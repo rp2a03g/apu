@@ -1,0 +1,546 @@
+/*
+ * FMPAC(MSX-MUSIC) 拡張音源エミュレータ (OPLL / YM2413)
+ * MML.Emu.OPLLAudio
+ *
+ * src/emulator/expansion/vrc7.js のOPLLコア(Mitsutaka Okazaki emu2413移植)をそのまま
+ * 流用し、バス面のみMSX実機のFMPAC I/Oポート(0x7C=アドレス, 0x7D=データ)に置き換えている。
+ * VRC7とFMPACはハードウェア的に同一のYM2413(OPLL)であるため、DSPコアは変更していない。
+ * 出力49716Hz (Z80クロック/36)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  // FMPAC(YM2413)は9メロディチャンネル。リズムモード時はch6-8が
+  // BD(ch6両slot)/HH+SD(ch7 mod+car)/TOM+CYM(ch8 mod+car)に化ける。
+  // VRC7(6ch専用・リズムモード無し)から移植したコアをここで9ch+リズム対応に拡張している。
+  const NUM_CH = 9;
+  const CYCLES_PER_SAMPLE = 36;
+  const SAMPLE_RATE = 49716;
+
+  const PG_BITS = 9, PG_WIDTH = 1 << PG_BITS;
+  const DP_BITS = 18, DP_WIDTH = 1 << DP_BITS, DP_BASE_BITS = DP_BITS - PG_BITS;
+  const DB_STEP = 0.375, DB_BITS = 7, DB_MUTE = 1 << DB_BITS;
+  const EG_STEP = 0.375, EG_BITS = 7;
+  const EG2DB = 1;
+  const TL2EG = 2;
+  const DB2LIN_AMP_BITS = 10, SLOT_AMP_BITS = DB2LIN_AMP_BITS;
+  const EG_DP_BITS = 22, EG_DP_WIDTH = 1 << EG_DP_BITS;
+  const PM_PG_BITS = 8, PM_PG_WIDTH = 1 << PM_PG_BITS;
+  const PM_DP_BITS = 16, PM_DP_WIDTH = 1 << PM_DP_BITS;
+  const AM_PG_BITS = 8, AM_PG_WIDTH = 1 << AM_PG_BITS;
+  const AM_DP_BITS = 16, AM_DP_WIDTH = 1 << AM_DP_BITS;
+  const PM_AMP_BITS = 8, PM_AMP = 1 << PM_AMP_BITS;
+  const PM_SPEED = 6.4, PM_DEPTH = 13.75, AM_SPEED = 3.7, AM_DEPTH = 4.8;
+
+  const SETTLE = 0, ATTACK = 1, DECAY = 2, SUSHOLD = 3, SUSTINE = 4, RELEASE = 5, FINISH = 6;
+
+  // 音色ROM(VirtuaNES vrc7tone.h) — FMPAC/YM2413標準音色も同一ROM内容
+  const OPLL_INST = [
+    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00],
+    [0x33,0x01,0x09,0x0e,0x94,0x90,0x40,0x01],
+    [0x13,0x41,0x0f,0x0d,0xce,0xd3,0x43,0x13],
+    [0x01,0x12,0x1b,0x06,0xff,0xd2,0x00,0x32],
+    [0x61,0x61,0x1b,0x07,0xaf,0x63,0x20,0x28],
+    [0x22,0x21,0x1e,0x06,0xf0,0x76,0x08,0x28],
+    [0x66,0x21,0x15,0x00,0x93,0x94,0x20,0xf8],
+    [0x21,0x61,0x1c,0x07,0x82,0x81,0x10,0x17],
+    [0x23,0x21,0x20,0x1f,0xc0,0x71,0x07,0x47],
+    [0x25,0x31,0x26,0x05,0x64,0x41,0x18,0xf8],
+    [0x17,0x21,0x28,0x07,0xff,0x83,0x02,0xf8],
+    [0x97,0x81,0x25,0x07,0xcf,0xc8,0x02,0x14],
+    [0x21,0x21,0x54,0x0f,0x80,0x7f,0x07,0x07],
+    [0x01,0x01,0x56,0x03,0xd3,0xb2,0x43,0x58],
+    [0x31,0x21,0x0c,0x03,0x82,0xc0,0x40,0x07],
+    [0x21,0x01,0x0c,0x03,0xd4,0xd3,0x40,0x84]
+  ];
+
+  function dump2patch(d) {
+    return {
+      mod: { AM:(d[0]>>7)&1, PM:(d[0]>>6)&1, EG:(d[0]>>5)&1, KR:(d[0]>>4)&1, ML:d[0]&15,
+             KL:(d[2]>>6)&3, TL:d[2]&63, FB:d[3]&7, WF:(d[3]>>3)&1,
+             AR:(d[4]>>4)&15, DR:d[4]&15, SL:(d[6]>>4)&15, RR:d[6]&15 },
+      car: { AM:(d[1]>>7)&1, PM:(d[1]>>6)&1, EG:(d[1]>>5)&1, KR:(d[1]>>4)&1, ML:d[1]&15,
+             KL:(d[3]>>6)&3, TL:0, FB:0, WF:(d[3]>>4)&1,
+             AR:(d[5]>>4)&15, DR:d[5]&15, SL:(d[7]>>4)&15, RR:d[7]&15 }
+    };
+  }
+  const PATCH = OPLL_INST.map(dump2patch);
+
+  // リズム音色(実チップ内蔵ROMの正確な値は不明のため、各打楽器を聴感上区別できるように
+  // 手動調整した近似パッチ)。AR=15(最速アタック),DR/RRで減衰の速さを調整。
+  // BD=低めの2opキック、HH/SD・TOM/CYMはノイズ合成の元になる位相/エンベロープ用。
+  const RHYTHM_PATCH_BD  = dump2patch([0x01, 0x01, 0x18, 0x00, 0xF8, 0xF7, 0x00, 0x00]);
+  const RHYTHM_PATCH_HHSD = dump2patch([0x01, 0x01, 0x00, 0x00, 0xF8, 0xF6, 0x00, 0x00]);
+  const RHYTHM_PATCH_TOMCYM = dump2patch([0x05, 0x01, 0x00, 0x00, 0xF6, 0xF6, 0x00, 0x00]);
+
+  function Min(a, b) { return a < b ? a : b; }
+
+  const AR_ADJUST = new Uint32Array(1 << EG_BITS);
+  AR_ADJUST[0] = 1 << EG_BITS;
+  for (let i = 1; i < 128; i++)
+    AR_ADJUST[i] = ((1 << EG_BITS) - 1 - (1 << EG_BITS) * Math.log(i) / Math.log(128)) | 0;
+
+  const DB2LIN = new Int32Array((DB_MUTE + DB_MUTE) * 2);
+  for (let i = 0; i < DB_MUTE + DB_MUTE; i++) {
+    let v = (((1 << DB2LIN_AMP_BITS) - 1) * Math.pow(10, -i * DB_STEP / 20)) | 0;
+    if (i >= DB_MUTE) v = 0;
+    DB2LIN[i] = v;
+    DB2LIN[i + DB_MUTE + DB_MUTE] = -v;
+  }
+
+  function lin2db(d) {
+    if (d === 0) return DB_MUTE - 1;
+    return Min(-(((20.0 * Math.log10(d)) / DB_STEP) | 0), DB_MUTE - 1);
+  }
+
+  const fullsin = new Uint32Array(PG_WIDTH);
+  const halfsin = new Uint32Array(PG_WIDTH);
+  for (let i = 0; i < PG_WIDTH / 4; i++) fullsin[i] = lin2db(Math.sin(2.0 * Math.PI * i / PG_WIDTH));
+  for (let i = 0; i < PG_WIDTH / 4; i++) fullsin[PG_WIDTH / 2 - 1 - i] = fullsin[i];
+  for (let i = 0; i < PG_WIDTH / 2; i++) fullsin[PG_WIDTH / 2 + i] = DB_MUTE + DB_MUTE + fullsin[i];
+  for (let i = 0; i < PG_WIDTH / 2; i++) halfsin[i] = fullsin[i];
+  for (let i = PG_WIDTH / 2; i < PG_WIDTH; i++) halfsin[i] = fullsin[0];
+  const WAVEFORM = [fullsin, halfsin];
+
+  const pmtable = new Int32Array(PM_PG_WIDTH);
+  for (let i = 0; i < PM_PG_WIDTH; i++)
+    pmtable[i] = (PM_AMP * Math.pow(2, PM_DEPTH * Math.sin(2.0 * Math.PI * i / PM_PG_WIDTH) / 1200)) | 0;
+  const amtable = new Int32Array(AM_PG_WIDTH);
+  for (let i = 0; i < AM_PG_WIDTH; i++)
+    amtable[i] = (AM_DEPTH / 2 / DB_STEP * (1.0 + Math.sin(2.0 * Math.PI * i / PM_PG_WIDTH))) | 0;
+
+  const MLT = [1, 1*2, 2*2, 3*2, 4*2, 5*2, 6*2, 7*2, 8*2, 9*2, 10*2, 10*2, 12*2, 12*2, 15*2, 15*2];
+  const dphaseTable = [];
+  for (let fnum = 0; fnum < 512; fnum++) {
+    const a = []; dphaseTable.push(a);
+    for (let block = 0; block < 8; block++) {
+      const b = new Uint32Array(16); a.push(b);
+      for (let ML = 0; ML < 16; ML++)
+        b[ML] = (((fnum * MLT[ML]) << block) >> (20 - DP_BITS)) >>> 0;
+    }
+  }
+
+  const KL_DB2 = [0.000,9.000,12.000,13.875,15.000,16.125,16.875,17.625,18.000,18.750,19.125,19.500,19.875,20.250,20.625,21.000].map(x => (x * 2) | 0);
+  const tllTable = [];
+  for (let fnum = 0; fnum < 16; fnum++) {
+    const a = []; tllTable.push(a);
+    for (let block = 0; block < 8; block++) {
+      const b = []; a.push(b);
+      for (let TL = 0; TL < 64; TL++) {
+        const c = new Uint32Array(4); b.push(c);
+        for (let KL = 0; KL < 4; KL++) {
+          if (KL === 0) c[KL] = (TL2EG * TL) >>> 0;
+          else {
+            const tmp = KL_DB2[fnum] - (3 * 2) * (7 - block);
+            if (tmp <= 0) c[KL] = (TL2EG * TL) >>> 0;
+            else c[KL] = (((tmp >> (3 - KL)) / EG_STEP) | 0) + TL2EG * TL;
+          }
+        }
+      }
+    }
+  }
+
+  const rksTable = [];
+  for (let f8 = 0; f8 < 2; f8++) {
+    const a = []; rksTable.push(a);
+    for (let block = 0; block < 8; block++) {
+      const b = new Int32Array(2); a.push(b);
+      b[0] = block >> 1;
+      b[1] = (block << 1) + f8;
+    }
+  }
+
+  const dphaseARTable = [], dphaseDRTable = [];
+  for (let AR = 0; AR < 16; AR++) {
+    const a = new Uint32Array(16); dphaseARTable.push(a);
+    for (let Rks = 0; Rks < 16; Rks++) {
+      let RM = AR + (Rks >> 2); if (RM > 15) RM = 15; const RL = Rks & 3;
+      if (AR === 0) a[Rks] = 0;
+      else if (AR === 15) a[Rks] = EG_DP_WIDTH;
+      else a[Rks] = ((3 * (RL + 4)) << (RM + 1)) >>> 0;
+    }
+  }
+  for (let DR = 0; DR < 16; DR++) {
+    const a = new Uint32Array(16); dphaseDRTable.push(a);
+    for (let Rks = 0; Rks < 16; Rks++) {
+      let RM = DR + (Rks >> 2); if (RM > 15) RM = 15; const RL = Rks & 3;
+      if (DR === 0) a[Rks] = 0;
+      else a[Rks] = ((RL + 4) << (RM - 1)) >>> 0;
+    }
+  }
+
+  const SL_DB = [0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,48];
+  const SL = new Uint32Array(16);
+  for (let i = 0; i < 16; i++) SL[i] = ((((SL_DB[i] / 3.0) * 8) | 0) << (EG_DP_BITS - EG_BITS)) >>> 0;
+
+  const pm_dphase = ((PM_SPEED * PM_DP_WIDTH / (SAMPLE_RATE)) + 0.5) | 0;
+  const am_dphase = ((AM_SPEED * AM_DP_WIDTH / (SAMPLE_RATE)) + 0.5) | 0;
+
+  class Slot {
+    constructor(type) {
+      this.type = type;
+      this.patch = PATCH[0].mod;
+      this.reset();
+    }
+    reset() {
+      this.sintbl = WAVEFORM[0];
+      this.phase = 0; this.dphase = 0; this.pgout = 0;
+      this.output = [0, 0]; this.feedback = 0;
+      this.eg_mode = SETTLE; this.eg_phase = EG_DP_WIDTH; this.eg_dphase = 0; this.egout = 0;
+      this.fnum = 0; this.block = 0; this.volume = 0; this.sustine = 0;
+      this.tll = 0; this.rks = 0;
+    }
+    calcEgDphase() {
+      const p = this.patch;
+      switch (this.eg_mode) {
+        case ATTACK: return dphaseARTable[p.AR][this.rks];
+        case DECAY: return dphaseDRTable[p.DR][this.rks];
+        case SUSHOLD: return 0;
+        case SUSTINE: return dphaseDRTable[p.RR][this.rks];
+        case RELEASE:
+          if (this.sustine) return dphaseDRTable[5][this.rks];
+          else if (p.EG) return dphaseDRTable[p.RR][this.rks];
+          else return dphaseDRTable[7][this.rks];
+        default: return 0;
+      }
+    }
+    updatePG() { this.dphase = dphaseTable[this.fnum][this.block][this.patch.ML]; }
+    updateTLL() {
+      this.tll = (this.type === 0)
+        ? tllTable[this.fnum >> 5][this.block][this.patch.TL][this.patch.KL]
+        : tllTable[this.fnum >> 5][this.block][this.volume][this.patch.KL];
+    }
+    updateRKS() { this.rks = rksTable[this.fnum >> 8][this.block][this.patch.KR]; }
+    updateWF() { this.sintbl = WAVEFORM[this.patch.WF]; }
+    updateEG() { this.eg_dphase = this.calcEgDphase(); }
+    updateAll() { this.updatePG(); this.updateTLL(); this.updateRKS(); this.updateWF(); this.updateEG(); }
+    slotOn() { this.eg_mode = ATTACK; this.phase = 0; this.eg_phase = 0; }
+    slotOff() {
+      if (this.eg_mode === ATTACK)
+        this.eg_phase = (AR_ADJUST[(this.eg_phase >>> (EG_DP_BITS - EG_BITS)) & 0x7F] << (EG_DP_BITS - EG_BITS)) >>> 0;
+      this.eg_mode = RELEASE;
+    }
+    calcPhase(lfo_pm) {
+      if (this.patch.PM) this.phase = (this.phase + (((this.dphase * lfo_pm) >> PM_AMP_BITS) >>> 0)) >>> 0;
+      else this.phase = (this.phase + this.dphase) >>> 0;
+      this.phase &= (DP_WIDTH - 1);
+      this.pgout = this.phase >>> DP_BASE_BITS;
+      return this.pgout;
+    }
+    calcEnvelope(lfo_am) {
+      let egout;
+      switch (this.eg_mode) {
+        case ATTACK:
+          this.eg_phase = (this.eg_phase + this.eg_dphase) >>> 0;
+          if (this.eg_phase & EG_DP_WIDTH) { egout = 0; this.eg_phase = 0; this.eg_mode = DECAY; this.updateEG(); }
+          else egout = AR_ADJUST[(this.eg_phase >>> (EG_DP_BITS - EG_BITS)) & 0x7F];
+          break;
+        case DECAY:
+          this.eg_phase = (this.eg_phase + this.eg_dphase) >>> 0;
+          egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          if (this.eg_phase >= SL[this.patch.SL]) {
+            this.eg_phase = SL[this.patch.SL];
+            this.eg_mode = this.patch.EG ? SUSHOLD : SUSTINE;
+            this.updateEG();
+            egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          }
+          break;
+        case SUSHOLD:
+          egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          if (this.patch.EG === 0) { this.eg_mode = SUSTINE; this.updateEG(); }
+          break;
+        case SUSTINE:
+        case RELEASE:
+          this.eg_phase = (this.eg_phase + this.eg_dphase) >>> 0;
+          egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          if (egout >= (1 << EG_BITS)) { this.eg_mode = FINISH; egout = (1 << EG_BITS) - 1; }
+          break;
+        case FINISH: default:
+          egout = (1 << EG_BITS) - 1;
+          break;
+      }
+      egout = this.patch.AM ? (EG2DB * (egout + this.tll) + lfo_am) : (EG2DB * (egout + this.tll));
+      if (egout >= DB_MUTE) egout = DB_MUTE - 1;
+      this.egout = egout;
+      return egout;
+    }
+  }
+
+  function wave2_8pi(e) { return e << 1; }
+
+  // リズム用スロット出力。BD/TOMは通常のサイン波、HH/SD/CYMは自身の位相上位ビットと
+  // ノイズビットを組み合わせて疑似ノイズ的な出力にする(実チップのLFSR合成の簡略版)。
+  // volNibbleは0x36-38レジスタ由来の4bit音量(EGとは別に線形乗算)。
+  function calcRhythmSlot(slot, lfo_am, lfo_pm, noisy, noiseBit, volNibble) {
+    const egout = slot.calcEnvelope(lfo_am);
+    const pgout = slot.calcPhase(lfo_pm);
+    if (egout >= DB_MUTE - 1) return 0;
+    let sample;
+    if (!noisy) {
+      sample = DB2LIN[slot.sintbl[pgout] + egout];
+    } else {
+      const phaseHigh = (pgout >> (PG_BITS - 2)) & 1;
+      const idx = (phaseHigh << 1) | noiseBit;
+      const sel = [0, PG_WIDTH >> 2, PG_WIDTH >> 1, (PG_WIDTH >> 2) * 3][idx];
+      sample = DB2LIN[slot.sintbl[sel] + egout];
+    }
+    return sample * (volNibble / 15);
+  }
+
+  class OpllChannel {
+    constructor() {
+      this.mod = new Slot(0);
+      this.car = new Slot(1);
+      this.patchNumber = 0;
+      this.keyStatus = 0;
+    }
+    reset() { this.mod.reset(); this.car.reset(); this.keyStatus = 0; }
+
+    calcModulator(lfo_am, lfo_pm) {
+      const s = this.mod;
+      s.output[1] = s.output[0];
+      const egout = s.calcEnvelope(lfo_am);
+      const pgout = s.calcPhase(lfo_pm);
+      if (egout >= DB_MUTE - 1) s.output[0] = 0;
+      else if (s.patch.FB !== 0) {
+        const fm = (s.feedback) >> (7 - s.patch.FB);
+        s.output[0] = DB2LIN[s.sintbl[(pgout + fm) & (PG_WIDTH - 1)] + egout];
+      } else {
+        s.output[0] = DB2LIN[s.sintbl[pgout] + egout];
+      }
+      s.feedback = (s.output[1] + s.output[0]) >> 1;
+      return s.feedback;
+    }
+    calcCarrier(fm, lfo_am, lfo_pm) {
+      const s = this.car;
+      const egout = s.calcEnvelope(lfo_am);
+      const pgout = s.calcPhase(lfo_pm);
+      if (egout >= DB_MUTE - 1) return 0;
+      return DB2LIN[s.sintbl[(pgout + wave2_8pi(fm)) & (PG_WIDTH - 1)] + egout];
+    }
+  }
+
+  class OPLLAudio {
+    constructor() { this._init(); this.mute = new Array(NUM_CH).fill(false); }
+    _init() {
+      this.addr = 0;
+      this.reg = new Uint8Array(0x40);
+      this.patches = [];
+      for (let i = 0; i < 16; i++) this.patches.push({ mod: Object.assign({}, PATCH[i].mod), car: Object.assign({}, PATCH[i].car) });
+      this.channels = [];
+      for (let i = 0; i < NUM_CH; i++) { const c = new OpllChannel(); this.channels.push(c); this._setPatch(i, 0); }
+      this.pm_phase = 0; this.am_phase = 0; this.lfo_pm = 0; this.lfo_am = 0;
+      this.cyc = 0; this.lastSample = 0;
+      this.rhythmMode = false;
+      this.rhythmVol = { bd: 0, hh: 0, sd: 0, tom: 0, cym: 0 };
+      this.noiseLfsr = 1;
+    }
+    reset() { this._init(); }
+
+    _setPatch(i, num) {
+      const c = this.channels[i];
+      c.patchNumber = num;
+      c.mod.patch = this.patches[num].mod;
+      c.car.patch = this.patches[num].car;
+    }
+
+    // port: 0x7C=アドレス, 0x7D=データ (FMPAC/MSX-MUSIC)
+    ioWrite(port, value) {
+      value &= 0xFF;
+      if (port === 0x7C) this.addr = value & 0x3F;
+      else if (port === 0x7D) this.writeReg(this.addr, value);
+    }
+
+    writeReg(reg, data) {
+      reg &= 0x3F; data &= 0xFF;
+      const cust = this.patches[0];
+      if (reg <= 0x07) {
+        switch (reg) {
+          case 0x00: cust.mod.AM=(data>>7)&1; cust.mod.PM=(data>>6)&1; cust.mod.EG=(data>>5)&1; cust.mod.KR=(data>>4)&1; cust.mod.ML=data&15; break;
+          case 0x01: cust.car.AM=(data>>7)&1; cust.car.PM=(data>>6)&1; cust.car.EG=(data>>5)&1; cust.car.KR=(data>>4)&1; cust.car.ML=data&15; break;
+          case 0x02: cust.mod.KL=(data>>6)&3; cust.mod.TL=data&63; break;
+          case 0x03: cust.car.KL=(data>>6)&3; cust.car.WF=(data>>4)&1; cust.mod.WF=(data>>3)&1; cust.mod.FB=data&7; break;
+          case 0x04: cust.mod.AR=(data>>4)&15; cust.mod.DR=data&15; break;
+          case 0x05: cust.car.AR=(data>>4)&15; cust.car.DR=data&15; break;
+          case 0x06: cust.mod.SL=(data>>4)&15; cust.mod.RR=data&15; break;
+          case 0x07: cust.car.SL=(data>>4)&15; cust.car.RR=data&15; break;
+        }
+        for (let i = 0; i < NUM_CH; i++) if (this.channels[i].patchNumber === 0) { this.channels[i].mod.updateAll(); this.channels[i].car.updateAll(); }
+      } else if (reg === 0x0E) {
+        this._writeRhythmReg(data);
+      } else if (reg >= 0x10 && reg <= 0x18) {
+        const ch = reg - 0x10, c = this.channels[ch];
+        const fnum = data + ((this.reg[0x20 + ch] & 1) << 8);
+        c.mod.fnum = c.car.fnum = fnum;
+        c.mod.updateAll(); c.car.updateAll();
+      } else if (reg >= 0x20 && reg <= 0x28) {
+        const ch = reg - 0x20, c = this.channels[ch];
+        const fnum = ((data & 1) << 8) + this.reg[0x10 + ch];
+        const block = (data >> 1) & 7;
+        c.mod.fnum = c.car.fnum = fnum; c.mod.block = c.car.block = block;
+        if ((this.reg[reg] ^ data) & 0x20) { c.car.sustine = (data >> 5) & 1; }
+        // リズムモード中のch6-8はキーオン/オフを0x0Eのビットで行うため、ここでは無視する
+        // (周波数/ブロックの更新自体はBD/TOM等のピッチに使うので常に行う)。
+        if (!(this.rhythmMode && ch >= 6)) {
+          const key = (data & 0x10) !== 0;
+          if (key) { if (!c.keyStatus) { c.mod.slotOn(); c.car.slotOn(); } c.keyStatus = 1; }
+          else { if (c.keyStatus) c.car.slotOff(); c.keyStatus = 0; }
+        }
+        c.mod.updateAll(); c.car.updateAll();
+      } else if (reg >= 0x30 && reg <= 0x38) {
+        const ch = reg - 0x30, c = this.channels[ch];
+        if (this.rhythmMode && ch >= 6) {
+          if (ch === 6) { this.rhythmVol.bd = data & 0x0F; }
+          else if (ch === 7) { this.rhythmVol.hh = (data >> 4) & 0x0F; this.rhythmVol.sd = data & 0x0F; }
+          else { this.rhythmVol.tom = (data >> 4) & 0x0F; this.rhythmVol.cym = data & 0x0F; }
+        } else {
+          this._setPatch(ch, (data >> 4) & 15);
+          c.car.volume = (data & 15) << 2;
+          c.mod.updateAll(); c.car.updateAll();
+        }
+      }
+      this.reg[reg] = data;
+    }
+
+    // レジスタ0x0E: bit5=リズムモード有効, bit4-0=BD/SD/TOM/CYM/HHのキーオン
+    _writeRhythmReg(data) {
+      const old = this.reg[0x0E] || 0;
+      const wasRhythm = this.rhythmMode;
+      const newRhythm = !!(data & 0x20);
+      if (newRhythm && !wasRhythm) {
+        // ch6-8を専用リズム音色に切替
+        this.channels[6].mod.patch = RHYTHM_PATCH_BD.mod; this.channels[6].car.patch = RHYTHM_PATCH_BD.car;
+        this.channels[7].mod.patch = RHYTHM_PATCH_HHSD.mod; this.channels[7].car.patch = RHYTHM_PATCH_HHSD.car;
+        this.channels[8].mod.patch = RHYTHM_PATCH_TOMCYM.mod; this.channels[8].car.patch = RHYTHM_PATCH_TOMCYM.car;
+        for (const ch of [6, 7, 8]) { this.channels[ch].mod.updateAll(); this.channels[ch].car.updateAll(); }
+      } else if (!newRhythm && wasRhythm) {
+        // 通常モードに戻す: 直前の0x36-38値で音色/音量を再設定
+        for (const ch of [6, 7, 8]) {
+          const rv = this.reg[0x30 + ch] || 0;
+          this._setPatch(ch, (rv >> 4) & 15);
+          this.channels[ch].car.volume = (rv & 15) << 2;
+          this.channels[ch].mod.updateAll(); this.channels[ch].car.updateAll();
+        }
+      }
+      this.rhythmMode = newRhythm;
+      const trig = (bit, slots) => {
+        if (!this.rhythmMode) return;
+        const on = !!(data & bit), wasOn = !!(old & bit);
+        if (on && !wasOn) for (const s of slots) s.slotOn();
+        else if (!on && wasOn) for (const s of slots) s.slotOff();
+      };
+      trig(0x10, [this.channels[6].mod, this.channels[6].car]); // BD
+      trig(0x08, [this.channels[7].car]); // SD
+      trig(0x04, [this.channels[8].mod]); // TOM
+      trig(0x02, [this.channels[8].car]); // CYM
+      trig(0x01, [this.channels[7].mod]); // HH
+    }
+
+    _updateAMPM() {
+      this.pm_phase = (this.pm_phase + pm_dphase) & (PM_DP_WIDTH - 1);
+      this.am_phase = (this.am_phase + am_dphase) & (AM_DP_WIDTH - 1);
+      this.lfo_am = amtable[this.am_phase >>> (AM_DP_BITS - AM_PG_BITS)];
+      this.lfo_pm = pmtable[this.pm_phase >>> (PM_DP_BITS - PM_PG_BITS)];
+    }
+
+    _calc() {
+      this._updateAMPM();
+      // ノイズLFSR(HH/SD/CYMの疑似ノイズ合成用)を1サンプルにつき1回進める
+      if (this.noiseLfsr & 1) this.noiseLfsr ^= 0x800200;
+      this.noiseLfsr = (this.noiseLfsr >>> 1) || 1;
+      const noiseBit = this.noiseLfsr & 1;
+
+      let inst = 0;
+      const lastCh = this.rhythmMode ? 6 : NUM_CH;
+      for (let i = 0; i < lastCh; i++) {
+        const c = this.channels[i];
+        if (c.car.eg_mode === FINISH) continue;
+        const fm = c.calcModulator(this.lfo_am, this.lfo_pm);
+        const out = c.calcCarrier(fm, this.lfo_am, this.lfo_pm);
+        if (!this.mute[i]) inst += out;
+      }
+      if (this.rhythmMode) {
+        const ch6 = this.channels[6], ch7 = this.channels[7], ch8 = this.channels[8];
+        // BD: 簡略化のため2opFM(モジュレータ変調)ではなく単一サイン波の低音キックとして扱う。
+        // モジュレータ側もキーオン/オフだけは行われるため、無音のまま位相/包絡線だけ進める。
+        if (ch6.mod.eg_mode !== FINISH) calcRhythmSlot(ch6.mod, this.lfo_am, this.lfo_pm, false, noiseBit, 0);
+        if (ch6.car.eg_mode !== FINISH && !this.mute[6]) inst += calcRhythmSlot(ch6.car, this.lfo_am, this.lfo_pm, false, noiseBit, this.rhythmVol.bd);
+        if (ch7.mod.eg_mode !== FINISH && !this.mute[7]) inst += calcRhythmSlot(ch7.mod, this.lfo_am, this.lfo_pm, true, noiseBit, this.rhythmVol.hh);
+        if (ch7.car.eg_mode !== FINISH && !this.mute[7]) inst += calcRhythmSlot(ch7.car, this.lfo_am, this.lfo_pm, true, noiseBit, this.rhythmVol.sd);
+        if (ch8.mod.eg_mode !== FINISH && !this.mute[8]) inst += calcRhythmSlot(ch8.mod, this.lfo_am, this.lfo_pm, false, noiseBit, this.rhythmVol.tom);
+        if (ch8.car.eg_mode !== FINISH && !this.mute[8]) inst += calcRhythmSlot(ch8.car, this.lfo_am, this.lfo_pm, true, noiseBit, this.rhythmVol.cym);
+      }
+      return inst;
+    }
+
+    clock() {
+      if (++this.cyc < CYCLES_PER_SAMPLE) return;
+      this.cyc = 0;
+      this.lastSample = this._calc();
+    }
+
+    mixSample() {
+      return (this.lastSample / 4096) * 0.5;
+    }
+  }
+
+  function melodySnapshot(c, N) {
+    const mod = c.mod, car = c.car;
+    const freq = (c.keyStatus && car.fnum > 0) ? SAMPLE_RATE * car.fnum / Math.pow(2, 19 - car.block) : 0;
+    const active = c.keyStatus && car.eg_mode !== FINISH && car.eg_mode !== SETTLE;
+    const modEg = mod.egout, carEg = car.egout;
+    const ratio = car.dphase > 0 ? mod.dphase / car.dphase : 1;
+    const wave = new Array(N);
+    let mx = 1e-6;
+    for (let k = 0; k < N; k++) {
+      const cp = Math.round((k / N) * PG_WIDTH) & (PG_WIDTH - 1);
+      const mp = Math.round((k / N) * ratio * PG_WIDTH) & (PG_WIDTH - 1);
+      const mo = DB2LIN[mod.sintbl[mp] + Math.min(DB_MUTE - 1, modEg)];
+      const co = (carEg >= DB_MUTE - 1) ? 0 : DB2LIN[car.sintbl[(cp + (mo << 1)) & (PG_WIDTH - 1)] + carEg];
+      wave[k] = co;
+      if (Math.abs(co) > mx) mx = Math.abs(co);
+    }
+    for (let k = 0; k < N; k++) wave[k] /= mx;
+    return {
+      freq,
+      vol: (15 - (c.car.volume >> 2)) / 15,
+      rawVol: c.car.volume >> 2,
+      instrument: c.patchNumber,
+      active,
+      waveData: active ? wave : new Array(N).fill(0)
+    };
+  }
+
+  function rhythmSlotInfo(slot, keyOn, freq) {
+    const active = keyOn && slot.eg_mode !== FINISH;
+    return { freq: active ? freq : 0, vol: active ? 1 : 0, active };
+  }
+
+  // 通常モード: 9メロディチャンネル分を返す({rhythmMode:false, melody:[9]})。
+  // リズムモード: melodyは0-5chの6要素のみ、加えてrhythm{bd,sd,tom,cym,hh}を返す
+  // (ch6-8の8スロットが5種の打楽器に化けるため、鍵盤表示側は6melody+5rhythmの
+  // 11行として描画する)。
+  Emu.snapshotOPLL = function (chip) {
+    const N = 128;
+    const melodyCount = chip.rhythmMode ? 6 : NUM_CH;
+    const melody = [];
+    for (let i = 0; i < melodyCount; i++) melody.push(melodySnapshot(chip.channels[i], N));
+
+    if (!chip.rhythmMode) return { rhythmMode: false, melody };
+
+    const ch6 = chip.channels[6], ch7 = chip.channels[7], ch8 = chip.channels[8];
+    const bdFreq = ch6.car.fnum > 0 ? SAMPLE_RATE * ch6.car.fnum / Math.pow(2, 19 - ch6.car.block) : 0;
+    const tomFreq = ch8.mod.fnum > 0 ? SAMPLE_RATE * ch8.mod.fnum / Math.pow(2, 19 - ch8.mod.block) : 0;
+    const rhythm = {
+      bd: rhythmSlotInfo(ch6.car, true, bdFreq),
+      sd: rhythmSlotInfo(ch7.car, true, 0),
+      tom: rhythmSlotInfo(ch8.mod, true, tomFreq),
+      cym: rhythmSlotInfo(ch8.car, true, 0),
+      hh: rhythmSlotInfo(ch7.mod, true, 0),
+    };
+    return { rhythmMode: true, melody, rhythm };
+  };
+
+  Emu.OPLLAudio = OPLLAudio;
+})(window);

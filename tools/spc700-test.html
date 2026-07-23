@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>SPC700 命令テスト (SingleStepTests)</title>
+<style>
+  body{font:14px/1.5 system-ui,sans-serif;margin:1.5rem;max-width:900px}
+  h1{font-size:18px}
+  button{font:inherit;padding:.4em .9em;border:1px solid #888;border-radius:6px;background:#f6f6f4;cursor:pointer}
+  #sum{margin:.8rem 0;font-weight:600}
+  #grid{display:grid;grid-template-columns:repeat(16,1fr);gap:3px;margin-top:1rem}
+  .op{font:11px/1.4 monospace;text-align:center;padding:3px 0;border-radius:3px;background:#eee;color:#555}
+  .op.pass{background:#d8f0dc;color:#1b6b2f}
+  .op.fail{background:#f6c9c9;color:#8a1f1f}
+  .op.err{background:#eee;color:#aaa}
+  pre{background:#f6f6f4;padding:.8em;border-radius:6px;overflow:auto;max-height:40vh}
+  .muted{color:#777}
+</style>
+</head>
+<body>
+<h1>SPC700 命令テスト</h1>
+<p class="muted">外部テストベクタ <code>SingleStepTests/spc700</code>（各命令1000ケース、初期状態→1命令実行→最終状態を照合）で
+<code>MML.Emu.SPC700</code> を全256オペコード検証する。レジスタ・PSW・RAM を比較（サイクル数は未比較）。</p>
+<button id="run">全256オペコードをテスト</button>
+<div id="sum"></div>
+<div id="grid"></div>
+<pre id="detail" hidden></pre>
+
+<script src="../src/emulator/spc700.js"></script>
+<script>
+const VECTOR_BASE = 'https://cdn.jsdelivr.net/gh/SingleStepTests/spc700@main/v1/';
+const grid = document.getElementById('grid');
+const cells = {};
+for (let op = 0; op < 256; op++) {
+  const hex = op.toString(16).padStart(2, '0');
+  const c = document.createElement('div');
+  c.className = 'op'; c.textContent = hex; c.title = hex;
+  grid.appendChild(c); cells[hex] = c;
+}
+
+function runOne(cpu, ram, tests) {
+  let pass = 0; const fails = [];
+  for (const t of tests) {
+    for (const [a, v] of t.initial.ram) ram[a] = v;
+    cpu.PC = t.initial.pc; cpu.A = t.initial.a; cpu.X = t.initial.x; cpu.Y = t.initial.y;
+    cpu.SP = t.initial.sp; cpu.PSW = t.initial.psw; cpu.halted = false;
+    cpu.step();
+    const f = t.final;
+    let ok = cpu.A === f.a && cpu.X === f.x && cpu.Y === f.y && cpu.SP === f.sp && cpu.PC === f.pc && cpu.PSW === f.psw;
+    if (ok) for (const [a, v] of f.ram) { if (ram[a] !== v) { ok = false; break; } }
+    if (ok) pass++;
+    else if (fails.length < 3) fails.push({
+      name: t.name,
+      exp: { a: f.a, x: f.x, y: f.y, sp: f.sp, pc: f.pc, psw: '0x' + f.psw.toString(16) },
+      got: { a: cpu.A, x: cpu.X, y: cpu.Y, sp: cpu.SP, pc: cpu.PC, psw: '0x' + cpu.PSW.toString(16) },
+    });
+    for (const [a] of t.initial.ram) ram[a] = 0;
+    for (const [a] of f.ram) ram[a] = 0;
+  }
+  return { pass, total: tests.length, fails };
+}
+
+document.getElementById('run').onclick = async () => {
+  const ram = new Uint8Array(65536);
+  const bus = { read: a => ram[a & 0xFFFF], write: (a, v) => { ram[a & 0xFFFF] = v & 0xFF; } };
+  const cpu = new MML.Emu.SPC700(bus);
+  const sum = document.getElementById('sum');
+  const detail = document.getElementById('detail');
+  let totalFail = 0, oksum = 0, tsum = 0; const failReport = {};
+  for (let op = 0; op < 256; op++) {
+    const hex = op.toString(16).padStart(2, '0');
+    sum.textContent = `テスト中… ${hex}`;
+    let r;
+    try {
+      const res = await fetch(VECTOR_BASE + hex + '.json');
+      if (!res.ok) { cells[hex].className = 'op err'; continue; }
+      r = runOne(cpu, ram, await res.json());
+    } catch (e) { cells[hex].className = 'op err'; cells[hex].title = String(e); continue; }
+    oksum += r.pass; tsum += r.total;
+    if (r.pass === r.total) cells[hex].className = 'op pass';
+    else { cells[hex].className = 'op fail'; totalFail++; failReport[hex] = r.fails; cells[hex].title = `${r.total - r.pass}/${r.total} fail`; }
+  }
+  sum.textContent = totalFail === 0
+    ? `✅ 全256オペコード PASS（${oksum.toLocaleString()} / ${tsum.toLocaleString()} ケース）`
+    : `❌ ${totalFail} オペコードで失敗（${(tsum - oksum).toLocaleString()} ケース）`;
+  if (totalFail) { detail.hidden = false; detail.textContent = JSON.stringify(failReport, null, 2); }
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,428 @@
+﻿<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Famicom Sound Editor</title>
+  <link rel="stylesheet" href="src/css/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Famicom Sound Editor - ppmckc ed.</h1>
+    <p>Phase 1-6: 6502アセンブラ &amp; NSF生成・エミュレータ再生・MMLコンパイラ（拡張音源対応）・波形エディタ・DPCMコンバータ・シンタックスハイライト</p>
+    <div class="window-toggles">
+      <span class="window-toggles-label">サブウィンドウ:</span>
+      <button class="toggle-btn" data-target="win-asm">アセンブラ</button>
+      <button class="toggle-btn" data-target="win-nsf">NSFヘッダ/生成</button>
+      <button class="toggle-btn" data-target="win-wave">波形エディタ</button>
+      <button class="toggle-btn" data-target="win-dpcm">DPCMコンバータ</button>
+      <button class="toggle-btn" data-target="win-nsfplay">NSFファイル再生</button>
+      <button class="toggle-btn" data-target="win-monitor">レジスタ/メモリモニタ</button>
+      <button class="toggle-btn" data-target="win-keyboard">鍵盤表示</button>
+      <button class="toggle-btn" data-target="win-spcplay">SPCファイル再生</button>
+      <button class="toggle-btn" data-target="win-kssplay">KSSファイル再生</button>
+    </div>
+  </header>
+
+  <section class="float-window" id="win-mml" data-always-visible="true"
+    data-default-left="20" data-default-top="90" data-default-width="660" data-default-height="600">
+    <div class="float-window-header">
+      <span>MML作曲 &amp; 再生・シーク</span>
+    </div>
+    <div class="float-window-body mml-window-body">
+      <!-- MMLエディタペイン（スプリッターで高さ変更可能） -->
+      <div class="mml-editor-pane" id="mmlEditorPane">
+        <div class="mml-editor">
+          <pre id="mmlHighlight" class="mml-highlight" aria-hidden="true"></pre>
+          <textarea id="mmlSource" spellcheck="false"></textarea>
+        </div>
+      </div>
+      <!-- 縦スプリッター -->
+      <div class="pane-splitter" id="mmlSplitter" title="ドラッグでエディタの高さを変更"></div>
+      <!-- 下ペイン: コントロール + 出力 -->
+      <div class="mml-bottom-pane">
+        <div class="toolbar">
+          <button id="btnMmlCompile">MMLコンパイル</button>
+          <button id="btnMmlCapture">▶ MML再生</button>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;">ASMキャプチャ長さ(秒):
+            <input type="number" id="captureDuration" value="10" min="1" max="180" style="width:58px" />
+          </label>
+          <button id="btnCapture" class="secondary">ASMキャプチャ実行</button>
+          <button id="btnMmlExportNsf" class="secondary">NSF書き出し</button>
+        </div>
+        <div class="toolbar" style="margin-top:0;">
+          <button id="btnTransportPlayPause">▶ 再生</button>
+          <button id="btnTransportStop" class="secondary">■ 停止</button>
+          <button id="btnRewind" class="secondary">⏪ -5秒</button>
+          <button id="btnForward" class="secondary">⏩ +5秒</button>
+          <span id="timeDisplay" style="align-self:center;font-family:var(--mono);font-size:12px;">00:00 / 00:00</span>
+        </div>
+        <div class="toolbar" style="margin-top:0;">
+          <button id="btnRangeReset" class="secondary" title="開始点・終了点を曲の最初と最後にリセット">↺ 再生範囲をリセット</button>
+        </div>
+        <div class="toolbar" style="margin-top:0;">
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;">
+            <input type="checkbox" id="mmlHighlightEnable" checked /> 再生中ハイライト
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;">
+            <input type="checkbox" id="mmlAutoScrollEnable" /> 追随スクロール
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:12px;">追随チャンネル:
+            <select id="mmlFollowChannel"><option value="">なし</option></select>
+          </label>
+        </div>
+        <div class="seek-bar-wrap" id="seekBarWrap">
+          <input type="range" id="seekBar" min="0" max="1000" value="0" step="1" style="width:100%;margin:4px 0;" />
+          <div class="seek-range-fill" id="seekRangeFill"></div>
+          <div class="seek-handle seek-handle-start" id="seekHandleStart" title="開始点（ドラッグで移動）"></div>
+          <div class="seek-handle seek-handle-end" id="seekHandleEnd" title="終了点（ドラッグで移動）"></div>
+          <div class="seek-ticks" id="seekTicks"></div>
+        </div>
+        <div id="dpcmSampleList" class="output mml-output-area" style="margin-top:4px;display:none;"></div>
+        <div id="mmlOutput" class="output mml-output-area"></div>
+        <div id="captureOutput" class="output mml-output-area" style="margin-top:4px;"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="float-window" id="win-asm"
+    data-default-left="20" data-default-top="100" data-default-width="480" data-default-height="440">
+    <div class="float-window-header">
+      <span>6502 アセンブリソース</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <h2>6502 アセンブリソース</h2>
+      <textarea id="source" spellcheck="false"></textarea>
+      <div class="toolbar">
+        <button id="btnAssemble">アセンブル</button>
+      </div>
+      <h2>アセンブル結果</h2>
+      <div id="asmOutput" class="output"></div>
+    </div>
+  </section>
+
+  <section class="float-window" id="win-nsf"
+    data-default-left="520" data-default-top="100" data-default-width="480" data-default-height="520">
+    <div class="float-window-header">
+      <span>NSF ヘッダ情報・生成</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <h2>NSF ヘッダ情報</h2>
+      <div class="fields">
+        <label>曲名 (Song Name)
+          <input type="text" id="songName" value="Sample Song" />
+        </label>
+        <label>作者 (Artist)
+          <input type="text" id="artist" value="FamiMML Studio" />
+        </label>
+        <label>著作権 (Copyright)
+          <input type="text" id="copyright" value="2026" />
+        </label>
+        <label>トータルソング数
+          <input type="number" id="totalSongs" value="1" min="1" max="255" />
+        </label>
+        <label>開始ソング番号
+          <input type="number" id="startingSong" value="1" min="1" max="255" />
+        </label>
+        <div class="expansion-chip-group">
+          拡張音源(複数選択可)
+          <label><input type="checkbox" class="expansionChipCheck" value="vrc6" /> VRC6 (パルスx2 + 矩形波)</label>
+          <label><input type="checkbox" class="expansionChipCheck" value="vrc7" /> VRC7 (FM音源 x6)</label>
+          <label><input type="checkbox" class="expansionChipCheck" value="fds" /> FDS (波形メモリ音源)</label>
+          <label><input type="checkbox" class="expansionChipCheck" value="mmc5" /> MMC5 (パルスx2)</label>
+          <label><input type="checkbox" class="expansionChipCheck" value="n163" /> N163 (波形音源 x8)</label>
+          <label><input type="checkbox" class="expansionChipCheck" value="fme7" /> FME-7 (矩形波x3)</label>
+        </div>
+      </div>
+      <div class="toolbar">
+        <button id="btnBuildNsf">NSFバイナリ生成（プレビュー）</button>
+        <button id="btnDownloadNsf" class="secondary">NSFダウンロード</button>
+        <button id="btnPlay" class="secondary">▶ 試聴（エミュレータ再生）</button>
+        <button id="btnStop" class="secondary">■ 停止</button>
+      </div>
+      <h2>NSF 生成結果</h2>
+      <div id="nsfOutput" class="output"></div>
+    </div>
+  </section>
+
+  <section class="float-window" id="win-wave"
+    data-default-left="20" data-default-top="560" data-default-width="620" data-default-height="400">
+    <div class="float-window-header">
+      <span>波形エディタ (FDS / N163)</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <h2>波形エディタ (FDS / N163 拡張音源用カスタム波形)</h2>
+      <div class="wave-editor">
+        <div>
+          <h3>FDS波形 (64サンプル, 0-63)</h3>
+          <canvas id="fdsWaveCanvas" width="512" height="120"></canvas>
+          <div class="toolbar">
+            <button data-fds-preset="sine" class="secondary">サイン波</button>
+            <button data-fds-preset="triangle" class="secondary">三角波</button>
+            <button data-fds-preset="saw" class="secondary">サウトゥース</button>
+            <button data-fds-preset="square" class="secondary">矩形波</button>
+            <button data-fds-preset="random" class="secondary">ランダム</button>
+          </div>
+        </div>
+        <div>
+          <h3>N163波形 (16サンプル, 0-15)</h3>
+          <canvas id="n163WaveCanvas" width="256" height="120"></canvas>
+          <div class="toolbar">
+            <button data-n163-preset="sine" class="secondary">サイン波</button>
+            <button data-n163-preset="triangle" class="secondary">三角波</button>
+            <button data-n163-preset="saw" class="secondary">サウトゥース</button>
+            <button data-n163-preset="square" class="secondary">矩形波</button>
+            <button data-n163-preset="random" class="secondary">ランダム</button>
+          </div>
+        </div>
+      </div>
+      <p style="font-size:12px;color:#9999aa;margin:8px 0 0;">
+        拡張音源で FDS / N163 を選択した状態で「MMLコンパイル」「MMLをキャプチャ」を実行すると、
+        ここで編集した波形が初期波形として使用されます。
+      </p>
+    </div>
+  </section>
+
+  <section class="float-window" id="win-dpcm"
+    data-default-left="660" data-default-top="560" data-default-width="480" data-default-height="320">
+    <div class="float-window-header">
+      <span>DPCMコンバータ</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <h2>DPCMコンバータ</h2>
+      <div class="toolbar">
+        <input type="file" id="dpcmFile" accept="audio/*" />
+        <label style="display:flex;align-items:center;gap:4px;">DMCレート
+          <select id="dpcmRate"></select>
+        </label>
+        <button id="btnDpcmConvert">変換</button>
+        <button id="btnDpcmPreview" class="secondary">▶ プレビュー再生</button>
+        <button id="btnDpcmDownload" class="secondary">バイナリをダウンロード</button>
+      </div>
+      <div id="dpcmOutput" class="output" style="min-height: 100px;"></div>
+    </div>
+  </section>
+
+  <section class="float-window" id="win-nsfplay"
+    data-default-left="660" data-default-top="100" data-default-width="480" data-default-height="540">
+    <div class="float-window-header">
+      <span>NSFファイル読み込み・再生</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <h2>NSFファイル読み込み・再生</h2>
+      <div class="toolbar">
+        <input type="file" id="nsfFile" accept=".nsf" />
+      </div>
+      <h3 style="margin:4px 0;font-size:13px;color:var(--accent);">ヘッダ情報</h3>
+      <div id="nsfFileHeader" class="output" style="min-height:160px;"></div>
+      <div class="toolbar">
+        <label style="display:flex;align-items:center;gap:4px;">曲番号
+          <button id="btnNsfSongPrev" class="secondary">−</button>
+          <input type="number" id="nsfSongIndex" value="1" min="1" style="width:60px" />
+          <span id="nsfSongTotal">/ 1</span>
+          <button id="btnNsfSongNext" class="secondary">＋</button>
+        </label>
+      </div>
+      <div class="toolbar">
+        <label style="display:flex;align-items:center;gap:4px;">再生時間(秒)
+          <input type="number" id="nsfPlayDuration" value="300" min="1" max="3600" style="width:70px" />
+        </label>
+        <button id="btnNsfFilePlay">▶ 再生</button>
+        <button id="btnNsfFileStop" class="secondary">■ 停止</button>
+        <button id="btnNsfExportWav" class="secondary">💾 WAV書き出し</button>
+        <button id="btnNsf2Mml" class="secondary">♪ MML変換</button>
+      </div>
+      <div class="toolbar">
+        <label style="display:flex;align-items:center;gap:4px;">変換テンポ
+          <input type="number" id="nsfTempoBpm" placeholder="自動" min="40" max="400" style="width:70px" />
+        </label>
+        <button id="btnNsfTempoTap" class="secondary">👆 タップ</button>
+        <button id="btnNsfTempoClear" class="secondary">自動に戻す</button>
+        <span id="nsfTempoTapInfo" style="font-size:11px;color:#9999aa;"></span>
+      </div>
+      <div id="nsfFileStatus" class="output" style="min-height:40px;"></div>
+    </div>
+  </section>
+
+  <section class="float-window" id="win-monitor"
+    data-default-left="660" data-default-top="660" data-default-width="520" data-default-height="480">
+    <div class="float-window-header">
+      <span>レジスタ/メモリモニタ (リアルタイム)</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <h2>レジスタ/メモリモニタ (リアルタイム)</h2>
+      <p style="font-size:11px;color:#9999aa;margin:0 0 8px;">
+        MML再生・NSFファイル再生・キャプチャ再生中、サウンドレジスタ・CPUレジスタ・メモリ($0000-$00FF)の状態を16進数/2進数でリアルタイム表示します。
+      </p>
+      <h3 style="margin:4px 0;font-size:13px;color:var(--accent);">CPUレジスタ</h3>
+      <div id="cpuRegMonitor" class="output" style="min-height:80px;flex:none;"></div>
+      <h3 style="margin:8px 0 4px;font-size:13px;color:var(--accent);">サウンドレジスタ</h3>
+      <div id="soundRegMonitor" class="output" style="min-height:120px;max-height:160px;flex:none;"></div>
+      <h3 style="margin:8px 0 4px;font-size:13px;color:var(--accent);">メモリ ($0000-$00FF)</h3>
+      <div id="memMonitor" class="output" style="min-height:160px;"></div>
+    </div>
+  </section>
+
+
+  <script src="src/asm/opcodes.js"></script>
+  <script src="src/asm/assembler.js"></script>
+  <script src="src/nsf/nsfHeader.js"></script>
+  <script src="src/nsf/nsfBuilder.js"></script>
+  <script src="src/nsf/mckBytecode.js"></script>
+  <script src="src/emulator/cpu6502.js"></script>
+  <script src="src/emulator/apu2a03.js"></script>
+  <script src="src/emulator/expansion/vrc6.js"></script>
+  <script src="src/emulator/expansion/mmc5.js"></script>
+  <script src="src/emulator/expansion/fme7.js"></script>
+  <script src="src/emulator/expansion/fds.js"></script>
+  <script src="src/emulator/expansion/n163.js"></script>
+  <script src="src/emulator/expansion/vrc7.js"></script>
+  <script src="src/emulator/nsfBus.js"></script>
+  <script src="src/emulator/nsfPlayer.js"></script>
+  <script src="src/emulator/capture.js"></script>
+  <script src="src/mml/lexer.js"></script>
+  <script src="src/mml/compiler.js"></script>
+  <script src="src/mml/player.js"></script>
+  <script src="src/mml/sampleMml.js"></script>
+  <script src="src/mml/syntaxHighlight.js"></script>
+  <script src="src/mml/waveformEditor.js"></script>
+  <script src="src/convert/bpm.js"></script>
+  <script src="src/convert/duration.js"></script>
+  <script src="src/convert/envelope.js"></script>
+  <script src="src/convert/waveRegistry.js"></script>
+  <script src="src/convert/mmlEmit.js"></script>
+  <script src="src/dpcm/dpcmConverter.js"></script>
+  <script src="src/driver/sampleDriver.js"></script>
+  <script src="src/driver/ppmckDriver.js"></script>
+  <section class="float-window" id="win-keyboard"
+    data-default-left="20" data-default-top="640" data-default-width="600" data-default-height="320">
+    <div class="float-window-header">
+      <span>鍵盤表示 (リアルタイム)</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body" style="padding:0; display:flex; flex-direction:column; overflow:hidden;">
+      <div id="keyboardDisplay" style="display:flex; flex-direction:column; height:100%; overflow:hidden;"></div>
+    </div>
+  </section>
+
+  <!-- SPC 再生パネル -->
+  <section class="float-window" id="win-spcplay"
+    data-default-left="1160" data-default-top="100" data-default-width="480" data-default-height="560">
+    <div class="float-window-header">
+      <span>SPCファイル読み込み・再生</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <h2>SPCファイル読み込み・再生</h2>
+      <div class="toolbar">
+        <input type="file" id="spcFile" accept=".spc" />
+      </div>
+      <h3 style="margin:4px 0;font-size:13px;color:var(--accent);">ヘッダ情報</h3>
+      <div id="spcFileHeader" class="output" style="min-height:160px;"></div>
+      <div class="toolbar" style="margin-top:6px;">
+        <label style="display:flex;align-items:center;gap:4px;">再生時間(秒)
+          <input type="number" id="spcPlayDuration" value="180" min="1" max="3600" style="width:70px" />
+        </label>
+        <button id="btnSpcFilePlay">▶ 再生</button>
+        <button id="btnSpcFileStop" class="secondary">■ 停止</button>
+        <button id="btnSpcExportWav" class="secondary">💾 WAV書き出し</button>
+        <button id="btnSpc2Mml" class="secondary">♪ MML変換</button>
+      </div>
+      <div class="toolbar">
+        <label style="display:flex;align-items:center;gap:4px;">変換テンポ
+          <input type="number" id="spcTempoBpm" placeholder="自動" min="40" max="400" style="width:70px" />
+        </label>
+        <button id="btnSpcTempoTap" class="secondary">👆 タップ</button>
+        <button id="btnSpcTempoClear" class="secondary">自動に戻す</button>
+        <span id="spcTempoTapInfo" style="font-size:11px;color:#9999aa;"></span>
+      </div>
+      <div id="spcFileStatus" class="output" style="min-height:40px;"></div>
+
+      <!-- SPC ボイスモニター（鍵盤表示・ミュート） -->
+      <div id="spcVoiceMonitor" style="margin-top:8px;">
+        <h3 style="margin:4px 0;font-size:13px;color:var(--accent);">ボイスモニター</h3>
+        <div id="spcVoicePanel" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- KSS 再生パネル -->
+  <section class="float-window" id="win-kssplay"
+    data-default-left="1160" data-default-top="680" data-default-width="480" data-default-height="580">
+    <div class="float-window-header">
+      <span>KSSファイル読み込み・再生</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <h2>KSSファイル読み込み・再生 (MSX: PSG/SCC/FMPAC)</h2>
+      <div class="toolbar">
+        <input type="file" id="kssFile" accept=".kss" />
+      </div>
+      <h3 style="margin:4px 0;font-size:13px;color:var(--accent);">ヘッダ情報</h3>
+      <div id="kssFileHeader" class="output" style="min-height:140px;"></div>
+      <div class="toolbar">
+        <label style="display:flex;align-items:center;gap:4px;">曲番号
+          <button id="btnKssSongPrev" class="secondary">−</button>
+          <input type="number" id="kssSongIndex" value="0" min="0" style="width:60px" />
+          <span id="kssSongTotal">/ 0</span>
+          <button id="btnKssSongNext" class="secondary">＋</button>
+        </label>
+      </div>
+      <div class="toolbar" style="margin-top:6px;">
+        <label style="display:flex;align-items:center;gap:4px;">再生時間(秒)
+          <input type="number" id="kssPlayDuration" value="180" min="1" max="3600" style="width:70px" />
+        </label>
+        <button id="btnKssFilePlay">▶ 再生</button>
+        <button id="btnKssFileStop" class="secondary">■ 停止</button>
+        <button id="btnKssExportWav" class="secondary">💾 WAV書き出し</button>
+        <button id="btnKss2Mml" class="secondary">♪ MML変換</button>
+      </div>
+      <div class="toolbar">
+        <label style="display:flex;align-items:center;gap:4px;">変換テンポ
+          <input type="number" id="kssTempoBpm" placeholder="自動" min="40" max="400" style="width:70px" />
+        </label>
+        <button id="btnKssTempoTap" class="secondary">👆 タップ</button>
+        <button id="btnKssTempoClear" class="secondary">自動に戻す</button>
+        <span id="kssTempoTapInfo" style="font-size:11px;color:#9999aa;"></span>
+      </div>
+      <div id="kssFileStatus" class="output" style="min-height:40px;"></div>
+    </div>
+  </section>
+
+  <script src="src/ui/floatingWindows.js"></script>
+  <script src="src/ui/keyboard.js"></script>
+  <script src="src/nsf2mml/expansion/vrc6.js"></script>
+  <script src="src/nsf2mml/expansion/mmc5.js"></script>
+  <script src="src/nsf2mml/expansion/fme7.js"></script>
+  <script src="src/nsf2mml/expansion/fds.js"></script>
+  <script src="src/nsf2mml/expansion/n163.js"></script>
+  <script src="src/nsf2mml/expansion/vrc7.js"></script>
+  <script src="src/nsf2mml/converter.js"></script>
+  <script src="src/audio/stream-player.js"></script>
+  <script src="src/spc/spcHeader.js"></script>
+  <script src="src/emulator/spc700.js"></script>
+  <script src="src/emulator/spcDsp.js"></script>
+  <script src="src/emulator/spcPlayer.js"></script>
+  <script src="src/audio/spc-stream-player.js"></script>
+  <script src="src/spc2mml/converter.js"></script>
+  <script src="src/kss/kssHeader.js"></script>
+  <script src="src/emulator/cpuZ80.js"></script>
+  <script src="src/emulator/kssBus.js"></script>
+  <script src="src/emulator/expansion/ay8910Msx.js"></script>
+  <script src="src/emulator/expansion/sccAudio.js"></script>
+  <script src="src/emulator/expansion/opllMsx.js"></script>
+  <script src="src/emulator/kssPlayer.js"></script>
+  <script src="src/audio/kss-stream-player.js"></script>
+  <script src="src/kss2mml/expansion/ay.js"></script>
+  <script src="src/kss2mml/expansion/scc.js"></script>
+  <script src="src/kss2mml/expansion/opll.js"></script>
+  <script src="src/kss2mml/converter.js"></script>
+  <script src="src/main.js"></script>
+</body>
+</html>

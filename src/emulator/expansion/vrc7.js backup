@@ -1,0 +1,383 @@
+/*
+ * VRC7 拡張音源エミュレータ (OPLL / YM2413 系 2オペレータFM)
+ * MML.Emu.VRC7Audio
+ *
+ * 6チャンネルの2オペレータFM。対数sin/expテーブルによる本格実装。
+ *   $9010 : 内部レジスタ選択 (アドレスポート)
+ *   $9030 : 内部レジスタへの書き込み (データポート)
+ *   $00-$07 : カスタム音色(音色0)のパラメータ
+ *   $10-$15 : ch0-5 F-Number下位8bit
+ *   $20-$25 : bit0=F-Number bit8, bit1-3=block, bit4=key-on(トリガ), bit5=sustain
+ *   $30-$35 : bit4-7=音色番号(0-15), bit0-3=音量(0=最大, 15=無音)
+ *
+ * 出力サンプルレート 49716Hz (VRC7マスタ3.58MHz/72 ≒ CPUクロック/36)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const NUM_CH = 6;
+  const CYCLES_PER_SAMPLE = 36;     // CPUサイクル/VRC7サンプル
+  const SAMPLE_RATE = 49716;
+
+  // --- VRC7内蔵音色ROM (音色1-15、各8バイト = レジスタ$00-$07) ---
+  const PATCH_ROM = [
+    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // 0: カスタム(実際はレジスタ$00-07を使う)
+    [0x03,0x21,0x05,0x06,0xE8,0x81,0x42,0x27], // 1 Buzzy Bell
+    [0x13,0x41,0x14,0x0D,0xD8,0xF6,0x23,0x12], // 2 Guitar
+    [0x11,0x11,0x08,0x08,0xFA,0xB2,0x20,0x12], // 3 Wurly
+    [0x31,0x61,0x0C,0x07,0xA8,0x64,0x61,0x27], // 4 Flute
+    [0x32,0x21,0x1E,0x06,0xE1,0x76,0x01,0x28], // 5 Clarinet
+    [0x02,0x01,0x06,0x00,0xA3,0xE2,0xF4,0xF4], // 6 Synth
+    [0x21,0x61,0x1D,0x07,0x82,0x81,0x11,0x07], // 7 Trumpet
+    [0x23,0x21,0x22,0x17,0xA2,0x72,0x01,0x17], // 8 Organ
+    [0x35,0x11,0x25,0x00,0x40,0x73,0x72,0x01], // 9 Bells
+    [0xB5,0x01,0x0F,0x0F,0xA8,0xA5,0x51,0x02], // A Vibes
+    [0x17,0xC1,0x24,0x07,0xF8,0xF8,0x22,0x12], // B Vibraphone
+    [0x71,0x23,0x11,0x06,0x65,0x74,0x18,0x16], // C Tutti
+    [0x01,0x02,0xD3,0x05,0xC9,0x95,0x03,0x02], // D Fretless
+    [0x61,0x63,0x0C,0x00,0x94,0xC0,0x33,0xF6], // E Synth Bass
+    [0x21,0x72,0x0D,0x00,0xC1,0xD5,0x56,0x06]  // F Sweep
+  ];
+
+  // MULT テーブル(倍率×2の整数)。実値 1/2,1,2,3,4,5,6,7,8,9,10,10,12,12,15,15
+  const ML2 = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 20, 24, 24, 30, 30];
+
+  // --- 対数sin / exp テーブル (att単位 = 1/256 log2, 256=1oct=6.02dB) ---
+  const LOGSIN = new Uint16Array(256); // 第1象限のlog2減衰
+  for (let i = 0; i < 256; i++) {
+    const v = Math.sin((i + 0.5) * Math.PI / 512); // 0..PI/2
+    LOGSIN[i] = Math.round(-Math.log2(v) * 256);
+  }
+  const EXP2 = new Uint16Array(256);   // 2^(-i/256)*4096
+  for (let i = 0; i < 256; i++) EXP2[i] = Math.round(Math.pow(2, -i / 256) * 4096);
+
+  // att(1/256 log2) → 線形振幅(0..4096)
+  function expLin(att) {
+    if (att >= (12 << 8)) return 0;        // ~-72dB以下は無音
+    if (att < 0) att = 0;
+    return EXP2[att & 0xFF] >> (att >> 8);
+  }
+
+  // オペレータ出力: phase18(位相18bit), att(総減衰), waveform(0=sin,1=半波)
+  //   → 符号付き線形 ±4096
+  function opWave(phase18, att, waveform) {
+    const p = (phase18 >> 8) & 1023;       // 10bit波形位相
+    const neg = (p & 512) !== 0;           // 後半(負)
+    let idx = p & 255;
+    if (p & 256) idx = 255 - idx;          // 象限ミラー
+    const mag = expLin(LOGSIN[idx] + att);
+    if (waveform && neg) return 0;         // 半波整流: 負側は0
+    return neg ? -mag : mag;
+  }
+
+  // AR用: 線形アタック位相(0..255) → att。amp = 1 - phase/256 (線形振幅アタック近似)
+  const AR_ADJUST = new Uint16Array(256);
+  for (let i = 0; i < 256; i++) {
+    const amp = 1 - i / 256;
+    AR_ADJUST[i] = amp <= 0 ? 2048 : Math.min(2048, Math.round(-256 * Math.log2(amp)));
+  }
+
+  // --- KSL (key scale level) ---
+  const KL_DB = [0.000, 9.000, 12.000, 13.875, 15.000, 16.125, 17.250, 18.000,
+                 18.750, 19.875, 20.250, 21.000, 21.750, 22.125, 22.875, 23.250];
+  // kslAtt[block][fnum上位4bit][KL] を att単位で
+  const KSL_TAB = [];
+  for (let blk = 0; blk < 8; blk++) {
+    KSL_TAB[blk] = [];
+    for (let fh = 0; fh < 16; fh++) {
+      let db = KL_DB[fh] - 6.0 * (7 - blk);
+      if (db < 0) db = 0;
+      const attUnit = db * 256 / 6.0206;   // dB → 1/256 log2
+      KSL_TAB[blk][fh] = [0, attUnit / 4, attUnit / 2, attUnit].map(x => Math.round(x)); // KL 0..3
+    }
+  }
+
+  // EG 位相増分: 2^22 単位/サンプル。rate4(0-15), rks(0-15)
+  function egDphase(rate4, rks) {
+    if (rate4 === 0) return 0;
+    const rm = Math.min(15, rate4 + (rks >> 2));
+    const rl = rks & 3;
+    return (rl + 4) << (rm + 1);
+  }
+
+  const EG_MAX = 1 << 22; // エンベロープ位相フルスケール(=48dB相当)
+
+  // EG状態
+  const EG_ATTACK = 0, EG_DECAY = 1, EG_SUSTAIN = 2, EG_RELEASE = 3, EG_IDLE = 4;
+
+  // 1オペレータ
+  class Op {
+    constructor() {
+      this.phase = 0;      // 18bit位相
+      this.dphase = 0;     // 位相増分
+      this.egState = EG_IDLE;
+      this.egPhase = EG_MAX; // 減衰位相(大=無音)
+      this.att = 2048;     // 現在のenv減衰(att単位)
+      // パッチ由来パラメータ
+      this.am = false; this.vib = false; this.egt = false; this.ksr = false;
+      this.ml2 = 2; this.ksl = 0; this.tl = 0; this.waveform = 0;
+      this.ar = 0; this.dr = 0; this.sl = 0; this.rr = 0;
+      this.out = 0; this.prevOut = 0;
+    }
+  }
+
+  class Vrc7Channel {
+    constructor(chip) {
+      this.chip = chip;
+      this.mod = new Op();
+      this.car = new Op();
+      this.fnum = 0;
+      this.block = 0;
+      this.keyOn = false;
+      this.sustainReg = false; // $2X bit5
+      this.instrument = 0;
+      this.volume = 0;         // 0..15 (0=最大音量)
+      this.fb = 0;
+      this.fbBuf = 0;
+    }
+
+    // 音色/音量/周波数からオペレータパラメータを再計算
+    updatePatch() {
+      const inst = this.instrument;
+      const p = inst === 0 ? this.chip.customPatch : PATCH_ROM[inst];
+      const setOp = (op, b0, b2half, arDr, slRr, wf) => {
+        op.am = (b0 & 0x80) !== 0;
+        op.vib = (b0 & 0x40) !== 0;
+        op.egt = (b0 & 0x20) !== 0;
+        op.ksr = (b0 & 0x10) !== 0;
+        op.ml2 = ML2[b0 & 0x0F];
+        op.ksl = (b2half >> 6) & 3;
+        op.waveform = wf;
+        op.ar = (arDr >> 4) & 0x0F;
+        op.dr = arDr & 0x0F;
+        op.sl = (slRr >> 4) & 0x0F;
+        op.rr = slRr & 0x0F;
+      };
+      // モジュレータ
+      setOp(this.mod, p[0], p[2], p[4], p[6], (p[3] >> 3) & 1);
+      this.mod.tl = p[2] & 0x3F; // 6bit TL
+      // キャリア
+      setOp(this.car, p[1], p[3], p[5], p[7], (p[3] >> 4) & 1);
+      this.car.tl = this.volume * 4; // 音量4bit(3dB/step) を TL(0.75dB/step)換算: 3/0.75=4
+      this.fb = p[3] & 0x07;
+      this.updateFreq();
+    }
+
+    updateFreq() {
+      const base = (this.fnum << this.block);
+      this.mod.dphase = (base * this.mod.ml2) >> 2;
+      this.car.dphase = (base * this.car.ml2) >> 2;
+    }
+
+    keyOnEvent() {
+      // アタック開始
+      for (const op of [this.mod, this.car]) {
+        op.egState = EG_ATTACK;
+        op.egPhase = EG_MAX;
+        op.phase = 0;
+      }
+    }
+    keyOffEvent() {
+      for (const op of [this.mod, this.car]) {
+        if (op.egState !== EG_IDLE) op.egState = EG_RELEASE;
+      }
+    }
+
+    // rks(0-15)
+    rksOf(op) {
+      const kcode = (this.block << 1) | (this.fnum >> 8);
+      return op.ksr ? kcode : (kcode >> 2);
+    }
+
+    // 1オペレータのEGを1サンプル進めて att を更新
+    clockEG(op) {
+      const rks = this.rksOf(op);
+      switch (op.egState) {
+        case EG_ATTACK: {
+          if (op.ar >= 15) { op.egPhase = 0; }
+          else if (op.ar === 0) { op.att = 2048; break; }
+          else op.egPhase -= egDphase(op.ar, rks);
+          if (op.egPhase <= 0) { op.egPhase = 0; op.egState = EG_DECAY; op.att = 0; break; }
+          op.att = AR_ADJUST[Math.min(255, op.egPhase >> 14)];
+          break;
+        }
+        case EG_DECAY: {
+          op.egPhase += egDphase(op.dr, rks);
+          const slPhase = op.sl << 18; // SL*3dB
+          if (op.egPhase >= slPhase) {
+            op.egPhase = slPhase;
+            op.egState = op.egt ? EG_SUSTAIN : EG_RELEASE; // egt=持続音は保持
+          }
+          op.att = op.egPhase >> 11;
+          break;
+        }
+        case EG_SUSTAIN:
+          op.att = op.egPhase >> 11;
+          break;
+        case EG_RELEASE: {
+          // key-on中(egt=0の打楽器音がSL到達後): RRで減衰継続。
+          // key-off後: RR。ただし$2X sustainビットが立つとレート5で緩やかに。
+          const rate = this.keyOn ? op.rr : (this.sustainReg ? 5 : op.rr);
+          op.egPhase += egDphase(rate, rks);
+          if (op.egPhase >= EG_MAX) { op.egPhase = EG_MAX; op.egState = EG_IDLE; }
+          op.att = op.egPhase >> 11;
+          break;
+        }
+        case EG_IDLE:
+          op.att = 2048;
+          break;
+      }
+    }
+
+    // 1サンプル計算
+    clockSample(amOfs, pmShift) {
+      const mod = this.mod, car = this.car;
+      this.clockEG(mod);
+      this.clockEG(car);
+
+      // 位相更新(ビブラート)
+      const modInc = mod.vib ? ((mod.dphase * pmShift) >> 8) + mod.dphase : mod.dphase;
+      const carInc = car.vib ? ((car.dphase * pmShift) >> 8) + car.dphase : car.dphase;
+      mod.phase = (mod.phase + modInc) & 0x3FFFF;
+      car.phase = (car.phase + carInc) & 0x3FFFF;
+
+      // モジュレータ(自己フィードバック)
+      const modAtt = mod.att + (mod.tl << 5) + this.chip.kslAtt(this, mod) + (mod.am ? amOfs : 0);
+      const fbOfs = this.fb ? (this.fbBuf >> (8 - this.fb)) : 0;
+      const modOut = opWave((mod.phase + (fbOfs << 8)) & 0x3FFFF, modAtt, mod.waveform);
+      this.fbBuf = (mod.prevOut + modOut) >> 1;
+      mod.prevOut = modOut;
+
+      // キャリア(モジュレータで位相変調)
+      const carAtt = car.att + (car.tl << 5) + this.chip.kslAtt(this, car) + (car.am ? amOfs : 0);
+      const carOut = opWave((car.phase + (modOut << 7)) & 0x3FFFF, carAtt, car.waveform);
+      return carOut;
+    }
+  }
+
+  class VRC7Audio {
+    constructor() {
+      this.addr = 0;
+      this.customPatch = [0, 0, 0, 0, 0, 0, 0, 0];
+      this.channels = [];
+      for (let i = 0; i < NUM_CH; i++) this.channels.push(new Vrc7Channel(this));
+      this.mute = new Array(NUM_CH).fill(false);
+      this.cyc = 0;
+      this.lastSample = 0;
+      this.lfoAm = 0; this.lfoPm = 0; this.lfoCount = 0;
+    }
+
+    reset() {
+      this.addr = 0;
+      this.customPatch = [0, 0, 0, 0, 0, 0, 0, 0];
+      this.channels = [];
+      for (let i = 0; i < NUM_CH; i++) this.channels.push(new Vrc7Channel(this));
+      this.cyc = 0; this.lastSample = 0;
+      this.lfoAm = 0; this.lfoPm = 0; this.lfoCount = 0;
+    }
+
+    kslAtt(ch, op) {
+      return KSL_TAB[ch.block][ch.fnum >> 5][op.ksl];
+    }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      if (addr === 0x9010) this.addr = value & 0x3F;
+      else if (addr === 0x9030) this.writeInternal(this.addr, value);
+    }
+
+    writeInternal(reg, value) {
+      if (reg <= 0x07) {
+        this.customPatch[reg] = value;
+        // カスタム音色を使っている全chを更新
+        for (const c of this.channels) if (c.instrument === 0) c.updatePatch();
+      } else if (reg >= 0x10 && reg <= 0x15) {
+        const c = this.channels[reg - 0x10];
+        c.fnum = (c.fnum & 0x100) | value;
+        c.updateFreq();
+      } else if (reg >= 0x20 && reg <= 0x25) {
+        const c = this.channels[reg - 0x20];
+        c.fnum = (c.fnum & 0xFF) | ((value & 1) << 8);
+        c.block = (value >> 1) & 7;
+        c.sustainReg = (value & 0x20) !== 0;
+        const newKey = (value & 0x10) !== 0;
+        if (newKey && !c.keyOn) { c.keyOn = true; c.keyOnEvent(); }
+        else if (!newKey && c.keyOn) { c.keyOn = false; c.keyOffEvent(); }
+        c.updateFreq();
+      } else if (reg >= 0x30 && reg <= 0x35) {
+        const c = this.channels[reg - 0x30];
+        c.instrument = (value >> 4) & 0x0F;
+        c.volume = value & 0x0F;
+        c.updatePatch();
+      }
+    }
+
+    // LFO(AM/PM)を1サンプル進める
+    stepLFO() {
+      this.lfoCount++;
+      // AM: 三角波 0..~1.0dB相当。PM: 位相±
+      const amPhase = (this.lfoCount * 78 / SAMPLE_RATE) % 1; // ~3.7Hz(tremolo)
+      this.lfoAm = Math.round((0.5 - Math.abs(amPhase - 0.5)) * 2 * 47); // 0..47 att単位(~1.1dB)
+      const pmPhase = (this.lfoCount * 128 / SAMPLE_RATE) % 1; // ~6.4Hz(vibrato)
+      this.lfoPm = Math.round(Math.sin(2 * Math.PI * pmPhase) * 8); // ±8 (>>8で微小)
+    }
+
+    clock() {
+      // CPUサイクルごとに呼ばれる。36サイクルに1回VRC7サンプルを生成。
+      if (++this.cyc < CYCLES_PER_SAMPLE) return;
+      this.cyc = 0;
+      this.stepLFO();
+      let sum = 0;
+      for (let i = 0; i < NUM_CH; i++) {
+        const out = this.channels[i].clockSample(this.lfoAm, this.lfoPm);
+        if (!this.mute[i]) sum += out;
+      }
+      this.lastSample = sum;
+    }
+
+    mixSample() {
+      // ±4096×6ch を正規化。他チップとバランス。
+      return (this.lastSample / 4096) * 0.20;
+    }
+  }
+
+  // 鍵盤表示用: ライブチップから6ch分の {freq,vol,rawVol,active,waveData} を作る。
+  // waveDataは現在のオペレータ状態(音色/変調/エンベロープ)から1周期のFM波形を合成。
+  Emu.snapshotVRC7 = function (chip) {
+    const out = [];
+    const N = 64;
+    for (let i = 0; i < NUM_CH; i++) {
+      const c = chip.channels[i];
+      const mod = c.mod, car = c.car;
+      const freq = (c.keyOn && c.fnum > 0) ? SAMPLE_RATE * c.fnum / Math.pow(2, 19 - c.block) : 0;
+      const active = c.keyOn && car.egState !== EG_IDLE && c.volume < 15;
+      const modAtt = mod.att + (mod.tl << 5) + chip.kslAtt(c, mod);
+      const carAtt = car.att + (car.tl << 5) + chip.kslAtt(c, car);
+      const ratio = car.dphase > 0 ? mod.dphase / car.dphase : 1;
+      const fbOfs = c.fb ? (c.fbBuf >> (8 - c.fb)) : 0;
+      const wave = new Array(N);
+      let mx = 1e-6;
+      for (let k = 0; k < N; k++) {
+        const carPh = Math.round((k / N) * 262144) & 0x3FFFF;
+        const modPh = Math.round((k / N) * ratio * 262144) & 0x3FFFF;
+        const modOut = opWave((modPh + (fbOfs << 8)) & 0x3FFFF, modAtt, mod.waveform);
+        const carOut = opWave((carPh + (modOut << 7)) & 0x3FFFF, carAtt, car.waveform);
+        wave[k] = carOut;
+        if (Math.abs(carOut) > mx) mx = Math.abs(carOut);
+      }
+      for (let k = 0; k < N; k++) wave[k] /= mx; // -1..1 に正規化
+      out.push({
+        freq,
+        vol: (15 - c.volume) / 15,
+        rawVol: c.volume,
+        instrument: c.instrument,
+        active,
+        waveData: active ? wave : new Array(N).fill(0)
+      });
+    }
+    return out;
+  };
+
+  Emu.VRC7Audio = VRC7Audio;
+})(window);

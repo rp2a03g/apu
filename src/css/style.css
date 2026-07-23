@@ -1,0 +1,836 @@
+:root {
+  --bg: #1e1e24;
+  --panel: #2a2a33;
+  --border: #3d3d4a;
+  --text: #e6e6ef;
+  --accent: #6fb1ff;
+  --error: #ff6b6b;
+  --mono: 'Consolas', 'Courier New', monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  padding: 12px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+header h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+header p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #9999aa;
+}
+
+.window-toggles {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.window-toggles-label {
+  font-size: 12px;
+  color: #9999aa;
+}
+
+.toggle-btn {
+  background: #3d3d4a;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.toggle-btn:hover { opacity: 0.85; }
+
+.toggle-btn.active {
+  background: var(--accent);
+  color: #102030;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+/* --- フローティングウィンドウ --- */
+.float-window {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  min-width: 280px;
+  min-height: 160px;
+  resize: both;
+  overflow: hidden;
+  padding: 0;
+}
+
+.float-window-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #34343f;
+  border-bottom: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+  cursor: move;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.float-window-close {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+.float-window-close:hover { color: var(--error); }
+
+.float-window-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.float-window-body h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--accent);
+}
+
+textarea {
+  width: 100%;
+  flex: 1;
+  min-height: 320px;
+  background: #14141a;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 8px;
+  resize: vertical;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+  flex-wrap: wrap;
+}
+
+.mute-row {
+  align-items: center;
+}
+
+.mute-row label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+button {
+  background: var(--accent);
+  color: #102030;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:hover { opacity: 0.85; }
+
+button.secondary {
+  background: #3d3d4a;
+  color: var(--text);
+}
+
+.output {
+  flex: 1;
+  background: #14141a;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  min-height: 200px;
+}
+
+.error { color: var(--error); }
+.ok { color: #74e08e; }
+
+.fields {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.fields label {
+  font-size: 12px;
+  color: #aaaabb;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fields input {
+  background: #14141a;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* --- MMLウィンドウ: エディタ + 再生ペイン --- */
+.mml-window-body {
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+
+.mml-editor-pane {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  height: 280px; /* JS で上書きされる */
+  padding: 8px 12px 0;
+}
+
+.pane-splitter {
+  flex-shrink: 0;
+  height: 6px;
+  background: var(--border);
+  cursor: ns-resize;
+  transition: background 0.15s;
+  position: relative;
+}
+.pane-splitter::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 32px;
+  height: 2px;
+  border-radius: 2px;
+  background: #666680;
+}
+.pane-splitter:hover,
+.pane-splitter.dragging { background: var(--accent); }
+
+.mml-bottom-pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.mml-output-area {
+  flex: none;
+  min-height: 48px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/* --- MMLシンタックスハイライト --- */
+.mml-editor {
+  position: relative;
+  flex: 1;
+  min-height: 120px;
+  background: #14141a;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.mml-editor .mml-highlight,
+.mml-editor textarea {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 8px;
+  border: none;
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow: auto;
+}
+
+.mml-editor .mml-highlight {
+  color: var(--text);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.mml-editor textarea {
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
+  resize: none;
+  z-index: 1;
+  min-height: 0;
+  flex: none;
+}
+
+.tok-channel { color: #ffd479; font-weight: 700; }
+.tok-note { color: #6fb1ff; }
+.tok-command { color: #c792ea; }
+.tok-octave { color: #f78c6c; }
+.tok-tie { color: #f78c6c; }
+.tok-loop { color: #ff6b6b; }
+.tok-number { color: #82d2ce; }
+.tok-comment { color: #6a737d; font-style: italic; }
+
+.mml-playing {
+  background: rgba(111, 177, 255, 0.35);
+  border-radius: 2px;
+}
+
+/* シークバーの開始点(青)〜終了点(赤)ハンドルが示す再生範囲を常時背景色で示す。
+   個々の音符を丸くハイライトする.mml-playingとは違い、範囲全体を示す帯として見せたいので
+   角丸は付けない。.mml-playing(再生中の現在位置)と重なった場合は後者の色を優先する。 */
+.mml-range-selected {
+  background: rgba(255, 196, 64, 0.22);
+}
+.mml-playing.mml-range-selected {
+  background: rgba(111, 177, 255, 0.5);
+}
+
+/* --- シークバー: 目盛り(メモリ) + ドラッグ可能な再生範囲ハンドル(開始点=青/終了点=赤) --- */
+.seek-bar-wrap {
+  position: relative;
+  width: 100%;
+  margin: 4px 0 20px; /* 下の目盛り行ぶんの余白 */
+}
+.seek-bar-wrap input#seekBar {
+  display: block;
+  width: 100%;
+  margin: 0;
+  position: relative;
+  z-index: 2;
+}
+.seek-range-fill {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 4px;
+  width: 0;
+  transform: translateY(-50%);
+  background: rgba(111, 177, 255, 0.25);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 1;
+  display: none;
+}
+/* ドラッグハンドル: シークバーの最初/最後を初期値とし、ユーザーが左右に自由に動かせる */
+.seek-handle {
+  position: absolute;
+  top: -3px;
+  left: 0%;
+  width: 7px;
+  height: 20px;
+  border-radius: 3px;
+  transform: translateX(-50%);
+  cursor: ew-resize;
+  z-index: 3;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  box-sizing: border-box;
+  touch-action: none;
+  display: none;
+}
+.seek-handle:hover,
+.seek-handle.dragging { filter: brightness(1.25); }
+.seek-handle-start { background: #4f8fff; }
+.seek-handle-end { background: var(--error); }
+
+/* 目盛り(時間ラベル付きの縦線)。シークバー直下に表示 */
+.seek-ticks {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 16px;
+  pointer-events: none;
+}
+.seek-tick {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 4px;
+  background: #55556a;
+  transform: translateX(-50%);
+}
+.seek-tick-label {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  transform: translateX(-50%);
+  font-size: 9px;
+  color: #8888a0;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+/* --- 波形エディタ --- */
+.wave-editor {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.wave-editor h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.wave-editor canvas {
+  background: #14141a;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: crosshair;
+  display: block;
+  max-width: 100%;
+}
+
+/* --- 鍵盤表示ウィジェット --- */
+.kbd-speed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: #9999aa;
+  border-bottom: 1px solid #3d3d4a;
+}
+.kbd-speed-label { flex: none; }
+.kbd-speed-range { flex: none; width: 140px; accent-color: var(--accent); cursor: pointer; }
+.kbd-speed-value { flex: none; width: 32px; color: #e6e6ef; }
+
+.kbd-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px 1px;
+  font-size: 10px;
+  color: #6a6a80;
+  font-family: var(--mono);
+  border-bottom: 1px solid #3d3d4a;
+}
+
+/* ヘッダ列幅をチャンネル行と合わせる(NSF/KSSのメイン一覧、行側の実測値は.kbd-part/.kbd-mute/.kbd-name/.kbd-vol-wrap参照)
+   (dot-part・mute-ch・ch-volの間隔は個別にmarginで調整、[[keyboard-part-letter-column]]参照)
+   part = dot(8) + gap(0) + part(10) = 18px、mute = checkbox(14)単独(アイコン表示なので幅そのまま) */
+.kbd-h-part      { flex: none; width: 18px; }
+.kbd-h-mute-solo { flex: none; width: 14px; text-align: center; }
+/* SPCボイス一覧(kbds-header)はdot+checkboxを1列(mute)のまま使うため従来幅を維持 */
+.kbd-h-mute  { flex: none; width: 28px; }
+.kbd-h-name  { flex: none; width: 32px; }
+/* メイン一覧のみ: chとvolの間隔を詰める(SPC側のkbd-h-nameは対象外にするためkbd-h-mute-soloとの隣接で絞る。
+   行側の.kbd-part + .kbd-mute + .kbd-name と同じ値に揃える) */
+.kbd-h-mute-solo + .kbd-h-name { margin-right: -16px; }
+/* "vol"の文字位置は音量バー(vol-wrap)の左端に揃える(vol-numの左端だと数値の上に浮いて見えるため)。
+   vol-numはnum(20px)・barはvol-wrap(40px)に合わせる */
+.kbd-h-vol   { flex: none; width: calc(20px + 6px + 40px); box-sizing: border-box; padding-left: calc(20px + 6px); }
+.kbd-h-wave  { flex: none; width: 34px; text-align: center; }
+.kbd-h-note  { flex: none; width: 36px; text-align: right; }
+.kbd-h-freq  { flex: 1; }
+
+.kbd-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.kbd-ch-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  font-size: 11px;
+  font-family: var(--mono);
+  flex-shrink: 0; /* SPC表示は列数が多く横スクロールするため、行が縮んで崩れないようにする */
+}
+
+.kbd-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.kbd-dot:hover {
+  outline: 1px solid #8888aa;
+  outline-offset: 1px;
+}
+
+.kbd-color-picker {
+  position: fixed;
+  /* .float-window はドラッグ/フォーカスのたびにインラインz-indexが増加し永続化されるため、
+     千程度の固定値では簡単に追い越されて背面に隠れてしまう。最大値に近い値で常に最前面にする。 */
+  z-index: 2147483647;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  display: grid;
+  grid-template-columns: repeat(6, 20px);
+  gap: 6px;
+}
+.kbd-color-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid #55556a;
+}
+.kbd-color-swatch:hover {
+  border-color: var(--text);
+}
+.kbd-color-swatch--selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.kbd-color-more {
+  position: relative;
+  overflow: hidden;
+  padding: 0;
+  background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
+}
+.kbd-color-native {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  margin: 0;
+  border: none;
+  opacity: 0;
+  cursor: pointer;
+}
+.kbd-color-reset {
+  grid-column: 1 / -1;
+  background: #14141a;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 3px 0;
+  cursor: pointer;
+}
+.kbd-color-reset:hover {
+  border-color: var(--accent);
+}
+
+.kbd-mute {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+/* メイン一覧のみ: muteをアイコン表示にした分、chとの間隔は素のgap(6px)まで詰める
+   (kbd-partの直後のmuteだけに絞ってSPC/ALL行は対象外にする) */
+.kbd-part + .kbd-mute { margin-right: 0; }
+
+/* MMLパート文字(A-Z,a,b)。丸アイコンと同じ列("part")の一部として隣接表示する */
+.kbd-part {
+  flex: none;
+  width: 10px;
+  text-align: center;
+  color: #cccce0;
+  font-weight: 600;
+  font-size: 10px;
+  margin-left: -6px; /* 丸アイコンとパート文字をくっつける */
+}
+
+.kbd-name {
+  flex: none;
+  width: 32px;
+  color: #cccce0;
+  font-weight: 600;
+  font-size: 11px;
+}
+/* メイン一覧のみ: chとvolの間隔を詰める(kbd-part+kbd-muteの直後のnameだけに絞る) */
+.kbd-part + .kbd-mute + .kbd-name { margin-right: -16px; }
+/* SPC表示のみ: ch(name)とLの間を詰める（NSF表示はLが無いため対象外） */
+.kbd-left--spc .kbd-name,
+.kbd-left--spc .kbd-h-name {
+  margin-right: -3px;
+}
+
+.kbd-vol-wrap {
+  flex: none;
+  width: 40px;
+  height: 8px;
+  background: #14141a;
+  border: 1px solid #3d3d4a;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.kbd-vol-bar {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  transition: width 0.04s linear, background 0.04s;
+}
+
+.kbd-vol-num {
+  flex: none;
+  width: 20px; /* 最大3桁("255"等)でも実測16.5px@10pxフォントで収まる。ch列との間の余白を減らすため詰めた */
+  text-align: right;
+  font-size: 10px;
+  color: #e6e6ef;
+  font-family: var(--mono);
+}
+
+.kbd-wave {
+  flex: none;
+  width: 34px;
+  height: 14px;
+  background: #14141a;
+  border: 1px solid #3d3d4a;
+  border-radius: 3px;
+  display: block;
+}
+
+.kbd-note {
+  flex: none;
+  width: 36px;
+  color: #e6e6ef;
+  text-align: right;
+}
+
+.kbd-freq {
+  flex: 1;
+  color: #9999aa;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* --- SPC専用列 (mute/ch/L/R/vol/env/wave/PM/note/freq/echo/echoL/echoR/C0-C7) --- */
+.kbds-h-lr, .kbds-lr { flex: none; width: 30px; text-align: right; }
+/* L/R は間を詰める(下記kbds-l)ため近接しがちなので、視認性を保つよう少し暗めにする */
+.kbds-lr { font-size: 10px; color: #b0b0c0; font-family: var(--mono); }
+/* L(1つ目のkbds-lr)だけ右マージンを削って R との間隔を詰める */
+.kbds-l, .kbds-h-l { margin-right: -3px; }
+
+.kbds-h-env, .kbds-env { flex: none; width: 44px; }
+.kbds-env { display: flex; align-items: center; gap: 4px; overflow: hidden; }
+.kbds-env-canvas {
+  flex: none;
+  width: 34px;
+  height: 16px;
+  background: #14141a;
+  border: 1px solid #3d3d4a;
+  border-radius: 3px;
+  display: block;
+}
+.kbds-env-text {
+  font-size: 9px;
+  color: #cfcfe0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* PM は note との間を詰める */
+.kbds-h-pm, .kbds-pm { flex: none; width: 26px; text-align: center; margin-right: -3px; }
+.kbds-pm { font-size: 10px; font-family: var(--mono); }
+
+/* freq は echo との間を詰める */
+.kbds-h-freq, .kbds-freq { flex: none; width: 68px; margin-right: -3px; }
+.kbds-freq { color: #9999aa; font-size: 10px; white-space: nowrap; overflow: hidden; }
+
+.kbds-h-echo, .kbds-echo { flex: none; width: 36px; text-align: center; }
+.kbds-echo { font-size: 10px; font-family: var(--mono); }
+
+.kbds-h-echolr, .kbds-echolr { flex: none; width: 38px; text-align: right; }
+.kbds-echolr { font-size: 10px; color: #e6e6ef; font-family: var(--mono); }
+
+.kbds-h-fir, .kbds-fir { flex: none; width: 32px; text-align: right; }
+.kbds-fir { font-size: 10px; color: #e6e6ef; font-family: var(--mono); }
+
+.kbd-mute-ph { flex: none; width: 14px; height: 14px; }
+
+.kbds-all-row .kbd-name { color: #cfcfe0; }
+.kbds-all-row { border-bottom: 1px solid #3d3d4a; margin-bottom: 2px; padding-bottom: 2px; }
+
+.kbd-piano {
+  display: block;
+  width: 100%;
+  height: 68px;
+  background: #2a2a33;
+  border-top: 1px solid #3d3d4a;
+  flex: none;
+}
+
+/* --- ピアノロール(鍵盤の直上、折りたたみ可能) --- */
+.kbd-roll-wrap {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+}
+.kbd-roll-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 8px;
+  background: #34343f;
+  border-top: 1px solid #3d3d4a;
+  color: var(--accent);
+  font-size: 11px;
+  font-family: var(--mono);
+  cursor: pointer;
+  user-select: none;
+}
+.kbd-roll-toggle { flex: none; width: 10px; text-align: center; }
+.kbd-roll-label { flex: none; }
+.kbd-roll {
+  display: block;
+  width: 100%;
+  height: 320px;
+  background: #14141a;
+  border-top: 1px solid #3d3d4a;
+  flex: none;
+}
+
+/* --- 上段: 左=チャンネル一覧 / 右=選択波形の拡大表示 --- */
+.kbd-main {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.kbd-left {
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  flex: none;
+  min-height: 0;
+}
+/* SPC表示は列数が多いため、横スクロールを出さずに全列が収まる幅を確保する */
+.kbd-left.kbd-left--spc {
+  width: 1000px;
+}
+.kbd-bigwave {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+  border-left: 1px solid #3d3d4a;
+  overflow: hidden;
+}
+.kbd-bigwave-title {
+  font-size: 12px;
+  color: #cccce0;
+  font-family: var(--mono);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+}
+.kbd-bigwave-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+}
+.kbd-bigwave-canvas {
+  width: 280px;
+  height: 140px;
+  max-width: 100%;
+  background: #14141a;
+  border: 1px solid #3d3d4a;
+  border-radius: 4px;
+}
+/* SPCモードのサイズ(echoL列〜C7列にちょうど収まる幅、縦横比維持)は
+   keyboard.js の _positionSpcBigWave() が実測して inline style で設定する */
+
+/* SPCモード: echoL〜C7列(ALL行以外は常に空欄)の上に大波形パネルを重ねて表示する。
+   横に並べる/下に積むと必要な面積が大きくなりすぎるため、元々空いているその領域を
+   再利用し、テーブル自体の横幅(kbd-left--spc)を超えて広がらないようにする。 */
+.kbd-main.kbd-main--spc {
+  position: relative;
+  align-self: flex-start; /* stretchで親幅いっぱいに広がるのを防ぎ、kbd-leftの幅に合わせる */
+}
+.kbd-main.kbd-main--spc .kbd-left {
+  min-height: 360px; /* 重なる大波形パネルの下端ぶんの高さを確保し、下のピアノ鍵盤と衝突しないようにする */
+}
+.kbd-main.kbd-main--spc .kbd-bigwave {
+  position: absolute;
+  top: 70px;    /* JS側(_positionSpcBigWave)で実測値に上書きされる暫定値 */
+  left: 520px;  /* 同上。echoL列の左端に上書きされる暫定値 */
+  flex: none;
+  border: 1px solid #3d3d4a;
+  background: var(--panel);
+  border-radius: 4px;
+  z-index: 2;
+}
+/* 波形アイコンをクリック可能・選択中を強調 */
+.kbd-wave--clickable { cursor: pointer; }
+.kbd-wave--selected {
+  outline: 2px solid #6ea8ff;
+  outline-offset: 0;
+}
+

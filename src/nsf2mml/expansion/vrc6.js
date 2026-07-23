@@ -1,0 +1,134 @@
+/*
+ * VRC6拡張音源(パルスx2+サウ) → MML共通イベント形式 抽出
+ * MML.Nsf2MmlExpansion.vrc6(writeLog, totalFrames) → { channels: [...] }
+ *
+ * レジスタ(直書き、ラッチ不要): $9000-2=パルス1, $A000-2=パルス2, $B000-2=サウ
+ *   ctrl: パルスはbits4-6=duty bits0-3=volume, サウはbits0-5=accumRate(≈volume*4)
+ *   periodLo/periodHi(bit7=enable)
+ * アタック合図: periodHi書き込み(コンパイラ側 segmentsToWriteLogVrc6 が毎ノート必ず書く)
+ *
+ * 音程は src/mml/compiler.js の pulsePeriod()/sawPeriod() の逆関数で求める。
+ * パルスのduty(ctrl bits4-6, 0-7の8段階)は@<n>(instrument)としてそのまま出力する
+ * (compiler.js側もseg.instrument%8を読むよう対応済み)。サウには波形/duty概念が無い。
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  MML.Nsf2MmlExpansion = MML.Nsf2MmlExpansion || {};
+
+  const CPU_CLOCK = 1789773;
+
+  function freqToNoteNumber(freq) {
+    if (freq <= 0) return null;
+    const n = Math.round(57 + 12 * Math.log2(freq / 440));
+    return (n >= 0 && n <= 119) ? n : null;
+  }
+  function pulseFreq(period) { return CPU_CLOCK / (16 * (period + 1)); }
+  function sawFreq(period)   { return CPU_CLOCK / (14 * (period + 1)); }
+
+  // initRegs(INIT実行後・PLAY開始前のレジスタ状態)からp1/p2/sawの初期状態を復元する。
+  // 音色(duty)やサウのaccumRateを曲中一度もPLAY側で書き換えず、INIT時の1回だけ設定する
+  // 曲があるため、これが無いと常に初期値(duty=0/無音)のまま検出されてしまう
+  // (src/nsf2mml/expansion/fds.jsと同じ問題、3D Hot Rallyで実際に確認)。
+  function buildTimeline(writeLog, initRegs) {
+    const ir = initRegs || {};
+    function reg(addr, def) { return ir[addr] !== undefined ? ir[addr] : def; }
+    const p = [
+      { ctrl: reg(0x9000, 0), lo: reg(0x9001, 0), hi: reg(0x9002, 0) },
+      { ctrl: reg(0xA000, 0), lo: reg(0xA001, 0), hi: reg(0xA002, 0) }
+    ];
+    const s = { ctrl: reg(0xB000, 0), lo: reg(0xB001, 0), hi: reg(0xB002, 0) };
+    return writeLog.map(writes => {
+      const attack = [false, false, false];
+      for (const { addr, value } of writes) {
+        if      (addr === 0x9000) p[0].ctrl = value;
+        else if (addr === 0x9001) p[0].lo = value;
+        else if (addr === 0x9002) { p[0].hi = value; attack[0] = true; }
+        else if (addr === 0xA000) p[1].ctrl = value;
+        else if (addr === 0xA001) p[1].lo = value;
+        else if (addr === 0xA002) { p[1].hi = value; attack[1] = true; }
+        else if (addr === 0xB000) s.ctrl = value;
+        else if (addr === 0xB001) s.lo = value;
+        else if (addr === 0xB002) { s.hi = value; attack[2] = true; }
+      }
+      return { p1: { ...p[0] }, p2: { ...p[1] }, saw: { ...s }, attack };
+    });
+  }
+
+  // ピッチ/duty/enabledが同じ間は音量変化だけでは区切らずvolSeqに積む
+  // (ソフトウェア音量エンベロープ抽出用。src/nsf2mml/converter.jsのパルス抽出と同じ考え方)。
+  function extractPulseEvents(timeline, chKey, attackIdx) {
+    const events = [];
+    let cur = null;
+    function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
+    for (let f = 0; f < timeline.length; f++) {
+      const t = timeline[f];
+      const r = t[chKey];
+      const period  = r.lo | ((r.hi & 0x0F) << 8);
+      const enabled = !!(r.hi & 0x80);
+      const volume  = r.ctrl & 0x0F;
+      const duty    = (r.ctrl >> 4) & 0x07;
+      const note = (enabled && volume > 0 && period >= 4) ? freqToNoteNumber(pulseFreq(period)) : null;
+      if (!cur) { cur = { note, duty, start: f, end: f, volSeq: [volume] }; continue; }
+      if (t.attack[attackIdx] || note !== cur.note || duty !== cur.duty) {
+        flush(f);
+        cur = { note, duty, start: f, end: f, volSeq: [volume] };
+      } else {
+        cur.volSeq.push(volume);
+      }
+    }
+    flush(timeline.length);
+    return events;
+  }
+
+  function extractSawEvents(timeline) {
+    const events = [];
+    let cur = null;
+    function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
+    for (let f = 0; f < timeline.length; f++) {
+      const t = timeline[f];
+      const r = t.saw;
+      const period    = r.lo | ((r.hi & 0x0F) << 8);
+      const enabled   = !!(r.hi & 0x80);
+      const accumRate = r.ctrl & 0x3F;
+      const volume    = Math.min(15, Math.round(accumRate / 4));
+      const note = (enabled && accumRate > 0 && period >= 4) ? freqToNoteNumber(sawFreq(period)) : null;
+      if (!cur) { cur = { note, start: f, end: f, volSeq: [volume] }; continue; }
+      if (t.attack[2] || note !== cur.note) {
+        flush(f);
+        cur = { note, start: f, end: f, volSeq: [volume] };
+      } else {
+        cur.volSeq.push(volume);
+      }
+    }
+    flush(timeline.length);
+    return events;
+  }
+
+  MML.Nsf2MmlExpansion.vrc6 = function (writeLog, totalFrames, envReg, waveReg, initRegs) {
+    const timeline = buildTimeline(writeLog, initRegs);
+    const evP1  = extractPulseEvents(timeline, 'p1', 0);
+    const evP2  = extractPulseEvents(timeline, 'p2', 1);
+    const evSaw = extractSawEvents(timeline);
+
+    function toVolumeFields(volSeq) {
+      const idx = envReg ? envReg.assign(volSeq) : null;
+      return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
+    }
+    const toCommonPulse = ev => Object.assign(
+      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty }, toVolumeFields(ev.volSeq)
+    );
+    const toCommonSaw = ev => Object.assign(
+      { start: ev.start, end: ev.end, note: ev.note }, toVolumeFields(ev.volSeq)
+    );
+
+    return {
+      channels: [
+        { letter: 'E', events: evP1.map(toCommonPulse), hasVolume: true, hasEnvelope: true, hasInstrument: true },
+        { letter: 'F', events: evP2.map(toCommonPulse), hasVolume: true, hasEnvelope: true, hasInstrument: true },
+        { letter: 'G', events: evSaw.map(toCommonSaw), hasVolume: true, hasEnvelope: true },
+      ]
+    };
+  };
+
+})(window);

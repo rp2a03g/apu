@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>6502 命令テスト (SingleStepTests / nes6502)</title>
+<style>
+  body{font:14px/1.5 system-ui,sans-serif;margin:1.5rem;max-width:900px}
+  h1{font-size:18px}
+  button{font:inherit;padding:.4em .9em;border:1px solid #888;border-radius:6px;background:#f6f6f4;cursor:pointer}
+  label{font-size:13px;color:#555}
+  #sum{margin:.8rem 0;font-weight:600}
+  #grid{display:grid;grid-template-columns:repeat(16,1fr);gap:3px;margin-top:1rem}
+  .op{font:11px/1.4 monospace;text-align:center;padding:3px 0;border-radius:3px;background:#eee;color:#555}
+  .op.pass{background:#d8f0dc;color:#1b6b2f}
+  .op.fail{background:#f6c9c9;color:#8a1f1f}
+  .op.skip{background:#f3f3f3;color:#bbb}
+  .op.err{background:#eee;color:#aaa}
+  pre{background:#f6f6f4;padding:.8em;border-radius:6px;overflow:auto;max-height:45vh}
+  .muted{color:#777}
+</style>
+</head>
+<body>
+<h1>6502 (2A03) 命令テスト</h1>
+<p class="muted">外部テストベクタ <code>SingleStepTests/65x02 → nes6502</code>（10進無効=2A03仕様、各命令最大10000ケース、
+初期状態→1命令実行→最終状態を照合）で <code>MML.Emu.CPU6502</code> を検証する。
+<b>レジスタ(A/X/Y/S/P/PC)・RAM(ゼロページ/スタック含むメモリ破壊)・サイクル数</b>を比較。
+本実装は正規151命令のみ対応のため、非公式オペコードは <span style="color:#bbb">skip</span> 表示。</p>
+<p>
+  <label>各命令のケース数: <input id="per" type="number" value="1000" min="1" max="10000" style="width:6em"></label>
+  <button id="run">実装済み命令をテスト</button>
+</p>
+<div id="sum"></div>
+<div id="grid"></div>
+<pre id="detail" hidden></pre>
+
+<script src="../src/emulator/cpu6502.js"></script>
+<script>
+const VECTOR_BASE = 'https://cdn.jsdelivr.net/gh/SingleStepTests/65x02@main/nes6502/v1/';
+const grid = document.getElementById('grid');
+const cells = {};
+for (let op = 0; op < 256; op++) {
+  const hex = op.toString(16).padStart(2, '0');
+  const c = document.createElement('div');
+  c.className = 'op'; c.textContent = hex; c.title = hex;
+  grid.appendChild(c); cells[hex] = c;
+}
+
+function runOne(cpu, ram, tests, per) {
+  const n = Math.min(per, tests.length);
+  let pass = 0, cycBad = 0, stateBad = 0, ramBad = 0; const fails = [];
+  for (let i = 0; i < n; i++) {
+    const t = tests[i], I = t.initial, F = t.final;
+    for (const [a, v] of I.ram) ram[a] = v;
+    cpu.PC = I.pc; cpu.S = I.s; cpu.A = I.a; cpu.X = I.x; cpu.Y = I.y; cpu.P = I.p; cpu.halted = false;
+    const cyc = cpu.step();
+    const regOK = cpu.PC === F.pc && cpu.S === F.s && cpu.A === F.a && cpu.X === F.x && cpu.Y === F.y && cpu.P === F.p;
+    let ramOK = true; for (const [a, v] of F.ram) { if (ram[a] !== v) { ramOK = false; break; } }
+    const cycOK = cyc === t.cycles.length;
+    if (regOK && ramOK && cycOK) pass++;
+    else {
+      if (!cycOK) cycBad++; if (!regOK) stateBad++; if (!ramOK) ramBad++;
+      if (fails.length < 3) fails.push({
+        name: t.name, regOK, ramOK, cycOK,
+        exp: { pc: F.pc, s: F.s, a: F.a, x: F.x, y: F.y, p: F.p, cyc: t.cycles.length },
+        got: { pc: cpu.PC, s: cpu.S, a: cpu.A, x: cpu.X, y: cpu.Y, p: cpu.P, cyc }
+      });
+    }
+    for (const [a] of I.ram) ram[a] = 0; for (const [a] of F.ram) ram[a] = 0;
+  }
+  return { pass, total: n, cycBad, stateBad, ramBad, fails };
+}
+
+document.getElementById('run').onclick = async () => {
+  const per = Math.max(1, Math.min(10000, parseInt(document.getElementById('per').value) || 1000));
+  const ram = new Uint8Array(65536);
+  const bus = { read: a => ram[a & 0xFFFF], write: (a, v) => { ram[a & 0xFFFF] = v & 0xFF; } };
+  const cpu = new MML.Emu.CPU6502(bus);
+  const sum = document.getElementById('sum');
+  const detail = document.getElementById('detail');
+  let totalFail = 0, oksum = 0, tsum = 0, skipped = 0; const failReport = {};
+  for (let op = 0; op < 256; op++) {
+    const hex = op.toString(16).padStart(2, '0');
+    if (!MML.Emu.OPS[op]) { cells[hex].className = 'op skip'; cells[hex].title = '未実装(非公式)'; skipped++; continue; }
+    sum.textContent = `テスト中… ${hex}`;
+    let r;
+    try {
+      const res = await fetch(VECTOR_BASE + hex + '.json');
+      if (!res.ok) { cells[hex].className = 'op err'; continue; }
+      r = runOne(cpu, ram, await res.json(), per);
+    } catch (e) { cells[hex].className = 'op err'; cells[hex].title = String(e); continue; }
+    oksum += r.pass; tsum += r.total;
+    if (r.pass === r.total) cells[hex].className = 'op pass';
+    else {
+      cells[hex].className = 'op fail'; totalFail++; failReport[hex] = r.fails;
+      cells[hex].title = `${r.total - r.pass} fail (cyc:${r.cycBad} state:${r.stateBad} ram:${r.ramBad})`;
+    }
+  }
+  sum.textContent = totalFail === 0
+    ? `✅ 実装済み ${256 - skipped} 命令 PASS（${oksum.toLocaleString()} / ${tsum.toLocaleString()} ケース、非公式 ${skipped} skip）`
+    : `❌ ${totalFail} オペコードで失敗（${(tsum - oksum).toLocaleString()} ケース）`;
+  detail.hidden = !totalFail;
+  if (totalFail) detail.textContent = JSON.stringify(failReport, null, 2);
+};
+</script>
+</body>
+</html>
