@@ -35,6 +35,25 @@
     });
   }
 
+  // --- アクティブウィンドウのサイズ表示(右下固定、開発用) ---
+  const sizeIndicatorEl = document.getElementById('windowSizeIndicator');
+  let activeWin = null;
+
+  function updateSizeIndicator(win) {
+    if (!sizeIndicatorEl) return;
+    if (!win || win.style.display === 'none') {
+      sizeIndicatorEl.classList.remove('visible');
+      return;
+    }
+    sizeIndicatorEl.textContent = win.offsetWidth + ' x ' + win.offsetHeight + ' px';
+    sizeIndicatorEl.classList.add('visible');
+  }
+
+  function setActiveWin(win) {
+    activeWin = win;
+    updateSizeIndicator(win);
+  }
+
   function init() {
     let zCounter = 100;
     const windows = Array.from(document.querySelectorAll('.float-window'));
@@ -81,6 +100,7 @@
         zCounter++;
         win.style.zIndex = String(zCounter);
         persist();
+        setActiveWin(win);
       }
 
       // --- ドラッグ移動 ---
@@ -88,7 +108,9 @@
       let startX = 0, startY = 0, origLeft = 0, origTop = 0;
 
       header.addEventListener('mousedown', (e) => {
-        if (e.target === closeBtn) return;
+        // タイトル行に埋め込まれた操作(閉じるボタン/アイコンボタン/チェックボックス/
+        // セレクト/速度スライダー等)をクリックした時はウィンドウ移動を始めない
+        if (e.target.closest('button, input, select, label')) return;
         dragging = true;
         startX = e.clientX;
         startY = e.clientY;
@@ -119,7 +141,10 @@
 
       // --- リサイズ（CSS resize: both）の状態保存 ---
       if (typeof ResizeObserver !== 'undefined') {
-        const ro = new ResizeObserver(() => persist());
+        const ro = new ResizeObserver(() => {
+          persist();
+          if (win === activeWin) updateSizeIndicator(win);
+        });
         ro.observe(win);
       }
 
@@ -129,6 +154,7 @@
           setVisible(win, false);
           persist();
           updateToggleButtons();
+          if (win === activeWin) setActiveWin(null);
         });
       }
 
@@ -145,8 +171,17 @@
         if (willShow) win._famimmlWindow.bringToFront();
         win._famimmlWindow.persist();
         updateToggleButtons();
+        if (!willShow && win === activeWin) setActiveWin(null);
       });
     });
+
+    // 初期状態: 表示中のウィンドウのうち最前面(z最大)のものをアクティブとして表示する
+    const visibleWindows = windows.filter((w) => w.style.display !== 'none');
+    if (visibleWindows.length) {
+      const topWin = visibleWindows.reduce((a, b) =>
+        (parseInt(b.style.zIndex, 10) || 0) > (parseInt(a.style.zIndex, 10) || 0) ? b : a);
+      setActiveWin(topWin);
+    }
 
     updateToggleButtons();
   }

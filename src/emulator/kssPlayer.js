@@ -9,6 +9,10 @@
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
 
+  // INIT/PLAY呼び出し時のスタックポインタ初期値(libkss exec_setup の 0xF380 と同じ。
+  // MSX BIOSワークエリアの直下で、実機ドライバが LD SP,0F380h とするのと同じ位置)
+  const STACK_TOP = 0xF380;
+
   class KssPlayer {
     /**
      * @param {Uint8Array} kssBytes - KSSファイルの完全なバイナリ
@@ -32,9 +36,14 @@
       }
 
       this.cpu = new Emu.CPUZ80(this.bus);
-      this._setupBiosTraps();
 
+      // 音源チップは常にMSX標準の3.58MHzで駆動する。一方Z80は、FMPAC/MSX-AUDIO搭載曲では
+      // libkss(getclk)と同じく倍速(7.16MHz)で回す。FM系ドライバは1フレームの処理が重く、
+      // 3.58MHz相当のサイクル数ではPLAYが1フレーム内に終わらずテンポが崩れるため。
       this.clockHz = MML.KSS.Z80_CLOCK;
+      const d = this.header.device;
+      this.cpuClockHz = (d.mode === 'MSX' && (d.fmpac || d.msxAudio)) ? MML.KSS.Z80_CLOCK * 2 : MML.KSS.Z80_CLOCK;
+      this.cpuCyclesPerChipCycle = this.cpuClockHz / this.clockHz;
       this.frameRate = this.header.device.palMode ? MML.KSS.PAL_FPS : MML.KSS.NTSC_FPS;
 
       this.cycleAccum = 0;
@@ -43,42 +52,12 @@
       this._playFrameAccum = 0;
     }
 
-    // 実BIOS ROMを積んでいないため、標準MSX BIOSの固定アドレス(0x0000-0x01xx台)へ
-    // CALLされた場合にゼロ埋めメモリをコードとして暴走実行してしまう
-    // (多くの実機ゲーム由来ドライバはPSGへ直接OUTせずWRTPSG等のBIOSコールを使うため必須)。
-    // PSG関連の3ルーチンは実際に効果を持たせ、それ以外は安全なダミー値を返すだけの
-    // RETスタブ(VDP/スロット/キーボード等、KSS再生には無関係だが暴走防止のため用意)。
-    _setupBiosTraps() {
-      const psg = this.psg;
-      const ret = (c) => { c.pc = c.pop16(); return 20; };
-      this.cpu.traps = {
-        0x0090: (c) => { // GICINI: PSGレジスタ7-13を無音初期化
-          for (let r = 7; r <= 13; r++) { c.ioWrite(0xA0, r); c.ioWrite(0xA1, r === 7 ? 0x3F : 0); }
-          return ret(c);
-        },
-        0x0093: (c) => { c.ioWrite(0xA0, c.a); c.ioWrite(0xA1, c.e); return ret(c); }, // WRTPSG A=reg,E=data
-        0x0096: (c) => { c.ioWrite(0xA0, c.a); c.a = psg.readData(); return ret(c); }, // RDPSG A=reg->A=data
-        // VDP/スロット/キーボード系: KSS再生には無関係だが、呼ばれても暴走しないようダミーRETにする
-        0x001C: ret, 0x0024: ret, 0x0030: ret, // CALSLT/ENASLT/CALLF
-        0x0047: ret, 0x004D: ret, 0x0050: ret, 0x0053: ret, 0x0056: ret, 0x0059: ret, 0x005C: ret, // VDP書込系
-        0x004A: (c) => { c.a = 0; return ret(c); }, // RDVRM
-        0x00D5: (c) => { c.a = 0; return ret(c); }, // GTSTCK
-        0x00D8: (c) => { c.a = 0; return ret(c); }, // GTTRIG
-        0x00DB: (c) => { c.a = 0; return ret(c); }, // GTPAD
-        0x0132: ret, 0x0135: ret, // CHGCAP/CHGSND
-        0x0138: (c) => { c.a = 0; return ret(c); }, // RSLREG
-        0x013B: ret, // WSLREG
-        0x013E: (c) => { c.a = 0; return ret(c); }, // RDVDP
-        0x0141: (c) => { c.a = 0xFF; return ret(c); }, // SNSMAT(キー未押下扱い)
-        0x0156: ret, // KILBUF
-      };
-    }
-
     /**
      * 指定した曲番号(0始まり)で初期化する
      * @param {number} songIndex
      */
     initSong(songIndex) {
+      this.bus.reset(); // メインメモリ・バンクマップを再ロード(曲切替でも初期状態から始める)
       this.cpu.reset();
       this.psg.reset();
       this.scc.reset();
@@ -87,8 +66,15 @@
       this.cpu.iff1 = false;
       this.cpu.iff2 = false;
       this.cpu.im = 1;
-      this.cpu.call(this.header.initAddr);
+
+      // INITはlibkssと同じく「最大1秒相当のCPUサイクル」を上限に実行する。
+      // ステップ数上限だと重いINIT(バンクからのデータ展開等)が途中で打ち切られる。
+      this.cpu.sp = STACK_TOP;
+      this.cpu.beginCall(this.header.initAddr);
+      let cycles = 0;
+      while (this.cpu.callActive && cycles < this.cpuClockHz) cycles += this.cpu.stepCall();
       this.cpu.callActive = false;
+
       this.cycleAccum = 0;
       this.cpuDebt = 0;
       this._playFrameAccum = 0;
@@ -114,18 +100,23 @@
         this._playFrameAccum += this.speedFactor;
         if (this._playFrameAccum >= 1) {
           this._playFrameAccum -= 1;
+          // libkss exec_setup と同じく、PLAY呼び出しごとにSPを既定値へ戻す
+          // (ドライバがINIT中に積んだ分でスタックが延々ドリフトするのを防ぐ)。
+          cpu.sp = STACK_TOP;
           cpu.beginCall(this.header.playAddr);
         }
       }
 
+      // cycleAccum/チップのclock()は常に3.58MHz基準。CPUだけ cpuCyclesPerChipCycle 倍で進める。
+      const cpuPerChip = this.cpuCyclesPerChipCycle;
       for (let i = 0; i < samplesThisFrame; i++) {
         this.cycleAccum += cyclesPerSample;
         while (this.cycleAccum >= 1) {
           if (this.cpuDebt <= 0) {
             if (cpu.callActive) this.cpuDebt += cpu.stepCall();
-            else this.cpuDebt = 1;
+            else this.cpuDebt = cpuPerChip;
           }
-          this.cpuDebt--;
+          this.cpuDebt -= cpuPerChip;
           psg.clock();
           scc.clock();
           if (opll) opll.clock();
@@ -155,7 +146,17 @@
    */
   Emu.captureKssSongAsync = async function (kssBytes, opt, onProgress) {
     const player = new KssPlayer(kssBytes);
+    // INIT中の書込みも記録し、フレーム0の先頭に含める。
+    // INITで一度だけ設定されPLAY中は二度と書かれないレジスタが実在するため
+    // (SCC-I(SCC+)のモードレジスタ0xBFFEが代表例。これを取りこぼすと、writeLogを
+    //  読むピアノロール/MML変換側はSCCのレジスタ窓が0xB800へ移ったことを知らず、
+    //  スナッチャー系のSCCパートが「音符ゼロ」になる)。NSF側のinitWritesと同じ考え方。
+    const initWrites = [];
+    player.bus.onWrite = (addr, value) => initWrites.push({ addr, value, io: false });
+    player.bus.onIoWrite = (port, value) => initWrites.push({ addr: port, value, io: true });
     player.initSong(opt.songIndex || 0);
+    player.bus.onWrite = null;
+    player.bus.onIoWrite = null;
     if (opt.mute) {
       if (opt.mute.psg) Emu.applyMute(player.psg.mute, opt.mute.psg);
       if (opt.mute.scc) Emu.applyMute(player.scc.mute, opt.mute.scc);
@@ -171,7 +172,7 @@
     const CHUNK_FRAMES = regsOnly ? 10 : 60; // regsOnly(先読み用)はより細かくyieldする
 
     for (let f = 0; f < totalFrames; f++) {
-      const frameWrites = [];
+      const frameWrites = f === 0 ? initWrites : []; // フレーム0はINIT中の書込みから続ける
       player.bus.onWrite = (addr, value) => frameWrites.push({ addr, value, io: false });
       player.bus.onIoWrite = (port, value) => frameWrites.push({ addr: port, value, io: true });
       const frameBuf = player.renderFrame(sampleRate, regsOnly);

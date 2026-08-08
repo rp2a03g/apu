@@ -22,6 +22,9 @@
   const F_S = 0x80;
 
   // CALL終了検知用の番兵リターンアドレス。RETでこのアドレスに戻ったら終了とみなす。
+  // 番兵そのものをスタックへ積む(番兵-1を積んで1バイト実行させる方式にすると、
+  // push16がその着地アドレスへ 0xFF を書き込んでしまい、RET後に RST 38h として
+  // 暴走実行される。SP初期値0xFFFFのときに実際に踏む。)
   const CALL_SENTINEL = 0xFFFF;
 
   // パリティテーブル(偶数個の1ビットならtrue)
@@ -757,8 +760,7 @@
      * @returns {number} 実行した命令数
      */
     call(addr, maxSteps = 500000) {
-      const ret = (CALL_SENTINEL - 1) & 0xFFFF;
-      this.push16(ret);
+      this.push16(CALL_SENTINEL);
       this.pc = addr & 0xFFFF;
       let steps = 0;
       while (this.pc !== CALL_SENTINEL && steps < maxSteps) {
@@ -770,8 +772,7 @@
     }
 
     beginCall(addr) {
-      const ret = (CALL_SENTINEL - 1) & 0xFFFF;
-      this.push16(ret);
+      this.push16(CALL_SENTINEL);
       this.pc = addr & 0xFFFF;
       this.callActive = true;
       this.halted = false;

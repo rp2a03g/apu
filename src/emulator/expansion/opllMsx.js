@@ -6,6 +6,9 @@
  * 流用し、バス面のみMSX実機のFMPAC I/Oポート(0x7C=アドレス, 0x7D=データ)に置き換えている。
  * VRC7とFMPACはハードウェア的に同一のYM2413(OPLL)であるため、DSPコアは変更していない。
  * 出力49716Hz (Z80クロック/36)。
+ *
+ * リズム音色ROM値・ノイズ合成(short_noise)アルゴリズムは digital-sound-antiques/emu2413
+ * (MIT License, Copyright (c) 2001-2019 Mitsutaka Okazaki) の emu2413.c を参照して移植。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -18,8 +21,8 @@
   const CYCLES_PER_SAMPLE = 36;
   const SAMPLE_RATE = 49716;
 
-  const PG_BITS = 9, PG_WIDTH = 1 << PG_BITS;
-  const DP_BITS = 18, DP_WIDTH = 1 << DP_BITS, DP_BASE_BITS = DP_BITS - PG_BITS;
+  const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS; // emu2413本家に合わせて9→10bit化
+  const DP_BITS = 19, DP_WIDTH = 1 << DP_BITS, DP_BASE_BITS = DP_BITS - PG_BITS;
   const DB_STEP = 0.375, DB_BITS = 7, DB_MUTE = 1 << DB_BITS;
   const EG_STEP = 0.375, EG_BITS = 7;
   const EG2DB = 1;
@@ -35,24 +38,31 @@
 
   const SETTLE = 0, ATTACK = 1, DECAY = 2, SUSHOLD = 3, SUSTINE = 4, RELEASE = 5, FINISH = 6;
 
-  // 音色ROM(VirtuaNES vrc7tone.h) — FMPAC/YM2413標準音色も同一ROM内容
+  // 音色ROM(YM2413本来の内蔵15音色)。
+  // ★2026-08-02: 以前はVirtuaNESのvrc7tone.h(=VRC7チップ固有ROM)を「FMPAC/YM2413標準音色も
+  // 同一ROM内容」という誤った前提で流用していたが、VRC7(Konami DS1001の独自ROM)とYM2413本来の
+  // ROMは別物と判明。最終的にemu2413本家(digital-sound-antiques、MIT License)のROMデータ
+  // 2413tone.h(VirtuaNES同梱版、ユーザー提供)に差し替え。このアプリのOPLLコア自体
+  // (このファイル冒頭コメント・[[opll-rhythm-emu2413-port]]参照)も元々emu2413移植なので
+  // 音色ROMもemu2413本家準拠に揃うのが筋が良い。VRC7側(vrc7.js)のvrc7tone.hテーブルは
+  // VRC7としては引き続き正しいのでそのまま。
   const OPLL_INST = [
-    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00],
-    [0x33,0x01,0x09,0x0e,0x94,0x90,0x40,0x01],
-    [0x13,0x41,0x0f,0x0d,0xce,0xd3,0x43,0x13],
-    [0x01,0x12,0x1b,0x06,0xff,0xd2,0x00,0x32],
-    [0x61,0x61,0x1b,0x07,0xaf,0x63,0x20,0x28],
-    [0x22,0x21,0x1e,0x06,0xf0,0x76,0x08,0x28],
-    [0x66,0x21,0x15,0x00,0x93,0x94,0x20,0xf8],
-    [0x21,0x61,0x1c,0x07,0x82,0x81,0x10,0x17],
-    [0x23,0x21,0x20,0x1f,0xc0,0x71,0x07,0x47],
-    [0x25,0x31,0x26,0x05,0x64,0x41,0x18,0xf8],
-    [0x17,0x21,0x28,0x07,0xff,0x83,0x02,0xf8],
-    [0x97,0x81,0x25,0x07,0xcf,0xc8,0x02,0x14],
-    [0x21,0x21,0x54,0x0f,0x80,0x7f,0x07,0x07],
-    [0x01,0x01,0x56,0x03,0xd3,0xb2,0x43,0x58],
-    [0x31,0x21,0x0c,0x03,0x82,0xc0,0x40,0x07],
-    [0x21,0x01,0x0c,0x03,0xd4,0xd3,0x40,0x84]
+    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // 0: ユーザー音色枠(@0所定値なし)
+    [0x61,0x61,0x1e,0x17,0xf0,0x7f,0x07,0x17], // 1: Violin
+    [0x13,0x41,0x0f,0x0d,0xce,0xd2,0x43,0x13], // 2: Guitar
+    [0x03,0x01,0x99,0x04,0xff,0xc3,0x03,0x73], // 3: Piano
+    [0x21,0x61,0x1b,0x07,0xaf,0x63,0x40,0x28], // 4: Flute
+    [0x22,0x21,0x1e,0x06,0xf0,0x76,0x08,0x28], // 5: Clarinet
+    [0x31,0x22,0x16,0x05,0x90,0x71,0x00,0x18], // 6: Oboe
+    [0x21,0x61,0x1d,0x07,0x82,0x81,0x10,0x17], // 7: Trumpet
+    [0x23,0x21,0x2d,0x16,0xc0,0x70,0x07,0x07], // 8: Organ
+    [0x61,0x21,0x1b,0x06,0x64,0x65,0x18,0x18], // 9: Horn
+    [0x61,0x61,0x0c,0x18,0x85,0xa0,0x79,0x07], // 10: Synthesizer
+    [0x23,0x21,0x87,0x11,0xf0,0xa4,0x00,0xf7], // 11: Harpsichord
+    [0x97,0xe1,0x28,0x07,0xff,0xf3,0x02,0xf8], // 12: Vibraphone
+    [0x61,0x10,0x0c,0x05,0xf2,0xc4,0x40,0xc8], // 13: Synth Bass
+    [0x01,0x01,0x56,0x03,0xb4,0xb2,0x23,0x58], // 14: Acoustic Bass
+    [0x61,0x41,0x89,0x03,0xf1,0xf4,0xf0,0x13]  // 15: Electric Guitar
   ];
 
   function dump2patch(d) {
@@ -67,12 +77,12 @@
   }
   const PATCH = OPLL_INST.map(dump2patch);
 
-  // リズム音色(実チップ内蔵ROMの正確な値は不明のため、各打楽器を聴感上区別できるように
-  // 手動調整した近似パッチ)。AR=15(最速アタック),DR/RRで減衰の速さを調整。
-  // BD=低めの2opキック、HH/SD・TOM/CYMはノイズ合成の元になる位相/エンベロープ用。
-  const RHYTHM_PATCH_BD  = dump2patch([0x01, 0x01, 0x18, 0x00, 0xF8, 0xF7, 0x00, 0x00]);
-  const RHYTHM_PATCH_HHSD = dump2patch([0x01, 0x01, 0x00, 0x00, 0xF8, 0xF6, 0x00, 0x00]);
-  const RHYTHM_PATCH_TOMCYM = dump2patch([0x05, 0x01, 0x00, 0x00, 0xF6, 0xF6, 0x00, 0x00]);
+  // リズム音色。★2026-08-02: メロディ音色と同じくemu2413本家(VirtuaNES同梱2413tone.h、
+  // ユーザー提供)の値に差し替え。従来値は「VRC7内蔵ROMと同一」という誤った前提のまま
+  // だった(メロディ音色と同じ間違い)。
+  const RHYTHM_PATCH_BD  = dump2patch([0x04, 0x21, 0x28, 0x00, 0xdf, 0xf8, 0xff, 0xf8]);
+  const RHYTHM_PATCH_HHSD = dump2patch([0x23, 0x22, 0x00, 0x00, 0xd8, 0xf8, 0xf8, 0xf8]);
+  const RHYTHM_PATCH_TOMCYM = dump2patch([0x25, 0x18, 0x00, 0x00, 0xf8, 0xda, 0xf8, 0x55]);
 
   function Min(a, b) { return a < b ? a : b; }
 
@@ -267,25 +277,18 @@
     }
   }
 
-  function wave2_8pi(e) { return e << 1; }
+  // emu2413本家 calc_slot_car: modOut = 2*(fm>>1) (fmのLSBを切り捨てるだけで倍化はしない)
+  function modToCarPhase(fm) { return 2 * (fm >> 1); }
 
-  // リズム用スロット出力。BD/TOMは通常のサイン波、HH/SD/CYMは自身の位相上位ビットと
-  // ノイズビットを組み合わせて疑似ノイズ的な出力にする(実チップのLFSR合成の簡略版)。
-  // volNibbleは0x36-38レジスタ由来の4bit音量(EGとは別に線形乗算)。
-  function calcRhythmSlot(slot, lfo_am, lfo_pm, noisy, noiseBit, volNibble) {
-    const egout = slot.calcEnvelope(lfo_am);
-    const pgout = slot.calcPhase(lfo_pm);
+  // emu2413.c の _PD マクロ: リズム位相定数は10bit(PG_BITS=10)テーブル基準の値。
+  // 自前のPG_BITSも10なので通常は恒等変換だが、将来PG_BITSを変える場合に備え式のまま残す。
+  function PD(phase) {
+    return ((PG_BITS < 10 ? phase >> (10 - PG_BITS) : phase << (PG_BITS - 10)) & (PG_WIDTH - 1));
+  }
+
+  function rhythmOut(slot, egout, pgout) {
     if (egout >= DB_MUTE - 1) return 0;
-    let sample;
-    if (!noisy) {
-      sample = DB2LIN[slot.sintbl[pgout] + egout];
-    } else {
-      const phaseHigh = (pgout >> (PG_BITS - 2)) & 1;
-      const idx = (phaseHigh << 1) | noiseBit;
-      const sel = [0, PG_WIDTH >> 2, PG_WIDTH >> 1, (PG_WIDTH >> 2) * 3][idx];
-      sample = DB2LIN[slot.sintbl[sel] + egout];
-    }
-    return sample * (volNibble / 15);
+    return DB2LIN[slot.sintbl[pgout] + egout];
   }
 
   class OpllChannel {
@@ -304,20 +307,24 @@
       const pgout = s.calcPhase(lfo_pm);
       if (egout >= DB_MUTE - 1) s.output[0] = 0;
       else if (s.patch.FB !== 0) {
-        const fm = (s.feedback) >> (7 - s.patch.FB);
+        // emu2413本家: fm = (output[1]+output[0]) >> (9-FB)。s.feedbackは(output[1]+output[0])>>1で
+        // 既に1bitシフト済みのため、ここでのシフト量は(9-FB)-1 = (8-FB)。
+        const fm = (s.feedback) >> (8 - s.patch.FB);
         s.output[0] = DB2LIN[s.sintbl[(pgout + fm) & (PG_WIDTH - 1)] + egout];
       } else {
         s.output[0] = DB2LIN[s.sintbl[pgout] + egout];
       }
+      // s.feedbackは自己変調(次回calcModulator呼び出し時のfm計算)専用。キャリアへ渡すのは
+      // emu2413本家同様、平均化前の生のoutput[0]。
       s.feedback = (s.output[1] + s.output[0]) >> 1;
-      return s.feedback;
+      return s.output[0];
     }
     calcCarrier(fm, lfo_am, lfo_pm) {
       const s = this.car;
       const egout = s.calcEnvelope(lfo_am);
       const pgout = s.calcPhase(lfo_pm);
       if (egout >= DB_MUTE - 1) return 0;
-      return DB2LIN[s.sintbl[(pgout + wave2_8pi(fm)) & (PG_WIDTH - 1)] + egout];
+      return DB2LIN[s.sintbl[(pgout + modToCarPhase(fm)) & (PG_WIDTH - 1)] + egout];
     }
   }
 
@@ -333,7 +340,6 @@
       this.pm_phase = 0; this.am_phase = 0; this.lfo_pm = 0; this.lfo_am = 0;
       this.cyc = 0; this.lastSample = 0;
       this.rhythmMode = false;
-      this.rhythmVol = { bd: 0, hh: 0, sd: 0, tom: 0, cym: 0 };
       this.noiseLfsr = 1;
     }
     reset() { this._init(); }
@@ -389,11 +395,14 @@
         }
         c.mod.updateAll(); c.car.updateAll();
       } else if (reg >= 0x30 && reg <= 0x38) {
+        // emu2413.c OPLL_writeReg(): リズムモード中のch7/8上位ニブルはHH/TOMの音量(mod側の
+        // TLLをTLでなくvolumeから引く、cf. mod.type=1切替はrhythmMode切替時)。
+        // 下位ニブルはBD/SD/CYMも含め常にCAR側の音量として通常のTLLパスに乗る。
         const ch = reg - 0x30, c = this.channels[ch];
         if (this.rhythmMode && ch >= 6) {
-          if (ch === 6) { this.rhythmVol.bd = data & 0x0F; }
-          else if (ch === 7) { this.rhythmVol.hh = (data >> 4) & 0x0F; this.rhythmVol.sd = data & 0x0F; }
-          else { this.rhythmVol.tom = (data >> 4) & 0x0F; this.rhythmVol.cym = data & 0x0F; }
+          if (reg === 0x37 || reg === 0x38) { c.mod.volume = ((data >> 4) & 15) << 2; c.mod.updateTLL(); }
+          c.car.volume = (data & 15) << 2;
+          c.car.updateTLL();
         } else {
           this._setPatch(ch, (data >> 4) & 15);
           c.car.volume = (data & 15) << 2;
@@ -409,13 +418,20 @@
       const wasRhythm = this.rhythmMode;
       const newRhythm = !!(data & 0x20);
       if (newRhythm && !wasRhythm) {
-        // ch6-8を専用リズム音色に切替
+        // ch6-8を専用リズム音色に切替。HH(ch7.mod)/TOM(ch8.mod)は本来モジュレータだが
+        // リズムモードでは独立した音声出力になり、TLLもTL固定でなくvolumeレジスタ由来に
+        // なる(emu2413 commit_slot_update: type&1==0以外はvolumeを参照)ためtypeを1にする。
         this.channels[6].mod.patch = RHYTHM_PATCH_BD.mod; this.channels[6].car.patch = RHYTHM_PATCH_BD.car;
         this.channels[7].mod.patch = RHYTHM_PATCH_HHSD.mod; this.channels[7].car.patch = RHYTHM_PATCH_HHSD.car;
         this.channels[8].mod.patch = RHYTHM_PATCH_TOMCYM.mod; this.channels[8].car.patch = RHYTHM_PATCH_TOMCYM.car;
+        this.channels[7].mod.type = 1; this.channels[8].mod.type = 1;
+        // 0x37/0x38の上位ニブルはレジスタとして常に保持されているため、直前の値を反映する
+        this.channels[7].mod.volume = ((this.reg[0x37] >> 4) & 15) << 2;
+        this.channels[8].mod.volume = ((this.reg[0x38] >> 4) & 15) << 2;
         for (const ch of [6, 7, 8]) { this.channels[ch].mod.updateAll(); this.channels[ch].car.updateAll(); }
       } else if (!newRhythm && wasRhythm) {
-        // 通常モードに戻す: 直前の0x36-38値で音色/音量を再設定
+        // 通常モードに戻す: mod側のtypeを戻し、直前の0x36-38値で音色/音量を再設定
+        this.channels[7].mod.type = 0; this.channels[8].mod.type = 0;
         for (const ch of [6, 7, 8]) {
           const rv = this.reg[0x30 + ch] || 0;
           this._setPatch(ch, (rv >> 4) & 15);
@@ -424,11 +440,13 @@
         }
       }
       this.rhythmMode = newRhythm;
+      // slotOn/slotOffはeg_modeを変えるだけでeg_dphaseを再計算しないため、通常チャンネルの
+      // キーオン(reg 0x20-0x28ハンドラ)同様にupdateEG()で追従させる必要がある。
       const trig = (bit, slots) => {
         if (!this.rhythmMode) return;
         const on = !!(data & bit), wasOn = !!(old & bit);
-        if (on && !wasOn) for (const s of slots) s.slotOn();
-        else if (!on && wasOn) for (const s of slots) s.slotOff();
+        if (on && !wasOn) for (const s of slots) { s.slotOn(); s.updateEG(); }
+        else if (!on && wasOn) for (const s of slots) { s.slotOff(); s.updateEG(); }
       };
       trig(0x10, [this.channels[6].mod, this.channels[6].car]); // BD
       trig(0x08, [this.channels[7].car]); // SD
@@ -462,14 +480,49 @@
       }
       if (this.rhythmMode) {
         const ch6 = this.channels[6], ch7 = this.channels[7], ch8 = this.channels[8];
-        // BD: 簡略化のため2opFM(モジュレータ変調)ではなく単一サイン波の低音キックとして扱う。
-        // モジュレータ側もキーオン/オフだけは行われるため、無音のまま位相/包絡線だけ進める。
-        if (ch6.mod.eg_mode !== FINISH) calcRhythmSlot(ch6.mod, this.lfo_am, this.lfo_pm, false, noiseBit, 0);
-        if (ch6.car.eg_mode !== FINISH && !this.mute[6]) inst += calcRhythmSlot(ch6.car, this.lfo_am, this.lfo_pm, false, noiseBit, this.rhythmVol.bd);
-        if (ch7.mod.eg_mode !== FINISH && !this.mute[7]) inst += calcRhythmSlot(ch7.mod, this.lfo_am, this.lfo_pm, true, noiseBit, this.rhythmVol.hh);
-        if (ch7.car.eg_mode !== FINISH && !this.mute[7]) inst += calcRhythmSlot(ch7.car, this.lfo_am, this.lfo_pm, true, noiseBit, this.rhythmVol.sd);
-        if (ch8.mod.eg_mode !== FINISH && !this.mute[8]) inst += calcRhythmSlot(ch8.mod, this.lfo_am, this.lfo_pm, false, noiseBit, this.rhythmVol.tom);
-        if (ch8.car.eg_mode !== FINISH && !this.mute[8]) inst += calcRhythmSlot(ch8.car, this.lfo_am, this.lfo_pm, true, noiseBit, this.rhythmVol.cym);
+        // BD: 通常チャンネルと同じmod→car 2opFM接続(emu2413はcalc_slot_mod/carをch6にも
+        // そのまま流用している)。
+        if (ch6.car.eg_mode !== FINISH) {
+          const fm = ch6.calcModulator(this.lfo_am, this.lfo_pm);
+          const out = ch6.calcCarrier(fm, this.lfo_am, this.lfo_pm);
+          if (!this.mute[6]) inst += out;
+        }
+
+        // HH/SD/TOM/CYM: 先に位相を進めてからshort_noiseを計算し(emu2413 update_short_noise)、
+        // それを使って各スロットの出力サイン位相を選ぶ。音量はEG/TLL経由(rhythmOut内でegout
+        // が既にvolumeレジスタ由来のTLLを反映済み)。
+        const hh = ch7.mod, sd = ch7.car, tom = ch8.mod, cym = ch8.car;
+        const hhPg = hh.calcPhase(this.lfo_pm);
+        const sdPg = sd.calcPhase(this.lfo_pm);
+        const tomPg = tom.calcPhase(this.lfo_pm);
+        const cymPg = cym.calcPhase(this.lfo_pm);
+        // emu2413 update_short_noise: BIT位置はPG_BITS基準の相対式のままにしておく
+        const h_bit2 = (hhPg >> (PG_BITS - 8)) & 1;
+        const h_bit7 = (hhPg >> (PG_BITS - 3)) & 1;
+        const h_bit3 = (hhPg >> (PG_BITS - 7)) & 1;
+        const c_bit3 = (cymPg >> (PG_BITS - 7)) & 1;
+        const c_bit5 = (cymPg >> (PG_BITS - 5)) & 1;
+        const shortNoise = (h_bit2 ^ h_bit7) | (h_bit3 ^ c_bit5) | (c_bit3 ^ c_bit5);
+
+        const hhEg = hh.calcEnvelope(this.lfo_am);
+        const sdEg = sd.calcEnvelope(this.lfo_am);
+        const tomEg = tom.calcEnvelope(this.lfo_am);
+        const cymEg = cym.calcEnvelope(this.lfo_am);
+
+        if (tom.eg_mode !== FINISH && !this.mute[8]) inst += rhythmOut(tom, tomEg, tomPg);
+        if (hh.eg_mode !== FINISH && !this.mute[7]) {
+          const ph = shortNoise ? (noiseBit ? PD(0x2d0) : PD(0x234)) : (noiseBit ? PD(0x34) : PD(0xd0));
+          inst += rhythmOut(hh, hhEg, ph);
+        }
+        if (sd.eg_mode !== FINISH && !this.mute[7]) {
+          const sdOwnBit = (sdPg >> (PG_BITS - 2)) & 1;
+          const ph = sdOwnBit ? (noiseBit ? PD(0x300) : PD(0x200)) : (noiseBit ? PD(0x0) : PD(0x100));
+          inst += rhythmOut(sd, sdEg, ph);
+        }
+        if (cym.eg_mode !== FINISH && !this.mute[8]) {
+          const ph = shortNoise ? PD(0x300) : PD(0x100);
+          inst += rhythmOut(cym, cymEg, ph);
+        }
       }
       return inst;
     }

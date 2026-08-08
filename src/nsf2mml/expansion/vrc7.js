@@ -62,14 +62,16 @@
       const reg30  = regs[0x30 + ch];
       const instrument = (reg30 >> 4) & 0x0F;
       const volume      = reg30 & 0x0F;
-      const note = (keyon && fnum > 0) ? freqToNoteNumber(vrc7Freq(fnum, block)) : null;
+      const freq = vrc7Freq(fnum, block);
+      const note = (keyon && fnum > 0) ? freqToNoteNumber(freq) : null;
+      const rawFreq = note !== null ? freq : null;
       const vrc7Tone = (toneReg && note !== null && instrument === 0)
         ? toneReg.assign(Array.from(regs.slice(0, 8))) : undefined;
-      if (!cur) { cur = { note, volume, instrument, vrc7Tone, start: f, end: f }; continue; }
+      if (!cur) { cur = { note, volume, instrument, vrc7Tone, rawFreq, start: f, end: f }; continue; }
       if (attack[ch] || note !== cur.note || volume !== cur.volume || instrument !== cur.instrument ||
           vrc7Tone !== cur.vrc7Tone) {
         flush(f);
-        cur = { note, volume, instrument, vrc7Tone, start: f, end: f };
+        cur = { note, volume, instrument, vrc7Tone, rawFreq, start: f, end: f };
       }
     }
     flush(timeline.length);
@@ -81,7 +83,7 @@
     const letters = 'EFGHIJ'.split('');
     const toCommon = ev => ({
       start: ev.start, end: ev.end, note: ev.note, volume: ev.volume, instrument: ev.instrument,
-      vrc7Tone: ev.vrc7Tone
+      vrc7Tone: ev.vrc7Tone, rawFreq: ev.rawFreq
     });
 
     const channels = letters.map((letter, ch) => ({

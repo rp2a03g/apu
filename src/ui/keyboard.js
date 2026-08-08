@@ -7,8 +7,28 @@
   const MML = global.MML = global.MML || {};
   const UI = MML.UI = MML.UI || {};
 
+  // 表示文言の翻訳(src/i18n/i18n.js)。キーは日本語の原文そのもの
+  const T = (key, params) => MML.I18n.t(key, params);
+
   const CPU_CLOCK = 1789773;
   const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+  // canvasはCSSを継承しないので、style.cssの --sans / --mono を実行時に読んでフォント指定に使う。
+  // 総称ファミリ(sans-serif/monospace)任せだと日本語フォント未導入の環境で豆腐(□)になり、
+  // 中国語ロケールでは漢字が簡体字の字形で描かれる(canvasにはlang属性が効かない)。
+  let _fontStacks = null;
+  function fontStack(kind) {
+    if (!_fontStacks) {
+      const cs = getComputedStyle(document.documentElement);
+      const pick = (name, fallback) =>
+        (cs.getPropertyValue(name) || '').replace(/\s+/g, ' ').trim() || fallback;
+      _fontStacks = {
+        sans: pick('--sans', 'sans-serif'),
+        mono: pick('--mono', 'monospace'),
+      };
+    }
+    return _fontStacks[kind];
+  }
 
   const MIDI_MIN = 24;
   const MIDI_MAX = 108;
@@ -16,6 +36,11 @@
 
   // ピアノロールが先読み表示する時間幅(秒)。この秒数分だけ「未来」を上から降らせる。
   const ROLL_WINDOW_SEC = 4;
+
+  // ピアノロールcanvasの高さ。style.cssの .kbd-roll { height } と必ず一致させること
+  // (折りたたみ時にウィンドウ高さをこの値ぶん増減させるため、ズレると鍵盤の位置がずれる)。
+  const ROLL_CANVAS_HEIGHT = 320;
+  const MIN_WINDOW_HEIGHT = 160;
 
   const WHITE_IDX = [0,-1,1,-1,2,3,-1,4,-1,5,-1,6];
   const IS_BLACK   = [0, 1,0, 1,0,0, 1,0, 1,0, 1,0];
@@ -77,6 +102,16 @@
     M5P1: { section: 'expansion', chip: 'mmc5', type: 'object', key: 'pulse1' },
     M5P2: { section: 'expansion', chip: 'mmc5', type: 'object', key: 'pulse2' },
     M5PC: { section: 'expansion', chip: 'mmc5', type: 'object', key: 'pcm' },
+    GB1:  { section: 'expansion', chip: 'gb', type: 'object', key: 'ch1' },
+    GB2:  { section: 'expansion', chip: 'gb', type: 'object', key: 'ch2' },
+    GN:   { section: 'expansion', chip: 'gb', type: 'object', key: 'ch4' },
+    GW:   { section: 'expansion', chip: 'gb', type: 'object', key: 'ch3' },
+    PSG0: { section: 'expansion', chip: 'hes', type: 'object', key: 'ch0' },
+    PSG1: { section: 'expansion', chip: 'hes', type: 'object', key: 'ch1' },
+    PSG2: { section: 'expansion', chip: 'hes', type: 'object', key: 'ch2' },
+    PSG3: { section: 'expansion', chip: 'hes', type: 'object', key: 'ch3' },
+    PSG4: { section: 'expansion', chip: 'hes', type: 'object', key: 'ch4' },
+    PSG5: { section: 'expansion', chip: 'hes', type: 'object', key: 'ch5' },
   };
 
   // リズムch: BD=ch6, SD/HH=ch7, TOM/CYM=ch8 (chip.mute[]がch単位のため同chの打楽器は連動ミュート)
@@ -103,21 +138,56 @@
     return null;
   }
 
+  // ── チップ名見出し + 短縮ch名 ──────────────────────────────────
+  // ch.id(P1/VR3/N5など内部識別子)はチップごとに命名規則がバラバラで一覧性が
+  // 低いため、表示上はチップ名を見出し行として挟み、行側は見出し配下で完結する
+  // 短い名前(P1/FM3/W5など)にする。ch.id自体は変更しない(ミュート状態のキー・
+  // getPartLetterのパターンマッチ・大波形選択などが全てch.id前提のため)。
+  // 完全一致(ids)を先に見て、無ければ前方一致(prefix)にフォールバックする
+  // (例: 'NO'は2A03グループの完全一致で先に拾われ、N163のprefix:'N'とは衝突しない)。
+  const CHANNEL_DISPLAY_GROUPS = [
+    { header: 'RP2A03 (Family Computer)', ids: { P1: 'P1', P2: 'P2', TR: 'Tri', NO: 'No', DM: 'DPCM' } },
+    { header: 'RP2C33 (Family Computer Disk System)', ids: { FDS: 'FDS' } },
+    { header: 'VRC6 (Virtual Rom Controller 6)', ids: { V6P1: 'P1', V6P2: 'P2', V6SW: 'Saw' } },
+    { header: 'VRC7 (Virtual Rom Controller 7)', prefix: 'VR', name: (id) => 'FM' + id.slice(2) },
+    { header: 'N163 (Namco 163)', prefix: 'N', name: (id) => 'W' + id.slice(1) },
+    { header: 'SUNSOFT5B (FME-7 , YM2149)', ids: { FE1: 'P1', FE2: 'P2', FE3: 'P3' } },
+    { header: 'MMC5 (Memory Management Controller 5)', ids: { M5P1: 'P1', M5P2: 'P2', M5PC: 'PCM' } },
+    { header: 'YM2149 (Software controlled Sound Generator)', ids: { KP1: 'P1', KP2: 'P2', KP3: 'P3' } },
+    { header: 'SCC (Sound Creative Chip)', prefix: 'KS', name: (id) => 'W' + id.slice(2) },
+    { header: 'YM2413 (MSX-MUSIC , OPLL)', ids: { KFBD: 'BD', KFSD: 'SD', KFTOM: 'Tom', KFCYM: 'Cym', KFHH: 'HH' }, prefix: 'KF', name: (id) => 'FM' + id.slice(2) },
+    { header: 'DMG APU (Game Boy)', ids: { GB1: 'P1', GB2: 'P2', GN: 'No', GW: 'Wave' } },
+    { header: 'PSG (PC Engine / TurboGrafx-16)', ids: { PSG0: 'Ch0', PSG1: 'Ch1', PSG2: 'Ch2', PSG3: 'Ch3', PSG4: 'Ch4', PSG5: 'Ch5' } },
+  ];
+  function getChannelDisplay(id) {
+    for (const g of CHANNEL_DISPLAY_GROUPS) {
+      if (g.ids && g.ids[id]) return { header: g.header, name: g.ids[id] };
+    }
+    for (const g of CHANNEL_DISPLAY_GROUPS) {
+      if (g.prefix && id.startsWith(g.prefix)) return { header: g.header, name: g.name(id) };
+    }
+    return { header: '', name: id };
+  }
+
   // ── MMLパート文字(A-Z,a,b)の算出 ──────────────────────────────
   // 実際のMML変換(nsf2mml/kss2mml)が振るチャンネル文字を鍵盤表示にも出す。
   // 2A03固定4ch=A-D、DPCM=E(未使用でも常にこのスロット)、拡張音源以降は
   // src/mml/compiler.jsのassignExpansionLettersで機種に関わらず完全固定。
-  const APU_PART_LETTER = { P1: 'A', P2: 'B', TR: 'C', NO: 'D', DM: 'E' };
+  // GB1/GB2/GNは2A03コア(自チップ、拡張音源宣言不要)を借用するのでA/B/Dに固定
+  // (src/gbs2mml/converter.js参照。GBのCH1/CH2/CH4はそのままNESパルス1/2/ノイズへ乗る)。
+  const APU_PART_LETTER = { P1: 'A', P2: 'B', TR: 'C', NO: 'D', DM: 'E', GB1: 'A', GB2: 'B', GN: 'D' };
 
   // chips(内部chip名の配列)をassignExpansionLettersが受け取る拡張音源名に変換する。
-  // KSSはPSG→FME-7・SCC→N163・FMPAC→VRC7のレジスタ互換チップを借用して再生するため
-  // (src/kss2mml/converter.js参照)、レター体系もそれらをそのまま流用する。
-  const KSS_CHIP_TO_EXPANSION = { kssPsg: 'fme7', kssScc: 'n163', kssOpll: 'vrc7' };
+  // KSSはPSG→FME-7・SCC→N163・FMPAC→VRC7、GBSは波形ch→FDS(実機較正済みの音量バランスを
+  // 持つため、当初のN163から変更した。src/gbs2mml/expansion/wave.js冒頭コメント参照)を
+  // 借用して再生するため(src/kss2mml/converter.js・src/gbs2mml/converter.js参照)、
+  // レター体系もそれらをそのまま流用する。
+  const BORROWED_CHIP_TO_EXPANSION = { kssPsg: 'fme7', kssScc: 'n163', kssOpll: 'vrc7', gbs: 'fds', hes: 'n163' };
   function chipsToExpansions(chips) {
     const priority = MML.Mml && MML.Mml.EXPANSION_PRIORITY;
     const set = new Set();
     for (const c of chips) {
-      const exp = KSS_CHIP_TO_EXPANSION[c] || c;
+      const exp = BORROWED_CHIP_TO_EXPANSION[c] || c;
       if (priority && priority.includes(exp)) set.add(exp);
     }
     return Array.from(set);
@@ -148,6 +218,10 @@
     if ((m = id.match(/^KP(\d+)$/))) return (lm.fme7 || [])[+m[1] - 1] || '';
     if ((m = id.match(/^KS(\d+)$/))) return (lm.n163 || [])[+m[1] - 1] || '';
     if ((m = id.match(/^KF(\d+)$/))) return (lm.vrc7 || [])[+m[1] - 1] || '';
+    if (id === 'GW') return (lm.fds || [])[0] || ''; // GBの波形chはFDS(1ch)を借用(src/gbs2mml/converter.js参照)
+    // HESのPSG ch0-5はN163へ直接(反転無し)の順で借用する(src/hes2mml/converter.js参照。
+    // N163実機のアドレッシングに基づく反転(上のKS/N163ケース)とは異なる独自の割当規則)。
+    if ((m = id.match(/^PSG(\d)$/))) return (lm.n163 || [])[+m[1]] || '';
     if (KF_RHYTHM_INDEX[id] !== undefined) return (lm.vrc7 || [])[KF_RHYTHM_INDEX[id]] || '';
     return '';
   }
@@ -202,9 +276,12 @@
       if (!apuEnv && extraSnaps.apuEnv) apuEnv = extraSnaps.apuEnv[frameIdx];
     }
 
-    // KSS(MSX)再生中はNES内蔵チャンネル(2A03)を表示しない。PSG/SCC/FMPACのみ表示する。
+    // KSS(MSX)/GBS(Game Boy)/HES(PC Engine)再生中はNES内蔵チャンネル(2A03)を表示しない
+    // (KSSはPSG/SCC/FMPACのみ、GBSはGB1/GB2/GN/GWのみ、HESはPSG0-5のみを表示する)。
     const isKss = chips.includes('kss');
-    if (!isKss) {
+    const isGbs = chips.includes('gbs');
+    const isHes = chips.includes('hes');
+    if (!isKss && !isGbs && !isHes) {
     // APU Pulse 1
     {
       const r = snap[0x4000] || 0;
@@ -285,36 +362,7 @@
       channels.push({ id: 'DM', color: '#aa44ff', freq: 0, vol: level / 127, rawVol: level, rawVolMax: 127,
         wave, active: !!(status & 0x10), sample: true, dmcRateIdx, dmcFreq, dmcReg: dv });
     }
-    } // !isKss
-
-    if (chips.includes('vrc6')) {
-      for (const [id, color, b0, blo, bhi, div] of [
-        ['V6P1', '#00ccff', 0x9000, 0x9001, 0x9002, 16],
-        ['V6P2', '#0088ff', 0xA000, 0xA001, 0xA002, 16],
-      ]) {
-        const ctrl = snap[b0] || 0, lo = snap[blo] || 0, hi = snap[bhi] || 0;
-        const period = lo | ((hi & 0xF) << 8);
-        const en = !!(hi & 0x80);
-        const rv = ctrl & 0xF;
-        const vol = rv / 15;
-        const duty = (ctrl >> 4) & 7; // VRC6 は High 区間 = (duty+1)/16
-        const freq = (en && period > 0) ? CPU_CLOCK / (div * (period + 1)) : 0;
-        channels.push({ id, color, freq, vol, rawVol: rv, rawVolMax: 15,
-          wave: { t: 'pulse', hi: (duty + 1) / 16, nx: 16, ny: 2 },
-          active: en && vol > 0 && freq > 0 });
-      }
-      {
-        const ctrl = snap[0xB000] || 0, lo = snap[0xB001] || 0, hi = snap[0xB002] || 0;
-        const period = lo | ((hi & 0xF) << 8);
-        const en = !!(hi & 0x80);
-        const rv = ctrl & 0x3F;
-        const vol = Math.min(1, rv / 42);
-        const freq = (en && period > 0) ? CPU_CLOCK / (14 * (period + 1)) : 0;
-        channels.push({ id: 'V6SW', color: '#00ffcc', freq, vol, rawVol: rv, rawVolMax: 42,
-          wave: { t: 'saw', nx: 7, ny: 32 },
-          active: en && rv > 0 && freq > 0 });
-      }
-    }
+    } // !isKss && !isGbs
 
     if (chips.includes('fds')) {
       const lo = snap[0x4082] || 0, hi = snap[0x4083] || 0;
@@ -350,29 +398,33 @@
         active: !disabled && vol > 0 && freq > 0 });
     }
 
-    if (chips.includes('mmc5')) {
-      // リアルタイムはライブMMC5(エンベロープ実出力・PCM反映)、事前キャプチャはレジスタ値。
-      const ls = extraSnaps && extraSnaps.mmc5Live ? extraSnaps.mmc5Live() : null;
-      const mst = snap[0x5015] || 0;
-      for (const [i, base, bit] of [[0, 0x5000, 1], [1, 0x5004, 2]]) {
-        const r = snap[base] || 0;
-        let c;
-        if (ls) {
-          c = i === 0 ? ls.pulse1 : ls.pulse2;
-        } else {
-          const freq = pulseFreq(snap[base + 2] || 0, snap[base + 3] || 0);
-          c = { freq, vol: pulseVol(r), rawVol: r & 0xF, duty: (r >> 6) & 3,
-                active: !!(mst & bit) && pulseActive(r) && freq > 0 };
-        }
-        channels.push({ id: i === 0 ? 'M5P1' : 'M5P2',
-          color: i === 0 ? '#ff6655' : '#ffaa44', freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          wave: { t: 'pulse', hi: APU_DUTY[c.duty !== undefined ? c.duty : ((r >> 6) & 3)], nx: 8, ny: 2 },
-          active: c.active });
+    if (chips.includes('vrc6')) {
+      for (const [id, color, b0, blo, bhi, div] of [
+        ['V6P1', '#00ccff', 0x9000, 0x9001, 0x9002, 16],
+        ['V6P2', '#0088ff', 0xA000, 0xA001, 0xA002, 16],
+      ]) {
+        const ctrl = snap[b0] || 0, lo = snap[blo] || 0, hi = snap[bhi] || 0;
+        const period = lo | ((hi & 0xF) << 8);
+        const en = !!(hi & 0x80);
+        const rv = ctrl & 0xF;
+        const vol = rv / 15;
+        const duty = (ctrl >> 4) & 7; // VRC6 は High 区間 = (duty+1)/16
+        const freq = (en && period > 0) ? CPU_CLOCK / (div * (period + 1)) : 0;
+        channels.push({ id, color, freq, vol, rawVol: rv, rawVolMax: 15,
+          wave: { t: 'pulse', hi: (duty + 1) / 16, nx: 16, ny: 2 },
+          active: en && vol > 0 && freq > 0 });
       }
-      // $5011 生PCM チャンネル
-      const pcm = ls ? ls.pcm : { level: snap[0x5011] || 0, vol: (snap[0x5011] || 0) / 255, active: (snap[0x5011] || 0) > 0 };
-      channels.push({ id: 'M5PC', color: '#ff4488', freq: 0, vol: pcm.vol, rawVol: pcm.level, rawVolMax: 255,
-        wave: { t: 'sample' }, active: pcm.active });
+      {
+        const ctrl = snap[0xB000] || 0, lo = snap[0xB001] || 0, hi = snap[0xB002] || 0;
+        const period = lo | ((hi & 0xF) << 8);
+        const en = !!(hi & 0x80);
+        const rv = ctrl & 0x3F;
+        const vol = Math.min(1, rv / 42);
+        const freq = (en && period > 0) ? CPU_CLOCK / (14 * (period + 1)) : 0;
+        channels.push({ id: 'V6SW', color: '#00ffcc', freq, vol, rawVol: rv, rawVolMax: 42,
+          wave: { t: 'saw', nx: 7, ny: 32 },
+          active: en && rv > 0 && freq > 0 });
+      }
     }
 
     if (chips.includes('vrc7')) {
@@ -408,7 +460,9 @@
         numRows = (arr && arr.maxNumCh) ? arr.maxNumCh : 1;
       }
       n163NumRows = numRows;
-      for (let i = 0; i < numRows; i++) {
+      // 表示順は下位アドレス側(MML文字の若い方)を上段にするため i を降順で積む
+      // (id自体はN{i+1}=ハードch(8-(i+1))のまま。getMuteInfo等の対応関係は変えない)。
+      for (let i = numRows - 1; i >= 0; i--) {
         const c = snaps ? snaps.channels[i] : { freq: 0, vol: 0, active: false };
         const hue = (180 + i * 25) % 360;
         channels.push({ id: `N${i+1}`, color: `hsl(${hue},80%,60%)`, freq: c.freq, vol: c.vol,
@@ -431,6 +485,31 @@
           wave: c.noise ? { t: 'noise', short: false, nx: 32767, ny: 2 } : { t: 'pulse', hi: 0.5, nx: 2, ny: 2 },
           active: c.active });
       }
+    }
+
+    if (chips.includes('mmc5')) {
+      // リアルタイムはライブMMC5(エンベロープ実出力・PCM反映)、事前キャプチャはレジスタ値。
+      const ls = extraSnaps && extraSnaps.mmc5Live ? extraSnaps.mmc5Live() : null;
+      const mst = snap[0x5015] || 0;
+      for (const [i, base, bit] of [[0, 0x5000, 1], [1, 0x5004, 2]]) {
+        const r = snap[base] || 0;
+        let c;
+        if (ls) {
+          c = i === 0 ? ls.pulse1 : ls.pulse2;
+        } else {
+          const freq = pulseFreq(snap[base + 2] || 0, snap[base + 3] || 0);
+          c = { freq, vol: pulseVol(r), rawVol: r & 0xF, duty: (r >> 6) & 3,
+                active: !!(mst & bit) && pulseActive(r) && freq > 0 };
+        }
+        channels.push({ id: i === 0 ? 'M5P1' : 'M5P2',
+          color: i === 0 ? '#ff6655' : '#ffaa44', freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave: { t: 'pulse', hi: APU_DUTY[c.duty !== undefined ? c.duty : ((r >> 6) & 3)], nx: 8, ny: 2 },
+          active: c.active });
+      }
+      // $5011 生PCM チャンネル
+      const pcm = ls ? ls.pcm : { level: snap[0x5011] || 0, vol: (snap[0x5011] || 0) / 255, active: (snap[0x5011] || 0) > 0 };
+      channels.push({ id: 'M5PC', color: '#ff4488', freq: 0, vol: pcm.vol, rawVol: pcm.level, rawVolMax: 255,
+        wave: { t: 'sample' }, active: pcm.active });
     }
 
     if (chips.includes('kssPsg')) {
@@ -487,6 +566,49 @@
             wave: r.freq > 0 ? { t: 'pulse', hi: 0.5, nx: 2, ny: 2 } : { t: 'noise', short: true, nx: 93, ny: 2 },
             active: r.active, drum: true });
         }
+      }
+    }
+
+    if (isGbs) {
+      // GB CH1/CH2(パルス+スイープ/パルス): 2A03パルス表示と同じ考え方(duty波形)。
+      const live = extraSnaps && extraSnaps.gbsApuLive;
+      const s = live ? live() : null;
+      const PCOLS = [['GB1', '#66ddff'], ['GB2', '#0077dd']];
+      for (let i = 0; i < 2; i++) {
+        const c = s ? s['ch' + (i + 1)] : { freq: 0, vol: 0, rawVol: 0, duty: 2, active: false };
+        channels.push({ id: PCOLS[i][0], color: PCOLS[i][1], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave: { t: 'pulse', hi: APU_DUTY[c.duty], nx: 8, ny: 2 },
+          active: c.active });
+      }
+      // GB CH4(ノイズ): 7bit/15bit幅モードで短周期/長周期のノイズ波形を切り替える。
+      {
+        const c = s ? s.ch4 : { freq: 0, vol: 0, rawVol: 0, widthMode: 0, active: false };
+        channels.push({ id: 'GN', color: '#888888', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave: { t: 'noise', short: !!c.widthMode, nx: c.widthMode ? 127 : 32767, ny: 2 },
+          active: c.active, noise: true });
+      }
+      // GB CH3(波形メモリ): N163と同じ波形メモリ表示(要素数のみ異なる: GBは32点符号無し4bit)。
+      {
+        const c = s ? s.ch3 : { freq: 0, vol: 0, rawVol: 0, waveData: [0, 0], active: false };
+        channels.push({ id: 'GW', color: '#ffcc00', freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 3,
+          wave: { t: 'wave', data: c.waveData, nx: c.waveData.length, ny: 16 },
+          active: c.active });
+      }
+    }
+
+    if (isHes) {
+      // PSG(PC Engine) 6ch: 32サンプル5bit波形音源。ch4/5はノイズモード中のみノイズ波形表示に
+      // 切り替わる(hesBus.js/apuHuC6280.js参照。物理的にノイズ生成回路を持つのはch4/5のみ)。
+      const live = extraSnaps && extraSnaps.hesApuLive;
+      const s = live ? live() : null;
+      const PCOLS = ['#66ddff', '#33aaff', '#0099ff', '#33cc99', '#ffaa00', '#ff6699'];
+      for (let i = 0; i < 6; i++) {
+        const c = s ? s[i] : { freq: 0, vol: 0, rawVol: 0, wave: [0, 0], noiseOn: false, active: false };
+        const wave = c.noiseOn
+          ? { t: 'noise', short: false, nx: 131071, ny: 2 }
+          : { t: 'wave', data: c.wave, nx: c.wave.length, ny: 32 };
+        channels.push({ id: `PSG${i}`, color: PCOLS[i], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
+          wave, active: c.active, noise: c.noiseOn });
       }
     }
 
@@ -603,11 +725,14 @@
       return Array.from({ length: 3 }, (_, ch) => {
         const period = regs[ch * 2] | ((regs[ch * 2 + 1] & 0xF) << 8);
         const toneOn = !((regs[7] >> ch) & 1);
+        const noiseOn = !((regs[7] >> (3 + ch)) & 1);
         const rawVol = regs[8 + ch] & 0xF;
         const vol = rawVol / 15;
         // 実機5B/AYは +1 しない。f = CPU/(32*period)。
         const freq = (toneOn && period > 0) ? CPU_CLOCK / (32 * period) : 0;
-        return { freq, vol, rawVol, active: toneOn && vol > 0 && freq > 0 };
+        // ノイズ単独(@2)はトーンが止まっていても発音中(Emu.snapshotFME7と同じ判定)
+        return { freq, vol, rawVol, noise: noiseOn,
+                 active: toneOn ? (vol > 0 && freq > 0) : (noiseOn && vol > 0) };
       });
     });
   }
@@ -661,6 +786,28 @@
       }
     }
     return 0;
+  }
+
+  // 波形クリップボード用: そのチャンネルの1周期ぶんを具体的な数値配列にして返す。
+  // pulse/saw/tri等はwave.hi等のパラメータだけで実データ配列を持たないため
+  // waveSampleValue()で一定解像度サンプリングして配列化する。noise(LFSR)/fm(実データ
+  // 無しの代替アイコン)/sample(固有波形無し)はコピー対象外としてnullを返す
+  function getCopyableWaveSamples(wave) {
+    if (!wave) return null;
+    if (wave.t === 'wave') {
+      // SPCの多層波形は素のBRR値(層0)を代表として使う
+      if (wave.layers && wave.layers.length && wave.layers[0].data && wave.layers[0].data.length) {
+        return Array.from(wave.layers[0].data);
+      }
+      return (wave.data && wave.data.length) ? Array.from(wave.data) : null;
+    }
+    if (wave.t === 'pulse' || wave.t === 'saw' || wave.t === 'tri') {
+      const resolution = Math.max(8, Math.min(256, wave.nx || 32));
+      const arr = [];
+      for (let i = 0; i < resolution; i++) arr.push(waveSampleValue(wave, i / resolution));
+      return arr;
+    }
+    return null;
   }
 
   // 再描画要否判定用シグネチャ（形状 or 表示状態が変わった時だけ描き直す）
@@ -759,7 +906,8 @@
       case 'saw':    return 'Sawtooth';
       case 'noise':  return 'Noise (' + (wave.short ? 'short' : 'long') + ')';
       case 'wave':
-        if (wave.layers) return 'BRR (素 + ガウス補間' + (wave.layers.length > 2 ? ' + PM' : '') + ')';
+        if (wave.layers) return wave.layers.length > 2
+          ? T('BRR (素 + ガウス補間 + PM)') : T('BRR (素 + ガウス補間)');
         return wave.smooth ? 'FM' : (wave.pcm ? 'DPCM' : 'Wavetable');
       case 'fm':     return 'FM';
       case 'sample': return 'PCM (DMC)';
@@ -832,7 +980,7 @@
 
     if (!wave || wave.t === 'sample') {
       ctx.fillStyle = '#777788';
-      ctx.font = Math.round(20 * S) + 'px sans-serif';
+      ctx.font = Math.round(20 * S) + 'px ' + fontStack('sans');
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(wave ? 'PCM (no fixed waveform)' : '—', (x0 + x1) / 2, mid);
       return;
@@ -895,7 +1043,7 @@
       }
       ctx.setLineDash([]);
       // 凡例（プロット左上に色見本＋ラベル）
-      ctx.font = Math.round(13 * S) + 'px sans-serif';
+      ctx.font = Math.round(13 * S) + 'px ' + fontStack('sans');
       ctx.textAlign = 'left'; ctx.textBaseline = 'top';
       let ly = y0 + 4 * S;
       for (const layer of wave.layers) {
@@ -933,18 +1081,18 @@
       // FM等の連続波形: 要素数(描画解像度)や振幅は素の値が存在しない(音階/音量/EG依存)
       // ため数値目盛りは出さない。位相=1周期・中心0(相対波形)だけを示す。
       ctx.fillStyle = '#8a8a98';
-      ctx.font = Math.round(17 * S) + 'px sans-serif';
+      ctx.font = Math.round(17 * S) + 'px ' + fontStack('sans');
       ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
       ctx.fillText('0', x0 - tickGap, mid); // Y中心(ゼロ交差)のみ
       ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-      ctx.fillText('1 周期 (相対波形)', x0 + w / 2, y1 + tickGap);
+      ctx.fillText(T('1 周期 (相対波形)'), x0 + w / 2, y1 + tickGap);
     } else {
       // ウェーブテーブル等: 軸目盛り。signed=trueのPCM系(BRR等)は符号付きレンジ
       // (-ny 〜 0 〜 ny-1。例: ny=32768 なら -32768〜0〜32767)、それ以外は
       // 従来通り0始まり(0 〜 ny-1)で表示する。
       ctx.fillStyle = '#b6b6c6';
       // canvasは var() 非対応。実フォント名を指定
-      ctx.font = Math.round((signed ? 18 : 22) * S) + 'px monospace';
+      ctx.font = Math.round((signed ? 18 : 22) * S) + 'px ' + fontStack('mono');
       const nxMax = wave.nx - 1, nyMax = wave.ny - 1;
       const nxMid = Math.floor(nxMax / 2);
       let yBottomLabel, yMidLabel;
@@ -991,9 +1139,9 @@
     ).join('') +
       // プリセット一覧を広げる代わりに、OSネイティブのカラーピッカー(無段階スペクトラム)を
       // 呼び出す小さな1マスを追加する。画面を圧迫せずに「もっと多くの色」を選べるようにする。
-      `<span class="kbd-color-swatch kbd-color-more" title="もっと選ぶ...">` +
+      `<span class="kbd-color-swatch kbd-color-more" title="${T('もっと選ぶ...')}">` +
       `<input type="color" class="kbd-color-native" value="${/^#[0-9a-f]{6}$/i.test(currentColor || '') ? currentColor : '#ffffff'}"></span>` +
-      `<button type="button" class="kbd-color-reset">既定色に戻す</button>`;
+      `<button type="button" class="kbd-color-reset">${T('既定色に戻す')}</button>`;
     document.body.appendChild(pop);
 
     const rect = anchorEl.getBoundingClientRect();
@@ -1033,7 +1181,7 @@
   }
 
   function drawPiano(canvas, channels) {
-    const newW = canvas.offsetWidth || 560;
+    const newW = canvas._cachedWidth || canvas.offsetWidth || 560;
     if (newW === 0) return;
     if (canvas.width !== newW) canvas.width = newW; // サイズ変化時のみ再割り当て（毎フレームのリフロー防止）
     const wkW = canvas.width / TOTAL_WHITE;
@@ -1108,6 +1256,7 @@
       this._lastDmc4011 = null;   // DMC $4011 直接書き込み検出用（前回のレジスタ値）
       this._speedDenom = 1;        // 再生速度分母(1〜8。実速度=1/_speedDenom)
       this._rollTimeline = null;  // ピアノロール用ノート区間 [{color, notes:[{startSec,endSec,midi}]}]
+      this._rollCursor = {};      // track.id → 「もう画面上端より上に流れ去った」最初のnote index(_renderRollの走査起点キャッシュ)
       this._rollSongTimeBase = 0; // 最後に実測位置が更新された時点での「曲内基準の経過時間」(確定値)
       this._rollLastRawPos = null; // 直前に_renderRollへ渡された実時間(壁時計)位置
       this._rollBaseWallMs = null; // _rollSongTimeBase確定時点のperformance.now()(補間の起点)
@@ -1116,6 +1265,24 @@
       this.onSpeedChange = null;   // (factor:number) => void  曲切替をまたいで保持する
       this._colorOverrides = loadColorOverrides(); // channelId → ユーザー指定色(localStorage永続化)
       this._build();
+
+      /*
+       * 言語切替時の作り直し。行のtitle等は "P1 ミュート" のようにチャンネル名を
+       * 埋め込んだ文字列なので、i18nDom.js のDOM走査(辞書の完全一致で引く)では
+       * 訳せない。T()を通す生成処理そのものを走らせ直す必要がある。
+       */
+      if (MML.I18n) {
+        MML.I18n.onChange(() => {
+          const mode = this._mode;
+          this._build();               // ウィジェット枠(速度ラベル/ロール見出し/コピーボタン)を作り直す
+          // _build() がコンテナを空にするので、行要素の参照も捨てて次のupdate()で作り直させる
+          this._rowEls = [];
+          this._spcRowEls = [];
+          this._spcAllRow = null;
+          if (this._prevChannels) this._rebuildRows(this._prevChannels);
+          this.setMode(mode);
+        });
+      }
     }
 
     _build() {
@@ -1134,11 +1301,12 @@
       this._leftEl = left;
 
       // 再生速度バー(1/1〜1/8)。音程を保ったままテンポだけを落とす。
-      // 見出し・行と同じ left 内に置くことで幅が自動的に揃う（別枠に見えないように）。
+      // ウィンドウのタイトル行(タイトル文字の右)に置く。本体側は毎回_build()で
+      // 作り直されるため、タイトル行に前回挿入した分を先に取り除いてから差し替える。
       const speedBar = document.createElement('div');
-      speedBar.className = 'kbd-speed';
+      speedBar.className = 'kbd-speed kbd-speed--header';
       speedBar.innerHTML =
-        `<span class="kbd-speed-label">速度</span>` +
+        `<span class="kbd-speed-label">${T('速度')}</span>` +
         `<input type="range" class="kbd-speed-range" min="1" max="8" step="1" value="1">` +
         `<span class="kbd-speed-value">1/1</span>`;
       const speedRange = speedBar.querySelector('.kbd-speed-range');
@@ -1151,7 +1319,16 @@
         speedValueEl.textContent = `1/${denom}`;
         if (this.onSpeedChange) this.onSpeedChange(1 / denom);
       });
-      left.appendChild(speedBar);
+      const winEl = this.container.closest('.float-window');
+      const headerEl = winEl && winEl.querySelector('.float-window-header');
+      if (headerEl) {
+        const oldSpeedBar = headerEl.querySelector('.kbd-speed');
+        if (oldSpeedBar) oldSpeedBar.remove();
+        const closeBtn = headerEl.querySelector('.float-window-close');
+        headerEl.insertBefore(speedBar, closeBtn || null);
+      } else {
+        left.appendChild(speedBar); // フォールバック(タイトル行が見つからない場合)
+      }
 
       const header = document.createElement('div');
       header.className = 'kbd-header';
@@ -1202,14 +1379,34 @@
       // 右: 選択チャンネルの素波形を拡大表示（表示サイズ固定・要素数はX/Y数値で表現）
       const big = document.createElement('div');
       big.className = 'kbd-bigwave';
+      const bigHeader = document.createElement('div');
+      bigHeader.className = 'kbd-bigwave-header';
       this._bigTitleEl = document.createElement('div');
       this._bigTitleEl.className = 'kbd-bigwave-title';
       this._bigTitleEl.textContent = 'Click a wave icon to enlarge';
+      // 波形エディタ(FDS波形エディタ等)との相互コピペ用。実際の波形テーブルを
+      // 持つ表示(t:'wave')のときだけ有効化する(ノイズ/PCM等は固有波形が無いため不可)
+      this._bigCopyBtn = document.createElement('button');
+      this._bigCopyBtn.className = 'kbd-bigwave-copy secondary';
+      this._bigCopyBtn.textContent = T('📋コピー');
+      this._bigCopyBtn.title = T('この波形データをクリップボードへコピー(他の波形エディタへ貼り付け可)');
+      this._bigCopyBtn.disabled = true;
+      this._bigWaveCopyData = null;
+      this._bigCopyBtn.addEventListener('click', () => {
+        if (!this._bigWaveCopyData || !(MML.UI && MML.UI.WaveClipboard)) return;
+        MML.UI.WaveClipboard.copyValues(this._bigWaveCopyData).then((ok) => {
+          const orig = T('📋コピー');
+          this._bigCopyBtn.textContent = ok ? T('✓ コピー完了') : T('✗ 失敗');
+          setTimeout(() => { this._bigCopyBtn.textContent = orig; }, 1000);
+        });
+      });
+      bigHeader.appendChild(this._bigTitleEl);
+      bigHeader.appendChild(this._bigCopyBtn);
       this._bigCanvas = document.createElement('canvas');
       this._bigCanvas.className = 'kbd-bigwave-canvas';
       this._bigCanvas.width = 560;   // 内部解像度(表示の2倍)。表示サイズは.kbd-bigwave-canvasで指定
       this._bigCanvas.height = 280;
-      big.appendChild(this._bigTitleEl);
+      big.appendChild(bigHeader);
       big.appendChild(this._bigCanvas);
       this._bigWaveEl = big;
 
@@ -1227,16 +1424,27 @@
       try { rollCollapsed = localStorage.getItem('mml_pianoRollCollapsed') === '1'; } catch (e) { /* ignore */ }
       rollHeader.innerHTML =
         `<span class="kbd-roll-toggle">${rollCollapsed ? '▶' : '▼'}</span>` +
-        `<span class="kbd-roll-label">ピアノロール</span>`;
+        `<span class="kbd-roll-label">${T('ピアノロール')}</span>`;
       this._rollCanvas = document.createElement('canvas');
       this._rollCanvas.className = 'kbd-roll';
-      this._rollCanvas.height = 320;
+      this._rollCanvas.height = ROLL_CANVAS_HEIGHT;
       this._rollCanvas.style.display = rollCollapsed ? 'none' : '';
       rollHeader.addEventListener('click', () => {
         const collapsed = this._rollCanvas.style.display !== 'none';
         this._rollCanvas.style.display = collapsed ? 'none' : '';
         rollHeader.querySelector('.kbd-roll-toggle').textContent = collapsed ? '▶' : '▼';
         try { localStorage.setItem('mml_pianoRollCollapsed', collapsed ? '1' : '0'); } catch (e) { /* ignore */ }
+        // 畳んだらロールの高さぶんウィンドウ自体を縮め(=鍵盤が上へ詰まる)、
+        // 開いたらロールの高さぶん広げる(=鍵盤がロールの下へ移動する)。
+        // こうしないとチャンネル一覧(.kbd-main, flex:1 1 auto)が伸縮を全部吸収してしまい、
+        // 折りたたんでも窓の高さが変わらず鍵盤の位置も動かない。
+        // 高さの永続化は floatingWindows.js の ResizeObserver → persist() が行う。
+        const win = this.container.closest ? this.container.closest('.float-window') : null;
+        if (win) {
+          const cur = parseInt(win.style.height, 10) || win.offsetHeight;
+          const delta = collapsed ? -ROLL_CANVAS_HEIGHT : ROLL_CANVAS_HEIGHT;
+          win.style.height = Math.max(MIN_WINDOW_HEIGHT, cur + delta) + 'px';
+        }
       });
       rollWrap.appendChild(rollHeader);
       rollWrap.appendChild(this._rollCanvas);
@@ -1246,6 +1454,20 @@
       this._canvas.className = 'kbd-piano';
       this._canvas.height = 68;
       this.container.appendChild(this._canvas);
+
+      // drawPiano()/_renderRoll()は毎フレーム(60fps)canvasの表示幅を必要とするが、
+      // canvas.offsetWidthを直接読むと毎回強制同期レイアウトが走る(要素のwidth自体は
+      // リサイズ時以外変わらないのに)。MML再生ハイライト機能の毎フレームDOM更新と
+      // 同じフレーム内で両方が動くと、この強制レイアウトがお互いの保留中のDOM変更を
+      // 巻き込んで重くなる(レイアウトスラッシング)。ResizeObserverで実際にリサイズ
+      // された時だけ幅をキャッシュし、毎フレームの読み取りをキャッシュ参照に置き換える
+      const widthObserver = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          entry.target._cachedWidth = Math.round(entry.contentRect.width);
+        }
+      });
+      widthObserver.observe(this._rollCanvas);
+      widthObserver.observe(this._canvas);
     }
 
     setSource(result, chips) {
@@ -1266,6 +1488,8 @@
       this._extraSnaps.kssPsgLive = typeof result.getKssPsg === 'function' ? result.getKssPsg : null;
       this._extraSnaps.kssSccLive = typeof result.getKssScc === 'function' ? result.getKssScc : null;
       this._extraSnaps.kssOpllLive = typeof result.getKssOpll === 'function' ? result.getKssOpll : null;
+      this._extraSnaps.gbsApuLive = typeof result.getGbsApu === 'function' ? result.getGbsApu : null;
+      this._extraSnaps.hesApuLive = typeof result.getHesApu === 'function' ? result.getHesApu : null;
       this._lastDmc4011 = null; // 曲切替時にDMC書き込み検出をリセット
       this._rollSongTimeBase = 0; // 曲切替時にピアノロールの経過時間もリセット
       this._rollLastRawPos = null;
@@ -1314,6 +1538,7 @@
     // 結果を非同期に反映する際に main.js から呼ばれる。
     setRollTimeline(timeline) {
       this._rollTimeline = timeline || null;
+      this._rollCursor = {};
     }
 
     // regSnapshots形式(NSFのライブ再生を裏で先読みキャプチャした結果など)からピアノロールの
@@ -1326,6 +1551,7 @@
     // 誤ったチャンネル/周波数/波形を復元してしまう(Rolling Thunder等で顕著、
     // [[n163-capture-snapshot-and-numch]]参照)。ライブRAMスナップショットなら常に正しい。
     setRollTimelineFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots) {
+      this._rollCursor = {};
       if (!regSnapshots || totalFrames <= 0) { this._rollTimeline = null; return; }
       const wl = writeLog || [];
       const extraSnaps = {
@@ -1486,9 +1712,19 @@
     _rebuildRows(channels) {
       this._rowsEl.innerHTML = '';
       this._rowEls = [];
+      let lastHeader = null;
       for (const ch of channels) {
         const mi = getMuteInfo(ch.id);
         const muted = this._muteState.get(ch.id) || false;
+        const disp = getChannelDisplay(ch.id);
+
+        if (disp.header && disp.header !== lastHeader) {
+          const headerRow = document.createElement('div');
+          headerRow.className = 'kbd-chip-header';
+          headerRow.textContent = disp.header;
+          this._rowsEl.appendChild(headerRow);
+          lastHeader = disp.header;
+        }
 
         const row = document.createElement('div');
         const rowColor = this._getColor(ch.id, ch.color);
@@ -1496,8 +1732,8 @@
         row.innerHTML =
           `<span class="kbd-dot" style="background:${rowColor}"></span>` +
           `<span class="kbd-part">${ch.letter || ''}</span>` +
-          `<input type="checkbox" class="kbd-mute"${muted ? '' : ' checked'} title="${ch.id} ミュート">` +
-          `<span class="kbd-name">${ch.id}</span>` +
+          `<input type="checkbox" class="kbd-mute"${muted ? '' : ' checked'} title="${T('{ch} ミュート', { ch: ch.id })}">` +
+          `<span class="kbd-name">${disp.name}</span>` +
           `<span class="kbd-vol-num">0</span>` +
           `<span class="kbd-vol-wrap"><span class="kbd-vol-bar" style="background:transparent"></span></span>` +
           `<canvas class="kbd-wave" width="68" height="28"></canvas>` +
@@ -1559,6 +1795,11 @@
     // 選択チャンネルの素波形を右パネルへ描画（形状変化時のみ再描画）
     _renderBigWave(ch) {
       if (!ch || !ch.wave) return;
+      // コピー可否は再描画をスキップする場合でも常に最新化する(表示形状のsigが
+      // 同じでもチャンネル切替直後にボタン状態が古いままになるのを防ぐため)
+      this._bigWaveCopyData = getCopyableWaveSamples(ch.wave);
+      if (this._bigCopyBtn) this._bigCopyBtn.disabled = !this._bigWaveCopyData;
+
       const sig = bigWaveSig(ch.wave);
       if (sig === this._bigWaveSig) return;
       this._bigWaveSig = sig;
@@ -1647,7 +1888,7 @@
           : ((ch.envMode === true || dmcWritten) ? '#ffcc44' : '#e6e6ef');
         // Triangleの見かけ音量(黄色文字)はnoise/dmcとの非線形ミキサー干渉による推定値であり、
         // 実レジスタ値ではないことを示すツールチップを付ける。
-        el.volNum.title = (ch.id === 'TR' && rawStr && ch.envMode === true) ? '$4011制御' : '';
+        el.volNum.title = (ch.id === 'TR' && rawStr && ch.envMode === true) ? T('$4011制御') : '';
 
         // 素波形アイコン: 発声中のみ更新。使っていないチャンネルは更新しない
         // （発声→停止の遷移時に1回だけ暗色で描き、以後は据え置き＝波形データのハッシュ計算も省略）。
@@ -1700,7 +1941,7 @@
           // リセットしてしまい、ネイティブツールチップが実質出せなくなる(SPCのADSR
           // ツールチップは値が音符の間ほぼ変化しないため同じ問題が起きなかっただけ)
           el.freqEl.style.color = ch.modActive ? '#ffcc44' : '';
-          el.row.title = ch.modActive ? '$4087 bit7=0 (モジュレーション有効)' : '';
+          el.row.title = ch.modActive ? T('$4087 bit7=0 (モジュレーション有効)') : '';
         }
       }
 
@@ -1741,7 +1982,7 @@
     _renderRoll(posSeconds) {
       const canvas = this._rollCanvas;
       if (!canvas || canvas.style.display === 'none') return;
-      const newW = canvas.offsetWidth || 560;
+      const newW = canvas._cachedWidth || canvas.offsetWidth || 560;
       if (newW === 0) return;
       if (canvas.width !== newW) canvas.width = newW;
       const wkW = canvas.width / TOTAL_WHITE;
@@ -1763,8 +2004,13 @@
       const rawPos = posSeconds || 0;
       const speedFactor = 1 / (this._speedDenom || 1);
       if (this._rollLastRawPos === null || rawPos < this._rollLastRawPos - 0.001) {
-        this._rollSongTimeBase = 0; // 新規再生開始 or シークによる巻き戻り
+        // 新規再生開始(rawPos=0)またはシークによる巻き戻り。rawPosは「現在の速度で
+        // 曲頭から目標地点まで再生した場合の実時間」(stream-player.jsのseek()参照)
+        // なので、rawPos*speedFactorが常に正しい曲内絶対秒になる(新規再生開始時は
+        // rawPos=0なので特別扱い不要で0と一致する)。
+        this._rollSongTimeBase = rawPos * speedFactor;
         this._rollBaseWallMs = nowMs;
+        this._rollCursor = {}; // 巻き戻り時は各trackの走査起点キャッシュも巻き戻す
       } else if (rawPos > this._rollLastRawPos + 1e-6) {
         this._rollSongTimeBase += (rawPos - this._rollLastRawPos) * speedFactor; // 実測位置が更新された
         this._rollBaseWallMs = nowMs;
@@ -1794,7 +2040,7 @@
           ctx.stroke();
           if (semi === 0) { // C
             ctx.fillStyle = '#6b6b7a';
-            ctx.font = '9px sans-serif';
+            ctx.font = '9px ' + fontStack('sans');
             ctx.textBaseline = 'top';
             ctx.fillText(midiToName(midi), keyPos.x + 2, 1);
           }
@@ -1805,7 +2051,7 @@
       // 再生が進むにつれて線が下から上へ流れ、新しい秒の線が上端から現れる(累積の経過時間)。
       ctx.strokeStyle = '#3d3d4a';
       ctx.fillStyle = '#6b6b7a';
-      ctx.font = '9px sans-serif';
+      ctx.font = '9px ' + fontStack('sans');
       ctx.textBaseline = 'bottom';
       const firstSec = Math.ceil(pos);
       for (let s = firstSec; s < winEnd; s++) {
@@ -1821,10 +2067,22 @@
 
       if (!this._rollTimeline || !this._rollTimeline.length) return;
 
+      // track.notesはstartSec昇順(buildNoteTimelineFromChannelFrames参照)なので、
+      // 「もう画面上端より上に流れ去った(endSec<=pos)」ノートを読み飛ばす起点を
+      // trackごとにキャッシュし、次フレームはそこから再開する(巻き戻り時は上でリセット済み)。
+      // 曲が長い/ノート数が多いほど毎フレーム全ノート走査のコストが線形に効いてくるため、
+      // 未再生ノートだけを毎フレーム定数時間で拾えるようにする最適化(文字数の多いMMLで
+      // ピアノロールがカクつく問題の対策)
       for (const track of this._rollTimeline) {
         if (this._isTrackMuted(track.id)) continue; // ミュート中のチャンネルは描画しない
-        for (const note of track.notes) {
-          if (note.endSec <= pos || note.startSec >= winEnd) continue;
+        const notes = track.notes;
+        let idx = this._rollCursor[track.id] || 0;
+        if (idx > notes.length) idx = notes.length;
+        while (idx < notes.length && notes[idx].endSec <= pos) idx++;
+        this._rollCursor[track.id] = idx;
+        for (let i = idx; i < notes.length; i++) {
+          const note = notes[i];
+          if (note.startSec >= winEnd) break; // 以降は全て未来のノート(startSec昇順のため打ち切れる)
           const keyPos = keyX(note.midi, wkW);
           if (!keyPos) continue;
           const relEnd = Math.min(ROLL_WINDOW_SEC, note.endSec - pos);
@@ -1851,7 +2109,7 @@
       row.className = 'kbd-ch-row';
       row.innerHTML =
         `<span class="kbd-dot" style="background:${rowColor}"></span>` +
-        `<input type="checkbox" class="kbd-mute" checked title="${v.label} ミュート">` +
+        `<input type="checkbox" class="kbd-mute" checked title="${T('{ch} ミュート', { ch: v.label })}">` +
         `<span class="kbd-name">${v.label}</span>` +
         `<span class="kbds-lr kbds-l"></span>` +
         `<span class="kbds-lr"></span>` +
@@ -1949,11 +2207,16 @@
       }));
       const anyActive = this._spcVoices.some(v => v.active);
 
-      // ALL行は初回のみ構築（内容は毎回更新）
+      // ALL行は初回のみ構築（内容は毎回更新）。見出しは理屈上はALL行含む全体に
+      // かかるべきだが、見た目はALL行をヘッダ扱いにしたいのでALLとV0の間に置く。
       if (!this._spcAllRow) {
         this._spcSectionEl.innerHTML = '';
         this._spcAllRow = this._buildSpcAllRow();
         this._spcSectionEl.appendChild(this._spcAllRow.row);
+        const chipHeader = document.createElement('div');
+        chipHeader.className = 'kbd-chip-header';
+        chipHeader.textContent = 'S-DSP (SPC700)';
+        this._spcSectionEl.appendChild(chipHeader);
       }
 
       // 行数が変化した場合だけ per-voice 行を再構築（通常は初回の8行のみ。ALL行は保持）

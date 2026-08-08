@@ -112,6 +112,11 @@
   // 次バイトは@MH<n>のn(0-254)、255=MHOF
   const OP_FDS_MOD_RELOAD = 0xf5;
   const FDS_MOD_OFF = 0xff;
+  // N163専用: 共有バッファアロケータ(src/mml/n163Alloc.js)が決めた波形のRAM上の
+  // バイト位置再設定(曲中の再ロード、音符に紐付かない即時イベント)。次バイトは
+  // byteOffset(0-63)。波形の中身自体は既存のOP_TONE(音色番号)切替検出で選ぶので、
+  // このオペコードは「行き先」だけを運ぶ
+  const OP_N163_WAVE_RELOAD = 0xf6;
 
   // 音長(フレーム数)を、255ずつのチャンクに分割して書き込む。
   // 最初のチャンクはそのまま直後に、2つ目以降は 0xF4(ウェイト) + チャンクの形で続ける
@@ -152,8 +157,8 @@
   MckBytecode.serialize = function (segments, immediateWrites, envIndexRemap) {
     const bytes = [];
     let lastVolume = null;
-    let lastVolMode = null; // 'plain' | 'env' (src/convert/mmlEmit.jsのcurVolModeと同じ考え方。
-                             // モード切替時は値/番号が前回と同じでも必ず出し直す)
+    let lastVolMode = null; // 'plain' | 'env' | 'fme7env' (src/convert/mmlEmit.jsのcurVolModeと
+                             // 同じ考え方。モード切替時は値/番号が前回と同じでも必ず出し直す)
     let lastEnvIdx = null;
     let lastTone = null;
     let lastNoteEnv = null;
@@ -192,9 +197,23 @@
       }
     };
 
+    // N163共有バッファアロケータが決めたbyteOffsetの再設定(kind:'n163WaveReload')
+    const n163reloads = (immediateWrites || [])
+      .filter(iw => iw.kind === 'n163WaveReload')
+      .slice()
+      .sort((a, b) => a.frame - b.frame);
+    let n163reloadIdx = 0;
+    const flushN163ReloadsUpTo = (frame) => {
+      while (n163reloadIdx < n163reloads.length && n163reloads[n163reloadIdx].frame <= frame) {
+        bytes.push(OP_N163_WAVE_RELOAD, n163reloads[n163reloadIdx].value & 0xff);
+        n163reloadIdx++;
+      }
+    };
+
     for (const seg of segments) {
       flushToneReloadsUpTo(elapsed);
       flushModReloadsUpTo(elapsed);
+      flushN163ReloadsUpTo(elapsed);
       elapsed += seg.durationFrames;
       const gateDenom = seg.gateDenom || 8;
       const gate = seg.gate == null ? 8 : seg.gate;
@@ -203,8 +222,24 @@
         : Math.max(1, Math.round(seg.durationFrames * (gate / gateDenom)));
 
       if (seg.freq != null) {
-        const remapIdx = (envIndexRemap && seg.envelopeV != null) ? envIndexRemap[seg.envelopeV] : undefined;
-        if (remapIdx !== undefined) {
+        // 音量の指定方法は3つ排他で、compiler.jsのsegmentsToWriteLogFme7と同じ優先順位
+        // (FME7ハードウェアエンベロープ > ソフトウェア音量エンベロープ > 固定音量)。
+        // ハードウェアエンベロープ中はVOL/VOL_ENVを出さない(6502側はこれらのオペコードで
+        // ハードウェアエンベロープを解除するため。compiler.js側もv<n>でのみ解除される)
+        const remapIdx = (envIndexRemap && seg.envelopeV != null && seg.fme7EnvShape == null)
+          ? envIndexRemap[seg.envelopeV] : undefined;
+        if (seg.fme7EnvShape != null) {
+          const period = seg.fme7EnvPeriod || 0;
+          // モードが切り替わった直後は形状・周期が前回と同じでも必ず出し直す
+          // (6502側はOP_VOL/OP_VOL_ENVでハードウェアエンベロープを解除しているため)
+          if (seg.fme7EnvShape !== lastFme7EnvShape || period !== lastFme7EnvPeriod ||
+              lastVolMode !== 'fme7env') {
+            bytes.push(OP_FME7_HARDENV, seg.fme7EnvShape & 0x0f, period & 0xff, (period >> 8) & 0xff);
+            lastFme7EnvShape = seg.fme7EnvShape;
+            lastFme7EnvPeriod = period;
+          }
+          lastVolMode = 'fme7env';
+        } else if (remapIdx !== undefined) {
           // ソフトウェア音量エンベロープ選択。モードが切り替わった直後は番号が前回と
           // 同じでも必ず出し直す(6502ドライバ側もOP_VOLでENVACTをクリアするため、
           // 出し直さないとエンベロープが再度有効化されない)
@@ -250,13 +285,6 @@
           bytes.push(OP_FME7_NOISE, seg.fme7Noise & 0x1f);
           lastFme7Noise = seg.fme7Noise;
         }
-        if (seg.fme7EnvShape != null &&
-            (seg.fme7EnvShape !== lastFme7EnvShape || seg.fme7EnvPeriod !== lastFme7EnvPeriod)) {
-          const period = seg.fme7EnvPeriod || 0;
-          bytes.push(OP_FME7_HARDENV, seg.fme7EnvShape & 0x0f, period & 0xff, (period >> 8) & 0xff);
-          lastFme7EnvShape = seg.fme7EnvShape;
-          lastFme7EnvPeriod = seg.fme7EnvPeriod;
-        }
 
         const noteByte = Math.max(0, Math.min(NOTE_MAX, Math.round(seg.noteNumber)));
         bytes.push(noteByte);
@@ -272,6 +300,7 @@
     }
     flushToneReloadsUpTo(elapsed);
     flushModReloadsUpTo(elapsed);
+    flushN163ReloadsUpTo(elapsed);
 
     bytes.push(OP_END);
     return new Uint8Array(bytes);
@@ -292,8 +321,10 @@
     while (i < bytes.length) {
       const b = bytes[i]; i++;
       if (b === OP_END) break;
-      if (b === OP_VOL) { volume = bytes[i] & 0x7f; envIdx = null; i++; continue; }
-      if (b === OP_VOL_ENV) { envIdx = bytes[i]; i++; continue; }
+      // OP_VOL/OP_VOL_ENVはFME7ハードウェアエンベロープも解除する(6502ドライバ側の
+      // RD_VOL/RD_VOLENVがFMEEACTをクリアするのと同じ意味)
+      if (b === OP_VOL) { volume = bytes[i] & 0x7f; envIdx = null; fme7EnvShape = null; i++; continue; }
+      if (b === OP_VOL_ENV) { envIdx = bytes[i]; fme7EnvShape = null; i++; continue; }
       if (b === OP_TONE) { tone = bytes[i] & 0x7f; i++; continue; }
       if (b === OP_VRC7_TONE_RELOAD) {
         const toneIndex = bytes[i] & 0x7f; i++;
@@ -303,6 +334,11 @@
       if (b === OP_FDS_MOD_RELOAD) {
         const v = bytes[i]; i++;
         rawEvents.push({ type: 'fdsModReload', mhIndex: v === FDS_MOD_OFF ? 255 : v });
+        continue;
+      }
+      if (b === OP_N163_WAVE_RELOAD) {
+        const byteOffset = bytes[i]; i++;
+        rawEvents.push({ type: 'n163WaveReload', byteOffset });
         continue;
       }
       if (b === OP_NOTE_ENV) { noteEnv = bytes[i]; i++; continue; }

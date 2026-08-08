@@ -27,15 +27,33 @@
   const MML = global.MML = global.MML || {};
   MML.Convert = MML.Convert || {};
 
-  const MAX_ENV_FRAMES     = 180; // ループが見つからない場合の上限(SPC変換と同じ約3秒分)
-  const MIN_LOOP_PERIOD    = 2;   // 周期1は単なる単一値(=フラット)と区別がつかないので除外
-  const MAX_LOOP_PERIOD    = 48;  // これより長い周期は音量ビブラートとしては非現実的
-  const MIN_LOOP_REPEATS   = 3;   // 誤検出防止のため最低3周期分の一致を要求する
+  const MAX_ENV_FRAMES     = 180;  // ループが見つからない場合の上限(SPC変換と同じ約3秒分)
+  const MIN_LOOP_PERIOD    = 2;    // 周期1は単なる単一値(=フラット)と区別がつかないので除外
+  const MAX_LOOP_PERIOD    = 512;  // ゆっくりしたスウェル(数秒周期)も検出できるだけの余裕を持たせる
+  const MIN_LOOP_REPEATS   = 3;    // 誤検出防止のため最低3周期分の一致を要求する
   const MAX_LOOP_SEARCH_START = 96; // ループ開始位置の探索上限(アタック直後からの範囲で十分)
   const HARDWARE_INDEX_BASE = 100; // ハードウェア減衰エンベロープの採番開始番号
 
+  // 周期性の確認窓は「MAX_ENV_FRAMES」と「period*MIN_LOOP_REPEATS(この周期を確認するのに
+  // 最低限必要な長さ、呼び出し元のmaxPeriod計算が既に保証している)」の大きい方に制限する
+  // (seq.length全体ではなく)。
+  // 理由(1): ノートが数秒を超える長さ(例: 持続音のパッド)だと、圧縮したい前半区間よりずっと
+  // 先(どうせ非ループ時もMAX_ENV_FRAMESで切り詰めて捨てる範囲)にたまたま値が変化する箇所が
+  // あるだけで「周期性が全区間で成立しない」と判定されループ検出そのものが握りつぶれ、
+  // 本来なら{val | 一定値}と圧縮できるはずの長い一定値ノートが非圧縮の巨大配列(180値
+  // フラット)になっていた(女神転生II 27曲目、N163の4秒近い持続音でuser指摘)。
+  // 理由(2): MAX_LOOP_PERIODがMAX_ENV_FRAMESを超える場合(例: 320フレーム周期のスウェル)、
+  // 確認窓を単純にMAX_ENV_FRAMES(180)固定にすると「period(320)より窓(180)が短く
+  // for文が1回も回らずtrueを返してしまう(=検証していないのに周期性ありと誤判定する)」
+  // というバグになる(女神転生II 24曲目、320フレーム周期のスウェルがピーク付近で
+  // 止まって聞こえる=検出漏れの逆にもなりかねない話としてuser指摘、実際にはこちらの
+  // 「確認せず素通りする」方向でなく「180フレームで頭打ちになり長い周期を検出できない」
+  // 方向で発現していたが、根本原因である固定180上限そのものを直すため合わせて対応)。
+  // period*MIN_LOOP_REPEATSはmaxPeriod計算(呼び出し元)により既にremain以下と保証されて
+  // いるため、そこまでは安全に確認できる。
   function isPeriodicFrom(seq, start, period) {
-    for (let i = start + period; i < seq.length; i++) {
+    const limit = Math.min(seq.length, start + Math.max(MAX_ENV_FRAMES, period * MIN_LOOP_REPEATS));
+    for (let i = start + period; i < limit; i++) {
       if (seq[i] !== seq[i - period]) return false;
     }
     return true;
@@ -57,8 +75,18 @@
         }
       }
     }
-    // ループ無し: 減衰/単発の音量変化として全フレームを記録(末尾保持)
-    return { values: seq.slice(0, MAX_ENV_FRAMES), loop: null };
+    // ループ無し: 減衰/単発の音量変化として記録する(末尾保持)。
+    // 末尾が同一値のまま足踏みしている区間はstepEnvelope()の末尾保持で自動的に
+    // 続くため、1点を残して切り詰めればよい(データ量の抑制)。★逆に値が変化し
+    // 続けている間はMAX_ENV_FRAMESで頭打ちにしてはいけない(女神転生II 24曲目、
+    // 320フレーム周期の左右対称スウェルが単発ノートでは1周期分弱しかデータが
+    // 無く3周期一致というループ確定基準を満たせない=ループ無し判定は正しいの
+    // だが、旧実装はここで無条件にMAX_ENV_FRAMES=180で切り捨てていたため
+    // スウェル後半の減衰(180-319フレーム目)が失われ、180フレーム目の値の
+    // まま静止して聞こえていた)。
+    let end = n;
+    while (end > 1 && seq[end - 1] === seq[end - 2]) end--;
+    return { values: seq.slice(0, end), loop: null };
   };
 
   // 2A03/MMC5の内蔵減衰エンベロープ(4bit period n, loopフラグ)を厳密にシミュレートする。
@@ -108,16 +136,77 @@
     return shape.values.join(',') + '|' + (shape.loop == null ? '-' : shape.loop);
   }
 
+  // aがbの前方一致(prefix)かどうか。同じ形状の音符が音長違いで複数回現れる時、
+  // stepEnvelope()はノート自身のゲート長ぶんしかテーブルを読まない(短い方はテーブルの
+  // 途中までしか参照しない)ため、短い方は長い方のテーブルをそのまま共有しても再生結果は
+  // 変わらない。@v<n>を音長ごとに量産せず1つのテーブルへ統合できる。
+  function isPrefix(a, b) {
+    if (a.length > b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
   // 既に確定した shape({values,loop})を登録し番号を返す(重複排除)。
   // hardware=true ならHARDWARE_INDEX_BASE以降、falseなら0番から採番する。
   MML.Convert.EnvelopeRegistry.prototype.registerShape = function (shape, hardware) {
     if (!shape) return null;
-    const keyMap = hardware ? this.hwKeyToIndex : this.swKeyToIndex;
+    if (hardware) {
+      const key = shapeKey(shape);
+      let idx = this.hwKeyToIndex.get(key);
+      if (idx === undefined) {
+        idx = this.nextHwIndex++;
+        this.hwKeyToIndex.set(key, idx);
+        this.tables.set(idx, shape);
+      }
+      return idx;
+    }
+    // ソフトウェアエンベロープ同士は生の values 配列が前方一致すれば共有する(例: 8分音符
+    // 用の12点減衰カーブと4分音符用の24点減衰カーブが完全に同じ形の前半12点を持つ場合、
+    // 片方だけを保持し短い方のノートはその先頭12点だけを読む)。ループ無し同士なら短い方を
+    // 長い方で置き換えることもある(Ys1 12曲目で実測: @v12={12 12 10 10 10 10 9 9}
+    // (ループ無し)と検出された形が、同じ楽器のより長いノートでは@v13={... 9 9 9 9 9 9 8 7
+    // 6 5 4 3}と、9の後も減衰が続くと判明した)。stepEnvelope()は参照側ノート自身の長さ
+    // ぶんしかテーブルを読まないため、より長い方へ差し替えても短いノートの再生結果に
+    // 影響は無い。
+    //
+    // ★ループ有り同士(片方でもloop!=null)は前方一致していても共有・置き換えを一切行わない。
+    // 理由(1) ループ有無の食い違い: analyzeVolumeShapeが返すloop有りの`values`は「最小の
+    // 繰り返し単位」に切り詰められており、その配列長は実際に何フレーム分観測できたかを
+    // 反映しない(切り詰め後は数個でも、裏では何十フレームも観測されている場合がある)。
+    // このため「配列が長い方が情報量が多い」という前提そのものがループ有り無しの比較には
+    // 使えず、「前方一致かつ片方だけ配列が長い」だけを頼りに片方を採用すると、実際には
+    // 無関係な別ノート同士を混同する事故が繰り返し起きた(女神転生II 11曲目: 3で保持する
+    // ループが、たまたま同じ立ち上がりで0まで減衰する別ノートに上書きされた。同33曲目:
+    // 6でループし続ける長いノートに、たまたま同じ内容で終わる短いノート(実際は6の後も
+    // ゆっくり減衰する)が紛れ込んだ)。
+    // 理由(2) ループ有り同士でも危険: analyzeVolumeShapeは「同一値がMIN_LOOP_REPEATS*period
+    // 分以上続く」だけでもloopと判定する(例: 減衰後ずっと一定音量を保持するだけの音符も
+    // period=2の自明なループとして検出される)。この「単に保持しているだけ」のループと、
+    // 本当に音量が周期的に上下する(トレモロ・リアタック含む)別楽器のループが、たまたま
+    // 前半の数値が一致するだけで前方一致と判定されることがある。ループ再生はloop位置以降を
+    // 無限に繰り返す仕様のため、短い方のノートがloop開始位置に到達する前に長い方の
+    // pre-loop区間(本来そのノートには存在しないはずの再アタック等)を再生してしまい、
+    // 1音のはずが2音に聞こえる不具合になる(Getsufuu Maden 5曲目、単発の減衰保持ノート
+    // {7 6 5 4 3 2 1|1}が、エコーパートの二重アタックループ{7 6 5 4 3 2 1 1 1 1 7 6 5 4
+    // 3 2|1 1}に丸ごと差し替えられ、単発のはずの音が二重アタックに聞こえた)。
+    // いずれも「配列長」や「続きの整合性チェック」による特例で都度対処したが、切り詰め後の
+    // 配列長という前提自体が壊れているため対症療法では再発した。よってループ有りが
+    // 一つでも絡む組み合わせは常に「別ノート」として扱い、それぞれ独立に登録する
+    // (ループ同士の重複排除は下のshapeKeyによる完全一致のみで行う)。
+    for (const [idx, existing] of this.tables) {
+      if (idx >= HARDWARE_INDEX_BASE) continue;
+      if (existing.loop != null || shape.loop != null) continue;
+      if (isPrefix(existing.values, shape.values)) {
+        if (shape.values.length > existing.values.length) this.tables.set(idx, shape);
+        return idx;
+      }
+      if (isPrefix(shape.values, existing.values)) return idx;
+    }
     const key = shapeKey(shape);
-    let idx = keyMap.get(key);
+    let idx = this.swKeyToIndex.get(key);
     if (idx === undefined) {
-      idx = hardware ? this.nextHwIndex++ : this.nextSwIndex++;
-      keyMap.set(key, idx);
+      idx = this.nextSwIndex++;
+      this.swKeyToIndex.set(key, idx);
       this.tables.set(idx, shape);
     }
     return idx;

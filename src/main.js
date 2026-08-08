@@ -4,11 +4,8 @@
  * - NSFヘッダ情報入力 → NSFバイナリ生成・ダウンロード
  */
 (function () {
-  const sourceEl = document.getElementById('source');
-  const asmOutputEl = document.getElementById('asmOutput');
-  const nsfOutputEl = document.getElementById('nsfOutput');
-
-  sourceEl.value = MML.Driver.SAMPLE_SOURCE;
+  // 表示文言の翻訳(src/i18n/i18n.js)。キーは日本語の原文そのもの
+  const T = (key, params) => MML.I18n.t(key, params);
 
   const mmlSourceEl = document.getElementById('mmlSource');
   const mmlOutputEl = document.getElementById('mmlOutput');
@@ -19,10 +16,13 @@
   // srcStart(絶対文字位置) -> DOM要素。再生ハイライト機能が対象spanをO(1)で引くための索引で、
   // オーバーレイのHTMLが変わるたび(attachHighlighterのonUpdate経由で)再構築する
   let mmlHighlightIndex = new Map();
+  let mmlHighlightIndexGen = 0; // オーバーレイHTMLが作り直されるたびに増える(追随スクロールの位置キャッシュ無効化用)
   MML.Mml.attachHighlighter(mmlSourceEl, mmlHighlightEl, () => {
     mmlHighlightIndex = MML.Mml.buildOffsetIndex(mmlHighlightEl);
+    mmlHighlightIndexGen++;
   });
-  MML.WaveformEditor.init();
+  // ウィンドウ幅が変わると行の折り返しが変わり要素のoffsetTopもずれるため、位置キャッシュを無効化する
+  window.addEventListener('resize', () => { mmlHighlightIndexGen++; });
 
   // --- MML再生連動ハイライト・追随スクロールのコントロール ---
   const mmlHighlightEnableEl = document.getElementById('mmlHighlightEnable');
@@ -35,16 +35,8 @@
   // --- フローティングウィンドウ（位置・サイズ・表示状態を記憶） ---
   MML.FloatingWindows.init();
   MML.FloatingWindows.initSplitters();
-
-  const EXPANSION_CHIP_FLAGS = {
-    none: 0,
-    vrc6: MML.NSF.CHIP_FLAGS.VRC6,
-    vrc7: MML.NSF.CHIP_FLAGS.VRC7,
-    fds: MML.NSF.CHIP_FLAGS.FDS,
-    mmc5: MML.NSF.CHIP_FLAGS.MMC5,
-    n163: MML.NSF.CHIP_FLAGS.N163,
-    fme7: MML.NSF.CHIP_FLAGS.FME7
-  };
+  MML.UI.FdsWaveEditor.init(mmlSourceEl);
+  MML.UI.N163WaveEditor.init(mmlSourceEl);
 
   // MML.Mml.compile()のresult.expansionsは'dpcm'を含みうる(チャンネル文字割当等の
   // 内部処理で拡張音源と同じ優先順位機構を借用しているため)。しかしDPCMは2A03内蔵
@@ -55,19 +47,6 @@
     return (list || []).filter(name => name !== 'dpcm');
   }
 
-  // チェック済みの拡張音源チップ名の配列を返す(複数選択可)
-  function getExpansionChips() {
-    return Array.from(document.querySelectorAll('.expansionChipCheck:checked')).map(el => el.value);
-  }
-
-  function setExpansionChips(names) {
-    const set = new Set(names || []);
-    document.querySelectorAll('.expansionChipCheck').forEach(el => { el.checked = set.has(el.value); });
-  }
-
-  function getExtraChipsFlag() {
-    return getExpansionChips().reduce((flags, name) => flags | (EXPANSION_CHIP_FLAGS[name] || 0), 0);
-  }
 
   // extraChips フラグから拡張音源名の配列に変換する
   function chipsFromExtraFlags(flags) {
@@ -108,13 +87,16 @@
       kssActivePlayer.applyMute(getChannelMuteConfig());
       return;
     }
-    clearTimeout(muteRerenderTimer);
-    muteRerenderTimer = setTimeout(() => {
-      if (lastPlayMode === 'capture-nsf') {
-        runCapture();
-      }
-      // MML / NSF Worklet 再生中はミュートを即時送信するので到達しない
-    }, 300);
+    if (gbsActivePlayer) {
+      gbsActivePlayer.applyMute(getChannelMuteConfig());
+      return;
+    }
+    if (hesActivePlayer) {
+      hesActivePlayer.applyMute(getChannelMuteConfig());
+      return;
+    }
+    // MML / NSF Worklet 再生中は上記のいずれかで即時反映されるため、
+    // 非再生中はミュート設定を変えても再レンダリングは不要
   }
 
   function toHex(n, digits) {
@@ -159,10 +141,24 @@
     currentSpeedFactor = factor;
     if (activePlayer && activePlayer.setSpeed) {
       activePlayer.setSpeed(factor);
-      if (lastPlayMode === 'capture-mml') workletDuration = activePlayer.getDuration();
+      if (lastPlayMode === 'capture-mml' || lastPlayMode === 'nsf') workletDuration = activePlayer.getDuration();
     }
-    if (spcActivePlayer && spcActivePlayer.setSpeed) spcActivePlayer.setSpeed(factor);
-    if (kssActivePlayer && kssActivePlayer.setSpeed) kssActivePlayer.setSpeed(factor);
+    if (spcActivePlayer && spcActivePlayer.setSpeed) {
+      spcActivePlayer.setSpeed(factor);
+      if (lastPlayMode === 'spc') workletDuration = spcActivePlayer.getDuration();
+    }
+    if (kssActivePlayer && kssActivePlayer.setSpeed) {
+      kssActivePlayer.setSpeed(factor);
+      if (lastPlayMode === 'kss') workletDuration = kssActivePlayer.getDuration();
+    }
+    if (gbsActivePlayer && gbsActivePlayer.setSpeed) {
+      gbsActivePlayer.setSpeed(factor);
+      if (lastPlayMode === 'gbs') workletDuration = gbsActivePlayer.getDuration();
+    }
+    if (hesActivePlayer && hesActivePlayer.setSpeed) {
+      hesActivePlayer.setSpeed(factor);
+      if (lastPlayMode === 'hes') workletDuration = hesActivePlayer.getDuration();
+    }
   };
 
   let monitorState = null;
@@ -172,6 +168,21 @@
   let nsfRollToken = 0;
   let spcRollToken = 0;
   let kssRollToken = 0;
+  let gbsRollToken = 0;
+  let hesRollToken = 0;
+
+  // NSF/SPC/KSSの先読みキャプチャは再生を止めても最後まで走り続けようとするため、
+  // 「別のフォーマットの再生/変換を始めたのに、前のフォーマットの先読みが
+  // keyboardDisplay.setRollTimeline() を上書きし続ける」という取り違えが起きる
+  // (KSS再生中にMML変換→MML再生すると、MMLのロールがKSSのロールで塗り潰される)。
+  // 他フォーマットの再生を開始する側は必ずこれを呼んで、走っている先読みを無効化する。
+  function invalidateOtherRollPrefetch(keep) {
+    if (keep !== 'nsf') nsfRollToken++;
+    if (keep !== 'spc') spcRollToken++;
+    if (keep !== 'kss') kssRollToken++;
+    if (keep !== 'gbs') gbsRollToken++;
+    if (keep !== 'hes') hesRollToken++;
+  }
 
   // リアルタイム再生(ScriptProcessorNode・メインスレッドAPU)中の
   // 現在のエンベロープ実出力を返す。MML/NSFどちらのストリームプレイヤーにも対応。
@@ -257,6 +268,19 @@
     return MML.Emu.snapshotOPLL(kssActivePlayer.player.opll);
   }
 
+  // GBS再生中のライブAPUスナップショット(鍵盤表示用)
+  function liveGbsApu() {
+    if (!gbsActivePlayer || !gbsActivePlayer.apu) return null;
+    return MML.Emu.snapshotGbApu(gbsActivePlayer.apu);
+  }
+
+  // HES(PC Engine)再生中のライブPSGスナップショット(鍵盤表示用)。HesReplayStreamPlayerは
+  // player=this(自己参照)でapuをそのまま持つ(GbsReplayStreamPlayer等と同じ形)。
+  function liveHesApu() {
+    if (!hesActivePlayer || !hesActivePlayer.player || !hesActivePlayer.player.apu) return null;
+    return MML.Emu.snapshotHuC6280Apu(hesActivePlayer.player.apu);
+  }
+
   // chips: string[] 例 ['vrc6'] / [] = APUのみ
   function setMonitorSource(result, getPositionSeconds, chips) {
     const addrSet = new Set();
@@ -278,9 +302,9 @@
 
   function renderMonitor(frameIndex) {
     if (!monitorState) {
-      cpuRegMonitorEl.textContent = '（再生中の情報がありません）';
-      soundRegMonitorEl.textContent = '（再生中の情報がありません）';
-      memMonitorEl.textContent = '（再生中の情報がありません）';
+      cpuRegMonitorEl.textContent = T('（再生中の情報がありません）');
+      soundRegMonitorEl.textContent = T('（再生中の情報がありません）');
+      memMonitorEl.textContent = T('（再生中の情報がありません）');
       return;
     }
 
@@ -302,12 +326,12 @@
         `P  = ${toHex(cpu.P, 2)}  ${toBin(cpu.P, 8)}  (${flagsStr})\n` +
         `PC = ${toHex(cpu.PC, 4)} ${toBin(cpu.PC, 16)}`;
     } else {
-      cpuRegMonitorEl.textContent = '（MML再生中はCPUレジスタの情報はありません）';
+      cpuRegMonitorEl.textContent = T('（MML再生中はCPUレジスタの情報はありません）');
     }
 
     // --- サウンドレジスタ ---
     if (regAddrs.length === 0) {
-      soundRegMonitorEl.textContent = '（書き込みがありません）';
+      soundRegMonitorEl.textContent = T('（書き込みがありません）');
     } else {
       const snap = regSnapshots[frameIndex] || {};
       soundRegMonitorEl.textContent = regAddrs.map((addr) => {
@@ -320,7 +344,7 @@
     if (memSnapshots) {
       memMonitorEl.textContent = hexDump(memSnapshots[frameIndex], 0);
     } else {
-      memMonitorEl.textContent = '（MML再生中はメモリ情報はありません）';
+      memMonitorEl.textContent = T('（MML再生中はメモリ情報はありません）');
     }
   }
 
@@ -340,6 +364,22 @@
   let mmlHighlightLastFollowSrc = -1; // 直近で追随スクロールした対象spanのdata-s(重複防止)
   let mmlHighlightSuppressed = false; // ■停止直後はPlayを押すまでハイライトを出さない
   let mmlRangeHighlightedElements = new Set(); // 現在.mml-range-selectedを付与中の要素（再生範囲=開始点〜終了点の常時表示）
+  // .mml-playingはtext-shadow4枚重ねの縁取り付きで、classList操作自体は軽くても
+  // ブラウザ側の再描画(ペイント)コストは無視できない。文字数の多いMMLではフレーム毎(60fps)の
+  // 描画更新がその分カクつきの原因になるため、見た目の滑らかさを大きく損なわない範囲で
+  // 更新頻度を間引く。追随スクロールのgetBoundingClientRect()は強制同期レイアウトを伴い
+  // さらに重いので、それとは別によりゆるい間隔で間引く
+  // MML再生はScriptProcessorNode(メインスレッド)でオーディオを生成しており(AudioWorkletでは
+  // なくメインスレッドを選んだ設計。src/audio/stream-player.js冒頭コメント参照)、ここでのJS処理は
+  // オーディオコールバックと同じスレッド/実行キューを取り合う。拡張音源を多く積んだ曲は
+  // renderFrame自体が既にバッファ時間(93ms)の大半を使っており、ここでの追加コストが
+  // わずかでも録音アンダーラン(音切れ・もたつき)の引き金になり得る。そのため間引き間隔を
+  // 長めに取り、かつ毎回のSet/配列の再アロケーションを避けてGCの発生機会自体を減らす
+  const MML_HIGHLIGHT_MIN_INTERVAL_MS = 100; // 約10fps上限
+  const MML_AUTOSCROLL_MIN_INTERVAL_MS = 200;
+  let mmlHighlightLastUpdateTime = 0;
+  let mmlAutoScrollLastTime = 0;
+  let mmlHighlightGen = 0; // 要素に付ける世代番号(Set再アロケーションなしで差分更新するため)
 
   function findActiveHighlightRange(ranges, frame, ch) {
     if (!ranges || ranges.length === 0) return null;
@@ -370,6 +410,20 @@
       el = el.nextElementSibling;
     }
     return result;
+  }
+
+  // collectElementsInRangeと同じ探索だが、配列を新規アロケートせずコールバックで渡す版。
+  // updateMmlPlaybackHighlightは毎フレーム(スロットル済みとはいえ)呼ばれ、かつ
+  // ScriptProcessorNodeのオーディオコールバックと同じメインスレッドを取り合うため、
+  // 無駄なGCの発生機会をできる限り減らす目的でこちらを使う
+  function forEachElementInRange(srcStart, srcEnd, cb) {
+    let el = mmlHighlightIndex.get(srcStart);
+    while (el) {
+      const s = Number(el.dataset.s);
+      if (!(s < srcEnd)) break;
+      cb(el);
+      el = el.nextElementSibling;
+    }
   }
 
   // startFrame〜endFrameと重なるレンジをすべて集める(範囲ハイライト用。単一フレームの
@@ -439,16 +493,36 @@
 
   function clearMmlPlaybackHighlight() {
     for (const el of mmlHighlightedElements) el.classList.remove('mml-playing');
-    mmlHighlightedElements = new Set();
+    mmlHighlightedElements.clear();
     mmlHighlightLastFrame = -1;
     mmlHighlightLastFollowSrc = -1;
   }
 
+  // 追随スクロールの位置キャッシュ。getBoundingClientRect/offsetTopは呼ぶたびに強制同期
+  // レイアウト(reflow)を起こし、直前のclassList変更で汚れた状態だとオーバーレイ全体の
+  // 再計算(実測で文字数の多いMMLで約11ms)を毎回誘発する。そこで各要素のoverlay内相対位置
+  // (offsetTop/offsetHeight)を再生開始時に一度だけ全採取してキャッシュし、以降のスクロールは
+  // レイアウトを一切読まず数値計算だけで済ませる(オーバーレイHTMLが変わるまでキャッシュ有効)。
+  let mmlGeomCacheGen = -1;
+  let mmlOverlayClientH = 0;
+  function ensureScrollGeomCache() {
+    if (mmlGeomCacheGen === mmlHighlightIndexGen) return;
+    // ここでの読み取りは1フレームぶんの強制レイアウト(再生開始直後に一度だけ)。
+    // 一度キャッシュすれば以降のフレームはレイアウトを読まない
+    mmlOverlayClientH = mmlHighlightEl.clientHeight;
+    for (const el of mmlHighlightIndex.values()) {
+      el._mmlTop = el.offsetTop;
+      el._mmlH = el.offsetHeight;
+    }
+    mmlGeomCacheGen = mmlHighlightIndexGen;
+  }
+
   function scrollMmlEditorToElement(el) {
-    const containerRect = mmlHighlightEl.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    const delta = (elRect.top + elRect.height / 2) - (containerRect.top + containerRect.height / 2);
-    mmlSourceEl.scrollTop += delta; // overlay側はattachHighlighterのscrollリスナーで自動追従
+    ensureScrollGeomCache();
+    if (el._mmlTop == null) return;
+    // 対象要素がオーバーレイの縦中央に来るようtextareaのscrollTopを設定
+    // (overlay側はattachHighlighterのscrollリスナーで自動追従する)
+    mmlSourceEl.scrollTop = el._mmlTop + el._mmlH / 2 - mmlOverlayClientH / 2;
   }
 
   function updateMmlPlaybackHighlight(frameIndex) {
@@ -457,30 +531,47 @@
       compiled && compiled.highlightRanges && frameIndex >= 0;
     if (!active) { if (mmlHighlightedElements.size > 0) clearMmlPlaybackHighlight(); return; }
     if (frameIndex === mmlHighlightLastFrame) return; // 位置が変わっていなければ再描画不要
+    const now = performance.now();
+    if (now - mmlHighlightLastUpdateTime < MML_HIGHLIGHT_MIN_INTERVAL_MS) return; // 描画頻度を間引く(次に許可される時点の最新フレームへ飛ぶ)
+    mmlHighlightLastUpdateTime = now;
     mmlHighlightLastFrame = frameIndex;
 
-    const nextElements = new Set();
+    // Set/配列を毎回新規アロケートせず、要素に世代番号を刻んで差分更新する(GC発生を減らす)。
+    // 要素自身に立てた_mmlGenと今回のgenを比べるだけなので、Setの中身は永続的に使い回せる
+    mmlHighlightGen++;
+    const gen = mmlHighlightGen;
     const followCh = mmlFollowChannelEl.value;
     let followEl = null;
     for (const ch of compiled.channelLetters) {
       if (keyboardDisplay.isChannelMuted(ch)) continue;
       const r = findActiveHighlightRange(compiled.highlightRanges[ch], frameIndex, ch);
       if (!r) continue;
-      const els = collectElementsInRange(r.srcStart, r.srcEnd);
-      for (const el of els) nextElements.add(el);
-      if (ch === followCh && els.length > 0) followEl = els[0];
+      let first = null;
+      forEachElementInRange(r.srcStart, r.srcEnd, (el) => {
+        if (first === null) first = el;
+        if (el._mmlGen !== gen) {
+          el._mmlGen = gen;
+          if (!mmlHighlightedElements.has(el)) {
+            el.classList.add('mml-playing');
+            mmlHighlightedElements.add(el);
+          }
+        }
+      });
+      if (ch === followCh && first !== null) followEl = first;
     }
-
+    // 今回の世代番号が付かなかった(=もう対象でなくなった)要素だけ消す
     for (const el of mmlHighlightedElements) {
-      if (!nextElements.has(el)) el.classList.remove('mml-playing');
+      if (el._mmlGen !== gen) {
+        el.classList.remove('mml-playing');
+        mmlHighlightedElements.delete(el);
+      }
     }
-    for (const el of nextElements) el.classList.add('mml-playing');
-    mmlHighlightedElements = nextElements;
 
     if (mmlAutoScrollEnableEl.checked && followEl) {
       const followSrc = Number(followEl.dataset.s);
-      if (followSrc !== mmlHighlightLastFollowSrc) {
+      if (followSrc !== mmlHighlightLastFollowSrc && now - mmlAutoScrollLastTime >= MML_AUTOSCROLL_MIN_INTERVAL_MS) {
         mmlHighlightLastFollowSrc = followSrc;
+        mmlAutoScrollLastTime = now;
         scrollMmlEditorToElement(followEl);
       }
     }
@@ -489,7 +580,7 @@
   // MMLコンパイル結果が変わるたびに追随チャンネル候補を更新する
   function populateFollowChannelSelect(channelLetters) {
     const prev = mmlFollowChannelEl.value;
-    mmlFollowChannelEl.innerHTML = '<option value="">なし</option>';
+    mmlFollowChannelEl.innerHTML = '<option value="">' + T('なし') + '</option>';
     for (const ch of channelLetters) {
       const opt = document.createElement('option');
       opt.value = ch;
@@ -506,7 +597,14 @@
     if (monitorState && monitorState.getPosition) {
       const frameDuration = monitorState.samplesPerFrame / monitorState.sampleRate;
       const pos = monitorState.getPosition();
-      let frameIndex = Math.floor(pos / frameDuration);
+      // MML再生(MmlStreamPlayer)はgetCurrentFrame()が speedFactor込みで既に正確な
+      // 曲フレーム位置を返す。pos(実時間)/frameDurationは等速(speedFactor=1)前提の
+      // 換算式なので、再生速度を等速以外にするとハイライト/レジスタモニタが
+      // 実際の再生と食い違っていた(pos基準のframeDuration換算をそのまま使うのは
+      // getCurrentFrame()を持たない他フォーマットへのフォールバックのみ)。
+      let frameIndex = (activePlayer && typeof activePlayer.getCurrentFrame === 'function')
+        ? activePlayer.getCurrentFrame()
+        : Math.floor(pos / frameDuration);
       frameIndex = Math.max(0, Math.min(monitorState.totalFrames - 1, frameIndex));
       renderMonitor(frameIndex);
       keyboardDisplay.update(pos);
@@ -525,133 +623,9 @@
   }
   requestAnimationFrame(monitorLoop);
 
-  let lastAssembly = null;
-
-  function assemble() {
-    const result = MML.Asm.assemble(sourceEl.value, { origin: 0x8000 });
-    lastAssembly = result;
-
-    let out = '';
-    if (result.errors.length > 0) {
-      out += result.errors.map(e => `[Line ${e.lineNo}] ${e.message}`).join('\n');
-      out += '\n\n';
-    } else {
-      out += 'アセンブル成功\n\n';
-    }
-
-    out += `Origin: ${toHex(result.origin, 4)}  End: ${toHex(result.end, 4)}  Size: ${result.bytes.length} bytes\n\n`;
-
-    out += '--- シンボルテーブル ---\n';
-    const symNames = Object.keys(result.symbols).filter(k => !k.startsWith('__'));
-    if (symNames.length === 0) {
-      out += '(なし)\n';
-    } else {
-      for (const name of symNames) {
-        out += `${name.padEnd(16)} = ${toHex(result.symbols[name], 4)}\n`;
-      }
-    }
-
-    out += '\n--- バイナリダンプ ---\n';
-    out += hexDump(result.bytes, result.origin);
-
-    asmOutputEl.innerHTML = '';
-    const pre = document.createElement('div');
-    pre.className = result.errors.length > 0 ? 'error' : '';
-    pre.textContent = out;
-    asmOutputEl.appendChild(pre);
-
-    return result;
-  }
-
-  function buildNSF() {
-    const result = lastAssembly || assemble();
-    if (result.errors.length > 0) {
-      nsfOutputEl.innerHTML = '<div class="error">アセンブルエラーがあるためNSFを生成できません。先にアセンブルしてください。</div>';
-      return null;
-    }
-
-    const headerOpt = {
-      songName: document.getElementById('songName').value,
-      artist: document.getElementById('artist').value,
-      copyright: document.getElementById('copyright').value,
-      totalSongs: parseInt(document.getElementById('totalSongs').value, 10) || 1,
-      startingSong: parseInt(document.getElementById('startingSong').value, 10) || 1,
-      extraChips: getExtraChipsFlag()
-    };
-
-    const nsfBytes = MML.NSF.buildFromAssembly(headerOpt, result, { init: 'INIT', play: 'PLAY' });
-    const parsed = MML.NSF.parseHeader(nsfBytes);
-
-    let out = `NSFサイズ: ${nsfBytes.length} bytes (header 128 + program ${result.bytes.length})\n\n`;
-    out += '--- ヘッダ内容 ---\n';
-    out += `Magic OK       : ${parsed.magicOk}\n`;
-    out += `Version        : ${parsed.version}\n`;
-    out += `Total Songs    : ${parsed.totalSongs}\n`;
-    out += `Starting Song  : ${parsed.startingSong}\n`;
-    out += `Load Address   : ${toHex(parsed.loadAddr, 4)}\n`;
-    out += `Init Address   : ${toHex(parsed.initAddr, 4)}\n`;
-    out += `Play Address   : ${toHex(parsed.playAddr, 4)}\n`;
-    out += `Song Name      : ${parsed.songName}\n`;
-    out += `Artist         : ${parsed.artist}\n`;
-    out += `Copyright      : ${parsed.copyright}\n`;
-    out += `NTSC Speed     : ${parsed.ntscSpeed}\n`;
-    out += `PAL Speed      : ${parsed.palSpeed}\n`;
-    out += `Extra Chips    : ${toHex(parsed.extraChips, 2)}\n\n`;
-
-    out += '--- ヘッダ先頭128バイト ダンプ ---\n';
-    out += hexDump(nsfBytes.slice(0, 128), 0);
-
-    nsfOutputEl.innerHTML = '';
-    const pre = document.createElement('div');
-    pre.className = 'ok';
-    pre.textContent = out;
-    nsfOutputEl.appendChild(pre);
-
-    return nsfBytes;
-  }
-
-  // --- Phase 2: エミュレータ試聴 ---
+  // --- エミュレータ試聴(DPCMプレビュー等で共用) ---
   let audioCtx = null;
   let currentSource = null;
-  const PREVIEW_SECONDS = 3;
-
-  function playPreview() {
-    const bytes = buildNSF();
-    if (!bytes) return;
-
-    stopPreview();
-
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
-    const player = new MML.Emu.NsfPlayer(bytes);
-    const startingSong = parseInt(document.getElementById('startingSong').value, 10) || 1;
-    player.initSong(startingSong - 1);
-
-    const sampleRate = audioCtx.sampleRate;
-    const totalSamples = Math.round(sampleRate * PREVIEW_SECONDS);
-    const raw = new Float32Array(totalSamples);
-    let pos = 0;
-    while (pos < totalSamples) {
-      const frame = player.renderFrame(sampleRate);
-      for (let i = 0; i < frame.length && pos < totalSamples; i++, pos++) {
-        raw[pos] = frame[i];
-      }
-    }
-
-    const blocked = MML.Emu.dcBlock(raw);
-    const buffer = audioCtx.createBuffer(1, totalSamples, sampleRate);
-    const data = buffer.getChannelData(0);
-    const gain = 3.0; // DCブロック後は振幅が小さいため増幅
-    for (let i = 0; i < totalSamples; i++) {
-      data[i] = Math.max(-1, Math.min(1, blocked[i] * gain));
-    }
-
-    const source = audioCtx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioCtx.destination);
-    source.start();
-    currentSource = source;
-  }
 
   function stopPreview() {
     if (currentSource) {
@@ -668,8 +642,37 @@
   const seekHandleStartEl = document.getElementById('seekHandleStart');
   const seekHandleEndEl = document.getElementById('seekHandleEnd');
   const seekRangeFillEl = document.getElementById('seekRangeFill');
+  const seekBufferedFillEl = document.getElementById('seekBufferedFill');
   const seekTicksEl = document.getElementById('seekTicks');
   const SEEK_RESOLUTION = 1000;
+
+  // NSF/KSS実ファイル再生のバックグラウンドキャプチャ進捗(0〜1)。シークバーの
+  // バッファ済み範囲インジケータ表示に使う。該当モード以外では常に非表示。
+  let nsfBufferedFraction = 1;
+  let kssBufferedFraction = 1;
+  let spcBufferedFraction = 1;
+  let gbsBufferedFraction = 1;
+  // HES(HesReplayStreamPlayer)もNSF/KSS/GBSと同じく、バックグラウンドの
+  // regsOnlyキャプチャが先読みで埋めた範囲までシーク・再生できる。
+  let hesBufferedFraction = 1;
+  function currentBufferedFraction() {
+    if (lastPlayMode === 'nsf') return nsfBufferedFraction;
+    if (lastPlayMode === 'kss') return kssBufferedFraction;
+    if (lastPlayMode === 'spc') return spcBufferedFraction;
+    if (lastPlayMode === 'gbs') return gbsBufferedFraction;
+    if (lastPlayMode === 'hes') return hesBufferedFraction;
+    return null;
+  }
+  function updateSeekBufferedUI() {
+    if (!seekBufferedFillEl) return;
+    const frac = currentBufferedFraction();
+    if (frac === null || frac >= 1) {
+      seekBufferedFillEl.style.display = 'none';
+      return;
+    }
+    seekBufferedFillEl.style.display = 'block';
+    seekBufferedFillEl.style.width = `${frac * 100}%`;
+  }
 
   let capturedBuffer = null;
   let transportSource = null;
@@ -694,6 +697,11 @@
   let workletDuration = 0;    // 総再生時間（秒）
   let lastMmlCompiled = null;  // モニタ用にコンパイル結果を保持
 
+  // 「MML再生」ボタンの3状態を区別するフラグ。■停止(または曲の自然終了)で true に戻り、
+  // そのときだけボタンは「▶ MML再生」(押すと再コンパイルして最初から再生)を表示する。
+  // 一時停止中(false かつ非再生)は「▶ 再生」(押すと一時停止位置から再コンパイルなしで再開)になる
+  let mmlPlaybackStopped = true;
+
   function formatTime(sec) {
     sec = Math.max(0, sec);
     const m = Math.floor(sec / 60);
@@ -701,9 +709,28 @@
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
 
+  // activePlayer(MML/NSF)とkssActivePlayer(KSS)は排他利用(片方の再生開始時に
+  // もう片方を止める設計)。共有トランスポート関数から「今アクティブな方」を
+  // 1箇所で判定できるようにする(再生/一時停止/シーク操作は両者で同じインターフェース
+  // を持つため、呼び出し側でフォーマットを区別する必要がない)。
+  function currentTransportPlayer() {
+    return activePlayer || kssActivePlayer || spcActivePlayer || gbsActivePlayer || hesActivePlayer;
+  }
+
+  // NSF/KSS/SPC/GBS/HESそれぞれの再生ボタンの見た目を更新する。実在しないものは
+  // 内部で自身のプレイヤーの有無をチェックするため、まとめて呼んでよい。
+  function updateFormatPlayButtons() {
+    updateNsfPlayButton();
+    updateKssPlayButton();
+    updateSpcPlayButton();
+    updateGbsPlayButton();
+    updateHesPlayButton();
+  }
+
   function getTransportPosition() {
-    if (activePlayer) {
-      return Math.max(0, Math.min(workletDuration, activePlayer.getPosition()));
+    const p = currentTransportPlayer();
+    if (p) {
+      return Math.max(0, Math.min(workletDuration, p.getPosition()));
     }
     if (!capturedBuffer) return 0;
     const pos = transportPlaying
@@ -713,11 +740,15 @@
   }
 
   function updateTransportUI() {
-    const duration = activePlayer ? workletDuration : (capturedBuffer ? capturedBuffer.duration : 0);
-    const playing = activePlayer ? activePlayer.isPlaying : transportPlaying;
-    document.getElementById('btnTransportPlayPause').textContent = playing ? '⏸ 一時停止' : '▶ 再生';
+    const p = currentTransportPlayer();
+    const duration = p ? workletDuration : (capturedBuffer ? capturedBuffer.duration : 0);
+    const playing = p ? p.isPlaying : transportPlaying;
+    const captureBtn = document.getElementById('btnMmlCapture');
+    captureBtn.classList.toggle('is-playing', !mmlPlaybackStopped && playing);
+    captureBtn.title = mmlPlaybackStopped ? T('MML再生') : (playing ? T('一時停止') : T('再生'));
     updateRangeMarkersUI(duration);
     updateSeekTicksUI(duration);
+    updateSeekBufferedUI();
     if (!duration) return;
     const pos = getTransportPosition();
     seekBarEl.value = String(Math.round((pos / duration) * SEEK_RESOLUTION));
@@ -728,7 +759,7 @@
       } else if (rangeEndSec !== null && pos >= rangeEndSec) {
         if (rangeEndArmed) {
           rangeEndArmed = false;
-          transportPause();
+          transportStop();
         } else {
           transportRaf = requestAnimationFrame(updateTransportUI);
         }
@@ -741,14 +772,16 @@
     }
   }
 
-  // 現在シーク可能かどうか（NSFストリーミング再生はシーク非対応、transportSeekと同じ判定）
+  // 現在シーク可能かどうか（transportSeekと同じ判定）
+  // HES(HesReplayStreamPlayer)もGBS/KSSと同じくバックグラウンドキャプチャの
+  // 先読み範囲内でseek()に対応する。
   function canSeek() {
-    if (activePlayer) return lastPlayMode === 'capture-mml';
+    if (currentTransportPlayer()) return lastPlayMode === 'capture-mml' || lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'spc' || lastPlayMode === 'gbs' || lastPlayMode === 'hes';
     return !!capturedBuffer;
   }
 
   function currentDuration() {
-    return activePlayer ? workletDuration : (capturedBuffer ? capturedBuffer.duration : 0);
+    return currentTransportPlayer() ? workletDuration : (capturedBuffer ? capturedBuffer.duration : 0);
   }
 
   // 開始点(青)/終了点(赤)ハンドルと範囲の塗りつぶしをシークバー上に表示する
@@ -779,6 +812,7 @@
   // シークバーの目盛り(時間の縦線+ラベル)を生成する。durationが変わった時だけ再構築する
   let lastTicksDuration = -1;
   function updateSeekTicksUI(duration) {
+    if (!seekTicksEl) return; // 目盛りUIは廃止済み(ヘッダーのシークバーには表示しない)
     if (duration === undefined) duration = currentDuration();
     if (duration === lastTicksDuration) return;
     lastTicksDuration = duration;
@@ -836,9 +870,12 @@
     updateMmlRangeHighlight();
   }
 
-  // 開始点/終了点ハンドルのドラッグ操作。ドラッグ中は左右反転しないよう互いにクランプする
+  // 開始点/終了点ハンドルのドラッグ操作。ドラッグ中は左右反転しないよう互いにクランプする。
+  // 最小間隔を秒数の固定値にすると、長い曲では画面上ではほぼ0pxになり2つのハンドルが
+  // 重なってしまい、DOM順で後にある終点側だけしか掴めなくなる(始点が下敷きになる)バグが
+  // あったため、常に画面上で一定px以上離れるよう duration/表示幅から逆算した秒数を使う。
+  const MIN_GAP_PX = 12;
   function setupRangeHandleDrag(handleEl, which) {
-    const MIN_GAP = 0.05; // 秒。開始点と終了点が完全に重ならないための最小間隔
     handleEl.addEventListener('pointerdown', (e) => {
       if (!canSeek()) return;
       const duration = currentDuration();
@@ -850,12 +887,13 @@
 
       const onMove = (ev) => {
         const wrapRect = seekBarWrapEl.getBoundingClientRect();
+        const minGap = (MIN_GAP_PX / wrapRect.width) * duration;
         const frac = Math.max(0, Math.min(1, (ev.clientX - wrapRect.left) / wrapRect.width));
         const sec = frac * duration;
         if (which === 'start') {
-          rangeStartSec = Math.max(0, Math.min(sec, rangeEndSec - MIN_GAP));
+          rangeStartSec = Math.max(0, Math.min(sec, rangeEndSec - minGap));
         } else {
-          rangeEndSec = Math.min(duration, Math.max(sec, rangeStartSec + MIN_GAP));
+          rangeEndSec = Math.min(duration, Math.max(sec, rangeStartSec + minGap));
         }
         rangeEndArmed = getTransportPosition() < rangeEndSec;
         updateRangeMarkersUI(duration);
@@ -889,11 +927,12 @@
     if (canSeek() && rangeStartSec > 0 && getTransportPosition() < rangeStartSec - 0.001) {
       transportSeek(rangeStartSec);
     }
-    if (activePlayer) {
-      if (activePlayer.isPlaying) return;
+    const p = currentTransportPlayer();
+    if (p) {
+      if (p.isPlaying) return;
       if (audioCtx) audioCtx.resume();
-      activePlayer.play();
-      updateNsfPlayButton();
+      p.play();
+      updateFormatPlayButtons();
       transportRaf = requestAnimationFrame(updateTransportUI);
       return;
     }
@@ -912,11 +951,12 @@
   }
 
   function transportPause() {
-    if (activePlayer) {
-      if (!activePlayer.isPlaying) return;
-      activePlayer.pause();
+    const p = currentTransportPlayer();
+    if (p) {
+      if (!p.isPlaying) return;
+      p.pause();
       if (transportRaf) cancelAnimationFrame(transportRaf);
-      updateNsfPlayButton();
+      updateFormatPlayButtons();
       updateTransportUI();
       return;
     }
@@ -933,15 +973,17 @@
 
   function transportStop() {
     mmlHighlightSuppressed = true;
+    mmlPlaybackStopped = true;
     // 停止後は曲頭(0)ではなく再生範囲の開始点に戻る（開始点未設定時は従来通り0）
     const restoreTo = rangeStartSec || 0;
-    if (activePlayer) {
-      activePlayer.stop();
-      if (restoreTo > 0 && lastPlayMode === 'capture-mml') {
-        activePlayer.seek(Math.round(restoreTo * audioCtx.sampleRate));
+    const p = currentTransportPlayer();
+    if (p) {
+      p.stop();
+      if (restoreTo > 0 && (lastPlayMode === 'capture-mml' || lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'spc' || lastPlayMode === 'gbs' || lastPlayMode === 'hes')) {
+        p.seek(Math.round(restoreTo * audioCtx.sampleRate));
       }
       if (transportRaf) cancelAnimationFrame(transportRaf);
-      updateNsfPlayButton();
+      updateFormatPlayButtons();
       updateTransportUI();
       return;
     }
@@ -953,13 +995,14 @@
   function transportSeek(seconds) {
     // シークバーを動かした位置をハイライトで即座に確認できるようにする（■停止直後でも）
     mmlHighlightSuppressed = false;
-    if (activePlayer) {
-      if (lastPlayMode !== 'capture-mml') return; // NSFはシーク非対応
-      const wasPlaying = activePlayer.isPlaying;
-      activePlayer.pause();
-      activePlayer.seek(Math.round(Math.max(0, Math.min(workletDuration, seconds)) * audioCtx.sampleRate));
+    const p = currentTransportPlayer();
+    if (p) {
+      if (lastPlayMode !== 'capture-mml' && lastPlayMode !== 'nsf' && lastPlayMode !== 'kss' && lastPlayMode !== 'spc' && lastPlayMode !== 'gbs' && lastPlayMode !== 'hes') return;
+      const wasPlaying = p.isPlaying;
+      p.pause();
+      p.seek(Math.round(Math.max(0, Math.min(workletDuration, seconds)) * audioCtx.sampleRate));
       if (wasPlaying) {
-        activePlayer.play();
+        p.play();
         transportRaf = requestAnimationFrame(updateTransportUI);
       } else {
         updateTransportUI();
@@ -1009,76 +1052,6 @@
     return writeLog;
   }
 
-  function applyCaptureResult(result, sampleRate, extraInfo, chips) {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    transportStop();
-    capturedBuffer = null;
-
-    const buffer = audioCtx.createBuffer(1, result.audio.length, sampleRate);
-    const data = buffer.getChannelData(0);
-    const gain = 3.0;
-    for (let i = 0; i < result.audio.length; i++) {
-      data[i] = Math.max(-1, Math.min(1, result.audio[i] * gain));
-    }
-    capturedBuffer = buffer;
-    transportOffset = 0;
-
-    setMonitorSource(result, getTransportPosition, chips || []);
-
-    let totalWrites = 0;
-    for (const writes of result.writeLog) totalWrites += writes.length;
-
-    let out = extraInfo || '';
-    out += `フレーム数        : ${result.totalFrames}\n`;
-    out += `1フレームのサンプル数: ${result.samplesPerFrame.toFixed(2)}\n`;
-    out += `総サンプル数      : ${result.audio.length}\n`;
-    out += `サンプルレート    : ${sampleRate} Hz\n`;
-    out += `総再生時間        : ${formatTime(buffer.duration)}\n`;
-    out += `レジスタ書き込み総数: ${totalWrites}\n`;
-
-    captureOutputEl.innerHTML = '';
-    const pre = document.createElement('div');
-    pre.className = 'ok';
-    pre.textContent = out;
-    captureOutputEl.appendChild(pre);
-
-    preservePlaybackRange(buffer.duration);
-    updateTransportUI();
-    seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(buffer.duration)}`;
-  }
-
-  async function runCapture() {
-    const bytes = buildNSF();
-    if (!bytes) return;
-
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
-    const duration = parseInt(document.getElementById('captureDuration').value, 10) || 10;
-    const startingSong = parseInt(document.getElementById('startingSong').value, 10) || 1;
-    const sampleRate = audioCtx.sampleRate;
-
-    const btnCapture = document.getElementById('btnCapture');
-    btnCapture.disabled = true;
-    captureOutputEl.innerHTML = '<div>レンダリング中… 0%</div>';
-
-    const t0 = performance.now();
-    const result = await MML.Emu.captureSongAsync(bytes, {
-      songIndex: startingSong - 1,
-      durationSeconds: duration,
-      sampleRate,
-      mute: getChannelMuteConfig()
-    }, (done, total) => {
-      captureOutputEl.innerHTML = `<div>レンダリング中… ${Math.round(done / total * 100)}%</div>`;
-    });
-    const elapsedMs = performance.now() - t0;
-
-    btnCapture.disabled = false;
-    lastPlayMode = 'capture-nsf';
-    applyCaptureResult(result, sampleRate, `キャプチャ完了 (処理時間: ${elapsedMs.toFixed(1)} ms)\n\n`,
-      getExpansionChips());
-  }
-
   // --- フェーズ1.7: MML本文の@DPCM<n>参照ファイルの読み込みUI ---
   // ファイル名(@DPCM<n>={"file",...}の"file")をキーにエンコード済みバイト列を
   // キャッシュする。セッション内で一度読み込めば、再コンパイル・再生時に
@@ -1109,15 +1082,15 @@
   async function loadDpcmSampleFile(filename, freq, file, statusEl) {
     try {
       if (isDmcFilename(file.name)) {
-        statusEl.textContent = '読込中…';
+        statusEl.textContent = T('読込中…');
         const arrayBuffer = await file.arrayBuffer();
         dpcmSampleCache[filename] = new Uint8Array(arrayBuffer);
-        statusEl.textContent = `読み込み済み(${dpcmSampleCache[filename].length}バイト、.dmc生データ)。` +
-          '再コンパイル/再生してください';
+        statusEl.textContent = T('読み込み済み({n}バイト、.dmc生データ)。再コンパイル/再生してください',
+          { n: dpcmSampleCache[filename].length });
         statusEl.className = 'ok';
         return;
       }
-      statusEl.textContent = '変換中…';
+      statusEl.textContent = T('変換中…');
       if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       const arrayBuffer = await file.arrayBuffer();
       const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
@@ -1132,11 +1105,11 @@
       }
       const result = MML.Dpcm.encode(samples, audioBuffer.sampleRate, freq);
       dpcmSampleCache[filename] = result.bytes;
-      statusEl.textContent = `読み込み済み(${result.bytes.length}バイト、レート${freq}=${result.rateHz.toFixed(0)}Hz)。` +
-        '再コンパイル/再生してください';
+      statusEl.textContent = T('読み込み済み({n}バイト、レート{freq}={hz}Hz)。再コンパイル/再生してください',
+        { n: result.bytes.length, freq, hz: result.rateHz.toFixed(0) });
       statusEl.className = 'ok';
     } catch (e) {
-      statusEl.textContent = `変換失敗: ${e.message}`;
+      statusEl.textContent = T('変換失敗: {msg}', { msg: e.message });
       statusEl.className = 'error';
     }
   }
@@ -1154,7 +1127,7 @@
     dpcmSampleListEl.style.display = '';
     dpcmSampleListEl.innerHTML = '';
     const title = document.createElement('div');
-    title.textContent = 'MML内で参照されている@DPCMサンプル:';
+    title.textContent = T('MML内で参照されている@DPCMサンプル:');
     dpcmSampleListEl.appendChild(title);
     for (const filename of names) {
       const freq = files[filename];
@@ -1162,7 +1135,7 @@
       row.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:2px;';
 
       const label = document.createElement('span');
-      label.textContent = `"${filename}" (レート${freq}):`;
+      label.textContent = T('"{file}" (レート{freq}):', { file: filename, freq });
       row.appendChild(label);
 
       const input = document.createElement('input');
@@ -1173,8 +1146,8 @@
       const status = document.createElement('span');
       status.className = dpcmSampleCache[filename] ? 'ok' : '';
       status.textContent = dpcmSampleCache[filename]
-        ? `読み込み済み(${dpcmSampleCache[filename].length}バイト)`
-        : '未読み込み(この曲は無音になります)';
+        ? T('読み込み済み({n}バイト)', { n: dpcmSampleCache[filename].length })
+        : T('未読み込み(この曲は無音になります)');
       row.appendChild(status);
 
       input.addEventListener('change', () => {
@@ -1190,43 +1163,11 @@
   function getMmlOpt() {
     refreshDpcmSampleList(mmlSourceEl.value);
     return {
-      expansions: getExpansionChips(),
       fdsWave: MML.WaveformEditor.getFdsWave(),
       n163Wave: MML.WaveformEditor.getN163Wave(),
       mute: getChannelMuteConfig(),
       dpcmSamples: dpcmSampleCache
     };
-  }
-
-  function compileMml() {
-    const result = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
-
-    let out = '';
-    if (result.errors.length > 0) {
-      out += result.errors.map(e => e.lineNo ? `[Line ${e.lineNo}] ${e.message}` : e.message).join('\n');
-      out += '\n\n';
-    } else {
-      out += 'コンパイル成功\n\n';
-    }
-
-    out += `テンポ      : ${result.tempo}\n`;
-    const shownExpansions = displayExpansions(result.expansions);
-    out += `拡張音源    : ${shownExpansions.length > 0 ? shownExpansions.join(', ') : 'なし'}\n`;
-    out += `総フレーム数: ${result.totalFrames}\n`;
-    out += `総再生時間  : ${formatTime(result.totalFrames / result.frameRate)}\n\n`;
-
-    for (const ch of result.channelLetters) {
-      const writes = result.tracks[ch].reduce((a, w) => a + w.length, 0);
-      out += `チャンネル${ch}: レジスタ書き込み ${writes} 件\n`;
-    }
-
-    mmlOutputEl.innerHTML = '';
-    const pre = document.createElement('div');
-    pre.className = result.errors.length > 0 ? 'error' : 'ok';
-    pre.textContent = out;
-    mmlOutputEl.appendChild(pre);
-
-    return result;
   }
 
   // MMLをコンパイルし、ppmck方式バイトコード(src/nsf/mckBytecode.js)+
@@ -1240,23 +1181,26 @@
 
     if (result.errors.length > 0) {
       msg.className = 'error';
-      msg.textContent = 'MMLコンパイルエラーのため書き出せません:\n' +
+      msg.textContent = T('MMLコンパイルエラーのため書き出せません:') + '\n' +
         result.errors.map(e => e.lineNo ? `[Line ${e.lineNo}] ${e.message}` : e.message).join('\n');
       mmlOutputEl.appendChild(msg);
       return;
     }
 
+    // #TITLE/#COMPOSER/#MAKER(MML本文)からNSFヘッダを組み立てる
+    // (DESIGN.md INV-2: MMLテキストが正典。UI入力欄は廃止)
+    const meta = result.meta || {};
     const headerOpt = {
-      songName: document.getElementById('songName').value,
-      artist: document.getElementById('artist').value,
-      copyright: document.getElementById('copyright').value,
+      songName: meta.title || '',
+      artist: meta.composer || '',
+      copyright: meta.maker || '',
       totalSongs: 1,
       startingSong: 1
     };
     const built = MML.Driver.buildBankedNsfBytes(result, headerOpt);
     if (built.asmErrors.length > 0) {
       msg.className = 'error';
-      msg.textContent = 'ドライバのアセンブルに失敗しました(内部エラー):\n' +
+      msg.textContent = T('ドライバのアセンブルに失敗しました(内部エラー):') + '\n' +
         built.asmErrors.map(e => `[Line ${e.lineNo}] ${e.message}`).join('\n');
       mmlOutputEl.appendChild(msg);
       return;
@@ -1264,23 +1208,26 @@
     const nsfBytes = built.nsfBytes;
     MML.NSF.download(nsfBytes, (headerOpt.songName || 'output') + '.nsf');
 
-    let out = `NSF書き出し完了: ${nsfBytes.length}バイト(${built.bankCount}バンク、` +
-      `うち曲データ ${Math.max(0, built.bankCount - 8)}バンク)\n`;
+    let out = T('NSF書き出し完了: {bytes}バイト({banks}バンク、うち曲データ {songBanks}バンク)',
+      { bytes: nsfBytes.length, banks: built.bankCount, songBanks: Math.max(0, built.bankCount - 8) }) + '\n';
     if (built.unsupportedExpansions.length > 0) {
-      out += `注意: 拡張音源(${built.unsupportedExpansions.join(', ')})は現状のNSF書き出しでは` +
-        '未対応のため、該当チャンネルは無音になります(VRC6/MMC5/FME7は対応済み)。\n';
+      out += T('注意: 拡張音源({chips})は現状のNSF書き出しでは未対応のため、該当チャンネルは無音になります(VRC6/MMC5/FME7は対応済み)。',
+        { chips: built.unsupportedExpansions.join(', ') }) + '\n';
     }
     msg.className = 'ok';
     msg.textContent = out;
     mmlOutputEl.appendChild(msg);
   }
 
-  function runMmlStream() {
+  // compileOnly=true: コンパイル・再生準備(モニタ/DPCMサンプル欄/チャンネル選択欄など各種UIの
+  // 反映)のみ行い、実際の音声再生は開始しない。NSF2MML等の変換直後にMML本文だけを差し替えても
+  // これらの要素は自動更新されないため、変換完了時にはこちらを呼ぶ
+  function prepareMmlStream(compileOnly) {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
     const btnMmlCapture = document.getElementById('btnMmlCapture');
     btnMmlCapture.disabled = true;
-    captureOutputEl.innerHTML = '<div>コンパイル中…</div>';
+    captureOutputEl.innerHTML = '<div>' + T('コンパイル中…') + '</div>';
 
     const compiled = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
     if (compiled.errors.length > 0) {
@@ -1290,51 +1237,73 @@
       return;
     }
 
-    // 既存の再生を停止
-    transportStop();
-    stopActivePlayer();
-    capturedBuffer = null;
+    // compile()自体は成功していても、この先(再生用プレイヤー構築等)で予期しない例外が
+    // 起きると、それを捕まえるcatchが無かったため「コンパイル中…」の表示とボタンの
+    // disabled状態がそのまま固まり、ユーザーからは「MMLコンパイルが終わらない」ように
+    // 見えていた(実際はUncaught例外で処理が中断していただけ)。実例: HES由来のMMLで
+    // DPCMサンプルが長すぎるとMmlStreamPlayer.load()のbuildDpcmBusがRangeErrorを投げていた
+    // (src/mml/compiler.js layoutDpcmSamples側で修正済みだが、想定外の例外一般に対する
+    // フォールバックとしてここでも捕捉し、必ずUIへエラー表示・ボタン復帰させる)
+    try {
+      // 既存の再生を停止。MMLとNSF/SPC/KSSファイル再生は排他(同時に鳴らす意味がない)なので、
+      // 音だけでなくピアノロールの先読みキャプチャもここで確実に止める。止めないと
+      // KSS/SPCの先読みが完了までsetRollTimeline()を上書きし続け、MMLのロールが壊れる。
+      transportStop();
+      stopActivePlayer();
+      stopKssPlayback();
+      stopSpcPlayback();
+      stopVoiceMonitor();
+      invalidateOtherRollPrefetch();
+      capturedBuffer = null;
 
-    lastMmlCompiled = compiled;
-    lastPlayMode    = 'capture-mml';
-    populateFollowChannelSelect(compiled.channelLetters);
+      lastMmlCompiled = compiled;
+      lastPlayMode    = 'capture-mml';
+      populateFollowChannelSelect(compiled.channelLetters);
 
-    // モニタ用 regSnapshots をメインスレッドで即時構築（音声生成なし）
-    resetN163Max();
-    const regSnapshots    = buildRegSnapshotsFromTracks(compiled);
-    const writeLog        = buildWriteLogFromTracks(compiled);
-    const samplesPerFrame = audioCtx.sampleRate / compiled.frameRate;
-    setMonitorSource(
-      { regSnapshots, writeLog, cpuSnapshots: null, memSnapshots: null,
-        sampleRate: audioCtx.sampleRate, samplesPerFrame,
-        totalFrames: compiled.totalFrames,
-        getApuEnv: liveApuEnv, getN163: liveN163,
-        getFME7: liveFME7, getMmc5: liveMMC5, getVRC7: liveVRC7 }, // 音量/拡張音源表示をライブ反映
-      getTransportPosition,
-      compiled.expansions
-    );
+      // モニタ用 regSnapshots をメインスレッドで即時構築（音声生成なし）
+      resetN163Max();
+      const regSnapshots    = buildRegSnapshotsFromTracks(compiled);
+      const writeLog        = buildWriteLogFromTracks(compiled);
+      const samplesPerFrame = audioCtx.sampleRate / compiled.frameRate;
+      setMonitorSource(
+        { regSnapshots, writeLog, cpuSnapshots: null, memSnapshots: null,
+          sampleRate: audioCtx.sampleRate, samplesPerFrame,
+          totalFrames: compiled.totalFrames,
+          getApuEnv: liveApuEnv, getN163: liveN163,
+          getFME7: liveFME7, getMmc5: liveMMC5, getVRC7: liveVRC7 }, // 音量/拡張音源表示をライブ反映
+        getTransportPosition,
+        compiled.expansions
+      );
 
-    // MmlStreamPlayer を生成してデータをロード
-    const player = new MML.Audio.MmlStreamPlayer(audioCtx);
-    player.load(compiled, getChannelMuteConfig());
-    player.onEnded = () => {
-      if (transportRaf) cancelAnimationFrame(transportRaf);
-      updateTransportUI();
-    };
+      // MmlStreamPlayer を生成してデータをロード
+      const player = new MML.Audio.MmlStreamPlayer(audioCtx);
+      player.load(compiled, getChannelMuteConfig());
+      // 曲末まで再生し終えて音声スレッド側が自然にisPlaying=falseにした場合も、
+      // ■停止を押したときと同じ状態(mmlPlaybackStopped、開始点への復帰)にする
+      player.onEnded = () => {
+        if (transportRaf) cancelAnimationFrame(transportRaf);
+        transportStop();
+      };
 
-    activePlayer    = player;
-    player.setSpeed(currentSpeedFactor);
-    workletDuration = player.getDuration();
+      activePlayer    = player;
+      player.setSpeed(currentSpeedFactor);
+      workletDuration = player.getDuration();
+    } catch (e) {
+      captureOutputEl.innerHTML = `<div class="error">${T('再生準備に失敗しました(内部エラー): {msg}', { msg: e.message })}</div>`;
+      btnMmlCapture.disabled = false;
+      return;
+    }
 
     const duration = workletDuration;
     const shownExpansions = displayExpansions(compiled.expansions);
-    const expansionsLabel = shownExpansions.length > 0 ? shownExpansions.join(', ') : 'なし';
-    let out = `再生準備完了 (テンポ ${compiled.tempo}, 拡張音源: ${expansionsLabel})\n\n`;
-    out += `総フレーム数: ${compiled.totalFrames}\n`;
-    out += `総再生時間  : ${formatTime(duration)}\n`;
+    const expansionsLabel = shownExpansions.length > 0 ? shownExpansions.join(', ') : T('なし');
+    let out = T('再生準備完了 (テンポ {tempo}, 拡張音源: {chips})',
+      { tempo: compiled.tempo, chips: expansionsLabel }) + '\n\n';
+    out += T('総フレーム数: {n}', { n: compiled.totalFrames }) + '\n';
+    out += T('総再生時間  : {time}', { time: formatTime(duration) }) + '\n';
     for (const ch of compiled.channelLetters) {
       const writes = compiled.tracks[ch].reduce((a, w) => a + w.length, 0);
-      out += `チャンネル${ch}: ${writes} 件\n`;
+      out += T('チャンネル{ch}: {n} 件', { ch, n: writes }) + '\n';
     }
     captureOutputEl.innerHTML = '';
     const pre = document.createElement('div');
@@ -1347,7 +1316,14 @@
     timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
     btnMmlCapture.disabled = false;
 
-    transportPlay();
+    if (!compileOnly) {
+      mmlPlaybackStopped = false;
+      transportPlay();
+    }
+  }
+
+  function runMmlStream() {
+    prepareMmlStream(false);
   }
 
   // --- Phase 6: DPCMコンバータ ---
@@ -1367,7 +1343,7 @@
   async function convertDpcm() {
     const file = dpcmFileEl.files[0];
     if (!file) {
-      dpcmOutputEl.innerHTML = '<div class="error">音声ファイルを選択してください。</div>';
+      dpcmOutputEl.innerHTML = '<div class="error">' + T('音声ファイルを選択してください。') + '</div>';
       return;
     }
 
@@ -1391,13 +1367,13 @@
     lastDpcmResult = result;
 
     let out = '';
-    out += `元サンプルレート      : ${audioBuffer.sampleRate} Hz\n`;
-    out += `元サンプル数          : ${samples.length}\n`;
-    out += `DMCレート             : ${rateIndex} (${result.rateHz.toFixed(1)} Hz)\n`;
-    out += `エンコード後サンプル数: ${result.sampleCount}\n`;
-    out += `データサイズ          : ${result.bytes.length} bytes\n`;
-    out += `再生時間              : ${formatTime(result.sampleCount / result.rateHz)}\n\n`;
-    out += '--- バイナリダンプ (先頭256バイト) ---\n';
+    out += T('元サンプルレート      : {rate} Hz', { rate: audioBuffer.sampleRate }) + '\n';
+    out += T('元サンプル数          : {n}', { n: samples.length }) + '\n';
+    out += T('DMCレート             : {idx} ({hz} Hz)', { idx: rateIndex, hz: result.rateHz.toFixed(1) }) + '\n';
+    out += T('エンコード後サンプル数: {n}', { n: result.sampleCount }) + '\n';
+    out += T('データサイズ          : {n} bytes', { n: result.bytes.length }) + '\n';
+    out += T('再生時間              : {time}', { time: formatTime(result.sampleCount / result.rateHz) }) + '\n\n';
+    out += T('--- バイナリダンプ (先頭256バイト) ---') + '\n';
     out += MML.Dpcm.hexDump(result.bytes.slice(0, 256));
 
     dpcmOutputEl.innerHTML = '';
@@ -1450,9 +1426,8 @@
   let nsfPlaybackStartTime = 0;   // 再生開始時の audioCtx.currentTime
   let nsfIsRendering = false;
 
-  // ミュート変更時の自動再レンダリング管理
-  let lastPlayMode = null; // 'nsf' | 'capture-nsf' | 'capture-mml'
-  let muteRerenderTimer = null;
+  // 再生状態の種別管理
+  let lastPlayMode = null; // 'nsf' | 'capture-mml'
 
   const NSF_CHIP_NAMES = [
     ['VRC6', MML.NSF.CHIP_FLAGS.VRC6],
@@ -1465,7 +1440,7 @@
 
   function describeChips(flags) {
     const names = NSF_CHIP_NAMES.filter(([, bit]) => (flags & bit) !== 0).map(([name]) => name);
-    return names.length > 0 ? names.join(', ') : 'なし (2A03のみ)';
+    return names.length > 0 ? names.join(', ') : T('なし (2A03のみ)');
   }
 
   function renderNsfFileHeader(header) {
@@ -1480,10 +1455,11 @@
     out += `Song Name      : ${header.songName}\n`;
     out += `Artist         : ${header.artist}\n`;
     out += `Copyright      : ${header.copyright}\n`;
-    out += `NTSC Speed     : ${header.ntscSpeed} (1/1,000,000秒)\n`;
-    out += `PAL Speed      : ${header.palSpeed} (1/1,000,000秒)\n`;
+    out += T('NTSC Speed     : {v} (1/1,000,000秒)', { v: header.ntscSpeed }) + '\n';
+    out += T('PAL Speed      : {v} (1/1,000,000秒)', { v: header.palSpeed }) + '\n';
     out += `PAL/NTSC Bit   : ${toHex(header.palNtscBit, 2)}\n`;
-    out += `拡張音源       : ${describeChips(header.extraChips)} (${toHex(header.extraChips, 2)})\n`;
+    out += T('拡張音源       : {chips} ({hex})',
+      { chips: describeChips(header.extraChips), hex: toHex(header.extraChips, 2) }) + '\n';
 
     nsfFileHeaderEl.innerHTML = '';
     const pre = document.createElement('div');
@@ -1505,13 +1481,13 @@
     const bytes = new Uint8Array(arrayBuffer);
 
     if (bytes.length < 128) {
-      nsfFileHeaderEl.innerHTML = '<div class="error">ファイルサイズが小さすぎます（NSFヘッダは128バイト必要です）。</div>';
+      nsfFileHeaderEl.innerHTML = '<div class="error">' + T('ファイルサイズが小さすぎます（NSFヘッダは128バイト必要です）。') + '</div>';
       return;
     }
 
     const header = MML.NSF.parseHeader(bytes);
     if (!header.magicOk) {
-      nsfFileHeaderEl.innerHTML = '<div class="error">NSFヘッダのマジックナンバーが不正です（NSFファイルではない可能性があります）。</div>';
+      nsfFileHeaderEl.innerHTML = '<div class="error">' + T('NSFヘッダのマジックナンバーが不正です（NSFファイルではない可能性があります）。') + '</div>';
       return;
     }
 
@@ -1532,7 +1508,8 @@
     const btn = document.getElementById('btnNsfFilePlay');
     btn.disabled = nsfIsRendering;
     const isPlaying = lastPlayMode === 'nsf' && activePlayer && activePlayer.isPlaying;
-    btn.textContent = isPlaying ? '⏸ 一時停止' : '▶ 再生';
+    btn.classList.toggle('is-playing', isPlaying);
+    btn.title = isPlaying ? T('一時停止') : T('再生');
   }
 
   function stopNsfFilePlayback() {
@@ -1565,7 +1542,7 @@
       taps.push(now);
       taps = taps.slice(-16); // 直近16タップの移動窓
       if (taps.length < 2) {
-        info.textContent = 'タップ1回目… 拍に合わせて続けてタップ';
+        if (info) info.textContent = T('タップ1回目… 拍に合わせて続けてタップ');
         return;
       }
       const intervals = [];
@@ -1577,18 +1554,20 @@
       const avg = good.reduce((a, b) => a + b, 0) / good.length;
       const bpm = Math.max(40, Math.min(400, Math.round(60000 / avg)));
       input.value = String(bpm);
-      info.textContent = `${taps.length}回タップ → ${bpm} BPM`;
+      if (info) info.textContent = T('{n}回タップ → {bpm} BPM', { n: taps.length, bpm });
     });
 
     btnClear.addEventListener('click', () => {
       input.value = '';
       taps = [];
-      info.textContent = '自動検出に戻しました';
+      if (info) info.textContent = T('自動検出に戻しました');
     });
   }
   setupTempoControl('nsf');
   setupTempoControl('spc');
   setupTempoControl('kss');
+  setupTempoControl('gbs');
+  setupTempoControl('hes');
 
   // 変換テンポ入力欄の値 (空/不正なら null = 自動検出)
   function getManualBpm(prefix) {
@@ -1601,7 +1580,7 @@
 
   async function runNsf2Mml() {
     if (!loadedNsfBytes || !loadedNsfHeader) {
-      nsfFileStatusEl.innerHTML = '<div class="error">先にNSFファイルを読み込んでください。</div>';
+      nsfFileStatusEl.innerHTML = '<div class="error">' + T('先にNSFファイルを読み込んでください。') + '</div>';
       return;
     }
     if (nsfIsRendering) return;
@@ -1617,7 +1596,7 @@
       const duration = parseInt(nsfPlayDurationEl.value, 10) || 30;
       nsfIsRendering = true;
       updateNsfPlayButton();
-      nsfFileStatusEl.innerHTML = '<div>MML変換用レンダリング中…</div>';
+      nsfFileStatusEl.innerHTML = '<div>' + T('MML変換用レンダリング中…') + '</div>';
 
       result = await MML.Emu.captureSongAsync(loadedNsfBytes, {
         songIndex: songNo - 1,
@@ -1630,7 +1609,7 @@
       lastNsfCaptureResult = result;
     }
 
-    nsfFileStatusEl.innerHTML = '<div>MML変換中…</div>';
+    nsfFileStatusEl.innerHTML = '<div>' + T('MML変換中…') + '</div>';
     // 少し待って UI を更新させる
     await new Promise(r => setTimeout(r, 10));
 
@@ -1641,7 +1620,7 @@
         result.writeLog, loadedNsfBytes, loadedNsfHeader, songNo - 1, result.initRegs, result.initWrites,
         { bpm: nsfManualBpm, n163Snapshots: result.n163Snapshots });
     } catch (e) {
-      nsfFileStatusEl.innerHTML = `<div class="error">変換エラー: ${e.message}</div>`;
+      nsfFileStatusEl.innerHTML = '<div class="error">' + T('変換エラー: {msg}', { msg: e.message }) + '</div>';
       return;
     }
 
@@ -1649,9 +1628,8 @@
     mmlSourceEl.value = converted.mml;
     mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新
 
-    // 検出した拡張音源チェックボックスと抽出済み波形を反映
-    // (これをやらないと拡張チャンネルのMMLは出力されてもコンパイル時に鳴らない)
-    if (converted.expansions) setExpansionChips(converted.expansions);
+    // 抽出済み波形を波形エディタへ反映(拡張音源の有効化自体はMML本文に埋め込まれた
+    // #EX-*ディレクティブがコンパイル時に自動検出するため、UI側の操作は不要)
     if (converted.fdsWave && MML.WaveformEditor.fdsWave) MML.WaveformEditor.fdsWave.setData(converted.fdsWave);
     if (converted.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(converted.n163Wave);
 
@@ -1664,11 +1642,20 @@
     }
 
     const dpcmMsg = converted.dpcmFiles.length > 0
-      ? `、DPCM ${converted.dpcmFiles.length} ファイル出力` : '';
+      ? T('、DPCM {n} ファイル出力', { n: converted.dpcmFiles.length }) : '';
     const expMsg = converted.expansions && converted.expansions.length > 0
-      ? `、拡張音源: ${converted.expansions.join(', ')}` : '';
-    nsfFileStatusEl.innerHTML =
-      `<div class="ok">MML変換完了 (${nsfManualBpm ? '指定' : '推定'} ${converted.bpm} BPM${expMsg}${dpcmMsg}) → MMLエディタに出力しました</div>`;
+      ? T('、拡張音源: {chips}', { chips: converted.expansions.join(', ') }) : '';
+    nsfFileStatusEl.innerHTML = '<div class="ok">' +
+      T('MML変換完了 ({mode} {bpm} BPM{exp}{dpcm}) → MMLエディタに出力しました',
+        { mode: nsfManualBpm ? T('指定') : T('推定'), bpm: converted.bpm, exp: expMsg, dpcm: dpcmMsg }) + '</div>';
+
+    // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
+    // 各種UIをMML本文に反映する(再生は開始しない)。
+    // 新規変換された曲なので、前回再生していた曲の再生範囲(赤/青ハンドル)を
+    // 引き継がず全体にリセットする(preservePlaybackRangeによる引き継ぎを無効化)
+    rangeStartSec = 0;
+    rangeEndSec = null;
+    prepareMmlStream(true);
   }
 
   // Float32Array (DCブロック済み, gain適用前) → 16bit PCM WAV Blob を生成
@@ -1699,7 +1686,7 @@
 
   async function exportNsfWav() {
     if (!loadedNsfBytes || !loadedNsfHeader) {
-      nsfFileStatusEl.innerHTML = '<div class="error">先にNSFファイルを読み込んでください。</div>';
+      nsfFileStatusEl.innerHTML = '<div class="error">' + T('先にNSFファイルを読み込んでください。') + '</div>';
       return;
     }
     if (nsfIsRendering) return;
@@ -1711,14 +1698,14 @@
     const sampleRate = audioCtx.sampleRate;
     nsfIsRendering = true;
     updateNsfPlayButton();
-    nsfFileStatusEl.innerHTML = '<div>WAV書き出し用レンダリング中…</div>';
+    nsfFileStatusEl.innerHTML = '<div>' + T('WAV書き出し用レンダリング中…') + '</div>';
     const result = await MML.Emu.captureSongAsync(loadedNsfBytes, {
       songIndex: songNo - 1,
       durationSeconds: duration,
       sampleRate,
       mute: getChannelMuteConfig()
     }, (done, total) => {
-      nsfFileStatusEl.innerHTML = `<div>WAV書き出し中… ${Math.round(done / total * 100)}%</div>`;
+      nsfFileStatusEl.innerHTML = '<div>' + T('WAV書き出し中… {pct}%', { pct: Math.round(done / total * 100) }) + '</div>';
     });
     nsfIsRendering = false;
     updateNsfPlayButton();
@@ -1749,8 +1736,9 @@
     // 有効音源リスト（2A03 + ヘッダの拡張音源フラグ）
     const activeChips = ['2A03'].concat(
       chipsFromExtraFlags(loadedNsfHeader.extraChips || 0).map(c => c.toUpperCase()));
-    nsfFileStatusEl.innerHTML =
-      `<div class="ok">WAV + レジスタログ書き出し完了: ${filename}<br>音源: ${activeChips.join(', ')}</div>`;
+    nsfFileStatusEl.innerHTML = '<div class="ok">' +
+      T('WAV + レジスタログ書き出し完了: {file}<br>音源: {chips}',
+        { file: filename, chips: activeChips.join(', ') }) + '</div>';
   }
 
   function downloadText(filename, text) {
@@ -1771,7 +1759,7 @@
 
   function playNsfStream() {
     if (!loadedNsfBytes || !loadedNsfHeader) {
-      nsfFileStatusEl.innerHTML = '<div class="error">先にNSFファイルを読み込んでください。</div>';
+      nsfFileStatusEl.innerHTML = '<div class="error">' + T('先にNSFファイルを読み込んでください。') + '</div>';
       return;
     }
 
@@ -1795,20 +1783,30 @@
     const duration    = parseInt(nsfPlayDurationEl.value, 10) || 30;
     const totalFrames = Math.ceil(duration * MML.Emu.FRAME_RATE_NTSC);
 
-    // 既存の再生を停止
+    // 既存の再生を停止(KSS/SPCの先読みキャプチャも止める。走らせたままだとNSFの
+    // ピアノロールを他フォーマットの結果で上書きしてしまう)
     stopActivePlayer();
+    stopKssPlayback();
+    stopSpcPlayback();
+    stopVoiceMonitor();
     capturedBuffer       = null;
     lastNsfCaptureResult = null;
     lastPlayMode         = 'nsf';
+    nsfBufferedFraction  = 0;
+    updateSeekBufferedUI();
 
-    const player = new MML.Audio.NsfStreamPlayer(audioCtx);
-    player.load(loadedNsfBytes, songNo - 1, totalFrames, getChannelMuteConfig());
+    // NSF実ファイル再生は、6502を実際に駆動するバックグラウンドキャプチャ(regsOnly、
+    // ピアノロールと共用)を1本だけ走らせ、実際の音声はそのwriteLogをNsfReplayStreamPlayerが
+    // (CPUを動かさず)再生する。以前はライブ再生用の別プレイヤーとロール先読みキャプチャが
+    // 同時に2本の6502エミュレーションを回しており、これがNSF/KSS再生開始直後のカクつきの
+    // 原因だった。副産物としてシーク・再生中のライブミュートにも対応できる
+    // (MmlStreamPlayerと同じ「書き込みログをCPU無しで再生する」方式のため)。
+    const player = new MML.Audio.NsfReplayStreamPlayer(audioCtx);
     player.onEnded = () => {
       if (transportRaf) cancelAnimationFrame(transportRaf);
       updateNsfPlayButton();
       updateTransportUI();
     };
-
     activePlayer    = player;
     player.setSpeed(currentSpeedFactor);
     workletDuration = duration;
@@ -1816,60 +1814,74 @@
     nsfFileStatusEl.innerHTML = '';
     const pre = document.createElement('div');
     pre.className = 'ok';
-    pre.textContent = `曲 ${songNo} / ${totalSongs}  再生時間: ${formatTime(duration)}`;
+    pre.textContent = T('曲 {song} / {total}  再生時間: {time}',
+      { song: songNo, total: totalSongs, time: formatTime(duration) });
     nsfFileStatusEl.appendChild(pre);
 
     resetPlaybackRangeToFull(duration);
     seekBarEl.value = '0';
     timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
 
-    transportPlay();
-
-    // 鍵盤表示: bus.onWrite でリアルタイム追跡（バックグラウンドキャプチャ不要）
     const captureChips = chipsFromExtraFlags(loadedNsfHeader.extraChips || 0);
     resetN163Max();
-    const liveSnap = {};
-    // INIT時の書き込み(FDS/N163の波形メモリ等、再生中は書き直されない)を初期値として取り込む
-    Object.assign(liveSnap, player.initRegs || {});
-    liveSnap[0x4015] = 0x0F; // initSong は bus.write を経由しないため手動補完
-    player.player.bus.onWrite = (addr, value) => { liveSnap[addr] = value; };
-    setMonitorSource({
-      regSnapshots: [liveSnap], // totalFrames=1 にして常に liveSnap[0] を参照
-      totalFrames: 1,
-      samplesPerFrame: audioCtx.sampleRate / MML.Emu.FRAME_RATE_NTSC,
-      sampleRate: audioCtx.sampleRate,
-      writeLog: [],
-      cpuSnapshots: null,
-      memSnapshots: null,
-      initRegs: liveSnap,
-      getApuEnv: liveApuEnv, // 音量表示にハードウェアエンベロープ実出力を反映
-      getN163: liveN163,     // N163はライブチップのRAMから直接スナップショット
-      getFME7: liveFME7,     // FME-7もライブチップから(ラッチ式で復元不可)
-      getMmc5: liveMMC5,     // MMC5もライブ(エンベロープ/PCM反映)
-      getVRC7: liveVRC7      // VRC7もライブ(周波数/音量/FM波形)
-    }, () => activePlayer ? activePlayer.getPosition() : 0, captureChips);
 
-    // ピアノロール先読み用キャプチャ(実際の音声再生とは別に裏で走らせる、非同期・非ブロッキング。
-    // regsOnly:true で音声バッファ生成をスキップし高速化する)。onProgressで途中経過(その時点
-    // までのregSnapshots/writeLog)を渡してもらい、キャプチャ完了を待たずに段階的にロールを埋める。
-    // ★SPC/KSSと同じ理由でロール再構築(setRollTimelineFromRegSnapshots内のO(全フレーム)走査)
-    // は間引く(onProgress自体は音切れ防止のため高頻度のまま)。
+    // バックグラウンドキャプチャ(regsOnly、CPU実行あり)。ピアノロールと実再生の両方の
+    // 情報源を兼ねる。onProgressで途中経過(その時点までのregSnapshots/writeLog、進行中の
+    // 配列への参照なので以後キャプチャが進むにつれ自動的に埋まっていく)を受け取り、
+    // 最初の1回でplayer.load()して再生を開始する(以降のチャンクを待つ必要はない)。
+    // ★ロール再構築(setRollTimelineFromRegSnapshots内のO(全フレーム)走査)は
+    // SPC/KSSと同じ理由で間引く(onProgress自体は音切れ防止のため高頻度のまま)。
     const ROLL_REBUILD_INTERVAL_FRAMES = 120;
     const myNsfRollToken = ++nsfRollToken;
     const nsfSamplesPerFrame = audioCtx.sampleRate / MML.Emu.FRAME_RATE_NTSC;
     let lastNsfRollBuiltFrame = 0;
+    let nsfPlaybackLoaded = false;
     MML.Emu.captureSongAsync(loadedNsfBytes, {
       songIndex: songNo - 1, durationSeconds: duration, sampleRate: audioCtx.sampleRate,
-      mute: getChannelMuteConfig(), regsOnly: true,
+      regsOnly: true,
       shouldCancel: () => myNsfRollToken !== nsfRollToken
-    }, (done, total, regSnapshots, writeLog, n163Snapshots) => {
+    }, (done, total, regSnapshots, writeLog, n163Snapshots, initRegs, initWrites) => {
       if (myNsfRollToken !== nsfRollToken) return; // 曲切替/停止で無効化済み
+
+      if (!nsfPlaybackLoaded) {
+        nsfPlaybackLoaded = true;
+        player.load(loadedNsfBytes, songNo - 1, totalFrames,
+          { writeLog, initWrites, initRegs, n163Snapshots }, getChannelMuteConfig());
+
+        // 鍵盤表示のライブ現在値表示用(常に「今の」レジスタ状態を反映する専用スナップショット。
+        // ピアノロール=曲全体の先読みタイムラインとは別物)
+        const liveSnap = {};
+        Object.assign(liveSnap, initRegs || {});
+        liveSnap[0x4015] = 0x0F; // initSong は bus.write を経由しないため手動補完
+        player.setOnWrite((addr, value) => { liveSnap[addr] = value; });
+        setMonitorSource({
+          regSnapshots: [liveSnap], // totalFrames=1 にして常に liveSnap[0] を参照
+          totalFrames: 1,
+          samplesPerFrame: nsfSamplesPerFrame,
+          sampleRate: audioCtx.sampleRate,
+          writeLog: [],
+          cpuSnapshots: null,
+          memSnapshots: null,
+          initRegs: liveSnap,
+          getApuEnv: liveApuEnv, // 音量表示にハードウェアエンベロープ実出力を反映
+          getN163: liveN163,     // N163はライブチップのRAMから直接スナップショット
+          getFME7: liveFME7,     // FME-7もライブチップから(ラッチ式で復元不可)
+          getMmc5: liveMMC5,     // MMC5もライブ(エンベロープ/PCM反映)
+          getVRC7: liveVRC7      // VRC7もライブ(周波数/音量/FM波形)
+        }, () => activePlayer ? activePlayer.getPosition() : 0, captureChips);
+
+        transportPlay();
+      }
+
+      nsfBufferedFraction = total > 0 ? done / total : 0;
+      updateSeekBufferedUI();
+
       if (done - lastNsfRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && done < total) return;
       lastNsfRollBuiltFrame = done;
       keyboardDisplay.setRollTimelineFromRegSnapshots(
         regSnapshots, writeLog, done, nsfSamplesPerFrame, audioCtx.sampleRate, captureChips, n163Snapshots
       );
-    }).catch(() => { /* 先読み失敗時はピアノロールなしで続行 */ });
+    }).catch(() => { /* 先読みキャプチャ失敗時は再生を開始できない */ });
   }
 
   function changeNsfSong(delta) {
@@ -1904,40 +1916,33 @@
 
   document.getElementById('btnDpcmConvert').addEventListener('click', convertDpcm);
   document.getElementById('btnDpcmPreview').addEventListener('click', previewDpcm);
+  document.getElementById('btnDpcmStop').addEventListener('click', stopPreview);
   document.getElementById('btnDpcmDownload').addEventListener('click', downloadDpcm);
 
-  document.getElementById('btnAssemble').addEventListener('click', assemble);
-  document.getElementById('btnBuildNsf').addEventListener('click', buildNSF);
-  document.getElementById('btnDownloadNsf').addEventListener('click', () => {
-    const bytes = buildNSF();
-    if (bytes) MML.NSF.download(bytes, 'output.nsf');
-  });
-  document.getElementById('btnPlay').addEventListener('click', playPreview);
-  document.getElementById('btnStop').addEventListener('click', stopPreview);
-
-  document.getElementById('btnCapture').addEventListener('click', runCapture);
-  document.getElementById('btnMmlCompile').addEventListener('click', compileMml);
   document.getElementById('btnMmlExportNsf').addEventListener('click', exportMmlNsf);
-  document.getElementById('btnMmlCapture').addEventListener('click', runMmlStream);
-  document.getElementById('btnTransportPlayPause').addEventListener('click', () => {
+  document.getElementById('btnMmlCapture').addEventListener('click', () => {
     const playing = activePlayer ? activePlayer.isPlaying : transportPlaying;
     if (playing) transportPause();
-    else transportPlay();
+    else if (!mmlPlaybackStopped) transportPlay(); // 一時停止中: 再コンパイルせずその位置から再開
+    else runMmlStream(); // 停止中: 再コンパイルして最初(または再生範囲開始点)から再生
   });
   document.getElementById('btnTransportStop').addEventListener('click', transportStop);
-  document.getElementById('btnRewind').addEventListener('click', () => transportSeek(getTransportPosition() - 5));
-  document.getElementById('btnForward').addEventListener('click', () => transportSeek(getTransportPosition() + 5));
   document.getElementById('btnRangeReset').addEventListener('click', () => resetPlaybackRangeToFull(currentDuration()));
-  window.__rangeDebug = {
-    setRange: (s, e) => { rangeStartSec = s; rangeEndSec = e; updateRangeMarkersUI(); updateMmlRangeHighlight(); },
-    rangeSelectedTexts: () => Array.from(document.querySelectorAll('.mml-range-selected')).map(el => el.textContent),
-    overlayHtml: () => document.getElementById('mmlHighlight').innerHTML
-  };
   seekBarEl.addEventListener('input', () => {
-    if (activePlayer) {
-      // MML はシーク可能、NSF はシーク非対応
-      if (lastPlayMode === 'capture-mml') {
-        const frac = parseInt(seekBarEl.value, 10) / SEEK_RESOLUTION;
+    if (currentTransportPlayer()) {
+      if (lastPlayMode === 'capture-mml' || lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'spc' || lastPlayMode === 'gbs' || lastPlayMode === 'hes') {
+        let frac = parseInt(seekBarEl.value, 10) / SEEK_RESOLUTION;
+        // NSF/KSS/SPC実ファイル再生はバックグラウンドキャプチャが追いついた範囲までしか
+        // シークできない。プレイヤー側の内部クランプ(NsfReplayStreamPlayer.seek()/
+        // KssReplayStreamPlayer.seek())だけに任せると、ユーザーがバッファより先へ
+        // ドラッグした「つもり」のまま実際は手前へ戻っていて無音状態になり「シークすると
+        // 止まる」ように見えるため、ここでハンドル自体をバッファ済み範囲より先へ
+        // 動かせないようにスナップバックする。
+        const bufferedFrac = currentBufferedFraction();
+        if (bufferedFrac !== null && frac > bufferedFrac) {
+          frac = bufferedFrac;
+          seekBarEl.value = String(Math.round(frac * SEEK_RESOLUTION));
+        }
         transportSeek(frac * workletDuration);
       }
       return;
@@ -1946,9 +1951,6 @@
     const frac = parseInt(seekBarEl.value, 10) / SEEK_RESOLUTION;
     transportSeek(frac * capturedBuffer.duration);
   });
-
-  // 初回アセンブル
-  assemble();
 
   // ── SPC ファイル読み込み・再生 ────────────────────────────────────
   const spcFileEl       = document.getElementById('spcFile');
@@ -1959,23 +1961,23 @@
   let loadedSpcBytes  = null;
   let loadedSpcHeader = null;
   let spcIsRendering  = false;
-  let spcActivePlayer = null; // SpcStreamPlayer
+  let spcActivePlayer = null; // SpcReplayStreamPlayer
 
   function renderSpcHeader(h) {
     let out = '';
     out += `Magic OK    : ${h.magicOk}\n`;
     out += `PC          : ${toHex(h.pc, 4)}\n`;
     out += `A=${toHex(h.a,2)}  X=${toHex(h.x,2)}  Y=${toHex(h.y,2)}  PSW=${toHex(h.psw,2)}  SP=${toHex(h.sp,2)}\n`;
-    out += `ID666       : ${h.hasId666 ? 'あり' : 'なし'}\n`;
+    out += T('ID666       : {v}', { v: h.hasId666 ? T('あり') : T('なし') }) + '\n';
     if (h.id666) {
       const id = h.id666;
-      if (id.songTitle)  out += `曲名        : ${id.songTitle}\n`;
-      if (id.gameTitle)  out += `ゲーム      : ${id.gameTitle}\n`;
-      if (id.artistName) out += `アーティスト: ${id.artistName}\n`;
-      if (id.dumperName) out += `ダンパー    : ${id.dumperName}\n`;
-      if (id.comments)   out += `コメント    : ${id.comments}\n`;
-      if (id.dumpDate)   out += `ダンプ日    : ${id.dumpDate}\n`;
-      if (id.playSeconds) out += `推奨再生時間: ${id.playSeconds} 秒\n`;
+      if (id.songTitle)  out += T('曲名        : {v}', { v: id.songTitle }) + '\n';
+      if (id.gameTitle)  out += T('ゲーム      : {v}', { v: id.gameTitle }) + '\n';
+      if (id.artistName) out += T('アーティスト: {v}', { v: id.artistName }) + '\n';
+      if (id.dumperName) out += T('ダンパー    : {v}', { v: id.dumperName }) + '\n';
+      if (id.comments)   out += T('コメント    : {v}', { v: id.comments }) + '\n';
+      if (id.dumpDate)   out += T('ダンプ日    : {v}', { v: id.dumpDate }) + '\n';
+      if (id.playSeconds) out += T('推奨再生時間: {v} 秒', { v: id.playSeconds }) + '\n';
     }
     spcFileHeaderEl.innerHTML = '';
     const pre = document.createElement('div');
@@ -1997,7 +1999,7 @@
     try {
       const h = MML.SPC.parseHeader(bytes);
       if (!h.magicOk) {
-        spcFileHeaderEl.innerHTML = '<div class="error">SPC ヘッダが不正です。</div>';
+        spcFileHeaderEl.innerHTML = '<div class="error">' + T('SPC ヘッダが不正です。') + '</div>';
         return;
       }
       loadedSpcBytes  = bytes;
@@ -2012,7 +2014,7 @@
       }
       spcFileStatusEl.innerHTML = '';
     } catch (e) {
-      spcFileHeaderEl.innerHTML = `<div class="error">読み込みエラー: ${e.message}</div>`;
+      spcFileHeaderEl.innerHTML = '<div class="error">' + T('読み込みエラー: {msg}', { msg: e.message }) + '</div>';
     }
   }
 
@@ -2030,7 +2032,8 @@
     const btn = document.getElementById('btnSpcFilePlay');
     if (!btn) return;
     const playing = spcActivePlayer && spcActivePlayer.isPlaying;
-    btn.textContent = playing ? '⏸ 一時停止' : '▶ 再生';
+    btn.classList.toggle('is-playing', !!playing);
+    btn.title = playing ? T('一時停止') : T('再生');
     btn.disabled    = spcIsRendering;
   }
 
@@ -2066,40 +2069,54 @@
 
   function playSpcStream() {
     if (!loadedSpcBytes) {
-      spcFileStatusEl.innerHTML = '<div class="error">先にSPCファイルを読み込んでください。</div>';
+      spcFileStatusEl.innerHTML = '<div class="error">' + T('先にSPCファイルを読み込んでください。') + '</div>';
       return;
     }
-    // 再生中なら一時停止 / 停止中なら再開
-    if (spcActivePlayer) {
-      if (spcActivePlayer.isPlaying) {
-        spcActivePlayer.pause();
-      } else {
-        spcActivePlayer.play();
-      }
-      updateSpcPlayButton();
+    // 再生中なら一時停止 / 一時停止中なら再開
+    if (spcActivePlayer && lastPlayMode === 'spc') {
+      if (spcActivePlayer.isPlaying) transportPause();
+      else transportPlay();
       return;
     }
 
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-    const duration    = parseInt(spcPlayDurEl.value, 10) || 180;
-    const totalFrames = Math.ceil(duration * 60); // 60fps 換算
+    // 他フォーマットの再生と先読みキャプチャを止める(ロールの取り違え防止)
+    transportStop();
+    stopActivePlayer();
+    stopKssPlayback();
+    invalidateOtherRollPrefetch('spc');
+    lastPlayMode = 'spc';
+    spcBufferedFraction = 0;
+    updateSeekBufferedUI();
 
-    // ピアノロール先読み用キャプチャ(実際の音声再生とは別に裏で走らせる、非同期・非ブロッキング)。
-    // onProgressで途中経過(その時点までのlog)を渡してもらい、キャプチャ完了(最大でduration秒
-    // 分)を待たずに段階的にロールを埋めていく。
-    //
-    // ★captureAsyncのonProgressは(音切れ防止のため)10フレームごとという高頻度で呼ばれるが、
-    // ここで毎回 extractVoiceEvents(=O(その時点までの全フレーム)の総ざらい) を回すと、
-    // 曲が長く書き込みが多いほど回数を重ねるごとに重くなるO(n^2)的な負荷になり、
-    // 実際に書き込みの多い曲(R-Type III「Outer Space」等)ではキャプチャ全体が実時間の
-    // 何倍もかかってしまい、ロールが実再生に追いつけず「序盤ロールが出ない/直近の音が
-    // 欠ける」原因になっていた。ロールの再構築自体は間引いて(約1秒=60フレームごと)呼ぶ
-    // ことで、captureAsync自体の頻繁なyield(音切れ防止)はそのまま維持しつつ負荷を大きく下げる。
-    const ROLL_REBUILD_INTERVAL_FRAMES = 120;
-    keyboardDisplay.setRollTimeline(null);
-    const myRollToken = ++spcRollToken;
-    let lastRollBuiltFrame = 0;
+    const duration = parseInt(spcPlayDurEl.value, 10) || 180;
+
+    // NSF/KSS実ファイル再生と同じ理由(二重エミュレーション解消・シーク・再生中ライブミュート
+    // 対応)で、ライブ再生用プレイヤーとロール先読みキャプチャを1本のバックグラウンド
+    // キャプチャに統合する(NsfReplayStreamPlayer/KssReplayStreamPlayerと対になる
+    // SpcReplayStreamPlayer、src/audio/spc-stream-player.js)。ただしSPCはNSF/KSSと違い
+    // regsOnly相当の軽量ショートカットが存在せず(MML.SPC2MML.captureAsyncは元から
+    // CPU+DSPフル駆動の実コスト計算)、今回の統合の主眼は「軽量化」ではなく「ライブ
+    // 再生用と先読み用の2本を同時に走らせてCPUを食い合っていたのを1本にまとめる」こと。
+    const player = new MML.Audio.SpcReplayStreamPlayer(audioCtx);
+    player.onEnded = () => { updateSpcPlayButton(); updateTransportUI(); };
+    spcActivePlayer = player;
+    player.setSpeed(currentSpeedFactor);
+    workletDuration = duration;
+
+    resetPlaybackRangeToFull(duration);
+    seekBarEl.value = '0';
+    timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
+
+    const id = loadedSpcHeader.id666;
+    const title = (id && id.songTitle) ? id.songTitle : T('(無題)');
+    spcFileStatusEl.innerHTML = '';
+    const pre = document.createElement('div');
+    pre.className = 'ok';
+    pre.textContent = T('再生中: {title}  (最大 {time})', { title, time: formatTime(duration) });
+    spcFileStatusEl.appendChild(pre);
+
     // 原音チューニング補正マップを一度だけ算出(BRRサンプルは曲頭から不変なので、ごく短い
     // キャプチャで全サンプルを収集できる)。ロール再構築ごとに再計算しないよう使い回す。
     let spcFineTune = null;
@@ -2108,31 +2125,38 @@
     } catch (_) { /* 失敗時は補正なし(従来動作)で続行 */ }
     // ライブ鍵盤(updateVoiceMonitor)も同じ補正で表示するため共有する
     spcActiveFineTune = spcFineTune;
-    MML.SPC2MML.captureAsync(loadedSpcBytes, duration, (frame, frames, log) => {
+
+    // バックグラウンドキャプチャ。ピアノロールと実再生の両方の情報源を兼ねる。
+    // onProgressで途中経過(その時点までのframeLog、進行中の配列への参照なので以後
+    // キャプチャが進むにつれ自動的に埋まっていく)を受け取り、最初の1回でplayer.load()
+    // して再生を開始する(以降のチャンクを待つ必要はない)。
+    //
+    // ★ロール再構築(setRollTimeline内のO(全フレーム)走査)は従来通り間引く(onProgress
+    // 自体は音切れ防止のため高頻度のまま、captureAsync自体のyield頻度は変えない)。
+    const ROLL_REBUILD_INTERVAL_FRAMES = 120;
+    keyboardDisplay.setRollTimeline(null);
+    const myRollToken = ++spcRollToken;
+    let lastRollBuiltFrame = 0;
+    let spcPlaybackLoaded = false;
+    MML.SPC2MML.captureAsync(loadedSpcBytes, duration, (frame, frames, frameLog) => {
       if (myRollToken !== spcRollToken) return; // 曲切替/停止で無効化済み
+
+      if (!spcPlaybackLoaded) {
+        spcPlaybackLoaded = true;
+        player.load(loadedSpcBytes, frames, frameLog, spcMutedVoices);
+        transportPlay();
+      }
+
+      spcBufferedFraction = frames > 0 ? frame / frames : 0;
+      updateSeekBufferedUI();
+
       if (frame - lastRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && frame < frames) return;
       lastRollBuiltFrame = frame;
-      keyboardDisplay.setRollTimeline(buildSpcRollTimeline(log.slice(0, frame), MML.SPC2MML.FRAME_RATE, spcFineTune));
-    }, () => myRollToken !== spcRollToken).catch(() => { /* 先読み失敗時はピアノロールなしで続行 */ });
-
-    const player = new MML.Audio.SpcStreamPlayer(audioCtx);
-    player.load(loadedSpcBytes, totalFrames, {});
-    player.onEnded = () => { updateSpcPlayButton(); };
-    spcActivePlayer = player;
-    player.setSpeed(currentSpeedFactor);
-
-    const id = loadedSpcHeader.id666;
-    const title = (id && id.songTitle) ? id.songTitle : '(無題)';
-    spcFileStatusEl.innerHTML = '';
-    const pre = document.createElement('div');
-    pre.className = 'ok';
-    pre.textContent = `再生中: ${title}  (最大 ${formatTime(duration)})`;
-    spcFileStatusEl.appendChild(pre);
-
-    // ミュート状態を復元
-    if (player.player) player.player.dsp.mutedVoices = spcMutedVoices;
-    player.play();
-    updateSpcPlayButton();
+      keyboardDisplay.setRollTimeline(buildSpcRollTimeline(frameLog.slice(0, frame), MML.SPC2MML.FRAME_RATE, spcFineTune));
+    }, () => myRollToken !== spcRollToken).catch((e) => {
+      // 先読み失敗時はピアノロールなしで続行するが、原因を追えるようログには残す
+      console.error('SPC先読みキャプチャに失敗:', e);
+    });
   }
 
   // DSP レジスタ番号 → 人間可読名
@@ -2155,7 +2179,7 @@
 
   async function exportSpcWav() {
     if (!loadedSpcBytes) {
-      spcFileStatusEl.innerHTML = '<div class="error">先にSPCファイルを読み込んでください。</div>';
+      spcFileStatusEl.innerHTML = '<div class="error">' + T('先にSPCファイルを読み込んでください。') + '</div>';
       return;
     }
     if (spcIsRendering) return;
@@ -2167,7 +2191,7 @@
 
     spcIsRendering = true;
     updateSpcPlayButton();
-    spcFileStatusEl.innerHTML = '<div>WAV書き出し中… 0%</div>';
+    spcFileStatusEl.innerHTML = '<div>' + T('WAV書き出し中… 0%') + '</div>';
     await new Promise(r => setTimeout(r, 0));
 
     let   player       = new MML.Emu.SpcPlayer(loadedSpcBytes);
@@ -2307,7 +2331,7 @@
 
       // 進捗更新
       const pct = Math.round(dspDone / totalDspSmp * 100);
-      spcFileStatusEl.innerHTML = `<div>WAV書き出し中… ${pct}%</div>`;
+      spcFileStatusEl.innerHTML = '<div>' + T('WAV書き出し中… {pct}%', { pct }) + '</div>';
       await new Promise(r => setTimeout(r, 0));
     }
 
@@ -2386,13 +2410,13 @@
     const totalWrites = dspWriteLog.length;
     const konCount    = konEvents.length;
     spcFileStatusEl.innerHTML =
-      `<div class="ok">書き出し完了: ${name}.wav + ${name}_dsp_log.csv<br>` +
-      `DSP書き込み ${totalWrites} 件 / KON ${konCount} 件 (先頭${LOG_SEC}秒)</div>`;
+      '<div class="ok">' + T('書き出し完了: {name}.wav + {name}_dsp_log.csv<br>DSP書き込み {writes} 件 / KON {kon} 件 (先頭{sec}秒)',
+        { name, writes: totalWrites, kon: konCount, sec: LOG_SEC }) + '</div>';
   }
 
   async function runSpc2Mml() {
     if (!loadedSpcBytes) {
-      spcFileStatusEl.innerHTML = '<div class="error">先にSPCファイルを読み込んでください。</div>';
+      spcFileStatusEl.innerHTML = '<div class="error">' + T('先にSPCファイルを読み込んでください。') + '</div>';
       return;
     }
     if (spcIsRendering) return;
@@ -2400,7 +2424,7 @@
     const duration = parseInt(spcPlayDurEl.value, 10) || 60;
     spcIsRendering = true;
     updateSpcPlayButton();
-    spcFileStatusEl.innerHTML = '<div>MML変換用キャプチャ中… (数秒かかります)</div>';
+    spcFileStatusEl.innerHTML = '<div>' + T('MML変換用キャプチャ中… (数秒かかります)') + '</div>';
 
     await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -2416,7 +2440,7 @@
       result = MML.SPC2MML.fromSpc(loadedSpcBytes, Math.min(duration, 60), { channelMap, bpm: spcManualBpm });
     } catch (e) {
       spcIsRendering = false;
-      spcFileStatusEl.innerHTML = `<div class="error">変換エラー: ${e.message}</div>`;
+      spcFileStatusEl.innerHTML = '<div class="error">' + T('変換エラー: {msg}', { msg: e.message }) + '</div>';
       return;
     }
 
@@ -2438,11 +2462,20 @@
     }
 
     const dmcMsg = (result.dmcFiles && result.dmcFiles.length > 0)
-      ? `、DPCM ${result.dmcFiles.length} ファイル出力` : '';
+      ? T('、DPCM {n} ファイル出力', { n: result.dmcFiles.length }) : '';
     const expMsg = result.expansion && result.expansion !== 'none'
-      ? `、拡張音源: ${result.expansion}` : '';
-    spcFileStatusEl.innerHTML =
-      `<div class="ok">MML変換完了 (${spcManualBpm ? '指定' : '推定'} ${result.bpm} BPM${expMsg}${dmcMsg}) → MMLエディタに出力</div>`;
+      ? T('、拡張音源: {chips}', { chips: result.expansion }) : '';
+    spcFileStatusEl.innerHTML = '<div class="ok">' +
+      T('MML変換完了 ({mode} {bpm} BPM{exp}{dpcm}) → MMLエディタに出力',
+        { mode: spcManualBpm ? T('指定') : T('推定'), bpm: result.bpm, exp: expMsg, dpcm: dmcMsg }) + '</div>';
+
+    // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
+    // 各種UIをMML本文に反映する(再生は開始しない)。
+    // 新規変換された曲なので、前回再生していた曲の再生範囲(赤/青ハンドル)を
+    // 引き継がず全体にリセットする(preservePlaybackRangeによる引き継ぎを無効化)
+    rangeStartSec = 0;
+    rangeEndSec = null;
+    prepareMmlStream(true);
   }
 
   // ── SPC ボイスモニター ───────────────────────────────────────────
@@ -2487,16 +2520,16 @@
 
   // チャンネルターゲット選択肢
   const TARGET_OPTIONS = [
-    { value: 'skip',       label: 'スキップ' },
+    { value: 'skip',       label: T('スキップ') },
     { value: 'pulse1',     label: 'A: Pulse 1' },
     { value: 'pulse2',     label: 'B: Pulse 2' },
     { value: 'triangle',   label: 'C: Triangle' },
     { value: 'noise',      label: 'D: Noise' },
-    { value: 'dpcm',       label: 'DPCM変換' },
-    { value: 'fds',        label: 'E: FDS 波形' },
+    { value: 'dpcm',       label: T('DPCM変換') },
+    { value: 'fds',        label: T('E: FDS 波形') },
     { value: 'vrc6pulse1', label: 'E: VRC6 Pulse1' },
     { value: 'vrc6pulse2', label: 'F: VRC6 Pulse2' },
-    { value: 'vrc6saw',    label: 'G: VRC6 のこぎり' },
+    { value: 'vrc6saw',    label: T('G: VRC6 のこぎり') },
     { value: 'mmc5pulse1', label: 'E: MMC5 Pulse1' },
     { value: 'mmc5pulse2', label: 'F: MMC5 Pulse2' },
     { value: 'fme7a',      label: 'E: FME7 A' },
@@ -2563,9 +2596,10 @@
       div.querySelector(`#spc-v${ch}-mute`).addEventListener('click', (e) => {
         e.stopPropagation();
         spcMutedVoices ^= (1 << ch);           // 永続ミュート状態を更新
-        if (spcActivePlayer && spcActivePlayer.player) {
-          spcActivePlayer.player.dsp.mutedVoices = spcMutedVoices;
-        }
+        // applyMute()経由にすることでSpcReplayStreamPlayer側が_lastMutedとして保持し、
+        // シーク時の再構築(_buildChips())後も設定が消えないようにする(dsp.mutedVoicesを
+        // 直接上書きするだけだと再構築のたびにリセットされてしまう)。
+        if (spcActivePlayer) spcActivePlayer.applyMute(spcMutedVoices);
         updateMuteButton(ch, spcMutedVoices);
       });
     }
@@ -2614,9 +2648,9 @@
       t: 'wave', nx: 16, ny: 32768, signed: true,
       data: raw,
       layers: [
-        { data: raw, mode: 'steps', color: '#8a8a98', label: '素(BRR)' },
-        { data: smooth, mode: 'line', color: '#6ea8ff', label: 'ガウス補間' },
-      ].concat(smoothPM ? [{ data: smoothPM, mode: 'line', dash: [4, 3], color: '#ff8844', label: 'PM変調後' }] : []),
+        { data: raw, mode: 'steps', color: '#8a8a98', label: T('素(BRR)') },
+        { data: smooth, mode: 'line', color: '#6ea8ff', label: T('ガウス補間') },
+      ].concat(smoothPM ? [{ data: smoothPM, mode: 'line', dash: [4, 3], color: '#ff8844', label: T('PM変調後') }] : []),
     };
   }
 
@@ -2732,9 +2766,7 @@
   // 鍵盤表示側のミュートチェックボックス操作 → ボイスモニターと同じミュート機構に反映
   keyboardDisplay.onSpcMuteChange = (idx, muted) => {
     spcMutedVoices = muted ? (spcMutedVoices | (1 << idx)) : (spcMutedVoices & ~(1 << idx));
-    if (spcActivePlayer && spcActivePlayer.player) {
-      spcActivePlayer.player.dsp.mutedVoices = spcMutedVoices;
-    }
+    if (spcActivePlayer) spcActivePlayer.applyMute(spcMutedVoices);
     updateMuteButton(idx, spcMutedVoices);
   };
 
@@ -2768,22 +2800,48 @@
   let kssIsRendering  = false;
   let kssActivePlayer = null; // KssStreamPlayer
 
-  // KSSで使う鍵盤表示チャンネル種別 (ヘッダのFMPAC有無で可変)
-  function kssMonitorChips(header) {
-    const chips = ['kss', 'kssPsg', 'kssScc'];
+  // KSSで使う鍵盤表示チャンネル種別 (ヘッダのFMPAC有無・SCC使用有無で可変)。
+  // SCCはKSSヘッダに現れないため「積んでいるか」はヘッダだけでは決まらない。
+  // ・16Kバンクモード+RAMモードのファイルはバス側でSCCデコード自体を止めている
+  //   (src/emulator/kssBus.js の sccDisable)ので確実に非搭載。
+  // ・それ以外は先読みキャプチャでSCCレジスタへの実書込みを検出できたときだけ出す
+  //   (PSG+FMPACだけの曲でKS1-KS5の空行が5行居座るのを防ぐ)。
+  function kssHasSccDecoder(header) {
+    return !!header && !(header.bankMode === '16K' && header.device.ramMode);
+  }
+  function kssMonitorChips(header, sccUsed) {
+    const chips = ['kss', 'kssPsg'];
+    if (sccUsed) chips.push('kssScc');
     if (header && header.device.mode === 'MSX' && header.device.fmpac) chips.push('kssOpll');
     return chips;
   }
 
+  // writeLogのフレーム範囲[from,to)にSCC音源レジスタ(周波数/音量/有効ビット)への
+  // 書込みがあるか。波形テーブルはクリア目的で0書きされることがあるため判定材料にせず、
+  // 実際に発音に効くレジスタだけを見る。classic(SCC)は0x80-0x8F、SCC+(SCC-I)は
+  // 0xA0-0xAFに並ぶので両方を対象にする(src/emulator/expansion/sccAudio.js参照)。
+  function kssWriteLogUsesScc(writeLog, from, to) {
+    for (let f = from; f < to && f < writeLog.length; f++) {
+      for (const w of writeLog[f]) {
+        if (w.io) continue;
+        const off = (w.addr >= 0x9800 && w.addr <= 0x98FF) ? w.addr - 0x9800
+          : (w.addr >= 0xB800 && w.addr <= 0xB8FF) ? w.addr - 0xB800 : -1;
+        if (off < 0 || w.value === 0) continue;
+        if ((off >= 0x80 && off <= 0x8F) || (off >= 0xA0 && off <= 0xAF)) return true;
+      }
+    }
+    return false;
+  }
+
   function renderKssHeader(h) {
     let out = '';
-    out += `Magic       : ${h.magic} (${h.magicOk ? 'OK' : '不正'})\n`;
+    out += T('Magic       : {magic} ({ok})', { magic: h.magic, ok: h.magicOk ? 'OK' : T('不正') }) + '\n';
     out += `Load/Init/Play: ${toHex(h.loadAddr,4)} / ${toHex(h.initAddr,4)} / ${toHex(h.playAddr,4)}\n`;
-    out += `データ長    : ${h.dataLength} バイト\n`;
-    out += `バンク方式  : ${h.bankMode}マッパー (追加バンク数 ${h.bankNum})\n`;
-    out += `モード      : ${h.device.mode}${h.device.palMode ? ' / PAL' : ' / NTSC'}\n`;
-    out += `音源        : ${MML.KSS.describeChips(h).join(', ')}\n`;
-    if (h.hasSongRange) out += `曲番号範囲  : ${h.firstSong} 〜 ${h.lastSong}\n`;
+    out += T('データ長    : {n} バイト', { n: h.dataLength }) + '\n';
+    out += T('バンク方式  : {mode}マッパー (追加バンク数 {n})', { mode: h.bankMode, n: h.bankNum }) + '\n';
+    out += T('モード      : {mode}', { mode: h.device.mode + (h.device.palMode ? ' / PAL' : ' / NTSC') }) + '\n';
+    out += T('音源        : {chips}', { chips: MML.KSS.describeChips(h).join(', ') }) + '\n';
+    if (h.hasSongRange) out += T('曲番号範囲  : {first} 〜 {last}', { first: h.firstSong, last: h.lastSong }) + '\n';
     kssFileHeaderEl.innerHTML = '';
     const pre = document.createElement('div');
     pre.className = h.magicOk ? 'ok' : 'error';
@@ -2804,7 +2862,7 @@
     try {
       const h = MML.KSS.parseHeader(bytes);
       if (!h.magicOk) {
-        kssFileHeaderEl.innerHTML = '<div class="error">KSSヘッダが不正です。</div>';
+        kssFileHeaderEl.innerHTML = '<div class="error">' + T('KSSヘッダが不正です。') + '</div>';
         return;
       }
       loadedKssBytes = bytes;
@@ -2818,7 +2876,7 @@
       kssSongTotalEl.textContent = `/ ${last}`;
       kssFileStatusEl.innerHTML = '';
     } catch (e) {
-      kssFileHeaderEl.innerHTML = `<div class="error">読み込みエラー: ${e.message}</div>`;
+      kssFileHeaderEl.innerHTML = '<div class="error">' + T('読み込みエラー: {msg}', { msg: e.message }) + '</div>';
     }
   }
 
@@ -2835,7 +2893,7 @@
   // KSS captureKssSongAsync() の結果(writeLog)からピアノロール用タイムライン(共通形状)を
   // 構築する。PSG→KP/SCC→KS/FMPAC→KF は src/ui/keyboard.js の extractChannels() が
   // kssPsg/kssScc/kssOpll チップ向けに使っている色分けと揃えている。
-  function buildKssRollTimeline(writeLog, totalFrames, frameRate, header) {
+  function buildKssRollTimeline(writeLog, totalFrames, frameRate, header, sccUsed) {
     const frameDur = 1 / frameRate;
     const clock = MML.KSS.Z80_CLOCK;
     // volume は ay/scc/opll いずれも0-15(4bit)なので/15で0-1に正規化する。
@@ -2843,16 +2901,41 @@
     // ノート番号体系(57+12*log2(freq/440)、nsf2mml/expansion/fme7.js等でも同じ)を採用しており、
     // 標準MIDI(69+12*log2(freq/440)、keyboard.jsのfreqToMidiと同じ)より1オクターブ(12)低い。
     // MML変換自体はこの体系で正しく動くため触らず、鍵盤描画に合わせるロール側でのみ+12補正する。
-    const toNotes = (events) => events.filter(e => e.note !== null)
-      .map(e => ({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15 }));
+    //
+    // ★ay/scc/opllの抽出イベントは「音量が1でも変わったら別イベント」に切れている
+    // (MML変換側が音量エンベロープ@v<n>を作るのに必要なため)。実機ドライバは毎フレーム
+    // 音量ニブルを書き直すのが普通なので、そのままロールに描くと1つのロングトーンが
+    // 1フレーム幅の短冊数百本に分解されて「ロールが壊れて見える」。ピアノロールでは
+    // 音程が同じまま途切れず続いている区間を1本の音符に統合する。
+    // ただしキーオンによる打ち直し(retrigger)だけは音符の区切りとして残す。
+    const toNotes = (events) => {
+      const out = [];
+      let endFrame = -1;
+      for (const e of events) {
+        if (e.note === null) { endFrame = -1; continue; }
+        const prev = out[out.length - 1];
+        if (prev && !e.retrigger && endFrame === e.start && prev.midi === e.note + 12) {
+          prev.endSec = e.end * frameDur;
+          prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
+        } else {
+          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15 });
+        }
+        endFrame = e.end;
+      }
+      return out;
+    };
     const tracks = [];
 
     const ayResult = MML.Kss2MmlExpansion.ay(writeLog, totalFrames, clock);
     const KP_COLS = ['#66ddff', '#33aaff', '#0077dd'];
     ayResult.channels.forEach((ch, i) => tracks.push({ id: `KP${i + 1}`, color: KP_COLS[i], notes: toNotes(ch.events) }));
 
-    const sccResult = MML.Kss2MmlExpansion.scc(writeLog, totalFrames, clock);
-    sccResult.channels.forEach((ch, i) => tracks.push({ id: `KS${i + 1}`, color: `hsl(${(280 + i * 20) % 360},80%,60%)`, notes: toNotes(ch.events) }));
+    // SCC未使用の曲では鍵盤表示側にもKS行を出さないので、ロールのトラックも作らない
+    // (トラックidと鍵盤の行が1対1で対応している必要がある)
+    if (sccUsed) {
+      const sccResult = MML.Kss2MmlExpansion.scc(writeLog, totalFrames, clock);
+      sccResult.channels.forEach((ch, i) => tracks.push({ id: `KS${i + 1}`, color: `hsl(${(280 + i * 20) % 360},80%,60%)`, notes: toNotes(ch.events) }));
+    }
 
     if (header && header.device.mode === 'MSX' && header.device.fmpac) {
       const opllResult = MML.Kss2MmlExpansion.opll(writeLog, totalFrames);
@@ -2867,79 +2950,133 @@
     const btn = document.getElementById('btnKssFilePlay');
     if (!btn) return;
     const playing = kssActivePlayer && kssActivePlayer.isPlaying;
-    btn.textContent = playing ? '⏸ 一時停止' : '▶ 再生';
+    btn.classList.toggle('is-playing', !!playing);
+    btn.title = playing ? T('一時停止') : T('再生');
     btn.disabled = kssIsRendering;
   }
 
   function playKssStream() {
     if (!loadedKssBytes) {
-      kssFileStatusEl.innerHTML = '<div class="error">先にKSSファイルを読み込んでください。</div>';
+      kssFileStatusEl.innerHTML = '<div class="error">' + T('先にKSSファイルを読み込んでください。') + '</div>';
       return;
     }
-    if (kssActivePlayer) {
-      if (kssActivePlayer.isPlaying) kssActivePlayer.pause();
-      else kssActivePlayer.play();
-      updateKssPlayButton();
+    // 再生中なら一時停止 / 一時停止中なら再開
+    if (kssActivePlayer && lastPlayMode === 'kss') {
+      if (kssActivePlayer.isPlaying) transportPause();
+      else transportPlay();
       return;
     }
 
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
+    // 他フォーマットの再生と先読みキャプチャを止める(ロールの取り違え防止)
+    transportStop();
+    stopActivePlayer();
+    stopSpcPlayback();
+    stopVoiceMonitor();
+    invalidateOtherRollPrefetch('kss');
+    lastPlayMode = 'kss';
+    kssBufferedFraction = 0;
+    updateSeekBufferedUI();
+
     const songNo = parseInt(kssSongIndexEl.value, 10) || 0;
     const duration = parseInt(kssPlayDurEl.value, 10) || 180;
-    const totalFrames = Math.ceil(duration * (loadedKssHeader.device.palMode ? MML.KSS.PAL_FPS : MML.KSS.NTSC_FPS));
+    const kssFrameRate = loadedKssHeader.device.palMode ? MML.KSS.PAL_FPS : MML.KSS.NTSC_FPS;
+    const totalFrames = Math.ceil(duration * kssFrameRate);
 
-    const player = new MML.Audio.KssStreamPlayer(audioCtx);
-    player.load(loadedKssBytes, songNo, totalFrames, getChannelMuteConfig());
-    player.onEnded = () => { updateKssPlayButton(); };
+    // NSF実ファイル再生と同じ理由(二重エミュレーション解消・シーク・再生中ライブミュート
+    // 対応)で、ライブ再生用プレイヤーとロール先読みキャプチャを1本のバックグラウンド
+    // regsOnlyキャプチャに統合する(NsfReplayStreamPlayerと対になるKssReplayStreamPlayer、
+    // src/audio/kss-stream-player.js)。KSSはKssBus.write()が通常メモリ書込みも含め全て
+    // onWriteへ渡すため、NSFの$4015/$4017のような「バスを経由しない直接書込み」問題は無く、
+    // またKssPlayer.renderFrame()自体がregsOnly時もチップのclock()を省略しない設計のため、
+    // NSFのcapture.js側で必要だった追加修正(clock呼び出し追加)も不要だった(実測でPSG
+    // レジスタ状態が実CPU駆動と200フレームぶん完全一致することを確認済み)。
+    const player = new MML.Audio.KssReplayStreamPlayer(audioCtx);
+    player.onEnded = () => { updateKssPlayButton(); updateTransportUI(); };
     kssActivePlayer = player;
     player.setSpeed(currentSpeedFactor);
+    workletDuration = duration;
 
-    // ピアノロール先読み用キャプチャ(実際の音声再生とは別に裏で走らせる、非同期・非ブロッキング)。
-    // regsOnly:true で波形合成を省略し、実再生(ScriptProcessorNode)とメインスレッドを共有しても
-    // 音切れを起こしにくくする。onProgressで途中経過(その時点までのwriteLog)を渡してもらい、
-    // キャプチャ完了を待たずに段階的にロールを埋めていく。
-    // ★SPCと同じ理由(onProgressの高頻度呼び出しのたびにKss2MmlExpansion.ay/scc/opllの
-    // 全フレーム総ざらいを回すと、書き込みの多い曲でO(n^2)的に重くなりキャプチャが実再生に
-    // 追いつけなくなる)でロール再構築は間引く。captureKssSongAsync自体のyield頻度は変えない。
-    const ROLL_REBUILD_INTERVAL_FRAMES = 120;
-    keyboardDisplay.setRollTimeline(null);
-    const myKssRollToken = ++kssRollToken;
-    const kssFrameRate = loadedKssHeader.device.palMode ? MML.KSS.PAL_FPS : MML.KSS.NTSC_FPS;
-    let lastKssRollBuiltFrame = 0;
-    MML.Emu.captureKssSongAsync(loadedKssBytes, {
-      songIndex: songNo, durationSeconds: duration, sampleRate: audioCtx.sampleRate,
-      mute: getChannelMuteConfig().expansion, regsOnly: true,
-      shouldCancel: () => myKssRollToken !== kssRollToken
-    }, (done, total, writeLog) => {
-      if (myKssRollToken !== kssRollToken) return; // 曲切替/停止で無効化済み
-      if (done - lastKssRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && done < total) return;
-      lastKssRollBuiltFrame = done;
-      keyboardDisplay.setRollTimeline(buildKssRollTimeline(writeLog.slice(0, done), done, kssFrameRate, loadedKssHeader));
-    }).catch(() => { /* 先読み失敗時はピアノロールなしで続行 */ });
+    // 鍵盤表示: PSG/SCC/FMPACをライブチップから直接スナップショットする。
+    // SCC使用が判明した時点で行構成を変えるため、再呼び出しできる形にしておく。
+    function applyKssMonitorSource(sccUsed) {
+      setMonitorSource({
+        regSnapshots: [{}],
+        totalFrames: 1,
+        samplesPerFrame: audioCtx.sampleRate / kssFrameRate,
+        sampleRate: audioCtx.sampleRate,
+        writeLog: [],
+        cpuSnapshots: null,
+        memSnapshots: null,
+        getKssPsg: liveKssPsg,
+        getKssScc: liveKssScc,
+        getKssOpll: liveKssOpll
+      }, () => kssActivePlayer ? kssActivePlayer.getPosition() : 0, kssMonitorChips(loadedKssHeader, sccUsed));
+    }
+
+    resetPlaybackRangeToFull(duration);
+    seekBarEl.value = '0';
+    timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
 
     kssFileStatusEl.innerHTML = '';
     const pre = document.createElement('div');
     pre.className = 'ok';
-    pre.textContent = `再生中: 曲${songNo}  (最大 ${formatTime(duration)})`;
+    pre.textContent = T('再生中: 曲{song}  (最大 {time})', { song: songNo, time: formatTime(duration) });
     kssFileStatusEl.appendChild(pre);
 
-    player.play();
-    updateKssPlayButton();
+    // バックグラウンドキャプチャ(regsOnly)。ピアノロールと実再生の両方の情報源を兼ねる。
+    // onProgressで途中経過(その時点までのwriteLog、進行中の配列への参照なので以後
+    // キャプチャが進むにつれ自動的に埋まっていく)を受け取り、最初の1回でplayer.load()
+    // して再生を開始する(以降のチャンクを待つ必要はない)。
+    // ★ロール再構築(setRollTimeline内のO(全フレーム)走査)はSPCと同じ理由で間引く
+    // (onProgress自体は音切れ防止のため高頻度のまま、captureKssSongAsync自体のyield頻度は
+    // 変えない)。
+    const ROLL_REBUILD_INTERVAL_FRAMES = 120;
+    keyboardDisplay.setRollTimeline(null);
+    const myKssRollToken = ++kssRollToken;
+    let lastKssRollBuiltFrame = 0;
+    // SCCは「使われたと分かった時点で行を足す」単調な運用にする(出したり消したりすると
+    // 再生中に行数が揺れて見づらいため)。バス側でSCCを殺しているファイルは常に非表示。
+    let kssSccUsed = false;
+    let kssSccScanned = 0;
+    const kssSccPossible = kssHasSccDecoder(loadedKssHeader);
+    let kssPlaybackLoaded = false;
+    MML.Emu.captureKssSongAsync(loadedKssBytes, {
+      songIndex: songNo, durationSeconds: duration, sampleRate: audioCtx.sampleRate,
+      regsOnly: true,
+      shouldCancel: () => myKssRollToken !== kssRollToken
+    }, (done, total, writeLog) => {
+      if (myKssRollToken !== kssRollToken) return; // 曲切替/停止で無効化済み
 
-    // 鍵盤表示: PSG/SCC/FMPACをライブチップから直接スナップショット
-    setMonitorSource({
-      regSnapshots: [{}],
-      totalFrames: 1,
-      samplesPerFrame: audioCtx.sampleRate / (loadedKssHeader.device.palMode ? MML.KSS.PAL_FPS : MML.KSS.NTSC_FPS),
-      sampleRate: audioCtx.sampleRate,
-      writeLog: [],
-      cpuSnapshots: null,
-      memSnapshots: null,
-      getKssPsg: liveKssPsg,
-      getKssScc: liveKssScc,
-      getKssOpll: liveKssOpll
-    }, () => kssActivePlayer ? kssActivePlayer.getPosition() : 0, kssMonitorChips(loadedKssHeader));
+      if (!kssPlaybackLoaded) {
+        kssPlaybackLoaded = true;
+        player.load(loadedKssBytes, songNo, totalFrames, { writeLog }, getChannelMuteConfig());
+        applyKssMonitorSource(kssSccUsed);
+        transportPlay();
+      }
+
+      kssBufferedFraction = total > 0 ? done / total : 0;
+      updateSeekBufferedUI();
+
+      if (kssSccPossible && !kssSccUsed && kssWriteLogUsesScc(writeLog, kssSccScanned, done)) {
+        kssSccUsed = true;
+        // SCC行を追加して鍵盤表示を組み直す。setMonitorSource()はロールも初期化して
+        // しまうので、同じコールバック内で必ず作り直させる(間引きを一度だけ解除)。
+        applyKssMonitorSource(kssSccUsed);
+        lastKssRollBuiltFrame = -Infinity;
+      }
+      kssSccScanned = done;
+      if (done - lastKssRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && done < total) return;
+      lastKssRollBuiltFrame = done;
+      keyboardDisplay.setRollTimeline(
+        buildKssRollTimeline(writeLog.slice(0, done), done, kssFrameRate, loadedKssHeader, kssSccUsed));
+    }).catch((e) => {
+      // 先読み失敗時はピアノロールなしで続行するが、原因を追えるようログには残す
+      // (ここを完全に握り潰していたため、Kss2MmlExpansion.sccのTypeErrorで
+      //  ロールが出なくなっていた不具合の発見が遅れた)
+      console.error('KSS先読みキャプチャに失敗:', e);
+    });
   }
 
   function changeKssSong(delta) {
@@ -2953,7 +3090,7 @@
 
   async function exportKssWav() {
     if (!loadedKssBytes) {
-      kssFileStatusEl.innerHTML = '<div class="error">先にKSSファイルを読み込んでください。</div>';
+      kssFileStatusEl.innerHTML = '<div class="error">' + T('先にKSSファイルを読み込んでください。') + '</div>';
       return;
     }
     if (kssIsRendering) return;
@@ -2964,12 +3101,12 @@
     const sampleRate = audioCtx.sampleRate;
     kssIsRendering = true;
     updateKssPlayButton();
-    kssFileStatusEl.innerHTML = '<div>WAV書き出し用レンダリング中…</div>';
+    kssFileStatusEl.innerHTML = '<div>' + T('WAV書き出し用レンダリング中…') + '</div>';
 
     const result = await MML.Emu.captureKssSongAsync(loadedKssBytes, {
       songIndex: songNo, durationSeconds: duration, sampleRate, mute: getChannelMuteConfig().expansion
     }, (done, total) => {
-      kssFileStatusEl.innerHTML = `<div>WAV書き出し中… ${Math.round(done / total * 100)}%</div>`;
+      kssFileStatusEl.innerHTML = '<div>' + T('WAV書き出し中… {pct}%', { pct: Math.round(done / total * 100) }) + '</div>';
     });
 
     kssIsRendering = false;
@@ -2992,12 +3129,12 @@
     b.href = logUrl; b.download = `kss_song${songNo}_regs.csv`; b.click();
     URL.revokeObjectURL(logUrl);
 
-    kssFileStatusEl.innerHTML = `<div class="ok">書き出し完了: ${filename} + regs.csv</div>`;
+    kssFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file} + regs.csv', { file: filename }) + '</div>';
   }
 
   async function runKss2Mml() {
     if (!loadedKssBytes) {
-      kssFileStatusEl.innerHTML = '<div class="error">先にKSSファイルを読み込んでください。</div>';
+      kssFileStatusEl.innerHTML = '<div class="error">' + T('先にKSSファイルを読み込んでください。') + '</div>';
       return;
     }
     if (kssIsRendering) return;
@@ -3006,17 +3143,17 @@
     const duration = parseInt(kssPlayDurEl.value, 10) || 60;
     kssIsRendering = true;
     updateKssPlayButton();
-    kssFileStatusEl.innerHTML = '<div>MML変換用キャプチャ中… (数秒かかります)</div>';
+    kssFileStatusEl.innerHTML = '<div>' + T('MML変換用キャプチャ中… (数秒かかります)') + '</div>';
     await new Promise(resolve => setTimeout(resolve, 10));
 
     const kssManualBpm = getManualBpm('kss');
     let result;
     try {
-      result = await MML.KSS2MML.fromKss(loadedKssBytes, songNo, Math.min(duration, 60), { bpm: kssManualBpm });
+      result = await MML.KSS2MML.fromKss(loadedKssBytes, songNo, duration, { bpm: kssManualBpm });
     } catch (e) {
       kssIsRendering = false;
       updateKssPlayButton();
-      kssFileStatusEl.innerHTML = `<div class="error">変換エラー: ${e.message}</div>`;
+      kssFileStatusEl.innerHTML = '<div class="error">' + T('変換エラー: {msg}', { msg: e.message }) + '</div>';
       return;
     }
 
@@ -3026,14 +3163,21 @@
     mmlSourceEl.value = result.mml;
     mmlSourceEl.dispatchEvent(new Event('input'));
 
-    // 変換結果はNES拡張音源(FME-7/N163/VRC7)を借りて再生する設計のため、
-    // コンパイル時に鳴るようチェックボックスと波形エディタへ反映する
-    // (NSF2MMLと同じ理由。反映しないと出力されたチャンネルが無音になる)。
-    if (result.expansions) setExpansionChips(result.expansions);
+    // 変換結果はNES拡張音源(FME-7/N163/VRC7)を借りて再生する設計。有効化はMML本文に
+    // 埋め込まれた#EX-*ディレクティブで行われるため、波形エディタへの反映のみ行う
     if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
 
     kssFileStatusEl.innerHTML =
-      `<div class="ok">MML変換完了 (${kssManualBpm ? '指定' : '推定'} ${result.bpm} BPM、音源: ${result.chips.join(', ')}) → MMLエディタに出力(FME-7/N163/VRC7を借用して再生)</div>`;
+      '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FME-7/N163/VRC7を借用して再生)',
+        { mode: kssManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', ') }) + '</div>';
+
+    // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
+    // 各種UIをMML本文に反映する(再生は開始しない)。
+    // 新規変換された曲なので、前回再生していた曲の再生範囲(赤/青ハンドル)を
+    // 引き継がず全体にリセットする(preservePlaybackRangeによる引き継ぎを無効化)
+    rangeStartSec = 0;
+    rangeEndSec = null;
+    prepareMmlStream(true);
   }
 
   kssFileEl.addEventListener('change', loadKssFile);
@@ -3049,4 +3193,707 @@
   document.getElementById('btnKss2Mml').addEventListener('click', runKss2Mml);
   document.getElementById('btnKssSongPrev').addEventListener('click', () => changeKssSong(-1));
   document.getElementById('btnKssSongNext').addEventListener('click', () => changeKssSong(1));
+
+  // ── GBS ファイル読み込み・再生 ────────────────────────────────────
+  // ★現段階ではネイティブ再生のみ(KSS/NSFのような背景先読みキャプチャ・ピアノロール・
+  //   ライブモニタ連携・シーク(scrub)は未実装)。gbs2mml実装時にcaptureGbsSongAsyncを
+  //   作る際、KSSのKssReplayStreamPlayerと同様の仕組みへ発展させる想定
+  //   (その際はlastPlayMode==='gbs'をcanSeek()/transportStop()のシーク対応リストへ追加すること)。
+  const gbsFileEl       = document.getElementById('gbsFile');
+  const gbsFileHeaderEl = document.getElementById('gbsFileHeader');
+  const gbsPlayDurEl    = document.getElementById('gbsPlayDuration');
+  const gbsFileStatusEl = document.getElementById('gbsFileStatus');
+  const gbsSongIndexEl  = document.getElementById('gbsSongIndex');
+  const gbsSongTotalEl  = document.getElementById('gbsSongTotal');
+
+  let loadedGbsBytes  = null;
+  let loadedGbsHeader = null;
+  let gbsIsRendering  = false;
+  let gbsActivePlayer = null; // GbsStreamPlayer
+
+  function renderGbsHeader(h) {
+    let out = '';
+    out += T('Magic       : {magic} ({ok})', { magic: h.magic, ok: h.magicOk ? 'OK' : T('不正') }) + '\n';
+    out += `Load/Init/Play: ${toHex(h.loadAddr,4)} / ${toHex(h.initAddr,4)} / ${toHex(h.playAddr,4)}\n`;
+    out += T('曲数        : {n}', { n: h.numSongs }) + '\n';
+    out += T('PLAY駆動    : {mode} ({fps} Hz)',
+      { mode: h.timerEnabled ? T('タイマ割込') : T('VBlank割込'), fps: h.playFps.toFixed(2) }) + '\n';
+    if (h.title) out += T('タイトル    : {title}', { title: h.title }) + '\n';
+    if (h.author) out += T('作者        : {author}', { author: h.author }) + '\n';
+    if (h.copyright) out += T('著作権      : {copyright}', { copyright: h.copyright }) + '\n';
+    gbsFileHeaderEl.innerHTML = '';
+    const pre = document.createElement('div');
+    pre.className = h.magicOk ? 'ok' : 'error';
+    pre.textContent = out;
+    gbsFileHeaderEl.appendChild(pre);
+  }
+
+  async function loadGbsFile() {
+    const file = gbsFileEl.files[0];
+    if (!file) return;
+    stopGbsPlayback();
+    keyboardDisplay.reset();
+    loadedGbsBytes = null; loadedGbsHeader = null;
+
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+
+    try {
+      const h = MML.GBS.parseHeader(bytes);
+      if (!h.magicOk) {
+        gbsFileHeaderEl.innerHTML = '<div class="error">' + T('GBSヘッダが不正です。') + '</div>';
+        return;
+      }
+      loadedGbsBytes = bytes;
+      loadedGbsHeader = h;
+      renderGbsHeader(h);
+      gbsSongIndexEl.min = String(h.firstSong);
+      gbsSongIndexEl.max = String(Math.max(h.firstSong, h.numSongs));
+      gbsSongIndexEl.value = String(h.firstSong);
+      gbsSongTotalEl.textContent = `/ ${h.numSongs}`;
+      gbsFileStatusEl.innerHTML = '';
+    } catch (e) {
+      gbsFileHeaderEl.innerHTML = '<div class="error">' + T('読み込みエラー: {msg}', { msg: e.message }) + '</div>';
+    }
+  }
+
+  function stopGbsPlayback() {
+    if (gbsActivePlayer) {
+      gbsActivePlayer.destroy();
+      gbsActivePlayer = null;
+    }
+    gbsRollToken++; // 進行中の先読みキャプチャ結果を無効化
+    keyboardDisplay.setRollTimeline(null);
+    updateGbsPlayButton();
+  }
+
+  // captureGbsSongAsync() の結果(snapshots)からピアノロール用タイムライン(共通形状)を
+  // 構築する。src/gbs2mml/expansion/*.js の抽出関数をenvReg/waveReg無し(ロールは
+  // 音色番号/エンベロープを必要としない)で呼び出すのはbuildKssRollTimelineと同じ考え方。
+  function buildGbsRollTimeline(snapshots, frameRate) {
+    const frameDur = 1 / frameRate;
+    // toNotes: 音程が同じまま途切れず続いている区間を1本の音符に統合する
+    // (buildKssRollTimelineと同じ考え方。ただしGBは実トリガbitがあるため
+    // retrigger判定はtriggerSeqの変化そのもの=extraction側で既にイベント境界として
+    // 反映済みなので、ここでは単純にnote/startの連続性だけ見ればよい)。
+    const toNotes = (events) => {
+      const out = [];
+      let endFrame = -1;
+      for (const e of events) {
+        if (e.note === null) { endFrame = -1; continue; }
+        const prev = out[out.length - 1];
+        if (prev && endFrame === e.start && prev.midi === e.note + 12) {
+          prev.endSec = e.end * frameDur;
+          prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
+        } else {
+          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15 });
+        }
+        endFrame = e.end;
+      }
+      return out;
+    };
+    const tracks = [];
+    const ch1 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch1');
+    const ch2 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch2');
+    const noise = MML.Gbs2MmlExpansion.noise(snapshots);
+    const wave = MML.Gbs2MmlExpansion.wave(snapshots);
+    tracks.push({ id: 'GB1', color: '#66ddff', notes: toNotes(ch1.events) });
+    tracks.push({ id: 'GB2', color: '#0077dd', notes: toNotes(ch2.events) });
+    tracks.push({ id: 'GN', color: '#aaaaaa', notes: toNotes(noise.events) });
+    tracks.push({ id: 'GW', color: '#ffcc00', notes: toNotes(wave.events) });
+    return tracks;
+  }
+
+  function updateGbsPlayButton() {
+    const btn = document.getElementById('btnGbsFilePlay');
+    if (!btn) return;
+    const playing = gbsActivePlayer && gbsActivePlayer.isPlaying;
+    btn.classList.toggle('is-playing', !!playing);
+    btn.title = playing ? T('一時停止') : T('再生');
+    btn.disabled = gbsIsRendering;
+  }
+
+  function playGbsStream() {
+    if (!loadedGbsBytes) {
+      gbsFileStatusEl.innerHTML = '<div class="error">' + T('先にGBSファイルを読み込んでください。') + '</div>';
+      return;
+    }
+    // 再生中なら一時停止 / 一時停止中なら再開
+    if (gbsActivePlayer && lastPlayMode === 'gbs') {
+      if (gbsActivePlayer.isPlaying) transportPause();
+      else transportPlay();
+      return;
+    }
+
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // 他フォーマットの再生と先読みキャプチャを止める(ロールの取り違え防止)
+    transportStop();
+    stopActivePlayer();
+    stopKssPlayback();
+    stopSpcPlayback();
+    stopVoiceMonitor();
+    invalidateOtherRollPrefetch('gbs');
+    lastPlayMode = 'gbs';
+    gbsBufferedFraction = 0;
+    updateSeekBufferedUI();
+
+    // ヘッダのfirstSongは1始まり(表示用)。INIT呼出は0始まりの曲番号を渡す仕様
+    // (src/gbs/gbsHeader.js・src/emulator/gbsPlayer.js参照)。
+    const songNoDisplay = parseInt(gbsSongIndexEl.value, 10) || loadedGbsHeader.firstSong;
+    const songIndex = Math.max(0, songNoDisplay - loadedGbsHeader.firstSong);
+    const duration = parseInt(gbsPlayDurEl.value, 10) || 180;
+    const gbsFrameRate = loadedGbsHeader.playFps;
+    const totalFrames = Math.ceil(duration * gbsFrameRate);
+
+    // NSF/KSSと同じ理由(二重エミュレーション解消・シーク対応)で、ライブ再生用プレイヤーと
+    // ロール先読みキャプチャを1本のバックグラウンドregsOnlyキャプチャに統合する
+    // (KssReplayStreamPlayerと対になるGbsReplayStreamPlayer、src/audio/gbs-stream-player.js)。
+    const player = new MML.Audio.GbsReplayStreamPlayer(audioCtx);
+    player.onEnded = () => { updateGbsPlayButton(); updateTransportUI(); };
+    gbsActivePlayer = player;
+    player.setSpeed(currentSpeedFactor);
+    workletDuration = duration;
+
+    resetPlaybackRangeToFull(duration);
+    seekBarEl.value = '0';
+    timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
+
+    gbsFileStatusEl.innerHTML = '';
+    const pre = document.createElement('div');
+    pre.className = 'ok';
+    pre.textContent = T('再生中: 曲{song}  (最大 {time})', { song: songNoDisplay, time: formatTime(duration) });
+    gbsFileStatusEl.appendChild(pre);
+
+    // バックグラウンドキャプチャ(regsOnly)。ピアノロールと実再生の両方の情報源を兼ねる。
+    // onProgressで途中経過(その時点までのsnapshots、進行中の配列への参照なので以後
+    // キャプチャが進むにつれ自動的に埋まっていく)を受け取り、最初の1回でplayer.load()
+    // して再生を開始する(以降のチャンクを待つ必要はない)。
+    const ROLL_REBUILD_INTERVAL_FRAMES = 120;
+    keyboardDisplay.setRollTimeline(null);
+    const myGbsRollToken = ++gbsRollToken;
+    let lastGbsRollBuiltFrame = 0;
+    let gbsPlaybackLoaded = false;
+    MML.Emu.captureGbsSongAsync(loadedGbsBytes, {
+      songIndex, durationSeconds: duration, sampleRate: audioCtx.sampleRate,
+      regsOnly: true,
+      shouldCancel: () => myGbsRollToken !== gbsRollToken
+    }, (done, total, data) => {
+      if (myGbsRollToken !== gbsRollToken) return; // 曲切替/停止で無効化済み
+
+      if (!gbsPlaybackLoaded) {
+        gbsPlaybackLoaded = true;
+        player.load(loadedGbsBytes, songIndex, totalFrames, { snapshots: data.snapshots }, getChannelMuteConfig());
+        // 鍵盤表示: GB APUをライブチップから直接スナップショットする(KSSのapplyKssMonitorSourceと同じ考え方)。
+        setMonitorSource({
+          regSnapshots: [{}], totalFrames: 1,
+          samplesPerFrame: audioCtx.sampleRate / gbsFrameRate,
+          sampleRate: audioCtx.sampleRate,
+          writeLog: [], cpuSnapshots: null, memSnapshots: null,
+          getGbsApu: liveGbsApu
+        }, () => gbsActivePlayer ? gbsActivePlayer.getPosition() : 0, ['gbs']);
+        transportPlay();
+      }
+
+      gbsBufferedFraction = total > 0 ? done / total : 0;
+      updateSeekBufferedUI();
+
+      if (done - lastGbsRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && done < total) return;
+      lastGbsRollBuiltFrame = done;
+      keyboardDisplay.setRollTimeline(buildGbsRollTimeline(data.snapshots.slice(0, done), gbsFrameRate));
+    }).catch((e) => {
+      // 先読み失敗時はピアノロールなしで続行するが、原因を追えるようログには残す(KSSと同じ理由)
+      console.error('GBS先読みキャプチャに失敗:', e);
+    });
+  }
+
+  function changeGbsSong(delta) {
+    const min = parseInt(gbsSongIndexEl.min, 10) || 0;
+    const max = parseInt(gbsSongIndexEl.max, 10) || 0;
+    let v = (parseInt(gbsSongIndexEl.value, 10) || 0) + delta;
+    v = Math.max(min, Math.min(max, v));
+    gbsSongIndexEl.value = String(v);
+    if (gbsActivePlayer) { stopGbsPlayback(); playGbsStream(); }
+  }
+
+  async function exportGbsWav() {
+    if (!loadedGbsBytes) {
+      gbsFileStatusEl.innerHTML = '<div class="error">' + T('先にGBSファイルを読み込んでください。') + '</div>';
+      return;
+    }
+    if (gbsIsRendering) return;
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    const songNoDisplay = parseInt(gbsSongIndexEl.value, 10) || loadedGbsHeader.firstSong;
+    const songIndex = Math.max(0, songNoDisplay - loadedGbsHeader.firstSong);
+    const duration = parseInt(gbsPlayDurEl.value, 10) || 30;
+    const sampleRate = audioCtx.sampleRate;
+    gbsIsRendering = true;
+    updateGbsPlayButton();
+    gbsFileStatusEl.innerHTML = '<div>' + T('WAV書き出し用レンダリング中…') + '</div>';
+    await new Promise(resolve => setTimeout(resolve, 10)); // UIを一度更新させてから重い処理へ入る
+
+    const player = new MML.Emu.GbsPlayer(loadedGbsBytes);
+    player.initSong(songIndex);
+    const totalFrames = Math.ceil(duration * player.frameRate);
+    const totalSamples = Math.round(totalFrames * sampleRate / player.frameRate);
+    const audio = new Float32Array(totalSamples);
+    let pos = 0;
+    for (let f = 0; f < totalFrames && pos < totalSamples; f++) {
+      const chunk = player.renderFrame(sampleRate);
+      const n = Math.min(chunk.length, totalSamples - pos);
+      audio.set(chunk.subarray(0, n), pos);
+      pos += n;
+    }
+
+    gbsIsRendering = false;
+    updateGbsPlayButton();
+
+    const filename = `gbs_song${songNoDisplay}.wav`;
+    const blob = buildWavBlob(audio, sampleRate, 2.5);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+
+    gbsFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file: filename }) + '</div>';
+  }
+
+  async function runGbs2Mml() {
+    if (!loadedGbsBytes) {
+      gbsFileStatusEl.innerHTML = '<div class="error">' + T('先にGBSファイルを読み込んでください。') + '</div>';
+      return;
+    }
+    if (gbsIsRendering) return;
+
+    const songNoDisplay = parseInt(gbsSongIndexEl.value, 10) || loadedGbsHeader.firstSong;
+    const songIndex = Math.max(0, songNoDisplay - loadedGbsHeader.firstSong);
+    const duration = parseInt(gbsPlayDurEl.value, 10) || 60;
+    gbsIsRendering = true;
+    updateGbsPlayButton();
+    gbsFileStatusEl.innerHTML = '<div>' + T('MML変換用キャプチャ中… (数秒かかります)') + '</div>';
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    const gbsManualBpm = getManualBpm('gbs');
+    let result;
+    try {
+      result = await MML.GBS2MML.fromGbs(loadedGbsBytes, songIndex, duration, { bpm: gbsManualBpm });
+    } catch (e) {
+      gbsIsRendering = false;
+      updateGbsPlayButton();
+      gbsFileStatusEl.innerHTML = '<div class="error">' + T('変換エラー: {msg}', { msg: e.message }) + '</div>';
+      return;
+    }
+
+    gbsIsRendering = false;
+    updateGbsPlayButton();
+
+    mmlSourceEl.value = result.mml;
+    mmlSourceEl.dispatchEvent(new Event('input'));
+
+    // 変換結果はNES拡張音源(FDS)を借りて再生する設計。有効化はMML本文に埋め込まれた
+    // #EX-*ディレクティブで行われるため、波形エディタへの反映のみ行う
+    if (result.fdsWave && MML.WaveformEditor.fdsWave) MML.WaveformEditor.fdsWave.setData(result.fdsWave);
+
+    gbsFileStatusEl.innerHTML =
+      '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FDSを借用して再生)',
+        { mode: gbsManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', ') }) + '</div>';
+
+    // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
+    // 各種UIをMML本文に反映する(再生は開始しない)。新規変換された曲なので、前回再生
+    // していた曲の再生範囲(赤/青ハンドル)を引き継がず全体にリセットする。
+    rangeStartSec = 0;
+    rangeEndSec = null;
+    prepareMmlStream(true);
+  }
+
+  gbsFileEl.addEventListener('change', loadGbsFile);
+  document.getElementById('btnGbsFilePlay').addEventListener('click', () => {
+    playGbsStream();
+    keyboardDisplay.setMode('nsf');
+  });
+  document.getElementById('btnGbsFileStop').addEventListener('click', () => {
+    stopGbsPlayback();
+    keyboardDisplay.setMode('nsf');
+  });
+  document.getElementById('btnGbsExportWav').addEventListener('click', exportGbsWav);
+  document.getElementById('btnGbs2Mml').addEventListener('click', runGbs2Mml);
+  document.getElementById('btnGbsSongPrev').addEventListener('click', () => changeGbsSong(-1));
+  document.getElementById('btnGbsSongNext').addEventListener('click', () => changeGbsSong(1));
+
+  // ── HES(PC Engine)ファイル読み込み・再生 ────────────────────────────────
+  // ★HESヘッダにはNSF/GBSと違い「曲数」「PLAYアドレス」が存在しない(hesBus.js冒頭コメント
+  //   参照)。トラック番号はゲーム依存の任意値のため、min/max/曲数表示は行わず自由入力とする
+  //   (既定値はheader.firstTrack)。再生自体は本物のIRQディスパッチで駆動されるため
+  //   (hesPlayer.js)、GBS同様バックグラウンド先読みキャプチャ+スナップショット再生方式。
+  const hesFileEl       = document.getElementById('hesFile');
+  const hesFileHeaderEl = document.getElementById('hesFileHeader');
+  const hesPlayDurEl    = document.getElementById('hesPlayDuration');
+  const hesFileStatusEl = document.getElementById('hesFileStatus');
+  const hesTrackIndexEl = document.getElementById('hesTrackIndex');
+
+  let loadedHesBytes  = null;
+  let loadedHesHeader = null;
+  let hesIsRendering  = false;
+  let hesActivePlayer = null; // HesReplayStreamPlayer
+
+  function renderHesHeader(h) {
+    let out = '';
+    out += T('Magic       : {magic} ({ok})', { magic: h.tag, ok: h.magicOk ? 'OK' : T('不正') }) + '\n';
+    out += `Init: ${toHex(h.initAddr, 4)}\n`;
+    out += T('先頭トラック: {n} (0x{hex})', { n: h.firstTrack, hex: h.firstTrack.toString(16).toUpperCase() }) + '\n';
+    out += `MPR0-7: ${h.banks.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')}\n`;
+    out += T('データ      : {size}byte @ 0x{addr}', { size: h.dataSize, addr: h.addr.toString(16).toUpperCase() }) + '\n';
+    if (h.title) out += T('タイトル    : {title}', { title: h.title }) + '\n';
+    if (h.author) out += T('作者        : {author}', { author: h.author }) + '\n';
+    if (h.copyright) out += T('著作権      : {copyright}', { copyright: h.copyright }) + '\n';
+    hesFileHeaderEl.innerHTML = '';
+    const pre = document.createElement('div');
+    pre.className = h.magicOk ? 'ok' : 'error';
+    pre.textContent = out;
+    hesFileHeaderEl.appendChild(pre);
+  }
+
+  async function loadHesFile() {
+    const file = hesFileEl.files[0];
+    if (!file) return;
+    stopHesPlayback();
+    keyboardDisplay.reset();
+    loadedHesBytes = null; loadedHesHeader = null;
+
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+
+    try {
+      const h = MML.HES.parseHeader(bytes);
+      if (!h.magicOk) {
+        hesFileHeaderEl.innerHTML = '<div class="error">' + T('HESヘッダが不正です。') + '</div>';
+        return;
+      }
+      loadedHesBytes = bytes;
+      loadedHesHeader = h;
+      renderHesHeader(h);
+      hesTrackIndexEl.value = String(h.firstTrack);
+      hesFileStatusEl.innerHTML = '';
+    } catch (e) {
+      hesFileHeaderEl.innerHTML = '<div class="error">' + T('読み込みエラー: {msg}', { msg: e.message }) + '</div>';
+    }
+  }
+
+  function stopHesPlayback() {
+    if (hesActivePlayer) {
+      hesActivePlayer.destroy();
+      hesActivePlayer = null;
+    }
+    hesRollToken++; // 進行中の先読みキャプチャ結果を無効化
+    keyboardDisplay.setRollTimeline(null);
+    updateHesPlayButton();
+  }
+
+  // captureHesSongAsync() の結果(snapshots)からピアノロール用タイムライン(共通形状)を
+  // 構築する。src/hes2mml/expansion/*.js の抽出関数をenvReg/waveReg無し(ロールは
+  // 音色番号/エンベロープを必要としない)で呼び出すのはbuildKssRollTimelineと同じ考え方。
+  function buildHesRollTimeline(snapshots, frameRate) {
+    const frameDur = 1 / frameRate;
+    const toNotes = (events) => {
+      const out = [];
+      let endFrame = -1;
+      for (const e of events) {
+        if (e.note === null) { endFrame = -1; continue; }
+        const prev = out[out.length - 1];
+        if (prev && endFrame === e.start && prev.midi === e.note + 12) {
+          prev.endSec = e.end * frameDur;
+          prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
+        } else {
+          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15 });
+        }
+        endFrame = e.end;
+      }
+      return out;
+    };
+    const tracks = [];
+    const waveResult = MML.Hes2MmlExpansion.wave(snapshots);
+    const noiseResult = MML.Hes2MmlExpansion.noise(snapshots);
+    const colors = ['#66ddff', '#0077dd', '#33cc99', '#ffaa00', '#ff6699', '#cc88ff'];
+    waveResult.channels.forEach((ch, i) => {
+      tracks.push({ id: `P${i}`, color: colors[i % colors.length], notes: toNotes(ch.events) });
+    });
+    tracks.push({ id: 'PN', color: '#aaaaaa', notes: toNotes(noiseResult.events) });
+    return tracks;
+  }
+
+  function updateHesPlayButton() {
+    const btn = document.getElementById('btnHesFilePlay');
+    if (!btn) return;
+    const playing = hesActivePlayer && hesActivePlayer.isPlaying;
+    btn.classList.toggle('is-playing', !!playing);
+    btn.title = playing ? T('一時停止') : T('再生');
+    btn.disabled = hesIsRendering;
+  }
+
+  // ★HESはHesReplayStreamPlayer(GBS/KSSと同じスナップショット再生方式)を使う。
+  //   経緯: PSGのDDA(直接D/A、PCM/音声サンプル再生)モードを正しく再現するため、
+  //   HesStreamPlayer(CPU駆動のリアルタイム合成)→HesBufferedPlayer(事前一括
+  //   レンダリング/ストリーミング再生、いずれもsrc/audio/hes-stream-player.jsに定義は
+  //   残したまま)の順に試したが、「がくがく」する・鍵盤表示が働かない等の副作用が
+  //   解消しきれなかった(ユーザー要望により2026-08、PCM対応着手前の状態へ差し戻し)。
+  //   このためDDA(PCM)を使う曲の音は、フレーム単位のスナップショットでは高頻度書込みを
+  //   取りこぼすという制約を再び受ける(波形/ノイズchの通常の音は問題なく鳴る)。
+  function playHesStream() {
+    if (!loadedHesBytes) {
+      hesFileStatusEl.innerHTML = '<div class="error">' + T('先にHESファイルを読み込んでください。') + '</div>';
+      return;
+    }
+    if (hesActivePlayer && lastPlayMode === 'hes') {
+      if (hesActivePlayer.isPlaying) transportPause();
+      else transportPlay();
+      return;
+    }
+
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    transportStop();
+    stopActivePlayer();
+    stopKssPlayback();
+    stopSpcPlayback();
+    stopGbsPlayback();
+    stopVoiceMonitor();
+    invalidateOtherRollPrefetch('hes');
+    lastPlayMode = 'hes';
+    hesBufferedFraction = 0;
+    updateSeekBufferedUI();
+
+    const track = parseInt(hesTrackIndexEl.value, 10) || 0;
+    const duration = parseInt(hesPlayDurEl.value, 10) || 180;
+    const hesFrameRate = MML.HES.VBLANK_FPS;
+    const totalFrames = Math.ceil(duration * hesFrameRate);
+
+    // ★2026-08 PCM(DDA)対応前の設計に戻した(GBS/KSSと同じHesReplayStreamPlayer、
+    // ユーザー要望)。CPU駆動のリアルタイム合成(HesStreamPlayer)や事前一括レンダリング
+    // (HesBufferedPlayer、いずれもsrc/audio/hes-stream-player.jsに定義は残したまま)は
+    // DDA(PCM)の高頻度書込みを正確に再現するために順に試したが、いずれも「がくがく」
+    // する・鍵盤表示が働かない等の副作用が解消しきれなかったため、まずは安定していた
+    // この方式へ戻す。PCM(DDA)を使う曲の音は再びこの方式の制約(フレーム単位の
+    // スナップショットでは追いきれない)を受ける。
+    const player = new MML.Audio.HesReplayStreamPlayer(audioCtx);
+    player.onEnded = () => { updateHesPlayButton(); updateTransportUI(); };
+    hesActivePlayer = player;
+    player.setSpeed(currentSpeedFactor);
+    workletDuration = duration;
+
+    resetPlaybackRangeToFull(duration);
+    seekBarEl.value = '0';
+    timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
+
+    hesFileStatusEl.innerHTML = '';
+    const pre = document.createElement('div');
+    pre.className = 'ok';
+    pre.textContent = T('再生中: トラック{track}  (最大 {time})', { track, time: formatTime(duration) });
+    hesFileStatusEl.appendChild(pre);
+
+    // バックグラウンドキャプチャ(regsOnly)。ピアノロールと実再生の両方の情報源を兼ねる。
+    const ROLL_REBUILD_INTERVAL_FRAMES = 120;
+    keyboardDisplay.setRollTimeline(null);
+    const myHesRollToken = ++hesRollToken;
+    let lastHesRollBuiltFrame = 0;
+    let hesPlaybackLoaded = false;
+    MML.Emu.captureHesSongAsync(loadedHesBytes, {
+      track, durationSeconds: duration, sampleRate: audioCtx.sampleRate,
+      regsOnly: true,
+      shouldCancel: () => myHesRollToken !== hesRollToken
+    }, (done, total, data) => {
+      if (myHesRollToken !== hesRollToken) return; // 曲切替/停止で無効化済み
+
+      if (!hesPlaybackLoaded) {
+        hesPlaybackLoaded = true;
+        player.load(loadedHesBytes, track, totalFrames, { snapshots: data.snapshots }, getChannelMuteConfig());
+        setMonitorSource({
+          regSnapshots: [{}], totalFrames: 1,
+          samplesPerFrame: audioCtx.sampleRate / hesFrameRate,
+          sampleRate: audioCtx.sampleRate,
+          writeLog: [], cpuSnapshots: null, memSnapshots: null,
+          getHesApu: liveHesApu
+        }, () => hesActivePlayer ? hesActivePlayer.getPosition() : 0, ['hes']);
+        transportPlay();
+      }
+
+      hesBufferedFraction = total > 0 ? done / total : 0;
+      updateSeekBufferedUI();
+
+      if (done - lastHesRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && done < total) return;
+      lastHesRollBuiltFrame = done;
+      keyboardDisplay.setRollTimeline(buildHesRollTimeline(data.snapshots.slice(0, done), hesFrameRate));
+    }).catch((e) => {
+      console.error('HES先読みキャプチャに失敗:', e);
+    });
+  }
+
+  function changeHesTrack(delta) {
+    let v = (parseInt(hesTrackIndexEl.value, 10) || 0) + delta;
+    v = Math.max(0, Math.min(255, v));
+    hesTrackIndexEl.value = String(v);
+    if (hesActivePlayer) { stopHesPlayback(); playHesStream(); }
+  }
+
+  async function exportHesWav() {
+    if (!loadedHesBytes) {
+      hesFileStatusEl.innerHTML = '<div class="error">' + T('先にHESファイルを読み込んでください。') + '</div>';
+      return;
+    }
+    if (hesIsRendering) return;
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    const track = parseInt(hesTrackIndexEl.value, 10) || 0;
+    const duration = parseInt(hesPlayDurEl.value, 10) || 30;
+    const sampleRate = audioCtx.sampleRate;
+    hesIsRendering = true;
+    updateHesPlayButton();
+    hesFileStatusEl.innerHTML = '<div>' + T('WAV書き出し用レンダリング中…') + '</div>';
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    const player = new MML.Emu.HesPlayer(loadedHesBytes);
+    player.initSong(track);
+    const totalFrames = Math.ceil(duration * player.frameRate);
+    const totalSamples = Math.round(totalFrames * sampleRate / player.frameRate);
+    const audio = new Float32Array(totalSamples);
+    let pos = 0;
+    for (let f = 0; f < totalFrames && pos < totalSamples; f++) {
+      const chunk = player.renderFrame(sampleRate);
+      const n = Math.min(chunk.length, totalSamples - pos);
+      audio.set(chunk.subarray(0, n), pos);
+      pos += n;
+    }
+
+    hesIsRendering = false;
+    updateHesPlayButton();
+
+    const filename = `hes_track${track}.wav`;
+    const blob = buildWavBlob(audio, sampleRate, 4.0);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+
+    hesFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file: filename }) + '</div>';
+  }
+
+  async function runHes2Mml() {
+    if (!loadedHesBytes) {
+      hesFileStatusEl.innerHTML = '<div class="error">' + T('先にHESファイルを読み込んでください。') + '</div>';
+      return;
+    }
+    if (hesIsRendering) return;
+
+    const track = parseInt(hesTrackIndexEl.value, 10) || 0;
+    const duration = parseInt(hesPlayDurEl.value, 10) || 60;
+    hesIsRendering = true;
+    updateHesPlayButton();
+    hesFileStatusEl.innerHTML = '<div>' + T('MML変換用キャプチャ中… (数秒かかります)') + '</div>';
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    const hesManualBpm = getManualBpm('hes');
+    let result;
+    try {
+      result = await MML.HES2MML.fromHes(loadedHesBytes, track, duration, { bpm: hesManualBpm });
+    } catch (e) {
+      hesIsRendering = false;
+      updateHesPlayButton();
+      hesFileStatusEl.innerHTML = '<div class="error">' + T('変換エラー: {msg}', { msg: e.message }) + '</div>';
+      return;
+    }
+
+    hesIsRendering = false;
+    updateHesPlayButton();
+
+    mmlSourceEl.value = result.mml;
+    mmlSourceEl.dispatchEvent(new Event('input'));
+
+    if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
+
+    // DPCM(DDA/PCM抽出分)バイナリファイルをダウンロード(保存用)。同時にdpcmSampleCacheへ
+    // 直接投入し、生成されたMML中の@DPCM<n>定義をユーザーがファイル再選択しなくても
+    // そのまま再生・NSF書き出しできるようにする(nsf2mml/converter.jsと同じパターン)
+    for (const f of (result.dpcmFiles || [])) {
+      downloadBin(f.name, f.bytes);
+      dpcmSampleCache[f.name] = f.bytes;
+    }
+    const dpcmMsg = (result.dpcmFiles && result.dpcmFiles.length > 0)
+      ? T('、DPCM {n} ファイル出力', { n: result.dpcmFiles.length }) : '';
+
+    hesFileStatusEl.innerHTML =
+      '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}{dpcm}) → MMLエディタに出力(N163を借用して再生)',
+        { mode: hesManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', '), dpcm: dpcmMsg }) + '</div>';
+
+    rangeStartSec = 0;
+    rangeEndSec = null;
+    prepareMmlStream(true);
+  }
+
+  hesFileEl.addEventListener('change', loadHesFile);
+  document.getElementById('btnHesFilePlay').addEventListener('click', () => {
+    playHesStream();
+    keyboardDisplay.setMode('nsf');
+  });
+  document.getElementById('btnHesFileStop').addEventListener('click', () => {
+    stopHesPlayback();
+    keyboardDisplay.setMode('nsf');
+  });
+  document.getElementById('btnHesExportWav').addEventListener('click', exportHesWav);
+  document.getElementById('btnHes2Mml').addEventListener('click', runHes2Mml);
+  document.getElementById('btnHesTrackPrev').addEventListener('click', () => changeHesTrack(-1));
+  document.getElementById('btnHesTrackNext').addEventListener('click', () => changeHesTrack(1));
+
+  // ==========================================================================
+  // 統合サウンドファイルウィンドウ: 拡張子でNSF/SPC/KSSパネルを切り替える
+  // ==========================================================================
+  (function initUnifiedSoundFileWindow() {
+    const soundFileEl = document.getElementById('soundFile');
+    const soundPlayTitleEl = document.getElementById('soundPlayTitle');
+    const formatToInputId = { nsf: 'nsfFile', spc: 'spcFile', kss: 'kssFile', gbs: 'gbsFile', hes: 'hesFile' };
+    const formatToLabel = { nsf: T('NSF (ファミコン)'), spc: T('SPC (スーパーファミコン)'), kss: 'KSS (MSX)', gbs: 'GBS (Game Boy)', hes: 'HES (PC Engine)' };
+
+    function showSoundPanel(format) {
+      ['none', 'nsf', 'spc', 'kss', 'gbs', 'hes'].forEach((f) => {
+        const panel = document.getElementById('soundPanel-' + f);
+        if (panel) panel.style.display = f === format ? '' : 'none';
+      });
+      soundPlayTitleEl.textContent = formatToLabel[format] || T('サウンドファイルを開く');
+    }
+
+    soundFileEl.addEventListener('change', () => {
+      const file = soundFileEl.files[0];
+      if (!file) return;
+      const ext = file.name.split('.').pop().toLowerCase();
+      const targetInputId = formatToInputId[ext];
+      if (!targetInputId) {
+        alert(T('対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES)', { ext }));
+        soundFileEl.value = '';
+        return;
+      }
+      const targetInput = document.getElementById(targetInputId);
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      targetInput.files = dt.files;
+      targetInput.dispatchEvent(new Event('change'));
+      showSoundPanel(ext);
+    });
+
+    // ヘッダーの「サウンドファイルを開く」ボタン: ウィンドウを開くのと同時に
+    // ファイル選択ダイアログを直接表示する（floatingWindows.jsの汎用トグル処理の後に実行され、
+    // その時点でウィンドウの表示/非表示は確定している）
+    const openBtn = document.querySelector('.toggle-btn[data-target="win-soundplay"]');
+    const soundWinEl = document.getElementById('win-soundplay');
+    if (openBtn && soundWinEl) {
+      openBtn.addEventListener('click', () => {
+        if (soundWinEl.style.display !== 'none') {
+          soundFileEl.click();
+        }
+      });
+    }
+
+    // ウィンドウ自体のタイトル行にあるファイルを開くアイコン(ウィンドウが既に開いている状態で
+    // 別のファイルへ差し替える用)
+    const inlineOpenBtn = document.getElementById('btnSoundFileOpenInline');
+    if (inlineOpenBtn) inlineOpenBtn.addEventListener('click', () => soundFileEl.click());
+  })();
 })();

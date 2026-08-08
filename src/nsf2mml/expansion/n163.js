@@ -18,8 +18,13 @@
  *  の internalIdx = (8-numCh)+i と一致)。周波数も numCh を含む実機式で算出する。
  *
  * 波形は各チャンネルが自分の波形(+6のオフセット/+4の長さ)を持つため、ch0共有ではなく
- * チャンネルごとに実波形を読み出し、コンパイラのN163波形長(16サンプル)へリサンプリングして
- * waveReg(WaveRegistry、曲全体で共有・重複排除)に登録し、@<n>(instrument)で選択する。
+ * チャンネルごとに実波形を読み出し、waveReg(WaveRegistry、曲全体で共有・重複排除)に
+ * 登録し、@<n>(instrument)で選択する。★波形は実機の生の長さのまま(16サンプルへの
+ * リサンプリングはしない)抽出する。コンパイラ側(src/mml/n163Alloc.js共有バッファ
+ * アロケータ)は既に可変長の@N<n>に対応済みだったが、抽出側だけが古い「常に16サンプルへ
+ * 縮小」のままだったため、実機の波形長(例: 32サンプル)がある曲では音色の解像度が
+ * 半分以下に失われ聴感上の「キレ」が損なわれていた(女神転生II 20曲目のベースで
+ * ユーザー報告・実測: 実機は32サンプルなのに抽出は16サンプルに間引いていた)。
  * N163にはハードウェア音量エンベロープが無く音量は完全にソフトウェア書き込みのみなので、
  * ピッチ/波形が同じ間は音量変化だけでは区切らずvolSeqに積み、envReg(EnvelopeRegistry)へ
  * 実測形状として登録する(2A03等と同じ考え方)。
@@ -30,7 +35,7 @@
   MML.Nsf2MmlExpansion = MML.Nsf2MmlExpansion || {};
 
   const CPU_CLOCK = 1789773;
-  const OUT_WAVE_LEN = 16; // コンパイラ側 N163_WAVE_LEN と一致させる
+  const UI_DEFAULT_WAVE_LEN = 16; // 波形エディタUI(MML.WaveformEditor)の固定枠に合わせた表示専用の長さ
 
   function freqToNoteNumber(freq) {
     if (freq <= 0) return null;
@@ -38,17 +43,26 @@
     return (n >= 0 && n <= 119) ? n : null;
   }
 
-  // 128byte RAM から base のチャンネルの波形を実長で読み、OUT_WAVE_LEN 点へリサンプリングする。
-  // 波形アドレス(+6)・波形長(+4)は各チャンネル固有。サンプルは4bit(ニブル)単位でRAMに詰まる。
-  function resampleWave(ram, base) {
+  // 128byte RAM から base のチャンネルの波形を、実機の生の長さのまま読み出す(リサンプリング
+  // しない)。波形アドレス(+6)・波形長(+4)は各チャンネル固有。サンプルは4bit(ニブル)単位で
+  // RAMに詰まる。長さは256-(+4&0xFC)というレジスタの丸め規則そのものが既に4の倍数
+  // (MML.N163Alloc.roundedLenと同じ規則)なので、ここで改めて丸め直す必要はない。
+  function readNativeWave(ram, base) {
     const waveOffset = ram[base + 6];
     const length = Math.max(1, 256 - (ram[base + 4] & 0xFC));
     const sampleAt = a => (ram[(a >> 1) & 0x7F] >> ((a & 1) * 4)) & 0x0F;
-    const raw = [];
-    for (let i = 0; i < length; i++) raw.push(sampleAt((waveOffset + i) & 0xFF));
-    const wave = new Array(OUT_WAVE_LEN);
-    for (let i = 0; i < OUT_WAVE_LEN; i++) {
-      const srcPos = Math.floor((i / OUT_WAVE_LEN) * raw.length) % raw.length;
+    const wave = new Array(length);
+    for (let i = 0; i < length; i++) wave[i] = sampleAt((waveOffset + i) & 0xFF);
+    return wave;
+  }
+
+  // 波形エディタUIの既定波形表示専用(MML.WaveformEditorが固定16サンプル枠のため)。
+  // 実際の音符の音色にはreadNativeWaveの生の長さをそのまま使う。
+  function resampleWaveForUiDefault(ram, base) {
+    const raw = readNativeWave(ram, base);
+    const wave = new Array(UI_DEFAULT_WAVE_LEN);
+    for (let i = 0; i < UI_DEFAULT_WAVE_LEN; i++) {
+      const srcPos = Math.floor((i / UI_DEFAULT_WAVE_LEN) * raw.length) % raw.length;
       wave[i] = raw[srcPos] || 0;
     }
     return wave;
@@ -81,11 +95,20 @@
     });
   }
 
-  // ピッチ/波形が同じ間は音量変化だけでは区切らずvolSeqに積む(ソフトウェア音量エンベロープ抽出用)。
+  // ピッチ/波形が同じ間は音量変化だけでは区切らずvolSeqに積む(ソフトウェア音量エンベロープ抽出用、
+  // パス1)。★N163には2A03/MMC5の$4003/$400B相当の専用アタックレジスタが無く、同じ音程・
+  // 同じ波形のまま音量だけリセットしてノートを打ち直す(ロール奏法)場合、ピッチ/波形の
+  // 変化だけを見ていると別々の発音を1つの音符に merge してしまう(女神転生II 25曲目、
+  // N163 Sパートで同じ音程のまま5→4→3→5→4→3→5→4→3と3回打ち直されている「d+ f f f」相当の
+  // ロールが、1本の長い音符+2周期分では足りずloop検出もできない中途半端なエンベロープに
+  // 丸め込まれていた、とユーザー報告で発覚)。この「同ピッチ内の打ち直し検出」自体は
+  // N163固有の話ではなく(FME7等アタックレジスタを持たないチップ全般に言える)ため、
+  // src/convert/retrigger.js に音源非依存の判定として切り出し、パス2でランごとに適用する
+  // (詳細な判定方針はそちらのコメント参照)。
   function extractChannelEvents(timeline, base) {
-    const events = [];
+    const runs = [];
     let cur = null;
-    function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
+    function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) runs.push(cur); cur = null; } }
     for (let f = 0; f < timeline.length; f++) {
       const ram = timeline[f].ram;
       const numCh = timeline[f].numCh;
@@ -93,18 +116,35 @@
       const volume  = ram[base + 7] & 0x0F;
       const length  = Math.max(1, 256 - (ram[base + 4] & 0xFC));
       const freq = (freqReg * CPU_CLOCK) / (15 * 65536 * length * numCh);
-      const wave = resampleWave(ram, base);
+      const wave = readNativeWave(ram, base);
       const waveKey = wave.join(',');
       const note = (volume > 0 && freqReg > 0) ? freqToNoteNumber(freq) : null;
-      if (!cur) { cur = { note, wave, waveKey, start: f, end: f, volSeq: [volume] }; continue; }
+      const rawFreq = note !== null ? freq : null;
+      if (!cur) { cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume] }; continue; }
       if (note !== cur.note || waveKey !== cur.waveKey) {
         flush(f);
-        cur = { note, wave, waveKey, start: f, end: f, volSeq: [volume] };
+        cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume] };
       } else {
         cur.volSeq.push(volume);
       }
     }
     flush(timeline.length);
+
+    // パス2: 各ラン(同ピッチ・同波形の区間)ごとに、打ち直し境界が無いか判定して分割する。
+    // 休符(note===null)は対象外。
+    const events = [];
+    for (const run of runs) {
+      if (run.note == null) { events.push(run); continue; }
+      const ranges = MML.Convert.splitRetriggers(run.volSeq);
+      for (const r of ranges) {
+        events.push({
+          note: run.note, wave: run.wave, waveKey: run.waveKey,
+          rawFreq: run.rawFreq, rawNumCh: run.rawNumCh,
+          start: run.start + r.start, end: run.start + r.end,
+          volSeq: run.volSeq.slice(r.start, r.end)
+        });
+      }
+    }
     return events;
   }
 
@@ -120,7 +160,8 @@
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
     }
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note },
+      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, rawNumCh: ev.rawNumCh,
+        rawLength: ev.note !== null ? ev.wave.length : undefined },
       ev.note !== null ? Object.assign(
         { instrument: waveReg ? waveReg.assign(ev.wave) : 0 },
         toVolumeFields(ev.volSeq)
@@ -141,7 +182,7 @@
 
     // 波形エディタUIの既定波形として、最終フレームの先頭(最下位アドレス)チャンネルの波形を返す
     const lastRam = timeline.length > 0 ? timeline[timeline.length - 1].ram : null;
-    const n163Wave = lastRam ? resampleWave(lastRam, 0x40 + (8 - songNumCh) * 8) : null;
+    const n163Wave = lastRam ? resampleWaveForUiDefault(lastRam, 0x40 + (8 - songNumCh) * 8) : null;
 
     return { channels, n163Wave };
   };

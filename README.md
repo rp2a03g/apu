@@ -1,4 +1,4 @@
-# Web-Based FamiMML Studio
+# Sound Emulation Foundry - ppmckc ed.
 
 ブラウザ上で動作するファミコン(RP2A03)＋拡張音源対応MML制作環境。
 MMLコンパイラ・6502アセンブラ・NSFジェネレーター・音源エミュレータをすべてJavaScriptで内製する。

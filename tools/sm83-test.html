@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>SM83 命令テスト (SingleStepTests / sm83)</title>
+<style>
+  body{font:14px/1.5 system-ui,sans-serif;margin:1.5rem;max-width:1000px}
+  h1{font-size:18px}
+  button{font:inherit;padding:.4em .9em;border:1px solid #888;border-radius:6px;background:#f6f6f4;cursor:pointer}
+  label{font-size:13px;color:#555}
+  #sum{margin:.8rem 0;font-weight:600}
+  .group{margin-top:1rem}
+  .group h2{font-size:13px;margin:.4em 0}
+  #grid,#gridCB{display:grid;grid-template-columns:repeat(16,1fr);gap:3px}
+  .op{font:11px/1.4 monospace;text-align:center;padding:3px 0;border-radius:3px;background:#eee;color:#555}
+  .op.pass{background:#d8f0dc;color:#1b6b2f}
+  .op.fail{background:#f6c9c9;color:#8a1f1f}
+  .op.skip{background:#f3f3f3;color:#bbb}
+  .op.err{background:#eee;color:#aaa}
+  pre{background:#f6f6f4;padding:.8em;border-radius:6px;overflow:auto;max-height:45vh}
+  .muted{color:#777}
+</style>
+</head>
+<body>
+<h1>SM83 (Game Boy CPU) 命令テスト</h1>
+<p class="muted">外部テストベクタ <code>SingleStepTests/sm83 v1</code>(初期状態→1命令実行→最終状態を照合、各命令最大1000ケース)で
+<code>MML.Emu.CPUSm83</code> を検証する。<b>主要レジスタ(A/F/B/C/D/E/H/L/SP/PC)・IME・RAM破壊(IEレジスタ=$FFFFのメモリ内容を含む)・サイクル数</b>を比較。
+テストの<code>cycles</code>配列はMサイクル単位(1エントリ=4Tステート)のため、<code>step()</code>が返すTステート数を4で割って比較する。
+未定義オペコード(D3/DB/DD/E3/E4/EB/EC/ED/F4/FC/FD)はテストベクタが存在しないため取得失敗時は skip 表示。</p>
+<p>
+  <label>各命令のケース数: <input id="per" type="number" value="300" min="1" max="1000" style="width:6em"></label>
+  <button id="run">全命令をテスト</button>
+</p>
+<div id="sum"></div>
+<div class="group"><h2>メイン (00-FF)</h2><div id="grid"></div></div>
+<div class="group"><h2>CB (回転/ビット/SWAP)</h2><div id="gridCB"></div></div>
+<pre id="detail" hidden></pre>
+
+<script src="../src/emulator/cpuSm83.js"></script>
+<script>
+const VECTOR_BASE = 'https://cdn.jsdelivr.net/gh/SingleStepTests/sm83@main/v1/';
+
+function makeGrid(el) {
+  const cells = {};
+  for (let op = 0; op < 256; op++) {
+    const hex = op.toString(16).padStart(2, '0');
+    const c = document.createElement('div');
+    c.className = 'op'; c.textContent = hex; c.title = hex;
+    el.appendChild(c); cells[hex] = c;
+  }
+  return cells;
+}
+const grids = {
+  main: { cells: makeGrid(document.getElementById('grid')), file: hex => hex + '.json' },
+  cb: { cells: makeGrid(document.getElementById('gridCB')), file: hex => 'cb%20' + hex + '.json' }
+};
+
+// テストベクタの initial.ie は前提条件の一部(HALTバグ等の分岐用)を表すだけで、
+// final側には存在しない(=検証対象外)。$FFFFは通常のram読み書き対象アドレスとしても
+// 使われうる(PCがラップして$FFFFから命令フェッチするケース等)ため、ie専用の書込みで
+// ram[0xFFFF]を上書きしてはいけない(実際にこれで命令バイトを破壊するバグがあった)。
+function applyState(cpu, ram, s) {
+  cpu.a = s.a; cpu.f = s.f; cpu.b = s.b; cpu.c = s.c; cpu.d = s.d; cpu.e = s.e; cpu.h = s.h; cpu.l = s.l;
+  cpu.sp = s.sp; cpu.pc = s.pc;
+  cpu.ime = !!s.ime;
+  cpu.imePending = 0;
+  cpu.halted = false;
+  cpu.stopped = false;
+}
+function stateOf(cpu) {
+  return { a: cpu.a, f: cpu.f, b: cpu.b, c: cpu.c, d: cpu.d, e: cpu.e, h: cpu.h, l: cpu.l, sp: cpu.sp, pc: cpu.pc };
+}
+
+function runOne(cpu, ram, tests, per) {
+  const n = Math.min(per, tests.length);
+  let pass = 0, cycBad = 0, stateBad = 0, ramBad = 0, imeBad = 0; const fails = [];
+  const keys = ['a', 'f', 'b', 'c', 'd', 'e', 'h', 'l', 'sp', 'pc'];
+  for (let i = 0; i < n; i++) {
+    const t = tests[i], I = t.initial, F = t.final;
+    for (const [a, v] of I.ram) ram[a] = v;
+    applyState(cpu, ram, I);
+    const cyc = cpu.step();
+    const got = stateOf(cpu);
+    let regOK = true;
+    for (const k of keys) { if (got[k] !== F[k]) { regOK = false; break; } }
+    const imeOK = cpu.ime === !!F.ime;
+    let ramOK = true;
+    for (const [a, v] of F.ram) { if (ram[a] !== v) { ramOK = false; break; } }
+    const cycOK = cyc === t.cycles.length * 4;
+    if (regOK && ramOK && cycOK && imeOK) pass++;
+    else {
+      if (!cycOK) cycBad++; if (!regOK) stateBad++; if (!ramOK) ramBad++; if (!imeOK) imeBad++;
+      if (fails.length < 3) fails.push({ name: t.name, regOK, ramOK, cycOK, imeOK, exp: F, got, cycExp: t.cycles.length * 4, cycGot: cyc });
+    }
+    for (const [a] of I.ram) ram[a] = 0; for (const [a] of F.ram) ram[a] = 0;
+  }
+  return { pass, total: n, cycBad, stateBad, ramBad, imeBad, fails };
+}
+
+async function fetchPool(items, concurrency, worker) {
+  let idx = 0;
+  async function runner() {
+    while (idx < items.length) {
+      const i = idx++;
+      await worker(items[i], i);
+    }
+  }
+  const runners = [];
+  for (let i = 0; i < concurrency; i++) runners.push(runner());
+  await Promise.all(runners);
+}
+
+document.getElementById('run').onclick = async () => {
+  const per = Math.max(1, Math.min(1000, parseInt(document.getElementById('per').value) || 300));
+  const ram = new Uint8Array(65536);
+  const bus = {
+    read: a => ram[a & 0xFFFF], write: (a, v) => { ram[a & 0xFFFF] = v & 0xFF; }
+  };
+  const cpu = new MML.Emu.CPUSm83(bus);
+  const sum = document.getElementById('sum');
+  const detail = document.getElementById('detail');
+  let totalFail = 0, totalSkip = 0, oksum = 0, tsum = 0; const failReport = {};
+  let done = 0;
+
+  const items = [];
+  for (const groupName in grids) {
+    const { file } = grids[groupName];
+    for (let op = 0; op < 256; op++) {
+      const hex = op.toString(16).padStart(2, '0');
+      items.push({ groupName, hex, url: VECTOR_BASE + file(hex) });
+    }
+  }
+  const totalItems = items.length;
+
+  await fetchPool(items, 16, async (item) => {
+    const { groupName, hex, url } = item;
+    const cells = grids[groupName].cells;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) { cells[hex].className = 'op skip'; cells[hex].title = '未取得(スキップ)'; totalSkip++; return; }
+      const tests = await res.json();
+      // CPUインスタンスはシングルスレッドJSなので直列実行され競合しない
+      const r = runOne(cpu, ram, tests, per);
+      oksum += r.pass; tsum += r.total;
+      if (r.pass === r.total) cells[hex].className = 'op pass';
+      else {
+        cells[hex].className = 'op fail'; totalFail++;
+        failReport[groupName + ' ' + hex] = r.fails;
+        cells[hex].title = `${r.total - r.pass} fail (cyc:${r.cycBad} state:${r.stateBad} ram:${r.ramBad} ime:${r.imeBad})`;
+      }
+    } catch (e) {
+      cells[hex].className = 'op err'; cells[hex].title = String(e); totalSkip++;
+    } finally {
+      done++;
+      sum.textContent = `テスト中… ${done}/${totalItems}`;
+    }
+  });
+
+  sum.textContent = totalFail === 0
+    ? `✅ PASS(${oksum.toLocaleString()} / ${tsum.toLocaleString()} ケース、取得不可 ${totalSkip} skip)`
+    : `❌ ${totalFail} オペコードで失敗(${(tsum - oksum).toLocaleString()} ケース、取得不可 ${totalSkip} skip)`;
+  detail.hidden = !totalFail;
+  if (totalFail) detail.textContent = JSON.stringify(failReport, null, 2);
+};
+</script>
+</body>
+</html>

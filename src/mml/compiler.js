@@ -73,7 +73,10 @@
  *                    曲中`MH<n>`が出現した位置(+delayフレーム)で有効化される
  *   S<n>             FME7ハードウェアエンベロープ形状(0-15)
  *   M<n>             FME7ハードウェアエンベロープ周期(0-65535)
- *   N<n>             FME7ノイズ周波数(0-31)。曲全体でN<n>を使うchだけ曲開始時にミキサーで有効化
+ *   N<n>             FME7ノイズ周波数(0-31、R6)。@2の時は無効(ノート番号が周期になるため)
+ *   @<n>(X/Y/Z)      FME7のみ音色番号ではなくミキサー指定(ppmck仕様):
+ *                    0=ミュート, 1=トーン(既定), 2=ノイズ, 3=トーン+ノイズ。
+ *                    @2ではノート番号がそのままノイズ周波数になる(n0=o0c 〜 n31=o2g)
  *   #TITLE/#COMPOSER/#MAKER/#PROGRAMER <str>  メタ情報(戻り値のmetaに格納。再生には影響しない)
  *   #OCTAVE-REV <n>  0以外で`>``<`(オクターブ上げ/下げ)の意味を反転
  *   #GATE-DENOM <n>  q<n>のゲート分母を8から変更(既定8)
@@ -97,6 +100,10 @@
 (function (global) {
   const MML = global.MML = global.MML || {};
   const Mml = MML.Mml = MML.Mml || {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。キーは日本語の原文。MML.I18nが無い環境でも動くよう素通し
+  const T = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/\{(\w+)\}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
 
   const CPU_CLOCK_NTSC = 1789773;
   const FRAME_RATE_NTSC = 60.0988;
@@ -157,8 +164,10 @@
 
   // D<n>(デチューン)。算出済みの周期/周波数レジスタ値へ生のオフセットを加算し、
   // レジスタ幅でクランプする。2A03パルス/三角・VRC6・MMC5・FME7・FDS(2047/4095幅)に加え
-  // N163(freqReg、262143幅。18bitスケールなので同じ値でも変化量は小さい)も対応。
-  // VRC7(fnum/blockの対数的な表現)は単純な加算オフセットが意味を持たないため対象外
+  // N163(freqReg、262143幅。18bitスケールなので同じ値でも変化量は小さい)、
+  // VRC7(fnum、511幅。block自体は動かさずfnumだけをクランプするため、blockの境界を
+  // またぐような大きなデチューン量では近似精度が落ちるが、コーラス効果程度の
+  // 小さなずれなら十分機能する)も対応。
   function applyDetune(period, detune, max) {
     return Math.max(0, Math.min(max, period + (detune || 0)));
   }
@@ -184,9 +193,12 @@
     return Math.max(0, Math.min(4095, p));
   }
 
-  // FME-7: freq = CLOCK / (16 * period)
+  // FME-7: freq = CLOCK / (32 * period)
+  // ★MSXのPSG(AY-3-8910)は f=clock/(16*TP) だが、NESの5B(YM2149)は内蔵の1/2プリスケーラが
+  // 効いており分母が32になる(NESdev "Sunsoft 5B audio": Frequency = Clock/(32*Period))。
+  // 16で計算すると実際の発音が1オクターブ低くなる(鍵盤表示で低音が範囲外の"??"になる)。
   function fme7Period(freq) {
-    let p = Math.round(CPU_CLOCK_NTSC / (16 * freq));
+    let p = Math.round(CPU_CLOCK_NTSC / (32 * freq));
     return Math.max(1, Math.min(4095, p));
   }
 
@@ -239,7 +251,7 @@
               if (after && r < count - 1) seq.push(...after);
             }
           } else {
-            errors.push({ message: 'ループ終端 "]" が見つかりません' });
+            errors.push({ message: T('ループ終端 "]" が見つかりません') });
             seq.push(...before);
             if (after) seq.push(...after);
           }
@@ -307,7 +319,7 @@
         const inner = tokens.slice(i + 1, j);
         const endTok = tokens[j];
         if (!endTok) {
-          errors.push({ message: 'タプレット終端 "}" が見つかりません' });
+          errors.push({ message: T('タプレット終端 "}" が見つかりません') });
           result.push(...inner);
           i = j;
           continue;
@@ -345,10 +357,12 @@
 
   // チャンネルのトークン列 -> 音符セグメント列
   // settings: #OCTAVE-REV(>/<を反転)・#GATE-DENOM(qのゲート分母、既定8)などの曲全体設定
-  function buildSegments(tokens, initialTempo, errors, settings) {
+  // defaultInstrument: @<n>が一度も書かれていないときの音色番号。FME7だけはこの値が
+  // ミキサー指定(0=ミュート)を兼ねるため、ppmck同様に既定を1(トーン)にする必要がある
+  function buildSegments(tokens, initialTempo, errors, settings, defaultInstrument) {
     const cfg = settings || { octaveRev: 0, gateDenom: 8 };
     const state = {
-      octave: 4, defaultLength: 4, volume: 15, gate: 8, instrument: 0,
+      octave: 4, defaultLength: 4, volume: 15, gate: 8, instrument: defaultInstrument || 0,
       envelopeV: null, envelopeVr: 255, transpose: 0, detune: 0, qFrames: null,
       vibrato: null, pitchEnv: null, noteEnv: null, sweepSpeed: 0, sweepDepth: 0,
       fme7Noise: null, fme7EnvShape: null, fme7EnvPeriod: 0
@@ -841,6 +855,14 @@
   }
 
   // --- FME-7 (Sunsoft 5B) ---
+  // @<n>はppmck準拠のミキサー指定(0=ミュート/1=トーン(既定)/2=ノイズ/3=トーン+ノイズ)。
+  // ミキサーレジスタ(R7)は3ch共有の1バイトなので、ここ(chごと)では書かず
+  // fme7MixerWrites()が全chぶんをまとめて1本のタイムラインとして生成する。
+  function fme7Mode(seg) {
+    const m = seg.instrument == null ? 1 : seg.instrument;
+    return m & 3;
+  }
+
   function segmentsToWriteLogFme7(index, segments, totalFrames, envelopes) {
     const writeLog = newWriteLog(totalFrames);
     const env = envelopes || { v: {}, vr: {} };
@@ -854,16 +876,25 @@
       const startFrame = frame;
       const dur = Math.min(seg.durationFrames, totalFrames - frame);
       const gateFrames = computeGateFrames(seg, dur);
-      if (seg.freq != null) {
-        const period = applyDetune(fme7Period(seg.freq), seg.detune, 0xFFF);
-        writeLog[startFrame].push({ addr: 0xC000, value: periodRegLo });
-        writeLog[startFrame].push({ addr: 0xE000, value: period & 0xFF });
-        writeLog[startFrame].push({ addr: 0xC000, value: periodRegHi });
-        writeLog[startFrame].push({ addr: 0xE000, value: (period >> 8) & 0x0F });
-        // R6: ノイズ周期(3chで共有の1レジスタ。実機PSGも同様の制約)
-        if (seg.fme7Noise != null) {
+      const mode = fme7Mode(seg);
+      if (seg.freq != null && mode !== 0) {
+        if (mode === 2) {
+          // @2(ノイズ)はppmck仕様で「ノート番号(n0=o0c〜n31=o2g)がそのままノイズ周期」に
+          // なる。トーン周期は書かない(ミキサーでトーンを切っているため無意味)
           writeLog[startFrame].push({ addr: 0xC000, value: 6 });
-          writeLog[startFrame].push({ addr: 0xE000, value: seg.fme7Noise & 0x1F });
+          writeLog[startFrame].push({ addr: 0xE000, value: Math.max(0, Math.min(31, Math.round(seg.noteNumber))) });
+        } else {
+          const period = applyDetune(fme7Period(seg.freq), seg.detune, 0xFFF);
+          writeLog[startFrame].push({ addr: 0xC000, value: periodRegLo });
+          writeLog[startFrame].push({ addr: 0xE000, value: period & 0xFF });
+          writeLog[startFrame].push({ addr: 0xC000, value: periodRegHi });
+          writeLog[startFrame].push({ addr: 0xE000, value: (period >> 8) & 0x0F });
+          // R6: ノイズ周期(3chで共有の1レジスタ。実機PSGも同様の制約)。
+          // ppmckでは@2のときN<n>は無効(ノート番号が周期になるため)
+          if (seg.fme7Noise != null) {
+            writeLog[startFrame].push({ addr: 0xC000, value: 6 });
+            writeLog[startFrame].push({ addr: 0xE000, value: seg.fme7Noise & 0x1F });
+          }
         }
         const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
         const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
@@ -908,13 +939,47 @@
     return writeLog;
   }
 
-  // R7(ミキサー): bit0-2=トーン有効(0で有効,既定で全ch有効), bit3-5=ノイズ有効(0で有効)。
-  // ノイズは3ch共有の1レジスタ(R6)なので、曲全体でN<n>を使うchだけをbit3-5で有効化する
-  // (曲中の動的な有効/無効切り替えは他chとの競合リスクがあるため未対応、初期化時に固定)
-  function fme7InitWrites(noiseChannels) {
-    let mixer = 0x38;
-    for (const idx of (noiseChannels || [])) mixer &= ~(1 << (3 + idx));
-    return [{ addr: 0xC000, value: 7 }, { addr: 0xE000, value: mixer }];
+  // R7(ミキサー): bit0-2=トーン有効(0で有効), bit3-5=ノイズ有効(0で有効)。
+  // 初期状態は全ch無音(全bit=1)にしておき、実際の有効化は音符ごとの@<n>から
+  // fme7MixerWrites()が組み立てるタイムラインに任せる
+  function fme7InitWrites() {
+    return [{ addr: 0xC000, value: 7 }, { addr: 0xE000, value: 0x3F }];
+  }
+
+  // R7は3ch共有の1バイトなので、chごとのwriteLogから独立に書くと他chのビットを
+  // 壊してしまう。ここで3ch分の@<n>(ミキサーモード)をフレーム単位に展開し、
+  // 値が変化したフレームにだけR7書き込みを出す1本のタイムラインへまとめる。
+  function fme7MixerWrites(letters, segmentsByChannel, totalFrames) {
+    // 各chの「フレーム→モード(0-3)」。音符の無い(=まだ何も鳴らしていない)区間は
+    // ミュート扱いにして、そのchのビットを立てたままにする
+    const modeByFrame = letters.map(ch => {
+      const arr = new Uint8Array(totalFrames);
+      let frame = 0;
+      for (const seg of (segmentsByChannel[ch] || [])) {
+        const end = Math.min(totalFrames, frame + seg.durationFrames);
+        const mode = seg.freq == null ? 0 : fme7Mode(seg);
+        for (let f = frame; f < end; f++) arr[f] = mode;
+        frame = end;
+        if (frame >= totalFrames) break;
+      }
+      return arr;
+    });
+
+    const writes = [];
+    let prev = -1;
+    for (let f = 0; f < totalFrames; f++) {
+      let mixer = 0x3F; // 全bit=1(トーン・ノイズとも無効)から必要な分だけ落とす
+      for (let ch = 0; ch < modeByFrame.length; ch++) {
+        const mode = modeByFrame[ch][f];
+        if (mode & 1) mixer &= ~(1 << ch);        // トーン有効
+        if (mode & 2) mixer &= ~(1 << (3 + ch));  // ノイズ有効
+      }
+      if (mixer !== prev) {
+        writes.push({ frame: f, writes: [{ addr: 0xC000, value: 7 }, { addr: 0xE000, value: mixer }] });
+        prev = mixer;
+      }
+    }
+    return writes;
   }
 
   // --- FDS ---
@@ -997,82 +1062,64 @@
     return [0, 2, 4, 6, 8, 10, 12, 14, 15, 13, 11, 9, 7, 5, 3, 1];
   }
 
-  // 波形長レジスタ(+4のbit2-7)の値。length = 256-(値&0xFC) なので N=16 → 0xF0。
-  function n163LengthByte() {
-    return (256 - N163_WAVE_LEN) & 0xFC;
-  }
-
   // 実機の$4800書き込みはRAMへの「1バイト」書き込みで、波形読み出し側(+6=波形アドレス、
   // N163Audio._sample/resampleWave参照)は「1ニブル=4bitサンプル」単位でその領域を読む。
   // つまり書き込み側も2サンプルを1バイトに詰めて書く必要がある(以前は0-15の値をそのまま
   // 1バイト=1サンプルとして書いていたため、読み出し側は毎回上位ニブル=0を挟んで読んでしまい
-  // 波形が[0,0,2,0,4,0,...]のように歯抜けに壊れていた)。
+  // 波形が[0,0,2,0,4,0,...]のように歯抜けに壊れていた)。waveは既にnormalizeN163Waveで
+  // 実際に使う長さへ揃え済みなので、wave.length分だけ詰める。
   function n163PackWaveBytes(wave) {
     const bytes = [];
-    for (let i = 0; i < N163_WAVE_LEN; i += 2) {
+    for (let i = 0; i < wave.length; i += 2) {
       bytes.push((wave[i] & 0x0F) | ((wave[i + 1] & 0x0F) << 4));
     }
     return bytes;
   }
 
-  // 各chが専用に使う波形スロットのバイトオフセット。N163_WAVE_LEN(16)サンプル=8byte/ch、
-  // 8ch分でも 8*8=64byte で ちょうどレジスタ領域($40-$7F)の手前(0-63)に収まる。
-  // 以前は全ch共有(waveBase=0固定)だったため、あるchが別の音色(@N<n>)へ切り替えて再ロード
-  // すると、まだ同じ音色のまま鳴り続けている他chの波形まで巻き添えで書き換わってしまい、
-  // 曲中に複数のN163波形を同時使用する曲(例: Megami Tensei II)で音色が別chの物にすり替わる
-  // 不具合があった。chごとに独立領域を持たせることで解消する。
-  function n163WaveByteOffset(internalIdx) {
-    return internalIdx * (N163_WAVE_LEN / 2);
-  }
-
-  function n163InitWrites(customWave, numN163Ch) {
-    const writes = [];
-    const wave = (customWave && customWave.length === N163_WAVE_LEN) ? customWave : n163DefaultWave();
-    const packed = n163PackWaveBytes(wave);
+  function n163InitWrites(numN163Ch) {
     const num = Math.max(1, Math.min(N163_CHANNEL_COUNT, numN163Ch || N163_CHANNEL_COUNT));
-
-    // 実機は内部8ch中「上位 num 個」だけを巡回・ミックスするため、各chの内部インデックスは
-    // (8-num)+i。各chの専用波形スロットに既定波形を書き、波形長(+4)・波形アドレス(+6、
-    // ニブル単位=バイトオフセット*2)を初期化する(位相 +1/+3/+5 は触らない)。
-    for (let i = 0; i < num; i++) {
-      const internalIdx = (N163_CHANNEL_COUNT - num) + i;
-      const regBase = 0x40 + internalIdx * 8;
-      const byteOffset = n163WaveByteOffset(internalIdx);
-      writes.push({ addr: 0xF800, value: byteOffset | 0x80 });
-      for (const b of packed) writes.push({ addr: 0x4800, value: b });
-      writes.push({ addr: 0xF800, value: (regBase + 4) | 0x80 });
-      writes.push({ addr: 0x4800, value: n163LengthByte() });
-      writes.push({ addr: 0xF800, value: (regBase + 6) | 0x80 });
-      writes.push({ addr: 0x4800, value: byteOffset * 2 });
-    }
-    // $7F(内部アドレス、ゼロページではなくポート経由)に有効ch数を設定する。
-    writes.push({ addr: 0xF800, value: 0x7F | 0x80 });
-    writes.push({ addr: 0x4800, value: (num - 1) << 4 });
-    return writes;
+    // 波形データの配置は共有アロケータ(MML.N163Alloc、segmentsToWriteLogN163内で使用)が
+    // 曲の実際の使用状況に応じて動的に行うため、ここではchごとの専用スロットへの既定波形の
+    // 事前書き込みは行わない(@N<n>を一度も呼ばないchは波形が不定になる既知の制限。
+    // 予約領域を作らずRAM全体を共有プールにする、というユーザー確認済みの設計)。
+    // $7F(内部アドレス、ゼロページではなくポート経由)に有効ch数だけを設定する。
+    return [
+      { addr: 0xF800, value: 0x7F | 0x80 },
+      { addr: 0x4800, value: (num - 1) << 4 }
+    ];
   }
 
-  // @<n>(instrument)で @N<n> 波形を選択する。選択している番号が前の音符から変わったときだけ
-  // このchの専用スロット(byteOffset)へ8byteの波形を書き直す(波形アドレス+6は初期化済みで
-  // 不変のため書き直さない)
-  function n163WaveLoadWrites(wave, byteOffset) {
+  // @<n>(instrument)で @N<n> 波形を選択する。共有アロケータが割り当てたbyteOffsetは
+  // chごとに固定ではなくなったため、波形本体だけでなく波形アドレス(+6、ニブル単位=
+  // byteOffset*2)も毎回書き直す(以前は初期化時のみで不変という前提だったが、その前提は
+  // もう成り立たない)。
+  function n163WaveLoadWrites(wave, byteOffset, regBase) {
     if (!wave) return [];
     const packed = n163PackWaveBytes(wave);
     const writes = [{ addr: 0xF800, value: byteOffset | 0x80 }];
     for (const b of packed) writes.push({ addr: 0x4800, value: b });
+    writes.push({ addr: 0xF800, value: (regBase + 6) | 0x80 });
+    writes.push({ addr: 0x4800, value: byteOffset * 2 });
     return writes;
   }
 
-  function segmentsToWriteLogN163(index, segments, totalFrames, envelopes, numN163Ch) {
+  // occurrences: MML.N163Alloc.allocate()が返す配列全体(全N163ch分)。このch(ch文字)の
+  // ものだけを開始フレームで引けるようにする
+  function segmentsToWriteLogN163(ch, index, segments, totalFrames, envelopes, numN163Ch, occurrences) {
     const writeLog = newWriteLog(totalFrames);
     // 実機は内部8ch中「上位 num 個」だけを巡回・ミックスする。letters[index] の内部インデックスは
     // (8-num)+index(下位アドレス側から)。0番から詰めると鳴らないため必ずオフセットする。
     const num = Math.max(1, Math.min(N163_CHANNEL_COUNT, numN163Ch || N163_CHANNEL_COUNT));
     const internalIdx = (N163_CHANNEL_COUNT - num) + index;
     const regBase = 0x40 + internalIdx * 8;
-    const waveByteOffset = n163WaveByteOffset(internalIdx);
     const nMap = (envelopes && envelopes.n) || {};
     const env = envelopes || { v: {}, vr: {} };
     let lastInstrument = null;
+    // @N<n>を一度も呼んでいない間の既定値(無難なフォールバック。実際に鳴らす場合は
+    // 作曲者が必ず@<n>で切り替えるはずなので、この値が実際に使われることはまず無い)
+    let currentLengthByte = 0xF0, currentRoundedLen = 16;
+    const occByStart = new Map();
+    for (const occ of (occurrences || [])) if (occ.channel === ch) occByStart.set(occ.startFrame, occ);
     // 最上位ch(internalIdx=7)の音量レジスタ(+7)は $7F で有効ch数ビット(4-6)と共用のため、
     // 音量を書くときも numCh ビットを保持する必要がある(他chの+7上位ビットは未使用)。
     const isTopCh = (regBase + 7) === 0x7F;
@@ -1086,10 +1133,18 @@
       const gateFrames = computeGateFrames(seg, dur);
       if (seg.freq != null) {
         if (nMap[seg.instrument] && seg.instrument !== lastInstrument) {
-          writeLog[startFrame].push(...n163WaveLoadWrites(normalizeN163Wave(nMap[seg.instrument]), waveByteOffset));
+          const occ = occByStart.get(startFrame);
+          if (occ) {
+            currentRoundedLen = MML.N163Alloc.roundedLen(nMap[seg.instrument].length);
+            currentLengthByte = occ.lengthByte;
+            writeLog[startFrame].push(...n163WaveLoadWrites(
+              normalizeN163Wave(nMap[seg.instrument], currentRoundedLen), occ.byteOffset, regBase));
+          }
+          // occが無い場合はRAM配置に失敗している(compiled.errorsにconflictとして記録済み・
+          // 呼び出し元は既にコンパイルを中断しているはず)。書き込みは行わず現状維持に留める
           lastInstrument = seg.instrument;
         }
-        const freqReg = applyDetune(n163FreqReg(seg.freq, N163_WAVE_LEN, num), seg.detune, 262143);
+        const freqReg = applyDetune(n163FreqReg(seg.freq, currentRoundedLen, num), seg.detune, 262143);
         // 周波数は実機のインターリーブ配置に従い +0/+2/+4 へ書く(間の位相バイト +1/+3 は
         // 触らない)。オートインクリメントに頼らずアドレスを都度選択する。波形長は +4 の上位に共用。
         writeLog[startFrame].push({ addr: 0xF800, value: (regBase + 0) });
@@ -1097,7 +1152,7 @@
         writeLog[startFrame].push({ addr: 0xF800, value: (regBase + 2) });
         writeLog[startFrame].push({ addr: 0x4800, value: (freqReg >> 8) & 0xFF });
         writeLog[startFrame].push({ addr: 0xF800, value: (regBase + 4) });
-        writeLog[startFrame].push({ addr: 0x4800, value: n163LengthByte() | ((freqReg >> 16) & 0x03) });
+        writeLog[startFrame].push({ addr: 0x4800, value: currentLengthByte | ((freqReg >> 16) & 0x03) });
         const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
         const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
         if (vTable) {
@@ -1135,10 +1190,24 @@
       const dur = Math.min(seg.durationFrames, totalFrames - frame);
       const gateFrames = computeGateFrames(seg, dur);
       if (seg.freq != null) {
-        const { fnum, block } = vrc7FreqToFnumBlock(seg.freq);
+        const { fnum: baseFnum, block } = vrc7FreqToFnumBlock(seg.freq);
+        // fnumは同一block内では周波数に比例するため、他チップと同じ生レジスタへの単純加算
+        // オフセットでデチューンできる(0-511の9bit幅でクランプ、block自体は変えない)。
+        // block境界をまたぐ本来のデチューン量が必要な場合でも、この曲の狭い範囲の
+        // デチューン効果には影響しない程度の近似として十分(他チップのapplyDetuneも
+        // 同様に単純クランプのみでキャリー処理はしていない)。
+        const fnum = applyDetune(baseFnum, seg.detune, 511);
         const instrument = seg.instrument % 16;
         writeLog[startFrame].push({ addr: 0x9010, value: 0x10 + ch });
         writeLog[startFrame].push({ addr: 0x9030, value: fnum & 0xFF });
+        // キーオン(bit4)はYM2413実機同様エッジトリガ(src/emulator/expansion/vrc7.js
+        // slotOn: keyStatusが既に1のままだとエンベロープが再スタートしない)。前の音符が
+        // レガート(ゲート=フル、無音区間なし)で直前まで鳴っていた場合、単にbit4=1を
+        // 書くだけでは0→1の遷移が起きず、2音目以降が完全に無音になっていた
+        // (Final Fantasy(MSX)で実測)。必ずキーオフを1回挟んでからキーオンを書き、
+        // 前の状態に関わらずエッジを保証する。
+        writeLog[startFrame].push({ addr: 0x9010, value: 0x20 + ch });
+        writeLog[startFrame].push({ addr: 0x9030, value: (block << 1) | ((fnum >> 8) & 1) });
         writeLog[startFrame].push({ addr: 0x9010, value: 0x20 + ch });
         writeLog[startFrame].push({ addr: 0x9030, value: 0x10 | (block << 1) | ((fnum >> 8) & 1) });
         writeLog[startFrame].push({ addr: 0x9010, value: 0x30 + ch });
@@ -1172,11 +1241,14 @@
     return writes;
   }
 
-  // @N<n>の波形値をN163_WAVE_LEN(16)固定に正規化する(不足はゼロ埋め、超過は切り詰め)
-  function normalizeN163Wave(values) {
+  // @N<n>の波形値をtargetLen(共有アロケータが決めた、実機レジスタ丸め後の長さ)へ
+  // 正規化する(不足はゼロ埋め、超過は切り詰め)。作曲者が書いた要素数がそのまま
+  // 波形長になる仕様なので、以前のような固定16サンプルへの強制丸めはしない。
+  function normalizeN163Wave(values, targetLen) {
     if (!values || values.length === 0) return null;
-    const wave = values.slice(0, N163_WAVE_LEN);
-    while (wave.length < N163_WAVE_LEN) wave.push(0);
+    const len = targetLen || values.length;
+    const wave = values.slice(0, len);
+    while (wave.length < len) wave.push(0);
     return wave;
   }
 
@@ -1257,7 +1329,13 @@
         // dac===255(またはundefined)は「DAC値を変更しない」という実機ppmck driverの
         // 慣例(dpcm.hのskipラベル)に合わせ、$4011書き込み自体を省略する
         dac: (def.dac == null || def.dac === 255) ? null : (def.dac & 0x7F),
-        bytes: def.bytes
+        // $4013(長さレジスタ)は8bitのため実機DMCはplayLenバイトまでしか読み出さない。
+        // rawLenがplayLenを超える(=lengthRegが255で頭打ちになった)場合、元データを
+        // そのまま保持するとここで確保した領域(offsetの増分もplayLen基準)を超えて
+        // 書き込まれ、64KB仮想メモリ(src/audio/stream-player.js buildDpcmBus)の
+        // 境界超過(RangeError)やNSF書き出し側(ppmckDriver.js)の固定領域破壊を招く
+        // (HESの長いDDA/PCM抽出で実測)。再生されない末尾は切り詰めて安全側に倒す。
+        bytes: def.bytes.slice(0, playLen)
       };
       offset += playLen;
     }
@@ -1323,13 +1401,14 @@
     return writeLog;
   }
 
-  function buildExpansionWriteLog(expansion, index, segments, totalFrames, envelopes, dpcmLayout, dpcmSamples, extra) {
+  function buildExpansionWriteLog(expansion, ch, index, segments, totalFrames, envelopes, dpcmLayout, dpcmSamples, extra) {
     switch (expansion) {
       case 'vrc6': return segmentsToWriteLogVrc6(index, segments, totalFrames, envelopes);
       case 'mmc5': return segmentsToWriteLogMmc5(index, segments, totalFrames, envelopes);
       case 'fme7': return segmentsToWriteLogFme7(index, segments, totalFrames, envelopes);
       case 'fds': return segmentsToWriteLogFds(segments, totalFrames, envelopes);
-      case 'n163': return segmentsToWriteLogN163(index, segments, totalFrames, envelopes, extra && extra.numN163Ch);
+      case 'n163': return segmentsToWriteLogN163(ch, index, segments, totalFrames, envelopes,
+        extra && extra.numN163Ch, extra && extra.n163Occurrences);
       case 'vrc7': return segmentsToWriteLogVrc7(index, segments, totalFrames);
       case 'dpcm': return segmentsToWriteLogDpcm(segments, totalFrames, dpcmLayout, dpcmSamples);
       default: return newWriteLog(totalFrames);
@@ -1345,9 +1424,9 @@
   function expansionInitWrites(expansion, opt, envelopes, extra) {
     switch (expansion) {
       case 'mmc5': return mmc5InitWrites();
-      case 'fme7': return fme7InitWrites(extra && extra.noiseChannels);
+      case 'fme7': return fme7InitWrites();
       case 'fds': return fdsInitWrites(opt && opt.fdsWave);
-      case 'n163': return n163InitWrites(opt && opt.n163Wave, extra && extra.numN163Ch);
+      case 'n163': return n163InitWrites(extra && extra.numN163Ch);
       default: return [];
     }
   }
@@ -1387,12 +1466,13 @@
     const immediateWritesByChannel = {};
     let totalFrames = 0;
 
+    const fme7Letters = new Set(expansionLetterMap.fme7 || []);
     for (const ch of channelLetters) {
       const raw = channels[ch] || { text: '', offsets: [] };
       let tokens = Mml.tokenize(raw.text, raw.offsets);
       tokens = expandLoops(tokens, errors);
       tokens = applyTuplets(tokens, tempo, errors);
-      const { segments, immediateWrites } = buildSegments(tokens, tempo, errors, settings);
+      const { segments, immediateWrites } = buildSegments(tokens, tempo, errors, settings, fme7Letters.has(ch) ? 1 : 0);
       segmentsByChannel[ch] = segments;
       immediateWritesByChannel[ch] = immediateWrites;
       const sum = segments.reduce((a, s) => a + s.durationFrames, 0);
@@ -1430,10 +1510,15 @@
         letters.forEach((ch, index) => {
           if ((segmentsByChannel[ch] || []).some(s => s.freq != null)) numN163Ch = index + 1;
         });
-        extra = { numN163Ch: Math.max(1, numN163Ch) };
+        // 共有バッファアロケータ: 曲全体のN163使用状況から、時間軸で重ならない範囲だけ
+        // 波形データを再利用しながらRAM上のバイト位置を割り当てる。128byteを超えて
+        // 同時使用される場合はconflictとして記録し、コンパイルエラーへ変換する
+        const allocResult = MML.N163Alloc.allocate(letters, segmentsByChannel, envelopes.n, totalFrames);
+        for (const c of allocResult.conflicts) errors.push({ message: c.message });
+        extra = { numN163Ch: Math.max(1, numN163Ch), n163Occurrences: allocResult.occurrences };
       }
       letters.forEach((ch, index) => {
-        tracks[ch] = buildExpansionWriteLog(exp, index, segmentsByChannel[ch], totalFrames, envelopes, dpcmLayout, dpcmSamples, extra);
+        tracks[ch] = buildExpansionWriteLog(exp, ch, index, segmentsByChannel[ch], totalFrames, envelopes, dpcmLayout, dpcmSamples, extra);
         // OP<n>(VRC7音色)/MH<n>(FDS変調)による曲中の動的切り替えをこのchへ差し込む
         if (exp === 'vrc7') {
           spliceImmediateWrites(tracks[ch], immediateWritesByChannel[ch], 'vrc7Tone', totalFrames,
@@ -1443,13 +1528,11 @@
             iw => resolveFdsModWrite(iw, envelopes));
         }
       });
-      // 拡張音源の初期化書き込みをそのチップの先頭チャンネルのフレーム0に挿入
-      if (exp === 'fme7') {
-        extra = {
-          noiseChannels: letters
-            .map((ch, index) => (segmentsByChannel[ch].some(s => s.fme7Noise != null) ? index : -1))
-            .filter(i => i >= 0)
-        };
+      // ミキサー(R7)は3ch共有のため、chごとのwriteLogではなく先頭chへ1本にまとめて挿す
+      if (exp === 'fme7' && letters.length > 0) {
+        for (const { frame, writes } of fme7MixerWrites(letters, segmentsByChannel, totalFrames)) {
+          tracks[letters[0]][frame] = [...writes, ...tracks[letters[0]][frame]];
+        }
       }
       const initWrites = expansionInitWrites(exp, opt, envelopes, extra);
       if (initWrites.length > 0 && letters.length > 0) {

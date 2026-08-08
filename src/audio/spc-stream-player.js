@@ -170,6 +170,240 @@
     applyMute() {}
   }
 
+  // =========================================================
+  // SpcReplayStreamPlayer
+  // =========================================================
+  // SPCは「SPC700 CPUを実行しながらDSPで音声も生成する」SpcStreamPlayerとは異なり、
+  // バックグラウンドで先行実行されたMML.SPC2MML.captureAsyncのframeLog(フレームごとの
+  // DSPレジスタ書込み{reg,val}[]、dsp.onWriteをフックして取得。$F2/$F3のバス間接
+  // アドレッシングは既にデコード済みの生レジスタ番号で記録されている)を「CPU抜きで」
+  // DSPへ再適用するだけで音声合成する。NsfReplayStreamPlayer/KssReplayStreamPlayerと
+  // 同じ設計だが、SPCならではの特性が2つある:
+  //  (1) .spcファイルは64KB RAM全体(BRRサンプル本体を含む)の完全なスナップショットであり、
+  //      NSF/KSSのように「ROM+INITルーチン」から実行してRAMを組み立てる必要が無い。
+  //      MML.Emu.SpcPlayerのコンストラクタが、エコーバッファのクリア・BRRディレクトリの
+  //      キャッシュ・KON再発火(ダンプ時点で鳴っていたボイスのアタックを正しく再現する
+  //      補正)を含めて既に正しく行っているため、そのコンストラクタを丸ごと再利用し
+  //      CPU/バスだけを使わない(dspだけを取り出す)。
+  //  (2) captureAsyncのframeLog[0]の先頭128個は_seedInitialFrameが注入した「生の
+  //      DSPレジスタダンプ」で、上記(1)のコンストラクタが適用する内容と重複する
+  //      (特にKONレジスタは生の値をそのまま2回書くとアタックが再トリガーされてしまう)。
+  //      このため頭128個は必ずスキップし、それより後(実際のPLAY開始直後に発生した
+  //      書き込み)だけを適用する。
+  const SPC_FRAME_SAMPLES = Math.round(DSP_RATE / 60);
+  const SPC_FRAME_RATE    = DSP_RATE / SPC_FRAME_SAMPLES;
+  const SEEDED_FRAME0_LEN = 128; // _seedInitialFrame(spc2mml/converter.js)が注入する固定数
+
+  class SpcReplayStreamPlayer {
+    constructor(audioCtx) {
+      this.audioCtx      = audioCtx;
+      this.node          = null;
+      this.gainNode      = null;
+      // main.jsはspcActivePlayer.player.dsp.mutedVoices等「player.player.dsp」形状を
+      // 前提にしている。自己参照させることでこれらのヘルパーを一切変更せずに再利用できる
+      // (NsfReplayStreamPlayer/KssReplayStreamPlayerと同じ手法)。
+      this.player        = this;
+      this.dsp           = null;
+      this.spcBytes      = null;
+      this.writeLog      = null; // captureAsyncが進行中に育てる配列への参照
+      this.totalFrames   = 0;
+      this.samplePos     = 0;    // 出力サンプル(audioCtx.sampleRate基準の実時間)経過数
+      this.currentFrame  = -1;
+      this._dspFrac      = 0;    // 出力レート→DSPレート(32kHz)変換の端数
+      this._songFramePos = 0;    // ログフレーム位置(speedFactor込みの実数値)
+      this.speedFactor   = 1;
+      this._lastL = 0; this._lastR = 0;
+      this.isPlaying = false;
+      this.onEnded   = null;
+      this._createNode();
+    }
+
+    _createNode() {
+      this.gainNode = this.audioCtx.createGain();
+      this.gainNode.gain.value = 2.0;
+      this.gainNode.connect(this.audioCtx.destination);
+      this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
+      this.node.connect(this.gainNode);
+      this.node.onaudioprocess = (e) => {
+        const out = e.outputBuffer.getChannelData(0);
+        if (!this.dsp || !this.isPlaying) { out.fill(0); return; }
+        this._fill(out);
+      };
+    }
+
+    // MML.Emu.SpcPlayerのコンストラクタを丸ごと再利用してRAM/エコー/BRRキャッシュ/KON
+    // 再発火を正しい状態にし、そこからdspだけを取り出す(CPU/バスは使わない)。
+    _buildChips() {
+      const base = new MML.Emu.SpcPlayer(this.spcBytes);
+      this.dsp = base.dsp;
+      if (this._lastMuted !== undefined) this.dsp.mutedVoices = this._lastMuted;
+    }
+
+    // frameLog: MML.SPC2MML.captureAsyncのonProgressが渡すframeLogそのもの(進行中配列への
+    // 参照なので、呼び出し後もキャプチャが進むにつれ自動的に埋まっていく)
+    load(spcBytes, totalFrames, frameLog, mute) {
+      this.stop();
+      this.spcBytes    = spcBytes;
+      this.writeLog    = frameLog;
+      this.totalFrames = totalFrames;
+      this._buildChips();
+      this.samplePos     = 0;
+      this.currentFrame  = -1;
+      this._dspFrac      = 0;
+      this._songFramePos = 0;
+      this._lastL = this._lastR = 0;
+      if (mute !== undefined && mute !== null) this.applyMute(mute);
+    }
+
+    _isFrameReady(f) {
+      return !!(this.writeLog && this.writeLog[f]);
+    }
+
+    _applyWrites(writes, skipSeeded) {
+      if (!writes) return;
+      const start = skipSeeded ? SEEDED_FRAME0_LEN : 0;
+      for (let i = start; i < writes.length; i++) {
+        const w = writes[i];
+        this.dsp.writeReg(w.reg, w.val);
+      }
+    }
+
+    _applyFrame(f) {
+      this.currentFrame = f;
+      this._applyWrites(this.writeLog[f], f === 0);
+    }
+
+    // DSPを1サンプル(32kHz)分進める。フレーム境界を跨ぐ場合は先にwriteLogを適用する。
+    // 'ended' = 曲末に到達、false = キャプチャがまだ追いついていない、true = 進行できた。
+    _stepDsp() {
+      // どのログフレームを適用すべきかはspeedFactorで間引く独立したアキュムレータ
+      // (NsfReplayStreamPlayerの_songFramePosと同じ考え方)。DSPクロック自体は
+      // _stepDsp()が呼ばれるたび常に等速で駆動する(音程を保つ)。
+      const nextSongFramePos = this._songFramePos + (SPC_FRAME_RATE / DSP_RATE) * this.speedFactor;
+      const f = Math.floor(nextSongFramePos);
+      if (f >= this.totalFrames) return 'ended';
+      if (!this._isFrameReady(f)) return false;
+      this._songFramePos = nextSongFramePos;
+      if (f !== this.currentFrame) this._applyFrame(f);
+      this.dsp.clock();
+      this._lastL = this.dsp.outL; this._lastR = this.dsp.outR;
+      return true;
+    }
+
+    _fill(out) {
+      const outRate = this.audioCtx.sampleRate;
+      const step = DSP_RATE / outRate;
+      for (let i = 0; i < out.length; i++) {
+        this._dspFrac += step;
+        let stalled = false, ended = false;
+        while (this._dspFrac >= 1.0) {
+          const r = this._stepDsp();
+          if (r === 'ended') { ended = true; break; }
+          if (r === false) {
+            // バックグラウンドキャプチャがまだこのフレームに追いついていない。
+            // 無音のまま位置を凍結し、次のコールバックで同じフレームを再試行する
+            // (NsfReplayStreamPlayerと同じ理由: samplePosを進めるとgetPosition()が
+            // 実際には再生していないのにdurationに到達したと誤認し自動停止してしまう)。
+            stalled = true;
+            break;
+          }
+          this._dspFrac -= 1.0;
+        }
+        if (ended) {
+          for (let j = i; j < out.length; j++) out[j] = 0;
+          this.isPlaying = false;
+          if (this.onEnded) this.onEnded();
+          return;
+        }
+        out[i] = stalled ? 0 : (this._lastL + this._lastR) * 0.5;
+        if (!stalled) this.samplePos++;
+      }
+    }
+
+    play()  { this.isPlaying = true; }
+    pause() { this.isPlaying = false; }
+
+    stop() {
+      this.isPlaying = false;
+      if (this.spcBytes) this._buildChips();
+      this.samplePos     = 0;
+      this.currentFrame  = -1;
+      this._dspFrac      = 0;
+      this._songFramePos = 0;
+      this._lastL = this._lastR = 0;
+    }
+
+    setSpeed(factor) { this.speedFactor = factor; }
+
+    // targetFrameの直前まで(0..targetFrame、キャプチャが追いついていなければその手前まで)の
+    // 書き込みをdspへ再適用してシークする(NsfReplayStreamPlayer.seek()と同じ考え方。
+    // エンベロープ/BRR再生位置の内部クロック位相までは復元されない既知の割り切り)。
+    seek(samplePos) {
+      const outRate = this.audioCtx.sampleRate;
+      let songFramePos = (samplePos / outRate) * SPC_FRAME_RATE * this.speedFactor;
+      let targetFrame = Math.min(Math.floor(songFramePos), this.totalFrames - 1);
+      const wl = this.writeLog || [];
+      if (targetFrame >= 0 && !wl[targetFrame]) {
+        // 未キャプチャ範囲へのシーク: バッファ済み末尾にクランプする。samplePos/
+        // songFramePosも合わせて再計算する(そうしないとgetPosition()が矛盾した
+        // 位置を報告し続け、_isFrameReady(f)==falseのスタール状態に陥る)。
+        while (targetFrame > 0 && !wl[targetFrame]) targetFrame--;
+        songFramePos = targetFrame;
+        samplePos = (songFramePos / SPC_FRAME_RATE / this.speedFactor) * outRate;
+      }
+      this._buildChips();
+      this._dspFrac = 0;
+      for (let f = 0; f <= targetFrame; f++) {
+        const writes = wl[f];
+        if (!writes) break;
+        this._applyWrites(writes, f === 0);
+      }
+      this.samplePos     = samplePos;
+      this.currentFrame  = targetFrame;
+      this._songFramePos = songFramePos;
+      this._lastL = this._lastR = 0;
+    }
+
+    // mute: mutedVoicesと同じ8bitビットマスク(bit0=Voice0...bit7=Voice7)。
+    // main.jsは既存のkeyboardDisplay/鍵盤UIの都合上ビットマスクをそのまま渡す。
+    applyMute(mute) {
+      if (mute === undefined || mute === null) return;
+      this._lastMuted = mute; // _buildChips()(シーク等でdspを作り直すたび)に再適用するため保持
+      if (this.dsp) this.dsp.mutedVoices = mute;
+    }
+
+    getPosition() {
+      return this.samplePos / this.audioCtx.sampleRate;
+    }
+
+    getDuration() {
+      return this.totalFrames / SPC_FRAME_RATE / this.speedFactor;
+    }
+
+    getCurrentFrame() {
+      return Math.max(0, this.currentFrame);
+    }
+
+    destroy() {
+      this.isPlaying = false;
+      // onaudioprocessのクロージャがthis(ひいてはwriteLog=数分の曲の全DSPレジスタ
+      // 書込みログ)を掴んだままだと、disconnect()後もScriptProcessorNodeがGCされる
+      // まで保持され続ける(ScriptProcessorNodeはdeprecated APIで、ブラウザによっては
+      // disconnect済みでも即座には回収されないため、ハンドラを明示的に外して参照を断つ)。
+      // ファイルを連続で開き直すたびにこれが解放されないとメモリ不足でブラウザが落ちる。
+      if (this.node) {
+        this.node.onaudioprocess = null;
+        this.node.disconnect();
+        this.node = null;
+      }
+      if (this.gainNode) { this.gainNode.disconnect(); this.gainNode = null; }
+      this.dsp      = null;
+      this.writeLog = null;
+      this.spcBytes = null;
+    }
+  }
+
   MML.Audio.SpcStreamPlayer = SpcStreamPlayer;
+  MML.Audio.SpcReplayStreamPlayer = SpcReplayStreamPlayer;
 
 })(window);

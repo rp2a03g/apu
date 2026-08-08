@@ -69,11 +69,12 @@
       const duty     = (r.ctrl >> 6) & 0x03;
       const freq = pulseFreq(period);
       const note = (active && audible && freq > 0) ? freqToNoteNumber(freq) : null;
-      if (!cur) { cur = { note, duty, constVol, envKey, start: f, end: f, volSeq: [volume] }; continue; }
+      const rawFreq = note !== null ? freq : null;
+      if (!cur) { cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume] }; continue; }
       if (t.attack[attackIdx] || note !== cur.note || duty !== cur.duty || constVol !== cur.constVol ||
           (!constVol && envKey !== cur.envKey)) {
         flush(f);
-        cur = { note, duty, constVol, envKey, start: f, end: f, volSeq: [volume] };
+        cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume] };
       } else if (constVol) {
         cur.volSeq.push(volume);
       }
@@ -99,7 +100,7 @@
       return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty },
+      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq },
       ev.note !== null ? toVolumeFields(ev) : {}
     );
 

@@ -260,11 +260,28 @@
       return this.totalFrames / this.frameRate / this.speedFactor;
     }
 
+    // 現在の曲フレーム位置(_songFramePosをオーディオサンプル単位で毎サンプル進めた
+    // 結果、speedFactor込みで既に正確)。getPosition()(実時間)をframeDurationで
+    // 単純に割ると再生速度が等速でない場合に曲の進行と食い違うため、frameIndexが
+    // 必要な箇所(MML再生ハイライト・CPU/サウンドレジスタモニタ)はこちらを使うこと。
+    getCurrentFrame() {
+      return Math.max(0, this.currentFrame);
+    }
+
     destroy() {
       this.isPlaying = false;
-      if (this.node)     { this.node.disconnect();     this.node = null; }
+      // onaudioprocessのクロージャがthis(ひいてはtracks等の大きな配列)を掴んだままだと、
+      // disconnect()後もScriptProcessorNodeがGCされるまでメモリを保持し続けてしまう
+      // (ScriptProcessorNodeはdeprecated APIで、ブラウザによってはdisconnect済みでも
+      // 即座には回収されないため、ハンドラを明示的に外して参照を断つ必要がある)。
+      if (this.node) {
+        this.node.onaudioprocess = null;
+        this.node.disconnect();
+        this.node = null;
+      }
       if (this.gainNode) { this.gainNode.disconnect(); this.gainNode = null; }
       if (this.limiter)  { this.limiter.disconnect();  this.limiter = null; }
+      this.tracks = null;
     }
   }
 
@@ -388,12 +405,301 @@
 
     destroy() {
       this.isPlaying = false;
-      if (this.node)     { this.node.disconnect();     this.node = null; }
+      if (this.node) {
+        this.node.onaudioprocess = null;
+        this.node.disconnect();
+        this.node = null;
+      }
       if (this.gainNode) { this.gainNode.disconnect(); this.gainNode = null; }
       if (this.limiter)  { this.limiter.disconnect();  this.limiter = null; }
+      this.player      = null;
+      this.frameBuffer  = null;
+    }
+  }
+
+  // N163は$F800(アドレスラッチ)+$4800(データ)の間接アドレッシングで、実機ドライバは
+  // 位相バイトを「$4800の空読み」で読み飛ばす(読み出しもオートインクリメントを進める)。
+  // writeLogは書き込みしか記録していないため、書き込みだけを再生するとその「読み飛ばし」分
+  // ポインタがドリフトし、以降の書き込みが誤ったオフセットへ着地して波形/レジスタが
+  // 破壊される([[n163-capture-snapshot-and-numch]]と同種の問題)。
+  // capture.js(regsOnly)が採取するn163Snapshots[f]は毎フレームのライブRAM実測なので
+  // ポインタドリフトの影響を受けず、周波数/波形/音量バイトは常に正しい。ただし
+  // regsOnlyはN163.clock()を呼ばない(音声合成をスキップする高速モードのため)ので、
+  // 位相バイト(+1/+3/+5、_updateChannel()だけが更新する)はスナップショット内では
+  // 進行していない(参考にならない)。そのため位相バイトだけは対象外にし、実際に毎
+  // サンプルclock()している自分のN163インスタンスの位相をそのまま使う。
+  const N163_PHASE_BYTES = (() => {
+    const s = new Set();
+    for (let ch = 0; ch < 8; ch++) {
+      const base = 0x40 + ch * 8;
+      s.add(base + 1); s.add(base + 3); s.add(base + 5);
+    }
+    return s;
+  })();
+  function applyN163RamSnapshot(n163, snapshotRam) {
+    if (!n163 || !snapshotRam) return;
+    const dst = n163.ram;
+    for (let i = 0; i < 128; i++) {
+      if (!N163_PHASE_BYTES.has(i)) dst[i] = snapshotRam[i];
+    }
+  }
+
+  // =========================================================
+  // NsfReplayStreamPlayer
+  // =========================================================
+  // NSF実ファイルを「6502 CPUを実行しながら音声も生成する」NsfStreamPlayerとは異なり、
+  // バックグラウンドで先行実行された6502キャプチャ(src/emulator/capture.js captureSongAsync
+  // のwriteLog、フレームごとの{addr,value}[])を「実CPU抜きで」チップへ再適用するだけで
+  // 音声合成する。MmlStreamPlayer(MMLコンパイル済みtracksを同じ方式で再生)とほぼ同型の設計で、
+  // その結果MmlStreamPlayerと同じ仕組み(seek=0からの書き込み再適用、applyMute=チップの
+  // mute配列をライブ書き換え)がNSF実ファイルでもそのまま使える。
+  // CPUを持たないため、曲送り連打時などにNsfStreamPlayer+先読みキャプチャの「2本の6502
+  // エミュレーションが同時に走ってCPUを食い合う」問題も構造的に起きない。
+  class NsfReplayStreamPlayer {
+    constructor(audioCtx) {
+      this.audioCtx       = audioCtx;
+      this.node           = null;
+      this.gainNode       = null;
+      this.bus            = null;
+      this.apu            = null;
+      // liveApuEnv/liveN163/liveFME7/liveMMC5/liveVRC7(main.js)はNsfStreamPlayer/
+      // KssStreamPlayerの「p.player.apu」「p.player.bus」形状を前提にしている。
+      // 自己参照させることでこれらのヘルパーを一切変更せずに再利用できる。
+      this.player          = this;
+      this.busOpt          = null;
+      this.writeLog        = null;   // captureSongAsyncが進行中に育てる配列への参照(未キャプチャの添字はundefined)
+      this.initWrites      = [];
+      this.initRegs        = {};
+      this.totalFrames     = 0;
+      this.frameRate       = MML.Emu.FRAME_RATE_NTSC;
+      this.samplesPerFrame = 0;
+      this.samplePos       = 0;
+      this.currentFrame    = -1;
+      this.cycleAccum      = 0;
+      this.speedFactor     = 1;
+      this._songFramePos   = 0;
+      this.dcPrevX         = 0;
+      this.dcPrevY         = 0;
+      this.isPlaying       = false;
+      this.onEnded         = null;
+      this._createNode();
+    }
+
+    _createNode() {
+      this.gainNode = this.audioCtx.createGain();
+      this.gainNode.gain.value = 3.0;
+      this.limiter = createLimiter(this.audioCtx);
+      this.gainNode.connect(this.limiter);
+      this.limiter.connect(this.audioCtx.destination);
+
+      this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
+      this.node.connect(this.gainNode);
+
+      this.node.onaudioprocess = (e) => {
+        const out = e.outputBuffer.getChannelData(0);
+        if (!this.bus || !this.isPlaying) { out.fill(0); return; }
+        this._fill(out);
+      };
+    }
+
+    // bus/apu/拡張音源を作り直し、initWrites(INIT実行直後の初期レジスタ状態)を適用する。
+    // load()時と、シーク時(0から再適用するため)の両方から呼ばれる。
+    _buildChips() {
+      this.bus = new MML.Emu.NsfBus(this.busOpt);
+      this.apu = new MML.Emu.APU2A03(this.bus);
+      this.bus.setApu(this.apu);
+      for (const w of this.initWrites) this.bus.write(w.addr, w.value);
+      // seek()等でbusが作り直されてもライブ鍵盤モニタ用フックが失われないよう保持しておく
+      if (this._onWriteHook) this.bus.onWrite = this._onWriteHook;
+      // 同様にミュート設定もbus/apu/拡張音源を作り直すたびに失われる(新しいチップ
+      // インスタンスのmuteは既定で全解除状態のため)。直近に適用されたミュート設定を
+      // 再適用して、シーク後にチャンネルが勝手にミュート解除されないようにする。
+      if (this._lastMute) this.applyMute(this._lastMute);
+    }
+
+    // ライブ鍵盤モニタ用のbus.onWriteフックを設定する。_buildChips()(load/seek/stop時に
+    // busを毎回作り直す)を経ても引き継がれるよう、素の`bus.onWrite = fn`ではなくこちらを使う。
+    setOnWrite(fn) {
+      this._onWriteHook = fn;
+      if (this.bus) this.bus.onWrite = fn;
+    }
+
+    // capture: {writeLog, initWrites, initRegs, n163Snapshots}(captureSongAsyncのonProgress由来。
+    // writeLog/n163Snapshotsは進行中配列への参照で、呼び出し後もキャプチャが進むにつれ自動的に埋まっていく)
+    load(nsfBytes, songIndex, totalFrames, capture, mute) {
+      this.stop();
+      const header = MML.NSF.parseHeader(nsfBytes);
+      this.busOpt = {
+        program: nsfBytes.slice(128),
+        loadAddr: header.loadAddr,
+        bankswitch: header.bankswitch,
+        extraChips: header.extraChips
+      };
+      this.writeLog      = capture.writeLog;
+      this.initWrites    = capture.initWrites || [];
+      this.initRegs      = capture.initRegs || {};
+      this.n163Snapshots = capture.n163Snapshots || null;
+      this.totalFrames = totalFrames;
+      this.samplesPerFrame = this.audioCtx.sampleRate / this.frameRate;
+      this._buildChips();
+      this.samplePos     = 0;
+      this.currentFrame  = -1;
+      this._songFramePos = 0;
+      this.cycleAccum    = 0;
+      this.dcPrevX = this.dcPrevY = 0;
+      if (mute) this.applyMute(mute);
+    }
+
+    _isFrameReady(f) {
+      return !!(this.writeLog && this.writeLog[f]);
+    }
+
+    _applyFrame(f) {
+      this.currentFrame = f;
+      const writes = this.writeLog[f];
+      if (writes) for (const w of writes) this.bus.write(w.addr, w.value);
+      // N163は書き込み再生だけだとポインタドリフトで破壊されるため、ライブRAM
+      // スナップショットで(位相バイトを除き)上書きして正しい状態に補正する
+      if (this.n163Snapshots && this.bus.expansion.n163) {
+        applyN163RamSnapshot(this.bus.expansion.n163, this.n163Snapshots[f]);
+      }
+    }
+
+    _fill(out) {
+      const sr = this.audioCtx.sampleRate;
+      for (let i = 0; i < out.length; i++) {
+        const nextSongFramePos = this._songFramePos + (this.frameRate / sr) * this.speedFactor;
+        const f = Math.floor(nextSongFramePos);
+        if (f >= this.totalFrames) {
+          for (let j = i; j < out.length; j++) out[j] = 0;
+          this.isPlaying = false;
+          if (this.onEnded) this.onEnded();
+          return;
+        }
+        if (!this._isFrameReady(f)) {
+          // バックグラウンドキャプチャがまだこのフレームに追いついていない
+          // (再生開始直後や、先読みの先端付近へのシーク直後などに起こりうる)。
+          // samplePosは進めない: 進めてしまうと(スタール中も実時間で位置が進み続け)
+          // getPosition()が「実際には再生していない」のに duration に到達したと
+          // 誤認し、updateTransportUI()の「pos>=durationならtransportStop()」に
+          // よってスタールしたまま再生が停止してしまう不具合があった(King of Kings
+          // 実測で発覚)。無音のまま位置を凍結し、次のコールバックで同じフレームを再試行する。
+          out[i] = 0;
+          continue;
+        }
+        this._songFramePos = nextSongFramePos;
+        if (f !== this.currentFrame) this._applyFrame(f);
+
+        this.cycleAccum += CPU_CLOCK_NTSC / sr;
+        while (this.cycleAccum >= 1) {
+          this.apu.clock();
+          for (const name in this.bus.expansion) this.bus.expansion[name].clock();
+          this.cycleAccum -= 1;
+        }
+        let raw = this.apu.mixSample();
+        for (const name in this.bus.expansion) raw += this.bus.expansion[name].mixSample();
+        const y = raw - this.dcPrevX + 0.999 * this.dcPrevY;
+        this.dcPrevX = raw; this.dcPrevY = y;
+        out[i] = y;
+        this.samplePos++;
+      }
+    }
+
+    play()  { this.isPlaying = true; }
+    pause() { this.isPlaying = false; }
+
+    stop() {
+      this.isPlaying = false;
+      if (this.busOpt) this._buildChips();
+      this.samplePos     = 0;
+      this.currentFrame  = -1;
+      this._songFramePos = 0;
+      this.cycleAccum    = 0;
+      this.dcPrevX = this.dcPrevY = 0;
+    }
+
+    setSpeed(factor) { this.speedFactor = factor; }
+
+    // targetFrameの直前まで(0..targetFrame、キャプチャが追いついていなければその手前まで)の
+    // 書き込みをbus/apuへ再適用してシークする(MmlStreamPlayer.seek()と同じ考え方)。
+    // エンベロープ/スイープの内部クロック位相までは復元されない(同じ既知の割り切り)。
+    seek(samplePos) {
+      const sr = this.audioCtx.sampleRate;
+      let songFramePos = (samplePos / sr) * this.frameRate * this.speedFactor;
+      let targetFrame = Math.min(Math.floor(songFramePos), this.totalFrames - 1);
+      const wl = this.writeLog || [];
+      if (targetFrame >= 0 && !wl[targetFrame]) {
+        // 未キャプチャ範囲へのシーク: バッファ済み末尾にクランプする。samplePos/
+        // songFramePosも合わせて再計算しないと、getPosition()が「要求された(まだ
+        // 存在しない)位置」を報告し続け、次の_fill()でcurrentFrameとsongFramePosが
+        // 食い違ってしまう(_isFrameReady(f)==falseのスタール状態に陥る)。
+        while (targetFrame > 0 && !wl[targetFrame]) targetFrame--;
+        songFramePos = targetFrame;
+        samplePos = (songFramePos / this.frameRate / this.speedFactor) * sr;
+      }
+      this._buildChips();
+      this.cycleAccum = 0;
+      for (let f = 0; f <= targetFrame; f++) {
+        const writes = wl[f];
+        if (!writes) break;
+        for (const w of writes) this.bus.write(w.addr, w.value);
+      }
+      // N163はポインタドリフトの影響を受けるため、シーク先フレームのライブRAM
+      // スナップショットで(位相バイトを除き)最終的に上書きして補正する
+      if (this.n163Snapshots && this.bus.expansion.n163) {
+        applyN163RamSnapshot(this.bus.expansion.n163, this.n163Snapshots[targetFrame]);
+      }
+      this.samplePos     = samplePos;
+      this.currentFrame  = targetFrame;
+      this._songFramePos = songFramePos;
+      this.dcPrevX = this.dcPrevY = 0;
+    }
+
+    applyMute(mute) {
+      if (!mute) return;
+      this._lastMute = mute; // _buildChips()(シーク等でチップを作り直すたび)に再適用するため保持
+      if (!this.apu) return;
+      if (mute.apu) MML.Emu.applyMute(this.apu.mute, mute.apu);
+      if (mute.expansion) {
+        for (const [name, chip] of Object.entries(this.bus.expansion)) {
+          if (mute.expansion[name]) MML.Emu.applyMute(chip.mute, mute.expansion[name]);
+        }
+      }
+    }
+
+    getPosition() {
+      return this.samplePos / this.audioCtx.sampleRate;
+    }
+
+    getDuration() {
+      return this.totalFrames / this.frameRate / this.speedFactor;
+    }
+
+    getCurrentFrame() {
+      return Math.max(0, this.currentFrame);
+    }
+
+    destroy() {
+      this.isPlaying = false;
+      if (this.node) {
+        this.node.onaudioprocess = null;
+        this.node.disconnect();
+        this.node = null;
+      }
+      if (this.gainNode) { this.gainNode.disconnect(); this.gainNode = null; }
+      if (this.limiter)  { this.limiter.disconnect();  this.limiter = null; }
+      // writeLog等はキャプチャ済み全曲分の書き込みログ(数分の曲では数十MB規模になりうる)を
+      // 保持している。ファイルを連続で開き直すたびにこれが解放されないと蓄積してブラウザが
+      // メモリ不足で落ちるため、破棄時に明示的に参照を切る。
+      this.bus           = null;
+      this.apu           = null;
+      this.writeLog       = null;
+      this.initWrites     = [];
+      this.n163Snapshots  = null;
     }
   }
 
   MML.Audio.MmlStreamPlayer = MmlStreamPlayer;
   MML.Audio.NsfStreamPlayer = NsfStreamPlayer;
+  MML.Audio.NsfReplayStreamPlayer = NsfReplayStreamPlayer;
 })(window);

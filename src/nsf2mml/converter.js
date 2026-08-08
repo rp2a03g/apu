@@ -27,6 +27,82 @@
   function triFreq(period) {
     return period >= 4 ? CPU_CLOCK / (32 * (period + 1)) : 0;
   }
+  // 長さカウンタテーブル(src/emulator/apu2a03.jsのLENGTH_TABLEと同一。三角波の$400B書込み
+  // 上位5bitのインデックスで参照する)。
+  const LENGTH_TABLE = [
+    10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
+    12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
+  ];
+  // 三角波は音量レジスタを持たず、$4008(bit7=halt、bits0-6=線形カウンタリロード値)と
+  // $400B書込み時の長さカウンタ(上記テーブル)の2つのハードウェアカウンタだけで発音の
+  // オン/オフを制御する(apu2a03.js TriangleChannel参照)。haltビットが立っている間は
+  // 両カウンタとも減少しない(継続音/レガート用)。haltが立っていない場合は「バスドラム的な
+  // 短い一発」に使われることが多く、線形カウンタ(240Hz、1フレームに4回)と長さカウンタ
+  // (120Hz、1フレームに2回)のどちらか早く0に達した方で自然に消音する。この消音は
+  // レジスタ値そのものは変化しないため($4015のステータスビットも立ったまま)、
+  // レジスタの値だけを見る抽出処理では検出できず、次の書込みまでずっと同じ音が
+  // 連続音として鳴っているように見えてしまう(女神転生II 11曲目のバスドラム的三角波が
+  // 連続トーンになる、とユーザー報告)。ここでこの自然減衰をシミュレートし、実際に
+  // 音が止まるフレームで休符へ切り替える。
+  function triangleAudibleFrames(haltFlag, linearReload, lengthCounterValue) {
+    if (haltFlag) return Infinity; // 継続モード: 自然減衰しない(次のイベントまで鳴り続ける)
+    const framesForLinear = Math.ceil((linearReload + 1) / 4); // 240Hz、リロードに1ティック分の余裕
+    const framesForLength = Math.ceil(lengthCounterValue / 2); // 120Hz
+    return Math.max(1, Math.min(framesForLinear, framesForLength));
+  }
+  // pulseFreq/triFreqの逆関数(丸めない生の連続値)。applyPitchDetune(src/convert/detune.js)は
+  // 「理論値の周期」と「実測値の周期」の差を最後に1回だけ丸めてD<n>にするため、ここで先に
+  // 整数化してはいけない(kss2mml-pitch-detune-correction参照)。実機の周期レジスタは整数
+  // でしか書けないため、元のNSFが「12平均律を理論通りに丸めた値」と厳密には限らない
+  // (ドライバ/ツール固有のピッチテーブル誤差、意図的なデチューン/コーラス等)場合、この
+  // 差がそのまま失われてしまうのを防ぐ。
+  function pulsePeriodRaw(freq) { return CPU_CLOCK / (16 * freq) - 1; }
+  function triPeriodRaw(freq) { return CPU_CLOCK / (32 * freq) - 1; }
+  // 拡張音源側(src/nsf2mml/expansion/*.js)の各周波数式の逆関数。同じ理由(コーラス検知時の
+  // D<n>算出、src/convert/detune.js MML.Convert.detectChorusDetune)で丸めない生の連続値。
+  function vrc6PulsePeriodRaw(freq) { return CPU_CLOCK / (16 * freq) - 1; } // vrc6.js pulseFreq()の逆関数
+  function vrc6SawPeriodRaw(freq) { return CPU_CLOCK / (14 * freq) - 1; }   // vrc6.js sawFreq()の逆関数
+  function fme7ToneRaw(freq) { return CPU_CLOCK / (32 * freq); }           // fme7.js toneFreq()の逆関数
+  function fdsPeriodRaw(freq) { return freq * 65536 * 64 / CPU_CLOCK; }    // fds.js fdsFreq()の逆関数
+  // vrc7.js vrc7Freq(fnum,block)の逆関数。kss2mml/converter.jsのvrc7FnumRawと同じ式で、
+  // blockは自己選択(生fnum値なので同一block内なら周波数に比例、ズレは小さいため常に
+  // block自体は揺れない前提で問題ない)。
+  function vrc7FnumRaw(freq) {
+    for (let block = 0; block <= 7; block++) {
+      const fnum = (freq * 524288) / (49716 * Math.pow(2, block));
+      if (fnum <= 511) return fnum;
+    }
+    return 511;
+  }
+  // n163.js freq=freqReg*CLOCK/(15*65536*length*numCh)の逆関数。
+  // ★lengthは必ず「そのノートが実際にコンパイル時に使う波形長」と一致させること
+  // (D<n>算出時のlengthと適用時のlengthが食い違うと、女神転生II 11曲目で実測した通り
+  // オフセットが丸ごと倍/半分になり音痴に聞こえるバグになる)。以前はnsf2mml/expansion/
+  // n163.jsの波形抽出が常に16サンプルへリサンプリングしていたためlengthを16固定にして
+  // いたが、その後「波形は実機の生の長さのまま抽出する」よう修正した(女神転生II 20曲目、
+  // 実機32サンプルの波形が16に間引かれ音色の解像度が失われる別バグの修正、
+  // n163.jsのreadNativeWave参照)ため、ここでもev.rawLength(=そのノートの実際の
+  // 波形サンプル数、n163.jsのtoCommonがev.wave.lengthから渡す)をそのまま使う
+  // (roundedLenは実機レジスタの丸め規則そのものなので既に丸め済み、再度丸め直す必要はない)。
+  // numCh(有効ch数)は曲全体で不変という前提のもと、抽出側の実測値(ev.rawNumCh)をそのまま使う。
+  function n163FreqRegRaw(freq, ev) {
+    const length = (ev && ev.rawLength) || 16;
+    const numCh = (ev && ev.rawNumCh) || 8;
+    return freq * 15 * 65536 * length * numCh / CPU_CLOCK;
+  }
+  // チップ種別+チャンネルindexから対応する生周期関数を返す(result.channelsの並び順:
+  // vrc6=[p1,p2,saw], mmc5=[p1,p2], fme7=[A,B,C], n163=[ch0..], vrc7=[ch0..ch5], fds=[単一])。
+  function expansionPeriodFn(chip, index) {
+    switch (chip) {
+      case 'vrc6': return index === 2 ? vrc6SawPeriodRaw : vrc6PulsePeriodRaw;
+      case 'mmc5': return pulsePeriodRaw;
+      case 'fme7': return fme7ToneRaw;
+      case 'n163': return n163FreqRegRaw;
+      case 'vrc7': return vrc7FnumRaw;
+      case 'fds':  return fdsPeriodRaw;
+      default: return null;
+    }
+  }
   // 周波数 → MML noteNumber (o4a=57)
   function freqToNote(freq) {
     if (freq <= 0) return null;
@@ -95,8 +171,8 @@
     function flush(end) {
       if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; }
     }
-    function begin(f, note, vol, duty, constVol, envKey) {
-      cur = { note, vol, duty, constVol, envKey, start: f, end: f, volSeq: [vol] };
+    function begin(f, note, vol, duty, constVol, envKey, rawFreq) {
+      cur = { note, vol, duty, constVol, envKey, start: f, end: f, volSeq: [vol], rawFreq };
     }
 
     for (let f = 0; f < timeline.length; f++) {
@@ -115,17 +191,18 @@
       const duty = (r[0] >> 6) & 3;
       const freq = pulseFreq(period);
       const note = (active && audible && freq > 0) ? freqToNote(freq) : null;
+      const rawFreq = note !== null ? freq : null;
 
       if (!cur) {
-        begin(f, note, vol, duty, constVol, envKey);
+        begin(f, note, vol, duty, constVol, envKey, rawFreq);
         continue;
       }
       // アタック書き込みがあれば必ず新イベント
       if (t.attack[chKey]) {
-        flush(f); begin(f, note, vol, duty, constVol, envKey);
+        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq);
       } else if (note !== cur.note || duty !== cur.duty || constVol !== cur.constVol ||
                  (!constVol && envKey !== cur.envKey)) {
-        flush(f); begin(f, note, vol, duty, constVol, envKey);
+        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq);
       } else if (constVol) {
         // 固定音量モードのまま音量だけ変化する場合はソフトウェアエンベロープの
         // 一部として同一ノートに積む(区切らない)。
@@ -141,6 +218,7 @@
   function extractTriEvents(timeline) {
     const events = [];
     let cur = null;
+    let silenceAtFrame = Infinity; // このフレーム以降は線形/長さカウンタで自然消音済み(休符扱い)
 
     function flush(end) {
       if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; }
@@ -152,15 +230,29 @@
       const active = !!(t.status & 4);
       const period = r[2] | ((r[3] & 7) << 8);
       const freq = triFreq(period);
-      const linearEnabled = !!(r[0] & 0x80) || (r[0] & 0x7F) > 0;
-      const note = (active && freq > 0 && linearEnabled) ? freqToNote(freq) : null;
 
-      if (!cur) { cur = { note, start: f, end: f }; continue; }
+      // halt=1(継続モード)は実機仕様上reload flagが永久にセットされたままになるため、線形
+      // カウンタは毎四分フレーム$4008下位7bitをそのままライブ反映し続ける($400Bを介した
+      // アタックが無くても、$4008単体の書込みだけでreload=0にすれば即座に消音できる。
+      // 女神転生II 11曲目のバスドラム的三角波は$400Bでなくこの手法(常時halt=1固定+
+      // $4008=$80(reload=0)による都度ミュート)を使っていた)。halt=0(単発減衰)モードは
+      // 従来通りアタック起点の時間経過でシミュレートする。
+      const haltFlagNow = !!(r[0] & 0x80);
+      const linearReloadNow = r[0] & 0x7F;
+      if (t.attack.tr && !haltFlagNow) {
+        const lengthCounterValue = LENGTH_TABLE[(r[3] >> 3) & 0x1F];
+        silenceAtFrame = f + triangleAudibleFrames(haltFlagNow, linearReloadNow, lengthCounterValue);
+      }
+      const gated = haltFlagNow ? (linearReloadNow > 0) : (f < silenceAtFrame);
+      const note = (active && freq > 0 && gated) ? freqToNote(freq) : null;
+      const rawFreq = note !== null ? freq : null;
+
+      if (!cur) { cur = { note, start: f, end: f, rawFreq }; continue; }
 
       if (t.attack.tr) {
-        flush(f); cur = { note, start: f, end: f };
+        flush(f); cur = { note, start: f, end: f, rawFreq };
       } else if (note !== cur.note) {
-        flush(f); cur = { note, start: f, end: f };
+        flush(f); cur = { note, start: f, end: f, rawFreq };
       }
     }
     if (cur) { cur.end = timeline.length; if (cur.end > cur.start) events.push(cur); }
@@ -393,7 +485,11 @@
     const bpm = options.bpm
       ? MML.Convert.refineBpm(options.bpm, noteDurations, FPS)
       : MML.Convert.detectBpm(noteDurations, FPS);
-    const fpb = FPS * 60 / bpm;
+    // MML本文に埋め込まれるテンポは整数(t<n>)に丸められる(mmlEmit.js)。音長量子化の
+    // グリッド(fpb)も同じ丸め後の値で計算しないと、書き出し時と再生(コンパイル)時で
+    // 基準テンポが食い違い、打ち直しの多いパートで誤差が蓄積してドリフトする
+    // ([[tempo-rounding-drift-future-issue]]参照)。
+    const fpb = FPS * 60 / Math.round(bpm);
     const totalFrames = timeline.length;
 
     // DPCM: ppmckc準拠(音符=テーブル行選択)で@DPCM<n>定義+実際のノートイベントを作る
@@ -433,7 +529,7 @@
       `; Song     : ${songNo} / ${totalS}`,
       `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
       `; 分解能   : 480 TPQN (MIDI準拠)`,
-      `; 変換     : FamiMML Studio`,
+      `; 変換     : Sound Emulation Foundry`,
       `; チャンネル: A=Pulse1 B=Pulse2 C=Triangle D=Noise` + (dpcmLetter ? ` ${dpcmLetter}=DPCM` : ''),
       ...(expansions.length > 0 ? [`; 拡張音源  : ${expansions.join(', ')}`] : []),
       `; =========================================================`,
@@ -464,26 +560,42 @@
       return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
 
-    // イベントを共通形式 { start, end, note, volume?/envelopeV?, instrument? } に整形
+    // イベントを共通形式 { start, end, note, volume?/envelopeV?, instrument?, rawFreq? } に整形
     const toCommon = (ev) => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty },
+      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq },
       ev.note !== null ? toVolumeFields(ev) : {}
     );
     const chEventsA = evA.map(toCommon);
     const chEventsB = evB.map(toCommon);
-    const chEventsC = evC.map(ev => ({ start: ev.start, end: ev.end, note: ev.note }));
+    const chEventsC = evC.map(ev => ({ start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq }));
     const chEventsD = evD.map(ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.on ? noisePeriodToNoteNum(ev.periodIdx) : null },
       ev.on ? toVolumeFields(ev) : {}
     ));
 
+    // 音程補正: NSF→2A03(及び拡張音源)はネイティブ変換(変換元・変換先が同一チップ・同一
+    // クロック)であり、KSSのPSG→FME-7のような「変換先チップの格子が粗い」二重量子化は
+    // 起こらない。よって単独ノートの実測誤差はほぼノイズであり補正すべきではなく、複数
+    // チャンネルが同じ音程を同時に鳴らしている(コーラス)場合に限って実測周波数の違いを
+    // 意図的なデチューン効果とみなして補正する MML.Convert.detectChorusDetune を使う
+    // (applyPitchDetuneではない、kss2mml-pitch-detune-correction参照)。2A03本体だけでなく
+    // 拡張音源(VRC6等)を含めた全チャンネルを横断してグループ化することで、チップをまたいだ
+    // コーラス(例: 2A03パルス+VRC6パルスの同時発音)も検知できるようにする。そのため実際の
+    // 呼び出しは拡張音源抽出後(下記detuneEntries)にまとめて1回だけ行う。ノイズ(D)は
+    // periodIdxが元々16通りの離散値でしか存在せず補正の余地が無いため対象外。
+    const detuneEntries = [
+      { events: chEventsA, periodFn: pulsePeriodRaw },
+      { events: chEventsB, periodFn: pulsePeriodRaw },
+      { events: chEventsC, periodFn: triPeriodRaw },
+    ];
+
     // 各チップの抽出モジュール(src/nsf2mml/expansion/*.js)を呼んでチャンネルを追加する。
     // 全チャンネルを小節揃えスコア形式(1回のemitScore呼び出し)で出力する。
     // テンポは先頭に "ABCD... t<bpm>" の形で1回だけ出す。
     const scoreChannels = [
-      { letter: 'A', events: chEventsA, hasInstrument: true, hasVolume: true, hasEnvelope: true },
-      { letter: 'B', events: chEventsB, hasInstrument: true, hasVolume: true, hasEnvelope: true },
-      { letter: 'C', events: chEventsC },
+      { letter: 'A', events: chEventsA, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true },
+      { letter: 'B', events: chEventsB, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true },
+      { letter: 'C', events: chEventsC, hasDetune: true },
       { letter: 'D', events: chEventsD, hasVolume: true, hasEnvelope: true },
       ...(dpcmLetter ? [{ letter: dpcmLetter, events: dpcmEvents, hasInstrument: true }] : []),
     ];
@@ -501,7 +613,7 @@
     // 振り直す。実機ppmck同様、各チップの文字範囲は他の拡張音源の有無に関わらず
     // 完全固定(例: VRC6のみでも常にM-O。E-Lは未使用のまま空く。詰め直しはしない)。
     // (expansionLetterMapはヘッダーコメント生成時にdpcmを含めて計算済みのものを再利用する)
-    let fdsWave = null, n163Wave = null, fdsModDefLines = [];
+    let fdsWave = null, n163Wave = null, fdsModDefLines = [], n163ChannelCount = 0;
     for (const chip of expansions) {
       const extractor = MML.Nsf2MmlExpansion && MML.Nsf2MmlExpansion[chip];
       if (!extractor) continue;
@@ -510,21 +622,38 @@
         initRegs, initWrites, options.n163Snapshots);
       const letters = expansionLetterMap[chip];
       result.channels.forEach((ch, index) => {
-        scoreChannels.push(Object.assign({}, ch, { letter: letters[index] }));
+        scoreChannels.push(Object.assign({}, ch, { letter: letters[index], hasDetune: true }));
+        detuneEntries.push({ events: ch.events, periodFn: expansionPeriodFn(chip, index) });
       });
       if (result.fdsWave)  fdsWave  = result.fdsWave;
       if (result.n163Wave) n163Wave = result.n163Wave;
       if (result.fdsModDefLines) fdsModDefLines = result.fdsModDefLines;
+      if (chip === 'n163') n163ChannelCount = result.channels.length;
     }
+
+    // 2A03本体+全拡張音源を横断してコーラス検知+D<n>補正(上のdetuneEntries参照)
+    MML.Convert.detectChorusDetune(detuneEntries, detuneEntries.map(e => e.periodFn));
 
     // @DPCM<n>定義行(実機ppmckcと同じ書式)。ヘッダー行として他の音色定義と同列に出す
     const dpcmDefLines = dpcmDefs.map(d =>
       `@DPCM${d.index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac}, ${d.mode} }`);
 
+    // #TITLE/#COMPOSER/#MAKER/#EX-*(機能する本文ディレクティブ。上の`; `コメントとは別。
+    // これがないとMML本文だけからは拡張音源が有効にならず、UI側の操作が必要になってしまう)
+    const directiveLines = [
+      ...(title ? [`#TITLE ${title}`] : []),
+      ...(artist ? [`#COMPOSER ${artist}`] : []),
+      ...(copy ? [`#MAKER ${copy}`] : []),
+      ...expansions.map(chip => chip === 'n163'
+        ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${n163ChannelCount}`
+        : MML.Mml.EX_CHIP_DIRECTIVE[chip]),
+      ``
+    ];
+
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm,
-      headerLines: [...dpcmDefLines, ...envReg.defLines(), ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(),
-        ...vrc7ToneReg.defLines(), ...fdsModDefLines]
+      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...fdsWaveReg.defLines(),
+        ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(), ...fdsModDefLines]
     });
 
     const mml = [headerComment, scoreText].join('\n');

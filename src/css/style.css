@@ -5,46 +5,79 @@
   --text: #e6e6ef;
   --accent: #6fb1ff;
   --error: #ff6b6b;
-  --mono: 'Consolas', 'Courier New', monospace;
+  /*
+   * 日本語グリフを持つフォントを必ず明示すること。
+   * 欧文フォント(Segoe UI/Consolas)だけだと、日本語フォント未導入の環境で豆腐(□)になり、
+   * 中国語ロケールでは総称ファミリが中文フォントに解決されて漢字が簡体字の字形で出る。
+   * 各OSの標準日本語フォントを順に並べて字形を固定する。
+   */
+  --sans: 'Segoe UI', system-ui, 'Yu Gothic UI', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN',
+          'Noto Sans JP', 'Noto Sans CJK JP', Meiryo, 'IPAPGothic', sans-serif;
+  --mono: 'Consolas', 'Courier New', 'BIZ UDGothic', 'Noto Sans Mono CJK JP',
+          'Yu Gothic UI', 'Hiragino Sans', 'Noto Sans JP', Meiryo, monospace;
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  font-family: 'Segoe UI', sans-serif;
+  font-family: var(--sans);
   background: var(--bg);
   color: var(--text);
 }
 
 header {
-  padding: 12px 20px;
+  padding: 10px 20px 12px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
+  position: relative;   /* 言語選択を右上に固定するための基準 */
 }
 
-header h1 {
-  margin: 0;
-  font-size: 18px;
+/* 言語選択 (i18nDom.js が生成) */
+.lang-picker {
+  position: absolute;
+  top: 12px;
+  right: 20px;
 }
 
-header p {
-  margin: 4px 0 0;
+.lang-picker select {
+  background: #3d3d4a;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 6px;
   font-size: 12px;
-  color: #9999aa;
+  font-family: var(--sans);
 }
 
-.window-toggles {
+/* タイトル行: 左=アイコンツールバー、右=タイトル(同じ行に並べる) */
+.header-top-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 8px;
+  justify-content: space-between;
+  gap: 12px;
   flex-wrap: wrap;
 }
 
-.window-toggles-label {
-  font-size: 12px;
-  color: #9999aa;
+header h1.app-title {
+  margin: 0 96px 0 0; /* 右側の言語選択(lang-picker)と重ならないよう余白を確保 */
+  font-size: 18px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.icon-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.icon-toolbar-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 4px;
+  background: var(--border);
 }
 
 .toggle-btn {
@@ -66,6 +99,82 @@ header p {
   font-weight: 600;
 }
 
+/* --- 単色アイコンボタン (ヘッダーツールバー) --- */
+.icon-btn {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.icon-btn svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  pointer-events: none;
+}
+
+.icon-btn:hover { background: rgba(255, 255, 255, 0.09); opacity: 1; }
+
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  background: transparent;
+}
+
+.icon-btn .icon-pause { display: none; }
+.icon-btn.is-playing .icon-play { display: none; }
+.icon-btn.is-playing .icon-pause { display: block; }
+
+/* ウィンドウのタイトル行に埋め込む縮小版(FDS/N163波形エディタを開く・ファイルを開く等) */
+.icon-btn-title {
+  width: 24px;
+  height: 24px;
+}
+.icon-btn-title svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* アイコンではなく短い文字列を表示するボタン(例: "MML") */
+.icon-btn-text {
+  width: auto;
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+/* MMLエディタ上部のトランスポート行: 再生/停止/NSF出力 + 範囲リセット + シークバー + 時間表示 */
+.mml-top-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 8px 12px 0;
+}
+
+.mml-top-toolbar #timeDisplay {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.mml-top-toolbar .seek-bar-wrap {
+  flex: 1;
+  min-width: 80px;
+  margin: 0;
+}
+
 /* --- フローティングウィンドウ --- */
 .float-window {
   position: fixed;
@@ -85,7 +194,9 @@ header p {
 .float-window-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start; /* 閉じるボタンは.float-window-closeのmargin-left:autoで右寄せする */
+  flex-wrap: wrap;
+  row-gap: 4px;
   gap: 8px;
   padding: 6px 10px;
   background: #34343f;
@@ -99,6 +210,33 @@ header p {
   flex-shrink: 0;
 }
 
+/* タイトル行に埋め込む追加コントロール(アイコンボタン/チェックボックス/セレクト等)。
+   タイトルの太字・アクセント色を継承しないよう明示的にリセットする */
+.fw-header-extra {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text);
+}
+.fw-header-extra label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  cursor: default;
+}
+/* タイトルの左側ではなく右側(閉じるボタンの手前)に寄せたい場合はこちらを付ける */
+.fw-header-extra--right {
+  margin-left: auto;
+}
+.float-window-header input,
+.float-window-header select {
+  cursor: default;
+}
+
 .float-window-close {
   background: transparent;
   border: none;
@@ -107,6 +245,7 @@ header p {
   line-height: 1;
   padding: 0 4px;
   cursor: pointer;
+  margin-left: auto; /* 常に行の右端に押し出す */
 }
 
 .float-window-close:hover { color: var(--error); }
@@ -272,6 +411,14 @@ button.secondary {
   overflow-y: auto;
 }
 
+/* ログ表示(mmlOutput/captureOutput)は常時2行ぶんの高さに固定し、それ以上はスクロールで見る */
+.mml-log-area {
+  flex: none;
+  min-height: 38px;
+  max-height: 38px;
+  overflow-y: auto;
+}
+
 /* --- MMLシンタックスハイライト --- */
 .mml-editor {
   position: relative;
@@ -325,26 +472,42 @@ button.secondary {
 .tok-number { color: #82d2ce; }
 .tok-comment { color: #6a737d; font-style: italic; }
 
+/* オーバーレイの各行を独立したブロックにして再レイアウトを行内に閉じ込める
+   (syntaxHighlight.jsのwrapLine参照。文字数の多いMML再生時のハイライトのカクつき対策)。
+   ハイライトは色/text-shadow(paintのみ・高さ不変)なので、行を別ブロックにすれば他の行は
+   一切再レイアウトされない。★contain:layoutは付けない: それを付けると各行が絶対配置の
+   containing blockになり、子spanのoffsetTopが行内相対値になって追随スクロールの位置計算が
+   壊れる(display:blockだけで再レイアウト隔離の目的は達成できている) */
+.mml-line {
+  display: block;
+}
+
+/* 再生中の現在位置ハイライト: 既存のtok-*(音符=青, コマンド=紫, オクターブ/タイ=橙,
+   ループ=赤, 数値=緑, チャンネル=金)のどれとも被らない明るい白系にし、背景色(下の
+   mml-range-selected)の上に乗っても視認できるよう黒縁取り(text-shadowで疑似アウトライン)を付ける。
+   ★font-weight(太字)は付けない: 太字は文字幅が変わるためハイライトのたびにその行の
+   再レイアウトを誘発し、かつ下のtextarea(非太字)と字送りがずれてオーバーレイが微妙に
+   ずれる。色+text-shadow(どちらもpaintのみでレイアウト非影響)だけで十分な視認性を確保する */
 .mml-playing {
-  background: rgba(111, 177, 255, 0.35);
-  border-radius: 2px;
+  color: #ffffff;
+  text-shadow:
+    -1px -1px 0 #000,
+     1px -1px 0 #000,
+    -1px  1px 0 #000,
+     1px  1px 0 #000;
 }
 
 /* シークバーの開始点(青)〜終了点(赤)ハンドルが示す再生範囲を常時背景色で示す。
-   個々の音符を丸くハイライトする.mml-playingとは違い、範囲全体を示す帯として見せたいので
-   角丸は付けない。.mml-playing(再生中の現在位置)と重なった場合は後者の色を優先する。 */
+   tok-spaceも含めて塗るため、範囲内は空白を挟んでも途切れない連続した帯になる。 */
 .mml-range-selected {
   background: rgba(255, 196, 64, 0.22);
 }
-.mml-playing.mml-range-selected {
-  background: rgba(111, 177, 255, 0.5);
-}
 
-/* --- シークバー: 目盛り(メモリ) + ドラッグ可能な再生範囲ハンドル(開始点=青/終了点=赤) --- */
+/* --- シークバー: ドラッグ可能な再生範囲ハンドル(開始点=青/終了点=赤) --- */
 .seek-bar-wrap {
   position: relative;
   width: 100%;
-  margin: 4px 0 20px; /* 下の目盛り行ぶんの余白 */
+  margin: 4px 0;
 }
 .seek-bar-wrap input#seekBar {
   display: block;
@@ -363,7 +526,32 @@ button.secondary {
   background: rgba(111, 177, 255, 0.25);
   border-radius: 2px;
   pointer-events: none;
-  z-index: 1;
+  z-index: 4; /* #seekBar(z-index:2)のネイティブ描画に隠れないよう、buffered-fill(3)
+                 よりさらに上に置く(バッファ中でも選択範囲が見えるように) */
+  display: none;
+}
+/* NSF実ファイル再生: バックグラウンドキャプチャがどこまで進んだか(=どこまでシーク
+   可能か)を示す帯。動画サイトの「読み込み済み」バーと同じ灰色・.seek-range-fillより
+   下のレイヤーに置く(左端から幅%で伸びるだけなのでrange-fillと違いleftは常に0)。
+   #seekBar(input[type=range])は無装飾のためOS既定の明るいトラックで描画されることが
+   あり、淡い白半透明(rgba(255,255,255,0.22))だとほぼ同化して見えなかった(ユーザー報告)。
+   中間グレー0.65にしてもまだ薄いとの指摘だったため、さらに濃い・ほぼ不透明な
+   グレーに変更した(トラックの明暗によらず視認できることを優先)。 */
+.seek-buffered-fill {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 6px;
+  width: 0;
+  transform: translateY(-50%);
+  background: rgba(100, 100, 112, 0.9);
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 3; /* #seekBar(z-index:2)は無装飾のネイティブ描画がその下のz-indexの
+                 兄弟要素を覆い隠してしまう(ユーザーのdocument.elementFromPoint()
+                 診断で確認)ため、inputより上に置く。pointer-events:noneなので
+                 ドラッグ操作はそのまま下のinputへ通る */
   display: none;
 }
 /* ドラッグハンドル: シークバーの最初/最後を初期値とし、ユーザーが左右に自由に動かせる */
@@ -376,7 +564,7 @@ button.secondary {
   border-radius: 3px;
   transform: translateX(-50%);
   cursor: ew-resize;
-  z-index: 3;
+  z-index: 5; /* buffered-fill(3)/range-fill(4)より確実に上、ドラッグハンドルなので */
   border: 1px solid rgba(0, 0, 0, 0.35);
   box-sizing: border-box;
   touch-action: none;
@@ -386,34 +574,6 @@ button.secondary {
 .seek-handle.dragging { filter: brightness(1.25); }
 .seek-handle-start { background: #4f8fff; }
 .seek-handle-end { background: var(--error); }
-
-/* 目盛り(時間ラベル付きの縦線)。シークバー直下に表示 */
-.seek-ticks {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 100%;
-  height: 16px;
-  pointer-events: none;
-}
-.seek-tick {
-  position: absolute;
-  top: 0;
-  width: 1px;
-  height: 4px;
-  background: #55556a;
-  transform: translateX(-50%);
-}
-.seek-tick-label {
-  position: absolute;
-  top: 5px;
-  left: 0;
-  transform: translateX(-50%);
-  font-size: 9px;
-  color: #8888a0;
-  font-family: var(--mono);
-  white-space: nowrap;
-}
 
 /* --- 波形エディタ --- */
 .wave-editor {
@@ -437,6 +597,141 @@ button.secondary {
   max-width: 100%;
 }
 
+.fds-sample-mml {
+  min-height: 40px;
+  height: 40px;
+  flex: none;
+}
+
+.fds-status-output {
+  flex: none;
+  min-height: 28px;
+}
+
+/* --- 波形エディタ(FDS/N163共通): 縦圧縮のためウィンドウ本体だけ小さめのフォント/余白にする
+   (ウィンドウのヘッダー/タイトルバーは.float-window-headerなので対象外のまま) --- */
+.compact-wave-editor {
+  font-size: 11px;
+  gap: 2px;
+}
+/* ウィンドウを縦に縮めた時、中身がつぶれて上側(波形など)が見えなくなっていた問題の修正。
+   直接の子要素をflex-shrink:0にして「つぶれる」のではなく「スクロールで隠れる」ようにする。
+   overflow:autoのscrollTopは初期値0(先頭)なので、縮めても常に上側が優先的に見える状態になる */
+.compact-wave-editor > * {
+  flex-shrink: 0;
+}
+.compact-wave-editor button {
+  font-size: 11px;
+  padding: 2px 7px;
+}
+.compact-wave-editor select,
+.compact-wave-editor input[type="number"],
+.compact-wave-editor input[type="text"] {
+  font-size: 11px;
+  padding: 2px 4px;
+}
+.compact-wave-editor select {
+  max-width: 90px;
+}
+.compact-wave-editor h3 {
+  font-size: 11px;
+  margin: 5px 0 3px;
+  color: var(--accent);
+}
+.compact-wave-editor .toolbar {
+  gap: 3px;
+  margin: 3px 0;
+  align-items: center;
+}
+
+/* --- サウンドファイルを開くウィンドウ: ヘッダ情報・ボタン類を一回り小さく表示 --- */
+.compact-soundplay {
+  font-size: 11px;
+}
+.compact-soundplay h3 {
+  margin: 4px 0;
+  font-size: 11px;
+  color: var(--accent);
+}
+.compact-soundplay button {
+  font-size: 11px;
+  padding: 4px 10px;
+}
+.compact-soundplay .output {
+  font-size: 10px;
+}
+.compact-soundplay input[type="number"],
+.compact-soundplay input[type="text"] {
+  font-size: 11px;
+  padding: 3px 5px;
+}
+
+/* 再生/停止/WAVE書き出しをアイコン(+ラベル)ボタンにする(サウンドファイルを開くウィンドウ内) */
+.icon-btn-sm {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  justify-content: center;
+}
+.icon-btn-sm svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  flex: none;
+  pointer-events: none;
+}
+.icon-btn-sm .icon-pause { display: none; }
+.icon-btn-sm.is-playing .icon-play { display: none; }
+.icon-btn-sm.is-playing .icon-pause { display: block; }
+.icon-btn-sm.icon-btn-label {
+  width: auto;
+  padding: 0 10px 0 8px;
+}
+
+.fds-values-text {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: #8a8a98;
+  word-break: break-all;
+  max-height: 34px;
+  overflow-y: auto;
+  background: #14141a;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 4px;
+  margin-top: 2px;
+}
+
+.fds-help-text {
+  font-size: 10px;
+  color: #9999aa;
+  background: #20202a;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin: 2px 0 4px;
+}
+
+.fields-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.fields-row label {
+  flex: 1;
+  font-size: 10px;
+  color: #aaaabb;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fields-row input {
+  width: 100%;
+}
+
 /* --- 鍵盤表示ウィジェット --- */
 .kbd-speed {
   display: flex;
@@ -451,6 +746,15 @@ button.secondary {
 .kbd-speed-label { flex: none; }
 .kbd-speed-range { flex: none; width: 140px; accent-color: var(--accent); cursor: pointer; }
 .kbd-speed-value { flex: none; width: 32px; color: #e6e6ef; }
+
+/* ウィンドウのタイトル行に置く版(鍵盤表示のタイトル右、閉じるボタンの手前)。本体側の下線/余白は不要 */
+.kbd-speed--header {
+  padding: 0;
+  border-bottom: none;
+  color: #cfcfe0;
+  margin-left: auto;
+}
+.kbd-speed--header .kbd-speed-range { width: 90px; }
 
 .kbd-header {
   display: flex;
@@ -610,6 +914,21 @@ button.secondary {
   margin-right: -3px;
 }
 
+/* チップ名見出し行(RP2A03/VRC7/N163等)。ch行と紛れないよう区切り線+控えめな色にする */
+.kbd-chip-header {
+  flex-shrink: 0;
+  padding: 3px 0 2px 2px;
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #8888a0;
+  border-top: 1px solid #35353f;
+}
+.kbd-chip-header:first-child {
+  margin-top: 0;
+  border-top: none;
+}
+
 .kbd-vol-wrap {
   flex: none;
   width: 40px;
@@ -742,6 +1061,8 @@ button.secondary {
 }
 .kbd-roll-toggle { flex: none; width: 10px; text-align: center; }
 .kbd-roll-label { flex: none; }
+/* height は keyboard.js の ROLL_CANVAS_HEIGHT と必ず一致させること
+   (折りたたみ時にウィンドウ高さをこの値ぶん増減させている) */
 .kbd-roll {
   display: block;
   width: 100%;
@@ -780,6 +1101,13 @@ button.secondary {
   border-left: 1px solid #3d3d4a;
   overflow: hidden;
 }
+.kbd-bigwave-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .kbd-bigwave-title {
   font-size: 12px;
   color: #cccce0;
@@ -788,6 +1116,14 @@ button.secondary {
   align-items: center;
   gap: 6px;
   text-align: center;
+}
+.kbd-bigwave-copy {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.kbd-bigwave-copy:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 .kbd-bigwave-dot {
   width: 8px;
@@ -833,4 +1169,23 @@ button.secondary {
   outline: 2px solid #6ea8ff;
   outline-offset: 0;
 }
+
+/* --- 開発用: 現在アクティブなウィンドウのサイズ表示(右下固定) --- */
+.window-size-indicator {
+  position: fixed;
+  right: 10px;
+  bottom: 8px;
+  z-index: 2147483647;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #8888a0;
+  background: rgba(20, 20, 26, 0.7);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  pointer-events: none;
+  user-select: none;
+  display: none;
+}
+.window-size-indicator.visible { display: block; }
 

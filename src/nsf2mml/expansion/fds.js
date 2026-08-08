@@ -202,9 +202,9 @@
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
-    function begin(f, note, volume, envEnabled, wave, waveKey, t) {
+    function begin(f, note, volume, envEnabled, wave, waveKey, t, rawFreq) {
       cur = {
-        note, envEnabled, wave, waveKey, start: f, end: f, volSeq: [volume],
+        note, envEnabled, wave, waveKey, rawFreq, start: f, end: f, volSeq: [volume],
         modFreq: t.modFreq, modGain: t.modGain, modEnabled: t.modEnabled, modTable: t.modTable,
         modKey: `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modGain}|${t.modTableKey}`
       };
@@ -214,15 +214,17 @@
       const period    = t.freqLo | ((t.freqHiReg & 0x0F) << 8);
       const disabled  = !!(t.freqHiReg & 0x80);
       const volume    = Math.max(0, Math.min(15, Math.round(t.gain / 2)));
-      const note = (!disabled && period > 0) ? freqToNoteNumber(fdsFreq(period)) : null;
+      const freq = fdsFreq(period);
+      const note = (!disabled && period > 0) ? freqToNoteNumber(freq) : null;
+      const rawFreq = note !== null ? freq : null;
       const modKey = `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modGain}|${t.modTableKey}`;
 
-      if (!cur) { begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t); continue; }
+      if (!cur) { begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq); continue; }
 
       if (t.attack || note !== cur.note || t.waveKey !== cur.waveKey ||
           t.envEnabled !== cur.envEnabled || (t.envEnabled && t.envRestart) || modKey !== cur.modKey) {
         flush(f);
-        begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t);
+        begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq);
       } else {
         cur.volSeq.push(volume);
       }
@@ -280,7 +282,7 @@
       return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note },
+      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq },
       ev.note !== null ? Object.assign(
         { instrument: waveReg ? waveReg.assign(ev.wave) : 0 },
         toVolumeFields(ev),

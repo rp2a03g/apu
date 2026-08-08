@@ -86,4 +86,30 @@
     return { lengths: result, carryOut: target - consumed };
   };
 
+  // events(隙間補完済み、note=null休符含む)を通しでframesToLengths相当の量子化を行い、
+  // 生成される音価(付点は無視し数値部分のみ)のうち最も出現回数が多いものを返す。
+  // l<n>(デフォルト音長)をチャンネル先頭で宣言し、以後その値と一致する音符/休符は
+  // 数値部分を省略してMMLを見やすくするための下調べに使う(呼び出し側の
+  // src/convert/mmlEmit.js参照)。該当データが無ければMML既定値の4を返す。
+  MML.Convert.detectDefaultLength = function (events, fpb) {
+    const counts = new Map();
+    let carry = 0;
+    const sorted = (events || []).slice().sort((a, b) => a.start - b.start);
+    for (const ev of sorted) {
+      const dur = ev.end - ev.start;
+      if (dur <= 0) continue;
+      const { lengths, carryOut } = MML.Convert.framesToLengths(dur, fpb, carry);
+      carry = carryOut;
+      for (const l of lengths) {
+        const m = /^(\d+)/.exec(l);
+        if (m) counts.set(m[1], (counts.get(m[1]) || 0) + 1);
+      }
+    }
+    let best = null, bestCount = -1;
+    for (const [num, cnt] of counts) {
+      if (cnt > bestCount) { bestCount = cnt; best = num; }
+    }
+    return best ? parseInt(best, 10) : 4;
+  };
+
 })(window);

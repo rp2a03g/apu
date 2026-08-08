@@ -68,11 +68,13 @@
       const enabled = !!(r.hi & 0x80);
       const volume  = r.ctrl & 0x0F;
       const duty    = (r.ctrl >> 4) & 0x07;
-      const note = (enabled && volume > 0 && period >= 4) ? freqToNoteNumber(pulseFreq(period)) : null;
-      if (!cur) { cur = { note, duty, start: f, end: f, volSeq: [volume] }; continue; }
+      const freq = pulseFreq(period);
+      const note = (enabled && volume > 0 && period >= 4) ? freqToNoteNumber(freq) : null;
+      const rawFreq = note !== null ? freq : null;
+      if (!cur) { cur = { note, duty, rawFreq, start: f, end: f, volSeq: [volume] }; continue; }
       if (t.attack[attackIdx] || note !== cur.note || duty !== cur.duty) {
         flush(f);
-        cur = { note, duty, start: f, end: f, volSeq: [volume] };
+        cur = { note, duty, rawFreq, start: f, end: f, volSeq: [volume] };
       } else {
         cur.volSeq.push(volume);
       }
@@ -92,11 +94,13 @@
       const enabled   = !!(r.hi & 0x80);
       const accumRate = r.ctrl & 0x3F;
       const volume    = Math.min(15, Math.round(accumRate / 4));
-      const note = (enabled && accumRate > 0 && period >= 4) ? freqToNoteNumber(sawFreq(period)) : null;
-      if (!cur) { cur = { note, start: f, end: f, volSeq: [volume] }; continue; }
+      const freq = sawFreq(period);
+      const note = (enabled && accumRate > 0 && period >= 4) ? freqToNoteNumber(freq) : null;
+      const rawFreq = note !== null ? freq : null;
+      if (!cur) { cur = { note, rawFreq, start: f, end: f, volSeq: [volume] }; continue; }
       if (t.attack[2] || note !== cur.note) {
         flush(f);
-        cur = { note, start: f, end: f, volSeq: [volume] };
+        cur = { note, rawFreq, start: f, end: f, volSeq: [volume] };
       } else {
         cur.volSeq.push(volume);
       }
@@ -116,10 +120,10 @@
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
     }
     const toCommonPulse = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty }, toVolumeFields(ev.volSeq)
+      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq }, toVolumeFields(ev.volSeq)
     );
     const toCommonSaw = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note }, toVolumeFields(ev.volSeq)
+      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq }, toVolumeFields(ev.volSeq)
     );
 
     return {

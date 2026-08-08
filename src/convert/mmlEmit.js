@@ -5,7 +5,7 @@
  *   縦に揃えたスコア形式。数小節ごとに改行してパート譜のように読める形にする)
  *
  * events: [{ start, end, note: number|null, volume?, instrument?, envelopeV?, envelopeVr?,
- *            fme7EnvShape?, fme7EnvPeriod? }]
+ *            fme7EnvShape?, fme7EnvPeriod?, fme7Noise? }]
  *   note=null は休符。start/endはフレーム単位で、隙間があっても良い(内部で休符補完する)。
  * 共通opts:
  *   hasVolume    … true の場合のみ v トークンを出す
@@ -15,6 +15,9 @@
  *                   その場合 envelopeV が無い(フラットな)イベントだけ通常の v<N> を出す
  *   hasFme7Env   … true の場合、fme7EnvShape が設定されているイベントは
  *                   S<N>(+周期が変わればM<N>)を出す。hasVolumeと併用可能
+ *   hasFme7Noise … true の場合、fme7Noise が前回と変わったイベントで N<N>(ノイズ周期)を出す。
+ *                   FME7/PSGはミキサー指定が @<n> (0=ミュート/1=トーン/2=ノイズ/
+ *                   3=トーン+ノイズ)なので hasInstrument と併用する
  *   (v<N>/@v<N>/S<N>の切替時は値が前回と同じ番号でも必ずトークンを出し直す。
  *    コンパイラ側は明示的なv<n>でstate.envelopeV/fme7EnvShapeをnullにクリアするため)
  *   totalFrames  … 末尾休符を補うための曲全体のフレーム数
@@ -49,13 +52,40 @@
     return filled;
   }
 
+  // 音価文字列("8"/"4."/"16.."等)の数値部分がdefaultLenと一致すれば省略する
+  // (l<n>宣言済みの前提。一致しなければ変更なしでそのまま返す)。付点はl<n>自体には
+  // 乗せられないため常に明示するが、数値だけ省略しても曲全体で defaultLen が有効な
+  // 限りコンパイラ側は同じ音価として正しく再現できる(src/mml/compiler.js
+  // framesForLength: n = len || defaultLength)。
+  function omitDefaultLen(lenStr, defaultLen) {
+    const m = /^(\d+)(\.*)$/.exec(lenStr);
+    if (!m) return lenStr;
+    return parseInt(m[1], 10) === defaultLen ? m[2] : lenStr;
+  }
+
   // ── イベント配列 → トークン列 (共通コア) ────────────────────────────
   // state (curOct/curVol/curInst/curEnvV/curEnvVr) は呼び出しをまたいで
   // 共有できるようにする(小節ごとに分けて呼んでも変化検出が継続するため)。
   // ev.continued=true の音符は小節境界で分割された継続音として、音色/音量/
   // オクターブを再指定せずタイ(&)だけで繋げる(休符は繋げても繋げなくても
   // 音的に同じなので continued を見る必要がない)。
+  //
+  // トークン間の区切り空白は音符/休符(タイ継続・オクターブ変更含む)同士の間だけ
+  // 省く(実際のMMLではa+8a+4のように書けば読める。字句解析器はi++で位置を進めながら
+  // 貪欲に数字を読むため空白区切りを必要としない)。@<n>やv<n>等の設定コマンドは
+  // 従来通り前後に空白を入れて視認性を保つ。
   function renderEvents(events, fpb, flags, state, appendToken) {
+    function emit(tok, isNoteToken) {
+      const needsSpace = state.hasEmitted && !(isNoteToken && state.lastWasNote);
+      appendToken(needsSpace ? ' ' + tok : tok);
+      state.lastWasNote = !!isNoteToken;
+      state.hasEmitted = true;
+    }
+    const defaultLen = flags.defaultLen || 4;
+    const fmtLens = (name, lengths) =>
+      name + omitDefaultLen(lengths[0], defaultLen) +
+      lengths.slice(1).map(l => `&${name}${omitDefaultLen(l, defaultLen)}`).join('');
+
     for (const ev of events) {
       const dur = ev.end - ev.start;
       if (dur <= 0) continue;
@@ -63,46 +93,57 @@
       state.durCarry = carryOut;
 
       if (ev.note === null) {
-        appendToken('r' + lengths[0] + lengths.slice(1).map(l => `&r${l}`).join(''));
+        emit(fmtLens('r', lengths), true);
         continue;
       }
 
       if (!ev.continued) {
         if (flags.hasVrc7Tone && ev.vrc7Tone !== undefined && ev.vrc7Tone !== state.curVrc7Tone) {
-          appendToken(`OP${ev.vrc7Tone}`); state.curVrc7Tone = ev.vrc7Tone;
+          emit(`OP${ev.vrc7Tone}`); state.curVrc7Tone = ev.vrc7Tone;
         }
         if (flags.hasFdsMod && ev.fdsMod !== undefined && ev.fdsMod !== state.curFdsMod) {
-          appendToken(ev.fdsMod === 'off' ? 'MHOF' : `MH${ev.fdsMod}`); state.curFdsMod = ev.fdsMod;
+          emit(ev.fdsMod === 'off' ? 'MHOF' : `MH${ev.fdsMod}`); state.curFdsMod = ev.fdsMod;
         }
         if (flags.hasInstrument && ev.instrument !== undefined && ev.instrument !== state.curInst) {
-          appendToken(`@${ev.instrument}`); state.curInst = ev.instrument;
+          emit(`@${ev.instrument}`); state.curInst = ev.instrument;
+        }
+        // コーラス(デチューン)効果。未指定イベントは0扱い(直前の音符のデチューンを
+        // 引きずらないよう、hasDetune指定チャンネルでは毎回0との差分を見て明示的に戻す)
+        if (flags.hasDetune) {
+          const detuneVal = ev.detune || 0;
+          if (detuneVal !== state.curDetune) { emit(`D${detuneVal}`); state.curDetune = detuneVal; }
+        }
+        // FME7/PSGのノイズ周期(R6、3ch共有)。@2(ノイズ単独)ではノート番号自体が周期に
+        // なるためN<n>は出さない(ppmck仕様で@2の時のNは無効)
+        if (flags.hasFme7Noise && ev.fme7Noise !== undefined && ev.fme7Noise !== state.curFme7Noise) {
+          emit(`N${ev.fme7Noise}`); state.curFme7Noise = ev.fme7Noise;
         }
         if (flags.hasFme7Env && ev.fme7EnvShape !== undefined) {
           if (ev.fme7EnvPeriod !== undefined && ev.fme7EnvPeriod !== state.curFme7Period) {
-            appendToken(`M${ev.fme7EnvPeriod}`); state.curFme7Period = ev.fme7EnvPeriod;
+            emit(`M${ev.fme7EnvPeriod}`); state.curFme7Period = ev.fme7EnvPeriod;
           }
           // S<n>には解除コマンドが無く一度出すと残り続けるため(compiler.js側もv<n>でしか
           // クリアできない)、v<n>経由でモードを抜けていた場合は番号が同じでも出し直す。
           if (ev.fme7EnvShape !== state.curFme7Shape || state.curVolMode !== 'fme7env') {
-            appendToken(`S${ev.fme7EnvShape}`); state.curFme7Shape = ev.fme7EnvShape;
+            emit(`S${ev.fme7EnvShape}`); state.curFme7Shape = ev.fme7EnvShape;
           }
           state.curVolMode = 'fme7env';
         } else if (flags.hasEnvelope && ev.envelopeV !== undefined) {
           if (ev.envelopeVr !== undefined && ev.envelopeVr !== state.curEnvVr) {
-            appendToken(`@vr${ev.envelopeVr}`); state.curEnvVr = ev.envelopeVr;
+            emit(`@vr${ev.envelopeVr}`); state.curEnvVr = ev.envelopeVr;
           }
           // v<n>とhasEnvelopeを併用するチャンネル(NSF/KSSの帯域)では、直前がv<n>だった
           // 場合コンパイラ側のstate.envelopeVがnullにクリアされているため、値が前回の
           // @v<n>と同じ番号でも必ずトークンを出し直して再セットする(state.curVolMode参照)。
           if (ev.envelopeV !== state.curEnvV || state.curVolMode !== 'env') {
-            appendToken(`@v${ev.envelopeV}`); state.curEnvV = ev.envelopeV;
+            emit(`@v${ev.envelopeV}`); state.curEnvV = ev.envelopeV;
           }
           state.curVolMode = 'env';
         } else if (flags.hasVolume && ev.volume !== undefined) {
           // 同様に、直前が@v<n>だった場合はコンパイラのstate.volumeが古いままなので、
           // 値が前回のv<n>と同じでも必ず出し直してエンベロープを解除する。
           if (ev.volume !== state.curVol || state.curVolMode !== 'plain') {
-            appendToken(`v${ev.volume}`); state.curVol = ev.volume;
+            emit(`v${ev.volume}`); state.curVol = ev.volume;
           }
           state.curVolMode = 'plain';
         }
@@ -110,22 +151,25 @@
 
       const { oct, name } = MML.Convert.noteNumberToMmlParts(ev.note);
       if (!ev.continued && oct !== state.curOct) {
-        if      (state.curOct >= 0 && oct === state.curOct + 1) appendToken('>');
-        else if (state.curOct >= 0 && oct === state.curOct - 1) appendToken('<');
-        else                                                    appendToken(`o${oct}`);
+        // >/<(相対オクターブ移動)は直後の音符と一体で書く伝統的なMML表記(o<n>は
+        // 独立した設定コマンドとして扱い空白を空ける)ため、note扱い(isNoteToken=true)
+        // にして音符側との間の空白も詰める。
+        if      (state.curOct >= 0 && oct === state.curOct + 1) emit('>', true);
+        else if (state.curOct >= 0 && oct === state.curOct - 1) emit('<', true);
+        else                                                    emit(`o${oct}`);
         state.curOct = oct;
       }
 
       const tie = ev.continued ? '&' : '';
-      appendToken(tie + name + lengths[0] + lengths.slice(1).map(l => `&${name}${l}`).join(''));
+      emit(tie + fmtLens(name, lengths), true);
     }
   }
 
   function newState() {
     return {
       curOct: -1, curVol: -1, curInst: -1, curEnvV: -1, curEnvVr: -1,
-      curFme7Shape: -1, curFme7Period: -1, curVolMode: null, durCarry: 0, curVrc7Tone: -1,
-      curFdsMod: 'off'
+      curFme7Shape: -1, curFme7Period: -1, curFme7Noise: -1, curVolMode: null, durCarry: 0,
+      curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, lastWasNote: false, hasEmitted: false
     };
   }
 
@@ -137,7 +181,7 @@
     const flags = {
       hasVolume: !!opts.hasVolume, hasInstrument: !!opts.hasInstrument,
       hasEnvelope: !!opts.hasEnvelope, hasFme7Env: !!opts.hasFme7Env, hasVrc7Tone: !!opts.hasVrc7Tone,
-      hasFdsMod: !!opts.hasFdsMod
+      hasFdsMod: !!opts.hasFdsMod, hasFme7Noise: !!opts.hasFme7Noise, hasDetune: !!opts.hasDetune
     };
     const tempoPrefix = opts.tempoPrefix || '';
 
@@ -152,20 +196,28 @@
       return lines.join('\n');
     }
 
+    // 曲(このチャンネル)で最も多い音価をl<n>としてチャンネル先頭で宣言し、以後
+    // 一致する音符/休符は数値部分を省略する(renderEvents内のomitDefaultLen参照)。
+    flags.defaultLen = MML.Convert.detectDefaultLength(filled, fpb);
+
     let line = `${letter} ${tempoPrefix}`;
     let col  = line.length;
 
     function appendToken(tok) {
-      if (col + tok.length + 1 > wrapCol) {
+      if (col + tok.length > wrapCol) {
         lines.push(line.trimEnd());
         line = `${letter} `;
         col = line.length;
+        tok = tok.replace(/^ /, ''); // 改行直後は区切り空白不要
       }
-      line += tok + ' ';
-      col += tok.length + 1;
+      line += tok;
+      col += tok.length;
     }
 
-    renderEvents(filled, fpb, flags, newState(), appendToken);
+    const state = newState();
+    appendToken(`l${flags.defaultLen}`);
+    state.hasEmitted = true;
+    renderEvents(filled, fpb, flags, state, appendToken);
 
     lines.push(line.trimEnd());
     if (opts.footerLines) lines.push(...opts.footerLines);
@@ -234,13 +286,18 @@
       const flags = {
         hasVolume: !!chan.hasVolume, hasInstrument: !!chan.hasInstrument,
         hasEnvelope: !!chan.hasEnvelope, hasFme7Env: !!chan.hasFme7Env, hasVrc7Tone: !!chan.hasVrc7Tone,
-        hasFdsMod: !!chan.hasFdsMod
+        hasFdsMod: !!chan.hasFdsMod, hasFme7Noise: !!chan.hasFme7Noise, hasDetune: !!chan.hasDetune,
+        // 曲(このチャンネル)で最も多い音価をl<n>としてチャンネル先頭で宣言し、以後
+        // 一致する音符/休符は数値部分を省略する(renderEvents内のomitDefaultLen参照)。
+        defaultLen: MML.Convert.detectDefaultLength(filled, fpb)
       };
       const state = newState();
+      let first = true;
       return buckets.map(bucketEvents => {
         let text = '';
-        renderEvents(bucketEvents, fpb, flags, state, tok => { text += tok + ' '; });
-        return text.trimEnd();
+        if (first) { text += `l${flags.defaultLen}`; state.hasEmitted = true; first = false; }
+        renderEvents(bucketEvents, fpb, flags, state, tok => { text += tok; });
+        return text;
       });
     });
 

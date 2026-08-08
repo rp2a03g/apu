@@ -6,6 +6,10 @@
 (function (global) {
   const MML = global.MML = global.MML || {};
   const Mml = MML.Mml = MML.Mml || {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。キーは日本語の原文。MML.I18nが無い環境でも動くよう素通し
+  const T = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/\{(\w+)\}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
 
   // @v<n> = { ... } / @vr<n> = { ... } 音量エンベロープ定義行のパース
   // { } 内はカンマ/空白区切りの0-15の値の列。"|" があればそこがループ位置になり、
@@ -272,6 +276,12 @@
     'EX-NAMCO106': 'n163', 'EX-FME7': 'fme7', 'EX-MMC5': 'mmc5'
   };
 
+  // EX_CHIP_MAPの逆引き(nsf2mml/spc2mml/kss2mml等の自動変換がMML本文へ
+  // #EX-*ディレクティブを埋め込む際に使う)
+  const EX_CHIP_DIRECTIVE = {};
+  for (const name in EX_CHIP_MAP) EX_CHIP_DIRECTIVE[EX_CHIP_MAP[name]] = '#' + name;
+  Mml.EX_CHIP_DIRECTIVE = EX_CHIP_DIRECTIVE;
+
   // バンキング系(本ツールはROMバンク分割を前提にしないため認識のみ・無視する)
   const BANKING_DIRECTIVES = new Set(['AUTO-BANKSWITCH', 'BANK-CHANGE', 'SETBANK', 'NO-BANKSWITCH']);
 
@@ -346,7 +356,7 @@
               else if (BANKING_DIRECTIVES.has(directive.name) || UNSUPPORTED_FILE_DIRECTIVES.has(directive.name)) {
                 // 認識するが本ツールでは無視する(バンキング非対応/静的ホスティングのみのためファイル読込非対応)
               } else {
-                errors.push({ lineNo, message: `未対応のヘッダ指示子です: "#${directive.name}"` });
+                errors.push({ lineNo, message: T('未対応のヘッダ指示子です: "#{name}"', { name: directive.name }) });
               }
             }
           }
@@ -387,7 +397,7 @@
       const vrc7ToneAltDef = parseVrc7ToneAltDef(trimmed);
       if (vrc7ToneAltDef) {
         if (vrc7ToneAltDef.bytes) envelopes.op[vrc7ToneAltDef.index] = vrc7ToneAltDef.bytes;
-        else errors.push({ lineNo, message: `@OT${vrc7ToneAltDef.index} の値の数が不足しています(24個必要)` });
+        else errors.push({ lineNo, message: T('@OT{index} の値の数が不足しています(24個必要)', { index: vrc7ToneAltDef.index }) });
         continue;
       }
 
@@ -423,7 +433,7 @@
 
       const m = trimmed.match(/^([A-Za-z]+)\s+(.*)$/) || trimmed.match(/^([A-Za-z]+)$/);
       if (!m) {
-        errors.push({ lineNo, message: `チャンネル指定が認識できません: "${trimmed}"` });
+        errors.push({ lineNo, message: T('チャンネル指定が認識できません: "{text}"', { text: trimmed }) });
         continue;
       }
       // 実機ppmck同様、チャンネル文字は大文字小文字を区別する(MMC5の2chが

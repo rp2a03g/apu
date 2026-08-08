@@ -5,6 +5,10 @@
 (function (global) {
   const MML = global.MML = global.MML || {};
   const KSS = MML.KSS = MML.KSS || {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。キーは日本語の原文。MML.I18nが無い環境でも動くよう素通し
+  const T = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/\{(\w+)\}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
 
   // 拡張チップフラグ (オフセット 0x0F) の意味
   // MSXモード (bit1=0):
@@ -54,7 +58,7 @@
    * @returns {object}
    */
   KSS.parseHeader = function (bytes) {
-    if (bytes.length < 16) throw new Error('KSSヘッダは最低16バイト必要です');
+    if (bytes.length < 16) throw new Error(T('KSSヘッダは最低16バイト必要です'));
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const magicStr = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
     const magicOk = magicStr === 'KSCC' || magicStr === 'KSSX';
@@ -121,14 +125,17 @@
    */
   KSS.describeChips = function (header) {
     const list = ['PSG(AY-3-8910)'];
-    if (header.bankNum > 0) list.push('SCC/SCC+ (Konami、使用時のみ)');
+    // 16KバンクモードかつRAMモードのタイトルはSCCを積まず0x9800台を素のRAMとして使うため
+    // SCCデコード自体を止める(src/emulator/kssBus.js の sccDisable と同じ判定)。
+    const sccDisabled = header.bankMode === '16K' && header.device.ramMode;
+    if (!sccDisabled) list.push(T('SCC/SCC+ (Konami、使用時のみ)'));
     const d = header.device;
     if (d.mode === 'SEGA') {
       if (d.sn76489) list.push('SN76489');
       if (d.fmunit) list.push('FM Unit (Y8950)');
     } else {
       if (d.fmpac) list.push('FMPAC (OPLL/YM2413)');
-      if (d.msxAudio) list.push('MSX-AUDIO (Y8950, 未対応)');
+      if (d.msxAudio) list.push(T('MSX-AUDIO (Y8950, 未対応)'));
     }
     return list;
   };

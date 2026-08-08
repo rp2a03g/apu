@@ -21,31 +21,6 @@
   };
 
   /**
-   * 6502アセンブラの出力 (MML.Asm.assemble の戻り値) からNSFを生成する。
-   * assembleResult.origin が loadAddr として使われる。
-   * @param {object} headerOpt - songName, artist 等。loadAddr/initAddr/playAddrは省略時 assembleResult から推定
-   * @param {object} assembleResult - { bytes, origin, symbols }
-   * @param {object} [entryPoints] - { init: 'INIT', play: 'PLAY' } のようなラベル名指定
-   * @returns {Uint8Array}
-   */
-  NSF.buildFromAssembly = function (headerOpt, assembleResult, entryPoints = {}) {
-    const opt = Object.assign({}, headerOpt);
-    opt.loadAddr = assembleResult.origin;
-
-    const initLabel = entryPoints.init || 'INIT';
-    const playLabel = entryPoints.play || 'PLAY';
-
-    opt.initAddr = (assembleResult.symbols[initLabel] !== undefined)
-      ? assembleResult.symbols[initLabel]
-      : assembleResult.origin;
-    opt.playAddr = (assembleResult.symbols[playLabel] !== undefined)
-      ? assembleResult.symbols[playLabel]
-      : assembleResult.origin;
-
-    return NSF.buildNSF(opt, assembleResult.bytes);
-  };
-
-  /**
    * Blob としてダウンロードを開始する
    * @param {Uint8Array} bytes
    * @param {string} filename

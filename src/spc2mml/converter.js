@@ -547,7 +547,11 @@
     const bpm = options.bpm
       ? MML.Convert.refineBpm(options.bpm, noteDurations, FPS_SPC)
       : MML.Convert.detectBpm(noteDurations, FPS_SPC);
-    const fpb = FPS_SPC * 60 / bpm;
+    // MML本文に埋め込まれるテンポは整数(t<n>)に丸められる(mmlEmit.js)。音長量子化の
+    // グリッド(fpb)も同じ丸め後の値で計算しないと、書き出し時と再生(コンパイル)時で
+    // 基準テンポが食い違い、打ち直しの多いパートで誤差が蓄積してドリフトする
+    // ([[tempo-rounding-drift-future-issue]]参照)。
+    const fpb = FPS_SPC * 60 / Math.round(bpm);
 
     // ── ADSR/GAIN → ppmck @v/@vr テーブル抽出 (2A03 pulse/noise のみ対象) ──
     // 同じ (adsr1,adsr2,gain) の組み合わせは同じ音色とみなし @vN を共有する。
@@ -669,6 +673,13 @@
     // ── MML 生成 ─────────────────────────────────────────────────────
     let mml = `; SPC → MML 変換 (${Math.round(bpm)} BPM, ${FRAMES} フレーム, 分解能480TPQN)\n`;
     if (expansion !== 'none') mml += `; 拡張音源: ${expansion}\n`;
+    // #EX-*(機能する本文ディレクティブ。上の`; `コメントとは別。これがないと
+    // MML本文だけからは拡張音源が有効にならず、UI側の操作が必要になってしまう)
+    if (expansion !== 'none') {
+      mml += expansion === 'n163'
+        ? `${MML.Mml.EX_CHIP_DIRECTIVE[expansion]} ${expansionLetters.length}\n`
+        : `${MML.Mml.EX_CHIP_DIRECTIVE[expansion]}\n`;
+    }
 
     // @DPCM<n>定義(実機ppmckcと同じ書式)。以後Eチャンネルの音符で@<n>により選択する
     for (let i = 0; i < dmcFiles.length; i++) {

@@ -7,8 +7,11 @@
  *   (bits0-3=固定音量、bit4=1でハードウェアエンベロープ使用(下位4bitは無視される)),
  *   reg11/12 = エンベロープ周期(16bit,全ch共有), reg13 = エンベロープ形状(下位4bit,
  *   書込みで位相リセット=ノートオンに相当、全ch共有)。
- * コンパイラ側(segmentsToWriteLogFme7)はノイズを一切使わず常時トーン有効固定
- * (fme7InitWrites)なので、ここでもノイズは無視し3トーンチャンネルのみ扱う。
+ *   reg6 = ノイズ周期(5bit,全ch共有), reg7 = ミキサー(bit0-2=トーン有効/bit3-5=ノイズ有効、
+ *   いずれも0で有効のactive-low)。
+ * ミキサーの状態はppmckの`@<n>`(0=ミュート/1=トーン/2=ノイズ/3=トーン+ノイズ)へそのまま
+ * 対応させる。`@2`のときはppmck仕様に合わせてノート番号自体をノイズ周期(0-31)として出す
+ * (n0=o0c〜n31=o2g)ため、この場合の`note`はreg6の生値になる。
  * 専用のアタックレジスタが無いため、固定音量時は音量 0→非0 の遷移を、エンベロープ
  * 使用時はreg13書込み(位相リセット)をノートオンとして扱う。
  */
@@ -24,7 +27,9 @@
     const n = Math.round(57 + 12 * Math.log2(freq / 440));
     return (n >= 0 && n <= 119) ? n : null;
   }
-  function toneFreq(period) { return period >= 1 ? CPU_CLOCK / (16 * period) : 0; }
+  // 5B(YM2149)は内蔵1/2プリスケーラにより f=CLOCK/(32*period)(NESdev "Sunsoft 5B audio")。
+  // MSXのPSG(kss2mml/expansion/ay.js)は入力クロックが半分なので同じ式で分母32=実質16になる
+  function toneFreq(period) { return period >= 1 ? CPU_CLOCK / (32 * period) : 0; }
 
   // FME7は$C000(アドレスラッチ)+$E000(データ)の間接アドレッシングのため、initRegs
   // (最終値スナップショット)だけでは16個のレジスタ全体を復元できない。initWrites
@@ -33,6 +38,9 @@
   function buildTimeline(writeLog, initWrites) {
     let latch = 0;
     const regs = new Uint8Array(16);
+    // ミキサー(reg7)を一度も書かない曲があるため、エミュレータ(fme7.js)と同じ既定値から
+    // 始める。0のまま始めると全chがトーン+ノイズ有効として抽出されてしまう
+    regs[7] = 0x38;
     for (const { addr: a, value } of (initWrites || [])) {
       if      (a === 0xC000) latch = value & 0x0F;
       else if (a === 0xE000) regs[latch] = value;
@@ -53,6 +61,10 @@
           regs[4] | ((regs[5] & 0x0F) << 8),
         ],
         volRegs: [regs[8], regs[9], regs[10]],
+        // ミキサー(active-low)を @<n> の 0-3 へ変換: bit0=トーン, bit1=ノイズ
+        modes: [0, 1, 2].map(ch =>
+          (((regs[7] >> ch) & 1) ? 0 : 1) | (((regs[7] >> (3 + ch)) & 1) ? 0 : 2)),
+        noisePeriod: regs[6] & 0x1F,
         envPeriod: regs[11] | (regs[12] << 8),
         envShape: regs[13] & 0x0F,
         envRestart,
@@ -69,24 +81,35 @@
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
-    function begin(f, note, envUsed, envShape, envPeriod, volume) {
-      cur = { note, envUsed, envShape, envPeriod, start: f, end: f, volSeq: [volume] };
-    }
+    function begin(f, ev) { cur = Object.assign({ start: f, end: f, volSeq: [ev.volume] }, ev); }
     for (let f = 0; f < timeline.length; f++) {
       const t = timeline[f];
       const period = t.periods[chIndex];
       const volReg = t.volRegs[chIndex];
       const envUsed = !!(volReg & 0x10);
       const volume = envUsed ? 15 : (volReg & 0x0F); // 実際の減衰値はこのツールでは非対応(下記参照)
-      const note = ((envUsed || volume > 0) && period >= 1) ? freqToNoteNumber(toneFreq(period)) : null;
+      const mode = t.modes[chIndex];
+      const audible = (envUsed || volume > 0) && mode !== 0;
+      // @2(ノイズ単独)はノート番号=ノイズ周期。それ以外はトーン周期から音程を求める
+      let note = null, rawFreq = null;
+      if (audible) {
+        if (mode === 2) note = t.noisePeriod; // ノイズ周期(離散値)であり連続的な周波数ではないのでrawFreqは付けない
+        else if (period >= 1) { rawFreq = toneFreq(period); note = freqToNoteNumber(rawFreq); }
+      }
+      const ev = {
+        note, mode, envUsed, envShape: t.envShape, envPeriod: t.envPeriod, volume, rawFreq,
+        // @3(トーン+ノイズ)のときだけN<n>を出す(@2はノート番号が周期を兼ねる)
+        noise: mode === 3 ? t.noisePeriod : null,
+      };
 
-      if (!cur) { begin(f, note, envUsed, t.envShape, t.envPeriod, volume); continue; }
+      if (!cur) { begin(f, ev); continue; }
 
       const restart = envUsed && t.envRestart;
-      if (note !== cur.note || envUsed !== cur.envUsed || restart ||
+      if (note !== cur.note || mode !== cur.mode || ev.noise !== cur.noise ||
+          envUsed !== cur.envUsed || restart ||
           (envUsed && (t.envShape !== cur.envShape || t.envPeriod !== cur.envPeriod))) {
         flush(f);
-        begin(f, note, envUsed, t.envShape, t.envPeriod, volume);
+        begin(f, ev);
       } else if (!envUsed) {
         cur.volSeq.push(volume);
       }
@@ -107,17 +130,19 @@
       return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note },
+      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq },
+      ev.note !== null ? { instrument: ev.mode } : {},
+      ev.note !== null && ev.noise !== null ? { fme7Noise: ev.noise } : {},
       ev.note !== null ? toVolumeFields(ev) : {}
     );
 
-    return {
-      channels: [
-        { letter: 'E', events: extractToneEvents(timeline, 0).map(toCommon), hasVolume: true, hasEnvelope: true, hasFme7Env: true },
-        { letter: 'F', events: extractToneEvents(timeline, 1).map(toCommon), hasVolume: true, hasEnvelope: true, hasFme7Env: true },
-        { letter: 'G', events: extractToneEvents(timeline, 2).map(toCommon), hasVolume: true, hasEnvelope: true, hasFme7Env: true },
-      ]
-    };
+    const chan = (letter, index) => ({
+      letter, events: extractToneEvents(timeline, index).map(toCommon),
+      hasVolume: true, hasEnvelope: true, hasFme7Env: true,
+      hasInstrument: true, hasFme7Noise: true
+    });
+
+    return { channels: [chan('E', 0), chan('F', 1), chan('G', 2)] };
   };
 
 })(window);

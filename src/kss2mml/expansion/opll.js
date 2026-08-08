@@ -23,20 +23,36 @@
   function buildTimeline(writeLog) {
     let latch = 0;
     const regs = new Uint8Array(0x40);
+    // キーオンの立ち上がり(0→1)だけを打ち直しとみなす。$2xはビブラート/音程更新の
+    // ために毎フレーム書き直すドライバが多く、「キーオンビットが立った書込み」を
+    // 全部アタック扱いにすると、1つのロングトーンが毎フレーム打ち直しに見えて
+    // イベントが1フレーム単位に分解されてしまう(ピアノロールが短冊だらけになる)。
+    // 実機YM2413もキーオン中に再度キーオンを書いてもエンベロープは再スタートしない。
+    const keyon = [false, false, false, false, false, false];
     return writeLog.map(writes => {
       const attack = [false, false, false, false, false, false];
       for (const { addr, value, io } of writes) {
         if (!io) continue;
-        if (addr === 0x7C) { latch = value & 0x3F; continue; }
-        if (addr !== 0x7D) continue;
+        // 0xF0/0xF1 は FM-PAC の別名ポート(src/emulator/kssBus.js ioWrite 参照)
+        if (addr === 0x7C || addr === 0xF0) { latch = value & 0x3F; continue; }
+        if (addr !== 0x7D && addr !== 0xF1) continue;
         regs[latch] = value;
-        if (latch >= 0x20 && latch <= 0x25 && (value & 0x10)) attack[latch - 0x20] = true;
+        if (latch >= 0x20 && latch <= 0x25) {
+          const ch = latch - 0x20;
+          const on = !!(value & 0x10);
+          if (on && !keyon[ch]) attack[ch] = true; // フレームを跨ぐ/跨がない両方の立ち上がりを拾う
+          keyon[ch] = on;
+        }
       }
       return { regs: regs.slice(), attack };
     });
   }
 
-  function extractChannelEvents(timeline, ch) {
+  // instrument===0(ユーザー定義音色)のときだけ、その時点の0x00-0x07(全ch共有の
+  // カスタム音色スロット)8バイトをtoneRegに登録してインデックスを付与する
+  // (nsf2mml/expansion/vrc7.jsと同じ考え方。VRC7=OPLLなのでレジスタ配置も同一)。
+  // toneRegが無い(呼び出し元が対応していない)場合はvrc7Toneを付けず従来通り。
+  function extractChannelEvents(timeline, ch, toneReg) {
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
@@ -50,25 +66,37 @@
       const reg30 = regs[0x30 + ch];
       const instrument = (reg30 >> 4) & 0x0F;
       const volume = reg30 & 0x0F;
-      const note = (keyon && fnum > 0) ? freqToNoteNumber(opllFreq(fnum, block)) : null;
-      if (!cur) { cur = { note, volume, instrument, start: f, end: f }; continue; }
-      if (attack[ch] || note !== cur.note || volume !== cur.volume || instrument !== cur.instrument) {
+      const freqHz = (keyon && fnum > 0) ? opllFreq(fnum, block) : null;
+      const note = freqHz != null ? freqToNoteNumber(freqHz) : null;
+      const vrc7Tone = (toneReg && note !== null && instrument === 0)
+        ? toneReg.assign(Array.from(regs.slice(0, 8))) : undefined;
+      if (!cur) { cur = { note, volume, instrument, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
+      if (attack[ch] || note !== cur.note || volume !== cur.volume || instrument !== cur.instrument ||
+          vrc7Tone !== cur.vrc7Tone) {
         flush(f);
-        cur = { note, volume, instrument, start: f, end: f };
+        // retrigger: このイベントが「キーオン(アタック)による打ち直し」で始まったか。
+        // 音量エンベロープによる細切れ(1フレームごとの音量書換え)と区別するための印で、
+        // ピアノロール側(src/main.js buildKssRollTimeline)が同音程の連結可否に使う。
+        cur = { note, volume, instrument, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
       }
     }
     flush(timeline.length);
     return events;
   }
 
-  MML.Kss2MmlExpansion.opll = function (writeLog, totalFrames) {
+  MML.Kss2MmlExpansion.opll = function (writeLog, totalFrames, toneReg) {
     const timeline = buildTimeline(writeLog);
-    const toCommon = ev => ({ start: ev.start, end: ev.end, note: ev.note, volume: ev.volume, instrument: ev.instrument });
+    const toCommon = ev => Object.assign(
+      { start: ev.start, end: ev.end, note: ev.note, volume: ev.volume, instrument: ev.instrument, retrigger: ev.retrigger },
+      ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
+      ev.vrc7Tone !== undefined ? { vrc7Tone: ev.vrc7Tone } : {}
+    );
     return {
       channels: [0, 1, 2, 3, 4, 5].map(ch => ({
-        events: extractChannelEvents(timeline, ch).map(toCommon),
+        events: extractChannelEvents(timeline, ch, toneReg).map(toCommon),
         hasVolume: true,
-        hasInstrument: true
+        hasInstrument: true,
+        hasVrc7Tone: !!toneReg
       }))
     };
   };

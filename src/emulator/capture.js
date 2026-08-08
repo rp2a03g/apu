@@ -62,16 +62,19 @@
     // buildTimeline側で書き込みシーケンスをそのまま再生できるようにこちらも保持する。
     const runningRegs = {};
     const initWrites = [];
+    // NsfPlayer.initSong()は$4017(フレームカウンタリセット)・$4015(全チャンネル有効化)を
+    // bus.write()を経由せずAPU.writeRegister()へ直接書き込むため、onWriteフックを
+    // 通らずinitWritesに記録されない。NSF自体のINITルーチンがこれらを書き直さない曲
+    // (例: アルマナの軌跡のようなFDS曲で2A03パルス/三角/ノイズ側を$4015再設定しない
+    // ドライバ)だと、initWritesの再生だけで音源を組み立てるNsfReplayStreamPlayerでは
+    // $4015が一度も有効化されず2A03が全チャンネル無音になる不具合があった。
+    // initSong()内部の書き込み順序と同じ順で先に記録しておく(曲のINITが実際に
+    // 書き直した場合は後続の通常記録で上書きされるので問題ない)。
+    runningRegs[0x4017] = 0x40; initWrites.push({ addr: 0x4017, value: 0x40 });
+    runningRegs[0x4015] = 0x0F; initWrites.push({ addr: 0x4015, value: 0x0F });
     player.bus.onWrite = (a, val) => { runningRegs[a] = val; initWrites.push({ addr: a, value: val }); };
     player.initSong(songIndex, !!opt.pal);
     player.bus.onWrite = null;
-
-    // initSong は bus.write を経由せず APU.writeRegister を直接呼ぶため
-    // $4015 (チャンネル有効化) が onWrite を通らず regSnapshots に記録されない。
-    // NSF の INIT が $4015 を書かなかった場合は initSong のデフォルト値 $0F を補完する。
-    if (runningRegs[0x4015] === undefined) {
-      runningRegs[0x4015] = 0x0F;
-    }
 
     if (opt.mute) {
       if (opt.mute.apu) Emu.applyMute(player.apu.mute, opt.mute.apu);
@@ -240,11 +243,41 @@
     const regsOnly = !!opt.regsOnly;
     const CHUNK_FRAMES = regsOnly ? 10 : 60; // regsOnly(先読み用)はより細かくyieldする
     let pos = 0;
+    // regsOnly専用: 1フレーム=CPUサイクルCYCLES_PER_FRAME分、というサイクル駆動で
+    // PLAYを刻む(NsfPlayer.renderFrame()と全く同じサイクル会計方式・クロック呼び出し)。
+    // 省略するのはaudio.mixSample()と出力バッファへの書き込みだけ(regsOnlyの目的である
+    // 「音声波形は要らない」を満たすのに必要十分)。
+    // ★当初はapu.clock()/expansion.clock()自体も丸ごと省略していたが、これは誤りだった。
+    // FDSの$4090(エンベロープ実測値読み出し)のように、ドライバがチップの内部状態を
+    // 読み戻して「エンベロープが既定値まで減衰したら次の命令へ分岐する」種類の楽器
+    // マクロを使う曲(Ai Senshi Nicol(FDS)等)では、clock()を呼ばないとエンベロープが
+    // 初期値のまま一切減衰しないため、この分岐条件が実際のプレイとは異なる結果になり
+    // (常に「まだ減衰していない」ため)、本来発生するはずの命令分岐先の書き込みが
+    // 丸ごとwriteLogから欠落する不具合があった。clock()自体はmixSample()に比べて
+    // 十分軽い(波形合成をしないだけ)ため、追加しても速度上のメリットはほぼ失われない。
+    // cpuDebtは端数サイクルを次のフレームへ確実に持ち越す必要があるため、
+    // renderFrame()と同じく「+=」で加算する(「=」で上書きすると端数が失われる)。
+    const CYCLES_PER_FRAME = Emu.CPU_CLOCK_NTSC / Emu.FRAME_RATE_NTSC;
+    let regsOnlyCycleAccum = 0;
+    let regsOnlyCpuDebt = 0;
     for (let f = 0; f < ctx.totalFrames; f++) {
       if (regsOnly) {
-        // 音声生成を省略し CPU 実行のみ（鍵盤表示用の高速キャプチャ）
+        // CPU実行 + チップのクロック(エンベロープ等の内部状態更新)のみ。
+        // 音声波形合成(mixSample())と出力バッファ書き込みだけを省略する。
         ctx.pendingWritesRef.set([]);
-        ctx.player.cpu.call(ctx.player.header.playAddr);
+        if (!ctx.player.cpu.callActive) ctx.player.cpu.beginCall(ctx.player.header.playAddr);
+        const regsOnlyExpansion = Object.values(ctx.player.bus.expansion);
+        regsOnlyCycleAccum += CYCLES_PER_FRAME;
+        while (regsOnlyCycleAccum >= 1) {
+          if (regsOnlyCpuDebt <= 0) {
+            if (ctx.player.cpu.callActive) regsOnlyCpuDebt += ctx.player.cpu.stepCall();
+            else regsOnlyCpuDebt = 1;
+          }
+          regsOnlyCpuDebt--;
+          ctx.player.apu.clock();
+          for (let e = 0; e < regsOnlyExpansion.length; e++) regsOnlyExpansion[e].clock();
+          regsOnlyCycleAccum -= 1;
+        }
         ctx.writeLog[f] = ctx.pendingWritesRef.current;
         for (const w of ctx.pendingWritesRef.current) ctx.runningRegs[w.addr] = w.value;
         ctx.regSnapshots[f] = Object.assign({}, ctx.runningRegs);
@@ -254,7 +287,11 @@
         pos = _processFrame(ctx, f, pos);
       }
       if ((f + 1) % CHUNK_FRAMES === 0) {
-        if (onProgress) onProgress(f + 1, ctx.totalFrames, ctx.regSnapshots, ctx.writeLog, ctx.n163Snapshots);
+        // initRegs/initWritesは末尾に追加(既存呼び出し元は無視するだけで後方互換)。
+        // NSF実再生をこのwriteLogから直接合成する新エンジン(NsfReplayStreamPlayer)が
+        // INIT時点の初期状態を再生開始前に必要とするため、完了(Promise解決)を待たずに
+        // 最初のonProgressの時点で渡せるようにした。
+        if (onProgress) onProgress(f + 1, ctx.totalFrames, ctx.regSnapshots, ctx.writeLog, ctx.n163Snapshots, ctx.initRegs, ctx.initWrites);
         await new Promise(r => setTimeout(r, 0));
         // 呼び出し元が「もう不要」と判断したら(曲切替/停止の連打で先読みが積み上がるのを防ぐ)
         // ここで即座に打ち切る。onProgress側だけをトークンで無視する方式だと、キャプチャ
@@ -263,7 +300,7 @@
         if (opt.shouldCancel && opt.shouldCancel()) return _buildResult(ctx);
       }
     }
-    if (onProgress) onProgress(ctx.totalFrames, ctx.totalFrames, ctx.regSnapshots, ctx.writeLog, ctx.n163Snapshots);
+    if (onProgress) onProgress(ctx.totalFrames, ctx.totalFrames, ctx.regSnapshots, ctx.writeLog, ctx.n163Snapshots, ctx.initRegs, ctx.initWrites);
     return _buildResult(ctx);
   };
 })(window);

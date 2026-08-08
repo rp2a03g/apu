@@ -14,8 +14,10 @@
  * デフォルト波形(fdsDefaultWave/n163DefaultWave相当)を使う(`@FM`/`@N`によるMML側の
  * カスタム波形定義はNSF書き出しには未反映)。VRC7はROMプリセット音色(1-15)のみ対応
  * (`OP<n>`によるカスタム音色0番のロードは未反映、常にプリセットのみ)。
- * ループ命令(0xA0/0xA1)・EN/EP/MP/FME7拡張オペコード(0xF1/0xF2)の実際の効果適用
- * (現状は読み飛ばすだけ)も未対応。
+ * ループ命令(0xA0/0xA1)・EN/EP/MPの実際の効果適用(現状は読み飛ばすだけ)も未対応。
+ * FME7のノイズ(0xF1=N<n>)と@<n>によるミキサー制御(0=ミュート/1=トーン/2=ノイズ/
+ * 3=トーン+ノイズ、@2はノート番号がノイズ周期)、およびハードウェアエンベロープ
+ * (0xF2=S<n>/M<n>)は2026-07-28に実装(FME7_PREP/FME7_WRITE_VOL参照)。
  * デチューン(0xFA、D<n>)は2026-07-24実装(APPLY_DETUNE/APPLY_DETUNE_N163参照)。
  * 2A03パルス/三角・VRC6・MMC5・FME7・FDS・N163に対応、VRC7は対象外。
  *
@@ -100,16 +102,20 @@
   function sawPeriod(freq) {
     return Math.max(0, Math.min(4095, Math.round(CPU_CLOCK_NTSC / (14 * freq)) - 1));
   }
+  // FME7(5B)は f=CLOCK/(32*period)。MSXのPSG(f=clock/(16*TP))とは分母が異なる
+  // (NESdev "Sunsoft 5B audio")。src/mml/compiler.js の fme7Period と必ず一致させること
   function fme7Period(freq) {
-    return Math.max(1, Math.min(4095, Math.round(CPU_CLOCK_NTSC / (16 * freq))));
+    return Math.max(1, Math.min(4095, Math.round(CPU_CLOCK_NTSC / (32 * freq))));
   }
   function fdsPeriod(freq) {
     return Math.max(0, Math.min(4095, Math.round((freq * 65536 * 64) / CPU_CLOCK_NTSC)));
   }
   // 実機の出力周波数 f = CLOCK * freqReg / (15 * 65536 * waveLen * numCh) を反転。
   // 有効ch数(numCh、実行時に$7Fへ設定する値)を含めないと音程がズレる(compiler.jsと同じ式)。
-  function n163FreqReg(freq, numCh) {
-    return Math.max(0, Math.min(262143, Math.round((freq * 15 * 65536 * N163_WAVE_LEN * (numCh || 1)) / CPU_CLOCK_NTSC)));
+  // waveLenは共有バッファアロケータ(src/mml/n163Alloc.js)が決めた実際の波形長
+  // (compiler.js側と同じくインスツルメントごとに異なりうる。固定16ではない)。
+  function n163FreqReg(freq, waveLen, numCh) {
+    return Math.max(0, Math.min(262143, Math.round((freq * 15 * 65536 * (waveLen || N163_WAVE_LEN) * (numCh || 1)) / CPU_CLOCK_NTSC)));
   }
   function vrc7FnumBlock(freq) {
     for (let block = 0; block <= 7; block++) {
@@ -240,6 +246,10 @@
     const fdsCustomWaves = usesFds ? Object.keys(envelopes.fm || {}).map(Number).sort((a, b) => a - b) : [];
     const n163CustomWaves = usesN163 ? Object.keys(envelopes.n || {}).map(Number).sort((a, b) => a - b) : [];
     const vrc7CustomTones = usesVrc7 ? Object.keys(envelopes.op || {}).map(Number).sort((a, b) => a - b) : [];
+    // N163が@N<n>カスタム波形を実際に使う曲でのみ、共有バッファアロケータ用の追加zp配列
+    // (WAVEOFS/TBLLO/TBLHI)を確保する。使わない曲は従来通りの固定16サンプル単一テーブル・
+    // 絶対アドレッシングのまま(回帰リスクを抑えるため、この場合はコード自体を変更しない)。
+    const usesN163CustomWaves = n163CustomWaves.length > 0;
 
     // ゼロページレイアウト(チャンネル数nに応じて動的に配置)。LASTINSはFDS/N163/VRC7の
     // カスタム波形・音色の「直近ロードした音色番号」を覚えておくためのチャンネルごとの
@@ -253,41 +263,55 @@
       // D<n>(デチューン)。チャンネルごとの符号付き16bit生オフセット(下位/上位バイト)。
       // APPLY_DETUNE/APPLY_DETUNE_N163参照
       DETUNE_LO = 12 * n, DETUNE_HI = 13 * n;
-    const CURLO = 14 * n, CURHI = 14 * n + 1, CHIDX = 14 * n + 2,
-      PERLO = 14 * n + 3, PERHI = 14 * n + 4, PERLO2 = 14 * n + 5, JMPLO = 14 * n + 6, JMPHI = 14 * n + 7;
+    // N163共有バッファアロケータ用(usesN163CustomWaves時のみ実際に使う。未使用時も定数
+    // 自体は計算するがコード上参照されない): WAVEOFS=このchが今使っている波形のバイト
+    // オフセット(OP_N163_WAVE_RELOADで動的に書き換わる)、TBLLO/TBLHI=このchが今使っている
+    // 音色の周波数テーブル(N163_TABLE_<L>)への間接ポインタ(音色ロード時に固定値を設定)
+    const WAVEOFS = 14 * n, TBLLO = 15 * n, TBLHI = 16 * n;
+    const n163ExtraSlots = usesN163CustomWaves ? 3 : 0;
+    // FME7ハードウェアエンベロープ(S<n>/M<n>)使用中フラグ。チャンネルごとに持つ必要が
+    // あるのはこれだけで、形状・周期(R11-R13)はチップ内に1組しか無いためグローバル
+    // (FMEESH/FMEEPL/FMEEPH)に持つ。usesFme7の時のみ実際に使う
+    const FMEEACT = (14 + n163ExtraSlots) * n;
+    const fme7ExtraSlots = usesFme7 ? 1 : 0;
+    const fixedBase = (14 + n163ExtraSlots + fme7ExtraSlots) * n;
+    const CURLO = fixedBase, CURHI = fixedBase + 1, CHIDX = fixedBase + 2,
+      PERLO = fixedBase + 3, PERHI = fixedBase + 4, PERLO2 = fixedBase + 5,
+      JMPLO = fixedBase + 6, JMPHI = fixedBase + 7,
+      // WFV_T側でTBLLO/TBLHI,Xを一時的にコピーしてind,Yアドレッシングするための共有ポインタ
+      PTBLLO = fixedBase + 8, PTBLHI = fixedBase + 9,
+      // FME7専用(usesFme7時のみ参照)。FMEMIX=ミキサ(R7)のシャドウ(チップから読み出せない
+      // ため保持が必要)、FMEMODE=処理中chの@<n>(0-3)、FMETM/FMENM=そのchのトーン/ノイズ
+      // 有効ビットマスク。FME7_PREP参照
+      FMEMIX = fixedBase + 10, FMEMODE = fixedBase + 11,
+      FMETM = fixedBase + 12, FMENM = fixedBase + 13,
+      // FME7ハードウェアエンベロープ(S<n>/M<n>)。形状(R13)・周期(R11/R12)はチップに
+      // 1組しか無いため全ch共通。FMEVREGはFME7_WRITE_VOLへ渡す音量レジスタ番号
+      FMEESH = fixedBase + 14, FMEEPL = fixedBase + 15, FMEEPH = fixedBase + 16,
+      FMEVREG = fixedBase + 17;
 
     const playLines = [];
     for (let i = 0; i < n; i++) playLines.push(`    LDX #${hex(i)}\n    JSR SERVICE_CH`);
 
     const initExtra = [];
     if (usesMmc5) initExtra.push('    LDA #$03\n    STA $5015       ; MMC5パルス1/2有効化');
-    if (usesFme7) initExtra.push('    LDA #$07\n    STA $C000\n    LDA #$38\n    STA $E000       ; FME7ミキサ: トーンA/B/C有効・ノイズ無効');
+    // FME7のミキサ(R7)は音符ごとの@<n>で組み立てる(FME7_PREP)。初期値は全ch無音にし、
+    // シャドウ変数(FMEMIX)も同じ値に合わせておく
+    if (usesFme7) initExtra.push(`    LDA #$3F\n    STA ${hex(FMEMIX)}\n    LDA #$07\n    STA $C000\n    LDA #$3F\n    STA $E000       ; FME7ミキサ: 全chトーン/ノイズ無効(@<n>で有効化)`);
     if (usesFds) {
       const wave = new Array(64);
       for (let i = 0; i < 64; i++) wave[i] = Math.round(31.5 + 31.5 * Math.sin((2 * Math.PI * i) / 64)) & 0x3f;
       initExtra.push(`    LDA #$80\n    STA $4089       ; FDS波形メモリ書込み許可\n    LDX #$00\nINIT_FDS_WAVE:\n    LDA FDS_WAVE_DATA,X\n    STA $4040,X\n    INX\n    CPX #$40\n    BNE INIT_FDS_WAVE\n    LDA #$00\n    STA $4089       ; 書込み禁止・マスター音量フル`);
     }
     if (usesN163) {
-      // 波形RAMは4bitサンプルを1バイトに2つ(下位/上位ニブル)格納するため、
-      // N163_WAVE_LEN(サンプル数)の半分のバイト数だけ書き込む。
-      // 長さレジスタは NESdev準拠で length = 256 - (regByte & 0xFC) なので、
-      // 16サンプルにするには regByte の上位6bit = 256-16 = 0xF0。
-      // 実機は内部8ch中「上位numN163Ch個」だけを巡回・ミックスするため(下位から詰めると鳴らない)、
-      // 各chの内部インデックスは (8-numN163Ch)+ch。$7Fに(numN163Ch-1)<<4を設定する必要がある。
-      // 各chが専用の波形スロット(internalIdx*8byte、compiler.jsのn163WaveByteOffsetと同じ)に
-      // 既定波形を書き込む。以前は全ch共有(waveBase=0固定)だったため、あるchが@N<n>で
-      // 別波形へ切り替えると他chの波形まで巻き添えで書き換わっていた(compiler.js側の修正と
-      // 同種のバグ。詳細はn163WaveLoadWrites/n163WaveByteOffsetのコメント参照)。
-      const n163InitLines = [];
-      for (let ch = 0; ch < numN163Ch; ch++) {
-        const internalIdx = (N163_CHANNEL_COUNT - numN163Ch) + ch;
-        const regBase = 0x40 + internalIdx * 8;
-        const byteOffset = internalIdx * (N163_WAVE_LEN / 2);
-        n163InitLines.push(`    LDA #${hex(byteOffset | 0x80)}\n    STA $F800       ; ch${ch}専用波形スロットを選択\n    LDX #$00\nINIT_N163_WAVE_${ch}:\n    LDA N163_WAVE_DATA,X\n    STA $4800\n    INX\n    CPX #${hex(N163_WAVE_LEN / 2)}\n    BNE INIT_N163_WAVE_${ch}\n    LDA #${hex((regBase + 4) | 0x80)}\n    STA $F800\n    LDA #$F0        ; 波形長=256-240=16サンプル\n    STA $4800\n    LDA #${hex((regBase + 6) | 0x80)}\n    STA $F800\n    LDA #${hex(byteOffset * 2)}        ; waveBase=byteOffset*2(ニブルアドレス)\n    STA $4800`);
-      }
-      // $7Fはゼロページではなくポート経由(N163内部RAMアドレス0x7F)で書く必要がある
-      n163InitLines.push(`    LDA #$FF\n    STA $F800       ; N163内部アドレス$7Fを選択\n    LDA #${hex((numN163Ch - 1) << 4)}\n    STA $4800       ; 有効チャンネル数=${numN163Ch}`);
-      initExtra.push(n163InitLines.join('\n'));
+      // 波形データの配置は共有バッファアロケータ(MML.N163Alloc、compiler.jsと同じ計算)が
+      // 曲の実際の使用状況に応じて動的に行うため、ここではchごとの専用スロットへの
+      // 既定波形の事前書き込みは行わない(@N<n>を一度も呼ばないchは波形が不定になる
+      // 既知の制限。予約領域を作らずRAM全体を共有プールにする設計、compiler.js側と同じ)。
+      // $7F(ゼロページではなくポート経由、N163内部RAMアドレス0x7F)に有効チャンネル数だけ
+      // 設定する。実機は内部8ch中「上位numN163Ch個」だけを巡回・ミックスするため
+      // (下位から詰めると鳴らない)。
+      initExtra.push(`    LDA #$FF\n    STA $F800       ; N163内部アドレス$7Fを選択\n    LDA #${hex((numN163Ch - 1) << 4)}\n    STA $4800       ; 有効チャンネル数=${numN163Ch}`);
     }
 
     // --- 拡張音源ごとのハンドラ+テーブルのソース片(使うチップのみ生成) ---
@@ -606,8 +630,94 @@ LFP_OK:
     STA ${hex(PERHI)}
     RTS
 
+; --- FME7共通: @<n>(=DUTY,X。ppmck仕様で 0=ミュート/1=トーン/2=ノイズ/3=トーン+ノイズ)を
+;     ミキサ(R7)へ反映する。R7は3ch共有かつ読み出し不可なのでFMEMIXにシャドウを持つ。
+;     呼び出し前に FMETM へこのchのトーン有効ビット(1<<ch)を入れておくこと。
+;     @2(ノイズ単独)のときはノート番号がそのままノイズ周期(R6)になる(ppmck仕様)。
+;     戻り値: キャリー=1ならトーン周期レジスタの書き込みが必要 ---
+FME7_PREP:
+    LDA ${hex(FMETM)}
+    ASL A
+    ASL A
+    ASL A
+    STA ${hex(FMENM)}      ; ノイズ有効ビット = トーン有効ビット<<3
+    LDA ${hex(DUTY)},X
+    AND #$03
+    STA ${hex(FMEMODE)}
+    LDA ${hex(FMEMIX)}
+    ORA ${hex(FMETM)}
+    ORA ${hex(FMENM)}
+    STA ${hex(FMEMIX)}     ; いったんこのchのトーン・ノイズとも無効(bit=1)にする
+    LDA ${hex(FMEMODE)}
+    LSR A
+    BCC FP_NOTONE
+    LDA ${hex(FMEMIX)}
+    EOR ${hex(FMETM)}      ; bitは必ず1なのでEORで0(=有効)にできる
+    STA ${hex(FMEMIX)}
+FP_NOTONE:
+    LDA ${hex(FMEMODE)}
+    AND #$02
+    BEQ FP_NONOISE
+    LDA ${hex(FMEMIX)}
+    EOR ${hex(FMENM)}
+    STA ${hex(FMEMIX)}
+    LDA ${hex(FMEMODE)}
+    CMP #$02
+    BNE FP_NONOISE  ; @3(トーン+ノイズ)の周期はN<n>(0xF1)で設定済みの値をそのまま使う
+    LDA #$06
+    STA $C000
+    LDA ${hex(NOTE)},X
+    AND #$1F
+    STA $E000       ; @2: ノート番号(0-31)をノイズ周期として書く
+FP_NONOISE:
+    LDA #$07
+    STA $C000
+    LDA ${hex(FMEMIX)}
+    STA $E000
+    LDA ${hex(FMEMODE)}
+    LSR A           ; bit0(トーン有効)をキャリーへ
+    RTS
+
+; --- FME7共通: このチャンネルの音量レジスタ(A=$08-$0A)を書く。
+;     ハードウェアエンベロープ(S<n>/M<n>)使用中は固定音量ではなくbit4=1を書き、
+;     さらに音符ごとにR11/R12/R13を書き直してエンベロープの位相をリセットする
+;     (R13への書き込みが実機のキーオン相当。compiler.jsも音符ごとに書いている) ---
+FME7_WRITE_VOL:
+    STA ${hex(FMEVREG)}
+    LDA ${hex(FMEEACT)},X
+    BEQ FWV_PLAIN
+    LDA #$0B
+    STA $C000
+    LDA ${hex(FMEEPL)}
+    STA $E000
+    LDA #$0C
+    STA $C000
+    LDA ${hex(FMEEPH)}
+    STA $E000
+    LDA #$0D
+    STA $C000
+    LDA ${hex(FMEESH)}
+    STA $E000       ; 形状の書き直し=位相リセット
+    LDA ${hex(FMEVREG)}
+    STA $C000
+    LDA #$10
+    STA $E000       ; 音量レジスタbit4=1: ハードウェアエンベロープ制御
+    RTS
+FWV_PLAIN:
+    LDA ${hex(FMEVREG)}
+    STA $C000
+    LDA ${hex(VOL)},X
+    STA $E000
+    RTS
+
 ; --- FME7 ch0 ($C000アドレス選択/$E000データ書込の間接方式。reg0/1=周期,reg8=音量) ---
 WFV_T9:
+    LDA #$01
+    STA ${hex(FMETM)}
+    JSR FME7_PREP
+    BCS WFV_T9_TONE
+    JMP WFV_T9_VOL  ; @0/@2はトーン周期を書かない
+WFV_T9_TONE:
     STX ${hex(CHIDX)}
     JSR LOOKUP_FME7_PERIOD
     LDX ${hex(CHIDX)}
@@ -620,11 +730,9 @@ WFV_T9:
     STA $C000
     LDA ${hex(PERHI)}
     STA $E000
+WFV_T9_VOL:
     LDA #$08
-    STA $C000
-    LDA ${hex(VOL)},X
-    STA $E000
-    RTS
+    JMP FME7_WRITE_VOL
 SIL_T9:
     LDA #$08
     STA $C000
@@ -634,6 +742,12 @@ SIL_T9:
 
 ; --- FME7 ch1 (reg2/3=周期,reg9=音量) ---
 WFV_T10:
+    LDA #$02
+    STA ${hex(FMETM)}
+    JSR FME7_PREP
+    BCS WFV_T10_TONE
+    JMP WFV_T10_VOL
+WFV_T10_TONE:
     STX ${hex(CHIDX)}
     JSR LOOKUP_FME7_PERIOD
     LDX ${hex(CHIDX)}
@@ -646,11 +760,9 @@ WFV_T10:
     STA $C000
     LDA ${hex(PERHI)}
     STA $E000
+WFV_T10_VOL:
     LDA #$09
-    STA $C000
-    LDA ${hex(VOL)},X
-    STA $E000
-    RTS
+    JMP FME7_WRITE_VOL
 SIL_T10:
     LDA #$09
     STA $C000
@@ -660,6 +772,12 @@ SIL_T10:
 
 ; --- FME7 ch2 (reg4/5=周期,reg10=音量) ---
 WFV_T11:
+    LDA #$04
+    STA ${hex(FMETM)}
+    JSR FME7_PREP
+    BCS WFV_T11_TONE
+    JMP WFV_T11_VOL
+WFV_T11_TONE:
     STX ${hex(CHIDX)}
     JSR LOOKUP_FME7_PERIOD
     LDX ${hex(CHIDX)}
@@ -672,11 +790,9 @@ WFV_T11:
     STA $C000
     LDA ${hex(PERHI)}
     STA $E000
+WFV_T11_VOL:
     LDA #$0A
-    STA $C000
-    LDA ${hex(VOL)},X
-    STA $E000
-    RTS
+    JMP FME7_WRITE_VOL
 SIL_T11:
     LDA #$0A
     STA $C000
@@ -881,67 +997,68 @@ ${modBlocks}`);
     }
 
     if (usesN163) {
-      // N163: 周波数レジスタは18bit(3バイト)。テーブルには
-      // バイト2に波形長レジスタ(0x3C固定)を事前にORして格納しておく
-      const words3 = [];
-      for (let noteN = 0; noteN < NOTE_TABLE_SIZE; noteN++) {
-        // 実行時に $7F へ設定する有効ch数(numN163Ch)で符号化する(復号側と一致させる)
-        const reg = n163FreqReg(noteFrequency(noteN), numN163Ch);
-        // 0xF0 = 波形長256-240=16サンプル(bit2-7)。周波数上位2bitはbit0-1にOR
-        words3.push(reg & 0xff, (reg >> 8) & 0xff, 0xf0 | ((reg >> 16) & 0x03));
-      }
-      extraTables.push(`N163_TABLE:\n${bytesToDb(new Uint8Array(words3))}`);
-      // 既定波形(サイン波、4bitサンプル16個をニブル詰めで8バイトに格納)
-      const n163Wave = new Array(N163_WAVE_LEN);
-      for (let i = 0; i < N163_WAVE_LEN; i++) {
-        n163Wave[i] = Math.max(0, Math.min(15, Math.round(7.5 + 7.5 * Math.sin((2 * Math.PI * i) / N163_WAVE_LEN))));
-      }
-      const n163WaveBytes = new Array(N163_WAVE_LEN / 2);
-      for (let i = 0; i < n163WaveBytes.length; i++) {
-        n163WaveBytes[i] = (n163Wave[2 * i] & 0x0f) | ((n163Wave[2 * i + 1] & 0x0f) << 4);
-      }
-      extraTables.push(`N163_WAVE_DATA:\n${bytesToDb(new Uint8Array(n163WaveBytes))}`);
-      // @N<n>カスタム波形。各chは専用の波形スロット(internalIdx*8byte、init時と同じ
-      // n163WaveByteOffset相当のオフセット)を持つため、「選択中の音色番号が前の音符から
-      // 変わり、かつ定義がある時だけ」再ロードする共通サブルーチンをJSRで呼ぶ際は、
-      // 呼び出し元chの全体配列インデックス(X)から自chの波形バイトオフセットを
-      // N163_CH_WAVEOFS テーブルで動的に引く(以前はオフセット0固定で全ch共有バッファに
-      // 書いていたため、複数chが異なる@N<n>波形を同時使用する曲で後からロードしたchが
-      // 他chの波形まで巻き添えで上書きしていた。compiler.js側の同種修正と対応)。
-      let n163ToneCheckCall = '';
-      if (n163CustomWaves.length > 0) {
-        // X(呼び出し元の全体chインデックス)→波形バイトオフセットの対応表。N163ch以外の
-        // インデックスは参照されないため値は未使用(0のまま)でよい。
-        const chWaveOfs = new Array(n).fill(0);
-        for (let i = 0; i < n; i++) {
-          const t = channelTypes[i];
-          if (t >= TYPE_N163_BASE && t < TYPE_N163_BASE + N163_CHANNEL_COUNT) {
-            const internalIdx = (N163_CHANNEL_COUNT - numN163Ch) + (t - TYPE_N163_BASE);
-            chWaveOfs[i] = internalIdx * (N163_WAVE_LEN / 2);
-          }
+      // usesN163CustomWaves===falseの場合は従来通り: 波形長16固定・単一テーブル・
+      // 絶対アドレッシング(コードは一切変更しない。回帰リスクを抑えるため)。
+      // usesN163CustomWaves===trueの場合は共有バッファアロケータ(MML.N163Alloc、
+      // compiler.jsと全く同じ計算)に対応した可変長版を生成する:
+      // インスツルメントごとに実際の波形長(4の倍数へ丸め)を持てるようにし、
+      // ・波形の書込み先バイトオフセットはOP_N163_WAVE_RELOAD(ch別バイトコードに
+      //   埋め込み済み、buildBankedNsfBytes参照)でWAVEOFS,Xへ動的に設定する
+      // ・使う周波数テーブルはインスツルメントごとに固定(N163_LOAD_<i>がTBLLO/TBLHI,Xへ
+      //   設定する。長さはインスツルメント固有でコンパイル時に決まるため、
+      //   オフセットと違って音符ごとに変わらない)
+      const n163LengthByIdx = {};
+      n163CustomWaves.forEach(idx => {
+        n163LengthByIdx[idx] = MML.N163Alloc.roundedLen((envelopes.n[idx] || []).length);
+      });
+      const n163LengthsUsed = usesN163CustomWaves
+        ? Array.from(new Set(Object.values(n163LengthByIdx)))
+        : [N163_WAVE_LEN];
+
+      const n163TableLabel = L => usesN163CustomWaves ? `N163_TABLE_${L}` : 'N163_TABLE';
+      const n163TableBlocks = n163LengthsUsed.map(L => {
+        const words3 = [];
+        for (let noteN = 0; noteN < NOTE_TABLE_SIZE; noteN++) {
+          // 実行時に $7F へ設定する有効ch数(numN163Ch)で符号化する(復号側と一致させる)
+          const reg = n163FreqReg(noteFrequency(noteN), L, numN163Ch);
+          const lenByte = MML.N163Alloc ? MML.N163Alloc.lengthByte(L) : (256 - L) & 0xFC;
+          words3.push(reg & 0xff, (reg >> 8) & 0xff, lenByte | ((reg >> 16) & 0x03));
         }
-        extraTables.push(`N163_CH_WAVEOFS:\n${bytesToDb(new Uint8Array(chWaveOfs))}`);
+        return `${n163TableLabel(L)}:\n${bytesToDb(new Uint8Array(words3))}`;
+      });
+      extraTables.push(n163TableBlocks.join('\n'));
+
+      let n163ToneCheckCall = '';
+      if (usesN163CustomWaves) {
         // FDS(WFV13)と同じ理由(src/driver/ppmckDriver.js usesFdsブロック参照)で、
         // BEQ/BNEは直後のJMP(範囲無制限)への短距離分岐のみに使い、長距離ジャンプは
         // 全てJMPで行う(波形の種類が増えるとBEQの分岐距離が±127byteを超えうる)。
         const cmpChain = n163CustomWaves.map((idx, i) =>
           `    CMP #${hex(idx)}\n    BNE N163_SKIP_${i}\n    JMP N163_LOAD_${i}\nN163_SKIP_${i}:`).join('\n');
-        const loadBlocks = n163CustomWaves.map((idx, i) => `
+        const loadBlocks = n163CustomWaves.map((idx, i) => {
+          const L = n163LengthByIdx[idx];
+          const byteLen = L / 2;
+          return `
 N163_LOAD_${i}:
     STA ${hex(LASTINS)},X
     STX ${hex(CHIDX)}
-    LDA N163_CH_WAVEOFS,X
+    LDA ${hex(WAVEOFS)},X
     ORA #$80
-    STA $F800       ; ch専用波形スロットを選択、オートインクリメントON
+    STA $F800       ; 共有アロケータが決めたバイト位置を選択、オートインクリメントON
     LDX #$00
 N163_LOAD_${i}_LP:
     LDA N163_CUSTOM_WAVE_${i},X
     STA $4800
     INX
-    CPX #${hex(N163_WAVE_LEN / 2)}
+    CPX #${hex(byteLen)}
     BNE N163_LOAD_${i}_LP
     LDX ${hex(CHIDX)}
-    JMP N163_TONE_OK`).join('\n');
+    LDA #<${n163TableLabel(L)}
+    STA ${hex(TBLLO)},X
+    LDA #>${n163TableLabel(L)}
+    STA ${hex(TBLHI)},X
+    JMP N163_TONE_OK`;
+        }).join('\n');
         extraHandlers.push(`
 ; --- N163共通: @N<n>カスタム波形の再ロードチェック(X=チャンネル配列index) ---
 N163_TONE_CHECK:
@@ -956,9 +1073,11 @@ ${loadBlocks}
 N163_TONE_OK:
     RTS`);
         const toneTables = n163CustomWaves.map((idx, i) => {
-          const wave = envelopes.n[idx].slice(0, N163_WAVE_LEN);
-          while (wave.length < N163_WAVE_LEN) wave.push(0);
-          const packed = new Array(N163_WAVE_LEN / 2);
+          const L = n163LengthByIdx[idx];
+          const raw = envelopes.n[idx] || [];
+          const wave = raw.slice(0, L);
+          while (wave.length < L) wave.push(0);
+          const packed = new Array(L / 2);
           for (let k = 0; k < packed.length; k++) packed[k] = (wave[2 * k] & 0x0f) | ((wave[2 * k + 1] & 0x0f) << 4);
           return `N163_CUSTOM_WAVE_${i}:\n${bytesToDb(new Uint8Array(packed))}`;
         }).join('\n');
@@ -985,6 +1104,20 @@ N163_TONE_OK:
         const silWrite = isTopCh
           ? `    LDA #${hex((regBase + 7) | 0x80)}\n    STA $F800\n    LDA $4800       ; 現在値読出し(有効ch数ビットを保持するため)\n    AND #$F0\n    STA ${hex(PERLO)}\n    LDA #${hex((regBase + 7) | 0x80)}\n    STA $F800       ; 読出しでアドレスが進むため再選択\n    LDA ${hex(PERLO)}\n    STA $4800`
           : `    LDA #${hex((regBase + 7) | 0x80)}\n    STA $F800\n    LDA #$00\n    STA $4800`;
+        // 波形長テーブル参照は、カスタム波形を使う曲ではインスツルメントごとに異なる
+        // N163_TABLE_<L>を間接(ptr),Yで、使わない曲は従来通り単一N163_TABLEを絶対,Yで読む
+        // (絶対/間接どちらもYを使うよう統一しているだけで、Xは温存されchannel indexのまま)
+        const tableRead = usesN163CustomWaves
+          ? `    LDA ${hex(TBLLO)},X\n    STA ${hex(PTBLLO)}\n    LDA ${hex(TBLHI)},X\n    STA ${hex(PTBLHI)}\n` +
+            `    LDA (${hex(PTBLLO)}),Y\n    STA ${hex(PERLO)}\n    INY\n` +
+            `    LDA (${hex(PTBLLO)}),Y\n    STA ${hex(PERHI)}\n    INY\n` +
+            `    LDA (${hex(PTBLLO)}),Y\n    STA ${hex(PERLO2)}`
+          : `    LDA N163_TABLE,Y\n    STA ${hex(PERLO)}\n    LDA N163_TABLE+1,Y\n    STA ${hex(PERHI)}\n` +
+            `    LDA N163_TABLE+2,Y\n    STA ${hex(PERLO2)}`;
+        const waveAddrRewrite = usesN163CustomWaves
+          ? `    LDA #${hex((regBase + 6) | 0x80)}\n    STA $F800       ; 波形アドレス(+6)。` +
+            `共有アロケータのオフセットは固定でなくなったため毎回書き直す\n    LDA ${hex(WAVEOFS)},X\n    ASL A\n    STA $4800\n`
+          : '';
         n163Handlers.push(`
 ; --- N163 ch${ch} (regBase=${hex(regBase)}、$F800アドレス選択/$4800データ書込) ---
 WFV_T${t}:
@@ -1000,13 +1133,8 @@ WFV${t}_OK:
     ADC ${hex(PERLO)}
     CLC
     ADC ${hex(PERLO)}
-    TAX
-    LDA N163_TABLE,X
-    STA ${hex(PERLO)}
-    LDA N163_TABLE+1,X
-    STA ${hex(PERHI)}
-    LDA N163_TABLE+2,X
-    STA ${hex(PERLO2)}
+    TAY
+${tableRead}
     LDX ${hex(CHIDX)}
     JSR APPLY_DETUNE_N163
     LDA #${hex(regBase | 0x80)}
@@ -1019,7 +1147,7 @@ WFV${t}_OK:
     LDA $4800       ; +3(位相mid)を空読みして読み飛ばす、addrは+4へ
     LDA ${hex(PERLO2)}
     STA $4800       ; +4=freq hi|波形長書込み
-${wfvVolWrite}
+${waveAddrRewrite}${wfvVolWrite}
     RTS
 SIL_T${t}:
 ${silWrite}
@@ -1240,7 +1368,7 @@ SIL_T${TYPE_DPCM}:
     }
 
     return `; ==========================================
-; FamiMML Studio - ppmck方式バイトコード再生ドライバ(バンク切り替え+拡張音源対応)
+; Sound Emulation Foundry - ppmck方式バイトコード再生ドライバ(バンク切り替え+拡張音源対応)
 ; チャンネル数: ${n} / 使用拡張音源: ${expansions.length ? expansions.join(',') : 'なし'}
 ; ==========================================
     .org $8000
@@ -1272,6 +1400,7 @@ INIT_LOOP:
     STA ${hex(VOL)},X      ; VOL=0
     STA ${hex(DUTY)},X     ; DUTY=0
     STA ${hex(ENVACT)},X   ; ENVACT=0(ソフトウェア音量エンベロープ無効)
+${usesFme7 ? `    STA ${hex(FMEEACT)},X  ; FMEEACT=0(FME7ハードウェアエンベロープ無効)` : ''}
     LDA #$FF
     STA ${hex(LASTINS)},X  ; LASTINS=$FF(番兵。有効な音色番号0-127とは重複しない)
     LDA #$00
@@ -1351,9 +1480,10 @@ RD_LOOP:
     CMP #$FA
     BEQ RD_JMP_DETUNE
 ${envTableCount > 0 ? '    CMP #$F3\n    BEQ RD_JMP_VOLENV' : ''}
-${usesFme7 ? '    CMP #$F1\n    BEQ RD_SKIP1\n    CMP #$F2\n    BEQ RD_SKIP3' : ''}
+${usesFme7 ? '    CMP #$F1\n    BEQ RD_JMP_FME7NOISE\n    CMP #$F2\n    BEQ RD_JMP_FME7HENV' : ''}
 ${vrc7CustomTones.length > 0 ? '    CMP #$F0\n    BEQ RD_JMP_VRC7TONE' : ''}
 ${usesFds ? '    CMP #$F5\n    BEQ RD_JMP_FDSMOD' : ''}
+${usesN163CustomWaves ? '    CMP #$F6\n    BEQ RD_JMP_N163RELOC' : ''}
     JMP RD_NOTE
 
 RD_JMP_ENDTRACK:
@@ -1373,6 +1503,8 @@ RD_JMP_DETUNE:
 ${envTableCount > 0 ? 'RD_JMP_VOLENV:\n    JMP RD_VOLENV' : ''}
 ${vrc7CustomTones.length > 0 ? 'RD_JMP_VRC7TONE:\n    JMP RD_VRC7TONE' : ''}
 ${usesFds ? 'RD_JMP_FDSMOD:\n    JMP RD_FDSMOD' : ''}
+${usesFme7 ? 'RD_JMP_FME7NOISE:\n    JMP RD_FME7NOISE\nRD_JMP_FME7HENV:\n    JMP RD_FME7HENV' : ''}
+${usesN163CustomWaves ? 'RD_JMP_N163RELOC:\n    JMP RD_N163RELOC' : ''}
 
 ; 0xEEマーカーの残り3バイト(新バンク番号,新アドレス下位,新アドレス上位)は
 ; まだ「現在のバンク」の中に物理的に置かれているため、3バイト全て読み終えるまでは
@@ -1404,12 +1536,38 @@ RD_SKIP3:
     JSR READ_BYTE
     JSR READ_BYTE
     JMP RD_LOOP
+${usesFme7 ? `
+; --- N<n>(0xF1): FME7ノイズ周期(R6、3ch共有)。直後1バイトが0-31。
+; READ_BYTEはAを返すので、先にレジスタ番号6をラッチしてから読む(退避用zpが要らない) ---
+RD_FME7NOISE:
+    LDA #$06
+    STA $C000
+    JSR READ_BYTE
+    AND #$1F
+    STA $E000
+    JMP RD_LOOP
+
+; --- S<n>/M<n>(0xF2): FME7ハードウェアエンベロープ。直後3バイトが[形状,周期下位,周期上位]。
+; 実際のレジスタ書き込みは音符ごとにFME7_WRITE_VOLが行う(音符のたびに位相を
+; リセットする必要があるため、ここでは値を覚えてこのchを有効化するだけ) ---
+RD_FME7HENV:
+    JSR READ_BYTE
+    AND #$0F
+    STA ${hex(FMEESH)}
+    JSR READ_BYTE
+    STA ${hex(FMEEPL)}
+    JSR READ_BYTE
+    STA ${hex(FMEEPH)}
+    LDA #$01
+    STA ${hex(FMEEACT)},X
+    JMP RD_LOOP` : ''}
 
 RD_VOL:
     JSR READ_BYTE
     AND #$0F
     STA ${hex(VOL)},X
 ${envTableCount > 0 ? `    LDA #$00\n    STA ${hex(ENVACT)},X   ; 明示的な音量指定はソフトウェアエンベロープを解除する` : ''}
+${usesFme7 ? `    LDA #$00\n    STA ${hex(FMEEACT)},X  ; 同じくFME7ハードウェアエンベロープも解除する` : ''}
     JMP RD_LOOP
 ${envTableCount > 0 ? `
 RD_VOLENV:
@@ -1419,6 +1577,7 @@ RD_VOLENV:
     STA ${hex(ENVACT)},X
     LDA #$00
     STA ${hex(ENVTICK)},X
+${usesFme7 ? `    STA ${hex(FMEEACT)},X  ; @v<n>とFME7ハードウェアエンベロープは排他` : ''}
     JMP RD_LOOP` : ''}
 
 RD_TONE:
@@ -1428,6 +1587,13 @@ RD_TONE:
                     ; マスク幅を広げても既存チップの挙動には影響しない)
     STA ${hex(DUTY)},X
     JMP RD_LOOP
+${usesN163CustomWaves ? `
+; --- N163共有バッファアロケータ(0xF6): 直後1バイトがこのchの波形バイトオフセット。
+; 波形の中身自体はこの後に続くOP_TONE(音色番号)の変化検知(N163_TONE_CHECK)で選ばれる ---
+RD_N163RELOC:
+    JSR READ_BYTE
+    STA ${hex(WAVEOFS)},X
+    JMP RD_LOOP` : ''}
 
 ; --- D<n>デチューン(0xFA): 直後2バイトが符号付き16bit値(下位,上位)。次の音符から
 ; APPLY_DETUNE/APPLY_DETUNE_N163が使う。値そのものを覚えるだけで周期計算はしない ---
@@ -1767,6 +1933,30 @@ SONG_BANK:
     // exp==='fds'判定と同じ挙動をここでも再現する)
     const vrc7Letters = new Set(expansionLetterMap.vrc7 || []);
     const fdsLetters = new Set(expansionLetterMap.fds || []);
+    const n163Letters = new Set(expansionLetterMap.n163 || []);
+
+    // N163共有バッファアロケータ: ブラウザプレビュー(compiler.js)と全く同じ計算
+    // (MML.N163Alloc)をNSF書き出し時にも行い、両者が同じ音程・波形になるようにする
+    // (周波数式・バイトオフセット計算を2箇所で独立実装して食い違わせた過去のN163バグと
+    // 同種の事故を防ぐため、必ずこの1箇所だけを両者が呼ぶ)。128byteに収まらない場合は
+    // compiler.js側と同じくエラーとして書き出しを中断する。
+    const n163RelocsByChannel = {};
+    if (expansions.includes('n163')) {
+      const allocResult = MML.N163Alloc.allocate(
+        Array.from(n163Letters), segmentsByChannel, envelopes.n, compileResult.totalFrames);
+      if (allocResult.conflicts.length > 0) {
+        return {
+          nsfBytes: null,
+          asmErrors: allocResult.conflicts.map(c => ({ lineNo: 0, message: c.message })),
+          bankCount: 0,
+          unsupportedExpansions
+        };
+      }
+      for (const occ of allocResult.occurrences) {
+        if (!n163RelocsByChannel[occ.channel]) n163RelocsByChannel[occ.channel] = [];
+        n163RelocsByChannel[occ.channel].push({ kind: 'n163WaveReload', frame: occ.startFrame, value: occ.byteOffset });
+      }
+    }
 
     // ソフトウェア音量エンベロープ(@v<n>)のROM埋め込み用: 曲全体(全チャンネル)で
     // 実際に使われているenvelopeV値だけを集め、0始まりの連番(envIndexRemap)に詰め直す
@@ -1787,7 +1977,10 @@ SONG_BANK:
 
     const chBytes = channelLetters.map(ch => MML.NSF.MckBytecode.serialize(
       segmentsByChannel[ch] || [],
-      (vrc7Letters.has(ch) || fdsLetters.has(ch)) ? (immediateWritesByChannel[ch] || []) : [],
+      [
+        ...((vrc7Letters.has(ch) || fdsLetters.has(ch)) ? (immediateWritesByChannel[ch] || []) : []),
+        ...(n163Letters.has(ch) ? (n163RelocsByChannel[ch] || []) : [])
+      ],
       envIndexRemap));
 
     // 各チャンネルを順にバンク配置する

@@ -5,7 +5,9 @@
  * ポート0xA0=レジスタ選択, 0xA1=データ書込。reg0/1,2/3,4/5=ch0-2の12bit周期(lo/hi)、
  * reg8/9/10=ch0-2の音量(下位4bit、bit4=エンベロープ使用)。専用アタックレジスタが
  * 無いため音量0→非0の遷移をノートオンとして扱う(nsf2mml/expansion/fme7.jsと同型)。
- * ノイズは(FME7抽出と同様)対象外、3トーンチャンネルのみ扱う。
+ * reg6=ノイズ周期(5bit,全ch共有)、reg7=ミキサー(bit0-2=トーン有効/bit3-5=ノイズ有効、
+ * どちらも0で有効のactive-low)。ミキサーはppmckの`@<n>`(0=ミュート/1=トーン/2=ノイズ/
+ * 3=トーン+ノイズ)へ対応させ、`@2`ではノート番号自体がノイズ周期(0-31)になる。
  */
 (function (global) {
   'use strict';
@@ -22,6 +24,9 @@
   function buildTimeline(writeLog, clock) {
     let addrReg = 0;
     const regs = new Uint8Array(16);
+    // ミキサー(reg7)を一度も書かない曲があるため、エミュレータ(ay8910Msx.js)と同じ
+    // 既定値から始める。0のまま始めると全chがトーン+ノイズ有効として抽出されてしまう
+    regs[7] = 0x38;
     return writeLog.map(writes => {
       for (const { addr, value, io } of writes) {
         if (!io) continue;
@@ -44,13 +49,24 @@
       // 周期レジスタだけでノート判定すると、ノイズ区間なのに直前のトーン音程のまま
       // 音量だけ変化する偽ノート(ノイズの減衰エンベロープを別々の短いノートの連打と
       // 誤検出)になっていた。
-      const toneEnabled = [0, 1, 2].map(ch => !(regs[7] & (1 << ch)));
-      return { periods, volumes, toneEnabled };
+      const modes = [0, 1, 2].map(ch =>
+        (((regs[7] >> ch) & 1) ? 0 : 1) | (((regs[7] >> (3 + ch)) & 1) ? 0 : 2));
+      return { periods, volumes, modes, noisePeriod: regs[6] & 0x1F };
     });
   }
 
   // ピッチ/トーン有効状態が同じ間は音量変化だけでは区切らずvolSeqに積む
   // (ソフトウェア音量エンベロープ抽出用。src/nsf2mml/expansion/fme7.jsと同じ考え方)。
+  // ただし音量がそれまでの減衰傾向から上向きに跳ね上がった(=エンベロープ再アタック)
+  // 場合は、同じ音程・同じ音量のままの同音連打であっても必ず新イベントに区切る。
+  // 【周期レジスタへの書込みそのものを合図にする案(periodTouched)は撤回】PSGにも
+  // SCC同様キーオン信号が無いため当初は「周期レジスタへの書込み+音量上昇」の両方を
+  // 要求していたが、F1 Spirit 64曲目のSCC(同じ手法を移植したscc.js)で「音程が同じ
+  // ままの同音連打で周波数レジスタが書き直されない(値が変わらないので省略される)」
+  // 曲があり、periodTouchedを必須にすると本来の再アタックを見逃すことが判明した。
+  // 音量が上向きに跳ね上がること自体がソフトウェアエンベロープの再アタックを意味する
+  // ため、これだけで十分な合図になる(Ys1 12曲目のperiodTouched=falseの偽陽性ケースは
+  // 音量も変化しない継続ティックだったため、この条件だけで元々弾かれていた)。
   function extractToneEvents(timeline, chIndex, clock) {
     const events = [];
     let cur = null;
@@ -59,12 +75,20 @@
       const t = timeline[f];
       const period = t.periods[chIndex];
       const volume = t.volumes[chIndex];
-      const toneOn = t.toneEnabled[chIndex];
-      const note = (toneOn && volume > 0 && period >= 1) ? freqToNoteNumber(toneFreq(period, clock)) : null;
-      if (!cur) { cur = { note, start: f, end: f, volSeq: [volume] }; continue; }
-      if (note !== cur.note) {
+      const mode = t.modes[chIndex];
+      // @2(ノイズ単独)はノート番号=ノイズ周期。それ以外はトーン周期から音程を求める
+      let note = null;
+      let freqHz = null; // トーン発音時の実周波数(デチューン検出用、ノイズ単独時はnull)
+      if (volume > 0 && mode !== 0) {
+        if (mode === 2) note = t.noisePeriod;
+        else if (period >= 1) { freqHz = toneFreq(period, clock); note = freqToNoteNumber(freqHz); }
+      }
+      const noise = mode === 3 ? t.noisePeriod : null; // @3のみN<n>を出す
+      if (!cur) { cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume] }; continue; }
+      const retrigger = note !== null && volume > cur.volSeq[cur.volSeq.length - 1];
+      if (retrigger || note !== cur.note || mode !== cur.mode || noise !== cur.noise) {
         flush(f);
-        cur = { note, start: f, end: f, volSeq: [volume] };
+        cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume] };
       } else {
         cur.volSeq.push(volume);
       }
@@ -80,12 +104,16 @@
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
     }
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note }, toVolumeFields(ev.volSeq)
+      { start: ev.start, end: ev.end, note: ev.note },
+      ev.note !== null ? { instrument: ev.mode } : {},
+      ev.note !== null && ev.noise !== null ? { fme7Noise: ev.noise } : {},
+      ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
+      toVolumeFields(ev.volSeq)
     );
     return {
       channels: [0, 1, 2].map(ch => ({
         events: extractToneEvents(timeline, ch, clock).map(toCommon),
-        hasVolume: true, hasEnvelope: true
+        hasVolume: true, hasEnvelope: true, hasInstrument: true, hasFme7Noise: true
       }))
     };
   };
