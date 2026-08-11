@@ -18,6 +18,9 @@
  *   hasFme7Noise … true の場合、fme7Noise が前回と変わったイベントで N<N>(ノイズ周期)を出す。
  *                   FME7/PSGはミキサー指定が @<n> (0=ミュート/1=トーン/2=ノイズ/
  *                   3=トーン+ノイズ)なので hasInstrument と併用する
+ *   hasPitchMod  … true の場合、pitchEp が設定されているイベントは EP<N>(未設定なら
+ *                   EPOF)を出す(D<n>と同型の独立プレフィックスコマンド。
+ *                   src/convert/pitch.js PitchEnvelopeRegistry参照)
  *   (v<N>/@v<N>/S<N>の切替時は値が前回と同じ番号でも必ずトークンを出し直す。
  *    コンパイラ側は明示的なv<n>でstate.envelopeV/fme7EnvShapeをnullにクリアするため)
  *   totalFrames  … 末尾休符を補うための曲全体のフレーム数
@@ -113,6 +116,22 @@
           const detuneVal = ev.detune || 0;
           if (detuneVal !== state.curDetune) { emit(`D${detuneVal}`); state.curDetune = detuneVal; }
         }
+        // ピッチエンベロープ(厳密周期ビブラート、DESIGN-PITCH.md Phase 1)。D<n>と同じく
+        // 未指定イベントはoff扱いにし、hasPitchMod指定チャンネルでは毎回前回状態との差分を
+        // 見て明示的にEPOFへ戻す(直前の音符のビブラートを引きずらないため)。
+        // ★2026-08-11(別プロジェクトA): delay引数`EP<n>,<delay>`に対応。同じテーブル番号
+        // でもdelayが前回と違えば出し直す(delayも音符ごとの状態なので、番号だけの比較では
+        // 変化を見逃す)。delay=0(既定)なら従来通りカンマ無しの`EP<n>`のまま出す。
+        if (flags.hasPitchMod) {
+          const epVal = (ev.pitchEp != null) ? ev.pitchEp : null;
+          const epDelay = epVal !== null ? (ev.pitchEpDelay || 0) : 0;
+          if (epVal !== state.curPitchEp || epDelay !== state.curPitchEpDelay) {
+            if (epVal === null) emit('EPOF');
+            else emit(epDelay > 0 ? `EP${epVal},${epDelay}` : `EP${epVal}`);
+            state.curPitchEp = epVal;
+            state.curPitchEpDelay = epDelay;
+          }
+        }
         // FME7/PSGのノイズ周期(R6、3ch共有)。@2(ノイズ単独)ではノート番号自体が周期に
         // なるためN<n>は出さない(ppmck仕様で@2の時のNは無効)
         if (flags.hasFme7Noise && ev.fme7Noise !== undefined && ev.fme7Noise !== state.curFme7Noise) {
@@ -169,7 +188,8 @@
     return {
       curOct: -1, curVol: -1, curInst: -1, curEnvV: -1, curEnvVr: -1,
       curFme7Shape: -1, curFme7Period: -1, curFme7Noise: -1, curVolMode: null, durCarry: 0,
-      curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, lastWasNote: false, hasEmitted: false
+      curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, curPitchEp: null, curPitchEpDelay: 0,
+      lastWasNote: false, hasEmitted: false
     };
   }
 
@@ -181,7 +201,8 @@
     const flags = {
       hasVolume: !!opts.hasVolume, hasInstrument: !!opts.hasInstrument,
       hasEnvelope: !!opts.hasEnvelope, hasFme7Env: !!opts.hasFme7Env, hasVrc7Tone: !!opts.hasVrc7Tone,
-      hasFdsMod: !!opts.hasFdsMod, hasFme7Noise: !!opts.hasFme7Noise, hasDetune: !!opts.hasDetune
+      hasFdsMod: !!opts.hasFdsMod, hasFme7Noise: !!opts.hasFme7Noise, hasDetune: !!opts.hasDetune,
+      hasPitchMod: !!opts.hasPitchMod
     };
     const tempoPrefix = opts.tempoPrefix || '';
 
@@ -287,6 +308,7 @@
         hasVolume: !!chan.hasVolume, hasInstrument: !!chan.hasInstrument,
         hasEnvelope: !!chan.hasEnvelope, hasFme7Env: !!chan.hasFme7Env, hasVrc7Tone: !!chan.hasVrc7Tone,
         hasFdsMod: !!chan.hasFdsMod, hasFme7Noise: !!chan.hasFme7Noise, hasDetune: !!chan.hasDetune,
+        hasPitchMod: !!chan.hasPitchMod,
         // 曲(このチャンネル)で最も多い音価をl<n>としてチャンネル先頭で宣言し、以後
         // 一致する音符/休符は数値部分を省略する(renderEvents内のomitDefaultLen参照)。
         defaultLen: MML.Convert.detectDefaultLength(filled, fpb)

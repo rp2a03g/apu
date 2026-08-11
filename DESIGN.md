@@ -133,11 +133,32 @@ structuredClone/JSON.stringifyがそのまま通ること)。
   volume?: number,
   instrument?: number,
   envelopeV?: number, envelopeVr?: number,
+  detune?: number,      // D<n>。変換先チップの周期/周波数レジスタへの生オフセット定数
+  pitchEp?: number,     // EP<n>参照インデックス(下記pitchMod分類結果をレジストリ登録した番号)。
+                        //   mmlEmit.jsはこの数値だけを見る(DESIGN-PITCH.md Phase 1)
+  pitchMod?: {          // 分類の中間結果(IR上はオプション、無くても良い。実装は
+                        //   src/convert/pitch.js の classifyPitchMod の戻り値そのもの)
+    type: 'periodic',   // 周期ビブラート(Phase 1)。loopが繰り返し単位
+    head: number[],     // ループ開始前の区間(実測ゼロ値のみ、DESIGN-PITCH.md §5参照)
+    loop: number[],     // 1周期分の生レジスタオフセット差分列
+    delay: number        // 常に0(delay引数拡張は別プロジェクトA、未実装)
+  } | {
+    type: 'literal' | 'ramp',  // 非周期の装飾(こぶし/アタックベンド/ランプ、Phase 3)。
+                        //   'ramp'は単調増加/減少、'literal'はそれ以外の任意形状
+    head: number[],     // 区間全体の生レジスタオフセット差分列(末尾は同一値足踏みをtrim済み)
+    loop: null          // ループ無し。テーブル末尾到達後は最終値を永久ホールド
+                        //   (src/mml/compiler.js stepEnvelope参照)
+  },
   continued?: boolean,  // 小節境界等で分割された継続音(タイで繋ぐ)
   srcRange?: [number, number]  // 原文MML内の文字位置 [開始,終了)。
                                //   部分書き戻し(INV-6)に使う。無い場合もある
 }
 ```
+
+`pitchMod`/`pitchEp`は DESIGN-PITCH.md Phase 1 で追加(厳密周期ビブラート→ループ`EP<n>`)、
+`type:'literal'/'ramp'`は Phase 3 で追加(非周期の装飾→非ループ`EP<n>`)。
+`src/ir/`(Song IR実装)がまだ存在しないため`MML.IR.validate`への型チェック追加は未着手。
+`src/ir/`実装時にこのフィールドの型チェックも忘れずに追加すること。
 
 **TimedPitchEvent**(リアルタイム入力の共通形式。量子化前):
 

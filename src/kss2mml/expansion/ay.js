@@ -84,13 +84,14 @@
         else if (period >= 1) { freqHz = toneFreq(period, clock); note = freqToNoteNumber(freqHz); }
       }
       const noise = mode === 3 ? t.noisePeriod : null; // @3のみN<n>を出す
-      if (!cur) { cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume] }; continue; }
+      if (!cur) { cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [period] }; continue; }
       const retrigger = note !== null && volume > cur.volSeq[cur.volSeq.length - 1];
       if (retrigger || note !== cur.note || mode !== cur.mode || noise !== cur.noise) {
         flush(f);
-        cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume] };
+        cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [period] };
       } else {
         cur.volSeq.push(volume);
+        cur.pitchSeq.push(period);
       }
     }
     flush(timeline.length);
@@ -103,16 +104,24 @@
       const idx = envReg ? envReg.assign(volSeq) : null;
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
     }
+    // pitchEp(EP<n>参照)は借用先(FME7)の生レジスタ空間への変換が必要なため、ここでは
+    // 付けずev.freqSeq(Hz)だけ残し、呼び出し元のkss2mml/converter.jsが
+    // MML.Convert.rescalePitchSeqFromFreqで変換してから登録する(DESIGN-PITCH.md Phase 1、
+    // src/convert/pitch.js冒頭コメント参照)。
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },
       ev.note !== null ? { instrument: ev.mode } : {},
       ev.note !== null && ev.noise !== null ? { fme7Noise: ev.noise } : {},
-      ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
+      ev.note !== null && ev.freqHz != null
+        ? { rawFreq: ev.freqHz, freqSeq: ev.pitchSeq.map(p => toneFreq(p, clock)) } : {},
       toVolumeFields(ev.volSeq)
     );
     return {
       channels: [0, 1, 2].map(ch => ({
-        events: extractToneEvents(timeline, ch, clock).map(toCommon),
+        // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2): 半音境界を跨ぐビブラートが
+        // 音符連打に化ける問題を、抽出後の後処理パスとして統合する(既存の毎フレーム
+        // ループ自体は変えない)
+        events: MML.Convert.mergeAlternatingVibrato(extractToneEvents(timeline, ch, clock)).map(toCommon),
         hasVolume: true, hasEnvelope: true, hasInstrument: true, hasFme7Noise: true
       }))
     };

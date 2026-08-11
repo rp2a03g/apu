@@ -156,7 +156,7 @@
 
   // ── イベント抽出 ──────────────────────────────────────────────
 
-  // パルスチャンネル (p1/p2): [{note, vol, duty, constVol, envKey, start, end, volSeq}]
+  // パルスチャンネル (p1/p2): [{note, vol, duty, constVol, envKey, start, end, volSeq, pitchSeq}]
   // volSeq はセグメント内フレーム毎の生音量値の列(固定音量モード時のソフトウェア音量
   // エンベロープ抽出用)。envKey はエンベロープモード時の周期(bits0-3)+ループフラグ
   // (bit5)で、ハードウェア減衰エンベロープの再現に使う(nsf2mml/converter.js側で
@@ -164,6 +164,8 @@
   // ピッチ/duty/固定音量モードが同じ間は音量変化だけでは区切らず、volSeqに積む。
   // ただしエンベロープモード中にenvKey(周期/ループ)が変わった場合は別ノートとして
   // 区切る(このツールはノート単位でしか減衰カーブを表現できないため)。
+  // pitchSeq はセグメント内フレーム毎の生周期レジスタ値の列(DESIGN-PITCH.md Phase 0。
+  // volSeqのconstVol gateとは独立に、セグメントが続く全フレームで無条件に積む)。
   function extractPulseEvents(timeline, chKey, statusBit) {
     const events = [];
     let cur = null;
@@ -171,8 +173,8 @@
     function flush(end) {
       if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; }
     }
-    function begin(f, note, vol, duty, constVol, envKey, rawFreq) {
-      cur = { note, vol, duty, constVol, envKey, start: f, end: f, volSeq: [vol], rawFreq };
+    function begin(f, note, vol, duty, constVol, envKey, rawFreq, period) {
+      cur = { note, vol, duty, constVol, envKey, start: f, end: f, volSeq: [vol], pitchSeq: [period], rawFreq };
     }
 
     for (let f = 0; f < timeline.length; f++) {
@@ -194,20 +196,23 @@
       const rawFreq = note !== null ? freq : null;
 
       if (!cur) {
-        begin(f, note, vol, duty, constVol, envKey, rawFreq);
+        begin(f, note, vol, duty, constVol, envKey, rawFreq, period);
         continue;
       }
       // アタック書き込みがあれば必ず新イベント
       if (t.attack[chKey]) {
-        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq);
+        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period);
       } else if (note !== cur.note || duty !== cur.duty || constVol !== cur.constVol ||
                  (!constVol && envKey !== cur.envKey)) {
-        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq);
-      } else if (constVol) {
-        // 固定音量モードのまま音量だけ変化する場合はソフトウェアエンベロープの
-        // 一部として同一ノートに積む(区切らない)。
-        cur.vol = vol;
-        cur.volSeq.push(vol);
+        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period);
+      } else {
+        cur.pitchSeq.push(period);
+        if (constVol) {
+          // 固定音量モードのまま音量だけ変化する場合はソフトウェアエンベロープの
+          // 一部として同一ノートに積む(区切らない)。
+          cur.vol = vol;
+          cur.volSeq.push(vol);
+        }
       }
     }
     flush(timeline.length);
@@ -247,12 +252,14 @@
       const note = (active && freq > 0 && gated) ? freqToNote(freq) : null;
       const rawFreq = note !== null ? freq : null;
 
-      if (!cur) { cur = { note, start: f, end: f, rawFreq }; continue; }
+      if (!cur) { cur = { note, start: f, end: f, rawFreq, pitchSeq: [period] }; continue; }
 
       if (t.attack.tr) {
-        flush(f); cur = { note, start: f, end: f, rawFreq };
+        flush(f); cur = { note, start: f, end: f, rawFreq, pitchSeq: [period] };
       } else if (note !== cur.note) {
-        flush(f); cur = { note, start: f, end: f, rawFreq };
+        flush(f); cur = { note, start: f, end: f, rawFreq, pitchSeq: [period] };
+      } else {
+        cur.pitchSeq.push(period);
       }
     }
     if (cur) { cur.end = timeline.length; if (cur.end > cur.start) events.push(cur); }
@@ -460,9 +467,12 @@
     options = options || {};
     const timeline = buildTimeline(writeLog, initRegs);
 
-    const evA = extractPulseEvents(timeline, 'p1', 1);
-    const evB = extractPulseEvents(timeline, 'p2', 2);
-    const evC = extractTriEvents(timeline);
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2): 半音境界を跨ぐビブラートが
+    // 音符連打に化ける問題を、抽出後の後処理パスとして統合する(ノイズ(evD)は
+    // 音程=周期インデックスの離散値でビブラートの概念が無いため対象外)。
+    const evA = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p1', 1));
+    const evB = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p2', 2));
+    const evC = MML.Convert.mergeAlternatingVibrato(extractTriEvents(timeline));
     const evD = extractNoiseEvents(timeline);
     const dmcTriggers = extractDmcTriggers(timeline, writeLog, header);
     const bankInfo    = computeBankInfo(nsfBytes, header || {});
@@ -560,14 +570,28 @@
       return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
 
+    // ピッチエンベロープ(厳密周期ビブラート)を曲全体で共有登録するレジストリ
+    // (DESIGN-PITCH.md Phase 1)。基準点はev.rawFreqと同じ生成元(ev.pitchSeq[0])
+    // なのでD<n>(detectChorusDetuneが後段で設定)とcompiler.js側で正しく合成される。
+    const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
+    function toPitchFields(ev) {
+      if (ev.rawFreq == null || !ev.pitchSeq) return {};
+      const assigned = pitchReg.assign(ev.pitchSeq);
+      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+    }
+
     // イベントを共通形式 { start, end, note, volume?/envelopeV?, instrument?, rawFreq? } に整形
     const toCommon = (ev) => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq },
-      ev.note !== null ? toVolumeFields(ev) : {}
+      ev.note !== null ? toVolumeFields(ev) : {},
+      ev.note !== null ? toPitchFields(ev) : {}
     );
     const chEventsA = evA.map(toCommon);
     const chEventsB = evB.map(toCommon);
-    const chEventsC = evC.map(ev => ({ start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq }));
+    const chEventsC = evC.map(ev => Object.assign(
+      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq },
+      ev.note !== null ? toPitchFields(ev) : {}
+    ));
     const chEventsD = evD.map(ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.on ? noisePeriodToNoteNum(ev.periodIdx) : null },
       ev.on ? toVolumeFields(ev) : {}
@@ -593,9 +617,9 @@
     // 全チャンネルを小節揃えスコア形式(1回のemitScore呼び出し)で出力する。
     // テンポは先頭に "ABCD... t<bpm>" の形で1回だけ出す。
     const scoreChannels = [
-      { letter: 'A', events: chEventsA, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true },
-      { letter: 'B', events: chEventsB, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true },
-      { letter: 'C', events: chEventsC, hasDetune: true },
+      { letter: 'A', events: chEventsA, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true, hasPitchMod: true },
+      { letter: 'B', events: chEventsB, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true, hasPitchMod: true },
+      { letter: 'C', events: chEventsC, hasDetune: true, hasPitchMod: true },
       { letter: 'D', events: chEventsD, hasVolume: true, hasEnvelope: true },
       ...(dpcmLetter ? [{ letter: dpcmLetter, events: dpcmEvents, hasInstrument: true }] : []),
     ];
@@ -619,10 +643,11 @@
       if (!extractor) continue;
       const result = extractor(writeLog, totalFrames, envReg,
         chip === 'fds' ? fdsWaveReg : chip === 'n163' ? n163WaveReg : chip === 'vrc7' ? vrc7ToneReg : undefined,
-        initRegs, initWrites, options.n163Snapshots);
+        initRegs, initWrites, options.n163Snapshots, pitchReg);
       const letters = expansionLetterMap[chip];
+      const hasPitchModForChip = chip !== 'vrc7'; // VRC7はfnum/block対数空間でD/EP/MP非対応(DESIGN-PITCH.md §7)
       result.channels.forEach((ch, index) => {
-        scoreChannels.push(Object.assign({}, ch, { letter: letters[index], hasDetune: true }));
+        scoreChannels.push(Object.assign({}, ch, { letter: letters[index], hasDetune: true, hasPitchMod: hasPitchModForChip }));
         detuneEntries.push({ events: ch.events, periodFn: expansionPeriodFn(chip, index) });
       });
       if (result.fdsWave)  fdsWave  = result.fdsWave;
@@ -652,8 +677,8 @@
 
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm,
-      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...fdsWaveReg.defLines(),
-        ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(), ...fdsModDefLines]
+      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(),
+        ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(), ...fdsModDefLines]
     });
 
     const mml = [headerComment, scoreText].join('\n');

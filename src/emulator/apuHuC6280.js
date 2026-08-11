@@ -262,17 +262,24 @@
   }
 
   // 鍵盤表示/ロール用ライブスナップショット(snapshotGbApu等と同じ考え方)。
+  // panL/panR: $0805(chバランス)の上位/下位ニブル(0-15、鍵盤表示のL/R列用)。
+  // 戻り値の配列自体にglobalPanL/globalPanR($0801、全体バランス)も生やしておく
+  // (main.js liveHesApu()参照。ch単位ではないため配列要素にはせず配列のプロパティとして持たせる)。
   Emu.snapshotHuC6280Apu = function (apu) {
-    return apu.ch.map((c, i) => {
+    const arr = apu.ch.map((c, i) => {
       const freqHz = (c.on && !c.dda && c.freq > 0) ? MML.HES.PSG_CLOCK / (32 * c.freq) : 0;
       const noiseOn = c.hasNoise && c.on && (c.noiseCtrl & 0x80) !== 0;
       return {
         on: c.on, dda: c.dda, noiseOn,
         freq: freqHz, vol: c.volume / 31, rawVol: c.volume,
         wave: Array.from(c.wave, v => v / 15.5 - 1),
-        active: c.on && c.volume > 0 && (c.dda || noiseOn || freqHz > 0)
+        active: c.on && c.volume > 0 && (c.dda || noiseOn || freqHz > 0),
+        panL: (c.balance >> 4) & 0x0F, panR: c.balance & 0x0F
       };
     });
+    arr.globalPanL = (apu.balance >> 4) & 0x0F;
+    arr.globalPanR = apu.balance & 0x0F;
+    return arr;
   };
 
   Emu.APUHuC6280 = APUHuC6280;

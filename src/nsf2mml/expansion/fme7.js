@@ -81,7 +81,7 @@
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
-    function begin(f, ev) { cur = Object.assign({ start: f, end: f, volSeq: [ev.volume] }, ev); }
+    function begin(f, ev, period) { cur = Object.assign({ start: f, end: f, volSeq: [ev.volume], pitchSeq: [period] }, ev); }
     for (let f = 0; f < timeline.length; f++) {
       const t = timeline[f];
       const period = t.periods[chIndex];
@@ -102,23 +102,24 @@
         noise: mode === 3 ? t.noisePeriod : null,
       };
 
-      if (!cur) { begin(f, ev); continue; }
+      if (!cur) { begin(f, ev, period); continue; }
 
       const restart = envUsed && t.envRestart;
       if (note !== cur.note || mode !== cur.mode || ev.noise !== cur.noise ||
           envUsed !== cur.envUsed || restart ||
           (envUsed && (t.envShape !== cur.envShape || t.envPeriod !== cur.envPeriod))) {
         flush(f);
-        begin(f, ev);
-      } else if (!envUsed) {
-        cur.volSeq.push(volume);
+        begin(f, ev, period);
+      } else {
+        cur.pitchSeq.push(period);
+        if (!envUsed) cur.volSeq.push(volume);
       }
     }
     flush(timeline.length);
     return events;
   }
 
-  MML.Nsf2MmlExpansion.fme7 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites) {
+  MML.Nsf2MmlExpansion.fme7 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
     const timeline = buildTimeline(writeLog, initWrites);
     function toVolumeFields(ev) {
       // FME7のハードウェアエンベロープは全ch共有の1個しかない(R11/R12/R13はグローバル)ため、
@@ -129,17 +130,25 @@
       const idx = envReg ? envReg.assign(ev.volSeq) : null;
       return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
+    // @2(ノイズ単独)はrawFreqがnullなのでここで自動的に対象外になる
+    function toPitchFields(ev) {
+      if (!pitchReg || ev.rawFreq == null) return {};
+      const assigned = pitchReg.assign(ev.pitchSeq);
+      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+    }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq },
       ev.note !== null ? { instrument: ev.mode } : {},
       ev.note !== null && ev.noise !== null ? { fme7Noise: ev.noise } : {},
-      ev.note !== null ? toVolumeFields(ev) : {}
+      ev.note !== null ? toVolumeFields(ev) : {},
+      ev.note !== null ? toPitchFields(ev) : {}
     );
 
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
     const chan = (letter, index) => ({
-      letter, events: extractToneEvents(timeline, index).map(toCommon),
+      letter, events: MML.Convert.mergeAlternatingVibrato(extractToneEvents(timeline, index)).map(toCommon),
       hasVolume: true, hasEnvelope: true, hasFme7Env: true,
-      hasInstrument: true, hasFme7Noise: true
+      hasInstrument: true, hasFme7Noise: true, hasPitchMod: true
     });
 
     return { channels: [chan('E', 0), chan('F', 1), chan('G', 2)] };

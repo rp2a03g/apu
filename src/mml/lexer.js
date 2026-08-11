@@ -564,7 +564,7 @@
         }
         case '>': i++; tokens.push({ type: 'octaveUp' }); break;
         case '<': i++; tokens.push({ type: 'octaveDown' }); break;
-        case 'l': case 'L': {
+        case 'l': {
           i++;
           const v = readNumber();
           let dots = 0;
@@ -572,6 +572,11 @@
           tokens.push({ type: 'length', value: v, dots });
           break;
         }
+        // 大文字L = ループ地点マーカー(小文字lのデフォルト音長とは別コマンド。以前は
+        // l/Lを区別せず同じ長さコマンドとして扱っていたが、ppmck本来の意味に合わせて分離した)。
+        // パラメータは取らない。曲の再生がチャンネル末尾に達したとき、このチャンネルの
+        // Lの位置まで戻って演奏を続ける(compiler.js buildSegments/src/driver/ppmckDriver.js参照)
+        case 'L': i++; tokens.push({ type: 'loopPoint' }); break;
         case 'v': case 'V': {
           i++;
           if (str[i] === '+' || str[i] === '-') {
@@ -654,12 +659,20 @@
           tokens.push({ type: 'fme7EnvShape', value: v == null ? 0 : v });
           break;
         }
+        // EP<n>[,<delay>] ピッチエンベロープ選択。<delay>は省略可(既定0=即座に開始)、
+        // 選択解除EPOFにはdelayの概念が無い(2026-08-11 別プロジェクトA: EP<n>,<delay>引数拡張。
+        // s<n0>,<n1>と同じカンマ区切りの追加引数パターンを踏襲)
         case 'E': {
           i++;
           if (str[i] === 'P' || str[i] === 'p') {
             i++;
-            if (matchLiteral2('OF')) tokens.push({ type: 'pitchEnv', value: 255 });
-            else { const v = readNumber(); tokens.push({ type: 'pitchEnv', value: v == null ? 0 : v }); }
+            if (matchLiteral2('OF')) tokens.push({ type: 'pitchEnv', value: 255, delay: 0 });
+            else {
+              const v = readNumber();
+              let delay = 0;
+              if (str[i] === ',') { i++; const d = readNumber(); delay = d == null ? 0 : d; }
+              tokens.push({ type: 'pitchEnv', value: v == null ? 0 : v, delay });
+            }
           } else if (str[i] === 'N' || str[i] === 'n') {
             i++;
             if (matchLiteral2('OF')) tokens.push({ type: 'noteEnv', value: 255 });
@@ -684,11 +697,14 @@
           }
           break;
         }
+        // s<n0>,<n1> スイープ。両方とも0-15の符号なし値(n1の下位4bitがnegate+shiftを
+        // 兼ねるため符号は付かない。旧実装はn1を符号付きで読んでいたが誤り。
+        // compiler.js sweepRegisterByte参照)
         case 's': {
           i++;
           const speed = readNumber();
           let depth = null;
-          if (str[i] === ',') { i++; depth = readSignedNumber(); }
+          if (str[i] === ',') { i++; depth = readNumber(); }
           tokens.push({ type: 'sweep', speed: speed == null ? 0 : speed, depth: depth == null ? 0 : depth });
           break;
         }

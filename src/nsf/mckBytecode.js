@@ -13,7 +13,10 @@
  *   0xF4      : ウェイト。直後1バイトがフレーム数を直前のイベントへ加算する
  *               (256以上の音長を255バイトずつに分割して継続するために使う)
  *   0xF7      : ノートエンベロープ(EN)選択。次バイトはインデックス(255=off)
- *   0xF8      : ピッチエンベロープ(EP)選択。次バイトはインデックス(255=off)
+ *   0xF8      : ピッチエンベロープ(EP)選択。次の2バイトが[インデックス(255=off),delay]。
+ *               delayはEP<n>,<delay>のdelayフレーム数(0-255、2026-08-11 別プロジェクトA。
+ *               ppmck本家仕様には無いこのツール独自の拡張。offでも固定長デコードのため
+ *               2バイト目を読む、値は無視される)
  *   0xFB      : ビブラート(MP)選択。次バイトはインデックス(255=off)
  *   0xFC      : 休符。直後1バイトがフレーム数
  *   0xFD      : 音量直接指定。次バイトは 0x80|(0-15)。このチャンネルのソフトウェア
@@ -75,10 +78,30 @@
  *     実際の加算・負方向クランプを行う。実機6502エミュレータ上でのNSF書き出し往復
  *     検証済み(全対応チップで期待通りの周期差、高音+大きな負のデチューンでも
  *     0クランプでラップアラウンドしないことを確認)。
- *   - DPCM: チャンネル文字の割当方針が未確定(ROADMAP.mdフェーズ1.7タスク1で
- *     ユーザー確認待ち)のため、この段階では対象にしない。
+ *   - DPCM: フェーズ1.7でチャンネル文字の割当・NSF書き出し(TYPE_DPCM)まで実装済み
+ *     (このコメントは実装前に書かれたまま更新されていなかった。DPCMチャンネルの
+ *     セグメント列も他チップと同じくこのserialize()を通る。noteByteはdpcm_dataの
+ *     インデックスではなく音符音高そのもので、レートインデックスへの変換は
+ *     src/driver/ppmckDriver.jsのTYPE_DPCMハンドラが行う)。
  *   - FDSの`MH<n>`(曲中の変調再ロード)はVRC7の`OP<n>`(0xF0)と同じ音符に紐付かない
  *     即時コマンドとして0xF5オペコードで対応する(下記OP_FDS_MOD_RELOAD参照)。
+ *   - L(ループ地点マーカー): 2026-08-09実装。serialize()はloopFrame引数を受け取り、
+ *     対応するバイト列オフセット(loopByteOffset)を返すだけ。実際のジャンプ命令の
+ *     生成・アドレス解決はROM配置が決まった後でないとできない(0xEEバンクジャンプと
+ *     同じ理由)ため、src/driver/ppmckDriver.js側(layoutChannelBanks/buildFixedSource)の
+ *     責務とする。
+ *   - EP(0xF8、ピッチエンベロープ)・MP(0xFB、ビブラート)デチューン(0xFA)と
+ *     全く同じ「発音周波数レジスタへの生オフセット加算」空間を共有するため(compiler.jsの
+ *     pitchRegisterOffset参照)、6502ドライバ側もAPPLY_DETUNE自体を拡張してD<n>と
+ *     一緒に加算する設計を取る。EP_LOOKUP/LFO_SUB・WRITE_FREQ_ONLY(継続フレームの
+ *     周期/周波数レジスタ再書込み専用、音符アタック時のWRITE_FREQ_VOLとは別経路)は
+ *     src/driver/ppmckDriver.js参照。pitchEnvIndexRemap/vibratoIndexRemapで
+ *     曲中の使用インデックスだけをROMへコンパクトに詰める(envIndexRemapと同じ方式)。
+ *   - EN(0xF7、ノートエンベロープ=アルペジオ)は引き続き未実装(オペコードを読み捨てるだけ、
+ *     RD_SKIP1)。EN/EP/MPのうちEP/MPを優先実装した経緯はメモリ
+ *     (ppmck-nsf-export-en-ep-mp-implementation-plan)参照。ENはノート番号空間への
+ *     加算(周期/周波数レジスタ空間のD/EP/MPとは別のノート単位の値の重ね方)が必要で
+ *     設計が別になるため、別途対応する。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -154,8 +177,23 @@
   // 採番したもの(0-99のソフトウェア由来・100番台のハードウェア由来を区別せず同じ
   // 番号空間として扱う)。省略時(nullや未指定のenvelopeVは)常にプレーン音量(OP_VOL)
   // として出力する
-  MckBytecode.serialize = function (segments, immediateWrites, envIndexRemap) {
+  // loopFrame: 省略可。Lコマンド(ループ地点マーカー)が出現した時点のフレーム数
+  // (compiler.js buildSegments()の戻り値のloopFrame、このチャンネル自身の値)。
+  // 指定された場合、そのフレーム位置に対応するバイト列中のオフセットを
+  // 戻り値のloopByteOffsetとして返す(src/driver/ppmckDriver.jsがNSFバンク配置後の
+  // 実アドレスへ変換し、トラック終端でそこへジャンプする本当の無限ループを組み立てる)。
+  // 戻り値は従来のUint8Arrayではなく{ bytes, loopByteOffset }になる点に注意
+  // (呼び出し元はsrc/driver/ppmckDriver.jsのみ)
+  // pitchEnvIndexRemap/vibratoIndexRemap: 省略可。envIndexRemapと同じ考え方で、曲全体で
+  // 実際に使われているEP<n>/MP<n>のインデックスだけを詰めて0始まりで再採番したもの
+  // (2026-08-11、EN/EP/MPのNSF書き出し実装。src/driver/ppmckDriver.jsのEP_LEN/EP_PTR等・
+  // MP_DELAY/MP_SPEED/MP_DEPTHテーブルの添字と一致させる)。省略時は元のインデックスを
+  // そのまま使う(255=off はremap対象外で常にそのまま)。remapが渡されているのに対応する
+  // エントリが無い(未定義のEP<n>/MP<n>を参照)場合はオペコード自体を出力しない
+  // (compiler.js側もそのセグメントは効果0として扱うため、無出力=無効果で整合する)
+  MckBytecode.serialize = function (segments, immediateWrites, envIndexRemap, loopFrame, pitchEnvIndexRemap, vibratoIndexRemap) {
     const bytes = [];
+    let loopByteOffset = null;
     let lastVolume = null;
     let lastVolMode = null; // 'plain' | 'env' | 'fme7env' (src/convert/mmlEmit.jsのcurVolModeと
                              // 同じ考え方。モード切替時は値/番号が前回と同じでも必ず出し直す)
@@ -163,6 +201,7 @@
     let lastTone = null;
     let lastNoteEnv = null;
     let lastPitchEnv = null;
+    let lastPitchEnvDelay = null; // EP<n>,<delay>のdelay(2026-08-11 別プロジェクトA)
     let lastVibrato = null;
     let lastFme7Noise = null;
     let lastFme7EnvShape = null;
@@ -214,6 +253,14 @@
       flushToneReloadsUpTo(elapsed);
       flushModReloadsUpTo(elapsed);
       flushN163ReloadsUpTo(elapsed);
+      // このセグメントの開始位置がちょうどLの位置なら、これから出力するバイト列の
+      // 先頭(=このセグメントの最初のオペコード)をループ入り口として記録する。
+      // buildSegments()のloopFrameはセグメント境界上のelapsedFramesをそのまま
+      // 記録したものなので、ここでのelapsed(このセグメントを加算する前の値)と
+      // 必ず一致する
+      if (loopFrame != null && loopByteOffset == null && elapsed === loopFrame) {
+        loopByteOffset = bytes.length;
+      }
       elapsed += seg.durationFrames;
       const gateDenom = seg.gateDenom || 8;
       const gate = seg.gate == null ? 8 : seg.gate;
@@ -265,13 +312,27 @@
           bytes.push(OP_NOTE_ENV, seg.noteEnv & 0xff);
           lastNoteEnv = seg.noteEnv;
         }
-        if (seg.pitchEnv != null && seg.pitchEnv !== lastPitchEnv) {
-          bytes.push(OP_PITCH_ENV, seg.pitchEnv & 0xff);
-          lastPitchEnv = seg.pitchEnv;
+        // EP<n>,<delay>(2026-08-11 別プロジェクトA): 番号だけでなくdelayも音符ごとの状態
+        // なので、番号が前回と同じでもdelayが違えば出し直す(src/convert/mmlEmit.jsの
+        // curPitchEp/curPitchEpDelay判定と同じ理由)。offはdelayの概念が無いので0固定で
+        // 出す(6502側は常に2バイト固定長で読むためoff時も1バイト分空読みが必要)。
+        const pitchEnvDelay = seg.pitchEnv === 255 ? 0 : Math.max(0, Math.min(255, seg.pitchEnvDelay || 0));
+        if (seg.pitchEnv != null && (seg.pitchEnv !== lastPitchEnv || pitchEnvDelay !== lastPitchEnvDelay)) {
+          const pe = seg.pitchEnv === 255 ? 255
+            : (pitchEnvIndexRemap ? pitchEnvIndexRemap[seg.pitchEnv] : seg.pitchEnv);
+          if (pe != null) {
+            bytes.push(OP_PITCH_ENV, pe & 0xff, pitchEnvDelay & 0xff);
+            lastPitchEnv = seg.pitchEnv;
+            lastPitchEnvDelay = pitchEnvDelay;
+          }
         }
         if (seg.vibrato != null && seg.vibrato !== lastVibrato) {
-          bytes.push(OP_VIBRATO, seg.vibrato & 0xff);
-          lastVibrato = seg.vibrato;
+          const mp = seg.vibrato === 255 ? 255
+            : (vibratoIndexRemap ? vibratoIndexRemap[seg.vibrato] : seg.vibrato);
+          if (mp != null) {
+            bytes.push(OP_VIBRATO, mp & 0xff);
+            lastVibrato = seg.vibrato;
+          }
         }
         const detune = seg.detune || 0;
         if (detune !== lastDetune) {
@@ -301,9 +362,14 @@
     flushToneReloadsUpTo(elapsed);
     flushModReloadsUpTo(elapsed);
     flushN163ReloadsUpTo(elapsed);
+    // Lが曲(このチャンネル)の末尾ちょうどに置かれていた場合(末尾に音符が続かない)のための
+    // 保険。この場合ループ先はOP_END自身になり、以降は無音のまま無限ループする
+    if (loopFrame != null && loopByteOffset == null && elapsed === loopFrame) {
+      loopByteOffset = bytes.length;
+    }
 
     bytes.push(OP_END);
-    return new Uint8Array(bytes);
+    return { bytes: new Uint8Array(bytes), loopByteOffset };
   };
 
   // シリアライズ結果を読み戻し、イベント列にする(往復テスト用。実際の6502ドライバの
@@ -313,7 +379,7 @@
     const rawEvents = [];
     let i = 0;
     let volume = null, tone = null;
-    let noteEnv = null, pitchEnv = null, vibrato = null;
+    let noteEnv = null, pitchEnv = null, pitchEnvDelay = 0, vibrato = null;
     let fme7Noise = null, fme7EnvShape = null, fme7EnvPeriod = null;
     let detune = 0;
     let envIdx = null; // OP_VOL_ENVで選択中のコンパクトなテーブル番号(nullならプレーン音量)
@@ -342,7 +408,7 @@
         continue;
       }
       if (b === OP_NOTE_ENV) { noteEnv = bytes[i]; i++; continue; }
-      if (b === OP_PITCH_ENV) { pitchEnv = bytes[i]; i++; continue; }
+      if (b === OP_PITCH_ENV) { pitchEnv = bytes[i]; pitchEnvDelay = bytes[i + 1]; i += 2; continue; }
       if (b === OP_DETUNE) {
         const d16 = bytes[i] | (bytes[i + 1] << 8);
         detune = d16 >= 0x8000 ? d16 - 0x10000 : d16;
@@ -361,7 +427,7 @@
       const frames = bytes[i]; i++;
       rawEvents.push({
         type: 'note', noteNumber: b, frames, volume, tone, envIdx,
-        noteEnv, pitchEnv, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune
+        noteEnv, pitchEnv, pitchEnvDelay, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune
       });
     }
 

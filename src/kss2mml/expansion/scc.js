@@ -159,13 +159,14 @@
       const note = (enabled && volume > 0 && freqHz > 0) ? freqToNoteNumber(freqHz) : null;
       const wave = resampleWave(t.wave[ch]);
       const waveKey = wave.join(',');
-      if (!cur) { cur = { note, wave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume] }; continue; }
+      if (!cur) { cur = { note, wave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume], pitchSeq: [period] }; continue; }
       const retrigger = note !== null && volume > cur.volSeq[cur.volSeq.length - 1];
       if (retrigger || note !== cur.note || (note !== null && waveKey !== cur.waveKey)) {
         flush(f);
-        cur = { note, wave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume] };
+        cur = { note, wave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume], pitchSeq: [period] };
       } else {
         cur.volSeq.push(volume);
+        cur.pitchSeq.push(period);
       }
     }
     flush(timeline.length);
@@ -184,16 +185,20 @@
       const idx = envReg ? envReg.assign(volSeq) : null;
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
     }
+    // pitchEpは呼び出し元(kss2mml/converter.js)がev.freqSeqから借用先(N163)の
+    // 生レジスタ空間へ変換して付与する(ay.jsと同じ理由、DESIGN-PITCH.md Phase 1)。
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(ev.wave) } : {},
-      ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
+      ev.note !== null && ev.freqHz != null
+        ? { rawFreq: ev.freqHz, freqSeq: ev.pitchSeq.map(p => p > 8 ? clock / (32 * (p + 1)) : 0) } : {},
       toVolumeFields(ev.volSeq)
     );
     const finalFrame = timeline.length > 0 ? timeline[timeline.length - 1] : null;
     return {
       channels: [0, 1, 2, 3, 4].map(ch => ({
-        events: extractChannelEvents(timeline, ch, clock).map(toCommon),
+        // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
+        events: MML.Convert.mergeAlternatingVibrato(extractChannelEvents(timeline, ch, clock)).map(toCommon),
         hasVolume: true,
         hasEnvelope: true,
         hasInstrument: true

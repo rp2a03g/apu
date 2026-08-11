@@ -35,6 +35,40 @@
     return 31 - best;
   }
 
+  // 物理ch(4 or 5)単独のノイズイベント列(マージ無し)。noise()はMML書き出し用に
+  // 2A03への借用(物理1chしか無い)を前提としてch5優先でch4/5をマージするが、
+  // ピアノロール/鍵盤表示はch4・ch5を別々の行として独立に持つため、マージせず
+  // 物理chごとのイベント列が必要(main.js buildHesRollTimeline参照。
+  // 「ないチャンネルの表示がロールにある」バグ調査で発覚: 従来はnoise()のマージ結果を
+  // どの行にも属さない別idのゴースト行として表示していたため、ミュートが効かず色も
+  // 一致しなかった)。
+  function extractChannelNoiseEvents(snapshots, chIndex) {
+    const events = [];
+    let cur = null;
+    function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
+    for (let f = 0; f < snapshots.length; f++) {
+      const c = snapshots[f][chIndex];
+      const active = c.on && c.noiseOn;
+      const vol4 = active ? Math.max(0, Math.min(15, c.vol >> 1)) : 0;
+      const note = (active && vol4 > 0) ? psgNoiseFreqToNote(psgNoiseFreq(c.noiseCtrl)) : null;
+      if (!cur) { cur = { note, start: f, end: f, volSeq: [vol4] }; continue; }
+      if (note !== cur.note) {
+        flush(f);
+        cur = { note, start: f, end: f, volSeq: [vol4] };
+      } else {
+        cur.volSeq.push(vol4);
+      }
+    }
+    flush(snapshots.length);
+    return events;
+  }
+
+  MML.Hes2MmlExpansion.noiseChannel = function (snapshots, chIndex) {
+    const events = extractChannelNoiseEvents(snapshots, chIndex)
+      .map(ev => ({ note: ev.note, start: ev.start, end: ev.end, volume: ev.volSeq[0] }));
+    return { events };
+  };
+
   function pickSource(snapFrame) {
     const c5 = snapFrame[5], c4 = snapFrame[4];
     if (c5.on && c5.noiseOn) return c5;

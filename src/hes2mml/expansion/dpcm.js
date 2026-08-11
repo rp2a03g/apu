@@ -100,24 +100,33 @@
     return runs;
   }
 
-  MML.Hes2MmlExpansion.dpcm = function (snapshots, dpcmTrace, controlTrace, frameRate) {
+  // フォーマット非依存の共通抽出処理。「同じドラム/ボイス音の別打点」を重複排除した
+  // 生クリップ(5bit、0-31の生サンプル値。DMCエンコード等の変換は一切していない)と、
+  // どのクリップがいつ(何フレーム目〜何フレーム目に)トリガーされたかを返す。
+  // MML.Hes2MmlExpansion.dpcm()(hes2mml変換、@DPCM<n>としてDMCエンコードする)と
+  // src/audio/hes-stream-player.js HesReplayStreamPlayer(ネイティブ再生、生サンプルを
+  // そのままAudioBufferとして再生する)の両方がこの1箇所を共有する(2026-08、
+  // ユーザー提案: 「PCMは種類が少ないので最初に軽くバッファして呼び出すだけにすればいい」
+  // という方針をネイティブ再生側にも展開)。
+  // 戻り値: { channel, clips: [{samples:number[](0-31), rateHz}], events: [{start,end,clipIndex}] }
+  MML.Hes2MmlExpansion.extractDdaClips = function (snapshots, dpcmTrace, controlTrace, frameRate) {
     const totalFrames = snapshots.length;
-    const defs = [], files = [], events = [];
+    const clips = [], events = [];
 
-    // @DPCM<n>チャンネルは1つしか無いため(冒頭コメント参照)、6ch中もっとも実際に
-    // DDA区間の合計が長いchを1つだけ選ぶ(同時使用時に毎フレームchを切り替えていた
-    // 旧実装より単純かつ、実測上ほぼ常に特定の1chへ集約される実態に合っている)。
+    // @DPCM<n>チャンネルは1つしか無いため(hes2mml側の制約。ネイティブ再生では制約は
+    // 無いが、実測上ほぼ常に特定の1chへ集約されるため同じ選び方を踏襲する)、6ch中
+    // もっとも実際にDDA区間の合計が長いchを1つだけ選ぶ。
     let bestCh = -1, bestTotal = 0, bestRuns = null;
     for (let ch = 0; ch < 6; ch++) {
       const runs = buildChannelRuns(controlTrace[ch] || [], totalFrames);
       const total = runs.reduce((a, r) => a + (r.end - r.start), 0);
       if (total > bestTotal) { bestTotal = total; bestCh = ch; bestRuns = runs; }
     }
-    if (bestCh < 0) return { defs, files, events };
+    if (bestCh < 0) return { channel: -1, clips, events };
 
     const trace = dpcmTrace[bestCh] || [];
     let tracePos = 0;
-    const exactMap = new Map();   // samples.join(',') -> defIndex(完全一致の高速パス)
+    const exactMap = new Map();   // samples.join(',') -> clipIndex(完全一致の高速パス)
     const uniqueList = [];        // [{index, samples}](あいまい一致のフォールバック用)
 
     for (const run of bestRuns) {
@@ -130,36 +139,57 @@
 
       // 既に登録済みの音と(完全一致 or ほぼ同一)なら新規登録せず使い回す。実際には
       // 3〜4種類しか無いドラム/ボイス音が打点の数だけ重複登録される事故を防ぐ
-      // (冒頭コメント参照。DPCMエンコード自体もそこそこ重いため、ここで弾くほど軽くなる)。
+      // (冒頭コメント参照)。
       const dupIndex = findDuplicateIndex(samples, exactMap, uniqueList);
       if (dupIndex >= 0) {
-        events.push({ start: run.start, end: run.end, note: 48, instrument: dupIndex });
+        events.push({ start: run.start, end: run.end, clipIndex: dupIndex });
         continue;
       }
 
       // レート推定: クリップの総サンプル数 ÷ 経過秒数
       const seconds = (run.end - run.start) / frameRate;
       const rateHz = seconds > 0 ? samples.length / seconds : MML.Dpcm.DMC_RATE_TABLE_NTSC[7];
-      const rateIndex = bestDmcRateIndex(rateHz);
 
+      const index = clips.length;
+      clips.push({ samples, rateHz });
+      exactMap.set(samples.join(','), index);
+      uniqueList.push({ index, samples });
+      events.push({ start: run.start, end: run.end, clipIndex: index });
+    }
+
+    return { channel: bestCh, clips, events };
+  };
+
+  // channel/defs/files/eventsを返す。defsの各要素にsampleCount(実際のPCMサンプル数。
+  // sizeはNSF側配置用のバイト数で16byte境界に切り上げ済みのため別物)も含める。
+  // ネイティブ再生(src/audio/hes-stream-player.js HesReplayStreamPlayer)がMML.Dpcm.decode()で
+  // 復号する際、この正確なサンプル数が必要(2026-08、ユーザー指摘: ネイティブ再生も
+  // 自作の簡略再生ではなく、MML変換と同じencode→decode往復を必ず経由させる)。
+  MML.Hes2MmlExpansion.dpcm = function (snapshots, dpcmTrace, controlTrace, frameRate) {
+    const { channel, clips, events: ddaEvents } = MML.Hes2MmlExpansion.extractDdaClips(snapshots, dpcmTrace, controlTrace, frameRate);
+    const defs = [], files = [], events = [];
+
+    for (const clip of clips) {
+      const rateIndex = bestDmcRateIndex(clip.rateHz);
       // 5bit(0-31)を-1..1へ正規化してDPCMエンコーダへ渡す
-      const floatSamples = new Float32Array(samples.length);
-      for (let i = 0; i < samples.length; i++) floatSamples[i] = (samples[i] / 31) * 2 - 1;
-      const encoded = MML.Dpcm.encode(floatSamples, rateHz, rateIndex);
+      const floatSamples = new Float32Array(clip.samples.length);
+      for (let i = 0; i < clip.samples.length; i++) floatSamples[i] = (clip.samples[i] / 31) * 2 - 1;
+      const encoded = MML.Dpcm.encode(floatSamples, clip.rateHz, rateIndex);
 
       const index = defs.length;
       const name = `hes_dpcm_${index}.dmc`;
       files.push({ name, bytes: encoded.bytes });
       // dac=255は「初期DAC値の書込みを省略する」既定値(ROADMAP.md @DPCMフェーズA参照、
       // ppmck driverの慣例に合わせる)。mode=0固定(ワンショット、ループしない)。
-      defs.push({ index, file: name, freq: rateIndex, size: encoded.bytes.length, dac: 255, mode: 0 });
-      exactMap.set(samples.join(','), index);
-      uniqueList.push({ index, samples });
-      // 実機DMCと同じくノート自体はレートに影響しない(常に基準ノートo4c=48で@<n>を選ぶだけ、
-      // nsf2mml/converter.js buildDpcmEventsと同じ設計)。
-      events.push({ start: run.start, end: run.end, note: 48, instrument: index });
+      defs.push({ index, file: name, freq: rateIndex, size: encoded.bytes.length, sampleCount: encoded.sampleCount, dac: 255, mode: 0 });
     }
 
-    return { defs, files, events };
+    for (const ev of ddaEvents) {
+      // 実機DMCと同じくノート自体はレートに影響しない(常に基準ノートo4c=48で@<n>を選ぶだけ、
+      // nsf2mml/converter.js buildDpcmEventsと同じ設計)。
+      events.push({ start: ev.start, end: ev.end, note: 48, instrument: ev.clipIndex });
+    }
+
+    return { channel, defs, files, events };
   };
 })(window);

@@ -335,8 +335,12 @@
       this.ch3 = new WaveChannel();
       this.ch4 = new NoiseChannel();
       this.powerOn = true;
-      this.nr50 = 0;
-      this.nr51 = 0xFF;
+      // NR50/NR51は実機ブートROMがINIT実行前に書き込む post-boot 値で初期化する
+      // (Pan Docs "Power Up Sequence"参照)。GBSプレイヤーはブートROM自体を実行せず
+      // 直接INITを呼ぶため、多くの市販曲のようにNR50/NR51をINITが明示的に書き換えない
+      // 曲では、ここが0のままだと(実機なら$77で鳴る所を)不自然に無音/小音量になる。
+      this.nr50 = 0x77; // VIN無効、L/R音量とも最大(7)
+      this.nr51 = 0xF3; // CH1-4→L全ON、CH1/2→R ON、CH3/4→R OFF(ブートチャイム由来の値そのまま)
       this.frameSeqStep = 0;
       this.frameSeqCounter = 0;
       this.regRaw = new Uint8Array(0x17); // $FF10-$FF26分(オフセット0=$FF10)
@@ -349,6 +353,8 @@
       this.ch3 = new WaveChannel();
       this.ch4 = new NoiseChannel();
       this.powerOn = true;
+      this.nr50 = 0x77;
+      this.nr51 = 0xF3;
       this.frameSeqStep = 0;
       this.frameSeqCounter = 0;
       this.regRaw.fill(0);
@@ -432,15 +438,25 @@
 
     /**
      * 現在の出力レベルを 0.0〜1.0 程度で取得する。
-     * GBのDACはNESの非線形ミキサーと異なりほぼ線形なので、4ch(各0-15)を単純合算し正規化する
-     * (パンニング(NR51)/マスタ音量(NR50)はモノラル合成のため無視。将来実測で要調整の可能性あり)。
+     * GBのDACはNESの非線形ミキサーと異なりほぼ線形。NR51(パンニング)で各chをL/Rバスへ
+     * 振り分け、NR50(マスター音量、0-7を実機同様+1して1-8倍のスケール)をバス毎に掛ける。
+     * 出力自体は今のところモノラルなので最後にL/Rバスを平均する(左右分離出力は別タスク)。
+     * どちらのバスにも振られていないch(パン両ビット0)はここで正しく無音になる。
      */
     mixSample() {
       const c1 = this.mute.ch1 ? 0 : this.ch1.output();
       const c2 = this.mute.ch2 ? 0 : this.ch2.output();
       const c3 = this.mute.ch3 ? 0 : this.ch3.output();
       const c4 = this.mute.ch4 ? 0 : this.ch4.output();
-      return (c1 + c2 + c3 + c4) / 60;
+      const chans = [c1, c2, c3, c4];
+      let left = 0, right = 0;
+      for (let i = 0; i < 4; i++) {
+        if ((this.nr51 >> (4 + i)) & 1) left += chans[i];
+        if ((this.nr51 >> i) & 1) right += chans[i];
+      }
+      const volL = ((this.nr50 >> 4) & 0x07) + 1; // 1-8
+      const volR = (this.nr50 & 0x07) + 1;
+      return (left * volL + right * volR) / 8 / 2 / 60;
     }
   }
 
@@ -450,7 +466,8 @@
       const freq = ch.enabled ? 131072 / (2048 - ch.freq) : 0;
       return {
         freq, vol: ch.envelope.volume / 15, rawVol: ch.envelope.volume,
-        duty: ch.duty, active: ch.enabled && ch.envelope.volume > 0 && freq > 0
+        duty: ch.duty, envPeriod: ch.envelope.period,
+        active: ch.enabled && ch.envelope.volume > 0 && freq > 0
       };
     };
     const w = apu.ch3;
@@ -468,8 +485,9 @@
       },
       ch4: {
         freq: nFreq, vol: n.envelope.volume / 15, rawVol: n.envelope.volume,
-        widthMode: n.widthMode, active: n.enabled && n.envelope.volume > 0
-      }
+        widthMode: n.widthMode, envPeriod: n.envelope.period, active: n.enabled && n.envelope.volume > 0
+      },
+      nr50: apu.nr50, nr51: apu.nr51
     };
   };
 

@@ -276,9 +276,28 @@
 
   // HES(PC Engine)再生中のライブPSGスナップショット(鍵盤表示用)。HesReplayStreamPlayerは
   // player=this(自己参照)でapuをそのまま持つ(GbsReplayStreamPlayer等と同じ形)。
+  // DDAとして扱っているchは、波形メモリ(c.wave)がDDA突入中の内容で固まったまま
+  // 更新されず実際のPCM波形と無関係になる(apuHuC6280.js PsgChannel.writeData()参照)ため、
+  // hesActivePlayer.getDdaWave()(直近の実際のdac値のリングバッファ)で上書きする。
+  // ★ddaChannelは曲全体を通して固定の1ch(extractDdaClips()が曲中で最もDDA区間が
+  // 長いchを選ぶ)なので、そのchが曲の一部でだけDDAを使い残りは普通の波形chとして
+  // 使われる曲(percussion+melodyの兼任、実測: TP03018.hes index77 ch4)では、DDA区間を
+  // 抜けた後もsnap[ddaCh].waveが無条件に上書きされ続け、getDdaWave()のリングバッファに
+  // 残った(現在とは無関係な、直近のDDAヒットの)過去データがそのまま鍵盤表示に出続けて
+  // いた。DDAヒットが増えるたびリングバッファの中身が入れ替わるため、見た目上は本来の
+  // 波形chの表示が「毎回のDDA発音のたびに壊れていく」ように見える(ユーザー報告の
+  // 「波形が崩れていく」「変化の際ノイズ出てる」はこの現象)。現在フレームで実際に
+  // dda中(snap[ddaCh].dda)の時だけ上書きするよう限定し、通常の波形ch表示に戻す。
   function liveHesApu() {
     if (!hesActivePlayer || !hesActivePlayer.player || !hesActivePlayer.player.apu) return null;
-    return MML.Emu.snapshotHuC6280Apu(hesActivePlayer.player.apu);
+    const snap = MML.Emu.snapshotHuC6280Apu(hesActivePlayer.player.apu);
+    const ddaCh = hesActivePlayer.ddaChannel;
+    if (ddaCh != null && ddaCh >= 0 && snap[ddaCh] && snap[ddaCh].dda && typeof hesActivePlayer.getDdaWave === 'function') {
+      snap[ddaCh] = Object.assign({}, snap[ddaCh], {
+        wave: hesActivePlayer.getDdaWave().map(v => v / 15.5 - 1)
+      });
+    }
+    return snap;
   }
 
   // chips: string[] 例 ['vrc6'] / [] = APUのみ
@@ -921,6 +940,18 @@
     workletDuration = 0;
   }
 
+  // フォーマット非依存の「今鳴っている全プレイヤーを止める」。新規ファイル読込時や
+  // 他フォーマットの再生開始時に呼ぶことで、旧フォーマットが鳴りっぱなしになるのを防ぐ
+  // (各play*Stream/load*Fileが個別にstop*Playbackを列挙する方式だと、フォーマット追加時に
+  // 呼び忘れが起きやすい。実際HES/GBS追加時に他フォーマット側の停止漏れが発生していた)。
+  function stopAllFormatPlayback() {
+    stopActivePlayer();
+    stopKssPlayback();
+    stopSpcPlayback();
+    stopGbsPlayback();
+    stopHesPlayback();
+  }
+
   function transportPlay() {
     mmlHighlightSuppressed = false;
     // 現在位置が再生範囲の開始点より手前なら、再生前に開始点までジャンプする
@@ -1249,9 +1280,7 @@
       // 音だけでなくピアノロールの先読みキャプチャもここで確実に止める。止めないと
       // KSS/SPCの先読みが完了までsetRollTimeline()を上書きし続け、MMLのロールが壊れる。
       transportStop();
-      stopActivePlayer();
-      stopKssPlayback();
-      stopSpcPlayback();
+      stopAllFormatPlayback();
       stopVoiceMonitor();
       invalidateOtherRollPrefetch();
       capturedBuffer = null;
@@ -1472,6 +1501,7 @@
     const file = nsfFileEl.files[0];
     if (!file) return;
 
+    stopAllFormatPlayback();
     stopNsfFilePlayback();
     keyboardDisplay.reset();
     loadedNsfBytes = null;
@@ -1783,11 +1813,9 @@
     const duration    = parseInt(nsfPlayDurationEl.value, 10) || 30;
     const totalFrames = Math.ceil(duration * MML.Emu.FRAME_RATE_NTSC);
 
-    // 既存の再生を停止(KSS/SPCの先読みキャプチャも止める。走らせたままだとNSFの
+    // 既存の再生を停止(他フォーマットの先読みキャプチャも止める。走らせたままだとNSFの
     // ピアノロールを他フォーマットの結果で上書きしてしまう)
-    stopActivePlayer();
-    stopKssPlayback();
-    stopSpcPlayback();
+    stopAllFormatPlayback();
     stopVoiceMonitor();
     capturedBuffer       = null;
     lastNsfCaptureResult = null;
@@ -1989,7 +2017,7 @@
   async function loadSpcFile() {
     const file = spcFileEl.files[0];
     if (!file) return;
-    stopSpcPlayback();
+    stopAllFormatPlayback();
     keyboardDisplay.reset();
     loadedSpcBytes = null; loadedSpcHeader = null;
 
@@ -2060,10 +2088,19 @@
         // pitchSemi は note-number 空間(57=A4=MIDI69)なので MIDI へは +12。
         // 従来 +9 になっており、ロールがNSF/実機より3半音低く表示されていた
         // (KSSロールの midi:e.note+12 と不整合。src/main.js buildKssRollTimeline参照)。
-        .map(e => ({
-          startSec: e.frame * frameDur, endSec: (e.frame + e.len) * frameDur, midi: e.pitchSemi + 12,
-          vol: (e.adsr1 & 0x80) ? (((e.adsr2 >> 5) & 7) / 7) : 1,
-        })),
+        .map(e => {
+          // freqSeq(セント偏差オーバーレイ用): DSPピッチレジスタ(pitch=0x1000で原音32kHz)を
+          // pitchToSemitone(src/spc2mml/converter.js)と同じ式でHzへ変換する。
+          // continuousSemi(57基準)=12*log2(pitch/0x1000)+tune+60 → freq=440*2^((continuousSemi-57)/12)
+          // = 440*(pitch/0x1000)*2^((tune+3)/12)。tuneはpitchSemi算出時と同じサンプル別チューニング。
+          const tune = (srcnFineTune && srcnFineTune[e.srcn]) || 0;
+          const tuneFactor = Math.pow(2, (tune + 3) / 12);
+          return {
+            startSec: e.frame * frameDur, endSec: (e.frame + e.len) * frameDur, midi: e.pitchSemi + 12,
+            vol: (e.adsr1 & 0x80) ? (((e.adsr2 >> 5) & 7) / 7) : 1,
+            freqSeq: (e.pitchSeq || []).map(p => 440 * (p / 4096) * tuneFactor),
+          };
+        }),
     }));
   }
 
@@ -2083,8 +2120,7 @@
 
     // 他フォーマットの再生と先読みキャプチャを止める(ロールの取り違え防止)
     transportStop();
-    stopActivePlayer();
-    stopKssPlayback();
+    stopAllFormatPlayback();
     invalidateOtherRollPrefetch('spc');
     lastPlayMode = 'spc';
     spcBufferedFraction = 0;
@@ -2852,7 +2888,7 @@
   async function loadKssFile() {
     const file = kssFileEl.files[0];
     if (!file) return;
-    stopKssPlayback();
+    stopAllFormatPlayback();
     keyboardDisplay.reset();
     loadedKssBytes = null; loadedKssHeader = null;
 
@@ -2917,8 +2953,9 @@
         if (prev && !e.retrigger && endFrame === e.start && prev.midi === e.note + 12) {
           prev.endSec = e.end * frameDur;
           prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
+          if (e.freqSeq) prev.freqSeq.push(...e.freqSeq);
         } else {
-          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15 });
+          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15, freqSeq: e.freqSeq ? e.freqSeq.slice() : [] });
         }
         endFrame = e.end;
       }
@@ -2971,8 +3008,7 @@
 
     // 他フォーマットの再生と先読みキャプチャを止める(ロールの取り違え防止)
     transportStop();
-    stopActivePlayer();
-    stopSpcPlayback();
+    stopAllFormatPlayback();
     stopVoiceMonitor();
     invalidateOtherRollPrefetch('kss');
     lastPlayMode = 'kss';
@@ -3231,7 +3267,7 @@
   async function loadGbsFile() {
     const file = gbsFileEl.files[0];
     if (!file) return;
-    stopGbsPlayback();
+    stopAllFormatPlayback();
     keyboardDisplay.reset();
     loadedGbsBytes = null; loadedGbsHeader = null;
 
@@ -3285,8 +3321,9 @@
         if (prev && endFrame === e.start && prev.midi === e.note + 12) {
           prev.endSec = e.end * frameDur;
           prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
+          if (e.freqSeq) prev.freqSeq.push(...e.freqSeq);
         } else {
-          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15 });
+          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15, freqSeq: e.freqSeq ? e.freqSeq.slice() : [] });
         }
         endFrame = e.end;
       }
@@ -3329,9 +3366,7 @@
 
     // 他フォーマットの再生と先読みキャプチャを止める(ロールの取り違え防止)
     transportStop();
-    stopActivePlayer();
-    stopKssPlayback();
-    stopSpcPlayback();
+    stopAllFormatPlayback();
     stopVoiceMonitor();
     invalidateOtherRollPrefetch('gbs');
     lastPlayMode = 'gbs';
@@ -3557,7 +3592,7 @@
   async function loadHesFile() {
     const file = hesFileEl.files[0];
     if (!file) return;
-    stopHesPlayback();
+    stopAllFormatPlayback();
     keyboardDisplay.reset();
     loadedHesBytes = null; loadedHesHeader = null;
 
@@ -3604,8 +3639,9 @@
         if (prev && endFrame === e.start && prev.midi === e.note + 12) {
           prev.endSec = e.end * frameDur;
           prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
+          if (e.freqSeq) prev.freqSeq.push(...e.freqSeq);
         } else {
-          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15 });
+          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15, freqSeq: e.freqSeq ? e.freqSeq.slice() : [] });
         }
         endFrame = e.end;
       }
@@ -3613,12 +3649,26 @@
     };
     const tracks = [];
     const waveResult = MML.Hes2MmlExpansion.wave(snapshots);
-    const noiseResult = MML.Hes2MmlExpansion.noise(snapshots);
-    const colors = ['#66ddff', '#0077dd', '#33cc99', '#ffaa00', '#ff6699', '#cc88ff'];
+    // id/色はkeyboard.js extractChannels()のisHesブロック(PSG0-5, PCOLS)と揃える
+    // (揃えないとch設定の色ピッカー・鍵盤表示・ピアノロールで同じchなのに色が食い違う)。
+    const colors = ['#66ddff', '#33aaff', '#0099ff', '#33cc99', '#ffaa00', '#ff6699'];
+    // ノイズはch4/5(ノイズ生成回路を持つ物理ch)独自の発音であり、行/鍵盤表示でも
+    // 同じPSG4/PSG5の行がwave/noiseを兼ねる(keyboard.js extractChannels参照)。
+    // 以前はMML.Hes2MmlExpansion.noise()(MML書き出し用、2A03への借用は物理1chしか
+    // 無いためch5優先で1本にマージ)の結果をどの行にも属さない別id('PN')の孤立トラック
+    // として表示していたため、①色が行と食い違う②ミュートしてもch4/5どちらのミュートも
+    // 効かない③該当ch(ノイズ発音中)の行自体はwaveの休符のまま何も表示されない、
+    // という3点セットのバグになっていた。ロールは6ch独立表示なので、noiseChannel()で
+    // ch4とch5をそれぞれ個別に(マージ無しで)抽出し、そのchの波形音符と同じトラックへ
+    // 合流させる(wave/noiseは同一chで排他なので時間的に重ならず、単純にマージしてよい)。
     waveResult.channels.forEach((ch, i) => {
-      tracks.push({ id: `P${i}`, color: colors[i % colors.length], notes: toNotes(ch.events) });
+      let notes = toNotes(ch.events);
+      if (i === 4 || i === 5) {
+        const noiseNotes = toNotes(MML.Hes2MmlExpansion.noiseChannel(snapshots, i).events);
+        if (noiseNotes.length) notes = notes.concat(noiseNotes).sort((a, b) => a.startSec - b.startSec);
+      }
+      tracks.push({ id: `PSG${i}`, color: colors[i % colors.length], notes });
     });
-    tracks.push({ id: 'PN', color: '#aaaaaa', notes: toNotes(noiseResult.events) });
     return tracks;
   }
 
@@ -3632,13 +3682,10 @@
   }
 
   // ★HESはHesReplayStreamPlayer(GBS/KSSと同じスナップショット再生方式)を使う。
-  //   経緯: PSGのDDA(直接D/A、PCM/音声サンプル再生)モードを正しく再現するため、
-  //   HesStreamPlayer(CPU駆動のリアルタイム合成)→HesBufferedPlayer(事前一括
-  //   レンダリング/ストリーミング再生、いずれもsrc/audio/hes-stream-player.jsに定義は
-  //   残したまま)の順に試したが、「がくがく」する・鍵盤表示が働かない等の副作用が
-  //   解消しきれなかった(ユーザー要望により2026-08、PCM対応着手前の状態へ差し戻し)。
-  //   このためDDA(PCM)を使う曲の音は、フレーム単位のスナップショットでは高頻度書込みを
-  //   取りこぼすという制約を再び受ける(波形/ノイズchの通常の音は問題なく鳴る)。
+  //   PCM(DDA)対応の経緯・設計の詳細はsrc/audio/hes-stream-player.js冒頭コメント参照。
+  //   要点: DDAチャンネルの生の書込み値列(dpcmTrace)を、クリップ化・DMCエンコード等の
+  //   変換を挟まずそのまま再生時にAPUへ書き戻す。CPU命令エミュレーションは相変わらず
+  //   一切リアルタイムでは行わず、波形/ノイズchは従来通りのスナップショット再生のまま。
   function playHesStream() {
     if (!loadedHesBytes) {
       hesFileStatusEl.innerHTML = '<div class="error">' + T('先にHESファイルを読み込んでください。') + '</div>';
@@ -3653,10 +3700,7 @@
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
     transportStop();
-    stopActivePlayer();
-    stopKssPlayback();
-    stopSpcPlayback();
-    stopGbsPlayback();
+    stopAllFormatPlayback();
     stopVoiceMonitor();
     invalidateOtherRollPrefetch('hes');
     lastPlayMode = 'hes';
@@ -3722,7 +3766,18 @@
 
       if (done - lastHesRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && done < total) return;
       lastHesRollBuiltFrame = done;
-      keyboardDisplay.setRollTimeline(buildHesRollTimeline(data.snapshots.slice(0, done), hesFrameRate));
+      const snapsSoFar = data.snapshots.slice(0, done);
+      keyboardDisplay.setRollTimeline(buildHesRollTimeline(snapsSoFar, hesFrameRate));
+      // DDA(PCM)を担当するchの判定も同じ頻度で更新する(main.js playHesStream()冒頭の
+      // 設計方針、hes-stream-player.js HesReplayStreamPlayer.setDdaChannel()参照)。
+      // どのchをDDAとして扱うかの判定(曲全体でDDA区間が最も長い1ch)だけhes2mml変換と
+      // 共通のロジック(extractDdaClips)を借りるが、実際の再生には生のdpcmTrace列を
+      // そのまま渡す(クリップ化・DMCエンコードは経由しない。hes-stream-player.js
+      // 冒頭コメント参照: それらを経由すると「以前(CPU駆動ライブ再生)の音」と別物になる)。
+      if (data.dpcmTrace && data.controlTrace) {
+        const ddaInfo = MML.Hes2MmlExpansion.extractDdaClips(snapsSoFar, data.dpcmTrace, data.controlTrace, hesFrameRate);
+        player.setDdaChannel(ddaInfo.channel, ddaInfo.channel >= 0 ? data.dpcmTrace[ddaInfo.channel] : null);
+      }
     }).catch((e) => {
       console.error('HES先読みキャプチャに失敗:', e);
     });

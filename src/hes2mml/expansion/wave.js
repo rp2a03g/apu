@@ -96,12 +96,13 @@
       const resampled = resampleTo4bit(c.wave);
       const wave4 = useCanonicalRotation ? canonicalRotation(resampled) : resampled;
       const waveKey = wave4.join(',');
-      if (!cur) { cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4] }; continue; }
+      if (!cur) { cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq] }; continue; }
       if (note !== cur.note || (note !== null && waveKey !== cur.waveKey)) {
         flush(f);
-        cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4] };
+        cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq] };
       } else {
         cur.volSeq.push(vol4);
+        cur.pitchSeq.push(c.freq);
       }
     }
     flush(snapshots.length);
@@ -115,7 +116,8 @@
         events.push({
           note: run.note, wave: run.wave, waveKey: run.waveKey, rawFreq: run.rawFreq,
           start: run.start + r.start, end: run.start + r.end,
-          volSeq: run.volSeq.slice(r.start, r.end)
+          volSeq: run.volSeq.slice(r.start, r.end),
+          pitchSeq: run.pitchSeq.slice(r.start, r.end)
         });
       }
     }
@@ -134,14 +136,15 @@
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(ev.wave) } : {},
-      ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq } : {},
+      ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq, freqSeq: ev.pitchSeq.map(waveFreq) } : {},
       toVolumeFields(ev.volSeq)
     );
 
     const channels = [];
     for (let i = 0; i < MML.Hes2MmlExpansion.CH_COUNT; i++) {
       channels.push({
-        events: extractChannelEvents(snapshots, i, !!waveReg).map(toCommon),
+        // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
+        events: MML.Convert.mergeAlternatingVibrato(extractChannelEvents(snapshots, i, !!waveReg)).map(toCommon),
         hasVolume: true, hasEnvelope: true, hasInstrument: true
       });
     }

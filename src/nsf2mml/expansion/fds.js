@@ -202,9 +202,9 @@
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
-    function begin(f, note, volume, envEnabled, wave, waveKey, t, rawFreq) {
+    function begin(f, note, volume, envEnabled, wave, waveKey, t, rawFreq, period) {
       cur = {
-        note, envEnabled, wave, waveKey, rawFreq, start: f, end: f, volSeq: [volume],
+        note, envEnabled, wave, waveKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period],
         modFreq: t.modFreq, modGain: t.modGain, modEnabled: t.modEnabled, modTable: t.modTable,
         modKey: `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modGain}|${t.modTableKey}`
       };
@@ -219,14 +219,15 @@
       const rawFreq = note !== null ? freq : null;
       const modKey = `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modGain}|${t.modTableKey}`;
 
-      if (!cur) { begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq); continue; }
+      if (!cur) { begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq, period); continue; }
 
       if (t.attack || note !== cur.note || t.waveKey !== cur.waveKey ||
           t.envEnabled !== cur.envEnabled || (t.envEnabled && t.envRestart) || modKey !== cur.modKey) {
         flush(f);
-        begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq);
+        begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq, period);
       } else {
         cur.volSeq.push(volume);
+        cur.pitchSeq.push(period);
       }
     }
     flush(timeline.length);
@@ -256,9 +257,10 @@
     };
   }
 
-  MML.Nsf2MmlExpansion.fds = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites) {
+  MML.Nsf2MmlExpansion.fds = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
     const timeline = buildTimeline(writeLog, initRegs, initWrites);
-    const events = extractEvents(timeline);
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
+    const events = MML.Convert.mergeAlternatingVibrato(extractEvents(timeline));
 
     const modWaveReg = new MML.Convert.WaveRegistry('@MW');
     const modParamReg = makeModParamRegistry();
@@ -281,11 +283,18 @@
       const idx = envReg ? envReg.assign(ev.volSeq) : null;
       return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
+    // EPはキャリア(carrier)周波数レジスタのビブラートのみ対象(FDSのハードウェア
+    // モジュレーション=fdsMod/@MHとは別物、Phase 0のpitchSeq設計方針と同じ)
+    function toPitchFields(ev) {
+      if (!pitchReg || ev.rawFreq == null) return {};
+      const assigned = pitchReg.assign(ev.pitchSeq);
+      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+    }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq },
       ev.note !== null ? Object.assign(
         { instrument: waveReg ? waveReg.assign(ev.wave) : 0 },
-        toVolumeFields(ev),
+        toVolumeFields(ev), toPitchFields(ev),
         modUsed ? { fdsMod: toModField(ev) } : {}
       ) : {}
     );

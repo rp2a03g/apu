@@ -150,9 +150,18 @@
   // 鍵盤表示/ロール用: APUのライブ状態を1フレーム分スナップショットする(gbsPlayer.jsの
   // snapshotApuと同じ考え方。HES PSGは波形/ノイズ位相が内部クロックのみで進行するため
   // writeLog再生では追えず、ライブAPUから直接読む方式に統一する)。
+  // ★noiseCtrl(生の$0807値)はon/off(bit7)だけでなく下位5bitに周期選択値も持つ。
+  // 以前はnoiseOn(on/offの真偽値)しか記録していなかったため、この値を消費する側
+  // (hes2mml/expansion/noise.jsのpsgNoiseFreq()、main.js buildHesRollTimeline経由の
+  // noiseChannel()、hes-stream-player.js _applyFrame())が軒並みnoiseCtrl=undefinedを
+  // 受け取り、~undefined→-1→&0x1F=31という「常に最遅固定周期」にすり替わっていた
+  // (実測: TP03018.hes index77でノイズの音程が常に同じに聞こえる不具合の真因)。
+  // noiseOn自体は活性判定の簡易フラグとして他箇所で使われ続けるためそのまま残し、
+  // 生のnoiseCtrlを別フィールドとして追加する。
   function snapshotApu(apu) {
     return apu.ch.map(c => ({
       on: c.on, dda: c.dda, noiseOn: c.hasNoise && (c.noiseCtrl & 0x80) !== 0,
+      noiseCtrl: c.noiseCtrl,
       freq: c.freq, vol: c.volume, balance: c.balance,
       wave: Array.from(c.wave), dac: c.dac
     }));
@@ -265,14 +274,14 @@
       }
       snapshots.push(snapshotApu(player.apu));
       if (f % CHUNK_FRAMES === 0 || f === totalFrames - 1) {
-        if (onProgress) onProgress(f, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate });
+        if (onProgress) onProgress(f, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace });
         await new Promise(r => setTimeout(r, 0));
         if (opt.shouldCancel && opt.shouldCancel()) {
           return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, player, frameRate: player.frameRate };
         }
       }
     }
-    if (onProgress) onProgress(totalFrames, totalFrames, { snapshots });
+    if (onProgress) onProgress(totalFrames, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace });
     return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, player, frameRate: player.frameRate };
   };
 

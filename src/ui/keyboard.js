@@ -52,6 +52,20 @@
   // ノイズ周波数 = CPU_CLOCK / NOISE_PERIOD[index]（idx0≈447kHz … idx15≈440Hz）
   const NOISE_PERIOD = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068];
 
+  // GBノイズの実測周波数(c.freq、256通りのclockShift×divisorCode)を、既存の2A03ノイズ
+  // 16周期のうち対数距離で最も近いものにマッチさせた素のindex(0-15)に変換する
+  // (gbs2mml/expansion/noise.jsのgbNoiseFreqToNote()と同じ考え方だが、MMLノート番号
+  // ではなく鍵盤表示のnote列にそのまま出す周期indexが欲しいだけなので31-idxはしない)。
+  function gbNoiseFreqToIndex(freqHz) {
+    if (!freqHz) return 0;
+    let best = 0, bestDiff = Infinity;
+    for (let i = 0; i < NOISE_PERIOD.length; i++) {
+      const diff = Math.abs(Math.log2(freqHz / (CPU_CLOCK / NOISE_PERIOD[i])));
+      if (diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    return best;
+  }
+
   // DMC(DPCM)レートテーブル（$4010 bits0-3 → サンプル1bitあたりのCPUサイクル数, NTSC）
   // 再生周波数 = CPU_CLOCK / DMC_RATE[index]（idx0≈4182Hz … idx15≈33144Hz）
   const DMC_RATE = [428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54];
@@ -146,7 +160,7 @@
   // 完全一致(ids)を先に見て、無ければ前方一致(prefix)にフォールバックする
   // (例: 'NO'は2A03グループの完全一致で先に拾われ、N163のprefix:'N'とは衝突しない)。
   const CHANNEL_DISPLAY_GROUPS = [
-    { header: 'RP2A03 (Family Computer)', ids: { P1: 'P1', P2: 'P2', TR: 'Tri', NO: 'No', DM: 'DPCM' } },
+    { header: 'RP2A03 (Family Computer / Nintendo Entertainment System)', ids: { P1: 'P1', P2: 'P2', TR: 'Tri', NO: 'No', DM: 'DPCM' } },
     { header: 'RP2C33 (Family Computer Disk System)', ids: { FDS: 'FDS' } },
     { header: 'VRC6 (Virtual Rom Controller 6)', ids: { V6P1: 'P1', V6P2: 'P2', V6SW: 'Saw' } },
     { header: 'VRC7 (Virtual Rom Controller 7)', prefix: 'VR', name: (id) => 'FM' + id.slice(2) },
@@ -156,8 +170,8 @@
     { header: 'YM2149 (Software controlled Sound Generator)', ids: { KP1: 'P1', KP2: 'P2', KP3: 'P3' } },
     { header: 'SCC (Sound Creative Chip)', prefix: 'KS', name: (id) => 'W' + id.slice(2) },
     { header: 'YM2413 (MSX-MUSIC , OPLL)', ids: { KFBD: 'BD', KFSD: 'SD', KFTOM: 'Tom', KFCYM: 'Cym', KFHH: 'HH' }, prefix: 'KF', name: (id) => 'FM' + id.slice(2) },
-    { header: 'DMG APU (Game Boy)', ids: { GB1: 'P1', GB2: 'P2', GN: 'No', GW: 'Wave' } },
-    { header: 'PSG (PC Engine / TurboGrafx-16)', ids: { PSG0: 'Ch0', PSG1: 'Ch1', PSG2: 'Ch2', PSG3: 'Ch3', PSG4: 'Ch4', PSG5: 'Ch5' } },
+    { header: 'LR35902 (Game Boy)', ids: { GALL: 'ALL', GB1: 'P1', GB2: 'P2', GN: 'No', GW: 'Wave' } },
+    { header: 'HuC6280(PC Engine / TurboGrafx-16)', ids: { HALL: 'ALL', PSG0: 'Ch0', PSG1: 'Ch1', PSG2: 'Ch2', PSG3: 'Ch3', PSG4: 'Ch4', PSG5: 'Ch5' } },
   ];
   function getChannelDisplay(id) {
     for (const g of CHANNEL_DISPLAY_GROUPS) {
@@ -232,6 +246,36 @@
     if (!f || f <= 0) return null;
     const m = Math.round(69 + 12 * Math.log2(f / 440));
     return (m >= MIDI_MIN && m <= MIDI_MAX) ? m : null;
+  }
+
+  // セント偏差オーバーレイ(DESIGN-PITCH.md Phase 0)用。丸め後のMIDIノート番号の
+  // 理論周波数からのズレをセントで返す(detune.jsの cents=1200*log2(raw/ideal) と同じ式)。
+  function midiToFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+
+  // セント偏差オーバーレイの線色をノート帯の色に合わせて自動で切り替えるための輝度計算。
+  // チャンネル色はhex('#66ddff')/hsl(...)/ユーザーのカラーピッカー選択色など形式が混在するため、
+  // 自前でパースせず1x1canvasにfillして実際に描画されるRGBを読み戻す(どんな形式でも
+  // ブラウザ自身のCSS色パーサーに任せられる)。同じ色文字列を毎フレーム読み戻すのは
+  // 無駄なのでキャッシュする(色は基本的にユーザーが変更した時だけ変わる)。
+  const _lumCache = new Map();
+  let _lumProbeCtx = null;
+  function relativeLuminance(colorStr) {
+    if (_lumCache.has(colorStr)) return _lumCache.get(colorStr);
+    if (!_lumProbeCtx) {
+      const c = document.createElement('canvas');
+      c.width = 1; c.height = 1;
+      _lumProbeCtx = c.getContext('2d', { willReadFrequently: true });
+    }
+    _lumProbeCtx.fillStyle = colorStr;
+    _lumProbeCtx.fillRect(0, 0, 1, 1);
+    const [r, g, b] = _lumProbeCtx.getImageData(0, 0, 1, 1).data;
+    const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    _lumCache.set(colorStr, lum);
+    return lum;
+  }
+  // 明るい帯(輝度0.55超)には暗い線、暗い帯には白い線を重ねてコントラストを確保する。
+  function overlayLineColor(bgColorStr) {
+    return relativeLuminance(bgColorStr) > 0.55 ? 'rgba(0,0,0,0.75)' : 'rgba(255,255,255,0.85)';
   }
 
   function midiToName(m) {
@@ -570,29 +614,44 @@
     }
 
     if (isGbs) {
-      // GB CH1/CH2(パルス+スイープ/パルス): 2A03パルス表示と同じ考え方(duty波形)。
       const live = extraSnaps && extraSnaps.gbsApuLive;
       const s = live ? live() : null;
+      // NR50(マスター音量+VIN)/NR51(パンニング)。ライブでなければ全て0(無音扱い)。
+      const nr50 = s ? s.nr50 : 0;
+      const nr51 = s ? s.nr51 : 0;
+      const volL = (nr50 >> 4) & 0x07, volR = nr50 & 0x07;
+      const vinL = !!(nr50 & 0x80), vinR = !!(nr50 & 0x08);
+      // ALL行($FF24、全体バランス。HESのALL行と同じ考え方): 実チャンネルではないので
+      // L/R列(NR50のマスター音量0-7)だけを持つ。VINが有効な側は数字を黄色にする。
+      channels.push({ id: 'GALL', color: '#888', isAllRow: true, panL: volL, panR: volR, vinL, vinR });
+      // GB CH1/CH2(パルス+スイープ/パルス): 2A03パルス表示と同じ考え方(duty波形)。
+      // エンベロープperiod=0(ハード任せでなく実質固定/ドライバ管理)は白、1-7(ハード自動増減)は黄。
       const PCOLS = [['GB1', '#66ddff'], ['GB2', '#0077dd']];
       for (let i = 0; i < 2; i++) {
-        const c = s ? s['ch' + (i + 1)] : { freq: 0, vol: 0, rawVol: 0, duty: 2, active: false };
+        const c = s ? s['ch' + (i + 1)] : { freq: 0, vol: 0, rawVol: 0, duty: 2, envPeriod: 0, active: false };
         channels.push({ id: PCOLS[i][0], color: PCOLS[i][1], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          envMode: (c.envPeriod || 0) > 0,
           wave: { t: 'pulse', hi: APU_DUTY[c.duty], nx: 8, ny: 2 },
-          active: c.active });
+          active: c.active, panL: (nr51 >> (4 + i)) & 1, panR: (nr51 >> i) & 1 });
       }
       // GB CH4(ノイズ): 7bit/15bit幅モードで短周期/長周期のノイズ波形を切り替える。
+      // note列は実測周波数を既存2A03ノイズ16周期の最寄りにマッチさせたindex(0-15)、
+      // freq列はGB自体の実測再生速度(Hz)。note色は15bit=白/7bit=黄(ch.noiseShort)。
       {
-        const c = s ? s.ch4 : { freq: 0, vol: 0, rawVol: 0, widthMode: 0, active: false };
+        const c = s ? s.ch4 : { freq: 0, vol: 0, rawVol: 0, widthMode: 0, envPeriod: 0, active: false };
         channels.push({ id: 'GN', color: '#888888', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          envMode: (c.envPeriod || 0) > 0,
           wave: { t: 'noise', short: !!c.widthMode, nx: c.widthMode ? 127 : 32767, ny: 2 },
-          active: c.active, noise: true });
+          active: c.active, noise: true, noiseIndex: gbNoiseFreqToIndex(c.freq), noiseFreq: c.freq, noiseShort: !!c.widthMode,
+          panL: (nr51 >> 7) & 1, panR: (nr51 >> 3) & 1 });
       }
       // GB CH3(波形メモリ): N163と同じ波形メモリ表示(要素数のみ異なる: GBは32点符号無し4bit)。
+      // CH3にはエンベロープが無いためvol色は変更しない(envMode未設定=通常色のまま)。
       {
         const c = s ? s.ch3 : { freq: 0, vol: 0, rawVol: 0, waveData: [0, 0], active: false };
         channels.push({ id: 'GW', color: '#ffcc00', freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 3,
           wave: { t: 'wave', data: c.waveData, nx: c.waveData.length, ny: 16 },
-          active: c.active });
+          active: c.active, panL: (nr51 >> 6) & 1, panR: (nr51 >> 2) & 1 });
       }
     }
 
@@ -602,13 +661,20 @@
       const live = extraSnaps && extraSnaps.hesApuLive;
       const s = live ? live() : null;
       const PCOLS = ['#66ddff', '#33aaff', '#0099ff', '#33cc99', '#ffaa00', '#ff6699'];
+      // ALL行($0801、全体バランス。SPCのALL行と同じ考え方): 実チャンネルではないので
+      // active/wave/note/freqは無く、L/R列だけを持つ(_rebuildRows()のisAllRow参照)。
+      channels.push({
+        id: 'HALL', color: '#888', isAllRow: true,
+        panL: s ? s.globalPanL : 15, panR: s ? s.globalPanR : 15
+      });
       for (let i = 0; i < 6; i++) {
-        const c = s ? s[i] : { freq: 0, vol: 0, rawVol: 0, wave: [0, 0], noiseOn: false, active: false };
+        const c = s ? s[i] : { freq: 0, vol: 0, rawVol: 0, wave: [0, 0], noiseOn: false, active: false, dda: false, panL: 15, panR: 15 };
         const wave = c.noiseOn
           ? { t: 'noise', short: false, nx: 131071, ny: 2 }
           : { t: 'wave', data: c.wave, nx: c.wave.length, ny: 32 };
         channels.push({ id: `PSG${i}`, color: PCOLS[i], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
-          wave, active: c.active, noise: c.noiseOn });
+          wave, active: c.active, noise: c.noiseOn, noiseLabel: c.noiseOn ? 'noise' : undefined,
+          dda: c.dda, panL: c.panL, panR: c.panR });
       }
     }
 
@@ -629,8 +695,11 @@
   // getChannelsAtFrame(frameIdx) は extractChannels() と同じ形の channels[] を返す関数。
   // 同じMIDIノート・同じ量子化音量レベルが連続する区間を1つのノートにまとめる
   // (ノイズ/サンプルチャンネルは対象外)。
+  // freqSeq: DESIGN-PITCH.md Phase 0のセント偏差オーバーレイ用。ノート区間内フレーム毎の
+  // 生周波数(Hz)をvolSeqと同じ「区切らず積む」考え方で保持する(丸め後のmidiは一定のまま、
+  // 実際の周波数だけがビブラート等で揺れている様子を後で細線描画するため)。
   function buildNoteTimelineFromChannelFrames(getChannelsAtFrame, totalFrames, frameDur) {
-    const tracks = new Map(); // id → { id, color, notes:[], cur:{startFrame,midi,volQ}|null }
+    const tracks = new Map(); // id → { id, color, notes:[], cur:{startFrame,midi,volQ,freqs}|null }
     for (let f = 0; f < totalFrames; f++) {
       const channels = getChannelsAtFrame(f) || [];
       for (const ch of channels) {
@@ -641,18 +710,20 @@
         const midi = (ch.active && ch.freq) ? freqToMidi(ch.freq) : null;
         const volQ = midi !== null ? quantizeVol(ch.vol) : 0;
         if (track.cur && (midi === null || midi !== track.cur.midi || volQ !== track.cur.volQ)) {
-          track.notes.push({ startSec: track.cur.startFrame * frameDur, endSec: f * frameDur, midi: track.cur.midi, vol: track.cur.volQ / ROLL_VOL_LEVELS });
+          track.notes.push({ startSec: track.cur.startFrame * frameDur, endSec: f * frameDur, midi: track.cur.midi, vol: track.cur.volQ / ROLL_VOL_LEVELS, freqSeq: track.cur.freqs });
           track.cur = null;
         }
-        if (midi !== null && !track.cur) track.cur = { startFrame: f, midi, volQ };
+        if (midi !== null && !track.cur) track.cur = { startFrame: f, midi, volQ, freqs: [] };
+        if (track.cur) track.cur.freqs.push(ch.freq);
       }
     }
     const totalSec = totalFrames * frameDur;
     const result = [];
     for (const track of tracks.values()) {
-      if (track.cur) track.notes.push({ startSec: track.cur.startFrame * frameDur, endSec: totalSec, midi: track.cur.midi, vol: track.cur.volQ / ROLL_VOL_LEVELS });
+      if (track.cur) track.notes.push({ startSec: track.cur.startFrame * frameDur, endSec: totalSec, midi: track.cur.midi, vol: track.cur.volQ / ROLL_VOL_LEVELS, freqSeq: track.cur.freqs });
       result.push({ id: track.id, color: track.color, notes: track.notes });
     }
+    result.frameDur = frameDur; // セント偏差オーバーレイ描画時にfreqSeqのフレーム間隔を復元するため
     return result;
   }
 
@@ -1336,10 +1407,14 @@
         `<span class="kbd-h-part">part</span>` +
         `<span class="kbd-h-mute-solo" title="mute">\u{1F507}</span>` +
         `<span class="kbd-h-name">ch</span>` +
+        `<span class="kbds-h-lr kbds-h-l">L</span>` +
+        `<span class="kbds-h-lr">R</span>` +
         `<span class="kbd-h-vol">vol</span>` +
         `<span class="kbd-h-wave">wave</span>` +
         `<span class="kbd-h-note">note</span>` +
         `<span class="kbd-h-freq">freq</span>`;
+      // L/R列(SPCのステレオパン表示と同じクラスを流用)はHES(PSG)のみ値が入り、
+      // 他フォーマットは空欄のまま(_rebuildRows参照)。
       // dot 列オフセット不要（kbd-h-part が dot+パート文字両方をカバー）
       this._headerEl = header;
       left.appendChild(header);
@@ -1422,9 +1497,21 @@
       rollHeader.className = 'kbd-roll-header';
       let rollCollapsed = false;
       try { rollCollapsed = localStorage.getItem('mml_pianoRollCollapsed') === '1'; } catch (e) { /* ignore */ }
+      try { this._showCentsOverlay = localStorage.getItem('mml_pianoRollCentsOverlay') === '1'; } catch (e) { this._showCentsOverlay = false; }
       rollHeader.innerHTML =
         `<span class="kbd-roll-toggle">${rollCollapsed ? '▶' : '▼'}</span>` +
-        `<span class="kbd-roll-label">${T('ピアノロール')}</span>`;
+        `<span class="kbd-roll-label">${T('ピアノロール')}</span>` +
+        `<label class="kbd-roll-cents-toggle">` +
+        `<input type="checkbox" class="kbd-roll-cents-checkbox"${this._showCentsOverlay ? ' checked' : ''}>` +
+        `${T('セント偏差')}</label>`;
+      // オーバーレイのON/OFFはロール見出しクリック(折りたたみ)とは独立させるため、
+      // クリックイベントの伝播をここで止める(bubbling先のrollHeaderハンドラを発火させない)。
+      const centsCheckbox = rollHeader.querySelector('.kbd-roll-cents-checkbox');
+      centsCheckbox.addEventListener('click', (e) => e.stopPropagation());
+      centsCheckbox.addEventListener('change', () => {
+        this._showCentsOverlay = centsCheckbox.checked;
+        try { localStorage.setItem('mml_pianoRollCentsOverlay', this._showCentsOverlay ? '1' : '0'); } catch (e) { /* ignore */ }
+      });
       this._rollCanvas = document.createElement('canvas');
       this._rollCanvas.className = 'kbd-roll';
       this._rollCanvas.height = ROLL_CANVAS_HEIGHT;
@@ -1472,6 +1559,10 @@
 
     setSource(result, chips) {
       this._chips = Array.isArray(chips) ? chips.filter(c => c && c !== 'none') : [];
+      // L/R(ステレオパン)列はHES/GBSのみ意味を持つため、他フォーマットでは非表示にする
+      // (表示/パネル幅はCSS側の.kbd-left--hes/.kbd-left--gbsで切り替え、詳細はstyle.css参照)。
+      this._leftEl.classList.toggle('kbd-left--hes', this._chips.includes('hes'));
+      this._leftEl.classList.toggle('kbd-left--gbs', this._chips.includes('gbs'));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
       if (this._chips.includes('vrc7')) this._extraSnaps.vrc7 = buildVrc7Snapshots(wl);
@@ -1729,39 +1820,55 @@
         const row = document.createElement('div');
         const rowColor = this._getColor(ch.id, ch.color);
         row.className = 'kbd-ch-row';
+        // ALL行(ch.isAllRow、HESの$0801全体バランス用。SPCのALL行と同じ考え方)は
+        // 実チャンネルではないのでミュートチェックボックスの代わりにプレースホルダを置き、
+        // wave/note/freqは何も表示しない(空欄のまま)。
         row.innerHTML =
           `<span class="kbd-dot" style="background:${rowColor}"></span>` +
           `<span class="kbd-part">${ch.letter || ''}</span>` +
-          `<input type="checkbox" class="kbd-mute"${muted ? '' : ' checked'} title="${T('{ch} ミュート', { ch: ch.id })}">` +
+          (ch.isAllRow
+            ? `<span class="kbd-mute-ph"></span>`
+            : `<input type="checkbox" class="kbd-mute"${muted ? '' : ' checked'} title="${T('{ch} ミュート', { ch: ch.id })}">`) +
           `<span class="kbd-name">${disp.name}</span>` +
+          `<span class="kbds-lr kbds-l"></span>` +
+          `<span class="kbds-lr"></span>` +
           `<span class="kbd-vol-num">0</span>` +
           `<span class="kbd-vol-wrap"><span class="kbd-vol-bar" style="background:transparent"></span></span>` +
-          `<canvas class="kbd-wave" width="68" height="28"></canvas>` +
-          `<span class="kbd-note">—</span>` +
+          (ch.isAllRow ? `<span class="kbd-wave" style="visibility:hidden"></span>` : `<canvas class="kbd-wave" width="68" height="28"></canvas>`) +
+          `<span class="kbd-note">${ch.isAllRow ? '' : '—'}</span>` +
           `<span class="kbd-freq"></span>`;
 
-        const checkbox = row.querySelector('.kbd-mute');
-        checkbox.addEventListener('change', () => {
-          this._muteState.set(ch.id, !checkbox.checked);
-          if (this.onMuteChange) this.onMuteChange(this.getMuteConfig());
-        });
+        let checkbox = null;
+        if (!ch.isAllRow) {
+          checkbox = row.querySelector('.kbd-mute');
+          checkbox.addEventListener('change', () => {
+            this._muteState.set(ch.id, !checkbox.checked);
+            if (this.onMuteChange) this.onMuteChange(this.getMuteConfig());
+          });
+        }
 
-        // 波形アイコンをクリックで大波形表示に選択
-        const waveCanvas = row.querySelector('.kbd-wave');
+        // 波形アイコンをクリックで大波形表示に選択(ALL行には波形アイコン自体が無い)
+        const waveCanvas = ch.isAllRow ? null : row.querySelector('.kbd-wave');
         const chId = ch.id;
-        waveCanvas.classList.add('kbd-wave--clickable');
-        if (chId === this._selectedId) waveCanvas.classList.add('kbd-wave--selected');
-        waveCanvas.addEventListener('click', () => this._selectWave(chId));
+        if (waveCanvas) {
+          waveCanvas.classList.add('kbd-wave--clickable');
+          if (chId === this._selectedId) waveCanvas.classList.add('kbd-wave--selected');
+          waveCanvas.addEventListener('click', () => this._selectWave(chId));
+        }
 
         // 丸のクリックで色ピッカーを開く(選んだ色は即localStorageへ保存され全表示に反映)
         this._attachColorPicker(row.querySelector('.kbd-dot'), ch.id, ch.color);
+
+        const lrEls = row.querySelectorAll('.kbds-lr');
 
         this._rowsEl.appendChild(row);
         this._rowEls.push({
           row,
           id: ch.id,
+          isAllRow: !!ch.isAllRow,
           volBar: row.querySelector('.kbd-vol-bar'),
           volNum: row.querySelector('.kbd-vol-num'),
+          lEl: lrEls[0], rEl: lrEls[1],
           waveCanvas,
           waveSig: '',
           noteEl: row.querySelector('.kbd-note'),
@@ -1780,11 +1887,15 @@
     _selectWave(chId) {
       this._selectedId = chId;
       this._bigWaveSig = '';   // 強制再描画
+      // HESのALL行はwaveCanvasを持たない(el.waveCanvas===null)ため、他行を飛ばして
+      // 例外にならないようガードする(ガード無しだとALL行で例外→以降の行のtoggleが
+      // 一件も実行されず青枠が付かなくなる。大波形表示自体はupdate()側の毎フレーム
+      // 再描画で別途追従するため気付かれにくい)。
       for (const el of this._rowEls) {
-        el.waveCanvas.classList.toggle('kbd-wave--selected', el.id === chId);
+        if (el.waveCanvas) el.waveCanvas.classList.toggle('kbd-wave--selected', el.id === chId);
       }
       for (const el of this._spcRowEls) {
-        el.waveCanvas.classList.toggle('kbd-wave--selected', el.id === chId);
+        if (el.waveCanvas) el.waveCanvas.classList.toggle('kbd-wave--selected', el.id === chId);
       }
       // 直近のチャンネル状態で即時描画
       const ch = (this._prevChannels || []).find(c => c.id === chId) ||
@@ -1862,6 +1973,17 @@
       for (let i = 0; i < channels.length && i < this._rowEls.length; i++) {
         const ch = channels[i];
         const el = this._rowEls[i];
+
+        // L/R列(SPCのステレオパン表示と同じ考え方、色もSPCの.kbds-lrに合わせグレー固定)。
+        // panL/panRを持つch(HES: ALL行の$0801, 各chの$0805。GBS: ALL行のNR50, 各chのNR51)
+        // だけ値を出し、他フォーマットは空欄のまま。GBSのALL行はVIN有効時だけ黄色にする。
+        if (el.lEl) { el.lEl.textContent = ch.panL !== undefined ? String(ch.panL) : ''; el.lEl.style.color = ch.vinL ? '#ffcc44' : ''; }
+        if (el.rEl) { el.rEl.textContent = ch.panR !== undefined ? String(ch.panR) : ''; el.rEl.style.color = ch.vinR ? '#ffcc44' : ''; }
+
+        // ALL行(実チャンネルではない)はL/R以外に表示するものが無いので、以降のvol/wave/note/freq
+        // 更新はスキップする(チェックボックスも無いためel.checkbox.checkedへのアクセスもできない)。
+        if (el.isAllRow) continue;
+
         const muted = !el.checkbox.checked;
 
         // DMC: $4011 が書き込まれた瞬間だけ検出（レジスタ値の変化＝直接DAC書き込み）。
@@ -1909,12 +2031,18 @@
           el.noteEl.textContent = muted ? '(M)' : (isApuDisabled ? '-' : '—');
           el.noteEl.style.color = '#555566';
           el.freqEl.textContent = '';
+        } else if (ch.dda) {
+          // HES PSG: DDA(ソフトウェアPCM)モードで生DAC値を直接再生中
+          el.noteEl.textContent = 'PCM';
+          el.noteEl.style.color = '#e6e6ef';
+          el.freqEl.textContent = '';
         } else if (ch.noise) {
-          // note: 周期インデックス数値。長周期=白 / 短周期=黄
-          el.noteEl.textContent = String(ch.noiseIndex);
+          // note: 周期インデックス数値。長周期=白 / 短周期=黄。ch.noiseLabelがあれば
+          // (HES: 固定文字列'noise'。ノイズ周期がindex化されていない音源向け)そちらを優先。
+          el.noteEl.textContent = ch.noiseLabel !== undefined ? ch.noiseLabel : String(ch.noiseIndex);
           el.noteEl.style.color = ch.noiseShort ? '#ffcc44' : '#e6e6ef';
-          // freq: ノイズ周波数 (Hz)
-          el.freqEl.textContent = Math.round(ch.noiseFreq).toLocaleString() + ' Hz';
+          // freq: ノイズ周波数 (Hz)。ノイズ周波数の実測値を持たない音源では空欄のまま。
+          el.freqEl.textContent = (ch.noiseFreq !== undefined) ? (Math.round(ch.noiseFreq).toLocaleString() + ' Hz') : '';
         } else if (ch.sample) {
           // note: $4010 再生速度インデックス / freq: DPCM再生周波数
           el.noteEl.textContent = String(ch.dmcRateIdx);
@@ -2066,6 +2194,7 @@
       }
 
       if (!this._rollTimeline || !this._rollTimeline.length) return;
+      const frameDur = this._rollTimeline.frameDur || (1 / 60);
 
       // track.notesはstartSec昇順(buildNoteTimelineFromChannelFrames参照)なので、
       // 「もう画面上端より上に流れ去った(endSec<=pos)」ノートを読み飛ばす起点を
@@ -2093,8 +2222,35 @@
           const x = keyPos.isBlack ? keyPos.x - bkW / 2 : keyPos.x + 0.5;
           const w = keyPos.isBlack ? bkW : (wkW - 1);
           // 音量による濃淡はやめ、常にチャンネル本来の色をそのまま(不透明・フィルタ無し)で描く。
-          ctx.fillStyle = this._getColor(track.id, track.color);
+          const noteColor = this._getColor(track.id, track.color);
+          ctx.fillStyle = noteColor;
           ctx.fillRect(x, top, w, rectH);
+
+          // セント偏差オーバーレイ(DESIGN-PITCH.md Phase 0): freqSeq(ノート区間内フレーム毎の
+          // 生周波数)を丸め後noteの理論周波数と比較し、水平方向のズレとして細線描画する。
+          // このロールはX軸=音程・Y軸=時間(一般的なピアノロールと軸が逆)なので、
+          // 「±100セント=±1鍵盤幅」は水平オフセット(wkW基準)として表現する。
+          if (this._showCentsOverlay && note.freqSeq && note.freqSeq.length) {
+            const idealFreq = midiToFreq(note.midi);
+            const centerX = x + w / 2;
+            ctx.beginPath();
+            let started = false;
+            for (let k = 0; k < note.freqSeq.length; k++) {
+              const freq = note.freqSeq[k];
+              if (!freq || freq <= 0) continue;
+              const tAbs = note.startSec + k * frameDur;
+              if (tAbs < pos || tAbs > winEnd) continue;
+              const cents = 1200 * Math.log2(freq / idealFreq);
+              const y = h - ((tAbs - pos) / ROLL_WINDOW_SEC) * h;
+              const cx = centerX + (cents / 100) * wkW;
+              if (!started) { ctx.moveTo(cx, y); started = true; } else { ctx.lineTo(cx, y); }
+            }
+            if (started) {
+              ctx.strokeStyle = overlayLineColor(noteColor);
+              ctx.lineWidth = 1;
+              ctx.stroke();
+            }
+          }
         }
       }
     }
@@ -2215,7 +2371,7 @@
         this._spcSectionEl.appendChild(this._spcAllRow.row);
         const chipHeader = document.createElement('div');
         chipHeader.className = 'kbd-chip-header';
-        chipHeader.textContent = 'S-DSP (SPC700)';
+        chipHeader.textContent = 'SPC700 (Super Famicom / Super Nintendo Entertainment System)';
         this._spcSectionEl.appendChild(chipHeader);
       }
 

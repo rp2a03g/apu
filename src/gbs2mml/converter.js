@@ -47,6 +47,8 @@
     // (kss2mml/nsf2mmlと同じ考え方。CH1/CH2/CH3/CH4すべてで共有し、偶然同じ減衰形状が
     // 出ればチャンネルをまたいでも1つの@v<n>にまとめられる)。
     const envReg = new MML.Convert.EnvelopeRegistry();
+    // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
+    const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
     // GBの波形(4bit/32点→FDSの6bit/64点へビット拡張)を曲全体で共有登録する
     // (@FM<n>としてMML本文のヘッダに埋め込む。nsf2mml/expansion/fds.jsと同じ形式)。
     const fdsWaveReg = new MML.Convert.WaveRegistry('@FM');
@@ -65,6 +67,13 @@
     if (hasWave) {
       MML.Convert.applyPitchDetune([{ events: waveResult.events }], MML.Gbs2MmlExpansion._fdsPeriodRaw);
     }
+    // ピッチエンベロープも同じperiodFnで借用先の生レジスタ空間へ変換してから
+    // 分類・登録する(DESIGN-PITCH.md Phase 1、applyPitchDetuneと同じ変換系列)。
+    MML.Convert.assignPitchEnvelope([{ events: ch1Result.events }], pulsePeriodRaw, pitchReg);
+    MML.Convert.assignPitchEnvelope([{ events: ch2Result.events }], pulsePeriodRaw, pitchReg);
+    if (hasWave) {
+      MML.Convert.assignPitchEnvelope([{ events: waveResult.events }], MML.Gbs2MmlExpansion._fdsPeriodRaw, pitchReg);
+    }
     // ノイズは離散的な周期選択(2A03固定16通り)であり連続量の微調整という概念が無いため
     // detune補正の対象外(nsf2mml自体のネイティブノイズ抽出と同じ扱い)。
 
@@ -72,12 +81,12 @@
     const expansionLetterMap = expansions.length ? MML.Mml.assignExpansionLetters(expansions) : {};
 
     const scoreChannels = [
-      Object.assign({}, ch1Result, { letter: 'A', hasDetune: true }),
-      Object.assign({}, ch2Result, { letter: 'B', hasDetune: true }),
+      Object.assign({}, ch1Result, { letter: 'A', hasDetune: true, hasPitchMod: true }),
+      Object.assign({}, ch2Result, { letter: 'B', hasDetune: true, hasPitchMod: true }),
       Object.assign({}, noiseResult, { letter: 'D' })
     ];
     if (hasWave) {
-      scoreChannels.push(Object.assign({}, waveResult, { letter: expansionLetterMap.fds[0], hasDetune: true }));
+      scoreChannels.push(Object.assign({}, waveResult, { letter: expansionLetterMap.fds[0], hasDetune: true, hasPitchMod: true }));
     }
 
     // 音長に加え、チャンネル毎の発音開始間隔(IOI)も検出材料にする
@@ -118,7 +127,7 @@
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm,
       headerLines: [
-        ...directiveLines, ...envReg.defLines(),
+        ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(),
         ...(hasWave ? fdsWaveReg.defLines() : [])
       ]
     });

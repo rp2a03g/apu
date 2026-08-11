@@ -71,12 +71,13 @@
       const freq = pulseFreq(period);
       const note = (enabled && volume > 0 && period >= 4) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
-      if (!cur) { cur = { note, duty, rawFreq, start: f, end: f, volSeq: [volume] }; continue; }
+      if (!cur) { cur = { note, duty, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] }; continue; }
       if (t.attack[attackIdx] || note !== cur.note || duty !== cur.duty) {
         flush(f);
-        cur = { note, duty, rawFreq, start: f, end: f, volSeq: [volume] };
+        cur = { note, duty, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] };
       } else {
         cur.volSeq.push(volume);
+        cur.pitchSeq.push(period);
       }
     }
     flush(timeline.length);
@@ -97,33 +98,42 @@
       const freq = sawFreq(period);
       const note = (enabled && accumRate > 0 && period >= 4) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
-      if (!cur) { cur = { note, rawFreq, start: f, end: f, volSeq: [volume] }; continue; }
+      if (!cur) { cur = { note, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] }; continue; }
       if (t.attack[2] || note !== cur.note) {
         flush(f);
-        cur = { note, rawFreq, start: f, end: f, volSeq: [volume] };
+        cur = { note, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] };
       } else {
         cur.volSeq.push(volume);
+        cur.pitchSeq.push(period);
       }
     }
     flush(timeline.length);
     return events;
   }
 
-  MML.Nsf2MmlExpansion.vrc6 = function (writeLog, totalFrames, envReg, waveReg, initRegs) {
+  MML.Nsf2MmlExpansion.vrc6 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
     const timeline = buildTimeline(writeLog, initRegs);
-    const evP1  = extractPulseEvents(timeline, 'p1', 0);
-    const evP2  = extractPulseEvents(timeline, 'p2', 1);
-    const evSaw = extractSawEvents(timeline);
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
+    const evP1  = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p1', 0));
+    const evP2  = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p2', 1));
+    const evSaw = MML.Convert.mergeAlternatingVibrato(extractSawEvents(timeline));
 
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
     }
+    function toPitchFields(ev) {
+      if (!pitchReg || ev.rawFreq == null) return {};
+      const assigned = pitchReg.assign(ev.pitchSeq);
+      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+    }
     const toCommonPulse = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq }, toVolumeFields(ev.volSeq)
+      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq },
+      toVolumeFields(ev.volSeq), toPitchFields(ev)
     );
     const toCommonSaw = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq }, toVolumeFields(ev.volSeq)
+      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq },
+      toVolumeFields(ev.volSeq), toPitchFields(ev)
     );
 
     return {

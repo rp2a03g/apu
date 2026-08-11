@@ -120,12 +120,13 @@
       const waveKey = wave.join(',');
       const note = (volume > 0 && freqReg > 0) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
-      if (!cur) { cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume] }; continue; }
+      if (!cur) { cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume], pitchSeq: [freqReg] }; continue; }
       if (note !== cur.note || waveKey !== cur.waveKey) {
         flush(f);
-        cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume] };
+        cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume], pitchSeq: [freqReg] };
       } else {
         cur.volSeq.push(volume);
+        cur.pitchSeq.push(freqReg);
       }
     }
     flush(timeline.length);
@@ -141,14 +142,15 @@
           note: run.note, wave: run.wave, waveKey: run.waveKey,
           rawFreq: run.rawFreq, rawNumCh: run.rawNumCh,
           start: run.start + r.start, end: run.start + r.end,
-          volSeq: run.volSeq.slice(r.start, r.end)
+          volSeq: run.volSeq.slice(r.start, r.end),
+          pitchSeq: run.pitchSeq.slice(r.start, r.end)
         });
       }
     }
     return events;
   }
 
-  MML.Nsf2MmlExpansion.n163 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots) {
+  MML.Nsf2MmlExpansion.n163 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
     const timeline = buildTimeline(writeLog, initWrites, n163Snapshots);
     // 曲を通しての有効ch数(通常は一定)。上位 numCh 個を下位アドレス側から letters[0..] に割当てる。
     let songNumCh = 1;
@@ -159,12 +161,20 @@
       const idx = envReg ? envReg.assign(volSeq) : null;
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
     }
+    // freqRegは18bitの生レジスタ(numCh依存)なので、セント換算では浅いビブラートでも
+    // 生レジスタ差分は大きくなりうる。符号付きbyte範囲(-127~126)を超える場合は
+    // pitch.js側のclassifyPitchModが自動的にEP化を諦める(D<n>のみの既存動作を維持)。
+    function toPitchFields(ev) {
+      if (!pitchReg || ev.rawFreq == null) return {};
+      const assigned = pitchReg.assign(ev.pitchSeq);
+      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+    }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, rawNumCh: ev.rawNumCh,
         rawLength: ev.note !== null ? ev.wave.length : undefined },
       ev.note !== null ? Object.assign(
         { instrument: waveReg ? waveReg.assign(ev.wave) : 0 },
-        toVolumeFields(ev.volSeq)
+        toVolumeFields(ev.volSeq), toPitchFields(ev)
       ) : {}
     );
 
@@ -173,7 +183,9 @@
       const base = 0x40 + (8 - songNumCh + i) * 8; // internalIdx = (8-numCh)+i、下位側から
       channels.push({
         letter: letters[i],
-        events: extractChannelEvents(timeline, base).map(toCommon),
+        // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)。順序はsplitRetriggers(打ち直し
+        // 分割)の後(§5の手順順序: ハード境界→打ち直し分割→ピッチヒステリシスの順を維持)。
+        events: MML.Convert.mergeAlternatingVibrato(extractChannelEvents(timeline, base)).map(toCommon),
         hasVolume: true,
         hasEnvelope: true,
         hasInstrument: true

@@ -70,23 +70,25 @@
       const freq = pulseFreq(period);
       const note = (active && audible && freq > 0) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
-      if (!cur) { cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume] }; continue; }
+      if (!cur) { cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] }; continue; }
       if (t.attack[attackIdx] || note !== cur.note || duty !== cur.duty || constVol !== cur.constVol ||
           (!constVol && envKey !== cur.envKey)) {
         flush(f);
-        cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume] };
-      } else if (constVol) {
-        cur.volSeq.push(volume);
+        cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] };
+      } else {
+        cur.pitchSeq.push(period);
+        if (constVol) cur.volSeq.push(volume);
       }
     }
     flush(timeline.length);
     return events;
   }
 
-  MML.Nsf2MmlExpansion.mmc5 = function (writeLog, totalFrames, envReg, waveReg, initRegs) {
+  MML.Nsf2MmlExpansion.mmc5 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
     const timeline = buildTimeline(writeLog, initRegs);
-    const evP1 = extractPulseEvents(timeline, 'p1', 1, 0);
-    const evP2 = extractPulseEvents(timeline, 'p2', 2, 1);
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
+    const evP1 = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p1', 1, 0));
+    const evP2 = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p2', 2, 1));
 
     function toVolumeFields(ev) {
       if (!envReg) return { volume: ev.volSeq[0] };
@@ -99,9 +101,15 @@
       const idx = envReg.assign(ev.volSeq);
       return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
+    function toPitchFields(ev) {
+      if (!pitchReg || ev.rawFreq == null) return {};
+      const assigned = pitchReg.assign(ev.pitchSeq);
+      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+    }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq },
-      ev.note !== null ? toVolumeFields(ev) : {}
+      ev.note !== null ? toVolumeFields(ev) : {},
+      ev.note !== null ? toPitchFields(ev) : {}
     );
 
     return {

@@ -885,8 +885,9 @@ button.secondary {
   accent-color: var(--accent);
 }
 /* メイン一覧のみ: muteをアイコン表示にした分、chとの間隔は素のgap(6px)まで詰める
-   (kbd-partの直後のmuteだけに絞ってSPC/ALL行は対象外にする) */
-.kbd-part + .kbd-mute { margin-right: 0; }
+   (kbd-partの直後のmuteだけに絞ってSPC/ALL行は対象外にする。ただしHESのALL行のように
+   kbd-partを維持したままmute-phを使う行もあるため、そちらも同じく詰める) */
+.kbd-part + .kbd-mute, .kbd-part + .kbd-mute-ph { margin-right: 0; }
 
 /* MMLパート文字(A-Z,a,b)。丸アイコンと同じ列("part")の一部として隣接表示する */
 .kbd-part {
@@ -906,8 +907,9 @@ button.secondary {
   font-weight: 600;
   font-size: 11px;
 }
-/* メイン一覧のみ: chとvolの間隔を詰める(kbd-part+kbd-muteの直後のnameだけに絞る) */
-.kbd-part + .kbd-mute + .kbd-name { margin-right: -16px; }
+/* メイン一覧のみ: chとvolの間隔を詰める(kbd-part+kbd-muteの直後のnameだけに絞る。
+   HESのALL行(kbd-part+kbd-mute-ph)も同じ間隔に揃える) */
+.kbd-part + .kbd-mute + .kbd-name, .kbd-part + .kbd-mute-ph + .kbd-name { margin-right: -16px; }
 /* SPC表示のみ: ch(name)とLの間を詰める（NSF表示はLが無いため対象外） */
 .kbd-left--spc .kbd-name,
 .kbd-left--spc .kbd-h-name {
@@ -982,7 +984,14 @@ button.secondary {
 }
 
 /* --- SPC専用列 (mute/ch/L/R/vol/env/wave/PM/note/freq/echo/echoL/echoR/C0-C7) --- */
-.kbds-h-lr, .kbds-lr { flex: none; width: 30px; text-align: right; }
+/* L/R列はSPC・HESの鍵盤表示にしか意味の無い値(ステレオパン)なので、NSF/GBS/KSSでは
+   マークアップ自体(_rebuildRows/共通header)は共有のまま残しつつ、表示だけ隠す
+   (kbd-left--spc/kbd-left--hesが付いた時だけ見せる。おおもとのheader/rowには常に
+   出さない、という制約) */
+.kbds-h-lr, .kbds-lr { flex: none; width: 30px; text-align: right; display: none; }
+.kbd-left--spc .kbds-h-lr, .kbd-left--spc .kbds-lr,
+.kbd-left--hes .kbds-h-lr, .kbd-left--hes .kbds-lr,
+.kbd-left--gbs .kbds-h-lr, .kbd-left--gbs .kbds-lr { display: inline-block; }
 /* L/R は間を詰める(下記kbds-l)ため近接しがちなので、視認性を保つよう少し暗めにする */
 .kbds-lr { font-size: 10px; color: #b0b0c0; font-family: var(--mono); }
 /* L(1つ目のkbds-lr)だけ右マージンを削って R との間隔を詰める */
@@ -1061,6 +1070,16 @@ button.secondary {
 }
 .kbd-roll-toggle { flex: none; width: 10px; text-align: center; }
 .kbd-roll-label { flex: none; }
+.kbd-roll-cents-toggle {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  color: #9d9dab;
+  cursor: pointer;
+}
+.kbd-roll-cents-toggle input { cursor: pointer; }
 /* height は keyboard.js の ROLL_CANVAS_HEIGHT と必ず一致させること
    (折りたたみ時にウィンドウ高さをこの値ぶん増減させている) */
 .kbd-roll {
@@ -1084,6 +1103,12 @@ button.secondary {
   width: 320px;
   flex: none;
   min-height: 0;
+}
+/* HES/GBSのみL/R列(kbds-lr×2、各30px+gap6px分)を表示するため、その分だけ広げないと
+   残りのflex:1であるfreq列が押し潰されて見切れる(NSF/KSSはL/R非表示のまま320px) */
+.kbd-left.kbd-left--hes,
+.kbd-left.kbd-left--gbs {
+  width: 370px;
 }
 /* SPC表示は列数が多いため、横スクロールを出さずに全列が収まる幅を確保する */
 .kbd-left.kbd-left--spc {

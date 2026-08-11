@@ -91,6 +91,9 @@
     // (nsf2mml/converter.jsと同じ考え方。PSG/SCC両方の抽出で共有し、偶然同じ減衰形状が
     // 出ればチップをまたいでも1つの@v<n>にまとめられる)。
     const envReg = new MML.Convert.EnvelopeRegistry();
+    // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
+    // 借用先(PSG→FME7、SCC→N163)チップのEP対応範囲と一致させる(DESIGN-PITCH.md §7)。
+    const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
 
     // SCCの自作波形もN163形式へ変換した上で曲全体で共有登録する(@N<n>としてMML本文の
     // ヘッダに埋め込む)。曲中に音色が切り替わる曲でも全て登録され、@<n>で選択される。
@@ -118,8 +121,12 @@
     // 大きくズラしてしまい聞くに堪えなかった。ユーザー確認の上detectChorusDetune方式を
     // 正式採用。
     MML.Convert.detectChorusDetune(ayResult.channels, fme7PeriodRaw);
+    // ピッチエンベロープ(厳密周期ビブラート)も同じfme7PeriodRawで借用先の生レジスタ
+    // 空間へ変換してから分類・登録する(DESIGN-PITCH.md Phase 1、D<n>の直後に置くのは
+    // 両方とも同じ「借用先レジスタ空間への変換」処理系列だから)。
+    MML.Convert.assignPitchEnvelope(ayResult.channels, fme7PeriodRaw, pitchReg);
     const fme7Letters = expansionLetterMap.fme7;
-    ayResult.channels.forEach((ch, i) => scoreChannels.push(Object.assign({}, ch, { letter: fme7Letters[i], hasDetune: true })));
+    ayResult.channels.forEach((ch, i) => scoreChannels.push(Object.assign({}, ch, { letter: fme7Letters[i], hasDetune: true, hasPitchMod: true })));
 
     // SCC(5ch) → n163(8ch分の枠のうち実際に使うのは音符を持つ最上位chまで) 波形近似
     // (実際に使われている場合のみ)
@@ -129,10 +136,12 @@
       const n163ActualNumCh = computeActualN163ChannelCount(sccResult.channels);
       MML.Convert.detectChorusDetune(
         sccResult.channels, n163FreqRegRaw(MML.Kss2MmlExpansion.SCC_WAVE_LEN, n163ActualNumCh));
+      MML.Convert.assignPitchEnvelope(
+        sccResult.channels, n163FreqRegRaw(MML.Kss2MmlExpansion.SCC_WAVE_LEN, n163ActualNumCh), pitchReg);
       const n163Letters = expansionLetterMap.n163;
       for (let i = 0; i < n163Letters.length; i++) {
         const ch = sccResult.channels[i] || { events: [], hasVolume: true, hasInstrument: true };
-        scoreChannels.push(Object.assign({}, ch, { letter: n163Letters[i], hasDetune: true }));
+        scoreChannels.push(Object.assign({}, ch, { letter: n163Letters[i], hasDetune: true, hasPitchMod: true }));
       }
     }
 
@@ -192,7 +201,7 @@
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm,
       headerLines: [
-        ...directiveLines, ...envReg.defLines(),
+        ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(),
         ...(hasScc ? n163WaveReg.defLines() : []),
         ...(hasOpll ? vrc7ToneReg.defLines() : [])
       ]

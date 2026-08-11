@@ -1,0 +1,18 @@
+# Local Claude Code settings (machine-specific paths, not for sharing)
+.claude/settings.local.json
+
+# Test fixtures copied from local ROM/sound rip collections (copyrighted, not for backup)
+_tmp_test/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+
+# Node (in case tooling is added later)
+node_modules/
+npm-debug.log*
+
+# Env files
+.env
+.env.*

@@ -272,6 +272,7 @@
     'PCM (no fixed waveform)': 'PCM (no fixed waveform)',
     '1 周期 (相対波形)': '1 cycle (relative)',
     'ピアノロール': 'Piano roll',
+    'セント偏差': 'Cent deviation',
     '速度': 'Speed',
     '{ch} ミュート': 'Mute {ch}',
     'もっと選ぶ...': 'More colors...',

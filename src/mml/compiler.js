@@ -43,22 +43,51 @@
  *   K<n>           移調 (半音、符号あり)
  *   D<n>           デチューン (周期/周波数レジスタへの生オフセット、符号あり。以降の音符に
  *                  持続適用。同じ音を別チャンネルでわずかにずらして鳴らすコーラス効果等に使う。
- *                  2A03パルス/三角(A/B/C)・VRC6・MMC5・FME7・FDS・N163対応(N163は
+ *                  2A03パルス/三角/ノイズ(A/B/C/D)・VRC6・MMC5・FME7・FDS・N163対応(N163は
  *                  周波数レジスタが18bit相当のスケールのため同じ値でも変化量は小さくなる)。
- *                  VRC7はfnum/blockの対数的表現のため対象外
+ *                  VRC7はfnum/blockの対数的表現のため対象外。EP/MPと全く同じ「生レジスタへの
+ *                  加算」空間の値(下記参照)なので、この3つは同時に足し合わされる
  *   @<n>           音色番号 (パルスのデューティ比 = n % 4 / VRC6パルスのデューティ比 = n % 8
  *                  (実機同様8段階) / VRC7の音色番号 = n % 16)
  *   &              タイ（直前の音を伸ばす）
+ *   L              ループ地点マーカー(パラメータなし)。このチャンネルの再生が末尾まで
+ *                  達したとき、Lの位置まで戻って演奏を続ける(実機ppmck同様、曲全体を
+ *                  無限ループさせるための地点指定。[ ... ]nの小節単位の繰り返しとは別物)。
+ *                  ブラウザ再生・シークバーの「曲の長さ」は、Lへ2回戻る(=イントロ1回+
+ *                  ループ区間2回)までとして扱う。NSF書き出し(src/driver/ppmckDriver.js)は
+ *                  このチャンネルを実際に無限ループさせる
  *   [ ... ]n       繰り返し (n回)
  *   [ ... | ... ]n 繰り返し (最後の周回だけ | から ] までを演奏しない)
  *   { ... }<len>   連符 (中の音符列を<len>の音長で等分)
  *   EN<n> / ENOF   ノートエンベロープ(高速アルペジオ)。@EN<n>={...}で定義(前回値からの
- *                  相対値・累積、仕様通り厳密実装)。A/B/C/D全チャンネルで使用可
- *   EP<n> / EPOF   ピッチエンベロープ。@EP<n>={...}で定義(値/128を半音として加算)。
- *                  A/B/Cチャンネルのみ(近似実装、下記参照)
- *   MP<n> / MPOF   ソフトウェアビブラート。@MP<n>={delay,speed,depth}で定義。
- *                  A/B/Cチャンネルのみ(近似実装、下記参照)
- *   s<speed>,<depth> スイープ(半音、符号付き)。A/B/Cチャンネルのみ(近似実装、下記参照)
+ *                  相対値・累積、仕様通り厳密実装)。「発音ノート番号の値に加算」される
+ *                  (ppmck公式リファレンス通りの半音・ノート番号空間)。2A03全4ch(A-D)・
+ *                  VRC6・MMC5・FME7(トーンモード)・FDS・N163・VRC7全対応
+ *   EP<n> / EPOF   ピッチエンベロープ。@EP<n>={...}で定義。D<n>と全く同じ「周期/周波数
+ *                  レジスタへの生オフセット」空間の値(ppmck公式リファレンスのD/EPの説明が
+ *                  一字一句同じ「発音周波数の値に加算されます」であること、実機ドライバの
+ *                  sound_pitch_enveropeが detune と同じ freq_add_mcknumber を呼ぶことを
+ *                  実ソースで確認済み。以前の実装は値/128を半音とみなしていたが誤りだった)。
+ *                  対応チャンネルはD<n>と同じ(2A03全4ch・VRC6・MMC5・FME7・FDS・N163、
+ *                  VRC7は対象外)
+ *   MP<n> / MPOF   ソフトウェアビブラート。@MP<n>={delay,speed,depth}で定義。depthはEP/Dと
+ *                  同じ生レジスタ単位(実機ドライバのsound_lfoも同じfreq_add_mcknumberを
+ *                  呼ぶため)。波形は実機のlfo_sub/warizan_start(nes_include/ppmck/
+ *                  sounddrv.h、AoiMoe/ppmck)をそのまま状態遷移として移植(2026-08-11、
+ *                  DESIGN-PITCH.md 別プロジェクトB)。滑らかな三角波ではなく「1フレームごと
+ *                  ±1、またはNフレームごと±S」という階段状の変化で、Nまたは
+ *                  Sは(1/4周期)と(depth)の割り算(割り切れない場合はceil側に丸まる、実測
+ *                  確認済み)で決まる。方向(最初に+/-どちらへ動くか)はperiodFnが周波数の
+ *                  増加関数か減少関数かで自動判定(periodFnIncreasing、実機の
+ *                  freq_vector_table相当)。対応チャンネルはEPと同じ
+ *   s<n0>,<n1>     スイープ。ppmck実機ではソフトウェア効果ではなく2A03パルスの実ハードウェア
+ *                  スイープユニット($4001/$4005)への生バイト書き込み(CMD_SWEEPが1回書くだけ
+ *                  と実ソースで確認済み)なので、2A03パルスA/Bにしか存在しない
+ *                  (三角波・ノイズ・拡張音源は対象外。以前の実装は三角波にまで架空の
+ *                  ソフトウェア近似を適用していたが誤りだった)。n1(0-15)の下位4bitは
+ *                  そのままnegate(符号)+shift(かかり具合)、n0(0-15、0=OFF)は
+ *                  「1が最速・15が最遅」の記載に沿ったperiod(0-7)への線形近似
+ *                  (この換算式のみ資料未確認の近似、他は実ソースで確認済み)
  *   @OP<n>={8バイト} / @OT<n>={TL,FB,...} VRC7カスタム音色(パッチ0)。曲中`OP<n>`が
  *                    出現するたびその時点でロードし直す(実機同様スロットは1つだけ、
  *                    全ch共有)。@OTはMGSDRV互換形式(近似変換、下記参照)
@@ -92,10 +121,18 @@
  *                    数字 . + # - および音符文字 a-g r は既存コマンドと衝突するため
  *                    マクロ文字に使わないこと)
  *
- * 注意: EP/MP/s/@OTはppmck実機ドライバ(sounddrv.h)の内部除算ルーチンや音色データの
- * ビット配置まで確証を得られていない箇所があり、「妥当な近似」として実装している
- * (EN・FME7のS/M/N・VRC7の@OP生バイト形式は仕様・実例と厳密一致を確認済み)。
- * 詳細はROADMAP.mdフェーズ1.5参照。
+ * 注意: 2026-08-10、実機ppmckドライバ(nes_include/ppmck/{internal,sounddrv}.h)を
+ * 直接確認し、D<n>/EP/MPが同一のfreq_add_mcknumberルーチンを共有する「周期/周波数
+ * レジスタへの生オフセット」であること、sweep(s)はソフトウェア効果ではなく2A03パルスの
+ * 実ハードウェアスイープユニットへの1回書き込みであることを確認、それに合わせて
+ * EP/MP/sの実装を全面的に修正した(以前のEP=値/128を半音とみなす換算、sweep=三角波の
+ * 半音空間ソフトウェア近似はいずれも仕様に無い誤りだった)。2026-08-11、MPの三角波の
+ * 形状自体(内部除算ルーチンwarizan)も実ソース(AoiMoe/ppmck、nes_include/ppmck/
+ * sounddrv.h)を完全にトレースして忠実移植した(DESIGN-PITCH.md 別プロジェクトB)。
+ * 近似が残るのはsweepのn0(speed)→period変換式、@OT(VRC7のMGSDRV互換音色フォーマットの
+ * DTパラメータ解釈)のみ(EN・D/EP/MPの空間そのもの・MPの波形・sweepのレジスタ形式・
+ * FME7のS/M/N・VRC7の@OP生バイト形式は仕様・実ソースと一致を確認済み)。
+ * 詳細はROADMAP.mdフェーズ1.5・DESIGN-PITCH.md §8参照。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -170,6 +207,24 @@
   // 小さなずれなら十分機能する)も対応。
   function applyDetune(period, detune, max) {
     return Math.max(0, Math.min(max, period + (detune || 0)));
+  }
+
+  // s<n0>,<n1>(スイープ)。実機ppmckのCMD_SWEEP(nes_include/ppmck/internal.h)は
+  // MMLの値をソフトウェアでピッチ計算するのではなく、2A03パルスの実ハードウェア
+  // スイープユニット($4001/$4005)へ生バイトをそのまま1回書き込むだけと確認済み
+  // (よって2A03パルスA/Bにしか存在せず、三角波・拡張音源には無い。以前の実装は
+  // 「speed*4フレームで線形に到達する半音オフセット」という架空のソフトウェア近似を
+  // 三角波にまで適用していたが誤りだった)。
+  // n1(depth,0-15)の下位4bitは公式リファレンスの変化量対応表(1-7=マイナス/8=変化無し/
+  // 9-15=プラス)が標準的なNES APUスイープの符号(negate,bit3)+シフト量(bit2-0)の
+  // ビット表現と完全に一致するため、そのままnegate+shiftとして使える。
+  // n0(speed,0-15。0=OFF、1=最速…15=最遅)からperiod(0-7)への正確な換算式は資料からは
+  // 確認できなかったため、「1が最速・15が最遅」の記述に沿った線形近似を用いる
+  // (この部分は未検証の近似。他は実ソースで確認済み)
+  function sweepRegisterByte(speed, depth) {
+    if (!speed) return 0x08; // OFF: 誤ミュート防止のnegateビットだけ立てる定石を維持
+    const period = Math.max(0, Math.min(7, Math.round((speed - 1) / 2)));
+    return 0x80 | (period << 4) | ((depth || 0) & 0x0F);
   }
 
   function pulsePeriod(freq) {
@@ -364,7 +419,7 @@
     const state = {
       octave: 4, defaultLength: 4, volume: 15, gate: 8, instrument: defaultInstrument || 0,
       envelopeV: null, envelopeVr: 255, transpose: 0, detune: 0, qFrames: null,
-      vibrato: null, pitchEnv: null, noteEnv: null, sweepSpeed: 0, sweepDepth: 0,
+      vibrato: null, pitchEnv: null, pitchEnvDelay: 0, noteEnv: null, sweepSpeed: 0, sweepDepth: 0,
       fme7Noise: null, fme7EnvShape: null, fme7EnvPeriod: 0
     };
     const segments = [];
@@ -375,6 +430,9 @@
     let lengthCarry = 0;
     let tempo = initialTempo;
     let elapsedFrames = 0;
+    // L(ループ地点マーカー)が出現した時点でのelapsedFrames。複数回書かれた場合は
+    // 最初の1回だけを採用する(2回目以降は無視)
+    let loopFrame = null;
 
     // srcStart/srcEnd: 元MMLソース上のこの音符/休符トークンの絶対文字範囲(再生ハイライト用、
     // lexer.tokenizeがoffsets付きで呼ばれた場合のみ付与される。無ければundefined)
@@ -401,6 +459,7 @@
           qFrames: state.qFrames,
           vibrato: state.vibrato,
           pitchEnv: state.pitchEnv,
+          pitchEnvDelay: state.pitchEnvDelay,
           noteEnv: state.noteEnv,
           sweepSpeed: state.sweepSpeed,
           sweepDepth: state.sweepDepth,
@@ -434,12 +493,13 @@
         case 'envelopeV': state.envelopeV = tok.value; break;
         case 'envelopeVr': state.envelopeVr = tok.value; break;
         case 'vibrato': state.vibrato = tok.value; break;
-        case 'pitchEnv': state.pitchEnv = tok.value; break;
+        case 'pitchEnv': state.pitchEnv = tok.value; state.pitchEnvDelay = tok.delay || 0; break;
         case 'noteEnv': state.noteEnv = tok.value; break;
         case 'sweep': state.sweepSpeed = tok.speed; state.sweepDepth = tok.depth; break;
         case 'fme7Noise': state.fme7Noise = tok.value; break;
         case 'fme7EnvShape': state.fme7EnvShape = tok.value; break;
         case 'fme7EnvPeriod': state.fme7EnvPeriod = tok.value; break;
+        case 'loopPoint': if (loopFrame == null) loopFrame = elapsedFrames; break;
         case 'vrc7Tone': immediateWrites.push({ kind: 'vrc7Tone', frame: elapsedFrames, value: tok.value }); break;
         case 'fdsMod': immediateWrites.push({ kind: 'fdsMod', frame: elapsedFrames, value: tok.value }); break;
         case 'tie': {
@@ -484,7 +544,7 @@
       }
     }
 
-    return { segments, immediateWrites };
+    return { segments, immediateWrites, loopFrame };
   }
 
   // セグメントのゲート長(フレーム数)を算出する。@q<n>(フレーム単位の早期ノートオフ)が
@@ -518,82 +578,141 @@
     return result;
   }
 
-  // ソフトウェアビブラート(MP)の三角波オフセット(半音単位、近似実装)。
-  // ppmckドライバのlfo_subは delay 経過後、lfo_reverse_time(=speed)ごとに方向反転しながら
-  // depthぶんの増減を繰り返す三角波だが、内部の除算ルーチン(warizan)の詳細は本実装では
-  // 追い切れていないため、「delay後、四半周期=speedフレームでdepthに到達する対称三角波」
-  // という単純化した近似で実装している(depth/128を半音相当として換算)。
-  function vibratoValue(mp, tick) {
-    if (!mp || tick < mp.delay) return 0;
-    const t = tick - mp.delay;
-    const quarter = Math.max(1, mp.speed);
-    const period = quarter * 4;
-    const phase = t % period;
-    const depth = mp.depth / 128;
-    let ratio;
-    if (phase < quarter) ratio = phase / quarter;
-    else if (phase < quarter * 2) ratio = 1 - (phase - quarter) / quarter;
-    else if (phase < quarter * 3) ratio = -(phase - quarter * 2) / quarter;
-    else ratio = -1 + (phase - quarter * 3) / quarter;
-    return ratio * depth;
+  // ソフトウェアビブラート(MP)の生レジスタ単位オフセット列。
+  // ★2026-08-11(DESIGN-PITCH.md 別プロジェクトB): 以前は「delay後、四半周期=speedフレーム
+  // でdepthに到達する対称三角波」という近似実装だった(内部除算ルーチンwarizanの詳細を
+  // 追い切れていなかったため)。実ソース(nes_include/ppmck/sounddrv.h の lfo_sub /
+  // warizan_start、AoiMoe/ppmck)を完全にトレースした結果、実機は滑らかな三角波ではなく
+  // 「1フレームごとに±1、またはNフレームごとに±Sというカクカクした階段状の変化」を
+  // フレーム単位のカウンタで刻む方式だと判明したため、近似式をやめてその状態遷移を
+  // そのまま1フレーム=1ステップで再現する(音量エンベロープのstepEnvelopeと同じ発想)。
+  //
+  // 実機の対応(lfo_set_sub): mp.delay→lfo_start_time(遅延フレーム数)、
+  // mp.speed→lfo_reverse_time(LFO周期の1/4)、mp.depth→lfo_depth(warizan_start前の
+  // 生のY軸ピーク指定)。
+  //
+  // warizan_start(lfo_setで1回だけ実行): 「1/4周期」と「Y軸ピーク」の大小関係で、
+  // (a) 1/4周期の方が大きい(傾き<1): 単位ステップ=1、(1/4周期)/(Yピーク)フレームごとに
+  //     変化させる、(b) Yピークの方が大きい(傾き>1): 1フレームごとに(Yピーク)/(1/4周期)
+  //     ぶん変化させる、(c) 等しければ1フレームごとに±1、の3通り。除算はwarizan
+  //     (.quotient += floor(a/.divisor)というコメントだが、実際はA>=Mの間incして
+  //     引き続けるbcs/bccループのため、割り切れない場合は実質ceil(a/b)を返す。実測
+  //     トレース済み: 10/3→4=ceil、9/3→3=floor=ceil(割り切れる場合は一致))。
+  function ceilDivPpmck(a, b) {
+    if (a === b) return 1; // warizan_startの.plus_one分岐(1/4周期とYピークが等しい場合)
+    let q = 0, rem = a;
+    while (rem > 0) { q++; rem -= b; }
+    return q;
   }
 
-  // スイープ(s<speed>,<depth>)の半音オフセット(近似実装)。
-  // ppmckドライバ側に対応するsweepルーチンの実体が見つからなかったため、
-  // 「speed*4フレームかけてdepth(符号付き半音)まで線形に到達し、以降は保持する」
-  // という単純な近似で実装している。
-  function sweepValue(speed, depth, tick) {
-    if (!depth) return 0;
-    const frames = Math.max(1, speed) * 4;
-    if (tick >= frames) return depth;
-    return depth * (tick / frames);
+  // periodFnが周波数の増加関数か減少関数かを実測判定する(ppmck実機のfreq_vector_table相当。
+  // MPのdepthは符号無しのため、実機は音源チップごとに「周期レジスタ(値が下がるほど音程が
+  // 上がる: 2A03/VRC6/MMC5/FME7)」か「周波数レジスタ(値が上がるほど音程が上がる: FDS/N163)」
+  // かを引いて最初の変化方向を決める(PITCH_CORRECTIONモード、lfo_initial_vector)。
+  // どちらの場合も結果は「最初のクォーター周期で音程が上がる」で共通になるため、実機の
+  // 固定テーブルを持たずperiodFn自身の単調増減を実測して同じ効果を得る。
+  function periodFnIncreasing(periodFn) {
+    return periodFn(2000) > periodFn(200);
   }
 
-  // セグメントに音程変調(EN/EP/MP/sweep)が何か効いているかどうか
+  // lfo_sub本体の忠実移植。1音符ぶん(dur フレーム)を一度に状態遷移させ、フレーム毎の
+  // オフセット値配列を返す(stepEnvelopeの事前計算版と同じ考え方)。direction(+1/-1)は
+  // periodFnIncreasing(あるいはノイズ等periodFnが無いチャンネルでは固定値)で決める。
+  function vibratoSequence(mp, dur, direction) {
+    if (!mp || dur <= 0) return null;
+    const delay = Math.max(0, mp.delay || 0);
+    const quarter = Math.max(1, mp.speed || 1);   // lfo_reverse_time(1/4周期)
+    const rawDepth = Math.max(1, mp.depth || 1);  // lfo_depth(warizan_start前)
+
+    let stepSize, stepInterval;
+    if (quarter === rawDepth) { stepSize = 1; stepInterval = 1; }
+    else if (quarter > rawDepth) { stepInterval = ceilDivPpmck(quarter, rawDepth); stepSize = 1; }
+    else { stepSize = ceilDivPpmck(rawDepth, quarter); stepInterval = 1; }
+
+    const seq = new Array(dur);
+    let startCounter = delay;          // lfo_start_counter
+    let reverseCounter = quarter;      // effect_init: reverse_time初期値のまま開始
+    let adcSbcCounter = stepInterval;  // effect_init: adc_sbc_time初期値のまま開始
+    let dir = direction;
+    let value = 0;
+
+    for (let t = 0; t < dur; t++) {
+      if (startCounter > 0) { startCounter--; seq[t] = value; continue; } // 遅延中(dec;rts相当)
+      // 反転判定: 2×quarterごとに反転(asl/cmp/lsrの実質。lfo_sub参照)
+      if (reverseCounter === quarter * 2) { reverseCounter = 0; dir = -dir; }
+      // 変分処理: stepIntervalごとにstepSizeぶん加減算
+      if (adcSbcCounter === stepInterval) { adcSbcCounter = 0; value += dir * stepSize; }
+      reverseCounter++;
+      adcSbcCounter++;
+      seq[t] = value;
+    }
+    return seq;
+  }
+
+  // セグメントに音程変調(EN/EP/MP)が何か効いているかどうか。
+  // sweep(s<n0>,<n1>)はここに含まない: 実機ppmckのCMD_SWEEPはソフトウェア効果ではなく
+  // 2A03パルスの実ハードウェアスイープユニット($4001/$4005)へバイトを1回書くだけの
+  // 機能だと判明したため、フレームごとの再計算パイプラインからは分離した
+  // (sweepRegisterByte/2A03パルスの書き込み箇所を参照)
   function hasPitchModulation(seg) {
     return (seg.noteEnv != null && seg.noteEnv !== 255) ||
       (seg.pitchEnv != null && seg.pitchEnv !== 255) ||
-      (seg.vibrato != null && seg.vibrato !== 255) ||
-      !!seg.sweepDepth;
+      (seg.vibrato != null && seg.vibrato !== 255);
   }
 
-  // 指定フレーム(セグメント内の経過フレームtick)時点の半音オフセット合計を返す。
-  // EN(累積・整数半音)は仕様通り厳密実装、EP/MP/sweepは実機ドライバの内部係数まで
-  // 追い切れていないため近似実装(compiler.js冒頭コメント参照)。
-  function pitchOffsetSemitones(seg, envelopes, tick) {
-    let offset = 0;
-    if (seg.noteEnv != null && seg.noteEnv !== 255) {
-      const table = envelopes.en[seg.noteEnv];
-      if (table) offset += cumulativeEnvelopeValue(table, tick);
-    }
+  // EN(ノートエンベロープ)は「発音ノート番号の値に加算」(ppmck公式リファレンス通り、
+  // 半音・ノート番号空間、前回値からの相対値の累積)。この関数だけがノート番号空間を扱う。
+  function noteEnvelopeOffset(seg, envelopes, tick) {
+    if (seg.noteEnv == null || seg.noteEnv === 255) return 0;
+    const table = envelopes.en[seg.noteEnv];
+    return table ? cumulativeEnvelopeValue(table, tick) : 0;
+  }
+
+  // D<n>(デチューン)・EP(ピッチエンベロープ)・MP(ビブラート)は、実機ppmckドライバでは
+  // 3つとも同一のサブルーチン(freq_add_mcknumber)を共有し、いずれも「発音周波数の値」
+  // =周期/周波数レジスタへ書き込む直前の生の値へそのまま加算される(ppmck公式リファレンスの
+  // D/EPの説明文言が一字一句同じ「発音周波数の値に加算されます」であることと、実ソース
+  // (nes_include/ppmck/sounddrv.h)でsound_pitch_enverope・sound_lfoが共にfreq_add_mcknumber
+  // を呼ぶことで確認済み。2026-08-10修正: 以前のEPは値/128を半音とみなしnoteFrequency()で
+  // 再計算していたが、この換算は仕様に存在しない誤りだった)。
+  // ここで3つを合算してから、呼び出し側がapplyDetune相当のクランプ済み加算を1回だけ行う。
+  // vibSeq: 呼び出し側がwritePitchModulation冒頭で1音符ぶん事前計算したvibratoSequence
+  // (未使用/MP無効ならnull)。tick索引で読むだけなので状態を持たない。
+  function pitchRegisterOffset(seg, envelopes, tick, vibSeq) {
+    let offset = seg.detune || 0;
     if (seg.pitchEnv != null && seg.pitchEnv !== 255) {
       const table = envelopes.ep[seg.pitchEnv];
-      if (table) offset += stepEnvelope(table, tick) / 128;
+      // EP<n>,<delay>(2026-08-11 別プロジェクトA): delay経過前はテーブルへ触れず0のまま
+      // (MPのvibratoSequenceのdelay処理・実機lfo_sub delay中rtsと同じ考え方)。delay経過後は
+      // tickをdelayぶん巻き戻してテーブル先頭(index0)から辿る。
+      const delay = seg.pitchEnvDelay || 0;
+      if (table && tick >= delay) offset += stepEnvelope(table, tick - delay);
     }
-    if (seg.vibrato != null && seg.vibrato !== 255) {
-      offset += vibratoValue(envelopes.mp[seg.vibrato], tick);
-    }
-    if (seg.sweepDepth) {
-      offset += sweepValue(seg.sweepSpeed, seg.sweepDepth, tick);
-    }
+    if (vibSeq) offset += vibSeq[tick];
     return offset;
   }
 
-  // 音程変調ありのセグメントについて、フレームごとに周波数レジスタを再計算し、
-  // 前フレームと値が変わったときだけ書き込む(無変調時の1回書きより負荷は高いが、
-  // 総フレーム数は曲の長さ相当なので実用上問題にならない)
-  function writePitchModulation(writeLog, base, startFrame, dur, seg, envelopes, periodFn) {
-    let lastLo = -1, lastHi = -1;
+  // 音程変調(EN/EP/MP)ありのセグメントについて、フレームごとに周期/周波数レジスタを
+  // 再計算し、前フレームと値が変わったときだけ書き込む(無変調時の1回書きより負荷は
+  // 高いが、総フレーム数は曲の長さ相当なので実用上問題にならない)。
+  // periodFn: 基準Hz -> 変調前の周期/周波数レジスタ値。max: applyDetune相当のクランプ上限。
+  // writeFn(frame, value): そのフレームの周期/周波数レジスタ書き込みをwriteLogへpushする
+  // コールバック(チップごとにアドレス・バイト配置が異なるため、書き込み自体は
+  // 呼び出し側に委ねる。writeVolumeEnvelopeと同じ設計)
+  function writePitchModulation(writeLog, startFrame, dur, seg, envelopes, periodFn, max, writeFn) {
+    const mpActive = seg.vibrato != null && seg.vibrato !== 255;
+    const vibSeq = mpActive
+      ? vibratoSequence(envelopes.mp[seg.vibrato], dur, periodFnIncreasing(periodFn) ? 1 : -1)
+      : null;
+    let last = null;
     for (let t = 0; t < dur; t++) {
-      const offset = pitchOffsetSemitones(seg, envelopes, t);
-      const freq = offset === 0 ? seg.freq : noteFrequency(seg.noteNumber + offset);
-      const period = applyDetune(periodFn(freq), seg.detune, 0x7FF);
-      const lo = period & 0xFF;
-      const hi = (period >> 8) & 0x07;
-      if (lo !== lastLo || hi !== lastHi) {
-        writeLog[startFrame + t].push({ addr: base + 2, value: lo });
-        writeLog[startFrame + t].push({ addr: base + 3, value: hi });
-        lastLo = lo; lastHi = hi;
+      const enOffset = noteEnvelopeOffset(seg, envelopes, t);
+      const freq = enOffset === 0 ? seg.freq : noteFrequency(seg.noteNumber + enOffset);
+      const regOffset = pitchRegisterOffset(seg, envelopes, t, vibSeq);
+      const value = applyDetune(periodFn(freq), regOffset, max);
+      if (value !== last) {
+        writeFn(startFrame + t, value);
+        last = value;
       }
     }
   }
@@ -657,8 +776,9 @@
     // 未書込のままだとAPU2A03のPulseChannelがデフォルト(negate=false, shift=0)のまま
     // になり、ハードウェア実機と同じ「スイープ無効時でもtarget=period*2>0x7FFで
     // ミュートされる」オーバーフロー判定バグ(period>=1024の低音全て)が働いてしまう。
-    // 実機ドライバもnegateビットだけ立てて回避する定石($4001=$08)を踏襲し、
-    // スイープを実際には作動させない(enable=0,shift=0)まま誤ミュートだけ防ぐ。
+    // 最初の音符が来るまでのデフォルトとして、negateビットだけ立てて回避する定石
+    // ($4001=$08)を書いておく(誤ミュート防止のみ、スイープ自体は作動しない)。
+    // 実際のs<n0>,<n1>によるスイープは音符ごとにsweepRegisterByte()で書き直す(下記)
     if (totalFrames > 0 && (channel === 'A' || channel === 'B')) {
       writeLog[0].push({ addr: base + 1, value: 0x08 });
     }
@@ -675,8 +795,21 @@
       if (channel === 'A' || channel === 'B') {
         const duty = seg.instrument % 4;
         if (seg.freq != null) {
+          // s<n0>,<n1>(スイープ)は実機ハードウェアスイープユニットへの生バイト書き込み
+          // なので、EN/EP/MPの周期再計算パイプラインとは無関係に音符ごとへ一度だけ書く
+          writeLog[startFrame].push({ addr: base + 1, value: sweepRegisterByte(seg.sweepSpeed, seg.sweepDepth) });
           if (hasPitchModulation(seg)) {
-            writePitchModulation(writeLog, base, startFrame, dur, seg, env, pulsePeriod);
+            // $4003/$4007(addr+3)への書込みは実機で長さカウンタのロード+デューティ位相の
+            // リセットを引き起こすため、値が変わっていなくても毎回書くと(EP/MPで周期が
+            // 毎フレーム変わるたび)パルス波が意図せず打ち直され続けてしまう
+            // (DESIGN-PITCH.md Phase 1で実測発覚)。上位バイトが実際に変わった時だけ書く。
+            let lastHi = -1;
+            writePitchModulation(writeLog, startFrame, dur, seg, env, pulsePeriod, 0x7FF,
+              (f, period) => {
+                writeLog[f].push({ addr: base + 2, value: period & 0xFF });
+                const hi = (period >> 8) & 0x07;
+                if (hi !== lastHi) { writeLog[f].push({ addr: base + 3, value: hi }); lastHi = hi; }
+              });
           } else {
             const period = applyDetune(pulsePeriod(seg.freq), seg.detune, 0x7FF);
             writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
@@ -697,7 +830,17 @@
       } else if (channel === 'C') {
         if (seg.freq != null) {
           if (hasPitchModulation(seg)) {
-            writePitchModulation(writeLog, base, startFrame, dur, seg, env, trianglePeriod);
+            // $400B(addr+3)への書込みは実機で線形カウンタのreload flagを立てる副作用があり、
+            // 値が変わっていなくても毎回書くと(EP/MPで周期が毎フレーム変わるたび)三角波が
+            // 意図せず打ち直され続けてしまう。上位バイトの値が実際に変わった時だけ書く
+            // (下位バイト単体の書込みには副作用が無いため毎フレーム書いてよい)。
+            let lastHi = -1;
+            writePitchModulation(writeLog, startFrame, dur, seg, env, trianglePeriod, 0x7FF,
+              (f, period) => {
+                writeLog[f].push({ addr: base + 2, value: period & 0xFF });
+                const hi = (period >> 8) & 0x07;
+                if (hi !== lastHi) { writeLog[f].push({ addr: base + 3, value: hi }); lastHi = hi; }
+              });
           } else {
             const period = applyDetune(trianglePeriod(seg.freq), seg.detune, 0x7FF);
             writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
@@ -712,13 +855,22 @@
         }
       } else if (channel === 'D') {
         if (seg.freq != null) {
-          // ノイズは4bitインデックスのみのため、対応する音程変調はEN(ノートエンベロープ)に限定する
-          if (seg.noteEnv != null && seg.noteEnv !== 255) {
-            const table = env.en[seg.noteEnv];
+          // ノイズは4bitインデックス(0-15)のみなので、周期/周波数レジスタの代わりに
+          // インデックスへ直接足し引きする。EN(ノート番号空間)でベースindexを求めた後、
+          // D/EP/MP(生オフセット空間、pitchRegisterOffset)を同じくindexへ加算しクランプする
+          if (hasPitchModulation(seg) || seg.detune) {
             let lastIdx = -1;
+            // ノイズchは周期/周波数レジスタではなく離散indexなのでperiodFnが無く、
+            // periodFnIncreasingによる方向自動判定ができない。実機のfreq_vector_table
+            // 相当の値も未確認のため、direction=+1固定とする(DESIGN.md §7でD/EP/MPの
+            // 適用対象外と位置づけているノイズchの中では既存の簡略対応の範囲内)。
+            const mpActive = seg.vibrato != null && seg.vibrato !== 255;
+            const vibSeq = mpActive ? vibratoSequence(env.mp[seg.vibrato], dur, 1) : null;
             for (let t = 0; t < dur; t++) {
-              const delta = table ? cumulativeEnvelopeValue(table, t) : 0;
-              const idx = noisePeriodIndex(Math.round(seg.noteNumber + delta));
+              const enOffset = noteEnvelopeOffset(seg, env, t);
+              const baseIdx = noisePeriodIndex(Math.round(seg.noteNumber + enOffset));
+              const regOffset = pitchRegisterOffset(seg, env, t, vibSeq);
+              const idx = Math.max(0, Math.min(15, Math.round(baseIdx + regOffset)));
               if (idx !== lastIdx) {
                 writeLog[startFrame + t].push({ addr: base + 2, value: idx & 0x0F });
                 writeLog[startFrame + t].push({ addr: base + 3, value: 0x00 });
@@ -769,9 +921,22 @@
         const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
         const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
         if (seg.freq != null) {
-          const period = applyDetune(pulsePeriod(seg.freq), seg.detune, 0xFFF);
-          writeLog[startFrame].push({ addr: base + 1, value: period & 0xFF });
-          writeLog[startFrame].push({ addr: base + 2, value: 0x80 | ((period >> 8) & 0x0F) });
+          if (hasPitchModulation(seg)) {
+            // 上位バイト(enableビット込み)は*2mml抽出側でアタック合図として扱われるため
+            // (nsf2mml/expansion/vrc6.js buildTimeline参照)、値が変わった時だけ書く
+            // (2A03と同じ理由、DESIGN-PITCH.md Phase 1)。
+            let lastHi = -1;
+            writePitchModulation(writeLog, startFrame, dur, seg, env, pulsePeriod, 0xFFF,
+              (f, period) => {
+                writeLog[f].push({ addr: base + 1, value: period & 0xFF });
+                const hi = 0x80 | ((period >> 8) & 0x0F);
+                if (hi !== lastHi) { writeLog[f].push({ addr: base + 2, value: hi }); lastHi = hi; }
+              });
+          } else {
+            const period = applyDetune(pulsePeriod(seg.freq), seg.detune, 0xFFF);
+            writeLog[startFrame].push({ addr: base + 1, value: period & 0xFF });
+            writeLog[startFrame].push({ addr: base + 2, value: 0x80 | ((period >> 8) & 0x0F) });
+          }
           if (vTable) {
             writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable,
               (f, vol) => writeLog[f].push({ addr: base + 0, value: duty | vol }));
@@ -794,9 +959,19 @@
         const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
         const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
         if (seg.freq != null) {
-          const period = applyDetune(sawPeriod(seg.freq), seg.detune, 0xFFF);
-          writeLog[startFrame].push({ addr: 0xB001, value: period & 0xFF });
-          writeLog[startFrame].push({ addr: 0xB002, value: 0x80 | ((period >> 8) & 0x0F) });
+          if (hasPitchModulation(seg)) {
+            let lastHi = -1;
+            writePitchModulation(writeLog, startFrame, dur, seg, env, sawPeriod, 0xFFF,
+              (f, period) => {
+                writeLog[f].push({ addr: 0xB001, value: period & 0xFF });
+                const hi = 0x80 | ((period >> 8) & 0x0F);
+                if (hi !== lastHi) { writeLog[f].push({ addr: 0xB002, value: hi }); lastHi = hi; }
+              });
+          } else {
+            const period = applyDetune(sawPeriod(seg.freq), seg.detune, 0xFFF);
+            writeLog[startFrame].push({ addr: 0xB001, value: period & 0xFF });
+            writeLog[startFrame].push({ addr: 0xB002, value: 0x80 | ((period >> 8) & 0x0F) });
+          }
           if (vTable) {
             writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable,
               (f, vol) => writeLog[f].push({ addr: 0xB000, value: Math.min(63, vol * 4) }));
@@ -831,9 +1006,19 @@
       const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
       const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
       if (seg.freq != null) {
-        const period = applyDetune(pulsePeriod(seg.freq), seg.detune, 0x7FF);
-        writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
-        writeLog[startFrame].push({ addr: base + 3, value: (period >> 8) & 0x07 });
+        if (hasPitchModulation(seg)) {
+          let lastHi = -1;
+          writePitchModulation(writeLog, startFrame, dur, seg, env, pulsePeriod, 0x7FF,
+            (f, period) => {
+              writeLog[f].push({ addr: base + 2, value: period & 0xFF });
+              const hi = (period >> 8) & 0x07;
+              if (hi !== lastHi) { writeLog[f].push({ addr: base + 3, value: hi }); lastHi = hi; }
+            });
+        } else {
+          const period = applyDetune(pulsePeriod(seg.freq), seg.detune, 0x7FF);
+          writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
+          writeLog[startFrame].push({ addr: base + 3, value: (period >> 8) & 0x07 });
+        }
         if (vTable) {
           writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable,
             (f, vol) => writeLog[f].push({ addr: base + 0, value: (duty << 6) | 0x30 | vol }));
@@ -884,11 +1069,21 @@
           writeLog[startFrame].push({ addr: 0xC000, value: 6 });
           writeLog[startFrame].push({ addr: 0xE000, value: Math.max(0, Math.min(31, Math.round(seg.noteNumber))) });
         } else {
-          const period = applyDetune(fme7Period(seg.freq), seg.detune, 0xFFF);
-          writeLog[startFrame].push({ addr: 0xC000, value: periodRegLo });
-          writeLog[startFrame].push({ addr: 0xE000, value: period & 0xFF });
-          writeLog[startFrame].push({ addr: 0xC000, value: periodRegHi });
-          writeLog[startFrame].push({ addr: 0xE000, value: (period >> 8) & 0x0F });
+          if (hasPitchModulation(seg)) {
+            writePitchModulation(writeLog, startFrame, dur, seg, env, fme7Period, 0xFFF,
+              (f, period) => {
+                writeLog[f].push({ addr: 0xC000, value: periodRegLo });
+                writeLog[f].push({ addr: 0xE000, value: period & 0xFF });
+                writeLog[f].push({ addr: 0xC000, value: periodRegHi });
+                writeLog[f].push({ addr: 0xE000, value: (period >> 8) & 0x0F });
+              });
+          } else {
+            const period = applyDetune(fme7Period(seg.freq), seg.detune, 0xFFF);
+            writeLog[startFrame].push({ addr: 0xC000, value: periodRegLo });
+            writeLog[startFrame].push({ addr: 0xE000, value: period & 0xFF });
+            writeLog[startFrame].push({ addr: 0xC000, value: periodRegHi });
+            writeLog[startFrame].push({ addr: 0xE000, value: (period >> 8) & 0x0F });
+          }
           // R6: ノイズ周期(3chで共有の1レジスタ。実機PSGも同様の制約)。
           // ppmckでは@2のときN<n>は無効(ノート番号が周期になるため)
           if (seg.fme7Noise != null) {
@@ -1011,9 +1206,26 @@
           writeLog[startFrame].push(...fdsWaveLoadWrites(fm[seg.instrument]));
           lastInstrument = seg.instrument;
         }
-        const period = applyDetune(fdsFreqToPeriod(seg.freq), seg.detune, 0xFFF);
-        writeLog[startFrame].push({ addr: 0x4082, value: period & 0xFF });
-        writeLog[startFrame].push({ addr: 0x4083, value: (period >> 8) & 0x0F });
+        let period;
+        if (hasPitchModulation(seg)) {
+          period = null;
+          // $4083(addr+3相当)は*2mml抽出側でアタック合図として扱われる(bit7=disableの
+          // 立ち下がり/立ち上がりで波形位相をリセットする実機仕様、nsf2mml/expansion/fds.js
+          // 参照)ため、値が変わった時だけ書く(2A03と同じ理由)。
+          let lastHi = -1;
+          writePitchModulation(writeLog, startFrame, dur, seg, env, fdsFreqToPeriod, 0xFFF,
+            (f, p) => {
+              period = p;
+              writeLog[f].push({ addr: 0x4082, value: p & 0xFF });
+              const hi = (p >> 8) & 0x0F;
+              if (hi !== lastHi) { writeLog[f].push({ addr: 0x4083, value: hi }); lastHi = hi; }
+            });
+          if (period == null) period = applyDetune(fdsFreqToPeriod(seg.freq), seg.detune, 0xFFF);
+        } else {
+          period = applyDetune(fdsFreqToPeriod(seg.freq), seg.detune, 0xFFF);
+          writeLog[startFrame].push({ addr: 0x4082, value: period & 0xFF });
+          writeLog[startFrame].push({ addr: 0x4083, value: (period >> 8) & 0x0F });
+        }
         const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
         const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
         if (vTable) {
@@ -1144,15 +1356,23 @@
           // 呼び出し元は既にコンパイルを中断しているはず)。書き込みは行わず現状維持に留める
           lastInstrument = seg.instrument;
         }
-        const freqReg = applyDetune(n163FreqReg(seg.freq, currentRoundedLen, num), seg.detune, 262143);
         // 周波数は実機のインターリーブ配置に従い +0/+2/+4 へ書く(間の位相バイト +1/+3 は
         // 触らない)。オートインクリメントに頼らずアドレスを都度選択する。波形長は +4 の上位に共用。
-        writeLog[startFrame].push({ addr: 0xF800, value: (regBase + 0) });
-        writeLog[startFrame].push({ addr: 0x4800, value: freqReg & 0xFF });
-        writeLog[startFrame].push({ addr: 0xF800, value: (regBase + 2) });
-        writeLog[startFrame].push({ addr: 0x4800, value: (freqReg >> 8) & 0xFF });
-        writeLog[startFrame].push({ addr: 0xF800, value: (regBase + 4) });
-        writeLog[startFrame].push({ addr: 0x4800, value: currentLengthByte | ((freqReg >> 16) & 0x03) });
+        const writeN163Freq = (f, freqReg) => {
+          writeLog[f].push({ addr: 0xF800, value: (regBase + 0) });
+          writeLog[f].push({ addr: 0x4800, value: freqReg & 0xFF });
+          writeLog[f].push({ addr: 0xF800, value: (regBase + 2) });
+          writeLog[f].push({ addr: 0x4800, value: (freqReg >> 8) & 0xFF });
+          writeLog[f].push({ addr: 0xF800, value: (regBase + 4) });
+          writeLog[f].push({ addr: 0x4800, value: currentLengthByte | ((freqReg >> 16) & 0x03) });
+        };
+        if (hasPitchModulation(seg)) {
+          writePitchModulation(writeLog, startFrame, dur, seg, env,
+            freq => n163FreqReg(freq, currentRoundedLen, num), 262143, writeN163Freq);
+        } else {
+          const freqReg = applyDetune(n163FreqReg(seg.freq, currentRoundedLen, num), seg.detune, 262143);
+          writeN163Freq(startFrame, freqReg);
+        }
         const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
         const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
         if (vTable) {
@@ -1179,8 +1399,9 @@
   }
 
   // --- VRC7 ---
-  function segmentsToWriteLogVrc7(index, segments, totalFrames) {
+  function segmentsToWriteLogVrc7(index, segments, totalFrames, envelopes) {
     const writeLog = newWriteLog(totalFrames);
+    const env = envelopes || { en: {} };
     const ch = index;
 
     let frame = 0;
@@ -1212,6 +1433,29 @@
         writeLog[startFrame].push({ addr: 0x9030, value: 0x10 | (block << 1) | ((fnum >> 8) & 1) });
         writeLog[startFrame].push({ addr: 0x9010, value: 0x30 + ch });
         writeLog[startFrame].push({ addr: 0x9030, value: (instrument << 4) | seg.volume });
+        // EN(ノートエンベロープ)はノート番号空間なのでfnum/block両方に影響しうる
+        // (ここだけ他チップと違いvrc7FreqToFnumBlock()でblockごと再計算する)。
+        // D<n>/EP/MPはfnum/blockの対数的表現のため対象外(上のapplyDetuneのコメント通り、
+        // このチップだけ既存のD<n>実装から一貫して除外している)。
+        // キーオン後の再書き込みはkeyonビット(0x10)を立てたまま行い、エッジトリガを
+        // 再発生させない(音符の頭でのみ発生させる、上の一連の書き込みと同じ理由)
+        if (seg.noteEnv != null && seg.noteEnv !== 255) {
+          const table = env.en[seg.noteEnv];
+          if (table) {
+            let lastFnum = fnum, lastBlock = block;
+            for (let t = 1; t < gateFrames; t++) {
+              const delta = cumulativeEnvelopeValue(table, t);
+              if (delta === 0) continue;
+              const { fnum: f2, block: b2 } = vrc7FreqToFnumBlock(noteFrequency(seg.noteNumber + delta));
+              if (f2 === lastFnum && b2 === lastBlock) continue;
+              writeLog[startFrame + t].push({ addr: 0x9010, value: 0x10 + ch });
+              writeLog[startFrame + t].push({ addr: 0x9030, value: f2 & 0xFF });
+              writeLog[startFrame + t].push({ addr: 0x9010, value: 0x20 + ch });
+              writeLog[startFrame + t].push({ addr: 0x9030, value: 0x10 | (b2 << 1) | ((f2 >> 8) & 1) });
+              lastFnum = f2; lastBlock = b2;
+            }
+          }
+        }
         if (gateFrames < dur) {
           writeLog[startFrame + gateFrames].push({ addr: 0x9010, value: 0x20 + ch });
           writeLog[startFrame + gateFrames].push({ addr: 0x9030, value: (block << 1) | ((fnum >> 8) & 1) });
@@ -1409,7 +1653,7 @@
       case 'fds': return segmentsToWriteLogFds(segments, totalFrames, envelopes);
       case 'n163': return segmentsToWriteLogN163(ch, index, segments, totalFrames, envelopes,
         extra && extra.numN163Ch, extra && extra.n163Occurrences);
-      case 'vrc7': return segmentsToWriteLogVrc7(index, segments, totalFrames);
+      case 'vrc7': return segmentsToWriteLogVrc7(index, segments, totalFrames, envelopes);
       case 'dpcm': return segmentsToWriteLogDpcm(segments, totalFrames, dpcmLayout, dpcmSamples);
       default: return newWriteLog(totalFrames);
     }
@@ -1464,6 +1708,7 @@
     const channelLetters = ['A', 'B', 'C', 'D', ...expansionLetters];
     const segmentsByChannel = {};
     const immediateWritesByChannel = {};
+    const loopFrameByChannel = {};
     let totalFrames = 0;
 
     const fme7Letters = new Set(expansionLetterMap.fme7 || []);
@@ -1472,14 +1717,23 @@
       let tokens = Mml.tokenize(raw.text, raw.offsets);
       tokens = expandLoops(tokens, errors);
       tokens = applyTuplets(tokens, tempo, errors);
-      const { segments, immediateWrites } = buildSegments(tokens, tempo, errors, settings, fme7Letters.has(ch) ? 1 : 0);
+      const { segments, immediateWrites, loopFrame } = buildSegments(tokens, tempo, errors, settings, fme7Letters.has(ch) ? 1 : 0);
       segmentsByChannel[ch] = segments;
       immediateWritesByChannel[ch] = immediateWrites;
+      loopFrameByChannel[ch] = loopFrame;
       const sum = segments.reduce((a, s) => a + s.durationFrames, 0);
       totalFrames = Math.max(totalFrames, sum);
     }
 
     totalFrames = Math.max(1, totalFrames);
+
+    // L(ループ地点)は全チャンネルに同じフレーム位置で置くのが前提の使い方のため、
+    // チャンネルレターの並び順(A,B,C,D,拡張...)で最初に見つかったチャンネルの値を
+    // 曲全体のループ地点として採用する
+    let loopPointFrame = null;
+    for (const ch of channelLetters) {
+      if (loopFrameByChannel[ch] != null) { loopPointFrame = loopFrameByChannel[ch]; break; }
+    }
 
     // 再生ハイライト用: フレーム位置 -> ソース文字範囲の対応表(全チャンネル)
     const highlightRanges = {};
@@ -1540,6 +1794,36 @@
       }
     }
 
+    // L(ループ地点)が使われている場合、このツール(ブラウザ再生・シークバー)での
+    // 「曲の長さ」は "曲頭からLへ2回戻るまで"(=イントロ1回 + ループ区間を2回)とする。
+    // 各セグメント生成関数(segmentsToWriteLogXxx)は音符ごとに周波数・音量・音色を
+    // 必ずフルに書き直す設計(未書込のまま前フレームの値を引き継ぐ書き方をしていない)
+    // ため、書き込みログの[loopPointFrame, naturalEndFrame)を単純に複製して末尾へ
+    // 追加するだけで「実際にそこへ戻って演奏した場合」と同じ結果になる。
+    // NSF書き出し側(src/driver/ppmckDriver.js)はこれとは別に、loopFrameByChannelを使って
+    // 実機同様の(このツールの都合による打ち切りが無い)本当の無限ループを行う
+    if (loopPointFrame != null && loopPointFrame < totalFrames) {
+      const naturalEndFrame = totalFrames;
+      const loopLen = naturalEndFrame - loopPointFrame;
+      for (const ch of Object.keys(tracks)) {
+        tracks[ch] = tracks[ch].concat(tracks[ch].slice(loopPointFrame, naturalEndFrame));
+      }
+      for (const ch of Object.keys(highlightRanges)) {
+        const extraRanges = [];
+        for (const r of highlightRanges[ch]) {
+          if (r.endFrame <= loopPointFrame) continue;
+          extraRanges.push({
+            startFrame: Math.max(r.startFrame, loopPointFrame) + loopLen,
+            endFrame: r.endFrame + loopLen,
+            srcStart: r.srcStart,
+            srcEnd: r.srcEnd
+          });
+        }
+        highlightRanges[ch] = highlightRanges[ch].concat(extraRanges);
+      }
+      totalFrames = naturalEndFrame + loopLen;
+    }
+
     return {
       tracks,
       totalFrames,
@@ -1547,6 +1831,8 @@
       expansions,
       expansionLetterMap,
       channelLetters,
+      loopFrameByChannel,
+      loopPointFrame,
       highlightRanges,
       errors,
       frameRate: FRAME_RATE_NTSC,

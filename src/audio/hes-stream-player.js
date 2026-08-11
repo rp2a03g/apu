@@ -2,57 +2,109 @@
  * HES ストリーミング再生プレイヤー
  * MML.Audio.HesStreamPlayer / MML.Audio.HesReplayStreamPlayer / MML.Audio.HesBufferedPlayer
  *
- * gbs-stream-player.js と同じ設計(HesStreamPlayer=実CPU駆動の直接再生版、
- * HesReplayStreamPlayer=先読みキャプチャのAPUライブスナップショットを再生に使い回す版)。
- * HESはPSGの波形/ノイズ位相が内部クロックのみで進行するため、writeLog再生ではなく
- * スナップショット方式に統一する(gbsPlayer.js/hesPlayer.jsと同じ理由)。
+ * ★現在の結論(2026-08): HesReplayStreamPlayer(GBS/KSSと同じ、バックグラウンドの
+ * regsOnlyキャプチャ[hesPlayer.js captureHesSongAsync]が先読みで作るスナップショットを
+ * 再生時にAPUへ書き戻すだけの軽量方式)を使う。他の2クラス(HesStreamPlayer=CPU駆動の
+ * リアルタイム合成、HesBufferedPlayer=事前一括レンダリング)は定義だけ残しているが未使用。
+ * どちらも「重い」「鍵盤表示に出ない」等の問題を解消しきれず不採用になった経緯がある
+ * (詳しくはgit履歴参照。要点: HESは他フォーマットと違いPLAYが無くCPU命令列を実時間で
+ * 回し続ける設計のため、CPU駆動のリアルタイム合成は構造的に重い。事前一括レンダリングは
+ * 軽いが「レンダリング完了まで再生できない」トレードオフが許容されなかった)。
+ * HesReplayStreamPlayerはGBS/KSSと同じく、先読みが埋めた範囲まで再生開始を待たずに
+ * 進められ(NsfReplayStreamPlayer/main.js playNsfStream()と同じ「バックグラウンド
+ * キャプチャの配列を再生側と共有し、埋まった分だけ再生する」設計)、メインスレッドの
+ * 負荷もAPUクロックのみで軽い。
  *
- * ★2026-08: HesStreamPlayer(ScriptProcessorNode、onaudioprocess内でhesPlayer.js
- * renderFrame()を毎回呼びCPU/PSGを実時間で回す方式)はDDA(PCM)の高頻度書込みを正しく
- * 再現するために導入したが、HESは他フォーマット(NSF/GBS/KSS)と違い「PLAYを1回呼んで
- * 単純な音源更新をするだけ」では済まず、7.16MHz相当のCPU命令列を本当に実時間で回し
- * 続ける必要がある。hesBus.js/apuHuC6280.jsのclockBy()バッチ化で関数呼出しの
- * オーバーヘッド自体は削減したが、それでも「メインスレッド上のScriptProcessorNode
- * コールバック内でCPUエミュレーションを回す」という設計そのものが重く、UI更新等の
- * メインスレッド競合と相まって音切れ(ユーザー報告の「がくがく」)が解消しなかった。
- * 他フォーマットのストリーミング再生(NsfStreamPlayer等)がAPUクロックのみで
- * 済んでいるのに対し、HESだけCPU命令実行までリアルタイムで担っている点が根本的に
- * 割に合わない。captureHesSongAsync()は既にオフライン一括レンダリング(音声波形を
- * 事前に全部計算する)経路を持っており(hes2mml変換で使用、実測で実時間の1/10程度で
- * 完了する)、これをそのまま再生にも使い回すHesBufferedPlayerを追加した:
- * 事前に全波形をレンダリングしAudioBufferへ詰めてAudioBufferSourceNodeで再生する
- * ため、再生中は一切エミュレーションを行わず(ブラウザネイティブの再生パイプラインに
- * 任せるだけ)、メインスレッドが混雑していても音切れが起きない。
- * 代わりに「再生開始までにレンダリング待ちが発生する」「速度変更(再生速度スライダー)は
- * AudioBufferSourceNode.playbackRateではなく都度オフライン再レンダリングで対応する
- * (playbackRateはピッチも一緒に変わるテープ速度方式のため、既に対応済みの
- * 音程を変えないテンポ変更[hesPlayer.js renderFrame()冒頭コメント参照]と矛盾する)」
- * というトレードオフを払う。
- * ★ミュートについて: 当初は6ch合算済みの1本のAudioBufferにレンダリングしていたため、
- * 録音後に特定chだけをミュートすることができなかった(ユーザー指摘)。captureHesSongAsync()の
- * perChannelAudioオプション(hesPlayer.js)でchごとに独立したFloat32Arrayを受け取るようにし、
- * 後述のScriptProcessorNode側で毎サンプルch別ゲインを掛けてから合算する方式に変更、
- * 再生中でも即座にミュートを反映できるようにした。
- * ★2026-08 その2: 「レンダリング完了を待たず、他フォーマット(NSF/KSS/SPC)同様に
- * バックグラウンドキャプチャの先読みが追いついた範囲まで再生できるようにしてほしい」
- * 「レンダリング中に曲送りすると以後ボタンが一切反応しなくなる」という指摘を受け、
- * AudioBufferSourceNode(バッファ全体が揃うまでstart()できない)をやめ、
- * ScriptProcessorNodeでchごとの配列(channelAudio、captureHesSongAsync()のopt.channelAudioOutで
- * 渡した「今まさに埋まっていっている」配列そのもの)を直接読みながら再生する方式に変更した
- * (NsfReplayStreamPlayer/main.js playNsfStream()の「writeLog/regSnapshotsをバックグラウンド
- * キャプチャと共有し、埋まった分だけ再生する」設計と同じ考え方)。読み出し位置が
- * まだレンダリングの追いついていないサンプルに達したら無音を出しつつ位置を進めずに
- * 待つ(renderedSamplesで管理)。以前のバグ(曲送り後に無反応になる)は、
- * load()完了をawaitしてから一連の状態更新を行う設計だったため、待機中に別のload()で
- * 追い越されると"hesIsRendering"を戻し忘れる経路があったことが原因だった。load()を
- * 「即座に返り、進捗はonProgressコールバックで随時通知する」非同期即応型
- * (NSF/KSSと同じ設計)に変えたことで、この種のレース条件自体が構造的に起きなくなった。
+ * ★PCM(DDA)対応について: DDA(PSGの直接D/A書込み、$0806への高頻度な生値書込みで
+ * ソフトウェアPCMを実現するモード)は、フレーム単位のスナップショットだけでは
+ * 高頻度書込みを取りこぼす。クリップ検出+重複排除+DMCエンコード/デコードを挟む方式も
+ * 試したが、これは「CPU駆動でライブ再生していた時の音」とは別物になってしまう
+ * (不可逆変換を経由するため)。最終的に、hesPlayer.js captureHesSongAsyncが記録する
+ * 生のdpcmTrace(ch別・書込み順の$0806書込み値そのもの)を、クリップ化せず
+ * そのままのタイミングでAPUのdacへ再生時に書き戻す方式にした(HesReplayStreamPlayer
+ * 内のコメント参照)。CPU再実行は不要なまま、書込まれた生の値の並びを忠実に再現できる。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
   MML.Audio = MML.Audio || {};
 
   const BUFFER_SIZE = 4096;
+  const DDA_HIST_LEN = 512; // 鍵盤表示のPCM周期検出用の履歴バッファ長(HesReplayStreamPlayer参照)
+
+  // gainNode(4.0)の後段にリミッタ(DynamicsCompressorNode)を挟み、DDA(PCM)chの
+  // on/off切替のような急激な信号の段差でDCブロッキングフィルタ(y=raw-dcPrevX+0.999*dcPrevY)
+  // が過渡的にオーバーシュートし、そこへgain4.0が掛かって±1.0を超えハードクリップする
+  // のを防ぐ(src/audio/stream-player.js createLimiter()と同じ考え方・同じ設計)。
+  // ★実測(TP03018.hes index77): ch4の波形表示が「崩れて聴こえる」というユーザー報告の
+  // 実体はch4自体のバグではなく、ch5がDDA(190000回超の$0806書込み)とトーンを頻繁に
+  // 切り替える曲でのクリップ歪みだった。実際にHesReplayStreamPlayerの出力サンプルを
+  // 測定したところ、ch5のDDA on/off遷移の直後のフレームでgain適用後|y|>1.0となる
+  // クリップが124フレーム分(3604フレーム中)発生しており、遷移フレームと1対1に近い形で
+  // 一致していた。ユーザーが「変化の際ノイズ出てる」と報告した内容と一致する。
+  function createLimiter(audioCtx) {
+    const limiter = audioCtx.createDynamicsCompressor();
+    limiter.threshold.value = -3.0; // dB: 出力段が0dBFSに達する手前から効かせる
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.001;
+    limiter.release.value = 0.05;
+    return limiter;
+  }
+
+  // 直近の値変化履歴(circular buffer、古い→新しい順に並べ替え済みの配列を渡す)から
+  // 自己相関で基本周期を検出し、その1周期ぶんの値配列を返す。周期が見つからない
+  // (無音・打楽器的な過渡音等)場合はnullを返す(呼び出し側でフォールバックする)。
+  // 波形メモリ(N163/FDS等、固定長)と違いPCMには決まった長さが無いため、検出できた
+  // 周期の長さをそのまま可変長で返す設計にしている(ユーザー指摘: 固定32要素は
+  // 波形メモリ表示の流用に過ぎず、PCMの実態に合っていなかった)。
+  // ★しきい値は実際の(多少ノイズの乗った)PCMでも「だいたい周期的」なら拾えるよう
+  // 緩めにしてある(2026-08、ユーザー実測: 元の厳しい閾値では実ファイルのほとんどが
+  // 周期無し判定になりフォールバック表示ばかりになっていた)。
+  function detectPcmPeriod(buf) {
+    const n = buf.length;
+    const minLag = 2, maxLag = Math.min(160, Math.floor(n / 3));
+    if (maxLag <= minLag) return null;
+    let mean = 0;
+    for (let i = 0; i < n; i++) mean += buf[i];
+    mean /= n;
+    // ほぼ無音(振幅が無い)なら周期性を主張しない
+    let variance = 0;
+    for (let i = 0; i < n; i++) variance += (buf[i] - mean) * (buf[i] - mean);
+    variance /= n;
+    if (variance < 0.5) return null;
+
+    // 正規化二乗差分(YIN法に近い考え方): 値が小さいほど「lagだけずらしても波形が
+    // よく似ている」= その長さが周期の可能性が高い。最初の極小(最初にある閾値を
+    // 下回った点)を採用することで、周期の整数倍を誤検出しにくくする。
+    let bestLag = -1, bestScore = Infinity;
+    const scores = new Array(maxLag + 1);
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let sum = 0;
+      const count = n - lag;
+      for (let i = lag; i < n; i++) { const d = buf[i] - buf[i - lag]; sum += d * d; }
+      const normalized = sum / count / variance; // 0に近いほど良い一致
+      scores[lag] = normalized;
+      if (normalized < bestScore) { bestScore = normalized; bestLag = lag; }
+    }
+    // 最良の一致が十分に良くなければ(過渡音・打楽器等、真に周期性が無い)周期無しとする
+    if (bestLag < 0 || bestScore > 0.45) return null;
+    return bestLag;
+  }
+
+  // 表示用の軽い平滑化(3タップ移動平均、両端は縮退)。PCMは離散値が変化するたびに
+  // そのまま次の値へ直線で繋ぐと角ばった階段状に見える(NSFのDMC表示はデルタ変調
+  // [1ビットあたり最大±2/127]のなだらかな追従カーブなので滑らかに見える、との比較で
+  // ユーザー指摘)。実機のRCフィルタ的な追従を簡易的に模し、見た目を滑らかにする。
+  function smoothWave(arr) {
+    if (arr.length < 3) return arr;
+    const out = new Array(arr.length);
+    for (let i = 0; i < arr.length; i++) {
+      const prev = arr[(i - 1 + arr.length) % arr.length];
+      const next = arr[(i + 1) % arr.length];
+      out[i] = (prev + arr[i] * 2 + next) / 4;
+    }
+    return out;
+  }
 
   class HesStreamPlayer {
     constructor(audioCtx) {
@@ -186,13 +238,55 @@
       this.dcPrevY       = 0;
       this.isPlaying     = false;
       this.onEnded       = null;
+      // ★2026-08 PCM(DDA)対応、3度目の設計。
+      // 第1版: 生の5bitサンプルを自作の簡易ゲイン式で直接再生 → 音が違う。
+      // 第2版: hes2mml変換と同じ@DPCM<n>抽出(クリップへ重複排除→MML.Dpcm.encode()で
+      //   NSF実機DMC形式へエンコード→decode()で復号して再生)を再利用 → これも「以前
+      //   (CPU駆動のHesStreamPlayerでライブ再生していた時)の音」とは別物だった
+      //   (ユーザー実測)。加えてDDAchを常時off扱いにしてapu.mixSample()から外していた
+      //   ため、ライブAPU状態を見る鍵盤表示にも一切現れなくなっていた。
+      // 根本原因: クリップ検出・重複排除・DMC(1bitデルタ変調)エンコードはどれも
+      //   「元の生波形からの不可逆な変換」であり、CPU駆動再生(=書込まれた生の値を
+      //   その場でそのまま出力するだけ)とは原理的に別の音になる。MML変換(@DPCM<n>)は
+      //   NSF実機のDMCハードウェアという別チップに載せ替えるための変換なので不可逆で
+      //   構わないが、ネイティブ再生はHES実機そのものの音を目指すべきで、変換を挟む
+      //   理由が無い。
+      // 第3版(今回): dpcmTrace(hesPlayer.js captureHesSongAsync が記録する、ch別・
+      //   書込み順の生の$0806書込み値)を「クリップ」に加工せず、そのままのタイミングで
+      //   ライブAPUのdacへ再生時に書き戻す。1フレーム(1/60秒)内に複数件あるトレースは
+      //   フレーム内の経過割合に応じて均等に割り振る(正確な書込みタイミングまでは
+      //   記録していないための近似だが、CPU再実行が不要なままCPU駆動再生とほぼ同じ
+      //   生値の並びを再現できる)。DDAchも他ch同様に毎フレームスナップショットから
+      //   通常通り状態復元するため、鍵盤表示にも普通に反映される。
+      this.ddaChannel      = -1;   // DDAとして扱うPSG ch番号(-1=未検出/PCM無し曲)
+      this.ddaTrace        = null; // [{frame, value}](書込み順、hesPlayer.js dpcmTrace[ch]そのまま)
+      this._ddaTracePos    = 0;    // ddaTrace内の消費済み位置
+      this._ddaFrameEntries = null; // 現在フレーム分の値配列
+      // 鍵盤表示用: DDAchはc.wave(波形メモリ)がDDA突入前の内容で固まったまま更新されず
+      // 実際のPCM波形と無関係になってしまう(PsgChannel.writeData()参照、DDAモード中は
+      // wavePos/waveへは一切書かずdacだけを更新するため)。実際に鳴っている波形を
+      // 見せるため、直近のdac値(変化した時だけ)を独立したリングバッファに記録する。
+      // ★ユーザー指摘: 波形メモリ表示(N163/FDS等)を無批判に流用して固定32要素に
+      // していたが、PCMには波形メモリのような固定長という概念が無い。実際の音の
+      // 周期性を自己相関で検出し、その1周期ぶんだけを可変長で返す(getDdaWave参照)。
+      // 履歴バッファ(DDA_HIST_LEN)は検出可能な周期の上限を確保するため32よりだいぶ大きく取る。
+      this._ddaWaveBuf = new Uint8Array(DDA_HIST_LEN).fill(16); // 16=中央値(無音相当)で初期化
+      this._ddaWavePos = 0;
+      this._ddaWaveCount = 0; // これまでに記録した総件数(DDA_HIST_LENに達するまでの充填判定用)
       this._createNode();
     }
 
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 4.0;
-      this.gainNode.connect(this.audioCtx.destination);
+      // ★4.0のままだと、リミッタを足してもDDA(PCM) on/off遷移直後のDCブロッキング
+      // フィルタのオーバーシュートがリミッタの追従(attack=0.001s)を振り切って
+      // ±1.0を超えることがある(実測: TP03018.hes index77で60秒中131サンプルがクリップ)。
+      // 2.5まで下げるとリミッタと合わせて同じ60秒間で一度もクリップしなかった
+      // (実測: maxAbs=0.966)。DDAを使わない曲の体感音量はリミッタの底上げでほぼ保たれる。
+      this.gainNode.gain.value = 2.5;
+      this.limiter = createLimiter(this.audioCtx);
+      this.gainNode.connect(this.limiter);
+      this.limiter.connect(this.audioCtx.destination);
 
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
       this.node.connect(this.gainNode);
@@ -222,13 +316,34 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
+      this.ddaChannel = -1; this.ddaTrace = null; this._ddaTracePos = 0; this._ddaFrameEntries = null;
       if (mute) this.applyMute(mute);
+    }
+
+    // main.jsがバックグラウンドキャプチャの進捗ごと(ロール再構築と同じタイミング)に
+    // hesPlayer.js captureHesSongAsync が記録した生のdpcmTrace/controlTraceから
+    // 「どのchがDDA(PCM)か」「そのchの生の書込み値列」を渡し直す(冒頭コメント参照)。
+    // チャンネル選定だけはMML.Hes2MmlExpansion.extractDdaClips()のロジックを流用する
+    // (曲全体でDDA区間が最も長い1chを選ぶ、という判定自体はhes2mml変換と共通でよいため)。
+    setDdaChannel(channel, trace) {
+      this.ddaChannel = channel != null ? channel : -1;
+      this.ddaTrace = trace || null;
+      this._ddaTracePos = 0;
+      this._ddaFrameEntries = null;
+      // 現在の再生位置より前のトレースはスキップする(再トリガー/巻き戻り防止)
+      if (this.ddaTrace) {
+        while (this._ddaTracePos < this.ddaTrace.length && this.ddaTrace[this._ddaTracePos].frame < this.currentFrame) this._ddaTracePos++;
+      }
     }
 
     _isFrameReady(f) { return !!(this.snapshots && this.snapshots[f]); }
 
     // スナップショットの値をライブAPUのチャンネルへ直接書き戻す(wavePos/lfsr等の位相は
     // ここでは触らずclock()の自然な進行に任せる。gbs-stream-player.jsと同じ考え方)。
+    // DDAchも他ch同様に通常通り復元する(鍵盤表示にも普通に反映されるようにするため。
+    // 冒頭コメント参照)。dacの値だけは、この後_fill()側でこのフレーム分の生トレースを
+    // 使ってサンプル単位に細かく上書きする(フレーム単位のsc.dacは1フレームに1回しか
+    // 変化を捉えられず粗すぎるため)。
     _applyFrame(f) {
       this.currentFrame = f;
       const s = this.snapshots[f];
@@ -238,9 +353,29 @@
         c.freq = sc.freq;
         c.balance = sc.balance;
         c.dac = sc.dac;
-        c.noiseCtrl = sc.noiseOn ? 0x80 : 0;
+        // 生のnoiseCtrl(下位5bitに周期選択値)をそのまま復元する。以前はnoiseOn(真偽値)
+        // からon/offビットだけ再構成しており、周期選択値が常に0(=invVal31=最遅固定)に
+        // すり替わっていた(hesPlayer.js snapshotApu()冒頭コメント参照)。sc.noiseCtrlが
+        // 無い古いキャプチャ結果(念のためのフォールバック)ではnoiseOnから復元する。
+        c.noiseCtrl = sc.noiseCtrl !== undefined ? sc.noiseCtrl : (sc.noiseOn ? 0x80 : 0);
         for (let j = 0; j < sc.wave.length; j++) c.wave[j] = sc.wave[j];
       }
+      this._prepDdaFrame(f);
+    }
+
+    // このフレーム(f)分のDDA生トレース値を集めてキャッシュする(書込み順、ポインタは
+    // 消費した分だけ進める)。実際の書込みタイミング(フレーム内のどの瞬間か)までは
+    // 記録していないため、フレーム内で均等に割り振る近似で使う(_fill()参照)。
+    _prepDdaFrame(f) {
+      this._ddaFrameEntries = null;
+      if (this.ddaChannel < 0 || !this.ddaTrace) return;
+      const trace = this.ddaTrace;
+      while (this._ddaTracePos < trace.length && trace[this._ddaTracePos].frame < f) this._ddaTracePos++;
+      const entries = [];
+      let p = this._ddaTracePos;
+      while (p < trace.length && trace[p].frame === f) { entries.push(trace[p].value); p++; }
+      this._ddaTracePos = p;
+      if (entries.length > 0) this._ddaFrameEntries = entries;
     }
 
     _fill(out) {
@@ -258,6 +393,24 @@
         this._songFramePos = nextSongFramePos;
         if (f !== this.currentFrame) this._applyFrame(f);
 
+        // DDAchのdacを、このフレーム内の生トレース密度に応じてサンプル単位で更新する
+        // (CPU駆動再生が実際に書き込んでいた生の値の並びを、記録済みの書込みタイミングの
+        // 粒度[フレーム単位]の範囲でできるだけ忠実に再現する)。値が実際に変化した時だけ
+        // 鍵盤表示用リングバッファへも記録する(毎サンプル記録すると同じ値の連続で
+        // バッファがすぐ埋まり、直近のごく短い時間しか見えなくなるため。getDdaWave参照)。
+        if (this.ddaChannel >= 0 && this._ddaFrameEntries) {
+          const frac = this._songFramePos - f; // このフレーム内での経過割合(0..1)
+          const idx = Math.min(this._ddaFrameEntries.length - 1, Math.floor(frac * this._ddaFrameEntries.length));
+          const v = this._ddaFrameEntries[idx];
+          const ch = this.apu.ch[this.ddaChannel];
+          if (ch.dac !== v) {
+            ch.dac = v;
+            this._ddaWaveBuf[this._ddaWavePos] = v;
+            this._ddaWavePos = (this._ddaWavePos + 1) % DDA_HIST_LEN;
+            if (this._ddaWaveCount < DDA_HIST_LEN) this._ddaWaveCount++;
+          }
+        }
+
         this.cycleAccum += this.clockHz / sr;
         while (this.cycleAccum >= 1) { this.apu.clock(); this.cycleAccum -= 1; }
         const raw = this.apu.mixSample();
@@ -266,6 +419,24 @@
         out[i] = y;
         this.samplePos++;
       }
+    }
+
+    // 直近のdac生値履歴(古い→新しい順、0-31)から自己相関で周期を検出し、その1周期ぶんの
+    // 値配列(可変長)を返す(鍵盤表示用)。波形メモリ(N163/FDS等)は固定長のバッファ
+    // そのものだが、PCMには「1周期」に相当する固定長の概念が無いため、実際の音の
+    // 周期性から動的に長さを決める(ユーザー指摘)。周期が検出できない(無音・打楽器的な
+    // 過渡音等、実際のPCMで多い)場合は、NSFのDMC表示(サンプル全体をそのまま見せる)に
+    // 近い考え方で直近64件をフォールバックとして返す(以前は16件と狭すぎて、実質何も
+    // 見えていないのと同じだった)。いずれの場合も軽く平滑化してから返す
+    // (smoothWave冒頭コメント参照)。main.js liveHesApu()参照。
+    getDdaWave() {
+      const n = this._ddaWaveCount;
+      if (n === 0) return [16, 16, 16];
+      const hist = new Array(n);
+      for (let i = 0; i < n; i++) hist[i] = this._ddaWaveBuf[(this._ddaWavePos - n + i + DDA_HIST_LEN * 2) % DDA_HIST_LEN];
+      const period = detectPcmPeriod(hist);
+      const slice = period != null ? hist.slice(hist.length - period) : hist.slice(Math.max(0, hist.length - 64));
+      return smoothWave(slice);
     }
 
     play()  { this.isPlaying = true; }
@@ -279,6 +450,11 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
+      this._ddaTracePos = 0;
+      this._ddaFrameEntries = null;
+      this._ddaWaveBuf.fill(16);
+      this._ddaWavePos = 0;
+      this._ddaWaveCount = 0;
     }
 
     setSpeed(factor) { this.speedFactor = factor; }
@@ -295,6 +471,14 @@
       }
       this._buildApu();
       this.cycleAccum = 0;
+      // DDAトレースのポインタは前後どちらへもシークしうるため、常に先頭から
+      // 目標フレームの手前まで再走査する(_prepDdaFrameの前進のみの走査と違い、
+      // シークは巻き戻る場合があるため)。
+      this._ddaTracePos = 0;
+      this._ddaFrameEntries = null;
+      if (this.ddaTrace) {
+        while (this._ddaTracePos < this.ddaTrace.length && this.ddaTrace[this._ddaTracePos].frame < targetFrame) this._ddaTracePos++;
+      }
       if (targetFrame >= 0 && snaps[targetFrame]) this._applyFrame(targetFrame);
       this.samplePos     = samplePos;
       this.currentFrame  = targetFrame;
@@ -318,8 +502,15 @@
       this.isPlaying = false;
       if (this.node) { this.node.onaudioprocess = null; this.node.disconnect(); this.node = null; }
       if (this.gainNode) { this.gainNode.disconnect(); this.gainNode = null; }
+      if (this.limiter) { this.limiter.disconnect(); this.limiter = null; }
       this.apu       = null;
       this.snapshots = null;
+      // ddaTraceは曲全体のDDA(PCM)書込み値の生ログで、他フォーマットのwriteLog同様
+      // 長いDDA多用曲では数十MB規模になりうる(他4フォーマットのdestroy()と同じ理由で
+      // 明示的に参照を切る)。header/_ddaFrameEntriesも合わせて破棄する。
+      this.header           = null;
+      this.ddaTrace         = null;
+      this._ddaFrameEntries = null;
     }
   }
 

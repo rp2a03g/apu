@@ -65,6 +65,43 @@
     return (semi >= 0 && semi <= 119) ? semi : null;
   }
 
+  // pitchToSemitoneの丸めない連続版をHzへ変換する(DESIGN-PITCH.md Phase 1、
+  // ev.pitchSeqを借用先チップの生レジスタ空間へ変換する前段としてHzを経由する)。
+  // continuousSemi(57基準)=12*log2(pitch/0x1000)+tune+60 → freq=440*2^((continuousSemi-57)/12)
+  // = 440*(pitch/4096)*2^((tune+3)/12)
+  function pitchRegToFreqHz(pitch, tune) {
+    return pitch > 0 ? 440 * (pitch / 4096) * Math.pow(2, ((tune || 0) + 3) / 12) : 0;
+  }
+
+  // ── 借用先チップの生レジスタ空間への変換式(compiler.js/nsf2mml/converter.jsの
+  // 各periodFnと同じ、丸めない連続値。DESIGN-PITCH.md Phase 1、EP<n>用) ──────
+  const CPU_CLOCK_NTSC = 1789773; // 借用先(2A03/VRC6/MMC5/FME7/FDS/N163)のクロック
+  function pulsePeriodRaw(freq)   { return CPU_CLOCK_NTSC / (16 * freq) - 1; }   // 2A03/MMC5パルス
+  function triPeriodRaw(freq)     { return CPU_CLOCK_NTSC / (32 * freq) - 1; }   // 2A03三角波
+  function vrc6PulsePeriodRaw(freq) { return CPU_CLOCK_NTSC / (16 * freq) - 1; } // VRC6パルス
+  function vrc6SawPeriodRaw(freq) { return CPU_CLOCK_NTSC / (14 * freq) - 1; }   // VRC6サウ
+  function fme7ToneRaw(freq)      { return CPU_CLOCK_NTSC / (32 * freq); }       // FME7
+  function fdsPeriodRawSpc(freq)  { return freq * 65536 * 64 / CPU_CLOCK_NTSC; } // FDS
+  // N163: pcmToN163Wave()が常に16サンプルへリサンプリングするためwaveLen固定16。
+  // numChはSPC変換で実際に確保されるN163ch数(expansionLetters.length)を呼び出し側から渡す。
+  function n163FreqRegRawSpc(freq, numCh) { return freq * 15 * 65536 * 16 * numCh / CPU_CLOCK_NTSC; }
+
+  // type文字列(options.channelMap[ch].type)→借用先の生周期変換関数。ノイズ/DPCM/skipは
+  // 対象外(null)。VRC7/OPLLはこのアプリのSPC変換先候補に無いため定義不要。
+  function periodFnForType(type, n163NumCh) {
+    switch (type) {
+      case 'pulse1': case 'pulse2': case 'mmc5pulse1': case 'mmc5pulse2': return pulsePeriodRaw;
+      case 'triangle': return triPeriodRaw;
+      case 'vrc6pulse1': case 'vrc6pulse2': return vrc6PulsePeriodRaw;
+      case 'vrc6saw': return vrc6SawPeriodRaw;
+      case 'fme7a': case 'fme7b': case 'fme7c': return fme7ToneRaw;
+      case 'fds': return fdsPeriodRawSpc;
+      case 'n163_0': case 'n163_1': case 'n163_2': case 'n163_3':
+        return (freq) => n163FreqRegRawSpc(freq, n163NumCh);
+      default: return null;
+    }
+  }
+
   // ── BRR サンプルの原音(基本周波数)検出 ───────────────────────────
   // pitch=0x1000(原音・32kHz再生)で鳴らした時の基本周波数[Hz]を自己相関で推定する。
   // 旋律楽器のように明確な周期を持つ波形では高い信頼度で検出できる。打楽器/ノイズは
@@ -415,10 +452,12 @@
   // ★ただし「新しいピッチに変わった瞬間」を無条件に区切ると、ビブラート(音を伸ばしながら
   // 半音境界をまたいで細かく音程を揺らす奏法。ギター/リードパートで非常によく使われる)まで
   // 1フレームごとに別々の新しい音符として誤検出し、極薄(1フレーム程度)の音符の連続に
-  // 化けて描画も崩れる不具合があった(実SPCのピクセル単位検証で確認)。そこで、新しい
-  // ピッチがPITCH_CONFIRM_FRAMES連続して続いた場合のみ「本物の音程変化」と確定する
-  // (ビブラートのように元のピッチへすぐ揺れ戻る場合は候補を破棄し、元のノートを継続する)。
-  const PITCH_CONFIRM_FRAMES = 3;
+  // 化けて描画も崩れる不具合があった(実SPCのピクセル単位検証で確認)。
+  // ★2026-08-10(DESIGN-PITCH.md Phase 2): 以前はここで独自のPITCH_CONFIRM_FRAMES
+  // デバウンス(候補ピッチがNフレーム続くまで確定しない)を行っていたが、他形式と同じ
+  // 「即座に分割してから後段でmergeAlternatingVibratoにより統合する」方式に統一した
+  // (境界判定そのものは変えず、統合だけを共有ロジックに委ねるINV-3の原則)。
+  // 分割直後の配列はmergeSpcVoiceEvents()で後処理する。
 
   MML.SPC2MML.extractVoiceEvents = function (log, options = {}) {
     const FRAMES = log.length;
@@ -449,7 +488,8 @@
       const voiceDsp = new Uint8Array(8); // このボイスのレジスタ追跡用
       let activePitch = 0, activeSrcn = 0, activeStart = -1;
       let activeAdsr1 = 0, activeAdsr2 = 0, activeGain = 0;
-      let candidatePitchSemi = null, candidateStart = -1, candidateCount = 0;
+      // pitchSeq(DESIGN-PITCH.md Phase 0): 確定済みセグメントのフレーム毎生ピッチレジスタ値。
+      let activePitchSeq = [];
 
       for (let f = 0; f < FRAMES; f++) {
         for (const { reg, val } of log[f]) {
@@ -465,7 +505,7 @@
 
         if (konLatched[f] & (1 << ch)) {
           if (activeStart >= 0) {
-            voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain });
+            voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq });
           }
           activePitch = curPitch;
           activeSrcn  = voiceDsp[0x04];
@@ -473,28 +513,21 @@
           activeAdsr2 = voiceDsp[0x06];
           activeGain  = voiceDsp[0x07];
           activeStart = f;
-          candidatePitchSemi = null; candidateCount = 0;
+          activePitchSeq = [curPitch];
         } else if (activeStart >= 0 && curPitchSemi !== activePitchSemi) {
-          // ポルタメント/レガート候補: ビブラートの一時的な揺れと区別するため、
-          // 同じ新しいピッチがPITCH_CONFIRM_FRAMES連続するまでは確定しない。
-          if (curPitchSemi === candidatePitchSemi) {
-            candidateCount++;
-          } else {
-            candidatePitchSemi = curPitchSemi; candidateStart = f; candidateCount = 1;
-          }
-          if (candidateCount >= PITCH_CONFIRM_FRAMES) {
-            voiceEvents[ch].push({ frame: activeStart, len: candidateStart - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain });
-            activePitch = curPitch;
-            activeSrcn  = voiceDsp[0x04];
-            activeAdsr1 = voiceDsp[0x05];
-            activeAdsr2 = voiceDsp[0x06];
-            activeGain  = voiceDsp[0x07];
-            activeStart = candidateStart;
-            candidatePitchSemi = null; candidateCount = 0;
-          }
-        } else {
-          // ピッチが現在の音程に戻った(=ビブラートの揺れ戻り) → 候補を破棄
-          candidatePitchSemi = null; candidateCount = 0;
+          // ポルタメント/レガート: KONを送り直さない音程変化はここで即座に区切る
+          // (ビブラートによる細切れ化はmergeSpcVoiceEvents()の共有ロジックで後統合する、
+          // DESIGN-PITCH.md Phase 2)。
+          voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq });
+          activePitch = curPitch;
+          activeSrcn  = voiceDsp[0x04];
+          activeAdsr1 = voiceDsp[0x05];
+          activeAdsr2 = voiceDsp[0x06];
+          activeGain  = voiceDsp[0x07];
+          activeStart = f;
+          activePitchSeq = [curPitch];
+        } else if (activeStart >= 0) {
+          activePitchSeq.push(curPitch);
         }
         // 同じフレーム内にこのボイスのKONも来ている場合、そのKOFFは無視する。
         // 実機のDSPはKON/KOFFが同一タイミングで競合するとKON側が優先され、
@@ -505,19 +538,46 @@
         // されてしまう不具合があった(実SPCのV5パートで確認、ノート脱落の原因)。
         if ((koffLatched[f] & (1 << ch)) && !(konLatched[f] & (1 << ch))) {
           if (activeStart >= 0) {
-            voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, f - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain });
+            voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, f - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq });
             activeStart = -1;
+            activePitchSeq = [];
           }
-          candidatePitchSemi = null; candidateCount = 0;
         }
       }
       if (activeStart >= 0) {
-        voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, FRAMES - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain });
+        voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, FRAMES - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq });
       }
+      voiceEvents[ch] = mergeSpcVoiceEvents(voiceEvents[ch]);
     }
 
     return voiceEvents;
   };
+
+  // 即座に分割されたvoiceEvents(frame/len/pitchSemi/pitchSeq/srcn/adsr/gain形式)を
+  // 共有のMML.Convert.mergeAlternatingVibrato(start/end/note形式)へ橋渡しするアダプタ。
+  // KOFFで打ち切られた休符区間はvoiceEvents自体に含まれない(=配列内で隣接しない)ため、
+  // 休符ぶんのダミー区切り(note:null)を挟んでから渡すことで、休符を跨いだ誤統合を防ぐ
+  // (他形式は休符も1イベントとして持つため自然に区切られるが、SPCの配列表現には無い)。
+  function mergeSpcVoiceEvents(events) {
+    const mapped = [];
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      if (i > 0) {
+        const prevEnd = events[i - 1].frame + events[i - 1].len;
+        if (ev.frame !== prevEnd) mapped.push({ start: prevEnd, end: ev.frame, note: null });
+      }
+      mapped.push({
+        start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi, pitch: ev.pitch,
+        pitchSeq: ev.pitchSeq, srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain
+      });
+    }
+    return MML.Convert.mergeAlternatingVibrato(mapped)
+      .filter(ev => ev.note != null)
+      .map(ev => ({
+        frame: ev.start, len: ev.end - ev.start, pitch: ev.pitch, pitchSemi: ev.note,
+        srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain, pitchSeq: ev.pitchSeq
+      }));
+  }
 
   // ── MML 生成 ─────────────────────────────────────────────────────────
   MML.SPC2MML.convert = function (log, brrSamples, options = {}) {
@@ -531,6 +591,9 @@
     // (これにより実機の発音音程=SPC再生と一致する)。
     const srcnFineTune = computeSrcnFineTune(brrSamples);
     const voiceEvents = MML.SPC2MML.extractVoiceEvents(log, { srcnFineTune });
+    const tuneOf = (srcn) => srcnFineTune ? (srcnFineTune[srcn] || 0) : 0;
+    // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
+    const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
 
     // ── BPM (未指定ならマッピング済みチャンネルの有音イベントから自動検出、
     //         指定時もフレームグリッドへ吸着補正) ──
@@ -732,12 +795,29 @@
       if (!targetLetter) continue;
 
       const hasEnvelope = ENV_CAPABLE_TYPES.has(targetType);
-      const chEvents = events.map(ev => ({
-        start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi,
-        envelopeV: hasEnvelope && ev.envelopeIdx !== undefined ? ev.envelopeIdx : undefined,
-        envelopeVr: hasEnvelope && ev.envelopeIdx !== undefined ? 0 : undefined,
-      }));
-      scoreChannels.push({ letter: targetLetter, events: chEvents, hasEnvelope });
+      // ピッチエンベロープ(厳密周期ビブラート、DESIGN-PITCH.md Phase 1)。ev.pitchSeq
+      // (DSP生ピッチレジスタ、Phase 0で追加済み)をHz経由で借用先チップの生レジスタ
+      // 空間へ変換してから分類・登録する(KSS/GBS/HESと同じ「差を取ってから1回だけ
+      // 丸める」方針、MML.Convert.rescalePitchSeqFromFreq参照)。ノイズ/DPCMは
+      // periodFnForTypeがnullを返すため自動的に対象外になる。
+      const n163NumCh = expansion === 'n163' ? expansionLetters.length : undefined;
+      const periodFn = periodFnForType(targetType, n163NumCh);
+      const chEvents = events.map(ev => {
+        const common = {
+          start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi,
+          envelopeV: hasEnvelope && ev.envelopeIdx !== undefined ? ev.envelopeIdx : undefined,
+          envelopeVr: hasEnvelope && ev.envelopeIdx !== undefined ? 0 : undefined,
+        };
+        if (periodFn && ev.pitchSemi !== null && ev.pitchSeq && ev.pitchSeq.length > 0) {
+          const tune = tuneOf(ev.srcn);
+          const freqSeq = ev.pitchSeq.map(p => pitchRegToFreqHz(p, tune));
+          const rescaled = MML.Convert.rescalePitchSeqFromFreq(freqSeq, periodFn);
+          const assigned = pitchReg.assign(rescaled);
+          if (assigned) { common.pitchEp = assigned.index; common.pitchEpDelay = assigned.delay; }
+        }
+        return common;
+      });
+      scoreChannels.push({ letter: targetLetter, events: chEvents, hasEnvelope, hasPitchMod: !!periodFn });
     }
 
     if (dpcmLetter) {
@@ -745,7 +825,8 @@
     }
 
     if (scoreChannels.length > 0) {
-      mml += MML.Convert.emitScore(scoreChannels, fpb, { totalFrames: FRAMES, tempoBpm: bpm }) + '\n';
+      mml += MML.Convert.emitScore(scoreChannels, fpb,
+        { totalFrames: FRAMES, tempoBpm: bpm, headerLines: pitchReg.defLines() }) + '\n';
     }
 
     // ── 波形データを options に付加して返す ─────────────────────────

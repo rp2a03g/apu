@@ -76,14 +76,15 @@
       const triggered = lastTriggerSeq !== null && c.triggerSeq !== lastTriggerSeq;
       lastTriggerSeq = c.triggerSeq;
       if (!cur) {
-        cur = { note, wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol] };
+        cur = { note, wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol], pitchSeq: [c.freq] };
         continue;
       }
       if (triggered || note !== cur.note || (note !== null && waveKey !== cur.waveKey)) {
         flush(f);
-        cur = { note, wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol] };
+        cur = { note, wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol], pitchSeq: [c.freq] };
       } else {
         cur.volSeq.push(vol);
+        cur.pitchSeq.push(c.freq);
       }
     }
     flush(snapshots.length);
@@ -91,7 +92,8 @@
   }
 
   MML.Gbs2MmlExpansion.wave = function (snapshots, waveReg, envReg) {
-    const events = extractEvents(snapshots);
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
+    const events = MML.Convert.mergeAlternatingVibrato(extractEvents(snapshots));
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
@@ -99,7 +101,7 @@
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(expandTo6bit(ev.wave)) } : {},
-      ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq } : {},
+      ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq, freqSeq: ev.pitchSeq.map(waveFreq) } : {},
       toVolumeFields(ev.volSeq)
     );
     const finalSnap = snapshots.length > 0 ? snapshots[snapshots.length - 1].ch3 : null;

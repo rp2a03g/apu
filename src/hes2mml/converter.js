@@ -47,6 +47,8 @@
     const frameRate = capture.frameRate;
 
     const envReg = new MML.Convert.EnvelopeRegistry();
+    // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
+    const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
     const n163WaveReg = new MML.Convert.WaveRegistry('@N', v => [0, ...v]);
 
     const waveResult = MML.Hes2MmlExpansion.wave(snapshots, n163WaveReg, envReg);
@@ -68,6 +70,12 @@
     }
     // ノイズは2A03固定16周期の離散選択であり連続量の微調整という概念が無いためdetune対象外。
 
+    // ピッチエンベロープも同じn163PeriodRawで借用先の生レジスタ空間へ変換してから
+    // 分類・登録する(DESIGN-PITCH.md Phase 1、rawLength付与後・applyPitchDetuneと同じ変換系列)。
+    for (const ch of waveResult.channels) {
+      MML.Convert.assignPitchEnvelope([{ events: ch.events }], n163PeriodRaw, pitchReg);
+    }
+
     const expansions = ['n163'];
     // dpcmは実機ppmck同様レター体系上は常にEを固定占有する(使わなくても他チップの
     // レター位置には影響しない。src/mml/compiler.js assignExpansionLetters参照)。
@@ -76,7 +84,7 @@
     const dpcmLetter = hasDpcm ? expansionLetterMap.dpcm[0] : null;
 
     const scoreChannels = waveResult.channels.map((ch, i) =>
-      Object.assign({}, ch, { letter: n163Letters[i], hasDetune: true }));
+      Object.assign({}, ch, { letter: n163Letters[i], hasDetune: true, hasPitchMod: true }));
     if (hasNoise) scoreChannels.push(Object.assign({}, noiseResult, { letter: 'D' }));
     if (hasDpcm) scoreChannels.push({ letter: dpcmLetter, events: dpcmResult.events, hasInstrument: true });
 
@@ -113,7 +121,7 @@
 
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm,
-      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...n163WaveReg.defLines()]
+      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...n163WaveReg.defLines()]
     });
     const mml = [headerComment, scoreText].join('\n');
 
