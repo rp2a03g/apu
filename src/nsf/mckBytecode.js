@@ -17,6 +17,21 @@
  *               delayはEP<n>,<delay>のdelayフレーム数(0-255、2026-08-11 別プロジェクトA。
  *               ppmck本家仕様には無いこのツール独自の拡張。offでも固定長デコードのため
  *               2バイト目を読む、値は無視される)
+ *   0xF9      : ポルタメント(PT)選択。次の4バイトが[target下位,target上位(符号付き16bit
+ *               LE、D<n>と同じ),duration,delay]。offはduration=0を番兵とする
+ *               (2026-08-11 別プロジェクトC。ppmck本家ドキュメント(doc/mck.txt)には
+ *               専用のポルタメントコマンドが無く「ピッチエンベロープ(EP)で代用してください」
+ *               と明記されているため、このツール独自の拡張。実機では0xF9は生ハードウェア
+ *               スイープ書込み用に予約された値だが、本ツールのsweepはソフトウェア近似で
+ *               バイトコード化されておらず(実質未使用)、こちらに転用した)
+ *   0xED      : タイ(&)による異音程レガート(ピッチブレーク)。次の2バイトが
+ *               [新しいノート番号(0-0xEC),音長(フレーム数、1-255)]。音符アタック
+ *               (WRITE_FREQ_VOL、音量/エンベロープ/EP・MP・PTの再初期化を伴う)を
+ *               一切行わず、周期/周波数レジスタだけをその場で書き替える
+ *               (WRITE_FREQ_ONLYを流用、D<n>/EP/MP/PTの継続フレーム再計算と全く同じ
+ *               経路。2026-08-12、compiler.jsのpitchBreaks/activePitchAt参照)。
+ *               ★NOTE_MAXを0xEDから0xECへ1つ下げてこの値を確保した(実際に使われる
+ *               ノート番号の範囲には遠く届かない、既存のNOTE_MAX切り下げの延長)
  *   0xFB      : ビブラート(MP)選択。次バイトはインデックス(255=off)
  *   0xFC      : 休符。直後1バイトがフレーム数
  *   0xFD      : 音量直接指定。次バイトは 0x80|(0-15)。このチャンネルのソフトウェア
@@ -110,6 +125,13 @@
 
   const OP_NOTE_ENV = 0xf7;
   const OP_PITCH_ENV = 0xf8;
+  // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC)。次の4バイトが
+  // [target下位,target上位(符号付き16bit LE、D<n>と同じ),duration,delay]。offはduration=0を
+  // 番兵とする(実際のポルタメントはduration>=1が必須、src/convert/pitch.jsのfitPortamento
+  // 参照)。★0xF9は実機ppmckでは生ハードウェアスイープ書込み用に予約された値だが、
+  // 本ツールのsweepはソフトウェア近似でバイトコード化されていない(下記「未対応」節参照、
+  // 実質未使用)ため、このツール独自拡張のポルタメントに転用した
+  const OP_PORTAMENTO = 0xf9;
   const OP_DETUNE = 0xfa; // D<n>デチューン選択。次の2バイトが符号付き16bit値(下位,上位、リトルエンディアン)
   const OP_VIBRATO = 0xfb;
   const OP_WAIT = 0xf4;
@@ -118,11 +140,17 @@
   const OP_VOL_ENV = 0xf3; // ソフトウェア音量エンベロープ(@v<n>)選択。本実装の独自拡張
   const OP_TONE = 0xfe;
   const OP_END = 0xff;
+  // タイ(&)による異音程レガート(2026-08-12)。次の2バイトが[新ノート番号,音長]。
+  // アタック(音量/エンベロープ/EP・MP・PT再初期化)を伴わずに周期/周波数レジスタだけを
+  // その場で書き替える。ファイル冒頭コメント参照
+  const OP_PITCH_BREAK = 0xed;
   // 注意: NOTE_MAXは全オペコードより小さくすること。元は0xF3だったが、
   // 0xF1/0xF2(FME7拡張)と重複し得るバグのため0xF0に修正し、さらに
   // バンク切り替え(0xEE、src/driver/ppmckDriver.js側でシリアライズ後に挿入する
-  // バンクジャンプマーカー)とも重複しないよう0xEDまで下げた
-  const NOTE_MAX = 0xed;
+  // バンクジャンプマーカー)とも重複しないよう0xEDまで下げていた。2026-08-12、
+  // タイの異音程レガート(OP_PITCH_BREAK=0xED)用にもう1つ確保するため0xECまでさらに
+  // 下げた(実際に使われるノート番号の範囲には遠く届かない安全な切り下げ)
+  const NOTE_MAX = 0xec;
 
   // FME7専用の追加オペコード(実機と非互換の独自拡張。ファイル冒頭コメント参照)
   const OP_FME7_NOISE = 0xf1;
@@ -202,6 +230,7 @@
     let lastNoteEnv = null;
     let lastPitchEnv = null;
     let lastPitchEnvDelay = null; // EP<n>,<delay>のdelay(2026-08-11 別プロジェクトA)
+    let lastPortamentoTarget = null, lastPortamentoDuration = 0, lastPortamentoDelay = 0; // 別プロジェクトC
     let lastVibrato = null;
     let lastFme7Noise = null;
     let lastFme7EnvShape = null;
@@ -334,6 +363,23 @@
             lastVibrato = seg.vibrato;
           }
         }
+        // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC): src/convert/mmlEmit.jsの
+        // curPortamentoTarget/Duration/Delay判定と同じく3値まとめて前回状態と比較する
+        // (targetが同じでもduration/delayが違えば出し直す)。offはduration=0の番兵で表す。
+        {
+          const pt = seg.portamento || null;
+          const ptTarget = pt ? pt.target : null;
+          const ptDuration = pt ? pt.duration : 0;
+          const ptDelay = pt ? (pt.delay || 0) : 0;
+          if (ptTarget !== lastPortamentoTarget || ptDuration !== lastPortamentoDuration ||
+              ptDelay !== lastPortamentoDelay) {
+            const t16 = (ptTarget || 0) & 0xffff;
+            bytes.push(OP_PORTAMENTO, t16 & 0xff, (t16 >> 8) & 0xff, ptDuration & 0xff, ptDelay & 0xff);
+            lastPortamentoTarget = ptTarget;
+            lastPortamentoDuration = ptDuration;
+            lastPortamentoDelay = ptDelay;
+          }
+        }
         const detune = seg.detune || 0;
         if (detune !== lastDetune) {
           // 符号付き16bit、リトルエンディアン(6502側は2バイトの通常のADC加算でそのまま
@@ -349,11 +395,36 @@
 
         const noteByte = Math.max(0, Math.min(NOTE_MAX, Math.round(seg.noteNumber)));
         bytes.push(noteByte);
-        pushLength(bytes, gateFrames);
-        if (gateFrames < seg.durationFrames) {
-          bytes.push(OP_REST);
-          pushLength(bytes, seg.durationFrames - gateFrames);
+        // タイ(&)で異音程へレガートしたセグメント(compiler.jsのpitchBreaks)は、
+        // ゲートオフ(OP_REST)と同じく「このセグメント内の相対フレーム位置」の
+        // マーカーとして扱う。両方を時系列でマージし、各区間の長さをpushLengthで
+        // 書いてから区切りのオペコード(ゲートオフ=OP_REST/ピッチブレーク=
+        // OP_PITCH_BREAK+新ノート番号)を出す(2026-08-12)。pitchBreaksが無ければ
+        // 従来通りOP_REST 1箇所だけの分岐になる
+        const breakpoints = [];
+        if (seg.pitchBreaks) {
+          for (const pb of seg.pitchBreaks) {
+            if (pb.atFrame > 0 && pb.atFrame < seg.durationFrames) {
+              breakpoints.push({ atFrame: pb.atFrame, kind: 'pitch', noteNumber: pb.noteNumber });
+            }
+          }
         }
+        if (gateFrames < seg.durationFrames) {
+          breakpoints.push({ atFrame: gateFrames, kind: 'rest' });
+        }
+        breakpoints.sort((a, b) => a.atFrame - b.atFrame);
+        let cursor = 0;
+        for (const bp of breakpoints) {
+          pushLength(bytes, bp.atFrame - cursor);
+          cursor = bp.atFrame;
+          if (bp.kind === 'rest') {
+            bytes.push(OP_REST);
+          } else {
+            const nb = Math.max(0, Math.min(NOTE_MAX, Math.round(bp.noteNumber)));
+            bytes.push(OP_PITCH_BREAK, nb);
+          }
+        }
+        pushLength(bytes, seg.durationFrames - cursor);
       } else {
         bytes.push(OP_REST);
         pushLength(bytes, seg.durationFrames);
@@ -379,7 +450,7 @@
     const rawEvents = [];
     let i = 0;
     let volume = null, tone = null;
-    let noteEnv = null, pitchEnv = null, pitchEnvDelay = 0, vibrato = null;
+    let noteEnv = null, pitchEnv = null, pitchEnvDelay = 0, portamento = null, vibrato = null;
     let fme7Noise = null, fme7EnvShape = null, fme7EnvPeriod = null;
     let detune = 0;
     let envIdx = null; // OP_VOL_ENVで選択中のコンパクトなテーブル番号(nullならプレーン音量)
@@ -409,6 +480,14 @@
       }
       if (b === OP_NOTE_ENV) { noteEnv = bytes[i]; i++; continue; }
       if (b === OP_PITCH_ENV) { pitchEnv = bytes[i]; pitchEnvDelay = bytes[i + 1]; i += 2; continue; }
+      if (b === OP_PORTAMENTO) {
+        const t16 = bytes[i] | (bytes[i + 1] << 8);
+        const target = t16 >= 0x8000 ? t16 - 0x10000 : t16;
+        const duration = bytes[i + 2], delay = bytes[i + 3];
+        i += 4;
+        portamento = duration === 0 ? null : { target, duration, delay };
+        continue;
+      }
       if (b === OP_DETUNE) {
         const d16 = bytes[i] | (bytes[i + 1] << 8);
         detune = d16 >= 0x8000 ? d16 - 0x10000 : d16;
@@ -424,10 +503,23 @@
       }
       if (b === OP_REST) { const frames = bytes[i]; i++; rawEvents.push({ type: 'rest', frames }); continue; }
       if (b === OP_WAIT) { const frames = bytes[i]; i++; rawEvents.push({ type: 'wait', frames }); continue; }
+      if (b === OP_PITCH_BREAK) {
+        // タイ(&)による異音程レガート(2026-08-12)。アタックを伴わないので独立した
+        // 'pitchBreak'イベントとして扱う(volume/tone/envIdx等の状態はnoteイベントと
+        // 同じくその時点の選択中の値をそのまま引き継いで載せる、音程だけが変わる)
+        const noteNumber = bytes[i];
+        const frames = bytes[i + 1];
+        i += 2;
+        rawEvents.push({
+          type: 'pitchBreak', noteNumber, frames, volume, tone, envIdx,
+          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune
+        });
+        continue;
+      }
       const frames = bytes[i]; i++;
       rawEvents.push({
         type: 'note', noteNumber: b, frames, volume, tone, envIdx,
-        noteEnv, pitchEnv, pitchEnvDelay, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune
+        noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune
       });
     }
 
@@ -455,8 +547,18 @@
       const b = bytes[i]; i++;
       if (b === OP_END) break;
       if (b === OP_FME7_HARDENV) { i += 3; continue; }
+      if (b === OP_PORTAMENTO) { i += 4; continue; }
+      // ★2026-08-12修正: OP_PITCH_ENV(EP<n>,<delay>、別プロジェクトA)は[インデックス,delay]の
+      // 2バイトパラメータなのに、以前はここに特別扱いが無く後述の「1バイト」扱いへ
+      // フォールスルーしていた(OP_PORTAMENTOも同様に4バイトなのに1バイト扱いだった)。
+      // どちらも実データでは踏み抜いていなかった(バンク境界が偶然ズレなかった)ため
+      // 見過ごされていたが、EP<n>,<delay>/PT<n>を使う長い曲でバンク分割点がたまたま
+      // この2バイト目/4バイト目に重なると、そこでバンクを分割してしまい6502側が
+      // パラメータバイトをオペコードとして誤読する重大なサイレント破損バグだった。
+      // OP_PITCH_BREAK(タイの異音程レガート)も同じく2バイトパラメータなので合わせて追加
+      if (b === OP_PITCH_ENV || b === OP_PITCH_BREAK) { i += 2; continue; }
       if (b === OP_DETUNE) { i += 2; continue; }
-      // OP_VOL/OP_TONE/OP_NOTE_ENV/OP_PITCH_ENV/OP_VIBRATO/OP_FME7_NOISE/
+      // OP_VOL/OP_TONE/OP_NOTE_ENV/OP_VIBRATO/OP_FME7_NOISE/
       // OP_REST/OP_WAIT/音符バイト は、いずれも直後1バイトのパラメータを持つ
       i += 1;
     }

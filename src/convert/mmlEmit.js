@@ -100,7 +100,12 @@
         continue;
       }
 
-      if (!ev.continued) {
+      // ev.slurTie(スラー分割、2026-08-12): 純粋な音程変化だけで区切られた隣接イベントを
+      // 独立した再アタックではなくタイ(&)で繋ぐ(src/convert/pitch.js markSlurTies参照)。
+      // ev.continuedと全く同じ「音色/音量/エンベロープ等は再指定せずタイだけで繋げる」
+      // 扱いをする(compiler.js側のタイ処理はタイで繋いだ2音目以降が独自のD/EP/MP/PTを
+      // 持てない設計のため、どのみち出力しても再生時に無視される)。
+      if (!ev.continued && !ev.slurTie) {
         if (flags.hasVrc7Tone && ev.vrc7Tone !== undefined && ev.vrc7Tone !== state.curVrc7Tone) {
           emit(`OP${ev.vrc7Tone}`); state.curVrc7Tone = ev.vrc7Tone;
         }
@@ -130,6 +135,25 @@
             else emit(epDelay > 0 ? `EP${epVal},${epDelay}` : `EP${epVal}`);
             state.curPitchEp = epVal;
             state.curPitchEpDelay = epDelay;
+          }
+        }
+        // ポルタメントコマンド(単調ランプの軽量な直線グライド表現、DESIGN-PITCH.md
+        // 別プロジェクトC)。D<n>/EP<n>と全く同じ「毎回前回状態との差分を見て明示的に
+        // PTOFへ戻す」設計の独立プレフィックスコマンド。pitchReg.assign()はEPかPTの
+        // どちらか一方だけを返す(検出結果は同じpitchMod由来の排他的な出力形式の選択)
+        // ため、対応チャンネルの範囲も同じhasPitchModフラグを共有する。
+        if (flags.hasPitchMod) {
+          const pt = ev.portamento || null;
+          const ptTarget = pt ? pt.target : null;
+          const ptDuration = pt ? pt.duration : 0;
+          const ptDelay = pt ? (pt.delay || 0) : 0;
+          if (ptTarget !== state.curPortamentoTarget || ptDuration !== state.curPortamentoDuration ||
+              ptDelay !== state.curPortamentoDelay) {
+            if (ptTarget === null) emit('PTOF');
+            else emit(ptDelay > 0 ? `PT${ptTarget},${ptDuration},${ptDelay}` : `PT${ptTarget},${ptDuration}`);
+            state.curPortamentoTarget = ptTarget;
+            state.curPortamentoDuration = ptDuration;
+            state.curPortamentoDelay = ptDelay;
           }
         }
         // FME7/PSGのノイズ周期(R6、3ch共有)。@2(ノイズ単独)ではノート番号自体が周期に
@@ -169,7 +193,12 @@
       }
 
       const { oct, name } = MML.Convert.noteNumberToMmlParts(ev.note);
-      if (!ev.continued && oct !== state.curOct) {
+      // ★2026-08-12: 従来はここも!ev.continuedで無条件にガードしていた(継続音は常に
+      // 同じ音程=オクターブも不変という前提)。ev.slurTie(タイで異なる音程へレガート)は
+      // オクターブを跨ぐ場合があるため、oct!==state.curOctという実際の変化判定だけに
+      // 一本化した(continued/slurTieどちらでもoctが変わらなければ何も出さない点は
+      // 従来と同じ、continued側の挙動に退行なし)。
+      if (oct !== state.curOct) {
         // >/<(相対オクターブ移動)は直後の音符と一体で書く伝統的なMML表記(o<n>は
         // 独立した設定コマンドとして扱い空白を空ける)ため、note扱い(isNoteToken=true)
         // にして音符側との間の空白も詰める。
@@ -179,7 +208,7 @@
         state.curOct = oct;
       }
 
-      const tie = ev.continued ? '&' : '';
+      const tie = (ev.continued || ev.slurTie) ? '&' : '';
       emit(tie + fmtLens(name, lengths), true);
     }
   }
@@ -189,6 +218,7 @@
       curOct: -1, curVol: -1, curInst: -1, curEnvV: -1, curEnvVr: -1,
       curFme7Shape: -1, curFme7Period: -1, curFme7Noise: -1, curVolMode: null, durCarry: 0,
       curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, curPitchEp: null, curPitchEpDelay: 0,
+      curPortamentoTarget: null, curPortamentoDuration: 0, curPortamentoDelay: 0,
       lastWasNote: false, hasEmitted: false
     };
   }

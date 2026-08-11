@@ -84,11 +84,15 @@
         else if (period >= 1) { freqHz = toneFreq(period, clock); note = freqToNoteNumber(freqHz); }
       }
       const noise = mode === 3 ? t.noisePeriod : null; // @3のみN<n>を出す
-      if (!cur) { cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [period] }; continue; }
+      if (!cur) { cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: false }; continue; }
       const retrigger = note !== null && volume > cur.volSeq[cur.volSeq.length - 1];
       if (retrigger || note !== cur.note || mode !== cur.mode || noise !== cur.noise) {
+        // 音量ジャンプ(再アタック推定)が無く、純粋に音程だけが変わった場合はスラー分割の
+        // タイ候補とする(src/convert/pitch.js markSlurTies参照。AYには専用アタック
+        // レジスタが無いためretrigger推定(音量上昇)を「実アタックの代用」として使う)
+        const pureNoteChange = !retrigger && note !== cur.note && mode === cur.mode && noise === cur.noise;
         flush(f);
-        cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [period] };
+        cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: pureNoteChange };
       } else {
         cur.volSeq.push(volume);
         cur.pitchSeq.push(period);
@@ -109,7 +113,7 @@
     // MML.Convert.rescalePitchSeqFromFreqで変換してから登録する(DESIGN-PITCH.md Phase 1、
     // src/convert/pitch.js冒頭コメント参照)。
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note },
+      { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       ev.note !== null ? { instrument: ev.mode } : {},
       ev.note !== null && ev.noise !== null ? { fme7Noise: ev.noise } : {},
       ev.note !== null && ev.freqHz != null

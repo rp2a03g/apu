@@ -80,6 +80,14 @@
  *                  確認済み)で決まる。方向(最初に+/-どちらへ動くか)はperiodFnが周波数の
  *                  増加関数か減少関数かで自動判定(periodFnIncreasing、実機の
  *                  freq_vector_table相当)。対応チャンネルはEPと同じ
+ *   PT<target>,<duration>[,<delay>] / PTOF
+ *                  ポルタメント(単調な直線グライド)。D<n>/EP<n>と同じ生レジスタオフセット
+ *                  空間の値へ、delay経過後durationフレームでtargetへ到達し以降は最終値を
+ *                  永久ホールドする(portamentoSequence、MPのwarizan_start片道版と同一の
+ *                  ceil除算ステップ)。ppmck本家ドキュメント(doc/mck.txt)には専用の
+ *                  ポルタメントコマンドが無く「ピッチエンベロープ(EP)で代用してください」と
+ *                  明記されているため、これはppmck方言からの独自拡張(2026-08-11、
+ *                  DESIGN-PITCH.md 別プロジェクトC)。対応チャンネルはEPと同じ
  *   s<n0>,<n1>     スイープ。ppmck実機ではソフトウェア効果ではなく2A03パルスの実ハードウェア
  *                  スイープユニット($4001/$4005)への生バイト書き込み(CMD_SWEEPが1回書くだけ
  *                  と実ソースで確認済み)なので、2A03パルスA/Bにしか存在しない
@@ -419,8 +427,8 @@
     const state = {
       octave: 4, defaultLength: 4, volume: 15, gate: 8, instrument: defaultInstrument || 0,
       envelopeV: null, envelopeVr: 255, transpose: 0, detune: 0, qFrames: null,
-      vibrato: null, pitchEnv: null, pitchEnvDelay: 0, noteEnv: null, sweepSpeed: 0, sweepDepth: 0,
-      fme7Noise: null, fme7EnvShape: null, fme7EnvPeriod: 0
+      vibrato: null, pitchEnv: null, pitchEnvDelay: 0, portamento: null, noteEnv: null,
+      sweepSpeed: 0, sweepDepth: 0, fme7Noise: null, fme7EnvShape: null, fme7EnvPeriod: 0
     };
     const segments = [];
     // OP<n>(VRC7音色ロード)/MH<n>(FDS変調)のような「音符に紐付かない、その時点のフレーム
@@ -440,6 +448,22 @@
       elapsedFrames += frames;
       const prev = segments.length > 0 ? segments[segments.length - 1] : null;
       if (prev && prev.tieNext) {
+        // タイ(&): 新しいセグメントを作らず前のセグメントを延長する(ゲート/エンベロープは
+        // 継続、再アタックしない)。★2026-08-12修正: 以前は音程が前と異なる場合でも
+        // freq/noteNumberを丸ごと捨てて単にdurationFramesを延長するだけだったため、
+        // タイで別の音へレガートするMML(DESIGN-PITCH.md §3の`a8 & g8`等、スラー分割の
+        // 前提)が実際には音程変化ゼロのまま再生されるバグだった。音程が異なる場合は
+        // 「アタック無しでこの相対フレーム位置(prev.durationFrames時点)から新しい音程に
+        // 切り替える」という記録をpitchBreaksへ積む。実際の適用はwritePitchModulationの
+        // 毎フレームループ(activePitchAt)に委ねる。EP/MP/PTと同じ「値が変わった時だけ
+        // 書く・位相リセット副作用のある上位バイトはlastHiガード」を自動的に適用できる
+        // (hasPitchModulationがpitchBreaksありのセグメントもtrueを返すようにするだけで、
+        // 各チップの書込みハンドラは無改修で正しく動く)。
+        if (noteNumber != null && freq != null &&
+            (noteNumber !== prev.noteNumber || freq !== prev.freq)) {
+          if (!prev.pitchBreaks) prev.pitchBreaks = [];
+          prev.pitchBreaks.push({ atFrame: prev.durationFrames, freq, noteNumber });
+        }
         prev.durationFrames += frames;
         prev.tieNext = false;
         if (srcEnd != null) prev.srcEnd = srcEnd;
@@ -460,6 +484,7 @@
           vibrato: state.vibrato,
           pitchEnv: state.pitchEnv,
           pitchEnvDelay: state.pitchEnvDelay,
+          portamento: state.portamento,
           noteEnv: state.noteEnv,
           sweepSpeed: state.sweepSpeed,
           sweepDepth: state.sweepDepth,
@@ -467,6 +492,7 @@
           fme7Noise: state.fme7Noise,
           fme7EnvShape: state.fme7EnvShape,
           fme7EnvPeriod: state.fme7EnvPeriod,
+          pitchBreaks: null,
           tieNext: false
         });
       }
@@ -494,6 +520,9 @@
         case 'envelopeVr': state.envelopeVr = tok.value; break;
         case 'vibrato': state.vibrato = tok.value; break;
         case 'pitchEnv': state.pitchEnv = tok.value; state.pitchEnvDelay = tok.delay || 0; break;
+        case 'portamento':
+          state.portamento = tok.target == null ? null : { target: tok.target, duration: tok.duration, delay: tok.delay };
+          break;
         case 'noteEnv': state.noteEnv = tok.value; break;
         case 'sweep': state.sweepSpeed = tok.speed; state.sweepDepth = tok.depth; break;
         case 'fme7Noise': state.fme7Noise = tok.value; break;
@@ -649,7 +678,39 @@
     return seq;
   }
 
-  // セグメントに音程変調(EN/EP/MP)が何か効いているかどうか。
+  // ポルタメント(単調な直線グライド、DESIGN-PITCH.md 別プロジェクトC)。MPのwarizan_start
+  // (delay無し・反転無しの片道版)と全く同じアルゴリズム(src/convert/pitch.jsの
+  // simulatePortamento/fitPortamentoが可逆性を検査する時に使うのと同一実装。共有しない
+  // 理由はP-3参照)。delay経過後、target(0からの目標オフセット)へdurationフレームで
+  // 到達し、以降は最終値を永久ホールドする(vibratoSequenceの事前計算方式と同じ発想)。
+  function portamentoSequence(pt, dur) {
+    if (!pt || dur <= 0) return null;
+    const delay = Math.max(0, pt.delay || 0);
+    const duration = Math.max(1, pt.duration || 1);
+    const target = pt.target || 0;
+    const absTarget = Math.abs(target);
+    const dir = target < 0 ? -1 : 1;
+    let stepSize, stepInterval;
+    if (absTarget === 0) { stepSize = 0; stepInterval = 1; }
+    else if (duration === absTarget) { stepSize = 1; stepInterval = 1; }
+    else if (duration > absTarget) { stepInterval = ceilDivPpmck(duration, absTarget); stepSize = 1; }
+    else { stepSize = ceilDivPpmck(absTarget, duration); stepInterval = 1; }
+
+    const seq = new Array(dur);
+    let value = 0, counter = stepInterval, remaining = duration;
+    for (let t = 0; t < dur; t++) {
+      if (t < delay) { seq[t] = 0; continue; }
+      if (remaining > 0) {
+        if (counter === stepInterval) { counter = 0; value += dir * stepSize; }
+        counter++;
+        remaining--;
+      }
+      seq[t] = value;
+    }
+    return seq;
+  }
+
+  // セグメントに音程変調(EN/EP/MP/ポルタメント)が何か効いているかどうか。
   // sweep(s<n0>,<n1>)はここに含まない: 実機ppmckのCMD_SWEEPはソフトウェア効果ではなく
   // 2A03パルスの実ハードウェアスイープユニット($4001/$4005)へバイトを1回書くだけの
   // 機能だと判明したため、フレームごとの再計算パイプラインからは分離した
@@ -657,7 +718,26 @@
   function hasPitchModulation(seg) {
     return (seg.noteEnv != null && seg.noteEnv !== 255) ||
       (seg.pitchEnv != null && seg.pitchEnv !== 255) ||
-      (seg.vibrato != null && seg.vibrato !== 255);
+      (seg.vibrato != null && seg.vibrato !== 255) ||
+      seg.portamento != null ||
+      (seg.pitchBreaks != null && seg.pitchBreaks.length > 0);
+  }
+
+  // タイ(&)で異なる音程へレガートしたセグメントの、指定tick時点で有効な基準freq/
+  // noteNumberを返す(アタック無しの音程切替。pushNoteのpitchBreaks参照)。
+  // pitchBreaksが無ければセグメント本来のfreq/noteNumberをそのまま返す。
+  function activePitchAt(seg, tick) {
+    if (!seg.pitchBreaks || seg.pitchBreaks.length === 0) {
+      return { freq: seg.freq, noteNumber: seg.noteNumber };
+    }
+    let freq = seg.freq;
+    let noteNumber = seg.noteNumber;
+    for (const pb of seg.pitchBreaks) {
+      if (pb.atFrame > tick) break;
+      freq = pb.freq;
+      noteNumber = pb.noteNumber;
+    }
+    return { freq, noteNumber };
   }
 
   // EN(ノートエンベロープ)は「発音ノート番号の値に加算」(ppmck公式リファレンス通り、
@@ -675,10 +755,11 @@
   // (nes_include/ppmck/sounddrv.h)でsound_pitch_enverope・sound_lfoが共にfreq_add_mcknumber
   // を呼ぶことで確認済み。2026-08-10修正: 以前のEPは値/128を半音とみなしnoteFrequency()で
   // 再計算していたが、この換算は仕様に存在しない誤りだった)。
-  // ここで3つを合算してから、呼び出し側がapplyDetune相当のクランプ済み加算を1回だけ行う。
-  // vibSeq: 呼び出し側がwritePitchModulation冒頭で1音符ぶん事前計算したvibratoSequence
-  // (未使用/MP無効ならnull)。tick索引で読むだけなので状態を持たない。
-  function pitchRegisterOffset(seg, envelopes, tick, vibSeq) {
+  // ここで4つ(D/EP/MP/ポルタメント)を合算してから、呼び出し側がapplyDetune相当の
+  // クランプ済み加算を1回だけ行う。vibSeq/ptSeq: 呼び出し側がwritePitchModulation冒頭で
+  // 1音符ぶん事前計算したvibratoSequence/portamentoSequence(未使用ならnull)。
+  // tick索引で読むだけなので状態を持たない。
+  function pitchRegisterOffset(seg, envelopes, tick, vibSeq, ptSeq) {
     let offset = seg.detune || 0;
     if (seg.pitchEnv != null && seg.pitchEnv !== 255) {
       const table = envelopes.ep[seg.pitchEnv];
@@ -689,12 +770,13 @@
       if (table && tick >= delay) offset += stepEnvelope(table, tick - delay);
     }
     if (vibSeq) offset += vibSeq[tick];
+    if (ptSeq) offset += ptSeq[tick];
     return offset;
   }
 
-  // 音程変調(EN/EP/MP)ありのセグメントについて、フレームごとに周期/周波数レジスタを
-  // 再計算し、前フレームと値が変わったときだけ書き込む(無変調時の1回書きより負荷は
-  // 高いが、総フレーム数は曲の長さ相当なので実用上問題にならない)。
+  // 音程変調(EN/EP/MP/ポルタメント)ありのセグメントについて、フレームごとに周期/周波数
+  // レジスタを再計算し、前フレームと値が変わったときだけ書き込む(無変調時の1回書きより
+  // 負荷は高いが、総フレーム数は曲の長さ相当なので実用上問題にならない)。
   // periodFn: 基準Hz -> 変調前の周期/周波数レジスタ値。max: applyDetune相当のクランプ上限。
   // writeFn(frame, value): そのフレームの周期/周波数レジスタ書き込みをwriteLogへpushする
   // コールバック(チップごとにアドレス・バイト配置が異なるため、書き込み自体は
@@ -704,11 +786,13 @@
     const vibSeq = mpActive
       ? vibratoSequence(envelopes.mp[seg.vibrato], dur, periodFnIncreasing(periodFn) ? 1 : -1)
       : null;
+    const ptSeq = seg.portamento ? portamentoSequence(seg.portamento, dur) : null;
     let last = null;
     for (let t = 0; t < dur; t++) {
+      const { freq: baseFreq, noteNumber: baseNoteNumber } = activePitchAt(seg, t);
       const enOffset = noteEnvelopeOffset(seg, envelopes, t);
-      const freq = enOffset === 0 ? seg.freq : noteFrequency(seg.noteNumber + enOffset);
-      const regOffset = pitchRegisterOffset(seg, envelopes, t, vibSeq);
+      const freq = enOffset === 0 ? baseFreq : noteFrequency(baseNoteNumber + enOffset);
+      const regOffset = pitchRegisterOffset(seg, envelopes, t, vibSeq, ptSeq);
       const value = applyDetune(periodFn(freq), regOffset, max);
       if (value !== last) {
         writeFn(startFrame + t, value);
@@ -866,10 +950,14 @@
             // 適用対象外と位置づけているノイズchの中では既存の簡略対応の範囲内)。
             const mpActive = seg.vibrato != null && seg.vibrato !== 255;
             const vibSeq = mpActive ? vibratoSequence(env.mp[seg.vibrato], dur, 1) : null;
+            // ポルタメントはtarget自体が符号付きなのでMPのような方向判定は不要(ノイズchも
+            // 同様に対応できる)
+            const ptSeq = seg.portamento ? portamentoSequence(seg.portamento, dur) : null;
             for (let t = 0; t < dur; t++) {
+              const { noteNumber: baseNoteNumber } = activePitchAt(seg, t);
               const enOffset = noteEnvelopeOffset(seg, env, t);
-              const baseIdx = noisePeriodIndex(Math.round(seg.noteNumber + enOffset));
-              const regOffset = pitchRegisterOffset(seg, env, t, vibSeq);
+              const baseIdx = noisePeriodIndex(Math.round(baseNoteNumber + enOffset));
+              const regOffset = pitchRegisterOffset(seg, env, t, vibSeq, ptSeq);
               const idx = Math.max(0, Math.min(15, Math.round(baseIdx + regOffset)));
               if (idx !== lastIdx) {
                 writeLog[startFrame + t].push({ addr: base + 2, value: idx & 0x0F });

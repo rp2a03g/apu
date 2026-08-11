@@ -120,10 +120,13 @@
       const waveKey = wave.join(',');
       const note = (volume > 0 && freqReg > 0) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
-      if (!cur) { cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume], pitchSeq: [freqReg] }; continue; }
+      if (!cur) { cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume], pitchSeq: [freqReg], tieCandidate: false }; continue; }
       if (note !== cur.note || waveKey !== cur.waveKey) {
+        // 打ち直し(パス2)判定前なので、ここでの「純粋な音程変化」は波形切替を伴わない
+        // ことのみで判定する(hes2mml/expansion/wave.jsと同じ考え方)
+        const pureNoteChange = note !== cur.note && waveKey === cur.waveKey;
         flush(f);
-        cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume], pitchSeq: [freqReg] };
+        cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume], pitchSeq: [freqReg], tieCandidate: pureNoteChange };
       } else {
         cur.volSeq.push(volume);
         cur.pitchSeq.push(freqReg);
@@ -143,7 +146,8 @@
           rawFreq: run.rawFreq, rawNumCh: run.rawNumCh,
           start: run.start + r.start, end: run.start + r.end,
           volSeq: run.volSeq.slice(r.start, r.end),
-          pitchSeq: run.pitchSeq.slice(r.start, r.end)
+          pitchSeq: run.pitchSeq.slice(r.start, r.end),
+          tieCandidate: r.start === 0 ? run.tieCandidate : false
         });
       }
     }
@@ -166,12 +170,13 @@
     // pitch.js側のclassifyPitchModが自動的にEP化を諦める(D<n>のみの既存動作を維持)。
     function toPitchFields(ev) {
       if (!pitchReg || ev.rawFreq == null) return {};
-      const assigned = pitchReg.assign(ev.pitchSeq);
-      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+      const fields = {};
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      return fields;
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, rawNumCh: ev.rawNumCh,
-        rawLength: ev.note !== null ? ev.wave.length : undefined },
+        rawLength: ev.note !== null ? ev.wave.length : undefined, tieCandidate: ev.tieCandidate },
       ev.note !== null ? Object.assign(
         { instrument: waveReg ? waveReg.assign(ev.wave) : 0 },
         toVolumeFields(ev.volSeq), toPitchFields(ev)
@@ -181,11 +186,14 @@
     const channels = [];
     for (let i = 0; i < songNumCh; i++) {
       const base = 0x40 + (8 - songNumCh + i) * 8; // internalIdx = (8-numCh)+i、下位側から
+      // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)。順序はsplitRetriggers(打ち直し
+      // 分割)の後(§5の手順順序: ハード境界→打ち直し分割→ピッチヒステリシスの順を維持)。
+      // その後にスラー分割(別プロジェクトE、2026-08-12)。
+      const chEvents = MML.Convert.mergeAlternatingVibrato(extractChannelEvents(timeline, base)).map(toCommon);
+      MML.Convert.markSlurTies(chEvents);
       channels.push({
         letter: letters[i],
-        // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)。順序はsplitRetriggers(打ち直し
-        // 分割)の後(§5の手順順序: ハード境界→打ち直し分割→ピッチヒステリシスの順を維持)。
-        events: MML.Convert.mergeAlternatingVibrato(extractChannelEvents(timeline, base)).map(toCommon),
+        events: chEvents,
         hasVolume: true,
         hasEnvelope: true,
         hasInstrument: true

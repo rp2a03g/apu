@@ -76,12 +76,14 @@
       const triggered = lastTriggerSeq !== null && c.triggerSeq !== lastTriggerSeq;
       lastTriggerSeq = c.triggerSeq;
       if (!cur) {
-        cur = { note, wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol], pitchSeq: [c.freq] };
+        cur = { note, wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol], pitchSeq: [c.freq], tieCandidate: false };
         continue;
       }
       if (triggered || note !== cur.note || (note !== null && waveKey !== cur.waveKey)) {
+        // トリガbit変化・波形切替が無く、純粋に音程だけが変わった場合はスラー分割のタイ候補
+        const pureNoteChange = !triggered && note !== cur.note && waveKey === cur.waveKey;
         flush(f);
-        cur = { note, wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol], pitchSeq: [c.freq] };
+        cur = { note, wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol], pitchSeq: [c.freq], tieCandidate: pureNoteChange };
       } else {
         cur.volSeq.push(vol);
         cur.pitchSeq.push(c.freq);
@@ -99,7 +101,7 @@
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
     }
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note },
+      { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(expandTo6bit(ev.wave)) } : {},
       ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq, freqSeq: ev.pitchSeq.map(waveFreq) } : {},
       toVolumeFields(ev.volSeq)

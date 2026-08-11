@@ -70,11 +70,13 @@
       const freq = pulseFreq(period);
       const note = (active && audible && freq > 0) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
-      if (!cur) { cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] }; continue; }
+      if (!cur) { cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: false }; continue; }
       if (t.attack[attackIdx] || note !== cur.note || duty !== cur.duty || constVol !== cur.constVol ||
           (!constVol && envKey !== cur.envKey)) {
+        const pureNoteChange = !t.attack[attackIdx] && note !== cur.note && duty === cur.duty &&
+          constVol === cur.constVol && (constVol || envKey === cur.envKey);
         flush(f);
-        cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] };
+        cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: pureNoteChange };
       } else {
         cur.pitchSeq.push(period);
         if (constVol) cur.volSeq.push(volume);
@@ -103,19 +105,24 @@
     }
     function toPitchFields(ev) {
       if (!pitchReg || ev.rawFreq == null) return {};
-      const assigned = pitchReg.assign(ev.pitchSeq);
-      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+      const fields = {};
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      return fields;
     }
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq },
+      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
       ev.note !== null ? toVolumeFields(ev) : {},
       ev.note !== null ? toPitchFields(ev) : {}
     );
 
+    // スラー分割(別プロジェクトE、2026-08-12)
+    const chP1 = evP1.map(toCommon); MML.Convert.markSlurTies(chP1);
+    const chP2 = evP2.map(toCommon); MML.Convert.markSlurTies(chP2);
+
     return {
       channels: [
-        { letter: 'E', events: evP1.map(toCommon), hasVolume: true, hasInstrument: true, hasEnvelope: true },
-        { letter: 'F', events: evP2.map(toCommon), hasVolume: true, hasInstrument: true, hasEnvelope: true },
+        { letter: 'E', events: chP1, hasVolume: true, hasInstrument: true, hasEnvelope: true },
+        { letter: 'F', events: chP2, hasVolume: true, hasInstrument: true, hasEnvelope: true },
       ]
     };
   };

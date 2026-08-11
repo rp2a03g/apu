@@ -105,9 +105,13 @@
       if (!cur) { begin(f, ev, period); continue; }
 
       const restart = envUsed && t.envRestart;
-      if (note !== cur.note || mode !== cur.mode || ev.noise !== cur.noise ||
+      const hardBoundary = mode !== cur.mode || ev.noise !== cur.noise ||
           envUsed !== cur.envUsed || restart ||
-          (envUsed && (t.envShape !== cur.envShape || t.envPeriod !== cur.envPeriod))) {
+          (envUsed && (t.envShape !== cur.envShape || t.envPeriod !== cur.envPeriod));
+      if (note !== cur.note || hardBoundary) {
+        // 音色/エンベロープ/ミキサー由来の境界(hardBoundary)を伴わない純粋な音程変化のみ
+        // スラー分割のタイ候補とする
+        ev.tieCandidate = note !== cur.note && !hardBoundary;
         flush(f);
         begin(f, ev, period);
       } else {
@@ -133,23 +137,28 @@
     // @2(ノイズ単独)はrawFreqがnullなのでここで自動的に対象外になる
     function toPitchFields(ev) {
       if (!pitchReg || ev.rawFreq == null) return {};
-      const assigned = pitchReg.assign(ev.pitchSeq);
-      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+      const fields = {};
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      return fields;
     }
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq },
+      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
       ev.note !== null ? { instrument: ev.mode } : {},
       ev.note !== null && ev.noise !== null ? { fme7Noise: ev.noise } : {},
       ev.note !== null ? toVolumeFields(ev) : {},
       ev.note !== null ? toPitchFields(ev) : {}
     );
 
-    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
-    const chan = (letter, index) => ({
-      letter, events: MML.Convert.mergeAlternatingVibrato(extractToneEvents(timeline, index)).map(toCommon),
-      hasVolume: true, hasEnvelope: true, hasFme7Env: true,
-      hasInstrument: true, hasFme7Noise: true, hasPitchMod: true
-    });
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+スラー分割(別プロジェクトE、2026-08-12)
+    const chan = (letter, index) => {
+      const events = MML.Convert.mergeAlternatingVibrato(extractToneEvents(timeline, index)).map(toCommon);
+      MML.Convert.markSlurTies(events);
+      return {
+        letter, events,
+        hasVolume: true, hasEnvelope: true, hasFme7Env: true,
+        hasInstrument: true, hasFme7Noise: true, hasPitchMod: true
+      };
+    };
 
     return { channels: [chan('E', 0), chan('F', 1), chan('G', 2)] };
   };

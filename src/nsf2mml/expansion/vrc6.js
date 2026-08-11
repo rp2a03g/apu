@@ -71,10 +71,11 @@
       const freq = pulseFreq(period);
       const note = (enabled && volume > 0 && period >= 4) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
-      if (!cur) { cur = { note, duty, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] }; continue; }
+      if (!cur) { cur = { note, duty, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: false }; continue; }
       if (t.attack[attackIdx] || note !== cur.note || duty !== cur.duty) {
+        const pureNoteChange = !t.attack[attackIdx] && note !== cur.note && duty === cur.duty;
         flush(f);
-        cur = { note, duty, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] };
+        cur = { note, duty, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: pureNoteChange };
       } else {
         cur.volSeq.push(volume);
         cur.pitchSeq.push(period);
@@ -98,10 +99,11 @@
       const freq = sawFreq(period);
       const note = (enabled && accumRate > 0 && period >= 4) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
-      if (!cur) { cur = { note, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] }; continue; }
+      if (!cur) { cur = { note, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: false }; continue; }
       if (t.attack[2] || note !== cur.note) {
+        const pureNoteChange = !t.attack[2] && note !== cur.note;
         flush(f);
-        cur = { note, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period] };
+        cur = { note, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: pureNoteChange };
       } else {
         cur.volSeq.push(volume);
         cur.pitchSeq.push(period);
@@ -124,23 +126,29 @@
     }
     function toPitchFields(ev) {
       if (!pitchReg || ev.rawFreq == null) return {};
-      const assigned = pitchReg.assign(ev.pitchSeq);
-      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+      const fields = {};
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      return fields;
     }
     const toCommonPulse = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq },
+      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
       toVolumeFields(ev.volSeq), toPitchFields(ev)
     );
     const toCommonSaw = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq },
+      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
       toVolumeFields(ev.volSeq), toPitchFields(ev)
     );
 
+    // スラー分割(別プロジェクトE、2026-08-12): pitchEp/portamentoが確定した直後に行う
+    const chP1 = evP1.map(toCommonPulse); MML.Convert.markSlurTies(chP1);
+    const chP2 = evP2.map(toCommonPulse); MML.Convert.markSlurTies(chP2);
+    const chSaw = evSaw.map(toCommonSaw); MML.Convert.markSlurTies(chSaw);
+
     return {
       channels: [
-        { letter: 'E', events: evP1.map(toCommonPulse), hasVolume: true, hasEnvelope: true, hasInstrument: true },
-        { letter: 'F', events: evP2.map(toCommonPulse), hasVolume: true, hasEnvelope: true, hasInstrument: true },
-        { letter: 'G', events: evSaw.map(toCommonSaw), hasVolume: true, hasEnvelope: true },
+        { letter: 'E', events: chP1, hasVolume: true, hasEnvelope: true, hasInstrument: true },
+        { letter: 'F', events: chP2, hasVolume: true, hasEnvelope: true, hasInstrument: true },
+        { letter: 'G', events: chSaw, hasVolume: true, hasEnvelope: true },
       ]
     };
   };

@@ -490,6 +490,10 @@
       let activeAdsr1 = 0, activeAdsr2 = 0, activeGain = 0;
       // pitchSeq(DESIGN-PITCH.md Phase 0): 確定済みセグメントのフレーム毎生ピッチレジスタ値。
       let activePitchSeq = [];
+      // pendingTieCandidate(別プロジェクトE、2026-08-12): 次にpushされるイベントが
+      // 「純粋な音程変化のみ」による区切りで始まったか(=スラー分割のタイ候補か)を
+      // 一時保持する。KON(本物のアタック)/KOFF後の再開時はfalseにリセットする。
+      let pendingTieCandidate = false;
 
       for (let f = 0; f < FRAMES; f++) {
         for (const { reg, val } of log[f]) {
@@ -505,7 +509,7 @@
 
         if (konLatched[f] & (1 << ch)) {
           if (activeStart >= 0) {
-            voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq });
+            voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
           }
           activePitch = curPitch;
           activeSrcn  = voiceDsp[0x04];
@@ -514,11 +518,16 @@
           activeGain  = voiceDsp[0x07];
           activeStart = f;
           activePitchSeq = [curPitch];
+          pendingTieCandidate = false; // KON=本物のアタックなので次のイベントはタイ候補ではない
         } else if (activeStart >= 0 && curPitchSemi !== activePitchSemi) {
           // ポルタメント/レガート: KONを送り直さない音程変化はここで即座に区切る
           // (ビブラートによる細切れ化はmergeSpcVoiceEvents()の共有ロジックで後統合する、
-          // DESIGN-PITCH.md Phase 2)。
-          voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq });
+          // DESIGN-PITCH.md Phase 2)。KONが無い=まさに「純粋な音程変化のみによる区切り」
+          // なので、次に始まるイベント(=今まさに開始するイベント。まだ未pushで、
+          // このelse if節の中でactiveStart=fに更新される)をスラー分割のタイ候補とする
+          // (pendingTieCandidateに立てておき、そのイベントが実際にpushされる時に読む。
+          // 別プロジェクトE、2026-08-12)
+          voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
           activePitch = curPitch;
           activeSrcn  = voiceDsp[0x04];
           activeAdsr1 = voiceDsp[0x05];
@@ -526,6 +535,7 @@
           activeGain  = voiceDsp[0x07];
           activeStart = f;
           activePitchSeq = [curPitch];
+          pendingTieCandidate = true; // このイベントを閉じたのは純粋な音程変化 → 次のイベントはタイ候補
         } else if (activeStart >= 0) {
           activePitchSeq.push(curPitch);
         }
@@ -538,14 +548,15 @@
         // されてしまう不具合があった(実SPCのV5パートで確認、ノート脱落の原因)。
         if ((koffLatched[f] & (1 << ch)) && !(konLatched[f] & (1 << ch))) {
           if (activeStart >= 0) {
-            voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, f - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq });
+            voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, f - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
             activeStart = -1;
             activePitchSeq = [];
+            pendingTieCandidate = false; // KOFF後、次に始まるノートは新規アタックなのでタイ候補ではない
           }
         }
       }
       if (activeStart >= 0) {
-        voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, FRAMES - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq });
+        voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, FRAMES - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
       }
       voiceEvents[ch] = mergeSpcVoiceEvents(voiceEvents[ch]);
     }
@@ -568,14 +579,16 @@
       }
       mapped.push({
         start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi, pitch: ev.pitch,
-        pitchSeq: ev.pitchSeq, srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain
+        pitchSeq: ev.pitchSeq, srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain,
+        tieCandidate: ev.tieCandidate
       });
     }
     return MML.Convert.mergeAlternatingVibrato(mapped)
       .filter(ev => ev.note != null)
       .map(ev => ({
         frame: ev.start, len: ev.end - ev.start, pitch: ev.pitch, pitchSemi: ev.note,
-        srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain, pitchSeq: ev.pitchSeq
+        srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain, pitchSeq: ev.pitchSeq,
+        tieCandidate: ev.tieCandidate
       }));
   }
 
@@ -807,16 +820,18 @@
           start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi,
           envelopeV: hasEnvelope && ev.envelopeIdx !== undefined ? ev.envelopeIdx : undefined,
           envelopeVr: hasEnvelope && ev.envelopeIdx !== undefined ? 0 : undefined,
+          tieCandidate: ev.tieCandidate,
         };
         if (periodFn && ev.pitchSemi !== null && ev.pitchSeq && ev.pitchSeq.length > 0) {
           const tune = tuneOf(ev.srcn);
           const freqSeq = ev.pitchSeq.map(p => pitchRegToFreqHz(p, tune));
           const rescaled = MML.Convert.rescalePitchSeqFromFreq(freqSeq, periodFn);
-          const assigned = pitchReg.assign(rescaled);
-          if (assigned) { common.pitchEp = assigned.index; common.pitchEpDelay = assigned.delay; }
+          MML.Convert.applyPitchAssignment(common, pitchReg.assign(rescaled));
         }
         return common;
       });
+      // スラー分割(別プロジェクトE、2026-08-12): pitchEp/portamentoが確定した直後に行う
+      MML.Convert.markSlurTies(chEvents);
       scoreChannels.push({ letter: targetLetter, events: chEvents, hasEnvelope, hasPitchMod: !!periodFn });
     }
 

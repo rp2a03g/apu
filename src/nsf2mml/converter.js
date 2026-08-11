@@ -173,8 +173,13 @@
     function flush(end) {
       if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; }
     }
-    function begin(f, note, vol, duty, constVol, envKey, rawFreq, period) {
-      cur = { note, vol, duty, constVol, envKey, start: f, end: f, volSeq: [vol], pitchSeq: [period], rawFreq };
+    // tieCandidate: このイベントの開始が「純粋な音程変化のみ」による分割だったか
+    // (実アタック/デューティ/固定音量切替/エンベロープ周期変化を一切伴わない)。
+    // スラー分割(src/convert/pitch.js markSlurTies、2026-08-12)がこのフラグを見て、
+    // 独立した再アタック音符ではなくタイ(&)で繋いだレガートにできるかを判定する
+    function begin(f, note, vol, duty, constVol, envKey, rawFreq, period, tieCandidate) {
+      cur = { note, vol, duty, constVol, envKey, start: f, end: f, volSeq: [vol], pitchSeq: [period], rawFreq,
+        tieCandidate: !!tieCandidate };
     }
 
     for (let f = 0; f < timeline.length; f++) {
@@ -196,15 +201,19 @@
       const rawFreq = note !== null ? freq : null;
 
       if (!cur) {
-        begin(f, note, vol, duty, constVol, envKey, rawFreq, period);
+        begin(f, note, vol, duty, constVol, envKey, rawFreq, period, false);
         continue;
       }
       // アタック書き込みがあれば必ず新イベント
       if (t.attack[chKey]) {
-        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period);
+        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period, false);
       } else if (note !== cur.note || duty !== cur.duty || constVol !== cur.constVol ||
                  (!constVol && envKey !== cur.envKey)) {
-        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period);
+        // 音程だけが変わった(デューティ/固定音量切替/エンベロープ周期は不変)場合のみ
+        // タイ候補とする
+        const pureNoteChange = note !== cur.note && duty === cur.duty && constVol === cur.constVol &&
+          (constVol || envKey === cur.envKey);
+        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period, pureNoteChange);
       } else {
         cur.pitchSeq.push(period);
         if (constVol) {
@@ -252,12 +261,14 @@
       const note = (active && freq > 0 && gated) ? freqToNote(freq) : null;
       const rawFreq = note !== null ? freq : null;
 
-      if (!cur) { cur = { note, start: f, end: f, rawFreq, pitchSeq: [period] }; continue; }
+      if (!cur) { cur = { note, start: f, end: f, rawFreq, pitchSeq: [period], tieCandidate: false }; continue; }
 
       if (t.attack.tr) {
-        flush(f); cur = { note, start: f, end: f, rawFreq, pitchSeq: [period] };
+        flush(f); cur = { note, start: f, end: f, rawFreq, pitchSeq: [period], tieCandidate: false };
       } else if (note !== cur.note) {
-        flush(f); cur = { note, start: f, end: f, rawFreq, pitchSeq: [period] };
+        // 三角波はデューティ/エンベロープの概念が無いため、アタック無し+音程変化のみで
+        // 分割される場合は常にタイ候補(pureな音程変化)
+        flush(f); cur = { note, start: f, end: f, rawFreq, pitchSeq: [period], tieCandidate: true };
       } else {
         cur.pitchSeq.push(period);
       }
@@ -576,26 +587,37 @@
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
     function toPitchFields(ev) {
       if (ev.rawFreq == null || !ev.pitchSeq) return {};
-      const assigned = pitchReg.assign(ev.pitchSeq);
-      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+      const fields = {};
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      return fields;
     }
 
     // イベントを共通形式 { start, end, note, volume?/envelopeV?, instrument?, rawFreq? } に整形
+    // (tieCandidateはスラー分割判定用にそのまま素通しする。src/convert/pitch.js
+    // markSlurTies参照)
     const toCommon = (ev) => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq },
+      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq,
+        tieCandidate: ev.tieCandidate },
       ev.note !== null ? toVolumeFields(ev) : {},
       ev.note !== null ? toPitchFields(ev) : {}
     );
     const chEventsA = evA.map(toCommon);
     const chEventsB = evB.map(toCommon);
     const chEventsC = evC.map(ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq },
+      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
       ev.note !== null ? toPitchFields(ev) : {}
     ));
     const chEventsD = evD.map(ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.on ? noisePeriodToNoteNum(ev.periodIdx) : null },
       ev.on ? toVolumeFields(ev) : {}
     ));
+    // スラー分割(2026-08-12): 純粋な音程変化のみで区切られ、両側とも十分な長さ+
+    // 自前の変調が無い隣接ペアをタイ(&)で繋ぐ(src/convert/pitch.js markSlurTies)。
+    // pitchEp/portamentoが確定した後・detuneEntries(D<n>算出)より前でよい
+    // (D<n>はslurTieの判定に使わないため順不同、ここでまとめて処理する)
+    MML.Convert.markSlurTies(chEventsA);
+    MML.Convert.markSlurTies(chEventsB);
+    MML.Convert.markSlurTies(chEventsC);
 
     // 音程補正: NSF→2A03(及び拡張音源)はネイティブ変換(変換元・変換先が同一チップ・同一
     // クロック)であり、KSSのPSG→FME-7のような「変換先チップの格子が粗い」二重量子化は

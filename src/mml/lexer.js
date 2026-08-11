@@ -708,6 +708,32 @@
           tokens.push({ type: 'sweep', speed: speed == null ? 0 : speed, depth: depth == null ? 0 : depth });
           break;
         }
+        // PT<target>,<duration>[,<delay>] ポルタメント(単調な直線グライド、DESIGN-PITCH.md
+        // 別プロジェクトC)。PTOFで解除。target(符号付き)はD<n>/EP<n>と同じ「変換先チップの
+        // 生レジスタオフセット」空間、durationはグライドに要するフレーム数、delayは省略可
+        // (既定0)。★ppmck本家ドキュメント(doc/mck.txt)には専用のポルタメントコマンドが
+        // 無く「ピッチエンベロープ(EP)で代用してください」と明記されているため、これは
+        // ppmck方言からの独自拡張(README.md方言対応表・INV-2参照)。
+        case 'P': {
+          i++;
+          if (str[i] === 'T' || str[i] === 't') {
+            i++;
+            if (matchLiteral2('OF')) tokens.push({ type: 'portamento', target: null });
+            else {
+              const target = readSignedNumber();
+              let duration = null, delay = 0;
+              if (str[i] === ',') { i++; duration = readNumber(); }
+              if (str[i] === ',') { i++; const d = readNumber(); delay = d == null ? 0 : d; }
+              tokens.push({
+                type: 'portamento',
+                target: target == null ? 0 : target,
+                duration: duration == null ? 0 : duration,
+                delay
+              });
+            }
+          }
+          break;
+        }
         case '&': i++; tokens.push({ type: 'tie' }); break;
         case '[': i++; tokens.push({ type: 'loopStart' }); break;
         case '|': i++; tokens.push({ type: 'loopBreak' }); break;

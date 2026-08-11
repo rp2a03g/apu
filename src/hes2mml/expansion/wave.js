@@ -96,10 +96,14 @@
       const resampled = resampleTo4bit(c.wave);
       const wave4 = useCanonicalRotation ? canonicalRotation(resampled) : resampled;
       const waveKey = wave4.join(',');
-      if (!cur) { cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq] }; continue; }
+      if (!cur) { cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: false }; continue; }
       if (note !== cur.note || (note !== null && waveKey !== cur.waveKey)) {
+        // PSGには専用アタックレジスタが無くこの時点では打ち直し(パス2のsplitRetriggers)を
+        // まだ判定していないため、ここでの「純粋な音程変化」は波形切替を伴わないことのみで
+        // 判定する(打ち直しかどうかはパス2の結果を見てから確定させる、下記参照)
+        const pureNoteChange = note !== cur.note && waveKey === cur.waveKey;
         flush(f);
-        cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq] };
+        cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: pureNoteChange };
       } else {
         cur.volSeq.push(vol4);
         cur.pitchSeq.push(c.freq);
@@ -108,6 +112,9 @@
     flush(snapshots.length);
 
     // パス2: 打ち直し(ロール)検出(retrigger.js参照)。休符ランは対象外。
+    // tieCandidateはrun先頭のパス1判定をそのまま引き継ぐが、runの途中で打ち直しにより
+    // 新設された区間(r.start>0、実際に音量ジャンプで区切られた=本物の再アタック)は
+    // 常にfalseにする(パス1では見えていなかった打ち直しがここで確定するため)
     const events = [];
     for (const run of runs) {
       if (run.note == null) { events.push(run); continue; }
@@ -117,7 +124,8 @@
           note: run.note, wave: run.wave, waveKey: run.waveKey, rawFreq: run.rawFreq,
           start: run.start + r.start, end: run.start + r.end,
           volSeq: run.volSeq.slice(r.start, r.end),
-          pitchSeq: run.pitchSeq.slice(r.start, r.end)
+          pitchSeq: run.pitchSeq.slice(r.start, r.end),
+          tieCandidate: r.start === 0 ? run.tieCandidate : false
         });
       }
     }
@@ -134,7 +142,7 @@
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
     }
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note },
+      { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(ev.wave) } : {},
       ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq, freqSeq: ev.pitchSeq.map(waveFreq) } : {},
       toVolumeFields(ev.volSeq)

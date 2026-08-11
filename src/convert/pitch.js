@@ -212,10 +212,81 @@
     return { index: idx, delay: pitchMod.delay };
   };
 
-  // pitchSeqを解析して登録し、{index, delay}を返す。変調が見つからなければnull
-  // (呼び出し側はEP<n>を出さず従来のD<n>のみを使うべき合図)。
+  // ── ポルタメントコマンド(DESIGN-PITCH.md 別プロジェクトC、2026-08-11) ──────
+  // P-5「単調ランプ→ポルタメント(コマンドは将来)」の実装。検出側(classifyPitchMod)は
+  // 無変更のまま、type:'ramp'の結果を後段(このファイル内)でさらに判定する:
+  // 「MPの`warizan_start`(delay無し・反転無しの片道版)で寸分違わず再現できる、
+  // 単純な一定ペースの直線グライドか」を検査し、再現できればPT<target>,<duration>
+  // (2値だけの軽量コマンド、テーブル不要)へ、できなければ従来通り非ループEP
+  // テーブル(literal、全フレーム値をそのまま保持)へ回す。
+  // ★実機ppmck公式ドキュメント(doc/mck.txt)には専用のポルタメントコマンドが存在せず
+  // 「ピッチエンベロープ(EP)で代用してください」と明記されている。したがってこの
+  // PT<n>コマンドはppmck方言からの独自拡張であり(README.md方言対応表に明記、INV-2)、
+  // EPは今後も可逆性チェックに失敗した場合のフォールバックとして必須(P-1「音の
+  // 正しさ=軌跡保存」の非負妥協ライン。近似で妥協せず、再現できないものは安全側=EPへ)。
+  // MMLの構文・バイトコード上(mckBytecode.js)のtargetは符号付き16bit(D<n>と同じ)まで
+  // 表現できるが、6502ドライバ側のCEILDIV(MPと共有、ceilDivPpmck相当)がCDA/CDB共に
+  // 1byteスクラッチのため|target|は255までしか正しく計算できない。この判定側でも
+  // 同じ上限を掛けておく(判定と実装の上限がズレると「JS側は portamento と判定したのに
+  // 6502側は8bit溢れで誤動作する」事故になるため、必ず両方揃えること)。
+  const MAX_PORTAMENTO_TARGET = 255;
+  const MAX_PORTAMENTO_DURATION = 255; // 6502側PTSTEPINT/duration格納は1byte
+
+  // MPのwarizan_start(ceil除算によるBresenham風の一定ペース階段化)の片道版。
+  // target(0からの目標オフセット)へduration フレームで到達する列をシミュレートする
+  // (compiler.jsのvibratoSequence/ceilDivPpmckと同じアルゴリズムを反転無しで流用)。
+  function simulatePortamento(target, duration) {
+    const absTarget = Math.abs(target);
+    const dir = target < 0 ? -1 : 1;
+    let stepSize, stepInterval;
+    if (duration === absTarget) { stepSize = 1; stepInterval = 1; }
+    else if (duration > absTarget) { stepInterval = ceilDivPpmck(duration, absTarget); stepSize = 1; }
+    else { stepSize = ceilDivPpmck(absTarget, duration); stepInterval = 1; }
+    const seq = new Array(duration);
+    let value = 0, counter = stepInterval;
+    for (let t = 0; t < duration; t++) {
+      if (counter === stepInterval) { counter = 0; value += dir * stepSize; }
+      counter++;
+      seq[t] = value;
+    }
+    return seq;
+  }
+
+  // ceilDiv(a,b): a>bの2値をwarizanと同じ規則(割り切れなければ+1、実測トレース済み。
+  // src/mml/compiler.jsのceilDivPpmckと同一実装をここでも独立に持つ、共有しない
+  // 理由はP-3参照)で割る。
+  function ceilDivPpmck(a, b) {
+    if (a === b) return 1;
+    let q = 0, rem = a;
+    while (rem > 0) { q++; rem -= b; }
+    return q;
+  }
+
+  // valuesがsimulatePortamento(target,duration)と1バイトも違わず一致するかを確認し、
+  // 一致すれば{target,duration}を、しなければnullを返す(rampだが直線でない=EPへ)。
+  function fitPortamento(values) {
+    const duration = values.length;
+    const target = values[values.length - 1];
+    if (target === 0 || duration < 1) return null;
+    if (Math.abs(target) > MAX_PORTAMENTO_TARGET || duration > MAX_PORTAMENTO_DURATION) return null;
+    const simulated = simulatePortamento(target, duration);
+    for (let i = 0; i < duration; i++) if (simulated[i] !== values[i]) return null;
+    return { target, duration };
+  }
+
+  // pitchSeqを解析し、{kind:'portamento', target, duration, delay} |
+  // {kind:'ep', index, delay} | nullを返す(呼び出し側はkindで分岐してev.portamento
+  // またはev.pitchEp/ev.pitchEpDelayを設定する)。変調が見つからなければnull
+  // (呼び出し側はD<n>のみを使うべき合図)。
   MML.Convert.PitchEnvelopeRegistry.prototype.assign = function (pitchSeq) {
-    return this.registerShape(MML.Convert.classifyPitchMod(pitchSeq));
+    const pitchMod = MML.Convert.classifyPitchMod(pitchSeq);
+    if (!pitchMod) return null;
+    if (pitchMod.type === 'ramp') {
+      const fit = fitPortamento(pitchMod.values);
+      if (fit) return { kind: 'portamento', target: fit.target, duration: fit.duration, delay: pitchMod.delay };
+    }
+    const registered = this.registerShape(pitchMod);
+    return registered ? { kind: 'ep', index: registered.index, delay: registered.delay } : null;
   };
 
   MML.Convert.PitchEnvelopeRegistry.prototype.defLines = function () {
@@ -246,8 +317,26 @@
         if (ev.note === null || !ev.freqSeq || ev.freqSeq.length === 0) continue;
         const rescaled = MML.Convert.rescalePitchSeqFromFreq(ev.freqSeq, periodFn, ev);
         const assigned = pitchReg.assign(rescaled);
-        if (assigned) { ev.pitchEp = assigned.index; ev.pitchEpDelay = assigned.delay; }
+        MML.Convert.applyPitchAssignment(ev, assigned);
       }
+      // スラー分割(別プロジェクトE、2026-08-12): pitchEp/portamentoが確定した直後に
+      // まとめて行う(markSlurTiesの安全ガードが両方の値を参照するため)。KSS(ay/scc)・
+      // GBS(pulse/wave)・HES(wave)は全てこの共通ヘルパーを経由するため、ここ1箇所で
+      // 3形式に一括で効く(Project A/Cと同じ集約点の再利用)
+      MML.Convert.markSlurTies(ch.events);
+    }
+  };
+
+  // pitchReg.assign()の戻り値({kind:'portamento',...}|{kind:'ep',...}|null)をevへ
+  // 適用する共通ヘルパー(2026-08-11 別プロジェクトC)。呼び出し元(assignPitchEnvelope・
+  // 各*2mmlのtoPitchFields相当)で同じkind分岐を重複させないためにここへ集約する。
+  MML.Convert.applyPitchAssignment = function (ev, assigned) {
+    if (!assigned) return;
+    if (assigned.kind === 'portamento') {
+      ev.portamento = { target: assigned.target, duration: assigned.duration, delay: assigned.delay };
+    } else {
+      ev.pitchEp = assigned.index;
+      ev.pitchEpDelay = assigned.delay;
     }
   };
 
@@ -343,6 +432,51 @@
       i++;
     }
     return result;
+  };
+
+  // ── スラー分割(DESIGN-PITCH.md §3「レガートA→G」「こぶし」、2026-08-12) ──────
+  // 現状の抽出ループは「半音丸め値が変わったら即新イベント」という境界規則自体は
+  // Phase 2でも変えていない(mergeAlternatingVibratoは周期的な2値往復だけを後から
+  // 再統合するだけ)ため、非周期の音程クロス(1回きりのレガート/こぶし)は既に
+  // 別々のイベントとして抽出済みである。このスラー分割は「新しいプラトー検出/分割
+  // アルゴリズム」ではなく、隣接イベントの境界が(a)実アタック/デューティ/エンベロープ
+  // 種別変化を伴わない**純粋な音程変化のみ**で、(b)両側とも十分な長さ(プラトー)を
+  // 持ち、(c)どちらの側も自前の変調(EP/PT)が既に割り当てられていない、という
+  // 3条件を満たす場合に限り、独立した再アタック音符ではなくタイ(&)で繋いだ
+  // レガートとして出力する後処理パス。
+  //
+  // 呼び出し順序: 抽出(ev.tieCandidateを立てる。純粋な音程変化での分割だったかを
+  // extractor自身が記録する。他の要因では立てない)→音量/ピッチ割当て(pitchEp/
+  // portamentoの確定)→本関数、の順を必ず守ること(本関数はpitchEp/portamentoが
+  // 未割当のイベントしかタイの対象にしない。理由: compiler.jsのタイ処理は「新しい
+  // セグメントを作らず前のセグメントを延長する」設計のため、タイで繋いだ2音目以降が
+  // 独自のD/EP/MP/PTを持つことはできない(仮に出力しても再生時に無視される)。
+  // よって、タイに使うと自前の変調を握りつぶすことになる候補は安全側にスキップする)。
+  //
+  // 「不明瞭」な場合(短すぎる/自前の変調がある)は何もしない = 従来通りの独立した
+  // 再アタック音符のまま(P-5「プラトー明瞭→スラー分割、不明瞭→EPテーブル」のうち、
+  // 不明瞭側の「非周期の複数プラトーを1音+EPへ統合する」処理は今回のスコープ外。
+  // mergeAlternatingVibratoの拡張として別途着手する)。
+  const MIN_SLUR_PLATEAU_FRAMES = 4; // Phase 3のMIN_LITERAL_FRAMESと同じ考え方(打鍵ジッタ除外)
+
+  function qualifiesForSlur(ev) {
+    return !!ev && ev.note != null && (ev.end - ev.start) >= MIN_SLUR_PLATEAU_FRAMES &&
+      ev.pitchEp == null && ev.portamento == null;
+  }
+
+  MML.Convert.markSlurTies = function (events) {
+    for (let i = 1; i < events.length; i++) {
+      const prev = events[i - 1], ev = events[i];
+      // hysteresisCompatible(HYSTERESIS_HARD_KEYS、mergeAlternatingVibratoと共有)も
+      // ここで再利用する: SPCのsrcn/adsr1/adsr2/gain(楽器/エンベロープ)等、tieCandidate
+      // 計算だけでは拾いきれないチップ固有の「音色が変わったら別音符」制約を、
+      // extractorごとに個別実装させず一箇所に集約するため
+      if (ev.tieCandidate && prev.end === ev.start &&
+          qualifiesForSlur(prev) && qualifiesForSlur(ev) && hysteresisCompatible(prev, ev)) {
+        ev.slurTie = true;
+      }
+    }
+    return events;
   };
 
 })(window);

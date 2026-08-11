@@ -242,13 +242,15 @@
   // (いずれもchannelTypes.length件)。act[i]=1のチャンネルは、トラック終端到達時に
   // 無音化して止まる代わりにbank[i]/lo[i]/hi[i]が指す位置へジャンプして再生を続ける
   // (buildBankedNsfBytes参照)。省略時は全チャンネルact=0(従来通り終端で停止)
-  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList) {
+  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak) {
     envelopes = envelopes || {};
     dpcmLayout = dpcmLayout || {};
     dpcmSamples = dpcmSamples || {};
     envIndexList = envIndexList || [];
     epIndexList = epIndexList || [];
     mpIndexList = mpIndexList || [];
+    usesPortamento = !!usesPortamento;
+    usesPitchBreak = !!usesPitchBreak;
     const loopAct = (songLoop && songLoop.act) || channelTypes.map(() => 0);
     const loopBank = (songLoop && songLoop.bank) || channelTypes.map(() => 0);
     const loopLo = (songLoop && songLoop.lo) || channelTypes.map(() => 0);
@@ -304,9 +306,14 @@
     const epExtraSlots = usesEp ? 7 : 0;
     const usesMp = mpIndexList.length > 0;
     const mpExtraSlots = usesMp ? 11 : 0;
-    const usesFreqOnly = usesEp || usesMp;
+    // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC): 11byte/ch(MPと同数)
+    const ptExtraSlots = usesPortamento ? 11 : 0;
+    // タイ(&)による異音程レガート(2026-08-12): 専用のZP状態は持たない(NOTE,Xを
+    // 直接書き替えるだけ)ため追加スロットは不要。WRITE_FREQ_ONLY自体は必要なので
+    // usesFreqOnlyの判定にだけ加える
+    const usesFreqOnly = usesEp || usesMp || usesPortamento || usesPitchBreak;
     const freqOnlyExtraSlots = usesFreqOnly ? 1 : 0;
-    const totalPerChanBlocks = 14 + n163ExtraSlots + fme7ExtraSlots + epExtraSlots + mpExtraSlots + freqOnlyExtraSlots;
+    const totalPerChanBlocks = 14 + n163ExtraSlots + fme7ExtraSlots + epExtraSlots + mpExtraSlots + ptExtraSlots + freqOnlyExtraSlots;
     // fixedBase以降(JMPLO,JMPHI,FME7専用グローバル,CEILDIVスクラッチ)の固定個数。
     // 下のchArrayBase判定に含める(このブロックも$0100-$01FFに掛かってはいけないため)
     const TRAILING_FIXED_SIZE = 13;
@@ -372,11 +379,29 @@
       MPREVCNT = mpBase + 3 * n, MPQUARTER2 = mpBase + 4 * n, MPADCCNT = mpBase + 5 * n,
       MPSTEPSZ = mpBase + 6 * n, MPSTEPINT = mpBase + 7 * n, MPDIR = mpBase + 8 * n,
       MPVALLO = mpBase + 9 * n, MPVALHI = mpBase + 10 * n;
-    // LASTHI: EP/MPの継続フレーム再書込み(WRITE_FREQ_ONLY)で、位相リセット副作用を持つ
+    // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC)用チャンネルごとの状態。
+    // usesPortamentoの時のみ実際に使う。compiler.jsのportamentoSequenceと同じアルゴリズム
+    // (MPのwarizan_start片道版、反転無し)を1フレームずつ状態遷移させる。
+    // PTACT=有効フラグ、PTDIR=方向(+1=$00/-1=$FF。targetの符号拡張バイトをそのまま
+    // 使う、MPと違い符号付きtarget自身が方向を持つのでCHTYPE方向テーブルは不要)、
+    // PTDURSET/PTDELAYSET=PT<n>選択時(RD_PORTAMENTO)に保存したduration/delayの生値、
+    // PTSTEPSZ/PTSTEPINT=RD_PORTAMENTOでCEILDIVにより確定した1ステップの増減量/間隔、
+    // PTDELAY=delay残りカウントダウン、PTDUR=duration残りカウントダウン(0になったら
+    // 以降は何もせずPTVALLO/HIを保持=最終値の永久ホールド)、PTSTEPCNT=次のステップまでの
+    // カウンタ(MPのMPADCCNT相当)、PTVALLO/PTVALHI=累積オフセット(符号付き16bit、
+    // APPLY_DETUNE/APPLY_DETUNE_N163が読む)。RD_NOTEで毎音符PTDELAY/PTDUR/PTSTEPCNT/
+    // PTVALLO/HIを再初期化する(EP_STEPと同じpost-increment単一ルーチン設計、off-by-one
+    // バグの教訓を踏まえMP LFO_SUBのような初回/継続分離はしない)。
+    const ptBase = mpBase + mpExtraSlots * n;
+    const PTACT = ptBase, PTDIR = ptBase + n, PTDURSET = ptBase + 2 * n,
+      PTDELAYSET = ptBase + 3 * n, PTSTEPSZ = ptBase + 4 * n, PTSTEPINT = ptBase + 5 * n,
+      PTDELAY = ptBase + 6 * n, PTDUR = ptBase + 7 * n, PTSTEPCNT = ptBase + 8 * n,
+      PTVALLO = ptBase + 9 * n, PTVALHI = ptBase + 10 * n;
+    // LASTHI: EP/MP/PTの継続フレーム再書込み(WRITE_FREQ_ONLY)で、位相リセット副作用を持つ
     // 上位バイトレジスタを「実際に変わった時だけ」書くための直近書込み値
     // (compiler.js writePitchModulationのlastHiと同じロジック、n×1byte)。
-    // EPかMPのどちらかを使う曲でのみ確保する
-    const freqOnlyBase = mpBase + mpExtraSlots * n;
+    // EP・MP・PTのいずれかを使う曲でのみ確保する
+    const freqOnlyBase = ptBase + ptExtraSlots * n;
     const LASTHI = freqOnlyBase;
     // fixedBaseから先はチャンネル数nと無関係な固定個数のグローバルスクラッチ(,Xインデックス
     // なし)。JMPLOはJMP間接絶対(2バイトアドレスなので物理ゼロページ外でも正しく動く)、
@@ -617,6 +642,33 @@ EP_STEP_LOOKUP:
     // をそのまま埋め込み、warizan(除算)はMP<n>選択時(0xFB処理)にCEILDIVサブルーチンで
     // その場で計算する(実機と同じタイミング) ---
     const mpTableCount = mpIndexList.length;
+    // --- CEILDIV: ceilDivPpmck(a,b)相当。呼び出し前提: ${hex(CDA)}=a, ${hex(CDB)}=bを
+    // セットして呼ぶ(b>=1前提)。「while(rem>0){q++;rem-=b}」をそのまま減算ループで
+    // 再現(割り切れない場合はceil側に丸まる、実機トレース済みの仕様。compiler.js
+    // ceilDivPpmckのコメント参照)。戻り値=A(0-255)。${hex(CDA)}は呼び出し後に破壊される。
+    // チャンネル非依存の使い捨てスクラッチなのでXは使わない(呼び出し元でX退避不要)。
+    // MP(warizan_start)とポルタメント(RD_PORTAMENTO)の両方が共有するため、
+    // どちらか一方でも使われていれば1回だけ埋め込む(2026-08-11 別プロジェクトC)。
+    if (mpTableCount > 0 || usesPortamento) {
+      extraHandlers.push(`
+CEILDIV:
+    LDA #$00
+    STA ${hex(CDQ)}
+CEILDIV_LOOP:
+    LDA ${hex(CDA)}
+    BEQ CEILDIV_DONE
+    INC ${hex(CDQ)}
+    SEC
+    SBC ${hex(CDB)}
+    BCS CEILDIV_NOBORROW
+    LDA #$00
+CEILDIV_NOBORROW:
+    STA ${hex(CDA)}
+    JMP CEILDIV_LOOP
+CEILDIV_DONE:
+    LDA ${hex(CDQ)}
+    RTS`);
+    }
     if (mpTableCount > 0) {
       const mpDelays = mpIndexList.map(idx => Math.max(0, Math.min(255, ((envelopes.mp[idx] || {}).delay) || 0)));
       const mpSpeeds = mpIndexList.map(idx => Math.max(1, Math.min(255, ((envelopes.mp[idx] || {}).speed) || 0)));
@@ -639,30 +691,7 @@ EP_STEP_LOOKUP:
       mpDirTable[TYPE_FDS] = 0x01;
       for (let ch = 0; ch < N163_CHANNEL_COUNT; ch++) mpDirTable[TYPE_N163_BASE + ch] = 0x01;
       extraTables.push(`MP_DIR_TABLE:\n${bytesToDb(new Uint8Array(mpDirTable))}`);
-      // --- CEILDIV: ceilDivPpmck(a,b)相当。呼び出し前提: ${hex(CDA)}=a, ${hex(CDB)}=bを
-      // セットして呼ぶ(b>=1前提)。「while(rem>0){q++;rem-=b}」をそのまま減算ループで
-      // 再現(割り切れない場合はceil側に丸まる、実機トレース済みの仕様。compiler.js
-      // ceilDivPpmckのコメント参照)。戻り値=A(0-255)。${hex(CDA)}は呼び出し後に破壊される。
-      // チャンネル非依存の使い捨てスクラッチなのでXは使わない(呼び出し元でX退避不要) ---
       extraHandlers.push(`
-CEILDIV:
-    LDA #$00
-    STA ${hex(CDQ)}
-CEILDIV_LOOP:
-    LDA ${hex(CDA)}
-    BEQ CEILDIV_DONE
-    INC ${hex(CDQ)}
-    SEC
-    SBC ${hex(CDB)}
-    BCS CEILDIV_NOBORROW
-    LDA #$00
-CEILDIV_NOBORROW:
-    STA ${hex(CDA)}
-    JMP CEILDIV_LOOP
-CEILDIV_DONE:
-    LDA ${hex(CDQ)}
-    RTS
-
 ; --- LFO_SUB: lfo_sub本体の忠実移植。X=チャンネル番号のまま呼ぶ(1フレーム分だけ状態を
 ; 進める。compiler.jsのvibratoSequence内側ループの1反復と同一)。delay中はデクリメントして
 ; 即リターン(値は変えない)。reverseCounterがquarter*2(MPQUARTER2)に達したら0へ戻し方向反転、
@@ -711,6 +740,60 @@ LFO_NEG:
 LFO_NOSTEP:
     INC ${hex(MPREVCNT)},X
     INC ${hex(MPADCCNT)},X
+    RTS`);
+    }
+
+    // --- PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC)。ppmck本家
+    // ドキュメント(doc/mck.txt)に専用コマンドが無く「ピッチエンベロープ(EP)で
+    // 代用してください」と明記されているため、このツール独自の拡張。compiler.jsの
+    // portamentoSequence(MPのwarizan_start片道版・反転無し)と同一アルゴリズムを
+    // フレームごとの状態遷移として移植する。target/duration/delayはバイトコード上に
+    // 直接の即値として乗る(EP/MPのようなROM共有テーブルは無い)ため、PT<n>選択時
+    // (0xF9処理)にCEILDIVでその場でPTSTEPSZ/PTSTEPINTを確定する ---
+    if (usesPortamento) {
+      extraHandlers.push(`
+; --- PT_STEP: ポルタメントの1フレーム分の状態遷移。EP_STEPと同じpost-increment単一
+; ルーチン設計(RD_NOTE/SERVICE_CH継続フレームの両方から呼ぶ。EP実装時に踏んだ
+; init/tick分離によるoff-by-oneバグの教訓を踏まえ、最初から単一ルーチンにしてある)。
+; X=チャンネル番号のまま呼ぶ ---
+PT_STEP:
+    LDA ${hex(PTDELAY)},X
+    BEQ PT_STEP_ACTIVE
+    DEC ${hex(PTDELAY)},X
+    LDA #$00
+    STA ${hex(PTVALLO)},X
+    STA ${hex(PTVALHI)},X
+    RTS
+PT_STEP_ACTIVE:
+    LDA ${hex(PTDUR)},X
+    BEQ PT_STEP_DONE
+    LDA ${hex(PTSTEPCNT)},X
+    CMP ${hex(PTSTEPINT)},X
+    BNE PT_STEP_ADVANCE
+    LDA #$00
+    STA ${hex(PTSTEPCNT)},X
+    LDA ${hex(PTDIR)},X
+    BEQ PT_STEP_ADD
+    LDA ${hex(PTVALLO)},X
+    SEC
+    SBC ${hex(PTSTEPSZ)},X
+    STA ${hex(PTVALLO)},X
+    LDA ${hex(PTVALHI)},X
+    SBC #$00
+    STA ${hex(PTVALHI)},X
+    JMP PT_STEP_ADVANCE
+PT_STEP_ADD:
+    LDA ${hex(PTVALLO)},X
+    CLC
+    ADC ${hex(PTSTEPSZ)},X
+    STA ${hex(PTVALLO)},X
+    LDA ${hex(PTVALHI)},X
+    ADC #$00
+    STA ${hex(PTVALHI)},X
+PT_STEP_ADVANCE:
+    INC ${hex(PTSTEPCNT)},X
+    DEC ${hex(PTDUR)},X
+PT_STEP_DONE:
     RTS`);
     }
 
@@ -813,7 +896,7 @@ SIL_T6:
     RTS`);
       wfvEntries[4] = 'WFV_T4'; wfvEntries[5] = 'WFV_T5'; wfvEntries[6] = 'WFV_T6';
       silEntries[4] = 'SIL_T4'; silEntries[5] = 'SIL_T5'; silEntries[6] = 'SIL_T6';
-      if (usesEp || usesMp) {
+      if (usesEp || usesMp || usesPortamento || usesPitchBreak) {
         extraHandlers.push(`
 ; --- VRC6パルス1/2・矩形波(サウ)のEP<n>/MP<n>継続フレーム専用(周期のみ再書込み) ---
 WFO_T4:
@@ -950,7 +1033,7 @@ SIL_T8:
     RTS`);
       wfvEntries[7] = 'WFV_T7'; wfvEntries[8] = 'WFV_T8';
       silEntries[7] = 'SIL_T7'; silEntries[8] = 'SIL_T8';
-      if (usesEp || usesMp) {
+      if (usesEp || usesMp || usesPortamento || usesPitchBreak) {
         extraHandlers.push(`
 ; --- MMC5パルス1/2のEP<n>/MP<n>継続フレーム専用(周期のみ再書込み) ---
 WFO_T7:
@@ -1201,7 +1284,7 @@ SIL_T11:
     RTS`);
       wfvEntries[9] = 'WFV_T9'; wfvEntries[10] = 'WFV_T10'; wfvEntries[11] = 'WFV_T11';
       silEntries[9] = 'SIL_T9'; silEntries[10] = 'SIL_T10'; silEntries[11] = 'SIL_T11';
-      if (usesEp || usesMp) {
+      if (usesEp || usesMp || usesPortamento || usesPitchBreak) {
         // FME7は間接アドレッシング($C000選択/$E000データ)のみで、2A03等のような
         // 「上位バイト書込みで位相リセット」という副作用が無いため(compiler.jsの
         // segmentsToWriteLogFme7もlastHiガード無しで毎フレーム両バイトを書く)、
@@ -1370,7 +1453,7 @@ SIL_T13:
     RTS`);
       wfvEntries[13] = 'WFV_T13';
       silEntries[13] = 'SIL_T13';
-      if (usesEp || usesMp) {
+      if (usesEp || usesMp || usesPortamento || usesPitchBreak) {
         extraHandlers.push(`
 ; --- FDSのEP<n>/MP<n>継続フレーム専用(周期のみ再書込み。波形再ロードは音符アタック時
 ; のみなのでここでは行わない) ---
@@ -1656,7 +1739,7 @@ ${wfvVolWrite}
     RTS`);
           wfvVolEntries[t] = `WFV_VOL_T${t}`;
         }
-        if (usesEp || usesMp) {
+        if (usesEp || usesMp || usesPortamento || usesPitchBreak) {
           // N163は間接アドレッシング(オートインクリメント+位相byte空読み)のみで、
           // 2A03等のような「上位バイト書込みで位相リセット」という副作用が無いため
           // (compiler.jsのwriteN163Freqもlastガード無しで毎フレーム全バイトを書く)、
@@ -1758,6 +1841,23 @@ ADN163_EP_EXT:
 ADN163_MP_POS:
     LDA #$00
 ADN163_MP_EXT:
+    ADC ${hex(PERLO2)}
+    STA ${hex(PERLO2)}
+` : ''}${usesPortamento ? `    CLC
+    LDA ${hex(PERLO)}
+    ADC ${hex(PTVALLO)},X
+    STA ${hex(PERLO)}
+    LDA ${hex(PERHI)}
+    ADC ${hex(PTVALHI)},X
+    STA ${hex(PERHI)}
+    LDA ${hex(PTVALHI)},X
+    AND #$80
+    BEQ ADN163_PT_POS
+    LDA #$FF
+    JMP ADN163_PT_EXT
+ADN163_PT_POS:
+    LDA #$00
+ADN163_PT_EXT:
     ADC ${hex(PERLO2)}
     STA ${hex(PERLO2)}
 ` : ''}    LDA ${hex(PERLO2)}
@@ -1975,8 +2075,15 @@ ${usesFme7 ? `    STA ${hex(FMEEACT)},X  ; FMEEACT=0(FME7ハードウェアエ�
     LDA #$00
     STA ${hex(DETUNE_LO)},X ; DETUNE=0(D<n>未指定時の既定値)
     STA ${hex(DETUNE_HI)},X
-${usesEp ? `    STA ${hex(EPACT)},X    ; EPACT=0(EP<n>未指定時の既定値)` : ''}
-${usesMp ? `    STA ${hex(MPACT)},X    ; MPACT=0(MP<n>未指定時の既定値)` : ''}
+${usesEp ? `    STA ${hex(EPACT)},X    ; EPACT=0(EP<n>未指定時の既定値)
+    STA ${hex(EPVALLO)},X  ; ★EPVALLO/HIも0初期化(実機RAMの電源投入時の値は不定なため。
+    STA ${hex(EPVALHI)},X  ;  下記RD_PITCHENV/RD_REST側の教訓と同じ理由、2026-08-11)` : ''}
+${usesMp ? `    STA ${hex(MPACT)},X    ; MPACT=0(MP<n>未指定時の既定値)
+    STA ${hex(MPVALLO)},X  ; ★MPVALLO/HIも0初期化(同上)
+    STA ${hex(MPVALHI)},X` : ''}
+${usesPortamento ? `    STA ${hex(PTACT)},X    ; PTACT=0(PT<n>未指定時の既定値)
+    STA ${hex(PTVALLO)},X  ; ★PTVALLO/HIも0初期化(同上)
+    STA ${hex(PTVALHI)},X` : ''}
     INX
     CPX #${hex(n)}
     BNE INIT_LOOP
@@ -2011,9 +2118,16 @@ ${usesMp ? `    LDA ${hex(MPACT)},X
     BEQ SVC_NOMP
     JSR LFO_SUB
 SVC_NOMP:` : ''}
+${usesPortamento ? `    ; PT<n>が有効なら、このフレーム分の状態を進める(delayの消化・ステップ加算は
+    ; PT_STEP内で行う、2026-08-11 別プロジェクトC)
+    LDA ${hex(PTACT)},X
+    BEQ SVC_NOPT
+    JSR PT_STEP
+SVC_NOPT:` : ''}
 ${usesFreqOnly ? `    LDA #$00
 ${usesEp ? `    ORA ${hex(EPACT)},X` : ''}
 ${usesMp ? `    ORA ${hex(MPACT)},X` : ''}
+${usesPortamento ? `    ORA ${hex(PTACT)},X` : ''}
     BEQ SVC_NOFREQ
     JSR WRITE_FREQ_ONLY
 SVC_NOFREQ:` : ''}
@@ -2053,6 +2167,7 @@ RD_LOOP:
     BEQ RD_JMP_ENDTRACK
     CMP #$EE
     BEQ RD_JMP_BANKJUMP
+${usesPitchBreak ? '    CMP #$ED\n    BEQ RD_JMP_PITCHBREAK' : ''}
     CMP #$FD
     BEQ RD_JMP_VOL
     CMP #$FE
@@ -2065,6 +2180,7 @@ RD_LOOP:
     BEQ RD_SKIP1
 ${usesEp ? '    CMP #$F8\n    BEQ RD_JMP_PITCHENV' : '    CMP #$F8\n    BEQ RD_SKIP1'}
 ${usesMp ? '    CMP #$FB\n    BEQ RD_JMP_VIBRATO' : '    CMP #$FB\n    BEQ RD_SKIP1'}
+${usesPortamento ? '    CMP #$F9\n    BEQ RD_JMP_PORTAMENTO' : '    CMP #$F9\n    BEQ RD_SKIP4'}
     CMP #$FA
     BEQ RD_JMP_DETUNE
 ${envTableCount > 0 ? '    CMP #$F3\n    BEQ RD_JMP_VOLENV' : ''}
@@ -2078,6 +2194,7 @@ RD_JMP_ENDTRACK:
     JMP RD_ENDTRACK
 RD_JMP_BANKJUMP:
     JMP RD_BANKJUMP
+${usesPitchBreak ? 'RD_JMP_PITCHBREAK:\n    JMP RD_PITCHBREAK' : ''}
 RD_JMP_REST:
     JMP RD_REST
 RD_JMP_WAIT:
@@ -2090,6 +2207,7 @@ RD_JMP_DETUNE:
     JMP RD_DETUNE
 ${usesEp ? 'RD_JMP_PITCHENV:\n    JMP RD_PITCHENV' : ''}
 ${usesMp ? 'RD_JMP_VIBRATO:\n    JMP RD_VIBRATO' : ''}
+${usesPortamento ? 'RD_JMP_PORTAMENTO:\n    JMP RD_PORTAMENTO' : ''}
 ${envTableCount > 0 ? 'RD_JMP_VOLENV:\n    JMP RD_VOLENV' : ''}
 ${vrc7CustomTones.length > 0 ? 'RD_JMP_VRC7TONE:\n    JMP RD_VRC7TONE' : ''}
 ${usesFds ? 'RD_JMP_FDSMOD:\n    JMP RD_FDSMOD' : ''}
@@ -2122,6 +2240,13 @@ RD_SKIP1:
     JMP RD_LOOP
 
 RD_SKIP3:
+    JSR READ_BYTE
+    JSR READ_BYTE
+    JSR READ_BYTE
+    JMP RD_LOOP
+
+RD_SKIP4:
+    JSR READ_BYTE
     JSR READ_BYTE
     JSR READ_BYTE
     JSR READ_BYTE
@@ -2206,6 +2331,9 @@ RD_PITCHENV:
     JSR READ_BYTE
     LDA #$00
     STA ${hex(EPACT)},X
+    STA ${hex(EPVALLO)},X  ; ★EPOFで累積値も0に戻す(2026-08-11修正: 戻さないと次に
+    STA ${hex(EPVALHI)},X  ;  EP無指定の音符が続いた時、直前のEP値がAPPLY_DETUNEへ
+                            ;  漏れ続ける暴走バグだった。PT実装時の往復検証で発覚)
     JMP RD_LOOP
 RD_PITCHENV_ON:
     STA ${hex(EPSEL)},X
@@ -2227,6 +2355,8 @@ RD_VIBRATO:
     BNE RD_VIBRATO_ON
     LDA #$00
     STA ${hex(MPACT)},X
+    STA ${hex(MPVALLO)},X  ; ★MPOFで累積値も0に戻す(RD_PITCHENVと同じ2026-08-11修正)
+    STA ${hex(MPVALHI)},X
     JMP RD_LOOP
 RD_VIBRATO_ON:
     STA ${hex(MPSEL)},X
@@ -2259,13 +2389,82 @@ RDV_DEPTHBIG:
     LDA #$01
     STA ${hex(MPSTEPINT)},X
     JMP RD_LOOP` : ''}
+${usesPortamento ? `
+; --- PT<target>,<duration>[,<delay>]ポルタメント選択(0xF9): 次の4バイトが
+; [target下位,target上位,duration,delay]。duration=0を番兵としてoff(PTOF)を表す。
+; target上位バイトは|target|<=255前提の単なる符号拡張バイト($00/$FF)なので、そのまま
+; PTDIRとして使う(MPのような方向テーブルは不要、targetの符号自体が方向を持つ)。
+; |target|とdurationの大小比較+CEILDIVでPTSTEPSZ/PTSTEPINTを確定する(RD_VIBRATOと
+; 同型)。状態の初期化(delay/durationリセット・PT_STEP初回呼び出し)はRD_NOTE
+; (音符アタック時)で行う ---
+RD_PORTAMENTO:
+    JSR READ_BYTE
+    STA ${hex(PERLO)}          ; target下位(このハンドラ内だけのスクラッチとして再利用)
+    JSR READ_BYTE
+    STA ${hex(PTDIR)},X        ; target上位=$00(+)/$FF(-)をそのままdirとして使う
+    JSR READ_BYTE
+    STA ${hex(PTDURSET)},X
+    JSR READ_BYTE
+    STA ${hex(PTDELAYSET)},X
+    LDA ${hex(PTDURSET)},X
+    BNE RD_PORTAMENTO_ON
+    LDA #$00
+    STA ${hex(PTACT)},X
+    STA ${hex(PTVALLO)},X  ; ★PTOFで累積値も0に戻す(RD_PITCHENVと同じ2026-08-11修正)
+    STA ${hex(PTVALHI)},X
+    JMP RD_LOOP
+RD_PORTAMENTO_ON:
+    LDA #$01
+    STA ${hex(PTACT)},X
+    LDA ${hex(PTDIR)},X
+    BEQ RD_PORTAMENTO_POS
+    LDA #$00
+    SEC
+    SBC ${hex(PERLO)}
+    JMP RD_PORTAMENTO_ABSDONE
+RD_PORTAMENTO_POS:
+    LDA ${hex(PERLO)}
+RD_PORTAMENTO_ABSDONE:
+    STA ${hex(CDB)}            ; |target|(候補b)
+    LDA ${hex(PTDURSET)},X
+    STA ${hex(CDA)}            ; duration(候補a)
+    CMP ${hex(CDB)}
+    BCC RD_PORTAMENTO_TARGETBIG
+    ; duration >= |target|: stepInterval=ceilDiv(duration,|target|), stepSize=1
+    JSR CEILDIV
+    STA ${hex(PTSTEPINT)},X
+    LDA #$01
+    STA ${hex(PTSTEPSZ)},X
+    JMP RD_LOOP
+RD_PORTAMENTO_TARGETBIG:
+    ; |target| > duration: stepSize=ceilDiv(|target|,duration), stepInterval=1
+    LDA ${hex(CDB)}
+    PHA
+    LDA ${hex(CDA)}
+    STA ${hex(CDB)}
+    PLA
+    STA ${hex(CDA)}
+    JSR CEILDIV
+    STA ${hex(PTSTEPSZ)},X
+    LDA #$01
+    STA ${hex(PTSTEPINT)},X
+    JMP RD_LOOP` : ''}
 
 RD_REST:
     JSR READ_BYTE
     STA ${hex(CNT)},X
 ${envTableCount > 0 ? `    LDA #$00\n    STA ${hex(ENVACT)},X   ; 休符中はソフトウェアエンベロープを進めない` : ''}
-${usesEp ? `    LDA #$00\n    STA ${hex(EPACT)},X    ; 休符中はEP<n>を進めない` : ''}
-${usesMp ? `    LDA #$00\n    STA ${hex(MPACT)},X    ; 休符中はMP<n>を進めない` : ''}
+    ; ★2026-08-11修正(PT実装時の往復検証で発覚): EP<n>/MP<n>/PT<n>はここでEPACT/MPACT/
+    ; PTACTをクリアしていなかった/していた版いずれも問題があった。compiler.js側は休符
+    ; トークンでstate.pitchEnv/vibrato/portamentoを一切変更しない(EPOF/MPOF/PTOFや
+    ; 新しいEP/MP/PT<n>コマンドでのみ変わる)ため、休符明けの次の音符は休符前の設定を
+    ; そのまま引き継いで最初からグライド/LFOし直す、という仕様。旧実装はここでACTを
+    ; クリアしていたためRD_NOTEの再初期化ブロックが丸ごとスキップされ、休符明けの
+    ; 音符でEP/MP/PTが無効化されたまま復帰しない別バグになっていた。ACTは触らず
+    ; そのまま維持する(次の音符はRD_NOTEが常にdelay/tick/累積値を再初期化するので、
+    ; 休符中に値が古いままでも実害は無い。休符中もEP_STEP/LFO_SUB/PT_STEPは走り続ける
+    ; ため周期レジスタへの無音時の余分な書込みは発生するが、SILENCE_CHが音量を0にして
+    ; いるため無音のまま)
     JSR SILENCE_CH
     JMP RD_RETURN
 
@@ -2273,7 +2472,36 @@ RD_WAIT:
     JSR READ_BYTE
     STA ${hex(CNT)},X
     JMP RD_RETURN
-
+${usesPitchBreak ? `
+; --- タイ(&)による異音程レガート(0xED、2026-08-12): 次の2バイトが[新ノート番号,音長]。
+; RD_NOTEと違い音量/エンベロープ/EP・MP・PTのdelay/tick再初期化(reset)は一切行わない
+; (compiler.jsのpitchBreaks/activePitchAtが「タイで繋いだ1つのセグメント全体を通して
+; vibSeq/ptSeqを連続したtickで参照し続ける、区切りでは再スタートしない」設計のため、
+; 6502側もEPTICK/MPADCCNT/PTSTEPCNTを触らずそのまま続行させる必要がある)。
+; このフレームはCNTがちょうど0になりSERVICE_CH本体の継続処理(EP_STEP/LFO_SUB/PT_STEP
+; +WRITE_FREQ_ONLYの毎フレーム呼び出し)がスキップされてここへディスパッチされてくるため、
+; そのぶんを肩代わりして1tickだけ進めてから書く(進めないとcompiler.js側のtickと
+; 1フレームずれる。RD_NOTEが音符アタック時に一度だけEP_STEP等を呼ぶのと対称の理由) ---
+RD_PITCHBREAK:
+    JSR READ_BYTE
+    STA ${hex(NOTE)},X
+    JSR READ_BYTE
+    STA ${hex(CNT)},X
+${usesEp ? `    LDA ${hex(EPACT)},X
+    BEQ RPB_NOEP
+    JSR EP_STEP
+RPB_NOEP:` : ''}
+${usesMp ? `    LDA ${hex(MPACT)},X
+    BEQ RPB_NOMP
+    JSR LFO_SUB
+RPB_NOMP:` : ''}
+${usesPortamento ? `    LDA ${hex(PTACT)},X
+    BEQ RPB_NOPT
+    JSR PT_STEP
+RPB_NOPT:` : ''}
+    JSR WRITE_FREQ_ONLY
+    JMP RD_RETURN
+` : ''}
 RD_NOTE:
     STA ${hex(NOTE)},X
     JSR READ_BYTE
@@ -2317,6 +2545,22 @@ ${usesMp ? `    ; MP<n>も"この音符から"必ずdelay/quarterからリセッ
     STA ${hex(MPDIR)},X
     JSR LFO_SUB
 RD_NOTE_NOMP:` : ''}
+${usesPortamento ? `    ; PT<n>も"この音符から"必ずdelay/duration/stepcnt/累積値を再初期化する
+    ; (2026-08-11 別プロジェクトC。EP_STEPと同じpost-increment単一ルーチン設計、
+    ; MPのようなRD_NOTE専用の特別扱いは不要)
+    LDA ${hex(PTACT)},X
+    BEQ RD_NOTE_NOPT
+    LDA ${hex(PTDELAYSET)},X
+    STA ${hex(PTDELAY)},X
+    LDA ${hex(PTDURSET)},X
+    STA ${hex(PTDUR)},X
+    LDA ${hex(PTSTEPINT)},X
+    STA ${hex(PTSTEPCNT)},X
+    LDA #$00
+    STA ${hex(PTVALLO)},X
+    STA ${hex(PTVALHI)},X
+    JSR PT_STEP
+RD_NOTE_NOPT:` : ''}
     JSR WRITE_FREQ_VOL
     JMP RD_RETURN
 
@@ -2445,12 +2689,13 @@ LTP_OK:
     STA ${hex(PERHI)}
     RTS
 
-; --- D<n>/EP<n>/MP<n>共通処理。呼出し前提: Xはチャンネル番号、PERLO/PERHIにテーブル
-; 参照済みの周期値が入っている状態で呼ぶ。DETUNE_LO/HI,X(符号付き16bit)を通常の
-; 16bit ADCで加算し、続けてEP(EPVALLO/HI,X、有効時のみ)・MP(MPVALLO/HI,X、有効時のみ)を
-; 同じく16bit ADCで加算する(2の補数表現なので符号付き値でもビット演算は加算と同一。
-; compiler.jsのpitchRegisterOffsetがD+EP+MPを1つの生オフセットに合算してから1回だけ
-; クランプ加算するのと数学的に同じ結果になる、逐次加算でも結合則で等価)。
+; --- D<n>/EP<n>/MP<n>/PT<n>共通処理。呼出し前提: Xはチャンネル番号、PERLO/PERHIに
+; テーブル参照済みの周期値が入っている状態で呼ぶ。DETUNE_LO/HI,X(符号付き16bit)を通常の
+; 16bit ADCで加算し、続けてEP(EPVALLO/HI,X、有効時のみ)・MP(MPVALLO/HI,X、有効時のみ)・
+; PT(PTVALLO/HI,X、有効時のみ、2026-08-11 別プロジェクトC)を同じく16bit ADCで加算する
+; (2の補数表現なので符号付き値でもビット演算は加算と同一。compiler.jsの
+; pitchRegisterOffsetがD+EP+MP+PTを1つの生オフセットに合算してから1回だけクランプ加算
+; するのと数学的に同じ結果になる、逐次加算でも結合則で等価)。
 ; 最終的な加算結果が負(PERHIのbit7が立つ)ならPERLO/PERHI=0にクランプする(JS側=
 ; compiler.jsのapplyDetuneのMath.max(0,...)と同じ意図。上限側のクランプは行わない=
 ; 極端に大きいオフセットでレジスタ幅を超えるケースは非対応、通常の用途の値では発生しない)。
@@ -2476,6 +2721,13 @@ ${usesEp ? `    CLC
     STA ${hex(PERLO)}
     LDA ${hex(PERHI)}
     ADC ${hex(MPVALHI)},X
+    STA ${hex(PERHI)}
+` : ''}${usesPortamento ? `    CLC
+    LDA ${hex(PERLO)}
+    ADC ${hex(PTVALLO)},X
+    STA ${hex(PERLO)}
+    LDA ${hex(PERHI)}
+    ADC ${hex(PTVALHI)},X
     STA ${hex(PERHI)}
 ` : ''}    LDA ${hex(PERHI)}
     BPL APPLY_DETUNE_OK
@@ -2801,6 +3053,30 @@ SONG_LOOP_PTR_HI:
     const mpIndexRemap = {};
     mpIndexList.forEach((origIdx, i) => { mpIndexRemap[origIdx] = i; });
 
+    // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC): target/duration/delayは
+    // バイトコード上に直接の即値として乗る(EP/MPのようなROM上の共有テーブル・
+    // インデックス圧縮の概念が無い)ため、「1曲中で使われているかどうか」の真偽値だけを
+    // 判定すればよい(ZP確保・オペコードハンドラの条件付き埋め込みに使う)
+    let usesPortamento = false;
+    for (const ch of channelLetters) {
+      for (const seg of (segmentsByChannel[ch] || [])) {
+        if (seg.portamento != null) { usesPortamento = true; break; }
+      }
+      if (usesPortamento) break;
+    }
+
+    // タイ(&)による異音程レガート(compiler.jsのpitchBreaks、2026-08-12)。PTと同じく
+    // 曲中で使われているかどうかの真偽値だけ判定する(ZP確保・オペコードハンドラの
+    // 条件付き埋め込みに使う。値そのものはmckBytecode.js側がseg.pitchBreaksから直接
+    // 拾うのでremapテーブルは不要)
+    let usesPitchBreak = false;
+    for (const ch of channelLetters) {
+      for (const seg of (segmentsByChannel[ch] || [])) {
+        if (seg.pitchBreaks != null && seg.pitchBreaks.length > 0) { usesPitchBreak = true; break; }
+      }
+      if (usesPitchBreak) break;
+    }
+
     // L(ループ地点マーカー)。compiler.jsのbuildSegments()がチャンネルごとに記録した値
     // (このツールのブラウザ再生・シークバー向けの「song全体で1つに揃えたloopPointFrame」
     // とは別物。NSF書き出しはチャンネルごとに独立して本当の無限ループを行うため、
@@ -2843,7 +3119,7 @@ SONG_LOOP_PTR_HI:
     }
     const songLoop = { act: loopAct, bank: loopBank, lo: loopLo, hi: loopHi };
 
-    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList);
+    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak);
     const asm = MML.Asm.assemble(src, { origin: 0x8000 });
     if (asm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: asm.errors, bankCount: 0, unsupportedExpansions };

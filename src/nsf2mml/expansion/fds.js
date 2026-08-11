@@ -202,11 +202,12 @@
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
-    function begin(f, note, volume, envEnabled, wave, waveKey, t, rawFreq, period) {
+    function begin(f, note, volume, envEnabled, wave, waveKey, t, rawFreq, period, tieCandidate) {
       cur = {
         note, envEnabled, wave, waveKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period],
         modFreq: t.modFreq, modGain: t.modGain, modEnabled: t.modEnabled, modTable: t.modTable,
-        modKey: `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modGain}|${t.modTableKey}`
+        modKey: `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modGain}|${t.modTableKey}`,
+        tieCandidate: !!tieCandidate
       };
     }
     for (let f = 0; f < timeline.length; f++) {
@@ -219,12 +220,14 @@
       const rawFreq = note !== null ? freq : null;
       const modKey = `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modGain}|${t.modTableKey}`;
 
-      if (!cur) { begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq, period); continue; }
+      if (!cur) { begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq, period, false); continue; }
 
       if (t.attack || note !== cur.note || t.waveKey !== cur.waveKey ||
           t.envEnabled !== cur.envEnabled || (t.envEnabled && t.envRestart) || modKey !== cur.modKey) {
+        const pureNoteChange = !t.attack && note !== cur.note && t.waveKey === cur.waveKey &&
+          t.envEnabled === cur.envEnabled && !(t.envEnabled && t.envRestart) && modKey === cur.modKey;
         flush(f);
-        begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq, period);
+        begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq, period, pureNoteChange);
       } else {
         cur.volSeq.push(volume);
         cur.pitchSeq.push(period);
@@ -287,22 +290,26 @@
     // モジュレーション=fdsMod/@MHとは別物、Phase 0のpitchSeq設計方針と同じ)
     function toPitchFields(ev) {
       if (!pitchReg || ev.rawFreq == null) return {};
-      const assigned = pitchReg.assign(ev.pitchSeq);
-      return assigned ? { pitchEp: assigned.index, pitchEpDelay: assigned.delay } : {};
+      const fields = {};
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      return fields;
     }
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq },
+      { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
       ev.note !== null ? Object.assign(
         { instrument: waveReg ? waveReg.assign(ev.wave) : 0 },
         toVolumeFields(ev), toPitchFields(ev),
         modUsed ? { fdsMod: toModField(ev) } : {}
       ) : {}
     );
+    // スラー分割(別プロジェクトE、2026-08-12)
+    const chEvents = events.map(toCommon);
+    MML.Convert.markSlurTies(chEvents);
 
     return {
       channels: [
         {
-          letter: 'E', events: events.map(toCommon), hasVolume: true, hasEnvelope: true,
+          letter: 'E', events: chEvents, hasVolume: true, hasEnvelope: true,
           hasInstrument: true, hasFdsMod: modUsed
         },
       ],
