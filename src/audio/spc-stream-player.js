@@ -222,12 +222,14 @@
       this.gainNode = this.audioCtx.createGain();
       this.gainNode.gain.value = 2.0;
       this.gainNode.connect(this.audioCtx.destination);
-      this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
+      // VOL_L/VOL_R($x2/$x3)を反映するため2ch(ステレオ)出力にする
+      this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 2);
       this.node.connect(this.gainNode);
       this.node.onaudioprocess = (e) => {
-        const out = e.outputBuffer.getChannelData(0);
-        if (!this.dsp || !this.isPlaying) { out.fill(0); return; }
-        this._fill(out);
+        const outL = e.outputBuffer.getChannelData(0);
+        const outR = e.outputBuffer.getChannelData(1);
+        if (!this.dsp || !this.isPlaying) { outL.fill(0); outR.fill(0); return; }
+        this._fill(outL, outR);
       };
     }
 
@@ -290,10 +292,10 @@
       return true;
     }
 
-    _fill(out) {
+    _fill(outL, outR) {
       const outRate = this.audioCtx.sampleRate;
       const step = DSP_RATE / outRate;
-      for (let i = 0; i < out.length; i++) {
+      for (let i = 0; i < outL.length; i++) {
         this._dspFrac += step;
         let stalled = false, ended = false;
         while (this._dspFrac >= 1.0) {
@@ -310,12 +312,13 @@
           this._dspFrac -= 1.0;
         }
         if (ended) {
-          for (let j = i; j < out.length; j++) out[j] = 0;
+          for (let j = i; j < outL.length; j++) { outL[j] = 0; outR[j] = 0; }
           this.isPlaying = false;
           if (this.onEnded) this.onEnded();
           return;
         }
-        out[i] = stalled ? 0 : (this._lastL + this._lastR) * 0.5;
+        outL[i] = stalled ? 0 : this._lastL;
+        outR[i] = stalled ? 0 : this._lastR;
         if (!stalled) this.samplePos++;
       }
     }

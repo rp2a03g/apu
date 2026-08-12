@@ -1714,6 +1714,61 @@
     return new Blob([buf], { type: 'audio/wav' });
   }
 
+  // Float32Array×2 (L/R, DCブロック済み, gain適用前) → 16bit PCM interleaved stereo WAV Blob を生成
+  function buildWavBlobStereo(left, right, sampleRate, gainFactor = 1.0) {
+    const numSamples = left.length;
+    const bufLen = 44 + numSamples * 4; // 2ch × 16bit(2byte)
+    const buf = new ArrayBuffer(bufLen);
+    const view = new DataView(buf);
+    const write4 = (off, v) => view.setUint32(off, v, true);
+    const write2 = (off, v) => view.setUint16(off, v, true);
+    // RIFF header
+    [0x52,0x49,0x46,0x46].forEach((b,i) => view.setUint8(i, b)); // "RIFF"
+    write4(4, bufLen - 8);
+    [0x57,0x41,0x56,0x45].forEach((b,i) => view.setUint8(8+i, b)); // "WAVE"
+    [0x66,0x6D,0x74,0x20].forEach((b,i) => view.setUint8(12+i, b)); // "fmt "
+    write4(16, 16); write2(20, 1); write2(22, 2); // PCM, stereo
+    write4(24, sampleRate); write4(28, sampleRate * 4); // sampleRate, byteRate(=sampleRate*numCh*bytesPerSample)
+    write2(32, 4); write2(34, 16); // blockAlign(=numCh*bytesPerSample), bitsPerSample
+    [0x64,0x61,0x74,0x61].forEach((b,i) => view.setUint8(36+i, b)); // "data"
+    write4(40, numSamples * 4);
+    // サンプル書き込み (interleaved L,R, clamp → int16)
+    for (let i = 0; i < numSamples; i++) {
+      const l = Math.max(-1, Math.min(1, left[i] * gainFactor));
+      const r = Math.max(-1, Math.min(1, right[i] * gainFactor));
+      view.setInt16(44 + i * 4,     Math.round(l * 32767), true);
+      view.setInt16(44 + i * 4 + 2, Math.round(r * 32767), true);
+    }
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+
+  // GBSライブ再生(GbsReplayStreamPlayer)と同じgain(2.5)+リミッタ(DynamicsCompressorNode)を
+  // OfflineAudioContextでオフライン適用する(exportGbsWav用)。パラメータはgbs-stream-player.js
+  // createLimiter()と完全に同じ値を使い、ライブ再生とWAV書き出しで同じ音になるようにする。
+  async function applyGbsLimiterOffline(audioL, audioR, sampleRate) {
+    const n = audioL.length;
+    const offlineCtx = new OfflineAudioContext(2, n, sampleRate);
+    const abuf = offlineCtx.createBuffer(2, n, sampleRate);
+    abuf.copyToChannel(audioL, 0);
+    abuf.copyToChannel(audioR, 1);
+    const src = offlineCtx.createBufferSource();
+    src.buffer = abuf;
+    const gainNode = offlineCtx.createGain();
+    gainNode.gain.value = 2.5;
+    const limiter = offlineCtx.createDynamicsCompressor();
+    limiter.threshold.value = -3.0;
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.001;
+    limiter.release.value = 0.05;
+    src.connect(gainNode);
+    gainNode.connect(limiter);
+    limiter.connect(offlineCtx.destination);
+    src.start();
+    const rendered = await offlineCtx.startRendering();
+    return { left: rendered.getChannelData(0), right: rendered.getChannelData(1) };
+  }
+
   async function exportNsfWav() {
     if (!loadedNsfBytes || !loadedNsfHeader) {
       nsfFileStatusEl.innerHTML = '<div class="error">' + T('先にNSFファイルを読み込んでください。') + '</div>';
@@ -2234,7 +2289,8 @@
     player.dsp.mutedVoices = spcMutedVoices;  // ミュート状態を WAV 書き出しに反映
     const totalDspSmp  = duration * DSP_RATE;
     const totalOutSmp  = Math.round(duration * sampleRate);
-    const audio        = new Float32Array(totalOutSmp);
+    const audioL       = new Float32Array(totalOutSmp);
+    const audioR       = new Float32Array(totalOutSmp);
 
     // ── DSP 書き込みログ収集 ──────────────────────────────────────
     // KONイベントのみ全期間記録 + 先頭 LOG_SEC 秒分の詳細ログ
@@ -2362,7 +2418,7 @@
           logDspCount++;
           dspDone++;
         }
-        audio[outPos++] = (lastL + lastR) * 0.5;
+        audioL[outPos] = lastL; audioR[outPos] = lastR; outPos++;
       }
 
       // 進捗更新
@@ -2381,7 +2437,8 @@
     // ── WAV 出力 ─────────────────────────────────────────────────
     // ガウシアン補間の修正で DSP 出力が本来レベルに戻ったため、ライブ再生の
     // gainNode と同じく 2.0 に下げてクリップを防ぐ（旧値 3.0）。
-    const wavBlob = buildWavBlob(audio, sampleRate, 2.0);
+    // VOL_L/VOL_R($x2/$x3)を反映したステレオ出力。
+    const wavBlob = buildWavBlobStereo(audioL, audioR, sampleRate, 2.0);
     const wavUrl  = URL.createObjectURL(wavBlob);
     const wa = document.createElement('a');
     wa.href = wavUrl; wa.download = `${name}.wav`; wa.click();
@@ -3472,20 +3529,31 @@
     player.initSong(songIndex);
     const totalFrames = Math.ceil(duration * player.frameRate);
     const totalSamples = Math.round(totalFrames * sampleRate / player.frameRate);
-    const audio = new Float32Array(totalSamples);
+    const audioL = new Float32Array(totalSamples);
+    const audioR = new Float32Array(totalSamples);
     let pos = 0;
     for (let f = 0; f < totalFrames && pos < totalSamples; f++) {
-      const chunk = player.renderFrame(sampleRate);
-      const n = Math.min(chunk.length, totalSamples - pos);
-      audio.set(chunk.subarray(0, n), pos);
+      const chunk = player.renderFrame(sampleRate, false, true); // stereo
+      const n = Math.min(chunk.left.length, totalSamples - pos);
+      audioL.set(chunk.left.subarray(0, n), pos);
+      audioR.set(chunk.right.subarray(0, n), pos);
       pos += n;
     }
 
     gbsIsRendering = false;
     updateGbsPlayButton();
 
+    // ライブ再生(GbsReplayStreamPlayer)と同じgain(2.5)+リミッタをオフライン適用する。
+    // buildWavBlobStereo単体のMath.max(-1,Math.min(1,...))は単純なハードクランプで、
+    // 密度の高い区間ではピークが±1.5前後まで達し大きく歪む(GBSクリッピング修正の
+    // 経緯参照)。ライブ再生側は既にDynamicsCompressorNodeで対策済みだったが、
+    // WAV書き出しは別経路のため対策が漏れていた。同じ音を書き出すため、
+    // OfflineAudioContextでライブ再生と同一のgain→リミッタのグラフを通してから書き出す。
+    const { left: limitedL, right: limitedR } = await applyGbsLimiterOffline(audioL, audioR, sampleRate);
+
     const filename = `gbs_song${songNoDisplay}.wav`;
-    const blob = buildWavBlob(audio, sampleRate, 2.5);
+    // NR51(パンレジスタ)を反映したステレオ出力。gainはリミッタ側で適用済みなので1.0。
+    const blob = buildWavBlobStereo(limitedL, limitedR, sampleRate, 1.0);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = filename; a.click();
@@ -3810,12 +3878,14 @@
     player.initSong(track);
     const totalFrames = Math.ceil(duration * player.frameRate);
     const totalSamples = Math.round(totalFrames * sampleRate / player.frameRate);
-    const audio = new Float32Array(totalSamples);
+    const audioL = new Float32Array(totalSamples);
+    const audioR = new Float32Array(totalSamples);
     let pos = 0;
     for (let f = 0; f < totalFrames && pos < totalSamples; f++) {
-      const chunk = player.renderFrame(sampleRate);
-      const n = Math.min(chunk.length, totalSamples - pos);
-      audio.set(chunk.subarray(0, n), pos);
+      const chunk = player.renderFrame(sampleRate, false, null, true); // stereo
+      const n = Math.min(chunk.left.length, totalSamples - pos);
+      audioL.set(chunk.left.subarray(0, n), pos);
+      audioR.set(chunk.right.subarray(0, n), pos);
       pos += n;
     }
 
@@ -3823,7 +3893,8 @@
     updateHesPlayButton();
 
     const filename = `hes_track${track}.wav`;
-    const blob = buildWavBlob(audio, sampleRate, 4.0);
+    // $0805(chバランス)/$0801(全体バランス)を反映したステレオ出力。
+    const blob = buildWavBlobStereo(audioL, audioR, sampleRate, 4.0);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = filename; a.click();

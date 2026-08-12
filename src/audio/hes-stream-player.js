@@ -234,8 +234,9 @@
       this.cycleAccum    = 0;
       this.speedFactor   = 1;
       this._songFramePos = 0;
-      this.dcPrevX       = 0;
-      this.dcPrevY       = 0;
+      // DCブロッキングフィルタの状態はL/Rで混ざるとクロストークになるためチャンネル毎に分離する
+      this.dcPrevXL      = 0; this.dcPrevYL = 0;
+      this.dcPrevXR      = 0; this.dcPrevYR = 0;
       this.isPlaying     = false;
       this.onEnded       = null;
       // ★2026-08 PCM(DDA)対応、3度目の設計。
@@ -288,13 +289,15 @@
       this.gainNode.connect(this.limiter);
       this.limiter.connect(this.audioCtx.destination);
 
-      this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
+      // $0805(chバランス)/$0801(全体バランス)を反映するため2ch(ステレオ)出力にする
+      this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 2);
       this.node.connect(this.gainNode);
 
       this.node.onaudioprocess = (e) => {
-        const out = e.outputBuffer.getChannelData(0);
-        if (!this.apu || !this.isPlaying) { out.fill(0); return; }
-        this._fill(out);
+        const outL = e.outputBuffer.getChannelData(0);
+        const outR = e.outputBuffer.getChannelData(1);
+        if (!this.apu || !this.isPlaying) { outL.fill(0); outR.fill(0); return; }
+        this._fill(outL, outR);
       };
     }
 
@@ -315,7 +318,7 @@
       this.currentFrame  = -1;
       this._songFramePos = 0;
       this.cycleAccum    = 0;
-      this.dcPrevX = this.dcPrevY = 0;
+      this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
       this.ddaChannel = -1; this.ddaTrace = null; this._ddaTracePos = 0; this._ddaFrameEntries = null;
       if (mute) this.applyMute(mute);
     }
@@ -378,18 +381,18 @@
       if (entries.length > 0) this._ddaFrameEntries = entries;
     }
 
-    _fill(out) {
+    _fill(outL, outR) {
       const sr = this.audioCtx.sampleRate;
-      for (let i = 0; i < out.length; i++) {
+      for (let i = 0; i < outL.length; i++) {
         const nextSongFramePos = this._songFramePos + (this.frameRate / sr) * this.speedFactor;
         const f = Math.floor(nextSongFramePos);
         if (f >= this.totalFrames) {
-          for (let j = i; j < out.length; j++) out[j] = 0;
+          for (let j = i; j < outL.length; j++) { outL[j] = 0; outR[j] = 0; }
           this.isPlaying = false;
           if (this.onEnded) this.onEnded();
           return;
         }
-        if (!this._isFrameReady(f)) { out[i] = 0; continue; }
+        if (!this._isFrameReady(f)) { outL[i] = 0; outR[i] = 0; continue; }
         this._songFramePos = nextSongFramePos;
         if (f !== this.currentFrame) this._applyFrame(f);
 
@@ -414,9 +417,11 @@
         this.cycleAccum += this.clockHz / sr;
         while (this.cycleAccum >= 1) { this.apu.clock(); this.cycleAccum -= 1; }
         const raw = this.apu.mixSample();
-        const y = raw - this.dcPrevX + 0.999 * this.dcPrevY;
-        this.dcPrevX = raw; this.dcPrevY = y;
-        out[i] = y;
+        const yL = raw.left  - this.dcPrevXL + 0.999 * this.dcPrevYL;
+        const yR = raw.right - this.dcPrevXR + 0.999 * this.dcPrevYR;
+        this.dcPrevXL = raw.left;  this.dcPrevYL = yL;
+        this.dcPrevXR = raw.right; this.dcPrevYR = yR;
+        outL[i] = yL; outR[i] = yR;
         this.samplePos++;
       }
     }
@@ -449,7 +454,7 @@
       this.currentFrame  = -1;
       this._songFramePos = 0;
       this.cycleAccum    = 0;
-      this.dcPrevX = this.dcPrevY = 0;
+      this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
       this._ddaTracePos = 0;
       this._ddaFrameEntries = null;
       this._ddaWaveBuf.fill(16);
@@ -483,7 +488,7 @@
       this.samplePos     = samplePos;
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
-      this.dcPrevX = this.dcPrevY = 0;
+      this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
     }
 
     applyMute(mute) {

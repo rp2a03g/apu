@@ -92,13 +92,16 @@
      *   apu.mixChannelSamples()でchごとの値をchannelOut[0..5]へ書き込む(各要素は
      *   samplesThisFrame長のFloat32Arrayを呼び出し側で事前確保しておくこと)。
      *   HesBufferedPlayer(hes-stream-player.js)がリアルタイムミュート対応のため
-     *   chごとに別々のAudioBufferチャンネルへレンダリングする用途で使う。
-     * @returns {Float32Array|null} channelOut指定時・regsOnly指定時はnull
+     *   チャンネルごとに別々のAudioBufferチャンネルへレンダリングする用途で使う。
+     * @param {boolean} [stereo] - trueならモノラルFloat32Arrayの代わりに
+     *   {left, right}(各Float32Array)を返す(WAV書き出し用。channelOut指定時は無視)
+     * @returns {Float32Array|{left:Float32Array,right:Float32Array}|null} channelOut指定時・regsOnly指定時はnull
      */
-    renderFrame(sampleRate, regsOnly, channelOut) {
+    renderFrame(sampleRate, regsOnly, channelOut, stereo) {
       const masterTicksPerSample = this.clockHz / sampleRate;
       const samplesThisFrame = Math.round(sampleRate / this.frameRate);
-      const out = (regsOnly || channelOut) ? null : new Float32Array(samplesThisFrame);
+      const outL = (regsOnly || channelOut) ? null : new Float32Array(samplesThisFrame);
+      const outR = (regsOnly || channelOut || !stereo) ? null : new Float32Array(samplesThisFrame);
 
       const cpu = this.cpu, bus = this.bus, apu = this.apu;
 
@@ -139,11 +142,13 @@
           const samples = apu.mixChannelSamples();
           for (let c = 0; c < samples.length; c++) channelOut[c][i] = samples[c];
         } else if (!regsOnly) {
-          out[i] = apu.mixSample();
+          const s = apu.mixSample();
+          if (stereo) { outL[i] = s.left; outR[i] = s.right; }
+          else outL[i] = (s.left + s.right) * 0.5;
         }
       }
 
-      return out;
+      return stereo ? { left: outL, right: outR } : outL;
     }
   }
 

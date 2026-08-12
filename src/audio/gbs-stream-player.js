@@ -18,6 +18,25 @@
 
   const BUFFER_SIZE = 4096;
 
+  // gainNode(2.5)の後段にリミッタ(DynamicsCompressorNode)を挟み、複数チャンネル
+  // (特にCH4ノイズ+他ch)が同時に鳴る密度の高い箇所でピークが±1.0を超えハードクリップ
+  // するのを防ぐ(src/audio/stream-player.js・hes-stream-player.js createLimiter()と同じ
+  // 考え方・同じ設計。GBSだけこの対策が漏れていた)。★実測: DMG-CWJ.gbs(Castlevania II)
+  // で全chミックス時に瞬間ピークが±1.5前後(gain 2.5適用後)まで達し、密度の高い区間では
+  // 全サンプルの6〜13%がハードクリップしていた。ノイズchはブロードバンドで瞬間ピークが
+  // 相対的に大きいため、ハードクリップの影響を最も強く受けて元の"サー"というホワイト
+  // ノイズが潰れ"プチプチ"というクラックリング音に変質して聴こえていた
+  // (ユーザー報告の真因。CH4ノイズの音源自体・レジスタ値・パン処理はすべて正常だった)。
+  function createLimiter(audioCtx) {
+    const limiter = audioCtx.createDynamicsCompressor();
+    limiter.threshold.value = -3.0; // dB: 出力段が0dBFSに達する手前から効かせる
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.001;
+    limiter.release.value = 0.05;
+    return limiter;
+  }
+
   class GbsStreamPlayer {
     constructor(audioCtx) {
       this.audioCtx = audioCtx;
@@ -158,8 +177,9 @@
       this.cycleAccum    = 0;
       this.speedFactor   = 1;
       this._songFramePos = 0;
-      this.dcPrevX       = 0;
-      this.dcPrevY       = 0;
+      // DCブロッキングフィルタの状態はL/Rで混ざるとクロストークになるためチャンネル毎に分離する
+      this.dcPrevXL      = 0; this.dcPrevYL = 0;
+      this.dcPrevXR      = 0; this.dcPrevYR = 0;
       this.isPlaying     = false;
       this.onEnded       = null;
       this._createNode();
@@ -168,20 +188,28 @@
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
       this.gainNode.gain.value = 2.5;
-      this.gainNode.connect(this.audioCtx.destination);
+      this.limiter = createLimiter(this.audioCtx);
+      this.gainNode.connect(this.limiter);
+      this.limiter.connect(this.audioCtx.destination);
 
-      this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
+      // NR51(パンレジスタ)を反映するため2ch(ステレオ)出力にする
+      this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 2);
       this.node.connect(this.gainNode);
 
       this.node.onaudioprocess = (e) => {
-        const out = e.outputBuffer.getChannelData(0);
-        if (!this.apu || !this.isPlaying) { out.fill(0); return; }
-        this._fill(out);
+        const outL = e.outputBuffer.getChannelData(0);
+        const outR = e.outputBuffer.getChannelData(1);
+        if (!this.apu || !this.isPlaying) { outL.fill(0); outR.fill(0); return; }
+        this._fill(outL, outR);
       };
     }
 
     _buildApu() {
       this.apu = new MML.Emu.APUGb();
+      // CH4(ノイズ)のLFSRロックアップ対策(_applyFrame冒頭コメント参照)用の
+      // トリガ検出基準値。新品のAPUGbはlfsr=$7FFF(コンストラクタ既定値)なので
+      // ここでは-1にしておけば良い(最初のトリガ検出で単に同じ$7FFFへ再設定されるだけで無害)。
+      this._lastCh4TriggerSeq = -1;
       if (this._lastMute) this.applyMute(this._lastMute);
     }
 
@@ -199,7 +227,7 @@
       this.currentFrame  = -1;
       this._songFramePos = 0;
       this.cycleAccum    = 0;
-      this.dcPrevX = this.dcPrevY = 0;
+      this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
       if (mute) this.applyMute(mute);
     }
 
@@ -220,22 +248,42 @@
       for (let i = 0; i < 32; i++) apu.ch3.wave[i] = s.ch3.wave[i];
       apu.ch4.envelope.volume = s.ch4.vol; apu.ch4.enabled = s.ch4.enabled;
       apu.ch4.clockShift = s.ch4.clockShift; apu.ch4.widthMode = s.ch4.widthMode; apu.ch4.divisorCode = s.ch4.divisorCode;
+      // CH4のLFSRロックアップ対策: lfsr/timerは上記の方針どおり通常は触らないが、
+      // LFSR(線形帰還シフトレジスタ)は数学的な性質上$0000へ到達すると以後ずっと$0000の
+      // ままになる不動点を持つ(ビット0とビット1のXORが0のまま右シフトし続けるだけの
+      // 状態に収束するため、自然には二度と抜け出せない)。実機はノート再トリガの
+      // たびにlfsr=$7FFFへ強制リセットするためこの状態には陥らないが、このリプレイ
+      // 経路はtriggerSeqを見ていないため、長時間再生しているとまれに$0000へ迷い込み
+      // 「ホワイトノイズがプチノイズに変質したまま戻らない」不具合になっていた
+      // (実測: DMG-CWJ.gbs index9で約52秒経過時にlfsr=0で固着、シーク[=APU再構築で
+      // lfsr=$7FFFへ復帰]すると直る、という症状から特定)。triggerSeqの変化(=このフレームで
+      // 新しくトリガされた)を検出した時だけ、実機のtrigger()と同じくlfsr/timerを
+      // リセットする(triggerSeq自体はgbs2mml用に既にスナップショットへ入っている)。
+      if (s.ch4.triggerSeq !== undefined && s.ch4.triggerSeq !== this._lastCh4TriggerSeq) {
+        this._lastCh4TriggerSeq = s.ch4.triggerSeq;
+        apu.ch4.lfsr = 0x7FFF;
+        apu.ch4.timer = apu.ch4.periodT();
+      }
+      // NR50/NR51(古いキャプチャ結果には無いフィールドなのでフォールバックはAPUGbの
+      // ブート後既定値と同じにしておく)。gbsPlayer.js snapshotApu()冒頭コメント参照。
+      apu.nr50 = s.nr50 !== undefined ? s.nr50 : 0x77;
+      apu.nr51 = s.nr51 !== undefined ? s.nr51 : 0xF3;
     }
 
-    _fill(out) {
+    _fill(outL, outR) {
       const sr = this.audioCtx.sampleRate;
-      for (let i = 0; i < out.length; i++) {
+      for (let i = 0; i < outL.length; i++) {
         const nextSongFramePos = this._songFramePos + (this.frameRate / sr) * this.speedFactor;
         const f = Math.floor(nextSongFramePos);
         if (f >= this.totalFrames) {
-          for (let j = i; j < out.length; j++) out[j] = 0;
+          for (let j = i; j < outL.length; j++) { outL[j] = 0; outR[j] = 0; }
           this.isPlaying = false;
           if (this.onEnded) this.onEnded();
           return;
         }
         if (!this._isFrameReady(f)) {
           // バックグラウンドキャプチャがまだこのフレームに追いついていない(KssReplayStreamPlayerと同じ理由)
-          out[i] = 0;
+          outL[i] = 0; outR[i] = 0;
           continue;
         }
         this._songFramePos = nextSongFramePos;
@@ -247,9 +295,11 @@
           this.cycleAccum -= 1;
         }
         const raw = this.apu.mixSample();
-        const y = raw - this.dcPrevX + 0.999 * this.dcPrevY;
-        this.dcPrevX = raw; this.dcPrevY = y;
-        out[i] = y;
+        const yL = raw.left  - this.dcPrevXL + 0.999 * this.dcPrevYL;
+        const yR = raw.right - this.dcPrevXR + 0.999 * this.dcPrevYR;
+        this.dcPrevXL = raw.left;  this.dcPrevYL = yL;
+        this.dcPrevXR = raw.right; this.dcPrevYR = yR;
+        outL[i] = yL; outR[i] = yR;
         this.samplePos++;
       }
     }
@@ -264,7 +314,7 @@
       this.currentFrame  = -1;
       this._songFramePos = 0;
       this.cycleAccum    = 0;
-      this.dcPrevX = this.dcPrevY = 0;
+      this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
     }
 
     setSpeed(factor) { this.speedFactor = factor; }
@@ -288,7 +338,7 @@
       this.samplePos     = samplePos;
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
-      this.dcPrevX = this.dcPrevY = 0;
+      this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
     }
 
     // {gb:{ch1,ch2,ch3,ch4}}形状(GbsStreamPlayer.applyMuteと同じ読み方)
@@ -320,6 +370,7 @@
         this.node = null;
       }
       if (this.gainNode) { this.gainNode.disconnect(); this.gainNode = null; }
+      if (this.limiter)  { this.limiter.disconnect();  this.limiter = null; }
       // snapshots(数分の曲の全フレーム分)を保持したままだと、ファイルを連続で開き直す
       // たびに解放されず蓄積してしまうため、破棄時に明示的に参照を切る。
       this.apu       = null;

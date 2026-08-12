@@ -39,6 +39,23 @@
       this.io = new Uint8Array(0x80);     // $FF00-$FF7F(APU領域以外の雑多レジスタの下書き)
       this.hram = new Uint8Array(0x80);   // $FF80-$FFFE
       this.ie = 0;                        // $FFFF
+
+      // RSTベクタ($0000-$0038、8バイト間隔で8個)パッチ。GBSファイルは実機のブートROM/
+      // カートリッジヘッダを経由しないため、$0000-$(loadAddr-1)は本来ROMに存在しない
+      // (romByte()がaddr<loadAddrで0を返す=常にNOP)。ドライバコードが`RST n`命令
+      // (1バイトの省略呼出し、GBコードで多用される)を使うと、パッチが無いままではNOPの
+      // 連続を空回りしながらloadAddr地点へ迷い込み、本来の呼び出し先とは無関係な
+      // コードを誤実行してしまう(実測: CGB-BFTJ-JPN.gbsのRST $28[opcode 0xEF]が
+      // PLAY中に複数回発行され、これが原因で音量計算が常に0になり無音化していた)。
+      // Mesen2(GbsCart.h InitPlayback())と同じ方式で、各RSTベクタを
+      // `JP loadAddr+i`(3バイト: 0xC3, lo, hi)へジャンプさせるコードで上書きする。
+      this.vectorPatch = new Uint8Array(0x40);
+      for (let i = 0; i <= 0x38; i += 8) {
+        const target = (this.loadAddr + i) & 0xFFFF;
+        this.vectorPatch[i]     = 0xC3; // JP nn
+        this.vectorPatch[i + 1] = target & 0xFF;
+        this.vectorPatch[i + 2] = (target >> 8) & 0xFF;
+      }
     }
 
     reset() {
@@ -53,6 +70,7 @@
     }
 
     romByte(addr) {
+      if (addr < 0x40) return this.vectorPatch[addr]; // RSTベクタパッチ(コンストラクタ冒頭コメント参照)
       const L = this.loadAddr;
       if (addr < L) return 0; // loadAddr未満はROMデータの対象外
       if (addr < 0x4000) {

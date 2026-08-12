@@ -224,20 +224,24 @@
     }
 
     /**
-     * 現在の出力レベルを概ね -1.0〜1.0 で返す。6ch分のL/Rゲイン付きサンプルを合算し、
-     * モノラル化(L+Rの平均)した上で正規化する。基準は「0-31を中心±15.5とみなした
+     * 現在の出力レベルを {left, right}(概ね-1.0〜1.0)で返す。6ch分のL/Rゲイン付き
+     * サンプルをそれぞれのバスへ合算して正規化する。基準は「0-31を中心±15.5とみなした
      * 振幅×ゲイン」の合計を6ch分見込んだスケール。
+     * ★旧実装は(left+right)*0.5でモノラル化していた。センター定位(gainLRがleft=rightを
+     * 返すch)では平均してもモノラル値と一致するため、L/Rを別々に積むだけでモノラル時と
+     * 同じ音量感を保ったままステレオ分離できる。
      */
     mixSample() {
-      let sum = 0;
+      let sumL = 0, sumR = 0;
       for (let i = 0; i < CH_COUNT; i++) {
         if (this.mute['ch' + i]) continue;
         const c = this.ch[i];
         const raw = c.rawSample() - 16; // 0-31を中心0付近へ(±16相当)
         const { left, right } = c.gainLR(this.balance);
-        sum += raw * (left + right) * 0.5;
+        sumL += raw * left;
+        sumR += raw * right;
       }
-      return sum / (16 * CH_COUNT);
+      return { left: sumL / (16 * CH_COUNT), right: sumR / (16 * CH_COUNT) };
     }
 
     /**

@@ -69,12 +69,15 @@
      * @param {number} sampleRate
      * @param {boolean} [regsOnly] - trueならmixSample()を省略し、CPU実行・APUのclock()
      *   だけを行う(鍵盤表示/ピアノロールの先読みキャプチャ用の軽量モード)
-     * @returns {Float32Array|null}
+     * @param {boolean} [stereo] - trueならモノラルFloat32Arrayの代わりに
+     *   {left, right}(各Float32Array)を返す(WAV書き出し用)
+     * @returns {Float32Array|{left:Float32Array,right:Float32Array}|null}
      */
-    renderFrame(sampleRate, regsOnly) {
+    renderFrame(sampleRate, regsOnly, stereo) {
       const cyclesPerSample = this.clockHz / sampleRate;
       const samplesThisFrame = Math.round(sampleRate / this.frameRate);
-      const out = regsOnly ? null : new Float32Array(samplesThisFrame);
+      const outL = regsOnly ? null : new Float32Array(samplesThisFrame);
+      const outR = (regsOnly || !stereo) ? null : new Float32Array(samplesThisFrame);
 
       const cpu = this.cpu, apu = this.apu;
 
@@ -101,10 +104,14 @@
           this.cpuDebt--;
           apu.clock();
         }
-        if (!regsOnly) out[i] = apu.mixSample();
+        if (!regsOnly) {
+          const s = apu.mixSample();
+          if (stereo) { outL[i] = s.left; outR[i] = s.right; }
+          else outL[i] = (s.left + s.right) * 0.5;
+        }
       }
 
-      return out;
+      return stereo ? { left: outL, right: outR } : outL;
     }
   }
 
@@ -119,7 +126,13 @@
       ch1: { freq: apu.ch1.freq, duty: apu.ch1.duty, vol: apu.ch1.envelope.volume, enabled: apu.ch1.enabled, triggerSeq: apu.ch1.triggerSeq },
       ch2: { freq: apu.ch2.freq, duty: apu.ch2.duty, vol: apu.ch2.envelope.volume, enabled: apu.ch2.enabled, triggerSeq: apu.ch2.triggerSeq },
       ch3: { freq: apu.ch3.freq, volumeShift: apu.ch3.volumeShift, wave: Array.from(apu.ch3.wave), enabled: apu.ch3.enabled, dacOn: apu.ch3.dacOn, triggerSeq: apu.ch3.triggerSeq },
-      ch4: { vol: apu.ch4.envelope.volume, clockShift: apu.ch4.clockShift, widthMode: apu.ch4.widthMode, divisorCode: apu.ch4.divisorCode, enabled: apu.ch4.enabled, triggerSeq: apu.ch4.triggerSeq }
+      ch4: { vol: apu.ch4.envelope.volume, clockShift: apu.ch4.clockShift, widthMode: apu.ch4.widthMode, divisorCode: apu.ch4.divisorCode, enabled: apu.ch4.enabled, triggerSeq: apu.ch4.triggerSeq },
+      // NR50(マスター音量/VIN)・NR51(パンニング)。以前はここに含まれておらず、
+      // GbsReplayStreamPlayerが常にAPUGbコンストラクタのブート後既定値(nr50=$77,
+      // nr51=$F3)のまま再生し続けていた(実際にゲームが書き込んだ値を無視)。
+      // $F3はCH3/CH4の右chビットだけ0なので、曲を問わず常にCH3/CH4が左chにしか
+      // 出力されないように聴こえる不具合の直接の原因だった。
+      nr50: apu.nr50, nr51: apu.nr51
     };
   }
 
