@@ -3487,9 +3487,14 @@
       return out;
     };
     const tracks = [];
-    const ch1 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch1');
-    const ch2 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch2');
-    const noise = MML.Gbs2MmlExpansion.noise(snapshots);
+    // ★pulse()の音量はhwEnvelope.js側で64Hz実機クロックとplayFps(=frameRate)の位相を
+    // 見て再計算するため、frameRateを渡さないとvolumeAt()内でNaNになりvol>0が常にfalseに
+    // なる(=無音扱い)。この呼び出しはhwEnvelope.js導入時から一度もframeRateを渡して
+    // おらず、GB1/GB2/GNのロール行が常に空になっていた(waveだけが表示されていた原因。
+    // wave.jsは音量に生のvolumeShiftを直接使いplayFpsに依存しないため無症状だった)。
+    const ch1 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch1', null, frameRate);
+    const ch2 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch2', null, frameRate);
+    const noise = MML.Gbs2MmlExpansion.noise(snapshots, null, frameRate);
     const wave = MML.Gbs2MmlExpansion.wave(snapshots);
     tracks.push({ id: 'GB1', color: '#66ddff', notes: toNotes(ch1.events) });
     tracks.push({ id: 'GB2', color: '#0077dd', notes: toNotes(ch2.events) });

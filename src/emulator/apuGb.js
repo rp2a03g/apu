@@ -463,14 +463,20 @@
     }
   }
 
+  // NR51($FF25)の対応するchビットがL/R両方とも0なら、音量が非0でも実際は無音
+  // (gbs2mml/expansion/pulse.js panAudible()と全く同じ式。ch=0-3がCH1-4)。
+  function nr51Audible(nr51, ch) {
+    return (((nr51 >> (4 + ch)) & 1) !== 0) || (((nr51 >> ch) & 1) !== 0);
+  }
+
   // リアルタイム鍵盤表示用のライブスナップショット(snapshotAY8910/snapshotSCCと同じ考え方)。
   Emu.snapshotGbApu = function (apu) {
-    const p = (ch) => {
+    const p = (ch, chIndex) => {
       const freq = ch.enabled ? 131072 / (2048 - ch.freq) : 0;
       return {
         freq, vol: ch.envelope.volume / 15, rawVol: ch.envelope.volume,
         duty: ch.duty, envPeriod: ch.envelope.period,
-        active: ch.enabled && ch.envelope.volume > 0 && freq > 0
+        active: ch.enabled && ch.envelope.volume > 0 && freq > 0 && nr51Audible(apu.nr51, chIndex)
       };
     };
     const w = apu.ch3;
@@ -479,16 +485,17 @@
     const n = apu.ch4;
     const nFreq = n.enabled ? 4194304 / (16 * NOISE_DIVISOR[n.divisorCode] * (1 << n.clockShift)) : 0;
     return {
-      ch1: p(apu.ch1),
-      ch2: p(apu.ch2),
+      ch1: p(apu.ch1, 0),
+      ch2: p(apu.ch2, 1),
       ch3: {
         freq: wFreq, vol: wVol, rawVol: w.volumeShift,
         waveData: Array.from(w.wave, v => v / 7.5 - 1), // 0-15(4bit符号無し) → -1..1
-        active: w.enabled && w.dacOn && wVol > 0 && wFreq > 0
+        active: w.enabled && w.dacOn && wVol > 0 && wFreq > 0 && nr51Audible(apu.nr51, 2)
       },
       ch4: {
         freq: nFreq, vol: n.envelope.volume / 15, rawVol: n.envelope.volume,
-        widthMode: n.widthMode, envPeriod: n.envelope.period, active: n.enabled && n.envelope.volume > 0
+        widthMode: n.widthMode, envPeriod: n.envelope.period,
+        active: n.enabled && n.envelope.volume > 0 && nr51Audible(apu.nr51, 3)
       },
       nr50: apu.nr50, nr51: apu.nr51
     };
