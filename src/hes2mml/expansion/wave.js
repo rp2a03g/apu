@@ -49,6 +49,23 @@
   function waveFreq(periodReg) { return periodReg > 0 ? MML.HES.PSG_CLOCK / (32 * periodReg) : 0; }
   MML.Hes2MmlExpansion._waveFreq = waveFreq; // converter.jsのapplyPitchDetuneから使う
 
+  // ch別バランス($0805)と全体バランス($0801)を合成した結果、L/R両方とも実効ゲインが
+  // 厳密に0になるかどうかを判定する(apuHuC6280.js PsgChannel.gainLR()と全く同じ式。
+  // vol(0-31)は音量レジスタの生値。gainFromIndex側の対数変換は単調増加なので、
+  // 変換前のleft/rightが0以下かどうかだけ見れば「無音かどうか」はgainFromIndexを
+  // 通さずとも正確に判定できる)。音量レジスタが非0でも、パンだけで両バスから
+  // 外れていれば実際には無音(Last Bible DMG-M7J.gbsのGBS実測から発覚した現象がHESでも
+  // 起こりうるため同じ枠組みで対応)。
+  function panSilent(vol, balance, globalBalance) {
+    const v = vol - 0x1E * 2;
+    const lPan = (balance >> 4) & 0x0F, rPan = balance & 0x0F;
+    const gL = (globalBalance >> 4) & 0x0F, gR = globalBalance & 0x0F;
+    const left = Math.max(0, v + lPan * 2 + gL * 2);
+    const right = Math.max(0, v + rPan * 2 + gR * 2);
+    return left === 0 && right === 0;
+  }
+  MML.Hes2MmlExpansion._panSilent = panSilent; // noise.jsから共用
+
   // PSGの5bit(0-31)波形をN163の4bit(0-15)へビット深度変換する(単純な1bit右シフト、
   // 0-31を0-15へ均等対応。情報量の損失は最小限)。
   function resampleTo4bit(wave) {
@@ -86,7 +103,8 @@
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) runs.push(cur); cur = null; } }
     for (let f = 0; f < snapshots.length; f++) {
       const c = snapshots[f][chIndex];
-      const activeWave = c.on && !c.dda && !c.noiseOn;
+      const activeWave = c.on && !c.dda && !c.noiseOn &&
+        !panSilent(c.vol, c.balance, snapshots[f].globalBalance);
       const vol4 = Math.max(0, Math.min(15, c.vol >> 1));
       const freqHz = activeWave ? waveFreq(c.freq) : 0;
       const note = (activeWave && vol4 > 0 && freqHz > 0) ? freqToNoteNumber(freqHz) : null;

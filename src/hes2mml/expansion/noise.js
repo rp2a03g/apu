@@ -48,7 +48,8 @@
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
     for (let f = 0; f < snapshots.length; f++) {
       const c = snapshots[f][chIndex];
-      const active = c.on && c.noiseOn;
+      const active = c.on && c.noiseOn &&
+        !MML.Hes2MmlExpansion._panSilent(c.vol, c.balance, snapshots[f].globalBalance);
       const vol4 = active ? Math.max(0, Math.min(15, c.vol >> 1)) : 0;
       const note = (active && vol4 > 0) ? psgNoiseFreqToNote(psgNoiseFreq(c.noiseCtrl)) : null;
       if (!cur) { cur = { note, start: f, end: f, volSeq: [vol4] }; continue; }
@@ -71,8 +72,9 @@
 
   function pickSource(snapFrame) {
     const c5 = snapFrame[5], c4 = snapFrame[4];
-    if (c5.on && c5.noiseOn) return c5;
-    if (c4.on && c4.noiseOn) return c4;
+    const audible = c => !MML.Hes2MmlExpansion._panSilent(c.vol, c.balance, snapFrame.globalBalance);
+    if (c5.on && c5.noiseOn && audible(c5)) return c5;
+    if (c4.on && c4.noiseOn && audible(c4)) return c4;
     return null;
   }
 

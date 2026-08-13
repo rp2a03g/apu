@@ -164,12 +164,18 @@
   // noiseOn自体は活性判定の簡易フラグとして他箇所で使われ続けるためそのまま残し、
   // 生のnoiseCtrlを別フィールドとして追加する。
   function snapshotApu(apu) {
-    return apu.ch.map(c => ({
+    const arr = apu.ch.map(c => ({
       on: c.on, dda: c.dda, noiseOn: c.hasNoise && (c.noiseCtrl & 0x80) !== 0,
       noiseCtrl: c.noiseCtrl,
       freq: c.freq, vol: c.volume, balance: c.balance,
       wave: Array.from(c.wave), dac: c.dac
     }));
+    // $0801(全体バランス)。従来はチャンネル別の$0805(c.balance)しか記録しておらず、
+    // 全体バランスだけで片方の出力バスへ振り切って無音化するケースを抽出側が検知
+    // できなかった(apuHuC6280.js snapshotHuC6280ApuのglobalモPanL/PanRと同じ考え方、
+    // ライブ鍵盤表示側には既にあったがregsOnly抽出側には無かった)。
+    arr.globalBalance = apu.balance;
+    return arr;
   }
 
   /**
