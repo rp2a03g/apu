@@ -161,9 +161,51 @@
     for (const t of timeline) if (t.numCh > songNumCh) songNumCh = t.numCh;
 
     const letters = 'EFGHIJKL'.split(''); // 仮のレター。converter.js が expansionLetterMap['n163'] で振り直す
-    function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
+
+    // パス1: 全チャンネルぶんの生イベント(volSeqを保持したまま)を先に抽出する。envelopeVの
+    // 採番はまだ行わない(次のチャンネル横断パスで、他chの確定ループをヒントに使うため)。
+    const rawByChannel = [];
+    for (let i = 0; i < songNumCh; i++) {
+      const base = 0x40 + (8 - songNumCh + i) * 8; // internalIdx = (8-numCh)+i、下位側から
+      // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)。順序はsplitRetriggers(打ち直し
+      // 分割)の後(§5の手順順序: ハード境界→打ち直し分割→ピッチヒステリシスの順を維持)。
+      // その後にP-5「不明瞭→EPテーブル」側+スラー分割(別プロジェクトE、2026-08-12)。
+      rawByChannel.push({ base, events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractChannelEvents(timeline, base))) });
+    }
+
+    // パス1.5(2026-08-14): チャンネル横断の周期ヒント収集。あるチャンネルのイベントが
+    // 自力でループを確定検出できていれば、その時間範囲・周期を「証拠(witness)」として
+    // 集めておく(女神転生II 24曲目対応、詳細はsrc/convert/envelope.jsのコメント参照)。
+    const loopWitnesses = [];
+    for (const { events } of rawByChannel) {
+      for (const ev of events) {
+        if (ev.note == null) continue;
+        const shape = MML.Convert.analyzeVolumeShape(ev.volSeq);
+        if (shape && shape.loop != null) {
+          loopWitnesses.push({ start: ev.start, end: ev.end, period: shape.values.length - shape.loop });
+        }
+      }
+    }
+    // このイベント単体ではループを確定できない場合、時間的にこのイベントを完全に包含する
+    // 他chの確定ループが無いか探し、あればその周期をヒントに、このチャンネル自身の生データを
+    // timelineから(ラン分割を無視して)読み直して矛盾が無いか確認する。他chの値をそのまま
+    // 借用はしない(ボイスごとに音量が微妙に違う可能性があるため、あくまで周期だけを借りる)。
+    function resolveVolumeShape(ev, base) {
+      const shape = MML.Convert.analyzeVolumeShape(ev.volSeq);
+      if (shape && shape.loop != null) return shape;
+      for (const w of loopWitnesses) {
+        if (w.start > ev.start || w.end < ev.end) continue;
+        const seq = [];
+        for (let f = w.start; f < w.end; f++) seq.push(timeline[f].ram[base + 7] & 0x0F);
+        const hinted = MML.Convert.tryConfirmLoopWithHint(seq, w.period);
+        if (hinted) return hinted;
+      }
+      return shape;
+    }
+    function toVolumeFields(ev, base) {
+      if (!envReg) return { volume: ev.volSeq[0] };
+      const idx = envReg.registerShape(resolveVolumeShape(ev, base), false);
+      return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
     // freqRegは18bitの生レジスタ(numCh依存)なので、セント換算では浅いビブラートでも
     // 生レジスタ差分は大きくなりうる。符号付きbyte範囲(-127~126)を超える場合は
@@ -174,22 +216,19 @@
       MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
       return fields;
     }
-    const toCommon = ev => Object.assign(
+    const toCommon = (ev, base) => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, rawNumCh: ev.rawNumCh,
         rawLength: ev.note !== null ? ev.wave.length : undefined, tieCandidate: ev.tieCandidate },
       ev.note !== null ? Object.assign(
         { instrument: waveReg ? waveReg.assign(ev.wave) : 0 },
-        toVolumeFields(ev.volSeq), toPitchFields(ev)
+        toVolumeFields(ev, base), toPitchFields(ev)
       ) : {}
     );
 
     const channels = [];
     for (let i = 0; i < songNumCh; i++) {
-      const base = 0x40 + (8 - songNumCh + i) * 8; // internalIdx = (8-numCh)+i、下位側から
-      // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)。順序はsplitRetriggers(打ち直し
-      // 分割)の後(§5の手順順序: ハード境界→打ち直し分割→ピッチヒステリシスの順を維持)。
-      // その後にスラー分割(別プロジェクトE、2026-08-12)。
-      const chEvents = MML.Convert.mergeAlternatingVibrato(extractChannelEvents(timeline, base)).map(toCommon);
+      const { base, events } = rawByChannel[i];
+      const chEvents = events.map(ev => toCommon(ev, base));
       MML.Convert.markSlurTies(chEvents);
       channels.push({
         letter: letters[i],

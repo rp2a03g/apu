@@ -509,6 +509,19 @@
       return v == null ? null : sign * v;
     }
 
+    // y<adr>,<num>(レジスタ書き込み)/x<param0>,<param1>(直接埋め込み)専用。NESのメモリ
+    // アドレスは16進で書きたいことが多いため、"$"接頭辞の16進数にも対応する(@OP等の定義
+    // ブロック内で使われるparseMmlNumberと同じ規約。10進の既存コマンド群には影響しない)
+    function readNumberHex() {
+      if (str[i] === '$') {
+        i++;
+        let s = '';
+        while (i < n && /[0-9a-fA-F]/.test(str[i])) { s += str[i]; i++; }
+        return s.length > 0 ? parseInt(s, 16) : null;
+      }
+      return readNumber();
+    }
+
     // 大文字小文字を区別せず、現在位置から2文字リテラル(例:"OF")に一致するか判定し、
     // 一致すればiを進めてtrueを返す
     function matchLiteral2(lit) {
@@ -614,6 +627,17 @@
             i++;
             const v = readNumber();
             tokens.push({ type: 'quantizeFrames', value: v == null ? 0 : v });
+          } else if (str[i] === 't' || str[i] === 'T') {
+            // @t<len>,<num> テンポ2: 音長<len>が確実に<num>フレームになるようテンポを
+            // 逆算する(t<n>の整数BPM丸めによるフレーム数の端数化を避けるための実機コマンド)。
+            // <len>,<num>の初期値は4,30(ppmck公式リファレンス通り)
+            i++;
+            const len = readNumber();
+            let dots = 0;
+            while (i < n && str[i] === '.') { dots++; i++; }
+            let num = null;
+            if (str[i] === ',') { i++; num = readNumber(); }
+            tokens.push({ type: 'frameTempo', len: len == null ? 4 : len, dots, num: num == null ? 30 : num });
           } else {
             const v = readNumber();
             tokens.push({ type: 'instrument', value: v == null ? 0 : v });
@@ -652,11 +676,24 @@
           tokens.push({ type: 'fme7Noise', value: v == null ? 0 : v });
           break;
         }
-        // 大文字S<num> = FME7エンベロープ形状(0-15)。小文字s<speed>,<depth>(スイープ)とは別コマンド
+        // 大文字S<num> = FME7エンベロープ形状(0-15)。小文字s<speed>,<depth>(スイープ)とは別コマンド。
+        // ただし直後がD/Mの場合はSD<n>/SDOF/SDQR(セルフディレイ)・SM/SMOF(スムース)を優先する
+        // (いずれもFME7エンベロープ形状の数値表記とは衝突しない、ppmck公式コマンド)
         case 'S': {
           i++;
-          const v = readNumber();
-          tokens.push({ type: 'fme7EnvShape', value: v == null ? 0 : v });
+          if (str[i] === 'D' || str[i] === 'd') {
+            i++;
+            if (matchLiteral2('QR')) tokens.push({ type: 'selfDelayReset' });
+            else if (matchLiteral2('OF')) tokens.push({ type: 'selfDelay', value: null });
+            else { const v = readNumber(); tokens.push({ type: 'selfDelay', value: v == null ? 0 : v }); }
+          } else if (str[i] === 'M' || str[i] === 'm') {
+            i++;
+            if (matchLiteral2('OF')) tokens.push({ type: 'smooth', value: false });
+            else tokens.push({ type: 'smooth', value: true });
+          } else {
+            const v = readNumber();
+            tokens.push({ type: 'fme7EnvShape', value: v == null ? 0 : v });
+          }
           break;
         }
         // EP<n>[,<delay>] ピッチエンベロープ選択。<delay>は省略可(既定0=即座に開始)、
@@ -731,6 +768,11 @@
                 delay
               });
             }
+          } else if (str[i] === 'S' || str[i] === 's') {
+            // PS ポルタメント(ppmck本家、実機準拠の別実装。PTとは独立)。次に来る音符
+            // そのものをグライド先として使うため引数を取らない(compiler.js buildSegments参照)
+            i++;
+            tokens.push({ type: 'pitchShift' });
           }
           break;
         }
@@ -750,6 +792,59 @@
           let dots = 0;
           while (i < n && str[i] === '.') { dots++; i++; }
           tokens.push({ type: 'tupletEnd', length: v, dots });
+          break;
+        }
+        // w<len> ウェイト: 直前のコマンド(音符/休符/w自身)をさらに<len>音長ぶん保持する。
+        // タイ(&)と同じ「直前セグメントの長さを延長するだけ」で実現できる(compiler.js参照)
+        case 'w': {
+          i++;
+          const v = readNumber();
+          let dots = 0;
+          while (i < n && str[i] === '.') { dots++; i++; }
+          tokens.push(tagSource({ type: 'wait', length: v, dots }, tokStart));
+          break;
+        }
+        // y<adr>,<num> レジスタ(メモリ)直接書き込み。ブラウザ再生でもそのまま
+        // 該当アドレスへの生バイト書き込みとして再現する(compiler.js参照)
+        case 'y': {
+          i++;
+          const addr = readNumberHex();
+          let value = null;
+          if (str[i] === ',') { i++; value = readNumberHex(); }
+          tokens.push({ type: 'rawWrite', addr: addr == null ? 0 : addr, value: value == null ? 0 : value });
+          break;
+        }
+        // x<param0>,<param1> データストリームへのバイト直接埋め込み。NSF書き出し(6502
+        // バイトコード)専用のコマンドで、ブラウザ再生(レジスタログ方式)には対応する概念が
+        // 無いためパースのみ行い無視する(compiler.js側でも意図的に未処理、NSF書き出し実装は
+        // 別タスク)
+        case 'x': {
+          i++;
+          const p0 = readNumberHex();
+          let p1 = null;
+          if (str[i] === ',') { i++; p1 = readNumberHex(); }
+          tokens.push({ type: 'directBytes', param0: p0 == null ? 0 : p0, param1: p1 == null ? 0 : p1 });
+          break;
+        }
+        // ! / !! / !!!  特殊マーカー。
+        // ! (1個)      = データスキップ。この記号以降、このチャンネルのMMLはコンパイルしない
+        //                (ppmck公式リファレンス通り。トークン化自体をここで打ち切る)
+        // !! (2個)     = タイムシフト。ここが「再生開始位置」になる(ppmck公式、ppmck9a ex7以降)。
+        //                シークバーの開始ハンドル(青)と相互リンクする(main.js側)
+        // !!! (3個)    = 本ツール独自拡張(ユーザー要望、2026-08-13)。「再生終了位置」。
+        //                シークバーの終了ハンドル(赤)と相互リンクする。省略時は曲の最後まで
+        case '!': {
+          i++;
+          let bangs = 1;
+          while (bangs < 3 && str[i] === '!') { bangs++; i++; }
+          if (bangs === 1) {
+            // データスキップ: 以降のこのチャンネルのテキストは一切トークン化しない
+            i = n;
+          } else if (bangs === 2) {
+            tokens.push(tagSource({ type: 'timeShiftStart' }, tokStart));
+          } else {
+            tokens.push(tagSource({ type: 'timeShiftEnd' }, tokStart));
+          }
           break;
         }
         default:

@@ -454,9 +454,9 @@
   // よって、タイに使うと自前の変調を握りつぶすことになる候補は安全側にスキップする)。
   //
   // 「不明瞭」な場合(短すぎる/自前の変調がある)は何もしない = 従来通りの独立した
-  // 再アタック音符のまま(P-5「プラトー明瞭→スラー分割、不明瞭→EPテーブル」のうち、
-  // 不明瞭側の「非周期の複数プラトーを1音+EPへ統合する」処理は今回のスコープ外。
-  // mergeAlternatingVibratoの拡張として別途着手する)。
+  // 再アタック音符のまま(markSlurTiesが安全に判定できるペアだけを個別にタイで繋ぐ)。
+  // P-5「プラトー明瞭→スラー分割、不明瞭→EPテーブル」の不明瞭側(非周期の複数プラトーを
+  // 1音+EPへ統合する側)は`mergeUnclearPitchRuns`(下記)が別途担当する。
   const MIN_SLUR_PLATEAU_FRAMES = 4; // Phase 3のMIN_LITERAL_FRAMESと同じ考え方(打鍵ジッタ除外)
 
   function qualifiesForSlur(ev) {
@@ -477,6 +477,62 @@
       }
     }
     return events;
+  };
+
+  // ── P-5「不明瞭→EPテーブル」側(スラー分割の相方、2026-08-12) ──────────────
+  // tieCandidateで繋がった隣接イベントの連なり(§3の「レガート/こぶし」候補)のうち、
+  // 全メンバーが個々に十分な長さ(プラトー、MIN_SLUR_PLATEAU_FRAMES以上)を持つとは
+  // 限らない場合(=markSlurTiesが安全側にスキップしうる「不明瞭」な連なり)、run全体を
+  // 1つのイベントへ統合し、そのpitchSeqをclassifyPitchModで再分類できるか試す。
+  // 再分類できれば(周期/非ループどちらでも良い)「1音+EPテーブル」表現(§3の
+  // `EP4 a2`)に置き換わる。できなければ何もしない(=従来通り個々のイベントのまま。
+  // markSlurTiesが安全に判定できるペアだけ個別にタイで繋ぐ、既存動作への後退)。
+  // ★実際のEP登録(pitchReg.assign)はここでは行わない。統合後のpitchSeqを持つ1つの
+  // イベントとして返すだけで、呼び出し元の通常のtoPitchFields相当が普段通り処理する
+  // (mergeAlternatingVibratoと全く同じ「試し分類→統合、実登録は後段に委ねる」設計)。
+  //
+  // 呼び出し順序: 抽出(tieCandidate計算済み)→mergeAlternatingVibrato→本関数→
+  // (pitchEp/portamento割当て)→markSlurTies、を必ず守ること(本関数は割当て前の
+  // 生のpitchSeqを直接連結して再分類するため、割当て後には呼べない。呼び出し箇所は
+  // mergeAlternatingVibratoと全く同じ12箇所、その直後に連結して呼ぶだけでよい)。
+  const MIN_UNCLEAR_RUN_LEN = 2; // 統合を試みる最小メンバー数(2未満は統合の意味が無い)
+
+  function isClearPlateau(ev) {
+    return !!ev && ev.note != null && (ev.end - ev.start) >= MIN_SLUR_PLATEAU_FRAMES;
+  }
+
+  MML.Convert.mergeUnclearPitchRuns = function (events) {
+    const result = [];
+    let i = 0;
+    while (i < events.length) {
+      const home = events[i];
+      if (home.note == null || !home.pitchSeq) { result.push(home); i++; continue; }
+      let j = i + 1;
+      let allClear = isClearPlateau(home);
+      while (j < events.length && events[j].tieCandidate && events[j].note != null &&
+             events[j - 1].end === events[j].start && hysteresisCompatible(events[j - 1], events[j])) {
+        allClear = allClear && isClearPlateau(events[j]);
+        j++;
+      }
+      const runLen = j - i;
+      if (runLen >= MIN_UNCLEAR_RUN_LEN && !allClear) {
+        const run = events.slice(i, j);
+        const pitchSeq = concatField(run, 'pitchSeq');
+        const classified = pitchSeq ? MML.Convert.classifyPitchMod(pitchSeq) : null;
+        if (classified) {
+          result.push(Object.assign({}, home, {
+            end: run[run.length - 1].end,
+            volSeq: concatField(run, 'volSeq'),
+            pitchSeq
+          }));
+          i = j;
+          continue;
+        }
+      }
+      result.push(home);
+      i++;
+    }
+    return result;
   };
 
 })(window);

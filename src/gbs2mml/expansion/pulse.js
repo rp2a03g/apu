@@ -53,8 +53,8 @@
   }
 
   MML.Gbs2MmlExpansion.pulse = function (snapshots, chKey, envReg) {
-    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
-    const events = MML.Convert.mergeAlternatingVibrato(extractEvents(snapshots, chKey));
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+P-5「不明瞭→EPテーブル」側(2026-08-12)
+    const events = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractEvents(snapshots, chKey)));
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };

@@ -149,9 +149,11 @@
       ev.note !== null ? toPitchFields(ev) : {}
     );
 
-    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+スラー分割(別プロジェクトE、2026-08-12)
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+P-5「不明瞭→EPテーブル」側+
+    // スラー分割(別プロジェクトE、2026-08-12)
     const chan = (letter, index) => {
-      const events = MML.Convert.mergeAlternatingVibrato(extractToneEvents(timeline, index)).map(toCommon);
+      const raw = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractToneEvents(timeline, index)));
+      const events = raw.map(toCommon);
       MML.Convert.markSlurTies(events);
       return {
         letter, events,

@@ -218,6 +218,31 @@
     return this.registerShape(MML.Convert.analyzeVolumeShape(seq), false);
   };
 
+  // チャンネル横断の周期ヒント確認(2026-08-14): アタック/ゲートレジスタを持たない音源
+  // (N163等)では、疑似アタックのために音程やピッチを一瞬ずらす曲があり、単体チャンネルの
+  // ラン分割がそこで途切れて analyzeVolumeShape が「最低3周期分の一致」というループ確定
+  // 基準を満たせなくなることがある(女神転生II 24曲目、N163のP/Rパートで実測: 同時に鳴る
+  // 和音の他ボイス(Qパート)は同じ疑似アタックが起きず1本の連続データとして320フレーム
+  // 周期のループを確定検出できるのに、P/Rは約320フレームごとに千切れて1周期分弱しか
+  // データが無くループ無し判定になり、スウェルが1周期鳴った後は末尾値で張り付いて聞こえる)。
+  // 「一瞬のピッチ変化は疑似アタックとみなす」という一般ルールをsplitRetriggers/
+  // mergeAlternatingVibrato側に追加すると、本物の装飾音・トリル等を誤って分割/破壊する
+  // 副作用の方が大きいと判断し(ユーザー確認済み)、代わりに「同じ音源内の他チャンネルが
+  // 確定的にループを検出できている」という外部証拠がある場合に限り、周期を疑わずヒントとして
+  // 使い、自分自身の生データ(呼び出し側がラン分割を無視してtimelineから再構成したもの)が
+  // その周期と矛盾しないかだけを緩く確認する、という後付けの補完に留める。
+  // MIN_LOOP_REPEATSによる独立検出のハードルは課さない(周期の確からしさは呼び出し側が
+  // 既に他チャンネルの確定ループで保証している前提)。矛盾が無く、かつ1周期分以上の
+  // データがあればその1周期分をloop:0のvaluesとして返す。矛盾する、またはperiod未満しか
+  // データが無ければnull(呼び出し側は通常のanalyzeVolumeShapeの結果をそのまま使うこと)。
+  MML.Convert.tryConfirmLoopWithHint = function (seq, period) {
+    if (!seq || period <= 0 || seq.length < period) return null;
+    for (let i = period; i < seq.length; i++) {
+      if (seq[i] !== seq[i - period]) return null;
+    }
+    return { values: seq.slice(0, period), loop: 0 };
+  };
+
   MML.Convert.EnvelopeRegistry.prototype.defLines = function () {
     return Array.from(this.tables.keys()).sort((a, b) => a - b).map(i => {
       const t = this.tables.get(i);

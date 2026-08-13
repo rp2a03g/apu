@@ -707,6 +707,12 @@
   // 明示的に全体へ戻したい時だけ resetPlaybackRangeToFull() を使う(「範囲をリセット」ボタン)。
   let rangeStartSec = 0;
   let rangeEndSec = null;     // null = まだ曲がロードされていない
+  // MML内の!!(開始)/!!!(終了)マーカーとの連動用。「前回コンパイル時のフレーム位置」を
+  // 覚えておき、そこから変化した(=ユーザーがMML側のマーカーを動かした/追加/削除した)
+  // 時だけ再生範囲へ反映する。値が変わっていなければ、ユーザーがハンドルを手動でドラッグして
+  // 動かした範囲をそのまま尊重する(applyMmlPlaybackMarkers参照)。undefined = 未初期化
+  let lastStartMarkerFrame;
+  let lastEndMarkerFrame;
   // 終了点に到達したら1回だけ自動一時停止する。停止位置より手前へシークし直すまで再武装しない
   // （そうしないと、終了点で止まった直後に▶を押した瞬間また即座に止まってしまう）
   let rangeEndArmed = true;
@@ -889,6 +895,91 @@
     updateMmlRangeHighlight();
   }
 
+  // MML内の!!/!!!マーカーと再生範囲(青/赤ハンドル)を連動させる(!/!!/!!! 特殊マーカー)。
+  // forceApply=true(範囲が初回ロード状態=preservePlaybackRangeがrangeEndSec===nullから
+  // 全体初期化した直後)なら常に反映し、そうでなければ「前回コンパイル時と比べてMML側の
+  // マーカー位置が実際に変わった時だけ」反映する。これにより、MMLを編集せず単にハンドルを
+  // 手動ドラッグしただけなら、次の再コンパイルでその手動位置が上書きされてしまうことがない
+  function applyMmlPlaybackMarkers(compiled, duration, forceApply) {
+    const startChanged = forceApply || compiled.startMarkerFrame !== lastStartMarkerFrame;
+    const endChanged = forceApply || compiled.endMarkerFrame !== lastEndMarkerFrame;
+    lastStartMarkerFrame = compiled.startMarkerFrame;
+    lastEndMarkerFrame = compiled.endMarkerFrame;
+    if (!startChanged && !endChanged) return;
+    if (startChanged) {
+      rangeStartSec = compiled.startMarkerFrame != null ? compiled.startMarkerFrame / compiled.frameRate : 0;
+    }
+    if (endChanged) {
+      rangeEndSec = compiled.endMarkerFrame != null ? compiled.endMarkerFrame / compiled.frameRate : duration;
+    }
+    rangeStartSec = Math.max(0, Math.min(rangeStartSec, duration));
+    rangeEndSec = Math.max(0, Math.min(rangeEndSec, duration));
+    if (rangeEndSec <= rangeStartSec) { rangeStartSec = 0; rangeEndSec = duration; }
+    rangeEndArmed = true;
+    updateRangeMarkersUI(duration);
+    updateSeekTicksUI(duration);
+    updateMmlRangeHighlight();
+  }
+
+  // 指定フレームをchチャンネルの原文MML上のどこに挿入すべきか([[startFrame]]がtargetFrame以上
+  // になる最初の音符の直前)を返す。targetFrameが曲末より後ろなら最後の音符の直後。
+  // そのチャンネルに(srcRangeを持つ)音符が1つも無ければnull(書き込み不能)
+  function findMmlInsertPosForFrame(compiled, ch, targetFrame) {
+    const ranges = compiled.highlightRanges && compiled.highlightRanges[ch];
+    if (!ranges || ranges.length === 0) return null;
+    const sorted = ranges.slice().sort((a, b) => a.srcStart - b.srcStart);
+    for (const r of sorted) {
+      if (r.startFrame >= targetFrame) return r.srcStart;
+    }
+    return sorted[sorted.length - 1].srcEnd;
+  }
+
+  // removeRange(既存マーカーの[start,end)、無ければnull)を取り除きつつ、insertPos(削除前の
+  // 原文における位置)へinsertTextを挿入した新しい文字列を返す
+  function spliceMarkerText(text, removeRange, insertPos, insertText) {
+    if (!removeRange) {
+      return text.slice(0, insertPos) + insertText + text.slice(insertPos);
+    }
+    if (insertPos <= removeRange.start) {
+      const withInsert = text.slice(0, insertPos) + insertText + text.slice(insertPos);
+      const shift = insertText.length;
+      return withInsert.slice(0, removeRange.start + shift) + withInsert.slice(removeRange.end + shift);
+    }
+    const withoutOld = text.slice(0, removeRange.start) + text.slice(removeRange.end);
+    const adjPos = insertPos - (removeRange.end - removeRange.start);
+    return withoutOld.slice(0, adjPos) + insertText + withoutOld.slice(adjPos);
+  }
+
+  // シークバーの開始/終了ハンドルのドラッグ確定後、その位置を!!(開始)/!!!(終了)マーカーとして
+  // MML本文へ書き戻す(!/!!/!!! 特殊マーカー、ユーザー要望の「相互に更新できるように」)。
+  // 既存マーカーがあれば同じチャンネルのその位置を置き換え、無ければ最初のチャンネルへ新規挿入する。
+  // 書き込み対象チャンネルに音符が1つも無い場合は書き込めないので何もしない(無理に挿入しない)
+  function writeMmlPlaybackMarker(which) {
+    const compiled = lastMmlCompiled;
+    if (!compiled) return;
+    const isStart = which === 'start';
+    const markerText = isStart ? '!!' : '!!!';
+    const existingCh = isStart ? compiled.startMarkerChannel : compiled.endMarkerChannel;
+    const existingRange = isStart ? compiled.startMarkerSrcRange : compiled.endMarkerSrcRange;
+    const targetCh = existingCh || (compiled.channelLetters && compiled.channelLetters[0]);
+    if (!targetCh) return;
+    const targetFrame = Math.round((isStart ? rangeStartSec : rangeEndSec) * compiled.frameRate);
+    const insertPos = findMmlInsertPosForFrame(compiled, targetCh, targetFrame);
+    if (insertPos == null) return;
+
+    mmlSourceEl.value = spliceMarkerText(mmlSourceEl.value, existingRange, insertPos, markerText);
+    mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新
+    // ここでprepareMmlStream()(重い再コンパイル)を呼ぶと内部でtransportStop()が走り、
+    // 「再生しながら範囲をドラッグして聴き比べる」という本来の使い方を毎回中断させてしまう。
+    // 再生中の音声・トランスポート状態には触れず、次回のdirectMarkerSrcRange参照(連続ドラッグ時に
+    // 今書いたばかりのマーカーを重複挿入せず置換できるようにするため)とlastStartMarkerFrame/
+    // lastEndMarkerFrame追跡だけを軽量に同期する
+    const recompiled = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
+    lastMmlCompiled = recompiled;
+    lastStartMarkerFrame = recompiled.startMarkerFrame;
+    lastEndMarkerFrame = recompiled.endMarkerFrame;
+  }
+
   // 開始点/終了点ハンドルのドラッグ操作。ドラッグ中は左右反転しないよう互いにクランプする。
   // 最小間隔を秒数の固定値にすると、長い曲では画面上ではほぼ0pxになり2つのハンドルが
   // 重なってしまい、DOM順で後にある終点側だけしか掴めなくなる(始点が下敷きになる)バグが
@@ -923,6 +1014,9 @@
         handleEl.removeEventListener('pointermove', onMove);
         handleEl.removeEventListener('pointerup', onUp);
         handleEl.removeEventListener('pointercancel', onUp);
+        // MML再生中のみ、確定した範囲を!!/!!!マーカーとしてMML本文へ書き戻す
+        // (NSF/KSS/SPC等の実ファイル再生ではMML本文が存在しないため対象外)
+        if (lastPlayMode === 'capture-mml') writeMmlPlaybackMarker(which);
       };
       handleEl.addEventListener('pointermove', onMove);
       handleEl.addEventListener('pointerup', onUp);
@@ -1260,6 +1354,11 @@
     btnMmlCapture.disabled = true;
     captureOutputEl.innerHTML = '<div>' + T('コンパイル中…') + '</div>';
 
+    // 「まだ曲がロードされていない/直前に明示的にリセットされた」状態かどうかをここで
+    // 記録しておく(この先のpreservePlaybackRangeでrangeEndSecがnullでなくなるため、
+    // 呼び出し後では判定できない)。applyMmlPlaybackMarkers参照
+    const isFreshRangeLoad = (rangeEndSec === null);
+
     const compiled = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
     if (compiled.errors.length > 0) {
       captureOutputEl.innerHTML =
@@ -1341,6 +1440,7 @@
     captureOutputEl.appendChild(pre);
 
     preservePlaybackRange(duration);
+    applyMmlPlaybackMarkers(compiled, duration, isFreshRangeLoad);
     seekBarEl.value = '0';
     timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
     btnMmlCapture.disabled = false;

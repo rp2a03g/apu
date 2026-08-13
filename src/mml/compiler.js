@@ -128,6 +128,37 @@
  *                    (再帰展開はしない。o l v q t K n N S E M s @ & [ | ] { } > < 空白
  *                    数字 . + # - および音符文字 a-g r は既存コマンドと衝突するため
  *                    マクロ文字に使わないこと)
+ *   @t<len>,<num>    テンポ2(フレーム単位)。<len>の音符が確実に<num>フレームになる
+ *                    非整数tempoを逆算する(t<n>の整数BPM丸めによる端数化を避ける実機コマンド)
+ *   w<len>           ウェイト。直前のコマンド(音符/休符/w自身)を<len>音長ぶんそのまま
+ *                    延長する(タイと同じ「直前セグメントのdurationFramesを伸ばすだけ」)
+ *   y<adr>,<num>     レジスタ(メモリ)直接書き込み。$接頭辞の16進数対応。ブラウザ再生でも
+ *                    そのままそのアドレスへ生バイトを書き込む(チップ非依存)
+ *   x<param0>,<param1> データストリームへのバイト直接埋め込み。NSF書き出し(6502バイト
+ *                    コード)専用のコマンドで、ブラウザ再生には対応する概念が無いため
+ *                    パースのみ行い意図的に無視する(NSF書き出し実装は別タスク)
+ *   SD<n> / SDOF / SDQR  セルフディレイ(疑似エコー)。@vr(リリースエンベロープ)併用時のみ
+ *                    有効で、リリース区間のピッチを<n>個前のノートオンへ差し替える
+ *                    (ppmck公式リファレンスの出力例と完全一致することを実測確認済み)。
+ *                    SDQRはノートオン履歴(noteHistory)をリセットする
+ *   SM / SMOF        スムース(A/B/C対応)。周期/周波数レジスタの上位バイト(書込みで波形
+ *                    位相がリセットされる)を「値が変化した時だけ書く」モードに切り替え、
+ *                    同オクターブ内のレガートでクリック音が出るのを防ぐだけの機能
+ *                    (ピッチ自体はグライドしない。実機CMD_SMOOTH/EFF2_SMOOTH_ENABLEを
+ *                    実測確認)
+ *   PS               ポルタメント(A/B/C対応)。`c PS g`のように次の音符そのものをグライド
+ *                    先として使う。実機process_ps/pitchshift_setup(b_div方式のステップ
+ *                    計算)を移植した独自実装で、既存のPT<target>,<duration>(明示的な
+ *                    生レジスタオフセット指定)とは別物・共存する。実機は最初の1サイクルだけ
+ *                    間隔にstepでなくdurationを使うためグライドが次の音符へ食い込むことが
+ *                    あるが、本実装はt=0からstep間隔で刻む簡略化を採用する(意図的な近似、
+ *                    ppmck公式リファレンスが明記する「PSコマンド後の音程は不正確」の対象)
+ *   ! / !! / !!!     特殊マーカー。!(1個)=データスキップ、この記号以降そのチャンネルの
+ *                    MMLは一切コンパイルされない(以降無音)。!!(2個)=タイムシフト、
+ *                    ここが「再生開始位置」になりシークバーの開始ハンドルと連動する。
+ *                    !!!(3個)=**ppmck本家には無いこのツール独自の拡張**で「再生終了位置」、
+ *                    シークバーの終了ハンドルと連動する(省略時は曲の最後まで)。戻り値の
+ *                    startMarkerFrame/endMarkerFrameで参照できる
  *
  * 注意: 2026-08-10、実機ppmckドライバ(nes_include/ppmck/{internal,sounddrv}.h)を
  * 直接確認し、D<n>/EP/MPが同一のfreq_add_mcknumberルーチンを共有する「周期/周波数
@@ -418,6 +449,20 @@
     return result;
   }
 
+  // PS(ポルタメント)のグライド元周波数を求める: 直近に追加されたセグメントの、
+  // その時点で有効な(pitchBreaksがあればその最後の)freqを返す。休符(freq==null)は
+  // 読み飛ばして遡る。見つからなければnull
+  function lastActiveFreq(segments) {
+    for (let k = segments.length - 1; k >= 0; k--) {
+      const s = segments[k];
+      if (s.freq != null) {
+        if (s.pitchBreaks && s.pitchBreaks.length > 0) return s.pitchBreaks[s.pitchBreaks.length - 1].freq;
+        return s.freq;
+      }
+    }
+    return null;
+  }
+
   // チャンネルのトークン列 -> 音符セグメント列
   // settings: #OCTAVE-REV(>/<を反転)・#GATE-DENOM(qのゲート分母、既定8)などの曲全体設定
   // defaultInstrument: @<n>が一度も書かれていないときの音色番号。FME7だけはこの値が
@@ -428,9 +473,15 @@
       octave: 4, defaultLength: 4, volume: 15, gate: 8, instrument: defaultInstrument || 0,
       envelopeV: null, envelopeVr: 255, transpose: 0, detune: 0, qFrames: null,
       vibrato: null, pitchEnv: null, pitchEnvDelay: 0, portamento: null, noteEnv: null,
-      sweepSpeed: 0, sweepDepth: 0, fme7Noise: null, fme7EnvShape: null, fme7EnvPeriod: 0
+      sweepSpeed: 0, sweepDepth: 0, fme7Noise: null, fme7EnvShape: null, fme7EnvPeriod: 0,
+      // selfDelay: SD<n>の<n>(null=SDOF)。smooth: SM(true)/SMOF(false)。
+      // pendingPitchShift: PSトークン読み取り直後〜次の音符処理までのワンショットフラグ
+      selfDelay: null, smooth: false, pendingPitchShift: false
     };
     const segments = [];
+    // SD(セルフディレイ)用のノートオン履歴(発音順にfreq/noteNumberを積む)。
+    // SDQRで空にする
+    const noteHistory = [];
     // OP<n>(VRC7音色ロード)/MH<n>(FDS変調)のような「音符に紐付かない、その時点のフレーム
     // 位置で即座に効くコマンド」を記録する。frameはこのトークンに達するまでに
     // 消費された(=直前までのセグメントの合計)フレーム数
@@ -441,6 +492,14 @@
     // L(ループ地点マーカー)が出現した時点でのelapsedFrames。複数回書かれた場合は
     // 最初の1回だけを採用する(2回目以降は無視)
     let loopFrame = null;
+    // !!(タイムシフト=再生開始位置)/!!!(本ツール独自拡張=再生終了位置)が出現した時点の
+    // elapsedFrames。loopFrameと同じく最初の1回だけを採用する
+    let startMarkerFrame = null;
+    let endMarkerFrame = null;
+    // マーカートークン自身の原文文字範囲({start,end}、無ければnull)。UI側(main.js)が
+    // シークバードラッグ後にMMLへ書き戻す際、既存マーカーの置換位置として使う
+    let startMarkerSrcRange = null;
+    let endMarkerSrcRange = null;
 
     // srcStart/srcEnd: 元MMLソース上のこの音符/休符トークンの絶対文字範囲(再生ハイライト用、
     // lexer.tokenizeがoffsets付きで呼ばれた場合のみ付与される。無ければundefined)
@@ -467,7 +526,33 @@
         prev.durationFrames += frames;
         prev.tieNext = false;
         if (srcEnd != null) prev.srcEnd = srcEnd;
+        if (freq != null) noteHistory.push({ freq, noteNumber });
       } else {
+        // PS(ポルタメント、実機準拠新規実装): 直前のpitchShiftトークンをここで消費する。
+        // グライド元は直近の実音(休符/未発音を飛ばした最後のfreq)。見つからなければ
+        // 通常の音符として扱う(グライドしようがないため)
+        let psGlide = null;
+        if (freq != null && state.pendingPitchShift) {
+          const fromFreq = lastActiveFreq(segments);
+          if (fromFreq != null) psGlide = { fromFreq };
+        }
+        state.pendingPitchShift = false;
+
+        // SD(セルフディレイ): リリースエンベロープ(@vr)有効時のみ、ゲート終了以降の
+        // ピッチを<selfDelay>個前のノートオンへ差し替える(ppmck公式リファレンスの
+        // 出力例を実測トレースして再現。noteHistoryは push 後の配列で
+        // 「後ろからselfDelay+1番目」を引く)
+        let pitchBreaks = null;
+        if (freq != null) noteHistory.push({ freq, noteNumber });
+        if (freq != null && state.selfDelay != null && state.envelopeVr !== 255) {
+          const idx = noteHistory.length - 1 - state.selfDelay;
+          if (idx >= 0) {
+            const target = noteHistory[idx];
+            const gf = computeGateFrames({ gate: state.gate, gateDenom: cfg.gateDenom, qFrames: state.qFrames }, frames);
+            pitchBreaks = [{ atFrame: gf, freq: target.freq, noteNumber: target.noteNumber }];
+          }
+        }
+
         segments.push({
           durationFrames: frames,
           freq,
@@ -492,7 +577,9 @@
           fme7Noise: state.fme7Noise,
           fme7EnvShape: state.fme7EnvShape,
           fme7EnvPeriod: state.fme7EnvPeriod,
-          pitchBreaks: null,
+          smooth: state.smooth,
+          psGlide,
+          pitchBreaks,
           tieNext: false
         });
       }
@@ -529,8 +616,53 @@
         case 'fme7EnvShape': state.fme7EnvShape = tok.value; break;
         case 'fme7EnvPeriod': state.fme7EnvPeriod = tok.value; break;
         case 'loopPoint': if (loopFrame == null) loopFrame = elapsedFrames; break;
+        case 'timeShiftStart':
+          if (startMarkerFrame == null) {
+            startMarkerFrame = elapsedFrames;
+            if (tok.srcStart != null) startMarkerSrcRange = { start: tok.srcStart, end: tok.srcEnd };
+          }
+          break;
+        case 'timeShiftEnd':
+          if (endMarkerFrame == null) {
+            endMarkerFrame = elapsedFrames;
+            if (tok.srcStart != null) endMarkerSrcRange = { start: tok.srcStart, end: tok.srcEnd };
+          }
+          break;
         case 'vrc7Tone': immediateWrites.push({ kind: 'vrc7Tone', frame: elapsedFrames, value: tok.value }); break;
         case 'fdsMod': immediateWrites.push({ kind: 'fdsMod', frame: elapsedFrames, value: tok.value }); break;
+        // @t<len>,<num> テンポ2: framesForLengthが逆算どおりの整数フレーム数を返すよう、
+        // 「<len>(付点考慮)の音符が<num>フレームになる」ちょうどのtempo値(小数)を算出する
+        case 'frameTempo': {
+          const len = tok.len || 4;
+          const num = tok.num || 30;
+          const mult = dotMultiplier(tok.dots || 0);
+          tempo = (240 * FRAME_RATE_NTSC * mult) / (num * len);
+          break;
+        }
+        // w<len> ウェイト: タイと同じく直前セグメントのdurationFramesを延長するだけ
+        // (音程・音量・エンベロープは一切変更しない)。直前セグメントが無ければ休符として扱う
+        case 'wait': {
+          const lenResult = framesForLength(tok.length, tok.dots, state.defaultLength, tempo, lengthCarry);
+          const frames = lenResult.frames;
+          lengthCarry = lenResult.carryOut;
+          if (segments.length > 0) {
+            elapsedFrames += frames;
+            segments[segments.length - 1].durationFrames += frames;
+          } else {
+            pushNote(frames, null, null, tok.srcStart, tok.srcEnd);
+          }
+          break;
+        }
+        // y<adr>,<num> レジスタ直接書き込み。音符に紐付かない即時イベントとして記録し、
+        // compile()側でチャンネル非依存にwriteLogへ差し込む(spliceImmediateWrites参照)
+        case 'rawWrite': immediateWrites.push({ kind: 'rawWrite', frame: elapsedFrames, addr: tok.addr, value: tok.value }); break;
+        // x<param0>,<param1> はNSF書き出し(6502バイトコード)専用のコマンドで、ブラウザ再生
+        // (レジスタログ方式)には対応する概念が無いため意図的に無視する(NSF書き出し実装は別タスク)
+        case 'directBytes': break;
+        case 'selfDelay': state.selfDelay = tok.value; break;
+        case 'selfDelayReset': noteHistory.length = 0; break;
+        case 'smooth': state.smooth = tok.value; break;
+        case 'pitchShift': state.pendingPitchShift = true; break;
         case 'tie': {
           if (segments.length > 0) segments[segments.length - 1].tieNext = true;
           break;
@@ -573,7 +705,10 @@
       }
     }
 
-    return { segments, immediateWrites, loopFrame };
+    return {
+      segments, immediateWrites, loopFrame,
+      startMarkerFrame, endMarkerFrame, startMarkerSrcRange, endMarkerSrcRange
+    };
   }
 
   // セグメントのゲート長(フレーム数)を算出する。@q<n>(フレーム単位の早期ノートオフ)が
@@ -720,7 +855,45 @@
       (seg.pitchEnv != null && seg.pitchEnv !== 255) ||
       (seg.vibrato != null && seg.vibrato !== 255) ||
       seg.portamento != null ||
+      seg.psGlide != null ||
       (seg.pitchBreaks != null && seg.pitchBreaks.length > 0);
+  }
+
+  // PS(ポルタメント、実機準拠): 実ソース(nes_include/ppmck/sounddrv.hのprocess_ps/
+  // pitchshift_setup、AoiMoe/ppmck)をトレースして移植。oldReg(直前の音のレジスタ値)と
+  // newReg(このセグメント本来のレジスタ値)の差分を、b_div方式のceil除算で求めた
+  // 「歩幅(addfreq)・間隔(step)」で埋めていく階段状のグライド。newReg基準のオフセット列
+  // (pitchRegisterOffsetの他の効果と加算合成できる形)で返す。
+  // ★実機は最初の1サイクルだけ間隔にstepではなくdurationそのものを使う(結果、
+  // グライドが音符の終盤〜次の音符に食い込むことがある)独特の挙動があり、これが
+  // ppmck公式リファレンスの「PSコマンド後の音程は正確ではない」という注記の原因と
+  // 見られるが、本実装は音符の時間内で目標へ収束する分かりやすい近似(t=0で即座に
+  // 最初の1歩を踏む)を採用する(意図的な簡略化。実機の1サイクル目のみの特殊なずれ
+  // 自体は移植しない)。★カデンス判定は「counter===stepなら発火」というPT(portamentoSequence)
+  // と同一の等値判定にすること。counter--してから0以下判定する減算方式だと、
+  // stepが大きい(傾きが緩やかな)グライドでt=0での発火有無がPT/6502側のPS_STEP
+  // (PTと同じ等値判定を移植したもの)とズレ、実機さながらの6502エミュレータ検証で
+  // 実測乖離が見つかった(2026-08-13)
+  function pitchShiftOffsetSequence(oldReg, newReg, dur) {
+    if (dur <= 0 || oldReg === newReg) return null;
+    const diff = Math.abs(newReg - oldReg);
+    let addfreq, step;
+    if (dur > diff) { addfreq = 1; step = ceilDivPpmck(dur, diff); }
+    else { step = 1; addfreq = ceilDivPpmck(diff, dur); }
+    const dir = newReg > oldReg ? 1 : -1;
+    const seq = new Array(dur);
+    let value = oldReg;
+    let counter = step;
+    for (let t = 0; t < dur; t++) {
+      if (counter === step) {
+        counter = 0;
+        value += dir * addfreq;
+        if ((dir > 0 && value > newReg) || (dir < 0 && value < newReg)) value = newReg;
+      }
+      counter++;
+      seq[t] = value - newReg;
+    }
+    return seq;
   }
 
   // タイ(&)で異なる音程へレガートしたセグメントの、指定tick時点で有効な基準freq/
@@ -759,7 +932,7 @@
   // クランプ済み加算を1回だけ行う。vibSeq/ptSeq: 呼び出し側がwritePitchModulation冒頭で
   // 1音符ぶん事前計算したvibratoSequence/portamentoSequence(未使用ならnull)。
   // tick索引で読むだけなので状態を持たない。
-  function pitchRegisterOffset(seg, envelopes, tick, vibSeq, ptSeq) {
+  function pitchRegisterOffset(seg, envelopes, tick, vibSeq, ptSeq, psSeq) {
     let offset = seg.detune || 0;
     if (seg.pitchEnv != null && seg.pitchEnv !== 255) {
       const table = envelopes.ep[seg.pitchEnv];
@@ -771,6 +944,7 @@
     }
     if (vibSeq) offset += vibSeq[tick];
     if (ptSeq) offset += ptSeq[tick];
+    if (psSeq) offset += psSeq[tick];
     return offset;
   }
 
@@ -787,12 +961,20 @@
       ? vibratoSequence(envelopes.mp[seg.vibrato], dur, periodFnIncreasing(periodFn) ? 1 : -1)
       : null;
     const ptSeq = seg.portamento ? portamentoSequence(seg.portamento, dur) : null;
+    // PS(ポルタメント、実機準拠): oldReg(グライド元の音のレジスタ値)とnewReg(このセグメント
+    // 本来のレジスタ値)を同じperiodFnで求め、その差分を段階的に埋めるオフセット列にする
+    let psSeq = null;
+    if (seg.psGlide) {
+      const oldReg = applyDetune(periodFn(seg.psGlide.fromFreq), 0, max);
+      const newReg = applyDetune(periodFn(seg.freq), 0, max);
+      psSeq = pitchShiftOffsetSequence(oldReg, newReg, dur);
+    }
     let last = null;
     for (let t = 0; t < dur; t++) {
       const { freq: baseFreq, noteNumber: baseNoteNumber } = activePitchAt(seg, t);
       const enOffset = noteEnvelopeOffset(seg, envelopes, t);
       const freq = enOffset === 0 ? baseFreq : noteFrequency(baseNoteNumber + enOffset);
-      const regOffset = pitchRegisterOffset(seg, envelopes, t, vibSeq, ptSeq);
+      const regOffset = pitchRegisterOffset(seg, envelopes, t, vibSeq, ptSeq, psSeq);
       const value = applyDetune(periodFn(freq), regOffset, max);
       if (value !== last) {
         writeFn(startFrame + t, value);
@@ -867,6 +1049,13 @@
       writeLog[0].push({ addr: base + 1, value: 0x08 });
     }
 
+    // SM/SMOF(スムース、対応ABC): $4003/$4007/$400B(addr+3、上位バイト)への書込みは
+    // 波形位相をリセットする副作用があり、通常は音符ごとに毎回書き直す(実機同様)。
+    // SM有効中は「値が変化したときだけ書く」モードに切り替え、同オクターブ内で音符が
+    // 切り替わるレガート passageのクリック音を消す(実機CMD_SMOOTH/EFF2_SMOOTH_ENABLE、
+    // sound_data_writeを実測トレースして再現)。セグメントをまたいで直前値を保持する
+    let smoothLastHi = -1;
+
     let frame = 0;
     for (const seg of segments) {
       if (frame >= totalFrames) break;
@@ -887,17 +1076,21 @@
             // リセットを引き起こすため、値が変わっていなくても毎回書くと(EP/MPで周期が
             // 毎フレーム変わるたび)パルス波が意図せず打ち直され続けてしまう
             // (DESIGN-PITCH.md Phase 1で実測発覚)。上位バイトが実際に変わった時だけ書く。
-            let lastHi = -1;
+            // SM有効時はセグメントをまたいでも前回値を引き継ぐ(smoothLastHi)
+            let lastHi = seg.smooth ? smoothLastHi : -1;
             writePitchModulation(writeLog, startFrame, dur, seg, env, pulsePeriod, 0x7FF,
               (f, period) => {
                 writeLog[f].push({ addr: base + 2, value: period & 0xFF });
                 const hi = (period >> 8) & 0x07;
                 if (hi !== lastHi) { writeLog[f].push({ addr: base + 3, value: hi }); lastHi = hi; }
               });
+            smoothLastHi = lastHi;
           } else {
             const period = applyDetune(pulsePeriod(seg.freq), seg.detune, 0x7FF);
             writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
-            writeLog[startFrame].push({ addr: base + 3, value: (period >> 8) & 0x07 });
+            const hi = (period >> 8) & 0x07;
+            if (!seg.smooth || hi !== smoothLastHi) writeLog[startFrame].push({ addr: base + 3, value: hi });
+            smoothLastHi = hi;
           }
           if (vTable) {
             writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable,
@@ -918,17 +1111,21 @@
             // 値が変わっていなくても毎回書くと(EP/MPで周期が毎フレーム変わるたび)三角波が
             // 意図せず打ち直され続けてしまう。上位バイトの値が実際に変わった時だけ書く
             // (下位バイト単体の書込みには副作用が無いため毎フレーム書いてよい)。
-            let lastHi = -1;
+            // SM有効時はセグメントをまたいでも前回値を引き継ぐ(smoothLastHi)
+            let lastHi = seg.smooth ? smoothLastHi : -1;
             writePitchModulation(writeLog, startFrame, dur, seg, env, trianglePeriod, 0x7FF,
               (f, period) => {
                 writeLog[f].push({ addr: base + 2, value: period & 0xFF });
                 const hi = (period >> 8) & 0x07;
                 if (hi !== lastHi) { writeLog[f].push({ addr: base + 3, value: hi }); lastHi = hi; }
               });
+            smoothLastHi = lastHi;
           } else {
             const period = applyDetune(trianglePeriod(seg.freq), seg.detune, 0x7FF);
             writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
-            writeLog[startFrame].push({ addr: base + 3, value: (period >> 8) & 0x07 });
+            const hi = (period >> 8) & 0x07;
+            if (!seg.smooth || hi !== smoothLastHi) writeLog[startFrame].push({ addr: base + 3, value: hi });
+            smoothLastHi = hi;
           }
           writeLog[startFrame].push({ addr: base + 0, value: seg.volume > 0 ? 0xFF : 0x80 });
           if (gateFrames < dur) {
@@ -1797,6 +1994,10 @@
     const segmentsByChannel = {};
     const immediateWritesByChannel = {};
     const loopFrameByChannel = {};
+    const startMarkerFrameByChannel = {};
+    const endMarkerFrameByChannel = {};
+    const startMarkerSrcRangeByChannel = {};
+    const endMarkerSrcRangeByChannel = {};
     let totalFrames = 0;
 
     const fme7Letters = new Set(expansionLetterMap.fme7 || []);
@@ -1805,10 +2006,17 @@
       let tokens = Mml.tokenize(raw.text, raw.offsets);
       tokens = expandLoops(tokens, errors);
       tokens = applyTuplets(tokens, tempo, errors);
-      const { segments, immediateWrites, loopFrame } = buildSegments(tokens, tempo, errors, settings, fme7Letters.has(ch) ? 1 : 0);
+      const {
+        segments, immediateWrites, loopFrame,
+        startMarkerFrame, endMarkerFrame, startMarkerSrcRange, endMarkerSrcRange
+      } = buildSegments(tokens, tempo, errors, settings, fme7Letters.has(ch) ? 1 : 0);
       segmentsByChannel[ch] = segments;
       immediateWritesByChannel[ch] = immediateWrites;
       loopFrameByChannel[ch] = loopFrame;
+      startMarkerFrameByChannel[ch] = startMarkerFrame;
+      endMarkerFrameByChannel[ch] = endMarkerFrame;
+      startMarkerSrcRangeByChannel[ch] = startMarkerSrcRange;
+      endMarkerSrcRangeByChannel[ch] = endMarkerSrcRange;
       const sum = segments.reduce((a, s) => a + s.durationFrames, 0);
       totalFrames = Math.max(totalFrames, sum);
     }
@@ -1821,6 +2029,25 @@
     let loopPointFrame = null;
     for (const ch of channelLetters) {
       if (loopFrameByChannel[ch] != null) { loopPointFrame = loopFrameByChannel[ch]; break; }
+    }
+
+    // !!(再生開始位置)/!!!(再生終了位置)も同じ考え方で、最初に見つかったチャンネルの
+    // 値を曲全体のマーカーとして採用する(シークバー開始/終了ハンドルとの連動に使う)。
+    // どのチャンネルの何文字目にあったか(startMarkerChannel/startMarkerSrcRange)も
+    // 併せて公開し、UI側がシークバードラッグ後に既存マーカーへ書き戻せるようにする
+    let startMarkerFrame = null, startMarkerChannel = null, startMarkerSrcRange = null;
+    let endMarkerFrame = null, endMarkerChannel = null, endMarkerSrcRange = null;
+    for (const ch of channelLetters) {
+      if (startMarkerFrame == null && startMarkerFrameByChannel[ch] != null) {
+        startMarkerFrame = startMarkerFrameByChannel[ch];
+        startMarkerChannel = ch;
+        startMarkerSrcRange = startMarkerSrcRangeByChannel[ch];
+      }
+      if (endMarkerFrame == null && endMarkerFrameByChannel[ch] != null) {
+        endMarkerFrame = endMarkerFrameByChannel[ch];
+        endMarkerChannel = ch;
+        endMarkerSrcRange = endMarkerSrcRangeByChannel[ch];
+      }
     }
 
     // 再生ハイライト用: フレーム位置 -> ソース文字範囲の対応表(全チャンネル)
@@ -1882,6 +2109,13 @@
       }
     }
 
+    // y<adr>,<num>(レジスタ直接書き込み)。音源チップに関わらずどのチャンネルでも同じ
+    // 意味(生バイト書き込み)なので、2A03基本chと全拡張音源chへ一律に差し込む
+    for (const ch of channelLetters) {
+      spliceImmediateWrites(tracks[ch], immediateWritesByChannel[ch], 'rawWrite', totalFrames,
+        iw => ({ writes: [{ addr: iw.addr, value: iw.value }] }));
+    }
+
     // L(ループ地点)が使われている場合、このツール(ブラウザ再生・シークバー)での
     // 「曲の長さ」は "曲頭からLへ2回戻るまで"(=イントロ1回 + ループ区間を2回)とする。
     // 各セグメント生成関数(segmentsToWriteLogXxx)は音符ごとに周波数・音量・音色を
@@ -1921,6 +2155,12 @@
       channelLetters,
       loopFrameByChannel,
       loopPointFrame,
+      startMarkerFrame,
+      startMarkerChannel,
+      startMarkerSrcRange,
+      endMarkerFrame,
+      endMarkerChannel,
+      endMarkerSrcRange,
       highlightRanges,
       errors,
       frameRate: FRAME_RATE_NTSC,

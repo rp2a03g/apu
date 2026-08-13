@@ -200,8 +200,8 @@
     const finalFrame = timeline.length > 0 ? timeline[timeline.length - 1] : null;
     return {
       channels: [0, 1, 2, 3, 4].map(ch => ({
-        // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
-        events: MML.Convert.mergeAlternatingVibrato(extractChannelEvents(timeline, ch, clock)).map(toCommon),
+        // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+P-5「不明瞭→EPテーブル」側(2026-08-12)
+        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractChannelEvents(timeline, ch, clock))).map(toCommon),
         hasVolume: true,
         hasEnvelope: true,
         hasInstrument: true

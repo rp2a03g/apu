@@ -583,7 +583,8 @@
         tieCandidate: ev.tieCandidate
       });
     }
-    return MML.Convert.mergeAlternatingVibrato(mapped)
+    // P-5「不明瞭→EPテーブル」側(スラー分割の相方、2026-08-12)
+    return MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(mapped))
       .filter(ev => ev.note != null)
       .map(ev => ({
         frame: ev.start, len: ev.end - ev.start, pitch: ev.pitch, pitchSemi: ev.note,

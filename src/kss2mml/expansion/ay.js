@@ -124,8 +124,8 @@
       channels: [0, 1, 2].map(ch => ({
         // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2): 半音境界を跨ぐビブラートが
         // 音符連打に化ける問題を、抽出後の後処理パスとして統合する(既存の毎フレーム
-        // ループ自体は変えない)
-        events: MML.Convert.mergeAlternatingVibrato(extractToneEvents(timeline, ch, clock)).map(toCommon),
+        // ループ自体は変えない)+P-5「不明瞭→EPテーブル」側(2026-08-12)
+        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractToneEvents(timeline, ch, clock))).map(toCommon),
         hasVolume: true, hasEnvelope: true, hasInstrument: true, hasFme7Noise: true
       }))
     };

@@ -262,8 +262,8 @@
 
   MML.Nsf2MmlExpansion.fds = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
     const timeline = buildTimeline(writeLog, initRegs, initWrites);
-    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
-    const events = MML.Convert.mergeAlternatingVibrato(extractEvents(timeline));
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+P-5「不明瞭→EPテーブル」側(2026-08-12)
+    const events = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractEvents(timeline)));
 
     const modWaveReg = new MML.Convert.WaveRegistry('@MW');
     const modParamReg = makeModParamRegistry();

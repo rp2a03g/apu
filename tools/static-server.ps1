@@ -19,7 +19,7 @@ $mime = @{
     '.wav'  = 'audio/wav'
 }
 
-$SaveDir = "C:\Users\user\AppData\Local\Temp\claude\C--Users-user-Desktop-mml\cfac7993-fcb0-40b6-bc90-512c384a608d\scratchpad"
+$SaveDir = "C:\Users\user\AppData\Local\Temp\claude\C--Users-user-Desktop-mml\9d5392d8-0e9f-47d6-8a43-c7eb3b58726a\scratchpad"
 
 while ($listener.IsListening) {
     $context = $listener.GetContext()

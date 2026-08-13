@@ -481,9 +481,11 @@
     // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2): 半音境界を跨ぐビブラートが
     // 音符連打に化ける問題を、抽出後の後処理パスとして統合する(ノイズ(evD)は
     // 音程=周期インデックスの離散値でビブラートの概念が無いため対象外)。
-    const evA = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p1', 1));
-    const evB = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p2', 2));
-    const evC = MML.Convert.mergeAlternatingVibrato(extractTriEvents(timeline));
+    // P-5「不明瞭→EPテーブル」側(スラー分割の相方、2026-08-12): mergeAlternatingVibrato
+    // の直後に必ず連結して呼ぶ(pitchEp割当て前の生pitchSeqを直接連結するため)
+    const evA = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p1', 1)));
+    const evB = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p2', 2)));
+    const evC = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractTriEvents(timeline)));
     const evD = extractNoiseEvents(timeline);
     const dmcTriggers = extractDmcTriggers(timeline, writeLog, header);
     const bankInfo    = computeBankInfo(nsfBytes, header || {});

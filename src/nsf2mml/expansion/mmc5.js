@@ -88,9 +88,9 @@
 
   MML.Nsf2MmlExpansion.mmc5 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
     const timeline = buildTimeline(writeLog, initRegs);
-    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
-    const evP1 = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p1', 1, 0));
-    const evP2 = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p2', 2, 1));
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+P-5「不明瞭→EPテーブル」側(2026-08-12)
+    const evP1 = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p1', 1, 0)));
+    const evP2 = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p2', 2, 1)));
 
     function toVolumeFields(ev) {
       if (!envReg) return { volume: ev.volSeq[0] };
