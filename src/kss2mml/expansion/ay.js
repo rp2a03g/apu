@@ -118,14 +118,15 @@
       ev.note !== null && ev.noise !== null ? { fme7Noise: ev.noise } : {},
       ev.note !== null && ev.freqHz != null
         ? { rawFreq: ev.freqHz, freqSeq: ev.pitchSeq.map(p => toneFreq(p, clock)) } : {},
+      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
       toVolumeFields(ev.volSeq)
     );
     return {
       channels: [0, 1, 2].map(ch => ({
         // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2): 半音境界を跨ぐビブラートが
         // 音符連打に化ける問題を、抽出後の後処理パスとして統合する(既存の毎フレーム
-        // ループ自体は変えない)+P-5「不明瞭→EPテーブル」側(2026-08-12)
-        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractToneEvents(timeline, ch, clock))).map(toCommon),
+        // ループ自体は変えない)+高速アルペジオ→EN統合(2026-08-14)+P-5「不明瞭→EPテーブル」側(2026-08-12)
+        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractToneEvents(timeline, ch, clock))).map(toCommon),
         hasVolume: true, hasEnvelope: true, hasInstrument: true, hasFme7Noise: true
       }))
     };

@@ -481,11 +481,12 @@
     // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2): 半音境界を跨ぐビブラートが
     // 音符連打に化ける問題を、抽出後の後処理パスとして統合する(ノイズ(evD)は
     // 音程=周期インデックスの離散値でビブラートの概念が無いため対象外)。
-    // P-5「不明瞭→EPテーブル」側(スラー分割の相方、2026-08-12): mergeAlternatingVibrato
-    // の直後に必ず連結して呼ぶ(pitchEp割当て前の生pitchSeqを直接連結するため)
-    const evA = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p1', 1)));
-    const evB = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p2', 2)));
-    const evC = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractTriEvents(timeline)));
+    // P-5「不明瞭→EPテーブル」側(スラー分割の相方、2026-08-12): mergeVibratoAndArpeggio
+    // (高速アルペジオ→EN統合、2026-08-14で拡張)の直後に必ず連結して呼ぶ(pitchEp割当て前の
+    // 生pitchSeqを直接連結するため)
+    const evA = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractPulseEvents(timeline, 'p1', 1)));
+    const evB = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractPulseEvents(timeline, 'p2', 2)));
+    const evC = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractTriEvents(timeline)));
     const evD = extractNoiseEvents(timeline);
     const dmcTriggers = extractDmcTriggers(timeline, writeLog, header);
     const bankInfo    = computeBankInfo(nsfBytes, header || {});
@@ -594,6 +595,16 @@
       return fields;
     }
 
+    // ノートエンベロープ(高速アルペジオ)を曲全体で共有登録するレジストリ(2026-08-14)。
+    // mergeVibratoAndArpeggioがev.noteEnvOffsetsを付与済みのイベントだけ登録する
+    // (toPitchFieldsと同じ「classify+registerを1回で済ませる」inlineスタイル)。
+    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
+    function toNoteEnvFields(ev) {
+      if (!ev.noteEnvOffsets) return {};
+      const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
+      return idx != null ? { noteEnv: idx } : {};
+    }
+
     // イベントを共通形式 { start, end, note, volume?/envelopeV?, instrument?, rawFreq? } に整形
     // (tieCandidateはスラー分割判定用にそのまま素通しする。src/convert/pitch.js
     // markSlurTies参照)
@@ -601,13 +612,15 @@
       { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq,
         tieCandidate: ev.tieCandidate },
       ev.note !== null ? toVolumeFields(ev) : {},
-      ev.note !== null ? toPitchFields(ev) : {}
+      ev.note !== null ? toPitchFields(ev) : {},
+      ev.note !== null ? toNoteEnvFields(ev) : {}
     );
     const chEventsA = evA.map(toCommon);
     const chEventsB = evB.map(toCommon);
     const chEventsC = evC.map(ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
-      ev.note !== null ? toPitchFields(ev) : {}
+      ev.note !== null ? toPitchFields(ev) : {},
+      ev.note !== null ? toNoteEnvFields(ev) : {}
     ));
     const chEventsD = evD.map(ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.on ? noisePeriodToNoteNum(ev.periodIdx) : null },
@@ -667,11 +680,14 @@
       if (!extractor) continue;
       const result = extractor(writeLog, totalFrames, envReg,
         chip === 'fds' ? fdsWaveReg : chip === 'n163' ? n163WaveReg : chip === 'vrc7' ? vrc7ToneReg : undefined,
-        initRegs, initWrites, options.n163Snapshots, pitchReg);
+        initRegs, initWrites, options.n163Snapshots, pitchReg, noteEnvReg);
       const letters = expansionLetterMap[chip];
       const hasPitchModForChip = chip !== 'vrc7'; // VRC7はfnum/block対数空間でD/EP/MP非対応(DESIGN-PITCH.md §7)
+      // EN(ノートエンベロープ)はfnum/blockを都度再計算するだけなのでVRC7でも使える
+      // (D/EP/MPと違い生レジスタへの単純加算を必要としない、src/mml/compiler.js
+      // segmentsToWriteLogVrc7参照)。hasPitchModとは独立にVRC7も含め常にtrue。
       result.channels.forEach((ch, index) => {
-        scoreChannels.push(Object.assign({}, ch, { letter: letters[index], hasDetune: true, hasPitchMod: hasPitchModForChip }));
+        scoreChannels.push(Object.assign({}, ch, { letter: letters[index], hasDetune: true, hasPitchMod: hasPitchModForChip, hasNoteEnv: true }));
         detuneEntries.push({ events: ch.events, periodFn: expansionPeriodFn(chip, index) });
       });
       if (result.fdsWave)  fdsWave  = result.fdsWave;
@@ -701,7 +717,7 @@
 
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm,
-      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(),
+      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(), ...fdsModDefLines]
     });
 

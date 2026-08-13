@@ -94,6 +94,8 @@
     // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
     // 借用先(PSG→FME7、SCC→N163)チップのEP対応範囲と一致させる(DESIGN-PITCH.md §7)。
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
+    // ノートエンベロープ(高速アルペジオ)の共有レジストリ(2026-08-14)。
+    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
 
     // SCCの自作波形もN163形式へ変換した上で曲全体で共有登録する(@N<n>としてMML本文の
     // ヘッダに埋め込む)。曲中に音色が切り替わる曲でも全て登録され、@<n>で選択される。
@@ -121,6 +123,12 @@
     // 大きくズラしてしまい聞くに堪えなかった。ユーザー確認の上detectChorusDetune方式を
     // 正式採用。
     MML.Convert.detectChorusDetune(ayResult.channels, fme7PeriodRaw);
+    // 高速アルペジオ→EN統合(2026-08-14拡張)。★必ずassignPitchEnvelopeより先に呼ぶこと:
+    // assignPitchEnvelopeは内部でmarkSlurTiesを呼び、qualifiesForSlurがev.noteEnvの
+    // 有無を見てタイ化を抑制する。ev.noteEnvが未確定(noteEnvOffsetsのまま)の状態で
+    // markSlurTiesが走ると、アルペジオ統合済みイベントが誤ってタイ候補と判定され、
+    // mmlEmit側のEN再送出がスキップされる退行になる(SPC変換で実測発覚)。
+    MML.Convert.assignNoteEnvelope(ayResult.channels, noteEnvReg);
     // ピッチエンベロープ(厳密周期ビブラート)も同じfme7PeriodRawで借用先の生レジスタ
     // 空間へ変換してから分類・登録する(DESIGN-PITCH.md Phase 1、D<n>の直後に置くのは
     // 両方とも同じ「借用先レジスタ空間への変換」処理系列だから)。
@@ -136,6 +144,9 @@
       const n163ActualNumCh = computeActualN163ChannelCount(sccResult.channels);
       MML.Convert.detectChorusDetune(
         sccResult.channels, n163FreqRegRaw(MML.Kss2MmlExpansion.SCC_WAVE_LEN, n163ActualNumCh));
+      // 高速アルペジオ→EN統合(2026-08-14拡張)。ay.jsのブロックと同じ理由で
+      // assignPitchEnvelope(内部でmarkSlurTiesを呼ぶ)より必ず先に呼ぶこと。
+      MML.Convert.assignNoteEnvelope(sccResult.channels, noteEnvReg);
       MML.Convert.assignPitchEnvelope(
         sccResult.channels, n163FreqRegRaw(MML.Kss2MmlExpansion.SCC_WAVE_LEN, n163ActualNumCh), pitchReg);
       const n163Letters = expansionLetterMap.n163;
@@ -156,7 +167,12 @@
       // PSG/SCCと同じ理由でVRC7側も音程補正する(VRC7のfnum式を使用)。
       MML.Convert.detectChorusDetune(opllResult.channels, vrc7FnumRaw);
       const vrc7Letters = expansionLetterMap.vrc7;
-      opllResult.channels.forEach((ch, i) => scoreChannels.push(Object.assign({}, ch, { letter: vrc7Letters[i], hasDetune: true })));
+      // EN(ノートエンベロープ)はfnum/blockを都度再計算するだけなのでOPLL(=VRC7)でも使える
+      // (D/EP/MPと違い生レジスタへの単純加算を必要としない、nsf2mml/converter.jsと同じ理由)。
+      // OPLLはmarkSlurTiesが掛からない(ay.js/scc.jsと違い、これらのチャンネルには
+      // タイ分割の仕組み自体が無い)ため、ay/sccのような呼び出し順序の制約は無い。
+      MML.Convert.assignNoteEnvelope(opllResult.channels, noteEnvReg);
+      opllResult.channels.forEach((ch, i) => scoreChannels.push(Object.assign({}, ch, { letter: vrc7Letters[i], hasDetune: true, hasNoteEnv: true })));
     }
 
     // 音長に加え、チャンネル毎の発音開始間隔(IOI)も検出材料にする
@@ -201,7 +217,7 @@
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm,
       headerLines: [
-        ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(),
+        ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(hasScc ? n163WaveReg.defLines() : []),
         ...(hasOpll ? vrc7ToneReg.defLines() : [])
       ]

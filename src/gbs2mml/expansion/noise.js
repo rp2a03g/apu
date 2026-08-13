@@ -15,6 +15,7 @@
   'use strict';
   const MML = global.MML = global.MML || {};
   MML.Gbs2MmlExpansion = MML.Gbs2MmlExpansion || {};
+  const { volumeAt, updateAnchor } = MML.Gbs2MmlExpansion.hwEnvelope;
 
   // GBノイズ周期(Tステート) = 16 * divisor * 2^shift (apuGb.jsのNoiseChannel.periodT()と同じ式)
   const NOISE_DIVISOR = [8, 16, 32, 48, 64, 80, 96, 112];
@@ -40,31 +41,34 @@
     return 31 - best;
   }
 
-  function extractEvents(snapshots) {
+  function extractEvents(snapshots, playFps) {
     const events = [];
     let cur = null;
     let lastTriggerSeq = null;
+    let anchor = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
     for (let f = 0; f < snapshots.length; f++) {
       const c = snapshots[f].ch4;
-      const on = c.enabled && c.vol > 0;
-      const note = on ? gbNoiseFreqToNote(gbNoiseFreq(c.divisorCode, c.clockShift)) : null;
       const triggered = lastTriggerSeq !== null && c.triggerSeq !== lastTriggerSeq;
       lastTriggerSeq = c.triggerSeq;
-      if (!cur) { cur = { note, start: f, end: f, volSeq: [c.vol] }; continue; }
+      anchor = updateAnchor(anchor, c, f, triggered);
+      const vol = volumeAt(anchor, f, playFps);
+      const on = c.enabled && vol > 0;
+      const note = on ? gbNoiseFreqToNote(gbNoiseFreq(c.divisorCode, c.clockShift)) : null;
+      if (!cur) { cur = { note, start: f, end: f, volSeq: [vol] }; continue; }
       if (triggered || note !== cur.note) {
         flush(f);
-        cur = { note, start: f, end: f, volSeq: [c.vol] };
+        cur = { note, start: f, end: f, volSeq: [vol] };
       } else {
-        cur.volSeq.push(c.vol);
+        cur.volSeq.push(vol);
       }
     }
     flush(snapshots.length);
     return events;
   }
 
-  MML.Gbs2MmlExpansion.noise = function (snapshots, envReg) {
-    const events = extractEvents(snapshots);
+  MML.Gbs2MmlExpansion.noise = function (snapshots, envReg, playFps) {
+    const events = extractEvents(snapshots, playFps);
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };

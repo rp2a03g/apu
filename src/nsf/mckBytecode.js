@@ -267,7 +267,7 @@
   // そのまま使う(255=off はremap対象外で常にそのまま)。remapが渡されているのに対応する
   // エントリが無い(未定義のEP<n>/MP<n>を参照)場合はオペコード自体を出力しない
   // (compiler.js側もそのセグメントは効果0として扱うため、無出力=無効果で整合する)
-  MckBytecode.serialize = function (segments, immediateWrites, envIndexRemap, loopFrame, pitchEnvIndexRemap, vibratoIndexRemap, vrIndexRemap, usesVr) {
+  MckBytecode.serialize = function (segments, immediateWrites, envIndexRemap, loopFrame, pitchEnvIndexRemap, vibratoIndexRemap, noteEnvIndexRemap, vrIndexRemap, usesVr) {
     const bytes = [];
     let loopByteOffset = null;
     let lastVolume = null;
@@ -404,8 +404,14 @@
           lastTone = tone;
         }
         if (seg.noteEnv != null && seg.noteEnv !== lastNoteEnv) {
-          bytes.push(OP_NOTE_ENV, seg.noteEnv & 0xff);
-          lastNoteEnv = seg.noteEnv;
+          // @v<n>/EP<n>と同じ「実際に使われているインデックスだけをコンパクトに詰める」方式
+          // (2026-08-14実装)。255(ENOF)はそのまま素通し(remapテーブルには存在しない値)。
+          const ne = seg.noteEnv === 255 ? 255
+            : (noteEnvIndexRemap ? noteEnvIndexRemap[seg.noteEnv] : seg.noteEnv);
+          if (ne != null) {
+            bytes.push(OP_NOTE_ENV, ne & 0xff);
+            lastNoteEnv = seg.noteEnv;
+          }
         }
         // EP<n>,<delay>(2026-08-11 別プロジェクトA): 番号だけでなくdelayも音符ごとの状態
         // なので、番号が前回と同じでもdelayが違えば出し直す(src/convert/mmlEmit.jsの

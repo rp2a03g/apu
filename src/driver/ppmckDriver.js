@@ -14,8 +14,15 @@
  * デフォルト波形(fdsDefaultWave/n163DefaultWave相当)を使う(`@FM`/`@N`によるMML側の
  * カスタム波形定義はNSF書き出しには未反映)。VRC7はROMプリセット音色(1-15)のみ対応
  * (`OP<n>`によるカスタム音色0番のロードは未反映、常にプリセットのみ)。
- * ループ命令(0xA0/0xA1)・EN(0xF7、ノートエンベロープ=アルペジオ)は引き続き未対応
- * (オペコードを読み飛ばすだけ)。
+ * ループ命令(0xA0/0xA1)は引き続き未対応(オペコードを読み飛ばすだけ)。
+ * EN(0xF7、ノートエンベロープ=アルペジオ)は2026-08-14実装(EN_STEP/RD_NOTEENV参照)。
+ * ノート番号空間の累積オフセット(compiler.jsのcumulativeEnvelopeValueと同じ)をNOTE,Xへ
+ * 加算してから周波数テーブルを引き直す方式。2A03パルスA/B・三角波・MMC5パルス1/2・
+ * VRC6パルス1/2/矩形波(サウ)・FME7(LOOKUP_FME7_PERIOD)・FDS(WFV_T13/WFO_T13直書き)・
+ * N163(WFV_Tn/WFO_Tnテンプレート、3byte/entryテーブルのためTABLE_MAX縮小版)・
+ * VRC7(WFO_Tn新設、NOTE+ENVALからfnum/blockを再計算し$9010/$9030を再書込み)が対象。
+ * ノイズのみ対象外(離散周期選択でアルペジオという概念が馴染まないため)。SPCブラウザ側
+ * 抽出は対応済みだがSPCはNSF書き出し経路を持たないためこのドライバとは無関係。
  * FME7のノイズ(0xF1=N<n>)と@<n>によるミキサー制御(0=ミュート/1=トーン/2=ノイズ/
  * 3=トーン+ノイズ、@2はノート番号がノイズ周期)、およびハードウェアエンベロープ
  * (0xF2=S<n>/M<n>)は2026-07-28に実装(FME7_PREP/FME7_WRITE_VOL参照)。
@@ -289,7 +296,7 @@
   // (いずれもchannelTypes.length件)。act[i]=1のチャンネルは、トラック終端到達時に
   // 無音化して止まる代わりにbank[i]/lo[i]/hi[i]が指す位置へジャンプして再生を続ける
   // (buildBankedNsfBytes参照)。省略時は全チャンネルact=0(従来通り終端で停止)
-  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList) {
+  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList) {
     envelopes = envelopes || {};
     dpcmLayout = dpcmLayout || {};
     dpcmSamples = dpcmSamples || {};
@@ -297,6 +304,7 @@
     epIndexList = epIndexList || [];
     mpIndexList = mpIndexList || [];
     vrIndexList = vrIndexList || [];
+    enIndexList = enIndexList || [];
     usesPortamento = !!usesPortamento;
     usesPitchBreak = !!usesPitchBreak;
     usesSmooth = !!usesSmooth;
@@ -360,11 +368,16 @@
     const mpExtraSlots = usesMp ? 11 : 0;
     // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC): 11byte/ch(MPと同数)
     const ptExtraSlots = usesPortamento ? 11 : 0;
+    // EN<n>(ノートエンベロープ=高速アルペジオ、2026-08-14): ENACT/ENSEL/ENTICK/ENVALの
+    // 4byte/ch。EPと違いdelay概念が無く、値もノート番号空間の符号付き累積オフセット
+    // (1byteで十分な範囲)なので16bit(EPVALLO/HI)ではなく1byte(ENVAL)で済む
+    const usesEn = enIndexList.length > 0;
+    const enExtraSlots = usesEn ? 4 : 0;
     // タイ(&)による異音程レガート(2026-08-12): 専用のZP状態は持たない(NOTE,Xを
     // 直接書き替えるだけ)ため追加スロットは不要。WRITE_FREQ_ONLY自体は必要なので
-    // usesFreqOnlyの判定にだけ加える。PS(2026-08-13)も毎フレーム継続再計算が必要なので
-    // 同じくusesFreqOnlyに加える
-    const usesFreqOnly = usesEp || usesMp || usesPortamento || usesPitchBreak || usesPitchShift;
+    // usesFreqOnlyの判定にだけ加える。PS(2026-08-13)・EN<n>(2026-08-14)も毎フレーム
+    // 継続再計算・再書込みが必要なので同じくusesFreqOnlyに加える
+    const usesFreqOnly = usesEp || usesMp || usesPortamento || usesPitchBreak || usesPitchShift || usesEn;
     // LASTHI(位相リセット副作用のある上位バイトの直近書込み値)はusesFreqOnly由来の
     // 継続再計算に加え、SM(音符アタック時の書込み省略判定)でも必要
     const needsLastHi = usesFreqOnly || usesSmooth;
@@ -382,7 +395,7 @@
     // (REL_LOOKUP/既存のWRITE_VOL_ONLYをそのまま再利用)を流用する
     const vrExtraSlots = usesVr ? 3 : 0;
     const totalPerChanBlocks = 14 + n163ExtraSlots + fme7ExtraSlots + epExtraSlots + mpExtraSlots +
-      ptExtraSlots + freqOnlyExtraSlots + smoothExtraSlots + psExtraSlots + vrExtraSlots;
+      ptExtraSlots + enExtraSlots + freqOnlyExtraSlots + smoothExtraSlots + psExtraSlots + vrExtraSlots;
     // fixedBase以降(JMPLO,JMPHI,FME7専用グローバル,CEILDIVスクラッチ)の固定個数。
     // 下のchArrayBase判定に含める(このブロックも$0100-$01FFに掛かってはいけないため)。
     // PS(2026-08-13)使用時は16bit÷8bit版CEILDIV16のスクラッチ(CDA16LO/HI)+
@@ -468,11 +481,21 @@
       PTDELAYSET = ptBase + 3 * n, PTSTEPSZ = ptBase + 4 * n, PTSTEPINT = ptBase + 5 * n,
       PTDELAY = ptBase + 6 * n, PTDUR = ptBase + 7 * n, PTSTEPCNT = ptBase + 8 * n,
       PTVALLO = ptBase + 9 * n, PTVALHI = ptBase + 10 * n;
-    // LASTHI: EP/MP/PT/PSの継続フレーム再書込み(WRITE_FREQ_ONLY)、およびSMの音符アタック時
+    // EN<n>(ノートエンベロープ=高速アルペジオ、2026-08-14)用チャンネルごとの状態。
+    // usesEnの時のみ実際に使う。EP_LOOKUPと違い「値を直接読み直す」方式ではなく、
+    // 前回値へ差分を足し込む累積方式(compiler.jsのcumulativeEnvelopeValueと同じ)。
+    // ENACT=有効フラグ、ENSEL=選択中のROMテーブル番号(EN_LEN/EN_LOOP/EN_PTRの添字)、
+    // ENTICK=次に読むテーブル位置(post-increment、EPTICKと同じ考え方だが値を直接読む
+    // のではなく都度加算していく点が違う)、ENVAL=現在の累積オフセット(符号付き1byte、
+    // ノート番号(0-107)空間なので16bitは不要。LOOKUP_PULSE_PERIOD等がNOTE,Xへ
+    // 加算してからテーブル参照する)
+    const enBase = ptBase + ptExtraSlots * n;
+    const ENACT = enBase, ENSEL = enBase + n, ENTICK = enBase + 2 * n, ENVAL = enBase + 3 * n;
+    // LASTHI: EP/MP/PT/PS/ENの継続フレーム再書込み(WRITE_FREQ_ONLY)、およびSMの音符アタック時
     // 書込み省略判定で、位相リセット副作用を持つ上位バイトレジスタを「実際に変わった時だけ」
     // 書くための直近書込み値(compiler.js writePitchModulation/WFV_T*のsmoothLastHiと
-    // 同じロジック、n×1byte)。needsLastHi(EP・MP・PT・PS・SMのいずれかを使う)曲でのみ確保する
-    const freqOnlyBase = ptBase + ptExtraSlots * n;
+    // 同じロジック、n×1byte)。needsLastHi(EP・MP・PT・PS・SM・ENのいずれかを使う)曲でのみ確保する
+    const freqOnlyBase = enBase + enExtraSlots * n;
     const LASTHI = freqOnlyBase;
     // SM/SMOF(2026-08-13、対応ABC): 音符ごとのON/OFF状態。usesSmoothの時のみ実際に使う
     const smoothBase = freqOnlyBase + freqOnlyExtraSlots * n;
@@ -803,6 +826,76 @@ EP_STEP_LOOKUP:
     RTS`);
     }
 
+    // --- EN<n>(ノートエンベロープ=高速アルペジオ、2026-08-14)。EPと同じ「使われている
+    // インデックスだけをコンパクトに詰める」方式(enIndexList/noteEnvIndexRemap、
+    // buildBankedNsfBytes参照)。値は符号付きbyte(-128〜127、EP_DATAと同じ範囲)。
+    // ただしEP_LOOKUPと違い「テーブルの値をそのまま読み直す」方式ではなく、前回の
+    // 累積値(ENVAL,X)へ今回ぶんの差分を足し込む方式(compiler.jsのcumulativeEnvelopeValue
+    // が「values[0..tick]の総和」であることの、フレームごとの逐次計算版) ---
+    const enTableCount = enIndexList.length;
+    if (enTableCount > 0) {
+      const enLens = enIndexList.map(idx => ((envelopes.en[idx] || {}).values || []).length);
+      const enLoops = enIndexList.map(idx => {
+        const loop = (envelopes.en[idx] || {}).loop;
+        return (loop == null) ? 0xff : loop;
+      });
+      const enDataLabels = enIndexList.map((idx, i) => `EN_DATA_${i}`);
+      const enDataBlocks = enIndexList.map((idx, i) => {
+        const values = ((envelopes.en[idx] || {}).values || []).map(v => Math.max(-128, Math.min(127, v | 0)) & 0xff);
+        return `EN_DATA_${i}:\n${bytesToDb(new Uint8Array(values))}`;
+      });
+      extraTables.push(
+        `EN_LEN:\n    .byte ${enLens.join(',')}\n` +
+        `EN_LOOP:\n    .byte ${enLoops.join(',')}\n` +
+        `EN_PTR:\n    .word ${enDataLabels.join(',')}\n` +
+        enDataBlocks.join('\n')
+      );
+      // --- EN<n>: X=チャンネル番号のまま呼ぶ。テーブル探索自体はEP_LOOKUPと同型
+      // (ENSEL[X]/ENTICK[X]からEN_LEN/EN_LOOPを引く)だが、末尾に達し「ループ無し」なら
+      // それ以上は何もせず現状の累積値を保持したまま抜ける(compiler.js側の「非ループは
+      // 最終累積値を永久ホールド」と同じ意味。同じ末尾要素を足し込み続けるとドリフトする
+      // ため、EPの「末尾値を読み直す」方式とはここが違う)。ループ有りなら末尾を過ぎた分は
+      // ENTICKをループ開始位置へ巻き戻してから通常通り加算する ---
+      extraHandlers.push(`
+EN_STEP:
+    LDA ${hex(ENACT)},X
+    BEQ EN_STEP_DONE
+    LDA ${hex(ENSEL)},X
+    TAY
+    LDA EN_LEN,Y
+    STA ${hex(PERLO2)}
+    LDA ${hex(ENTICK)},X
+    CMP ${hex(PERLO2)}
+    BCC ENLK_ADD
+    LDA EN_LOOP,Y
+    CMP #$FF
+    BEQ EN_STEP_DONE
+    STA ${hex(ENTICK)},X
+ENLK_ADD:
+    TYA
+    ASL A
+    TAY
+    LDA EN_PTR,Y
+    STA ${hex(PERLO)}
+    LDA EN_PTR+1,Y
+    STA ${hex(PERHI)}
+    LDA ${hex(ENTICK)},X
+    CLC
+    ADC ${hex(PERLO)}
+    STA ${hex(PERLO)}
+    BCC ENLK_NOCARRY
+    INC ${hex(PERHI)}
+ENLK_NOCARRY:
+    LDY #$00
+    LDA (${hex(PERLO)}),Y
+    CLC
+    ADC ${hex(ENVAL)},X
+    STA ${hex(ENVAL)},X
+    INC ${hex(ENTICK)},X
+EN_STEP_DONE:
+    RTS`);
+    }
+
     // --- MP<n>(ソフトウェアビブラート)。ppmck実機lfo_set_sub/warizan_startの忠実移植
     // (compiler.jsのvibratoSequence/ceilDivPpmckと同じ状態遷移。DESIGN-PITCH.md
     // 別プロジェクトB参照)。MP_DELAY/MP_SPEED/MP_DEPTHは生の3値(delay/quarter/rawDepth)
@@ -1052,10 +1145,17 @@ PS_STEP_ADVANCE:
       extraHandlers.push(`
 LOOKUP_SAW_PERIOD:
     LDA ${hex(NOTE)},X
+${usesEn ? `    CLC
+    ADC ${hex(ENVAL)},X
+    BPL LSP_NONNEG
+    LDA #$00
+    JMP LSP_INDEX
+LSP_NONNEG:` : ''}
     CMP #${hex(TABLE_MAX)}
     BCC LSP_OK
     LDA #${hex(TABLE_MAX)}
 LSP_OK:
+LSP_INDEX:
     ASL A
     TAX
     LDA SAW_TABLE,X
@@ -1146,7 +1246,7 @@ SIL_T6:
     RTS`);
       wfvEntries[4] = 'WFV_T4'; wfvEntries[5] = 'WFV_T5'; wfvEntries[6] = 'WFV_T6';
       silEntries[4] = 'SIL_T4'; silEntries[5] = 'SIL_T5'; silEntries[6] = 'SIL_T6';
-      if (usesEp || usesMp || usesPortamento || usesPitchBreak) {
+      if (usesEp || usesMp || usesPortamento || usesPitchBreak || usesEn) {
         extraHandlers.push(`
 ; --- VRC6パルス1/2・矩形波(サウ)のEP<n>/MP<n>継続フレーム専用(周期のみ再書込み) ---
 WFO_T4:
@@ -1283,7 +1383,7 @@ SIL_T8:
     RTS`);
       wfvEntries[7] = 'WFV_T7'; wfvEntries[8] = 'WFV_T8';
       silEntries[7] = 'SIL_T7'; silEntries[8] = 'SIL_T8';
-      if (usesEp || usesMp || usesPortamento || usesPitchBreak) {
+      if (usesEp || usesMp || usesPortamento || usesPitchBreak || usesEn) {
         extraHandlers.push(`
 ; --- MMC5パルス1/2のEP<n>/MP<n>継続フレーム専用(周期のみ再書込み) ---
 WFO_T7:
@@ -1351,10 +1451,17 @@ WFV_VOL_T8:
       extraHandlers.push(`
 LOOKUP_FME7_PERIOD:
     LDA ${hex(NOTE)},X
+${usesEn ? `    CLC
+    ADC ${hex(ENVAL)},X
+    BPL LFP_NONNEG
+    LDA #$00
+    JMP LFP_INDEX
+LFP_NONNEG:` : ''}
     CMP #${hex(TABLE_MAX)}
     BCC LFP_OK
     LDA #${hex(TABLE_MAX)}
 LFP_OK:
+LFP_INDEX:
     ASL A
     TAX
     LDA FME7_TABLE,X
@@ -1534,7 +1641,7 @@ SIL_T11:
     RTS`);
       wfvEntries[9] = 'WFV_T9'; wfvEntries[10] = 'WFV_T10'; wfvEntries[11] = 'WFV_T11';
       silEntries[9] = 'SIL_T9'; silEntries[10] = 'SIL_T10'; silEntries[11] = 'SIL_T11';
-      if (usesEp || usesMp || usesPortamento || usesPitchBreak) {
+      if (usesEp || usesMp || usesPortamento || usesPitchBreak || usesEn) {
         // FME7は間接アドレッシング($C000選択/$E000データ)のみで、2A03等のような
         // 「上位バイト書込みで位相リセット」という副作用が無いため(compiler.jsの
         // segmentsToWriteLogFme7もlastHiガード無しで毎フレーム両バイトを書く)、
@@ -1676,10 +1783,17 @@ WFV13_TONE_OK:
 WFV_T13:
 ${fdsReload}    STX ${hex(CHIDX)}
     LDA ${hex(NOTE)},X
+${usesEn ? `    CLC
+    ADC ${hex(ENVAL)},X
+    BPL WFV13_NONNEG
+    LDA #$00
+    JMP WFV13_INDEX
+WFV13_NONNEG:` : ''}
     CMP #${hex(TABLE_MAX)}
     BCC WFV13_OK
     LDA #${hex(TABLE_MAX)}
 WFV13_OK:
+WFV13_INDEX:
     ASL A
     TAX
     LDA FDS_TABLE,X
@@ -1703,17 +1817,24 @@ SIL_T13:
     RTS`);
       wfvEntries[13] = 'WFV_T13';
       silEntries[13] = 'SIL_T13';
-      if (usesEp || usesMp || usesPortamento || usesPitchBreak) {
+      if (usesEp || usesMp || usesPortamento || usesPitchBreak || usesEn) {
         extraHandlers.push(`
 ; --- FDSのEP<n>/MP<n>継続フレーム専用(周期のみ再書込み。波形再ロードは音符アタック時
 ; のみなのでここでは行わない) ---
 WFO_T13:
     STX ${hex(CHIDX)}
     LDA ${hex(NOTE)},X
+${usesEn ? `    CLC
+    ADC ${hex(ENVAL)},X
+    BPL WFO13_NONNEG
+    LDA #$00
+    JMP WFO13_INDEX
+WFO13_NONNEG:` : ''}
     CMP #${hex(TABLE_MAX)}
     BCC WFO13_OK
     LDA #${hex(TABLE_MAX)}
 WFO13_OK:
+WFO13_INDEX:
     ASL A
     TAX
     LDA FDS_TABLE,X
@@ -1951,10 +2072,17 @@ N163_TONE_OK:
 WFV_T${t}:
 ${n163ToneCheckCall}    STX ${hex(CHIDX)}
     LDA ${hex(NOTE)},X
+${usesEn ? `    CLC
+    ADC ${hex(ENVAL)},X
+    BPL WFV${t}_NONNEG
+    LDA #$00
+    JMP WFV${t}_INDEX
+WFV${t}_NONNEG:` : ''}
     CMP #${hex(n163TableMax)}
     BCC WFV${t}_OK
     LDA #${hex(n163TableMax)}
 WFV${t}_OK:
+WFV${t}_INDEX:
     ; note*3 (テーブルは1エントリ3バイト) = note+note+note (音程は85までなので8bitで安全)
     STA ${hex(PERLO)}
     CLC
@@ -1989,7 +2117,7 @@ ${wfvVolWrite}
     RTS`);
           wfvVolEntries[t] = `WFV_VOL_T${t}`;
         }
-        if (usesEp || usesMp || usesPortamento || usesPitchBreak) {
+        if (usesEp || usesMp || usesPortamento || usesPitchBreak || usesEn) {
           // N163は間接アドレッシング(オートインクリメント+位相byte空読み)のみで、
           // 2A03等のような「上位バイト書込みで位相リセット」という副作用が無いため
           // (compiler.jsのwriteN163Freqもlastガード無しで毎フレーム全バイトを書く)、
@@ -2000,10 +2128,17 @@ ${wfvVolWrite}
 WFO_T${t}:
     STX ${hex(CHIDX)}
     LDA ${hex(NOTE)},X
+${usesEn ? `    CLC
+    ADC ${hex(ENVAL)},X
+    BPL WFO${t}_NONNEG
+    LDA #$00
+    JMP WFO${t}_INDEX
+WFO${t}_NONNEG:` : ''}
     CMP #${hex(n163TableMax)}
     BCC WFO${t}_OK
     LDA #${hex(n163TableMax)}
 WFO${t}_OK:
+WFO${t}_INDEX:
     STA ${hex(PERLO)}
     CLC
     ADC ${hex(PERLO)}
@@ -2146,10 +2281,17 @@ ADN163_DONE:
 WFV_T${t}:
     STX ${hex(CHIDX)}
     LDA ${hex(NOTE)},X
+${usesEn ? `    CLC
+    ADC ${hex(ENVAL)},X
+    BPL WFV${t}_NONNEG
+    LDA #$00
+    JMP WFV${t}_INDEX
+WFV${t}_NONNEG:` : ''}
     CMP #${hex(TABLE_MAX)}
     BCC WFV${t}_OK
     LDA #${hex(TABLE_MAX)}
 WFV${t}_OK:
+WFV${t}_INDEX:
     ASL A
     TAX
     LDA VRC7_TABLE,X
@@ -2188,6 +2330,47 @@ SIL_T${t}:
     RTS`);
         wfvEntries[t] = `WFV_T${t}`;
         silEntries[t] = `SIL_T${t}`;
+        if (usesEn) {
+          // VRC7のEN<n>継続フレーム専用(fnum/blockのみ再計算・再書込み。音量/音色・
+          // キーオンのトグルは行わない=既に鳴っている音符のフレーム継続のため、
+          // $20+ch書込みは常にkeyonビット(0x10)を立てたまま送ってエッジを再発生させない
+          // (src/mml/compiler.js segmentsToWriteLogVrc7のEN継続ループと同じ理由)。
+          // VRC7は元々D/EP/MP/PT非対応(fnum/block対数空間)だったためWFO_T${t}自体が
+          // 無かったが、ENは対応可能なのでここで新設する。
+          vrc7Handlers.push(`
+WFO_T${t}:
+    STX ${hex(CHIDX)}
+    LDA ${hex(NOTE)},X
+    CLC
+    ADC ${hex(ENVAL)},X
+    BPL WFO${t}_NONNEG
+    LDA #$00
+    JMP WFO${t}_INDEX
+WFO${t}_NONNEG:
+    CMP #${hex(TABLE_MAX)}
+    BCC WFO${t}_OK
+    LDA #${hex(TABLE_MAX)}
+WFO${t}_OK:
+WFO${t}_INDEX:
+    ASL A
+    TAX
+    LDA VRC7_TABLE,X
+    STA ${hex(PERLO)}
+    LDA VRC7_TABLE+1,X
+    STA ${hex(PERHI)}
+    LDX ${hex(CHIDX)}
+    LDA #${hex(0x10 + ch)}
+    STA $9010
+    LDA ${hex(PERLO)}
+    STA $9030
+    LDA #${hex(0x20 + ch)}
+    STA $9010
+    LDA ${hex(PERHI)}
+    ORA #$10
+    STA $9030
+    RTS`);
+          wfoEntries[t] = `WFO_T${t}`;
+        }
       }
       extraHandlers.push(vrc7Handlers.join('\n'));
 
@@ -2397,18 +2580,28 @@ ${usesPitchShift ? `    ; PS(ポルタメント、実機準拠、2026-08-13)が�
     ; WRITE_FREQ_ONLYを呼ぶかどうかの判定にPS_STEP呼び出し後のPSACTを使うと、
     ; ちょうど目標に到達した最後のフレームだけ書き込みが漏れる(クランプした値が
     ; レジスタへ反映されないまま次のフレームまでレジスタが古い値を保持し続ける)
-    ; バグになる。呼ぶ前の値を${hex(PERLO2)}(チャンネル非依存の使い捨てスクラッチ、
-    ; このタイミングでは他に使用者が無い)へ退避しておき、判定にはそちらを使う
+    ; バグになる。呼ぶ前の値を${hex(CDA)}(チャンネル非依存の使い捨てスクラッチ、
+    ; 通常はRD_PORTAMENTO/RD_PITCHENVのCEILDIV専用だがSERVICE_CH実行中には未使用)
+    ; へ退避しておき、判定にはそちらを使う。★PERLO2はこの直後のEN_STEP(2026-08-14
+    ; 追加)がテーブル長比較の一時スクラッチとして使うため、ここでは使えない
+    ; (使うとEN_STEP実行後にPS_STEP呼び出し前のPSACT値が失われる)
     LDA ${hex(PSACT)},X
-    STA ${hex(PERLO2)}
+    STA ${hex(CDA)}
     BEQ SVC_NOPS
     JSR PS_STEP
 SVC_NOPS:` : ''}
+${usesEn ? `    ; EN<n>が有効なら、このフレーム分tickを進めて累積値を更新する(テーブル探索・
+    ; 累積加算・ループ処理はEN_STEP内で行う、RD_NOTEと共通のルーチン)
+    LDA ${hex(ENACT)},X
+    BEQ SVC_NOEN
+    JSR EN_STEP
+SVC_NOEN:` : ''}
 ${usesFreqOnly ? `    LDA #$00
 ${usesEp ? `    ORA ${hex(EPACT)},X` : ''}
 ${usesMp ? `    ORA ${hex(MPACT)},X` : ''}
 ${usesPortamento ? `    ORA ${hex(PTACT)},X` : ''}
-${usesPitchShift ? `    ORA ${hex(PERLO2)}` : ''}
+${usesPitchShift ? `    ORA ${hex(CDA)}` : ''}
+${usesEn ? `    ORA ${hex(ENACT)},X` : ''}
     BEQ SVC_NOFREQ
     JSR WRITE_FREQ_ONLY
 SVC_NOFREQ:` : ''}
@@ -2457,8 +2650,7 @@ ${usesPitchBreak ? '    CMP #$ED\n    BEQ RD_JMP_PITCHBREAK' : ''}
     BEQ RD_JMP_REST
     CMP #$F4
     BEQ RD_JMP_WAIT
-    CMP #$F7
-    BEQ RD_SKIP1
+${usesEn ? '    CMP #$F7\n    BEQ RD_JMP_NOTEENV' : '    CMP #$F7\n    BEQ RD_SKIP1'}
 ${usesEp ? '    CMP #$F8\n    BEQ RD_JMP_PITCHENV' : '    CMP #$F8\n    BEQ RD_SKIP1'}
 ${usesMp ? '    CMP #$FB\n    BEQ RD_JMP_VIBRATO' : '    CMP #$FB\n    BEQ RD_SKIP1'}
 ${usesPortamento ? '    CMP #$F9\n    BEQ RD_JMP_PORTAMENTO' : '    CMP #$F9\n    BEQ RD_SKIP4'}
@@ -2494,6 +2686,7 @@ RD_JMP_TONE:
     JMP RD_TONE
 RD_JMP_DETUNE:
     JMP RD_DETUNE
+${usesEn ? 'RD_JMP_NOTEENV:\n    JMP RD_NOTEENV' : ''}
 ${usesEp ? 'RD_JMP_PITCHENV:\n    JMP RD_PITCHENV' : ''}
 ${usesMp ? 'RD_JMP_VIBRATO:\n    JMP RD_VIBRATO' : ''}
 ${usesPortamento ? 'RD_JMP_PORTAMENTO:\n    JMP RD_PORTAMENTO' : ''}
@@ -2644,6 +2837,24 @@ ${usesVr ? `
 RD_VRENV:
     JSR READ_BYTE
     STA ${hex(VRSEL)},X
+    JMP RD_LOOP` : ''}
+${usesEn ? `
+; --- EN<n>ノートエンベロープ選択(0xF7): 直後1バイトが[ROM上のコンパクトなテーブル
+; 番号($FF=ENOF、解除)]。MP<n>と同じくdelay概念が無い1バイト固定長。実際の値の反映
+; (ENTICK/ENVALリセット+EN_STEP初回呼び出し)はRD_NOTE(音符アタック時)で行う。
+; ここではENACT/ENSELを更新するだけ(@v<n>のRD_VOLENVと同じ設計) ---
+RD_NOTEENV:
+    JSR READ_BYTE
+    CMP #$FF
+    BNE RD_NOTEENV_ON
+    LDA #$00
+    STA ${hex(ENACT)},X
+    STA ${hex(ENVAL)},X  ; ★ENOFで累積値も0に戻す(RD_PITCHENVと同じ教訓、2026-08-14)
+    JMP RD_LOOP
+RD_NOTEENV_ON:
+    STA ${hex(ENSEL)},X
+    LDA #$01
+    STA ${hex(ENACT)},X
     JMP RD_LOOP` : ''}
 ${usesEp ? `
 ; --- EP<n>,<delay>ピッチエンベロープ選択(0xF8): 次の2バイトが[ROM上のコンパクトな
@@ -2867,6 +3078,10 @@ ${usesPitchShift ? `    LDA ${hex(PSACT)},X
     BEQ RPB_NOPS
     JSR PS_STEP
 RPB_NOPS:` : ''}
+${usesEn ? `    LDA ${hex(ENACT)},X
+    BEQ RPB_NOEN
+    JSR EN_STEP
+RPB_NOEN:` : ''}
     JSR WRITE_FREQ_ONLY
     JMP RD_RETURN
 ` : ''}
@@ -2923,6 +3138,16 @@ ${usesEp ? `    ; EP<n>,<delay>も同じ理由(@v<n>のRD_NOTE_NOENVと同一の
     STA ${hex(EPTICK)},X
     JSR EP_STEP
 RD_NOTE_NOEP:` : ''}
+${usesEn ? `    ; EN<n>も"この音符から"必ずtick0/累積値0から再初期化する(@v<n>のRD_NOTE_NOENVと
+    ; 同じ理由。ENACT継続時に前の音符のENTICK/ENVALをそのまま引き継ぐと、アルペジオの
+    ; 違う位相から再生されてしまう)
+    LDA ${hex(ENACT)},X
+    BEQ RD_NOTE_NOEN
+    LDA #$00
+    STA ${hex(ENTICK)},X
+    STA ${hex(ENVAL)},X
+    JSR EN_STEP
+RD_NOTE_NOEN:` : ''}
 ${usesMp ? `    ; MP<n>も"この音符から"必ずdelay/quarterからリセットする(実機effect_init相当)。
     ; MPSTEPSZ/MPSTEPINTはMP<n>選択時(RD_VIBRATO)に計算済みの値をそのまま使う。
     ; リセット直後にLFO_SUB を1回呼び、1フレーム目(delay=0なら即座に動き出す)の値まで
@@ -3202,12 +3427,26 @@ WRITE_FREQ_ONLY:
 ; ${hex(NOTE)},Xから音程を読み、該当テーブルを引いてPERLO/PERHIへ格納する。
 ; 呼び出し後はXが破壊されるので、呼び出し元は${hex(CHIDX)}から復元すること)
 ; ============================================================
+; EN<n>(ノートエンベロープ)有効時、ノート番号にENVAL,X(符号付き累積オフセット)を
+; 加算してからテーブルを引く(compiler.jsのnoteFrequency(baseNoteNumber+enOffset)と
+; 同じ「ノート番号空間で加算してから周波数化」の6502側実装。D<n>/EP<n>/MP<n>のような
+; 生レジスタ空間への加算ではない点に注意)。加算結果が負に振れた場合は0へクランプする
+; (このアプリのfreqテーブルは0-107の108音分しか無いため)。上限側(TABLE_MAX超過)の
+; クランプは元からある。逆に極端に大きい正のオフセットで8bit符号付き加算がオーバーフロー
+; するケースは非対応(APPLY_DETUNEの上限側同様、通常の用途の値では発生しない)
 LOOKUP_PULSE_PERIOD:
     LDA ${hex(NOTE)},X
+${usesEn ? `    CLC
+    ADC ${hex(ENVAL)},X
+    BPL LPP_NONNEG
+    LDA #$00
+    JMP LPP_INDEX
+LPP_NONNEG:` : ''}
     CMP #${hex(TABLE_MAX)}
     BCC LPP_OK
     LDA #${hex(TABLE_MAX)}
 LPP_OK:
+LPP_INDEX:
     ASL A
     TAX
     LDA PULSE_TABLE,X
@@ -3218,10 +3457,17 @@ LPP_OK:
 
 LOOKUP_TRI_PERIOD:
     LDA ${hex(NOTE)},X
+${usesEn ? `    CLC
+    ADC ${hex(ENVAL)},X
+    BPL LTP_NONNEG
+    LDA #$00
+    JMP LTP_INDEX
+LTP_NONNEG:` : ''}
     CMP #${hex(TABLE_MAX)}
     BCC LTP_OK
     LDA #${hex(TABLE_MAX)}
 LTP_OK:
+LTP_INDEX:
     ASL A
     TAX
     LDA TRI_TABLE,X
@@ -3635,6 +3881,21 @@ SONG_LOOP_PTR_HI:
     const vrIndexRemap = {};
     vrIndexList.forEach((origIdx, i) => { vrIndexRemap[origIdx] = i; });
 
+    // EN<n>(ノートエンベロープ=高速アルペジオ)も@v/EP/MPと全く同じ「実際に使われている
+    // インデックスだけをコンパクトに詰める」方式(2026-08-14実装)。
+    // seg.noteEnvは255=off、それ以外がenvelopes.enへの生の添字
+    const usedEnIndices = new Set();
+    for (const ch of channelLetters) {
+      for (const seg of (segmentsByChannel[ch] || [])) {
+        if (seg.noteEnv != null && seg.noteEnv !== 255 && envelopes.en && envelopes.en[seg.noteEnv]) {
+          usedEnIndices.add(seg.noteEnv);
+        }
+      }
+    }
+    const enIndexList = Array.from(usedEnIndices).sort((a, b) => a - b);
+    const enIndexRemap = {};
+    enIndexList.forEach((origIdx, i) => { enIndexRemap[origIdx] = i; });
+
     // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC): target/duration/delayは
     // バイトコード上に直接の即値として乗る(EP/MPのようなROM上の共有テーブル・
     // インデックス圧縮の概念が無い)ため、「1曲中で使われているかどうか」の真偽値だけを
@@ -3701,6 +3962,7 @@ SONG_LOOP_PTR_HI:
       loopFrameByChannel[ch],
       epIndexRemap,
       mpIndexRemap,
+      enIndexRemap,
       vrIndexRemap,
       vrIndexList.length > 0));
     const chBytes = chSerialized.map(r => r.bytes);
@@ -3730,7 +3992,7 @@ SONG_LOOP_PTR_HI:
     }
     const songLoop = { act: loopAct, bank: loopBank, lo: loopLo, hi: loopHi };
 
-    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList);
+    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList);
     const asm = MML.Asm.assemble(src, { origin: 0x8000 });
     if (asm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: asm.errors, bankCount: 0, unsupportedExpansions };

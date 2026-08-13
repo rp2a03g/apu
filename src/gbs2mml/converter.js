@@ -49,13 +49,15 @@
     const envReg = new MML.Convert.EnvelopeRegistry();
     // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
+    // ノートエンベロープ(高速アルペジオ)の共有レジストリ(2026-08-14)。
+    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
     // GBの波形(4bit/32点→FDSの6bit/64点へビット拡張)を曲全体で共有登録する
     // (@FM<n>としてMML本文のヘッダに埋め込む。nsf2mml/expansion/fds.jsと同じ形式)。
     const fdsWaveReg = new MML.Convert.WaveRegistry('@FM');
 
-    const ch1Result = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch1', envReg);
-    const ch2Result = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch2', envReg);
-    const noiseResult = MML.Gbs2MmlExpansion.noise(snapshots, envReg);
+    const ch1Result = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch1', envReg, frameRate);
+    const ch2Result = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch2', envReg, frameRate);
+    const noiseResult = MML.Gbs2MmlExpansion.noise(snapshots, envReg, frameRate);
     const waveResult = MML.Gbs2MmlExpansion.wave(snapshots, fdsWaveReg, envReg);
     const hasWave = waveResult.events.some(ev => ev.note !== null);
 
@@ -67,6 +69,18 @@
     if (hasWave) {
       MML.Convert.applyPitchDetune([{ events: waveResult.events }], MML.Gbs2MmlExpansion._fdsPeriodRaw);
     }
+    // 高速アルペジオ→EN統合(mergeVibratoAndArpeggioがev.noteEnvOffsetsを付与済みの
+    // イベントを、曲全体で共有するnoteEnvRegへ登録してev.noteEnvを確定する。
+    // pitchReg(EP)と同じく複数チャンネルをまたいだ重複排除のため1つの呼び出しにまとめる)。
+    // ★必ずassignPitchEnvelopeより先に呼ぶこと(2026-08-14修正): assignPitchEnvelopeは
+    // 内部でmarkSlurTiesを呼び、qualifiesForSlurがev.noteEnvの有無を見てタイ化を
+    // 抑制する。ev.noteEnvがまだ未確定(noteEnvOffsetsのまま)の状態でmarkSlurTiesが
+    // 走ると、アルペジオ統合済みイベントが誤ってタイ候補と判定され、mmlEmit側の
+    // EN再送出(前回状態との差分判定)がスキップされて「@EN<n>定義は出力されるが
+    // どの音符も参照していない」という気付きにくい退行になる(SPC変換で実測発覚)。
+    MML.Convert.assignNoteEnvelope(
+      hasWave ? [ch1Result, ch2Result, waveResult] : [ch1Result, ch2Result], noteEnvReg);
+
     // ピッチエンベロープも同じperiodFnで借用先の生レジスタ空間へ変換してから
     // 分類・登録する(DESIGN-PITCH.md Phase 1、applyPitchDetuneと同じ変換系列)。
     MML.Convert.assignPitchEnvelope([{ events: ch1Result.events }], pulsePeriodRaw, pitchReg);
@@ -127,7 +141,7 @@
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm,
       headerLines: [
-        ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(),
+        ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(hasWave ? fdsWaveReg.defLines() : [])
       ]
     });

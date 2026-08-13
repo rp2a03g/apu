@@ -89,11 +89,15 @@
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, volume: ev.volume, instrument: ev.instrument, retrigger: ev.retrigger },
       ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
-      ev.vrc7Tone !== undefined ? { vrc7Tone: ev.vrc7Tone } : {}
+      ev.vrc7Tone !== undefined ? { vrc7Tone: ev.vrc7Tone } : {},
+      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}
     );
     return {
       channels: [0, 1, 2, 3, 4, 5].map(ch => ({
-        events: extractChannelEvents(timeline, ch, toneReg).map(toCommon),
+        // 高速アルペジオ→EN統合(2026-08-14拡張)。VRC7(=OPLL)はfnum/block対数空間の
+        // ためD/EP/MPは使えないが、ENはノート番号→fnum/blockを都度再計算するだけなので
+        // 使える(src/mml/compiler.js segmentsToWriteLogVrc7参照)
+        events: MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, ch, toneReg)).map(toCommon),
         hasVolume: true,
         hasInstrument: true,
         hasVrc7Tone: !!toneReg

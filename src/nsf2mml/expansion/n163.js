@@ -154,7 +154,7 @@
     return events;
   }
 
-  MML.Nsf2MmlExpansion.n163 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
+  MML.Nsf2MmlExpansion.n163 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg, noteEnvReg) {
     const timeline = buildTimeline(writeLog, initWrites, n163Snapshots);
     // 曲を通しての有効ch数(通常は一定)。上位 numCh 個を下位アドレス側から letters[0..] に割当てる。
     let songNumCh = 1;
@@ -169,8 +169,9 @@
       const base = 0x40 + (8 - songNumCh + i) * 8; // internalIdx = (8-numCh)+i、下位側から
       // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)。順序はsplitRetriggers(打ち直し
       // 分割)の後(§5の手順順序: ハード境界→打ち直し分割→ピッチヒステリシスの順を維持)。
-      // その後にP-5「不明瞭→EPテーブル」側+スラー分割(別プロジェクトE、2026-08-12)。
-      rawByChannel.push({ base, events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractChannelEvents(timeline, base))) });
+      // その後に高速アルペジオ→EN統合(2026-08-14)+P-5「不明瞭→EPテーブル」側+
+      // スラー分割(別プロジェクトE、2026-08-12)。
+      rawByChannel.push({ base, events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, base))) });
     }
 
     // パス1.5(2026-08-14): チャンネル横断の周期ヒント収集。あるチャンネルのイベントが
@@ -216,17 +217,26 @@
       MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
       return fields;
     }
+    // 高速アルペジオ→EN統合(2026-08-14拡張)
+    function toNoteEnvFields(ev) {
+      if (!noteEnvReg || !ev.noteEnvOffsets) return {};
+      const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
+      return idx != null ? { noteEnv: idx } : {};
+    }
     const toCommon = (ev, base) => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, rawNumCh: ev.rawNumCh,
         rawLength: ev.note !== null ? ev.wave.length : undefined, tieCandidate: ev.tieCandidate },
       ev.note !== null ? Object.assign(
         { instrument: waveReg ? waveReg.assign(ev.wave) : 0 },
-        toVolumeFields(ev, base), toPitchFields(ev)
+        toVolumeFields(ev, base), toPitchFields(ev), toNoteEnvFields(ev)
       ) : {}
     );
 
     const channels = [];
     for (let i = 0; i < songNumCh; i++) {
+      // rawByChannel(パス1)で既にmergeUnclearPitchRuns(mergeVibratoAndArpeggio(...))を
+      // 適用済み(EN統合+P-5「不明瞭→EPテーブル」側+ハード境界→打ち直し分割→ピッチ
+      // ヒステリシスの順序、2026-08-12/2026-08-14)。ここではtoCommonへ渡すだけでよい。
       const { base, events } = rawByChannel[i];
       const chEvents = events.map(ev => toCommon(ev, base));
       MML.Convert.markSlurTies(chEvents);

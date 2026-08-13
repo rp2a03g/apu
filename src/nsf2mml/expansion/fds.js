@@ -260,10 +260,11 @@
     };
   }
 
-  MML.Nsf2MmlExpansion.fds = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
+  MML.Nsf2MmlExpansion.fds = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg, noteEnvReg) {
     const timeline = buildTimeline(writeLog, initRegs, initWrites);
-    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+P-5「不明瞭→EPテーブル」側(2026-08-12)
-    const events = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractEvents(timeline)));
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14拡張)+
+    // P-5「不明瞭→EPテーブル」側(2026-08-12)
+    const events = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractEvents(timeline)));
 
     const modWaveReg = new MML.Convert.WaveRegistry('@MW');
     const modParamReg = makeModParamRegistry();
@@ -294,11 +295,17 @@
       MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
       return fields;
     }
+    // 高速アルペジオ→EN統合(2026-08-14拡張)
+    function toNoteEnvFields(ev) {
+      if (!noteEnvReg || !ev.noteEnvOffsets) return {};
+      const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
+      return idx != null ? { noteEnv: idx } : {};
+    }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
       ev.note !== null ? Object.assign(
         { instrument: waveReg ? waveReg.assign(ev.wave) : 0 },
-        toVolumeFields(ev), toPitchFields(ev),
+        toVolumeFields(ev), toPitchFields(ev), toNoteEnvFields(ev),
         modUsed ? { fdsMod: toModField(ev) } : {}
       ) : {}
     );

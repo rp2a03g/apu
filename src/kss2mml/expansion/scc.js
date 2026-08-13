@@ -195,13 +195,15 @@
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(ev.wave) } : {},
       ev.note !== null && ev.freqHz != null
         ? { rawFreq: ev.freqHz, freqSeq: ev.pitchSeq.map(p => p > 8 ? clock / (32 * (p + 1)) : 0) } : {},
+      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
       toVolumeFields(ev.volSeq)
     );
     const finalFrame = timeline.length > 0 ? timeline[timeline.length - 1] : null;
     return {
       channels: [0, 1, 2, 3, 4].map(ch => ({
-        // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+P-5「不明瞭→EPテーブル」側(2026-08-12)
-        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractChannelEvents(timeline, ch, clock))).map(toCommon),
+        // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)+
+        // P-5「不明瞭→EPテーブル」側(2026-08-12)
+        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, ch, clock))).map(toCommon),
         hasVolume: true,
         hasEnvelope: true,
         hasInstrument: true

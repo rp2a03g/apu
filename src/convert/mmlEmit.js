@@ -137,6 +137,21 @@
             state.curPitchEpDelay = epDelay;
           }
         }
+        // ノートエンベロープ(高速アルペジオ、2026-08-14)。D<n>/EP<n>と同じく未指定
+        // イベントはoff扱いにし、hasNoteEnv指定チャンネルでは毎回前回状態との差分を
+        // 見て明示的にENOFへ戻す(直前の音符のアルペジオを引きずらないため)。
+        // ★VRC7拡張(2026-08-14): ENはノート番号→fnum/blockを都度再計算するだけで
+        // D<n>/EP<n>のような「生レジスタ空間への単純加算」を必要としないため、
+        // fnum/blockの対数表現によりD/EP/MPが使えないVRC7でも問題なく使える
+        // (src/mml/compiler.js segmentsToWriteLogVrc7参照)。そのためhasPitchModとは
+        // 独立したhasNoteEnvフラグを使う(hasPitchModはVRC7だけfalseになるため)。
+        if (flags.hasNoteEnv) {
+          const enVal = (ev.noteEnv != null) ? ev.noteEnv : null;
+          if (enVal !== state.curNoteEnv) {
+            emit(enVal === null ? 'ENOF' : `EN${enVal}`);
+            state.curNoteEnv = enVal;
+          }
+        }
         // ポルタメントコマンド(単調ランプの軽量な直線グライド表現、DESIGN-PITCH.md
         // 別プロジェクトC)。D<n>/EP<n>と全く同じ「毎回前回状態との差分を見て明示的に
         // PTOFへ戻す」設計の独立プレフィックスコマンド。pitchReg.assign()はEPかPTの
@@ -218,6 +233,7 @@
       curOct: -1, curVol: -1, curInst: -1, curEnvV: -1, curEnvVr: -1,
       curFme7Shape: -1, curFme7Period: -1, curFme7Noise: -1, curVolMode: null, durCarry: 0,
       curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, curPitchEp: null, curPitchEpDelay: 0,
+      curNoteEnv: null,
       curPortamentoTarget: null, curPortamentoDuration: 0, curPortamentoDelay: 0,
       lastWasNote: false, hasEmitted: false
     };
@@ -232,7 +248,11 @@
       hasVolume: !!opts.hasVolume, hasInstrument: !!opts.hasInstrument,
       hasEnvelope: !!opts.hasEnvelope, hasFme7Env: !!opts.hasFme7Env, hasVrc7Tone: !!opts.hasVrc7Tone,
       hasFdsMod: !!opts.hasFdsMod, hasFme7Noise: !!opts.hasFme7Noise, hasDetune: !!opts.hasDetune,
-      hasPitchMod: !!opts.hasPitchMod
+      hasPitchMod: !!opts.hasPitchMod,
+      // hasNoteEnvはhasPitchModと独立(VRC7はfnum/block対数空間のためD/EP/MPは使えないが
+      // ENは使える、mergeRapidArpeggio冒頭コメント参照)。opts.hasNoteEnvが省略された場合は
+      // hasPitchModを既定値として使う(既存の全チャンネル定義を書き換えずに済む後方互換)。
+      hasNoteEnv: opts.hasNoteEnv != null ? !!opts.hasNoteEnv : !!opts.hasPitchMod
     };
     const tempoPrefix = opts.tempoPrefix || '';
 
@@ -339,6 +359,13 @@
         hasEnvelope: !!chan.hasEnvelope, hasFme7Env: !!chan.hasFme7Env, hasVrc7Tone: !!chan.hasVrc7Tone,
         hasFdsMod: !!chan.hasFdsMod, hasFme7Noise: !!chan.hasFme7Noise, hasDetune: !!chan.hasDetune,
         hasPitchMod: !!chan.hasPitchMod,
+        // ★2026-08-14修正: emitChannelのflags構築(このファイル冒頭)と同じ
+        // hasNoteEnvフォールバックが、emitScore側のこの独立したflags構築には
+        // 欠けていた。全フォーマットはemitChannelでなくemitScoreを使うため、
+        // これが無いとEN<n>検出自体は正しく動いていても出力段で常に黙って
+        // 落とされる(VRC7対応でhasPitchModから分離した際に見落とした箇所、
+        // SPC変換の実測で発覚)。
+        hasNoteEnv: chan.hasNoteEnv != null ? !!chan.hasNoteEnv : !!chan.hasPitchMod,
         // 曲(このチャンネル)で最も多い音価をl<n>としてチャンネル先頭で宣言し、以後
         // 一致する音符/休符は数値部分を省略する(renderEvents内のomitDefaultLen参照)。
         defaultLen: MML.Convert.detectDefaultLength(filled, fpb)

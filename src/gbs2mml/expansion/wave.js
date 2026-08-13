@@ -94,8 +94,9 @@
   }
 
   MML.Gbs2MmlExpansion.wave = function (snapshots, waveReg, envReg) {
-    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+P-5「不明瞭→EPテーブル」側(2026-08-12)
-    const events = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeAlternatingVibrato(extractEvents(snapshots)));
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)+
+    // P-5「不明瞭→EPテーブル」側(2026-08-12)
+    const events = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractEvents(snapshots)));
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
@@ -104,6 +105,7 @@
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(expandTo6bit(ev.wave)) } : {},
       ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq, freqSeq: ev.pitchSeq.map(waveFreq) } : {},
+      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
       toVolumeFields(ev.volSeq)
     );
     const finalSnap = snapshots.length > 0 ? snapshots[snapshots.length - 1].ch3 : null;

@@ -340,6 +340,221 @@
     }
   };
 
+  // ── 高速アルペジオ→ノートエンベロープ(EN)統合(2026-08-14) ──────────────
+  // チップチューンでは、1chしか無い音源で和音を鳴らすため「フレーム単位で複数の
+  // 音程を高速に切り替える」演奏方法(アルペジオ)が非常によく使われる。抽出ループ
+  // 自体は「音程(半音丸め値)が変わったら即新イベント」という規則のため、これは
+  // 1フレームだけの極短いイベントの連なりとして抽出される。従来はこれをEP(生
+  // レジスタ差分のピッチエンベロープ)で表現しようとしていたが、EPは「基準ノート
+  // からの生レジスタオフセット」空間のテーブルであり、本来「複数の異なる音程を
+  // 正確に鳴らしている」という演奏意図を表すのに適さない(値がチップ・音域ごとに
+  // 意味の変わる生レジスタ単位になり、可読性も低い)。ここでは、各ステップの実測
+  // 周波数が最寄りの12平均律半音に十分近い(=本当にその音程を狙って鳴らしている)
+  // 場合に限り、1つの音符+EN<n>(ノート番号空間の相対オフセット、ppmck仕様通り
+  // 累積値)へ統合する。セント誤差が大きい(=半音に乗っていない生々しいピッチベンド/
+  // ビブラート)場合は対象外とし、従来通りEP/個別音符のままにする(実測: GBS Robocop
+  // CH2冒頭のアルペジオは誤差1〜3セントで綺麗に半音に乗っており、CH1のEP0/EP4等の
+  // 浅いビブラートは22〜47セットとずれているため、この閾値で正しく判別できる)。
+  const MAX_ARPEGGIO_STEP_FRAMES = 8; // 1ステップがこれ以下のフレーム数なら「高速」とみなす
+  const MIN_ARPEGGIO_PERIOD = 2;
+  const MAX_ARPEGGIO_PERIOD = 8; // 一般的な和音の構成音数を超える周期は誤検出とみなして除外
+  const MIN_ARPEGGIO_CYCLES = 2; // 最低2周期分の反復確認(偶然の一致除け)
+  const ARPEGGIO_CENTS_TOLERANCE = 25; // 半音の1/4以内なら「その半音に厳密に乗っている」とみなす
+  const EN_VALUE_MIN = -127, EN_VALUE_MAX = 126; // @EN<n>テーブル値は符号付きbyte(lexer.js参照、EPと共通)
+
+  // freq(Hz)が最寄りの12平均律半音(o4a=57=440Hz基準、他の抽出コードと同じ規約)から
+  // 何セントずれているかを返す(-50〜+50の範囲)。
+  function centsFromNearestSemitone(freq) {
+    if (!(freq > 0)) return Infinity;
+    const cont = 57 + 12 * Math.log2(freq / 440);
+    return (cont - Math.round(cont)) * 100;
+  }
+
+  // 実測周波数(Hz)を保持するフィールド名はフォーマットの抽出コードによって
+  // rawFreq/freqHzのどちらか一方に揺れている(toCommon内で最終的にどちらも
+  // rawFreqへ揃えて出力されるが、mergeRapidArpeggioはtoCommon実行前の生イベントを
+  // 見るためこの時点では揺れが残っている)。両対応にしておくことで、呼び出し側
+  // フォーマット毎の個別対応を増やさずに済む。
+  function eventFreq(ev) {
+    return ev.rawFreq != null ? ev.rawFreq : ev.freqHz;
+  }
+
+  // absorbed(短いイベントの連なり)のnote列から、周期的に繰り返す最小周期を探す
+  // (classifyPitchModのperiodic探索と同じ「最小周期優先・最低2周期分確認」方針)。
+  // 見つかれば{ period, matchLen }(matchLen=absorbed先頭から実際にその周期へ
+  // 一致し続けた長さ、period以上でperiodの倍数とは限らない)を返す。無ければnull。
+  function findArpeggioPeriod(notes) {
+    const n = notes.length;
+    const maxPeriod = Math.min(MAX_ARPEGGIO_PERIOD, Math.floor(n / MIN_ARPEGGIO_CYCLES));
+    for (let period = MIN_ARPEGGIO_PERIOD; period <= maxPeriod; period++) {
+      let matchLen = period;
+      while (matchLen < n && notes[matchLen] === notes[matchLen - period]) matchLen++;
+      if (matchLen >= period * MIN_ARPEGGIO_CYCLES) return { period, matchLen };
+    }
+    return null;
+  }
+
+  // 周期分のnote列(cycleNotes、最後の要素が「MML本文の音符として書き出す基準ノート」
+  // になる。詳細は下記)から、@EN<n>用の累積差分テーブルを作る。
+  //
+  // cumulativeEnvelopeValue(compiler.js)は値を毎フレーム加算していく「累積」方式で、
+  // stepEnvelope(EPで使用)のような単純な周期的インデックス参照ではない。そのため
+  // ループ(loop=0)で正しく繰り返すには、1周期ぶんの差分の合計が必ず0になっている
+  // 必要がある(そうでないと繰り返すたびに音程がドリフトしてしまう)。
+  // 「周期内の最後のノート(cycleNotes末尾)」を基準(オフセット0)に選び、
+  // 差分列を「基準→note[0]→note[1]→...→note[P-2]→基準(次周期の頭)」という
+  // 閉じた巡回として構成すると、和音の回り方に関わらず合計は必ず0になる
+  // (P角形を1周する経路の合計変位は常に0という単純な性質)。
+  // durations(各ステップのフレーム数、通常は全て1)ぶん、2フレーム目以降は
+  // 差分0(保持)を挟む。
+  function buildNoteEnvelopeDeltas(cycleNotes, durations) {
+    const period = cycleNotes.length;
+    const refNote = cycleNotes[period - 1];
+    let prevOffset = 0; // 基準ノート自身のオフセット
+    const deltas = [];
+    for (let k = 0; k < period; k++) {
+      const offset = cycleNotes[k] - refNote;
+      deltas.push(offset - prevOffset);
+      for (let f = 1; f < durations[k]; f++) deltas.push(0);
+      prevOffset = offset;
+    }
+    return { refNote, deltas };
+  }
+
+  // mergeAlternatingVibratoと同じ「隣接イベント列→統合後イベント列」形式。
+  // 統合したイベントには ev.noteEnvOffsets(累積差分配列)を付与する(登録・EN<n>への
+  // 割当ては呼び出し元のassignNoteEnvelopeが曲全体で共有するNoteEnvelopeRegistry経由で
+  // 行う。envelope.js/pitch.jsの既存レジストリと同じ「検出はここ、登録は呼び出し元」
+  // という役割分担)。mergeAlternatingVibratoより先に(=優先して)呼ぶこと
+  // (セントの綺麗な高速アルペジオはこちらで、それ以外の2値往復ビブラートは
+  // mergeAlternatingVibratoで、と役割を分けるため)。
+  MML.Convert.mergeRapidArpeggio = function (events) {
+    const result = [];
+    let i = 0;
+    const n = events.length;
+    while (i < n) {
+      const home = events[i];
+      const homeFreq = eventFreq(home);
+      if (home.note == null || homeFreq == null ||
+          (home.end - home.start) > MAX_ARPEGGIO_STEP_FRAMES ||
+          Math.abs(centsFromNearestSemitone(homeFreq)) > ARPEGGIO_CENTS_TOLERANCE) {
+        result.push(home); i++; continue;
+      }
+      // 短く・セントの綺麗な・音色が揃っている連続イベントを貪欲に集める
+      // (★直接連続する同ノートはretrigger等のハード境界とみなし跨がない、
+      // mergeAlternatingVibratoと同じ安全策)
+      const run = [home];
+      let j = i + 1;
+      while (j < n) {
+        const seg = events[j];
+        const segFreq = eventFreq(seg);
+        if (seg.note == null || segFreq == null) break;
+        if ((seg.end - seg.start) > MAX_ARPEGGIO_STEP_FRAMES) break;
+        if (seg.note === run[run.length - 1].note) break;
+        if (Math.abs(centsFromNearestSemitone(segFreq)) > ARPEGGIO_CENTS_TOLERANCE) break;
+        if (!hysteresisCompatible(seg, home)) break;
+        run.push(seg);
+        j++;
+      }
+      const found = findArpeggioPeriod(run.map(e => e.note));
+      if (found) {
+        const used = run.slice(0, found.matchLen);
+        const cycle = used.slice(0, found.period);
+        const cycleNotes = cycle.map(e => e.note);
+        const durations = cycle.map(e => e.end - e.start);
+        const { refNote, deltas } = buildNoteEnvelopeDeltas(cycleNotes, durations);
+        if (!deltas.some(v => v < EN_VALUE_MIN || v > EN_VALUE_MAX)) {
+          const last = used[used.length - 1];
+          // refNote(=cycle末尾のノート)を基準ノートとしてMML本文に書き出すため、
+          // rawFreq/freqSeqもhome(周期先頭)ではなくrefNoteに対応する値へ揃える
+          // (揃えないと、後段のapplyPitchDetune/detectChorusDetuneがnoteとrawFreqの
+          // 食い違い=無関係な2音間の周波数比較からD<n>を誤計算してしまう)。
+          // rawFreq/freqHzの両方を設定するのは、フォーマットごとにtoCommon()が
+          // 参照するフィールド名が揺れているため(eventFreq()コメント参照)。
+          const refEvent = cycle[cycle.length - 1];
+          const refFreq = eventFreq(refEvent);
+          result.push(Object.assign({}, home, {
+            note: refNote,
+            rawFreq: refFreq,
+            freqHz: refFreq,
+            end: last.end,
+            volSeq: concatField(used, 'volSeq'),
+            // pitchSeqはhome(周期先頭の1音符ぶん、通常は極短い)のまま残すと、各*2mmlの
+            // toCommon()がev.pitchSeq.map(periodFn)からfreqSeqを組み立てる際にend-startと
+            // 長さの合わないデータになる。空にしておけばfreqSeq=[]となり、後段の
+            // assignPitchEnvelopeが「変調無し」として安全にスキップする
+            // (noteEnvOffsetsで表現済みなのでEP側の変調検出はそもそも不要)。
+            pitchSeq: [],
+            noteEnvOffsets: deltas
+          }));
+          i += used.length;
+          continue;
+        }
+      }
+      result.push(home);
+      i++;
+    }
+    return result;
+  };
+
+  MML.Convert.NoteEnvelopeRegistry = function () {
+    this.tables = new Map(); // index(@EN<N>の番号) -> { values, loop }
+    this.keyToIndex = new Map();
+    this.nextIndex = 0;
+  };
+
+  // 周期的アルペジオは常にloop=0(先頭からループ、buildNoteEnvelopeDeltasが1周期分の
+  // 合計0の閉じた差分列を作るため)。EnvelopeRegistry/PitchEnvelopeRegistryと同じ
+  // 「loop有無が食い違うテーブルは前方一致でも共有しない」規約([[envelope-registry-loop-upgrade-bug]]
+  // 参照)は、EN側は現状ループ専用(非ループ生成経路が無い)ため該当しないが、将来
+  // 非ループEN生成を追加する場合はここも同じガードを入れること。
+  MML.Convert.NoteEnvelopeRegistry.prototype.registerShape = function (deltas) {
+    if (!deltas || deltas.length === 0) return null;
+    const key = deltas.join(',');
+    let idx = this.keyToIndex.get(key);
+    if (idx === undefined) {
+      idx = this.nextIndex++;
+      this.keyToIndex.set(key, idx);
+      this.tables.set(idx, { values: deltas, loop: 0 });
+    }
+    return idx;
+  };
+
+  MML.Convert.NoteEnvelopeRegistry.prototype.defLines = function () {
+    return Array.from(this.tables.keys()).sort((a, b) => a - b).map(i => {
+      const t = this.tables.get(i);
+      const parts = t.values.map(String);
+      if (t.loop != null) parts.splice(t.loop, 0, '|');
+      return `@EN${i} = { ${parts.join(' ')} }`;
+    });
+  };
+
+  // assignPitchEnvelopeと対になる、mergeRapidArpeggioが付与したev.noteEnvOffsetsを
+  // 曲全体で共有するNoteEnvelopeRegistryへ登録してev.noteEnvを確定する。
+  // mergeRapidArpeggio自身が登録まで行わないのは、EnvelopeRegistry/PitchEnvelopeRegistry
+  // と同じく複数チャンネルをまたいだ重複排除を1つの共有レジストリで行うため
+  // (曲中の別チャンネル・別箇所で偶然同じ形のアルペジオが出れば1つのEN<n>にまとまる)。
+  MML.Convert.assignNoteEnvelope = function (channels, noteEnvReg) {
+    for (const ch of channels) {
+      for (const ev of ch.events) {
+        if (!ev.noteEnvOffsets) continue;
+        const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
+        if (idx != null) ev.noteEnv = idx;
+        delete ev.noteEnvOffsets;
+      }
+    }
+  };
+
+  // extractEvents直後にどのフォーマットも呼んでいた「MML.Convert.mergeAlternatingVibrato(...)」
+  // を置き換える統合ヘルパー。mergeRapidArpeggioを必ず先に(優先して)適用し、そこで
+  // 統合されなかった残りのイベントにだけmergeAlternatingVibratoを適用する
+  // (pitch.js冒頭のmergeRapidArpeggioコメント参照)。rawFreqを持たない抽出結果
+  // (SPC/ノイズ/OPLL等)ではmergeRapidArpeggioは何もせず素通りするだけなので、
+  // 呼び出し側を条件分岐させずに一律この関数へ差し替えて問題ない。
+  MML.Convert.mergeVibratoAndArpeggio = function (events) {
+    return MML.Convert.mergeAlternatingVibrato(MML.Convert.mergeRapidArpeggio(events));
+  };
+
   // ── 分節のヒステリシス化(DESIGN-PITCH.md Phase 2、§5手順3) ──────────────
   // 「半音丸め値が変わったら即分割」(note !== cur.note)のせいで、半音境界を跨ぐ
   // 深いビブラートが音符連打(note spam)に化ける問題を、抽出後の後処理パスとして
@@ -367,6 +582,12 @@
   const HYSTERESIS_HARD_KEYS = [
     'duty', 'constVol', 'envKey', 'waveKey', 'mode', 'noise',
     'envUsed', 'envShape', 'envPeriod', 'modKey',
+    // FDS(nsf2mml/expansion/fds.js)専用: ハードウェア音量エンベロープの有効/無効が
+    // 食い違う隣接イベントは統合しない(音量の扱いが根本的に変わるため)
+    'envEnabled',
+    // OPLL(kss2mml/expansion/opll.js)専用: 音色番号・VRC7カスタム音色が食い違う
+    // 隣接イベントは統合しない(dutyに相当する「音色選択」がこのフィールド名のため)
+    'instrument', 'vrc7Tone',
     // SPC(spc2mml/converter.js)専用: 楽器(サンプル/エンベロープ)が食い違う隣接イベントは
     // 統合しない。他形式のイベントにはこれらのキー自体が存在しないため素通りする。
     'srcn', 'adsr1', 'adsr2', 'gain'
@@ -460,8 +681,15 @@
   const MIN_SLUR_PLATEAU_FRAMES = 4; // Phase 3のMIN_LITERAL_FRAMESと同じ考え方(打鍵ジッタ除外)
 
   function qualifiesForSlur(ev) {
+    // ev.noteEnv(2026-08-14拡張): タイで繋いだ2音目以降が独自のD/EP/MP/PTを持てないのと
+    // 同じ理由でEN<n>も持てない(RD_NOTEでのtick0/累積値0への再初期化が起きないため、
+    // タイ側にEN<n>を出力しても再生時に無視される)。ここで除外しないと、
+    // mergeRapidArpeggioが統合したEN持ちイベントがタイ候補と誤認されて
+    // mmlEmit側のEN再送出(前回状態との差分判定)がスキップされ、テーブル定義だけが
+    // 出力されて実際にどの音符もEN<n>を参照しないという「検出したのに黙って
+    // 捨てられる」退行になる(実測: SPC変換で発覚)。
     return !!ev && ev.note != null && (ev.end - ev.start) >= MIN_SLUR_PLATEAU_FRAMES &&
-      ev.pitchEp == null && ev.portamento == null;
+      ev.pitchEp == null && ev.portamento == null && ev.noteEnv == null;
   }
 
   MML.Convert.markSlurTies = function (events) {
@@ -506,10 +734,17 @@
     let i = 0;
     while (i < events.length) {
       const home = events[i];
-      if (home.note == null || !home.pitchSeq) { result.push(home); i++; continue; }
+      // home.noteEnvOffsets(2026-08-14拡張): mergeRapidArpeggioが統合したEN候補イベントは
+      // pitchSeqを空配列[]として持つため(truthy)上のnote/pitchSeqチェックだけでは
+      // すり抜けてしまう。これをrunの起点(home)や吸収対象(events[j])として扱うと、
+      // 本来のEN周期データを無関係な後続イベントのpitchSeqで上書き・延長してしまう
+      // (qualifiesForSlurのev.noteEnv除外と同じ理由、あちらは登録後のev.noteEnvを見るが
+      // 本関数は登録前なのでev.noteEnvOffsetsを見る)。
+      if (home.note == null || !home.pitchSeq || home.noteEnvOffsets != null) { result.push(home); i++; continue; }
       let j = i + 1;
       let allClear = isClearPlateau(home);
       while (j < events.length && events[j].tieCandidate && events[j].note != null &&
+             events[j].noteEnvOffsets == null &&
              events[j - 1].end === events[j].start && hysteresisCompatible(events[j - 1], events[j])) {
         allClear = allClear && isClearPlateau(events[j]);
         j++;
