@@ -19,6 +19,17 @@
   MML.Gbs2MmlExpansion = MML.Gbs2MmlExpansion || {};
   const { volumeAt, updateAnchor } = MML.Gbs2MmlExpansion.hwEnvelope;
 
+  // NR51($FF25、パンニング)の対応するchビットがL/R両方とも0なら、音量レジスタが
+  // 非0でも実際にはどちらの出力バスにも混ざらず無音になる(Pan Docs: bit(4+ch)=L出力へ
+  // ミックス、bit(ch)=R出力へミックス。ch=0-3がCH1-4に対応)。従来の抽出は音量レジスタ
+  // だけを見ていたため、作曲側がパンニングだけで消音するケース(Last Bible DMG-M7J.gbs
+  // 実測で発覚)を無音として検出できていなかった。電源投入時の既定値$F3(全ch L ON、
+  // CH1/2のみR ON)ではどのchも無音にならないため、明示的にNR51を書き換えた曲でのみ影響する。
+  function panAudible(nr51, chIndex) {
+    return (((nr51 >> (4 + chIndex)) & 1) !== 0) || (((nr51 >> chIndex) & 1) !== 0);
+  }
+  MML.Gbs2MmlExpansion._panAudible = panAudible; // wave.js/noise.jsから共用
+
   // f = 131072 / (2048 - freqReg) (Pan Docs、apuGb.jsのPulseChannel.clockTimer()と同じ式)
   function pulseFreq(freqReg) { return freqReg < 2048 ? 131072 / (2048 - freqReg) : 0; }
 
@@ -28,7 +39,10 @@
     return (n >= 0 && n <= 119) ? n : null;
   }
 
+  const CH_INDEX = { ch1: 0, ch2: 1 };
+
   function extractEvents(snapshots, chKey, playFps) {
+    const chIndex = CH_INDEX[chKey];
     const events = [];
     let cur = null;
     let lastTriggerSeq = null;
@@ -40,7 +54,7 @@
       lastTriggerSeq = c.triggerSeq;
       anchor = updateAnchor(anchor, c, f, triggered);
       const vol = volumeAt(anchor, f, playFps);
-      const freqHz = (c.enabled && vol > 0) ? pulseFreq(c.freq) : 0;
+      const freqHz = (c.enabled && vol > 0 && panAudible(snapshots[f].nr51, chIndex)) ? pulseFreq(c.freq) : 0;
       const note = freqHz > 0 ? freqToNoteNumber(freqHz) : null;
       if (!cur) {
         cur = { note, duty: c.duty, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol], pitchSeq: [c.freq], tieCandidate: false };

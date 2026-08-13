@@ -53,7 +53,9 @@
       lastTriggerSeq = c.triggerSeq;
       anchor = updateAnchor(anchor, c, f, triggered);
       const vol = volumeAt(anchor, f, playFps);
-      const on = c.enabled && vol > 0;
+      // NR51パンニングの両出力バスとも0ならch4無音扱い(pulse.jsのpanAudible冒頭コメント
+      // 参照)。CH4はNR51上のch index=3。
+      const on = c.enabled && vol > 0 && MML.Gbs2MmlExpansion._panAudible(snapshots[f].nr51, 3);
       const note = on ? gbNoiseFreqToNote(gbNoiseFreq(c.divisorCode, c.clockShift)) : null;
       if (!cur) { cur = { note, start: f, end: f, volSeq: [vol] }; continue; }
       if (triggered || note !== cur.note) {

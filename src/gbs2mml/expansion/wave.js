@@ -68,7 +68,9 @@
     for (let f = 0; f < snapshots.length; f++) {
       const c = snapshots[f].ch3;
       const vol = VOLUME_SHIFT_TO_FDS[c.volumeShift] || 0;
-      const audible = c.enabled && c.dacOn && vol > 0;
+      // NR51パンニングの両出力バスとも0ならch3(音量シフトは非0でも)無音扱い
+      // (pulse.jsのpanAudible冒頭コメント参照)。CH3はNR51上のch index=2。
+      const audible = c.enabled && c.dacOn && vol > 0 && MML.Gbs2MmlExpansion._panAudible(snapshots[f].nr51, 2);
       const freqHz = audible ? waveFreq(c.freq) : 0;
       const note = freqHz > 0 ? freqToNoteNumber(freqHz) : null;
       const wave = c.wave; // 元の4bit値(waveKey判定・スケーリング前の保持用)
