@@ -78,17 +78,26 @@
     return events;
   }
 
-  MML.Nsf2MmlExpansion.vrc7 = function (writeLog, totalFrames, envReg, toneReg, initRegs, initWrites) {
+  MML.Nsf2MmlExpansion.vrc7 = function (writeLog, totalFrames, envReg, toneReg, initRegs, initWrites, n163Snapshots, pitchReg, noteEnvReg) {
     const timeline = buildTimeline(writeLog, initWrites);
     const letters = 'EFGHIJ'.split('');
-    const toCommon = ev => ({
+    // 高速アルペジオ→EN統合(2026-08-14拡張)。VRC7はfnum/block対数空間のためD/EP/MPは
+    // 使えないが、ENはノート番号→fnum/blockを都度再計算するだけなので使える
+    // (src/mml/compiler.js segmentsToWriteLogVrc7参照。hasNoteEnvフラグは
+    // nsf2mml/converter.jsのdispatcherがhasPitchModと独立にVRC7へも常時付与する)
+    function toNoteEnvFields(ev) {
+      if (!noteEnvReg || !ev.noteEnvOffsets) return {};
+      const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
+      return idx != null ? { noteEnv: idx } : {};
+    }
+    const toCommon = ev => Object.assign({
       start: ev.start, end: ev.end, note: ev.note, volume: ev.volume, instrument: ev.instrument,
       vrc7Tone: ev.vrc7Tone, rawFreq: ev.rawFreq
-    });
+    }, toNoteEnvFields(ev));
 
     const channels = letters.map((letter, ch) => ({
       letter,
-      events: extractChannelEvents(timeline, ch, toneReg).map(toCommon),
+      events: MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, ch, toneReg)).map(toCommon),
       hasVolume: true,
       hasInstrument: true,
       hasVrc7Tone: !!toneReg

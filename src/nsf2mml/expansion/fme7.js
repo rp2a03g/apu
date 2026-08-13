@@ -123,7 +123,7 @@
     return events;
   }
 
-  MML.Nsf2MmlExpansion.fme7 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
+  MML.Nsf2MmlExpansion.fme7 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg, noteEnvReg) {
     const timeline = buildTimeline(writeLog, initWrites);
     function toVolumeFields(ev) {
       // FME7のハードウェアエンベロープは全ch共有の1個しかない(R11/R12/R13はグローバル)ため、
@@ -141,17 +141,26 @@
       MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
       return fields;
     }
+    // 高速アルペジオ→EN統合(2026-08-14拡張)。ノイズ単独(@2)はrawFreqが無いため
+    // mergeRapidArpeggio側で自動的に対象外になる
+    function toNoteEnvFields(ev) {
+      if (!noteEnvReg || !ev.noteEnvOffsets) return {};
+      const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
+      return idx != null ? { noteEnv: idx } : {};
+    }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
       ev.note !== null ? { instrument: ev.mode } : {},
       ev.note !== null && ev.noise !== null ? { fme7Noise: ev.noise } : {},
       ev.note !== null ? toVolumeFields(ev) : {},
-      ev.note !== null ? toPitchFields(ev) : {}
+      ev.note !== null ? toPitchFields(ev) : {},
+      ev.note !== null ? toNoteEnvFields(ev) : {}
     );
 
-    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+スラー分割(別プロジェクトE、2026-08-12)
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)
+    // +スラー分割(別プロジェクトE、2026-08-12)
     const chan = (letter, index) => {
-      const events = MML.Convert.mergeAlternatingVibrato(extractToneEvents(timeline, index)).map(toCommon);
+      const events = MML.Convert.mergeVibratoAndArpeggio(extractToneEvents(timeline, index)).map(toCommon);
       MML.Convert.markSlurTies(events);
       return {
         letter, events,

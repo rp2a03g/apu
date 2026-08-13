@@ -558,6 +558,10 @@
       if (activeStart >= 0) {
         voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, FRAMES - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
       }
+      // rawFreq(高速アルペジオ→EN統合のセント判定用、2026-08-14拡張): mergeSpcVoiceEvents
+      // (外側のIIFEスコープの関数でtuneOfへ直接アクセスできない)へ渡す前にここで計算して
+      // 各イベントへ付与しておく(DESIGN-PITCH.md Phase 1のpitchRegToFreqHzを流用)。
+      for (const ev of voiceEvents[ch]) ev.rawFreq = pitchRegToFreqHz(ev.pitch, tuneOf(ev.srcn));
       voiceEvents[ch] = mergeSpcVoiceEvents(voiceEvents[ch]);
     }
 
@@ -579,17 +583,21 @@
       }
       mapped.push({
         start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi, pitch: ev.pitch,
+        rawFreq: ev.rawFreq,
         pitchSeq: ev.pitchSeq, srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain,
         tieCandidate: ev.tieCandidate
       });
     }
-    return MML.Convert.mergeAlternatingVibrato(mapped)
+    // 高速アルペジオ→EN統合(2026-08-14拡張)。登録(noteEnvReg.registerShape)は
+    // 呼び出し元のfromSpcがpitchRegと同じタイミングで曲全体共有のnoteEnvRegを使って
+    // 行う(ay.js/scc.js/opll.jsと同じ「検出はここ、登録は呼び出し元」の遅延登録方式)。
+    return MML.Convert.mergeVibratoAndArpeggio(mapped)
       .filter(ev => ev.note != null)
-      .map(ev => ({
+      .map(ev => Object.assign({
         frame: ev.start, len: ev.end - ev.start, pitch: ev.pitch, pitchSemi: ev.note,
         srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain, pitchSeq: ev.pitchSeq,
         tieCandidate: ev.tieCandidate
-      }));
+      }, ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}));
   }
 
   // ── MML 生成 ─────────────────────────────────────────────────────────
@@ -607,6 +615,8 @@
     const tuneOf = (srcn) => srcnFineTune ? (srcnFineTune[srcn] || 0) : 0;
     // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
+    // ノートエンベロープ(高速アルペジオ)の共有レジストリ(2026-08-14拡張)。
+    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
 
     // ── BPM (未指定ならマッピング済みチャンネルの有音イベントから自動検出、
     //         指定時もフレームグリッドへ吸着補正) ──
@@ -828,11 +838,17 @@
           const rescaled = MML.Convert.rescalePitchSeqFromFreq(freqSeq, periodFn);
           MML.Convert.applyPitchAssignment(common, pitchReg.assign(rescaled));
         }
+        // 高速アルペジオ→EN統合(2026-08-14拡張)。mergeSpcVoiceEvents側で検出済みの
+        // ev.noteEnvOffsetsを、曲全体で共有するnoteEnvRegへ登録する
+        if (ev.noteEnvOffsets) {
+          const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
+          if (idx != null) common.noteEnv = idx;
+        }
         return common;
       });
       // スラー分割(別プロジェクトE、2026-08-12): pitchEp/portamentoが確定した直後に行う
       MML.Convert.markSlurTies(chEvents);
-      scoreChannels.push({ letter: targetLetter, events: chEvents, hasEnvelope, hasPitchMod: !!periodFn });
+      scoreChannels.push({ letter: targetLetter, events: chEvents, hasEnvelope, hasPitchMod: !!periodFn, hasNoteEnv: !!periodFn });
     }
 
     if (dpcmLetter) {
@@ -841,7 +857,7 @@
 
     if (scoreChannels.length > 0) {
       mml += MML.Convert.emitScore(scoreChannels, fpb,
-        { totalFrames: FRAMES, tempoBpm: bpm, headerLines: pitchReg.defLines() }) + '\n';
+        { totalFrames: FRAMES, tempoBpm: bpm, headerLines: [...pitchReg.defLines(), ...noteEnvReg.defLines()] }) + '\n';
     }
 
     // ── 波形データを options に付加して返す ─────────────────────────

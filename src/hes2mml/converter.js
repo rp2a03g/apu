@@ -49,6 +49,8 @@
     const envReg = new MML.Convert.EnvelopeRegistry();
     // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
+    // ノートエンベロープ(高速アルペジオ)の共有レジストリ(2026-08-14)。
+    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
     const n163WaveReg = new MML.Convert.WaveRegistry('@N', v => [0, ...v]);
 
     const waveResult = MML.Hes2MmlExpansion.wave(snapshots, n163WaveReg, envReg);
@@ -69,6 +71,13 @@
       MML.Convert.applyPitchDetune([{ events: ch.events }], n163PeriodRaw);
     }
     // ノイズは2A03固定16周期の離散選択であり連続量の微調整という概念が無いためdetune対象外。
+
+    // 高速アルペジオ→EN統合(mergeVibratoAndArpeggioがev.noteEnvOffsetsを付与済みの
+    // イベントを、曲全体で共有するnoteEnvRegへ登録してev.noteEnvを確定する)。
+    // ★必ずassignPitchEnvelopeより先に呼ぶこと(2026-08-14修正、gbs2mml/converter.jsと
+    // 同じ理由): assignPitchEnvelopeは内部でmarkSlurTiesを呼び、qualifiesForSlurが
+    // ev.noteEnvの有無を見てタイ化を抑制するため。
+    MML.Convert.assignNoteEnvelope(waveResult.channels, noteEnvReg);
 
     // ピッチエンベロープも同じn163PeriodRawで借用先の生レジスタ空間へ変換してから
     // 分類・登録する(DESIGN-PITCH.md Phase 1、rawLength付与後・applyPitchDetuneと同じ変換系列)。
@@ -121,7 +130,7 @@
 
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm,
-      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...n163WaveReg.defLines()]
+      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(), ...n163WaveReg.defLines()]
     });
     const mml = [headerComment, scoreText].join('\n');
 

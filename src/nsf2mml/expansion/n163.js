@@ -154,7 +154,7 @@
     return events;
   }
 
-  MML.Nsf2MmlExpansion.n163 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
+  MML.Nsf2MmlExpansion.n163 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg, noteEnvReg) {
     const timeline = buildTimeline(writeLog, initWrites, n163Snapshots);
     // 曲を通しての有効ch数(通常は一定)。上位 numCh 個を下位アドレス側から letters[0..] に割当てる。
     let songNumCh = 1;
@@ -174,22 +174,28 @@
       MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
       return fields;
     }
+    // 高速アルペジオ→EN統合(2026-08-14拡張)
+    function toNoteEnvFields(ev) {
+      if (!noteEnvReg || !ev.noteEnvOffsets) return {};
+      const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
+      return idx != null ? { noteEnv: idx } : {};
+    }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, rawNumCh: ev.rawNumCh,
         rawLength: ev.note !== null ? ev.wave.length : undefined, tieCandidate: ev.tieCandidate },
       ev.note !== null ? Object.assign(
         { instrument: waveReg ? waveReg.assign(ev.wave) : 0 },
-        toVolumeFields(ev.volSeq), toPitchFields(ev)
+        toVolumeFields(ev.volSeq), toPitchFields(ev), toNoteEnvFields(ev)
       ) : {}
     );
 
     const channels = [];
     for (let i = 0; i < songNumCh; i++) {
       const base = 0x40 + (8 - songNumCh + i) * 8; // internalIdx = (8-numCh)+i、下位側から
-      // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)。順序はsplitRetriggers(打ち直し
-      // 分割)の後(§5の手順順序: ハード境界→打ち直し分割→ピッチヒステリシスの順を維持)。
-      // その後にスラー分割(別プロジェクトE、2026-08-12)。
-      const chEvents = MML.Convert.mergeAlternatingVibrato(extractChannelEvents(timeline, base)).map(toCommon);
+      // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)。
+      // 順序はsplitRetriggers(打ち直し分割)の後(§5の手順順序: ハード境界→打ち直し分割→
+      // ピッチヒステリシスの順を維持)。その後にスラー分割(別プロジェクトE、2026-08-12)。
+      const chEvents = MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, base)).map(toCommon);
       MML.Convert.markSlurTies(chEvents);
       channels.push({
         letter: letters[i],

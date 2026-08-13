@@ -86,11 +86,11 @@
     return events;
   }
 
-  MML.Nsf2MmlExpansion.mmc5 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
+  MML.Nsf2MmlExpansion.mmc5 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg, noteEnvReg) {
     const timeline = buildTimeline(writeLog, initRegs);
-    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
-    const evP1 = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p1', 1, 0));
-    const evP2 = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p2', 2, 1));
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)
+    const evP1 = MML.Convert.mergeVibratoAndArpeggio(extractPulseEvents(timeline, 'p1', 1, 0));
+    const evP2 = MML.Convert.mergeVibratoAndArpeggio(extractPulseEvents(timeline, 'p2', 2, 1));
 
     function toVolumeFields(ev) {
       if (!envReg) return { volume: ev.volSeq[0] };
@@ -109,10 +109,16 @@
       MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
       return fields;
     }
+    function toNoteEnvFields(ev) {
+      if (!noteEnvReg || !ev.noteEnvOffsets) return {};
+      const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
+      return idx != null ? { noteEnv: idx } : {};
+    }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
       ev.note !== null ? toVolumeFields(ev) : {},
-      ev.note !== null ? toPitchFields(ev) : {}
+      ev.note !== null ? toPitchFields(ev) : {},
+      ev.note !== null ? toNoteEnvFields(ev) : {}
     );
 
     // スラー分割(別プロジェクトE、2026-08-12)

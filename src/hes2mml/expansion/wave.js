@@ -145,14 +145,15 @@
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(ev.wave) } : {},
       ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq, freqSeq: ev.pitchSeq.map(waveFreq) } : {},
+      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
       toVolumeFields(ev.volSeq)
     );
 
     const channels = [];
     for (let i = 0; i < MML.Hes2MmlExpansion.CH_COUNT; i++) {
       channels.push({
-        // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
-        events: MML.Convert.mergeAlternatingVibrato(extractChannelEvents(snapshots, i, !!waveReg)).map(toCommon),
+        // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)
+        events: MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(snapshots, i, !!waveReg)).map(toCommon),
         hasVolume: true, hasEnvelope: true, hasInstrument: true
       });
     }

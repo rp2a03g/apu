@@ -113,12 +113,12 @@
     return events;
   }
 
-  MML.Nsf2MmlExpansion.vrc6 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg) {
+  MML.Nsf2MmlExpansion.vrc6 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg, noteEnvReg) {
     const timeline = buildTimeline(writeLog, initRegs);
-    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)
-    const evP1  = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p1', 0));
-    const evP2  = MML.Convert.mergeAlternatingVibrato(extractPulseEvents(timeline, 'p2', 1));
-    const evSaw = MML.Convert.mergeAlternatingVibrato(extractSawEvents(timeline));
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)
+    const evP1  = MML.Convert.mergeVibratoAndArpeggio(extractPulseEvents(timeline, 'p1', 0));
+    const evP2  = MML.Convert.mergeVibratoAndArpeggio(extractPulseEvents(timeline, 'p2', 1));
+    const evSaw = MML.Convert.mergeVibratoAndArpeggio(extractSawEvents(timeline));
 
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
@@ -130,13 +130,18 @@
       MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
       return fields;
     }
+    function toNoteEnvFields(ev) {
+      if (!noteEnvReg || !ev.noteEnvOffsets) return {};
+      const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
+      return idx != null ? { noteEnv: idx } : {};
+    }
     const toCommonPulse = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
-      toVolumeFields(ev.volSeq), toPitchFields(ev)
+      toVolumeFields(ev.volSeq), toPitchFields(ev), toNoteEnvFields(ev)
     );
     const toCommonSaw = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
-      toVolumeFields(ev.volSeq), toPitchFields(ev)
+      toVolumeFields(ev.volSeq), toPitchFields(ev), toNoteEnvFields(ev)
     );
 
     // スラー分割(別プロジェクトE、2026-08-12): pitchEp/portamentoが確定した直後に行う

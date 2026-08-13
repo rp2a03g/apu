@@ -1533,7 +1533,13 @@
             let lastFnum = fnum, lastBlock = block;
             for (let t = 1; t < gateFrames; t++) {
               const delta = cumulativeEnvelopeValue(table, t);
-              if (delta === 0) continue;
+              // ★delta===0での早期skipは誤り(2026-08-14修正): 「累積オフセットが0」は
+              // 「基準ノートへ戻る」という意味であり「値を変えなくてよい」という意味ではない。
+              // 直前のtickで既に基準ノート以外(delta!=0)へ書き換わっていた場合、この行を
+              // 素通りしてしまうと基準ノートへ戻す書込みが丸ごと欠落し、レジスタが直前の
+              // 値のまま固まってしまう(実機6502ドライバとの往復比較で発覚、EN0={0 4 3 -7}の
+              // ようなオフセット0を経由する周期パターンで実測)。「変化が無ければ書かない」
+              // 判定は直後のf2===lastFnum&&b2===lastBlockチェックだけで十分かつ正しい。
               const { fnum: f2, block: b2 } = vrc7FreqToFnumBlock(noteFrequency(seg.noteNumber + delta));
               if (f2 === lastFnum && b2 === lastBlock) continue;
               writeLog[startFrame + t].push({ addr: 0x9010, value: 0x10 + ch });
