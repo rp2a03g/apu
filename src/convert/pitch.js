@@ -723,67 +723,26 @@
   // (pitchEp/portamento割当て)→markSlurTies、を必ず守ること(本関数は割当て前の
   // 生のpitchSeqを直接連結して再分類するため、割当て後には呼べない。呼び出し箇所は
   // mergeAlternatingVibratoと全く同じ12箇所、その直後に連結して呼ぶだけでよい)。
-  const MIN_UNCLEAR_RUN_LEN = 2; // 統合を試みる最小メンバー数(2未満は統合の意味が無い)
-  // ★統合を試みる合計フレーム数の上限。この関数の設計意図は「こぶし/アタックベンド/
-  // ランプ」のような1音相当の短い装飾的ピッチ揺れをEP<n>テーブルへ押し込むことであり、
-  // 上限が無いとtieCandidateの連鎖が続く限り無制限に伸び続ける貪欲収集になってしまう。
-  // 実測(Last Bible DMG-M7J.gbs、GBS波形ch→FDS借用): 短い装飾音(<4フレーム)混じりの
-  // 本物のメロディ(E4→F4→F#4→G4→B4→F#4→D4...、約4秒=239フレーム)がまるごとこの
-  // runに吸収され、EP<n>の生レジスタ差分が符号付きbyte範囲(EP_VALUE_MIN/MAX=-127〜126)を
-  // 超えてpitchReg.assign()がnullを返した結果、mergeがそのまま握りつぶされてピッチ情報が
-  // 完全に消失し(pitchEp/pitchBreaksどちらにも登録されない)、音符が先頭のノートに
-  // 凍りついたまま伸び続ける「音程が全く動かなくなる」不具合になっていた(mergeを一度
-  // 素通しに無効化すると正しいメロディへ戻ることで実測確認)。本関数はassignPitchEnvelope
-  // より前(まだ借用先チップのレジスタ空間へのスケール変換前)に動くため呼び出し時点では
-  // 登録可否を厳密には判定できず、代わりにここで「1音相当の装飾」という設計意図に沿う
-  // 保守的な時間上限で歯止めを掛ける(MIN_SLUR_PLATEAU_FRAMES=4の8倍、装飾を持つ1音として
-  // 妥当な余裕を見つつ、本物の複数音メロディを飲み込まない程度に短く)。
-  const MAX_UNCLEAR_RUN_FRAMES = MIN_SLUR_PLATEAU_FRAMES * 8;
-
-  function isClearPlateau(ev) {
-    return !!ev && ev.note != null && (ev.end - ev.start) >= MIN_SLUR_PLATEAU_FRAMES;
-  }
-
-  MML.Convert.mergeUnclearPitchRuns = function (events) {
-    const result = [];
-    let i = 0;
-    while (i < events.length) {
-      const home = events[i];
-      // home.noteEnvOffsets(2026-08-14拡張): mergeRapidArpeggioが統合したEN候補イベントは
-      // pitchSeqを空配列[]として持つため(truthy)上のnote/pitchSeqチェックだけでは
-      // すり抜けてしまう。これをrunの起点(home)や吸収対象(events[j])として扱うと、
-      // 本来のEN周期データを無関係な後続イベントのpitchSeqで上書き・延長してしまう
-      // (qualifiesForSlurのev.noteEnv除外と同じ理由、あちらは登録後のev.noteEnvを見るが
-      // 本関数は登録前なのでev.noteEnvOffsetsを見る)。
-      if (home.note == null || !home.pitchSeq || home.noteEnvOffsets != null) { result.push(home); i++; continue; }
-      let j = i + 1;
-      let allClear = isClearPlateau(home);
-      while (j < events.length && events[j].tieCandidate && events[j].note != null &&
-             events[j].noteEnvOffsets == null &&
-             events[j - 1].end === events[j].start && hysteresisCompatible(events[j - 1], events[j]) &&
-             (events[j].end - home.start) <= MAX_UNCLEAR_RUN_FRAMES) {
-        allClear = allClear && isClearPlateau(events[j]);
-        j++;
-      }
-      const runLen = j - i;
-      if (runLen >= MIN_UNCLEAR_RUN_LEN && !allClear) {
-        const run = events.slice(i, j);
-        const pitchSeq = concatField(run, 'pitchSeq');
-        const classified = pitchSeq ? MML.Convert.classifyPitchMod(pitchSeq) : null;
-        if (classified) {
-          result.push(Object.assign({}, home, {
-            end: run[run.length - 1].end,
-            volSeq: concatField(run, 'volSeq'),
-            pitchSeq
-          }));
-          i = j;
-          continue;
-        }
-      }
-      result.push(home);
-      i++;
-    }
-    return result;
-  };
+  // ★2026-08-14: 本関数は当面パススルー(無効化)する。実測(Last Bible DMG-M7J.gbs、
+  // GBS波形ch→FDS借用)で2件の実害が確認された:
+  //  ①上限の無いrun収集: tieCandidateの連鎖が続く限り無制限に伸び続け、短い装飾音
+  //    (<4フレーム)混じりの本物のメロディ(約4秒=239フレーム)をまるごと1つのrunに
+  //    飲み込んだ。EP<n>の生レジスタ差分が符号付きbyte範囲(EP_VALUE_MIN/MAX=-127〜126)を
+  //    超えてpitchReg.assign()がnullを返し、mergeがそのまま握りつぶされてピッチ情報が
+  //    完全に消失(pitchEp/pitchBreaksどちらにも登録されない)、音符が先頭ノートに
+  //    凍りついたまま伸び続ける「音程が全く動かなくなる」不具合になっていた。
+  //  ②run長に8*MIN_SLUR_PLATEAU_FRAMES(32フレーム)の上限を設けて①を塞いだ後も、
+  //    E4→G4→B4→F#4のような明瞭な複数の実在ノート(E短調アルペジオ、各ノートは正確に
+  //    半音上に乗っている)がclassifyPitchMod()に「ランプ/周期」として誤って連続ピッチ
+  //    カーブに近似され、本来の離散音程と異なる音(実測: g/bが欠落しfが混入する等)に
+  //    化ける「音を外す」不具合が発生した。classifyPitchMod()は本来「同じ音の中での
+  //    こぶし/アタックベンド」のような連続的なピッチ揺れを想定した分類器であり、
+  //    「複数の異なる実音符が短時間に並ぶ」ケース(本関数がmarkSlurTiesの補完として
+  //    対象にしたかったはずの範囲)の判別に十分な精度が無いことが分かった。
+  // 通常のタイ機構(markSlurTies→pushNoteのpitchBreaks)は十分な長さ(MIN_SLUR_PLATEAU_
+  // FRAMES以上)を持つ音符同士なら正確にレガート表現できることを実測確認済みなので、
+  // 「不明瞭(短すぎる)音符が混じる連なりは無理に1つへ統合せず、個々のイベントのまま
+  // 独立した音符として出力する」という安全側(近似ゼロ、劣化なし)に倒す。
+  MML.Convert.mergeUnclearPitchRuns = function (events) { return events; };
 
 })(window);
