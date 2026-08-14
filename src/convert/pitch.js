@@ -724,6 +724,21 @@
   // 生のpitchSeqを直接連結して再分類するため、割当て後には呼べない。呼び出し箇所は
   // mergeAlternatingVibratoと全く同じ12箇所、その直後に連結して呼ぶだけでよい)。
   const MIN_UNCLEAR_RUN_LEN = 2; // 統合を試みる最小メンバー数(2未満は統合の意味が無い)
+  // ★統合を試みる合計フレーム数の上限。この関数の設計意図は「こぶし/アタックベンド/
+  // ランプ」のような1音相当の短い装飾的ピッチ揺れをEP<n>テーブルへ押し込むことであり、
+  // 上限が無いとtieCandidateの連鎖が続く限り無制限に伸び続ける貪欲収集になってしまう。
+  // 実測(Last Bible DMG-M7J.gbs、GBS波形ch→FDS借用): 短い装飾音(<4フレーム)混じりの
+  // 本物のメロディ(E4→F4→F#4→G4→B4→F#4→D4...、約4秒=239フレーム)がまるごとこの
+  // runに吸収され、EP<n>の生レジスタ差分が符号付きbyte範囲(EP_VALUE_MIN/MAX=-127〜126)を
+  // 超えてpitchReg.assign()がnullを返した結果、mergeがそのまま握りつぶされてピッチ情報が
+  // 完全に消失し(pitchEp/pitchBreaksどちらにも登録されない)、音符が先頭のノートに
+  // 凍りついたまま伸び続ける「音程が全く動かなくなる」不具合になっていた(mergeを一度
+  // 素通しに無効化すると正しいメロディへ戻ることで実測確認)。本関数はassignPitchEnvelope
+  // より前(まだ借用先チップのレジスタ空間へのスケール変換前)に動くため呼び出し時点では
+  // 登録可否を厳密には判定できず、代わりにここで「1音相当の装飾」という設計意図に沿う
+  // 保守的な時間上限で歯止めを掛ける(MIN_SLUR_PLATEAU_FRAMES=4の8倍、装飾を持つ1音として
+  // 妥当な余裕を見つつ、本物の複数音メロディを飲み込まない程度に短く)。
+  const MAX_UNCLEAR_RUN_FRAMES = MIN_SLUR_PLATEAU_FRAMES * 8;
 
   function isClearPlateau(ev) {
     return !!ev && ev.note != null && (ev.end - ev.start) >= MIN_SLUR_PLATEAU_FRAMES;
@@ -745,7 +760,8 @@
       let allClear = isClearPlateau(home);
       while (j < events.length && events[j].tieCandidate && events[j].note != null &&
              events[j].noteEnvOffsets == null &&
-             events[j - 1].end === events[j].start && hysteresisCompatible(events[j - 1], events[j])) {
+             events[j - 1].end === events[j].start && hysteresisCompatible(events[j - 1], events[j]) &&
+             (events[j].end - home.start) <= MAX_UNCLEAR_RUN_FRAMES) {
         allClear = allClear && isClearPlateau(events[j]);
         j++;
       }
