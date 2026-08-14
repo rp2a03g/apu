@@ -518,8 +518,20 @@
         // 書く・位相リセット副作用のある上位バイトはlastHiガード」を自動的に適用できる
         // (hasPitchModulationがpitchBreaksありのセグメントもtrueを返すようにするだけで、
         // 各チップの書込みハンドラは無改修で正しく動く)。
+        // ★2026-08-14修正: 比較対象は「直前に適用済みの音程」であるべきで、prev.noteNumber/
+        // prev.freq(セグメント先頭=アンカー音符から一度も更新されない)と比較していたのは
+        // バグだった。長いタイ連鎖の途中でアンカーと全く同じ音程へ戻る音符が来ると、
+        // 「アンカーと同じだから変化なし」と誤判定されpitchBreaksへの記録がまるごと
+        // 抜け落ち、実際にはその前の(アンカーと異なる)音程で止まったまま戻らない
+        // 「音を外す」不具合になっていた(Last Bible DMG-M7J.gbs実測、E→D→G→F#→F→Eと
+        // 巡ってアンカーEへ戻る箇所でF止まりになり発覚)。pitchBreaksが既にあれば
+        // その末尾(直近適用値)、無ければセグメント先頭(アンカー)と比較する。
+        const curNoteNumber = (prev.pitchBreaks && prev.pitchBreaks.length > 0)
+          ? prev.pitchBreaks[prev.pitchBreaks.length - 1].noteNumber : prev.noteNumber;
+        const curFreq = (prev.pitchBreaks && prev.pitchBreaks.length > 0)
+          ? prev.pitchBreaks[prev.pitchBreaks.length - 1].freq : prev.freq;
         if (noteNumber != null && freq != null &&
-            (noteNumber !== prev.noteNumber || freq !== prev.freq)) {
+            (noteNumber !== curNoteNumber || freq !== curFreq)) {
           if (!prev.pitchBreaks) prev.pitchBreaks = [];
           prev.pitchBreaks.push({ atFrame: prev.durationFrames, freq, noteNumber });
         }
