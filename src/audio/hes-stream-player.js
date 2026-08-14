@@ -31,6 +31,10 @@
   const BUFFER_SIZE = 4096;
   const DDA_HIST_LEN = 512; // 鍵盤表示のPCM周期検出用の履歴バッファ長(HesReplayStreamPlayer参照)
 
+  // 無音自動送り(HesReplayStreamPlayer)用。src/audio/stream-player.jsの同名定数と同じ考え方。
+  const SILENCE_SEC = 10;
+  const SILENCE_EPS = 1e-4;
+
   // gainNode(4.0)の後段にリミッタ(DynamicsCompressorNode)を挟み、DDA(PCM)chの
   // on/off切替のような急激な信号の段差でDCブロッキングフィルタ(y=raw-dcPrevX+0.999*dcPrevY)
   // が過渡的にオーバーシュートし、そこへgain4.0が掛かって±1.0を超えハードクリップする
@@ -239,6 +243,9 @@
       this.dcPrevXR      = 0; this.dcPrevYR = 0;
       this.isPlaying     = false;
       this.onEnded       = null;
+      this.onSilenceTimeout = null;
+      this._silentSamples   = 0;
+      this._silenceFired    = false;
       // ★2026-08 PCM(DDA)対応、3度目の設計。
       // 第1版: 生の5bitサンプルを自作の簡易ゲイン式で直接再生 → 音が違う。
       // 第2版: hes2mml変換と同じ@DPCM<n>抽出(クリップへ重複排除→MML.Dpcm.encode()で
@@ -320,6 +327,8 @@
       this.cycleAccum    = 0;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
       this.ddaChannel = -1; this.ddaTrace = null; this._ddaTracePos = 0; this._ddaFrameEntries = null;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
       if (mute) this.applyMute(mute);
     }
 
@@ -423,6 +432,16 @@
         this.dcPrevXR = raw.right; this.dcPrevYR = yR;
         outL[i] = yL; outR[i] = yR;
         this.samplePos++;
+        if (Math.abs(yL) < SILENCE_EPS && Math.abs(yR) < SILENCE_EPS) {
+          this._silentSamples++;
+          if (!this._silenceFired && this._silentSamples >= sr * SILENCE_SEC) {
+            this._silenceFired = true;
+            if (this.onSilenceTimeout) this.onSilenceTimeout();
+          }
+        } else {
+          this._silentSamples = 0;
+          this._silenceFired  = false;
+        }
       }
     }
 
@@ -460,6 +479,8 @@
       this._ddaWaveBuf.fill(16);
       this._ddaWavePos = 0;
       this._ddaWaveCount = 0;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
     }
 
     setSpeed(factor) { this.speedFactor = factor; }
@@ -489,6 +510,8 @@
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
     }
 
     applyMute(mute) {

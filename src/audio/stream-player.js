@@ -15,6 +15,13 @@
   const CPU_CLOCK_NTSC = 1789773;
   const BUFFER_SIZE    = 4096; // ~93ms @44100Hz
 
+  // 無音自動送り(NsfReplayStreamPlayer)用。SILENCE_SEC秒連続でほぼ無音(|y|<SILENCE_EPS)の
+  // 出力が続いたらonSilenceTimeoutを一度だけ呼ぶ(main.js playNsfStream参照)。バックグラウンド
+  // キャプチャ未到達によるスタール出力(_isFrameReady()==false)はここに含めない
+  // (実際の無音と区別するため、呼び出し側で判定済みのフレームだけをカウント対象にする)。
+  const SILENCE_SEC = 10;
+  const SILENCE_EPS = 1e-4;
+
   // ---- 共通ユーティリティ ----
 
   function createExpansionMap(expansions) {
@@ -482,6 +489,9 @@
       this.dcPrevY         = 0;
       this.isPlaying       = false;
       this.onEnded         = null;
+      this.onSilenceTimeout = null;
+      this._silentSamples  = 0;
+      this._silenceFired   = false;
       this._createNode();
     }
 
@@ -547,6 +557,8 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
       if (mute) this.applyMute(mute);
     }
 
@@ -602,6 +614,16 @@
         this.dcPrevX = raw; this.dcPrevY = y;
         out[i] = y;
         this.samplePos++;
+        if (Math.abs(y) < SILENCE_EPS) {
+          this._silentSamples++;
+          if (!this._silenceFired && this._silentSamples >= sr * SILENCE_SEC) {
+            this._silenceFired = true;
+            if (this.onSilenceTimeout) this.onSilenceTimeout();
+          }
+        } else {
+          this._silentSamples = 0;
+          this._silenceFired  = false;
+        }
       }
     }
 
@@ -616,6 +638,8 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
     }
 
     setSpeed(factor) { this.speedFactor = factor; }
@@ -653,6 +677,8 @@
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevX = this.dcPrevY = 0;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
     }
 
     applyMute(mute) {

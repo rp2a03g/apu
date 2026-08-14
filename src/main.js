@@ -778,13 +778,16 @@
     const pos = getTransportPosition();
     seekBarEl.value = String(Math.round((pos / duration) * SEEK_RESOLUTION));
     timeDisplayEl.textContent = `${formatTime(pos)} / ${formatTime(duration)}`;
+    if (playing && isFadeableSoundFileMode() && p && p.gainNode && audioCtx) {
+      updateEndFadeGain(p, pos, duration);
+    }
     if (playing) {
       if (pos >= duration) {
-        transportStop();
+        if (isSoundFileMode()) finishSoundFilePlayback(); else transportStop();
       } else if (rangeEndSec !== null && pos >= rangeEndSec) {
         if (rangeEndArmed) {
           rangeEndArmed = false;
-          transportStop();
+          if (isSoundFileMode()) finishSoundFilePlayback(); else transportStop();
         } else {
           transportRaf = requestAnimationFrame(updateTransportUI);
         }
@@ -794,6 +797,34 @@
       }
     } else {
       if (rangeEndSec === null || pos < rangeEndSec) rangeEndArmed = true;
+    }
+  }
+
+  // duration(または再生範囲の終了点、どちらか早い方)の手前FADE_SEC秒からgainNodeを
+  // 直線的に0まで下げ、終了点到達とほぼ同時に無音になるようにする(finishSoundFilePlayback
+  // が実際に停止/次曲送りするのはその後)。手前へシークし直す等でフェード区間を外れたら
+  // 即座に元の音量へ戻す。
+  function updateEndFadeGain(p, pos, duration) {
+    const target = rangeEndSec !== null ? Math.min(duration, rangeEndSec) : duration;
+    const remain = target - pos;
+    const g = p.gainNode.gain;
+    if (remain <= FADE_SEC) {
+      if (!endFadeActive) {
+        endFadeActive = true;
+        try {
+          const now = audioCtx.currentTime;
+          g.cancelScheduledValues(now);
+          g.setValueAtTime(g.value, now);
+          g.linearRampToValueAtTime(0.0001, now + Math.max(0, remain));
+        } catch (e) { /* ignore */ }
+      }
+    } else if (endFadeActive) {
+      endFadeActive = false;
+      try {
+        const now = audioCtx.currentTime;
+        g.cancelScheduledValues(now);
+        g.setValueAtTime(p._baseGain != null ? p._baseGain : g.value, now);
+      } catch (e) { /* ignore */ }
     }
   }
 
@@ -1044,6 +1075,75 @@
     stopSpcPlayback();
     stopGbsPlayback();
     stopHesPlayback();
+  }
+
+  // ウィンドウを閉じた時用: stopAllFormatPlayback()と違い、MML再生中(activePlayerを
+  // 共用している)を巻き込まない。stopNsfFilePlayback()自体がlastPlayMode==='nsf'の
+  // 時だけactivePlayerへ触れる設計なので、他4つ(専用変数を持つ)と合わせて無条件に呼べる。
+  function stopSoundFileWindowPlayback() {
+    stopNsfFilePlayback();
+    stopKssPlayback();
+    stopSpcPlayback();
+    stopGbsPlayback();
+    stopHesPlayback();
+  }
+
+  // duration/再生範囲終了点への到達で自動的に次の曲/トラックへ進む対象かどうか
+  // (SPCは1ファイル=1曲のため曲送りの概念が無く、対象外)
+  function isSoundFileMode() {
+    return lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'gbs' || lastPlayMode === 'hes';
+  }
+  function isFadeableSoundFileMode() {
+    return isSoundFileMode() || lastPlayMode === 'spc';
+  }
+
+  // 曲リストの最後まで達したら先頭(0/最小値)へ戻ってループする「自動送り」版。
+  // ボタン操作のchangeXxxSong/Track(クランプ)とは違い、無限に再生が続けられるようラップする。
+  function autoAdvanceNsfSong() {
+    if (!loadedNsfHeader) return;
+    const totalSongs = Math.max(1, loadedNsfHeader.totalSongs);
+    let songNo = (parseInt(nsfSongIndexEl.value, 10) || 1) + 1;
+    if (songNo > totalSongs) songNo = 1;
+    nsfSongIndexEl.value = String(songNo);
+    lastNsfCaptureResult = null;
+    playNsfStream();
+  }
+  function autoAdvanceKssSong() {
+    const min = parseInt(kssSongIndexEl.min, 10) || 0;
+    const max = parseInt(kssSongIndexEl.max, 10) || 255;
+    let v = (parseInt(kssSongIndexEl.value, 10) || 0) + 1;
+    if (v > max) v = min;
+    kssSongIndexEl.value = String(v);
+    playKssStream();
+  }
+  function autoAdvanceGbsSong() {
+    const min = parseInt(gbsSongIndexEl.min, 10) || 0;
+    const max = parseInt(gbsSongIndexEl.max, 10) || 0;
+    let v = (parseInt(gbsSongIndexEl.value, 10) || 0) + 1;
+    if (v > max) v = min;
+    gbsSongIndexEl.value = String(v);
+    playGbsStream();
+  }
+  function autoAdvanceHesTrack() {
+    let v = (parseInt(hesTrackIndexEl.value, 10) || 0) + 1;
+    if (v > 255) v = 0;
+    hesTrackIndexEl.value = String(v);
+    playHesStream();
+  }
+
+  // duration/再生範囲終了点へ到達した(フェードアウト完了済み)時に呼ぶ。プレイヤーを
+  // 破棄してから次のインデックスへ進める(transportStop()だけだとactivePlayerが残ったまま
+  // 一時停止扱いになり、次のplayXxxStream()呼び出しが「一時停止解除」に化けてしまうため)。
+  // SPCは曲送りの概念が無いので停止するだけ。
+  function finishSoundFilePlayback() {
+    endFadeActive = false;
+    const mode = lastPlayMode;
+    if (mode === 'nsf') { stopNsfFilePlayback(); autoAdvanceNsfSong(); }
+    else if (mode === 'kss') { stopKssPlayback(); autoAdvanceKssSong(); }
+    else if (mode === 'gbs') { stopGbsPlayback(); autoAdvanceGbsSong(); }
+    else if (mode === 'hes') { stopHesPlayback(); autoAdvanceHesTrack(); }
+    else if (mode === 'spc') { stopSpcPlayback(); }
+    else { transportStop(); }
   }
 
   function transportPlay() {
@@ -1558,6 +1658,12 @@
   // 再生状態の種別管理
   let lastPlayMode = null; // 'nsf' | 'capture-mml'
 
+  // duration/再生範囲終了点へ近づいた時のフェードアウト(NSF/SPC/KSS/GBS/HES共通)。
+  // 5秒かけてgainNodeを0まで下げ、終了点到達と同時に無音になるようにする
+  // (finishSoundFilePlayback/updateTransportUI参照)。
+  const FADE_SEC = 5;
+  let endFadeActive = false;
+
   const NSF_CHIP_NAMES = [
     ['VRC6', MML.NSF.CHIP_FLAGS.VRC6],
     ['VRC7', MML.NSF.CHIP_FLAGS.VRC7],
@@ -1985,10 +2091,27 @@
     // 原因だった。副産物としてシーク・再生中のライブミュートにも対応できる
     // (MmlStreamPlayerと同じ「書き込みログをCPU無しで再生する」方式のため)。
     const player = new MML.Audio.NsfReplayStreamPlayer(audioCtx);
+    player._baseGain = player.gainNode.gain.value;
+    endFadeActive = false;
     player.onEnded = () => {
       if (transportRaf) cancelAnimationFrame(transportRaf);
       updateNsfPlayButton();
       updateTransportUI();
+      // durationちょうどで曲が自然終了した場合、内部プレイヤーのこの通知がupdateTransportUI()の
+      // rAFポーリング(pos>=duration)より先に発火しisPlaying=falseへ変わるため、そちらの
+      // finishSoundFilePlayback()呼び出しが実質発火しない(レース)。ここでも呼んでおく
+      // (setTimeoutで一度onaudioprocessコールバックのスタックを抜けてから実行する)。
+      setTimeout(() => { if (currentTransportPlayer() === player) finishSoundFilePlayback(); }, 0);
+    };
+    // 10秒連続無音を検出したら(SILENCE_SEC、stream-player.js)、1秒待ってから次の曲へ
+    // 進む(既に無音のためフェードは不要)。setTimeout発火時点でこのplayerがまだ
+    // アクティブか確認し、その間にユーザーが手動で操作していたら何もしない。
+    player.onSilenceTimeout = () => {
+      setTimeout(() => {
+        if (currentTransportPlayer() !== player) return;
+        stopNsfFilePlayback();
+        autoAdvanceNsfSong();
+      }, 1000);
     };
     activePlayer    = player;
     player.setSpeed(currentSpeedFactor);
@@ -2175,6 +2298,12 @@
     stopAllFormatPlayback();
     keyboardDisplay.reset();
     loadedSpcBytes = null; loadedSpcHeader = null;
+    // SPCのボイスミュートはkeyboardDisplay._muteStateを経由しない専用機構(spcMutedVoices
+    // ビットマスク)のため、reset()の_muteState.clear()だけではクリアされない。新しい
+    // ファイルを開いたらこちらも同様にクリアする(他フォーマットと同じ方針、changeSpcTrack
+    // 相当の概念が無いSPCでも「新規ファイルではミュートを引き継がない」を揃える)。
+    spcMutedVoices = 0;
+    for (let ch = 0; ch < 8; ch++) updateMuteButton(ch, spcMutedVoices);
 
     const buf   = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
@@ -2291,7 +2420,14 @@
     // CPU+DSPフル駆動の実コスト計算)、今回の統合の主眼は「軽量化」ではなく「ライブ
     // 再生用と先読み用の2本を同時に走らせてCPUを食い合っていたのを1本にまとめる」こと。
     const player = new MML.Audio.SpcReplayStreamPlayer(audioCtx);
-    player.onEnded = () => { updateSpcPlayButton(); updateTransportUI(); };
+    player._baseGain = player.gainNode.gain.value;
+    endFadeActive = false;
+    player.onEnded = () => {
+      updateSpcPlayButton();
+      updateTransportUI();
+      // NsfReplayStreamPlayerと同じレース対策(onEnded参照)。SPCは曲送りが無いので停止のみ。
+      setTimeout(() => { if (currentTransportPlayer() === player) finishSoundFilePlayback(); }, 0);
+    };
     spcActivePlayer = player;
     player.setSpeed(currentSpeedFactor);
     workletDuration = duration;
@@ -3186,7 +3322,22 @@
     // NSFのcapture.js側で必要だった追加修正(clock呼び出し追加)も不要だった(実測でPSG
     // レジスタ状態が実CPU駆動と200フレームぶん完全一致することを確認済み)。
     const player = new MML.Audio.KssReplayStreamPlayer(audioCtx);
-    player.onEnded = () => { updateKssPlayButton(); updateTransportUI(); };
+    player._baseGain = player.gainNode.gain.value;
+    endFadeActive = false;
+    player.onEnded = () => {
+      updateKssPlayButton();
+      updateTransportUI();
+      // NsfReplayStreamPlayerと同じレース対策(playNsfStream内のonEnded参照)
+      setTimeout(() => { if (currentTransportPlayer() === player) finishSoundFilePlayback(); }, 0);
+    };
+    // NsfReplayStreamPlayerと同じ理由(playNsfStream参照): 10秒無音を検出したら1秒待って次の曲へ
+    player.onSilenceTimeout = () => {
+      setTimeout(() => {
+        if (currentTransportPlayer() !== player) return;
+        stopKssPlayback();
+        autoAdvanceKssSong();
+      }, 1000);
+    };
     kssActivePlayer = player;
     player.setSpeed(currentSpeedFactor);
     workletDuration = duration;
@@ -3278,7 +3429,11 @@
     let v = (parseInt(kssSongIndexEl.value, 10) || 0) + delta;
     v = Math.max(min, Math.min(max, v));
     kssSongIndexEl.value = String(v);
-    if (kssActivePlayer) { stopKssPlayback(); playKssStream(); }
+    // NSFのchangeNsfSong()と同じく、再生中かどうかに関係なく無条件に再生を開始する
+    // (以前はkssActivePlayerがある時だけ再開しており、ファイル読込直後は曲送りボタンが
+    // 番号を進めるだけで再生されないというNSFとの挙動差があった)
+    stopKssPlayback();
+    playKssStream();
   }
 
   async function exportKssWav() {
@@ -3547,7 +3702,22 @@
     // ロール先読みキャプチャを1本のバックグラウンドregsOnlyキャプチャに統合する
     // (KssReplayStreamPlayerと対になるGbsReplayStreamPlayer、src/audio/gbs-stream-player.js)。
     const player = new MML.Audio.GbsReplayStreamPlayer(audioCtx);
-    player.onEnded = () => { updateGbsPlayButton(); updateTransportUI(); };
+    player._baseGain = player.gainNode.gain.value;
+    endFadeActive = false;
+    player.onEnded = () => {
+      updateGbsPlayButton();
+      updateTransportUI();
+      // NsfReplayStreamPlayerと同じレース対策(playNsfStream内のonEnded参照)
+      setTimeout(() => { if (currentTransportPlayer() === player) finishSoundFilePlayback(); }, 0);
+    };
+    // NsfReplayStreamPlayerと同じ理由(playNsfStream参照): 10秒無音を検出したら1秒待って次の曲へ
+    player.onSilenceTimeout = () => {
+      setTimeout(() => {
+        if (currentTransportPlayer() !== player) return;
+        stopGbsPlayback();
+        autoAdvanceGbsSong();
+      }, 1000);
+    };
     gbsActivePlayer = player;
     player.setSpeed(currentSpeedFactor);
     workletDuration = duration;
@@ -3610,7 +3780,9 @@
     let v = (parseInt(gbsSongIndexEl.value, 10) || 0) + delta;
     v = Math.max(min, Math.min(max, v));
     gbsSongIndexEl.value = String(v);
-    if (gbsActivePlayer) { stopGbsPlayback(); playGbsStream(); }
+    // NSFのchangeNsfSong()と同じく無条件に再生を開始する(KSSと同じ理由、changeKssSong参照)
+    stopGbsPlayback();
+    playGbsStream();
   }
 
   async function exportGbsWav() {
@@ -3893,7 +4065,22 @@
     // この方式へ戻す。PCM(DDA)を使う曲の音は再びこの方式の制約(フレーム単位の
     // スナップショットでは追いきれない)を受ける。
     const player = new MML.Audio.HesReplayStreamPlayer(audioCtx);
-    player.onEnded = () => { updateHesPlayButton(); updateTransportUI(); };
+    player._baseGain = player.gainNode.gain.value;
+    endFadeActive = false;
+    player.onEnded = () => {
+      updateHesPlayButton();
+      updateTransportUI();
+      // NsfReplayStreamPlayerと同じレース対策(playNsfStream内のonEnded参照)
+      setTimeout(() => { if (currentTransportPlayer() === player) finishSoundFilePlayback(); }, 0);
+    };
+    // NsfReplayStreamPlayerと同じ理由(playNsfStream参照): 10秒無音を検出したら1秒待って次の曲へ
+    player.onSilenceTimeout = () => {
+      setTimeout(() => {
+        if (currentTransportPlayer() !== player) return;
+        stopHesPlayback();
+        autoAdvanceHesTrack();
+      }, 1000);
+    };
     hesActivePlayer = player;
     player.setSpeed(currentSpeedFactor);
     workletDuration = duration;
@@ -3960,7 +4147,9 @@
     let v = (parseInt(hesTrackIndexEl.value, 10) || 0) + delta;
     v = Math.max(0, Math.min(255, v));
     hesTrackIndexEl.value = String(v);
-    if (hesActivePlayer) { stopHesPlayback(); playHesStream(); }
+    // NSFのchangeNsfSong()と同じく無条件に再生を開始する(KSS/GBSと同じ理由、changeKssSong参照)
+    stopHesPlayback();
+    playHesStream();
   }
 
   async function exportHesWav() {
@@ -4126,5 +4315,13 @@
     // 別のファイルへ差し替える用)
     const inlineOpenBtn = document.getElementById('btnSoundFileOpenInline');
     if (inlineOpenBtn) inlineOpenBtn.addEventListener('click', () => soundFileEl.click());
+
+    // ウィンドウを閉じたら再生を止め、先読みキャプチャ(writeLog/snapshots等)も破棄する
+    // (floatingWindows.jsの汎用closeハンドラは表示/非表示の切替のみで、鳴りっぱなし・
+    // メモリ蓄積を防ぐ処理を持たないため、このウィンドウ専用に追加で配線する)。
+    const soundWinCloseBtn = soundWinEl ? soundWinEl.querySelector('.float-window-close') : null;
+    if (soundWinCloseBtn) {
+      soundWinCloseBtn.addEventListener('click', () => stopSoundFileWindowPlayback());
+    }
   })();
 })();

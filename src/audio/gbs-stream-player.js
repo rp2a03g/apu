@@ -18,6 +18,10 @@
 
   const BUFFER_SIZE = 4096;
 
+  // 無音自動送り(GbsReplayStreamPlayer)用。src/audio/stream-player.jsの同名定数と同じ考え方。
+  const SILENCE_SEC = 10;
+  const SILENCE_EPS = 1e-4;
+
   // gainNode(2.5)の後段にリミッタ(DynamicsCompressorNode)を挟み、複数チャンネル
   // (特にCH4ノイズ+他ch)が同時に鳴る密度の高い箇所でピークが±1.0を超えハードクリップ
   // するのを防ぐ(src/audio/stream-player.js・hes-stream-player.js createLimiter()と同じ
@@ -182,6 +186,9 @@
       this.dcPrevXR      = 0; this.dcPrevYR = 0;
       this.isPlaying     = false;
       this.onEnded       = null;
+      this.onSilenceTimeout = null;
+      this._silentSamples   = 0;
+      this._silenceFired    = false;
       this._createNode();
     }
 
@@ -228,6 +235,8 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
       if (mute) this.applyMute(mute);
     }
 
@@ -301,6 +310,16 @@
         this.dcPrevXR = raw.right; this.dcPrevYR = yR;
         outL[i] = yL; outR[i] = yR;
         this.samplePos++;
+        if (Math.abs(yL) < SILENCE_EPS && Math.abs(yR) < SILENCE_EPS) {
+          this._silentSamples++;
+          if (!this._silenceFired && this._silentSamples >= sr * SILENCE_SEC) {
+            this._silenceFired = true;
+            if (this.onSilenceTimeout) this.onSilenceTimeout();
+          }
+        } else {
+          this._silentSamples = 0;
+          this._silenceFired  = false;
+        }
       }
     }
 
@@ -315,6 +334,8 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
     }
 
     setSpeed(factor) { this.speedFactor = factor; }
@@ -339,6 +360,8 @@
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
     }
 
     // {gb:{ch1,ch2,ch3,ch4}}形状(GbsStreamPlayer.applyMuteと同じ読み方)

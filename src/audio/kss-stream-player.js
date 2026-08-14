@@ -11,6 +11,10 @@
 
   const BUFFER_SIZE = 4096;
 
+  // 無音自動送り(KssReplayStreamPlayer)用。src/audio/stream-player.jsの同名定数と同じ考え方。
+  const SILENCE_SEC = 10;
+  const SILENCE_EPS = 1e-4;
+
   function createLimiter(audioCtx) {
     const limiter = audioCtx.createDynamicsCompressor();
     limiter.threshold.value = -3.0;
@@ -190,6 +194,9 @@
       this.dcPrevY          = 0;
       this.isPlaying        = false;
       this.onEnded          = null;
+      this.onSilenceTimeout = null;
+      this._silentSamples   = 0;
+      this._silenceFired    = false;
       this._createNode();
     }
 
@@ -244,6 +251,8 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
       if (mute) this.applyMute(mute);
     }
 
@@ -299,6 +308,16 @@
         this.dcPrevX = raw; this.dcPrevY = y;
         out[i] = y;
         this.samplePos++;
+        if (Math.abs(y) < SILENCE_EPS) {
+          this._silentSamples++;
+          if (!this._silenceFired && this._silentSamples >= sr * SILENCE_SEC) {
+            this._silenceFired = true;
+            if (this.onSilenceTimeout) this.onSilenceTimeout();
+          }
+        } else {
+          this._silentSamples = 0;
+          this._silenceFired  = false;
+        }
       }
     }
 
@@ -313,6 +332,8 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
     }
 
     setSpeed(factor) { this.speedFactor = factor; }
@@ -343,6 +364,8 @@
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevX = this.dcPrevY = 0;
+      this._silentSamples = 0;
+      this._silenceFired  = false;
     }
 
     // keyboardDisplay.getMuteConfig()と同じ{apu:{},expansion:{psg,scc,opll}}形式

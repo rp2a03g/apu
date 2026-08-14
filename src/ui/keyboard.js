@@ -1670,9 +1670,19 @@
     // 残ったまま次のファイルを読み込んだように見えてしまう問題(再生ボタンを押すまで
     // update()/updateSpcVoices()に新しいデータが渡らず、直前の描画がそのまま残る)を防ぐため、
     // 表示を無音状態に戻して即座に再描画する。
+    // 新しいファイルを開いた時に呼ぶ(main.jsの各loadXxxFile()冒頭)。曲送り/トラック送り
+    // (同一ファイル内での切替)ではミュート状態を保持したいため、ここでしかクリアしない。
+    // _muteStateはチャンネルid('P1'等、フォーマット固有だがファイルをまたいで共通)をキーに
+    // 永続化されており、以前は新しいファイルを開いてもクリアされなかった。結果、
+    // 再生開始直後にgetChannelMuteConfig()が(_rebuildRows前の空/旧チャンネル一覧を反映した)
+    // 「何もミュートされていない」設定を再生側へ渡してしまう一方、直後のロール/鍵盤再構築が
+    // 古い_muteStateを見て該当chを再びミュート表示するため、表示は「ミュートのまま」なのに
+    // 実際の再生は「全ch鳴る」という食い違いが起きていた。新規ファイルではミュートを
+    // 引き継がない方針にして解消する。
     reset() {
       this._spcVoices = [];
       this._prevSpcVoices = [];
+      this._muteState.clear();
       this.setSource({ regSnapshots: [{}], totalFrames: 1, samplesPerFrame: 735, sampleRate: 44100, writeLog: [] }, []);
       this.update(0);
     }
