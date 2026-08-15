@@ -104,10 +104,12 @@
       const idx = envReg.assign(ev.volSeq);
       return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
+    // MMC5パルスは周期レジスタ(値が下がるほど音程が上がる)なのでdirectionUp=false
+    // (src/convert/pitch.js fitVibrato参照)。
     function toPitchFields(ev) {
       if (!pitchReg || ev.rawFreq == null) return {};
       const fields = {};
-      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq, false));
       return fields;
     }
     function toNoteEnvFields(ev) {

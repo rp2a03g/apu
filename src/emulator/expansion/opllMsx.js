@@ -329,7 +329,7 @@
   }
 
   class OPLLAudio {
-    constructor() { this._init(); this.mute = new Array(NUM_CH).fill(false); }
+    constructor() { this._init(); this.mute = new Array(NUM_CH).fill(false); this.vol = new Array(NUM_CH).fill(1); }
     _init() {
       this.addr = 0;
       this.reg = new Uint8Array(0x40);
@@ -476,7 +476,7 @@
         if (c.car.eg_mode === FINISH) continue;
         const fm = c.calcModulator(this.lfo_am, this.lfo_pm);
         const out = c.calcCarrier(fm, this.lfo_am, this.lfo_pm);
-        if (!this.mute[i]) inst += out;
+        if (!this.mute[i]) inst += out * this.vol[i];
       }
       if (this.rhythmMode) {
         const ch6 = this.channels[6], ch7 = this.channels[7], ch8 = this.channels[8];
@@ -485,7 +485,7 @@
         if (ch6.car.eg_mode !== FINISH) {
           const fm = ch6.calcModulator(this.lfo_am, this.lfo_pm);
           const out = ch6.calcCarrier(fm, this.lfo_am, this.lfo_pm);
-          if (!this.mute[6]) inst += out;
+          if (!this.mute[6]) inst += out * this.vol[6];
         }
 
         // HH/SD/TOM/CYM: 先に位相を進めてからshort_noiseを計算し(emu2413 update_short_noise)、
@@ -509,19 +509,19 @@
         const tomEg = tom.calcEnvelope(this.lfo_am);
         const cymEg = cym.calcEnvelope(this.lfo_am);
 
-        if (tom.eg_mode !== FINISH && !this.mute[8]) inst += rhythmOut(tom, tomEg, tomPg);
+        if (tom.eg_mode !== FINISH && !this.mute[8]) inst += rhythmOut(tom, tomEg, tomPg) * this.vol[8];
         if (hh.eg_mode !== FINISH && !this.mute[7]) {
           const ph = shortNoise ? (noiseBit ? PD(0x2d0) : PD(0x234)) : (noiseBit ? PD(0x34) : PD(0xd0));
-          inst += rhythmOut(hh, hhEg, ph);
+          inst += rhythmOut(hh, hhEg, ph) * this.vol[7];
         }
         if (sd.eg_mode !== FINISH && !this.mute[7]) {
           const sdOwnBit = (sdPg >> (PG_BITS - 2)) & 1;
           const ph = sdOwnBit ? (noiseBit ? PD(0x300) : PD(0x200)) : (noiseBit ? PD(0x0) : PD(0x100));
-          inst += rhythmOut(sd, sdEg, ph);
+          inst += rhythmOut(sd, sdEg, ph) * this.vol[7];
         }
         if (cym.eg_mode !== FINISH && !this.mute[8]) {
           const ph = shortNoise ? PD(0x300) : PD(0x100);
-          inst += rhythmOut(cym, cymEg, ph);
+          inst += rhythmOut(cym, cymEg, ph) * this.vol[8];
         }
       }
       return inst;

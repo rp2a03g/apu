@@ -131,7 +131,7 @@
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
       this.gainNode.gain.value = 4.0;
-      this.gainNode.connect(this.audioCtx.destination);
+      this.gainNode.connect(MML.Audio.getMasterGain(this.audioCtx));
 
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
       this.node.connect(this.gainNode);
@@ -244,8 +244,22 @@
       this.isPlaying     = false;
       this.onEnded       = null;
       this.onSilenceTimeout = null;
-      this._silentSamples   = 0;
+      // 無音自動送り用の先読みスキャン状態(NsfReplayStreamPlayerと同じ設計、
+      // src/audio/stream-player.js scanSilenceStep冒頭コメント参照)。DDAの生トレース
+      // (ddaTrace、下記コメント参照)はフレーム単位のスナップショットへ既に反映済みの
+      // dac値をそのまま使う簡略版とし、_fill()側のサンプル単位上書きまでは複製しない
+      // (無音判定にはこれで十分。DDA発音中はスナップショットのdacがフレームごとに
+      // 変化し続けるため、単純な近似でも「無音ではない」とは正しく判定できる)。
       this._silenceFired    = false;
+      this._silenceScanFrame = -1;
+      this._scanDone         = false;
+      this._scanApu = null;
+      this._scanFrame = -1;
+      this._scanSongFramePos = 0;
+      this._scanCycleAccum = 0;
+      this._scanDcPrevXL = 0; this._scanDcPrevYL = 0;
+      this._scanDcPrevXR = 0; this._scanDcPrevYR = 0;
+      this._scanSilentRun = 0;
       // ★2026-08 PCM(DDA)対応、3度目の設計。
       // 第1版: 生の5bitサンプルを自作の簡易ゲイン式で直接再生 → 音が違う。
       // 第2版: hes2mml変換と同じ@DPCM<n>抽出(クリップへ重複排除→MML.Dpcm.encode()で
@@ -291,10 +305,13 @@
       // ±1.0を超えることがある(実測: TP03018.hes index77で60秒中131サンプルがクリップ)。
       // 2.5まで下げるとリミッタと合わせて同じ60秒間で一度もクリップしなかった
       // (実測: maxAbs=0.966)。DDAを使わない曲の体感音量はリミッタの底上げでほぼ保たれる。
-      this.gainNode.gain.value = 2.5;
+      // ★2026-08 SPCを基準に全フォーマットの体感音量を実測(RMS)揃え、1.65へさらに調整
+      // (src/audio/stream-player.js NsfReplayStreamPlayer冒頭コメント参照。クリップ耐性は
+      // 2.5より下げるほど有利になる方向なので上記の対策と両立する)。
+      this.gainNode.gain.value = 1.65;
       this.limiter = createLimiter(this.audioCtx);
       this.gainNode.connect(this.limiter);
-      this.limiter.connect(this.audioCtx.destination);
+      this.limiter.connect(MML.Audio.getMasterGain(this.audioCtx));
 
       // $0805(chバランス)/$0801(全体バランス)を反映するため2ch(ステレオ)出力にする
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 2);
@@ -311,6 +328,7 @@
     _buildApu() {
       this.apu = new MML.Emu.APUHuC6280();
       if (this._lastMute) this.applyMute(this._lastMute);
+      if (this._lastVolume) this.applyVolume(this._lastVolume);
     }
 
     load(hesBytes, track, totalFrames, capture, mute) {
@@ -327,9 +345,8 @@
       this.cycleAccum    = 0;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
       this.ddaChannel = -1; this.ddaTrace = null; this._ddaTracePos = 0; this._ddaFrameEntries = null;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
       if (mute) this.applyMute(mute);
+      this._resetScan(0);
     }
 
     // main.jsがバックグラウンドキャプチャの進捗ごと(ロール再構築と同じタイミング)に
@@ -358,9 +375,15 @@
     // 変化を捉えられず粗すぎるため)。
     _applyFrame(f) {
       this.currentFrame = f;
-      const s = this.snapshots[f];
+      this._applySnapshotTo(this.apu, this.snapshots[f]);
+      this._prepDdaFrame(f);
+    }
+
+    // apu(ライブ/スキャンどちらのAPUHuC6280インスタンスでも可)へスナップショットsを
+    // 書き戻す共通処理(DDAの生トレース上書きは含まない。呼び出し側で必要なら別途行う)。
+    _applySnapshotTo(apu, s) {
       for (let i = 0; i < s.length; i++) {
-        const c = this.apu.ch[i], sc = s[i];
+        const c = apu.ch[i], sc = s[i];
         c.control = (sc.on ? 0x80 : 0) | (sc.dda ? 0x40 : 0) | (sc.vol & 0x1F);
         c.freq = sc.freq;
         c.balance = sc.balance;
@@ -372,7 +395,75 @@
         c.noiseCtrl = sc.noiseCtrl !== undefined ? sc.noiseCtrl : (sc.noiseOn ? 0x80 : 0);
         for (let j = 0; j < sc.wave.length; j++) c.wave[j] = sc.wave[j];
       }
-      this._prepDdaFrame(f);
+    }
+
+    // ===== 無音自動送り: 先読みスキャン(NsfReplayStreamPlayerと同じ設計) =====
+    _scanBuildApu() {
+      this._scanApu = new MML.Emu.APUHuC6280();
+      if (this._lastMute) {
+        const exp = this._lastMute.expansion || this._lastMute;
+        if (exp.hes) Object.assign(this._scanApu.mute, exp.hes);
+      }
+      if (this._lastVolume) {
+        const exp = this._lastVolume.expansion || this._lastVolume;
+        if (exp.hes) MML.Emu.applyVolume(this._scanApu.vol, exp.hes);
+      }
+    }
+
+    _scanApplyFrame(f) {
+      this._scanFrame = f;
+      this._applySnapshotTo(this._scanApu, this.snapshots[f]);
+    }
+
+    _resetScan(fromFrame) {
+      if (!this.header) return;
+      this._scanBuildApu();
+      this._scanCycleAccum = 0;
+      this._scanDcPrevXL = this._scanDcPrevYL = this._scanDcPrevXR = this._scanDcPrevYR = 0;
+      this._scanSilentRun = 0;
+      this._silenceScanFrame = -1;
+      this._silenceFired = false;
+      this._scanDone = false;
+      this._scanFrame = -1;
+      const snaps = this.snapshots || [];
+      let f = 0;
+      for (; f <= fromFrame; f++) {
+        if (!snaps[f]) break;
+        this._scanApplyFrame(f);
+      }
+      this._scanSongFramePos = Math.min(f, fromFrame + 1);
+    }
+
+    scanSilenceStep(budgetSongSeconds) {
+      if (this._scanDone || this._silenceScanFrame >= 0 || !this._scanApu) return;
+      const sr = this.audioCtx.sampleRate;
+      const budgetSamples = Math.max(1, Math.round(budgetSongSeconds * sr));
+      for (let i = 0; i < budgetSamples; i++) {
+        const nextSongFramePos = this._scanSongFramePos + (this.frameRate / sr);
+        const f = Math.floor(nextSongFramePos);
+        if (f >= this.totalFrames) { this._scanDone = true; return; }
+        if (!this._isFrameReady(f)) return;
+        this._scanSongFramePos = nextSongFramePos;
+        if (f !== this._scanFrame) this._scanApplyFrame(f);
+
+        this._scanCycleAccum += this.clockHz / sr;
+        while (this._scanCycleAccum >= 1) { this._scanApu.clock(); this._scanCycleAccum -= 1; }
+        const raw = this._scanApu.mixSample();
+        const yL = raw.left  - this._scanDcPrevXL + 0.999 * this._scanDcPrevYL;
+        const yR = raw.right - this._scanDcPrevXR + 0.999 * this._scanDcPrevYR;
+        this._scanDcPrevXL = raw.left;  this._scanDcPrevYL = yL;
+        this._scanDcPrevXR = raw.right; this._scanDcPrevYR = yR;
+
+        if (Math.abs(yL) < SILENCE_EPS && Math.abs(yR) < SILENCE_EPS) {
+          this._scanSilentRun++;
+          if (this._scanSilentRun >= sr * SILENCE_SEC) {
+            this._silenceScanFrame = Math.max(0, Math.floor(this._scanSongFramePos - SILENCE_SEC * this.frameRate));
+            return;
+          }
+        } else {
+          this._scanSilentRun = 0;
+        }
+      }
     }
 
     // このフレーム(f)分のDDA生トレース値を集めてキャッシュする(書込み順、ポインタは
@@ -432,15 +523,9 @@
         this.dcPrevXR = raw.right; this.dcPrevYR = yR;
         outL[i] = yL; outR[i] = yR;
         this.samplePos++;
-        if (Math.abs(yL) < SILENCE_EPS && Math.abs(yR) < SILENCE_EPS) {
-          this._silentSamples++;
-          if (!this._silenceFired && this._silentSamples >= sr * SILENCE_SEC) {
-            this._silenceFired = true;
-            if (this.onSilenceTimeout) this.onSilenceTimeout();
-          }
-        } else {
-          this._silentSamples = 0;
-          this._silenceFired  = false;
+        if (this._silenceScanFrame >= 0 && !this._silenceFired && f >= this._silenceScanFrame) {
+          this._silenceFired = true;
+          if (this.onSilenceTimeout) this.onSilenceTimeout();
         }
       }
     }
@@ -479,8 +564,7 @@
       this._ddaWaveBuf.fill(16);
       this._ddaWavePos = 0;
       this._ddaWaveCount = 0;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
+      this._resetScan(0);
     }
 
     setSpeed(factor) { this.speedFactor = factor; }
@@ -510,8 +594,7 @@
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
+      this._resetScan(targetFrame);
     }
 
     applyMute(mute) {
@@ -520,6 +603,18 @@
       if (!this.apu) return;
       const exp = mute.expansion || mute;
       if (exp.hes) Object.assign(this.apu.mute, exp.hes);
+      // 再生中のミュート切替は無音判定の基準に影響するため先読みスキャンをやり直す
+      if (this.header) this._resetScan(Math.max(0, this.currentFrame));
+    }
+
+    // {hes:{ch0..ch5}}形状(applyMuteと同じ)だが値は0〜1
+    applyVolume(volume) {
+      if (!volume) return;
+      this._lastVolume = volume;
+      if (!this.apu) return;
+      const exp = volume.expansion || volume;
+      if (exp.hes) MML.Emu.applyVolume(this.apu.vol, exp.hes);
+      if (this.header) this._resetScan(Math.max(0, this.currentFrame));
     }
 
     getPosition() { return this.samplePos / this.audioCtx.sampleRate; }
@@ -532,6 +627,7 @@
       if (this.gainNode) { this.gainNode.disconnect(); this.gainNode = null; }
       if (this.limiter) { this.limiter.disconnect(); this.limiter = null; }
       this.apu       = null;
+      this._scanApu  = null;
       this.snapshots = null;
       // ddaTraceは曲全体のDDA(PCM)書込み値の生ログで、他フォーマットのwriteLog同様
       // 長いDDA多用曲では数十MB規模になりうる(他4フォーマットのdestroy()と同じ理由で
@@ -575,7 +671,7 @@
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
       this.gainNode.gain.value = 4.0;
-      this.gainNode.connect(this.audioCtx.destination);
+      this.gainNode.connect(MML.Audio.getMasterGain(this.audioCtx));
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
       this.node.connect(this.gainNode);
       this.node.onaudioprocess = (e) => {

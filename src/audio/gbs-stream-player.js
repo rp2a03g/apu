@@ -59,10 +59,12 @@
       this._createNode();
     }
 
+    // ★2026-08 SPCを基準に全フォーマットの体感音量を実測(RMS)揃え
+    // (src/audio/stream-player.js NsfReplayStreamPlayer冒頭コメント参照)。
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 2.5;
-      this.gainNode.connect(this.audioCtx.destination);
+      this.gainNode.gain.value = 1.35;
+      this.gainNode.connect(MML.Audio.getMasterGain(this.audioCtx));
 
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
       this.node.connect(this.gainNode);
@@ -187,17 +189,30 @@
       this.isPlaying     = false;
       this.onEnded       = null;
       this.onSilenceTimeout = null;
-      this._silentSamples   = 0;
+      // 無音自動送り用の先読みスキャン状態(NsfReplayStreamPlayerと同じ設計、
+      // src/audio/stream-player.js scanSilenceStep冒頭コメント参照)
       this._silenceFired    = false;
+      this._silenceScanFrame = -1;
+      this._scanDone         = false;
+      this._scanApu = null;
+      this._scanLastCh4TriggerSeq = -1;
+      this._scanFrame = -1;
+      this._scanSongFramePos = 0;
+      this._scanCycleAccum = 0;
+      this._scanDcPrevXL = 0; this._scanDcPrevYL = 0;
+      this._scanDcPrevXR = 0; this._scanDcPrevYR = 0;
+      this._scanSilentRun = 0;
       this._createNode();
     }
 
+    // ★2026-08 SPCを基準に全フォーマットの体感音量を実測(RMS)揃え
+    // (src/audio/stream-player.js NsfReplayStreamPlayer冒頭コメント参照)。
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 2.5;
+      this.gainNode.gain.value = 1.35;
       this.limiter = createLimiter(this.audioCtx);
       this.gainNode.connect(this.limiter);
-      this.limiter.connect(this.audioCtx.destination);
+      this.limiter.connect(MML.Audio.getMasterGain(this.audioCtx));
 
       // NR51(パンレジスタ)を反映するため2ch(ステレオ)出力にする
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 2);
@@ -218,6 +233,7 @@
       // ここでは-1にしておけば良い(最初のトリガ検出で単に同じ$7FFFへ再設定されるだけで無害)。
       this._lastCh4TriggerSeq = -1;
       if (this._lastMute) this.applyMute(this._lastMute);
+      if (this._lastVolume) this.applyVolume(this._lastVolume);
     }
 
     // capture: {snapshots}(captureGbsSongAsyncのonProgress由来。進行中配列への参照なので
@@ -235,9 +251,8 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
       if (mute) this.applyMute(mute);
+      this._resetScan(0);
     }
 
     _isFrameReady(f) {
@@ -249,8 +264,13 @@
     // 触らず、clock()による自然な進行に任せる=音符境界での位相跳躍を避ける)。
     _applyFrame(f) {
       this.currentFrame = f;
-      const s = this.snapshots[f];
-      const apu = this.apu;
+      this._applySnapshotTo(this.apu, this.snapshots[f], 'lastCh4TriggerSeq');
+    }
+
+    // apu(ライブ/スキャンどちらのAPUGbインスタンスでも可)へスナップショットsを書き戻す
+    // 共通処理。triggerSeqKeyは呼び出し側インスタンス上でtriggerSeq基準値を覚えておく
+    // プロパティ名(ライブは_lastCh4TriggerSeq、スキャンは_scanLastCh4TriggerSeq)。
+    _applySnapshotTo(apu, s, triggerSeqKey) {
       apu.ch1.freq = s.ch1.freq; apu.ch1.duty = s.ch1.duty; apu.ch1.envelope.volume = s.ch1.vol; apu.ch1.enabled = s.ch1.enabled;
       apu.ch2.freq = s.ch2.freq; apu.ch2.duty = s.ch2.duty; apu.ch2.envelope.volume = s.ch2.vol; apu.ch2.enabled = s.ch2.enabled;
       apu.ch3.freq = s.ch3.freq; apu.ch3.volumeShift = s.ch3.volumeShift; apu.ch3.enabled = s.ch3.enabled; apu.ch3.dacOn = s.ch3.dacOn;
@@ -268,8 +288,8 @@
       // lfsr=$7FFFへ復帰]すると直る、という症状から特定)。triggerSeqの変化(=このフレームで
       // 新しくトリガされた)を検出した時だけ、実機のtrigger()と同じくlfsr/timerを
       // リセットする(triggerSeq自体はgbs2mml用に既にスナップショットへ入っている)。
-      if (s.ch4.triggerSeq !== undefined && s.ch4.triggerSeq !== this._lastCh4TriggerSeq) {
-        this._lastCh4TriggerSeq = s.ch4.triggerSeq;
+      if (s.ch4.triggerSeq !== undefined && s.ch4.triggerSeq !== this[triggerSeqKey]) {
+        this[triggerSeqKey] = s.ch4.triggerSeq;
         apu.ch4.lfsr = 0x7FFF;
         apu.ch4.timer = apu.ch4.periodT();
       }
@@ -277,6 +297,79 @@
       // ブート後既定値と同じにしておく)。gbsPlayer.js snapshotApu()冒頭コメント参照。
       apu.nr50 = s.nr50 !== undefined ? s.nr50 : 0x77;
       apu.nr51 = s.nr51 !== undefined ? s.nr51 : 0xF3;
+    }
+
+    // ===== 無音自動送り: 先読みスキャン(NsfReplayStreamPlayerと同じ設計) =====
+    _scanBuildApu() {
+      this._scanApu = new MML.Emu.APUGb();
+      this._scanLastCh4TriggerSeq = -1;
+      if (this._lastMute) {
+        const exp = this._lastMute.expansion || this._lastMute;
+        if (exp.gb) Object.assign(this._scanApu.mute, exp.gb);
+      }
+      if (this._lastVolume) {
+        const exp = this._lastVolume.expansion || this._lastVolume;
+        if (exp.gb) MML.Emu.applyVolume(this._scanApu.vol, exp.gb);
+      }
+    }
+
+    _scanApplyFrame(f) {
+      this._scanFrame = f;
+      this._applySnapshotTo(this._scanApu, this.snapshots[f], '_scanLastCh4TriggerSeq');
+    }
+
+    _resetScan(fromFrame) {
+      if (!this.header) return;
+      this._scanBuildApu();
+      this._scanCycleAccum = 0;
+      this._scanDcPrevXL = this._scanDcPrevYL = this._scanDcPrevXR = this._scanDcPrevYR = 0;
+      this._scanSilentRun = 0;
+      this._silenceScanFrame = -1;
+      this._silenceFired = false;
+      this._scanDone = false;
+      this._scanFrame = -1;
+      const snaps = this.snapshots || [];
+      let f = 0;
+      for (; f <= fromFrame; f++) {
+        if (!snaps[f]) break;
+        this._scanApplyFrame(f);
+      }
+      this._scanSongFramePos = Math.min(f, fromFrame + 1);
+    }
+
+    scanSilenceStep(budgetSongSeconds) {
+      if (this._scanDone || this._silenceScanFrame >= 0 || !this._scanApu) return;
+      const sr = this.audioCtx.sampleRate;
+      const budgetSamples = Math.max(1, Math.round(budgetSongSeconds * sr));
+      for (let i = 0; i < budgetSamples; i++) {
+        const nextSongFramePos = this._scanSongFramePos + (this.frameRate / sr);
+        const f = Math.floor(nextSongFramePos);
+        if (f >= this.totalFrames) { this._scanDone = true; return; }
+        if (!this._isFrameReady(f)) return;
+        this._scanSongFramePos = nextSongFramePos;
+        if (f !== this._scanFrame) this._scanApplyFrame(f);
+
+        this._scanCycleAccum += this.clockHz / sr;
+        while (this._scanCycleAccum >= 1) {
+          this._scanApu.clock();
+          this._scanCycleAccum -= 1;
+        }
+        const raw = this._scanApu.mixSample();
+        const yL = raw.left  - this._scanDcPrevXL + 0.999 * this._scanDcPrevYL;
+        const yR = raw.right - this._scanDcPrevXR + 0.999 * this._scanDcPrevYR;
+        this._scanDcPrevXL = raw.left;  this._scanDcPrevYL = yL;
+        this._scanDcPrevXR = raw.right; this._scanDcPrevYR = yR;
+
+        if (Math.abs(yL) < SILENCE_EPS && Math.abs(yR) < SILENCE_EPS) {
+          this._scanSilentRun++;
+          if (this._scanSilentRun >= sr * SILENCE_SEC) {
+            this._silenceScanFrame = Math.max(0, Math.floor(this._scanSongFramePos - SILENCE_SEC * this.frameRate));
+            return;
+          }
+        } else {
+          this._scanSilentRun = 0;
+        }
+      }
     }
 
     _fill(outL, outR) {
@@ -310,15 +403,9 @@
         this.dcPrevXR = raw.right; this.dcPrevYR = yR;
         outL[i] = yL; outR[i] = yR;
         this.samplePos++;
-        if (Math.abs(yL) < SILENCE_EPS && Math.abs(yR) < SILENCE_EPS) {
-          this._silentSamples++;
-          if (!this._silenceFired && this._silentSamples >= sr * SILENCE_SEC) {
-            this._silenceFired = true;
-            if (this.onSilenceTimeout) this.onSilenceTimeout();
-          }
-        } else {
-          this._silentSamples = 0;
-          this._silenceFired  = false;
+        if (this._silenceScanFrame >= 0 && !this._silenceFired && f >= this._silenceScanFrame) {
+          this._silenceFired = true;
+          if (this.onSilenceTimeout) this.onSilenceTimeout();
         }
       }
     }
@@ -334,8 +421,7 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
+      this._resetScan(0);
     }
 
     setSpeed(factor) { this.speedFactor = factor; }
@@ -360,8 +446,7 @@
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
+      this._resetScan(targetFrame);
     }
 
     // {gb:{ch1,ch2,ch3,ch4}}形状(GbsStreamPlayer.applyMuteと同じ読み方)
@@ -371,6 +456,18 @@
       if (!this.apu) return;
       const exp = mute.expansion || mute;
       if (exp.gb) Object.assign(this.apu.mute, exp.gb);
+      // 再生中のミュート切替は無音判定の基準に影響するため先読みスキャンをやり直す
+      if (this.header) this._resetScan(Math.max(0, this.currentFrame));
+    }
+
+    // {gb:{ch1,ch2,ch3,ch4}}形状(applyMuteと同じ)だが値は0〜1
+    applyVolume(volume) {
+      if (!volume) return;
+      this._lastVolume = volume;
+      if (!this.apu) return;
+      const exp = volume.expansion || volume;
+      if (exp.gb) MML.Emu.applyVolume(this.apu.vol, exp.gb);
+      if (this.header) this._resetScan(Math.max(0, this.currentFrame));
     }
 
     getPosition() {
@@ -397,6 +494,7 @@
       // snapshots(数分の曲の全フレーム分)を保持したままだと、ファイルを連続で開き直す
       // たびに解放されず蓄積してしまうため、破棄時に明示的に参照を切る。
       this.apu       = null;
+      this._scanApu  = null;
       this.snapshots = null;
     }
   }

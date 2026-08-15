@@ -129,6 +129,7 @@
       this.koff = 0;  // KOFF ラッチ
       this.endx = 0;  // ENDX フラグ
       this.mutedVoices = 0;  // ミュートビットマスク (bit0=Voice0 ... bit7=Voice7)
+      this.voiceVol = new Array(8).fill(1); // ボイスごとの音量(0〜1、既定1)。鍵盤表示のch別音量バー用
       // エコー
       this.echoPos = 0;
       this.echoBufL = new Int32Array(8192);
@@ -429,8 +430,9 @@
         const mixR = Math.round((v.outSample * volR) / 128);
 
         if (!(this.mutedVoices & (1 << ch))) {
-          mainL += mixL; mainR += mixR;
-          if (eon & (1 << ch)) { echoInL += mixL; echoInR += mixR; }
+          const vv = this.voiceVol[ch];
+          mainL += mixL * vv; mainR += mixR * vv;
+          if (eon & (1 << ch)) { echoInL += mixL * vv; echoInR += mixR * vv; }
         }
 
         prevVoiceOut = v.outSample;

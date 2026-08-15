@@ -32,6 +32,28 @@
     return { isRelease, index, table: { values, loop } };
   }
 
+  // @<n> = { ... } デューティ(音色)エンベロープ定義行のパース(実機ppmckのgetTone/tone_tbl)。
+  // { } 内は0-7の値の列で、@v<n>と全く同じ書式("|"でループ位置指定、省略時は末尾保持)。
+  // トラック中で @@<n> と書くとこのテーブルが選ばれ、1フレーム1ステップでデューティが
+  // 変化する(@<n>単体は「固定デューティ+エンベロープ解除」で別物)。
+  // ★@v/@EP/@OP/@FM等の他の定義行と紛れないよう、@の直後が数字の場合のみ一致させる
+  const TONE_ENVELOPE_DEF_RE = /^@(\d+)\s*=\s*\{([^}]*)\}$/;
+
+  function parseToneEnvelopeDef(trimmed) {
+    const m = trimmed.match(TONE_ENVELOPE_DEF_RE);
+    if (!m) return null;
+    const index = parseInt(m[1], 10);
+    const parts = m[2].trim().split(/[\s,]+/).filter(s => s.length > 0);
+    const values = [];
+    let loop = null;
+    for (const part of parts) {
+      if (part === '|') { loop = values.length; continue; }
+      const n = parseInt(part, 10);
+      if (!isNaN(n)) values.push(n);
+    }
+    return { index, table: { values, loop } };
+  }
+
   // @EP<n> = { ... | ... } (ピッチエンベロープ, -127~126, ループ可)
   // @EN<n> = { ... | ... } (ノートエンベロープ=アルペジオ, 前回値からの相対値, -127~126, ループ可)
   // どちらも @v/@vr と同じテーブル書式(値は符号付き)なので同じパーサを流用する
@@ -325,7 +347,7 @@
   Mml.splitChannels = function (source) {
     const channels = {};
     const errors = [];
-    const envelopes = { v: {}, vr: {}, ep: {}, en: {}, mp: {}, op: {}, fm: {}, n: {}, mw: {}, mh: {}, dpcm: {} };
+    const envelopes = { v: {}, vr: {}, ep: {}, en: {}, mp: {}, op: {}, fm: {}, n: {}, mw: {}, mh: {}, dpcm: {}, duty: {} };
     const meta = { title: null, composer: null, maker: null, programer: null };
     const settings = { octaveRev: 0, gateDenom: 8 };
     const detectedExpansions = [];
@@ -428,6 +450,14 @@
       const dpcmDef = parseDpcmDef(trimmed);
       if (dpcmDef) {
         envelopes.dpcm[dpcmDef.index] = dpcmDef.sample;
+        continue;
+      }
+
+      // @<n> = {...}(デューティエンベロープ)は最も汎用的な書式のため、他の@XX定義を
+      // すべて試した後に判定する(正規表現自体も@直後が数字の場合しか一致しない)
+      const toneEnvDef = parseToneEnvelopeDef(trimmed);
+      if (toneEnvDef) {
+        envelopes.duty[toneEnvDef.index] = toneEnvDef.table;
         continue;
       }
 
@@ -617,7 +647,22 @@
         }
         case '@': {
           i++;
-          if (str[i] === 'v' || str[i] === 'V') {
+          // @@<n> / @@r<n>(実機ppmckの_ORG_TONE/_REL_ORG_TONE)。@<n>が「固定の音色を
+          // 指定してデューティエンベロープを解除する」(音色バイトbit7=1)のに対し、
+          // @@<n>は「自作音色=@<n>={...}で定義したデューティ(音色)エンベロープを選ぶ」
+          // (bit7=0)。@@r<n>はそのリリース版で、ゲートオフの瞬間に音色を差し替える
+          // (255=OFF)。compiler.js buildSegmentsのtoneEnv/releaseTone参照
+          if (str[i] === '@') {
+            i++;
+            if (str[i] === 'r' || str[i] === 'R') {
+              i++;
+              const v = readNumber();
+              tokens.push({ type: 'releaseTone', value: v == null ? 0 : v });
+            } else {
+              const v = readNumber();
+              tokens.push({ type: 'toneEnv', value: v == null ? 0 : v });
+            }
+          } else if (str[i] === 'v' || str[i] === 'V') {
             i++;
             let isRelease = false;
             if (str[i] === 'r' || str[i] === 'R') { isRelease = true; i++; }

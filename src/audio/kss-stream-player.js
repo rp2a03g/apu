@@ -44,12 +44,14 @@
       this._createNode();
     }
 
+    // ★2026-08 SPCを基準に全フォーマットの体感音量を実測(RMS)揃え
+    // (src/audio/stream-player.js NsfReplayStreamPlayer冒頭コメント参照)。
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 2.5;
+      this.gainNode.gain.value = 1.99;
       this.limiter = createLimiter(this.audioCtx);
       this.gainNode.connect(this.limiter);
-      this.limiter.connect(this.audioCtx.destination);
+      this.limiter.connect(MML.Audio.getMasterGain(this.audioCtx));
 
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
       this.node.connect(this.gainNode);
@@ -195,17 +197,28 @@
       this.isPlaying        = false;
       this.onEnded          = null;
       this.onSilenceTimeout = null;
-      this._silentSamples   = 0;
+      // 無音自動送り用の先読みスキャン状態(NsfReplayStreamPlayerと同じ設計、
+      // src/audio/stream-player.js scanSilenceStep冒頭コメント参照)
       this._silenceFired    = false;
+      this._silenceScanFrame = -1;
+      this._scanDone         = false;
+      this._scanBus = null; this._scanPsg = null; this._scanScc = null; this._scanOpll = null;
+      this._scanFrame = -1;
+      this._scanSongFramePos = 0;
+      this._scanCycleAccum = 0;
+      this._scanDcPrevX = 0; this._scanDcPrevY = 0;
+      this._scanSilentRun = 0;
       this._createNode();
     }
 
+    // ★2026-08 SPCを基準に全フォーマットの体感音量を実測(RMS)揃え
+    // (src/audio/stream-player.js NsfReplayStreamPlayer冒頭コメント参照)。
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 2.5;
+      this.gainNode.gain.value = 1.99;
       this.limiter = createLimiter(this.audioCtx);
       this.gainNode.connect(this.limiter);
-      this.limiter.connect(this.audioCtx.destination);
+      this.limiter.connect(MML.Audio.getMasterGain(this.audioCtx));
 
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
       this.node.connect(this.gainNode);
@@ -232,6 +245,7 @@
         this.opll = null;
       }
       if (this._lastMute) this.applyMute(this._lastMute);
+      if (this._lastVolume) this.applyVolume(this._lastVolume);
     }
 
     // capture: {writeLog}(captureKssSongAsyncのonProgress由来。進行中配列への参照なので
@@ -251,9 +265,8 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
       if (mute) this.applyMute(mute);
+      this._resetScan(0);
     }
 
     _isFrameReady(f) {
@@ -271,6 +284,102 @@
     _applyFrame(f) {
       this.currentFrame = f;
       this._applyWrites(this.writeLog[f]);
+    }
+
+    // ===== 無音自動送り: 先読みスキャン(NsfReplayStreamPlayerと同じ設計) =====
+    _scanBuildChips() {
+      const { header, songData } = this._headerOpt;
+      this._scanBus = new MML.Emu.KssBus(header, songData);
+      this._scanPsg = new MML.Emu.AY8910Audio();
+      this._scanScc = new MML.Emu.SCCAudio();
+      this._scanBus.registerChip('psg', this._scanPsg);
+      this._scanBus.registerChip('scc', this._scanScc);
+      if (header.device.mode === 'MSX' && header.device.fmpac) {
+        this._scanOpll = new MML.Emu.OPLLAudio();
+        this._scanBus.registerChip('opll', this._scanOpll);
+      } else {
+        this._scanOpll = null;
+      }
+      if (this._lastMute) {
+        const exp = this._lastMute.expansion || this._lastMute;
+        if (exp.psg) MML.Emu.applyMute(this._scanPsg.mute, exp.psg);
+        if (exp.scc) MML.Emu.applyMute(this._scanScc.mute, exp.scc);
+        if (exp.opll && this._scanOpll) MML.Emu.applyMute(this._scanOpll.mute, exp.opll);
+      }
+      if (this._lastVolume) {
+        const exp = this._lastVolume.expansion || this._lastVolume;
+        if (exp.psg) MML.Emu.applyVolume(this._scanPsg.vol, exp.psg);
+        if (exp.scc) MML.Emu.applyVolume(this._scanScc.vol, exp.scc);
+        if (exp.opll && this._scanOpll) MML.Emu.applyVolume(this._scanOpll.vol, exp.opll);
+      }
+    }
+
+    _scanApplyWrites(writes) {
+      if (!writes) return;
+      for (const w of writes) {
+        if (w.io) this._scanBus.ioWrite(w.addr, w.value);
+        else this._scanBus.write(w.addr, w.value);
+      }
+    }
+
+    _scanApplyFrame(f) {
+      this._scanFrame = f;
+      this._scanApplyWrites(this.writeLog[f]);
+    }
+
+    _resetScan(fromFrame) {
+      if (!this._headerOpt) return;
+      this._scanBuildChips();
+      this._scanCycleAccum = 0;
+      this._scanDcPrevX = this._scanDcPrevY = 0;
+      this._scanSilentRun = 0;
+      this._silenceScanFrame = -1;
+      this._silenceFired = false;
+      this._scanDone = false;
+      this._scanFrame = -1;
+      const wl = this.writeLog || [];
+      let f = 0;
+      for (; f <= fromFrame; f++) {
+        if (!wl[f]) break;
+        this._scanApplyFrame(f);
+      }
+      this._scanSongFramePos = Math.min(f, fromFrame + 1);
+    }
+
+    scanSilenceStep(budgetSongSeconds) {
+      if (this._scanDone || this._silenceScanFrame >= 0 || !this._scanBus) return;
+      const sr = this.audioCtx.sampleRate;
+      const budgetSamples = Math.max(1, Math.round(budgetSongSeconds * sr));
+      for (let i = 0; i < budgetSamples; i++) {
+        const nextSongFramePos = this._scanSongFramePos + (this.frameRate / sr);
+        const f = Math.floor(nextSongFramePos);
+        if (f >= this.totalFrames) { this._scanDone = true; return; }
+        if (!this._isFrameReady(f)) return;
+        this._scanSongFramePos = nextSongFramePos;
+        if (f !== this._scanFrame) this._scanApplyFrame(f);
+
+        this._scanCycleAccum += this.clockHz / sr;
+        while (this._scanCycleAccum >= 1) {
+          this._scanPsg.clock();
+          this._scanScc.clock();
+          if (this._scanOpll) this._scanOpll.clock();
+          this._scanCycleAccum -= 1;
+        }
+        let raw = this._scanPsg.mixSample() + this._scanScc.mixSample();
+        if (this._scanOpll) raw += this._scanOpll.mixSample();
+        const y = raw - this._scanDcPrevX + 0.999 * this._scanDcPrevY;
+        this._scanDcPrevX = raw; this._scanDcPrevY = y;
+
+        if (Math.abs(y) < SILENCE_EPS) {
+          this._scanSilentRun++;
+          if (this._scanSilentRun >= sr * SILENCE_SEC) {
+            this._silenceScanFrame = Math.max(0, Math.floor(this._scanSongFramePos - SILENCE_SEC * this.frameRate));
+            return;
+          }
+        } else {
+          this._scanSilentRun = 0;
+        }
+      }
     }
 
     _fill(out) {
@@ -308,15 +417,9 @@
         this.dcPrevX = raw; this.dcPrevY = y;
         out[i] = y;
         this.samplePos++;
-        if (Math.abs(y) < SILENCE_EPS) {
-          this._silentSamples++;
-          if (!this._silenceFired && this._silentSamples >= sr * SILENCE_SEC) {
-            this._silenceFired = true;
-            if (this.onSilenceTimeout) this.onSilenceTimeout();
-          }
-        } else {
-          this._silentSamples = 0;
-          this._silenceFired  = false;
+        if (this._silenceScanFrame >= 0 && !this._silenceFired && f >= this._silenceScanFrame) {
+          this._silenceFired = true;
+          if (this.onSilenceTimeout) this.onSilenceTimeout();
         }
       }
     }
@@ -332,8 +435,7 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
+      this._resetScan(0);
     }
 
     setSpeed(factor) { this.speedFactor = factor; }
@@ -364,8 +466,7 @@
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevX = this.dcPrevY = 0;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
+      this._resetScan(targetFrame);
     }
 
     // keyboardDisplay.getMuteConfig()と同じ{apu:{},expansion:{psg,scc,opll}}形式
@@ -378,6 +479,20 @@
       if (exp.psg) MML.Emu.applyMute(this.psg.mute, exp.psg);
       if (exp.scc) MML.Emu.applyMute(this.scc.mute, exp.scc);
       if (exp.opll && this.opll) MML.Emu.applyMute(this.opll.mute, exp.opll);
+      // 再生中のミュート切替は無音判定の基準に影響するため先読みスキャンをやり直す
+      if (this._headerOpt) this._resetScan(Math.max(0, this.currentFrame));
+    }
+
+    // {apu:{},expansion:{psg,scc,opll}}形式(applyMuteと同じ)だが値は0〜1
+    applyVolume(volume) {
+      if (!volume) return;
+      this._lastVolume = volume;
+      if (!this.psg) return;
+      const exp = volume.expansion || volume;
+      if (exp.psg) MML.Emu.applyVolume(this.psg.vol, exp.psg);
+      if (exp.scc) MML.Emu.applyVolume(this.scc.vol, exp.scc);
+      if (exp.opll && this.opll) MML.Emu.applyVolume(this.opll.vol, exp.opll);
+      if (this._headerOpt) this._resetScan(Math.max(0, this.currentFrame));
     }
 
     getPosition() {
@@ -407,6 +522,10 @@
       this.psg      = null;
       this.scc      = null;
       this.opll     = null;
+      this._scanBus  = null;
+      this._scanPsg  = null;
+      this._scanScc  = null;
+      this._scanOpll = null;
       this.writeLog = null;
     }
   }

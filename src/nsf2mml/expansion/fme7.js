@@ -125,20 +125,62 @@
 
   MML.Nsf2MmlExpansion.fme7 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg, noteEnvReg) {
     const timeline = buildTimeline(writeLog, initWrites);
-    function toVolumeFields(ev) {
+
+    // パス1: 3チャンネルぶんの生イベント(volSeqを保持したまま)を先に抽出する。envelopeVの
+    // 採番はまだ行わない(次のチャンネル横断パスで、他chの確定ループをヒントに使うため。
+    // N163版(src/nsf2mml/expansion/n163.js)と同じ考え方、詳細はsrc/convert/envelope.js参照)。
+    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)+
+    // P-5「不明瞭→EPテーブル」側+スラー分割(別プロジェクトE、2026-08-12)
+    const rawByChannel = [0, 1, 2].map(index =>
+      MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractToneEvents(timeline, index))));
+
+    // パス1.5(2026-08-14): チャンネル横断の周期ヒント収集。FME7も専用アタックレジスタが
+    // 無く(N163と同じ穴、[[n163-retrigger-vs-tremolo]]参照)、疑似アタックのための一瞬の
+    // ピッチ変化でラン分割が千切れることがある。ハードウェアエンベロープ使用中(envUsed)は
+    // チップが直接減衰を生成するため対象外(ソフトウェア音量エンベロープのみが対象)。
+    const loopWitnesses = [];
+    for (const events of rawByChannel) {
+      for (const ev of events) {
+        if (ev.note == null || ev.envUsed) continue;
+        const shape = MML.Convert.analyzeVolumeShape(ev.volSeq);
+        if (shape && shape.loop != null) {
+          loopWitnesses.push({ start: ev.start, end: ev.end, period: shape.values.length - shape.loop });
+        }
+      }
+    }
+    // このイベント単体ではループを確定できない場合、時間的にこのイベントを完全に包含する
+    // 他chの確定ループが無いか探し、あればその周期をヒントに、このチャンネル自身の生音量を
+    // timelineから(ラン分割を無視して)読み直して矛盾が無いか確認する。他chの値をそのまま
+    // 借用はしない(ボイスごとに音量が微妙に違う可能性があるため、あくまで周期だけを借りる)。
+    function resolveVolumeShape(ev, chIndex) {
+      const shape = MML.Convert.analyzeVolumeShape(ev.volSeq);
+      if (shape && shape.loop != null) return shape;
+      for (const w of loopWitnesses) {
+        if (w.start > ev.start || w.end < ev.end) continue;
+        const seq = [];
+        for (let f = w.start; f < w.end; f++) seq.push(timeline[f].volRegs[chIndex] & 0x0F);
+        const hinted = MML.Convert.tryConfirmLoopWithHint(seq, w.period);
+        if (hinted) return hinted;
+      }
+      return shape;
+    }
+    function toVolumeFields(ev, chIndex) {
       // FME7のハードウェアエンベロープは全ch共有の1個しかない(R11/R12/R13はグローバル)ため、
       // 実際のAY/YM2149と同じ形状(のこぎり/三角/ホールド等16種類)をS<n>/M<n>にそのまま
       // 反映する。減衰値そのものをソフトウェア的にシミュレートする必要が無い
       // (2A03/MMC5と違いこちらはチップ内蔵の形状をコンパイラがそのまま再生できるため)。
       if (ev.envUsed) return { fme7EnvShape: ev.envShape, fme7EnvPeriod: ev.envPeriod };
-      const idx = envReg ? envReg.assign(ev.volSeq) : null;
+      if (!envReg) return { volume: ev.volSeq[0] };
+      const idx = envReg.registerShape(resolveVolumeShape(ev, chIndex), false);
       return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
-    // @2(ノイズ単独)はrawFreqがnullなのでここで自動的に対象外になる
+    // @2(ノイズ単独)はrawFreqがnullなのでここで自動的に対象外になる。
+    // FME7トーンは周期レジスタ(値が下がるほど音程が上がる)なのでdirectionUp=false
+    // (src/convert/pitch.js fitVibrato参照)。
     function toPitchFields(ev) {
       if (!pitchReg || ev.rawFreq == null) return {};
       const fields = {};
-      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq, false));
       return fields;
     }
     // 高速アルペジオ→EN統合(2026-08-14拡張)。ノイズ単独(@2)はrawFreqが無いため
@@ -148,20 +190,17 @@
       const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
       return idx != null ? { noteEnv: idx } : {};
     }
-    const toCommon = ev => Object.assign(
+    const toCommon = (ev, chIndex) => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
       ev.note !== null ? { instrument: ev.mode } : {},
       ev.note !== null && ev.noise !== null ? { fme7Noise: ev.noise } : {},
-      ev.note !== null ? toVolumeFields(ev) : {},
+      ev.note !== null ? toVolumeFields(ev, chIndex) : {},
       ev.note !== null ? toPitchFields(ev) : {},
       ev.note !== null ? toNoteEnvFields(ev) : {}
     );
 
-    // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)+
-    // P-5「不明瞭→EPテーブル」側+スラー分割(別プロジェクトE、2026-08-12)
     const chan = (letter, index) => {
-      const raw = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractToneEvents(timeline, index)));
-      const events = raw.map(toCommon);
+      const events = rawByChannel[index].map(ev => toCommon(ev, index));
       MML.Convert.markSlurTies(events);
       return {
         letter, events,

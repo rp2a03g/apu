@@ -345,6 +345,7 @@
       this.frameSeqCounter = 0;
       this.regRaw = new Uint8Array(0x17); // $FF10-$FF26分(オフセット0=$FF10)
       this.mute = { ch1: false, ch2: false, ch3: false, ch4: false };
+      this.vol = { ch1: 1, ch2: 1, ch3: 1, ch4: 1 };
     }
 
     reset() {
@@ -447,10 +448,10 @@
      * chは平均で半減していたのが、本来の片側フル音量に戻る形)。
      */
     mixSample() {
-      const c1 = this.mute.ch1 ? 0 : this.ch1.output();
-      const c2 = this.mute.ch2 ? 0 : this.ch2.output();
-      const c3 = this.mute.ch3 ? 0 : this.ch3.output();
-      const c4 = this.mute.ch4 ? 0 : this.ch4.output();
+      const c1 = this.mute.ch1 ? 0 : this.ch1.output() * this.vol.ch1;
+      const c2 = this.mute.ch2 ? 0 : this.ch2.output() * this.vol.ch2;
+      const c3 = this.mute.ch3 ? 0 : this.ch3.output() * this.vol.ch3;
+      const c4 = this.mute.ch4 ? 0 : this.ch4.output() * this.vol.ch4;
       const chans = [c1, c2, c3, c4];
       let left = 0, right = 0;
       for (let i = 0; i < 4; i++) {

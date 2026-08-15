@@ -11,8 +11,8 @@
 - **入口を増やす**: MML手書き(ppmck文化圏) → ピアノロール → MIDI録音 → 鼻歌、と
   入力手段を段階的に増やし、最終的にMMLを知らない人・スマホユーザーでも作れるようにする。
 - **出口を増やす**: エミュ再生 → NSF/SPC書き出し → URL共有 → コンペ開催 → 他ツール連携。
-- **読む機能が独自性**: nsf2mml/spc2mml/kss2mml による「既存曲→MML」の逆変換は
-  他ツールにない資産。常に「作る」と「読む」の双方向を維持する。
+- **読む機能が独自性**: nsf2mml/spc2mml/kss2mml/gbs2mml/hes2mml による「既存曲→MML」の
+  逆変換は他ツールにない資産。常に「作る」と「読む」の双方向を維持する。
 
 ---
 
@@ -49,7 +49,8 @@
 ### INV-4: コアとUIの分離 — コアはDOMに触れない
 
 - **コア層** = `src/emulator/` `src/mml/`(lexer/compiler/player) `src/convert/`
-  `src/asm/` `src/nsf/` `src/spc/` `src/kss/` `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/`
+  `src/asm/` `src/nsf/` `src/spc/` `src/kss/` `src/gbs/` `src/hes/` `src/dpcm/` `src/driver/`
+  `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` `src/gbs2mml/` `src/hes2mml/`
   および将来の `src/ir/` `src/input/` `src/share/`。
   これらは `document`/`window.document`/DOM API を一切参照しないピュアJSであること
   (AudioWorklet内でも動く必要があるため。`globalThis` 置換でバンドルされる)。
@@ -71,8 +72,9 @@
   書き換え、それ以外の原文(ループ構造 `[ ]n`、マクロ、コメント、空白の癖)を保持**する。
 - 「IR→MML全文再生成」で上書きする実装は禁止(ppmckユーザーの手書きMMLが壊れるため)。
   全文生成が許されるのは、原文MMLが存在しない場合(鼻歌からの新規作成、*2mml変換直後)のみ。
-- このためコンパイラは将来、各音符イベントにソース位置(何文字目〜何文字目)を
-  記録する必要がある(ROADMAP フェーズ1参照)。
+- ソース位置(srcStart/srcEnd)自体はlexer.js/compiler.jsで既に音符トークンに記録されている
+  (再生ハイライト機能用)。フェーズ1で残っているのは、これをsrc/ir/のSong IR srcRangeとして
+  正式に露出させる部分のみ(ROADMAP フェーズ1参照)。
 
 ---
 
@@ -81,7 +83,7 @@
 ```
 [入力層]                     [ハブ]              [出力層]
 ppmck MMLパーサ ──────┐                    ┌────→ ppmck MML生成(正典) INV-2
-NSF/SPC/KSS 解析 ─────┤                    ├────→ レジスタログ → エミュ再生
+NSF/SPC/KSS/GBS/HES 解析┤                    ├────→ レジスタログ → エミュ再生
 Web MIDI 録音 ────────┼──→  Song IR  ──────┼────→ NSF/ROM 書き出し
 鼻歌ピッチ検出 ────────┤    (src/ir/)       ├────→ ピアノロール 表示/編集
 タップリズム ─────────┤                    ├────→ FamiStudio等 テキスト(将来)
@@ -136,17 +138,23 @@ structuredClone/JSON.stringifyがそのまま通ること)。
   detune?: number,      // D<n>。変換先チップの周期/周波数レジスタへの生オフセット定数
   pitchEp?: number,     // EP<n>参照インデックス(下記pitchMod分類結果をレジストリ登録した番号)。
                         //   mmlEmit.jsはこの数値だけを見る(DESIGN-PITCH.md Phase 1)
+  pitchEpDelay?: number, // EP<n>,<delay>のdelay(別プロジェクトA、2026-08-11実装済み)
+  vibrato?: number,      // MP<n>参照インデックス(周期ビブラートがlfo_sub厳密再現可能な
+                        //   場合のみ。別プロジェクトB gate解除、2026-08-15実装。
+                        //   fitできなければ従来通りpitchEpのループEPへフォールバックする)
+  portamento?: { target: number, duration: number, delay: number }, // PT<target>,<duration>[,<delay>]
+                        //   (別プロジェクトC、2026-08-11実装済み)
+  noteEnv?: number,      // EN<n>参照インデックス(高速アルペジオ、2026-08-14実装済み。
+                        //   ノート番号空間の累積オフセットのためVRC7でも使える)
   pitchMod?: {          // 分類の中間結果(IR上はオプション、無くても良い。実装は
                         //   src/convert/pitch.js の classifyPitchMod の戻り値そのもの)
-    type: 'periodic',   // 周期ビブラート(Phase 1)。loopが繰り返し単位
-    head: number[],     // ループ開始前の区間(実測ゼロ値のみ、DESIGN-PITCH.md §5参照)
-    loop: number[],     // 1周期分の生レジスタオフセット差分列
-    delay: number        // 常に0(delay引数拡張は別プロジェクトA、未実装)
-  } | {
-    type: 'literal' | 'ramp',  // 非周期の装飾(こぶし/アタックベンド/ランプ、Phase 3)。
+    type: 'periodic' | 'literal' | 'ramp', // periodic=周期ビブラート(Phase 1)、
+                        //   literal/ramp=非周期の装飾(こぶし/アタックベンド/ランプ、Phase 3)。
                         //   'ramp'は単調増加/減少、'literal'はそれ以外の任意形状
-    head: number[],     // 区間全体の生レジスタオフセット差分列(末尾は同一値足踏みをtrim済み)
-    loop: null          // ループ無し。テーブル末尾到達後は最終値を永久ホールド
+    delay: number,      // 区間先頭の実測ゼロフレーム数(別プロジェクトAでvaluesと分離済み)
+    values: number[]    // periodicは1周期分、literal/rampは区間全体の生レジスタオフセット
+                        //   差分列(末尾は同一値足踏みをtrim済み)。ループ無し(literal/ramp)は
+                        //   テーブル末尾到達後、最終値を永久ホールドする
                         //   (src/mml/compiler.js stepEnvelope参照)
   },
   continued?: boolean,  // 小節境界等で分割された継続音(タイで繋ぐ)
@@ -156,8 +164,9 @@ structuredClone/JSON.stringifyがそのまま通ること)。
 ```
 
 `pitchMod`/`pitchEp`は DESIGN-PITCH.md Phase 1 で追加(厳密周期ビブラート→ループ`EP<n>`)、
-`type:'literal'/'ramp'`は Phase 3 で追加(非周期の装飾→非ループ`EP<n>`)。
-`src/ir/`(Song IR実装)がまだ存在しないため`MML.IR.validate`への型チェック追加は未着手。
+`type:'literal'/'ramp'`は Phase 3 で追加(非周期の装飾→非ループ`EP<n>`)。その後の別プロジェクトで
+`pitchEpDelay`(A)・`portamento`(C)・`vibrato`(B、gate解除は2026-08-15)・`noteEnv`(EN、2026-08-14)が
+追加されている。`src/ir/`(Song IR実装)がまだ存在しないため`MML.IR.validate`への型チェック追加は未着手。
 `src/ir/`実装時にこのフィールドの型チェックも忘れずに追加すること。
 
 **TimedPitchEvent**(リアルタイム入力の共通形式。量子化前):
@@ -179,11 +188,13 @@ structuredClone/JSON.stringifyがそのまま通ること)。
 | ディレクトリ | 役割 | 層 |
 |---|---|---|
 | `src/asm/` `src/nsf/` | 6502アセンブラ・NSF生成 | コア |
+| `src/driver/` | MML→NSFバイトコードを再生する6502ドライバ(ppmckDriver.js) | コア |
+| `src/dpcm/` | 音声→DPCM(2A03 DMC)変換 | コア |
 | `src/emulator/` | 6502/APU/拡張音源エミュレータ | コア |
-| `src/spc/` `src/kss/` | SPC700/Z80系エミュレータ | コア |
+| `src/spc/` `src/kss/` `src/gbs/` `src/hes/` | SPC700/Z80/SM83/HuC6280系ヘッダ解析 | コア |
 | `src/mml/` lexer/compiler/player | MMLコンパイル・直接レンダリング | コア |
 | `src/convert/` | フォーマット非依存の BPM検出・音長量子化・MML生成 | コア |
-| `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` | 各形式→ノート抽出 | コア |
+| `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` `src/gbs2mml/` `src/hes2mml/` | 各形式→ノート抽出 | コア |
 | `src/ir/` (新設) | Song IR 定義・検証・移行・MML⇔IR変換 | コア |
 | `src/input/` (新設) | MIDI/鼻歌/タップ → TimedPitchEvent → IR | コア(*) |
 | `src/share/` (新設) | URL圧縮共有・コンペマニフェスト読み込み | コア |
@@ -253,7 +264,8 @@ structuredClone/JSON.stringifyがそのまま通ること)。
   エンベロープは別の理由(未実装、使用時は一律最大音量15として簡略化)で影響を受けない
   (ただしこちらはこちらで別の精度課題として残っている)。
 - **他形式の音源を、レジスタ互換の近いNES拡張音源を借りて再生する*2mml変換
-  (現状: KSSのPSG→FME-7、SCC→N163、FMPAC→VRC7。§0「読む機能が独自性」)を実装・拡張する際は、
+  (現状: KSSのPSG→FME-7、SCC→N163、FMPAC→VRC7、GBSのCH1/CH2→2A03パルス・CH3→FDS、
+  HESのPSG波形→N163・DDA→DMC。§0「読む機能が独自性」)を実装・拡張する際は、
   必ず `src/convert/detune.js` の `MML.Convert.applyPitchDetune()` で音程補正すること。**
   変換元と変換先はチップの入力クロック・レジスタ格子が異なるため、「実測周波数→12平均律の
   最寄りノート番号へ丸め」→「変換先チップの最寄りレジスタ値へ再量子化」という二重の丸めが
@@ -280,6 +292,7 @@ structuredClone/JSON.stringifyがそのまま通ること)。
 - Node/Pythonは無い。動作確認は **PowerShell静的サーバー(`tools/static-server.ps1`)+
   ブラウザ内評価**で行う。
 - CPUコアの検証ハーネス: `tools/6502-test.html` `tools/spc700-test.html` `tools/z80-test.html`
+  `tools/sm83-test.html`
   (SingleStepTests形式)。CPU/音源コアを触ったら該当ハーネスを回す。
 - ブラウザで音を再生して検証したら、**ターン終了前に必ず停止ボタンで音を止める**。
 - Browser paneは非表示タブで requestAnimationFrame が発火しない。rAF依存UIの検証は

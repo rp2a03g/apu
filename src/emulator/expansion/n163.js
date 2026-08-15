@@ -44,6 +44,7 @@
       this.updateCounter = 0; // 15CPUサイクルごとに1ch更新
       this.rrIndex = 0;       // 有効ch内の巡回位置
       this.mute = new Array(NUM_CHANNELS).fill(false);
+      this.vol = new Array(NUM_CHANNELS).fill(1);
     }
 
     reset() {
@@ -118,7 +119,7 @@
       for (let ch = NUM_CHANNELS - num; ch < NUM_CHANNELS; ch++) {
         if (this.mute[ch]) continue;
         const volume = this.ram[0x40 + ch * 8 + 7] & 0x0F;
-        sum += (this._sample(ch) - 8) * volume; // -120..105
+        sum += (this._sample(ch) - 8) * volume * this.vol[ch]; // -120..105
       }
       // 時間多重出力の可聴成分は有効ch平均。120で正規化してゲイン。
       // ゲインは他チップとのバランスで調整(0.8→0.3で全体を半分以下に下げた)。

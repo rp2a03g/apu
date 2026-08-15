@@ -4,7 +4,7 @@
  *
  * パルス x2 ($9000-$9002 / $A000-$A002) + 矩形波(サウ) ($B000-$B002)
  * パルスはデューティ比1/16刻みで指定可能(0=幅1/16 ... 15=幅16/16)。
- * サウ(sawtooth)は内部アキュムレータ式の簡易実装。
+ * サウ(sawtooth)はNESdev準拠の14ステップアキュムレータ実装(Vrc6Saw.clock()参照)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -98,6 +98,7 @@
       this.pulse2 = new Vrc6Pulse();
       this.saw = new Vrc6Saw();
       this.mute = { pulse1: false, pulse2: false, saw: false };
+      this.vol = { pulse1: 1, pulse2: 1, saw: 1 };
     }
 
     reset() {
@@ -129,9 +130,9 @@
 
     // 0.0 ~ 約0.65 (2A03と同程度のレベル感)
     mixSample() {
-      const p1 = this.mute.pulse1 ? 0 : this.pulse1.output() / 15;   // 0-1
-      const p2 = this.mute.pulse2 ? 0 : this.pulse2.output() / 15;   // 0-1
-      const sw = this.mute.saw ? 0 : this.saw.output() / 31;         // 0-1
+      const p1 = this.mute.pulse1 ? 0 : (this.pulse1.output() / 15) * this.vol.pulse1;   // 0-1
+      const p2 = this.mute.pulse2 ? 0 : (this.pulse2.output() / 15) * this.vol.pulse2;   // 0-1
+      const sw = this.mute.saw ? 0 : (this.saw.output() / 31) * this.vol.saw;         // 0-1
       return (p1 + p2 + sw) * 0.2;
     }
   }

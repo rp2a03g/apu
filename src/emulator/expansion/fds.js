@@ -70,6 +70,7 @@
       this.envRateClock = 0;
 
       this.mute = { wave: false };
+      this.vol = { wave: 1 };
     }
 
     reset() {
@@ -276,7 +277,7 @@
       const masterScale = MASTER_VOLUME_SCALE[this.masterVolume & 0x03];
       // FDS 混合係数: NES 実機の抵抗網 (FDS=47Ω直列, 2A03=100Ω直列, 負荷=39Ω) から
       // FDS 出力は 2A03 の約 39% 程度に相当。係数 0.20 は実機バランスに合わせた値。
-      return (centered / 32) * volScale * masterScale * 0.20;
+      return (centered / 32) * volScale * masterScale * 0.20 * this.vol.wave;
     }
   }
 

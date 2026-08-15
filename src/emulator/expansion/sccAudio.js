@@ -44,6 +44,7 @@
       this.counter = new Uint32Array(NUM_CH);
       this.pos = new Uint8Array(NUM_CH);
       this.mute = [false, false, false, false, false];
+      this.vol = [1, 1, 1, 1, 1];
     }
 
     reset() {
@@ -148,7 +149,7 @@
         if (!((this.enable >> ch) & 1)) continue;
         const sample = this.wave[ch][this.pos[ch]]; // 符号付き -128..127
         const vol = this.volume[ch];
-        sum += (sample * vol) >> 4;
+        sum += ((sample * vol) >> 4) * this.vol[ch];
       }
       return sum * (0.2 / 128);
     }

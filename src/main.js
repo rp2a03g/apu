@@ -11,6 +11,10 @@
   const mmlOutputEl = document.getElementById('mmlOutput');
   mmlSourceEl.value = MML.Mml.SAMPLE_SOURCE;
 
+  // フォント/配色設定の復元(エディタが色付きテキストを表示する前に反映する必要があるため
+  // attachHighlighterより先に呼ぶ)
+  MML.UI.EditorSettings.init();
+
   // --- Phase 6: シンタックスハイライト & 波形エディタ ---
   const mmlHighlightEl = document.getElementById('mmlHighlight');
   // srcStart(絶対文字位置) -> DOM要素。再生ハイライト機能が対象spanをO(1)で引くための索引で、
@@ -99,6 +103,20 @@
     // 非再生中はミュート設定を変えても再レンダリングは不要
   }
 
+  // 鍵盤表示のch別音量スライダーからの設定を取得する(getChannelMuteConfigと同じ形状、値は0〜1)
+  function getChannelVolumeConfig() {
+    return keyboardDisplay.getVolumeConfig();
+  }
+
+  // ch別音量変更 → ストリーミング再生中は即時反映(scheduleRerenderOnMuteと同じ考え方。
+  // SPCは専用配列形式のためonSpcVolumeChangeで別途扱う)
+  function scheduleRerenderOnVolume() {
+    if (activePlayer) { activePlayer.applyVolume(getChannelVolumeConfig()); return; }
+    if (kssActivePlayer) { kssActivePlayer.applyVolume(getChannelVolumeConfig()); return; }
+    if (gbsActivePlayer) { gbsActivePlayer.applyVolume(getChannelVolumeConfig()); return; }
+    if (hesActivePlayer) { hesActivePlayer.applyVolume(getChannelVolumeConfig()); return; }
+  }
+
   function toHex(n, digits) {
     return '$' + n.toString(16).toUpperCase().padStart(digits, '0');
   }
@@ -130,6 +148,7 @@
     mmlHighlightLastFrame = -1; // ミュート変更を即座にハイライト表示へ反映させる
     updateMmlRangeHighlight();
   };
+  keyboardDisplay.onVolumeChange = () => { scheduleRerenderOnVolume(); };
   // 起動時から APU チャンネル行を表示（再生前でも空白にならないよう）
   keyboardDisplay.setSource({ regSnapshots: [{}], totalFrames: 1, samplesPerFrame: 735, sampleRate: 44100 }, []);
 
@@ -159,6 +178,14 @@
       hesActivePlayer.setSpeed(factor);
       if (lastPlayMode === 'hes') workletDuration = hesActivePlayer.getDuration();
     }
+  };
+
+  // --- マスター音量(0〜1、全フォーマット共通の最終段。src/audio/stream-player.js
+  // MML.Audio.getMasterGain参照) --- 値自体の永続化(localStorage)はkeyboardDisplay側が
+  // 行う(色/速度と同じ流儀)。audioCtxがまだ無い場合は何もしない
+  // (次にgetMasterGain()が呼ばれた時点でlocalStorageの値を自分で読むため、取りこぼしはない)。
+  keyboardDisplay.onMasterVolumeChange = (vol) => {
+    if (audioCtx) MML.Audio.getMasterGain(audioCtx).gain.value = vol;
   };
 
   let monitorState = null;
@@ -637,6 +664,15 @@
     // (ボイス詳細UI自体は変わらず80ms間隔のままでよい、体感の重さには影響しない)。
     if (spcActivePlayer && spcActivePlayer.isPlaying) {
       keyboardDisplay.updateRollPosition(spcActivePlayer.getPosition());
+    }
+    // 無音自動送り用の先読みスキャン(SPC以外)を少しずつ進める。scanSilenceStep自身が
+    // 無音発見済み/曲末到達/先読みキャプチャ未到達のいずれかで自動的に仕事をやめるため、
+    // 毎フレーム呼びっぱなしでよい(SCAN_STEP_SONG_SECONDS参照)。
+    if (isSoundFileMode()) {
+      const p = currentTransportPlayer();
+      if (p && p.isPlaying && typeof p.scanSilenceStep === 'function') {
+        p.scanSilenceStep(SCAN_STEP_SONG_SECONDS);
+      }
     }
     requestAnimationFrame(monitorLoop);
   }
@@ -1167,7 +1203,7 @@
 
     const source = audioCtx.createBufferSource();
     source.buffer = capturedBuffer;
-    source.connect(audioCtx.destination);
+    source.connect(MML.Audio.getMasterGain(audioCtx));
     source.start(0, transportOffset);
     transportSource = source;
     transportStartTime = audioCtx.currentTime;
@@ -1397,7 +1433,8 @@
 
   // MMLをコンパイルし、ppmck方式バイトコード(src/nsf/mckBytecode.js)+
   // 専用ドライバ(src/driver/ppmckDriver.js)経由でNSFファイルとして書き出す。
-  // 現状は2A03のパルス1/パルス2/三角波/ノイズ(A-D)のみ対応(ROADMAP.mdフェーズ1.6)。
+  // 2A03(A-D)+DPCM+VRC6/MMC5/FME7/FDS/N163/VRC7に対応(ROADMAP.mdフェーズ1.6/1.7。
+  // 未対応の拡張音源が指定された場合はbuilt.unsupportedExpansionsで警告表示する)。
   function exportMmlNsf() {
     const result = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
 
@@ -1436,7 +1473,7 @@
     let out = T('NSF書き出し完了: {bytes}バイト({banks}バンク、うち曲データ {songBanks}バンク)',
       { bytes: nsfBytes.length, banks: built.bankCount, songBanks: Math.max(0, built.bankCount - 8) }) + '\n';
     if (built.unsupportedExpansions.length > 0) {
-      out += T('注意: 拡張音源({chips})は現状のNSF書き出しでは未対応のため、該当チャンネルは無音になります(VRC6/MMC5/FME7は対応済み)。',
+      out += T('注意: 拡張音源({chips})は現状のNSF書き出しでは未対応のため、該当チャンネルは無音になります(VRC6/MMC5/FME7/FDS/N163/VRC7は対応済み)。',
         { chips: built.unsupportedExpansions.join(', ') }) + '\n';
     }
     msg.className = 'ok';
@@ -1623,7 +1660,7 @@
 
     const source = audioCtx.createBufferSource();
     source.buffer = buffer;
-    source.connect(audioCtx.destination);
+    source.connect(MML.Audio.getMasterGain(audioCtx));
     source.start();
     currentSource = source;
   }
@@ -1663,6 +1700,12 @@
   // (finishSoundFilePlayback/updateTransportUI参照)。
   const FADE_SEC = 5;
   let endFadeActive = false;
+
+  // 無音自動送り用の先読みスキャン(player.scanSilenceStep、monitorLoop参照)を
+  // 1回のrAF tickで進める曲内時間の予算(秒)。60fps換算で概ね30倍速でスキャンが
+  // 進むため、キャプチャさえ追いついていればどんな長さの曲でも数秒〜数十秒で
+  // スキャンが完了(無音発見 or 曲末到達)し、以後は仕事をしなくなる。
+  const SCAN_STEP_SONG_SECONDS = 0.5;
 
   const NSF_CHIP_NAMES = [
     ['VRC6', MML.NSF.CHIP_FLAGS.VRC6],
@@ -2072,7 +2115,12 @@
     nsfSongIndexEl.value = String(songNo);
 
     const duration    = parseInt(nsfPlayDurationEl.value, 10) || 30;
-    const totalFrames = Math.ceil(duration * MML.Emu.FRAME_RATE_NTSC);
+    // 「指定した再生時間ぶん鳴らした後、そこからさらにFADE_SEC秒かけてフェードアウトする」
+    // 仕様(ユーザー指定)のため、実際のキャプチャ/再生長はduration+FADE_SECにする。
+    // フェード自体はupdateEndFadeGain()がworkletDuration(=captureDuration)の手前
+    // FADE_SEC秒から自動的に開始するので、ここではキャプチャ長を伸ばすだけでよい。
+    const captureDuration = duration + FADE_SEC;
+    const totalFrames = Math.ceil(captureDuration * MML.Emu.FRAME_RATE_NTSC);
 
     // 既存の再生を停止(他フォーマットの先読みキャプチャも止める。走らせたままだとNSFの
     // ピアノロールを他フォーマットの結果で上書きしてしまう)
@@ -2115,7 +2163,7 @@
     };
     activePlayer    = player;
     player.setSpeed(currentSpeedFactor);
-    workletDuration = duration;
+    workletDuration = captureDuration;
 
     nsfFileStatusEl.innerHTML = '';
     const pre = document.createElement('div');
@@ -2124,9 +2172,9 @@
       { song: songNo, total: totalSongs, time: formatTime(duration) });
     nsfFileStatusEl.appendChild(pre);
 
-    resetPlaybackRangeToFull(duration);
+    resetPlaybackRangeToFull(captureDuration);
     seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
+    timeDisplayEl.textContent = `00:00 / ${formatTime(captureDuration)}`;
 
     const captureChips = chipsFromExtraFlags(loadedNsfHeader.extraChips || 0);
     resetN163Max();
@@ -2143,7 +2191,7 @@
     let lastNsfRollBuiltFrame = 0;
     let nsfPlaybackLoaded = false;
     MML.Emu.captureSongAsync(loadedNsfBytes, {
-      songIndex: songNo - 1, durationSeconds: duration, sampleRate: audioCtx.sampleRate,
+      songIndex: songNo - 1, durationSeconds: captureDuration, sampleRate: audioCtx.sampleRate,
       regsOnly: true,
       shouldCancel: () => myNsfRollToken !== nsfRollToken
     }, (done, total, regSnapshots, writeLog, n163Snapshots, initRegs, initWrites) => {
@@ -2153,6 +2201,7 @@
         nsfPlaybackLoaded = true;
         player.load(loadedNsfBytes, songNo - 1, totalFrames,
           { writeLog, initWrites, initRegs, n163Snapshots }, getChannelMuteConfig());
+        player.applyVolume(getChannelVolumeConfig());
 
         // 鍵盤表示のライブ現在値表示用(常に「今の」レジスタ状態を反映する専用スナップショット。
         // ピアノロール=曲全体の先読みタイムラインとは別物)
@@ -2411,6 +2460,10 @@
     updateSeekBufferedUI();
 
     const duration = parseInt(spcPlayDurEl.value, 10) || 180;
+    // 指定時間ぶん鳴らした後さらにFADE_SEC秒フェードアウトする仕様のため、実際の
+    // キャプチャ/再生長はduration+FADE_SECにする(playNsfStream冒頭コメント参照)。
+    // SPCは曲送りが無いのでフェード後は単に停止するだけになる。
+    const captureDuration = duration + FADE_SEC;
 
     // NSF/KSS実ファイル再生と同じ理由(二重エミュレーション解消・シーク・再生中ライブミュート
     // 対応)で、ライブ再生用プレイヤーとロール先読みキャプチャを1本のバックグラウンド
@@ -2430,11 +2483,11 @@
     };
     spcActivePlayer = player;
     player.setSpeed(currentSpeedFactor);
-    workletDuration = duration;
+    workletDuration = captureDuration;
 
-    resetPlaybackRangeToFull(duration);
+    resetPlaybackRangeToFull(captureDuration);
     seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
+    timeDisplayEl.textContent = `00:00 / ${formatTime(captureDuration)}`;
 
     const id = loadedSpcHeader.id666;
     const title = (id && id.songTitle) ? id.songTitle : T('(無題)');
@@ -2465,12 +2518,13 @@
     const myRollToken = ++spcRollToken;
     let lastRollBuiltFrame = 0;
     let spcPlaybackLoaded = false;
-    MML.SPC2MML.captureAsync(loadedSpcBytes, duration, (frame, frames, frameLog) => {
+    MML.SPC2MML.captureAsync(loadedSpcBytes, captureDuration, (frame, frames, frameLog) => {
       if (myRollToken !== spcRollToken) return; // 曲切替/停止で無効化済み
 
       if (!spcPlaybackLoaded) {
         spcPlaybackLoaded = true;
         player.load(loadedSpcBytes, frames, frameLog, spcMutedVoices);
+        player.applyVolume(keyboardDisplay.getSpcVolumeConfig());
         transportPlay();
       }
 
@@ -3098,6 +3152,11 @@
     if (spcActivePlayer) spcActivePlayer.applyMute(spcMutedVoices);
     updateMuteButton(idx, spcMutedVoices);
   };
+  // ch別音量スライダー(V0〜V7)。SPCはミュートと同じくビットマスクではなく配列そのものを
+  // 引き回す(applyVolume、src/audio/spc-stream-player.js参照)。
+  keyboardDisplay.onSpcVolumeChange = (volArray) => {
+    if (spcActivePlayer) spcActivePlayer.applyVolume(volArray);
+  };
 
   // ページ読み込み時にボイスモニターを構築（ドロップダウンを最初から表示）
   buildVoiceMonitor();
@@ -3310,8 +3369,11 @@
 
     const songNo = parseInt(kssSongIndexEl.value, 10) || 0;
     const duration = parseInt(kssPlayDurEl.value, 10) || 180;
+    // 指定時間ぶん鳴らした後さらにFADE_SEC秒フェードアウトする仕様のため、実際の
+    // キャプチャ/再生長はduration+FADE_SECにする(playNsfStream冒頭コメント参照)。
+    const captureDuration = duration + FADE_SEC;
     const kssFrameRate = loadedKssHeader.device.palMode ? MML.KSS.PAL_FPS : MML.KSS.NTSC_FPS;
-    const totalFrames = Math.ceil(duration * kssFrameRate);
+    const totalFrames = Math.ceil(captureDuration * kssFrameRate);
 
     // NSF実ファイル再生と同じ理由(二重エミュレーション解消・シーク・再生中ライブミュート
     // 対応)で、ライブ再生用プレイヤーとロール先読みキャプチャを1本のバックグラウンド
@@ -3340,7 +3402,7 @@
     };
     kssActivePlayer = player;
     player.setSpeed(currentSpeedFactor);
-    workletDuration = duration;
+    workletDuration = captureDuration;
 
     // 鍵盤表示: PSG/SCC/FMPACをライブチップから直接スナップショットする。
     // SCC使用が判明した時点で行構成を変えるため、再呼び出しできる形にしておく。
@@ -3359,9 +3421,9 @@
       }, () => kssActivePlayer ? kssActivePlayer.getPosition() : 0, kssMonitorChips(loadedKssHeader, sccUsed));
     }
 
-    resetPlaybackRangeToFull(duration);
+    resetPlaybackRangeToFull(captureDuration);
     seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
+    timeDisplayEl.textContent = `00:00 / ${formatTime(captureDuration)}`;
 
     kssFileStatusEl.innerHTML = '';
     const pre = document.createElement('div');
@@ -3387,7 +3449,7 @@
     const kssSccPossible = kssHasSccDecoder(loadedKssHeader);
     let kssPlaybackLoaded = false;
     MML.Emu.captureKssSongAsync(loadedKssBytes, {
-      songIndex: songNo, durationSeconds: duration, sampleRate: audioCtx.sampleRate,
+      songIndex: songNo, durationSeconds: captureDuration, sampleRate: audioCtx.sampleRate,
       regsOnly: true,
       shouldCancel: () => myKssRollToken !== kssRollToken
     }, (done, total, writeLog) => {
@@ -3396,6 +3458,7 @@
       if (!kssPlaybackLoaded) {
         kssPlaybackLoaded = true;
         player.load(loadedKssBytes, songNo, totalFrames, { writeLog }, getChannelMuteConfig());
+        player.applyVolume(getChannelVolumeConfig());
         applyKssMonitorSource(kssSccUsed);
         transportPlay();
       }
@@ -3543,10 +3606,10 @@
   document.getElementById('btnKssSongNext').addEventListener('click', () => changeKssSong(1));
 
   // ── GBS ファイル読み込み・再生 ────────────────────────────────────
-  // ★現段階ではネイティブ再生のみ(KSS/NSFのような背景先読みキャプチャ・ピアノロール・
-  //   ライブモニタ連携・シーク(scrub)は未実装)。gbs2mml実装時にcaptureGbsSongAsyncを
-  //   作る際、KSSのKssReplayStreamPlayerと同様の仕組みへ発展させる想定
-  //   (その際はlastPlayMode==='gbs'をcanSeek()/transportStop()のシーク対応リストへ追加すること)。
+  // KSS/NSFと同じく背景先読みキャプチャ(captureGbsSongAsync)+ピアノロール+
+  // ライブモニタ連携+シーク(scrub)に対応済み(GbsReplayStreamPlayer、KSSの
+  // KssReplayStreamPlayerと同型)。lastPlayMode==='gbs'もcanSeek()のシーク対応リストに
+  // 含まれている。
   const gbsFileEl       = document.getElementById('gbsFile');
   const gbsFileHeaderEl = document.getElementById('gbsFileHeader');
   const gbsPlayDurEl    = document.getElementById('gbsPlayDuration');
@@ -3695,8 +3758,11 @@
     const songNoDisplay = parseInt(gbsSongIndexEl.value, 10) || loadedGbsHeader.firstSong;
     const songIndex = Math.max(0, songNoDisplay - loadedGbsHeader.firstSong);
     const duration = parseInt(gbsPlayDurEl.value, 10) || 180;
+    // 指定時間ぶん鳴らした後さらにFADE_SEC秒フェードアウトする仕様のため、実際の
+    // キャプチャ/再生長はduration+FADE_SECにする(playNsfStream冒頭コメント参照)。
+    const captureDuration = duration + FADE_SEC;
     const gbsFrameRate = loadedGbsHeader.playFps;
-    const totalFrames = Math.ceil(duration * gbsFrameRate);
+    const totalFrames = Math.ceil(captureDuration * gbsFrameRate);
 
     // NSF/KSSと同じ理由(二重エミュレーション解消・シーク対応)で、ライブ再生用プレイヤーと
     // ロール先読みキャプチャを1本のバックグラウンドregsOnlyキャプチャに統合する
@@ -3720,11 +3786,11 @@
     };
     gbsActivePlayer = player;
     player.setSpeed(currentSpeedFactor);
-    workletDuration = duration;
+    workletDuration = captureDuration;
 
-    resetPlaybackRangeToFull(duration);
+    resetPlaybackRangeToFull(captureDuration);
     seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
+    timeDisplayEl.textContent = `00:00 / ${formatTime(captureDuration)}`;
 
     gbsFileStatusEl.innerHTML = '';
     const pre = document.createElement('div');
@@ -3742,7 +3808,7 @@
     let lastGbsRollBuiltFrame = 0;
     let gbsPlaybackLoaded = false;
     MML.Emu.captureGbsSongAsync(loadedGbsBytes, {
-      songIndex, durationSeconds: duration, sampleRate: audioCtx.sampleRate,
+      songIndex, durationSeconds: captureDuration, sampleRate: audioCtx.sampleRate,
       regsOnly: true,
       shouldCancel: () => myGbsRollToken !== gbsRollToken
     }, (done, total, data) => {
@@ -3751,6 +3817,7 @@
       if (!gbsPlaybackLoaded) {
         gbsPlaybackLoaded = true;
         player.load(loadedGbsBytes, songIndex, totalFrames, { snapshots: data.snapshots }, getChannelMuteConfig());
+        player.applyVolume(getChannelVolumeConfig());
         // 鍵盤表示: GB APUをライブチップから直接スナップショットする(KSSのapplyKssMonitorSourceと同じ考え方)。
         setMonitorSource({
           regSnapshots: [{}], totalFrames: 1,
@@ -4054,8 +4121,11 @@
 
     const track = parseInt(hesTrackIndexEl.value, 10) || 0;
     const duration = parseInt(hesPlayDurEl.value, 10) || 180;
+    // 指定時間ぶん鳴らした後さらにFADE_SEC秒フェードアウトする仕様のため、実際の
+    // キャプチャ/再生長はduration+FADE_SECにする(playNsfStream冒頭コメント参照)。
+    const captureDuration = duration + FADE_SEC;
     const hesFrameRate = MML.HES.VBLANK_FPS;
-    const totalFrames = Math.ceil(duration * hesFrameRate);
+    const totalFrames = Math.ceil(captureDuration * hesFrameRate);
 
     // ★2026-08 PCM(DDA)対応前の設計に戻した(GBS/KSSと同じHesReplayStreamPlayer、
     // ユーザー要望)。CPU駆動のリアルタイム合成(HesStreamPlayer)や事前一括レンダリング
@@ -4083,11 +4153,11 @@
     };
     hesActivePlayer = player;
     player.setSpeed(currentSpeedFactor);
-    workletDuration = duration;
+    workletDuration = captureDuration;
 
-    resetPlaybackRangeToFull(duration);
+    resetPlaybackRangeToFull(captureDuration);
     seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
+    timeDisplayEl.textContent = `00:00 / ${formatTime(captureDuration)}`;
 
     hesFileStatusEl.innerHTML = '';
     const pre = document.createElement('div');
@@ -4102,7 +4172,7 @@
     let lastHesRollBuiltFrame = 0;
     let hesPlaybackLoaded = false;
     MML.Emu.captureHesSongAsync(loadedHesBytes, {
-      track, durationSeconds: duration, sampleRate: audioCtx.sampleRate,
+      track, durationSeconds: captureDuration, sampleRate: audioCtx.sampleRate,
       regsOnly: true,
       shouldCancel: () => myHesRollToken !== hesRollToken
     }, (done, total, data) => {
@@ -4111,6 +4181,7 @@
       if (!hesPlaybackLoaded) {
         hesPlaybackLoaded = true;
         player.load(loadedHesBytes, track, totalFrames, { snapshots: data.snapshots }, getChannelMuteConfig());
+        player.applyVolume(getChannelVolumeConfig());
         setMonitorSource({
           regSnapshots: [{}], totalFrames: 1,
           samplesPerFrame: audioCtx.sampleRate / hesFrameRate,
@@ -4272,6 +4343,8 @@
     const formatToInputId = { nsf: 'nsfFile', spc: 'spcFile', kss: 'kssFile', gbs: 'gbsFile', hes: 'hesFile' };
     const formatToLabel = { nsf: T('NSF (ファミコン)'), spc: T('SPC (スーパーファミコン)'), kss: 'KSS (MSX)', gbs: 'GBS (Game Boy)', hes: 'HES (PC Engine)' };
 
+    const soundWinEl = document.getElementById('win-soundplay');
+
     function showSoundPanel(format) {
       ['none', 'nsf', 'spc', 'kss', 'gbs', 'hes'].forEach((f) => {
         const panel = document.getElementById('soundPanel-' + f);
@@ -4280,29 +4353,63 @@
       soundPlayTitleEl.textContent = formatToLabel[format] || T('サウンドファイルを開く');
     }
 
-    soundFileEl.addEventListener('change', () => {
-      const file = soundFileEl.files[0];
-      if (!file) return;
+    // ウィンドウがまだ閉じていたら開く。openBtn.click()を使わない理由: openBtn自身にも
+    // 「開いたらファイル選択ダイアログを出す」リスナーが付いており(下記)、click()すると
+    // それも連動して発火しドラッグ&ドロップ直後に無関係なダイアログが開いてしまうため、
+    // floatingWindows.jsのsetVisible相当をここで直接行う(表示state管理はfloatingWindows.js
+    // 側のlocalStorage永続化に次のトグル操作時点で追いつくので実害はない)。
+    function ensureSoundWindowOpen() {
+      if (!soundWinEl || soundWinEl.style.display !== 'none') return;
+      soundWinEl.style.display = 'flex';
+      const btn = document.querySelector('.toggle-btn[data-target="win-soundplay"]');
+      if (btn) btn.classList.add('active');
+    }
+
+    // 拡張子→loadXxxFile()。ファイル選択ダイアログはinputのchangeイベント経由でこれと
+    // 同じ関数を呼んでいる(nsfFileEl.addEventListener('change', loadNsfFile)等)。
+    // ドラッグ&ドロップ側はイベント発火だと完了(非同期)を待てず再生開始のタイミングが
+    // 取れないため、openSoundFile()からは直接awaitで呼ぶ(inputのfilesへは同じくセットする
+    // ので、loadXxxFile()側から見た見え方はダイアログ経由と変わらない)。
+    const formatToLoadFn = { nsf: loadNsfFile, spc: loadSpcFile, kss: loadKssFile, gbs: loadGbsFile, hes: loadHesFile };
+    // ドラッグ&ドロップは「開いてそのまま再生」までを1操作で行いたいというユーザー要望。
+    // ファイル選択ダイアログ側は従来通りヘッダ確認後に手動で再生ボタンを押す2段階のまま
+    // 変えない(呼び出し元のdropハンドラでだけplayXxxStreamを呼ぶ、openSoundFile自体は
+    // 再生しない)。
+    const formatToPlayFn = { nsf: playNsfStream, spc: playSpcStream, kss: playKssStream, gbs: playGbsStream, hes: playHesStream };
+
+    // ファイル選択ダイアログ・ドラッグ&ドロップの両方から呼ばれる共通処理。拡張子で
+    // 対応フォーマットを判定し、フォーマット別の隠しinputへfilesをセットしてloadXxxFile()の
+    // 完了を待つ。戻り値は成功時のフォーマット文字列('nsf'等)、失敗時false。
+    async function openSoundFile(file) {
+      if (!file) return false;
       const ext = file.name.split('.').pop().toLowerCase();
       const targetInputId = formatToInputId[ext];
       if (!targetInputId) {
         alert(T('対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES)', { ext }));
-        soundFileEl.value = '';
-        return;
+        return false;
       }
+      ensureSoundWindowOpen();
       const targetInput = document.getElementById(targetInputId);
       const dt = new DataTransfer();
       dt.items.add(file);
       targetInput.files = dt.files;
-      targetInput.dispatchEvent(new Event('change'));
       showSoundPanel(ext);
+      const loadFn = formatToLoadFn[ext];
+      if (loadFn) await loadFn();
+      return ext;
+    }
+
+    soundFileEl.addEventListener('change', async () => {
+      const file = soundFileEl.files[0];
+      if (!file) return;
+      const ok = await openSoundFile(file);
+      if (!ok) soundFileEl.value = '';
     });
 
     // ヘッダーの「サウンドファイルを開く」ボタン: ウィンドウを開くのと同時に
     // ファイル選択ダイアログを直接表示する（floatingWindows.jsの汎用トグル処理の後に実行され、
     // その時点でウィンドウの表示/非表示は確定している）
     const openBtn = document.querySelector('.toggle-btn[data-target="win-soundplay"]');
-    const soundWinEl = document.getElementById('win-soundplay');
     if (openBtn && soundWinEl) {
       openBtn.addEventListener('click', () => {
         if (soundWinEl.style.display !== 'none') {
@@ -4310,6 +4417,44 @@
         }
       });
     }
+
+    // ドラッグ&ドロップでも同じ経路(openSoundFile)で開けるようにする。ウィンドウが
+    // 閉じていてもページ上のどこにドロップしても拾う(ヘッダーの開くボタンと同じ
+    // 「開く操作」として扱う)。dragover側でpreventDefault()しないとブラウザ既定動作の
+    // ページ遷移(ファイルがそのまま開かれてアプリの状態が失われる)が起きてしまうため必須。
+    const dropOverlayEl = document.getElementById('dropOverlay');
+    let dragDepth = 0; // dragenter/dragleaveは子要素の出入りでも発火するため深度カウントで判定する
+    function isFileDrag(e) {
+      return e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+    }
+    document.addEventListener('dragenter', (e) => {
+      if (!isFileDrag(e)) return;
+      dragDepth++;
+      if (dropOverlayEl) dropOverlayEl.classList.add('visible');
+    });
+    document.addEventListener('dragover', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+    });
+    document.addEventListener('dragleave', (e) => {
+      if (!isFileDrag(e)) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0 && dropOverlayEl) dropOverlayEl.classList.remove('visible');
+    });
+    document.addEventListener('drop', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      dragDepth = 0;
+      if (dropOverlayEl) dropOverlayEl.classList.remove('visible');
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (!file) return;
+      // ドラッグ&ドロップは開いた直後に自動再生まで行う(ファイル選択ダイアログとの
+      // 唯一の挙動差。ensureSoundWindowOpen/showSoundPanel等の中身はopenSoundFile側で共通)。
+      openSoundFile(file).then((ext) => {
+        const playFn = ext && formatToPlayFn[ext];
+        if (playFn) playFn();
+      });
+    });
 
     // ウィンドウ自体のタイトル行にあるファイルを開くアイコン(ウィンドウが既に開いている状態で
     // 別のファイルへ差し替える用)

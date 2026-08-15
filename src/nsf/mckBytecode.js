@@ -37,7 +37,9 @@
  *   0xFD      : 音量直接指定。次バイトは 0x80|(0-15)。このチャンネルのソフトウェア
  *               音量エンベロープ(下記0xF3)を解除する(compiler.js側の明示的なv<n>が
  *               state.envelopeVをnullクリアするのと同じ意味)
- *   0xFE      : 音色(デューティ/音色番号)直接指定。次バイトは 0x80|値
+ *   0xFE      : 音色指定。次バイトは実機ppmck同様bit7で2種類を区別する
+ *               (bit7=1 … @<n>の固定音色(デューティ/音色番号)、
+ *                bit7=0 … @@<n>で選んだデューティ(音色)エンベロープのテーブル番号)
  *   0xFF      : トラック終端
  *
  * チップ固有の追加オペコード:
@@ -67,15 +69,23 @@
  *               (以降は通常の音符と同じくpushLength継続・OP_REST/OP_PITCH_BREAK区切りに
  *               対応)。アタック(音量/デューティ再書込み)を伴わずグライドする
  *
+ *   0xE8      : SD(セルフディレイ、2026-08-15)。ゲートオフ(リリースエンベロープ突入、
+ *               0xECと同じ)と、<n>個前のノートへの音程差し替え+打ち直しを同時に行う
+ *               複合オペコード。次の2バイトが[新ノート番号,フレーム数]
+ *   0xE7      : @@r<n>(リリース音色、2026-08-15)。次バイトが音色バイト($FF=OFF)。
+ *               ゲートオフの瞬間に音色を差し替える(0xFEの音色バイトと同じbit7規約)
+ *
  * @t<len>,<num>(フレーム単位テンポ)・w<len>(ウェイト)は、コンパイル時点で既に
  * seg.durationFramesへ反映済みのため専用オペコードは不要(既存の音符長エンコードが
- * そのまま使える)。SD/SDOF/SDQR(セルフディレイ)も同様にcompiler.js側でpitchBreaksへ
- * 変換済みのため、既存の0xED(タイの異音程レガート)がそのまま流用できる。
- * ★ただしSDのpitchBreakは仕様上ゲートオフ(OP_REST)と必ず同じatFrameになるため、
+ * そのまま使える)。SD/SDOF/SDQR(セルフディレイ)もcompiler.js側でpitchBreaksへ
+ * 変換済みだが、SDのpitchBreakは仕様上ゲートオフ(OP_REST)と必ず同じatFrameになるため、
  * 素朴に両方を出力すると音長0のOP_PITCH_BREAKが生まれ6502ドライバのCNT,Xが0のまま
  * SERVICE_CHのDECでアンダーフローしチャンネルが永久フリーズする重大なバグになる
- * (実機さながらの6502+APUエミュレータで実測発覚、2026-08-13修正)。同じatFrameに
- * 複数のブレークポイントがある場合はrest(ゲートオフ)を優先し同位置のpitchは間引く。
+ * (実機さながらの6502+APUエミュレータで実測発覚、2026-08-13)。★2026-08-15まではこれを
+ * 「同じatFrameならrest(ゲートオフ)を優先しpitchを間引く」ことで回避していたが、
+ * SDのpitchBreakは必ずゲートオフと同フレームなので、結果としてSDがNSF書き出しでは
+ * 常に消える=機能そのものが無効という別のバグになっていた。現在は両者を1つに
+ * まとめた複合オペコード0xE8で音長0を発生させずに実現する。
  * !/!!/!!!(データスキップ/タイムシフト開始・終了)とx<param0>,<param1>はNSFに対応する
  * 概念が無い(!!/!!!はブラウザのシークバー専用、xはこのツールのバイトコードが実機
  * ppmckと非互換のため無意味)ため、いずれも意図的に未対応のまま
@@ -133,11 +143,12 @@
  *     周期/周波数レジスタ再書込み専用、音符アタック時のWRITE_FREQ_VOLとは別経路)は
  *     src/driver/ppmckDriver.js参照。pitchEnvIndexRemap/vibratoIndexRemapで
  *     曲中の使用インデックスだけをROMへコンパクトに詰める(envIndexRemapと同じ方式)。
- *   - EN(0xF7、ノートエンベロープ=アルペジオ)は引き続き未実装(オペコードを読み捨てるだけ、
- *     RD_SKIP1)。EN/EP/MPのうちEP/MPを優先実装した経緯はメモリ
- *     (ppmck-nsf-export-en-ep-mp-implementation-plan)参照。ENはノート番号空間への
- *     加算(周期/周波数レジスタ空間のD/EP/MPとは別のノート単位の値の重ね方)が必要で
- *     設計が別になるため、別途対応する。
+ *   - EN(0xF7、ノートエンベロープ=アルペジオ): 2026-08-14実装完了(このコメントは
+ *     実装前に書かれたまま更新されていなかった。EN/EP/MPのうちEP/MPを先に実装した
+ *     経緯はメモリ(ppmck-nsf-export-en-ep-mp-implementation-plan)参照)。ノート番号
+ *     空間への累積オフセットをNOTE,Xへ加算してから周波数テーブルを引き直す方式
+ *     (周期/周波数レジスタ空間へ直接加算するD/EP/MPとは別の重ね方)。
+ *     src/driver/ppmckDriver.jsのENACT/ENSEL/ENTICK/ENVAL・RD_NOTEENV参照。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -171,8 +182,10 @@
   // バンクジャンプマーカー)とも重複しないよう0xEDまで下げていた。2026-08-12、
   // タイの異音程レガート(OP_PITCH_BREAK=0xED)用にもう1つ確保するため0xECまでさらに
   // 下げた。2026-08-13、y/SM/PS用に0xE9-0xEBをもう3つ確保するため0xE8までさらに
-  // 下げた(実際に使われるノート番号の範囲には遠く届かない安全な切り下げ)
-  const NOTE_MAX = 0xe8;
+  // 下げた。2026-08-15、SD(セルフディレイ)の複合オペコード(OP_GATE_OFF_VR_SD=0xE8)と
+  // @@r(リリース音色、OP_REL_TONE=0xE7)用に2つ確保するため0xE6まで下げた
+  // (実際に使われるノート番号の範囲には遠く届かない安全な切り下げ)
+  const NOTE_MAX = 0xe6;
 
   // FME7専用の追加オペコード(実機と非互換の独自拡張。ファイル冒頭コメント参照)
   const OP_FME7_NOISE = 0xf1;
@@ -216,6 +229,34 @@
   // usesVr(@vrが曲中で1回でも使われている)の時だけ音符内部ゲートオフでこちらを使い、
   // 使わない曲では従来通りOP_RESTのまま(6502側にRD_GATEOFFVRハンドラが無いため)
   const OP_GATE_OFF_VR = 0xec;
+  // ★2026-08-15: SD(セルフディレイ)専用の複合オペコード。OP_GATE_OFF_VRと全く同じ
+  // 「リリースエンベロープへ突入するゲートオフ」に加え、同じフレームで音程を
+  // <n>個前のノートへ差し替えて打ち直す(実機ppmckのputReleaseEffectが
+  // 「MCK_SET_VOL rel_env」と「差し替えたノートの発音」を同時に出力するのと同じ)。
+  // 次の2バイトが[新ノート番号,フレーム数]。ゲートオフとピッチブレークは仕様上必ず
+  // 同フレームになるため、別々のオペコードとして並べると音長0のコマンドが生まれて
+  // 6502ドライバのカウンタがアンダーフローする(ファイル冒頭コメント参照)
+  const OP_GATE_OFF_VR_SD = 0xe8;
+  // @@r<n>(リリース音色、2026-08-15)。次バイトが音色バイト($FF=OFF、それ以外はOP_TONEと
+  // 同じbit7規約: 1=固定音色番号 / 0=デューティエンベロープのテーブル番号)。
+  // ゲートオフの瞬間に音色を差し替える(実機putReleaseEffectのMCK_SET_TONE rel_tone相当)
+  const OP_REL_TONE = 0xe7;
+
+  // --- sticky音長エンコード(2026-08-16 ROM圧縮対応) ---
+  // 実測でノート+休符がバイトコードの5-9割を占め、かつ「直前と同じ音長」率が高い
+  // (変換由来の曲で音符9割・休符7割など)ため、音長バイトを省略できる1バイト形式を導入する。
+  //   0x00-0x6B: 音符+音長バイト(従来通り2バイト)。音長バイトは6502側NOTELEN,X(sticky)を更新
+  //   0x76-0xE1: 「ノート番号(値-0x76)+直前の音符と同じ音長」の1バイト形式
+  //   0xE2:      「直前の休符/ゲートオフと同じ長さの休符」の1バイト形式(OP_REST_SAME)
+  //   0x6C-0x75, 0xE3-0xE6: 未使用(将来の拡張用)
+  // 実ノート番号は最大107(0x6B、9オクターブテーブル)なので1バイト形式で全音域を表現でき、
+  // 音域の制限は一切無い。音長が直前と異なる音符は従来の2バイト形式のままなので、
+  // どんな曲でも旧形式よりサイズが悪化することは無い。
+  // ★Lループとの整合: serialize()はループ地点でsticky音長とdedup状態(lastVolume等)を
+  // 全てリセットし、ループ本体の先頭で必ず明示形式を出し直す(下記resetDedupAtLoop参照)
+  const NOTE_IMPLICIT_BASE = 0x76;
+  const NOTE_IMPLICIT_MAX = 0x6b; // これ以下のノート番号のみ1バイト形式にできる(0x76+0x6B=0xE1)
+  const OP_REST_SAME = 0xe2;
 
   // 音長(フレーム数)を、255ずつのチャンクに分割して書き込む。
   // 最初のチャンクはそのまま直後に、2つ目以降は 0xF4(ウェイト) + チャンクの形で続ける
@@ -267,7 +308,7 @@
   // そのまま使う(255=off はremap対象外で常にそのまま)。remapが渡されているのに対応する
   // エントリが無い(未定義のEP<n>/MP<n>を参照)場合はオペコード自体を出力しない
   // (compiler.js側もそのセグメントは効果0として扱うため、無出力=無効果で整合する)
-  MckBytecode.serialize = function (segments, immediateWrites, envIndexRemap, loopFrame, pitchEnvIndexRemap, vibratoIndexRemap, noteEnvIndexRemap, vrIndexRemap, usesVr) {
+  MckBytecode.serialize = function (segments, immediateWrites, envIndexRemap, loopFrame, pitchEnvIndexRemap, vibratoIndexRemap, noteEnvIndexRemap, vrIndexRemap, usesVr, dutyIndexRemap) {
     const bytes = [];
     let loopByteOffset = null;
     let lastVolume = null;
@@ -276,6 +317,8 @@
     let lastEnvIdx = null;
     let lastEnvelopeVr = 255; // @vr<n>(2026-08-13)の既定値255=off(compiler.jsのstate.envelopeVrと同じ)
     let lastTone = null;
+    // @@r<n>(リリース音色)の直前に出力したバイト。$FF=OFF
+    let lastRelTone = 0xff;
     let lastNoteEnv = null;
     let lastPitchEnv = null;
     let lastPitchEnvDelay = null; // EP<n>,<delay>のdelay(2026-08-11 別プロジェクトA)
@@ -286,6 +329,49 @@
     let lastFme7EnvPeriod = null;
     let lastDetune = 0; // D<n>の既定値は0(compiler.jsのstate.detune初期値と同じ)
     let lastSmooth = false; // SM/SMOF(2026-08-13)の既定値はOFF(compiler.jsのstate.smoothと同じ)
+    // sticky音長(2026-08-16)。6502側のNOTELEN,X/RESTLEN,Xの厳密なモデル(=直前に明示形式で
+    // 出力した音長バイトの値。255超のチャンク分割時は最初のバイト=0xFF)
+    let stickyNoteLen = null;
+    let stickyRestLen = null;
+
+    // Lループ地点でdedup/sticky状態を「未知」へ戻す(2026-08-16)。
+    // Lの意味論は「毎周、1周目と同じ音」(ブラウザ再生=compiler.jsがwriteLogの
+    // [L地点,曲末)を逐語複製する挙動と一致させる。以前は状態をリセットしていなかったため、
+    // L地点より後で音量/音色等が変わる曲では2周目以降が曲末尾の状態を引きずる=
+    // ブラウザ再生・ピアノロールの表示と食い違う潜在バグだった)。
+    // リセットにより、ループ本体の先頭で各状態の明示コマンドが必ず出力され、
+    // ループで戻って来るたびに1周目と同じ状態から再生される。
+    // ★重要: リセットするのは「このチャンネルで実際に使われている機能」だけに限る。
+    // 無条件に全部リセットすると、一度も使っていない機能のoff状態(D0/SMOF/@@r OFF等)まで
+    // 明示出力してしまうが、ドライバ側は未使用機能のオペコードをディスパッチしない
+    // (usesXxxガード)ため、そのバイトが音符として誤読され暴走する(実測: @@r未使用曲で
+    // OP_REL_TONE $FFがノート番号113+ゴミ音長として再生された)。
+    // 「オペコードを出力する⟹対応するusesXxxフラグが立っている」は本形式の不変条件
+    const chUsesDetune = segments.some(s => s.detune);
+    const chUsesSmooth = segments.some(s => s.smooth);
+    const chUsesRelTone = segments.some(s => s.releaseTone != null && s.releaseTone !== 255);
+    const chUsesPortamento = segments.some(s => s.portamento != null);
+    const chUsesNoteEnv = segments.some(s => s.noteEnv != null && s.noteEnv !== 255);
+    const chUsesPitchEnv = segments.some(s => s.pitchEnv != null && s.pitchEnv !== 255);
+    const chUsesVibrato = segments.some(s => s.vibrato != null && s.vibrato !== 255);
+    function resetDedupAtLoop() {
+      // 音量・音色は全音符が持つ状態なので常時リセット(OP_VOL/OP_TONEは常にディスパッチされる。
+      // OP_VOL_ENVはremapIdx側のガードで@v未使用曲では出力自体が起こらない)
+      lastVolume = null; lastVolMode = null; lastEnvIdx = null;
+      lastTone = null;
+      // seg.x != nullガード付きの機能はnullリセットで安全(未使用曲では出力条件を満たさない)
+      lastEnvelopeVr = null; lastFme7Noise = null; lastFme7EnvShape = null; lastFme7EnvPeriod = null;
+      // 出力条件が無条件比較の機能・off値(255)だけでも出力されうる機能は、
+      // このチャンネルで実際に使っている場合のみリセットする
+      if (chUsesRelTone) lastRelTone = null;
+      if (chUsesDetune) lastDetune = null;
+      if (chUsesSmooth) lastSmooth = null;
+      if (chUsesPortamento) { lastPortamentoTarget = null; lastPortamentoDuration = null; lastPortamentoDelay = null; }
+      if (chUsesNoteEnv) lastNoteEnv = null;
+      if (chUsesPitchEnv) { lastPitchEnv = null; lastPitchEnvDelay = null; }
+      if (chUsesVibrato) lastVibrato = null;
+      stickyNoteLen = null; stickyRestLen = null;
+    }
 
     // y<adr>,<num>(レジスタ直接書き込み、2026-08-13)。音符に紐付かない即時イベントとして
     // 記録された(kind:'rawWrite')ものを、対応するフレーム位置のセグメント直前へ差し込む
@@ -355,6 +441,7 @@
       // 必ず一致する
       if (loopFrame != null && loopByteOffset == null && elapsed === loopFrame) {
         loopByteOffset = bytes.length;
+        resetDedupAtLoop();
       }
       elapsed += seg.durationFrames;
       const gateDenom = seg.gateDenom || 8;
@@ -398,10 +485,39 @@
           }
           lastVolMode = 'plain';
         }
-        const tone = seg.instrument || 0;
-        if (tone !== lastTone) {
-          bytes.push(OP_TONE, 0x80 | (tone & 0x7f));
-          lastTone = tone;
+        // 音色バイトは実機ppmck同様bit7で2種類を区別する(ppmckc datamake.cの
+        // _TONE=param|0x80 / _ORG_TONE=param&0x7f、6502側internal.h duty_set):
+        //   bit7=1 … @<n>の固定音色(デューティ比/波形番号)。デューティエンベロープは解除
+        //   bit7=0 … @@<n>で選んだデューティ(音色)エンベロープのテーブル番号
+        // @@<n>のテーブル番号は@v<n>等と同じく実際に使われている分だけ詰めて再採番する
+        // (dutyIndexRemap。未定義の@@<n>を参照している場合は固定音色へフォールバック)
+        let toneByte = 0x80 | ((seg.instrument || 0) & 0x7f);
+        if (seg.toneEnv != null) {
+          const di = dutyIndexRemap ? dutyIndexRemap[seg.toneEnv] : seg.toneEnv;
+          if (di != null) toneByte = di & 0x7f;
+        }
+        if (toneByte !== lastTone) {
+          bytes.push(OP_TONE, toneByte);
+          lastTone = toneByte;
+        }
+        // @@r<n>(リリース音色、255=OFF)。音色バイトと同じbit7の規約で、リリース音色が
+        // デューティエンベロープ番号(duty系チップ)か固定音色番号(FDS/VRC7)かを表す。
+        // 0xFFはOFFの番兵なので、固定音色側は0-126に丸める
+        {
+          const rt = seg.releaseTone == null ? 255 : seg.releaseTone;
+          let relByte = 0xff;
+          if (rt !== 255) {
+            if (seg.releaseToneDuty) {
+              const di = dutyIndexRemap ? dutyIndexRemap[rt] : rt;
+              if (di != null) relByte = di & 0x7f;
+            } else {
+              relByte = 0x80 | Math.min(126, rt & 0x7f);
+            }
+          }
+          if (relByte !== lastRelTone) {
+            bytes.push(OP_REL_TONE, relByte);
+            lastRelTone = relByte;
+          }
         }
         if (seg.noteEnv != null && seg.noteEnv !== lastNoteEnv) {
           // @v<n>/EP<n>と同じ「実際に使われているインデックスだけをコンパクトに詰める」方式
@@ -482,14 +598,6 @@
         }
 
         const noteByte = Math.max(0, Math.min(NOTE_MAX, Math.round(seg.noteNumber)));
-        // PS(ポルタメント、実機準拠、2026-08-13、対応ABC): 通常の音符バイトの代わりに
-        // OP_PITCH_SHIFT_NOTEを使う。アタック(音量/デューティ再書込み)を伴わず、
-        // 直前の音からこの音符自身の音長でグライドする(src/driver/ppmckDriver.js参照)
-        if (seg.psGlide) {
-          bytes.push(OP_PITCH_SHIFT_NOTE, noteByte);
-        } else {
-          bytes.push(noteByte);
-        }
         // タイ(&)で異音程へレガートしたセグメント(compiler.jsのpitchBreaks)は、
         // ゲートオフ(OP_REST)と同じく「このセグメント内の相対フレーム位置」の
         // マーカーとして扱う。両方を時系列でマージし、各区間の長さをpushLengthで
@@ -500,7 +608,7 @@
         if (seg.pitchBreaks) {
           for (const pb of seg.pitchBreaks) {
             if (pb.atFrame > 0 && pb.atFrame < seg.durationFrames) {
-              breakpoints.push({ atFrame: pb.atFrame, kind: 'pitch', noteNumber: pb.noteNumber });
+              breakpoints.push({ atFrame: pb.atFrame, kind: 'pitch', noteNumber: pb.noteNumber, attack: !!pb.attack });
             }
           }
         }
@@ -508,43 +616,101 @@
           breakpoints.push({ atFrame: gateFrames, kind: 'rest' });
         }
         breakpoints.sort((a, b) => a.atFrame - b.atFrame);
-        // ★2026-08-13修正: SD(セルフディレイ)のピッチブレークは仕様上ゲートオフと必ず
-        // 同じatFrameになる(compiler.jsが両方ともgateFramesを使うため)。同じatFrameに
-        // 2つのブレークポイントがあると、後者の直前にpushLength(0)=frames=0の音符バイトが
-        // 差し込まれてしまい(OP_PITCH_BREAKの音長パラメータが0になる)、6502ドライバ側で
-        // CNT,Xが0のままSERVICE_CHのDECが実行され255へアンダーフローしてチャンネルが
-        // 実質的にフリーズしたまま二度と復帰しない重大なバグになっていた(実機さながらの
-        // 6502+APUエミュレータで実測発覚)。同じatFrameが重複する場合はrest(ゲートオフ、
-        // 実際に音量を切り替える側)を優先し、同位置のpitchは無音化前の一瞬にしか
-        // 影響しないため間引く
-        const dedupedBreakpoints = [];
+        // SD(セルフディレイ)のピッチブレークは仕様上ゲートオフと必ず同じatFrameになる
+        // (compiler.jsが両方ともgateFramesを使うため)。同じatFrameに2つのブレークポイントを
+        // そのまま並べると、後者の直前にpushLength(0)=frames=0の音符バイトが差し込まれ
+        // (OP_PITCH_BREAKの音長パラメータが0になる)、6502ドライバ側でCNT,Xが0のまま
+        // SERVICE_CHのDECが実行され255へアンダーフローしてチャンネルが実質フリーズする
+        // (実機さながらの6502+APUエミュレータで実測発覚、2026-08-13)。
+        // ★2026-08-15: 当初これをrest優先でpitchを間引くことで回避していたが、SDの
+        // ピッチブレークは必ずゲートオフと同フレームなので「SDがNSF書き出しでは常に
+        // 消える」=機能そのものが無効という別のバグになっていた。ゲートオフとノート
+        // 差し替えを1つにまとめた複合オペコード(OP_GATE_OFF_VR_SD)へ統合し、音長0を
+        // 発生させずに両方を実現する(実機ppmckも putReleaseEffect で
+        // 「リリースエンベロープへの切替」と「差し替えたノートの発音」を同時に出力する)
+        const mergedBreakpoints = [];
         for (const bp of breakpoints) {
-          const prev = dedupedBreakpoints[dedupedBreakpoints.length - 1];
+          const prev = mergedBreakpoints[mergedBreakpoints.length - 1];
           if (prev && prev.atFrame === bp.atFrame) {
-            if (bp.kind === 'rest') dedupedBreakpoints[dedupedBreakpoints.length - 1] = bp;
+            // rest(ゲートオフ)とpitch(SD)が同フレームなら複合ブレークポイントへ畳む。
+            // それ以外の重複(理論上は起きない)は従来どおりrestを優先する
+            const restBp = prev.kind === 'rest' ? prev : (bp.kind === 'rest' ? bp : null);
+            const pitchBp = prev.kind === 'pitch' ? prev : (bp.kind === 'pitch' ? bp : null);
+            if (restBp && pitchBp && pitchBp.attack) {
+              mergedBreakpoints[mergedBreakpoints.length - 1] =
+                { atFrame: bp.atFrame, kind: 'restWithNote', noteNumber: pitchBp.noteNumber };
+            } else if (restBp) {
+              mergedBreakpoints[mergedBreakpoints.length - 1] = restBp;
+            }
             continue;
           }
-          dedupedBreakpoints.push(bp);
+          mergedBreakpoints.push(bp);
         }
         breakpoints.length = 0;
-        breakpoints.push(...dedupedBreakpoints);
-        let cursor = 0;
-        for (const bp of breakpoints) {
-          pushLength(bytes, bp.atFrame - cursor);
-          cursor = bp.atFrame;
-          if (bp.kind === 'rest') {
+        breakpoints.push(...mergedBreakpoints);
+
+        // --- 音符本体+最初の区間長(sticky音長エンコード対応、2026-08-16) ---
+        // 音符バイト直後の音長 = 最初のブレークポイントまでの長さ(無ければセグメント全長)。
+        // 通常音符でこれが1-255かつ直前の明示音長(stickyNoteLen)と同じなら、
+        // 音長バイトを省略した1バイト形式(NOTE_IMPLICIT_BASE+ノート番号)で出力する。
+        // PSグライド(OP_PITCH_SHIFT_NOTE)は6502側がNOTELENを更新しない専用経路なので
+        // 常に明示形式のまま(stickyも更新しない=6502側の挙動と厳密一致)
+        const firstLen = breakpoints.length > 0 ? breakpoints[0].atFrame : seg.durationFrames;
+        if (seg.psGlide) {
+          bytes.push(OP_PITCH_SHIFT_NOTE, noteByte);
+          pushLength(bytes, firstLen);
+        } else if (noteByte <= NOTE_IMPLICIT_MAX && firstLen >= 1 && firstLen <= 0xff &&
+                   firstLen === stickyNoteLen) {
+          bytes.push(NOTE_IMPLICIT_BASE + noteByte);
+        } else {
+          bytes.push(noteByte);
+          pushLength(bytes, firstLen);
+          // 6502側NOTELEN,X = READ_BYTEで読んだ最初の音長バイト(255超のチャンク分割時は0xFF)
+          stickyNoteLen = Math.min(0xff, Math.max(0, Math.round(firstLen)));
+        }
+
+        // --- ブレークポイント(ゲートオフ/ピッチブレーク)+各区間長 ---
+        // 各マーカーの音長 = 次のマーカー(または末尾)までの長さ。素のOP_RESTのみ、
+        // 直前の休符長(stickyRestLen)と同じ1-255ならOP_REST_SAME(1バイト)で出力できる
+        for (let bi = 0; bi < breakpoints.length; bi++) {
+          const bp = breakpoints[bi];
+          const spanLen = (bi + 1 < breakpoints.length ? breakpoints[bi + 1].atFrame : seg.durationFrames) - bp.atFrame;
+          const nb = bp.noteNumber != null
+            ? Math.max(0, Math.min(NOTE_MAX, Math.round(bp.noteNumber))) : 0;
+          if (bp.kind === 'restWithNote' && usesVr) {
+            // SD(セルフディレイ): ゲートオフでリリースエンベロープへ入りつつ、同時に
+            // <n>個前のノートへ音程を差し替えて打ち直す
+            bytes.push(OP_GATE_OFF_VR_SD, nb);
+            pushLength(bytes, spanLen);
+          } else if (bp.kind === 'rest' || bp.kind === 'restWithNote') {
             // 音符内部のゲートオフ(q<n>による打ち切り)。usesVr時は@vrを尊重できる
             // 専用オペコードを使う(素のOP_RESTは独立したr休符専用、ファイル冒頭コメント参照)
-            bytes.push(usesVr ? OP_GATE_OFF_VR : OP_REST);
+            if (usesVr) {
+              bytes.push(OP_GATE_OFF_VR);
+              pushLength(bytes, spanLen);
+            } else if (spanLen >= 1 && spanLen <= 0xff && spanLen === stickyRestLen) {
+              bytes.push(OP_REST_SAME);
+            } else {
+              bytes.push(OP_REST);
+              pushLength(bytes, spanLen);
+              stickyRestLen = Math.min(0xff, Math.max(0, Math.round(spanLen)));
+            }
           } else {
-            const nb = Math.max(0, Math.min(NOTE_MAX, Math.round(bp.noteNumber)));
             bytes.push(OP_PITCH_BREAK, nb);
+            pushLength(bytes, spanLen);
           }
         }
-        pushLength(bytes, seg.durationFrames - cursor);
       } else {
-        bytes.push(OP_REST);
-        pushLength(bytes, seg.durationFrames);
+        // 独立した休符(r)。ゲートオフのOP_RESTと同じstickyRestLenを共有する
+        // (6502側は同じRD_RESTハンドラ=同じRESTLEN,Xを使うため)
+        const dur = seg.durationFrames;
+        if (dur >= 1 && dur <= 0xff && dur === stickyRestLen) {
+          bytes.push(OP_REST_SAME);
+        } else {
+          bytes.push(OP_REST);
+          pushLength(bytes, dur);
+          stickyRestLen = Math.min(0xff, Math.max(0, Math.round(dur)));
+        }
       }
     }
     flushToneReloadsUpTo(elapsed);
@@ -568,12 +734,16 @@
     const rawEvents = [];
     let i = 0;
     let volume = null, tone = null;
+    // @@<n>(デューティエンベロープ番号、null=固定音色)と@@r<n>(リリース音色、255=OFF)
+    let toneEnv = null, releaseTone = 255, releaseToneDuty = false;
     let noteEnv = null, pitchEnv = null, pitchEnvDelay = 0, portamento = null, vibrato = null;
     let fme7Noise = null, fme7EnvShape = null, fme7EnvPeriod = null;
     let detune = 0;
     let smooth = false;
     let envelopeVr = 255; // @vr<n>(2026-08-13)。255=off
     let envIdx = null; // OP_VOL_ENVで選択中のコンパクトなテーブル番号(nullならプレーン音量)
+    // sticky音長(2026-08-16)。6502側NOTELEN,X/RESTLEN,Xと同じ解釈
+    let stickyNoteLen = 0, stickyRestLen = 0;
 
     while (i < bytes.length) {
       const b = bytes[i]; i++;
@@ -582,7 +752,18 @@
       // RD_VOL/RD_VOLENVがFMEEACTをクリアするのと同じ意味)
       if (b === OP_VOL) { volume = bytes[i] & 0x7f; envIdx = null; fme7EnvShape = null; i++; continue; }
       if (b === OP_VOL_ENV) { envIdx = bytes[i]; fme7EnvShape = null; i++; continue; }
-      if (b === OP_TONE) { tone = bytes[i] & 0x7f; i++; continue; }
+      if (b === OP_TONE) {
+        // bit7=1なら固定音色、0ならデューティエンベロープ番号(toneEnvとして復元する)
+        const tb = bytes[i]; i++;
+        if (tb & 0x80) { tone = tb & 0x7f; toneEnv = null; } else { toneEnv = tb & 0x7f; }
+        continue;
+      }
+      if (b === OP_REL_TONE) {
+        const rb = bytes[i]; i++;
+        releaseTone = rb === 0xff ? 255 : (rb & 0x7f);
+        releaseToneDuty = rb !== 0xff && (rb & 0x80) === 0;
+        continue;
+      }
       if (b === OP_VRC7_TONE_RELOAD) {
         const toneIndex = bytes[i] & 0x7f; i++;
         rawEvents.push({ type: 'vrc7ToneReload', toneIndex });
@@ -630,8 +811,18 @@
         fme7EnvPeriod = bytes[i] | (bytes[i + 1] << 8); i += 2;
         continue;
       }
-      if (b === OP_REST) { const frames = bytes[i]; i++; rawEvents.push({ type: 'rest', frames }); continue; }
+      if (b === OP_REST) { const frames = bytes[i]; i++; stickyRestLen = frames; rawEvents.push({ type: 'rest', frames }); continue; }
+      if (b === OP_REST_SAME) { rawEvents.push({ type: 'rest', frames: stickyRestLen }); continue; }
       if (b === OP_GATE_OFF_VR) { const frames = bytes[i]; i++; rawEvents.push({ type: 'rest', frames, gateOffVr: true }); continue; }
+      if (b === OP_GATE_OFF_VR_SD) {
+        // SD(セルフディレイ)。ゲートオフ(リリースエンベロープ突入)と同時に音程を
+        // 差し替えて打ち直す複合オペコード。次の2バイトが[新ノート番号,フレーム数]
+        const noteNumber = bytes[i];
+        const frames = bytes[i + 1];
+        i += 2;
+        rawEvents.push({ type: 'rest', frames, gateOffVr: true, selfDelayNote: noteNumber });
+        continue;
+      }
       if (b === OP_WAIT) { const frames = bytes[i]; i++; rawEvents.push({ type: 'wait', frames }); continue; }
       if (b === OP_PITCH_BREAK) {
         // タイ(&)による異音程レガート(2026-08-12)。アタックを伴わないので独立した
@@ -642,7 +833,7 @@
         i += 2;
         rawEvents.push({
           type: 'pitchBreak', noteNumber, frames, volume, tone, envIdx,
-          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, smooth, envelopeVr
+          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty
         });
         continue;
       }
@@ -654,15 +845,25 @@
         const frames = bytes[i]; i++;
         rawEvents.push({
           type: 'note', noteNumber, frames, volume, tone, envIdx,
-          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, smooth, envelopeVr,
+          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty,
           psGlide: true
         });
         continue;
       }
+      // 1バイト形式の音符(sticky音長、2026-08-16): ノート番号=b-NOTE_IMPLICIT_BASE、
+      // 音長は直前の明示音符と同じ
+      if (b >= NOTE_IMPLICIT_BASE && b <= NOTE_IMPLICIT_BASE + NOTE_IMPLICIT_MAX) {
+        rawEvents.push({
+          type: 'note', noteNumber: b - NOTE_IMPLICIT_BASE, frames: stickyNoteLen, volume, tone, envIdx,
+          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty
+        });
+        continue;
+      }
       const frames = bytes[i]; i++;
+      stickyNoteLen = frames;
       rawEvents.push({
         type: 'note', noteNumber: b, frames, volume, tone, envIdx,
-        noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, smooth, envelopeVr
+        noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty
       });
     }
 
@@ -699,12 +900,18 @@
       // この2バイト目/4バイト目に重なると、そこでバンクを分割してしまい6502側が
       // パラメータバイトをオペコードとして誤読する重大なサイレント破損バグだった。
       // OP_PITCH_BREAK(タイの異音程レガート)も同じく2バイトパラメータなので合わせて追加
-      if (b === OP_PITCH_ENV || b === OP_PITCH_BREAK || b === OP_PITCH_SHIFT_NOTE) { i += 2; continue; }
+      // OP_GATE_OFF_VR_SD(SD、2026-08-15)も[新ノート番号,フレーム数]の2バイトパラメータ
+      if (b === OP_PITCH_ENV || b === OP_PITCH_BREAK || b === OP_PITCH_SHIFT_NOTE ||
+          b === OP_GATE_OFF_VR_SD) { i += 2; continue; }
       if (b === OP_DETUNE) { i += 2; continue; }
       // OP_RAW_WRITE(y、2026-08-13)は[アドレス下位,アドレス上位,値]の3バイトパラメータ
       if (b === OP_RAW_WRITE) { i += 3; continue; }
-      // OP_VOL/OP_TONE/OP_NOTE_ENV/OP_VIBRATO/OP_FME7_NOISE/OP_SMOOTH/
-      // OP_REST/OP_WAIT/音符バイト は、いずれも直後1バイトのパラメータを持つ
+      // sticky音長の1バイト形式(2026-08-16): 音符(0x76-0xE1)とOP_REST_SAME(0xE2)は
+      // パラメータ無しの1バイトコマンド
+      if (b === OP_REST_SAME ||
+          (b >= NOTE_IMPLICIT_BASE && b <= NOTE_IMPLICIT_BASE + NOTE_IMPLICIT_MAX)) { continue; }
+      // OP_VOL/OP_TONE/OP_REL_TONE/OP_NOTE_ENV/OP_VIBRATO/OP_FME7_NOISE/OP_SMOOTH/
+      // OP_REST/OP_WAIT/明示形式の音符バイト は、いずれも直後1バイトのパラメータを持つ
       i += 1;
     }
     return offsets;

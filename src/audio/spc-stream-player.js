@@ -58,7 +58,7 @@
       // 旧テーブルの減衰を補償していたゲイン 3.0 では音割れ(クリップ)する。2.0 に下げて
       // 旧来と同等のラウドネスを保ちつつピークを 1.0 未満に収める。
       this.gainNode.gain.value = 2.0;
-      this.gainNode.connect(ctx.destination);
+      this.gainNode.connect(MML.Audio.getMasterGain(ctx));
 
       // ScriptProcessorNode
       this.node = ctx.createScriptProcessor(BUFFER_SIZE, 0, 1);
@@ -221,7 +221,7 @@
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
       this.gainNode.gain.value = 2.0;
-      this.gainNode.connect(this.audioCtx.destination);
+      this.gainNode.connect(MML.Audio.getMasterGain(this.audioCtx));
       // VOL_L/VOL_R($x2/$x3)を反映するため2ch(ステレオ)出力にする
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 2);
       this.node.connect(this.gainNode);
@@ -239,6 +239,7 @@
       const base = new MML.Emu.SpcPlayer(this.spcBytes);
       this.dsp = base.dsp;
       if (this._lastMuted !== undefined) this.dsp.mutedVoices = this._lastMuted;
+      if (this._lastVoiceVol) this.dsp.voiceVol = this._lastVoiceVol.slice();
     }
 
     // frameLog: MML.SPC2MML.captureAsyncのonProgressが渡すframeLogそのもの(進行中配列への
@@ -373,6 +374,14 @@
       if (mute === undefined || mute === null) return;
       this._lastMuted = mute; // _buildChips()(シーク等でdspを作り直すたび)に再適用するため保持
       if (this.dsp) this.dsp.mutedVoices = mute;
+    }
+
+    // volume: ボイスごとの音量配列(V0〜V7、値0〜1)。他フォーマットのapplyMuteと違い
+    // SPCのミュートは元々ビットマスクなので、音量もオブジェクト形状ではなく配列で揃える。
+    applyVolume(volume) {
+      if (!volume) return;
+      this._lastVoiceVol = volume;
+      if (this.dsp) this.dsp.voiceVol = volume.slice();
     }
 
     getPosition() {

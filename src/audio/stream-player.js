@@ -15,6 +15,36 @@
   const CPU_CLOCK_NTSC = 1789773;
   const BUFFER_SIZE    = 4096; // ~93ms @44100Hz
 
+  // マスター音量(全フォーマット共通の最終段ゲイン)。各プレイヤーは自分のgainNode/limiterの
+  // 出力先をaudioCtx.destinationへ直接つなぐ代わりにこのノードへつなぐことで、フォーマットを
+  // 問わず1箇所でまとめて音量調整できる(src/ui/keyboard.jsのマスター音量バー参照)。
+  // audioCtxはページ内で使い回される(main.js: `if (!audioCtx) audioCtx = new AudioContext()`)が、
+  // 念のためWeakMapでインスタンスごとにキャッシュする(audioCtxが再生成された場合も安全)。
+  // 0〜1のみ(減衰専用)にしておけば、各プレイヤーのリミッタで既に抑えたピークを再び
+  // 押し上げてクリップさせる心配がない。
+  // src/ui/keyboard.js のマスター音量バーと同じキー(値は0〜1)。生成タイミングに
+  // 依存せず常に直近の保存値から始まるよう、ノード新規作成時にここで読む。
+  const MASTER_VOLUME_STORAGE_KEY = 'mml_masterVolume';
+  function loadMasterVolume() {
+    try {
+      const raw = parseFloat(localStorage.getItem(MASTER_VOLUME_STORAGE_KEY));
+      if (Number.isFinite(raw)) return Math.max(0, Math.min(1, raw));
+    } catch (e) { /* ignore */ }
+    return 1;
+  }
+  const masterGainNodes = new WeakMap();
+  function getMasterGain(audioCtx) {
+    let node = masterGainNodes.get(audioCtx);
+    if (!node) {
+      node = audioCtx.createGain();
+      node.gain.value = loadMasterVolume();
+      node.connect(audioCtx.destination);
+      masterGainNodes.set(audioCtx, node);
+    }
+    return node;
+  }
+  MML.Audio.getMasterGain = getMasterGain;
+
   // 無音自動送り(NsfReplayStreamPlayer)用。SILENCE_SEC秒連続でほぼ無音(|y|<SILENCE_EPS)の
   // 出力が続いたらonSilenceTimeoutを一度だけ呼ぶ(main.js playNsfStream参照)。バックグラウンド
   // キャプチャ未到達によるスタール出力(_isFrameReady()==false)はここに含めない
@@ -122,10 +152,14 @@
 
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 3.0;
+      // ★2026-08 NSF実ファイル再生(NsfReplayStreamPlayer)と同じ音量バランスに揃える
+      // (ユーザー要望: MML作曲プレビューはNSF実ファイル再生と同じ2A03+拡張音源チップを
+      // 使っており、聴感上も同じ音量であるべき。NsfReplayStreamPlayer冒頭コメント参照の
+      // 実測RMS校正結果をそのまま流用する。旧値3.0は単一拡張音源チャンネル基準の値)。
+      this.gainNode.gain.value = 1.56;
       this.limiter = createLimiter(this.audioCtx);
       this.gainNode.connect(this.limiter);
-      this.limiter.connect(this.audioCtx.destination);
+      this.limiter.connect(getMasterGain(this.audioCtx));
 
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
       this.node.connect(this.gainNode);
@@ -315,10 +349,13 @@
 
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 3.0;
+      // ★2026-08 SPCを基準に全フォーマットの体感音量を実測揃え(RMS計測、他4フォーマットの
+      // 同種コメント参照)。3.0(旧値)は単一拡張音源前提でNSFが他フォーマットよりだいぶ
+      // 大きく聴こえていた。
+      this.gainNode.gain.value = 1.56;
       this.limiter = createLimiter(this.audioCtx);
       this.gainNode.connect(this.limiter);
-      this.limiter.connect(this.audioCtx.destination);
+      this.limiter.connect(getMasterGain(this.audioCtx));
 
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
       this.node.connect(this.gainNode);
@@ -462,6 +499,10 @@
   // mute配列をライブ書き換え)がNSF実ファイルでもそのまま使える。
   // CPUを持たないため、曲送り連打時などにNsfStreamPlayer+先読みキャプチャの「2本の6502
   // エミュレーションが同時に走ってCPUを食い合う」問題も構造的に起きない。
+  // ★2026-08 SPCを基準に全フォーマットの体感音量を実測(RMS)揃え: 各フォーマットの
+  // 実ファイルを数本、実際のチップミックス(gain適用前の生波形)でRMSを計測し、
+  // SPC(gain 2.0時点の実効音量)に一致するようgainを再計算した。3.0(旧値)は単一
+  // 拡張音源チャンネル基準の値で、NSFは他フォーマットよりだいぶ大きく聴こえていた。
   class NsfReplayStreamPlayer {
     constructor(audioCtx) {
       this.audioCtx       = audioCtx;
@@ -490,17 +531,27 @@
       this.isPlaying       = false;
       this.onEnded         = null;
       this.onSilenceTimeout = null;
-      this._silentSamples  = 0;
-      this._silenceFired   = false;
+      // 無音自動送り用の先読みスキャン状態(scanSilenceStep/_resetScan参照)。
+      // 実再生用のbus/apuとは別に、使い捨てのチップインスタンス(_scanBus/_scanApu)で
+      // writeLogを先回り再生し、実際に無音が来るより前に検出できるようにする。
+      this._silenceFired    = false;   // このロードで既にonSilenceTimeoutを発火済みか
+      this._silenceScanFrame = -1;     // 先読みで見つかった無音区間の開始フレーム(-1=未検出)
+      this._scanDone         = false;  // 曲末までスキャンし終えた(無音は無かった)
+      this._scanBus = null; this._scanApu = null;
+      this._scanFrame = -1;
+      this._scanSongFramePos = 0;
+      this._scanCycleAccum = 0;
+      this._scanDcPrevX = 0; this._scanDcPrevY = 0;
+      this._scanSilentRun = 0;
       this._createNode();
     }
 
     _createNode() {
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 3.0;
+      this.gainNode.gain.value = 1.56;
       this.limiter = createLimiter(this.audioCtx);
       this.gainNode.connect(this.limiter);
-      this.limiter.connect(this.audioCtx.destination);
+      this.limiter.connect(getMasterGain(this.audioCtx));
 
       this.node = this.audioCtx.createScriptProcessor(BUFFER_SIZE, 0, 1);
       this.node.connect(this.gainNode);
@@ -525,6 +576,8 @@
       // インスタンスのmuteは既定で全解除状態のため)。直近に適用されたミュート設定を
       // 再適用して、シーク後にチャンネルが勝手にミュート解除されないようにする。
       if (this._lastMute) this.applyMute(this._lastMute);
+      // ch別音量(vol)も同じ理由で再適用が必要(applyMuteと同じ流儀)
+      if (this._lastVolume) this.applyVolume(this._lastVolume);
     }
 
     // ライブ鍵盤モニタ用のbus.onWriteフックを設定する。_buildChips()(load/seek/stop時に
@@ -557,9 +610,8 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
       if (mute) this.applyMute(mute);
+      this._resetScan(0);
     }
 
     _isFrameReady(f) {
@@ -574,6 +626,105 @@
       // スナップショットで(位相バイトを除き)上書きして正しい状態に補正する
       if (this.n163Snapshots && this.bus.expansion.n163) {
         applyN163RamSnapshot(this.bus.expansion.n163, this.n163Snapshots[f]);
+      }
+    }
+
+    // ===== 無音自動送り: 先読みスキャン(scanSilenceStep)=====
+    // 実再生用のbus/apuとは別の使い捨てチップインスタンスを用意し、writeLogを
+    // 実再生より先回りして音声合成(clock+mixSample)だけ行うことで、実際にその
+    // 無音区間を聴く前にSILENCE_SEC秒以上の無音が来ることを検出する。
+    _scanBuildChips() {
+      this._scanBus = new MML.Emu.NsfBus(this.busOpt);
+      this._scanApu = new MML.Emu.APU2A03(this._scanBus);
+      this._scanBus.setApu(this._scanApu);
+      for (const w of this.initWrites) this._scanBus.write(w.addr, w.value);
+      // ミュート中のchは実際に聴こえないので、スキャンにも同じミュート設定を反映する
+      // (実再生と無音判定基準を揃える。_lastMuteはapplyMute()参照)。
+      if (this._lastMute) {
+        if (this._lastMute.apu) MML.Emu.applyMute(this._scanApu.mute, this._lastMute.apu);
+        if (this._lastMute.expansion) {
+          for (const [name, chip] of Object.entries(this._scanBus.expansion)) {
+            if (this._lastMute.expansion[name]) MML.Emu.applyMute(chip.mute, this._lastMute.expansion[name]);
+          }
+        }
+      }
+      // ch別音量も無音判定基準に含めるため、ミュートと同様スキャン側にも反映する
+      if (this._lastVolume) {
+        if (this._lastVolume.apu) MML.Emu.applyVolume(this._scanApu.vol, this._lastVolume.apu);
+        if (this._lastVolume.expansion) {
+          for (const [name, chip] of Object.entries(this._scanBus.expansion)) {
+            if (this._lastVolume.expansion[name]) MML.Emu.applyVolume(chip.vol, this._lastVolume.expansion[name]);
+          }
+        }
+      }
+    }
+
+    _scanApplyFrame(f) {
+      this._scanFrame = f;
+      const writes = this.writeLog[f];
+      if (writes) for (const w of writes) this._scanBus.write(w.addr, w.value);
+      if (this.n163Snapshots && this._scanBus.expansion.n163) {
+        applyN163RamSnapshot(this._scanBus.expansion.n163, this.n163Snapshots[f]);
+      }
+    }
+
+    // fromFrame(実再生の現在地に相当)からスキャンをやり直す。load/stop/seekから呼ぶ。
+    _resetScan(fromFrame) {
+      if (!this.busOpt) return;
+      this._scanBuildChips();
+      this._scanCycleAccum = 0;
+      this._scanDcPrevX = this._scanDcPrevY = 0;
+      this._scanSilentRun = 0;
+      this._silenceScanFrame = -1;
+      this._silenceFired = false;
+      this._scanDone = false;
+      this._scanFrame = -1;
+      const wl = this.writeLog || [];
+      let f = 0;
+      for (; f <= fromFrame; f++) {
+        if (!wl[f]) break; // 先読みキャプチャがまだここまで届いていない
+        this._scanApplyFrame(f);
+      }
+      this._scanSongFramePos = Math.min(f, fromFrame + 1);
+    }
+
+    // budgetSongSeconds分(曲内の時間、実時間ではない)だけスキャンを進める。
+    // main.jsのmonitorLoop()(rAF、~60fps)から毎フレーム少しずつ呼ばれる想定。
+    // 曲末に達する/writeLogの先読みがまだ届いていない/既に無音区間を発見済み、の
+    // いずれかで自動的に止まる(呼び続けても無駄な仕事はしない)。
+    scanSilenceStep(budgetSongSeconds) {
+      if (this._scanDone || this._silenceScanFrame >= 0 || !this._scanBus) return;
+      const sr = this.audioCtx.sampleRate;
+      const budgetSamples = Math.max(1, Math.round(budgetSongSeconds * sr));
+      for (let i = 0; i < budgetSamples; i++) {
+        const nextSongFramePos = this._scanSongFramePos + (this.frameRate / sr);
+        const f = Math.floor(nextSongFramePos);
+        if (f >= this.totalFrames) { this._scanDone = true; return; }
+        if (!this._isFrameReady(f)) return; // 先読みキャプチャがここまでまだ届いていない
+        this._scanSongFramePos = nextSongFramePos;
+        if (f !== this._scanFrame) this._scanApplyFrame(f);
+
+        this._scanCycleAccum += CPU_CLOCK_NTSC / sr;
+        while (this._scanCycleAccum >= 1) {
+          this._scanApu.clock();
+          for (const name in this._scanBus.expansion) this._scanBus.expansion[name].clock();
+          this._scanCycleAccum -= 1;
+        }
+        let raw = this._scanApu.mixSample();
+        for (const name in this._scanBus.expansion) raw += this._scanBus.expansion[name].mixSample();
+        const y = raw - this._scanDcPrevX + 0.999 * this._scanDcPrevY;
+        this._scanDcPrevX = raw; this._scanDcPrevY = y;
+
+        if (Math.abs(y) < SILENCE_EPS) {
+          this._scanSilentRun++;
+          if (this._scanSilentRun >= sr * SILENCE_SEC) {
+            // 無音区間の開始フレーム = 現在地からSILENCE_SEC秒ぶん遡った地点
+            this._silenceScanFrame = Math.max(0, Math.floor(this._scanSongFramePos - SILENCE_SEC * this.frameRate));
+            return;
+          }
+        } else {
+          this._scanSilentRun = 0;
+        }
       }
     }
 
@@ -614,15 +765,12 @@
         this.dcPrevX = raw; this.dcPrevY = y;
         out[i] = y;
         this.samplePos++;
-        if (Math.abs(y) < SILENCE_EPS) {
-          this._silentSamples++;
-          if (!this._silenceFired && this._silentSamples >= sr * SILENCE_SEC) {
-            this._silenceFired = true;
-            if (this.onSilenceTimeout) this.onSilenceTimeout();
-          }
-        } else {
-          this._silentSamples = 0;
-          this._silenceFired  = false;
+        // 先読みスキャン(scanSilenceStep)が見つけておいた無音区間の開始フレームに
+        // 実再生が到達したら通知する。実際に10秒待つ必要はない(既に先読みで
+        // SILENCE_SEC秒以上無音が続くと確認済みのため)。
+        if (this._silenceScanFrame >= 0 && !this._silenceFired && f >= this._silenceScanFrame) {
+          this._silenceFired = true;
+          if (this.onSilenceTimeout) this.onSilenceTimeout();
         }
       }
     }
@@ -638,8 +786,7 @@
       this._songFramePos = 0;
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
+      this._resetScan(0);
     }
 
     setSpeed(factor) { this.speedFactor = factor; }
@@ -677,8 +824,7 @@
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevX = this.dcPrevY = 0;
-      this._silentSamples = 0;
-      this._silenceFired  = false;
+      this._resetScan(targetFrame);
     }
 
     applyMute(mute) {
@@ -691,6 +837,24 @@
           if (mute.expansion[name]) MML.Emu.applyMute(chip.mute, mute.expansion[name]);
         }
       }
+      // 再生中にミュートを切り替えた場合、無音先読みスキャンも現在地からやり直す
+      // (ミュート状態が無音判定の基準に含まれるため、古いスキャン結果は無効になりうる)
+      if (this.busOpt) this._resetScan(Math.max(0, this.currentFrame));
+    }
+
+    // volume: getMuteConfig()と同じ{apu:{},expansion:{}}形状だが値は0〜1(applyMuteの
+    // 真偽値と違い数値)。keyboardDisplayのch別音量バー(src/ui/keyboard.js)用。
+    applyVolume(volume) {
+      if (!volume) return;
+      this._lastVolume = volume; // _buildChips()(シーク等でチップを作り直すたび)に再適用するため保持
+      if (!this.apu) return;
+      if (volume.apu) MML.Emu.applyVolume(this.apu.vol, volume.apu);
+      if (volume.expansion) {
+        for (const [name, chip] of Object.entries(this.bus.expansion)) {
+          if (volume.expansion[name]) MML.Emu.applyVolume(chip.vol, volume.expansion[name]);
+        }
+      }
+      if (this.busOpt) this._resetScan(Math.max(0, this.currentFrame));
     }
 
     getPosition() {
@@ -719,6 +883,8 @@
       // メモリ不足で落ちるため、破棄時に明示的に参照を切る。
       this.bus           = null;
       this.apu           = null;
+      this._scanBus       = null;
+      this._scanApu       = null;
       this.writeLog       = null;
       this.initWrites     = [];
       this.n163Snapshots  = null;

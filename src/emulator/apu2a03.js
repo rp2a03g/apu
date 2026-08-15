@@ -410,6 +410,8 @@
 
       // チャンネルごとのミュート設定（再生ON/OFF）
       this.mute = { pulse1: false, pulse2: false, triangle: false, noise: false, dmc: false };
+      // チャンネルごとの音量(0〜1、既定1=無調整)。鍵盤表示のch別音量バー用(src/ui/keyboard.js)
+      this.vol = { pulse1: 1, pulse2: 1, triangle: 1, noise: 1, dmc: 1 };
     }
 
     reset() {
@@ -525,11 +527,11 @@
      * 現在の出力レベルを 0.0〜1.0 で取得する（NESの非線形ミキサー近似）
      */
     mixSample() {
-      const p1 = this.mute.pulse1 ? 0 : this.pulse1.output();
-      const p2 = this.mute.pulse2 ? 0 : this.pulse2.output();
-      const tri = this.mute.triangle ? 0 : this.triangle.output();
-      const noi = this.mute.noise ? 0 : this.noise.output();
-      const dmc = this.mute.dmc ? 0 : this.dmc.output();
+      const p1 = this.mute.pulse1 ? 0 : this.pulse1.output() * this.vol.pulse1;
+      const p2 = this.mute.pulse2 ? 0 : this.pulse2.output() * this.vol.pulse2;
+      const tri = this.mute.triangle ? 0 : this.triangle.output() * this.vol.triangle;
+      const noi = this.mute.noise ? 0 : this.noise.output() * this.vol.noise;
+      const dmc = this.mute.dmc ? 0 : this.dmc.output() * this.vol.dmc;
 
       let pulseOut = 0;
       if (p1 + p2 > 0) pulseOut = 95.88 / (8128 / (p1 + p2) + 100);

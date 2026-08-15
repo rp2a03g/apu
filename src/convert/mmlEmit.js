@@ -19,8 +19,10 @@
  *                   FME7/PSGはミキサー指定が @<n> (0=ミュート/1=トーン/2=ノイズ/
  *                   3=トーン+ノイズ)なので hasInstrument と併用する
  *   hasPitchMod  … true の場合、pitchEp が設定されているイベントは EP<N>(未設定なら
- *                   EPOF)を出す(D<n>と同型の独立プレフィックスコマンド。
- *                   src/convert/pitch.js PitchEnvelopeRegistry参照)
+ *                   EPOF)、portamento が設定されているイベントは PT<target>,<duration>
+ *                   (未設定なら PTOF)、vibrato が設定されているイベントは MP<N>
+ *                   (未設定なら MPOF)を出す(いずれもD<n>と同型の独立プレフィックス
+ *                   コマンドで排他的。src/convert/pitch.js PitchEnvelopeRegistry参照)
  *   (v<N>/@v<N>/S<N>の切替時は値が前回と同じ番号でも必ずトークンを出し直す。
  *    コンパイラ側は明示的なv<n>でstate.envelopeV/fme7EnvShapeをnullにクリアするため)
  *   totalFrames  … 末尾休符を補うための曲全体のフレーム数
@@ -137,6 +139,19 @@
             state.curPitchEpDelay = epDelay;
           }
         }
+        // ビブラートコマンド(周期的振動の軽量な階段状LFO表現、DESIGN-PITCH.md
+        // 別プロジェクトB、gate解除は2026-08-15)。D<n>/EP<n>と全く同じ「毎回前回状態との
+        // 差分を見て明示的にMPOFへ戻す」設計の独立プレフィックスコマンド。
+        // pitchReg.assign()はEP/PT/MPのいずれか1つだけを返す(検出結果は同じpitchMod
+        // 由来の排他的な出力形式の選択)ため、対応チャンネルの範囲も同じhasPitchModフラグを
+        // 共有する。
+        if (flags.hasPitchMod) {
+          const mpVal = (ev.vibrato != null) ? ev.vibrato : null;
+          if (mpVal !== state.curVibrato) {
+            emit(mpVal === null ? 'MPOF' : `MP${mpVal}`);
+            state.curVibrato = mpVal;
+          }
+        }
         // ノートエンベロープ(高速アルペジオ、2026-08-14)。D<n>/EP<n>と同じく未指定
         // イベントはoff扱いにし、hasNoteEnv指定チャンネルでは毎回前回状態との差分を
         // 見て明示的にENOFへ戻す(直前の音符のアルペジオを引きずらないため)。
@@ -154,8 +169,8 @@
         }
         // ポルタメントコマンド(単調ランプの軽量な直線グライド表現、DESIGN-PITCH.md
         // 別プロジェクトC)。D<n>/EP<n>と全く同じ「毎回前回状態との差分を見て明示的に
-        // PTOFへ戻す」設計の独立プレフィックスコマンド。pitchReg.assign()はEPかPTの
-        // どちらか一方だけを返す(検出結果は同じpitchMod由来の排他的な出力形式の選択)
+        // PTOFへ戻す」設計の独立プレフィックスコマンド。pitchReg.assign()はEP/PT/MPの
+        // いずれか1つだけを返す(検出結果は同じpitchMod由来の排他的な出力形式の選択)
         // ため、対応チャンネルの範囲も同じhasPitchModフラグを共有する。
         if (flags.hasPitchMod) {
           const pt = ev.portamento || null;
@@ -233,7 +248,7 @@
       curOct: -1, curVol: -1, curInst: -1, curEnvV: -1, curEnvVr: -1,
       curFme7Shape: -1, curFme7Period: -1, curFme7Noise: -1, curVolMode: null, durCarry: 0,
       curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, curPitchEp: null, curPitchEpDelay: 0,
-      curNoteEnv: null,
+      curNoteEnv: null, curVibrato: null,
       curPortamentoTarget: null, curPortamentoDuration: 0, curPortamentoDelay: 0,
       lastWasNote: false, hasEmitted: false
     };

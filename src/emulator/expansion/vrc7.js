@@ -314,7 +314,7 @@
   }
 
   class VRC7Audio {
-    constructor() { this._init(); this.mute = new Array(NUM_CH).fill(false); }
+    constructor() { this._init(); this.mute = new Array(NUM_CH).fill(false); this.vol = new Array(NUM_CH).fill(1); }
     _init() {
       this.addr = 0;
       this.reg = new Uint8Array(0x40);
@@ -397,7 +397,7 @@
         if (c.car.eg_mode === FINISH) continue;
         const fm = c.calcModulator(this.lfo_am, this.lfo_pm);
         const out = c.calcCarrier(fm, this.lfo_am, this.lfo_pm);
-        if (!this.mute[i]) inst += out;
+        if (!this.mute[i]) inst += out * this.vol[i];
       }
       return inst; // ±(1023*6)
     }

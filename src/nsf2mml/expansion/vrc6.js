@@ -125,10 +125,12 @@
       const idx = envReg ? envReg.assign(volSeq) : null;
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
     }
+    // VRC6パルス/サウトゥースは周期レジスタ(値が下がるほど音程が上がる)なので
+    // directionUp=false(src/convert/pitch.js fitVibrato参照)。
     function toPitchFields(ev) {
       if (!pitchReg || ev.rawFreq == null) return {};
       const fields = {};
-      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq, false));
       return fields;
     }
     function toNoteEnvFields(ev) {

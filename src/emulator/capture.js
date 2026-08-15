@@ -29,6 +29,23 @@
     }
   };
 
+  /**
+   * チャンネルごとの音量(0〜1)設定をチップの vol プロパティへ反映する。applyMuteと同じ
+   * key/index一致方式(未指定のチャンネルは既存値=通常1のまま変更しない)。
+   */
+  Emu.applyVolume = function (target, source) {
+    if (!target || !source) return;
+    if (Array.isArray(target)) {
+      for (let i = 0; i < target.length; i++) {
+        if (source[i] !== undefined) target[i] = Math.max(0, Math.min(1, source[i]));
+      }
+    } else {
+      for (const k of Object.keys(target)) {
+        if (source[k] !== undefined) target[k] = Math.max(0, Math.min(1, source[k]));
+      }
+    }
+  };
+
   // NESの非線形ミキサー出力(DCオフセット付き)をAC成分に変換するDCブロッカー
   Emu.dcBlock = function (samples) {
     const out = new Float32Array(samples.length);

@@ -588,10 +588,13 @@
     // (DESIGN-PITCH.md Phase 1)。基準点はev.rawFreqと同じ生成元(ev.pitchSeq[0])
     // なのでD<n>(detectChorusDetuneが後段で設定)とcompiler.js側で正しく合成される。
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
+    // 2A03パルス/三角波は周期レジスタ(値が下がるほど音程が上がる)なのでdirectionUp=false
+    // (compiler.jsのperiodFnIncreasing→vibratoSequence呼び出しと同じ規則、src/convert/pitch.js
+    // fitVibrato参照)。
     function toPitchFields(ev) {
       if (ev.rawFreq == null || !ev.pitchSeq) return {};
       const fields = {};
-      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq, false));
       return fields;
     }
 

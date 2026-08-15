@@ -22,6 +22,7 @@
     'サブウィンドウ:': 'Windows:',
     'DPCMコンバータ': 'DPCM Converter',
     'サウンドファイルを開く': 'Open Sound File',
+    'ここにドロップしてサウンドファイルを開く': 'Drop here to open a sound file',
     'レジスタ/メモリモニタ': 'Register / Memory Monitor',
     'レジスタ/メモリモニタ (リアルタイム)': 'Register / Memory Monitor (live)',
     '鍵盤表示': 'Keyboard',
@@ -83,8 +84,8 @@
     '再生準備に失敗しました(内部エラー): {msg}': 'Failed to prepare playback (internal error): {msg}',
     'NSF書き出し完了: {bytes}バイト({banks}バンク、うち曲データ {songBanks}バンク)':
       'NSF exported: {bytes} bytes ({banks} banks, {songBanks} of them song data)',
-    '注意: 拡張音源({chips})は現状のNSF書き出しでは未対応のため、該当チャンネルは無音になります(VRC6/MMC5/FME7は対応済み)。':
-      'Note: NSF export does not support {chips} yet, so those channels will be silent (VRC6/MMC5/FME7 are supported).',
+    '注意: 拡張音源({chips})は現状のNSF書き出しでは未対応のため、該当チャンネルは無音になります(VRC6/MMC5/FME7/FDS/N163/VRC7は対応済み)。':
+      'Note: NSF export does not support {chips} yet, so those channels will be silent (VRC6/MMC5/FME7/FDS/N163/VRC7 are supported).',
     '再生準備完了 (テンポ {tempo}, 拡張音源: {chips})': 'Ready to play (tempo {tempo}, expansion: {chips})',
     '総フレーム数: {n}': 'Total frames  : {n}',
     '総再生時間  : {time}': 'Total duration: {time}',
@@ -92,8 +93,6 @@
     'なし (2A03のみ)': 'None (2A03 only)',
 
     // ---- サウンドファイルウィンドウ (共通) ----
-    'NSF/SPC/KSS/GBSファイルを開くと、ここに再生画面が表示されます。（今後 HES/VGM 対応予定）':
-      'Open an NSF/SPC/KSS/GBS file and its player will appear here. (HES/VGM planned)',
     '曲番号': 'Track',
     '再生時間(秒)': 'Length (sec)',
     '💾 WAV書き出し': '💾 Export WAV',
@@ -256,6 +255,13 @@
 
     // ---- コア層のエラー文言 ----
     'ループ終端 "]" が見つかりません': 'Missing loop end "]"',
+    'SD/SDOF/SDQR は三角波・DPCMチャンネルでは使用できません':
+      'SD/SDOF/SDQR cannot be used on the triangle or DPCM channels',
+    'SD の値は 0〜{max} で指定してください ({v})': 'SD takes a value from 0 to {max} ({v})',
+    '@@/@@r はこのチャンネルでは使用できません(2A03パルス・VRC6パルス・MMC5パルス・FDS・N163・VRC7のみ)':
+      '@@/@@r cannot be used on this channel (2A03 pulse, VRC6 pulse, MMC5 pulse, FDS, N163 and VRC7 only)',
+    '@@r はN163では未対応です(波形の共有RAM配置が音符単位のため)':
+      '@@r is not supported on N163 (its waveforms are placed in shared RAM per note)',
     'タプレット終端 "}" が見つかりません': 'Missing tuplet end "}"',
     '未対応のヘッダ指示子です: "#{name}"': 'Unsupported header directive: "#{name}"',
     '@OT{index} の値の数が不足しています(24個必要)': '@OT{index} has too few values (24 required)',
@@ -274,7 +280,9 @@
     'ピアノロール': 'Piano roll',
     'セント偏差': 'Cent deviation',
     '速度': 'Speed',
+    '音量': 'Vol',
     '{ch} ミュート': 'Mute {ch}',
+    '{ch} 音量': '{ch} Volume',
     'もっと選ぶ...': 'More colors...',
     '既定色に戻す': 'Reset to default color',
     '📋コピー': '📋 Copy',
@@ -292,5 +300,40 @@
     'エラー:': 'Error:',
     '再生終了': 'Finished',
     '再生中...': 'Playing...',
+
+    // ---- エディタ設定(フォント/カラー、src/ui/editorSettings.js) ----
+    '設定': 'Settings',
+    '既定': 'Default',
+    'カラー設定': 'Color Settings',
+    'プリセット': 'Presets',
+    'カスタム': 'Custom',
+    '全体の配色': 'General Colors',
+    'MMLエディタの配色': 'MML Editor Colors',
+    '既定値に戻す': 'Reset to Defaults',
+    '既定(ダーク)': 'Default (Dark)',
+    'ライト': 'Light',
+    '高コントラスト': 'High Contrast',
+    'ページ背景': 'Page Background',
+    'パネル背景': 'Panel Background',
+    'エディタ背景': 'Editor Background',
+    '境界線': 'Border',
+    '文字': 'Text',
+    'アクセント': 'Accent',
+    'エラー': 'Error',
+    'ヘッダー系(#...)': 'Headers (#...)',
+    'トラックヘッダー': 'Track Header',
+    '音階と音長': 'Notes & Note Length',
+    '休符': 'Rest',
+    '音長系': 'Note-Length Commands',
+    '音量系': 'Volume Commands',
+    '音程系': 'Pitch Commands',
+    '演奏制御系': 'Performance Commands',
+    '特殊': 'Special',
+    'エンベロープデータ定義': 'Envelope Data Definitions',
+    '音色データ定義': 'Tone Data Definitions',
+    'コメント': 'Comment',
+    'MSゴシック': 'MS Gothic',
+    '游ゴシック UI': 'Yu Gothic UI',
+    'monospace(総称)': 'monospace (generic)',
   });
 })(typeof window !== 'undefined' ? window : globalThis);

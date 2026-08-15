@@ -179,6 +179,7 @@
       this.selected = 0;   // $0800: 操作対象ch(bit2-0)
       this.balance = 0xFF; // $0801: 全体バランス
       this.mute = { ch0: false, ch1: false, ch2: false, ch3: false, ch4: false, ch5: false };
+      this.vol = { ch0: 1, ch1: 1, ch2: 1, ch3: 1, ch4: 1, ch5: 1 };
     }
 
     reset() {
@@ -236,7 +237,7 @@
       for (let i = 0; i < CH_COUNT; i++) {
         if (this.mute['ch' + i]) continue;
         const c = this.ch[i];
-        const raw = c.rawSample() - 16; // 0-31を中心0付近へ(±16相当)
+        const raw = (c.rawSample() - 16) * this.vol['ch' + i]; // 0-31を中心0付近へ(±16相当)
         const { left, right } = c.gainLR(this.balance);
         sumL += raw * left;
         sumR += raw * right;

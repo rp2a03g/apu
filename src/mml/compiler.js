@@ -17,14 +17,16 @@
  *
  * 拡張音源チャンネル (opt.expansions の配列で複数同時指定可。実機ppmck
  * (src/ppmckc/mckc.hの_TRACK_STR/BxxxTRACK定義)と同じ固定優先順位
- * dpcm→fds→vrc7→vrc6→n163→fme7→mmc5で、宣言順に関わらずE以降を
- * 詰めて連続割当てする(未使用チップの枠は消費しない)。実機同様、
- * mmc5だけ大文字を使い切った後の小文字a,bを使う(E-Zの22字+a,bの2字=24字):
- *   dpcm : DPCMサンプル再生 (1ch、フェーズ1.7で実装予定、現状は未実装で無音)
+ * dpcm→fds→vrc7→vrc6→n163→fme7→mmc5で、宣言順に関わらずE以降を割り当てる。
+ * ★未使用チップの枠は「消費しない」のではなく逆に常に消費される(li+=countが
+ * used.has()の判定と無関係に必ず進む、assignExpansionLetters参照): 例えばVRC6のみ
+ * 使う曲でもチャンネル文字は常にM-Oになり、E-L(dpcm/fds/vrc7の枠)はそのまま空く。
+ * 実機同様、mmc5だけ大文字を使い切った後の小文字a,bを使う(E-Zの22字+a,bの2字=24字):
+ *   dpcm : DPCMサンプル再生 (1ch)。@DPCM<n>定義が1つでもあれば自動的に有効化される
  *   fds  : 波形メモリ音源 (1ch)
  *   vrc7 : FM音源 (6ch)
  *   vrc6 : パルス1 パルス2 矩形波(サウ) (3ch)
- *   n163 : 波形音源 (8ch, 16サンプル波形を全ch共有)
+ *   n163 : 波形音源 (8ch, 波形は4の倍数の可変長。src/mml/n163Alloc.jsの共有バッファへ格納)
  *   fme7 : 矩形波A 矩形波B 矩形波C (3ch)
  *   mmc5 : パルス1 パルス2 (2ch)
  * (後方互換: opt.expansion に単一文字列を渡した場合は1要素の配列として扱う)
@@ -48,7 +50,17 @@
  *                  VRC7はfnum/blockの対数的表現のため対象外。EP/MPと全く同じ「生レジスタへの
  *                  加算」空間の値(下記参照)なので、この3つは同時に足し合わされる
  *   @<n>           音色番号 (パルスのデューティ比 = n % 4 / VRC6パルスのデューティ比 = n % 8
- *                  (実機同様8段階) / VRC7の音色番号 = n % 16)
+ *                  (実機同様8段階) / VRC7の音色番号 = n % 16)。実機同様、@@<n>で有効化した
+ *                  デューティエンベロープはこのコマンドで解除される
+ *   @<n>={...}     デューティ(音色)エンベロープ定義(値0-7、"|"でループ位置)。@v<n>の音色版で、
+ *                  1フレーム1ステップでデューティ比が変化する(実機ppmckのgetTone/tone_tbl)
+ *   @@<n>          デューティ(音色)エンベロープの選択(実機の音色バイトbit7=0=自作音色)。
+ *                  対応はデューティ比を持つチップ(2A03パルスA/B・VRC6パルス・MMC5パルス)。
+ *                  波形/音色番号を持つチップ(FDS・N163・VRC7)では@<n>と同じ音色選択になり、
+ *                  VRC7のみ@@<64+n>=OP<n>(ユーザー音色ロード+音色番号0)の別名も使える
+ *   @@r<n>         リリース音色(255=OFF)。ゲートオフの瞬間に音色を<n>へ差し替える
+ *                  (@vrの音色版。実機putReleaseEffectがMCK_SET_TONEを出すのと同じ)。
+ *                  N163だけは波形の共有RAM配置が音符単位のため未対応(エラーで通知する)
  *   &              タイ（直前の音を伸ばす）
  *   L              ループ地点マーカー(パラメータなし)。このチャンネルの再生が末尾まで
  *                  達したとき、Lの位置まで戻って演奏を続ける(実機ppmck同様、曲全体を
@@ -140,7 +152,12 @@
  *   SD<n> / SDOF / SDQR  セルフディレイ(疑似エコー)。@vr(リリースエンベロープ)併用時のみ
  *                    有効で、リリース区間のピッチを<n>個前のノートオンへ差し替える
  *                    (ppmck公式リファレンスの出力例と完全一致することを実測確認済み)。
- *                    SDQRはノートオン履歴(noteHistory)をリセットする
+ *                    リリース区間の先頭は実機同様「ノートオン」として打ち直す。
+ *                    SDQRはノートオン履歴(noteHistory)をリセットする。
+ *                    <n>は0〜8(SELF_DELAY_MAX)、SD255はSDOFと同じ、三角波とDPCMでは
+ *                    使用不可(いずれも実機ppmck ppmckc datamake.c 準拠)。
+ *                    ゲート(q<n>)が音符長いっぱい(既定のq8)だとリリース区間自体が
+ *                    存在しないため何も起きない点も実機と同じ
  *   SM / SMOF        スムース(A/B/C対応)。周期/周波数レジスタの上位バイト(書込みで波形
  *                    位相がリセットされる)を「値が変化した時だけ書く」モードに切り替え、
  *                    同オクターブ内のレガートでクリック音が出るのを防ぐだけの機能
@@ -185,6 +202,10 @@
   const FRAME_RATE_NTSC = 60.0988;
 
   const NOTE_SEMITONES = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
+
+  // SD<n>(セルフディレイ)で遡れるノートオン履歴の最大数。実機ppmck(ppmckc mckc.h の
+  // SELF_DELAY_MAX)と同じ8。0=自分自身の音程、1=1つ前の音程…と数える
+  const SELF_DELAY_MAX = 8;
 
   // 2A03チャンネルのベースアドレス
   const CHANNEL_BASE = { A: 0x4000, B: 0x4004, C: 0x4008, D: 0x400C };
@@ -467,7 +488,13 @@
   // settings: #OCTAVE-REV(>/<を反転)・#GATE-DENOM(qのゲート分母、既定8)などの曲全体設定
   // defaultInstrument: @<n>が一度も書かれていないときの音色番号。FME7だけはこの値が
   // ミキサー指定(0=ミュート)を兼ねるため、ppmck同様に既定を1(トーン)にする必要がある
-  function buildSegments(tokens, initialTempo, errors, settings, defaultInstrument) {
+  // chanCaps: このチャンネルで使えるコマンドの制約(省略時は全て許可)。
+  //   selfDelay=false のチャンネル(三角波・DPCM)ではSD/SDOF/SDQRをエラーにする。
+  //   toneEnv: @@<n>/@@r<n>の意味('duty'=デューティエンベロープ選択、
+  //   'instrument'=音色/波形番号選択、null=このチャンネルでは使用不可)。
+  //   vrc7: VRC7チャンネルなら真(@@<64+n>=OP<n>の別名に使う)
+  function buildSegments(tokens, initialTempo, errors, settings, defaultInstrument, chanCaps) {
+    const caps = chanCaps || { selfDelay: true, toneEnv: 'duty' };
     const cfg = settings || { octaveRev: 0, gateDenom: 8 };
     const state = {
       octave: 4, defaultLength: 4, volume: 15, gate: 8, instrument: defaultInstrument || 0,
@@ -476,7 +503,10 @@
       sweepSpeed: 0, sweepDepth: 0, fme7Noise: null, fme7EnvShape: null, fme7EnvPeriod: 0,
       // selfDelay: SD<n>の<n>(null=SDOF)。smooth: SM(true)/SMOF(false)。
       // pendingPitchShift: PSトークン読み取り直後〜次の音符処理までのワンショットフラグ
-      selfDelay: null, smooth: false, pendingPitchShift: false
+      selfDelay: null, smooth: false, pendingPitchShift: false,
+      // toneEnv: @@<n>で選択中のデューティ(音色)エンベロープ番号(null=未選択=@<n>の
+      // 固定デューティ)。releaseTone: @@r<n>のリリース音色番号(255=OFF)
+      toneEnv: null, releaseTone: 255
     };
     const segments = [];
     // SD(セルフディレイ)用のノートオン履歴(発音順にfreq/noteNumberを積む)。
@@ -561,7 +591,10 @@
           if (idx >= 0) {
             const target = noteHistory[idx];
             const gf = computeGateFrames({ gate: state.gate, gateDenom: cfg.gateDenom, qFrames: state.qFrames }, frames);
-            pitchBreaks = [{ atFrame: gf, freq: target.freq, noteNumber: target.noteNumber }];
+            // attack: 実機ppmckはリリース区間を「ノートオン」として出力する
+            // (putReleaseEffect → putAsm(fp, note))ので、このピッチブレークは
+            // タイ(&)のレガートと違い打ち直しを伴う。writePitchModulation参照
+            pitchBreaks = [{ atFrame: gf, freq: target.freq, noteNumber: target.noteNumber, attack: true }];
           }
         }
 
@@ -590,6 +623,11 @@
           fme7EnvShape: state.fme7EnvShape,
           fme7EnvPeriod: state.fme7EnvPeriod,
           smooth: state.smooth,
+          toneEnv: state.toneEnv,
+          releaseTone: state.releaseTone,
+          // リリース音色の値がデューティエンベロープ番号か固定音色番号かの区別
+          // (NSF書き出しの音色バイトbit7に対応。mckBytecode.js参照)
+          releaseToneDuty: caps.toneEnv === 'duty',
           psGlide,
           pitchBreaks,
           tieNext: false
@@ -614,7 +652,50 @@
         case 'tempo': tempo = tok.value; break;
         case 'transpose': state.transpose = tok.value; break;
         case 'detune': state.detune = tok.value; break;
-        case 'instrument': state.instrument = tok.value; break;
+        // @<n>: 固定の音色指定。実機同様デューティ(音色)エンベロープ@@<n>を解除する
+        // (ppmck internal.h duty_select_part が effect_flag のデューティエンベ有効ビットを
+        // 落とすのと同じ)
+        case 'instrument': state.instrument = tok.value; state.toneEnv = null; break;
+        // @@<n>: 実機ppmckの音色バイトbit7=0(自作音色)。意味はチップによって変わる。
+        //   ・デューティ比を持つチップ(2A03パルスA/B・VRC6パルス・MMC5パルス)
+        //     → @<n>={...}で定義したデューティエンベロープの選択(caps.toneEnv==='duty')
+        //   ・波形/音色番号を持つチップ(FDS・N163・VRC7)
+        //     → そのまま音色(波形)番号の選択。本ツールの@<n>と同じ意味になる
+        //       (caps.toneEnv==='instrument')。VRC7だけは@@<64+n>=OP<n>
+        //       (@OP<n>で定義したユーザー音色をレジスタへロードし、音色番号0=ユーザー音色)
+        //       という別名も実機リファレンスに定義されている
+        case 'toneEnv': {
+          if (caps.toneEnv === 'duty') {
+            state.toneEnv = tok.value;
+          } else if (caps.toneEnv === 'instrument') {
+            if (caps.vrc7 && tok.value >= 64) {
+              immediateWrites.push({ kind: 'vrc7Tone', frame: elapsedFrames, value: tok.value - 64 });
+              state.instrument = 0;
+            } else {
+              state.instrument = tok.value;
+            }
+          } else {
+            errors.push({ message: T('@@/@@r はこのチャンネルでは使用できません(2A03パルス・VRC6パルス・MMC5パルス・FDS・N163・VRC7のみ)') });
+          }
+          break;
+        }
+        // @@r<n>: リリース音色(255=OFF)。ゲートオフの瞬間に音色を差し替える
+        case 'releaseTone': {
+          if (caps.toneEnv == null) {
+            errors.push({ message: T('@@/@@r はこのチャンネルでは使用できません(2A03パルス・VRC6パルス・MMC5パルス・FDS・N163・VRC7のみ)') });
+            break;
+          }
+          // N163だけは音色=波形で、波形本体は共有RAMアロケータ(MML.N163Alloc)が
+          // 「音符の切れ目」単位で配置を決めているため、音符の途中(ゲートオフ)で
+          // 別の波形へ差し替えるにはアロケータ側の対応が要る。黙って無視すると
+          // 「書いたのに効かない」不具合になるので、明示的にエラーで知らせる
+          if (caps.n163 && tok.value !== 255) {
+            errors.push({ message: T('@@r はN163では未対応です(波形の共有RAM配置が音符単位のため)') });
+            break;
+          }
+          state.releaseTone = tok.value;
+          break;
+        }
         case 'envelopeV': state.envelopeV = tok.value; break;
         case 'envelopeVr': state.envelopeVr = tok.value; break;
         case 'vibrato': state.vibrato = tok.value; break;
@@ -671,8 +752,30 @@
         // x<param0>,<param1> はNSF書き出し(6502バイトコード)専用のコマンドで、ブラウザ再生
         // (レジスタログ方式)には対応する概念が無いため意図的に無視する(NSF書き出し実装は別タスク)
         case 'directBytes': break;
-        case 'selfDelay': state.selfDelay = tok.value; break;
-        case 'selfDelayReset': noteHistory.length = 0; break;
+        // SD<n>/SDOF/SDQR(セルフディレイ)。本家ppmck(ppmckc datamake.c)に合わせた制約:
+        //   ・対応トラックは ALLTRACK & ~TRACK(2) & ~DPCMTRACK = 三角波とDPCM以外
+        //   ・SD255はSDOFの別名(_SELF_DELAY_ON で param==255 なら self_delay=-1)
+        //   ・<n>の有効範囲は 0〜SELF_DELAY_MAX(8)。外れると変換エラー
+        case 'selfDelay': {
+          if (!caps.selfDelay) {
+            errors.push({ message: T('SD/SDOF/SDQR は三角波・DPCMチャンネルでは使用できません') });
+            break;
+          }
+          if (tok.value === 255) { state.selfDelay = null; break; }
+          if (tok.value != null && (tok.value < 0 || tok.value > SELF_DELAY_MAX)) {
+            errors.push({ message: T('SD の値は 0〜{max} で指定してください ({v})', { max: SELF_DELAY_MAX, v: tok.value }) });
+            break;
+          }
+          state.selfDelay = tok.value;
+          break;
+        }
+        case 'selfDelayReset':
+          if (!caps.selfDelay) {
+            errors.push({ message: T('SD/SDOF/SDQR は三角波・DPCMチャンネルでは使用できません') });
+            break;
+          }
+          noteHistory.length = 0;
+          break;
         case 'smooth': state.smooth = tok.value; break;
         case 'pitchShift': state.pendingPitchShift = true; break;
         case 'tie': {
@@ -981,6 +1084,15 @@
       const newReg = applyDetune(periodFn(seg.freq), 0, max);
       psSeq = pitchShiftOffsetSequence(oldReg, newReg, dur);
     }
+    // SD(セルフディレイ)のピッチブレークだけは実機ppmckが「ノートオン」として出力する
+    // (ppmckc datamake.c putReleaseEffect → putAsm(fp, note))ため、そのフレームでは
+    // 値が前フレームと同じでも必ず書き、writeFnへ第3引数attack=trueを渡して
+    // 「上位バイト(書込みで位相/カウンタがリセットされる側)の書込み抑止をバイパスして
+    // 打ち直す」よう指示する。タイ(&)のピッチブレーク(attack無し)は従来どおり
+    // アタックを伴わないレガートのまま
+    const attackFrames = (seg.pitchBreaks && seg.pitchBreaks.some(pb => pb.attack))
+      ? new Set(seg.pitchBreaks.filter(pb => pb.attack).map(pb => pb.atFrame))
+      : null;
     let last = null;
     for (let t = 0; t < dur; t++) {
       const { freq: baseFreq, noteNumber: baseNoteNumber } = activePitchAt(seg, t);
@@ -988,11 +1100,19 @@
       const freq = enOffset === 0 ? baseFreq : noteFrequency(baseNoteNumber + enOffset);
       const regOffset = pitchRegisterOffset(seg, envelopes, t, vibSeq, ptSeq, psSeq);
       const value = applyDetune(periodFn(freq), regOffset, max);
-      if (value !== last) {
-        writeFn(startFrame + t, value);
+      const attack = attackFrames != null && attackFrames.has(t);
+      if (value !== last || attack) {
+        writeFn(startFrame + t, value, attack);
         last = value;
       }
     }
+  }
+
+  // writePitchModulationのwriteFnが受け取るattackフラグを、実際に上位バイトを
+  // 書き直す(=打ち直す)かどうかへ変換する。SM(スムース)が有効な音符では実機同様
+  // 上位バイトの書込み自体を抑止するのがSMの役目なので、アタックでも書かない
+  function attackWritesHi(seg, attack) {
+    return !!attack && !seg.smooth;
   }
 
   function newWriteLog(totalFrames) {
@@ -1014,18 +1134,80 @@
     return values[values.length - 1];
   }
 
+  // 音符の音量エンベロープ(@v<n>)とリリースエンベロープ(@vr<n>)のテーブルを解決する。
+  // 全チップ共通(各チップの書き込みハンドラはここで得たvTable/vrTableをそのまま
+  // writeVolumeEnvelopeへ渡す)。★2026-08-15、本家ppmck準拠のため2点修正:
+  //  ・以前は「@vが設定されている音符」に限ってvrTableを引いていたが、実機の
+  //    putReleaseEffect(ppmckc datamake.c)はリリース発動条件に@vの有無を見ない。
+  //    v<n>固定音量の音符でも@vrが効くよう、ゲートON区間の音量を保持し続ける
+  //    1要素テーブルを合成して同じ経路へ載せる(stepEnvelopeは末尾の値を保持する)
+  //  ・本家の@vr<n>は@v<n>定義そのものへの参照(専用の@vr<n>={...}定義構文は本ツール
+  //    独自の拡張)。@vr<n>の定義が無い場合は@v<n>の定義へフォールバックし、
+  //    本家のMML(`@v1={...}` を定義して `@vr1` で参照する書き方)もそのまま読めるようにする
+  function resolveEnvTables(seg, env) {
+    const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
+    const vrTable = seg.envelopeVr !== 255
+      ? ((env.vr && env.vr[seg.envelopeVr]) || env.v[seg.envelopeVr] || null)
+      : null;
+    // デューティ(音色)エンベロープ@@<n>/@@r<n>も、@v/@vrと同じく毎フレームの
+    // 音量レジスタ書込み(デューティは音量と同じレジスタに同居する)で反映するため、
+    // 音量側が固定でもフレーム単位ループへ載せる必要がある
+    const { dutyTable, relDutyTable } = resolveDutyTables(seg, env);
+    if (!vTable && (vrTable || dutyTable || relDutyTable)) {
+      return { vTable: { values: [seg.volume], loop: null }, vrTable };
+    }
+    return { vTable, vrTable };
+  }
+
+  // @@<n>(デューティエンベロープ)/@@r<n>(リリース音色)のテーブルを解決する。
+  // 実機ppmckでは音色バイトのbit7=0が「自作音色=@<n>={...}のテーブル番号」を意味し、
+  // 1フレーム1ステップでデューティ値(0-7)が変化する(@v<n>の音色版)。
+  // @@r<n>はゲートオフの瞬間に音色をそのテーブルへ差し替えるリリース版(255=OFF)。
+  function resolveDutyTables(seg, env) {
+    const duty = (env && env.duty) || {};
+    return {
+      dutyTable: seg.toneEnv != null ? (duty[seg.toneEnv] || null) : null,
+      relDutyTable: (seg.releaseTone != null && seg.releaseTone !== 255)
+        ? (duty[seg.releaseTone] || null) : null
+    };
+  }
+
+  // 指定tickでのデューティ値。デューティエンベロープが無ければ固定値(fixedDuty)を返す。
+  // ゲートオフ以降は@@r<n>のテーブルへ切り替わり、そのテーブルの先頭から進む
+  // (@vrがゲートオフでtick0から再スタートするのと同じ)
+  function dutyAt(seg, env, tick, gateFrames, fixedDuty) {
+    const { dutyTable, relDutyTable } = resolveDutyTables(seg, env);
+    if (relDutyTable && tick >= gateFrames) {
+      return stepEnvelope(relDutyTable, tick - gateFrames);
+    }
+    if (dutyTable) return stepEnvelope(dutyTable, tick);
+    return fixedDuty;
+  }
+
   // ゲートON区間はvTable、ゲートOFF区間(あれば)はvrTableを1フレーム1ステップで
-  // 進めながら、直前と異なる値のフレームでのみwriteFn(frame, vol)を呼ぶ。
+  // 進めながら、直前と異なる値のフレームでのみwriteFn(frame, vol, duty)を呼ぶ。
   // vrTableが無ければ従来通りゲートOFF時に1回だけ音量0で呼ぶ。
   // writeFnはそのフレームに必要なレジスタ書き込み(1個とは限らない。例:FME7は
   // アドレスラッチ+データの2書き込み)をwriteLog[frame]へ自分でpushする。
-  function writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable, writeFn) {
+  // duty: @@<n>/@@r<n>(デューティエンベロープ)が有効なチップ用に、そのフレームの
+  // デューティ値を第3引数で渡す(dutyOpt={env,fixedDuty}を渡した時のみ。デューティは
+  // 音量と同じレジスタに同居するため、音量が変わらなくてもデューティが変われば書く)。
+  // dutyOptを渡さないチップでは第3引数はundefinedで、writeFn側も従来通り無視する
+  function writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable, writeFn, seg, dutyOpt) {
+    const dutyOf = dutyOpt
+      ? (t) => dutyAt(seg, dutyOpt.env, t, gateFrames, dutyOpt.fixedDuty)
+      : () => undefined;
     let lastVol = -1;
+    let lastDuty;
+    let dutyInit = false;
     for (let t = 0; t < gateFrames; t++) {
       const vol = Math.max(0, Math.min(15, stepEnvelope(vTable, t)));
-      if (vol !== lastVol) {
-        writeFn(startFrame + t, vol);
+      const duty = dutyOf(t);
+      if (vol !== lastVol || !dutyInit || duty !== lastDuty) {
+        writeFn(startFrame + t, vol, duty);
         lastVol = vol;
+        lastDuty = duty;
+        dutyInit = true;
       }
     }
     if (gateFrames < dur) {
@@ -1033,13 +1215,16 @@
         let lastRVol = -1;
         for (let t = gateFrames; t < dur; t++) {
           const vol = Math.max(0, Math.min(15, stepEnvelope(vrTable, t - gateFrames)));
-          if (vol !== lastRVol) {
-            writeFn(startFrame + t, vol);
+          const duty = dutyOf(t);
+          if (vol !== lastRVol || !dutyInit || duty !== lastDuty) {
+            writeFn(startFrame + t, vol, duty);
             lastRVol = vol;
+            lastDuty = duty;
+            dutyInit = true;
           }
         }
       } else {
-        writeFn(startFrame + gateFrames, 0);
+        writeFn(startFrame + gateFrames, 0, dutyOf(gateFrames));
       }
     }
   }
@@ -1074,8 +1259,7 @@
       const startFrame = frame;
       const dur = Math.min(seg.durationFrames, totalFrames - frame);
       const gateFrames = computeGateFrames(seg, dur);
-      const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
-      const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
+      const { vTable, vrTable } = resolveEnvTables(seg, env);
 
       if (channel === 'A' || channel === 'B') {
         const duty = seg.instrument % 4;
@@ -1091,10 +1275,13 @@
             // SM有効時はセグメントをまたいでも前回値を引き継ぐ(smoothLastHi)
             let lastHi = seg.smooth ? smoothLastHi : -1;
             writePitchModulation(writeLog, startFrame, dur, seg, env, pulsePeriod, 0x7FF,
-              (f, period) => {
+              (f, period, attack) => {
                 writeLog[f].push({ addr: base + 2, value: period & 0xFF });
                 const hi = (period >> 8) & 0x07;
-                if (hi !== lastHi) { writeLog[f].push({ addr: base + 3, value: hi }); lastHi = hi; }
+                if (hi !== lastHi || attackWritesHi(seg, attack)) {
+                  writeLog[f].push({ addr: base + 3, value: hi });
+                  lastHi = hi;
+                }
               });
             smoothLastHi = lastHi;
           } else {
@@ -1106,7 +1293,8 @@
           }
           if (vTable) {
             writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable,
-              (f, vol) => writeLog[f].push({ addr: base + 0, value: (duty << 6) | 0x30 | vol }));
+              (f, vol, d) => writeLog[f].push({ addr: base + 0, value: ((d & 3) << 6) | 0x30 | vol }),
+              seg, { env, fixedDuty: duty });
           } else {
             writeLog[startFrame].push({ addr: base + 0, value: (duty << 6) | 0x30 | seg.volume });
             if (gateFrames < dur) {
@@ -1126,10 +1314,13 @@
             // SM有効時はセグメントをまたいでも前回値を引き継ぐ(smoothLastHi)
             let lastHi = seg.smooth ? smoothLastHi : -1;
             writePitchModulation(writeLog, startFrame, dur, seg, env, trianglePeriod, 0x7FF,
-              (f, period) => {
+              (f, period, attack) => {
                 writeLog[f].push({ addr: base + 2, value: period & 0xFF });
                 const hi = (period >> 8) & 0x07;
-                if (hi !== lastHi) { writeLog[f].push({ addr: base + 3, value: hi }); lastHi = hi; }
+                if (hi !== lastHi || attackWritesHi(seg, attack)) {
+                  writeLog[f].push({ addr: base + 3, value: hi });
+                  lastHi = hi;
+                }
               });
             smoothLastHi = lastHi;
           } else {
@@ -1215,8 +1406,7 @@
         // VRC6パルスのduty(bits4-6)は実機同様8段階(0-7)。@<n>のnをそのまま使う
         // (2A03/MMC5の4段階=n%4とは異なるチップ固有の範囲)。既定値7=約50%幅
         const duty = ((seg.instrument != null ? seg.instrument : 7) % 8) << 4;
-        const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
-        const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
+        const { vTable, vrTable } = resolveEnvTables(seg, env);
         if (seg.freq != null) {
           if (hasPitchModulation(seg)) {
             // 上位バイト(enableビット込み)は*2mml抽出側でアタック合図として扱われるため
@@ -1224,10 +1414,13 @@
             // (2A03と同じ理由、DESIGN-PITCH.md Phase 1)。
             let lastHi = -1;
             writePitchModulation(writeLog, startFrame, dur, seg, env, pulsePeriod, 0xFFF,
-              (f, period) => {
+              (f, period, attack) => {
                 writeLog[f].push({ addr: base + 1, value: period & 0xFF });
                 const hi = 0x80 | ((period >> 8) & 0x0F);
-                if (hi !== lastHi) { writeLog[f].push({ addr: base + 2, value: hi }); lastHi = hi; }
+                if (hi !== lastHi || attackWritesHi(seg, attack)) {
+                  writeLog[f].push({ addr: base + 2, value: hi });
+                  lastHi = hi;
+                }
               });
           } else {
             const period = applyDetune(pulsePeriod(seg.freq), seg.detune, 0xFFF);
@@ -1236,7 +1429,8 @@
           }
           if (vTable) {
             writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable,
-              (f, vol) => writeLog[f].push({ addr: base + 0, value: duty | vol }));
+              (f, vol, d) => writeLog[f].push({ addr: base + 0, value: ((d & 7) << 4) | vol }),
+              seg, { env, fixedDuty: duty >> 4 });
           } else {
             writeLog[startFrame].push({ addr: base + 0, value: duty | seg.volume });
             if (gateFrames < dur) writeLog[startFrame + gateFrames].push({ addr: base + 0, value: duty });
@@ -1253,16 +1447,18 @@
         const startFrame = frame;
         const dur = Math.min(seg.durationFrames, totalFrames - frame);
         const gateFrames = computeGateFrames(seg, dur);
-        const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
-        const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
+        const { vTable, vrTable } = resolveEnvTables(seg, env);
         if (seg.freq != null) {
           if (hasPitchModulation(seg)) {
             let lastHi = -1;
             writePitchModulation(writeLog, startFrame, dur, seg, env, sawPeriod, 0xFFF,
-              (f, period) => {
+              (f, period, attack) => {
                 writeLog[f].push({ addr: 0xB001, value: period & 0xFF });
                 const hi = 0x80 | ((period >> 8) & 0x0F);
-                if (hi !== lastHi) { writeLog[f].push({ addr: 0xB002, value: hi }); lastHi = hi; }
+                if (hi !== lastHi || attackWritesHi(seg, attack)) {
+                  writeLog[f].push({ addr: 0xB002, value: hi });
+                  lastHi = hi;
+                }
               });
           } else {
             const period = applyDetune(sawPeriod(seg.freq), seg.detune, 0xFFF);
@@ -1300,16 +1496,18 @@
       const dur = Math.min(seg.durationFrames, totalFrames - frame);
       const gateFrames = computeGateFrames(seg, dur);
       const duty = seg.instrument % 4;
-      const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
-      const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
+      const { vTable, vrTable } = resolveEnvTables(seg, env);
       if (seg.freq != null) {
         if (hasPitchModulation(seg)) {
           let lastHi = -1;
           writePitchModulation(writeLog, startFrame, dur, seg, env, pulsePeriod, 0x7FF,
-            (f, period) => {
+            (f, period, attack) => {
               writeLog[f].push({ addr: base + 2, value: period & 0xFF });
               const hi = (period >> 8) & 0x07;
-              if (hi !== lastHi) { writeLog[f].push({ addr: base + 3, value: hi }); lastHi = hi; }
+              if (hi !== lastHi || attackWritesHi(seg, attack)) {
+                writeLog[f].push({ addr: base + 3, value: hi });
+                lastHi = hi;
+              }
             });
         } else {
           const period = applyDetune(pulsePeriod(seg.freq), seg.detune, 0x7FF);
@@ -1318,7 +1516,8 @@
         }
         if (vTable) {
           writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable,
-            (f, vol) => writeLog[f].push({ addr: base + 0, value: (duty << 6) | 0x30 | vol }));
+            (f, vol, d) => writeLog[f].push({ addr: base + 0, value: ((d & 3) << 6) | 0x30 | vol }),
+            seg, { env, fixedDuty: duty });
         } else {
           writeLog[startFrame].push({ addr: base + 0, value: (duty << 6) | 0x30 | seg.volume });
           if (gateFrames < dur) writeLog[startFrame + gateFrames].push({ addr: base + 0, value: (duty << 6) | 0x30 });
@@ -1388,8 +1587,7 @@
             writeLog[startFrame].push({ addr: 0xE000, value: seg.fme7Noise & 0x1F });
           }
         }
-        const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
-        const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
+        const { vTable, vrTable } = resolveEnvTables(seg, env);
         if (seg.fme7EnvShape != null) {
           // R11/R12: エンベロープ周期(16bit), R13: 形状。この音符はハードウェアエンベロープ
           // 制御(音量レジスタのbit4=1)で鳴らす(Gimmick!ベース等のハードエンベロープ効果用)
@@ -1511,11 +1709,14 @@
           // 参照)ため、値が変わった時だけ書く(2A03と同じ理由)。
           let lastHi = -1;
           writePitchModulation(writeLog, startFrame, dur, seg, env, fdsFreqToPeriod, 0xFFF,
-            (f, p) => {
+            (f, p, attack) => {
               period = p;
               writeLog[f].push({ addr: 0x4082, value: p & 0xFF });
               const hi = (p >> 8) & 0x0F;
-              if (hi !== lastHi) { writeLog[f].push({ addr: 0x4083, value: hi }); lastHi = hi; }
+              if (hi !== lastHi || attackWritesHi(seg, attack)) {
+                writeLog[f].push({ addr: 0x4083, value: hi });
+                lastHi = hi;
+              }
             });
           if (period == null) period = applyDetune(fdsFreqToPeriod(seg.freq), seg.detune, 0xFFF);
         } else {
@@ -1523,8 +1724,7 @@
           writeLog[startFrame].push({ addr: 0x4082, value: period & 0xFF });
           writeLog[startFrame].push({ addr: 0x4083, value: (period >> 8) & 0x0F });
         }
-        const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
-        const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
+        const { vTable, vrTable } = resolveEnvTables(seg, env);
         if (vTable) {
           // 直接指定モード(bit7=1)のまま、@v<n>テーブルの値でゲインを1フレームずつ
           // 書き換える(FDSの実機ハードウェアエンベロープ(bit7=0)は使わない。あちらは
@@ -1535,7 +1735,17 @@
           const gain = Math.min(32, seg.volume * 2);
           writeLog[startFrame].push({ addr: 0x4080, value: 0x80 | gain });
         }
-        if (gateFrames < dur) {
+        // @@r<n>(リリース音色): FDSの音色=波形メモリなので、ゲートオフの瞬間に
+        // <n>番の波形をロードし直す。次の音符は自分の音色を必ず書き直せるよう
+        // lastInstrumentもリリース音色へ更新しておく
+        if (gateFrames < dur && seg.releaseTone !== 255 && fm[seg.releaseTone]) {
+          writeLog[startFrame + gateFrames].push(...fdsWaveLoadWrites(fm[seg.releaseTone]));
+          lastInstrument = seg.releaseTone;
+        }
+        // ゲートオフでチャンネルを無効化(bit7)する。ただしリリースエンベロープ(@vr)が
+        // ある音符では無効化してしまうとリリースが一切聞こえないため書かない
+        // (他チップと同じく、リリース区間はvrTableの音量で鳴らし切る)
+        if (gateFrames < dur && !vrTable) {
           writeLog[startFrame + gateFrames].push({ addr: 0x4083, value: 0x80 | ((period >> 8) & 0x0F) });
         }
       } else {
@@ -1670,8 +1880,7 @@
           const freqReg = applyDetune(n163FreqReg(seg.freq, currentRoundedLen, num), seg.detune, 262143);
           writeN163Freq(startFrame, freqReg);
         }
-        const vTable = seg.envelopeV != null ? env.v[seg.envelopeV] : null;
-        const vrTable = (vTable && seg.envelopeVr !== 255) ? env.vr[seg.envelopeVr] : null;
+        const { vTable, vrTable } = resolveEnvTables(seg, env);
         if (vTable) {
           writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable, (f, vol) => {
             writeLog[f].push({ addr: 0xF800, value: (regBase + 7) | 0x80 });
@@ -1760,6 +1969,13 @@
           }
         }
         if (gateFrames < dur) {
+          // @@r<n>(リリース音色): VRC7の音色は$30+chの上位ニブル。ゲートオフの瞬間に
+          // 差し替える(音量ニブルはそのまま。@v/@vrによる音量エンベロープ自体は
+          // VRC7では未対応のため、実際に聞こえるのはキーオフ後の余韻部分になる)
+          if (seg.releaseTone !== 255) {
+            writeLog[startFrame + gateFrames].push({ addr: 0x9010, value: 0x30 + ch });
+            writeLog[startFrame + gateFrames].push({ addr: 0x9030, value: ((seg.releaseTone % 16) << 4) | seg.volume });
+          }
           writeLog[startFrame + gateFrames].push({ addr: 0x9010, value: 0x20 + ch });
           writeLog[startFrame + gateFrames].push({ addr: 0x9030, value: (block << 1) | ((fnum >> 8) & 1) });
         }
@@ -2019,6 +2235,27 @@
     let totalFrames = 0;
 
     const fme7Letters = new Set(expansionLetterMap.fme7 || []);
+    // SD(セルフディレイ)が使えないチャンネル。本家ppmckのコマンド表(datamake.c)で
+    // SD/SDOF/SDQRの対応トラックが ALLTRACK & ~TRACK(2) & ~DPCMTRACK になっているため、
+    // 三角波(C)とDPCMチャンネルを除外する(三角波は音量制御自体が無くリリース
+    // エンベロープが成立しない、DPCMはサンプル再生で音程の差し替えに意味が無い)
+    const noSelfDelayLetters = new Set(['C', ...(expansionLetterMap.dpcm || [])]);
+    // @@<n>/@@r<n>(音色バイトbit7=0)の対応トラックと意味。実機ppmckのコマンド表
+    // (datamake.c: TRACK(0)|TRACK(1)|FMTRACK|VRC7TRACK|VRC6PLSTRACK|N106TRACK|MMC5PLSTRACK)
+    // に合わせる。デューティ比を持つチップはデューティエンベロープ選択、波形/音色番号を
+    // 持つチップ(FDS/N163/VRC7)は音色選択になる(VRC6はのこぎり波chだけ対象外)
+    const vrc6Letters = expansionLetterMap.vrc6 || [];
+    const vrc7Letters = new Set(expansionLetterMap.vrc7 || []);
+    const dutyToneLetters = new Set([
+      'A', 'B',
+      ...vrc6Letters.slice(0, 2),
+      ...(expansionLetterMap.mmc5 || [])
+    ]);
+    const instrumentToneLetters = new Set([
+      ...(expansionLetterMap.fds || []),
+      ...(expansionLetterMap.n163 || []),
+      ...vrc7Letters
+    ]);
     for (const ch of channelLetters) {
       const raw = channels[ch] || { text: '', offsets: [] };
       let tokens = Mml.tokenize(raw.text, raw.offsets);
@@ -2027,7 +2264,12 @@
       const {
         segments, immediateWrites, loopFrame,
         startMarkerFrame, endMarkerFrame, startMarkerSrcRange, endMarkerSrcRange
-      } = buildSegments(tokens, tempo, errors, settings, fme7Letters.has(ch) ? 1 : 0);
+      } = buildSegments(tokens, tempo, errors, settings, fme7Letters.has(ch) ? 1 : 0, {
+        selfDelay: !noSelfDelayLetters.has(ch),
+        toneEnv: dutyToneLetters.has(ch) ? 'duty' : (instrumentToneLetters.has(ch) ? 'instrument' : null),
+        vrc7: vrc7Letters.has(ch),
+        n163: (expansionLetterMap.n163 || []).includes(ch)
+      });
       segmentsByChannel[ch] = segments;
       immediateWritesByChannel[ch] = immediateWrites;
       loopFrameByChannel[ch] = loopFrame;

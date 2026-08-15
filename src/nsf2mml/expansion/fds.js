@@ -288,11 +288,13 @@
       return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
     }
     // EPはキャリア(carrier)周波数レジスタのビブラートのみ対象(FDSのハードウェア
-    // モジュレーション=fdsMod/@MHとは別物、Phase 0のpitchSeq設計方針と同じ)
+    // モジュレーション=fdsMod/@MHとは別物、Phase 0のpitchSeq設計方針と同じ)。
+    // FDSは周波数レジスタ(値が上がるほど音程が上がる)なのでdirectionUp=true
+    // (src/convert/pitch.js fitVibrato参照)。
     function toPitchFields(ev) {
       if (!pitchReg || ev.rawFreq == null) return {};
       const fields = {};
-      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq, true));
       return fields;
     }
     // 高速アルペジオ→EN統合(2026-08-14拡張)

@@ -101,6 +101,7 @@
       this.pcmLevel = 0;   // $5011 8bit 生PCM DAC 出力
       this.pcmReadMode = false; // $5010 bit0
       this.mute = { pulse1: false, pulse2: false, pcm: false };
+      this.vol = { pulse1: 1, pulse2: 1, pcm: 1 };
     }
 
     reset() {
@@ -150,9 +151,9 @@
     }
 
     mixSample() {
-      const p1 = this.mute.pulse1 ? 0 : this.pulse1.output() / 15;
-      const p2 = this.mute.pulse2 ? 0 : this.pulse2.output() / 15;
-      const pcm = this.mute.pcm ? 0 : (this.pcmLevel / 255);
+      const p1 = this.mute.pulse1 ? 0 : (this.pulse1.output() / 15) * this.vol.pulse1;
+      const p2 = this.mute.pulse2 ? 0 : (this.pulse2.output() / 15) * this.vol.pulse2;
+      const pcm = this.mute.pcm ? 0 : (this.pcmLevel / 255) * this.vol.pcm;
       return (p1 + p2) * 0.25 + pcm * 0.30;
     }
   }

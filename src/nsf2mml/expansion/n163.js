@@ -211,10 +211,12 @@
     // freqRegは18bitの生レジスタ(numCh依存)なので、セント換算では浅いビブラートでも
     // 生レジスタ差分は大きくなりうる。符号付きbyte範囲(-127~126)を超える場合は
     // pitch.js側のclassifyPitchModが自動的にEP化を諦める(D<n>のみの既存動作を維持)。
+    // N163は周波数レジスタ(値が上がるほど音程が上がる)なのでdirectionUp=true
+    // (src/convert/pitch.js fitVibrato参照)。
     function toPitchFields(ev) {
       if (!pitchReg || ev.rawFreq == null) return {};
       const fields = {};
-      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq));
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq, true));
       return fields;
     }
     // 高速アルペジオ→EN統合(2026-08-14拡張)

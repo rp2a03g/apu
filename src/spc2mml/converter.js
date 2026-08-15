@@ -826,6 +826,9 @@
       // periodFnForTypeがnullを返すため自動的に対象外になる。
       const n163NumCh = expansion === 'n163' ? expansionLetters.length : undefined;
       const periodFn = periodFnForType(targetType, n163NumCh);
+      // 借用先チップの生周期換算関数(periodFn)自体の増減方向をfitVibratoへ渡す
+      // (compiler.jsのperiodFnIncreasingと同じ2点比較、src/convert/pitch.js fitVibrato参照)。
+      const directionUp = periodFn ? periodFn(2000) > periodFn(200) : undefined;
       const chEvents = events.map(ev => {
         const common = {
           start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi,
@@ -837,7 +840,7 @@
           const tune = tuneOf(ev.srcn);
           const freqSeq = ev.pitchSeq.map(p => pitchRegToFreqHz(p, tune));
           const rescaled = MML.Convert.rescalePitchSeqFromFreq(freqSeq, periodFn);
-          MML.Convert.applyPitchAssignment(common, pitchReg.assign(rescaled));
+          MML.Convert.applyPitchAssignment(common, pitchReg.assign(rescaled, directionUp));
         }
         // 高速アルペジオ→EN統合(2026-08-14拡張)。mergeSpcVoiceEvents側で検出済みの
         // ev.noteEnvOffsetsを、曲全体で共有するnoteEnvRegへ登録する

@@ -75,12 +75,6 @@
   // および localStorage への保存/読込。ロール・鍵盤・波形表示すべてがこの
   // 上書き色を参照するため、変更は即座に全表示へ反映される。
   const CHANNEL_COLOR_STORAGE_KEY = 'mml_channelColors';
-  const COLOR_PICKER_PALETTE = [
-    '#ff4466', '#ff8800', '#ffcc00', '#aaff33', '#33dd66', '#00cc99',
-    '#00ccff', '#3388ff', '#7755ff', '#cc55ff', '#ff55aa', '#ffffff',
-    '#ff8888', '#ffbb66', '#eedd55', '#88dd88', '#66cccc', '#88bbff',
-    '#aaaacc', '#dd8899', '#886644', '#888888', '#444455', '#000000',
-  ];
 
   function loadColorOverrides() {
     const map = new Map();
@@ -100,6 +94,64 @@
       for (const [id, color] of map) obj[id] = color;
       localStorage.setItem(CHANNEL_COLOR_STORAGE_KEY, JSON.stringify(obj));
     } catch (e) { /* ignore */ }
+  }
+
+  // ── マスター音量 ──────────────────────────────────────────
+  // src/audio/stream-player.js MML.Audio.getMasterGain() と同じキー/値域(0〜1)。
+  // 音声グラフ側(getMasterGain)も新規AudioContext生成時にこの値を読むため、
+  // どちらが先にロードされても一致する。
+  const MASTER_VOLUME_STORAGE_KEY = 'mml_masterVolume';
+  function loadMasterVolume() {
+    try {
+      const raw = parseFloat(localStorage.getItem(MASTER_VOLUME_STORAGE_KEY));
+      if (Number.isFinite(raw)) return Math.max(0, Math.min(1, raw));
+    } catch (e) { /* ignore */ }
+    return 1;
+  }
+  function saveMasterVolume(vol) {
+    try { localStorage.setItem(MASTER_VOLUME_STORAGE_KEY, String(vol)); } catch (e) { /* ignore */ }
+  }
+
+  // ── ch別音量(通常フォーマット: channelId → 0〜1) ─────────────────
+  // 色オーバーライドと同じ流儀(localStorage永続化、新規ファイルを開いても保持=
+  // ミュートのようなファイル切替時クリアはしない。音量調整は「一度決めたら
+  // ずっと使う」EQ的な設定なので、ファイルをまたいで残ってほしいという想定)。
+  const CHANNEL_VOLUME_STORAGE_KEY = 'mml_channelVolumes';
+  function loadChannelVolumes() {
+    const map = new Map();
+    try {
+      const raw = localStorage.getItem(CHANNEL_VOLUME_STORAGE_KEY);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        for (const id in obj) {
+          const v = parseFloat(obj[id]);
+          if (Number.isFinite(v)) map.set(id, Math.max(0, Math.min(1, v)));
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return map;
+  }
+  function saveChannelVolumes(map) {
+    try {
+      const obj = {};
+      for (const [id, vol] of map) obj[id] = vol;
+      localStorage.setItem(CHANNEL_VOLUME_STORAGE_KEY, JSON.stringify(obj));
+    } catch (e) { /* ignore */ }
+  }
+
+  // ── SPCボイス音量(V0〜V7、配列index=ボイス番号) ─────────────────
+  const SPC_VOLUME_STORAGE_KEY = 'mml_spcVoiceVolumes';
+  function loadSpcVoiceVolumes() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(SPC_VOLUME_STORAGE_KEY) || 'null');
+      if (Array.isArray(raw) && raw.length === 8) {
+        return raw.map((v) => { const n = parseFloat(v); return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 1; });
+      }
+    } catch (e) { /* ignore */ }
+    return new Array(8).fill(1);
+  }
+  function saveSpcVoiceVolumes(arr) {
+    try { localStorage.setItem(SPC_VOLUME_STORAGE_KEY, JSON.stringify(arr)); } catch (e) { /* ignore */ }
   }
 
   // ── 静的ミュートパス定義 ──────────────────────────────────────
@@ -246,6 +298,20 @@
     if (!f || f <= 0) return null;
     const m = Math.round(69 + 12 * Math.log2(f / 440));
     return (m >= MIDI_MIN && m <= MIDI_MAX) ? m : null;
+  }
+
+  // ノイズchの周期index(ch.noiseIndex、0〜15。NSF/GBSどちらも同じ2A03の16段階スケールへ
+  // 揃えている)を、そのままC1(MIDI 24)〜D#2(MIDI 39)の16音に1:1対応させる(ユーザー指定)。
+  function noisePeriodIndexToMidi(idx) {
+    if (idx === undefined || idx === null) return null;
+    return 24 + Math.max(0, Math.min(15, idx)); // idx0=C1 〜 idx15=D#2
+  }
+
+  // DPCM($4010再生速度index、ch.dmcRateIdx、0〜15)もノイズと同じC1〜D#2に1:1対応させる
+  // (ユーザー指定: ノイズchとバンドが重なってよい)。
+  function dmcRateIndexToMidi(idx) {
+    if (idx === undefined || idx === null) return null;
+    return 24 + Math.max(0, Math.min(15, idx)); // idx0=C1 〜 idx15=D#2(ノイズと同じ)
   }
 
   // セント偏差オーバーレイ(DESIGN-PITCH.md Phase 0)用。丸め後のMIDIノート番号の
@@ -710,18 +776,28 @@
     for (let f = 0; f < totalFrames; f++) {
       const channels = getChannelsAtFrame(f) || [];
       for (const ch of channels) {
-        if (ch.noise || ch.sample) continue;
         let track = tracks.get(ch.id);
         if (!track) { track = { id: ch.id, color: ch.color, notes: [], cur: null }; tracks.set(ch.id, track); }
         track.color = ch.color;
-        const midi = (ch.active && ch.freq) ? freqToMidi(ch.freq) : null;
+        // ノイズch/DPCM(サンプル)chはch.freqが常に0(実波形の「音程」ではないため)なので、
+        // 代わりに周期選択レジスタのindex(0-15)をそのまま16音へ1:1対応させた疑似ノート番号
+        // (noisePeriodIndexToMidi/dmcRateIndexToMidi冒頭コメント参照)として使う。GBSのロール
+        // (main.js buildGbsRollTimeline)は元々noise.jsの周期判定で音程付きで表示できていたが、
+        // この共通経路(NSF/MML再生のロール、および全フォーマット共通の鍵盤ハイライトdrawPiano)は
+        // ノイズ・DPCM双方を丸ごと除外していたため、NSFのノイズ/DPCMがロールにも鍵盤にも出ない・
+        // GBSのノイズが鍵盤に出ない、という食い違いになっていた。
+        let midi, pitchFreq;
+        if (!ch.active) { midi = null; pitchFreq = 0; }
+        else if (ch.noise) { midi = noisePeriodIndexToMidi(ch.noiseIndex); pitchFreq = ch.noiseFreq; }
+        else if (ch.sample) { midi = dmcRateIndexToMidi(ch.dmcRateIdx); pitchFreq = ch.dmcFreq; }
+        else { midi = ch.freq ? freqToMidi(ch.freq) : null; pitchFreq = ch.freq; }
         const volQ = midi !== null ? quantizeVol(ch.vol) : 0;
         if (track.cur && (midi === null || midi !== track.cur.midi || volQ !== track.cur.volQ)) {
           track.notes.push({ startSec: track.cur.startFrame * frameDur, endSec: f * frameDur, midi: track.cur.midi, vol: track.cur.volQ / ROLL_VOL_LEVELS, freqSeq: track.cur.freqs });
           track.cur = null;
         }
         if (midi !== null && !track.cur) track.cur = { startFrame: f, midi, volQ, freqs: [] };
-        if (track.cur) track.cur.freqs.push(ch.freq);
+        if (track.cur) track.cur.freqs.push(pitchFreq);
       }
     }
     const totalSec = totalFrames * frameDur;
@@ -1194,70 +1270,6 @@
     }
   }
 
-  // ── チャンネル色ピッカー(ポップオーバー) ──────────────────────
-  // kbd-dot クリックで開く色一覧。1インスタンスのみ存在するシングルトンとして
-  // document.body 直下に配置する(親要素のoverflow/z-indexに影響されないため)。
-  let _colorPickerEl = null;
-  let _colorPickerOutsideHandler = null;
-  function closeColorPicker() {
-    if (_colorPickerEl) { _colorPickerEl.remove(); _colorPickerEl = null; }
-    if (_colorPickerOutsideHandler) {
-      document.removeEventListener('mousedown', _colorPickerOutsideHandler, true);
-      _colorPickerOutsideHandler = null;
-    }
-  }
-  function openColorPicker(anchorEl, currentColor, onPick, onReset) {
-    closeColorPicker();
-    const pop = document.createElement('div');
-    pop.className = 'kbd-color-picker';
-    const cur = (currentColor || '').toLowerCase();
-    pop.innerHTML = COLOR_PICKER_PALETTE.map(c =>
-      `<span class="kbd-color-swatch${c.toLowerCase() === cur ? ' kbd-color-swatch--selected' : ''}" ` +
-      `style="background:${c}" data-color="${c}" title="${c}"></span>`
-    ).join('') +
-      // プリセット一覧を広げる代わりに、OSネイティブのカラーピッカー(無段階スペクトラム)を
-      // 呼び出す小さな1マスを追加する。画面を圧迫せずに「もっと多くの色」を選べるようにする。
-      `<span class="kbd-color-swatch kbd-color-more" title="${T('もっと選ぶ...')}">` +
-      `<input type="color" class="kbd-color-native" value="${/^#[0-9a-f]{6}$/i.test(currentColor || '') ? currentColor : '#ffffff'}"></span>` +
-      `<button type="button" class="kbd-color-reset">${T('既定色に戻す')}</button>`;
-    document.body.appendChild(pop);
-
-    const rect = anchorEl.getBoundingClientRect();
-    pop.style.left = Math.round(rect.left) + 'px';
-    pop.style.top = Math.round(rect.bottom + 4) + 'px';
-    const pr = pop.getBoundingClientRect();
-    if (pr.right > window.innerWidth) pop.style.left = Math.max(0, window.innerWidth - pr.width - 4) + 'px';
-    if (pr.bottom > window.innerHeight) pop.style.top = Math.max(0, rect.top - pr.height - 4) + 'px';
-
-    pop.querySelectorAll('.kbd-color-swatch[data-color]').forEach((sw) => {
-      sw.addEventListener('click', (e) => {
-        e.stopPropagation();
-        onPick(sw.getAttribute('data-color'));
-        closeColorPicker();
-      });
-    });
-    pop.querySelector('.kbd-color-reset').addEventListener('click', (e) => {
-      e.stopPropagation();
-      onReset();
-      closeColorPicker();
-    });
-
-    // 「もっと選ぶ」マス: OSネイティブのカラーピッカーを開く。ドラッグ中は
-    // input イベントでリアルタイムに反映し、確定(change)でポップオーバーを閉じる。
-    const nativeInput = pop.querySelector('.kbd-color-native');
-    nativeInput.addEventListener('input', () => onPick(nativeInput.value));
-    nativeInput.addEventListener('change', (e) => {
-      e.stopPropagation();
-      onPick(nativeInput.value);
-      closeColorPicker();
-    });
-
-    _colorPickerEl = pop;
-    _colorPickerOutsideHandler = (e) => { if (!pop.contains(e.target)) closeColorPicker(); };
-    // 開いたクリック自体で即座に閉じてしまわないよう、次のイベントループで登録する
-    setTimeout(() => document.addEventListener('mousedown', _colorPickerOutsideHandler, true), 0);
-  }
-
   function drawPiano(canvas, channels) {
     const newW = canvas._cachedWidth || canvas.offsetWidth || 560;
     if (newW === 0) return;
@@ -1270,8 +1282,12 @@
 
     const keyColors = {};
     for (const ch of channels) {
-      if (!ch.active || ch.noise || ch.sample || !ch.freq) continue;
-      const midi = freqToMidi(ch.freq);
+      if (!ch.active) continue;
+      // ノイズch/DPCM(サンプル)chはそれぞれch.noiseIndex/ch.dmcRateIdxを疑似ノートとして使う
+      // (noisePeriodIndexToMidi/dmcRateIndexToMidi冒頭コメント参照)。
+      const midi = ch.noise ? noisePeriodIndexToMidi(ch.noiseIndex)
+        : ch.sample ? dmcRateIndexToMidi(ch.dmcRateIdx)
+        : (ch.freq ? freqToMidi(ch.freq) : null);
       if (midi !== null && !keyColors[midi]) keyColors[midi] = ch.color;
     }
 
@@ -1341,6 +1357,12 @@
       this.onMuteChange = null;
       this.onSpcMuteChange = null; // (voiceIndex:number, muted:bool) => void
       this.onSpeedChange = null;   // (factor:number) => void  曲切替をまたいで保持する
+      this.onMasterVolumeChange = null; // (vol:0〜1) => void  曲切替をまたいで保持する
+      this._masterVolume = loadMasterVolume(); // localStorage永続化(mml_masterVolume)
+      this.onVolumeChange = null;       // () => void  ch別音量バー操作時(getVolumeConfig()参照)
+      this.onSpcVolumeChange = null;    // (volArray:number[8]) => void
+      this._channelVolumes = loadChannelVolumes();   // channelId → 0〜1(localStorage永続化)
+      this._spcVoiceVolumes = loadSpcVoiceVolumes(); // [V0..V7] → 0〜1(localStorage永続化)
       this._colorOverrides = loadColorOverrides(); // channelId → ユーザー指定色(localStorage永続化)
       this._build();
 
@@ -1378,6 +1400,27 @@
       left.className = 'kbd-left';
       this._leftEl = left;
 
+      // マスター音量バー(0〜100%)。フォーマットを問わず全ての音声出力に効く
+      // (MML.Audio.getMasterGain、src/audio/stream-player.js参照)。速度バーの
+      // すぐ左に置く。localStorageへ即保存し、次回起動時も値を維持する。
+      const masterVolBar = document.createElement('div');
+      masterVolBar.className = 'kbd-mastervol kbd-mastervol--header';
+      const initialPct = Math.round((this._masterVolume != null ? this._masterVolume : 1) * 100);
+      masterVolBar.innerHTML =
+        `<span class="kbd-mastervol-label">${T('音量')}</span>` +
+        `<input type="range" class="kbd-mastervol-range" min="0" max="100" step="1" value="${initialPct}">` +
+        `<span class="kbd-mastervol-value">${initialPct}%</span>`;
+      const masterVolRange = masterVolBar.querySelector('.kbd-mastervol-range');
+      const masterVolValueEl = masterVolBar.querySelector('.kbd-mastervol-value');
+      masterVolRange.addEventListener('input', () => {
+        const pct = parseInt(masterVolRange.value, 10) || 0;
+        const vol = pct / 100;
+        this._masterVolume = vol;
+        masterVolValueEl.textContent = `${pct}%`;
+        saveMasterVolume(vol);
+        if (this.onMasterVolumeChange) this.onMasterVolumeChange(vol);
+      });
+
       // 再生速度バー(1/1〜1/8)。音程を保ったままテンポだけを落とす。
       // ウィンドウのタイトル行(タイトル文字の右)に置く。本体側は毎回_build()で
       // 作り直されるため、タイトル行に前回挿入した分を先に取り除いてから差し替える。
@@ -1400,12 +1443,16 @@
       const winEl = this.container.closest('.float-window');
       const headerEl = winEl && winEl.querySelector('.float-window-header');
       if (headerEl) {
+        const oldMasterVolBar = headerEl.querySelector('.kbd-mastervol');
+        if (oldMasterVolBar) oldMasterVolBar.remove();
         const oldSpeedBar = headerEl.querySelector('.kbd-speed');
         if (oldSpeedBar) oldSpeedBar.remove();
         const closeBtn = headerEl.querySelector('.float-window-close');
         headerEl.insertBefore(speedBar, closeBtn || null);
+        headerEl.insertBefore(masterVolBar, speedBar);
       } else {
-        left.appendChild(speedBar); // フォールバック(タイトル行が見つからない場合)
+        left.appendChild(masterVolBar); // フォールバック(タイトル行が見つからない場合)
+        left.appendChild(speedBar);
       }
 
       const header = document.createElement('div');
@@ -1785,7 +1832,7 @@
     _attachColorPicker(dotEl, id, defaultColor) {
       dotEl.addEventListener('click', (e) => {
         e.stopPropagation();
-        openColorPicker(
+        UI.ColorPicker.open(
           dotEl,
           this._getColor(id, defaultColor),
           (color) => this._setColorOverride(id, color),
@@ -1850,7 +1897,12 @@
           `<span class="kbds-lr kbds-l"></span>` +
           `<span class="kbds-lr"></span>` +
           `<span class="kbd-vol-num">0</span>` +
-          `<span class="kbd-vol-wrap"><span class="kbd-vol-bar" style="background:transparent"></span></span>` +
+          `<span class="kbd-vol-wrap">` +
+            `<span class="kbd-vol-bar" style="background:transparent"></span>` +
+            (ch.isAllRow ? '' :
+              `<input type="range" class="kbd-vol-slider" min="0" max="100" step="1" value="${Math.round((this._channelVolumes.get(ch.id) ?? 1) * 100)}" title="${T('{ch} 音量', { ch: ch.id })}">` +
+              `<span class="kbd-vol-tooltip"></span>`) +
+          `</span>` +
           (ch.isAllRow ? `<span class="kbd-wave" style="visibility:hidden"></span>` : `<canvas class="kbd-wave" width="68" height="28"></canvas>`) +
           `<span class="kbd-note">${ch.isAllRow ? '' : '—'}</span>` +
           `<span class="kbd-freq"></span>`;
@@ -1863,6 +1915,7 @@
             if (this.onMuteChange) this.onMuteChange(this.getMuteConfig());
           });
         }
+        if (!ch.isAllRow) this._attachVolumeSlider(row, ch.id);
 
         // 波形アイコンをクリックで大波形表示に選択(ALL行には波形アイコン自体が無い)
         const waveCanvas = ch.isAllRow ? null : row.querySelector('.kbd-wave');
@@ -1897,6 +1950,59 @@
           letter: ch.letter,
         });
       }
+    }
+
+    // ch別音量スライダー(音量バー領域に重ねる半透明オーバーレイ)を1行ぶん配線する。
+    // 通常は薄く見えるだけで、ドラッグ中(またはホバー/フォーカス中)だけ数値ツールチップを
+    // 出す。値は0〜100%のrange inputで、_channelVolumes(localStorage永続化)を直接操作する。
+    // getVolumeConfig()の項参照: 適用先はこのMapを直接読むため、ここではUIの見た目の
+    // 同期(初期値反映・スライダー操作時の即時保存)だけを担当すればよい。
+    _attachVolumeSlider(row, id) {
+      const slider = row.querySelector('.kbd-vol-slider');
+      const tooltip = row.querySelector('.kbd-vol-tooltip');
+      if (!slider) return;
+      const showTooltip = () => {
+        tooltip.textContent = `${slider.value}%`;
+        tooltip.classList.add('visible');
+      };
+      const hideTooltip = () => tooltip.classList.remove('visible');
+      slider.addEventListener('pointerdown', () => { slider.classList.add('dragging'); showTooltip(); });
+      slider.addEventListener('pointerup', () => { slider.classList.remove('dragging'); hideTooltip(); });
+      slider.addEventListener('pointercancel', () => { slider.classList.remove('dragging'); hideTooltip(); });
+      slider.addEventListener('keydown', () => showTooltip()); // キーボード操作(矢印キー)にも対応
+      slider.addEventListener('blur', hideTooltip);
+      slider.addEventListener('input', () => {
+        const vol = (parseInt(slider.value, 10) || 0) / 100;
+        showTooltip();
+        this._channelVolumes.set(id, vol);
+        saveChannelVolumes(this._channelVolumes);
+        if (this.onVolumeChange) this.onVolumeChange();
+      });
+    }
+
+    // SPCボイス(V0〜V7)版。_spcVoiceVolumes(配列index=ボイス番号)を直接操作する点以外は
+    // _attachVolumeSlider()と同じ(見た目・ツールチップ挙動を統一するため実装も揃えている)。
+    _attachSpcVolumeSlider(row, idx) {
+      const slider = row.querySelector('.kbd-vol-slider');
+      const tooltip = row.querySelector('.kbd-vol-tooltip');
+      if (!slider) return;
+      const showTooltip = () => {
+        tooltip.textContent = `${slider.value}%`;
+        tooltip.classList.add('visible');
+      };
+      const hideTooltip = () => tooltip.classList.remove('visible');
+      slider.addEventListener('pointerdown', () => { slider.classList.add('dragging'); showTooltip(); });
+      slider.addEventListener('pointerup', () => { slider.classList.remove('dragging'); hideTooltip(); });
+      slider.addEventListener('pointercancel', () => { slider.classList.remove('dragging'); hideTooltip(); });
+      slider.addEventListener('keydown', () => showTooltip());
+      slider.addEventListener('blur', hideTooltip);
+      slider.addEventListener('input', () => {
+        const vol = (parseInt(slider.value, 10) || 0) / 100;
+        showTooltip();
+        this._spcVoiceVolumes[idx] = vol;
+        saveSpcVoiceVolumes(this._spcVoiceVolumes);
+        if (this.onSpcVolumeChange) this.onSpcVolumeChange(this._spcVoiceVolumes.slice());
+      });
     }
 
     // 波形アイコンのクリック: 選択チャンネルを切り替え、拡大表示を更新
@@ -1959,6 +2065,38 @@
         }
       }
       return config;
+    }
+
+    // 現在のch別音量設定を返す(getMuteConfig()と同じ形状、値は0〜1)。getMuteConfig()と
+    // 違い_rowEls(現在表示中の行のDOM)ではなく永続化Map(_channelVolumes)から直接組み立てる
+    // (getMuteInfo(id)はidの文字列だけから決まる純粋関数のため、行がまだ再構築されて
+    // いない/別フォーマットの行のままでも正しく引ける。ミュートで「再生開始直後、行が
+    // まだ古いままの状態でgetMuteConfig()を呼ぶと的外れな設定を返す」問題が起きていた
+    // [[keyboard-mute-state-new-file-leak]]のと同じ穴を音量では踏まないための設計)。
+    getVolumeConfig() {
+      const config = { apu: {}, expansion: {} };
+      for (const [id, vol] of this._channelVolumes) {
+        const mi = getMuteInfo(id);
+        if (!mi) continue;
+        if (mi.section === 'apu') {
+          config.apu[mi.key] = vol;
+        } else {
+          if (!config.expansion[mi.chip]) {
+            config.expansion[mi.chip] = mi.type === 'array' ? [] : {};
+          }
+          if (mi.type === 'array') {
+            config.expansion[mi.chip][mi.index] = vol;
+          } else {
+            config.expansion[mi.chip][mi.key] = vol;
+          }
+        }
+      }
+      return config;
+    }
+
+    // SPCボイス音量(配列、V0〜V7)。呼び出し側が書き換えても影響しないようコピーを返す
+    getSpcVolumeConfig() {
+      return this._spcVoiceVolumes.slice();
     }
 
     // MMLチャンネル文字(A,B,...拡張音源含む) → 現在ミュート中かどうか。
@@ -2287,7 +2425,11 @@
         `<span class="kbds-lr kbds-l"></span>` +
         `<span class="kbds-lr"></span>` +
         `<span class="kbd-vol-num">0</span>` +
-        `<span class="kbd-vol-wrap"><span class="kbd-vol-bar" style="background:transparent"></span></span>` +
+        `<span class="kbd-vol-wrap">` +
+          `<span class="kbd-vol-bar" style="background:transparent"></span>` +
+          `<input type="range" class="kbd-vol-slider" min="0" max="100" step="1" value="${Math.round((this._spcVoiceVolumes[idx] ?? 1) * 100)}" title="${T('{ch} 音量', { ch: v.label })}">` +
+          `<span class="kbd-vol-tooltip"></span>` +
+        `</span>` +
         `<span class="kbds-env"><canvas class="kbds-env-canvas" width="34" height="16"></canvas><span class="kbds-env-text"></span></span>` +
         `<canvas class="kbd-wave" width="68" height="28"></canvas>` +
         `<span class="kbds-pm">-</span>` +
@@ -2302,6 +2444,7 @@
       checkbox.addEventListener('change', () => {
         if (this.onSpcMuteChange) this.onSpcMuteChange(idx, !checkbox.checked);
       });
+      this._attachSpcVolumeSlider(row, idx);
 
       // 波形アイコンをクリックで大波形表示に選択（NSF側と同じ挙動）
       const waveCanvas = row.querySelector('.kbd-wave');

@@ -31,6 +31,18 @@
       <button class="icon-btn toggle-btn" data-target="win-dpcm" title="DPCMコンバータ" aria-label="DPCMコンバータ">
         <svg viewBox="0 0 20 20" fill="currentColor"><rect x="2.5" y="8" width="2" height="4"/><rect x="6" y="4.5" width="2" height="11"/><rect x="9.5" y="1.5" width="2" height="17"/><rect x="13" y="6" width="2" height="8"/><rect x="16.2" y="9" width="1.8" height="2"/></svg>
       </button>
+
+      <span class="icon-toolbar-sep"></span>
+
+      <button class="icon-btn" id="btnEditorSettings" title="設定" aria-label="設定">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.6v2.1M10 15.3v2.1M17.4 10h-2.1M4.7 10H2.6M15.1 4.9l-1.5 1.5M6.4 13.6l-1.5 1.5M15.1 15.1l-1.5-1.5M6.4 6.4 4.9 4.9"/></svg>
+      </button>
+      <label class="font-picker" title="フォント">
+        <select id="mmlFontFamily"></select>
+      </label>
+      <label class="font-picker" title="フォントサイズ">
+        <select id="mmlFontSize"></select>
+      </label>
     </div>
 
     <h1 class="app-title">Sound Emulation Foundry - ppmckc ed.</h1>
@@ -546,8 +558,12 @@
   <!-- 開発用: 現在アクティブなフローティングウィンドウのサイズをpx表示 -->
   <div id="windowSizeIndicator" class="window-size-indicator" aria-hidden="true"></div>
 
+  <!-- サウンドファイル(NSF/SPC/KSS/GBS/HES)のドラッグ&ドロップ用オーバーレイ(main.js initUnifiedSoundFileWindow参照) -->
+  <div id="dropOverlay" class="drop-overlay" aria-hidden="true"><span>ここにドロップしてサウンドファイルを開く</span></div>
+
   <script src="src/ui/floatingWindows.js"></script>
   <script src="src/ui/waveClipboard.js"></script>
+  <script src="src/ui/colorPicker.js"></script>
   <script src="src/ui/keyboard.js"></script>
   <script src="src/ui/fdsWaveEditor.js"></script>
   <script src="src/ui/n163WaveEditor.js"></script>
@@ -600,6 +616,7 @@
   <script src="src/hes2mml/converter.js"></script>
   <!-- 全マークアップの後・main.js の前。ここで表示言語が確定する -->
   <script src="src/ui/i18nDom.js"></script>
+  <script src="src/ui/editorSettings.js"></script>
   <script src="src/main.js"></script>
 </body>
 </html>

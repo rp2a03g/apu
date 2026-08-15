@@ -105,6 +105,7 @@
       this.env = new Fme7Envelope();
       this._div = 0;
       this.mute = [false, false, false];
+      this.vol = [1, 1, 1];
     }
 
     reset() {
@@ -167,7 +168,7 @@
         const noiseOn = ((mix >> (i + 3)) & 1) === 0;
         const t = toneOn ? this.tones[i].level : 1;
         const n = noiseOn ? this.noise.out : 1;
-        if (t && n) sum += AY_DAC[this.channelLevel(i)];
+        if (t && n) sum += AY_DAC[this.channelLevel(i)] * this.vol[i];
       }
       // 3ch分の対数振幅和。他チップとのバランスでゲイン調整。
       return sum * 0.35;

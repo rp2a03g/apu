@@ -15,6 +15,26 @@
           'Noto Sans JP', 'Noto Sans CJK JP', Meiryo, 'IPAPGothic', sans-serif;
   --mono: 'Consolas', 'Courier New', 'BIZ UDGothic', 'Noto Sans Mono CJK JP',
           'Yu Gothic UI', 'Hiragino Sans', 'Noto Sans JP', Meiryo, monospace;
+
+  /* MMLエディタのフォント(src/ui/editorSettings.jsが上書きする) */
+  --mml-font-family: var(--mono);
+  --mml-font-size: 13px;
+  /* MMLエディタ自体の背景(全体色--panelとは別に持たせる。src/ui/editorSettings.jsが上書きする) */
+  --mml-editor-bg: #14141a;
+
+  /* MMLシンタックスハイライトの色分け12分類(src/ui/editorSettings.jsが上書きする) */
+  --tok-header: #59a869;
+  --tok-track: #ffd479;
+  --tok-note: #6fb1ff;
+  --tok-rest: #9aa0ac;
+  --tok-cmd-length: #f78c6c;
+  --tok-cmd-volume: #82d2ce;
+  --tok-cmd-pitch: #c792ea;
+  --tok-cmd-perf: #ff6b6b;
+  --tok-cmd-special: #ffcc66;
+  --tok-def-envelope: #66d9ef;
+  --tok-def-tone: #a6e22e;
+  --tok-comment: #6a737d;
 }
 
 * { box-sizing: border-box; }
@@ -41,6 +61,17 @@ header {
 }
 
 .lang-picker select {
+  background: #3d3d4a;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: var(--sans);
+}
+
+/* MMLエディタのフォント選択(トップメニュー、src/ui/editorSettings.js) */
+.font-picker select {
   background: #3d3d4a;
   color: var(--text);
   border: 1px solid var(--border);
@@ -250,6 +281,30 @@ header h1.app-title {
 
 .float-window-close:hover { color: var(--error); }
 
+/* サウンドファイル(NSF/SPC/KSS/GBS/HES)のドラッグ&ドロップ用オーバーレイ。
+   ファイルをページ上にドラッグしている間だけ表示する(main.js initUnifiedSoundFileWindow参照) */
+.drop-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  align-items: center;
+  justify-content: center;
+  background: rgba(30, 30, 36, 0.75);
+  border: 3px dashed var(--accent);
+  pointer-events: none;
+}
+.drop-overlay.visible { display: flex; }
+.drop-overlay span {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--panel);
+  padding: 16px 28px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
 .float-window-body {
   flex: 1;
   min-height: 0;
@@ -424,7 +479,7 @@ button.secondary {
   position: relative;
   flex: 1;
   min-height: 120px;
-  background: #14141a;
+  background: var(--mml-editor-bg);
   border: 1px solid var(--border);
   border-radius: 4px;
 }
@@ -436,8 +491,8 @@ button.secondary {
   margin: 0;
   width: 100%;
   height: 100%;
-  font-family: var(--mono);
-  font-size: 13px;
+  font-family: var(--mml-font-family);
+  font-size: var(--mml-font-size);
   line-height: 1.4;
   padding: 8px;
   border: none;
@@ -463,14 +518,20 @@ button.secondary {
   flex: none;
 }
 
-.tok-channel { color: #ffd479; font-weight: 700; }
-.tok-note { color: #6fb1ff; }
-.tok-command { color: #c792ea; }
-.tok-octave { color: #f78c6c; }
-.tok-tie { color: #f78c6c; }
-.tok-loop { color: #ff6b6b; }
-.tok-number { color: #82d2ce; }
-.tok-comment { color: #6a737d; font-style: italic; }
+/* MMLシンタックスハイライトの12分類(色は:rootの--tok-*カスタムプロパティ、
+   src/ui/editorSettings.jsのプリセット/個別カスタマイズで上書きされる) */
+.tok-header { color: var(--tok-header); }
+.tok-track { color: var(--tok-track); font-weight: 700; }
+.tok-note { color: var(--tok-note); }
+.tok-rest { color: var(--tok-rest); }
+.tok-cmd-length { color: var(--tok-cmd-length); }
+.tok-cmd-volume { color: var(--tok-cmd-volume); }
+.tok-cmd-pitch { color: var(--tok-cmd-pitch); }
+.tok-cmd-perf { color: var(--tok-cmd-perf); }
+.tok-cmd-special { color: var(--tok-cmd-special); }
+.tok-def-envelope { color: var(--tok-def-envelope); font-weight: 700; }
+.tok-def-tone { color: var(--tok-def-tone); font-weight: 700; }
+.tok-comment { color: var(--tok-comment); }
 
 /* オーバーレイの各行を独立したブロックにして再レイアウトを行内に閉じ込める
    (syntaxHighlight.jsのwrapLine参照。文字数の多いMML再生時のハイライトのカクつき対策)。
@@ -747,14 +808,36 @@ button.secondary {
 .kbd-speed-range { flex: none; width: 140px; accent-color: var(--accent); cursor: pointer; }
 .kbd-speed-value { flex: none; width: 32px; color: #e6e6ef; }
 
-/* ウィンドウのタイトル行に置く版(鍵盤表示のタイトル右、閉じるボタンの手前)。本体側の下線/余白は不要 */
+/* ウィンドウのタイトル行に置く版(鍵盤表示のタイトル右、閉じるボタンの手前)。本体側の下線/余白は不要。
+   margin-leftはマスター音量バー側(直前に挿入される、こちらが先頭)に付ける */
 .kbd-speed--header {
+  padding: 0;
+  border-bottom: none;
+  color: #cfcfe0;
+}
+.kbd-speed--header .kbd-speed-range { width: 90px; }
+
+/* マスター音量バー(速度バーのすぐ左)。構造・挙動はkbd-speedと同じ */
+.kbd-mastervol {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: #9999aa;
+  border-bottom: 1px solid #3d3d4a;
+}
+.kbd-mastervol-label { flex: none; }
+.kbd-mastervol-range { flex: none; width: 140px; accent-color: var(--accent); cursor: pointer; }
+.kbd-mastervol-value { flex: none; width: 34px; color: #e6e6ef; }
+.kbd-mastervol--header {
   padding: 0;
   border-bottom: none;
   color: #cfcfe0;
   margin-left: auto;
 }
-.kbd-speed--header .kbd-speed-range { width: 90px; }
+.kbd-mastervol--header .kbd-mastervol-range { width: 90px; }
 
 .kbd-header {
   display: flex;
@@ -876,6 +959,120 @@ button.secondary {
   border-color: var(--accent);
 }
 
+/* --- カラー設定モーダル (src/ui/editorSettings.js) --- */
+.es-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.es-modal {
+  width: min(460px, 92vw);
+  max-height: 85vh;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  display: flex;
+  flex-direction: column;
+  color: var(--text);
+}
+.es-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+.es-modal-close {
+  background: transparent;
+  color: var(--text);
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.es-modal-close:hover { opacity: 0.7; }
+.es-modal-body {
+  padding: 12px 14px;
+  overflow-y: auto;
+}
+.es-section { margin-bottom: 14px; }
+.es-section h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  opacity: 0.75;
+}
+.es-preset--custom { font-weight: 400; opacity: 0.7; }
+.es-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.es-preset {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  background: #14141a;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+  cursor: pointer;
+  color: var(--text);
+}
+.es-preset:hover { border-color: var(--accent); }
+.es-preset--active { outline: 2px solid var(--accent); outline-offset: 1px; }
+.es-preset-swatches {
+  display: flex;
+  gap: 2px;
+}
+.es-preset-swatches span {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+.es-preset-name { font-size: 11px; }
+.es-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+.es-row-label { font-size: 12px; }
+.es-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid #55556a;
+  flex: none;
+}
+.es-swatch:hover { border-color: var(--accent); }
+.es-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+.es-modal-footer button {
+  background: #3d3d4a;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.es-modal-footer button:hover { border-color: var(--accent); }
+
 .kbd-mute {
   flex: none;
   width: 14px;
@@ -932,13 +1129,15 @@ button.secondary {
 }
 
 .kbd-vol-wrap {
+  position: relative; /* ch別音量スライダー(.kbd-vol-slider)/ツールチップの絶対配置の基準 */
   flex: none;
   width: 40px;
   height: 8px;
   background: #14141a;
   border: 1px solid #3d3d4a;
   border-radius: 3px;
-  overflow: hidden;
+  /* ツールチップ(.kbd-vol-tooltip)を上にはみ出させて表示するためoverflow:hiddenは
+     付けない(.kbd-vol-bar自体もborder-radiusを持つため見た目上のクリップは実害が薄い)。 */
 }
 
 .kbd-vol-bar {
@@ -947,6 +1146,76 @@ button.secondary {
   width: 0%;
   border-radius: 3px;
   transition: width 0.04s linear, background 0.04s;
+}
+
+/* ch別音量スライダー: 普段は薄い半透明で存在に気づける程度、ホバー/ドラッグ中だけ
+   はっきり見せる。ネイティブrange inputのトラック描画は消し、つまみだけ細い縦棒にする。 */
+.kbd-vol-slider {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0.18;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  transition: opacity 0.1s;
+}
+.kbd-vol-slider:hover,
+.kbd-vol-slider:focus-visible {
+  opacity: 0.6;
+}
+.kbd-vol-slider.dragging {
+  opacity: 0.9;
+}
+.kbd-vol-slider::-webkit-slider-runnable-track {
+  background: transparent;
+  height: 100%;
+}
+.kbd-vol-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 4px;
+  height: 12px;
+  margin-top: -2px;
+  background: #fff;
+  border-radius: 2px;
+}
+.kbd-vol-slider::-moz-range-track {
+  background: transparent;
+  height: 100%;
+  border: none;
+}
+.kbd-vol-slider::-moz-range-thumb {
+  width: 4px;
+  height: 12px;
+  background: #fff;
+  border: none;
+  border-radius: 2px;
+}
+
+.kbd-vol-tooltip {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 3px;
+  padding: 1px 5px;
+  background: #000;
+  color: #fff;
+  font-size: 9px;
+  font-family: var(--mono);
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s;
+  z-index: 5;
+}
+.kbd-vol-tooltip.visible {
+  opacity: 1;
 }
 
 .kbd-vol-num {

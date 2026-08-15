@@ -165,6 +165,24 @@
     this.tables = new Map(); // index(@EP<N>の番号) -> { values, loop }
     this.keyToIndex = new Map();
     this.nextIndex = 0;
+    // @MP<N>(ビブラート、{delay,speed,depth})用の独立した番号空間・重複排除マップ。
+    // EPと違い、MPは本文側コマンド(MP<n>)がdelay引数を取れない(lexer.js参照。
+    // EP<n>,<delay>のような拡張が無い)ため、delayもテーブル自体のキーに含める必要がある。
+    this.vibratoTables = new Map(); // index(@MP<N>の番号) -> { delay, speed, depth }
+    this.vibratoKeyToIndex = new Map();
+    this.nextVibratoIndex = 0;
+  };
+
+  // {delay,speed,depth}が完全一致する@MP<n>を再利用し、無ければ新規登録する。
+  MML.Convert.PitchEnvelopeRegistry.prototype.registerVibrato = function (mp) {
+    const key = mp.delay + ',' + mp.speed + ',' + mp.depth;
+    let idx = this.vibratoKeyToIndex.get(key);
+    if (idx === undefined) {
+      idx = this.nextVibratoIndex++;
+      this.vibratoKeyToIndex.set(key, idx);
+      this.vibratoTables.set(idx, mp);
+    }
+    return idx;
   };
 
   function shapeKey(shape) {
@@ -274,28 +292,150 @@
     return { target, duration };
   }
 
+  // ── ビブラートコマンド(DESIGN-PITCH.md 別プロジェクトB、gate解除は2026-08-15) ──
+  // P-5「周期的振動(三角形状)→MP<n>」の実装。別プロジェクトBでcompiler.jsのMPが
+  // lfo_sub/warizan_startの厳密移植になった(2026-08-11)後も、抽出側(ここ)は
+  // 「MPは近似実装だった名残」でしばらく常にループEP<n>を使い続けていた
+  // (gateが実装完了後も外されないまま残っていた、2026-08-15にユーザー指摘で発覚・解消)。
+  // 検出側(classifyPitchMod)は無変更のまま、type:'periodic'の結果を後段(このファイル内)
+  // でさらに判定する: 「MPの`lfo_sub`(delay無しでオシレーション形状だけを見る)で
+  // 寸分違わず再現できる、階段状の対称往復振動か」を検査し、再現できればMP<n>
+  // (3パラメータだけの軽量コマンド、テーブルは{delay,speed,depth}の3値のみ)へ、
+  // できなければ従来通りループEPテーブルへ回す(fitPortamentoと全く同じ「シミュレート
+  // して安全に妥協しない」設計方針)。
+  const MAX_MP_SPEED = 255, MAX_MP_DEPTH = 255; // @MP<n>={delay,speed,depth}は各値1byte幅
+                                                 // (mckBytecode.js/ppmckDriver.js側、delay/speed/depth共通)
+
+  // compiler.jsのvibratoSequence(lfo_sub厳密移植)と同一アルゴリズムをここでも独立に持つ
+  // (ceilDivPpmckと同じ理由=P-3で共有しない)。delay=0固定(delayはpitchModが別途返すため、
+  // ここでは純粋なオシレーション形状の照合だけを行う)。
+  function simulateVibrato(quarter, rawDepth, dur, direction) {
+    let stepSize, stepInterval;
+    if (quarter === rawDepth) { stepSize = 1; stepInterval = 1; }
+    else if (quarter > rawDepth) { stepInterval = ceilDivPpmck(quarter, rawDepth); stepSize = 1; }
+    else { stepSize = ceilDivPpmck(rawDepth, quarter); stepInterval = 1; }
+    const seq = new Array(dur);
+    let reverseCounter = quarter, adcSbcCounter = stepInterval, dir = direction, value = 0;
+    for (let t = 0; t < dur; t++) {
+      if (reverseCounter === quarter * 2) { reverseCounter = 0; dir = -dir; }
+      if (adcSbcCounter === stepInterval) { adcSbcCounter = 0; value += dir * stepSize; }
+      reverseCounter++; adcSbcCounter++;
+      seq[t] = value;
+    }
+    return seq;
+  }
+
+  // periodFn(freqを生レジスタへ写す関数)が増加関数か減少関数かを実測判定する
+  // (compiler.jsのperiodFnIncreasingと全く同じ2点比較、独立に持つ=P-3)。
+  function periodFnIncreasingLocal(periodFn) {
+    return periodFn(2000) > periodFn(200);
+  }
+
+  // 周期的ビブラート(classifyPitchModのperiodic、1周期分のvalues)がMP<n>の
+  // {speed,depth}パラメータ空間(lfo_sub、ceil除算の階段状LFO)で寸分違わず再現できるか
+  // 検査する。再現できれば{speed,depth}を、できなければnullを返す(呼び出し側は
+  // 従来通りループEPテーブルへフォールバックする)。
+  //
+  // directionUp: 出力先チップの周波数方向。true=周波数レジスタ(値が上がるほど音程が
+  // 上がる: FDS/N163)、false=周期レジスタ(値が下がるほど音程が上がる: 2A03/VRC6/
+  // MMC5/FME7)。compiler.jsのperiodFnIncreasing→vibratoSequence呼び出しと完全に同じ
+  // 規則で、呼び出し元が出力先チャンネルのチップに合わせて渡す必要がある(渡し間違えると
+  // 実際にMPで再コンパイルした時だけ逆位相になる=ここでのbit一致確認をすり抜けてしまう
+  // 唯一のポイントなので注意)。VRC7はEP/MP対象外(fnum/blockの対数空間)なので
+  // directionUpをundefinedのまま渡せば自動的にフィットを試みない。
+  //
+  // ★探索範囲: 観測周期period が4の倍数でなければ不採用(quarter=period/4が整数に
+  // ならないと lfo_sub の基本周期4*quarterと噛み合わない。quarter>depthの場合は
+  // ceil除算の噛み合わせで真の周期が4*quarterより長くなることがあるが、そのケースは
+  // 下の「3周期ぶん完全一致」チェックで自然に弾かれる=安全側にEPへフォールバックする)。
+  // quarterは上記でただ1通りに決まるため、depthだけを観測振幅(peak)近傍で総当たりする。
+  //
+  // ★位相はvalues[0]がそのままsim[0](オシレーション開始直後の最初のステップ済み値)と
+  // 一致することを要求する(任意回転は許容しない)。理由: vibratoSequenceは「delay
+  // フレームだけ0を保持し、その直後は必ず自前の初期状態(reverseCounter=quarter,
+  // adcSbcCounter=stepInterval,value=0)から新規にオシレーションを開始する」実装であり、
+  // ノート開始のたびに位相をリセットする(=途中の任意の位相から始めることはできない、
+  // かつsim自体は最初の1フレーム目から必ずステップ済みの非0値になり、0そのものには
+  // ならない)。
+  //
+  // ★ただし「values先頭の連続0」だけは特別扱いしてdelay側へ吸収する。classifyPitchModは
+  // (EP用途では位相を気にする理由が無いため)観測データの0交差を「delay」側に含めるか
+  // 「valuesの先頭」に含めるかを一意に決めない=前方一致で複数の(start,period)が同等に
+  // 有効なため、実測で「valuesの先頭が0(オシレーション自身の自然な0交差)」という
+  // 決定をしがちだと確認済み(delay=5で生成した合成データがdelay=4+values=[0,-2,...]と
+  // 分類され、素朴にpitchMod.delayをそのまま使うと1フレームずれた誤った波形になる、
+  // 実装時に発覚)。0は「delayホールド中の値」でもあるため、この曖昧さは
+  // 「valuesの先頭の連続0をdelay側の延長とみなす」ことで一意に解消できる(0以外の
+  // 値は延長候補になり得ない=sim自体が0を返さないため、この吸収は安全側の補正であり
+  // 妥協ではない)。吸収した後の残りの列がsim[0..]と寸分違わず一致することを要求する
+  // (先頭以外の回転は引き続き許容しない)。
+  const MAX_VIBRATO_FIT_PERIOD = 64; // MAX_PERIODと同じ(classifyPitchModが返す周期の上限)
+  const MAX_MP_DELAY = 255; // @MP<n>のdelayも1byte幅(mckBytecode.js/ppmckDriver.js側)
+
+  function fitVibrato(values, baseDelay, directionUp) {
+    if (directionUp == null) return null;
+    const period = values.length;
+    if (period < 4 || period % 4 !== 0 || period > MAX_VIBRATO_FIT_PERIOD) return null;
+    let leadingZeros = 0;
+    while (leadingZeros < period && values[leadingZeros] === 0) leadingZeros++;
+    if (leadingZeros >= period) return null; // 全区間0(あり得ないはずだが念のため)
+    const delay = baseDelay + leadingZeros;
+    if (delay > MAX_MP_DELAY) return null;
+    const quarter = period / 4;
+    if (quarter > MAX_MP_SPEED) return null;
+    const direction = directionUp ? 1 : -1;
+    const peak = Math.max(...values.map(v => Math.abs(v)));
+    const depthLo = Math.max(1, peak - quarter - 1);
+    const depthHi = Math.min(MAX_MP_DEPTH, peak + quarter + 1);
+    const simDur = period * 3; // 3周期ぶん確認し、真に無限に繰り返し可能なことを保証する
+    for (let rawDepth = depthLo; rawDepth <= depthHi; rawDepth++) {
+      const sim = simulateVibrato(quarter, rawDepth, simDur, direction);
+      let ok = true;
+      for (let i = 0; i < simDur; i++) {
+        if (sim[i] !== values[(i + leadingZeros) % period]) { ok = false; break; }
+      }
+      if (ok) return { delay, speed: quarter, depth: rawDepth };
+    }
+    return null;
+  }
+
   // pitchSeqを解析し、{kind:'portamento', target, duration, delay} |
-  // {kind:'ep', index, delay} | nullを返す(呼び出し側はkindで分岐してev.portamento
-  // またはev.pitchEp/ev.pitchEpDelayを設定する)。変調が見つからなければnull
-  // (呼び出し側はD<n>のみを使うべき合図)。
-  MML.Convert.PitchEnvelopeRegistry.prototype.assign = function (pitchSeq) {
+  // {kind:'vibrato', index} | {kind:'ep', index, delay} | nullを返す(呼び出し側は
+  // kindで分岐してev.portamento/ev.vibrato/ev.pitchEp+ev.pitchEpDelayを設定する)。
+  // 変調が見つからなければnull(呼び出し側はD<n>のみを使うべき合図)。
+  //
+  // directionUp: 周期的ビブラート(periodic)をMP<n>へフィットする際に使う出力先チップの
+  // 周波数方向(fitVibrato参照)。省略時(undefined)はMPへのフィットを試みず、
+  // 従来通り常にループEPテーブルを使う(VRC7=EP/MP対象外チャンネルの既定動作と一致)。
+  MML.Convert.PitchEnvelopeRegistry.prototype.assign = function (pitchSeq, directionUp) {
     const pitchMod = MML.Convert.classifyPitchMod(pitchSeq);
     if (!pitchMod) return null;
     if (pitchMod.type === 'ramp') {
       const fit = fitPortamento(pitchMod.values);
       if (fit) return { kind: 'portamento', target: fit.target, duration: fit.duration, delay: pitchMod.delay };
+    } else if (pitchMod.type === 'periodic') {
+      const fit = fitVibrato(pitchMod.values, pitchMod.delay, directionUp);
+      if (fit) {
+        const idx = this.registerVibrato({ delay: fit.delay, speed: fit.speed, depth: fit.depth });
+        return { kind: 'vibrato', index: idx };
+      }
     }
     const registered = this.registerShape(pitchMod);
     return registered ? { kind: 'ep', index: registered.index, delay: registered.delay } : null;
   };
 
   MML.Convert.PitchEnvelopeRegistry.prototype.defLines = function () {
-    return Array.from(this.tables.keys()).sort((a, b) => a - b).map(i => {
+    const epLines = Array.from(this.tables.keys()).sort((a, b) => a - b).map(i => {
       const t = this.tables.get(i);
       const parts = t.values.map(String);
       if (t.loop != null) parts.splice(t.loop, 0, '|');
       return `@EP${i} = { ${parts.join(' ')} }`;
     });
+    const mpLines = Array.from(this.vibratoTables.keys()).sort((a, b) => a - b).map(i => {
+      const t = this.vibratoTables.get(i);
+      return `@MP${i} = { ${t.delay}, ${t.speed}, ${t.depth} }`;
+    });
+    return [...epLines, ...mpLines];
   };
 
   // periodFn(freq, ev): applyPitchDetune/detectChorusDetuneと同じ2引数版
@@ -312,11 +452,14 @@
   // (MML出力側でのgetter用にイベントオブジェクトを直接書き換える。detectChorusDetuneが
   // ev.detuneを直接書き込むのと同じ流儀)。
   MML.Convert.assignPitchEnvelope = function (channels, periodFn, pitchReg) {
+    // このperiodFn(=呼び出し元が渡す借用先チップの生周期換算関数)自体の増減方向を
+    // 1回だけ調べ、fitVibratoへ渡す(compiler.jsのperiodFnIncreasingと同じ2点比較)。
+    const directionUp = periodFnIncreasingLocal(periodFn);
     for (const ch of channels) {
       for (const ev of ch.events) {
         if (ev.note === null || !ev.freqSeq || ev.freqSeq.length === 0) continue;
         const rescaled = MML.Convert.rescalePitchSeqFromFreq(ev.freqSeq, periodFn, ev);
-        const assigned = pitchReg.assign(rescaled);
+        const assigned = pitchReg.assign(rescaled, directionUp);
         MML.Convert.applyPitchAssignment(ev, assigned);
       }
       // スラー分割(別プロジェクトE、2026-08-12): pitchEp/portamentoが確定した直後に
@@ -327,13 +470,16 @@
     }
   };
 
-  // pitchReg.assign()の戻り値({kind:'portamento',...}|{kind:'ep',...}|null)をevへ
-  // 適用する共通ヘルパー(2026-08-11 別プロジェクトC)。呼び出し元(assignPitchEnvelope・
-  // 各*2mmlのtoPitchFields相当)で同じkind分岐を重複させないためにここへ集約する。
+  // pitchReg.assign()の戻り値({kind:'portamento',...}|{kind:'vibrato',...}|{kind:'ep',...}|null)
+  // をevへ適用する共通ヘルパー(2026-08-11 別プロジェクトC、2026-08-15 別プロジェクトB gate解除)。
+  // 呼び出し元(assignPitchEnvelope・各*2mmlのtoPitchFields相当)で同じkind分岐を
+  // 重複させないためにここへ集約する。
   MML.Convert.applyPitchAssignment = function (ev, assigned) {
     if (!assigned) return;
     if (assigned.kind === 'portamento') {
       ev.portamento = { target: assigned.target, duration: assigned.duration, delay: assigned.delay };
+    } else if (assigned.kind === 'vibrato') {
+      ev.vibrato = assigned.index;
     } else {
       ev.pitchEp = assigned.index;
       ev.pitchEpDelay = assigned.delay;
@@ -689,7 +835,7 @@
     // 出力されて実際にどの音符もEN<n>を参照しないという「検出したのに黙って
     // 捨てられる」退行になる(実測: SPC変換で発覚)。
     return !!ev && ev.note != null && (ev.end - ev.start) >= MIN_SLUR_PLATEAU_FRAMES &&
-      ev.pitchEp == null && ev.portamento == null && ev.noteEnv == null;
+      ev.pitchEp == null && ev.portamento == null && ev.noteEnv == null && ev.vibrato == null;
   }
 
   MML.Convert.markSlurTies = function (events) {
