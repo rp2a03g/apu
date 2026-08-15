@@ -2731,95 +2731,108 @@ ${playLines.join('\n')}
     RTS
 
 ; --- チャンネルX(0-N-1)を1フレーム分処理する ---
+; 音符継続中(カウンタがまだ尽きていない)は、継続効果のtick(TICK_VOL_FX=音量+デューティ側、
+; TICK_PITCH_FX=周期側)だけを進める。カウンタが尽きたフレーム(READ_DATA経由で次のデータを
+; 読む「読取りフレーム」)では、通常の音符(RD_NOTE_BODY)は全効果を再初期化するので継続tickは
+; 不要だが、キーオン無しでデータを読み進めるだけのオペコード(RD_PITCHSHIFT/RD_PITCHBREAK/
+; RD_WAIT/RD_REST/RD_GATEOFFVR/RD_GATEOFFVRSD)は自分で同じtickを1回肩代わりする(そうしないと
+; compiler.js側の連続したtickと1フレームずれる。★2026-08-16: 以前はRD_PITCHBREAKだけが
+; 周期側を肩代わりし、音量側(@v)は誰も肩代わりしていなかったため、タイ境界のフレームだけ
+; @vが1フレーム足踏みしていた) ---
 SERVICE_CH:
     DEC ${hex(CNT)},X
     BEQ SERVICE_CH_READ
-${envTableCount === 0 && !usesFreqOnly && !usesVr && !usesDutyEnv ? '    JMP SERVICE_CH_END' : `${usesDutyEnv ? `    ; @@<n>(デューティ=音色エンベロープ)が選択中なら、このフレーム分tickを進めて
-    ; DUTY,Xを更新する。デューティは音量と同じレジスタに同居しているので、
-    ; 直後の@v/@vr側がWRITE_VOL_ONLYを呼ぶならそちらがまとめて反映する。
-    ; どちらも動いていない(v<n>固定音量)ときだけ、ここで自分で書き込む
-    LDA ${hex(DUTYSEL)},X
+${usesVolOnly ? '    JSR TICK_VOL_FX' : ''}
+${usesFreqOnly ? `    JSR TICK_PITCH_FX
+    BEQ SERVICE_CH_END
+    JSR WRITE_FREQ_ONLY` : ''}
+SERVICE_CH_END:
+    RTS
+SERVICE_CH_READ:
+    JMP READ_DATA
+${usesVolOnly ? `
+; --- 音量側の継続効果(duty tick + @v tick + @vr tick)を1フレームぶん進める(X=チャンネル
+; 番号)。@@<n>(デューティ=音色エンベロープ)が選択中ならまずtickを進めてDUTY,Xを更新する
+; (デューティは音量と同じレジスタに同居しているので、直後の@v/@vr側がWRITE_VOL_ONLYを
+; 呼ぶならそちらがまとめて反映する。どちらも動いていない(v<n>固定音量)ときだけ、
+; ここで自分で書き込む)。次にソフトウェア音量エンベロープ(@v、ENVACT)が有効ならtickを
+; 進めて音量レジスタ"のみ"書き直す(周期/コントロールレジスタは書き直さない。
+; WRITE_VOL_ONLYのコメント参照)。@vr(リリースエンベロープ)再生中(RELPLAY)も同様
+; (ENVACTはRD_RESTで既に0クリア済みなので通常は同一フレームで両方発火することは無い。
+; PS音符の直前で@vが再選択された場合だけ両方立ちうるが、その場合は後に書くリリース側が勝つ) ---
+TICK_VOL_FX:
+${usesDutyEnv ? `    LDA ${hex(DUTYSEL)},X
     CMP #$FF
-    BEQ SVC_NODUTY
+    BEQ TVF_NODUTY
     INC ${hex(DUTYTICK)},X
     JSR DUTY_LOOKUP
     LDA #$00
 ${envTableCount > 0 ? `    ORA ${hex(ENVACT)},X` : ''}
 ${usesVr ? `    ORA ${hex(RELPLAY)},X` : ''}
-    BNE SVC_NODUTY
+    BNE TVF_NODUTY
     JSR WRITE_VOL_ONLY
-SVC_NODUTY:
-` : ''}${envTableCount > 0 ? `    ; 音符継続中(カウンタがまだ尽きていない)。ソフトウェア音量エンベロープが
-    ; 有効なら、このフレーム分tickを進めて音量レジスタ"のみ"書き直す(周期/コントロール
-    ; レジスタは書き直さない。WRITE_VOL_ONLYのコメント参照)
-    LDA ${hex(ENVACT)},X
-    BEQ SVC_NOENV
+TVF_NODUTY:` : ''}
+${envTableCount > 0 ? `    LDA ${hex(ENVACT)},X
+    BEQ TVF_NOENV
     INC ${hex(ENVTICK)},X
     JSR ENV_LOOKUP
     JSR WRITE_VOL_ONLY
-SVC_NOENV:` : ''}
-${usesVr ? `    ; @vr(リリースエンベロープ、2026-08-13)再生中なら、このフレーム分tickを
-    ; 進めて音量レジスタ"のみ"書き直す(ENVACT/WRITE_VOL_ONLYの休符版。ENVACTは
-    ; RD_RESTで既に0クリア済みなので同一フレームで両方発火することは無い)
-    LDA ${hex(RELPLAY)},X
-    BEQ SVC_NOREL
+TVF_NOENV:` : ''}
+${usesVr ? `    LDA ${hex(RELPLAY)},X
+    BEQ TVF_NOREL
     INC ${hex(RELTICK)},X
     JSR REL_LOOKUP
     JSR WRITE_VOL_ONLY
-SVC_NOREL:` : ''}
-${usesEp ? `    ; EP<n>が有効なら、このフレーム分tickを進める(周期/周波数レジスタの再書込み自体は
-    ; ENVACTと独立にSVC_FREQCHECKでまとめて行う。@vとD/EP/MPは音量側/周波数側で
-    ; 完全に独立したパスなので、それぞれ個別に判定する)。delayの消化・テーブル参照は
-    ; EP_STEP内で行う(RD_NOTEと共通のルーチン、2026-08-11 別プロジェクトA)
+TVF_NOREL:` : ''}
+    RTS` : ''}
+${usesFreqOnly ? `
+; --- 周期側の継続効果(EP/MP/PT/PS/EN)を1フレームぶん進める(X=チャンネル番号)。
+; 周期/周波数レジスタ自体は書かず、A=「いずれかの効果が有効(=呼び出し側がWRITE_FREQ_ONLYを
+; 呼ぶべき)なら非0」(Zフラグもそれに応じてセット)で返す。@vとD/EP/MPは音量側/周波数側で
+; 完全に独立したパスなので、それぞれ個別に判定する ---
+TICK_PITCH_FX:
+${usesEp ? `    ; EP<n>: delayの消化・テーブル参照はEP_STEP内で行う(RD_NOTEと共通のルーチン、
+    ; 2026-08-11 別プロジェクトA)
     LDA ${hex(EPACT)},X
-    BEQ SVC_NOEP
+    BEQ TPF_NOEP
     JSR EP_STEP
-SVC_NOEP:` : ''}
+TPF_NOEP:` : ''}
 ${usesMp ? `    LDA ${hex(MPACT)},X
-    BEQ SVC_NOMP
+    BEQ TPF_NOMP
     JSR LFO_SUB
-SVC_NOMP:` : ''}
-${usesPortamento ? `    ; PT<n>が有効なら、このフレーム分の状態を進める(delayの消化・ステップ加算は
-    ; PT_STEP内で行う、2026-08-11 別プロジェクトC)
+TPF_NOMP:` : ''}
+${usesPortamento ? `    ; PT<n>: delayの消化・ステップ加算はPT_STEP内で行う(2026-08-11 別プロジェクトC)
     LDA ${hex(PTACT)},X
-    BEQ SVC_NOPT
+    BEQ TPF_NOPT
     JSR PT_STEP
-SVC_NOPT:` : ''}
-${usesPitchShift ? `    ; PS(ポルタメント、実機準拠、2026-08-13)が有効なら、このフレーム分の状態を進める。
+TPF_NOPT:` : ''}
+${usesPitchShift ? `    ; PS(ポルタメント、実機準拠、2026-08-13)。
     ; ★PS_STEPは目標(オフセット0)に到達すると自らPSACTを0クリアするため、
     ; WRITE_FREQ_ONLYを呼ぶかどうかの判定にPS_STEP呼び出し後のPSACTを使うと、
     ; ちょうど目標に到達した最後のフレームだけ書き込みが漏れる(クランプした値が
     ; レジスタへ反映されないまま次のフレームまでレジスタが古い値を保持し続ける)
     ; バグになる。呼ぶ前の値を${hex(CDA)}(チャンネル非依存の使い捨てスクラッチ、
-    ; 通常はRD_PORTAMENTO/RD_PITCHENVのCEILDIV専用だがSERVICE_CH実行中には未使用)
+    ; 通常はRD_PORTAMENTO/RD_PITCHENVのCEILDIV専用だがこのルーチン実行中には未使用)
     ; へ退避しておき、判定にはそちらを使う。★PERLO2はこの直後のEN_STEP(2026-08-14
     ; 追加)がテーブル長比較の一時スクラッチとして使うため、ここでは使えない
     ; (使うとEN_STEP実行後にPS_STEP呼び出し前のPSACT値が失われる)
     LDA ${hex(PSACT)},X
     STA ${hex(CDA)}
-    BEQ SVC_NOPS
+    BEQ TPF_NOPS
     JSR PS_STEP
-SVC_NOPS:` : ''}
-${usesEn ? `    ; EN<n>が有効なら、このフレーム分tickを進めて累積値を更新する(テーブル探索・
-    ; 累積加算・ループ処理はEN_STEP内で行う、RD_NOTEと共通のルーチン)
+TPF_NOPS:` : ''}
+${usesEn ? `    ; EN<n>: テーブル探索・累積加算・ループ処理はEN_STEP内で行う(RD_NOTEと共通)
     LDA ${hex(ENACT)},X
-    BEQ SVC_NOEN
+    BEQ TPF_NOEN
     JSR EN_STEP
-SVC_NOEN:` : ''}
-${usesFreqOnly ? `    LDA #$00
+TPF_NOEN:` : ''}
+    LDA #$00
 ${usesEp ? `    ORA ${hex(EPACT)},X` : ''}
 ${usesMp ? `    ORA ${hex(MPACT)},X` : ''}
 ${usesPortamento ? `    ORA ${hex(PTACT)},X` : ''}
 ${usesPitchShift ? `    ORA ${hex(CDA)}` : ''}
 ${usesEn ? `    ORA ${hex(ENACT)},X` : ''}
-    BEQ SVC_NOFREQ
-    JSR WRITE_FREQ_ONLY
-SVC_NOFREQ:` : ''}
-    JMP SERVICE_CH_END`}
-SERVICE_CH_READ:
-    JSR READ_DATA
-SERVICE_CH_END:
-    RTS
+    RTS` : ''}
 
 ; --- A=[CURPTR]を読み、CURPTRを1進める ---
 READ_BYTE:
@@ -3009,9 +3022,16 @@ RD_VOLENV:
     STA ${hex(ENVSEL)},X
     LDA #$01
     STA ${hex(ENVACT)},X
-    LDA #$00
+    ; ENVTICKは$FF(=tick0の1つ手前)で初期化する(2026-08-16)。通常の音符ではRD_NOTE_BODYが
+    ; 改めて0にしてtick0の値を書くので無関係だが、直後がPS音符(RD_PITCHSHIFT=キーオン
+    ; 無し)の場合はTICK_VOL_FXのINCでちょうど0になり、compiler.jsの「@vの選択が変わった
+    ; PS音符はその先頭からtick0で再スタート」と一致する(0で初期化すると先頭がtick1に
+    ; なってしまう)。RD_VOLENVは必ず同じ読取り内で音長を伴うオペコードに続くので、
+    ; $FFのままSERVICE_CHのINCに達することは無い
+    LDA #$FF
     STA ${hex(ENVTICK)},X
-${usesFme7 ? `    STA ${hex(FMEEACT)},X  ; @v<n>とFME7ハードウェアエンベロープは排他` : ''}
+${usesFme7 ? `    LDA #$00
+    STA ${hex(FMEEACT)},X  ; @v<n>とFME7ハードウェアエンベロープは排他` : ''}
     JMP RD_LOOP` : ''}
 
 ${usesToneState ? `RD_TONE:
@@ -3099,6 +3119,13 @@ RD_NOTEENV_ON:
     STA ${hex(ENSEL)},X
     LDA #$01
     STA ${hex(ENACT)},X
+    ; 選択時点でtick/累積値も再初期化する(2026-08-16)。通常の音符ではRD_NOTE_BODYが
+    ; どのみち再初期化するので無関係だが、直後がPS音符(キーオン無し、RD_PITCHSHIFT)の
+    ; 場合に「選択が変わった効果はPS音符の先頭からtick0で再スタート」(compiler.jsの
+    ; psGlideFxOffsets)と一致させるため。RD_PITCHENV/RD_VIBRATO/RD_PORTAMENTOも同様
+    LDA #$00
+    STA ${hex(ENTICK)},X
+    STA ${hex(ENVAL)},X
     JMP RD_LOOP` : ''}
 ${usesEp ? `
 ; --- EP<n>,<delay>ピッチエンベロープ選択(0xF8): 次の2バイトが[ROM上のコンパクトな
@@ -3121,6 +3148,7 @@ RD_PITCHENV_ON:
     STA ${hex(EPSEL)},X
     JSR READ_BYTE
     STA ${hex(EPDELAYSET)},X
+    STA ${hex(EPDELAY)},X   ; 選択時点でdelay/tickも再初期化(2026-08-16、RD_NOTEENV_ONのコメント参照)
     LDA #$01
     STA ${hex(EPACT)},X
     LDA #$00
@@ -3157,7 +3185,7 @@ RD_VIBRATO_ON:
     STA ${hex(MPSTEPINT)},X
     LDA #$01
     STA ${hex(MPSTEPSZ)},X
-    JMP RD_LOOP
+    JMP RDV_DONE
 RDV_DEPTHBIG:
     ; rawDepth > quarter: stepSize=ceilDiv(rawDepth,quarter), stepInterval=1
     LDA ${hex(CDB)}
@@ -3170,7 +3198,34 @@ RDV_DEPTHBIG:
     STA ${hex(MPSTEPSZ)},X
     LDA #$01
     STA ${hex(MPSTEPINT)},X
-    JMP RD_LOOP` : ''}
+RDV_DONE:
+    ; 選択時点でLFO状態(delay/quarter/累積値)も再初期化する(2026-08-16、RD_NOTEENV_ONの
+    ; コメント参照。通常の音符ではRD_NOTE_BODYが改めて同じMP_INITを呼ぶ)
+    JSR MP_INIT
+    JMP RD_LOOP
+
+; --- MP<n>のLFO状態を音符先頭の初期状態にする(実機effect_init相当。X=チャンネル番号、
+; MPSEL/MPSTEPINTは設定済み前提)。呼び出し側がこの後LFO_SUBを1回呼んで1フレーム目
+; (delay=0なら即座に動き出す)の値まで進める ---
+MP_INIT:
+    LDA ${hex(MPSEL)},X
+    TAY
+    LDA MP_DELAY,Y
+    STA ${hex(MPSTARTCNT)},X
+    LDA MP_SPEED,Y
+    STA ${hex(MPREVCNT)},X
+    ASL A
+    STA ${hex(MPQUARTER2)},X
+    LDA ${hex(MPSTEPINT)},X
+    STA ${hex(MPADCCNT)},X
+    LDA #$00
+    STA ${hex(MPVALLO)},X
+    STA ${hex(MPVALHI)},X
+    LDA ${hex(CHTYPE)},X
+    TAY
+    LDA MP_DIR_TABLE,Y
+    STA ${hex(MPDIR)},X
+    RTS` : ''}
 ${usesPortamento ? `
 ; --- PT<target>,<duration>[,<delay>]ポルタメント選択(0xF9): 次の4バイトが
 ; [target下位,target上位,duration,delay]。duration=0を番兵としてoff(PTOF)を表す。
@@ -3217,7 +3272,7 @@ RD_PORTAMENTO_ABSDONE:
     STA ${hex(PTSTEPINT)},X
     LDA #$01
     STA ${hex(PTSTEPSZ)},X
-    JMP RD_LOOP
+    JMP RDP_DONE
 RD_PORTAMENTO_TARGETBIG:
     ; |target| > duration: stepSize=ceilDiv(|target|,duration), stepInterval=1
     LDA ${hex(CDB)}
@@ -3230,7 +3285,26 @@ RD_PORTAMENTO_TARGETBIG:
     STA ${hex(PTSTEPSZ)},X
     LDA #$01
     STA ${hex(PTSTEPINT)},X
-    JMP RD_LOOP` : ''}
+RDP_DONE:
+    ; 選択時点でPT状態も再初期化する(2026-08-16、RD_NOTEENV_ONのコメント参照。
+    ; 通常の音符ではRD_NOTE_BODYが改めて同じPT_INITを呼ぶ)
+    JSR PT_INIT
+    JMP RD_LOOP
+
+; --- PT<n>の状態(delay/duration/stepcnt/累積値)を音符先頭の初期状態にする(X=チャンネル
+; 番号、PTDELAYSET/PTDURSET/PTSTEPINTは設定済み前提)。呼び出し側がこの後PT_STEPを
+; 1回呼ぶ(EP_STEPと同じpost-increment単一ルーチン設計) ---
+PT_INIT:
+    LDA ${hex(PTDELAYSET)},X
+    STA ${hex(PTDELAY)},X
+    LDA ${hex(PTDURSET)},X
+    STA ${hex(PTDUR)},X
+    LDA ${hex(PTSTEPINT)},X
+    STA ${hex(PTSTEPCNT)},X
+    LDA #$00
+    STA ${hex(PTVALLO)},X
+    STA ${hex(PTVALHI)},X
+    RTS` : ''}
 
 ; OP_REST_SAME($E2、sticky音長): 直前の休符と同じ長さ。RESTLEN,Xから読み戻すだけで
 ; 音長バイトを持たない(RD_NOTE先頭の判定から飛んで来る)
@@ -3242,6 +3316,14 @@ RD_REST:
     STA ${hex(RESTLEN)},X  ; sticky音長を更新(OP_REST_SAMEが再利用する)
 RD_REST_GO:
     STA ${hex(CNT)},X
+${usesFreqOnly ? `    ; 読取りフレームぶんの周期側継続効果tick(SERVICE_CH冒頭コメント参照。休符中も
+    ; EP/MP/PT/ENは進み続けるので、この1フレームだけ止まらないようにする)。
+    ; SILENCE_CH(キーオフ)より前に行い、キーオン状態を伴う周波数書込みを持つチップ
+    ; でもキーオフが必ず後勝ちするようにする
+    JSR TICK_PITCH_FX
+    BEQ RR_NOFREQ
+    JSR WRITE_FREQ_ONLY
+RR_NOFREQ:` : ''}
 ${envTableCount > 0 ? `    LDA #$00\n    STA ${hex(ENVACT)},X   ; 休符中はソフトウェアエンベロープを進めない` : ''}
     ; ★2026-08-11修正(PT実装時の往復検証で発覚): EP<n>/MP<n>/PT<n>はここでEPACT/MPACT/
     ; PTACTをクリアしていなかった/していた版いずれも問題があった。compiler.js側は休符
@@ -3286,6 +3368,10 @@ ${usesGateOffVr ? `
 RD_GATEOFFVR:
     JSR READ_BYTE
     STA ${hex(CNT)},X
+${usesFreqOnly ? `    JSR TICK_PITCH_FX      ; 読取りフレームぶんの周期側継続効果tick(RD_RESTと同じ)
+    BEQ RGV_NOFREQ
+    JSR WRITE_FREQ_ONLY
+RGV_NOFREQ:` : ''}
 ${envTableCount > 0 ? `    LDA #$00\n    STA ${hex(ENVACT)},X` : ''}
 ${usesToneState ? `    JSR APPLY_REL_TONE` : ''}
 ${usesVr ? `    LDA ${hex(VRSEL)},X
@@ -3361,6 +3447,13 @@ ${usesDutyEnv ? `    ; 無音化する側の分岐ではデューティエンベ
 RD_WAIT:
     JSR READ_BYTE
     STA ${hex(CNT)},X
+    ; 音長255フレーム超の継続チャンク。読取りフレームだが音符は続いているので、
+    ; SERVICE_CHの継続フレームと同じtickを肩代わりする(SERVICE_CH冒頭コメント参照)
+${usesVolOnly ? '    JSR TICK_VOL_FX' : ''}
+${usesFreqOnly ? `    JSR TICK_PITCH_FX
+    BEQ RW_NOFREQ
+    JSR WRITE_FREQ_ONLY
+RW_NOFREQ:` : ''}
     JMP RD_RETURN
 ${usesPitchBreak ? `
 ; --- タイ(&)による異音程レガート(0xED、2026-08-12): 次の2バイトが[新ノート番号,音長]。
@@ -3371,32 +3464,16 @@ ${usesPitchBreak ? `
 ; このフレームはCNTがちょうど0になりSERVICE_CH本体の継続処理(EP_STEP/LFO_SUB/PT_STEP
 ; +WRITE_FREQ_ONLYの毎フレーム呼び出し)がスキップされてここへディスパッチされてくるため、
 ; そのぶんを肩代わりして1tickだけ進めてから書く(進めないとcompiler.js側のtickと
-; 1フレームずれる。RD_NOTEが音符アタック時に一度だけEP_STEP等を呼ぶのと対称の理由) ---
+; 1フレームずれる。RD_NOTEが音符アタック時に一度だけEP_STEP等を呼ぶのと対称の理由)。
+; ★2026-08-16: 音量側(@v、TICK_VOL_FX)も同じ理由で肩代わりする(以前は周期側だけ
+; だったため、タイ境界のフレームだけ@vが1フレーム足踏みしていた) ---
 RD_PITCHBREAK:
     JSR READ_BYTE
     STA ${hex(NOTE)},X
     JSR READ_BYTE
     STA ${hex(CNT)},X
-${usesEp ? `    LDA ${hex(EPACT)},X
-    BEQ RPB_NOEP
-    JSR EP_STEP
-RPB_NOEP:` : ''}
-${usesMp ? `    LDA ${hex(MPACT)},X
-    BEQ RPB_NOMP
-    JSR LFO_SUB
-RPB_NOMP:` : ''}
-${usesPortamento ? `    LDA ${hex(PTACT)},X
-    BEQ RPB_NOPT
-    JSR PT_STEP
-RPB_NOPT:` : ''}
-${usesPitchShift ? `    LDA ${hex(PSACT)},X
-    BEQ RPB_NOPS
-    JSR PS_STEP
-RPB_NOPS:` : ''}
-${usesEn ? `    LDA ${hex(ENACT)},X
-    BEQ RPB_NOEN
-    JSR EN_STEP
-RPB_NOEN:` : ''}
+${usesVolOnly ? '    JSR TICK_VOL_FX' : ''}
+    JSR TICK_PITCH_FX
     JSR WRITE_FREQ_ONLY
     JMP RD_RETURN
 ` : ''}
@@ -3499,23 +3576,7 @@ ${usesMp ? `    ; MP<n>も"この音符から"必ずdelay/quarterからリセッ
     ; t=0から通常のフレーム処理ループに入るのと同じ)
     LDA ${hex(MPACT)},X
     BEQ RD_NOTE_NOMP
-    LDA ${hex(MPSEL)},X
-    TAY
-    LDA MP_DELAY,Y
-    STA ${hex(MPSTARTCNT)},X
-    LDA MP_SPEED,Y
-    STA ${hex(MPREVCNT)},X
-    ASL A
-    STA ${hex(MPQUARTER2)},X
-    LDA ${hex(MPSTEPINT)},X
-    STA ${hex(MPADCCNT)},X
-    LDA #$00
-    STA ${hex(MPVALLO)},X
-    STA ${hex(MPVALHI)},X
-    LDA ${hex(CHTYPE)},X
-    TAY
-    LDA MP_DIR_TABLE,Y
-    STA ${hex(MPDIR)},X
+    JSR MP_INIT
     JSR LFO_SUB
 RD_NOTE_NOMP:` : ''}
 ${usesPortamento ? `    ; PT<n>も"この音符から"必ずdelay/duration/stepcnt/累積値を再初期化する
@@ -3523,15 +3584,7 @@ ${usesPortamento ? `    ; PT<n>も"この音符から"必ずdelay/duration/stepc
     ; MPのようなRD_NOTE専用の特別扱いは不要)
     LDA ${hex(PTACT)},X
     BEQ RD_NOTE_NOPT
-    LDA ${hex(PTDELAYSET)},X
-    STA ${hex(PTDELAY)},X
-    LDA ${hex(PTDURSET)},X
-    STA ${hex(PTDUR)},X
-    LDA ${hex(PTSTEPINT)},X
-    STA ${hex(PTSTEPCNT)},X
-    LDA #$00
-    STA ${hex(PTVALLO)},X
-    STA ${hex(PTVALHI)},X
+    JSR PT_INIT
     JSR PT_STEP
 RD_NOTE_NOPT:` : ''}
     JSR WRITE_FREQ_VOL
@@ -3545,7 +3598,18 @@ ${usesPitchShift ? `
 ; 変換し、PSVALLO/HI(APPLY_DETUNEが読む生オフセット)をoldReg-newRegで初期化する。
 ; アタック(音量/デューティ再書込み)は行わず、WRITE_FREQ_ONLYで周期/周波数レジスタのみ
 ; このフレーム分反映する(compiler.jsのpitchShiftOffsetSequence/writePitchModulation
-; のtick=0相当) ---
+; のtick=0相当)。
+; ★PS音符はキーオンではない(ppmck本家pitchshift_setupがeffect_initを通らないのと同じ)
+; ので、@v/@vr/EP/MP/PT/ENは前の音からそのまま継続する(@@<n>デューティエンベロープは
+; 対象外、compiler.jsのwritePsGlideVolume注記参照)。この読取りフレームはSERVICE_CHの
+; 継続処理がスキップされるため、TICK_VOL_FX/TICK_PITCH_FXで1tickぶん肩代わりする
+; (RD_PITCHBREAKと同じ理由。★2026-08-16: 以前は肩代わりしていなかったため、
+; PS音符の先頭フレームだけ@v等が1フレーム足踏みしcompiler.jsと食い違っていた)。
+; ★tickはoldReg/newRegの表引きより前に行う: EN(ノートエンベロープ)継続中は
+; LOOKUP_*_PERIODがNOTE+ENVALで表を引くので、このフレームのEN値で
+; グライド元/先を求める(compiler.jsのwritePitchModulationのen0と対応)。
+; PS音符の直前で選択が変わった効果(RD_VOLENV/RD_PITCHENV/RD_VIBRATO/RD_PORTAMENTO/
+; RD_NOTEENVが状態を再初期化済み)は、このtickでちょうどtick0の値になる ---
 RD_PITCHSHIFT:
     JSR READ_BYTE
     STA ${hex(PSNEWNOTE)}
@@ -3553,15 +3617,21 @@ RD_PITCHSHIFT:
     STA ${hex(CNT)},X
     LDA ${hex(CHTYPE)},X
     CMP #${hex(TYPE_2A03_PULSE_A)}
-    BEQ RPS_PULSE
+    BEQ RPS_GLIDE
     CMP #${hex(TYPE_2A03_PULSE_B)}
-    BEQ RPS_PULSE
+    BEQ RPS_GLIDE
     CMP #${hex(TYPE_2A03_TRI)}
-    BEQ RPS_TRI
+    BEQ RPS_GLIDE
     ; 対象外チップ: グライドせず通常のアタックとして扱う(音長は既に読み込み・設定済み)
     LDA ${hex(PSNEWNOTE)}
     STA ${hex(NOTE)},X
     JMP RD_NOTE_BODY
+RPS_GLIDE:
+${usesVolOnly ? '    JSR TICK_VOL_FX' : ''}
+    JSR TICK_PITCH_FX
+    LDA ${hex(CHTYPE)},X
+    CMP #${hex(TYPE_2A03_TRI)}
+    BEQ RPS_TRI
 RPS_PULSE:
     JSR LOOKUP_PULSE_PERIOD
     LDA ${hex(PERLO)}
