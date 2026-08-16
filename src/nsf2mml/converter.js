@@ -197,7 +197,22 @@
       const audible = constVol ? rawVol > 0 : true; // エンベロープモードは常に有音
       const duty = (r[0] >> 6) & 3;
       const freq = pulseFreq(period);
-      const note = (active && audible && freq > 0) ? freqToNote(freq) : null;
+      // スイープユニットによる強制ミュート(実機/emulator apu2a03.js PulseChannel.isMutedと同じ規則):
+      // スイープの有効/無効に関わらず、周期<8 または「目標周期(=period+(period>>shift)、
+      // negate時は減算)が$7FFを超える」ときチャンネルは無音になる。特に$4001/$4005=$00
+      // (negate=0, shift=0)のまま周期$400以上(o2a以下)の音符を書く曲では、レジスタ上は
+      // 音符に見えても実際には一切鳴らない(Batman Prototype 1曲目: 元曲は$4005=$00で
+      // Pulse2の低音が全て無音なのに、変換MMLはそれを音符として出力していた=元曲に
+      // 無いベースが鳴る)。ここで無音として扱い休符にする(sweepRegisterByteのOFF値$08を
+      // 書くコンパイラ側/NSFドライバ側は影響を受けない)
+      const sweepReg = r[1];
+      const sweepShift = sweepReg & 7;
+      const sweepChange = period >> sweepShift;
+      const sweepTarget = (sweepReg & 8)
+        ? period - sweepChange - (chKey === 'p1' ? 1 : 0)
+        : period + sweepChange;
+      const sweepMuted = period < 8 || sweepTarget > 0x7FF;
+      const note = (active && audible && freq > 0 && !sweepMuted) ? freqToNote(freq) : null;
       const rawFreq = note !== null ? freq : null;
 
       if (!cur) {

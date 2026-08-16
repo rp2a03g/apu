@@ -462,8 +462,9 @@
           </div>
           <div id="fdsWaveMwHelpText" class="fds-help-text" style="display:none;">
             実際に鳴るピッチオフセットの累積カーブ(-64〜63)を表示・編集します。
-            ハードウェアは0/+1/+2/+4/リセット/-4/-2/-1の8段階でしか変化できないため、
-            描いたカーブに最も近い形へ自動的に近似されます。
+            ハードウェアは1フレームあたり0/1/2/4/-1/-2/-4(とR=0へリセット)の8段階でしか
+            変化できないため、描いたカーブに最も近い形へ自動的に近似されます。
+            MML本文の@MW&lt;n&gt;にもこの8種類の値をそのまま書きます。
           </div>
           <canvas id="fdsWaveMwCanvas" width="256" height="100"></canvas>
           <div id="fdsWaveMwValues" class="fds-values-text"></div>

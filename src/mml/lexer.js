@@ -172,15 +172,46 @@
     return { index, bytes };
   }
 
-  // @MW<n> = { 32個の0-7 } (FDSモジュレータテーブル。相対増減の生3bit値)
+  // @MW<n> = { 32個の変調量 } (FDSモジュレータテーブル)。
+  // ★MML上は「実際の増減量そのもの」を書く: 0(維持) / 1 / 2 / 4 / -1 / -2 / -4 と
+  //   R(変調カウンタを0にリセット)。それ以外の値はコンパイルエラーにする。
+  // 実機のテーブルエントリは3bitのコード値(0=+0,1=+1,2=+2,3=+4,4=リセット,5=-4,
+  // 6=-2,7=-1。src/emulator/expansion/fds.js MOD_TABLE_DELTA)なので、MML表記から
+  // 生コードへの変換はここ(字句解析)だけで行い、以降(compiler.js/ppmckDriver.js)は
+  // 従来通り生コードだけを扱う。
+  const FDS_MOD_TOKEN_TO_CODE = new Map([
+    ['0', 0], ['1', 1], ['+1', 1], ['2', 2], ['+2', 2], ['4', 3], ['+4', 3],
+    ['R', 4], ['-4', 5], ['-2', 6], ['-1', 7]
+  ]);
+  // 生コード(0-7) → MML表記。逆変換(*2mml書き出し・FDS波形エディタ)から使う
+  const FDS_MOD_CODE_TO_TOKEN = ['0', '1', '2', '4', 'R', '-4', '-2', '-1'];
+  // MMLに書ける値の一覧(エラーメッセージ用)
+  const FDS_MOD_TOKEN_LIST = '0 / 1 / 2 / 4 / -1 / -2 / -4 / R';
+
+  // MML表記1個 → 生コード。使えない値なら undefined を返す
+  Mml.fdsModTokenToCode = function (token) {
+    return FDS_MOD_TOKEN_TO_CODE.get(String(token).trim().toUpperCase());
+  };
+  // 生コード → MML表記(範囲外は"0"扱い)
+  Mml.fdsModCodeToToken = function (code) {
+    return FDS_MOD_CODE_TO_TOKEN[code & 7] || '0';
+  };
+
   const FDS_MOD_WAVE_DEF_RE = /^@MW(\d+)\s*=\s*\{([^}]*)\}$/i;
 
   function parseFdsModWaveDef(trimmed) {
     const m = trimmed.match(FDS_MOD_WAVE_DEF_RE);
     if (!m) return null;
     const index = parseInt(m[1], 10);
-    const values = m[2].trim().split(/[\s,]+/).filter(s => s.length > 0).map(parseMmlNumber);
-    return { index, values };
+    const tokens = m[2].trim().split(/[\s,]+/).filter(s => s.length > 0);
+    const values = [];
+    const invalid = [];
+    for (const token of tokens) {
+      const code = Mml.fdsModTokenToCode(token);
+      if (code === undefined) invalid.push(token);
+      else values.push(code);
+    }
+    return { index, values, invalid };
   }
 
   // @MH<n> = { delay, freq, depth, waveform(@MW<n>のインデックス) } (FDSモジュレータ設定)
@@ -437,6 +468,16 @@
 
       const fdsModWaveDef = parseFdsModWaveDef(trimmed);
       if (fdsModWaveDef) {
+        if (fdsModWaveDef.invalid.length > 0) {
+          errors.push({
+            lineNo,
+            message: T('@MW{index} に使えない値があります: {values}(使えるのは {allowed} のみ)', {
+              index: fdsModWaveDef.index,
+              values: fdsModWaveDef.invalid.join(', '),
+              allowed: FDS_MOD_TOKEN_LIST
+            })
+          });
+        }
         envelopes.mw[fdsModWaveDef.index] = fdsModWaveDef.values;
         continue;
       }

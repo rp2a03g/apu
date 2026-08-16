@@ -266,7 +266,11 @@
     // P-5「不明瞭→EPテーブル」側(2026-08-12)
     const events = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractEvents(timeline)));
 
-    const modWaveReg = new MML.Convert.WaveRegistry('@MW');
+    // @MW<n>のMML表記は生3bitコードではなく実際の増減量(0/1/2/4/-1/-2/-4とR=リセット)。
+    // 抽出側は実機レジスタと同じ生コードを持っているので、定義行を書き出す時だけ変換する
+    // (逆方向の変換はsrc/mml/lexer.js parseFdsModWaveDef)
+    const modWaveReg = new MML.Convert.WaveRegistry('@MW',
+      codes => codes.map(code => MML.Mml.fdsModCodeToToken(code)));
     const modParamReg = makeModParamRegistry();
     const modUsed = events.some(ev =>
       ev.note !== null && ev.modEnabled && ev.modGain > 0 && ev.modFreq > 0);

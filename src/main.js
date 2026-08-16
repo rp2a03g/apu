@@ -1470,8 +1470,12 @@
     const nsfBytes = built.nsfBytes;
     MML.NSF.download(nsfBytes, (headerOpt.songName || 'output') + '.nsf');
 
-    let out = T('NSF書き出し完了: {bytes}バイト({banks}バンク、うち曲データ {songBanks}バンク)',
-      { bytes: nsfBytes.length, banks: built.bankCount, songBanks: Math.max(0, built.bankCount - 8) }) + '\n';
+    // 内訳(ドライバ本体/曲データ/DPCM)はbuildBankedNsfBytesが実測で返す(以前の
+    // 「bankCount-8=曲データバンク数」はドライバ領域が固定8バンクだった頃の式で、
+    // ROM圧縮後は意味を成さなくなっていた)
+    let out = T('NSF書き出し完了: {bytes}バイト({banks}バンク: ドライバ {driverBytes}バイト / 曲データ {songBytes}バイト / DPCM {dpcmBytes}バイト)',
+      { bytes: nsfBytes.length, banks: built.bankCount, driverBytes: built.driverBytes || 0,
+        songBytes: built.songDataBytes || 0, dpcmBytes: built.dpcmBytes || 0 }) + '\n';
     if (built.unsupportedExpansions.length > 0) {
       out += T('注意: 拡張音源({chips})は現状のNSF書き出しでは未対応のため、該当チャンネルは無音になります(VRC6/MMC5/FME7/FDS/N163/VRC7は対応済み)。',
         { chips: built.unsupportedExpansions.join(', ') }) + '\n';
@@ -1755,6 +1759,10 @@
     keyboardDisplay.reset();
     loadedNsfBytes = null;
     loadedNsfHeader = null;
+    // 別ファイルを読み込んだら前回ファイルのキャプチャ結果は無効(runNsf2Mmlが同じ
+    // 曲番号のまま前ファイルのwriteLogを再利用し、新ファイルのヘッダ/バイト列と混ぜて
+    // 変換してしまう不具合の修正)
+    lastNsfCaptureResult = null;
 
     const arrayBuffer = await file.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);

@@ -2,7 +2,7 @@
  * FDS波形グラフィカルエディタ
  * MML.UI.FdsWaveEditor
  *
- * MML本文中の @FM<n>(波形メモリ64サンプル) / @MW<n>(変調テーブル32サンプル、生3bit値0-7) /
+ * MML本文中の @FM<n>(波形メモリ64サンプル) / @MW<n>(変調テーブル32サンプル、増減量表記) /
  * @MH<n>(変調パラメータ delay,freq,depth,waveform) をキャンバス/数値入力で
  * グラフィカルに編集する。MMLテキストが正典(DESIGN.md INV-2)。
  *
@@ -16,11 +16,14 @@
  * MMLからの読み込みは、インデックスの選択を変えた時・ウィンドウを開いた時・
  * ダブルクリックで開いた時にだけ行う(こちらもテキスト全体の継続監視はしない)。
  *
- * @MW<n>について: 生の値は0-7の「テーブルコード」であり、そのまま量として
- * ドラッグ編集できるものではない(src/emulator/expansion/fds.js MOD_TABLE_DELTA参照)。
- * 0=+0, 1=+1, 2=+2, 3=+4, 4=リセット(0へ), 5=-4, 6=-2, 7=-1 という
- * 「変調カウンタへの増分」を表す符号なので、このエディタでは実際に鳴る
- * 変調カウンタの累積カーブ(-64〜63)をキャンバスに描かせる。ドラッグ中は
+ * @MW<n>について: MML上の値は「変調カウンタへの増分」そのもの
+ * (0=維持, 1, 2, 4, -1, -2, -4, R=0へリセット)であり、飛び飛びの8段階しか
+ * 取れないので、そのまま量としてドラッグ編集できるものではない。
+ * (実機テーブルはこれを3bitコード0-7へ詰めたもの=src/emulator/expansion/fds.js
+ *  MOD_TABLE_DELTA。MML表記↔生コードの変換はsrc/mml/lexer.jsが持ち、
+ *  このエディタも読み書きの境界だけでそれを使う。内部状態は生コード側。)
+ * このエディタでは実際に鳴る変調カウンタの累積カーブ(-64〜63)をキャンバスに
+ * 描かせる。ドラッグ中は
  * nearestAchievableValue()で直前のバーから実際に到達可能な値だけに毎回
  * スナップし(自由な値は描けない)、反映時にcodesFromCurve()で生コード列へ
  * 変換してMMLへ書き込む。
@@ -75,7 +78,16 @@
     const range = findDefRange(source, tag, index);
     if (!range) return null;
     const content = source.slice(range.contentStart, range.contentEnd);
-    return content.trim().split(/[\s,]+/).filter(s => s.length > 0).map(parseMmlNumber);
+    const tokens = content.trim().split(/[\s,]+/).filter(s => s.length > 0);
+    // @MWだけはMML表記(0/1/2/4/-1/-2/-4/R)なので、エディタ内部で扱う生コード(0-7)へ変換する。
+    // 使えない値が書かれていた場合(コンパイル側ではエラーになる)は0(維持)として読む
+    if (tag === 'MW') {
+      return tokens.map(t => {
+        const code = MML.Mml.fdsModTokenToCode(t);
+        return code === undefined ? 0 : code;
+      });
+    }
+    return tokens.map(parseMmlNumber);
   }
 
   function findEnclosingDef(source, pos) {
@@ -93,9 +105,10 @@
     return `@${tag}${index} = { ${body} }`;
   }
 
+  // valuesは@MWの場合も生コード(0-7)で受け取り、ここでMML表記へ変換して書き出す
   function formatDefText(tag, index, values) {
     if (tag === 'FM') return wrapValues('FM', index, values, 32, ' ');
-    if (tag === 'MW') return wrapValues('MW', index, values, 32, ' ');
+    if (tag === 'MW') return wrapValues('MW', index, values.map(c => MML.Mml.fdsModCodeToToken(c)), 16, ', ');
     return `@MH${index} = { ${values.join(', ')} }`;
   }
 

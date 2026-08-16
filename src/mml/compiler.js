@@ -115,8 +115,11 @@
  *                    変わったときだけ再ロードする(全ch共有のため動的切り替えは1音源内)
  *   @N<n>={buf,...}  N163波形。先頭のバッファ番号は無視。`@<n>`で選択、FMと同様に
  *                    選択変化時だけ再ロード(全ch共有16サンプル固定)
- *   @MW<n>={32値}    FDSモジュレータ(ピッチ変調)テーブル。値の意味は実機と同じ
- *                    0=無変化,1=+1,2=+2,3=+4,4=リセット,5=-4,6=-2,7=-1
+ *   @MW<n>={32値}    FDSモジュレータ(ピッチ変調)テーブル。1フレームごとに変調カウンタ
+ *                    (-64〜63)へ加算する増減量そのものを書く。使える値は
+ *                    0(維持)/1/2/4/-1/-2/-4/R(カウンタを0にリセット)の8種類だけで、
+ *                    それ以外はコンパイルエラー。実機テーブルの3bitコード
+ *                    (0,1,2,3=+4,4=リセット,5=-4,6=-2,7=-1)への変換はlexer.jsが行う
  *   @MH<n>={delay,freq,depth,waveform} / MH<n> / MHOF
  *                    FDSモジュレータ設定・有効化コマンド。waveformは@MW<n>のインデックス。
  *                    曲中`MH<n>`が出現した位置(+delayフレーム)で有効化される
@@ -2079,6 +2082,12 @@
     // 実機は内部8ch中「上位 num 個」だけを巡回・ミックスする。letters[index] の内部インデックスは
     // (8-num)+index(下位アドレス側から)。0番から詰めると鳴らないため必ずオフセットする。
     const num = Math.max(1, Math.min(N163_CHANNEL_COUNT, numN163Ch || N163_CHANNEL_COUNT));
+    // 有効ch数(num)より上のレター(音符を1つも持たないch)は実機上の実体が無い。
+    // 以前はここでregBase=0x80以上(内部RAMの範囲外)を算出し、休符の音量0書込み
+    // ($F800=(regBase+7)|0x80)が下位7bitへ折り返って波形RAM($07/$0F/$17/$1F…)を
+    // 上書き破壊していた(女神転生II 11曲目: 4ch使用曲のT-Wの休符が@N波形の末尾2サンプルを
+    // 毎回0にし、ブラウザ再生の音色だけが崩れていた)。何も書かずに空のログを返す
+    if (index >= num) return writeLog;
     const internalIdx = (N163_CHANNEL_COUNT - num) + index;
     const regBase = 0x40 + internalIdx * 8;
     const nMap = (envelopes && envelopes.n) || {};
@@ -2391,7 +2400,6 @@
       if (frame >= totalFrames) break;
       const startFrame = frame;
       const dur = Math.min(seg.durationFrames, totalFrames - frame);
-      const gateFrames = computeGateFrames(seg, dur);
       if (seg.freq != null) {
         const layout = dpcmLayout[seg.instrument];
         const def = dpcmSamples[seg.instrument];
@@ -2405,9 +2413,13 @@
           writeLog[startFrame].push({ addr: 0x4013, value: layout.lengthReg });
           writeLog[startFrame].push({ addr: 0x4015, value: 0x1F }); // 再生開始
         }
-        if (gateFrames < dur) {
-          writeLog[startFrame + gateFrames].push({ addr: 0x4015, value: 0x0F }); // ゲート終了で停止
-        }
+        // ゲートオフ(q<n>)・休符ではDPCMを止めない(サンプルは末尾まで鳴り切る)。
+        // 実機ppmck(dpcm.h no_dpcm: `.if DPCM_RESTSTOP`が無効な既定)と同じ挙動で、
+        // ppmckcはq<n>を音符+休符($FC)に分解して出力するためゲートオフも休符と同じ扱い。
+        // 以前はゲートオフだけ$4015=$0Fで停止していたが、NSF書き出しのバイトコードは
+        // 休符とゲートオフを同じOP_RESTで表す(区別できない)ため、6502側と揃えるには
+        // 「どちらも止めない」(ppmck準拠)か「どちらも止める」(#DPCM-RESTSTOP相当)の
+        // 二択になり、本家既定に合わせた(2026-08-16、ppmckDriver.js SIL_T DPCMと対)
       }
       frame += dur;
     }

@@ -1,10 +1,27 @@
 :root {
-  --bg: #1e1e24;
-  --panel: #2a2a33;
-  --border: #3d3d4a;
-  --text: #e6e6ef;
-  --accent: #6fb1ff;
-  --error: #ff6b6b;
+  /*
+   * アプリ全体の配色。ここの値は「デフォルト」プリセット(src/ui/editorSettings.js PRESETS[0])
+   * と必ず一致させること(起動直後=何も保存されていない状態の見た目がこの値、
+   * 「既定値に戻す」がPRESETS[0]、の2つが食い違わないようにするため)。
+   * 全プリセットはこの変数群を丸ごと上書きする。style.css内でこれらの色を直書き
+   * (#xxxxxx)してはいけない(ライト/ダーク切替で破綻するため。ピアノ鍵盤の白鍵/黒鍵、
+   * ツールチップの黒地白文字のような「テーマに依らない意味を持つ色」だけは例外)。
+   */
+  --bg: #f5f6f8;            /* ページ背景 */
+  --panel: #ffffff;         /* パネル/フローティングウィンドウ本体 */
+  --panel-raised: #eceff3;  /* ウィンドウ見出し行・ロール見出し等の一段浮いた面 */
+  --surface: #f0f2f5;       /* 入力欄/出力欄/キャンバス等の凹んだ面 */
+  --border: #d0d5dc;
+  --control-bg: #e4e8ee;    /* ボタン(secondary)/セレクト/トグルの地色 */
+  --text: #24292f;
+  --text-secondary: #3f4750;
+  --text-muted: #6e7781;
+  --text-faint: #9aa2ad;
+  --accent: #2563eb;
+  --on-accent: #ffffff;     /* アクセント地の上に乗せる文字 */
+  --error: #c62828;
+  --ok: #1a7f37;
+  --hover-bg: rgba(0, 0, 0, 0.06); /* アイコンボタン等のホバー面 */
   /*
    * 日本語グリフを持つフォントを必ず明示すること。
    * 欧文フォント(Segoe UI/Consolas)だけだと、日本語フォント未導入の環境で豆腐(□)になり、
@@ -19,22 +36,34 @@
   /* MMLエディタのフォント(src/ui/editorSettings.jsが上書きする) */
   --mml-font-family: var(--mono);
   --mml-font-size: 13px;
-  /* MMLエディタ自体の背景(全体色--panelとは別に持たせる。src/ui/editorSettings.jsが上書きする) */
-  --mml-editor-bg: #14141a;
+  /* MMLエディタ自体の背景/基本文字色(全体色--panel/--textとは別に持たせる。数値や
+     記号など色分け対象外の文字と入力キャレットが--mml-editor-fgになる。
+     エディタだけ紺地・周囲は明るいチュートリアル的な配色(NDP風プリセット)を
+     成立させるために独立させている。src/ui/editorSettings.jsが上書きする) */
+  --mml-editor-bg: #ffffff;
+  --mml-editor-fg: #24292f;
 
-  /* MMLシンタックスハイライトの色分け12分類(src/ui/editorSettings.jsが上書きする) */
-  --tok-header: #59a869;
-  --tok-track: #ffd479;
-  --tok-note: #6fb1ff;
-  --tok-rest: #9aa0ac;
-  --tok-cmd-length: #f78c6c;
-  --tok-cmd-volume: #82d2ce;
-  --tok-cmd-pitch: #c792ea;
-  --tok-cmd-perf: #ff6b6b;
-  --tok-cmd-special: #ffcc66;
-  --tok-def-envelope: #66d9ef;
-  --tok-def-tone: #a6e22e;
+  /* MMLシンタックスハイライトの色分け12分類(src/ui/editorSettings.jsが上書きする)。
+     色相の割り当ては全プリセット共通の約束事にしてある(プリセットを切り替えても
+     「音程系は青、音量系は緑」といった読み方が変わらないようにするため):
+       トラック=金/黄(太字)  ヘッダー=紫  音階=基本文字色  休符=控えめ  コメント=最も薄い
+       音長系=橙  音量系=緑  音程系=青  演奏制御系=赤  特殊=マゼンタ
+       エンベロープ定義=シアン/ティール(太字)  音色定義=ライム/オリーブ(太字) */
+  --tok-header: #6f42c1;
+  --tok-track: #9a6700;
+  --tok-note: #24292f;
+  --tok-rest: #57606a;
+  --tok-cmd-length: #bc4c00;
+  --tok-cmd-volume: #1a7f37;
+  --tok-cmd-pitch: #0550ae;
+  --tok-cmd-perf: #cf222e;
+  --tok-cmd-special: #a626a4;
+  --tok-def-envelope: #0f766e;
+  --tok-def-tone: #667a00;
   --tok-comment: #6a737d;
+  /* 再生中の現在位置ハイライト(白文字+黒縁取り。どの背景色でも読めるようプリセット間で共通) */
+  --playing-fg: #ffffff;
+  --playing-outline: #000000;
 }
 
 * { box-sizing: border-box; }
@@ -61,7 +90,7 @@ header {
 }
 
 .lang-picker select {
-  background: #3d3d4a;
+  background: var(--control-bg);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 3px;
@@ -72,7 +101,7 @@ header {
 
 /* MMLエディタのフォント選択(トップメニュー、src/ui/editorSettings.js) */
 .font-picker select {
-  background: #3d3d4a;
+  background: var(--control-bg);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 3px;
@@ -112,7 +141,7 @@ header h1.app-title {
 }
 
 .toggle-btn {
-  background: #3d3d4a;
+  background: var(--control-bg);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -125,7 +154,7 @@ header h1.app-title {
 
 .toggle-btn.active {
   background: var(--accent);
-  color: #102030;
+  color: var(--on-accent);
   border-color: var(--accent);
   font-weight: 600;
 }
@@ -152,7 +181,7 @@ header h1.app-title {
   pointer-events: none;
 }
 
-.icon-btn:hover { background: rgba(255, 255, 255, 0.09); opacity: 1; }
+.icon-btn:hover { background: var(--hover-bg); opacity: 1; }
 
 .icon-btn:disabled {
   opacity: 0.35;
@@ -230,7 +259,7 @@ header h1.app-title {
   row-gap: 4px;
   gap: 8px;
   padding: 6px 10px;
-  background: #34343f;
+  background: var(--panel-raised);
   border-bottom: 1px solid var(--border);
   border-radius: 6px 6px 0 0;
   cursor: move;
@@ -324,7 +353,7 @@ textarea {
   width: 100%;
   flex: 1;
   min-height: 320px;
-  background: #14141a;
+  background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -355,7 +384,7 @@ textarea {
 
 button {
   background: var(--accent);
-  color: #102030;
+  color: var(--on-accent);
   border: none;
   border-radius: 4px;
   padding: 6px 14px;
@@ -367,13 +396,13 @@ button {
 button:hover { opacity: 0.85; }
 
 button.secondary {
-  background: #3d3d4a;
+  background: var(--control-bg);
   color: var(--text);
 }
 
 .output {
   flex: 1;
-  background: #14141a;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 8px;
@@ -385,7 +414,7 @@ button.secondary {
 }
 
 .error { color: var(--error); }
-.ok { color: #74e08e; }
+.ok { color: var(--ok); }
 
 .fields {
   display: grid;
@@ -396,14 +425,14 @@ button.secondary {
 
 .fields label {
   font-size: 12px;
-  color: #aaaabb;
+  color: var(--text-muted);
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
 .fields input {
-  background: #14141a;
+  background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text);
   border-radius: 4px;
@@ -444,7 +473,7 @@ button.secondary {
   width: 32px;
   height: 2px;
   border-radius: 2px;
-  background: #666680;
+  background: var(--text-faint);
 }
 .pane-splitter:hover,
 .pane-splitter.dragging { background: var(--accent); }
@@ -503,7 +532,7 @@ button.secondary {
 }
 
 .mml-editor .mml-highlight {
-  color: var(--text);
+  color: var(--mml-editor-fg);
   pointer-events: none;
   z-index: 0;
 }
@@ -511,7 +540,7 @@ button.secondary {
 .mml-editor textarea {
   background: transparent;
   color: transparent;
-  caret-color: var(--text);
+  caret-color: var(--mml-editor-fg);
   resize: none;
   z-index: 1;
   min-height: 0;
@@ -550,12 +579,12 @@ button.secondary {
    再レイアウトを誘発し、かつ下のtextarea(非太字)と字送りがずれてオーバーレイが微妙に
    ずれる。色+text-shadow(どちらもpaintのみでレイアウト非影響)だけで十分な視認性を確保する */
 .mml-playing {
-  color: #ffffff;
+  color: var(--playing-fg);
   text-shadow:
-    -1px -1px 0 #000,
-     1px -1px 0 #000,
-    -1px  1px 0 #000,
-     1px  1px 0 #000;
+    -1px -1px 0 var(--playing-outline),
+     1px -1px 0 var(--playing-outline),
+    -1px  1px 0 var(--playing-outline),
+     1px  1px 0 var(--playing-outline);
 }
 
 /* シークバーの開始点(青)〜終了点(赤)ハンドルが示す再生範囲を常時背景色で示す。
@@ -633,7 +662,7 @@ button.secondary {
 }
 .seek-handle:hover,
 .seek-handle.dragging { filter: brightness(1.25); }
-.seek-handle-start { background: #4f8fff; }
+.seek-handle-start { background: var(--accent); }
 .seek-handle-end { background: var(--error); }
 
 /* --- 波形エディタ --- */
@@ -650,7 +679,7 @@ button.secondary {
 }
 
 .wave-editor canvas {
-  background: #14141a;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 4px;
   cursor: crosshair;
@@ -755,11 +784,11 @@ button.secondary {
 .fds-values-text {
   font-family: var(--mono);
   font-size: 9px;
-  color: #8a8a98;
+  color: var(--text-muted);
   word-break: break-all;
   max-height: 34px;
   overflow-y: auto;
-  background: #14141a;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 3px;
   padding: 2px 4px;
@@ -768,8 +797,8 @@ button.secondary {
 
 .fds-help-text {
   font-size: 10px;
-  color: #9999aa;
-  background: #20202a;
+  color: var(--text-muted);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 4px 6px;
@@ -784,7 +813,7 @@ button.secondary {
 .fields-row label {
   flex: 1;
   font-size: 10px;
-  color: #aaaabb;
+  color: var(--text-muted);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -801,19 +830,19 @@ button.secondary {
   padding: 4px 8px;
   font-size: 11px;
   font-family: var(--mono);
-  color: #9999aa;
-  border-bottom: 1px solid #3d3d4a;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
 }
 .kbd-speed-label { flex: none; }
 .kbd-speed-range { flex: none; width: 140px; accent-color: var(--accent); cursor: pointer; }
-.kbd-speed-value { flex: none; width: 32px; color: #e6e6ef; }
+.kbd-speed-value { flex: none; width: 32px; color: var(--text); }
 
 /* ウィンドウのタイトル行に置く版(鍵盤表示のタイトル右、閉じるボタンの手前)。本体側の下線/余白は不要。
    margin-leftはマスター音量バー側(直前に挿入される、こちらが先頭)に付ける */
 .kbd-speed--header {
   padding: 0;
   border-bottom: none;
-  color: #cfcfe0;
+  color: var(--text-secondary);
 }
 .kbd-speed--header .kbd-speed-range { width: 90px; }
 
@@ -825,16 +854,16 @@ button.secondary {
   padding: 4px 8px;
   font-size: 11px;
   font-family: var(--mono);
-  color: #9999aa;
-  border-bottom: 1px solid #3d3d4a;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
 }
 .kbd-mastervol-label { flex: none; }
 .kbd-mastervol-range { flex: none; width: 140px; accent-color: var(--accent); cursor: pointer; }
-.kbd-mastervol-value { flex: none; width: 34px; color: #e6e6ef; }
+.kbd-mastervol-value { flex: none; width: 34px; color: var(--text); }
 .kbd-mastervol--header {
   padding: 0;
   border-bottom: none;
-  color: #cfcfe0;
+  color: var(--text-secondary);
   margin-left: auto;
 }
 .kbd-mastervol--header .kbd-mastervol-range { width: 90px; }
@@ -845,9 +874,9 @@ button.secondary {
   gap: 6px;
   padding: 2px 6px 1px;
   font-size: 10px;
-  color: #6a6a80;
+  color: var(--text-faint);
   font-family: var(--mono);
-  border-bottom: 1px solid #3d3d4a;
+  border-bottom: 1px solid var(--border);
 }
 
 /* ヘッダ列幅をチャンネル行と合わせる(NSF/KSSのメイン一覧、行側の実測値は.kbd-part/.kbd-mute/.kbd-name/.kbd-vol-wrap参照)
@@ -896,7 +925,7 @@ button.secondary {
   cursor: pointer;
 }
 .kbd-dot:hover {
-  outline: 1px solid #8888aa;
+  outline: 1px solid var(--text-muted);
   outline-offset: 1px;
 }
 
@@ -919,7 +948,7 @@ button.secondary {
   height: 20px;
   border-radius: 4px;
   cursor: pointer;
-  border: 1px solid #55556a;
+  border: 1px solid var(--border);
 }
 .kbd-color-swatch:hover {
   border-color: var(--text);
@@ -947,7 +976,7 @@ button.secondary {
 }
 .kbd-color-reset {
   grid-column: 1 / -1;
-  background: #14141a;
+  background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -1021,7 +1050,7 @@ button.secondary {
   flex-direction: column;
   align-items: center;
   gap: 5px;
-  background: #14141a;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 7px 9px;
@@ -1038,6 +1067,8 @@ button.secondary {
   width: 12px;
   height: 12px;
   border-radius: 2px;
+  border: 1px solid var(--border); /* 白いエディタ地色の見本が白いパネルに溶けないように */
+  box-sizing: border-box;
 }
 .es-preset-name { font-size: 11px; }
 .es-row {
@@ -1052,7 +1083,7 @@ button.secondary {
   height: 22px;
   border-radius: 4px;
   cursor: pointer;
-  border: 1px solid #55556a;
+  border: 1px solid var(--border);
   flex: none;
 }
 .es-swatch:hover { border-color: var(--accent); }
@@ -1063,7 +1094,7 @@ button.secondary {
   border-top: 1px solid var(--border);
 }
 .es-modal-footer button {
-  background: #3d3d4a;
+  background: var(--control-bg);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -1091,7 +1122,7 @@ button.secondary {
   flex: none;
   width: 10px;
   text-align: center;
-  color: #cccce0;
+  color: var(--text-secondary);
   font-weight: 600;
   font-size: 10px;
   margin-left: -6px; /* 丸アイコンとパート文字をくっつける */
@@ -1100,7 +1131,7 @@ button.secondary {
 .kbd-name {
   flex: none;
   width: 32px;
-  color: #cccce0;
+  color: var(--text-secondary);
   font-weight: 600;
   font-size: 11px;
 }
@@ -1120,8 +1151,8 @@ button.secondary {
   margin-top: 2px;
   font-size: 10px;
   font-weight: 600;
-  color: #8888a0;
-  border-top: 1px solid #35353f;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
 }
 .kbd-chip-header:first-child {
   margin-top: 0;
@@ -1133,8 +1164,8 @@ button.secondary {
   flex: none;
   width: 40px;
   height: 8px;
-  background: #14141a;
-  border: 1px solid #3d3d4a;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 3px;
   /* ツールチップ(.kbd-vol-tooltip)を上にはみ出させて表示するためoverflow:hiddenは
      付けない(.kbd-vol-bar自体もborder-radiusを持つため見た目上のクリップは実害が薄い)。 */
@@ -1223,7 +1254,7 @@ button.secondary {
   width: 20px; /* 最大3桁("255"等)でも実測16.5px@10pxフォントで収まる。ch列との間の余白を減らすため詰めた */
   text-align: right;
   font-size: 10px;
-  color: #e6e6ef;
+  color: var(--text);
   font-family: var(--mono);
 }
 
@@ -1231,8 +1262,8 @@ button.secondary {
   flex: none;
   width: 34px;
   height: 14px;
-  background: #14141a;
-  border: 1px solid #3d3d4a;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 3px;
   display: block;
 }
@@ -1240,13 +1271,13 @@ button.secondary {
 .kbd-note {
   flex: none;
   width: 36px;
-  color: #e6e6ef;
+  color: var(--text);
   text-align: right;
 }
 
 .kbd-freq {
   flex: 1;
-  color: #9999aa;
+  color: var(--text-muted);
   font-size: 10px;
   white-space: nowrap;
   overflow: hidden;
@@ -1262,7 +1293,7 @@ button.secondary {
 .kbd-left--hes .kbds-h-lr, .kbd-left--hes .kbds-lr,
 .kbd-left--gbs .kbds-h-lr, .kbd-left--gbs .kbds-lr { display: inline-block; }
 /* L/R は間を詰める(下記kbds-l)ため近接しがちなので、視認性を保つよう少し暗めにする */
-.kbds-lr { font-size: 10px; color: #b0b0c0; font-family: var(--mono); }
+.kbds-lr { font-size: 10px; color: var(--text-secondary); font-family: var(--mono); }
 /* L(1つ目のkbds-lr)だけ右マージンを削って R との間隔を詰める */
 .kbds-l, .kbds-h-l { margin-right: -3px; }
 
@@ -1272,14 +1303,14 @@ button.secondary {
   flex: none;
   width: 34px;
   height: 16px;
-  background: #14141a;
-  border: 1px solid #3d3d4a;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 3px;
   display: block;
 }
 .kbds-env-text {
   font-size: 9px;
-  color: #cfcfe0;
+  color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1291,28 +1322,28 @@ button.secondary {
 
 /* freq は echo との間を詰める */
 .kbds-h-freq, .kbds-freq { flex: none; width: 68px; margin-right: -3px; }
-.kbds-freq { color: #9999aa; font-size: 10px; white-space: nowrap; overflow: hidden; }
+.kbds-freq { color: var(--text-muted); font-size: 10px; white-space: nowrap; overflow: hidden; }
 
 .kbds-h-echo, .kbds-echo { flex: none; width: 36px; text-align: center; }
 .kbds-echo { font-size: 10px; font-family: var(--mono); }
 
 .kbds-h-echolr, .kbds-echolr { flex: none; width: 38px; text-align: right; }
-.kbds-echolr { font-size: 10px; color: #e6e6ef; font-family: var(--mono); }
+.kbds-echolr { font-size: 10px; color: var(--text); font-family: var(--mono); }
 
 .kbds-h-fir, .kbds-fir { flex: none; width: 32px; text-align: right; }
-.kbds-fir { font-size: 10px; color: #e6e6ef; font-family: var(--mono); }
+.kbds-fir { font-size: 10px; color: var(--text); font-family: var(--mono); }
 
 .kbd-mute-ph { flex: none; width: 14px; height: 14px; }
 
-.kbds-all-row .kbd-name { color: #cfcfe0; }
-.kbds-all-row { border-bottom: 1px solid #3d3d4a; margin-bottom: 2px; padding-bottom: 2px; }
+.kbds-all-row .kbd-name { color: var(--text-secondary); }
+.kbds-all-row { border-bottom: 1px solid var(--border); margin-bottom: 2px; padding-bottom: 2px; }
 
 .kbd-piano {
   display: block;
   width: 100%;
   height: 68px;
-  background: #2a2a33;
-  border-top: 1px solid #3d3d4a;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
   flex: none;
 }
 
@@ -1329,8 +1360,8 @@ button.secondary {
   gap: 6px;
   height: 20px;
   padding: 0 8px;
-  background: #34343f;
-  border-top: 1px solid #3d3d4a;
+  background: var(--panel-raised);
+  border-top: 1px solid var(--border);
   color: var(--accent);
   font-size: 11px;
   font-family: var(--mono);
@@ -1345,7 +1376,7 @@ button.secondary {
   align-items: center;
   gap: 3px;
   margin-left: auto;
-  color: #9d9dab;
+  color: var(--text-muted);
   cursor: pointer;
 }
 .kbd-roll-cents-toggle input { cursor: pointer; }
@@ -1355,8 +1386,8 @@ button.secondary {
   display: block;
   width: 100%;
   height: 320px;
-  background: #14141a;
-  border-top: 1px solid #3d3d4a;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
   flex: none;
 }
 
@@ -1392,7 +1423,7 @@ button.secondary {
   justify-content: center;
   gap: 8px;
   padding: 8px;
-  border-left: 1px solid #3d3d4a;
+  border-left: 1px solid var(--border);
   overflow: hidden;
 }
 .kbd-bigwave-header {
@@ -1404,7 +1435,7 @@ button.secondary {
 }
 .kbd-bigwave-title {
   font-size: 12px;
-  color: #cccce0;
+  color: var(--text-secondary);
   font-family: var(--mono);
   display: flex;
   align-items: center;
@@ -1430,8 +1461,8 @@ button.secondary {
   width: 280px;
   height: 140px;
   max-width: 100%;
-  background: #14141a;
-  border: 1px solid #3d3d4a;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 4px;
 }
 /* SPCモードのサイズ(echoL列〜C7列にちょうど収まる幅、縦横比維持)は
@@ -1452,7 +1483,7 @@ button.secondary {
   top: 70px;    /* JS側(_positionSpcBigWave)で実測値に上書きされる暫定値 */
   left: 520px;  /* 同上。echoL列の左端に上書きされる暫定値 */
   flex: none;
-  border: 1px solid #3d3d4a;
+  border: 1px solid var(--border);
   background: var(--panel);
   border-radius: 4px;
   z-index: 2;
@@ -1460,7 +1491,7 @@ button.secondary {
 /* 波形アイコンをクリック可能・選択中を強調 */
 .kbd-wave--clickable { cursor: pointer; }
 .kbd-wave--selected {
-  outline: 2px solid #6ea8ff;
+  outline: 2px solid var(--accent);
   outline-offset: 0;
 }
 
@@ -1472,7 +1503,7 @@ button.secondary {
   z-index: 2147483647;
   font-family: var(--mono);
   font-size: 11px;
-  color: #8888a0;
+  color: var(--text-muted);
   background: rgba(20, 20, 26, 0.7);
   border: 1px solid var(--border);
   border-radius: 4px;

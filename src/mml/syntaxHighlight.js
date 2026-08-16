@@ -164,15 +164,37 @@
     return out;
   }
 
-  function highlightLine(line, lineStart) {
+  // 定義ブロックが複数行に渡る場合、2行目以降も「定義の中身」として無着色にするために
+  // 行をまたぐ{}のネスト数を数える(コメント部分は勘定しない)
+  function braceDelta(codePart) {
+    let delta = 0;
+    for (const ch of codePart) {
+      if (ch === '{') delta++;
+      else if (ch === '}') delta--;
+    }
+    return delta;
+  }
+
+  // insideDef: この行が定義ブロック({...})の内側から始まるか。
+  // 返り値は { html, insideDef }(insideDefはこの行を処理した後の状態)
+  function highlightLine(line, lineStart, insideDef) {
     // #で始まる行(ヘッダー/ディレクティブ)は行全体を1色で扱う(コメント分離やコマンド分割はしない)
-    if (/^\s*#/.test(line)) {
-      return `<span class="tok-header">${escapeHtml(line)}</span>`;
+    if (!insideDef && /^\s*#/.test(line)) {
+      return { html: `<span class="tok-header">${escapeHtml(line)}</span>`, insideDef: false };
     }
 
     const commentIdx = line.indexOf(';');
     const body = commentIdx >= 0 ? line.slice(0, commentIdx) : line;
     const comment = commentIdx >= 0 ? line.slice(commentIdx) : '';
+    const nextInsideDef = insideDef ? braceDelta(body) >= 0 : false;
+
+    // 定義ブロックの2行目以降: 中身は着色せずそのまま出す(1行目の"= { ... }"と同じ扱い。
+    // ここを音符扱いで着色すると、@MW<n>の"R"(リセット)や"-1"等が休符・音符の色になってしまう)
+    if (insideDef) {
+      let out = escapeHtml(body);
+      if (comment) out += `<span class="tok-comment">${escapeHtml(comment)}</span>`;
+      return { html: out, insideDef: nextInsideDef };
+    }
 
     // エンベロープ/音色データ定義行: 先頭の"@キーワード<n>"部分だけ定義色で着色し、
     // "= { ... }"の中身は無着色のプレーンテキストとして出す
@@ -185,7 +207,7 @@
       out += `<span class="${cls}">${escapeHtml(def[2])}</span>`;
       out += escapeHtml(body.slice(def[1].length + def[2].length));
       if (comment) out += `<span class="tok-comment">${escapeHtml(comment)}</span>`;
-      return out;
+      return { html: out, insideDef: braceDelta(body) > 0 };
     }
 
     const chanMatch = body.match(/^(\s*)([A-Za-z]+)(\s+|$)/);
@@ -201,7 +223,7 @@
     }
     out += highlightBody(rest, restStart);
     if (comment) out += `<span class="tok-comment">${escapeHtml(comment)}</span>`;
-    return out;
+    return { html: out, insideDef: false };
   }
 
   // 各行を display:block の <span class="mml-line"> で包む。
@@ -222,11 +244,14 @@
     let last = 0;
     let m;
     const parts = [];
+    let insideDef = false; // 複数行に渡る{}定義ブロックの内側かどうか(行をまたいで持ち回る)
     while ((m = re.exec(source)) !== null) {
-      parts.push(wrapLine(highlightLine(source.slice(last, m.index), last)));
+      const r = highlightLine(source.slice(last, m.index), last, insideDef);
+      insideDef = r.insideDef;
+      parts.push(wrapLine(r.html));
       last = m.index + m[0].length;
     }
-    parts.push(wrapLine(highlightLine(source.slice(last), last)));
+    parts.push(wrapLine(highlightLine(source.slice(last), last, insideDef).html));
     return parts.join('');
   };
 

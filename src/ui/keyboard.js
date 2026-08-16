@@ -399,27 +399,37 @@
     const isGbs = chips.includes('gbs');
     const isHes = chips.includes('hes');
     if (!isKss && !isGbs && !isHes) {
+    // 2A03パルスのスイープユニット強制ミュート(emulator apu2a03.js PulseChannel.isMuted /
+    // nsf2mml converter.js extractPulseEventsと同じ規則): 周期<8 または目標周期>$7FF
+    // (特に$4001/$4005=$00のまま周期$400以上=o2a以下)は実際には鳴らないので非アクティブ表示
+    const pulseSweepMuted = (sweepReg, period, isPulse1) => {
+      const change = period >> (sweepReg & 7);
+      const target = (sweepReg & 8) ? period - change - (isPulse1 ? 1 : 0) : period + change;
+      return period < 8 || target > 0x7FF;
+    };
     // APU Pulse 1
     {
       const r = snap[0x4000] || 0;
+      const period = (snap[0x4002] || 0) | (((snap[0x4003] || 0) & 7) << 8);
       const freq = pulseFreq(snap[0x4002] || 0, snap[0x4003] || 0);
       const e = apuEnv ? apuEnv.pulse1 : null;
       const rv = e ? e.level : (r & 0xF);
       channels.push({ id: 'P1', color: '#ff4466', freq, vol: e ? e.level / 15 : pulseVol(r), rawVol: rv, rawVolMax: 15,
         envMode: e ? e.env : false,
         wave: { t: 'pulse', hi: APU_DUTY[(r >> 6) & 3], nx: 8, ny: 2 },
-        active: !!(status & 1) && pulseActive(r) && freq > 0 });
+        active: !!(status & 1) && pulseActive(r) && freq > 0 && !pulseSweepMuted(snap[0x4001] || 0, period, true) });
     }
     // APU Pulse 2
     {
       const r = snap[0x4004] || 0;
+      const period = (snap[0x4006] || 0) | (((snap[0x4007] || 0) & 7) << 8);
       const freq = pulseFreq(snap[0x4006] || 0, snap[0x4007] || 0);
       const e = apuEnv ? apuEnv.pulse2 : null;
       const rv = e ? e.level : (r & 0xF);
       channels.push({ id: 'P2', color: '#ff8800', freq, vol: e ? e.level / 15 : pulseVol(r), rawVol: rv, rawVolMax: 15,
         envMode: e ? e.env : false,
         wave: { t: 'pulse', hi: APU_DUTY[(r >> 6) & 3], nx: 8, ny: 2 },
-        active: !!(status & 2) && pulseActive(r) && freq > 0 });
+        active: !!(status & 2) && pulseActive(r) && freq > 0 && !pulseSweepMuted(snap[0x4005] || 0, period, false) });
     }
     // Triangleの「見かけ音量」計算に使う Noise/DMC の現在値を先読みしておく
     // (NOブロック・DMブロックでも同じ値を使い回す)。

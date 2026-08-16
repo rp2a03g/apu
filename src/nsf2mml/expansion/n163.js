@@ -121,6 +121,19 @@
       const note = (volume > 0 && freqReg > 0) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
       if (!cur) { cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume], pitchSeq: [freqReg], tieCandidate: false }; continue; }
+      // 休符(note===null)が続いている間の波形データ変化は音に一切影響しないので区切らない
+      // (以前は休符中も波形キーの変化で1フレームごとにランを切っていた。8ch有効だが
+      // 4chしか鳴らさない曲=女神転生II 11曲目では、無音chの波形アドレスが指す先を他chの
+      // 波形ロードが毎フレーム書き換えるため、無音4ch×1フレーム休符1万7千個=約70KBの
+      // `rrr.rr.`がMMLに吐き出されNSF書き出しも4倍に膨れていた)。休符→音符の遷移で
+      // tieCandidate判定(pureNoteChange)に使う比較対象は「直近の波形」であるべきなので、
+      // 休符ランの波形は最新値で更新し続ける
+      if (note === null && cur.note === null) {
+        cur.wave = wave; cur.waveKey = waveKey;
+        cur.volSeq.push(volume);
+        cur.pitchSeq.push(freqReg);
+        continue;
+      }
       if (note !== cur.note || waveKey !== cur.waveKey) {
         // 打ち直し(パス2)判定前なので、ここでの「純粋な音程変化」は波形切替を伴わない
         // ことのみで判定する(hes2mml/expansion/wave.jsと同じ考え方)
@@ -249,6 +262,15 @@
         hasEnvelope: true,
         hasInstrument: true
       });
+    }
+
+    // 末尾側(上位レター側)の、曲を通して音符を1つも持たないチャンネルは出力しない
+    // (8ch有効だが実際に鳴らすのは下位4chだけ、という曲で無音のT-W行を丸ごと省く。
+    // compiler.js/ppmckDriver.jsの有効ch数は「音符を持つ最上位レターの位置+1」で決まる
+    // ため、末尾の無音chを省いても再生・NSF書き出しの結果は変わらない。途中の無音chは
+    // レター位置を保つために残す)
+    while (channels.length > 1 && !channels[channels.length - 1].events.some(ev => ev.note != null)) {
+      channels.pop();
     }
 
     // 波形エディタUIの既定波形として、最終フレームの先頭(最下位アドレス)チャンネルの波形を返す

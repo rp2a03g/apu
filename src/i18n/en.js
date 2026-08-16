@@ -82,8 +82,8 @@
     'MMLコンパイルエラーのため書き出せません:': 'Cannot export: the MML has compile errors:',
     'ドライバのアセンブルに失敗しました(内部エラー):': 'Failed to assemble the driver (internal error):',
     '再生準備に失敗しました(内部エラー): {msg}': 'Failed to prepare playback (internal error): {msg}',
-    'NSF書き出し完了: {bytes}バイト({banks}バンク、うち曲データ {songBanks}バンク)':
-      'NSF exported: {bytes} bytes ({banks} banks, {songBanks} of them song data)',
+    'NSF書き出し完了: {bytes}バイト({banks}バンク: ドライバ {driverBytes}バイト / 曲データ {songBytes}バイト / DPCM {dpcmBytes}バイト)':
+      'NSF exported: {bytes} bytes ({banks} banks: driver {driverBytes} B / song data {songBytes} B / DPCM {dpcmBytes} B)',
     '注意: 拡張音源({chips})は現状のNSF書き出しでは未対応のため、該当チャンネルは無音になります(VRC6/MMC5/FME7/FDS/N163/VRC7は対応済み)。':
       'Note: NSF export does not support {chips} yet, so those channels will be silent (VRC6/MMC5/FME7/FDS/N163/VRC7 are supported).',
     '再生準備完了 (テンポ {tempo}, 拡張音源: {chips})': 'Ready to play (tempo {tempo}, expansion: {chips})',
@@ -240,8 +240,8 @@
     '@FM<n>: FDS波形メモリ全64サンプル(各0-63)。1周期分の音色波形をそのまま記録します。':
       '@FM<n>: all 64 samples of FDS wave memory (0-63 each). One full cycle of the timbre, stored verbatim.',
     '@MW<n> 変調カーブ (32)': '@MW<n> modulation curve (32)',
-    '実際に鳴るピッチオフセットの累積カーブ(-64〜63)を表示・編集します。 ハードウェアは0/+1/+2/+4/リセット/-4/-2/-1の8段階でしか変化できないため、 描いたカーブに最も近い形へ自動的に近似されます。':
-      'Shows and edits the accumulated pitch-offset curve (-64 to 63) that is actually heard. The hardware can only step by 0/+1/+2/+4/reset/-4/-2/-1, so the curve you draw is automatically approximated to the closest achievable shape.',
+    '実際に鳴るピッチオフセットの累積カーブ(-64〜63)を表示・編集します。 ハードウェアは1フレームあたり0/1/2/4/-1/-2/-4(とR=0へリセット)の8段階でしか 変化できないため、描いたカーブに最も近い形へ自動的に近似されます。 MML本文の@MW<n>にもこの8種類の値をそのまま書きます。':
+      'Shows and edits the accumulated pitch-offset curve (-64 to 63) that is actually heard. Per frame the hardware can only step by 0/1/2/4/-1/-2/-4 (plus R = reset to 0), so the curve you draw is automatically approximated to the closest achievable shape. The @MW<n> definition in the MML uses these same eight values verbatim.',
     '@MH<n> 変調パラメータ': '@MH<n> modulation parameters',
     'delay=発音から変調開始までのフレーム数 / freq=変調テーブルの再生速度 / depth=変調の深さ($4084ゲイン。0だと@MWがあっても無効) / waveform=使用する@MW<n>のインデックス':
       'delay = frames from key-on until modulation starts / freq = playback speed of the modulation table / depth = modulation depth ($4084 gain; 0 disables it even if @MW is set) / waveform = index of the @MW<n> to use',
@@ -265,6 +265,8 @@
     'タプレット終端 "}" が見つかりません': 'Missing tuplet end "}"',
     '未対応のヘッダ指示子です: "#{name}"': 'Unsupported header directive: "#{name}"',
     '@OT{index} の値の数が不足しています(24個必要)': '@OT{index} has too few values (24 required)',
+    '@MW{index} に使えない値があります: {values}(使えるのは {allowed} のみ)':
+      '@MW{index} contains unusable values: {values} (only {allowed} are allowed)',
     'チャンネル指定が認識できません: "{text}"': 'Unrecognized channel specification: "{text}"',
     '@N{instrument} の波形長{len}サンプルはN163内蔵RAMの空き容量(最大{max}サンプル)を超えています':
       '@N{instrument} is {len} samples long, which exceeds the N163 internal RAM (max {max} samples)',
@@ -310,16 +312,28 @@
     '全体の配色': 'General Colors',
     'MMLエディタの配色': 'MML Editor Colors',
     '既定値に戻す': 'Reset to Defaults',
-    '既定(ダーク)': 'Default (Dark)',
-    'ライト': 'Light',
-    '高コントラスト': 'High Contrast',
+    'デフォルト': 'Default',
+    'ダークモード': 'Dark Mode',
+    'Windows標準': 'Windows Standard',
+    'NDP風': 'NDP Style',
     'ページ背景': 'Page Background',
     'パネル背景': 'Panel Background',
+    'ウィンドウ見出し背景': 'Window Title Background',
+    '入力欄/出力欄の背景': 'Input / Output Background',
     'エディタ背景': 'Editor Background',
+    'エディタ基本文字': 'Editor Base Text',
     '境界線': 'Border',
+    'ボタン/セレクト背景': 'Button / Select Background',
     '文字': 'Text',
+    '文字(サブ)': 'Text (Secondary)',
+    '文字(控えめ)': 'Text (Muted)',
+    '文字(最も薄い)': 'Text (Faint)',
     'アクセント': 'Accent',
+    'アクセント上の文字': 'Text on Accent',
     'エラー': 'Error',
+    '成功': 'Success',
+    '再生位置ハイライト文字': 'Playback Highlight Text',
+    '再生位置ハイライト縁取り': 'Playback Highlight Outline',
     'ヘッダー系(#...)': 'Headers (#...)',
     'トラックヘッダー': 'Track Header',
     '音階と音長': 'Notes & Note Length',

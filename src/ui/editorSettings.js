@@ -4,8 +4,19 @@
  *   保存済みのフォント/配色をlocalStorageから復元して即適用する。main.jsから起動時に1回呼ぶ。
  *
  * 配色は:rootのCSSカスタムプロパティ(src/css/style.css)を書き換えることで反映する。
- * 「全体」7項目(--bg/--panel/--mml-editor-bg/--border/--text/--accent/--error)と
- * 「MMLエディタ」12項目(--tok-*、src/mml/syntaxHighlight.js参照)の計19変数を持つ。
+ * 「全体」16項目(--bg/--panel/--panel-raised/--surface/--mml-editor-bg/--mml-editor-fg/
+ * --border/--control-bg/--text/--text-secondary/--text-muted/--text-faint/--accent/
+ * --on-accent/--error/--ok。加えて設定UIには出さない--hover-bg)と
+ * 「MMLエディタ」14項目(--tok-*の12分類+再生位置ハイライトの文字/縁取り、
+ * src/mml/syntaxHighlight.js参照)を持つ。
+ *
+ * ★PRESETS[0](デフォルト)の値はstyle.cssの:root既定値と必ず一致させること
+ * (起動直後の見た目と「既定値に戻す」の結果が食い違わないようにするため)。
+ * ★プリセット間の色相の割り当ては共通の約束事(style.css :rootのコメント参照)。
+ *   プリセットを切り替えても「音程系は青、音量系は緑」といった読み方が変わらないよう、
+ *   各プリセットは同じ役割に同じ色相系統(明度・彩度だけを地色に合わせて調整)を使う。
+ *   例外は「他エディタ/他アプリの再現」が目的のプリセット(VS Code等)で、そちらは
+ *   元の配色への忠実さを優先する。
  */
 (function (global) {
   'use strict';
@@ -14,9 +25,13 @@
   const T = (key, params) => MML.I18n.t(key, params);
 
   const FONT_KEY = 'mml_editorFont';
-  const UI_COLOR_KEY = 'mml_uiColors';
-  const TOKEN_COLOR_KEY = 'mml_tokenColors';
-  const PRESET_KEY = 'mml_colorPreset';
+  // v2: 2026-08-16にデフォルトをダーク→ライトへ変更し、UI変数を7→16項目に増やした。
+  // 旧キー(v1)に保存された7項目だけの色マップを新しい:root(ライト)へ上書きすると
+  // 「7項目は旧ダーク・残り9項目は新ライト」の混在で破綻するため、キー名を変えて
+  // 旧保存値を読まない(=全員が新しいデフォルトから始める)ようにする。
+  const UI_COLOR_KEY = 'mml_uiColors_v2';
+  const TOKEN_COLOR_KEY = 'mml_tokenColors_v2';
+  const PRESET_KEY = 'mml_colorPreset_v2';
 
   const FONT_FAMILIES = [
     { value: 'var(--mono)', label: '既定' },
@@ -29,14 +44,26 @@
   ];
   const FONT_SIZES = [10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24];
 
+  // 設定ダイアログに並べる順(上から視覚的に大きい面→小さい面→文字→アクセント)。
+  // --hover-bgはrgba(半透明)のためカラーピッカーで扱えず一覧に出さない(プリセットが
+  // 一括で設定するだけ)。
   const UI_VARS = [
     ['--bg', 'ページ背景'],
     ['--panel', 'パネル背景'],
+    ['--panel-raised', 'ウィンドウ見出し背景'],
+    ['--surface', '入力欄/出力欄の背景'],
     ['--mml-editor-bg', 'エディタ背景'],
+    ['--mml-editor-fg', 'エディタ基本文字'],
     ['--border', '境界線'],
+    ['--control-bg', 'ボタン/セレクト背景'],
     ['--text', '文字'],
+    ['--text-secondary', '文字(サブ)'],
+    ['--text-muted', '文字(控えめ)'],
+    ['--text-faint', '文字(最も薄い)'],
     ['--accent', 'アクセント'],
+    ['--on-accent', 'アクセント上の文字'],
     ['--error', 'エラー'],
+    ['--ok', '成功'],
   ];
   const TOKEN_VARS = [
     ['--tok-header', 'ヘッダー系(#...)'],
@@ -51,72 +78,135 @@
     ['--tok-def-envelope', 'エンベロープデータ定義'],
     ['--tok-def-tone', '音色データ定義'],
     ['--tok-comment', 'コメント'],
+    ['--playing-fg', '再生位置ハイライト文字'],
+    ['--playing-outline', '再生位置ハイライト縁取り'],
   ];
 
+  // 全プリセット共通の設計方針(2026-08-16、「MMLがみづらい」というユーザー指摘を受けて全面刷新):
+  //  - 音階(cdefgab)は「本文そのもの」なので基本文字色(--mml-editor-fg)と同じにする。
+  //    MMLの大半は音符であり、そこに色を付けると画面全体が虹色になって読めなくなる。
+  //    音符=無色・コマンド=有色、という対比で「どこがコマンドか」が浮かび上がる。
+  //  - 休符は音符よりワントーン控えめ(音符の流れの中の「間」として弱く見せる)。
+  //  - トラック文字は行頭の「見出し」なので太字+金/黄で目に留まる色に。
+  //  - コマンド5系統は互いに区別できつつ主張しすぎない中彩度に揃える(音長=橙、音量=緑、
+  //    音程=青、演奏制御=赤、特殊=マゼンタ。同じ役割は全プリセットで同じ色相系統)。
+  //  - 定義行(@v0=/@FM0=等)は本文には出てこない「宣言」なので太字+はっきりした色でよい
+  //    (エンベロープ=シアン/ティール、音色=ライム/オリーブ)。
+  //  - コメントは最も薄い灰色(斜体は付けない、ユーザー要望)。
+  //  - 各色は地色に対してWCAG AA相当(概ね4.5:1以上)のコントラストを確保する。
   const PRESETS = [
     {
-      id: 'default', name: '既定(ダーク)',
+      // 1. デフォルト: 明るいニュートラル。GitHub Light系の落ち着いた配色をベースに、
+      //    白地で読みやすい深めの色を選ぶ(彩度は上げすぎない)。style.css :rootと同値。
+      id: 'default', name: 'デフォルト',
       ui: {
-        '--bg': '#1e1e24', '--panel': '#2a2a33', '--mml-editor-bg': '#14141a',
-        '--border': '#3d3d4a', '--text': '#e6e6ef', '--accent': '#6fb1ff', '--error': '#ff6b6b',
+        '--bg': '#f5f6f8', '--panel': '#ffffff', '--panel-raised': '#eceff3', '--surface': '#f0f2f5',
+        '--mml-editor-bg': '#ffffff', '--mml-editor-fg': '#24292f',
+        '--border': '#d0d5dc', '--control-bg': '#e4e8ee',
+        '--text': '#24292f', '--text-secondary': '#3f4750', '--text-muted': '#6e7781', '--text-faint': '#9aa2ad',
+        '--accent': '#2563eb', '--on-accent': '#ffffff', '--error': '#c62828', '--ok': '#1a7f37',
+        '--hover-bg': 'rgba(0, 0, 0, 0.06)',
       },
       tokens: {
-        '--tok-header': '#59a869', '--tok-track': '#ffd479', '--tok-note': '#6fb1ff',
-        '--tok-rest': '#9aa0ac', '--tok-cmd-length': '#f78c6c', '--tok-cmd-volume': '#82d2ce',
-        '--tok-cmd-pitch': '#c792ea', '--tok-cmd-perf': '#ff6b6b', '--tok-cmd-special': '#ffcc66',
-        '--tok-def-envelope': '#66d9ef', '--tok-def-tone': '#a6e22e', '--tok-comment': '#6a737d',
+        '--tok-header': '#6f42c1', '--tok-track': '#9a6700', '--tok-note': '#24292f', '--tok-rest': '#57606a',
+        '--tok-cmd-length': '#bc4c00', '--tok-cmd-volume': '#1a7f37', '--tok-cmd-pitch': '#0550ae',
+        '--tok-cmd-perf': '#cf222e', '--tok-cmd-special': '#a626a4',
+        '--tok-def-envelope': '#0f766e', '--tok-def-tone': '#667a00', '--tok-comment': '#6a737d',
+        '--playing-fg': '#ffffff', '--playing-outline': '#000000',
       },
     },
     {
-      id: 'light', name: 'ライト',
+      // 2. ダークモード: このアプリが従来使ってきた青みがかった暗灰色のUI配色をそのまま残し、
+      //    トークン色だけ上記方針で刷新したもの(以前は音符が青・休符が灰・数値が緑…と
+      //    ほぼ全文字に色が付いていた)。暗い地なので各色は明るめのパステルにする。
+      id: 'dark', name: 'ダークモード',
       ui: {
-        '--bg': '#f4f4f8', '--panel': '#e6e6ee', '--mml-editor-bg': '#ffffff',
-        '--border': '#c7c7d3', '--text': '#202028', '--accent': '#2f6fce', '--error': '#c62828',
+        '--bg': '#1e1e24', '--panel': '#2a2a33', '--panel-raised': '#34343f', '--surface': '#14141a',
+        '--mml-editor-bg': '#14141a', '--mml-editor-fg': '#e6e6ef',
+        '--border': '#3d3d4a', '--control-bg': '#3d3d4a',
+        '--text': '#e6e6ef', '--text-secondary': '#cfcfe0', '--text-muted': '#9999aa', '--text-faint': '#6a6a80',
+        '--accent': '#6fb1ff', '--on-accent': '#102030', '--error': '#ff6b6b', '--ok': '#74e08e',
+        '--hover-bg': 'rgba(255, 255, 255, 0.09)',
       },
       tokens: {
-        '--tok-header': '#1a7a34', '--tok-track': '#b8860b', '--tok-note': '#1a56c4',
-        '--tok-rest': '#6b7280', '--tok-cmd-length': '#b45309', '--tok-cmd-volume': '#0e7d75',
-        '--tok-cmd-pitch': '#7a3fa0', '--tok-cmd-perf': '#c0392b', '--tok-cmd-special': '#a06600',
-        '--tok-def-envelope': '#0f7ea3', '--tok-def-tone': '#3f8f1f', '--tok-comment': '#7a7a85',
+        '--tok-header': '#c39cff', '--tok-track': '#ffd479', '--tok-note': '#e6e6ef', '--tok-rest': '#9aa0ac',
+        '--tok-cmd-length': '#f5a06a', '--tok-cmd-volume': '#7fd8a0', '--tok-cmd-pitch': '#7fb8ff',
+        '--tok-cmd-perf': '#ff7a7a', '--tok-cmd-special': '#f38ad4',
+        '--tok-def-envelope': '#66d9ef', '--tok-def-tone': '#b8e05a', '--tok-comment': '#7d828d',
+        '--playing-fg': '#ffffff', '--playing-outline': '#000000',
       },
     },
     {
-      id: 'solarized', name: 'Solarized Dark',
+      // 3. Windows標準: Windows 11の標準アプリ(メモ帳等)の見た目。ごく薄い灰色の地に白い
+      //    パネル、控えめな境界線、Windowsの青(#0067c0)をアクセントに。トークン色は
+      //    Fluent Design Systemの標準カラー(orange #ca5010/green #107c10/red #c42b1c/
+      //    purple #881798/magenta #c239b3/teal #038387/gold #986f0b)から取る。
+      id: 'windows', name: 'Windows標準',
       ui: {
-        '--bg': '#002b36', '--panel': '#073642', '--mml-editor-bg': '#00252e',
-        '--border': '#586e75', '--text': '#93a1a1', '--accent': '#268bd2', '--error': '#dc322f',
+        '--bg': '#f3f3f3', '--panel': '#ffffff', '--panel-raised': '#f0f0f0', '--surface': '#fafafa',
+        '--mml-editor-bg': '#ffffff', '--mml-editor-fg': '#1b1b1b',
+        '--border': '#dcdcdc', '--control-bg': '#f7f7f7',
+        '--text': '#1b1b1b', '--text-secondary': '#3b3b3b', '--text-muted': '#616161', '--text-faint': '#8a8a8a',
+        '--accent': '#0067c0', '--on-accent': '#ffffff', '--error': '#c42b1c', '--ok': '#0f7b0f',
+        '--hover-bg': 'rgba(0, 0, 0, 0.05)',
       },
       tokens: {
-        '--tok-header': '#b58900', '--tok-track': '#cb4b16', '--tok-note': '#268bd2',
-        '--tok-rest': '#657b83', '--tok-cmd-length': '#6c71c4', '--tok-cmd-volume': '#2aa198',
-        '--tok-cmd-pitch': '#d33682', '--tok-cmd-perf': '#dc322f', '--tok-cmd-special': '#93a1a1',
-        '--tok-def-envelope': '#859900', '--tok-def-tone': '#b58900', '--tok-comment': '#586e75',
+        '--tok-header': '#881798', '--tok-track': '#986f0b', '--tok-note': '#1b1b1b', '--tok-rest': '#767676',
+        '--tok-cmd-length': '#ca5010', '--tok-cmd-volume': '#107c10', '--tok-cmd-pitch': '#0067c0',
+        '--tok-cmd-perf': '#c42b1c', '--tok-cmd-special': '#c239b3',
+        '--tok-def-envelope': '#038387', '--tok-def-tone': '#667a00', '--tok-comment': '#6b6b6b',
+        '--playing-fg': '#ffffff', '--playing-outline': '#000000',
       },
     },
     {
-      id: 'monokai', name: 'Monokai',
+      // 4. VS Code (Dark Modern): VS Codeの既定テーマ。UI色はDark Modern
+      //    (エディタ#1f1f1f/サイドバー・タイトルバー#181818/境界#2b2b2b/アクセント#0078d4)、
+      //    トークン色はDark+のシンタックス配色をそのまま流用する:
+      //      #c586c0(キーワード/#include等のディレクティブ)→ヘッダー
+      //      #dcdcaa(関数名)→トラック  #ce9178(文字列)→音長系  #b5cea8(数値)→音量系
+      //      #569cd6(キーワード)→音程系  #d16969(正規表現)→演奏制御  #f44747(エラー)→特殊
+      //      #4ec9b0(型)→エンベロープ定義  #4fc1ff(定数)→音色定義  #6a9955(コメント)
+      //    (音色定義だけは共通方針の「ライム」ではなくDark+の定数色を使う=元テーマへの忠実さ優先)
+      id: 'vscode', name: 'VS Code (Dark Modern)',
       ui: {
-        '--bg': '#272822', '--panel': '#3e3d32', '--mml-editor-bg': '#1e1f1c',
-        '--border': '#49483e', '--text': '#f8f8f2', '--accent': '#66d9ef', '--error': '#f92672',
+        '--bg': '#181818', '--panel': '#1f1f1f', '--panel-raised': '#181818', '--surface': '#181818',
+        '--mml-editor-bg': '#1f1f1f', '--mml-editor-fg': '#d4d4d4',
+        '--border': '#2b2b2b', '--control-bg': '#313131',
+        '--text': '#cccccc', '--text-secondary': '#bbbbbb', '--text-muted': '#9d9d9d', '--text-faint': '#6e7681',
+        '--accent': '#0078d4', '--on-accent': '#ffffff', '--error': '#f14c4c', '--ok': '#89d185',
+        '--hover-bg': 'rgba(255, 255, 255, 0.08)',
       },
       tokens: {
-        '--tok-header': '#a6e22e', '--tok-track': '#e6db74', '--tok-note': '#66d9ef',
-        '--tok-rest': '#75715e', '--tok-cmd-length': '#fd971f', '--tok-cmd-volume': '#ae81ff',
-        '--tok-cmd-pitch': '#f92672', '--tok-cmd-perf': '#ff6188', '--tok-cmd-special': '#e6db74',
-        '--tok-def-envelope': '#a1efe4', '--tok-def-tone': '#a6e22e', '--tok-comment': '#75715e',
+        '--tok-header': '#c586c0', '--tok-track': '#dcdcaa', '--tok-note': '#d4d4d4', '--tok-rest': '#8b8b8b',
+        '--tok-cmd-length': '#ce9178', '--tok-cmd-volume': '#b5cea8', '--tok-cmd-pitch': '#569cd6',
+        '--tok-cmd-perf': '#d16969', '--tok-cmd-special': '#f44747',
+        '--tok-def-envelope': '#4ec9b0', '--tok-def-tone': '#4fc1ff', '--tok-comment': '#6a9955',
+        '--playing-fg': '#ffffff', '--playing-outline': '#000000',
       },
     },
     {
-      id: 'highContrast', name: '高コントラスト',
+      // 5. NDP風: NDP MML Compiler(ユーザー提供のスクリーンショット)を再現。ウィンドウの
+      //    周囲はWindows標準の明るい灰色、エディタ部分だけ濃紺の地に、音符=白、@系コマンド=緑、
+      //    トラック番号=淡い黄、コメント=灰、#ヘッダー=緑、という非常に色数の少ない配色。
+      //    元が「@付き=緑/それ以外=白」の2色主体なので、本ツールの12分類のうち音長系(l/q/t)は
+      //    白に近い色のまま、音量系と定義行を緑、残りの系統(音程/演奏制御/特殊)だけ紺地に
+      //    馴染む淡い水色/珊瑚/桃を薄く足して「NDPの雰囲気を保ちつつ最低限区別できる」に留める。
+      //    エディタだけ紺・周囲は明るい、を成立させるため--mml-editor-fgを--textと分けている。
+      id: 'ndp', name: 'NDP風',
       ui: {
-        '--bg': '#000000', '--panel': '#101010', '--mml-editor-bg': '#000000',
-        '--border': '#ffffff', '--text': '#ffffff', '--accent': '#ffff00', '--error': '#ff3333',
+        '--bg': '#f0f0f0', '--panel': '#ffffff', '--panel-raised': '#f0f0f0', '--surface': '#ffffff',
+        '--mml-editor-bg': '#212a4c', '--mml-editor-fg': '#dcdde3',
+        '--border': '#c8c8c8', '--control-bg': '#e8e8e8',
+        '--text': '#1a1a1a', '--text-secondary': '#333333', '--text-muted': '#666666', '--text-faint': '#999999',
+        '--accent': '#0078d7', '--on-accent': '#ffffff', '--error': '#c42b1c', '--ok': '#107c10',
+        '--hover-bg': 'rgba(0, 0, 0, 0.05)',
       },
       tokens: {
-        '--tok-header': '#00ff00', '--tok-track': '#ffff00', '--tok-note': '#00ffff',
-        '--tok-rest': '#ffffff', '--tok-cmd-length': '#ff8800', '--tok-cmd-volume': '#00ff88',
-        '--tok-cmd-pitch': '#ff00ff', '--tok-cmd-perf': '#ff3333', '--tok-cmd-special': '#ffaa00',
-        '--tok-def-envelope': '#00aaff', '--tok-def-tone': '#aaff00', '--tok-comment': '#aaaaaa',
+        '--tok-header': '#5ad35a', '--tok-track': '#e8d878', '--tok-note': '#dcdde3', '--tok-rest': '#a3a6b3',
+        '--tok-cmd-length': '#c9cbd4', '--tok-cmd-volume': '#62d46a', '--tok-cmd-pitch': '#7fc8f0',
+        '--tok-cmd-perf': '#f0a090', '--tok-cmd-special': '#f28fb8',
+        '--tok-def-envelope': '#62d46a', '--tok-def-tone': '#7fe0d0', '--tok-comment': '#8f95a7',
+        '--playing-fg': '#ffffff', '--playing-outline': '#000000',
       },
     },
   ];
@@ -252,7 +342,8 @@
     btn.type = 'button';
     btn.className = 'es-preset';
     btn.dataset.presetId = preset.id;
-    const swatches = ['--bg', '--tok-note', '--tok-cmd-pitch', '--tok-cmd-volume']
+    // 各プリセットの雰囲気が一目で分かる代表色: エディタ地色/音符/トラック/音程系/音量系
+    const swatches = ['--mml-editor-bg', '--tok-note', '--tok-track', '--tok-cmd-pitch', '--tok-cmd-volume']
       .map((k) => `<span style="background:${preset.ui[k] || preset.tokens[k]}"></span>`).join('');
     btn.innerHTML = `<span class="es-preset-swatches">${swatches}</span>` +
       `<span class="es-preset-name">${T(preset.name)}</span>`;

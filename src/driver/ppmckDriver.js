@@ -43,12 +43,14 @@
  * --- NSFバンク切り替えのメモリレイアウト ---
  * $5FF8-$5FFF の8レジスタで$8000-$FFFFを4KB単位8窓に分割してバンク切り替えする
  * (標準的なNSFバンクスイッチ方式。src/emulator/nsfBus.jsの実装と対応)。
- *   窓0 ($8000-$8FFF, $5FF8) : 曲データ専用の切り替え窓。バンク8以降を動的にマップする
- *   窓1-7($9000-$FFFF, $5FF9-$5FFF) : ドライバ本体(コード+テーブル類)を固定配置(バンク1-7固定)
- *   バンク0                          : 未使用(窓0の初期値。使用前に必ず上書きされる)
- *   バンク8以降                      : 各チャンネルのバイトコード。1チャンネルが4096バイトを
- *                                       超える場合は複数バンクにまたがり、コマンド境界を
- *                                       跨がない位置で0xEE(バンクジャンプ)を挿入してつなぐ
+ *   窓0 ($8000-$8FFF, $5FF8) : 曲データ専用の切り替え窓。曲データバンクを動的にマップする
+ *   窓1-7($9000-$FFFF, $5FF9-$5FFF) : ドライバ本体(コード+テーブル類)とDPCMサンプル($C000以降)を
+ *                                       固定配置。窓→ファイル上バンク番号はNSFヘッダの
+ *                                       bankswitch初期値で決め、ドライバは実行時に窓0しか切り替えない
+ *   ファイル上のバンク配置(2026-08-16、buildBankedNsfBytes参照):
+ *     [0]=曲データ(窓0の初期値でもある) / [1..]=ドライバ本体(DPCM使用時はさらにDPCMサンプル) /
+ *     その後ろ=残りの曲データ。1チャンネルが4096バイトを超える場合は複数バンクにまたがり、
+ *     コマンド境界を跨がない位置で0xEE(バンクジャンプ)を挿入してつなぐ
  *
  * 0xEE(バンクジャンプ)は [0xEE, 新バンク番号, 新アドレス下位, 新アドレス上位] の4バイト。
  * 新バンクは常に$8000から始まるチャンクとして生成するため、新アドレスは常に$00,$80。
@@ -75,6 +77,7 @@
   const TABLE_MAX = NOTE_TABLE_SIZE - 1;
   const BANK_SIZE = 4096;
   const DATA_START_BANK = 8; // 曲データの開始バンク(0=未使用, 1-3=ドライバ本体固定, 4-7=DPCM専用)
+  const DATA_DPCM_BANK = 4;  // DPCMサンプル領域の先頭バンク($C000)。実機DMCの読出し範囲$C000-$FFFF
   // ドライバ本体の割当上限(バンク0-3=$8000-$BFFF、16384バイト)。DPCM使用時は
   // バンク4-7($C000-$FFFF)が実機DMCハードウェアの読み出し範囲としてサンプル専用になるため、
   // ドライバ本体はここに収める必要がある(超過時はbuildBankedNsfBytesがエラーを返す)
@@ -224,19 +227,24 @@
   // loopByteOffset)。指定されると、分割後にそのオフセットが実際にどのバンク・
   // アドレスへ配置されたかをmarkLocation({bank, addr})として返す(Lコマンドの
   // ループ先アドレス解決に使う)。
-  // holeSkipTo(2026-08-16、ROM圧縮対応): バンク番号が1以上・この値未満になる箇所は
-  // ドライバ本体(またはDPCM専用領域)が占有しているため通れない「穴」として扱い、
-  // 素直に+1する代わりにholeSkipToへジャンプする(0xEEバンクジャンプは元々任意の
-  // バンク・アドレスへ飛べるため追加のランタイムコストは無い)。バンク0(窓0)は
-  // ドライバが動的に読み替える場所そのもの=コードさえ置かなければ自由に使えるため、
-  // 「バンク0だけ先に使い切ってからドライバ領域を飛び越す」という配置に使う。
-  // 戻り値のbanks[].offsetはそのバンク内での配置開始位置(0-4095、$8000からのオフセット)。
-  function layoutChannelBanks(bytes, startBank, startOffset, markOffset, holeSkipTo) {
+  // reserved(2026-08-16、ROM圧縮対応): チャンネルデータを置いてはいけないバンク番号
+  // (ドライバ本体・DPCMサンプルが占有する「穴」)。数値なら[1, reserved)、関数なら
+  // bank番号→真偽値の述語。穴に当たるバンクは素直に+1する代わりに飛び越える
+  // (0xEEバンクジャンプは元々任意のバンク・アドレスへ飛べるため追加のランタイムコストは
+  // 無い)。バンク0(窓0)はドライバが動的に読み替える場所そのもの=コードさえ置かなければ
+  // 自由に使えるため、「バンク0だけ先に使い切ってからドライバ領域を飛び越す」という
+  // 配置に使う。戻り値のbanks[].offsetはそのバンク内での配置開始位置(0-4095、$8000からの
+  // オフセット)。
+  function layoutChannelBanks(bytes, startBank, startOffset, markOffset, reserved) {
     const banks = [];
     const boundaries = MML.NSF.MckBytecode.commandBoundaries(bytes);
     const MIN_CHUNK_WITH_JUMP = 5; // 実データ最低1byte + バンクジャンプマーカー4byte
+    const isReserved = typeof reserved === 'function'
+      ? reserved
+      : (n => reserved != null && n >= 1 && n < reserved);
     function advanceBank(n) {
-      return (holeSkipTo != null && n >= 1 && n < holeSkipTo) ? holeSkipTo : n;
+      while (isReserved(n)) n++;
+      return n;
     }
     let offset = 0;
     let bankNum = startBank;
@@ -327,7 +335,12 @@
   // (いずれもchannelTypes.length件)。act[i]=1のチャンネルは、トラック終端到達時に
   // 無音化して止まる代わりにbank[i]/lo[i]/hi[i]が指す位置へジャンプして再生を続ける
   // (buildBankedNsfBytes参照)。省略時は全チャンネルact=0(従来通り終端で停止)
-  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune) {
+  // driverOrg(2026-08-16、DPCM曲のROM圧縮): ドライバ本体の配置先アドレス(既定$9000=窓1先頭)。
+  // DPCM使用曲ではサンプル($C000固定)の直下に詰めるため$C000-コードバンク数×4KBを渡す
+  // (buildBankedNsfBytes参照)。ドライバは絶対アドレスで自分自身を参照するのでorgで
+  // 一意に決まり、窓→ファイル上バンク番号の対応はNSFヘッダのbankswitch初期値で吸収する
+  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg) {
+    driverOrg = driverOrg || 0x9000;
     songAddrLo = songAddrLo || channelTypes.map(() => 0x00);
     songAddrHi = songAddrHi || channelTypes.map(() => 0x80);
     envelopes = envelopes || {};
@@ -2111,10 +2124,8 @@ N163_TONE_OK:
         extraTables.push(toneTables);
         n163ToneCheckCall = `    JSR N163_TONE_CHECK\n`;
       }
-      // N163はテーブル1エントリ3バイトのため、Xレジスタ(8bit、最大255)でインデックス
-      // 可能な範囲は音程0-85まで(85*3=255)。TABLE_MAX(107)のままだと107*3=321で
-      // 8bitからあふれて誤ったテーブル位置を読んでしまうため、N163だけ上限を下げる
-      const n163TableMax = Math.floor(255 / 3); // 85
+      // (2026-08-16まで: N163はテーブル1エントリ3バイトのためYで索引できるのは音程85まで、と
+      //  上限を下げていた。現在はN163_TBL_LOOKUPが16bitオフセットで引くため上限はTABLE_MAX)
 
       // --- N163ハンドラ共用化(2026-08-16 ROM圧縮対応) ---
       // 以前はWFV_T/SIL_T/WFV_VOL_T/WFO_Tを8チャンネルぶん丸ごと複製していた(チャンネル間の
@@ -2152,18 +2163,47 @@ N163_TONE_OK:
       // 波形長テーブル参照は、カスタム波形を使う曲ではインスツルメントごとに異なる
       // N163_TABLE_<L>を間接(ptr),Yで、使わない曲は従来通り単一N163_TABLEを絶対,Yで読む
       // (絶対/間接どちらもYを使うよう統一しているだけで、Xは温存されchannel indexのまま)
-      const tableRead = usesN163CustomWaves
-        ? `    LDA ${hex(TBLLO)},X\n    STA ${hex(PTBLLO)}\n    LDA ${hex(TBLHI)},X\n    STA ${hex(PTBLHI)}\n` +
-          `    LDA (${hex(PTBLLO)}),Y\n    STA ${hex(PERLO)}\n    INY\n` +
-          `    LDA (${hex(PTBLLO)}),Y\n    STA ${hex(PERHI)}\n    INY\n` +
-          `    LDA (${hex(PTBLLO)}),Y\n    STA ${hex(PERLO2)}`
-        : `    LDA N163_TABLE,Y\n    STA ${hex(PERLO)}\n    LDA N163_TABLE+1,Y\n    STA ${hex(PERHI)}\n` +
-          `    LDA N163_TABLE+2,Y\n    STA ${hex(PERLO2)}`;
+      // ★2026-08-16: 以前は「Y=ノート番号×3」でテーブルを引いていたため8bitのYに収まる
+      // ノート85(=索引255)までしか扱えず(それ以上は85にクランプ=C#7以上が出せない)、
+      // しかもカスタム波形時の間接(ptr),Y読みは索引255→INYで0へ折り返し(256/257番地の
+      // 代わりに0/1番地)を読んでデタラメな周波数になっていた(女神転生II実リップのRパート
+      // ノート85が別の音程で書き出されていた原因)。ノート×3を16bitで計算してポインタ
+      // (PTBLLO/PTBLHI)に加算し(ptr),Y(Y=0/1/2)で読む方式に改め、2A03等と同じ全108ノートを
+      // 扱えるようにした。カスタム波形の有無はポインタの元(TBLLO/HI,X か 固定N163_TABLE)の
+      // 差だけになるので、両方とも共用サブルーチンN163_TBL_LOOKUPで読む(A=ノート索引)
+      const tableRead = `    JSR N163_TBL_LOOKUP`;
+      const n163TableLookupRoutine = `
+; --- N163周波数テーブル読み出し(共用): A=ノート索引(0-${TABLE_MAX})、X=チャンネル番号。
+; PERLO/PERHI/PERLO2 <- テーブル3バイト(freq lo / freq mid / lenByte|freq hi)。
+; ポインタ=テーブル先頭+ノート×3(16bit)。Xは温存、Yは破壊 ---
+N163_TBL_LOOKUP:
+    STA ${hex(PERLO)}
+    ASL A                   ; ノート×2(最大214、C=0)
+    ADC ${hex(PERLO)}       ; ノート×3(最大321、C=9bit目)
+    STA ${hex(PERLO2)}
+    LDA #$00
+    ADC #$00
+    STA ${hex(PERHI)}       ; オフセット上位(0/1)
+    CLC
+${usesN163CustomWaves
+    ? `    LDA ${hex(TBLLO)},X\n    ADC ${hex(PERLO2)}\n    STA ${hex(PTBLLO)}\n    LDA ${hex(TBLHI)},X\n    ADC ${hex(PERHI)}\n    STA ${hex(PTBLHI)}`
+    : `    LDA #<N163_TABLE\n    ADC ${hex(PERLO2)}\n    STA ${hex(PTBLLO)}\n    LDA #>N163_TABLE\n    ADC ${hex(PERHI)}\n    STA ${hex(PTBLHI)}`}
+    LDY #$00
+    LDA (${hex(PTBLLO)}),Y
+    STA ${hex(PERLO)}
+    INY
+    LDA (${hex(PTBLLO)}),Y
+    STA ${hex(PERHI)}
+    INY
+    LDA (${hex(PTBLLO)}),Y
+    STA ${hex(PERLO2)}
+    RTS`;
       const waveAddrRewrite = usesN163CustomWaves
         ? `    LDA N163_SEL6,X\n    STA $F800       ; 波形アドレス(+6)。` +
           `共有アロケータのオフセットは固定でなくなったため毎回書き直す\n    LDA ${hex(WAVEOFS)},X\n    ASL A\n    STA $4800\n`
         : '';
       const n163Handlers = [];
+      n163Handlers.push(n163TableLookupRoutine);
       n163Handlers.push(`
 ; --- N163共用: 音量レジスタ(regBase+7)書込み。X=チャンネル番号のまま呼ぶ。
 ; 最上位ch(N163_SEL7,X=$FF)のみ、$7Fの有効チャンネル数ビット(4-6)を読み戻して保持する ---
@@ -2172,10 +2212,10 @@ N163_WVOL:
     CMP #$FF
     BEQ NWVOL_TOP
     STA $F800
-    LDA #$10
-    ORA ${hex(VOL)},X
-    STA $4800
-    RTS
+    LDA ${hex(VOL)},X
+    AND #$0F        ; compiler.js volByte(非最上位ch)と同じくbit4-7は0(以前は#$10を
+    STA $4800       ; ORしていた。実機は非$7Fの上位ビットを無視するが、ブラウザ再生との
+    RTS             ; レジスタトレース比較で常時食い違う唯一の点だったので揃える)
 NWVOL_TOP:
     STA $F800
     LDA $4800       ; 現在値読出し(有効ch数ビットを保持するため)
@@ -2223,20 +2263,13 @@ ${usesEn ? `    CLC
     LDA #$00
     JMP WFVN163_INDEX
 WFVN163_NONNEG:` : ''}
-    CMP #${hex(n163TableMax)}
+    CMP #${hex(TABLE_MAX)}
     BCC WFVN163_OK
-    LDA #${hex(n163TableMax)}
+    LDA #${hex(TABLE_MAX)}
 WFVN163_OK:
 WFVN163_INDEX:
-    ; note*3 (テーブルは1エントリ3バイト) = note+note+note (音程は85までなので8bitで安全)
     ; このルーチンはXを一切破壊しない(索引はY・(ptr),Yのみ)ため、旧複製版にあった
     ; STX/LDX CHIDXの退避・復元は不要(2026-08-16 最適化)
-    STA ${hex(PERLO)}
-    CLC
-    ADC ${hex(PERLO)}
-    CLC
-    ADC ${hex(PERLO)}
-    TAY
 ${tableRead}
     JSR APPLY_DETUNE_N163
     LDA N163_SEL0,X
@@ -2266,17 +2299,11 @@ ${usesEn ? `    CLC
     LDA #$00
     JMP WFON163_INDEX
 WFON163_NONNEG:` : ''}
-    CMP #${hex(n163TableMax)}
+    CMP #${hex(TABLE_MAX)}
     BCC WFON163_OK
-    LDA #${hex(n163TableMax)}
+    LDA #${hex(TABLE_MAX)}
 WFON163_OK:
 WFON163_INDEX:
-    STA ${hex(PERLO)}
-    CLC
-    ADC ${hex(PERLO)}
-    CLC
-    ADC ${hex(PERLO)}
-    TAY
 ${tableRead}
     JSR APPLY_DETUNE_N163
     LDA N163_SEL0,X
@@ -2309,8 +2336,18 @@ ${tableRead}
 ; ADC PERLO2はD<n>16bit加算のキャリーを引き継ぐ。CLCを挟まないのが重要。EP/MPも
 ; 同様に自ブロック内のキャリーを引き継ぐ)。3つとも加算し終えた最終結果が負(PERLO2の
 ; bit7が立つ)ならPERLO/PERHI/PERLO2=0にクランプし、そうでなければ上位2bitを
-; 再度AND #$03でマスクしてから波形長定数を戻す ---
+; 再度AND #$03でマスクしてから波形長ビットを戻す。
+; ★2026-08-16修正: 波形長ビット(bit2-7)は以前 ORA #$F0 (=16サンプル固定)で戻していた。
+; @N<n>が16サンプル以外(32サンプル等)の曲でD/EP/MP/PT/PSのいずれかを使うと、テーブル
+; (N163_TABLE_<L>)がLに合わせて符号化した周波数値に対し波形長だけ16に潰されて書き込まれ、
+; 実機は波形の先頭16サンプルだけを1オクターブ上で鳴らしていた(女神転生II実リップ変換で
+; P/Q/Sの音色崩れ+1オクターブ上、Rは16サンプル波形だったため無事、という症状で発覚)。
+; 入口でPERLO2の波形長ビットをPTBLHIへ退避し(tableRead直後で以後この呼出し内では
+; 未使用のスクラッチ)、出口でそれをORして戻す ---
 APPLY_DETUNE_N163:
+    LDA ${hex(PERLO2)}
+    AND #$FC
+    STA ${hex(PTBLHI)}     ; 波形長ビット退避
     LDA ${hex(PERLO2)}
     AND #$03
     STA ${hex(PERLO2)}
@@ -2383,19 +2420,23 @@ ADN163_PT_EXT:
     ADC ${hex(PERLO2)}
     STA ${hex(PERLO2)}
 ` : ''}    LDA ${hex(PERLO2)}
-    BPL ADN163_OK
+    BPL ADN163_NONNEG
     LDA #$00
     STA ${hex(PERLO)}
     STA ${hex(PERHI)}
     STA ${hex(PERLO2)}
     JMP ADN163_DONE
-ADN163_OK:
-    LDA ${hex(PERLO2)}
-    AND #$03
+ADN163_NONNEG:
+    CMP #$04
+    BCC ADN163_DONE        ; 0-3=18bit範囲内
+    LDA #$FF               ; 正方向の18bit溢れは最大値$3FFFFへクランプ
+    STA ${hex(PERLO)}      ; (compiler.js applyDetune/n163FreqRegのmin(262143)と同じ。
+    STA ${hex(PERHI)}      ; 以前は負方向のみクランプし正方向は18bitで折り返していた)
+    LDA #$03
     STA ${hex(PERLO2)}
 ADN163_DONE:
     LDA ${hex(PERLO2)}
-    ORA #$F0
+    ORA ${hex(PTBLHI)}     ; 退避しておいた波形長ビットを戻す(以前は#$F0固定=バグ)
     STA ${hex(PERLO2)}
     RTS`);
     }
@@ -2598,52 +2639,95 @@ ${toneLoadBlocks}`);
       // 変換した値を108ノート分(NOTE_TABLE_SIZE)事前計算したテーブルを引く。
       // サンプル本体のバイト列自体はここでは埋め込まない($C000-$FFFF固定バンク4-7に
       // buildBankedNsfBytesが直接配置する。ここでは$4010-4013用のレジスタ値のみ埋め込む)
-      const dpcmBranches = dpcmIndices.map((idx, i) => `    CMP #${hex(idx)}\n    BEQ DPCM_TRIGGER_${i}`).join('\n');
-      const dpcmBlocks = dpcmIndices.map((idx, i) => {
+      // 2026-08-16: 以前はサンプルごとにDPCM_TRIGGER_<i>ブロック(約48byte)を複製し
+      // `CMP #idx / BEQ DPCM_TRIGGER_<i>`で分岐していたが、サンプルが3個以上ある曲で
+      // BEQの分岐距離が±127byteを超えアセンブル失敗していた(悪魔城伝説1曲目で発覚)。
+      // 分岐トランポリン化ではなく、サンプルごとの差分(レート表・モードビット・DAC・
+      // アドレス・長さ)を全て,Y索引のテーブルに追い出した共用1本のルーチンに改める
+      // (N163/VRC7/FME7ハンドラ共用化と同じ方針。サンプル数に依らずコードは固定長、
+      // 分岐は全て短距離)。レート表(108byte)は基準freqが同じサンプル同士で共有する
+      const rateTableSlotByFreq = new Map();
+      const dpcmRateLabels = [];
+      const dpcmIdxBytes = [], dpcmModeBytes = [], dpcmDacBytes = [], dpcmAddrBytes = [], dpcmLenBytes = [];
+      dpcmIndices.forEach((idx) => {
         const layout = dpcmLayout[idx];
         const def = dpcmSamples[idx] || {};
-        const rateTable = new Array(NOTE_TABLE_SIZE);
-        for (let noteN = 0; noteN < NOTE_TABLE_SIZE; noteN++) {
-          rateTable[noteN] = MML.Mml.dpcmRateIndexForNote(def.freq || 0, noteN) & 0x0F;
+        const freq = (def.freq || 0) & 0x0F;
+        if (!rateTableSlotByFreq.has(freq)) {
+          const rateTable = new Array(NOTE_TABLE_SIZE);
+          for (let noteN = 0; noteN < NOTE_TABLE_SIZE; noteN++) {
+            rateTable[noteN] = MML.Mml.dpcmRateIndexForNote(freq, noteN) & 0x0F;
+          }
+          const label = `DPCM_RATE_TABLE_F${freq}`;
+          extraTables.push(`${label}:\n${bytesToDb(new Uint8Array(rateTable))}`);
+          rateTableSlotByFreq.set(freq, label);
         }
-        extraTables.push(`DPCM_RATE_TABLE_${i}:\n${bytesToDb(new Uint8Array(rateTable))}`);
-        const modeBit = def.mode ? 0x40 : 0x00;
-        return `
-DPCM_TRIGGER_${i}:
-    STX ${hex(CHIDX)}
+        dpcmRateLabels.push(rateTableSlotByFreq.get(freq));
+        dpcmIdxBytes.push(idx & 0xff);
+        dpcmModeBytes.push(def.mode ? 0x40 : 0x00);
+        // DAC=$FF(bit7)は「$4011を書かない」印(layout.dac===null、実機ppmck driverの
+        // dpcm.h skipラベル相当)。有効値は0-127なのでBMIで判別できる
+        dpcmDacBytes.push(layout.dac != null ? (layout.dac & 0x7F) : 0xFF);
+        dpcmAddrBytes.push(layout.addrReg & 0xff);
+        dpcmLenBytes.push(layout.lengthReg & 0xff);
+      });
+      extraTables.push(
+        `DPCM_IDX_TBL:\n${bytesToDb(new Uint8Array(dpcmIdxBytes))}\n` +
+        `DPCM_MODE_TBL:\n${bytesToDb(new Uint8Array(dpcmModeBytes))}\n` +
+        `DPCM_DAC_TBL:\n${bytesToDb(new Uint8Array(dpcmDacBytes))}\n` +
+        `DPCM_ADDR_TBL:\n${bytesToDb(new Uint8Array(dpcmAddrBytes))}\n` +
+        `DPCM_LEN_TBL:\n${bytesToDb(new Uint8Array(dpcmLenBytes))}\n` +
+        `DPCM_RATE_LO:\n    .byte ${dpcmRateLabels.map(l => `<${l}`).join(',')}\n` +
+        `DPCM_RATE_HI:\n    .byte ${dpcmRateLabels.map(l => `>${l}`).join(',')}`);
+      extraHandlers.push(`
+; --- DPCM ($4010-4013、サンプル本体は固定バンク4-7=$C000-$FFFFに直接配置) ---
+; DUTY,X(@<n>で選択した@DPCM<n>番号)をDPCM_IDX_TBLから逆引きしてスロットYを得て、
+; 以降は全て,Yテーブル参照(サンプル数に依らずコード固定長)。X(チャンネル)は保存
+WFV_T${TYPE_DPCM}:
+    LDA ${hex(DUTY)},X
+    LDY #${hex(dpcmIndices.length - 1)}
+DPCM_FIND:
+    CMP DPCM_IDX_TBL,Y
+    BEQ DPCM_FOUND
+    DEY
+    BPL DPCM_FIND
+    RTS     ; 対応するサンプルが無ければ何もしない(compiler.jsと同じ)
+DPCM_FOUND:
+    STY ${hex(PERLO2)}
+    LDA DPCM_RATE_LO,Y
+    STA ${hex(PTBLLO)}
+    LDA DPCM_RATE_HI,Y
+    STA ${hex(PTBLHI)}
     LDA ${hex(NOTE)},X
     CMP #${hex(TABLE_MAX)}
-    BCC DPCM_OK_${i}
+    BCC DPCM_OK
     LDA #${hex(TABLE_MAX)}
-DPCM_OK_${i}:
-    TAX
-    LDA DPCM_RATE_TABLE_${i},X
-    ORA #${hex(modeBit)}
+DPCM_OK:
+    TAY
+    LDA (${hex(PTBLLO)}),Y
+    LDY ${hex(PERLO2)}
+    ORA DPCM_MODE_TBL,Y
     STA ${hex(PERLO)}
-    LDX ${hex(CHIDX)}
     LDA #$0F
     STA $4015       ; DMC一旦停止(2A03他chは維持)
     LDA ${hex(PERLO)}
     STA $4010
-${layout.dac != null ? `    LDA #${hex(layout.dac)}\n    STA $4011\n` : ''}    LDA #${hex(layout.addrReg)}
+    LDA DPCM_DAC_TBL,Y
+    BMI DPCM_NODAC
+    STA $4011
+DPCM_NODAC:
+    LDA DPCM_ADDR_TBL,Y
     STA $4012
-    LDA #${hex(layout.lengthReg)}
+    LDA DPCM_LEN_TBL,Y
     STA $4013
     LDA #$1F
     STA $4015       ; 再生開始
-    RTS`;
-      }).join('\n');
-      extraHandlers.push(`
-; --- DPCM ($4010-4013、サンプル本体は固定バンク4-7=$C000-$FFFFに直接配置) ---
-WFV_T${TYPE_DPCM}:
-    LDA ${hex(DUTY)},X
-${dpcmBranches}
-    RTS     ; 対応するサンプルが無ければ何もしない(compiler.jsと同じ)
-${dpcmBlocks}
+    RTS
 SIL_T${TYPE_DPCM}:
-    LDA #$0F
-    STA $4015       ; DMC停止(2A03他chは維持)
-    RTS`);
+    RTS             ; 休符/ゲートオフではDMCを止めない(サンプルは末尾まで鳴り切る)。
+                    ; 実機ppmck(dpcm.h no_dpcm、DPCM_RESTSTOP無効の既定)およびcompiler.js
+                    ; segmentsToWriteLogDpcmと同じ。以前はここで$4015=$0Fを書いており、
+                    ; ブラウザ再生(休符で止めない)とNSFで食い違っていた(2026-08-16)`);
       wfvEntries[TYPE_DPCM] = `WFV_T${TYPE_DPCM}`;
       silEntries[TYPE_DPCM] = `SIL_T${TYPE_DPCM}`;
     }
@@ -2653,16 +2737,19 @@ SIL_T${TYPE_DPCM}:
 ; チャンネル数: ${n} / 使用拡張音源: ${expansions.length ? expansions.join(',') : 'なし'}
 ; ==========================================
     .org $8000
-    .res ${BANK_SIZE}       ; バンク0(未使用、窓0の初期表示分。使用前に必ず上書きされる)
+    .res ${driverOrg - 0x8000}       ; 窓0(バンク0)〜ドライバ本体開始位置までのダミー(曲データ用に後で上書きされる)
 
-    .org $9000
+    .org ${hex(driverOrg)}
 
 INIT:
     LDA #$0F
     STA $4015       ; 2A03全チャンネル有効化
-    LDA #$00
-    STA $4001       ; スイープ無効(パルス1)
-    STA $4005       ; スイープ無効(パルス2)
+    LDA #$08
+    STA $4001       ; スイープ無効(パルス1)。$00でなく$08(negate)にするのが定石:
+    STA $4005       ; スイープ無効(パルス2)。$00だとスイープユニットの目標周期
+                    ; (period+period>>0=2倍)が$7FFを超える周期$400以上の低音を実機/
+                    ; エミュレータが常時ミュートしてしまう(compiler.jsのsweepRegisterByteと
+                    ; 同じ0x08。Batman Prototype 1曲目のPulse2ベースが無音になった原因)
 ${initExtra.join('\n')}
 
     LDX #$00
@@ -4189,10 +4276,31 @@ SONG_LOOP_PTR_HI:
   // headerOpt: NSF.buildHeaderと同じオプション。
   // 戻り値: { nsfBytes, asmErrors, bankCount, unsupportedExpansions }
   Driver.buildBankedNsfBytes = function (compileResult, headerOpt) {
-    const channelLetters = compileResult.channelLetters || ['A', 'B', 'C', 'D'];
+    let channelLetters = compileResult.channelLetters || ['A', 'B', 'C', 'D'];
     const expansions = compileResult.expansions || [];
-    const expansionLetterMap = compileResult.expansionLetterMap || {};
+    let expansionLetterMap = compileResult.expansionLetterMap || {};
     const segmentsByChannel = compileResult.segmentsByChannel || {};
+
+    // N163の有効チャンネル数($7Fに書く値、周波数テーブルの符号化、レジスタ配置の
+    // (8-num)+chオフセットの全てに効く)をcompiler.js(segmentsToWriteLogN163の呼び出し元)と
+    // 完全に同じ規則=「音符を持つ最上位レターの位置+1」で決める。以前は#EX-NAMCO106で
+    // 宣言された8レター全部をチャンネルとして組み込み常に8ch扱いだったため、ブラウザ再生
+    // (実使用ch数)とNSF書き出しで$7F・周波数値・レジスタ配置が全て食い違っていた
+    // (女神転生II 11曲目=4ch使用曲で発覚)。有効ch数より上のレター(音符無し)は実機上の
+    // 実体が無い(レジスタ配置がRAM範囲外へはみ出す)ためドライバのチャンネル一覧から除外する
+    if (expansions.includes('n163')) {
+      const n163All = expansionLetterMap.n163 || [];
+      let numN163Ch = 0;
+      n163All.forEach((ch, index) => {
+        if ((segmentsByChannel[ch] || []).some(s => s.freq != null)) numN163Ch = index + 1;
+      });
+      numN163Ch = Math.max(1, numN163Ch);
+      if (numN163Ch < n163All.length) {
+        const dropped = new Set(n163All.slice(numN163Ch));
+        expansionLetterMap = Object.assign({}, expansionLetterMap, { n163: n163All.slice(0, numN163Ch) });
+        channelLetters = channelLetters.filter(ch => !dropped.has(ch));
+      }
+    }
     const envelopes = compileResult.envelopes || {};
     const immediateWritesByChannel = compileResult.immediateWritesByChannel || {};
 
@@ -4427,11 +4535,11 @@ SONG_LOOP_PTR_HI:
     // 動的に決める。
     //  1. まずダミーのSONG_BANK/SONG_ADDR_*/SONG_LOOP_*(値は何でもよい。.byteテーブルの
     //     長さ=チャンネル数だけ合っていればアセンブル後のバイト数は変わらない)で
-    //     ドライバ本体を1回アセンブルし、実際に必要なバンク数(driverBankCount)を測る。
-    //  2. DPCMを使う曲だけは、実機DMCハードウェアが$C000-$FFFFからしかサンプルを
-    //     読めない制約上、バンク4-7を従来通り無条件でDPCM専用に予約する(この場合は
-    //     一切変更しない=安全側)。DPCM未使用の曲は、この予約自体が不要なので
-    //     チャンネルデータをdriverBankCountの直後から詰められる。
+    //     ドライバ本体を1回アセンブルし、実際に必要なバンク数(driverCodeBanks)を測る。
+    //  2. DPCMを使う曲は、実機DMCハードウェアが$C000-$FFFFからしかサンプルを読めない
+    //     制約上サンプルを$C000以降の窓に置く必要があるが、ファイル上のバンク番号は
+    //     窓番号と独立に詰められる(下記「ROM上のバンク配置」参照。2026-08-16、以前は
+    //     バンク4-7=16KBを無条件予約していた)。
     //  3. 各チャンネルは(従来のように必ず新しいバンクの$8000から始めるのではなく)
     //     直前のチャンネルの続きに、バンクを跨がない範囲で詰めて配置する
     //     (layoutChannelBanksのstartOffset)。未使用/ほぼ空の拡張音源チャンネルが
@@ -4440,15 +4548,16 @@ SONG_LOOP_PTR_HI:
 
     // バンク0(窓0)はドライバが動的に読み替える場所そのもので、コードさえ置かなければ
     // チャンネルデータ用に自由に使える(READ_DATA参照)。ドライバ本体(+DPCM使用時は
-    // その専用領域)が占有する[1, holeSkipTo)だけを「穴」として飛び越え、バンク0から
-    // 真っ先に詰めていく(ユーザー指示: データ領域として使えるなら真っ先に埋める)
-    function layoutAllChannels(holeSkipTo) {
+    // その専用領域)が占有するバンク(reservedBank述語が真になる番号)だけを「穴」として
+    // 飛び越え、バンク0から真っ先に詰めていく(ユーザー指示: データ領域として使えるなら
+    // 真っ先に埋める)
+    function layoutAllChannels(reservedBank) {
       const songBank = [], songAddrLo = [], songAddrHi = [];
       const allDataBanks = [];
       const loopAct = [], loopBank = [], loopLo = [], loopHi = [];
       let bankNum = 0, offsetInBank = 0;
       for (let i = 0; i < channelLetters.length; i++) {
-        const layout = layoutChannelBanks(chBytes[i], bankNum, offsetInBank, chSerialized[i].loopByteOffset, holeSkipTo);
+        const layout = layoutChannelBanks(chBytes[i], bankNum, offsetInBank, chSerialized[i].loopByteOffset, reservedBank);
         songBank.push(layout.startBank);
         songAddrLo.push((0x8000 + layout.startOffset) & 0xff);
         songAddrHi.push((0x8000 + layout.startOffset) >> 8);
@@ -4479,11 +4588,25 @@ SONG_LOOP_PTR_HI:
     if (probeAsm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: probeAsm.errors, bankCount: 0, unsupportedExpansions };
     }
-    const driverBankCount = Math.max(1, Math.ceil(probeAsm.bytes.length / BANK_SIZE));
+    // ドライバ本体(コード+テーブル)のバンク数(窓0=バンク0のダミー4KBは含まない)
+    const driverCodeBanks = Math.max(1, Math.ceil((probeAsm.bytes.length - BANK_SIZE) / BANK_SIZE));
 
-    let channelStartBank, fixedRegionSize;
+    // ROM上のバンク配置(2026-08-16、DPCM曲のROM圧縮):
+    // ファイル上のバンク番号と実行時の窓番号は同じである必要が無い(窓→バンクの対応は
+    // NSFヘッダのbankswitch初期値で自由に決められ、ドライバ自身は窓0($5FF8)しか
+    // 切り替えない)。これを使ってDPCM使用曲でも空きバンクを一切作らない:
+    //   ・DPCM未使用: [0]=曲データ / [1..d]=ドライバ($9000〜、窓1..d) / [d+1..]=曲データ
+    //     (従来通り。窓とバンクは同番号)
+    //   ・DPCM使用  : [0]=曲データ / [1..d]=ドライバ($C000-d×4KB〜=窓4-d..3) /
+    //                 [d+1..d+p]=DPCMサンプル($C000〜=窓4..3+p) / [d+p+1..]=曲データ
+    //     以前はDPCM使用曲は無条件にバンク0-7=32KBを固定確保しており(ドライバ$9000固定+
+    //     サンプル$C000固定の間の空きバンクも、サンプル末尾以降のバンク5-7も全部空のまま)、
+    //     Batman Prototype 1曲目のようにDPCM 1個・曲データ2KBでも常に32896バイトになっていた
+    let driverOrg = 0x9000;
+    let driverFileBank = 1;          // ドライバ本体のファイル上の先頭バンク
+    let dpcmFileBank = 0, dpcmBanks = 0; // DPCMサンプル領域のファイル上の先頭バンクとバンク数
     if (dpcmUsed) {
-      // DPCM使用時はバンク4-7が専用領域のため、従来通りドライバはバンク0-3に収める必要がある
+      // DPCM使用時はサンプルが$C000固定なので、ドライバはその直下(窓1-3=最大12KB)に収める必要がある
       if (probeAsm.bytes.length > DRIVER_CODE_LIMIT) {
         return {
           nsfBytes: null,
@@ -4494,34 +4617,40 @@ SONG_LOOP_PTR_HI:
           unsupportedExpansions
         };
       }
-      channelStartBank = DATA_START_BANK; // 8、従来通り(変更なし)
-      fixedRegionSize = DATA_START_BANK * BANK_SIZE; // 32768、従来通り(変更なし)
-    } else {
-      channelStartBank = driverBankCount;
-      fixedRegionSize = driverBankCount * BANK_SIZE;
+      // DPCMサンプル本体は$C000から連続配置される(layoutDpcmSamples)。実際に使っている
+      // 末尾までのバンク数だけを確保する
+      let dpcmEnd = 0;
+      for (const idx of Object.keys(dpcmLayout)) {
+        const layout = dpcmLayout[idx];
+        dpcmEnd = Math.max(dpcmEnd, layout.addr - 0xC000 + layout.bytes.length);
+      }
+      dpcmBanks = Math.max(1, Math.ceil(dpcmEnd / BANK_SIZE));
+      driverOrg = 0xC000 - driverCodeBanks * BANK_SIZE;
+      dpcmFileBank = driverFileBank + driverCodeBanks;
     }
+    const fixedEndBank = driverFileBank + driverCodeBanks + dpcmBanks; // これ未満(1以上)がデータ禁止
+    const channelStartBank = fixedEndBank;
+    const reservedBank = n => (n >= 1 && n < fixedEndBank);
 
     // 2回目: 実際のチャンネルデータ配置(詰め込み込み)を確定し、それを使ってドライバ本体を
-    // 再アセンブルする(songBank等の値が変わるだけでバイト数は1回目と一致するはず)
-    const { songBank, songAddrLo, songAddrHi, allDataBanks, songLoop } = layoutAllChannels(channelStartBank);
+    // 再アセンブルする(songBank等の値とorgが変わるだけでバイト数は1回目と一致するはず。
+    // orgの違いはゼロページ/絶対の選択や分岐距離に影響しないため)
+    const { songBank, songAddrLo, songAddrHi, allDataBanks, songLoop } = layoutAllChannels(reservedBank);
 
-    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune);
+    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg);
     const asm = MML.Asm.assemble(src, { origin: 0x8000 });
     if (asm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: asm.errors, bankCount: 0, unsupportedExpansions };
     }
-
-    // 固定領域(ドライバ本体。DPCM使用時のみ従来通りバンク0-7=32768バイト、それ以外は
-    // 実サイズぶんだけ)を確保し、アセンブル結果を敷き詰める
-    const fixedRegion = new Uint8Array(fixedRegionSize);
-    fixedRegion.set(asm.bytes.slice(0, fixedRegionSize), 0);
-    // DPCMサンプル本体をバンク4-7($C000-$FFFF)へ直接配置する(実機DMCハードウェアは
-    // このアドレス範囲からしかサンプルを読めないため、NSFのバンク切り替え初期値
-    // (下記opt.bankswitch)で最初からこの窓に固定マップしておく。
-    // 追加の6502コードは不要 — NSFロード時にNsfBus/実機側で$5FF8-$5FFFへ反映される)
-    for (const idx of Object.keys(dpcmLayout)) {
-      const layout = dpcmLayout[idx];
-      fixedRegion.set(layout.bytes, layout.addr - 0x8000);
+    const driverBytes = asm.bytes.slice(driverOrg - 0x8000);
+    if (driverBytes.length > driverCodeBanks * BANK_SIZE) {
+      return {
+        nsfBytes: null,
+        asmErrors: [{ lineNo: 0, message: `内部エラー: ドライバ本体のサイズが計測時(${(probeAsm.bytes.length - BANK_SIZE)}バイト)と` +
+          `再アセンブル時(${driverBytes.length}バイト)で一致しません` }],
+        bankCount: 0,
+        unsupportedExpansions
+      };
     }
 
     // 曲データバンクをバンク番号順に並べ、それぞれのオフセットへ配置する。バンク内の
@@ -4530,12 +4659,23 @@ SONG_LOOP_PTR_HI:
     // あらかじめ0xFFで埋めてから実データを上書きする(個別に末尾だけ埋める旧方式だと、
     // 同じバンクの別オフセットに来る他チャンネルのデータとの順序依存が生じるため)
     allDataBanks.sort((a, b) => a.bankNum - b.bankNum);
-    const totalBanks = allDataBanks.length > 0
-      ? allDataBanks[allDataBanks.length - 1].bankNum + 1
-      : channelStartBank;
-    const programBytes = new Uint8Array(Math.max(fixedRegionSize, totalBanks * BANK_SIZE));
+    // 固定領域(ドライバ本体+DPCMサンプル)の末尾バンクは、チャンネルデータがそれより
+    // 手前(バンク0)だけに収まった場合でも必ず含める
+    const totalBanks = Math.max(
+      fixedEndBank,
+      allDataBanks.length > 0 ? allDataBanks[allDataBanks.length - 1].bankNum + 1 : channelStartBank);
+    const programBytes = new Uint8Array(totalBanks * BANK_SIZE);
     programBytes.fill(0xff);
-    programBytes.set(fixedRegion, 0);
+    // ドライバ本体(ファイル上バンク[driverFileBank..))
+    programBytes.set(driverBytes, driverFileBank * BANK_SIZE);
+    // DPCMサンプル本体(ファイル上バンク[dpcmFileBank..)。実行時は窓4以降=$C000以降に
+    // 見える。実機DMCハードウェアはこのアドレス範囲からしかサンプルを読めないため、
+    // NSFのバンク切り替え初期値(下記opt.bankswitch)で最初からこの窓に固定マップしておく。
+    // 追加の6502コードは不要 — NSFロード時にNsfBus/実機側で$5FF8-$5FFFへ反映される)
+    for (const idx of Object.keys(dpcmLayout)) {
+      const layout = dpcmLayout[idx];
+      programBytes.set(layout.bytes, dpcmFileBank * BANK_SIZE + (layout.addr - 0xC000));
+    }
     for (const b of allDataBanks) {
       programBytes.set(b.data, b.bankNum * BANK_SIZE + b.offset);
     }
@@ -4544,14 +4684,18 @@ SONG_LOOP_PTR_HI:
     opt.loadAddr = 0x8000;
     opt.initAddr = asm.symbols.INIT;
     opt.playAddr = asm.symbols.PLAY;
-    // 窓0(バンクデータ用)の初期値は使用前に必ず上書きされるので何でもよい。
-    // 窓1-7は本来バンク1-7を指すが、ROM圧縮(2026-08-15)でprogramBytesが8バンク未満に
-    // 縮むことがあるため、実在しないバンク番号を初期値テーブルへ書かないよう
-    // (totalBanks-1)でクランプする(そのバンクを指す窓は実行時に一度も参照されない=
-    // ドライバコードは常にwindow0だけを動的に切り替えて読むため、クランプ後の値が
-    // 何であっても再生結果に影響しない。存在しないバンク番号を初期値表に載せたままに
-    // すると、NSFプレイヤー実装によっては未定義動作になりうるための保険)
-    opt.bankswitch = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7].map(i => Math.min(i, totalBanks - 1)));
+    // 窓→ファイル上バンク番号の初期値(上のROM配置コメント参照)。
+    // 窓0(曲データ用)は使用前に必ず上書きされるので何でもよい。ドライバ本体の窓
+    // (driverOrgから始まるdriverCodeBanks個)とDPCMサンプルの窓(4以降dpcmBanks個)を
+    // それぞれのファイル上バンクへ向け、それ以外の窓(実行時に一度も参照されない)は
+    // 実在しないバンク番号を初期値テーブルへ書かないよう0にしておく(存在しないバンク
+    // 番号を初期値表に載せると、NSFプレイヤー実装によっては未定義動作になりうるための保険)
+    const driverWin0 = (driverOrg - 0x8000) / BANK_SIZE;
+    opt.bankswitch = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7].map(w => {
+      if (w >= driverWin0 && w < driverWin0 + driverCodeBanks) return driverFileBank + (w - driverWin0);
+      if (dpcmUsed && w >= DATA_DPCM_BANK && w < DATA_DPCM_BANK + dpcmBanks) return dpcmFileBank + (w - DATA_DPCM_BANK);
+      return 0;
+    }));
     if (MML.NSF.CHIP_FLAGS) {
       let extraChips = 0;
       const F = MML.NSF.CHIP_FLAGS;
@@ -4565,9 +4709,16 @@ SONG_LOOP_PTR_HI:
     }
 
     const nsfBytes = MML.NSF.buildNSF(opt, programBytes);
+    // 内訳(UIの完了メッセージ用): ドライバ本体(バンク0の.resぶんを除いた実コード+テーブル)、
+    // 曲データ(全チャンネルのバイトコード合計、バンクジャンプマーカー等は含まない)、DPCM
+    let dpcmBytes = 0;
+    for (const idx of Object.keys(dpcmLayout)) dpcmBytes += dpcmLayout[idx].bytes.length;
     return {
       nsfBytes, asmErrors: [], bankCount: Math.ceil(programBytes.length / BANK_SIZE),
-      unsupportedExpansions
+      unsupportedExpansions,
+      driverBytes: driverBytes.length,
+      songDataBytes: chBytes.reduce((s, b) => s + b.length, 0),
+      dpcmBytes
     };
   };
 })(window);
