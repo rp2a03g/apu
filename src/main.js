@@ -152,6 +152,33 @@
   // 起動時から APU チャンネル行を表示（再生前でも空白にならないよう）
   keyboardDisplay.setSource({ regSnapshots: [{}], totalFrames: 1, samplesPerFrame: 735, sampleRate: 44100 }, []);
 
+  // 鍵盤表示のレイアウト設定(ロールの置き場)とピアノロール別ウィンドウの連動:
+  // 「別ウィンドウ」のときだけツールバーのトグルボタンを見せ、切り替えた瞬間に窓を開く。
+  // 別ウィンドウ以外に戻したら窓を閉じてボタンも隠す(中身のロールペインは
+  // keyboardDisplay 側が鍵盤表示ウィンドウへ戻している)。
+  {
+    const rollWinBtn = document.getElementById('btnTogglePianoRollWindow');
+    const rollWinEl = document.getElementById('win-pianoroll');
+    const syncRollWindow = (layout, opening) => {
+      const useWindow = layout.rollPlacement === 'window';
+      if (rollWinBtn) rollWinBtn.hidden = !useWindow;
+      if (!rollWinEl || !rollWinBtn) return;
+      const visible = rollWinEl.style.display !== 'none';
+      if (useWindow && opening && !visible) rollWinBtn.click();
+      if (!useWindow && visible) rollWinBtn.click();
+    };
+    syncRollWindow(keyboardDisplay.getLayout(), false);
+    keyboardDisplay.onLayoutChange = (layout) => syncRollWindow(layout, true);
+  }
+  // ピアノロールをドラッグしてのシーク(縦向きは上下、横向きは左右)。keyboardDisplay側は
+  // 「現在の再生速度での実時間の秒」(シークバーと同じ単位)を渡してくるので、そのまま
+  // 共通のシーク入口へ。実際にシークした秒(クランプ後)を返してロールの表示位置を合わせる。
+  keyboardDisplay.onRollSeek = (seconds) => seekToSeconds(seconds);
+  // 鍵盤表示タイトルのバッジ用: <input type=file>に読み込まれているファイル名(無ければ空文字)
+  function fileInputName(inputEl) {
+    return (inputEl && inputEl.files && inputEl.files[0]) ? inputEl.files[0].name : '';
+  }
+
   // --- 再生速度(1/1〜1/8。音程を保ったままテンポだけ落とす) ---
   // 現在アクティブなプレイヤー(MML/NSF/SPCのいずれか)に速度を適用し、
   // 曲を読み込み直した時にも直前の設定を引き継げるよう値を保持しておく。
@@ -701,6 +728,49 @@
   const seekTicksEl = document.getElementById('seekTicks');
   const SEEK_RESOLUTION = 1000;
 
+  // シークバーは複数箇所に同じものを置く(MMLエディタのトランスポート行=主、鍵盤表示の
+  // ピアノロール見出し行=副。後者はkeyboardDisplay.setRollSeekBar()で渡す)。全インスタンスを
+  // ここに登録し、位置/範囲ハンドル/バッファ済み表示/時間表示の更新は forEachSeekBar() で
+  // 全部へ同時に流す。ドラッグ等の入力は各インスタンスから同じ共通処理へ入る。
+  const seekBars = [];
+  function forEachSeekBar(fn) { for (const sb of seekBars) fn(sb); }
+  function setSeekBarValue(v) { forEachSeekBar((sb) => { sb.barEl.value = String(v); }); }
+  function setTimeDisplay(text) { forEachSeekBar((sb) => { if (sb.timeEl) sb.timeEl.textContent = text; }); }
+  // 主インスタンス(index.htmlの固定id要素)
+  seekBars.push({ wrapEl: seekBarWrapEl, barEl: seekBarEl, timeEl: timeDisplayEl,
+    handleStartEl: seekHandleStartEl, handleEndEl: seekHandleEndEl,
+    rangeFillEl: seekRangeFillEl, bufferedFillEl: seekBufferedFillEl });
+  // 副インスタンスを生成する(主と同じ構造・クラス。idは付けない)。keyboardDisplay側の見出し行に置く用
+  function createSeekBarInstance() {
+    const wrapEl = document.createElement('div');
+    wrapEl.className = 'seek-bar-wrap seek-bar-wrap--roll';
+    wrapEl.innerHTML =
+      `<input type="range" min="0" max="${SEEK_RESOLUTION}" value="0" step="1" />` +
+      `<div class="seek-buffered-fill"></div>` +
+      `<div class="seek-range-fill"></div>` +
+      `<div class="seek-handle seek-handle-start" title="${T('開始点（ドラッグで移動）')}"></div>` +
+      `<div class="seek-handle seek-handle-end" title="${T('終了点（ドラッグで移動）')}"></div>`;
+    const timeEl = document.createElement('span');
+    timeEl.className = 'seek-time seek-time--roll';
+    timeEl.textContent = timeDisplayEl.textContent || '00:00 / 00:00';
+    const inst = { wrapEl, barEl: wrapEl.querySelector('input'), timeEl,
+      handleStartEl: wrapEl.querySelector('.seek-handle-start'), handleEndEl: wrapEl.querySelector('.seek-handle-end'),
+      rangeFillEl: wrapEl.querySelector('.seek-range-fill'), bufferedFillEl: wrapEl.querySelector('.seek-buffered-fill') };
+    // 初期状態は主インスタンスの現在の表示をそのまま写す(以後はupdateTransportUI等が
+    // 両方へ流す)。※ここでupdateRangeMarkersUI()等を呼ぶと、その先のcurrentTransportPlayer()が
+    // まだ初期化前(TDZ)のkssActivePlayer等に触れて例外になるため呼ばない
+    const src = seekBars[0];
+    inst.barEl.value = src.barEl.value;
+    for (const k of ['handleStartEl', 'handleEndEl', 'rangeFillEl', 'bufferedFillEl']) {
+      inst[k].style.cssText = src[k].style.cssText;
+    }
+    seekBars.push(inst);
+    setupSeekBarInput(inst);
+    setupRangeHandleDrag(inst, inst.handleStartEl, 'start');
+    setupRangeHandleDrag(inst, inst.handleEndEl, 'end');
+    return inst;
+  }
+
   // NSF/KSS実ファイル再生のバックグラウンドキャプチャ進捗(0〜1)。シークバーの
   // バッファ済み範囲インジケータ表示に使う。該当モード以外では常に非表示。
   let nsfBufferedFraction = 1;
@@ -719,14 +789,17 @@
     return null;
   }
   function updateSeekBufferedUI() {
-    if (!seekBufferedFillEl) return;
     const frac = currentBufferedFraction();
-    if (frac === null || frac >= 1) {
-      seekBufferedFillEl.style.display = 'none';
-      return;
-    }
-    seekBufferedFillEl.style.display = 'block';
-    seekBufferedFillEl.style.width = `${frac * 100}%`;
+    forEachSeekBar((sb) => {
+      const el = sb.bufferedFillEl;
+      if (!el) return;
+      if (frac === null || frac >= 1) {
+        el.style.display = 'none';
+        return;
+      }
+      el.style.display = 'block';
+      el.style.width = `${frac * 100}%`;
+    });
   }
 
   let capturedBuffer = null;
@@ -812,8 +885,8 @@
     updateSeekBufferedUI();
     if (!duration) return;
     const pos = getTransportPosition();
-    seekBarEl.value = String(Math.round((pos / duration) * SEEK_RESOLUTION));
-    timeDisplayEl.textContent = `${formatTime(pos)} / ${formatTime(duration)}`;
+    setSeekBarValue(Math.round((pos / duration) * SEEK_RESOLUTION));
+    setTimeDisplay(`${formatTime(pos)} / ${formatTime(duration)}`);
     if (playing && isFadeableSoundFileMode() && p && p.gainNode && audioCtx) {
       updateEndFadeGain(p, pos, duration);
     }
@@ -880,25 +953,28 @@
   function updateRangeMarkersUI(duration) {
     if (duration === undefined) duration = currentDuration();
     const pct = (sec) => Math.max(0, Math.min(100, (sec / duration) * 100));
-    if (!duration || rangeEndSec === null) {
-      seekHandleStartEl.style.display = 'none';
-      seekHandleEndEl.style.display = 'none';
-      seekRangeFillEl.style.display = 'none';
-      return;
-    }
-    seekHandleStartEl.style.display = 'block';
-    seekHandleEndEl.style.display = 'block';
-    const startPct = pct(rangeStartSec);
-    const endPct = pct(rangeEndSec);
-    seekHandleStartEl.style.left = `${startPct}%`;
-    seekHandleEndEl.style.left = `${endPct}%`;
-    if (endPct <= startPct) {
-      seekRangeFillEl.style.display = 'none';
-    } else {
-      seekRangeFillEl.style.display = 'block';
-      seekRangeFillEl.style.left = `${startPct}%`;
-      seekRangeFillEl.style.width = `${endPct - startPct}%`;
-    }
+    const show = !!duration && rangeEndSec !== null;
+    const startPct = show ? pct(rangeStartSec) : 0;
+    const endPct = show ? pct(rangeEndSec) : 0;
+    forEachSeekBar((sb) => {
+      if (!show) {
+        sb.handleStartEl.style.display = 'none';
+        sb.handleEndEl.style.display = 'none';
+        sb.rangeFillEl.style.display = 'none';
+        return;
+      }
+      sb.handleStartEl.style.display = 'block';
+      sb.handleEndEl.style.display = 'block';
+      sb.handleStartEl.style.left = `${startPct}%`;
+      sb.handleEndEl.style.left = `${endPct}%`;
+      if (endPct <= startPct) {
+        sb.rangeFillEl.style.display = 'none';
+      } else {
+        sb.rangeFillEl.style.display = 'block';
+        sb.rangeFillEl.style.left = `${startPct}%`;
+        sb.rangeFillEl.style.width = `${endPct - startPct}%`;
+      }
+    });
   }
 
   // シークバーの目盛り(時間の縦線+ラベル)を生成する。durationが変わった時だけ再構築する
@@ -1052,18 +1128,19 @@
   // 重なってしまい、DOM順で後にある終点側だけしか掴めなくなる(始点が下敷きになる)バグが
   // あったため、常に画面上で一定px以上離れるよう duration/表示幅から逆算した秒数を使う。
   const MIN_GAP_PX = 12;
-  function setupRangeHandleDrag(handleEl, which) {
+  function setupRangeHandleDrag(inst, handleEl, which) {
     handleEl.addEventListener('pointerdown', (e) => {
       if (!canSeek()) return;
       const duration = currentDuration();
       if (!duration) return;
       e.preventDefault();
-      handleEl.setPointerCapture(e.pointerId);
+      e.stopPropagation(); // フローティングウィンドウのドラッグ/前面化に取られないようにする
+      try { handleEl.setPointerCapture(e.pointerId); } catch (err) { /* キャプチャ不可でも要素上のmoveで追従する */ }
       handleEl.classList.add('dragging');
       mmlHighlightSuppressed = false; // ドラッグ中はハイライトで範囲を視覚的に確認できるようにする
 
       const onMove = (ev) => {
-        const wrapRect = seekBarWrapEl.getBoundingClientRect();
+        const wrapRect = inst.wrapEl.getBoundingClientRect();
         const minGap = (MIN_GAP_PX / wrapRect.width) * duration;
         const frac = Math.max(0, Math.min(1, (ev.clientX - wrapRect.left) / wrapRect.width));
         const sec = frac * duration;
@@ -1090,8 +1167,8 @@
       handleEl.addEventListener('pointercancel', onUp);
     });
   }
-  setupRangeHandleDrag(seekHandleStartEl, 'start');
-  setupRangeHandleDrag(seekHandleEndEl, 'end');
+  setupRangeHandleDrag(seekBars[0], seekHandleStartEl, 'start');
+  setupRangeHandleDrag(seekBars[0], seekHandleEndEl, 'end');
 
   function stopActivePlayer() {
     if (activePlayer) {
@@ -1282,6 +1359,31 @@
     else updateTransportUI();
   }
 
+  // 秒(現在の再生速度での実時間。シークバー/transportSeek()と同じ単位)へシークする共通入口。
+  // シークバーの入力と鍵盤表示のピアノロールをドラッグしてのシーク(keyboardDisplay.onRollSeek)の
+  // 両方から呼ぶ。範囲(0〜再生時間)と、NSF/KSS/SPC等の実ファイル再生ではバックグラウンド
+  // キャプチャが追いついた範囲(currentBufferedFraction)にクランプし、実際にシークした秒を返す。
+  // シークできる状態でなければ何もせず null を返す。
+  function seekToSeconds(seconds) {
+    if (currentTransportPlayer()) {
+      if (lastPlayMode !== 'capture-mml' && lastPlayMode !== 'nsf' && lastPlayMode !== 'kss' && lastPlayMode !== 'spc' && lastPlayMode !== 'gbs' && lastPlayMode !== 'hes') return null;
+      let sec = Math.max(0, Math.min(workletDuration, seconds));
+      // プレイヤー側の内部クランプ(NsfReplayStreamPlayer.seek()等)だけに任せると、ユーザーが
+      // バッファより先へ動かした「つもり」のまま実際は手前へ戻っていて無音になり「シークすると
+      // 止まる」ように見えるため、ここでバッファ済み範囲より先へは行かせない。
+      const bufferedFrac = currentBufferedFraction();
+      if (bufferedFrac !== null && workletDuration > 0 && sec > bufferedFrac * workletDuration) {
+        sec = bufferedFrac * workletDuration;
+      }
+      transportSeek(sec);
+      return sec;
+    }
+    if (!capturedBuffer) return null;
+    const sec = Math.max(0, Math.min(capturedBuffer.duration, seconds));
+    transportSeek(sec);
+    return sec;
+  }
+
   // compiled.tracks からモニタ用 regSnapshots を即時構築（音声生成なし）
   function buildRegSnapshotsFromTracks(compiled) {
     const { tracks, channelLetters, totalFrames, statusAddr } = compiled;
@@ -1435,6 +1537,110 @@
   // 専用ドライバ(src/driver/ppmckDriver.js)経由でNSFファイルとして書き出す。
   // 2A03(A-D)+DPCM+VRC6/MMC5/FME7/FDS/N163/VRC7に対応(ROADMAP.mdフェーズ1.6/1.7。
   // 未対応の拡張音源が指定された場合はbuilt.unsupportedExpansionsで警告表示する)。
+  // --- MMLテキストファイルの読み書き ---------------------------------------
+  // 保存形式はプレーンテキスト(拡張子.mml)。ppmck等の外部ツールがそのまま読める
+  // ようにMML本文以外のものは一切足さない(DESIGN.md INV-2「MMLテキストが正典」)。
+  // 読み込みは.mml/.txtの両方を受け付ける(中身は同じテキストで、拡張子だけが違う
+  // 運用が多いため)。
+  let currentMmlFileName = '';   // 直近に開いた/保存したファイル名(保存ダイアログの既定値)
+  let lastSyncedMmlText = null;  // 直近に開いた/保存した時点の本文。未保存の編集検出に使う
+
+  function markMmlTextSynced(name) {
+    if (name) currentMmlFileName = name;
+    lastSyncedMmlText = mmlSourceEl.value;
+  }
+
+  // 「開く」で現在の内容を捨ててよいか。起動直後のサンプルMMLは未編集なら黙って
+  // 捨ててよいので、初期値もsynced扱いにしておく(init時にmarkMmlTextSynced()を呼ぶ)
+  function confirmDiscardMmlEdits() {
+    if (lastSyncedMmlText === null || mmlSourceEl.value === lastSyncedMmlText) return true;
+    return window.confirm(T('MMLエディタの内容が変更されています。保存せずに破棄して開きますか？'));
+  }
+
+  function mmlFileStatus(text, cls) {
+    mmlOutputEl.innerHTML = '';
+    const msg = document.createElement('div');
+    msg.className = cls || '';
+    msg.textContent = text;
+    mmlOutputEl.appendChild(msg);
+  }
+
+  // win-mmlはdata-always-visible="true"だがユーザーが閉じている場合がある。
+  // トグルボタンのclick()経由にすると「閉じる」方向に働くことがあるため直接表示する
+  // (initUnifiedSoundFileWindow内のensureSoundWindowOpenと同じ理由・同じ手口)
+  function ensureMmlWindowOpen() {
+    const win = document.getElementById('win-mml');
+    if (!win || win.style.display !== 'none') return;
+    win.style.display = 'flex';
+    const btn = document.querySelector('.toggle-btn[data-target="win-mml"]');
+    if (btn) btn.classList.add('active');
+  }
+
+  // .mml/.txtを読み込んでMMLエディタへ展開する。ファイル選択ダイアログ・
+  // ドラッグ&ドロップ・トップのファイルを開くアイコンの3経路から共通で呼ばれる
+  async function openMmlTextFile(file) {
+    if (!file) return false;
+    if (!confirmDiscardMmlEdits()) return false;
+    let text;
+    try {
+      text = await file.text();
+    } catch (e) {
+      mmlFileStatus(T('MMLファイルの読み込みに失敗しました: {msg}', { msg: e.message }), 'error');
+      return false;
+    }
+    ensureMmlWindowOpen();
+    mmlSourceEl.value = text;
+    mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新
+    markMmlTextSynced(file.name);
+
+    // 別の曲を読み込んだので、前の曲の再生範囲(青/赤ハンドル)は引き継がない
+    // (NSF2MML等の変換直後と同じ扱い。[[mml-conversion-stale-playback-range-bug]])
+    rangeStartSec = 0;
+    rangeEndSec = null;
+    prepareMmlStream(true);
+    mmlFileStatus(T('MMLファイルを読み込みました: {file} ({n}バイト)',
+      { file: file.name, n: text.length }), 'ok');
+    return true;
+  }
+
+  // 保存。File System Access API(showSaveFilePicker)があれば保存先とファイル名を
+  // 選べる本物の保存ダイアログを出し、無いブラウザでは従来どおりダウンロードに落とす
+  async function saveMmlFile() {
+    const text = mmlSourceEl.value;
+    const suggestedName = currentMmlFileName
+      ? currentMmlFileName.replace(/\.[^.]*$/, '') + '.mml'
+      : 'song.mml';
+    if (window.showSaveFilePicker) {
+      let handle;
+      try {
+        handle = await window.showSaveFilePicker({
+          suggestedName,
+          types: [{ description: T('MMLファイル'), accept: { 'text/plain': ['.mml', '.txt'] } }]
+        });
+      } catch (e) {
+        if (e && e.name === 'AbortError') return; // ユーザーがキャンセルした
+        handle = null; // 権限拒否等: 下のダウンロードへフォールバック
+      }
+      if (handle) {
+        try {
+          const writable = await handle.createWritable();
+          await writable.write(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+          await writable.close();
+          markMmlTextSynced(handle.name);
+          mmlFileStatus(T('MMLファイルを保存しました: {file} ({n}バイト)',
+            { file: handle.name, n: text.length }), 'ok');
+        } catch (e) {
+          mmlFileStatus(T('MMLファイルの保存に失敗しました: {msg}', { msg: e.message }), 'error');
+        }
+        return;
+      }
+    }
+    downloadText(suggestedName, text);
+    markMmlTextSynced(suggestedName);
+    mmlFileStatus(T('MMLファイルを保存しました: {file} ({n}バイト)',
+      { file: suggestedName, n: text.length }), 'ok');
+  }
+
   function exportMmlNsf() {
     const result = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
 
@@ -1528,6 +1734,7 @@
       lastMmlCompiled = compiled;
       lastPlayMode    = 'capture-mml';
       populateFollowChannelSelect(compiled.channelLetters);
+      keyboardDisplay.setSourceInfo('mml', compiled.meta && compiled.meta.title ? compiled.meta.title : ''); // タイトル行のバッジ「MML · 曲名」
 
       // モニタ用 regSnapshots をメインスレッドで即時構築（音声生成なし）
       resetN163Max();
@@ -1547,6 +1754,7 @@
       // MmlStreamPlayer を生成してデータをロード
       const player = new MML.Audio.MmlStreamPlayer(audioCtx);
       player.load(compiled, getChannelMuteConfig());
+      player.applyVolume(getChannelVolumeConfig()); // 鍵盤表示のch別音量バー(再生開始時点の値。以後はonVolumeChange→scheduleRerenderOnVolumeで即時反映)
       // 曲末まで再生し終えて音声スレッド側が自然にisPlaying=falseにした場合も、
       // ■停止を押したときと同じ状態(mmlPlaybackStopped、開始点への復帰)にする
       player.onEnded = () => {
@@ -1582,8 +1790,8 @@
 
     preservePlaybackRange(duration);
     applyMmlPlaybackMarkers(compiled, duration, isFreshRangeLoad);
-    seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(duration)}`;
+    setSeekBarValue(0);
+    setTimeDisplay(`00:00 / ${formatTime(duration)}`);
     btnMmlCapture.disabled = false;
 
     if (!compileOnly) {
@@ -1757,6 +1965,7 @@
     stopAllFormatPlayback();
     stopNsfFilePlayback();
     keyboardDisplay.reset();
+    keyboardDisplay.setSourceInfo('nsf', file.name);
     loadedNsfBytes = null;
     loadedNsfHeader = null;
     // 別ファイルを読み込んだら前回ファイルのキャプチャ結果は無効(runNsf2Mmlが同じ
@@ -2137,6 +2346,7 @@
     capturedBuffer       = null;
     lastNsfCaptureResult = null;
     lastPlayMode         = 'nsf';
+    keyboardDisplay.setSourceInfo('nsf', fileInputName(nsfFileEl)); // 再生開始時にもバッジを更新(MML再生後に再生し直した場合など)
     nsfBufferedFraction  = 0;
     updateSeekBufferedUI();
 
@@ -2181,8 +2391,8 @@
     nsfFileStatusEl.appendChild(pre);
 
     resetPlaybackRangeToFull(captureDuration);
-    seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(captureDuration)}`;
+    setSeekBarValue(0);
+    setTimeDisplay(`00:00 / ${formatTime(captureDuration)}`);
 
     const captureChips = chipsFromExtraFlags(loadedNsfHeader.extraChips || 0);
     resetN163Max();
@@ -2283,6 +2493,19 @@
   document.getElementById('btnDpcmDownload').addEventListener('click', downloadDpcm);
 
   document.getElementById('btnMmlExportNsf').addEventListener('click', exportMmlNsf);
+  // MMLエディタのファイル操作(開く/保存)。開くのは.mml/.txtのみ
+  (function initMmlFileButtons() {
+    const openInput = document.getElementById('mmlOpenFile');
+    document.getElementById('btnMmlOpenFile').addEventListener('click', () => openInput.click());
+    openInput.addEventListener('change', async () => {
+      const file = openInput.files[0];
+      if (file) await openMmlTextFile(file);
+      openInput.value = ''; // 同じファイルを続けて開き直せるようにする
+    });
+    document.getElementById('btnMmlSaveFile').addEventListener('click', saveMmlFile);
+    // 起動直後のサンプルMMLを「未編集」の基準にする(この状態なら確認なしで開ける)
+    markMmlTextSynced('');
+  })();
   document.getElementById('btnMmlCapture').addEventListener('click', () => {
     const playing = activePlayer ? activePlayer.isPlaying : transportPlaying;
     if (playing) transportPause();
@@ -2291,29 +2514,26 @@
   });
   document.getElementById('btnTransportStop').addEventListener('click', transportStop);
   document.getElementById('btnRangeReset').addEventListener('click', () => resetPlaybackRangeToFull(currentDuration()));
-  seekBarEl.addEventListener('input', () => {
-    if (currentTransportPlayer()) {
-      if (lastPlayMode === 'capture-mml' || lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'spc' || lastPlayMode === 'gbs' || lastPlayMode === 'hes') {
-        let frac = parseInt(seekBarEl.value, 10) / SEEK_RESOLUTION;
-        // NSF/KSS/SPC実ファイル再生はバックグラウンドキャプチャが追いついた範囲までしか
-        // シークできない。プレイヤー側の内部クランプ(NsfReplayStreamPlayer.seek()/
-        // KssReplayStreamPlayer.seek())だけに任せると、ユーザーがバッファより先へ
-        // ドラッグした「つもり」のまま実際は手前へ戻っていて無音状態になり「シークすると
-        // 止まる」ように見えるため、ここでハンドル自体をバッファ済み範囲より先へ
-        // 動かせないようにスナップバックする。
-        const bufferedFrac = currentBufferedFraction();
-        if (bufferedFrac !== null && frac > bufferedFrac) {
-          frac = bufferedFrac;
-          seekBarEl.value = String(Math.round(frac * SEEK_RESOLUTION));
-        }
-        transportSeek(frac * workletDuration);
-      }
-      return;
-    }
-    if (!capturedBuffer) return;
-    const frac = parseInt(seekBarEl.value, 10) / SEEK_RESOLUTION;
-    transportSeek(frac * capturedBuffer.duration);
-  });
+  // シークバー(range input)の入力→シーク。主/副どのインスタンスからでも同じ処理
+  function setupSeekBarInput(inst) {
+    inst.barEl.addEventListener('input', () => {
+      const frac = parseInt(inst.barEl.value, 10) / SEEK_RESOLUTION;
+      const total = currentTransportPlayer() ? workletDuration : (capturedBuffer ? capturedBuffer.duration : 0);
+      if (!total) return;
+      const want = frac * total;
+      const got = seekToSeconds(want);
+      // バッファ済み範囲より先へはシークできないので、ハンドル自体を実際にシークした位置へ
+      // スナップバックする(seekToSeconds()のクランプ参照)
+      if (got !== null && got < want) setSeekBarValue(Math.round((got / total) * SEEK_RESOLUTION));
+    });
+  }
+  setupSeekBarInput(seekBars[0]);
+  // 鍵盤表示のピアノロール見出し行にも同じシークバー(副インスタンス)を置く。
+  // (keyboardDisplay生成直後ではなくここで行うのは、seekBars等がこの位置で初期化されるため)
+  {
+    const inst = createSeekBarInstance();
+    keyboardDisplay.setRollSeekBar(inst.wrapEl, inst.timeEl);
+  }
 
   // ── SPC ファイル読み込み・再生 ────────────────────────────────────
   const spcFileEl       = document.getElementById('spcFile');
@@ -2354,6 +2574,7 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
+    keyboardDisplay.setSourceInfo('spc', file.name);
     loadedSpcBytes = null; loadedSpcHeader = null;
     // SPCのボイスミュートはkeyboardDisplay._muteStateを経由しない専用機構(spcMutedVoices
     // ビットマスク)のため、reset()の_muteState.clear()だけではクリアされない。新しい
@@ -2464,6 +2685,7 @@
     stopAllFormatPlayback();
     invalidateOtherRollPrefetch('spc');
     lastPlayMode = 'spc';
+    keyboardDisplay.setSourceInfo('spc', fileInputName(spcFileEl));
     spcBufferedFraction = 0;
     updateSeekBufferedUI();
 
@@ -2494,8 +2716,8 @@
     workletDuration = captureDuration;
 
     resetPlaybackRangeToFull(captureDuration);
-    seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(captureDuration)}`;
+    setSeekBarValue(0);
+    setTimeDisplay(`00:00 / ${formatTime(captureDuration)}`);
 
     const id = loadedSpcHeader.id666;
     const title = (id && id.songTitle) ? id.songTitle : T('(無題)');
@@ -3250,6 +3472,7 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
+    keyboardDisplay.setSourceInfo('kss', file.name);
     loadedKssBytes = null; loadedKssHeader = null;
 
     const buf = await file.arrayBuffer();
@@ -3372,6 +3595,7 @@
     stopVoiceMonitor();
     invalidateOtherRollPrefetch('kss');
     lastPlayMode = 'kss';
+    keyboardDisplay.setSourceInfo('kss', fileInputName(kssFileEl));
     kssBufferedFraction = 0;
     updateSeekBufferedUI();
 
@@ -3430,8 +3654,8 @@
     }
 
     resetPlaybackRangeToFull(captureDuration);
-    seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(captureDuration)}`;
+    setSeekBarValue(0);
+    setTimeDisplay(`00:00 / ${formatTime(captureDuration)}`);
 
     kssFileStatusEl.innerHTML = '';
     const pre = document.createElement('div');
@@ -3652,6 +3876,7 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
+    keyboardDisplay.setSourceInfo('gbs', file.name);
     loadedGbsBytes = null; loadedGbsHeader = null;
 
     const buf = await file.arrayBuffer();
@@ -3758,6 +3983,7 @@
     stopVoiceMonitor();
     invalidateOtherRollPrefetch('gbs');
     lastPlayMode = 'gbs';
+    keyboardDisplay.setSourceInfo('gbs', fileInputName(gbsFileEl));
     gbsBufferedFraction = 0;
     updateSeekBufferedUI();
 
@@ -3797,8 +4023,8 @@
     workletDuration = captureDuration;
 
     resetPlaybackRangeToFull(captureDuration);
-    seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(captureDuration)}`;
+    setSeekBarValue(0);
+    setTimeDisplay(`00:00 / ${formatTime(captureDuration)}`);
 
     gbsFileStatusEl.innerHTML = '';
     const pre = document.createElement('div');
@@ -4014,6 +4240,7 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
+    keyboardDisplay.setSourceInfo('hes', file.name);
     loadedHesBytes = null; loadedHesHeader = null;
 
     const buf = await file.arrayBuffer();
@@ -4124,6 +4351,7 @@
     stopVoiceMonitor();
     invalidateOtherRollPrefetch('hes');
     lastPlayMode = 'hes';
+    keyboardDisplay.setSourceInfo('hes', fileInputName(hesFileEl));
     hesBufferedFraction = 0;
     updateSeekBufferedUI();
 
@@ -4164,8 +4392,8 @@
     workletDuration = captureDuration;
 
     resetPlaybackRangeToFull(captureDuration);
-    seekBarEl.value = '0';
-    timeDisplayEl.textContent = `00:00 / ${formatTime(captureDuration)}`;
+    setSeekBarValue(0);
+    setTimeDisplay(`00:00 / ${formatTime(captureDuration)}`);
 
     hesFileStatusEl.innerHTML = '';
     const pre = document.createElement('div');
@@ -4381,9 +4609,15 @@
     const formatToLoadFn = { nsf: loadNsfFile, spc: loadSpcFile, kss: loadKssFile, gbs: loadGbsFile, hes: loadHesFile };
     // ドラッグ&ドロップは「開いてそのまま再生」までを1操作で行いたいというユーザー要望。
     // ファイル選択ダイアログ側は従来通りヘッダ確認後に手動で再生ボタンを押す2段階のまま
-    // 変えない(呼び出し元のdropハンドラでだけplayXxxStreamを呼ぶ、openSoundFile自体は
-    // 再生しない)。
-    const formatToPlayFn = { nsf: playNsfStream, spc: playSpcStream, kss: playKssStream, gbs: playGbsStream, hes: playHesStream };
+    // 変えない(呼び出し元のdropハンドラでだけ再生を始める、openSoundFile自体は再生しない)。
+    // ★再生は各フォーマットの再生ボタンのclickに委ねる: 以前はplayXxxStream()を直接呼んで
+    // いたため、ボタン側が一緒に行う処理(SPCのstartVoiceMonitor()+setMode('spc')等)を
+    // 通らず、D&D再生ではロールは動くのにチャンネル一覧が更新されない不具合があった
+    const formatToPlayBtnId = { nsf: 'btnNsfFilePlay', spc: 'btnSpcFilePlay', kss: 'btnKssFilePlay', gbs: 'btnGbsFilePlay', hes: 'btnHesFilePlay' };
+    const formatToPlayFn = {};
+    for (const [fmt, id] of Object.entries(formatToPlayBtnId)) {
+      formatToPlayFn[fmt] = () => { const btn = document.getElementById(id); if (btn) btn.click(); };
+    }
 
     // ファイル選択ダイアログ・ドラッグ&ドロップの両方から呼ばれる共通処理。拡張子で
     // 対応フォーマットを判定し、フォーマット別の隠しinputへfilesをセットしてloadXxxFile()の
@@ -4391,9 +4625,15 @@
     async function openSoundFile(file) {
       if (!file) return false;
       const ext = file.name.split('.').pop().toLowerCase();
+      // MMLテキスト(.mml/.txt)はサウンドファイルではなくMMLエディタ側で開く。
+      // 戻り値'mml'はformatToPlayFnに載っていないので、ドラッグ&ドロップでも
+      // 読み込むだけで自動再生はしない(コンパイル準備まではopenMmlTextFileが行う)
+      if (ext === 'mml' || ext === 'txt') {
+        return (await openMmlTextFile(file)) ? 'mml' : false;
+      }
       const targetInputId = formatToInputId[ext];
       if (!targetInputId) {
-        alert(T('対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES)', { ext }));
+        alert(T('対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES, MML, TXT)', { ext }));
         return false;
       }
       ensureSoundWindowOpen();

@@ -293,6 +293,22 @@
       }
     }
 
+    // ch別音量(鍵盤表示の音量バー)。volume: applyMuteと同じ{apu:{},expansion:{}}形状で値は0〜1。
+    // NsfReplayStreamPlayer.applyVolume()と同じ流儀(以前はMML再生側に無く、音量バーが
+    // サウンドファイル再生でしか効かなかった)。チップの vol はreset()で消えないので、
+    // load()直後に一度適用すればシーク後も維持される
+    applyVolume(volume) {
+      if (!volume || !this.apu) return;
+      this._lastVolume = volume;
+      if (volume.apu) MML.Emu.applyVolume(this.apu.vol, volume.apu);
+      if (volume.expansion) {
+        for (const name in this.expansionMap) {
+          const chip = this.expansionMap[name];
+          if (volume.expansion[name] && chip && chip.vol) MML.Emu.applyVolume(chip.vol, volume.expansion[name]);
+        }
+      }
+    }
+
     getPosition() {
       return this.samplePos / this.audioCtx.sampleRate;
     }
@@ -439,6 +455,18 @@
       if (mute.expansion) {
         for (const [name, chip] of Object.entries(this.player.bus.expansion)) {
           if (mute.expansion[name]) MML.Emu.applyMute(chip.mute, mute.expansion[name]);
+        }
+      }
+    }
+
+    // ch別音量(鍵盤表示の音量バー)。MmlStreamPlayer/NsfReplayStreamPlayerと同じ形状(値0〜1)
+    applyVolume(volume) {
+      if (!volume || !this.player) return;
+      this._lastVolume = volume;
+      if (volume.apu) MML.Emu.applyVolume(this.player.apu.vol, volume.apu);
+      if (volume.expansion) {
+        for (const [name, chip] of Object.entries(this.player.bus.expansion)) {
+          if (volume.expansion[name] && chip.vol) MML.Emu.applyVolume(chip.vol, volume.expansion[name]);
         }
       }
     }

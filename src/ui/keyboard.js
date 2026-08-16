@@ -34,13 +34,98 @@
   const MIDI_MAX = 108;
   const TOTAL_WHITE = 50;
 
-  // ピアノロールが先読み表示する時間幅(秒)。この秒数分だけ「未来」を上から降らせる。
-  const ROLL_WINDOW_SEC = 4;
+  // ピアノロールの時間軸スケール(px/秒)。先読み時間幅(秒)は「時間軸の長さ(px)÷この値」で
+  // 決まる(=ロールが長いほど遠い未来まで見える)。従来の固定値(高さ320px/4秒)と同じ80px/秒。
+  const ROLL_PX_PER_SEC = 80;
 
-  // ピアノロールcanvasの高さ。style.cssの .kbd-roll { height } と必ず一致させること
-  // (折りたたみ時にウィンドウ高さをこの値ぶん増減させるため、ズレると鍵盤の位置がずれる)。
+  // ピアノロールcanvasの高さ(ロールを一覧の下に置く配置のとき)。style.cssの .kbd-roll { height }
+  // と必ず一致させること(折りたたみ時にウィンドウ高さをこの値ぶん増減させるため、
+  // ズレると鍵盤の位置がずれる)。
   const ROLL_CANVAS_HEIGHT = 320;
   const MIN_WINDOW_HEIGHT = 160;
+  // 鍵盤canvasの「鍵の長さ」方向のpx数(縦向きロール=鍵盤の高さ、横向きロール=鍵盤の幅)。
+  // style.cssの .kbd-piano-wrap { height } / .kbd-roll-wrap--horizontal .kbd-piano-wrap { width } と一致させること。
+  const PIANO_KEY_LEN = 68;
+  // SPCボイス一覧(mute/ch/L/R/vol/env/wave/PM/note/freq/echo)の全列が収まる一覧幅。
+  // style.cssの .kbd-left.kbd-left--spc { width } と一致させること
+  const SPC_LIST_MIN_WIDTH = 500;
+
+  // ── 鍵盤表示レイアウト設定 ────────────────────────────────────
+  // rollOrientation: 'vertical'  = Synthesia式(音程=横軸、音符が上から鍵盤へ降る。鍵盤は下)
+  //                  'horizontal'= DAW式(音程=縦軸、音符が右から鍵盤へ流れる。鍵盤は左)
+  // rollPlacement:   'bottom' = チャンネル一覧の下 / 'right' = 一覧の右 / 'window' = 別ウィンドウ
+  // listColumns:     'single' = 1列 / 'auto' = 幅に応じて自動多段
+  // rollLanes:       'all' = 全チャンネルを1つの鍵盤/ロールに重ねて表示
+  //                  'perChannel' = 使用チャンネルごとに鍵盤+ロールのレーンを並べる(縦向き=横に並ぶ、
+  //                                 横向き=縦に積む。収まらない分はスクロール)
+  // 既定値は従来の見た目(縦・下・1列・まとめて)。localStorageに永続化する。
+  const LAYOUT_STORAGE_KEY = 'mml_keyboardLayout_v1';
+  const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'bottom', listColumns: 'single', rollLanes: 'all' });
+  const LAYOUT_CHOICES = Object.freeze({
+    rollOrientation: ['vertical', 'horizontal'],
+    rollPlacement: ['bottom', 'right', 'window'],
+    listColumns: ['single', 'auto'],
+    rollLanes: ['all', 'perChannel'],
+  });
+  // チャンネルごとのレーン: 鍵盤全体(50白鍵)ではなく、白鍵LANE_VISIBLE_WHITE個ぶん(≈1.4オクターブ)の
+  // 音程窓だけを表示し、そのchの音符が窓からはみ出しそうなら音程方向に自動スクロールして追従する
+  // (_updateLaneScroll参照)。LANE_MIN_PXはレーンの音程軸方向の最小px(縦向き=幅、横向き=高さ)で、
+  // 1白鍵≈15px。style.cssの.kbd-laneの値と一致させること
+  const LANE_VISIBLE_WHITE = 10;
+  const LANE_MIN_PX = 150;
+  // 自動スクロールの余白(白鍵単位)と追従の速さ(1フレームあたり残差のこの割合だけ寄せる)
+  const LANE_SCROLL_MARGIN = 1;
+  const LANE_SCROLL_EASE = 0.15;
+  function loadLayoutSettings() {
+    const out = Object.assign({}, LAYOUT_DEFAULTS);
+    try {
+      const raw = JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY) || 'null');
+      if (raw && typeof raw === 'object') {
+        for (const k of Object.keys(LAYOUT_DEFAULTS)) {
+          if (LAYOUT_CHOICES[k].includes(raw[k])) out[k] = raw[k];
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return out;
+  }
+  function saveLayoutSettings(s) {
+    try { localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(s)); } catch (e) { /* ignore */ }
+  }
+
+  // ── ロール/鍵盤の座標系 ───────────────────────────────────────
+  // ロールと鍵盤は「音程軸(p)」と「時間軸(t)」の2軸で描き、向き(orientation)に応じて
+  // canvasのx/yへ写像する。描画ルーチン側は向きを意識せずp/tだけで書けるようにするための抽象。
+  //   p: 0(最低音側の端) → pitchLen(最高音側の端)。keyX()と同じ単位(白鍵1本=wk px)
+  //   t: 0(現在=鍵盤に接する端) → timeLen(先読みの果て)
+  //   vertical  : p→x(左→右)、t→y(下→上)   … 音符が上から降ってくる
+  //   horizontal: p→y(下→上)、t→x(左→右)   … 音符が右から流れてくる
+  // 縦向きの写像は従来実装と同じ式(H - t)になるよう書いてあり、丸めまで含めて描画結果は不変。
+  // visibleWhite: 音程軸に収める白鍵の本数(省略=鍵盤全体TOTAL_WHITE。チャンネルごとのレーンは
+  // LANE_VISIBLE_WHITEで、表示窓の左端(低音側)の白鍵位置offsetPxは呼び出し側がkeyX()の結果から引く)
+  function makeRollGeom(orientation, W, H, visibleWhite) {
+    const vertical = orientation !== 'horizontal';
+    const pitchLen = vertical ? W : H;
+    const timeLen = vertical ? H : W;
+    const wk = pitchLen / (visibleWhite || TOTAL_WHITE);
+    const bk = Math.max(3, wk * 0.60);
+    // 先読み時間幅(秒)と、秒→時間軸pxの変換。時間軸320pxのとき従来通り4秒/80px/秒になる
+    const windowSec = timeLen / ROLL_PX_PER_SEC;
+    const tPx = (sec) => (sec / windowSec) * timeLen;
+    return {
+      vertical, W, H, pitchLen, timeLen, wk, bk, windowSec, tPx,
+      // 音程軸[pLo, pLo+pSize) × 時間軸[tLo, tHi) の矩形をcanvas座標{x,y,w,h}へ。
+      // minT: 時間軸方向の最小サイズ(px)。短い音符も見えるように下限を設ける用途
+      rect(pLo, pSize, tLo, tHi, minT) {
+        if (vertical) {
+          const y0 = H - tHi, y1 = H - tLo;
+          return { x: pLo, y: y0, w: pSize, h: Math.max(minT || 0, y1 - y0) };
+        }
+        return { x: tLo, y: H - pLo - pSize, w: Math.max(minT || 0, tHi - tLo), h: pSize };
+      },
+      // 点(p, t) → canvas座標
+      point(p, t) { return vertical ? { x: p, y: H - t } : { x: t, y: H - p }; },
+    };
+  }
 
   const WHITE_IDX = [0,-1,1,-1,2,3,-1,4,-1,5,-1,6];
   const IS_BLACK   = [0, 1,0, 1,0,0, 1,0, 1,0, 1,0];
@@ -1280,14 +1365,28 @@
     }
   }
 
-  function drawPiano(canvas, channels) {
-    const newW = canvas._cachedWidth || canvas.offsetWidth || 560;
-    if (newW === 0) return;
-    if (canvas.width !== newW) canvas.width = newW; // サイズ変化時のみ再割り当て（毎フレームのリフロー防止）
-    const wkW = canvas.width / TOTAL_WHITE;
-    const bkW = Math.max(3, wkW * 0.60);
-    const wkH = canvas.height;
-    const bkH = Math.round(wkH * 0.62);
+  // 鍵盤描画。orientation='vertical'(既定)は横並びの鍵盤(鍵の長さ=canvasの高さ、黒鍵は
+  // 上=ロール側に付く)、'horizontal'は縦並びの鍵盤(鍵の長さ=canvasの幅、黒鍵は右=ロール側に
+  // 付く、高音が上)。音程軸の座標はロール側と同じkeyX()を共有する。
+  // visibleWhite/offsetWhite(省略可): 鍵盤全体でなく白鍵visibleWhite本ぶんの音程窓を、白鍵offsetWhite
+  // (小数可)から表示する(チャンネルごとのレーン用。ロール側と同じ窓を使う)
+  function drawPiano(canvas, channels, orientation, visibleWhite, offsetWhite) {
+    const vertical = orientation !== 'horizontal';
+    // 内部解像度は表示サイズ(CSS px、border除く)に合わせる。表示サイズは_cachedWidth/_cachedHeight
+    // (ResizeObserverでキャッシュ)を優先し、毎フレームoffsetWidth/clientHeightを読んで
+    // 強制レイアウトが走るのを避ける
+    const newW = canvas._cachedWidth || canvas.clientWidth || (vertical ? 560 : PIANO_KEY_LEN);
+    const newH = canvas._cachedHeight || canvas.clientHeight || (vertical ? PIANO_KEY_LEN : 560);
+    if (newW === 0 || newH === 0) return;
+    if (canvas.width !== newW) canvas.width = newW;   // サイズ変化時のみ再割り当て（毎フレームのリフロー防止）
+    if (canvas.height !== newH) canvas.height = newH;
+    const W = canvas.width, H = canvas.height;
+    const pitchLen = vertical ? W : H;   // 音程軸の長さ
+    const keyLen = vertical ? H : W;     // 鍵の長さ
+    const wkW = pitchLen / (visibleWhite || TOTAL_WHITE);  // 白鍵1本の太さ(音程軸方向)
+    const offPx = (offsetWhite || 0) * wkW;  // 表示窓の低音側の端(px)。keyX()の結果からこれを引く
+    const bkW = Math.max(3, wkW * 0.60); // 黒鍵の太さ
+    const bkH = Math.round(keyLen * 0.62); // 黒鍵の長さ
     const ctx = canvas.getContext('2d');
 
     const keyColors = {};
@@ -1301,7 +1400,7 @@
       if (midi !== null && !keyColors[midi]) keyColors[midi] = ch.color;
     }
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.clearRect(0, 0, W, H);
 
     for (let midi = MIDI_MIN; midi <= MIDI_MAX; midi++) {
       const rel = midi - MIDI_MIN;
@@ -1309,17 +1408,40 @@
       if (IS_BLACK[semi]) continue;
       const pos = keyX(midi, wkW);
       if (!pos) continue;
+      pos.x -= offPx;
+      if (pos.x + wkW < 0 || pos.x > pitchLen) continue; // 表示窓の外
       const color = keyColors[midi];
       ctx.fillStyle = color ? color : '#d4cfbc';
-      ctx.fillRect(pos.x + 0.5, 0.5, wkW - 1, wkH - 1);
       ctx.strokeStyle = '#44404a';
       ctx.lineWidth = 0.5;
-      ctx.strokeRect(pos.x + 0.5, 0.5, wkW - 1, wkH - 1);
-      if (color) {
-        ctx.fillStyle = color;
-        ctx.globalAlpha = 0.55;
-        ctx.fillRect(pos.x + 0.5, wkH - 8, wkW - 1, 7);
-        ctx.globalAlpha = 1;
+      if (vertical) {
+        ctx.fillRect(pos.x + 0.5, 0.5, wkW - 1, keyLen - 1);
+        ctx.strokeRect(pos.x + 0.5, 0.5, wkW - 1, keyLen - 1);
+        if (color) { // 発音中: 手前(下端)に濃い帯
+          ctx.fillStyle = color;
+          ctx.globalAlpha = 0.55;
+          ctx.fillRect(pos.x + 0.5, keyLen - 8, wkW - 1, 7);
+          ctx.globalAlpha = 1;
+        }
+      } else {
+        const y = H - pos.x - wkW; // 高音が上: 音程軸pをcanvasの下から上へ
+        ctx.fillRect(0.5, y + 0.5, keyLen - 1, wkW - 1);
+        ctx.strokeRect(0.5, y + 0.5, keyLen - 1, wkW - 1);
+        if (color) { // 発音中: 手前(左端)に濃い帯
+          ctx.fillStyle = color;
+          ctx.globalAlpha = 0.55;
+          ctx.fillRect(1, y + 0.5, 7, wkW - 1);
+          ctx.globalAlpha = 1;
+        }
+        // Cの音名は鍵の上(黒鍵に隠れない手前側)に書く(縦向きはロール側のレーン先頭に
+        // 書いているが、横向きはレーンが薄くて文字が入らないため鍵に書く)。鍵が細すぎる
+        // ときは省略する
+        if (semi === 0 && wkW >= 8) {
+          ctx.fillStyle = color ? '#1a1830' : '#6b6b7a';
+          ctx.font = Math.min(9, Math.floor(wkW) - 1) + 'px ' + fontStack('sans');
+          ctx.textBaseline = 'middle';
+          ctx.fillText(midiToName(midi), 10, y + wkW / 2 + 0.5);
+        }
       }
     }
 
@@ -1329,14 +1451,27 @@
       if (!IS_BLACK[semi]) continue;
       const pos = keyX(midi, wkW);
       if (!pos) continue;
+      pos.x -= offPx;
+      if (pos.x + bkW < 0 || pos.x - bkW > pitchLen) continue; // 表示窓の外
       const color = keyColors[midi];
       ctx.fillStyle = color ? color : '#1a1830';
-      ctx.fillRect(pos.x - bkW / 2, 0, bkW, bkH);
-      if (color) {
-        ctx.fillStyle = '#1a1830';
-        ctx.globalAlpha = 0.35;
-        ctx.fillRect(pos.x - bkW / 2, 0, bkW, bkH * 0.65);
-        ctx.globalAlpha = 1;
+      if (vertical) {
+        ctx.fillRect(pos.x - bkW / 2, 0, bkW, bkH);
+        if (color) {
+          ctx.fillStyle = '#1a1830';
+          ctx.globalAlpha = 0.35;
+          ctx.fillRect(pos.x - bkW / 2, 0, bkW, bkH * 0.65);
+          ctx.globalAlpha = 1;
+        }
+      } else {
+        const y = H - pos.x - bkW / 2;
+        ctx.fillRect(keyLen - bkH, y, bkH, bkW); // 黒鍵はロール側(右端)に付く
+        if (color) {
+          ctx.fillStyle = '#1a1830';
+          ctx.globalAlpha = 0.35;
+          ctx.fillRect(keyLen - bkH * 0.65, y, bkH * 0.65, bkW);
+          ctx.globalAlpha = 1;
+        }
       }
     }
   }
@@ -1346,6 +1481,7 @@
   class KeyboardDisplay {
     constructor(container) {
       this.container = container;
+      container._kbdInstance = this; // 検証/デバッグ用の逆参照(DevToolsからインスタンスに触るため)
       this._state = null;
       this._extraSnaps = null;
       this._chips = [];
@@ -1368,12 +1504,35 @@
       this.onSpcMuteChange = null; // (voiceIndex:number, muted:bool) => void
       this.onSpeedChange = null;   // (factor:number) => void  曲切替をまたいで保持する
       this.onMasterVolumeChange = null; // (vol:0〜1) => void  曲切替をまたいで保持する
+      this.onLayoutChange = null;       // (layout) => void  setLayout()で設定が変わった時
+      this.onRollSeek = null;           // (seconds:実時間) => 実際にシークした秒|null  ロールのドラッグシーク(_attachRollSeekDrag)
+      this._rollDrag = null;            // ドラッグシーク中の状態 {id,x,y,startPos,pos,moved}
+      this._rollSeekBarEls = null;      // ロール見出し行に置くシークバー要素(setRollSeekBar)
+      this._lanes = [];                 // チャンネルごとのレーン [{id, laneEl, rollCanvas, pianoCanvas}](_rebuildLanes)
+      this._lanesEl = null;
+      this._sizeObserver = null;
+      this._sourceInfo = null;          // 表示中の再生ソース {kind, name}(setSourceInfo)。タイトル行のバッジに出す
+      this._srcBadgeEl = null;
+      this._titleEl = null;
+      this._rollLastDrawnPos = 0;       // _renderRoll()が最後に描いた曲内秒(ドラッグ開始位置の基準)
       this._masterVolume = loadMasterVolume(); // localStorage永続化(mml_masterVolume)
       this.onVolumeChange = null;       // () => void  ch別音量バー操作時(getVolumeConfig()参照)
       this.onSpcVolumeChange = null;    // (volArray:number[8]) => void
       this._channelVolumes = loadChannelVolumes();   // channelId → 0〜1(localStorage永続化)
       this._spcVoiceVolumes = loadSpcVoiceVolumes(); // [V0..V7] → 0〜1(localStorage永続化)
       this._colorOverrides = loadColorOverrides(); // channelId → ユーザー指定色(localStorage永続化)
+      this._layout = loadLayoutSettings();         // ロールの向き/置き場/一覧の多段(localStorage永続化)
+      // 下配置でのロール高さ / 右配置での一覧幅(どちらもスプリッターで変更、localStorage永続化)
+      this._rollHeight = ROLL_CANVAS_HEIGHT;
+      this._listWidth = null;
+      try {
+        const h = parseInt(localStorage.getItem('mml_pianoRollHeight'), 10);
+        if (Number.isFinite(h) && h >= 80) this._rollHeight = h;
+        const w = parseInt(localStorage.getItem('mml_keyboardListWidth'), 10);
+        if (Number.isFinite(w) && w >= 200) this._listWidth = w;
+      } catch (e) { /* ignore */ }
+      this._rollCollapsed = false;
+      this._bigWaveCollapsed = false;
       this._build();
 
       /*
@@ -1396,12 +1555,16 @@
     }
 
     _build() {
+      // ロールペインは別ウィンドウ(#pianoRollDisplay)に取り付けられていることがあり、
+      // container.innerHTML=''では消えないので明示的に外す(言語切替時の作り直し用)
+      if (this._rollPaneEl && this._rollPaneEl.parentNode) this._rollPaneEl.parentNode.removeChild(this._rollPaneEl);
       this.container.innerHTML = '';
       this._selectedId = null;   // 大波形表示に選択中のチャンネルID
       this._bigWaveSig = '';     // 大波形の再描画要否判定用
 
-      // 上段: 左=速度バー+チャンネル一覧 / 右=選択波形の拡大表示
-      // （SPCモードは列数が多いため setMode() で縦積みレイアウトに切り替える）
+      // 上段: 左=速度バー+チャンネル一覧(+大波形の詳細帯) / 右=選択波形の拡大表示 or ロールペイン
+      // (置き場はレイアウト設定で決まる: _mountBigWave()/_mountRollPane()参照。
+      //  SPCモードは列数が多いため setMode() で専用レイアウトに切り替える)
       const main = document.createElement('div');
       main.className = 'kbd-main';
       this._mainEl = main;
@@ -1450,19 +1613,43 @@
         speedValueEl.textContent = `1/${denom}`;
         if (this.onSpeedChange) this.onSpeedChange(1 / denom);
       });
+      // レイアウト設定ボタン(⚙)。クリックでポップオーバー(_openLayoutPopover)を開く。
+      // 速度バーの右(閉じるボタンの手前)に置く
+      const layoutBtn = document.createElement('button');
+      layoutBtn.type = 'button';
+      layoutBtn.className = 'kbd-layout-btn';
+      layoutBtn.title = T('鍵盤表示のレイアウト設定');
+      layoutBtn.setAttribute('aria-label', T('鍵盤表示のレイアウト設定'));
+      layoutBtn.innerHTML = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="14" rx="1"/><path d="M3 12h14M9 3v9"/></svg>';
+      layoutBtn.addEventListener('click', (e) => { e.stopPropagation(); this._openLayoutPopover(layoutBtn); });
+
       const winEl = this.container.closest('.float-window');
       const headerEl = winEl && winEl.querySelector('.float-window-header');
       if (headerEl) {
-        const oldMasterVolBar = headerEl.querySelector('.kbd-mastervol');
-        if (oldMasterVolBar) oldMasterVolBar.remove();
-        const oldSpeedBar = headerEl.querySelector('.kbd-speed');
-        if (oldSpeedBar) oldSpeedBar.remove();
+        for (const sel of ['.kbd-mastervol', '.kbd-speed', '.kbd-layout-btn', '.kbd-src-badge']) {
+          const old = headerEl.querySelector(sel);
+          if (old) old.remove();
+        }
         const closeBtn = headerEl.querySelector('.float-window-close');
-        headerEl.insertBefore(speedBar, closeBtn || null);
+        headerEl.insertBefore(layoutBtn, closeBtn || null);
+        headerEl.insertBefore(speedBar, layoutBtn);
         headerEl.insertBefore(masterVolBar, speedBar);
+        // タイトル: 「鍵盤表示」+ 何を表示しているかのバッジ(MML / NSF · ファイル名 等。
+        // どちらを再生中なのか分かりづらいという要望から。setSourceInfo()で更新)
+        const titleEl = headerEl.querySelector('span');
+        if (titleEl && !titleEl.classList.contains('kbd-src-badge')) {
+          titleEl.textContent = T('鍵盤表示');
+          this._titleEl = titleEl;
+        }
+        this._srcBadgeEl = document.createElement('span');
+        this._srcBadgeEl.className = 'kbd-src-badge';
+        if (this._titleEl) this._titleEl.insertAdjacentElement('afterend', this._srcBadgeEl);
+        else headerEl.insertBefore(this._srcBadgeEl, masterVolBar);
+        this._renderSourceBadge();
       } else {
         left.appendChild(masterVolBar); // フォールバック(タイトル行が見つからない場合)
         left.appendChild(speedBar);
+        left.appendChild(layoutBtn);
       }
 
       const header = document.createElement('div');
@@ -1485,11 +1672,17 @@
 
       this._rowsEl = document.createElement('div');
       this._rowsEl.className = 'kbd-rows';
+      // 行本体は内側の要素に入れる(.kbd-rowsは縦スクロールの箱、.kbd-rows-innerが1列/多段の
+      // 並べ方を担当。多段のとき高さauto=中身なりに伸びるので、はみ出しは横でなく縦スクロールになる)
+      this._rowsInnerEl = document.createElement('div');
+      this._rowsInnerEl.className = 'kbd-rows-inner';
+      this._rowsEl.appendChild(this._rowsInnerEl);
       left.appendChild(this._rowsEl);
 
-      // SPC ボイス用セクション（再生中のみ表示）。列数がNSFと大きく異なるため
-      // 専用ヘッダーを持つが、NSF側と同じく left 直下に置いて横スクロール無しで
-      // 全列表示する（left 側の幅は setMode() で SPC モード時に拡張する）。
+      // SPC ボイス用セクション（再生中のみ表示）。列数がNSFと異なるため専用ヘッダーを持つが、
+      // NSF側と同じく left 直下に置く（left 側の幅は .kbd-left--spc で少し広げる）。
+      // ボイス単位のレジスタが無いマスター値(エコー音量L/R、FIR係数C0-C7)は列にせず、
+      // ALL行の下の1行(.kbds-master、updateSpcVoices参照)にまとめて表示する。
       this._spcHeaderEl = document.createElement('div');
       this._spcHeaderEl.className = 'kbd-header kbds-header';
       this._spcHeaderEl.style.display = 'none';
@@ -1504,10 +1697,7 @@
         `<span class="kbds-h-pm">PM</span>` +
         `<span class="kbd-h-note">note</span>` +
         `<span class="kbds-h-freq">freq</span>` +
-        `<span class="kbds-h-echo">echo</span>` +
-        `<span class="kbds-h-echolr">echoL</span>` +
-        `<span class="kbds-h-echolr">echoR</span>` +
-        Array.from({ length: 8 }, (_, i) => `<span class="kbds-h-fir">C${i}</span>`).join('');
+        `<span class="kbds-h-echo">echo</span>`;
       left.appendChild(this._spcHeaderEl);
 
       this._spcSectionEl = document.createElement('div');
@@ -1515,11 +1705,24 @@
       this._spcSectionEl.style.display = 'none';
       left.appendChild(this._spcSectionEl);
 
-      // 右: 選択チャンネルの素波形を拡大表示（表示サイズ固定・要素数はX/Y数値で表現）
+      // 選択チャンネルの素波形を拡大表示（表示サイズ固定・要素数はX/Y数値で表現）。
+      // 置き場は一覧の右(従来)または一覧の下の折りたたみ帯(_mountBigWave()参照)
       const big = document.createElement('div');
       big.className = 'kbd-bigwave';
       const bigHeader = document.createElement('div');
       bigHeader.className = 'kbd-bigwave-header';
+      // 折りたたみトグル(一覧の下に置く配置でだけ表示。状態はlocalStorageに保存)。既定は畳んだ状態
+      // (一覧の高さを優先)で、波形アイコンをクリックして選んだときに自動で開く(_selectWave参照)
+      try { this._bigWaveCollapsed = localStorage.getItem('mml_bigWaveCollapsed') !== '0'; } catch (e) { this._bigWaveCollapsed = true; }
+      this._bigToggleEl = document.createElement('span');
+      this._bigToggleEl.className = 'kbd-bigwave-toggle';
+      this._bigToggleEl.textContent = this._bigWaveCollapsed ? '▶' : '▼';
+      this._bigToggleEl.title = T('大波形の表示/非表示');
+      this._bigToggleEl.addEventListener('click', () => {
+        this._bigWaveCollapsed = !this._bigWaveCollapsed;
+        try { localStorage.setItem('mml_bigWaveCollapsed', this._bigWaveCollapsed ? '1' : '0'); } catch (e) { /* ignore */ }
+        this._applyLayoutClasses();
+      });
       this._bigTitleEl = document.createElement('div');
       this._bigTitleEl.className = 'kbd-bigwave-title';
       this._bigTitleEl.textContent = 'Click a wave icon to enlarge';
@@ -1539,24 +1742,111 @@
           setTimeout(() => { this._bigCopyBtn.textContent = orig; }, 1000);
         });
       });
+      bigHeader.appendChild(this._bigToggleEl);
       bigHeader.appendChild(this._bigTitleEl);
       bigHeader.appendChild(this._bigCopyBtn);
       this._bigCanvas = document.createElement('canvas');
       this._bigCanvas.className = 'kbd-bigwave-canvas';
       this._bigCanvas.width = 560;   // 内部解像度(表示の2倍)。表示サイズは.kbd-bigwave-canvasで指定
       this._bigCanvas.height = 280;
+      // 表示サイズが変わったら(一覧の下に幅いっぱいで置く配置など)内部解像度を表示幅の2倍に
+      // 合わせて描き直す(drawBigWave()は幅基準でスケールするので解像度が変わっても比率は保たれる)。
+      // ★高さは表示高さから取らず常に幅の1/2にする: height:autoのcanvasは属性の縦横比で表示高さが
+      // 決まるため、表示高さ→属性高さと決めると互いに追いかけて比率が崩れる
+      new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const cw = Math.round(entry.contentRect.width * 2), chh = Math.round(cw / 2);
+          if (cw <= 0 || chh <= 0) continue;
+          if (this._bigCanvas.width === cw && this._bigCanvas.height === chh) continue;
+          this._bigCanvas.width = cw;
+          this._bigCanvas.height = chh;
+          this._bigWaveSig = '';
+          if (this._selectedId) {
+            const sel = (this._prevChannels || []).concat(this._prevSpcVoices || []).find(c => c.id === this._selectedId);
+            if (sel) this._renderBigWave(sel);
+          }
+        }
+      }).observe(this._bigCanvas);
       big.appendChild(bigHeader);
       big.appendChild(this._bigCanvas);
       this._bigWaveEl = big;
 
+      // 一覧と右隣(大波形 or ロールペイン)の間のスプリッター(ロールを右に置く配置でのみ表示。
+      // ドラッグで一覧の幅を変える。幅はlocalStorageに保存)
+      this._listSplitterEl = this._makeSplitter('vertical', (delta, start) => {
+        const w = Math.max(200, Math.round(start + delta));
+        this._listWidth = w;
+        left.style.width = w + 'px';
+      }, () => left.offsetWidth, () => {
+        try { localStorage.setItem('mml_keyboardListWidth', String(this._listWidth)); } catch (e) { /* ignore */ }
+      });
+      // 一覧(上段)とロールペイン(下段)の間のスプリッター(ロールを下に置く配置でのみ表示。
+      // ドラッグでロールの高さを変える。高さはlocalStorageに保存)
+      this._rollSplitterEl = this._makeSplitter('horizontal', (delta, start) => {
+        const h = Math.max(80, Math.round(start - delta)); // 上へドラッグ=ロールが高くなる
+        this._setRollHeight(h);
+      }, () => this._rollHeight, () => {
+        try { localStorage.setItem('mml_pianoRollHeight', String(this._rollHeight)); } catch (e) { /* ignore */ }
+      });
+
       main.appendChild(left);
-      main.appendChild(big);
       this.container.appendChild(main);
 
-      // ピアノロール: 鍵盤のすぐ上に配置し、未来の音符を上から降らせて表示する。
-      // 折りたたみ状態は localStorage に保存し次回起動時も維持する。
+      // ピアノロール+鍵盤(ロールペイン)。自己完結したDOM塊として作り、レイアウト設定に
+      // 応じた置き場(一覧の下/右/別ウィンドウ)へ_mountRollPane()で取り付ける。
+      this._buildRollPane();
+      this._mountRollPane();
+      this._mountBigWave();
+      this._applyLayoutClasses();
+    }
+
+    // ドラッグ可能な仕切り。orientation='vertical'は縦線(左右のペインを分ける、横ドラッグ)、
+    // 'horizontal'は横線(上下のペインを分ける、縦ドラッグ)。
+    // onDrag(delta, startSize): ドラッグ中に毎回、startSizeはgetStart()でドラッグ開始時に取得。
+    // onEnd(): ドラッグ終了時(永続化用)。
+    _makeSplitter(orientation, onDrag, getStart, onEnd) {
+      const el = document.createElement('div');
+      el.className = 'kbd-splitter kbd-splitter--' + orientation;
+      let startPos = 0, startSize = 0, active = false;
+      el.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        active = true;
+        startPos = orientation === 'vertical' ? e.clientX : e.clientY;
+        startSize = getStart();
+        el.setPointerCapture(e.pointerId);
+        el.classList.add('dragging');
+        e.preventDefault();
+      });
+      el.addEventListener('pointermove', (e) => {
+        if (!active) return;
+        const cur = orientation === 'vertical' ? e.clientX : e.clientY;
+        onDrag(cur - startPos, startSize);
+      });
+      const finish = (e) => {
+        if (!active) return;
+        active = false;
+        el.classList.remove('dragging');
+        try { el.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        if (onEnd) onEnd();
+      };
+      el.addEventListener('pointerup', finish);
+      el.addEventListener('pointercancel', finish);
+      return el;
+    }
+
+    // ロールを一覧の下に置く配置でのロールcanvasの高さ(px)を設定する(スプリッター/初期化から)
+    _setRollHeight(h) {
+      this._rollHeight = h;
+      if (this._rollCanvas) this._applyLayoutClasses(); // ロールcanvas/レーン群の高さへ反映
+    }
+
+    // ── ロールペイン(ピアノロール見出し+ロールcanvas+鍵盤canvas)の構築 ─────────
+    // ロールは未来の音符を鍵盤へ向かって流して表示する(向きは_layout.rollOrientation、
+    // 座標系はmakeRollGeom()参照)。折りたたみ状態は localStorage に保存し次回起動時も維持する。
+    _buildRollPane() {
       const rollWrap = document.createElement('div');
       rollWrap.className = 'kbd-roll-wrap';
+      this._rollPaneEl = rollWrap;
       const rollHeader = document.createElement('div');
       rollHeader.className = 'kbd-roll-header';
       let rollCollapsed = false;
@@ -1565,9 +1855,15 @@
       rollHeader.innerHTML =
         `<span class="kbd-roll-toggle">${rollCollapsed ? '▶' : '▼'}</span>` +
         `<span class="kbd-roll-label">${T('ピアノロール')}</span>` +
+        `<span class="kbd-roll-seek-slot"></span>` + // main.jsから渡されるシークバー(setRollSeekBar)の置き場
         `<label class="kbd-roll-cents-toggle">` +
         `<input type="checkbox" class="kbd-roll-cents-checkbox"${this._showCentsOverlay ? ' checked' : ''}>` +
         `${T('セント偏差')}</label>`;
+      // シークバー(range input/ハンドル)の操作でロールの折りたたみ(見出しclick)を起こさない
+      const seekSlot = rollHeader.querySelector('.kbd-roll-seek-slot');
+      seekSlot.addEventListener('click', (e) => e.stopPropagation());
+      seekSlot.addEventListener('mousedown', (e) => e.stopPropagation());
+      this._mountRollSeekBar(seekSlot);
       // オーバーレイのON/OFFはロール見出しクリック(折りたたみ)とは独立させるため、
       // クリックイベントの伝播をここで止める(bubbling先のrollHeaderハンドラを発火させない)。
       const centsCheckbox = rollHeader.querySelector('.kbd-roll-cents-checkbox');
@@ -1579,46 +1875,470 @@
       this._rollCanvas = document.createElement('canvas');
       this._rollCanvas.className = 'kbd-roll';
       this._rollCanvas.height = ROLL_CANVAS_HEIGHT;
-      this._rollCanvas.style.display = rollCollapsed ? 'none' : '';
+      // 折りたたみは「一覧の下」配置でのみ有効(右/別ウィンドウ配置ではロールがペインの
+      // 主役なので畳む意味が薄く、別ウィンドウは閉じれば済む)。表示状態の反映は
+      // _applyLayoutClasses()に集約する
       rollHeader.addEventListener('click', () => {
-        const collapsed = this._rollCanvas.style.display !== 'none';
-        this._rollCanvas.style.display = collapsed ? 'none' : '';
-        rollHeader.querySelector('.kbd-roll-toggle').textContent = collapsed ? '▶' : '▼';
+        if (this._effectivePlacement() !== 'bottom') return;
+        const collapsed = !this._rollCollapsed;
+        this._rollCollapsed = collapsed;
         try { localStorage.setItem('mml_pianoRollCollapsed', collapsed ? '1' : '0'); } catch (e) { /* ignore */ }
         // 畳んだらロールの高さぶんウィンドウ自体を縮め(=鍵盤が上へ詰まる)、
         // 開いたらロールの高さぶん広げる(=鍵盤がロールの下へ移動する)。
         // こうしないとチャンネル一覧(.kbd-main, flex:1 1 auto)が伸縮を全部吸収してしまい、
-        // 折りたたんでも窓の高さが変わらず鍵盤の位置も動かない。
+        // 折りたたんでも窓の高さが変わらず鍵盤の位置も動かない。増減量はペインの実測高さの
+        // 差分(まとめ表示ならロール高さ、レーン表示ならレーン全体の高さ)。
         // 高さの永続化は floatingWindows.js の ResizeObserver → persist() が行う。
-        const win = this.container.closest ? this.container.closest('.float-window') : null;
+        const win = rollWrap.closest('.float-window');
+        const before = rollWrap.offsetHeight;
+        this._applyLayoutClasses();
+        const after = rollWrap.offsetHeight;
         if (win) {
           const cur = parseInt(win.style.height, 10) || win.offsetHeight;
-          const delta = collapsed ? -ROLL_CANVAS_HEIGHT : ROLL_CANVAS_HEIGHT;
-          win.style.height = Math.max(MIN_WINDOW_HEIGHT, cur + delta) + 'px';
+          win.style.height = Math.max(MIN_WINDOW_HEIGHT, cur + (after - before)) + 'px';
         }
       });
-      rollWrap.appendChild(rollHeader);
-      rollWrap.appendChild(this._rollCanvas);
-      this.container.appendChild(rollWrap);
+      this._rollCollapsed = rollCollapsed;
+      this._rollHeaderEl = rollHeader;
+      this._attachRollSeekDrag(this._rollCanvas);
 
+      // 鍵盤canvas。ロールと同じペインに入れる(音符が鍵盤へ流れ着く一体表示のため、
+      // ロールの置き場が変わっても必ず一緒に動く)
       this._canvas = document.createElement('canvas');
       this._canvas.className = 'kbd-piano';
-      this._canvas.height = 68;
-      this.container.appendChild(this._canvas);
+      this._canvas.height = PIANO_KEY_LEN;
+      // 鍵盤canvasはサイズ決め用のラッパー(.kbd-piano-wrap)の中に絶対配置で入れる。
+      // canvas要素はwidth/height属性が「固有サイズ」としてレイアウトに効くため、横向きの
+      // 横並びレイアウトで古い属性値(前の配置での高さ)が行の高さを押し広げてしまう。
+      // 絶対配置ならレイアウトに寄与せず、常にラッパーのサイズに追随する
+      const pianoWrap = document.createElement('div');
+      pianoWrap.className = 'kbd-piano-wrap';
+      pianoWrap.appendChild(this._canvas);
+      this._pianoWrapEl = pianoWrap;
 
-      // drawPiano()/_renderRoll()は毎フレーム(60fps)canvasの表示幅を必要とするが、
-      // canvas.offsetWidthを直接読むと毎回強制同期レイアウトが走る(要素のwidth自体は
+      // 本体(ロール+鍵盤)。縦向きは縦積み(ロールの下に鍵盤)、横向きは横並び(鍵盤の右にロール)。
+      // 向きの切替はCSSクラス(.kbd-roll-wrap--horizontal)で行う(_applyLayoutClasses参照)
+      const body = document.createElement('div');
+      body.className = 'kbd-roll-body';
+      body.appendChild(this._rollCanvas);
+      body.appendChild(pianoWrap);
+      this._rollBodyEl = body;
+
+      // チャンネルごとのレーン表示(rollLanes='perChannel')用のコンテナ。中身(各レーンの
+      // ロール+鍵盤canvas)は_rebuildLanes()が使用チャンネルに合わせて作り直す。
+      // 縦向きはレーンが横に並び(横スクロール)、横向きは縦に積まれる(縦スクロール)
+      const lanes = document.createElement('div');
+      lanes.className = 'kbd-lanes';
+      this._lanesEl = lanes;
+      this._lanes = [];
+
+      rollWrap.appendChild(rollHeader);
+      rollWrap.appendChild(body);
+      rollWrap.appendChild(lanes);
+
+      // drawPiano()/_renderRoll()は毎フレーム(60fps)canvasの表示サイズを必要とするが、
+      // canvas.offsetWidth/Heightを直接読むと毎回強制同期レイアウトが走る(要素のサイズ自体は
       // リサイズ時以外変わらないのに)。MML再生ハイライト機能の毎フレームDOM更新と
       // 同じフレーム内で両方が動くと、この強制レイアウトがお互いの保留中のDOM変更を
       // 巻き込んで重くなる(レイアウトスラッシング)。ResizeObserverで実際にリサイズ
-      // された時だけ幅をキャッシュし、毎フレームの読み取りをキャッシュ参照に置き換える
-      const widthObserver = new ResizeObserver((entries) => {
+      // された時だけ幅・高さをキャッシュし、毎フレームの読み取りをキャッシュ参照に置き換える
+      // (レーンのcanvasも_rebuildLanes()で同じオブザーバに登録する)
+      this._sizeObserver = new ResizeObserver((entries) => {
         for (const entry of entries) {
           entry.target._cachedWidth = Math.round(entry.contentRect.width);
+          entry.target._cachedHeight = Math.round(entry.contentRect.height);
         }
       });
-      widthObserver.observe(this._rollCanvas);
-      widthObserver.observe(this._canvas);
+      this._sizeObserver.observe(this._rollCanvas);
+      this._sizeObserver.observe(this._canvas);
+      this._rebuildLanes();
+      this._applyLayoutClasses();
+    }
+
+    // チャンネルごとのレーン表示の中身を、現在の一覧(NSF等: _rowEls / SPC: _spcRowEls)に
+    // 合わせて作り直す。各レーンは [ラベル(色丸+パート文字+ch名)] + [ロールcanvas+鍵盤canvas]。
+    // 一覧が組み直された時(_rebuildRows/updateSpcVoices/setMode)と設定切替時に呼ぶ。
+    // 'all'モードでは中身を空にしておく(描画コストをかけない)
+    _rebuildLanes() {
+      const lanesEl = this._lanesEl;
+      if (!lanesEl) return;
+      // 古いcanvasの監視解除
+      for (const l of this._lanes) {
+        try { this._sizeObserver.unobserve(l.rollCanvas); this._sizeObserver.unobserve(l.pianoCanvas); } catch (e) { /* ignore */ }
+      }
+      this._lanes = [];
+      lanesEl.innerHTML = '';
+      if (this._layout.rollLanes !== 'perChannel') return;
+      const rows = (this._mode === 'spc' ? this._spcRowEls : this._rowEls).filter(el => !el.isAllRow && el.waveCanvas);
+      for (const rowEl of rows) {
+        const lane = document.createElement('div');
+        lane.className = 'kbd-lane';
+        const label = document.createElement('div');
+        label.className = 'kbd-lane-label';
+        const nameEl = rowEl.row.querySelector('.kbd-name');
+        label.innerHTML = `<span class="kbd-lane-dot" style="background:${rowEl.color}"></span>` +
+          `<span class="kbd-lane-text">${rowEl.letter ? rowEl.letter + ' ' : ''}${nameEl ? nameEl.textContent : rowEl.id}</span>`;
+        label.title = rowEl.id;
+        const rollCanvas = document.createElement('canvas');
+        rollCanvas.className = 'kbd-roll';
+        rollCanvas.height = ROLL_CANVAS_HEIGHT;
+        this._attachRollSeekDrag(rollCanvas);
+        const pianoCanvas = document.createElement('canvas');
+        pianoCanvas.className = 'kbd-piano';
+        pianoCanvas.height = PIANO_KEY_LEN;
+        const pianoWrap = document.createElement('div');
+        pianoWrap.className = 'kbd-piano-wrap';
+        pianoWrap.appendChild(pianoCanvas);
+        const body = document.createElement('div');
+        body.className = 'kbd-roll-body kbd-lane-body';
+        body.appendChild(rollCanvas);
+        body.appendChild(pianoWrap);
+        lane.appendChild(label);
+        lane.appendChild(body);
+        lanesEl.appendChild(lane);
+        this._sizeObserver.observe(rollCanvas);
+        this._sizeObserver.observe(pianoCanvas);
+        this._lanes.push({ id: rowEl.id, laneEl: lane, rollCanvas, pianoCanvas, scrollWhite: null });
+      }
+    }
+
+    // 鍵盤描画: 全チャンネルまとめ(1枚)か、レーンごと(そのchだけ)か
+    _drawPianos(allChannels) {
+      if (this._layout.rollLanes === 'perChannel' && this._lanes.length) {
+        for (const l of this._lanes) {
+          // 音程窓はロール側(_updateLaneScroll)が決めた位置に合わせる(未決定なら鍵盤全体の代わりにC4中心)
+          const off = l.scrollWhite == null ? Math.max(0, keyX(60, 1).x - LANE_VISIBLE_WHITE / 2) : l.scrollWhite;
+          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, LANE_VISIBLE_WHITE, off);
+        }
+        return;
+      }
+      drawPiano(this._canvas, allChannels, this._layout.rollOrientation);
+    }
+
+    // 表示中の再生ソースをタイトル行のバッジに出す。kind: 'mml' | 'nsf'|'spc'|'kss'|'gbs'|'hes'
+    // (サウンドファイル) | null(未ロード)。name: ファイル名や曲名(省略可)。
+    // main.js が MML再生の準備(prepareMmlStream)と各loadXxxFile()で呼ぶ。
+    setSourceInfo(kind, name) {
+      this._sourceInfo = kind ? { kind, name: name || '' } : null;
+      this._renderSourceBadge();
+    }
+    _renderSourceBadge() {
+      const el = this._srcBadgeEl;
+      if (!el) return;
+      const info = this._sourceInfo;
+      el.classList.remove('kbd-src-badge--mml', 'kbd-src-badge--file');
+      if (!info) { el.textContent = ''; el.title = ''; el.style.display = 'none'; return; }
+      el.style.display = '';
+      const isMml = info.kind === 'mml';
+      el.classList.add(isMml ? 'kbd-src-badge--mml' : 'kbd-src-badge--file');
+      const kindLabel = info.kind.toUpperCase();
+      // 表示は「MML · タイトル」/「NSF · ファイル名」。長い名前は省略記号にしてtitleに全文
+      const name = info.name || '';
+      el.textContent = name ? `${kindLabel} · ${name}` : kindLabel;
+      el.title = (isMml ? T('MML再生を表示中') : T('サウンドファイル再生を表示中')) + (name ? `: ${name}` : '');
+    }
+
+    // 大波形の選択チャンネルを「一番若いch(波形アイコンを持つ最初の行)」にする。
+    // ファイルを読み込み直した時(reset)や、行を組み直して選択中のchが無くなった時に呼ぶ。
+    // 一覧の下の折りたたみ帯は自動で開かない(ユーザーがクリックしたときだけ開く)
+    _selectFirstWave(rowEls) {
+      const first = (rowEls || []).find(el => el.waveCanvas);
+      if (!first) return;
+      this._selectedId = first.id;
+      this._bigWaveSig = '';
+      for (const el of this._rowEls.concat(this._spcRowEls)) {
+        if (el.waveCanvas) el.waveCanvas.classList.toggle('kbd-wave--selected', el.id === first.id);
+      }
+      const ch = (this._prevChannels || []).find(c => c.id === first.id) ||
+                 (this._prevSpcVoices || []).find(c => c.id === first.id);
+      if (ch) this._renderBigWave(ch);
+    }
+
+    // ロール見出し行に置くシークバー(MMLエディタのトランスポート行と同じもの。DOMはmain.jsが
+    // createSeekBarInstance()で作り位置/範囲/時間表示を同期し続けるので、ここでは置くだけ)。
+    // 言語切替で見出しを作り直しても同じ要素を差し戻す(_buildRollPane→_mountRollSeekBar)。
+    setRollSeekBar(wrapEl, timeEl) {
+      this._rollSeekBarEls = wrapEl ? { wrapEl, timeEl } : null;
+      const slot = this._rollHeaderEl && this._rollHeaderEl.querySelector('.kbd-roll-seek-slot');
+      if (slot) this._mountRollSeekBar(slot);
+    }
+    _mountRollSeekBar(slot) {
+      const els = this._rollSeekBarEls;
+      slot.innerHTML = '';
+      if (!els) return;
+      slot.appendChild(els.wrapEl);
+      if (els.timeEl) slot.appendChild(els.timeEl);
+    }
+
+    // ── ロールをドラッグしてシーク ─────────────────────────────────
+    // ロール上でポインタを押して動かすと、音符の流れる方向に沿って再生位置を動かす
+    // (縦向き=上下: 下へ引くと未来の音符が鍵盤へ近づく=進む / 横向き=左右: 左へ引くと進む)。
+    // 1px = 1/ROLL_PX_PER_SEC 秒(ロールの時間軸スケールと同じなので、つかんだ音符が指に付いてくる)。
+    // 実際のシークは onRollSeek(実時間の秒) に委ね(main.js: seekToSeconds)、ドラッグ中は
+    // 間引いて呼び、離した時に最終位置で呼ぶ。返ってきた(クランプ後の)秒で表示位置を合わせる。
+    // ドラッグ中の描画は _renderRoll() が _rollDrag.pos を優先する。
+    _attachRollSeekDrag(canvas) {
+      canvas.classList.add('kbd-roll--seekable');
+      canvas.title = T('ドラッグでシーク(縦向きは上下、横向きは左右)');
+      const SEEK_THROTTLE_MS = 60;
+      let lastSeekMs = 0;
+      const applySeek = (songSec, force) => {
+        const nowMs = performance.now();
+        if (!force && nowMs - lastSeekMs < SEEK_THROTTLE_MS) return;
+        lastSeekMs = nowMs;
+        if (!this.onRollSeek) return;
+        // ロールの位置は曲内の絶対秒。プレイヤー/シークバーの秒は「現在の再生速度での実時間」
+        // なので速度分母を掛けて渡す(逆変換は _renderRoll のrawPos*speedFactor参照)
+        const denom = this._speedDenom || 1;
+        const got = this.onRollSeek(songSec * denom);
+        if (typeof got === 'number' && Number.isFinite(got)) this._rollDrag.pos = got / denom;
+      };
+      canvas.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0 || !this._rollTimeline) return;
+        this._rollDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, startPos: this._rollLastDrawnPos || 0, pos: this._rollLastDrawnPos || 0, moved: false };
+        try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* キャプチャ不可でも要素上のmoveで追従する */ }
+        canvas.classList.add('dragging');
+        e.preventDefault();
+      });
+      canvas.addEventListener('pointermove', (e) => {
+        const d = this._rollDrag;
+        if (!d || e.pointerId !== d.id) return;
+        const dx = e.clientX - d.x, dy = e.clientY - d.y;
+        if (!d.moved && Math.abs(dx) < 2 && Math.abs(dy) < 2) return; // クリック程度の揺れでは動かさない
+        d.moved = true;
+        const vertical = this._layout.rollOrientation !== 'horizontal';
+        const deltaSec = (vertical ? dy : -dx) / ROLL_PX_PER_SEC;
+        d.pos = Math.max(0, d.startPos + deltaSec);
+        applySeek(d.pos, false);
+        this._renderRoll(this._rollLastRawPosForDrag()); // 即座に追従して描く
+      });
+      const finish = (e) => {
+        const d = this._rollDrag;
+        if (!d || e.pointerId !== d.id) return;
+        try { canvas.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        canvas.classList.remove('dragging');
+        if (d.moved) applySeek(d.pos, true);
+        this._rollDrag = null;
+        // 次の実測位置から補間を組み直す(シーク後の位置に即座に揃える)
+        this._rollLastRawPos = null;
+        this._rollCursor = {};
+      };
+      canvas.addEventListener('pointerup', finish);
+      canvas.addEventListener('pointercancel', finish);
+    }
+    // ドラッグ中に_renderRoll()を即時呼びするための「直前の実測位置」(無ければ0)。
+    // _renderRoll()はドラッグ中は表示位置に_rollDrag.posを使うので値自体は補間の帳尻用
+    _rollLastRawPosForDrag() { return this._rollLastRawPos == null ? 0 : this._rollLastRawPos; }
+
+    // 実効的なロールの置き場。'window'は別ウィンドウのコンテナ(#pianoRollDisplay)が
+    // 無いページでは'bottom'扱いにする
+    _effectivePlacement() {
+      const p = this._layout.rollPlacement;
+      if (p === 'window' && !document.getElementById('pianoRollDisplay')) return 'bottom';
+      return p;
+    }
+
+    // ロールペインをレイアウト設定(_layout.rollPlacement)に応じた親へ取り付ける。
+    //   'bottom': チャンネル一覧(.kbd-main)の下(従来配置)。手前にロール高さ用スプリッター
+    //   'right' : 一覧の右(.kbd-main内)。手前に一覧幅用スプリッター
+    //   'window': 別ウィンドウ(#pianoRollDisplay)
+    _mountRollPane() {
+      const pane = this._rollPaneEl;
+      if (!pane) return;
+      if (pane.parentNode) pane.parentNode.removeChild(pane);
+      for (const sp of [this._listSplitterEl, this._rollSplitterEl]) {
+        if (sp && sp.parentNode) sp.parentNode.removeChild(sp);
+      }
+      const placement = this._effectivePlacement();
+      if (placement === 'right') {
+        this._mainEl.appendChild(this._listSplitterEl);
+        this._mainEl.appendChild(pane);
+      } else if (placement === 'window') {
+        document.getElementById('pianoRollDisplay').appendChild(pane);
+      } else {
+        this.container.appendChild(this._rollSplitterEl);
+        this.container.appendChild(pane);
+      }
+    }
+
+    // 大波形パネルの置き場。ロールが一覧の下で一覧が1列(従来レイアウト)のときは一覧の右、
+    // それ以外(右側をロールが使う/一覧が幅いっぱいに広がる)は一覧の下の折りたたみ帯に置く
+    _bigWaveBelow() {
+      return this._effectivePlacement() !== 'bottom' || this._layout.listColumns === 'auto';
+    }
+    _mountBigWave() {
+      const big = this._bigWaveEl;
+      if (!big) return;
+      if (big.parentNode) big.parentNode.removeChild(big);
+      if (this._bigWaveBelow()) this._leftEl.appendChild(big);
+      else this._mainEl.appendChild(big);
+    }
+
+    // レイアウト設定をCSSクラス/インラインサイズへ反映する(向き・置き場・多段・折りたたみ)
+    _applyLayoutClasses() {
+      const L = this._layout;
+      const placement = this._effectivePlacement();
+      const horizontal = L.rollOrientation === 'horizontal';
+      const below = this._bigWaveBelow();
+      const pane = this._rollPaneEl;
+      if (pane) {
+        pane.classList.toggle('kbd-roll-wrap--horizontal', horizontal);
+        // 右/別ウィンドウ配置ではペインが親いっぱいに広がる(ロールがflex:1)。下配置は固定高さ
+        pane.classList.toggle('kbd-roll-wrap--fill', placement !== 'bottom');
+        pane.classList.toggle('kbd-roll-wrap--nocollapse', placement !== 'bottom');
+        pane.classList.toggle('kbd-roll-wrap--window', placement === 'window'); // 窓のタイトルと二重になる見出しラベルを隠す
+        // チャンネルごとのレーン表示: まとめ表示の本体(.kbd-roll-body)を隠してレーン群を出す
+        const lanesMode = L.rollLanes === 'perChannel';
+        pane.classList.toggle('kbd-roll-wrap--lanes', lanesMode);
+        const collapsed = placement === 'bottom' && this._rollCollapsed;
+        this._rollCanvas.style.display = collapsed ? 'none' : '';
+        if (this._lanesEl) this._lanesEl.style.display = (collapsed || !lanesMode) ? 'none' : '';
+        const toggle = this._rollHeaderEl && this._rollHeaderEl.querySelector('.kbd-roll-toggle');
+        if (toggle) toggle.textContent = collapsed ? '▶' : '▼';
+        // 下配置は固定高さ(スプリッターで可変)。レーン表示のコンテナは各レーンに鍵盤も含むので、
+        // 縦向きはロール高さ+鍵盤高さぶん確保して全体の高さをまとめ表示と揃える
+        this._rollCanvas.style.height = placement === 'bottom' ? (this._rollHeight + 'px') : '';
+        if (this._lanesEl) {
+          this._lanesEl.style.height = placement === 'bottom'
+            ? ((this._rollHeight + (horizontal ? 0 : PIANO_KEY_LEN)) + 'px') : '';
+        }
+      }
+      const left = this._leftEl;
+      if (left) {
+        // 一覧の幅: 右配置=スプリッターで決めた固定幅 / 下配置で1列=CSS既定の固定幅(従来) /
+        // それ以外(下配置で多段、別ウィンドウ配置)=幅いっぱい
+        const flexible = placement === 'window' || (placement === 'bottom' && L.listColumns === 'auto');
+        left.classList.toggle('kbd-left--flex', flexible);
+        left.classList.toggle('kbd-left--multicol', L.listColumns === 'auto');
+        // 大波形を一覧の下に置くときは、行一覧を伸ばして最下部に張り付けるのでなく
+        // チャンネル行のすぐ下に続ける(行が少ないと間が空いて「左下」に見えるため)
+        left.classList.toggle('kbd-left--wave-below', below);
+        // 右配置の一覧幅。SPCモードは列が多いので全列が収まる幅(SPC_LIST_MIN_WIDTH)を下限にする
+        let w = '';
+        if (placement === 'right') {
+          const min = this._mode === 'spc' ? SPC_LIST_MIN_WIDTH : 0;
+          const want = Math.max(this._listWidth || 0, min);
+          if (want > 0) w = want + 'px';
+        }
+        left.style.width = w;
+      }
+      const big = this._bigWaveEl;
+      if (big) {
+        big.classList.toggle('kbd-bigwave--below', below);
+        big.classList.toggle('kbd-bigwave--collapsed', below && this._bigWaveCollapsed);
+        this._bigToggleEl.textContent = this._bigWaveCollapsed ? '▶' : '▼';
+      }
+      if (this._mainEl) this._mainEl.classList.toggle('kbd-main--roll-right', placement === 'right');
+    }
+
+    // 現在のレイアウト設定(コピー)を返す
+    getLayout() { return Object.assign({}, this._layout); }
+
+    // レイアウト設定を部分的に変更して即反映・永続化する。
+    // 例: setLayout({ rollOrientation: 'horizontal' })
+    setLayout(partial) {
+      let changed = false;
+      for (const k of Object.keys(LAYOUT_DEFAULTS)) {
+        if (partial && LAYOUT_CHOICES[k].includes(partial[k]) && partial[k] !== this._layout[k]) {
+          this._layout[k] = partial[k];
+          changed = true;
+        }
+      }
+      if (!changed) return;
+      saveLayoutSettings(this._layout);
+      this._mountRollPane();
+      this._mountBigWave();
+      this._rebuildLanes();
+      this._applyLayoutClasses();
+      // canvasの内部解像度は次の描画でサイズキャッシュから決め直す。向きが変わると
+      // 表示サイズも変わるので、古いキャッシュ値で1フレーム描かないよう捨てておく
+      for (const c of [this._rollCanvas, this._canvas]) {
+        if (!c) continue;
+        delete c._cachedWidth;
+        delete c._cachedHeight;
+      }
+      this._rollCursor = {};
+      this._rollLastRawPos = null;
+      if (this._selectedId) this._bigWaveSig = ''; // 置き場が変わった大波形は描き直す
+      if (this.onLayoutChange) this.onLayoutChange(this.getLayout());
+    }
+
+    // レイアウト設定のポップオーバー(⚙ボタン直下)。ラジオ3組(向き/置き場/一覧)で即反映。
+    // 外側クリック/Escで閉じる。既に開いていれば閉じる(トグル)。
+    _openLayoutPopover(anchorEl) {
+      if (this._layoutPopEl) { this._closeLayoutPopover(); return; }
+      const groups = [
+        { key: 'rollOrientation', label: T('ピアノロールの向き'), options: [
+          ['vertical', T('縦 (音符が上から鍵盤へ降る)')],
+          ['horizontal', T('横 (音符が右から鍵盤へ流れる)')],
+        ] },
+        { key: 'rollPlacement', label: T('ピアノロールの置き場'), options: [
+          ['bottom', T('チャンネル一覧の下')],
+          ['right', T('チャンネル一覧の右')],
+          ['window', T('別ウィンドウ')],
+        ] },
+        { key: 'listColumns', label: T('チャンネル一覧'), options: [
+          ['single', T('1列')],
+          ['auto', T('幅に応じて自動で多段')],
+        ] },
+        { key: 'rollLanes', label: T('ピアノロールの鍵盤'), options: [
+          ['all', T('全チャンネルを1つの鍵盤に')],
+          ['perChannel', T('チャンネルごとに分割 (収まらない分はスクロール)')],
+        ] },
+      ];
+      const pop = document.createElement('div');
+      pop.className = 'kbd-layout-pop';
+      pop.addEventListener('mousedown', (e) => e.stopPropagation()); // ウィンドウのドラッグ/前面化を起こさない
+      pop.addEventListener('click', (e) => e.stopPropagation());
+      for (const g of groups) {
+        const sec = document.createElement('div');
+        sec.className = 'kbd-layout-sec';
+        const title = document.createElement('div');
+        title.className = 'kbd-layout-sec-title';
+        title.textContent = g.label;
+        sec.appendChild(title);
+        for (const [value, text] of g.options) {
+          const lab = document.createElement('label');
+          lab.className = 'kbd-layout-opt';
+          const radio = document.createElement('input');
+          radio.type = 'radio';
+          radio.name = 'kbd-layout-' + g.key;
+          radio.value = value;
+          radio.checked = this._layout[g.key] === value;
+          radio.addEventListener('change', () => { if (radio.checked) this.setLayout({ [g.key]: value }); });
+          lab.appendChild(radio);
+          lab.appendChild(document.createTextNode(text));
+          sec.appendChild(lab);
+        }
+        pop.appendChild(sec);
+      }
+      document.body.appendChild(pop);
+      // アンカー(⚙)の直下、右端揃え。画面からはみ出す場合は左へ寄せる
+      const r = anchorEl.getBoundingClientRect();
+      const pw = pop.offsetWidth, ph = pop.offsetHeight;
+      let left = r.right - pw, top = r.bottom + 4;
+      if (left < 4) left = 4;
+      if (top + ph > window.innerHeight - 4) top = Math.max(4, r.top - ph - 4);
+      pop.style.left = left + 'px';
+      pop.style.top = top + 'px';
+      this._layoutPopEl = pop;
+      this._layoutPopClose = (e) => {
+        if (e.type === 'keydown' && e.key !== 'Escape') return;
+        if (e.type === 'mousedown' && (pop.contains(e.target) || anchorEl.contains(e.target))) return;
+        this._closeLayoutPopover();
+      };
+      setTimeout(() => {
+        document.addEventListener('mousedown', this._layoutPopClose, true);
+        document.addEventListener('keydown', this._layoutPopClose, true);
+      }, 0);
+    }
+    _closeLayoutPopover() {
+      if (!this._layoutPopEl) return;
+      this._layoutPopEl.remove();
+      this._layoutPopEl = null;
+      document.removeEventListener('mousedown', this._layoutPopClose, true);
+      document.removeEventListener('keydown', this._layoutPopClose, true);
+      this._layoutPopClose = null;
     }
 
     setSource(result, chips) {
@@ -1740,6 +2460,8 @@
       this._spcVoices = [];
       this._prevSpcVoices = [];
       this._muteState.clear();
+      // 大波形の選択も前ファイルのchを引きずらず、一番若いchに戻す(_rebuildRowsが選び直す)
+      this._selectedId = null;
       this.setSource({ regSnapshots: [{}], totalFrames: 1, samplesPerFrame: 735, sampleRate: 44100, writeLog: [] }, []);
       this.update(0);
     }
@@ -1754,80 +2476,24 @@
       this._rowsEl.style.display = spc ? 'none' : '';
       this._spcHeaderEl.style.display = spc ? '' : 'none';
       this._spcSectionEl.style.display = spc ? '' : 'none';
-      // SPCは列数が多いため、横スクロールなしで全列収まるよう左パネル幅を拡張する。
-      // 大波形パネルはecho列より右（echoL〜C7、ALL行以外は常に空欄）の領域にちょうど
-      // 収まるサイズに縮小して重ね、note/freq/echo列の実データを隠さないようにする
-      // （サイズ・位置は _positionSpcBigWave() で echoL〜C7 の実測幅から都度計算する）。
+      // SPCはNSFより列が多い(L/R/env/PM/echo)ぶん一覧の幅を少し広げる(.kbd-left--spc)。
+      // レイアウト(ロールの置き場/大波形の置き場)はNSF等と共通のまま(以前はSPC専用の
+      // 1000px幅テーブル+大波形の重ね配置だったが、マスター値を1行にまとめて廃止した)
       this._leftEl.classList.toggle('kbd-left--spc', spc);
-      this._mainEl.classList.toggle('kbd-main--spc', spc);
+      this._applyLayoutClasses(); // 右配置の一覧幅(SPCは下限あり)を反映
+      // 大波形の選択を表示中の一覧に合わせる(SPC→V0 / NSF等→一番若いch)
+      const rows = spc ? this._spcRowEls : this._rowEls;
+      if (rows.length && !rows.some(el => el.waveCanvas && el.id === this._selectedId)) this._selectFirstWave(rows);
+      this._rebuildLanes(); // チャンネルごとのレーン表示も表示中の一覧に合わせる
 
-      if (!spc) {
-        // NSF/MMLモードでは常に固定の既定サイズに戻す
-        this._bigCanvas.style.width = '';
-        this._bigCanvas.style.height = '';
-        if (this._bigCanvas.width !== 560) {
-          this._bigCanvas.width = 560;
-          this._bigCanvas.height = 280;
-          this._bigWaveSig = '';
-          if (this._selectedId) {
-            const sel = (this._prevChannels || []).find(c => c.id === this._selectedId);
-            if (sel) this._renderBigWave(sel);
-          }
-        }
-      }
-
-      // ウィンドウが狭い場合のみ、全列が収まる最小サイズまで自動拡張する
-      // （縮小はしない。ユーザーが既に手動でそれ以上広げていればそのまま尊重する）
+      // ウィンドウが狭くて一覧の全列が収まらない場合だけ、収まる幅まで自動拡張する
+      // (縮小はしない。ユーザーが既に手動でそれ以上広げていればそのまま尊重する)
       if (spc) {
         const winEl = this.container.closest('.float-window');
-        if (winEl) {
-          const minW = 1030, minH = 560;
+        if (winEl && this._effectivePlacement() !== 'window') {
+          const minW = this._effectivePlacement() === 'bottom' && this._layout.listColumns === 'single' ? 720 : 560;
           if (winEl.offsetWidth < minW) winEl.style.width = minW + 'px';
-          if (winEl.offsetHeight < minH) winEl.style.height = minH + 'px';
         }
-        this._positionSpcBigWave();
-      }
-    }
-
-    // 大波形パネルをALL行のすぐ下（ALL行の値を隠さない位置）に実測で配置し、
-    // 幅もecho列より右（echoL列左端〜C7列右端）にちょうど収まるよう実測して
-    // 縮小する（縦横比は保つ）。列幅はCSS側の調整で変わりうるため、固定px値ではなく
-    // 都度DOMから実測する。
-    _positionSpcBigWave() {
-      if (this._mode !== 'spc' || !this._spcAllRow) return;
-      const row = this._spcAllRow.row;
-      this._bigWaveEl.style.top = (row.offsetTop + row.offsetHeight + 4) + 'px';
-
-      const echoLEl = this._spcHeaderEl.querySelector('.kbds-h-echolr');
-      const firEls = this._spcHeaderEl.querySelectorAll('.kbds-h-fir');
-      const c7El = firEls[firEls.length - 1];
-      if (!echoLEl || !c7El) return;
-      // echoL列の左端 〜 C7列の右端に厳密に揃える。offsetLeftはどちらも同じ
-      // 位置決め祖先(position:relativeのkbd-main)基準なので、right指定ではなく
-      // left指定にする（kbd-leftは横スクロール回避のため列合計より広いことがあり、
-      // right基準だとkbd-leftの右端＝C7の右端にならず揃わない）。
-      const leftPx = echoLEl.offsetLeft;
-      const span = (c7El.offsetLeft + c7El.offsetWidth) - leftPx;
-
-      const cs = getComputedStyle(this._bigWaveEl);
-      const padH = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
-      const borderH = parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth);
-      const cssW = Math.max(120, Math.round(span - padH - borderH));
-      const cssH = Math.round(cssW * (560 / 1120)); // 元の縦横比(2:1)を維持
-
-      this._bigWaveEl.style.left = leftPx + 'px';
-      this._bigWaveEl.style.right = 'auto';
-
-      if (this._bigCanvas.clientWidth === cssW) return; // 未変化なら何もしない
-      this._bigCanvas.style.width = cssW + 'px';
-      this._bigCanvas.style.height = cssH + 'px';
-      this._bigCanvas.width = cssW * 2;   // 内部解像度はCSS表示サイズの2倍(シャープさ維持)
-      this._bigCanvas.height = cssH * 2;
-      this._bigWaveSig = ''; // サイズ変更のため強制再描画
-      if (this._selectedId) {
-        const sel = (this._prevChannels || []).concat(this._prevSpcVoices || [])
-          .find(c => c.id === this._selectedId);
-        if (sel) this._renderBigWave(sel);
       }
     }
 
@@ -1875,19 +2541,27 @@
     }
 
     _rebuildRows(channels) {
-      this._rowsEl.innerHTML = '';
+      this._rowsInnerEl.innerHTML = '';
       this._rowEls = [];
       let lastHeader = null;
+      // チップごとに .kbd-chip-group で括る(多段表示のとき同じチップの行が列をまたいで
+      // 千切れないようにするため。1列表示では見た目に影響しない)
+      let group = null;
       for (const ch of channels) {
         const mi = getMuteInfo(ch.id);
         const muted = this._muteState.get(ch.id) || false;
         const disp = getChannelDisplay(ch.id);
 
-        if (disp.header && disp.header !== lastHeader) {
-          const headerRow = document.createElement('div');
-          headerRow.className = 'kbd-chip-header';
-          headerRow.textContent = disp.header;
-          this._rowsEl.appendChild(headerRow);
+        if (!group || (disp.header && disp.header !== lastHeader)) {
+          group = document.createElement('div');
+          group.className = 'kbd-chip-group';
+          this._rowsInnerEl.appendChild(group);
+          if (disp.header) {
+            const headerRow = document.createElement('div');
+            headerRow.className = 'kbd-chip-header';
+            headerRow.textContent = disp.header;
+            group.appendChild(headerRow);
+          }
           lastHeader = disp.header;
         }
 
@@ -1941,7 +2615,7 @@
 
         const lrEls = row.querySelectorAll('.kbds-lr');
 
-        this._rowsEl.appendChild(row);
+        group.appendChild(row);
         this._rowEls.push({
           row,
           id: ch.id,
@@ -1960,6 +2634,13 @@
           letter: ch.letter,
         });
       }
+      // 大波形の選択chが新しい行一覧に無ければ(未選択/前ファイルのch/SPCボイスでもない)、
+      // 一番若いchを選び直す。SPCボイス(V0-V7)を選択中ならそのまま(SPCモード側で管理)
+      const selectedIsSpcVoice = typeof this._selectedId === 'string' && /^V\d+$/.test(this._selectedId) && this._mode === 'spc';
+      if (!selectedIsSpcVoice && !this._rowEls.some(el => el.waveCanvas && el.id === this._selectedId)) {
+        this._selectFirstWave(this._rowEls);
+      }
+      if (this._mode !== 'spc') this._rebuildLanes(); // チャンネルごとのレーン表示も一覧に合わせる
     }
 
     // ch別音量スライダー(音量バー領域に重ねる半透明オーバーレイ)を1行ぶん配線する。
@@ -2020,6 +2701,12 @@
     _selectWave(chId) {
       this._selectedId = chId;
       this._bigWaveSig = '';   // 強制再描画
+      // 一覧の下の折りたたみ帯に置かれていて畳まれていたら、選んだ時点で開く
+      if (this._bigWaveCollapsed && this._bigWaveBelow()) {
+        this._bigWaveCollapsed = false;
+        try { localStorage.setItem('mml_bigWaveCollapsed', '0'); } catch (e) { /* ignore */ }
+        this._applyLayoutClasses();
+      }
       // HESのALL行はwaveCanvasを持たない(el.waveCanvas===null)ため、他行を飛ばして
       // 例外にならないようガードする(ガード無しだとALL行で例外→以降の行のtoggleが
       // 一件も実行されず青枠が付かなくなる。大波形表示自体はupdate()側の毎フレーム
@@ -2250,7 +2937,7 @@
           id: v.label, color: this._getColor(v.label, v.color), freq: v.freq, vol: v.vol,
           active: v.active, rawVol: null, rawVolMax: null,
         })));
-      drawPiano(this._canvas, allChannels);
+      this._drawPianos(allChannels);
 
       // ピアノロールはSPCモード中は updateSpcVoices() 側が描画するため、ここでは
       // それ以外(NSF/MML/KSS)のときだけ描画する(同じcanvasへの二重描画を避ける)。
@@ -2269,20 +2956,24 @@
       return this._muteState.get(id) || false;
     }
 
-    // ピアノロール描画(Synthesia式: ピッチ=X軸を鍵盤とkeyX()で共有、時間=Y軸で
-    // 上から下(=鍵盤に接する現在地)へ降ってくる)。_rollTimeline が無い間(先読み
-    // キャプチャ完了前など)は前回の描画内容をクリアするだけにする。
+    // ピアノロール描画。音程軸は鍵盤とkeyX()で共有し、時間軸は「現在(鍵盤に接する端)→未来」
+    // へ向かって音符を流す。向き(縦=上から降る/横=右から流れる)はmakeRollGeom()が吸収する。
+    // _rollTimeline が無い間(先読みキャプチャ完了前など)は前回の描画内容をクリアするだけにする。
+    // 描画先: 全チャンネルまとめ(rollLanes='all')なら_rollCanvas 1枚(フィルタ無し)、
+    // チャンネルごと(rollLanes='perChannel')なら各レーンのcanvas(そのchのノートだけ)。
+    _rollTargets() {
+      if (this._layout.rollLanes === 'perChannel' && this._lanes && this._lanes.length) {
+        return this._lanes.map(l => ({ canvas: l.rollCanvas, onlyId: l.id, lane: l }));
+      }
+      return [{ canvas: this._rollCanvas, onlyId: null, lane: null }];
+    }
+
     _renderRoll(posSeconds) {
-      const canvas = this._rollCanvas;
-      if (!canvas || canvas.style.display === 'none') return;
-      const newW = canvas._cachedWidth || canvas.offsetWidth || 560;
-      if (newW === 0) return;
-      if (canvas.width !== newW) canvas.width = newW;
-      const wkW = canvas.width / TOTAL_WHITE;
-      const bkW = Math.max(3, wkW * 0.60);
-      const h = canvas.height;
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, canvas.width, h);
+      const targets = this._rollTargets();
+      if (!targets.length || !targets[0].canvas) return;
+      // 折りたたみ中(表示要素がdisplay:none)は描かない
+      const host = targets[0].onlyId === null ? this._rollCanvas : this._lanesEl;
+      if (!host || host.style.display === 'none') return;
 
       // posSeconds(実プレイヤーのgetPosition())はオーディオコールバック単位(数十〜100ms程度)
       // でしか更新されないため、rAF(約16ms間隔)からは同じ値が何フレームも続いた後に一気に
@@ -2310,28 +3001,114 @@
       }
       this._rollLastRawPos = rawPos;
       const elapsedSinceBaseMs = Math.min(ROLL_INTERP_CAP_MS, Math.max(0, nowMs - (this._rollBaseWallMs || nowMs)));
-      const pos = this._rollSongTimeBase + (elapsedSinceBaseMs / 1000) * speedFactor;
-      const winEnd = pos + ROLL_WINDOW_SEC;
+      let pos = this._rollSongTimeBase + (elapsedSinceBaseMs / 1000) * speedFactor;
+      // ロールをドラッグしてシーク中は、実測位置でなくドラッグ位置を表示する(_attachRollSeekDrag参照)。
+      // 巻き戻し方向にも動くので走査起点キャッシュは使わない
+      if (this._rollDrag) {
+        pos = this._rollDrag.pos;
+        this._rollCursor = {};
+      }
+      this._rollLastDrawnPos = pos;
+      for (const t of targets) this._drawRollCanvas(t.canvas, pos, t.onlyId, t.lane || null);
+    }
 
-      // 鍵盤ごとの縦グリッド線(白鍵の境界線+黒鍵カラムの淡い網掛け)とCの音名ラベル。
+    // チャンネルごとのレーンの音程窓(白鍵LANE_VISIBLE_WHITE本ぶん)を、そのchの「鳴っている音+
+    // 先読み範囲[pos, pos+windowSec)内の音符」が収まるようにスクロールさせる。
+    // 動かし方はデッドゾーン方式: 必要な音域が今の窓(余白LANE_SCROLL_MARGIN白鍵を除く)に
+    // 収まっていれば動かさない。はみ出す側があればその側だけ必要最小限ずらし、音域が窓より
+    // 広くて収まらないときは「今鳴っている音(無ければ一番近い未来の音)」を窓の中央に置く。
+    // 目標へは毎フレーム残差の一部ずつ寄せる(LANE_SCROLL_EASE)ので滑らかに追従する。
+    // 音符が1つも無い間は動かさない。lane.scrollWhite = 窓の低音側端の白鍵位置(小数)
+    _updateLaneScroll(lane, pos, windowSec) {
+      const maxOff = TOTAL_WHITE - LANE_VISIBLE_WHITE;
+      const track = this._rollTimeline && this._rollTimeline.find(t => t.id === lane.id);
+      if (lane.scrollWhite == null) lane.scrollWhite = Math.max(0, Math.min(maxOff, keyX(60, 1).x - LANE_VISIBLE_WHITE / 2)); // 初期値: C4中心
+      if (!track || !track.notes.length) return;
+      const winEnd = pos + windowSec;
+      // 白鍵単位の位置(黒鍵は隣接白鍵の境界)。keyX(midi,1)は白鍵幅1としたときの座標
+      let lo = Infinity, hi = -Infinity, focus = null, focusStart = Infinity;
+      const notes = track.notes;
+      // startSec昇順なので、終わった音を飛ばしつつ先読み範囲まで見る(ノート数は多くても
+      // 範囲は数秒ぶんなので線形走査で十分。位置はレーンごとに独立なのでcursorは使わない)
+      for (let i = 0; i < notes.length; i++) {
+        const n = notes[i];
+        if (n.endSec <= pos) continue;
+        if (n.startSec >= winEnd) break;
+        const kp = keyX(n.midi, 1);
+        if (!kp) continue;
+        const p0 = kp.isBlack ? kp.x - 0.3 : kp.x, p1 = kp.isBlack ? kp.x + 0.3 : kp.x + 1;
+        if (p0 < lo) lo = p0;
+        if (p1 > hi) hi = p1;
+        // 注目音: 鳴っている音(startSec<=pos)があればそれ、無ければ最も近い未来の音
+        const key = n.startSec <= pos ? -1 : n.startSec;
+        if (key < focusStart) { focusStart = key; focus = (p0 + p1) / 2; }
+      }
+      if (lo === Infinity) return;
+      const vis = LANE_VISIBLE_WHITE, m = LANE_SCROLL_MARGIN;
+      let target = lane.scrollWhite;
+      if (hi - lo + 2 * m <= vis) {
+        if (lo - m < target) target = lo - m;
+        else if (hi + m > target + vis) target = hi + m - vis;
+      } else {
+        target = focus - vis / 2;
+      }
+      target = Math.max(0, Math.min(maxOff, target));
+      const diff = target - lane.scrollWhite;
+      lane.scrollWhite = Math.abs(diff) < 0.005 ? target : lane.scrollWhite + diff * LANE_SCROLL_EASE;
+    }
+
+    // 1枚のロールcanvasを曲内秒posの状態で描く。onlyId!=nullならそのチャンネルのノートだけ描く
+    // (チャンネルごとのレーン表示用。laneが渡されたら音程窓=白鍵LANE_VISIBLE_WHITE本ぶんを
+    // lane.scrollWhiteから表示し、描画前に_updateLaneScroll()で窓を追従させる)。
+    _drawRollCanvas(canvas, pos, onlyId, lane) {
+      // 内部解像度は表示サイズ(CSS px)に追随させる(縦向き・一覧の下配置ではCSSの固定高さ
+      // ROLL_CANVAS_HEIGHTと一致する)。フォールバックのclientHeightはborder-topを含まない値
+      const newW = canvas._cachedWidth || canvas.offsetWidth || 560;
+      const newH = canvas._cachedHeight || canvas.clientHeight || canvas.height;
+      if (newW === 0 || newH === 0) return;
+      if (canvas.width !== newW) canvas.width = newW;
+      if (canvas.height !== newH) canvas.height = newH;
+      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? LANE_VISIBLE_WHITE : 0);
+      const { wk: wkW, bk: bkW, H } = g;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, H);
+      const windowSec = g.windowSec;
+      const winEnd = pos + windowSec;
+      if (lane) this._updateLaneScroll(lane, pos, windowSec);
+      const offPx = lane ? lane.scrollWhite * wkW : 0; // 音程窓の低音側端(px)。keyX()の結果から引く
+
+      // 鍵盤ごとの音程グリッド(白鍵の境界線+黒鍵レーンの淡い網掛け)とCの音名ラベル。
+      // グリッドは音程軸に直交する全時間帯の帯/線なので、時間軸[0, timeLen)いっぱいに引く。
       for (let midi = MIDI_MIN; midi <= MIDI_MAX; midi++) {
         const rel = midi - MIDI_MIN;
         const semi = rel % 12;
         const keyPos = keyX(midi, wkW);
         if (!keyPos) continue;
+        keyPos.x -= offPx;
+        if (keyPos.x + wkW < 0 || keyPos.x - wkW > g.pitchLen) continue; // 音程窓の外
         if (IS_BLACK[semi]) {
           ctx.fillStyle = '#000000';
           ctx.globalAlpha = 0.25;
-          ctx.fillRect(keyPos.x - bkW / 2, 0, bkW, h);
+          const r = g.rect(keyPos.x - bkW / 2, bkW, 0, g.timeLen);
+          ctx.fillRect(r.x, r.y, r.w, r.h);
           ctx.globalAlpha = 1;
         } else {
           ctx.strokeStyle = '#3d3d4a';
           ctx.lineWidth = 1;
           ctx.beginPath();
-          ctx.moveTo(Math.round(keyPos.x) + 0.5, 0);
-          ctx.lineTo(Math.round(keyPos.x) + 0.5, h);
+          if (g.vertical) {
+            const x = Math.round(keyPos.x) + 0.5;
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, H);
+          } else {
+            const y = Math.round(H - keyPos.x) + 0.5;
+            ctx.moveTo(0, y);
+            ctx.lineTo(g.W, y);
+          }
           ctx.stroke();
-          if (semi === 0) { // C
+          // Cの音名ラベル(縦向きのみ。横向きはレーンが薄くて入らないので鍵盤側drawPiano()が
+          // 鍵の上に書く)
+          if (semi === 0 && g.vertical) {
             ctx.fillStyle = '#6b6b7a';
             ctx.font = '9px ' + fontStack('sans');
             ctx.textBaseline = 'top';
@@ -2340,34 +3117,46 @@
         }
       }
 
-      // 時間軸: 曲内の絶対秒(0,1,2,3…)ごとに横線を引き、ノートと同じ式でスクロールさせる。
-      // 再生が進むにつれて線が下から上へ流れ、新しい秒の線が上端から現れる(累積の経過時間)。
+      // 時間軸: 曲内の絶対秒(0,1,2,3…)ごとに音程軸方向の線を引き、ノートと同じ式でスクロールさせる。
+      // 再生が進むにつれて線が鍵盤側へ流れ、新しい秒の線が先読みの果て(縦向き=上端、横向き=右端)
+      // から現れる(累積の経過時間)。
       ctx.strokeStyle = '#3d3d4a';
       ctx.fillStyle = '#6b6b7a';
       ctx.font = '9px ' + fontStack('sans');
-      ctx.textBaseline = 'bottom';
       const firstSec = Math.ceil(pos);
       for (let s = firstSec; s < winEnd; s++) {
-        const y = Math.round(h - ((s - pos) / ROLL_WINDOW_SEC) * h) + 0.5;
         ctx.globalAlpha = 0.5;
         ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(canvas.width, y);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        ctx.fillText(`${s}s`, 2, y - 1);
+        if (g.vertical) {
+          const y = Math.round(H - g.tPx(s - pos)) + 0.5;
+          ctx.moveTo(0, y);
+          ctx.lineTo(g.W, y);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(`${s}s`, 2, y - 1);
+        } else {
+          const x = Math.round(g.tPx(s - pos)) + 0.5;
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, H);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+          ctx.textBaseline = 'top';
+          ctx.fillText(`${s}s`, x + 2, 1);
+        }
       }
 
       if (!this._rollTimeline || !this._rollTimeline.length) return;
       const frameDur = this._rollTimeline.frameDur || (1 / 60);
 
       // track.notesはstartSec昇順(buildNoteTimelineFromChannelFrames参照)なので、
-      // 「もう画面上端より上に流れ去った(endSec<=pos)」ノートを読み飛ばす起点を
+      // 「もう鍵盤側へ流れ去った(endSec<=pos)」ノートを読み飛ばす起点を
       // trackごとにキャッシュし、次フレームはそこから再開する(巻き戻り時は上でリセット済み)。
       // 曲が長い/ノート数が多いほど毎フレーム全ノート走査のコストが線形に効いてくるため、
       // 未再生ノートだけを毎フレーム定数時間で拾えるようにする最適化(文字数の多いMMLで
       // ピアノロールがカクつく問題の対策)
       for (const track of this._rollTimeline) {
+        if (onlyId !== null && track.id !== onlyId) continue; // レーン表示: このchのノートだけ
         if (this._isTrackMuted(track.id)) continue; // ミュート中のチャンネルは描画しない
         const notes = track.notes;
         let idx = this._rollCursor[track.id] || 0;
@@ -2379,25 +3168,25 @@
           if (note.startSec >= winEnd) break; // 以降は全て未来のノート(startSec昇順のため打ち切れる)
           const keyPos = keyX(note.midi, wkW);
           if (!keyPos) continue;
-          const relEnd = Math.min(ROLL_WINDOW_SEC, note.endSec - pos);
+          keyPos.x -= offPx;
+          if (keyPos.x + wkW < 0 || keyPos.x - wkW > g.pitchLen) continue; // 音程窓の外
+          const relEnd = Math.min(windowSec, note.endSec - pos);
           const relStart = Math.max(0, note.startSec - pos);
-          const top = Math.max(0, h - (relEnd / ROLL_WINDOW_SEC) * h);
-          const bottom = Math.min(h, h - (relStart / ROLL_WINDOW_SEC) * h);
-          const rectH = Math.max(2, bottom - top);
-          const x = keyPos.isBlack ? keyPos.x - bkW / 2 : keyPos.x + 0.5;
-          const w = keyPos.isBlack ? bkW : (wkW - 1);
+          // 音程軸: 白鍵は境界線1px内側、黒鍵はレーン幅いっぱい。時間軸: 最低2pxは見えるようにする
+          const pLo = keyPos.isBlack ? keyPos.x - bkW / 2 : keyPos.x + 0.5;
+          const pSize = keyPos.isBlack ? bkW : (wkW - 1);
+          const r = g.rect(pLo, pSize, g.tPx(relStart), g.tPx(relEnd), 2);
           // 音量による濃淡はやめ、常にチャンネル本来の色をそのまま(不透明・フィルタ無し)で描く。
           const noteColor = this._getColor(track.id, track.color);
           ctx.fillStyle = noteColor;
-          ctx.fillRect(x, top, w, rectH);
+          ctx.fillRect(r.x, r.y, r.w, r.h);
 
           // セント偏差オーバーレイ(DESIGN-PITCH.md Phase 0): freqSeq(ノート区間内フレーム毎の
-          // 生周波数)を丸め後noteの理論周波数と比較し、水平方向のズレとして細線描画する。
-          // このロールはX軸=音程・Y軸=時間(一般的なピアノロールと軸が逆)なので、
-          // 「±100セント=±1鍵盤幅」は水平オフセット(wkW基準)として表現する。
+          // 生周波数)を丸め後noteの理論周波数と比較し、音程軸方向のズレとして細線描画する。
+          // 「±100セント=±1鍵盤幅」を音程軸オフセット(wkW基準)として表現する。
           if (this._showCentsOverlay && note.freqSeq && note.freqSeq.length) {
             const idealFreq = midiToFreq(note.midi);
-            const centerX = x + w / 2;
+            const centerP = pLo + pSize / 2;
             ctx.beginPath();
             let started = false;
             for (let k = 0; k < note.freqSeq.length; k++) {
@@ -2406,9 +3195,8 @@
               const tAbs = note.startSec + k * frameDur;
               if (tAbs < pos || tAbs > winEnd) continue;
               const cents = 1200 * Math.log2(freq / idealFreq);
-              const y = h - ((tAbs - pos) / ROLL_WINDOW_SEC) * h;
-              const cx = centerX + (cents / 100) * wkW;
-              if (!started) { ctx.moveTo(cx, y); started = true; } else { ctx.lineTo(cx, y); }
+              const pt = g.point(centerP + (cents / 100) * wkW, g.tPx(tAbs - pos));
+              if (!started) { ctx.moveTo(pt.x, pt.y); started = true; } else { ctx.lineTo(pt.x, pt.y); }
             }
             if (started) {
               ctx.strokeStyle = overlayLineColor(noteColor);
@@ -2445,10 +3233,7 @@
         `<span class="kbds-pm">-</span>` +
         `<span class="kbd-note">—</span>` +
         `<span class="kbds-freq"></span>` +
-        `<span class="kbds-echo">-</span>` +
-        `<span class="kbds-echolr"></span>` +
-        `<span class="kbds-echolr"></span>` +
-        Array.from({ length: 8 }, () => `<span class="kbds-fir"></span>`).join('');
+        `<span class="kbds-echo">-</span>`;
 
       const checkbox = row.querySelector('.kbd-mute');
       checkbox.addEventListener('change', () => {
@@ -2488,8 +3273,10 @@
       };
     }
 
-    // ALL行: mute/vol/env/wave/PM/note/freq/echo は空欄。L・R にマスター音量
-    // ($0C/$1C)、echoL・echoRにエコー音量($2C/$3C)、C0-C7にFIRフィルタ係数を表示。
+    // ALL行: L・R にマスター音量($0C/$1C)。それより右(vol以降)はボイス単位の値が無いので、
+    // 1つのセル(.kbds-master)にエコー音量L/R($2C/$3C)とFIRフィルタ係数C0-C7をまとめて表示する
+    // (以前は echoL/echoR/C0-C7 を独立した列にしていたが、ALL行以外は常に空欄で幅ばかり
+    // 食っていたため、一覧幅を他フォーマット並みに収める目的で1セルにした)。
     _buildSpcAllRow() {
       const row = document.createElement('div');
       row.className = 'kbd-ch-row kbds-all-row';
@@ -2499,24 +3286,12 @@
         `<span class="kbd-name">ALL</span>` +
         `<span class="kbds-lr kbds-l"></span>` +
         `<span class="kbds-lr"></span>` +
-        `<span class="kbd-vol-num"></span>` +
-        `<span class="kbd-vol-wrap"></span>` +
-        `<span class="kbds-env"></span>` +
-        `<span class="kbd-wave" style="visibility:hidden"></span>` +
-        `<span class="kbds-pm"></span>` +
-        `<span class="kbd-note"></span>` +
-        `<span class="kbds-freq"></span>` +
-        `<span class="kbds-echo"></span>` +
-        `<span class="kbds-echolr"></span>` +
-        `<span class="kbds-echolr"></span>` +
-        Array.from({ length: 8 }, () => `<span class="kbds-fir"></span>`).join('');
+        `<span class="kbds-master" title="echo L/R = ${'$'}2C/${'$'}3C, FIR = C0..C7"></span>`;
       const lrEls = row.querySelectorAll('.kbds-lr');
-      const echolrEls = row.querySelectorAll('.kbds-echolr');
       return {
         row,
         lEl: lrEls[0], rEl: lrEls[1],
-        echoLEl: echolrEls[0], echoREl: echolrEls[1],
-        firEls: Array.from(row.querySelectorAll('.kbds-fir')),
+        masterEl: row.querySelector('.kbds-master'),
       };
     }
 
@@ -2553,6 +3328,11 @@
           this._spcSectionEl.appendChild(el.row);
           return el;
         });
+        // 大波形の選択がSPCボイス以外(前ファイルのNSF ch等)なら、V0(一番若いボイス)に選び直す
+        if (this._spcRowEls.length && !this._spcRowEls.some(el => el.id === this._selectedId)) {
+          this._selectFirstWave(this._spcRowEls);
+        }
+        if (this._mode === 'spc') this._rebuildLanes(); // チャンネルごとのレーン表示もボイス一覧に合わせる
       }
 
       // ALL行データ更新（マスター音量・エコー音量・FIRフィルタ、各 -128〜127）
@@ -2560,9 +3340,9 @@
         const a = this._spcAllRow;
         a.lEl.textContent = String(master.volL);
         a.rEl.textContent = String(master.volR);
-        a.echoLEl.textContent = String(master.echoL);
-        a.echoREl.textContent = String(master.echoR);
-        (master.fir || []).forEach((val, i) => { if (a.firEls[i]) a.firEls[i].textContent = String(val); });
+        const fir = (master.fir || []).map(v => String(v)).join(' ');
+        const txt = `echo ${master.echoL}/${master.echoR}  FIR ${fir}`;
+        if (a.masterEl.textContent !== txt) a.masterEl.textContent = txt;
       }
 
       // 各ボイス行データ更新
@@ -2649,8 +3429,6 @@
         if (sel) this._renderBigWave(sel);
       }
 
-      this._positionSpcBigWave();
-
       // ピアノを即時再描画（SPC のみ再生中も更新）
       if (anyActive) {
         const snap = this._state && this._state.regSnapshots
@@ -2662,7 +3440,7 @@
           id: v.label, color: this._getColor(v.label, v.color), freq: v.freq, vol: v.vol,
           active: v.active, rawVol: null, rawVolMax: null,
         })));
-        drawPiano(this._canvas, allChannels);
+        this._drawPianos(allChannels);
       }
 
       if (this._mode === 'spc') this._renderRoll(posSeconds || 0);

@@ -160,6 +160,7 @@ header h1.app-title {
 }
 
 /* --- 単色アイコンボタン (ヘッダーツールバー) --- */
+.icon-btn[hidden] { display: none; } /* display:inline-flex がhidden属性(UA既定のdisplay:none)に勝ってしまうのを防ぐ */
 .icon-btn {
   background: transparent;
   color: var(--text);
@@ -599,12 +600,40 @@ button.secondary {
   width: 100%;
   margin: 4px 0;
 }
-.seek-bar-wrap input#seekBar {
+/* 主(#seekBar)と副(鍵盤表示のロール見出し行、idなし。main.js createSeekBarInstance)の両方に効かせる */
+.seek-bar-wrap > input[type="range"] {
   display: block;
   width: 100%;
   margin: 0;
   position: relative;
   z-index: 2;
+}
+/* ロール見出し行(.kbd-roll-header、高さ20px)に収まる副シークバー+時間表示 */
+.kbd-roll-seek-slot {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 6px;
+  cursor: default;
+}
+.seek-bar-wrap--roll {
+  flex: 1 1 auto;
+  min-width: 60px;
+  margin: 0;
+  height: 16px;
+  display: flex;
+  align-items: center;
+}
+.seek-bar-wrap--roll > input[type="range"] { height: 16px; }
+.seek-bar-wrap--roll .seek-handle { top: -2px; height: 20px; }
+.seek-time--roll {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 .seek-range-fill {
   position: absolute;
@@ -906,6 +935,14 @@ button.secondary {
   overflow-y: auto;
   min-height: 0;
 }
+/* メイン一覧の行本体(.kbd-rowsの内側)。1列表示ではflex縦積み、多段表示ではCSS multicol
+   (keyboard.js _rebuildRows()が.kbd-chip-groupをここへ入れる。SPCボイス一覧は別の.kbd-rowsで内側要素なし) */
+.kbd-rows-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: none;
+}
 
 .kbd-ch-row {
   display: flex;
@@ -987,6 +1024,73 @@ button.secondary {
 .kbd-color-reset:hover {
   border-color: var(--accent);
 }
+
+/* 鍵盤表示タイトル行の「何を表示中か」バッジ(MML / NSF · ファイル名 等。keyboard.js setSourceInfo) */
+.kbd-src-badge {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 260px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--mono);
+  color: var(--on-accent);
+  background: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+.kbd-src-badge--file { background: var(--ok); }
+
+/* --- 鍵盤表示のレイアウト設定(タイトル行の⚙ボタン+ポップオーバー、keyboard.js _openLayoutPopover) --- */
+.kbd-layout-btn {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.kbd-layout-btn svg { width: 14px; height: 14px; }
+.kbd-layout-btn:hover { color: var(--accent); border-color: var(--border); background: var(--control-bg); }
+.kbd-layout-pop {
+  position: fixed;
+  z-index: 2147483647; /* .kbd-color-pickerと同じ理由(float-windowのz-indexが増え続けるため最前面固定) */
+  min-width: 220px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  font-size: 12px;
+  cursor: default;
+}
+.kbd-layout-sec { margin-bottom: 8px; }
+.kbd-layout-sec:last-child { margin-bottom: 0; }
+.kbd-layout-sec-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+.kbd-layout-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.kbd-layout-opt input { margin: 0; accent-color: var(--accent); cursor: pointer; }
 
 /* --- カラー設定モーダル (src/ui/editorSettings.js) --- */
 .es-backdrop {
@@ -1144,6 +1248,14 @@ button.secondary {
   margin-right: -3px;
 }
 
+/* チップ単位のまとまり(見出し+そのチップのch行)。多段表示で列をまたいで千切れないようにする */
+.kbd-chip-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex-shrink: 0;
+  break-inside: avoid;
+}
 /* チップ名見出し行(RP2A03/VRC7/N163等)。ch行と紛れないよう区切り線+控えめな色にする */
 .kbd-chip-header {
   flex-shrink: 0;
@@ -1154,10 +1266,22 @@ button.secondary {
   color: var(--text-muted);
   border-top: 1px solid var(--border);
 }
-.kbd-chip-header:first-child {
+.kbd-chip-group:first-child > .kbd-chip-header {
   margin-top: 0;
   border-top: none;
 }
+/* 一覧の多段表示(レイアウト設定「一覧を多段」)。列数は一覧の幅÷列幅(ch行1本ぶん。L/R列のある
+   HES/GBSは広め)で自動、各列の高さは均等(balance)。それでも収まらなければ.kbd-rowsが縦スクロール */
+.kbd-left--multicol .kbd-rows-inner {
+  display: block;
+  columns: 300px auto;
+  column-gap: 12px;
+  column-rule: 1px solid var(--border);
+}
+.kbd-left--multicol.kbd-left--hes .kbd-rows-inner,
+.kbd-left--multicol.kbd-left--gbs .kbd-rows-inner { columns: 350px auto; }
+.kbd-left--multicol .kbd-chip-group { margin-bottom: 2px; }
+.kbd-left--multicol .kbd-rows { overflow-x: hidden; }
 
 .kbd-vol-wrap {
   position: relative; /* ch別音量スライダー(.kbd-vol-slider)/ツールチップの絶対配置の基準 */
@@ -1327,32 +1451,186 @@ button.secondary {
 .kbds-h-echo, .kbds-echo { flex: none; width: 36px; text-align: center; }
 .kbds-echo { font-size: 10px; font-family: var(--mono); }
 
-.kbds-h-echolr, .kbds-echolr { flex: none; width: 38px; text-align: right; }
-.kbds-echolr { font-size: 10px; color: var(--text); font-family: var(--mono); }
-
-.kbds-h-fir, .kbds-fir { flex: none; width: 32px; text-align: right; }
-.kbds-fir { font-size: 10px; color: var(--text); font-family: var(--mono); }
+/* ALL行のマスター値(エコー音量L/R + FIR係数C0-C7)を1セルにまとめたもの(keyboard.js _buildSpcAllRow参照) */
+.kbds-master {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .kbd-mute-ph { flex: none; width: 14px; height: 14px; }
 
 .kbds-all-row .kbd-name { color: var(--text-secondary); }
 .kbds-all-row { border-bottom: 1px solid var(--border); margin-bottom: 2px; padding-bottom: 2px; }
 
-.kbd-piano {
-  display: block;
+/* 鍵盤。縦向きロール(既定)では横並びの鍵盤(高さ68px=keyboard.jsのPIANO_KEY_LEN)。
+   横向きロール(.kbd-roll-wrap--horizontal)では縦並びの鍵盤(幅68px、高さはロールに揃える)。
+   サイズはラッパー(.kbd-piano-wrap)が決め、canvasはその中に絶対配置(canvasのwidth/height属性が
+   固有サイズとしてflexレイアウトに効いてしまうのを避けるため。keyboard.js _buildRollPane参照) */
+.kbd-piano-wrap {
+  position: relative;
+  flex: none;
   width: 100%;
   height: 68px;
   background: var(--panel);
   border-top: 1px solid var(--border);
-  flex: none;
+}
+.kbd-piano {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
-/* --- ピアノロール(鍵盤の直上、折りたたみ可能) --- */
+/* --- ロールペイン(ピアノロール見出し+ロール+鍵盤。折りたたみ可能) --- */
+/* keyboard.jsの_buildRollPane()が生成し、レイアウト設定に応じてチャンネル一覧の下/右、
+   または別ウィンドウ(#pianoRollDisplay)へ取り付ける。 */
 .kbd-roll-wrap {
   flex: none;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  min-width: 0;
 }
+/* 本体: 縦向き=縦積み(ロール、その下に鍵盤) / 横向き=横並び(鍵盤、その右にロール) */
+.kbd-roll-body {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.kbd-roll-wrap--horizontal .kbd-roll-body {
+  flex-direction: row-reverse; /* DOM順は[ロール, 鍵盤]のまま、鍵盤を左・ロールを右に */
+}
+.kbd-roll-wrap--horizontal .kbd-roll {
+  width: auto;
+  flex: 1 1 0;
+  min-width: 0;
+  border-top: 1px solid var(--border);
+}
+.kbd-roll-wrap--horizontal .kbd-piano-wrap {
+  width: 68px;
+  height: auto;   /* ロールの高さに揃う(align-items:stretch) */
+  border-top: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+/* 右配置/別ウィンドウ配置: ペインが親いっぱいに広がり、ロールが残り全部を使う
+   (縦向き=高さ方向にflex:1、横向き=幅方向にflex:1)。下配置は固定高さ(inline styleで指定) */
+.kbd-roll-wrap--fill {
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+}
+.kbd-roll-wrap--fill .kbd-roll-body {
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+}
+.kbd-roll-wrap--fill .kbd-roll {
+  flex: 1 1 0;
+  height: auto;
+  min-height: 0;
+}
+/* --- チャンネルごとのレーン表示(レイアウト設定 rollLanes='perChannel'、keyboard.js _rebuildLanes) ---
+   まとめ表示の本体(.kbd-roll-body)の代わりに .kbd-lanes を出し、その中に使用chぶんのレーン
+   [ラベル + (ロール+鍵盤)] を並べる。縦向き=横並び(横スクロール)、横向き=縦積み(縦スクロール)。
+   各レーンは最小サイズ(keyboard.jsのLANE_MIN_PX)を持ち、余裕があれば均等に伸びる */
+.kbd-lanes {
+  display: none;               /* レーン表示のときだけ keyboard.js が表示する */
+  flex: none;                  /* 下配置: 高さはinline style(ロール高さ+鍵盤高さ) */
+  flex-direction: row;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-width: 0;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+}
+.kbd-roll-wrap--lanes > .kbd-roll-body { display: none; }
+.kbd-roll-wrap--lanes > .kbd-lanes { display: flex; }
+.kbd-roll-wrap--fill.kbd-roll-wrap--lanes > .kbd-lanes { flex: 1 1 0; }
+.kbd-lane {
+  flex: 1 0 150px;             /* 150px = LANE_MIN_PX(音程軸方向の最小サイズ。白鍵10本ぶんの音程窓、1白鍵≈15px) */
+  min-width: 150px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+}
+.kbd-lane:last-child { border-right: none; }
+.kbd-lane-label {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 14px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--panel-raised);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.kbd-lane-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+.kbd-lane-text { overflow: hidden; text-overflow: ellipsis; }
+.kbd-lane-body { flex: 1 1 0; min-height: 0; min-width: 0; }
+.kbd-lane .kbd-roll { flex: 1 1 0; height: auto; min-height: 0; border-top: none; }
+/* 横向き: レーンは縦に積む(縦スクロール)。各レーンは [ラベル / 鍵盤(左)+ロール(右)] */
+.kbd-roll-wrap--horizontal .kbd-lanes {
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.kbd-roll-wrap--horizontal .kbd-lane {
+  flex: 1 0 164px;             /* LANE_MIN_PX + ラベル行(14px) */
+  min-width: 0;
+  min-height: 164px;
+  border-right: none;
+  border-bottom: 1px solid var(--border);
+}
+.kbd-roll-wrap--horizontal .kbd-lane:last-child { border-bottom: none; }
+.kbd-roll-wrap--horizontal .kbd-lane .kbd-roll { min-width: 0; }
+.kbd-roll-wrap--horizontal .kbd-lane .kbd-piano-wrap { border-top: none; }
+
+/* ロールをドラッグしてシーク(keyboard.js _attachRollSeekDrag) */
+.kbd-roll--seekable { cursor: grab; touch-action: none; }
+.kbd-roll--seekable.dragging { cursor: grabbing; }
+/* 右配置: 一覧との境界線 */
+.kbd-main--roll-right > .kbd-roll-wrap { border-left: 1px solid var(--border); }
+/* 右/別ウィンドウ配置では折りたたみ無し(見出しは表示するがトグルを隠す) */
+.kbd-roll-wrap--nocollapse .kbd-roll-header { cursor: default; }
+.kbd-roll-wrap--nocollapse .kbd-roll-toggle { display: none; }
+/* 別ウィンドウ配置では窓のタイトルが「ピアノロール」なので見出しラベルは二重になる→隠す */
+.kbd-roll-wrap--window .kbd-roll-label { display: none; }
+.kbd-roll-wrap--window .kbd-roll-header { border-top: none; }
+
+/* --- ペイン間スプリッター(一覧|ロール(右配置)、一覧/ロール(下配置)) ---
+   レイアウト上の大きさは0で(従来の見た目を変えない)、::afterで±3pxのつかみ代だけ張り出す */
+.kbd-splitter {
+  position: relative;
+  flex: none;
+  z-index: 2;
+  touch-action: none;
+}
+.kbd-splitter::after {
+  content: '';
+  position: absolute;
+  background: transparent;
+  transition: background 0.1s;
+}
+.kbd-splitter--vertical { width: 0; cursor: col-resize; }
+.kbd-splitter--vertical::after { top: 0; bottom: 0; left: -3px; width: 7px; cursor: col-resize; }
+.kbd-splitter--horizontal { height: 0; cursor: row-resize; }
+.kbd-splitter--horizontal::after { left: 0; right: 0; top: -3px; height: 7px; cursor: row-resize; }
+.kbd-splitter:hover::after, .kbd-splitter.dragging::after { background: var(--accent); opacity: 0.5; }
 .kbd-roll-header {
   flex: none;
   display: flex;
@@ -1380,8 +1658,8 @@ button.secondary {
   cursor: pointer;
 }
 .kbd-roll-cents-toggle input { cursor: pointer; }
-/* height は keyboard.js の ROLL_CANVAS_HEIGHT と必ず一致させること
-   (折りたたみ時にウィンドウ高さをこの値ぶん増減させている) */
+/* height の既定値は keyboard.js の ROLL_CANVAS_HEIGHT と一致させること(下配置ではJS側が
+   スプリッターで変えた高さをinline styleで上書きし、折りたたみ時にウィンドウ高さをその値ぶん増減させる) */
 .kbd-roll {
   display: block;
   width: 100%;
@@ -1410,9 +1688,15 @@ button.secondary {
 .kbd-left.kbd-left--gbs {
   width: 370px;
 }
-/* SPC表示は列数が多いため、横スクロールを出さずに全列が収まる幅を確保する */
+/* SPC表示はL/R/env/PM/echo列のぶんNSFより広い。全列が収まる幅(keyboard.jsのSPC_LIST_MIN_WIDTHと一致) */
 .kbd-left.kbd-left--spc {
-  width: 1000px;
+  width: 500px;
+}
+/* 一覧が幅いっぱいに広がる配置(下配置で多段、別ウィンドウ配置)。固定幅の指定より後ろに置いて優先させる */
+.kbd-left.kbd-left--flex {
+  width: auto;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .kbd-bigwave {
   flex: 1 1 0;
@@ -1465,29 +1749,46 @@ button.secondary {
   border: 1px solid var(--border);
   border-radius: 4px;
 }
-/* SPCモードのサイズ(echoL列〜C7列にちょうど収まる幅、縦横比維持)は
-   keyboard.js の _positionSpcBigWave() が実測して inline style で設定する */
-
-/* SPCモード: echoL〜C7列(ALL行以外は常に空欄)の上に大波形パネルを重ねて表示する。
-   横に並べる/下に積むと必要な面積が大きくなりすぎるため、元々空いているその領域を
-   再利用し、テーブル自体の横幅(kbd-left--spc)を超えて広がらないようにする。 */
-.kbd-main.kbd-main--spc {
-  position: relative;
-  align-self: flex-start; /* stretchで親幅いっぱいに広がるのを防ぎ、kbd-leftの幅に合わせる */
-}
-.kbd-main.kbd-main--spc .kbd-left {
-  min-height: 360px; /* 重なる大波形パネルの下端ぶんの高さを確保し、下のピアノ鍵盤と衝突しないようにする */
-}
-.kbd-main.kbd-main--spc .kbd-bigwave {
-  position: absolute;
-  top: 70px;    /* JS側(_positionSpcBigWave)で実測値に上書きされる暫定値 */
-  left: 520px;  /* 同上。echoL列の左端に上書きされる暫定値 */
+/* 大波形を一覧の下の折りたたみ帯として置く配置(ロールが右/別ウィンドウ、または一覧が多段のとき。
+   keyboard.js _mountBigWave()参照)。見出し行(▼/▶トグル+タイトル+コピー)の下に波形canvas */
+.kbd-bigwave-toggle {
+  display: none;
   flex: none;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  border-radius: 4px;
-  z-index: 2;
+  width: 10px;
+  text-align: center;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
 }
+.kbd-bigwave.kbd-bigwave--below {
+  flex: none;
+  min-width: 0;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 4px;
+  padding: 4px 6px 6px;
+  border-left: none;
+  border-top: 1px solid var(--border);
+}
+.kbd-bigwave--below .kbd-bigwave-header { justify-content: flex-start; flex-wrap: nowrap; }
+.kbd-bigwave--below .kbd-bigwave-toggle { display: inline-block; }
+.kbd-bigwave--below .kbd-bigwave-title { min-width: 0; overflow: hidden; white-space: nowrap; }
+.kbd-bigwave--below .kbd-bigwave-canvas { align-self: center; }
+/* 一覧が1列で大波形がその下にあるとき: 横幅を一覧(左ペイン)に合わせ、縦は2:1の比率のまま
+   (canvasのwidth/height属性が2:1なのでheight:autoで比率が保たれる。内部解像度はkeyboard.jsが
+   表示サイズの2倍に追随させる) */
+.kbd-left--wave-below:not(.kbd-left--multicol) .kbd-bigwave-canvas {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 2 / 1;
+  align-self: stretch;
+}
+.kbd-bigwave--collapsed .kbd-bigwave-canvas { display: none; }
+/* 大波形が一覧の下にあるとき: 行一覧(.kbd-rows)は中身なりの高さ(足りなければ縮んでスクロール)にして、
+   大波形の帯がチャンネル行の直後に続くようにする(左ペインの最下部に張り付かせない) */
+.kbd-left--wave-below .kbd-rows { flex: 0 1 auto; }
+
 /* 波形アイコンをクリック可能・選択中を強調 */
 .kbd-wave--clickable { cursor: pointer; }
 .kbd-wave--selected {
