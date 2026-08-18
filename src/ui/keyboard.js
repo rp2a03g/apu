@@ -292,7 +292,7 @@
     if (id === 'SNN') return { section: 'expansion', chip: 'sn76489', type: 'array', index: 3 };
     if (id === 'SNN2') return { section: 'expansion', chip: 'sn76489', type: 'array', index: 7 };
     // VGM: YM2612(YM1-6=FM ch、YMDA=DAC)。chip.mute[]はFM 0-5、DAC 6
-    const ym = id.match(/^YM(d)$/);
+    const ym = id.match(/^YM(\d)$/);
     if (ym) return { section: 'expansion', chip: 'ym2612', type: 'array', index: +ym[1] - 1 };
     if (id === 'YMDA') return { section: 'expansion', chip: 'ym2612', type: 'array', index: 6 };
     if (KF_RHYTHM_INDEX[id] !== undefined) return { section: 'expansion', chip: 'opll', type: 'array', index: KF_RHYTHM_INDEX[id] };

@@ -401,6 +401,12 @@
           </label>
           <button id="btnVgmTempoTap" class="secondary">👆 タップ</button>
           <button id="btnVgmTempoClear" class="secondary">自動</button>
+          <label style="display:flex;align-items:center;gap:4px;" title="YM2612(メガドライブFM)のエミュレーションコア。切替は次の再生開始から効きます">YM2612コア
+            <select id="vgmYmCore">
+              <option value="fast">高速(近似)</option>
+              <option value="nuked">Nuked-OPN2(実機準拠)</option>
+            </select>
+          </label>
         </div>
         <div id="vgmFileStatus" class="output" style="min-height:40px;"></div>
         <!-- チャンネル割当: 変換元ch→借用先(NES音源)の対応表。読み込み時に構成から自動で埋まり、
@@ -698,6 +704,7 @@
   <script src="src/vgm/vgmHeader.js"></script>
   <script src="src/emulator/expansion/sn76489.js"></script>
   <script src="src/emulator/expansion/ym2612.js"></script>
+  <script src="src/emulator/expansion/ym2612Nuked.js"></script>
   <script src="src/emulator/vgmPlayer.js"></script>
   <script src="src/audio/vgm-stream-player.js"></script>
   <script src="src/vgm2mml/expansion/sn76489.js"></script>

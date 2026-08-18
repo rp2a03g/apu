@@ -391,6 +391,7 @@
   // active(キーオン中またはリリース途中で可聴)、algo/fb、waveData(1周期のFM波形)。
   const CARRIER_OPS = [[3], [3], [3], [3], [1, 3], [1, 2, 3], [1, 2, 3], [0, 1, 2, 3]];
   Emu.snapshotYM2612 = function (chip) {
+    if (typeof chip.snapshot === 'function') return chip.snapshot(); // Nuked-OPN2移植版(ym2612Nuked.js)は自前のsnapshot()
     const N = 128;
     const fs = chip.sampleRate;
     const out = { channels: [], dac: null };

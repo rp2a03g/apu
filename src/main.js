@@ -4970,6 +4970,33 @@
   // 言語切替時は借用先ラベル(「スキップ」)を作り直す
   if (MML.I18n && MML.I18n.onChange) MML.I18n.onChange(() => buildVgmChannelMap(loadedVgmHeader));
 
+  // ── YM2612コア切替(高速近似 / Nuked-OPN2実機準拠)。localStorageに永続化し、
+  //    vgmPlayer.js の makeYm2612Adapter が生成時に Emu.ym2612CorePref を見る。
+  //    再生中に切り替えた場合は再生し直して即反映する(アダプタ生成時にしか効かないため)。
+  const vgmYmCoreEl = document.getElementById('vgmYmCore');
+  (function initVgmYmCore() {
+    let pref = 'fast';
+    try { pref = localStorage.getItem('vgmYm2612Core') || 'fast'; } catch (e) { /* ignore */ }
+    if (pref !== 'nuked') pref = 'fast';
+    MML.Emu.ym2612CorePref = pref;
+    if (vgmYmCoreEl) {
+      vgmYmCoreEl.value = pref;
+      vgmYmCoreEl.addEventListener('change', () => {
+        MML.Emu.ym2612CorePref = vgmYmCoreEl.value === 'nuked' ? 'nuked' : 'fast';
+        try { localStorage.setItem('vgmYm2612Core', MML.Emu.ym2612CorePref); } catch (e) { /* ignore */ }
+        if (vgmActivePlayer && lastPlayMode === 'vgm') {
+          const wasPlaying = vgmActivePlayer.isPlaying;
+          const pos = vgmActivePlayer.getPosition();
+          stopVgmPlayback();
+          playVgmStream();
+          // 元の位置から続ける(コアを作り直すので曲頭から再走。VGMのシークは高速)
+          if (vgmActivePlayer && pos > 0.5) transportSeek(pos);
+          if (!wasPlaying) transportPause();
+        }
+      });
+    }
+  })();
+
   async function runVgm2Mml() {
     if (!loadedVgmBytes) {
       vgmFileStatusEl.innerHTML = '<div class="error">' + T('先にVGMファイルを読み込んでください。') + '</div>';
