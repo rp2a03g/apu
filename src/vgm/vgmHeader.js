@@ -152,6 +152,49 @@
     const loopBase = version >= 0x160 ? (bytes[0x7E] << 24 >> 24) : 0;
     const loopModifier = version >= 0x151 ? bytes[0x7F] : 0;
 
+    // 拡張ヘッダ(v1.70+、0xBC): 2個目チップのクロック上書きと、チップ別音量。
+    // 例: Exed Exes(Arcade)は AY8910 の音量 0x0028(=40/256≒16%) を指定しており、これを
+    // 掛けないとAYが不釣り合いに大きく鳴る。
+    // chip volume: chipId(bit7=2個目のチップ), flags, volume(16bit LE。bit15=0なら絶対値で
+    // 0x100=100%、bit15=1なら相対倍率(0x100=1.0倍))
+    const EXTRA_CHIP_IDS = {
+      0x00: 'sn76489', 0x01: 'ym2413', 0x02: 'ym2612', 0x03: 'ym2151', 0x04: 'segapcm', 0x05: 'rf5c68',
+      0x06: 'ym2203', 0x07: 'ym2608', 0x08: 'ym2610', 0x09: 'ym3812', 0x0A: 'ym3526', 0x0B: 'y8950',
+      0x0C: 'ymf262', 0x0D: 'ymf278b', 0x0E: 'ymf271', 0x0F: 'ymz280b', 0x10: 'rf5c164', 0x11: 'pwm',
+      0x12: 'ay8910', 0x13: 'gb', 0x14: 'nes', 0x15: 'multipcm', 0x16: 'upd7759', 0x17: 'okim6258',
+      0x18: 'okim6295', 0x19: 'k051649', 0x1A: 'k054539', 0x1B: 'huc6280', 0x1C: 'c140', 0x1D: 'k053260',
+      0x1E: 'pokey', 0x1F: 'qsound', 0x20: 'scsp', 0x21: 'wswan', 0x22: 'vsu', 0x23: 'saa1099',
+      0x24: 'es5503', 0x25: 'es5506', 0x26: 'x1_010', 0x27: 'c352', 0x28: 'ga20'
+    };
+    const extra = { chipClocks: {}, chipVolumes: {} }; // chipVolumes[id or id+'_2'] = 倍率(1.0=100%)
+    const extraRel = version >= 0x170 && dataOffset > 0xBC + 4 ? u32(bytes, 0xBC) : 0;
+    if (extraRel) {
+      const base = 0xBC + extraRel;
+      const hdrSize = u32(bytes, base);
+      const clkRel = hdrSize >= 8 ? u32(bytes, base + 4) : 0;
+      const volRel = hdrSize >= 12 ? u32(bytes, base + 8) : 0;
+      if (clkRel) {
+        let p = base + 4 + clkRel;
+        const n = bytes[p++];
+        for (let i = 0; i < n && p + 5 <= bytes.length; i++, p += 5) {
+          const id = EXTRA_CHIP_IDS[bytes[p] & 0x7F];
+          if (id) extra.chipClocks[id] = u32(bytes, p + 1) & 0x3FFFFFFF;
+        }
+      }
+      if (volRel) {
+        let p = base + 8 + volRel;
+        const n = bytes[p++];
+        for (let i = 0; i < n && p + 4 <= bytes.length; i++, p += 4) {
+          const id = EXTRA_CHIP_IDS[bytes[p] & 0x7F];
+          const second = !!(bytes[p] & 0x80);
+          const v = u16(bytes, p + 2);
+          if (!id) continue;
+          const key = second ? id + '_2' : id;
+          extra.chipVolumes[key] = (v & 0x8000) ? (v & 0x7FFF) / 0x100 : v / 0x100;
+        }
+      }
+    }
+
     const gd3Offset = gd3Rel ? 0x14 + gd3Rel : 0;
     const gd3 = gd3Offset ? parseGd3(bytes, gd3Offset) : null;
 
@@ -168,6 +211,8 @@
       chips,          // id → info
       usedChips,      // 配列(ヘッダ順)
       volumeModifier, loopBase, loopModifier,
+      volumeFactor: Math.pow(2, volumeModifier / 0x20), // 全体音量倍率(0x7C、v1.60+。0=等倍)
+      extra,
       gd3,
       durationSeconds: totalSamples / VGM.SAMPLE_RATE,
       loopSeconds: loopSamples / VGM.SAMPLE_RATE

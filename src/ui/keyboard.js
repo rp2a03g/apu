@@ -286,9 +286,11 @@
     const kf = id.match(/^KF(\d+)$/);
     if (kf) return { section: 'expansion', chip: 'opll', type: 'array', index: +kf[1] - 1 };
     // VGM: SN76489(SN1-3=トーン, SNN=ノイズ)。chip.mute[]はトーン0-2,ノイズ3の4要素
+    // VGMのデュアルチップ(2個目)はSN4-6/SNN2=index 4-7(vgmPlayer.js側が2個目のch0-3として読む)
     const sn = id.match(/^SN(\d)$/);
-    if (sn) return { section: 'expansion', chip: 'sn76489', type: 'array', index: +sn[1] - 1 };
+    if (sn) return { section: 'expansion', chip: 'sn76489', type: 'array', index: +sn[1] <= 3 ? +sn[1] - 1 : +sn[1] };
     if (id === 'SNN') return { section: 'expansion', chip: 'sn76489', type: 'array', index: 3 };
+    if (id === 'SNN2') return { section: 'expansion', chip: 'sn76489', type: 'array', index: 7 };
     if (KF_RHYTHM_INDEX[id] !== undefined) return { section: 'expansion', chip: 'opll', type: 'array', index: KF_RHYTHM_INDEX[id] };
     return null;
   }
@@ -308,12 +310,12 @@
     { header: 'N163 (Namco 163)', prefix: 'N', name: (id) => 'W' + id.slice(1) },
     { header: 'SUNSOFT5B (FME-7 , YM2149)', ids: { FE1: 'P1', FE2: 'P2', FE3: 'P3' } },
     { header: 'MMC5 (Memory Management Controller 5)', ids: { M5P1: 'P1', M5P2: 'P2', M5PC: 'PCM' } },
-    { header: 'YM2149 (Software controlled Sound Generator)', ids: { KP1: 'P1', KP2: 'P2', KP3: 'P3' } },
+    { header: 'YM2149 (Software controlled Sound Generator)', ids: { KP1: 'P1', KP2: 'P2', KP3: 'P3', KP4: 'P1(2)', KP5: 'P2(2)', KP6: 'P3(2)' } },
     { header: 'SCC (Sound Creative Chip)', prefix: 'KS', name: (id) => 'W' + id.slice(2) },
     { header: 'YM2413 (MSX-MUSIC , OPLL)', ids: { KFBD: 'BD', KFSD: 'SD', KFTOM: 'Tom', KFCYM: 'Cym', KFHH: 'HH' }, prefix: 'KF', name: (id) => 'FM' + id.slice(2) },
     { header: 'LR35902 (Game Boy)', ids: { GALL: 'ALL', GB1: 'P1', GB2: 'P2', GN: 'No', GW: 'Wave' } },
     { header: 'HuC6280(PC Engine / TurboGrafx-16)', ids: { HALL: 'ALL', PSG0: 'Ch0', PSG1: 'Ch1', PSG2: 'Ch2', PSG3: 'Ch3', PSG4: 'Ch4', PSG5: 'Ch5' } },
-    { header: 'SN76489 (SG-1000 / Master System / Game Gear / Mega Drive PSG)', ids: { SN1: 'P1', SN2: 'P2', SN3: 'P3', SNN: 'No' } },
+    { header: 'SN76489 (SG-1000 / Master System / Game Gear / Mega Drive PSG)', ids: { SN1: 'P1', SN2: 'P2', SN3: 'P3', SNN: 'No', SN4: 'P1(2)', SN5: 'P2(2)', SN6: 'P3(2)', SNN2: 'No(2)' } },
   ];
   function getChannelDisplay(id) {
     for (const g of CHANNEL_DISPLAY_GROUPS) {
@@ -739,9 +741,11 @@
       const live = extraSnaps && extraSnaps.kssPsgLive;
       const snaps = live ? live() : null;
       const COLS = ['#66ddff', '#33aaff', '#0077dd'];
-      for (let ch = 0; ch < 3; ch++) {
+      // VGMのデュアルAY8910(2個目)はスナップショットが6要素で返るのでKP4-6行も出す
+      const nKp = snaps && snaps.length > 3 ? snaps.length : 3;
+      for (let ch = 0; ch < nKp; ch++) {
         const c = snaps ? snaps[ch] : { freq: 0, vol: 0, active: false };
-        channels.push({ id: `KP${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol,
+        channels.push({ id: `KP${ch + 1}`, color: COLS[ch % 3], freq: c.freq, vol: c.vol,
           rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: 15,
           wave: c.noise ? { t: 'noise', short: false, nx: 32767, ny: 2 } : { t: 'pulse', hi: 0.5, nx: 2, ny: 2 },
           active: c.active });
@@ -796,21 +800,26 @@
       // 無ければ先読みスナップショット配列(extraSnaps.sn[frameIdx]、ロール構築用)。
       // L/R列はGame Gearのステレオレジスタ(他機種では常に1/1)。
       const live = extraSnaps && extraSnaps.snLive;
-      const s = live ? live() : (extraSnaps && extraSnaps.sn ? extraSnaps.sn[frameIdx] : null);
+      const sAll = live ? live() : (extraSnaps && extraSnaps.sn ? extraSnaps.sn[frameIdx] : null);
       const COLS = ['#66ddff', '#33aaff', '#0077dd'];
+      // デュアルチップ(2個目)はスナップショットが8要素(4+4)で返る: 2組目はSN4-6/SNN2行
+      const nGroups = sAll && sAll.length >= 8 ? 2 : 1;
+      for (let g = 0; g < nGroups; g++) {
+      const s = sAll ? sAll.slice(g * 4, g * 4 + 4) : null;
       for (let ch = 0; ch < 3; ch++) {
         const c = s ? s[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1 };
-        channels.push({ id: `SN${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+        channels.push({ id: `SN${g * 3 + ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
           wave: { t: 'pulse', hi: 0.5, nx: 2, ny: 2 }, active: c.active, panL: c.panL, panR: c.panR });
       }
       {
         const c = s ? s[3] : { freq: 0, vol: 0, rawVol: 0, active: false, white: true, noiseFreq: 0, panL: 1, panR: 1 };
         // 周期性ノイズ(white=false)は短周期の繰り返し=2A03の短周期ノイズ表示に寄せる。
         // note列はシフトレートを2A03ノイズ16周期の最寄りindexに写像(GBのGN行と同じ考え方)。
-        channels.push({ id: 'SNN', color: '#888888', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+        channels.push({ id: g === 0 ? 'SNN' : 'SNN2', color: '#888888', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
           wave: { t: 'noise', short: !c.white, nx: c.white ? 65535 : 16, ny: 2 },
           active: c.active, noise: true, noiseIndex: gbNoiseFreqToIndex(c.noiseFreq), noiseFreq: c.noiseFreq, noiseShort: !c.white,
           panL: c.panL, panR: c.panR });
+      }
       }
     }
 
@@ -1592,7 +1601,8 @@
       // container.innerHTML=''では消えないので明示的に外す(言語切替時の作り直し用)
       if (this._rollPaneEl && this._rollPaneEl.parentNode) this._rollPaneEl.parentNode.removeChild(this._rollPaneEl);
       this.container.innerHTML = '';
-      this._selectedId = null;   // 大波形表示に選択中のチャンネルID
+      this._selectedId = null;   // 大波形表示にユーザーが選んだチャンネルID(ファイル読込でのみリセット)
+      this._shownWaveId = null;  // 大波形に今表示しているチャンネルID(選択chが一覧に無い間は若いchを一時表示、_syncShownWave参照)
       this._bigWaveSig = '';     // 大波形の再描画要否判定用
 
       // 上段: 左=速度バー+チャンネル一覧(+大波形の詳細帯) / 右=選択波形の拡大表示 or ロールペイン
@@ -1794,8 +1804,8 @@
           this._bigCanvas.width = cw;
           this._bigCanvas.height = chh;
           this._bigWaveSig = '';
-          if (this._selectedId) {
-            const sel = (this._prevChannels || []).concat(this._prevSpcVoices || []).find(c => c.id === this._selectedId);
+          if (this._shownWaveId) {
+            const sel = (this._prevChannels || []).concat(this._prevSpcVoices || []).find(c => c.id === this._shownWaveId);
             if (sel) this._renderBigWave(sel);
           }
         }
@@ -2071,19 +2081,25 @@
       el.title = (isMml ? T('MML再生を表示中') : T('サウンドファイル再生を表示中')) + (name ? `: ${name}` : '');
     }
 
-    // 大波形の選択チャンネルを「一番若いch(波形アイコンを持つ最初の行)」にする。
-    // ファイルを読み込み直した時(reset)や、行を組み直して選択中のchが無くなった時に呼ぶ。
+    // 大波形に「今表示するch」(_shownWaveId)を、表示中の一覧(rowEls)に合わせて決め直す。
+    // ユーザーが選んだch(_selectedId)が一覧にあればそれ、無ければ一番若いch(波形アイコンを
+    // 持つ最初の行)を一時的に表示する。_selectedId自体はここでは変えない(停止→再生や曲送りで
+    // 一覧が一時的に2A03だけになっても、選択が勝手に若いchへ変わってしまわないように。
+    // 選択を捨てて若いchへ戻すのはファイルの読み込み直し=reset()のときだけ)。
     // 一覧の下の折りたたみ帯は自動で開かない(ユーザーがクリックしたときだけ開く)
-    _selectFirstWave(rowEls) {
-      const first = (rowEls || []).find(el => el.waveCanvas);
-      if (!first) return;
-      this._selectedId = first.id;
-      this._bigWaveSig = '';
+    _syncShownWave(rowEls) {
+      const rows = (rowEls || []).filter(el => el.waveCanvas);
+      const keep = rows.find(el => el.id === this._selectedId);
+      const target = keep || rows[0];
+      const id = target ? target.id : null;
+      if (id !== this._shownWaveId) this._bigWaveSig = '';
+      this._shownWaveId = id;
       for (const el of this._rowEls.concat(this._spcRowEls)) {
-        if (el.waveCanvas) el.waveCanvas.classList.toggle('kbd-wave--selected', el.id === first.id);
+        if (el.waveCanvas) el.waveCanvas.classList.toggle('kbd-wave--selected', el.id === id);
       }
-      const ch = (this._prevChannels || []).find(c => c.id === first.id) ||
-                 (this._prevSpcVoices || []).find(c => c.id === first.id);
+      if (!id) return;
+      const ch = (this._prevChannels || []).find(c => c.id === id) ||
+                 (this._prevSpcVoices || []).find(c => c.id === id);
       if (ch) this._renderBigWave(ch);
     }
 
@@ -2292,7 +2308,7 @@
       }
       this._rollCursor = {};
       this._rollLastRawPos = null;
-      if (this._selectedId) this._bigWaveSig = ''; // 置き場が変わった大波形は描き直す
+      if (this._shownWaveId) this._bigWaveSig = ''; // 置き場が変わった大波形は描き直す
       if (this.onLayoutChange) this.onLayoutChange(this.getLayout());
     }
 
@@ -2503,9 +2519,12 @@
       this._spcVoices = [];
       this._prevSpcVoices = [];
       this._muteState.clear();
-      // 大波形の選択も前ファイルのchを引きずらず、一番若いchに戻す(_rebuildRowsが選び直す)
+      // 大波形の選択も前ファイルのchを引きずらず、一番若いchに戻す。選択を捨てるのはここ
+      // (ファイルの読み込み直し)だけで、曲送りや停止→再生で一覧が一時的に変わっても
+      // 選択は保つ(_syncShownWave参照)
       this._selectedId = null;
       this.setSource({ regSnapshots: [{}], totalFrames: 1, samplesPerFrame: 735, sampleRate: 44100, writeLog: [] }, []);
+      this._selectedId = this._shownWaveId; // 一番若いchを新しい選択にする
       this.update(0);
     }
 
@@ -2524,9 +2543,8 @@
       // 1000px幅テーブル+大波形の重ね配置だったが、マスター値を1行にまとめて廃止した)
       this._leftEl.classList.toggle('kbd-left--spc', spc);
       this._applyLayoutClasses(); // 右配置の一覧幅(SPCは下限あり)を反映
-      // 大波形の選択を表示中の一覧に合わせる(SPC→V0 / NSF等→一番若いch)
-      const rows = spc ? this._spcRowEls : this._rowEls;
-      if (rows.length && !rows.some(el => el.waveCanvas && el.id === this._selectedId)) this._selectFirstWave(rows);
+      // 大波形に表示するchを表示中の一覧に合わせる(選択chが無ければ一番若いch/V0を一時表示)
+      this._syncShownWave(spc ? this._spcRowEls : this._rowEls);
       this._rebuildLanes(); // チャンネルごとのレーン表示も表示中の一覧に合わせる
 
       // ウィンドウが狭くて一覧の全列が収まらない場合だけ、収まる幅まで自動拡張する
@@ -2575,7 +2593,7 @@
         if (dot) dot.style.background = newColor;
       }
 
-      if (this._selectedId === id) {
+      if (this._shownWaveId === id) {
         this._bigWaveSig = ''; // 色はwave形状に含まれないため強制再描画
         const sel = (this._prevChannels || []).concat(this._prevSpcVoices || [])
           .find((c) => c.id === id);
@@ -2649,7 +2667,7 @@
         const chId = ch.id;
         if (waveCanvas) {
           waveCanvas.classList.add('kbd-wave--clickable');
-          if (chId === this._selectedId) waveCanvas.classList.add('kbd-wave--selected');
+          if (chId === this._shownWaveId) waveCanvas.classList.add('kbd-wave--selected');
           waveCanvas.addEventListener('click', () => this._selectWave(chId));
         }
 
@@ -2677,13 +2695,11 @@
           letter: ch.letter,
         });
       }
-      // 大波形の選択chが新しい行一覧に無ければ(未選択/前ファイルのch/SPCボイスでもない)、
-      // 一番若いchを選び直す。SPCボイス(V0-V7)を選択中ならそのまま(SPCモード側で管理)
-      const selectedIsSpcVoice = typeof this._selectedId === 'string' && /^V\d+$/.test(this._selectedId) && this._mode === 'spc';
-      if (!selectedIsSpcVoice && !this._rowEls.some(el => el.waveCanvas && el.id === this._selectedId)) {
-        this._selectFirstWave(this._rowEls);
+      // 大波形に表示するchを新しい一覧に合わせる(SPCモード中はSPC側の一覧が表示中なので触らない)
+      if (this._mode !== 'spc') {
+        this._syncShownWave(this._rowEls);
+        this._rebuildLanes(); // チャンネルごとのレーン表示も一覧に合わせる
       }
-      if (this._mode !== 'spc') this._rebuildLanes(); // チャンネルごとのレーン表示も一覧に合わせる
     }
 
     // ch別音量スライダー(音量バー領域に重ねる半透明オーバーレイ)を1行ぶん配線する。
@@ -2743,6 +2759,7 @@
     // NSF/SPC どちらの行がクリックされても対応できるよう両リストを見る（IDは重複しない）
     _selectWave(chId) {
       this._selectedId = chId;
+      this._shownWaveId = chId;
       this._bigWaveSig = '';   // 強制再描画
       // 一覧の下の折りたたみ帯に置かれていて畳まれていたら、選んだ時点で開く
       if (this._bigWaveCollapsed && this._bigWaveBelow()) {
@@ -2969,8 +2986,8 @@
       }
 
       // 選択チャンネルの大波形を更新（FDS/N163 等は波形が変化するため毎フレーム判定）
-      if (this._selectedId) {
-        const sel = channels.find(c => c.id === this._selectedId);
+      if (this._shownWaveId) {
+        const sel = channels.find(c => c.id === this._shownWaveId);
         if (sel) this._renderBigWave(sel);
       }
 
@@ -3288,7 +3305,7 @@
       const waveCanvas = row.querySelector('.kbd-wave');
       const chId = v.label;
       waveCanvas.classList.add('kbd-wave--clickable');
-      if (chId === this._selectedId) waveCanvas.classList.add('kbd-wave--selected');
+      if (chId === this._shownWaveId) waveCanvas.classList.add('kbd-wave--selected');
       waveCanvas.addEventListener('click', () => this._selectWave(chId));
 
       // 丸のクリックで色ピッカーを開く
@@ -3371,11 +3388,11 @@
           this._spcSectionEl.appendChild(el.row);
           return el;
         });
-        // 大波形の選択がSPCボイス以外(前ファイルのNSF ch等)なら、V0(一番若いボイス)に選び直す
-        if (this._spcRowEls.length && !this._spcRowEls.some(el => el.id === this._selectedId)) {
-          this._selectFirstWave(this._spcRowEls);
+        // 大波形に表示するボイスを新しい一覧に合わせる(選択がSPCボイス以外ならV0を一時表示)
+        if (this._mode === 'spc') {
+          this._syncShownWave(this._spcRowEls);
+          this._rebuildLanes(); // チャンネルごとのレーン表示もボイス一覧に合わせる
         }
-        if (this._mode === 'spc') this._rebuildLanes(); // チャンネルごとのレーン表示もボイス一覧に合わせる
       }
 
       // ALL行データ更新（マスター音量・エコー音量・FIRフィルタ、各 -128〜127）
@@ -3467,8 +3484,8 @@
       }
 
       // 選択チャンネルの大波形を更新
-      if (this._selectedId) {
-        const sel = this._prevSpcVoices.find(c => c.id === this._selectedId);
+      if (this._shownWaveId) {
+        const sel = this._prevSpcVoices.find(c => c.id === this._shownWaveId);
         if (sel) this._renderBigWave(sel);
       }
 

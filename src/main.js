@@ -4722,10 +4722,11 @@
     getApuEnv: () => { const a = vgmAdapter('nes'); return a ? MML.Emu.snapshotApuEnv(a.apu, a.fds, a.bus) : null; },
     getGbsApu: () => { const a = vgmAdapter('gb'); return a ? MML.Emu.snapshotGbApu(a.apu) : null; },
     getHesApu: () => { const a = vgmAdapter('huc6280'); return a ? MML.Emu.snapshotHuC6280Apu(a.apu) : null; },
-    getKssPsg: () => { const a = vgmAdapter('ay8910'); return a ? MML.Emu.snapshotAY8910(a.chip) : null; },
+    // デュアルチップ(2個目)があれば連結して返す(鍵盤はKP4-6/SN4-6+SNN2行として出す)
+    getKssPsg: () => { const a = vgmAdapter('ay8910'); if (!a) return null; const s = MML.Emu.snapshotAY8910(a.chip); const b = vgmAdapter('ay8910_2'); return b ? s.concat(MML.Emu.snapshotAY8910(b.chip)) : s; },
     getKssScc: () => { const a = vgmAdapter('k051649'); return a ? MML.Emu.snapshotSCC(a.chip) : null; },
     getKssOpll: () => { const a = vgmAdapter('ym2413'); return a ? MML.Emu.snapshotOPLL(a.chip) : null; },
-    getSn76489: () => { const a = vgmAdapter('sn76489'); return a ? MML.Emu.snapshotSN76489(a.chip, a.clockHz) : null; }
+    getSn76489: () => { const a = vgmAdapter('sn76489'); if (!a) return null; const s = MML.Emu.snapshotSN76489(a.chip, a.clockHz); const b = vgmAdapter('sn76489_2'); return b ? s.concat(MML.Emu.snapshotSN76489(b.chip, b.clockHz)) : s; }
   };
 
   // captureVgmSongAsync()の結果からピアノロール用タイムライン(共通形状)を構築する。

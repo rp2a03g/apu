@@ -41,6 +41,11 @@
    */
   function convertSn(data, title, options, ignoredNote) {
     const snapshots = data.sn.snapshots;
+    // デュアルチップ(2個目、スナップショット8要素)は変換対象外(FME-7は3chしか無い)。注記だけ残す
+    if (snapshots.length && snapshots[0].length >= 8) {
+      const n = '2個目のSN76489(デュアルチップ)は変換対象外のため無視しました。';
+      ignoredNote = ignoredNote ? ignoredNote + n : n;
+    }
     const totalFrames = snapshots.length;
     const frameRate = data.frameRate;
     const clock = data.sn.clock;

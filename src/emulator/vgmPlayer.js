@@ -106,8 +106,9 @@
       write(aa, dd) { chip.writeInternal(aa & 0x0F, dd); },
       clock() { chip.clock(); },
       mix(out) { const s = chip.mixSample() * this.gain; out[0] += s; out[1] += s; },
-      applyMute(m) { const e = m.expansion || m; if (e.psg) Emu.applyMute(chip.mute, e.psg); },
-      applyVolume(v) { const e = v.expansion || v; if (e.psg) Emu.applyVolume(chip.vol, e.psg); }
+      // 2個目のチップ(this.second)は鍵盤のKP4-6行=配列index 3-5 を自分のch0-2として読む
+      applyMute(m) { const e = m.expansion || m; if (e.psg) Emu.applyMute(chip.mute, this.second ? e.psg.slice(3) : e.psg); },
+      applyVolume(v) { const e = v.expansion || v; if (e.psg) Emu.applyVolume(chip.vol, this.second ? e.psg.slice(3) : e.psg); }
     };
   }
 
@@ -173,8 +174,9 @@
       writeStereo(dd) { chip.writeStereo(dd); },
       clock() { chip.clock(); },
       mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
-      applyMute(m) { const e = m.expansion || m; if (e.sn76489) Emu.applyMute(chip.mute, e.sn76489); },
-      applyVolume(v) { const e = v.expansion || v; if (e.sn76489) Emu.applyVolume(chip.vol, e.sn76489); }
+      // 2個目のチップ(this.second)は鍵盤のSN4-6/SNN2行=配列index 4-7 を自分のch0-3として読む
+      applyMute(m) { const e = m.expansion || m; if (e.sn76489) Emu.applyMute(chip.mute, this.second ? e.sn76489.slice(4) : e.sn76489); },
+      applyVolume(v) { const e = v.expansion || v; if (e.sn76489) Emu.applyVolume(chip.vol, this.second ? e.sn76489.slice(4) : e.sn76489); }
     };
   }
 
@@ -232,9 +234,26 @@
       // アダプタごと作り直す(FDS/GB/HuC/AY/SCC/OPLLのreset()の有無に依存しないため)。
       this.adapters = [];
       this.adapterById = {};
+      const extra = h.extra || { chipClocks: {}, chipVolumes: {} };
+      const globalVol = h.volumeFactor || 1;
       for (const info of h.usedChips) {
         const mk = ADAPTERS[info.id];
-        if (mk) { const a = mk(info); this.adapters.push(a); this.adapterById[info.id] = a; }
+        if (!mk) continue;
+        // 拡張ヘッダのチップ別音量(0x100=100%)と全体音量(0x7C)をアダプタのgainへ掛ける
+        // (VGMPlayと同じ扱い。Exed Exes(Arcade)はAY8910に16%を指定している)。
+        const a = mk(info);
+        a.gain *= globalVol * (extra.chipVolumes[info.id] !== undefined ? extra.chipVolumes[info.id] : 1);
+        this.adapters.push(a); this.adapterById[info.id] = a;
+        if (info.dual) {
+          // デュアルチップ(クロック値bit30): 2個目は同じ設定で別インスタンス。クロックは
+          // 拡張ヘッダのchip clock表に2個目用の値があればそれを使う。書込みはコマンド側の
+          // 「2個目」印(SN=0x30、その他はレジスタ/ポートのbit7)で振り分ける。
+          const info2 = Object.assign({}, info, { clock: extra.chipClocks[info.id] || info.clock });
+          const b = mk(info2);
+          b.gain *= globalVol * (extra.chipVolumes[info.id + '_2'] !== undefined ? extra.chipVolumes[info.id + '_2'] : 1);
+          b.second = true;
+          this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
+        }
       }
       this.pos = h.dataOffset;
       this.samplePos = 0;      // VGMサンプル位置(44100Hz)
@@ -281,14 +300,17 @@
             this._dataBlock(type, block);
             this.pos = start + size; break;
           }
-          case 0x50: this._writeSn(d[p]); this.pos = p + 1; break;
+          case 0x50: this._writeSn(d[p], false); this.pos = p + 1; break;
+          case 0x30: this._writeSn(d[p], true); this.pos = p + 1; break; // 2個目のSN76489
           case 0x4F: this._writeGgStereo(d[p]); this.pos = p + 1; break;
-          case 0x51: this._chipWrite('ym2413', d[p], d[p + 1]); this.pos = p + 2; break;
-          case 0xA0: this._chipWrite('ay8910', d[p], d[p + 1]); this.pos = p + 2; break;
-          case 0xB3: this._chipWrite('gb', d[p], d[p + 1]); this.pos = p + 2; break;
-          case 0xB4: this._chipWrite('nes', d[p], d[p + 1]); this.pos = p + 2; break;
-          case 0xB9: this._chipWrite('huc6280', d[p], d[p + 1]); this.pos = p + 2; break;
-          case 0xD2: this._sccWrite(d[p], d[p + 1], d[p + 2]); this.pos = p + 3; break;
+          case 0x51: this._chipWrite('ym2413', d[p], d[p + 1], false); this.pos = p + 2; break;
+          case 0xA1: this._chipWrite('ym2413', d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2413
+          // 0xA0/0xB3/0xB4/0xB9/0xD2: レジスタ(ポート)のbit7=1が2個目のチップ
+          case 0xA0: this._chipWrite('ay8910', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          case 0xB3: this._chipWrite('gb', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          case 0xB4: this._chipWrite('nes', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          case 0xB9: this._chipWrite('huc6280', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          case 0xD2: this._sccWrite(d[p] & 0x7F, d[p + 1], d[p + 2], !!(d[p] & 0x80)); this.pos = p + 3; break;
           case 0xE0: this.pcmBank = (d[p] | (d[p + 1] << 8) | (d[p + 2] << 16) | (d[p + 3] << 24)) >>> 0; this.pos = p + 4; break;
           default: {
             if (op >= 0x70 && op <= 0x7F) { this.waitRemaining = (op & 0x0F) + 1; this.pos = p; break; }
@@ -325,23 +347,28 @@
       // その他(YM2612 PCM=0x00, 圧縮ブロック, 各種ROMダンプ)は未実装チップ向けなので保持しない
     }
 
-    _chipWrite(id, aa, dd) {
-      const a = this.adapterById[id];
+    // second=true なら2個目のチップ(adapterById[id+'_2'])。onWriteのidも '_2' 付きで通知する
+    // (キャプチャ側は1個目のみ抽出対象。2個目は再生と鍵盤表示のみ)。
+    _chipWrite(id, aa, dd, second) {
+      const key = second ? id + '_2' : id;
+      const a = this.adapterById[key];
       if (!a) return;
       const r = a.write(aa, dd);
-      if (this.onWrite) this.onWrite(id, aa, dd, r);
+      if (this.onWrite) this.onWrite(key, aa, dd, r);
     }
 
-    _sccWrite(pp, aa, dd) {
-      const a = this.adapterById.k051649;
+    _sccWrite(pp, aa, dd, second) {
+      const key = second ? 'k051649_2' : 'k051649';
+      const a = this.adapterById[key];
       if (!a) return;
       const addr = a.write(pp, aa, dd);
-      if (this.onWrite && addr >= 0) this.onWrite('k051649', pp, aa, dd, addr);
+      if (this.onWrite && addr >= 0) this.onWrite(key, pp, aa, dd, addr);
     }
 
-    _writeSn(dd) {
-      const a = this.adapterById.sn76489;
-      if (a) { a.write(dd); if (this.onWrite) this.onWrite('sn76489', dd); }
+    _writeSn(dd, second) {
+      const key = second ? 'sn76489_2' : 'sn76489';
+      const a = this.adapterById[key];
+      if (a) { a.write(dd); if (this.onWrite) this.onWrite(key, dd); }
     }
     _writeGgStereo(dd) {
       const a = this.adapterById.sn76489;
@@ -462,7 +489,11 @@
       if (data.gb) data.gb.snapshots.push(Emu.snapshotGbApuForCapture(player.adapterById.gb.apu));
       if (data.hes) data.hes.snapshots.push(Emu.snapshotHesApuForCapture(player.adapterById.huc6280.apu));
       if (data.kss) { data.kss.writeLog.push(kssFrameWrites); kssFrameWrites = []; }
-      if (data.sn) data.sn.snapshots.push(Emu.snapshotSN76489(player.adapterById.sn76489.chip, data.sn.clock));
+      if (data.sn) {
+        const s1 = Emu.snapshotSN76489(player.adapterById.sn76489.chip, data.sn.clock);
+        const a2 = player.adapterById.sn76489_2;
+        data.sn.snapshots.push(a2 ? s1.concat(Emu.snapshotSN76489(a2.chip, a2.clockHz)) : s1);
+      }
       if (f % CHUNK_FRAMES === 0) {
         if (onProgress) onProgress(f, totalFrames, data);
         await new Promise(r => setTimeout(r, 0));
