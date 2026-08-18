@@ -4713,6 +4713,8 @@
     if (h.chips.sn76489) chips.push('sn76489');
     if (h.chips.ym2612) chips.push('ym2612');
     if (h.chips.pwm) chips.push('pwm');
+    if (h.chips.rf5c164) chips.push('rf5c164');
+    if (h.chips.rf5c68) chips.push('rf5c68');
     return chips;
   }
 
@@ -4735,6 +4737,9 @@
     getYm2612: () => { const a = vgmAdapter('ym2612'); return a ? MML.Emu.snapshotYM2612(a.chip) : null; }
 ,
     getPwm: () => { const a = vgmAdapter('pwm'); return a ? MML.Emu.snapshotPWM32X(a.chip) : null; }
+,
+    getRf5c164: () => { const a = vgmAdapter('rf5c164'); return a ? MML.Emu.snapshotRF5C164(a.chip) : null; },
+    getRf5c68: () => { const a = vgmAdapter('rf5c68'); return a ? MML.Emu.snapshotRF5C164(a.chip) : null; }
   };
 
   // captureVgmSongAsync()の結果からピアノロール用タイムライン(共通形状)を構築する。
@@ -4773,6 +4778,12 @@
     if (data.pwm) {
       const t = keyboardDisplay.buildRollTracksFromRegSnapshots(
         data.pwm.snapshots, [], done, sr / frameRate, sr, ['vgm', 'pwm'], null, { pwm: data.pwm.snapshots });
+      if (t) tracks = tracks.concat(t);
+    }
+    for (const tok of ['rf5c164', 'rf5c68']) {
+      if (!data[tok]) continue;
+      const extra = {}; extra[tok] = data[tok].snapshots;
+      const t = keyboardDisplay.buildRollTracksFromRegSnapshots(data[tok].snapshots, [], done, sr / frameRate, sr, ['vgm', tok], null, extra);
       if (t) tracks = tracks.concat(t);
     }
     return tracks;
@@ -4855,7 +4866,9 @@
       getKssOpll: liveVgm.getKssOpll,
       getSn76489: liveVgm.getSn76489,
       getYm2612: liveVgm.getYm2612,
-      getPwm: liveVgm.getPwm
+      getPwm: liveVgm.getPwm,
+      getRf5c164: liveVgm.getRf5c164,
+      getRf5c68: liveVgm.getRf5c68
     }, () => vgmActivePlayer ? vgmActivePlayer.getPosition() : 0, chips);
     transportPlay();
 

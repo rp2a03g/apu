@@ -298,6 +298,11 @@
     // VGM: 32X PWM(PWL/PWR)。chip.mute[]は L=0, R=1
     if (id === 'PWL') return { section: 'expansion', chip: 'pwm', type: 'array', index: 0 };
     if (id === 'PWR') return { section: 'expansion', chip: 'pwm', type: 'array', index: 1 };
+    // VGM: RF5C164(メガCD PCM、RC1-8) / RF5C68(RB1-8)
+    const rc = id.match(/^RC(\d)$/);
+    if (rc) return { section: 'expansion', chip: 'rf5c164', type: 'array', index: +rc[1] - 1 };
+    const rb = id.match(/^RB(\d)$/);
+    if (rb) return { section: 'expansion', chip: 'rf5c68', type: 'array', index: +rb[1] - 1 };
     if (KF_RHYTHM_INDEX[id] !== undefined) return { section: 'expansion', chip: 'opll', type: 'array', index: KF_RHYTHM_INDEX[id] };
     return null;
   }
@@ -325,6 +330,8 @@
     { header: 'SN76489 (SG-1000 / Master System / Game Gear / Mega Drive PSG)', ids: { SN1: 'P1', SN2: 'P2', SN3: 'P3', SNN: 'No', SN4: 'P1(2)', SN5: 'P2(2)', SN6: 'P3(2)', SNN2: 'No(2)' } },
     { header: 'YM2612 (OPN2 , Mega Drive FM)', ids: { YMDA: 'DAC' }, prefix: 'YM', name: (id) => 'FM' + id.slice(2) },
     { header: 'PWM (Sega 32X)', ids: { PWL: 'L', PWR: 'R' } },
+    { header: 'RF5C164 (Mega-CD PCM)', prefix: 'RC', name: (id) => 'PCM' + id.slice(2) },
+    { header: 'RF5C68 (PCM)', prefix: 'RB', name: (id) => 'PCM' + id.slice(2) },
   ];
   function getChannelDisplay(id) {
     for (const g of CHANNEL_DISPLAY_GROUPS) {
@@ -862,6 +869,20 @@
         channels.push({ id, color, freq: 0, vol: c.vol, rawVol: c.level, rawVolMax: s ? s.cycle : 4095,
           wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.level, dmcRateIdx: 15, dmcFreq: 0,
           panL: key === 'l' ? 1 : 0, panR: key === 'r' ? 1 : 0 });
+      }
+    }
+
+    for (const [tok, prefix, liveKey] of [['rf5c164', 'RC', 'rf5c164Live'], ['rf5c68', 'RB', 'rf5c68Live']]) {
+      if (!chips.includes(tok)) continue;
+      // RF5C68/164(VGM): 8ch PCM。音程はサンプル依存で不明なのでDMCと同じ「サンプル」行、音量=env×パン
+      const live = extraSnaps && extraSnaps[liveKey];
+      const s = live ? live() : (extraSnaps && extraSnaps[tok] ? extraSnaps[tok][frameIdx] : null);
+      for (let ch = 0; ch < 8; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 0, panR: 0 };
+        const hue = (200 + ch * 18) % 360;
+        channels.push({ id: `${prefix}${ch + 1}`, color: `hsl(${hue},70%,60%)`, freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
+          panL: c.panL, panR: c.panR });
       }
     }
 
@@ -2460,6 +2481,8 @@
       this._extraSnaps.snLive = typeof result.getSn76489 === 'function' ? result.getSn76489 : null;
       this._extraSnaps.ymLive = typeof result.getYm2612 === 'function' ? result.getYm2612 : null;
       this._extraSnaps.pwmLive = typeof result.getPwm === 'function' ? result.getPwm : null;
+      this._extraSnaps.rf5c164Live = typeof result.getRf5c164 === 'function' ? result.getRf5c164 : null;
+      this._extraSnaps.rf5c68Live = typeof result.getRf5c68 === 'function' ? result.getRf5c68 : null;
       this._lastDmc4011 = null; // 曲切替時にDMC書き込み検出をリセット
       this._rollSongTimeBase = 0; // 曲切替時にピアノロールの経過時間もリセット
       this._rollLastRawPos = null;

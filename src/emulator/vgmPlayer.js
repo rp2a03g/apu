@@ -43,7 +43,7 @@
   // 各フォーマットのストリームプレイヤーが使っている実測校正済みgain
   // (src/audio/*-stream-player.js 参照)。VGMは複数チップの合算なので、チップごとに
   // 由来フォーマットのgainを掛けてから足し、出力段のgainは1.0にする。
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -212,10 +212,28 @@
     };
   }
 
+  // RF5C68(X68000/FM TOWNS)とRF5C164(メガCD)は同じコア(クロックとVGMコマンド番号だけ違う)
+  function makeRfAdapter(id) {
+    return function (info) {
+      const chip = new Emu.RF5C164Audio(info.clock);
+      return {
+        id, clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN[id],
+        write(reg, dd) { chip.write(reg, dd); },
+        memWrite(off, dd) { chip.memWrite(off, dd); },
+        ramWrite(start, data) { chip.ramWrite(start, data); },
+        clock() { chip.clock(); },
+        mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+        applyMute(m) { const e = m.expansion || m; if (e[id]) Emu.applyMute(chip.mute, e[id]); },
+        applyVolume(v) { const e = v.expansion || v; if (e[id]) Emu.applyVolume(chip.vol, e[id]); }
+      };
+    };
+  }
+
   const ADAPTERS = {
     nes: makeNesAdapter, gb: makeGbAdapter, huc6280: makeHucAdapter,
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
-    sn76489: makeSnAdapter, ym2612: makeYm2612Adapter, pwm: makePwmAdapter
+    sn76489: makeSnAdapter, ym2612: makeYm2612Adapter, pwm: makePwmAdapter,
+    rf5c68: makeRfAdapter('rf5c68'), rf5c164: makeRfAdapter('rf5c164')
   };
 
   // ---------------------------------------------------------------------------
@@ -315,7 +333,9 @@
       const d = this.data;
       const h = this.header;
       while (this.waitRemaining === 0 && !this.ended) {
-        if (this.pos >= d.length || (h.eofOffset && this.pos >= h.eofOffset)) { this._endOfData(); return; }
+        // eofOffset(0x04)が壊れている/データ開始より手前のファイルは無視してデータ長だけを見る
+        const eof = (h.eofOffset && h.eofOffset > h.dataOffset) ? Math.min(h.eofOffset, d.length) : d.length;
+        if (this.pos >= eof) { this._endOfData(); return; }
         const op = d[this.pos];
         const p = this.pos + 1;
         switch (op) {
@@ -348,6 +368,10 @@
           case 0xB4: this._chipWrite('nes', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB9: this._chipWrite('huc6280', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB2: this._chipWrite('pwm', (d[p] >> 4) & 0x0F, ((d[p] & 0x0F) << 8) | d[p + 1], false); this.pos = p + 2; break; // 32X PWM: reg=a, 12bit値
+          case 0xB0: this._chipWrite('rf5c68', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          case 0xB1: this._chipWrite('rf5c164', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          case 0xC1: this._rfMemWrite('rf5c68', d[p] | (d[p + 1] << 8), d[p + 2]); this.pos = p + 3; break;  // RF5C68 メモリ書込み(選択中バンク窓)
+          case 0xC2: this._rfMemWrite('rf5c164', d[p] | (d[p + 1] << 8), d[p + 2]); this.pos = p + 3; break; // RF5C164 メモリ書込み
           case 0xD2: this._sccWrite(d[p] & 0x7F, d[p + 1], d[p + 2], !!(d[p] & 0x80)); this.pos = p + 3; break;
           case 0x52: this._ymWrite(0, d[p], d[p + 1], false); this.pos = p + 2; break;
           case 0x53: this._ymWrite(1, d[p], d[p + 1], false); this.pos = p + 2; break;
@@ -429,6 +453,10 @@
         const nes = this.adapterById.nes;
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
+      if (type === 0xC0 || type === 0xC1) { // RF5C68(0xC0)/RF5C164(0xC1) 波形RAM書込み: 先頭2バイト=絶対アドレス
+        const rf = this.adapterById[type === 0xC0 ? 'rf5c68' : 'rf5c164'];
+        if (rf && block.length >= 2) rf.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
+      }
       // その他(YM2612 PCM=0x00, 圧縮ブロック, 各種ROMダンプ)は未実装チップ向けなので保持しない
     }
 
@@ -497,6 +525,11 @@
           s.pos += s.stepSize;
         }
       }
+    }
+
+    _rfMemWrite(id, offset, dd) {
+      const a = this.adapterById[id];
+      if (a) a.memWrite(offset, dd);
     }
 
     _writeSn(dd, second) {
@@ -599,7 +632,9 @@
         : null,
       sn: has('sn76489') ? { snapshots: [], clock: player.adapterById.sn76489.clockHz } : null,
       ym2612: has('ym2612') ? { snapshots: [] } : null,
-      pwm: has('pwm') ? { snapshots: [] } : null
+      pwm: has('pwm') ? { snapshots: [] } : null,
+      rf5c164: has('rf5c164') ? { snapshots: [] } : null,
+      rf5c68: has('rf5c68') ? { snapshots: [] } : null
     };
     let nesFrameWrites = [];
     let kssFrameWrites = [];
@@ -636,6 +671,8 @@
         data.sn.snapshots.push(a2 ? s1.concat(Emu.snapshotSN76489(a2.chip, a2.clockHz)) : s1);
       }
       if (data.pwm) data.pwm.snapshots.push(Emu.snapshotPWM32X(player.adapterById.pwm.chip));
+      if (data.rf5c164) data.rf5c164.snapshots.push(Emu.snapshotRF5C164(player.adapterById.rf5c164.chip));
+      if (data.rf5c68) data.rf5c68.snapshots.push(Emu.snapshotRF5C164(player.adapterById.rf5c68.chip));
       if (data.ym2612) {
         // 先読みはチップのclock()を回さない(EGが進まない)ので、ロール用の発音判定/音量は
         // レジスタだけから決まる keyOn/tlVol に差し替える(ライブ表示はEG由来のactive/volを使う)
