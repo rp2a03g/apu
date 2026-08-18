@@ -192,9 +192,10 @@ structuredClone/JSON.stringifyがそのまま通ること)。
 | `src/dpcm/` | 音声→DPCM(2A03 DMC)変換 | コア |
 | `src/emulator/` | 6502/APU/拡張音源エミュレータ | コア |
 | `src/spc/` `src/kss/` `src/gbs/` `src/hes/` | SPC700/Z80/SM83/HuC6280系ヘッダ解析 | コア |
+| `src/vgm/` (新設) | VGMヘッダ解析(チップクロック表/ループ/GD3)・.vgz解凍 | コア |
 | `src/mml/` lexer/compiler/player | MMLコンパイル・直接レンダリング | コア |
 | `src/convert/` | フォーマット非依存の BPM検出・音長量子化・MML生成 | コア |
-| `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` `src/gbs2mml/` `src/hes2mml/` | 各形式→ノート抽出 | コア |
+| `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` `src/gbs2mml/` `src/hes2mml/` `src/vgm2mml/` (新設) | 各形式→ノート抽出 | コア |
 | `src/ir/` (新設) | Song IR 定義・検証・移行・MML⇔IR変換 | コア |
 | `src/input/` (新設) | MIDI/鼻歌/タップ → TimedPitchEvent → IR | コア(*) |
 | `src/share/` (新設) | URL圧縮共有・コンペマニフェスト読み込み | コア |
