@@ -293,6 +293,10 @@
         // (VGMPlayと同じ扱い。Exed Exes(Arcade)はAY8910に16%を指定している)。
         const a = mk(info);
         a.gain *= globalVol * (extra.chipVolumes[info.id] !== undefined ? extra.chipVolumes[info.id] : 1);
+        // メガドライブ/32X(SN76489+YM2612)の実機ミックスではPSGはFMよりかなり小さい。VGMPlayも
+        // YM2612同居時はSN76496の音量を0x80(50%)に落としている。ユーザー実測でも「PSGが明らかに大きい、
+        // 50%くらいで丁度よい」だったので同じ比率にする(SMS/GG等のPSG単独構成は従来どおり)。
+        if (info.id === 'sn76489' && h.chips.ym2612) a.gain *= 0.5;
         this.adapters.push(a); this.adapterById[info.id] = a;
         if (info.dual) {
           // デュアルチップ(クロック値bit30): 2個目は同じ設定で別インスタンス。クロックは
@@ -301,6 +305,7 @@
           const info2 = Object.assign({}, info, { clock: extra.chipClocks[info.id] || info.clock });
           const b = mk(info2);
           b.gain *= globalVol * (extra.chipVolumes[info.id + '_2'] !== undefined ? extra.chipVolumes[info.id + '_2'] : 1);
+          if (info.id === 'sn76489' && h.chips.ym2612) b.gain *= 0.5;
           b.second = true;
           this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
         }
