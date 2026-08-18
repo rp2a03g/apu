@@ -247,8 +247,7 @@
       'The zip contains no supported sound files (NSF/SPC/KSS/GBS/HES/VGM).',
     'MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力{borrow}{ignored}':
       'Converted to MML ({mode} {bpm} BPM, chips: {chips}) → written to the MML editor{borrow}{ignored}',
-    '(FME-7/N163/VRC7を借用して再生)': ' (played back via FME-7/N163/VRC7)',
-    '(FME-7と2A03ノイズを借用して再生)': ' (played back via FME-7 and 2A03 noise)',
+    '(借用先: {assign})': ' (targets: {assign})',
     '(2A03/FDSを借用して再生)': ' (played back via 2A03/FDS)',
     '(N163を借用して再生)': ' (played back via N163)',
     '。対象外の音源は無視: {chips}': '. Ignored unsupported chips: {chips}',

@@ -4937,10 +4937,10 @@
     }
 
     // 借用先の説明(ファミリごと)。ネイティブ変換(NES)は借用無し。
-    const borrowNote = ({
-      kss: T('(FME-7/N163/VRC7を借用して再生)'), sn: T('(FME-7と2A03ノイズを借用して再生)'),
-      gb: T('(2A03/FDSを借用して再生)'), hes: T('(N163を借用して再生)'), nes: ''
-    })[result.family] || '';
+    // PSG系(AY/SCC/OPLL/SN)は構成から自動割当した借用先をそのまま出す(vgm2mml/converter.js composePsgLike)
+    const borrowNote = result.family === 'psg'
+      ? T('(借用先: {assign})', { assign: (result.assignments || []).join(', ') })
+      : (({ gb: T('(2A03/FDSを借用して再生)'), hes: T('(N163を借用して再生)'), nes: '' })[result.family] || '');
     const ignoredMsg = (result.ignoredChips && result.ignoredChips.length)
       ? T('。対象外の音源は無視: {chips}', { chips: result.ignoredChips.join(', ') }) : '';
     vgmFileStatusEl.innerHTML =

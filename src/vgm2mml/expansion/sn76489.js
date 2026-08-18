@@ -47,7 +47,7 @@
     return 31 - best; // ppmck準拠: ノート番号31-n = periodIndex n(src/mml/compiler.js noisePeriodIndex)
   }
 
-  function extractToneEvents(snapshots, ch, clock) {
+  function extractToneEvents(snapshots, ch, clock) { // ch: スナップショット配列内の要素index(2個目チップは+4)
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
@@ -74,12 +74,12 @@
     return events;
   }
 
-  function extractNoiseEvents(snapshots) {
+  function extractNoiseEvents(snapshots, idx) {
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
     for (let f = 0; f < snapshots.length; f++) {
-      const c = snapshots[f][3];
+      const c = snapshots[f][idx];
       const volume = c.rawVol;
       const on = volume > 0 && c.active && c.noiseFreq > 0;
       const note = on ? noiseFreqToNote(c.noiseFreq) : null;
@@ -99,9 +99,13 @@
   /**
    * @param {Array} snapshots - Emu.snapshotSN76489 のフレーム配列
    * @param {number} clock - チップクロック(Hz)
-   * @param {object} [envReg] - MML.Convert.EnvelopeRegistry(音量エンベロープ@v<n>の共有登録)
+   * @param {object} [envReg] - MML.Convert.EnvelopeRegistry(音量エンベロープ@v<n>の共有登録)。
+   *   assign(volSeq)を持つ任意のオブジェクト可(借用先に合わせた音量写像プロキシ等)
+   * @param {number} [chip=0] - デュアルチップの何個目か(スナップショットは1個目[0-3]+2個目[4-7]の連結)
    */
-  MML.Vgm2MmlExpansion.sn76489 = function (snapshots, clock, envReg) {
+  MML.Vgm2MmlExpansion.sn76489 = function (snapshots, clock, envReg, chip) {
+    const base = (chip || 0) * 4;
+    if (base > 0 && !(snapshots.length && snapshots[0].length > base)) return { tones: [0, 1, 2].map(() => ({ events: [], hasVolume: true, hasEnvelope: true, hasInstrument: true, hasFme7Noise: true })), noise: { events: [], hasVolume: true, hasEnvelope: true } };
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
       return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
@@ -122,10 +126,10 @@
     return {
       tones: [0, 1, 2].map(ch => ({
         // 分節のヒステリシス化+高速アルペジオ→EN統合+不明瞭連なり統合(ay.jsと同じ後処理列)
-        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractToneEvents(snapshots, ch, clock))).map(toneToCommon),
+        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractToneEvents(snapshots, base + ch, clock))).map(toneToCommon),
         hasVolume: true, hasEnvelope: true, hasInstrument: true, hasFme7Noise: true
       })),
-      noise: { events: extractNoiseEvents(snapshots).map(noiseToCommon), hasVolume: true, hasEnvelope: true }
+      noise: { events: extractNoiseEvents(snapshots, base + 3).map(noiseToCommon), hasVolume: true, hasEnvelope: true }
     };
   };
 })(window);
