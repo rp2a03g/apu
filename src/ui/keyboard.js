@@ -1620,6 +1620,10 @@
       this._srcBadgeEl = null;
       this._titleEl = null;
       this._rollLastDrawnPos = 0;       // _renderRoll()が最後に描いた曲内秒(ドラッグ開始位置の基準)
+      this._pendingSelectionReset = false; // reset()が立てるフラグ。次に実データでチャンネル一覧が
+                                            // 判明した時(setSource()/updateSpcVoices())、大波形の選択
+                                            // (_selectedId)がそこにも存在すれば維持・無ければ一番若い
+                                            // chへ切替える一度きりの判定を行う(_consumePendingSelectionReset)
       this._masterVolume = loadMasterVolume(); // localStorage永続化(mml_masterVolume)
       this.onVolumeChange = null;       // () => void  ch別音量バー操作時(getVolumeConfig()参照)
       this.onSpcVolumeChange = null;    // (volArray:number[8]) => void
@@ -2147,9 +2151,10 @@
     // 大波形に「今表示するch」(_shownWaveId)を、表示中の一覧(rowEls)に合わせて決め直す。
     // ユーザーが選んだch(_selectedId)が一覧にあればそれ、無ければ一番若いch(波形アイコンを
     // 持つ最初の行)を一時的に表示する。_selectedId自体はここでは変えない(停止→再生や曲送りで
-    // 一覧が一時的に2A03だけになっても、選択が勝手に若いchへ変わってしまわないように。
-    // 選択を捨てて若いchへ戻すのはファイルの読み込み直し=reset()のときだけ)。
-    // 一覧の下の折りたたみ帯は自動で開かない(ユーザーがクリックしたときだけ開く)
+    // 一覧が一時的に2A03だけになっても、選択が勝手に若いchへ変わってしまわないように)。
+    // ファイルの読み込み直しに伴う「選択を捨てて若いchへ戻すか、同じchが新ファイルにも
+    // あるなら維持するか」の判定は_consumePendingSelectionReset()が別途行う(こちらを呼ぶ前に
+    // 呼ばれる想定)。一覧の下の折りたたみ帯は自動で開かない(ユーザーがクリックしたときだけ開く)
     _syncShownWave(rowEls) {
       const rows = (rowEls || []).filter(el => el.waveCanvas);
       const keep = rows.find(el => el.id === this._selectedId);
@@ -2164,6 +2169,18 @@
       const ch = (this._prevChannels || []).find(c => c.id === id) ||
                  (this._prevSpcVoices || []).find(c => c.id === id);
       if (ch) this._renderBigWave(ch);
+    }
+
+    // reset()(ファイルの読み込み直し)が立てたフラグを、新ファイルの実際のチャンネル一覧
+    // (waveIds: 波形を持つ行のid配列)が判明した最初の1回だけ消費して、大波形の選択
+    // (_selectedId)を確定させる。同じch(id)が新ファイルにもあれば選択を維持(同じ音源構成の
+    // 別ファイルを続けて開いた場合など)、無ければ一番若いchへ切り替える。
+    // waveIdsが空(まだ実データが来ていない一覧)の間は消費せず次回に持ち越す。
+    // 呼び出し側は結果を_syncShownWave()に反映させるため、この直後に必ず_syncShownWave()を呼ぶこと。
+    _consumePendingSelectionReset(waveIds) {
+      if (!this._pendingSelectionReset || !waveIds || !waveIds.length) return;
+      this._pendingSelectionReset = false;
+      if (!waveIds.includes(this._selectedId)) this._selectedId = waveIds[0];
     }
 
     // ロール見出し行に置くシークバー(MMLエディタのトランスポート行と同じもの。DOMはmain.jsが
@@ -2586,12 +2603,17 @@
       this._spcVoices = [];
       this._prevSpcVoices = [];
       this._muteState.clear();
-      // 大波形の選択も前ファイルのchを引きずらず、一番若いchに戻す。選択を捨てるのはここ
-      // (ファイルの読み込み直し)だけで、曲送りや停止→再生で一覧が一時的に変わっても
-      // 選択は保つ(_syncShownWave参照)
-      this._selectedId = null;
+      // 大波形の選択(_selectedId)はここでは変えない。新ファイルの実際のチャンネル構成が
+      // 判明した時点(次のsetSource()/updateSpcVoices()の実データ呼び出し)で、同じchが
+      // 新ファイルにもあれば維持、無ければ一番若いchへ切り替える判定を1回だけ行う
+      // (_pendingSelectionResetフラグ、_consumePendingSelectionReset参照)。曲送り/停止→再生
+      // (同一ファイル内での切替)ではこのフラグは立てないため選択はそのまま保たれる。
+      // ここより前に消費されていない古いフラグが残っていたら(短時間に連続でファイルを
+      // 読み込み直した場合)、直後のダミーsetSource()呼び出しがその場で誤って消費してしまう
+      // 前に破棄しておく。
+      this._pendingSelectionReset = false;
       this.setSource({ regSnapshots: [{}], totalFrames: 1, samplesPerFrame: 735, sampleRate: 44100, writeLog: [] }, []);
-      this._selectedId = this._shownWaveId; // 一番若いchを新しい選択にする
+      this._pendingSelectionReset = true;
       this.update(0);
     }
 
@@ -2764,6 +2786,7 @@
       }
       // 大波形に表示するchを新しい一覧に合わせる(SPCモード中はSPC側の一覧が表示中なので触らない)
       if (this._mode !== 'spc') {
+        this._consumePendingSelectionReset(this._rowEls.filter(el => el.waveCanvas).map(el => el.id));
         this._syncShownWave(this._rowEls);
         this._rebuildLanes(); // チャンネルごとのレーン表示も一覧に合わせる
       }
@@ -3448,15 +3471,23 @@
       }
 
       // 行数が変化した場合だけ per-voice 行を再構築（通常は初回の8行のみ。ALL行は保持）
-      if (this._spcRowEls.length !== this._spcVoices.length) {
+      const spcRowsChanged = this._spcRowEls.length !== this._spcVoices.length;
+      if (spcRowsChanged) {
         for (const el of this._spcRowEls) el.row.remove();
         this._spcRowEls = this._spcVoices.map((v, idx) => {
           const el = this._buildSpcRow(v, idx);
           this._spcSectionEl.appendChild(el.row);
           return el;
         });
-        // 大波形に表示するボイスを新しい一覧に合わせる(選択がSPCボイス以外ならV0を一時表示)
-        if (this._mode === 'spc') {
+      }
+      // 大波形に表示するボイスを新しい一覧に合わせる(選択がSPCボイス以外ならV0を一時表示)。
+      // ★SPCのボイス数は常に8で固定のため、reset()でファイルを読み込み直しても行の再構築
+      // (spcRowsChanged)自体は2回目以降起きない。ファイル読み込み直し直後の選択判定
+      // (_consumePendingSelectionReset)は行の再構築有無に関わらずここで必ず試みる必要がある
+      if (this._mode === 'spc' && this._spcVoices.length) {
+        const hadPending = this._pendingSelectionReset;
+        this._consumePendingSelectionReset(this._spcRowEls.filter(el => el.waveCanvas).map(el => el.id));
+        if (spcRowsChanged || hadPending) {
           this._syncShownWave(this._spcRowEls);
           this._rebuildLanes(); // チャンネルごとのレーン表示もボイス一覧に合わせる
         }
