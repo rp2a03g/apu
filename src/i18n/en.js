@@ -238,6 +238,7 @@
       'The chips used by this VGM ({chips}) are not supported yet (it will be silent).',
     '再生中 (最大 {time})': 'Playing (max {time})',
     'アーカイブ': 'Archive',
+    '曲': 'Track',
     '前の曲': 'Previous track',
     '次の曲': 'Next track',
     'アーカイブ内のファイルを開けませんでした: {msg}': 'Could not open a file inside the archive: {msg}',

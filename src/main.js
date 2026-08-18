@@ -5021,6 +5021,7 @@
     // 拡張子で決めるが、gzip(.vgz)は各loadXxxFile側が中身で判別する。
     const ARCHIVE_EXTS = ['nsf', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz'];
     const archiveBarEl = document.getElementById('archiveBar');
+    const archiveTrackBarEl = document.getElementById('archiveTrackBar');
     const archiveNameEl = document.getElementById('archiveName');
     const archiveSelectEl = document.getElementById('archiveTrackSelect');
     const archiveTotalEl = document.getElementById('archiveTrackTotal');
@@ -5030,12 +5031,17 @@
     function clearArchive() {
       archive = null;
       if (archiveBarEl) archiveBarEl.style.display = 'none';
+      if (archiveTrackBarEl) archiveTrackBarEl.style.display = 'none';
       if (archiveSelectEl) archiveSelectEl.innerHTML = '';
     }
 
-    function renderArchiveBar() {
+    // アーカイブ表示: ファイル名はパネルの上の #archiveBar に、曲リスト(曲名+送りボタン)は
+    // 他形式の「曲番号」行と同じ位置に見えるよう、表示中フォーマットのパネルの
+    // 「ヘッダ情報」(#xxxFileHeader)の直後へ #archiveTrackBar を付け替える(ユーザー要望:
+    // VGMに限らず全形式で位置を揃える)。fmt省略時は現在読み込み中のフォーマット。
+    function renderArchiveBar(fmt) {
       if (!archiveBarEl) return;
-      if (!archive) { archiveBarEl.style.display = 'none'; return; }
+      if (!archive) { archiveBarEl.style.display = 'none'; if (archiveTrackBarEl) archiveTrackBarEl.style.display = 'none'; return; }
       archiveBarEl.style.display = '';
       archiveNameEl.textContent = archive.name;
       archiveNameEl.title = archive.name;
@@ -5048,6 +5054,14 @@
       });
       archiveSelectEl.value = String(archive.index);
       archiveTotalEl.textContent = `/ ${archive.playlist.length}`;
+      if (archiveTrackBarEl) {
+        const f = fmt || archive.loadedFormat;
+        const headerEl = f ? document.getElementById(`${f}FileHeader`) : null;
+        if (headerEl && headerEl.parentNode && archiveTrackBarEl.previousElementSibling !== headerEl) {
+          headerEl.parentNode.insertBefore(archiveTrackBarEl, headerEl.nextSibling);
+        }
+        archiveTrackBarEl.style.display = headerEl ? '' : 'none';
+      }
     }
 
     // 拡張m3u("file::KSS,song,...")の曲番号を、その形式の曲番号入力欄へ反映する。
@@ -5086,6 +5100,7 @@
           fmt = await openSoundFile(entryFile, { fromArchive: true });
           archive.loadedEntry = fmt ? item.entry : null;
           archive.loadedFormat = fmt || null;
+          renderArchiveBar(fmt || null); // フォーマットが確定したので曲リスト行を該当パネルへ付け替える
         }
         if (fmt) applyArchiveSong(fmt, item.song);
         if (fmt && autoplay) {

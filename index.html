@@ -164,15 +164,20 @@
       <input type="file" id="hesFile" accept=".hes" style="display:none" />
       <input type="file" id="vgmFile" accept=".vgm,.vgz" style="display:none" />
 
-      <!-- アーカイブ(zip)曲リストバー: zipを開いた時だけ表示。中の曲(NSF/SPC/KSS/GBS/HES/VGM)を
-           曲番号のように送る。SPC/VGMのような1ファイル1曲の形式でも他形式と同じ曲送りUIになる -->
+      <!-- アーカイブ(zip)を開いた時だけ表示。ファイル名はここ(パネルの上)に、曲リスト(曲名+送り
+           ボタン)は他形式の「曲番号」行と同じ位置=各パネルの「ヘッダ情報」の直下へ移動して表示する
+           (main.js renderArchiveBar が #archiveTrackBar を表示中パネルの xxxFileHeader の直後へ付け替える) -->
       <div id="archiveBar" class="toolbar archive-bar" style="display:none;">
         <span class="archive-bar-icon" title="アーカイブ">📦</span>
         <span id="archiveName" class="archive-bar-name"></span>
-        <button id="btnArchivePrev" class="secondary" title="前の曲">−</button>
-        <select id="archiveTrackSelect" class="archive-bar-select"></select>
-        <span id="archiveTrackTotal"></span>
-        <button id="btnArchiveNext" class="secondary" title="次の曲">＋</button>
+      </div>
+      <div id="archiveTrackBar" class="toolbar" style="display:none;">
+        <label style="display:flex;align-items:center;gap:4px;">曲
+          <button id="btnArchivePrev" class="secondary" title="前の曲">−</button>
+          <select id="archiveTrackSelect" class="archive-bar-select"></select>
+          <span id="archiveTrackTotal"></span>
+          <button id="btnArchiveNext" class="secondary" title="次の曲">＋</button>
+        </label>
       </div>
       <div id="soundPanel-none" class="sound-format-panel">
         <p style="color:#9999aa;">NSF/SPC/KSS/GBS/HES/VGM ファイル(または、それらを含む zip)を開くと、ここに再生画面が表示されます。</p>

@@ -797,7 +797,7 @@ button.secondary {
 }
 .archive-bar-name {
   flex: 0 1 auto;
-  max-width: 40%;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
