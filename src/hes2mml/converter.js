@@ -42,9 +42,31 @@
       sampleRate: 44100,
       regsOnly: true
     });
-    const snapshots = capture.snapshots;
+    return MML.HES2MML.convertCapture({
+      snapshots: capture.snapshots,
+      dpcmTrace: capture.dpcmTrace,
+      controlTrace: capture.controlTrace,
+      frameRate: capture.frameRate,
+      trackLabel: String(trackNo)
+    }, options);
+  };
+
+  /**
+   * キャプチャ済みデータからMMLへ変換する(fromHesの後半)。VGM(src/vgm2mml)がHuC6280由来の
+   * VGMを同じ抽出・出力経路で変換するために分離した(抽出器を複製しない方針、ROADMAP.md
+   * VGM節)。fromHes経由の出力は分離前と完全に同一。
+   * @param {object} cap - { snapshots(hesPlayer.js snapshotApu形式のフレーム配列),
+   *   dpcmTrace, controlTrace(captureHesSongAsync由来。無ければ空配列でDDA(PCM)は抽出されない),
+   *   frameRate, trackLabel(コメント用), sourceLabel(コメント用、既定'HES') }
+   */
+  MML.HES2MML.convertCapture = function (cap, options) {
+    options = options || {};
+    const capture = { dpcmTrace: cap.dpcmTrace || [], controlTrace: cap.controlTrace || [] };
+    const snapshots = cap.snapshots;
     const totalFrames = snapshots.length;
-    const frameRate = capture.frameRate;
+    const frameRate = cap.frameRate;
+    const trackNo = cap.trackLabel;
+    const sourceLabel = cap.sourceLabel || 'HES';
 
     const envReg = new MML.Convert.EnvelopeRegistry();
     // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
@@ -110,8 +132,8 @@
 
     const headerComment = [
       `; =========================================================`,
-      `; HES → MML 変換 (PC Engine/TurboGrafx-16: PSG 6ch)`,
-      `; トラック番号 : ${trackNo} (0x${(trackNo & 0xFF).toString(16).toUpperCase()})`,
+      `; ${sourceLabel} → MML 変換 (PC Engine/TurboGrafx-16: PSG 6ch)`,
+      `; トラック番号 : ${trackNo}${isFinite(+trackNo) ? ` (0x${(+trackNo & 0xFF).toString(16).toUpperCase()})` : ''}`,
       `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
       `; 分解能   : 480 TPQN (MIDI準拠)`,
       `; 変換     : Sound Emulation Foundry`,

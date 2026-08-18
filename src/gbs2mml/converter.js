@@ -32,16 +32,32 @@
   function pulsePeriodRaw(freq) { return CPU_CLOCK_NTSC / (16 * freq) - 1; }
 
   MML.GBS2MML.fromGbs = async function (gbsBytes, songIndex, durationSeconds, options) {
-    options = options || {};
-    const header = MML.GBS.parseHeader(gbsBytes);
     const capture = await MML.Emu.captureGbsSongAsync(gbsBytes, {
       songIndex: songIndex || 0,
       durationSeconds: durationSeconds || 60,
       sampleRate: 44100
     });
-    const snapshots = capture.snapshots;
+    return MML.GBS2MML.convertCapture({
+      snapshots: capture.snapshots,
+      frameRate: capture.frameRate,
+      songLabel: String(songIndex)
+    }, options);
+  };
+
+  /**
+   * キャプチャ済みデータからMMLへ変換する(fromGbsの後半)。VGM(src/vgm2mml)がGB DMG由来の
+   * VGMを同じ抽出・出力経路で変換するために分離した(抽出器を複製しない方針、ROADMAP.md
+   * VGM節)。fromGbs経由の出力は分離前と完全に同一。
+   * @param {object} cap - { snapshots(gbsPlayer.js snapshotApu形式のフレーム配列), frameRate,
+   *   songLabel(コメント用), sourceLabel(コメント用、既定'GBS') }
+   */
+  MML.GBS2MML.convertCapture = function (cap, options) {
+    options = options || {};
+    const snapshots = cap.snapshots;
     const totalFrames = snapshots.length;
-    const frameRate = capture.frameRate;
+    const frameRate = cap.frameRate;
+    const songIndex = cap.songLabel;
+    const sourceLabel = cap.sourceLabel || 'GBS';
 
     // 音量変化をソフトウェアエンベロープとして曲全体で共有登録するレジストリ
     // (kss2mml/nsf2mmlと同じ考え方。CH1/CH2/CH3/CH4すべてで共有し、偶然同じ減衰形状が
@@ -123,7 +139,7 @@
 
     const headerComment = [
       `; =========================================================`,
-      `; GBS → MML 変換 (Game Boy: CH1/CH2パルス + CH3波形${hasWave ? '' : '(未使用)'} + CH4ノイズ)`,
+      `; ${sourceLabel} → MML 変換 (Game Boy: CH1/CH2パルス + CH3波形${hasWave ? '' : '(未使用)'} + CH4ノイズ)`,
       `; 曲番号   : ${songIndex}`,
       `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
       `; 分解能   : 480 TPQN (MIDI準拠)`,

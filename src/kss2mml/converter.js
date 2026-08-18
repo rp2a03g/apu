@@ -74,18 +74,40 @@
   }
 
   MML.KSS2MML.fromKss = async function (kssBytes, songIndex, durationSeconds, options) {
-    options = options || {};
     const header = MML.KSS.parseHeader(kssBytes);
     const capture = await MML.Emu.captureKssSongAsync(kssBytes, {
       songIndex: songIndex || 0,
       durationSeconds: durationSeconds || 60,
       sampleRate: 44100
     });
-    const writeLog = capture.writeLog;
+    return MML.KSS2MML.convertCapture({
+      writeLog: capture.writeLog,
+      frameRate: capture.frameRate,
+      clock: MML.KSS.Z80_CLOCK,
+      hasOpll: header.device.mode === 'MSX' && header.device.fmpac,
+      songLabel: String(songIndex)
+    }, options);
+  };
+
+  /**
+   * キャプチャ済みデータからMMLへ変換する(fromKssの後半)。VGM(src/vgm2mml)がAY8910/SCC/
+   * YM2413由来のVGMを同じ抽出・出力経路で変換するために分離した(抽出器を複製しない方針、
+   * ROADMAP.md VGM節)。fromKss経由の出力は分離前と完全に同一。
+   * @param {object} cap - {
+   *   writeLog: フレーム毎の{addr,value,io}配列(PSG=io 0xA0/0xA1, OPLL=io 0x7C/0x7D,
+   *             SCC=mem 0x9800/0xB800台。kss2mml/expansion/*.jsが読む形),
+   *   frameRate, clock(Z80クロック基準3579545。AY/SCCの実チップクロックの2倍),
+   *   hasOpll, songLabel(コメント用), sourceLabel(コメント用、既定'KSS') }
+   */
+  MML.KSS2MML.convertCapture = function (cap, options) {
+    options = options || {};
+    const writeLog = cap.writeLog;
     const totalFrames = writeLog.length;
-    const clock = MML.KSS.Z80_CLOCK;
-    const frameRate = capture.frameRate;
-    const hasOpll = header.device.mode === 'MSX' && header.device.fmpac;
+    const clock = cap.clock || MML.KSS.Z80_CLOCK;
+    const frameRate = cap.frameRate;
+    const hasOpll = !!cap.hasOpll;
+    const songIndex = cap.songLabel;
+    const sourceLabel = cap.sourceLabel || 'KSS';
 
     // 音量変化をソフトウェアエンベロープとして曲全体で共有登録するレジストリ
     // (nsf2mml/converter.jsと同じ考え方。PSG/SCC両方の抽出で共有し、偶然同じ減衰形状が
@@ -194,7 +216,7 @@
 
     const headerComment = [
       `; =========================================================`,
-      `; KSS → MML 変換 (MSX: PSG${hasScc ? ' + SCC' : ''}${hasOpll ? ' + FMPAC' : ''})`,
+      `; ${sourceLabel} → MML 変換 (MSX: PSG${hasScc ? ' + SCC' : ''}${hasOpll ? ' + FMPAC' : ''})`,
       `; 曲番号   : ${songIndex}`,
       `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
       `; 分解能   : 480 TPQN (MIDI準拠)`,

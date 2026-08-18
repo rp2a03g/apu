@@ -2085,6 +2085,7 @@
   setupTempoControl('kss');
   setupTempoControl('gbs');
   setupTempoControl('hes');
+  setupTempoControl('vgm');
 
   // 変換テンポ入力欄の値 (空/不正なら null = 自動検出)
   function getManualBpm(prefix) {
@@ -4898,6 +4899,58 @@
     vgmFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file: filename }) + '</div>';
   }
 
+  async function runVgm2Mml() {
+    if (!loadedVgmBytes) {
+      vgmFileStatusEl.innerHTML = '<div class="error">' + T('先にVGMファイルを読み込んでください。') + '</div>';
+      return;
+    }
+    if (vgmIsRendering) return;
+    const duration = parseInt(vgmPlayDurEl.value, 10) || vgmDefaultDuration(loadedVgmHeader);
+    vgmIsRendering = true;
+    updateVgmPlayButton();
+    vgmFileStatusEl.innerHTML = '<div>' + T('MML変換用キャプチャ中… (数秒かかります)') + '</div>';
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    const vgmManualBpm = getManualBpm('vgm');
+    let result;
+    try {
+      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm });
+    } catch (e) {
+      vgmIsRendering = false;
+      updateVgmPlayButton();
+      vgmFileStatusEl.innerHTML = '<div class="error">' + T('変換エラー: {msg}', { msg: e.message }) + '</div>';
+      return;
+    }
+    vgmIsRendering = false;
+    updateVgmPlayButton();
+
+    mmlSourceEl.value = result.mml;
+    mmlSourceEl.dispatchEvent(new Event('input'));
+
+    // 委譲先ファミリに応じた波形エディタ反映(nsf2mml: FDS/N163、kss2mml: SCC→N163、gbs2mml: GB波形→FDS)
+    if (result.fdsWave && MML.WaveformEditor.fdsWave) MML.WaveformEditor.fdsWave.setData(result.fdsWave);
+    if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
+    for (const f of (result.dpcmFiles || [])) {
+      downloadBin(f.name, f.bytes);
+      dpcmSampleCache[f.name] = f.bytes;
+    }
+
+    // 借用先の説明(ファミリごと)。ネイティブ変換(NES)は借用無し。
+    const borrowNote = ({
+      kss: T('(FME-7/N163/VRC7を借用して再生)'), sn: T('(FME-7と2A03ノイズを借用して再生)'),
+      gb: T('(2A03/FDSを借用して再生)'), hes: T('(N163を借用して再生)'), nes: ''
+    })[result.family] || '';
+    const ignoredMsg = (result.ignoredChips && result.ignoredChips.length)
+      ? T('。対象外の音源は無視: {chips}', { chips: result.ignoredChips.join(', ') }) : '';
+    vgmFileStatusEl.innerHTML =
+      '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力{borrow}{ignored}',
+        { mode: vgmManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: (result.chips || []).join(', '), borrow: borrowNote, ignored: ignoredMsg }) + '</div>';
+
+    rangeStartSec = 0;
+    rangeEndSec = null;
+    prepareMmlStream(true);
+  }
+
   vgmFileEl.addEventListener('change', loadVgmFile);
   document.getElementById('btnVgmFilePlay').addEventListener('click', () => {
     playVgmStream();
@@ -4908,6 +4961,7 @@
     keyboardDisplay.setMode('nsf');
   });
   document.getElementById('btnVgmExportWav').addEventListener('click', exportVgmWav);
+  document.getElementById('btnVgm2Mml').addEventListener('click', runVgm2Mml);
 
   // ==========================================================================
   // 統合サウンドファイルウィンドウ: 拡張子でNSF/SPC/KSSパネルを切り替える

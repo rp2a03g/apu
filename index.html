@@ -389,6 +389,14 @@
             <span>WAVE</span>
           </button>
         </div>
+        <div class="toolbar">
+          <button id="btnVgm2Mml" class="secondary">to MML</button>
+          <label style="display:flex;align-items:center;gap:4px;">変換テンポ
+            <input type="number" id="vgmTempoBpm" placeholder="自動" min="40" max="400" style="width:70px" />
+          </label>
+          <button id="btnVgmTempoTap" class="secondary">👆 タップ</button>
+          <button id="btnVgmTempoClear" class="secondary">自動</button>
+        </div>
         <div id="vgmFileStatus" class="output" style="min-height:40px;"></div>
       </div>
     </div>
@@ -677,6 +685,8 @@
   <script src="src/emulator/expansion/sn76489.js"></script>
   <script src="src/emulator/vgmPlayer.js"></script>
   <script src="src/audio/vgm-stream-player.js"></script>
+  <script src="src/vgm2mml/expansion/sn76489.js"></script>
+  <script src="src/vgm2mml/converter.js"></script>
   <!-- 全マークアップの後・main.js の前。ここで表示言語が確定する -->
   <script src="src/ui/i18nDom.js"></script>
   <script src="src/ui/editorSettings.js"></script>
