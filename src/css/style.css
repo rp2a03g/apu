@@ -785,6 +785,31 @@ button.secondary {
   padding: 3px 5px;
 }
 
+/* アーカイブ(zip)曲リストバー(サウンドファイルを開くウィンドウ内、zipを開いた時だけ表示) */
+.compact-soundplay .archive-bar {
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0 6px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-raised);
+}
+.archive-bar-name {
+  flex: 0 1 auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.compact-soundplay .archive-bar-select {
+  flex: 1 1 auto;
+  min-width: 80px;
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
 /* 再生/停止/WAVE書き出しをアイコン(+ラベル)ボタンにする(サウンドファイルを開くウィンドウ内) */
 .icon-btn-sm {
   display: inline-flex;

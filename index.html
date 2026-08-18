@@ -155,16 +155,27 @@
       <button class="float-window-close" aria-label="閉じる">×</button>
     </div>
     <div class="float-window-body compact-soundplay">
-      <input type="file" id="soundFile" accept=".nsf,.spc,.kss,.gbs,.hes,.mml,.txt" style="display:none" />
+      <input type="file" id="soundFile" accept=".nsf,.spc,.kss,.gbs,.hes,.vgm,.vgz,.zip,.mml,.txt" style="display:none" />
       <!-- 内部的にフォーマット別ロジックを呼び出すための非表示input（互換用） -->
       <input type="file" id="nsfFile" accept=".nsf" style="display:none" />
       <input type="file" id="spcFile" accept=".spc" style="display:none" />
       <input type="file" id="kssFile" accept=".kss" style="display:none" />
       <input type="file" id="gbsFile" accept=".gbs" style="display:none" />
       <input type="file" id="hesFile" accept=".hes" style="display:none" />
+      <input type="file" id="vgmFile" accept=".vgm,.vgz" style="display:none" />
 
+      <!-- アーカイブ(zip)曲リストバー: zipを開いた時だけ表示。中の曲(NSF/SPC/KSS/GBS/HES/VGM)を
+           曲番号のように送る。SPC/VGMのような1ファイル1曲の形式でも他形式と同じ曲送りUIになる -->
+      <div id="archiveBar" class="toolbar archive-bar" style="display:none;">
+        <span class="archive-bar-icon" title="アーカイブ">📦</span>
+        <span id="archiveName" class="archive-bar-name"></span>
+        <button id="btnArchivePrev" class="secondary" title="前の曲">−</button>
+        <select id="archiveTrackSelect" class="archive-bar-select"></select>
+        <span id="archiveTrackTotal"></span>
+        <button id="btnArchiveNext" class="secondary" title="次の曲">＋</button>
+      </div>
       <div id="soundPanel-none" class="sound-format-panel">
-        <p style="color:#9999aa;">NSF/SPC/KSS/GBS/HESファイルを開くと、ここに再生画面が表示されます。（今後 VGM 対応予定）</p>
+        <p style="color:#9999aa;">NSF/SPC/KSS/GBS/HES/VGM ファイル(または、それらを含む zip)を開くと、ここに再生画面が表示されます。</p>
       </div>
 
       <!-- NSFパネル -->
@@ -357,6 +368,28 @@
           <button id="btnHesTempoClear" class="secondary">自動</button>
         </div>
         <div id="hesFileStatus" class="output" style="min-height:40px;"></div>
+      </div>
+      <!-- VGMパネル(1ファイル1曲。曲送りは下記アーカイブ(zip)バーが担う) -->
+      <div id="soundPanel-vgm" class="sound-format-panel" style="display:none;">
+        <h3>ヘッダ情報 (VGM)</h3>
+        <div id="vgmFileHeader" class="output" style="min-height:140px;"></div>
+        <div class="toolbar" style="margin-top:6px;">
+          <label style="display:flex;align-items:center;gap:4px;">再生時間(秒)
+            <input type="number" id="vgmPlayDuration" value="180" min="1" max="3600" style="width:70px" />
+          </label>
+          <button id="btnVgmFilePlay" class="icon-btn-sm" title="再生">
+            <svg class="icon-play" viewBox="0 0 20 20" fill="currentColor"><path d="M6.5 4.2v11.6c0 .8.9 1.3 1.6.9l9-5.8c.6-.4.6-1.4 0-1.8l-9-5.8c-.7-.4-1.6.1-1.6.9Z"/></svg>
+            <svg class="icon-pause" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="4" width="3.4" height="12"/><rect x="11.6" y="4" width="3.4" height="12"/></svg>
+          </button>
+          <button id="btnVgmFileStop" class="icon-btn-sm secondary" title="停止">
+            <svg viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1.2"/></svg>
+          </button>
+          <button id="btnVgmExportWav" class="icon-btn-sm icon-btn-label secondary" title="WAVE書き出し">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v9"/><path d="M6.2 8.8 10 12.6l3.8-3.8"/><path d="M4 15.5h12"/></svg>
+            <span>WAVE</span>
+          </button>
+        </div>
+        <div id="vgmFileStatus" class="output" style="min-height:40px;"></div>
       </div>
     </div>
   </section>
@@ -639,6 +672,10 @@
   <script src="src/hes2mml/expansion/noise.js"></script>
   <script src="src/hes2mml/expansion/dpcm.js"></script>
   <script src="src/hes2mml/converter.js"></script>
+  <script src="src/archive/archive.js"></script>
+  <script src="src/vgm/vgmHeader.js"></script>
+  <script src="src/emulator/vgmPlayer.js"></script>
+  <script src="src/audio/vgm-stream-player.js"></script>
   <!-- 全マークアップの後・main.js の前。ここで表示言語が確定する -->
   <script src="src/ui/i18nDom.js"></script>
   <script src="src/ui/editorSettings.js"></script>

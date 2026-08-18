@@ -483,7 +483,10 @@
     const isKss = chips.includes('kss');
     const isGbs = chips.includes('gbs');
     const isHes = chips.includes('hes');
-    if (!isKss && !isGbs && !isHes) {
+    // VGMはヘッダで使うチップが決まる: NES APUを含まないVGM(MSX/GB/PCE系)では2A03行を出さない
+    // (main.js側が chips に 'vgm' と、NES APU使用時のみ 'nes' を入れる)。
+    const isVgmNoNes = chips.includes('vgm') && !chips.includes('nes');
+    if (!isKss && !isGbs && !isHes && !isVgmNoNes) {
     // 2A03パルスのスイープユニット強制ミュート(emulator apu2a03.js PulseChannel.isMuted /
     // nsf2mml converter.js extractPulseEventsと同じ規則): 周期<8 または目標周期>$7FF
     // (特に$4001/$4005=$00のまま周期$400以上=o2a以下)は実際には鳴らないので非アクティブ表示
@@ -2427,7 +2430,14 @@
     // [[n163-capture-snapshot-and-numch]]参照)。ライブRAMスナップショットなら常に正しい。
     setRollTimelineFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots) {
       this._rollCursor = {};
-      if (!regSnapshots || totalFrames <= 0) { this._rollTimeline = null; return; }
+      this._rollTimeline = this.buildRollTracksFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots);
+    }
+
+    // setRollTimelineFromRegSnapshots()のトラック構築部分。VGM(main.js playVgmStream)のように
+    // NES APU由来のトラックと他チップ(GB/HuC6280/AY/SCC/OPLL)由来のトラックを1本の
+    // タイムラインへ連結したい呼び出し側のために、差し替えず配列を返す版を分離した。
+    buildRollTracksFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots) {
+      if (!regSnapshots || totalFrames <= 0) return null;
       const wl = writeLog || [];
       const extraSnaps = {
         vrc7: chips.includes('vrc7') ? buildVrc7Snapshots(wl) : null,
@@ -2437,7 +2447,7 @@
         fme7: chips.includes('fme7') ? buildFme7Snapshots(wl) : null,
       };
       const frameDur = samplesPerFrame / sampleRate;
-      this._rollTimeline = buildNoteTimelineFromChannelFrames(
+      return buildNoteTimelineFromChannelFrames(
         (f) => extractChannels(regSnapshots[f] || {}, extraSnaps, f, chips),
         totalFrames, frameDur
       );

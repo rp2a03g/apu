@@ -297,4 +297,7 @@
   };
 
   Emu.HesPlayer = HesPlayer;
+  // VGM(vgmPlayer.js captureVgmSongAsync)がHuC6280チップのフレームスナップショットを
+  // hes2mml抽出器と同じ形で積むために公開する(gbsPlayer.jsのsnapshotGbApuForCaptureと同じ)。
+  Emu.snapshotHesApuForCapture = snapshotApu;
 })(window);

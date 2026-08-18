@@ -193,4 +193,7 @@
   };
 
   Emu.GbsPlayer = GbsPlayer;
+  // VGM(vgmPlayer.js captureVgmSongAsync)がGB DMGチップのフレームスナップショットを
+  // gbs2mml抽出器と同じ形で積むために公開する(GBS自身はモジュール内で直接呼ぶ)。
+  Emu.snapshotGbApuForCapture = snapshotApu;
 })(window);

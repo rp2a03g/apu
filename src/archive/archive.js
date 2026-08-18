@@ -1,0 +1,211 @@
+/*
+ * アーカイブ/圧縮の汎用リーダー
+ * MML.Archive
+ *
+ * 目的: 「1 zip = 1ゲーム分の複数トラック(+.m3u)」という配布単位(vgmrips等)を、
+ * VGMだけでなく SPC/NSF/KSS/GBS/HES すべてに被せられる「曲リストの器」として扱う。
+ * VGM(1ファイル1曲)/SPC(1ファイル1曲)のように単体では曲番号の概念が無い形式でも、
+ * zipを開けば他形式と同じ「曲送り」UIが成立する。
+ *
+ * 外部ライブラリは使わない(INV-1)。解凍はブラウザ標準の DecompressionStream
+ * ('deflate-raw' / 'gzip')。DOM非依存(INV-4)。
+ *
+ * - zip: セントラルディレクトリを末尾のEOCDから辿る。対応する圧縮方式は
+ *   store(0)とdeflate(8)のみ。それ以外は readEntry() が明示エラーを投げる。
+ *   zip64・暗号化・マルチパートは非対応(vgmrips/zophar系の配布物には出てこない)。
+ * - gzip: 拡張子は当てにせず先頭2バイト(1f 8b)で判別する
+ *   (「.vgm」拡張子で中身がgzipのファイルが実在する。ROADMAP.md VGM節参照)。
+ * - m3u: zip内に .m3u があればその行順をトラック順にする。無ければファイル名の自然順。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Archive = MML.Archive = MML.Archive || {};
+
+  const SIG_LOCAL = 0x04034b50;   // 'PK\x03\x04'
+  const SIG_CENTRAL = 0x02014b50; // 'PK\x01\x02'
+  const SIG_EOCD = 0x06054b50;    // 'PK\x05\x06'
+
+  const utf8 = new TextDecoder('utf-8');
+  // zip仕様上、bit11(EFS)が立っていなければファイル名の文字コードは規定されない
+  // (歴史的にはCP437、日本製アーカイバはShift-JIS)。ブラウザ標準のTextDecoderは
+  // Shift-JISも扱えるので、EFS無しなら一度Shift-JISとして解釈を試みる。
+  let sjis = null;
+  try { sjis = new TextDecoder('shift_jis'); } catch (e) { sjis = null; }
+
+  function u16(b, o) { return b[o] | (b[o + 1] << 8); }
+  function u32(b, o) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0; }
+
+  Archive.isZip = function (bytes) {
+    return bytes && bytes.length >= 4 && u32(bytes, 0) === SIG_LOCAL;
+  };
+
+  Archive.isGzip = function (bytes) {
+    return bytes && bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  };
+
+  async function decompress(bytes, format) {
+    if (typeof DecompressionStream === 'undefined') {
+      throw new Error('DecompressionStream unsupported'); // 呼び出し側でi18n化する
+    }
+    const ds = new DecompressionStream(format);
+    const writer = ds.writable.getWriter();
+    writer.write(bytes);
+    writer.close();
+    const chunks = [];
+    const reader = ds.readable.getReader();
+    let total = 0;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+    const out = new Uint8Array(total);
+    let pos = 0;
+    for (const c of chunks) { out.set(c, pos); pos += c.length; }
+    return out;
+  }
+
+  /** gzip(.vgz等)を解凍する。gzipでなければそのまま返す。 */
+  Archive.gunzipIfNeeded = async function (bytes) {
+    if (!Archive.isGzip(bytes)) return bytes;
+    return decompress(bytes, 'gzip');
+  };
+
+  /**
+   * zipのセントラルディレクトリを解析してエントリ一覧を返す(同期・データは読まない)。
+   * @param {Uint8Array} bytes
+   * @returns {{entries: Array<{name:string, size:number, compressedSize:number, method:number, localOffset:number, isDir:boolean}>}}
+   */
+  Archive.parseZip = function (bytes) {
+    if (!Archive.isZip(bytes)) throw new Error('not a zip');
+    // EOCD(22バイト固定+コメント最大65535)を末尾から探す
+    const minPos = Math.max(0, bytes.length - 22 - 65535);
+    let eocd = -1;
+    for (let p = bytes.length - 22; p >= minPos; p--) {
+      if (u32(bytes, p) === SIG_EOCD) { eocd = p; break; }
+    }
+    if (eocd < 0) throw new Error('zip: EOCD not found');
+    const count = u16(bytes, eocd + 10);
+    const cdSize = u32(bytes, eocd + 12);
+    const cdOffset = u32(bytes, eocd + 16);
+    if (cdOffset + cdSize > bytes.length) throw new Error('zip: central directory out of range');
+
+    const entries = [];
+    let p = cdOffset;
+    for (let i = 0; i < count; i++) {
+      if (u32(bytes, p) !== SIG_CENTRAL) throw new Error('zip: bad central directory entry');
+      const flags = u16(bytes, p + 8);
+      const method = u16(bytes, p + 10);
+      const compressedSize = u32(bytes, p + 20);
+      const size = u32(bytes, p + 24);
+      const nameLen = u16(bytes, p + 28);
+      const extraLen = u16(bytes, p + 30);
+      const commentLen = u16(bytes, p + 32);
+      const localOffset = u32(bytes, p + 42);
+      const nameBytes = bytes.subarray(p + 46, p + 46 + nameLen);
+      const efs = !!(flags & 0x0800);
+      let name;
+      if (efs || !sjis) name = utf8.decode(nameBytes);
+      else {
+        // EFS無し: ASCII範囲のみならどちらでも同じ。非ASCIIを含むならShift-JISを優先
+        // (UTF-8として不正なら置換文字U+FFFDが出るのでそれで判定する)
+        const asUtf8 = utf8.decode(nameBytes);
+        name = asUtf8.includes('�') ? sjis.decode(nameBytes) : asUtf8;
+      }
+      name = name.replace(/\\/g, '/');
+      entries.push({ name, size, compressedSize, method, localOffset, isDir: name.endsWith('/'), encrypted: !!(flags & 1) });
+      p += 46 + nameLen + extraLen + commentLen;
+    }
+    return { entries };
+  };
+
+  /**
+   * エントリの中身を解凍して返す。
+   * @param {Uint8Array} bytes - zip全体
+   * @param {object} entry - parseZip()のエントリ
+   * @returns {Promise<Uint8Array>}
+   */
+  Archive.readEntry = async function (bytes, entry) {
+    const p = entry.localOffset;
+    if (u32(bytes, p) !== SIG_LOCAL) throw new Error('zip: bad local header');
+    if (entry.encrypted) throw new Error('zip: encrypted entry');
+    const nameLen = u16(bytes, p + 26);
+    const extraLen = u16(bytes, p + 28);
+    const dataStart = p + 30 + nameLen + extraLen;
+    const raw = bytes.subarray(dataStart, dataStart + entry.compressedSize);
+    if (entry.method === 0) return raw.slice();
+    if (entry.method === 8) return decompress(raw, 'deflate-raw');
+    throw new Error('zip: unsupported compression method ' + entry.method);
+  };
+
+  function baseName(path) {
+    const i = path.lastIndexOf('/');
+    return i >= 0 ? path.slice(i + 1) : path;
+  }
+  function extOf(name) {
+    const b = baseName(name);
+    const i = b.lastIndexOf('.');
+    return i >= 0 ? b.slice(i + 1).toLowerCase() : '';
+  }
+  Archive.baseName = baseName;
+  Archive.extOf = extOf;
+
+  // ファイル名の自然順(数字は数値として比較: "2" < "10")
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+  Archive.naturalCompare = (a, b) => collator.compare(a, b);
+
+  /**
+   * zipエントリ一覧から「曲リスト」を作る。
+   * @param {Array} entries - parseZip().entries
+   * @param {Set<string>|string[]} exts - 対象拡張子(小文字、ドット無し)
+   * @param {(entry)=>Promise<Uint8Array>} [readFn] - .m3uを読むための関数(省略時はm3u無視)
+   * @returns {Promise<Array<{entry:object, title:string}>>}
+   *   title は m3u に "name.vgm::TITLE" 形式(vgmrips形式の拡張)があればそれ、無ければファイル名(拡張子除く)
+   */
+  Archive.buildPlaylist = async function (entries, exts, readFn) {
+    const extSet = new Set(Array.from(exts).map(e => e.toLowerCase()));
+    const files = entries.filter(e => !e.isDir && extSet.has(extOf(e.name)));
+    if (files.length === 0) return [];
+
+    // .m3u があれば行順を優先する。複数ある場合(vgmrips系は "01 xxx.m3u" のように
+    // 曲ごとに1つ置く配布物もある: GG Aleste)は、最も多くのエントリを列挙している
+    // 1本を採用し、それでも足りない分は自然順で末尾に足す。
+    let ordered = null;
+    if (readFn) {
+      const m3us = entries.filter(e => !e.isDir && (extOf(e.name) === 'm3u' || extOf(e.name) === 'm3u8'));
+      let best = null;
+      for (const m of m3us) {
+        let text;
+        try {
+          const raw = await readFn(m);
+          text = new TextDecoder(extOf(m.name) === 'm3u8' ? 'utf-8' : 'utf-8', { fatal: false }).decode(raw);
+          if (text.includes('�') && sjis) text = sjis.decode(raw);
+        } catch (e) { continue; }
+        const dirOfM3u = m.name.includes('/') ? m.name.slice(0, m.name.lastIndexOf('/') + 1) : '';
+        const list = [];
+        const seen = new Set();
+        for (let line of text.split(/\r?\n/)) {
+          line = line.trim();
+          if (!line || line.startsWith('#')) continue;
+          // "file.vgm::TITLE" / "file.vgm|..." 形式は最初のセパレータまでをファイル名とみなす
+          const fname = line.split('::')[0].split('|')[0].trim().replace(/\\/g, '/');
+          const key = baseName(fname).toLowerCase();
+          const hit = files.find(f => f.name.toLowerCase() === (dirOfM3u + fname).toLowerCase())
+                   || files.find(f => baseName(f.name).toLowerCase() === key);
+          if (hit && !seen.has(hit)) { seen.add(hit); list.push(hit); }
+        }
+        if (!best || list.length > best.length) best = list;
+      }
+      if (best && best.length > 0) ordered = best;
+    }
+
+    const rest = files.filter(f => !ordered || !ordered.includes(f)).sort((a, b) => Archive.naturalCompare(a.name, b.name));
+    const all = (ordered || []).concat(rest);
+    return all.map(entry => {
+      const b = baseName(entry.name);
+      const dot = b.lastIndexOf('.');
+      return { entry, title: dot > 0 ? b.slice(0, dot) : b };
+    });
+  };
+})(window);

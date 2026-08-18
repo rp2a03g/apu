@@ -113,15 +113,15 @@
     'タップ1回目… 拍に合わせて続けてタップ': 'First tap... keep tapping on the beat',
     '{n}回タップ → {bpm} BPM': '{n} taps → {bpm} BPM',
     '自動検出に戻しました': 'Back to auto detection',
-    '対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES, MML, TXT)':
-      'Unsupported file type: .{ext}\n(Supported: NSF, SPC, KSS, GBS, HES, MML, TXT)',
+    '対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, MML, TXT)':
+      'Unsupported file type: .{ext}\n(Supported: NSF, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, MML, TXT)',
     'NSF (ファミコン)': 'NSF (NES)',
     'SPC (スーパーファミコン)': 'SPC (SNES)',
     'KSS (MSX)': 'KSS (MSX)',
     'GBS (Game Boy)': 'GBS (Game Boy)',
     'HES (PC Engine)': 'HES (PC Engine)',
-    'NSF/SPC/KSS/GBS/HESファイルを開くと、ここに再生画面が表示されます。（今後 VGM 対応予定）':
-      'Open an NSF/SPC/KSS/GBS/HES file to show the player here. (VGM support planned.)',
+    'NSF/SPC/KSS/GBS/HES/VGM ファイル(または、それらを含む zip)を開くと、ここに再生画面が表示されます。':
+      'Open an NSF/SPC/KSS/GBS/HES/VGM file (or a zip containing them) to show the player here.',
 
     // ---- NSFパネル ----
     'ヘッダ情報 (NSF)': 'Header (NSF)',
@@ -218,6 +218,32 @@
     '先頭トラック: {n} (0x{hex})': 'First track : {n} (0x{hex})',
     'データ      : {size}byte @ 0x{addr}': 'Data        : {size} bytes @ 0x{addr}',
     '再生中: トラック{track}  (最大 {time})': 'Playing: track {track}  (max {time})',
+
+    // ---- VGMパネル / アーカイブ(zip)曲リスト ----
+    'ヘッダ情報 (VGM)': 'Header (VGM)',
+    'VGMヘッダが不正です。': 'Invalid VGM header.',
+    '先にVGMファイルを読み込んでください。': 'Load a VGM file first.',
+    'バージョン  : {ver}': 'Version     : {ver}',
+    '曲名        : {title}': 'Track       : {title}',
+    'ゲーム      : {game}': 'Game        : {game}',
+    'システム    : {system}': 'System      : {system}',
+    '日付        : {date}': 'Date        : {date}',
+    '音源        : {chips}': 'Chips       : {chips}',
+    '[未対応・読み飛ばし]': '[unsupported, skipped]',
+    '長さ        : {time}{loop}': 'Length      : {time}{loop}',
+    ' (ループ {loop})': ' (loop {loop})',
+    ' (ループ無し)': ' (no loop)',
+    'レート      : {rate} Hz': 'Rate        : {rate} Hz',
+    'このVGMが使う音源({chips})はまだ対応していません(無音になります)。':
+      'The chips used by this VGM ({chips}) are not supported yet (it will be silent).',
+    '再生中 (最大 {time})': 'Playing (max {time})',
+    'アーカイブ': 'Archive',
+    '前の曲': 'Previous track',
+    '次の曲': 'Next track',
+    'アーカイブ内のファイルを開けませんでした: {msg}': 'Could not open a file inside the archive: {msg}',
+    'zipを解析できませんでした: {msg}': 'Could not parse the zip: {msg}',
+    'zip内に対応するサウンドファイル(NSF/SPC/KSS/GBS/HES/VGM)がありません。':
+      'The zip contains no supported sound files (NSF/SPC/KSS/GBS/HES/VGM).',
     '(レンダリング中… {pct}%)': '(rendering... {pct}%)',
     'レンダリングエラー: {msg}': 'Render error: {msg}',
     'MML変換完了 ({mode} {bpm} BPM、音源: {chips}{dpcm}) → MMLエディタに出力(N163を借用して再生)':
