@@ -291,6 +291,10 @@
     if (sn) return { section: 'expansion', chip: 'sn76489', type: 'array', index: +sn[1] <= 3 ? +sn[1] - 1 : +sn[1] };
     if (id === 'SNN') return { section: 'expansion', chip: 'sn76489', type: 'array', index: 3 };
     if (id === 'SNN2') return { section: 'expansion', chip: 'sn76489', type: 'array', index: 7 };
+    // VGM: YM2612(YM1-6=FM ch、YMDA=DAC)。chip.mute[]はFM 0-5、DAC 6
+    const ym = id.match(/^YM(d)$/);
+    if (ym) return { section: 'expansion', chip: 'ym2612', type: 'array', index: +ym[1] - 1 };
+    if (id === 'YMDA') return { section: 'expansion', chip: 'ym2612', type: 'array', index: 6 };
     if (KF_RHYTHM_INDEX[id] !== undefined) return { section: 'expansion', chip: 'opll', type: 'array', index: KF_RHYTHM_INDEX[id] };
     return null;
   }
@@ -316,6 +320,7 @@
     { header: 'LR35902 (Game Boy)', ids: { GALL: 'ALL', GB1: 'P1', GB2: 'P2', GN: 'No', GW: 'Wave' } },
     { header: 'HuC6280(PC Engine / TurboGrafx-16)', ids: { HALL: 'ALL', PSG0: 'Ch0', PSG1: 'Ch1', PSG2: 'Ch2', PSG3: 'Ch3', PSG4: 'Ch4', PSG5: 'Ch5' } },
     { header: 'SN76489 (SG-1000 / Master System / Game Gear / Mega Drive PSG)', ids: { SN1: 'P1', SN2: 'P2', SN3: 'P3', SNN: 'No', SN4: 'P1(2)', SN5: 'P2(2)', SN6: 'P3(2)', SNN2: 'No(2)' } },
+    { header: 'YM2612 (OPN2 , Mega Drive FM)', ids: { YMDA: 'DAC' }, prefix: 'YM', name: (id) => 'FM' + id.slice(2) },
   ];
   function getChannelDisplay(id) {
     for (const g of CHANNEL_DISPLAY_GROUPS) {
@@ -820,6 +825,27 @@
           active: c.active, noise: true, noiseIndex: gbNoiseFreqToIndex(c.noiseFreq), noiseFreq: c.noiseFreq, noiseShort: !c.white,
           panL: c.panL, panR: c.panR });
       }
+      }
+    }
+
+    if (chips.includes('ym2612')) {
+      // YM2612(VGM: メガドライブ): 4op FM×6ch(VRC7/OPLL行と同じFM波形表示)+DAC行。ライブ関数
+      // 優先、無ければ先読みスナップショット配列(extraSnaps.ym2612[frameIdx]、ロール構築用)。
+      const live = extraSnaps && extraSnaps.ymLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.ym2612 ? extraSnaps.ym2612[frameIdx] : null);
+      const COLS = ['#ffcc00', '#ffdd44', '#ffe566', '#ffee88', '#fff2aa', '#fff8cc'];
+      for (let ch = 0; ch < 6; ch++) {
+        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, waveData: null };
+        const wave = (c.waveData && c.waveData.length && c.active)
+          ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
+          : { t: 'fm', nx: 256, ny: 256 };
+        channels.push({ id: `YM${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave, active: c.active, panL: c.panL, panR: c.panR });
+      }
+      {
+        const d = s ? s.dac : { enabled: false, level: 0, vol: 0, active: false };
+        channels.push({ id: 'YMDA', color: '#aa44ff', freq: 0, vol: d.vol, rawVol: d.enabled ? d.level : null, rawVolMax: 255,
+          wave: { t: 'sample' }, active: !!d.active, sample: true, dmcReg: d.level, dmcRateIdx: 15, dmcFreq: 0 });
       }
     }
 
@@ -2416,6 +2442,7 @@
       this._extraSnaps.gbsApuLive = typeof result.getGbsApu === 'function' ? result.getGbsApu : null;
       this._extraSnaps.hesApuLive = typeof result.getHesApu === 'function' ? result.getHesApu : null;
       this._extraSnaps.snLive = typeof result.getSn76489 === 'function' ? result.getSn76489 : null;
+      this._extraSnaps.ymLive = typeof result.getYm2612 === 'function' ? result.getYm2612 : null;
       this._lastDmc4011 = null; // 曲切替時にDMC書き込み検出をリセット
       this._rollSongTimeBase = 0; // 曲切替時にピアノロールの経過時間もリセット
       this._rollLastRawPos = null;

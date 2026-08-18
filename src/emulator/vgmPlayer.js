@@ -7,7 +7,9 @@
  * 各チップへ流す」だけ。チップ本体はすべて既存実装を流用する:
  *   NES APU(+FDS)=apu2a03.js/fds.js, GB DMG=apuGb.js, HuC6280=apuHuC6280.js,
  *   AY8910=ay8910Msx.js, K051649(SCC)=sccAudio.js, YM2413=opllMsx.js,
- *   SN76489(SMS/GG/SG-1000/MD PSG)=expansion/sn76489.js(VGM段階2で新規実装)
+ *   SN76489(SMS/GG/SG-1000/MD PSG)=expansion/sn76489.js(VGM段階2で新規実装),
+ *   YM2612(OPN2、MD FM)=expansion/ym2612.js(VGM段階4で新規実装。データブロック0x00のPCM、
+ *   0xE0シーク、0x8n DAC書込+待ち、DACストリーム制御0x90-0x95もここで扱う)
  * ヘッダのクロックが非ゼロでも未実装のチップは、コマンド長規則で読み飛ばすだけ
  * (ROADMAP.md VGM節: 全チップ実装は不要)。
  *
@@ -28,6 +30,7 @@
  *  - GB DMG: ヘッダ値(4194304)そのまま。
  *  - HuC6280: ヘッダ値(3579545)そのまま(PSGクロック)。
  *  - SN76489: ヘッダ値(3579545)そのまま(内部/16分周はチップ側)。
+ *  - YM2612: ヘッダ値(7670453)そのまま(内部/144で1サンプル=53267Hz)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -40,7 +43,7 @@
   // 各フォーマットのストリームプレイヤーが使っている実測校正済みgain
   // (src/audio/*-stream-player.js 参照)。VGMは複数チップの合算なので、チップごとに
   // 由来フォーマットのgainを掛けてから足し、出力段のgainは1.0にする。
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -180,10 +183,23 @@
     };
   }
 
+  function makeYm2612Adapter(info) {
+    const chip = new Emu.YM2612Audio(info.clock);
+    return {
+      id: 'ym2612', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.ym2612,
+      // 0x52 aa dd(port0=ch1-3) / 0x53(port1=ch4-6)。DAC(0x2A)もここを通る
+      write(port, aa, dd) { chip.writeReg(port, aa, dd); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.ym2612) Emu.applyMute(chip.mute, e.ym2612); },
+      applyVolume(v) { const e = v.expansion || v; if (e.ym2612) Emu.applyVolume(chip.vol, e.ym2612); }
+    };
+  }
+
   const ADAPTERS = {
     nes: makeNesAdapter, gb: makeGbAdapter, huc6280: makeHucAdapter,
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
-    sn76489: makeSnAdapter
+    sn76489: makeSnAdapter, ym2612: makeYm2612Adapter
   };
 
   // ---------------------------------------------------------------------------
@@ -262,8 +278,13 @@
       this.loopCount = 0;
       this._lastLoopSample = -1;
       this.vgmAccum = 0;
-      this.dataBlocks = [];    // {type, data}
-      this.pcmBank = 0;        // 0xE0 シーク位置(YM2612 PCM用、未使用)
+      this.dataBlocks = [];    // {type, size}(表示用)
+      // データバンク(0x67 の非圧縮ストリーム 0x00-0x3F): type → { data: Uint8Array(連結), blocks: [{start,len}] }
+      // YM2612 PCM(type 0x00)は 0x8n(DAC書込+待ち)と 0xE0(シーク)が使う
+      this.dataBanks = {};
+      this.pcmPos = 0;         // 0xE0 シーク位置(YM2612 PCMバンク内)
+      // DACストリーム制御(0x90-0x95): id → {chipType, port, cmd, bankType, stepSize, stepBase, freq, acc, pos, end, loop, reverse, active}
+      this.streams = {};
       this.overrideWait62 = 0; // 0x64 による 0x62/0x63 の待ち上書き
       this.overrideWait63 = 0;
       this.unknownOps = 0;
@@ -311,10 +332,49 @@
           case 0xB4: this._chipWrite('nes', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB9: this._chipWrite('huc6280', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xD2: this._sccWrite(d[p] & 0x7F, d[p + 1], d[p + 2], !!(d[p] & 0x80)); this.pos = p + 3; break;
-          case 0xE0: this.pcmBank = (d[p] | (d[p + 1] << 8) | (d[p + 2] << 16) | (d[p + 3] << 24)) >>> 0; this.pos = p + 4; break;
+          case 0x52: this._ymWrite(0, d[p], d[p + 1], false); this.pos = p + 2; break;
+          case 0x53: this._ymWrite(1, d[p], d[p + 1], false); this.pos = p + 2; break;
+          case 0xA2: this._ymWrite(0, d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2612
+          case 0xA3: this._ymWrite(1, d[p], d[p + 1], true); this.pos = p + 2; break;
+          case 0xE0: this.pcmPos = (d[p] | (d[p + 1] << 8) | (d[p + 2] << 16) | (d[p + 3] << 24)) >>> 0; this.pos = p + 4; break;
+          case 0x90: { // ストリーム設定: ss tt pp cc
+            const s = this._stream(d[p]); s.chipType = d[p + 1] & 0x7F; s.second = !!(d[p + 1] & 0x80); s.port = d[p + 2]; s.cmd = d[p + 3];
+            this.pos = p + 4; break;
+          }
+          case 0x91: { // データバンク: ss dd ll bb
+            const s = this._stream(d[p]); s.bankType = d[p + 1]; s.stepSize = Math.max(1, d[p + 2]); s.stepBase = d[p + 3];
+            this.pos = p + 4; break;
+          }
+          case 0x92: { // 周波数: ss ff ff ff ff
+            const s = this._stream(d[p]); s.freq = (d[p + 1] | (d[p + 2] << 8) | (d[p + 3] << 16) | (d[p + 4] << 24)) >>> 0;
+            this.pos = p + 5; break;
+          }
+          case 0x93: { // 開始: ss aa aa aa aa mm ll ll ll ll
+            const s = this._stream(d[p]);
+            const start = (d[p + 1] | (d[p + 2] << 8) | (d[p + 3] << 16) | (d[p + 4] << 24)) >>> 0;
+            const mode = d[p + 5];
+            const len = (d[p + 6] | (d[p + 7] << 8) | (d[p + 8] << 16) | (d[p + 9] << 24)) >>> 0;
+            this._streamStart(s, start === 0xFFFFFFFF ? -1 : start, mode, len);
+            this.pos = p + 10; break;
+          }
+          case 0x94: { const s = this.streams[d[p]]; if (s) s.active = false; this.pos = p + 1; break; } // 停止
+          case 0x95: { // 高速開始: ss bb bb ff (ブロック番号、bit0=ループ, bit4=逆再生)
+            const s = this._stream(d[p]); const blockId = d[p + 1] | (d[p + 2] << 8); const flags = d[p + 3];
+            const bank = this.dataBanks[s.bankType];
+            if (bank && bank.blocks[blockId]) {
+              const b = bank.blocks[blockId];
+              this._streamStart(s, b.start, 0x01 | (flags & 1 ? 0x80 : 0) | (flags & 0x10 ? 0x10 : 0), b.len);
+            }
+            this.pos = p + 4; break;
+          }
           default: {
             if (op >= 0x70 && op <= 0x7F) { this.waitRemaining = (op & 0x0F) + 1; this.pos = p; break; }
-            if (op >= 0x80 && op <= 0x8F) { this.waitRemaining = op & 0x0F; this.pos = p; break; } // YM2612 DAC書込み(未実装)+待ち
+            if (op >= 0x80 && op <= 0x8F) { // YM2612 DAC: PCMバンクから1バイトを A へ書き、nサンプル待つ
+              const bank = this.dataBanks[0x00];
+              if (bank && this.pcmPos < bank.data.length) this._ymWrite(0, 0x2A, bank.data[this.pcmPos], false);
+              this.pcmPos++;
+              this.waitRemaining = op & 0x0F; this.pos = p; break;
+            }
             const len = operandLength(op);
             if (len < 0) { this.unknownOps++; this._endOfData(); return; } // 未定義: 同期不能なので終了
             this.pos = p + len; // 未実装チップ/未対応コマンドは読み飛ばす
@@ -340,6 +400,14 @@
 
     _dataBlock(type, block) {
       this.dataBlocks.push({ type, size: block.length });
+      if (type < 0x40) { // 非圧縮ストリーム(0x00=YM2612 PCM 等): typeごとに連結してバンクにする
+        const bank = this.dataBanks[type] || (this.dataBanks[type] = { data: new Uint8Array(0), blocks: [] });
+        const merged = new Uint8Array(bank.data.length + block.length);
+        merged.set(bank.data, 0); merged.set(block, bank.data.length);
+        bank.blocks.push({ start: bank.data.length, len: block.length });
+        bank.data = merged;
+        return;
+      }
       if (type === 0xC2) { // NES APU RAM書込み: 先頭2バイト=開始アドレス
         const nes = this.adapterById.nes;
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
@@ -365,6 +433,51 @@
       if (this.onWrite && addr >= 0) this.onWrite(key, pp, aa, dd, addr);
     }
 
+    _ymWrite(port, aa, dd, second) {
+      const key = second ? 'ym2612_2' : 'ym2612';
+      const a = this.adapterById[key];
+      if (!a) return;
+      a.write(port, aa, dd);
+      if (this.onWrite) this.onWrite(key, port, aa, dd);
+    }
+
+    _stream(id) {
+      return this.streams[id] || (this.streams[id] = { chipType: 0, second: false, port: 0, cmd: 0, bankType: 0, stepSize: 1, stepBase: 0, freq: 0, acc: 0, pos: 0, end: 0, loop: false, reverse: false, active: false });
+    }
+    // mode: bit7=ループ, bit4=逆再生, 下位2bit: 0=長さ無視(終端まで) 1=コマンド数 2=ミリ秒 3=終端まで
+    _streamStart(s, start, mode, len) {
+      const bank = this.dataBanks[s.bankType];
+      if (!bank) { s.active = false; return; }
+      if (start >= 0) s.pos = start;
+      s.loop = !!(mode & 0x80); s.reverse = !!(mode & 0x10);
+      s.start = s.pos;
+      const lm = mode & 3;
+      if (lm === 1) s.end = Math.min(bank.data.length, s.pos + len * s.stepSize);
+      else if (lm === 2) s.end = Math.min(bank.data.length, s.pos + Math.round(s.freq * len / 1000) * s.stepSize);
+      else s.end = bank.data.length;
+      s.acc = 0; s.active = s.freq > 0 && s.pos < s.end;
+    }
+    // 1VGMサンプルぶんストリームを進める(0x90-0x95。現状の書込み先はYM2612(chipType 2)のみ実装)
+    _stepStreams() {
+      for (const id in this.streams) {
+        const s = this.streams[id];
+        if (!s.active) continue;
+        s.acc += s.freq / 44100;
+        if (s.acc < 1) continue;
+        const bank = this.dataBanks[s.bankType];
+        while (s.acc >= 1 && s.active) {
+          s.acc -= 1;
+          if (!bank || s.pos >= s.end || s.pos < 0) {
+            if (s.loop && bank) { s.pos = s.start; } else { s.active = false; break; }
+          }
+          const v = bank.data[s.pos + s.stepBase];
+          if (s.chipType === 0x02) this._ymWrite(s.port & 1, s.cmd, v, s.second);
+          // 他チップのストリーム(未実装チップ向け)は無視
+          s.pos += s.stepSize;
+        }
+      }
+    }
+
     _writeSn(dd, second) {
       const key = second ? 'sn76489_2' : 'sn76489';
       const a = this.adapterById[key];
@@ -379,6 +492,7 @@
     _stepVgmSample() {
       if (this.waitRemaining === 0) this._runCommands();
       if (this.waitRemaining > 0) this.waitRemaining--;
+      this._stepStreams();
       this.samplePos++;
     }
 
@@ -394,6 +508,8 @@
         if (step <= 0) { if (this.ended) break; continue; }
         this.waitRemaining -= step;
         this.samplePos += step;
+        // ストリームはサンプル単位でしか進められないが、シーク用途では最終位置だけ合えばよい
+        for (let i = 0; i < step; i++) this._stepStreams();
       }
     }
 
@@ -458,7 +574,8 @@
       kss: (has('ay8910') || has('k051649') || has('ym2413'))
         ? { writeLog: [], ay: has('ay8910'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus) }
         : null,
-      sn: has('sn76489') ? { snapshots: [], clock: player.adapterById.sn76489.clockHz } : null
+      sn: has('sn76489') ? { snapshots: [], clock: player.adapterById.sn76489.clockHz } : null,
+      ym2612: has('ym2612') ? { snapshots: [] } : null
     };
     let nesFrameWrites = [];
     let kssFrameWrites = [];
@@ -493,6 +610,13 @@
         const s1 = Emu.snapshotSN76489(player.adapterById.sn76489.chip, data.sn.clock);
         const a2 = player.adapterById.sn76489_2;
         data.sn.snapshots.push(a2 ? s1.concat(Emu.snapshotSN76489(a2.chip, a2.clockHz)) : s1);
+      }
+      if (data.ym2612) {
+        // 先読みはチップのclock()を回さない(EGが進まない)ので、ロール用の発音判定/音量は
+        // レジスタだけから決まる keyOn/tlVol に差し替える(ライブ表示はEG由来のactive/volを使う)
+        const s = Emu.snapshotYM2612(player.adapterById.ym2612.chip);
+        for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
+        data.ym2612.snapshots.push(s);
       }
       if (f % CHUNK_FRAMES === 0) {
         if (onProgress) onProgress(f, totalFrames, data);

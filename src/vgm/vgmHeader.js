@@ -25,7 +25,7 @@
   VGM.CHIPS = [
     { id: 'sn76489',  name: 'SN76489',    offset: 0x0C, minVer: 0x100, impl: true },
     { id: 'ym2413',   name: 'YM2413',     offset: 0x10, minVer: 0x100, impl: true },
-    { id: 'ym2612',   name: 'YM2612',     offset: 0x2C, minVer: 0x110 },
+    { id: 'ym2612',   name: 'YM2612',     offset: 0x2C, minVer: 0x110, impl: true },
     { id: 'ym2151',   name: 'YM2151',     offset: 0x30, minVer: 0x110 },
     { id: 'segapcm',  name: 'SegaPCM',    offset: 0x38, minVer: 0x151 },
     { id: 'rf5c68',   name: 'RF5C68',     offset: 0x40, minVer: 0x151 },
