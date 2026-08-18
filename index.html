@@ -403,6 +403,15 @@
           <button id="btnVgmTempoClear" class="secondary">自動</button>
         </div>
         <div id="vgmFileStatus" class="output" style="min-height:40px;"></div>
+        <!-- チャンネル割当: 変換元ch→借用先(NES音源)の対応表。読み込み時に構成から自動で埋まり、
+             ユーザーが変更できる(SPCのボイスモニターの借用先selectと同じ語彙) -->
+        <div id="vgmChannelMapWrap" style="display:none;margin-top:6px;">
+          <div class="toolbar" style="align-items:center;gap:6px;">
+            <h3 style="margin:0;">チャンネル割当</h3>
+            <button id="btnVgmChannelMapAuto" class="secondary">自動に戻す</button>
+          </div>
+          <div id="vgmChannelMap" class="vgm-chmap"></div>
+        </div>
       </div>
     </div>
   </section>

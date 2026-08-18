@@ -248,6 +248,7 @@
     'MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力{borrow}{ignored}':
       'Converted to MML ({mode} {bpm} BPM, chips: {chips}) → written to the MML editor{borrow}{ignored}',
     '(借用先: {assign})': ' (targets: {assign})',
+    'チャンネル割当': 'Channel mapping',
     '(2A03/FDSを借用して再生)': ' (played back via 2A03/FDS)',
     '(N163を借用して再生)': ' (played back via N163)',
     '。対象外の音源は無視: {chips}': '. Ignored unsupported chips: {chips}',

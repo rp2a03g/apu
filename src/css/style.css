@@ -1840,3 +1840,20 @@ button.secondary {
 }
 .window-size-indicator.visible { display: block; }
 
+
+/* VGMパネル: チャンネル割当表(変換元ch→借用先select) */
+.vgm-chmap {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 3px 8px;
+  margin-top: 4px;
+}
+.vgm-chmap label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  font-size: 11px;
+}
+.vgm-chmap label span { white-space: nowrap; }
+.compact-soundplay .vgm-chmap select { font-size: 11px; padding: 1px 3px; max-width: 130px; }

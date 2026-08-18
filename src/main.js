@@ -4654,6 +4654,7 @@
     keyboardDisplay.reset();
     keyboardDisplay.setSourceInfo('vgm', file.name);
     loadedVgmBytes = null; loadedVgmHeader = null;
+    buildVgmChannelMap(null);
 
     try {
       const raw = new Uint8Array(await file.arrayBuffer());
@@ -4667,6 +4668,7 @@
       loadedVgmBytes = bytes;
       loadedVgmHeader = h;
       renderVgmHeader(h);
+      buildVgmChannelMap(h);
       vgmPlayDurEl.value = String(vgmDefaultDuration(h));
       vgmFileStatusEl.innerHTML = '';
       const title = MML.VGM.displayTitle(h);
@@ -4900,6 +4902,65 @@
     vgmFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file: filename }) + '</div>';
   }
 
+  // ── VGM チャンネル割当表(変換元ch→借用先) ──
+  // 読み込み時に構成駆動の既定割当(MML.VGM2MML.defaultPlan)で埋め、ユーザーが変更できる。
+  // 借用先の語彙はSPCのTARGET_OPTIONS(ボイスモニター)と同じ。runVgm2Mmlが options.channelMap
+  // として渡す(既定と同じなら渡さない=「構成から自動」表記のまま)。
+  const vgmChannelMapWrapEl = document.getElementById('vgmChannelMapWrap');
+  const vgmChannelMapEl = document.getElementById('vgmChannelMap');
+  function vgmTargetLabel(type) {
+    if (type === 'skip') return T('スキップ');
+    const tt = MML.VGM2MML.TARGET_TYPES[type];
+    if (!tt) return type;
+    if (tt.chip === '2a03') {
+      return { pulse1: 'A: 2A03 Pulse1', pulse2: 'B: 2A03 Pulse2', triangle: 'C: 2A03 Triangle', noise: 'D: 2A03 Noise' }[type] || type;
+    }
+    // 拡張音源のレターは他チップの有無に関わらず固定(assignExpansionLetters)なので全部渡して引く
+    const lm = MML.Mml.assignExpansionLetters(['fds', 'vrc7', 'vrc6', 'n163', 'fme7', 'mmc5']);
+    const letter = (lm[tt.chip] || [])[tt.index] || '?';
+    const name = { fme7: 'FME-7', n163: 'N163', vrc7: 'VRC7', mmc5: 'MMC5', vrc6: 'VRC6' }[tt.chip] || tt.chip;
+    const sub = tt.chip === 'fme7' ? ['A', 'B', 'C'][tt.index] : tt.chip === 'vrc6' ? `Pulse${tt.index + 1}` : tt.chip === 'mmc5' ? `Pulse${tt.index + 1}` : `ch${tt.index + 1}`;
+    return `${letter}: ${name} ${sub}`;
+  }
+  function buildVgmChannelMap(h) {
+    if (!vgmChannelMapEl) return;
+    vgmChannelMapEl.innerHTML = '';
+    const src = h ? MML.VGM2MML.sourceChannels(h) : [];
+    if (!src.length) { vgmChannelMapWrapEl.style.display = 'none'; return; }
+    const plan = MML.VGM2MML.defaultPlan(h);
+    for (const s of src) {
+      const label = document.createElement('label');
+      const name = document.createElement('span');
+      name.textContent = s.label;
+      const sel = document.createElement('select');
+      sel.dataset.sourceId = s.id;
+      for (const t of MML.VGM2MML.targetOptionsFor(s.kind)) {
+        const o = document.createElement('option');
+        o.value = t; o.textContent = vgmTargetLabel(t);
+        if (t === (plan[s.id] || 'skip')) o.selected = true;
+        sel.appendChild(o);
+      }
+      label.appendChild(name); label.appendChild(sel);
+      vgmChannelMapEl.appendChild(label);
+    }
+    vgmChannelMapWrapEl.style.display = '';
+  }
+  // 現在の割当表を読む。既定と全く同じなら null(=自動)を返す
+  function getVgmChannelMap() {
+    if (!loadedVgmHeader || !vgmChannelMapEl) return null;
+    const plan = MML.VGM2MML.defaultPlan(loadedVgmHeader);
+    const map = {};
+    let changed = false;
+    for (const sel of vgmChannelMapEl.querySelectorAll('select')) {
+      map[sel.dataset.sourceId] = sel.value;
+      if ((plan[sel.dataset.sourceId] || 'skip') !== sel.value) changed = true;
+    }
+    return changed ? map : null;
+  }
+  document.getElementById('btnVgmChannelMapAuto').addEventListener('click', () => buildVgmChannelMap(loadedVgmHeader));
+  // 言語切替時は借用先ラベル(「スキップ」)を作り直す
+  if (MML.I18n && MML.I18n.onChange) MML.I18n.onChange(() => buildVgmChannelMap(loadedVgmHeader));
+
   async function runVgm2Mml() {
     if (!loadedVgmBytes) {
       vgmFileStatusEl.innerHTML = '<div class="error">' + T('先にVGMファイルを読み込んでください。') + '</div>';
@@ -4915,7 +4976,7 @@
     const vgmManualBpm = getManualBpm('vgm');
     let result;
     try {
-      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm });
+      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap() });
     } catch (e) {
       vgmIsRendering = false;
       updateVgmPlayButton();

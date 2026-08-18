@@ -13,16 +13,14 @@
  *                        vgm2mml/expansion/sn76489.js の抽出器を直接呼び、**構成に応じて借用先を
  *                        自動割当**してから1つのスコアに合成する(下記)。
  *
- * ── 借用先の自動割当(構成駆動) ──────────────────────────────────────────
- * 「AY8910×1+SN76489×2(Exed Exes)なら AY→FME-7、SN×2→N163×6ch」のように、ファイルごとの
- * 個別対応ではなく、音源の種類と本数から機械的に決める:
- *   - ネイティブ相当のNES音源がある種類は固定: AY(1個目)→FME-7、YM2413→VRC7、SCC→N163。
- *   - それ以外の矩形波チップ(SN76489)は「矩形波を出せる借用先」を優先順に、チップ単位で
- *     まとまって収まる所へ入れる: FME-7(3ch、空きがあれば) → N163(8chからSCC使用分を引いた
- *     残り。矩形波は@N波形として登録) → 収まらなければ変換対象外(注記)。
- *   - ノイズは 2A03ノイズ(D)が1本だけ。最初に見つかったノイズchをDへ、残りは対象外(注記)。
- *   音量は借用先に合わせて写像する: FME-7(対数DAC)には元の4bit値をそのまま、N163(線形)には
- *   元チップの減衰カーブ(SN=2dB/step)を線形の0-15へ換算した値を入れる。
+ * ── 借用先の割当(構成駆動の既定+ユーザー上書き) ─────────────────────────────
+ * 変換元チャンネル一覧(sourceChannels)はヘッダだけから決まる。既定割当(defaultPlan)は
+ * 「AY8910×1+SN76489×2(Exed Exes)なら AY→FME-7、SN×2→N163×6ch」のように種類と本数から
+ * 機械的に決める(固定: AY→FME-7、YM2413→VRC7、SCC→N163。SN76489はFME-7の空き→N163へ
+ * チップ単位。ノイズは最初の1本だけ2A03ノイズD)。ユーザーはVGMパネルの「チャンネル割当」で
+ * ソースchごとに借用先(SPCのTARGET_OPTIONSと同じ語彙: A/B/C/D、FME-7、N163、MMC5、VRC6…)を
+ * 変えられ(例: FME-7が高音で辛いchを2A03へ)、options.channelMap として渡る。借用先ファミリ
+ * ごとにイベントを整形(adaptEvents: 矩形波/デューティ/音量の対数→線形換算/三角波は音程のみ)。
  */
 (function (global) {
   'use strict';
@@ -69,132 +67,236 @@
   }
 
   // ---------------------------------------------------------------------------
-  // PSG系(AY/SCC/OPLL/SN76489)の合成変換
+  // 借用先タイプ(SPCのTARGET_OPTIONSと同じ語彙、src/main.js参照)とチャンネル割当計画
+  // ---------------------------------------------------------------------------
+  // type → { chip(拡張音源名|null=2A03), index(チップ内ch番号), letter(2A03のみ固定) }
+  const TARGET_TYPES = {
+    skip:       { chip: null },
+    pulse1:     { chip: '2a03', letter: 'A', family: 'pulse' },
+    pulse2:     { chip: '2a03', letter: 'B', family: 'pulse' },
+    triangle:   { chip: '2a03', letter: 'C', family: 'triangle' },
+    noise:      { chip: '2a03', letter: 'D', family: 'noise' },
+    fme7a:      { chip: 'fme7', index: 0, family: 'fme7' },
+    fme7b:      { chip: 'fme7', index: 1, family: 'fme7' },
+    fme7c:      { chip: 'fme7', index: 2, family: 'fme7' },
+    mmc5pulse1: { chip: 'mmc5', index: 0, family: 'pulse' },
+    mmc5pulse2: { chip: 'mmc5', index: 1, family: 'pulse' },
+    vrc6pulse1: { chip: 'vrc6', index: 0, family: 'vrc6pulse' },
+    vrc6pulse2: { chip: 'vrc6', index: 1, family: 'vrc6pulse' },
+  };
+  for (let i = 0; i < 8; i++) TARGET_TYPES['n163_' + i] = { chip: 'n163', index: i, family: 'n163' };
+  for (let i = 0; i < 6; i++) TARGET_TYPES['vrc7_' + i] = { chip: 'vrc7', index: i, family: 'vrc7' };
+  MML.VGM2MML.TARGET_TYPES = TARGET_TYPES;
+
+  // ソース種別ごとに選べる借用先(UIのselect候補)。
+  // square=矩形波チップ(AY/SN)、wave=SCC、fm=YM2413、noise=SNノイズ
+  const SQUARE_TARGETS = ['skip', 'fme7a', 'fme7b', 'fme7c', 'pulse1', 'pulse2', 'triangle', 'mmc5pulse1', 'mmc5pulse2', 'vrc6pulse1', 'vrc6pulse2']
+    .concat(Array.from({ length: 8 }, (_, i) => 'n163_' + i));
+  const WAVE_TARGETS = ['skip'].concat(Array.from({ length: 8 }, (_, i) => 'n163_' + i));
+  const FM_TARGETS = ['skip'].concat(Array.from({ length: 6 }, (_, i) => 'vrc7_' + i));
+  const NOISE_TARGETS = ['skip', 'noise'];
+  MML.VGM2MML.targetOptionsFor = function (kind) {
+    return kind === 'wave' ? WAVE_TARGETS : kind === 'fm' ? FM_TARGETS : kind === 'noise' ? NOISE_TARGETS : SQUARE_TARGETS;
+  };
+
+  /**
+   * ヘッダから変換元チャンネル一覧を作る(キャプチャ不要。UIの割当表とcomposePsgLikeが共有)。
+   * @returns {Array<{id, label, kind, chip, chipIndex, ch}>}
+   */
+  MML.VGM2MML.sourceChannels = function (h) {
+    const out = [];
+    const c = h.chips || {};
+    if (c.ay8910) for (let i = 0; i < 3; i++) out.push({ id: `ay:${i}`, label: `AY8910 ch${i + 1}`, kind: 'square', chip: 'ay8910', chipIndex: 0, ch: i });
+    if (c.k051649) for (let i = 0; i < 5; i++) out.push({ id: `scc:${i}`, label: `SCC ch${i + 1}`, kind: 'wave', chip: 'k051649', chipIndex: 0, ch: i });
+    if (c.ym2413) for (let i = 0; i < 6; i++) out.push({ id: `opll:${i}`, label: `YM2413 ch${i + 1}`, kind: 'fm', chip: 'ym2413', chipIndex: 0, ch: i });
+    if (c.sn76489) {
+      const n = c.sn76489.dual ? 2 : 1;
+      for (let k = 0; k < n; k++) {
+        const nm = n > 1 ? `SN76489#${k + 1}` : 'SN76489';
+        for (let i = 0; i < 3; i++) out.push({ id: `sn${k}:${i}`, label: `${nm} ch${i + 1}`, kind: 'square', chip: 'sn76489', chipIndex: k, ch: i });
+        out.push({ id: `sn${k}:noise`, label: `${nm} noise`, kind: 'noise', chip: 'sn76489', chipIndex: k, ch: 3 });
+      }
+    }
+    return out;
+  };
+
+  /**
+   * 構成駆動の既定割当(ROADMAP.md VGM節 段階3): 固定=AY→FME-7、YM2413→VRC7、SCC→N163。
+   * SN76489はFME-7の空き→N163の順にチップ単位で収め、ノイズは最初の1本だけ2A03ノイズ(D)。
+   * @returns {Object<string,string>} sourceId → targetType
+   */
+  MML.VGM2MML.defaultPlan = function (h) {
+    const plan = {};
+    const src = MML.VGM2MML.sourceChannels(h);
+    const used = { fme7: 0, n163: 0, vrc7: 0, noise: 0 };
+    const cap = { fme7: 3, n163: 8, vrc7: 6, noise: 1 };
+    const take = (chip) => { const i = used[chip]++; return i; };
+    for (const s of src.filter(s => s.kind === 'wave')) plan[s.id] = used.n163 < cap.n163 ? `n163_${take('n163')}` : 'skip';
+    for (const s of src.filter(s => s.kind === 'fm')) plan[s.id] = used.vrc7 < cap.vrc7 ? `vrc7_${take('vrc7')}` : 'skip';
+    for (const s of src.filter(s => s.kind === 'square' && s.chip === 'ay8910')) plan[s.id] = used.fme7 < cap.fme7 ? ['fme7a', 'fme7b', 'fme7c'][take('fme7')] : 'skip';
+    // SN76489: チップ単位でまとまって入る所へ
+    const snChips = [...new Set(src.filter(s => s.chip === 'sn76489').map(s => s.chipIndex))];
+    for (const k of snChips) {
+      const tones = src.filter(s => s.chip === 'sn76489' && s.chipIndex === k && s.kind === 'square');
+      let target = null;
+      if (cap.fme7 - used.fme7 >= tones.length) target = 'fme7';
+      else if (cap.n163 - used.n163 >= tones.length) target = 'n163';
+      for (const s of tones) {
+        if (target === 'fme7') plan[s.id] = ['fme7a', 'fme7b', 'fme7c'][take('fme7')];
+        else if (target === 'n163') plan[s.id] = `n163_${take('n163')}`;
+        else plan[s.id] = 'skip';
+      }
+      const noise = src.find(s => s.chip === 'sn76489' && s.chipIndex === k && s.kind === 'noise');
+      if (noise) plan[noise.id] = used.noise < cap.noise ? (take('noise'), 'noise') : 'skip';
+    }
+    return plan;
+  };
+
+  // 表示用: "AY8910 → FME-7(X-Z)" のように割当をまとめる
+  MML.VGM2MML.describePlan = function (h, plan) {
+    const src = MML.VGM2MML.sourceChannels(h);
+    const groups = new Map();
+    for (const s of src) {
+      const t = plan[s.id] || 'skip';
+      const tt = TARGET_TYPES[t] || TARGET_TYPES.skip;
+      const key = s.label.replace(/ ch\d+$| noise$/, '') + (s.kind === 'noise' ? ' noise' : '');
+      const dst = t === 'skip' ? null : (tt.chip === '2a03' ? `2A03 ${tt.letter}` : tt.chip.toUpperCase().replace('FME7', 'FME-7'));
+      if (!groups.has(key)) groups.set(key, new Set());
+      if (dst) groups.get(key).add(dst);
+    }
+    return Array.from(groups.entries()).map(([k, v]) => `${k} → ${v.size ? Array.from(v).join('/') : '(skip)'}`);
+  };
+
+  // 借用先ファミリごとの生周期換算(detune/EP用、丸めない)
+  const pulsePeriodRaw = freq => CPU_CLOCK_NTSC / (16 * freq) - 1;   // 2A03/MMC5パルス
+  const triPeriodRaw = freq => CPU_CLOCK_NTSC / (32 * freq) - 1;     // 2A03三角波
+  const vrc6PulsePeriodRaw = freq => CPU_CLOCK_NTSC / (16 * freq) - 1;
+  const LIN_TABLE = { ay8910: logToLinearTable(1.5), sn76489: logToLinearTable(2) };
+
+  // ---------------------------------------------------------------------------
+  // PSG系(AY/SCC/OPLL/SN76489)の合成変換。plan(sourceId→targetType)は options.channelMap が
+  // あればそれ、無ければ defaultPlan(構成駆動の自動割当)。
   // ---------------------------------------------------------------------------
   function composePsgLike(data, h, label, options, ignoredNote) {
     const frameRate = data.frameRate;
     const totalFrames = data.totalFrames;
     const c = h.chips;
+    const src = MML.VGM2MML.sourceChannels(h);
+    const plan = Object.assign({}, MML.VGM2MML.defaultPlan(h), options.channelMap || {});
 
     const envReg = new MML.Convert.EnvelopeRegistry();
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
     const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
     const n163WaveReg = new MML.Convert.WaveRegistry('@N', v => [0, ...v]);
     const vrc7ToneReg = new MML.Convert.WaveRegistry('@OP');
-
-    // ── 借用先のスロット台帳 ──
-    const slots = {
-      fme7: { cap: 3, used: [] },   // used: {label, channel}
-      n163: { cap: 8, used: [] },
-      vrc7: { cap: 6, used: [] },
-      noise: { cap: 1, used: [] }   // 2A03ノイズ(D)
-    };
     const notes = ignoredNote ? [ignoredNote] : [];
-    const assignments = []; // 表示/コメント用: "AY8910 → FME-7" 等
-    function free(target) { return slots[target].cap - slots[target].used.length; }
-    function place(target, label, channels) {
-      if (channels.length > free(target)) return false;
-      for (const ch of channels) slots[target].used.push({ label, channel: ch });
-      return true;
-    }
+    if (c.ay8910 && c.ay8910.dual) notes.push('2個目のAY8910(デュアルチップ)は変換対象外のため無視しました。');
 
-    // ── 抽出(借用先が固定のもの) ──
+    // 借用先ファミリに応じた音量写像プロキシ(対数DAC元→線形先のときだけ写像)
+    const familyOf = t => (TARGET_TYPES[t] || TARGET_TYPES.skip).family || null;
+    const needsLinear = fam => fam === 'n163' || fam === 'pulse' || fam === 'vrc6pulse';
+    const regFor = (chip, fam) => (needsLinear(fam) && LIN_TABLE[chip]) ? mappedEnvReg(envReg, LIN_TABLE[chip]) : envReg;
+
+    // ── 抽出(ソースチップごと。同じチップ内でも借用先ファミリが違えば音量写像が違うので、
+    //    ファミリごとに抽出し直して該当chだけ採る) ──
     const kssClock = c.ay8910 ? c.ay8910.clock * 2 : c.k051649 ? c.k051649.clock * 2 : (c.ym2413 ? c.ym2413.clock : 3579545);
-    let sccResult = null, hasScc = false;
-    if (data.kss && data.kss.scc) {
+    const extracted = {}; // sourceId → channel(events+flags)
+    function extractGroup(chipKey, extractFn) {
+      const items = src.filter(s => s.chip === chipKey && s.kind !== 'noise' && plan[s.id] !== 'skip');
+      const fams = [...new Set(items.map(s => familyOf(plan[s.id])))];
+      for (const fam of fams) {
+        const res = extractFn(regFor(chipKey, fam), fam);
+        for (const s of items) if (familyOf(plan[s.id]) === fam) extracted[s.id] = res[s.ch];
+      }
+    }
+    if (data.kss && data.kss.ay && c.ay8910) {
+      extractGroup('ay8910', (reg) => MML.Kss2MmlExpansion.ay(data.kss.writeLog, totalFrames, kssClock, reg).channels);
+    }
+    let sccResult = null, sccUsed = false;
+    if (data.kss && data.kss.scc && c.k051649) {
       sccResult = MML.Kss2MmlExpansion.scc(data.kss.writeLog, totalFrames, kssClock, n163WaveReg, envReg);
-      hasScc = sccResult.channels.some(ch => ch.events.some(ev => ev.note !== null));
+      sccUsed = sccResult.channels.some(ch => ch.events.some(ev => ev.note !== null));
+      if (sccUsed) for (const s of src) if (s.chip === 'k051649' && plan[s.id] !== 'skip') extracted[s.id] = sccResult.channels[s.ch];
     }
-    // 1) 固定割当: SCC→N163(実際に使っている時だけ、5ch)、YM2413→VRC7、AY(1個目)→FME-7
-    if (hasScc) { place('n163', 'SCC', sccResult.channels); assignments.push('SCC → N163'); }
-    let opllResult = null;
-    if (data.kss && data.kss.opll) {
-      opllResult = MML.Kss2MmlExpansion.opll(data.kss.writeLog, totalFrames, vrc7ToneReg);
-      place('vrc7', 'YM2413', opllResult.channels); assignments.push('YM2413 → VRC7');
+    if (data.kss && data.kss.opll && c.ym2413) {
+      const r = MML.Kss2MmlExpansion.opll(data.kss.writeLog, totalFrames, vrc7ToneReg);
+      for (const s of src) if (s.chip === 'ym2413' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
     }
-    if (data.kss && data.kss.ay) {
-      const ayResult = MML.Kss2MmlExpansion.ay(data.kss.writeLog, totalFrames, kssClock, envReg);
-      if (place('fme7', 'AY8910', ayResult.channels)) assignments.push('AY8910 → FME-7');
-      else notes.push('AY8910 は FME-7 の空きが無いため変換対象外です。');
-      // AY2個目のwriteLogは分離していない(vgmPlayer.js capture参照)ため変換対象外
-      if (c.ay8910 && c.ay8910.dual) notes.push('2個目のAY8910(デュアルチップ)は変換対象外のため無視しました。');
-    }
-
-    // 2) 矩形波チップ(SN76489、デュアルなら2個): FME-7の空き → N163 の順でチップ単位に収める。
-    //    借用先ごとに音量写像が違うので、先に借用先を決めてから抽出する。
-    if (data.sn) {
-      const nChips = data.sn.snapshots.length && data.sn.snapshots[0].length >= 8 ? 2 : 1;
-      const SQUARE_TARGETS = ['fme7', 'n163'];
-      for (let i = 0; i < nChips; i++) {
-        const chipLabel = nChips > 1 ? `SN76489#${i + 1}` : 'SN76489';
-        let target = null;
-        for (const t of SQUARE_TARGETS) { if (free(t) >= 3) { target = t; break; } }
-        if (!target) { notes.push(`${chipLabel} は借用先(FME-7/N163)の空きが無いため変換対象外です。`); continue; }
-        const table = logToLinearTable(2); // SN76489の減衰は2dB/step
-        const reg = target === 'n163' ? mappedEnvReg(envReg, table) : envReg;
-        const r = MML.Vgm2MmlExpansion.sn76489(data.sn.snapshots, data.sn.clock, reg, i);
-        if (target === 'n163') {
-          for (const ch of r.tones) {
-            mapConstVolumes(ch.events, table);
-            for (const ev of ch.events) if (ev.note !== null) { ev.instrument = n163WaveReg.assign(N163_SQUARE_WAVE); ev.rawLength = N163_WAVE_LEN; }
-            ch.hasFme7Noise = false;
+    if (data.sn && c.sn76489) {
+      const nChips = c.sn76489.dual ? 2 : 1;
+      for (let k = 0; k < nChips; k++) {
+        const items = src.filter(s => s.chip === 'sn76489' && s.chipIndex === k && plan[s.id] !== 'skip');
+        const fams = [...new Set(items.filter(s => s.kind !== 'noise').map(s => familyOf(plan[s.id])))];
+        let noiseDone = false;
+        for (const fam of fams.length ? fams : [null]) {
+          const r = MML.Vgm2MmlExpansion.sn76489(data.sn.snapshots, data.sn.clock, regFor('sn76489', fam), k);
+          for (const s of items) {
+            if (s.kind === 'noise') { if (!noiseDone) { extracted[s.id] = r.noise; noiseDone = true; } }
+            else if (familyOf(plan[s.id]) === fam) extracted[s.id] = r.tones[s.ch];
           }
-        }
-        place(target, chipLabel, r.tones);
-        assignments.push(`${chipLabel} → ${target === 'fme7' ? 'FME-7' : 'N163(矩形波)'}`);
-        // ノイズ: 最初の1本だけ2A03ノイズ(D)へ
-        if (r.noise.events.some(ev => ev.note !== null)) {
-          if (place('noise', chipLabel + ' noise', [r.noise])) assignments.push(`${chipLabel} noise → 2A03 noise(D)`);
-          else notes.push(`${chipLabel} のノイズは2A03ノイズ(D)が使用済みのため変換対象外です。`);
         }
       }
     }
 
-    // ── 借用先ごとの後処理(音程補正・EN・EP)とレター割当 ──
+    // ── 借用先ごとにイベントを整形して台帳へ ──
+    // slotsByFamily: family → { index → {source, channel} }
+    const placed = {}; // targetType → { source, channel }
+    const conflicts = [];
+    for (const s of src) {
+      const t = plan[s.id];
+      if (!t || t === 'skip' || !extracted[s.id]) continue;
+      if (placed[t]) { conflicts.push(`${s.label} は ${t} が既に ${placed[t].source.label} に使われているため変換対象外です。`); continue; }
+      const tt = TARGET_TYPES[t];
+      if (!tt) continue;
+      // 種別と借用先の相性(UI外から不正な組合せが来た時の防御)
+      if ((s.kind === 'noise') !== (tt.family === 'noise')) { conflicts.push(`${s.label} → ${t} は種別が合わないため変換対象外です。`); continue; }
+      if (s.kind === 'fm' && tt.family !== 'vrc7') { conflicts.push(`${s.label} → ${t} はFM以外へ載せられないため変換対象外です。`); continue; }
+      if (s.kind === 'wave' && tt.family !== 'n163') { conflicts.push(`${s.label} → ${t} は波形音源以外へ載せられないため変換対象外です。`); continue; }
+      const ch = Object.assign({}, extracted[s.id], { events: extracted[s.id].events.map(ev => Object.assign({}, ev)) });
+      adaptEvents(ch, s, tt.family, n163WaveReg);
+      placed[t] = { source: s, channel: ch };
+    }
+    notes.push(...conflicts);
+
+    // 借用先ファミリごとの後処理(音程補正・EN・EP)
+    const byFamily = {};
+    for (const [t, p] of Object.entries(placed)) { const f = TARGET_TYPES[t].family; (byFamily[f] = byFamily[f] || []).push({ type: t, ...p }); }
     const expansions = [];
-    if (slots.fme7.used.length) expansions.push('fme7');
-    if (slots.n163.used.length) expansions.push('n163');
-    if (slots.vrc7.used.length) expansions.push('vrc7');
-    // ppmck固定優先順(src/mml/compiler.js EXPANSION_PRIORITY)に並べ替える
+    for (const t of Object.keys(placed)) { const chip = TARGET_TYPES[t].chip; if (chip !== '2a03' && !expansions.includes(chip)) expansions.push(chip); }
     const prio = MML.Mml.EXPANSION_PRIORITY || ['fds', 'vrc7', 'vrc6', 'n163', 'fme7', 'mmc5'];
     expansions.sort((a, b) => prio.indexOf(a) - prio.indexOf(b));
     const letterMap = expansions.length ? MML.Mml.assignExpansionLetters(expansions) : {};
+    // N163のnumChはcompiler.js側の自動検出(音符を持つ最上位レター位置+1)と一致させる
+    let n163NumCh = 1;
+    for (const p of (byFamily.n163 || [])) if (p.channel.events.some(ev => ev.note !== null)) n163NumCh = Math.max(n163NumCh, TARGET_TYPES[p.type].index + 1);
+    const periodFnFor = {
+      fme7: fme7PeriodRaw, n163: n163FreqRegRaw(N163_WAVE_LEN, n163NumCh), pulse: pulsePeriodRaw,
+      triangle: triPeriodRaw, vrc6pulse: vrc6PulsePeriodRaw, vrc7: vrc7FnumRaw, noise: null
+    };
     const scoreChannels = [];
-
-    if (slots.fme7.used.length) {
-      const chans = slots.fme7.used.map(u => u.channel);
-      // 音程補正: kss2mml(PSG→FME-7)と同じ detectChorusDetune 方針(単独音は12平均律へ丸め、
-      // 同時に同音程を鳴らすコーラスだけD<n>)。EN→EPの順序はkss2mml/converter.js参照。
-      MML.Convert.detectChorusDetune(chans, fme7PeriodRaw);
-      MML.Convert.assignNoteEnvelope(chans, noteEnvReg);
-      MML.Convert.assignPitchEnvelope(chans, fme7PeriodRaw, pitchReg);
-      chans.forEach((ch, i) => scoreChannels.push(Object.assign({}, ch, { letter: letterMap.fme7[i], hasDetune: true, hasPitchMod: true })));
-    }
-    if (slots.n163.used.length) {
-      const chans = slots.n163.used.map(u => u.channel);
-      // numChはcompiler.js側の自動検出(音符を持つ最上位レター位置+1)と一致させる(kss2mml参照)
-      let numCh = 0;
-      chans.forEach((ch, i) => { if (ch.events.some(ev => ev.note !== null)) numCh = i + 1; });
-      numCh = Math.max(1, numCh);
-      const fn = n163FreqRegRaw(N163_WAVE_LEN, numCh);
-      MML.Convert.detectChorusDetune(chans, fn);
-      MML.Convert.assignNoteEnvelope(chans, noteEnvReg);
-      MML.Convert.assignPitchEnvelope(chans, fn, pitchReg);
-      const letters = letterMap.n163 || [];
-      for (let i = 0; i < letters.length; i++) {
-        const ch = chans[i] || { events: [], hasVolume: true, hasInstrument: true };
-        scoreChannels.push(Object.assign({}, ch, { letter: letters[i], hasDetune: true, hasPitchMod: true }));
+    for (const [fam, list] of Object.entries(byFamily)) {
+      const chans = list.map(p => p.channel);
+      const fn = periodFnFor[fam];
+      if (fn) {
+        // 音程補正: kss2mml(PSG→FME-7)と同じ detectChorusDetune 方針。EN→EPの順序はkss2mml参照
+        MML.Convert.detectChorusDetune(chans, fn);
+        MML.Convert.assignNoteEnvelope(chans, noteEnvReg);
+        if (fam !== 'vrc7') MML.Convert.assignPitchEnvelope(chans, fn, pitchReg);
+      }
+      for (const p of list) {
+        const tt = TARGET_TYPES[p.type];
+        const letter = tt.chip === '2a03' ? tt.letter : (letterMap[tt.chip] || [])[tt.index];
+        if (!letter) continue;
+        const flags = fam === 'vrc7' ? { hasDetune: true, hasNoteEnv: true } : fam === 'noise' ? {} : { hasDetune: true, hasPitchMod: true };
+        scoreChannels.push(Object.assign({}, p.channel, { letter }, flags));
       }
     }
-    if (slots.vrc7.used.length) {
-      const chans = slots.vrc7.used.map(u => u.channel);
-      MML.Convert.detectChorusDetune(chans, vrc7FnumRaw);
-      MML.Convert.assignNoteEnvelope(chans, noteEnvReg);
-      chans.forEach((ch, i) => scoreChannels.push(Object.assign({}, ch, { letter: letterMap.vrc7[i], hasDetune: true, hasNoteEnv: true })));
+    // N163: 途中の空きレターも空チャンネルとして出す(numCh検出をcompiler.jsと揃えるため)
+    if (letterMap.n163) {
+      const have = new Set(scoreChannels.map(ch => ch.letter));
+      for (let i = 0; i < n163NumCh; i++) if (!have.has(letterMap.n163[i])) scoreChannels.push({ letter: letterMap.n163[i], events: [], hasVolume: true, hasInstrument: true });
     }
-    if (slots.noise.used.length) {
-      scoreChannels.push(Object.assign({}, slots.noise.used[0].channel, { letter: 'D' }));
-    }
+    scoreChannels.sort((a, b) => a.letter.localeCompare(b.letter));
 
     // ── テンポ・出力 ──
     const noteDurations = [];
@@ -208,13 +310,14 @@
       : MML.Convert.detectBpm(noteDurations, frameRate);
     const fpb = frameRate * 60 / Math.round(bpm); // t<n>整数丸めと揃える([[tempo-rounding-drift-future-issue]])
 
-    const uniq = arr => arr.filter((v, i, a) => a.indexOf(v) === i);
+    const assignments = MML.VGM2MML.describePlan(h, plan);
     const chipList = h.usedChips.map(ch => ch.name + (ch.dual ? ' x2' : '')).join(', ');
-    const letterDesc = [];
-    if (slots.fme7.used.length) letterDesc.push(`${(letterMap.fme7 || []).slice(0, slots.fme7.used.length).join('')}=${uniq(slots.fme7.used.map(u => u.label)).join('/')}(FME-7として再生)`);
-    if (slots.n163.used.length) letterDesc.push(`${(letterMap.n163 || []).slice(0, slots.n163.used.length).join('')}=${uniq(slots.n163.used.map(u => u.label)).join('/')}(N163として${hasScc ? '近似' : '矩形波で'}再生)`);
-    if (slots.vrc7.used.length) letterDesc.push(`${(letterMap.vrc7 || []).join('')}=YM2413(VRC7として再生)`);
-    if (slots.noise.used.length) letterDesc.push(`D=${slots.noise.used[0].label}(2A03ノイズとして近似再生)`);
+    const chanDesc = Object.entries(placed).map(([t, p]) => {
+      const tt = TARGET_TYPES[t];
+      const letter = tt.chip === '2a03' ? tt.letter : (letterMap[tt.chip] || [])[tt.index];
+      return `${letter}=${p.source.label}`;
+    }).join(' ');
+    const isCustom = !!options.channelMap && Object.keys(options.channelMap).some(k => options.channelMap[k] !== MML.VGM2MML.defaultPlan(h)[k]);
 
     const headerComment = [
       `; =========================================================`,
@@ -223,11 +326,12 @@
       `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
       `; 分解能   : 480 TPQN (MIDI準拠)`,
       `; 変換     : Sound Emulation Foundry`,
-      `; チャンネル: ${letterDesc.join(' ')}`,
-      `; 借用先の割当(構成から自動): ${assignments.join(', ') || '-'}`,
+      `; チャンネル: ${chanDesc}`,
+      `; 借用先の割当(${isCustom ? 'ユーザー指定' : '構成から自動'}): ${assignments.join(', ') || '-'}`,
       `; ※ このアプリのMMLプレイヤーはNES音源専用のため、AY8910→FME-7(互換)、YM2413→VRC7(同一)、`,
-      `;    SCC→N163(波形近似)、その他の矩形波チップ(SN76489等)はFME-7の空き→N163(矩形波@N)の順に、`,
-      `;    ノイズは2A03ノイズ(D)へ載せています。N163へ載せた音量は対数DAC→線形へ換算した値です。`,
+      `;    SCC→N163(波形近似)、SN76489等の矩形波はFME-7の空き→N163(矩形波@N)の順に、ノイズは`,
+      `;    2A03ノイズ(D)へ載せています(割当はVGMパネルの「チャンネル割当」で変更できます)。`,
+      `;    線形音量の借用先(N163/2A03/MMC5/VRC6)へ載せた音量は対数DAC→線形へ換算した値です。`,
       ...notes.map(n => `; ※ ${n}`),
       `; =========================================================`,
       ``
@@ -240,8 +344,8 @@
       totalFrames, tempoBpm: bpm,
       headerLines: [
         ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
-        ...(slots.n163.used.length ? n163WaveReg.defLines() : []),
-        ...(slots.vrc7.used.length ? vrc7ToneReg.defLines() : [])
+        ...(expansions.includes('n163') ? n163WaveReg.defLines() : []),
+        ...(expansions.includes('vrc7') ? vrc7ToneReg.defLines() : [])
       ]
     });
     return {
@@ -250,8 +354,44 @@
       chips: h.usedChips.filter(ch => ['ay8910', 'k051649', 'ym2413', 'sn76489'].includes(ch.id)).map(ch => ch.name + (ch.dual ? ' x2' : '')),
       expansions,
       assignments,
-      n163Wave: hasScc && sccResult ? sccResult.n163Wave : (slots.n163.used.length ? N163_SQUARE_WAVE : null)
+      plan,
+      n163Wave: sccUsed && sccResult ? sccResult.n163Wave : (expansions.includes('n163') ? N163_SQUARE_WAVE : null)
     };
+  }
+
+  // ソースチャンネルのイベントを借用先ファミリの語彙へ整形する(破壊的。呼び出し側でコピー済み)
+  function adaptEvents(ch, s, fam, n163WaveReg) {
+    const events = ch.events;
+    const isAy = s.chip === 'ay8910';
+    if (fam === 'fme7' || fam === 'vrc7' || fam === 'noise') return; // そのまま
+    // AYのミキサー: ノイズ単独(mode 2)は矩形波系の借用先では鳴らせないので休符に、
+    // トーン+ノイズ(mode 3)はトーンだけ残す。FME-7以外ではN<n>も出さない
+    for (const ev of events) {
+      if (isAy && ev.instrument === 2) { ev.note = null; }
+      delete ev.fme7Noise;
+    }
+    ch.hasFme7Noise = false;
+    if (fam === 'n163') {
+      if (s.kind === 'square') {
+        for (const ev of events) if (ev.note !== null) { ev.instrument = n163WaveReg.assign(N163_SQUARE_WAVE); ev.rawLength = N163_WAVE_LEN; }
+        if (LIN_TABLE[s.chip]) mapConstVolumes(events, LIN_TABLE[s.chip]);
+      }
+      ch.hasInstrument = true;
+    } else if (fam === 'pulse') {
+      // 2A03/MMC5パルス: @2=デューティ50%(矩形波)。音量は線形へ
+      for (const ev of events) if (ev.note !== null) ev.instrument = 2;
+      if (LIN_TABLE[s.chip]) mapConstVolumes(events, LIN_TABLE[s.chip]);
+      ch.hasInstrument = true;
+    } else if (fam === 'vrc6pulse') {
+      // VRC6パルス: @7=デューティ50%(8/16)。音量は線形へ
+      for (const ev of events) if (ev.note !== null) ev.instrument = 7;
+      if (LIN_TABLE[s.chip]) mapConstVolumes(events, LIN_TABLE[s.chip]);
+      ch.hasInstrument = true;
+    } else if (fam === 'triangle') {
+      // 三角波: 音量・音色は無い。音程だけ
+      for (const ev of events) { delete ev.volume; delete ev.envelopeV; delete ev.envelopeVr; delete ev.instrument; }
+      ch.hasVolume = false; ch.hasEnvelope = false; ch.hasInstrument = false;
+    }
   }
 
   /**
