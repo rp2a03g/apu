@@ -3534,9 +3534,11 @@
   // KSS captureKssSongAsync() の結果(writeLog)からピアノロール用タイムライン(共通形状)を
   // 構築する。PSG→KP/SCC→KS/FMPAC→KF は src/ui/keyboard.js の extractChannels() が
   // kssPsg/kssScc/kssOpll チップ向けに使っている色分けと揃えている。
-  function buildKssRollTimeline(writeLog, totalFrames, frameRate, header, sccUsed) {
+  // clockOverride(省略可): AY/SCC抽出器に渡すZ80相当クロック。KSSは常にMSXの3.58MHz、
+  // VGMはチップごとに違う(vgmPlayer.js captureVgmSongAsync の kss.clock)ので呼び出し側が渡す。
+  function buildKssRollTimeline(writeLog, totalFrames, frameRate, header, sccUsed, clockOverride) {
     const frameDur = 1 / frameRate;
-    const clock = MML.KSS.Z80_CLOCK;
+    const clock = clockOverride || MML.KSS.Z80_CLOCK;
     // volume は ay/scc/opll いずれも0-15(4bit)なので/15で0-1に正規化する。
     // note: Kss2MmlExpansion(ay/scc/opll)のfreqToNoteNumberはMML変換側で使う共通の
     // ノート番号体系(57+12*log2(freq/440)、nsf2mml/expansion/fme7.js等でも同じ)を採用しており、
@@ -4633,7 +4635,8 @@
       if (author) out += T('作者        : {author}', { author: author + (g.authorJa && g.authorEn && g.authorJa !== g.authorEn ? ` / ${g.authorJa}` : '') }) + '\n';
       if (g.date) out += T('日付        : {date}', { date: g.date }) + '\n';
     }
-    const chipNames = h.usedChips.map(c => `${c.name}${c.dual ? ' x2' : ''}${c.id === 'nes' && c.fds ? '+FDS' : ''}${c.id === 'k051649' && c.sccPlus ? '+' : ''} (${c.clock} Hz)${c.impl ? '' : ' ' + T('[未対応・読み飛ばし]')}`);
+    // YM2610はFM+SSGのみ実装(ADPCM-A/B未実装=ドラム/効果音の大半が鳴らない)ので部分対応と明示する
+    const chipNames = h.usedChips.map(c => `${c.name}${c.dual ? ' x2' : ''}${c.id === 'nes' && c.fds ? '+FDS' : ''}${c.id === 'k051649' && c.sccPlus ? '+' : ''} (${c.clock} Hz)${c.impl ? (c.id === 'ym2610' ? ' ' + T('[FM+SSGのみ・ADPCM-A/B未対応]') : '') : ' ' + T('[未対応・読み飛ばし]')}`);
     out += T('音源        : {chips}', { chips: chipNames.join(', ') || '-' }) + '\n';
     out += T('長さ        : {time}{loop}', {
       time: formatTime(h.durationSeconds),
@@ -4712,6 +4715,7 @@
     if (h.chips.ym2413) chips.push('kssOpll');
     if (h.chips.sn76489) chips.push('sn76489');
     if (h.chips.ym2612) chips.push('ym2612');
+    if (h.chips.ym2610) { chips.push('ym2610fm'); chips.push('kssPsg'); } // SSGはKSS PSG行(KP1-3)を流用
     if (h.chips.pwm) chips.push('pwm');
     if (h.chips.rf5c164) chips.push('rf5c164');
     if (h.chips.rf5c68) chips.push('rf5c68');
@@ -4728,13 +4732,23 @@
     getApuEnv: () => { const a = vgmAdapter('nes'); return a ? MML.Emu.snapshotApuEnv(a.apu, a.fds, a.bus) : null; },
     getGbsApu: () => { const a = vgmAdapter('gb'); return a ? MML.Emu.snapshotGbApu(a.apu) : null; },
     getHesApu: () => { const a = vgmAdapter('huc6280'); return a ? MML.Emu.snapshotHuC6280Apu(a.apu) : null; },
-    // デュアルチップ(2個目)があれば連結して返す(鍵盤はKP4-6/SN4-6+SNN2行として出す)
-    getKssPsg: () => { const a = vgmAdapter('ay8910'); if (!a) return null; const s = MML.Emu.snapshotAY8910(a.chip); const b = vgmAdapter('ay8910_2'); return b ? s.concat(MML.Emu.snapshotAY8910(b.chip)) : s; },
+    // デュアルチップ(2個目)があれば連結して返す(鍵盤はKP4-6/SN4-6+SNN2行として出す)。
+    // ay8910未使用でym2610があれば、その内蔵SSGをKP1-3行として出す(YM2610=SSG+FM+ADPCM統合チップ、
+    // SSGはAY-3-8910互換なのでKSS PSG表示をそのまま流用)。
+    getKssPsg: () => {
+      const a = vgmAdapter('ay8910');
+      // clockHzは各アダプタのclock()呼び出しレート(AYアダプタ=ヘッダ値×2、YM2610=ヘッダ値/2)
+      if (a) { const s = MML.Emu.snapshotAY8910(a.chip, a.clockHz); const b = vgmAdapter('ay8910_2'); return b ? s.concat(MML.Emu.snapshotAY8910(b.chip, b.clockHz)) : s; }
+      const y = vgmAdapter('ym2610');
+      return y ? MML.Emu.snapshotAY8910(y.ssg, y.clockHz / 2) : null;
+    },
     getKssScc: () => { const a = vgmAdapter('k051649'); return a ? MML.Emu.snapshotSCC(a.chip) : null; },
     getKssOpll: () => { const a = vgmAdapter('ym2413'); return a ? MML.Emu.snapshotOPLL(a.chip) : null; },
     getSn76489: () => { const a = vgmAdapter('sn76489'); if (!a) return null; const s = MML.Emu.snapshotSN76489(a.chip, a.clockHz); const b = vgmAdapter('sn76489_2'); return b ? s.concat(MML.Emu.snapshotSN76489(b.chip, b.clockHz)) : s; }
 ,
     getYm2612: () => { const a = vgmAdapter('ym2612'); return a ? MML.Emu.snapshotYM2612(a.chip) : null; }
+,
+    getYm2610Fm: () => { const a = vgmAdapter('ym2610'); return a ? MML.Emu.snapshotYM2610(a.fm) : null; }
 ,
     getPwm: () => { const a = vgmAdapter('pwm'); return a ? MML.Emu.snapshotPWM32X(a.chip) : null; }
 ,
@@ -4759,7 +4773,7 @@
     if (data.kss) {
       const wl = data.kss.writeLog.slice(0, done);
       const fakeHeader = { device: { mode: 'MSX', fmpac: data.kss.opll } };
-      const kssTracks = buildKssRollTimeline(wl, done, frameRate, fakeHeader, data.kss.scc);
+      const kssTracks = buildKssRollTimeline(wl, done, frameRate, fakeHeader, data.kss.scc, data.kss.clock);
       // AY未使用(SCC/OPLLのみ)のVGMではKP行が鍵盤に無いのでロール側も落とす
       tracks = tracks.concat(data.kss.ay ? kssTracks : kssTracks.filter(t => !/^KP\d/.test(t.id)));
     }
@@ -4773,6 +4787,11 @@
     if (data.ym2612) {
       const t = keyboardDisplay.buildRollTracksFromRegSnapshots(
         data.ym2612.snapshots, [], done, sr / frameRate, sr, ['vgm', 'ym2612'], null, { ym2612: data.ym2612.snapshots });
+      if (t) tracks = tracks.concat(t);
+    }
+    if (data.ym2610fm) {
+      const t = keyboardDisplay.buildRollTracksFromRegSnapshots(
+        data.ym2610fm.snapshots, [], done, sr / frameRate, sr, ['vgm', 'ym2610fm'], null, { ym2610fm: data.ym2610fm.snapshots });
       if (t) tracks = tracks.concat(t);
     }
     if (data.pwm) {
@@ -4866,6 +4885,7 @@
       getKssOpll: liveVgm.getKssOpll,
       getSn76489: liveVgm.getSn76489,
       getYm2612: liveVgm.getYm2612,
+      getYm2610Fm: liveVgm.getYm2610Fm,
       getPwm: liveVgm.getPwm,
       getRf5c164: liveVgm.getRf5c164,
       getRf5c68: liveVgm.getRf5c68

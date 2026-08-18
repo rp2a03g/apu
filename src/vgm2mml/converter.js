@@ -107,6 +107,9 @@
     const out = [];
     const c = h.chips || {};
     if (c.ay8910) for (let i = 0; i < 3; i++) out.push({ id: `ay:${i}`, label: `AY8910 ch${i + 1}`, kind: 'square', chip: 'ay8910', chipIndex: 0, ch: i });
+    // YM2610(Neo Geo)の内蔵SSG(AY互換): captureVgmSongAsyncがkss.writeLogへAY書込みとして流すので
+    // 抽出はAY8910と同じ経路。ay8910と同居する構成は実在しないので同じ 'ay8910' chipキーで扱う
+    if (c.ym2610 && !c.ay8910) for (let i = 0; i < 3; i++) out.push({ id: `ay:${i}`, label: `YM2610 SSG ch${i + 1}`, kind: 'square', chip: 'ay8910', chipIndex: 0, ch: i });
     if (c.k051649) for (let i = 0; i < 5; i++) out.push({ id: `scc:${i}`, label: `SCC ch${i + 1}`, kind: 'wave', chip: 'k051649', chipIndex: 0, ch: i });
     if (c.ym2413) for (let i = 0; i < 6; i++) out.push({ id: `opll:${i}`, label: `YM2413 ch${i + 1}`, kind: 'fm', chip: 'ym2413', chipIndex: 0, ch: i });
     if (c.sn76489) {
@@ -199,7 +202,9 @@
 
     // ── 抽出(ソースチップごと。同じチップ内でも借用先ファミリが違えば音量写像が違うので、
     //    ファミリごとに抽出し直して該当chだけ採る) ──
-    const kssClock = c.ay8910 ? c.ay8910.clock * 2 : c.k051649 ? c.k051649.clock * 2 : (c.ym2413 ? c.ym2413.clock : 3579545);
+    // YM2610内蔵SSGの実クロックはチップクロック/4(ymfm裏取り)。AY抽出器はZ80(=AY実クロック×2)前提なので/2
+    const kssClock = c.ay8910 ? c.ay8910.clock * 2 : c.ym2610 ? c.ym2610.clock / 2 : c.k051649 ? c.k051649.clock * 2 : (c.ym2413 ? c.ym2413.clock : 3579545);
+    const hasAySource = !!(c.ay8910 || c.ym2610);
     const extracted = {}; // sourceId → channel(events+flags)
     function extractGroup(chipKey, extractFn) {
       const items = src.filter(s => s.chip === chipKey && s.kind !== 'noise' && plan[s.id] !== 'skip');
@@ -209,7 +214,7 @@
         for (const s of items) if (familyOf(plan[s.id]) === fam) extracted[s.id] = res[s.ch];
       }
     }
-    if (data.kss && data.kss.ay && c.ay8910) {
+    if (data.kss && data.kss.ay && hasAySource) {
       extractGroup('ay8910', (reg) => MML.Kss2MmlExpansion.ay(data.kss.writeLog, totalFrames, kssClock, reg).channels);
     }
     let sccResult = null, sccUsed = false;
@@ -419,11 +424,13 @@
       throw new Error(`MML変換に対応した音源がありません(${names})`);
     }
     const family = families[0];
-    const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };
+    const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', ym2610: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };
     const ignoredChips = h.usedChips.filter(ch => !ch.impl || famOf[ch.id] !== family).map(ch => ch.name);
-    const ignoredNote = ignoredChips.length
-      ? `このVGMは複数の音源を含みます。${ignoredChips.join(', ')} はMML変換の対象外のため無視しました。`
-      : null;
+    const ignoredNotes = [];
+    if (ignoredChips.length) ignoredNotes.push(`このVGMは複数の音源を含みます。${ignoredChips.join(', ')} はMML変換の対象外のため無視しました。`);
+    // YM2610は内蔵SSG(3ch)だけをFME-7へ借用変換。FM 4ch/ADPCM-A/Bは変換対象外
+    if (h.chips.ym2610 && family === 'psg') ignoredNotes.push('YM2610(Neo Geo)は内蔵SSG(3ch)のみ変換しました。FM 4ch / ADPCM-A / ADPCM-B は変換対象外です。');
+    const ignoredNote = ignoredNotes.length ? ignoredNotes.join(' ') : null;
 
     let result;
     if (family === 'psg') {

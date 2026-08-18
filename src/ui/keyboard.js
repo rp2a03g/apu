@@ -295,6 +295,10 @@
     const ym = id.match(/^YM(\d)$/);
     if (ym) return { section: 'expansion', chip: 'ym2612', type: 'array', index: +ym[1] - 1 };
     if (id === 'YMDA') return { section: 'expansion', chip: 'ym2612', type: 'array', index: 6 };
+    // VGM: YM2610(Neo Geo) FM(NF1-4)。内蔵SSGはKP1-3行(chip 'psg')を流用し、vgmPlayer.jsの
+    // YM2610アダプタが e.psg を自分のSSGへ適用する
+    const nf = id.match(/^NF(\d)$/);
+    if (nf) return { section: 'expansion', chip: 'ym2610fm', type: 'array', index: +nf[1] - 1 };
     // VGM: 32X PWM(PWL/PWR)。chip.mute[]は L=0, R=1
     if (id === 'PWL') return { section: 'expansion', chip: 'pwm', type: 'array', index: 0 };
     if (id === 'PWR') return { section: 'expansion', chip: 'pwm', type: 'array', index: 1 };
@@ -329,6 +333,8 @@
     { header: 'HuC6280(PC Engine / TurboGrafx-16)', ids: { HALL: 'ALL', PSG0: 'Ch0', PSG1: 'Ch1', PSG2: 'Ch2', PSG3: 'Ch3', PSG4: 'Ch4', PSG5: 'Ch5' } },
     { header: 'SN76489 (SG-1000 / Master System / Game Gear / Mega Drive PSG)', ids: { SN1: 'P1', SN2: 'P2', SN3: 'P3', SNN: 'No', SN4: 'P1(2)', SN5: 'P2(2)', SN6: 'P3(2)', SNN2: 'No(2)' } },
     { header: 'YM2612 (OPN2 , Mega Drive FM)', ids: { YMDA: 'DAC' }, prefix: 'YM', name: (id) => 'FM' + id.slice(2) },
+    // NF1-4は完全一致(ids)で先に拾う(N163のprefix 'N' と衝突させない)
+    { header: 'YM2610 (OPNB , Neo Geo FM)', ids: { NF1: 'FM1', NF2: 'FM2', NF3: 'FM3', NF4: 'FM4' } },
     { header: 'PWM (Sega 32X)', ids: { PWL: 'L', PWR: 'R' } },
     { header: 'RF5C164 (Mega-CD PCM)', prefix: 'RC', name: (id) => 'PCM' + id.slice(2) },
     { header: 'RF5C68 (PCM)', prefix: 'RB', name: (id) => 'PCM' + id.slice(2) },
@@ -857,6 +863,23 @@
         const d = s ? s.dac : { enabled: false, level: 0, vol: 0, active: false };
         channels.push({ id: 'YMDA', color: '#aa44ff', freq: 0, vol: d.vol, rawVol: d.enabled ? d.level : null, rawVolMax: 255,
           wave: { t: 'sample' }, active: !!d.active, sample: true, dmcReg: d.level, dmcRateIdx: 15, dmcFreq: 0 });
+      }
+    }
+
+    if (chips.includes('ym2610fm')) {
+      // YM2610(VGM: Neo Geo): 4op FM×4ch(YM2612と同じFM波形表示)。内蔵SSGは 'kssPsg' の
+      // KP1-3行として別途出す(main.js vgmKeyboardChips)。ライブ関数優先、無ければ先読み
+      // スナップショット配列(extraSnaps.ym2610fm[frameIdx]、ロール構築用)。
+      const live = extraSnaps && extraSnaps.ym2610FmLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.ym2610fm ? extraSnaps.ym2610fm[frameIdx] : null);
+      const COLS = ['#ffcc00', '#ffdd44', '#ffe566', '#ffee88'];
+      for (let ch = 0; ch < 4; ch++) {
+        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, waveData: null };
+        const wave = (c.waveData && c.waveData.length && c.active)
+          ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
+          : { t: 'fm', nx: 256, ny: 256 };
+        channels.push({ id: `NF${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave, active: c.active, panL: c.panL, panR: c.panR });
       }
     }
 
@@ -2497,6 +2520,7 @@
       this._extraSnaps.hesApuLive = typeof result.getHesApu === 'function' ? result.getHesApu : null;
       this._extraSnaps.snLive = typeof result.getSn76489 === 'function' ? result.getSn76489 : null;
       this._extraSnaps.ymLive = typeof result.getYm2612 === 'function' ? result.getYm2612 : null;
+      this._extraSnaps.ym2610FmLive = typeof result.getYm2610Fm === 'function' ? result.getYm2610Fm : null;
       this._extraSnaps.pwmLive = typeof result.getPwm === 'function' ? result.getPwm : null;
       this._extraSnaps.rf5c164Live = typeof result.getRf5c164 === 'function' ? result.getRf5c164 : null;
       this._extraSnaps.rf5c68Live = typeof result.getRf5c68 === 'function' ? result.getRf5c68 : null;

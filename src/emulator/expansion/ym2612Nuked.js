@@ -21,6 +21,8 @@
  *   OPN2_WRITEBUF_DELAY(15サイクル)間隔に整流してから流す(VGMPlay同梱版と同じ)。
  *   外部インターフェースは ym2612.js と同じ: writeReg(port,reg,val) / clock()(マスタークロック毎)
  *   / mixSample() / mute[7] / vol[7] / snapshot()。
+ *   constructor(clock, {chipType}) で 'ym2612'(既定、ラダー効果あり)/'ym3438'(ラダー無し)を選べる。
+ *   後者は expansion/ym2610.js(Neo Geo YM2610のFM段)が使う。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -29,7 +31,13 @@
   const eg_num_attack = 0, eg_num_decay = 1, eg_num_sustain = 2, eg_num_release = 3;
   const ym3438_mode_ym2612 = 0x01;
   const ym3438_mode_readmode = 0x02;
-  const chip_type = ym3438_mode_ym2612 | ym3438_mode_readmode; // メガドライブ(YM2612)として振る舞う
+  // chip_type はインスタンスごと(constructorのopts.chipType)。
+  //   'ym2612'(既定): メガドライブのYM2612。9bit DACのラダー効果(不連続歪み)を再現、1サンプル中1/4
+  //                   サイクルだけ出力して3倍(ym3438.c OPN2_ChOutput)。
+  //   'ym3438'      : YM3438(ASIC版OPN2)。ラダー効果無し、3/4サイクル出力。FMオペレータ本体(PG/EG/
+  //                   log-sin/exp ROM/LFO/SSG-EG)はOPNファミリで共通設計なので、ラダーの無い
+  //                   YM2610(OPNB、expansion/ym2610.js)のFM段としてもこのモードを使う。
+  const CHIP_TYPES = { ym2612: ym3438_mode_ym2612 | ym3438_mode_readmode, ym3438: ym3438_mode_readmode };
 
   const SIGN_EXTEND = (bit, v) => (v & ((1 << bit) - 1)) - (v & (1 << bit));
 
@@ -95,9 +103,15 @@
   const CYCLES_PER_SAMPLE = 24;   // OPN2サイクル(=マスタークロック/6)
 
   class YM2612Nuked {
-    constructor(clock) {
+    /**
+     * @param {number} [clock=7670453]
+     * @param {{chipType?: 'ym2612'|'ym3438'}} [opts]
+     */
+    constructor(clock, opts) {
       this.clockHz = clock || 7670453;
       this.sampleRate = this.clockHz / 144;
+      this.chipType = (opts && opts.chipType) || 'ym2612';
+      this.chip_type = CHIP_TYPES[this.chipType] !== undefined ? CHIP_TYPES[this.chipType] : CHIP_TYPES.ym2612;
       this.mute = new Array(7).fill(false); // 0-5=FM ch(ch1-6), 6=DAC
       this.vol = new Array(7).fill(1);
       this.reset();
@@ -544,7 +558,7 @@
       if (((cycles >> 2) === 1 && c.dacen) || test_dac) { out = SIGN_EXTEND(8, c.dacdata); isDac = true; }
       else out = c.ch_lock;
       c.mol = 0; c.mor = 0;
-      if (chip_type & ym3438_mode_ym2612) {
+      if (this.chip_type & ym3438_mode_ym2612) {
         out_en = ((cycles & 3) === 3) || test_dac;
         sign = out >> 8;
         if (out >= 0) { out++; sign++; }

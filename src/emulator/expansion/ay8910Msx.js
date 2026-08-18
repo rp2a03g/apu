@@ -171,9 +171,11 @@
     }
   }
 
-  // 鍵盤表示用スナップショット(MSX Z80クロック基準)
-  Emu.snapshotAY8910 = function (chip) {
-    const CLOCK = MML.KSS ? MML.KSS.Z80_CLOCK : 3579545;
+  // 鍵盤表示用スナップショット。clockHz省略時はMSX Z80クロック基準(=このエミュレータの
+  // clock()呼び出しレート、実AYクロックの2倍)。VGMのように別クロックで叩く場合は
+  // clock()の呼び出しレートを渡す
+  Emu.snapshotAY8910 = function (chip, clockHz) {
+    const CLOCK = clockHz || (MML.KSS ? MML.KSS.Z80_CLOCK : 3579545);
     const mix = chip.regs[7];
     const out = [];
     for (let i = 0; i < NUM_CH; i++) {

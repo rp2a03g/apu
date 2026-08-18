@@ -31,7 +31,7 @@
     { id: 'rf5c68',   name: 'RF5C68',     offset: 0x40, minVer: 0x151, impl: true },
     { id: 'ym2203',   name: 'YM2203',     offset: 0x44, minVer: 0x151 },
     { id: 'ym2608',   name: 'YM2608',     offset: 0x48, minVer: 0x151 },
-    { id: 'ym2610',   name: 'YM2610/B',   offset: 0x4C, minVer: 0x151 },
+    { id: 'ym2610',   name: 'YM2610/B',   offset: 0x4C, minVer: 0x151, impl: true },
     { id: 'ym3812',   name: 'YM3812',     offset: 0x50, minVer: 0x151 },
     { id: 'ym3526',   name: 'YM3526',     offset: 0x54, minVer: 0x151 },
     { id: 'y8950',    name: 'Y8950',      offset: 0x58, minVer: 0x151 },

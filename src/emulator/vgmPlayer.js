@@ -9,7 +9,9 @@
  *   AY8910=ay8910Msx.js, K051649(SCC)=sccAudio.js, YM2413=opllMsx.js,
  *   SN76489(SMS/GG/SG-1000/MD PSG)=expansion/sn76489.js(VGM段階2で新規実装),
  *   YM2612(OPN2、MD FM)=expansion/ym2612.js(VGM段階4で新規実装。データブロック0x00のPCM、
- *   0xE0シーク、0x8n DAC書込+待ち、DACストリーム制御0x90-0x95もここで扱う)
+ *   0xE0シーク、0x8n DAC書込+待ち、DACストリーム制御0x90-0x95もここで扱う)、
+ *   YM2610(OPNB、Neo Geo FM+SSG)=expansion/ym2610.js(FM部。レジスタ配置がYM2612と同一なので
+ *   YM2612Audioのラッパー)+AY8910Audio(SSG流用)。ADPCM-A/Bは未実装(段階2)
  * ヘッダのクロックが非ゼロでも未実装のチップは、コマンド長規則で読み飛ばすだけ
  * (ROADMAP.md VGM節: 全チップ実装は不要)。
  *
@@ -31,6 +33,9 @@
  *  - HuC6280: ヘッダ値(3579545)そのまま(PSGクロック)。
  *  - SN76489: ヘッダ値(3579545)そのまま(内部/16分周はチップ側)。
  *  - YM2612: ヘッダ値(7670453)そのまま(内部/144で1サンプル=53267Hz)。
+ *  - YM2610: FMはヘッダ値そのまま(内部/144でYM2612と同じ、Neo Geo: 8000000Hz→55555Hz、
+ *    ymfm裏取り済み)。SSGはヘッダ値/2でAY8910Audio.clock()を呼ぶ(実SSGクロックはヘッダ値/4、
+ *    AY8910Audioは実クロックの2倍で叩く既存規約のため)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -43,7 +48,11 @@
   // 各フォーマットのストリームプレイヤーが使っている実測校正済みgain
   // (src/audio/*-stream-player.js 参照)。VGMは複数チップの合算なので、チップごとに
   // 由来フォーマットのgainを掛けてから足し、出力段のgainは1.0にする。
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6 };
+  // ym2610(FM)/ym2610ssg: Neo Geoの曲はYM2612(MD)よりTLを詰めて鳴らすものが多く、YM2612と同じ2.0だと
+  // 実測RMSがMD FMの2〜4倍(Metal Slug 0.21、Neo Turf Masters 0.29〜0.44、ピーク1.5超)になるので、
+  // MD FM(0.10〜0.13)に揃うよう1.25。SSGはFMに対して MAME neogeo ドライバのルーティング比
+  // (SSG 0.28 : FM 0.98)を目安に1.0(暫定。実機録音との比較は未実施)。
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.25, ym2610ssg: 1.0 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -185,6 +194,7 @@
 
   // YM2612コアの選択: 既定は Nuked-OPN2 移植版(実機準拠、重い)、Emu.ym2612CorePref = 'fast' で
   // 自作の近似コア(高速)。切替はアダプタ生成時(再生開始/シーク時)に効く。
+  // 同じ設定を YM2610(expansion/ym2610.js、Nukedはラダー無しの ym3438 モード)も見る。
   function makeYm2612Adapter(info) {
     // 既定(Emu.ym2612CorePref未設定)は Nuked-OPN2。'fast' を明示した時だけ近似コア
     const useNuked = Emu.ym2612CorePref !== 'fast' && Emu.YM2612Nuked;
@@ -200,6 +210,36 @@
       flushWrites() { if (chip.flushWrites) chip.flushWrites(); },
       applyMute(m) { const e = m.expansion || m; if (e.ym2612) Emu.applyMute(chip.mute, e.ym2612); },
       applyVolume(v) { const e = v.expansion || v; if (e.ym2612) Emu.applyVolume(chip.vol, e.ym2612); }
+    };
+  }
+
+  // YM2610(Neo Geo): FM(4ch、expansion/ym2610.js=YM2612Audioのラッパー)+SSG(3ch、Emu.AY8910Audio
+  // を流用)を1アダプタでまとめて鳴らす(NESアダプタのapu+fdsと同じ構成)。SSGの実クロックは
+  // ymfm(aaronsgiles/ymfm)裏取り: チップクロック/4。AY8910Audioは「実クロックの2倍で叩く」既存規約
+  // (標準AY8910アダプタと同じ)のため、呼び出しはチップクロック/2(=fm.clock()を2回に1回ssg.clock())。
+  // ADPCM-A(port1 addr<0x30)/ADPCM-B(port0 addr 0x10-0x1C)は段階2で未実装、該当アドレスは
+  // ym2610.jsのwriteRegが弾く。
+  function makeYm2610Adapter(info) {
+    const fm = new Emu.YM2610Audio(info.clock);
+    const ssg = new Emu.AY8910Audio();
+    return {
+      id: 'ym2610', clockHz: info.clock, accum: 0, fm, ssg, gain: CHIP_GAIN.ym2610, ssgGain: CHIP_GAIN.ym2610ssg, core: fm.coreName,
+      _ssgToggle: 0,
+      write(port, aa, dd) {
+        if (port === 0 && aa < 0x0E) { ssg.writeInternal(aa & 0x0F, dd); return; }
+        fm.writeReg(port, aa, dd);
+      },
+      clock() { fm.clock(); if ((this._ssgToggle ^= 1) === 0) ssg.clock(); },
+      flushWrites() { fm.flushWrites(); },
+      mix(out) {
+        const s = fm.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain;
+        const sg = ssg.mixSample() * this.ssgGain; out[0] += sg; out[1] += sg;
+      },
+      // 鍵盤: FMはNF1-4行(chip 'ym2610fm')、SSGはKSS PSG表示のKP1-3行(chip 'psg')を流用
+      applyMute(m) { const e = m.expansion || m; if (e.ym2610fm) { Emu.applyMute(fm.mute, e.ym2610fm); fm.syncMuteVol(); } if (e.psg) Emu.applyMute(ssg.mute, e.psg); },
+      applyVolume(v) { const e = v.expansion || v; if (e.ym2610fm) { Emu.applyVolume(fm.vol, e.ym2610fm); fm.syncMuteVol(); } if (e.psg) Emu.applyVolume(ssg.vol, e.psg); },
+      // 拡張ヘッダのチップ音量/全体音量(reset()が掛ける)はFM/SSG両方に効かせる
+      scaleGain(f) { this.gain *= f; this.ssgGain *= f; }
     };
   }
 
@@ -237,7 +277,7 @@
     nes: makeNesAdapter, gb: makeGbAdapter, huc6280: makeHucAdapter,
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
     sn76489: makeSnAdapter, ym2612: makeYm2612Adapter, pwm: makePwmAdapter,
-    rf5c68: makeRfAdapter('rf5c68'), rf5c164: makeRfAdapter('rf5c164')
+    rf5c68: makeRfAdapter('rf5c68'), rf5c164: makeRfAdapter('rf5c164'), ym2610: makeYm2610Adapter
   };
 
   // ---------------------------------------------------------------------------
@@ -296,7 +336,9 @@
         // 拡張ヘッダのチップ別音量(0x100=100%)と全体音量(0x7C)をアダプタのgainへ掛ける
         // (VGMPlayと同じ扱い。Exed Exes(Arcade)はAY8910に16%を指定している)。
         const a = mk(info);
-        a.gain *= globalVol * (extra.chipVolumes[info.id] !== undefined ? extra.chipVolumes[info.id] : 1);
+        // 複数gainを持つアダプタ(YM2610のFM/SSG)は scaleGain() で両方へ
+        const scale1 = globalVol * (extra.chipVolumes[info.id] !== undefined ? extra.chipVolumes[info.id] : 1);
+        if (a.scaleGain) a.scaleGain(scale1); else a.gain *= scale1;
         // メガドライブ/32X(SN76489+YM2612)の実機ミックスではPSGはFMよりかなり小さい。VGMPlayも
         // YM2612同居時はSN76496の音量を0x80(50%)に落としている。ユーザー実測でも「PSGが明らかに大きい、
         // 50%くらいで丁度よい」だったので同じ比率にする(SMS/GG等のPSG単独構成は従来どおり)。
@@ -308,7 +350,8 @@
           // 「2個目」印(SN=0x30、その他はレジスタ/ポートのbit7)で振り分ける。
           const info2 = Object.assign({}, info, { clock: extra.chipClocks[info.id] || info.clock });
           const b = mk(info2);
-          b.gain *= globalVol * (extra.chipVolumes[info.id + '_2'] !== undefined ? extra.chipVolumes[info.id + '_2'] : 1);
+          const scale2 = globalVol * (extra.chipVolumes[info.id + '_2'] !== undefined ? extra.chipVolumes[info.id + '_2'] : 1);
+          if (b.scaleGain) b.scaleGain(scale2); else b.gain *= scale2;
           if (info.id === 'sn76489' && h.chips.ym2612) b.gain *= 0.5;
           b.second = true;
           this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
@@ -386,6 +429,8 @@
           case 0x53: this._ymWrite(1, d[p], d[p + 1], false); this.pos = p + 2; break;
           case 0xA2: this._ymWrite(0, d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2612
           case 0xA3: this._ymWrite(1, d[p], d[p + 1], true); this.pos = p + 2; break;
+          case 0x58: this._ym2610Write(0, d[p], d[p + 1]); this.pos = p + 2; break; // YM2610(Neo Geo) ポート0
+          case 0x59: this._ym2610Write(1, d[p], d[p + 1]); this.pos = p + 2; break; // YM2610 ポート1
           case 0xE0: this.pcmPos = (d[p] | (d[p + 1] << 8) | (d[p + 2] << 16) | (d[p + 3] << 24)) >>> 0; this.pos = p + 4; break;
           case 0x90: { // ストリーム設定: ss tt pp cc
             const s = this._stream(d[p]); s.chipType = d[p + 1] & 0x7F; s.second = !!(d[p + 1] & 0x80); s.port = d[p + 2]; s.cmd = d[p + 3];
@@ -495,6 +540,13 @@
       if (this.onWrite) this.onWrite(key, port, aa, dd);
     }
 
+    _ym2610Write(port, aa, dd) {
+      const a = this.adapterById.ym2610;
+      if (!a) return;
+      a.write(port, aa, dd);
+      if (this.onWrite) this.onWrite('ym2610', port, aa, dd);
+    }
+
     _stream(id) {
       return this.streams[id] || (this.streams[id] = { chipType: 0, second: false, port: 0, cmd: 0, bankType: 0, stepSize: 1, stepBase: 0, freq: 0, acc: 0, pos: 0, end: 0, loop: false, reverse: false, active: false });
     }
@@ -578,7 +630,7 @@
     }
 
     // clock()を回さずにコマンドだけ消化した後(fastForward / renderFrame regsOnly)、書込みを
-    // キュー経由で適用するチップ(Nuked-OPN2版YM2612)にキューを消化させる。
+    // キュー経由で適用するチップ(Nuked-OPN2版YM2612/YM2610)にキューを消化させる。
     // これが無いと、Nukedコアではキャプチャの鍵盤スナップショット/ロールが空になり、シーク後は
     // 曲頭からの全書込みがキューに溜まったまま再生が始まって暫く音が崩れる。
     _flushWrites() {
@@ -646,11 +698,18 @@
       nes: has('nes') ? { regSnapshots: [], writeLog: [], fds: !!player.adapterById.nes.fds } : null,
       gb: has('gb') ? { snapshots: [] } : null,
       hes: has('huc6280') ? { snapshots: [] } : null,
-      kss: (has('ay8910') || has('k051649') || has('ym2413'))
-        ? { writeLog: [], ay: has('ay8910'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus) }
+      // YM2610の内蔵SSG(AY互換)は kss.writeLog へ AY8910書込みとして流し込む(KP1-3行/kss2mml流用)。
+      // clock: kss2mml抽出器(AY/SCC)に渡す「Z80相当クロック」(=AY実クロック×2)。MSXの3.58MHz固定では
+      // 別クロックのAY(Exed Exes 1.5MHz等)やYM2610内蔵SSG(チップクロック/4)のロール音程がずれる。
+      // vgm2mml/converter.js の kssClock と同じ優先順位。
+      kss: (has('ay8910') || has('k051649') || has('ym2413') || has('ym2610'))
+        ? { writeLog: [], ay: has('ay8910') || has('ym2610'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus),
+            clock: has('ay8910') ? player.adapterById.ay8910.clockHz : has('ym2610') ? player.adapterById.ym2610.clockHz / 2
+                 : has('k051649') ? player.adapterById.k051649.clockHz : has('ym2413') ? player.adapterById.ym2413.clockHz : 3579545 }
         : null,
       sn: has('sn76489') ? { snapshots: [], clock: player.adapterById.sn76489.clockHz } : null,
       ym2612: has('ym2612') ? { snapshots: [] } : null,
+      ym2610fm: has('ym2610') ? { snapshots: [] } : null,
       pwm: has('pwm') ? { snapshots: [] } : null,
       rf5c164: has('rf5c164') ? { snapshots: [] } : null,
       rf5c68: has('rf5c68') ? { snapshots: [] } : null
@@ -666,6 +725,8 @@
       switch (id) {
         case 'nes': nesFrameWrites.push({ addr: c, value: b }); nesRegs[c] = b; break;
         case 'ay8910': kssFrameWrites.push({ addr: 0xA0, value: a & 0x0F, io: true }, { addr: 0xA1, value: b, io: true }); break;
+        // YM2610: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
+        case 'ym2610': if (a === 0 && b < 0x0E) kssFrameWrites.push({ addr: 0xA0, value: b & 0x0F, io: true }, { addr: 0xA1, value: c, io: true }); break;
         case 'ym2413': kssFrameWrites.push({ addr: 0x7C, value: a, io: true }, { addr: 0x7D, value: b, io: true }); break;
         case 'k051649': kssFrameWrites.push({ addr: d, value: c, io: false }); break;
       }
@@ -698,6 +759,11 @@
         const s = Emu.snapshotYM2612(player.adapterById.ym2612.chip);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2612.snapshots.push(s);
+      }
+      if (data.ym2610fm) {
+        const s = Emu.snapshotYM2610(player.adapterById.ym2610.fm);
+        for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
+        data.ym2610fm.snapshots.push(s);
       }
       if (f % CHUNK_FRAMES === 0) {
         if (onProgress) onProgress(f, totalFrames, data);
