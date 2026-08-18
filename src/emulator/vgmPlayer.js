@@ -6,7 +6,8 @@
  * CPUコアは無い。「44100Hzのサンプルクロックを進めながらコマンドを消化し、書込みを
  * 各チップへ流す」だけ。チップ本体はすべて既存実装を流用する:
  *   NES APU(+FDS)=apu2a03.js/fds.js, GB DMG=apuGb.js, HuC6280=apuHuC6280.js,
- *   AY8910=ay8910Msx.js, K051649(SCC)=sccAudio.js, YM2413=opllMsx.js
+ *   AY8910=ay8910Msx.js, K051649(SCC)=sccAudio.js, YM2413=opllMsx.js,
+ *   SN76489(SMS/GG/SG-1000/MD PSG)=expansion/sn76489.js(VGM段階2で新規実装)
  * ヘッダのクロックが非ゼロでも未実装のチップは、コマンド長規則で読み飛ばすだけ
  * (ROADMAP.md VGM節: 全チップ実装は不要)。
  *
@@ -26,6 +27,7 @@
  *  - NES APU: ヘッダ値(1789772)そのまま(=CPUサイクル)。FDSも同じクロック。
  *  - GB DMG: ヘッダ値(4194304)そのまま。
  *  - HuC6280: ヘッダ値(3579545)そのまま(PSGクロック)。
+ *  - SN76489: ヘッダ値(3579545)そのまま(内部/16分周はチップ側)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -38,7 +40,7 @@
   // 各フォーマットのストリームプレイヤーが使っている実測校正済みgain
   // (src/audio/*-stream-player.js 参照)。VGMは複数チップの合算なので、チップごとに
   // 由来フォーマットのgainを掛けてから足し、出力段のgainは1.0にする。
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -160,9 +162,26 @@
     };
   }
 
+  function makeSnAdapter(info) {
+    // LFSRの幅/帰還はヘッダ0x28/0x2A(vgmHeader.jsがv1.10未満や0をSega既定へ補正済み)。
+    // 0x2Bフラグ: bit0=周期0を0x400扱い, bit3=内部分周/8。
+    const chip = new Emu.SN76489Audio({ feedback: info.feedback, shiftWidth: info.shiftWidth,
+      freq0Is0x400: !!(info.flags & 1), clockDiv8: !!(info.flags & 8) });
+    return {
+      id: 'sn76489', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.sn76489,
+      write(dd) { chip.write(dd); },
+      writeStereo(dd) { chip.writeStereo(dd); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.sn76489) Emu.applyMute(chip.mute, e.sn76489); },
+      applyVolume(v) { const e = v.expansion || v; if (e.sn76489) Emu.applyVolume(chip.vol, e.sn76489); }
+    };
+  }
+
   const ADAPTERS = {
     nes: makeNesAdapter, gb: makeGbAdapter, huc6280: makeHucAdapter,
-    ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter
+    ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
+    sn76489: makeSnAdapter
   };
 
   // ---------------------------------------------------------------------------
@@ -320,7 +339,6 @@
       if (this.onWrite && addr >= 0) this.onWrite('k051649', pp, aa, dd, addr);
     }
 
-    // SN76489 は段階2で実装(src/emulator/expansion/sn76489.js)。それまでは無視。
     _writeSn(dd) {
       const a = this.adapterById.sn76489;
       if (a) { a.write(dd); if (this.onWrite) this.onWrite('sn76489', dd); }
@@ -412,7 +430,8 @@
       hes: has('huc6280') ? { snapshots: [] } : null,
       kss: (has('ay8910') || has('k051649') || has('ym2413'))
         ? { writeLog: [], ay: has('ay8910'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus) }
-        : null
+        : null,
+      sn: has('sn76489') ? { snapshots: [], clock: player.adapterById.sn76489.clockHz } : null
     };
     let nesFrameWrites = [];
     let kssFrameWrites = [];
@@ -443,6 +462,7 @@
       if (data.gb) data.gb.snapshots.push(Emu.snapshotGbApuForCapture(player.adapterById.gb.apu));
       if (data.hes) data.hes.snapshots.push(Emu.snapshotHesApuForCapture(player.adapterById.huc6280.apu));
       if (data.kss) { data.kss.writeLog.push(kssFrameWrites); kssFrameWrites = []; }
+      if (data.sn) data.sn.snapshots.push(Emu.snapshotSN76489(player.adapterById.sn76489.chip, data.sn.clock));
       if (f % CHUNK_FRAMES === 0) {
         if (onProgress) onProgress(f, totalFrames, data);
         await new Promise(r => setTimeout(r, 0));

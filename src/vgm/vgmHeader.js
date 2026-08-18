@@ -23,7 +23,7 @@
   // 鍵盤表示のキーとして使う。impl は現時点で実装済み(再生できる)かどうか。
   // 未実装チップはコマンドを読み飛ばすだけ(ROADMAP: 全チップ実装は不要)。
   VGM.CHIPS = [
-    { id: 'sn76489',  name: 'SN76489',    offset: 0x0C, minVer: 0x100 },
+    { id: 'sn76489',  name: 'SN76489',    offset: 0x0C, minVer: 0x100, impl: true },
     { id: 'ym2413',   name: 'YM2413',     offset: 0x10, minVer: 0x100, impl: true },
     { id: 'ym2612',   name: 'YM2612',     offset: 0x2C, minVer: 0x110 },
     { id: 'ym2151',   name: 'YM2151',     offset: 0x30, minVer: 0x110 },

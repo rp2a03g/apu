@@ -285,6 +285,10 @@
     if (ks) return { section: 'expansion', chip: 'scc', type: 'array', index: +ks[1] - 1 };
     const kf = id.match(/^KF(\d+)$/);
     if (kf) return { section: 'expansion', chip: 'opll', type: 'array', index: +kf[1] - 1 };
+    // VGM: SN76489(SN1-3=トーン, SNN=ノイズ)。chip.mute[]はトーン0-2,ノイズ3の4要素
+    const sn = id.match(/^SN(\d)$/);
+    if (sn) return { section: 'expansion', chip: 'sn76489', type: 'array', index: +sn[1] - 1 };
+    if (id === 'SNN') return { section: 'expansion', chip: 'sn76489', type: 'array', index: 3 };
     if (KF_RHYTHM_INDEX[id] !== undefined) return { section: 'expansion', chip: 'opll', type: 'array', index: KF_RHYTHM_INDEX[id] };
     return null;
   }
@@ -309,6 +313,7 @@
     { header: 'YM2413 (MSX-MUSIC , OPLL)', ids: { KFBD: 'BD', KFSD: 'SD', KFTOM: 'Tom', KFCYM: 'Cym', KFHH: 'HH' }, prefix: 'KF', name: (id) => 'FM' + id.slice(2) },
     { header: 'LR35902 (Game Boy)', ids: { GALL: 'ALL', GB1: 'P1', GB2: 'P2', GN: 'No', GW: 'Wave' } },
     { header: 'HuC6280(PC Engine / TurboGrafx-16)', ids: { HALL: 'ALL', PSG0: 'Ch0', PSG1: 'Ch1', PSG2: 'Ch2', PSG3: 'Ch3', PSG4: 'Ch4', PSG5: 'Ch5' } },
+    { header: 'SN76489 (SG-1000 / Master System / Game Gear / Mega Drive PSG)', ids: { SN1: 'P1', SN2: 'P2', SN3: 'P3', SNN: 'No' } },
   ];
   function getChannelDisplay(id) {
     for (const g of CHANNEL_DISPLAY_GROUPS) {
@@ -326,14 +331,15 @@
   // src/mml/compiler.jsのassignExpansionLettersで機種に関わらず完全固定。
   // GB1/GB2/GNは2A03コア(自チップ、拡張音源宣言不要)を借用するのでA/B/Dに固定
   // (src/gbs2mml/converter.js参照。GBのCH1/CH2/CH4はそのままNESパルス1/2/ノイズへ乗る)。
-  const APU_PART_LETTER = { P1: 'A', P2: 'B', TR: 'C', NO: 'D', DM: 'E', GB1: 'A', GB2: 'B', GN: 'D' };
+  // SN76489(VGM)のノイズchも2A03ノイズ(D)へ借用する(vgm2mml、ROADMAP VGM節 段階3)。
+  const APU_PART_LETTER = { P1: 'A', P2: 'B', TR: 'C', NO: 'D', DM: 'E', GB1: 'A', GB2: 'B', GN: 'D', SNN: 'D' };
 
   // chips(内部chip名の配列)をassignExpansionLettersが受け取る拡張音源名に変換する。
   // KSSはPSG→FME-7・SCC→N163・FMPAC→VRC7、GBSは波形ch→FDS(実機較正済みの音量バランスを
   // 持つため、当初のN163から変更した。src/gbs2mml/expansion/wave.js冒頭コメント参照)を
   // 借用して再生するため(src/kss2mml/converter.js・src/gbs2mml/converter.js参照)、
   // レター体系もそれらをそのまま流用する。
-  const BORROWED_CHIP_TO_EXPANSION = { kssPsg: 'fme7', kssScc: 'n163', kssOpll: 'vrc7', gbs: 'fds', hes: 'n163' };
+  const BORROWED_CHIP_TO_EXPANSION = { kssPsg: 'fme7', kssScc: 'n163', kssOpll: 'vrc7', gbs: 'fds', hes: 'n163', sn76489: 'fme7' };
   function chipsToExpansions(chips) {
     const priority = MML.Mml && MML.Mml.EXPANSION_PRIORITY;
     const set = new Set();
@@ -367,6 +373,7 @@
       return letters[numCh - (+m[1])] || '';
     }
     if ((m = id.match(/^KP(\d+)$/))) return (lm.fme7 || [])[+m[1] - 1] || '';
+    if ((m = id.match(/^SN(\d)$/))) return (lm.fme7 || [])[+m[1] - 1] || ''; // SN76489トーン3本→FME7(vgm2mml)
     if ((m = id.match(/^KS(\d+)$/))) return (lm.n163 || [])[+m[1] - 1] || '';
     if ((m = id.match(/^KF(\d+)$/))) return (lm.vrc7 || [])[+m[1] - 1] || '';
     if (id === 'GW') return (lm.fds || [])[0] || ''; // GBの波形chはFDS(1ch)を借用(src/gbs2mml/converter.js参照)
@@ -781,6 +788,29 @@
             wave: r.freq > 0 ? { t: 'pulse', hi: 0.5, nx: 2, ny: 2 } : { t: 'noise', short: true, nx: 93, ny: 2 },
             active: r.active, drum: true });
         }
+      }
+    }
+
+    if (chips.includes('sn76489')) {
+      // SN76489(VGM: SMS/GG/SG-1000/MD PSG): 矩形3本(50%固定)+ノイズ1ch。ライブ関数優先、
+      // 無ければ先読みスナップショット配列(extraSnaps.sn[frameIdx]、ロール構築用)。
+      // L/R列はGame Gearのステレオレジスタ(他機種では常に1/1)。
+      const live = extraSnaps && extraSnaps.snLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.sn ? extraSnaps.sn[frameIdx] : null);
+      const COLS = ['#66ddff', '#33aaff', '#0077dd'];
+      for (let ch = 0; ch < 3; ch++) {
+        const c = s ? s[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1 };
+        channels.push({ id: `SN${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave: { t: 'pulse', hi: 0.5, nx: 2, ny: 2 }, active: c.active, panL: c.panL, panR: c.panR });
+      }
+      {
+        const c = s ? s[3] : { freq: 0, vol: 0, rawVol: 0, active: false, white: true, noiseFreq: 0, panL: 1, panR: 1 };
+        // 周期性ノイズ(white=false)は短周期の繰り返し=2A03の短周期ノイズ表示に寄せる。
+        // note列はシフトレートを2A03ノイズ16周期の最寄りindexに写像(GBのGN行と同じ考え方)。
+        channels.push({ id: 'SNN', color: '#888888', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave: { t: 'noise', short: !c.white, nx: c.white ? 65535 : 16, ny: 2 },
+          active: c.active, noise: true, noiseIndex: gbNoiseFreqToIndex(c.noiseFreq), noiseFreq: c.noiseFreq, noiseShort: !c.white,
+          panL: c.panL, panR: c.panR });
       }
     }
 
@@ -2349,7 +2379,8 @@
       // L/R(ステレオパン)列はHES/GBSのみ意味を持つため、他フォーマットでは非表示にする
       // (表示/パネル幅はCSS側の.kbd-left--hes/.kbd-left--gbsで切り替え、詳細はstyle.css参照)。
       this._leftEl.classList.toggle('kbd-left--hes', this._chips.includes('hes'));
-      this._leftEl.classList.toggle('kbd-left--gbs', this._chips.includes('gbs'));
+      // VGMのSN76489もGame Gearステレオ(L/R列)を持つのでGBS用のL/R列表示を流用する
+      this._leftEl.classList.toggle('kbd-left--gbs', this._chips.includes('gbs') || this._chips.includes('sn76489'));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
       if (this._chips.includes('vrc7')) this._extraSnaps.vrc7 = buildVrc7Snapshots(wl);
@@ -2368,6 +2399,7 @@
       this._extraSnaps.kssOpllLive = typeof result.getKssOpll === 'function' ? result.getKssOpll : null;
       this._extraSnaps.gbsApuLive = typeof result.getGbsApu === 'function' ? result.getGbsApu : null;
       this._extraSnaps.hesApuLive = typeof result.getHesApu === 'function' ? result.getHesApu : null;
+      this._extraSnaps.snLive = typeof result.getSn76489 === 'function' ? result.getSn76489 : null;
       this._lastDmc4011 = null; // 曲切替時にDMC書き込み検出をリセット
       this._rollSongTimeBase = 0; // 曲切替時にピアノロールの経過時間もリセット
       this._rollLastRawPos = null;
@@ -2436,16 +2468,17 @@
     // setRollTimelineFromRegSnapshots()のトラック構築部分。VGM(main.js playVgmStream)のように
     // NES APU由来のトラックと他チップ(GB/HuC6280/AY/SCC/OPLL)由来のトラックを1本の
     // タイムラインへ連結したい呼び出し側のために、差し替えず配列を返す版を分離した。
-    buildRollTracksFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots) {
+    // extra(省略可): extraSnapsへ追加でマージする先読み配列({sn: [...]}等。VGMのSN76489ロール用)。
+    buildRollTracksFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots, extra) {
       if (!regSnapshots || totalFrames <= 0) return null;
       const wl = writeLog || [];
-      const extraSnaps = {
+      const extraSnaps = Object.assign({}, extra || {}, {
         vrc7: chips.includes('vrc7') ? buildVrc7Snapshots(wl) : null,
         n163: chips.includes('n163')
           ? (n163Snapshots && n163Snapshots.length ? buildN163SnapshotsFromLiveRam(n163Snapshots) : buildN163Snapshots(wl))
           : null,
         fme7: chips.includes('fme7') ? buildFme7Snapshots(wl) : null,
-      };
+      });
       const frameDur = samplesPerFrame / sampleRate;
       return buildNoteTimelineFromChannelFrames(
         (f) => extractChannels(regSnapshots[f] || {}, extraSnaps, f, chips),

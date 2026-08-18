@@ -16,6 +16,8 @@
  * - gzip: 拡張子は当てにせず先頭2バイト(1f 8b)で判別する
  *   (「.vgm」拡張子で中身がgzipのファイルが実在する。ROADMAP.md VGM節参照)。
  * - m3u: zip内に .m3u があればその行順をトラック順にする。無ければファイル名の自然順。
+ *   NEZplug系の拡張行 "file.kss::KSS,song,title,..." は曲番号付きの項目になる
+ *   (KSS/NSF等の1ファイル多曲形式でも m3u の曲順で曲送りできる)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -155,57 +157,77 @@
   const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
   Archive.naturalCompare = (a, b) => collator.compare(a, b);
 
+
+  // NEZplug/in_kss 系の拡張m3u行 "file.kss::KSS,song,title,length,loop,fade" を分解する。
+  // 通常のm3u(ファイル名のみ)なら {fname} だけ返す。title 内の "\," はエスケープされたカンマ。
+  const ESC_COMMA = '⁣'; // 分割時にエスケープ済みカンマを一時退避する印(不可視分離子、m3uには現れない)
+  function parseM3uLine(line) {
+    const sep = line.indexOf('::');
+    if (sep < 0) return { fname: line.split('|')[0].trim() };
+    const fname = line.slice(0, sep).trim();
+    const rest = line.slice(sep + 2);
+    const fields = rest.replace(/\\,/g, ESC_COMMA).split(',').map(s => s.split(ESC_COMMA).join(',').trim());
+    const song = fields.length >= 2 && fields[1] !== '' && !isNaN(+fields[1]) ? +fields[1] : null;
+    const title = fields.length >= 3 && fields[2] ? fields[2] : null;
+    return { fname, type: fields[0] || null, song, title };
+  }
+
   /**
    * zipエントリ一覧から「曲リスト」を作る。
    * @param {Array} entries - parseZip().entries
    * @param {Set<string>|string[]} exts - 対象拡張子(小文字、ドット無し)
    * @param {(entry)=>Promise<Uint8Array>} [readFn] - .m3uを読むための関数(省略時はm3u無視)
-   * @returns {Promise<Array<{entry:object, title:string}>>}
-   *   title は m3u に "name.vgm::TITLE" 形式(vgmrips形式の拡張)があればそれ、無ければファイル名(拡張子除く)
+   * @returns {Promise<Array<{entry:object, title:string, song:number|null}>>}
+   *   - song: 拡張m3u("file::TYPE,song,title,...")が曲番号を持つ場合その値(形式ごとの
+   *     ネイティブ表記のまま: NSF/GBSは1始まり、KSS/HESは0始まりで書かれるのが慣例)。
+   *     同じファイルを曲番号違いで複数回列挙するm3u(KSSの1ファイル多曲)は別項目になる。
+   *   - title: 拡張m3uのタイトル、無ければファイル名(拡張子除く)
    */
   Archive.buildPlaylist = async function (entries, exts, readFn) {
     const extSet = new Set(Array.from(exts).map(e => e.toLowerCase()));
     const files = entries.filter(e => !e.isDir && extSet.has(extOf(e.name)));
     if (files.length === 0) return [];
 
-    // .m3u があれば行順を優先する。複数ある場合(vgmrips系は "01 xxx.m3u" のように
-    // 曲ごとに1つ置く配布物もある: GG Aleste)は、最も多くのエントリを列挙している
-    // 1本を採用し、それでも足りない分は自然順で末尾に足す。
-    let ordered = null;
+    // .m3u があれば行順を優先する。複数ある場合(zophar系は "01 xxx.m3u" のように
+    // 曲ごとに1本置く配布物がある: GG Aleste = KSS 1本 + m3u 13本)は、全m3uを
+    // ファイル名の自然順に連結して1つの並びとみなす(同一 entry+song の重複は除外)。
+    const ordered = [];
+    const seenKey = new Set();
     if (readFn) {
-      const m3us = entries.filter(e => !e.isDir && (extOf(e.name) === 'm3u' || extOf(e.name) === 'm3u8'));
-      let best = null;
+      const m3us = entries.filter(e => !e.isDir && (extOf(e.name) === 'm3u' || extOf(e.name) === 'm3u8'))
+        .sort((a, b) => Archive.naturalCompare(a.name, b.name));
       for (const m of m3us) {
         let text;
         try {
           const raw = await readFn(m);
-          text = new TextDecoder(extOf(m.name) === 'm3u8' ? 'utf-8' : 'utf-8', { fatal: false }).decode(raw);
+          text = utf8.decode(raw);
           if (text.includes('�') && sjis) text = sjis.decode(raw);
         } catch (e) { continue; }
         const dirOfM3u = m.name.includes('/') ? m.name.slice(0, m.name.lastIndexOf('/') + 1) : '';
-        const list = [];
-        const seen = new Set();
         for (let line of text.split(/\r?\n/)) {
           line = line.trim();
           if (!line || line.startsWith('#')) continue;
-          // "file.vgm::TITLE" / "file.vgm|..." 形式は最初のセパレータまでをファイル名とみなす
-          const fname = line.split('::')[0].split('|')[0].trim().replace(/\\/g, '/');
+          const info = parseM3uLine(line);
+          const fname = info.fname.replace(/\\/g, '/');
           const key = baseName(fname).toLowerCase();
           const hit = files.find(f => f.name.toLowerCase() === (dirOfM3u + fname).toLowerCase())
                    || files.find(f => baseName(f.name).toLowerCase() === key);
-          if (hit && !seen.has(hit)) { seen.add(hit); list.push(hit); }
+          if (!hit) continue;
+          const k = hit.name + '::' + (info.song === null ? '' : info.song);
+          if (seenKey.has(k)) continue;
+          seenKey.add(k);
+          ordered.push({ entry: hit, song: info.song, title: info.title });
         }
-        if (!best || list.length > best.length) best = list;
       }
-      if (best && best.length > 0) ordered = best;
     }
 
-    const rest = files.filter(f => !ordered || !ordered.includes(f)).sort((a, b) => Archive.naturalCompare(a.name, b.name));
-    const all = (ordered || []).concat(rest);
-    return all.map(entry => {
-      const b = baseName(entry.name);
+    const listedEntries = new Set(ordered.map(o => o.entry));
+    const rest = files.filter(f => !listedEntries.has(f)).sort((a, b) => Archive.naturalCompare(a.name, b.name))
+      .map(entry => ({ entry, song: null, title: null }));
+    return ordered.concat(rest).map(item => {
+      const b = baseName(item.entry.name);
       const dot = b.lastIndexOf('.');
-      return { entry, title: dot > 0 ? b.slice(0, dot) : b };
+      return { entry: item.entry, song: item.song, title: item.title || (dot > 0 ? b.slice(0, dot) : b) };
     });
   };
 })(window);

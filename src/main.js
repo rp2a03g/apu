@@ -4707,6 +4707,7 @@
     if (h.chips.ay8910) chips.push('kssPsg');
     if (h.chips.k051649) chips.push('kssScc');
     if (h.chips.ym2413) chips.push('kssOpll');
+    if (h.chips.sn76489) chips.push('sn76489');
     return chips;
   }
 
@@ -4722,7 +4723,8 @@
     getHesApu: () => { const a = vgmAdapter('huc6280'); return a ? MML.Emu.snapshotHuC6280Apu(a.apu) : null; },
     getKssPsg: () => { const a = vgmAdapter('ay8910'); return a ? MML.Emu.snapshotAY8910(a.chip) : null; },
     getKssScc: () => { const a = vgmAdapter('k051649'); return a ? MML.Emu.snapshotSCC(a.chip) : null; },
-    getKssOpll: () => { const a = vgmAdapter('ym2413'); return a ? MML.Emu.snapshotOPLL(a.chip) : null; }
+    getKssOpll: () => { const a = vgmAdapter('ym2413'); return a ? MML.Emu.snapshotOPLL(a.chip) : null; },
+    getSn76489: () => { const a = vgmAdapter('sn76489'); return a ? MML.Emu.snapshotSN76489(a.chip, a.clockHz) : null; }
   };
 
   // captureVgmSongAsync()の結果からピアノロール用タイムライン(共通形状)を構築する。
@@ -4745,6 +4747,13 @@
       const kssTracks = buildKssRollTimeline(wl, done, frameRate, fakeHeader, data.kss.scc);
       // AY未使用(SCC/OPLLのみ)のVGMではKP行が鍵盤に無いのでロール側も落とす
       tracks = tracks.concat(data.kss.ay ? kssTracks : kssTracks.filter(t => !/^KP\d/.test(t.id)));
+    }
+    if (data.sn) {
+      // SN76489はレジスタスナップショットを持たないので、extractChannels(keyboard.js)が読む
+      // extraSnaps.sn(フレーム毎スナップショット配列)を渡して同じ抽出経路でトラック化する
+      const t = keyboardDisplay.buildRollTracksFromRegSnapshots(
+        data.sn.snapshots, [], done, sr / frameRate, sr, ['vgm', 'sn76489'], null, { sn: data.sn.snapshots });
+      if (t) tracks = tracks.concat(t);
     }
     return tracks;
   }
@@ -4823,7 +4832,8 @@
       getHesApu: liveVgm.getHesApu,
       getKssPsg: liveVgm.getKssPsg,
       getKssScc: liveVgm.getKssScc,
-      getKssOpll: liveVgm.getKssOpll
+      getKssOpll: liveVgm.getKssOpll,
+      getSn76489: liveVgm.getSn76489
     }, () => vgmActivePlayer ? vgmActivePlayer.getPosition() : 0, chips);
     transportPlay();
 
@@ -4986,8 +4996,22 @@
       archiveTotalEl.textContent = `/ ${archive.playlist.length}`;
     }
 
-    // zip内の index 番目のエントリを取り出して開く。戻り値は openSoundFile と同じ
-    // (フォーマット文字列 or false)。autoplay=true なら再生まで行う(曲送り操作用)。
+    // 拡張m3u("file::KSS,song,...")の曲番号を、その形式の曲番号入力欄へ反映する。
+    // m3uの番号は形式ごとのネイティブ表記(NSF/GBS=1始まり、KSS/HES=0始まり)で書かれる
+    // 慣例なので、各入力欄(同じ表記)へそのまま入れる。1ファイル1曲の形式(SPC/VGM)は無視。
+    const formatToSongInputId = { nsf: 'nsfSongIndex', kss: 'kssSongIndex', gbs: 'gbsSongIndex', hes: 'hesTrackIndex' };
+    function applyArchiveSong(fmt, song) {
+      const id = formatToSongInputId[fmt];
+      const el = id ? document.getElementById(id) : null;
+      if (!el || song === null || song === undefined) return;
+      const min = el.min !== '' ? parseInt(el.min, 10) : -Infinity;
+      const max = el.max !== '' ? parseInt(el.max, 10) : Infinity;
+      el.value = String(Math.max(min, Math.min(max, song)));
+    }
+
+    // zip内の index 番目の項目を開く。戻り値は openSoundFile と同じ(フォーマット文字列 or false)。
+    // autoplay=true なら再生まで行う(曲送り操作用)。同じファイルの曲番号違い(KSSの拡張m3u等)
+    // なら読み直さず曲番号だけ変える。
     async function loadArchiveIndex(index, autoplay) {
       if (!archive || archiveLoading) return false;
       const n = archive.playlist.length;
@@ -4997,10 +5021,19 @@
       archiveLoading = true;
       try {
         const item = archive.playlist[index];
-        const bytes = await MML.Archive.readEntry(archive.bytes, item.entry);
-        const entryFile = new File([bytes], MML.Archive.baseName(item.entry.name));
-        renderArchiveBar();
-        const fmt = await openSoundFile(entryFile, { fromArchive: true });
+        let fmt;
+        if (archive.loadedEntry === item.entry && archive.loadedFormat) {
+          fmt = archive.loadedFormat;
+          renderArchiveBar();
+        } else {
+          const bytes = await MML.Archive.readEntry(archive.bytes, item.entry);
+          const entryFile = new File([bytes], MML.Archive.baseName(item.entry.name));
+          renderArchiveBar();
+          fmt = await openSoundFile(entryFile, { fromArchive: true });
+          archive.loadedEntry = fmt ? item.entry : null;
+          archive.loadedFormat = fmt || null;
+        }
+        if (fmt) applyArchiveSong(fmt, item.song);
         if (fmt && autoplay) {
           const playFn = formatToPlayFn[fmt];
           if (playFn) playFn();
@@ -5025,7 +5058,7 @@
         return false;
       }
       stopAllFormatPlayback();
-      archive = { name: file.name, bytes, playlist, index: 0 };
+      archive = { name: file.name, bytes, playlist, index: 0, loadedEntry: null, loadedFormat: null };
       ensureSoundWindowOpen();
       renderArchiveBar();
       return loadArchiveIndex(0, false);
