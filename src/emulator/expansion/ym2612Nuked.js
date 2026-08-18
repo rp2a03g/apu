@@ -196,6 +196,20 @@
     }
     mixSample() { return { left: this.lastL, right: this.lastR }; }
 
+    /**
+     * 書込みキューを空になるまでチップを回して適用する。clock()を回さない経路(VGMの先読み
+     * キャプチャ regsOnly / シークの fastForward)では、キュー経由の本コアはレジスタ状態が
+     * 一切更新されず(鍵盤スナップショット/ロールが空になる、シーク後にキューが山積みのまま
+     * 再生が始まる)ため、そこから呼ぶ。実時間再生と同じ順序・間隔(15サイクル刻み)で
+     * 適用されるので最終レジスタ状態は同じ。キーオンのEGへの反映など数サイクル遅れて
+     * 効く状態のために、空になった後さらに1サンプルぶん(24サイクル)回す。
+     */
+    flushWrites() {
+      let guard = 0;
+      while (this.writebuf.length && guard++ < 50000000) this.clock();
+      for (let i = 0; i < CYCLES_PER_SAMPLE * 6; i++) this.clock();
+    }
+
     _write(port, data) {
       port &= 3;
       this.write_data = ((port << 7) & 0x100) | data;

@@ -195,6 +195,9 @@
       write(port, aa, dd) { chip.writeReg(port, aa, dd); },
       clock() { chip.clock(); },
       mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      // Nukedは書込みをキュー経由でclock()内に適用するので、clock()を回さない経路(先読み/シーク)は
+      // これで適用させる(VgmPlayer._flushWrites)。高速コアはメソッド無し=何もしない
+      flushWrites() { if (chip.flushWrites) chip.flushWrites(); },
       applyMute(m) { const e = m.expansion || m; if (e.ym2612) Emu.applyMute(chip.mute, e.ym2612); },
       applyVolume(v) { const e = v.expansion || v; if (e.ym2612) Emu.applyVolume(chip.vol, e.ym2612); }
     };
@@ -571,6 +574,15 @@
         // ストリームはサンプル単位でしか進められないが、シーク用途では最終位置だけ合えばよい
         for (let i = 0; i < step; i++) this._stepStreams();
       }
+      this._flushWrites();
+    }
+
+    // clock()を回さずにコマンドだけ消化した後(fastForward / renderFrame regsOnly)、書込みを
+    // キュー経由で適用するチップ(Nuked-OPN2版YM2612)にキューを消化させる。
+    // これが無いと、Nukedコアではキャプチャの鍵盤スナップショット/ロールが空になり、シーク後は
+    // 曲頭からの全書込みがキューに溜まったまま再生が始まって暫く音が崩れる。
+    _flushWrites() {
+      for (const a of this.adapters) if (a.flushWrites) a.flushWrites();
     }
 
     /**
@@ -585,6 +597,7 @@
       if (regsOnly) {
         // 速度は無関係(キャプチャはVGM時間で進める)
         for (let i = 0; i < SAMPLES_PER_FRAME; i++) this._stepVgmSample();
+        this._flushWrites(); // Nukedコアの書込みキュー適用(スナップショットを正しく読むため)
         return null;
       }
       const outL = new Float32Array(samplesThisFrame);
