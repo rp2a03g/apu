@@ -183,10 +183,11 @@
     };
   }
 
-  // YM2612コアの選択: Emu.ym2612CorePref = 'nuked' で Nuked-OPN2 移植版(実機準拠、重い)、
-  // それ以外は自作の近似コア(高速)。切替はアダプタ生成時(再生開始/シーク時)に効く。
+  // YM2612コアの選択: 既定は Nuked-OPN2 移植版(実機準拠、重い)、Emu.ym2612CorePref = 'fast' で
+  // 自作の近似コア(高速)。切替はアダプタ生成時(再生開始/シーク時)に効く。
   function makeYm2612Adapter(info) {
-    const useNuked = Emu.ym2612CorePref === 'nuked' && Emu.YM2612Nuked;
+    // 既定(Emu.ym2612CorePref未設定)は Nuked-OPN2。'fast' を明示した時だけ近似コア
+    const useNuked = Emu.ym2612CorePref !== 'fast' && Emu.YM2612Nuked;
     const chip = useNuked ? new Emu.YM2612Nuked(info.clock) : new Emu.YM2612Audio(info.clock);
     return {
       id: 'ym2612', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.ym2612, core: useNuked ? 'nuked' : 'fast',

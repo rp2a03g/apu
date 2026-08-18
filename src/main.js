@@ -4997,9 +4997,10 @@
   //    再生中に切り替えた場合は再生し直して即反映する(アダプタ生成時にしか効かないため)。
   const vgmYmCoreEl = document.getElementById('vgmYmCore');
   (function initVgmYmCore() {
-    let pref = 'fast';
-    try { pref = localStorage.getItem('vgmYm2612Core') || 'fast'; } catch (e) { /* ignore */ }
-    if (pref !== 'nuked') pref = 'fast';
+    // 既定は Nuked-OPN2(実機準拠)。ユーザー決定(2026-08-19)。高速コアは聴き比べ/低負荷用に残す
+    let pref = 'nuked';
+    try { pref = localStorage.getItem('vgmYm2612Core') || 'nuked'; } catch (e) { /* ignore */ }
+    if (pref !== 'fast') pref = 'nuked';
     MML.Emu.ym2612CorePref = pref;
     if (vgmYmCoreEl) {
       vgmYmCoreEl.value = pref;
