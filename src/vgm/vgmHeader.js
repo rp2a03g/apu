@@ -40,7 +40,7 @@
     { id: 'ymf271',   name: 'YMF271',     offset: 0x64, minVer: 0x151 },
     { id: 'ymz280b',  name: 'YMZ280B',    offset: 0x68, minVer: 0x151 },
     { id: 'rf5c164',  name: 'RF5C164',    offset: 0x6C, minVer: 0x151 },
-    { id: 'pwm',      name: 'PWM',        offset: 0x70, minVer: 0x151 },
+    { id: 'pwm',      name: 'PWM(32X)',   offset: 0x70, minVer: 0x151, impl: true },
     { id: 'ay8910',   name: 'AY8910',     offset: 0x74, minVer: 0x151, impl: true },
     { id: 'gb',       name: 'GB DMG',     offset: 0x80, minVer: 0x161, impl: true },
     { id: 'nes',      name: 'NES APU',    offset: 0x84, minVer: 0x161, impl: true },

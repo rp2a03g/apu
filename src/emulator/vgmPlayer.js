@@ -43,7 +43,7 @@
   // 各フォーマットのストリームプレイヤーが使っている実測校正済みgain
   // (src/audio/*-stream-player.js 参照)。VGMは複数チップの合算なので、チップごとに
   // 由来フォーマットのgainを掛けてから足し、出力段のgainは1.0にする。
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -199,10 +199,23 @@
     };
   }
 
+  function makePwmAdapter(info) {
+    const chip = new Emu.PWM32XAudio();
+    return {
+      id: 'pwm', clockHz: 0, accum: 0, chip, gain: CHIP_GAIN.pwm,
+      // 0xB2 ad dd: reg=a(上位ニブル), 12bit値=((ad&0x0F)<<8)|dd
+      write(reg, data) { chip.write(reg, data); },
+      clock() {},
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.pwm) Emu.applyMute(chip.mute, e.pwm); },
+      applyVolume(v) { const e = v.expansion || v; if (e.pwm) Emu.applyVolume(chip.vol, e.pwm); }
+    };
+  }
+
   const ADAPTERS = {
     nes: makeNesAdapter, gb: makeGbAdapter, huc6280: makeHucAdapter,
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
-    sn76489: makeSnAdapter, ym2612: makeYm2612Adapter
+    sn76489: makeSnAdapter, ym2612: makeYm2612Adapter, pwm: makePwmAdapter
   };
 
   // ---------------------------------------------------------------------------
@@ -334,6 +347,7 @@
           case 0xB3: this._chipWrite('gb', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB4: this._chipWrite('nes', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB9: this._chipWrite('huc6280', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          case 0xB2: this._chipWrite('pwm', (d[p] >> 4) & 0x0F, ((d[p] & 0x0F) << 8) | d[p + 1], false); this.pos = p + 2; break; // 32X PWM: reg=a, 12bit値
           case 0xD2: this._sccWrite(d[p] & 0x7F, d[p + 1], d[p + 2], !!(d[p] & 0x80)); this.pos = p + 3; break;
           case 0x52: this._ymWrite(0, d[p], d[p + 1], false); this.pos = p + 2; break;
           case 0x53: this._ymWrite(1, d[p], d[p + 1], false); this.pos = p + 2; break;
@@ -475,6 +489,10 @@
           }
           const v = bank.data[s.pos + s.stepBase];
           if (s.chipType === 0x02) this._ymWrite(s.port & 1, s.cmd, v, s.second);
+          else if (s.chipType === 0x11) { // 32X PWM: ステップ2バイト(LE)の12bit値をレジスタ(port)へ
+            const v16 = s.stepSize >= 2 ? (bank.data[s.pos + s.stepBase] | (bank.data[s.pos + s.stepBase + 1] << 8)) : v;
+            this._chipWrite('pwm', s.port & 0x0F, v16 & 0xFFF, false);
+          }
           // 他チップのストリーム(未実装チップ向け)は無視
           s.pos += s.stepSize;
         }
@@ -541,8 +559,10 @@
         acc[0] = 0; acc[1] = 0;
         for (let k = 0; k < adapters.length; k++) {
           const a = adapters[k];
-          a.accum += a.clockHz / sampleRate;
-          while (a.accum >= 1) { a.accum -= 1; a.clock(); }
+          if (a.clockHz > 0) {
+            a.accum += a.clockHz / sampleRate;
+            while (a.accum >= 1) { a.accum -= 1; a.clock(); }
+          }
           a.mix(acc);
         }
         if (stereo) { outL[i] = acc[0]; outR[i] = acc[1]; }
@@ -578,7 +598,8 @@
         ? { writeLog: [], ay: has('ay8910'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus) }
         : null,
       sn: has('sn76489') ? { snapshots: [], clock: player.adapterById.sn76489.clockHz } : null,
-      ym2612: has('ym2612') ? { snapshots: [] } : null
+      ym2612: has('ym2612') ? { snapshots: [] } : null,
+      pwm: has('pwm') ? { snapshots: [] } : null
     };
     let nesFrameWrites = [];
     let kssFrameWrites = [];
@@ -614,6 +635,7 @@
         const a2 = player.adapterById.sn76489_2;
         data.sn.snapshots.push(a2 ? s1.concat(Emu.snapshotSN76489(a2.chip, a2.clockHz)) : s1);
       }
+      if (data.pwm) data.pwm.snapshots.push(Emu.snapshotPWM32X(player.adapterById.pwm.chip));
       if (data.ym2612) {
         // 先読みはチップのclock()を回さない(EGが進まない)ので、ロール用の発音判定/音量は
         // レジスタだけから決まる keyOn/tlVol に差し替える(ライブ表示はEG由来のactive/volを使う)

@@ -295,6 +295,9 @@
     const ym = id.match(/^YM(\d)$/);
     if (ym) return { section: 'expansion', chip: 'ym2612', type: 'array', index: +ym[1] - 1 };
     if (id === 'YMDA') return { section: 'expansion', chip: 'ym2612', type: 'array', index: 6 };
+    // VGM: 32X PWM(PWL/PWR)。chip.mute[]は L=0, R=1
+    if (id === 'PWL') return { section: 'expansion', chip: 'pwm', type: 'array', index: 0 };
+    if (id === 'PWR') return { section: 'expansion', chip: 'pwm', type: 'array', index: 1 };
     if (KF_RHYTHM_INDEX[id] !== undefined) return { section: 'expansion', chip: 'opll', type: 'array', index: KF_RHYTHM_INDEX[id] };
     return null;
   }
@@ -321,6 +324,7 @@
     { header: 'HuC6280(PC Engine / TurboGrafx-16)', ids: { HALL: 'ALL', PSG0: 'Ch0', PSG1: 'Ch1', PSG2: 'Ch2', PSG3: 'Ch3', PSG4: 'Ch4', PSG5: 'Ch5' } },
     { header: 'SN76489 (SG-1000 / Master System / Game Gear / Mega Drive PSG)', ids: { SN1: 'P1', SN2: 'P2', SN3: 'P3', SNN: 'No', SN4: 'P1(2)', SN5: 'P2(2)', SN6: 'P3(2)', SNN2: 'No(2)' } },
     { header: 'YM2612 (OPN2 , Mega Drive FM)', ids: { YMDA: 'DAC' }, prefix: 'YM', name: (id) => 'FM' + id.slice(2) },
+    { header: 'PWM (Sega 32X)', ids: { PWL: 'L', PWR: 'R' } },
   ];
   function getChannelDisplay(id) {
     for (const g of CHANNEL_DISPLAY_GROUPS) {
@@ -846,6 +850,18 @@
         const d = s ? s.dac : { enabled: false, level: 0, vol: 0, active: false };
         channels.push({ id: 'YMDA', color: '#aa44ff', freq: 0, vol: d.vol, rawVol: d.enabled ? d.level : null, rawVolMax: 255,
           wave: { t: 'sample' }, active: !!d.active, sample: true, dmcReg: d.level, dmcRateIdx: 15, dmcFreq: 0 });
+      }
+    }
+
+    if (chips.includes('pwm')) {
+      // 32X PWM(VGM): 左右2chのPCM DAC。DMC/YMDAと同じ「サンプル」行(音量=振幅)
+      const live = extraSnaps && extraSnaps.pwmLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.pwm ? extraSnaps.pwm[frameIdx] : null);
+      for (const [id, key, color] of [['PWL', 'l', '#66ddff'], ['PWR', 'r', '#ff8866']]) {
+        const c = s ? s[key] : { level: 0, vol: 0, active: false };
+        channels.push({ id, color, freq: 0, vol: c.vol, rawVol: c.level, rawVolMax: s ? s.cycle : 4095,
+          wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.level, dmcRateIdx: 15, dmcFreq: 0,
+          panL: key === 'l' ? 1 : 0, panR: key === 'r' ? 1 : 0 });
       }
     }
 
@@ -2443,6 +2459,7 @@
       this._extraSnaps.hesApuLive = typeof result.getHesApu === 'function' ? result.getHesApu : null;
       this._extraSnaps.snLive = typeof result.getSn76489 === 'function' ? result.getSn76489 : null;
       this._extraSnaps.ymLive = typeof result.getYm2612 === 'function' ? result.getYm2612 : null;
+      this._extraSnaps.pwmLive = typeof result.getPwm === 'function' ? result.getPwm : null;
       this._lastDmc4011 = null; // 曲切替時にDMC書き込み検出をリセット
       this._rollSongTimeBase = 0; // 曲切替時にピアノロールの経過時間もリセット
       this._rollLastRawPos = null;
