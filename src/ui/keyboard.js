@@ -299,6 +299,10 @@
     // YM2610アダプタが e.psg を自分のSSGへ適用する
     const nf = id.match(/^NF(\d)$/);
     if (nf) return { section: 'expansion', chip: 'ym2610fm', type: 'array', index: +nf[1] - 1 };
+    // YM2610 ADPCM-A(NA1-6)/ADPCM-B(NB)。chip.muteAdpcm[]は A=0-5, B=6
+    const na = id.match(/^NA(\d)$/);
+    if (na) return { section: 'expansion', chip: 'ym2610adpcm', type: 'array', index: +na[1] - 1 };
+    if (id === 'NB') return { section: 'expansion', chip: 'ym2610adpcm', type: 'array', index: 6 };
     // VGM: 32X PWM(PWL/PWR)。chip.mute[]は L=0, R=1
     if (id === 'PWL') return { section: 'expansion', chip: 'pwm', type: 'array', index: 0 };
     if (id === 'PWR') return { section: 'expansion', chip: 'pwm', type: 'array', index: 1 };
@@ -334,7 +338,8 @@
     { header: 'SN76489 (SG-1000 / Master System / Game Gear / Mega Drive PSG)', ids: { SN1: 'P1', SN2: 'P2', SN3: 'P3', SNN: 'No', SN4: 'P1(2)', SN5: 'P2(2)', SN6: 'P3(2)', SNN2: 'No(2)' } },
     { header: 'YM2612 (OPN2 , Mega Drive FM)', ids: { YMDA: 'DAC' }, prefix: 'YM', name: (id) => 'FM' + id.slice(2) },
     // NF1-4は完全一致(ids)で先に拾う(N163のprefix 'N' と衝突させない)
-    { header: 'YM2610 (OPNB , Neo Geo FM)', ids: { NF1: 'FM1', NF2: 'FM2', NF3: 'FM3', NF4: 'FM4' } },
+    { header: 'YM2610 (OPNB , Neo Geo)', ids: { NF1: 'FM1', NF2: 'FM2', NF3: 'FM3', NF4: 'FM4', NF5: 'FM5', NF6: 'FM6',
+        NA1: 'PCMA1', NA2: 'PCMA2', NA3: 'PCMA3', NA4: 'PCMA4', NA5: 'PCMA5', NA6: 'PCMA6', NB: 'PCMB' } }, // NA=ADPCM-A, NB=ADPCM-B
     { header: 'PWM (Sega 32X)', ids: { PWL: 'L', PWR: 'R' } },
     { header: 'RF5C164 (Mega-CD PCM)', prefix: 'RC', name: (id) => 'PCM' + id.slice(2) },
     { header: 'RF5C68 (PCM)', prefix: 'RB', name: (id) => 'PCM' + id.slice(2) },
@@ -872,14 +877,30 @@
       // スナップショット配列(extraSnaps.ym2610fm[frameIdx]、ロール構築用)。
       const live = extraSnaps && extraSnaps.ym2610FmLive;
       const s = live ? live() : (extraSnaps && extraSnaps.ym2610fm ? extraSnaps.ym2610fm[frameIdx] : null);
-      const COLS = ['#ffcc00', '#ffdd44', '#ffe566', '#ffee88'];
-      for (let ch = 0; ch < 4; ch++) {
+      const COLS = ['#ffcc00', '#ffdd44', '#ffe566', '#ffee88', '#fff2aa', '#fff8cc'];
+      const nFm = s && s.channels ? s.channels.length : 4; // YM2610B は6ch
+      for (let ch = 0; ch < nFm; ch++) {
         const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, waveData: null };
         const wave = (c.waveData && c.waveData.length && c.active)
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
           : { t: 'fm', nx: 256, ny: 256 };
         channels.push({ id: `NF${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
           wave, active: c.active, panL: c.panL, panR: c.panR });
+      }
+      // ADPCM-A(6ch)/ADPCM-B(1ch): 音程はサンプル依存で不明なのでDMC/RF5C164と同じ「サンプル」行。
+      // 音量=音色レベル(A)/レベル(B)、L/Rはパン。同じスナップショット(adpcmA[]/adpcmB)から読む。
+      for (let ch = 0; ch < 6; ch++) {
+        const c = s && s.adpcmA ? s.adpcmA[ch] : { vol: 0, rawVol: 0, rawVolMax: 31, active: false, panL: 1, panR: 1, rate: 0 };
+        const hue = (20 + ch * 12) % 360;
+        channels.push({ id: `NA${ch + 1}`, color: `hsl(${hue},80%,60%)`, freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
+          wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
+          panL: c.panL, panR: c.panR });
+      }
+      {
+        const c = s && s.adpcmB ? s.adpcmB : { vol: 0, rawVol: 0, rawVolMax: 255, active: false, panL: 1, panR: 1, rate: 0 };
+        channels.push({ id: 'NB', color: '#cc66ff', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
+          panL: c.panL, panR: c.panR });
       }
     }
 

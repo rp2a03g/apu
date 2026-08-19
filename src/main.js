@@ -4635,8 +4635,7 @@
       if (author) out += T('作者        : {author}', { author: author + (g.authorJa && g.authorEn && g.authorJa !== g.authorEn ? ` / ${g.authorJa}` : '') }) + '\n';
       if (g.date) out += T('日付        : {date}', { date: g.date }) + '\n';
     }
-    // YM2610はFM+SSGのみ実装(ADPCM-A/B未実装=ドラム/効果音の大半が鳴らない)ので部分対応と明示する
-    const chipNames = h.usedChips.map(c => `${c.name}${c.dual ? ' x2' : ''}${c.id === 'nes' && c.fds ? '+FDS' : ''}${c.id === 'k051649' && c.sccPlus ? '+' : ''} (${c.clock} Hz)${c.impl ? (c.id === 'ym2610' ? ' ' + T('[FM+SSGのみ・ADPCM-A/B未対応]') : '') : ' ' + T('[未対応・読み飛ばし]')}`);
+    const chipNames = h.usedChips.map(c => `${c.name}${c.dual ? ' x2' : ''}${c.id === 'nes' && c.fds ? '+FDS' : ''}${c.id === 'k051649' && c.sccPlus ? '+' : ''} (${c.clock} Hz)${c.impl ? '' : ' ' + T('[未対応・読み飛ばし]')}`);
     out += T('音源        : {chips}', { chips: chipNames.join(', ') || '-' }) + '\n';
     out += T('長さ        : {time}{loop}', {
       time: formatTime(h.durationSeconds),

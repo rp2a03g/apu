@@ -230,7 +230,6 @@
     '日付        : {date}': 'Date        : {date}',
     '音源        : {chips}': 'Chips       : {chips}',
     '[未対応・読み飛ばし]': '[unsupported, skipped]',
-    '[FM+SSGのみ・ADPCM-A/B未対応]': '[FM+SSG only, ADPCM-A/B unsupported]',
     '長さ        : {time}{loop}': 'Length      : {time}{loop}',
     ' (ループ {loop})': ' (loop {loop})',
     ' (ループ無し)': ' (no loop)',

@@ -131,6 +131,7 @@
       if (c.id === 'sn76489') info.t6w28 = flag31;           // bit31: T6W28(NGP)
       if (c.id === 'ym2612') info.ym3438 = flag31;
       if (c.id === 'ym2413') info.vrc7 = flag31;             // bit31: VRC7 (仕様上の互換フラグ)
+      if (c.id === 'ym2610') { info.ym2610b = flag31; info.name = flag31 ? 'YM2610B' : 'YM2610'; } // bit31: YM2610B(FM 6ch)
       if (c.id === 'ay8910') {
         info.ayType = bytes[0x78];
         info.ayFlags = bytes[0x79];

@@ -10,8 +10,8 @@
  *   SN76489(SMS/GG/SG-1000/MD PSG)=expansion/sn76489.js(VGM段階2で新規実装),
  *   YM2612(OPN2、MD FM)=expansion/ym2612.js(VGM段階4で新規実装。データブロック0x00のPCM、
  *   0xE0シーク、0x8n DAC書込+待ち、DACストリーム制御0x90-0x95もここで扱う)、
- *   YM2610(OPNB、Neo Geo FM+SSG)=expansion/ym2610.js(FM部。レジスタ配置がYM2612と同一なので
- *   YM2612Audioのラッパー)+AY8910Audio(SSG流用)。ADPCM-A/Bは未実装(段階2)
+ *   YM2610(OPNB、Neo Geo)=expansion/ym2610.js(FM=レジスタ配置がYM2612と同一なのでYM2612コアの
+ *   ラッパー、ADPCM-A/B=ymfm移植。ROMはデータブロック0x82/0x83)+AY8910Audio(SSG流用)
  * ヘッダのクロックが非ゼロでも未実装のチップは、コマンド長規則で読み飛ばすだけ
  * (ROADMAP.md VGM節: 全チップ実装は不要)。
  *
@@ -48,11 +48,12 @@
   // 各フォーマットのストリームプレイヤーが使っている実測校正済みgain
   // (src/audio/*-stream-player.js 参照)。VGMは複数チップの合算なので、チップごとに
   // 由来フォーマットのgainを掛けてから足し、出力段のgainは1.0にする。
-  // ym2610(FM)/ym2610ssg: Neo Geoの曲はYM2612(MD)よりTLを詰めて鳴らすものが多く、YM2612と同じ2.0だと
-  // 実測RMSがMD FMの2〜4倍(Metal Slug 0.21、Neo Turf Masters 0.29〜0.44、ピーク1.5超)になるので、
-  // MD FM(0.10〜0.13)に揃うよう1.25。SSGはFMに対して MAME neogeo ドライバのルーティング比
-  // (SSG 0.28 : FM 0.98)を目安に1.0(暫定。実機録音との比較は未実施)。
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.25, ym2610ssg: 1.0 };
+  // ym2610(FM+ADPCM、チップ内ミックス比はymfm準拠)/ym2610ssg: Neo Geoの曲はYM2612(MD)よりTLを詰めて
+  // 鳴らすものが多く、YM2612と同じ2.0だとFMだけでMD FMの2〜4倍になる。FM+ADPCM込みの全体RMSが
+  // 他形式(MD全体0.13、SPC基準)に近づくよう1.0(実測: Metal Slug 0.17〜0.21、Last Resort 0.10〜0.12、
+  // Neo Turf Masters 0.29〜0.42=元々ホットな曲、ピークはリミッタ任せ)。SSGはFMに対して MAME neogeo
+  // ドライバのルーティング比(SSG 0.28 : FM 0.98)を目安に0.8(暫定。実機録音との比較は未実施)。
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -213,14 +214,13 @@
     };
   }
 
-  // YM2610(Neo Geo): FM(4ch、expansion/ym2610.js=YM2612Audioのラッパー)+SSG(3ch、Emu.AY8910Audio
+  // YM2610(Neo Geo): FM(4ch)+ADPCM-A(6ch)+ADPCM-B(1ch)(expansion/ym2610.js)+SSG(3ch、Emu.AY8910Audio
   // を流用)を1アダプタでまとめて鳴らす(NESアダプタのapu+fdsと同じ構成)。SSGの実クロックは
   // ymfm(aaronsgiles/ymfm)裏取り: チップクロック/4。AY8910Audioは「実クロックの2倍で叩く」既存規約
   // (標準AY8910アダプタと同じ)のため、呼び出しはチップクロック/2(=fm.clock()を2回に1回ssg.clock())。
-  // ADPCM-A(port1 addr<0x30)/ADPCM-B(port0 addr 0x10-0x1C)は段階2で未実装、該当アドレスは
-  // ym2610.jsのwriteRegが弾く。
+  // ADPCMのROMはデータブロック0x82(ADPCM-A)/0x83(ADPCM-B)を _dataBlock → loadRom で渡す。
   function makeYm2610Adapter(info) {
-    const fm = new Emu.YM2610Audio(info.clock);
+    const fm = new Emu.YM2610Audio(info.clock, { ym2610b: !!info.ym2610b });
     const ssg = new Emu.AY8910Audio();
     return {
       id: 'ym2610', clockHz: info.clock, accum: 0, fm, ssg, gain: CHIP_GAIN.ym2610, ssgGain: CHIP_GAIN.ym2610ssg, core: fm.coreName,
@@ -229,15 +229,27 @@
         if (port === 0 && aa < 0x0E) { ssg.writeInternal(aa & 0x0F, dd); return; }
         fm.writeReg(port, aa, dd);
       },
+      loadRom(kind, romSize, start, data) { fm.loadRom(kind, romSize, start, data); },
       clock() { fm.clock(); if ((this._ssgToggle ^= 1) === 0) ssg.clock(); },
       flushWrites() { fm.flushWrites(); },
       mix(out) {
         const s = fm.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain;
         const sg = ssg.mixSample() * this.ssgGain; out[0] += sg; out[1] += sg;
       },
-      // 鍵盤: FMはNF1-4行(chip 'ym2610fm')、SSGはKSS PSG表示のKP1-3行(chip 'psg')を流用
-      applyMute(m) { const e = m.expansion || m; if (e.ym2610fm) { Emu.applyMute(fm.mute, e.ym2610fm); fm.syncMuteVol(); } if (e.psg) Emu.applyMute(ssg.mute, e.psg); },
-      applyVolume(v) { const e = v.expansion || v; if (e.ym2610fm) { Emu.applyVolume(fm.vol, e.ym2610fm); fm.syncMuteVol(); } if (e.psg) Emu.applyVolume(ssg.vol, e.psg); },
+      // 鍵盤: FMはNF1-4(6)行(chip 'ym2610fm')、ADPCM-A/BはNA1-6/NB行(chip 'ym2610adpcm'、0-5=A, 6=B)、
+      // SSGはKSS PSG表示のKP1-3行(chip 'psg')を流用
+      applyMute(m) {
+        const e = m.expansion || m;
+        if (e.ym2610fm) { Emu.applyMute(fm.mute, e.ym2610fm); fm.syncMuteVol(); }
+        if (e.ym2610adpcm) Emu.applyMute(fm.muteAdpcm, e.ym2610adpcm);
+        if (e.psg) Emu.applyMute(ssg.mute, e.psg);
+      },
+      applyVolume(v) {
+        const e = v.expansion || v;
+        if (e.ym2610fm) { Emu.applyVolume(fm.vol, e.ym2610fm); fm.syncMuteVol(); }
+        if (e.ym2610adpcm) Emu.applyVolume(fm.volAdpcm, e.ym2610adpcm);
+        if (e.psg) Emu.applyVolume(ssg.vol, e.psg);
+      },
       // 拡張ヘッダのチップ音量/全体音量(reset()が掛ける)はFM/SSG両方に効かせる
       scaleGain(f) { this.gain *= f; this.ssgGain *= f; }
     };
@@ -511,6 +523,14 @@
         const rf = this.adapterById[type === 0xC0 ? 'rf5c68' : 'rf5c164'];
         if (rf && block.length >= 2) rf.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
+      if (type === 0x82 || type === 0x83) { // YM2610 ADPCM-A(0x82) / ADPCM-B(0x83) ROM: ROMサイズ(4)+開始アドレス(4)+データ
+        const y = this.adapterById.ym2610;
+        if (y && block.length >= 8) {
+          const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
+          const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
+          y.loadRom(type === 0x83 ? 'b' : 'a', romSize, start, block.subarray(8));
+        }
+      }
       // その他(YM2612 PCM=0x00, 圧縮ブロック, 各種ROMダンプ)は未実装チップ向けなので保持しない
     }
 
@@ -715,6 +735,8 @@
       rf5c68: has('rf5c68') ? { snapshots: [] } : null
     };
     let nesFrameWrites = [];
+    // YM2610 ADPCM のロール用発音区間推定の状態(上のループ内コメント参照)
+    const adpcmState = { aSeq: new Array(6).fill(0), aEnd: new Array(6).fill(-1), bSeq: 0, bEnd: -1 };
     let kssFrameWrites = [];
     const nesRegs = {};
     if (data.kss && data.kss.scc && data.kss.sccPlus) {
@@ -763,6 +785,21 @@
       if (data.ym2610fm) {
         const s = Emu.snapshotYM2610(player.adapterById.ym2610.fm);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
+        // ADPCM-A/B: clock()を回さないので playing は終端で落ちない。キーオン通番(seq)の変化を発音開始、
+        // そこからサンプル長(lenSec)ぶんを発音区間として推定する(ADPCM-Bはリピート中=Infinity、
+        // 実行ビットが落ちたら終了)
+        const st = adpcmState;
+        for (let i = 0; i < 6; i++) {
+          const c = s.adpcmA[i];
+          if (c.seq !== st.aSeq[i]) { st.aSeq[i] = c.seq; st.aEnd[i] = f + c.lenSec * FRAME_RATE; }
+          c.active = c.vol > 0 && f < st.aEnd[i];
+        }
+        {
+          const c = s.adpcmB;
+          if (c.seq !== st.bSeq) { st.bSeq = c.seq; st.bEnd = f + c.lenSec * FRAME_RATE; }
+          if (!c.executing) st.bEnd = -1;
+          c.active = c.vol > 0 && f < st.bEnd;
+        }
         data.ym2610fm.snapshots.push(s);
       }
       if (f % CHUNK_FRAMES === 0) {
