@@ -1349,54 +1349,156 @@
   }
 
   // ── FM音色データのテキスト化(大波形表示の下に出す・コピー用) ──
-  // 数値行は各値を width 桁に右寄せして "," で繋ぎ、見出し行は同じ幅のラベルを " " で繋ぐので
-  // 列が縦に揃う(ユーザー指定の書式:
+  // 数値行は各値を width 桁に右寄せして sep で繋ぎ、見出し行(コメント)は同じ幅のラベルを " " で
+  // 繋ぐので列が縦に揃う(ユーザー指定の書式:
   //   ; TL FB
   //     20, 0,
   //   ; AR DR SL RR KL ML AM VB EG KR DT
   //     15, 4, 2, 4, 0, 1, 0, 0, 1, 0, 0,
   //     15, 4, 2, 4, 0, 1, 0, 0, 1, 0, 0
-  // )。最終行以外は行末に "," を付ける。
-  function fmtPatchRows(width, groups) {
-    // groups: [{ labels:[...], rows:[[...],[...]] }, ...]
+  // )。表示は行ごとに「コメント(先頭が ; の行、または行中の ; 以降)」と「データ」を色分けする
+  // (renderFmPatchHtml)。書式はドライバごとに選べる(FM_PATCH_FORMATS、localStorageに保存)。
+  // 各書式の並びは公式ドキュメントで確認済み:
+  //   PMD    : `; nm alg fbl` / `@nnn alg fbl` / `; ar dr sr rr sl tl ks ml dt ams` ×op1-4 (3桁ゼロ埋めが慣例)
+  //   FMP7   : `'@ FA n` / `'@ AR,DR,SR,RR,SL,TL,KS,ML,DT,AM` ×4 / `'@ AL,FB` (' の無い行はコメント)
+  //   MUCOM88: `  @n`(先頭空白2つ以上) / `FB,AL` / `AR,DR,SR,RR,SL,TL,KS,ML,DT ; opN` ×4
+  //   op1..op4 はいずれも論理順(op2=レジスタ+8)。SSG-EGはPMD/FMP7/MUCOM88の書式に無いので、
+  //   使われている時だけコメントで添える。
+  //   OPLL系: @OT(このツール/mck、MGSDRV互換の並び)、@v(MGSDRV)、@OP(生8バイト、mck)。
+  const FM_PATCH_FORMATS = {
+    opn:  [{ id: 'pmd', label: 'PMD' }, { id: 'fmp7', label: 'FMP7' }, { id: 'mucom88', label: 'MUCOM88' }, { id: 'regs', label: 'レジスタ(バイナリ)' }],
+    opll: [{ id: 'ot', label: '@OT (mck)' }, { id: 'mgs', label: '@v (MGSDRV)' }, { id: 'op', label: '@OP (バイナリ8バイト)' }]
+  };
+  const FM_PATCH_FMT_KEY = { opn: 'kbdFmPatchFmtOpn', opll: 'kbdFmPatchFmtOpll' };
+  function getFmPatchFormat(type) {
+    const list = FM_PATCH_FORMATS[type] || [];
+    let id = null;
+    try { id = localStorage.getItem(FM_PATCH_FMT_KEY[type]); } catch (e) { /* ignore */ }
+    return list.some(f => f.id === id) ? id : (list[0] ? list[0].id : null);
+  }
+  function setFmPatchFormat(type, id) {
+    try { localStorage.setItem(FM_PATCH_FMT_KEY[type], id); } catch (e) { /* ignore */ }
+  }
+
+  function fmtPatchRows(width, groups, sep, indent) {
+    // groups: [{ labels:[...], rows:[[...],[...]], prefix?, tail?:[..] }, ...]
+    sep = sep === undefined ? ',' : sep; indent = indent === undefined ? '  ' : indent;
     const lines = [];
     for (const g of groups) {
-      lines.push('; ' + g.labels.map(l => String(l).padStart(width)).join(' '));
-      for (const row of g.rows) lines.push('  ' + row.map(v => String(v).padStart(width)).join(',') + ',');
+      if (g.labels) lines.push('; ' + g.labels.map(l => String(l).padStart(width)).join(' '));
+      g.rows.forEach((row, i) => {
+        const tail = g.tails && g.tails[i] ? g.tails[i] : '';
+        lines.push((g.prefix !== undefined ? g.prefix : indent) + row.map(v => String(v).padStart(width)).join(sep) + (g.trailingComma === false ? '' : ',') + tail);
+      });
     }
-    // 最終行の末尾カンマだけ落とす
-    if (lines.length) lines[lines.length - 1] = lines[lines.length - 1].replace(/,$/, '');
+    // 最終行の末尾カンマだけ落とす(コメント末尾なら手前のデータ行)
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (/^\s*;/.test(lines[i])) continue;
+      lines[i] = lines[i].replace(/,(\s*;.*)?$/, '$1');
+      break;
+    }
     return lines.join('\n');
   }
-  // OPLL/VRC7(YM2413系): @OT形式(MGSDRV互換、lexer.js parseVrc7ToneAltDef の逆変換)。
-  //   TL FB / [モジュレータ] AR DR SL RR KL ML AM VB EG KR DT / [キャリア] 同11個。
-  //   AM=振幅変調, VB=ビブラート(PM), EG=持続音(EGタイプ), KR=キーレート(KSR), DT=波形(WF、DC/DM)
-  function formatOpllPatch(p) {
+
+  // ---- OPLL / VRC7 (YM2413系) ----
+  const opllOpRow = (o) => [o.AR, o.DR, o.SL, o.RR, o.KL, o.ML, o.AM, o.PM, o.EG, o.KR, o.WF];
+  const OPLL_OP_LABELS = ['AR', 'DR', 'SL', 'RR', 'KL', 'ML', 'AM', 'VB', 'EG', 'KR', 'DT'];
+  // {mod,car} → VRC7/OPLLのカスタム音色レジスタ8バイト(lexer.js parseVrc7ToneAltDef / vrc7.js dump2patch の逆)
+  function opllPatchBytes(p) {
     const m = p.mod, c = p.car;
-    const opRow = (o) => [o.AR, o.DR, o.SL, o.RR, o.KL, o.ML, o.AM, o.PM, o.EG, o.KR, o.WF];
-    return fmtPatchRows(2, [
+    return [
+      ((m.AM & 1) << 7) | ((m.PM & 1) << 6) | ((m.EG & 1) << 5) | ((m.KR & 1) << 4) | (m.ML & 15),
+      ((c.AM & 1) << 7) | ((c.PM & 1) << 6) | ((c.EG & 1) << 5) | ((c.KR & 1) << 4) | (c.ML & 15),
+      ((m.KL & 3) << 6) | (m.TL & 63),
+      ((c.KL & 3) << 6) | ((c.WF & 1) << 4) | ((m.WF & 1) << 3) | (m.FB & 7),
+      ((m.AR & 15) << 4) | (m.DR & 15),
+      ((c.AR & 15) << 4) | (c.DR & 15),
+      ((m.SL & 15) << 4) | (m.RR & 15),
+      ((c.SL & 15) << 4) | (c.RR & 15)
+    ];
+  }
+  function formatOpllPatch(p, fmt, ch) {
+    const m = p.mod, c = p.car;
+    const head = `; ${ch.id} inst ${p.inst}${p.inst === 0 ? ' (user)' : ' (ROM)'}`;
+    if (fmt === 'op') {
+      return head + '\n@OP0 = {\n  ' + opllPatchBytes(p).map(b => '$' + b.toString(16).toUpperCase().padStart(2, '0')).join(',') + '\n}';
+    }
+    const body = fmtPatchRows(2, [
       { labels: ['TL', 'FB'], rows: [[m.TL, m.FB]] },
-      { labels: ['AR', 'DR', 'SL', 'RR', 'KL', 'ML', 'AM', 'VB', 'EG', 'KR', 'DT'], rows: [opRow(m), opRow(c)] }
+      { labels: OPLL_OP_LABELS, rows: [opllOpRow(m), opllOpRow(c)] }
     ]);
+    if (fmt === 'mgs') return head + '\n@v0 = {\n' + body + '\n}';
+    return head + '\n@OT0 = {\n' + body + '\n}';
   }
-  // OPN(YM2612/YM2610): PMD風の並び(AL FB / op1-4: AR DR SR RR SL TL KS ML DT AM)+末尾に SE(SSG-EG、
-  // PMDには無いがOPN2/OPNBの音色再現に必要なので付ける。0なら未使用)。opは論理順op1..op4
-  // (Emu.decodeOpnPatch 参照)。最後にAMS/PMS/パンを参考コメントで添える。
-  function formatOpnPatch(p) {
-    const opRow = (o) => [o.AR, o.DR, o.SR, o.RR, o.SL, o.TL, o.KS, o.ML, o.DT, o.AM, o.SE];
-    const body = fmtPatchRows(3, [
-      { labels: ['AL', 'FB'], rows: [[p.AL, p.FB]] },
-      { labels: ['AR', 'DR', 'SR', 'RR', 'SL', 'TL', 'KS', 'ML', 'DT', 'AM', 'SE'], rows: p.ops.map(opRow) }
-    ]);
-    return body + `\n; AMS ${p.AMS}  PMS ${p.PMS}  PAN ${p.L ? 'L' : '-'}${p.R ? 'R' : '-'}`;
+
+  // ---- OPN (YM2612 / YM2610) ----
+  function opnExtraComments(p) {
+    const lines = [];
+    if (p.ops.some(o => o.SE)) lines.push('; ssg-eg ' + p.ops.map(o => o.SE).join(' ') + ' (op1..op4)');
+    lines.push(`; ams ${p.AMS} pms ${p.PMS} pan ${p.L ? 'L' : '-'}${p.R ? 'R' : '-'}`);
+    return lines.join('\n');
   }
-  // ch.fmPatch → 表示テキスト(無ければnull)。先頭行に音源種別と音色番号(OPLL系)を添える
-  function formatFmPatch(ch) {
+  function formatOpnPatch(p, fmt, ch) {
+    const head = `; ${ch.id}`;
+    const pmdRow = (o) => [o.AR, o.DR, o.SR, o.RR, o.SL, o.TL, o.KS, o.ML, o.DT, o.AM];
+    if (fmt === 'fmp7') {
+      const body = fmtPatchRows(3, [
+        { labels: ['AR', 'DR', 'SR', 'RR', 'SL', 'TL', 'KS', 'ML', 'DT', 'AM'], rows: p.ops.map(pmdRow), prefix: "'@ ", trailingComma: false },
+        { labels: ['AL', 'FB'], rows: [[p.AL, p.FB]], prefix: "'@ ", trailingComma: false }
+      ]);
+      return `${head}\n'@ FA 0\n` + body + '\n' + opnExtraComments(p);
+    }
+    if (fmt === 'mucom88') {
+      const body = fmtPatchRows(3, [
+        { labels: ['FB', 'AL'], rows: [[p.FB, p.AL]], prefix: '   ', trailingComma: false },
+        { labels: ['AR', 'DR', 'SR', 'RR', 'SL', 'TL', 'KS', 'ML', 'DT'], rows: p.ops.map(o => [o.AR, o.DR, o.SR, o.RR, o.SL, o.TL, o.KS, o.ML, o.DT]),
+          prefix: '  ', trailingComma: false, tails: [' ; op1', ' ; op2', ' ; op3', ' ; op4'] }
+      ]);
+      return `${head}\n  @0\n` + body + '\n' + opnExtraComments(p);
+    }
+    if (fmt === 'regs') {
+      // レジスタ順(op1,op3,op2,op4)で $30〜$90 の各グループと $B0/$B4。ch1相当のオフセット0で表記
+      const regOrder = [0, 2, 1, 3]; // 論理op → レジスタスロット順に並べ替え
+      const hx = (v) => '$' + (v & 0xFF).toString(16).toUpperCase().padStart(2, '0');
+      const grp = (label, f) => `; ${label}\n  ` + regOrder.map(i => hx(f(p.ops[i]))).join(',');
+      return [head + ' (register order op1,op3,op2,op4 = +0,+4,+8,+12)',
+        grp('$30 DT/ML', o => (o.DT << 4) | o.ML),
+        grp('$40 TL', o => o.TL),
+        grp('$50 KS/AR', o => (o.KS << 6) | o.AR),
+        grp('$60 AM/DR', o => (o.AM << 7) | o.DR),
+        grp('$70 SR', o => o.SR),
+        grp('$80 SL/RR', o => (o.SL << 4) | o.RR),
+        grp('$90 SSG-EG', o => o.SE),
+        '; $B0 FB/AL\n  ' + hx((p.FB << 3) | p.AL),
+        '; $B4 L/R/AMS/PMS\n  ' + hx((p.L << 7) | (p.R << 6) | (p.AMS << 4) | p.PMS)
+      ].join('\n');
+    }
+    // PMD(既定): 3桁ゼロ埋め・空白区切りが慣例
+    const z3 = (v) => String(v).padStart(3, '0');
+    const lines = [head, '; nm  alg fbl', `@000 ${z3(p.AL)} ${z3(p.FB)}`, ';  ar  dr  sr  rr  sl  tl  ks  ml  dt ams'];
+    for (const o of p.ops) lines.push(' ' + pmdRow(o).map(z3).join(' '));
+    lines.push(opnExtraComments(p));
+    return lines.join('\n');
+  }
+
+  // ch.fmPatch → 表示テキスト(無ければnull)。fmt省略時は保存済み/既定の書式
+  function formatFmPatch(ch, fmt) {
     const p = ch && ch.fmPatch;
     if (!p) return null;
-    if (p.type === 'opll') return `; ${ch.id} @OT (inst ${p.inst}${p.inst === 0 ? ' = user' : ''})\n` + formatOpllPatch(p);
-    if (p.type === 'opn') return `; ${ch.id} OPN (op1..op4)\n` + formatOpnPatch(p);
+    const f = fmt || getFmPatchFormat(p.type);
+    if (p.type === 'opll') return formatOpllPatch(p, f, ch);
+    if (p.type === 'opn') return formatOpnPatch(p, f, ch);
     return null;
+  }
+  // テキスト → 色分けHTML(コメント=先頭';'の行と行中の';'以降、それ以外=データ)
+  function renderFmPatchHtml(text) {
+    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return text.split('\n').map((line) => {
+      const i = line.indexOf(';');
+      if (i < 0) return `<span class="kbd-patch-data">${esc(line)}</span>`;
+      if (/^\s*;/.test(line)) return `<span class="kbd-patch-comment">${esc(line)}</span>`;
+      return `<span class="kbd-patch-data">${esc(line.slice(0, i))}</span><span class="kbd-patch-comment">${esc(line.slice(i))}</span>`;
+    }).join('\n');
   }
 
   // ── SPC エンベロープ(env列)アイコン描画 ─────────────────────────
@@ -2001,9 +2103,24 @@
           () => { this._bigPatchCopyBtn.textContent = T('✗ 失敗'); }
         ).finally(() => setTimeout(() => { this._bigPatchCopyBtn.textContent = orig; }, 1000));
       });
+      // 音色データの書式選択(FM_PATCH_FORMATS: OPN=PMD/FMP7/MUCOM88/レジスタ、OPLL=@OT/@v/@OP)。
+      // FMチャンネル選択時だけ表示、選択は音源種別ごとにlocalStorageへ保存
+      this._bigPatchFmtSel = document.createElement('select');
+      this._bigPatchFmtSel.className = 'kbd-bigwave-fmt';
+      this._bigPatchFmtSel.title = T('音色データの書式');
+      this._bigPatchFmtSel.style.display = 'none';
+      this._bigPatchFmtType = null; // 今optionを入れてある音源種別('opn'/'opll')
+      this._bigPatchCh = null;      // 音色テキストを出している対象ch(書式変更時の再描画用)
+      this._bigPatchFmtSel.addEventListener('change', () => {
+        if (!this._bigPatchFmtType) return;
+        setFmPatchFormat(this._bigPatchFmtType, this._bigPatchFmtSel.value);
+        this._bigPatchText = null; // 強制更新
+        if (this._bigPatchCh) this._renderBigWave(this._bigPatchCh);
+      });
       bigHeader.appendChild(this._bigToggleEl);
       bigHeader.appendChild(this._bigTitleEl);
       bigHeader.appendChild(this._bigCopyBtn);
+      bigHeader.appendChild(this._bigPatchFmtSel);
       bigHeader.appendChild(this._bigPatchCopyBtn);
       this._bigCanvas = document.createElement('canvas');
       this._bigCanvas.className = 'kbd-bigwave-canvas';
@@ -3054,10 +3171,23 @@
       // FM音色データ(OPLL/VRC7/YM2612/YM2610)。波形の見た目(sig)が同じでもパラメータは
       // 変わりうるので、sig判定より前に毎回テキストを比較して更新する
       if (this._bigPatchEl) {
+        const ptype = ch.fmPatch ? ch.fmPatch.type : null;
+        this._bigPatchCh = ptype ? ch : null;
+        // 書式selectのoptionを音源種別に合わせる(種別が変わった時だけ作り直す)
+        if (ptype !== this._bigPatchFmtType) {
+          this._bigPatchFmtType = ptype;
+          this._bigPatchFmtSel.innerHTML = '';
+          for (const f of (FM_PATCH_FORMATS[ptype] || [])) {
+            const o = document.createElement('option'); o.value = f.id; o.textContent = T(f.label);
+            this._bigPatchFmtSel.appendChild(o);
+          }
+          if (ptype) this._bigPatchFmtSel.value = getFmPatchFormat(ptype);
+          this._bigPatchFmtSel.style.display = ptype ? '' : 'none';
+        }
         const text = formatFmPatch(ch);
         if (text !== this._bigPatchText) {
           this._bigPatchText = text;
-          this._bigPatchEl.textContent = text || '';
+          this._bigPatchEl.innerHTML = text ? renderFmPatchHtml(text) : '';
           this._bigPatchEl.style.display = text ? '' : 'none';
           this._bigPatchCopyBtn.style.display = text ? '' : 'none';
         }
