@@ -5031,7 +5031,7 @@
       const defInst = MML.VGM2MML.defaultVrc7Inst(s.kind);
       for (const opt of MML.VGM2MML.vrc7InstOptions(s.kind)) {
         const o = document.createElement('option');
-        o.value = opt.value; o.textContent = opt.value === 'auto' ? T('元の音色') : opt.label;
+        o.value = opt.value; o.textContent = T(opt.label); // 日本語ラベル('元の音色'/'@0 自作音色…')だけ辞書に載っている
         if (opt.value === defInst) o.selected = true;
         inst.appendChild(o);
       }

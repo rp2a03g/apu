@@ -627,8 +627,9 @@
       const wave = (dmc && dmc.len > 0)
         ? { t: 'wave', data: dmc.samples, nx: dmc.len * 8, ny: 128, sig: dmc.addr + ':' + dmc.len, pcm: true }
         : { t: 'sample', nx: 0, ny: 0 };
+      // dmcDirect: $4011 直接書込み(生PCM)の検出対象はこの行だけ(update()参照)
       channels.push({ id: 'DM', color: '#aa44ff', freq: 0, vol: level / 127, rawVol: level, rawVolMax: 127,
-        wave, active: !!(status & 0x10), sample: true, dmcRateIdx, dmcFreq, dmcReg: dv });
+        wave, active: !!(status & 0x10), sample: true, dmcRateIdx, dmcFreq, dmcReg: dv, dmcDirect: true });
     }
     } // !isKss && !isGbs
 
@@ -3305,8 +3306,11 @@
 
         // DMC: $4011 が書き込まれた瞬間だけ検出（レジスタ値の変化＝直接DAC書き込み）。
         // 直接PCM再生中は発声扱いにし、その瞬間だけ数値を黄色にする。
+        // ★対象は 2A03 DM 行(ch.dmcDirect)だけ。以前は sample:true の全行(RF5C164/PWM/ADPCM等)で
+        //   1つの _lastDmc4011 を共有していたため、サンプル行が複数あると隣の行の値と比較して
+        //   常に「書き換わった」と判定され、PCM行の音量数値が意味なく黄色になり active も強制されていた
         let dmcWritten = false;
-        if (ch.sample && ch.dmcReg !== undefined) {
+        if (ch.dmcDirect && ch.dmcReg !== undefined) {
           if (this._lastDmc4011 !== null && ch.dmcReg !== this._lastDmc4011) {
             dmcWritten = true;
             ch.active = true;

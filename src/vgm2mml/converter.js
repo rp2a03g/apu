@@ -112,10 +112,59 @@
   MML.VGM2MML.vrc7InstOptions = function (kind) {
     const list = [];
     if (kind === 'fm') list.push({ value: 'auto', label: '元の音色' });
+    // OPN 4op FM → '0'=自作音色(@OP、4op→2opの自動変換。opnToOpllBytes 参照)
+    if (kind === 'fm4') list.push({ value: '0', label: '@0 自作音色(4op→2op自動変換)' });
     for (let i = 1; i <= 15; i++) list.push({ value: String(i), label: `@${i} ${VRC7_PRESET_NAMES[i]}` });
     return list;
   };
-  MML.VGM2MML.defaultVrc7Inst = function (kind) { return kind === 'fm' ? 'auto' : '1'; };
+  MML.VGM2MML.defaultVrc7Inst = function (kind) { return kind === 'fm' ? 'auto' : kind === 'fm4' ? '0' : '1'; };
+
+  // OPN(YM2612/YM2610)の4op音色 → OPLL/VRC7 の2op自作音色(レジスタ8バイト)。近似変換:
+  //  - キャリア = アルゴリズムの最終段(キャリア)のうちTLが最小(いちばん鳴っている)op、
+  //    モジュレータ = そのキャリアを直接変調するop(複数ならTL最小、無ければ無音のモジュレータ=TL63)。
+  //  - ML: そのまま(両者とも0=½,1-15)。DT: OPLLに無いので捨てる。
+  //  - TL(モジュレータ): 0.75dB/段どうし、6bitへ飽和(min(63,TL))。キャリアTLは音量(v)側で表現済みなので0。
+  //  - AR/DR: 5bit→4bit(>>1。どちらも最大が「即時」)。SL: 3dB/段どうしでそのまま。RR: 4bitどうしそのまま。
+  //  - SR(D2R): OPLLには持続レートが無い → SR==0 なら EG=1(SLで持続)、SR>0 なら EG=0(減衰音、SL到達後は
+  //    RRで減衰し続けるので RR:=max(RR,SR>>1)。キーオフ後は固定レートになる=OPNのRRは失われる)。
+  //  - KS(0-3)→KR(1bit): KS>=2 なら1。KL: OPNに無いので0。AM: op.AM かつ AMS>0。VB: PMS>0 なら両op。
+  //  - FB: OPNではop1の自己帰還なので、モジュレータにop1を選んだときだけ引き継ぐ。波形(DC/DM): OPNは
+  //    正弦のみなので0。SSG-EG: 表現できないので無視。
+  const OPN_MODULATORS = [ // アルゴリズムごとの「op i を直接変調するop」(論理op index)
+    { 3: [2] }, { 3: [2] }, { 3: [0, 2] }, { 3: [1, 2] }, { 1: [0], 3: [2] }, { 1: [0], 2: [0], 3: [0] }, { 1: [0] }, {}
+  ];
+  const OPN_CARRIERS = [[3], [3], [3], [3], [1, 3], [1, 2, 3], [1, 2, 3], [0, 1, 2, 3]];
+  function opnToOpllBytes(p) {
+    if (!p || !p.ops) return null;
+    const alg = p.AL & 7;
+    let car = OPN_CARRIERS[alg][0];
+    for (const i of OPN_CARRIERS[alg]) if (p.ops[i].TL < p.ops[car].TL) car = i;
+    const mods = (OPN_MODULATORS[alg][car] || []);
+    let mod = mods.length ? mods[0] : -1;
+    for (const i of mods) if (p.ops[i].TL < p.ops[mod].TL) mod = i;
+    const C = p.ops[car];
+    const M = mod >= 0 ? p.ops[mod] : { TL: 127, ML: 1, AR: 31, DR: 0, SR: 0, SL: 0, RR: 15, KS: 0, AM: 0 };
+    const conv = (o) => {
+      const eg = o.SR === 0 ? 1 : 0;
+      const rr = eg ? o.RR : Math.max(o.RR, o.SR >> 1);
+      return { AM: (o.AM && p.AMS > 0) ? 1 : 0, PM: p.PMS > 0 ? 1 : 0, EG: eg, KR: o.KS >= 2 ? 1 : 0, ML: o.ML & 15,
+        AR: o.AR >> 1, DR: o.DR >> 1, SL: o.SL & 15, RR: rr & 15 };
+    };
+    const m = conv(M), c = conv(C);
+    // FBはOPNではop1の自己帰還。選んだモジュレータがop1のときだけ引き継ぐ(他のopに帰還は無い)
+    const mTL = Math.min(63, M.TL), fb = mod === 0 ? (p.FB & 7) : 0;
+    return [
+      (m.AM << 7) | (m.PM << 6) | (m.EG << 5) | (m.KR << 4) | m.ML,
+      (c.AM << 7) | (c.PM << 6) | (c.EG << 5) | (c.KR << 4) | c.ML,
+      mTL,                       // KL(mod)=0
+      fb,                        // KL(car)=0, DC=DM=0
+      (m.AR << 4) | m.DR,
+      (c.AR << 4) | c.DR,
+      (m.SL << 4) | m.RR,
+      (c.SL << 4) | c.RR
+    ];
+  }
+  MML.VGM2MML.opnToOpllBytes = opnToOpllBytes;
 
   /**
    * ヘッダから変換元チャンネル一覧を作る(キャプチャ不要。UIの割当表とcomposePsgLikeが共有)。
@@ -314,7 +363,7 @@
       if ((s.kind === 'noise') !== (tt.family === 'noise')) { conflicts.push(`${s.label} → ${t} は種別が合わないため変換対象外です。`); continue; }
       if (s.kind === 'wave' && tt.family !== 'n163' && tt.family !== 'vrc7') { conflicts.push(`${s.label} → ${t} は波形音源/VRC7以外へ載せられないため変換対象外です。`); continue; }
       const ch = Object.assign({}, extracted[s.id], { events: extracted[s.id].events.map(ev => Object.assign({}, ev)) });
-      adaptEvents(ch, s, tt.family, n163WaveReg, tt.family === 'vrc7' ? vrc7InstOf(s) : null);
+      adaptEvents(ch, s, tt.family, n163WaveReg, tt.family === 'vrc7' ? vrc7InstOf(s) : null, vrc7ToneReg);
       placed[t] = { source: s, channel: ch };
     }
     notes.push(...conflicts);
@@ -378,7 +427,7 @@
       const letter = tt.chip === '2a03' ? tt.letter : (letterMap[tt.chip] || [])[tt.index];
       // VRC7へ載せたチャンネルは使ったプリセット音色も併記(OPLL元音色そのままなら書かない)
       let inst = '';
-      if (tt.chip === 'vrc7') { const v = vrc7InstOf(p.source); if (v !== 'auto') inst = `(@${v} ${VRC7_PRESET_NAMES[parseInt(v, 10)] || ''})`; }
+      if (tt.chip === 'vrc7') { const v = vrc7InstOf(p.source); if (v === '0') inst = '(@0 自作音色=4op→2op変換)'; else if (v !== 'auto') inst = `(@${v} ${VRC7_PRESET_NAMES[parseInt(v, 10)] || ''})`; }
       return `${letter}=${p.source.label}${inst}`;
     }).join(' ');
     const isCustom = !!options.channelMap && Object.keys(options.channelMap).some(k => options.channelMap[k] !== MML.VGM2MML.defaultPlan(h)[k]);
@@ -442,8 +491,9 @@
   }
 
   // ソースチャンネルのイベントを借用先ファミリの語彙へ整形する(破壊的。呼び出し側でコピー済み)。
-  // vrc7Inst: 借用先がVRC7のときの音色('auto'=OPLLソースの元音色/カスタム音色をそのまま、'1'-'15'=プリセット)
-  function adaptEvents(ch, s, fam, n163WaveReg, vrc7Inst) {
+  // vrc7Inst: 借用先がVRC7のときの音色('auto'=OPLLソースの元音色/カスタム音色をそのまま、'1'-'15'=プリセット、
+  //           '0'=OPN 4op音色を2op自作音色(@OP)へ自動変換して OP<n>+@0)
+  function adaptEvents(ch, s, fam, n163WaveReg, vrc7Inst, vrc7ToneReg) {
     const events = ch.events;
     const isAy = s.chip === 'ay8910';
     const nativeVrc7 = s.kind === 'fm' && fam === 'vrc7' && (vrc7Inst === 'auto' || vrc7Inst == null);
@@ -468,10 +518,21 @@
       for (const ev of events) if (ev.note !== null && (ev.attDb !== undefined || ev.volume !== undefined)) ev.volume = conv(sourceAttDb(s, ev));
     }
     for (const ev of events) delete ev.attDb;
-    if (fam === 'vrc7') {
+    if (fam === 'vrc7' && vrc7Inst === '0' && s.kind === 'fm4' && vrc7ToneReg) {
+      // OPN 4op → VRC7 2op 自作音色(opnToOpllBytes)。音色ごとに @OP<n> を登録し OP<n>+@0 で切り替える
+      for (const ev of events) {
+        delete ev.n163Wave;
+        if (ev.note === null) { delete ev.vrc7Tone; delete ev.opnPatch; continue; }
+        const bytes = opnToOpllBytes(ev.opnPatch);
+        ev.instrument = 0;
+        ev.vrc7Tone = bytes ? vrc7ToneReg.assign(bytes) : undefined;
+        delete ev.opnPatch;
+      }
+      ch.hasVrc7Tone = true; ch.hasInstrument = true;
+    } else if (fam === 'vrc7') {
       // VRC7プリセット音色。OPLLソースの元音色/カスタム音色は捨てる
       const inst = Math.max(1, Math.min(15, parseInt(vrc7Inst, 10) || 1));
-      for (const ev of events) { if (ev.note !== null) ev.instrument = inst; delete ev.vrc7Tone; delete ev.n163Wave; }
+      for (const ev of events) { if (ev.note !== null) ev.instrument = inst; delete ev.vrc7Tone; delete ev.n163Wave; delete ev.opnPatch; }
       ch.hasVrc7Tone = false; ch.hasInstrument = true;
     } else if (fam === 'n163') {
       // ADPCM(サンプル1周期の波形あり)はその波形を、他は矩形波を @N に登録して音色にする
@@ -479,24 +540,24 @@
         if (ev.note === null) { delete ev.n163Wave; continue; }
         const wave = (ev.n163Wave && ev.n163Wave.length === N163_WAVE_LEN) ? ev.n163Wave : N163_SQUARE_WAVE;
         ev.instrument = n163WaveReg.assign(wave); ev.rawLength = N163_WAVE_LEN;
-        delete ev.n163Wave; delete ev.vrc7Tone;
+        delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch;
       }
       ch.hasInstrument = true; ch.hasVrc7Tone = false;
     } else if (fam === 'pulse') {
       // 2A03/MMC5パルス: @2=デューティ50%(矩形波)
-      for (const ev of events) { if (ev.note !== null) ev.instrument = 2; delete ev.n163Wave; delete ev.vrc7Tone; }
+      for (const ev of events) { if (ev.note !== null) ev.instrument = 2; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
       ch.hasInstrument = true; ch.hasVrc7Tone = false;
     } else if (fam === 'vrc6pulse') {
       // VRC6パルス: @7=デューティ50%(8/16)
-      for (const ev of events) { if (ev.note !== null) ev.instrument = 7; delete ev.n163Wave; delete ev.vrc7Tone; }
+      for (const ev of events) { if (ev.note !== null) ev.instrument = 7; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
       ch.hasInstrument = true; ch.hasVrc7Tone = false;
     } else if (fam === 'fme7') {
       // FME-7: @1=トーンのみ
-      for (const ev of events) { if (ev.note !== null) ev.instrument = 1; delete ev.n163Wave; delete ev.vrc7Tone; }
+      for (const ev of events) { if (ev.note !== null) ev.instrument = 1; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
       ch.hasInstrument = true; ch.hasVrc7Tone = false;
     } else if (fam === 'triangle') {
       // 三角波: 音量・音色は無い。音程だけ
-      for (const ev of events) { delete ev.volume; delete ev.envelopeV; delete ev.envelopeVr; delete ev.instrument; delete ev.n163Wave; delete ev.vrc7Tone; }
+      for (const ev of events) { delete ev.volume; delete ev.envelopeV; delete ev.envelopeVr; delete ev.instrument; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
       ch.hasVolume = false; ch.hasEnvelope = false; ch.hasInstrument = false; ch.hasVrc7Tone = false;
     }
   }

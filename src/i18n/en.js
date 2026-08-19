@@ -173,6 +173,7 @@
     'スキップ': 'Skip',
     'VRC7の音色プリセット': 'VRC7 instrument preset',
     '元の音色': 'Original patch',
+    '@0 自作音色(4op→2op自動変換)': '@0 custom patch (auto 4op→2op)',
     'DPCM変換': 'DPCM',
     'E: FDS 波形': 'E: FDS wave',
     'G: VRC6 のこぎり': 'G: VRC6 saw',

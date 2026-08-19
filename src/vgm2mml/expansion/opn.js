@@ -42,6 +42,11 @@
     return minTl * 0.75;
   }
   const vrc7Vol = (att) => Math.max(0, Math.min(15, Math.round(att / 3)));
+  // 音色の同一性キー(全パラメータ。モジュレータTLも音色なので含める=VRC7自作音色への変換結果が変わる単位)
+  function patchKey(p) {
+    if (!p || !p.ops) return '';
+    return p.AL + '/' + p.FB + '/' + p.AMS + '/' + p.PMS + '/' + p.ops.map(o => [o.DT, o.ML, o.TL, o.KS, o.AR, o.DR, o.SR, o.SL, o.RR, o.AM, o.SE].join('.')).join('|');
+  }
 
   // 連続フレームを同一イベントにまとめる共通ループ。frameState(f) → {note, attDb, retrigger, rawFreq, extra}
   function collect(totalFrames, frameState) {
@@ -54,7 +59,7 @@
       if (same) continue;
       flush(f);
       cur = { start: f, end: f, note: st.note, attDb: st.attDb, retrigger: !!st.retrigger, key: st.key,
-        rawFreq: st.note !== null ? st.rawFreq : undefined, n163Wave: st.n163Wave };
+        rawFreq: st.note !== null ? st.rawFreq : undefined, n163Wave: st.n163Wave, opnPatch: st.opnPatch };
     }
     flush(totalFrames);
     return events;
@@ -64,6 +69,7 @@
     const out = { start: ev.start, end: ev.end, note: ev.note, volume: vrc7Vol(ev.attDb), attDb: ev.attDb, retrigger: ev.retrigger };
     if (ev.note !== null && ev.rawFreq != null) out.rawFreq = ev.rawFreq;
     if (ev.n163Wave) out.n163Wave = ev.n163Wave;
+    if (ev.opnPatch) out.opnPatch = ev.opnPatch; // 借用先VRC7の自作音色(4op→2op自動変換)用
     if (ev.noteEnvOffsets) out.noteEnvOffsets = ev.noteEnvOffsets;
     return out;
   }
@@ -82,7 +88,8 @@
         prevKey = !!s.keyOn;
         if (!on) return { note: null, attDb: 0 };
         const att = fmAttDb(s.patch);
-        return { note: freqToNoteNumber(s.freq), attDb: att, retrigger, rawFreq: s.freq };
+        // key: 音色パラメータが変わったら別イベント(VRC7自作音色への変換結果が変わるため)
+        return { note: freqToNoteNumber(s.freq), attDb: att, retrigger, rawFreq: s.freq, opnPatch: s.patch, key: patchKey(s.patch) };
       });
       channels.push({ events: MML.Convert.mergeVibratoAndArpeggio(events).map(toCommon), hasVolume: true, hasInstrument: true });
     }
