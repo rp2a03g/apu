@@ -606,7 +606,12 @@
       };
       // $4015を一度も書かないVGMでもチャンネルが有効扱いになるよう既定値を補う
       const initRegs = { 0x4015: 0x0F };
-      result = MML.NSF2MML.convert(data.nes.writeLog, null, header, 0, initRegs, null, options);
+      // DPCMサンプル本体はNSFのようなファイル内ROMではなく、VGMのデータブロック
+      // (0x67 type=0xC2)でエミュレータのメモリへ書き込まれた$C000-$FFFF(vgmPlayer.jsが
+      // キャプチャ末尾で切り出したdata.nes.dpcmRom)から解決する
+      const nesOptions = Object.assign({}, options,
+        data.nes.dpcmRom ? { dpcmRom: { bytes: data.nes.dpcmRom, loadAddr: 0xC000 } } : {});
+      result = MML.NSF2MML.convert(data.nes.writeLog, null, header, 0, initRegs, null, nesOptions);
       result.chips = ['2A03'].concat(data.nes.fds ? ['FDS'] : []);
     } else if (family === 'gb') {
       result = MML.GBS2MML.convertCapture({

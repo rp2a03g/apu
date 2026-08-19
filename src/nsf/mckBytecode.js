@@ -113,9 +113,12 @@
  *     (タスク2-4)の段階で扱うべき機能であり、本タスク(タスク1)の対象外とする。
  *     現状はコンパイラ側で既にループを展開済み(expandLoops)のセグメント列をそのまま
  *     線形にシリアライズする(サイズは大きくなるがループの有無で再生内容は変わらない)。
- *   - スイープ(0xF9): 本ツールのsweep実装はソフトウェア近似(半音オフセットを毎フレーム
- *     計算する方式)であり、実機の生ハードウェアスイープレジスタ直接書き込み(0xF9)とは
- *     表現形式が異なるため、そのまま流用できない。
+ *   (スイープ s<speed>,<depth> は2026-08-20にOP_SWEEP=0xE3で実装済み。かつてここには
+ *    「本ツールのsweepはソフトウェア近似なので実機の0xF9とは表現形式が異なり流用できない」
+ *    と書いていたが、その後compiler.jsのsweepRegisterByte()が生ハードウェアスイープ
+ *    レジスタへの直接書き込みに置き換わった(旧ソフトウェア近似は削除済み)ため、
+ *    レジスタ生バイト1つをそのまま運ぶだけで済むようになった。実機ppmckの予約値0xF9は
+ *    既にOP_PORTAMENTOへ転用済みなので空き領域の0xE3を使う)
  *   - デチューン(0xFA、D<n>): 2026-07-24実装完了。compiler.jsが算出した周期/周波数
  *     レジスタ値への生オフセットをそのまま2バイト(符号付き16bit、リトルエンディアン)で
  *     書き出す(0xF9のスイープと違い、こちらは単純な加算オフセットなのでバイトコード化に
@@ -161,8 +164,8 @@
   // [target下位,target上位(符号付き16bit LE、D<n>と同じ),duration,delay]。offはduration=0を
   // 番兵とする(実際のポルタメントはduration>=1が必須、src/convert/pitch.jsのfitPortamento
   // 参照)。★0xF9は実機ppmckでは生ハードウェアスイープ書込み用に予約された値だが、
-  // 本ツールのsweepはソフトウェア近似でバイトコード化されていない(下記「未対応」節参照、
-  // 実質未使用)ため、このツール独自拡張のポルタメントに転用した
+  // 当時の本ツールのsweepはバイトコード化されておらず実質未使用だったため、このツール
+  // 独自拡張のポルタメントに転用した(その後2026-08-20にsweepはOP_SWEEP=0xE3で実装)
   const OP_PORTAMENTO = 0xf9;
   const OP_DETUNE = 0xfa; // D<n>デチューン選択。次の2バイトが符号付き16bit値(下位,上位、リトルエンディアン)
   const OP_VIBRATO = 0xfb;
@@ -184,8 +187,10 @@
   // 下げた。2026-08-13、y/SM/PS用に0xE9-0xEBをもう3つ確保するため0xE8までさらに
   // 下げた。2026-08-15、SD(セルフディレイ)の複合オペコード(OP_GATE_OFF_VR_SD=0xE8)と
   // @@r(リリース音色、OP_REL_TONE=0xE7)用に2つ確保するため0xE6まで下げた
-  // (実際に使われるノート番号の範囲には遠く届かない安全な切り下げ)
-  const NOTE_MAX = 0xe6;
+  // (実際に使われるノート番号の範囲には遠く届かない安全な切り下げ)。2026-08-20、
+  // ハードウェアスイープ(OP_SWEEP=0xE3)用に0xE2まで下げた(音長省略形式の音符が
+  // 0x76-0xE1、OP_REST_SAME=0xE2なので、コマンド領域として使えるのは0xE3以上)
+  const NOTE_MAX = 0xe2;
 
   // FME7専用の追加オペコード(実機と非互換の独自拡張。ファイル冒頭コメント参照)
   const OP_FME7_NOISE = 0xf1;
@@ -241,6 +246,11 @@
   // 同じbit7規約: 1=固定音色番号 / 0=デューティエンベロープのテーブル番号)。
   // ゲートオフの瞬間に音色を差し替える(実機putReleaseEffectのMCK_SET_TONE rel_tone相当)
   const OP_REL_TONE = 0xe7;
+  // s<speed>,<depth>(ハードウェアスイープ、2026-08-20)。次の1バイトが$4001/$4005へ
+  // そのまま書き込む生バイト(compiler.jsのsweepRegisterByteが計算済み。OFFは$08)。
+  // 実機ppmckの0xF9(MCK_SET_HWSWEEP)に相当するが、0xF9はこのツールでは既に
+  // OP_PORTAMENTOへ転用済みのため、空き領域(0xE3-0xE6)の先頭を使う
+  const OP_SWEEP = 0xe3;
 
   // --- sticky音長エンコード(2026-08-16 ROM圧縮対応) ---
   // 実測でノート+休符がバイトコードの5-9割を占め、かつ「直前と同じ音長」率が高い
@@ -328,6 +338,9 @@
     let lastFme7EnvShape = null;
     let lastFme7EnvPeriod = null;
     let lastDetune = 0; // D<n>の既定値は0(compiler.jsのstate.detune初期値と同じ)
+    // s<speed>,<depth>(2026-08-20)。既定値$08はドライバのINITが$4001/$4005へ書く値と同じ
+    // (スイープ無効。$00だと低音が実機で常時ミュートされるためnegateビットだけ立てる定石)
+    let lastSweep = 0x08;
     let lastSmooth = false; // SM/SMOF(2026-08-13)の既定値はOFF(compiler.jsのstate.smoothと同じ)
     // sticky音長(2026-08-16)。6502側のNOTELEN,X/RESTLEN,Xの厳密なモデル(=直前に明示形式で
     // 出力した音長バイトの値。255超のチャンク分割時は最初のバイト=0xFF)
@@ -354,6 +367,7 @@
     const chUsesNoteEnv = segments.some(s => s.noteEnv != null && s.noteEnv !== 255);
     const chUsesPitchEnv = segments.some(s => s.pitchEnv != null && s.pitchEnv !== 255);
     const chUsesVibrato = segments.some(s => s.vibrato != null && s.vibrato !== 255);
+    const chUsesSweep = segments.some(s => s.sweepSpeed);
     function resetDedupAtLoop() {
       // 音量・音色は全音符が持つ状態なので常時リセット(OP_VOL/OP_TONEは常にディスパッチされる。
       // OP_VOL_ENVはremapIdx側のガードで@v未使用曲では出力自体が起こらない)
@@ -370,6 +384,7 @@
       if (chUsesNoteEnv) lastNoteEnv = null;
       if (chUsesPitchEnv) { lastPitchEnv = null; lastPitchEnvDelay = null; }
       if (chUsesVibrato) lastVibrato = null;
+      if (chUsesSweep) lastSweep = null;
       stickyNoteLen = null; stickyRestLen = null;
     }
 
@@ -576,6 +591,17 @@
           bytes.push(OP_DETUNE, d16 & 0xff, (d16 >> 8) & 0xff);
           lastDetune = detune;
         }
+        // s<speed>,<depth>(ハードウェアスイープ、2026-08-20)。compiler.jsと同じ関数で
+        // $4001/$4005の生バイトを作り、変化したときだけ出す(6502側はSWEEPREG,Xへ保持し、
+        // 音符アタック(WFV_T0/T1)で毎回書き直す=ブラウザ再生側と同じ挙動)。
+        // 2A03パルス以外のチャンネルではsweepSpeedが常に0=既定値のままなので何も出ない
+        {
+          const sw = MML.Mml.sweepRegisterByte(seg.sweepSpeed || 0, seg.sweepDepth || 0);
+          if (sw !== lastSweep) {
+            bytes.push(OP_SWEEP, sw & 0xff);
+            lastSweep = sw;
+          }
+        }
         if (seg.fme7Noise != null && seg.fme7Noise !== lastFme7Noise) {
           bytes.push(OP_FME7_NOISE, seg.fme7Noise & 0x1f);
           lastFme7Noise = seg.fme7Noise;
@@ -739,6 +765,7 @@
     let noteEnv = null, pitchEnv = null, pitchEnvDelay = 0, portamento = null, vibrato = null;
     let fme7Noise = null, fme7EnvShape = null, fme7EnvPeriod = null;
     let detune = 0;
+    let sweepReg = 0x08; // s<speed>,<depth>の生バイト($08=OFF、2026-08-20)
     let smooth = false;
     let envelopeVr = 255; // @vr<n>(2026-08-13)。255=off
     let envIdx = null; // OP_VOL_ENVで選択中のコンパクトなテーブル番号(nullならプレーン音量)
@@ -805,6 +832,9 @@
         continue;
       }
       if (b === OP_VIBRATO) { vibrato = bytes[i]; i++; continue; }
+      // s<speed>,<depth>(2026-08-20): 生の$4001/$4005バイトを保持するだけ
+      // (このデコーダは音符イベントの再構成用で、スイープはレジスタ直書きなので値は使わない)
+      if (b === OP_SWEEP) { sweepReg = bytes[i]; i++; continue; }
       if (b === OP_FME7_NOISE) { fme7Noise = bytes[i]; i++; continue; }
       if (b === OP_FME7_HARDENV) {
         fme7EnvShape = bytes[i]; i++;

@@ -625,6 +625,10 @@
             freqHz: refFreq,
             end: last.end,
             volSeq: concatField(used, 'volSeq'),
+            // 統合前の各音符が持っていた「ハード音量エンベロープの打ち直し」位置
+            // (nsf2mml/converter.js begin()のhwEnvSeq参照)。1音符=1本の減衰カーブしか
+            // 持てないため、統合先で実測レベル列を組み直せるようにフレーム毎の並びのまま繋ぐ
+            hwEnvSeq: concatField(used, 'hwEnvSeq'),
             // pitchSeqはhome(周期先頭の1音符ぶん、通常は極短い)のまま残すと、各*2mmlの
             // toCommon()がev.pitchSeq.map(periodFn)からfreqSeqを組み立てる際にend-startと
             // 長さの合わないデータになる。空にしておけばfreqSeq=[]となり、後段の
@@ -789,6 +793,8 @@
           result.push(Object.assign({}, home, {
             end: last.end,
             volSeq: concatField(absorbed, 'volSeq'),
+            // mergeRapidArpeggio側と同じ理由でフレーム毎の並びのまま繋ぐ
+            hwEnvSeq: concatField(absorbed, 'hwEnvSeq'),
             pitchSeq: candidateSeq
           }));
           i = j;

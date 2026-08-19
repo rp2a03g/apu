@@ -163,8 +163,16 @@
   }
 
   Emu.snapshotApuEnv = function (apu, fds, bus) {
-    const rd = (ch) => ({ level: ch.envelope.output(), env: !ch.envelope.constant });
+    // level/env=音量エンベロープの実出力。len/period/mutedは「レジスタ値だけでは分からない
+    // 実状態」で、長さカウンタによる自然消音・スイープユニットが書き換えた実周期・スイープ
+    // 強制ミュートを鍵盤/ピアノロールの発音判定と音程表示に使う(nsf2mml/converter.jsの
+    // extractPulseEvents/extractNoiseEventsが行うシミュレーションと同じ情報)。
+    const rd = (ch) => ({ level: ch.envelope.output(), env: !ch.envelope.constant,
+      len: ch.lengthCounter, period: ch.timerPeriod,
+      muted: typeof ch.isMuted === 'function' ? ch.isMuted() : false });
     const out = { pulse1: rd(apu.pulse1), pulse2: rd(apu.pulse2), noise: rd(apu.noise) };
+    // 三角波は音量レジスタが無く、長さカウンタ+線形カウンタだけで発音が止まる
+    if (apu.triangle) out.triangle = { len: apu.triangle.lengthCounter, linear: apu.triangle.linearCounter };
     // FDS $4080: bit7=1で直接ゲイン, bit7=0でエンベロープ(減衰)。実ゲイン(volGain 0-32)を採取。
     // effectiveFreq: モジュレーション適用後の実ピッチ(内部単位)。鍵盤表示でMH<n>使用中の
     // 実際に揺れているピッチをHz換算する用途(生の$4082/4083周期だけでは変調前の値になる)。

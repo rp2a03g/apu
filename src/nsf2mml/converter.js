@@ -50,6 +50,29 @@
     const framesForLength = Math.ceil(lengthCounterValue / 2); // 120Hz
     return Math.max(1, Math.min(framesForLinear, framesForLength));
   }
+  // 長さカウンタ(120Hz=1フレームに2回減少)が0になるまでのフレーム数。halt($4000/$400C
+  // bit5、エンベロープのループフラグと共用)が立っている間は減少しないので継続音になる。
+  // 上の三角波と全く同じ話がパルス/ノイズにもあり、そちらは長さカウンタだけで決まる
+  // (FamicomBox「Game Select」のノイズは長さカウンタ2/10=1フレーム/5フレームだけ鳴る
+  // 打楽器的な使い方をしており、これを見ないと次の書込みまで鳴りっぱなしになる)。
+  function lengthAudibleFrames(lengthCounterValue) {
+    return Math.max(1, Math.ceil(lengthCounterValue / 2));
+  }
+  // スイープユニット(実機/src/emulator/apu2a03.js PulseChannel、src/audio/mml-worklet.js)。
+  // negate時のパルス1は1の補数(さらに-1)、パルス2は2の補数。
+  function sweepTargetPeriod(period, sweepReg, isPulse1) {
+    const change = period >> (sweepReg & 7);
+    return (sweepReg & 8) ? period - change - (isPulse1 ? 1 : 0) : period + change;
+  }
+  function sweepMutes(period, sweepReg, isPulse1) {
+    return period < 8 || sweepTargetPeriod(period, sweepReg, isPulse1) > 0x7FF;
+  }
+  // sweepRegisterByte(src/mml/compiler.js)の逆関数。speedは1が最速…15が最遅で
+  // period=round((speed-1)/2)という線形近似なので、speed=2*period+1で厳密に戻せる。
+  // depthの下位4bit(negate+shift)はレジスタのbit3-0そのまま。
+  function sweepToMmlArgs(sweepReg) {
+    return { speed: ((sweepReg >> 4) & 7) * 2 + 1, depth: sweepReg & 0x0F };
+  }
   // pulseFreq/triFreqの逆関数(丸めない生の連続値)。applyPitchDetune(src/convert/detune.js)は
   // 「理論値の周期」と「実測値の周期」の差を最後に1回だけ丸めてD<n>にするため、ここで先に
   // 整数化してはいけない(kss2mml-pitch-detune-correction参照)。実機の周期レジスタは整数
@@ -133,15 +156,26 @@
     };
     // チャンネルごとの「アタック」フラグ（r3/r7 への書き込み）
     const attack = { p1:false, p2:false, tr:false, no:false };
+    // 長さカウンタのロード(=レジスタ3への書き込み)だけを表すフラグ。ノイズはattackが
+    // $400E(周期)の書込みでも立つためattackとは別に持つ必要がある(長さカウンタをロード
+    // するのは$400Fだけ)。パルス/三角はattackと同義だが対称性のため同じように持つ。
+    const lengthLoad = { p1:false, p2:false, tr:false, no:false };
+    // 周期レジスタ(r2/r3)への書き込みフラグ。スイープユニットのシミュレーション
+    // (extractPulseEvents)で「書き込みによるタイマ再ロード」を検出するのに使う。
+    const periodWrite = { p1:false, p2:false };
+    // $4001/$4005(スイープ)への書き込みフラグ(実機のsweepReload相当)
+    const sweepWrite = { p1:false, p2:false };
 
     return writeLog.map(writes => {
-      for (const k in attack) attack[k] = false;
+      for (const k in attack) { attack[k] = false; lengthLoad[k] = false; }
+      periodWrite.p1 = periodWrite.p2 = false;
+      sweepWrite.p1 = sweepWrite.p2 = false;
 
       for (const { addr, value } of writes) {
-        if      (addr >= 0x4000 && addr <= 0x4003) { r.p1[addr & 3] = value; if ((addr&3)===3) attack.p1=true; }
-        else if (addr >= 0x4004 && addr <= 0x4007) { r.p2[addr & 3] = value; if ((addr&3)===3) attack.p2=true; }
-        else if (addr >= 0x4008 && addr <= 0x400B) { r.tr[addr & 3] = value; if ((addr&3)===3) attack.tr=true; }
-        else if (addr >= 0x400C && addr <= 0x400F) { r.no[addr & 3] = value; if ((addr&3)===2||(addr&3)===3) attack.no=true; }
+        if      (addr >= 0x4000 && addr <= 0x4003) { r.p1[addr & 3] = value; if ((addr&3)===3) { attack.p1=true; lengthLoad.p1=true; } if ((addr&3)===2||(addr&3)===3) periodWrite.p1=true; if ((addr&3)===1) sweepWrite.p1=true; }
+        else if (addr >= 0x4004 && addr <= 0x4007) { r.p2[addr & 3] = value; if ((addr&3)===3) { attack.p2=true; lengthLoad.p2=true; } if ((addr&3)===2||(addr&3)===3) periodWrite.p2=true; if ((addr&3)===1) sweepWrite.p2=true; }
+        else if (addr >= 0x4008 && addr <= 0x400B) { r.tr[addr & 3] = value; if ((addr&3)===3) { attack.tr=true; lengthLoad.tr=true; } }
+        else if (addr >= 0x400C && addr <= 0x400F) { r.no[addr & 3] = value; if ((addr&3)===2||(addr&3)===3) attack.no=true; if ((addr&3)===3) lengthLoad.no=true; }
         else if (addr >= 0x4010 && addr <= 0x4013) { r.dm[addr & 3] = value; }
         else if (addr === 0x4015) r.status = value;
       }
@@ -149,7 +183,10 @@
         p1:[...r.p1], p2:[...r.p2], tr:[...r.tr],
         no:[...r.no], dm:[...r.dm],
         status: r.status,
-        attack: { ...attack }
+        attack: { ...attack },
+        lengthLoad: { ...lengthLoad },
+        periodWrite: { ...periodWrite },
+        sweepWrite: { ...sweepWrite }
       };
     });
   }
@@ -177,10 +214,27 @@
     // (実アタック/デューティ/固定音量切替/エンベロープ周期変化を一切伴わない)。
     // スラー分割(src/convert/pitch.js markSlurTies、2026-08-12)がこのフラグを見て、
     // 独立した再アタック音符ではなくタイ(&)で繋いだレガートにできるかを判定する
-    function begin(f, note, vol, duty, constVol, envKey, rawFreq, period, tieCandidate) {
+    // hwEnvSeq: フレーム毎の「この frame でハードウェア音量エンベロープが打ち直されたか」
+    // ($4003/$4007書込み=長さカウンタロードは実機で減衰レベルを15へ再ロードする)。
+    // 抽出直後はイベント先頭以外に立つことは無いが、EP/EN統合(src/convert/pitch.js
+    // mergeVibratoAndArpeggio)が複数の音符を1音へまとめると1音の中に複数の打ち直しが
+    // 含まれるようになる。1音符=1本の減衰カーブしか持てないため、その場合は
+    // toVolumeFields側で実測レベル列をソフトウェアエンベロープ(@v<n>)として書き出す
+    // (これが無いと、統合された2音目以降のアタックが消えて最初の減衰カーブのまま
+    //  0まで落ちて無音になる。FamicomBox「Game Select」で実測)
+    function begin(f, note, vol, duty, constVol, envKey, rawFreq, period, tieCandidate, sweep, sweepKey, attackNow) {
       cur = { note, vol, duty, constVol, envKey, start: f, end: f, volSeq: [vol], pitchSeq: [period], rawFreq,
-        tieCandidate: !!tieCandidate };
+        tieCandidate: !!tieCandidate, sweep: sweep || null, sweepKey: sweepKey || 0,
+        hwEnvSeq: [!!attackNow] };
     }
+
+    const isPulse1 = chKey === 'p1';
+    // スイープユニットの内部状態(実機apu2a03.js PulseChannelと同じ)。writeLogには
+    // レジスタへの書き込みしか残らないため、スイープが実際に書き換えていく周期は
+    // ここでシミュレートしないと分からない(周期レジスタは止まったままに見える)。
+    let simPeriod = -1, sweepDivider = 0, sweepReload = false;
+    // 長さカウンタ(halt=0のとき自然消音する)。三角波のsilenceAtFrameと同じ考え方
+    let silenceAtFrame = Infinity;
 
     for (let f = 0; f < timeline.length; f++) {
       const t = timeline[f];
@@ -197,6 +251,14 @@
       const audible = constVol ? rawVol > 0 : true; // エンベロープモードは常に有音
       const duty = (r[0] >> 6) & 3;
       const freq = pulseFreq(period);
+      // 長さカウンタ: $4003/$4007書込みでロードされ、halt($4000 bit5)が0の間だけ120Hzで
+      // 減少して0で消音する。halt=1(継続音)なら減らないので自然消音しない。
+      const lengthHalt = !!(r[0] & 0x20);
+      if (t.lengthLoad[chKey]) silenceAtFrame = f + lengthAudibleFrames(LENGTH_TABLE[(r[3] >> 3) & 0x1F]);
+      // haltが立っている間はカウンタが減らない(=期限が来ない)。既に0まで減り切った後に
+      // haltを立てても復活はしないので、期限前のときだけ無期限へ延ばす
+      if (lengthHalt && f < silenceAtFrame) silenceAtFrame = Infinity;
+      const lengthGated = f < silenceAtFrame;
       // スイープユニットによる強制ミュート(実機/emulator apu2a03.js PulseChannel.isMutedと同じ規則):
       // スイープの有効/無効に関わらず、周期<8 または「目標周期(=period+(period>>shift)、
       // negate時は減算)が$7FFを超える」ときチャンネルは無音になる。特に$4001/$4005=$00
@@ -205,32 +267,54 @@
       // Pulse2の低音が全て無音なのに、変換MMLはそれを音符として出力していた=元曲に
       // 無いベースが鳴る)。ここで無音として扱い休符にする(sweepRegisterByteのOFF値$08を
       // 書くコンパイラ側/NSFドライバ側は影響を受けない)
+      //
+      // ★スイープが「有効」(bit7=1かつshift>0)の場合は、上記のミュート判定だけでなく
+      // 実際に周期レジスタがハードウェア側で書き換わっていく(120Hz=1フレーム2回)。
+      // writeLogにはその変化が残らないため、ここで実機と同じ手順(apu2a03.js
+      // PulseChannel.clockHalfFrame)でシミュレートする。音符自体の音程は書き込まれた
+      // 周期(=発音開始時の音程)のままにしておき、動き自体はMMLのs<speed>,<depth>
+      // コマンド(compiler.js sweepRegisterByte)で再現させる。ここでシミュレートするのは
+      // 「いつスイープが自分でミュートするか」を知るためで、これが無いと元曲では
+      // 下降して消えるだけの短い効果音が、変換MMLでは平坦な長い音符になってしまう
+      // (FamicomBox「Game Select」のパルス1: $4001=$83で6フレームに約2オクターブ下降)。
       const sweepReg = r[1];
-      const sweepShift = sweepReg & 7;
-      const sweepChange = period >> sweepShift;
-      const sweepTarget = (sweepReg & 8)
-        ? period - sweepChange - (chKey === 'p1' ? 1 : 0)
-        : period + sweepChange;
-      const sweepMuted = period < 8 || sweepTarget > 0x7FF;
-      const note = (active && audible && freq > 0 && !sweepMuted) ? freqToNote(freq) : null;
+      const sweepEnabled = !!(sweepReg & 0x80) && (sweepReg & 7) > 0;
+      // 周期レジスタへの書き込み(タイマ再ロード)/$4001書込み(dividerリロード)を反映
+      if (simPeriod < 0 || t.periodWrite[chKey]) simPeriod = period;
+      if (t.sweepWrite[chKey]) sweepReload = true;
+      const simMuted = sweepMutes(simPeriod, sweepReg, isPulse1);
+      const note = (active && audible && freq > 0 && lengthGated && !simMuted) ? freqToNote(freq) : null;
       const rawFreq = note !== null ? freq : null;
+      const sweep = sweepEnabled ? sweepToMmlArgs(sweepReg) : null;
+      // スイープの識別キー(有効時のみ。無効時は$08/$7F等どの値でも音に影響しないので0)
+      const sweepKey = sweepEnabled ? sweepReg : 0;
+      // このフレーム分(半フレーム2回)スイープユニットを進める
+      for (let h = 0; h < 2; h++) {
+        if (sweepDivider === 0 && sweepEnabled) {
+          const target = sweepTargetPeriod(simPeriod, sweepReg, isPulse1);
+          if (target <= 0x7FF) simPeriod = target;
+        }
+        if (sweepDivider === 0 || sweepReload) { sweepDivider = (sweepReg >> 4) & 7; sweepReload = false; }
+        else sweepDivider--;
+      }
 
       if (!cur) {
-        begin(f, note, vol, duty, constVol, envKey, rawFreq, period, false);
+        begin(f, note, vol, duty, constVol, envKey, rawFreq, period, false, sweep, sweepKey, t.attack[chKey]);
         continue;
       }
       // アタック書き込みがあれば必ず新イベント
       if (t.attack[chKey]) {
-        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period, false);
+        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period, false, sweep, sweepKey, true);
       } else if (note !== cur.note || duty !== cur.duty || constVol !== cur.constVol ||
-                 (!constVol && envKey !== cur.envKey)) {
-        // 音程だけが変わった(デューティ/固定音量切替/エンベロープ周期は不変)場合のみ
+                 sweepKey !== cur.sweepKey || (!constVol && envKey !== cur.envKey)) {
+        // 音程だけが変わった(デューティ/固定音量切替/エンベロープ周期/スイープは不変)場合のみ
         // タイ候補とする
         const pureNoteChange = note !== cur.note && duty === cur.duty && constVol === cur.constVol &&
-          (constVol || envKey === cur.envKey);
-        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period, pureNoteChange);
+          sweepKey === cur.sweepKey && !sweepEnabled && (constVol || envKey === cur.envKey);
+        flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period, pureNoteChange, sweep, sweepKey, false);
       } else {
         cur.pitchSeq.push(period);
+        cur.hwEnvSeq.push(false); // アタックは必ず上の分岐で新イベントになるためここは常にfalse
         if (constVol) {
           // 固定音量モードのまま音量だけ変化する場合はソフトウェアエンベロープの
           // 一部として同一ノートに積む(区切らない)。
@@ -300,6 +384,7 @@
   function extractNoiseEvents(timeline) {
     const events = [];
     let cur = null;
+    let silenceAtFrame = Infinity; // 長さカウンタ(halt=0)による自然消音フレーム
 
     function flush(end) {
       if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; }
@@ -315,7 +400,12 @@
       const rawVol = r[0] & 0xF;
       const envKey = r[0] & 0x2F;
       const vol = constVol ? rawVol : 15; // 実際の減衰値はtoVolumeFields側でsimulateHwEnvelope
-      const on = active && (constVol ? rawVol > 0 : true);
+      // 長さカウンタ($400F書込みでロード、halt=$400C bit5)。パルス/三角と同じ扱いで、
+      // これを見ないと1〜数フレームだけの打楽器的なノイズが次の書込みまで鳴り続けてしまう
+      const lengthHalt = !!(r[0] & 0x20);
+      if (t.lengthLoad.no) silenceAtFrame = f + lengthAudibleFrames(LENGTH_TABLE[(r[3] >> 3) & 0x1F]);
+      if (lengthHalt && f < silenceAtFrame) silenceAtFrame = Infinity;
+      const on = active && (constVol ? rawVol > 0 : true) && f < silenceAtFrame;
 
       if (!cur) { cur = { periodIdx, mode, vol, on, constVol, envKey, start: f, end: f, volSeq: [vol] }; continue; }
 
@@ -372,7 +462,14 @@
   // バンクスイッチ解決に必要な情報をまとめる。src/emulator/nsfBus.jsのNsfBus
   // コンストラクタと全く同じロジック(パディング・バンク数計算)で作る必要がある
   // (でないとINIT/PLAYと同じ理由でズレる。nsf-bankswitch-padding参照)。
-  function computeBankInfo(nsfBytes, header) {
+  // dpcmRom: 省略可。NSFファイルを持たない呼び出し元(VGM)がDPCMサンプルの実体を
+  // 直接渡すための代替経路。{ bytes, loadAddr } で、bytesはloadAddrから始まるCPU
+  // アドレス空間のイメージ(VGMはデータブロック0x67 type=0xC2でエミュレータのメモリへ
+  // 書き込まれた$C000-$FFFFの16KB)。バンクスイッチの概念が無いので常に単純な線形解決
+  function computeBankInfo(nsfBytes, header, dpcmRom) {
+    if (dpcmRom && dpcmRom.bytes && dpcmRom.bytes.length) {
+      return { useBankswitch: false, program: dpcmRom.bytes, loadAddr: dpcmRom.loadAddr || 0xC000 };
+    }
     const loadAddr = (header && header.loadAddr) || 0x8000;
     const program = nsfBytes ? nsfBytes.slice(128) : new Uint8Array(0); // ヘッダ除去
     const useBankswitch = (header.bankswitch || []).some(b => b !== 0);
@@ -504,7 +601,7 @@
     const evC = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractTriEvents(timeline)));
     const evD = extractNoiseEvents(timeline);
     const dmcTriggers = extractDmcTriggers(timeline, writeLog, header);
-    const bankInfo    = computeBankInfo(nsfBytes, header || {});
+    const bankInfo    = computeBankInfo(nsfBytes, header || {}, options.dpcmRom);
     const dpcmFiles   = extractDpcmFiles(dmcTriggers, bankInfo);
 
     // テンポ推定: 全有音イベントの音長 + チャンネル毎の発音開始間隔(IOI)から。
@@ -592,6 +689,30 @@
         const period = ev.envKey & 0x0F;
         const loop = !!(ev.envKey & 0x20);
         const shape = MML.Convert.simulateHwEnvelope(period, loop);
+        // EP/EN統合(src/convert/pitch.js)で複数の音符が1音にまとまり、その中に
+        // ハードウェアエンベロープの打ち直しが2回以上含まれる場合(元曲が音符ごとに
+        // $4003を書いてアタックし直している場合)は、共有の100番台テーブル(1本の減衰
+        // カーブ)では表現できない。打ち直しを反映した実測レベル列を組んで通常の
+        // ソフトウェアエンベロープ(0番台@v<n>)として登録する。★これが無いと統合された
+        // 2音目以降のアタックが消え、最初の減衰カーブのまま0へ落ちて後半が無音になる
+        // (FamicomBox「Game Select」のパルス1 A3-A#3-A3トリル/パルス2の90フレーム
+        //  アルペジオで実測。統合しない従来の分割出力なら各音符が自前のアタックを持つ)
+        const seq = ev.hwEnvSeq;
+        if (seq && seq.filter(Boolean).length > 1) {
+          const vals = shape.values;
+          const levelAt = (i) => shape.loop == null
+            ? vals[Math.min(i, vals.length - 1)]     // 非ループ: 0到達後は末尾保持
+            : vals[i % vals.length];                 // ループ: 1サイクルを繰り返す
+          const dur = ev.end - ev.start;
+          const levels = [];
+          let since = 0;
+          for (let f = 0; f < dur; f++) {
+            if (f > 0) since = seq[f] ? 0 : since + 1;
+            levels.push(levelAt(since));
+          }
+          const idx = envReg.assign(levels);
+          return idx == null ? { volume: levels[0] } : { envelopeV: idx };
+        }
         const idx = envReg.registerShape(shape, true);
         return { envelopeV: idx };
       }
@@ -628,7 +749,7 @@
     // markSlurTies参照)
     const toCommon = (ev) => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq,
-        tieCandidate: ev.tieCandidate },
+        tieCandidate: ev.tieCandidate, sweep: ev.sweep || null },
       ev.note !== null ? toVolumeFields(ev) : {},
       ev.note !== null ? toPitchFields(ev) : {},
       ev.note !== null ? toNoteEnvFields(ev) : {}
@@ -672,8 +793,8 @@
     // 全チャンネルを小節揃えスコア形式(1回のemitScore呼び出し)で出力する。
     // テンポは先頭に "ABCD... t<bpm>" の形で1回だけ出す。
     const scoreChannels = [
-      { letter: 'A', events: chEventsA, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true, hasPitchMod: true },
-      { letter: 'B', events: chEventsB, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true, hasPitchMod: true },
+      { letter: 'A', events: chEventsA, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true, hasPitchMod: true, hasSweep: true },
+      { letter: 'B', events: chEventsB, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true, hasPitchMod: true, hasSweep: true },
       { letter: 'C', events: chEventsC, hasDetune: true, hasPitchMod: true },
       { letter: 'D', events: chEventsD, hasVolume: true, hasEnvelope: true },
       ...(dpcmLetter ? [{ letter: dpcmLetter, events: dpcmEvents, hasInstrument: true }] : []),

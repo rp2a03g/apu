@@ -548,29 +548,42 @@
       const target = (sweepReg & 8) ? period - change - (isPulse1 ? 1 : 0) : period + change;
       return period < 8 || target > 0x7FF;
     };
+    // ライブAPU状態(apuEnv)があるときは、レジスタ値では分からない実状態を優先する:
+    //  ・period … スイープユニットが書き換えた実周期(レジスタは書いた瞬間の値のまま止まって
+    //     見えるため、これが無いとスイープの上昇/下降が表示に一切出ない)
+    //  ・muted … スイープ強制ミュート(上のpulseSweepMutedと同じ判定を実機側で行った結果)
+    //  ・len … 長さカウンタ。halt=0の短い打楽器的な音は次の書込みを待たず自然消音する
+    // (2026-08-19、FamicomBox「Game Select」。nsf2mml/converter.js側の同名シミュレーションと
+    //  同じ情報で、ロール表示と変換MMLが食い違わないようにする)
+    const pulseChannelState = (e, regPeriod, sweepReg, isPulse1) => {
+      const period = (e && e.period != null) ? e.period : regPeriod;
+      const muted = (e && e.muted !== undefined) ? e.muted : pulseSweepMuted(sweepReg, period, isPulse1);
+      const lenOk = (e && e.len !== undefined) ? e.len > 0 : true;
+      return { freq: period >= 8 ? CPU_CLOCK / (16 * (period + 1)) : 0, muted, lenOk };
+    };
     // APU Pulse 1
     {
       const r = snap[0x4000] || 0;
-      const period = (snap[0x4002] || 0) | (((snap[0x4003] || 0) & 7) << 8);
-      const freq = pulseFreq(snap[0x4002] || 0, snap[0x4003] || 0);
+      const regPeriod = (snap[0x4002] || 0) | (((snap[0x4003] || 0) & 7) << 8);
       const e = apuEnv ? apuEnv.pulse1 : null;
+      const { freq, muted, lenOk } = pulseChannelState(e, regPeriod, snap[0x4001] || 0, true);
       const rv = e ? e.level : (r & 0xF);
       channels.push({ id: 'P1', color: '#ff4466', freq, vol: e ? e.level / 15 : pulseVol(r), rawVol: rv, rawVolMax: 15,
         envMode: e ? e.env : false,
         wave: { t: 'pulse', hi: APU_DUTY[(r >> 6) & 3], nx: 8, ny: 2 },
-        active: !!(status & 1) && pulseActive(r) && freq > 0 && !pulseSweepMuted(snap[0x4001] || 0, period, true) });
+        active: !!(status & 1) && pulseActive(r) && freq > 0 && !muted && lenOk });
     }
     // APU Pulse 2
     {
       const r = snap[0x4004] || 0;
-      const period = (snap[0x4006] || 0) | (((snap[0x4007] || 0) & 7) << 8);
-      const freq = pulseFreq(snap[0x4006] || 0, snap[0x4007] || 0);
+      const regPeriod = (snap[0x4006] || 0) | (((snap[0x4007] || 0) & 7) << 8);
       const e = apuEnv ? apuEnv.pulse2 : null;
+      const { freq, muted, lenOk } = pulseChannelState(e, regPeriod, snap[0x4005] || 0, false);
       const rv = e ? e.level : (r & 0xF);
       channels.push({ id: 'P2', color: '#ff8800', freq, vol: e ? e.level / 15 : pulseVol(r), rawVol: rv, rawVolMax: 15,
         envMode: e ? e.env : false,
         wave: { t: 'pulse', hi: APU_DUTY[(r >> 6) & 3], nx: 8, ny: 2 },
-        active: !!(status & 2) && pulseActive(r) && freq > 0 && !pulseSweepMuted(snap[0x4005] || 0, period, false) });
+        active: !!(status & 2) && pulseActive(r) && freq > 0 && !muted && lenOk });
     }
     // Triangleの「見かけ音量」計算に使う Noise/DMC の現在値を先読みしておく
     // (NOブロック・DMブロックでも同じ値を使い回す)。
@@ -599,7 +612,10 @@
       channels.push({ id: 'TR', color: '#00cc44', freq, vol, rawVol: masked ? Math.round(vol * 15) : null, rawVolMax: 15,
         envMode: masked,
         wave: { t: 'tri', nx: 32, ny: 16 },
-        active: !!(status & 4) && freq > 0 });
+        // 三角波は長さカウンタ/線形カウンタのどちらかが0になると消音する(レジスタ値は
+        // 変わらないためライブ状態が無いと判定できない。nsf2mml側のtriangleAudibleFrames相当)
+        active: !!(status & 4) && freq > 0 &&
+          (!apuEnv || !apuEnv.triangle || (apuEnv.triangle.len > 0 && apuEnv.triangle.linear > 0)) });
     }
     // APU Noise
     {
@@ -613,7 +629,8 @@
       channels.push({ id: 'NO', color: '#888888', freq: 0, vol: e ? e.level / 15 : pulseVol(noiseRegPre), rawVol: rv, rawVolMax: 15,
         envMode: e ? e.env : false,
         wave: { t: 'noise', short: noiseShort, nx: noiseShort ? 93 : 32767, ny: 2 },
-        active: !!(status & 8) && pulseActive(noiseRegPre), noise: true, noiseShort, noiseIndex, noiseFreq });
+        active: !!(status & 8) && pulseActive(noiseRegPre) && (!e || e.len === undefined || e.len > 0),
+        noise: true, noiseShort, noiseIndex, noiseFreq });
     }
     // APU DMC
     {

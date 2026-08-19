@@ -15,6 +15,9 @@
  *                   その場合 envelopeV が無い(フラットな)イベントだけ通常の v<N> を出す
  *   hasFme7Env   … true の場合、fme7EnvShape が設定されているイベントは
  *                   S<N>(+周期が変わればM<N>)を出す。hasVolumeと併用可能
+ *   hasSweep     … true の場合、sweep({speed,depth}|null)が前回と変わったイベントで
+ *                   s<speed>,<depth>(解除は s0)を出す。2A03パルス(A/B)専用の
+ *                   ハードウェアスイープ(src/mml/compiler.js sweepRegisterByte)
  *   hasFme7Noise … true の場合、fme7Noise が前回と変わったイベントで N<N>(ノイズ周期)を出す。
  *                   FME7/PSGはミキサー指定が @<n> (0=ミュート/1=トーン/2=ノイズ/
  *                   3=トーン+ノイズ)なので hasInstrument と併用する
@@ -116,6 +119,12 @@
         }
         if (flags.hasInstrument && ev.instrument !== undefined && ev.instrument !== state.curInst) {
           emit(`@${ev.instrument}`); state.curInst = ev.instrument;
+        }
+        // ハードウェアスイープ(2A03パルスのみ)。D<n>等と同じく未指定イベントはOFF扱いに
+        // して、前回との差分があるときだけ出す(直前の音符のスイープを引きずらないため)
+        if (flags.hasSweep) {
+          const sw = ev.sweep ? `s${ev.sweep.speed},${ev.sweep.depth}` : 's0';
+          if (sw !== state.curSweep) { emit(sw); state.curSweep = sw; }
         }
         // コーラス(デチューン)効果。未指定イベントは0扱い(直前の音符のデチューンを
         // 引きずらないよう、hasDetune指定チャンネルでは毎回0との差分を見て明示的に戻す)
@@ -248,7 +257,7 @@
       curOct: -1, curVol: -1, curInst: -1, curEnvV: -1, curEnvVr: -1,
       curFme7Shape: -1, curFme7Period: -1, curFme7Noise: -1, curVolMode: null, durCarry: 0,
       curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, curPitchEp: null, curPitchEpDelay: 0,
-      curNoteEnv: null, curVibrato: null,
+      curNoteEnv: null, curVibrato: null, curSweep: 's0',
       curPortamentoTarget: null, curPortamentoDuration: 0, curPortamentoDelay: 0,
       lastWasNote: false, hasEmitted: false
     };
@@ -263,6 +272,7 @@
       hasVolume: !!opts.hasVolume, hasInstrument: !!opts.hasInstrument,
       hasEnvelope: !!opts.hasEnvelope, hasFme7Env: !!opts.hasFme7Env, hasVrc7Tone: !!opts.hasVrc7Tone,
       hasFdsMod: !!opts.hasFdsMod, hasFme7Noise: !!opts.hasFme7Noise, hasDetune: !!opts.hasDetune,
+      hasSweep: !!opts.hasSweep,
       hasPitchMod: !!opts.hasPitchMod,
       // hasNoteEnvはhasPitchModと独立(VRC7はfnum/block対数空間のためD/EP/MPは使えないが
       // ENは使える、mergeRapidArpeggio冒頭コメント参照)。opts.hasNoteEnvが省略された場合は
@@ -373,6 +383,7 @@
         hasVolume: !!chan.hasVolume, hasInstrument: !!chan.hasInstrument,
         hasEnvelope: !!chan.hasEnvelope, hasFme7Env: !!chan.hasFme7Env, hasVrc7Tone: !!chan.hasVrc7Tone,
         hasFdsMod: !!chan.hasFdsMod, hasFme7Noise: !!chan.hasFme7Noise, hasDetune: !!chan.hasDetune,
+        hasSweep: !!chan.hasSweep,
         hasPitchMod: !!chan.hasPitchMod,
         // ★2026-08-14修正: emitChannelのflags構築(このファイル冒頭)と同じ
         // hasNoteEnvフォールバックが、emitScore側のこの独立したflags構築には

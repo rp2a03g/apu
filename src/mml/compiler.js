@@ -2699,6 +2699,9 @@
     };
   };
 
+  // s<speed>,<depth> → $4001/$4005の生バイト。NSF書き出し(src/nsf/mckBytecode.js)も
+  // 同じバイトをバイトコードへ埋め込むため、ブラウザ再生と完全に同じ値になるよう共有する
+  Mml.sweepRegisterByte = sweepRegisterByte;
   Mml.CHANNEL_BASE = CHANNEL_BASE;
   Mml.CHIP_CHANNEL_COUNTS = CHIP_CHANNEL_COUNTS;
   Mml.EXPANSION_PRIORITY = EXPANSION_PRIORITY;

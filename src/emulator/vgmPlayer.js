@@ -80,7 +80,11 @@
         else if (fds) fds.writeRegister(addr, dd);
         return addr;
       },
-      ramWrite(start, data) { for (let i = 0; i < data.length && start + i < 0x10000; i++) ram[start + i] = data[i]; },
+      // VGMのデータブロック(0x67 type=0xC2 "NES APU RAM write")。DPCMサンプル本体が
+      // ここでCPUアドレス空間へ流し込まれる。ramLoaded=一度でも流し込まれたか
+      // (DMCを使わない曲と「サンプルが全部0の曲」を区別するため。captureVgmSongAsync参照)
+      ramLoaded: false,
+      ramWrite(start, data) { this.ramLoaded = true; for (let i = 0; i < data.length && start + i < 0x10000; i++) ram[start + i] = data[i]; },
       clock() { apu.clock(); if (fds) fds.clock(); },
       mix(out) { const s = apu.mixSample() + (fds ? fds.mixSample() : 0); out[0] += s * this.gain; out[1] += s * this.gain; },
       applyMute(m) { if (m.apu) Emu.applyMute(apu.mute, m.apu); if (fds && m.expansion && m.expansion.fds) Emu.applyMute(fds.mute, m.expansion.fds); },
@@ -809,6 +813,14 @@
       }
     }
     if (onProgress) onProgress(totalFrames, totalFrames, data);
+    // NES APUのDPCMサンプル本体はVGMのデータブロック(0x67 type=0xC2 "NES APU RAM write")で
+    // エミュレータのメモリ空間へ流し込まれる(NSFのようにファイルの中にROMイメージがある
+    // わけではない)。DMCは$C000-$FFFFしか読まないので、その16KBだけを最終状態で切り出して
+    // 渡す(vgm2mml/converter.js → nsf2mml/converter.jsのoptions.dpcmRom。ブロックの
+    // 読み込みは通常曲の先頭付近で1回きりなので最終スナップショットで足りる)
+    if (data.nes && player.adapterById.nes.ramLoaded) {
+      data.nes.dpcmRom = player.adapterById.nes.ram.slice(0xC000, 0x10000);
+    }
     return data;
   };
 

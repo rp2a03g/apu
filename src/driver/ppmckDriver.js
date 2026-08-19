@@ -339,8 +339,9 @@
   // DPCM使用曲ではサンプル($C000固定)の直下に詰めるため$C000-コードバンク数×4KBを渡す
   // (buildBankedNsfBytes参照)。ドライバは絶対アドレスで自分自身を参照するのでorgで
   // 一意に決まり、窓→ファイル上バンク番号の対応はNSFヘッダのbankswitch初期値で吸収する
-  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg) {
+  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep) {
     driverOrg = driverOrg || 0x9000;
+    usesSweep = !!usesSweep;
     songAddrLo = songAddrLo || channelTypes.map(() => 0x00);
     songAddrHi = songAddrHi || channelTypes.map(() => 0x80);
     envelopes = envelopes || {};
@@ -479,11 +480,15 @@
     // 実際に使う(以前は全曲・全チャンネル無条件に確保・初期化・毎音符APPLY_DETUNEで
     // 加算していた唯一の「拡張音源以外なのにガードされていないコマンド」だった)
     const detuneExtraSlots = usesDetune ? 2 : 0;
+    // s<speed>,<depth>(ハードウェアスイープ、2026-08-20): $4001/$4005へ書く生バイトを
+    // 保持する1byte/ch。2A03パルスA/B以外のチャンネルでは使わないが、,Xインデックスの
+    // 配列として他の状態と同じ形で確保する(D<n>等と同じ扱い)
+    const sweepExtraSlots = usesSweep ? 1 : 0;
     // NOTELEN/RESTLEN(sticky音長、2026-08-16): 直前に読んだ音符/休符の音長バイト。
     // バイトコードの1バイト形式(音長省略)がこの値を再利用する(mckBytecode.js参照)
     const totalPerChanBlocks = 11 + n163ExtraSlots + fme7ExtraSlots + epExtraSlots + mpExtraSlots +
       ptExtraSlots + enExtraSlots + freqOnlyExtraSlots + smoothExtraSlots + psExtraSlots + vrExtraSlots +
-      dutyExtraSlots + detuneExtraSlots + envActExtraSlots;
+      dutyExtraSlots + detuneExtraSlots + sweepExtraSlots + envActExtraSlots;
     // fixedBase以降(JMPLO,JMPHI,FME7専用グローバル,CEILDIVスクラッチ,PLAYIDX)の固定個数。
     // 下のchArrayBase判定に含める(このブロックも$0100-$01FFに掛かってはいけないため)。
     // PS(2026-08-13)使用時は16bit÷8bit版CEILDIV16のスクラッチ(CDA16LO/HI)+
@@ -625,7 +630,11 @@
     // ENVACT/ENVSEL/ENVTICK(@v<n>、2026-08-16 ROM圧縮対応)。envIndexList.length>0の時のみ
     // 実際に使う。ENV_LOOKUP本体・SERVICE_CH側の毎フレーム処理・RD_VOL/RD_NOTE等は
     // 既にenvTableCount>0でガード済み(このZP確保だけが唯一無条件だった)
-    const envActBase = detuneBase + detuneExtraSlots * n;
+    // s<speed>,<depth>(ハードウェアスイープ、2026-08-20)。$4001/$4005へそのまま書く生バイト
+    // (mckBytecode.jsのOP_SWEEP=0xE3が運んでくる。compiler.jsのsweepRegisterByteと同じ値)
+    const sweepBase = detuneBase + detuneExtraSlots * n;
+    const SWEEPREG = sweepBase;
+    const envActBase = sweepBase + sweepExtraSlots * n;
     const ENVACT = envActBase, ENVSEL = envActBase + n, ENVTICK = envActBase + 2 * n;
     // fixedBaseから先はチャンネル数nと無関係な固定個数のグローバルスクラッチ(,Xインデックス
     // なし)。JMPLOはJMP間接絶対(2バイトアドレスなので物理ゼロページ外でも正しく動く)、
@@ -2778,6 +2787,9 @@ ${envTableCount > 0 ? `    STA ${hex(ENVSEL)},X   ; ENVSEL=$FF(@v<n>未選択の
     LDA #$00
 ${usesDetune ? `    STA ${hex(DETUNE_LO)},X ; DETUNE=0(D<n>未指定時の既定値)
     STA ${hex(DETUNE_HI)},X` : ''}
+${usesSweep ? `    LDA #$08
+    STA ${hex(SWEEPREG)},X ; スイープOFF($08=negateのみ。上のINITが$4001/$4005へ書く値と同じ)
+    LDA #$00` : ''}
 ${usesEp ? `    STA ${hex(EPACT)},X    ; EPACT=0(EP<n>未指定時の既定値)
     STA ${hex(EPVALLO)},X  ; ★EPVALLO/HIも0初期化(実機RAMの電源投入時の値は不定なため。
     STA ${hex(EPVALHI)},X  ;  下記RD_PITCHENV/RD_REST側の教訓と同じ理由、2026-08-11)` : ''}
@@ -2948,11 +2960,13 @@ READ_DATA:
 ; 受けてからJMPで飛ぶ2段構成にする
 RD_LOOP:
     JSR READ_BYTE
-; ノート早期判定(2026-08-16 最適化): ノートバイトは0x00-0xE6、コマンドは0xE7-0xFFと
-; 完全分離済み(mckBytecode.jsのNOTE_MAX=0xE6はこの境界を保証するためのクランプ)。
+; ノート早期判定(2026-08-16 最適化): ノートバイトは0x00-0xE2、コマンドは0xE3-0xFFと
+; 完全分離済み(mckBytecode.jsのNOTE_MAX=0xE2はこの境界を保証するためのクランプ。
+; 2026-08-20にOP_SWEEP=0xE3を追加した際、境界を0xE7から0xE3へ下げた。0xE4-0xE6は
+; 引き続き未使用でここをすり抜けるが、末尾のJMP RD_NOTEへ落ちるだけで従来と同じ)。
 ; 最頻のノートを2命令で即ディスパッチする(以前は下のCMP/BEQ連鎖を全てすり抜けてから
 ; 末尾のJMP RD_NOTEに到達しており、機能の多い曲では1ノートあたり約80サイクル掛かっていた)
-    CMP #$E7
+    CMP #$E3
     BCS RD_ISCMD
     JMP RD_NOTE
 RD_ISCMD:
@@ -2985,40 +2999,48 @@ ${usesPitchShift ? '    CMP #$E9\n    BEQ RD_JMP_PITCHSHIFT' : ''}
 ${usesVr ? '    CMP #$EF\n    BEQ RD_JMP_VRENV' : ''}
 ${usesGateOffVr ? '    CMP #$EC\n    BEQ RD_JMP_GATEOFFVR\n    CMP #$E8\n    BEQ RD_JMP_GATEOFFVRSD' : ''}
 ${usesToneState ? '    CMP #$E7\n    BEQ RD_JMP_RELTONE' : ''}
+${usesSweep ? '    CMP #$E3\n    BEQ RD_JMP_SWEEP' : ''}
     JMP RD_NOTE
 
+; ★トランポリンの並びは必ず上のCMP/BEQ連鎖と同じ順序に保つこと(2026-08-20)。
+; 各BEQからその行き先までの距離は「自分より後ろのCMP連鎖の長さ + 自分より前の
+; トランポリンの長さ」で決まるため、同順なら全機能を使う曲でも±95バイト程度に収まり
+; 6502の分岐範囲(±127)に余裕で入る。以前は連鎖の早い方でテストされるVOL/TONEの
+; トランポリンが並びの後ろ半分に置かれており、機能全部盛りの曲(sampleMml.js相当)で
+; offset=126=上限まで1バイトという綱渡り状態だった(OP_SWEEP追加で実際に溢れた)
 RD_JMP_ENDTRACK:
     JMP RD_ENDTRACK
 RD_JMP_BANKJUMP:
     JMP RD_BANKJUMP
+${usesPitchBreak ? 'RD_JMP_PITCHBREAK:\n    JMP RD_PITCHBREAK' : ''}
+RD_JMP_VOL:
+    JMP RD_VOL
+RD_JMP_TONE:
+    JMP RD_TONE
+RD_JMP_REST:
+    JMP RD_REST
+RD_JMP_WAIT:
+    JMP RD_WAIT
+${usesEn ? 'RD_JMP_NOTEENV:\n    JMP RD_NOTEENV' : ''}
+${usesEp ? 'RD_JMP_PITCHENV:\n    JMP RD_PITCHENV' : ''}
+${usesMp ? 'RD_JMP_VIBRATO:\n    JMP RD_VIBRATO' : ''}
+${usesPortamento ? 'RD_JMP_PORTAMENTO:\n    JMP RD_PORTAMENTO' : ''}
+${usesDetune ? 'RD_JMP_DETUNE:\n    JMP RD_DETUNE' : ''}
 ${(!usesEn || !usesMp) ? 'RD_JMP_SKIP1:\n    JMP RD_SKIP1' : ''}
 ${(!usesDetune || !usesEp) ? 'RD_JMP_SKIP2:\n    JMP RD_SKIP2' : ''}
 ${!usesPortamento ? 'RD_JMP_SKIP4:\n    JMP RD_SKIP4' : ''}
-${usesPitchBreak ? 'RD_JMP_PITCHBREAK:\n    JMP RD_PITCHBREAK' : ''}
+${envTableCount > 0 ? 'RD_JMP_VOLENV:\n    JMP RD_VOLENV' : ''}
+${usesFme7 ? 'RD_JMP_FME7NOISE:\n    JMP RD_FME7NOISE\nRD_JMP_FME7HENV:\n    JMP RD_FME7HENV' : ''}
+${vrc7CustomTones.length > 0 ? 'RD_JMP_VRC7TONE:\n    JMP RD_VRC7TONE' : ''}
+${usesFds ? 'RD_JMP_FDSMOD:\n    JMP RD_FDSMOD' : ''}
+${usesN163CustomWaves ? 'RD_JMP_N163RELOC:\n    JMP RD_N163RELOC' : ''}
 ${usesRawWrite ? 'RD_JMP_RAWWRITE:\n    JMP RD_RAWWRITE' : ''}
 ${usesSmooth ? 'RD_JMP_SMOOTH:\n    JMP RD_SMOOTH' : ''}
 ${usesPitchShift ? 'RD_JMP_PITCHSHIFT:\n    JMP RD_PITCHSHIFT' : ''}
 ${usesVr ? 'RD_JMP_VRENV:\n    JMP RD_VRENV' : ''}
 ${usesGateOffVr ? 'RD_JMP_GATEOFFVR:\n    JMP RD_GATEOFFVR\nRD_JMP_GATEOFFVRSD:\n    JMP RD_GATEOFFVRSD' : ''}
 ${usesToneState ? 'RD_JMP_RELTONE:\n    JMP RD_RELTONE' : ''}
-RD_JMP_REST:
-    JMP RD_REST
-RD_JMP_WAIT:
-    JMP RD_WAIT
-RD_JMP_VOL:
-    JMP RD_VOL
-RD_JMP_TONE:
-    JMP RD_TONE
-${usesDetune ? 'RD_JMP_DETUNE:\n    JMP RD_DETUNE' : ''}
-${usesEn ? 'RD_JMP_NOTEENV:\n    JMP RD_NOTEENV' : ''}
-${usesEp ? 'RD_JMP_PITCHENV:\n    JMP RD_PITCHENV' : ''}
-${usesMp ? 'RD_JMP_VIBRATO:\n    JMP RD_VIBRATO' : ''}
-${usesPortamento ? 'RD_JMP_PORTAMENTO:\n    JMP RD_PORTAMENTO' : ''}
-${envTableCount > 0 ? 'RD_JMP_VOLENV:\n    JMP RD_VOLENV' : ''}
-${vrc7CustomTones.length > 0 ? 'RD_JMP_VRC7TONE:\n    JMP RD_VRC7TONE' : ''}
-${usesFds ? 'RD_JMP_FDSMOD:\n    JMP RD_FDSMOD' : ''}
-${usesFme7 ? 'RD_JMP_FME7NOISE:\n    JMP RD_FME7NOISE\nRD_JMP_FME7HENV:\n    JMP RD_FME7HENV' : ''}
-${usesN163CustomWaves ? 'RD_JMP_N163RELOC:\n    JMP RD_N163RELOC' : ''}
+${usesSweep ? 'RD_JMP_SWEEP:\n    JMP RD_SWEEP' : ''}
 
 ; 0xEEマーカーの残り3バイト(新バンク番号,新アドレス下位,新アドレス上位)は
 ; まだ「現在のバンク」の中に物理的に置かれているため、3バイト全て読み終えるまでは
@@ -3157,6 +3179,17 @@ RD_DETUNE:
     STA ${hex(DETUNE_LO)},X
     JSR READ_BYTE
     STA ${hex(DETUNE_HI)},X
+    JMP RD_LOOP` : ''}
+${usesSweep ? `
+; --- s<speed>,<depth>(ハードウェアスイープ、0xE3、2026-08-20、対応AB=2A03パルスのみ):
+; 直後1バイトが$4001/$4005へ書く生バイト(mckBytecode.jsのOP_SWEEP、値はcompiler.jsの
+; sweepRegisterByteが計算済み)。ここでは保持するだけで、実際のレジスタ書き込みは
+; 音符アタック(WFV_T0/T1)が毎回行う。実機のスイープユニットは$4003/$4007書込みでは
+; リロードされない(=音符ごとに$4001/$4005を書き直さないと2音目以降スイープが
+; 掛からない)ため、ブラウザ再生(compiler.jsがセグメント先頭で毎回書く)と同じ挙動にする ---
+RD_SWEEP:
+    JSR READ_BYTE
+    STA ${hex(SWEEPREG)},X
     JMP RD_LOOP` : ''}
 ${usesRawWrite ? `
 ; --- y<adr>,<num>(0xEB、2026-08-13): 直後3バイトが[アドレス下位,アドレス上位,値]。
@@ -4036,7 +4069,9 @@ APPLY_DETUNE_OK:
 WFV_T0:
     JSR LOOKUP_PULSE_PERIOD
     JSR APPLY_DETUNE
-    LDA ${hex(PERLO)}
+${usesSweep ? `    LDA ${hex(SWEEPREG)},X
+    STA $4001       ; s<speed>,<depth>。音符アタックごとに書き直す(RD_SWEEP参照)
+` : ''}    LDA ${hex(PERLO)}
     STA $4002
     LDA ${hex(PERHI)}
 ${usesSmooth ? `    LDY ${hex(SMOOTHACT)},X    ; SM無効(0)なら常に書く、有効なら変化時のみ(WFV0_HI_SKIP)
@@ -4065,7 +4100,9 @@ SIL_T0:
 WFV_T1:
     JSR LOOKUP_PULSE_PERIOD
     JSR APPLY_DETUNE
-    LDA ${hex(PERLO)}
+${usesSweep ? `    LDA ${hex(SWEEPREG)},X
+    STA $4005       ; s<speed>,<depth>(パルスB)
+` : ''}    LDA ${hex(PERLO)}
     STA $4006
     LDA ${hex(PERHI)}
 ${usesSmooth ? `    LDY ${hex(SMOOTHACT)},X
@@ -4477,6 +4514,18 @@ SONG_LOOP_PTR_HI:
       if (usesDetune) break;
     }
 
+    // s<speed>,<depth>(ハードウェアスイープ、2026-08-20、対応AB=2A03パルスのみ)。
+    // D<n>と同じく真偽値のみ判定する(生バイトはmckBytecode.jsがseg.sweepSpeed/Depthから
+    // compiler.jsのsweepRegisterByteで直接作るのでremapテーブルは不要)。
+    // speed=0はs未指定/OFFの既定値なので対象外
+    let usesSweep = false;
+    for (const ch of channelLetters) {
+      for (const seg of (segmentsByChannel[ch] || [])) {
+        if (seg.sweepSpeed) { usesSweep = true; break; }
+      }
+      if (usesSweep) break;
+    }
+
     // SM/SMOF(スムース、2026-08-13、対応ABC=2A03パルスA/B/三角波)。PT/pitchBreakと
     // 同じく曲中で使われているかどうかの真偽値だけを判定する
     let usesSmooth = false;
@@ -4583,7 +4632,7 @@ SONG_LOOP_PTR_HI:
     const dummyBank = channelLetters.map(() => 0);
     const probeSrc = buildFixedSource(channelTypes, dummyBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList,
       undefined, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite,
-      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune);
+      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, undefined, usesSweep);
     const probeAsm = MML.Asm.assemble(probeSrc, { origin: 0x8000 });
     if (probeAsm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: probeAsm.errors, bankCount: 0, unsupportedExpansions };
@@ -4637,7 +4686,7 @@ SONG_LOOP_PTR_HI:
     // orgの違いはゼロページ/絶対の選択や分岐距離に影響しないため)
     const { songBank, songAddrLo, songAddrHi, allDataBanks, songLoop } = layoutAllChannels(reservedBank);
 
-    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg);
+    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep);
     const asm = MML.Asm.assemble(src, { origin: 0x8000 });
     if (asm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: asm.errors, bankCount: 0, unsupportedExpansions };
