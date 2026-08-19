@@ -1441,8 +1441,10 @@ button.secondary {
 .kbd-left--spc .kbds-h-lr, .kbd-left--spc .kbds-lr,
 .kbd-left--hes .kbds-h-lr, .kbd-left--hes .kbds-lr,
 .kbd-left--gbs .kbds-h-lr, .kbd-left--gbs .kbds-lr { display: inline-block; }
-/* L/R は間を詰める(下記kbds-l)ため近接しがちなので、視認性を保つよう少し暗めにする */
-.kbds-lr { font-size: 10px; color: var(--text-secondary); font-family: var(--mono); }
+/* L/R は間を詰める(下記kbds-l)ため近接しがちなので、視認性を保つよう少し暗めにする。
+   ★--text-secondary はダークモードでは #cfcfe0(ほぼ白)になり L/R が浮いて見づらい(ユーザー指摘、
+   2026-08-19)ため、どの配色でも中間グレーになる --text-muted(既定 #6e7781 / ダーク #9999aa)にする */
+.kbds-lr { font-size: 10px; color: var(--text-muted); font-family: var(--mono); }
 /* L(1つ目のkbds-lr)だけ右マージンを削って R との間隔を詰める */
 .kbds-l, .kbds-h-l { margin-right: -3px; }
 
