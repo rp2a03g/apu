@@ -1731,11 +1731,13 @@ button.secondary {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* 中身(見出し+大波形+FM音色データ)が縦に収まる間は中央寄せ、溢れたら上詰め+縦スクロール
+     (素の center + overflow:hidden だと溢れた分が上下とも切れて見出しや音色データが見えなくなる) */
+  justify-content: safe center;
   gap: 8px;
   padding: 8px;
   border-left: 1px solid var(--border);
-  overflow: hidden;
+  overflow: hidden auto;
 }
 .kbd-bigwave-header {
   display: flex;
@@ -1801,25 +1803,43 @@ button.secondary {
 .kbd-bigwave--below .kbd-bigwave-header { justify-content: flex-start; flex-wrap: nowrap; }
 .kbd-bigwave--below .kbd-bigwave-toggle { display: inline-block; }
 .kbd-bigwave--below .kbd-bigwave-title { min-width: 0; overflow: hidden; white-space: nowrap; }
-.kbd-bigwave--below .kbd-bigwave-canvas { align-self: center; }
+/* 本体(.kbd-bigwave-body) = 大波形canvas + FM音色データ(.kbd-bigwave-patch)。既定は縦並び(音色データが下)、
+   .kbd-bigwave--patch-right(ロールが下/別窓で一覧が多段のとき、keyboard.js _applyLayoutClasses)で横並び
+   (音色データが右)。音色データの箱は大波形と同じ大きさ(280x140、または下記の幅いっぱい2:1) */
+.kbd-bigwave-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+.kbd-bigwave--patch-right .kbd-bigwave-body { flex-direction: row; align-items: flex-start; justify-content: center; flex-wrap: wrap; }
+.kbd-bigwave--below .kbd-bigwave-body { align-self: center; max-width: 100%; }
 /* 一覧が1列で大波形がその下にあるとき: 横幅を一覧(左ペイン)に合わせ、縦は2:1の比率のまま
    (canvasのwidth/height属性が2:1なのでheight:autoで比率が保たれる。内部解像度はkeyboard.jsが
-   表示サイズの2倍に追随させる) */
-.kbd-left--wave-below:not(.kbd-left--multicol) .kbd-bigwave-canvas {
+   表示サイズの2倍に追随させる)。音色データの箱も同じ幅・同じ2:1 */
+.kbd-left--wave-below:not(.kbd-left--multicol) .kbd-bigwave-body { align-self: stretch; }
+.kbd-left--wave-below:not(.kbd-left--multicol) .kbd-bigwave-canvas,
+.kbd-left--wave-below:not(.kbd-left--multicol) .kbd-bigwave-patch {
   width: 100%;
   height: auto;
   aspect-ratio: 2 / 1;
   align-self: stretch;
 }
-/* FM音色データ(大波形の下。keyboard.js _renderBigWave/formatFmPatch)。列を揃えた等幅テキスト */
+/* FM音色データ(keyboard.js _renderBigWave/formatFmPatch)。列を揃えた等幅テキスト。大波形と同じ箱の大きさ
+   (280x140、中身が溢れればスクロール) */
 .kbd-bigwave-patch {
+  box-sizing: border-box;
+  width: 280px;
+  height: 140px;
   margin: 0;
   padding: 4px 8px;
   max-width: 100%;
-  overflow-x: auto;
+  overflow: auto;
   font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.35;
+  font-size: 10px;
+  line-height: 1.3;
   color: var(--text-secondary);
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1830,15 +1850,13 @@ button.secondary {
 /* コメント(; 以降)とデータの色分け。MMLエディタのシンタックスハイライトと同じトークン色 */
 .kbd-bigwave-patch .kbd-patch-comment { color: var(--tok-comment); }
 .kbd-bigwave-patch .kbd-patch-data { color: var(--tok-def-tone); font-weight: 600; }
-.kbd-bigwave--below .kbd-bigwave-patch { align-self: stretch; }
 /* 音色データの書式select(FMチャンネル選択時のみ表示) */
 .kbd-bigwave-fmt {
   font-size: 11px;
   padding: 1px 4px;
   max-width: 11em;
 }
-.kbd-bigwave--collapsed .kbd-bigwave-canvas,
-.kbd-bigwave--collapsed .kbd-bigwave-patch { display: none !important; }
+.kbd-bigwave--collapsed .kbd-bigwave-body { display: none !important; }
 /* 大波形が一覧の下にあるとき: 行一覧(.kbd-rows)は中身なりの高さ(足りなければ縮んでスクロール)にして、
    大波形の帯がチャンネル行の直後に続くようにする(左ペインの最下部に張り付かせない) */
 .kbd-left--wave-below .kbd-rows { flex: 0 1 auto; }

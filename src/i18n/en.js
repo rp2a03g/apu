@@ -362,7 +362,7 @@
     '{ch} 音量': '{ch} Volume',
     'もっと選ぶ...': 'More colors...',
     '既定色に戻す': 'Reset to default color',
-    '📋コピー': '📋 Copy',
+    '📋波形': '📋 Wave',
     'この波形データをクリップボードへコピー(他の波形エディタへ貼り付け可)':
       'Copy this waveform to the clipboard (can be pasted into the other wave editors)',
     '✓ コピー完了': '✓ Copied',

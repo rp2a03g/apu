@@ -2076,14 +2076,14 @@
       // 持つ表示(t:'wave')のときだけ有効化する(ノイズ/PCM等は固有波形が無いため不可)
       this._bigCopyBtn = document.createElement('button');
       this._bigCopyBtn.className = 'kbd-bigwave-copy secondary';
-      this._bigCopyBtn.textContent = T('📋コピー');
+      this._bigCopyBtn.textContent = T('📋波形');
       this._bigCopyBtn.title = T('この波形データをクリップボードへコピー(他の波形エディタへ貼り付け可)');
       this._bigCopyBtn.disabled = true;
       this._bigWaveCopyData = null;
       this._bigCopyBtn.addEventListener('click', () => {
         if (!this._bigWaveCopyData || !(MML.UI && MML.UI.WaveClipboard)) return;
         MML.UI.WaveClipboard.copyValues(this._bigWaveCopyData).then((ok) => {
-          const orig = T('📋コピー');
+          const orig = T('📋波形');
           this._bigCopyBtn.textContent = ok ? T('✓ コピー完了') : T('✗ 失敗');
           setTimeout(() => { this._bigCopyBtn.textContent = orig; }, 1000);
         });
@@ -2146,12 +2146,19 @@
         }
       }).observe(this._bigCanvas);
       big.appendChild(bigHeader);
-      big.appendChild(this._bigCanvas);
-      // FM音色データのテキスト(FMチャンネル選択時のみ表示。_renderBigWave が更新)
+      // 本体 = 大波形canvas + FM音色データ(FMチャンネル選択時のみ表示、_renderBigWave が更新)。
+      // 音色データの箱は大波形と同じ大きさ(CSS .kbd-bigwave-patch)で、置き場は
+      //  ・ロールが右(大波形が一覧の左下)      → 大波形の下(従来どおり)
+      //  ・ロールが下で一覧が1列               → 大波形の下
+      //  ・ロールが下/別窓で一覧が幅に応じて多段 → 大波形の右(.kbd-bigwave--patch-right、_applyLayoutClasses)
+      const bigBody = document.createElement('div');
+      bigBody.className = 'kbd-bigwave-body';
+      bigBody.appendChild(this._bigCanvas);
       this._bigPatchEl = document.createElement('pre');
       this._bigPatchEl.className = 'kbd-bigwave-patch';
       this._bigPatchEl.style.display = 'none';
-      big.appendChild(this._bigPatchEl);
+      bigBody.appendChild(this._bigPatchEl);
+      big.appendChild(bigBody);
       this._bigWaveEl = big;
 
       // 一覧と右隣(大波形 or ロールペイン)の間のスプリッター(ロールを右に置く配置でのみ表示。
@@ -2628,6 +2635,8 @@
       if (big) {
         big.classList.toggle('kbd-bigwave--below', below);
         big.classList.toggle('kbd-bigwave--collapsed', below && this._bigWaveCollapsed);
+        // FM音色データの箱: ロールが下/別窓で一覧が多段(幅いっぱい)のときだけ大波形の右、他は下
+        big.classList.toggle('kbd-bigwave--patch-right', placement !== 'right' && L.listColumns === 'auto');
         this._bigToggleEl.textContent = this._bigWaveCollapsed ? '▶' : '▼';
       }
       if (this._mainEl) this._mainEl.classList.toggle('kbd-main--roll-right', placement === 'right');
