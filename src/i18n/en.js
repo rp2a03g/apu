@@ -171,6 +171,8 @@
     '書き出し完了: {name}.wav + {name}_dsp_log.csv<br>DSP書き込み {writes} 件 / KON {kon} 件 (先頭{sec}秒)':
       'Exported: {name}.wav + {name}_dsp_log.csv<br>{writes} DSP writes / {kon} key-ons (first {sec} s)',
     'スキップ': 'Skip',
+    'VRC7の音色プリセット': 'VRC7 instrument preset',
+    '元の音色': 'Original patch',
     'DPCM変換': 'DPCM',
     'E: FDS 波形': 'E: FDS wave',
     'G: VRC6 のこぎり': 'G: VRC6 saw',

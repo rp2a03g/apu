@@ -5015,13 +5015,30 @@
       name.textContent = s.label;
       const sel = document.createElement('select');
       sel.dataset.sourceId = s.id;
+      sel.dataset.role = 'target';
       for (const t of MML.VGM2MML.targetOptionsFor(s.kind)) {
         const o = document.createElement('option');
         o.value = t; o.textContent = vgmTargetLabel(t);
         if (t === (plan[s.id] || 'skip')) o.selected = true;
         sel.appendChild(o);
       }
-      label.appendChild(name); label.appendChild(sel);
+      // 借用先がVRC7のときだけ出す音色プリセット選択(vgm2mml/converter.js vrc7InstOptions)。
+      // OPLLソースは「元の音色」(auto)が既定、他はプリセット1(Buzzy Bell)
+      const inst = document.createElement('select');
+      inst.dataset.sourceId = s.id;
+      inst.dataset.role = 'vrc7inst';
+      inst.title = T('VRC7の音色プリセット');
+      const defInst = MML.VGM2MML.defaultVrc7Inst(s.kind);
+      for (const opt of MML.VGM2MML.vrc7InstOptions(s.kind)) {
+        const o = document.createElement('option');
+        o.value = opt.value; o.textContent = opt.value === 'auto' ? T('元の音色') : opt.label;
+        if (opt.value === defInst) o.selected = true;
+        inst.appendChild(o);
+      }
+      const syncInst = () => { inst.style.display = /^vrc7_/.test(sel.value) ? '' : 'none'; };
+      sel.addEventListener('change', syncInst);
+      syncInst();
+      label.appendChild(name); label.appendChild(sel); label.appendChild(inst);
       vgmChannelMapEl.appendChild(label);
     }
     vgmChannelMapWrapEl.style.display = '';
@@ -5032,11 +5049,18 @@
     const plan = MML.VGM2MML.defaultPlan(loadedVgmHeader);
     const map = {};
     let changed = false;
-    for (const sel of vgmChannelMapEl.querySelectorAll('select')) {
+    for (const sel of vgmChannelMapEl.querySelectorAll('select[data-role="target"]')) {
       map[sel.dataset.sourceId] = sel.value;
       if ((plan[sel.dataset.sourceId] || 'skip') !== sel.value) changed = true;
     }
     return changed ? map : null;
+  }
+  // VRC7音色プリセットの選択(sourceId → 'auto'|'1'..'15')。既定のままなら省略(nullではなく空でよい)
+  function getVgmVrc7Inst() {
+    const map = {};
+    if (!vgmChannelMapEl) return map;
+    for (const sel of vgmChannelMapEl.querySelectorAll('select[data-role="vrc7inst"]')) map[sel.dataset.sourceId] = sel.value;
+    return map;
   }
   document.getElementById('btnVgmChannelMapAuto').addEventListener('click', () => buildVgmChannelMap(loadedVgmHeader));
   // 言語切替時は借用先ラベル(「スキップ」)を作り直す
@@ -5085,7 +5109,7 @@
     const vgmManualBpm = getManualBpm('vgm');
     let result;
     try {
-      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap() });
+      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst() });
     } catch (e) {
       vgmIsRendering = false;
       updateVgmPlayButton();
