@@ -102,6 +102,51 @@
   const OPN2_WRITEBUF_DELAY = 15; // サイクル
   const CYCLES_PER_SAMPLE = 24;   // OPN2サイクル(=マスタークロック/6)
 
+  // 鍵盤表示用: 1周期ぶんのFM波形を「今のパラメータで再合成した概形」として作る
+  // (ym2612.js snapshotYM2612 と同じ簡易合成方針。実機のクロック多重化は模擬しない)。
+  // opOutはym3438.c _fmGenerate と同じ式(logsinrom/exprom、位相10bit、eg_out込みの減衰)。
+  function nukedOpOut(phase10, egOut) {
+    const quarter = (phase10 & 0x100) ? (phase10 ^ 0xff) & 0xff : phase10 & 0xff;
+    let level = logsinrom[quarter] + (egOut << 2);
+    if (level > 0x1fff) level = 0x1fff;
+    let output = ((exprom[(level & 0xff) ^ 0xff] | 0x400) << 2) >> (level >> 8);
+    output = (phase10 & 0x200) ? (~output) + 1 : output;
+    return SIGN_EXTEND(13, output & 0x3fff);
+  }
+  // pgInc[0..3]=op1-4の位相増分、egOut[0..3]=op1-4の現在の減衰(TL込み)、algo=0-7、fb=0-7
+  function nukedSynthWave(pgInc, egOut, algo, fb) {
+    const N = 128;
+    const base = pgInc[3] || 1;
+    const wave = new Array(N).fill(0);
+    let prev0 = 0, prev1 = 0, mx = 1e-6;
+    // モジュレーション量はop間>>1、フィードバックは(直近2出力の和)>>(10-fb)。
+    // ym3438.c _fmPrepare の op===0(feedback)/それ以外(>>1)と同じ規約
+    const m = (x) => x >> 1;
+    for (let k = 0; k < N; k++) {
+      const ph = pgInc.map((inc) => Math.round((k / N) * 1024 * (inc / base)) & 0x3ff);
+      const fbIn = fb ? ((prev0 + prev1) >> (10 - fb)) : 0;
+      const o1 = nukedOpOut((ph[0] + fbIn) & 0x3ff, egOut[0]);
+      prev0 = prev1; prev1 = o1;
+      const op2 = (mod) => nukedOpOut((ph[1] + mod) & 0x3ff, egOut[1]);
+      const op3 = (mod) => nukedOpOut((ph[2] + mod) & 0x3ff, egOut[2]);
+      const op4 = (mod) => nukedOpOut((ph[3] + mod) & 0x3ff, egOut[3]);
+      let v;
+      switch (algo) {
+        case 0: { const o2 = op2(m(o1)); const o3 = op3(m(o2)); v = op4(m(o3)); break; }
+        case 1: { const o2 = op2(0); const o3 = op3(m(o1 + o2)); v = op4(m(o3)); break; }
+        case 2: { const o2 = op2(0); const o3 = op3(m(o2)); v = op4(m(o1 + o3)); break; }
+        case 3: { const o2 = op2(m(o1)); const o3 = op3(0); v = op4(m(o2 + o3)); break; }
+        case 4: { const o2 = op2(m(o1)); const o3 = op3(0); const o4 = op4(m(o3)); v = o2 + o4; break; }
+        case 5: { const o2 = op2(m(o1)); const o3 = op3(m(o1)); const o4 = op4(m(o1)); v = o2 + o3 + o4; break; }
+        case 6: { const o2 = op2(m(o1)); const o3 = op3(0); const o4 = op4(0); v = o2 + o3 + o4; break; }
+        default: { const o2 = op2(0); const o3 = op3(0); const o4 = op4(0); v = o1 + o2 + o3 + o4; break; }
+      }
+      wave[k] = v; if (Math.abs(v) > mx) mx = Math.abs(v);
+    }
+    for (let k = 0; k < N; k++) wave[k] /= mx;
+    return wave;
+  }
+
   class YM2612Nuked {
     /**
      * @param {number} [clock=7670453]
@@ -736,7 +781,12 @@
         const vol = anyOn ? Math.max(0, 1 - minOut / 0x3ff) : 0;
         const tlVol = Math.max(0, 1 - minTl / 127);
         const active = anyOn && vol > 0.02 && freq > 0 && !(ch === 5 && c.dacen);
-        out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol, algo, fb: c.fb[ch], panL: c.pan_l[ch], panR: c.pan_r[ch], waveData: null });
+        let waveData = null;
+        if (active) {
+          const slots4 = [0, 1, 2, 3].map((op) => slotOf(ch, op));
+          waveData = nukedSynthWave(slots4.map((s) => c.pg_inc[s]), slots4.map((s) => c.eg_out[s]), algo, c.fb[ch]);
+        }
+        out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol, algo, fb: c.fb[ch], panL: c.pan_l[ch], panR: c.pan_r[ch], waveData });
       }
       const level = ((c.dacdata >> 1) ^ 0x80) & 0xff;
       out.dac = { enabled: !!c.dacen, level, active: !!c.dacen, vol: c.dacen ? Math.min(1, Math.abs(level - 0x80) / 64) : 0 };

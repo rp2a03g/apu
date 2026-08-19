@@ -338,7 +338,11 @@
     }
     const lvl = B.regs[0x0B];
     const adpcmB = { active: B.playing && !!(B.regs[0x00] & 0x80) && lvl > 0, vol: lvl / 255, rawVol: lvl, rawVolMax: 255,
-      panL: B.panL() ? 1 : 0, panR: B.panR() ? 1 : 0, rate: B.rate(), seq: B.seq, lenSec: B.lengthSeconds(), executing: !!(B.regs[0x00] & 0x80) };
+      panL: B.panL() ? 1 : 0, panR: B.panR() ? 1 : 0, rate: B.rate(), seq: B.seq, lenSec: B.lengthSeconds(), executing: !!(B.regs[0x00] & 0x80),
+      // refRate: ADPCM-Bの再生レート(Delta-N由来)を鍵盤/ロールで疑似音程表示する際の基準(=C4扱い)。
+      // ADPCM-Bには「これが基準ピッチ」というレジスタは無いので、同チップのADPCM-A固定レート
+      // (chip.sampleRate/3)を基準に採用した(keyboard.js側の相対表示。絶対音名は目安)
+      refRate: chip.sampleRate / 3 };
     return { channels: chip.coreCh.map(i => s.channels[i]), adpcmA, adpcmB };
   };
 
