@@ -435,12 +435,18 @@
     return 24 + Math.max(0, Math.min(15, idx)); // idx0=C1 〜 idx15=D#2(ノイズと同じ)
   }
 
-  // YM2610 ADPCM-B(ch.adpcmPitch、NB行)用の疑似音程。Delta-Nは連続値の再生レートで、
-  // 実際の音程は元サンプルの収録内容(1周期あたりの生サンプル数)に依存するため絶対音名を
-  // 保証するレジスタは存在しない。ここでは同チップのADPCM-A固定レート(refRate=chip.sampleRate/3)
-  // を基準ピッチ(C4=MIDI60)とみなし、レートの比を半音数へ変換する(ユーザー要望、2026-08-19)。
-  // ★絶対音名は目安。ピッチベンド等の相対的な上下動は正しく追従する。
-  function adpcmBRateToMidi(rateHz, refRate) {
+  // YM2610 ADPCM-A/B(ch.adpcmPitch、NA/NB行)の音程。
+  //  - ch.adpcmExact: ym2610.js のサンプルピッチ解析(ROM上のサンプルをデコードして基本周期を検出)
+  //    ×再生レートの実周波数が ch.freq に入っているので通常の freqToMidi。
+  //  - それ以外(ADPCM-Bで解析が信頼できない時): Delta-Nは連続値の再生レートだが、実際の音程は
+  //    元サンプルの収録内容に依存し絶対音名を保証するレジスタは無い。同チップのADPCM-A固定レート
+  //    (refRate=chip.sampleRate/3)を基準ピッチ(C4=MIDI60)とみなしレートの比を半音数へ変換する
+  //    (目安。ピッチベンド等の相対的な上下動は正しく追従する)。
+  // 解析の信頼度しきい値(pitchConf、0-1: 窓ごとの検出周期が中央値±3%で一致した割合)
+  const ADPCM_PITCH_CONF = 0.5;
+  function adpcmPitchToMidi(ch) {
+    if (ch.adpcmExact) return ch.freq > 0 ? freqToMidi(ch.freq) : null;
+    const rateHz = ch.freq, refRate = ch.adpcmRefRate;
     if (!rateHz || rateHz <= 0 || !refRate) return null;
     const m = Math.round(60 + 12 * Math.log2(rateHz / refRate));
     return (m >= MIDI_MIN && m <= MIDI_MAX) ? m : null;
@@ -898,24 +904,30 @@
         channels.push({ id: `NF${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
           wave, active: c.active, panL: c.panL, panR: c.panR });
       }
-      // ADPCM-A(6ch): 開始/終了アドレスで別サンプルを選ぶだけで再生レート自体は固定(18518Hz)なので
-      // 音程レジスタが存在しない。DMC/RF5C164と同じ「サンプル」行(音程表示なし)。
-      // 音量=音色レベル、L/Rはパン。
+      // ADPCM-A(6ch)/ADPCM-B(1ch)の音程表示(3段階、adpcmPitchToMidi参照):
+      //  (1) サンプルのピッチ解析(ym2610.js samplePitch: ROM上のサンプルを1回デコードして基本周期を
+      //      検出、×再生レート)が信頼できる(pitchConf>=ADPCM_PITCH_CONF) → 実周波数として通常の
+      //      音名表示(adpcmExact)。ADPCM-Aは「音程ごとに別サンプル」の場合、ADPCM-Bは
+      //      「1サンプルをΔ-Nで音階演奏」の場合にこれで絶対音名が出る。
+      //  (2) ADPCM-Bで解析が信頼できない → Δ-N由来レートを仮基準(refRate=C4)からの相対音程として
+      //      表示(目安、noteに'?')。
+      //  (3) ADPCM-Aで解析が信頼できない(ドラム/ノイズ等) → 音程レジスタが無い(再生レート固定
+      //      18518Hz、開始/終了アドレスで別サンプルを選ぶだけ)ので DMC/RF5C164 と同じ「サンプル」行。
+      // 音量=音色レベル(A)/レベル(B)、L/Rはパン。
       for (let ch = 0; ch < 6; ch++) {
-        const c = s && s.adpcmA ? s.adpcmA[ch] : { vol: 0, rawVol: 0, rawVolMax: 31, active: false, panL: 1, panR: 1, rate: 0 };
+        const c = s && s.adpcmA ? s.adpcmA[ch] : { vol: 0, rawVol: 0, rawVolMax: 31, active: false, panL: 1, panR: 1, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (20 + ch * 12) % 360;
-        channels.push({ id: `NA${ch + 1}`, color: `hsl(${hue},80%,60%)`, freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
-          wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
-          panL: c.panL, panR: c.panR });
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `NA${ch + 1}`, color: `hsl(${hue},80%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
+          wave: { t: 'sample' }, active: !!c.active, panL: c.panL, panR: c.panR,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true, adpcmRate: c.rate }
+                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
       }
       {
-        // ADPCM-B(1ch): Delta-Nで再生レートを連続的に変えられる(=実質のピッチ制御)ので、
-        // ADPCM-Aと違い相対音程を表示できる。ただし絶対音名を保証するレジスタは無いので
-        // adpcmPitch/adpcmRefRate 経由の疑似音程(下のnoteAdpcmB/drawPiano/buildNoteTimeline参照、
-        // 目安であることに注意)として扱う。
-        const c = s && s.adpcmB ? s.adpcmB : { vol: 0, rawVol: 0, rawVolMax: 255, active: false, panL: 1, panR: 1, rate: 0, refRate: 1 };
-        channels.push({ id: 'NB', color: '#cc66ff', freq: c.rate || 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
-          wave: { t: 'sample' }, active: !!c.active, adpcmPitch: true, adpcmRefRate: c.refRate || 1,
+        const c = s && s.adpcmB ? s.adpcmB : { vol: 0, rawVol: 0, rawVolMax: 255, active: false, panL: 1, panR: 1, rate: 0, refRate: 1, pitchHz: 0, pitchConf: 0 };
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: 'NB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: { t: 'sample' }, active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
           panL: c.panL, panR: c.panR });
       }
     }
@@ -1049,7 +1061,7 @@
         let midi, pitchFreq;
         if (!ch.active) { midi = null; pitchFreq = 0; }
         else if (ch.noise) { midi = noisePeriodIndexToMidi(ch.noiseIndex); pitchFreq = ch.noiseFreq; }
-        else if (ch.adpcmPitch) { midi = adpcmBRateToMidi(ch.freq, ch.adpcmRefRate); pitchFreq = ch.freq; }
+        else if (ch.adpcmPitch) { midi = adpcmPitchToMidi(ch); pitchFreq = ch.freq; }
         else if (ch.sample) { midi = dmcRateIndexToMidi(ch.dmcRateIdx); pitchFreq = ch.dmcFreq; }
         else { midi = ch.freq ? freqToMidi(ch.freq) : null; pitchFreq = ch.freq; }
         const volQ = midi !== null ? quantizeVol(ch.vol) : 0;
@@ -1559,10 +1571,10 @@
     for (const ch of channels) {
       if (!ch.active) continue;
       // ノイズch/DPCM(サンプル)chはそれぞれch.noiseIndex/ch.dmcRateIdxを疑似ノートとして使う
-      // (noisePeriodIndexToMidi/dmcRateIndexToMidi冒頭コメント参照)。YM2610 ADPCM-Bは
-      // Delta-N由来の連続レートをadpcmBRateToMidiで(目安の)音程へ変換する。
+      // (noisePeriodIndexToMidi/dmcRateIndexToMidi冒頭コメント参照)。YM2610 ADPCM-A/Bは
+      // 解析済みピッチ(adpcmExact)またはDelta-N由来レートを adpcmPitchToMidi で音程へ。
       const midi = ch.noise ? noisePeriodIndexToMidi(ch.noiseIndex)
-        : ch.adpcmPitch ? adpcmBRateToMidi(ch.freq, ch.adpcmRefRate)
+        : ch.adpcmPitch ? adpcmPitchToMidi(ch)
         : ch.sample ? dmcRateIndexToMidi(ch.dmcRateIdx)
         : (ch.freq ? freqToMidi(ch.freq) : null);
       if (midi !== null && !keyColors[midi]) keyColors[midi] = ch.color;
@@ -3110,12 +3122,19 @@
           // freq: ノイズ周波数 (Hz)。ノイズ周波数の実測値を持たない音源では空欄のまま。
           el.freqEl.textContent = (ch.noiseFreq !== undefined) ? (Math.round(ch.noiseFreq).toLocaleString() + ' Hz') : '';
         } else if (ch.adpcmPitch) {
-          // YM2610 ADPCM-B: note列は目安の音名(adpcmBRateToMidi、絶対音名は保証しない)、
-          // freq列は実際のDelta-N由来の再生レート(Hz、そのまま=元のPCMサンプリングレート)
-          const midi = adpcmBRateToMidi(ch.freq, ch.adpcmRefRate);
-          el.noteEl.textContent = midi !== null ? midiToName(midi) + '?' : '??';
-          el.noteEl.style.color = midi !== null ? '#e6e6ef' : '#555566';
-          el.freqEl.textContent = ch.freq > 0 ? Math.round(ch.freq).toLocaleString() + ' Hz' : '';
+          // YM2610 ADPCM-A/B: adpcmExact(サンプル解析ピッチ×再生レート)なら通常の音名+実周波数、
+          // それ以外(ADPCM-Bの解析不能時)は目安の音名に'?'を付け、freq列にはDelta-N由来の
+          // 再生レート(Hz、=元のPCMサンプリングレート)を出す
+          const midi = adpcmPitchToMidi(ch);
+          if (ch.adpcmExact) {
+            el.noteEl.textContent = midi !== null ? midiToName(midi) : '??';
+            el.noteEl.style.color = '#e6e6ef';
+            el.freqEl.textContent = ch.freq > 0 ? ch.freq.toFixed(1) + ' Hz' : '';
+          } else {
+            el.noteEl.textContent = midi !== null ? midiToName(midi) + '?' : '??';
+            el.noteEl.style.color = midi !== null ? '#e6e6ef' : '#555566';
+            el.freqEl.textContent = ch.freq > 0 ? Math.round(ch.freq).toLocaleString() + ' Hz' : '';
+          }
         } else if (ch.sample) {
           // note: $4010 再生速度インデックス / freq: DPCM再生周波数
           el.noteEl.textContent = String(ch.dmcRateIdx);

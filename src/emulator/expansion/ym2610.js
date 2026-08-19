@@ -38,7 +38,12 @@
  *   ADPCM-B最大≒16320(レベル255、YM2610はrshift=1)。本クラスのFMコアはフルスケール0.2
  *   (高速/Nuked両コアで実測一致)なのでADPCM出力は ×0.2/4096 で同じ比率に合わせる(ADPCM_SCALE)。
  *
+ * ★表示専用のサンプルピッチ解析(samplePitch / decodeAdpcmA・B / detectCps): 音程レジスタの無い
+ *   ADPCM-Aと、Δ-Nしか無いADPCM-Bに絶対音名を出すため、ROM上のサンプルを1回だけデコードして
+ *   基本周期(cps=1入力サンプルあたりの周期数)を求めキャッシュする(詳細は同関数群のコメント)。
+ *
  * 外部I/F: writeReg(port,reg,val) / clock()(マスタークロック毎) / mixSample() / loadRom(kind,...) /
+ * samplePitch(kind,start,end) /
  * mute[fmCh] / vol[fmCh] / muteAdpcm[7](A1-6,B) / volAdpcm[7](書き換えたら syncMuteVol()) /
  * core / coreName / numFm(4 or 6) / flushWrites() / Emu.snapshotYM2610(chip)。
  * Neo Geo: 8000000Hz → 55555Hz。
@@ -95,6 +100,10 @@
         c.curaddress = (this.regs[0x10 + i] | (this.regs[0x18 + i] << 8)) << ADPCMA_ADDR_SHIFT;
         c.curnibble = 0; c.curbyte = 0; c.acc = 0; c.stepIndex = 0;
         c.seq++;
+        // 鳴っているサンプルの範囲(バイト)。ドライバがキーオン後に次の音のレジスタを先書きしても
+        // 表示側(ピッチ解析)が正しいサンプルを見られるようキーオン時点で確定させる
+        c.smpStart = c.curaddress;
+        c.smpEnd = ((this.regs[0x20 + i] | (this.regs[0x28 + i] << 8)) + 1) << ADPCMA_ADDR_SHIFT;
       }
     }
     // FMサンプル3回に1回。
@@ -178,6 +187,8 @@
       this.curaddress = (this.regs[0x02] | (this.regs[0x03] << 8)) << ADPCMB_ADDR_SHIFT;
       this.curnibble = 0; this.curbyte = 0; this.position = 0; this.acc = 0; this.prevAcc = 0; this.step = ADPCMB_STEP_MIN;
       this.seq++;
+      this.smpStart = this.curaddress; // 鳴っているサンプルの範囲(AdpcmA.ch[].smpStart/Endと同じ用途)
+      this.smpEnd = ((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << ADPCMB_ADDR_SHIFT;
     }
     _atEnd() { return this.curaddress === ((((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << ADPCMB_ADDR_SHIFT) - 1); }
     _atLimit() { return this.curaddress === ((((this.regs[0x0C] | (this.regs[0x0D] << 8)) + 1) << ADPCMB_ADDR_SHIFT) - 1); }
@@ -220,6 +231,124 @@
     rate() { return (this.regs[0x09] | (this.regs[0x0A] << 8)) * this.owner.sampleRate / 65536; }
   }
 
+  // ── サンプルのピッチ解析(鍵盤/ロールの音程表示用。再生には一切関与しない) ──
+  // ADPCM-A/B のサンプルは ROM 上の固定データなので、同じ範囲(開始/終了アドレス)は毎回同じ波形。
+  // 初めて見たサンプルを1回だけ丸ごとデコードして基本周期を求め、「1入力サンプルあたりの周期数
+  // cps」(再生レート非依存)としてキャッシュする。表示周波数 = cps × 現在の再生レート
+  // (ADPCM-A: 固定18518Hz、ADPCM-B: Δ-N由来)。ADPCM-Bは「1つのサンプルをΔ-Nで音階演奏」が
+  // 典型なので、Δ-Nの比で正確な音程差 + 解析で正確な基準、の組み合わせで絶対音名まで出せる。
+  // ADPCM-Aは「音程ごとに別サンプル」の場合にサンプルごとの検出値がそのまま絶対音になる。
+  // ドラム/ノイズ系は検出信頼度(conf)が低くなるので、表示側はしきい値で音程なし表示に落とす。
+  //
+  // 検出は McLeod の NSDF(正規化二乗差関数、実体は正規化自己相関)。アタック部(先頭15%)を避けて
+  // 最大 PITCH_FRAMES 個の窓を等間隔に取り、各窓で「最初の主要ピーク」(グローバル最大の90%以上で
+  // 最初に現れる正の山、放物線補間)を周期とする。窓ごとの結果の中央値を採用し、中央値±3%以内で
+  // 一致した窓の割合を conf(0-1)にする(オクターブ誤りや非周期部分があると下がる)。
+  // コスト: 窓1600×ラグ800×6窓≒8M積和/サンプル、ユニークなサンプルごとに1回だけ(数ms〜十数ms)。
+  // PITCH_MIN_LAG: 検出上限周波数=レート/16(ADPCM-A 18518Hz→1157Hz、ADPCM-B 55kHz→3.4kHz)。
+  // 小さくするとハイハット等の高域ノイズが最小ラグ境界に偽ピークを作る(初版は8で 18518/8=2314.8Hz
+  // が実曲のハイハットに出た)。境界(τ==PITCH_MIN_LAG)で最大となる山も真の極大でないので捨てる。
+  const PITCH_WIN = 1600, PITCH_MAX_LAG = 800, PITCH_MIN_LAG = 16, PITCH_FRAMES = 6, PITCH_CLARITY = 0.85;
+
+  function decodeAdpcmA(rom, start, end) {
+    const n = Math.max(0, Math.min(end, rom.length) - start);
+    const out = new Float32Array(n * 2);
+    let acc = 0, stepIndex = 0, k = 0;
+    for (let a = start; a < start + n; a++) {
+      const byte = rom[a];
+      for (const data of [byte >> 4, byte & 0x0F]) {
+        let delta = ((2 * (data & 7) + 1) * ADPCMA_STEPS[stepIndex]) >> 3;
+        if (data & 8) delta = -delta;
+        acc = (acc + delta) & 0xFFF;
+        stepIndex = Math.max(0, Math.min(48, stepIndex + ADPCMA_STEP_INC[data & 7]));
+        let s = acc; if (s & 0x800) s -= 0x1000;
+        out[k++] = s / 2048;
+      }
+    }
+    return out;
+  }
+  function decodeAdpcmB(rom, start, end) {
+    const n = Math.max(0, Math.min(end, rom.length) - start);
+    const out = new Float32Array(n * 2);
+    let acc = 0, step = ADPCMB_STEP_MIN, k = 0;
+    for (let a = start; a < start + n; a++) {
+      const byte = rom[a];
+      for (const data of [byte >> 4, byte & 0x0F]) {
+        let delta = ((2 * (data & 7) + 1) * step) >> 3;
+        if (data & 8) delta = -delta;
+        acc = Math.max(-32768, Math.min(32767, acc + delta));
+        step = Math.max(ADPCMB_STEP_MIN, Math.min(ADPCMB_STEP_MAX, ((step * ADPCMB_STEP_SCALE[data & 7]) / 64) | 0));
+        out[k++] = acc / 32768;
+      }
+    }
+    return out;
+  }
+
+  // 1窓のNSDFから周期(ラグ、小数)と明瞭度(0-1)を返す
+  function nsdfPeriod(pcm, off, W, maxLag) {
+    let mean = 0;
+    for (let i = 0; i < W; i++) mean += pcm[off + i];
+    mean /= W;
+    const x = new Float32Array(W);
+    for (let i = 0; i < W; i++) x[i] = pcm[off + i] - mean;
+    const nsdf = new Float32Array(maxLag + 1);
+    for (let tau = PITCH_MIN_LAG; tau <= maxLag; tau++) {
+      let acf = 0, m = 0;
+      for (let i = 0; i + tau < W; i++) { const a = x[i], b = x[i + tau]; acf += a * b; m += a * a + b * b; }
+      nsdf[tau] = m > 0 ? 2 * acf / m : 0;
+    }
+    // 正の山ごとの最大値を集める(負→正の交差から次の負への交差まで)
+    const peaks = [];
+    let inPos = false, best = -1, bestTau = 0;
+    for (let tau = PITCH_MIN_LAG; tau <= maxLag; tau++) {
+      const v = nsdf[tau];
+      if (v > 0) {
+        if (!inPos) { inPos = true; best = -1; }
+        if (v > best) { best = v; bestTau = tau; }
+      } else if (inPos) {
+        inPos = false;
+        if (bestTau > PITCH_MIN_LAG) peaks.push({ tau: bestTau, v: best }); // 境界の偽ピークは捨てる
+      }
+    }
+    if (inPos && best > 0 && bestTau > PITCH_MIN_LAG && bestTau < maxLag) peaks.push({ tau: bestTau, v: best });
+    if (!peaks.length) return null;
+    let gmax = 0;
+    for (const p of peaks) if (p.v > gmax) gmax = p.v;
+    const p = peaks.find(q => q.v >= gmax * 0.9);
+    // 放物線補間
+    let tau = p.tau;
+    if (tau > PITCH_MIN_LAG && tau < maxLag) {
+      const y0 = nsdf[tau - 1], y1 = nsdf[tau], y2 = nsdf[tau + 1];
+      const d = y0 - 2 * y1 + y2;
+      if (d < 0) tau += 0.5 * (y0 - y2) / d;
+    }
+    return { lag: tau, clarity: p.v };
+  }
+
+  // pcm(Float32Array)から {cps, conf}。conf<0.5 は表示側で「音程なし」扱い
+  function detectCps(pcm) {
+    const len = pcm.length;
+    if (len < 256) return { cps: 0, conf: 0 };
+    const W = Math.min(PITCH_WIN, Math.floor(len * 0.6));
+    const maxLag = Math.min(PITCH_MAX_LAG, Math.floor(W / 2));
+    if (maxLag <= PITCH_MIN_LAG + 2) return { cps: 0, conf: 0 };
+    const first = Math.floor(len * 0.15);
+    const span = len - first - W;
+    const frames = span <= 0 ? 1 : Math.min(PITCH_FRAMES, Math.floor(span / (W / 2)) + 1);
+    const lags = [];
+    for (let f = 0; f < frames; f++) {
+      const off = span <= 0 ? Math.max(0, len - W) : first + Math.floor(span * f / Math.max(1, frames - 1));
+      const r = nsdfPeriod(pcm, off, W, maxLag);
+      if (r && r.clarity >= PITCH_CLARITY) lags.push(r.lag);
+    }
+    if (!lags.length) return { cps: 0, conf: 0 };
+    lags.sort((a, b) => a - b);
+    const med = lags[lags.length >> 1];
+    let agree = 0;
+    for (const l of lags) if (Math.abs(l - med) / med <= 0.03) agree++;
+    return { cps: 1 / med, conf: agree / frames };
+  }
+
   class YM2610Audio {
     /**
      * @param {number} [clock=8000000] - マスタークロック(サンプルレート=clock/144)
@@ -242,6 +371,7 @@
       this.muteAdpcm = new Array(7).fill(false); // 0-5=ADPCM-A ch1-6, 6=ADPCM-B
       this.volAdpcm = new Array(7).fill(1);
       this.romA = null; this.romB = null;
+      this._pitchCache = new Map(); // 'a:start:end' / 'b:start:end' → {cps, conf}(samplePitch)
       this.adpcmA = new AdpcmA(this);
       this.adpcmB = new AdpcmB(this);
       this.cyc = 0; this.cycA = 0;
@@ -272,6 +402,27 @@
       const need = Math.max(romSize >>> 0, start + data.length);
       if (!rom || rom.length < need) { const n = new Uint8Array(need); if (rom) n.set(rom, 0); rom = this[key] = n; }
       rom.set(data, start);
+      this._pitchCache.clear(); // ROMが変わったら解析結果は無効
+    }
+
+    /**
+     * サンプル(ROM上のstart..end-1バイト)の基本周期解析結果(キャッシュ)。表示専用。
+     * @param {'a'|'b'} kind  @returns {{cps:number, conf:number}|null}  cps=1入力サンプルあたりの周期数
+     */
+    samplePitch(kind, start, end) {
+      if (start === undefined || end === undefined || !(end > start)) return null;
+      const key = kind + ':' + start + ':' + end;
+      let r = this._pitchCache.get(key);
+      if (r) return r;
+      const rom = kind === 'b' ? this.romB : this.romA;
+      if (!rom) return null;
+      // 極端に長いサンプル(ADPCM-Bのループ曲データ等)は先頭部分だけ見る(解析コスト上限)
+      const MAX_BYTES = 64 * 1024;
+      const e = Math.min(end, start + MAX_BYTES);
+      const pcm = kind === 'b' ? decodeAdpcmB(rom, start, e) : decodeAdpcmA(rom, start, e);
+      r = detectCps(pcm);
+      this._pitchCache.set(key, r);
+      return r;
     }
 
     // レジスタ書込み(port 0/1)。SSG(port0 0x00-0x0F)は呼び出し側がAY8910Audioへ振り分ける前提
@@ -321,28 +472,39 @@
   }
 
   // 鍵盤表示用スナップショット: FMはYM2612版の6chから実チャンネルを抜き出す(形は同じ)。
-  // adpcmA[6]/adpcmB: {active, vol(0-1), rawVol, rawVolMax, panL, panR, rate}
+  // adpcmA[6]/adpcmB: {active, vol(0-1), rawVol, rawVolMax, panL, panR, rate, pitchHz, pitchConf, ...}
+  //   pitchHz/pitchConf: 鳴っているサンプルのピッチ解析(samplePitch)結果 × 現在の再生レート。
+  //   conf<0.5 は表示側で音程なし扱い(ドラム等)。ADPCM-Aは音程レジスタが無いのでこれが唯一の音程情報、
+  //   ADPCM-Bは refRate ベースの仮基準(下記)より優先して使う。
   Emu.snapshotYM2610 = function (chip) {
     const s = Emu.snapshotYM2612(chip.core);
     const A = chip.adpcmA, B = chip.adpcmB;
     const tl = (A.regs[0x01] & 0x3F);
     const adpcmA = [];
+    const rateA = chip.sampleRate / 3;
     for (let i = 0; i < 6; i++) {
       const il = A.regs[0x08 + i] & 0x1F;
       const att = (il ^ 0x1F) + (tl ^ 0x3F); // 0=最大
       const vol = att >= 63 ? 0 : Math.max(0, 1 - att / 63);
+      const c = A.ch[i];
+      const p = c.seq ? chip.samplePitch('a', c.smpStart, c.smpEnd) : null;
       // seq/lenSec: clock()を回さない先読みキャプチャ(vgmPlayer.js captureVgmSongAsync)が、キーオン通番の
       // 変化とサンプル長から「鳴っている区間」を推定するために使う(ライブ表示は playing で足りる)
-      adpcmA.push({ active: A.ch[i].playing && vol > 0, vol, rawVol: il, rawVolMax: 31, panL: A.panL(i) ? 1 : 0, panR: A.panR(i) ? 1 : 0,
-        rate: chip.sampleRate / 3, seq: A.ch[i].seq, lenSec: A.lengthSeconds(i) });
+      adpcmA.push({ active: c.playing && vol > 0, vol, rawVol: il, rawVolMax: 31, panL: A.panL(i) ? 1 : 0, panR: A.panR(i) ? 1 : 0,
+        rate: rateA, seq: c.seq, lenSec: A.lengthSeconds(i),
+        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0 });
     }
     const lvl = B.regs[0x0B];
+    const rateB = B.rate();
+    const pb = B.seq ? chip.samplePitch('b', B.smpStart, B.smpEnd) : null;
     const adpcmB = { active: B.playing && !!(B.regs[0x00] & 0x80) && lvl > 0, vol: lvl / 255, rawVol: lvl, rawVolMax: 255,
-      panL: B.panL() ? 1 : 0, panR: B.panR() ? 1 : 0, rate: B.rate(), seq: B.seq, lenSec: B.lengthSeconds(), executing: !!(B.regs[0x00] & 0x80),
-      // refRate: ADPCM-Bの再生レート(Delta-N由来)を鍵盤/ロールで疑似音程表示する際の基準(=C4扱い)。
-      // ADPCM-Bには「これが基準ピッチ」というレジスタは無いので、同チップのADPCM-A固定レート
-      // (chip.sampleRate/3)を基準に採用した(keyboard.js側の相対表示。絶対音名は目安)
-      refRate: chip.sampleRate / 3 };
+      panL: B.panL() ? 1 : 0, panR: B.panR() ? 1 : 0, rate: rateB, seq: B.seq, lenSec: B.lengthSeconds(), executing: !!(B.regs[0x00] & 0x80),
+      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0,
+      // refRate: ピッチ解析が信頼できない時のフォールバック用。ADPCM-Bの再生レート(Delta-N由来)を
+      // 鍵盤/ロールで疑似音程表示する際の基準(=C4扱い)。ADPCM-Bには「これが基準ピッチ」という
+      // レジスタは無いので、同チップのADPCM-A固定レート(chip.sampleRate/3)を基準に採用した
+      // (keyboard.js側の相対表示。絶対音名は目安)
+      refRate: rateA };
     return { channels: chip.coreCh.map(i => s.channels[i]), adpcmA, adpcmB };
   };
 
