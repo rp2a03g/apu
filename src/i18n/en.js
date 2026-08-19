@@ -250,6 +250,13 @@
     '(借用先: {assign})': ' (targets: {assign})',
     'チャンネル割当': 'Channel mapping',
     'FMコア': 'FM core',
+    // YM2610 ADPCM 手動ピッチ補正(keyboard.js / main.js onAdpcmCalibrate)
+    'クリックでこのサンプルの基準音を手動補正': 'Click to calibrate this sample\'s base pitch manually',
+    '{ch} のサンプルの基準音を補正します。\n現在: {cur}{manual}\n音名(例: C4)、またはセント補正(例: +20 / -15)を入力。空欄で補正解除。':
+      'Calibrate the base pitch of the sample on {ch}.\nCurrent: {cur}{manual}\nEnter a note name (e.g. C4) or a cent offset (e.g. +20 / -15). Leave empty to clear.',
+    '音程なし': 'no pitch',
+    '  [手動補正中]': '  [manually calibrated]',
+    '入力を解釈できませんでした: {s}': 'Could not parse the input: {s}',
     '高速(近似)': 'Fast (approx.)',
     'Nuked-OPN2(実機準拠)': 'Nuked-OPN2 (accurate)',
     'YM2612(メガドライブ)/YM2610(Neo Geo)のFMエミュレーションコア。切替は次の再生開始から効きます': 'FM emulation core for the YM2612 (Mega Drive) / YM2610 (Neo Geo). Takes effect from the next playback start',

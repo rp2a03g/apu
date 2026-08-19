@@ -914,20 +914,26 @@
       //  (3) ADPCM-Aで解析が信頼できない(ドラム/ノイズ等) → 音程レジスタが無い(再生レート固定
       //      18518Hz、開始/終了アドレスで別サンプルを選ぶだけ)ので DMC/RF5C164 と同じ「サンプル」行。
       // 音量=音色レベル(A)/レベル(B)、L/Rはパン。
+      // 波形アイコン: ym2610.js がデコード済みサンプルから作った128点(音程あり=持続部の1周期、無し=
+      // サンプル全体の概形)。無ければ従来の「サンプル」グリフ。
+      // adpcmSample: 手動キャリブレーション(note列クリック→onAdpcmCalibrate)用のサンプル同定情報。
+      const adpcmWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
       for (let ch = 0; ch < 6; ch++) {
         const c = s && s.adpcmA ? s.adpcmA[ch] : { vol: 0, rawVol: 0, rawVolMax: 31, active: false, panL: 1, panR: 1, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (20 + ch * 12) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `NA${ch + 1}`, color: `hsl(${hue},80%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
-          wave: { t: 'sample' }, active: !!c.active, panL: c.panL, panR: c.panR,
-          ...(exact ? { adpcmPitch: true, adpcmExact: true, adpcmRate: c.rate }
+          wave: adpcmWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
       }
       {
         const c = s && s.adpcmB ? s.adpcmB : { vol: 0, rawVol: 0, rawVolMax: 255, active: false, panL: 1, panR: 1, rate: 0, refRate: 1, pitchHz: 0, pitchConf: 0 };
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: 'NB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
-          wave: { t: 'sample' }, active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
+          wave: adpcmWave(c), active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual,
           panL: c.panL, panR: c.panR });
       }
     }
@@ -1701,6 +1707,7 @@
                                             // chへ切替える一度きりの判定を行う(_consumePendingSelectionReset)
       this._masterVolume = loadMasterVolume(); // localStorage永続化(mml_masterVolume)
       this.onVolumeChange = null;       // () => void  ch別音量バー操作時(getVolumeConfig()参照)
+      this.onAdpcmCalibrate = null;     // (ch) => void  YM2610 ADPCM行のnote列クリック(手動ピッチ補正。ch.adpcmSample={kind,start,end})
       this.onSpcVolumeChange = null;    // (volArray:number[8]) => void
       this._channelVolumes = loadChannelVolumes();   // channelId → 0〜1(localStorage永続化)
       this._spcVoiceVolumes = loadSpcVoiceVolumes(); // [V0..V7] → 0〜1(localStorage永続化)
@@ -2839,6 +2846,20 @@
         // 丸のクリックで色ピッカーを開く(選んだ色は即localStorageへ保存され全表示に反映)
         this._attachColorPicker(row.querySelector('.kbd-dot'), ch.id, ch.color);
 
+        // YM2610 ADPCM行(NA1-6/NB): note列クリックで手動ピッチキャリブレーション(onAdpcmCalibrate、
+        // main.jsがプロンプトを出してチップの setSampleTuning を呼ぶ)。対象は「今その行で鳴っている
+        // サンプル」(ch.adpcmSample)なので、直近の update() の channels(_lastChannels)から引く
+        // (_prevChannelsは行再構築時にしか更新されず古い)
+        if (/^N[AB]\d?$/.test(ch.id)) {
+          const noteElForClick = row.querySelector('.kbd-note');
+          noteElForClick.classList.add('kbd-note--clickable');
+          noteElForClick.title = T('クリックでこのサンプルの基準音を手動補正');
+          noteElForClick.addEventListener('click', () => {
+            const cur = (this._lastChannels || this._prevChannels || []).find(c => c.id === chId);
+            if (cur && cur.adpcmSample && this.onAdpcmCalibrate) this.onAdpcmCalibrate(cur);
+          });
+        }
+
         const lrEls = row.querySelectorAll('.kbds-lr');
 
         group.appendChild(row);
@@ -3042,6 +3063,9 @@
 
       const snap = regSnapshots[fi] || {};
       const channels = extractChannels(snap, this._extraSnaps, fi, this._chips);
+      // 直近の抽出結果(_prevChannelsは行の再構築時にしか更新されない=行構成の基準用。
+      // 「今この行で鳴っているもの」を要する処理(ADPCM手動キャリブレーションのクリック等)はこちらを見る)
+      this._lastChannels = channels;
 
       if (channels.length !== this._rowEls.length) {
         this._prevChannels = channels;
@@ -3128,7 +3152,7 @@
           const midi = adpcmPitchToMidi(ch);
           if (ch.adpcmExact) {
             el.noteEl.textContent = midi !== null ? midiToName(midi) : '??';
-            el.noteEl.style.color = '#e6e6ef';
+            el.noteEl.style.color = ch.adpcmManual ? '#ffcc44' : '#e6e6ef'; // 手動補正済みは黄色
             el.freqEl.textContent = ch.freq > 0 ? ch.freq.toFixed(1) + ' Hz' : '';
           } else {
             el.noteEl.textContent = midi !== null ? midiToName(midi) + '?' : '??';
@@ -3706,4 +3730,5 @@
   }
 
   UI.KeyboardDisplay = KeyboardDisplay;
+  UI.midiToNoteName = midiToName; // main.js(ADPCM手動キャリブレーションのプロンプト表示)用
 })(window);

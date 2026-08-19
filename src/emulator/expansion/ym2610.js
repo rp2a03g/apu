@@ -42,8 +42,11 @@
  *   ADPCM-Aと、Δ-Nしか無いADPCM-Bに絶対音名を出すため、ROM上のサンプルを1回だけデコードして
  *   基本周期(cps=1入力サンプルあたりの周期数)を求めキャッシュする(詳細は同関数群のコメント)。
  *
+ *   手動キャリブレーション(setSampleTuning: cps上書き、localStorage 'ym2610AdpcmTuning' にサンプル内容の
+ *   ハッシュをキーで永続化)と、波形アイコン用の1周期/概形波形(makeSampleWave)もここで作る。
+ *
  * 外部I/F: writeReg(port,reg,val) / clock()(マスタークロック毎) / mixSample() / loadRom(kind,...) /
- * samplePitch(kind,start,end) /
+ * samplePitch(kind,start,end) / setSampleTuning(kind,start,end,cps|null) /
  * mute[fmCh] / vol[fmCh] / muteAdpcm[7](A1-6,B) / volAdpcm[7](書き換えたら syncMuteVol()) /
  * core / coreName / numFm(4 or 6) / flushWrites() / Emu.snapshotYM2610(chip)。
  * Neo Geo: 8000000Hz → 55555Hz。
@@ -349,6 +352,57 @@
     return { cps: 1 / med, conf: agree / frames };
   }
 
+  // サンプル内容のハッシュ(FNV-1a、先頭4KB+長さ)。手動キャリブレーションのキー。ROM上のアドレスは
+  // ゲームごと/ダンプごとに違いうるが、サンプル内容が同じなら同じ音なので内容で同定する。
+  function sampleHash(rom, start, end) {
+    let h = 0x811c9dc5;
+    const n = Math.min(end, rom.length) - start;
+    const lim = Math.min(n, 4096);
+    for (let i = 0; i < lim; i++) { h ^= rom[start + i]; h = Math.imul(h, 0x01000193); }
+    h ^= n; h = Math.imul(h, 0x01000193);
+    return (h >>> 0).toString(16) + '-' + n.toString(16);
+  }
+  const TUNING_KEY = 'ym2610AdpcmTuning'; // localStorage: { [sampleHash]: cps }
+  // 毎回localStorageから読む(サンプル初出時とキャリブレーション時だけなので頻度は低い。
+  // メモリキャッシュにすると開発者ツール等で消した設定が残り続けて紛らわしい)
+  function getTuningMap() {
+    try { return JSON.parse(global.localStorage.getItem(TUNING_KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function saveTuningMap(map) {
+    try { global.localStorage.setItem(TUNING_KEY, JSON.stringify(map)); } catch (e) { /* ignore */ }
+  }
+
+  // 波形アイコン用の128点。cps>0(音程あり)なら持続部(先頭40%位置)から1周期を線形補間で切り出し、
+  // 音程なし(ドラム等)ならサンプル全体を128区間に分け各区間の絶対値最大(符号付き)=概形。
+  // どちらも最大絶対値で正規化(±1)。
+  function makeSampleWave(pcm, cps) {
+    const N = 128;
+    const len = pcm.length;
+    if (len < 8) return null;
+    const out = new Float32Array(N);
+    let mx = 1e-9;
+    if (cps > 0) {
+      const period = 1 / cps;
+      let off = Math.floor(len * 0.4);
+      if (off + period + 1 >= len) off = Math.max(0, len - period - 2);
+      for (let k = 0; k < N; k++) {
+        const pos = off + period * k / N;
+        const i = Math.floor(pos), f = pos - i;
+        const v = pcm[i] * (1 - f) + (pcm[Math.min(len - 1, i + 1)] || 0) * f;
+        out[k] = v; if (Math.abs(v) > mx) mx = Math.abs(v);
+      }
+    } else {
+      for (let k = 0; k < N; k++) {
+        const a = Math.floor(len * k / N), b = Math.max(a + 1, Math.floor(len * (k + 1) / N));
+        let best = 0;
+        for (let i = a; i < b; i++) if (Math.abs(pcm[i]) > Math.abs(best)) best = pcm[i];
+        out[k] = best; if (Math.abs(best) > mx) mx = Math.abs(best);
+      }
+    }
+    for (let k = 0; k < N; k++) out[k] /= mx;
+    return out;
+  }
+
   class YM2610Audio {
     /**
      * @param {number} [clock=8000000] - マスタークロック(サンプルレート=clock/144)
@@ -407,7 +461,10 @@
 
     /**
      * サンプル(ROM上のstart..end-1バイト)の基本周期解析結果(キャッシュ)。表示専用。
-     * @param {'a'|'b'} kind  @returns {{cps:number, conf:number}|null}  cps=1入力サンプルあたりの周期数
+     * @param {'a'|'b'} kind
+     * @returns {{cps:number, conf:number, cpsAuto:number, confAuto:number, manual:boolean, hash:string, wave:Float32Array|null}|null}
+     *   cps=1入力サンプルあたりの周期数(手動補正があればその値、conf=1)。cpsAuto/confAutoは自動検出値。
+     *   wave=波形アイコン用128点(音程あり: 持続部の1周期 / 無し: サンプル全体の概形)
      */
     samplePitch(kind, start, end) {
       if (start === undefined || end === undefined || !(end > start)) return null;
@@ -416,12 +473,35 @@
       if (r) return r;
       const rom = kind === 'b' ? this.romB : this.romA;
       if (!rom) return null;
+      const pcm = this._decodeSample(kind, start, end);
+      const auto = detectCps(pcm);
+      r = { cps: auto.cps, conf: auto.conf, cpsAuto: auto.cps, confAuto: auto.conf, manual: false, hash: sampleHash(rom, start, end), wave: null };
+      // 手動キャリブレーション(localStorage、サンプル内容のハッシュがキーなので同じゲームの他トラックでも効く)
+      const t = getTuningMap()[r.hash];
+      if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
+      r.wave = makeSampleWave(pcm, r.conf >= 0.5 ? r.cps : 0);
+      this._pitchCache.set(key, r);
+      return r;
+    }
+    _decodeSample(kind, start, end) {
+      const rom = kind === 'b' ? this.romB : this.romA;
       // 極端に長いサンプル(ADPCM-Bのループ曲データ等)は先頭部分だけ見る(解析コスト上限)
       const MAX_BYTES = 64 * 1024;
       const e = Math.min(end, start + MAX_BYTES);
-      const pcm = kind === 'b' ? decodeAdpcmB(rom, start, e) : decodeAdpcmA(rom, start, e);
-      r = detectCps(pcm);
-      this._pitchCache.set(key, r);
+      return kind === 'b' ? decodeAdpcmB(rom, start, e) : decodeAdpcmA(rom, start, e);
+    }
+    /**
+     * サンプルの手動ピッチ補正(表示専用)。cps=null で解除。localStorage に永続化し、
+     * 同じ内容のサンプル(ハッシュ一致)なら別トラック/別セッションでも効く。
+     */
+    setSampleTuning(kind, start, end, cps) {
+      const r = this.samplePitch(kind, start, end);
+      if (!r) return null;
+      const map = getTuningMap();
+      if (cps && cps > 0) { map[r.hash] = cps; r.cps = cps; r.conf = 1; r.manual = true; }
+      else { delete map[r.hash]; r.cps = r.cpsAuto; r.conf = r.confAuto; r.manual = false; }
+      saveTuningMap(map);
+      r.wave = makeSampleWave(this._decodeSample(kind, start, end), r.conf >= 0.5 ? r.cps : 0);
       return r;
     }
 
@@ -492,14 +572,18 @@
       // 変化とサンプル長から「鳴っている区間」を推定するために使う(ライブ表示は playing で足りる)
       adpcmA.push({ active: c.playing && vol > 0, vol, rawVol: il, rawVolMax: 31, panL: A.panL(i) ? 1 : 0, panR: A.panR(i) ? 1 : 0,
         rate: rateA, seq: c.seq, lenSec: A.lengthSeconds(i),
-        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0 });
+        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
+        waveData: p ? p.wave : null,
+        sample: c.seq ? { kind: 'a', start: c.smpStart, end: c.smpEnd } : null }); // 手動キャリブレーション用の同定情報
     }
     const lvl = B.regs[0x0B];
     const rateB = B.rate();
     const pb = B.seq ? chip.samplePitch('b', B.smpStart, B.smpEnd) : null;
     const adpcmB = { active: B.playing && !!(B.regs[0x00] & 0x80) && lvl > 0, vol: lvl / 255, rawVol: lvl, rawVolMax: 255,
       panL: B.panL() ? 1 : 0, panR: B.panR() ? 1 : 0, rate: rateB, seq: B.seq, lenSec: B.lengthSeconds(), executing: !!(B.regs[0x00] & 0x80),
-      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0,
+      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0, pitchManual: !!(pb && pb.manual),
+      waveData: pb ? pb.wave : null,
+      sample: B.seq ? { kind: 'b', start: B.smpStart, end: B.smpEnd } : null,
       // refRate: ピッチ解析が信頼できない時のフォールバック用。ADPCM-Bの再生レート(Delta-N由来)を
       // 鍵盤/ロールで疑似音程表示する際の基準(=C4扱い)。ADPCM-Bには「これが基準ピッチ」という
       // レジスタは無いので、同チップのADPCM-A固定レート(chip.sampleRate/3)を基準に採用した

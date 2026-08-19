@@ -154,6 +154,37 @@
     updateMmlRangeHighlight();
   };
   keyboardDisplay.onVolumeChange = () => { scheduleRerenderOnVolume(); };
+  // YM2610 ADPCM行(NA1-6/NB)のnote列クリック → そのサンプルの基準音を手動補正(表示専用)。
+  // 入力: 音名(例 "C4"、"a#3")=そのサンプルの現在の再生レートでその音になるよう基準を設定 /
+  //       "+20"/"-15" = 現在の表示音程からのセント補正 / 空欄 = 補正解除。
+  // ym2610.js setSampleTuning がサンプル内容ハッシュをキーに localStorage へ永続化する。
+  keyboardDisplay.onAdpcmCalibrate = (ch) => {
+    const a = vgmActivePlayer && vgmActivePlayer.player && vgmActivePlayer.player.adapterById.ym2610;
+    if (!a || !ch.adpcmSample) return;
+    const fm = a.fm, smp = ch.adpcmSample;
+    const info = fm.samplePitch(smp.kind, smp.start, smp.end);
+    if (!info) return;
+    const rate = ch.adpcmRate || 0;
+    const curHz = info.cps > 0 ? info.cps * rate : 0;
+    const curName = curHz > 0 ? MML.UI.midiToNoteName(Math.round(69 + 12 * Math.log2(curHz / 440))) : '';
+    const msg = T('{ch} のサンプルの基準音を補正します。\n現在: {cur}{manual}\n音名(例: C4)、またはセント補正(例: +20 / -15)を入力。空欄で補正解除。',
+      { ch: ch.id, cur: curHz > 0 ? `${curName} (${curHz.toFixed(1)} Hz)` : T('音程なし'), manual: info.manual ? T('  [手動補正中]') : '' });
+    const ans = window.prompt(msg, '');
+    if (ans === null) return;
+    const s = ans.trim();
+    let cps = null;
+    if (s === '') cps = null;
+    else if (/^[+-]\d+(\.\d+)?$/.test(s)) { if (info.cps > 0) cps = info.cps * Math.pow(2, parseFloat(s) / 1200); }
+    else {
+      const m = s.match(/^([a-gA-G])([#b]?)(-?\d)$/);
+      if (m && rate > 0) {
+        const base = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 }[m[1].toLowerCase()] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0);
+        const midi = 12 * (parseInt(m[3], 10) + 1) + base;
+        cps = 440 * Math.pow(2, (midi - 69) / 12) / rate;
+      } else { window.alert(T('入力を解釈できませんでした: {s}', { s })); return; }
+    }
+    fm.setSampleTuning(smp.kind, smp.start, smp.end, cps);
+  };
   // 起動時から APU チャンネル行を表示（再生前でも空白にならないよう）
   keyboardDisplay.setSource({ regSnapshots: [{}], totalFrames: 1, samplesPerFrame: 735, sampleRate: 44100 }, []);
 

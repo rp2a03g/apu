@@ -1816,6 +1816,8 @@ button.secondary {
 
 /* 波形アイコンをクリック可能・選択中を強調 */
 .kbd-wave--clickable { cursor: pointer; }
+/* YM2610 ADPCM行のnote列(クリックで手動ピッチ補正) */
+.kbd-note--clickable { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
 .kbd-wave--selected {
   outline: 2px solid var(--accent);
   outline-offset: 0;
