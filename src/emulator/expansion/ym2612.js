@@ -390,6 +390,30 @@
   // 各chの freq(キャリア=op4の周波数、ch3特殊は同様)、vol(キャリアの実EG出力から)、
   // active(キーオン中またはリリース途中で可聴)、algo/fb、waveData(1周期のFM波形)。
   const CARRIER_OPS = [[3], [3], [3], [3], [1, 3], [1, 2, 3], [1, 2, 3], [0, 1, 2, 3]];
+
+  // OPN(YM2612/YM2610)のレジスタ影(regs[port][reg]、高速コア/Nukedコアとも同じ配置)から
+  // ch(0-5)の音色パラメータを取り出す(鍵盤の大波形表示の下に音色データを出すため)。
+  // ops はop1,op2,op3,op4の論理順(レジスタ上のスロット順 +0,+4,+8,+12 は op1,op3,op2,op4)。
+  Emu.decodeOpnPatch = function (regs, ch) {
+    const port = ch < 3 ? 0 : 1, off = ch % 3;
+    const r = regs[port];
+    const ops = [];
+    for (const so of [0, 8, 4, 12]) { // 論理op1..op4 → レジスタスロットオフセット
+      const o = off + so;
+      ops.push({
+        DT: (r[0x30 + o] >> 4) & 7, ML: r[0x30 + o] & 15,
+        TL: r[0x40 + o] & 127,
+        KS: (r[0x50 + o] >> 6) & 3, AR: r[0x50 + o] & 31,
+        AM: (r[0x60 + o] >> 7) & 1, DR: r[0x60 + o] & 31,
+        SR: r[0x70 + o] & 31,
+        SL: (r[0x80 + o] >> 4) & 15, RR: r[0x80 + o] & 15,
+        SE: r[0x90 + o] & 15
+      });
+    }
+    const b0 = r[0xB0 + off], b4 = r[0xB4 + off];
+    return { type: 'opn', AL: b0 & 7, FB: (b0 >> 3) & 7, AMS: (b4 >> 4) & 3, PMS: b4 & 7, L: (b4 >> 7) & 1, R: (b4 >> 6) & 1, ops };
+  };
+
   Emu.snapshotYM2612 = function (chip) {
     if (typeof chip.snapshot === 'function') return chip.snapshot(); // Nuked-OPN2移植版(ym2612Nuked.js)は自前のsnapshot()
     const N = 128;
@@ -443,7 +467,7 @@
         }
         for (let k = 0; k < N; k++) wave[k] /= mx;
       }
-      out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol, algo: ch.algo, fb: ch.fb, panL: ch.left ? 1 : 0, panR: ch.right ? 1 : 0, waveData: wave });
+      out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol, algo: ch.algo, fb: ch.fb, panL: ch.left ? 1 : 0, panR: ch.right ? 1 : 0, waveData: wave, patch: Emu.decodeOpnPatch(chip.regs, i) });
     }
     out.dac = { enabled: chip.dacEnable, level: chip.dac, active: chip.dacEnable, vol: chip.dacEnable ? Math.min(1, Math.abs(chip.dac - 0x80) / 64) : 0 };
     return out;

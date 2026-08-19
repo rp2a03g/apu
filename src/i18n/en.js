@@ -364,6 +364,8 @@
       'Copy this waveform to the clipboard (can be pasted into the other wave editors)',
     '✓ コピー完了': '✓ Copied',
     '✗ 失敗': '✗ Failed',
+    '📋音色': '📋 Patch',
+    'このFM音色データ(下のテキスト)をクリップボードへコピー': 'Copy this FM patch data (the text below) to the clipboard',
     '$4011制御': 'driven by $4011',
     '$4087 bit7=0 (モジュレーション有効)': '$4087 bit7=0 (modulation enabled)',
     'BRR (素 + ガウス補間)': 'BRR (raw + Gaussian)',

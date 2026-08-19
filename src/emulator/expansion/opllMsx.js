@@ -561,7 +561,10 @@
       rawVol: c.car.volume >> 2,
       instrument: c.patchNumber,
       active,
-      waveData: active ? wave : new Array(N).fill(0)
+      waveData: active ? wave : new Array(N).fill(0),
+      // patch: 鍵盤の大波形表示の下に音色データ(@OT形式)を出すためのパラメータ
+      // (現在選択中の音色のスロット {mod,car}。emu2413のpatch構造体そのまま)
+      patch: { type: 'opll', inst: c.patchNumber, mod: mod.patch, car: car.patch }
     };
   }
 

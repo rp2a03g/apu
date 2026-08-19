@@ -786,7 +786,7 @@
           const slots4 = [0, 1, 2, 3].map((op) => slotOf(ch, op));
           waveData = nukedSynthWave(slots4.map((s) => c.pg_inc[s]), slots4.map((s) => c.eg_out[s]), algo, c.fb[ch]);
         }
-        out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol, algo, fb: c.fb[ch], panL: c.pan_l[ch], panR: c.pan_r[ch], waveData });
+        out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol, algo, fb: c.fb[ch], panL: c.pan_l[ch], panR: c.pan_r[ch], waveData, patch: Emu.decodeOpnPatch(c.regs, ch) });
       }
       const level = ((c.dacdata >> 1) ^ 0x80) & 0xff;
       out.dac = { enabled: !!c.dacen, level, active: !!c.dacen, vol: c.dacen ? Math.min(1, Math.abs(level - 0x80) / 64) : 0 };

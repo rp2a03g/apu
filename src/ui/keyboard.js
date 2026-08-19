@@ -710,7 +710,7 @@
           : { t: 'fm', nx: 256, ny: 256 };
         channels.push({ id: `VR${ch+1}`, color: COLS[ch], freq: c.freq, vol: c.vol,
           rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: 15,
-          wave, active: c.active });
+          wave, active: c.active, fmPatch: c.patch || null });
       }
     }
 
@@ -824,7 +824,7 @@
           : { t: 'fm', nx: 256, ny: 256 };
         channels.push({ id: `KF${ch + 1}`, color: MCOLS[ch % MCOLS.length], freq: c.freq, vol: c.vol,
           rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: 15,
-          wave, active: c.active });
+          wave, active: c.active, fmPatch: c.patch || null });
       }
       if (snap2 && snap2.rhythmMode && snap2.rhythm) {
         const RCOLS = { bd: '#ff5555', sd: '#ffaa55', tom: '#aaff55', cym: '#55ffaa', hh: '#55aaff' };
@@ -879,7 +879,7 @@
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
           : { t: 'fm', nx: 256, ny: 256 };
         channels.push({ id: `YM${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          wave, active: c.active, panL: c.panL, panR: c.panR });
+          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
       }
       {
         const d = s ? s.dac : { enabled: false, level: 0, vol: 0, active: false };
@@ -902,7 +902,7 @@
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
           : { t: 'fm', nx: 256, ny: 256 };
         channels.push({ id: `NF${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          wave, active: c.active, panL: c.panL, panR: c.panR });
+          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
       }
       // ADPCM-A(6ch)/ADPCM-B(1ch)の音程表示(3段階、adpcmPitchToMidi参照):
       //  (1) サンプルのピッチ解析(ym2610.js samplePitch: ROM上のサンプルを1回デコードして基本周期を
@@ -1346,6 +1346,57 @@
       case 'sample': return 'PCM (DMC)';
     }
     return wave.t;
+  }
+
+  // ── FM音色データのテキスト化(大波形表示の下に出す・コピー用) ──
+  // 数値行は各値を width 桁に右寄せして "," で繋ぎ、見出し行は同じ幅のラベルを " " で繋ぐので
+  // 列が縦に揃う(ユーザー指定の書式:
+  //   ; TL FB
+  //     20, 0,
+  //   ; AR DR SL RR KL ML AM VB EG KR DT
+  //     15, 4, 2, 4, 0, 1, 0, 0, 1, 0, 0,
+  //     15, 4, 2, 4, 0, 1, 0, 0, 1, 0, 0
+  // )。最終行以外は行末に "," を付ける。
+  function fmtPatchRows(width, groups) {
+    // groups: [{ labels:[...], rows:[[...],[...]] }, ...]
+    const lines = [];
+    for (const g of groups) {
+      lines.push('; ' + g.labels.map(l => String(l).padStart(width)).join(' '));
+      for (const row of g.rows) lines.push('  ' + row.map(v => String(v).padStart(width)).join(',') + ',');
+    }
+    // 最終行の末尾カンマだけ落とす
+    if (lines.length) lines[lines.length - 1] = lines[lines.length - 1].replace(/,$/, '');
+    return lines.join('\n');
+  }
+  // OPLL/VRC7(YM2413系): @OT形式(MGSDRV互換、lexer.js parseVrc7ToneAltDef の逆変換)。
+  //   TL FB / [モジュレータ] AR DR SL RR KL ML AM VB EG KR DT / [キャリア] 同11個。
+  //   AM=振幅変調, VB=ビブラート(PM), EG=持続音(EGタイプ), KR=キーレート(KSR), DT=波形(WF、DC/DM)
+  function formatOpllPatch(p) {
+    const m = p.mod, c = p.car;
+    const opRow = (o) => [o.AR, o.DR, o.SL, o.RR, o.KL, o.ML, o.AM, o.PM, o.EG, o.KR, o.WF];
+    return fmtPatchRows(2, [
+      { labels: ['TL', 'FB'], rows: [[m.TL, m.FB]] },
+      { labels: ['AR', 'DR', 'SL', 'RR', 'KL', 'ML', 'AM', 'VB', 'EG', 'KR', 'DT'], rows: [opRow(m), opRow(c)] }
+    ]);
+  }
+  // OPN(YM2612/YM2610): PMD風の並び(AL FB / op1-4: AR DR SR RR SL TL KS ML DT AM)+末尾に SE(SSG-EG、
+  // PMDには無いがOPN2/OPNBの音色再現に必要なので付ける。0なら未使用)。opは論理順op1..op4
+  // (Emu.decodeOpnPatch 参照)。最後にAMS/PMS/パンを参考コメントで添える。
+  function formatOpnPatch(p) {
+    const opRow = (o) => [o.AR, o.DR, o.SR, o.RR, o.SL, o.TL, o.KS, o.ML, o.DT, o.AM, o.SE];
+    const body = fmtPatchRows(3, [
+      { labels: ['AL', 'FB'], rows: [[p.AL, p.FB]] },
+      { labels: ['AR', 'DR', 'SR', 'RR', 'SL', 'TL', 'KS', 'ML', 'DT', 'AM', 'SE'], rows: p.ops.map(opRow) }
+    ]);
+    return body + `\n; AMS ${p.AMS}  PMS ${p.PMS}  PAN ${p.L ? 'L' : '-'}${p.R ? 'R' : '-'}`;
+  }
+  // ch.fmPatch → 表示テキスト(無ければnull)。先頭行に音源種別と音色番号(OPLL系)を添える
+  function formatFmPatch(ch) {
+    const p = ch && ch.fmPatch;
+    if (!p) return null;
+    if (p.type === 'opll') return `; ${ch.id} @OT (inst ${p.inst}${p.inst === 0 ? ' = user' : ''})\n` + formatOpllPatch(p);
+    if (p.type === 'opn') return `; ${ch.id} OPN (op1..op4)\n` + formatOpnPatch(p);
+    return null;
   }
 
   // ── SPC エンベロープ(env列)アイコン描画 ─────────────────────────
@@ -1934,9 +1985,26 @@
           setTimeout(() => { this._bigCopyBtn.textContent = orig; }, 1000);
         });
       });
+      // FM音色データ(OPLL/VRC7=@OT形式、YM2612/YM2610=OPN形式)のコピー。大波形の下の
+      // テキスト(_bigPatchEl)と同じ内容をクリップボードへ(formatFmPatch参照)
+      this._bigPatchCopyBtn = document.createElement('button');
+      this._bigPatchCopyBtn.className = 'kbd-bigwave-copy secondary';
+      this._bigPatchCopyBtn.textContent = T('📋音色');
+      this._bigPatchCopyBtn.title = T('このFM音色データ(下のテキスト)をクリップボードへコピー');
+      this._bigPatchCopyBtn.style.display = 'none';
+      this._bigPatchText = null;
+      this._bigPatchCopyBtn.addEventListener('click', () => {
+        if (!this._bigPatchText) return;
+        const orig = T('📋音色');
+        navigator.clipboard.writeText(this._bigPatchText).then(
+          () => { this._bigPatchCopyBtn.textContent = T('✓ コピー完了'); },
+          () => { this._bigPatchCopyBtn.textContent = T('✗ 失敗'); }
+        ).finally(() => setTimeout(() => { this._bigPatchCopyBtn.textContent = orig; }, 1000));
+      });
       bigHeader.appendChild(this._bigToggleEl);
       bigHeader.appendChild(this._bigTitleEl);
       bigHeader.appendChild(this._bigCopyBtn);
+      bigHeader.appendChild(this._bigPatchCopyBtn);
       this._bigCanvas = document.createElement('canvas');
       this._bigCanvas.className = 'kbd-bigwave-canvas';
       this._bigCanvas.width = 560;   // 内部解像度(表示の2倍)。表示サイズは.kbd-bigwave-canvasで指定
@@ -1961,6 +2029,11 @@
       }).observe(this._bigCanvas);
       big.appendChild(bigHeader);
       big.appendChild(this._bigCanvas);
+      // FM音色データのテキスト(FMチャンネル選択時のみ表示。_renderBigWave が更新)
+      this._bigPatchEl = document.createElement('pre');
+      this._bigPatchEl.className = 'kbd-bigwave-patch';
+      this._bigPatchEl.style.display = 'none';
+      big.appendChild(this._bigPatchEl);
       this._bigWaveEl = big;
 
       // 一覧と右隣(大波形 or ロールペイン)の間のスプリッター(ロールを右に置く配置でのみ表示。
@@ -2977,6 +3050,18 @@
       // 同じでもチャンネル切替直後にボタン状態が古いままになるのを防ぐため)
       this._bigWaveCopyData = getCopyableWaveSamples(ch.wave);
       if (this._bigCopyBtn) this._bigCopyBtn.disabled = !this._bigWaveCopyData;
+
+      // FM音色データ(OPLL/VRC7/YM2612/YM2610)。波形の見た目(sig)が同じでもパラメータは
+      // 変わりうるので、sig判定より前に毎回テキストを比較して更新する
+      if (this._bigPatchEl) {
+        const text = formatFmPatch(ch);
+        if (text !== this._bigPatchText) {
+          this._bigPatchText = text;
+          this._bigPatchEl.textContent = text || '';
+          this._bigPatchEl.style.display = text ? '' : 'none';
+          this._bigPatchCopyBtn.style.display = text ? '' : 'none';
+        }
+      }
 
       const sig = bigWaveSig(ch.wave);
       if (sig === this._bigWaveSig) return;

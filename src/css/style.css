@@ -1809,7 +1809,25 @@ button.secondary {
   aspect-ratio: 2 / 1;
   align-self: stretch;
 }
-.kbd-bigwave--collapsed .kbd-bigwave-canvas { display: none; }
+/* FM音色データ(大波形の下。keyboard.js _renderBigWave/formatFmPatch)。列を揃えた等幅テキスト */
+.kbd-bigwave-patch {
+  margin: 0;
+  padding: 4px 8px;
+  max-width: 100%;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: pre;
+  user-select: text;
+}
+.kbd-bigwave--below .kbd-bigwave-patch { align-self: stretch; }
+.kbd-bigwave--collapsed .kbd-bigwave-canvas,
+.kbd-bigwave--collapsed .kbd-bigwave-patch { display: none !important; }
 /* 大波形が一覧の下にあるとき: 行一覧(.kbd-rows)は中身なりの高さ(足りなければ縮んでスクロール)にして、
    大波形の帯がチャンネル行の直後に続くようにする(左ペインの最下部に張り付かせない) */
 .kbd-left--wave-below .kbd-rows { flex: 0 1 auto; }

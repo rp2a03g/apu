@@ -437,13 +437,17 @@
         if (Math.abs(co) > mx) mx = Math.abs(co);
       }
       for (let k = 0; k < N; k++) wave[k] /= mx;
+      // patch: 鍵盤の大波形表示の下に音色データ(@OT形式)を出すためのパラメータ
+      // (chip.patches[n] の {mod,car}。emu2413のpatch構造体そのまま: AM/PM/EG/KR/ML/KL/TL/FB/WF/AR/DR/SL/RR)
+      const pt = chip.patches[c.patchNumber];
       out.push({
         freq,
         vol: (15 - (c.car.volume >> 2)) / 15,
         rawVol: c.car.volume >> 2,
         instrument: c.patchNumber,
         active,
-        waveData: active ? wave : new Array(N).fill(0)
+        waveData: active ? wave : new Array(N).fill(0),
+        patch: pt ? { type: 'opll', inst: c.patchNumber, mod: pt.mod, car: pt.car } : null
       });
     }
     return out;
