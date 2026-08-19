@@ -2748,8 +2748,11 @@
       // L/R(ステレオパン)列はHES/GBSのみ意味を持つため、他フォーマットでは非表示にする
       // (表示/パネル幅はCSS側の.kbd-left--hes/.kbd-left--gbsで切り替え、詳細はstyle.css参照)。
       this._leftEl.classList.toggle('kbd-left--hes', this._chips.includes('hes'));
-      // VGMのSN76489もGame Gearステレオ(L/R列)を持つのでGBS用のL/R列表示を流用する
-      this._leftEl.classList.toggle('kbd-left--gbs', this._chips.includes('gbs') || this._chips.includes('sn76489'));
+      // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
+      // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
+      // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'pwm', 'rf5c164', 'rf5c68'];
+      this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
       if (this._chips.includes('vrc7')) this._extraSnaps.vrc7 = buildVrc7Snapshots(wl);
