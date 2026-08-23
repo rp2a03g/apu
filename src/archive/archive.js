@@ -2,20 +2,22 @@
  * アーカイブ/圧縮の汎用リーダー
  * MML.Archive
  *
- * 目的: 「1 zip = 1ゲーム分の複数トラック(+.m3u)」という配布単位(vgmrips等)を、
+ * 目的: 「1アーカイブ = 1ゲーム分の複数トラック(+.m3u)」という配布単位(vgmrips等)を、
  * VGMだけでなく SPC/NSF/KSS/GBS/HES すべてに被せられる「曲リストの器」として扱う。
  * VGM(1ファイル1曲)/SPC(1ファイル1曲)のように単体では曲番号の概念が無い形式でも、
- * zipを開けば他形式と同じ「曲送り」UIが成立する。
+ * アーカイブを開けば他形式と同じ「曲送り」UIが成立する。
  *
- * 外部ライブラリは使わない(INV-1)。解凍はブラウザ標準の DecompressionStream
+ * 外部ライブラリは使わない(INV-1)。zip/gzipの解凍はブラウザ標準の DecompressionStream
  * ('deflate-raw' / 'gzip')。DOM非依存(INV-4)。
+ * 7zは同じ器に載せるが、ヘッダ解析と LZMA/LZMA2 展開が別物なので src/archive/sevenzip.js
+ * (+ src/archive/lzma.js)に分けてある。入口は Archive.parse() / Archive.readEntry()。
  *
  * - zip: セントラルディレクトリを末尾のEOCDから辿る。対応する圧縮方式は
  *   store(0)とdeflate(8)のみ。それ以外は readEntry() が明示エラーを投げる。
  *   zip64・暗号化・マルチパートは非対応(vgmrips/zophar系の配布物には出てこない)。
  * - gzip: 拡張子は当てにせず先頭2バイト(1f 8b)で判別する
  *   (「.vgm」拡張子で中身がgzipのファイルが実在する。ROADMAP.md VGM節参照)。
- * - m3u: zip内に .m3u があればその行順をトラック順にする。無ければファイル名の自然順。
+ * - m3u: アーカイブ内に .m3u があればその行順をトラック順にする。無ければファイル名の自然順。
  *   NEZplug系の拡張行 "file.kss::KSS,song,title,..." は曲番号付きの項目になる
  *   (KSS/NSF等の1ファイル多曲形式でも m3u の曲順で曲送りできる)。
  */
@@ -43,6 +45,23 @@
 
   Archive.isGzip = function (bytes) {
     return bytes && bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  };
+
+  /** 中身の署名からアーカイブ種別を返す('zip' / '7z' / null)。拡張子は当てにしない。 */
+  Archive.detect = function (bytes) {
+    if (Archive.isZip(bytes)) return 'zip';
+    if (Archive.is7z && Archive.is7z(bytes)) return '7z';
+    return null;
+  };
+
+  /**
+   * zip / 7z を種別に応じて解析してエントリ一覧を返す(呼び出し側は種別を意識しなくてよい)。
+   * エントリの形は両者で揃えてあるので buildPlaylist / readEntry はそのまま共用できる。
+   * @returns {Promise<{type:string, entries:Array}>}
+   */
+  Archive.parse = async function (bytes) {
+    if (Archive.is7z && Archive.is7z(bytes)) return Archive.parse7z(bytes); // src/archive/sevenzip.js
+    return { type: 'zip', entries: Archive.parseZip(bytes).entries };
   };
 
   async function decompress(bytes, format) {
@@ -124,11 +143,12 @@
 
   /**
    * エントリの中身を解凍して返す。
-   * @param {Uint8Array} bytes - zip全体
-   * @param {object} entry - parseZip()のエントリ
+   * @param {Uint8Array} bytes - アーカイブ全体
+   * @param {object} entry - parseZip()/parse7z()のエントリ
    * @returns {Promise<Uint8Array>}
    */
   Archive.readEntry = async function (bytes, entry) {
+    if (entry.sevenZip) return Archive.read7zEntry(entry); // 7zはブロック単位(src/archive/sevenzip.js)
     const p = entry.localOffset;
     if (u32(bytes, p) !== SIG_LOCAL) throw new Error('zip: bad local header');
     if (entry.encrypted) throw new Error('zip: encrypted entry');
@@ -161,19 +181,28 @@
   // NEZplug/in_kss 系の拡張m3u行 "file.kss::KSS,song,title,length,loop,fade" を分解する。
   // 通常のm3u(ファイル名のみ)なら {fname} だけ返す。title 内の "\," はエスケープされたカンマ。
   const ESC_COMMA = '⁣'; // 分割時にエスケープ済みカンマを一時退避する印(不可視分離子、m3uには現れない)
+  // 曲番号は10進のほか "$00"(NEZplug/in_kss系の16進表記)でも書かれる。実際に出回っている
+  // KSSの.m3uはほぼ$表記で、これを取りこぼすと全行が同じ曲扱いになり曲リストが1件に潰れる。
+  function parseSongNumber(s) {
+    if (s === undefined || s === null) return null;
+    s = s.trim();
+    let m = /^\$([0-9a-fA-F]+)$/.exec(s) || /^0[xX]([0-9a-fA-F]+)$/.exec(s);
+    if (m) return parseInt(m[1], 16);
+    return /^\d+$/.test(s) ? +s : null;
+  }
   function parseM3uLine(line) {
     const sep = line.indexOf('::');
-    if (sep < 0) return { fname: line.split('|')[0].trim() };
+    if (sep < 0) return { fname: line.split('|')[0].trim(), song: null, title: null };
     const fname = line.slice(0, sep).trim();
     const rest = line.slice(sep + 2);
     const fields = rest.replace(/\\,/g, ESC_COMMA).split(',').map(s => s.split(ESC_COMMA).join(',').trim());
-    const song = fields.length >= 2 && fields[1] !== '' && !isNaN(+fields[1]) ? +fields[1] : null;
+    const song = fields.length >= 2 ? parseSongNumber(fields[1]) : null;
     const title = fields.length >= 3 && fields[2] ? fields[2] : null;
     return { fname, type: fields[0] || null, song, title };
   }
 
   /**
-   * zipエントリ一覧から「曲リスト」を作る。
+   * アーカイブのエントリ一覧から「曲リスト」を作る。
    * @param {Array} entries - parseZip().entries
    * @param {Set<string>|string[]} exts - 対象拡張子(小文字、ドット無し)
    * @param {(entry)=>Promise<Uint8Array>} [readFn] - .m3uを読むための関数(省略時はm3u無視)

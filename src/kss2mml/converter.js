@@ -121,7 +121,7 @@
 
     // SCCの自作波形もN163形式へ変換した上で曲全体で共有登録する(@N<n>としてMML本文の
     // ヘッダに埋め込む)。曲中に音色が切り替わる曲でも全て登録され、@<n>で選択される。
-    const n163WaveReg = new MML.Convert.WaveRegistry('@N', v => [0, ...v]);
+    const n163WaveReg = MML.Convert.n163WaveRegistry();
 
     // SCCはヘッダフラグに現れないため(kssBus.jsが常時バスに配線している都合)、
     // ヘッダだけでは搭載有無を判定できない。実際にSCCレジスタへ音符として意味のある
@@ -194,7 +194,20 @@
       // OPLLはmarkSlurTiesが掛からない(ay.js/scc.jsと違い、これらのチャンネルには
       // タイ分割の仕組み自体が無い)ため、ay/sccのような呼び出し順序の制約は無い。
       MML.Convert.assignNoteEnvelope(opllResult.channels, noteEnvReg);
-      opllResult.channels.forEach((ch, i) => scoreChannels.push(Object.assign({}, ch, { letter: vrc7Letters[i], hasDetune: true, hasNoteEnv: true })));
+      // ★2026-08-22: 抽出側がYM2413本来の9chを返すようになったが、出力先のVRC7は6ch固定
+      // (ppmckの拡張チャンネル文字は固定。[[ppmck-fixed-channel-letters]])。溢れるぶんは
+      // 落とすしかないので、7ch目以降に実音がある曲に限り「実際に鳴っているchだけを
+      // 前詰め」して取りこぼしを減らす。6ch以内に収まる従来の曲は前詰めが起きないため
+      // MML出力は完全に従来通りになる。
+      let opllChannels = opllResult.channels;
+      const cap = vrc7Letters.length;
+      if (opllChannels.length > cap) {
+        const sounding = opllChannels.filter(ch => ch.events.some(ev => ev.note !== null));
+        const overflow = opllChannels.slice(cap).some(ch => ch.events.some(ev => ev.note !== null));
+        opllChannels = (overflow && sounding.length <= cap) ? sounding : opllChannels.slice(0, cap);
+        if (opllChannels.length > cap) opllChannels = opllChannels.slice(0, cap);
+      }
+      opllChannels.forEach((ch, i) => scoreChannels.push(Object.assign({}, ch, { letter: vrc7Letters[i], hasDetune: true, hasNoteEnv: true })));
     }
 
     // 音長に加え、チャンネル毎の発音開始間隔(IOI)も検出材料にする

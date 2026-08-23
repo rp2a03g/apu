@@ -2,13 +2,20 @@
  * FMPAC(MSX-MUSIC) 拡張音源エミュレータ (OPLL / YM2413)
  * MML.Emu.OPLLAudio
  *
+ * ★2026-08-22: 既定の再生コアは opllNuked.js (Nuked-OPLL移植) に移行した。このファイルの
+ * 実装は MML.Emu.OPLL_CORE = 'emu2413' を指定したときのA/B比較用として残してある。
+ *
  * src/emulator/expansion/vrc7.js のOPLLコア(Mitsutaka Okazaki emu2413移植)をそのまま
  * 流用し、バス面のみMSX実機のFMPAC I/Oポート(0x7C=アドレス, 0x7D=データ)に置き換えている。
  * VRC7とFMPACはハードウェア的に同一のYM2413(OPLL)であるため、DSPコアは変更していない。
- * 出力49716Hz (Z80クロック/36)。
+ * 出力49716Hz。clock()はOPLLマスタクロック(=MSXでは3.579545MHz、Z80と同一)基準で
+ * 呼ばれるため分周は72(3579545/72=49716)。★VRC7(vrc7.js)はNES CPUクロック1.79MHz
+ * =マスタの半分を渡される設計なので分周36。両者で定数が違うのは正しい。
  *
- * リズム音色ROM値・ノイズ合成(short_noise)アルゴリズムは digital-sound-antiques/emu2413
+ * ノイズ合成(short_noise)アルゴリズムは digital-sound-antiques/emu2413
  * (MIT License, Copyright (c) 2001-2019 Mitsutaka Okazaki) の emu2413.c を参照して移植。
+ * 音色ROM(メロディ15音色・リズム3音色)は nukeykt/Nuked-OPLL (GPLv2) の patch_ym2413
+ * = YM2413実チップの die shot 読み出し値。本リポジトリもGPLv2。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -18,7 +25,12 @@
   // BD(ch6両slot)/HH+SD(ch7 mod+car)/TOM+CYM(ch8 mod+car)に化ける。
   // VRC7(6ch専用・リズムモード無し)から移植したコアをここで9ch+リズム対応に拡張している。
   const NUM_CH = 9;
-  const CYCLES_PER_SAMPLE = 36;
+  // ミュート/音量の添字: 0-8=メロディch, 9-13=リズム(BD,SD,TOM,CYM,HH)。
+  // SDとHH(TOMとCYM)は実機では同じchだが鍵盤には別行で出るため、実ch単位の添字だと
+  // getMuteConfig()の書き込み順で片方が無視される(opllNuked.js RHYTHM_CH のコメント参照)。
+  const MUTE_BD = 9, MUTE_SD = 10, MUTE_TOM = 11, MUTE_CYM = 12, MUTE_HH = 13;
+  const NUM_MUTE_SLOTS = 14;
+  const CYCLES_PER_SAMPLE = 72; // ★2026-08-22: 36は誤り(1オクターブ高かった)。ファイル冒頭コメント参照
   const SAMPLE_RATE = 49716;
 
   const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS; // emu2413本家に合わせて9→10bit化
@@ -39,30 +51,30 @@
   const SETTLE = 0, ATTACK = 1, DECAY = 2, SUSHOLD = 3, SUSTINE = 4, RELEASE = 5, FINISH = 6;
 
   // 音色ROM(YM2413本来の内蔵15音色)。
-  // ★2026-08-02: 以前はVirtuaNESのvrc7tone.h(=VRC7チップ固有ROM)を「FMPAC/YM2413標準音色も
-  // 同一ROM内容」という誤った前提で流用していたが、VRC7(Konami DS1001の独自ROM)とYM2413本来の
-  // ROMは別物と判明。最終的にemu2413本家(digital-sound-antiques、MIT License)のROMデータ
-  // 2413tone.h(VirtuaNES同梱版、ユーザー提供)に差し替え。このアプリのOPLLコア自体
-  // (このファイル冒頭コメント・[[opll-rhythm-emu2413-port]]参照)も元々emu2413移植なので
-  // 音色ROMもemu2413本家準拠に揃うのが筋が良い。VRC7側(vrc7.js)のvrc7tone.hテーブルは
-  // VRC7としては引き続き正しいのでそのまま。
+  // ★2026-08-22: emu2413本家(2413tone.h)の値から、nukeykt/Nuked-OPLL の patch_ym2413 へ
+  // 差し替え。emu2413のROM値は本家Wikiが "Estimated ROM Instruments" と明記している通り
+  // YM2413B実機録音からの耳コピ推定だが、Nuked-OPLL のものは decap/die shot
+  // (siliconpr0n: digshadow, John McMaster)から読み出したROM内容そのもの。
+  // 同じ経緯で vrc7.js の VRC7(DS1001)側テーブルも patch_ds1001 へ差し替え済み。
+  // ★2026-08-02(履歴): それ以前はVirtuaNESのvrc7tone.h(=VRC7固有ROM)を「FMPAC/YM2413も
+  // 同一ROM」という誤った前提で流用していた。VRC7とYM2413のROMは別物。
   const OPLL_INST = [
     [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // 0: ユーザー音色枠(@0所定値なし)
-    [0x61,0x61,0x1e,0x17,0xf0,0x7f,0x07,0x17], // 1: Violin
-    [0x13,0x41,0x0f,0x0d,0xce,0xd2,0x43,0x13], // 2: Guitar
-    [0x03,0x01,0x99,0x04,0xff,0xc3,0x03,0x73], // 3: Piano
-    [0x21,0x61,0x1b,0x07,0xaf,0x63,0x40,0x28], // 4: Flute
-    [0x22,0x21,0x1e,0x06,0xf0,0x76,0x08,0x28], // 5: Clarinet
-    [0x31,0x22,0x16,0x05,0x90,0x71,0x00,0x18], // 6: Oboe
-    [0x21,0x61,0x1d,0x07,0x82,0x81,0x10,0x17], // 7: Trumpet
-    [0x23,0x21,0x2d,0x16,0xc0,0x70,0x07,0x07], // 8: Organ
-    [0x61,0x21,0x1b,0x06,0x64,0x65,0x18,0x18], // 9: Horn
-    [0x61,0x61,0x0c,0x18,0x85,0xa0,0x79,0x07], // 10: Synthesizer
-    [0x23,0x21,0x87,0x11,0xf0,0xa4,0x00,0xf7], // 11: Harpsichord
-    [0x97,0xe1,0x28,0x07,0xff,0xf3,0x02,0xf8], // 12: Vibraphone
-    [0x61,0x10,0x0c,0x05,0xf2,0xc4,0x40,0xc8], // 13: Synth Bass
-    [0x01,0x01,0x56,0x03,0xb4,0xb2,0x23,0x58], // 14: Acoustic Bass
-    [0x61,0x41,0x89,0x03,0xf1,0xf4,0xf0,0x13]  // 15: Electric Guitar
+    [0x71,0x61,0x1e,0x17,0xd0,0x78,0x00,0x17], // 1: Violin
+    [0x13,0x41,0x1a,0x0d,0xd8,0xf7,0x23,0x13], // 2: Guitar
+    [0x13,0x01,0x99,0x00,0xf2,0xc4,0x11,0x23], // 3: Piano
+    [0x31,0x61,0x0e,0x07,0xa8,0x64,0x70,0x27], // 4: Flute
+    [0x32,0x21,0x1e,0x06,0xe0,0x76,0x00,0x28], // 5: Clarinet
+    [0x31,0x22,0x16,0x05,0xe0,0x71,0x00,0x18], // 6: Oboe
+    [0x21,0x61,0x1d,0x07,0x82,0x81,0x10,0x07], // 7: Trumpet
+    [0x23,0x21,0x2d,0x14,0xa2,0x72,0x00,0x07], // 8: Organ
+    [0x61,0x61,0x1b,0x06,0x64,0x65,0x10,0x17], // 9: Horn
+    [0x41,0x61,0x0b,0x18,0x85,0xf7,0x71,0x07], // 10: Synthesizer
+    [0x13,0x01,0x83,0x11,0xfa,0xe4,0x10,0x04], // 11: Harpsichord
+    [0x17,0xc1,0x24,0x07,0xf8,0xf8,0x22,0x12], // 12: Vibraphone
+    [0x61,0x50,0x0c,0x05,0xc2,0xf5,0x20,0x42], // 13: Synth Bass
+    [0x01,0x01,0x55,0x03,0xc9,0x95,0x03,0x02], // 14: Acoustic Bass
+    [0x61,0x41,0x89,0x03,0xf1,0xe4,0x40,0x13]  // 15: Electric Guitar
   ];
 
   function dump2patch(d) {
@@ -77,12 +89,13 @@
   }
   const PATCH = OPLL_INST.map(dump2patch);
 
-  // リズム音色。★2026-08-02: メロディ音色と同じくemu2413本家(VirtuaNES同梱2413tone.h、
-  // ユーザー提供)の値に差し替え。従来値は「VRC7内蔵ROMと同一」という誤った前提のまま
-  // だった(メロディ音色と同じ間違い)。
-  const RHYTHM_PATCH_BD  = dump2patch([0x04, 0x21, 0x28, 0x00, 0xdf, 0xf8, 0xff, 0xf8]);
-  const RHYTHM_PATCH_HHSD = dump2patch([0x23, 0x22, 0x00, 0x00, 0xd8, 0xf8, 0xf8, 0xf8]);
-  const RHYTHM_PATCH_TOMCYM = dump2patch([0x25, 0x18, 0x00, 0x00, 0xf8, 0xda, 0xf8, 0x55]);
+  // リズム音色。★2026-08-22: メロディ音色と同じく Nuked-OPLL の patch_ym2413 由来の
+  // die shot 読み出し値へ差し替え。Nuked側はドラムをmod半分(drum_0..2)とcar半分
+  // (drum_3..5)に分けて持つので、$00-$07 の8バイト形式へは対になる2エントリをORして復元
+  // (BDの結果 01 01 18 0F DF F8 6A 6D は NESdev Wiki "VRC7 audio" のドラム表とも一致)。
+  const RHYTHM_PATCH_BD  = dump2patch([0x01, 0x01, 0x18, 0x0f, 0xdf, 0xf8, 0x6a, 0x6d]);
+  const RHYTHM_PATCH_HHSD = dump2patch([0x01, 0x01, 0x00, 0x00, 0xc8, 0xd8, 0xa7, 0x48]);
+  const RHYTHM_PATCH_TOMCYM = dump2patch([0x05, 0x01, 0x00, 0x00, 0xf8, 0xaa, 0x59, 0x55]);
 
   function Min(a, b) { return a < b ? a : b; }
 
@@ -329,7 +342,15 @@
   }
 
   class OPLLAudio {
-    constructor() { this._init(); this.mute = new Array(NUM_CH).fill(false); this.vol = new Array(NUM_CH).fill(1); }
+    constructor(opts) {
+      // ★2026-08-22: 既定ではNuked-OPLLコア(opllNuked.js)へ委譲する。
+      // MML.Emu.OPLL_CORE = 'emu2413' を指定するとこの下の旧コア(emu2413 0.6x系移植)に戻る。
+      // opts.core === 'legacy' でもこの下の旧コアになる。無音自動送りの先読みスキャンのように
+      // 「音が鳴っているかどうかしか見ない」用途では、サイクルアキュレートである必要が無い一方
+      // 主スレッドを食うため軽い方を明示的に選ぶ(kss-stream-player.js _scanBuildChips参照)。
+      const useNuked = !(opts && opts.core === 'legacy') && Emu.OPLL_CORE !== 'emu2413' && Emu.OPLLNuked;
+      if (useNuked) return new Emu.OPLLNuked({ chipType: 'ym2413' });
+      this._init(); this.mute = new Array(NUM_MUTE_SLOTS).fill(false); this.vol = new Array(NUM_MUTE_SLOTS).fill(1); }
     _init() {
       this.addr = 0;
       this.reg = new Uint8Array(0x40);
@@ -485,7 +506,7 @@
         if (ch6.car.eg_mode !== FINISH) {
           const fm = ch6.calcModulator(this.lfo_am, this.lfo_pm);
           const out = ch6.calcCarrier(fm, this.lfo_am, this.lfo_pm);
-          if (!this.mute[6]) inst += out * this.vol[6];
+          if (!this.mute[MUTE_BD]) inst += out * this.vol[MUTE_BD];
         }
 
         // HH/SD/TOM/CYM: 先に位相を進めてからshort_noiseを計算し(emu2413 update_short_noise)、
@@ -509,19 +530,19 @@
         const tomEg = tom.calcEnvelope(this.lfo_am);
         const cymEg = cym.calcEnvelope(this.lfo_am);
 
-        if (tom.eg_mode !== FINISH && !this.mute[8]) inst += rhythmOut(tom, tomEg, tomPg) * this.vol[8];
-        if (hh.eg_mode !== FINISH && !this.mute[7]) {
+        if (tom.eg_mode !== FINISH && !this.mute[MUTE_TOM]) inst += rhythmOut(tom, tomEg, tomPg) * this.vol[MUTE_TOM];
+        if (hh.eg_mode !== FINISH && !this.mute[MUTE_HH]) {
           const ph = shortNoise ? (noiseBit ? PD(0x2d0) : PD(0x234)) : (noiseBit ? PD(0x34) : PD(0xd0));
-          inst += rhythmOut(hh, hhEg, ph) * this.vol[7];
+          inst += rhythmOut(hh, hhEg, ph) * this.vol[MUTE_HH];
         }
-        if (sd.eg_mode !== FINISH && !this.mute[7]) {
+        if (sd.eg_mode !== FINISH && !this.mute[MUTE_SD]) {
           const sdOwnBit = (sdPg >> (PG_BITS - 2)) & 1;
           const ph = sdOwnBit ? (noiseBit ? PD(0x300) : PD(0x200)) : (noiseBit ? PD(0x0) : PD(0x100));
-          inst += rhythmOut(sd, sdEg, ph) * this.vol[7];
+          inst += rhythmOut(sd, sdEg, ph) * this.vol[MUTE_SD];
         }
-        if (cym.eg_mode !== FINISH && !this.mute[8]) {
+        if (cym.eg_mode !== FINISH && !this.mute[MUTE_CYM]) {
           const ph = shortNoise ? PD(0x300) : PD(0x100);
-          inst += rhythmOut(cym, cymEg, ph) * this.vol[8];
+          inst += rhythmOut(cym, cymEg, ph) * this.vol[MUTE_CYM];
         }
       }
       return inst;
@@ -578,6 +599,7 @@
   // (ch6-8の8スロットが5種の打楽器に化けるため、鍵盤表示側は6melody+5rhythmの
   // 11行として描画する)。
   Emu.snapshotOPLL = function (chip) {
+    if (typeof chip.snapshot === 'function') return chip.snapshot(); // Nukedコア
     const N = 128;
     const melodyCount = chip.rhythmMode ? 6 : NUM_CH;
     const melody = [];

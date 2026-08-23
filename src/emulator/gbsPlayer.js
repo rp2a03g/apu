@@ -172,7 +172,12 @@
     const writeLog = [];
     const snapshots = [];
     let outPos = 0;
-    const CHUNK_FRAMES = regsOnly ? 10 : 60;
+    // ★2026-08-20 スライスを「フレーム数固定」から「時間予算固定」へ変更(NSFの
+    // capture.js captureSongAsync・captureKssSongAsyncと同じ方式・同じ理由)。
+    // Worker実行時はopt.yieldFn/sliceBudgetMsで上書きされる。
+    const sliceBudgetMs = opt.sliceBudgetMs > 0 ? opt.sliceBudgetMs : (regsOnly ? 5 : 15);
+    const yieldFn = opt.yieldFn || (() => new Promise(r => setTimeout(r, 0)));
+    let sliceStart = performance.now();
 
     for (let f = 0; f < totalFrames; f++) {
       const frameWrites = f === 0 ? initWrites : [];
@@ -182,10 +187,11 @@
       writeLog.push(frameWrites);
       snapshots.push(snapshotApu(player.apu));
       if (!regsOnly) { for (let i = 0; i < frameBuf.length && outPos < audio.length; i++) audio[outPos++] = frameBuf[i]; }
-      if (f % CHUNK_FRAMES === 0) {
+      if (f === 0 || performance.now() - sliceStart >= sliceBudgetMs) {
         if (onProgress) onProgress(f, totalFrames, { writeLog, snapshots });
-        await new Promise(r => setTimeout(r, 0));
+        await yieldFn();
         if (opt.shouldCancel && opt.shouldCancel()) return { audio, writeLog, snapshots, player, frameRate: player.frameRate };
+        sliceStart = performance.now();
       }
     }
     if (onProgress) onProgress(totalFrames, totalFrames, { writeLog, snapshots });

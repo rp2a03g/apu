@@ -1,6 +1,10 @@
 AudioWorklet バンドルについて
 ==============================
 
+※2026-08-22 現状: このバンドル群(worklet-loader.js / mml-worklet.js / mml-worklet-impl.js /
+  nsf-worklet.js / nsf-worklet-impl.js)は index.html から一切参照されていない未使用コードです
+  (MML再生はScriptProcessorNode = src/audio/stream-player.js に移行済み。ROADMAP.md 参照)。
+  そのため下記のソースを編集しても再ビルドは不要です。動作確認が済み次第まとめて削除予定。
 src/audio/mml-worklet.js と src/audio/nsf-worklet.js は
 APU エミュレータコードを自己完結にまとめたビルド済みファイルです。
 file:// から fetch() なしで動作するよう、ソースを手動で結合しています。

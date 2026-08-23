@@ -26,8 +26,8 @@
     { id: 'sn76489',  name: 'SN76489',    offset: 0x0C, minVer: 0x100, impl: true },
     { id: 'ym2413',   name: 'YM2413',     offset: 0x10, minVer: 0x100, impl: true },
     { id: 'ym2612',   name: 'YM2612',     offset: 0x2C, minVer: 0x110, impl: true },
-    { id: 'ym2151',   name: 'YM2151',     offset: 0x30, minVer: 0x110 },
-    { id: 'segapcm',  name: 'SegaPCM',    offset: 0x38, minVer: 0x151 },
+    { id: 'ym2151',   name: 'YM2151',     offset: 0x30, minVer: 0x110, impl: true },
+    { id: 'segapcm',  name: 'SegaPCM',    offset: 0x38, minVer: 0x151, impl: true },
     { id: 'rf5c68',   name: 'RF5C68',     offset: 0x40, minVer: 0x151, impl: true },
     { id: 'ym2203',   name: 'YM2203',     offset: 0x44, minVer: 0x151 },
     { id: 'ym2608',   name: 'YM2608',     offset: 0x48, minVer: 0x151 },
@@ -51,7 +51,7 @@
     { id: 'k051649',  name: 'K051649',    offset: 0x9C, minVer: 0x161, impl: true },
     { id: 'k054539',  name: 'K054539',    offset: 0xA0, minVer: 0x161 },
     { id: 'huc6280',  name: 'HuC6280',    offset: 0xA4, minVer: 0x161, impl: true },
-    { id: 'c140',     name: 'C140',       offset: 0xA8, minVer: 0x161 },
+    { id: 'c140',     name: 'C140',       offset: 0xA8, minVer: 0x161, impl: true },
     { id: 'k053260',  name: 'K053260',    offset: 0xAC, minVer: 0x161 },
     { id: 'pokey',    name: 'Pokey',      offset: 0xB0, minVer: 0x161 },
     { id: 'qsound',   name: 'QSound',     offset: 0xB4, minVer: 0x161 },
@@ -63,7 +63,7 @@
     { id: 'es5506',   name: 'ES5505/6',   offset: 0xD0, minVer: 0x171 },
     { id: 'x1_010',   name: 'X1-010',     offset: 0xD8, minVer: 0x171 },
     { id: 'c352',     name: 'C352',       offset: 0xDC, minVer: 0x171 },
-    { id: 'ga20',     name: 'GA20',       offset: 0xE0, minVer: 0x171 },
+    { id: 'ga20',     name: 'GA20',       offset: 0xE0, minVer: 0x171, impl: true },
     { id: 'mikey',    name: 'Mikey',      offset: 0xE4, minVer: 0x172 }
   ];
 
@@ -137,6 +137,8 @@
         info.ayFlags = bytes[0x79];
       }
       if (c.id === 'k051649') info.sccPlus = flag31;         // bit31: SCC+ (K052539)
+      if (c.id === 'segapcm') info.intf = rd32(0x3C);        // 0x3C: Sega PCM interface register(バンク構成)
+      if (c.id === 'c140') info.c140Type = (0x96 < headerEnd) ? bytes[0x96] : 0; // 0x96: 0=System2, 1=System21, 2=C219
       chips[c.id] = info;
       usedChips.push(info);
     }

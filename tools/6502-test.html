@@ -34,65 +34,40 @@
 <pre id="detail" hidden></pre>
 
 <script src="../src/emulator/cpu6502.js"></script>
+<script src="cpu-test-core.js"></script>
 <script>
-const VECTOR_BASE = 'https://cdn.jsdelivr.net/gh/SingleStepTests/65x02@main/nes6502/v1/';
+// 検証ロジックは cpu-test-core.js に集約(CLI版 tools/headless/cpu-test.js と共通)。
+// このページが持つのは画面表示とベクタ取得だけ。
+const SPEC = MML.CpuTest.SPECS['6502'];
+const FILES = SPEC.groups()[0].files;
 const grid = document.getElementById('grid');
 const cells = {};
-for (let op = 0; op < 256; op++) {
-  const hex = op.toString(16).padStart(2, '0');
+for (const f of FILES) {
   const c = document.createElement('div');
-  c.className = 'op'; c.textContent = hex; c.title = hex;
-  grid.appendChild(c); cells[hex] = c;
-}
-
-function runOne(cpu, ram, tests, per) {
-  const n = Math.min(per, tests.length);
-  let pass = 0, cycBad = 0, stateBad = 0, ramBad = 0; const fails = [];
-  for (let i = 0; i < n; i++) {
-    const t = tests[i], I = t.initial, F = t.final;
-    for (const [a, v] of I.ram) ram[a] = v;
-    cpu.PC = I.pc; cpu.S = I.s; cpu.A = I.a; cpu.X = I.x; cpu.Y = I.y; cpu.P = I.p; cpu.halted = false;
-    const cyc = cpu.step();
-    const regOK = cpu.PC === F.pc && cpu.S === F.s && cpu.A === F.a && cpu.X === F.x && cpu.Y === F.y && cpu.P === F.p;
-    let ramOK = true; for (const [a, v] of F.ram) { if (ram[a] !== v) { ramOK = false; break; } }
-    const cycOK = cyc === t.cycles.length;
-    if (regOK && ramOK && cycOK) pass++;
-    else {
-      if (!cycOK) cycBad++; if (!regOK) stateBad++; if (!ramOK) ramBad++;
-      if (fails.length < 3) fails.push({
-        name: t.name, regOK, ramOK, cycOK,
-        exp: { pc: F.pc, s: F.s, a: F.a, x: F.x, y: F.y, p: F.p, cyc: t.cycles.length },
-        got: { pc: cpu.PC, s: cpu.S, a: cpu.A, x: cpu.X, y: cpu.Y, p: cpu.P, cyc }
-      });
-    }
-    for (const [a] of I.ram) ram[a] = 0; for (const [a] of F.ram) ram[a] = 0;
-  }
-  return { pass, total: n, cycBad, stateBad, ramBad, fails };
+  c.className = 'op'; c.textContent = f.hex; c.title = f.hex;
+  grid.appendChild(c); cells[f.hex] = c;
 }
 
 document.getElementById('run').onclick = async () => {
   const per = Math.max(1, Math.min(10000, parseInt(document.getElementById('per').value) || 1000));
-  const ram = new Uint8Array(65536);
-  const bus = { read: a => ram[a & 0xFFFF], write: (a, v) => { ram[a & 0xFFFF] = v & 0xFF; } };
-  const cpu = new MML.Emu.CPU6502(bus);
+  const runner = SPEC.createRunner();
   const sum = document.getElementById('sum');
   const detail = document.getElementById('detail');
   let totalFail = 0, oksum = 0, tsum = 0, skipped = 0; const failReport = {};
-  for (let op = 0; op < 256; op++) {
-    const hex = op.toString(16).padStart(2, '0');
-    if (!MML.Emu.OPS[op]) { cells[hex].className = 'op skip'; cells[hex].title = '未実装(非公式)'; skipped++; continue; }
-    sum.textContent = `テスト中… ${hex}`;
+  for (const f of FILES) {
+    if (!runner.isImplemented(f.op)) { cells[f.hex].className = 'op skip'; cells[f.hex].title = '未実装(非公式)'; skipped++; continue; }
+    sum.textContent = `テスト中… ${f.hex}`;
     let r;
     try {
-      const res = await fetch(VECTOR_BASE + hex + '.json');
-      if (!res.ok) { cells[hex].className = 'op err'; continue; }
-      r = runOne(cpu, ram, await res.json(), per);
-    } catch (e) { cells[hex].className = 'op err'; cells[hex].title = String(e); continue; }
+      const res = await fetch(SPEC.vectorBase + f.path);
+      if (!res.ok) { cells[f.hex].className = 'op err'; continue; }
+      r = runner.runOne(await res.json(), per);
+    } catch (e) { cells[f.hex].className = 'op err'; cells[f.hex].title = String(e); continue; }
     oksum += r.pass; tsum += r.total;
-    if (r.pass === r.total) cells[hex].className = 'op pass';
+    if (r.pass === r.total) cells[f.hex].className = 'op pass';
     else {
-      cells[hex].className = 'op fail'; totalFail++; failReport[hex] = r.fails;
-      cells[hex].title = `${r.total - r.pass} fail (cyc:${r.cycBad} state:${r.stateBad} ram:${r.ramBad})`;
+      cells[f.hex].className = 'op fail'; totalFail++; failReport[f.hex] = r.fails;
+      cells[f.hex].title = `${r.total - r.pass} fail (cyc:${r.cycBad} state:${r.stateBad} ram:${r.ramBad})`;
     }
   }
   sum.textContent = totalFail === 0

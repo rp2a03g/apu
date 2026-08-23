@@ -401,7 +401,7 @@
   // ループへ制御を返す」パターン)。onProgressにはその時点までのframeLog(同一配列参照、
   // 伸びていく)も渡すので、キャプチャ完了を待たずに途中経過だけでピアノロールを段階的に
   // 埋めていける。戻り値はcapture()と同じ { log, brrSamples } 形。
-  MML.SPC2MML.captureAsync = async function (spcBytes, durationSec, onProgress, shouldCancel) {
+  MML.SPC2MML.captureAsync = async function (spcBytes, durationSec, onProgress, shouldCancel, opt = {}) {
     const player  = new MML.Emu.SpcPlayer(spcBytes);
     const totalDspSamples = Math.round(durationSec * DSP_RATE);
     const frames  = Math.ceil(totalDspSamples / SAMPLES_PER_FRAME);
@@ -413,24 +413,31 @@
       if (frame < frames) frameLog[frame].push({ reg: reg & 0x7F, val });
     };
 
-    const CHUNK_FRAMES = 10; // 実再生とメインスレッドを共有するため細かめにyieldする
-    let framesSinceYield = 0;
+    // ★2026-08-20 スライスを「フレーム数固定(CHUNK_FRAMES=10)」から「時間予算固定」へ変更
+    // (capture.js captureSongAsyncと同じ方式・同じ理由。端末速度差の自動吸収)。
+    // Worker実行時(src/audio/capture-worker-client.js)はopt.yieldFn/sliceBudgetMsで
+    // 上書きされる。frame===1で必ず一度onProgressを発火するのも同様(最初のonProgressで
+    // 実再生のplayer.load()が走るため。SPCはフレームレンダリングが重く、旧来の
+    // 10フレーム待ちは再生開始遅延としてそのまま効いていた)。
+    const sliceBudgetMs = opt.sliceBudgetMs > 0 ? opt.sliceBudgetMs : 5;
+    const yieldFn = opt.yieldFn || (() => new Promise((resolve) => setTimeout(resolve, 0)));
+    let sliceStart = performance.now();
     for (let s = 0; s < totalDspSamples; s++) {
       samplesInFrame++;
       player.renderSample();
       if (samplesInFrame >= SAMPLES_PER_FRAME) {
         samplesInFrame = 0;
         frame++;
-        if (++framesSinceYield >= CHUNK_FRAMES) {
-          framesSinceYield = 0;
+        if (frame === 1 || performance.now() - sliceStart >= sliceBudgetMs) {
           if (onProgress) onProgress(frame, frames, frameLog);
-          await new Promise((resolve) => setTimeout(resolve, 0));
+          await yieldFn();
           // 曲切替/停止の連打で先読みキャプチャが何本も積み上がりCPUを食い合うのを防ぐため、
           // 呼び出し元から「もう不要」と言われたらここでループ自体を打ち切る(onProgress側だけ
           // 無視してもエミュレーション自体は最後まで回り続けてしまうため不十分だった)。
           if (shouldCancel && shouldCancel()) {
             return { log: frameLog, brrSamples: _collectBrrSamples(player), frameRate: FPS_SPC };
           }
+          sliceStart = performance.now();
         }
       }
     }

@@ -12,14 +12,14 @@
  * the original. It is combined with the rest of this program (GPL-2.0) which is
  * license-compatible. See the original repository for the full LGPL text.
  *
- * ★用途: src/emulator/expansion/ym2612.js(自作の近似コア、高速)と切り替えて聴き比べる
- *   「実機準拠」コア。ダイショットから起こしたログサイン/EXP ROM、EGの実タイマ挙動、
+ * ★用途: VGM/Neo Geo再生のOPN2「実機準拠」コア(唯一のFMコア。以前あった自作の近似コア
+ *   ym2612.jsは廃止)。ダイショットから起こしたログサイン/EXP ROM、EGの実タイマ挙動、
  *   LFO PMテーブル、SSG-EGの実挙動、YM2612版DACのラダー効果(mode_ym2612)をそのまま持つ。
  *   移植方針: ym3438.c を関数単位で機械的に書き換え(テストピン/ステータス読み出しは省略、
  *   ミュート/音量は出力段(ChOutput)に追加)。1コール=OPN2 1サイクル(マスタークロック/6)、
  *   24サイクルで1サンプル。書込みは実機同様にバス上のタイミングを持つため、内部キューで
  *   OPN2_WRITEBUF_DELAY(15サイクル)間隔に整流してから流す(VGMPlay同梱版と同じ)。
- *   外部インターフェースは ym2612.js と同じ: writeReg(port,reg,val) / clock()(マスタークロック毎)
+ *   外部インターフェース: writeReg(port,reg,val) / clock()(マスタークロック毎)
  *   / mixSample() / mute[7] / vol[7] / snapshot()。
  *   constructor(clock, {chipType}) で 'ym2612'(既定、ラダー効果あり)/'ym3438'(ラダー無し)を選べる。
  *   後者は expansion/ym2610.js(Neo Geo YM2610のFM段)が使う。
@@ -103,7 +103,7 @@
   const CYCLES_PER_SAMPLE = 24;   // OPN2サイクル(=マスタークロック/6)
 
   // 鍵盤表示用: 1周期ぶんのFM波形を「今のパラメータで再合成した概形」として作る
-  // (ym2612.js snapshotYM2612 と同じ簡易合成方針。実機のクロック多重化は模擬しない)。
+  // (簡易合成方針: 実機のクロック多重化は模擬しない)。
   // opOutはym3438.c _fmGenerate と同じ式(logsinrom/exprom、位相10bit、eg_out込みの減衰)。
   function nukedOpOut(phase10, egOut) {
     const quarter = (phase10 & 0x100) ? (phase10 ^ 0xff) & 0xff : phase10 & 0xff;
@@ -221,7 +221,7 @@
     }
 
     // ── 外部インターフェース ──
-    /** ym2612.js と同じ: port(0/1) と レジスタ番号・値。実機のバス書込み(アドレス→データ)に展開してキューへ */
+    /** port(0/1) と レジスタ番号・値。実機のバス書込み(アドレス→データ)に展開してキューへ */
     writeReg(port, reg, val) {
       reg &= 0xFF; val &= 0xFF;
       this.regs[port & 1][reg] = val;
@@ -248,7 +248,7 @@
       }
       this.writebuf_samplecnt++;
       if (this.cycles === 0) { // 24サイクル=1サンプル完了
-        // 6ch×(9bit×3 ±ラダー)≒±4608 を ±1.2 程度へ(ym2612.jsの出力尺度に合わせる)
+        // 6ch×(9bit×3 ±ラダー)≒±4608 を ±1.2 程度へ(他チップと揃えた出力尺度)
         this.lastL = this.accL / 3840; this.lastR = this.accR / 3840;
         this.accL = 0; this.accR = 0;
       }
@@ -759,7 +759,7 @@
       if (c.status_time) c.status_time--;
     }
 
-    // ── 鍵盤表示用スナップショット(ym2612.js の snapshotYM2612 と同じ形) ──
+    // ── 鍵盤表示用スナップショット(Emu.snapshotYM2612 の実体) ──
     // スロット番号: op1=ch, op2=ch+12, op3=ch+6, op4=ch+18
     snapshot() {
       const c = this;
@@ -793,6 +793,32 @@
       return out;
     }
   }
+
+  // OPN(YM2612/YM2610)のレジスタ影(regs[port][reg])から ch(0-5)の音色パラメータを取り出す
+  // (鍵盤の大波形表示の下に音色データを出すため)。
+  // ops はop1,op2,op3,op4の論理順(レジスタ上のスロット順 +0,+4,+8,+12 は op1,op3,op2,op4)。
+  Emu.decodeOpnPatch = function (regs, ch) {
+    const port = ch < 3 ? 0 : 1, off = ch % 3;
+    const r = regs[port];
+    const ops = [];
+    for (const so of [0, 8, 4, 12]) { // 論理op1..op4 → レジスタスロットオフセット
+      const o = off + so;
+      ops.push({
+        DT: (r[0x30 + o] >> 4) & 7, ML: r[0x30 + o] & 15,
+        TL: r[0x40 + o] & 127,
+        KS: (r[0x50 + o] >> 6) & 3, AR: r[0x50 + o] & 31,
+        AM: (r[0x60 + o] >> 7) & 1, DR: r[0x60 + o] & 31,
+        SR: r[0x70 + o] & 31,
+        SL: (r[0x80 + o] >> 4) & 15, RR: r[0x80 + o] & 15,
+        SE: r[0x90 + o] & 15
+      });
+    }
+    const b0 = r[0xB0 + off], b4 = r[0xB4 + off];
+    return { type: 'opn', AL: b0 & 7, FB: (b0 >> 3) & 7, AMS: (b4 >> 4) & 3, PMS: b4 & 7, L: (b4 >> 7) & 1, R: (b4 >> 6) & 1, ops };
+  };
+
+  // 鍵盤表示用スナップショット(OPN系の共通入口。YM2610のFM段もこれを通る)
+  Emu.snapshotYM2612 = function (chip) { return chip.snapshot(); };
 
   Emu.YM2612Nuked = YM2612Nuked;
 })(window);

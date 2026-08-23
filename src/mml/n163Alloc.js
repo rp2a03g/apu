@@ -44,6 +44,49 @@
     return N163Alloc.roundedLen(len) / 2;
   };
 
+  // --- 本家ppmck互換のバッファ番号(このツール自身は一切使わない) ---
+  //
+  // 本家ppmck(mck/doc/mckc.txt の @N<num> の節)では、@N定義の先頭の数値は
+  // 作曲者が手で決める「バッファ番号」で、波形はRAM上の byteOffset = 番号 * (波形長/2)
+  // へ置かれる。番号の上限は波形長ごとに違う(4サンプル=0-31 / 8=0-15 / 12=0-9 /
+  // 16=0-7 / 20=0-5 / 24=0-4 / 28=0-3 / 32=0-3)。長さ違いの波形が同じ領域を
+  // 踏み合う組み合わせは、本家では作曲者の責任で避ける必要があった。
+  //
+  // このツールは配置を自動で行う(allocate)ためバッファ番号を読み捨てるが、
+  // *2mml変換の出力MMLを本家ppmckへ持って行く人のために、書き出し時だけは
+  // 「なるべく踏み合わない番号」を振っておく(準互換。時間軸を見ない静的な詰め込みなので
+  // 本家での完全な正しさは保証しない)。
+  N163Alloc.PPMCK_MAX_SAMPLE_LEN = 32; // 本家ppmckが扱える最大波形長
+  N163Alloc.PPMCK_MAX_BUFFER = 31;     // バッファ番号の上限(4サンプル時の0-31)
+
+  // waves: 波形サンプル配列の配列(登録順)。戻り値: 同じ順のバッファ番号配列。
+  // 全部を重ならないように置ければそうする。64バイトに入り切らなくなった時点で
+  // 領域を空にして先頭から詰め直す(本家でも時分割で使い回すしかない状況なので、
+  // 番号だけは有効な範囲に収める)。本家に無い33サンプル以上の波形は0を返す。
+  N163Alloc.ppmckBufferNumbers = function (waves) {
+    let used = new Array(N163Alloc.MAX_BYTES).fill(false);
+    const fits = (offset, bytes) => {
+      if (offset + bytes > N163Alloc.MAX_BYTES) return false;
+      for (let i = offset; i < offset + bytes; i++) if (used[i]) return false;
+      return true;
+    };
+    return (waves || []).map(values => {
+      const len = (values || []).length;
+      if (len === 0 || N163Alloc.roundedLen(len) > N163Alloc.PPMCK_MAX_SAMPLE_LEN) return 0;
+      const bytes = N163Alloc.byteLen(len);
+      const maxBuffer = Math.min(N163Alloc.PPMCK_MAX_BUFFER, Math.floor(N163Alloc.MAX_BYTES / bytes) - 1);
+      for (let pass = 0; pass < 2; pass++) {
+        for (let b = 0; b <= maxBuffer; b++) {
+          if (!fits(b * bytes, bytes)) continue;
+          for (let i = b * bytes; i < (b + 1) * bytes; i++) used[i] = true;
+          return b;
+        }
+        used = new Array(N163Alloc.MAX_BYTES).fill(false); // 満杯: 先頭から詰め直す
+      }
+      return 0;
+    });
+  };
+
   // segmentsToWriteLogN163(compiler.js)のリロード検知条件と完全に同じ条件で、
   // 「あるインスツルメントが連続してロードされている区間」の列を作る。
   // 休符(seg.freq==null)は区間を終わらせない(直前のロード状態を保持し続ける。
@@ -169,7 +212,7 @@
       if (!region) {
         conflicts.push({
           frame: e.frame, channel: e.channel, instrument: e.instrument,
-          message: T('フレーム{frame}: @N{instrument}(ch{channel})をN163内蔵RAMに配置できません({bytes}byte必要・空き不足。同時使用中の波形の合計が128バイトを超えています)',
+          message: T('フレーム{frame}: @N{instrument}(ch{channel})をN163内蔵RAMに配置できません({bytes}byte必要・空き不足。同時使用中の波形の合計が波形用の64バイト=128サンプルを超えています)',
             { frame: e.frame, instrument: e.instrument, channel: e.channel, bytes: needBytes })
         });
         continue;

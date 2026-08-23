@@ -201,7 +201,11 @@
     const frame = player.renderFrame(sampleRate);
     writeLog[f] = pendingWritesRef.current;
     for (const w of pendingWritesRef.current) runningRegs[w.addr] = w.value;
-    regSnapshots[f] = Object.assign({}, runningRegs);
+    // 書き込みが1件も無かったフレームは前フレームとスナップショットが同一なので、
+    // オブジェクトを共有してアロケーション(=GC圧)を減らす。消費側(ピアノロール/
+    // モニタ/nsf2mml)はいずれも読み取り専用アクセスのため共有しても安全。
+    regSnapshots[f] = (f > 0 && pendingWritesRef.current.length === 0)
+      ? regSnapshots[f - 1] : Object.assign({}, runningRegs);
     const n163 = player.bus.expansion && player.bus.expansion.n163;
     if (n163) n163Snapshots[f] = n163.ram.slice();
     cpuSnapshots[f] = {
@@ -266,7 +270,15 @@
   Emu.captureSongAsync = async function (nsfBytes, opt = {}, onProgress = null) {
     const ctx = _setupCapture(nsfBytes, opt);
     const regsOnly = !!opt.regsOnly;
-    const CHUNK_FRAMES = regsOnly ? 10 : 60; // regsOnly(先読み用)はより細かくyieldする
+    // ★2026-08-20 スライス制御を「フレーム数固定(CHUNK_FRAMES)」から「時間予算固定」へ変更。
+    // 端末の速度差(同じフレーム数でも掛かる時間はバラバラ)を自動吸収し、メインスレッド
+    // 実行時は1スライスあたり最大~sliceBudgetMsしかブロックしない。Worker実行時
+    // (src/audio/capture-worker-client.js経由)はUIをブロックしないため、呼び出し側が
+    // 大きい予算とsetTimeoutより高速なyield(opt.yieldFn、4msクランプ回避)を渡して
+    // スループット優先にできる。
+    const sliceBudgetMs = opt.sliceBudgetMs > 0 ? opt.sliceBudgetMs : (regsOnly ? 5 : 15);
+    const yieldFn = opt.yieldFn || (() => new Promise(r => setTimeout(r, 0)));
+    let sliceStart = performance.now();
     let pos = 0;
     // regsOnly専用: 1フレーム=CPUサイクルCYCLES_PER_FRAME分、というサイクル駆動で
     // PLAYを刻む(NsfPlayer.renderFrame()と全く同じサイクル会計方式・クロック呼び出し)。
@@ -305,19 +317,26 @@
         }
         ctx.writeLog[f] = ctx.pendingWritesRef.current;
         for (const w of ctx.pendingWritesRef.current) ctx.runningRegs[w.addr] = w.value;
-        ctx.regSnapshots[f] = Object.assign({}, ctx.runningRegs);
+        // 書き込み無しフレームは前フレームとスナップショット同一なのでオブジェクトを共有
+        // (_processFrame側の同名コメント参照)
+        ctx.regSnapshots[f] = (f > 0 && ctx.pendingWritesRef.current.length === 0)
+          ? ctx.regSnapshots[f - 1] : Object.assign({}, ctx.runningRegs);
         const n163 = ctx.player.bus.expansion && ctx.player.bus.expansion.n163;
         if (n163) ctx.n163Snapshots[f] = n163.ram.slice();
       } else {
         pos = _processFrame(ctx, f, pos);
       }
-      if ((f + 1) % CHUNK_FRAMES === 0) {
+      // f===0でも必ず一度onProgressを発火する(最初のonProgressで実再生のplayer.load()が
+      // 走るため、時間予算いっぱいまで溜めると再生開始が遅れる)。以降は時間予算を
+      // 超えたときだけスライス境界にする。
+      if (f === 0 || performance.now() - sliceStart >= sliceBudgetMs) {
         // initRegs/initWritesは末尾に追加(既存呼び出し元は無視するだけで後方互換)。
         // NSF実再生をこのwriteLogから直接合成する新エンジン(NsfReplayStreamPlayer)が
         // INIT時点の初期状態を再生開始前に必要とするため、完了(Promise解決)を待たずに
         // 最初のonProgressの時点で渡せるようにした。
         if (onProgress) onProgress(f + 1, ctx.totalFrames, ctx.regSnapshots, ctx.writeLog, ctx.n163Snapshots, ctx.initRegs, ctx.initWrites);
-        await new Promise(r => setTimeout(r, 0));
+        await yieldFn();
+        sliceStart = performance.now();
         // 呼び出し元が「もう不要」と判断したら(曲切替/停止の連打で先読みが積み上がるのを防ぐ)
         // ここで即座に打ち切る。onProgress側だけをトークンで無視する方式だと、キャプチャ
         // ループ自体(重いCPUエミュレーション)は最後まで回り続けてしまい、連打するたびに

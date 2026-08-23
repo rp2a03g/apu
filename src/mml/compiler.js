@@ -2603,8 +2603,8 @@
           if ((segmentsByChannel[ch] || []).some(s => s.freq != null)) numN163Ch = index + 1;
         });
         // 共有バッファアロケータ: 曲全体のN163使用状況から、時間軸で重ならない範囲だけ
-        // 波形データを再利用しながらRAM上のバイト位置を割り当てる。128byteを超えて
-        // 同時使用される場合はconflictとして記録し、コンパイルエラーへ変換する
+        // 波形データを再利用しながらRAM上のバイト位置を割り当てる。空き容量を超えて
+        // 同時使用される場合(波形用RAMは64byte=128サンプル)はconflictとして記録し、エラーへ変換する
         const allocResult = MML.N163Alloc.allocate(letters, segmentsByChannel, envelopes.n, totalFrames);
         for (const c of allocResult.conflicts) errors.push({ message: c.message });
         extra = { numN163Ch: Math.max(1, numN163Ch), n163Occurrences: allocResult.occurrences };

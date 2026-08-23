@@ -295,7 +295,10 @@
       this._scanBus.registerChip('psg', this._scanPsg);
       this._scanBus.registerChip('scc', this._scanScc);
       if (header.device.mode === 'MSX' && header.device.fmpac) {
-        this._scanOpll = new MML.Emu.OPLLAudio();
+        // ★2026-08-22: スキャンは「無音が10秒続いたか」しか見ないのでサイクル精度は不要。
+        // Nukedコアは実測で旧コアの約3倍重く、しかもこのスキャンは主スレッド(rAF)で回るため
+        // 実再生のScriptProcessorNodeと食い合ってカクつきの原因になる。ここは軽い旧コア固定。
+        this._scanOpll = new MML.Emu.OPLLAudio({ core: 'legacy' });
         this._scanBus.registerChip('opll', this._scanOpll);
       } else {
         this._scanOpll = null;

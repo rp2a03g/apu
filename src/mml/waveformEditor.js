@@ -3,7 +3,7 @@
  * MML.WaveformEditor
  *
  * - FDS: 64サンプル, 各6bit (0-63)
- * - N163: 16サンプル, 各4bit (0-15)
+ * - N163: 4〜128サンプル(4の倍数), 各4bit (0-15)
  * キャンバス上をドラッグして波形を編集し、MMLコンパイル/キャプチャ時に
  * compiler.js の fdsInitWrites()/n163InitWrites() へ渡される。
  */

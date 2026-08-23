@@ -25,60 +25,38 @@
 <div id="sum"></div>
 <div id="grid"></div>
 <pre id="detail" hidden></pre>
-
 <script src="../src/emulator/spc700.js"></script>
+<script src="cpu-test-core.js"></script>
 <script>
-const VECTOR_BASE = 'https://cdn.jsdelivr.net/gh/SingleStepTests/spc700@main/v1/';
+// 検証ロジックは cpu-test-core.js に集約(CLI版 tools/headless/cpu-test.js と共通)。
+// このページが持つのは画面表示とベクタ取得だけ。
+const SPEC = MML.CpuTest.SPECS['spc700'];
+const FILES = SPEC.groups()[0].files;
 const grid = document.getElementById('grid');
 const cells = {};
-for (let op = 0; op < 256; op++) {
-  const hex = op.toString(16).padStart(2, '0');
+for (const f of FILES) {
   const c = document.createElement('div');
-  c.className = 'op'; c.textContent = hex; c.title = hex;
-  grid.appendChild(c); cells[hex] = c;
-}
-
-function runOne(cpu, ram, tests) {
-  let pass = 0; const fails = [];
-  for (const t of tests) {
-    for (const [a, v] of t.initial.ram) ram[a] = v;
-    cpu.PC = t.initial.pc; cpu.A = t.initial.a; cpu.X = t.initial.x; cpu.Y = t.initial.y;
-    cpu.SP = t.initial.sp; cpu.PSW = t.initial.psw; cpu.halted = false;
-    cpu.step();
-    const f = t.final;
-    let ok = cpu.A === f.a && cpu.X === f.x && cpu.Y === f.y && cpu.SP === f.sp && cpu.PC === f.pc && cpu.PSW === f.psw;
-    if (ok) for (const [a, v] of f.ram) { if (ram[a] !== v) { ok = false; break; } }
-    if (ok) pass++;
-    else if (fails.length < 3) fails.push({
-      name: t.name,
-      exp: { a: f.a, x: f.x, y: f.y, sp: f.sp, pc: f.pc, psw: '0x' + f.psw.toString(16) },
-      got: { a: cpu.A, x: cpu.X, y: cpu.Y, sp: cpu.SP, pc: cpu.PC, psw: '0x' + cpu.PSW.toString(16) },
-    });
-    for (const [a] of t.initial.ram) ram[a] = 0;
-    for (const [a] of f.ram) ram[a] = 0;
-  }
-  return { pass, total: tests.length, fails };
+  c.className = 'op'; c.textContent = f.hex; c.title = f.hex;
+  grid.appendChild(c); cells[f.hex] = c;
 }
 
 document.getElementById('run').onclick = async () => {
-  const ram = new Uint8Array(65536);
-  const bus = { read: a => ram[a & 0xFFFF], write: (a, v) => { ram[a & 0xFFFF] = v & 0xFF; } };
-  const cpu = new MML.Emu.SPC700(bus);
+  const runner = SPEC.createRunner();
   const sum = document.getElementById('sum');
   const detail = document.getElementById('detail');
   let totalFail = 0, oksum = 0, tsum = 0; const failReport = {};
-  for (let op = 0; op < 256; op++) {
-    const hex = op.toString(16).padStart(2, '0');
-    sum.textContent = `テスト中… ${hex}`;
+  for (const f of FILES) {
+    sum.textContent = `テスト中… ${f.hex}`;
     let r;
     try {
-      const res = await fetch(VECTOR_BASE + hex + '.json');
-      if (!res.ok) { cells[hex].className = 'op err'; continue; }
-      r = runOne(cpu, ram, await res.json());
-    } catch (e) { cells[hex].className = 'op err'; cells[hex].title = String(e); continue; }
+      const res = await fetch(SPEC.vectorBase + f.path);
+      if (!res.ok) { cells[f.hex].className = 'op err'; continue; }
+      // per を渡さない = ファイルに入っている全ケース(このベクタは1命令1000ケース)
+      r = runner.runOne(await res.json(), Infinity);
+    } catch (e) { cells[f.hex].className = 'op err'; cells[f.hex].title = String(e); continue; }
     oksum += r.pass; tsum += r.total;
-    if (r.pass === r.total) cells[hex].className = 'op pass';
-    else { cells[hex].className = 'op fail'; totalFail++; failReport[hex] = r.fails; cells[hex].title = `${r.total - r.pass}/${r.total} fail`; }
+    if (r.pass === r.total) cells[f.hex].className = 'op pass';
+    else { cells[f.hex].className = 'op fail'; totalFail++; failReport[f.hex] = r.fails; cells[f.hex].title = `${r.total - r.pass}/${r.total} fail`; }
   }
   sum.textContent = totalFail === 0
     ? `✅ 全256オペコード PASS（${oksum.toLocaleString()} / ${tsum.toLocaleString()} ケース）`

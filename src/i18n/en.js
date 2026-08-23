@@ -113,15 +113,15 @@
     'タップ1回目… 拍に合わせて続けてタップ': 'First tap... keep tapping on the beat',
     '{n}回タップ → {bpm} BPM': '{n} taps → {bpm} BPM',
     '自動検出に戻しました': 'Back to auto detection',
-    '対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, MML, TXT)':
-      'Unsupported file type: .{ext}\n(Supported: NSF, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, MML, TXT)',
+    '対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)':
+      'Unsupported file type: .{ext}\n(Supported: NSF, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)',
     'NSF (ファミコン)': 'NSF (NES)',
     'SPC (スーパーファミコン)': 'SPC (SNES)',
     'KSS (MSX)': 'KSS (MSX)',
     'GBS (Game Boy)': 'GBS (Game Boy)',
     'HES (PC Engine)': 'HES (PC Engine)',
-    'NSF/SPC/KSS/GBS/HES/VGM ファイル(または、それらを含む zip)を開くと、ここに再生画面が表示されます。':
-      'Open an NSF/SPC/KSS/GBS/HES/VGM file (or a zip containing them) to show the player here.',
+    'NSF/SPC/KSS/GBS/HES/VGM ファイル(または、それらを含む zip/7z)を開くと、ここに再生画面が表示されます。':
+      'Open an NSF/SPC/KSS/GBS/HES/VGM file (or a zip/7z containing them) to show the player here.',
 
     // ---- NSFパネル ----
     'ヘッダ情報 (NSF)': 'Header (NSF)',
@@ -222,7 +222,7 @@
     'データ      : {size}byte @ 0x{addr}': 'Data        : {size} bytes @ 0x{addr}',
     '再生中: トラック{track}  (最大 {time})': 'Playing: track {track}  (max {time})',
 
-    // ---- VGMパネル / アーカイブ(zip)曲リスト ----
+    // ---- VGMパネル / アーカイブ(zip/7z)曲リスト ----
     'ヘッダ情報 (VGM)': 'Header (VGM)',
     'VGMヘッダが不正です。': 'Invalid VGM header.',
     '先にVGMファイルを読み込んでください。': 'Load a VGM file first.',
@@ -245,14 +245,13 @@
     '前の曲': 'Previous track',
     '次の曲': 'Next track',
     'アーカイブ内のファイルを開けませんでした: {msg}': 'Could not open a file inside the archive: {msg}',
-    'zipを解析できませんでした: {msg}': 'Could not parse the zip: {msg}',
-    'zip内に対応するサウンドファイル(NSF/SPC/KSS/GBS/HES/VGM)がありません。':
-      'The zip contains no supported sound files (NSF/SPC/KSS/GBS/HES/VGM).',
+    'アーカイブを解析できませんでした: {msg}': 'Could not parse the archive: {msg}',
+    'アーカイブ内に対応するサウンドファイル(NSF/SPC/KSS/GBS/HES/VGM)がありません。':
+      'The archive contains no supported sound files (NSF/SPC/KSS/GBS/HES/VGM).',
     'MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力{borrow}{ignored}':
       'Converted to MML ({mode} {bpm} BPM, chips: {chips}) → written to the MML editor{borrow}{ignored}',
     '(借用先: {assign})': ' (targets: {assign})',
     'チャンネル割当': 'Channel mapping',
-    'FMコア': 'FM core',
     // YM2610 ADPCM 手動ピッチ補正(keyboard.js / main.js onAdpcmCalibrate)
     'クリックでこのサンプルの基準音を手動補正': 'Click to calibrate this sample\'s base pitch manually',
     '{ch} のサンプルの基準音を補正します。\n現在: {cur}{manual}\n音名(例: C4)、またはセント補正(例: +20 / -15)を入力。空欄で補正解除。':
@@ -260,9 +259,6 @@
     '音程なし': 'no pitch',
     '  [手動補正中]': '  [manually calibrated]',
     '入力を解釈できませんでした: {s}': 'Could not parse the input: {s}',
-    '高速(近似)': 'Fast (approx.)',
-    'Nuked-OPN2(実機準拠)': 'Nuked-OPN2 (accurate)',
-    'YM2612(メガドライブ)/YM2610(Neo Geo)のFMエミュレーションコア。切替は次の再生開始から効きます': 'FM emulation core for the YM2612 (Mega Drive) / YM2610 (Neo Geo). Takes effect from the next playback start',
     '(2A03/FDSを借用して再生)': ' (played back via 2A03/FDS)',
     '(N163を借用して再生)': ' (played back via N163)',
     '。対象外の音源は無視: {chips}': '. Ignored unsupported chips: {chips}',
@@ -310,6 +306,31 @@
     '停止': 'Stop',
     '音量(@v99,"|"=ループ)': 'Volume (@v99, "|" = loop)',
 
+    // ---- MMLコマンドヘルプ (src/ui/helpPanel.js) ----
+    'MMLコマンドヘルプ': 'MML command help',
+    'コマンド・説明を検索': 'Search commands and text',
+    'カテゴリで絞り込む': 'Filter by category',
+    'どのMMLから項目を集めるか': 'Which MML to collect entries from',
+    '組み込みサンプル': 'Built-in sample',
+    'エディタ本文': 'Editor content',
+    '両方': 'Both',
+    '今のMML本文から読み直す': 'Reload from the current MML',
+    '再生を止める': 'Stop playback',
+    '自己点検の結果を表示/非表示': 'Show/hide the self-check result',
+    '自己点検(タグの書式・コマンドの重複)': 'Self-check (tag syntax, duplicate commands)',
+    'すべて': 'All',
+    'この項目を聴く': 'Listen to this entry',
+    'エディタの該当行へ移動': 'Jump to this line in the editor',
+    '実演MMLをコピー': 'Copy the demo MML',
+    'コピーしました': 'Copied',
+    'コピーできませんでした': 'Could not copy',
+    '再生中: {title}': 'Playing: {title}',
+    'ヘルプ: {title}': 'Help: {title}',
+    'この項目は再生できませんでした(MMLエディタ側のエラー表示を確認してください)。': 'Could not play this entry (see the error shown in the MML editor).',
+    'ヘルプ': 'Help',
+    '該当する項目がありません。': 'No matching entries.',
+    '問題は見つかりませんでした(書式・重複コマンド)。': 'No problems found (syntax, duplicate commands).',
+
     // ---- コア層のエラー文言 ----
     'ループ終端 "]" が見つかりません': 'Missing loop end "]"',
     'SD/SDOF/SDQR は三角波・DPCMチャンネルでは使用できません':
@@ -327,8 +348,8 @@
     'チャンネル指定が認識できません: "{text}"': 'Unrecognized channel specification: "{text}"',
     '@N{instrument} の波形長{len}サンプルはN163内蔵RAMの空き容量(最大{max}サンプル)を超えています':
       '@N{instrument} is {len} samples long, which exceeds the N163 internal RAM (max {max} samples)',
-    'フレーム{frame}: @N{instrument}(ch{channel})をN163内蔵RAMに配置できません({bytes}byte必要・空き不足。同時使用中の波形の合計が128バイトを超えています)':
-      'Frame {frame}: cannot place @N{instrument} (ch{channel}) in N163 internal RAM ({bytes} bytes needed, not enough free; the waves in use at once exceed 128 bytes)',
+    'フレーム{frame}: @N{instrument}(ch{channel})をN163内蔵RAMに配置できません({bytes}byte必要・空き不足。同時使用中の波形の合計が波形用の64バイト=128サンプルを超えています)':
+      'Frame {frame}: cannot place @N{instrument} (ch{channel}) in N163 internal RAM ({bytes} bytes needed, not enough free; the waves in use at once exceed the 64 bytes = 128 samples available for waves)',
     'KSSヘッダは最低16バイト必要です': 'A KSS header needs at least 16 bytes',
     'SCC/SCC+ (Konami、使用時のみ)': 'SCC/SCC+ (Konami, only when used)',
     'MSX-AUDIO (Y8950, 未対応)': 'MSX-AUDIO (Y8950, unsupported)',

@@ -37,64 +37,23 @@
 <pre id="detail" hidden></pre>
 
 <script src="../src/emulator/cpuSm83.js"></script>
+<script src="cpu-test-core.js"></script>
 <script>
-const VECTOR_BASE = 'https://cdn.jsdelivr.net/gh/SingleStepTests/sm83@main/v1/';
+// 検証ロジックは cpu-test-core.js に集約(CLI版 tools/headless/cpu-test.js と共通)。
+// このページが持つのは画面表示とベクタ取得だけ。
+const SPEC = MML.CpuTest.SPECS["sm83"];
+const GRID_IDS = { main: "grid", cb: "gridCB" };
 
-function makeGrid(el) {
+const grids = {};
+for (const g of SPEC.groups()) {
+  const el = document.getElementById(GRID_IDS[g.key]);
   const cells = {};
-  for (let op = 0; op < 256; op++) {
-    const hex = op.toString(16).padStart(2, '0');
+  for (const f of g.files) {
     const c = document.createElement('div');
-    c.className = 'op'; c.textContent = hex; c.title = hex;
-    el.appendChild(c); cells[hex] = c;
+    c.className = 'op'; c.textContent = f.hex; c.title = f.hex;
+    el.appendChild(c); cells[f.hex] = c;
   }
-  return cells;
-}
-const grids = {
-  main: { cells: makeGrid(document.getElementById('grid')), file: hex => hex + '.json' },
-  cb: { cells: makeGrid(document.getElementById('gridCB')), file: hex => 'cb%20' + hex + '.json' }
-};
-
-// テストベクタの initial.ie は前提条件の一部(HALTバグ等の分岐用)を表すだけで、
-// final側には存在しない(=検証対象外)。$FFFFは通常のram読み書き対象アドレスとしても
-// 使われうる(PCがラップして$FFFFから命令フェッチするケース等)ため、ie専用の書込みで
-// ram[0xFFFF]を上書きしてはいけない(実際にこれで命令バイトを破壊するバグがあった)。
-function applyState(cpu, ram, s) {
-  cpu.a = s.a; cpu.f = s.f; cpu.b = s.b; cpu.c = s.c; cpu.d = s.d; cpu.e = s.e; cpu.h = s.h; cpu.l = s.l;
-  cpu.sp = s.sp; cpu.pc = s.pc;
-  cpu.ime = !!s.ime;
-  cpu.imePending = 0;
-  cpu.halted = false;
-  cpu.stopped = false;
-}
-function stateOf(cpu) {
-  return { a: cpu.a, f: cpu.f, b: cpu.b, c: cpu.c, d: cpu.d, e: cpu.e, h: cpu.h, l: cpu.l, sp: cpu.sp, pc: cpu.pc };
-}
-
-function runOne(cpu, ram, tests, per) {
-  const n = Math.min(per, tests.length);
-  let pass = 0, cycBad = 0, stateBad = 0, ramBad = 0, imeBad = 0; const fails = [];
-  const keys = ['a', 'f', 'b', 'c', 'd', 'e', 'h', 'l', 'sp', 'pc'];
-  for (let i = 0; i < n; i++) {
-    const t = tests[i], I = t.initial, F = t.final;
-    for (const [a, v] of I.ram) ram[a] = v;
-    applyState(cpu, ram, I);
-    const cyc = cpu.step();
-    const got = stateOf(cpu);
-    let regOK = true;
-    for (const k of keys) { if (got[k] !== F[k]) { regOK = false; break; } }
-    const imeOK = cpu.ime === !!F.ime;
-    let ramOK = true;
-    for (const [a, v] of F.ram) { if (ram[a] !== v) { ramOK = false; break; } }
-    const cycOK = cyc === t.cycles.length * 4;
-    if (regOK && ramOK && cycOK && imeOK) pass++;
-    else {
-      if (!cycOK) cycBad++; if (!regOK) stateBad++; if (!ramOK) ramBad++; if (!imeOK) imeBad++;
-      if (fails.length < 3) fails.push({ name: t.name, regOK, ramOK, cycOK, imeOK, exp: F, got, cycExp: t.cycles.length * 4, cycGot: cyc });
-    }
-    for (const [a] of I.ram) ram[a] = 0; for (const [a] of F.ram) ram[a] = 0;
-  }
-  return { pass, total: n, cycBad, stateBad, ramBad, imeBad, fails };
+  grids[g.key] = { cells, files: g.files };
 }
 
 async function fetchPool(items, concurrency, worker) {
@@ -112,44 +71,33 @@ async function fetchPool(items, concurrency, worker) {
 
 document.getElementById('run').onclick = async () => {
   const per = Math.max(1, Math.min(1000, parseInt(document.getElementById('per').value) || 300));
-  const ram = new Uint8Array(65536);
-  const bus = {
-    read: a => ram[a & 0xFFFF], write: (a, v) => { ram[a & 0xFFFF] = v & 0xFF; }
-  };
-  const cpu = new MML.Emu.CPUSm83(bus);
+  const runner = SPEC.createRunner();
   const sum = document.getElementById('sum');
   const detail = document.getElementById('detail');
   let totalFail = 0, totalSkip = 0, oksum = 0, tsum = 0; const failReport = {};
   let done = 0;
 
   const items = [];
-  for (const groupName in grids) {
-    const { file } = grids[groupName];
-    for (let op = 0; op < 256; op++) {
-      const hex = op.toString(16).padStart(2, '0');
-      items.push({ groupName, hex, url: VECTOR_BASE + file(hex) });
-    }
-  }
+  for (const key in grids) for (const f of grids[key].files) items.push({ key, f });
   const totalItems = items.length;
 
-  await fetchPool(items, 16, async (item) => {
-    const { groupName, hex, url } = item;
-    const cells = grids[groupName].cells;
+  await fetchPool(items, 16, async ({ key, f }) => {
+    const cells = grids[key].cells;
     try {
-      const res = await fetch(url);
-      if (!res.ok) { cells[hex].className = 'op skip'; cells[hex].title = '未取得(スキップ)'; totalSkip++; return; }
+      const res = await fetch(SPEC.vectorBase + f.path);
+      if (!res.ok) { cells[f.hex].className = 'op skip'; cells[f.hex].title = '未取得(スキップ)'; totalSkip++; return; }
       const tests = await res.json();
       // CPUインスタンスはシングルスレッドJSなので直列実行され競合しない
-      const r = runOne(cpu, ram, tests, per);
+      const r = runner.runOne(tests, per);
       oksum += r.pass; tsum += r.total;
-      if (r.pass === r.total) cells[hex].className = 'op pass';
+      if (r.pass === r.total) cells[f.hex].className = 'op pass';
       else {
-        cells[hex].className = 'op fail'; totalFail++;
-        failReport[groupName + ' ' + hex] = r.fails;
-        cells[hex].title = `${r.total - r.pass} fail (cyc:${r.cycBad} state:${r.stateBad} ram:${r.ramBad} ime:${r.imeBad})`;
+        cells[f.hex].className = 'op fail'; totalFail++;
+        failReport[f.name] = r.fails;
+        cells[f.hex].title = `${r.total - r.pass} fail (cyc:${r.cycBad} state:${r.stateBad} ram:${r.ramBad} ime:${r.imeBad})`;
       }
     } catch (e) {
-      cells[hex].className = 'op err'; cells[hex].title = String(e); totalSkip++;
+      cells[f.hex].className = 'op err'; cells[f.hex].title = String(e); totalSkip++;
     } finally {
       done++;
       sum.textContent = `テスト中… ${done}/${totalItems}`;

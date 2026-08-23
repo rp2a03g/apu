@@ -265,8 +265,13 @@
     PSG5: { section: 'expansion', chip: 'hes', type: 'object', key: 'ch5' },
   };
 
-  // リズムch: BD=ch6, SD/HH=ch7, TOM/CYM=ch8 (chip.mute[]がch単位のため同chの打楽器は連動ミュート)
-  const KF_RHYTHM_INDEX = { KFBD: 6, KFSD: 7, KFHH: 7, KFTOM: 8, KFCYM: 8 };
+  // リズムchのミュート添字。★2026-08-22: 以前は実チャンネル(BD=6, SD/HH=7, TOM/CYM=8)を
+  // そのまま使っていたが、SDとHH(およびTOMとCYM)が同じ添字を共有するため
+  // getMuteConfig() が行順に config[index] = muted を書く際に**後の行が前の行を上書き**し、
+  // 「SDをミュートしても消えず、鳴っていないHHをミュートすると消える」状態になっていた。
+  // OPLLコア(opllNuked.js)は打楽器ごとに出力サイクルを識別できるので、5種に独立した
+  // 添字(9-13)を与える。0-8はメロディch用なので衝突しない。
+  const KF_RHYTHM_INDEX = { KFBD: 9, KFSD: 10, KFTOM: 11, KFCYM: 12, KFHH: 13 };
 
   function getMuteInfo(id) {
     if (MUTE_INFO_MAP[id]) return MUTE_INFO_MAP[id];
@@ -295,6 +300,18 @@
     const ym = id.match(/^YM(\d)$/);
     if (ym) return { section: 'expansion', chip: 'ym2612', type: 'array', index: +ym[1] - 1 };
     if (id === 'YMDA') return { section: 'expansion', chip: 'ym2612', type: 'array', index: 6 };
+    // VGM: YM2151(OPM、OM1-8=FM ch)。chip.mute[]はch 0-7
+    const om = id.match(/^OM(\d)$/);
+    if (om) return { section: 'expansion', chip: 'ym2151', type: 'array', index: +om[1] - 1 };
+    // VGM: GA20(Irem PCM、GA1-4)。chip.mute[]はch 0-3(GALLはGB行なので\dで区別される)
+    const ga = id.match(/^GA(\d)$/);
+    if (ga) return { section: 'expansion', chip: 'ga20', type: 'array', index: +ga[1] - 1 };
+    // VGM: SegaPCM(SP1-16)。chip.mute[]はch 0-15
+    const sp = id.match(/^SP(\d+)$/);
+    if (sp) return { section: 'expansion', chip: 'segapcm', type: 'array', index: +sp[1] - 1 };
+    // VGM: C140(CN1-24)。chip.mute[]はch 0-23
+    const cn = id.match(/^CN(\d+)$/);
+    if (cn) return { section: 'expansion', chip: 'c140', type: 'array', index: +cn[1] - 1 };
     // VGM: YM2610(Neo Geo) FM(NF1-4)。内蔵SSGはKP1-3行(chip 'psg')を流用し、vgmPlayer.jsの
     // YM2610アダプタが e.psg を自分のSSGへ適用する
     const nf = id.match(/^NF(\d)$/);
@@ -337,6 +354,11 @@
     { header: 'HuC6280(PC Engine / TurboGrafx-16)', ids: { HALL: 'ALL', PSG0: 'Ch0', PSG1: 'Ch1', PSG2: 'Ch2', PSG3: 'Ch3', PSG4: 'Ch4', PSG5: 'Ch5' } },
     { header: 'SN76489 (SG-1000 / Master System / Game Gear / Mega Drive PSG)', ids: { SN1: 'P1', SN2: 'P2', SN3: 'P3', SNN: 'No', SN4: 'P1(2)', SN5: 'P2(2)', SN6: 'P3(2)', SNN2: 'No(2)' } },
     { header: 'YM2612 (OPN2 , Mega Drive FM)', ids: { YMDA: 'DAC' }, prefix: 'YM', name: (id) => 'FM' + id.slice(2) },
+    { header: 'YM2151 (OPM , X68000 / Arcade)', prefix: 'OM', name: (id) => 'FM' + id.slice(2) },
+    // GA1-4は完全一致(ids)で拾う(GBの'GALL'と prefix 'GA' を衝突させない)
+    { header: 'GA20 (Irem M92 / M107 PCM)', ids: { GA1: 'PCM1', GA2: 'PCM2', GA3: 'PCM3', GA4: 'PCM4' } },
+    { header: 'SegaPCM (315-5218 , OutRun / After Burner)', prefix: 'SP', name: (id) => 'PCM' + id.slice(2) },
+    { header: 'C140 (Namco System 2 / 21)', prefix: 'CN', name: (id) => 'PCM' + id.slice(2) },
     // NF1-4は完全一致(ids)で先に拾う(N163のprefix 'N' と衝突させない)
     { header: 'YM2610 (OPNB , Neo Geo)', ids: { NF1: 'FM1', NF2: 'FM2', NF3: 'FM3', NF4: 'FM4', NF5: 'FM5', NF6: 'FM6',
         NA1: 'PCMA1', NA2: 'PCMA2', NA3: 'PCMA3', NA4: 'PCMA4', NA5: 'PCMA5', NA6: 'PCMA6', NB: 'PCMB' } }, // NA=ADPCM-A, NB=ADPCM-B
@@ -807,10 +829,21 @@
       const nKp = snaps && snaps.length > 3 ? snaps.length : 3;
       for (let ch = 0; ch < nKp; ch++) {
         const c = snaps ? snaps[ch] : { freq: 0, vol: 0, active: false };
-        channels.push({ id: `KP${ch + 1}`, color: COLS[ch % 3], freq: c.freq, vol: c.vol,
+        // ★2026-08-22: ノイズ専用ch(トーン無効 or トーン周期0でノイズだけ鳴らす打楽器)は
+        // SN76489/GBSのノイズ行と同じ扱いにして、note列に周期indexを出す。
+        // 従来は波形アイコンだけノイズにしていたため、note列が空のままで何のchか読めなかった。
+        const noiseRow = { id: `KP${ch + 1}`, color: COLS[ch % 3], freq: c.freq, vol: c.vol,
           rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: 15,
           wave: c.noise ? { t: 'noise', short: false, nx: 32767, ny: 2 } : { t: 'pulse', hi: 0.5, nx: 2, ny: 2 },
-          active: c.active });
+          active: c.active };
+        if (c.noiseOnly) {
+          noiseRow.noise = true;
+          noiseRow.noiseFreq = c.noiseFreq;
+          noiseRow.noiseIndex = gbNoiseFreqToIndex(c.noiseFreq);
+          noiseRow.noiseShort = false;
+          noiseRow.freq = 0; // 音程は持たない(古いトーン周期の残骸を出さない)
+        }
+        channels.push(noiseRow);
       }
     }
 
@@ -833,9 +866,16 @@
       // の両方に対応する(VRC7ハードウェアにはリズムモードが存在しないため6ch固定だった)。
       const live = extraSnaps && extraSnaps.kssOpllLive;
       const snap2 = live ? live() : null;
+      // ★2026-08-22: リズムモード(レジスタ$0E bit5)は「打つ瞬間だけ立てて即降ろす」ドライバが
+      // 実在する(SMS版After Burnerは毎秒10〜16回トグル)。生ビットに追随すると9ch表示と
+      // 6ch+リズム表示が激しく入れ替わって読めないため、**一度でも見たら以後は保持する**
+      // 単調な運用にする(SCC行を出したら消さないのと同じ考え方)。フラグはextraSnapsに
+      // 持たせているのでsetSource()の this._extraSnaps = {} で曲ごとにリセットされる。
+      if (snap2 && snap2.rhythmMode && extraSnaps) extraSnaps.opllRhythmSeen = true;
+      const opllRhythm = !!(extraSnaps && extraSnaps.opllRhythmSeen);
       const melody = snap2 ? snap2.melody : [];
       const MCOLS = ['#ffcc00','#ffdd44','#ffe566','#ffee88','#fff2aa','#fff8cc','#ffd9a0','#ffe0b0','#ffe8c0'];
-      for (let ch = 0; ch < (melody.length || (snap2 && snap2.rhythmMode ? 6 : 9)); ch++) {
+      for (let ch = 0; ch < (opllRhythm ? 6 : (melody.length || 9)); ch++) {
         const c = melody[ch] || { freq: 0, vol: 0, active: false, rawVol: 15 };
         const wave = (c.waveData && c.waveData.length)
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
@@ -844,15 +884,30 @@
           rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: 15,
           wave, active: c.active, fmPatch: c.patch || null });
       }
-      if (snap2 && snap2.rhythmMode && snap2.rhythm) {
+      if (opllRhythm && snap2 && snap2.rhythm) {
         const RCOLS = { bd: '#ff5555', sd: '#ffaa55', tom: '#aaff55', cym: '#55ffaa', hh: '#55aaff' };
         const RLABEL = { bd: 'BD', sd: 'SD', tom: 'TOM', cym: 'CYM', hh: 'HH' };
+        // ★ロールと同じ規則で音程を決める(ここを変えたら src/kss2mml/expansion/opll.js の
+        // RHYTHM_DEFS / extractRhythmEvents も必ず同じに直すこと。両者がずれると
+        // 「ロールと鍵盤で音符が違う」状態になる)。
+        //   BD(ch6)/TOM(ch8) … fnum/blockの実音程を持つので、描画範囲(MIDI_MIN以上)なら実音程
+        //   それ以外(音程なし=SD/CYM/HH、または実音程が低すぎて範囲外) … 疑似音程 index
+        //     (ロールは midi = 24 + index に置く。鍵盤は noiseIndex 経由で同じキーになる)
+        const RPSEUDO = { bd: 0, sd: 2, tom: 4, cym: 6, hh: 8 };
         for (const key of ['bd', 'sd', 'tom', 'cym', 'hh']) {
           const r = snap2.rhythm[key];
-          channels.push({ id: `KF${RLABEL[key]}`, color: RCOLS[key], freq: r.freq, vol: r.vol,
+          const realMidi = freqToMidi(r.freq); // 範囲外はnullが返る
+          const row = { id: `KF${RLABEL[key]}`, color: RCOLS[key], freq: realMidi !== null ? r.freq : 0, vol: r.vol,
             rawVol: null, rawVolMax: null,
-            wave: r.freq > 0 ? { t: 'pulse', hi: 0.5, nx: 2, ny: 2 } : { t: 'noise', short: true, nx: 93, ny: 2 },
-            active: r.active, drum: true });
+            wave: realMidi !== null ? { t: 'pulse', hi: 0.5, nx: 2, ny: 2 } : { t: 'noise', short: true, nx: 93, ny: 2 },
+            active: r.active, drum: true };
+          if (realMidi === null) {
+            row.noise = true;
+            row.noiseIndex = RPSEUDO[key];
+            row.noiseShort = true;
+            row.noiseLabel = RLABEL[key]; // note列は周期indexでなく打楽器名を出す
+          }
+          channels.push(row);
         }
       }
     }
@@ -903,6 +958,82 @@
         const d = s ? s.dac : { enabled: false, level: 0, vol: 0, active: false };
         channels.push({ id: 'YMDA', color: '#aa44ff', freq: 0, vol: d.vol, rawVol: d.enabled ? d.level : null, rawVolMax: 255,
           wave: { t: 'sample' }, active: !!d.active, sample: true, dmcReg: d.level, dmcRateIdx: 15, dmcFreq: 0 });
+      }
+    }
+
+    if (chips.includes('ym2151')) {
+      // YM2151(VGM: OPM、X68000/アーケード): 4op FM×8ch(YM2612と同じFM波形表示)。
+      // ch8はノイズモード(c.noise)がありうるが表示は通常のFM行(ノイズ中はfreq=0で無音符扱い)。
+      const live = extraSnaps && extraSnaps.ym2151Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.ym2151 ? extraSnaps.ym2151[frameIdx] : null);
+      const COLS = ['#ffcc00', '#ffd422', '#ffdd44', '#ffe566', '#ffee88', '#fff2aa', '#fff6bb', '#fff8cc'];
+      for (let ch = 0; ch < 8; ch++) {
+        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, waveData: null };
+        const wave = (c.waveData && c.waveData.length && c.active)
+          ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
+          : { t: 'fm', nx: 256, ny: 256 };
+        channels.push({ id: `OM${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
+      }
+    }
+
+    if (chips.includes('ga20')) {
+      // GA20(VGM: アイレムM92/M107 PCM): 4ch 8bit PCM。YM2610 ADPCM行(NA/NB)と同じ3段階表示:
+      // サンプルピッチ解析(ga20.js samplePitch=Emu.SamplePitchUtil共有)が信頼できれば
+      // 実周波数×再生レートの通常音名(adpcmExact)、できなければ「サンプル」行。
+      // GA20はレートレジスタで1サンプルを音階演奏するチップなので、音程が取れれば絶対音名になる。
+      // note列クリックの手動キャリブレーション(adpcmSample)もNA/NB行と共通(main.js onAdpcmCalibrate)。
+      const live = extraSnaps && extraSnaps.ga20Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.ga20 ? extraSnaps.ga20[frameIdx] : null);
+      const gaWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 4; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (170 + ch * 14) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `GA${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: gaWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
+      }
+    }
+
+    if (chips.includes('segapcm')) {
+      // SegaPCM(VGM: OutRun/After Burner等): 16ch ステレオPCM。GA1-4行と同じ3段階表示
+      // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。デルタレジスタで
+      // 1サンプルを音階演奏するチップなので、音程が取れれば絶対音名になる。
+      // L/R列はch毎のL/R音量(7bit)を0-15へ丸めた値。手動キャリブレーションもGA/NA行と共通。
+      const live = extraSnaps && extraSnaps.segapcmLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.segapcm ? extraSnaps.segapcm[frameIdx] : null);
+      const spWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 16; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (200 + ch * 9) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `SP${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 127,
+          wave: spWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
+      }
+    }
+
+    if (chips.includes('c140')) {
+      // C140(VGM: ナムコSystem 2/21): 24ch ステレオPCM。SP/GA行と同じ3段階表示
+      // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。System 2はメロディも
+      // C140で弾く曲が多く、周波数レジスタ由来のrateがピッチベンドも追従する。
+      const live = extraSnaps && extraSnaps.c140Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.c140 ? extraSnaps.c140[frameIdx] : null);
+      const cnWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 24; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (330 + ch * 6) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `CN${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: cnWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
       }
     }
 
@@ -1453,6 +1584,8 @@
   function opnExtraComments(p) {
     const lines = [];
     if (p.ops.some(o => o.SE)) lines.push('; ssg-eg ' + p.ops.map(o => o.SE).join(' ') + ' (op1..op4)');
+    // OPM(YM2151)のみ: DT2(粗デチューン 0/+600/+781/+950セント)。OPNには無いフィールド
+    if (p.ops.some(o => o.DT2)) lines.push('; dt2 ' + p.ops.map(o => o.DT2 || 0).join(' ') + ' (op1..op4)');
     lines.push(`; ams ${p.AMS} pms ${p.PMS} pan ${p.L ? 'L' : '-'}${p.R ? 'R' : '-'}`);
     return lines.join('\n');
   }
@@ -2777,7 +2910,7 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'segapcm', 'c140', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
@@ -2800,6 +2933,10 @@
       this._extraSnaps.snLive = typeof result.getSn76489 === 'function' ? result.getSn76489 : null;
       this._extraSnaps.ymLive = typeof result.getYm2612 === 'function' ? result.getYm2612 : null;
       this._extraSnaps.ym2610FmLive = typeof result.getYm2610Fm === 'function' ? result.getYm2610Fm : null;
+      this._extraSnaps.ym2151Live = typeof result.getYm2151 === 'function' ? result.getYm2151 : null;
+      this._extraSnaps.ga20Live = typeof result.getGa20 === 'function' ? result.getGa20 : null;
+      this._extraSnaps.segapcmLive = typeof result.getSegaPcm === 'function' ? result.getSegaPcm : null;
+      this._extraSnaps.c140Live = typeof result.getC140 === 'function' ? result.getC140 : null;
       this._extraSnaps.pwmLive = typeof result.getPwm === 'function' ? result.getPwm : null;
       this._extraSnaps.rf5c164Live = typeof result.getRf5c164 === 'function' ? result.getRf5c164 : null;
       this._extraSnaps.rf5c68Live = typeof result.getRf5c68 === 'function' ? result.getRf5c68 : null;
@@ -2873,20 +3010,11 @@
     // タイムラインへ連結したい呼び出し側のために、差し替えず配列を返す版を分離した。
     // extra(省略可): extraSnapsへ追加でマージする先読み配列({sn: [...]}等。VGMのSN76489ロール用)。
     buildRollTracksFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots, extra) {
-      if (!regSnapshots || totalFrames <= 0) return null;
-      const wl = writeLog || [];
-      const extraSnaps = Object.assign({}, extra || {}, {
-        vrc7: chips.includes('vrc7') ? buildVrc7Snapshots(wl) : null,
-        n163: chips.includes('n163')
-          ? (n163Snapshots && n163Snapshots.length ? buildN163SnapshotsFromLiveRam(n163Snapshots) : buildN163Snapshots(wl))
-          : null,
-        fme7: chips.includes('fme7') ? buildFme7Snapshots(wl) : null,
-      });
-      const frameDur = samplesPerFrame / sampleRate;
-      return buildNoteTimelineFromChannelFrames(
-        (f) => extractChannels(regSnapshots[f] || {}, extraSnaps, f, chips),
-        totalFrames, frameDur
-      );
+      // 実体はモジュールレベルの純粋関数(buildRollTracksFromRegSnapshotsPure)。
+      // thisに依存しないため、キャプチャWorker(ロール構築のオフスレッド化、
+      // src/audio/roll-builders.js)からも UI.buildRollTracksFromRegSnapshots 経由で
+      // 同じコードを使えるよう分離した。
+      return buildRollTracksFromRegSnapshotsPure(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots, extra);
     }
 
     // 新しいファイルを読み込んだ直後などに呼ぶ。前のファイルの発音色が鍵盤/ピアノロールに
@@ -3977,6 +4105,28 @@
 
   }
 
+  // regSnapshots形式からピアノロールのトラック配列を構築する(KeyboardDisplayの
+  // 同名メソッドの実体。this非依存の純粋関数なので、キャプチャWorkerバンドル
+  // (NSF/VGMのロール構築オフスレッド化)からも直接呼べるようモジュールレベルに置く。
+  // 詳細コメントはKeyboardDisplay.setRollTimelineFromRegSnapshots参照)。
+  function buildRollTracksFromRegSnapshotsPure(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots, extra) {
+    if (!regSnapshots || totalFrames <= 0) return null;
+    const wl = writeLog || [];
+    const extraSnaps = Object.assign({}, extra || {}, {
+      vrc7: chips.includes('vrc7') ? buildVrc7Snapshots(wl) : null,
+      n163: chips.includes('n163')
+        ? (n163Snapshots && n163Snapshots.length ? buildN163SnapshotsFromLiveRam(n163Snapshots) : buildN163Snapshots(wl))
+        : null,
+      fme7: chips.includes('fme7') ? buildFme7Snapshots(wl) : null,
+    });
+    const frameDur = samplesPerFrame / sampleRate;
+    return buildNoteTimelineFromChannelFrames(
+      (f) => extractChannels(regSnapshots[f] || {}, extraSnaps, f, chips),
+      totalFrames, frameDur
+    );
+  }
+
   UI.KeyboardDisplay = KeyboardDisplay;
+  UI.buildRollTracksFromRegSnapshots = buildRollTracksFromRegSnapshotsPure; // roll-builders.js(Worker)用
   UI.midiToNoteName = midiToName; // main.js(ADPCM手動キャリブレーションのプロンプト表示)用
 })(window);

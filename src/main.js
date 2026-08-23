@@ -112,6 +112,18 @@
     return keyboardDisplay.getVolumeConfig();
   }
 
+  // GBS/HESのWAV書き出し用: 鍵盤のch別ミュート/音量を、素のAPUオブジェクトへ直接入れる。
+  // これらのプレイヤークラス(GbsPlayer/HesPlayer)はapplyMuteを持たず、
+  // 実再生では gbs/hes-stream-player.js のラッパーが同じことをしている。
+  // key: 設定オブジェクト内のチップ名('gb' / 'hes')。
+  function applyChannelSettingsToApu(apu, key) {
+    if (!apu) return;
+    const m = getChannelMuteConfig(); const me = m.expansion || m;
+    if (me[key]) Object.assign(apu.mute, me[key]);
+    const v = getChannelVolumeConfig(); const ve = v.expansion || v;
+    if (ve[key] && MML.Emu.applyVolume) MML.Emu.applyVolume(apu.vol, ve[key]);
+  }
+
   // ch別音量変更 → ストリーミング再生中は即時反映(scheduleRerenderOnMuteと同じ考え方。
   // SPCは専用配列形式のためonSpcVolumeChangeで別途扱う)
   function scheduleRerenderOnVolume() {
@@ -159,9 +171,19 @@
   //       "+20"/"-15" = 現在の表示音程からのセント補正 / 空欄 = 補正解除。
   // ym2610.js setSampleTuning がサンプル内容ハッシュをキーに localStorage へ永続化する。
   keyboardDisplay.onAdpcmCalibrate = (ch) => {
-    const a = vgmActivePlayer && vgmActivePlayer.player && vgmActivePlayer.player.adapterById.ym2610;
-    if (!a || !ch.adpcmSample) return;
-    const fm = a.fm, smp = ch.adpcmSample;
+    if (!ch.adpcmSample) return;
+    const smp = ch.adpcmSample;
+    const p = vgmActivePlayer && vgmActivePlayer.player;
+    // kind 'a'/'b'=YM2610(fmラッパーが解析を持つ)、'ga20'/'segapcm'=各チップ本体。
+    // いずれも samplePitch/setSampleTuning の同一インターフェース(内容ハッシュのlocalStorage共有)
+    const fm = smp.kind === 'ga20'
+      ? (p && p.adapterById.ga20 && p.adapterById.ga20.chip)
+      : smp.kind === 'segapcm'
+      ? (p && p.adapterById.segapcm && p.adapterById.segapcm.chip)
+      : smp.kind === 'c140'
+      ? (p && p.adapterById.c140 && p.adapterById.c140.chip)
+      : (p && p.adapterById.ym2610 && p.adapterById.ym2610.fm);
+    if (!fm) return;
     const info = fm.samplePitch(smp.kind, smp.start, smp.end);
     if (!info) return;
     const rate = ch.adpcmRate || 0;
@@ -351,12 +373,17 @@
   }
 
   // KSS(MSX)再生中のライブPSG/SCC/FMPACスナップショット(鍵盤表示用)
+  // ★チップ本体(psg/scc)のnullチェックが必須。KssReplayStreamPlayerは this.player = this の
+  // 自己参照で、psg/scc/opllは load() が呼ばれるまで null のまま。曲送り直後は「前の曲の
+  // monitorStateが毎フレーム新プレイヤーを触るが、まだload()前」という窓ができるため、
+  // ここを素通りさせると snapshotAY8910(null) で TypeError になり、monitorLoop の
+  // requestAnimationFrame 再登録に到達せず描画ループが永久に止まる。
   function liveKssPsg() {
-    if (!kssActivePlayer || !kssActivePlayer.player) return null;
+    if (!kssActivePlayer || !kssActivePlayer.player || !kssActivePlayer.player.psg) return null;
     return MML.Emu.snapshotAY8910(kssActivePlayer.player.psg);
   }
   function liveKssScc() {
-    if (!kssActivePlayer || !kssActivePlayer.player) return null;
+    if (!kssActivePlayer || !kssActivePlayer.player || !kssActivePlayer.player.scc) return null;
     return MML.Emu.snapshotSCC(kssActivePlayer.player.scc);
   }
   function liveKssOpll() {
@@ -478,6 +505,14 @@
   let mmlHighlightLastFrame = -1;
   let mmlHighlightLastFollowSrc = -1; // 直近で追随スクロールした対象spanのdata-s(重複防止)
   let mmlHighlightSuppressed = false; // ■停止直後はPlayを押すまでハイライトを出さない
+  // エディタ本文以外のMML(MMLコマンドヘルプの実演スニペット等)を再生している間だけ非nullになる。
+  // 鍵盤表示/ピアノロール/モニタ/シークバーは通常再生と同じ経路で動かしたいが、
+  // 再生位置ハイライトだけは「今エディタに写っていない本文」の文字位置を指してしまうので抑止する
+  let mmlExternalSourceLabel = null;
+  let mmlExternalSourceOnEnded = null;
+  // 実演再生中に退避しておくユーザーの再生範囲(青/赤ハンドル)。実演は常に全体を鳴らしたいが、
+  // ユーザーが自分の曲に設定した範囲を壊してはいけないので、開始時に退避し停止時に戻す
+  let mmlExternalSavedRange = null;
   let mmlRangeHighlightedElements = new Set(); // 現在.mml-range-selectedを付与中の要素（再生範囲=開始点〜終了点の常時表示）
   // .mml-playingはtext-shadow4枚重ねの縁取り付きで、classList操作自体は軽くても
   // ブラウザ側の再描画(ペイント)コストは無視できない。文字数の多いMMLではフレーム毎(60fps)の
@@ -561,7 +596,7 @@
     const duration = currentDuration();
     const isPartialRange = rangeEndSec !== null && duration > 0 &&
       (rangeStartSec > 0.001 || rangeEndSec < duration - 0.001);
-    const active = mmlHighlightEnableEl.checked && lastPlayMode === 'capture-mml' &&
+    const active = mmlHighlightEnableEl.checked && !mmlExternalSourceLabel && lastPlayMode === 'capture-mml' &&
       compiled && compiled.highlightRanges && isPartialRange;
     if (!active) {
       if (mmlRangeHighlightedElements.size > 0) {
@@ -642,7 +677,7 @@
 
   function updateMmlPlaybackHighlight(frameIndex) {
     const compiled = lastMmlCompiled;
-    const active = mmlHighlightEnableEl.checked && !mmlHighlightSuppressed && lastPlayMode === 'capture-mml' &&
+    const active = mmlHighlightEnableEl.checked && !mmlHighlightSuppressed && !mmlExternalSourceLabel && lastPlayMode === 'capture-mml' &&
       compiled && compiled.highlightRanges && frameIndex >= 0;
     if (!active) { if (mmlHighlightedElements.size > 0) clearMmlPlaybackHighlight(); return; }
     if (frameIndex === mmlHighlightLastFrame) return; // 位置が変わっていなければ再描画不要
@@ -708,7 +743,14 @@
     mmlHighlightLastFollowSrc = -1;
   }
 
-  function monitorLoop() {
+  // monitorLoop本体。例外が漏れると requestAnimationFrame の再登録に到達せず、
+  // 鍵盤・ピアノロール・レジスタモニタの描画が「ページを再読込するまで永久に」止まる。
+  // 1フレームぶんの不具合の代償としては大きすぎるので、monitorLoop側で必ず捕まえて
+  // 次フレームを繋ぐ(原因究明のためログは最初の1回だけ出す)。
+  // ★2026-08-22: KSS曲送り時に liveKssPsg が未ロードのチップを触って TypeError を投げ、
+  //   これでロールが死んでいた。個別の原因は直したが、構造としてもここで塞いでおく。
+  let monitorLoopErrorLogged = false;
+  function monitorLoopBody() {
     if (monitorState && monitorState.getPosition) {
       const frameDuration = monitorState.samplesPerFrame / monitorState.sampleRate;
       const pos = monitorState.getPosition();
@@ -743,7 +785,17 @@
         p.scanSilenceStep(SCAN_STEP_SONG_SECONDS);
       }
     }
-    requestAnimationFrame(monitorLoop);
+  }
+  function monitorLoop() {
+    try {
+      monitorLoopBody();
+    } catch (e) {
+      if (!monitorLoopErrorLogged) {
+        monitorLoopErrorLogged = true;
+        console.error('monitorLoopで例外(以後この警告は出しません。描画は継続します):', e);
+      }
+    }
+    requestAnimationFrame(monitorLoop); // 例外の有無に関わらず必ず次フレームを繋ぐ
   }
   requestAnimationFrame(monitorLoop);
 
@@ -1064,6 +1116,20 @@
   // そのたびに開始点/終了点が曲頭・曲末にリセットされると不便なため、既存の範囲を維持する。
   // 新しいdurationに収まるようクランプするだけで、初回(まだ範囲が無い)や
   // 範囲が潰れてしまった場合(曲が大幅に短くなった等)は全体にフォールバックする。
+  // 実演再生(ヘルプ)の前に退避した再生範囲を戻す。戻す先の曲は実演スニペットのままなので、
+  // 表示上の整合は次の通常コンパイル時のpreservePlaybackRange(クランプ)に任せる
+  function restoreExternalPlaybackRange() {
+    if (!mmlExternalSavedRange) return;
+    rangeStartSec = mmlExternalSavedRange.start;
+    rangeEndSec = mmlExternalSavedRange.end;
+    mmlExternalSavedRange = null;
+    rangeEndArmed = true;
+    const duration = currentDuration();
+    updateRangeMarkersUI(duration);
+    updateSeekTicksUI(duration);
+    updateMmlRangeHighlight();
+  }
+
   function preservePlaybackRange(duration) {
     duration = duration || 0;
     if (rangeEndSec === null) {
@@ -1291,7 +1357,7 @@
     playHesStream();
   }
 
-  // 1ファイル1曲の形式(SPC/VGM)の再生終了時に、zip(アーカイブ)を開いていれば次のエントリへ
+  // 1ファイル1曲の形式(SPC/VGM)の再生終了時に、アーカイブ(zip/7z)を開いていれば次のエントリへ
   // 進める(initUnifiedSoundFileWindow内で実体を差し替える。単体ファイルなら何もしない)。
   let archiveAutoAdvanceOrStop = () => {};
 
@@ -1363,9 +1429,15 @@
 
   function transportStop() {
     mmlHighlightSuppressed = true;
+    if (mmlExternalSourceOnEnded) { const fn = mmlExternalSourceOnEnded; mmlExternalSourceOnEnded = null; try { fn(); } catch (e) { console.error(e); } }
     mmlPlaybackStopped = true;
+    // ヘルプの実演再生(外部ソース)だった場合は、退避しておいたユーザーの再生範囲を戻す。
+    // 範囲を戻すのは停止位置を決めた後(復元後のrangeStartSecへシークすると、
+    // 実演スニペットの長さを超えた位置へ飛んでしまうため)
+    const wasExternal = mmlExternalSavedRange !== null;
     // 停止後は曲頭(0)ではなく再生範囲の開始点に戻る（開始点未設定時は従来通り0）
-    const restoreTo = rangeStartSec || 0;
+    const restoreTo = wasExternal ? 0 : (rangeStartSec || 0);
+    if (wasExternal) restoreExternalPlaybackRange();
     const p = currentTransportPlayer();
     if (p) {
       p.stop();
@@ -1746,7 +1818,7 @@
   // compileOnly=true: コンパイル・再生準備(モニタ/DPCMサンプル欄/チャンネル選択欄など各種UIの
   // 反映)のみ行い、実際の音声再生は開始しない。NSF2MML等の変換直後にMML本文だけを差し替えても
   // これらの要素は自動更新されないため、変換完了時にはこちらを呼ぶ
-  function prepareMmlStream(compileOnly) {
+  function prepareMmlStream(compileOnly, externalSource, externalLabel) {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
     const btnMmlCapture = document.getElementById('btnMmlCapture');
@@ -1758,7 +1830,8 @@
     // 呼び出し後では判定できない)。applyMmlPlaybackMarkers参照
     const isFreshRangeLoad = (rangeEndSec === null);
 
-    const compiled = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
+    mmlExternalSourceLabel = (externalSource != null) ? (externalLabel || T('ヘルプ')) : null;
+    const compiled = MML.Mml.compile(externalSource != null ? externalSource : mmlSourceEl.value, getMmlOpt());
     if (compiled.errors.length > 0) {
       captureOutputEl.innerHTML =
         `<div class="error">${compiled.errors.map(e => e.lineNo ? `[Line ${e.lineNo}] ${e.message}` : e.message).join('\n')}</div>`;
@@ -1786,7 +1859,7 @@
       lastMmlCompiled = compiled;
       lastPlayMode    = 'capture-mml';
       populateFollowChannelSelect(compiled.channelLetters);
-      keyboardDisplay.setSourceInfo('mml', compiled.meta && compiled.meta.title ? compiled.meta.title : ''); // タイトル行のバッジ「MML · 曲名」
+      keyboardDisplay.setSourceInfo('mml', mmlExternalSourceLabel || (compiled.meta && compiled.meta.title ? compiled.meta.title : '')); // タイトル行のバッジ「MML · 曲名」
 
       // モニタ用 regSnapshots をメインスレッドで即時構築（音声生成なし）
       resetN163Max();
@@ -1840,8 +1913,17 @@
     pre.textContent = out;
     captureOutputEl.appendChild(pre);
 
-    preservePlaybackRange(duration);
-    applyMmlPlaybackMarkers(compiled, duration, isFreshRangeLoad);
+    if (externalSource != null) {
+      // ヘルプの実演は必ずスニペット全体を鳴らす。ユーザーが設定していた再生範囲を
+      // そのまま使うと、範囲が短いときに実演が最初の一音で打ち切られてしまう
+      // (updateTransportUIの rangeEndSec 到達判定)。範囲は退避して停止時に戻す
+      if (!mmlExternalSavedRange) mmlExternalSavedRange = { start: rangeStartSec, end: rangeEndSec };
+      resetPlaybackRangeToFull(duration);
+    } else {
+      mmlExternalSavedRange = null;
+      preservePlaybackRange(duration);
+      applyMmlPlaybackMarkers(compiled, duration, isFreshRangeLoad);
+    }
     setSeekBarValue(0);
     setTimeDisplay(`00:00 / ${formatTime(duration)}`);
     btnMmlCapture.disabled = false;
@@ -1855,6 +1937,29 @@
   function runMmlStream() {
     prepareMmlStream(false);
   }
+
+  /*
+   * エディタ本文以外のMML文字列を、通常のMML再生とまったく同じ経路で鳴らす公開API。
+   * MMLコマンドヘルプ(src/ui/helpPanel.js)の項目ごとの「▶」から使う。
+   * 通常経路に乗せることで、鍵盤表示・ピアノロール・レジスタモニタ・シークバー・
+   * ch別ミュート/音量がヘルプの実演にもそのまま効く(再生位置ハイライトだけは
+   * エディタ本文と中身が違うので mmlExternalSourceLabel で抑止される)。
+   */
+  MML.UI = MML.UI || {};
+  MML.UI.MmlPlayback = {
+    // 戻り値: 実際に再生を開始できたか(コンパイルエラー時はfalse)
+    playSource(text, label, onEnded) {
+      // prepareMmlStreamは冒頭で既存再生をtransportStop()するので、終了コールバックの
+      // 登録はその後(=再生開始後)に行う。先に登録すると自分の開始処理で即座に呼ばれてしまう
+      mmlExternalSourceOnEnded = null;
+      prepareMmlStream(false, String(text || ''), label);
+      const started = !mmlPlaybackStopped && mmlExternalSourceLabel != null;
+      if (started && typeof onEnded === 'function') mmlExternalSourceOnEnded = onEnded;
+      return started;
+    },
+    stop() { transportStop(); },
+    isExternal() { return mmlExternalSourceLabel != null; }
+  };
 
   // --- Phase 6: DPCMコンバータ ---
   const dpcmFileEl = document.getElementById('dpcmFile');
@@ -2361,6 +2466,16 @@
     URL.revokeObjectURL(url);
   }
 
+  // ピアノロールのタイムライン構築は、キャプチャWorker内で行われた完成品を
+  // opt.roll.onRoll(timeline, info)で受け取って差し替えるだけになった
+  // (src/audio/roll-builders.js、capture-worker-client.js参照)。
+  // ★2026-08-21 経緯: Worker化でキャプチャが数十倍速になった結果、メインスレッドでの
+  // ロール再構築(1回あたりO(done)の曲全体走査)がprogressごとに走って長タスク=
+  // カクつきの主因になった(実測: VGM Neo Geo再生6秒間で累計975ms=16%占有、最大110ms)。
+  // 適応スロットルで16%→3.5%まで抑えたが、曲末近くの1回~90msのスパイクは残ったため、
+  // 構築そのものをWorkerへ移した(スロットルはWorker側とフォールバック時の
+  // メインスレッド構築に残っている: RollBuild.makeThrottle)。
+
   function playNsfStream() {
     if (!loadedNsfBytes || !loadedNsfHeader) {
       nsfFileStatusEl.innerHTML = '<div class="error">' + T('先にNSFファイルを読み込んでください。') + '</div>';
@@ -2454,17 +2569,25 @@
     // 情報源を兼ねる。onProgressで途中経過(その時点までのregSnapshots/writeLog、進行中の
     // 配列への参照なので以後キャプチャが進むにつれ自動的に埋まっていく)を受け取り、
     // 最初の1回でplayer.load()して再生を開始する(以降のチャンクを待つ必要はない)。
-    // ★ロール再構築(setRollTimelineFromRegSnapshots内のO(全フレーム)走査)は
-    // SPC/KSSと同じ理由で間引く(onProgress自体は音切れ防止のため高頻度のまま)。
-    const ROLL_REBUILD_INTERVAL_FRAMES = 120;
+    // ロールのタイムライン構築はキャプチャWorker内で行い、opt.roll.onRollで完成品を受け取る
     const myNsfRollToken = ++nsfRollToken;
     const nsfSamplesPerFrame = audioCtx.sampleRate / MML.Emu.FRAME_RATE_NTSC;
-    let lastNsfRollBuiltFrame = 0;
     let nsfPlaybackLoaded = false;
-    MML.Emu.captureSongAsync(loadedNsfBytes, {
+    // captureSongWorkerAsync: 6502+チップエミュレーションをWeb Workerで実行し、メイン
+    // スレッド(オーディオコールバック/ロール描画)とのCPU取り合いによるカクつきを解消する。
+    // Worker不可・バンドル未ビルド時は従来のメインスレッド版へ自動フォールバック
+    // (src/audio/capture-worker-client.js)。onProgress契約は完全に同一。
+    MML.Emu.captureSongWorkerAsync(loadedNsfBytes, {
       songIndex: songNo - 1, durationSeconds: captureDuration, sampleRate: audioCtx.sampleRate,
       regsOnly: true,
-      shouldCancel: () => myNsfRollToken !== nsfRollToken
+      shouldCancel: () => myNsfRollToken !== nsfRollToken,
+      roll: {
+        samplesPerFrame: nsfSamplesPerFrame, sampleRate: audioCtx.sampleRate, chips: captureChips,
+        onRoll: (timeline) => {
+          if (myNsfRollToken !== nsfRollToken) return;
+          keyboardDisplay.setRollTimeline(timeline);
+        }
+      }
     }, (done, total, regSnapshots, writeLog, n163Snapshots, initRegs, initWrites) => {
       if (myNsfRollToken !== nsfRollToken) return; // 曲切替/停止で無効化済み
 
@@ -2501,12 +2624,6 @@
 
       nsfBufferedFraction = total > 0 ? done / total : 0;
       updateSeekBufferedUI();
-
-      if (done - lastNsfRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && done < total) return;
-      lastNsfRollBuiltFrame = done;
-      keyboardDisplay.setRollTimelineFromRegSnapshots(
-        regSnapshots, writeLog, done, nsfSamplesPerFrame, audioCtx.sampleRate, captureChips, n163Snapshots
-      );
     }).catch(() => { /* 先読みキャプチャ失敗時は再生を開始できない */ });
   }
 
@@ -2688,36 +2805,8 @@
   // MML変換の出力を目で確認できる「デバッガ」的な役割も持たせたいため、ロール専用の
   // 抽出ロジックを別途持たず、MML変換と全く同じ抽出結果を描画する(ポルタメント/レガート
   // 対応はextractVoiceEvents側で行う。src/spc2mml/converter.js参照)。
-  function buildSpcRollTimeline(log, frameRate, srcnFineTune) {
-    const frameDur = 1 / frameRate;
-    // MML変換と同じ原音チューニング補正を渡し、ロール表示の音程も実機発音に一致させる
-    // (ロール=MML変換デバッガの方針。補正マップは再生開始時に一度だけ算出して使い回す)。
-    const voiceEvents = MML.SPC2MML.extractVoiceEvents(log, { srcnFineTune });
-    return voiceEvents.map((events, ch) => ({
-      id: `V${ch}`,
-      color: `hsl(${ch * 45},90%,65%)`,
-      notes: events
-        .filter(e => e.pitchSemi !== null)
-        // 音量シェーディング用の簡易近似: ADSRモード(adsr1 bit7=1)ならサスティンレベル(adsr2 bit5-7、
-        // 0-7)を目安の音量とする。GAINモード(直接指定)は減衰カーブを追わず常に最大音量扱い。
-        // pitchSemi は note-number 空間(57=A4=MIDI69)なので MIDI へは +12。
-        // 従来 +9 になっており、ロールがNSF/実機より3半音低く表示されていた
-        // (KSSロールの midi:e.note+12 と不整合。src/main.js buildKssRollTimeline参照)。
-        .map(e => {
-          // freqSeq(セント偏差オーバーレイ用): DSPピッチレジスタ(pitch=0x1000で原音32kHz)を
-          // pitchToSemitone(src/spc2mml/converter.js)と同じ式でHzへ変換する。
-          // continuousSemi(57基準)=12*log2(pitch/0x1000)+tune+60 → freq=440*2^((continuousSemi-57)/12)
-          // = 440*(pitch/0x1000)*2^((tune+3)/12)。tuneはpitchSemi算出時と同じサンプル別チューニング。
-          const tune = (srcnFineTune && srcnFineTune[e.srcn]) || 0;
-          const tuneFactor = Math.pow(2, (tune + 3) / 12);
-          return {
-            startSec: e.frame * frameDur, endSec: (e.frame + e.len) * frameDur, midi: e.pitchSemi + 12,
-            vol: (e.adsr1 & 0x80) ? (((e.adsr2 >> 5) & 7) / 7) : 1,
-            freqSeq: (e.pitchSeq || []).map(p => 440 * (p / 4096) * tuneFactor),
-          };
-        }),
-    }));
-  }
+  // SPCのロールタイムライン構築はMML.RollBuild.spc(src/audio/roll-builders.js)へ移設
+  // (キャプチャWorker内で構築するため。他フォーマットも同様)
 
   function playSpcStream() {
     if (!loadedSpcBytes) {
@@ -2794,14 +2883,15 @@
     // キャプチャが進むにつれ自動的に埋まっていく)を受け取り、最初の1回でplayer.load()
     // して再生を開始する(以降のチャンクを待つ必要はない)。
     //
-    // ★ロール再構築(setRollTimeline内のO(全フレーム)走査)は従来通り間引く(onProgress
-    // 自体は音切れ防止のため高頻度のまま、captureAsync自体のyield頻度は変えない)。
-    const ROLL_REBUILD_INTERVAL_FRAMES = 120;
+    // ロールのタイムライン構築はキャプチャWorker内で行い、onRollで完成品を受け取る
     keyboardDisplay.setRollTimeline(null);
     const myRollToken = ++spcRollToken;
-    let lastRollBuiltFrame = 0;
     let spcPlaybackLoaded = false;
-    MML.SPC2MML.captureAsync(loadedSpcBytes, captureDuration, (frame, frames, frameLog) => {
+    // captureSpcSongWorkerAsync: SPC700+DSPエミュレーションをWeb Workerで実行
+    // (NSF/KSS/GBS/VGMと同じ仕組み、src/audio/capture-worker-client.js。Worker不可時は
+    // メインスレッド版captureAsyncへ自動フォールバック)。SPCはフレームレンダリングが
+    // 特に重く(CPU+DSPフル駆動)、Worker化の体感効果が最も大きいフォーマット。
+    MML.Emu.captureSpcSongWorkerAsync(loadedSpcBytes, captureDuration, (frame, frames, frameLog) => {
       if (myRollToken !== spcRollToken) return; // 曲切替/停止で無効化済み
 
       if (!spcPlaybackLoaded) {
@@ -2813,11 +2903,13 @@
 
       spcBufferedFraction = frames > 0 ? frame / frames : 0;
       updateSeekBufferedUI();
-
-      if (frame - lastRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && frame < frames) return;
-      lastRollBuiltFrame = frame;
-      keyboardDisplay.setRollTimeline(buildSpcRollTimeline(frameLog.slice(0, frame), MML.SPC2MML.FRAME_RATE, spcFineTune));
-    }, () => myRollToken !== spcRollToken).catch((e) => {
+    }, () => myRollToken !== spcRollToken, {
+      fineTune: spcFineTune,
+      onRoll: (timeline) => {
+        if (myRollToken !== spcRollToken) return;
+        keyboardDisplay.setRollTimeline(timeline);
+      }
+    }).catch((e) => {
       // 先読み失敗時はピアノロールなしで続行するが、原因を追えるようログには残す
       console.error('SPC先読みキャプチャに失敗:', e);
     });
@@ -3477,31 +3569,14 @@
   //   (src/emulator/kssBus.js の sccDisable)ので確実に非搭載。
   // ・それ以外は先読みキャプチャでSCCレジスタへの実書込みを検出できたときだけ出す
   //   (PSG+FMPACだけの曲でKS1-KS5の空行が5行居座るのを防ぐ)。
-  function kssHasSccDecoder(header) {
-    return !!header && !(header.bankMode === '16K' && header.device.ramMode);
-  }
+  // kssHasSccDecoder / kssWriteLogUsesScc は MML.RollBuild(src/audio/roll-builders.js)へ
+  // 移設(SCC使用判定はキャプチャWorker内のロール構築ジョブが行い、onRollのinfo.sccUsedで
+  // 受け取る)
   function kssMonitorChips(header, sccUsed) {
     const chips = ['kss', 'kssPsg'];
     if (sccUsed) chips.push('kssScc');
     if (header && header.device.mode === 'MSX' && header.device.fmpac) chips.push('kssOpll');
     return chips;
-  }
-
-  // writeLogのフレーム範囲[from,to)にSCC音源レジスタ(周波数/音量/有効ビット)への
-  // 書込みがあるか。波形テーブルはクリア目的で0書きされることがあるため判定材料にせず、
-  // 実際に発音に効くレジスタだけを見る。classic(SCC)は0x80-0x8F、SCC+(SCC-I)は
-  // 0xA0-0xAFに並ぶので両方を対象にする(src/emulator/expansion/sccAudio.js参照)。
-  function kssWriteLogUsesScc(writeLog, from, to) {
-    for (let f = from; f < to && f < writeLog.length; f++) {
-      for (const w of writeLog[f]) {
-        if (w.io) continue;
-        const off = (w.addr >= 0x9800 && w.addr <= 0x98FF) ? w.addr - 0x9800
-          : (w.addr >= 0xB800 && w.addr <= 0xB8FF) ? w.addr - 0xB800 : -1;
-        if (off < 0 || w.value === 0) continue;
-        if ((off >= 0x80 && off <= 0x8F) || (off >= 0xA0 && off <= 0xAF)) return true;
-      }
-    }
-    return false;
   }
 
   function renderKssHeader(h) {
@@ -3562,64 +3637,7 @@
     updateKssPlayButton();
   }
 
-  // KSS captureKssSongAsync() の結果(writeLog)からピアノロール用タイムライン(共通形状)を
-  // 構築する。PSG→KP/SCC→KS/FMPAC→KF は src/ui/keyboard.js の extractChannels() が
-  // kssPsg/kssScc/kssOpll チップ向けに使っている色分けと揃えている。
-  // clockOverride(省略可): AY/SCC抽出器に渡すZ80相当クロック。KSSは常にMSXの3.58MHz、
-  // VGMはチップごとに違う(vgmPlayer.js captureVgmSongAsync の kss.clock)ので呼び出し側が渡す。
-  function buildKssRollTimeline(writeLog, totalFrames, frameRate, header, sccUsed, clockOverride) {
-    const frameDur = 1 / frameRate;
-    const clock = clockOverride || MML.KSS.Z80_CLOCK;
-    // volume は ay/scc/opll いずれも0-15(4bit)なので/15で0-1に正規化する。
-    // note: Kss2MmlExpansion(ay/scc/opll)のfreqToNoteNumberはMML変換側で使う共通の
-    // ノート番号体系(57+12*log2(freq/440)、nsf2mml/expansion/fme7.js等でも同じ)を採用しており、
-    // 標準MIDI(69+12*log2(freq/440)、keyboard.jsのfreqToMidiと同じ)より1オクターブ(12)低い。
-    // MML変換自体はこの体系で正しく動くため触らず、鍵盤描画に合わせるロール側でのみ+12補正する。
-    //
-    // ★ay/scc/opllの抽出イベントは「音量が1でも変わったら別イベント」に切れている
-    // (MML変換側が音量エンベロープ@v<n>を作るのに必要なため)。実機ドライバは毎フレーム
-    // 音量ニブルを書き直すのが普通なので、そのままロールに描くと1つのロングトーンが
-    // 1フレーム幅の短冊数百本に分解されて「ロールが壊れて見える」。ピアノロールでは
-    // 音程が同じまま途切れず続いている区間を1本の音符に統合する。
-    // ただしキーオンによる打ち直し(retrigger)だけは音符の区切りとして残す。
-    const toNotes = (events) => {
-      const out = [];
-      let endFrame = -1;
-      for (const e of events) {
-        if (e.note === null) { endFrame = -1; continue; }
-        const prev = out[out.length - 1];
-        if (prev && !e.retrigger && endFrame === e.start && prev.midi === e.note + 12) {
-          prev.endSec = e.end * frameDur;
-          prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
-          if (e.freqSeq) prev.freqSeq.push(...e.freqSeq);
-        } else {
-          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15, freqSeq: e.freqSeq ? e.freqSeq.slice() : [] });
-        }
-        endFrame = e.end;
-      }
-      return out;
-    };
-    const tracks = [];
-
-    const ayResult = MML.Kss2MmlExpansion.ay(writeLog, totalFrames, clock);
-    const KP_COLS = ['#66ddff', '#33aaff', '#0077dd'];
-    ayResult.channels.forEach((ch, i) => tracks.push({ id: `KP${i + 1}`, color: KP_COLS[i], notes: toNotes(ch.events) }));
-
-    // SCC未使用の曲では鍵盤表示側にもKS行を出さないので、ロールのトラックも作らない
-    // (トラックidと鍵盤の行が1対1で対応している必要がある)
-    if (sccUsed) {
-      const sccResult = MML.Kss2MmlExpansion.scc(writeLog, totalFrames, clock);
-      sccResult.channels.forEach((ch, i) => tracks.push({ id: `KS${i + 1}`, color: `hsl(${(280 + i * 20) % 360},80%,60%)`, notes: toNotes(ch.events) }));
-    }
-
-    if (header && header.device.mode === 'MSX' && header.device.fmpac) {
-      const opllResult = MML.Kss2MmlExpansion.opll(writeLog, totalFrames);
-      const KF_COLS = ['#ffcc00','#ffdd44','#ffe566','#ffee88','#fff2aa','#fff8cc','#ffd9a0','#ffe0b0','#ffe8c0'];
-      opllResult.channels.forEach((ch, i) => tracks.push({ id: `KF${i + 1}`, color: KF_COLS[i % KF_COLS.length], notes: toNotes(ch.events) }));
-    }
-
-    return tracks;
-  }
+  // KSSのロールタイムライン構築はMML.RollBuild.kss(src/audio/roll-builders.js)へ移設
 
   function updateKssPlayButton() {
     const btn = document.getElementById('btnKssFilePlay');
@@ -3706,6 +3724,12 @@
         getKssScc: liveKssScc,
         getKssOpll: liveKssOpll
       }, () => kssActivePlayer ? kssActivePlayer.getPosition() : 0, kssMonitorChips(loadedKssHeader, sccUsed));
+      // ★setMonitorSource()はsetSource()経由でロールのタイムラインを必ず捨てる
+      // (keyboard.js setSource末尾の this._rollTimeline = null)。既に受け取っている
+      // 最新のタイムラインをここで戻さないと、onRollがonProgressより先に届いた場合に
+      // ロールが空のまま復帰しない。曲送りでワーカーが温まっていると必ずこの順序になり、
+      // 「前の絵が残ったまま音符が出ない/動かない」状態になっていた。
+      if (kssLastRollTimeline) keyboardDisplay.setRollTimeline(kssLastRollTimeline);
     }
 
     resetPlaybackRangeToFull(captureDuration);
@@ -3722,23 +3746,38 @@
     // onProgressで途中経過(その時点までのwriteLog、進行中の配列への参照なので以後
     // キャプチャが進むにつれ自動的に埋まっていく)を受け取り、最初の1回でplayer.load()
     // して再生を開始する(以降のチャンクを待つ必要はない)。
-    // ★ロール再構築(setRollTimeline内のO(全フレーム)走査)はSPCと同じ理由で間引く
-    // (onProgress自体は音切れ防止のため高頻度のまま、captureKssSongAsync自体のyield頻度は
-    // 変えない)。
-    const ROLL_REBUILD_INTERVAL_FRAMES = 120;
+    // ロールのタイムライン構築(SCC使用判定込み)はキャプチャWorker内で行い、
+    // onRoll(timeline, info)で完成品を受け取る
     keyboardDisplay.setRollTimeline(null);
     const myKssRollToken = ++kssRollToken;
-    let lastKssRollBuiltFrame = 0;
     // SCCは「使われたと分かった時点で行を足す」単調な運用にする(出したり消したりすると
-    // 再生中に行数が揺れて見づらいため)。バス側でSCCを殺しているファイルは常に非表示。
+    // 再生中に行数が揺れて見づらいため)。判定はWorker側のロール構築ジョブが行う。
     let kssSccUsed = false;
-    let kssSccScanned = 0;
-    const kssSccPossible = kssHasSccDecoder(loadedKssHeader);
     let kssPlaybackLoaded = false;
-    MML.Emu.captureKssSongAsync(loadedKssBytes, {
+    // 直近にWorkerから受け取ったロールのタイムライン。setMonitorSource()がロールを
+    // 捨てた直後に復元するために保持する(applyKssMonitorSource参照)。曲ごとに作り直す
+    // ローカル変数なので、前の曲のタイムラインが復元されることは無い。
+    let kssLastRollTimeline = null;
+    // captureKssSongWorkerAsync: エミュレーションをWeb Workerで実行(NSFと同じ仕組み、
+    // src/audio/capture-worker-client.js。Worker不可時はメインスレッド版へ自動フォールバック)
+    MML.Emu.captureKssSongWorkerAsync(loadedKssBytes, {
       songIndex: songNo, durationSeconds: captureDuration, sampleRate: audioCtx.sampleRate,
       regsOnly: true,
-      shouldCancel: () => myKssRollToken !== kssRollToken
+      shouldCancel: () => myKssRollToken !== kssRollToken,
+      roll: {
+        frameRate: kssFrameRate, header: loadedKssHeader,
+        onRoll: (timeline, info) => {
+          if (myKssRollToken !== kssRollToken) return;
+          kssLastRollTimeline = timeline; // setMonitorSource後の復元用(applyKssMonitorSource参照)
+          if (info.sccUsed && !kssSccUsed) {
+            kssSccUsed = true;
+            // SCC行を追加して鍵盤表示を組み直す(setMonitorSource()はロールも初期化する
+            // ため、この直後のsetRollTimelineで必ず新しいタイムラインが入る)
+            applyKssMonitorSource(kssSccUsed);
+          }
+          keyboardDisplay.setRollTimeline(timeline);
+        }
+      }
     }, (done, total, writeLog) => {
       if (myKssRollToken !== kssRollToken) return; // 曲切替/停止で無効化済み
 
@@ -3752,19 +3791,6 @@
 
       kssBufferedFraction = total > 0 ? done / total : 0;
       updateSeekBufferedUI();
-
-      if (kssSccPossible && !kssSccUsed && kssWriteLogUsesScc(writeLog, kssSccScanned, done)) {
-        kssSccUsed = true;
-        // SCC行を追加して鍵盤表示を組み直す。setMonitorSource()はロールも初期化して
-        // しまうので、同じコールバック内で必ず作り直させる(間引きを一度だけ解除)。
-        applyKssMonitorSource(kssSccUsed);
-        lastKssRollBuiltFrame = -Infinity;
-      }
-      kssSccScanned = done;
-      if (done - lastKssRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && done < total) return;
-      lastKssRollBuiltFrame = done;
-      keyboardDisplay.setRollTimeline(
-        buildKssRollTimeline(writeLog.slice(0, done), done, kssFrameRate, loadedKssHeader, kssSccUsed));
     }).catch((e) => {
       // 先読み失敗時はピアノロールなしで続行するが、原因を追えるようログには残す
       // (ここを完全に握り潰していたため、Kss2MmlExpansion.sccのTypeErrorで
@@ -3968,46 +3994,8 @@
 
   // captureGbsSongAsync() の結果(snapshots)からピアノロール用タイムライン(共通形状)を
   // 構築する。src/gbs2mml/expansion/*.js の抽出関数をenvReg/waveReg無し(ロールは
-  // 音色番号/エンベロープを必要としない)で呼び出すのはbuildKssRollTimelineと同じ考え方。
-  function buildGbsRollTimeline(snapshots, frameRate) {
-    const frameDur = 1 / frameRate;
-    // toNotes: 音程が同じまま途切れず続いている区間を1本の音符に統合する
-    // (buildKssRollTimelineと同じ考え方。ただしGBは実トリガbitがあるため
-    // retrigger判定はtriggerSeqの変化そのもの=extraction側で既にイベント境界として
-    // 反映済みなので、ここでは単純にnote/startの連続性だけ見ればよい)。
-    const toNotes = (events) => {
-      const out = [];
-      let endFrame = -1;
-      for (const e of events) {
-        if (e.note === null) { endFrame = -1; continue; }
-        const prev = out[out.length - 1];
-        if (prev && endFrame === e.start && prev.midi === e.note + 12) {
-          prev.endSec = e.end * frameDur;
-          prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
-          if (e.freqSeq) prev.freqSeq.push(...e.freqSeq);
-        } else {
-          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15, freqSeq: e.freqSeq ? e.freqSeq.slice() : [] });
-        }
-        endFrame = e.end;
-      }
-      return out;
-    };
-    const tracks = [];
-    // ★pulse()の音量はhwEnvelope.js側で64Hz実機クロックとplayFps(=frameRate)の位相を
-    // 見て再計算するため、frameRateを渡さないとvolumeAt()内でNaNになりvol>0が常にfalseに
-    // なる(=無音扱い)。この呼び出しはhwEnvelope.js導入時から一度もframeRateを渡して
-    // おらず、GB1/GB2/GNのロール行が常に空になっていた(waveだけが表示されていた原因。
-    // wave.jsは音量に生のvolumeShiftを直接使いplayFpsに依存しないため無症状だった)。
-    const ch1 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch1', null, frameRate);
-    const ch2 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch2', null, frameRate);
-    const noise = MML.Gbs2MmlExpansion.noise(snapshots, null, frameRate);
-    const wave = MML.Gbs2MmlExpansion.wave(snapshots);
-    tracks.push({ id: 'GB1', color: '#66ddff', notes: toNotes(ch1.events) });
-    tracks.push({ id: 'GB2', color: '#0077dd', notes: toNotes(ch2.events) });
-    tracks.push({ id: 'GN', color: '#aaaaaa', notes: toNotes(noise.events) });
-    tracks.push({ id: 'GW', color: '#ffcc00', notes: toNotes(wave.events) });
-    return tracks;
-  }
+  // 音色番号/エンベロープを必要としない)で呼び出すのはMML.RollBuild.kss(roll-builders.js)と同じ考え方。
+  // GBSのロールタイムライン構築はMML.RollBuild.gbs(src/audio/roll-builders.js)へ移設
 
   function updateGbsPlayButton() {
     const btn = document.getElementById('btnGbsFilePlay');
@@ -4091,15 +4079,25 @@
     // onProgressで途中経過(その時点までのsnapshots、進行中の配列への参照なので以後
     // キャプチャが進むにつれ自動的に埋まっていく)を受け取り、最初の1回でplayer.load()
     // して再生を開始する(以降のチャンクを待つ必要はない)。
-    const ROLL_REBUILD_INTERVAL_FRAMES = 120;
+    // ロールのタイムライン構築はキャプチャWorker内で行い、onRollで完成品を受け取る
     keyboardDisplay.setRollTimeline(null);
     const myGbsRollToken = ++gbsRollToken;
-    let lastGbsRollBuiltFrame = 0;
     let gbsPlaybackLoaded = false;
-    MML.Emu.captureGbsSongAsync(loadedGbsBytes, {
+    let gbsLastRollTimeline = null; // setMonitorSource後の復元用(KSSと同じ理由)
+    // captureGbsSongWorkerAsync: エミュレーションをWeb Workerで実行(NSF/KSSと同じ仕組み、
+    // src/audio/capture-worker-client.js。Worker不可時はメインスレッド版へ自動フォールバック)
+    MML.Emu.captureGbsSongWorkerAsync(loadedGbsBytes, {
       songIndex, durationSeconds: captureDuration, sampleRate: audioCtx.sampleRate,
       regsOnly: true,
-      shouldCancel: () => myGbsRollToken !== gbsRollToken
+      shouldCancel: () => myGbsRollToken !== gbsRollToken,
+      roll: {
+        frameRate: gbsFrameRate,
+        onRoll: (timeline) => {
+          if (myGbsRollToken !== gbsRollToken) return;
+          gbsLastRollTimeline = timeline; // setMonitorSource後の復元用(KSSと同じ理由)
+          keyboardDisplay.setRollTimeline(timeline);
+        }
+      }
     }, (done, total, data) => {
       if (myGbsRollToken !== gbsRollToken) return; // 曲切替/停止で無効化済み
 
@@ -4115,15 +4113,13 @@
           writeLog: [], cpuSnapshots: null, memSnapshots: null,
           getGbsApu: liveGbsApu
         }, () => gbsActivePlayer ? gbsActivePlayer.getPosition() : 0, ['gbs']);
+        // setMonitorSource()はロールを捨てるので、既に届いていれば戻す(KSSと同じ)
+        if (gbsLastRollTimeline) keyboardDisplay.setRollTimeline(gbsLastRollTimeline);
         transportPlay();
       }
 
       gbsBufferedFraction = total > 0 ? done / total : 0;
       updateSeekBufferedUI();
-
-      if (done - lastGbsRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && done < total) return;
-      lastGbsRollBuiltFrame = done;
-      keyboardDisplay.setRollTimeline(buildGbsRollTimeline(data.snapshots.slice(0, done), gbsFrameRate));
     }).catch((e) => {
       // 先読み失敗時はピアノロールなしで続行するが、原因を追えるようログには残す(KSSと同じ理由)
       console.error('GBS先読みキャプチャに失敗:', e);
@@ -4160,6 +4156,9 @@
 
     const player = new MML.Emu.GbsPlayer(loadedGbsBytes);
     player.initSong(songIndex);
+    // ★2026-08-22: WAV書き出しにも鍵盤のch別ミュート/音量を反映(VGMと同じ抜けがあった)。
+    // GbsPlayer自体にはapplyMuteが無く、gbs-stream-player.jsと同じくapuへ直接入れる。
+    applyChannelSettingsToApu(player.apu, 'gb');
     const totalFrames = Math.ceil(duration * player.frameRate);
     const totalSamples = Math.round(totalFrames * sampleRate / player.frameRate);
     const audioL = new Float32Array(totalSamples);
@@ -4329,50 +4328,8 @@
 
   // captureHesSongAsync() の結果(snapshots)からピアノロール用タイムライン(共通形状)を
   // 構築する。src/hes2mml/expansion/*.js の抽出関数をenvReg/waveReg無し(ロールは
-  // 音色番号/エンベロープを必要としない)で呼び出すのはbuildKssRollTimelineと同じ考え方。
-  function buildHesRollTimeline(snapshots, frameRate) {
-    const frameDur = 1 / frameRate;
-    const toNotes = (events) => {
-      const out = [];
-      let endFrame = -1;
-      for (const e of events) {
-        if (e.note === null) { endFrame = -1; continue; }
-        const prev = out[out.length - 1];
-        if (prev && endFrame === e.start && prev.midi === e.note + 12) {
-          prev.endSec = e.end * frameDur;
-          prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
-          if (e.freqSeq) prev.freqSeq.push(...e.freqSeq);
-        } else {
-          out.push({ startSec: e.start * frameDur, endSec: e.end * frameDur, midi: e.note + 12, vol: (e.volume || 0) / 15, freqSeq: e.freqSeq ? e.freqSeq.slice() : [] });
-        }
-        endFrame = e.end;
-      }
-      return out;
-    };
-    const tracks = [];
-    const waveResult = MML.Hes2MmlExpansion.wave(snapshots);
-    // id/色はkeyboard.js extractChannels()のisHesブロック(PSG0-5, PCOLS)と揃える
-    // (揃えないとch設定の色ピッカー・鍵盤表示・ピアノロールで同じchなのに色が食い違う)。
-    const colors = ['#66ddff', '#33aaff', '#0099ff', '#33cc99', '#ffaa00', '#ff6699'];
-    // ノイズはch4/5(ノイズ生成回路を持つ物理ch)独自の発音であり、行/鍵盤表示でも
-    // 同じPSG4/PSG5の行がwave/noiseを兼ねる(keyboard.js extractChannels参照)。
-    // 以前はMML.Hes2MmlExpansion.noise()(MML書き出し用、2A03への借用は物理1chしか
-    // 無いためch5優先で1本にマージ)の結果をどの行にも属さない別id('PN')の孤立トラック
-    // として表示していたため、①色が行と食い違う②ミュートしてもch4/5どちらのミュートも
-    // 効かない③該当ch(ノイズ発音中)の行自体はwaveの休符のまま何も表示されない、
-    // という3点セットのバグになっていた。ロールは6ch独立表示なので、noiseChannel()で
-    // ch4とch5をそれぞれ個別に(マージ無しで)抽出し、そのchの波形音符と同じトラックへ
-    // 合流させる(wave/noiseは同一chで排他なので時間的に重ならず、単純にマージしてよい)。
-    waveResult.channels.forEach((ch, i) => {
-      let notes = toNotes(ch.events);
-      if (i === 4 || i === 5) {
-        const noiseNotes = toNotes(MML.Hes2MmlExpansion.noiseChannel(snapshots, i).events);
-        if (noiseNotes.length) notes = notes.concat(noiseNotes).sort((a, b) => a.startSec - b.startSec);
-      }
-      tracks.push({ id: `PSG${i}`, color: colors[i % colors.length], notes });
-    });
-    return tracks;
-  }
+  // 音色番号/エンベロープを必要としない)で呼び出すのはMML.RollBuild.kss(roll-builders.js)と同じ考え方。
+  // HESのロールタイムライン構築はMML.RollBuild.hes(src/audio/roll-builders.js)へ移設
 
   function updateHesPlayButton() {
     const btn = document.getElementById('btnHesFilePlay');
@@ -4457,17 +4414,38 @@
     hesFileStatusEl.appendChild(pre);
 
     // バックグラウンドキャプチャ(regsOnly)。ピアノロールと実再生の両方の情報源を兼ねる。
-    const ROLL_REBUILD_INTERVAL_FRAMES = 120;
+    // ロールのタイムライン構築(DDA担当ch判定込み)はキャプチャWorker内で行い、
+    // onRoll(timeline, info)で完成品を受け取る
     keyboardDisplay.setRollTimeline(null);
     const myHesRollToken = ++hesRollToken;
-    let lastHesRollBuiltFrame = 0;
     let hesPlaybackLoaded = false;
-    MML.Emu.captureHesSongAsync(loadedHesBytes, {
+    let hesLastRollTimeline = null; // setMonitorSource後の復元用(KSSと同じ理由)
+    let hesLatestData = null; // onRollでsetDdaChannelに渡す生dpcmTrace(進行中の鏡像)への参照
+    // captureHesSongWorkerAsync: HuC6280+APUエミュレーションをWeb Workerで実行
+    // (他5フォーマットと同じ仕組み、src/audio/capture-worker-client.js。Worker不可時は
+    // メインスレッド版へ自動フォールバック)
+    MML.Emu.captureHesSongWorkerAsync(loadedHesBytes, {
       track, durationSeconds: captureDuration, sampleRate: audioCtx.sampleRate,
       regsOnly: true,
-      shouldCancel: () => myHesRollToken !== hesRollToken
+      shouldCancel: () => myHesRollToken !== hesRollToken,
+      roll: {
+        frameRate: hesFrameRate,
+        onRoll: (timeline, info) => {
+          if (myHesRollToken !== hesRollToken) return;
+          hesLastRollTimeline = timeline; // setMonitorSource後の復元用(KSSと同じ理由)
+          keyboardDisplay.setRollTimeline(timeline);
+          // DDA(PCM)担当ch: 判定(曲全体でDDA区間が最も長い1ch)はWorker側ジョブが行い、
+          // 実際の再生に使う生のdpcmTrace列はこちらが保持する鏡像から渡す
+          // (hes-stream-player.js HesReplayStreamPlayer.setDdaChannel()参照)。
+          if (info && info.ddaChannel !== undefined && hesLatestData) {
+            player.setDdaChannel(info.ddaChannel,
+              info.ddaChannel >= 0 ? hesLatestData.dpcmTrace[info.ddaChannel] : null);
+          }
+        }
+      }
     }, (done, total, data) => {
       if (myHesRollToken !== hesRollToken) return; // 曲切替/停止で無効化済み
+      hesLatestData = data;
 
       if (!hesPlaybackLoaded) {
         hesPlaybackLoaded = true;
@@ -4480,26 +4458,13 @@
           writeLog: [], cpuSnapshots: null, memSnapshots: null,
           getHesApu: liveHesApu
         }, () => hesActivePlayer ? hesActivePlayer.getPosition() : 0, ['hes']);
+        // setMonitorSource()はロールを捨てるので、既に届いていれば戻す(KSSと同じ)
+        if (hesLastRollTimeline) keyboardDisplay.setRollTimeline(hesLastRollTimeline);
         transportPlay();
       }
 
       hesBufferedFraction = total > 0 ? done / total : 0;
       updateSeekBufferedUI();
-
-      if (done - lastHesRollBuiltFrame < ROLL_REBUILD_INTERVAL_FRAMES && done < total) return;
-      lastHesRollBuiltFrame = done;
-      const snapsSoFar = data.snapshots.slice(0, done);
-      keyboardDisplay.setRollTimeline(buildHesRollTimeline(snapsSoFar, hesFrameRate));
-      // DDA(PCM)を担当するchの判定も同じ頻度で更新する(main.js playHesStream()冒頭の
-      // 設計方針、hes-stream-player.js HesReplayStreamPlayer.setDdaChannel()参照)。
-      // どのchをDDAとして扱うかの判定(曲全体でDDA区間が最も長い1ch)だけhes2mml変換と
-      // 共通のロジック(extractDdaClips)を借りるが、実際の再生には生のdpcmTrace列を
-      // そのまま渡す(クリップ化・DMCエンコードは経由しない。hes-stream-player.js
-      // 冒頭コメント参照: それらを経由すると「以前(CPU駆動ライブ再生)の音」と別物になる)。
-      if (data.dpcmTrace && data.controlTrace) {
-        const ddaInfo = MML.Hes2MmlExpansion.extractDdaClips(snapsSoFar, data.dpcmTrace, data.controlTrace, hesFrameRate);
-        player.setDdaChannel(ddaInfo.channel, ddaInfo.channel >= 0 ? data.dpcmTrace[ddaInfo.channel] : null);
-      }
     }).catch((e) => {
       console.error('HES先読みキャプチャに失敗:', e);
     });
@@ -4532,6 +4497,8 @@
 
     const player = new MML.Emu.HesPlayer(loadedHesBytes);
     player.initSong(track);
+    // ★2026-08-22: WAV書き出しにも鍵盤のch別ミュート/音量を反映(VGMと同じ抜けがあった)
+    applyChannelSettingsToApu(player.apu, 'hes');
     const totalFrames = Math.ceil(duration * player.frameRate);
     const totalSamples = Math.round(totalFrames * sampleRate / player.frameRate);
     const audioL = new Float32Array(totalSamples);
@@ -4627,7 +4594,7 @@
 
   // ── VGM ファイル読み込み・再生 ────────────────────────────────────
   // ★VGMはCPUを持たないレジスタ書込みログ(src/emulator/vgmPlayer.js冒頭コメント)。
-  //   1ファイル1曲で曲番号の概念が無く、曲送りはアーカイブ(zip)バー側が担う
+  //   1ファイル1曲で曲番号の概念が無く、曲送りはアーカイブ(zip/7z)バー側が担う
   //   (initUnifiedSoundFileWindow参照)。再生はVgmStreamPlayer(直接駆動)で、
   //   ロール用の先読みキャプチャ(captureVgmSongAsync)はチップのclock()を回さない
   //   コマンド消化だけなので一瞬で終わる(GBS/HESのような二重エミュレーションにならない)。
@@ -4745,6 +4712,10 @@
     if (h.chips.ym2413) chips.push('kssOpll');
     if (h.chips.sn76489) chips.push('sn76489');
     if (h.chips.ym2612) chips.push('ym2612');
+    if (h.chips.ym2151) chips.push('ym2151');
+    if (h.chips.ga20) chips.push('ga20');
+    if (h.chips.segapcm) chips.push('segapcm');
+    if (h.chips.c140) chips.push('c140');
     if (h.chips.ym2610) { chips.push('ym2610fm'); chips.push('kssPsg'); } // SSGはKSS PSG行(KP1-3)を流用
     if (h.chips.pwm) chips.push('pwm');
     if (h.chips.rf5c164) chips.push('rf5c164');
@@ -4778,6 +4749,14 @@
 ,
     getYm2612: () => { const a = vgmAdapter('ym2612'); return a ? MML.Emu.snapshotYM2612(a.chip) : null; }
 ,
+    getYm2151: () => { const a = vgmAdapter('ym2151'); return a ? MML.Emu.snapshotYM2151(a.chip) : null; }
+,
+    getGa20: () => { const a = vgmAdapter('ga20'); return a ? MML.Emu.snapshotGA20(a.chip) : null; }
+,
+    getSegaPcm: () => { const a = vgmAdapter('segapcm'); return a ? MML.Emu.snapshotSegaPCM(a.chip) : null; }
+,
+    getC140: () => { const a = vgmAdapter('c140'); return a ? MML.Emu.snapshotC140(a.chip) : null; }
+,
     getYm2610Fm: () => { const a = vgmAdapter('ym2610'); return a ? MML.Emu.snapshotYM2610(a.fm) : null; }
 ,
     getPwm: () => { const a = vgmAdapter('pwm'); return a ? MML.Emu.snapshotPWM32X(a.chip) : null; }
@@ -4788,55 +4767,7 @@
 
   // captureVgmSongAsync()の結果からピアノロール用タイムライン(共通形状)を構築する。
   // チップファミリごとに既存のビルダーへ委譲して連結する(トラックidは鍵盤の行idと1対1)。
-  function buildVgmRollTimeline(data, done) {
-    const frameRate = data.frameRate;
-    const sr = 44100;
-    let tracks = [];
-    if (data.nes) {
-      const nesChips = ['nes'].concat(data.nes.fds ? ['fds'] : []);
-      const t = keyboardDisplay.buildRollTracksFromRegSnapshots(
-        data.nes.regSnapshots, data.nes.writeLog, done, sr / frameRate, sr, nesChips, null);
-      if (t) tracks = tracks.concat(t);
-    }
-    if (data.gb) tracks = tracks.concat(buildGbsRollTimeline(data.gb.snapshots.slice(0, done), frameRate));
-    if (data.hes) tracks = tracks.concat(buildHesRollTimeline(data.hes.snapshots.slice(0, done), frameRate));
-    if (data.kss) {
-      const wl = data.kss.writeLog.slice(0, done);
-      const fakeHeader = { device: { mode: 'MSX', fmpac: data.kss.opll } };
-      const kssTracks = buildKssRollTimeline(wl, done, frameRate, fakeHeader, data.kss.scc, data.kss.clock);
-      // AY未使用(SCC/OPLLのみ)のVGMではKP行が鍵盤に無いのでロール側も落とす
-      tracks = tracks.concat(data.kss.ay ? kssTracks : kssTracks.filter(t => !/^KP\d/.test(t.id)));
-    }
-    if (data.sn) {
-      // SN76489はレジスタスナップショットを持たないので、extractChannels(keyboard.js)が読む
-      // extraSnaps.sn(フレーム毎スナップショット配列)を渡して同じ抽出経路でトラック化する
-      const t = keyboardDisplay.buildRollTracksFromRegSnapshots(
-        data.sn.snapshots, [], done, sr / frameRate, sr, ['vgm', 'sn76489'], null, { sn: data.sn.snapshots });
-      if (t) tracks = tracks.concat(t);
-    }
-    if (data.ym2612) {
-      const t = keyboardDisplay.buildRollTracksFromRegSnapshots(
-        data.ym2612.snapshots, [], done, sr / frameRate, sr, ['vgm', 'ym2612'], null, { ym2612: data.ym2612.snapshots });
-      if (t) tracks = tracks.concat(t);
-    }
-    if (data.ym2610fm) {
-      const t = keyboardDisplay.buildRollTracksFromRegSnapshots(
-        data.ym2610fm.snapshots, [], done, sr / frameRate, sr, ['vgm', 'ym2610fm'], null, { ym2610fm: data.ym2610fm.snapshots });
-      if (t) tracks = tracks.concat(t);
-    }
-    if (data.pwm) {
-      const t = keyboardDisplay.buildRollTracksFromRegSnapshots(
-        data.pwm.snapshots, [], done, sr / frameRate, sr, ['vgm', 'pwm'], null, { pwm: data.pwm.snapshots });
-      if (t) tracks = tracks.concat(t);
-    }
-    for (const tok of ['rf5c164', 'rf5c68']) {
-      if (!data[tok]) continue;
-      const extra = {}; extra[tok] = data[tok].snapshots;
-      const t = keyboardDisplay.buildRollTracksFromRegSnapshots(data[tok].snapshots, [], done, sr / frameRate, sr, ['vgm', tok], null, extra);
-      if (t) tracks = tracks.concat(t);
-    }
-    return tracks;
-  }
+  // VGMのロールタイムライン構築はMML.RollBuild.vgm(src/audio/roll-builders.js)へ移設
 
   function playVgmStream() {
     if (!loadedVgmBytes) {
@@ -4916,27 +4847,36 @@
       getSn76489: liveVgm.getSn76489,
       getYm2612: liveVgm.getYm2612,
       getYm2610Fm: liveVgm.getYm2610Fm,
+      getYm2151: liveVgm.getYm2151,
+      getGa20: liveVgm.getGa20,
+      getSegaPcm: liveVgm.getSegaPcm,
+      getC140: liveVgm.getC140,
       getPwm: liveVgm.getPwm,
       getRf5c164: liveVgm.getRf5c164,
       getRf5c68: liveVgm.getRf5c68
     }, () => vgmActivePlayer ? vgmActivePlayer.getPosition() : 0, chips);
     transportPlay();
 
-    // ピアノロール用の先読み(コマンド消化のみ・高速)。
-    const ROLL_REBUILD_INTERVAL_FRAMES = 300;
+    // ピアノロール用の先読み(コマンド消化のみ・高速)。ロールのタイムライン構築は
+    // キャプチャWorker内で行い、onRollで完成品を受け取る
     keyboardDisplay.setRollTimeline(null);
     const myToken = ++vgmRollToken;
-    let lastBuilt = 0;
-    MML.Emu.captureVgmSongAsync(loadedVgmBytes, {
+    // captureVgmSongWorkerAsync: コマンド消化+スナップショット採取をWeb Workerで実行
+    // (NSF/KSS/GBSと同じ仕組み、src/audio/capture-worker-client.js。Worker不可時は
+    // メインスレッド版へ自動フォールバック)
+    MML.Emu.captureVgmSongWorkerAsync(loadedVgmBytes, {
       durationSeconds: captureDuration,
-      shouldCancel: () => myToken !== vgmRollToken
+      shouldCancel: () => myToken !== vgmRollToken,
+      roll: {
+        onRoll: (timeline) => {
+          if (myToken !== vgmRollToken) return;
+          keyboardDisplay.setRollTimeline(timeline);
+        }
+      }
     }, (done, total, data) => {
       if (myToken !== vgmRollToken) return;
       vgmBufferedFraction = total > 0 ? done / total : 0;
       updateSeekBufferedUI();
-      if (done - lastBuilt < ROLL_REBUILD_INTERVAL_FRAMES && done < total) return;
-      lastBuilt = done;
-      keyboardDisplay.setRollTimeline(buildVgmRollTimeline(data, done));
     }).catch((e) => {
       console.error('VGM先読みキャプチャに失敗:', e);
     });
@@ -4957,6 +4897,11 @@
     await new Promise(resolve => setTimeout(resolve, 10));
 
     const player = new MML.Emu.VgmPlayer(loadedVgmBytes);
+    // ★2026-08-22: WAV書き出しにも鍵盤のch別ミュート/音量を反映する(他形式と同じ挙動)。
+    // 以前は新しいVgmPlayerを作るだけで適用しておらず、「1chだけ書き出す」ができなかった
+    // (KSSは効くのにVGMだけ全ch鳴る、という食い違いになっていた)。
+    player.applyMute(getChannelMuteConfig());
+    player.applyVolume(getChannelVolumeConfig());
     const totalFrames = Math.ceil(duration * player.frameRate);
     const totalSamples = Math.round(totalFrames * sampleRate / player.frameRate);
     const audioL = new Float32Array(totalSamples);
@@ -5065,34 +5010,6 @@
   document.getElementById('btnVgmChannelMapAuto').addEventListener('click', () => buildVgmChannelMap(loadedVgmHeader));
   // 言語切替時は借用先ラベル(「スキップ」)を作り直す
   if (MML.I18n && MML.I18n.onChange) MML.I18n.onChange(() => buildVgmChannelMap(loadedVgmHeader));
-
-  // ── YM2612コア切替(高速近似 / Nuked-OPN2実機準拠)。localStorageに永続化し、
-  //    vgmPlayer.js の makeYm2612Adapter が生成時に Emu.ym2612CorePref を見る。
-  //    再生中に切り替えた場合は再生し直して即反映する(アダプタ生成時にしか効かないため)。
-  const vgmYmCoreEl = document.getElementById('vgmYmCore');
-  (function initVgmYmCore() {
-    // 既定は Nuked-OPN2(実機準拠)。ユーザー決定(2026-08-19)。高速コアは聴き比べ/低負荷用に残す
-    let pref = 'nuked';
-    try { pref = localStorage.getItem('vgmYm2612Core') || 'nuked'; } catch (e) { /* ignore */ }
-    if (pref !== 'fast') pref = 'nuked';
-    MML.Emu.ym2612CorePref = pref;
-    if (vgmYmCoreEl) {
-      vgmYmCoreEl.value = pref;
-      vgmYmCoreEl.addEventListener('change', () => {
-        MML.Emu.ym2612CorePref = vgmYmCoreEl.value === 'nuked' ? 'nuked' : 'fast';
-        try { localStorage.setItem('vgmYm2612Core', MML.Emu.ym2612CorePref); } catch (e) { /* ignore */ }
-        if (vgmActivePlayer && lastPlayMode === 'vgm') {
-          const wasPlaying = vgmActivePlayer.isPlaying;
-          const pos = vgmActivePlayer.getPosition();
-          stopVgmPlayback();
-          playVgmStream();
-          // 元の位置から続ける(コアを作り直すので曲頭から再走。VGMのシークは高速)
-          if (vgmActivePlayer && pos > 0.5) transportSeek(pos);
-          if (!wasPlaying) transportPause();
-        }
-      });
-    }
-  })();
 
   async function runVgm2Mml() {
     if (!loadedVgmBytes) {
@@ -5207,13 +5124,14 @@
       formatToPlayFn[fmt] = () => { const btn = document.getElementById(id); if (btn) btn.click(); };
     }
 
-    // ==== アーカイブ(zip)曲リスト ====
-    // 「1 zip = 1ゲーム分の複数トラック(+.m3u)」という配布単位(vgmrips/zophar等)を、
+    // ==== アーカイブ(zip/7z)曲リスト ====
+    // 「1アーカイブ = 1ゲーム分の複数トラック(+.m3u)」という配布単位(vgmrips/zophar等)を、
     // 全フォーマット共通の「曲リストの器」として扱う。SPC/VGMのように単体では曲番号の
-    // 概念が無い形式でも、zipを開けば他形式と同じ曲送りが成立する(NSF等の複数曲形式は
-    // 「zip内のファイル送り」と「ファイル内の曲送り」の2段になる)。
-    // zip解析/解凍は src/archive/archive.js(MML.Archive)。zip内エントリのフォーマットは
-    // 拡張子で決めるが、gzip(.vgz)は各loadXxxFile側が中身で判別する。
+    // 概念が無い形式でも、アーカイブを開けば他形式と同じ曲送りが成立する(NSF等の複数曲
+    // 形式は「アーカイブ内のファイル送り」と「ファイル内の曲送り」の2段になる)。
+    // 解析/解凍は src/archive/archive.js(MML.Archive。7zは sevenzip.js + lzma.js)。
+    // アーカイブ内エントリのフォーマットは拡張子で決めるが、gzip(.vgz)は各loadXxxFile側が
+    // 中身で判別する。
     const ARCHIVE_EXTS = ['nsf', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz'];
     const archiveBarEl = document.getElementById('archiveBar');
     const archiveTrackBarEl = document.getElementById('archiveTrackBar');
@@ -5272,7 +5190,7 @@
       el.value = String(Math.max(min, Math.min(max, song)));
     }
 
-    // zip内の index 番目の項目を開く。戻り値は openSoundFile と同じ(フォーマット文字列 or false)。
+    // アーカイブ内の index 番目の項目を開く。戻り値は openSoundFile と同じ(フォーマット文字列 or false)。
     // autoplay=true なら再生まで行う(曲送り操作用)。同じファイルの曲番号違い(KSSの拡張m3u等)
     // なら読み直さず曲番号だけ変える。
     async function loadArchiveIndex(index, autoplay) {
@@ -5314,11 +5232,14 @@
     async function openArchive(file) {
       const bytes = new Uint8Array(await file.arrayBuffer());
       let parsed;
-      try { parsed = MML.Archive.parseZip(bytes); }
-      catch (e) { alert(T('zipを解析できませんでした: {msg}', { msg: e.message })); return false; }
-      const playlist = await MML.Archive.buildPlaylist(parsed.entries, ARCHIVE_EXTS, (m3u) => MML.Archive.readEntry(bytes, m3u));
+      try { parsed = await MML.Archive.parse(bytes); }
+      catch (e) { alert(T('アーカイブを解析できませんでした: {msg}', { msg: e.message })); return false; }
+      let playlist;
+      try {
+        playlist = await MML.Archive.buildPlaylist(parsed.entries, ARCHIVE_EXTS, (m3u) => MML.Archive.readEntry(bytes, m3u));
+      } catch (e) { alert(T('アーカイブを解析できませんでした: {msg}', { msg: e.message })); return false; }
       if (playlist.length === 0) {
-        alert(T('zip内に対応するサウンドファイル(NSF/SPC/KSS/GBS/HES/VGM)がありません。'));
+        alert(T('アーカイブ内に対応するサウンドファイル(NSF/SPC/KSS/GBS/HES/VGM)がありません。'));
         return false;
       }
       stopAllFormatPlayback();
@@ -5337,7 +5258,7 @@
       loadArchiveIndex(next, true);
     }
 
-    // 1ファイル1曲の形式(SPC/VGM)の再生終了/無音時の自動送り: zipを開いていれば次の
+    // 1ファイル1曲の形式(SPC/VGM)の再生終了/無音時の自動送り: アーカイブを開いていれば次の
     // エントリへ(末尾は先頭へラップ)、単体ファイルなら何もしない(従来どおり停止のまま)。
     archiveAutoAdvanceOrStop = () => {
       if (!archive || archive.playlist.length <= 1) return;
@@ -5361,9 +5282,9 @@
     async function openSoundFile(file, opts) {
       if (!file) return false;
       let ext = file.name.split('.').pop().toLowerCase();
-      // zip: 中のサウンドファイルを曲リストとして開く(上記アーカイブ節)。zip内から再帰的に
-      // 呼ばれた場合(opts.fromArchive)は通常のファイルとして扱う。
-      if (ext === 'zip' && !(opts && opts.fromArchive)) return openArchive(file);
+      // zip/7z: 中のサウンドファイルを曲リストとして開く(上記アーカイブ節)。アーカイブ内から
+      // 再帰的に呼ばれた場合(opts.fromArchive)は通常のファイルとして扱う。
+      if ((ext === 'zip' || ext === '7z') && !(opts && opts.fromArchive)) return openArchive(file);
       if (!(opts && opts.fromArchive)) clearArchive(); // 単体ファイルを開いたらアーカイブ曲リストは閉じる
       if (ext === 'vgz') ext = 'vgm'; // gzip圧縮VGM(中身の判別はloadVgmFile側)
       // MMLテキスト(.mml/.txt)はサウンドファイルではなくMMLエディタ側で開く。
@@ -5374,7 +5295,7 @@
       }
       const targetInputId = formatToInputId[ext];
       if (!targetInputId) {
-        alert(T('対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, MML, TXT)', { ext }));
+        alert(T('対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)', { ext }));
         return false;
       }
       ensureSoundWindowOpen();

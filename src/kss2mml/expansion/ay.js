@@ -21,6 +21,28 @@
   }
   function toneFreq(period, clock) { return period >= 1 ? clock / (32 * period) : 0; }
 
+  // ノイズLFSRのシフトレート。トーンと同じ分周(ay8910Msx.js clock()内で1/16、2フリップで
+  // 1シフト)なので式もトーンと同一。周期0は実機同様1として扱う。
+  function noiseFreq(np, clock) { return clock / (32 * Math.max(1, np)); }
+
+  // 2A03ノイズの実測16周期(NTSC。apu2a03.js / gbs2mml/expansion/noise.js と同じテーブル)。
+  // ピアノロールのノイズ行は全チップこの16段階へ揃えてC1(24)〜D#2(39)に並べる約束なので
+  // (keyboard.js noisePeriodIndexToMidi)、AYのノイズ周波数も対数距離で最寄りに写像する。
+  // ★AYのノイズ周期(0-31)をそのままノート番号にすると midi = 周期+12 となり、
+  //   周期が小さい曲では MIDI_MIN(24) を下回ってロールに描画されない。
+  const NES_CPU_CLOCK = 1789772.5;
+  const NES_NOISE_FREQS = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068]
+    .map(p => NES_CPU_CLOCK / p);
+  function noiseFreqToRollIndex(freqHz) {
+    if (!freqHz) return 0;
+    let best = 0, bestDiff = Infinity;
+    for (let i = 0; i < NES_NOISE_FREQS.length; i++) {
+      const d = Math.abs(Math.log2(freqHz / NES_NOISE_FREQS[i]));
+      if (d < bestDiff) { bestDiff = d; best = i; }
+    }
+    return best;
+  }
+
   function buildTimeline(writeLog, clock) {
     let addrReg = 0;
     const regs = new Uint8Array(16);
@@ -76,23 +98,31 @@
       const period = t.periods[chIndex];
       const volume = t.volumes[chIndex];
       const mode = t.modes[chIndex];
+      // ★2026-08-22: 「トーン有効だがトーン周期0」= トーン発生器は実質鳴っていないので、
+      // ノイズが有効ならノイズ単独(@2)として扱う。実測でAleste Gaiden(MSX2)のch Aが
+      // 全曲この状態(mode=3=トーン+ノイズ有効、period=0)で打楽器を鳴らしており、
+      // 従来は mode===2 しかノイズ扱いしなかったため下の枝に落ちて period>=1 を満たさず
+      // note=null(=休符)になり、ロールにもMMLにも一切出てこなかった。
+      const toneUsable = (mode & 1) !== 0 && period >= 1;
+      const effMode = toneUsable ? mode : ((mode & 2) ? 2 : 0);
       // @2(ノイズ単独)はノート番号=ノイズ周期。それ以外はトーン周期から音程を求める
       let note = null;
       let freqHz = null; // トーン発音時の実周波数(デチューン検出用、ノイズ単独時はnull)
-      if (volume > 0 && mode !== 0) {
-        if (mode === 2) note = t.noisePeriod;
-        else if (period >= 1) { freqHz = toneFreq(period, clock); note = freqToNoteNumber(freqHz); }
+      if (volume > 0 && effMode !== 0) {
+        if (effMode === 2) note = t.noisePeriod;
+        else if (toneUsable) { freqHz = toneFreq(period, clock); note = freqToNoteNumber(freqHz); }
       }
-      const noise = mode === 3 ? t.noisePeriod : null; // @3のみN<n>を出す
-      if (!cur) { cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: false }; continue; }
+      const mode_ = effMode; // 以降(イベント分割・@<n>出力)は実効モードで判断する
+      const noise = mode_ === 3 ? t.noisePeriod : null; // @3のみN<n>を出す
+      if (!cur) { cur = { note, mode: mode_, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: false }; continue; }
       const retrigger = note !== null && volume > cur.volSeq[cur.volSeq.length - 1];
-      if (retrigger || note !== cur.note || mode !== cur.mode || noise !== cur.noise) {
+      if (retrigger || note !== cur.note || mode_ !== cur.mode || noise !== cur.noise) {
         // 音量ジャンプ(再アタック推定)が無く、純粋に音程だけが変わった場合はスラー分割の
         // タイ候補とする(src/convert/pitch.js markSlurTies参照。AYには専用アタック
         // レジスタが無いためretrigger推定(音量上昇)を「実アタックの代用」として使う)
-        const pureNoteChange = !retrigger && note !== cur.note && mode === cur.mode && noise === cur.noise;
+        const pureNoteChange = !retrigger && note !== cur.note && mode_ === cur.mode && noise === cur.noise;
         flush(f);
-        cur = { note, mode, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: pureNoteChange };
+        cur = { note, mode: mode_, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: pureNoteChange };
       } else {
         cur.volSeq.push(volume);
         cur.pitchSeq.push(period);
@@ -116,6 +146,11 @@
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       ev.note !== null ? { instrument: ev.mode } : {},
       ev.note !== null && ev.noise !== null ? { fme7Noise: ev.noise } : {},
+      // ピアノロール専用の疑似音程(0-15、C1〜D#2)。MML側のノート番号(=ノイズ周期、
+      // ppmckのFME-7 @2仕様)はそのまま note に残し、表示だけこちらを使う
+      // (src/audio/roll-builders.js の toNotes 参照)。MML変換はこのフィールドを見ない。
+      ev.note !== null && ev.mode === 2
+        ? { noiseRollIndex: noiseFreqToRollIndex(noiseFreq(ev.note, clock)) } : {},
       ev.note !== null && ev.freqHz != null
         ? { rawFreq: ev.freqHz, freqSeq: ev.pitchSeq.map(p => toneFreq(p, clock)) } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},

@@ -189,8 +189,20 @@
         freq,
         vol: level / 31,
         rawVol: Math.round(level / 2),
-        active: (toneOn ? (level > 0 && freq > 0) : (noiseOn && level > 0)),
+        // ★2026-08-22: 「トーン有効だが周期0で、ノイズだけで鳴らしている」打楽器chが
+        // 消灯していた(Aleste Gaiden MSX2のch A=全曲period 0/ノイズのみ)。旧式は
+        // toneOnを先に見てfreq>0を要求していたため、ノイズ発音中でもactive=falseになる。
+        // 実際に音が出る条件は「音量>0 かつ (実周期のあるトーン または ノイズ)」。
+        // 音量判定に level>0 は使えない: channelLevel()は音量レジスタ0でも1を返す
+        // ((nibble*2)+1 の5bit DACインデックス)ため、固定音量時は level>1 で見る。
+        active: (envMode ? level > 0 : level > 1) && ((toneOn && freq > 0) || noiseOn),
         noise: noiseOn,
+        // ノイズLFSRのシフトレート。トーンと同じ分周(clock()内で1/16 → 2フリップで1シフト)
+        // なので式もトーンと同一(CLOCK/(32*周期))。周期0は実機同様1として扱う。
+        noiseFreq: CLOCK / (32 * Math.max(1, chip.noise.period)),
+        // トーン発生器が実質鳴っていない(無効 or 周期0)のにノイズが有効 = ノイズ専用ch。
+        // 鍵盤のnote列/波形をノイズ表示に切り替える判断に使う(SN76489/GBSのノイズ行と同じ扱い)。
+        noiseOnly: noiseOn && !(toneOn && period > 0),
         envMode
       });
     }

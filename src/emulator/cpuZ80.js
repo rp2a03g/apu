@@ -684,6 +684,15 @@
       return 8;
     }
 
+    // ブロック命令(LDIR/CPIR/INIR/OTIR系)が「もう一周する」と決まったときだけ、
+    // 未定義フラグ XF/YF を PC上位バイトから取り直す。実機はこの経路でだけ
+    // A+転送値ではなく巻き戻したPCのPCHをフラグ源にする(SingleStepTests z80 で確認)。
+    // 最終周(BC=0で抜ける回)は通常どおりなので、ここを通さないのが正しい。
+    _blockRepeatFlags() {
+      const pch = (this.pc >> 8) & 0xFF;
+      this.f = (this.f & ~(F_X | F_Y)) | (pch & (F_X | F_Y));
+    }
+
     execBlock(y, z) {
       const inc = (y === 4 || y === 6) ? 1 : -1;
       const repeat = (y === 6 || y === 7);
@@ -699,7 +708,7 @@
         this.setFlag(F_PV, bc !== 0);
         const n = (value + this.a) & 0xFF;
         this.f = (this.f & ~(F_X | F_Y)) | (n & F_X) | (((n & 0x02) << 4));
-        if (repeat && bc !== 0) { this.pc = (this.pc - 2) & 0xFFFF; return 21; }
+        if (repeat && bc !== 0) { this.pc = (this.pc - 2) & 0xFFFF; this._blockRepeatFlags(); return 21; }
         return 16;
       }
       if (z === 1) { // CPI/CPD/CPIR/CPDR
@@ -719,7 +728,7 @@
         this.setFlag(F_S, (result & 0x80) !== 0);
         const n = (result - (halfBorrow ? 1 : 0)) & 0xFF;
         this.f = (this.f & ~(F_X | F_Y)) | (n & F_X) | (((n & 0x02) << 4));
-        if (repeat && bc !== 0 && result !== 0) { this.pc = (this.pc - 2) & 0xFFFF; return 21; }
+        if (repeat && bc !== 0 && result !== 0) { this.pc = (this.pc - 2) & 0xFFFF; this._blockRepeatFlags(); return 21; }
         return 16;
       }
       if (z === 2) { // INI/IND/INIR/INDR
@@ -734,7 +743,7 @@
         this.setFlag(F_C, k > 0xFF); this.setFlag(F_H, k > 0xFF);
         this.setFlag(F_PV, PARITY[(k & 7) ^ this.b]);
         setXY(this, this.b);
-        if (repeat && this.b !== 0) { this.pc = (this.pc - 2) & 0xFFFF; return 21; }
+        if (repeat && this.b !== 0) { this.pc = (this.pc - 2) & 0xFFFF; this._blockRepeatFlags(); return 21; }
         return 16;
       }
       // z===3: OUTI/OUTD/OTIR/OTDR
@@ -749,7 +758,7 @@
       this.setFlag(F_C, k > 0xFF); this.setFlag(F_H, k > 0xFF);
       this.setFlag(F_PV, PARITY[(k & 7) ^ this.b]);
       setXY(this, this.b);
-      if (repeat && this.b !== 0) { this.pc = (this.pc - 2) & 0xFFFF; return 21; }
+      if (repeat && this.b !== 0) { this.pc = (this.pc - 2) & 0xFFFF; this._blockRepeatFlags(); return 21; }
       return 16;
     }
 

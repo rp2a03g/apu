@@ -1906,3 +1906,88 @@ button.secondary {
 }
 .vgm-chmap label span { white-space: nowrap; }
 .compact-soundplay .vgm-chmap select { font-size: 11px; padding: 1px 3px; max-width: 130px; }
+
+/* --- MMLコマンドヘルプ (src/ui/helpPanel.js) --- */
+.help-window-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+.help-toolbar { flex-wrap: wrap; }
+.help-toolbar #helpSearch { flex: 1; min-width: 140px; }
+.help-status {
+  flex: 0 0 auto;
+  min-height: 0;
+  padding: 3px 6px;
+  font-size: 11px;
+  white-space: normal;
+}
+.help-status.ok { color: var(--ok); }
+.help-status.error { color: var(--error); }
+.help-lint-box { flex: 0 0 auto; }
+.help-lint-title { font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }
+.help-lint { min-height: 0; max-height: 120px; font-size: 11px; }
+.help-list {
+  flex: 1;
+  overflow: auto;
+  padding-right: 2px;
+}
+.help-chapter {
+  position: sticky;
+  top: 0;
+  background: var(--panel-raised);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 3px 6px;
+  margin: 6px 0 4px;
+  z-index: 1;
+}
+.help-card {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+.help-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.help-cmd {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  white-space: pre-wrap;
+}
+.help-title { font-size: 12px; color: var(--text); font-weight: 600; }
+.help-actions { margin-left: auto; display: flex; gap: 4px; }
+.help-actions button { padding: 1px 7px; font-size: 12px; }
+.help-actions .help-play.playing { background: var(--accent); color: var(--on-accent); }
+.help-body {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  margin-top: 4px;
+  line-height: 1.5;
+}
+.help-snippet {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 6px;
+  margin: 4px 0 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+.help-empty { color: var(--text-muted); font-size: 12px; padding: 8px; }

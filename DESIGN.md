@@ -193,7 +193,7 @@ structuredClone/JSON.stringifyがそのまま通ること)。
 | `src/emulator/` | 6502/APU/拡張音源エミュレータ | コア |
 | `src/spc/` `src/kss/` `src/gbs/` `src/hes/` | SPC700/Z80/SM83/HuC6280系ヘッダ解析 | コア |
 | `src/vgm/` | VGMヘッダ解析(チップクロック表/ループ/GD3) | コア |
-| `src/archive/` | zip(セントラルディレクトリ/deflate-raw)・gzip の汎用リーダー。全形式共通の「曲リストの器」(SPC等の1ファイル1曲形式もzipで曲送り) | コア |
+| `src/archive/` | zip(セントラルディレクトリ/deflate-raw)・7z(ヘッダ解析+自前LZMA/LZMA2展開)・gzip の汎用リーダー。全形式共通の「曲リストの器」(SPC等の1ファイル1曲形式もアーカイブで曲送り) | コア |
 | `src/mml/` lexer/compiler/player | MMLコンパイル・直接レンダリング | コア |
 | `src/convert/` | フォーマット非依存の BPM検出・音長量子化・MML生成 | コア |
 | `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` `src/gbs2mml/` `src/hes2mml/` `src/vgm2mml/` | 各形式→ノート抽出(vgm2mmlはチップファミリごとに他の*2mmlへ委譲。kss/gbs/hesは`convertCapture`でキャプチャと変換を分離済み) | コア |

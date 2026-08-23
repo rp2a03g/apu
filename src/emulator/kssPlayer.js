@@ -169,7 +169,14 @@
     const audio = new Float32Array(totalOutSamples);
     const writeLog = [];
     let outPos = 0;
-    const CHUNK_FRAMES = regsOnly ? 10 : 60; // regsOnly(先読み用)はより細かくyieldする
+    // ★2026-08-20 スライスを「フレーム数固定」から「時間予算固定」へ変更(NSFの
+    // capture.js captureSongAsyncと同じ方式・同じ理由。端末速度差の自動吸収)。
+    // Worker実行時(src/audio/capture-worker-client.js)はopt.yieldFn/sliceBudgetMsで
+    // 上書きされる。f===0で必ず一度onProgressを発火するのも同様(最初のonProgressで
+    // 実再生のplayer.load()が走るため)。
+    const sliceBudgetMs = opt.sliceBudgetMs > 0 ? opt.sliceBudgetMs : (regsOnly ? 5 : 15);
+    const yieldFn = opt.yieldFn || (() => new Promise(r => setTimeout(r, 0)));
+    let sliceStart = performance.now();
 
     for (let f = 0; f < totalFrames; f++) {
       const frameWrites = f === 0 ? initWrites : []; // フレーム0はINIT中の書込みから続ける
@@ -180,13 +187,14 @@
       player.bus.onIoWrite = null;
       writeLog.push(frameWrites);
       if (!regsOnly) { for (let i = 0; i < frameBuf.length && outPos < audio.length; i++) audio[outPos++] = frameBuf[i]; }
-      if (f % CHUNK_FRAMES === 0) {
+      if (f === 0 || performance.now() - sliceStart >= sliceBudgetMs) {
         if (onProgress) onProgress(f, totalFrames, writeLog);
-        await new Promise(r => setTimeout(r, 0));
+        await yieldFn();
         // 曲切替/停止の連打で先読みキャプチャが何本も積み上がりCPUを食い合うのを防ぐため、
         // 呼び出し元から「もう不要」と言われたらここでループ自体を打ち切る(onProgress側だけ
         // 無視してもエミュレーション自体は最後まで回り続けてしまうため不十分だった)。
         if (opt.shouldCancel && opt.shouldCancel()) return { audio, writeLog, player, frameRate: player.frameRate };
+        sliceStart = performance.now();
       }
     }
     if (onProgress) onProgress(totalFrames, totalFrames, writeLog);

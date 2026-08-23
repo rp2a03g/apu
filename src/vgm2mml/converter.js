@@ -178,16 +178,27 @@
     // 抽出はAY8910と同じ経路。ay8910と同居する構成は実在しないので同じ 'ay8910' chipキーで扱う
     if (c.ym2610 && !c.ay8910) for (let i = 0; i < 3; i++) out.push({ id: `ay:${i}`, label: `YM2610 SSG ch${i + 1}`, kind: 'square', chip: 'ay8910', chipIndex: 0, ch: i });
     if (c.k051649) for (let i = 0; i < 5; i++) out.push({ id: `scc:${i}`, label: `SCC ch${i + 1}`, kind: 'wave', chip: 'k051649', chipIndex: 0, ch: i });
-    if (c.ym2413) for (let i = 0; i < 6; i++) out.push({ id: `opll:${i}`, label: `YM2413 ch${i + 1}`, kind: 'fm', chip: 'ym2413', chipIndex: 0, ch: i });
+    // YM2413はメロディ9ch(★2026-08-22に6→9へ。リズムモード曲は抽出側が6chしか返さないので
+    // ch7-9は空チャンネルとして扱われる。src/kss2mml/expansion/opll.js 参照)
+    if (c.ym2413) for (let i = 0; i < 9; i++) out.push({ id: `opll:${i}`, label: `YM2413 ch${i + 1}`, kind: 'fm', chip: 'ym2413', chipIndex: 0, ch: i });
     // OPN系FM: YM2612(6ch。ch6のDAC(PCMストリーム)は音程情報が無いので対象外)、YM2610(4ch、Bは6ch)。
     // YM2610 ADPCM-A/B はサンプルのピッチ解析(ym2610.js samplePitch)で音程が取れたものだけ音符になる。
     if (c.ym2612) for (let i = 0; i < 6; i++) out.push({ id: `opn:${i}`, label: `YM2612 FM${i + 1}`, kind: 'fm4', chip: 'ym2612', chipIndex: 0, ch: i });
+    // YM2151(OPM): 4op FM×8ch。音色パラメータはOPN互換の形(decodeOpmPatch)で snapshot に
+    // 入っているので抽出・4op→2op変換(opnToOpllBytes)はOPNと同じ経路。VRC7は6chなので
+    // 既定割当では7ch目以降がskipになる(ユーザーが割当UIで他の借用先へ逃がせる)。
+    if (c.ym2151) for (let i = 0; i < 8; i++) out.push({ id: `opm:${i}`, label: `YM2151 FM${i + 1}`, kind: 'fm4', chip: 'ym2151', chipIndex: 0, ch: i });
     if (c.ym2610) {
       const nFm = c.ym2610.ym2610b ? 6 : 4;
       for (let i = 0; i < nFm; i++) out.push({ id: `opnb:${i}`, label: `YM2610 FM${i + 1}`, kind: 'fm4', chip: 'ym2610', chipIndex: 0, ch: i });
       for (let i = 0; i < 6; i++) out.push({ id: `pcma:${i}`, label: `YM2610 ADPCM-A${i + 1}`, kind: 'pcm', chip: 'ym2610adpcm', chipIndex: 0, ch: i });
       out.push({ id: 'pcmb:0', label: 'YM2610 ADPCM-B', kind: 'pcm', chip: 'ym2610adpcm', chipIndex: 0, ch: 6 });
     }
+    // GA20(Irem PCM 4ch)/SegaPCM(16ch): レート(デルタ)レジスタで音階演奏するPCM。
+    // ピッチ解析で音程が取れた区間だけ音符になる
+    if (c.ga20) for (let i = 0; i < 4; i++) out.push({ id: `ga20:${i}`, label: `GA20 PCM${i + 1}`, kind: 'pcm', chip: 'ga20', chipIndex: 0, ch: i });
+    if (c.segapcm) for (let i = 0; i < 16; i++) out.push({ id: `spcm:${i}`, label: `SegaPCM PCM${i + 1}`, kind: 'pcm', chip: 'segapcm', chipIndex: 0, ch: i });
+    if (c.c140) for (let i = 0; i < 24; i++) out.push({ id: `c140:${i}`, label: `C140 PCM${i + 1}`, kind: 'pcm', chip: 'c140', chipIndex: 0, ch: i });
     if (c.sn76489) {
       const n = c.sn76489.dual ? 2 : 1;
       for (let k = 0; k < n; k++) {
@@ -244,7 +255,7 @@
     for (const s of src) {
       const t = plan[s.id] || 'skip';
       const tt = TARGET_TYPES[t] || TARGET_TYPES.skip;
-      const key = s.label.replace(/ ch\d+$| noise$/, '').replace(/ (FM|ADPCM-A)\d+$/, ' $1') + (s.kind === 'noise' ? ' noise' : '');
+      const key = s.label.replace(/ ch\d+$| noise$/, '').replace(/ (FM|ADPCM-A|PCM)\d+$/, ' $1') + (s.kind === 'noise' ? ' noise' : '');
       const dst = t === 'skip' ? null : (tt.chip === '2a03' ? `2A03 ${tt.letter}` : tt.chip.toUpperCase().replace('FME7', 'FME-7'));
       if (!groups.has(key)) groups.set(key, new Set());
       if (dst) groups.get(key).add(dst);
@@ -279,10 +290,15 @@
     const envReg = new MML.Convert.EnvelopeRegistry();
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
     const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
-    const n163WaveReg = new MML.Convert.WaveRegistry('@N', v => [0, ...v]);
+    const n163WaveReg = MML.Convert.n163WaveRegistry();
     const vrc7ToneReg = new MML.Convert.WaveRegistry('@OP');
     const notes = ignoredNote ? [ignoredNote] : [];
     if (c.ay8910 && c.ay8910.dual) notes.push('2個目のAY8910(デュアルチップ)は変換対象外のため無視しました。');
+    // 既定割当が借用先不足でskipにしたFMチャンネル(YM2151 8ch > VRC7 6ch 等)はその旨を注記する
+    // (ユーザーが明示的にskipへ変えたものは対象外)
+    const autoSkippedFm = src.filter(s => (s.kind === 'fm4' || s.kind === 'fm') && plan[s.id] === 'skip'
+      && !(options.channelMap && options.channelMap[s.id] === 'skip'));
+    if (autoSkippedFm.length) notes.push(`${autoSkippedFm.map(s => s.label).join(', ')} は借用先(VRC7は6ch)の空きが無いため変換対象外です(チャンネル割当で変更できます)。`);
 
     // 借用先ファミリに応じた音量写像プロキシ(対数DAC元→線形先のときだけ写像)
     const familyOf = t => (TARGET_TYPES[t] || TARGET_TYPES.skip).family || null;
@@ -296,6 +312,34 @@
     const kssClock = c.ay8910 ? c.ay8910.clock * 2 : c.ym2610 ? c.ym2610.clock / 2 : c.k051649 ? c.k051649.clock * 2 : (c.ym2413 ? c.ym2413.clock : 3579545);
     const hasAySource = !!(c.ay8910 || c.ym2610);
     const extracted = {}; // sourceId → channel(events+flags)
+
+    // ── PCMチップ(SegaPCM 16ch/C140 24ch等)のch数が既定割当の借用先枠(N163 8ch)より
+    //    多い場合、既定割当のままだと「先頭8ch」に固定されメロディが別chにあると丸ごと
+    //    skipされる。ユーザー指定(channelMap)が無いときは全chを先に抽出して
+    //    **音符(ピッチ解析で音程が取れたイベント)の多いch上位**へ枠を割り当て直す。
+    //    (describePlan/ヘッダの割当表示もこの並べ替え後のplanを反映する) ──
+    if (!options.channelMap) {
+      for (const chipKey of [...new Set(src.filter(s => s.kind === 'pcm' && s.chip !== 'ym2610adpcm').map(s => s.chip))]) {
+        const items = src.filter(s => s.chip === chipKey && s.kind === 'pcm');
+        const slots = items.map(s => plan[s.id]).filter(t => t && t !== 'skip');
+        if (slots.length >= items.length) continue; // 全ch入るなら並べ替え不要
+        if (!data[chipKey] || !MML.Vgm2MmlExpansion[chipKey]) continue;
+        const r = MML.Vgm2MmlExpansion[chipKey](data[chipKey].snapshots);
+        const counts = items.map(s => ({ s, notes: r.channels[s.ch].events.filter(ev => ev.note !== null).length }));
+        counts.sort((a, b) => b.notes - a.notes);
+        for (const it of items) plan[it.id] = 'skip';
+        const picked = [];
+        counts.slice(0, slots.length).forEach((cn, k) => {
+          if (cn.notes > 0) { plan[cn.s.id] = slots[k]; picked.push(cn.s.label.match(/\d+$/)[0]); }
+        });
+        for (const s of items) if (plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+        if (picked.length && counts.length > picked.length) {
+          const chipName = items[0].label.replace(/ PCM\d+$/, '');
+          notes.push(`${chipName} は${items.length}chのうち音符の多いch(${picked.join(',')})を既定割当に自動選択しました(チャンネル割当で変更できます)。`);
+        }
+      }
+    }
+
     function extractGroup(chipKey, extractFn) {
       const items = src.filter(s => s.chip === chipKey && s.kind !== 'noise' && plan[s.id] !== 'skip');
       const fams = [...new Set(items.map(s => familyOf(plan[s.id])))];
@@ -315,12 +359,29 @@
     }
     if (data.kss && data.kss.opll && c.ym2413) {
       const r = MML.Kss2MmlExpansion.opll(data.kss.writeLog, totalFrames, vrc7ToneReg);
-      for (const s of src) if (s.chip === 'ym2413' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      // リズムモード曲は r.channels が6本しか無いので、ch7-9は未定義のまま置かない
+      for (const s of src) if (s.chip === 'ym2413' && plan[s.id] !== 'skip' && r.channels[s.ch]) extracted[s.id] = r.channels[s.ch];
     }
     // OPN系FM(YM2612/YM2610)と YM2610 ADPCM: イベントは借用先非依存(attDb)なので1回抽出して全部に使う
     if (data.ym2612 && c.ym2612) {
       const r = MML.Vgm2MmlExpansion.opn(data.ym2612.snapshots, 6);
       for (const s of src) if (s.chip === 'ym2612' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+    }
+    if (data.ym2151 && c.ym2151) {
+      const r = MML.Vgm2MmlExpansion.opn(data.ym2151.snapshots, 8);
+      for (const s of src) if (s.chip === 'ym2151' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+    }
+    if (data.ga20 && c.ga20) {
+      const r = MML.Vgm2MmlExpansion.ga20(data.ga20.snapshots);
+      for (const s of src) if (s.chip === 'ga20' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+    }
+    if (data.segapcm && c.segapcm) {
+      const r = MML.Vgm2MmlExpansion.segapcm(data.segapcm.snapshots);
+      for (const s of src) if (s.chip === 'segapcm' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+    }
+    if (data.c140 && c.c140) {
+      const r = MML.Vgm2MmlExpansion.c140(data.c140.snapshots);
+      for (const s of src) if (s.chip === 'c140' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
     }
     if (data.ym2610fm && c.ym2610) {
       const nFm = c.ym2610.ym2610b ? 6 : 4;
@@ -444,7 +505,7 @@
       `; ※ このアプリのMMLプレイヤーはNES音源専用のため、AY8910→FME-7(互換)、YM2413→VRC7(同一)、`,
       `;    SCC→N163(波形近似)、SN76489等の矩形波はFME-7の空き→N163(矩形波@N)の順に、ノイズは`,
       `;    2A03ノイズ(D)へ載せています(割当はVGMパネルの「チャンネル割当」で変更できます)。`,
-      `;    YM2612/YM2610のFMはVRC7へ(4op→2op、音色はプリセットから選択。音程・TL由来の音量のみ再現)、`,
+      `;    YM2612/YM2610/YM2151のFMはVRC7へ(4op→2op、音色はプリセットから選択。音程・TL由来の音量のみ再現)、`,
       `;    YM2610 ADPCM-A/Bはサンプルのピッチ解析で得た音程と音量だけを載せています。`,
       `;    線形音量の借用先(N163/2A03/MMC5/VRC6)へ載せた音量は対数DAC→線形へ換算した値です。`,
       ...notes.map(n => `; ※ ${n}`),
@@ -466,7 +527,7 @@
     return {
       mml: [headerComment, scoreText].join('\n'),
       bpm: Math.round(bpm),
-      chips: h.usedChips.filter(ch => ['ay8910', 'k051649', 'ym2413', 'sn76489', 'ym2612', 'ym2610'].includes(ch.id)).map(ch => ch.name + (ch.dual ? ' x2' : '')),
+      chips: h.usedChips.filter(ch => ['ay8910', 'k051649', 'ym2413', 'sn76489', 'ym2612', 'ym2610', 'ym2151', 'ga20', 'segapcm', 'c140'].includes(ch.id)).map(ch => ch.name + (ch.dual ? ' x2' : '')),
       expansions,
       assignments,
       plan,
@@ -578,7 +639,7 @@
 
     // 変換ファミリ: PSG系(AY/SCC/OPLL/SN、同居可) / NES / GB / HES。複数同居していれば先頭だけ。
     const families = [];
-    if (data.kss || data.sn || data.ym2612 || data.ym2610fm) families.push('psg');
+    if (data.kss || data.sn || data.ym2612 || data.ym2610fm || data.ym2151 || data.ga20 || data.segapcm || data.c140) families.push('psg');
     if (data.nes) families.push('nes');
     if (data.gb) families.push('gb');
     if (data.hes) families.push('hes');
@@ -587,13 +648,16 @@
       throw new Error(`MML変換に対応した音源がありません(${names})`);
     }
     const family = families[0];
-    const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', ym2610: 'psg', ym2612: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };
+    const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', ym2610: 'psg', ym2612: 'psg', ym2151: 'psg', ga20: 'psg', segapcm: 'psg', c140: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };
     const ignoredChips = h.usedChips.filter(ch => !ch.impl || famOf[ch.id] !== family).map(ch => ch.name);
     const ignoredNotes = [];
     if (ignoredChips.length) ignoredNotes.push(`このVGMは複数の音源を含みます。${ignoredChips.join(', ')} はMML変換の対象外のため無視しました。`);
     // YM2612 ch6 DAC(PCMストリーム)は音程情報が無いので対象外
     if (h.chips.ym2612 && family === 'psg') ignoredNotes.push('YM2612 の ch6 DAC(PCM)は変換対象外です。');
     if (h.chips.ym2610 && family === 'psg') ignoredNotes.push('YM2610 ADPCM-A/B はサンプルのピッチ解析で音程が取れた区間だけ音符にしています(ドラム等の音程なしサンプルは休符)。');
+    if (h.chips.ga20 && family === 'psg') ignoredNotes.push('GA20 PCM はサンプルのピッチ解析で音程が取れた区間だけ音符にしています(ドラム等の音程なしサンプルは休符)。');
+    if (h.chips.segapcm && family === 'psg') ignoredNotes.push('SegaPCM はサンプルのピッチ解析で音程が取れた区間だけ音符にしています(ドラム/効果音等の音程なしサンプルは休符)。');
+    if (h.chips.c140 && family === 'psg') ignoredNotes.push('C140 はサンプルのピッチ解析で音程が取れた区間だけ音符にしています(ドラム/効果音等の音程なしサンプルは休符)。');
     const ignoredNote = ignoredNotes.length ? ignoredNotes.join(' ') : null;
 
     let result;

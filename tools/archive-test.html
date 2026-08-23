@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>アーカイブ(zip/7z)展開テスト</title>
+<style>
+  body{font:14px/1.5 system-ui,sans-serif;margin:1.5rem;max-width:1000px}
+  h1{font-size:18px}
+  button{font:inherit;padding:.4em .9em;border:1px solid #888;border-radius:6px;background:#f6f6f4;cursor:pointer}
+  #drop{border:2px dashed #bbb;border-radius:8px;padding:1.6em;text-align:center;color:#777;margin:1rem 0}
+  #drop.over{border-color:#4a8;background:#eefaf3;color:#276}
+  #sum{margin:.8rem 0;font-weight:600}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{border-bottom:1px solid #e2e2e2;padding:.28em .5em;text-align:left}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  tr.pass td.st{color:#1b6b2f}
+  tr.fail td.st{color:#8a1f1f;font-weight:600}
+  tr.skip td.st{color:#999}
+  code{font-family:ui-monospace,Consolas,monospace}
+  .muted{color:#777}
+</style>
+</head>
+<body>
+<h1>アーカイブ(zip/7z)展開テスト</h1>
+<p class="muted">
+  <code>MML.Archive</code>(src/archive/archive.js + sevenzip.js + lzma.js)の展開結果を検証する。
+  7zはヘッダに各ファイルのCRC32が入っているので、<b>展開したデータのCRC32とヘッダの値を照合</b>すれば
+  LZMA/LZMA2デコーダの正しさをファイル単位で機械判定できる(zipも同様にローカルヘッダ/セントラル
+  ディレクトリのCRCと照合する)。<br>
+  ファイルをドロップするか選択すると、全エントリを展開して照合し、続けて曲リスト
+  (<code>Archive.buildPlaylist</code>: .m3uの並び順やNEZplug拡張行の曲番号)も表示する。
+</p>
+<p><input type="file" id="file" accept=".zip,.7z" multiple></p>
+<div id="drop">ここに .zip / .7z をドロップ(複数可)</div>
+<div id="sum"></div>
+<div id="out"></div>
+
+<script src="../src/archive/lzma.js"></script>
+<script src="../src/archive/sevenzip.js"></script>
+<script src="../src/archive/archive.js"></script>
+<script>
+'use strict';
+const SOUND_EXTS = ['nsf', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz'];
+
+// CRC32(zip/7zと同じ多項式 0xEDB88320)
+const crcTable = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[i] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+// zipはセントラルディレクトリにCRCがあるが archive.js は返さないので、ここで直接読む
+function zipCrcs(bytes) {
+  const map = new Map();
+  const u16 = (o) => bytes[o] | (bytes[o + 1] << 8);
+  const u32 = (o) => (bytes[o] | (bytes[o + 1] << 8) | (bytes[o + 2] << 16) | (bytes[o + 3] << 24)) >>> 0;
+  let eocd = -1;
+  for (let p = bytes.length - 22; p >= Math.max(0, bytes.length - 22 - 65535); p--) {
+    if (u32(p) === 0x06054b50) { eocd = p; break; }
+  }
+  if (eocd < 0) return map;
+  let p = u32(eocd + 16);
+  const count = u16(eocd + 10);
+  for (let i = 0; i < count; i++) {
+    if (u32(p) !== 0x02014b50) break;
+    const nameLen = u16(p + 28);
+    const name = new TextDecoder('utf-8').decode(bytes.subarray(p + 46, p + 46 + nameLen));
+    map.set(name.replace(/\\/g, '/'), u32(p + 16));
+    p += 46 + nameLen + u16(p + 30) + u16(p + 32);
+  }
+  return map;
+}
+
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+let totalPass = 0, totalFail = 0, totalSkip = 0;
+
+async function testFile(file) {
+  const out = document.getElementById('out');
+  const box = el('div');
+  box.appendChild(el('h2', null, file.name));
+  out.appendChild(box);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let parsed;
+  const t0 = performance.now();
+  try { parsed = await MML.Archive.parse(bytes); }
+  catch (e) { box.appendChild(el('p', 'muted', 'parse失敗: ' + e.message)); totalFail++; return; }
+  const crcMap = parsed.type === 'zip' ? zipCrcs(bytes) : null;
+
+  const table = el('table');
+  table.innerHTML = '<tr><th>エントリ</th><th>サイズ</th><th>CRC(ヘッダ)</th><th>CRC(展開)</th><th>結果</th></tr>';
+  for (const entry of parsed.entries) {
+    const tr = el('tr');
+    let status, want = null, got = null;
+    if (entry.isDir) { status = 'dir'; tr.className = 'skip'; totalSkip++; }
+    else {
+      try {
+        const data = await MML.Archive.readEntry(bytes, entry);
+        want = parsed.type === 'zip' ? (crcMap.get(entry.name) ?? null) : (entry.crc ?? null);
+        got = crc32(data);
+        if (data.length !== entry.size) { status = 'サイズ不一致 ' + data.length + ' != ' + entry.size; tr.className = 'fail'; totalFail++; }
+        else if (want === null) { status = 'CRC無し(展開のみ成功)'; tr.className = 'skip'; totalSkip++; }
+        else if (want === got) { status = 'OK'; tr.className = 'pass'; totalPass++; }
+        else { status = 'CRC不一致'; tr.className = 'fail'; totalFail++; }
+      } catch (e) { status = 'エラー: ' + e.message; tr.className = 'fail'; totalFail++; }
+    }
+    const hex = (v) => v === null || v === undefined ? '-' : v.toString(16).padStart(8, '0');
+    for (const [text, cls] of [[entry.name, ''], [String(entry.size), 'num'], [hex(want), 'num'], [hex(got), 'num'], [status, 'st']]) {
+      tr.appendChild(el('td', cls, text));
+    }
+    table.appendChild(tr);
+  }
+  box.appendChild(table);
+  const ms = (performance.now() - t0).toFixed(0);
+
+  // 曲リスト(main.js の openArchive と同じ経路)
+  try {
+    const list = await MML.Archive.buildPlaylist(parsed.entries, SOUND_EXTS, (m) => MML.Archive.readEntry(bytes, m));
+    const p = el('p', 'muted', `形式=${parsed.type} / エントリ${parsed.entries.length}件 / ${ms}ms / 曲リスト${list.length}件`);
+    box.insertBefore(p, table);
+    if (list.length) {
+      const pre = el('pre');
+      pre.style.cssText = 'background:#f6f6f4;padding:.6em;border-radius:6px;max-height:14em;overflow:auto;font-size:12px';
+      pre.textContent = list.map((it, i) => `${i + 1}. ${it.title}${it.song === null ? '' : '  [song ' + it.song + ']'}  <- ${it.entry.name}`).join('\n');
+      box.appendChild(pre);
+    }
+  } catch (e) {
+    box.appendChild(el('p', 'muted', 'buildPlaylist失敗: ' + e.message));
+    totalFail++;
+  }
+  document.getElementById('sum').textContent = `OK ${totalPass} / 失敗 ${totalFail} / 対象外 ${totalSkip}`;
+}
+
+async function run(files) {
+  for (const f of files) await testFile(f);
+}
+document.getElementById('file').addEventListener('change', (e) => run(e.target.files));
+const drop = document.getElementById('drop');
+drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); run(e.dataTransfer.files); });
+
+// ?f=... で自動実行(サーバー経由の自動テスト用。カンマ区切りで複数)
+const auto = new URLSearchParams(location.search).get('f');
+if (auto) {
+  (async () => {
+    for (const url of auto.split(',')) {
+      const res = await fetch(url);
+      const buf = await res.arrayBuffer();
+      await testFile(new File([buf], decodeURIComponent(url.split('/').pop())));
+    }
+    document.body.dataset.done = '1';
+  })();
+}
+</script>
+</body>
+</html>

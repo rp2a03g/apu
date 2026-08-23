@@ -61,6 +61,9 @@
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-n163wave" title="N163波形エディタ" aria-label="N163波形エディタ">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13h2.5V7h2.5v6h2.5V7h2.5v6h2.5V7H17"/></svg>
         </button>
+        <button class="icon-btn icon-btn-title toggle-btn" data-target="win-help" title="MMLコマンドヘルプ" aria-label="MMLコマンドヘルプ">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7.5"/><path d="M7.8 7.6a2.3 2.3 0 1 1 3.1 2.2c-.6.25-.9.8-.9 1.5"/><path d="M10 14.2h.01"/></svg>
+        </button>
         <label><input type="checkbox" id="mmlHighlightEnable" checked /> 再生中ハイライト</label>
         <label><input type="checkbox" id="mmlAutoScrollEnable" /> 追随スクロール</label>
         <label>追随チャンネル:
@@ -155,7 +158,7 @@
       <button class="float-window-close" aria-label="閉じる">×</button>
     </div>
     <div class="float-window-body compact-soundplay">
-      <input type="file" id="soundFile" accept=".nsf,.spc,.kss,.gbs,.hes,.vgm,.vgz,.zip,.mml,.txt" style="display:none" />
+      <input type="file" id="soundFile" accept=".nsf,.spc,.kss,.gbs,.hes,.vgm,.vgz,.zip,.7z,.mml,.txt" style="display:none" />
       <!-- 内部的にフォーマット別ロジックを呼び出すための非表示input（互換用） -->
       <input type="file" id="nsfFile" accept=".nsf" style="display:none" />
       <input type="file" id="spcFile" accept=".spc" style="display:none" />
@@ -164,7 +167,7 @@
       <input type="file" id="hesFile" accept=".hes" style="display:none" />
       <input type="file" id="vgmFile" accept=".vgm,.vgz" style="display:none" />
 
-      <!-- アーカイブ(zip)を開いた時だけ表示。ファイル名はここ(パネルの上)に、曲リスト(曲名+送り
+      <!-- アーカイブ(zip/7z)を開いた時だけ表示。ファイル名はここ(パネルの上)に、曲リスト(曲名+送り
            ボタン)は他形式の「曲番号」行と同じ位置=各パネルの「ヘッダ情報」の直下へ移動して表示する
            (main.js renderArchiveBar が #archiveTrackBar を表示中パネルの xxxFileHeader の直後へ付け替える) -->
       <div id="archiveBar" class="toolbar archive-bar" style="display:none;">
@@ -180,7 +183,7 @@
         </label>
       </div>
       <div id="soundPanel-none" class="sound-format-panel">
-        <p style="color:#9999aa;">NSF/SPC/KSS/GBS/HES/VGM ファイル(または、それらを含む zip)を開くと、ここに再生画面が表示されます。</p>
+        <p style="color:#9999aa;">NSF/SPC/KSS/GBS/HES/VGM ファイル(または、それらを含む zip/7z)を開くと、ここに再生画面が表示されます。</p>
       </div>
 
       <!-- NSFパネル -->
@@ -374,7 +377,7 @@
         </div>
         <div id="hesFileStatus" class="output" style="min-height:40px;"></div>
       </div>
-      <!-- VGMパネル(1ファイル1曲。曲送りは下記アーカイブ(zip)バーが担う) -->
+      <!-- VGMパネル(1ファイル1曲。曲送りは下記アーカイブ(zip/7z)バーが担う) -->
       <div id="soundPanel-vgm" class="sound-format-panel" style="display:none;">
         <h3>ヘッダ情報 (VGM)</h3>
         <div id="vgmFileHeader" class="output" style="min-height:140px;"></div>
@@ -401,12 +404,6 @@
           </label>
           <button id="btnVgmTempoTap" class="secondary">👆 タップ</button>
           <button id="btnVgmTempoClear" class="secondary">自動</button>
-          <label style="display:flex;align-items:center;gap:4px;" title="YM2612(メガドライブ)/YM2610(Neo Geo)のFMエミュレーションコア。切替は次の再生開始から効きます">FMコア
-            <select id="vgmYmCore">
-              <option value="nuked">Nuked-OPN2(実機準拠)</option>
-              <option value="fast">高速(近似)</option>
-            </select>
-          </label>
         </div>
         <div id="vgmFileStatus" class="output" style="min-height:40px;"></div>
         <!-- チャンネル割当: 変換元ch→借用先(NES音源)の対応表。読み込み時に構成から自動で埋まり、
@@ -458,15 +455,26 @@
   <script src="src/emulator/expansion/fme7.js"></script>
   <script src="src/emulator/expansion/fds.js"></script>
   <script src="src/emulator/expansion/n163.js"></script>
+  <script src="src/emulator/expansion/opllNuked.js"></script>
   <script src="src/emulator/expansion/vrc7.js"></script>
   <script src="src/emulator/nsfBus.js"></script>
   <script src="src/emulator/nsfPlayer.js"></script>
   <script src="src/emulator/capture.js"></script>
+  <!-- regsOnlyキャプチャのWorker実行(生成物バンドル+クライアント。README-worker-build.txt参照) -->
+  <script src="src/audio/nsf-capture-worker.js"></script>
+  <script src="src/audio/kss-capture-worker.js"></script>
+  <script src="src/audio/gbs-capture-worker.js"></script>
+  <script src="src/audio/vgm-capture-worker.js"></script>
+  <script src="src/audio/spc-capture-worker.js"></script>
+  <script src="src/audio/hes-capture-worker.js"></script>
+  <script src="src/audio/roll-builders.js"></script>
+  <script src="src/audio/capture-worker-client.js"></script>
   <script src="src/mml/lexer.js"></script>
   <script src="src/mml/n163Alloc.js"></script>
   <script src="src/mml/compiler.js"></script>
   <script src="src/mml/player.js"></script>
   <script src="src/mml/sampleMml.js"></script>
+  <script src="src/mml/helpIndex.js"></script>
   <script src="src/mml/syntaxHighlight.js"></script>
   <script src="src/mml/waveformEditor.js"></script>
   <script src="src/convert/bpm.js"></script>
@@ -641,6 +649,35 @@
     </div>
   </section>
 
+  <!-- MMLコマンドヘルプ: MML本文の ";@help" タグを索引化して表示する(src/ui/helpPanel.js) -->
+  <section class="float-window" id="win-help"
+    data-default-left="120" data-default-top="120" data-default-width="720" data-default-height="600">
+    <div class="float-window-header">
+      <span>MMLコマンドヘルプ</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body help-window-body">
+      <div class="toolbar help-toolbar">
+        <input type="search" id="helpSearch" placeholder="コマンド・説明を検索" />
+        <select id="helpCategory" title="カテゴリで絞り込む"></select>
+        <select id="helpSource" title="どのMMLから項目を集めるか">
+          <option value="sample">組み込みサンプル</option>
+          <option value="editor">エディタ本文</option>
+          <option value="both">両方</option>
+        </select>
+        <button id="helpReload" class="secondary" title="今のMML本文から読み直す">↻</button>
+        <button id="helpStopAll" class="secondary" title="再生を止める">■</button>
+        <button id="helpLintToggle" class="secondary" title="自己点検の結果を表示/非表示">🩺</button>
+      </div>
+      <div id="helpLintBox" class="help-lint-box" style="display:none;">
+        <div class="help-lint-title">自己点検(タグの書式・コマンドの重複)</div>
+        <pre id="helpLint" class="output help-lint" data-i18n-skip></pre>
+      </div>
+      <div id="helpStatus" class="output help-status"></div>
+      <div id="helpList" class="help-list" data-i18n-skip></div>
+    </div>
+  </section>
+
   <!-- 開発用: 現在アクティブなフローティングウィンドウのサイズをpx表示 -->
   <div id="windowSizeIndicator" class="window-size-indicator" aria-hidden="true"></div>
 
@@ -653,6 +690,7 @@
   <script src="src/ui/keyboard.js"></script>
   <script src="src/ui/fdsWaveEditor.js"></script>
   <script src="src/ui/n163WaveEditor.js"></script>
+  <script src="src/ui/helpPanel.js"></script>
   <script src="src/nsf2mml/expansion/vrc6.js"></script>
   <script src="src/nsf2mml/expansion/mmc5.js"></script>
   <script src="src/nsf2mml/expansion/fme7.js"></script>
@@ -700,12 +738,17 @@
   <script src="src/hes2mml/expansion/noise.js"></script>
   <script src="src/hes2mml/expansion/dpcm.js"></script>
   <script src="src/hes2mml/converter.js"></script>
+  <script src="src/archive/lzma.js"></script>
+  <script src="src/archive/sevenzip.js"></script>
   <script src="src/archive/archive.js"></script>
   <script src="src/vgm/vgmHeader.js"></script>
   <script src="src/emulator/expansion/sn76489.js"></script>
-  <script src="src/emulator/expansion/ym2612.js"></script>
   <script src="src/emulator/expansion/ym2612Nuked.js"></script>
   <script src="src/emulator/expansion/ym2610.js"></script>
+  <script src="src/emulator/expansion/ym2151.js"></script>
+  <script src="src/emulator/expansion/ga20.js"></script>
+  <script src="src/emulator/expansion/segapcm.js"></script>
+  <script src="src/emulator/expansion/c140.js"></script>
   <script src="src/emulator/expansion/pwm32x.js"></script>
   <script src="src/emulator/expansion/rf5c164.js"></script>
   <script src="src/emulator/vgmPlayer.js"></script>

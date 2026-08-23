@@ -115,6 +115,37 @@
     return w;
   }
 
+  /**
+   * 汎用PCMチップ抽出(GA20 4ch / SegaPCM 16ch): snapshots[f][ch] は
+   * Emu.snapshotGA20 / Emu.snapshotSegaPCM の配列(ADPCMと同じ pitchHz/pitchConf/seq/vol)。
+   * どちらもレート(デルタ)レジスタで1サンプルを音階演奏するチップなので、
+   * ピッチ解析が信頼できる区間はADPCM-Bと同様に絶対音程の音符になる。
+   * 音量: vol は振幅比(0..1)なので attDb = -20*log10(vol)。
+   */
+  function pcmChannels(snapshots, numCh) {
+    const total = snapshots.length;
+    const channels = [];
+    for (let chIdx = 0; chIdx < numCh; chIdx++) {
+      let prevSeq = null;
+      const events = collect(total, (f) => {
+        const c = snapshots[f] ? snapshots[f][chIdx] : null;
+        if (!c) return { note: null, attDb: 0 };
+        const retrigger = c.seq !== prevSeq && c.seq > 0;
+        prevSeq = c.seq;
+        const pitched = c.active && c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        if (!pitched) return { note: null, attDb: 0 };
+        const att = c.vol > 0 ? Math.min(96, -20 * Math.log10(c.vol)) : 96;
+        return { note: freqToNoteNumber(c.pitchHz), attDb: att, retrigger, rawFreq: c.pitchHz,
+          n163Wave: n163WaveOf(c), key: String(c.sample ? c.sample.start : '') };
+      });
+      channels.push({ events: MML.Convert.mergeVibratoAndArpeggio(events).map(toCommon), hasVolume: true, hasInstrument: true });
+    }
+    return { channels };
+  }
+  MML.Vgm2MmlExpansion.ga20 = (snapshots) => pcmChannels(snapshots, 4);
+  MML.Vgm2MmlExpansion.segapcm = (snapshots) => pcmChannels(snapshots, 16);
+  MML.Vgm2MmlExpansion.c140 = (snapshots) => pcmChannels(snapshots, 24);
+
   /** YM2610 ADPCM-A(6ch)/ADPCM-B: snapshots[f].adpcmA[i] / .adpcmB */
   MML.Vgm2MmlExpansion.adpcm = function (snapshots) {
     const total = snapshots.length;

@@ -16,3 +16,9 @@ npm-debug.log*
 # Env files
 .env
 .env.*
+
+# CPU命令テストのベクタキャッシュ(SingleStepTestsからDLしたJSON、1命令数MB)
+tools/headless/.vectors/
+
+# 一括変換の目視diff用ダンプ(regress.js --dump の出力)
+tools/headless/dump*/

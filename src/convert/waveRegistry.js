@@ -5,9 +5,13 @@
  *
  * MML.Convert.WaveRegistry(prefix, formatValues?)
  *   prefix       … 定義行の先頭('@FM' / '@N')
- *   formatValues … 登録済みの値配列 → 出力用配列 への変換(省略時はそのまま)。
- *                  N163の@N<n>定義は先頭に読み飛ばされるバッファ番号を1つ要求する
- *                  (src/mml/lexer.js parseN163WaveDef参照)ため、これで補う。
+ *   formatValues … (値配列, 定義番号, 全波形配列) → 出力用配列 への変換(省略時はそのまま)。
+ *                  第2/第3引数は「他の波形の内容も見ないと決まらない値」(N163の
+ *                  バッファ番号)のためにある。
+ *
+ * N163の@N<n>定義は先頭にバッファ番号を1つ要求する(src/mml/lexer.js parseN163WaveDef)。
+ * このツールでは読み捨てられるが、出力MMLを本家ppmckへ持って行った時のために
+ * MML.Convert.n163WaveRegistry()が準互換の番号を振る(src/mml/n163Alloc.js参照)。
  */
 (function (global) {
   'use strict';
@@ -34,7 +38,22 @@
   };
 
   MML.Convert.WaveRegistry.prototype.defLines = function () {
-    return this.waves.map((values, i) => `${this.prefix}${i} = { ${this.formatValues(values).join(' ')} }`);
+    return this.waves.map((values, i) =>
+      `${this.prefix}${i} = { ${this.formatValues(values, i, this.waves).join(' ')} }`);
+  };
+
+  // N163(@N<n>)用のレジストリ。先頭のバッファ番号は書き出す時に、全波形の長さを見て
+  // 本家ppmckでなるべく踏み合わない値を割り当てる(このツールの再生・NSF書き出しは
+  // この値を読まない。MML.N163Alloc.ppmckBufferNumbers参照)
+  MML.Convert.n163WaveRegistry = function () {
+    let buffers = null, computedFor = -1; // 1行ごとに全体を再計算しないためのメモ(波形は増える一方)
+    return new MML.Convert.WaveRegistry('@N', (values, index, waves) => {
+      if (computedFor !== waves.length) {
+        buffers = MML.N163Alloc.ppmckBufferNumbers(waves);
+        computedFor = waves.length;
+      }
+      return [buffers[index], ...values];
+    });
   };
 
 })(window);

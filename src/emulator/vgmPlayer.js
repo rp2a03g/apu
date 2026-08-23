@@ -8,10 +8,13 @@
  *   NES APU(+FDS)=apu2a03.js/fds.js, GB DMG=apuGb.js, HuC6280=apuHuC6280.js,
  *   AY8910=ay8910Msx.js, K051649(SCC)=sccAudio.js, YM2413=opllMsx.js,
  *   SN76489(SMS/GG/SG-1000/MD PSG)=expansion/sn76489.js(VGM段階2で新規実装),
- *   YM2612(OPN2、MD FM)=expansion/ym2612.js(VGM段階4で新規実装。データブロック0x00のPCM、
+ *   YM2612(OPN2、MD FM)=expansion/ym2612Nuked.js(Nuked-OPN2移植。データブロック0x00のPCM、
  *   0xE0シーク、0x8n DAC書込+待ち、DACストリーム制御0x90-0x95もここで扱う)、
  *   YM2610(OPNB、Neo Geo)=expansion/ym2610.js(FM=レジスタ配置がYM2612と同一なのでYM2612コアの
- *   ラッパー、ADPCM-A/B=ymfm移植。ROMはデータブロック0x82/0x83)+AY8910Audio(SSG流用)
+ *   ラッパー、ADPCM-A/B=ymfm移植。ROMはデータブロック0x82/0x83)+AY8910Audio(SSG流用)、
+ *   YM2151(OPM、アーケード/X68000)=expansion/ym2151.js(コマンド0x54、デュアル2個目=0xA4)、
+ *   GA20(Irem M92/M107 PCM)=expansion/ga20.js(コマンド0xBF、ROMはデータブロック0x93)、
+ *   SegaPCM(OutRun/After Burner等)=expansion/segapcm.js(コマンド0xC0、ROMはデータブロック0x80)
  * ヘッダのクロックが非ゼロでも未実装のチップは、コマンド長規則で読み飛ばすだけ
  * (ROADMAP.md VGM節: 全チップ実装は不要)。
  *
@@ -36,6 +39,7 @@
  *  - YM2610: FMはヘッダ値そのまま(内部/144でYM2612と同じ、Neo Geo: 8000000Hz→55555Hz、
  *    ymfm裏取り済み)。SSGはヘッダ値/2でAY8910Audio.clock()を呼ぶ(実SSGクロックはヘッダ値/4、
  *    AY8910Audioは実クロックの2倍で叩く既存規約のため)。
+ *  - YM2151: ヘッダ値(3579545/4000000)そのまま(内部/64で1サンプル=55930/62500Hz)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -53,7 +57,7 @@
   // 他形式(MD全体0.13、SPC基準)に近づくよう1.0(実測: Metal Slug 0.17〜0.21、Last Resort 0.10〜0.12、
   // Neo Turf Masters 0.29〜0.42=元々ホットな曲、ピークはリミッタ任せ)。SSGはFMに対して MAME neogeo
   // ドライバのルーティング比(SSG 0.28 : FM 0.98)を目安に0.8(暫定。実機録音との比較は未実施)。
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ga20: 3.0, segapcm: 2.0, c140: 1.0 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -197,21 +201,18 @@
     };
   }
 
-  // YM2612コアの選択: 既定は Nuked-OPN2 移植版(実機準拠、重い)、Emu.ym2612CorePref = 'fast' で
-  // 自作の近似コア(高速)。切替はアダプタ生成時(再生開始/シーク時)に効く。
-  // 同じ設定を YM2610(expansion/ym2610.js、Nukedはラダー無しの ym3438 モード)も見る。
+  // YM2612コアは Nuked-OPN2 移植版(実機準拠)のみ。YM2610(expansion/ym2610.js)のFM段も
+  // 同じコアをラダー無しの ym3438 モードで使う。
   function makeYm2612Adapter(info) {
-    // 既定(Emu.ym2612CorePref未設定)は Nuked-OPN2。'fast' を明示した時だけ近似コア
-    const useNuked = Emu.ym2612CorePref !== 'fast' && Emu.YM2612Nuked;
-    const chip = useNuked ? new Emu.YM2612Nuked(info.clock) : new Emu.YM2612Audio(info.clock);
+    const chip = new Emu.YM2612Nuked(info.clock);
     return {
-      id: 'ym2612', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.ym2612, core: useNuked ? 'nuked' : 'fast',
+      id: 'ym2612', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.ym2612,
       // 0x52 aa dd(port0=ch1-3) / 0x53(port1=ch4-6)。DAC(0x2A)もここを通る
       write(port, aa, dd) { chip.writeReg(port, aa, dd); },
       clock() { chip.clock(); },
       mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
-      // Nukedは書込みをキュー経由でclock()内に適用するので、clock()を回さない経路(先読み/シーク)は
-      // これで適用させる(VgmPlayer._flushWrites)。高速コアはメソッド無し=何もしない
+      // 書込みはキュー経由でclock()内に適用されるので、clock()を回さない経路(先読み/シーク)は
+      // これで適用させる(VgmPlayer._flushWrites)
       flushWrites() { if (chip.flushWrites) chip.flushWrites(); },
       applyMute(m) { const e = m.expansion || m; if (e.ym2612) Emu.applyMute(chip.mute, e.ym2612); },
       applyVolume(v) { const e = v.expansion || v; if (e.ym2612) Emu.applyVolume(chip.vol, e.ym2612); }
@@ -227,7 +228,7 @@
     const fm = new Emu.YM2610Audio(info.clock, { ym2610b: !!info.ym2610b });
     const ssg = new Emu.AY8910Audio();
     return {
-      id: 'ym2610', clockHz: info.clock, accum: 0, fm, ssg, gain: CHIP_GAIN.ym2610, ssgGain: CHIP_GAIN.ym2610ssg, core: fm.coreName,
+      id: 'ym2610', clockHz: info.clock, accum: 0, fm, ssg, gain: CHIP_GAIN.ym2610, ssgGain: CHIP_GAIN.ym2610ssg,
       _ssgToggle: 0,
       write(port, aa, dd) {
         if (port === 0 && aa < 0x0E) { ssg.writeInternal(aa & 0x0F, dd); return; }
@@ -256,6 +257,65 @@
       },
       // 拡張ヘッダのチップ音量/全体音量(reset()が掛ける)はFM/SSG両方に効かせる
       scaleGain(f) { this.gain *= f; this.ssgGain *= f; }
+    };
+  }
+
+  // YM2151(OPM): FM 8ch単チップ(expansion/ym2151.js)。VGMコマンドは 0x54 aa dd
+  // (レジスタ空間256バイトの1ポート)、デュアルチップ2個目は 0xA4。
+  function makeYm2151Adapter(info) {
+    const chip = new Emu.YM2151Audio(info.clock);
+    return {
+      id: 'ym2151', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.ym2151,
+      write(aa, dd) { chip.writeReg(aa, dd); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.ym2151) Emu.applyMute(chip.mute, e.ym2151); },
+      applyVolume(v) { const e = v.expansion || v; if (e.ym2151) Emu.applyVolume(chip.vol, e.ym2151); }
+    };
+  }
+
+  // GA20(Irem M92/M107 PCM): 4ch 8bit PCM(expansion/ga20.js)。コマンドは 0xBF aa dd
+  // (aaのbit7=デュアル2個目)、ROMはデータブロック0x93。
+  function makeGa20Adapter(info) {
+    const chip = new Emu.GA20Audio(info.clock);
+    return {
+      id: 'ga20', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.ga20,
+      write(aa, dd) { chip.write(aa, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.ga20) Emu.applyMute(chip.mute, e.ga20); },
+      applyVolume(v) { const e = v.expansion || v; if (e.ga20) Emu.applyVolume(chip.vol, e.ga20); }
+    };
+  }
+
+  // SegaPCM(315-5218): 16ch ステレオPCM(expansion/segapcm.js)。コマンドは 0xC0 bbaa dd
+  // (offset=aabb、bit15=デュアル2個目)、ROMはデータブロック0x80。バンク構成はヘッダ0x3C(info.intf)。
+  function makeSegaPcmAdapter(info) {
+    const chip = new Emu.SegaPCMAudio(info.clock, info.intf || 0);
+    return {
+      id: 'segapcm', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.segapcm,
+      write(off, dd) { chip.write(off, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.segapcm) Emu.applyMute(chip.mute, e.segapcm); },
+      applyVolume(v) { const e = v.expansion || v; if (e.segapcm) Emu.applyVolume(chip.vol, e.segapcm); }
+    };
+  }
+
+  // C140(Namco System 2/21): 24ch ステレオPCM(expansion/c140.js)。コマンドは 0xD4 pp aa dd
+  // (レジスタ=ppaa、ppのbit7=デュアル2個目)、ROMはデータブロック0x8D。タイプはヘッダ0x96。
+  function makeC140Adapter(info) {
+    const chip = new Emu.C140Audio(info.clock, info.c140Type || 0);
+    return {
+      id: 'c140', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.c140,
+      write(reg, dd) { chip.write(reg, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.c140) Emu.applyMute(chip.mute, e.c140); },
+      applyVolume(v) { const e = v.expansion || v; if (e.c140) Emu.applyVolume(chip.vol, e.c140); }
     };
   }
 
@@ -293,7 +353,8 @@
     nes: makeNesAdapter, gb: makeGbAdapter, huc6280: makeHucAdapter,
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
     sn76489: makeSnAdapter, ym2612: makeYm2612Adapter, pwm: makePwmAdapter,
-    rf5c68: makeRfAdapter('rf5c68'), rf5c164: makeRfAdapter('rf5c164'), ym2610: makeYm2610Adapter
+    rf5c68: makeRfAdapter('rf5c68'), rf5c164: makeRfAdapter('rf5c164'), ym2610: makeYm2610Adapter,
+    ym2151: makeYm2151Adapter, ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter
   };
 
   // ---------------------------------------------------------------------------
@@ -430,17 +491,26 @@
           case 0x4F: this._writeGgStereo(d[p]); this.pos = p + 1; break;
           case 0x51: this._chipWrite('ym2413', d[p], d[p + 1], false); this.pos = p + 2; break;
           case 0xA1: this._chipWrite('ym2413', d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2413
+          case 0x54: this._chipWrite('ym2151', d[p], d[p + 1], false); this.pos = p + 2; break; // YM2151(OPM)
+          case 0xA4: this._chipWrite('ym2151', d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2151
           // 0xA0/0xB3/0xB4/0xB9/0xD2: レジスタ(ポート)のbit7=1が2個目のチップ
           case 0xA0: this._chipWrite('ay8910', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB3: this._chipWrite('gb', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB4: this._chipWrite('nes', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB9: this._chipWrite('huc6280', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB2: this._chipWrite('pwm', (d[p] >> 4) & 0x0F, ((d[p] & 0x0F) << 8) | d[p + 1], false); this.pos = p + 2; break; // 32X PWM: reg=a, 12bit値
+          case 0xBF: this._chipWrite('ga20', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // GA20(Irem)
           case 0xB0: this._chipWrite('rf5c68', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB1: this._chipWrite('rf5c164', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          case 0xC0: { // SegaPCM: bbaa dd(offset=aabb、bit15=デュアル2個目)
+            const off = d[p] | (d[p + 1] << 8);
+            this._chipWrite('segapcm', off & 0x7FFF, d[p + 2], !!(off & 0x8000));
+            this.pos = p + 3; break;
+          }
           case 0xC1: this._rfMemWrite('rf5c68', d[p] | (d[p + 1] << 8), d[p + 2]); this.pos = p + 3; break;  // RF5C68 メモリ書込み(選択中バンク窓)
           case 0xC2: this._rfMemWrite('rf5c164', d[p] | (d[p + 1] << 8), d[p + 2]); this.pos = p + 3; break; // RF5C164 メモリ書込み
           case 0xD2: this._sccWrite(d[p] & 0x7F, d[p + 1], d[p + 2], !!(d[p] & 0x80)); this.pos = p + 3; break;
+          case 0xD4: this._chipWrite('c140', ((d[p] & 0x7F) << 8) | d[p + 1], d[p + 2], !!(d[p] & 0x80)); this.pos = p + 3; break; // C140(Namco)
           case 0x52: this._ymWrite(0, d[p], d[p + 1], false); this.pos = p + 2; break;
           case 0x53: this._ymWrite(1, d[p], d[p + 1], false); this.pos = p + 2; break;
           case 0xA2: this._ymWrite(0, d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2612
@@ -533,6 +603,30 @@
           const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
           const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
           y.loadRom(type === 0x83 ? 'b' : 'a', romSize, start, block.subarray(8));
+        }
+      }
+      if (type === 0x93) { // GA20 ROM: ROMサイズ(4)+開始アドレス(4)+データ(0x82/0x83と同形式)
+        const g = this.adapterById.ga20;
+        if (g && block.length >= 8) {
+          const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
+          const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
+          g.loadRom(romSize, start, block.subarray(8));
+        }
+      }
+      if (type === 0x80) { // SegaPCM ROM: 同形式
+        const sp = this.adapterById.segapcm;
+        if (sp && block.length >= 8) {
+          const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
+          const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
+          sp.loadRom(romSize, start, block.subarray(8));
+        }
+      }
+      if (type === 0x8D) { // C140 ROM: 同形式
+        const cn = this.adapterById.c140;
+        if (cn && block.length >= 8) {
+          const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
+          const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
+          cn.loadRom(romSize, start, block.subarray(8));
         }
       }
       // その他(YM2612 PCM=0x00, 圧縮ブロック, 各種ROMダンプ)は未実装チップ向けなので保持しない
@@ -734,6 +828,10 @@
       sn: has('sn76489') ? { snapshots: [], clock: player.adapterById.sn76489.clockHz } : null,
       ym2612: has('ym2612') ? { snapshots: [] } : null,
       ym2610fm: has('ym2610') ? { snapshots: [] } : null,
+      ym2151: has('ym2151') ? { snapshots: [] } : null,
+      ga20: has('ga20') ? { snapshots: [] } : null,
+      segapcm: has('segapcm') ? { snapshots: [] } : null,
+      c140: has('c140') ? { snapshots: [] } : null,
       pwm: has('pwm') ? { snapshots: [] } : null,
       rf5c164: has('rf5c164') ? { snapshots: [] } : null,
       rf5c68: has('rf5c68') ? { snapshots: [] } : null
@@ -741,6 +839,12 @@
     let nesFrameWrites = [];
     // YM2610 ADPCM のロール用発音区間推定の状態(上のループ内コメント参照)
     const adpcmState = { aSeq: new Array(6).fill(0), aEnd: new Array(6).fill(-1), bSeq: 0, bEnd: -1 };
+    // GA20 も同じ推定(clock()を回さないと0x00終端で止まらないため、キーオン通番+サンプル長で区間を切る)
+    const ga20State = { seq: new Array(4).fill(0), end: new Array(4).fill(-1) };
+    // SegaPCM: ワンショットは同じ推定。ループ再生(lenSec=Infinity)は明示停止(reg86書込み)まで鳴る
+    const spcmState = { seq: new Array(16).fill(0), end: new Array(16).fill(-1) };
+    // C140: 同じ推定(キーオン/オフは明示レジスタなのでエッジは正確。ワンショット終端だけ窓で切る)
+    const c140State = { seq: new Array(24).fill(0), end: new Array(24).fill(-1) };
     let kssFrameWrites = [];
     const nesRegs = {};
     if (data.kss && data.kss.scc && data.kss.sccPlus) {
@@ -757,7 +861,12 @@
         case 'k051649': kssFrameWrites.push({ addr: d, value: c, io: false }); break;
       }
     };
-    const CHUNK_FRAMES = 30;
+    // ★2026-08-20 スライスを「フレーム数固定」から「時間予算固定」へ変更(NSFの
+    // capture.js captureSongAsyncと同じ方式・同じ理由)。Worker実行時は
+    // opt.yieldFn/sliceBudgetMsで上書きされる。
+    const sliceBudgetMs = opt.sliceBudgetMs > 0 ? opt.sliceBudgetMs : 5;
+    const yieldFn = opt.yieldFn || (() => new Promise(r => setTimeout(r, 0)));
+    let sliceStart = performance.now();
     for (let f = 0; f < totalFrames; f++) {
       player.renderFrame(VGM_RATE, true);
       if (data.nes) {
@@ -786,6 +895,43 @@
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2612.snapshots.push(s);
       }
+      if (data.ga20) {
+        const s = Emu.snapshotGA20(player.adapterById.ga20.chip);
+        const st = ga20State;
+        for (let i = 0; i < 4; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = f + c.lenSec * FRAME_RATE; }
+          // 明示停止(reg6=0)は書込みで play が落ちるので c.active に反映済み。終端は推定窓で切る
+          c.active = c.active && f < st.end[i];
+        }
+        data.ga20.snapshots.push(s);
+      }
+      if (data.segapcm) {
+        const s = Emu.snapshotSegaPCM(player.adapterById.segapcm.chip);
+        const st = spcmState;
+        for (let i = 0; i < 16; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = c.lenSec === Infinity ? Infinity : f + c.lenSec * FRAME_RATE; }
+          c.active = c.active && f < st.end[i];
+        }
+        data.segapcm.snapshots.push(s);
+      }
+      if (data.c140) {
+        const s = Emu.snapshotC140(player.adapterById.c140.chip);
+        const st = c140State;
+        for (let i = 0; i < 24; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = c.lenSec === Infinity ? Infinity : f + c.lenSec * FRAME_RATE; }
+          c.active = c.active && f < st.end[i];
+        }
+        data.c140.snapshots.push(s);
+      }
+      if (data.ym2151) {
+        // YM2612と同じ: 先読みはEGが進まないので発音判定/音量はレジスタ由来(keyOn/tlVol)へ差し替える
+        const s = Emu.snapshotYM2151(player.adapterById.ym2151.chip);
+        for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
+        data.ym2151.snapshots.push(s);
+      }
       if (data.ym2610fm) {
         const s = Emu.snapshotYM2610(player.adapterById.ym2610.fm);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
@@ -806,10 +952,11 @@
         }
         data.ym2610fm.snapshots.push(s);
       }
-      if (f % CHUNK_FRAMES === 0) {
+      if (f === 0 || performance.now() - sliceStart >= sliceBudgetMs) {
         if (onProgress) onProgress(f, totalFrames, data);
-        await new Promise(r => setTimeout(r, 0));
+        await yieldFn();
         if (opt.shouldCancel && opt.shouldCancel()) return data;
+        sliceStart = performance.now();
       }
     }
     if (onProgress) onProgress(totalFrames, totalFrames, data);

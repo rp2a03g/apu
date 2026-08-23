@@ -248,6 +248,11 @@
     let currentFrame = 0;
     player.bus.onWrite = (addr, value) => {
       const sel = player.apu.selected;
+      // $0800は3bit(0-7)なのでch6/7が選ばれうるが、実機にそのchは無い。
+      // apuHuC6280側も「selected >= CH_COUNT なら書込み無視」としているので、
+      // トレースも同じ規則で捨てる。ここを守らないと6ch分しかないtrace配列が
+      // 範囲外アクセスになり変換ごと落ちる(HC63015.hes等6曲で実際に発生)。
+      if (sel >= controlTrace.length) return;
       if (addr === 0x0804) {
         controlTrace[sel].push({ frame: currentFrame, on: (value & 0x80) !== 0, dda: (value & 0x40) !== 0 });
       } else if (addr === 0x0806) {
@@ -268,7 +273,16 @@
     // 起こしていた(ユーザー指摘・実測で発覚)。KSSと同じ固定フレーム数方式に戻し、
     // yieldの上限間隔を短く保つことでメインスレッドを定期的に手放す(DDA多用曲は
     // 1フレームが重いぶんチャンクの実時間は長くなるが、それ自体は元々避けられない)。
-    const CHUNK_FRAMES = regsOnly ? 10 : 60; // regsOnly(先読み/ロール用)はより細かくyieldする
+    // ★2026-08-20 スライスを「フレーム数固定(CHUNK_FRAMES)」から「時間予算固定」へ変更
+    // (capture.js captureSongAsyncと同じ方式)。上の経緯コメントの「経過実時間ベース
+    // (100msごと)yield」の失敗と向きが逆である点に注意: あれは「100ms連続でメイン
+    // スレッドを占有してからyield」でスライスが長すぎたのが問題。こちらは「5ms使ったら
+    // 必ずyield」でスライス上限を従来のCHUNK_FRAMES方式より短く保証する(DDA多用曲の
+    // 重い1フレームでも超過は1フレーム分だけ)。Worker実行時(capture-worker-client.js)は
+    // opt.yieldFn/sliceBudgetMsで上書きされる。
+    const sliceBudgetMs = opt.sliceBudgetMs > 0 ? opt.sliceBudgetMs : (regsOnly ? 5 : 15);
+    const yieldFn = opt.yieldFn || (() => new Promise(r => setTimeout(r, 0)));
+    let sliceStart = performance.now();
 
     for (let f = 0; f < totalFrames; f++) {
       currentFrame = f;
@@ -284,12 +298,13 @@
         if (!regsOnly) { for (let i = 0; i < frameBuf.length && outPos < audio.length; i++) audio[outPos++] = frameBuf[i]; }
       }
       snapshots.push(snapshotApu(player.apu));
-      if (f % CHUNK_FRAMES === 0 || f === totalFrames - 1) {
+      if (f === 0 || f === totalFrames - 1 || performance.now() - sliceStart >= sliceBudgetMs) {
         if (onProgress) onProgress(f, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace });
-        await new Promise(r => setTimeout(r, 0));
+        await yieldFn();
         if (opt.shouldCancel && opt.shouldCancel()) {
           return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, player, frameRate: player.frameRate };
         }
+        sliceStart = performance.now();
       }
     }
     if (onProgress) onProgress(totalFrames, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace });

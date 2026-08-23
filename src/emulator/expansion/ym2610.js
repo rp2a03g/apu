@@ -7,7 +7,7 @@
  * VGM上は 0x58(ポート0)/0x59(ポート1) のレジスタ書込みでまとめて叩かれるので、SSG/FMの
  * 振り分けは呼び出し側(vgmPlayer.js)が行う(SSGはここに来ても弾くだけ)。
  *
- * ★FM部は YM2612コア(ym2612Nuked.js=Nuked-OPN2移植 または ym2612.js=高速近似)の薄いラッパー。
+ * ★FM部は YM2612コア(ym2612Nuked.js=Nuked-OPN2移植)の薄いラッパー。
  * 理由: YM2610のFMレジスタ配置はYM2612と完全に同一(0x30 DT/MUL … 0xB4 L/R/AMS/PMS、0x22 LFO、
  * 0x27 ch3モード、0x28 キーオン、サンプルレート=clock/144、周波数式も同じ)で、違いは
  *   (1) 6chぶんのアドレス空間のうち実チャンネルが各ポートのオフセット1,2だけ
@@ -20,10 +20,9 @@
  * オフセット2=YM2610のFM2に相当。MAME fm.cppのym2610もCH[2]に適用)もそのまま効く。
  * キーオン0x28の値1,2,5,6 → YM2612コアのch1,2,4,5 = 本クラスのFM1-4。
  *
- * コアの選択は makeYm2612Adapter(vgmPlayer.js)と同じ Emu.ym2612CorePref: 既定=Nuked-OPN2
- * (実機準拠)、'fast'=高速近似。Nukedは chipType:'ym3438' で使う: FMオペレータ本体(PG/EG/
- * log-sin・exp ROM/LFO/SSG-EG)はOPNファミリ共通設計だが、YM2612固有の9bit DACラダー効果は
- * YM2610には無い(OPNA/OPNBは内部加算して16bit出力)ため、ラダー無しモードが正しい。
+ * コアは chipType:'ym3438' で使う: FMオペレータ本体(PG/EG/log-sin・exp ROM/LFO/SSG-EG)は
+ * OPNファミリ共通設計だが、YM2612固有の9bit DACラダー効果はYM2610には無い
+ * (OPNA/OPNBは内部加算して16bit出力)ため、ラダー無しモードが正しい。
  *
  * ★ADPCM-A/B は ymfm(ymfm_adpcm.cpp / ymfm_opn.cpp ym2610)の関数単位の移植:
  *   ADPCM-A: 6ch、4bit ADPCM(MSM5205系、12bit累算器はラップ)、アドレスは 開始/終了レジスタ<<8、
@@ -36,7 +35,7 @@
  *   ROMは VGM データブロック 0x82(ADPCM-A)/0x83(ADPCM-B=DELTA-T) を loadRom() で受け取る。
  *   出力尺度: ymfmでは FMチャンネルのフルスケール=4096(13bit>>1)、ADPCM-A最大≒15360、
  *   ADPCM-B最大≒16320(レベル255、YM2610はrshift=1)。本クラスのFMコアはフルスケール0.2
- *   (高速/Nuked両コアで実測一致)なのでADPCM出力は ×0.2/4096 で同じ比率に合わせる(ADPCM_SCALE)。
+ *   (実測)なのでADPCM出力は ×0.2/4096 で同じ比率に合わせる(ADPCM_SCALE)。
  *
  * ★表示専用のサンプルピッチ解析(samplePitch / decodeAdpcmA・B / detectCps): 音程レジスタの無い
  *   ADPCM-Aと、Δ-Nしか無いADPCM-Bに絶対音名を出すため、ROM上のサンプルを1回だけデコードして
@@ -48,7 +47,7 @@
  * 外部I/F: writeReg(port,reg,val) / clock()(マスタークロック毎) / mixSample() / loadRom(kind,...) /
  * samplePitch(kind,start,end) / setSampleTuning(kind,start,end,cps|null) /
  * mute[fmCh] / vol[fmCh] / muteAdpcm[7](A1-6,B) / volAdpcm[7](書き換えたら syncMuteVol()) /
- * core / coreName / numFm(4 or 6) / flushWrites() / Emu.snapshotYM2610(chip)。
+ * core / numFm(4 or 6) / flushWrites() / Emu.snapshotYM2610(chip)。
  * Neo Geo: 8000000Hz → 55555Hz。
  */
 (function (global) {
@@ -406,15 +405,11 @@
   class YM2610Audio {
     /**
      * @param {number} [clock=8000000] - マスタークロック(サンプルレート=clock/144)
-     * @param {{core?: 'nuked'|'fast', ym2610b?: boolean}} [opts]
-     *   core: 省略時は Emu.ym2612CorePref('fast' 以外=Nuked)。ym2610b: YM2610B(FM 6ch全部が実チャンネル)
+     * @param {{ym2610b?: boolean}} [opts] - ym2610b: YM2610B(FM 6ch全部が実チャンネル)
      */
     constructor(clock, opts) {
       this.clockHz = clock || 8000000;
-      const pref = (opts && opts.core) || Emu.ym2612CorePref;
-      const useNuked = pref !== 'fast' && !!Emu.YM2612Nuked;
-      this.coreName = useNuked ? 'nuked' : 'fast';
-      this.core = useNuked ? new Emu.YM2612Nuked(this.clockHz, { chipType: 'ym3438' }) : new Emu.YM2612Audio(this.clockHz);
+      this.core = new Emu.YM2612Nuked(this.clockHz, { chipType: 'ym3438' });
       this.sampleRate = this.core.sampleRate;
       this.isB = !!(opts && opts.ym2610b);
       // 本クラスのFM1-n → YM2612コア(6ch)上のチャンネル番号
@@ -547,7 +542,7 @@
       const s = this.core.mixSample();
       return { left: s.left + this.adpcmL, right: s.right + this.adpcmR };
     }
-    // Nukedコアの書込みキュー適用(clock()を回さない先読み/シーク経路用。高速コアでは不要)
+    // 書込みキュー適用(clock()を回さない先読み/シーク経路用)
     flushWrites() { if (this.core.flushWrites) this.core.flushWrites(); }
   }
 
@@ -593,4 +588,10 @@
   };
 
   Emu.YM2610Audio = YM2610Audio;
+
+  // サンプルピッチ解析ユーティリティの共有(GA20等、他のPCMチップからの流用。抽出器を複製しない)。
+  // getTuningMap/saveTuningMap の localStorage キーはYM2610と共通('ym2610AdpcmTuning')だが、
+  // キーはサンプル内容ハッシュなのでチップをまたいで共有しても衝突しない(むしろ同じサンプルなら
+  // 同じ補正が効くのが望ましい)。
+  Emu.SamplePitchUtil = { detectCps, makeSampleWave, sampleHash, getTuningMap, saveTuningMap };
 })(window);

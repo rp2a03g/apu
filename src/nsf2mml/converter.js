@@ -803,7 +803,7 @@
     // FDS/N163の自作波形も曲全体で共有登録するレジストリ(@FM<n>/@N<n>としてMML本文の
     // ヘッダに埋め込む。それぞれ定義書式が異なる別レジストリが必要)。
     const fdsWaveReg = new MML.Convert.WaveRegistry('@FM');
-    const n163WaveReg = new MML.Convert.WaveRegistry('@N', v => [0, ...v]);
+    const n163WaveReg = MML.Convert.n163WaveRegistry();
     // VRC7カスタム音色(ユーザー定義音色, レジスタ$00-$07)。全ch共有の1系統のみで、
     // @OP<n>定義+曲中の切替はOP<n>即時コマンド(mmlEmit.jsのhasVrc7Tone)で表現する
     const vrc7ToneReg = new MML.Convert.WaveRegistry('@OP');

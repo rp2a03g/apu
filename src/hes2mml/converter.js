@@ -73,7 +73,7 @@
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
     // ノートエンベロープ(高速アルペジオ)の共有レジストリ(2026-08-14)。
     const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
-    const n163WaveReg = new MML.Convert.WaveRegistry('@N', v => [0, ...v]);
+    const n163WaveReg = MML.Convert.n163WaveRegistry();
 
     const waveResult = MML.Hes2MmlExpansion.wave(snapshots, n163WaveReg, envReg);
     const noiseResult = MML.Hes2MmlExpansion.noise(snapshots, envReg);
