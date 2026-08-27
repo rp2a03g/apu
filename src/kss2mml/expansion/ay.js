@@ -136,7 +136,7 @@
     const timeline = buildTimeline(writeLog, clock);
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
     }
     // pitchEp(EP<n>参照)は借用先(FME7)の生レジスタ空間への変換が必要なため、ここでは
     // 付けずev.freqSeq(Hz)だけ残し、呼び出し元のkss2mml/converter.jsが

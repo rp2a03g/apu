@@ -32,19 +32,15 @@
 
   const NUM_CH = 24;
 
-  // μ-law展開表(MAME c140.cpp、Starblade実機出力から検証されたもの)
+  // μ-law展開表(libvgm c140.c準拠=superctrの実チップ解析。指数=下位3bit、仮数=上位5bit)。
+  // ★当初MAME旧版の累積テーブルを使っていたが式が全く違う(libvgmがVGMの参照実装)
   const PCM_TBL = new Int16Array(256);
-  {
-    let j = 0;
-    for (let i = 0; i < 128; i++) {
-      PCM_TBL[i] = j << 5;
-      if (i < 16) j += 1;
-      else if (i < 24) j += 2;
-      else if (i < 48) j += 4;
-      else if (i < 100) j += 8;
-      else j += 16;
-    }
-    for (let i = 0; i < 128; i++) PCM_TBL[i + 128] = ((~PCM_TBL[i]) & 0xFFE0) << 16 >> 16;
+  for (let i = 0; i < 256; i++) {
+    const s1 = i & 7;
+    const s2 = Math.abs((i << 24) >> 27) & 0x1F;
+    let v = (0x80 << s1) & 0xFF00;
+    v += s2 << (s1 ? (s1 + 3) : 4);
+    PCM_TBL[i] = (i & 0x80) ? -v : v;
   }
   const ASIC219_BANK_REGS = [0x1F7, 0x1F1, 0x1F3, 0x1F5];
 
@@ -56,9 +52,35 @@
      */
     constructor(clock, type) {
       this.clockHz = clock || 12288000;
-      this.cyclesPerSample = this.clockHz >= 1000000 ? 576 : 1;
-      this.sampleRate = this.clockHz / this.cyclesPerSample;
+      // ★baseRate = 実チップの出力レート = clock/288(libvgm c140.c=superctrの実チップ解析。
+      //   System 2: 12.288MHz → 42667Hz)。当初 clock/576=21333Hz と誤実装しており
+      //   **全ボイスが正確に1オクターブ低く**鳴っていた(ユーザーの実聴指摘+CD照合で発覚)。
+      //   周波数レジスタの意味は bytes/sec = baseRate*freq/65536。
+      // 旧VGM互換: 1MHz未満はレート直値(旧仕様の~21390)とみなし、旧値=半レート慣習として2倍する。
+      // 内部ティックは cyclesPerSample=288 → 42667Hz。この時点で44.1kHz出力段ZOHの折り返しは
+      // 42.6k±fの不可聴域なので追加オーバーサンプルは不要(_freqScale=baseRate/実ティックレート)。
+      const legacy = this.clockHz < 1000000;
+      this.baseRate = legacy ? this.clockHz * 2 : this.clockHz / 288;
+      this.cyclesPerSample = legacy ? 1 : 288;
+      this._freqScale = this.baseRate / (this.clockHz / this.cyclesPerSample); // legacy=2, 通常=1
+      this.sampleRate = this.baseRate; // playRate/スナップショットの周波数基準
       this.type = type || 0;
+      // 出力LPF(基板のDAC後段アナログ再構成フィルタ相当、2次バターワース ~7kHz)。
+      // CD音源(実基板ライン録音)とのスペクトル比較で、ZOH化後の6.3k/10k/16kHz帯が
+      // CD比+3/+5/+12dB過剰(=DACイメージング成分)だったのを実機同様に丸める。
+      // RBJ biquad lowpass(チップレートで動作)
+      {
+        const fc = 10000, Q = 0.707; // 基板出力のアナログ再構成フィルタ相当(CD照合で調整。8kは10k帯が-5.5dB不足)
+        const w0 = 2 * Math.PI * fc / (this.clockHz / this.cyclesPerSample); // LPFは内部ティックレートで動く
+        const alpha = Math.sin(w0) / (2 * Q);
+        const cosw = Math.cos(w0);
+        const a0 = 1 + alpha;
+        this._lpB0 = (1 - cosw) / 2 / a0;
+        this._lpB1 = (1 - cosw) / a0;
+        this._lpB2 = (1 - cosw) / 2 / a0;
+        this._lpA1 = -2 * cosw / a0;
+        this._lpA2 = (1 - alpha) / a0;
+      }
       this.rom = null;
       this.mute = new Array(NUM_CH).fill(false);
       this.vol = new Array(NUM_CH).fill(1);
@@ -75,6 +97,8 @@
         st: 0, ed: 0, loop: 0, bank: 0, mode: 0, seq: 0, smpStart: 0, smpEnd: 0 });
       this.cyc = 0;
       this.lastL = 0; this.lastR = 0;
+      // 出力LPFの状態(biquad Direct Form 1、L/R各: 入力x1,x2 / 出力y1,y2)
+      this._lp = { lx1: 0, lx2: 0, ly1: 0, ly2: 0, rx1: 0, rx2: 0, ry1: 0, ry2: 0 };
     }
 
     /** VGMデータブロック 0x8D(C140 ROM)。 */
@@ -143,9 +167,10 @@
           const b = i << 4;
           const freq = (regs[b + 2] << 8) | regs[b + 3];
           if (!freq) continue;
-          c.frac += freq;
-          const cnt = c.frac >> 16;
-          c.frac &= 0xFFFF;
+          // 1ティックの進み = freq * _freqScale(通常1。旧VGM互換時のみ2)
+          c.frac += freq * this._freqScale;
+          const cnt = c.frac >= 65536 ? Math.floor(c.frac / 65536) : 0;
+          c.frac -= cnt * 65536;
           if (cnt) {
             c.pos += cnt;
             const sz = c.ed - c.st;
@@ -157,18 +182,26 @@
             c.lastdt = this._fetch(c, i);
           }
           if (this.mute[i]) continue;
-          // ★補間はしない(ZOH=次のサンプルまで値を保持)。MAMEコアはprevdt/dltdtの線形補間を
+          // ★既定は補間なし(ZOH=次のサンプルまで値を保持)。MAMEコアはprevdt/dltdtの線形補間を
           //   入れているが、実チップは保持のみで、C140の実曲は再生レートが低い(3〜7kBytes/s)ため
-          //   直線補間だと高域が大きく削れて「ぼやけた」音になる(ユーザー実聴指摘)。
-          //   実機どおり階段状に保持する方が原音の輪郭(くっきり感)が出る。
-          const sdt = c.lastdt;
+          //   直線補間だと高域が大きく削れて「ぼやけた」音になる(ユーザー実聴指摘。CD音源との
+          //   スペクトル比較にも使えるよう this.interp=true でMAME流補間へ切替可能)。
+          const sdt = this.interp ? c.prevdt + (c.lastdt - c.prevdt) * c.frac / 65536 : c.lastdt;
           l += sdt * regs[b + 1] * this.vol[i]; // +1=音量L
           r += sdt * regs[b + 0] * this.vol[i]; // +0=音量R
         }
       }
       // 1chフルスケール ≒ 32767*255。24ch合算を±1.0程度へ
-      this.lastL = l / (32768 * 255 * 2);
-      this.lastR = r / (32768 * 255 * 2);
+      const rawL = l / (32768 * 255 * 2);
+      const rawR = r / (32768 * 255 * 2);
+      // 出力LPF(コンストラクタのコメント参照)
+      const s = this._lp;
+      const yl = this._lpB0 * rawL + this._lpB1 * s.lx1 + this._lpB2 * s.lx2 - this._lpA1 * s.ly1 - this._lpA2 * s.ly2;
+      s.lx2 = s.lx1; s.lx1 = rawL; s.ly2 = s.ly1; s.ly1 = yl;
+      const yr = this._lpB0 * rawR + this._lpB1 * s.rx1 + this._lpB2 * s.rx2 - this._lpA1 * s.ry1 - this._lpA2 * s.ry2;
+      s.rx2 = s.rx1; s.rx1 = rawR; s.ry2 = s.ry1; s.ry1 = yr;
+      this.lastL = yl;
+      this.lastR = yr;
     }
 
     clock() {

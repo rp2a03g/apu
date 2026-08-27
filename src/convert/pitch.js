@@ -161,7 +161,9 @@
     return null;
   };
 
-  MML.Convert.PitchEnvelopeRegistry = function () {
+  // cmd: src/convert/options.js の変換設定(省略可)。EP/MP/PT の個別ON/OFFを assign() で見る。
+  MML.Convert.PitchEnvelopeRegistry = function (cmd) {
+    this.cmd = MML.Convert.normalizeCmd(cmd);
     this.tables = new Map(); // index(@EP<N>の番号) -> { values, loop }
     this.keyToIndex = new Map();
     this.nextIndex = 0;
@@ -407,21 +409,69 @@
   // directionUp: 周期的ビブラート(periodic)をMP<n>へフィットする際に使う出力先チップの
   // 周波数方向(fitVibrato参照)。省略時(undefined)はMPへのフィットを試みず、
   // 従来通り常にループEPテーブルを使う(VRC7=EP/MP対象外チャンネルの既定動作と一致)。
-  MML.Convert.PitchEnvelopeRegistry.prototype.assign = function (pitchSeq, directionUp) {
-    const pitchMod = MML.Convert.classifyPitchMod(pitchSeq);
-    if (!pitchMod) return null;
-    if (pitchMod.type === 'ramp') {
-      const fit = fitPortamento(pitchMod.values);
-      if (fit) return { kind: 'portamento', target: fit.target, duration: fit.duration, delay: pitchMod.delay };
-    } else if (pitchMod.type === 'periodic') {
-      const fit = fitVibrato(pitchMod.values, pitchMod.delay, directionUp);
-      if (fit) {
-        const idx = this.registerVibrato({ delay: fit.delay, speed: fit.speed, depth: fit.depth });
-        return { kind: 'vibrato', index: idx };
+  // ── SA<num>(ピッチシフト量、ppmckc公式・N163専用)の自動選択 ─────────────
+  // EPテーブル値は符号付きbyte(EP_VALUE_MIN/MAX)・MP depthも1byteだが、N163の周波数
+  // レジスタは18bitで1オクターブごとに値が2倍になる。深いビブラート等は生オフセットが
+  // byte幅を大きく超えて割当が失敗するため(実測: HESの変調イベントの58〜98%が黙って
+  // 破棄されていた)、SA<num>で値を<num>回左シフトして適用するようにし、テーブルには
+  // 縮めた値(>>sa)を登録する。量子化は2^sa単位=変調深さの約1/127で、セント換算1〜2程度。
+  //
+  // saMode('PITCH_SA'変換設定、src/convert/options.js):
+  //   'octave' … 基準レジスタ値のオクターブに連動(sa=floor(log2(base))-10、正規化後の
+  //              基準値が1024〜2047になる位置)。同じセント形状のビブラートがオクターブを
+  //              またいで同一のテーブル値になり、EnvelopeRegistryのdedupeが効く。
+  //              量子化ステップはセント換算0.85〜1.7で一定(オクターブ非依存)。既定。
+  //   'note'   … 音符ごとに必要最小のsa(最高精度、テーブル共有は減る)
+  //   'off'    … SAを使わない(従来互換。byte幅を超える変調は従来どおり割当失敗)
+  // どのモードもレンジに収まらない場合はsa+1のエスケープで引き上げる(上限8=本家仕様)。
+  MML.Convert.n163SaForBase = function (baseReg) {
+    if (!(baseReg > 0)) return 0;
+    return Math.max(0, Math.min(8, Math.floor(Math.log2(baseReg)) - 10));
+  };
+
+  // pitchSeq(生レジスタ値列)に対する実際のsaを決める。baseSa(モードごとの基本値)から、
+  // 最大偏差がEPのbyte幅に収まるまで引き上げる
+  function resolveSa(pitchSeq, baseSa) {
+    const base = pitchSeq[0];
+    let maxAbs = 0;
+    for (const v of pitchSeq) { const d = Math.abs(v - base); if (d > maxAbs) maxAbs = d; }
+    let sa = Math.max(0, Math.min(8, baseSa || 0));
+    while (sa < 8 && (maxAbs >> sa) > EP_VALUE_MAX) sa++;
+    return sa;
+  }
+
+  // saOpts(省略可): { mode: 'octave'|'note'|'off', baseSa: number }。
+  // N163が出力先のときだけ渡す(assignPitchEnvelopeのopts.saMode経由、または
+  // nsf2mml/spc2mmlのN163パスから直接)。戻り値にsa(使用したシフト量)が付く。
+  MML.Convert.PitchEnvelopeRegistry.prototype.assign = function (pitchSeq, directionUp, saOpts) {
+    const cmd = this.cmd;
+    if (!cmd.EP && !cmd.MP && !cmd.PT) return null; // 変換設定で全てOFF(基準音のみ)
+    let sa = 0;
+    let seq = pitchSeq;
+    if (saOpts && saOpts.mode && saOpts.mode !== 'off') {
+      sa = resolveSa(pitchSeq, saOpts.baseSa || 0);
+      if (sa > 0) {
+        const base = pitchSeq[0];
+        seq = pitchSeq.map(v => base + Math.round((v - base) / (1 << sa)));
       }
     }
+    const pitchMod = MML.Convert.classifyPitchMod(seq);
+    if (!pitchMod) return null;
+    if (pitchMod.type === 'ramp') {
+      const fit = cmd.PT ? fitPortamento(pitchMod.values) : null;
+      // PT(独自拡張)はSAのシフト対象外(compiler.js pitchRegisterOffset参照)のため、
+      // targetを生スケールへ戻して返す
+      if (fit) return { kind: 'portamento', target: fit.target * (1 << sa), duration: fit.duration, delay: pitchMod.delay, sa };
+    } else if (pitchMod.type === 'periodic') {
+      const fit = cmd.MP ? fitVibrato(pitchMod.values, pitchMod.delay, directionUp) : null;
+      if (fit) {
+        const idx = this.registerVibrato({ delay: fit.delay, speed: fit.speed, depth: fit.depth });
+        return { kind: 'vibrato', index: idx, sa };
+      }
+    }
+    if (!cmd.EP) return null; // EPが受け皿として使えなければ基準音のみ
     const registered = this.registerShape(pitchMod);
-    return registered ? { kind: 'ep', index: registered.index, delay: registered.delay } : null;
+    return registered ? { kind: 'ep', index: registered.index, delay: registered.delay, sa } : null;
   };
 
   MML.Convert.PitchEnvelopeRegistry.prototype.defLines = function () {
@@ -451,16 +501,25 @@
   // 借用先チップの生レジスタ空間へ変換して分類・登録し、該当すればev.pitchEpを立てる
   // (MML出力側でのgetter用にイベントオブジェクトを直接書き換える。detectChorusDetuneが
   // ev.detuneを直接書き込むのと同じ流儀)。
-  MML.Convert.assignPitchEnvelope = function (channels, periodFn, pitchReg) {
+  // opts.saMode('octave'|'note'|'off'): 出力先がN163のときだけ渡すSA<num>自動選択
+  // (n163SaForBase冒頭コメント参照)。省略時はSA無し(従来動作)。
+  MML.Convert.assignPitchEnvelope = function (channels, periodFn, pitchReg, opts) {
     // このperiodFn(=呼び出し元が渡す借用先チップの生周期換算関数)自体の増減方向を
     // 1回だけ調べ、fitVibratoへ渡す(compiler.jsのperiodFnIncreasingと同じ2点比較)。
     const directionUp = periodFnIncreasingLocal(periodFn);
+    const saMode = opts && opts.saMode && opts.saMode !== 'off' ? opts.saMode : null;
     for (const ch of channels) {
       for (const ev of ch.events) {
         if (ev.note === null || !ev.freqSeq || ev.freqSeq.length === 0) continue;
         const rescaled = MML.Convert.rescalePitchSeqFromFreq(ev.freqSeq, periodFn, ev);
-        const assigned = pitchReg.assign(rescaled, directionUp);
+        const saOpts = saMode
+          ? { mode: saMode, baseSa: saMode === 'octave' ? MML.Convert.n163SaForBase(rescaled[0]) : 0 }
+          : undefined;
+        const assigned = pitchReg.assign(rescaled, directionUp, saOpts);
         MML.Convert.applyPitchAssignment(ev, assigned);
+        // SAはD<n>にも効く(compiler.js pitchRegisterOffset、本家freq_add_mcknumber参照)ため、
+        // この音符のDも同じシフトで縮めて出力する(量子化2^sa単位≈1〜2セント)
+        if (ev.pitchSa && ev.detune) ev.detune = Math.round(ev.detune / (1 << ev.pitchSa));
       }
       // スラー分割(別プロジェクトE、2026-08-12): pitchEp/portamentoが確定した直後に
       // まとめて行う(markSlurTiesの安全ガードが両方の値を参照するため)。KSS(ay/scc)・
@@ -476,6 +535,9 @@
   // 重複させないためにここへ集約する。
   MML.Convert.applyPitchAssignment = function (ev, assigned) {
     if (!assigned) return;
+    // SA<num>(assign()のsaOpts参照): この音符のEP/MP値が>>saで登録されているため、
+    // 再生時に同じsaで戻せるようイベントへ記録する(mmlEmitがSA<n>コマンドとして出力)
+    if (assigned.sa != null && assigned.sa > 0) ev.pitchSa = assigned.sa;
     if (assigned.kind === 'portamento') {
       ev.portamento = { target: assigned.target, duration: assigned.duration, delay: assigned.delay };
     } else if (assigned.kind === 'vibrato') {
@@ -506,6 +568,9 @@
   const MAX_ARPEGGIO_PERIOD = 8; // 一般的な和音の構成音数を超える周期は誤検出とみなして除外
   const MIN_ARPEGGIO_CYCLES = 2; // 最低2周期分の反復確認(偶然の一致除け)
   const ARPEGGIO_CENTS_TOLERANCE = 25; // 半音の1/4以内なら「その半音に厳密に乗っている」とみなす
+  // トリル判別(mergeAlternatingVibratoの形状ゲート、同所コメント参照)
+  const TRILL_MIN_CENTS = 70;          // 方形でもこれ未満の浅い変調はビブラートとして統合を許す
+  const TRILL_MIDDLE_FRAC_MAX = 0.15;  // 中間帯滞在サンプル比がこれ未満なら方形(2値切替)とみなす
   const EN_VALUE_MIN = -127, EN_VALUE_MAX = 126; // @EN<n>テーブル値は符号付きbyte(lexer.js参照、EPと共通)
 
   // freq(Hz)が最寄りの12平均律半音(o4a=57=440Hz基準、他の抽出コードと同じ規約)から
@@ -647,7 +712,10 @@
     return result;
   };
 
-  MML.Convert.NoteEnvelopeRegistry = function () {
+  // cmd: src/convert/options.js の変換設定(省略可)。cmd.EN===false なら登録せず null
+  // (アルペジオ統合済みイベントは基音1音のまま出る)。
+  MML.Convert.NoteEnvelopeRegistry = function (cmd) {
+    this.cmd = MML.Convert.normalizeCmd(cmd);
     this.tables = new Map(); // index(@EN<N>の番号) -> { values, loop }
     this.keyToIndex = new Map();
     this.nextIndex = 0;
@@ -659,7 +727,7 @@
   // 参照)は、EN側は現状ループ専用(非ループ生成経路が無い)ため該当しないが、将来
   // 非ループEN生成を追加する場合はここも同じガードを入れること。
   MML.Convert.NoteEnvelopeRegistry.prototype.registerShape = function (deltas) {
-    if (!deltas || deltas.length === 0) return null;
+    if (!deltas || deltas.length === 0 || !this.cmd.EN) return null;
     const key = deltas.join(',');
     let idx = this.keyToIndex.get(key);
     if (idx === undefined) {
@@ -701,8 +769,9 @@
   // (pitch.js冒頭のmergeRapidArpeggioコメント参照)。rawFreqを持たない抽出結果
   // (SPC/ノイズ/OPLL等)ではmergeRapidArpeggioは何もせず素通りするだけなので、
   // 呼び出し側を条件分岐させずに一律この関数へ差し替えて問題ない。
-  MML.Convert.mergeVibratoAndArpeggio = function (events) {
-    return MML.Convert.mergeAlternatingVibrato(MML.Convert.mergeRapidArpeggio(events));
+  // opts.maxAbsorbCents: mergeAlternatingVibratoの統合上限(同関数コメント参照)。省略時は無制限
+  MML.Convert.mergeVibratoAndArpeggio = function (events, opts) {
+    return MML.Convert.mergeAlternatingVibrato(MML.Convert.mergeRapidArpeggio(events), opts);
   };
 
   // ── 分節のヒステリシス化(DESIGN-PITCH.md Phase 2、§5手順3) ──────────────
@@ -753,7 +822,7 @@
     return list.reduce((acc, e) => acc.concat(e[key] || []), []);
   }
 
-  MML.Convert.mergeAlternatingVibrato = function (events) {
+  MML.Convert.mergeAlternatingVibrato = function (events, opts) {
     const result = [];
     let i = 0;
     const n = events.length;
@@ -789,7 +858,38 @@
         // 周期で2音を高速往復=ビブラート」だけを統合対象とし、非周期の2値往復
         // (トレモロ的な打ち直し等、周期性の裏付けが無いもの)を誤って1音化しない)。
         const classified = MML.Convert.classifyPitchMod(candidateSeq);
-        if (classified && classified.type === 'periodic') {
+        // ★形状判別+統合上限(2026-08-26、DESIGN-PITCH.md §5「トリル判別」の実装):
+        //
+        // (1) トリル判別(形状、全フォーマット共通): LFOテーブル駆動のビブラートは中間値を
+        //     通る三角/正弦状、トリル奏法は2値切替の方形状。正規化振幅の中間帯(25%〜75%)に
+        //     滞在するサンプル比率(middleFrac)で判別し、方形かつ変調幅が奏法として意味を持つ
+        //     深さ(TRILL_MIN_CENTS以上)なら統合せず音符の交互のまま残す。浅い2値切替
+        //     (レジスタ分解能の都合で中間値を持てない境界ビブラート、数〜数十セント)は
+        //     従来どおり統合する。実例: Final Fantasy(NSF)の96〜105セント方形=トリル、
+        //     NX91002 idx34(HES)の149セント階段=三角ビブラート。
+        //
+        // (2) opts.maxAbsorbCents(フォーマット別の表現力上限): 統合された変調は後段の
+        //     MP/EPテーブル(fitVibrato→ループEP→literal EPの3段構え)で再現される前提だが、
+        //     テーブル値は符号付きbyte(EP_VALUE_MIN/MAX)・MP depthも1byteのため、表現可能な
+        //     変調幅は借用先チップの周期単位に依存する。HES→N163借用は単位が大きく
+        //     (半音≈1100周期単位)深い変調はレンジ外で割当が失敗し変調が丸ごと消えるため、
+        //     フォーマット側が上限を渡して超えるものは音符の交互のまま残す(次善の近似)。
+        //     省略時は無制限。
+        let spanCents = 0, middleFrac = 0;
+        {
+          let mn = Infinity, mx = 0;
+          for (const v of candidateSeq) if (v > 0) { if (v < mn) mn = v; if (v > mx) mx = v; }
+          if (mn < Infinity && mx > mn) {
+            spanCents = 1200 * Math.log2(mx / mn);
+            const lo = mn + (mx - mn) * 0.25, hi = mn + (mx - mn) * 0.75;
+            let mid = 0, n = 0;
+            for (const v of candidateSeq) if (v > 0) { n++; if (v > lo && v < hi) mid++; }
+            middleFrac = n > 0 ? mid / n : 0;
+          }
+        }
+        const isTrill = spanCents >= TRILL_MIN_CENTS && middleFrac < TRILL_MIDDLE_FRAC_MAX;
+        const spanOk = !(opts && opts.maxAbsorbCents != null && spanCents >= opts.maxAbsorbCents);
+        if (classified && classified.type === 'periodic' && !isTrill && spanOk) {
           result.push(Object.assign({}, home, {
             end: last.end,
             volSeq: concatField(absorbed, 'volSeq'),

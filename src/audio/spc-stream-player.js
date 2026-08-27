@@ -252,6 +252,7 @@
       this._buildChips();
       this.samplePos     = 0;
       this.currentFrame  = -1;
+      this._writeIdx     = 0;
       this._dspFrac      = 0;
       this._songFramePos = 0;
       this._lastL = this._lastR = 0;
@@ -262,18 +263,26 @@
       return !!(this.writeLog && this.writeLog[f]);
     }
 
-    _applyWrites(writes, skipSeeded) {
+    // 現在のフレームの書き込みを「フレーム内サンプル位置(w.off)がposInFrameに達した分まで」
+    // 適用する。offを持たない旧形式のログは従来通り即時(フレーム先頭で全部)適用する。
+    // posInFrame=Infinityで残り全部を流し切る(フレーム切替時の取りこぼし防止)。
+    _applyWritesUpTo(posInFrame) {
+      const writes = this.writeLog && this.writeLog[this.currentFrame];
       if (!writes) return;
-      const start = skipSeeded ? SEEDED_FRAME0_LEN : 0;
-      for (let i = start; i < writes.length; i++) {
-        const w = writes[i];
+      while (this._writeIdx < writes.length) {
+        const w = writes[this._writeIdx];
+        if (w.off !== undefined && w.off > posInFrame) break;
         this.dsp.writeReg(w.reg, w.val);
+        this._writeIdx++;
       }
     }
 
     _applyFrame(f) {
+      // 前フレームに残っていた書き込み(offが末尾付近のもの)を取りこぼさず流してから移る
+      if (this.currentFrame >= 0) this._applyWritesUpTo(Infinity);
       this.currentFrame = f;
-      this._applyWrites(this.writeLog[f], f === 0);
+      // frame0の先頭SEEDED_FRAME0_LEN件は_buildChips()の初期化と重複するので飛ばす
+      this._writeIdx = (f === 0) ? SEEDED_FRAME0_LEN : 0;
     }
 
     // DSPを1サンプル(32kHz)分進める。フレーム境界を跨ぐ場合は先にwriteLogを適用する。
@@ -288,6 +297,8 @@
       if (!this._isFrameReady(f)) return false;
       this._songFramePos = nextSongFramePos;
       if (f !== this.currentFrame) this._applyFrame(f);
+      // このサンプル時点までに実機で書かれていた分だけを適用する(フレーム内タイミング再現)
+      this._applyWritesUpTo((this._songFramePos - f) * SPC_FRAME_SAMPLES);
       this.dsp.clock();
       this._lastL = this.dsp.outL; this._lastR = this.dsp.outR;
       return true;
@@ -332,6 +343,7 @@
       if (this.spcBytes) this._buildChips();
       this.samplePos     = 0;
       this.currentFrame  = -1;
+      this._writeIdx     = 0;
       this._dspFrac      = 0;
       this._songFramePos = 0;
       this._lastL = this._lastR = 0;
@@ -357,13 +369,18 @@
       }
       this._buildChips();
       this._dspFrac = 0;
+      // 早送り: targetFrameまでの書き込みを順に全適用する(過去フレームはフレーム内位置に
+      // 関わらず全て適用済みであるべきなのでoffは見ない)
       for (let f = 0; f <= targetFrame; f++) {
         const writes = wl[f];
         if (!writes) break;
-        this._applyWrites(writes, f === 0);
+        const start = (f === 0) ? SEEDED_FRAME0_LEN : 0;
+        for (let i = start; i < writes.length; i++) this.dsp.writeReg(writes[i].reg, writes[i].val);
       }
       this.samplePos     = samplePos;
       this.currentFrame  = targetFrame;
+      // targetFrameは上で全部流し切っているので、次の_stepDsp()で二重適用しないよう末尾へ
+      this._writeIdx     = ((wl[targetFrame] || []).length) || 0;
       this._songFramePos = songFramePos;
       this._lastL = this._lastR = 0;
     }

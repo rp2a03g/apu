@@ -52,8 +52,10 @@
 
   function idealFreqOf(note) { return 440 * Math.pow(2, (note - 57) / 12); }
 
+  // opts.cmd(src/convert/options.js)の D===false なら何もしない(最寄り半音のまま)
   MML.Convert.applyPitchDetune = function (channels, periodForFreq, opts) {
     opts = opts || {};
+    if (opts.cmd && MML.Convert.normalizeCmd(opts.cmd).D === false) return;
     const maxAbsDetuneRatio = opts.maxAbsDetuneRatio || 0.5;
     const minCents = opts.minCents != null ? opts.minCents : 10;
 
@@ -70,6 +72,11 @@
         if (d === 0) continue;
         const maxAbsDetune = Math.abs(idealPeriod) * maxAbsDetuneRatio;
         ev.detune = Math.max(-maxAbsDetune, Math.min(maxAbsDetune, d));
+        // SA<num>(N163、pitch.js n163SaForBase参照): この音符のEP/MPが>>saで登録済みの
+        // 場合、再生側はDにも同じシフトを掛けるため、Dも縮めて出力する。
+        // (assignPitchEnvelopeより後にこの関数が走るNSF/SPC経路向け。HES/KSS/VGMの
+        //  「detune先・assign後」順ではassignPitchEnvelope側が同じ縮小を行う)
+        if (ev.pitchSa) ev.detune = Math.round(ev.detune / (1 << ev.pitchSa));
       }
     }
   };
@@ -125,6 +132,7 @@
    */
   MML.Convert.detectChorusDetune = function (channels, periodForFreq, opts) {
     opts = opts || {};
+    if (opts.cmd && MML.Convert.normalizeCmd(opts.cmd).D === false) return;
     const maxAbsDetuneRatio = opts.maxAbsDetuneRatio || 0.5;
     // applyPitchDetuneの既定10とは別物(理由は上のコメント参照)。既定0にし、実質的な下限は
     // 呼び出し先のd===0チェック(レジスタ値換算で本当に差が無い場合のみ無補正)に委ねる。
@@ -184,6 +192,8 @@
         if (d === 0) continue;
         const maxAbsDetune = Math.abs(idealPeriod) * maxAbsDetuneRatio;
         w.g.ev.detune = Math.max(-maxAbsDetune, Math.min(maxAbsDetune, d));
+        // SA<num>: applyPitchDetune側と同じ理由(同上コメント参照)
+        if (w.g.ev.pitchSa) w.g.ev.detune = Math.round(w.g.ev.detune / (1 << w.g.ev.pitchSa));
       }
     }
   };

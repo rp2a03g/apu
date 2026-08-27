@@ -29,6 +29,8 @@
  *   (v<N>/@v<N>/S<N>の切替時は値が前回と同じ番号でも必ずトークンを出し直す。
  *    コンパイラ側は明示的なv<n>でstate.envelopeV/fme7EnvShapeをnullにクリアするため)
  *   totalFrames  … 末尾休符を補うための曲全体のフレーム数
+ *   cmd          … 変換設定(src/convert/options.js)。上記フラグをANDマスクし、譜面整形
+ *                   (SHAPE_REST/SHAPE_QUANT)をギャップ補完前に掛ける
  *
  * 音価の継続(タイ)は必ず & (note/rest名を繰り返す) で行う。
  * 字句解析器 (src/mml/lexer.js) は & のみを tie として認識し、^ は無視される
@@ -125,6 +127,13 @@
         if (flags.hasSweep) {
           const sw = ev.sweep ? `s${ev.sweep.speed},${ev.sweep.depth}` : 's0';
           if (sw !== state.curSweep) { emit(sw); state.curSweep = sw; }
+        }
+        // SA<num>(N163ピッチシフト量、ppmckc公式): この音符のD/EP/MP値が>>saで縮めて
+        // 登録されている場合に、再生側が同じシフトで戻すための状態コマンド。D<n>より
+        // 先に出す(同じ音符のDにも効くため)。未指定イベントは0扱いで明示的に戻す
+        if (flags.hasDetune || flags.hasPitchMod) {
+          const saVal = ev.pitchSa || 0;
+          if (saVal !== (state.curPitchSa || 0)) { emit(`SA${saVal}`); state.curPitchSa = saVal; }
         }
         // コーラス(デチューン)効果。未指定イベントは0扱い(直前の音符のデチューンを
         // 引きずらないよう、hasDetune指定チャンネルでは毎回0との差分を見て明示的に戻す)
@@ -256,7 +265,7 @@
     return {
       curOct: -1, curVol: -1, curInst: -1, curEnvV: -1, curEnvVr: -1,
       curFme7Shape: -1, curFme7Period: -1, curFme7Noise: -1, curVolMode: null, durCarry: 0,
-      curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, curPitchEp: null, curPitchEpDelay: 0,
+      curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, curPitchSa: 0, curPitchEp: null, curPitchEpDelay: 0,
       curNoteEnv: null, curVibrato: null, curSweep: 's0',
       curPortamentoTarget: null, curPortamentoDuration: 0, curPortamentoDelay: 0,
       lastWasNote: false, hasEmitted: false
@@ -280,11 +289,14 @@
       hasNoteEnv: opts.hasNoteEnv != null ? !!opts.hasNoteEnv : !!opts.hasPitchMod
     };
     const tempoPrefix = opts.tempoPrefix || '';
+    // 変換設定(src/convert/options.js): コマンドマスク+譜面整形
+    const maskedFlags = MML.Convert.maskEmitFlags(flags, opts.cmd);
+    Object.assign(flags, maskedFlags);
 
     const lines = [];
     if (opts.headerLines) lines.push(...opts.headerLines);
 
-    const filled = fillGaps(events, totalFrames);
+    const filled = fillGaps(MML.Convert.shapeEvents(events, fpb, opts.cmd), totalFrames);
 
     if (filled.length === 0) {
       lines.push(`${letter} ${tempoPrefix}r1`.trimEnd());
@@ -364,8 +376,13 @@
     const framesPerMeasure = fpb * beatsPerMeasure;
     const measureCount = Math.max(1, Math.ceil(totalFrames / framesPerMeasure));
 
+    // 小節境界。譜面整形の格子量子化(SHAPE_QUANT、src/convert/options.js)がONのときは
+    // イベント境界が fpb/4 の倍数(一般に非整数)に揃っているため、境界も丸めずに
+    // 厳密値を使う(整数に丸めると格子から僅かにズレた位置で分割され &g96&g192 の
+    // ような端数タイが湧く)。OFF時は従来通り整数に丸める(出力不変)。
+    const quantized = !!(opts.cmd && MML.Convert.normalizeCmd(opts.cmd).SHAPE_QUANT);
     const boundaries = [];
-    for (let m = 1; m < measureCount; m++) boundaries.push(Math.round(m * framesPerMeasure));
+    for (let m = 1; m < measureCount; m++) boundaries.push(quantized ? m * framesPerMeasure : Math.round(m * framesPerMeasure));
 
     const lines = [];
     if (opts.headerLines) lines.push(...opts.headerLines);
@@ -376,10 +393,13 @@
 
     // チャンネルごとに: ギャップ補完 → 小節境界で分割 → 小節バケツへ → テキスト化
     const perChannelMeasureTexts = channelsData.map(chan => {
-      const filled  = fillGaps(chan.events, totalFrames);
+      // 変換設定(src/convert/options.js opts.cmd): 譜面整形(短い休符吸収/格子量子化)を
+      // ギャップ補完の前に掛け、コマンドフラグは下でANDマスクする(割当層で止め切れ
+      // なかった分の安全網)
+      const filled  = fillGaps(MML.Convert.shapeEvents(chan.events, fpb, opts.cmd), totalFrames);
       const split   = splitAtBoundaries(filled, boundaries);
       const buckets = bucketByMeasure(split, framesPerMeasure, measureCount);
-      const flags = {
+      const flags = MML.Convert.maskEmitFlags({
         hasVolume: !!chan.hasVolume, hasInstrument: !!chan.hasInstrument,
         hasEnvelope: !!chan.hasEnvelope, hasFme7Env: !!chan.hasFme7Env, hasVrc7Tone: !!chan.hasVrc7Tone,
         hasFdsMod: !!chan.hasFdsMod, hasFme7Noise: !!chan.hasFme7Noise, hasDetune: !!chan.hasDetune,
@@ -395,7 +415,7 @@
         // 曲(このチャンネル)で最も多い音価をl<n>としてチャンネル先頭で宣言し、以後
         // 一致する音符/休符は数値部分を省略する(renderEvents内のomitDefaultLen参照)。
         defaultLen: MML.Convert.detectDefaultLength(filled, fpb)
-      };
+      }, opts.cmd);
       const state = newState();
       let first = true;
       return buckets.map(bucketEvents => {

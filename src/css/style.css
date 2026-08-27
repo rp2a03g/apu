@@ -951,6 +951,34 @@ button.secondary {
 .kbd-h-note  { flex: none; width: 36px; text-align: right; }
 .kbd-h-freq  { flex: 1; }
 
+/* 見出しの3つのボタン(part列=チャンネル割当トグル / mute列=全chミュート / vol列=全ch音量100%)。
+   列そのものがボタンなので、幅・位置は上の見出し列指定のまま、ボタンの既定装飾だけ落とす。
+   ボタン化しても見出しの文字の並び(高さ・ベースライン)が変わらないようにする */
+.kbd-header button.kbd-h-part,
+.kbd-header button.kbd-h-mute-solo,
+.kbd-header button.kbd-h-vol {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+.kbd-header button.kbd-h-vol { padding-left: calc(20px + 6px); text-align: left; }
+.kbd-header button.kbd-h-part { display: inline-flex; align-items: center; justify-content: center; }
+.kbd-header button.kbd-h-part svg { width: 14px; height: 14px; }
+.kbd-header button.kbd-h-part:hover:not(:disabled),
+.kbd-header button.kbd-h-mute-solo:hover,
+.kbd-header button.kbd-h-vol:hover { color: var(--accent); border-color: var(--border); background: var(--control-bg); }
+.kbd-header button.kbd-h-part:disabled { opacity: 0.35; cursor: default; }
+/* 全chミュート中は押し込み表示(もう一度押すと解除、が分かるように) */
+.kbd-muteall-btn--on { color: var(--accent); border-color: var(--border) !important; background: var(--control-bg) !important; }
+
 .kbd-rows {
   display: flex;
   flex-direction: column;
@@ -1068,6 +1096,38 @@ button.secondary {
   cursor: default;
 }
 .kbd-src-badge--file { background: var(--ok); }
+/* サウンドファイルを開いている時だけバッジをクリック可能にする(MML↔サウンドファイル切替) */
+.kbd-src-badge--clickable { cursor: pointer; }
+.kbd-src-badge--clickable:hover { filter: brightness(1.15); }
+
+/* 鍵盤表示タイトル行の再生コントロール(⏮ ▶/⏸ ■ ⏭、keyboard.js _buildTransportBar)。
+   バッジ(ファイル名)の右に置き、今表示している方(MML / サウンドファイル)を操作する */
+.kbd-transport {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+.kbd-tp-btn {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.kbd-tp-btn svg { width: 13px; height: 13px; display: block; pointer-events: none; }
+.kbd-tp-btn .icon-pause { display: none; }
+.kbd-tp-btn.is-playing .icon-play { display: none; }
+.kbd-tp-btn.is-playing .icon-pause { display: block; }
+.kbd-tp-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--border); background: var(--control-bg); }
+.kbd-tp-btn:disabled { color: var(--text-muted); opacity: 0.4; cursor: default; }
 
 /* --- 鍵盤表示のレイアウト設定(タイトル行の⚙ボタン+ポップオーバー、keyboard.js _openLayoutPopover) --- */
 .kbd-layout-btn {
@@ -1086,6 +1146,104 @@ button.secondary {
 }
 .kbd-layout-btn svg { width: 14px; height: 14px; }
 .kbd-layout-btn:hover { color: var(--accent); border-color: var(--border); background: var(--control-bg); }
+
+/* ---- チャンネル割当(変換元ch → NSF側の借用先パート。src/convert/channelPlan.js) ---- */
+/* 一覧に「借用先/音色」列を出すトグル。見出しのpart列そのものがボタン
+   (幅・配置は .kbd-header button.kbd-h-part 側、ここは状態表示だけ) */
+.kbd-assign-btn { position: relative; } /* --custom の印(::after)の位置基準 */
+/* 未展開は明るいアクセント色で「押せる」ことを示し、展開中は暗い沈んだ地色+内側の影で
+   「押し込まれている」ことを表す(他の見出し文字と同じ淡色だとボタンだと気付けないため)。
+   .kbd-header の見出しボタン共通指定(hover含む)より後ろ・同等以上の詳細度で上書きする */
+.kbd-header button.kbd-h-part.kbd-assign-btn { color: var(--accent); }
+.kbd-header button.kbd-h-part.kbd-assign-btn.kbd-assign-btn--on {
+  color: var(--text-muted);
+  border-color: var(--border);
+  background: var(--surface);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.28);
+}
+/* 既定から変更されている(ユーザー指定あり)ときは小さな印を出す */
+.kbd-assign-btn--custom::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* part列チップ: 割当を変更できるフォーマットではクリックでポップオーバーを開く。
+   幅は従来のパート文字(10px)のままで、枠のぶんだけ内側を詰める(縦置き/多段/別窓の
+   どのレイアウトでも行の高さ・列幅が変わらないようにするため) */
+.kbd-part--editable {
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  line-height: 12px;
+}
+.kbd-part--editable:hover { border-color: var(--accent); color: var(--accent); }
+/* 既定から変更した行は文字をアクセント色にする(どの行を触ったか一目で分かるように) */
+.kbd-part--custom { color: var(--accent); border-color: var(--accent); }
+/* スキップ(変換対象外)の行は減光。「この音は変換に乗らない」を聴きながら分かるようにする */
+.kbd-ch-row--skip { opacity: 0.45; }
+/* 借用先が他chと重複している行(先に置かれた方が勝ち、後は変換対象外になる) */
+.kbd-ch-row--conflict .kbd-part { color: var(--error); border-color: var(--error); }
+.kbd-ch-row--conflict .kbd-assign-target { border-color: var(--error); }
+
+/* 「借用先/音色」列。割当表示ON(.kbd-left--assign)のときだけ現れる。
+   ヘッダ(.kbd-h-assign)と行(.kbd-assign)は同じ幅にして列を揃える */
+.kbd-h-assign, .kbd-assign { display: none; flex: none; width: 200px; }
+.kbd-left--assign .kbd-h-assign { display: inline-block; }
+.kbd-left--assign .kbd-assign { display: flex; align-items: center; gap: 4px; }
+.kbd-assign-target { flex: none; width: 112px; }
+.kbd-assign-tone { flex: none; width: 84px; }
+.kbd-assign-target, .kbd-assign-tone {
+  height: 16px;
+  padding: 0 2px;
+  font-size: 10px;
+  font-family: var(--mono);
+  background: var(--control-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+.kbd-assign-target:disabled, .kbd-assign-tone:disabled { opacity: 0.5; }
+/* SPC一覧はpart列を足しても ch↔L の間隔を従来どおり(-3px)に保つ(メイン一覧の-16pxが
+   セレクタの詳細度で勝ってしまうため明示的に上書きする) */
+.kbd-left--spc .kbd-part + .kbd-mute + .kbd-name,
+.kbd-left--spc .kbd-h-mute-solo + .kbd-h-name { margin-right: -3px; }
+
+/* part列チップから開く1行ぶんの割当ポップオーバー(レイアウトに依らず使える編集経路) */
+.kbd-assign-pop {
+  position: fixed;
+  z-index: 2147483646; /* 色ピッカー(.kbd-color-picker)と同じ理由で最前面 */
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 8px 10px;
+  min-width: 250px;
+  font-size: 11px;
+  font-family: var(--mono);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+.kbd-assign-pop-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.kbd-assign-pop-row > span:first-child { flex: none; width: 56px; color: var(--text-secondary); }
+.kbd-assign-pop-row select { flex: 1; min-width: 0; font-size: 11px; font-family: var(--mono); }
+.kbd-assign-pop-vol { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.kbd-assign-pop-vol input[type=range] { flex: 1; min-width: 0; height: 12px; margin: 0; }
+.kbd-assign-pop-vol span { flex: none; width: 34px; text-align: right; color: var(--text-secondary); }
+.kbd-assign-pop-foot { display: flex; justify-content: flex-end; }
+.kbd-assign-pop-foot button {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: var(--control-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.kbd-assign-pop-foot button:hover { border-color: var(--accent); color: var(--accent); }
 .kbd-layout-pop {
   position: fixed;
   z-index: 2147483647; /* .kbd-color-pickerと同じ理由(float-windowのz-indexが増え続けるため最前面固定) */
@@ -1717,8 +1875,14 @@ button.secondary {
 }
 /* SPC表示はL/R/env/PM/echo列のぶんNSFより広い。全列が収まる幅(keyboard.jsのSPC_LIST_MIN_WIDTHと一致) */
 .kbd-left.kbd-left--spc {
-  width: 500px;
+  width: 512px;
 }
+/* チャンネル割当の「借用先/音色」列(200px+gap6px=206px)を出す間は、その分だけ一覧を広げる
+   (widthを持たない幅いっぱい配置(.kbd-left--flex)は対象外。keyboard.jsのASSIGN_COL_WIDTHと一致させること) */
+.kbd-left.kbd-left--assign:not(.kbd-left--flex) { width: 526px; }
+.kbd-left.kbd-left--assign.kbd-left--hes:not(.kbd-left--flex),
+.kbd-left.kbd-left--assign.kbd-left--gbs:not(.kbd-left--flex) { width: 576px; }
+.kbd-left.kbd-left--assign.kbd-left--spc:not(.kbd-left--flex) { width: 718px; }
 /* 一覧が幅いっぱいに広がる配置(下配置で多段、別ウィンドウ配置)。固定幅の指定より後ろに置いて優先させる */
 .kbd-left.kbd-left--flex {
   width: auto;
@@ -1889,24 +2053,6 @@ button.secondary {
 }
 .window-size-indicator.visible { display: block; }
 
-
-/* VGMパネル: チャンネル割当表(変換元ch→借用先select) */
-.vgm-chmap {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  gap: 3px 8px;
-  margin-top: 4px;
-}
-.vgm-chmap label {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 4px;
-  font-size: 11px;
-}
-.vgm-chmap label span { white-space: nowrap; }
-.compact-soundplay .vgm-chmap select { font-size: 11px; padding: 1px 3px; max-width: 130px; }
-
 /* --- MMLコマンドヘルプ (src/ui/helpPanel.js) --- */
 .help-window-body {
   display: flex;
@@ -1959,15 +2105,16 @@ button.secondary {
 }
 .help-cmd {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 15px;
+  font-weight: 600;
   color: var(--accent);
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 3px;
-  padding: 1px 5px;
+  padding: 2px 7px;
   white-space: pre-wrap;
 }
-.help-title { font-size: 12px; color: var(--text); font-weight: 600; }
+.help-title { font-size: 14px; color: var(--text); font-weight: 600; }
 .help-actions { margin-left: auto; display: flex; gap: 4px; }
 .help-actions button { padding: 1px 7px; font-size: 12px; }
 .help-actions .help-play.playing { background: var(--accent); color: var(--on-accent); }
@@ -1991,3 +2138,70 @@ button.secondary {
   white-space: pre;
 }
 .help-empty { color: var(--text-muted); font-size: 12px; padding: 8px; }
+
+/* コマンド索引(アルファベット順のリスト。クリックで該当項目へ) */
+.help-index-box {
+  flex: 0 0 auto;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  padding: 2px 0;
+}
+.help-index-label {
+  position: sticky;
+  top: 0;
+  background: var(--panel-raised);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 3px 6px;
+  z-index: 1;
+}
+.help-index-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.help-index-item:hover, .help-index-item:focus {
+  background: var(--hover-bg);
+  outline: none;
+}
+.help-index-cmd {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--accent);
+  flex: 0 0 auto;
+  min-width: 132px;
+}
+.help-index-title {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 索引から飛んだ項目を一瞬光らせる */
+@keyframes help-card-flash {
+  from { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+  to   { border-color: var(--border); box-shadow: none; }
+}
+.help-card--flash { animation: help-card-flash 1.2s ease-out 1; }
+
+/* ---- 変換設定ダイアログ(src/ui/convertSettings.js、es-modal を流用) ---- */
+.cs-modal { max-width: 560px; }
+.cs-note { margin: 0 0 12px; font-size: 12px; color: var(--text-muted); }
+.cs-row {
+  display: grid;
+  grid-template-columns: auto 7.5em 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  cursor: pointer;
+}
+.cs-key { font-size: 12px; }
+.cs-desc { font-size: 12px; color: var(--text-muted); }
+.convert-settings-btn--active { outline: 2px solid var(--accent); outline-offset: -2px; }

@@ -109,7 +109,8 @@
         if (this.waveWriteEnable) this.wave[addr - 0x4040] = value & 0x3F;
       } else if (addr === 0x4080) {
         if (value & 0x80) {
-          // 直接指定モード: bits0-5 をゲインとして即時反映
+          // 直接指定モード: bits0-5 をゲインとして即時反映(6bit生値を保持。出力段で32に
+          // 頭打ちするのはmixSample側。エンベロープ減衰は書かれた値から数え始めるため)
           this.volEnvEnabled = false;
           this.volGain = value & 0x3F;
         } else {
@@ -273,7 +274,9 @@
       const index = Math.floor(this.phaseAcc / 65536) % 64;
       const sample = this.wave[index] & 0x3F; // 0-63
       const centered = sample - 32; // -32..31
-      const volScale = this.volGain / 32;
+      // 実機の有効ゲインは32で頭打ち(33-63を書いても32相当。以前はクランプ漏れで最大約2倍
+      // 大きく鳴っていた、2026-08-24)
+      const volScale = Math.min(32, this.volGain) / 32;
       const masterScale = MASTER_VOLUME_SCALE[this.masterVolume & 0x03];
       // FDS 混合係数: NES 実機の抵抗網 (FDS=47Ω直列, 2A03=100Ω直列, 負荷=39Ω) から
       // FDS 出力は 2A03 の約 39% 程度に相当。係数 0.20 は実機バランスに合わせた値。

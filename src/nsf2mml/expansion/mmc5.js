@@ -99,10 +99,12 @@
         const period = ev.envKey & 0x0F;
         const loop = !!(ev.envKey & 0x20);
         const shape = MML.Convert.simulateHwEnvelope(period, loop);
-        return { envelopeV: envReg.registerShape(shape, true) };
+        const hwIdx = envReg.registerShape(shape, true);
+        // 変換設定ENV=OFF時はnull → ピーク値のv<n>へ(src/convert/options.js plainVolume)
+        return hwIdx == null ? { volume: MML.Convert.plainVolume(shape) } : { envelopeV: hwIdx };
       }
       const idx = envReg.assign(ev.volSeq);
-      return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(ev.volSeq) } : { envelopeV: idx };
     }
     // MMC5パルスは周期レジスタ(値が下がるほど音程が上がる)なのでdirectionUp=false
     // (src/convert/pitch.js fitVibrato参照)。

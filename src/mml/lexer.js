@@ -778,6 +778,12 @@
             i++;
             if (matchLiteral2('OF')) tokens.push({ type: 'smooth', value: false });
             else tokens.push({ type: 'smooth', value: true });
+          } else if (str[i] === 'A' || str[i] === 'a') {
+            // SA<num> ピッチシフト量(ppmckc公式、N163用)。D/EP/MPの値を<num>回左シフト
+            // してから周波数値へ加減算する(compiler.js pitchRegisterOffset参照)
+            i++;
+            const v = readNumber();
+            tokens.push({ type: 'pitchShiftAmount', value: v == null ? 0 : v });
           } else {
             const v = readNumber();
             tokens.push({ type: 'fme7EnvShape', value: v == null ? 0 : v });

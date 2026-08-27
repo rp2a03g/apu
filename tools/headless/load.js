@@ -62,13 +62,16 @@ function load(opt = {}) {
       loaded.push(src);
       if (verbose) console.error(`  ok   ${src}`);
     } catch (e) {
-      errors.push({ src, phase: 'exec', message: e.message, stack: e.stack });
+      // 診断用: 失敗時点のグローバル状態(MMLの有無・コード長)も残す(稀な読み込み失敗の切り分け)
+      errors.push({ src, phase: 'exec', message: e.message, stack: e.stack,
+        hasMML: typeof g.MML, codeLen: code.length });
       if (verbose) console.error(`  FAIL ${src}: ${e.message}`);
     }
   }
 
   if (strict && errors.length) {
-    const lines = errors.map((e) => `  ${e.src}: ${e.message}`).join('\n');
+    // 稀に発生する読み込み失敗の原因究明用に、スタックの先頭(発生行)も併記する
+    const lines = errors.map((e) => `  ${e.src}: ${e.message}\n    ${((e.stack || '').split('\n')[1] || '').trim()}`).join('\n');
     throw new Error(`ヘッドレス読み込みで ${errors.length} 本が失敗:\n${lines}`);
   }
 

@@ -34,7 +34,7 @@
  *               ノート番号の範囲には遠く届かない、既存のNOTE_MAX切り下げの延長)
  *   0xFB      : ビブラート(MP)選択。次バイトはインデックス(255=off)
  *   0xFC      : 休符。直後1バイトがフレーム数
- *   0xFD      : 音量直接指定。次バイトは 0x80|(0-15)。このチャンネルのソフトウェア
+ *   0xFD      : 音量直接指定。次バイトは 0x80|(0-63。FDS/VRC6のこぎり波以外は0-15)。このチャンネルのソフトウェア
  *               音量エンベロープ(下記0xF3)を解除する(compiler.js側の明示的なv<n>が
  *               state.envelopeVをnullクリアするのと同じ意味)
  *   0xFE      : 音色指定。次バイトは実機ppmck同様bit7で2種類を区別する
@@ -168,6 +168,9 @@
   // 独自拡張のポルタメントに転用した(その後2026-08-20にsweepはOP_SWEEP=0xE3で実装)
   const OP_PORTAMENTO = 0xf9;
   const OP_DETUNE = 0xfa; // D<n>デチューン選択。次の2バイトが符号付き16bit値(下位,上位、リトルエンディアン)
+  // SA<num>(N163ピッチシフト量、2026-08-26、本家ppmckcのpitch_shift_amount相当)。
+  // 次バイトがシフト量(0-8)。空き領域0xE3-0xE6のうちOP_SWEEP(0xE3)の次を使う
+  const OP_PITCH_SA = 0xe4;
   const OP_VIBRATO = 0xfb;
   const OP_WAIT = 0xf4;
   const OP_REST = 0xfc;
@@ -338,6 +341,7 @@
     let lastFme7EnvShape = null;
     let lastFme7EnvPeriod = null;
     let lastDetune = 0; // D<n>の既定値は0(compiler.jsのstate.detune初期値と同じ)
+    let lastPitchSa = 0; // SA<num>の既定値は0(compiler.jsのstate.pitchSa初期値と同じ)
     // s<speed>,<depth>(2026-08-20)。既定値$08はドライバのINITが$4001/$4005へ書く値と同じ
     // (スイープ無効。$00だと低音が実機で常時ミュートされるためnegateビットだけ立てる定石)
     let lastSweep = 0x08;
@@ -493,7 +497,9 @@
           }
           lastVolMode = 'env';
         } else {
-          const volume = Math.max(0, Math.min(15, seg.volume));
+          // FDS/VRC6のこぎり波は0-63(本家ppmck同様の6bit音量)、他はcompiler.js側で0-15に
+          // クランプ済み。デコーダは&0x7Fなのでバイト表現は変わらない
+          const volume = Math.max(0, Math.min(63, seg.volume));
           if (volume !== lastVolume || lastVolMode !== 'plain') {
             bytes.push(OP_VOL, 0x80 | volume);
             lastVolume = volume;
@@ -582,6 +588,13 @@
             lastPortamentoDuration = ptDuration;
             lastPortamentoDelay = ptDelay;
           }
+        }
+        // SA<num>(N163ピッチシフト量): D<n>より先に出す(ドライバ側は状態変数なので
+        // 順序は本質でないが、MML出力(mmlEmit.js)のSA→Dの並びと揃えておく)
+        const pitchSa = seg.pitchSa || 0;
+        if (pitchSa !== lastPitchSa) {
+          bytes.push(OP_PITCH_SA, pitchSa & 0xff);
+          lastPitchSa = pitchSa;
         }
         const detune = seg.detune || 0;
         if (detune !== lastDetune) {
@@ -765,6 +778,7 @@
     let noteEnv = null, pitchEnv = null, pitchEnvDelay = 0, portamento = null, vibrato = null;
     let fme7Noise = null, fme7EnvShape = null, fme7EnvPeriod = null;
     let detune = 0;
+    let pitchSa = 0; // SA<num>(N163ピッチシフト量、2026-08-26)。0=シフト無し
     let sweepReg = 0x08; // s<speed>,<depth>の生バイト($08=OFF、2026-08-20)
     let smooth = false;
     let envelopeVr = 255; // @vr<n>(2026-08-13)。255=off
@@ -831,6 +845,7 @@
         i += 2;
         continue;
       }
+      if (b === OP_PITCH_SA) { pitchSa = bytes[i]; i++; continue; }
       if (b === OP_VIBRATO) { vibrato = bytes[i]; i++; continue; }
       // s<speed>,<depth>(2026-08-20): 生の$4001/$4005バイトを保持するだけ
       // (このデコーダは音符イベントの再構成用で、スイープはレジスタ直書きなので値は使わない)
@@ -863,7 +878,7 @@
         i += 2;
         rawEvents.push({
           type: 'pitchBreak', noteNumber, frames, volume, tone, envIdx,
-          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty
+          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, pitchSa, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty
         });
         continue;
       }
@@ -875,7 +890,7 @@
         const frames = bytes[i]; i++;
         rawEvents.push({
           type: 'note', noteNumber, frames, volume, tone, envIdx,
-          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty,
+          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, pitchSa, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty,
           psGlide: true
         });
         continue;
@@ -885,7 +900,7 @@
       if (b >= NOTE_IMPLICIT_BASE && b <= NOTE_IMPLICIT_BASE + NOTE_IMPLICIT_MAX) {
         rawEvents.push({
           type: 'note', noteNumber: b - NOTE_IMPLICIT_BASE, frames: stickyNoteLen, volume, tone, envIdx,
-          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty
+          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, pitchSa, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty
         });
         continue;
       }
@@ -893,7 +908,7 @@
       stickyNoteLen = frames;
       rawEvents.push({
         type: 'note', noteNumber: b, frames, volume, tone, envIdx,
-        noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty
+        noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, pitchSa, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty
       });
     }
 

@@ -30,18 +30,19 @@
   };
 
   /**
-   * チャンネルごとの音量(0〜1)設定をチップの vol プロパティへ反映する。applyMuteと同じ
-   * key/index一致方式(未指定のチャンネルは既存値=通常1のまま変更しない)。
+   * チャンネルごとの音量(0〜2、1=100%で2まではブースト)設定をチップの vol プロパティへ
+   * 反映する。applyMuteと同じkey/index一致方式(未指定のチャンネルは既存値=通常1のまま
+   * 変更しない)。
    */
   Emu.applyVolume = function (target, source) {
     if (!target || !source) return;
     if (Array.isArray(target)) {
       for (let i = 0; i < target.length; i++) {
-        if (source[i] !== undefined) target[i] = Math.max(0, Math.min(1, source[i]));
+        if (source[i] !== undefined) target[i] = Math.max(0, Math.min(2, source[i]));
       }
     } else {
       for (const k of Object.keys(target)) {
-        if (source[k] !== undefined) target[k] = Math.max(0, Math.min(1, source[k]));
+        if (source[k] !== undefined) target[k] = Math.max(0, Math.min(2, source[k]));
       }
     }
   };

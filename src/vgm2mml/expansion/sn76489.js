@@ -108,7 +108,7 @@
     if (base > 0 && !(snapshots.length && snapshots[0].length > base)) return { tones: [0, 1, 2].map(() => ({ events: [], hasVolume: true, hasEnvelope: true, hasInstrument: true, hasFme7Noise: true })), noise: { events: [], hasVolume: true, hasEnvelope: true } };
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
     }
     const toneToCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },

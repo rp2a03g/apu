@@ -216,6 +216,7 @@
         </div>
         <div class="toolbar">
           <button id="btnNsf2Mml" class="secondary">to MML</button>
+          <button class="secondary convert-settings-btn" title="変換設定">⚙ 変換設定</button>
           <label style="display:flex;align-items:center;gap:4px;">変換テンポ
             <input type="number" id="nsfTempoBpm" placeholder="自動" min="40" max="400" style="width:70px" />
           </label>
@@ -247,6 +248,7 @@
         </div>
         <div class="toolbar">
           <button id="btnSpc2Mml" class="secondary">to MML</button>
+          <button class="secondary convert-settings-btn" title="変換設定">⚙ 変換設定</button>
           <label style="display:flex;align-items:center;gap:4px;">変換テンポ
             <input type="number" id="spcTempoBpm" placeholder="自動" min="40" max="400" style="width:70px" />
           </label>
@@ -292,6 +294,7 @@
         </div>
         <div class="toolbar">
           <button id="btnKss2Mml" class="secondary">to MML</button>
+          <button class="secondary convert-settings-btn" title="変換設定">⚙ 変換設定</button>
           <label style="display:flex;align-items:center;gap:4px;">変換テンポ
             <input type="number" id="kssTempoBpm" placeholder="自動" min="40" max="400" style="width:70px" />
           </label>
@@ -331,6 +334,7 @@
         </div>
         <div class="toolbar">
           <button id="btnGbs2Mml" class="secondary">to MML</button>
+          <button class="secondary convert-settings-btn" title="変換設定">⚙ 変換設定</button>
           <label style="display:flex;align-items:center;gap:4px;">変換テンポ
             <input type="number" id="gbsTempoBpm" placeholder="自動" min="40" max="400" style="width:70px" />
           </label>
@@ -369,6 +373,7 @@
         </div>
         <div class="toolbar">
           <button id="btnHes2Mml" class="secondary">to MML</button>
+          <button class="secondary convert-settings-btn" title="変換設定">⚙ 変換設定</button>
           <label style="display:flex;align-items:center;gap:4px;">変換テンポ
             <input type="number" id="hesTempoBpm" placeholder="自動" min="40" max="400" style="width:70px" />
           </label>
@@ -399,6 +404,7 @@
         </div>
         <div class="toolbar">
           <button id="btnVgm2Mml" class="secondary">to MML</button>
+          <button class="secondary convert-settings-btn" title="変換設定">⚙ 変換設定</button>
           <label style="display:flex;align-items:center;gap:4px;">変換テンポ
             <input type="number" id="vgmTempoBpm" placeholder="自動" min="40" max="400" style="width:70px" />
           </label>
@@ -406,15 +412,6 @@
           <button id="btnVgmTempoClear" class="secondary">自動</button>
         </div>
         <div id="vgmFileStatus" class="output" style="min-height:40px;"></div>
-        <!-- チャンネル割当: 変換元ch→借用先(NES音源)の対応表。読み込み時に構成から自動で埋まり、
-             ユーザーが変更できる(SPCのボイスモニターの借用先selectと同じ語彙) -->
-        <div id="vgmChannelMapWrap" style="display:none;margin-top:6px;">
-          <div class="toolbar" style="align-items:center;gap:6px;">
-            <h3 style="margin:0;">チャンネル割当</h3>
-            <button id="btnVgmChannelMapAuto" class="secondary">自動に戻す</button>
-          </div>
-          <div id="vgmChannelMap" class="vgm-chmap"></div>
-        </div>
       </div>
     </div>
   </section>
@@ -477,6 +474,7 @@
   <script src="src/mml/helpIndex.js"></script>
   <script src="src/mml/syntaxHighlight.js"></script>
   <script src="src/mml/waveformEditor.js"></script>
+  <script src="src/convert/options.js"></script>
   <script src="src/convert/bpm.js"></script>
   <script src="src/convert/duration.js"></script>
   <script src="src/convert/envelope.js"></script>
@@ -485,6 +483,9 @@
   <script src="src/convert/detune.js"></script>
   <script src="src/convert/retrigger.js"></script>
   <script src="src/convert/mmlEmit.js"></script>
+  <script src="src/convert/verify.js"></script>
+  <script src="src/convert/channelPlan.js"></script>
+  <script src="src/convert/borrow.js"></script>
   <script src="src/dpcm/dpcmConverter.js"></script>
   <script src="src/driver/ppmckDriver.js"></script>
   <!-- data-default-height はピアノロール(既定320px、スプリッターで可変)を一覧の下に開いた状態の高さ。
@@ -658,7 +659,7 @@
     </div>
     <div class="float-window-body help-window-body">
       <div class="toolbar help-toolbar">
-        <input type="search" id="helpSearch" placeholder="コマンド・説明を検索" />
+        <button id="helpIndexToggle" class="secondary" title="コマンド索引を表示/非表示">🔤 索引</button>
         <select id="helpCategory" title="カテゴリで絞り込む"></select>
         <select id="helpSource" title="どのMMLから項目を集めるか">
           <option value="sample">組み込みサンプル</option>
@@ -669,6 +670,8 @@
         <button id="helpStopAll" class="secondary" title="再生を止める">■</button>
         <button id="helpLintToggle" class="secondary" title="自己点検の結果を表示/非表示">🩺</button>
       </div>
+      <!-- コマンド索引: アルファベット順に全コマンドを並べ、クリックで該当項目へ飛ぶ -->
+      <div id="helpIndexBox" class="help-index-box" data-i18n-skip></div>
       <div id="helpLintBox" class="help-lint-box" style="display:none;">
         <div class="help-lint-title">自己点検(タグの書式・コマンドの重複)</div>
         <pre id="helpLint" class="output help-lint" data-i18n-skip></pre>
@@ -759,6 +762,7 @@
   <!-- 全マークアップの後・main.js の前。ここで表示言語が確定する -->
   <script src="src/ui/i18nDom.js"></script>
   <script src="src/ui/editorSettings.js"></script>
+  <script src="src/ui/convertSettings.js"></script>
   <script src="src/main.js"></script>
 </body>
 </html>

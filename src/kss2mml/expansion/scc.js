@@ -186,7 +186,7 @@
     const timeline = buildTimeline(writeLog);
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
     }
     // pitchEpは呼び出し元(kss2mml/converter.js)がev.freqSeqから借用先(N163)の
     // 生レジスタ空間へ変換して付与する(ay.jsと同じ理由、DESIGN-PITCH.md Phase 1)。

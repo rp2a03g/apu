@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-08-22 23:25:42
+ * Built by tools/build-capture-workers.ps1 at 2026-08-27 10:08:06
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-08-22 23:25:42';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-08-27 10:08:06';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -158,6 +158,7 @@
       this.halted = false;
       this.callActive = false;
       this.speedHigh = true; // CSH(既定)/CSL。master clockに対するCPUサイクルの重み換算に使う
+      this.lastDataAddr = -1;
     }
 
     read(addr) { return this.bus.read(addr & 0xFFFF) & 0xFF; }
@@ -220,6 +221,13 @@
         case 'rel': addr = this.fetchByte(); break;
         default: throw new Error(`未知のアドレッシングモード: ${mode}`);
       }
+      // 直近の「メモリからのデータ読出し」の論理アドレス。DDA(PCM)キャプチャ
+      // (hesPlayer.js captureHesSongAsync)が「$0806へ書かれたサンプル値はROMのどこから
+      // 読まれたか」を突き止めるために参照する(hes2mml/expansion/dpcm.js冒頭コメント参照)。
+      // skipRead(STA/STZ等のストア系。書込み先アドレスは読出しではない)とrel(分岐オフセット)
+      // は除外する。実測(NX91002.hes)ではストリーミングループのLDA (zp)がここに残り、
+      // 43142/43142件でROMバイトと書込み値が一致した。
+      if (!skipRead && addr !== null && mode !== 'rel') this.lastDataAddr = addr;
       return { addr, value, pageCrossed };
     }
 
@@ -1249,7 +1257,12 @@
 
       const cpu = this.cpu, bus = this.bus, apu = this.apu;
 
+      // キャプチャ(captureHesSongAsync)がDDA書込みのフレーム内時刻を分数フレームとして
+      // 記録できるように、現在のサンプル位置を公開する(代入1回/サンプルなのでコストは無視できる)。
+      this.frameSampleCount = samplesThisFrame;
+
       for (let i = 0; i < samplesThisFrame; i++) {
+        this.frameSamplePos = i;
         // PSG: 常に実時間のクロックで進める(音程を変えないため)。
         // ★2026-08: 以前はマスタークロック1tickごとにapu.clock()を呼んでおり
         // (1サンプルあたり約162tick=マスタークロック7.16MHz÷44.1kHz)、リアルタイム
@@ -1381,22 +1394,104 @@
     // (詳細はplayHesStream()冒頭コメント参照)。フックはループの外で1回だけ設定し、
     // 現在フレーム番号はクロージャではなく可変変数currentFrameで渡す(毎フレーム新しい
     // クロージャを作らないための最適化。上のコメントのGC劣化対策の一環)。
-    const dpcmTrace = [[], [], [], [], [], []]; // ch毎: [{frame, value}]
+    // ★2026-08: 各エントリにフレーム番号(frame)に加えて以下を持たせる:
+    //   t   … 分数フレーム時刻(frame + フレーム内サンプル位置/フレーム内サンプル数)。
+    //         クリップの実再生レートをフレーム量子化誤差なしで推定するため。
+    //   seq … controlTrace/dpcmTraceで共通の単調増加連番。同じドラムの「off→次のon」が
+    //         ほぼ常に同一フレーム内で起きるため(NX91002.hes実測で打点の254/255)、frameだけでは
+    //         書込み順を復元できず、前クリップの尾(平均約80サンプル≒12ms)が次クリップの頭に
+    //         混入して「同じドラムなのに毎回別波形」になり重複排除が全滅していた。連番により
+    //         区切りを書込み1件単位で正確に復元する(hes2mml/expansion/dpcm.js冒頭コメント参照)。
+    //   src … (dpcmTraceのみ)そのサンプル値の読出し元ROM物理オフセット。読出し元が
+    //         ROM以外(RAM経由・加工あり)のときは-1。cpuHuC6280.js fetchOperandが記録する
+    //         lastDataAddr(直近のデータ読出し論理アドレス)を物理へ換算し、さらに
+    //         「ROMバイト==書込み値」の一致検証を通ったものだけ採用する。
+    //         同一ドラム=同一ROM開始アドレスなので重複排除が確定的になる。
+    const dpcmTrace = [[], [], [], [], [], []]; // ch毎: [{frame, t, seq, value, src}]
     // $0804(chの on/DDA 制御レジスタ)書込みをch別・書込み順に記録する(hes2mml/expansion/
     // dpcm.js向け)。DDA(PCM)で打楽器を鳴らす曲は1音ごとに on/dda を素早くon/offし直すことが
     // 多く、その切替がフレーム(1/60秒)より短い間隔で起きうる。snapshots(フレーム単位の
     // 状態サンプリング)だけでは切替を取りこぼし、複数の打点が「1本の連続音」として
     // 誤って結合されてしまう(ユーザー実測: NX91002.hesで全打楽器が1音に繋がる不具合)。
     // dpcmTraceと同じ理由でここも書込みイベントをそのまま記録する。
-    const controlTrace = [[], [], [], [], [], []]; // ch毎: [{frame, on, dda}]
+    const controlTrace = [[], [], [], [], [], []]; // ch毎: [{frame, t, seq, on, dda, vol}]
+    // $0802/$0803(12bit周期)書込み列。音量(controlTraceのvol)と同じ理由で、ピッチ列
+    // (ビブラート/EPテーブル・音程判定)の位相エイリアシング対策のノート相対時刻リサンプル
+    // (hes2mml/expansion/wave.js)に使う。freqは書込み適用後の12bit値
+    // (apuHuC6280.js writeDataの$0802/$0803と同じ合成式をシャドウで再現。onWriteは
+    // APU側への適用より先に呼ばれるためAPUの値は読めない)。
+    const pitchTrace = [[], [], [], [], [], []]; // ch毎: [{t, freq}]
+    const freqShadow = new Uint16Array(6);
+    for (let i = 0; i < 6; i++) freqShadow[i] = player.apu.ch[i] ? player.apu.ch[i].freq : 0;
     let currentFrame = 0;
+    let traceSeq = 0; // controlTrace/dpcmTrace共通の書込み順連番(上のコメント参照)
     player.bus.onWrite = (addr, value) => {
       const sel = player.apu.selected;
+      // $0800は3bit(0-7)なのでch6/7が選ばれうるが、実機にそのchは無い。
+      // apuHuC6280側も「selected >= CH_COUNT なら書込み無視」としているので、
+      // トレースも同じ規則で捨てる。ここを守らないと6ch分しかないtrace配列が
+      // 範囲外アクセスになり変換ごと落ちる(HC63015.hes等6曲で実際に発生)。
+      // $0801(全体バランス)は全chの実効音量に効く(bal/gbalのコメント参照)ため、
+      // チャンネル選択($0800)とは無関係に全chのタイムラインへ変化点を積む
+      if (addr === 0x0801) {
+        const t = currentFrame + (player.frameSamplePos || 0) / (player.frameSampleCount || 1);
+        for (let ch = 0; ch < controlTrace.length; ch++) {
+          const c = player.apu.ch[ch];
+          if (!c) continue;
+          controlTrace[ch].push({ frame: currentFrame, t, seq: traceSeq++, on: c.on, dda: c.dda, vol: c.volume, bal: c.balance, gbal: value });
+        }
+        return;
+      }
+      if (sel >= controlTrace.length) return;
       if (addr === 0x0804) {
-        controlTrace[sel].push({ frame: currentFrame, on: (value & 0x80) !== 0, dda: (value & 0x40) !== 0 });
+        const t = currentFrame + (player.frameSamplePos || 0) / (player.frameSampleCount || 1);
+        // vol(下位5bit): HESのソフトウェア音量エンベロープはゲーム内蔵タイマー駆動で、
+        // 周期がキャプチャフレームレートと一致しない(実測: NX91002は約54.9Hz)。フレーム境界の
+        // スナップショットで音量をサンプリングすると位相エイリアシングで「同じエンベロープの
+        // 1フレーム違い列」が量産されるため、hes2mml/expansion/wave.jsが書込みイベント列から
+        // ノート相対時刻でリサンプルできるよう生値も残す(同expansion冒頭コメント参照)。
+        // bal/gbal($0805のch別バランス・$0801の全体バランス): これらは「パン」ではなく
+        // 音量レジスタと同じインデックスへ合流する減衰器で、実質的に第2の音量レジスタ
+        // (実測でbalanceだけで減衰エンベロープを作る曲がある。hes2mml/expansion/wave.js
+        // effectiveVolIndex冒頭コメント参照)。抽出側が実効音量を復元できるよう
+        // 書込み時点のシャドウ値を添える(onWriteはAPUへの適用前に呼ばれるが、
+        // 別レジスタである$0805/$0801の値は既に反映済みなのでそのまま読んでよい)。
+        const c = player.apu.ch[sel];
+        controlTrace[sel].push({ frame: currentFrame, t, seq: traceSeq++, on: (value & 0x80) !== 0, dda: (value & 0x40) !== 0, vol: value & 0x1F, bal: c ? c.balance : 0xFF, gbal: player.apu.balance });
+      } else if (addr === 0x0805) {
+        // ch別バランス変更も実効音量の変化点(上記コメント参照)。on/ddaは現在の
+        // シャドウをそのまま載せるのでbuildChannelRuns(状態遷移のみ見る)には影響しない
+        const c = player.apu.ch[sel];
+        if (c) {
+          const t = currentFrame + (player.frameSamplePos || 0) / (player.frameSampleCount || 1);
+          controlTrace[sel].push({ frame: currentFrame, t, seq: traceSeq++, on: c.on, dda: c.dda, vol: c.volume, bal: value, gbal: player.apu.balance });
+        }
+      } else if (addr === 0x0802 || addr === 0x0803) {
+        freqShadow[sel] = addr === 0x0802
+          ? (freqShadow[sel] & 0xF00) | value
+          : (freqShadow[sel] & 0x0FF) | ((value & 0x0F) << 8);
+        const t = currentFrame + (player.frameSamplePos || 0) / (player.frameSampleCount || 1);
+        pitchTrace[sel].push({ t, freq: freqShadow[sel] });
       } else if (addr === 0x0806) {
         const ch = player.apu.ch[sel];
-        if (ch && ch.dda && ch.on) dpcmTrace[sel].push({ frame: currentFrame, value: value & 0x1F });
+        if (ch && ch.dda && ch.on) {
+          const t = currentFrame + (player.frameSamplePos || 0) / (player.frameSampleCount || 1);
+          // 読出し元ROM物理オフセット(dpcmTrace冒頭コメント参照)。lastDataAddrは
+          // 論理アドレスなのでMPRで物理バンクへ換算し、実際にそのROMバイトが
+          // 書込み値と一致する(下位5bit、無加工ストリーミング)場合だけ採用する。
+          // 音量テーブル加工やRAMバッファ経由のROMではここが-1になり、抽出側は
+          // バイト列一致の重複排除へフォールバックする。
+          let src = -1;
+          const la = player.cpu.lastDataAddr;
+          if (la >= 0) {
+            const bank = player.bus.mpr[(la & 0xFFFF) >>> 13];
+            if (bank < 0x80) {
+              const off = bank * 0x2000 + (la & 0x1FFF) - player.bus.romBase;
+              if (off >= 0 && off < player.bus.rom.length && (player.bus.rom[off] & 0x1F) === (value & 0x1F)) src = off;
+            }
+          }
+          dpcmTrace[sel].push({ frame: currentFrame, t, seq: traceSeq++, value: value & 0x1F, src });
+        }
       }
     };
 
@@ -1438,22 +1533,202 @@
       }
       snapshots.push(snapshotApu(player.apu));
       if (f === 0 || f === totalFrames - 1 || performance.now() - sliceStart >= sliceBudgetMs) {
-        if (onProgress) onProgress(f, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace });
+        if (onProgress) onProgress(f, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace, pitchTrace });
         await yieldFn();
         if (opt.shouldCancel && opt.shouldCancel()) {
-          return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, player, frameRate: player.frameRate };
+          return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, pitchTrace, player, frameRate: player.frameRate };
         }
         sliceStart = performance.now();
       }
     }
-    if (onProgress) onProgress(totalFrames, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace });
-    return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, player, frameRate: player.frameRate };
+    if (onProgress) onProgress(totalFrames, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace, pitchTrace });
+    return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, pitchTrace, player, frameRate: player.frameRate };
   };
 
   Emu.HesPlayer = HesPlayer;
   // VGM(vgmPlayer.js captureVgmSongAsync)がHuC6280チップのフレームスナップショットを
   // hes2mml抽出器と同じ形で積むために公開する(gbsPlayer.jsのsnapshotGbApuForCaptureと同じ)。
   Emu.snapshotHesApuForCapture = snapshotApu;
+})(globalThis);
+
+/*
+ * *2MML 変換設定(コマンド使用/不使用・譜面整形)の共通定義
+ *
+ * 目的(2026-08-24): 熟練者が「ほぼ音階だけのプレーンな譜面」から自分で編曲を始められる
+ * ように、各 *2mml がセント単位の補正コマンド(D/EP/MP/PT/EN)や音量エンベロープ(@v等)を
+ * 出す/出さないを選べるようにする。全6形式(nsf/spc/kss/gbs/hes/vgm)で共通の1つの
+ * オブジェクト options.cmd を受け取り、
+ *   (1) 割当層(EnvelopeRegistry/PitchEnvelopeRegistry/NoteEnvelopeRegistry/detune.js)で
+ *       登録自体を止める(→ ヘッダの @v/@EP/@MP/@EN テーブル定義も自然に消える)
+ *   (2) 出力層(mmlEmit.js emitScore/emitChannel)でチャンネルフラグをANDマスクする(安全網)
+ *   (3) 譜面整形(短い休符の吸収・音長の格子量子化)を emitScore 手前のイベント整形で行う
+ * の3段で効かせる。
+ *
+ * cmd の各キー(全て boolean。省略時は true = 従来通り忠実再現):
+ *   D      … D<n>(チャンネル/チップ間デチューン、detune.js)
+ *   EP     … EP<n>(ピッチエンベロープ。MP/PT の受け皿でもある)
+ *   MP     … MP<n>(ビブラート)。falseで EP が true なら周期EPテーブルへ落ちる
+ *   PT     … PT<n>(ポルタメント)。falseで EP が true なら非ループEPテーブルへ落ちる
+ *   EN     … EN<n>(高速アルペジオのノートエンベロープ)。false時はアルペジオ統合
+ *            (mergeRapidArpeggio)自体は行い、基音1音として出す(音符連打には戻さない。
+ *            編曲の出発点としては1音の方が読みやすいため)
+ *   ENV    … @v/@vr(ソフト/ハード音量エンベロープ)と FME7 の S/M。false時は各イベントの
+ *            音量列のピーク値を v<n> として出す(MML.Convert.plainVolume)
+ *   V      … v<n>(音量そのもの)。false なら v も出さず既定音量
+ *   SWEEP  … s<speed>,<depth>(2A03ハードウェアスイープ)
+ *   INST   … @<n>(音色/デューティ)、OP<n>(VRC7音色)、MH<n>(FDS変調)、N<n>(FME7ノイズ周期)
+ *
+ * 譜面整形(既定 false = 従来通り):
+ *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)
+ *   SHAPE_QUANT … イベント境界を16分音符格子へ丸める
+ *
+ * 値キー(booleanでない設定。2026-08-26):
+ *   PITCH_SA … N163出力のSA<num>(ピッチシフト量)自動選択。'octave' | 'note' | 'off'
+ *     EP/MP/Dテーブル値のbyte幅とN163周波数レジスタ18bitの桁差を埋める(選び方の詳細は
+ *     src/convert/pitch.js n163SaForBase冒頭コメント参照)。既定'octave'(オクターブ連動、
+ *     セント精度がオクターブ非依存でテーブル共有も効く)。'note'=音符ごと最高精度、
+ *     'off'=SA不使用(従来互換、深い変調は割当失敗して落ちる)。
+ *   PCM_RATE … PCM→DPCM変換の品質(DMCレートの選び方)。'max' | 8 | 4 | 2 | 1
+ *     1bitデルタ変調は1bitあたり±2/127しか動けないため、ソースのバイトレートに対して
+ *     何倍のDMCレートを使うかが追従能力(アタックのなまり)とアイドルトーン
+ *     (平坦部で乗るレート/2のキーン音)を直接決める。倍率が上がるほど高音質・データ大。
+ *     'max'=常に最高レート33.1kHz(既定) / 8,4,2=ソースレートのn倍以上の最小レート /
+ *     1=従来互換(最も近いレート、データ最小)。現状の消費者はhes2mml/expansion/dpcm.js
+ *     (HES DDA抽出)のみ。SPCのBRR→DPCMはDSPレート32kHz≒テーブル上限のため対象外。
+ */
+(function (global) {
+  'use strict';
+  const MML   = global.MML   = global.MML   || {};
+  MML.Convert = MML.Convert || {};
+
+  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST'];
+  const SHAPE_KEYS = ['SHAPE_REST', 'SHAPE_QUANT'];
+  // PCM品質(冒頭コメント参照)。boolean群とは別に許容値で正規化する
+  const PCM_RATE_VALUES = ['max', 8, 4, 2, 1];
+  const PITCH_SA_VALUES = ['octave', 'note', 'off'];
+  MML.Convert.CMD_KEYS = CMD_KEYS;
+  MML.Convert.SHAPE_KEYS = SHAPE_KEYS;
+  MML.Convert.PCM_RATE_VALUES = PCM_RATE_VALUES;
+  MML.Convert.PITCH_SA_VALUES = PITCH_SA_VALUES;
+
+  const PRESETS = {
+    // 忠実再現(従来の既定)
+    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true,
+                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave' },
+    // プレーン譜面: 音階+音色だけ。編曲の出発点用
+    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true,
+                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave' },
+  };
+  MML.Convert.CMD_PRESETS = PRESETS;
+
+  // options.cmd(部分指定可)を全キー揃った正規形にする。省略キーは faithful 既定。
+  MML.Convert.normalizeCmd = function (cmd) {
+    const out = Object.assign({}, PRESETS.faithful);
+    if (cmd && typeof cmd === 'object') {
+      for (const k of [...CMD_KEYS, ...SHAPE_KEYS]) if (cmd[k] != null) out[k] = !!cmd[k];
+      // 数値は文字列でも受ける(localStorage/JSON経由やUIのselect値が'4'等になるため)
+      if (cmd.PCM_RATE != null) {
+        const v = cmd.PCM_RATE === 'max' ? 'max' : parseInt(cmd.PCM_RATE, 10);
+        if (PCM_RATE_VALUES.indexOf(v) >= 0) out.PCM_RATE = v;
+      }
+      if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
+    }
+    return out;
+  };
+
+  // どれかがプリセットと完全一致すればその名前、無ければ 'custom'
+  MML.Convert.cmdPresetName = function (cmd) {
+    const n = MML.Convert.normalizeCmd(cmd);
+    for (const name of Object.keys(PRESETS)) {
+      const p = PRESETS[name];
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA'].every(k => p[k] === n[k])) return name;
+    }
+    return 'custom';
+  };
+
+  // ── チャンネル別の変換音量(2026-08-25) ──────────────────────────────
+  // 規約: options.channelMap[ch].volPct = 0..100(既定100)。そのチャンネルの変換時
+  // 音量を何%にするかの縮小専用の比率(v15等で頭打ちのため上げる方向は無い)。
+  // パート(借用先)指定・音色指定と組で、SPC以外のフォーマットのチャンネル割当UIにも
+  // 同じキー名・同じ意味で展開する予定の共通規約。計算はこのヘルパーに一本化する。
+  MML.Convert.channelVolScale = function (cfg) {
+    const p = cfg && cfg.volPct != null ? parseFloat(cfg.volPct) : 100;
+    if (!isFinite(p)) return 1;
+    return Math.max(0, Math.min(100, p)) / 100;
+  };
+
+  // エンベロープを出さない時の代表音量: 音量列(または{values}形状)のピーク値。
+  // 先頭値だとアタック途中(0から立ち上がる音源)の値になることがあるため最大値を取る。
+  MML.Convert.plainVolume = function (seqOrShape) {
+    const seq = Array.isArray(seqOrShape) ? seqOrShape : (seqOrShape && seqOrShape.values) || [];
+    let m = null;
+    for (const v of seq) if (typeof v === 'number' && (m === null || v > m)) m = v;
+    return m === null ? 0 : m;
+  };
+
+  // mmlEmit.js の per-channel フラグを cmd でANDマスクする(出力層の安全網)
+  MML.Convert.maskEmitFlags = function (flags, cmd) {
+    const c = MML.Convert.normalizeCmd(cmd);
+    const f = Object.assign({}, flags);
+    if (!c.D)     f.hasDetune = false;
+    if (!c.EP && !c.MP && !c.PT) f.hasPitchMod = false;
+    if (!c.EN)    f.hasNoteEnv = false;
+    if (!c.ENV)   { f.hasEnvelope = false; f.hasFme7Env = false; }
+    if (!c.V)     f.hasVolume = false;
+    if (!c.SWEEP) f.hasSweep = false;
+    if (!c.INST)  { f.hasInstrument = false; f.hasVrc7Tone = false; f.hasFdsMod = false; f.hasFme7Noise = false; }
+    return f;
+  };
+
+  // ── 譜面整形 ───────────────────────────────────────────────────────
+  // events: mmlEmit.js と同じ { start, end, note, ... } の配列(フレーム単位、昇順前提)。
+  // 新しい配列を返す(元は変更しない)。
+  //   SHAPE_REST : 音符の直後の休符(または隙間)が restThreshold フレーム未満なら直前の
+  //                音符を延ばして埋める(ゲートタイムの隙間除去)
+  //   SHAPE_QUANT: 各イベントの start を grid フレーム格子へ丸め、end は次イベントの start
+  //                (最後は元の end を丸めた値)。長さ0になったイベントは捨てる
+  MML.Convert.shapeEvents = function (events, fpb, cmd) {
+    const c = MML.Convert.normalizeCmd(cmd);
+    if (!c.SHAPE_REST && !c.SHAPE_QUANT) return events;
+    let evs = (events || []).slice().sort((a, b) => a.start - b.start).map(e => Object.assign({}, e));
+
+    if (c.SHAPE_REST) {
+      const restThreshold = fpb / 8; // 1/32 音符未満
+      const out = [];
+      for (let i = 0; i < evs.length; i++) {
+        const ev = evs[i];
+        const prev = out[out.length - 1];
+        if (ev.note === null && prev && prev.note !== null && (ev.end - ev.start) < restThreshold) {
+          prev.end = Math.max(prev.end, ev.end); // 休符を直前の音符へ吸収
+          continue;
+        }
+        // 明示休符が無い単なる隙間も同じ扱い(fillGaps が後で休符化する前に埋める)
+        if (prev && prev.note !== null && ev.start > prev.end && (ev.start - prev.end) < restThreshold) {
+          prev.end = ev.start;
+        }
+        out.push(ev);
+      }
+      evs = out;
+    }
+
+    if (c.SHAPE_QUANT) {
+      const grid = fpb / 4; // 16分音符
+      const snap = (f) => Math.round(f / grid) * grid;
+      const out = [];
+      for (let i = 0; i < evs.length; i++) {
+        const ev = evs[i];
+        const s = snap(ev.start);
+        const e = (i + 1 < evs.length && evs[i + 1].start <= ev.end) ? snap(evs[i + 1].start) : snap(ev.end);
+        if (e <= s) continue;
+        const prev = out[out.length - 1];
+        if (prev && prev.end > s) prev.end = s;
+        if (prev && prev.end <= prev.start) out.pop();
+        out.push(Object.assign(ev, { start: s, end: e }));
+      }
+      evs = out;
+    }
+    return evs;
+  };
 })(globalThis);
 
 /*
@@ -1619,7 +1894,9 @@
     return null;
   };
 
-  MML.Convert.PitchEnvelopeRegistry = function () {
+  // cmd: src/convert/options.js の変換設定(省略可)。EP/MP/PT の個別ON/OFFを assign() で見る。
+  MML.Convert.PitchEnvelopeRegistry = function (cmd) {
+    this.cmd = MML.Convert.normalizeCmd(cmd);
     this.tables = new Map(); // index(@EP<N>の番号) -> { values, loop }
     this.keyToIndex = new Map();
     this.nextIndex = 0;
@@ -1865,21 +2142,69 @@
   // directionUp: 周期的ビブラート(periodic)をMP<n>へフィットする際に使う出力先チップの
   // 周波数方向(fitVibrato参照)。省略時(undefined)はMPへのフィットを試みず、
   // 従来通り常にループEPテーブルを使う(VRC7=EP/MP対象外チャンネルの既定動作と一致)。
-  MML.Convert.PitchEnvelopeRegistry.prototype.assign = function (pitchSeq, directionUp) {
-    const pitchMod = MML.Convert.classifyPitchMod(pitchSeq);
-    if (!pitchMod) return null;
-    if (pitchMod.type === 'ramp') {
-      const fit = fitPortamento(pitchMod.values);
-      if (fit) return { kind: 'portamento', target: fit.target, duration: fit.duration, delay: pitchMod.delay };
-    } else if (pitchMod.type === 'periodic') {
-      const fit = fitVibrato(pitchMod.values, pitchMod.delay, directionUp);
-      if (fit) {
-        const idx = this.registerVibrato({ delay: fit.delay, speed: fit.speed, depth: fit.depth });
-        return { kind: 'vibrato', index: idx };
+  // ── SA<num>(ピッチシフト量、ppmckc公式・N163専用)の自動選択 ─────────────
+  // EPテーブル値は符号付きbyte(EP_VALUE_MIN/MAX)・MP depthも1byteだが、N163の周波数
+  // レジスタは18bitで1オクターブごとに値が2倍になる。深いビブラート等は生オフセットが
+  // byte幅を大きく超えて割当が失敗するため(実測: HESの変調イベントの58〜98%が黙って
+  // 破棄されていた)、SA<num>で値を<num>回左シフトして適用するようにし、テーブルには
+  // 縮めた値(>>sa)を登録する。量子化は2^sa単位=変調深さの約1/127で、セント換算1〜2程度。
+  //
+  // saMode('PITCH_SA'変換設定、src/convert/options.js):
+  //   'octave' … 基準レジスタ値のオクターブに連動(sa=floor(log2(base))-10、正規化後の
+  //              基準値が1024〜2047になる位置)。同じセント形状のビブラートがオクターブを
+  //              またいで同一のテーブル値になり、EnvelopeRegistryのdedupeが効く。
+  //              量子化ステップはセント換算0.85〜1.7で一定(オクターブ非依存)。既定。
+  //   'note'   … 音符ごとに必要最小のsa(最高精度、テーブル共有は減る)
+  //   'off'    … SAを使わない(従来互換。byte幅を超える変調は従来どおり割当失敗)
+  // どのモードもレンジに収まらない場合はsa+1のエスケープで引き上げる(上限8=本家仕様)。
+  MML.Convert.n163SaForBase = function (baseReg) {
+    if (!(baseReg > 0)) return 0;
+    return Math.max(0, Math.min(8, Math.floor(Math.log2(baseReg)) - 10));
+  };
+
+  // pitchSeq(生レジスタ値列)に対する実際のsaを決める。baseSa(モードごとの基本値)から、
+  // 最大偏差がEPのbyte幅に収まるまで引き上げる
+  function resolveSa(pitchSeq, baseSa) {
+    const base = pitchSeq[0];
+    let maxAbs = 0;
+    for (const v of pitchSeq) { const d = Math.abs(v - base); if (d > maxAbs) maxAbs = d; }
+    let sa = Math.max(0, Math.min(8, baseSa || 0));
+    while (sa < 8 && (maxAbs >> sa) > EP_VALUE_MAX) sa++;
+    return sa;
+  }
+
+  // saOpts(省略可): { mode: 'octave'|'note'|'off', baseSa: number }。
+  // N163が出力先のときだけ渡す(assignPitchEnvelopeのopts.saMode経由、または
+  // nsf2mml/spc2mmlのN163パスから直接)。戻り値にsa(使用したシフト量)が付く。
+  MML.Convert.PitchEnvelopeRegistry.prototype.assign = function (pitchSeq, directionUp, saOpts) {
+    const cmd = this.cmd;
+    if (!cmd.EP && !cmd.MP && !cmd.PT) return null; // 変換設定で全てOFF(基準音のみ)
+    let sa = 0;
+    let seq = pitchSeq;
+    if (saOpts && saOpts.mode && saOpts.mode !== 'off') {
+      sa = resolveSa(pitchSeq, saOpts.baseSa || 0);
+      if (sa > 0) {
+        const base = pitchSeq[0];
+        seq = pitchSeq.map(v => base + Math.round((v - base) / (1 << sa)));
       }
     }
+    const pitchMod = MML.Convert.classifyPitchMod(seq);
+    if (!pitchMod) return null;
+    if (pitchMod.type === 'ramp') {
+      const fit = cmd.PT ? fitPortamento(pitchMod.values) : null;
+      // PT(独自拡張)はSAのシフト対象外(compiler.js pitchRegisterOffset参照)のため、
+      // targetを生スケールへ戻して返す
+      if (fit) return { kind: 'portamento', target: fit.target * (1 << sa), duration: fit.duration, delay: pitchMod.delay, sa };
+    } else if (pitchMod.type === 'periodic') {
+      const fit = cmd.MP ? fitVibrato(pitchMod.values, pitchMod.delay, directionUp) : null;
+      if (fit) {
+        const idx = this.registerVibrato({ delay: fit.delay, speed: fit.speed, depth: fit.depth });
+        return { kind: 'vibrato', index: idx, sa };
+      }
+    }
+    if (!cmd.EP) return null; // EPが受け皿として使えなければ基準音のみ
     const registered = this.registerShape(pitchMod);
-    return registered ? { kind: 'ep', index: registered.index, delay: registered.delay } : null;
+    return registered ? { kind: 'ep', index: registered.index, delay: registered.delay, sa } : null;
   };
 
   MML.Convert.PitchEnvelopeRegistry.prototype.defLines = function () {
@@ -1909,16 +2234,25 @@
   // 借用先チップの生レジスタ空間へ変換して分類・登録し、該当すればev.pitchEpを立てる
   // (MML出力側でのgetter用にイベントオブジェクトを直接書き換える。detectChorusDetuneが
   // ev.detuneを直接書き込むのと同じ流儀)。
-  MML.Convert.assignPitchEnvelope = function (channels, periodFn, pitchReg) {
+  // opts.saMode('octave'|'note'|'off'): 出力先がN163のときだけ渡すSA<num>自動選択
+  // (n163SaForBase冒頭コメント参照)。省略時はSA無し(従来動作)。
+  MML.Convert.assignPitchEnvelope = function (channels, periodFn, pitchReg, opts) {
     // このperiodFn(=呼び出し元が渡す借用先チップの生周期換算関数)自体の増減方向を
     // 1回だけ調べ、fitVibratoへ渡す(compiler.jsのperiodFnIncreasingと同じ2点比較)。
     const directionUp = periodFnIncreasingLocal(periodFn);
+    const saMode = opts && opts.saMode && opts.saMode !== 'off' ? opts.saMode : null;
     for (const ch of channels) {
       for (const ev of ch.events) {
         if (ev.note === null || !ev.freqSeq || ev.freqSeq.length === 0) continue;
         const rescaled = MML.Convert.rescalePitchSeqFromFreq(ev.freqSeq, periodFn, ev);
-        const assigned = pitchReg.assign(rescaled, directionUp);
+        const saOpts = saMode
+          ? { mode: saMode, baseSa: saMode === 'octave' ? MML.Convert.n163SaForBase(rescaled[0]) : 0 }
+          : undefined;
+        const assigned = pitchReg.assign(rescaled, directionUp, saOpts);
         MML.Convert.applyPitchAssignment(ev, assigned);
+        // SAはD<n>にも効く(compiler.js pitchRegisterOffset、本家freq_add_mcknumber参照)ため、
+        // この音符のDも同じシフトで縮めて出力する(量子化2^sa単位≈1〜2セント)
+        if (ev.pitchSa && ev.detune) ev.detune = Math.round(ev.detune / (1 << ev.pitchSa));
       }
       // スラー分割(別プロジェクトE、2026-08-12): pitchEp/portamentoが確定した直後に
       // まとめて行う(markSlurTiesの安全ガードが両方の値を参照するため)。KSS(ay/scc)・
@@ -1934,6 +2268,9 @@
   // 重複させないためにここへ集約する。
   MML.Convert.applyPitchAssignment = function (ev, assigned) {
     if (!assigned) return;
+    // SA<num>(assign()のsaOpts参照): この音符のEP/MP値が>>saで登録されているため、
+    // 再生時に同じsaで戻せるようイベントへ記録する(mmlEmitがSA<n>コマンドとして出力)
+    if (assigned.sa != null && assigned.sa > 0) ev.pitchSa = assigned.sa;
     if (assigned.kind === 'portamento') {
       ev.portamento = { target: assigned.target, duration: assigned.duration, delay: assigned.delay };
     } else if (assigned.kind === 'vibrato') {
@@ -1964,6 +2301,9 @@
   const MAX_ARPEGGIO_PERIOD = 8; // 一般的な和音の構成音数を超える周期は誤検出とみなして除外
   const MIN_ARPEGGIO_CYCLES = 2; // 最低2周期分の反復確認(偶然の一致除け)
   const ARPEGGIO_CENTS_TOLERANCE = 25; // 半音の1/4以内なら「その半音に厳密に乗っている」とみなす
+  // トリル判別(mergeAlternatingVibratoの形状ゲート、同所コメント参照)
+  const TRILL_MIN_CENTS = 70;          // 方形でもこれ未満の浅い変調はビブラートとして統合を許す
+  const TRILL_MIDDLE_FRAC_MAX = 0.15;  // 中間帯滞在サンプル比がこれ未満なら方形(2値切替)とみなす
   const EN_VALUE_MIN = -127, EN_VALUE_MAX = 126; // @EN<n>テーブル値は符号付きbyte(lexer.js参照、EPと共通)
 
   // freq(Hz)が最寄りの12平均律半音(o4a=57=440Hz基準、他の抽出コードと同じ規約)から
@@ -2105,7 +2445,10 @@
     return result;
   };
 
-  MML.Convert.NoteEnvelopeRegistry = function () {
+  // cmd: src/convert/options.js の変換設定(省略可)。cmd.EN===false なら登録せず null
+  // (アルペジオ統合済みイベントは基音1音のまま出る)。
+  MML.Convert.NoteEnvelopeRegistry = function (cmd) {
+    this.cmd = MML.Convert.normalizeCmd(cmd);
     this.tables = new Map(); // index(@EN<N>の番号) -> { values, loop }
     this.keyToIndex = new Map();
     this.nextIndex = 0;
@@ -2117,7 +2460,7 @@
   // 参照)は、EN側は現状ループ専用(非ループ生成経路が無い)ため該当しないが、将来
   // 非ループEN生成を追加する場合はここも同じガードを入れること。
   MML.Convert.NoteEnvelopeRegistry.prototype.registerShape = function (deltas) {
-    if (!deltas || deltas.length === 0) return null;
+    if (!deltas || deltas.length === 0 || !this.cmd.EN) return null;
     const key = deltas.join(',');
     let idx = this.keyToIndex.get(key);
     if (idx === undefined) {
@@ -2159,8 +2502,9 @@
   // (pitch.js冒頭のmergeRapidArpeggioコメント参照)。rawFreqを持たない抽出結果
   // (SPC/ノイズ/OPLL等)ではmergeRapidArpeggioは何もせず素通りするだけなので、
   // 呼び出し側を条件分岐させずに一律この関数へ差し替えて問題ない。
-  MML.Convert.mergeVibratoAndArpeggio = function (events) {
-    return MML.Convert.mergeAlternatingVibrato(MML.Convert.mergeRapidArpeggio(events));
+  // opts.maxAbsorbCents: mergeAlternatingVibratoの統合上限(同関数コメント参照)。省略時は無制限
+  MML.Convert.mergeVibratoAndArpeggio = function (events, opts) {
+    return MML.Convert.mergeAlternatingVibrato(MML.Convert.mergeRapidArpeggio(events), opts);
   };
 
   // ── 分節のヒステリシス化(DESIGN-PITCH.md Phase 2、§5手順3) ──────────────
@@ -2211,7 +2555,7 @@
     return list.reduce((acc, e) => acc.concat(e[key] || []), []);
   }
 
-  MML.Convert.mergeAlternatingVibrato = function (events) {
+  MML.Convert.mergeAlternatingVibrato = function (events, opts) {
     const result = [];
     let i = 0;
     const n = events.length;
@@ -2247,7 +2591,38 @@
         // 周期で2音を高速往復=ビブラート」だけを統合対象とし、非周期の2値往復
         // (トレモロ的な打ち直し等、周期性の裏付けが無いもの)を誤って1音化しない)。
         const classified = MML.Convert.classifyPitchMod(candidateSeq);
-        if (classified && classified.type === 'periodic') {
+        // ★形状判別+統合上限(2026-08-26、DESIGN-PITCH.md §5「トリル判別」の実装):
+        //
+        // (1) トリル判別(形状、全フォーマット共通): LFOテーブル駆動のビブラートは中間値を
+        //     通る三角/正弦状、トリル奏法は2値切替の方形状。正規化振幅の中間帯(25%〜75%)に
+        //     滞在するサンプル比率(middleFrac)で判別し、方形かつ変調幅が奏法として意味を持つ
+        //     深さ(TRILL_MIN_CENTS以上)なら統合せず音符の交互のまま残す。浅い2値切替
+        //     (レジスタ分解能の都合で中間値を持てない境界ビブラート、数〜数十セント)は
+        //     従来どおり統合する。実例: Final Fantasy(NSF)の96〜105セント方形=トリル、
+        //     NX91002 idx34(HES)の149セント階段=三角ビブラート。
+        //
+        // (2) opts.maxAbsorbCents(フォーマット別の表現力上限): 統合された変調は後段の
+        //     MP/EPテーブル(fitVibrato→ループEP→literal EPの3段構え)で再現される前提だが、
+        //     テーブル値は符号付きbyte(EP_VALUE_MIN/MAX)・MP depthも1byteのため、表現可能な
+        //     変調幅は借用先チップの周期単位に依存する。HES→N163借用は単位が大きく
+        //     (半音≈1100周期単位)深い変調はレンジ外で割当が失敗し変調が丸ごと消えるため、
+        //     フォーマット側が上限を渡して超えるものは音符の交互のまま残す(次善の近似)。
+        //     省略時は無制限。
+        let spanCents = 0, middleFrac = 0;
+        {
+          let mn = Infinity, mx = 0;
+          for (const v of candidateSeq) if (v > 0) { if (v < mn) mn = v; if (v > mx) mx = v; }
+          if (mn < Infinity && mx > mn) {
+            spanCents = 1200 * Math.log2(mx / mn);
+            const lo = mn + (mx - mn) * 0.25, hi = mn + (mx - mn) * 0.75;
+            let mid = 0, n = 0;
+            for (const v of candidateSeq) if (v > 0) { n++; if (v > lo && v < hi) mid++; }
+            middleFrac = n > 0 ? mid / n : 0;
+          }
+        }
+        const isTrill = spanCents >= TRILL_MIN_CENTS && middleFrac < TRILL_MIDDLE_FRAC_MAX;
+        const spanOk = !(opts && opts.maxAbsorbCents != null && spanCents >= opts.maxAbsorbCents);
+        if (classified && classified.type === 'periodic' && !isTrill && spanOk) {
           result.push(Object.assign({}, home, {
             end: last.end,
             volSeq: concatField(absorbed, 'volSeq'),
@@ -2403,6 +2778,14 @@
   MML.Convert = MML.Convert || {};
 
   const DEFAULT_JUMP_THRESHOLD = 2;
+  // ★抽出パス1(音程変化の境界)からも同じ基準を使うために公開する(2026-08-26)。
+  // アタックレジスタを持たないチップ(N163・HES PSG)は「音量の跳ね上がり」だけが
+  // 打ち直しの手がかりだが、splitRetriggersは同一音程ラン内(パス2)しか走らないため、
+  // 音程が変わる境界での再アタックは各extractorのpureNoteChange判定側で見る必要がある
+  // (見落とすと、実際は打ち直している音程変化をレガートと誤認してタイ(&)で繋いでしまい、
+  // タイ側では@v等を再指定しない仕様のため音量エンベロープが減衰し続ける。
+  // 実測: 女神転生II 12曲目のN163 Q/Rパートで発覚)。
+  MML.Convert.RETRIGGER_JUMP_THRESHOLD = DEFAULT_JUMP_THRESHOLD;
   const DEFAULT_MIN_PERIOD = 2;
   const DEFAULT_MAX_PERIOD = 48;
   const DEFAULT_MIN_REPEATS = 3;
@@ -2534,53 +2917,140 @@
     return out;
   }
 
+  // ── 1bit列の生成 ──────────────────────────────────────────────────
+  // DACカウンタの遷移は実機DMC(およびsrc/emulator/apu2a03.js clockOutput())と同じ:
+  //   bit=1: counter<=125 なら +2、それ以外は変化なし
+  //   bit=0: counter>=2   なら -2、それ以外は変化なし
+  // (以前は0/127でclampしていたが、実機は125/2で頭打ちし±1の飛び越えは起きない=
+  //  カウンタの偶奇は初期値のまま保存される。エンコーダの想定と再生側の実挙動を
+  //  完全一致させるためこちらへ統一した)
+  function stepUp(c) { return c <= 125 ? c + 2 : c; }
+  function stepDown(c) { return c >= 2 ? c - 2 : c; }
+
+  // 貪欲法(旧方式): その場その場で目標に近づく方だけを選ぶ。O(N)で省メモリ。
+  // Viterbiのメモリ上限を超える長大入力のフォールバック用に残す。
+  function encodeBitsGreedy(targets, startCounter) {
+    const bits = new Uint8Array(targets.length);
+    let counter = startCounter;
+    for (let i = 0; i < targets.length; i++) {
+      const bit = targets[i] >= counter ? 1 : 0;
+      counter = bit ? stepUp(counter) : stepDown(counter);
+      bits[i] = bit;
+    }
+    return bits;
+  }
+
+  // Viterbi(動的計画法): カウンタ128状態×サンプル数の格子で二乗誤差合計が最小になる
+  // bit列を選ぶ(2026-08、貪欲法からの品質改善)。貪欲法は「今」最善のbitしか選べないため、
+  //   ・平坦部で目標の上下どちらに張り付くかの位相が最適にならない(アイドルトーン悪化)
+  //   ・大きなジャンプの直前に「助走」できない(スロープ過負荷の増幅)
+  // が起きる。DPは全体最適なのでどちらも自動的に解決する。計算量O(64N)
+  // (±2遷移で偶奇が保存されるため実際に到達しうる状態は64個)。
+  // バックポインタは1状態あたり2bit(採用bit+自己ループか)をパックして持つ
+  // (N*32バイト。上限VITERBI_MAX_SAMPLESを超える入力は貪欲法へフォールバック)。
+  const VITERBI_MAX_SAMPLES = 2000000; // バックポインタ約64MBまで許容
+  function encodeBitsViterbi(targets, startCounter) {
+    const N = targets.length;
+    if (N > VITERBI_MAX_SAMPLES) return encodeBitsGreedy(targets, startCounter);
+    const par = startCounter & 1; // 偶奇は保存される(上のコメント参照)
+    let prev = new Float64Array(128).fill(Infinity);
+    let next = new Float64Array(128);
+    prev[startCounter] = 0;
+    const bp = new Uint8Array((N * 128 + 3) >> 2); // (i,状態)ごとに2bit
+    for (let i = 0; i < N; i++) {
+      next.fill(Infinity);
+      const t = targets[i];
+      const base = i * 128;
+      for (let c = par; c < 128; c += 2) {
+        const pc = prev[c];
+        if (pc === Infinity) continue;
+        const n1 = stepUp(c);
+        const e1 = n1 - t;
+        const c1 = pc + e1 * e1;
+        if (c1 < next[n1]) {
+          next[n1] = c1;
+          const idx = base + n1, code = 1 | (n1 === c ? 2 : 0);
+          bp[idx >> 2] = (bp[idx >> 2] & ~(3 << ((idx & 3) * 2))) | (code << ((idx & 3) * 2));
+        }
+        const n0 = stepDown(c);
+        const e0 = n0 - t;
+        const c0 = pc + e0 * e0;
+        if (c0 < next[n0]) {
+          next[n0] = c0;
+          const idx = base + n0, code = (n0 === c ? 2 : 0);
+          bp[idx >> 2] = (bp[idx >> 2] & ~(3 << ((idx & 3) * 2))) | (code << ((idx & 3) * 2));
+        }
+      }
+      const tmp = prev; prev = next; next = tmp;
+    }
+    // 終端: 最小コストの状態から逆順にbitと前状態を復元する
+    let best = par, bestCost = Infinity;
+    for (let c = par; c < 128; c += 2) if (prev[c] < bestCost) { bestCost = prev[c]; best = c; }
+    const bits = new Uint8Array(N);
+    let s = best;
+    for (let i = N - 1; i >= 0; i--) {
+      const idx = i * 128 + s;
+      const code = (bp[idx >> 2] >> ((idx & 3) * 2)) & 3;
+      const bit = code & 1;
+      bits[i] = bit;
+      if (!(code & 2)) s = bit ? s - 2 : s + 2; // 自己ループでなければ遷移を巻き戻す
+    }
+    return bits;
+  }
+
   /**
    * PCMサンプル(-1..1, srcRate Hz)をDPCMバイト列にエンコードする
    * @param {Float32Array} samples
    * @param {number} srcRate - 入力サンプルレート(Hz)
    * @param {number} rateIndex - DMCレートインデックス(0-15)
-   * @returns {{bytes: Uint8Array, rateIndex: number, rateHz: number, sampleCount: number}}
+   * @param {{startCounter?:number}} [opt] - startCounter: DACカウンタの開始値(0-127、既定64)。
+   *   再生側が@DPCM定義のdac値($4011初期書込み)で同じ値から開始する前提で、先頭サンプル値を
+   *   渡すと頭の追従ランプ(クリック)が消える(hes2mml/expansion/dpcm.js参照)。
+   * @returns {{bytes: Uint8Array, rateIndex: number, rateHz: number, sampleCount: number, startCounter: number}}
    */
-  function encode(samples, srcRate, rateIndex) {
+  function encode(samples, srcRate, rateIndex, opt) {
     rateIndex = Math.max(0, Math.min(15, rateIndex | 0));
     const rateHz = DMC_RATE_TABLE_NTSC[rateIndex];
     const resampled = resample(samples, srcRate, rateHz);
+    const startCounter = Math.max(0, Math.min(127, (opt && opt.startCounter != null) ? opt.startCounter | 0 : 64));
 
-    const bits = new Array(resampled.length);
-    let counter = 64;
-    for (let i = 0; i < resampled.length; i++) {
-      const target = (resampled[i] * 0.5 + 0.5) * 127; // 0-127
-      const bit = target >= counter ? 1 : 0;
-      counter += bit ? 2 : -2;
-      counter = Math.max(0, Math.min(127, counter));
-      bits[i] = bit;
-    }
+    const targets = new Float64Array(resampled.length);
+    for (let i = 0; i < resampled.length; i++) targets[i] = (resampled[i] * 0.5 + 0.5) * 127; // 0-127
+    const bits = encodeBitsViterbi(targets, startCounter);
 
     // DMCサンプルはバイト単位(8サンプル/byte, LSBが先頭)で、
-    // 長さは16バイト境界に揃える必要がある(不足分は0bitでパディング)
+    // 長さは16バイト境界に揃える必要がある。
+    // ★パディングは0bit詰めではなく+2/-2交互の「ホールド」で埋める。実機DMCは
+    // 16バイト境界までの全bitを再生するため、0詰めだと末尾でDACが-2/bitで滑り落ちて
+    // プチッと鳴る(プレビューのdecode()はsampleCountで止まるため気づけない)。
     const sampleCount = bits.length;
     const byteCount = Math.ceil(sampleCount / 8 / 16) * 16 || 16;
     const bytes = new Uint8Array(byteCount);
     for (let i = 0; i < sampleCount; i++) {
       if (bits[i]) bytes[i >> 3] |= (1 << (i & 7));
     }
+    for (let i = sampleCount; i < byteCount * 8; i++) {
+      // 最後のデータbitと逆から始めて交互に(±2の往復=値を保持)
+      const bit = ((i - sampleCount) & 1) === 0 ? (sampleCount > 0 ? 1 - bits[sampleCount - 1] : 1) : (sampleCount > 0 ? bits[sampleCount - 1] : 0);
+      if (bit) bytes[i >> 3] |= (1 << (i & 7));
+    }
 
-    return { bytes, rateIndex, rateHz, sampleCount };
+    return { bytes, rateIndex, rateHz, sampleCount, startCounter };
   }
 
   /**
    * DPCMバイト列をプレビュー用PCM波形(-1..1)に復号する
    * @param {Uint8Array} bytes
    * @param {number} sampleCount
+   * @param {number} [startCounter] - encode時のstartCounterと同じ値(既定64)
    * @returns {Float32Array}
    */
-  function decode(bytes, sampleCount) {
+  function decode(bytes, sampleCount, startCounter) {
     const out = new Float32Array(sampleCount);
-    let counter = 64;
+    let counter = (startCounter != null) ? Math.max(0, Math.min(127, startCounter | 0)) : 64;
     for (let i = 0; i < sampleCount; i++) {
       const bit = (bytes[i >> 3] >> (i & 7)) & 1;
-      counter += bit ? 2 : -2;
-      counter = Math.max(0, Math.min(127, counter));
+      counter = bit ? stepUp(counter) : stepDown(counter); // 実機DMC/エンコーダと同一遷移
       out[i] = (counter / 127) * 2 - 1;
     }
     return out;
@@ -2659,22 +3129,99 @@
   function waveFreq(periodReg) { return periodReg > 0 ? MML.HES.PSG_CLOCK / (32 * periodReg) : 0; }
   MML.Hes2MmlExpansion._waveFreq = waveFreq; // converter.jsのapplyPitchDetuneから使う
 
-  // ch別バランス($0805)と全体バランス($0801)を合成した結果、L/R両方とも実効ゲインが
-  // 厳密に0になるかどうかを判定する(apuHuC6280.js PsgChannel.gainLR()と全く同じ式。
-  // vol(0-31)は音量レジスタの生値。gainFromIndex側の対数変換は単調増加なので、
-  // 変換前のleft/rightが0以下かどうかだけ見れば「無音かどうか」はgainFromIndexを
-  // 通さずとも正確に判定できる)。音量レジスタが非0でも、パンだけで両バスから
-  // 外れていれば実際には無音(Last Bible DMG-M7J.gbsのGBS実測から発覚した現象がHESでも
-  // 起こりうるため同じ枠組みで対応)。
-  function panSilent(vol, balance, globalBalance) {
+  // ch別バランス($0805)・全体バランス($0801)まで込みの実効音量インデックス(0-31)を返す
+  // (apuHuC6280.js PsgChannel.gainLR()と全く同じ式。vol(0-31)は音量レジスタの生値)。
+  //
+  // ★重要(2026-08-26): $0805は「パン」専用ではなく、音量レジスタと同じインデックスへ
+  // 合流する同一スケール(1step≒1.5dB)の減衰器=事実上の第2の音量レジスタである。
+  // 実測(NX91002.hes)ではbalance値が左右対称($99/$88/$77…)の曲が多く、パンではなく
+  // 純粋なチャンネル別の音量調整として使われている(idx34はch毎に$ee/$cc/$88/$bbで、
+  // $88のchは$eeのchより14段=21dB下)。さらにidx34 ch3は音量レジスタを31に固定したまま
+  // balanceを$99→$33へ掃引する「balanceだけで作った減衰エンベロープ」だった。
+  // 以前はこの関数の代わりにpanSilent()(L/R両方が厳密に0か)を無音判定にだけ使い、
+  // 減衰量そのものを完全に無視していたため、チャンネル間のミックスバランスが
+  // 平均14.8dB崩れ、balance駆動のフェードは平坦な持続音に化けていた。
+  // 実効インデックスを音量として使うことで両方が同時に解決し、無音判定も
+  // 「実効インデックス0」として自然に吸収される(panSilentは廃止)。
+  //
+  // L/Rの扱い: 借用先(N163)にパンの概念が無いため、大きい方の側を採用して
+  // 「その音がミックス上どれだけ大きいか」を保つ(SPC(spc2mml/converter.js frameVol)が
+  // ボイス音量のVOL L/Rに対して max(|L|,|R|) を採るのと同じ方針)。
+  function effectiveVolIndex(vol, balance, globalBalance) {
     const v = vol - 0x1E * 2;
     const lPan = (balance >> 4) & 0x0F, rPan = balance & 0x0F;
     const gL = (globalBalance >> 4) & 0x0F, gR = globalBalance & 0x0F;
     const left = Math.max(0, v + lPan * 2 + gL * 2);
     const right = Math.max(0, v + rPan * 2 + gR * 2);
-    return left === 0 && right === 0;
+    return Math.min(31, Math.max(left, right));
   }
-  MML.Hes2MmlExpansion._panSilent = panSilent; // noise.jsから共用
+  MML.Hes2MmlExpansion._effectiveVolIndex = effectiveVolIndex; // noise.jsから共用
+
+  // ── ソフトウェア音量エンベロープの位相エイリアシング対策(2026-08-26) ──────────
+  // HESにはNSF/KSS/GBSのような「PLAYルーチンをフレームレートで呼ぶ」規約が無く、
+  // ゲームが内蔵タイマー(TIQ)を自前の周期で回して音量を1段ずつ書く(実測: NX91002は
+  // 約54.9Hz=1.094フレーム間隔)。フレーム境界のスナップショットで音量列を作ると、
+  // どのステップが2フレームに見えるかがノート開始の位相で毎回変わり、同じエンベロープが
+  // 「各段±1フレーム違いの列」として数百種類の@v<n>に化ける(ユーザー実測: NX91002
+  // idx34/180秒で@v252個。GBSの64Hzハードエンベロープクロック位相エイリアシングと同類だが、
+  // HESはソフトエンベロープなのでレジスタパラメータからの決定論的再現はできない)。
+  // 対策: captureHesSongAsyncのcontrolTrace($0804書込み列、音量の生値と分数フレーム時刻t
+  // 付き)から volume(t) を区分定数関数として復元し、「ノートの開始書込みを原点にした
+  // 相対時刻 t0+k (kフレーム目)」でリサンプルする。位相の基準がグローバルなフレーム格子
+  // ではなくノート自身のアタック書込みになるため、同じエンベロープは駆動レートが何Hzでも
+  // 必ず同一の列になり、EnvelopeRegistryの完全一致dedupeがそのまま効く。
+  // 列の長さ(=ノートのフレーム数)と実時間の対応は変えないので、再生タイミングは不変。
+
+  // controlTraceの1ch分から音量タイムライン[{t, v}](v=4bit音量)を作る。旧形式トレース
+  // (vol/tフィールド無し)やVGM経由(トレース自体が空)はnullを返し、呼び出し側は
+  // 従来のスナップショット列をそのまま使う。
+  // ★bal/gbal(ch別バランス$0805・全体バランス$0801)が記録されているトレースでは、
+  // 生の音量レジスタではなく実効音量インデックス(effectiveVolIndex参照)から作る。
+  // これらは実質的に第2の音量レジスタで、balanceだけで減衰エンベロープを作る曲もあるため
+  // (キャプチャ側hesPlayer.jsは$0805/$0801の書込みも変化点としてこのトレースへ積む)。
+  // 旧形式(bal無し)は従来どおり生の音量レジスタで代替する。
+  function buildVolTimeline(trace) {
+    if (!trace || trace.length === 0 || trace[0].vol === undefined || trace[0].t === undefined) return null;
+    const hasBal = trace[0].bal !== undefined;
+    return trace.map((e) => ({
+      t: e.t,
+      v: Math.max(0, Math.min(15, (hasBal ? effectiveVolIndex(e.vol, e.bal, e.gbal) : e.vol) >> 1))
+    }));
+  }
+  MML.Hes2MmlExpansion._buildVolTimeline = buildVolTimeline; // noise.jsから共用
+
+  // pitchTrace($0802/$0803書込み列、hesPlayer.js参照)の1ch分から周期タイムライン
+  // [{t, v}](v=12bit周期生値)を作る。音量と同じ位相エイリアシングがビブラート等の
+  // ピッチ列(pitchSeq→EP/MPテーブル・音程判定)にも乗るため、同じ仕組みで正規化する。
+  function buildPitchTimeline(trace) {
+    if (!trace || trace.length === 0 || trace[0].t === undefined) return null;
+    return trace.map((e) => ({ t: e.t, v: e.freq }));
+  }
+
+  // [startFrame, endFrame)のノートの音量列(長さendFrame-startFrame)を、ノート相対時刻で
+  // リサンプルして返す(冒頭コメント参照)。原点t0は「開始フレーム内の最後の書込み」
+  // (スナップショットが見るアタック値と同じ書込み。駆動tickは1フレームより長いのが普通で
+  // 同一フレーム内に複数書込みがある場合は直前ノートの残りが先行しているだけ)。
+  // 開始フレーム内に書込みが無い(音量変化を伴わないノート境界)場合はフレーム原点に
+  // フォールバックし、書込みがまだ一度も無い区間はfallbackSeq(スナップショット列)を使う。
+  function resampleSeq(timeline, startFrame, endFrame, fallbackSeq) {
+    if (!timeline || timeline.length === 0) return fallbackSeq;
+    let lo = 0, hi = timeline.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (timeline[m].t < startFrame) lo = m + 1; else hi = m; }
+    let anchor = -1;
+    for (let i = lo; i < timeline.length && timeline[i].t < startFrame + 1; i++) anchor = i;
+    const t0 = anchor >= 0 ? timeline[anchor].t : startFrame;
+    const len = endFrame - startFrame;
+    const out = new Array(len);
+    let j = lo - 1;
+    for (let k = 0; k < len; k++) {
+      const sampleT = t0 + k;
+      while (j + 1 < timeline.length && timeline[j + 1].t <= sampleT) j++;
+      out[k] = j >= 0 ? timeline[j].v : (fallbackSeq ? fallbackSeq[k] : 0);
+    }
+    return out;
+  }
+  MML.Hes2MmlExpansion._resampleSeq = resampleSeq; // noise.jsから共用
 
   // PSGの5bit(0-31)波形をN163の4bit(0-15)へビット深度変換する(単純な1bit右シフト、
   // 0-31を0-15へ均等対応。情報量の損失は最小限)。
@@ -2713,9 +3260,11 @@
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) runs.push(cur); cur = null; } }
     for (let f = 0; f < snapshots.length; f++) {
       const c = snapshots[f][chIndex];
-      const activeWave = c.on && !c.dda && !c.noiseOn &&
-        !panSilent(c.vol, c.balance, snapshots[f].globalBalance);
-      const vol4 = Math.max(0, Math.min(15, c.vol >> 1));
+      // 実効音量(balance込み。effectiveVolIndex冒頭コメント参照)。0=無音なので、
+      // 以前のpanSilent判定はこの値が0かどうかに吸収されている
+      const effVol = effectiveVolIndex(c.vol, c.balance, snapshots[f].globalBalance);
+      const activeWave = c.on && !c.dda && !c.noiseOn && effVol > 0;
+      const vol4 = Math.max(0, Math.min(15, effVol >> 1));
       const freqHz = activeWave ? waveFreq(c.freq) : 0;
       const note = (activeWave && vol4 > 0 && freqHz > 0) ? freqToNoteNumber(freqHz) : null;
       // 巡回シフトの正規化(冒頭コメント参照): 音符分割にも@N<n>登録にも常にこの
@@ -2726,10 +3275,16 @@
       const waveKey = wave4.join(',');
       if (!cur) { cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: false }; continue; }
       if (note !== cur.note || (note !== null && waveKey !== cur.waveKey)) {
-        // PSGには専用アタックレジスタが無くこの時点では打ち直し(パス2のsplitRetriggers)を
-        // まだ判定していないため、ここでの「純粋な音程変化」は波形切替を伴わないことのみで
-        // 判定する(打ち直しかどうかはパス2の結果を見てから確定させる、下記参照)
-        const pureNoteChange = note !== cur.note && waveKey === cur.waveKey;
+        // 「純粋な音程変化」(=タイで繋いでよいレガート)の判定。波形切替を伴わないことに加え、
+        // ★この境界で音量が跳ね上がっていない(=打ち直しでない)ことも要る(2026-08-26修正)。
+        // PSGには専用アタックレジスタが無いため打ち直しの手がかりは音量の跳ね上がりだけだが、
+        // それを見るパス2のsplitRetriggersは同一音程ラン内しか走らず、音程が変わる境界は
+        // 素通りしていた。結果、実際は再アタックしている音程変化までタイ候補になり、タイ側は
+        // @v等を再指定しない仕様のため音量エンベロープが減衰し続けていた(nsf2mml/expansion/
+        // n163.jsと同じ穴。女神転生II 12曲目のN163で発覚した同一原因)。
+        const prevVol = cur.volSeq[cur.volSeq.length - 1];
+        const reattack = prevVol != null && (vol4 - prevVol) >= MML.Convert.RETRIGGER_JUMP_THRESHOLD;
+        const pureNoteChange = !reattack && note !== cur.note && waveKey === cur.waveKey;
         flush(f);
         cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: pureNoteChange };
       } else {
@@ -2764,10 +3319,13 @@
   // kss2mml/expansion/scc.jsと同じ理由)。waveRegが無い(=ロール表示専用)呼び出しでは
   // canonicalRotationを省略し、再生中のメインスレッド負荷を抑える(extractChannelEvents
   // 冒頭コメント参照)。
-  MML.Hes2MmlExpansion.wave = function (snapshots, waveReg, envReg) {
+  // opts.maxAbsorbCents: mergeAlternatingVibratoの統合上限(pitch.js参照)。SA<num>導入後は
+  // 深い変調もEP/MPで表現できるため既定は無制限。SA不使用(変換設定PITCH_SA='off')のときだけ
+  // 呼び出し元が70を渡し、表現不能な深い統合を音符の交互のまま残す(従来動作)。
+  MML.Hes2MmlExpansion.wave = function (snapshots, waveReg, envReg, controlTrace, pitchTrace, opts) {
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
@@ -2779,10 +3337,23 @@
 
     const channels = [];
     for (let i = 0; i < MML.Hes2MmlExpansion.CH_COUNT; i++) {
+      const rawEvents = extractChannelEvents(snapshots, i, !!waveReg);
+      // ソフトエンベロープの位相エイリアシング対策(buildVolTimeline冒頭コメント参照):
+      // 音符イベントのvolSeq(音量列)とpitchSeq(周期生値列、ビブラート/EP検出の入力)を
+      // ノート相対時刻リサンプル列へ差し替える。マージ(mergeVibratoAndArpeggio等)より
+      // 前に行い、以後の利用は全て正規化済み列を見る。
+      const volTimeline = controlTrace ? buildVolTimeline(controlTrace[i]) : null;
+      const pitchTimeline = pitchTrace ? buildPitchTimeline(pitchTrace[i]) : null;
+      for (const ev of rawEvents) {
+        if (ev.note === null) continue;
+        if (volTimeline) ev.volSeq = resampleSeq(volTimeline, ev.start, ev.end, ev.volSeq);
+        if (pitchTimeline) ev.pitchSeq = resampleSeq(pitchTimeline, ev.start, ev.end, ev.pitchSeq);
+      }
       channels.push({
         // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)+
-        // P-5「不明瞭→EPテーブル」側(2026-08-12)
-        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(snapshots, i, !!waveReg))).map(toCommon),
+        // P-5「不明瞭→EPテーブル」側(2026-08-12)。統合上限はopts経由(関数冒頭コメント参照)
+        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(rawEvents,
+          { maxAbsorbCents: opts && opts.maxAbsorbCents != null ? opts.maxAbsorbCents : null })).map(toCommon),
         hasVolume: true, hasEnvelope: true, hasInstrument: true
       });
     }
@@ -2845,9 +3416,10 @@
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
     for (let f = 0; f < snapshots.length; f++) {
       const c = snapshots[f][chIndex];
-      const active = c.on && c.noiseOn &&
-        !MML.Hes2MmlExpansion._panSilent(c.vol, c.balance, snapshots[f].globalBalance);
-      const vol4 = active ? Math.max(0, Math.min(15, c.vol >> 1)) : 0;
+      // 実効音量(balance込み。wave.js effectiveVolIndex冒頭コメント参照)
+      const effVol = MML.Hes2MmlExpansion._effectiveVolIndex(c.vol, c.balance, snapshots[f].globalBalance);
+      const active = c.on && c.noiseOn && effVol > 0;
+      const vol4 = active ? Math.max(0, Math.min(15, effVol >> 1)) : 0;
       const note = (active && vol4 > 0) ? psgNoiseFreqToNote(psgNoiseFreq(c.noiseCtrl)) : null;
       if (!cur) { cur = { note, start: f, end: f, volSeq: [vol4] }; continue; }
       if (note !== cur.note) {
@@ -2869,9 +3441,20 @@
 
   function pickSource(snapFrame) {
     const c5 = snapFrame[5], c4 = snapFrame[4];
-    const audible = c => !MML.Hes2MmlExpansion._panSilent(c.vol, c.balance, snapFrame.globalBalance);
+    const audible = c => MML.Hes2MmlExpansion._effectiveVolIndex(c.vol, c.balance, snapFrame.globalBalance) > 0;
     if (c5.on && c5.noiseOn && audible(c5)) return c5;
     if (c4.on && c4.noiseOn && audible(c4)) return c4;
+    return null;
+  }
+
+  // pickSourceと同じ優先順位でchインデックス(5/4/null)だけ返す(音量リサンプルが
+  // どのchの$0804書込みタイムラインを参照すべきかを知るため。wave.js冒頭の
+  // 位相エイリアシング対策コメント参照)
+  function pickSourceIndex(snapFrame) {
+    const c5 = snapFrame[5], c4 = snapFrame[4];
+    const audible = c => MML.Hes2MmlExpansion._effectiveVolIndex(c.vol, c.balance, snapFrame.globalBalance) > 0;
+    if (c5.on && c5.noiseOn && audible(c5)) return 5;
+    if (c4.on && c4.noiseOn && audible(c4)) return 4;
     return null;
   }
 
@@ -2881,12 +3464,15 @@
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
     for (let f = 0; f < snapshots.length; f++) {
       const src = pickSource(snapshots[f]);
-      const vol4 = src ? Math.max(0, Math.min(15, src.vol >> 1)) : 0;
+      // 実効音量(balance込み。wave.js effectiveVolIndex冒頭コメント参照)
+      const vol4 = src
+        ? Math.max(0, Math.min(15, MML.Hes2MmlExpansion._effectiveVolIndex(src.vol, src.balance, snapshots[f].globalBalance) >> 1))
+        : 0;
       const note = (src && vol4 > 0) ? psgNoiseFreqToNote(psgNoiseFreq(src.noiseCtrl)) : null;
-      if (!cur) { cur = { note, start: f, end: f, volSeq: [vol4] }; continue; }
+      if (!cur) { cur = { note, start: f, end: f, volSeq: [vol4], srcCh: pickSourceIndex(snapshots[f]) }; continue; }
       if (note !== cur.note) {
         flush(f);
-        cur = { note, start: f, end: f, volSeq: [vol4] };
+        cur = { note, start: f, end: f, volSeq: [vol4], srcCh: pickSourceIndex(snapshots[f]) };
       } else {
         cur.volSeq.push(vol4);
       }
@@ -2895,11 +3481,26 @@
     return events;
   }
 
-  MML.Hes2MmlExpansion.noise = function (snapshots, envReg) {
+  MML.Hes2MmlExpansion.noise = function (snapshots, envReg, controlTrace) {
     const events = extractEvents(snapshots);
+    // ソフト音量エンベロープの位相エイリアシング対策(wave.js buildVolTimeline冒頭コメント
+    // 参照)。ノイズはch4/5どちらかを借りるため、イベント開始時点の担当chのタイムラインで
+    // リサンプルする(イベント途中でchが移る曲は稀で、その場合もエンベロープ形状はほぼ
+    // 同一のため開始chで代表させる)。
+    const timelines = controlTrace
+      ? [null, null, null, null,
+         MML.Hes2MmlExpansion._buildVolTimeline(controlTrace[4]),
+         MML.Hes2MmlExpansion._buildVolTimeline(controlTrace[5])]
+      : null;
+    if (timelines) {
+      for (const ev of events) {
+        const tl = ev.srcCh != null ? timelines[ev.srcCh] : null;
+        if (ev.note !== null && tl) ev.volSeq = MML.Hes2MmlExpansion._resampleSeq(tl, ev.start, ev.end, ev.volSeq);
+      }
+    }
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },
@@ -2923,32 +3524,40 @@
  * 無く、CPUが$0806へ生の5bitサンプル値を直接・高頻度(1フレームあたり数十〜百回)に
  * 書き込み続けることで音を作る(ソフトウェアPCM)。そのためNSFのDMCトリガー抽出
  * (nsf2mml/converter.js extractDmcTriggers)のような「レジスタから直接読める固定パラメータ」
- * が無く、代わりに hesPlayer.js captureHesSongAsync が記録する dpcmTrace
- * (ch別の{frame,value}列、$0806書込みをそのまま記録したもの)から実際の再生レートを
- * 逆算し、MML.Dpcm.encode()でこのアプリのDPCM(2A03 DMC形式)へ変換する。
+ * が無く、hesPlayer.js captureHesSongAsync が記録する dpcmTrace($0806書込み列)から
+ * 実際の再生レートを逆算し、MML.Dpcm.encode()でこのアプリのDPCM(2A03 DMC形式)へ変換する。
  *
- * 区間(クリップ)の切れ目は、on&&ddaが連続している間を1クリップとする。
- * ★2026-08: 当初はsnapshots(1/60秒ごとのフレーム単位スナップショット)のon&&dda継続を
- * 見て区切っていたが、打楽器のように1音ごとに$0804(on/dda制御)をオン→オフし直す曲では
- * その切替がフレーム未満の間隔で起きることが多く、フレーム単位のサンプリングでは
- * 取りこぼして「全ての打点が1本の連続音に結合される」不具合になっていた(ユーザー実測:
- * NX91002.hesでリズムパートが単一の伸ばした音になってしまう)。hesPlayer.jsが新たに
- * 記録するcontrolTrace(ch別・書込み順の$0804イベント列。1フレームに複数回の切替が
- * あってもすべて個別のイベントとして残る)を使い、書込み順にon&&ddaの状態遷移を
- * 追うことで実際の打点区切りを取りこぼさず検出する。
- * レートは「クリップの総サンプル数 ÷ クリップの経過秒数」で推定する(1フレームより短い
- * 極端に短いクリップは誤差が大きくなりうるが、聴感上の影響が小さい単発ノイズ的書込みと
- * して許容する)。
+ * ★2026-08-26 全面改修(それまでの経緯は下の「旧方式」も参照):
+ * NX91002.hes idx33等で「実音は10種以下なのに@DPCM定義が数百件」+打点の頭に
+ * キーン系ノイズが乗る問題の真因を実測で特定した:
+ *   1. 打点の区切り($0804のoff→次のon)がほぼ常に同一フレーム内で起きる(実測254/255)。
+ *      旧トレースはフレーム番号しか持たないため書込み順を復元できず、境界フレームの
+ *      $0806書込み(平均約80サンプル≒12ms)が丸ごと次クリップの頭に混入していた。
+ *      直前に鳴っていた音の尾は毎回違うので、同じドラムでも頭が毎回異なり、
+ *      完全一致/あいまい判定の両方が外れて全打点が別定義になっていた。
+ *      混入した異物がクリック/キーン系ノイズの実体でもある。
+ *   2. あいまい判定が固定閾値(長さ差≤2サンプル・先頭固定アラインMAD≤1.0)で厳しすぎた。
+ *   3. 同じドラムを途中でブツ切りして鳴らす打点(長い定義の前方一致)が全部別定義になっていた。
  *
- * ★2026-08: 打点の区切り検出(上記)を直しただけでは、検出できた各クリップを無条件に
- * 新規@DPCM<n>として登録していたため、実際は3〜4種類しか無いドラム音が(打点の数だけ)
- * 何百件も重複登録されてしまう問題が残っていた(ユーザー実測: NX91002.hesで980件)。
- * ドラム/ボイスサンプルは同じROMデータをソフトPCMで毎回同じように流し込んでいるだけ
- * (N163波形のような回転位相ズレとは別の話)なので、生サンプル列がほぼ同一になる。
- * WaveRegistry(src/convert/waveRegistry.js、N163/FDS波形の重複排除に使用)と同じ発想で、
- * クリップごとにDPCMエンコード(重い処理)する前に「意味的に同じ音」をまとめる
- * dedupeClip()を追加した。完全一致はMapで即座に、長さ・波形が近い場合は正規化相関で
- * 判定する(キャプチャのタイミング量子化により1サンプル程度前後することがあるため)。
+ * 対策として、キャプチャ(hesPlayer.js)がトレースへ追加した3情報を使う:
+ *   seq … controlTrace/dpcmTrace共通の書込み順連番。区切りを書込み1件単位で正確に復元する。
+ *   t   … 分数フレーム時刻。クリップの再生レートをフレーム量子化誤差なしで推定する。
+ *   src … サンプル値の読出し元ROM物理オフセット(ROM直読み・無加工と検証済みのときだけ、
+ *         それ以外は-1)。cpuHuC6280.js fetchOperandのlastDataAddr由来。
+ * srcが使えるクリップは「ROM開始アドレス=ドラムのID」として確定的に重複排除でき、
+ * アドレスジャンプ=サンプル境界なので$0804トグルより正確な区切りにもなる
+ * (実測: NX91002.hesはストリーミングループ LDA (zp) がROMを+1連続で直読みし、
+ * 43142/43142件でROMバイトと書込み値が一致。書込みの残り29%はZP保持値の
+ * ホールド書きでサンプル内容ではない=srcで自然に除外される)。
+ * srcが使えない(RAMバッファ経由・音量テーブル加工などの)ROMは、seq精密区切りで
+ * バイト列がほぼ完全一致になるため、完全一致+前方一致+緩和あいまい判定で潰す。
+ * ※同じHuC6280曲でもVGM形式はCPU実行が無くこのトレース自体を作れない(空配列が渡る)ので、
+ *   HES形式のほうがDPCM抽出精度は原理的に高い。
+ *
+ * 旧方式(seq/t/srcが無いトレースへのフォールバックとして保持):
+ * snapshotsのon&&dda継続で区切る→controlTrace書込み順で区切る、と改善してきた
+ * (フレーム未満のon/off切替の取りこぼし対策)。重複排除はWaveRegistry
+ * (src/convert/waveRegistry.js)と同じ発想の完全一致+あいまい判定。
  */
 (function (global) {
   'use strict';
@@ -2956,6 +3565,13 @@
   MML.Hes2MmlExpansion = MML.Hes2MmlExpansion || {};
 
   const MIN_CLIP_SAMPLES = 4; // これ未満のクリップはノイズ的単発書込みとみなし無視する
+  // run内の書込みのうちROM連続読みセグメントが占める割合がこれ以上なら
+  // 「アドレス同定モード」(セグメント=クリップ、開始アドレス=ID)を使う。
+  // 下回るROM(バッファ経由等)はバイト列一致モードへフォールバックする。
+  const ADDR_COVERAGE_RATIO = 0.7;
+  // アドレス同定モードで「1つのサンプル」とみなすROM連続セグメントの最小長(extractBySeq
+  // 内のガード参照)。実測のドラム/ボイスは200〜2700サンプルなので十分に安全な下限
+  const MIN_ADDR_SEG_SAMPLES = 32;
 
   // 実測レート(Hz)に対数距離で最も近いDMCレートインデックス(0-15)を選ぶ
   function bestDmcRateIndex(rateHz) {
@@ -2968,31 +3584,29 @@
     return best;
   }
 
-  // 「同じドラム/ボイス音の別の打点」をまとめて再利用するための重複排除。
-  // 完全一致(同じROMデータをそのまま再生しているケース、大半はこちらでヒットする)は
-  // Mapで即座に引ける。長さ・振幅が近いが1サンプルもズレていないとは限らないケース
-  // (捕捉タイミングの量子化による前後1サンプル程度のジッタ)は、短い方の長さに揃えて
-  // 平均絶対誤差を見るフォールバックで拾う。閾値は「別のドラム音を誤って同一視しない」
-  // ことを優先し、かなり厳しめに設定してある。
-  const FUZZY_LEN_TOLERANCE = 2;      // 許容する長さの差(サンプル数)
-  const FUZZY_MEAN_ABS_DIFF = 1.0;    // 許容する平均絶対誤差(0-31スケール上)
-  function findDuplicateIndex(samples, exactMap, uniqueList) {
-    const exact = exactMap.get(samples.join(','));
-    if (exact !== undefined) return exact;
-    for (const u of uniqueList) {
-      if (Math.abs(u.samples.length - samples.length) > FUZZY_LEN_TOLERANCE) continue;
-      const len = Math.min(u.samples.length, samples.length);
-      let sum = 0;
-      for (let i = 0; i < len; i++) sum += Math.abs(u.samples[i] - samples[i]);
-      if (sum / len <= FUZZY_MEAN_ABS_DIFF) return u.index;
-    }
-    return -1;
+  // PCM品質設定(cmd.PCM_RATE、src/convert/options.js冒頭コメント参照)に従って
+  // DMCレートを選ぶ。1bitデルタ変調は1bitあたり±2/127しか動けないため、ソースの
+  // バイトレートと同程度のDMCレート(旧来の「最も近いレート」)では
+  //   (a) 5bitの1LSB遷移にすら2bit必要でアタックが盛大になまる(スロープ過負荷)
+  //   (b) 平坦部の+2/-2交互トグルがレート/2の可聴キーン音になる(実測4.4kHz運用で約2.2kHz)
+  // の両方を踏む。倍率を上げるほど追従が効きアイドルトーンも高域へ逃げるが、
+  // データ量はレートに比例して増える(ユーザー判断でサイズと品質を選ぶ)。
+  //   'max' … 常に最高レート33.1kHz(既定)
+  //   8/4/2 … ソースレートのn倍以上となる最小レート(テーブル上限で頭打ち)
+  //   1     … 従来互換(最も近いレート、データ最小)
+  function dmcRateIndexFor(rateHz, pcmRate) {
+    const table = MML.Dpcm.DMC_RATE_TABLE_NTSC;
+    if (pcmRate === 'max' || pcmRate == null) return table.length - 1;
+    const mult = typeof pcmRate === 'number' ? pcmRate : parseInt(pcmRate, 10) || 4;
+    if (mult <= 1) return bestDmcRateIndex(rateHz);
+    for (let i = 0; i < table.length; i++) if (table[i] >= rateHz * mult) return i;
+    return table.length - 1;
   }
 
-  // controlTrace[ch](書込み順の{frame,on,dda}イベント列)から、on&&ddaが連続している
-  // 区間列({start,end}、半開区間)を作る。書込み順に状態遷移を追うため、1フレーム内で
-  // 複数回on/offが切り替わっても取りこぼさない(冒頭コメント参照)。曲末尾でonのまま
-  // 終わった場合はtotalFramesまでを区間とする。
+  // controlTrace(書込み順の{frame,on,dda}イベント列)から、on&&ddaが連続している
+  // 区間列を作る。書込み順に状態遷移を追うため、1フレーム内で複数回on/offが
+  // 切り替わっても取りこぼさない。曲末尾でonのまま終わった場合はtotalFramesまで。
+  // seq有りトレースでは{startSeq,endSeq,startFrame,endFrame}、無しでは{start,end}(フレーム)。
   function buildChannelRuns(trace, totalFrames) {
     const runs = [];
     let active = false, runStart = null;
@@ -3000,15 +3614,95 @@
       const newActive = ev.on && ev.dda;
       if (newActive === active) continue;
       if (newActive) {
-        runStart = ev.frame;
+        runStart = ev;
       } else if (runStart != null) {
-        if (ev.frame > runStart) runs.push({ start: runStart, end: ev.frame });
+        if (ev.frame > runStart.frame || (ev.seq !== undefined && ev.seq > runStart.seq)) {
+          runs.push({ start: runStart.frame, end: ev.frame, startSeq: runStart.seq, endSeq: ev.seq, startFrame: runStart.frame, endFrame: ev.frame });
+        }
         runStart = null;
       }
       active = newActive;
     }
-    if (runStart != null && totalFrames > runStart) runs.push({ start: runStart, end: totalFrames });
+    if (runStart != null && totalFrames > runStart.frame) {
+      runs.push({ start: runStart.frame, end: totalFrames, startSeq: runStart.seq, endSeq: Infinity, startFrame: runStart.frame, endFrame: totalFrames });
+    }
     return runs;
+  }
+
+  // ---- クリップ登録簿(アドレス同定/バイト列一致の両モード共用) --------------------
+  // clips: [{samples:number[](0-31), rateHz}] を蓄積し、同じ音は1つのindexへまとめる。
+  // 「同じ音の短いブツ切り打点」(次の打点で切られたハイハット等)は長い方の定義を共有し、
+  // 打点の長さは音符長側で表現する(実機DMCの「途中で切る=次のトリガー/停止」と同じ意味論。
+  // EnvelopeRegistryの前方一致共有と同じ発想)。逆に既存より長い打点が来たら定義を延長する。
+  class ClipRegistry {
+    constructor() {
+      this.clips = [];
+      this.byAddr = new Map();  // ROM開始オフセット -> clipIndex(アドレス同定モード)
+      this.exact = new Map();   // samples.join(',') -> clipIndex(バイト列一致の高速パス)
+    }
+
+    _register(samples, rateHz) {
+      const index = this.clips.length;
+      this.clips.push({ samples, rateHz });
+      this.exact.set(samples.join(','), index);
+      return index;
+    }
+
+    // 既存clipのsamplesを長い版へ差し替える(前方一致で内容は同じ、末尾が伸びるだけ)
+    _extend(index, samples, rateHz) {
+      const clip = this.clips[index];
+      this.exact.delete(clip.samples.join(','));
+      clip.samples = samples;
+      clip.rateHz = rateHz;
+      this.exact.set(samples.join(','), index);
+    }
+
+    // アドレス同定モード: ROM開始オフセットがIDそのもの
+    addByAddr(startAddr, samples, rateHz) {
+      const hit = this.byAddr.get(startAddr);
+      if (hit !== undefined) {
+        if (samples.length > this.clips[hit].samples.length) this._extend(hit, samples, rateHz);
+        return hit;
+      }
+      const index = this._register(samples, rateHz);
+      this.byAddr.set(startAddr, index);
+      return index;
+    }
+
+    // バイト列一致モード: 完全一致 → 前方一致 → 緩和あいまい判定の順で既存を探す。
+    // seq精密区切り後はバイト列がほぼ完全一致になるため大半は最初の2つで決まる。
+    // あいまい判定は保険: 長さ許容は相対(2%+2サンプル)、±4サンプルのオフセット探索付きで
+    // 平均絶対誤差≤1.0(0-31スケール)・重なり90%以上を要求する(旧固定閾値は
+    // 「長さ差≤2・先頭固定アライン」で実データの揺れに対して厳しすぎた)。
+    addBySamples(samples, rateHz) {
+      const exact = this.exact.get(samples.join(','));
+      if (exact !== undefined) return exact;
+      for (let i = 0; i < this.clips.length; i++) {
+        const u = this.clips[i].samples;
+        // 前方一致(短い方が長い方の先頭と完全一致)
+        const common = Math.min(u.length, samples.length);
+        if (common >= MIN_CLIP_SAMPLES) {
+          let prefix = true;
+          for (let k = 0; k < common; k++) if (u[k] !== samples[k]) { prefix = false; break; }
+          if (prefix) {
+            if (samples.length > u.length) this._extend(i, samples, rateHz);
+            return i;
+          }
+        }
+        // あいまい判定(長さが近いものだけ)
+        if (Math.abs(u.length - samples.length) > Math.max(u.length, samples.length) * 0.02 + 2) continue;
+        for (let off = -4; off <= 4; off++) {
+          let sum = 0, n = 0;
+          for (let k = 0; k < samples.length; k++) {
+            const j = k + off;
+            if (j < 0 || j >= u.length) continue;
+            sum += Math.abs(samples[k] - u[j]); n++;
+          }
+          if (n >= samples.length * 0.9 && sum / n <= 1.0) return i;
+        }
+      }
+      return this._register(samples, rateHz);
+    }
   }
 
   // フォーマット非依存の共通抽出処理。「同じドラム/ボイス音の別打点」を重複排除した
@@ -3022,7 +3716,6 @@
   // 戻り値: { channel, clips: [{samples:number[](0-31), rateHz}], events: [{start,end,clipIndex}] }
   MML.Hes2MmlExpansion.extractDdaClips = function (snapshots, dpcmTrace, controlTrace, frameRate) {
     const totalFrames = snapshots.length;
-    const clips = [], events = [];
 
     // @DPCM<n>チャンネルは1つしか無いため(hes2mml側の制約。ネイティブ再生では制約は
     // 無いが、実測上ほぼ常に特定の1chへ集約されるため同じ選び方を踏襲する)、6ch中
@@ -3033,14 +3726,127 @@
       const total = runs.reduce((a, r) => a + (r.end - r.start), 0);
       if (total > bestTotal) { bestTotal = total; bestCh = ch; bestRuns = runs; }
     }
-    if (bestCh < 0) return { channel: -1, clips, events };
+    if (bestCh < 0) return { channel: -1, clips: [], events: [] };
 
     const trace = dpcmTrace[bestCh] || [];
-    let tracePos = 0;
-    const exactMap = new Map();   // samples.join(',') -> clipIndex(完全一致の高速パス)
-    const uniqueList = [];        // [{index, samples}](あいまい一致のフォールバック用)
+    const hasSeq = trace.length > 0 && trace[0].seq !== undefined &&
+      bestRuns.length > 0 && bestRuns[0].startSeq !== undefined;
+    return hasSeq
+      ? extractBySeq(bestCh, trace, bestRuns, frameRate)
+      : extractByFrames(bestCh, trace, bestRuns, frameRate);
+  };
 
-    for (const run of bestRuns) {
+  // クリップのレート推定: 書込みの分数フレーム時刻tが使えるなら
+  // 「サンプル間隔の実測平均」= (件数-1) ÷ (最後と最初のtの差の秒数)。
+  // t無し(旧トレース)はrun全長ベース(境界がフレーム量子化されるため誤差±10%程度)。
+  function estimateRate(writes, from, to, fallbackFrames, frameRate) {
+    const n = to - from;
+    const first = writes[from], last = writes[to - 1];
+    if (n >= 2 && first.t !== undefined && last.t > first.t) {
+      return (n - 1) / ((last.t - first.t) / frameRate);
+    }
+    const seconds = fallbackFrames / frameRate;
+    return seconds > 0 ? n / seconds : MML.Dpcm.DMC_RATE_TABLE_NTSC[7];
+  }
+
+  // ---- seq/t/src有りトレースの精密抽出(2026-08-26、冒頭コメント参照) ----------------
+  function extractBySeq(channel, trace, runs, frameRate) {
+    const reg = new ClipRegistry();
+    const events = [];
+    let pos = 0;
+
+    for (const run of runs) {
+      while (pos < trace.length && trace[pos].seq < run.startSeq) pos++;
+      const ws = [];
+      while (pos < trace.length && trace[pos].seq < run.endSeq) { ws.push(trace[pos]); pos++; }
+      if (ws.length < MIN_CLIP_SAMPLES) continue;
+
+      // run内の書込みを3種に分類しつつ、ROM読出しアドレスの連続セグメントに分ける:
+      //   ROM内容   … src>=0。サンプル本体。前のROM書込みのsrc+1なら同一セグメント継続。
+      //   ホールド  … src<0 かつ 直前の書込みと同じ値。DACの値を保持し直しているだけで
+      //               波形情報を持たない(実測: NX91002.hesは書込みの29%がZP保持値の
+      //               ホールド書きで、ROMストリームの合間に挟まる。これをセグメントの
+      //               切れ目とみなすと1つのドラムが数十セグメントに細切れになる)。
+      //               セグメントを切らず、サンプルにも入れない(透過)。
+      //   異物内容  … src<0 かつ 値が変化している。出所不明の波形情報(音量加工や
+      //               RAMバッファ経由)。これが多いrunはアドレス同定を信用しない。
+      const segs = []; // {items:[wsインデックス...](ROM内容のみ)}
+      let cur = null, lastSrc = -1;
+      let romCount = 0, foreignCount = 0;
+      for (let i = 0; i < ws.length; i++) {
+        const w = ws[i];
+        if (w.src >= 0) {
+          romCount++;
+          if (!cur || w.src !== lastSrc + 1) { cur = { items: [] }; segs.push(cur); }
+          cur.items.push(i);
+          lastSrc = w.src;
+        } else if (i > 0 && w.value === ws[i - 1].value) {
+          // ホールド: 透過(セグメント継続)
+        } else {
+          foreignCount++;
+          cur = null; lastSrc = -1;
+        }
+      }
+      // ★アドレス同定を採用する条件(2026-08-26追加のガード): 「十分に長いROM連続
+      // セグメントが支配的」であること。アドレスが数サンプルおきに跳ぶ曲
+      // (連続ストリーミングPCMや複数サンプルのソフトミキシング)では、セグメントが
+      // MIN_ADDR_SEG_SAMPLES未満に砕けて「1打点=4サンプル」の微細イベントが数千個でき、
+      // @DPCM定義も打点も爆発する(実測: SS90002.hesで86定義2902打点、MML 8倍に肥大)。
+      // 実際のドラム/ボイスは数十ms=数百サンプルあるので、この閾値を下回るセグメントは
+      // 「サンプルの切れ目」ではないと判断し、run全体を1クリップとして扱うストリーム
+      // モードへ落とす(音の始まりは$0804のon/offが与えるので情報は失われない)。
+      const bigSegs = segs.filter((sg) => sg.items.length >= MIN_ADDR_SEG_SAMPLES);
+      const addrCoverage = bigSegs.reduce((a, sg) => a + sg.items.length, 0);
+
+      if (romCount >= MIN_CLIP_SAMPLES && romCount >= (romCount + foreignCount) * ADDR_COVERAGE_RATIO &&
+          addrCoverage >= ws.length * ADDR_COVERAGE_RATIO) {
+        // アドレス同定モード: セグメントごとに1打点(runの途中でアドレスが跳んだら
+        // 別サンプルの連続再生とみなして分割する=$0804トグル無しの垂れ流しにも耐える)。
+        for (const sg of bigSegs) {
+          const items = sg.items;
+          const samples = items.map((i) => ws[i].value);
+          const first = ws[items[0]], last = ws[items[items.length - 1]];
+          const rateHz = (samples.length >= 2 && first.t !== undefined && last.t > first.t)
+            ? (samples.length - 1) / ((last.t - first.t) / frameRate)
+            : estimateRate(ws, 0, ws.length, run.endFrame - run.startFrame, frameRate);
+          const clipIndex = reg.addByAddr(first.src, samples, rateHz);
+          events.push({ start: first.frame, end: last.frame + 1, clipIndex });
+        }
+      } else {
+        // バイト列一致モード: run全体を1クリップとして扱う(seq精密区切りにより
+        // 同じ音はバイト列がほぼ完全一致する)
+        const samples = ws.map((w) => w.value);
+        const rateHz = estimateRate(ws, 0, ws.length, run.endFrame - run.startFrame, frameRate);
+        const clipIndex = reg.addBySamples(samples, rateHz);
+        events.push({ start: ws[0].frame, end: ws[ws.length - 1].frame + 1, clipIndex });
+      }
+    }
+
+    // ★イベントendのクランプ(2026-08-26): endは「最終書込みフレーム+1」だが、次の打点が
+    // 同一フレーム内で始まる(off→on同一フレームがこの種の曲では常態)と ev[i].end が
+    // ev[i+1].start を1フレーム追い越して重複する。MML出力(mmlEmit)は各イベントの
+    // dur=end-start を直列に並べるため、重複分がそのままDPCMチャンネルの尺に上乗せされ、
+    // 曲が進むほど累積遅延になっていた(実測: NX91002 idx33/60秒で重複103件=+103フレーム
+    // =終盤+1.7秒遅れ。PSG各chは3607フレームなのにEだけ3710フレーム)。
+    // 発音タイミング(start)は変えず、endだけ次イベントのstartへ切り詰める。
+    for (let i = 0; i + 1 < events.length; i++) {
+      if (events[i].end > events[i + 1].start) {
+        events[i].end = Math.max(events[i].start + 1, events[i + 1].start);
+      }
+    }
+
+    return { channel, clips: reg.clips, events };
+  }
+
+  // ---- 旧トレース(seq無し)のフォールバック抽出(従来ロジック) ------------------------
+  // 境界フレームの混入(冒頭コメントの真因1)は原理的に避けられないが、緩和済みの
+  // ClipRegistry.addBySamples(前方一致+相対長さ許容+オフセット探索)で旧実装よりは潰せる。
+  function extractByFrames(channel, trace, runs, frameRate) {
+    const reg = new ClipRegistry();
+    const events = [];
+    let tracePos = 0;
+
+    for (const run of runs) {
       const samples = [];
       while (tracePos < trace.length && trace[tracePos].frame < run.end) {
         if (trace[tracePos].frame >= run.start) samples.push(trace[tracePos].value);
@@ -3048,51 +3854,42 @@
       }
       if (samples.length < MIN_CLIP_SAMPLES) continue;
 
-      // 既に登録済みの音と(完全一致 or ほぼ同一)なら新規登録せず使い回す。実際には
-      // 3〜4種類しか無いドラム/ボイス音が打点の数だけ重複登録される事故を防ぐ
-      // (冒頭コメント参照)。
-      const dupIndex = findDuplicateIndex(samples, exactMap, uniqueList);
-      if (dupIndex >= 0) {
-        events.push({ start: run.start, end: run.end, clipIndex: dupIndex });
-        continue;
-      }
-
-      // レート推定: クリップの総サンプル数 ÷ 経過秒数
       const seconds = (run.end - run.start) / frameRate;
       const rateHz = seconds > 0 ? samples.length / seconds : MML.Dpcm.DMC_RATE_TABLE_NTSC[7];
-
-      const index = clips.length;
-      clips.push({ samples, rateHz });
-      exactMap.set(samples.join(','), index);
-      uniqueList.push({ index, samples });
-      events.push({ start: run.start, end: run.end, clipIndex: index });
+      const clipIndex = reg.addBySamples(samples, rateHz);
+      events.push({ start: run.start, end: run.end, clipIndex });
     }
 
-    return { channel: bestCh, clips, events };
-  };
+    return { channel, clips: reg.clips, events };
+  }
 
   // channel/defs/files/eventsを返す。defsの各要素にsampleCount(実際のPCMサンプル数。
   // sizeはNSF側配置用のバイト数で16byte境界に切り上げ済みのため別物)も含める。
   // ネイティブ再生(src/audio/hes-stream-player.js HesReplayStreamPlayer)がMML.Dpcm.decode()で
   // 復号する際、この正確なサンプル数が必要(2026-08、ユーザー指摘: ネイティブ再生も
   // 自作の簡略再生ではなく、MML変換と同じencode→decode往復を必ず経由させる)。
-  MML.Hes2MmlExpansion.dpcm = function (snapshots, dpcmTrace, controlTrace, frameRate) {
+  MML.Hes2MmlExpansion.dpcm = function (snapshots, dpcmTrace, controlTrace, frameRate, cmd) {
     const { channel, clips, events: ddaEvents } = MML.Hes2MmlExpansion.extractDdaClips(snapshots, dpcmTrace, controlTrace, frameRate);
     const defs = [], files = [], events = [];
+    const pcmRate = cmd && cmd.PCM_RATE != null ? cmd.PCM_RATE : 'max';
 
     for (const clip of clips) {
-      const rateIndex = bestDmcRateIndex(clip.rateHz);
+      const rateIndex = dmcRateIndexFor(clip.rateHz, pcmRate);
       // 5bit(0-31)を-1..1へ正規化してDPCMエンコーダへ渡す
       const floatSamples = new Float32Array(clip.samples.length);
       for (let i = 0; i < clip.samples.length; i++) floatSamples[i] = (clip.samples[i] / 31) * 2 - 1;
-      const encoded = MML.Dpcm.encode(floatSamples, clip.rateHz, rateIndex);
+      // 初期DAC: 先頭サンプル値を7bit化してエンコーダのカウンタ開始値にし、同じ値を
+      // @DPCM定義のdac($4011初期書込み)へ入れる。旧来のdac=255(書込み省略)+カウンタ64
+      // 固定だと、再生開始時のDACが前の音の最終値のままでエンコーダの仮定とズレ、
+      // 頭に追従ランプ(クリック)が乗っていた。
+      const dac = Math.max(0, Math.min(127, Math.round((clip.samples[0] / 31) * 127)));
+      const encoded = MML.Dpcm.encode(floatSamples, clip.rateHz, rateIndex, { startCounter: dac });
 
       const index = defs.length;
       const name = `hes_dpcm_${index}.dmc`;
       files.push({ name, bytes: encoded.bytes });
-      // dac=255は「初期DAC値の書込みを省略する」既定値(ROADMAP.md @DPCMフェーズA参照、
-      // ppmck driverの慣例に合わせる)。mode=0固定(ワンショット、ループしない)。
-      defs.push({ index, file: name, freq: rateIndex, size: encoded.bytes.length, sampleCount: encoded.sampleCount, dac: 255, mode: 0 });
+      // mode=0固定(ワンショット、ループしない)。
+      defs.push({ index, file: name, freq: rateIndex, size: encoded.bytes.length, sampleCount: encoded.sampleCount, dac, mode: 0 });
     }
 
     for (const ev of ddaEvents) {

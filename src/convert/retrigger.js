@@ -44,6 +44,14 @@
   MML.Convert = MML.Convert || {};
 
   const DEFAULT_JUMP_THRESHOLD = 2;
+  // ★抽出パス1(音程変化の境界)からも同じ基準を使うために公開する(2026-08-26)。
+  // アタックレジスタを持たないチップ(N163・HES PSG)は「音量の跳ね上がり」だけが
+  // 打ち直しの手がかりだが、splitRetriggersは同一音程ラン内(パス2)しか走らないため、
+  // 音程が変わる境界での再アタックは各extractorのpureNoteChange判定側で見る必要がある
+  // (見落とすと、実際は打ち直している音程変化をレガートと誤認してタイ(&)で繋いでしまい、
+  // タイ側では@v等を再指定しない仕様のため音量エンベロープが減衰し続ける。
+  // 実測: 女神転生II 12曲目のN163 Q/Rパートで発覚)。
+  MML.Convert.RETRIGGER_JUMP_THRESHOLD = DEFAULT_JUMP_THRESHOLD;
   const DEFAULT_MIN_PERIOD = 2;
   const DEFAULT_MAX_PERIOD = 48;
   const DEFAULT_MIN_REPEATS = 3;

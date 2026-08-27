@@ -588,6 +588,9 @@
 
   MML.NSF2MML.convert = function (writeLog, nsfBytes, header, songIndex, initRegs, initWrites, options) {
     options = options || {};
+    // 変換設定(src/convert/options.js): コマンド使用/不使用・譜面整形。全レジストリと
+    // detune.js・emitScore へ同じ cmd を渡す
+    const cmd = MML.Convert.normalizeCmd(options.cmd);
     const timeline = buildTimeline(writeLog, initRegs);
 
     // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2): 半音境界を跨ぐビブラートが
@@ -636,7 +639,7 @@
     // 順序はsrc/mml/compiler.jsのEXPANSION_PRIORITY(実機ppmck固定優先順位)に合わせる
     // (NSFのextraChipsにdpcmビットは無いためfilterで自然に除外される)。
     const extraChips = (header && header.extraChips) || 0;
-    const expansions = MML.Mml.EXPANSION_PRIORITY.filter(name => {
+    let expansions = MML.Mml.EXPANSION_PRIORITY.filter(name => {
       const flag = MML.NSF.CHIP_FLAGS[name.toUpperCase()];
       return flag && (extraChips & flag);
     });
@@ -683,7 +686,7 @@
     // 全フレーム同一値(フラット)ならvolumeを、変化があれば実測形状のenvelopeV(0番台)を、
     // エンベロープモード(!constVol)ならハードウェア減衰カーブを厳密シミュレートした
     // envelopeV(100番台、HARDWARE_INDEX_BASE)を使う。休符(note===null)には音量は不要。
-    const envReg = new MML.Convert.EnvelopeRegistry();
+    const envReg = new MML.Convert.EnvelopeRegistry(cmd);
     function toVolumeFields(ev) {
       if (!ev.constVol) {
         const period = ev.envKey & 0x0F;
@@ -711,19 +714,20 @@
             levels.push(levelAt(since));
           }
           const idx = envReg.assign(levels);
-          return idx == null ? { volume: levels[0] } : { envelopeV: idx };
+          return idx == null ? { volume: MML.Convert.plainVolume(levels) } : { envelopeV: idx };
         }
         const idx = envReg.registerShape(shape, true);
-        return { envelopeV: idx };
+        // 変換設定ENV=OFF時はnull → ピーク値のv<n>へ(src/convert/options.js plainVolume)
+        return idx == null ? { volume: MML.Convert.plainVolume(shape) } : { envelopeV: idx };
       }
       const idx = envReg.assign(ev.volSeq);
-      return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(ev.volSeq) } : { envelopeV: idx };
     }
 
     // ピッチエンベロープ(厳密周期ビブラート)を曲全体で共有登録するレジストリ
     // (DESIGN-PITCH.md Phase 1)。基準点はev.rawFreqと同じ生成元(ev.pitchSeq[0])
     // なのでD<n>(detectChorusDetuneが後段で設定)とcompiler.js側で正しく合成される。
-    const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
+    const pitchReg = new MML.Convert.PitchEnvelopeRegistry(cmd);
     // 2A03パルス/三角波は周期レジスタ(値が下がるほど音程が上がる)なのでdirectionUp=false
     // (compiler.jsのperiodFnIncreasing→vibratoSequence呼び出しと同じ規則、src/convert/pitch.js
     // fitVibrato参照)。
@@ -737,7 +741,7 @@
     // ノートエンベロープ(高速アルペジオ)を曲全体で共有登録するレジストリ(2026-08-14)。
     // mergeVibratoAndArpeggioがev.noteEnvOffsetsを付与済みのイベントだけ登録する
     // (toPitchFieldsと同じ「classify+registerを1回で済ませる」inlineスタイル)。
-    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
+    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry(cmd);
     function toNoteEnvFields(ev) {
       if (!ev.noteEnvOffsets) return {};
       const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
@@ -836,7 +840,21 @@
     }
 
     // 2A03本体+全拡張音源を横断してコーラス検知+D<n>補正(上のdetuneEntries参照)
-    MML.Convert.detectChorusDetune(detuneEntries, detuneEntries.map(e => e.periodFn));
+    MML.Convert.detectChorusDetune(detuneEntries, detuneEntries.map(e => e.periodFn), { cmd });
+
+    // ── チャンネル割当(案E): ユーザーが鍵盤表示で借用先を変えたぶんを反映する ──
+    // NSFはネイティブ変換(元のチップがそのまま出力先)なので、割当変更でできるのは
+    // 「同じ音源の別チャンネルへ移す」「2A03パルス↔MMC5パルスへ移す」「出力しない(skip)」の3つ。
+    // 音程の生周期換算式と音量の尺度が完全に同じ組合せに限る(それ以外は抽出時点で
+    // ネイティブ前提のEP/@vが確定済みのため、ここで移すと音程・音量が狂う)。
+    const planNotes = [];
+    if (options.channelMap) {
+      const applied = applyNsfChannelMap(scoreChannels, options.channelMap, {
+        expansions, expansionLetterMap, n163ChannelCount, dpcmLetter, planNotes,
+      });
+      for (const chip of applied.addedChips) if (expansions.indexOf(chip) < 0) expansions.push(chip);
+      expansions.sort((a, b) => MML.Mml.EXPANSION_PRIORITY.indexOf(a) - MML.Mml.EXPANSION_PRIORITY.indexOf(b));
+    }
 
     // @DPCM<n>定義行(実機ppmckcと同じ書式)。ヘッダー行として他の音色定義と同列に出す
     const dpcmDefLines = dpcmDefs.map(d =>
@@ -855,14 +873,120 @@
     ];
 
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
-      totalFrames, tempoBpm: bpm,
+      totalFrames, tempoBpm: bpm, cmd,
       headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(), ...fdsModDefLines]
     });
 
-    const mml = [headerComment, scoreText].join('\n');
+    // チャンネル割当をユーザーが変えたときだけ、実際の並びと適用できなかった指定を書き添える
+    // (上のヘッダコメントは既定の並び前提の固定文なので、そこは触らず追記する)
+    const planComment = options.channelMap
+      ? [`; チャンネル割当: ユーザー指定 (${scoreChannels.map(c => c.letter).join('')})`,
+        ...planNotes.map(n => `; ※ ${n}`), ``].join('\n')
+      : '';
+    const mml = [headerComment + planComment, scoreText].join('\n');
 
-    return { mml, dpcmFiles, bpm: Math.round(bpm), expansions, fdsWave, n163Wave };
+    // 変換結果の音程検証(src/convert/verify.js): 最終MMLを実コンパイルして
+    // 「実際に鳴る音の高さ」を変換元イベントと突き合わせる(失敗しても変換は妨げない)
+    const pitchCheck = MML.Convert.verifyPitch
+      ? MML.Convert.verifyPitch(mml, scoreChannels, { frameRate: FPS, totalFrames: totalFrames,
+          compileOpts: { dpcmSamples: Object.fromEntries(dpcmFiles.map(f => [f.name, f.bytes])) } })
+      : null;
+
+    return { mml, dpcmFiles, bpm: Math.round(bpm), expansions, fdsWave, n163Wave, pitchCheck };
   };
+
+  // ── チャンネル割当(案E) ────────────────────────────────────────
+  // NSFはネイティブ変換なので「借用先」という概念が無く、割当でできるのは
+  //   ・同じ音源の別チャンネルへ移す(N163 ch3→ch1、VRC7 ch1↔ch2 等)
+  //   ・2A03パルス ↔ MMC5パルス(周期式・音量尺度が完全に同一)
+  //   ・そのチャンネルを出力しない(skip)
+  // の3つに限る。他チップへ移すには抽出前に借用先を決める必要がある(EP/@vが
+  // ネイティブの生レジスタ空間で確定済みのため、後から移すと音程・音量が狂う)。
+  // 変換元チャンネルのIDは鍵盤表示の行IDと同じ体系(P1/P2/TR/NO/DM/FDS/VR<n>/V6P1…)。
+  const NSF_APU_SRC = {
+    P1: { letter: 'A', family: 'pulse' }, P2: { letter: 'B', family: 'pulse' },
+    TR: { letter: 'C', family: 'triangle' }, NO: { letter: 'D', family: 'noise' },
+  };
+  const NSF_EXP_SRC = [
+    [/^DM$/, () => ({ chip: 'dpcm', index: 0, family: 'dpcm' })],
+    [/^FDS$/, () => ({ chip: 'fds', index: 0, family: 'fds' })],
+    [/^VR([1-6])$/, m => ({ chip: 'vrc7', index: +m[1] - 1, family: 'vrc7' })],
+    [/^V6(P1|P2|SW)$/, m => ({ chip: 'vrc6', index: { P1: 0, P2: 1, SW: 2 }[m[1]], family: m[1] === 'SW' ? 'vrc6saw' : 'vrc6pulse' })],
+    [/^FE([1-3])$/, m => ({ chip: 'fme7', index: +m[1] - 1, family: 'fme7' })],
+    [/^M5(P1|P2)$/, m => ({ chip: 'mmc5', index: m[1] === 'P1' ? 0 : 1, family: 'pulse' })],
+    // N163の表示行N{k}はハードウェアch(numCh-k)。MML文字は下位アドレス側から順に振られる
+    // (src/ui/keyboard.js getPartLetter と同じ規則)
+    [/^N([1-8])$/, (m, ctx) => ({ chip: 'n163', index: ctx.n163ChannelCount - (+m[1]), family: 'n163' })],
+  ];
+  function nsfSourceInfo(id, ctx) {
+    if (NSF_APU_SRC[id]) return Object.assign({ chip: '2a03' }, NSF_APU_SRC[id]);
+    for (const pair of NSF_EXP_SRC) {
+      const m = pair[0].exec(id);
+      if (!m) continue;
+      const info = pair[1](m, ctx);
+      if (info.index < 0) return null;
+      const letters = ctx.expansionLetterMap[info.chip] || [];
+      return Object.assign({}, info, { letter: letters[info.index] });
+    }
+    return null;
+  }
+
+  function applyNsfChannelMap(scoreChannels, channelMap, ctx) {
+    const Plan = MML.Convert.ChannelPlan;
+    const notes = ctx.planNotes;
+    const addedChips = [];
+    const byLetter = new Map();
+    for (const ch of scoreChannels) byLetter.set(ch.letter, ch);
+
+    const moves = [];   // { ch, to }   to=null はskip(出力しない)
+    for (const id of Object.keys(channelMap)) {
+      const target = channelMap[id];
+      const src = nsfSourceInfo(id, ctx);
+      if (!src || !src.letter) continue;
+      const ch = byLetter.get(src.letter);
+      if (!ch) continue;
+      if (target === 'skip') { moves.push({ ch, to: null }); continue; }
+      const info = Plan.targetInfo(target);
+      const dstLetter = Plan.letterOfTarget(target);
+      if (!dstLetter || dstLetter === src.letter) continue;
+      if (info.family !== src.family) {
+        notes.push(`${src.letter} → ${Plan.targetLabel(target)} はNSF(ネイティブ変換)では音程・音量の尺度が変わるため適用できません。`);
+        continue;
+      }
+      if (info.chip === 'n163' && info.index >= ctx.n163ChannelCount) {
+        notes.push(`${src.letter} → ${Plan.targetLabel(target)} はこの曲のN163有効ch数(${ctx.n163ChannelCount})の外なので適用できません。`);
+        continue;
+      }
+      moves.push({ ch, to: dstLetter, chip: info.chip });
+    }
+    // 移動元は空くので、その空きへ入る移動(A↔Bの入れ替え等)は許す。空かない文字は拒否する
+    const vacated = new Set(moves.map(mv => mv.ch.letter));
+    const applied = [];
+    for (const mv of moves) {
+      if (mv.to === null) { applied.push(mv); continue; }
+      const occupant = byLetter.get(mv.to);
+      if (occupant && !vacated.has(mv.to)) {
+        notes.push(`${mv.ch.letter} → ${mv.to} は ${mv.to} が既に使われているため適用できません。`);
+        continue;
+      }
+      applied.push(mv);
+    }
+    for (const mv of applied) {
+      if (mv.to === null) {
+        const i = scoreChannels.indexOf(mv.ch);
+        if (i >= 0) scoreChannels.splice(i, 1);
+        continue;
+      }
+      mv.ch.letter = mv.to;
+      if (mv.chip && mv.chip !== '2a03' && mv.chip !== 'dpcm' && addedChips.indexOf(mv.chip) < 0) addedChips.push(mv.chip);
+    }
+    scoreChannels.sort((a, b) => a.letter.localeCompare(b.letter));
+    return { addedChips };
+  }
+
+  // 鍵盤表示のチャンネル割当UIが「この形式で選べる借用先」を絞るために使う
+  // (NSFは同じ音源内の移動と2A03パルス↔MMC5パルスだけ)
+  MML.NSF2MML.sourceInfo = nsfSourceInfo;
 
 })(window);

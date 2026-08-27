@@ -36,6 +36,10 @@
 
   const CPU_CLOCK = 1789773;
   const UI_DEFAULT_WAVE_LEN = 16; // 波形エディタUI(MML.WaveformEditor)の固定枠に合わせた表示専用の長さ
+  // 音量レジスタ書込みを「ノートオン信号」として使えるかの判定閾値。発音中フレームの
+  // これ以上の割合で書かれているドライバは毎フレーム書いている(=信号が無情報)とみなす
+  // (このアプリのNSF書き出しドライバも@v有効chでは毎フレーム書いていた)。
+  const VOL_WRITE_SIGNAL_MAX_RATIO = 0.9;
 
   function freqToNoteNumber(freq) {
     if (freq <= 0) return null;
@@ -75,11 +79,35 @@
   //   書き込みしか記録しないため、ログ再生ではアドレスポインタがズレて周波数/波形/音量が
   //   全て誤った位置から読まれる(Rolling Thunder等のインターリーブ配置ドライバで顕著)。
   // 【フォールバック】スナップショットが無い場合のみ writeLog を再生する(近似・非インターリーブ用)。
+  // ★wrote(2026-08-26): そのフレームで書き込まれたN163内部RAMアドレスの集合。
+  // 「音量レジスタが書かれた」=ドライバのノートオン、という確度の高い信号になる
+  // (extractChannelEventsのpureNoteChange判定参照)。RAMの"状態"だけを見ていると、
+  // 同じ値での書き直し(=エンベロープの頭へ戻す打ち直し)を検出できない。
+  // $F800のアドレスラッチとオートインクリメントはフレームをまたいで保持されるため、
+  // スナップショットの有無にかかわらずwriteLogを一本のループで走査して作る。
+  function buildWroteSets(writeLog, initWrites) {
+    let addr = 0, autoInc = false;
+    for (const { addr: a, value } of (initWrites || [])) {
+      if      (a === 0xF800) { addr = value & 0x7F; autoInc = !!(value & 0x80); }
+      else if (a === 0x4800) { if (autoInc) addr = (addr + 1) & 0x7F; }
+    }
+    return writeLog.map(writes => {
+      const set = new Set();
+      for (const { addr: a, value } of writes) {
+        if      (a === 0xF800) { addr = value & 0x7F; autoInc = !!(value & 0x80); }
+        else if (a === 0x4800) { set.add(addr); if (autoInc) addr = (addr + 1) & 0x7F; }
+      }
+      return set;
+    });
+  }
+
   function buildTimeline(writeLog, initWrites, n163Snapshots) {
+    const wroteSets = buildWroteSets(writeLog, initWrites);
+    const EMPTY_WROTE = new Set();
     if (n163Snapshots && n163Snapshots.length) {
-      return n163Snapshots.map(snap => {
+      return n163Snapshots.map((snap, i) => {
         const ram = snap || new Uint8Array(128);
-        return { ram, numCh: ((ram[0x7F] >> 4) & 0x07) + 1 };
+        return { ram, numCh: ((ram[0x7F] >> 4) & 0x07) + 1, wrote: wroteSets[i] || EMPTY_WROTE };
       });
     }
     const ram = new Uint8Array(128);
@@ -89,9 +117,9 @@
       else if (a === 0x4800) { ram[addr] = value; if (autoInc) addr = (addr + 1) & 0x7F; }
     }
     for (const { addr: a, value } of (initWrites || [])) applyWrite(a, value);
-    return writeLog.map(writes => {
+    return writeLog.map((writes, i) => {
       for (const { addr: a, value } of writes) applyWrite(a, value);
-      return { ram: ram.slice(), numCh: ((ram[0x7F] >> 4) & 0x07) + 1 };
+      return { ram: ram.slice(), numCh: ((ram[0x7F] >> 4) & 0x07) + 1, wrote: wroteSets[i] || EMPTY_WROTE };
     });
   }
 
@@ -106,6 +134,21 @@
   // src/convert/retrigger.js に音源非依存の判定として切り出し、パス2でランごとに適用する
   // (詳細な判定方針はそちらのコメント参照)。
   function extractChannelEvents(timeline, base) {
+    // ★ノートオン信号(2026-08-26): 「そのフレームで音量レジスタ(+7)が書かれたか」。
+    // N163にはキーオンが無く、ドライバは音符の頭で周波数と一緒に音量を書き直す。値が
+    // 前と同じでもこの書込み自体がノートオンなので、RAMの状態比較では原理的に検出できない
+    // (女神転生II 33曲目: f81/f97/f113のいずれも音量7を書き直して打ち直していた。
+    //  状態は7→7で不変に見えるためレガートと誤判定し、タイで繋いで@vの減衰が消えていた)。
+    // ただし毎フレーム音量を書くドライバでは常時trueになり無情報なので、その場合は使わず
+    // 従来の音量跳ね上がり(RETRIGGER_JUMP_THRESHOLD)へフォールバックする。
+    let activeFrames = 0, volWriteFrames = 0;
+    for (let f = 0; f < timeline.length; f++) {
+      if ((timeline[f].ram[base + 7] & 0x0F) === 0) continue;
+      activeFrames++;
+      if (timeline[f].wrote && timeline[f].wrote.has(base + 7)) volWriteFrames++;
+    }
+    const useVolWriteSignal = activeFrames > 0 &&
+      volWriteFrames < activeFrames * VOL_WRITE_SIGNAL_MAX_RATIO;
     const runs = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) runs.push(cur); cur = null; } }
@@ -135,9 +178,19 @@
         continue;
       }
       if (note !== cur.note || waveKey !== cur.waveKey) {
-        // 打ち直し(パス2)判定前なので、ここでの「純粋な音程変化」は波形切替を伴わない
-        // ことのみで判定する(hes2mml/expansion/wave.jsと同じ考え方)
-        const pureNoteChange = note !== cur.note && waveKey === cur.waveKey;
+        // 「純粋な音程変化」(=タイで繋いでよいレガート)の判定。波形切替を伴わないことに加え、
+        // ★この境界で音量が跳ね上がっていない(=打ち直しでない)ことも要る(2026-08-26修正)。
+        // N163はアタックレジスタを持たないため打ち直しの手がかりは音量の跳ね上がりだけだが、
+        // それを見るsplitRetriggersは同一音程ラン内(パス2)しか走らず、音程が変わる境界は
+        // 素通りしていた。結果、実際は音量11へ再アタックしている音程変化までタイ候補になり、
+        // タイ側は@v等を再指定しない仕様のため音量エンベロープが減衰し続けていた
+        // (実測: 女神転生II 12曲目のQ/Rパート、境界で9→11=+2の跳ね上がり)。
+        // 休符→音符(prevVol=0からの立ち上がり)もこの判定で自然にタイ候補から外れる。
+        const prevVol = cur.volSeq[cur.volSeq.length - 1];
+        const reattack = useVolWriteSignal
+          ? !!(timeline[f].wrote && timeline[f].wrote.has(base + 7))
+          : (prevVol != null && (volume - prevVol) >= MML.Convert.RETRIGGER_JUMP_THRESHOLD);
+        const pureNoteChange = !reattack && note !== cur.note && waveKey === cur.waveKey;
         flush(f);
         cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume], pitchSeq: [freqReg], tieCandidate: pureNoteChange };
       } else {
@@ -219,7 +272,7 @@
     function toVolumeFields(ev, base) {
       if (!envReg) return { volume: ev.volSeq[0] };
       const idx = envReg.registerShape(resolveVolumeShape(ev, base), false);
-      return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(ev.volSeq) } : { envelopeV: idx };
     }
     // freqRegは18bitの生レジスタ(numCh依存)なので、セント換算では浅いビブラートでも
     // 生レジスタ差分は大きくなりうる。符号付きbyte範囲(-127~126)を超える場合は
@@ -229,7 +282,15 @@
     function toPitchFields(ev) {
       if (!pitchReg || ev.rawFreq == null) return {};
       const fields = {};
-      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq, true));
+      // SA<num>自動選択(pitch.js n163SaForBase参照): ネイティブN163もpitchSeqは18bit
+      // レジスタ生値のため、byte幅を超える変調はSA付きで登録する。モードは
+      // pitchReg生成時のcmd(変換設定)から引く。D<n>への同時シフトはdetectChorusDetuneが
+      // 後段でev.pitchSaを見て行う(src/convert/detune.js参照)
+      const saMode = pitchReg.cmd && pitchReg.cmd.PITCH_SA;
+      const saOpts = saMode && saMode !== 'off'
+        ? { mode: saMode, baseSa: saMode === 'octave' ? MML.Convert.n163SaForBase(ev.pitchSeq[0]) : 0 }
+        : undefined;
+      MML.Convert.applyPitchAssignment(fields, pitchReg.assign(ev.pitchSeq, true, saOpts));
       return fields;
     }
     // 高速アルペジオ→EN統合(2026-08-14拡張)

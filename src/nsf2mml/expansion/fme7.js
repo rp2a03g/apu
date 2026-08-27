@@ -169,10 +169,12 @@
       // 実際のAY/YM2149と同じ形状(のこぎり/三角/ホールド等16種類)をS<n>/M<n>にそのまま
       // 反映する。減衰値そのものをソフトウェア的にシミュレートする必要が無い
       // (2A03/MMC5と違いこちらはチップ内蔵の形状をコンパイラがそのまま再生できるため)。
-      if (ev.envUsed) return { fme7EnvShape: ev.envShape, fme7EnvPeriod: ev.envPeriod };
+      // volume:15 は変換設定ENV=OFF(S/M不使用)時の代替(mmlEmit.jsはhasFme7Env側を優先するため
+      // 通常時の出力には影響しない)
+      if (ev.envUsed) return { fme7EnvShape: ev.envShape, fme7EnvPeriod: ev.envPeriod, volume: 15 };
       if (!envReg) return { volume: ev.volSeq[0] };
       const idx = envReg.registerShape(resolveVolumeShape(ev, chIndex), false);
-      return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(ev.volSeq) } : { envelopeV: idx };
     }
     // @2(ノイズ単独)はrawFreqがnullなのでここで自動的に対象外になる。
     // FME7トーンは周期レジスタ(値が下がるほど音程が上がる)なのでdirectionUp=false

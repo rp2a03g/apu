@@ -105,7 +105,12 @@
 
       const cpu = this.cpu, bus = this.bus, apu = this.apu;
 
+      // キャプチャ(captureHesSongAsync)がDDA書込みのフレーム内時刻を分数フレームとして
+      // 記録できるように、現在のサンプル位置を公開する(代入1回/サンプルなのでコストは無視できる)。
+      this.frameSampleCount = samplesThisFrame;
+
       for (let i = 0; i < samplesThisFrame; i++) {
+        this.frameSamplePos = i;
         // PSG: 常に実時間のクロックで進める(音程を変えないため)。
         // ★2026-08: 以前はマスタークロック1tickごとにapu.clock()を呼んでおり
         // (1サンプルあたり約162tick=マスタークロック7.16MHz÷44.1kHz)、リアルタイム
@@ -237,27 +242,104 @@
     // (詳細はplayHesStream()冒頭コメント参照)。フックはループの外で1回だけ設定し、
     // 現在フレーム番号はクロージャではなく可変変数currentFrameで渡す(毎フレーム新しい
     // クロージャを作らないための最適化。上のコメントのGC劣化対策の一環)。
-    const dpcmTrace = [[], [], [], [], [], []]; // ch毎: [{frame, value}]
+    // ★2026-08: 各エントリにフレーム番号(frame)に加えて以下を持たせる:
+    //   t   … 分数フレーム時刻(frame + フレーム内サンプル位置/フレーム内サンプル数)。
+    //         クリップの実再生レートをフレーム量子化誤差なしで推定するため。
+    //   seq … controlTrace/dpcmTraceで共通の単調増加連番。同じドラムの「off→次のon」が
+    //         ほぼ常に同一フレーム内で起きるため(NX91002.hes実測で打点の254/255)、frameだけでは
+    //         書込み順を復元できず、前クリップの尾(平均約80サンプル≒12ms)が次クリップの頭に
+    //         混入して「同じドラムなのに毎回別波形」になり重複排除が全滅していた。連番により
+    //         区切りを書込み1件単位で正確に復元する(hes2mml/expansion/dpcm.js冒頭コメント参照)。
+    //   src … (dpcmTraceのみ)そのサンプル値の読出し元ROM物理オフセット。読出し元が
+    //         ROM以外(RAM経由・加工あり)のときは-1。cpuHuC6280.js fetchOperandが記録する
+    //         lastDataAddr(直近のデータ読出し論理アドレス)を物理へ換算し、さらに
+    //         「ROMバイト==書込み値」の一致検証を通ったものだけ採用する。
+    //         同一ドラム=同一ROM開始アドレスなので重複排除が確定的になる。
+    const dpcmTrace = [[], [], [], [], [], []]; // ch毎: [{frame, t, seq, value, src}]
     // $0804(chの on/DDA 制御レジスタ)書込みをch別・書込み順に記録する(hes2mml/expansion/
     // dpcm.js向け)。DDA(PCM)で打楽器を鳴らす曲は1音ごとに on/dda を素早くon/offし直すことが
     // 多く、その切替がフレーム(1/60秒)より短い間隔で起きうる。snapshots(フレーム単位の
     // 状態サンプリング)だけでは切替を取りこぼし、複数の打点が「1本の連続音」として
     // 誤って結合されてしまう(ユーザー実測: NX91002.hesで全打楽器が1音に繋がる不具合)。
     // dpcmTraceと同じ理由でここも書込みイベントをそのまま記録する。
-    const controlTrace = [[], [], [], [], [], []]; // ch毎: [{frame, on, dda}]
+    const controlTrace = [[], [], [], [], [], []]; // ch毎: [{frame, t, seq, on, dda, vol}]
+    // $0802/$0803(12bit周期)書込み列。音量(controlTraceのvol)と同じ理由で、ピッチ列
+    // (ビブラート/EPテーブル・音程判定)の位相エイリアシング対策のノート相対時刻リサンプル
+    // (hes2mml/expansion/wave.js)に使う。freqは書込み適用後の12bit値
+    // (apuHuC6280.js writeDataの$0802/$0803と同じ合成式をシャドウで再現。onWriteは
+    // APU側への適用より先に呼ばれるためAPUの値は読めない)。
+    const pitchTrace = [[], [], [], [], [], []]; // ch毎: [{t, freq}]
+    const freqShadow = new Uint16Array(6);
+    for (let i = 0; i < 6; i++) freqShadow[i] = player.apu.ch[i] ? player.apu.ch[i].freq : 0;
     let currentFrame = 0;
+    let traceSeq = 0; // controlTrace/dpcmTrace共通の書込み順連番(上のコメント参照)
     player.bus.onWrite = (addr, value) => {
       const sel = player.apu.selected;
       // $0800は3bit(0-7)なのでch6/7が選ばれうるが、実機にそのchは無い。
       // apuHuC6280側も「selected >= CH_COUNT なら書込み無視」としているので、
       // トレースも同じ規則で捨てる。ここを守らないと6ch分しかないtrace配列が
       // 範囲外アクセスになり変換ごと落ちる(HC63015.hes等6曲で実際に発生)。
+      // $0801(全体バランス)は全chの実効音量に効く(bal/gbalのコメント参照)ため、
+      // チャンネル選択($0800)とは無関係に全chのタイムラインへ変化点を積む
+      if (addr === 0x0801) {
+        const t = currentFrame + (player.frameSamplePos || 0) / (player.frameSampleCount || 1);
+        for (let ch = 0; ch < controlTrace.length; ch++) {
+          const c = player.apu.ch[ch];
+          if (!c) continue;
+          controlTrace[ch].push({ frame: currentFrame, t, seq: traceSeq++, on: c.on, dda: c.dda, vol: c.volume, bal: c.balance, gbal: value });
+        }
+        return;
+      }
       if (sel >= controlTrace.length) return;
       if (addr === 0x0804) {
-        controlTrace[sel].push({ frame: currentFrame, on: (value & 0x80) !== 0, dda: (value & 0x40) !== 0 });
+        const t = currentFrame + (player.frameSamplePos || 0) / (player.frameSampleCount || 1);
+        // vol(下位5bit): HESのソフトウェア音量エンベロープはゲーム内蔵タイマー駆動で、
+        // 周期がキャプチャフレームレートと一致しない(実測: NX91002は約54.9Hz)。フレーム境界の
+        // スナップショットで音量をサンプリングすると位相エイリアシングで「同じエンベロープの
+        // 1フレーム違い列」が量産されるため、hes2mml/expansion/wave.jsが書込みイベント列から
+        // ノート相対時刻でリサンプルできるよう生値も残す(同expansion冒頭コメント参照)。
+        // bal/gbal($0805のch別バランス・$0801の全体バランス): これらは「パン」ではなく
+        // 音量レジスタと同じインデックスへ合流する減衰器で、実質的に第2の音量レジスタ
+        // (実測でbalanceだけで減衰エンベロープを作る曲がある。hes2mml/expansion/wave.js
+        // effectiveVolIndex冒頭コメント参照)。抽出側が実効音量を復元できるよう
+        // 書込み時点のシャドウ値を添える(onWriteはAPUへの適用前に呼ばれるが、
+        // 別レジスタである$0805/$0801の値は既に反映済みなのでそのまま読んでよい)。
+        const c = player.apu.ch[sel];
+        controlTrace[sel].push({ frame: currentFrame, t, seq: traceSeq++, on: (value & 0x80) !== 0, dda: (value & 0x40) !== 0, vol: value & 0x1F, bal: c ? c.balance : 0xFF, gbal: player.apu.balance });
+      } else if (addr === 0x0805) {
+        // ch別バランス変更も実効音量の変化点(上記コメント参照)。on/ddaは現在の
+        // シャドウをそのまま載せるのでbuildChannelRuns(状態遷移のみ見る)には影響しない
+        const c = player.apu.ch[sel];
+        if (c) {
+          const t = currentFrame + (player.frameSamplePos || 0) / (player.frameSampleCount || 1);
+          controlTrace[sel].push({ frame: currentFrame, t, seq: traceSeq++, on: c.on, dda: c.dda, vol: c.volume, bal: value, gbal: player.apu.balance });
+        }
+      } else if (addr === 0x0802 || addr === 0x0803) {
+        freqShadow[sel] = addr === 0x0802
+          ? (freqShadow[sel] & 0xF00) | value
+          : (freqShadow[sel] & 0x0FF) | ((value & 0x0F) << 8);
+        const t = currentFrame + (player.frameSamplePos || 0) / (player.frameSampleCount || 1);
+        pitchTrace[sel].push({ t, freq: freqShadow[sel] });
       } else if (addr === 0x0806) {
         const ch = player.apu.ch[sel];
-        if (ch && ch.dda && ch.on) dpcmTrace[sel].push({ frame: currentFrame, value: value & 0x1F });
+        if (ch && ch.dda && ch.on) {
+          const t = currentFrame + (player.frameSamplePos || 0) / (player.frameSampleCount || 1);
+          // 読出し元ROM物理オフセット(dpcmTrace冒頭コメント参照)。lastDataAddrは
+          // 論理アドレスなのでMPRで物理バンクへ換算し、実際にそのROMバイトが
+          // 書込み値と一致する(下位5bit、無加工ストリーミング)場合だけ採用する。
+          // 音量テーブル加工やRAMバッファ経由のROMではここが-1になり、抽出側は
+          // バイト列一致の重複排除へフォールバックする。
+          let src = -1;
+          const la = player.cpu.lastDataAddr;
+          if (la >= 0) {
+            const bank = player.bus.mpr[(la & 0xFFFF) >>> 13];
+            if (bank < 0x80) {
+              const off = bank * 0x2000 + (la & 0x1FFF) - player.bus.romBase;
+              if (off >= 0 && off < player.bus.rom.length && (player.bus.rom[off] & 0x1F) === (value & 0x1F)) src = off;
+            }
+          }
+          dpcmTrace[sel].push({ frame: currentFrame, t, seq: traceSeq++, value: value & 0x1F, src });
+        }
       }
     };
 
@@ -299,16 +381,16 @@
       }
       snapshots.push(snapshotApu(player.apu));
       if (f === 0 || f === totalFrames - 1 || performance.now() - sliceStart >= sliceBudgetMs) {
-        if (onProgress) onProgress(f, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace });
+        if (onProgress) onProgress(f, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace, pitchTrace });
         await yieldFn();
         if (opt.shouldCancel && opt.shouldCancel()) {
-          return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, player, frameRate: player.frameRate };
+          return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, pitchTrace, player, frameRate: player.frameRate };
         }
         sliceStart = performance.now();
       }
     }
-    if (onProgress) onProgress(totalFrames, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace });
-    return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, player, frameRate: player.frameRate };
+    if (onProgress) onProgress(totalFrames, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace, pitchTrace });
+    return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, pitchTrace, player, frameRate: player.frameRate };
   };
 
   Emu.HesPlayer = HesPlayer;

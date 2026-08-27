@@ -124,7 +124,10 @@
     return { values, loop: null };
   };
 
-  MML.Convert.EnvelopeRegistry = function () {
+  // cmd: src/convert/options.js の変換設定(省略可)。cmd.ENV===false なら登録を一切行わず
+  // 常に null を返す(呼び出し側は MML.Convert.plainVolume で v<n> へフォールバックする)。
+  MML.Convert.EnvelopeRegistry = function (cmd) {
+    this.cmd = MML.Convert.normalizeCmd(cmd);
     this.tables = new Map();     // index(@v<N>の番号) -> { values, loop }
     this.swKeyToIndex = new Map();
     this.hwKeyToIndex = new Map();
@@ -149,7 +152,7 @@
   // 既に確定した shape({values,loop})を登録し番号を返す(重複排除)。
   // hardware=true ならHARDWARE_INDEX_BASE以降、falseなら0番から採番する。
   MML.Convert.EnvelopeRegistry.prototype.registerShape = function (shape, hardware) {
-    if (!shape) return null;
+    if (!shape || !this.cmd.ENV) return null;
     if (hardware) {
       const key = shapeKey(shape);
       let idx = this.hwKeyToIndex.get(key);
@@ -215,6 +218,7 @@
   // seq(生音量値の配列)を解析して登録し、テーブル番号を返す。フラットなら null(呼び出し側で
   // volume を使うべき合図)。同一形状は曲全体を通して番号を再利用する(ソフトウェア=0番台)。
   MML.Convert.EnvelopeRegistry.prototype.assign = function (seq) {
+    if (!this.cmd.ENV) return null;
     return this.registerShape(MML.Convert.analyzeVolumeShape(seq), false);
   };
 

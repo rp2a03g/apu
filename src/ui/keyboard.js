@@ -46,9 +46,14 @@
   // 鍵盤canvasの「鍵の長さ」方向のpx数(縦向きロール=鍵盤の高さ、横向きロール=鍵盤の幅)。
   // style.cssの .kbd-piano-wrap { height } / .kbd-roll-wrap--horizontal .kbd-piano-wrap { width } と一致させること。
   const PIANO_KEY_LEN = 68;
-  // SPCボイス一覧(mute/ch/L/R/vol/env/wave/PM/note/freq/echo)の全列が収まる一覧幅。
+  // SPCボイス一覧(part/mute/ch/L/R/vol/env/wave/PM/note/freq/echo)の全列が収まる一覧幅。
   // style.cssの .kbd-left.kbd-left--spc { width } と一致させること
-  const SPC_LIST_MIN_WIDTH = 500;
+  const SPC_LIST_MIN_WIDTH = 512;
+  // チャンネル割当の「借用先/音色」列(.kbd-h-assign/.kbd-assign の200px + gap)。
+  // style.css の .kbd-left--assign の各幅(=各フォーマットの固定幅+この値)と一致させること
+  const ASSIGN_COL_WIDTH = 206;
+  // 一覧の固定幅(style.css の .kbd-left / --hes / --gbs / --spc と一致させること)
+  const LIST_WIDTH_NSF = 320, LIST_WIDTH_PAN = 370;
 
   // ── 鍵盤表示レイアウト設定 ────────────────────────────────────
   // rollOrientation: 'vertical'  = Synthesia式(音程=横軸、音符が上から鍵盤へ降る。鍵盤は下)
@@ -210,7 +215,7 @@
         const obj = JSON.parse(raw);
         for (const id in obj) {
           const v = parseFloat(obj[id]);
-          if (Number.isFinite(v)) map.set(id, Math.max(0, Math.min(1, v)));
+          if (Number.isFinite(v)) map.set(id, Math.max(0, Math.min(2, v)));
         }
       }
     } catch (e) { /* ignore */ }
@@ -230,7 +235,7 @@
     try {
       const raw = JSON.parse(localStorage.getItem(SPC_VOLUME_STORAGE_KEY) || 'null');
       if (Array.isArray(raw) && raw.length === 8) {
-        return raw.map((v) => { const n = parseFloat(v); return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 1; });
+        return raw.map((v) => { const n = parseFloat(v); return Number.isFinite(n) ? Math.max(0, Math.min(2, n)) : 1; });
       }
     } catch (e) { /* ignore */ }
     return new Array(8).fill(1);
@@ -399,6 +404,47 @@
       if (priority && priority.includes(exp)) set.add(exp);
     }
     return Array.from(set);
+  }
+
+  // チャンネル割当(変換元ch → NSF側の借用先パート)の共通モジュール。読み込み順の都合で
+  // 未定義でも鍵盤表示は動く(その場合はpart列が従来どおりの固定表示になるだけ)。
+  function channelPlan() { return (MML.Convert && MML.Convert.ChannelPlan) || null; }
+
+  // part列(丸の隣のパート文字)。クリックで1行ぶんの割当ポップオーバーを開けるチップにする。
+  // 割当を変更できないフォーマット(NSF等)では従来どおりただの文字表示のまま。
+  function partChipHtml(ch) {
+    const plan = channelPlan();
+    const editable = !!plan && plan.editable() && !ch.isAllRow && ch.target !== undefined;
+    const cls = 'kbd-part' + (editable ? ' kbd-part--editable' : '');
+    return `<span class="${cls}" data-ch="${ch.id || ''}">${ch.letter || (editable ? '—' : '')}</span>`;
+  }
+
+  // 見出しの part 列に置くチャンネル割当トグル(案E)。ONで一覧に「借用先/音色」列が生える。
+  // 「part」という文字の代わりにアイコンだけを置く(列の意味そのものがボタンになっている)。
+  function headerAssignBtnHtml() {
+    return `<button type="button" class="kbd-h-part kbd-assign-btn"` +
+      ` aria-label="${T('チャンネル割当(変換元ch → NSF側のパート)を表示')}">` +
+      '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M3 6h5M3 14h5"/><path d="M12 6h5M12 14h5"/><path d="M8 6c2.5 0 1.5 8 4 8"/><path d="M8 14c2.5 0 1.5-8 4-8"/></svg></button>';
+  }
+  // 見出しの mute 列に置く一括ミュートボタン。全chミュートでなければ全ミュート、
+  // 全ミュート済みなら全解除(トグル)。
+  function headerMuteAllBtnHtml() {
+    return `<button type="button" class="kbd-h-mute-solo kbd-muteall-btn" aria-label="${T('全チャンネルをミュート')}">\u{1F507}</button>`;
+  }
+  // 見出しの vol 列に置く一括音量リセットボタン。押すと全chの音量スライダーを100%へ戻す
+  // (行ごとのダブルクリックでの100%復帰と同じ動作を全chまとめて行う)。
+  function headerVolResetBtnHtml() {
+    return `<button type="button" class="kbd-h-vol kbd-volreset-btn" title="${T('全チャンネルの音量を100%に戻す')}">vol</button>`;
+  }
+
+  // 割当表示ONのときだけ現れる「借用先 / 音色」のセレクト2つ(案Eの列展開)
+  function assignCellHtml(ch) {
+    if (ch.isAllRow) return `<span class="kbd-assign"></span>`;
+    return `<span class="kbd-assign">` +
+      `<select class="kbd-assign-target"></select>` +
+      `<select class="kbd-assign-tone"></select>` +
+      `</span>`;
   }
 
   // ch.id → MMLパート文字。letterMapはassignExpansionLettersの戻り値
@@ -678,9 +724,12 @@
       const disabled = !!(hi & 0x80);
       // $4080: bit7=1で直接ゲイン, bit7=0でエンベロープ(減衰)。実ゲイン(volGain 0-32)を優先し、
       // 無ければレジスタ直読み(直接ゲイン時のみ正しい)にフォールバック。
+      // 実効ゲインは32で頭打ち(v33-63を書いても32相当、src/emulator/expansion/fds.js mixSample)
+      // なのでバーは32=100%固定。以前はレジスタ直読みフォールバック時だけ/63にしていたため
+      // 同じ音量でもライブ時と半分の長さに見えていた(2026-08-24)
       const fe = apuEnv ? apuEnv.fds : null;
       const gain = fe ? fe.gain : ((snap[0x4080] || 0) & 0x3F);
-      const gainMax = fe ? 32 : 63;
+      const gainMax = 32;
       const vol = Math.min(1, gain / gainMax);
       const freq = (!disabled && f12 > 0) ? f12 * CPU_CLOCK / (64 * 65536) : 0;
       // 波形メモリ $4040-$407F (6bit, 0-63) を -1..1 に正規化
@@ -729,8 +778,9 @@
         const rv = ctrl & 0x3F;
         const vol = Math.min(1, rv / 42);
         const freq = (en && period > 0) ? CPU_CLOCK / (14 * (period + 1)) : 0;
+        // 波形表示にも蓄積レートを渡す(43以上は実機の8bit桁溢れで鋸波が崩れる。waveSampleValue参照)
         channels.push({ id: 'V6SW', color: '#00ffcc', freq, vol, rawVol: rv, rawVolMax: 42,
-          wave: { t: 'saw', nx: 7, ny: 32 },
+          wave: { t: 'saw', nx: 7, ny: 32, rate: rv },
           active: en && rv > 0 && freq > 0 });
       }
     }
@@ -1179,7 +1229,20 @@
     }
 
     const letterMap = (MML.Mml && MML.Mml.assignExpansionLetters) ? MML.Mml.assignExpansionLetters(chipsToExpansions(chips)) : {};
-    for (const c of channels) c.letter = getPartLetter(c.id, letterMap, n163NumRows);
+    // part列は元々「この元chはNSF側のどのパートになるか」の表示(=既に割当表だった)。
+    // 既定はgetPartLetter()のハードコード規則(従来の変換結果と同一)のままで、チャンネル割当
+    // (src/convert/channelPlan.js)でユーザーが変えた行だけ、その借用先のレターへ差し替える。
+    const plan = channelPlan();
+    for (const c of channels) {
+      const hardLetter = getPartLetter(c.id, letterMap, n163NumRows);
+      if (!plan || c.isAllRow) { c.letter = hardLetter; continue; }
+      c.defaultTarget = plan.defaultTarget(c.id, plan.targetOfLetter(hardLetter));
+      const ent = plan.get(c.id);
+      c.target = (ent && ent.target) || c.defaultTarget;
+      // 既定のままなら従来どおりgetPartLetter()の文字をそのまま使う(表示を変えない)
+      c.letter = (ent && ent.target) ? plan.letterOfTarget(ent.target)
+        : (hardLetter || plan.letterOfTarget(c.defaultTarget));
+    }
 
     return channels;
   }
@@ -1347,9 +1410,14 @@
         return (v / 15) * 2 - 1;
       }
       case 'saw': {
-        // VRC6のこぎり波: アキュムレータを7回加算してリセットする階段状
+        // VRC6のこぎり波: 8bitアキュムレータへ蓄積レートを6回加算→リセットの7段階段状。
+        // 出力は上位5bit(0-31)。実機通り&0xFFで折り返すので、レート43以上は桁溢れで
+        // 波形が崩れる(src/emulator/expansion/vrc6.js Vrc6Saw.clock()と同じ計算)。
+        // rate未指定(ロール等の静的アイコン)は理想形(=レート42相当)
         const step = Math.floor(phase * 7) % 7;
-        return (step / 6) * 2 - 1;
+        const rate = wave.rate == null ? 42 : wave.rate;
+        const out = ((step * rate) & 0xFF) >> 3;
+        return (out / 31) * 2 - 1;
       }
       case 'fm':    return Math.sin(phase * Math.PI * 2);
       case 'wave': {
@@ -1397,6 +1465,7 @@
     if (!wave) return 'x';
     let s = wave.t + (on ? '1' : '0');
     if (wave.t === 'pulse') s += wave.hi.toFixed(3);
+    else if (wave.t === 'saw') s += wave.rate == null ? '' : wave.rate;
     else if (wave.t === 'noise') s += wave.short ? 'S' : 'L';
     else if (wave.t === 'wave') {
       if (wave.layers) {
@@ -2004,6 +2073,14 @@
       this._sourceInfo = null;          // 表示中の再生ソース {kind, name}(setSourceInfo)。タイトル行のバッジに出す
       this._srcBadgeEl = null;
       this._titleEl = null;
+      this._transportEl = null;         // タイトル行の再生コントロール(⏮ ▶/⏸ ■ ⏭)。バッジの右に置く
+      this._transportBtns = null;       // { prev, play, stop, next }
+      // 再生コントロールの状態(main.js が setTransportState() で更新する)。canPrevNext は
+      // 「m3u/アーカイブを開いていればその曲送り、実ファイル単体なら曲番号送り」が可能か
+      // どうかで、MML再生を表示中は常に false(=グレーアウト)。
+      this._transportState = { playing: false, canPlay: false, canStop: false, canPrevNext: false, canToggleSource: false };
+      this.onTransport = null;          // (action:'play'|'stop'|'prev'|'next') => void
+      this.onSourceToggle = null;       // () => void  バッジ(ファイル名)クリックでMML↔サウンドファイル切替
       this._rollLastDrawnPos = 0;       // _renderRoll()が最後に描いた曲内秒(ドラッグ開始位置の基準)
       this._pendingSelectionReset = false; // reset()が立てるフラグ。次に実データでチャンネル一覧が
                                             // 判明した時(setSource()/updateSpcVoices())、大波形の選択
@@ -2013,9 +2090,14 @@
       this.onVolumeChange = null;       // () => void  ch別音量バー操作時(getVolumeConfig()参照)
       this.onAdpcmCalibrate = null;     // (ch) => void  YM2610 ADPCM行のnote列クリック(手動ピッチ補正。ch.adpcmSample={kind,start,end})
       this.onSpcVolumeChange = null;    // (volArray:number[8]) => void
-      this._channelVolumes = loadChannelVolumes();   // channelId → 0〜1(localStorage永続化)
-      this._spcVoiceVolumes = loadSpcVoiceVolumes(); // [V0..V7] → 0〜1(localStorage永続化)
+      this._channelVolumes = loadChannelVolumes();   // channelId → 0〜2(1=100%、localStorage永続化)
+      this._spcVoiceVolumes = loadSpcVoiceVolumes(); // [V0..V7] → 0〜2(1=100%、localStorage永続化)
       this._colorOverrides = loadColorOverrides(); // channelId → ユーザー指定色(localStorage永続化)
+      // チャンネル割当(案E): 一覧に「借用先」列を出すか(トグル状態はlocalStorage永続化)。
+      // 幅が足りないレイアウトでは列を隠し、part列チップ→ポップオーバー経由で編集する。
+      try { this._assignMode = localStorage.getItem('mml_kbdAssignMode') === '1'; } catch (e) { this._assignMode = false; }
+      this._assignPop = null;
+      this._assignPopClose = null;
       this._layout = loadLayoutSettings();         // ロールの向き/置き場/一覧の多段(localStorage永続化)
       // 下配置でのロール高さ / 右配置での一覧幅(どちらもスプリッターで変更、localStorage永続化)
       this._rollHeight = ROLL_CANVAS_HEIGHT;
@@ -2119,15 +2201,22 @@
       layoutBtn.innerHTML = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="14" rx="1"/><path d="M3 12h14M9 3v9"/></svg>';
       layoutBtn.addEventListener('click', (e) => { e.stopPropagation(); this._openLayoutPopover(layoutBtn); });
 
+      // 再生コントロール(⏮ ▶/⏸ ■ ⏭)。バッジ(=今どちらを表示中かのファイル名)の右に置き、
+      // 「今鳴っている方(MML側 / サウンドファイル側)」をそのまま操作する。⏮⏭ は
+      // アーカイブ(m3u)を開いていればその曲送り、実ファイル単体なら曲番号送りで、
+      // MML再生を表示中は操作対象が無いのでグレーアウトする(setTransportState)。
+      const transportBar = this._buildTransportBar();
+
       const winEl = this.container.closest('.float-window');
       const headerEl = winEl && winEl.querySelector('.float-window-header');
       if (headerEl) {
-        for (const sel of ['.kbd-mastervol', '.kbd-speed', '.kbd-layout-btn', '.kbd-src-badge']) {
+        for (const sel of ['.kbd-mastervol', '.kbd-speed', '.kbd-layout-btn', '.kbd-src-badge', '.kbd-transport']) {
           const old = headerEl.querySelector(sel);
           if (old) old.remove();
         }
         const closeBtn = headerEl.querySelector('.float-window-close');
         headerEl.insertBefore(layoutBtn, closeBtn || null);
+
         headerEl.insertBefore(speedBar, layoutBtn);
         headerEl.insertBefore(masterVolBar, speedBar);
         // タイトル: 「鍵盤表示」+ 何を表示しているかのバッジ(MML / NSF · ファイル名 等。
@@ -2139,24 +2228,35 @@
         }
         this._srcBadgeEl = document.createElement('span');
         this._srcBadgeEl.className = 'kbd-src-badge';
+        this._srcBadgeEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (!this._transportState.canToggleSource) return;
+          if (this.onSourceToggle) this.onSourceToggle();
+        });
         if (this._titleEl) this._titleEl.insertAdjacentElement('afterend', this._srcBadgeEl);
         else headerEl.insertBefore(this._srcBadgeEl, masterVolBar);
+        this._srcBadgeEl.insertAdjacentElement('afterend', transportBar);
         this._renderSourceBadge();
+        this._renderTransport();
       } else {
-        left.appendChild(masterVolBar); // フォールバック(タイトル行が見つからない場合)
+        left.appendChild(transportBar); // フォールバック(タイトル行が見つからない場合)
+        left.appendChild(masterVolBar);
         left.appendChild(speedBar);
+
         left.appendChild(layoutBtn);
+        this._renderTransport();
       }
 
       const header = document.createElement('div');
       header.className = 'kbd-header';
       header.innerHTML =
-        `<span class="kbd-h-part">part</span>` +
-        `<span class="kbd-h-mute-solo" title="mute">\u{1F507}</span>` +
+        headerAssignBtnHtml() +
+        headerMuteAllBtnHtml() +
         `<span class="kbd-h-name">ch</span>` +
+        `<span class="kbd-h-assign">${T('借用先')}</span>` +
         `<span class="kbds-h-lr kbds-h-l">L</span>` +
         `<span class="kbds-h-lr">R</span>` +
-        `<span class="kbd-h-vol">vol</span>` +
+        headerVolResetBtnHtml() +
         `<span class="kbd-h-wave">wave</span>` +
         `<span class="kbd-h-note">note</span>` +
         `<span class="kbd-h-freq">freq</span>`;
@@ -2183,11 +2283,13 @@
       this._spcHeaderEl.className = 'kbd-header kbds-header';
       this._spcHeaderEl.style.display = 'none';
       this._spcHeaderEl.innerHTML =
-        `<span class="kbd-h-mute">mute</span>` +
+        headerAssignBtnHtml() +
+        headerMuteAllBtnHtml() +
         `<span class="kbd-h-name">ch</span>` +
+        `<span class="kbd-h-assign">${T('借用先')}</span>` +
         `<span class="kbds-h-lr kbds-h-l">L</span>` +
         `<span class="kbds-h-lr">R</span>` +
-        `<span class="kbd-h-vol">vol</span>` +
+        headerVolResetBtnHtml() +
         `<span class="kbds-h-env">env</span>` +
         `<span class="kbd-h-wave">wave</span>` +
         `<span class="kbds-h-pm">PM</span>` +
@@ -2200,6 +2302,20 @@
       this._spcSectionEl.className = 'kbd-rows';
       this._spcSectionEl.style.display = 'none';
       left.appendChild(this._spcSectionEl);
+
+      // 見出しのボタン(part列=チャンネル割当トグル / mute列=一括ミュート)を配線する。
+      // メイン一覧とSPC一覧で見出しが2つあるので、両方まとめて拾って同じ動作にする。
+      this._assignBtns = Array.prototype.slice.call(left.querySelectorAll('.kbd-assign-btn'));
+      for (const b of this._assignBtns) {
+        b.addEventListener('click', (e) => { e.stopPropagation(); this._setAssignMode(!this._assignMode); });
+      }
+      this._muteAllBtns = Array.prototype.slice.call(left.querySelectorAll('.kbd-muteall-btn'));
+      for (const b of this._muteAllBtns) {
+        b.addEventListener('click', (e) => { e.stopPropagation(); this._toggleAllMute(); });
+      }
+      for (const b of left.querySelectorAll('.kbd-volreset-btn')) {
+        b.addEventListener('click', (e) => { e.stopPropagation(); this._resetAllVolumes(); });
+      }
 
       // 選択チャンネルの素波形を拡大表示（表示サイズ固定・要素数はX/Y数値で表現）。
       // 置き場は一覧の右(従来)または一覧の下の折りたたみ帯(_mountBigWave()参照)
@@ -2337,7 +2453,17 @@
       this._buildRollPane();
       this._mountRollPane();
       this._mountBigWave();
+      this._leftEl.classList.toggle('kbd-left--assign', !!this._assignMode);
       this._applyLayoutClasses();
+      // チャンネル割当が変わったら(この鍵盤表示のセレクト経由でも、他のUI経由でも)
+      // part列の文字・スキップ減光・重複警告を貼り直す
+      // ★_build()は言語切替のたびに走るので、購読は初回だけ(毎回足すとリスナーが増え続ける)
+      const plan = channelPlan();
+      if (plan && !this._planHooked) {
+        this._planHooked = true;
+        plan.onChange(() => this._refreshAssignUi());
+      }
+      this._renderAssignToggle();
     }
 
     // ドラッグ可能な仕切り。orientation='vertical'は縦線(左右のペインを分ける、横ドラッグ)、
@@ -2575,7 +2701,71 @@
       // 表示は「MML · タイトル」/「NSF · ファイル名」。長い名前は省略記号にしてtitleに全文
       const name = info.name || '';
       el.textContent = name ? `${kindLabel} · ${name}` : kindLabel;
-      el.title = (isMml ? T('MML再生を表示中') : T('サウンドファイル再生を表示中')) + (name ? `: ${name}` : '');
+      const base = (isMml ? T('MML再生を表示中') : T('サウンドファイル再生を表示中')) + (name ? `: ${name}` : '');
+      el.title = this._transportState.canToggleSource
+        ? base + '\n' + T('クリックでMML再生 / サウンドファイル再生を切り替え')
+        : base;
+      el.classList.toggle('kbd-src-badge--clickable', !!this._transportState.canToggleSource);
+    }
+
+    // ── タイトル行の再生コントロール(⏮ ▶/⏸ ■ ⏭) ───────────────────
+    // 操作対象は「今表示している方」(バッジと同じ = MML再生 or サウンドファイル再生)。
+    // 実際の再生/停止/曲送りはmain.js側が持っているので、ここは押されたことを
+    // onTransport(action)で伝えるだけにして、状態(有効/無効・再生中か)は
+    // setTransportState()で外から流し込む。
+    _buildTransportBar() {
+      const ICONS = {
+        prev: '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M6.6 4.5v11h1.8v-11zM16 5.2c0-.8-.9-1.2-1.5-.8l-5.1 4.1a1 1 0 0 0 0 1.6l5.1 4.1c.6.5 1.5 0 1.5-.8z"/></svg>',
+        play: '<svg class="icon-play" viewBox="0 0 20 20" fill="currentColor"><path d="M6.5 4.2v11.6c0 .8.9 1.3 1.6.9l9-5.8c.6-.4.6-1.4 0-1.8l-9-5.8c-.7-.4-1.6.1-1.6.9Z"/></svg>' +
+              '<svg class="icon-pause" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="4" width="3.4" height="12"/><rect x="11.6" y="4" width="3.4" height="12"/></svg>',
+        stop: '<svg viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1.2"/></svg>',
+        next: '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M13.4 4.5v11h-1.8v-11zM4 5.2c0-.8.9-1.2 1.5-.8l5.1 4.1a1 1 0 0 1 0 1.6l-5.1 4.1c-.6.5-1.5 0-1.5-.8z"/></svg>'
+      };
+      const bar = document.createElement('div');
+      bar.className = 'kbd-transport';
+      this._transportBtns = {};
+      for (const action of ['prev', 'play', 'stop', 'next']) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'kbd-tp-btn kbd-tp-btn--' + action;
+        btn.innerHTML = ICONS[action];
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (btn.disabled) return;
+          if (this.onTransport) this.onTransport(action);
+        });
+        bar.appendChild(btn);
+        this._transportBtns[action] = btn;
+      }
+      return bar;
+    }
+
+    // main.js が再生状態の変化ごとに呼ぶ。state: { playing, canPlay, canStop, canPrevNext, canToggleSource }
+    setTransportState(state) {
+      const s = this._transportState;
+      let changed = false;
+      for (const k of ['playing', 'canPlay', 'canStop', 'canPrevNext', 'canToggleSource']) {
+        const v = !!(state && state[k]);
+        if (s[k] !== v) { s[k] = v; changed = true; }
+      }
+      if (!changed) return; // 毎フレーム呼ばれても実際に変わった時だけDOMを触る
+      this._renderTransport();
+      this._renderSourceBadge(); // バッジのクリック可否(カーソル/ツールチップ)も一緒に更新
+    }
+
+    _renderTransport() {
+      const b = this._transportBtns;
+      if (!b) return;
+      const s = this._transportState;
+      b.prev.disabled = !s.canPrevNext;
+      b.next.disabled = !s.canPrevNext;
+      b.play.disabled = !s.canPlay;
+      b.stop.disabled = !s.canStop;
+      b.play.classList.toggle('is-playing', s.playing);
+      b.play.title = s.playing ? T('一時停止') : T('再生');
+      b.stop.title = T('停止');
+      b.prev.title = T('前の曲');
+      b.next.title = T('次の曲');
     }
 
     // 大波形に「今表示するch」(_shownWaveId)を、表示中の一覧(rowEls)に合わせて決め直す。
@@ -2775,7 +2965,12 @@
         // 右配置の一覧幅。SPCモードは列が多いので全列が収まる幅(SPC_LIST_MIN_WIDTH)を下限にする
         let w = '';
         if (placement === 'right') {
-          const min = this._mode === 'spc' ? SPC_LIST_MIN_WIDTH : 0;
+          // 割当表示ONのときは「借用先/音色」列(ASSIGN_COL_WIDTH)が入る幅を下限にする
+          // (スプリッターで狭めた幅のままだと右側の列が押し出されて見えなくなるため)
+          const base = this._mode === 'spc' ? SPC_LIST_MIN_WIDTH
+            : (left.classList.contains('kbd-left--hes') || left.classList.contains('kbd-left--gbs'))
+              ? LIST_WIDTH_PAN : LIST_WIDTH_NSF;
+          const min = this._assignMode ? base + ASSIGN_COL_WIDTH : (this._mode === 'spc' ? SPC_LIST_MIN_WIDTH : 0);
           const want = Math.max(this._listWidth || 0, min);
           if (want > 0) w = want + 'px';
         }
@@ -3030,8 +3225,15 @@
     // 古い_muteStateを見て該当chを再びミュート表示するため、表示は「ミュートのまま」なのに
     // 実際の再生は「全ch鳴る」という食い違いが起きていた。新規ファイルではミュートを
     // 引き継がない方針にして解消する。
+    // *2MML変換の音程検証(src/convert/verify.js)で見つかった不一致箇所。ロールに赤枠で
+    // 重ね描きする({sec,endSec,expectedMidi,gotMidi,letter}の配列)。次のファイル/変換で更新。
+    setConversionDiffs(diffs) {
+      this._conversionDiffs = (diffs && diffs.length) ? diffs : null;
+    }
+
     reset() {
       this._spcVoices = [];
+      this._conversionDiffs = null;
       this._prevSpcVoices = [];
       this._muteState.clear();
       // 大波形の選択(_selectedId)はここでは変えない。新ファイルの実際のチャンネル構成が
@@ -3066,6 +3268,8 @@
       // 大波形に表示するchを表示中の一覧に合わせる(選択chが無ければ一番若いch/V0を一時表示)
       this._syncShownWave(spc ? this._spcRowEls : this._rowEls);
       this._rebuildLanes(); // チャンネルごとのレーン表示も表示中の一覧に合わせる
+      this._refreshAssignUi(); // 借用先の重複判定は「表示中の一覧」が対象なので切替のたびに計算し直す
+      this._renderMuteAllBtn(); // 一括ミュートの状態も表示中の一覧が対象
 
       // ウィンドウが狭くて一覧の全列が収まらない場合だけ、収まる幅まで自動拡張する
       // (縮小はしない。ユーザーが既に手動でそれ以上広げていればそのまま尊重する)
@@ -3121,6 +3325,322 @@
       }
     }
 
+    // ── チャンネル割当(案E: 鍵盤表示の行で借用先を決める) ────────────────
+    // part列の文字とセレクトのラベル(「P: N163 ch1」)は channelPlan.js 側が持つ固定レター表
+    // (assignExpansionLettersは他チップの有無に関わらず同じ文字を返す)から引くので、
+    // ここで曲ごとのletterMapを作る必要はない。
+
+    // 1行ぶんのpart列チップと「借用先/音色」セレクトを配線する。セレクトは割当表示ON
+    // (_assignMode)のときだけ見えるが、DOMは常に作っておく(トグルのたびに行を組み直すと
+    // 再生中の描画が途切れるため)。
+    _wireAssign(row, ch) {
+      const plan = channelPlan();
+      if (!plan) return;
+      const chId = ch.id;
+      const editable = plan.editable();
+      const partEl = row.querySelector('.kbd-part');
+      const targetSel = row.querySelector('.kbd-assign-target');
+      const toneSel = row.querySelector('.kbd-assign-tone');
+      if (partEl) {
+        if (editable) {
+          partEl.title = T('クリックで借用先(NSF側のパート)を選ぶ');
+          partEl.addEventListener('click', (e) => { e.stopPropagation(); this._openAssignPopover(partEl, chId); });
+        } else {
+          partEl.title = plan.lockReason() || '';
+        }
+      }
+      if (!targetSel || !toneSel) return;
+      targetSel.disabled = toneSel.disabled = !editable;
+      if (!editable) targetSel.title = plan.lockReason() || '';
+      targetSel.addEventListener('change', () => this._setAssignTarget(chId, targetSel.value));
+      toneSel.addEventListener('change', () => {
+        const cur = plan.get(chId) || {};
+        const kind = plan.toneKindFor(cur.target || this._defaultTargetOf(chId));
+        const def = kind ? plan.toneOptionsFor(kind, plan.channelKind(chId)).def : null;
+        plan.set(chId, { tone: toneSel.value === def ? null : toneSel.value });
+      });
+      // クリックが行の他の操作(大波形選択・色ピッカー)に伝播しないようにする
+      for (const el of [targetSel, toneSel]) el.addEventListener('click', (e) => e.stopPropagation());
+    }
+
+    // この曲に実在する借用先(表示中の各行の既定の借用先)。NSFのように「同じ音源の
+    // 別チャンネルへ移す」しかできない形式で、存在しない枠を候補に出さないために使う。
+    _availTargets() {
+      const rows = this._mode === 'spc' ? this._spcRowEls : this._rowEls;
+      return rows.map(el => el.defaultTarget).filter(Boolean);
+    }
+
+    _defaultTargetOf(chId) {
+      const plan = channelPlan();
+      if (!plan) return 'skip';
+      const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+      return (el && el.defaultTarget) || plan.defaultTarget(chId, 'skip');
+    }
+
+    // 借用先を選び直す。既定と同じ値を選んだらユーザー指定を消して「自動」に戻す
+    _setAssignTarget(chId, value) {
+      const plan = channelPlan();
+      if (!plan) return;
+      const def = this._defaultTargetOf(chId);
+      plan.set(chId, { target: value === def ? null : value, tone: null });
+    }
+
+    // セレクトの中身を現在の割当に合わせて作り直す(借用先を変えると音色の選択肢も変わる)
+    _syncAssignSelects(el) {
+      const plan = channelPlan();
+      if (!plan || !el.targetSel) return;
+      const srcKind = plan.channelKind(el.id);
+      const ent = plan.get(el.id) || {};
+      const target = ent.target || el.defaultTarget || 'skip';
+      const opts = plan.targetsForChannel(el.id, el.defaultTarget, this._availTargets());
+      // 既定の借用先が候補に無い(種別判定と既定がずれている)場合も選べるように足す
+      const list = opts.indexOf(target) >= 0 ? opts : opts.concat([target]);
+      const sig = list.join(',') + '|' + target;
+      if (el.targetSig !== sig) {
+        el.targetSig = sig;
+        el.targetSel.innerHTML = '';
+        for (const t of list) {
+          const o = document.createElement('option');
+          o.value = t;
+          // 行内のセレクトは幅が狭いので「(既定)」は付けない(既定から変えた行はpart列の
+          // チップがアクセント色になるので区別はつく)。ポップオーバー側には付ける。
+          o.textContent = plan.targetLabel(t);
+          el.targetSel.appendChild(o);
+        }
+      }
+      el.targetSel.value = target;
+
+      const toneKind = plan.toneKindFor(target);
+      if (!toneKind) { el.toneSel.style.display = 'none'; el.toneSig = ''; return; }
+      el.toneSel.style.display = '';
+      const to = plan.toneOptionsFor(toneKind, srcKind);
+      const tsig = toneKind + '|' + srcKind;
+      if (el.toneSig !== tsig) {
+        el.toneSig = tsig;
+        el.toneSel.innerHTML = '';
+        for (const pair of to.opts) {
+          const o = document.createElement('option');
+          o.value = pair[0]; o.textContent = pair[1];
+          el.toneSel.appendChild(o);
+        }
+      }
+      el.toneSel.value = ent.tone !== undefined ? ent.tone : to.def;
+    }
+
+    // 割当が変わったとき(plan.onChange)に呼ぶ。part列の文字・スキップの減光・
+    // 借用先の重複(赤)を表示中の全行へ反映する。
+    _refreshAssignUi() {
+      const plan = channelPlan();
+      if (!plan) return;
+      // ★対象は「今表示中の一覧」だけ。両方(_rowEls+_spcRowEls)を混ぜると、SPC表示中に
+      //   隠れているNSF側の行(A/B/C/D…)まで数えてしまい、全行が重複警告になる
+      const rows = (this._mode === 'spc' ? this._spcRowEls : this._rowEls)
+        .filter(el => !el.isAllRow && el.partEl);
+      const count = {};
+      for (const el of rows) {
+        const ent = plan.get(el.id) || {};
+        el.target = ent.target || el.defaultTarget || 'skip';
+        if (el.target !== 'skip') count[el.target] = (count[el.target] || 0) + 1;
+      }
+      // スキップの減光と重複警告は「割当が意味を持つ形式」だけに出す。NSFのようにMMLパート文字を
+      // 持たない行(MMC5の$5011直接PCM等)まで一律に減光すると、従来の見た目を壊してしまう
+      const editable = plan.editable();
+      for (const el of rows) {
+        const custom = !!(plan.get(el.id) || {}).target;
+        el.letter = el.target === 'skip' ? '' : plan.letterOfTarget(el.target);
+        el.partEl.textContent = el.letter || (editable ? '—' : '');
+        el.partEl.classList.toggle('kbd-part--custom', custom);
+        el.row.classList.toggle('kbd-ch-row--skip', editable && el.target === 'skip');
+        const dup = editable && el.target !== 'skip' && count[el.target] > 1;
+        el.row.classList.toggle('kbd-ch-row--conflict', dup);
+        if (el.partEl) {
+          el.partEl.title = dup ? T('この借用先は他のチャンネルと重複しています')
+            : plan.editable() ? T('クリックで借用先(NSF側のパート)を選ぶ') : (plan.lockReason() || '');
+        }
+        this._syncAssignSelects(el);
+      }
+      this._renderAssignToggle();
+    }
+
+    // part列チップのクリックで開く1行ぶんの割当ポップオーバー(縦置き・多段・別窓など
+    // 幅が足りないレイアウトでも必ず使える経路。案Eの土台)
+    _openAssignPopover(anchorEl, chId) {
+      const plan = channelPlan();
+      if (!plan || !plan.editable()) return;
+      this._closeAssignPopover();
+      const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+      if (!el) return;
+      const pop = document.createElement('div');
+      pop.className = 'kbd-assign-pop';
+      const srcKind = plan.channelKind(chId);
+      const ent = plan.get(chId) || {};
+      const target = ent.target || el.defaultTarget || 'skip';
+
+      const rowOf = (labelText, control) => {
+        const r = document.createElement('label');
+        r.className = 'kbd-assign-pop-row';
+        const s = document.createElement('span');
+        s.textContent = labelText;
+        r.appendChild(s); r.appendChild(control);
+        return r;
+      };
+      const targetSel = document.createElement('select');
+      const list = plan.targetsForChannel(chId, el.defaultTarget, this._availTargets());
+      for (const t of (list.indexOf(target) >= 0 ? list : list.concat([target]))) {
+        const o = document.createElement('option');
+        o.value = t;
+        o.textContent = plan.targetLabel(t) + (t === el.defaultTarget ? T('(既定)') : '');
+        targetSel.appendChild(o);
+      }
+      targetSel.value = target;
+      targetSel.addEventListener('change', () => { this._setAssignTarget(chId, targetSel.value); this._openAssignPopover(anchorEl, chId); });
+      pop.appendChild(rowOf(T('借用先'), targetSel));
+
+      const toneKind = plan.toneKindFor(target);
+      if (toneKind) {
+        const to = plan.toneOptionsFor(toneKind, srcKind);
+        const toneSel = document.createElement('select');
+        for (const pair of to.opts) {
+          const o = document.createElement('option');
+          o.value = pair[0]; o.textContent = pair[1];
+          toneSel.appendChild(o);
+        }
+        toneSel.value = ent.tone !== undefined ? ent.tone : to.def;
+        toneSel.addEventListener('change', () => plan.set(chId, { tone: toneSel.value === to.def ? null : toneSel.value }));
+        pop.appendChild(rowOf(T('音色'), toneSel));
+      }
+      if (plan.hasVolSliderFor(target)) {
+        const volWrap = document.createElement('span');
+        volWrap.className = 'kbd-assign-pop-vol';
+        const vol = document.createElement('input');
+        vol.type = 'range'; vol.min = '0'; vol.max = '100'; vol.step = '5';
+        vol.value = String(ent.volPct !== undefined ? ent.volPct : 100);
+        const volNum = document.createElement('span');
+        volNum.textContent = vol.value + '%';
+        vol.addEventListener('input', () => { volNum.textContent = vol.value + '%'; });
+        vol.addEventListener('change', () => plan.set(chId, { volPct: vol.value === '100' ? null : parseInt(vol.value, 10) }));
+        volWrap.appendChild(vol); volWrap.appendChild(volNum);
+        pop.appendChild(rowOf(T('変換音量'), volWrap));
+      }
+      const foot = document.createElement('div');
+      foot.className = 'kbd-assign-pop-foot';
+      const auto = document.createElement('button');
+      auto.type = 'button';
+      auto.textContent = T('自動に戻す');
+      auto.addEventListener('click', () => { plan.clearChannel(chId); this._closeAssignPopover(); });
+      foot.appendChild(auto);
+      pop.appendChild(foot);
+
+      document.body.appendChild(pop);
+      const r = anchorEl.getBoundingClientRect();
+      pop.style.left = Math.max(4, Math.min(window.innerWidth - pop.offsetWidth - 4, r.left)) + 'px';
+      pop.style.top = Math.min(window.innerHeight - pop.offsetHeight - 4, r.bottom + 2) + 'px';
+      this._assignPop = pop;
+      this._assignPopClose = (e) => { if (!pop.contains(e.target) && e.target !== anchorEl) this._closeAssignPopover(); };
+      setTimeout(() => document.addEventListener('mousedown', this._assignPopClose), 0);
+    }
+
+    _closeAssignPopover() {
+      if (this._assignPopClose) document.removeEventListener('mousedown', this._assignPopClose);
+      this._assignPopClose = null;
+      if (this._assignPop) { this._assignPop.remove(); this._assignPop = null; }
+    }
+
+    // 一覧の「割当」トグル(幅が足りるときだけ列展開する。案Eの2段目)
+    _setAssignMode(on) {
+      this._assignMode = !!on;
+      try { localStorage.setItem('mml_kbdAssignMode', on ? '1' : '0'); } catch (e) { /* private browsing等 */ }
+      this._leftEl.classList.toggle('kbd-left--assign', this._assignMode);
+      this._applyLayoutClasses();
+      this._refreshAssignUi();
+      // 「借用先/音色」列(200px)が入りきらない幅のままだと右側の列(L/R・vol・wave)が
+      // 押し出されて見えなくなるので、収まる幅まで自動拡張する(setMode()のSPC下限と同じ考え方。
+      // 縮小はしない=ユーザーが既に広げていればそのまま尊重する)
+      if (this._assignMode) {
+        const winEl = this.container.closest('.float-window');
+        const placement = this._effectivePlacement();
+        if (winEl && placement !== 'window') {
+          // 一覧の幅(CSSの.kbd-left--assignで広がった値)+ロールの最低限が収まる窓幅を確保する
+          const need = this._leftEl.offsetWidth + (placement === 'right' ? 260 : 24);
+          if (winEl.offsetWidth < need) winEl.style.width = need + 'px';
+        }
+      }
+    }
+
+    _renderAssignToggle() {
+      const plan = channelPlan();
+      if (!this._assignBtns) return;
+      const editable = !!plan && plan.editable();
+      for (const btn of this._assignBtns) {
+        btn.classList.toggle('kbd-assign-btn--on', !!this._assignMode);
+        btn.classList.toggle('kbd-assign-btn--custom', !!plan && plan.isCustom());
+        btn.disabled = !editable;
+        btn.title = editable ? T('チャンネル割当(変換元ch → NSF側のパート)を表示')
+          : (plan ? plan.lockReason() : '');
+      }
+    }
+
+    // ── 一括ミュート(見出しのミュート列のボタン) ──────────────────────
+    // 表示中の一覧(SPCモードならボイス一覧)の実チャンネルだけを対象にする。
+    // 全chミュートでなければ全ミュート、全ミュート済みなら全解除。
+    _muteRows() {
+      return (this._mode === 'spc' ? this._spcRowEls : this._rowEls).filter(el => !el.isAllRow && el.checkbox);
+    }
+    _allMuted() {
+      const rows = this._muteRows();
+      return rows.length > 0 && rows.every(el => !el.checkbox.checked);
+    }
+    _toggleAllMute() {
+      const rows = this._muteRows();
+      if (!rows.length) return;
+      const muted = !this._allMuted(); // 全ミュートでなければ全ミュート、そうなら全解除
+      if (this._mode === 'spc') {
+        // SPCはボイス番号でミュート機構が別(main.js onSpcMuteChange → ビットマスク)
+        rows.forEach((el, idx) => {
+          el.checkbox.checked = !muted;
+          if (this.onSpcMuteChange) this.onSpcMuteChange(idx, muted);
+        });
+      } else {
+        for (const el of rows) {
+          el.checkbox.checked = !muted;
+          this._muteState.set(el.id, muted);
+        }
+        // 行ごとに呼ぶとその都度再生側へ設定が飛ぶので、まとめて1回だけ通知する
+        if (this.onMuteChange) this.onMuteChange(this.getMuteConfig());
+      }
+      this._renderMuteAllBtn();
+    }
+    // 見出しの vol 列のボタン: 全chの音量スライダーを100%へ戻す(行ごとのダブルクリックの
+    // 全ch版)。ミュートと違いトグルではなく常にリセット。
+    _resetAllVolumes() {
+      const spc = this._mode === 'spc';
+      const rows = (spc ? this._spcRowEls : this._rowEls).filter(el => !el.isAllRow);
+      if (!rows.length) return;
+      for (const el of rows) {
+        const slider = el.row.querySelector('.kbd-vol-slider');
+        if (slider) slider.value = '100';
+      }
+      if (spc) {
+        for (let i = 0; i < this._spcVoiceVolumes.length; i++) this._spcVoiceVolumes[i] = 1;
+        saveSpcVoiceVolumes(this._spcVoiceVolumes);
+        if (this.onSpcVolumeChange) this.onSpcVolumeChange(this._spcVoiceVolumes.slice());
+      } else {
+        for (const el of rows) this._channelVolumes.set(el.id, 1);
+        saveChannelVolumes(this._channelVolumes);
+        if (this.onVolumeChange) this.onVolumeChange();
+      }
+    }
+
+    // ボタンの見た目: 全ミュート中は押し込み表示にして「もう一度押すと解除」だと分かるようにする
+    _renderMuteAllBtn() {
+      if (!this._muteAllBtns) return;
+      const all = this._allMuted();
+      for (const btn of this._muteAllBtns) {
+        btn.classList.toggle('kbd-muteall-btn--on', all);
+        btn.title = all ? T('全チャンネルのミュートを解除') : T('全チャンネルをミュート');
+      }
+    }
+
     _rebuildRows(channels) {
       this._rowsInnerEl.innerHTML = '';
       this._rowEls = [];
@@ -3154,18 +3674,19 @@
         // wave/note/freqは何も表示しない(空欄のまま)。
         row.innerHTML =
           `<span class="kbd-dot" style="background:${rowColor}"></span>` +
-          `<span class="kbd-part">${ch.letter || ''}</span>` +
+          partChipHtml(ch) +
           (ch.isAllRow
             ? `<span class="kbd-mute-ph"></span>`
             : `<input type="checkbox" class="kbd-mute"${muted ? '' : ' checked'} title="${T('{ch} ミュート', { ch: ch.id })}">`) +
           `<span class="kbd-name">${disp.name}</span>` +
+          assignCellHtml(ch) +
           `<span class="kbds-lr kbds-l"></span>` +
           `<span class="kbds-lr"></span>` +
           `<span class="kbd-vol-num">0</span>` +
           `<span class="kbd-vol-wrap">` +
             `<span class="kbd-vol-bar" style="background:transparent"></span>` +
             (ch.isAllRow ? '' :
-              `<input type="range" class="kbd-vol-slider" min="0" max="100" step="1" value="${Math.round((this._channelVolumes.get(ch.id) ?? 1) * 100)}" title="${T('{ch} 音量', { ch: ch.id })}">` +
+              `<input type="range" class="kbd-vol-slider" min="0" max="200" step="1" value="${Math.round((this._channelVolumes.get(ch.id) ?? 1) * 100)}" title="${T('{ch} 音量(中央100%・ダブルクリックで100%)', { ch: ch.id })}">` +
               `<span class="kbd-vol-tooltip"></span>`) +
           `</span>` +
           (ch.isAllRow ? `<span class="kbd-wave" style="visibility:hidden"></span>` : `<canvas class="kbd-wave" width="68" height="28"></canvas>`) +
@@ -3178,6 +3699,7 @@
           checkbox.addEventListener('change', () => {
             this._muteState.set(ch.id, !checkbox.checked);
             if (this.onMuteChange) this.onMuteChange(this.getMuteConfig());
+            this._renderMuteAllBtn(); // 見出しの一括ミュートボタンの状態を追随させる
           });
         }
         if (!ch.isAllRow) this._attachVolumeSlider(row, ch.id);
@@ -3210,6 +3732,9 @@
 
         const lrEls = row.querySelectorAll('.kbds-lr');
 
+        // チャンネル割当(part列のチップ + 割当表示ONのときのセレクト。案E)
+        if (!ch.isAllRow) this._wireAssign(row, ch);
+
         group.appendChild(row);
         this._rowEls.push({
           row,
@@ -3227,6 +3752,12 @@
           color: rowColor,
           defaultColor: ch.color,
           letter: ch.letter,
+          // チャンネル割当(案E): part列チップとセレクトの参照+この行の既定の借用先
+          partEl: row.querySelector('.kbd-part'),
+          targetSel: row.querySelector('.kbd-assign-target'),
+          toneSel: row.querySelector('.kbd-assign-tone'),
+          defaultTarget: ch.defaultTarget,
+          target: ch.target,
         });
       }
       // 大波形に表示するchを新しい一覧に合わせる(SPCモード中はSPC側の一覧が表示中なので触らない)
@@ -3235,11 +3766,14 @@
         this._syncShownWave(this._rowEls);
         this._rebuildLanes(); // チャンネルごとのレーン表示も一覧に合わせる
       }
+      this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
+      this._renderMuteAllBtn();
     }
 
     // ch別音量スライダー(音量バー領域に重ねる半透明オーバーレイ)を1行ぶん配線する。
     // 通常は薄く見えるだけで、ドラッグ中(またはホバー/フォーカス中)だけ数値ツールチップを
-    // 出す。値は0〜100%のrange inputで、_channelVolumes(localStorage永続化)を直接操作する。
+    // 出す。値は0〜200%(中央=100%)のrange inputで、_channelVolumes(localStorage永続化)を
+    // 直接操作する。ダブルクリックで100%へ戻る。
     // getVolumeConfig()の項参照: 適用先はこのMapを直接読むため、ここではUIの見た目の
     // 同期(初期値反映・スライダー操作時の即時保存)だけを担当すればよい。
     _attachVolumeSlider(row, id) {
@@ -3262,6 +3796,10 @@
         this._channelVolumes.set(id, vol);
         saveChannelVolumes(this._channelVolumes);
         if (this.onVolumeChange) this.onVolumeChange();
+      });
+      slider.addEventListener('dblclick', () => {
+        slider.value = '100';
+        slider.dispatchEvent(new Event('input'));
       });
     }
 
@@ -3287,6 +3825,10 @@
         this._spcVoiceVolumes[idx] = vol;
         saveSpcVoiceVolumes(this._spcVoiceVolumes);
         if (this.onSpcVolumeChange) this.onSpcVolumeChange(this._spcVoiceVolumes.slice());
+      });
+      slider.addEventListener('dblclick', () => {
+        slider.value = '100';
+        slider.dispatchEvent(new Event('input'));
       });
     }
 
@@ -3846,6 +4388,35 @@
           }
         }
       }
+
+      // *2MML変換の音程検証で見つかった不一致箇所(setConversionDiffs)を赤枠で重ね描きする。
+      // 塗り(gotMidi=実際に鳴る高さ)と枠(expectedMidi=元の高さ)の両方を示す。
+      // 時間軸はソースの秒(ロールと同じ)なのでそのまま描ける。
+      if (this._conversionDiffs && onlyId === null) {
+        for (const d of this._conversionDiffs) {
+          if (d.endSec <= pos || d.sec >= winEnd) continue;
+          const relStart = Math.max(0, d.sec - pos);
+          const relEnd = Math.min(windowSec, d.endSec - pos);
+          for (const [midi, fill] of [[d.gotMidi, true], [d.expectedMidi, false]]) {
+            const keyPos = keyX(midi, wkW);
+            if (!keyPos) continue;
+            keyPos.x -= offPx;
+            if (keyPos.x + wkW < 0 || keyPos.x - wkW > g.pitchLen) continue;
+            const pLo = keyPos.isBlack ? keyPos.x - bkW / 2 : keyPos.x + 0.5;
+            const pSize = keyPos.isBlack ? bkW : (wkW - 1);
+            const r = g.rect(pLo, pSize, g.tPx(relStart), g.tPx(relEnd), 2);
+            if (fill) {
+              ctx.fillStyle = 'rgba(255,40,40,0.35)';
+              ctx.fillRect(r.x, r.y, r.w, r.h);
+            }
+            ctx.strokeStyle = '#ff2828';
+            ctx.lineWidth = fill ? 2 : 1;
+            if (!fill) ctx.setLineDash([3, 3]);
+            ctx.strokeRect(r.x + 0.5, r.y + 0.5, Math.max(1, r.w - 1), Math.max(1, r.h - 1));
+            ctx.setLineDash([]);
+          }
+        }
+      }
     }
 
     // ── SPC ボイス行 DOM構築 ─────────────────────────────────────
@@ -3855,17 +4426,26 @@
     _buildSpcRow(v, idx) {
       const row = document.createElement('div');
       const rowColor = this._getColor(v.label, v.color);
+      const plan = channelPlan();
+      // SPCのボイスは元々パート文字を持たない(getPartLetterが空を返す)。既定の借用先は
+      // main.jsが setDefaults() で与える(V0→A、V1→B、V2→C、V3→D、V4-7→スキップ)。
+      const defaultTarget = plan ? plan.defaultTarget(v.label, 'skip') : 'skip';
+      const ent = plan ? (plan.get(v.label) || {}) : {};
+      const target = ent.target || defaultTarget;
+      const letter = plan ? plan.letterOfTarget(target) : '';
       row.className = 'kbd-ch-row';
       row.innerHTML =
         `<span class="kbd-dot" style="background:${rowColor}"></span>` +
+        partChipHtml({ id: v.label, letter, target }) +
         `<input type="checkbox" class="kbd-mute" checked title="${T('{ch} ミュート', { ch: v.label })}">` +
         `<span class="kbd-name">${v.label}</span>` +
+        assignCellHtml({ id: v.label }) +
         `<span class="kbds-lr kbds-l"></span>` +
         `<span class="kbds-lr"></span>` +
         `<span class="kbd-vol-num">0</span>` +
         `<span class="kbd-vol-wrap">` +
           `<span class="kbd-vol-bar" style="background:transparent"></span>` +
-          `<input type="range" class="kbd-vol-slider" min="0" max="100" step="1" value="${Math.round((this._spcVoiceVolumes[idx] ?? 1) * 100)}" title="${T('{ch} 音量', { ch: v.label })}">` +
+          `<input type="range" class="kbd-vol-slider" min="0" max="200" step="1" value="${Math.round((this._spcVoiceVolumes[idx] ?? 1) * 100)}" title="${T('{ch} 音量(中央100%・ダブルクリックで100%)', { ch: v.label })}">` +
           `<span class="kbd-vol-tooltip"></span>` +
         `</span>` +
         `<span class="kbds-env"><canvas class="kbds-env-canvas" width="34" height="16"></canvas><span class="kbds-env-text"></span></span>` +
@@ -3878,6 +4458,7 @@
       const checkbox = row.querySelector('.kbd-mute');
       checkbox.addEventListener('change', () => {
         if (this.onSpcMuteChange) this.onSpcMuteChange(idx, !checkbox.checked);
+        this._renderMuteAllBtn(); // 見出しの一括ミュートボタンの状態を追随させる
       });
       this._attachSpcVolumeSlider(row, idx);
 
@@ -3890,11 +4471,19 @@
 
       // 丸のクリックで色ピッカーを開く
       this._attachColorPicker(row.querySelector('.kbd-dot'), v.label, v.color);
+      // チャンネル割当(part列チップ + 割当表示ONのときのセレクト)
+      this._wireAssign(row, { id: v.label, target: target });
 
       const lrEls = row.querySelectorAll('.kbds-lr');
       return {
         id: v.label,
         row,
+        partEl: row.querySelector('.kbd-part'),
+        targetSel: row.querySelector('.kbd-assign-target'),
+        toneSel: row.querySelector('.kbd-assign-tone'),
+        defaultTarget,
+        target,
+        letter,
         volBar: row.querySelector('.kbd-vol-bar'),
         volNum: row.querySelector('.kbd-vol-num'),
         lEl: lrEls[0], rEl: lrEls[1],
@@ -3922,8 +4511,10 @@
       row.className = 'kbd-ch-row kbds-all-row';
       row.innerHTML =
         `<span class="kbd-dot" style="background:#888"></span>` +
+        `<span class="kbd-part"></span>` +
         `<span class="kbd-mute-ph"></span>` +
         `<span class="kbd-name">ALL</span>` +
+        `<span class="kbd-assign"></span>` +
         `<span class="kbds-lr kbds-l"></span>` +
         `<span class="kbds-lr"></span>` +
         `<span class="kbds-master" title="echo L/R = ${'$'}2C/${'$'}3C, FIR = C0..C7"></span>`;
@@ -3969,6 +4560,8 @@
           this._spcSectionEl.appendChild(el.row);
           return el;
         });
+        this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
+        this._renderMuteAllBtn();
       }
       // 大波形に表示するボイスを新しい一覧に合わせる(選択がSPCボイス以外ならV0を一時表示)。
       // ★SPCのボイス数は常に8で固定のため、reset()でファイルを読み込み直しても行の再構築

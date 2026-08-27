@@ -32,11 +32,12 @@
   function pulsePeriodRaw(freq) { return CPU_CLOCK_NTSC / (16 * freq) - 1; }
 
   MML.GBS2MML.fromGbs = async function (gbsBytes, songIndex, durationSeconds, options) {
+    options = options || {};
     const capture = await MML.Emu.captureGbsSongAsync(gbsBytes, {
       songIndex: songIndex || 0,
       durationSeconds: durationSeconds || 60,
       sampleRate: 44100
-    });
+    }, options.onProgress || null);
     return MML.GBS2MML.convertCapture({
       snapshots: capture.snapshots,
       frameRate: capture.frameRate,
@@ -51,8 +52,26 @@
    * @param {object} cap - { snapshots(gbsPlayer.js snapshotApu形式のフレーム配列), frameRate,
    *   songLabel(コメント用), sourceLabel(コメント用、既定'GBS') }
    */
+  // ── チャンネル割当(案E) ────────────────────────────────────────
+  // 変換元チャンネルのIDは鍵盤表示の行IDと同じ体系(GB1/GB2=パルス, GW=波形, GN=ノイズ)。
+  // 音量は抽出時点で線形4bitなので linear:true(借用層の音量写像が対数の借用先へ換算する)。
+  MML.GBS2MML.sourceChannels = function () {
+    return [
+      { id: 'GB1', label: 'GB CH1(パルス)', chip: 'gb', kind: 'square', ch: 0, linear: true, nativeFamily: 'pulse' },
+      { id: 'GB2', label: 'GB CH2(パルス)', chip: 'gb', kind: 'square', ch: 1, linear: true, nativeFamily: 'pulse' },
+      { id: 'GW', label: 'GB CH3(波形)', chip: 'gb', kind: 'wave', ch: 2, linear: true, nativeFamily: 'fds' },
+      { id: 'GN', label: 'GB CH4(ノイズ)', chip: 'gb', kind: 'noise', ch: 3, linear: true, nativeFamily: 'noise' },
+    ];
+  };
+  MML.GBS2MML.defaultPlan = function () {
+    return { GB1: 'pulse1', GB2: 'pulse2', GW: 'fds', GN: 'noise' };
+  };
+
   MML.GBS2MML.convertCapture = function (cap, options) {
     options = options || {};
+    // 変換設定(src/convert/options.js): コマンド使用/不使用・譜面整形(全レジストリ・
+    // detune.js・emitScore へ同じ cmd を渡す)
+    const cmd = MML.Convert.normalizeCmd(options.cmd);
     const snapshots = cap.snapshots;
     const totalFrames = snapshots.length;
     const frameRate = cap.frameRate;
@@ -62,14 +81,21 @@
     // 音量変化をソフトウェアエンベロープとして曲全体で共有登録するレジストリ
     // (kss2mml/nsf2mmlと同じ考え方。CH1/CH2/CH3/CH4すべてで共有し、偶然同じ減衰形状が
     // 出ればチャンネルをまたいでも1つの@v<n>にまとめられる)。
-    const envReg = new MML.Convert.EnvelopeRegistry();
+    const envReg = new MML.Convert.EnvelopeRegistry(cmd);
     // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
-    const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
+    const pitchReg = new MML.Convert.PitchEnvelopeRegistry(cmd);
     // ノートエンベロープ(高速アルペジオ)の共有レジストリ(2026-08-14)。
-    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
+    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry(cmd);
     // GBの波形(4bit/32点→FDSの6bit/64点へビット拡張)を曲全体で共有登録する
     // (@FM<n>としてMML本文のヘッダに埋め込む。nsf2mml/expansion/fds.jsと同じ形式)。
     const fdsWaveReg = new MML.Convert.WaveRegistry('@FM');
+
+    // ユーザーがチャンネル割当(鍵盤表示、案E)を既定から変えたときだけ通る共通借用層
+    // (src/convert/borrow.js)。既定のときは以下の従来コードをそのまま使う=出力は不変。
+    const customPlan = options.channelMap || null;
+    if (customPlan) {
+      return convertWithPlan(cap, options, customPlan, { cmd, envReg, pitchReg, noteEnvReg, fdsWaveReg });
+    }
 
     const ch1Result = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch1', envReg, frameRate);
     const ch2Result = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch2', envReg, frameRate);
@@ -80,10 +106,10 @@
     // 借用変換(DESIGN.md §5): 変換元と変換先でチップ・クロックが異なる二重量子化を
     // 補正する。GBSはまずapplyPitchDetune(既定)を採用し、実測でKSSのような系統的な
     // ズレが見つかれば見直す方針(ユーザー確認済み)。
-    MML.Convert.applyPitchDetune([{ events: ch1Result.events }], pulsePeriodRaw);
-    MML.Convert.applyPitchDetune([{ events: ch2Result.events }], pulsePeriodRaw);
+    MML.Convert.applyPitchDetune([{ events: ch1Result.events }], pulsePeriodRaw, { cmd });
+    MML.Convert.applyPitchDetune([{ events: ch2Result.events }], pulsePeriodRaw, { cmd });
     if (hasWave) {
-      MML.Convert.applyPitchDetune([{ events: waveResult.events }], MML.Gbs2MmlExpansion._fdsPeriodRaw);
+      MML.Convert.applyPitchDetune([{ events: waveResult.events }], MML.Gbs2MmlExpansion._fdsPeriodRaw, { cmd });
     }
     // 高速アルペジオ→EN統合(mergeVibratoAndArpeggioがev.noteEnvOffsetsを付与済みの
     // イベントを、曲全体で共有するnoteEnvRegへ登録してev.noteEnvを確定する。
@@ -155,7 +181,7 @@
     const directiveLines = hasWave ? [MML.Mml.EX_CHIP_DIRECTIVE.fds] : [];
 
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
-      totalFrames, tempoBpm: bpm,
+      totalFrames, tempoBpm: bpm, cmd,
       headerLines: [
         ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(hasWave ? fdsWaveReg.defLines() : [])
@@ -163,11 +189,110 @@
     });
     const mml = [headerComment, scoreText].join('\n');
 
+    // 変換結果の音程検証(src/convert/verify.js): 最終MMLを実コンパイルして
+    // 「実際に鳴る音の高さ」を変換元イベントと突き合わせる(失敗しても変換は妨げない)
+    const pitchCheck = MML.Convert.verifyPitch
+      ? MML.Convert.verifyPitch(mml, scoreChannels, { frameRate: frameRate, totalFrames: totalFrames })
+      : null;
+
     return {
-      mml, bpm: Math.round(bpm),
+      mml, bpm: Math.round(bpm), pitchCheck,
       chips: ['CH1', 'CH2', 'CH4'].concat(hasWave ? ['CH3'] : []),
       expansions,
       fdsWave: waveResult.fdsWave
     };
   };
+
+  // ── ユーザー指定の割当で変換する(共通借用層 src/convert/borrow.js 経由) ──────
+  // 既定の割当のときは上の従来コードが担当する(出力を変えないため)。ここは
+  // 「GBのどのchをNES側のどのパートに載せるか」をユーザーが選び直したときだけ通る。
+  function convertWithPlan(cap, options, customPlan, ctx) {
+    const Plan = MML.Convert.ChannelPlan;
+    const { cmd, envReg, pitchReg, noteEnvReg, fdsWaveReg } = ctx;
+    const snapshots = cap.snapshots;
+    const totalFrames = snapshots.length;
+    const frameRate = cap.frameRate;
+    const songIndex = cap.songLabel;
+    const sourceLabel = cap.sourceLabel || 'GBS';
+    const n163WaveReg = MML.Convert.n163WaveRegistry();
+    const vrc7ToneReg = new MML.Convert.WaveRegistry('@OP');
+    let fdsWave = null;
+
+    const r = MML.Convert.Borrow.compose({
+      sources: MML.GBS2MML.sourceChannels(),
+      plan: Object.assign({}, MML.GBS2MML.defaultPlan(), customPlan),
+      cmd,
+      // GBSは借用変換(二重量子化の補正)なのでapplyPitchDetune方針を保つ
+      // ([[kss2mml-pitch-detune-correction]]、従来経路と同じ)
+      detuneMode: 'apply',
+      regs: { envReg, pitchReg, noteEnvReg, n163WaveReg, vrc7ToneReg },
+      toneOf: (id) => (options.tone || {})[id],
+      extract: (chip, fam, reg) => {
+        // FDS波形は借用先がFDSのときだけ本物のレジストリへ登録する(他のファミリへ載せる
+        // 抽出でも登録すると、誰も参照しない@FM定義がMML本文に残るため)
+        const waveReg = fam === 'fds' ? fdsWaveReg : new MML.Convert.WaveRegistry('@FM');
+        const wave = MML.Gbs2MmlExpansion.wave(snapshots, waveReg, reg);
+        if (fam === 'fds') fdsWave = wave.fdsWave;
+        return {
+          0: MML.Gbs2MmlExpansion.pulse(snapshots, 'ch1', reg, frameRate),
+          1: MML.Gbs2MmlExpansion.pulse(snapshots, 'ch2', reg, frameRate),
+          2: wave,
+          3: MML.Gbs2MmlExpansion.noise(snapshots, reg, frameRate),
+        };
+      },
+    });
+    const { scoreChannels, expansions, letterMap } = r;
+
+    const noteDurations = [];
+    for (const ch of scoreChannels) {
+      const sounding = ch.events.filter(ev => ev.note !== null);
+      for (const ev of sounding) noteDurations.push(ev.end - ev.start);
+      noteDurations.push(...MML.Convert.onsetIntervals(sounding.map(ev => ev.start)));
+    }
+    const bpm = options.bpm
+      ? MML.Convert.refineBpm(options.bpm, noteDurations, frameRate)
+      : MML.Convert.detectBpm(noteDurations, frameRate);
+    const fpb = frameRate * 60 / Math.round(bpm);
+
+    const chanDesc = Object.keys(r.placed)
+      .map(t => `${Plan.letterOfTarget(t)}=${r.placed[t].source.label}`).sort().join(' ');
+    const headerComment = [
+      `; =========================================================`,
+      `; ${sourceLabel} → MML 変換 (Game Boy)`,
+      `; 曲番号   : ${songIndex}`,
+      `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
+      `; 分解能   : 480 TPQN (MIDI準拠)`,
+      `; 変換     : Sound Emulation Foundry`,
+      `; チャンネル: ${chanDesc || '-'} (借用先の割当: ユーザー指定)`,
+      `; ※ このアプリのMMLプレイヤーはNES音源専用のため、GBの各chはNES側の音源へ載せています`,
+      `;    (割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
+      ...r.notes.map(n => `; ※ ${n}`),
+      `; =========================================================`,
+      ``
+    ].join('\n');
+
+    const directiveLines = expansions.map(chip => chip === 'n163'
+      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${(letterMap.n163 || []).length}`
+      : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
+    const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
+      totalFrames, tempoBpm: bpm, cmd,
+      headerLines: [
+        ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+        ...(expansions.indexOf('fds') >= 0 ? fdsWaveReg.defLines() : []),
+        ...(expansions.indexOf('n163') >= 0 ? n163WaveReg.defLines() : []),
+        ...(expansions.indexOf('vrc7') >= 0 ? vrc7ToneReg.defLines() : [])
+      ]
+    });
+    const mml = [headerComment, scoreText].join('\n');
+    const pitchCheck = MML.Convert.verifyPitch
+      ? MML.Convert.verifyPitch(mml, scoreChannels, { frameRate: frameRate, totalFrames: totalFrames })
+      : null;
+
+    return {
+      mml, bpm: Math.round(bpm), pitchCheck,
+      chips: ['CH1', 'CH2', 'CH3', 'CH4'],
+      expansions,
+      fdsWave
+    };
+  }
 })(window);

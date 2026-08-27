@@ -37,7 +37,10 @@
  *   n<num>[,<len>] 直接音程指定 (オクターブ2のCを0とした通し番号)
  *   o<n> > <       オクターブ指定 / 上げ / 下げ
  *   l<n>[.]        デフォルト音長
- *   v<n>           音量 (0-15、絶対指定)
+ *   v<n>           音量 (0-15、絶対指定。FDS/VRC6のこぎり波だけは本家ppmck同様0-63で、
+ *                  レジスタ生値=FDSの$4080ゲイン(実効32で頭打ち)/VRC6の$B000蓄積レート
+ *                  (実質42が最大。43以上は実機の8bit桁溢れで鋸波が崩れるだけで音量は
+ *                  上がらない)。@v/@vrのテーブル値も同じ範囲)
  *   v+<n> v-<n>    音量の相対増減 (省略時は±1)
  *   q<n>           ゲートタイム (0-8, 8で音長いっぱい)
  *   @q<n>          ゲートタイムをフレーム単位で指定(音符終端の<n>フレーム前でノートオフ)
@@ -334,6 +337,68 @@
     return Math.max(0, Math.min(262143, r));
   }
 
+  // ── 借用先チップの音域判定(2026-08-25) ────────────────────────────
+  // 各チップの周期/周波数レジスタは有限幅なので、低すぎる/高すぎる音は物理的に出せない
+  // (例: 2A03パルスは period 11bit + 実機が period<8 で発音停止するため約55Hz〜約12.4kHz)。
+  // 従来は Math.min/max でクランプしていたため「別の音程で鳴る」という最悪の壊れ方をした
+  // (FF4のベース o1f が o1a で鳴る)。作曲側はオクターブを上げる等で対処したいので、
+  // 音程を勝手に変えるのではなく「その音は鳴らさない+警告」にする(compile()内で使用)。
+  // 戻り値: null=表現可能 / 'low'=低すぎる / 'high'=高すぎる
+  function pitchRangeIssue(kind, freq, opt) {
+    if (!(freq > 0)) return null;
+    const o = opt || {};
+    switch (kind) {
+      case 'pulse': { // 2A03/MMC5(11bit) と VRC6パルス(12bit)。実機は period<8 で発音停止
+        const p = Math.round(CPU_CLOCK_NTSC / (16 * freq)) - 1;
+        if (p > (o.periodMax || 2047)) return 'low';
+        if (p < 8) return 'high';
+        return null;
+      }
+      case 'triangle': {
+        const p = Math.round(CPU_CLOCK_NTSC / (32 * freq)) - 1;
+        if (p > 2047) return 'low';
+        if (p < 2) return 'high';
+        return null;
+      }
+      case 'saw': { // VRC6のこぎり(12bit)
+        const p = Math.round(CPU_CLOCK_NTSC / (14 * freq)) - 1;
+        if (p > 4095) return 'low';
+        if (p < 3) return 'high';
+        return null;
+      }
+      case 'fme7': {
+        const p = Math.round(CPU_CLOCK_NTSC / (32 * freq));
+        if (p > 4095) return 'low';
+        if (p < 1) return 'high';
+        return null;
+      }
+      case 'fds': { // 周波数比例レジスタなので上限が高音側
+        const p = Math.round((freq * 65536 * 64) / CPU_CLOCK_NTSC);
+        if (p > 4095) return 'high';
+        if (p < 1) return 'low';
+        return null;
+      }
+      case 'n163': { // 有効ch数と波形長で上限周波数が変わる(時間多重のため)
+        const r = Math.round((freq * 15 * 65536 * (o.waveLen || N163_WAVE_LEN) * (o.numCh || 1)) / CPU_CLOCK_NTSC);
+        if (r > 262143) return 'high';
+        if (r < 1) return 'low';
+        return null;
+      }
+      case 'vrc7': {
+        if ((freq * 524288) / (49716 * 128) > 511) return 'high'; // block=7でもfnum溢れ
+        if ((freq * 524288) / 49716 < 1) return 'low';            // block=0でもfnum=0
+        return null;
+      }
+      default: return null; // ノイズ/DPCMは音程軸が別なので対象外
+    }
+  }
+
+  const PITCH_NOTE_NAMES = ['c', 'c+', 'd', 'd+', 'e', 'f', 'f+', 'g', 'g+', 'a', 'a+', 'b'];
+  function noteNumberToName(n) {
+    if (n == null) return '?';
+    return 'o' + Math.floor(n / 12) + PITCH_NOTE_NAMES[((n % 12) + 12) % 12];
+  }
+
   // VRC7: freq = fnum * 2^block * 49716 / 2^19
   function vrc7FreqToFnumBlock(freq) {
     for (let block = 0; block <= 7; block++) {
@@ -507,14 +572,22 @@
   function buildSegments(tokens, initialTempo, errors, settings, defaultInstrument, chanCaps) {
     const caps = chanCaps || { selfDelay: true, toneEnv: 'duty', psAllowed: false };
     const cfg = settings || { octaveRev: 0, gateDenom: 8 };
+    // volMax: v<n>の上限。本家ppmck(datamake.c _VOLUME)と同じくFDS/VRC6のこぎり波だけ63、
+    // 他は15。volDefault: v<n>未指定時の音量(FDS=32=実効フルゲイン、VRC6サウ=63、他=15)
+    const volMax = caps.volMax == null ? 15 : caps.volMax;
+    const volDefault = caps.volDefault == null ? volMax : caps.volDefault;
     const state = {
-      octave: 4, defaultLength: 4, volume: 15, gate: 8, instrument: defaultInstrument || 0,
+      octave: 4, defaultLength: 4, volume: volDefault, gate: 8, instrument: defaultInstrument || 0,
       envelopeV: null, envelopeVr: 255, transpose: 0, detune: 0, qFrames: null,
       vibrato: null, pitchEnv: null, pitchEnvDelay: 0, portamento: null, noteEnv: null,
       sweepSpeed: 0, sweepDepth: 0, fme7Noise: null, fme7EnvShape: null, fme7EnvPeriod: 0,
       // selfDelay: SD<n>の<n>(null=SDOF)。smooth: SM(true)/SMOF(false)。
       // pendingPitchShift: PSトークン読み取り直後〜次の音符処理までのワンショットフラグ
       selfDelay: null, smooth: false, pendingPitchShift: false,
+      // SA<num>(ppmckc公式、N163用): D/EP/MPの値を<num>回左シフトしてから周波数値へ
+      // 加減算する(pitchRegisterOffset参照)。EP/MPテーブル値・Dが1byte幅なのに対し
+      // N163の周波数レジスタは18bitで、深いビブラート等はシフト無しでは表現できない
+      pitchSa: 0,
       // toneEnv: @@<n>で選択中のデューティ(音色)エンベロープ番号(null=未選択=@<n>の
       // 固定デューティ)。releaseTone: @@r<n>のリリース音色番号(255=OFF)
       toneEnv: null, releaseTone: 255
@@ -634,6 +707,7 @@
           fme7EnvShape: state.fme7EnvShape,
           fme7EnvPeriod: state.fme7EnvPeriod,
           smooth: state.smooth,
+          pitchSa: state.pitchSa,
           toneEnv: state.toneEnv,
           releaseTone: state.releaseTone,
           // リリース音色の値がデューティエンベロープ番号か固定音色番号かの区別
@@ -656,8 +730,14 @@
         // ソフトウェアエンベロープ(envelopeV)だけでなくFME7ハードウェアエンベロープ
         // (fme7EnvShape、S<n>で設定・解除するコマンドが無く一度設定すると残り続けるため
         // ここで明示的に解除する)も同時にクリアする
-        case 'volume': state.volume = Math.max(0, Math.min(15, tok.value)); state.envelopeV = null; state.fme7EnvShape = null; break;
-        case 'volumeRel': state.volume = Math.max(0, Math.min(15, state.volume + tok.delta)); state.envelopeV = null; state.fme7EnvShape = null; break;
+        // 上限超え(v16を2A03に書く等)は本家ppmck同様エラー(ABNORMAL_VOLUME_VALUE)。
+        // 相対指定の範囲超えも本家同様エラー(VOLUME_RANGE_OVER/UNDER)だがこちらはクランプに留める
+        case 'volume':
+          if (tok.value < 0 || tok.value > volMax) {
+            errors.push({ message: T('v の値は 0〜{max} で指定してください ({v})', { max: volMax, v: tok.value }) });
+          }
+          state.volume = Math.max(0, Math.min(volMax, tok.value)); state.envelopeV = null; state.fme7EnvShape = null; break;
+        case 'volumeRel': state.volume = Math.max(0, Math.min(volMax, state.volume + tok.delta)); state.envelopeV = null; state.fme7EnvShape = null; break;
         case 'gate': state.gate = Math.max(0, Math.min(8, tok.value)); state.qFrames = null; break;
         case 'quantizeFrames': state.qFrames = Math.max(0, tok.value); break;
         case 'tempo': tempo = tok.value; break;
@@ -788,6 +868,19 @@
           noteHistory.length = 0;
           break;
         case 'smooth': state.smooth = tok.value; break;
+        // SA<num>(N163専用、state.pitchSa冒頭コメント参照)。本家仕様どおり範囲0〜8
+        case 'pitchShiftAmount': {
+          if (!caps.n163) {
+            errors.push({ message: T('SA はN163チャンネル専用です') });
+            break;
+          }
+          if (tok.value == null || tok.value < 0 || tok.value > 8) {
+            errors.push({ message: T('SA の値は 0〜8 で指定してください ({v})', { v: tok.value }) });
+            break;
+          }
+          state.pitchSa = tok.value;
+          break;
+        }
         case 'pitchShift': state.pendingPitchShift = true; break;
         case 'tie': {
           if (segments.length > 0) segments[segments.length - 1].tieNext = true;
@@ -1083,6 +1176,11 @@
       if (table && epTick >= delay) offset += stepEnvelope(table, epTick - delay);
     }
     if (vibSeq) offset += vibSeq[tick + fx.mp];
+    // SA<num>(N163専用): 本家仕様どおりD/EP/MPの合算値を<num>回左シフトする
+    // (実機はdetune_plus_with_asl等の共通aslループ、sounddrv.h freq_add_mcknumber参照)。
+    // PT/PS(当プロジェクト独自拡張)はレジスタ値から直接算出した全精度オフセットなので
+    // シフト対象にしない。
+    if (seg.pitchSa) offset *= (1 << seg.pitchSa);
     if (ptSeq) offset += ptSeq[tick + fx.pt];
     if (psSeq) offset += psSeq[tick];
     return offset;
@@ -1238,7 +1336,11 @@
   // デューティ値を第3引数で渡す(dutyOpt={env,fixedDuty}を渡した時のみ。デューティは
   // 音量と同じレジスタに同居するため、音量が変わらなくてもデューティが変われば書く)。
   // dutyOptを渡さないチップでは第3引数はundefinedで、writeFn側も従来通り無視する
-  function writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable, writeFn, seg, dutyOpt) {
+  // volMax: 音量値の上限(省略時15)。FDS/VRC6のこぎり波だけは本家ppmck同様に音量が6bit
+  // (0-63)なので63を渡す(datamake.cの_VOLUME範囲チェックがFMTRACK|VRC6SAWTRACKだけ0-63、
+  // 他は0-15になっているのに合わせた。2026-08-24)
+  function writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable, writeFn, seg, dutyOpt, volMax) {
+    const vMax = volMax == null ? 15 : volMax;
     const dutyOf = dutyOpt
       ? (t) => dutyAt(seg, dutyOpt.env, t, gateFrames, dutyOpt.fixedDuty)
       : () => undefined;
@@ -1246,7 +1348,7 @@
     let lastDuty;
     let dutyInit = false;
     for (let t = 0; t < gateFrames; t++) {
-      const vol = Math.max(0, Math.min(15, stepEnvelope(vTable, t)));
+      const vol = Math.max(0, Math.min(vMax, stepEnvelope(vTable, t)));
       const duty = dutyOf(t);
       if (vol !== lastVol || !dutyInit || duty !== lastDuty) {
         writeFn(startFrame + t, vol, duty);
@@ -1259,7 +1361,7 @@
       if (vrTable) {
         let lastRVol = -1;
         for (let t = gateFrames; t < dur; t++) {
-          const vol = Math.max(0, Math.min(15, stepEnvelope(vrTable, t - gateFrames)));
+          const vol = Math.max(0, Math.min(vMax, stepEnvelope(vrTable, t - gateFrames)));
           const duty = dutyOf(t);
           if (vol !== lastRVol || !dutyInit || duty !== lastDuty) {
             writeFn(startFrame + t, vol, duty);
@@ -1719,10 +1821,13 @@
             writeLog[startFrame].push({ addr: 0xB002, value: 0x80 | ((period >> 8) & 0x0F) });
           }
           if (vTable) {
+            // 本家ppmck同様、音量(0-63)をそのまま蓄積レートへ書く(以前は0-15を4倍していた)。
+            // 43以上は実機の8bitアキュムレータが桁溢れして鋸波が崩れるが、それも実機通り
             writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable,
-              (f, vol) => writeLog[f].push({ addr: 0xB000, value: Math.min(63, vol * 4) }));
+              (f, vol) => writeLog[f].push({ addr: 0xB000, value: Math.min(63, vol) }),
+              undefined, undefined, 63);
           } else {
-            const accumRate = Math.min(63, seg.volume * 4);
+            const accumRate = Math.min(63, seg.volume);
             writeLog[startFrame].push({ addr: 0xB000, value: accumRate });
             if (gateFrames < dur) writeLog[startFrame + gateFrames].push({ addr: 0xB000, value: 0 });
           }
@@ -1983,9 +2088,10 @@
           // 書き換える(FDSの実機ハードウェアエンベロープ(bit7=0)は使わない。あちらは
           // nsf2mml側の抽出でのみ使う独立した経路)
           writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable,
-            (f, vol) => writeLog[f].push({ addr: 0x4080, value: 0x80 | Math.min(32, vol * 2) }));
+            (f, vol) => writeLog[f].push({ addr: 0x4080, value: 0x80 | Math.min(63, vol) }),
+            undefined, undefined, 63);
         } else {
-          const gain = Math.min(32, seg.volume * 2);
+          const gain = Math.min(63, seg.volume);
           writeLog[startFrame].push({ addr: 0x4080, value: 0x80 | gain });
         }
         // @@r<n>(リリース音色): FDSの音色=波形メモリなので、ゲートオフの瞬間に
@@ -2136,7 +2242,9 @@
           writePitchModulation(writeLog, startFrame, dur, seg, env,
             freq => n163FreqReg(freq, currentRoundedLen, num), 262143, writeN163Freq);
         } else {
-          const freqReg = applyDetune(n163FreqReg(seg.freq, currentRoundedLen, num), seg.detune, 262143);
+          // 無変調ノートのD<n>もSA<num>のシフト対象(pitchRegisterOffset冒頭コメント参照)
+          const detune = (seg.detune || 0) * (1 << (seg.pitchSa || 0));
+          const freqReg = applyDetune(n163FreqReg(seg.freq, currentRoundedLen, num), detune, 262143);
           writeN163Freq(startFrame, freqReg);
         }
         const { vTable, vrTable } = resolveEnvTables(seg, env);
@@ -2513,6 +2621,8 @@
       ...vrc6Letters.slice(0, 2),
       ...(expansionLetterMap.mmc5 || [])
     ]);
+    const fdsLetters = new Set(expansionLetterMap.fds || []);
+    const vrc6SawLetter = vrc6Letters[2];
     const instrumentToneLetters = new Set([
       ...(expansionLetterMap.fds || []),
       ...(expansionLetterMap.n163 || []),
@@ -2531,7 +2641,11 @@
         toneEnv: dutyToneLetters.has(ch) ? 'duty' : (instrumentToneLetters.has(ch) ? 'instrument' : null),
         vrc7: vrc7Letters.has(ch),
         n163: (expansionLetterMap.n163 || []).includes(ch),
-        psAllowed: ch === 'A' || ch === 'B' || ch === 'C'
+        psAllowed: ch === 'A' || ch === 'B' || ch === 'C',
+        // 音量6bitチャンネル(本家ppmck FMTRACK|VRC6SAWTRACK相当)。FDSは$4080の実効ゲインが
+        // 32で頭打ちなので既定音量32、VRC6サウは蓄積レートそのままなので63
+        volMax: (fdsLetters.has(ch) || ch === vrc6SawLetter) ? 63 : 15,
+        volDefault: fdsLetters.has(ch) ? 32 : (ch === vrc6SawLetter ? 63 : 15)
       });
       segmentsByChannel[ch] = segments;
       immediateWritesByChannel[ch] = immediateWrites;
@@ -2585,6 +2699,65 @@
         frame += seg.durationFrames;
       }
       highlightRanges[ch] = ranges;
+    }
+
+    // ── 音域外の音符を「鳴らさない」+警告(2026-08-25) ────────────────
+    // クランプして別音程で鳴らす旧挙動をやめる(pitchRangeIssue のコメント参照)。
+    // seg.freq=null にすると以降のwriteLog生成では休符として扱われ、音程は変えずに
+    // その音だけ無音になる。警告はチャンネルごとに1件へまとめる(同じ低音が延々続く曲で
+    // メッセージが溢れないように、件数だけ添える)。
+    const warnings = [];
+    {
+      const chipOf = {};
+      chipOf.A = chipOf.B = { kind: 'pulse', periodMax: 2047, label: '2A03 ' + T('パルス') };
+      chipOf.C = { kind: 'triangle', label: '2A03 ' + T('三角波') };
+      for (const exp of expansions) {
+        (expansionLetterMap[exp] || []).forEach((L, i) => {
+          if (exp === 'vrc6') chipOf[L] = (i === 2)
+            ? { kind: 'saw', label: 'VRC6 ' + T('ノコギリ波') }
+            : { kind: 'pulse', periodMax: 4095, label: 'VRC6 ' + T('パルス') };
+          else if (exp === 'mmc5') chipOf[L] = { kind: 'pulse', periodMax: 2047, label: 'MMC5 ' + T('パルス') };
+          else if (exp === 'fme7') chipOf[L] = { kind: 'fme7', label: 'FME-7' };
+          else if (exp === 'fds')  chipOf[L] = { kind: 'fds',  label: 'FDS' };
+          else if (exp === 'vrc7') chipOf[L] = { kind: 'vrc7', label: 'VRC7' };
+          else if (exp === 'n163') chipOf[L] = { kind: 'n163', label: 'N163' };
+        });
+      }
+      // N163の有効ch数(segmentsToWriteLogN163へ渡す値と同じ規則で求める)
+      let numN163 = 0;
+      (expansionLetterMap.n163 || []).forEach((L, i) => {
+        if ((segmentsByChannel[L] || []).some(s => s.freq != null)) numN163 = i + 1;
+      });
+      const nWaves = (envelopes && envelopes.n) || {};
+      for (const ch of channelLetters) {
+        const chip = chipOf[ch];
+        if (!chip) continue;
+        let frame = 0, count = 0, first = null;
+        for (const seg of segmentsByChannel[ch] || []) {
+          if (seg.freq != null) {
+            const opt = chip.kind === 'n163'
+              ? { waveLen: (nWaves[seg.instrument] || []).length || N163_WAVE_LEN, numCh: Math.max(1, numN163) }
+              : chip;
+            const issue = pitchRangeIssue(chip.kind, seg.freq, opt);
+            if (issue) {
+              if (!first) first = { issue, frame, note: seg.noteNumber, srcStart: seg.srcStart };
+              count++;
+              seg.freq = null; // 音程は変えず、その音だけ鳴らさない
+            }
+          }
+          frame += seg.durationFrames;
+        }
+        if (first) {
+          const params = {
+            ch, note: noteNumberToName(first.note), chip: chip.label,
+            sec: (first.frame / FRAME_RATE_NTSC).toFixed(1),
+            more: count > 1 ? T('(他 {n} 音)', { n: count - 1 }) : ''
+          };
+          warnings.push({ srcStart: first.srcStart, message: first.issue === 'low'
+            ? T('{ch}: {note} ({sec}秒) は {chip} の音域より低いため鳴りません{more}。オクターブを上げてください', params)
+            : T('{ch}: {note} ({sec}秒) は {chip} の音域より高いため鳴りません{more}。オクターブを下げてください', params) });
+        }
+      }
     }
 
     const tracks = {};
@@ -2669,6 +2842,52 @@
       totalFrames = naturalEndFrame + loopLen;
     }
 
+    // ── VRC7自作音色(@0)の同時使用チェック ─────────────────────────────
+    // 実機VRC7の自作音色スロット(レジスタ$00-$07)はチップ全体で1系統しかないため、
+    // 複数チャンネルが同時に「異なるOP<n>の自作音色」を鳴らすことはできない(後から
+    // 書いたOP<n>が先に鳴っている音の音色も上書きしてしまう)。時間をずらして使い分ける
+    // のは正当なので、発音区間が実際に重なり、かつその時点の選択OP<n>が異なる場合のみ
+    // エラーにする(OP<n>未発行の@0同士は現在ロード済みの音色を共有する意図とみなし許容)。
+    (() => {
+      const vrc7Ls = (expansionLetterMap.vrc7 || []).filter((l) => (segmentsByChannel[l] || []).length);
+      if (vrc7Ls.length < 2) return;
+      const perCh = vrc7Ls.map((l) => {
+        const iv = [];
+        let f = 0;
+        for (const seg of segmentsByChannel[l]) {
+          if (seg.freq != null && (seg.instrument || 0) === 0) iv.push({ s: f, e: f + seg.durationFrames });
+          f += seg.durationFrames;
+        }
+        const tones = (immediateWritesByChannel[l] || [])
+          .filter((w) => w.kind === 'vrc7Tone')
+          .sort((a, b) => a.frame - b.frame);
+        const toneAt = (fr) => {
+          let v = null;
+          for (const t of tones) { if (t.frame <= fr) v = t.value; else break; }
+          return v;
+        };
+        return { letter: l, iv, toneAt };
+      });
+      for (let i = 0; i < perCh.length; i++) {
+        for (let j = i + 1; j < perCh.length; j++) {
+          for (const a of perCh[i].iv) {
+            for (const b of perCh[j].iv) {
+              const s = Math.max(a.s, b.s);
+              if (s >= Math.min(a.e, b.e)) continue;
+              const ta = perCh[i].toneAt(s);
+              const tb = perCh[j].toneAt(s);
+              if (ta != null && tb != null && ta !== tb) {
+                errors.push({ message: T(
+                  'VRC7の自作音色(@0)はチップ全体で1系統です: {sec}秒付近で {chA}(OP{a}) と {chB}(OP{b}) が同時に異なる自作音色を使っています',
+                  { sec: (s / FRAME_RATE_NTSC).toFixed(1), chA: perCh[i].letter, a: ta, chB: perCh[j].letter, b: tb }) });
+                return; // 最初の1件で十分(同種の衝突が大量に並ぶのを防ぐ)
+              }
+            }
+          }
+        }
+      }
+    })();
+
     return {
       tracks,
       totalFrames,
@@ -2686,6 +2905,9 @@
       endMarkerSrcRange,
       highlightRanges,
       errors,
+      // warnings: コンパイルは成立するが意図どおり鳴らない箇所(音域外など)。
+      // errorsと違い再生/書き出しは中止しない(UI側は表示のみ)
+      warnings,
       frameRate: FRAME_RATE_NTSC,
       statusAddr: STATUS_ADDR,
       meta,

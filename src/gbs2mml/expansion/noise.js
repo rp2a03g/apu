@@ -73,7 +73,7 @@
     const events = extractEvents(snapshots, playFps);
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },

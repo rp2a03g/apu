@@ -95,7 +95,8 @@
       const period    = r.lo | ((r.hi & 0x0F) << 8);
       const enabled   = !!(r.hi & 0x80);
       const accumRate = r.ctrl & 0x3F;
-      const volume    = Math.min(15, Math.round(accumRate / 4));
+      // MMLのVRC6のこぎり波音量は$B000蓄積レートの生値(0-63、本家ppmck同様。2026-08-24)
+      const volume    = accumRate;
       const freq = sawFreq(period);
       const note = (enabled && accumRate > 0 && period >= 4) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
@@ -123,7 +124,7 @@
 
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
     }
     // VRC6パルス/サウトゥースは周期レジスタ(値が下がるほど音程が上がる)なので
     // directionUp=false(src/convert/pitch.js fitVibrato参照)。

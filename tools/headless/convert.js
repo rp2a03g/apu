@@ -107,11 +107,12 @@ function defaultSong(format, header) {
  * バイト列を MML へ変換する
  * @param {Uint8Array} rawBytes
  * @param {string} format
- * @param {object} opt {song(省略時はヘッダ既定), seconds, bpm, sampleRate}
+ * @param {object} opt {song(省略時はヘッダ既定), seconds, bpm, sampleRate,
+ *                      cmd(変換設定 src/convert/options.js。省略時は忠実再現=従来通り)}
  */
 async function convertBytes(rawBytes, format, opt = {}) {
   const MML = ctx();
-  const { seconds = 30, bpm = null, sampleRate = 48000 } = opt;
+  const { seconds = 30, bpm = null, sampleRate = 48000, cmd = undefined } = opt;
   const { bytes, header, songs } = await probe(rawBytes, format);
   const song = opt.song != null ? opt.song : defaultSong(format, header);
 
@@ -127,19 +128,19 @@ async function convertBytes(rawBytes, format, opt = {}) {
     tCapture = Date.now() - t0;
     r = MML.NSF2MML.convert(
       cap.writeLog, bytes, header, song, cap.initRegs, cap.initWrites,
-      { bpm, n163Snapshots: cap.n163Snapshots });
+      { bpm, cmd, n163Snapshots: cap.n163Snapshots });
     r.capture = cap;
   } else if (format === 'spc') {
-    r = MML.SPC2MML.fromSpc(bytes, Math.min(seconds, 60), { bpm });
+    r = MML.SPC2MML.fromSpc(bytes, seconds, { bpm, cmd });
   } else if (format === 'kss') {
-    r = await MML.KSS2MML.fromKss(bytes, song, seconds, { bpm });
+    r = await MML.KSS2MML.fromKss(bytes, song, seconds, { bpm, cmd });
   } else if (format === 'gbs') {
-    r = await MML.GBS2MML.fromGbs(bytes, song, seconds, { bpm });
+    r = await MML.GBS2MML.fromGbs(bytes, song, seconds, { bpm, cmd });
   } else if (format === 'hes') {
-    r = await MML.HES2MML.fromHes(bytes, song, seconds, { bpm });
+    r = await MML.HES2MML.fromHes(bytes, song, seconds, { bpm, cmd });
   } else if (format === 'vgm') {
     // channelMap を渡さないと defaultPlan + 全ch抽出になる(UI未操作時と同じ挙動)
-    r = await MML.VGM2MML.fromVgm(bytes, seconds, { bpm });
+    r = await MML.VGM2MML.fromVgm(bytes, seconds, { bpm, cmd });
   } else {
     throw new Error(`未対応フォーマット: ${format}`);
   }
@@ -152,6 +153,24 @@ async function convertBytes(rawBytes, format, opt = {}) {
     files: r.dpcmFiles || r.dmcFiles || [],
     tCapture, tConvert: total - tCapture,
   });
+}
+
+/**
+ * --preset / --cmd から変換設定(options.cmd)を組み立てる。
+ * --preset plain|faithful を土台に、--cmd "D=0,EP=0,SHAPE_REST=1" で個別上書き。
+ * どちらも無ければ undefined(=忠実再現、従来通り)。
+ */
+function parseCmdFlags(preset, cmdStr) {
+  if (!preset && !cmdStr) return undefined;
+  const MML = ctx();
+  const base = preset ? MML.Convert.CMD_PRESETS[preset] : null;
+  if (preset && !base) throw new Error(`未知のプリセット: ${preset}`);
+  const out = Object.assign({}, base || {});
+  for (const kv of (cmdStr || '').split(',').filter(Boolean)) {
+    const [k, v] = kv.split('=');
+    out[k.trim()] = !(v === undefined || v === '0' || v === 'false' || v === 'off');
+  }
+  return out;
 }
 
 /** パス指定で1曲変換する(アーカイブなら opt.entry 番目) */
@@ -175,7 +194,7 @@ if (require.main === module) {
     return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : def;
   };
   if (!file) {
-    console.error('usage: node tools/headless/convert.js <file> [--song N] [--entry N] [--sec S] [-o out.mml] [--list]');
+    console.error('usage: node tools/headless/convert.js <file> [--song N] [--entry N] [--sec S] [-o out.mml] [--list] [--preset plain|faithful] [--cmd D=0,EP=0,...]');
     process.exit(2);
   }
 
@@ -190,6 +209,7 @@ if (require.main === module) {
       song: flag('--song', null) != null ? parseInt(flag('--song', '0'), 10) : null,
       entry: parseInt(flag('--entry', '0'), 10),
       seconds: parseInt(flag('--sec', '30'), 10),
+      cmd: parseCmdFlags(flag('--preset', null), flag('--cmd', null)),
     });
     const out = flag('-o', null);
     const title = r.header.songName || r.header.title || r.header.gameName || '(no title)';

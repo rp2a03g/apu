@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-08-22 23:25:42
+ * Built by tools/build-capture-workers.ps1 at 2026-08-27 10:08:06
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-08-22 23:25:42';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-08-27 10:08:06';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -929,7 +929,7 @@
       this.koff = 0;  // KOFF ラッチ
       this.endx = 0;  // ENDX フラグ
       this.mutedVoices = 0;  // ミュートビットマスク (bit0=Voice0 ... bit7=Voice7)
-      this.voiceVol = new Array(8).fill(1); // ボイスごとの音量(0〜1、既定1)。鍵盤表示のch別音量バー用
+      this.voiceVol = new Array(8).fill(1); // ボイスごとの音量(0〜2、既定1=100%)。鍵盤表示のch別音量バー用
       // エコー
       this.echoPos = 0;
       this.echoBufL = new Int32Array(8192);
@@ -1050,7 +1050,11 @@
         const mode = (gain >> 5) & 3;
         const rate = gain & 0x1F;
         if (gain & 0x80) {
-          // カスタムモード
+          // カスタムモード。rate=0は実機では「周期無限=エンベロープ変化なし」(sustainの
+          // sr===0と同じ扱い)。RATE_TABLE[0]=0のまま比較すると毎サンプル発火=最速減衰に
+          // 化け、GAIN $A0(exp減衰,rate0)を「現レベル保持」として使うFF4等のAKAOドライバで
+          // 全ボイスが数フレームで無音になっていた(2026-08-25、FF4全曲異常の真因)。
+          if (rate === 0) { v.env = Math.max(0, Math.min(0x7FF, v.env)); return; }
           v.envRate++;
           if (v.envRate >= RATE_TABLE[rate]) {
             v.envRate = 0;
@@ -1654,6 +1658,9 @@
     mmc5pulse1:'mmc5', mmc5pulse2:'mmc5',
     fme7a:     'fme7', fme7b:'fme7', fme7c:'fme7',
     n163_0:    'n163', n163_1:'n163', n163_2:'n163', n163_3:'n163',
+    n163_4:    'n163', n163_5:'n163', n163_6:'n163', n163_7:'n163',
+    vrc7_0:    'vrc7', vrc7_1:'vrc7', vrc7_2:'vrc7',
+    vrc7_3:    'vrc7', vrc7_4:'vrc7', vrc7_5:'vrc7',
   };
 
   // type → そのチップ内でのチャンネル通し番号(0始まり)。
@@ -1664,7 +1671,42 @@
     mmc5pulse1: 0, mmc5pulse2: 1,
     fme7a: 0, fme7b: 1, fme7c: 2,
     n163_0: 0, n163_1: 1, n163_2: 2, n163_3: 3,
+    n163_4: 4, n163_5: 5, n163_6: 6, n163_7: 7,
+    vrc7_0: 0, vrc7_1: 1, vrc7_2: 2, vrc7_3: 3, vrc7_4: 4, vrc7_5: 5,
   };
+
+  // VRC7のfnum換算(kss2mml/converter.js vrc7FnumRawと同じ式)。fnum/blockの対数表現のため
+  // EP/MP/PT(生レジスタ加算のピッチ変調)は使えないが、D<n>はfnumが同一block内で周波数に
+  // 比例するため使える(compiler.js segmentsToWriteLogVrc7参照)。detectChorusDetune専用。
+  function vrc7FnumRawSpc(freq) {
+    for (let block = 0; block <= 7; block++) {
+      const fnum = (freq * 524288) / (49716 * Math.pow(2, block));
+      if (fnum <= 511) return fnum;
+    }
+    return 511;
+  }
+
+  // ── SPCノイズ→2A03ノイズ周期idx変換 ─────────────────────────────────
+  // SPCのノイズはFLG($6C)下位5bitのレートでLFSRを進める(spcDsp.js _updateNoise、
+  // 更新周波数=32000/RATE_TABLE[rate])。2A03ノイズの16通りの周期(NTSC)のうち聴感上
+  // 最も近いものへ対数距離で丸め、nsf2mml converter.jsのnoisePeriodToNoteNumと同じ
+  // 規則(noteNumber = 31 - periodIdx)でノート番号にする。
+  const SPC_RATE_TABLE = [
+    0,2048,1536,1280,1024,768,640,512,384,320,256,192,160,128,96,80,
+    64,48,40,32,24,20,16,12,10,8,6,5,4,3,2,1,
+  ];
+  const NES_NOISE_PERIODS = [4,8,16,32,64,96,128,160,202,254,380,508,762,1016,2034,4068];
+  function spcNoiseNoteNum(rate) {
+    const div = SPC_RATE_TABLE[rate & 0x1F];
+    if (!div) return null; // rate=0はLFSR停止(無音扱い)
+    const freq = DSP_RATE / div;
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < NES_NOISE_PERIODS.length; i++) {
+      const d = Math.abs(Math.log((1789773 / NES_NOISE_PERIODS[i]) / freq));
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return 31 - best;
+  }
 
   // ── ピッチ変換 ───────────────────────────────────────────────────────
   // pitch: DSP 14bit ピッチ値。tune: そのボイスが使うBRRサンプルの原音チューニング
@@ -1715,6 +1757,7 @@
       case 'fme7a': case 'fme7b': case 'fme7c': return fme7ToneRaw;
       case 'fds': return fdsPeriodRawSpc;
       case 'n163_0': case 'n163_1': case 'n163_2': case 'n163_3':
+      case 'n163_4': case 'n163_5': case 'n163_6': case 'n163_7':
         return (freq) => n163FreqRegRawSpc(freq, n163NumCh);
       default: return null;
     }
@@ -1726,38 +1769,62 @@
   // 周期が不明瞭で信頼度が低くなるため、呼び出し側(computeSrcnFineTune)で閾値により
   // フォールバックする。倍音/低調波の取り違えを避けるため、自己相関のピーク(全体最大の
   // 90%超)のうち最短ラグ=基本波を採用する。
-  function detectBrrFundamental(brrBytes) {
+  // brrBytes: BRRサンプル全体。loopByteOffset(省略可): DIRのループ開始アドレスの
+  // サンプル先頭からのバイトオフセット(_collectBrrSamplesが採取)。あればループ以降=
+  // 完全な定常部を解析窓にする(アタック過渡による誤検出を避ける)。
+  //
+  // ★2026-08-25 自己相関の「最初の0.9maxピーク」方式からYIN(CMNDF)方式へ全面差し替え。
+  // 旧方式は倍音の強いサンプル(FF4のブラス系srcn65等)で第2〜4倍音のラグを掴み、原音推定が
+  // 丸ごと1〜2オクターブずれて全ノートのオクターブが崩壊していた(実測: V2の実出力280Hzに
+  // 対し変換はo6=1109Hz)。YINは累積平均正規化差分d'(τ)が「最初に閾値を下回る谷」を採る
+  // 標準的なオクターブ頑健化で、倍音ラグでは谷が浅くならないため誤爆しない。
+  // 谷は放物線補間でサブサンプル化(整数ラグだと高音サンプルほど±数十セント粗くなるため)。
+  function detectBrrFundamental(brrBytes, loopByteOffset) {
     const pcm = decodeBrrBytes(brrBytes);
     const L0 = pcm.length;
-    if (L0 < 128) return null;
-    // アタックの過渡を避けるため少し後ろから、かつ長すぎる場合は上限を設けて定常部を見る
-    const start = Math.min(L0 >> 2, 512);
-    const end   = Math.min(L0, start + 4000);
-    const N = end - start;
-    if (N < 128) return null;
-    let mean = 0;
-    for (let i = start; i < end; i++) mean += pcm[i];
-    mean /= N;
-    const s = new Float64Array(N);
-    for (let i = 0; i < N; i++) s[i] = pcm[start + i] - mean;
-    const minLag = 8, maxLag = Math.min(1600, N >> 1);
-    let gMax = -Infinity;
-    const vals = new Float64Array(maxLag);
-    for (let lag = minLag; lag < maxLag; lag++) {
-      let sum = 0, e1 = 0, e2 = 0;
-      for (let i = 0; i + lag < N; i++) { sum += s[i] * s[i + lag]; e1 += s[i] * s[i]; e2 += s[i + lag] * s[i + lag]; }
-      const norm = sum / (Math.sqrt(e1 * e2) || 1);
-      vals[lag] = norm;
-      if (norm > gMax) gMax = norm;
+    if (L0 < 256) return null;
+    const W = 1024;                       // 差分積分の窓幅
+    const maxTau = Math.min(1200, L0 >> 1); // 最低約27Hzまで
+    // 解析開始点: ループ開始(=定常部)が分かればそこ、無ければ従来の「少し後ろ」。
+    // 窓+最大ラグが収まらない場合は後ろから詰める
+    let start = loopByteOffset != null && loopByteOffset >= 0
+      ? Math.floor(loopByteOffset / 9) * 16
+      : Math.min(L0 >> 2, 512);
+    if (start + W + maxTau > L0) start = Math.max(0, L0 - W - maxTau);
+    if (maxTau < 32) return null;
+    const x = pcm;
+    // d(τ) = Σ_{i<W} (x[i]-x[i+τ])^2 → d'(τ) = d(τ)·τ / Σ_{u≤τ} d(u)
+    const d = new Float64Array(maxTau);
+    for (let tau = 1; tau < maxTau; tau++) {
+      let sum = 0;
+      for (let i = 0; i < W; i++) { const diff = x[start + i] - x[start + i + tau]; sum += diff * diff; }
+      d[tau] = sum;
     }
-    if (gMax <= 0) return null;
-    const thr = 0.9 * gMax;
+    const dn = new Float64Array(maxTau);
+    dn[0] = 1;
+    let cum = 0;
+    for (let tau = 1; tau < maxTau; tau++) { cum += d[tau]; dn[tau] = cum > 0 ? d[tau] * tau / cum : 1; }
+    // 最初に閾値を下回る局所最小を採る(YIN本来の手順)。見つからなければ全体最小
+    const THRESHOLD = 0.15;
     let period = -1;
-    for (let lag = minLag + 1; lag < maxLag - 1; lag++) {
-      if (vals[lag] > thr && vals[lag] >= vals[lag - 1] && vals[lag] >= vals[lag + 1]) { period = lag; break; }
+    for (let tau = 2; tau < maxTau - 1; tau++) {
+      if (dn[tau] < THRESHOLD && dn[tau] <= dn[tau + 1]) { period = tau; break; }
     }
-    if (period < 1) return null;
-    return { freq: DSP_RATE / period, conf: gMax };
+    if (period < 0) {
+      let mn = Infinity;
+      for (let tau = 2; tau < maxTau - 1; tau++) if (dn[tau] < mn) { mn = dn[tau]; period = tau; }
+      if (period < 0) return null;
+    }
+    // 谷の放物線補間(サブサンプル精度)
+    let refined = period;
+    const y0 = dn[period - 1], y1 = dn[period], y2 = dn[period + 1];
+    const denom = y0 - 2 * y1 + y2;
+    if (denom > 0) {
+      const delta = 0.5 * (y0 - y2) / denom;
+      if (delta > -1 && delta < 1) refined = period + delta;
+    }
+    // 信頼度: 1 - d'(谷)。周期が明瞭なほど1に近づく(打楽器/ノイズは低くなり補正対象外へ)
+    return { freq: DSP_RATE / refined, conf: 1 - Math.min(1, y1) };
   }
 
   // ── srcn ごとの原音チューニング補正(半音)を算出 ─────────────────
@@ -1774,7 +1841,7 @@
     for (const srcn in brrSamples) {
       const brr = brrSamples[srcn];
       if (!brr || !brr.bytes || brr.bytes.length === 0) continue;
-      const f = detectBrrFundamental(brr.bytes);
+      const f = detectBrrFundamental(brr.bytes, brr.loopByteOffset);
       if (f && f.conf >= FUNDAMENTAL_CONF_MIN && f.freq > 0) {
         tune[srcn] = 12 * Math.log2(f.freq / REFERENCE_HZ);
       }
@@ -1806,6 +1873,9 @@
 
   // KON時点のADSR1/ADSR2/GAINから、アタック〜サステインのエンベロープを
   // maxFrames分シミュレートし、1フレーム1値(0-15)の配列にする。
+  // ★2026-08-25 実測エンベロープ方式(capture envLog)への移行で本体からは未使用になった。
+  // Workerバンドル互換とデバッグ用に残置(削除する場合はspc-capture-worker再生成も忘れずに)。
+  // eslint-disable-next-line no-unused-vars
   function simulateSpcEnvelope(adsr1, adsr2, gain, maxFrames) {
     const adsrEn = adsr1 & 0x80;
     let env = 0, envMode = 'attack', envRate = 0;
@@ -1818,6 +1888,9 @@
           const mode = (gain >> 5) & 3;
           const rate = gain & 0x1F;
           if (gain & 0x80) {
+            // rate=0は周期無限=エンベロープ変化なし(実機仕様。spcDsp.js _updateEnvelopeの
+            // 同修正と必ず対で保つこと。FF4等のAKAOがGAIN $A0を「現レベル保持」に使う)
+            if (rate === 0) { /* 変化なし */ } else {
             envRate++;
             if (envRate >= ENV_RATE_TABLE[rate]) {
               envRate = 0;
@@ -1827,6 +1900,7 @@
                 case 2: env += 32; break;
                 case 3: env += (env < 0x600) ? 32 : 8; break;
               }
+            }
             }
           } else {
             env = (gain & 0x7F) << 4;
@@ -1963,7 +2037,10 @@
     for (let srcn = 0; srcn < 256; srcn++) {
       const dirAddr  = ((dir << 8) + srcn * 4) & 0xFFFF;
       const startAddr = player.ram[dirAddr] | (player.ram[(dirAddr+1) & 0xFFFF] << 8);
-      if (startAddr === 0) break;
+      // DIRは疎なことがある(未使用エントリ=0のまま先頭に混ざる。Chrono Trigger等で実測)。
+      // 以前はここで break していたため、最初の空エントリ以降の全サンプルが収集されず、
+      // 波形/@DPCM/チューニング補正が全て空振りしていた。空エントリは飛ばして続行する。
+      if (startAddr === 0 || startAddr === 0xFFFF) continue;
       const brrBytes = [];
       let addr = startAddr;
       for (let blk = 0; blk < 4096; blk++) {
@@ -1972,7 +2049,12 @@
         if (header & 1) break;
         addr += 9;
       }
-      brrSamples[srcn] = { startAddr, bytes: new Uint8Array(brrBytes) };
+      // ループ開始アドレス(DIRエントリ+2)。サンプル範囲内ならバイトオフセットとして持つ
+      // (基音検出の解析窓を完全な定常部=ループ以降に置くため。範囲外/未ループはnull)
+      const loopAddr = player.ram[(dirAddr + 2) & 0xFFFF] | (player.ram[(dirAddr + 3) & 0xFFFF] << 8);
+      const loopByteOffset = (loopAddr >= startAddr && loopAddr < startAddr + brrBytes.length)
+        ? loopAddr - startAddr : null;
+      brrSamples[srcn] = { startAddr, loopByteOffset, bytes: new Uint8Array(brrBytes) };
     }
     return brrSamples;
   }
@@ -1999,18 +2081,32 @@
     const frameLog = Array.from({ length: frames }, () => []);
     _seedInitialFrame(frameLog, spcBytes);
 
+    // envLog[f] = フレーム末尾時点の各ボイスの実エンベロープ値(ENVX相当、0..127)。
+    // AKAO系ドライバはKON後にGAIN直値やADSR書き換えで音量を作るため、KON時点の
+    // レジスタから机上シミュレートする方式では音量が取れない(FF4で実測)。実測値を
+    // そのまま@v化する(NSFのhwEnvSeqと同じ思想)
+    const envLog = Array.from({ length: frames }, () => null);
+    const snapEnv = () => { const e = new Uint8Array(8); for (let c = 0; c < 8; c++) e[c] = player.dsp.voices[c].env >> 4; return e; };
     let frame = 0, samplesInFrame = 0;
+    // off: そのフレーム内での書き込みサンプル位置(0..SAMPLES_PER_FRAME-1)。
+    // ★2026-08-25: 再生(SpcReplayStreamPlayer)がフレーム先頭で全書き込みを一括適用して
+    // いたため、同一フレーム内のKON→KOFFが同じサンプルへ潰れて音が丸ごと消え、AKAO系の
+    // GAIN連続書き込みによる減衰カーブも崩れていた(FF4実測: 音量比0.72・欠落26フレーム)。
+    // 位置を持たせて再生側で実タイミングを再現すると正解と完全一致(比1.000/欠落0)する。
     player.dsp.onWrite = (reg, val) => {
-      if (frame < frames) frameLog[frame].push({ reg: reg & 0x7F, val });
+      if (frame < frames) frameLog[frame].push({ reg: reg & 0x7F, val, off: samplesInFrame });
     };
 
     for (let s = 0; s < totalDspSamples; s++) {
       samplesInFrame++;
       player.renderSample();
-      if (samplesInFrame >= SAMPLES_PER_FRAME) { samplesInFrame = 0; frame++; }
+      if (samplesInFrame >= SAMPLES_PER_FRAME) {
+        if (frame < frames) envLog[frame] = snapEnv();
+        samplesInFrame = 0; frame++;
+      }
     }
 
-    return { log: frameLog, brrSamples: _collectBrrSamples(player), frameRate: FPS_SPC };
+    return { log: frameLog, brrSamples: _collectBrrSamples(player), envLog, frameRate: FPS_SPC };
   };
 
   // captureの非同期チャンク版。SPCは事前レンダリングを持たない完全リアルタイム合成
@@ -2026,9 +2122,17 @@
     const frameLog = Array.from({ length: frames }, () => []);
     _seedInitialFrame(frameLog, spcBytes);
 
+    // envLog: capture()と同じ実測エンベロープ採取(コメントはそちらを参照)
+    const envLog = Array.from({ length: frames }, () => null);
+    const snapEnv = () => { const e = new Uint8Array(8); for (let c = 0; c < 8; c++) e[c] = player.dsp.voices[c].env >> 4; return e; };
     let frame = 0, samplesInFrame = 0;
+    // off: そのフレーム内での書き込みサンプル位置(0..SAMPLES_PER_FRAME-1)。
+    // ★2026-08-25: 再生(SpcReplayStreamPlayer)がフレーム先頭で全書き込みを一括適用して
+    // いたため、同一フレーム内のKON→KOFFが同じサンプルへ潰れて音が丸ごと消え、AKAO系の
+    // GAIN連続書き込みによる減衰カーブも崩れていた(FF4実測: 音量比0.72・欠落26フレーム)。
+    // 位置を持たせて再生側で実タイミングを再現すると正解と完全一致(比1.000/欠落0)する。
     player.dsp.onWrite = (reg, val) => {
-      if (frame < frames) frameLog[frame].push({ reg: reg & 0x7F, val });
+      if (frame < frames) frameLog[frame].push({ reg: reg & 0x7F, val, off: samplesInFrame });
     };
 
     // ★2026-08-20 スライスを「フレーム数固定(CHUNK_FRAMES=10)」から「時間予算固定」へ変更
@@ -2044,6 +2148,7 @@
       samplesInFrame++;
       player.renderSample();
       if (samplesInFrame >= SAMPLES_PER_FRAME) {
+        if (frame < frames) envLog[frame] = snapEnv();
         samplesInFrame = 0;
         frame++;
         if (frame === 1 || performance.now() - sliceStart >= sliceBudgetMs) {
@@ -2053,7 +2158,7 @@
           // 呼び出し元から「もう不要」と言われたらここでループ自体を打ち切る(onProgress側だけ
           // 無視してもエミュレーション自体は最後まで回り続けてしまうため不十分だった)。
           if (shouldCancel && shouldCancel()) {
-            return { log: frameLog, brrSamples: _collectBrrSamples(player), frameRate: FPS_SPC };
+            return { log: frameLog, brrSamples: _collectBrrSamples(player), envLog, frameRate: FPS_SPC };
           }
           sliceStart = performance.now();
         }
@@ -2061,7 +2166,7 @@
     }
     if (onProgress) onProgress(frames, frames, frameLog);
 
-    return { log: frameLog, brrSamples: _collectBrrSamples(player), frameRate: FPS_SPC };
+    return { log: frameLog, brrSamples: _collectBrrSamples(player), envLog, frameRate: FPS_SPC };
   };
 
   // ── DSPログ(フレーム単位のreg/val書き込み列)からボイスごとのノートイベントを抽出 ──
@@ -2086,6 +2191,9 @@
 
   MML.SPC2MML.extractVoiceEvents = function (log, options = {}) {
     const FRAMES = log.length;
+    // envLog(capture()/captureAsync()が採取): フレーム毎の実エンベロープ値(0..127)。
+    // あればVOL L/Rとの積を実測音量列(volSeq、0..127)として各イベントに載せる
+    const envLog = options.envLog || null;
     // srcn → 原音チューニング補正(半音)。未指定なら全サンプル補正0(=従来動作)。
     // ピッチ→ノート変換は、その音符を鳴らしているサンプル(activeSrcn)固有の補正を使う。
     const srcnFineTune = options.srcnFineTune || null;
@@ -2113,6 +2221,14 @@
       const voiceDsp = new Uint8Array(8); // このボイスのレジスタ追跡用
       let activePitch = 0, activeSrcn = 0, activeStart = -1;
       let activeAdsr1 = 0, activeAdsr2 = 0, activeGain = 0;
+      // NON(ノイズ有効ビット、$3D)とFLG($6C)下位5bitのノイズレート。KON/音程分割の
+      // 時点の値をイベントへ焼き込む(2A03ノイズchへの借用時にレート→周期idx変換で使う)
+      let nonReg = 0, flgReg = 0, activeNon = 0, activeNoiseRate = 0;
+      let activeVolSeq = []; // 実測音量列(ENVX×VOL、0..127)。pitchSeqと同じ区切りで積む
+      // vol: ボイス音量(VOL L/R、符号付き8bit)の絶対値の大きい方の、ノート中のピーク値。
+      // 変換設定ENV=OFF(ADSR→@vテーブルを出さない)時の v<n> の材料(src/convert/options.js)
+      let activeVol = 0;
+      const s8 = (b) => (b << 24) >> 24;
       // pitchSeq(DESIGN-PITCH.md Phase 0): 確定済みセグメントのフレーム毎生ピッチレジスタ値。
       let activePitchSeq = [];
       // pendingTieCandidate(別プロジェクトE、2026-08-12): 次にpushされるイベントが
@@ -2122,11 +2238,18 @@
 
       for (let f = 0; f < FRAMES; f++) {
         for (const { reg, val } of log[f]) {
+          if (reg === 0x3D) nonReg = val;
+          else if (reg === 0x6C) flgReg = val;
           const vc = reg >> 4, r = reg & 0x0F;
-          if (vc !== ch) continue;
+          if (vc !== ch || r > 0x09) continue;
           voiceDsp[r] = val;
         }
         const curPitch = voiceDsp[0x02] | ((voiceDsp[0x03] & 0x3F) << 8);
+        const frameVol = Math.max(Math.abs(s8(voiceDsp[0x00])), Math.abs(s8(voiceDsp[0x01])));
+        if (activeStart >= 0) activeVol = Math.max(activeVol, frameVol);
+        // このフレームの実測音量(エンベロープ×ボイス音量)。envLog無し(ロール等)ではVOLのみ
+        const envx = envLog && envLog[f] ? envLog[f][ch] : null;
+        const lvlNow = envx == null ? frameVol : Math.round(envx * frameVol / 127);
         // 音程比較・区切りは、現在鳴っているノートのサンプル(activeSrcn)の補正で統一する
         // (1音符の間 srcn は不変なので curPitch/activePitch とも同じ補正を使えばよい)。
         const curPitchSemi = pitchToSemitone(curPitch, tuneOf(activeSrcn));
@@ -2134,13 +2257,17 @@
 
         if (konLatched[f] & (1 << ch)) {
           if (activeStart >= 0) {
-            voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
+            voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
           }
           activePitch = curPitch;
           activeSrcn  = voiceDsp[0x04];
           activeAdsr1 = voiceDsp[0x05];
           activeAdsr2 = voiceDsp[0x06];
           activeGain  = voiceDsp[0x07];
+          activeVol   = frameVol;
+          activeNon   = (nonReg >> ch) & 1;
+          activeNoiseRate = flgReg & 0x1F;
+          activeVolSeq = [lvlNow];
           activeStart = f;
           activePitchSeq = [curPitch];
           pendingTieCandidate = false; // KON=本物のアタックなので次のイベントはタイ候補ではない
@@ -2152,17 +2279,22 @@
           // このelse if節の中でactiveStart=fに更新される)をスラー分割のタイ候補とする
           // (pendingTieCandidateに立てておき、そのイベントが実際にpushされる時に読む。
           // 別プロジェクトE、2026-08-12)
-          voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
+          voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
           activePitch = curPitch;
           activeSrcn  = voiceDsp[0x04];
           activeAdsr1 = voiceDsp[0x05];
           activeAdsr2 = voiceDsp[0x06];
           activeGain  = voiceDsp[0x07];
+          activeVol   = frameVol;
+          activeNon   = (nonReg >> ch) & 1;
+          activeNoiseRate = flgReg & 0x1F;
+          activeVolSeq = [lvlNow];
           activeStart = f;
           activePitchSeq = [curPitch];
           pendingTieCandidate = true; // このイベントを閉じたのは純粋な音程変化 → 次のイベントはタイ候補
         } else if (activeStart >= 0) {
           activePitchSeq.push(curPitch);
+          activeVolSeq.push(lvlNow);
         }
         // 同じフレーム内にこのボイスのKONも来ている場合、そのKOFFは無視する。
         // 実機のDSPはKON/KOFFが同一タイミングで競合するとKON側が優先され、
@@ -2173,7 +2305,7 @@
         // されてしまう不具合があった(実SPCのV5パートで確認、ノート脱落の原因)。
         if ((koffLatched[f] & (1 << ch)) && !(konLatched[f] & (1 << ch))) {
           if (activeStart >= 0) {
-            voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, f - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
+            voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, f - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
             activeStart = -1;
             activePitchSeq = [];
             pendingTieCandidate = false; // KOFF後、次に始まるノートは新規アタックなのでタイ候補ではない
@@ -2181,7 +2313,7 @@
         }
       }
       if (activeStart >= 0) {
-        voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, FRAMES - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
+        voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, FRAMES - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
       }
       // rawFreq(高速アルペジオ→EN統合のセント判定用、2026-08-14拡張): mergeSpcVoiceEvents
       // (外側のIIFEスコープの関数でtuneOfへ直接アクセスできない)へ渡す前にここで計算して
@@ -2209,7 +2341,8 @@
       mapped.push({
         start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi, pitch: ev.pitch,
         rawFreq: ev.rawFreq,
-        pitchSeq: ev.pitchSeq, srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain,
+        pitchSeq: ev.pitchSeq, srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain, vol: ev.vol,
+        volSeq: ev.volSeq, non: ev.non, noiseRate: ev.noiseRate,
         tieCandidate: ev.tieCandidate
       });
     }
@@ -2221,7 +2354,8 @@
       .filter(ev => ev.note != null)
       .map(ev => Object.assign({
         frame: ev.start, len: ev.end - ev.start, pitch: ev.pitch, pitchSemi: ev.note,
-        srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain, pitchSeq: ev.pitchSeq,
+        srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain, vol: ev.vol, pitchSeq: ev.pitchSeq,
+        volSeq: ev.volSeq, rawFreq: ev.rawFreq, non: ev.non, noiseRate: ev.noiseRate,
         tieCandidate: ev.tieCandidate
       }, ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}));
   }
@@ -2233,16 +2367,18 @@
     // デフォルトマップ: V0→A, V1→B ... V3→D, V4→スキップ
     const DEFAULT_TYPES = ['pulse1','pulse2','triangle','noise','skip','skip','skip','skip'];
     const channelMap = options.channelMap || DEFAULT_TYPES.map(t => ({ type: t }));
+    // 変換設定(src/convert/options.js): コマンド使用/不使用・譜面整形
+    const cmd = MML.Convert.normalizeCmd(options.cmd);
 
     // 各BRRサンプルの実測原音から音程補正マップを作り、ノート抽出に反映する
     // (これにより実機の発音音程=SPC再生と一致する)。
     const srcnFineTune = computeSrcnFineTune(brrSamples);
-    const voiceEvents = MML.SPC2MML.extractVoiceEvents(log, { srcnFineTune });
+    const voiceEvents = MML.SPC2MML.extractVoiceEvents(log, { srcnFineTune, envLog: options.envLog });
     const tuneOf = (srcn) => srcnFineTune ? (srcnFineTune[srcn] || 0) : 0;
     // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
-    const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
+    const pitchReg = new MML.Convert.PitchEnvelopeRegistry(cmd);
     // ノートエンベロープ(高速アルペジオ)の共有レジストリ(2026-08-14拡張)。
-    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
+    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry(cmd);
 
     // ── BPM (未指定ならマッピング済みチャンネルの有音イベントから自動検出、
     //         指定時もフレームグリッドへ吸着補正) ──
@@ -2265,41 +2401,87 @@
     // ([[tempo-rounding-drift-future-issue]]参照)。
     const fpb = FPS_SPC * 60 / Math.round(bpm);
 
-    // ── ADSR/GAIN → ppmck @v/@vr テーブル抽出 (2A03 pulse/noise のみ対象) ──
-    // 同じ (adsr1,adsr2,gain) の組み合わせは同じ音色とみなし @vN を共有する。
-    // リリースは実機的に音色非依存の固定カーブなので曲全体で @vr0 を1つだけ使う。
-    const ENV_CAPABLE_TYPES = new Set(['pulse1', 'pulse2', 'noise']);
-    const MAX_ENV_FRAMES = 180; // 約3秒分まで机上シミュレート
-    const envelopeIndexByKey = new Map();
-    const envelopeTables = [];
+    // ── 実測エンベロープ → ppmck @v/@vr テーブル抽出 ──
+    // ★2026-08-25 全面変更: 従来はKON時点の(adsr1,adsr2,gain)から机上シミュレートしていたが、
+    // FF4等のAKAO系ドライバは「KON後にGAIN直値やADSR書き換えを連発して音量を作る」ため
+    // KONスナップショットでは原理的に音量が取れない(@v={0}が量産され大半のノートが無音化)。
+    // capture()が毎フレーム採取した実エンベロープ値×VOL(ev.volSeq、0..127)を
+    // analyzeVolumeShape+共有EnvelopeRegistryで@v化する(NSF/KSS/GBS/HESと同じ方式)。
+    // リリース(@vr0)は従来通り実機固定カーブのシミュレート値を使う。
+    // 三角波(音量制御なし)とDPCMは対象外。
+    const envCapableType = (type) => type && type !== 'skip' && type !== 'dpcm' && type !== 'triangle' &&
+      !type.startsWith('vrc7'); // VRC7は@v非対応(compiler segmentsToWriteLogVrc7はENのみ)。v<n>で出す
+    // ボイス音量の正規化基準(2026-08-24): SPCのVOL L/Rは絶対値が小さい曲が多く(実測:
+    // 最大37/127等)、0..127→0..15の絶対マッピングでは全chが v1〜2 に潰れて比率も丸めで
+    // 消える。「音量制御を持つ借用先」に割り当てたボイス全体の最大値を15へ正規化し、
+    // チャンネル間の音量比を0..15レンジへ引き延ばす。音量が固定のDPCM割当ボイスと
+    // スキップは基準に含めない(含めるとN163等が上限を使い切れない)。
+    let songMaxVol = 0;
+    for (let ch = 0; ch < 8; ch++) {
+      const cfg = channelMap[ch];
+      if (!cfg || !envCapableType(cfg.type)) continue;
+      for (const ev of voiceEvents[ch]) songMaxVol = Math.max(songMaxVol, ev.vol || 0);
+    }
+    if (!songMaxVol) songMaxVol = 127;
+    // 借用先ごとの音量上限(2026-08-24): 本家ppmck同様、FDSは$4080ゲイン生値(実効32で
+    // 頭打ち)、VRC6のこぎり波は$B000蓄積レート生値(実質42が最大。43以上は8bit桁溢れで
+    // 音が崩れるだけ)。他は0-15。src/mml/compiler.js volMax(v<n>の上限63)のコメント参照。
+    // 一律0-15にするとFDSは実効半分・のこぎりは1/3の音量しか出ず「音が小さい」となる。
+    const TARGET_VOL_MAX = { fds: 32, vrc6saw: 42 };
+    const volStepOf = (vol, type) => {
+      const m = TARGET_VOL_MAX[type] || 15;
+      return Math.max(1, Math.round((vol || 0) * m / songMaxVol)); // 0でも1(発音はしている)
+    };
+    const MAX_ENV_FRAMES = 180; // @vr0(リリース)のシミュレート長
+    const envReg = new MML.Convert.EnvelopeRegistry(cmd);
     let usesReleaseTable = false;
 
     for (let ch = 0; ch < 8; ch++) {
       const cfg = channelMap[ch];
-      if (!cfg || !ENV_CAPABLE_TYPES.has(cfg.type)) continue;
+      if (!cfg || !envCapableType(cfg.type)) continue;
+      if (!cmd.ENV) continue; // 変換設定ENV=OFF: @v/@vrテーブルを作らずボイス音量のv<n>で代替
+      // チャンネル別の変換音量(volPct、src/convert/options.js)。songMaxVolは縮小前の
+      // 生値から計算済みなので、ここで乗算すれば「曲中最大=targetMax」の正規化基準に対する
+      // 相対的な減衰になる(他chとのバランス指定がそのまま効く)
+      const chVolScale = MML.Convert.channelVolScale(cfg);
+      const targetMax = TARGET_VOL_MAX[cfg.type] || 15;
+      const k = chVolScale === 0 ? 0 : (targetMax * chVolScale) / songMaxVol;
       for (const ev of voiceEvents[ch]) {
-        if (ev.pitchSemi === null) continue;
-        const key = `${ev.adsr1},${ev.adsr2},${ev.gain}`;
-        let idx = envelopeIndexByKey.get(key);
-        if (idx === undefined) {
-          idx = envelopeTables.length;
-          envelopeIndexByKey.set(key, idx);
-          envelopeTables.push({ index: idx, values: simulateSpcEnvelope(ev.adsr1, ev.adsr2, ev.gain, MAX_ENV_FRAMES) });
+        if (ev.pitchSemi === null && !(cfg.type === 'noise' && ev.non)) continue;
+        if (!ev.volSeq || ev.volSeq.length === 0) continue; // envLog無し(旧経路)はv<n>へ
+        const seq = ev.volSeq.map(v => Math.max(0, Math.min(targetMax, Math.round(v * k))));
+        const idx = envReg.assign(seq);
+        if (idx == null) {
+          // フラット(エンベロープ不要)なノート: ピーク値をv<n>で出す
+          ev.plainVol = MML.Convert.plainVolume(seq);
+        } else {
+          ev.envelopeIdx = idx;
+          usesReleaseTable = true;
         }
-        ev.envelopeIdx = idx;
-        usesReleaseTable = true;
       }
     }
     const releaseTable = usesReleaseTable ? simulateSpcRelease(MAX_ENV_FRAMES) : null;
 
-    // ── 拡張音源を確定 ───────────────────────────────────────────────
-    let expansion = 'none';
+    // ── 拡張音源を確定(複数同居可、2026-08-24) ─────────────────────────
+    // 従来は「最初に見つかった1種類だけ」だったため、FDS+N163のような組み合わせを
+    // 選んでも片方が無音になっていた。使われている拡張を全部集め、チャンネル文字は
+    // assignExpansionLettersの完全固定範囲(dpcm=E, fds=F, vrc6=M-O, n163=P-W, fme7=X-Z,
+    // mmc5=a-b)から引く。
+    const usedExpansions = [];
+    let n163MaxIndex = -1;
     for (let ch = 0; ch < 8; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip' || cfg.type === 'dpcm') continue;
       const exp = TYPE_TO_EXPANSION[cfg.type];
-      if (exp) { expansion = exp; break; } // 最初に見つかった拡張を使用
+      if (!exp) continue;
+      if (!usedExpansions.includes(exp)) usedExpansions.push(exp);
+      if (exp === 'n163') n163MaxIndex = Math.max(n163MaxIndex, TYPE_TO_CHIP_INDEX[cfg.type]);
     }
+    // #EX-NAMCO106 <n> と周波数式(n163FreqRegRawSpc)が使う実効ch数。実機N163は有効ch数で
+    // 各chの更新レートが変わる=同じ周波数レジスタ値でも音程が変わるため、宣言と式は必ず
+    // 一致させること
+    const n163UsedCount = n163MaxIndex + 1;
+    const expansion = usedExpansions[0] || 'none'; // 後方互換(result.expansion)用
 
     // ── DPCM 変換 (全ボイス中で DPCM 指定されたものの srcn を収集) ──
     // SNESのBRRサンプルは元々ノートごとにピッチシフトして鳴らす前提の楽器なので、
@@ -2365,32 +2547,131 @@
     const usesDpcm = dpcmNoteEvents.length > 0;
     const letterExpansions = [
       ...(usesDpcm ? ['dpcm'] : []),
-      ...(expansion !== 'none' ? [expansion] : []),
+      ...usedExpansions,
     ];
     const expansionLetterMap = MML.Mml.assignExpansionLetters(letterExpansions);
     const dpcmLetter = usesDpcm ? expansionLetterMap.dpcm[0] : null;
-    const expansionLetters = expansion !== 'none' ? expansionLetterMap[expansion] : null;
+    // type → 出力チャンネル文字(2A03はTYPE_TO_LETTER、拡張はチップ固定範囲のchipIndex番目)
+    const letterForType = (type) => TYPE_TO_LETTER[type]
+      || ((expansionLetterMap[TYPE_TO_EXPANSION[type]] || [])[TYPE_TO_CHIP_INDEX[type]]);
 
-    // ── FDS/N163 波形をボイスごとに生成 ────────────────────────────
-    // 同じ srcn でも複数ボイスが使う場合は先頭ボイスの波形を採用
+    // ── FDS/N163 波形をsrcnごとに生成 ────────────────────────────────
+    // BRRサンプルの定常部から基本周期1周期分を切り出して波形メモリ化する(検出は
+    // detectBrrFundamentalを流用)。周期が取れない打楽器/ノイズ系は従来通りサンプル全体を
+    // リサンプリング(それらしい倍音構成にはならないが無音よりまし)。振幅は最大値で正規化。
     const waveCache = {}; // srcn → { fds: [], n163: [] }
+    function extractCyclePcm(brrBytes) {
+      const pcm = decodeBrrBytes(brrBytes);
+      if (pcm.length === 0) return new Float32Array([0]);
+      const fund = detectBrrFundamental(brrBytes);
+      let cycle = pcm;
+      if (fund && fund.conf >= FUNDAMENTAL_CONF_MIN && fund.freq > 0) {
+        const period = Math.max(2, Math.round(DSP_RATE / fund.freq));
+        const start = Math.min(pcm.length >> 2, 512); // detectBrrFundamentalと同じ定常部開始
+        if (start + period <= pcm.length) cycle = pcm.slice(start, start + period);
+      }
+      let peak = 0;
+      for (const v of cycle) peak = Math.max(peak, Math.abs(v));
+      if (peak > 0 && peak < 1) {
+        const scaled = new Float32Array(cycle.length);
+        for (let i = 0; i < cycle.length; i++) scaled[i] = cycle[i] / peak;
+        cycle = scaled;
+      }
+      return cycle;
+    }
     function getWave(srcn) {
       if (waveCache[srcn]) return waveCache[srcn];
       const brr = brrSamples[srcn];
-      const pcm = brr && brr.bytes.length > 0 ? decodeBrrBytes(brr.bytes) : new Float32Array([0]);
-      waveCache[srcn] = { fds: pcmToFdsWave(pcm), n163: pcmToN163Wave(pcm) };
+      const cycle = brr && brr.bytes.length > 0 ? extractCyclePcm(brr.bytes) : new Float32Array([0]);
+      waveCache[srcn] = { fds: pcmToFdsWave(cycle), n163: pcmToN163Wave(cycle) };
       return waveCache[srcn];
+    }
+    // 波形はKSS/NSFと同じ共有レジストリで曲全体の重複を排除し、@FM<n>/@N<n>として
+    // MML本文のヘッダに定義、音符側は@<n>(instrument)で切り替える
+    const fdsWaveReg = new MML.Convert.WaveRegistry('@FM');
+    const n163WaveReg = MML.Convert.n163WaveRegistry();
+    // VRC7自作音色(@0 + OP<n>)。BRRサンプルの1周期から2op FMパッチを推定して@OP<n>に登録する
+    const vrc7ToneReg = new MML.Convert.WaveRegistry('@OP');
+
+    // ── BRR1周期 → OPLL(2op FM)自作音色の推定 ──────────────────────────
+    // サンプル波形をFMで厳密再現するのは不可能なので、倍音構成の「明るさ」を耳コピ近似で
+    // 2opパッチへ写像する:
+    //  - 基本波に対する高調波エネルギー比R → モジュレータTL(変調深度。倍音豊富ほど深く)
+    //  - 倍音が多く奇数次優勢(矩形/ノコギリ系) → フィードバックを増やす
+    //  - 2次倍音が基本波より強い → モジュレータMULT=2(オクターブ上変調)
+    //  - エンベロープはサステイン型(EG-TYP=1, AR=15, SL=0)にして音量変化は v/@v 側に任せる
+    // バイト列はOPLLレジスタ$00-$07の生値(@OP<n>定義、lexer.js parseVrc7ToneDefと同形式)。
+    function pcmToOpllPatch(cycle) {
+      const N = cycle.length;
+      const H = 8;
+      const amp = new Array(H + 1).fill(0);
+      for (let k = 1; k <= H; k++) {
+        let re = 0, im = 0;
+        for (let n = 0; n < N; n++) {
+          const ph = 2 * Math.PI * k * n / N;
+          re += cycle[n] * Math.cos(ph); im += cycle[n] * Math.sin(ph);
+        }
+        amp[k] = Math.hypot(re, im) / N;
+      }
+      const h1 = amp[1] || 1e-9;
+      let hi = 0, odd = 0, even = 0;
+      for (let k = 2; k <= H; k++) { hi += amp[k] * amp[k]; if (k % 2) odd += amp[k]; else even += amp[k]; }
+      const R = Math.sqrt(hi) / h1; // 0=正弦波 〜 1.5以上=矩形/ノコギリ級
+      const tl = Math.max(2, Math.min(45, Math.round(40 - 26 * Math.min(1.5, R))));
+      const fb = (R > 1.0 && odd > even) ? 3 : R > 0.6 ? 2 : R > 0.25 ? 1 : 0;
+      const mult = amp[2] > amp[1] * 1.2 ? 2 : 1;
+      return [
+        0x20 | (mult & 0x0F), // mod: EG-TYP=1(sustained) MULT
+        0x21,                 // car: EG-TYP=1 MULT=1
+        tl & 0x3F,            // KSL=0 / TL(mod)
+        fb & 7,               // KSL=0 DC=0 DM=0 / FB
+        0xF0,                 // mod AR=15 DR=0
+        0xF0,                 // car AR=15 DR=0
+        0x0F,                 // mod SL=0 RR=15
+        0x0F,                 // car SL=0 RR=15
+      ];
+    }
+    // FDS/N163の音色選択(cfg.tone): 'copy'=サンプル1周期コピー(既定)、または固定波形。
+    // 固定波形はサンプルに周期が無い(打楽器等)場合や、あえて素直な音色で編曲したい場合用。
+    const fixedWaveCache = {};
+    function fixedWave(kind, mode) {
+      const key = kind + ':' + mode;
+      if (fixedWaveCache[key]) return fixedWaveCache[key];
+      const len = kind === 'fds' ? 64 : 16;
+      const max = kind === 'fds' ? 63 : 15;
+      const w = new Array(len);
+      for (let i = 0; i < len; i++) {
+        const t = i / len;
+        let v;
+        if (mode === 'pulse50') v = t < 0.5 ? 1 : -1;
+        else if (mode === 'sin') v = Math.sin(2 * Math.PI * t);
+        else if (mode === 'triangle') v = t < 0.25 ? 4 * t : t < 0.75 ? 2 - 4 * t : 4 * t - 4;
+        else v = 2 * t - 1; // saw
+        w[i] = Math.max(0, Math.min(max, Math.round((v * 0.5 + 0.5) * max)));
+      }
+      fixedWaveCache[key] = w;
+      return w;
+    }
+
+    const opllPatchCache = {}; // srcn → @OP<n>登録番号
+    function getOpllToneIdx(srcn) {
+      if (opllPatchCache[srcn] !== undefined) return opllPatchCache[srcn];
+      const brr = brrSamples[srcn];
+      const cycle = brr && brr.bytes.length > 0 ? extractCyclePcm(brr.bytes) : new Float32Array([0]);
+      const idx = vrc7ToneReg.assign(pcmToOpllPatch(Array.from(cycle)));
+      opllPatchCache[srcn] = idx;
+      return idx;
     }
 
     // ── MML 生成 ─────────────────────────────────────────────────────
     let mml = `; SPC → MML 変換 (${Math.round(bpm)} BPM, ${FRAMES} フレーム, 分解能480TPQN)\n`;
-    if (expansion !== 'none') mml += `; 拡張音源: ${expansion}\n`;
+    if (usedExpansions.length) mml += `; 拡張音源: ${usedExpansions.join(', ')}\n`;
     // #EX-*(機能する本文ディレクティブ。上の`; `コメントとは別。これがないと
     // MML本文だけからは拡張音源が有効にならず、UI側の操作が必要になってしまう)
-    if (expansion !== 'none') {
-      mml += expansion === 'n163'
-        ? `${MML.Mml.EX_CHIP_DIRECTIVE[expansion]} ${expansionLetters.length}\n`
-        : `${MML.Mml.EX_CHIP_DIRECTIVE[expansion]}\n`;
+    for (const exp of usedExpansions) {
+      mml += exp === 'n163'
+        ? `${MML.Mml.EX_CHIP_DIRECTIVE[exp]} ${n163UsedCount}\n`
+        : `${MML.Mml.EX_CHIP_DIRECTIVE[exp]}\n`;
     }
 
     // @DPCM<n>定義(実機ppmckcと同じ書式)。以後Eチャンネルの音符で@<n>により選択する
@@ -2399,23 +2680,8 @@
       mml += `@DPCM${i} = { "${f.name}", ${f.rateIndex}, ${f.bytes.length}, 255, 0 }\n`;
     }
 
-    // FDS/N163 波形コメント (波形データは別途コンパイラオプションで渡す)
-    const waveVoices = []; // { ch, srcn, type }
-    for (let ch = 0; ch < 8; ch++) {
-      const cfg = channelMap[ch];
-      if (!cfg) continue;
-      const isFds  = cfg.type === 'fds';
-      const isN163 = cfg.type && cfg.type.startsWith('n163');
-      if (isFds || isN163) {
-        const srcn = voiceEvents[ch][0]?.srcn ?? 0;
-        waveVoices.push({ ch, srcn, type: cfg.type });
-      }
-    }
-
-    // ADSR/GAIN由来の音量エンベロープ定義 (@vN / @vr0)
-    for (const { index, values } of envelopeTables) {
-      mml += `@v${index} = { ${values.join(' ')} }\n`;
-    }
+    // 実測エンベロープ由来の音量テーブル定義 (@vN / @vr0)
+    for (const line of envReg.defLines()) mml += line + '\n';
     if (releaseTable) {
       mml += `@vr0 = { ${releaseTable.join(' ')} }\n`;
     }
@@ -2425,6 +2691,7 @@
     // チャンネルごとの共通イベント形式を組み立て、最後にまとめて
     // 小節揃えスコア形式(1曲まるごと1回のemitScore呼び出し)で出力する。
     const scoreChannels = [];
+    const detuneEntries = [];
     for (let ch = 0; ch < 8; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip') continue;
@@ -2438,34 +2705,84 @@
       // (ループの外で1回だけscoreChannelsに追加する)
       if (targetType === 'dpcm') continue;
 
-      const chipIndex = TYPE_TO_CHIP_INDEX[targetType];
-      const targetLetter = TYPE_TO_LETTER[targetType]
-        || (expansionLetters && chipIndex !== undefined ? expansionLetters[chipIndex] : undefined);
+      const targetLetter = letterForType(targetType);
       if (!targetLetter) continue;
 
-      const hasEnvelope = ENV_CAPABLE_TYPES.has(targetType);
+      const hasEnvelope = envCapableType(targetType) && cmd.ENV;
+      // FDS/N163はsrcnごとの自作波形を@<n>(instrument)で切り替える
+      const isFdsTarget = targetType === 'fds';
+      const isN163Target = targetType.startsWith('n163');
+      const isVrc7Target = targetType.startsWith('vrc7');
+      // 音量制御を持つ借用先は常にv<n>可(NSFのA/B同様、@vとv併用。フラットなノートはv、
+      // エンベロープのあるノートは@v)。VRC7は@v非対応なので常にv<n>
+      const hasVolume = envCapableType(targetType) || isVrc7Target;
+      // パルス系のデューティ選択(cfg.tone): 2A03/MMC5=@0-@3(既定@2=50%)、VRC6=@0-@7(既定@7=50%)
+      const isPulseTarget = targetType === 'pulse1' || targetType === 'pulse2' ||
+        targetType === 'mmc5pulse1' || targetType === 'mmc5pulse2';
+      const isVrc6PulseTarget = targetType === 'vrc6pulse1' || targetType === 'vrc6pulse2';
+      const dutyIdx = isPulseTarget
+        ? Math.max(0, Math.min(3, Number.isInteger(parseInt(cfg.tone, 10)) ? parseInt(cfg.tone, 10) : 2))
+        : isVrc6PulseTarget
+          ? Math.max(0, Math.min(7, Number.isInteger(parseInt(cfg.tone, 10)) ? parseInt(cfg.tone, 10) : 7))
+          : null;
+      // FDS/N163の波形モード(cfg.tone): 'copy'(既定)/'pulse50'/'sin'/'triangle'/'saw'
+      const waveMode = (isFdsTarget || isN163Target) ? (cfg.tone || 'copy') : null;
+      const hasInstrument = isFdsTarget || isN163Target || isVrc7Target || dutyIdx !== null;
+      const isNoiseTarget = targetType === 'noise';
+      // チャンネル別の変換音量(volPct)。v<n>直接出力(ENV OFF時と VRC7)用
+      const chVolScale = MML.Convert.channelVolScale(cfg);
+      // VRC7の音色: ボイスモニターで選んだプリセット(@1-@15)。'0'は自作音色=BRRサンプル
+      // から推定した@OP<n>をOP<n>+@0で使う(cfg.vrc7Inst。既定@1)
+      const vrc7Sel = cfg.vrc7Inst != null ? cfg.vrc7Inst : cfg.tone;
+      const vrc7Custom = isVrc7Target && String(vrc7Sel) === '0';
+      const vrc7Preset = (isVrc7Target && !vrc7Custom)
+        ? Math.max(1, Math.min(15, parseInt(vrc7Sel, 10) || 1)) : null;
       // ピッチエンベロープ(厳密周期ビブラート、DESIGN-PITCH.md Phase 1)。ev.pitchSeq
       // (DSP生ピッチレジスタ、Phase 0で追加済み)をHz経由で借用先チップの生レジスタ
       // 空間へ変換してから分類・登録する(KSS/GBS/HESと同じ「差を取ってから1回だけ
       // 丸める」方針、MML.Convert.rescalePitchSeqFromFreq参照)。ノイズ/DPCMは
       // periodFnForTypeがnullを返すため自動的に対象外になる。
-      const n163NumCh = expansion === 'n163' ? expansionLetters.length : undefined;
+      const n163NumCh = n163UsedCount > 0 ? n163UsedCount : undefined;
       const periodFn = periodFnForType(targetType, n163NumCh);
       // 借用先チップの生周期換算関数(periodFn)自体の増減方向をfitVibratoへ渡す
       // (compiler.jsのperiodFnIncreasingと同じ2点比較、src/convert/pitch.js fitVibrato参照)。
       const directionUp = periodFn ? periodFn(2000) > periodFn(200) : undefined;
       const chEvents = events.map(ev => {
+        // ノイズ借用先: NON(ノイズ有効)ボイスはFLGレート→2A03ノイズ周期idxのノートへ。
+        // NONでないボイス(旋律サンプルをノイズchへ割り当てた場合)は従来通りpitchSemi。
+        const note = (isNoiseTarget && ev.non) ? spcNoiseNoteNum(ev.noiseRate) : ev.pitchSemi;
         const common = {
-          start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi,
+          start: ev.frame, end: ev.frame + ev.len, note,
+          rawFreq: ev.rawFreq,
           envelopeV: hasEnvelope && ev.envelopeIdx !== undefined ? ev.envelopeIdx : undefined,
           envelopeVr: hasEnvelope && ev.envelopeIdx !== undefined ? 0 : undefined,
+          volume: !hasVolume ? undefined
+            : (cmd.ENV && envCapableType(targetType))
+              ? (ev.envelopeIdx !== undefined ? undefined : ev.plainVol)
+              : (chVolScale === 0 ? 0 : volStepOf(ev.vol * chVolScale, targetType)),
+          // volPct=0のチャンネルは無音なので音程検証(src/convert/verify.js)の対象外にする
+          verifySkip: chVolScale === 0 || undefined,
+          instrument: (hasInstrument && note !== null && cmd.INST)
+            ? (isFdsTarget
+                ? fdsWaveReg.assign(waveMode === 'copy' ? getWave(ev.srcn).fds : fixedWave('fds', waveMode))
+              : isN163Target
+                ? n163WaveReg.assign(waveMode === 'copy' ? getWave(ev.srcn).n163 : fixedWave('n163', waveMode))
+              : isVrc7Target ? (vrc7Custom ? 0 : vrc7Preset)
+              : dutyIdx)
+            : undefined,
+          vrc7Tone: (vrc7Custom && note !== null && cmd.INST) ? getOpllToneIdx(ev.srcn) : undefined,
           tieCandidate: ev.tieCandidate,
         };
-        if (periodFn && ev.pitchSemi !== null && ev.pitchSeq && ev.pitchSeq.length > 0) {
+        if (periodFn && !(isNoiseTarget && ev.non) && ev.pitchSemi !== null && ev.pitchSeq && ev.pitchSeq.length > 0) {
           const tune = tuneOf(ev.srcn);
           const freqSeq = ev.pitchSeq.map(p => pitchRegToFreqHz(p, tune));
           const rescaled = MML.Convert.rescalePitchSeqFromFreq(freqSeq, periodFn);
-          MML.Convert.applyPitchAssignment(common, pitchReg.assign(rescaled, directionUp));
+          // 出力先N163のときだけSA<num>自動選択(pitch.js n163SaForBase参照)。
+          // D<n>への同時シフトは後段のdetectChorusDetuneがev.pitchSaを見て行う
+          const saOpts = isN163Target && cmd.PITCH_SA !== 'off'
+            ? { mode: cmd.PITCH_SA, baseSa: cmd.PITCH_SA === 'octave' ? MML.Convert.n163SaForBase(rescaled[0]) : 0 }
+            : undefined;
+          MML.Convert.applyPitchAssignment(common, pitchReg.assign(rescaled, directionUp, saOpts));
         }
         // 高速アルペジオ→EN統合(2026-08-14拡張)。mergeSpcVoiceEvents側で検出済みの
         // ev.noteEnvOffsetsを、曲全体で共有するnoteEnvRegへ登録する
@@ -2477,8 +2794,18 @@
       });
       // スラー分割(別プロジェクトE、2026-08-12): pitchEp/portamentoが確定した直後に行う
       MML.Convert.markSlurTies(chEvents);
-      scoreChannels.push({ letter: targetLetter, events: chEvents, hasEnvelope, hasPitchMod: !!periodFn, hasNoteEnv: !!periodFn });
+      // デチューン(2026-08-24): 借用先の生周期レジスタ空間でのコーラス検知+D<n>補正。
+      // KSSと同じdetectChorusDetune方式(単独ノートの残差は補正せず、複数chの同音同時
+      // 発音だけを意図的なデチューンとみなす)。ノイズはperiodFn無しで自動的に対象外。
+      // VRC7はEP/MP/PT非対応(periodFn=null)だがD<n>とEN<n>は使える(kss2mmlのopllと同じ)。
+      const detuneFn = periodFn || (isVrc7Target ? vrc7FnumRawSpc : null);
+      if (detuneFn) detuneEntries.push({ events: chEvents, periodFn: detuneFn });
+      scoreChannels.push({ letter: targetLetter, events: chEvents, hasEnvelope, hasVolume,
+        hasInstrument, hasVrc7Tone: vrc7Custom, hasDetune: !!detuneFn, hasPitchMod: !!periodFn,
+        hasNoteEnv: !!periodFn || isVrc7Target });
     }
+    // 全チャンネル横断でコーラス検知+D<n>補正(nsf2mmlと同じ「1回だけまとめて」方式)
+    MML.Convert.detectChorusDetune(detuneEntries, detuneEntries.map(e => e.periodFn), { cmd });
 
     if (dpcmLetter) {
       scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents, hasInstrument: true });
@@ -2486,27 +2813,212 @@
 
     if (scoreChannels.length > 0) {
       mml += MML.Convert.emitScore(scoreChannels, fpb,
-        { totalFrames: FRAMES, tempoBpm: bpm, headerLines: [...pitchReg.defLines(), ...noteEnvReg.defLines()] }) + '\n';
+        { totalFrames: FRAMES, tempoBpm: bpm, cmd,
+          headerLines: [...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
+            ...pitchReg.defLines(), ...noteEnvReg.defLines()] }) + '\n';
     }
 
     // ── 波形データを options に付加して返す ─────────────────────────
     // fdsWave / n163Wave: 最初に見つかったボイスの波形を採用
-    let fdsWave  = null;
-    let n163Wave = null;
-    for (const { ch, srcn, type } of waveVoices) {
-      const w = getWave(srcn);
-      if (type === 'fds'  && !fdsWave)  fdsWave  = w.fds;
-      if (type.startsWith('n163') && !n163Wave) n163Wave = w.n163;
-    }
+    // 波形エディタ表示用に先頭の波形を返す(本文には全波形が@FM/@N定義済み)
+    const fdsWave  = fdsWaveReg.waves[0]  || null;
+    const n163Wave = n163WaveReg.waves[0] ? n163WaveReg.waves[0].slice() : null;
 
-    return { mml, dmcFiles, bpm: Math.round(bpm), expansion, fdsWave, n163Wave };
+    // 変換結果の音程検証(src/convert/verify.js): 最終MMLを実コンパイルして
+    // 「実際に鳴る音の高さ」を変換元イベントと突き合わせる(失敗しても変換は妨げない)
+    const pitchCheck = MML.Convert.verifyPitch
+      ? MML.Convert.verifyPitch(mml, scoreChannels, { frameRate: FPS_SPC, totalFrames: FRAMES,
+          compileOpts: { dpcmSamples: Object.fromEntries(dmcFiles.map(f => [f.name, f.bytes])) } })
+      : null;
+
+    return { mml, dmcFiles, bpm: Math.round(bpm), expansion, expansions: usedExpansions, fdsWave, n163Wave, pitchCheck };
   };
 
   MML.SPC2MML.fromSpc = function (spcBytes, durationSec, options) {
-    const { log, brrSamples } = MML.SPC2MML.capture(spcBytes, durationSec);
-    return MML.SPC2MML.convert(log, brrSamples, options);
+    const { log, brrSamples, envLog } = MML.SPC2MML.capture(spcBytes, durationSec);
+    return MML.SPC2MML.convert(log, brrSamples, Object.assign({ envLog }, options));
   };
 
+})(globalThis);
+
+/*
+ * *2MML 変換設定(コマンド使用/不使用・譜面整形)の共通定義
+ *
+ * 目的(2026-08-24): 熟練者が「ほぼ音階だけのプレーンな譜面」から自分で編曲を始められる
+ * ように、各 *2mml がセント単位の補正コマンド(D/EP/MP/PT/EN)や音量エンベロープ(@v等)を
+ * 出す/出さないを選べるようにする。全6形式(nsf/spc/kss/gbs/hes/vgm)で共通の1つの
+ * オブジェクト options.cmd を受け取り、
+ *   (1) 割当層(EnvelopeRegistry/PitchEnvelopeRegistry/NoteEnvelopeRegistry/detune.js)で
+ *       登録自体を止める(→ ヘッダの @v/@EP/@MP/@EN テーブル定義も自然に消える)
+ *   (2) 出力層(mmlEmit.js emitScore/emitChannel)でチャンネルフラグをANDマスクする(安全網)
+ *   (3) 譜面整形(短い休符の吸収・音長の格子量子化)を emitScore 手前のイベント整形で行う
+ * の3段で効かせる。
+ *
+ * cmd の各キー(全て boolean。省略時は true = 従来通り忠実再現):
+ *   D      … D<n>(チャンネル/チップ間デチューン、detune.js)
+ *   EP     … EP<n>(ピッチエンベロープ。MP/PT の受け皿でもある)
+ *   MP     … MP<n>(ビブラート)。falseで EP が true なら周期EPテーブルへ落ちる
+ *   PT     … PT<n>(ポルタメント)。falseで EP が true なら非ループEPテーブルへ落ちる
+ *   EN     … EN<n>(高速アルペジオのノートエンベロープ)。false時はアルペジオ統合
+ *            (mergeRapidArpeggio)自体は行い、基音1音として出す(音符連打には戻さない。
+ *            編曲の出発点としては1音の方が読みやすいため)
+ *   ENV    … @v/@vr(ソフト/ハード音量エンベロープ)と FME7 の S/M。false時は各イベントの
+ *            音量列のピーク値を v<n> として出す(MML.Convert.plainVolume)
+ *   V      … v<n>(音量そのもの)。false なら v も出さず既定音量
+ *   SWEEP  … s<speed>,<depth>(2A03ハードウェアスイープ)
+ *   INST   … @<n>(音色/デューティ)、OP<n>(VRC7音色)、MH<n>(FDS変調)、N<n>(FME7ノイズ周期)
+ *
+ * 譜面整形(既定 false = 従来通り):
+ *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)
+ *   SHAPE_QUANT … イベント境界を16分音符格子へ丸める
+ *
+ * 値キー(booleanでない設定。2026-08-26):
+ *   PITCH_SA … N163出力のSA<num>(ピッチシフト量)自動選択。'octave' | 'note' | 'off'
+ *     EP/MP/Dテーブル値のbyte幅とN163周波数レジスタ18bitの桁差を埋める(選び方の詳細は
+ *     src/convert/pitch.js n163SaForBase冒頭コメント参照)。既定'octave'(オクターブ連動、
+ *     セント精度がオクターブ非依存でテーブル共有も効く)。'note'=音符ごと最高精度、
+ *     'off'=SA不使用(従来互換、深い変調は割当失敗して落ちる)。
+ *   PCM_RATE … PCM→DPCM変換の品質(DMCレートの選び方)。'max' | 8 | 4 | 2 | 1
+ *     1bitデルタ変調は1bitあたり±2/127しか動けないため、ソースのバイトレートに対して
+ *     何倍のDMCレートを使うかが追従能力(アタックのなまり)とアイドルトーン
+ *     (平坦部で乗るレート/2のキーン音)を直接決める。倍率が上がるほど高音質・データ大。
+ *     'max'=常に最高レート33.1kHz(既定) / 8,4,2=ソースレートのn倍以上の最小レート /
+ *     1=従来互換(最も近いレート、データ最小)。現状の消費者はhes2mml/expansion/dpcm.js
+ *     (HES DDA抽出)のみ。SPCのBRR→DPCMはDSPレート32kHz≒テーブル上限のため対象外。
+ */
+(function (global) {
+  'use strict';
+  const MML   = global.MML   = global.MML   || {};
+  MML.Convert = MML.Convert || {};
+
+  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST'];
+  const SHAPE_KEYS = ['SHAPE_REST', 'SHAPE_QUANT'];
+  // PCM品質(冒頭コメント参照)。boolean群とは別に許容値で正規化する
+  const PCM_RATE_VALUES = ['max', 8, 4, 2, 1];
+  const PITCH_SA_VALUES = ['octave', 'note', 'off'];
+  MML.Convert.CMD_KEYS = CMD_KEYS;
+  MML.Convert.SHAPE_KEYS = SHAPE_KEYS;
+  MML.Convert.PCM_RATE_VALUES = PCM_RATE_VALUES;
+  MML.Convert.PITCH_SA_VALUES = PITCH_SA_VALUES;
+
+  const PRESETS = {
+    // 忠実再現(従来の既定)
+    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true,
+                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave' },
+    // プレーン譜面: 音階+音色だけ。編曲の出発点用
+    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true,
+                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave' },
+  };
+  MML.Convert.CMD_PRESETS = PRESETS;
+
+  // options.cmd(部分指定可)を全キー揃った正規形にする。省略キーは faithful 既定。
+  MML.Convert.normalizeCmd = function (cmd) {
+    const out = Object.assign({}, PRESETS.faithful);
+    if (cmd && typeof cmd === 'object') {
+      for (const k of [...CMD_KEYS, ...SHAPE_KEYS]) if (cmd[k] != null) out[k] = !!cmd[k];
+      // 数値は文字列でも受ける(localStorage/JSON経由やUIのselect値が'4'等になるため)
+      if (cmd.PCM_RATE != null) {
+        const v = cmd.PCM_RATE === 'max' ? 'max' : parseInt(cmd.PCM_RATE, 10);
+        if (PCM_RATE_VALUES.indexOf(v) >= 0) out.PCM_RATE = v;
+      }
+      if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
+    }
+    return out;
+  };
+
+  // どれかがプリセットと完全一致すればその名前、無ければ 'custom'
+  MML.Convert.cmdPresetName = function (cmd) {
+    const n = MML.Convert.normalizeCmd(cmd);
+    for (const name of Object.keys(PRESETS)) {
+      const p = PRESETS[name];
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA'].every(k => p[k] === n[k])) return name;
+    }
+    return 'custom';
+  };
+
+  // ── チャンネル別の変換音量(2026-08-25) ──────────────────────────────
+  // 規約: options.channelMap[ch].volPct = 0..100(既定100)。そのチャンネルの変換時
+  // 音量を何%にするかの縮小専用の比率(v15等で頭打ちのため上げる方向は無い)。
+  // パート(借用先)指定・音色指定と組で、SPC以外のフォーマットのチャンネル割当UIにも
+  // 同じキー名・同じ意味で展開する予定の共通規約。計算はこのヘルパーに一本化する。
+  MML.Convert.channelVolScale = function (cfg) {
+    const p = cfg && cfg.volPct != null ? parseFloat(cfg.volPct) : 100;
+    if (!isFinite(p)) return 1;
+    return Math.max(0, Math.min(100, p)) / 100;
+  };
+
+  // エンベロープを出さない時の代表音量: 音量列(または{values}形状)のピーク値。
+  // 先頭値だとアタック途中(0から立ち上がる音源)の値になることがあるため最大値を取る。
+  MML.Convert.plainVolume = function (seqOrShape) {
+    const seq = Array.isArray(seqOrShape) ? seqOrShape : (seqOrShape && seqOrShape.values) || [];
+    let m = null;
+    for (const v of seq) if (typeof v === 'number' && (m === null || v > m)) m = v;
+    return m === null ? 0 : m;
+  };
+
+  // mmlEmit.js の per-channel フラグを cmd でANDマスクする(出力層の安全網)
+  MML.Convert.maskEmitFlags = function (flags, cmd) {
+    const c = MML.Convert.normalizeCmd(cmd);
+    const f = Object.assign({}, flags);
+    if (!c.D)     f.hasDetune = false;
+    if (!c.EP && !c.MP && !c.PT) f.hasPitchMod = false;
+    if (!c.EN)    f.hasNoteEnv = false;
+    if (!c.ENV)   { f.hasEnvelope = false; f.hasFme7Env = false; }
+    if (!c.V)     f.hasVolume = false;
+    if (!c.SWEEP) f.hasSweep = false;
+    if (!c.INST)  { f.hasInstrument = false; f.hasVrc7Tone = false; f.hasFdsMod = false; f.hasFme7Noise = false; }
+    return f;
+  };
+
+  // ── 譜面整形 ───────────────────────────────────────────────────────
+  // events: mmlEmit.js と同じ { start, end, note, ... } の配列(フレーム単位、昇順前提)。
+  // 新しい配列を返す(元は変更しない)。
+  //   SHAPE_REST : 音符の直後の休符(または隙間)が restThreshold フレーム未満なら直前の
+  //                音符を延ばして埋める(ゲートタイムの隙間除去)
+  //   SHAPE_QUANT: 各イベントの start を grid フレーム格子へ丸め、end は次イベントの start
+  //                (最後は元の end を丸めた値)。長さ0になったイベントは捨てる
+  MML.Convert.shapeEvents = function (events, fpb, cmd) {
+    const c = MML.Convert.normalizeCmd(cmd);
+    if (!c.SHAPE_REST && !c.SHAPE_QUANT) return events;
+    let evs = (events || []).slice().sort((a, b) => a.start - b.start).map(e => Object.assign({}, e));
+
+    if (c.SHAPE_REST) {
+      const restThreshold = fpb / 8; // 1/32 音符未満
+      const out = [];
+      for (let i = 0; i < evs.length; i++) {
+        const ev = evs[i];
+        const prev = out[out.length - 1];
+        if (ev.note === null && prev && prev.note !== null && (ev.end - ev.start) < restThreshold) {
+          prev.end = Math.max(prev.end, ev.end); // 休符を直前の音符へ吸収
+          continue;
+        }
+        // 明示休符が無い単なる隙間も同じ扱い(fillGaps が後で休符化する前に埋める)
+        if (prev && prev.note !== null && ev.start > prev.end && (ev.start - prev.end) < restThreshold) {
+          prev.end = ev.start;
+        }
+        out.push(ev);
+      }
+      evs = out;
+    }
+
+    if (c.SHAPE_QUANT) {
+      const grid = fpb / 4; // 16分音符
+      const snap = (f) => Math.round(f / grid) * grid;
+      const out = [];
+      for (let i = 0; i < evs.length; i++) {
+        const ev = evs[i];
+        const s = snap(ev.start);
+        const e = (i + 1 < evs.length && evs[i + 1].start <= ev.end) ? snap(evs[i + 1].start) : snap(ev.end);
+        if (e <= s) continue;
+        const prev = out[out.length - 1];
+        if (prev && prev.end > s) prev.end = s;
+        if (prev && prev.end <= prev.start) out.pop();
+        out.push(Object.assign(ev, { start: s, end: e }));
+      }
+      evs = out;
+    }
+    return evs;
+  };
 })(globalThis);
 
 /*
@@ -2672,7 +3184,9 @@
     return null;
   };
 
-  MML.Convert.PitchEnvelopeRegistry = function () {
+  // cmd: src/convert/options.js の変換設定(省略可)。EP/MP/PT の個別ON/OFFを assign() で見る。
+  MML.Convert.PitchEnvelopeRegistry = function (cmd) {
+    this.cmd = MML.Convert.normalizeCmd(cmd);
     this.tables = new Map(); // index(@EP<N>の番号) -> { values, loop }
     this.keyToIndex = new Map();
     this.nextIndex = 0;
@@ -2918,21 +3432,69 @@
   // directionUp: 周期的ビブラート(periodic)をMP<n>へフィットする際に使う出力先チップの
   // 周波数方向(fitVibrato参照)。省略時(undefined)はMPへのフィットを試みず、
   // 従来通り常にループEPテーブルを使う(VRC7=EP/MP対象外チャンネルの既定動作と一致)。
-  MML.Convert.PitchEnvelopeRegistry.prototype.assign = function (pitchSeq, directionUp) {
-    const pitchMod = MML.Convert.classifyPitchMod(pitchSeq);
-    if (!pitchMod) return null;
-    if (pitchMod.type === 'ramp') {
-      const fit = fitPortamento(pitchMod.values);
-      if (fit) return { kind: 'portamento', target: fit.target, duration: fit.duration, delay: pitchMod.delay };
-    } else if (pitchMod.type === 'periodic') {
-      const fit = fitVibrato(pitchMod.values, pitchMod.delay, directionUp);
-      if (fit) {
-        const idx = this.registerVibrato({ delay: fit.delay, speed: fit.speed, depth: fit.depth });
-        return { kind: 'vibrato', index: idx };
+  // ── SA<num>(ピッチシフト量、ppmckc公式・N163専用)の自動選択 ─────────────
+  // EPテーブル値は符号付きbyte(EP_VALUE_MIN/MAX)・MP depthも1byteだが、N163の周波数
+  // レジスタは18bitで1オクターブごとに値が2倍になる。深いビブラート等は生オフセットが
+  // byte幅を大きく超えて割当が失敗するため(実測: HESの変調イベントの58〜98%が黙って
+  // 破棄されていた)、SA<num>で値を<num>回左シフトして適用するようにし、テーブルには
+  // 縮めた値(>>sa)を登録する。量子化は2^sa単位=変調深さの約1/127で、セント換算1〜2程度。
+  //
+  // saMode('PITCH_SA'変換設定、src/convert/options.js):
+  //   'octave' … 基準レジスタ値のオクターブに連動(sa=floor(log2(base))-10、正規化後の
+  //              基準値が1024〜2047になる位置)。同じセント形状のビブラートがオクターブを
+  //              またいで同一のテーブル値になり、EnvelopeRegistryのdedupeが効く。
+  //              量子化ステップはセント換算0.85〜1.7で一定(オクターブ非依存)。既定。
+  //   'note'   … 音符ごとに必要最小のsa(最高精度、テーブル共有は減る)
+  //   'off'    … SAを使わない(従来互換。byte幅を超える変調は従来どおり割当失敗)
+  // どのモードもレンジに収まらない場合はsa+1のエスケープで引き上げる(上限8=本家仕様)。
+  MML.Convert.n163SaForBase = function (baseReg) {
+    if (!(baseReg > 0)) return 0;
+    return Math.max(0, Math.min(8, Math.floor(Math.log2(baseReg)) - 10));
+  };
+
+  // pitchSeq(生レジスタ値列)に対する実際のsaを決める。baseSa(モードごとの基本値)から、
+  // 最大偏差がEPのbyte幅に収まるまで引き上げる
+  function resolveSa(pitchSeq, baseSa) {
+    const base = pitchSeq[0];
+    let maxAbs = 0;
+    for (const v of pitchSeq) { const d = Math.abs(v - base); if (d > maxAbs) maxAbs = d; }
+    let sa = Math.max(0, Math.min(8, baseSa || 0));
+    while (sa < 8 && (maxAbs >> sa) > EP_VALUE_MAX) sa++;
+    return sa;
+  }
+
+  // saOpts(省略可): { mode: 'octave'|'note'|'off', baseSa: number }。
+  // N163が出力先のときだけ渡す(assignPitchEnvelopeのopts.saMode経由、または
+  // nsf2mml/spc2mmlのN163パスから直接)。戻り値にsa(使用したシフト量)が付く。
+  MML.Convert.PitchEnvelopeRegistry.prototype.assign = function (pitchSeq, directionUp, saOpts) {
+    const cmd = this.cmd;
+    if (!cmd.EP && !cmd.MP && !cmd.PT) return null; // 変換設定で全てOFF(基準音のみ)
+    let sa = 0;
+    let seq = pitchSeq;
+    if (saOpts && saOpts.mode && saOpts.mode !== 'off') {
+      sa = resolveSa(pitchSeq, saOpts.baseSa || 0);
+      if (sa > 0) {
+        const base = pitchSeq[0];
+        seq = pitchSeq.map(v => base + Math.round((v - base) / (1 << sa)));
       }
     }
+    const pitchMod = MML.Convert.classifyPitchMod(seq);
+    if (!pitchMod) return null;
+    if (pitchMod.type === 'ramp') {
+      const fit = cmd.PT ? fitPortamento(pitchMod.values) : null;
+      // PT(独自拡張)はSAのシフト対象外(compiler.js pitchRegisterOffset参照)のため、
+      // targetを生スケールへ戻して返す
+      if (fit) return { kind: 'portamento', target: fit.target * (1 << sa), duration: fit.duration, delay: pitchMod.delay, sa };
+    } else if (pitchMod.type === 'periodic') {
+      const fit = cmd.MP ? fitVibrato(pitchMod.values, pitchMod.delay, directionUp) : null;
+      if (fit) {
+        const idx = this.registerVibrato({ delay: fit.delay, speed: fit.speed, depth: fit.depth });
+        return { kind: 'vibrato', index: idx, sa };
+      }
+    }
+    if (!cmd.EP) return null; // EPが受け皿として使えなければ基準音のみ
     const registered = this.registerShape(pitchMod);
-    return registered ? { kind: 'ep', index: registered.index, delay: registered.delay } : null;
+    return registered ? { kind: 'ep', index: registered.index, delay: registered.delay, sa } : null;
   };
 
   MML.Convert.PitchEnvelopeRegistry.prototype.defLines = function () {
@@ -2962,16 +3524,25 @@
   // 借用先チップの生レジスタ空間へ変換して分類・登録し、該当すればev.pitchEpを立てる
   // (MML出力側でのgetter用にイベントオブジェクトを直接書き換える。detectChorusDetuneが
   // ev.detuneを直接書き込むのと同じ流儀)。
-  MML.Convert.assignPitchEnvelope = function (channels, periodFn, pitchReg) {
+  // opts.saMode('octave'|'note'|'off'): 出力先がN163のときだけ渡すSA<num>自動選択
+  // (n163SaForBase冒頭コメント参照)。省略時はSA無し(従来動作)。
+  MML.Convert.assignPitchEnvelope = function (channels, periodFn, pitchReg, opts) {
     // このperiodFn(=呼び出し元が渡す借用先チップの生周期換算関数)自体の増減方向を
     // 1回だけ調べ、fitVibratoへ渡す(compiler.jsのperiodFnIncreasingと同じ2点比較)。
     const directionUp = periodFnIncreasingLocal(periodFn);
+    const saMode = opts && opts.saMode && opts.saMode !== 'off' ? opts.saMode : null;
     for (const ch of channels) {
       for (const ev of ch.events) {
         if (ev.note === null || !ev.freqSeq || ev.freqSeq.length === 0) continue;
         const rescaled = MML.Convert.rescalePitchSeqFromFreq(ev.freqSeq, periodFn, ev);
-        const assigned = pitchReg.assign(rescaled, directionUp);
+        const saOpts = saMode
+          ? { mode: saMode, baseSa: saMode === 'octave' ? MML.Convert.n163SaForBase(rescaled[0]) : 0 }
+          : undefined;
+        const assigned = pitchReg.assign(rescaled, directionUp, saOpts);
         MML.Convert.applyPitchAssignment(ev, assigned);
+        // SAはD<n>にも効く(compiler.js pitchRegisterOffset、本家freq_add_mcknumber参照)ため、
+        // この音符のDも同じシフトで縮めて出力する(量子化2^sa単位≈1〜2セント)
+        if (ev.pitchSa && ev.detune) ev.detune = Math.round(ev.detune / (1 << ev.pitchSa));
       }
       // スラー分割(別プロジェクトE、2026-08-12): pitchEp/portamentoが確定した直後に
       // まとめて行う(markSlurTiesの安全ガードが両方の値を参照するため)。KSS(ay/scc)・
@@ -2987,6 +3558,9 @@
   // 重複させないためにここへ集約する。
   MML.Convert.applyPitchAssignment = function (ev, assigned) {
     if (!assigned) return;
+    // SA<num>(assign()のsaOpts参照): この音符のEP/MP値が>>saで登録されているため、
+    // 再生時に同じsaで戻せるようイベントへ記録する(mmlEmitがSA<n>コマンドとして出力)
+    if (assigned.sa != null && assigned.sa > 0) ev.pitchSa = assigned.sa;
     if (assigned.kind === 'portamento') {
       ev.portamento = { target: assigned.target, duration: assigned.duration, delay: assigned.delay };
     } else if (assigned.kind === 'vibrato') {
@@ -3017,6 +3591,9 @@
   const MAX_ARPEGGIO_PERIOD = 8; // 一般的な和音の構成音数を超える周期は誤検出とみなして除外
   const MIN_ARPEGGIO_CYCLES = 2; // 最低2周期分の反復確認(偶然の一致除け)
   const ARPEGGIO_CENTS_TOLERANCE = 25; // 半音の1/4以内なら「その半音に厳密に乗っている」とみなす
+  // トリル判別(mergeAlternatingVibratoの形状ゲート、同所コメント参照)
+  const TRILL_MIN_CENTS = 70;          // 方形でもこれ未満の浅い変調はビブラートとして統合を許す
+  const TRILL_MIDDLE_FRAC_MAX = 0.15;  // 中間帯滞在サンプル比がこれ未満なら方形(2値切替)とみなす
   const EN_VALUE_MIN = -127, EN_VALUE_MAX = 126; // @EN<n>テーブル値は符号付きbyte(lexer.js参照、EPと共通)
 
   // freq(Hz)が最寄りの12平均律半音(o4a=57=440Hz基準、他の抽出コードと同じ規約)から
@@ -3158,7 +3735,10 @@
     return result;
   };
 
-  MML.Convert.NoteEnvelopeRegistry = function () {
+  // cmd: src/convert/options.js の変換設定(省略可)。cmd.EN===false なら登録せず null
+  // (アルペジオ統合済みイベントは基音1音のまま出る)。
+  MML.Convert.NoteEnvelopeRegistry = function (cmd) {
+    this.cmd = MML.Convert.normalizeCmd(cmd);
     this.tables = new Map(); // index(@EN<N>の番号) -> { values, loop }
     this.keyToIndex = new Map();
     this.nextIndex = 0;
@@ -3170,7 +3750,7 @@
   // 参照)は、EN側は現状ループ専用(非ループ生成経路が無い)ため該当しないが、将来
   // 非ループEN生成を追加する場合はここも同じガードを入れること。
   MML.Convert.NoteEnvelopeRegistry.prototype.registerShape = function (deltas) {
-    if (!deltas || deltas.length === 0) return null;
+    if (!deltas || deltas.length === 0 || !this.cmd.EN) return null;
     const key = deltas.join(',');
     let idx = this.keyToIndex.get(key);
     if (idx === undefined) {
@@ -3212,8 +3792,9 @@
   // (pitch.js冒頭のmergeRapidArpeggioコメント参照)。rawFreqを持たない抽出結果
   // (SPC/ノイズ/OPLL等)ではmergeRapidArpeggioは何もせず素通りするだけなので、
   // 呼び出し側を条件分岐させずに一律この関数へ差し替えて問題ない。
-  MML.Convert.mergeVibratoAndArpeggio = function (events) {
-    return MML.Convert.mergeAlternatingVibrato(MML.Convert.mergeRapidArpeggio(events));
+  // opts.maxAbsorbCents: mergeAlternatingVibratoの統合上限(同関数コメント参照)。省略時は無制限
+  MML.Convert.mergeVibratoAndArpeggio = function (events, opts) {
+    return MML.Convert.mergeAlternatingVibrato(MML.Convert.mergeRapidArpeggio(events), opts);
   };
 
   // ── 分節のヒステリシス化(DESIGN-PITCH.md Phase 2、§5手順3) ──────────────
@@ -3264,7 +3845,7 @@
     return list.reduce((acc, e) => acc.concat(e[key] || []), []);
   }
 
-  MML.Convert.mergeAlternatingVibrato = function (events) {
+  MML.Convert.mergeAlternatingVibrato = function (events, opts) {
     const result = [];
     let i = 0;
     const n = events.length;
@@ -3300,7 +3881,38 @@
         // 周期で2音を高速往復=ビブラート」だけを統合対象とし、非周期の2値往復
         // (トレモロ的な打ち直し等、周期性の裏付けが無いもの)を誤って1音化しない)。
         const classified = MML.Convert.classifyPitchMod(candidateSeq);
-        if (classified && classified.type === 'periodic') {
+        // ★形状判別+統合上限(2026-08-26、DESIGN-PITCH.md §5「トリル判別」の実装):
+        //
+        // (1) トリル判別(形状、全フォーマット共通): LFOテーブル駆動のビブラートは中間値を
+        //     通る三角/正弦状、トリル奏法は2値切替の方形状。正規化振幅の中間帯(25%〜75%)に
+        //     滞在するサンプル比率(middleFrac)で判別し、方形かつ変調幅が奏法として意味を持つ
+        //     深さ(TRILL_MIN_CENTS以上)なら統合せず音符の交互のまま残す。浅い2値切替
+        //     (レジスタ分解能の都合で中間値を持てない境界ビブラート、数〜数十セント)は
+        //     従来どおり統合する。実例: Final Fantasy(NSF)の96〜105セント方形=トリル、
+        //     NX91002 idx34(HES)の149セント階段=三角ビブラート。
+        //
+        // (2) opts.maxAbsorbCents(フォーマット別の表現力上限): 統合された変調は後段の
+        //     MP/EPテーブル(fitVibrato→ループEP→literal EPの3段構え)で再現される前提だが、
+        //     テーブル値は符号付きbyte(EP_VALUE_MIN/MAX)・MP depthも1byteのため、表現可能な
+        //     変調幅は借用先チップの周期単位に依存する。HES→N163借用は単位が大きく
+        //     (半音≈1100周期単位)深い変調はレンジ外で割当が失敗し変調が丸ごと消えるため、
+        //     フォーマット側が上限を渡して超えるものは音符の交互のまま残す(次善の近似)。
+        //     省略時は無制限。
+        let spanCents = 0, middleFrac = 0;
+        {
+          let mn = Infinity, mx = 0;
+          for (const v of candidateSeq) if (v > 0) { if (v < mn) mn = v; if (v > mx) mx = v; }
+          if (mn < Infinity && mx > mn) {
+            spanCents = 1200 * Math.log2(mx / mn);
+            const lo = mn + (mx - mn) * 0.25, hi = mn + (mx - mn) * 0.75;
+            let mid = 0, n = 0;
+            for (const v of candidateSeq) if (v > 0) { n++; if (v > lo && v < hi) mid++; }
+            middleFrac = n > 0 ? mid / n : 0;
+          }
+        }
+        const isTrill = spanCents >= TRILL_MIN_CENTS && middleFrac < TRILL_MIDDLE_FRAC_MAX;
+        const spanOk = !(opts && opts.maxAbsorbCents != null && spanCents >= opts.maxAbsorbCents);
+        if (classified && classified.type === 'periodic' && !isTrill && spanOk) {
           result.push(Object.assign({}, home, {
             end: last.end,
             volSeq: concatField(absorbed, 'volSeq'),

@@ -17,8 +17,8 @@
  * 変換元チャンネル一覧(sourceChannels)はヘッダだけから決まる。既定割当(defaultPlan)は
  * 「AY8910×1+SN76489×2(Exed Exes)なら AY→FME-7、SN×2→N163×6ch」のように種類と本数から
  * 機械的に決める(固定: AY→FME-7、YM2413→VRC7、SCC→N163。SN76489はFME-7の空き→N163へ
- * チップ単位。ノイズは最初の1本だけ2A03ノイズD)。ユーザーはVGMパネルの「チャンネル割当」で
- * ソースchごとに借用先(SPCのTARGET_OPTIONSと同じ語彙: A/B/C/D、FME-7、N163、MMC5、VRC6…)を
+ * チップ単位。ノイズは最初の1本だけ2A03ノイズD)。ユーザーは鍵盤表示のチャンネル割当(part列チップ/「借用先」列)で
+ * ソースchごとに借用先(共通語彙 src/convert/channelPlan.js: A/B/C/D、FME-7、N163、MMC5、VRC6…)を
  * 変えられ(例: FME-7が高音で辛いchを2A03へ)、options.channelMap として渡る。借用先ファミリ
  * ごとにイベントを整形(adaptEvents: 矩形波/デューティ/音量の対数→線形換算/三角波は音程のみ)。
  */
@@ -67,7 +67,7 @@
   }
 
   // ---------------------------------------------------------------------------
-  // 借用先タイプ(SPCのTARGET_OPTIONSと同じ語彙、src/main.js参照)とチャンネル割当計画
+  // 借用先タイプ(共通語彙。src/convert/channelPlan.js の TARGETS と同じ)とチャンネル割当計画
   // ---------------------------------------------------------------------------
   // type → { chip(拡張音源名|null=2A03), index(チップ内ch番号), letter(2A03のみ固定) }
   const TARGET_TYPES = {
@@ -286,10 +286,13 @@
     const c = h.chips;
     const src = MML.VGM2MML.sourceChannels(h);
     const plan = Object.assign({}, MML.VGM2MML.defaultPlan(h), options.channelMap || {});
+    // 変換設定(src/convert/options.js): コマンド使用/不使用・譜面整形(全レジストリ・
+    // detune.js・emitScore へ同じ cmd を渡す)
+    const cmd = MML.Convert.normalizeCmd(options.cmd);
 
-    const envReg = new MML.Convert.EnvelopeRegistry();
-    const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
-    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
+    const envReg = new MML.Convert.EnvelopeRegistry(cmd);
+    const pitchReg = new MML.Convert.PitchEnvelopeRegistry(cmd);
+    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry(cmd);
     const n163WaveReg = MML.Convert.n163WaveRegistry();
     const vrc7ToneReg = new MML.Convert.WaveRegistry('@OP');
     const notes = ignoredNote ? [ignoredNote] : [];
@@ -298,7 +301,7 @@
     // (ユーザーが明示的にskipへ変えたものは対象外)
     const autoSkippedFm = src.filter(s => (s.kind === 'fm4' || s.kind === 'fm') && plan[s.id] === 'skip'
       && !(options.channelMap && options.channelMap[s.id] === 'skip'));
-    if (autoSkippedFm.length) notes.push(`${autoSkippedFm.map(s => s.label).join(', ')} は借用先(VRC7は6ch)の空きが無いため変換対象外です(チャンネル割当で変更できます)。`);
+    if (autoSkippedFm.length) notes.push(`${autoSkippedFm.map(s => s.label).join(', ')} は借用先(VRC7は6ch)の空きが無いため変換対象外です(鍵盤表示のチャンネル割当で変更できます)。`);
 
     // 借用先ファミリに応じた音量写像プロキシ(対数DAC元→線形先のときだけ写像)
     const familyOf = t => (TARGET_TYPES[t] || TARGET_TYPES.skip).family || null;
@@ -335,7 +338,7 @@
         for (const s of items) if (plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
         if (picked.length && counts.length > picked.length) {
           const chipName = items[0].label.replace(/ PCM\d+$/, '');
-          notes.push(`${chipName} は${items.length}chのうち音符の多いch(${picked.join(',')})を既定割当に自動選択しました(チャンネル割当で変更できます)。`);
+          notes.push(`${chipName} は${items.length}chのうち音符の多いch(${picked.join(',')})を既定割当に自動選択しました(鍵盤表示のチャンネル割当で変更できます)。`);
         }
       }
     }
@@ -450,9 +453,10 @@
       const fn = periodFnFor[fam];
       if (fn) {
         // 音程補正: kss2mml(PSG→FME-7)と同じ detectChorusDetune 方針。EN→EPの順序はkss2mml参照
-        MML.Convert.detectChorusDetune(chans, fn);
+        MML.Convert.detectChorusDetune(chans, fn, { cmd });
         MML.Convert.assignNoteEnvelope(chans, noteEnvReg);
-        if (fam !== 'vrc7') MML.Convert.assignPitchEnvelope(chans, fn, pitchReg);
+        // n163出力先だけSA<num>自動選択を有効化(pitch.js n163SaForBase参照)
+        if (fam !== 'vrc7') MML.Convert.assignPitchEnvelope(chans, fn, pitchReg, fam === 'n163' ? { saMode: cmd.PITCH_SA } : undefined);
       }
       for (const p of list) {
         const tt = TARGET_TYPES[p.type];
@@ -504,7 +508,7 @@
       `; 借用先の割当(${isCustom ? 'ユーザー指定' : '構成から自動'}): ${assignments.join(', ') || '-'}`,
       `; ※ このアプリのMMLプレイヤーはNES音源専用のため、AY8910→FME-7(互換)、YM2413→VRC7(同一)、`,
       `;    SCC→N163(波形近似)、SN76489等の矩形波はFME-7の空き→N163(矩形波@N)の順に、ノイズは`,
-      `;    2A03ノイズ(D)へ載せています(割当はVGMパネルの「チャンネル割当」で変更できます)。`,
+      `;    2A03ノイズ(D)へ載せています(割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
       `;    YM2612/YM2610/YM2151のFMはVRC7へ(4op→2op、音色はプリセットから選択。音程・TL由来の音量のみ再現)、`,
       `;    YM2610 ADPCM-A/Bはサンプルのピッチ解析で得た音程と音量だけを載せています。`,
       `;    線形音量の借用先(N163/2A03/MMC5/VRC6)へ載せた音量は対数DAC→線形へ換算した値です。`,
@@ -517,16 +521,24 @@
       ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${(letterMap.n163 || []).length}`
       : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
-      totalFrames, tempoBpm: bpm,
+      totalFrames, tempoBpm: bpm, cmd,
       headerLines: [
         ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(expansions.includes('n163') ? n163WaveReg.defLines() : []),
         ...(expansions.includes('vrc7') ? vrc7ToneReg.defLines() : [])
       ]
     });
+    const mml = [headerComment, scoreText].join('\n');
+    // 変換結果の音程検証(src/convert/verify.js): 最終MMLを実コンパイルして
+    // 「実際に鳴る音の高さ」を変換元イベントと突き合わせる(失敗しても変換は妨げない)
+    const pitchCheck = MML.Convert.verifyPitch
+      ? MML.Convert.verifyPitch(mml, scoreChannels, { frameRate: frameRate, totalFrames: totalFrames })
+      : null;
+
     return {
-      mml: [headerComment, scoreText].join('\n'),
+      mml,
       bpm: Math.round(bpm),
+      pitchCheck,
       chips: h.usedChips.filter(ch => ['ay8910', 'k051649', 'ym2413', 'sn76489', 'ym2612', 'ym2610', 'ym2151', 'ga20', 'segapcm', 'c140'].includes(ch.id)).map(ch => ch.name + (ch.dual ? ' x2' : '')),
       expansions,
       assignments,
@@ -630,7 +642,7 @@
    */
   MML.VGM2MML.fromVgm = async function (vgmBytes, durationSeconds, options) {
     options = options || {};
-    const data = await MML.Emu.captureVgmSongAsync(vgmBytes, { durationSeconds: durationSeconds || 60 });
+    const data = await MML.Emu.captureVgmSongAsync(vgmBytes, { durationSeconds: durationSeconds || 60 }, options.onProgress || null);
     const h = data.header;
     const title = gd3Field(h, 'trackEn', 'trackJa');
     const game = gd3Field(h, 'gameEn', 'gameJa');

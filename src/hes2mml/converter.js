@@ -41,11 +41,12 @@
       durationSeconds: durationSeconds || 60,
       sampleRate: 44100,
       regsOnly: true
-    });
+    }, options.onProgress || null);
     return MML.HES2MML.convertCapture({
       snapshots: capture.snapshots,
       dpcmTrace: capture.dpcmTrace,
       controlTrace: capture.controlTrace,
+      pitchTrace: capture.pitchTrace,
       frameRate: capture.frameRate,
       trackLabel: String(trackNo)
     }, options);
@@ -59,26 +60,51 @@
    *   dpcmTrace, controlTrace(captureHesSongAsync由来。無ければ空配列でDDA(PCM)は抽出されない),
    *   frameRate, trackLabel(コメント用), sourceLabel(コメント用、既定'HES') }
    */
+  // ── チャンネル割当(案E) ────────────────────────────────────────
+  // 変換元チャンネルのIDは鍵盤表示の行IDと同じ体系(PSG0-5)。音量は抽出時点で線形4bitなので
+  // linear:true(借用層の音量写像が対数の借用先=FME-7/VRC7へ換算する)。
+  // ノイズ(ch4/5のノイズモード)とDDA(PCM)は「chのモード」であって別チャンネルではないため、
+  // 割当の対象にはせず従来どおりD/Eへ固定で出す。
+  MML.HES2MML.sourceChannels = function () {
+    return Array.from({ length: 6 }, (_, i) => ({
+      id: `PSG${i}`, label: `PSG ch${i}`, chip: 'huc6280', kind: 'wave', ch: i,
+      linear: true, nativeFamily: 'n163',
+    }));
+  };
+  MML.HES2MML.defaultPlan = function () {
+    const plan = {};
+    for (let i = 0; i < 6; i++) plan[`PSG${i}`] = `n163_${i}`;
+    return plan;
+  };
+
   MML.HES2MML.convertCapture = function (cap, options) {
     options = options || {};
-    const capture = { dpcmTrace: cap.dpcmTrace || [], controlTrace: cap.controlTrace || [] };
+    // 変換設定(src/convert/options.js): コマンド使用/不使用・譜面整形(全レジストリ・
+    // detune.js・emitScore へ同じ cmd を渡す)
+    const cmd = MML.Convert.normalizeCmd(options.cmd);
+    const capture = { dpcmTrace: cap.dpcmTrace || [], controlTrace: cap.controlTrace || [], pitchTrace: cap.pitchTrace || [] };
     const snapshots = cap.snapshots;
     const totalFrames = snapshots.length;
     const frameRate = cap.frameRate;
     const trackNo = cap.trackLabel;
     const sourceLabel = cap.sourceLabel || 'HES';
 
-    const envReg = new MML.Convert.EnvelopeRegistry();
+    const envReg = new MML.Convert.EnvelopeRegistry(cmd);
     // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
-    const pitchReg = new MML.Convert.PitchEnvelopeRegistry();
+    const pitchReg = new MML.Convert.PitchEnvelopeRegistry(cmd);
     // ノートエンベロープ(高速アルペジオ)の共有レジストリ(2026-08-14)。
-    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry();
+    const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry(cmd);
     const n163WaveReg = MML.Convert.n163WaveRegistry();
 
-    const waveResult = MML.Hes2MmlExpansion.wave(snapshots, n163WaveReg, envReg);
-    const noiseResult = MML.Hes2MmlExpansion.noise(snapshots, envReg);
+    // controlTrace($0804書込み列)はソフト音量エンベロープの位相エイリアシング対策の
+    // リサンプルに使う(wave.js buildVolTimeline冒頭コメント参照)。VGM経由は空配列で
+    // 従来のスナップショット列にフォールバックする。
+    const waveResult = MML.Hes2MmlExpansion.wave(snapshots, n163WaveReg, envReg, capture.controlTrace, capture.pitchTrace,
+      // SA不使用設定のときだけ深い統合を止める(wave.js冒頭コメント参照)
+      { maxAbsorbCents: cmd.PITCH_SA === 'off' ? 70 : null });
+    const noiseResult = MML.Hes2MmlExpansion.noise(snapshots, envReg, capture.controlTrace);
     const hasNoise = noiseResult.events.some(ev => ev.note !== null);
-    const dpcmResult = MML.Hes2MmlExpansion.dpcm(snapshots, capture.dpcmTrace, capture.controlTrace, frameRate);
+    const dpcmResult = MML.Hes2MmlExpansion.dpcm(snapshots, capture.dpcmTrace, capture.controlTrace, frameRate, cmd);
     const hasDpcm = dpcmResult.defs.length > 0;
 
     // rawLength(N163波形の実サンプル数、常に32)を付与してからdetune計算に渡す
@@ -87,10 +113,15 @@
       for (const ev of ch.events) if (ev.note !== null) ev.rawLength = 32;
     }
 
+    // ユーザーがチャンネル割当(鍵盤表示、案E)を既定から変えたときは、以下の音程補正/EN/EPは
+    // 借用先ファミリごとに共通借用層(src/convert/borrow.js)側で行う(借用先が変われば
+    // 生周期の換算式が変わるため、ここでN163前提の補正を掛けてはいけない)。
+    const customPlan = options.channelMap || null;
+    if (!customPlan) {
     // 借用変換(DESIGN.md §5): PC EngineのPSGとNES N163はチップ・クロックが異なるため、
     // 二重量子化を補正するapplyPitchDetuneを使う(ネイティブ変換のdetectChorusDetuneではない)。
     for (const ch of waveResult.channels) {
-      MML.Convert.applyPitchDetune([{ events: ch.events }], n163PeriodRaw);
+      MML.Convert.applyPitchDetune([{ events: ch.events }], n163PeriodRaw, { cmd });
     }
     // ノイズは2A03固定16周期の離散選択であり連続量の微調整という概念が無いためdetune対象外。
 
@@ -103,21 +134,59 @@
 
     // ピッチエンベロープも同じn163PeriodRawで借用先の生レジスタ空間へ変換してから
     // 分類・登録する(DESIGN-PITCH.md Phase 1、rawLength付与後・applyPitchDetuneと同じ変換系列)。
+    // saMode: 出力先がN163なのでSA<num>自動選択を有効化(pitch.js n163SaForBase参照)。
+    // これによりbyte幅を超える深いビブラート等もSA付きEP/MPで表現できる。
     for (const ch of waveResult.channels) {
-      MML.Convert.assignPitchEnvelope([{ events: ch.events }], n163PeriodRaw, pitchReg);
+      MML.Convert.assignPitchEnvelope([{ events: ch.events }], n163PeriodRaw, pitchReg, { saMode: cmd.PITCH_SA });
     }
+    } // ← 既定割当のときの音程補正/EN/EPここまで
 
-    const expansions = ['n163'];
+    // 割当の適用。既定のときは従来どおりPSG 6ch→N163固定で出力する=出力は不変。
+    // ノイズ(D)とDDA(E=DPCM)は「PSGのモード」であってch単位の借用先ではないため、
+    // どちらの経路でも従来どおり別枠で追加する。
+    let expansions, expansionLetterMap, scoreChannels, borrowNotes = [], chanDesc = '';
+    if (customPlan) {
+      const r = MML.Convert.Borrow.compose({
+        sources: MML.HES2MML.sourceChannels(),
+        plan: Object.assign({}, MML.HES2MML.defaultPlan(), customPlan),
+        cmd,
+        // HESも借用変換(二重量子化の補正)なのでapplyPitchDetune方針を保つ(従来経路と同じ)
+        detuneMode: 'apply',
+        regs: {
+          envReg, pitchReg, noteEnvReg, n163WaveReg,
+          vrc7ToneReg: new MML.Convert.WaveRegistry('@OP'),
+        },
+        toneOf: (id) => (options.tone || {})[id],
+        // PSGの抽出は借用先ファミリに依らず1回でよい(既に上で済ませてある)。ただし音量尺度が
+        // 違うファミリ(FME-7/VRC7)へ載せる分は @v テーブルを写像した registry で取り直す
+        extract: (chip, fam, reg) => (reg === envReg ? waveResult.channels
+          : MML.Hes2MmlExpansion.wave(snapshots, MML.Convert.n163WaveRegistry(), reg,
+              capture.controlTrace, capture.pitchTrace,
+              { maxAbsorbCents: cmd.PITCH_SA === 'off' ? 70 : null }).channels),
+      });
+      expansions = r.expansions.slice();
+      if (hasDpcm && expansions.indexOf('dpcm') < 0) expansions.unshift('dpcm');
+      expansionLetterMap = MML.Mml.assignExpansionLetters(expansions);
+      scoreChannels = r.scoreChannels;
+      borrowNotes = r.notes;
+      chanDesc = Object.keys(r.placed)
+        .map(t => `${MML.Convert.ChannelPlan.letterOfTarget(t)}=${r.placed[t].source.label}`).sort().join(' ');
+      if (hasNoise) scoreChannels.push(Object.assign({}, noiseResult, { letter: 'D' }));
+      if (hasDpcm) scoreChannels.push({ letter: expansionLetterMap.dpcm[0], events: dpcmResult.events, hasInstrument: true });
+      scoreChannels.sort((a, b) => a.letter.localeCompare(b.letter));
+    } else {
+    expansions = ['n163'];
     // dpcmは実機ppmck同様レター体系上は常にEを固定占有する(使わなくても他チップの
     // レター位置には影響しない。src/mml/compiler.js assignExpansionLetters参照)。
-    const expansionLetterMap = MML.Mml.assignExpansionLetters(hasDpcm ? ['dpcm', 'n163'] : expansions);
+    expansionLetterMap = MML.Mml.assignExpansionLetters(hasDpcm ? ['dpcm', 'n163'] : expansions);
     const n163Letters = expansionLetterMap.n163;
     const dpcmLetter = hasDpcm ? expansionLetterMap.dpcm[0] : null;
 
-    const scoreChannels = waveResult.channels.map((ch, i) =>
+    scoreChannels = waveResult.channels.map((ch, i) =>
       Object.assign({}, ch, { letter: n163Letters[i], hasDetune: true, hasPitchMod: true }));
     if (hasNoise) scoreChannels.push(Object.assign({}, noiseResult, { letter: 'D' }));
     if (hasDpcm) scoreChannels.push({ letter: dpcmLetter, events: dpcmResult.events, hasInstrument: true });
+    }
 
     const noteDurations = [];
     for (const ch of scoreChannels) {
@@ -137,22 +206,32 @@
       `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
       `; 分解能   : 480 TPQN (MIDI準拠)`,
       `; 変換     : Sound Emulation Foundry`,
-      `; チャンネル: ${dpcmLetter ? dpcmLetter + '=PSG DDA(PCM、2A03 DMCとして近似再生) ' : ''}${n163Letters.slice(0, N163_NUM_CH).join('')}=PSG ch0-5(N163として近似再生)${hasNoise ? ' D=PSGノイズ(ch4/5、2A03ノイズとして近似再生)' : ''}`,
+      customPlan
+        ? `; チャンネル: ${chanDesc || '-'}${hasDpcm ? ` ${expansionLetterMap.dpcm[0]}=PSG DDA(PCM)` : ''}${hasNoise ? ' D=PSGノイズ' : ''} (借用先の割当: ユーザー指定)`
+        : `; チャンネル: ${hasDpcm ? expansionLetterMap.dpcm[0] + '=PSG DDA(PCM、2A03 DMCとして近似再生) ' : ''}${(expansionLetterMap.n163 || []).slice(0, N163_NUM_CH).join('')}=PSG ch0-5(N163として近似再生)${hasNoise ? ' D=PSGノイズ(ch4/5、2A03ノイズとして近似再生)' : ''}`,
       `; ※ このアプリのMMLプレイヤーはNES音源専用のため、PSGの6ch(いずれも32サンプル5bit`,
       `;    波形音源)はレジスタ構造が近いN163へ、ノイズモードは2A03ノイズへ、DDA(PCM)は`,
       `;    2A03 DMCへ載せています。DPCMサンプルは抽出済み.dmcファイルとして自動でダウンロード`,
-      `;    ・読込済みになるため、変換直後の再生・NSF書き出しでそのまま鳴らせます。`,
+      `;    ・読込済みになるため、変換直後の再生・NSF書き出しでそのまま鳴らせます`,
+      `;    (借用先の割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
+      ...borrowNotes.map(n => `; ※ ${n}`),
       `; =========================================================`,
       ``
     ].join('\n');
 
     const dpcmDefLines = dpcmResult.defs.map(d =>
       `@DPCM${d.index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac}, ${d.mode} }`);
-    const directiveLines = [`${MML.Mml.EX_CHIP_DIRECTIVE.n163} ${N163_NUM_CH}`];
+    // #EX-*: 既定は常にN163(6ch宣言)。ユーザー指定のときは実際に使った拡張音源だけ宣言する
+    const directiveLines = customPlan
+      ? expansions.filter(chip => chip !== 'dpcm').map(chip => chip === 'n163'
+        ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${(expansionLetterMap.n163 || []).length}`
+        : MML.Mml.EX_CHIP_DIRECTIVE[chip])
+      : [`${MML.Mml.EX_CHIP_DIRECTIVE.n163} ${N163_NUM_CH}`];
 
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
-      totalFrames, tempoBpm: bpm,
-      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(), ...n163WaveReg.defLines()]
+      totalFrames, tempoBpm: bpm, cmd,
+      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+        ...(!customPlan || expansions.indexOf('n163') >= 0 ? n163WaveReg.defLines() : [])]
     });
     const mml = [headerComment, scoreText].join('\n');
 
@@ -166,8 +245,14 @@
       uiWave[i] = waveResult.n163Wave[srcPos] || 0;
     }
 
+    // 変換結果の音程検証(src/convert/verify.js): 最終MMLを実コンパイルして
+    // 「実際に鳴る音の高さ」を変換元イベントと突き合わせる(失敗しても変換は妨げない)
+    const pitchCheck = MML.Convert.verifyPitch
+      ? MML.Convert.verifyPitch(mml, scoreChannels, { frameRate, totalFrames })
+      : null;
+
     return {
-      mml, bpm: Math.round(bpm),
+      mml, bpm: Math.round(bpm), pitchCheck,
       chips: ['PSG0', 'PSG1', 'PSG2', 'PSG3', 'PSG4', 'PSG5'].concat(hasNoise ? ['NOISE'] : []).concat(hasDpcm ? ['DDA'] : []),
       expansions,
       n163Wave: uiWave,

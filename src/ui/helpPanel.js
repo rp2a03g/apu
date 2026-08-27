@@ -27,7 +27,7 @@
       if (!win) return;
       const mmlSourceEl = document.getElementById('mmlSource');
       const listEl = document.getElementById('helpList');
-      const searchEl = document.getElementById('helpSearch');
+      const indexBoxEl = document.getElementById('helpIndexBox');
       const categoryEl = document.getElementById('helpCategory');
       const sourceEl = document.getElementById('helpSource');
       const statusEl = document.getElementById('helpStatus');
@@ -167,9 +167,86 @@
         render();
       }
 
+      /* ---- コマンド索引 ----
+       * 「このコマンドは何だっけ」を引くための索引なので、項目単位ではなくコマンド単位で並べる
+       * (1項目が SD<n>/SDOF/SDQR のように複数コマンドを持つため)。素のASCII順だと
+       * 記号・"@"付き・"#"付きが入り混じって引きにくいので、4群に分けてから群ごとに
+       * アルファベット順(接頭辞の @ / # は無視)に並べる。
+       */
+      const INDEX_GROUPS = [
+        { key: 'alpha',  label: () => T('A-Z(音符・コマンド)'), test: c => /^[A-Za-z]/.test(c) },
+        { key: 'at',     label: () => T('@ で始まるもの'),      test: c => c.startsWith('@') },
+        { key: 'hash',   label: () => T('# ヘッダ指示子'),      test: c => c.startsWith('#') },
+        { key: 'symbol', label: () => T('記号'),                test: () => true }
+      ];
+
+      // 先頭の @ / # は1個だけ落として並べる(こうすると "@@<n>" と "@@r<n>" が隣り合い、
+      // それ以外は "@v<n>" → v、"#TITLE" → title のように中身のアルファベット順になる)
+      function sortKeyOf(cmd) {
+        return cmd.replace(/^[@#]/, '').toLowerCase();
+      }
+
+      function renderIndex() {
+        indexBoxEl.innerHTML = '';
+        if (indexBoxEl.style.display === 'none') return;
+        // コマンド→項目。重複(同じコマンドが両方のソースにある等)は最初のものを採る
+        const seen = new Map();
+        for (const item of entries) {
+          for (const cmd of item.entry.commands) {
+            if (!seen.has(cmd)) seen.set(cmd, item);
+          }
+        }
+        const buckets = new Map(INDEX_GROUPS.map(g => [g.key, []]));
+        for (const [cmd, item] of seen) {
+          const group = INDEX_GROUPS.find(g => g.test(cmd));
+          buckets.get(group.key).push({ cmd, item });
+        }
+        for (const group of INDEX_GROUPS) {
+          const list = buckets.get(group.key);
+          if (!list.length) continue;
+          // 記号群だけは辞書順(localeCompare)だと句読点の重みで直感に反する並びになるので符号位置順
+          const cmp = group.key === 'symbol'
+            ? (x, y) => (x.cmd < y.cmd ? -1 : x.cmd > y.cmd ? 1 : 0)
+            : (x, y) => sortKeyOf(x.cmd).localeCompare(sortKeyOf(y.cmd)) || (x.cmd < y.cmd ? -1 : 1);
+          list.sort(cmp);
+          const label = document.createElement('div');
+          label.className = 'help-index-label';
+          label.textContent = group.label();
+          indexBoxEl.appendChild(label);
+          for (const { cmd, item } of list) {
+            const row = document.createElement('div');
+            row.className = 'help-index-item';
+            row.tabIndex = 0;
+            const code = document.createElement('code');
+            code.className = 'help-index-cmd';
+            code.textContent = cmd;
+            const title = document.createElement('span');
+            title.className = 'help-index-title';
+            title.textContent = item.entry.title;
+            row.appendChild(code);
+            row.appendChild(title);
+            row.addEventListener('click', () => jumpToEntry(item));
+            row.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); jumpToEntry(item); } });
+            indexBoxEl.appendChild(row);
+          }
+        }
+      }
+
+      // 索引のコマンドをクリックしたとき、その項目までスクロールして一瞬光らせる
+      function jumpToEntry(item) {
+        // カテゴリで絞り込み中に索引から飛ぶと対象が描画されていないので、絞り込みを解除する
+        const target = () => document.getElementById('card-' + item.origin + '-' + item.entry.id);
+        if (!target() && categoryEl.value) { categoryEl.value = ''; render(); }
+        const el = target();
+        if (!el) return;
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        el.classList.remove('help-card--flash');
+        void el.offsetWidth;                    // アニメーションを再スタートさせる
+        el.classList.add('help-card--flash');
+      }
+
       // ---- 一覧描画 ----
       function render() {
-        const q = (searchEl.value || '').trim().toLowerCase();
         const cat = categoryEl.value;
         listEl.innerHTML = '';
         let shown = 0;
@@ -178,10 +255,6 @@
         for (const item of entries) {
           const e = item.entry;
           if (cat && e.category !== cat) continue;
-          if (q) {
-            const hay = (e.commands.join(' ') + ' ' + e.title + ' ' + e.body + ' ' + e.snippet).toLowerCase();
-            if (!hay.includes(q)) continue;
-          }
           const chapterKey = item.originLabel + ' / ' + (e.chapter || '');
           if (chapterKey !== lastChapter) {
             lastChapter = chapterKey;
@@ -193,6 +266,7 @@
 
           const card = document.createElement('div');
           card.className = 'help-card';
+          card.id = 'card-' + item.origin + '-' + e.id;   // コマンド索引からのジャンプ先
 
           const head = document.createElement('div');
           head.className = 'help-card-head';
@@ -263,14 +337,18 @@
           empty.textContent = T('該当する項目がありません。');
           listEl.appendChild(empty);
         }
+        renderIndex();
       }
 
       // ---- イベント ----
-      searchEl.addEventListener('input', render);
       categoryEl.addEventListener('change', render);
       sourceEl.addEventListener('change', rebuild);
       document.getElementById('helpReload').addEventListener('click', rebuild);
       stopBtn.addEventListener('click', stopPlayback);
+      document.getElementById('helpIndexToggle').addEventListener('click', () => {
+        indexBoxEl.style.display = indexBoxEl.style.display === 'none' ? '' : 'none';
+        renderIndex();
+      });
       lintToggleEl.addEventListener('click', () => {
         const box = document.getElementById('helpLintBox');
         box.style.display = box.style.display === 'none' ? 'block' : 'none';

@@ -214,7 +214,9 @@
       const t = timeline[f];
       const period    = t.freqLo | ((t.freqHiReg & 0x0F) << 8);
       const disabled  = !!(t.freqHiReg & 0x80);
-      const volume    = Math.max(0, Math.min(15, Math.round(t.gain / 2)));
+      // MMLのFDS音量は$4080ゲインの生値(0-63、本家ppmck同様)。以前は0-15へ半分に丸めて
+      // いたためハードウェアエンベロープの分解能を半分捨てていた(2026-08-24)
+      const volume    = Math.max(0, Math.min(63, t.gain));
       const freq = fdsFreq(period);
       const note = (!disabled && period > 0) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
@@ -286,10 +288,10 @@
         // 限らないため実測(analyzeVolumeShape)して、100番台(ハードウェア由来)に登録する
         const shape = MML.Convert.analyzeVolumeShape(ev.volSeq);
         const idx = envReg ? envReg.registerShape(shape, true) : null;
-        return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
+        return idx == null ? { volume: MML.Convert.plainVolume(ev.volSeq) } : { envelopeV: idx };
       }
       const idx = envReg ? envReg.assign(ev.volSeq) : null;
-      return idx == null ? { volume: ev.volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(ev.volSeq) } : { envelopeV: idx };
     }
     // EPはキャリア(carrier)周波数レジスタのビブラートのみ対象(FDSのハードウェア
     // モジュレーション=fdsMod/@MHとは別物、Phase 0のpitchSeq設計方針と同じ)。

@@ -53,6 +53,7 @@
       this.halted = false;
       this.callActive = false;
       this.speedHigh = true; // CSH(既定)/CSL。master clockに対するCPUサイクルの重み換算に使う
+      this.lastDataAddr = -1;
     }
 
     read(addr) { return this.bus.read(addr & 0xFFFF) & 0xFF; }
@@ -115,6 +116,13 @@
         case 'rel': addr = this.fetchByte(); break;
         default: throw new Error(`未知のアドレッシングモード: ${mode}`);
       }
+      // 直近の「メモリからのデータ読出し」の論理アドレス。DDA(PCM)キャプチャ
+      // (hesPlayer.js captureHesSongAsync)が「$0806へ書かれたサンプル値はROMのどこから
+      // 読まれたか」を突き止めるために参照する(hes2mml/expansion/dpcm.js冒頭コメント参照)。
+      // skipRead(STA/STZ等のストア系。書込み先アドレスは読出しではない)とrel(分岐オフセット)
+      // は除外する。実測(NX91002.hes)ではストリーミングループのLDA (zp)がここに残り、
+      // 43142/43142件でROMバイトと書込み値が一致した。
+      if (!skipRead && addr !== null && mode !== 'rel') this.lastDataAddr = addr;
       return { addr, value, pageCrossed };
     }
 

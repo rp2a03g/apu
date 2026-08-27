@@ -339,7 +339,7 @@
   // DPCM使用曲ではサンプル($C000固定)の直下に詰めるため$C000-コードバンク数×4KBを渡す
   // (buildBankedNsfBytes参照)。ドライバは絶対アドレスで自分自身を参照するのでorgで
   // 一意に決まり、窓→ファイル上バンク番号の対応はNSFヘッダのbankswitch初期値で吸収する
-  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep) {
+  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa) {
     driverOrg = driverOrg || 0x9000;
     usesSweep = !!usesSweep;
     songAddrLo = songAddrLo || channelTypes.map(() => 0x00);
@@ -484,18 +484,27 @@
     // 保持する1byte/ch。2A03パルスA/B以外のチャンネルでは使わないが、,Xインデックスの
     // 配列として他の状態と同じ形で確保する(D<n>等と同じ扱い)
     const sweepExtraSlots = usesSweep ? 1 : 0;
+    // SA<num>(N163ピッチシフト量、2026-08-26、本家pitch_shift_amount相当): 1byte/ch。
+    // usesPitchSaの時のみ実際に使う。APPLY_DETUNE_N163のSA_ADD16参照
+    const saExtraSlots = usesPitchSa ? 1 : 0;
+    // LASTVOL(音量書込みスキップ用の直近値、2026-08-26): 1byte/ch。音量のみ書込み経路
+    // (WRITE_VOL_ONLY=TICK_VOL_FXの継続フレーム)が存在する曲でのみ確保する。
+    // 条件はusesVolOnly(下方で定義)と同一だが、ZPレイアウト計算がそれより手前に
+    // あるためここで同じ式を展開する(片方だけ変更しないこと)
+    const usesVolSkip = envIndexList.length > 0 || usesVr || usesDutyEnv;
+    const lastVolExtraSlots = usesVolSkip ? 1 : 0;
     // NOTELEN/RESTLEN(sticky音長、2026-08-16): 直前に読んだ音符/休符の音長バイト。
     // バイトコードの1バイト形式(音長省略)がこの値を再利用する(mckBytecode.js参照)
     const totalPerChanBlocks = 11 + n163ExtraSlots + fme7ExtraSlots + epExtraSlots + mpExtraSlots +
       ptExtraSlots + enExtraSlots + freqOnlyExtraSlots + smoothExtraSlots + psExtraSlots + vrExtraSlots +
-      dutyExtraSlots + detuneExtraSlots + sweepExtraSlots + envActExtraSlots;
+      dutyExtraSlots + detuneExtraSlots + sweepExtraSlots + envActExtraSlots + saExtraSlots + lastVolExtraSlots;
     // fixedBase以降(JMPLO,JMPHI,FME7専用グローバル,CEILDIVスクラッチ,PLAYIDX)の固定個数。
     // 下のchArrayBase判定に含める(このブロックも$0100-$01FFに掛かってはいけないため)。
     // PS(2026-08-13)使用時は16bit÷8bit版CEILDIV16のスクラッチ(CDA16LO/HI)+
     // RD_PITCHSHIFT設定用スクラッチ(PSNEWNOTE/PSOLDLO/PSOLDHI)の5byteを追加する。
     // PLAYIDX(2026-08-16 最適化)はPLAYのチャンネルループカウンタ1byte(旧実装は
     // LDX #i/JSR SERVICE_CHをチャンネル数ぶんアンロールしており5byte/chを消費していた)
-    const TRAILING_FIXED_SIZE = 14 + (usesPitchShift ? 5 : 0);
+    const TRAILING_FIXED_SIZE = 14 + (usesPitchShift ? 5 : 0) + (usesPitchSa ? 3 : 0);
     // CNT以降のチャンネル配列群の開始番地。$0100-$01FFは6502のハードウェアスタック
     // (JSR/RTS/PHA/PLAが暗黙に使う)なので、,X直接インデックスの配列であっても
     // 絶対に踏んではいけない(踏むとJSRの戻り先が化けて実機で不定動作/暴走する。
@@ -636,12 +645,19 @@
     const SWEEPREG = sweepBase;
     const envActBase = sweepBase + sweepExtraSlots * n;
     const ENVACT = envActBase, ENVSEL = envActBase + n, ENVTICK = envActBase + 2 * n;
+    const saBase = envActBase + envActExtraSlots * n;
+    const SAAMT = saBase;
+    // LASTVOL(2026-08-26): 直近に音量レジスタへ書いたVOL,Xの値。TICK_VOL_FXの継続フレームで
+    // 「前フレームと同じ音量なら書込みごと省く」ための比較用(下記TICK_VOL_FXのコメント参照)。
+    // $FF=無効(音量は0-63しか取らないので番兵として使える)。usesVolOnlyの時のみ確保する
+    const lastVolBase = saBase + saExtraSlots * n;
+    const LASTVOL = lastVolBase;
     // fixedBaseから先はチャンネル数nと無関係な固定個数のグローバルスクラッチ(,Xインデックス
     // なし)。JMPLOはJMP間接絶対(2バイトアドレスなので物理ゼロページ外でも正しく動く)、
     // FME7専用グローバル・CEILDIV用スクラッチも通常のLDA/STA(間接アドレッシングではない)
     // なので255番地を超えても問題ない(CURLO/PERLO/PTBLLO等の物理ゼロページ必須組は
     // 既に先頭0-7番地に固定済み、このコメント直前を参照)
-    const fixedBase = envActBase + envActExtraSlots * n;
+    const fixedBase = lastVolBase + lastVolExtraSlots * n;
     const JMPLO = fixedBase, JMPHI = fixedBase + 1,
       // FME7専用(usesFme7時のみ参照)。FMEMIX=ミキサ(R7)のシャドウ(チップから読み出せない
       // ため保持が必要)、FMEMODE=処理中chの@<n>(0-3)、FMETM/FMENM=そのchのトーン/ノイズ
@@ -667,6 +683,8 @@
     // PLAYのチャンネルループカウンタ(SERVICE_CHがXを保存する保証は無いため、メモリへ
     // 退避して回す。2026-08-16 最適化: アンロール5byte/ch→固定13byteのループ化)
     const PLAYIDX = fixedBase + 13 + (usesPitchShift ? 5 : 0);
+    // SA<num>用の24bitシフト加算スクラッチ(SA_ADD16参照、チャンネル非依存の使い捨て)
+    const SAT0 = PLAYIDX + 1, SAT1 = PLAYIDX + 2, SAT2 = PLAYIDX + 3;
 
     const playLines = [];
     playLines.push(`    LDX #$00
@@ -742,7 +760,9 @@ PLAY_CHLOOP:
       });
       const { ptrExprs: envPtrExprs, dataBlocks: envDataBlocks } = packEnvelopeTables(
         envIndexList, 'ENV',
-        idx => ((envelopes.v[idx] || {}).values || []).map(v => Math.max(0, Math.min(15, v | 0)))
+        // FDS/VRC6のこぎり波は6bit音量なので63でクランプ(他chは各WFV_*が4bitマスクするか
+        // レジスタ側が下位bitしか見ない。compiler.js writeVolumeEnvelopeのvolMaxと対)
+        idx => ((envelopes.v[idx] || {}).values || []).map(v => Math.max(0, Math.min(63, v | 0)))
       );
       extraTables.push(
         `ENV_LEN:\n    .byte ${envLens.join(',')}\n` +
@@ -809,7 +829,7 @@ ENVLK_NOCARRY:
       });
       const { ptrExprs: vrPtrExprs, dataBlocks: vrDataBlocks } = packEnvelopeTables(
         vrIndexList, 'VRENV',
-        idx => (vrTableOf(idx).values || []).map(v => Math.max(0, Math.min(15, v | 0)))
+        idx => (vrTableOf(idx).values || []).map(v => Math.max(0, Math.min(63, v | 0)))
       );
       extraTables.push(
         `VRENV_LEN:\n    .byte ${vrLens.join(',')}\n` +
@@ -1429,7 +1449,7 @@ SIL_T5:
     STA $A000
     RTS
 
-; --- VRC6矩形波(サウ) ($B000)。音量0-15を4倍して蓄積レート(0-60)にする ---
+; --- VRC6矩形波(サウ) ($B000)。音量(0-63)をそのまま蓄積レートへ(本家ppmck同様) ---
 WFV_T6:
     JSR LOOKUP_SAW_PERIOD
     JSR APPLY_DETUNE
@@ -1439,8 +1459,6 @@ WFV_T6:
     ORA #$80
 ${usesFreqOnly ? `    STA ${hex(LASTHI)},X\n` : ''}    STA $B002
     LDA ${hex(VOL)},X
-    ASL A
-    ASL A
     STA $B000
     RTS
 SIL_T6:
@@ -1517,8 +1535,6 @@ WFV_VOL_T5:
     RTS
 WFV_VOL_T6:
     LDA ${hex(VOL)},X
-    ASL A
-    ASL A
     STA $B000
     RTS`);
         wfvVolEntries[4] = 'WFV_VOL_T4'; wfvVolEntries[5] = 'WFV_VOL_T5'; wfvVolEntries[6] = 'WFV_VOL_T6';
@@ -1883,7 +1899,7 @@ WFV13_TONE_OK:
         extraTables.push(toneTables);
       }
       extraHandlers.push(`
-; --- FDS ($4082/4083=周期, $4080=ゲイン(音量*2)) ---
+; --- FDS ($4082/4083=周期, $4080=ゲイン(音量0-63そのまま。実効32で頭打ち)) ---
 WFV_T13:
 ${fdsReload}    LDA ${hex(NOTE)},X
 ${usesEn ? `    CLC
@@ -1909,7 +1925,6 @@ WFV13_INDEX:
     LDA ${hex(PERHI)}
 ${usesFreqOnly ? `    STA ${hex(LASTHI)},X\n` : ''}    STA $4083
     LDA ${hex(VOL)},X
-    ASL A
     ORA #$80
     STA $4080
     RTS
@@ -1958,7 +1973,6 @@ WFO13_SKIPHI:
         extraHandlers.push(`
 WFV_VOL_T13:
     LDA ${hex(VOL)},X
-    ASL A
     ORA #$80
     STA $4080
     RTS`);
@@ -2360,7 +2374,12 @@ APPLY_DETUNE_N163:
     LDA ${hex(PERLO2)}
     AND #$03
     STA ${hex(PERLO2)}
-${usesDetune ? `    CLC
+${usesDetune ? (usesPitchSa ? `    LDA ${hex(DETUNE_LO)},X
+    STA ${hex(SAT0)}
+    LDA ${hex(DETUNE_HI)},X
+    STA ${hex(SAT1)}
+    JSR SA_ADD16           ; D<n>をSAAMT,X回左シフトして加算(SA<num>、本家仕様)
+` : `    CLC
     LDA ${hex(PERLO)}
     ADC ${hex(DETUNE_LO)},X
     STA ${hex(PERLO)}
@@ -2377,7 +2396,12 @@ ADN163_D_POS:
 ADN163_D_EXT:
     ADC ${hex(PERLO2)}
     STA ${hex(PERLO2)}
-` : ''}${usesEp ? `    CLC
+`) : ''}${usesEp ? (usesPitchSa ? `    LDA ${hex(EPVALLO)},X
+    STA ${hex(SAT0)}
+    LDA ${hex(EPVALHI)},X
+    STA ${hex(SAT1)}
+    JSR SA_ADD16           ; EP値をSAAMT,X回左シフトして加算(SA<num>)
+` : `    CLC
     LDA ${hex(PERLO)}
     ADC ${hex(EPVALLO)},X
     STA ${hex(PERLO)}
@@ -2394,7 +2418,12 @@ ADN163_EP_POS:
 ADN163_EP_EXT:
     ADC ${hex(PERLO2)}
     STA ${hex(PERLO2)}
-` : ''}${usesMp ? `    CLC
+`) : ''}${usesMp ? (usesPitchSa ? `    LDA ${hex(MPVALLO)},X
+    STA ${hex(SAT0)}
+    LDA ${hex(MPVALHI)},X
+    STA ${hex(SAT1)}
+    JSR SA_ADD16           ; MP累積値をSAAMT,X回左シフトして加算(SA<num>)
+` : `    CLC
     LDA ${hex(PERLO)}
     ADC ${hex(MPVALLO)},X
     STA ${hex(PERLO)}
@@ -2411,7 +2440,7 @@ ADN163_MP_POS:
 ADN163_MP_EXT:
     ADC ${hex(PERLO2)}
     STA ${hex(PERLO2)}
-` : ''}${usesPortamento ? `    CLC
+`) : ''}${usesPortamento ? `    CLC
     LDA ${hex(PERLO)}
     ADC ${hex(PTVALLO)},X
     STA ${hex(PERLO)}
@@ -2447,7 +2476,42 @@ ADN163_DONE:
     LDA ${hex(PERLO2)}
     ORA ${hex(PTBLHI)}     ; 退避しておいた波形長ビットを戻す(以前は#$F0固定=バグ)
     STA ${hex(PERLO2)}
-    RTS`);
+    RTS${usesPitchSa ? `
+
+; --- SA<num>共用: SAT0/SAT1(符号付き16bit)をSAAMT,X回左シフト(符号拡張24bit)して
+; PERLO/PERHI/PERLO2へ加算する(本家sounddrv.h freq_add_mcknumber_with_aslの
+; asl t0/rol t1/rol t2ループと同じ考え方)。Yは破壊する(APPLY_DETUNE_N163の呼び出し元は
+; JSR後にYを再利用しない、WFV_N163/WFO_N163参照)。SAAMT=0なら素の16bit加算と等価 ---
+SA_ADD16:
+    LDA ${hex(SAT1)}
+    AND #$80
+    BEQ SAADD_POS
+    LDA #$FF
+    BNE SAADD_EXT
+SAADD_POS:
+    LDA #$00
+SAADD_EXT:
+    STA ${hex(SAT2)}
+    LDY ${hex(SAAMT)},X
+    BEQ SAADD_ADD
+SAADD_SHIFT:
+    ASL ${hex(SAT0)}
+    ROL ${hex(SAT1)}
+    ROL ${hex(SAT2)}
+    DEY
+    BNE SAADD_SHIFT
+SAADD_ADD:
+    CLC
+    LDA ${hex(PERLO)}
+    ADC ${hex(SAT0)}
+    STA ${hex(PERLO)}
+    LDA ${hex(PERHI)}
+    ADC ${hex(SAT1)}
+    STA ${hex(PERHI)}
+    LDA ${hex(PERLO2)}
+    ADC ${hex(SAT2)}
+    STA ${hex(PERLO2)}
+    RTS` : ''}`);
     }
 
     if (usesVrc7) {
@@ -2803,6 +2867,10 @@ ${usesEn ? `    STA ${hex(ENACT)},X    ; ENACT=0(EN<n>未指定時の既定値�
     STA ${hex(ENVAL)},X    ; ★ENVALも0初期化(LOOKUP_*_PERIOD/WFV_*がNOTEへ無条件加算するため)` : ''}
 ${needsLastHi ? `    STA ${hex(LASTHI)},X   ; LASTHI=0(VRC7ではキー状態シャドウを兼ねる、WFO_VRC7参照。同上の理由)` : ''}
 ${usesSmooth ? `    STA ${hex(SMOOTHACT)},X  ; SMOOTHACT=0(SM未指定時の既定値、SMOF相当)` : ''}
+${usesPitchSa ? `    STA ${hex(SAAMT)},X    ; SAAMT=0(SA未指定時の既定値=シフト無し)` : ''}
+${usesVolSkip ? `    LDA #$FF
+    STA ${hex(LASTVOL)},X  ; LASTVOL=$FF(無効。初回は必ず書く)
+    LDA #$00` : ''}
 ${usesPitchShift ? `    STA ${hex(PSACT)},X     ; PSACT=0(PS未使用時の既定値)
     STA ${hex(PSVALLO)},X  ; ★PSVALLO/HIも0初期化(同上)
     STA ${hex(PSVALHI)},X` : ''}
@@ -2869,18 +2937,49 @@ ${usesDutyEnv ? `    LDA ${hex(DUTYSEL)},X
 ${envTableCount > 0 ? `    ORA ${hex(ENVACT)},X` : ''}
 ${usesVr ? `    ORA ${hex(RELPLAY)},X` : ''}
     BNE TVF_NODUTY
-    JSR WRITE_VOL_ONLY
+${usesVolSkip ? `    LDA #$FF
+    STA ${hex(LASTVOL)},X  ; ここは無条件で書くので音量シャドウを無効化しておく
+                           ; (更新せずに書くとシャドウが古いまま残り、次の@v/@vr継続
+                           ;  フレームで「同値だから書かない」と誤判定する)
+` : ''}    JSR WRITE_VOL_ONLY
 TVF_NODUTY:` : ''}
 ${envTableCount > 0 ? `    LDA ${hex(ENVACT)},X
     BEQ TVF_NOENV
     INC ${hex(ENVTICK)},X
     JSR ENV_LOOKUP
+    ; ★前フレームと同じ音量なら書込みごと省く(2026-08-26)。音量レジスタへの同値の
+    ; 再書込みはどのチップでも副作用が無い(2A03/MMC5のエンベロープディバイダのリロードは
+    ; $4003/$4007側、FDSは常にbit7=1の直接ゲインモード、N163/FME7/VRC6/VRC7は単純代入)
+    ; ため、丸ごと飛ばしてよい。WRITE_VOL_ONLYはジャンプテーブル分岐+チップ別ハンドラで
+    ; 60サイクル前後かかるのに対し、この判定は19サイクルで済む(実測で音量書込みの
+    ; 55〜99%が同値。特にN163の平坦ホールドは94〜99%)。
+    ; ★デューティエンベロープ(@@<n>)選択中は除外する: dutyは音量と同じバイトに同居して
+    ; おり(WFV_VOL_T0参照)、上のTVF_NODUTY側は「@v/@vrが動いていればそちらが書く」前提で
+    ; 自分では書かない。音量が同値でもdutyだけ変わったフレームを握り潰さないよう、
+    ; @@が動いている間は無条件で書く。
+    LDA ${hex(VOL)},X
+${usesDutyEnv ? `    LDY ${hex(DUTYSEL)},X
+    INY                    ; DUTYSEL=$FF(未選択)なら0になりZセット
+    BNE TVF_ENVWRITE       ; @@動作中は無条件で書く
+` : ''}    CMP ${hex(LASTVOL)},X
+    BEQ TVF_NOENV
+TVF_ENVWRITE:
+    STA ${hex(LASTVOL)},X
     JSR WRITE_VOL_ONLY
 TVF_NOENV:` : ''}
 ${usesVr ? `    LDA ${hex(RELPLAY)},X
     BEQ TVF_NOREL
     INC ${hex(RELTICK)},X
     JSR REL_LOOKUP
+    ; @v側と同じ「同値なら書込みごと省く」判定(上のコメント参照)
+    LDA ${hex(VOL)},X
+${usesDutyEnv ? `    LDY ${hex(DUTYSEL)},X
+    INY
+    BNE TVF_RELWRITE
+` : ''}    CMP ${hex(LASTVOL)},X
+    BEQ TVF_NOREL
+TVF_RELWRITE:
+    STA ${hex(LASTVOL)},X
     JSR WRITE_VOL_ONLY
 TVF_NOREL:` : ''}
     RTS` : ''}
@@ -3000,6 +3099,7 @@ ${usesVr ? '    CMP #$EF\n    BEQ RD_JMP_VRENV' : ''}
 ${usesGateOffVr ? '    CMP #$EC\n    BEQ RD_JMP_GATEOFFVR\n    CMP #$E8\n    BEQ RD_JMP_GATEOFFVRSD' : ''}
 ${usesToneState ? '    CMP #$E7\n    BEQ RD_JMP_RELTONE' : ''}
 ${usesSweep ? '    CMP #$E3\n    BEQ RD_JMP_SWEEP' : ''}
+${usesPitchSa ? '    CMP #$E4\n    BEQ RD_JMP_PITCHSA' : ''}
     JMP RD_NOTE
 
 ; ★トランポリンの並びは必ず上のCMP/BEQ連鎖と同じ順序に保つこと(2026-08-20)。
@@ -3041,6 +3141,7 @@ ${usesVr ? 'RD_JMP_VRENV:\n    JMP RD_VRENV' : ''}
 ${usesGateOffVr ? 'RD_JMP_GATEOFFVR:\n    JMP RD_GATEOFFVR\nRD_JMP_GATEOFFVRSD:\n    JMP RD_GATEOFFVRSD' : ''}
 ${usesToneState ? 'RD_JMP_RELTONE:\n    JMP RD_RELTONE' : ''}
 ${usesSweep ? 'RD_JMP_SWEEP:\n    JMP RD_SWEEP' : ''}
+${usesPitchSa ? 'RD_JMP_PITCHSA:\n    JMP RD_PITCHSA' : ''}
 
 ; 0xEEマーカーの残り3バイト(新バンク番号,新アドレス下位,新アドレス上位)は
 ; まだ「現在のバンク」の中に物理的に置かれているため、3バイト全て読み終えるまでは
@@ -3112,7 +3213,7 @@ RD_FME7HENV:
 
 RD_VOL:
     JSR READ_BYTE
-    AND #$0F
+    AND #$3F        ; FDS/VRC6サウは6bit音量(0-63)。他chはコンパイラ側で0-15保証済み
     STA ${hex(VOL)},X
 ${usesVr ? `    STA ${hex(VOLBASE)},X   ; リリース再生でVOL,Xが潰れるため素の音量を控えておく` : ''}
 ${envTableCount > 0 ? `    LDA #$00
@@ -3190,6 +3291,14 @@ ${usesSweep ? `
 RD_SWEEP:
     JSR READ_BYTE
     STA ${hex(SWEEPREG)},X
+    JMP RD_LOOP` : ''}
+${usesPitchSa ? `
+; --- SA<num>(N163ピッチシフト量、0xE4、2026-08-26、本家pitch_shift_amount相当):
+; 直後1バイトがシフト量(0-8)。保持するだけで、実際の適用はAPPLY_DETUNE_N163の
+; SA_ADD16(D/EP/MPの16bit値を左シフトしながら18bit周波数へ加算)が毎回行う ---
+RD_PITCHSA:
+    JSR READ_BYTE
+    STA ${hex(SAAMT)},X
     JMP RD_LOOP` : ''}
 ${usesRawWrite ? `
 ; --- y<adr>,<num>(0xEB、2026-08-13): 直後3バイトが[アドレス下位,アドレス上位,値]。
@@ -3502,7 +3611,9 @@ ${usesVr ? `    LDA ${hex(VRSEL)},X
     LDA #$01
     STA ${hex(RELPLAY)},X
     JSR REL_LOOKUP
-    JSR WRITE_VOL_ONLY
+${usesVolSkip ? `    LDA #$FF
+    STA ${hex(LASTVOL)},X  ; TVF_NODUTYと同じ理由で音量シャドウを無効化(無条件書込み)
+` : ''}    JSR WRITE_VOL_ONLY
     JMP RD_RETURN
 RD_GATEOFFVR_NOVR:
     LDA #$00
@@ -3891,7 +4002,9 @@ RD_RETURN:
 
 ; --- チャンネルX(0-N-1)を無音化する(種別テーブル経由でハンドラへ間接ジャンプ) ---
 SILENCE_CH:
-    LDA ${hex(CHTYPE)},X
+${usesVolSkip ? `    LDA #$FF
+    STA ${hex(LASTVOL)},X  ; 同上(無音化も音量レジスタを直接書くためシャドウを無効化)
+` : ''}    LDA ${hex(CHTYPE)},X
     ASL A
     TAY
     LDA SIL_JUMPTABLE,Y
@@ -3903,7 +4016,11 @@ SILENCE_CH:
 ; --- チャンネルX(0-N-1)の現在のNOTE/VOL/DUTYをAPUレジスタへ反映する ---
 ; (種別テーブル経由でハンドラへ間接ジャンプする)
 WRITE_FREQ_VOL:
-    LDA ${hex(CHTYPE)},X
+${usesVolSkip ? `    LDA #$FF
+    STA ${hex(LASTVOL)},X  ; 音量シャドウを無効化。チップ別ハンドラが音量レジスタを直接
+                           ; 書くため、TICK_VOL_FXの同値スキップ判定が古い値を参照して
+                           ; 必要な書込みを飛ばすのを防ぐ($FFは音量が取り得ない番兵)
+` : ''}    LDA ${hex(CHTYPE)},X
     ASL A
     TAY
     LDA WFV_JUMPTABLE,Y
@@ -4514,6 +4631,16 @@ SONG_LOOP_PTR_HI:
       if (usesDetune) break;
     }
 
+    // SA<num>(N163ピッチシフト量、2026-08-26、本家ppmckcのpitch_shift_amount相当)。
+    // D<n>と同じ真偽値のみの判定。0はSA未指定時の既定値なので対象外
+    let usesPitchSa = false;
+    for (const ch of channelLetters) {
+      for (const seg of (segmentsByChannel[ch] || [])) {
+        if (seg.pitchSa) { usesPitchSa = true; break; }
+      }
+      if (usesPitchSa) break;
+    }
+
     // s<speed>,<depth>(ハードウェアスイープ、2026-08-20、対応AB=2A03パルスのみ)。
     // D<n>と同じく真偽値のみ判定する(生バイトはmckBytecode.jsがseg.sweepSpeed/Depthから
     // compiler.jsのsweepRegisterByteで直接作るのでremapテーブルは不要)。
@@ -4632,7 +4759,7 @@ SONG_LOOP_PTR_HI:
     const dummyBank = channelLetters.map(() => 0);
     const probeSrc = buildFixedSource(channelTypes, dummyBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList,
       undefined, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite,
-      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, undefined, usesSweep);
+      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, undefined, usesSweep, usesPitchSa);
     const probeAsm = MML.Asm.assemble(probeSrc, { origin: 0x8000 });
     if (probeAsm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: probeAsm.errors, bankCount: 0, unsupportedExpansions };
@@ -4686,7 +4813,7 @@ SONG_LOOP_PTR_HI:
     // orgの違いはゼロページ/絶対の選択や分岐距離に影響しないため)
     const { songBank, songAddrLo, songAddrHi, allDataBanks, songLoop } = layoutAllChannels(reservedBank);
 
-    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep);
+    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa);
     const asm = MML.Asm.assemble(src, { origin: 0x8000 });
     if (asm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: asm.errors, bankCount: 0, unsupportedExpansions };

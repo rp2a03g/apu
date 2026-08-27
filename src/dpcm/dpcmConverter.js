@@ -33,53 +33,140 @@
     return out;
   }
 
+  // ── 1bit列の生成 ──────────────────────────────────────────────────
+  // DACカウンタの遷移は実機DMC(およびsrc/emulator/apu2a03.js clockOutput())と同じ:
+  //   bit=1: counter<=125 なら +2、それ以外は変化なし
+  //   bit=0: counter>=2   なら -2、それ以外は変化なし
+  // (以前は0/127でclampしていたが、実機は125/2で頭打ちし±1の飛び越えは起きない=
+  //  カウンタの偶奇は初期値のまま保存される。エンコーダの想定と再生側の実挙動を
+  //  完全一致させるためこちらへ統一した)
+  function stepUp(c) { return c <= 125 ? c + 2 : c; }
+  function stepDown(c) { return c >= 2 ? c - 2 : c; }
+
+  // 貪欲法(旧方式): その場その場で目標に近づく方だけを選ぶ。O(N)で省メモリ。
+  // Viterbiのメモリ上限を超える長大入力のフォールバック用に残す。
+  function encodeBitsGreedy(targets, startCounter) {
+    const bits = new Uint8Array(targets.length);
+    let counter = startCounter;
+    for (let i = 0; i < targets.length; i++) {
+      const bit = targets[i] >= counter ? 1 : 0;
+      counter = bit ? stepUp(counter) : stepDown(counter);
+      bits[i] = bit;
+    }
+    return bits;
+  }
+
+  // Viterbi(動的計画法): カウンタ128状態×サンプル数の格子で二乗誤差合計が最小になる
+  // bit列を選ぶ(2026-08、貪欲法からの品質改善)。貪欲法は「今」最善のbitしか選べないため、
+  //   ・平坦部で目標の上下どちらに張り付くかの位相が最適にならない(アイドルトーン悪化)
+  //   ・大きなジャンプの直前に「助走」できない(スロープ過負荷の増幅)
+  // が起きる。DPは全体最適なのでどちらも自動的に解決する。計算量O(64N)
+  // (±2遷移で偶奇が保存されるため実際に到達しうる状態は64個)。
+  // バックポインタは1状態あたり2bit(採用bit+自己ループか)をパックして持つ
+  // (N*32バイト。上限VITERBI_MAX_SAMPLESを超える入力は貪欲法へフォールバック)。
+  const VITERBI_MAX_SAMPLES = 2000000; // バックポインタ約64MBまで許容
+  function encodeBitsViterbi(targets, startCounter) {
+    const N = targets.length;
+    if (N > VITERBI_MAX_SAMPLES) return encodeBitsGreedy(targets, startCounter);
+    const par = startCounter & 1; // 偶奇は保存される(上のコメント参照)
+    let prev = new Float64Array(128).fill(Infinity);
+    let next = new Float64Array(128);
+    prev[startCounter] = 0;
+    const bp = new Uint8Array((N * 128 + 3) >> 2); // (i,状態)ごとに2bit
+    for (let i = 0; i < N; i++) {
+      next.fill(Infinity);
+      const t = targets[i];
+      const base = i * 128;
+      for (let c = par; c < 128; c += 2) {
+        const pc = prev[c];
+        if (pc === Infinity) continue;
+        const n1 = stepUp(c);
+        const e1 = n1 - t;
+        const c1 = pc + e1 * e1;
+        if (c1 < next[n1]) {
+          next[n1] = c1;
+          const idx = base + n1, code = 1 | (n1 === c ? 2 : 0);
+          bp[idx >> 2] = (bp[idx >> 2] & ~(3 << ((idx & 3) * 2))) | (code << ((idx & 3) * 2));
+        }
+        const n0 = stepDown(c);
+        const e0 = n0 - t;
+        const c0 = pc + e0 * e0;
+        if (c0 < next[n0]) {
+          next[n0] = c0;
+          const idx = base + n0, code = (n0 === c ? 2 : 0);
+          bp[idx >> 2] = (bp[idx >> 2] & ~(3 << ((idx & 3) * 2))) | (code << ((idx & 3) * 2));
+        }
+      }
+      const tmp = prev; prev = next; next = tmp;
+    }
+    // 終端: 最小コストの状態から逆順にbitと前状態を復元する
+    let best = par, bestCost = Infinity;
+    for (let c = par; c < 128; c += 2) if (prev[c] < bestCost) { bestCost = prev[c]; best = c; }
+    const bits = new Uint8Array(N);
+    let s = best;
+    for (let i = N - 1; i >= 0; i--) {
+      const idx = i * 128 + s;
+      const code = (bp[idx >> 2] >> ((idx & 3) * 2)) & 3;
+      const bit = code & 1;
+      bits[i] = bit;
+      if (!(code & 2)) s = bit ? s - 2 : s + 2; // 自己ループでなければ遷移を巻き戻す
+    }
+    return bits;
+  }
+
   /**
    * PCMサンプル(-1..1, srcRate Hz)をDPCMバイト列にエンコードする
    * @param {Float32Array} samples
    * @param {number} srcRate - 入力サンプルレート(Hz)
    * @param {number} rateIndex - DMCレートインデックス(0-15)
-   * @returns {{bytes: Uint8Array, rateIndex: number, rateHz: number, sampleCount: number}}
+   * @param {{startCounter?:number}} [opt] - startCounter: DACカウンタの開始値(0-127、既定64)。
+   *   再生側が@DPCM定義のdac値($4011初期書込み)で同じ値から開始する前提で、先頭サンプル値を
+   *   渡すと頭の追従ランプ(クリック)が消える(hes2mml/expansion/dpcm.js参照)。
+   * @returns {{bytes: Uint8Array, rateIndex: number, rateHz: number, sampleCount: number, startCounter: number}}
    */
-  function encode(samples, srcRate, rateIndex) {
+  function encode(samples, srcRate, rateIndex, opt) {
     rateIndex = Math.max(0, Math.min(15, rateIndex | 0));
     const rateHz = DMC_RATE_TABLE_NTSC[rateIndex];
     const resampled = resample(samples, srcRate, rateHz);
+    const startCounter = Math.max(0, Math.min(127, (opt && opt.startCounter != null) ? opt.startCounter | 0 : 64));
 
-    const bits = new Array(resampled.length);
-    let counter = 64;
-    for (let i = 0; i < resampled.length; i++) {
-      const target = (resampled[i] * 0.5 + 0.5) * 127; // 0-127
-      const bit = target >= counter ? 1 : 0;
-      counter += bit ? 2 : -2;
-      counter = Math.max(0, Math.min(127, counter));
-      bits[i] = bit;
-    }
+    const targets = new Float64Array(resampled.length);
+    for (let i = 0; i < resampled.length; i++) targets[i] = (resampled[i] * 0.5 + 0.5) * 127; // 0-127
+    const bits = encodeBitsViterbi(targets, startCounter);
 
     // DMCサンプルはバイト単位(8サンプル/byte, LSBが先頭)で、
-    // 長さは16バイト境界に揃える必要がある(不足分は0bitでパディング)
+    // 長さは16バイト境界に揃える必要がある。
+    // ★パディングは0bit詰めではなく+2/-2交互の「ホールド」で埋める。実機DMCは
+    // 16バイト境界までの全bitを再生するため、0詰めだと末尾でDACが-2/bitで滑り落ちて
+    // プチッと鳴る(プレビューのdecode()はsampleCountで止まるため気づけない)。
     const sampleCount = bits.length;
     const byteCount = Math.ceil(sampleCount / 8 / 16) * 16 || 16;
     const bytes = new Uint8Array(byteCount);
     for (let i = 0; i < sampleCount; i++) {
       if (bits[i]) bytes[i >> 3] |= (1 << (i & 7));
     }
+    for (let i = sampleCount; i < byteCount * 8; i++) {
+      // 最後のデータbitと逆から始めて交互に(±2の往復=値を保持)
+      const bit = ((i - sampleCount) & 1) === 0 ? (sampleCount > 0 ? 1 - bits[sampleCount - 1] : 1) : (sampleCount > 0 ? bits[sampleCount - 1] : 0);
+      if (bit) bytes[i >> 3] |= (1 << (i & 7));
+    }
 
-    return { bytes, rateIndex, rateHz, sampleCount };
+    return { bytes, rateIndex, rateHz, sampleCount, startCounter };
   }
 
   /**
    * DPCMバイト列をプレビュー用PCM波形(-1..1)に復号する
    * @param {Uint8Array} bytes
    * @param {number} sampleCount
+   * @param {number} [startCounter] - encode時のstartCounterと同じ値(既定64)
    * @returns {Float32Array}
    */
-  function decode(bytes, sampleCount) {
+  function decode(bytes, sampleCount, startCounter) {
     const out = new Float32Array(sampleCount);
-    let counter = 64;
+    let counter = (startCounter != null) ? Math.max(0, Math.min(127, startCounter | 0)) : 64;
     for (let i = 0; i < sampleCount; i++) {
       const bit = (bytes[i >> 3] >> (i & 7)) & 1;
-      counter += bit ? 2 : -2;
-      counter = Math.max(0, Math.min(127, counter));
+      counter = bit ? stepUp(counter) : stepDown(counter); // 実機DMC/エンコーダと同一遷移
       out[i] = (counter / 127) * 2 - 1;
     }
     return out;

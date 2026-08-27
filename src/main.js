@@ -14,6 +14,7 @@
   // フォント/配色設定の復元(エディタが色付きテキストを表示する前に反映する必要があるため
   // attachHighlighterより先に呼ぶ)
   MML.UI.EditorSettings.init();
+  MML.UI.ConvertSettings.init(); // *2MML 変換設定(src/ui/convertSettings.js)
 
   // --- Phase 6: シンタックスハイライト & 波形エディタ ---
   const mmlHighlightEl = document.getElementById('mmlHighlight');
@@ -107,7 +108,7 @@
     // 非再生中はミュート設定を変えても再レンダリングは不要
   }
 
-  // 鍵盤表示のch別音量スライダーからの設定を取得する(getChannelMuteConfigと同じ形状、値は0〜1)
+  // 鍵盤表示のch別音量スライダーからの設定を取得する(getChannelMuteConfigと同じ形状、値は0〜2で1=100%)
   function getChannelVolumeConfig() {
     return keyboardDisplay.getVolumeConfig();
   }
@@ -236,6 +237,56 @@
   function fileInputName(inputEl) {
     return (inputEl && inputEl.files && inputEl.files[0]) ? inputEl.files[0].name : '';
   }
+
+  // --- 鍵盤表示タイトル行のバッジ+再生コントロール ---------------------------
+  // 拡張子(=フォーマット)→サウンドファイルパネル内の再生ボタンid。鍵盤表示側の▶からは
+  // このボタンをclick()して再生する(playXxxStream()を直接呼ぶと、ボタン側が一緒に行う
+  // 処理(SPCのstartVoiceMonitor()等)を通らないため。D&D再生と同じ理由・同じ流儀)。
+  const SOUND_FORMAT_PLAY_BTN = { nsf: 'btnNsfFilePlay', spc: 'btnSpcFilePlay', kss: 'btnKssFilePlay', gbs: 'btnGbsFilePlay', hes: 'btnHesFilePlay', vgm: 'btnVgmFilePlay' };
+  const SOUND_FORMAT_STOP_BTN = { nsf: 'btnNsfFileStop', spc: 'btnSpcFileStop', kss: 'btnKssFileStop', gbs: 'btnGbsFileStop', hes: 'btnHesFileStop', vgm: 'btnVgmFileStop' };
+  // 曲番号(インデックス)を持つ形式 → その入力欄id。SPC/VGMは1ファイル1曲なので載らない
+  // (単体で開いている限り戻り/送りの対象が無い。アーカイブを開いていればそちらの曲送りになる)。
+  // 曲数はファイルごとに違うので、有効/無効の判定は入力欄のmin/maxから行う(下記
+  // updateKeyboardTransport)。1曲だけのNSF等では ⏮⏭ もグレーアウトする。
+  const SOUND_FORMAT_SONG_INPUT = { nsf: 'nsfSongIndex', kss: 'kssSongIndex', gbs: 'gbsSongIndex', hes: 'hesTrackIndex' };
+
+  let kbdSourceKind = null;     // 鍵盤表示が今表示しているソース 'mml' | 形式名 | null
+  let loadedSoundFormat = null; // 直近に読み込んだサウンドファイルの形式(MML再生へ切り替えた後も覚えておく)
+
+  // keyboardDisplay.setSourceInfo()の唯一の入口。バッジの表示に加えて「今どちらを
+  // 操作対象にするか」(kbdSourceKind)と再生コントロールの状態も一緒に更新する。
+  // 鍵盤表示のチャンネル割当(案E、src/convert/channelPlan.js)を各 *2mml の options 形へ。
+  // ユーザーが既定から何も変えていなければ channelMap=null を返し、変換器は従来どおりの
+  // 既定経路(出力が一切変わらない道)を通る。
+  function planConvertOptions() {
+    const Plan = MML.Convert && MML.Convert.ChannelPlan;
+    if (!Plan || !Plan.isCustom()) return { channelMap: null, tone: {} };
+    const all = Plan.all();
+    const channelMap = {};
+    const tone = {};
+    for (const id of Object.keys(all)) {
+      if (all[id].target) channelMap[id] = all[id].target;
+      if (all[id].tone !== undefined) tone[id] = all[id].tone;
+    }
+    return { channelMap, tone };
+  }
+
+  function setKbdSource(kind, name) {
+    kbdSourceKind = kind || null;
+    if (kind && kind !== 'mml') loadedSoundFormat = kind;
+    keyboardDisplay.setSourceInfo(kind, name);
+    updateKeyboardTransport();
+    // 鍵盤表示のチャンネル割当(案E)が「今どの形式か」を知るための唯一の入口。
+    // 同じ形式で呼び直されても割当は消さない(消すのは新ファイルを開いたときのnewFile)
+    if (MML.Convert && MML.Convert.ChannelPlan && kind && kind !== 'mml') {
+      MML.Convert.ChannelPlan.setFormat(kind);
+    }
+  }
+
+  // アーカイブ(zip/7z の m3u 曲リスト)の曲数と曲送り。実体は initUnifiedSoundFileWindow 内で
+  // 差し替える(archiveAutoAdvanceOrStopと同じ流儀。archive変数がそのIIFE内ローカルのため)。
+  let archiveTrackCount = () => 0;
+  let archiveChangeTrack = () => {};
 
   // --- 再生速度(1/1〜1/8。音程を保ったままテンポだけ落とす) ---
   // 現在アクティブなプレイヤー(MML/NSF/SPCのいずれか)に速度を適用し、
@@ -977,6 +1028,7 @@
     const captureBtn = document.getElementById('btnMmlCapture');
     captureBtn.classList.toggle('is-playing', !mmlPlaybackStopped && playing);
     captureBtn.title = mmlPlaybackStopped ? T('MML再生') : (playing ? T('一時停止') : T('再生'));
+    updateKeyboardTransport(); // 鍵盤表示タイトル行の▶/⏸/■(MML側の状態変化はここを通る)
     updateRangeMarkersUI(duration);
     updateSeekTicksUI(duration);
     updateSeekBufferedUI();
@@ -1377,6 +1429,72 @@
     else { transportStop(); }
   }
 
+  // ── 鍵盤表示タイトル行の再生コントロール(⏮ ▶/⏸ ■ ⏭) ─────────────
+  // 操作対象はバッジと同じ「今表示している方」(MML再生 / サウンドファイル再生)。
+  // どちらの経路も、既にある本体側のボタンと同じ関数へ集約する(挙動を二重に持たない)。
+  function updateKeyboardTransport() {
+    const kind = kbdSourceKind;
+    const p = currentTransportPlayer();
+    let playing = false, canPlay = false, canStop = false, canPrevNext = false;
+    if (!kind || kind === 'mml') {
+      // MML再生: btnMmlCapture / btnTransportStop と同じ判定
+      playing = !mmlPlaybackStopped && (p ? p.isPlaying : transportPlaying);
+      canPlay = true;
+      canStop = !mmlPlaybackStopped;
+      canPrevNext = false; // MMLには曲送りの概念が無いのでグレーアウト
+    } else {
+      const active = lastPlayMode === kind && !!p;
+      playing = active && p.isPlaying;
+      canPlay = true;
+      canStop = active;
+      // アーカイブ(m3u)を開いていればそのファイル送り、単体ファイルなら曲番号送り
+      const songEl = SOUND_FORMAT_SONG_INPUT[kind] ? document.getElementById(SOUND_FORMAT_SONG_INPUT[kind]) : null;
+      const multiSong = !!songEl && (parseInt(songEl.max, 10) || 0) > (parseInt(songEl.min, 10) || 0);
+      canPrevNext = archiveTrackCount() > 1 || multiSong;
+    }
+    keyboardDisplay.setTransportState({ playing, canPlay, canStop, canPrevNext, canToggleSource: !!loadedSoundFormat });
+  }
+
+  keyboardDisplay.onTransport = (action) => {
+    const kind = kbdSourceKind;
+    if (!kind || kind === 'mml') {
+      if (action === 'play') document.getElementById('btnMmlCapture').click();
+      else if (action === 'stop') transportStop();
+      return; // prev/next は MML では無効(ボタン自体もグレーアウトしている)
+    }
+    if (action === 'play') {
+      const btn = document.getElementById(SOUND_FORMAT_PLAY_BTN[kind]);
+      if (btn) btn.click(); // 各形式の再生ボタン = 再生/一時停止のトグル
+      return;
+    }
+    if (action === 'stop') {
+      const btn = document.getElementById(SOUND_FORMAT_STOP_BTN[kind]);
+      if (btn) btn.click(); // 停止に伴うボイスモニタ停止/setMode('nsf')もパネル側と同じにする
+      updateKeyboardTransport();
+      return;
+    }
+    const delta = action === 'next' ? 1 : -1;
+    if (archiveTrackCount() > 1) archiveChangeTrack(delta);
+    else if (kind === 'nsf') changeNsfSong(delta);
+    else if (kind === 'kss') changeKssSong(delta);
+    else if (kind === 'gbs') changeGbsSong(delta);
+    else if (kind === 'hes') changeHesTrack(delta);
+  };
+
+  // バッジ(ファイル名)クリック: MML再生 ↔ サウンドファイル再生の切り替え。
+  // どちらも「相手を止めて自分を再生する」経路(prepareMmlStream / 各形式の再生ボタン)を
+  // そのまま使うので、鍵盤表示・ピアノロール・シークバーも一緒に切り替わる。
+  // サウンドファイルを一度も開いていなければ切り替え先が無いので何もしない。
+  keyboardDisplay.onSourceToggle = () => {
+    if (!loadedSoundFormat) return;
+    if (!kbdSourceKind || kbdSourceKind === 'mml') {
+      const btn = document.getElementById(SOUND_FORMAT_PLAY_BTN[loadedSoundFormat]);
+      if (btn) btn.click();
+    } else {
+      runMmlStream(); // 内部でtransportStop()+stopAllFormatPlayback()してからMMLを鳴らす
+    }
+  };
+
   function transportPlay() {
     mmlHighlightSuppressed = false;
     // 現在位置が再生範囲の開始点より手前なら、再生前に開始点までジャンプする
@@ -1647,6 +1765,33 @@
   }
 
   // --- Phase 4: MMLコンパイラ ---
+  // *2MML変換結果の音程検証(result.pitchCheck、src/convert/verify.js)をステータス欄用HTMLに
+  // 整形し、ロールへ赤マーカー(keyboardDisplay.setConversionDiffs)も渡す共通ヘルパー。
+  // 全フォーマットの「MML変換完了」ステータスの直後に足して使う。
+  // compile()のwarnings(音域外で鳴らない箇所)をHTML化する。errorsと違い再生は続行する
+  function renderCompileWarnings(warnings) {
+    if (!warnings || !warnings.length) return '';
+    return '<div class="error">' +
+      warnings.map(w => '⚠ ' + (typeof w === 'string' ? w : w.message)).join('<br>') + '</div>';
+  }
+
+  function renderPitchCheck(pc) {
+    keyboardDisplay.setConversionDiffs(pc && pc.diffs || []);
+    if (!pc) return '';
+    const warn = renderCompileWarnings(pc.warnings);
+    if (pc.error) return warn + '<div>' + T('音程チェック: 実行不可 ({msg})', { msg: pc.error }) + '</div>';
+    if (!pc.diffs || pc.diffs.length === 0) {
+      return warn + '<div>' + T('音程チェック: 一致 ({n} 音符を検証)', { n: pc.checked }) + '</div>';
+    }
+    const nn = MML.Convert.verifyNoteName;
+    const lines = pc.diffs.slice(0, 10).map(d =>
+      `<div>${d.sec.toFixed(1)}s ${d.letter}: ${nn(d.expected)} → ${nn(d.got)}</div>`).join('');
+    const more = pc.diffs.length > 10 ? '<div>' + T('…他 {n} 件', { n: pc.diffs.length - 10 }) + '</div>' : '';
+    return warn + '<div class="error">' +
+      T('⚠ 音程不一致 {n} 件 (元の高さと違う音で鳴ります。ロールの赤枠が該当箇所)', { n: pc.diffs.length }) +
+      lines + more + '</div>';
+  }
+
   function getMmlOpt() {
     refreshDpcmSampleList(mmlSourceEl.value);
     return {
@@ -1778,6 +1923,11 @@
       mmlOutputEl.appendChild(msg);
       return;
     }
+    if (result.warnings && result.warnings.length) {
+      const w = document.createElement('div');
+      w.innerHTML = renderCompileWarnings(result.warnings);
+      mmlOutputEl.appendChild(w);
+    }
 
     // #TITLE/#COMPOSER/#MAKER(MML本文)からNSFヘッダを組み立てる
     // (DESIGN.md INV-2: MMLテキストが正典。UI入力欄は廃止)
@@ -1838,6 +1988,8 @@
       btnMmlCapture.disabled = false;
       return;
     }
+    // 音域外など「鳴らない箇所」の警告。再生自体は続行する(該当音だけ無音)
+    captureOutputEl.innerHTML = renderCompileWarnings(compiled.warnings);
 
     // compile()自体は成功していても、この先(再生用プレイヤー構築等)で予期しない例外が
     // 起きると、それを捕まえるcatchが無かったため「コンパイル中…」の表示とボタンの
@@ -1859,7 +2011,7 @@
       lastMmlCompiled = compiled;
       lastPlayMode    = 'capture-mml';
       populateFollowChannelSelect(compiled.channelLetters);
-      keyboardDisplay.setSourceInfo('mml', mmlExternalSourceLabel || (compiled.meta && compiled.meta.title ? compiled.meta.title : '')); // タイトル行のバッジ「MML · 曲名」
+      setKbdSource('mml', mmlExternalSourceLabel || (compiled.meta && compiled.meta.title ? compiled.meta.title : '')); // タイトル行のバッジ「MML · 曲名」
 
       // モニタ用 regSnapshots をメインスレッドで即時構築（音声生成なし）
       resetN163Max();
@@ -2122,7 +2274,8 @@
     stopAllFormatPlayback();
     stopNsfFilePlayback();
     keyboardDisplay.reset();
-    keyboardDisplay.setSourceInfo('nsf', file.name);
+    MML.Convert.ChannelPlan.newFile("nsf", {}); // 新ファイル: チャンネル割当(案E)をリセット
+    setKbdSource('nsf', file.name);
     loadedNsfBytes = null;
     loadedNsfHeader = null;
     // 別ファイルを読み込んだら前回ファイルのキャプチャ結果は無効(runNsf2Mmlが同じ
@@ -2155,6 +2308,7 @@
     nsfSongTotalEl.textContent = `/ ${totalSongs}`;
 
     nsfFileStatusEl.innerHTML = '';
+    updateKeyboardTransport(); // 曲数が確定したので鍵盤表示の⏮⏭の有効/無効を決め直す(1曲のNSFは無効)
   }
 
   function updateNsfPlayButton() {
@@ -2163,6 +2317,7 @@
     const isPlaying = lastPlayMode === 'nsf' && activePlayer && activePlayer.isPlaying;
     btn.classList.toggle('is-playing', isPlaying);
     btn.title = isPlaying ? T('一時停止') : T('再生');
+    updateKeyboardTransport(); // 鍵盤表示タイトル行の▶/⏸も同じ状態に合わせる
   }
 
   function stopNsfFilePlayback() {
@@ -2229,6 +2384,19 @@
     return (isFinite(v) && v >= 40 && v <= 400) ? v : null;
   }
 
+  // MML変換用キャプチャの進捗%表示コールバックを作る(SPCで先行導入した表示を全形式で共通化。
+  // 各captureXxxSongAsyncのonProgress(done,total,...)にそのまま渡せる)。%が変わったときだけ
+  // DOMを書き換える(onProgressはタイムスライスごとに高頻度で呼ばれるため)。
+  function makeCaptureProgress(statusEl) {
+    let lastPct = -1;
+    return (done, total) => {
+      const pct = total > 0 ? Math.floor(done * 100 / total) : 0;
+      if (pct === lastPct) return;
+      lastPct = pct;
+      statusEl.innerHTML = '<div>' + T('MML変換用キャプチャ中… {pct}%', { pct }) + '</div>';
+    };
+  }
+
   // 最後にキャプチャした生の result (writeLog 込み) を保持
   let lastNsfCaptureResult = null;
 
@@ -2250,14 +2418,14 @@
       const duration = parseInt(nsfPlayDurationEl.value, 10) || 30;
       nsfIsRendering = true;
       updateNsfPlayButton();
-      nsfFileStatusEl.innerHTML = '<div>' + T('MML変換用レンダリング中…') + '</div>';
+      nsfFileStatusEl.innerHTML = '<div>' + T('MML変換用キャプチャ中… (数秒かかります)') + '</div>';
 
       result = await MML.Emu.captureSongAsync(loadedNsfBytes, {
         songIndex: songNo - 1,
         durationSeconds: duration,
         sampleRate: audioCtx.sampleRate,
         mute: {}
-      });
+      }, makeCaptureProgress(nsfFileStatusEl));
       nsfIsRendering = false;
       updateNsfPlayButton();
       lastNsfCaptureResult = result;
@@ -2272,7 +2440,7 @@
     try {
       converted = MML.NSF2MML.convert(
         result.writeLog, loadedNsfBytes, loadedNsfHeader, songNo - 1, result.initRegs, result.initWrites,
-        { bpm: nsfManualBpm, n163Snapshots: result.n163Snapshots });
+        Object.assign({ bpm: nsfManualBpm, n163Snapshots: result.n163Snapshots, cmd: MML.UI.ConvertSettings.get() }, planConvertOptions()));
     } catch (e) {
       nsfFileStatusEl.innerHTML = '<div class="error">' + T('変換エラー: {msg}', { msg: e.message }) + '</div>';
       return;
@@ -2301,7 +2469,8 @@
       ? T('、拡張音源: {chips}', { chips: converted.expansions.join(', ') }) : '';
     nsfFileStatusEl.innerHTML = '<div class="ok">' +
       T('MML変換完了 ({mode} {bpm} BPM{exp}{dpcm}) → MMLエディタに出力しました',
-        { mode: nsfManualBpm ? T('指定') : T('推定'), bpm: converted.bpm, exp: expMsg, dpcm: dpcmMsg }) + '</div>';
+        { mode: nsfManualBpm ? T('指定') : T('推定'), bpm: converted.bpm, exp: expMsg, dpcm: dpcmMsg }) + '</div>' +
+      renderPitchCheck(converted.pitchCheck);
 
     // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
     // 各種UIをMML本文に反映する(再生は開始しない)。
@@ -2514,7 +2683,7 @@
     capturedBuffer       = null;
     lastNsfCaptureResult = null;
     lastPlayMode         = 'nsf';
-    keyboardDisplay.setSourceInfo('nsf', fileInputName(nsfFileEl)); // 再生開始時にもバッジを更新(MML再生後に再生し直した場合など)
+    setKbdSource('nsf', fileInputName(nsfFileEl)); // 再生開始時にもバッジを更新(MML再生後に再生し直した場合など)
     nsfBufferedFraction  = 0;
     updateSeekBufferedUI();
 
@@ -2744,7 +2913,8 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
-    keyboardDisplay.setSourceInfo('spc', file.name);
+    MML.Convert.ChannelPlan.newFile("spc", SPC_DEFAULT_TARGETS); // 新ファイル: チャンネル割当(案E)をリセット
+    setKbdSource('spc', file.name);
     loadedSpcBytes = null; loadedSpcHeader = null;
     // SPCのボイスミュートはkeyboardDisplay._muteStateを経由しない専用機構(spcMutedVoices
     // ビットマスク)のため、reset()の_muteState.clear()だけではクリアされない。新しい
@@ -2795,6 +2965,7 @@
     btn.classList.toggle('is-playing', !!playing);
     btn.title = playing ? T('一時停止') : T('再生');
     btn.disabled    = spcIsRendering;
+    updateKeyboardTransport();
   }
 
   // SPC captureAsync() の結果(log)からピアノロール用タイムライン(共通形状)を構築する。
@@ -2827,7 +2998,7 @@
     stopAllFormatPlayback();
     invalidateOtherRollPrefetch('spc');
     lastPlayMode = 'spc';
-    keyboardDisplay.setSourceInfo('spc', fileInputName(spcFileEl));
+    setKbdSource('spc', fileInputName(spcFileEl));
     spcBufferedFraction = 0;
     updateSeekBufferedUI();
 
@@ -3186,16 +3357,30 @@
 
     await new Promise(resolve => setTimeout(resolve, 10));
 
-    // チャンネルマップをUIから取得
+    // チャンネルマップを鍵盤表示のチャンネル割当(src/convert/channelPlan.js)から取得。
+    // 以前はボイスモニターのカード内selectから読んでいたが、割当UIは鍵盤表示へ集約した。
+    // tone: 借用先ごとの音色選択 / volPct: 変換音量%(共通規約、src/convert/options.js)
+    const Plan = MML.Convert.ChannelPlan;
     const channelMap = Array.from({ length: 8 }, (_, ch) => {
-      const sel = document.getElementById(`spc-v${ch}-target`);
-      return { type: sel ? sel.value : (ch < 4 ? ['pulse1','pulse2','triangle','noise'][ch] : 'skip') };
+      const id = `V${ch}`;
+      const ent = Plan.get(id) || {};
+      const type = ent.target || SPC_DEFAULT_TARGETS[id] || 'skip';
+      const toneKind = Plan.toneKindFor(type);
+      const tone = toneKind
+        ? (ent.tone !== undefined ? ent.tone : Plan.toneOptionsFor(toneKind, 'any').def)
+        : undefined;
+      return { type, tone, volPct: ent.volPct !== undefined ? ent.volPct : 100 };
     });
 
     const spcManualBpm = getManualBpm('spc');
     let result;
     try {
-      result = MML.SPC2MML.fromSpc(loadedSpcBytes, Math.min(duration, 60), { channelMap, bpm: spcManualBpm });
+      // 再生時間欄(ID666の演奏時間=フェード抜きが自動入力される)どおりにキャプチャする。
+      // 以前はMath.min(duration, 60)で60秒に切り詰めていた。長い曲でもUIが固まらないよう
+      // 同期版fromSpcでなくチャンク実行のcaptureAsync(進捗表示付き)を使う。
+      const { log, brrSamples, envLog } = await MML.SPC2MML.captureAsync(loadedSpcBytes, duration,
+        makeCaptureProgress(spcFileStatusEl));
+      result = MML.SPC2MML.convert(log, brrSamples, { envLog, channelMap, bpm: spcManualBpm, cmd: MML.UI.ConvertSettings.get() });
     } catch (e) {
       spcIsRendering = false;
       spcFileStatusEl.innerHTML = '<div class="error">' + T('変換エラー: {msg}', { msg: e.message }) + '</div>';
@@ -3221,11 +3406,13 @@
 
     const dmcMsg = (result.dmcFiles && result.dmcFiles.length > 0)
       ? T('、DPCM {n} ファイル出力', { n: result.dmcFiles.length }) : '';
-    const expMsg = result.expansion && result.expansion !== 'none'
-      ? T('、拡張音源: {chips}', { chips: result.expansion }) : '';
+    const expList = (result.expansions && result.expansions.length) ? result.expansions.join(', ')
+      : (result.expansion !== 'none' ? result.expansion : '');
+    const expMsg = expList ? T('、拡張音源: {chips}', { chips: expList }) : '';
     spcFileStatusEl.innerHTML = '<div class="ok">' +
       T('MML変換完了 ({mode} {bpm} BPM{exp}{dpcm}) → MMLエディタに出力',
-        { mode: spcManualBpm ? T('指定') : T('推定'), bpm: result.bpm, exp: expMsg, dpcm: dmcMsg }) + '</div>';
+        { mode: spcManualBpm ? T('指定') : T('推定'), bpm: result.bpm, exp: expMsg, dpcm: dmcMsg }) + '</div>' +
+      renderPitchCheck(result.pitchCheck);
 
     // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
     // 各種UIをMML本文に反映する(再生は開始しない)。
@@ -3276,44 +3463,12 @@
     return Math.max(0, Math.min(1, (note - 36) / 60)); // C2-C7 の範囲
   }
 
-  // チャンネルターゲット選択肢
-  const TARGET_OPTIONS = [
-    { value: 'skip',       label: T('スキップ') },
-    { value: 'pulse1',     label: 'A: Pulse 1' },
-    { value: 'pulse2',     label: 'B: Pulse 2' },
-    { value: 'triangle',   label: 'C: Triangle' },
-    { value: 'noise',      label: 'D: Noise' },
-    { value: 'dpcm',       label: T('DPCM変換') },
-    { value: 'fds',        label: T('E: FDS 波形') },
-    { value: 'vrc6pulse1', label: 'E: VRC6 Pulse1' },
-    { value: 'vrc6pulse2', label: 'F: VRC6 Pulse2' },
-    { value: 'vrc6saw',    label: T('G: VRC6 のこぎり') },
-    { value: 'mmc5pulse1', label: 'E: MMC5 Pulse1' },
-    { value: 'mmc5pulse2', label: 'F: MMC5 Pulse2' },
-    { value: 'fme7a',      label: 'E: FME7 A' },
-    { value: 'fme7b',      label: 'F: FME7 B' },
-    { value: 'fme7c',      label: 'G: FME7 C' },
-    { value: 'n163_0',     label: 'E: N163 ch0' },
-    { value: 'n163_1',     label: 'F: N163 ch1' },
-    { value: 'n163_2',     label: 'G: N163 ch2' },
-    { value: 'n163_3',     label: 'H: N163 ch3' },
-  ];
-  const DEFAULT_TARGET_TYPES = ['pulse1','pulse2','triangle','noise','skip','skip','skip','skip'];
-
-  function buildTargetSelect(ch) {
-    const sel = document.createElement('select');
-    sel.id = `spc-v${ch}-target`;
-    sel.style.cssText = 'width:100%;font-size:10px;margin-top:3px;background:#222;color:#ccc;border:1px solid #555;border-radius:3px;';
-    for (const opt of TARGET_OPTIONS) {
-      const el = document.createElement('option');
-      el.value = opt.value;
-      el.textContent = opt.label;
-      if (opt.value === DEFAULT_TARGET_TYPES[ch]) el.selected = true;
-      sel.appendChild(el);
-    }
-    sel.addEventListener('click', e => e.stopPropagation());
-    return sel;
-  }
+  // SPCの既定の借用先(V0-V7 → NSF側のパート)。従来の DEFAULT_TARGET_TYPES と同じ値で、
+  // 鍵盤表示のチャンネル割当(src/convert/channelPlan.js)へ既定として渡す。
+  // 借用先の一覧・ラベル・音色選択肢はすべて channelPlan.js に集約済み(以前はここに
+  // TARGET_OPTIONS/buildTargetSelect があり、ボイスモニターのカード内にselectを出していた)。
+  const SPC_DEFAULT_TARGETS = { V0: 'pulse1', V1: 'pulse2', V2: 'triangle', V3: 'noise',
+    V4: 'skip', V5: 'skip', V6: 'skip', V7: 'skip' };
 
   // ボイスモニター UI を構築
   function buildVoiceMonitor() {
@@ -3347,7 +3502,7 @@
           "></div>
         </div>
       `;
-      div.appendChild(buildTargetSelect(ch));
+      // 借用先/音色/変換音量の選択は鍵盤表示のチャンネル割当(案E)へ集約したのでここには置かない
       voicePanelEl.appendChild(div);
 
       // ミュートボタン（停止・WAV書き出しをまたいで状態保持）
@@ -3600,7 +3755,8 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
-    keyboardDisplay.setSourceInfo('kss', file.name);
+    MML.Convert.ChannelPlan.newFile("kss", {}); // 新ファイル: チャンネル割当(案E)をリセット
+    setKbdSource('kss', file.name);
     loadedKssBytes = null; loadedKssHeader = null;
 
     const buf = await file.arrayBuffer();
@@ -3622,6 +3778,7 @@
       kssSongIndexEl.value = String(first);
       kssSongTotalEl.textContent = `/ ${last}`;
       kssFileStatusEl.innerHTML = '';
+      updateKeyboardTransport(); // 曲数が確定したので鍵盤表示の⏮⏭の有効/無効を決め直す
     } catch (e) {
       kssFileHeaderEl.innerHTML = '<div class="error">' + T('読み込みエラー: {msg}', { msg: e.message }) + '</div>';
     }
@@ -3646,6 +3803,7 @@
     btn.classList.toggle('is-playing', !!playing);
     btn.title = playing ? T('一時停止') : T('再生');
     btn.disabled = kssIsRendering;
+    updateKeyboardTransport();
   }
 
   function playKssStream() {
@@ -3668,7 +3826,7 @@
     stopVoiceMonitor();
     invalidateOtherRollPrefetch('kss');
     lastPlayMode = 'kss';
-    keyboardDisplay.setSourceInfo('kss', fileInputName(kssFileEl));
+    setKbdSource('kss', fileInputName(kssFileEl));
     kssBufferedFraction = 0;
     updateSeekBufferedUI();
 
@@ -3873,7 +4031,7 @@
     const kssManualBpm = getManualBpm('kss');
     let result;
     try {
-      result = await MML.KSS2MML.fromKss(loadedKssBytes, songNo, duration, { bpm: kssManualBpm });
+      result = await MML.KSS2MML.fromKss(loadedKssBytes, songNo, duration, Object.assign({ bpm: kssManualBpm, cmd: MML.UI.ConvertSettings.get(), onProgress: makeCaptureProgress(kssFileStatusEl) }, planConvertOptions()));
     } catch (e) {
       kssIsRendering = false;
       updateKssPlayButton();
@@ -3893,7 +4051,8 @@
 
     kssFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FME-7/N163/VRC7を借用して再生)',
-        { mode: kssManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', ') }) + '</div>';
+        { mode: kssManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', ') }) + '</div>' +
+      renderPitchCheck(result.pitchCheck);
 
     // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
     // 各種UIをMML本文に反映する(再生は開始しない)。
@@ -3957,7 +4116,8 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
-    keyboardDisplay.setSourceInfo('gbs', file.name);
+    MML.Convert.ChannelPlan.newFile("gbs", {}); // 新ファイル: チャンネル割当(案E)をリセット
+    setKbdSource('gbs', file.name);
     loadedGbsBytes = null; loadedGbsHeader = null;
 
     const buf = await file.arrayBuffer();
@@ -3977,6 +4137,7 @@
       gbsSongIndexEl.value = String(h.firstSong);
       gbsSongTotalEl.textContent = `/ ${h.numSongs}`;
       gbsFileStatusEl.innerHTML = '';
+      updateKeyboardTransport(); // 曲数が確定したので鍵盤表示の⏮⏭の有効/無効を決め直す
     } catch (e) {
       gbsFileHeaderEl.innerHTML = '<div class="error">' + T('読み込みエラー: {msg}', { msg: e.message }) + '</div>';
     }
@@ -4004,6 +4165,7 @@
     btn.classList.toggle('is-playing', !!playing);
     btn.title = playing ? T('一時停止') : T('再生');
     btn.disabled = gbsIsRendering;
+    updateKeyboardTransport();
   }
 
   function playGbsStream() {
@@ -4026,7 +4188,7 @@
     stopVoiceMonitor();
     invalidateOtherRollPrefetch('gbs');
     lastPlayMode = 'gbs';
-    keyboardDisplay.setSourceInfo('gbs', fileInputName(gbsFileEl));
+    setKbdSource('gbs', fileInputName(gbsFileEl));
     gbsBufferedFraction = 0;
     updateSeekBufferedUI();
 
@@ -4212,7 +4374,7 @@
     const gbsManualBpm = getManualBpm('gbs');
     let result;
     try {
-      result = await MML.GBS2MML.fromGbs(loadedGbsBytes, songIndex, duration, { bpm: gbsManualBpm });
+      result = await MML.GBS2MML.fromGbs(loadedGbsBytes, songIndex, duration, Object.assign({ bpm: gbsManualBpm, cmd: MML.UI.ConvertSettings.get(), onProgress: makeCaptureProgress(gbsFileStatusEl) }, planConvertOptions()));
     } catch (e) {
       gbsIsRendering = false;
       updateGbsPlayButton();
@@ -4232,7 +4394,8 @@
 
     gbsFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FDSを借用して再生)',
-        { mode: gbsManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', ') }) + '</div>';
+        { mode: gbsManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', ') }) + '</div>' +
+      renderPitchCheck(result.pitchCheck);
 
     // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
     // 各種UIをMML本文に反映する(再生は開始しない)。新規変換された曲なので、前回再生
@@ -4294,7 +4457,8 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
-    keyboardDisplay.setSourceInfo('hes', file.name);
+    MML.Convert.ChannelPlan.newFile("hes", {}); // 新ファイル: チャンネル割当(案E)をリセット
+    setKbdSource('hes', file.name);
     loadedHesBytes = null; loadedHesHeader = null;
 
     const buf = await file.arrayBuffer();
@@ -4338,6 +4502,7 @@
     btn.classList.toggle('is-playing', !!playing);
     btn.title = playing ? T('一時停止') : T('再生');
     btn.disabled = hesIsRendering;
+    updateKeyboardTransport();
   }
 
   // ★HESはHesReplayStreamPlayer(GBS/KSSと同じスナップショット再生方式)を使う。
@@ -4363,7 +4528,7 @@
     stopVoiceMonitor();
     invalidateOtherRollPrefetch('hes');
     lastPlayMode = 'hes';
-    keyboardDisplay.setSourceInfo('hes', fileInputName(hesFileEl));
+    setKbdSource('hes', fileInputName(hesFileEl));
     hesBufferedFraction = 0;
     updateSeekBufferedUI();
 
@@ -4543,7 +4708,7 @@
     const hesManualBpm = getManualBpm('hes');
     let result;
     try {
-      result = await MML.HES2MML.fromHes(loadedHesBytes, track, duration, { bpm: hesManualBpm });
+      result = await MML.HES2MML.fromHes(loadedHesBytes, track, duration, Object.assign({ bpm: hesManualBpm, cmd: MML.UI.ConvertSettings.get(), onProgress: makeCaptureProgress(hesFileStatusEl) }, planConvertOptions()));
     } catch (e) {
       hesIsRendering = false;
       updateHesPlayButton();
@@ -4569,9 +4734,18 @@
     const dpcmMsg = (result.dpcmFiles && result.dpcmFiles.length > 0)
       ? T('、DPCM {n} ファイル出力', { n: result.dpcmFiles.length }) : '';
 
+    // 借用先を変えているときは「N163を借用」固定の文言が実態と合わなくなるので、
+    // 実際に使った拡張音源を出す(チャンネル割当、案E)
+    const hesBorrow = MML.Convert.ChannelPlan.isCustom()
+      ? T('、拡張音源: {chips}', { chips: (result.expansions || []).join(', ') || '-' })
+      : '';
     hesFileStatusEl.innerHTML =
-      '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}{dpcm}) → MMLエディタに出力(N163を借用して再生)',
-        { mode: hesManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', '), dpcm: dpcmMsg }) + '</div>';
+      '<div class="ok">' + (hesBorrow
+        ? T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}{dpcm}) → MMLエディタに出力',
+          { mode: hesManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', '), dpcm: dpcmMsg + hesBorrow })
+        : T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}{dpcm}) → MMLエディタに出力(N163を借用して再生)',
+          { mode: hesManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', '), dpcm: dpcmMsg })) + '</div>' +
+      renderPitchCheck(result.pitchCheck);
 
     rangeStartSec = 0;
     rangeEndSec = null;
@@ -4652,9 +4826,9 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
-    keyboardDisplay.setSourceInfo('vgm', file.name);
+    setKbdSource('vgm', file.name);
     loadedVgmBytes = null; loadedVgmHeader = null;
-    buildVgmChannelMap(null);
+    vgmSetPlanDefaults(null);
 
     try {
       const raw = new Uint8Array(await file.arrayBuffer());
@@ -4668,11 +4842,11 @@
       loadedVgmBytes = bytes;
       loadedVgmHeader = h;
       renderVgmHeader(h);
-      buildVgmChannelMap(h);
+      vgmSetPlanDefaults(h);
       vgmPlayDurEl.value = String(vgmDefaultDuration(h));
       vgmFileStatusEl.innerHTML = '';
       const title = MML.VGM.displayTitle(h);
-      if (title) keyboardDisplay.setSourceInfo('vgm', title);
+      if (title) setKbdSource('vgm', title);
       if (h.usedChips.length && !h.usedChips.some(c => c.impl)) {
         vgmFileStatusEl.innerHTML = '<div class="error">' + T('このVGMが使う音源({chips})はまだ対応していません(無音になります)。', { chips: h.usedChips.map(c => c.name).join(', ') }) + '</div>';
       }
@@ -4698,6 +4872,7 @@
     btn.classList.toggle('is-playing', !!playing);
     btn.title = playing ? T('一時停止') : T('再生');
     btn.disabled = vgmIsRendering;
+    updateKeyboardTransport();
   }
 
   // 鍵盤表示用のchips配列(src/ui/keyboard.js extractChannels のトークン)をヘッダから組む。
@@ -4786,7 +4961,7 @@
     stopVoiceMonitor();
     invalidateOtherRollPrefetch('vgm');
     lastPlayMode = 'vgm';
-    keyboardDisplay.setSourceInfo('vgm', MML.VGM.displayTitle(loadedVgmHeader) || fileInputName(vgmFileEl));
+    setKbdSource('vgm', MML.VGM.displayTitle(loadedVgmHeader) || fileInputName(vgmFileEl));
     vgmBufferedFraction = 0;
     updateSeekBufferedUI();
 
@@ -4928,88 +5103,56 @@
     vgmFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file: filename }) + '</div>';
   }
 
-  // ── VGM チャンネル割当表(変換元ch→借用先) ──
-  // 読み込み時に構成駆動の既定割当(MML.VGM2MML.defaultPlan)で埋め、ユーザーが変更できる。
-  // 借用先の語彙はSPCのTARGET_OPTIONS(ボイスモニター)と同じ。runVgm2Mmlが options.channelMap
-  // として渡す(既定と同じなら渡さない=「構成から自動」表記のまま)。
-  const vgmChannelMapWrapEl = document.getElementById('vgmChannelMapWrap');
-  const vgmChannelMapEl = document.getElementById('vgmChannelMap');
-  function vgmTargetLabel(type) {
-    if (type === 'skip') return T('スキップ');
-    const tt = MML.VGM2MML.TARGET_TYPES[type];
-    if (!tt) return type;
-    if (tt.chip === '2a03') {
-      return { pulse1: 'A: 2A03 Pulse1', pulse2: 'B: 2A03 Pulse2', triangle: 'C: 2A03 Triangle', noise: 'D: 2A03 Noise' }[type] || type;
-    }
-    // 拡張音源のレターは他チップの有無に関わらず固定(assignExpansionLetters)なので全部渡して引く
-    const lm = MML.Mml.assignExpansionLetters(['fds', 'vrc7', 'vrc6', 'n163', 'fme7', 'mmc5']);
-    const letter = (lm[tt.chip] || [])[tt.index] || '?';
-    const name = { fme7: 'FME-7', n163: 'N163', vrc7: 'VRC7', mmc5: 'MMC5', vrc6: 'VRC6' }[tt.chip] || tt.chip;
-    const sub = tt.chip === 'fme7' ? ['A', 'B', 'C'][tt.index] : tt.chip === 'vrc6' ? `Pulse${tt.index + 1}` : tt.chip === 'mmc5' ? `Pulse${tt.index + 1}` : `ch${tt.index + 1}`;
-    return `${letter}: ${name} ${sub}`;
-  }
-  function buildVgmChannelMap(h) {
-    if (!vgmChannelMapEl) return;
-    vgmChannelMapEl.innerHTML = '';
-    const src = h ? MML.VGM2MML.sourceChannels(h) : [];
-    if (!src.length) { vgmChannelMapWrapEl.style.display = 'none'; return; }
+  // ── VGM チャンネル割当(変換元ch→借用先) ──
+  // 割当UIはVGMパネル専用の表を廃し、鍵盤表示の行(part列チップ/借用先列、案E)へ集約した。
+  // ここではヘッダから決まる構成駆動の既定割当(MML.VGM2MML.defaultPlan)を鍵盤の行ID
+  // (KP1/KS1/KF1/YM1/SN1…)へ移して既定として登録し、変換時にユーザー指定を読み戻す。
+  function vgmSetPlanDefaults(h) {
+    const Plan = MML.Convert.ChannelPlan;
+    if (!h) { Plan.newFile('vgm', {}); return; }
     const plan = MML.VGM2MML.defaultPlan(h);
-    for (const s of src) {
-      const label = document.createElement('label');
-      const name = document.createElement('span');
-      name.textContent = s.label;
-      const sel = document.createElement('select');
-      sel.dataset.sourceId = s.id;
-      sel.dataset.role = 'target';
-      for (const t of MML.VGM2MML.targetOptionsFor(s.kind)) {
-        const o = document.createElement('option');
-        o.value = t; o.textContent = vgmTargetLabel(t);
-        if (t === (plan[s.id] || 'skip')) o.selected = true;
-        sel.appendChild(o);
-      }
-      // 借用先がVRC7のときだけ出す音色プリセット選択(vgm2mml/converter.js vrc7InstOptions)。
-      // OPLLソースは「元の音色」(auto)が既定、他はプリセット1(Buzzy Bell)
-      const inst = document.createElement('select');
-      inst.dataset.sourceId = s.id;
-      inst.dataset.role = 'vrc7inst';
-      inst.title = T('VRC7の音色プリセット');
-      const defInst = MML.VGM2MML.defaultVrc7Inst(s.kind);
-      for (const opt of MML.VGM2MML.vrc7InstOptions(s.kind)) {
-        const o = document.createElement('option');
-        o.value = opt.value; o.textContent = T(opt.label); // 日本語ラベル('元の音色'/'@0 自作音色…')だけ辞書に載っている
-        if (opt.value === defInst) o.selected = true;
-        inst.appendChild(o);
-      }
-      const syncInst = () => { inst.style.display = /^vrc7_/.test(sel.value) ? '' : 'none'; };
-      sel.addEventListener('change', syncInst);
-      syncInst();
-      label.appendChild(name); label.appendChild(sel); label.appendChild(inst);
-      vgmChannelMapEl.appendChild(label);
+    const map = {};
+    for (const srcId of Object.keys(plan)) {
+      const chId = Plan.chIdForVgmSource(srcId);
+      if (chId) map[chId] = plan[srcId];
     }
-    vgmChannelMapWrapEl.style.display = '';
+    Plan.newFile('vgm', map);
   }
-  // 現在の割当表を読む。既定と全く同じなら null(=自動)を返す
+  // 現在の割当をVGM変換器のソースID体系で返す。既定と全く同じなら null(=構成から自動)
   function getVgmChannelMap() {
-    if (!loadedVgmHeader || !vgmChannelMapEl) return null;
-    const plan = MML.VGM2MML.defaultPlan(loadedVgmHeader);
+    if (!loadedVgmHeader) return null;
+    const Plan = MML.Convert.ChannelPlan;
+    const src = MML.VGM2MML.sourceChannels(loadedVgmHeader);
+    // NES/GB/HuC6280のVGMはvgm2mmlが nsf2mml/gbs2mml/hes2mml へ丸ごと委譲する。
+    // それらの変換器は鍵盤表示の行IDをそのままキーに使うので、変換せずに渡す。
+    if (!src.length) return planConvertOptions().channelMap;
+    const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
     const map = {};
     let changed = false;
-    for (const sel of vgmChannelMapEl.querySelectorAll('select[data-role="target"]')) {
-      map[sel.dataset.sourceId] = sel.value;
-      if ((plan[sel.dataset.sourceId] || 'skip') !== sel.value) changed = true;
+    for (const s of src) {
+      const chId = Plan.chIdForVgmSource(s.id);
+      const ent = (chId && Plan.get(chId)) || {};
+      map[s.id] = ent.target || def[s.id] || 'skip';
+      if (map[s.id] !== (def[s.id] || 'skip')) changed = true;
     }
     return changed ? map : null;
   }
-  // VRC7音色プリセットの選択(sourceId → 'auto'|'1'..'15')。既定のままなら省略(nullではなく空でよい)
+  // VRC7を借用先に選んだchの音色プリセット(sourceId → 'auto'|'0'..'15')。
+  // 鍵盤側の「音色」セレクト(tone)がそのままこの値になる。
   function getVgmVrc7Inst() {
+    const Plan = MML.Convert.ChannelPlan;
     const map = {};
-    if (!vgmChannelMapEl) return map;
-    for (const sel of vgmChannelMapEl.querySelectorAll('select[data-role="vrc7inst"]')) map[sel.dataset.sourceId] = sel.value;
+    if (!loadedVgmHeader) return map;
+    const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
+    for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
+      const chId = Plan.chIdForVgmSource(s.id);
+      const ent = (chId && Plan.get(chId)) || {};
+      const target = ent.target || def[s.id] || 'skip';
+      if (!/^vrc7_/.test(target)) continue;
+      map[s.id] = ent.tone !== undefined ? ent.tone : MML.VGM2MML.defaultVrc7Inst(s.kind);
+    }
     return map;
   }
-  document.getElementById('btnVgmChannelMapAuto').addEventListener('click', () => buildVgmChannelMap(loadedVgmHeader));
-  // 言語切替時は借用先ラベル(「スキップ」)を作り直す
-  if (MML.I18n && MML.I18n.onChange) MML.I18n.onChange(() => buildVgmChannelMap(loadedVgmHeader));
 
   async function runVgm2Mml() {
     if (!loadedVgmBytes) {
@@ -5026,7 +5169,7 @@
     const vgmManualBpm = getManualBpm('vgm');
     let result;
     try {
-      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst() });
+      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), tone: planConvertOptions().tone, cmd: MML.UI.ConvertSettings.get(), onProgress: makeCaptureProgress(vgmFileStatusEl) });
     } catch (e) {
       vgmIsRendering = false;
       updateVgmPlayButton();
@@ -5056,7 +5199,8 @@
       ? T('。対象外の音源は無視: {chips}', { chips: result.ignoredChips.join(', ') }) : '';
     vgmFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力{borrow}{ignored}',
-        { mode: vgmManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: (result.chips || []).join(', '), borrow: borrowNote, ignored: ignoredMsg }) + '</div>';
+        { mode: vgmManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: (result.chips || []).join(', '), borrow: borrowNote, ignored: ignoredMsg }) + '</div>' +
+      renderPitchCheck(result.pitchCheck);
 
     rangeStartSec = 0;
     rangeEndSec = null;
@@ -5118,9 +5262,9 @@
     // ★再生は各フォーマットの再生ボタンのclickに委ねる: 以前はplayXxxStream()を直接呼んで
     // いたため、ボタン側が一緒に行う処理(SPCのstartVoiceMonitor()+setMode('spc')等)を
     // 通らず、D&D再生ではロールは動くのにチャンネル一覧が更新されない不具合があった
-    const formatToPlayBtnId = { nsf: 'btnNsfFilePlay', spc: 'btnSpcFilePlay', kss: 'btnKssFilePlay', gbs: 'btnGbsFilePlay', hes: 'btnHesFilePlay', vgm: 'btnVgmFilePlay' };
+    // (ボタンidの表はSOUND_FORMAT_PLAY_BTN。鍵盤表示タイトル行の▶も同じ表を使う)
     const formatToPlayFn = {};
-    for (const [fmt, id] of Object.entries(formatToPlayBtnId)) {
+    for (const [fmt, id] of Object.entries(SOUND_FORMAT_PLAY_BTN)) {
       formatToPlayFn[fmt] = () => { const btn = document.getElementById(id); if (btn) btn.click(); };
     }
 
@@ -5180,9 +5324,8 @@
     // 拡張m3u("file::KSS,song,...")の曲番号を、その形式の曲番号入力欄へ反映する。
     // m3uの番号は形式ごとのネイティブ表記(NSF/GBS=1始まり、KSS/HES=0始まり)で書かれる
     // 慣例なので、各入力欄(同じ表記)へそのまま入れる。1ファイル1曲の形式(SPC/VGM)は無視。
-    const formatToSongInputId = { nsf: 'nsfSongIndex', kss: 'kssSongIndex', gbs: 'gbsSongIndex', hes: 'hesTrackIndex' };
     function applyArchiveSong(fmt, song) {
-      const id = formatToSongInputId[fmt];
+      const id = SOUND_FORMAT_SONG_INPUT[fmt];
       const el = id ? document.getElementById(id) : null;
       if (!el || song === null || song === undefined) return;
       const min = el.min !== '' ? parseInt(el.min, 10) : -Infinity;
@@ -5264,6 +5407,11 @@
       if (!archive || archive.playlist.length <= 1) return;
       loadArchiveIndex(archive.index + 1, true);
     };
+
+    // 鍵盤表示タイトル行の ⏮/⏭ 用。アーカイブ(m3u)を開いていればそちらのファイル送りを
+    // 優先し、単体ファイルなら曲番号送りへ落ちる(updateKeyboardTransport / onTransport参照)
+    archiveTrackCount = () => (archive ? archive.playlist.length : 0);
+    archiveChangeTrack = (delta) => changeArchiveTrack(delta);
 
     if (archiveBarEl) {
       document.getElementById('btnArchivePrev').addEventListener('click', () => changeArchiveTrack(-1));
@@ -5379,4 +5527,10 @@
       soundWinCloseBtn.addEventListener('click', () => stopSoundFileWindowPlayback());
     }
   })();
+
+  // 鍵盤表示タイトル行の再生コントロールの初期状態(起動直後=まだ何も再生していない=MML扱い)。
+  // ★ここで呼ぶ理由: updateKeyboardTransport()はcurrentTransportPlayer()経由で
+  // kssActivePlayer等のlet変数を読むので、それらの宣言(ファイル中ほど)より前で呼ぶと
+  // TDZの ReferenceError になり、以降の初期化(各ボタンのaddEventListener等)が丸ごと止まる。
+  updateKeyboardTransport();
 })();

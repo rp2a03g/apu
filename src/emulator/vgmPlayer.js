@@ -420,6 +420,11 @@
         // YM2612同居時はSN76496の音量を0x80(50%)に落としている。ユーザー実測でも「PSGが明らかに大きい、
         // 50%くらいで丁度よい」だったので同じ比率にする(SMS/GG等のPSG単独構成は従来どおり)。
         if (info.id === 'sn76489' && h.chips.ym2612) a.gain *= 0.5;
+        // ナムコSystem 2/21(YM2151+C140): 実基板録音CD(ワルキューレの伝説メインテーマ)との
+        // ラウドネス推移フィットで、FM:PCM比は既定ゲイン比のFM約1.7倍が最適だった
+        // (現状比1.4〜2.0がほぼ同値、最小1.77。FMのファンファーレがPCMに埋もれる報告)。
+        // C140側を下げると曲全体が他形式比-5dBに沈むため、YM2151側をこの構成時のみ増強する。
+        if (info.id === 'ym2151' && h.chips.c140) a.gain *= 1.7;
         this.adapters.push(a); this.adapterById[info.id] = a;
         if (info.dual) {
           // デュアルチップ(クロック値bit30): 2個目は同じ設定で別インスタンス。クロックは
@@ -430,6 +435,7 @@
           const scale2 = globalVol * (extra.chipVolumes[info.id + '_2'] !== undefined ? extra.chipVolumes[info.id + '_2'] : 1);
           if (b.scaleGain) b.scaleGain(scale2); else b.gain *= scale2;
           if (info.id === 'sn76489' && h.chips.ym2612) b.gain *= 0.5;
+          if (info.id === 'ym2151' && h.chips.c140) b.gain *= 1.7;
           b.second = true;
           this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
         }

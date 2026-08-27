@@ -49,22 +49,99 @@
   function waveFreq(periodReg) { return periodReg > 0 ? MML.HES.PSG_CLOCK / (32 * periodReg) : 0; }
   MML.Hes2MmlExpansion._waveFreq = waveFreq; // converter.jsのapplyPitchDetuneから使う
 
-  // ch別バランス($0805)と全体バランス($0801)を合成した結果、L/R両方とも実効ゲインが
-  // 厳密に0になるかどうかを判定する(apuHuC6280.js PsgChannel.gainLR()と全く同じ式。
-  // vol(0-31)は音量レジスタの生値。gainFromIndex側の対数変換は単調増加なので、
-  // 変換前のleft/rightが0以下かどうかだけ見れば「無音かどうか」はgainFromIndexを
-  // 通さずとも正確に判定できる)。音量レジスタが非0でも、パンだけで両バスから
-  // 外れていれば実際には無音(Last Bible DMG-M7J.gbsのGBS実測から発覚した現象がHESでも
-  // 起こりうるため同じ枠組みで対応)。
-  function panSilent(vol, balance, globalBalance) {
+  // ch別バランス($0805)・全体バランス($0801)まで込みの実効音量インデックス(0-31)を返す
+  // (apuHuC6280.js PsgChannel.gainLR()と全く同じ式。vol(0-31)は音量レジスタの生値)。
+  //
+  // ★重要(2026-08-26): $0805は「パン」専用ではなく、音量レジスタと同じインデックスへ
+  // 合流する同一スケール(1step≒1.5dB)の減衰器=事実上の第2の音量レジスタである。
+  // 実測(NX91002.hes)ではbalance値が左右対称($99/$88/$77…)の曲が多く、パンではなく
+  // 純粋なチャンネル別の音量調整として使われている(idx34はch毎に$ee/$cc/$88/$bbで、
+  // $88のchは$eeのchより14段=21dB下)。さらにidx34 ch3は音量レジスタを31に固定したまま
+  // balanceを$99→$33へ掃引する「balanceだけで作った減衰エンベロープ」だった。
+  // 以前はこの関数の代わりにpanSilent()(L/R両方が厳密に0か)を無音判定にだけ使い、
+  // 減衰量そのものを完全に無視していたため、チャンネル間のミックスバランスが
+  // 平均14.8dB崩れ、balance駆動のフェードは平坦な持続音に化けていた。
+  // 実効インデックスを音量として使うことで両方が同時に解決し、無音判定も
+  // 「実効インデックス0」として自然に吸収される(panSilentは廃止)。
+  //
+  // L/Rの扱い: 借用先(N163)にパンの概念が無いため、大きい方の側を採用して
+  // 「その音がミックス上どれだけ大きいか」を保つ(SPC(spc2mml/converter.js frameVol)が
+  // ボイス音量のVOL L/Rに対して max(|L|,|R|) を採るのと同じ方針)。
+  function effectiveVolIndex(vol, balance, globalBalance) {
     const v = vol - 0x1E * 2;
     const lPan = (balance >> 4) & 0x0F, rPan = balance & 0x0F;
     const gL = (globalBalance >> 4) & 0x0F, gR = globalBalance & 0x0F;
     const left = Math.max(0, v + lPan * 2 + gL * 2);
     const right = Math.max(0, v + rPan * 2 + gR * 2);
-    return left === 0 && right === 0;
+    return Math.min(31, Math.max(left, right));
   }
-  MML.Hes2MmlExpansion._panSilent = panSilent; // noise.jsから共用
+  MML.Hes2MmlExpansion._effectiveVolIndex = effectiveVolIndex; // noise.jsから共用
+
+  // ── ソフトウェア音量エンベロープの位相エイリアシング対策(2026-08-26) ──────────
+  // HESにはNSF/KSS/GBSのような「PLAYルーチンをフレームレートで呼ぶ」規約が無く、
+  // ゲームが内蔵タイマー(TIQ)を自前の周期で回して音量を1段ずつ書く(実測: NX91002は
+  // 約54.9Hz=1.094フレーム間隔)。フレーム境界のスナップショットで音量列を作ると、
+  // どのステップが2フレームに見えるかがノート開始の位相で毎回変わり、同じエンベロープが
+  // 「各段±1フレーム違いの列」として数百種類の@v<n>に化ける(ユーザー実測: NX91002
+  // idx34/180秒で@v252個。GBSの64Hzハードエンベロープクロック位相エイリアシングと同類だが、
+  // HESはソフトエンベロープなのでレジスタパラメータからの決定論的再現はできない)。
+  // 対策: captureHesSongAsyncのcontrolTrace($0804書込み列、音量の生値と分数フレーム時刻t
+  // 付き)から volume(t) を区分定数関数として復元し、「ノートの開始書込みを原点にした
+  // 相対時刻 t0+k (kフレーム目)」でリサンプルする。位相の基準がグローバルなフレーム格子
+  // ではなくノート自身のアタック書込みになるため、同じエンベロープは駆動レートが何Hzでも
+  // 必ず同一の列になり、EnvelopeRegistryの完全一致dedupeがそのまま効く。
+  // 列の長さ(=ノートのフレーム数)と実時間の対応は変えないので、再生タイミングは不変。
+
+  // controlTraceの1ch分から音量タイムライン[{t, v}](v=4bit音量)を作る。旧形式トレース
+  // (vol/tフィールド無し)やVGM経由(トレース自体が空)はnullを返し、呼び出し側は
+  // 従来のスナップショット列をそのまま使う。
+  // ★bal/gbal(ch別バランス$0805・全体バランス$0801)が記録されているトレースでは、
+  // 生の音量レジスタではなく実効音量インデックス(effectiveVolIndex参照)から作る。
+  // これらは実質的に第2の音量レジスタで、balanceだけで減衰エンベロープを作る曲もあるため
+  // (キャプチャ側hesPlayer.jsは$0805/$0801の書込みも変化点としてこのトレースへ積む)。
+  // 旧形式(bal無し)は従来どおり生の音量レジスタで代替する。
+  function buildVolTimeline(trace) {
+    if (!trace || trace.length === 0 || trace[0].vol === undefined || trace[0].t === undefined) return null;
+    const hasBal = trace[0].bal !== undefined;
+    return trace.map((e) => ({
+      t: e.t,
+      v: Math.max(0, Math.min(15, (hasBal ? effectiveVolIndex(e.vol, e.bal, e.gbal) : e.vol) >> 1))
+    }));
+  }
+  MML.Hes2MmlExpansion._buildVolTimeline = buildVolTimeline; // noise.jsから共用
+
+  // pitchTrace($0802/$0803書込み列、hesPlayer.js参照)の1ch分から周期タイムライン
+  // [{t, v}](v=12bit周期生値)を作る。音量と同じ位相エイリアシングがビブラート等の
+  // ピッチ列(pitchSeq→EP/MPテーブル・音程判定)にも乗るため、同じ仕組みで正規化する。
+  function buildPitchTimeline(trace) {
+    if (!trace || trace.length === 0 || trace[0].t === undefined) return null;
+    return trace.map((e) => ({ t: e.t, v: e.freq }));
+  }
+
+  // [startFrame, endFrame)のノートの音量列(長さendFrame-startFrame)を、ノート相対時刻で
+  // リサンプルして返す(冒頭コメント参照)。原点t0は「開始フレーム内の最後の書込み」
+  // (スナップショットが見るアタック値と同じ書込み。駆動tickは1フレームより長いのが普通で
+  // 同一フレーム内に複数書込みがある場合は直前ノートの残りが先行しているだけ)。
+  // 開始フレーム内に書込みが無い(音量変化を伴わないノート境界)場合はフレーム原点に
+  // フォールバックし、書込みがまだ一度も無い区間はfallbackSeq(スナップショット列)を使う。
+  function resampleSeq(timeline, startFrame, endFrame, fallbackSeq) {
+    if (!timeline || timeline.length === 0) return fallbackSeq;
+    let lo = 0, hi = timeline.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (timeline[m].t < startFrame) lo = m + 1; else hi = m; }
+    let anchor = -1;
+    for (let i = lo; i < timeline.length && timeline[i].t < startFrame + 1; i++) anchor = i;
+    const t0 = anchor >= 0 ? timeline[anchor].t : startFrame;
+    const len = endFrame - startFrame;
+    const out = new Array(len);
+    let j = lo - 1;
+    for (let k = 0; k < len; k++) {
+      const sampleT = t0 + k;
+      while (j + 1 < timeline.length && timeline[j + 1].t <= sampleT) j++;
+      out[k] = j >= 0 ? timeline[j].v : (fallbackSeq ? fallbackSeq[k] : 0);
+    }
+    return out;
+  }
+  MML.Hes2MmlExpansion._resampleSeq = resampleSeq; // noise.jsから共用
 
   // PSGの5bit(0-31)波形をN163の4bit(0-15)へビット深度変換する(単純な1bit右シフト、
   // 0-31を0-15へ均等対応。情報量の損失は最小限)。
@@ -103,9 +180,11 @@
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) runs.push(cur); cur = null; } }
     for (let f = 0; f < snapshots.length; f++) {
       const c = snapshots[f][chIndex];
-      const activeWave = c.on && !c.dda && !c.noiseOn &&
-        !panSilent(c.vol, c.balance, snapshots[f].globalBalance);
-      const vol4 = Math.max(0, Math.min(15, c.vol >> 1));
+      // 実効音量(balance込み。effectiveVolIndex冒頭コメント参照)。0=無音なので、
+      // 以前のpanSilent判定はこの値が0かどうかに吸収されている
+      const effVol = effectiveVolIndex(c.vol, c.balance, snapshots[f].globalBalance);
+      const activeWave = c.on && !c.dda && !c.noiseOn && effVol > 0;
+      const vol4 = Math.max(0, Math.min(15, effVol >> 1));
       const freqHz = activeWave ? waveFreq(c.freq) : 0;
       const note = (activeWave && vol4 > 0 && freqHz > 0) ? freqToNoteNumber(freqHz) : null;
       // 巡回シフトの正規化(冒頭コメント参照): 音符分割にも@N<n>登録にも常にこの
@@ -116,10 +195,16 @@
       const waveKey = wave4.join(',');
       if (!cur) { cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: false }; continue; }
       if (note !== cur.note || (note !== null && waveKey !== cur.waveKey)) {
-        // PSGには専用アタックレジスタが無くこの時点では打ち直し(パス2のsplitRetriggers)を
-        // まだ判定していないため、ここでの「純粋な音程変化」は波形切替を伴わないことのみで
-        // 判定する(打ち直しかどうかはパス2の結果を見てから確定させる、下記参照)
-        const pureNoteChange = note !== cur.note && waveKey === cur.waveKey;
+        // 「純粋な音程変化」(=タイで繋いでよいレガート)の判定。波形切替を伴わないことに加え、
+        // ★この境界で音量が跳ね上がっていない(=打ち直しでない)ことも要る(2026-08-26修正)。
+        // PSGには専用アタックレジスタが無いため打ち直しの手がかりは音量の跳ね上がりだけだが、
+        // それを見るパス2のsplitRetriggersは同一音程ラン内しか走らず、音程が変わる境界は
+        // 素通りしていた。結果、実際は再アタックしている音程変化までタイ候補になり、タイ側は
+        // @v等を再指定しない仕様のため音量エンベロープが減衰し続けていた(nsf2mml/expansion/
+        // n163.jsと同じ穴。女神転生II 12曲目のN163で発覚した同一原因)。
+        const prevVol = cur.volSeq[cur.volSeq.length - 1];
+        const reattack = prevVol != null && (vol4 - prevVol) >= MML.Convert.RETRIGGER_JUMP_THRESHOLD;
+        const pureNoteChange = !reattack && note !== cur.note && waveKey === cur.waveKey;
         flush(f);
         cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: pureNoteChange };
       } else {
@@ -154,10 +239,13 @@
   // kss2mml/expansion/scc.jsと同じ理由)。waveRegが無い(=ロール表示専用)呼び出しでは
   // canonicalRotationを省略し、再生中のメインスレッド負荷を抑える(extractChannelEvents
   // 冒頭コメント参照)。
-  MML.Hes2MmlExpansion.wave = function (snapshots, waveReg, envReg) {
+  // opts.maxAbsorbCents: mergeAlternatingVibratoの統合上限(pitch.js参照)。SA<num>導入後は
+  // 深い変調もEP/MPで表現できるため既定は無制限。SA不使用(変換設定PITCH_SA='off')のときだけ
+  // 呼び出し元が70を渡し、表現不能な深い統合を音符の交互のまま残す(従来動作)。
+  MML.Hes2MmlExpansion.wave = function (snapshots, waveReg, envReg, controlTrace, pitchTrace, opts) {
     function toVolumeFields(volSeq) {
       const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: volSeq[0] } : { envelopeV: idx };
+      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
@@ -169,10 +257,23 @@
 
     const channels = [];
     for (let i = 0; i < MML.Hes2MmlExpansion.CH_COUNT; i++) {
+      const rawEvents = extractChannelEvents(snapshots, i, !!waveReg);
+      // ソフトエンベロープの位相エイリアシング対策(buildVolTimeline冒頭コメント参照):
+      // 音符イベントのvolSeq(音量列)とpitchSeq(周期生値列、ビブラート/EP検出の入力)を
+      // ノート相対時刻リサンプル列へ差し替える。マージ(mergeVibratoAndArpeggio等)より
+      // 前に行い、以後の利用は全て正規化済み列を見る。
+      const volTimeline = controlTrace ? buildVolTimeline(controlTrace[i]) : null;
+      const pitchTimeline = pitchTrace ? buildPitchTimeline(pitchTrace[i]) : null;
+      for (const ev of rawEvents) {
+        if (ev.note === null) continue;
+        if (volTimeline) ev.volSeq = resampleSeq(volTimeline, ev.start, ev.end, ev.volSeq);
+        if (pitchTimeline) ev.pitchSeq = resampleSeq(pitchTimeline, ev.start, ev.end, ev.pitchSeq);
+      }
       channels.push({
         // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)+
-        // P-5「不明瞭→EPテーブル」側(2026-08-12)
-        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(snapshots, i, !!waveReg))).map(toCommon),
+        // P-5「不明瞭→EPテーブル」側(2026-08-12)。統合上限はopts経由(関数冒頭コメント参照)
+        events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(rawEvents,
+          { maxAbsorbCents: opts && opts.maxAbsorbCents != null ? opts.maxAbsorbCents : null })).map(toCommon),
         hasVolume: true, hasEnvelope: true, hasInstrument: true
       });
     }

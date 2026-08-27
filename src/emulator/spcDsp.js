@@ -129,7 +129,7 @@
       this.koff = 0;  // KOFF ラッチ
       this.endx = 0;  // ENDX フラグ
       this.mutedVoices = 0;  // ミュートビットマスク (bit0=Voice0 ... bit7=Voice7)
-      this.voiceVol = new Array(8).fill(1); // ボイスごとの音量(0〜1、既定1)。鍵盤表示のch別音量バー用
+      this.voiceVol = new Array(8).fill(1); // ボイスごとの音量(0〜2、既定1=100%)。鍵盤表示のch別音量バー用
       // エコー
       this.echoPos = 0;
       this.echoBufL = new Int32Array(8192);
@@ -250,7 +250,11 @@
         const mode = (gain >> 5) & 3;
         const rate = gain & 0x1F;
         if (gain & 0x80) {
-          // カスタムモード
+          // カスタムモード。rate=0は実機では「周期無限=エンベロープ変化なし」(sustainの
+          // sr===0と同じ扱い)。RATE_TABLE[0]=0のまま比較すると毎サンプル発火=最速減衰に
+          // 化け、GAIN $A0(exp減衰,rate0)を「現レベル保持」として使うFF4等のAKAOドライバで
+          // 全ボイスが数フレームで無音になっていた(2026-08-25、FF4全曲異常の真因)。
+          if (rate === 0) { v.env = Math.max(0, Math.min(0x7FF, v.env)); return; }
           v.envRate++;
           if (v.envRate >= RATE_TABLE[rate]) {
             v.envRate = 0;
