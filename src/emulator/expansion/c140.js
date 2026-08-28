@@ -65,13 +65,21 @@
       this._freqScale = this.baseRate / (this.clockHz / this.cyclesPerSample); // legacy=2, 通常=1
       this.sampleRate = this.baseRate; // playRate/スナップショットの周波数基準
       this.type = type || 0;
-      // 出力LPF(基板のDAC後段アナログ再構成フィルタ相当、2次バターワース ~7kHz)。
-      // CD音源(実基板ライン録音)とのスペクトル比較で、ZOH化後の6.3k/10k/16kHz帯が
-      // CD比+3/+5/+12dB過剰(=DACイメージング成分)だったのを実機同様に丸める。
-      // RBJ biquad lowpass(チップレートで動作)
+      // 出力LPF(基板のDAC後段アナログ再構成フィルタ相当)。RBJ biquad lowpass(チップレートで動作)。
+      // ★fc履歴: 当初10kHz — だがそれはclock/576(1オクターブ低)バグ時代に「6.3k/10k/16k帯が
+      //   CD比+3/+5/+12dB過剰」と実測したイメージング補正で、42667Hz修正後はZOHイメージが
+      //   42.7k±fの不可聴域へ逃げるため過補正だった(10k以上が両CD比3-5dB不足=ハイハット/鈴の
+      //   抜けが死ぬ)。2026-08-28にワルキューレ/RT2/FL2の3枚のCD照合で再較正: LPF無しでも
+      //   イメージング過剰は出ず、フラットマスタリングのワルキューレ盤と10.2k/12.8k/16k/20.3k帯が
+      //   ±2dBで一致。fc=20k(チップNyquist21.3k直下)は可聴帯域をほぼ素通しし、出力段リサンプルへ
+      //   漏れる42.7k−f帯イメージだけ丸める再構成フィルタとして残す。掃引データ: _tmp_test/c140-cal/
       {
-        const fc = 10000, Q = 0.707; // 基板出力のアナログ再構成フィルタ相当(CD照合で調整。8kは10k帯が-5.5dB不足)
-        const w0 = 2 * Math.PI * fc / (this.clockHz / this.cyclesPerSample); // LPFは内部ティックレートで動く
+        // fc=20k(通常時: チップNyquist21.33kHzの直下=可聴帯域は素通し)。Nyquist以上のfcは
+        // biquadが発散するため、旧VGM互換(ティック=レート直値~21.4kHz)では0.47×ティック
+        // (~10kHz)へクランプ(通常時は0.47×42667=20053>20000なのでクランプ非発動)
+        const tickRate = this.clockHz / this.cyclesPerSample; // LPFは内部ティックレートで動く
+        const fc = Math.min(20000, tickRate * 0.47), Q = 0.707;
+        const w0 = 2 * Math.PI * fc / tickRate;
         const alpha = Math.sin(w0) / (2 * Q);
         const cosw = Math.cos(w0);
         const a0 = 1 + alpha;

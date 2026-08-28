@@ -425,6 +425,12 @@
         // (現状比1.4〜2.0がほぼ同値、最小1.77。FMのファンファーレがPCMに埋もれる報告)。
         // C140側を下げると曲全体が他形式比-5dBに沈むため、YM2151側をこの構成時のみ増強する。
         if (info.id === 'ym2151' && h.chips.c140) a.gain *= 1.7;
+        // アイレムM92/M107(YM2151+GA20): FM:PCM比自体はCD照合(UCC/ファイヤーバレル4曲の
+        // ゲインフィット±0.5dB以内)で既定ゲイン比が正と確認済みだが、合算ミックスが過熱し
+        // 再生段リミッタ(-3dB/20:1)がファイヤーバレルで64〜67%の時間介入・アタック最大6.8dB
+        // 刈り=「PCMの抜けが弱い」の実体だった(2026-08-28)。比率を保ったまま両チップ×0.5で
+        // 介入0%・RMS-13〜-15dB(MD/SPC基準近傍)に収める。
+        if ((info.id === 'ym2151' || info.id === 'ga20') && h.chips.ym2151 && h.chips.ga20) a.gain *= 0.5;
         this.adapters.push(a); this.adapterById[info.id] = a;
         if (info.dual) {
           // デュアルチップ(クロック値bit30): 2個目は同じ設定で別インスタンス。クロックは
@@ -436,6 +442,7 @@
           if (b.scaleGain) b.scaleGain(scale2); else b.gain *= scale2;
           if (info.id === 'sn76489' && h.chips.ym2612) b.gain *= 0.5;
           if (info.id === 'ym2151' && h.chips.c140) b.gain *= 1.7;
+          if ((info.id === 'ym2151' || info.id === 'ga20') && h.chips.ym2151 && h.chips.ga20) b.gain *= 0.5;
           b.second = true;
           this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
         }
