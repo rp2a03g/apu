@@ -102,7 +102,9 @@
           this.dcPrevXL = rl; this.dcPrevYL = yL;
           this.dcPrevXR = rr; this.dcPrevYR = yR;
           outL[outPos + i] = yL; outR[outPos + i] = yR;
-          if (Math.abs(yL) < SILENCE_EPS && Math.abs(yR) < SILENCE_EPS) {
+          // ★ミュート中は無音を数えない(ミュートは聴き方の設定であって曲の内容ではない。
+          // main.js syncSilenceDetect が silenceDetectEnabled を落とす)
+          if (this.silenceDetectEnabled === false) { this._silentRun = 0; } else if (Math.abs(yL) < SILENCE_EPS && Math.abs(yR) < SILENCE_EPS) {
             this._silentRun++;
             if (!this._silenceFired && this._silentRun >= sr * SILENCE_SEC) {
               this._silenceFired = true;

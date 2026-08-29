@@ -14,7 +14,12 @@
  *   ラッパー、ADPCM-A/B=ymfm移植。ROMはデータブロック0x82/0x83)+AY8910Audio(SSG流用)、
  *   YM2151(OPM、アーケード/X68000)=expansion/ym2151.js(コマンド0x54、デュアル2個目=0xA4)、
  *   GA20(Irem M92/M107 PCM)=expansion/ga20.js(コマンド0xBF、ROMはデータブロック0x93)、
- *   SegaPCM(OutRun/After Burner等)=expansion/segapcm.js(コマンド0xC0、ROMはデータブロック0x80)
+ *   SegaPCM(OutRun/After Burner等)=expansion/segapcm.js(コマンド0xC0、ROMはデータブロック0x80)、
+ *   C352(ナムコ System 11/12/22等)=expansion/c352.js(コマンド0xE1、ROMはデータブロック0x92)、
+ *   OKIM6258(X68000 ADPCM)=expansion/okim6258.js(コマンド0xB7、データはDACストリーム0x17経由)、
+ *   QSound(カプコンCPS1ダッシュ/CPS2)=expansion/qsound.js(コマンド0xC4、ROMはデータブロック0x8F)、
+ *   OKIM6295(東亜プラン/ライジング等)=expansion/okim6295.js(コマンド0xB8、ROMはデータブロック0x8B)、
+ *   MultiPCM(セガModel 1/2/Multi 32)=expansion/multipcm.js(コマンド0xB5、バンク0xC3、ROMは0x89)
  * ヘッダのクロックが非ゼロでも未実装のチップは、コマンド長規則で読み飛ばすだけ
  * (ROADMAP.md VGM節: 全チップ実装は不要)。
  *
@@ -57,7 +62,7 @@
   // 他形式(MD全体0.13、SPC基準)に近づくよう1.0(実測: Metal Slug 0.17〜0.21、Last Resort 0.10〜0.12、
   // Neo Turf Masters 0.29〜0.42=元々ホットな曲、ピークはリミッタ任せ)。SSGはFMに対して MAME neogeo
   // ドライバのルーティング比(SSG 0.28 : FM 0.98)を目安に0.8(暫定。実機録音との比較は未実施)。
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ga20: 3.0, segapcm: 2.0, c140: 1.0 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 1.0, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -319,6 +324,88 @@
     };
   }
 
+  // C352(Namco System 11/12/22/NB-1/2/ND-1): 32ch PCM(expansion/c352.js)。コマンドは
+  // 0xE1 aa bb dd ee(レジスタ=aabb 16bitワード、aaのbit7=デュアル2個目、データ=ddee)、
+  // ROMはデータブロック0x92。サンプルレート=クロック/分周(ヘッダ0xD6の値×4、0=288)。
+  function makeC352Adapter(info) {
+    const chip = new Emu.C352Audio(info.clock, info.c352Div || 288);
+    return {
+      id: 'c352', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.c352,
+      write(reg, dd) { chip.write(reg, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.c352) Emu.applyMute(chip.mute, e.c352); },
+      applyVolume(v) { const e = v.expansion || v; if (e.c352) Emu.applyVolume(chip.vol, e.c352); }
+    };
+  }
+
+  // QSound(カプコンCPS1ダッシュ/CPS2): 16ch PCM(expansion/qsound.js)。コマンドは
+  // 0xC4 mm ll rr(値=mmll、レジスタ=rr)、ROMはデータブロック0x8F。デュアルは実機に無い。
+  function makeQsoundAdapter(info) {
+    const chip = new Emu.QSoundAudio(info.clock);
+    return {
+      id: 'qsound', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.qsound,
+      write(reg, dd) { chip.write(reg, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.qsound) Emu.applyMute(chip.mute, e.qsound); },
+      applyVolume(v) { const e = v.expansion || v; if (e.qsound) Emu.applyVolume(chip.vol, e.qsound); }
+    };
+  }
+
+  // MultiPCM(セガModel 1/2/Multi 32の28ch PCM): expansion/multipcm.js。コマンドは
+  // 0xB5 aa dd(aa=ポート0-2、bit7=デュアル2個目)、バンクは0xC3 cc bbaa(専用case)、
+  // ROMはデータブロック0x89。
+  function makeMultiPcmAdapter(info) {
+    // クロックはヘッダ値をそのまま使う(サンプルレート=clock/180。分周の根拠は
+    // multipcm.jsコンストラクタのコメント参照。一時期「Multi32はヘッダ×4/3」補正を
+    // 入れたが、実盤FLACのクロマ照合で「分周180+ヘッダそのまま」が正と確定し撤去)。
+    const chip = new Emu.MultiPCMAudio(info.clock);
+    return {
+      id: 'multipcm', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.multipcm,
+      write(port, dd) { chip.write(port, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.multipcm) Emu.applyMute(chip.mute, e.multipcm); },
+      applyVolume(v) { const e = v.expansion || v; if (e.multipcm) Emu.applyVolume(chip.vol, e.multipcm); }
+    };
+  }
+
+  // OKIM6295(東亜プラン/ライジング等の4ch ADPCM): expansion/okim6295.js。コマンドは
+  // 0xB8 aa dd(aaのbit7=デュアル2個目、aa=仮想レジスタ: 0=コマンド/0x0F=バンク/
+  // 0x0E,0x10-0x13=NMK112)。ROMはデータブロック0x8B、pin7(分周132/165)はクロックbit31。
+  function makeOkim6295Adapter(info) {
+    const chip = new Emu.OKIM6295Audio(info.clock, !!info.pin7);
+    return {
+      id: 'okim6295', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.okim6295,
+      write(reg, dd) { chip.write(reg, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.okim6295) Emu.applyMute(chip.mute, e.okim6295); },
+      applyVolume(v) { const e = v.expansion || v; if (e.okim6295) Emu.applyVolume(chip.vol, e.okim6295); }
+    };
+  }
+
+  // OKIM6258(Sharp X68000 ADPCM): 1ch ストリーミングADPCM(expansion/okim6258.js)。
+  // コマンドは 0xB7 aa dd(aaのbit7=デュアル2個目)。ROMは持たず、データは
+  // DACストリーム制御(0x90-0x95、chipType 0x17)がデータバンク(type 0x04)から
+  // データレジスタ(offset 1)へ配送する。初期分周はヘッダ0x94のflags。
+  function makeOkim6258Adapter(info) {
+    const chip = new Emu.OKIM6258Audio(info.clock, info.okiFlags || 0);
+    return {
+      id: 'okim6258', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.okim6258,
+      write(reg, dd) { chip.write(reg, dd); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.okim6258) Emu.applyMute(chip.mute, e.okim6258); },
+      applyVolume(v) { const e = v.expansion || v; if (e.okim6258) Emu.applyVolume(chip.vol, e.okim6258); }
+    };
+  }
+
   function makePwmAdapter(info) {
     const chip = new Emu.PWM32XAudio();
     return {
@@ -354,7 +441,9 @@
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
     sn76489: makeSnAdapter, ym2612: makeYm2612Adapter, pwm: makePwmAdapter,
     rf5c68: makeRfAdapter('rf5c68'), rf5c164: makeRfAdapter('rf5c164'), ym2610: makeYm2610Adapter,
-    ym2151: makeYm2151Adapter, ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter
+    ym2151: makeYm2151Adapter, ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter,
+    c352: makeC352Adapter, okim6258: makeOkim6258Adapter, qsound: makeQsoundAdapter,
+    okim6295: makeOkim6295Adapter, multipcm: makeMultiPcmAdapter
   };
 
   // ---------------------------------------------------------------------------
@@ -431,6 +520,10 @@
         // 刈り=「PCMの抜けが弱い」の実体だった(2026-08-28)。比率を保ったまま両チップ×0.5で
         // 介入0%・RMS-13〜-15dB(MD/SPC基準近傍)に収める。
         if ((info.id === 'ym2151' || info.id === 'ga20') && h.chips.ym2151 && h.chips.ga20) a.gain *= 0.5;
+        // 東亜プラン2/ライジング(YM2151+OKIM6295): FM:ADPCM比は既定ゲイン比でRMSほぼ1:1
+        // (Battle Garegga実測 0.197:0.198)だが合算が過熱(RMS0.28/ピーク1.41)するため、
+        // アイレムM92と同じ「比率を保ったまま両チップ縮小」で×0.7(RMS-14dB級/ピーク~1.0)。
+        if ((info.id === 'ym2151' || info.id === 'okim6295') && h.chips.ym2151 && h.chips.okim6295) a.gain *= 0.7;
         this.adapters.push(a); this.adapterById[info.id] = a;
         if (info.dual) {
           // デュアルチップ(クロック値bit30): 2個目は同じ設定で別インスタンス。クロックは
@@ -443,6 +536,7 @@
           if (info.id === 'sn76489' && h.chips.ym2612) b.gain *= 0.5;
           if (info.id === 'ym2151' && h.chips.c140) b.gain *= 1.7;
           if ((info.id === 'ym2151' || info.id === 'ga20') && h.chips.ym2151 && h.chips.ga20) b.gain *= 0.5;
+          if ((info.id === 'ym2151' || info.id === 'okim6295') && h.chips.ym2151 && h.chips.okim6295) b.gain *= 0.7;
           b.second = true;
           this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
         }
@@ -493,10 +587,11 @@
           case 0x67: { // データブロック: 0x67 0x66 tt ss ss ss ss data...
             const type = d[p + 1];
             let size = (d[p + 2] | (d[p + 3] << 8) | (d[p + 4] << 16) | (d[p + 5] << 24)) >>> 0;
-            size &= 0x7FFFFFFF; // bit31 = デュアルチップ2個目のフラグ
+            const second = !!(size & 0x80000000); // bit31 = デュアルチップ2個目のROM/RAM
+            size &= 0x7FFFFFFF;
             const start = p + 6;
             const block = d.subarray(start, Math.min(d.length, start + size));
-            this._dataBlock(type, block);
+            this._dataBlock(type, block, second);
             this.pos = start + size; break;
           }
           case 0x50: this._writeSn(d[p], false); this.pos = p + 1; break;
@@ -513,8 +608,17 @@
           case 0xB9: this._chipWrite('huc6280', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB2: this._chipWrite('pwm', (d[p] >> 4) & 0x0F, ((d[p] & 0x0F) << 8) | d[p + 1], false); this.pos = p + 2; break; // 32X PWM: reg=a, 12bit値
           case 0xBF: this._chipWrite('ga20', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // GA20(Irem)
+          case 0xB7: this._chipWrite('okim6258', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // OKIM6258(X68000 ADPCM)
+          case 0xB8: this._chipWrite('okim6295', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // OKIM6295(4ch ADPCM)
+          case 0xB5: this._chipWrite('multipcm', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // MultiPCM(ポート0-2)
+          case 0xC3: { // MultiPCMセガバンキング: cc bb aa(値=aabb、ccのbit0/1=L/Rバンク、bit7=2個目)
+            const mp = this.adapterById[(d[p] & 0x80) ? 'multipcm_2' : 'multipcm'];
+            if (mp) mp.chip.bankWrite(d[p] & 0x7F, d[p + 1] | (d[p + 2] << 8));
+            this.pos = p + 3; break;
+          }
           case 0xB0: this._chipWrite('rf5c68', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB1: this._chipWrite('rf5c164', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          case 0xC4: this._chipWrite('qsound', d[p + 2], (d[p] << 8) | d[p + 1], false); this.pos = p + 3; break; // QSound: mm ll rr(値=mmll、レジスタ=rr)
           case 0xC0: { // SegaPCM: bbaa dd(offset=aabb、bit15=デュアル2個目)
             const off = d[p] | (d[p + 1] << 8);
             this._chipWrite('segapcm', off & 0x7FFF, d[p + 2], !!(off & 0x8000));
@@ -524,6 +628,7 @@
           case 0xC2: this._rfMemWrite('rf5c164', d[p] | (d[p + 1] << 8), d[p + 2]); this.pos = p + 3; break; // RF5C164 メモリ書込み
           case 0xD2: this._sccWrite(d[p] & 0x7F, d[p + 1], d[p + 2], !!(d[p] & 0x80)); this.pos = p + 3; break;
           case 0xD4: this._chipWrite('c140', ((d[p] & 0x7F) << 8) | d[p + 1], d[p + 2], !!(d[p] & 0x80)); this.pos = p + 3; break; // C140(Namco)
+          case 0xE1: this._chipWrite('c352', ((d[p] & 0x7F) << 8) | d[p + 1], (d[p + 2] << 8) | d[p + 3], !!(d[p] & 0x80)); this.pos = p + 4; break; // C352(Namco、16bitデータ)
           case 0x52: this._ymWrite(0, d[p], d[p + 1], false); this.pos = p + 2; break;
           case 0x53: this._ymWrite(1, d[p], d[p + 1], false); this.pos = p + 2; break;
           case 0xA2: this._ymWrite(0, d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2612
@@ -592,8 +697,15 @@
       this.ended = true;
     }
 
-    _dataBlock(type, block) {
+    // ROMサイズ(4)+開始アドレス(4)+データ、の共通形式で1チップに紐づくROMブロック(型→チップid)
+    static get ROM_BLOCK_CHIP() {
+      return { 0x80: 'segapcm', 0x89: 'multipcm', 0x8B: 'okim6295', 0x8D: 'c140', 0x8F: 'qsound', 0x92: 'c352', 0x93: 'ga20' };
+    }
+    // second: データブロックサイズのbit31=デュアルチップ2個目のROM/RAM(Batriderの
+    // デュアルOKIM6295等。以前は捨てて全部1個目へロードし、2個目のROMが1個目を上書きしていた)
+    _dataBlock(type, block, second) {
       this.dataBlocks.push({ type, size: block.length });
+      const ad = (id) => this.adapterById[second ? id + '_2' : id];
       if (type < 0x40) { // 非圧縮ストリーム(0x00=YM2612 PCM 等): typeごとに連結してバンクにする
         const bank = this.dataBanks[type] || (this.dataBanks[type] = { data: new Uint8Array(0), blocks: [] });
         const merged = new Uint8Array(bank.data.length + block.length);
@@ -603,43 +715,28 @@
         return;
       }
       if (type === 0xC2) { // NES APU RAM書込み: 先頭2バイト=開始アドレス
-        const nes = this.adapterById.nes;
+        const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
       if (type === 0xC0 || type === 0xC1) { // RF5C68(0xC0)/RF5C164(0xC1) 波形RAM書込み: 先頭2バイト=絶対アドレス
-        const rf = this.adapterById[type === 0xC0 ? 'rf5c68' : 'rf5c164'];
+        const rf = ad(type === 0xC0 ? 'rf5c68' : 'rf5c164');
         if (rf && block.length >= 2) rf.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
-      if (type === 0x82 || type === 0x83) { // YM2610 ADPCM-A(0x82) / ADPCM-B(0x83) ROM: ROMサイズ(4)+開始アドレス(4)+データ
-        const y = this.adapterById.ym2610;
+      if (type === 0x82 || type === 0x83) { // YM2610 ADPCM-A(0x82) / ADPCM-B(0x83) ROM: 共通形式(kind付き)
+        const y = ad('ym2610');
         if (y && block.length >= 8) {
           const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
           const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
           y.loadRom(type === 0x83 ? 'b' : 'a', romSize, start, block.subarray(8));
         }
       }
-      if (type === 0x93) { // GA20 ROM: ROMサイズ(4)+開始アドレス(4)+データ(0x82/0x83と同形式)
-        const g = this.adapterById.ga20;
-        if (g && block.length >= 8) {
+      const romChip = VgmPlayer.ROM_BLOCK_CHIP[type];
+      if (romChip) {
+        const a = ad(romChip);
+        if (a && block.length >= 8) {
           const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
           const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
-          g.loadRom(romSize, start, block.subarray(8));
-        }
-      }
-      if (type === 0x80) { // SegaPCM ROM: 同形式
-        const sp = this.adapterById.segapcm;
-        if (sp && block.length >= 8) {
-          const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
-          const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
-          sp.loadRom(romSize, start, block.subarray(8));
-        }
-      }
-      if (type === 0x8D) { // C140 ROM: 同形式
-        const cn = this.adapterById.c140;
-        if (cn && block.length >= 8) {
-          const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
-          const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
-          cn.loadRom(romSize, start, block.subarray(8));
+          a.loadRom(romSize, start, block.subarray(8));
         }
       }
       // その他(YM2612 PCM=0x00, 圧縮ブロック, 各種ROMダンプ)は未実装チップ向けなので保持しない
@@ -713,6 +810,7 @@
             const v16 = s.stepSize >= 2 ? (bank.data[s.pos + s.stepBase] | (bank.data[s.pos + s.stepBase + 1] << 8)) : v;
             this._chipWrite('pwm', s.port & 0x0F, v16 & 0xFFF, false);
           }
+          else if (s.chipType === 0x17) this._chipWrite('okim6258', s.cmd & 0x7F, v, s.second); // X68000 ADPCM: データレジスタ(通常cmd=0x01)へ1バイト
           // 他チップのストリーム(未実装チップ向け)は無視
           s.pos += s.stepSize;
         }
@@ -843,8 +941,18 @@
       ym2610fm: has('ym2610') ? { snapshots: [] } : null,
       ym2151: has('ym2151') ? { snapshots: [] } : null,
       ga20: has('ga20') ? { snapshots: [] } : null,
-      segapcm: has('segapcm') ? { snapshots: [] } : null,
-      c140: has('c140') ? { snapshots: [] } : null,
+      // snapshots=物理スロット、logical=割当逆算(ソフトウェアチャンネル合成、
+      // Emu.PoolChannelRegrouper)。ペア交互/巡回割当のドライバ対策で両方を常時保持する
+      segapcm: has('segapcm') ? { snapshots: [], logical: [] } : null,
+      c140: has('c140') ? { snapshots: [], logical: [] } : null,
+      c352: has('c352') ? { snapshots: [], logical: [] } : null,
+      okim6258: has('okim6258') ? { snapshots: [] } : null,
+      qsound: has('qsound') ? { snapshots: [], logical: [] } : null,
+      okim6295: has('okim6295') ? { snapshots: [] } : null,
+      // multipcm: snapshots=物理スロット(実機のまま)、logical=割当逆算(ソフトウェア
+      // チャンネル合成)。チャンネルプール式ドライバ対策で両方を常時保持し、
+      // 鍵盤/ロール/変換が表示モードに応じて選ぶ(Emu.PoolChannelRegrouper参照)
+      multipcm: has('multipcm') ? { snapshots: [], logical: [] } : null,
       pwm: has('pwm') ? { snapshots: [] } : null,
       rf5c164: has('rf5c164') ? { snapshots: [] } : null,
       rf5c68: has('rf5c68') ? { snapshots: [] } : null
@@ -858,6 +966,20 @@
     const spcmState = { seq: new Array(16).fill(0), end: new Array(16).fill(-1) };
     // C140: 同じ推定(キーオン/オフは明示レジスタなのでエッジは正確。ワンショット終端だけ窓で切る)
     const c140State = { seq: new Array(24).fill(0), end: new Array(24).fill(-1) };
+    // C352: 同上(キーオン/オフは0x202トリガで明示。ワンショット終端だけ窓で切る)
+    const c352State = { seq: new Array(32).fill(0), end: new Array(32).fill(-1) };
+    // QSound: 同上(キーオン/オフは音量/ピッチレジスタで明示。ワンショット終端だけ窓で切る)
+    const qsState = { seq: new Array(16).fill(0), end: new Array(16).fill(-1) };
+    // OKIM6295: 同上(全ワンショット。停止コマンドは明示、終端だけ窓で切る)
+    const okiState = { seq: new Array(4).fill(0), end: new Array(4).fill(-1) };
+    // MultiPCM: キーオン/オフは明示(r4)だが、キーオフ無しのワンショット(ドラム)はEGの
+    // ディケイで無音化する方式なので、キーオン時のEG可聴時間見積り(lenSec)で窓を切る
+    const mpcmState = { seq: new Array(28).fill(0), end: new Array(28).fill(-1) };
+    const mpcmRegrouper = data.multipcm ? new Emu.PoolChannelRegrouper(28) : null;
+    const spcmRegrouper = data.segapcm ? new Emu.PoolChannelRegrouper(16) : null;
+    const c140Regrouper = data.c140 ? new Emu.PoolChannelRegrouper(24) : null;
+    const c352Regrouper = data.c352 ? new Emu.PoolChannelRegrouper(32) : null;
+    const qsRegrouper = data.qsound ? new Emu.PoolChannelRegrouper(16) : null;
     let kssFrameWrites = [];
     const nesRegs = {};
     if (data.kss && data.kss.scc && data.kss.sccPlus) {
@@ -928,6 +1050,7 @@
           c.active = c.active && f < st.end[i];
         }
         data.segapcm.snapshots.push(s);
+        data.segapcm.logical.push(spcmRegrouper.step(s));
       }
       if (data.c140) {
         const s = Emu.snapshotC140(player.adapterById.c140.chip);
@@ -938,7 +1061,54 @@
           c.active = c.active && f < st.end[i];
         }
         data.c140.snapshots.push(s);
+        data.c140.logical.push(c140Regrouper.step(s));
       }
+      if (data.c352) {
+        const s = Emu.snapshotC352(player.adapterById.c352.chip);
+        const st = c352State;
+        for (let i = 0; i < 32; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = c.lenSec === Infinity ? Infinity : f + c.lenSec * FRAME_RATE; }
+          c.active = c.active && f < st.end[i];
+        }
+        data.c352.snapshots.push(s);
+        data.c352.logical.push(c352Regrouper.step(s));
+      }
+      if (data.qsound) {
+        const s = Emu.snapshotQSound(player.adapterById.qsound.chip);
+        const st = qsState;
+        for (let i = 0; i < 16; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = c.lenSec === Infinity ? Infinity : f + c.lenSec * FRAME_RATE; }
+          c.active = c.active && f < st.end[i];
+        }
+        data.qsound.snapshots.push(s);
+        data.qsound.logical.push(qsRegrouper.step(s));
+      }
+      if (data.multipcm) {
+        const s = Emu.snapshotMultiPCM(player.adapterById.multipcm.chip);
+        const st = mpcmState;
+        for (let i = 0; i < 28; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = c.lenSec === Infinity ? Infinity : f + c.lenSec * FRAME_RATE; }
+          c.active = c.active && f < st.end[i];
+        }
+        data.multipcm.snapshots.push(s);
+        data.multipcm.logical.push(mpcmRegrouper.step(s));
+      }
+      if (data.okim6295) {
+        const s = Emu.snapshotOKIM6295(player.adapterById.okim6295.chip);
+        const st = okiState;
+        for (let i = 0; i < 4; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = f + c.lenSec * FRAME_RATE; }
+          c.active = c.active && f < st.end[i];
+        }
+        data.okim6295.snapshots.push(s);
+      }
+      // OKIM6258: 再生/停止が制御レジスタ書込みで明示されるので推定不要(activeは正確)。
+      // 音程情報は無い(ストリーミングADPCM)のでロールはDMC式の疑似ノート表示のみ。
+      if (data.okim6258) data.okim6258.snapshots.push(Emu.snapshotOKIM6258(player.adapterById.okim6258.chip));
       if (data.ym2151) {
         // YM2612と同じ: 先読みはEGが進まないので発音判定/音量はレジスタ由来(keyOn/tlVol)へ差し替える
         const s = Emu.snapshotYM2151(player.adapterById.ym2151.chip);
@@ -981,8 +1151,55 @@
     if (data.nes && player.adapterById.nes.ramLoaded) {
       data.nes.dpcmRom = player.adapterById.nes.ram.slice(0xC000, 0x10000);
     }
+    collectUsedSamples(data, player);
     return data;
   };
+
+  // ── 使われたサンプルの実PCMを取り出す(dpcmRomと同じ「最後に一度だけ」の考え方) ──
+  // サンプルROMはチップ側にしか無く、キャプチャはWorkerで走るうえ関数はpostMessageを
+  // 越えられないので、キャプチャの最後に「実際にキーオンされたサンプルだけ」をデコードして
+  // 実データとして持たせる。vgm2mmlのドラム→@DPCM変換(打点の合成)がこれを使う。
+  // 実測: 1曲あたり5〜13種・ROM生バイトで14〜252KB程度しか使われないので全部持ってよい。
+  const USED_SAMPLE_MAX_TOTAL = 16 * 1024 * 1024; // デコード後の合計サンプル数の上限(安全弁)
+  function collectUsedSamples(data, player) {
+    // [dataのキー, スナップショットからチャンネル配列を取り出す関数, adapterId]
+    const SRC = [
+      ['ga20', (s) => s, 'ga20'], ['segapcm', (s) => s, 'segapcm'],
+      ['c140', (s) => s, 'c140'], ['c352', (s) => s, 'c352'],
+      ['qsound', (s) => s, 'qsound'], ['okim6295', (s) => s, 'okim6295'],
+      ['multipcm', (s) => s, 'multipcm'],
+      // ★YM2610のアダプタはチップを .chip ではなく .fm で持つ(SSGと2個持ちのため)
+      ['ym2610fm', (s) => (s && s.adpcmA ? s.adpcmA.concat(s.adpcmB ? [s.adpcmB] : []) : null), 'ym2610', (a) => a.fm],
+    ];
+    let total = 0;
+    for (const [key, chansOf, adapterId, chipOf] of SRC) {
+      const entry = data[key];
+      const adapter = player.adapterById[adapterId];
+      const chip = adapter && (chipOf ? chipOf(adapter) : adapter.chip);
+      if (!entry || !entry.snapshots || !chip || !chip.samplePcm) continue;
+      const seen = new Map(); // 'kind:start:end' → sample
+      for (const fr of entry.snapshots) {
+        const chans = chansOf(fr);
+        if (!chans) continue;
+        for (const c of chans) {
+          if (!c || !c.sample) continue;
+          const k = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end;
+          if (!seen.has(k)) seen.set(k, c.sample);
+        }
+      }
+      if (!seen.size) continue;
+      const out = {};
+      for (const [k, sample] of seen) {
+        if (total >= USED_SAMPLE_MAX_TOTAL) break;
+        let pcm = null;
+        try { pcm = chip.samplePcm(sample); } catch (e) { pcm = null; }
+        if (!pcm || !pcm.length) continue;
+        total += pcm.length;
+        out[k] = pcm;
+      }
+      entry.samples = out;
+    }
+  }
 
   Emu.VgmPlayer = VgmPlayer;
   Emu.VGM_FRAME_RATE = FRAME_RATE;

@@ -278,7 +278,9 @@
   };
 
   // ── VGM(チップファミリごとに上の各ビルダー/共通抽出経路を連結)─────────
-  RollBuild.vgm = function (data, done) {
+  // opts.poolMode: チャンネルプール式チップの表示モード({multipcm:'logical'|'phys'})。
+  // 'logical'なら割当逆算済みスナップショット(data.multipcm.logical)でロールを組む
+  RollBuild.vgm = function (data, done, opts) {
     const frameRate = data.frameRate;
     const sr = 44100;
     const buildTracks = MML.UI.buildRollTracksFromRegSnapshots;
@@ -299,13 +301,15 @@
     }
     // スナップショット型チップ: extractChannels(keyboard.js)が読むextraSnapsに
     // フレーム毎スナップショット配列を渡して同じ抽出経路でトラック化する
-    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ga20', 'segapcm', 'c140', 'pwm', 'rf5c164', 'rf5c68'];
+    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ga20', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
     const chipToken = { sn: 'sn76489' };
+    const poolMode = (opts && opts.poolMode) || {};
     for (const key of snapChips) {
       if (!data[key]) continue;
       const token = chipToken[key] || key;
-      const extra = {}; extra[key] = data[key].snapshots;
-      const t = buildTracks(data[key].snapshots, [], done, sr / frameRate, sr, ['vgm', token], null, extra);
+      const snaps = (poolMode[key] === 'logical' && data[key].logical) ? data[key].logical : data[key].snapshots;
+      const extra = {}; extra[key] = snaps;
+      const t = buildTracks(snaps, [], done, sr / frameRate, sr, ['vgm', token], null, extra);
       if (t) tracks = tracks.concat(t);
     }
     return tracks;
@@ -391,7 +395,8 @@
       }) };
     }
     if (format === 'vgm') {
-      return { build: (data, done) => ({ timeline: RollBuild.vgm(data, done), info: {} }) };
+      // params.poolMode: プール式チップの表示モード(Worker実行時はopt.roll経由で届く)
+      return { build: (data, done) => ({ timeline: RollBuild.vgm(data, done, params), info: {} }) };
     }
     return null;
   };

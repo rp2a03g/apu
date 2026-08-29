@@ -81,6 +81,47 @@
   // 自動スクロールの余白(白鍵単位)と追従の速さ(1フレームあたり残差のこの割合だけ寄せる)
   const LANE_SCROLL_MARGIN = 1;
   const LANE_SCROLL_EASE = 0.15;
+  // スポットライト(案D): チャンネル一覧の行にホバー/クリックすると、ロール上でその行の
+  // ノートだけを原色・最前面で描き、他chはこの不透明度まで減光する。ミュート(=音も消える)
+  // とは別軸の「注目だけ」の仕組みで、PCM多chがドラムを叩いていて音符が重なるときに
+  // 「今どの行を見ているか」を切り分けるために使う。
+  const SPOTLIGHT_DIM_ALPHA = 0.16;
+  // ── ドラム区画(音程ロールと同じcanvasの低音側に置く) ─────────────
+  // 打楽器として鳴っているサンプルPCM(pcmSampleRow の drumKey)は音程軸に載せられないので、
+  // 音程鍵盤(MIDI_MIN=C1)より低音側に「1レーン=1サンプル」の区画を作ってそこへ置く。
+  // 音程軸の単位は白鍵1本ぶん(wk)で、ドラム1レーンは DRUM_LANE_WHITE 本ぶんの幅を持つ
+  // (白鍵と同じ幅だとラベルが入らないので少し広くしてある)。ドラムが1つも無い曲では
+  // レーン数0=区画の幅0になり、音程軸の座標は従来と完全に一致する。
+  // レーン割当そのもの(どのサンプルが何番レーンか・上限・溢れの扱い)は
+  // src/convert/drumMap.js に置いてある。vgm2mmlのドラム音符出力と同じ表を使うため。
+  const DRUM_LANE_WHITE = 1.5;  // ドラム1レーンの幅(白鍵何本ぶんか)
+  // レーンの色 = どの太鼓か。チャンネルの色(=どのスロットが鳴らしたか)とは別軸なので、
+  // 打点は「塗り=このレーン色 / 枠線=チャンネル色」の二重符号化で描く。プール式チップ
+  // (C140/C352/QSound/MultiPCM)は同じ太鼓が毎回別スロットへ移るため、色をchに割り当てると
+  // 太鼓の色が踊ってしまう。塗りをサンプル側に固定するとその問題が出ない。
+  const DRUM_LANE_COLORS = ['#e8564a', '#f0a232', '#4a9de8', '#9b6ef3', '#22b3a4', '#d94fa0',
+                            '#7a8a99', '#c2a03a', '#5ac47a', '#ff7fa8', '#8ab4ff', '#d0703a',
+                            '#59c2c9', '#b06ee0', '#9aa832', '#e06060'];
+  const DRUM_OTHER_COLOR = '#8a93a1'; // 「その他」レーン
+
+  // 曲が終わった後の挙動。ヘッダの1つのアイコンをクリックのたびに巡回して選ぶ
+  // 複数の元chを1本にまとめて載せられる借用先(重複=競合ではない)。
+  // DPCMは「選んだPCMチャンネルの打楽器を、同時発音ぶんはミックスして1本のサンプル列にする」
+  // という作りなので、何本選んでもよい
+  const MULTI_SOURCE_TARGETS = new Set(['dpcm']);
+
+  const REPEAT_MODES = ['next', 'one', 'shuffle', 'stop'];
+  const REPEAT_MODE_KEY = 'mml_repeatMode';
+  const REPEAT_ICONS = {
+    next: { label: () => T('曲が終わったら: 次の曲へ'),
+      svg: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9.5M11.5 4.8 14 7l-2.5 2.2"/><path d="M16 13H6.5M8.5 10.8 6 13l2.5 2.2"/></svg>' },
+    one: { label: () => T('曲が終わったら: 同じ曲を繰り返す'),
+      svg: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 8.5A4.5 4.5 0 0 1 10 4h5M12.5 1.8 15 4l-2.5 2.2"/><path d="M14.5 11.5A4.5 4.5 0 0 1 10 16H5M7.5 13.8 5 16l2.5 2.2"/><text x="10" y="12.6" font-size="7" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">1</text></svg>' },
+    shuffle: { label: () => T('曲が終わったら: ランダム再生'),
+      svg: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h3l8 8h3M3 14h3l8-8h3"/><path d="M14.8 3.8 17 6l-2.2 2.2M14.8 11.8 17 14l-2.2 2.2"/></svg>' },
+    stop: { label: () => T('曲が終わったら: 停止'),
+      svg: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="10" height="10" rx="1.5"/></svg>' },
+  };
   function loadLayoutSettings() {
     const out = Object.assign({}, LAYOUT_DEFAULTS);
     try {
@@ -107,17 +148,22 @@
   // 縦向きの写像は従来実装と同じ式(H - t)になるよう書いてあり、丸めまで含めて描画結果は不変。
   // visibleWhite: 音程軸に収める白鍵の本数(省略=鍵盤全体TOTAL_WHITE。チャンネルごとのレーンは
   // LANE_VISIBLE_WHITEで、表示窓の左端(低音側)の白鍵位置offsetPxは呼び出し側がkeyX()の結果から引く)
-  function makeRollGeom(orientation, W, H, visibleWhite) {
+  // nDrum: ドラム区画のレーン数(0=区画なし)。音程軸は [ドラム区画][音程鍵盤] の並びで、
+  // 全体の長さは (nDrum * DRUM_LANE_WHITE + TOTAL_WHITE) 白鍵ぶん。keyX()が返す音程側の
+  // 座標には drumOff(区画の幅px)を足して使う。
+  function makeRollGeom(orientation, W, H, visibleWhite, nDrum) {
     const vertical = orientation !== 'horizontal';
     const pitchLen = vertical ? W : H;
     const timeLen = vertical ? H : W;
-    const wk = pitchLen / (visibleWhite || TOTAL_WHITE);
+    const drumUnits = (nDrum || 0) * DRUM_LANE_WHITE;
+    const wk = pitchLen / (visibleWhite || (TOTAL_WHITE + drumUnits));
     const bk = Math.max(3, wk * 0.60);
     // 先読み時間幅(秒)と、秒→時間軸pxの変換。時間軸320pxのとき従来通り4秒/80px/秒になる
     const windowSec = timeLen / ROLL_PX_PER_SEC;
     const tPx = (sec) => (sec / windowSec) * timeLen;
     return {
       vertical, W, H, pitchLen, timeLen, wk, bk, windowSec, tPx,
+      nDrum: nDrum || 0, drumOff: drumUnits * wk, drumLaneW: DRUM_LANE_WHITE * wk,
       // 音程軸[pLo, pLo+pSize) × 時間軸[tLo, tHi) の矩形をcanvas座標{x,y,w,h}へ。
       // minT: 時間軸方向の最小サイズ(px)。短い音符も見えるように下限を設ける用途
       rect(pLo, pSize, tLo, tHi, minT) {
@@ -130,6 +176,20 @@
       // 点(p, t) → canvas座標
       point(p, t) { return vertical ? { x: p, y: H - t } : { x: t, y: H - p }; },
     };
+  }
+
+  // ドラム区画のレーン lane の音程軸上の範囲(px)。sub/subN を渡すと、レーンをsubN分割した
+  // うちの sub 番目(同時発音の横並び)の範囲を返す。
+  // note列クリックで「打楽器/音階の指定」を出す行(サンプルPCM系のチャンネル)。
+  // NA/NB=YM2610 ADPCM、GA=GA20、SP=SegaPCM、CN=C140、CS=C352、QS=QSound、
+  // OK=OKIM6295、MP=MultiPCM
+  const SAMPLE_ROW_RE = /^(N[AB]\d?|GA\d|SP\d+|CN\d+|CS\d+|QS\d+|OK\d|MP\d+)$/;
+
+  function drumLaneX(lane, sub, subN, laneW) {
+    const n = Math.max(1, subN || 1);
+    const s = Math.min(n - 1, Math.max(0, sub || 0));
+    const w = laneW / n;
+    return { x: lane * laneW + s * w, size: w };
   }
 
   const WHITE_IDX = [0,-1,1,-1,2,3,-1,4,-1,5,-1,6];
@@ -317,6 +377,20 @@
     // VGM: C140(CN1-24)。chip.mute[]はch 0-23
     const cn = id.match(/^CN(\d+)$/);
     if (cn) return { section: 'expansion', chip: 'c140', type: 'array', index: +cn[1] - 1 };
+    // VGM: C352(CS1-32)。chip.mute[]はch 0-31
+    const cs = id.match(/^CS(\d+)$/);
+    if (cs) return { section: 'expansion', chip: 'c352', type: 'array', index: +cs[1] - 1 };
+    // VGM: OKIM6258(X68000 ADPCM、1ch)。chip.mute[]は1要素
+    if (id === 'OKI') return { section: 'expansion', chip: 'okim6258', type: 'array', index: 0 };
+    // VGM: QSound(QS1-16)。chip.mute[]はch 0-15
+    const qs = id.match(/^QS(\d+)$/);
+    if (qs) return { section: 'expansion', chip: 'qsound', type: 'array', index: +qs[1] - 1 };
+    // VGM: OKIM6295(OK1-4)。chip.mute[]はch 0-3('OKI'=OKIM6258は上の完全一致で先に拾われる)
+    const ok = id.match(/^OK(\d)$/);
+    if (ok) return { section: 'expansion', chip: 'okim6295', type: 'array', index: +ok[1] - 1 };
+    // VGM: MultiPCM(MP1-28)。chip.mute[]はch 0-27('M5P1'等MMC5とは前方不一致)
+    const mp = id.match(/^MP(\d+)$/);
+    if (mp) return { section: 'expansion', chip: 'multipcm', type: 'array', index: +mp[1] - 1 };
     // VGM: YM2610(Neo Geo) FM(NF1-4)。内蔵SSGはKP1-3行(chip 'psg')を流用し、vgmPlayer.jsの
     // YM2610アダプタが e.psg を自分のSSGへ適用する
     const nf = id.match(/^NF(\d)$/);
@@ -362,8 +436,20 @@
     { header: 'YM2151 (OPM , X68000 / Arcade)', prefix: 'OM', name: (id) => 'FM' + id.slice(2) },
     // GA1-4は完全一致(ids)で拾う(GBの'GALL'と prefix 'GA' を衝突させない)
     { header: 'GA20 (Irem M92 / M107 PCM)', ids: { GA1: 'PCM1', GA2: 'PCM2', GA3: 'PCM3', GA4: 'PCM4' } },
-    { header: 'SegaPCM (315-5218 , OutRun / After Burner)', prefix: 'SP', name: (id) => 'PCM' + id.slice(2) },
-    { header: 'C140 (Namco System 2 / 21)', prefix: 'CN', name: (id) => 'PCM' + id.slice(2) },
+    // pool: サンプルPCM系はドライバがスロットをペア交互/巡回割当する曲がある
+    // (実測: SegaPCM 8-23%移動 / C140 37-100% / C352 74-79% / QSound 8-63% / MultiPCM 100%)。
+    // ヘッダに「合成ch/実機スロット」トグルを出し、割当逆算した表示・変換と選べるようにする
+    { header: 'SegaPCM (315-5218 , OutRun / After Burner)', prefix: 'SP', name: (id) => 'PCM' + id.slice(2), pool: 'segapcm' },
+    { header: 'C140 (Namco System 2 / 21)', prefix: 'CN', name: (id) => 'PCM' + id.slice(2), pool: 'c140' },
+    { header: 'C352 (Namco System 11 / 12 / 22)', prefix: 'CS', name: (id) => 'PCM' + id.slice(2), pool: 'c352' },
+    { header: 'OKIM6258 (MSM6258 , Sharp X68000)', ids: { OKI: 'ADPCM' } },
+    { header: 'QSound (DL-1425 , Capcom CPS2)', prefix: 'QS', name: (id) => 'PCM' + id.slice(2), pool: 'qsound' },
+    // ★prefix 'OK' は 'OKI'(OKIM6258)にも前方一致するが、完全一致(ids)が全グループ横断で
+    //   先に評価されるので衝突しない(getChannelDisplayの2段ループ参照)
+    { header: 'OKIM6295 (MSM6295 , Toaplan / Raizing etc.)', prefix: 'OK', name: (id) => 'ADPCM' + id.slice(2) },
+    // pool: チャンネルプール式(ドライバがボイスを巡回割当する)チップの印。ヘッダ行に
+    // 「実機スロット/合成ch」の表示モード切替を出す(_rebuildRows参照)
+    { header: 'MultiPCM (315-5560 , Sega Model 1 / 2)', prefix: 'MP', name: (id) => 'PCM' + id.slice(2), pool: 'multipcm' },
     // NF1-4は完全一致(ids)で先に拾う(N163のprefix 'N' と衝突させない)
     { header: 'YM2610 (OPNB , Neo Geo)', ids: { NF1: 'FM1', NF2: 'FM2', NF3: 'FM3', NF4: 'FM4', NF5: 'FM5', NF6: 'FM6',
         NA1: 'PCMA1', NA2: 'PCMA2', NA3: 'PCMA3', NA4: 'PCMA4', NA5: 'PCMA5', NA6: 'PCMA6', NB: 'PCMB' } }, // NA=ADPCM-A, NB=ADPCM-B
@@ -373,10 +459,10 @@
   ];
   function getChannelDisplay(id) {
     for (const g of CHANNEL_DISPLAY_GROUPS) {
-      if (g.ids && g.ids[id]) return { header: g.header, name: g.ids[id] };
+      if (g.ids && g.ids[id]) return { header: g.header, name: g.ids[id], pool: g.pool };
     }
     for (const g of CHANNEL_DISPLAY_GROUPS) {
-      if (g.prefix && id.startsWith(g.prefix)) return { header: g.header, name: g.name(id) };
+      if (g.prefix && id.startsWith(g.prefix)) return { header: g.header, name: g.name(id), pool: g.pool };
     }
     return { header: '', name: id };
   }
@@ -512,6 +598,23 @@
   //    (目安。ピッチベンド等の相対的な上下動は正しく追従する)。
   // 解析の信頼度しきい値(pitchConf、0-1: 窓ごとの検出周期が中央値±3%で一致した割合)
   const ADPCM_PITCH_CONF = 0.5;
+
+  // サンプルPCM系チップ(GA20/SegaPCM/C140/C352/QSound/MultiPCM/OKIM6295/YM2610 ADPCM-A)の
+  // 「ピッチ解析が信頼できなかった」行の共通形。音階演奏していない=打楽器/効果音なので、
+  // ロールでは音程軸ではなくドラム区画(音程鍵盤より低音側のレーン群)へ置く。
+  //  drumKey: どの太鼓かの同定キー。ドラム区画のレーンはこのキー単位で割り当てる。
+  //           sample.start はサンプルROM上の開始アドレスで、同じ音なら曲中ずっと同じ値になる
+  //           (vgm2mml/expansion/opn.js が既にリトリガー判定のキーに使っているのと同じ考え方)。
+  //           サンプル同定情報を持たないチップ(OKIM6258/PWM/RF5C68/164 = ROMもアドレスも無い
+  //           ストリーミングDAC)ではnullになり、従来どおり dmcRateIdx 経由の疑似音程に落ちる。
+  //  drumSeq: キーオン通番。同じ太鼓を連打したとき区間が1本に融合しないよう区切りに使う。
+  function pcmSampleRow(c) {
+    return {
+      sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
+      drumKey: c.sample ? (c.sample.kind + ':' + c.sample.start) : null,
+      drumSeq: c.seq || 0,
+    };
+  }
   function adpcmPitchToMidi(ch) {
     if (ch.adpcmExact) return ch.freq > 0 ? freqToMidi(ch.freq) : null;
     const rateHz = ch.freq, refRate = ch.adpcmRefRate;
@@ -1042,9 +1145,9 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `GA${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: gaWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
-                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
+                    : pcmSampleRow(c)) });
       }
     }
 
@@ -1062,9 +1165,9 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `SP${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 127,
           wave: spWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
-                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
+                    : pcmSampleRow(c)) });
       }
     }
 
@@ -1081,9 +1184,28 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `CN${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: cnWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
-                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
+                    : pcmSampleRow(c)) });
+      }
+    }
+
+    if (chips.includes('c352')) {
+      // C352(VGM: ナムコSystem 11/12/22等): 32ch PCM。CN/SP/GA行と同じ3段階表示
+      // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。ノイズフラグの
+      // ボイス(LFSR)はサンプルが無いのでピッチ解析対象外=「サンプル」行のまま。
+      const live = extraSnaps && extraSnaps.c352Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.c352 ? extraSnaps.c352[frameIdx] : null);
+      const csWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 32; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (30 + ch * 5) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `CS${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: csWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
       }
     }
 
@@ -1123,18 +1245,84 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `NA${ch + 1}`, color: `hsl(${hue},80%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
           wave: adpcmWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
-                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
+                    : pcmSampleRow(c)) });
       }
       {
         const c = s && s.adpcmB ? s.adpcmB : { vol: 0, rawVol: 0, rawVolMax: 255, active: false, panL: 1, panR: 1, rate: 0, refRate: 1, pitchHz: 0, pitchConf: 0 };
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: 'NB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: adpcmWave(c), active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
           panL: c.panL, panR: c.panR });
       }
+    }
+
+    if (chips.includes('qsound')) {
+      // QSound(VGM: カプコンCPS1ダッシュ/CPS2): 16ch PCM。CS/SP/GA行と同じ3段階表示
+      // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。
+      const live = extraSnaps && extraSnaps.qsoundLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.qsound ? extraSnaps.qsound[frameIdx] : null);
+      const qsWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 16; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (260 + ch * 7) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `QS${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: qsWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
+    if (chips.includes('multipcm')) {
+      // MultiPCM(VGM: セガModel 1/2/Multi 32): 28ch PCM。CS/QS行と同じ3段階表示
+      // (F-number/octで1サンプルを音階演奏するチップなのでピッチ解析が通れば絶対音名)。
+      const live = extraSnaps && extraSnaps.multipcmLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.multipcm ? extraSnaps.multipcm[frameIdx] : null);
+      const mpWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 28; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (190 + ch * 6) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `MP${ch + 1}`, color: `hsl(${hue},72%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: mpWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
+    if (chips.includes('okim6295')) {
+      // OKIM6295(VGM: 東亜プラン/ライジング等): 4ch ADPCM。音程レジスタは無い(固定レート)が
+      // 「音程ごとに別サンプル」方式の曲があるので、NA/GA行と同じ3段階表示
+      // (フレーズのピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。モノラル。
+      const live = extraSnaps && extraSnaps.okim6295Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.okim6295 ? extraSnaps.okim6295[frameIdx] : null);
+      const okWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 4; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (100 + ch * 15) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `OK${ch + 1}`, color: `hsl(${hue},70%,58%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0x20,
+          wave: okWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
+    if (chips.includes('okim6258')) {
+      // OKIM6258(VGM: X68000 ADPCM): 1chストリーミングADPCM。ROMも音程レジスタも無いので
+      // YMDA/PWMと同じ「サンプル」行(音量=現在振幅、キャプチャ時は再生中の下限0.3)。
+      const live = extraSnaps && extraSnaps.okim6258Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.okim6258 ? extraSnaps.okim6258[frameIdx] : null);
+      const c = s ? s[0] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0 };
+      channels.push({ id: 'OKI', color: '#ff9944', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+        wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
+        panL: c.panL, panR: c.panR });
     }
 
     if (chips.includes('pwm')) {
@@ -1262,7 +1450,20 @@
   // 生周波数(Hz)をvolSeqと同じ「区切らず積む」考え方で保持する(丸め後のmidiは一定のまま、
   // 実際の周波数だけがビブラート等で揺れている様子を後で細線描画するため)。
   function buildNoteTimelineFromChannelFrames(getChannelsAtFrame, totalFrames, frameDur) {
-    const tracks = new Map(); // id → { id, color, notes:[], cur:{startFrame,midi,volQ,freqs}|null }
+    const tracks = new Map(); // id → { id, color, notes:[], cur:{startFrame,midi,drumKey,volQ,freqs}|null }
+    // ドラム区画のレーン割当はここではやらない。RollBuild.vgm はチップごとに
+    // この関数を別々に呼んでタイムラインを連結するので、ここで割り当てると
+    // 2つのサンプルチップを積んだVGMで両方が「レーン0」から番号を振ってしまう。
+    // noteにはdrumKeyだけ載せ、曲全体が揃った受け取り側で一括して割り当てる
+    // (KeyboardDisplay._rebuildDrumLanes → MML.Convert.DrumMap.build)。
+    const pushNote = (track, endSec) => {
+      const c = track.cur;
+      const note = { startSec: c.startFrame * frameDur, endSec, midi: c.midi,
+                     vol: c.volQ / ROLL_VOL_LEVELS, freqSeq: c.freqs };
+      if (c.drumKey) note.drumKey = c.drumKey;
+      track.notes.push(note);
+      track.cur = null;
+    };
     for (let f = 0; f < totalFrames; f++) {
       const channels = getChannelsAtFrame(f) || [];
       for (const ch of channels) {
@@ -1276,25 +1477,31 @@
         // この共通経路(NSF/MML再生のロール、および全フォーマット共通の鍵盤ハイライトdrawPiano)は
         // ノイズ・DPCM双方を丸ごと除外していたため、NSFのノイズ/DPCMがロールにも鍵盤にも出ない・
         // GBSのノイズが鍵盤に出ない、という食い違いになっていた。
-        let midi, pitchFreq;
+        //  drumKey付き(打楽器として鳴っているサンプルPCM)は音程を持たないので、midiではなく
+        //  drumKeyの側で同一性を判断する。以降 midi と drumKey は排他(どちらか一方だけ非null)。
+        let midi, pitchFreq, drumKey = null, drumSeq = 0;
         if (!ch.active) { midi = null; pitchFreq = 0; }
+        else if (ch.drumKey) { midi = null; pitchFreq = 0; drumKey = ch.drumKey; drumSeq = ch.drumSeq || 0; }
         else if (ch.noise) { midi = noisePeriodIndexToMidi(ch.noiseIndex); pitchFreq = ch.noiseFreq; }
         else if (ch.adpcmPitch) { midi = adpcmPitchToMidi(ch); pitchFreq = ch.freq; }
         else if (ch.sample) { midi = dmcRateIndexToMidi(ch.dmcRateIdx); pitchFreq = ch.dmcFreq; }
         else { midi = ch.freq ? freqToMidi(ch.freq) : null; pitchFreq = ch.freq; }
-        const volQ = midi !== null ? quantizeVol(ch.vol) : 0;
-        if (track.cur && (midi === null || midi !== track.cur.midi || volQ !== track.cur.volQ)) {
-          track.notes.push({ startSec: track.cur.startFrame * frameDur, endSec: f * frameDur, midi: track.cur.midi, vol: track.cur.volQ / ROLL_VOL_LEVELS, freqSeq: track.cur.freqs });
-          track.cur = null;
+        const sounding = midi !== null || drumKey !== null;
+        const volQ = sounding ? quantizeVol(ch.vol) : 0;
+        const cur = track.cur;
+        // drumSeqはキーオン通番。同じ太鼓を同じ音量で連打したとき(16分のハイハット等)、
+        // これを見ないと区間が1本の長い棒に融合してしまう
+        if (cur && (!sounding || midi !== cur.midi || drumKey !== cur.drumKey || drumSeq !== cur.drumSeq || volQ !== cur.volQ)) {
+          pushNote(track, f * frameDur);
         }
-        if (midi !== null && !track.cur) track.cur = { startFrame: f, midi, volQ, freqs: [] };
+        if (sounding && !track.cur) track.cur = { startFrame: f, midi, drumKey, drumSeq, volQ, freqs: [] };
         if (track.cur) track.cur.freqs.push(pitchFreq);
       }
     }
     const totalSec = totalFrames * frameDur;
     const result = [];
     for (const track of tracks.values()) {
-      if (track.cur) track.notes.push({ startSec: track.cur.startFrame * frameDur, endSec: totalSec, midi: track.cur.midi, vol: track.cur.volQ / ROLL_VOL_LEVELS, freqSeq: track.cur.freqs });
+      if (track.cur) pushNote(track, totalSec);
       result.push({ id: track.id, color: track.color, notes: track.notes });
     }
     result.frameDur = frameDur; // セント偏差オーバーレイ描画時にfreqSeqのフレーム間隔を復元するため
@@ -1927,7 +2134,9 @@
   // 付く、高音が上)。音程軸の座標はロール側と同じkeyX()を共有する。
   // visibleWhite/offsetWhite(省略可): 鍵盤全体でなく白鍵visibleWhite本ぶんの音程窓を、白鍵offsetWhite
   // (小数可)から表示する(チャンネルごとのレーン用。ロール側と同じ窓を使う)
-  function drawPiano(canvas, channels, orientation, visibleWhite, offsetWhite) {
+  // drums: {lanes:[{label,color}], laneOf:Map(drumKey→レーン番号)} ドラム区画のパッド。
+  // 省略/空なら区画なし(音程軸の座標は従来と完全に一致する)。
+  function drawPiano(canvas, channels, orientation, visibleWhite, offsetWhite, drums) {
     const vertical = orientation !== 'horizontal';
     // 内部解像度は表示サイズ(CSS px、border除く)に合わせる。表示サイズは_cachedWidth/_cachedHeight
     // (ResizeObserverでキャッシュ)を優先し、毎フレームoffsetWidth/clientHeightを読んで
@@ -1940,15 +2149,26 @@
     const W = canvas.width, H = canvas.height;
     const pitchLen = vertical ? W : H;   // 音程軸の長さ
     const keyLen = vertical ? H : W;     // 鍵の長さ
-    const wkW = pitchLen / (visibleWhite || TOTAL_WHITE);  // 白鍵1本の太さ(音程軸方向)
+    const drumLanes = (drums && drums.lanes) || [];
+    const drumUnits = drumLanes.length * DRUM_LANE_WHITE;
+    const wkW = pitchLen / (visibleWhite || (TOTAL_WHITE + drumUnits));  // 白鍵1本の太さ(音程軸方向)
     const offPx = (offsetWhite || 0) * wkW;  // 表示窓の低音側の端(px)。keyX()の結果からこれを引く
+    const drumLaneW = DRUM_LANE_WHITE * wkW;
+    const pitchOff = drumUnits * wkW - offPx; // 音程側の座標補正(ドラム区画ぶん右へ + 窓スクロール)
     const bkW = Math.max(3, wkW * 0.60); // 黒鍵の太さ
     const bkH = Math.round(keyLen * 0.62); // 黒鍵の長さ
     const ctx = canvas.getContext('2d');
 
     const keyColors = {};
+    const laneColors = {}; // ドラム区画: レーン番号 → 今そこを鳴らしているchの色
     for (const ch of channels) {
       if (!ch.active) continue;
+      // 打楽器として鳴っているサンプルPCMは音程を持たないのでドラム区画のパッドを光らせる
+      if (ch.drumKey && drums && drums.laneOf) {
+        const lane = drums.laneOf.get(ch.drumKey);
+        if (lane !== undefined && laneColors[lane] === undefined) laneColors[lane] = ch.color;
+        continue;
+      }
       // ノイズch/DPCM(サンプル)chはそれぞれch.noiseIndex/ch.dmcRateIdxを疑似ノートとして使う
       // (noisePeriodIndexToMidi/dmcRateIndexToMidi冒頭コメント参照)。YM2610 ADPCM-A/Bは
       // 解析済みピッチ(adpcmExact)またはDelta-N由来レートを adpcmPitchToMidi で音程へ。
@@ -1961,13 +2181,53 @@
 
     ctx.clearRect(0, 0, W, H);
 
+    // ドラム区画のパッド(鍵盤の代わり)。1パッド=1サンプル。手前側(=ロールと反対の端)に
+    // レーン色の帯とラベルを出し、鳴っている間は鍵と同じくchの色で点灯する。
+    for (let i = 0; i < drumLanes.length; i++) {
+      const x0 = i * drumLaneW - offPx;
+      if (x0 + drumLaneW < 0 || x0 > pitchLen) continue; // 表示窓の外
+      const laneColor = drumLanes[i].color || DRUM_OTHER_COLOR;
+      const lit = laneColors[i];
+      ctx.fillStyle = lit || '#2f2c3a';
+      ctx.strokeStyle = '#44404a';
+      ctx.lineWidth = 0.5;
+      if (vertical) {
+        ctx.fillRect(x0 + 0.5, 0.5, drumLaneW - 1, keyLen - 1);
+        ctx.strokeRect(x0 + 0.5, 0.5, drumLaneW - 1, keyLen - 1);
+        ctx.fillStyle = laneColor; // ロール側(上端)にレーン色の帯 = ロールの打点の塗りと同じ色
+        ctx.fillRect(x0 + 1.5, 1.5, drumLaneW - 3, 5);
+        if (drumLaneW >= 9) { // ラベルは縦書き(90度回転)。レーンが細いときは省略
+          ctx.save();
+          ctx.translate(x0 + drumLaneW / 2, keyLen - 5);
+          ctx.rotate(-Math.PI / 2);
+          ctx.fillStyle = lit ? '#1a1830' : '#a9a3bb';
+          ctx.font = Math.min(9, Math.floor(drumLaneW) - 2) + 'px ' + fontStack('mono');
+          ctx.textBaseline = 'middle';
+          ctx.fillText(drumLanes[i].label, 0, 0);
+          ctx.restore();
+        }
+      } else {
+        const y = H - x0 - drumLaneW;
+        ctx.fillRect(0.5, y + 0.5, keyLen - 1, drumLaneW - 1);
+        ctx.strokeRect(0.5, y + 0.5, keyLen - 1, drumLaneW - 1);
+        ctx.fillStyle = laneColor; // ロール側(右端)にレーン色の帯
+        ctx.fillRect(keyLen - 6.5, y + 1.5, 5, drumLaneW - 3);
+        if (drumLaneW >= 9) {
+          ctx.fillStyle = lit ? '#1a1830' : '#a9a3bb';
+          ctx.font = Math.min(9, Math.floor(drumLaneW) - 2) + 'px ' + fontStack('mono');
+          ctx.textBaseline = 'middle';
+          ctx.fillText(drumLanes[i].label, 4, y + drumLaneW / 2 + 0.5);
+        }
+      }
+    }
+
     for (let midi = MIDI_MIN; midi <= MIDI_MAX; midi++) {
       const rel = midi - MIDI_MIN;
       const semi = rel % 12;
       if (IS_BLACK[semi]) continue;
       const pos = keyX(midi, wkW);
       if (!pos) continue;
-      pos.x -= offPx;
+      pos.x += pitchOff;
       if (pos.x + wkW < 0 || pos.x > pitchLen) continue; // 表示窓の外
       const color = keyColors[midi];
       ctx.fillStyle = color ? color : '#d4cfbc';
@@ -1982,6 +2242,13 @@
           ctx.fillRect(pos.x + 0.5, keyLen - 8, wkW - 1, 7);
           ctx.globalAlpha = 1;
         }
+        // Cの音名(横向きと同じく鍵に書く)。黒鍵に隠れない手前側=下端寄りへ
+        if (semi === 0 && wkW >= 8) {
+          ctx.fillStyle = color ? '#1a1830' : '#6b6b7a';
+          ctx.font = Math.min(9, Math.floor(wkW) - 1) + 'px ' + fontStack('sans');
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(midiToName(midi), pos.x + 2, keyLen - 9);
+        }
       } else {
         const y = H - pos.x - wkW; // 高音が上: 音程軸pをcanvasの下から上へ
         ctx.fillRect(0.5, y + 0.5, keyLen - 1, wkW - 1);
@@ -1992,9 +2259,7 @@
           ctx.fillRect(1, y + 0.5, 7, wkW - 1);
           ctx.globalAlpha = 1;
         }
-        // Cの音名は鍵の上(黒鍵に隠れない手前側)に書く(縦向きはロール側のレーン先頭に
-        // 書いているが、横向きはレーンが薄くて文字が入らないため鍵に書く)。鍵が細すぎる
-        // ときは省略する
+        // Cの音名は鍵の上(黒鍵に隠れない手前側)に書く。鍵が細すぎるときは省略する
         if (semi === 0 && wkW >= 8) {
           ctx.fillStyle = color ? '#1a1830' : '#6b6b7a';
           ctx.font = Math.min(9, Math.floor(wkW) - 1) + 'px ' + fontStack('sans');
@@ -2010,7 +2275,7 @@
       if (!IS_BLACK[semi]) continue;
       const pos = keyX(midi, wkW);
       if (!pos) continue;
-      pos.x -= offPx;
+      pos.x += pitchOff;
       if (pos.x + bkW < 0 || pos.x - bkW > pitchLen) continue; // 表示窓の外
       const color = keyColors[midi];
       ctx.fillStyle = color ? color : '#1a1830';
@@ -2055,17 +2320,23 @@
       this._lastDmc4011 = null;   // DMC $4011 直接書き込み検出用（前回のレジスタ値）
       this._speedDenom = 1;        // 再生速度分母(1〜8。実速度=1/_speedDenom)
       this._rollTimeline = null;  // ピアノロール用ノート区間 [{color, notes:[{startSec,endSec,midi}]}]
+      this._drumLanes = [];       // ドラム区画のレーン表 [{key,label,color,subN}](_rebuildDrumLanes)
+      this._drumLaneOf = new Map(); // drumKey → レーン番号(鍵盤のパッド点灯用)
       this._rollCursor = {};      // track.id → 「もう画面上端より上に流れ去った」最初のnote index(_renderRollの走査起点キャッシュ)
       this._rollSongTimeBase = 0; // 最後に実測位置が更新された時点での「曲内基準の経過時間」(確定値)
       this._rollLastRawPos = null; // 直前に_renderRollへ渡された実時間(壁時計)位置
       this._rollBaseWallMs = null; // _rollSongTimeBase確定時点のperformance.now()(補間の起点)
       this.onMuteChange = null;
+      this._poolModes = {};             // チャンネルプール式チップの表示モード(chipToken → 'logical'|'phys')
+      this.onPoolModeChange = null;     // (chipToken, mode) => void  ヘッダのモード切替
       this.onSpcMuteChange = null; // (voiceIndex:number, muted:bool) => void
       this.onSpeedChange = null;   // (factor:number) => void  曲切替をまたいで保持する
       this.onMasterVolumeChange = null; // (vol:0〜1) => void  曲切替をまたいで保持する
       this.onLayoutChange = null;       // (layout) => void  setLayout()で設定が変わった時
       this.onRollSeek = null;           // (seconds:実時間) => 実際にシークした秒|null  ロールのドラッグシーク(_attachRollSeekDrag)
       this._rollDrag = null;            // ドラッグシーク中の状態 {id,x,y,startPos,pos,moved}
+      this._spotlightHoverId = null;    // スポットライト(案D): ホバー中の行のch.id(一時的)
+      this._spotlightPinnedId = null;   // スポットライト(案D): ch名クリックで固定した行のch.id(ホバーより優先)
       this._rollSeekBarEls = null;      // ロール見出し行に置くシークバー要素(setRollSeekBar)
       this._lanes = [];                 // チャンネルごとのレーン [{id, laneEl, rollCanvas, pianoCanvas}](_rebuildLanes)
       this._lanesEl = null;
@@ -2089,6 +2360,25 @@
       this._masterVolume = loadMasterVolume(); // localStorage永続化(mml_masterVolume)
       this.onVolumeChange = null;       // () => void  ch別音量バー操作時(getVolumeConfig()参照)
       this.onAdpcmCalibrate = null;     // (ch) => void  YM2610 ADPCM行のnote列クリック(手動ピッチ補正。ch.adpcmSample={kind,start,end})
+      // ドラム区画のパッドクリック試聴。(sampleKey, mode:'raw'|'dpcm') => void
+      // ★PCM→DMCは必ず劣化するので、レートを耳で決められることが必須(ユーザー指示)。
+      //   パッドは1枚=1サンプルなので「複数chが同時に鳴っていて何を聴いているか分からない」
+      //   問題が原理的に起きない。
+      this.onDrumAudition = null;
+      this._drumAuditionMode = 'raw';
+      this.onOpenFile = null;         // ヘッダの「ファイルを開く」
+      this.onToMml = null;            // ヘッダの「to MML」
+      this.onRepeatModeChange = null; // 曲が終わった後の挙動が変わったとき
+      this._repeatBtnEl = null;
+      this._repeatMode = 'next';
+      try {
+        const m = localStorage.getItem(REPEAT_MODE_KEY);
+        if (m && REPEAT_MODES.indexOf(m) >= 0) this._repeatMode = m;
+      } catch (e) { /* ignore */ }
+      // (ch, kind:'drum'|'pitch'|null) => void  note列の小メニューでの打楽器/音階の手動指定
+      this.onSampleKind = null;
+      this._sampleMenuEl = null;
+      this._sampleMenuOutside = null;
       this.onSpcVolumeChange = null;    // (volArray:number[8]) => void
       this._channelVolumes = loadChannelVolumes();   // channelId → 0〜2(1=100%、localStorage永続化)
       this._spcVoiceVolumes = loadSpcVoiceVolumes(); // [V0..V7] → 0〜2(1=100%、localStorage永続化)
@@ -2101,6 +2391,15 @@
       this._layout = loadLayoutSettings();         // ロールの向き/置き場/一覧の多段(localStorage永続化)
       // 下配置でのロール高さ / 右配置での一覧幅(どちらもスプリッターで変更、localStorage永続化)
       this._rollHeight = ROLL_CANVAS_HEIGHT;
+      // 一覧/大波形のサイズ(スプリッターで可変。0=未設定でCSS既定)
+      this._listRowsHeight = 0;
+      this._bigWaveWidth = 0;
+      try {
+        const rh = parseInt(localStorage.getItem('mml_keyboardRowsHeight'), 10);
+        if (Number.isFinite(rh) && rh >= 60) this._listRowsHeight = rh;
+        const ww = parseInt(localStorage.getItem('mml_keyboardWaveWidth'), 10);
+        if (Number.isFinite(ww) && ww >= 120) this._bigWaveWidth = ww;
+      } catch (e) { /* ignore */ }
       this._listWidth = null;
       try {
         const h = parseInt(localStorage.getItem('mml_pianoRollHeight'), 10);
@@ -2206,6 +2505,17 @@
       // アーカイブ(m3u)を開いていればその曲送り、実ファイル単体なら曲番号送りで、
       // MML再生を表示中は操作対象が無いのでグレーアウトする(setTransportState)。
       const transportBar = this._buildTransportBar();
+      // 曲が終わった後の挙動(次の曲 / 1曲リピート / ランダム / 停止)。1つのアイコンが
+      // クリックのたびに切り替わる。ファイル名バッジの左に置く
+      const repeatBtn = this._buildRepeatBtn();
+      // ファイルを開く / to MML。ヘッダ左端(旧「鍵盤表示」の文字の位置)へ移す。
+      // 元のツールバー側のボタンをそのまま押す複製なので、動作の実体は1箇所のまま
+      const openBtn = this._buildProxyBtn('kbd-open-btn', T('ファイルを開く'),
+        '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.5c0-.83.67-1.5 1.5-1.5h3.4l1.4 1.6H16c.83 0 1.5.67 1.5 1.5v7c0 .83-.67 1.5-1.5 1.5H4c-.83 0-1.5-.67-1.5-1.5v-8.6Z"/></svg>',
+        () => { if (this.onOpenFile) this.onOpenFile(); });
+      const toMmlBtn = this._buildProxyBtn('kbd-tomml-btn', T('MMLへ変換'),
+        '<span class="kbd-tomml-text">to MML</span>',
+        () => { if (this.onToMml) this.onToMml(); });
 
       const winEl = this.container.closest('.float-window');
       const headerEl = winEl && winEl.querySelector('.float-window-header');
@@ -2214,18 +2524,24 @@
           const old = headerEl.querySelector(sel);
           if (old) old.remove();
         }
+        for (const sel of ['.kbd-open-btn', '.kbd-tomml-btn', '.kbd-repeat-btn']) {
+          const old = headerEl.querySelector(sel);
+          if (old) old.remove();
+        }
         const closeBtn = headerEl.querySelector('.float-window-close');
-        headerEl.insertBefore(layoutBtn, closeBtn || null);
-
-        headerEl.insertBefore(speedBar, layoutBtn);
+        headerEl.insertBefore(speedBar, closeBtn || null);
         headerEl.insertBefore(masterVolBar, speedBar);
-        // タイトル: 「鍵盤表示」+ 何を表示しているかのバッジ(MML / NSF · ファイル名 等。
-        // どちらを再生中なのか分かりづらいという要望から。setSourceInfo()で更新)
+        // ★ヘッダ左端は「鍵盤表示」という文字ではなく[ファイルを開く][レイアウト][to MML]。
+        //   タイトル文字はウィンドウの見出しとして自明なので置かない(ユーザー指示)
         const titleEl = headerEl.querySelector('span');
         if (titleEl && !titleEl.classList.contains('kbd-src-badge')) {
-          titleEl.textContent = T('鍵盤表示');
+          titleEl.textContent = '';
+          titleEl.style.display = 'none';
           this._titleEl = titleEl;
         }
+        headerEl.insertBefore(openBtn, titleEl || masterVolBar);
+        headerEl.insertBefore(layoutBtn, titleEl || masterVolBar);
+        headerEl.insertBefore(toMmlBtn, titleEl || masterVolBar);
         this._srcBadgeEl = document.createElement('span');
         this._srcBadgeEl.className = 'kbd-src-badge';
         this._srcBadgeEl.addEventListener('click', (e) => {
@@ -2233,9 +2549,10 @@
           if (!this._transportState.canToggleSource) return;
           if (this.onSourceToggle) this.onSourceToggle();
         });
-        if (this._titleEl) this._titleEl.insertAdjacentElement('afterend', this._srcBadgeEl);
-        else headerEl.insertBefore(this._srcBadgeEl, masterVolBar);
-        this._srcBadgeEl.insertAdjacentElement('afterend', transportBar);
+        // ファイル名バッジの左に [再生コントロール][終了後の挙動] を置く(ユーザー指示)
+        headerEl.insertBefore(this._srcBadgeEl, masterVolBar);
+        headerEl.insertBefore(transportBar, this._srcBadgeEl);
+        headerEl.insertBefore(repeatBtn, this._srcBadgeEl);
         this._renderSourceBadge();
         this._renderTransport();
       } else {
@@ -2264,12 +2581,19 @@
       // 他フォーマットは空欄のまま(_rebuildRows参照)。
       // dot 列オフセット不要（kbd-h-part が dot+パート文字両方をカバー）
       this._headerEl = header;
+      // DPCM(打楽器を実サンプルのまま焼く)の実コスト表示。借用先にDPCMを選んだ瞬間に
+      // 「1本増やしたらROMが何KB増えるか」が見えないと選びようがないため、割当UIのすぐ下に出す
+      // (ユーザー要望。実機ROMの容量を意識する方針 [[nsf-export-size-consciousness]])
+      this._dpcmCostEl = document.createElement('div');
+      this._dpcmCostEl.className = 'kbd-dpcm-cost';
+      this._dpcmCostEl.style.display = 'none';
       left.appendChild(header);
 
       this._rowsEl = document.createElement('div');
       this._rowsEl.className = 'kbd-rows';
       // 行本体は内側の要素に入れる(.kbd-rowsは縦スクロールの箱、.kbd-rows-innerが1列/多段の
       // 並べ方を担当。多段のとき高さauto=中身なりに伸びるので、はみ出しは横でなく縦スクロールになる)
+      left.appendChild(this._dpcmCostEl);
       this._rowsInnerEl = document.createElement('div');
       this._rowsInnerEl.className = 'kbd-rows-inner';
       this._rowsEl.appendChild(this._rowsInnerEl);
@@ -2436,6 +2760,25 @@
       }, () => left.offsetWidth, () => {
         try { localStorage.setItem('mml_keyboardListWidth', String(this._listWidth)); } catch (e) { /* ignore */ }
       });
+      // 一覧(音源ごとのCH表示)と大波形の間のスプリッター。大波形が一覧の下にあるとき(縦並び)
+      // はCH一覧の高さを、右にあるとき(横並び)は大波形の幅を変える。ユーザー要望で
+      // 「各表示の境目でサイズを変えられる」ようにするためのもの
+      this._waveSplitterEl = this._makeSplitter('horizontal', (delta, start) => {
+        const h = Math.max(60, Math.round(start + delta));
+        this._listRowsHeight = h;
+        this._rowsEl.style.flex = 'none';
+        this._rowsEl.style.height = h + 'px';
+      }, () => this._rowsEl.offsetHeight, () => {
+        try { localStorage.setItem('mml_keyboardRowsHeight', String(this._listRowsHeight)); } catch (e) { /* ignore */ }
+      });
+      this._waveSplitterVEl = this._makeSplitter('vertical', (delta, start) => {
+        const w = Math.max(120, Math.round(start - delta)); // 左へドラッグ=大波形が広くなる
+        this._bigWaveWidth = w;
+        this._bigWaveEl.style.flex = 'none';
+        this._bigWaveEl.style.width = w + 'px';
+      }, () => this._bigWaveEl.offsetWidth, () => {
+        try { localStorage.setItem('mml_keyboardWaveWidth', String(this._bigWaveWidth)); } catch (e) { /* ignore */ }
+      });
       // 一覧(上段)とロールペイン(下段)の間のスプリッター(ロールを下に置く配置でのみ表示。
       // ドラッグでロールの高さを変える。高さはlocalStorageに保存)
       this._rollSplitterEl = this._makeSplitter('horizontal', (delta, start) => {
@@ -2522,6 +2865,11 @@
         `<span class="kbd-roll-toggle">${rollCollapsed ? '▶' : '▼'}</span>` +
         `<span class="kbd-roll-label">${T('ピアノロール')}</span>` +
         `<span class="kbd-roll-seek-slot"></span>` + // main.jsから渡されるシークバー(setRollSeekBar)の置き場
+        `<span class="kbd-roll-drum-audition" style="display:none">` +
+          `<span class="kbd-roll-drum-label">${T('パッド試聴')}</span>` +
+          `<button type="button" class="kbd-drum-aud-btn kbd-drum-aud-btn--on" data-mode="raw">${T('原音')}</button>` +
+          `<button type="button" class="kbd-drum-aud-btn" data-mode="dpcm">DPCM</button>` +
+        `</span>` +
         `<label class="kbd-roll-cents-toggle">` +
         `<input type="checkbox" class="kbd-roll-cents-checkbox"${this._showCentsOverlay ? ' checked' : ''}>` +
         `${T('セント偏差')}</label>`;
@@ -2532,6 +2880,18 @@
       this._mountRollSeekBar(seekSlot);
       // オーバーレイのON/OFFはロール見出しクリック(折りたたみ)とは独立させるため、
       // クリックイベントの伝播をここで止める(bubbling先のrollHeaderハンドラを発火させない)。
+      // ドラム区画のパッド試聴の切替(原音 / DPCM変換後)。区画があるときだけ出す
+      this._drumAuditionEl = rollHeader.querySelector('.kbd-roll-drum-audition');
+      for (const btn of rollHeader.querySelectorAll('.kbd-drum-aud-btn')) {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._drumAuditionMode = btn.dataset.mode;
+          for (const b of rollHeader.querySelectorAll('.kbd-drum-aud-btn')) {
+            b.classList.toggle('kbd-drum-aud-btn--on', b.dataset.mode === this._drumAuditionMode);
+          }
+        });
+      }
+
       const centsCheckbox = rollHeader.querySelector('.kbd-roll-cents-checkbox');
       centsCheckbox.addEventListener('click', (e) => e.stopPropagation());
       centsCheckbox.addEventListener('change', () => {
@@ -2674,11 +3034,16 @@
         for (const l of this._lanes) {
           // 音程窓はロール側(_updateLaneScroll)が決めた位置に合わせる(未決定なら鍵盤全体の代わりにC4中心)
           const off = l.scrollWhite == null ? Math.max(0, keyX(60, 1).x - LANE_VISIBLE_WHITE / 2) : l.scrollWhite;
-          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, LANE_VISIBLE_WHITE, off);
+          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, LANE_VISIBLE_WHITE, off, this._drumsForPiano());
+          if (this._drumLanes && this._drumLanes.length) this._attachDrumAudition(l.pianoCanvas);
         }
         return;
       }
-      drawPiano(this._canvas, allChannels, this._layout.rollOrientation);
+      drawPiano(this._canvas, allChannels, this._layout.rollOrientation, 0, 0, this._drumsForPiano());
+      // ドラム区画があるときだけパッド試聴を有効にする(区画=パッドが無ければ押す物が無い)
+      const hasDrums = !!(this._drumLanes && this._drumLanes.length);
+      if (hasDrums) this._attachDrumAudition(this._canvas);
+      if (this._drumAuditionEl) this._drumAuditionEl.style.display = (hasDrums && this.onDrumAudition) ? '' : 'none';
     }
 
     // 表示中の再生ソースをタイトル行のバッジに出す。kind: 'mml' | 'nsf'|'spc'|'kss'|'gbs'|'hes'
@@ -2738,6 +3103,52 @@
         this._transportBtns[action] = btn;
       }
       return bar;
+    }
+
+    // ヘッダへ置く小さな代理ボタン(実体は別の場所のボタン/main.jsのコールバック)
+    _buildProxyBtn(cls, title, innerHtml, onClick) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'kbd-hdr-btn ' + cls;
+      b.title = title;
+      b.setAttribute('aria-label', title);
+      b.innerHTML = innerHtml;
+      b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+      return b;
+    }
+
+    // 曲が終わった後の挙動。1つのアイコンをクリックのたびに次のモードへ回す
+    _buildRepeatBtn() {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'kbd-hdr-btn kbd-repeat-btn';
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const i = REPEAT_MODES.indexOf(this._repeatMode);
+        this.setRepeatMode(REPEAT_MODES[(i + 1) % REPEAT_MODES.length]);
+        if (this.onRepeatModeChange) this.onRepeatModeChange(this._repeatMode);
+      });
+      this._repeatBtnEl = b;
+      this._renderRepeatBtn();
+      return b;
+    }
+
+    setRepeatMode(mode) {
+      if (REPEAT_MODES.indexOf(mode) < 0) mode = 'next';
+      this._repeatMode = mode;
+      try { localStorage.setItem(REPEAT_MODE_KEY, mode); } catch (e) { /* ignore */ }
+      this._renderRepeatBtn();
+    }
+    getRepeatMode() { return this._repeatMode; }
+
+    _renderRepeatBtn() {
+      const b = this._repeatBtnEl;
+      if (!b) return;
+      const info = REPEAT_ICONS[this._repeatMode] || REPEAT_ICONS.next;
+      b.innerHTML = info.svg;
+      b.title = info.label();
+      b.setAttribute('aria-label', info.label());
+      b.classList.toggle('kbd-repeat-btn--stop', this._repeatMode === 'stop');
     }
 
     // main.js が再生状態の変化ごとに呼ぶ。state: { playing, canPlay, canStop, canPrevNext, canToggleSource }
@@ -2826,9 +3237,56 @@
     // 実際のシークは onRollSeek(実時間の秒) に委ね(main.js: seekToSeconds)、ドラッグ中は
     // 間引いて呼び、離した時に最終位置で呼ぶ。返ってきた(クランプ後の)秒で表示位置を合わせる。
     // ドラッグ中の描画は _renderRoll() が _rollDrag.pos を優先する。
+    // ロール上の点(clientX/Y)にノートがあればそのトラックidを返す(無ければnull)。
+    // 判定は _drawRollCanvas の描画と同じ座標計算を使う。
+    //  ・ノートの上 → そのchを大波形へフォーカスする(ドラッグシークはしない)
+    //  ・ノートの無いところ → 従来どおりドラッグでシーク
+    _trackAtRollPoint(canvas, clientX, clientY, onlyId, lane) {
+      if (!this._rollTimeline || !this._rollTimeline.length) return null;
+      const r = canvas.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      const nDrum = (this._drumLanes || []).length;
+      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? LANE_VISIBLE_WHITE : 0, nDrum);
+      // CSS表示サイズ → canvas内部解像度
+      const cx = (clientX - r.left) * (canvas.width / r.width);
+      const cy = (clientY - r.top) * (canvas.height / r.height);
+      // canvas座標 → (音程軸p, 時間軸t)。makeRollGeom の point() の逆変換
+      const p = g.vertical ? cx : (g.H - cy);
+      const t = g.vertical ? (g.H - cy) : cx;
+      if (t < 0 || t > g.timeLen) return null;
+      const pos = this._rollLastDrawnPos || 0;
+      const sec = pos + t / ROLL_PX_PER_SEC;
+      const wkW = g.wk, bkW = g.bk;
+      const offPx = lane ? lane.scrollWhite * wkW : 0;
+      const pitchOff = g.drumOff - offPx;
+      // 手前(描画順が後=最前面)から探したいので逆順に見る
+      for (let ti = this._rollTimeline.length - 1; ti >= 0; ti--) {
+        const track = this._rollTimeline[ti];
+        if (onlyId !== null && track.id !== onlyId) continue;
+        for (const note of track.notes) {
+          if (note.startSec > sec || note.endSec <= sec) continue;
+          let pLo, pSize;
+          if (note.drumLane !== undefined) {
+            if (note.drumLane >= nDrum) continue;
+            const d = drumLaneX(note.drumLane, note.drumSub, note.drumSubN, g.drumLaneW);
+            pLo = d.x - offPx + 1;
+            pSize = Math.max(2, d.size - 2);
+          } else {
+            const kp = keyX(note.midi, wkW);
+            if (!kp) continue;
+            kp.x += pitchOff;
+            pLo = kp.isBlack ? kp.x - bkW / 2 : kp.x + 0.5;
+            pSize = kp.isBlack ? bkW : (wkW - 1);
+          }
+          if (p >= pLo && p < pLo + pSize) return track.id;
+        }
+      }
+      return null;
+    }
+
     _attachRollSeekDrag(canvas) {
       canvas.classList.add('kbd-roll--seekable');
-      canvas.title = T('ドラッグでシーク(縦向きは上下、横向きは左右)');
+      canvas.title = T('音符をクリックでそのchを波形表示へ / 音符の無いところをドラッグでシーク');
       const SEEK_THROTTLE_MS = 60;
       let lastSeekMs = 0;
       const applySeek = (songSec, force) => {
@@ -2844,6 +3302,9 @@
       };
       canvas.addEventListener('pointerdown', (e) => {
         if (e.button !== 0 || !this._rollTimeline) return;
+        // ノートの上で押した場合はシークせず、そのchを大波形へフォーカスする
+        const hit = this._trackAtRollPoint(canvas, e.clientX, e.clientY, canvas._rollOnlyId != null ? canvas._rollOnlyId : null, canvas._rollLane || null);
+        if (hit) { this._selectWave(hit); e.preventDefault(); return; }
         this._rollDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, startPos: this._rollLastDrawnPos || 0, pos: this._rollLastDrawnPos || 0, moved: false };
         try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* キャプチャ不可でも要素上のmoveで追従する */ }
         canvas.classList.add('dragging');
@@ -2878,6 +3339,58 @@
     // ドラッグ中に_renderRoll()を即時呼びするための「直前の実測位置」(無ければ0)。
     // _renderRoll()はドラッグ中は表示位置に_rollDrag.posを使うので値自体は補間の帳尻用
     _rollLastRawPosForDrag() { return this._rollLastRawPos == null ? 0 : this._rollLastRawPos; }
+
+    // ── スポットライト(案D) ────────────────────────────────────────
+    // チャンネル一覧の行にホバー(一時)/ch名クリック(固定)で「注目ch」を決め、ロール描画で
+    // そのchだけを原色・最前面に、他chをSPOTLIGHT_DIM_ALPHAまで減光する。
+    // ★ホバー中はホバーが勝ち、マウスが一覧から離れたら固定へ戻る。固定は「マウスを離しても
+    //   注目を失わない」ためのもので、他の行を覗く操作を殺すためのものではないため。
+    _effectiveSpotlightId() { return this._spotlightHoverId || this._spotlightPinnedId; }
+
+    // 停止中はrAFが回っていないので、注目chが変わったらその場で描き直す。
+    // _renderRoll()は同じrawPosを渡しても位置を進めない(実測差分ぶんしか加算しない)ので安全。
+    _redrawRollForSpotlight() {
+      if (!this._rollTimeline) return;
+      this._renderRoll(this._rollLastRawPosForDrag());
+    }
+
+    // ★ホバーでのピックアップは「その行の小波形が大波形として選択されている」ときだけ効かせる
+    //   (ユーザー指示)。一覧の上をマウスが通るだけで次々ロールが切り替わるのを避け、
+    //   「注目したいchを波形で選んでから、その行を指す」という操作に揃える。
+    _setSpotlightHover(id) {
+      if (id !== null && id !== this._shownWaveId) id = null;
+      if (this._spotlightHoverId === id) return;
+      this._spotlightHoverId = id;
+      this._redrawRollForSpotlight();
+    }
+
+    // ch名クリックで固定のON/OFF。同じ行をもう一度クリックすると解除する
+    _toggleSpotlightPin(id) {
+      this._spotlightPinnedId = (this._spotlightPinnedId === id) ? null : id;
+      this._applySpotlightClasses();
+      this._redrawRollForSpotlight();
+    }
+
+    // 固定中の行に目印クラスを付ける(行の再構築後にも呼んで状態を復元する)
+    _applySpotlightClasses() {
+      for (const r of (this._rowEls || []).concat(this._spcRowEls || [])) {
+        if (!r || !r.row) continue;
+        r.row.classList.toggle('kbd-ch-row--spot', r.id === this._spotlightPinnedId);
+      }
+    }
+
+    // 1行にスポットライトの操作を取り付ける(メイン一覧・SPCボイス行の両方から呼ぶ)。
+    // ホバーは行全体、固定はch名セルのクリック(丸=色ピッカー/波形=大波形/note=キャリブレーションと
+    // 衝突しない場所を選ぶ)
+    _attachSpotlight(row, id) {
+      row.addEventListener('mouseenter', () => this._setSpotlightHover(id));
+      row.addEventListener('mouseleave', () => this._setSpotlightHover(null));
+      const nameEl = row.querySelector('.kbd-name');
+      if (!nameEl) return;
+      nameEl.classList.add('kbd-name--clickable');
+      nameEl.title = T('クリックでこのチャンネルに注目(他chを減光)。もう一度クリックで解除');
+      nameEl.addEventListener('click', () => this._toggleSpotlightPin(id));
+    }
 
     // 実効的なロールの置き場。'window'は別ウィンドウのコンテナ(#pianoRollDisplay)が
     // 無いページでは'bottom'扱いにする
@@ -2919,8 +3432,30 @@
       const big = this._bigWaveEl;
       if (!big) return;
       if (big.parentNode) big.parentNode.removeChild(big);
-      if (this._bigWaveBelow()) this._leftEl.appendChild(big);
-      else this._mainEl.appendChild(big);
+      for (const sp of [this._waveSplitterEl, this._waveSplitterVEl]) {
+        if (sp && sp.parentNode) sp.parentNode.removeChild(sp);
+      }
+      // 置き場に応じて向きの合うスプリッターを一覧と大波形の間へ挟む。
+      // 置き場が変わったらインラインサイズは捨てる(縦横で意味が変わるため)
+      if (this._bigWaveBelow()) {
+        this._bigWaveEl.style.flex = '';
+        this._bigWaveEl.style.width = '';
+        this._leftEl.appendChild(this._waveSplitterEl);
+        this._leftEl.appendChild(big);
+        if (this._listRowsHeight) {
+          this._rowsEl.style.flex = 'none';
+          this._rowsEl.style.height = this._listRowsHeight + 'px';
+        }
+      } else {
+        this._rowsEl.style.flex = '';
+        this._rowsEl.style.height = '';
+        this._mainEl.appendChild(this._waveSplitterVEl);
+        this._mainEl.appendChild(big);
+        if (this._bigWaveWidth) {
+          big.style.flex = 'none';
+          big.style.width = this._bigWaveWidth + 'px';
+        }
+      }
     }
 
     // レイアウト設定をCSSクラス/インラインサイズへ反映する(向き・置き場・多段・折りたたみ)
@@ -3105,7 +3640,7 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'segapcm', 'c140', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
@@ -3132,6 +3667,11 @@
       this._extraSnaps.ga20Live = typeof result.getGa20 === 'function' ? result.getGa20 : null;
       this._extraSnaps.segapcmLive = typeof result.getSegaPcm === 'function' ? result.getSegaPcm : null;
       this._extraSnaps.c140Live = typeof result.getC140 === 'function' ? result.getC140 : null;
+      this._extraSnaps.c352Live = typeof result.getC352 === 'function' ? result.getC352 : null;
+      this._extraSnaps.okim6258Live = typeof result.getOkim6258 === 'function' ? result.getOkim6258 : null;
+      this._extraSnaps.qsoundLive = typeof result.getQsound === 'function' ? result.getQsound : null;
+      this._extraSnaps.okim6295Live = typeof result.getOkim6295 === 'function' ? result.getOkim6295 : null;
+      this._extraSnaps.multipcmLive = typeof result.getMultiPcm === 'function' ? result.getMultiPcm : null;
       this._extraSnaps.pwmLive = typeof result.getPwm === 'function' ? result.getPwm : null;
       this._extraSnaps.rf5c164Live = typeof result.getRf5c164 === 'function' ? result.getRf5c164 : null;
       this._extraSnaps.rf5c68Live = typeof result.getRf5c68 === 'function' ? result.getRf5c68 : null;
@@ -3176,6 +3716,7 @@
       } else {
         this._rollTimeline = null;
       }
+      this._rebuildDrumLanes();
     }
 
     // ピアノロール用タイムラインを直接差し替える(共通形状: [{color, notes:[{startSec,endSec,midi}]}])。
@@ -3184,6 +3725,185 @@
     setRollTimeline(timeline) {
       this._rollTimeline = timeline || null;
       this._rollCursor = {};
+      this._rebuildDrumLanes();
+    }
+
+    // ドラム区画のレーン表を、タイムラインのノートに書き込まれた drumLane/drumKey から組み直す。
+    // ★配列に生やしたプロパティ(result.drumLanes のような形)はWorkerからのpostMessageの
+    //   構造化複製で消えるため、レーン表そのものは渡さず「noteが持っている情報から復元する」
+    //   方式にしてある(assignDrumLanes冒頭のコメント参照)。
+    // this._drumLanes: [{key, label, color, subN}]  区画に出す順(=レーン番号順)
+    // this._drumLaneOf: Map(drumKey → レーン番号)   鍵盤のパッド点灯(drawPiano)用
+    // drawPiano()へ渡すドラム区画の情報。区画が無いときはundefinedを返し、鍵盤の描画を
+    // 従来と完全に同じにする
+    /**
+     * DPCMの実コスト表示。cost = {clips, segments, bytes} | null(=DPCM未使用で非表示)。
+     * 'pending' を渡すと計算中の表示にする。
+     */
+    setDpcmCost(cost) {
+      if (!this._dpcmCostEl) return;
+      if (!cost) { this._dpcmCostEl.style.display = 'none'; return; }
+      this._dpcmCostEl.style.display = '';
+      if (cost === 'pending') { this._dpcmCostEl.textContent = T('DPCM: 計算中…'); return; }
+      const kb = (cost.bytes / 1024).toFixed(1);
+      this._dpcmCostEl.innerHTML =
+        `<span class="kbd-dpcm-cost-label">DPCM</span>` +
+        T('定義 {clips} / 打点 {segments} / ROM {kb} KB', { clips: cost.clips, segments: cost.segments, kb });
+      // ROMが大きいときは色で警告(NSFのバンク1本=8KB、実用の目安として32KB/64KB)
+      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--warn', cost.bytes >= 32 * 1024);
+      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--over', cost.bytes >= 64 * 1024);
+    }
+
+    // note列クリックの小メニュー。「このサンプルは打楽器か音階か」の手動指定と、
+    // 既存の基準音キャリブレーションをまとめて出す。
+    // ★指定はサンプル単位(chではない)。プール式チップは同じ太鼓が毎回別スロットへ移るので、
+    //   ch単位で持つと指定が飛ぶ。
+    _openSampleMenu(anchorEl, ch) {
+      this._closeSampleMenu();
+      const menu = document.createElement('div');
+      menu.className = 'kbd-sample-menu';
+      const cur = ch.sampleKind || 'auto'; // 'auto'|'drum'|'pitch'(extractChannelsが載せる)
+      const items = [
+        ['auto', T('自動判定にまかせる')],
+        ['drum', T('打楽器として扱う')],
+        ['pitch', T('音階として扱う')],
+      ];
+      for (const [kind, label] of items) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'kbd-sample-menu-item' + (kind === cur ? ' kbd-sample-menu-item--on' : '');
+        b.textContent = label;
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._closeSampleMenu();
+          if (this.onSampleKind) this.onSampleKind(ch, kind === 'auto' ? null : kind);
+        });
+        menu.appendChild(b);
+      }
+      if (this.onAdpcmCalibrate) {
+        const sep = document.createElement('div');
+        sep.className = 'kbd-sample-menu-sep';
+        menu.appendChild(sep);
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'kbd-sample-menu-item';
+        b.textContent = T('基準音を手動補正…');
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._closeSampleMenu();
+          this.onAdpcmCalibrate(ch);
+        });
+        menu.appendChild(b);
+      }
+      document.body.appendChild(menu);
+      const r = anchorEl.getBoundingClientRect();
+      menu.style.left = Math.round(Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+      menu.style.top = Math.round(Math.min(r.bottom + 2, window.innerHeight - menu.offsetHeight - 8)) + 'px';
+      this._sampleMenuEl = menu;
+      // 次のクリックで閉じる(メニュー内のクリックは上でstopPropagation済み)
+      this._sampleMenuOutside = () => this._closeSampleMenu();
+      setTimeout(() => document.addEventListener('click', this._sampleMenuOutside, { once: true }), 0);
+    }
+
+    _closeSampleMenu() {
+      if (this._sampleMenuOutside) {
+        document.removeEventListener('click', this._sampleMenuOutside);
+        this._sampleMenuOutside = null;
+      }
+      if (this._sampleMenuEl && this._sampleMenuEl.parentNode) this._sampleMenuEl.parentNode.removeChild(this._sampleMenuEl);
+      this._sampleMenuEl = null;
+    }
+
+    _drumsForPiano() {
+      if (!this._drumLanes || !this._drumLanes.length) return undefined;
+      return { lanes: this._drumLanes, laneOf: this._drumLaneOf };
+    }
+
+    // 鍵盤canvasのクリック位置 → ドラム区画のレーン番号(区画の外なら-1)。
+    // 座標系は drawPiano と同じ(音程軸は縦向き=x、横向き=下から上へのy)
+    _drumLaneAtPoint(canvas, clientX, clientY) {
+      const lanes = this._drumLanes || [];
+      if (!lanes.length) return -1;
+      const r = canvas.getBoundingClientRect();
+      const vertical = this._layout.rollOrientation !== 'horizontal';
+      const pitchLen = vertical ? r.width : r.height;
+      const p = vertical ? (clientX - r.left) : (r.bottom - clientY);
+      const wk = pitchLen / (TOTAL_WHITE + lanes.length * DRUM_LANE_WHITE);
+      const lane = Math.floor(p / (DRUM_LANE_WHITE * wk));
+      return (lane >= 0 && lane < lanes.length) ? lane : -1;
+    }
+
+    // 鍵盤canvasにパッド試聴のクリックを取り付ける(_buildRollPane / _rebuildLanes から)
+    _attachDrumAudition(canvas) {
+      if (!canvas || canvas._drumAuditionWired) return;
+      canvas._drumAuditionWired = true;
+      canvas.addEventListener('click', (e) => {
+        const lane = this._drumLaneAtPoint(canvas, e.clientX, e.clientY);
+        if (lane < 0 || !this.onDrumAudition) return;
+        const info = this._drumLanes[lane];
+        if (!info || !info.key || info.key === '*') return;
+        this.onDrumAudition(info.key, this._drumAuditionMode);
+      });
+      canvas.addEventListener('mousemove', (e) => {
+        const lane = this._drumLaneAtPoint(canvas, e.clientX, e.clientY);
+        canvas.style.cursor = (lane >= 0 && this.onDrumAudition) ? 'pointer' : '';
+      });
+    }
+
+    _rebuildDrumLanes() {
+      this._drumLanes = [];
+      this._drumLaneOf = new Map();
+      const DrumMap = MML.Convert && MML.Convert.DrumMap;
+      const tracks = this._rollTimeline || [];
+      if (!DrumMap || !tracks.length) return;
+
+      // 1) 曲全体の打点を集めてレーンを決める(vgm2mmlのドラム音符出力と同じ表)
+      const obs = [];
+      for (const track of tracks) {
+        for (const n of track.notes) if (n.drumKey) obs.push({ key: n.drumKey, sec: n.startSec });
+      }
+      if (!obs.length) return;
+      const map = DrumMap.build(obs);
+
+      // 2) 各打点にレーン番号を書き戻し、レーンごとに集める
+      const byLane = map.lanes.map(() => []);
+      for (const track of tracks) {
+        for (const n of track.notes) {
+          if (!n.drumKey) continue;
+          const lane = map.laneOf.has(n.drumKey) ? map.laneOf.get(n.drumKey) : map.otherLane;
+          if (lane < 0 || lane >= byLane.length) { delete n.drumLane; continue; }
+          n.drumLane = lane;
+          byLane[lane].push(n);
+        }
+      }
+
+      // 3) レーン内の同時発音をサブスロットへ振る(貪欲な区間彩色。開始時刻の昇順に、
+      //    「まだ前の打点が終わっている」一番若いサブスロットへ入れる)。分割数は曲全体で
+      //    決まるので、再生位置によって打点の幅が踊らない。
+      const lanes = [];
+      const labels = DrumMap.labels(map.lanes.map((l) => l.key));
+      for (let i = 0; i < byLane.length; i++) {
+        const notes = byLane[i];
+        notes.sort((a, b) => a.startSec - b.startSec);
+        const ends = [];
+        for (const n of notes) {
+          let s = 0;
+          while (s < ends.length && ends[s] > n.startSec + 1e-9) s++;
+          n.drumSub = s;
+          ends[s] = n.endSec;
+        }
+        const subN = Math.max(1, ends.length);
+        for (const n of notes) n.drumSubN = subN;
+        const isOther = map.lanes[i].key === null;
+        lanes.push({
+          key: map.lanes[i].key,
+          label: isOther ? T('他') : (labels[i] || ''),
+          color: isOther ? DRUM_OTHER_COLOR : DRUM_LANE_COLORS[i % DRUM_LANE_COLORS.length],
+          subN,
+        });
+      }
+      this._drumLanes = lanes;
+      this._drumLaneOf = map.laneOf;
     }
 
     // regSnapshots形式(NSFのライブ再生を裏で先読みキャプチャした結果など)からピアノロールの
@@ -3198,6 +3918,7 @@
     setRollTimelineFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots) {
       this._rollCursor = {};
       this._rollTimeline = this.buildRollTracksFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots);
+      this._rebuildDrumLanes();
     }
 
     // setRollTimelineFromRegSnapshots()のトラック構築部分。VGM(main.js playVgmStream)のように
@@ -3236,6 +3957,10 @@
       this._conversionDiffs = null;
       this._prevSpcVoices = [];
       this._muteState.clear();
+      // スポットライト(案D)の固定も新ファイルへは持ち越さない(ミュート状態と同じ扱い。
+      // 前の曲にしか無いch.idが固定されたまま残ると、注目が効かない見た目になるため)
+      this._spotlightPinnedId = null;
+      this._spotlightHoverId = null;
       // 大波形の選択(_selectedId)はここでは変えない。新ファイルの実際のチャンネル構成が
       // 判明した時点(次のsetSource()/updateSpcVoices()の実データ呼び出し)で、同じchが
       // 新ファイルにもあれば維持、無ければ一番若いchへ切り替える判定を1回だけ行う
@@ -3378,10 +4103,28 @@
     }
 
     // 借用先を選び直す。既定と同じ値を選んだらユーザー指定を消して「自動」に戻す
+    // 借用先を1つの枠へ移すと、そこに先に居たchは行き場を失う(変換器は先に置かれた方を
+    // 採り、後は「対象外」にする)。UI上は赤い重複表示が出るだけで、ユーザーは自分で
+    // 前のchをスキップにし直す必要があった。★2A03ノイズのように枠が1つしか無い借用先では
+    // これが「どちらを鳴らすか選ぶ」操作そのものなので、選んだ時点で前のchを自動でスキップへ
+    // 落とし、ラジオボタンのように振る舞わせる(SN76489デュアルのノイズ2本、SNノイズと
+    // サンプルPCMのドラムパートの取り合いが実例)。
     _setAssignTarget(chId, value) {
       const plan = channelPlan();
       if (!plan) return;
       const def = this._defaultTargetOf(chId);
+      // ★DPCMだけは例外。複数のPCMチャンネルをまとめて1本のDPCMパートへ焼く設計
+      //   (同時発音区間はミックスして1サンプルにする。src/vgm2mml/expansion/dpcmDrums.js)
+      //   なので、ここで他chを追い出すとドラムを複数ch選べなくなる。
+      if (value && value !== 'skip' && !MULTI_SOURCE_TARGETS.has(value)) {
+        for (const el of this._rowEls) {
+          if (el.id === chId) continue;
+          const cur = (plan.get(el.id) || {}).target || el.defaultTarget || 'skip';
+          if (cur !== value) continue;
+          const otherDef = this._defaultTargetOf(el.id);
+          plan.set(el.id, { target: otherDef === 'skip' ? null : 'skip' });
+        }
+      }
       plan.set(chId, { target: value === def ? null : value, tone: null });
     }
 
@@ -3451,7 +4194,8 @@
         el.partEl.textContent = el.letter || (editable ? '—' : '');
         el.partEl.classList.toggle('kbd-part--custom', custom);
         el.row.classList.toggle('kbd-ch-row--skip', editable && el.target === 'skip');
-        const dup = editable && el.target !== 'skip' && count[el.target] > 1;
+        // DPCMは複数chをまとめて載せる先なので重複扱いにしない(上の MULTI_SOURCE_TARGETS 参照)
+        const dup = editable && el.target !== 'skip' && !MULTI_SOURCE_TARGETS.has(el.target) && count[el.target] > 1;
         el.row.classList.toggle('kbd-ch-row--conflict', dup);
         if (el.partEl) {
           el.partEl.title = dup ? T('この借用先は他のチャンネルと重複しています')
@@ -3661,6 +4405,35 @@
             const headerRow = document.createElement('div');
             headerRow.className = 'kbd-chip-header';
             headerRow.textContent = disp.header;
+            // チャンネルプール/ペア交互割当のチップ: 表示モード切替(実機スロット=素材のまま /
+            // 合成ch=割当逆算)。行構成は同じでデータ系列だけが替わる。見た目は2状態の
+            // トグルスイッチ(クリックで切替、点灯側が現在モード)。
+            if (disp.pool) {
+              const sw = document.createElement('span');
+              sw.className = 'kbd-pool-toggle';
+              sw.dataset.pool = disp.pool;
+              sw.style.cssText = 'display:inline-flex;margin-left:8px;font-size:9px;border:1px solid #444;border-radius:8px;overflow:hidden;cursor:pointer;user-select:none;vertical-align:middle;';
+              sw.title = T('チャンネルプール式音源の表示モード: 実機スロット=ドライバの巡回割当そのまま / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す');
+              const mk = (label) => { const s = document.createElement('span'); s.textContent = label; s.style.cssText = 'padding:1px 6px;'; return s; };
+              const segL = mk(T('合成ch')), segP = mk(T('実機スロット'));
+              sw.appendChild(segL); sw.appendChild(segP);
+              const paint = () => {
+                const logical = (this._poolModes[disp.pool] || 'logical') === 'logical';
+                segL.style.background = logical ? '#3a6ea5' : '#22242e';
+                segL.style.color = logical ? '#fff' : '#667';
+                segP.style.background = logical ? '#22242e' : '#3a6ea5';
+                segP.style.color = logical ? '#667' : '#fff';
+              };
+              sw._paint = paint; // setPoolModes()からの再描画用
+              paint();
+              sw.addEventListener('click', () => {
+                const mode = (this._poolModes[disp.pool] || 'logical') === 'logical' ? 'phys' : 'logical';
+                this._poolModes[disp.pool] = mode;
+                paint();
+                if (this.onPoolModeChange) this.onPoolModeChange(disp.pool, mode);
+              });
+              headerRow.appendChild(sw);
+            }
             group.appendChild(headerRow);
           }
           lastHeader = disp.header;
@@ -3700,6 +4473,8 @@
             this._muteState.set(ch.id, !checkbox.checked);
             if (this.onMuteChange) this.onMuteChange(this.getMuteConfig());
             this._renderMuteAllBtn(); // 見出しの一括ミュートボタンの状態を追随させる
+            // ミュートはロールの見え方(減光)にも効くので、停止中でもその場で描き直す
+            this._redrawRollForSpotlight();
           });
         }
         if (!ch.isAllRow) this._attachVolumeSlider(row, ch.id);
@@ -3720,13 +4495,16 @@
         // main.jsがプロンプトを出してチップの setSampleTuning を呼ぶ)。対象は「今その行で鳴っている
         // サンプル」(ch.adpcmSample)なので、直近の update() の channels(_lastChannels)から引く
         // (_prevChannelsは行再構築時にしか更新されず古い)
-        if (/^N[AB]\d?$/.test(ch.id)) {
+        // note列クリック: サンプルPCM系の行(adpcmSampleを持つ行)なら「打楽器/音階の手動指定 +
+        // 基準音の手動補正」の小メニューを出す。★どちらもサンプル単位の指定なので、
+        // 「今その行で鳴っているサンプル」(_lastChannels)を対象にする
+        if (SAMPLE_ROW_RE.test(ch.id)) {
           const noteElForClick = row.querySelector('.kbd-note');
           noteElForClick.classList.add('kbd-note--clickable');
-          noteElForClick.title = T('クリックでこのサンプルの基準音を手動補正');
+          noteElForClick.title = T('クリックで打楽器/音階の指定と基準音の手動補正');
           noteElForClick.addEventListener('click', () => {
             const cur = (this._lastChannels || this._prevChannels || []).find(c => c.id === chId);
-            if (cur && cur.adpcmSample && this.onAdpcmCalibrate) this.onAdpcmCalibrate(cur);
+            if (cur && cur.adpcmSample) this._openSampleMenu(noteElForClick, cur);
           });
         }
 
@@ -3734,6 +4512,8 @@
 
         // チャンネル割当(part列のチップ + 割当表示ONのときのセレクト。案E)
         if (!ch.isAllRow) this._wireAssign(row, ch);
+        // スポットライト(案D): 行ホバー=一時的に注目、ch名クリック=固定
+        if (!ch.isAllRow) this._attachSpotlight(row, ch.id);
 
         group.appendChild(row);
         this._rowEls.push({
@@ -3768,6 +4548,7 @@
       }
       this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
       this._renderMuteAllBtn();
+      this._applySpotlightClasses(); // 固定中のスポットライトの目印を新しい行へ復元
     }
 
     // ch別音量スライダー(音量バー領域に重ねる半透明オーバーレイ)を1行ぶん配線する。
@@ -3904,6 +4685,13 @@
     }
 
     // 現在のチェックボックス状態からミュート設定を返す
+    /** 1つでもミュートされている行があるか(無音自動送りの判定を止めるため。main.js参照) */
+    hasAnyMute() {
+      for (const el of this._rowEls) if (el.checkbox && !el.checkbox.checked) return true;
+      for (const el of (this._spcRowEls || [])) if (el.checkbox && !el.checkbox.checked) return true;
+      return false;
+    }
+
     getMuteConfig() {
       const config = { apu: {}, expansion: {} };
       for (const el of this._rowEls) {
@@ -4077,6 +4865,16 @@
             el.noteEl.style.color = midi !== null ? '#e6e6ef' : '#555566';
             el.freqEl.textContent = ch.freq > 0 ? Math.round(ch.freq).toLocaleString() + ' Hz' : '';
           }
+        } else if (ch.drumKey && this._drumLaneOf && this._drumLaneOf.has(ch.drumKey)) {
+          // 打楽器として鳴っているサンプルPCM: note列は「今このスロットが鳴らしている太鼓」
+          // (ドラム区画のレーンのラベルと色)。プール式チップは同じ太鼓が毎回別スロットへ
+          // 移るので、行を見ただけでどの音か分かるこの表示が効く。
+          // (従来はdmcRateIdxを出していたが、この経路では常に固定値15で情報が無かった)
+          const laneIdx = this._drumLaneOf.get(ch.drumKey);
+          const laneInfo = this._drumLanes[laneIdx];
+          el.noteEl.textContent = (laneInfo && laneInfo.label) || '?';
+          el.noteEl.style.color = (laneInfo && laneInfo.color) || '#e6e6ef';
+          el.freqEl.textContent = ch.dmcFreq > 0 ? Math.round(ch.dmcFreq).toLocaleString() + ' Hz' : '';
         } else if (ch.sample) {
           // note: $4010 再生速度インデックス / freq: DPCM再生周波数
           el.noteEl.textContent = String(ch.dmcRateIdx);
@@ -4124,6 +4922,14 @@
       // ピアノロールはSPCモード中は updateSpcVoices() 側が描画するため、ここでは
       // それ以外(NSF/MML/KSS)のときだけ描画する(同じcanvasへの二重描画を避ける)。
       if (this._mode !== 'spc') this._renderRoll(posSeconds);
+    }
+
+    /** チャンネルプール式チップの表示モード初期値(main.jsがlocalStorageから復元して渡す)。 */
+    setPoolModes(modes) {
+      Object.assign(this._poolModes, modes || {});
+      for (const sw of this._rowsInnerEl.querySelectorAll('.kbd-pool-toggle')) {
+        if (sw._paint) sw._paint(); // data-poolごとに自分のモードを塗り直す
+      }
     }
 
     // トラックid(NSF:'P1'等/SPC:'V0'-'V7'/KSS:'KP1'等)がミュート中かどうかを判定する。
@@ -4191,7 +4997,12 @@
         this._rollCursor = {};
       }
       this._rollLastDrawnPos = pos;
-      for (const t of targets) this._drawRollCanvas(t.canvas, pos, t.onlyId, t.lane || null);
+      for (const t of targets) {
+        // ヒットテスト(_trackAtRollPoint)が同じ座標系を使えるよう、そのcanvasの表示条件を控える
+        t.canvas._rollOnlyId = t.onlyId;
+        t.canvas._rollLane = t.lane || null;
+        this._drawRollCanvas(t.canvas, pos, t.onlyId, t.lane || null);
+      }
     }
 
     // チャンネルごとのレーンの音程窓(白鍵LANE_VISIBLE_WHITE本ぶん)を、そのchの「鳴っている音+
@@ -4202,9 +5013,11 @@
     // 目標へは毎フレーム残差の一部ずつ寄せる(LANE_SCROLL_EASE)ので滑らかに追従する。
     // 音符が1つも無い間は動かさない。lane.scrollWhite = 窓の低音側端の白鍵位置(小数)
     _updateLaneScroll(lane, pos, windowSec) {
-      const maxOff = TOTAL_WHITE - LANE_VISIBLE_WHITE;
+      // 音程軸の単位は白鍵1本。ドラム区画があるぶん全体の長さが伸び、音程側の座標も右へずれる
+      const drumUnits = (this._drumLanes || []).length * DRUM_LANE_WHITE;
+      const maxOff = TOTAL_WHITE + drumUnits - LANE_VISIBLE_WHITE;
       const track = this._rollTimeline && this._rollTimeline.find(t => t.id === lane.id);
-      if (lane.scrollWhite == null) lane.scrollWhite = Math.max(0, Math.min(maxOff, keyX(60, 1).x - LANE_VISIBLE_WHITE / 2)); // 初期値: C4中心
+      if (lane.scrollWhite == null) lane.scrollWhite = Math.max(0, Math.min(maxOff, drumUnits + keyX(60, 1).x - LANE_VISIBLE_WHITE / 2)); // 初期値: C4中心
       if (!track || !track.notes.length) return;
       const winEnd = pos + windowSec;
       // 白鍵単位の位置(黒鍵は隣接白鍵の境界)。keyX(midi,1)は白鍵幅1としたときの座標
@@ -4216,9 +5029,17 @@
         const n = notes[i];
         if (n.endSec <= pos) continue;
         if (n.startSec >= winEnd) break;
-        const kp = keyX(n.midi, 1);
-        if (!kp) continue;
-        const p0 = kp.isBlack ? kp.x - 0.3 : kp.x, p1 = kp.isBlack ? kp.x + 0.3 : kp.x + 1;
+        let p0, p1;
+        if (n.drumLane !== undefined) {
+          // ドラムの打点はレーン番号が音程軸上の位置(1レーン=DRUM_LANE_WHITE白鍵ぶん)
+          const d = drumLaneX(n.drumLane, n.drumSub, n.drumSubN, DRUM_LANE_WHITE);
+          p0 = d.x; p1 = d.x + d.size;
+        } else {
+          const kp = keyX(n.midi, 1);
+          if (!kp) continue;
+          p0 = (kp.isBlack ? kp.x - 0.3 : kp.x) + drumUnits;
+          p1 = (kp.isBlack ? kp.x + 0.3 : kp.x + 1) + drumUnits;
+        }
         if (p0 < lo) lo = p0;
         if (p1 > hi) hi = p1;
         // 注目音: 鳴っている音(startSec<=pos)があればそれ、無ければ最も近い未来の音
@@ -4250,7 +5071,8 @@
       if (newW === 0 || newH === 0) return;
       if (canvas.width !== newW) canvas.width = newW;
       if (canvas.height !== newH) canvas.height = newH;
-      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? LANE_VISIBLE_WHITE : 0);
+      const nDrum = (this._drumLanes || []).length;
+      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? LANE_VISIBLE_WHITE : 0, nDrum);
       const { wk: wkW, bk: bkW, H } = g;
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, H);
@@ -4258,6 +5080,34 @@
       const winEnd = pos + windowSec;
       if (lane) this._updateLaneScroll(lane, pos, windowSec);
       const offPx = lane ? lane.scrollWhite * wkW : 0; // 音程窓の低音側端(px)。keyX()の結果から引く
+      const pitchOff = g.drumOff - offPx; // 音程側の座標補正(ドラム区画ぶん右へ + 窓スクロール)
+
+      // ドラム区画のレーングリッド(淡い下地+レーン境界)。音程鍵盤より低音側に置く。
+      for (let i = 0; i < nDrum; i++) {
+        const d = drumLaneX(i, 0, 1, g.drumLaneW);
+        const x0 = d.x - offPx;
+        if (x0 + d.size < 0 || x0 > g.pitchLen) continue;
+        ctx.fillStyle = '#000000';
+        ctx.globalAlpha = i % 2 ? 0.06 : 0.12; // 交互の縞でレーンの境目を分かりやすく(黒鍵の網掛けと同系)
+        let r = g.rect(x0, d.size, 0, g.timeLen);
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#3d3d4a';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        if (g.vertical) { const x = Math.round(x0) + 0.5; ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+        else { const y = Math.round(H - x0) + 0.5; ctx.moveTo(0, y); ctx.lineTo(g.W, y); }
+        ctx.stroke();
+      }
+      // ドラム区画と音程鍵盤の境目(区画があるときだけ)
+      if (nDrum) {
+        ctx.strokeStyle = '#7a86a8';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        if (g.vertical) { const x = Math.round(g.drumOff - offPx) + 0.5; ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+        else { const y = Math.round(H - (g.drumOff - offPx)) + 0.5; ctx.moveTo(0, y); ctx.lineTo(g.W, y); }
+        ctx.stroke();
+      }
 
       // 鍵盤ごとの音程グリッド(白鍵の境界線+黒鍵レーンの淡い網掛け)とCの音名ラベル。
       // グリッドは音程軸に直交する全時間帯の帯/線なので、時間軸[0, timeLen)いっぱいに引く。
@@ -4266,7 +5116,7 @@
         const semi = rel % 12;
         const keyPos = keyX(midi, wkW);
         if (!keyPos) continue;
-        keyPos.x -= offPx;
+        keyPos.x += pitchOff;
         if (keyPos.x + wkW < 0 || keyPos.x - wkW > g.pitchLen) continue; // 音程窓の外
         if (IS_BLACK[semi]) {
           ctx.fillStyle = '#000000';
@@ -4288,14 +5138,8 @@
             ctx.lineTo(g.W, y);
           }
           ctx.stroke();
-          // Cの音名ラベル(縦向きのみ。横向きはレーンが薄くて入らないので鍵盤側drawPiano()が
-          // 鍵の上に書く)
-          if (semi === 0 && g.vertical) {
-            ctx.fillStyle = '#6b6b7a';
-            ctx.font = '9px ' + fontStack('sans');
-            ctx.textBaseline = 'top';
-            ctx.fillText(midiToName(midi), keyPos.x + 2, 1);
-          }
+          // ★音名ラベルはロールではなく鍵盤(drawPiano)に書く。以前は縦向きだけロールの
+          //   上端に書いていたが、横向きは鍵に書いており置き場が食い違っていた(ユーザー指摘)。
         }
       }
 
@@ -4337,9 +5181,21 @@
       // 曲が長い/ノート数が多いほど毎フレーム全ノート走査のコストが線形に効いてくるため、
       // 未再生ノートだけを毎フレーム定数時間で拾えるようにする最適化(文字数の多いMMLで
       // ピアノロールがカクつく問題の対策)
-      for (const track of this._rollTimeline) {
+      // スポットライト(案D): 注目chがあるときは他chを減光し、注目chは最後=最前面に描く
+      // (ノートは不透明塗りなので、描画順が後のchが必ず勝つ。並べ替えないと注目chが
+      // 他chに上書きされて「注目しているのに見えない」ことがある)。
+      const spotId = this._effectiveSpotlightId();
+      const spotActive = !!spotId && this._rollTimeline.some(t => t.id === spotId);
+      const drawOrder = spotActive
+        ? this._rollTimeline.filter(t => t.id !== spotId).concat(this._rollTimeline.filter(t => t.id === spotId))
+        : this._rollTimeline;
+
+      for (const track of drawOrder) {
         if (onlyId !== null && track.id !== onlyId) continue; // レーン表示: このchのノートだけ
-        if (this._isTrackMuted(track.id)) continue; // ミュート中のチャンネルは描画しない
+        // ミュート中のchは「消す」のではなくスポットライトと同じ減光で描く。
+        // 消してしまうと、そのchが元々何も鳴っていないのか消しているのか区別できない
+        const muted = this._isTrackMuted(track.id);
+        const dimAlpha = (muted || (spotActive && track.id !== spotId)) ? SPOTLIGHT_DIM_ALPHA : 1;
         const notes = track.notes;
         let idx = this._rollCursor[track.id] || 0;
         if (idx > notes.length) idx = notes.length;
@@ -4348,18 +5204,47 @@
         for (let i = idx; i < notes.length; i++) {
           const note = notes[i];
           if (note.startSec >= winEnd) break; // 以降は全て未来のノート(startSec昇順のため打ち切れる)
-          const keyPos = keyX(note.midi, wkW);
-          if (!keyPos) continue;
-          keyPos.x -= offPx;
-          if (keyPos.x + wkW < 0 || keyPos.x - wkW > g.pitchLen) continue; // 音程窓の外
-          const relEnd = Math.min(windowSec, note.endSec - pos);
-          const relStart = Math.max(0, note.startSec - pos);
-          // 音程軸: 白鍵は境界線1px内側、黒鍵はレーン幅いっぱい。時間軸: 最低2pxは見えるようにする
-          const pLo = keyPos.isBlack ? keyPos.x - bkW / 2 : keyPos.x + 0.5;
-          const pSize = keyPos.isBlack ? bkW : (wkW - 1);
-          const r = g.rect(pLo, pSize, g.tPx(relStart), g.tPx(relEnd), 2);
           // 音量による濃淡はやめ、常にチャンネル本来の色をそのまま(不透明・フィルタ無し)で描く。
           const noteColor = this._getColor(track.id, track.color);
+          const isDrum = note.drumLane !== undefined;
+          let pLo, pSize;
+          if (isDrum) {
+            // ドラム区画の打点。レーン=どのサンプルか、レーン内の分割=同時発音の横並び
+            if (note.drumLane >= nDrum) continue; // レーン表より後に来たタイムライン(再構築待ち)
+            const d = drumLaneX(note.drumLane, note.drumSub, note.drumSubN, g.drumLaneW);
+            const x0 = d.x - offPx;
+            if (x0 + d.size < 0 || x0 > g.pitchLen) continue;
+            pLo = x0 + 1;
+            pSize = Math.max(2, d.size - 2);
+          } else {
+            const keyPos = keyX(note.midi, wkW);
+            if (!keyPos) continue;
+            keyPos.x += pitchOff;
+            if (keyPos.x + wkW < 0 || keyPos.x - wkW > g.pitchLen) continue; // 音程窓の外
+            // 音程軸: 白鍵は境界線1px内側、黒鍵はレーン幅いっぱい
+            pLo = keyPos.isBlack ? keyPos.x - bkW / 2 : keyPos.x + 0.5;
+            pSize = keyPos.isBlack ? bkW : (wkW - 1);
+          }
+          const relEnd = Math.min(windowSec, note.endSec - pos);
+          const relStart = Math.max(0, note.startSec - pos);
+          // 時間軸: 最低2pxは見えるようにする
+          const r = g.rect(pLo, pSize, g.tPx(relStart), g.tPx(relEnd), 2);
+          ctx.globalAlpha = dimAlpha;
+          if (isDrum) {
+            // 塗り=サンプル(どの太鼓か) / 枠線=チャンネル(どのスロットが鳴らしたか)の二重符号化。
+            // プール式チップでは同じ太鼓が毎回別スロットへ移るので、色をchに割り当てると
+            // 太鼓の色が踊る。塗りをサンプル側に固定するとその問題が出ない。
+            const laneInfo = this._drumLanes[note.drumLane];
+            ctx.fillStyle = (laneInfo && laneInfo.color) || DRUM_OTHER_COLOR;
+            ctx.fillRect(r.x, r.y, r.w, r.h);
+            if (r.w > 3 && r.h > 3) {
+              ctx.strokeStyle = noteColor;
+              ctx.lineWidth = 1.5;
+              ctx.strokeRect(r.x + 0.75, r.y + 0.75, r.w - 1.5, r.h - 1.5);
+            }
+            ctx.globalAlpha = 1;
+            continue; // ドラムの打点にセント偏差オーバーレイは無い(音程を持たないため)
+          }
           ctx.fillStyle = noteColor;
           ctx.fillRect(r.x, r.y, r.w, r.h);
 
@@ -4386,6 +5271,7 @@
               ctx.stroke();
             }
           }
+          ctx.globalAlpha = 1;
         }
       }
 
@@ -4400,7 +5286,7 @@
           for (const [midi, fill] of [[d.gotMidi, true], [d.expectedMidi, false]]) {
             const keyPos = keyX(midi, wkW);
             if (!keyPos) continue;
-            keyPos.x -= offPx;
+            keyPos.x += pitchOff;
             if (keyPos.x + wkW < 0 || keyPos.x - wkW > g.pitchLen) continue;
             const pLo = keyPos.isBlack ? keyPos.x - bkW / 2 : keyPos.x + 0.5;
             const pSize = keyPos.isBlack ? bkW : (wkW - 1);
@@ -4473,6 +5359,8 @@
       this._attachColorPicker(row.querySelector('.kbd-dot'), v.label, v.color);
       // チャンネル割当(part列チップ + 割当表示ONのときのセレクト)
       this._wireAssign(row, { id: v.label, target: target });
+      // スポットライト(案D): メイン一覧と同じ操作をSPCボイス行にも付ける
+      this._attachSpotlight(row, v.label);
 
       const lrEls = row.querySelectorAll('.kbds-lr');
       return {
@@ -4562,6 +5450,7 @@
         });
         this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
         this._renderMuteAllBtn();
+        this._applySpotlightClasses(); // 固定中のスポットライトの目印を新しい行へ復元
       }
       // 大波形に表示するボイスを新しい一覧に合わせる(選択がSPCボイス以外ならV0を一時表示)。
       // ★SPCのボイス数は常に8で固定のため、reset()でファイルを読み込み直しても行の再構築

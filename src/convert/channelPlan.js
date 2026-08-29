@@ -166,6 +166,11 @@
   function toneKindFor(type, fmt) {
     const cap = capsOf(fmt).tone;
     if (!cap) return null;
+    // DPCM(サンプルPCMの打楽器を実サンプルのままDMCへ変換して載せる)は「音色」ではなく
+    // DMCレートを選ぶ。置き場(借用先の隣の小さいセレクト)と保存経路(ent.tone)が同じなので
+    // 音色セレクトへ相乗りする。★PCMからDMCへは必ず劣化するので、自動任せにせず
+    // ユーザーが耳で選べることを必須にする(ユーザー指示)。
+    if (type === 'dpcm') return 'dpcmRate';
     if (cap === 'vrc7') return /^vrc7_/.test(type) ? 'vrc7' : null;
     if (/^(pulse1|pulse2|mmc5pulse1|mmc5pulse2)$/.test(type)) return 'duty4';
     if (/^vrc6pulse/.test(type)) return 'duty8';
@@ -180,6 +185,12 @@
     return type !== 'skip' && type !== 'dpcm' && type !== 'triangle';
   }
   function toneOptionsFor(kind, srcKind) {
+    if (kind === 'dpcmRate') {
+      const table = (MML.Dpcm && MML.Dpcm.DMC_RATE_TABLE_NTSC) || [];
+      const opts = [['auto', T('自動')]];
+      for (let i = table.length - 1; i >= 0; i--) opts.push([String(i), (table[i] / 1000).toFixed(1) + 'kHz']);
+      return { def: 'auto', opts: opts };
+    }
     if (kind === 'duty4') {
       return { def: '2', opts: [['0', '@0 12.5%'], ['1', '@1 25%'], ['2', '@2 50%'], ['3', '@3 75%']] };
     }
@@ -218,6 +229,10 @@
     [/^GA([1-4])$/, function (m) { return ['pcm', 'ga20:' + (+m[1] - 1)]; }],               // GA20
     [/^SP(\d+)$/, function (m) { return ['pcm', 'spcm:' + (+m[1] - 1)]; }],                 // SegaPCM
     [/^CN(\d+)$/, function (m) { return ['pcm', 'c140:' + (+m[1] - 1)]; }],                 // C140
+    [/^CS(\d+)$/, function (m) { return ['pcm', 'c352:' + (+m[1] - 1)]; }],                 // C352
+    [/^QS(\d+)$/, function (m) { return ['pcm', 'qs:' + (+m[1] - 1)]; }],                   // QSound
+    [/^OK([1-4])$/, function (m) { return ['pcm', 'oki:' + (+m[1] - 1)]; }],                // OKIM6295('OKI'=6258は不一致)
+    [/^MP(\d+)$/, function (m) { return ['pcm', 'mp:' + (+m[1] - 1)]; }],                   // MultiPCM
     [/^SN([1-6])$/, function (m) { return ['square', 'sn' + (+m[1] > 3 ? 1 : 0) + ':' + ((+m[1] - 1) % 3)]; }], // SN76489
     [/^SNN(2?)$/, function (m) { return ['noise', 'sn' + (m[1] ? 1 : 0) + ':noise']; }],
     [/^GB[12]$/, function () { return ['square', null]; }],                                 // GB パルス
@@ -234,7 +249,7 @@
 
   // 逆引き: 変換器のソースID(VGM) → 鍵盤表示の行ID。VGMの構成駆動の既定割当
   // (MML.VGM2MML.defaultPlan)を鍵盤の行へ移すのに使う。
-  const VGM_SRC_TO_CH = { ay: 'KP', scc: 'KS', opll: 'KF', opn: 'YM', opm: 'OM', opnb: 'NF', pcma: 'NA', ga20: 'GA', spcm: 'SP', c140: 'CN' };
+  const VGM_SRC_TO_CH = { ay: 'KP', scc: 'KS', opll: 'KF', opn: 'YM', opm: 'OM', opnb: 'NF', pcma: 'NA', ga20: 'GA', spcm: 'SP', c140: 'CN', c352: 'CS', qs: 'QS', oki: 'OK', mp: 'MP' };
   function chIdForVgmSource(srcId) {
     const m = /^([a-z0-9]+):(.+)$/.exec(srcId || '');
     if (!m) return null;
@@ -245,6 +260,10 @@
       if (rest === 'noise') return chip ? 'SNN2' : 'SNN';
       return 'SN' + (chip * 3 + (+rest) + 1);
     }
+    // ドラムパート(`c140:drum` 等)は実機スロットではない合成チャンネルなので、対応する
+    // 鍵盤表示の行が無い。null を返して「割当UIからは触れない」ことを明示する
+    // (弾かないと prefix+NaN という存在しない行IDになる)
+    if (!/^\d+$/.test(rest)) return null;
     const prefix = VGM_SRC_TO_CH[kind];
     return prefix ? prefix + (+rest + 1) : null;
   }

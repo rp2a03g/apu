@@ -120,6 +120,9 @@
       const t = U.getTuningMap()[r.hash];
       if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
       r.wave = U.makeSampleWave(pcm, r.conf >= 0.5 ? r.cps : 0);
+      // 打楽器/音階の手動上書きをconfへ反映(Emu.SamplePitchUtil。ロール/鍵盤/変換の
+      // 4箇所がこの1点で追随する)。キャッシュへ入れる前に適用する
+      Emu.SamplePitchUtil.applyKindOverride(r);
       this._pitchCache.set(key, r);
       return r;
     }
@@ -133,6 +136,39 @@
       for (let i = 0; i < n; i++) pcm[i] = (rom[start + i] - 0x80) / 128;
       return pcm;
     }
+
+    /**
+     * スナップショットの sample({kind,start,end}) → デコード済みPCM(Float32Array、-1..1)。
+     * vgm2mmlのドラム→@DPCM変換が実サンプルを必要とするための公開口。
+     * ROMはこのチップ(=キャプチャWorker側)にしか無く、関数はpostMessageを越えられないので、
+     * キャプチャの最後にここを呼んで実データだけをメインスレッドへ渡す
+     * (src/emulator/vgmPlayer.js の collectUsedSamples 参照)。
+     */
+    /**
+     * 打楽器/音階の手動上書き。kind: 'drum' | 'pitch' | null(=自動へ戻す)。
+     * ピッチ解析の信頼度(conf)による自動判定が外れた曲を、ユーザーが耳で直すための口。
+     * 指定はサンプル内容のハッシュをキーに localStorage へ入る(setSampleTuningと同じ流儀。
+     * ROMアドレスと違い、同じ音なら別のゲーム/リビジョンでも効く)。
+     * ★confへの反映は Emu.SamplePitchUtil.applyKindOverride が samplePitch() の中で行うので、
+     *   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換が自動的に追随する。
+     */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      // 「音階として扱う」を選んでも、周期がまったく検出できていない(cps=0)サンプルは
+      // 使える音程が無い。呼び出し側へ知らせて基準音の手動補正を促す(黙って無視しない)
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.start + ':' + sample.end); // 次回参照で上書きを反映し直す
+      return { kind: kind || null, needsTuning: needsTuning };
+    }
+
+    samplePcm(sample) {
+      if (!sample) return null;
+      return this._decodeSample(sample.start, sample.end);
+    }
+
     /** 手動ピッチ補正(表示専用)。cps=null で解除。ym2610.js setSampleTuning と同じ永続化。 */
     setSampleTuning(kind, start, end, cps) {
       const r = this.samplePitch(kind, start, end);
@@ -160,7 +196,7 @@
       const vol = c.volume / 246; // 音量カーブ適用後の振幅比(最大値246で正規化)
       out.push({ active: c.play && vol > 0, vol, rawVol: c.rawVol, rawVolMax: 255, panL: 1, panR: 1,
         rate, seq: c.seq, lenSec: rate > 0 ? lenBytes / rate : 0,
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'ga20', start: c.start, end: c.end } : null });
     }

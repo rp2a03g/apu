@@ -305,7 +305,8 @@
       this._scanLastCh4TriggerSeq = -1;
       if (this._lastMute) {
         const exp = this._lastMute.expansion || this._lastMute;
-        if (exp.gb) Object.assign(this._scanApu.mute, exp.gb);
+        // ★ミュートはスキャンへ反映しない(聴き方の設定であって曲の内容ではないため。
+        //   全chミュートで「曲が終わった」と誤判定して次の曲へ飛ぶのを防ぐ)
       }
       if (this._lastVolume) {
         const exp = this._lastVolume.expansion || this._lastVolume;
@@ -404,6 +405,8 @@
         outL[i] = yL; outR[i] = yR;
         this.samplePos++;
         if (this._silenceScanFrame >= 0 && !this._silenceFired && f >= this._silenceScanFrame) {
+          // ★ミュート中は通知しない(main.js syncSilenceDetect)
+          if (this.silenceDetectEnabled === false) continue;
           this._silenceFired = true;
           if (this.onSilenceTimeout) this.onSilenceTimeout();
         }

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-08-28 13:02:11
+ * Built by tools/build-capture-workers.ps1 at 2026-08-29 11:11:52
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-08-28 13:02:11';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-08-29 11:11:52';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -57,17 +57,17 @@
     { id: 'ay8910',   name: 'AY8910',     offset: 0x74, minVer: 0x151, impl: true },
     { id: 'gb',       name: 'GB DMG',     offset: 0x80, minVer: 0x161, impl: true },
     { id: 'nes',      name: 'NES APU',    offset: 0x84, minVer: 0x161, impl: true },
-    { id: 'multipcm', name: 'MultiPCM',   offset: 0x88, minVer: 0x161 },
+    { id: 'multipcm', name: 'MultiPCM',   offset: 0x88, minVer: 0x161, impl: true },
     { id: 'upd7759',  name: 'uPD7759',    offset: 0x8C, minVer: 0x161 },
-    { id: 'okim6258', name: 'OKIM6258',   offset: 0x90, minVer: 0x161 },
-    { id: 'okim6295', name: 'OKIM6295',   offset: 0x98, minVer: 0x161 },
+    { id: 'okim6258', name: 'OKIM6258',   offset: 0x90, minVer: 0x161, impl: true },
+    { id: 'okim6295', name: 'OKIM6295',   offset: 0x98, minVer: 0x161, impl: true },
     { id: 'k051649',  name: 'K051649',    offset: 0x9C, minVer: 0x161, impl: true },
     { id: 'k054539',  name: 'K054539',    offset: 0xA0, minVer: 0x161 },
     { id: 'huc6280',  name: 'HuC6280',    offset: 0xA4, minVer: 0x161, impl: true },
     { id: 'c140',     name: 'C140',       offset: 0xA8, minVer: 0x161, impl: true },
     { id: 'k053260',  name: 'K053260',    offset: 0xAC, minVer: 0x161 },
     { id: 'pokey',    name: 'Pokey',      offset: 0xB0, minVer: 0x161 },
-    { id: 'qsound',   name: 'QSound',     offset: 0xB4, minVer: 0x161 },
+    { id: 'qsound',   name: 'QSound',     offset: 0xB4, minVer: 0x161, impl: true },
     { id: 'scsp',     name: 'SCSP',       offset: 0xB8, minVer: 0x171 },
     { id: 'wswan',    name: 'WonderSwan', offset: 0xC0, minVer: 0x171 },
     { id: 'vsu',      name: 'VSU',        offset: 0xC4, minVer: 0x171 },
@@ -75,7 +75,7 @@
     { id: 'es5503',   name: 'ES5503',     offset: 0xCC, minVer: 0x171 },
     { id: 'es5506',   name: 'ES5505/6',   offset: 0xD0, minVer: 0x171 },
     { id: 'x1_010',   name: 'X1-010',     offset: 0xD8, minVer: 0x171 },
-    { id: 'c352',     name: 'C352',       offset: 0xDC, minVer: 0x171 },
+    { id: 'c352',     name: 'C352',       offset: 0xDC, minVer: 0x171, impl: true },
     { id: 'ga20',     name: 'GA20',       offset: 0xE0, minVer: 0x171, impl: true },
     { id: 'mikey',    name: 'Mikey',      offset: 0xE4, minVer: 0x172 }
   ];
@@ -152,6 +152,9 @@
       if (c.id === 'k051649') info.sccPlus = flag31;         // bit31: SCC+ (K052539)
       if (c.id === 'segapcm') info.intf = rd32(0x3C);        // 0x3C: Sega PCM interface register(バンク構成)
       if (c.id === 'c140') info.c140Type = (0x96 < headerEnd) ? bytes[0x96] : 0; // 0x96: 0=System2, 1=System21, 2=C219
+      if (c.id === 'c352') info.c352Div = ((0xD6 < headerEnd ? bytes[0xD6] : 0) * 4) || 288; // 0xD6: 分周/4(0=既定288)
+      if (c.id === 'okim6258') info.okiFlags = (0x94 < headerEnd) ? bytes[0x94] : 0; // 0x94: bit0-1=分周, bit2=3bit ADPCM, bit3=12bit DAC
+      if (c.id === 'okim6295') info.pin7 = flag31; // bit31: pin7(分周132/165切替)
       chips[c.id] = info;
       usedChips.push(info);
     }
@@ -6390,6 +6393,38 @@
     try { global.localStorage.setItem(TUNING_KEY, JSON.stringify(map)); } catch (e) { /* ignore */ }
   }
 
+  // ── 打楽器/音階の手動上書き ────────────────────────────────────────────
+  // 「このサンプルは打楽器か、音階楽器か」はピッチ解析の信頼度(conf>=0.5)で自動判定して
+  // いるが、外れる曲がある。ユーザーが耳で決めた指定をここへ集約する。
+  // ★applyKindOverride を samplePitch() の中で conf に反映させることで、
+  //   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換の4箇所が
+  //   すべて自動的に追随する(判定の分岐を増やさない)。
+  // キーはサンプル内容のハッシュ(チューニングと同じ)。ROM上のアドレスと違い、
+  // 別のゲーム/別のリビジョンでも同じ音なら同じ指定が効く。
+  const KIND_KEY = 'samplePitchKind'; // localStorage: { [sampleHash]: 'drum' | 'pitch' }
+  function getKindMap() {
+    try { return JSON.parse(global.localStorage.getItem(KIND_KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function saveKindMap(map) {
+    try { global.localStorage.setItem(KIND_KEY, JSON.stringify(map)); } catch (e) { /* ignore */ }
+  }
+  /** samplePitch() の結果 r に手動指定を反映する(r.kindManual に指定内容を残す) */
+  function applyKindOverride(r) {
+    if (!r || !r.hash) return r;
+    const k = getKindMap()[r.hash];
+    if (k === 'drum') { r.conf = 0; r.kindManual = 'drum'; }
+    else if (k === 'pitch' && r.cps > 0) { r.conf = 1; r.kindManual = 'pitch'; }
+    else r.kindManual = null;
+    return r;
+  }
+  /** 手動指定の設定/解除。kind: 'drum' | 'pitch' | null(=自動へ戻す) */
+  function setKindOverride(hash, kind) {
+    if (!hash) return;
+    const map = getKindMap();
+    if (kind === 'drum' || kind === 'pitch') map[hash] = kind; else delete map[hash];
+    saveKindMap(map);
+  }
+
   // 波形アイコン用の128点。cps>0(音程あり)なら持続部(先頭40%位置)から1周期を線形補間で切り出し、
   // 音程なし(ドラム等)ならサンプル全体を128区間に分け各区間の絶対値最大(符号付き)=概形。
   // どちらも最大絶対値で正規化(±1)。
@@ -6493,6 +6528,8 @@
       // 手動キャリブレーション(localStorage、サンプル内容のハッシュがキーなので同じゲームの他トラックでも効く)
       const t = getTuningMap()[r.hash];
       if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
+      // 打楽器/音階の手動上書きをconfへ反映(ロール/鍵盤/変換の4箇所がこの1点で追随する)
+      applyKindOverride(r);
       r.wave = makeSampleWave(pcm, r.conf >= 0.5 ? r.cps : 0);
       this._pitchCache.set(key, r);
       return r;
@@ -6504,6 +6541,39 @@
       const e = Math.min(end, start + MAX_BYTES);
       return kind === 'b' ? decodeAdpcmB(rom, start, e) : decodeAdpcmA(rom, start, e);
     }
+
+    /**
+     * スナップショットの sample({kind,start,end}) → デコード済みPCM(Float32Array、-1..1)。
+     * vgm2mmlのドラム→@DPCM変換が実サンプルを必要とするための公開口。
+     * ROMはこのチップ(=キャプチャWorker側)にしか無く、関数はpostMessageを越えられないので、
+     * キャプチャの最後にここを呼んで実データだけをメインスレッドへ渡す
+     * (src/emulator/vgmPlayer.js の collectUsedSamples 参照)。
+     */
+    /**
+     * 打楽器/音階の手動上書き。kind: 'drum' | 'pitch' | null(=自動へ戻す)。
+     * ピッチ解析の信頼度(conf)による自動判定が外れた曲を、ユーザーが耳で直すための口。
+     * 指定はサンプル内容のハッシュをキーに localStorage へ入る(setSampleTuningと同じ流儀。
+     * ROMアドレスと違い、同じ音なら別のゲーム/リビジョンでも効く)。
+     * ★confへの反映は Emu.SamplePitchUtil.applyKindOverride が samplePitch() の中で行うので、
+     *   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換が自動的に追随する。
+     */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      // 「音階として扱う」を選んでも、周期がまったく検出できていない(cps=0)サンプルは
+      // 使える音程が無い。呼び出し側へ知らせて基準音の手動補正を促す(黙って無視しない)
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.kind + ':' + sample.start + ':' + sample.end); // 次回参照で上書きを反映し直す
+      return { kind: kind || null, needsTuning: needsTuning };
+    }
+
+    samplePcm(sample) {
+      if (!sample) return null;
+      return this._decodeSample(sample.kind, sample.start, sample.end);
+    }
+
     /**
      * サンプルの手動ピッチ補正(表示専用)。cps=null で解除。localStorage に永続化し、
      * 同じ内容のサンプル(ハッシュ一致)なら別トラック/別セッションでも効く。
@@ -6586,7 +6656,7 @@
       // 変化とサンプル長から「鳴っている区間」を推定するために使う(ライブ表示は playing で足りる)
       adpcmA.push({ active: c.playing && vol > 0, vol, rawVol: il, rawVolMax: 31, panL: A.panL(i) ? 1 : 0, panR: A.panR(i) ? 1 : 0,
         rate: rateA, seq: c.seq, lenSec: A.lengthSeconds(i),
-        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
+        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'a', start: c.smpStart, end: c.smpEnd } : null }); // 手動キャリブレーション用の同定情報
     }
@@ -6595,7 +6665,7 @@
     const pb = B.seq ? chip.samplePitch('b', B.smpStart, B.smpEnd) : null;
     const adpcmB = { active: B.playing && !!(B.regs[0x00] & 0x80) && lvl > 0, vol: lvl / 255, rawVol: lvl, rawVolMax: 255,
       panL: B.panL() ? 1 : 0, panR: B.panR() ? 1 : 0, rate: rateB, seq: B.seq, lenSec: B.lengthSeconds(), executing: !!(B.regs[0x00] & 0x80),
-      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0, pitchManual: !!(pb && pb.manual),
+      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0, pitchManual: !!(pb && pb.manual), sampleKind: pb ? (pb.kindManual || 'auto') : 'auto',
       waveData: pb ? pb.wave : null,
       sample: B.seq ? { kind: 'b', start: B.smpStart, end: B.smpEnd } : null,
       // refRate: ピッチ解析が信頼できない時のフォールバック用。ADPCM-Bの再生レート(Delta-N由来)を
@@ -6612,7 +6682,48 @@
   // getTuningMap/saveTuningMap の localStorage キーはYM2610と共通('ym2610AdpcmTuning')だが、
   // キーはサンプル内容ハッシュなのでチップをまたいで共有しても衝突しない(むしろ同じサンプルなら
   // 同じ補正が効くのが望ましい)。
-  Emu.SamplePitchUtil = { detectCps, makeSampleWave, sampleHash, getTuningMap, saveTuningMap };
+  // ループ区間の基本周期推定(qsound.jsで実証した「ループ因数分解方式」の共有版)。
+  // ハードウェアループは継ぎ目なく繋がる=ループ長は基本周期の整数倍。k=2..64の lag=N/k で
+  // 巡回自己相関(補間つき)を測り、最大相関の90%以上の中で最大のk(=最高周波数解釈)を採る。
+  // 汎用detectCpsは探索上限(PITCH_MAX_LAG)を長周期ベースが超えるが、この方式は上限なし。
+  // どのkも通らなければ「ループ全体=1周期」(単一周期シンセ波形。≤1024サンプルに限る)。
+  // 返り値は detectCps 互換 {cps, conf} または null。
+  function loopCps(one) {
+    const N = one.length;
+    if (N < 16) return null;
+    let mean = 0;
+    for (let i = 0; i < N; i++) mean += one[i];
+    mean /= N;
+    const x = new Float32Array(N);
+    let e = 0;
+    for (let i = 0; i < N; i++) { x[i] = one[i] - mean; e += x[i] * x[i]; }
+    if (e < 1e-9) return null;
+    let bestK = 0, bestCorr = 0;
+    const cands = [];
+    for (let k = 2; k <= 64; k++) {
+      const lag = N / k;
+      if (lag < 8) break;
+      let acf = 0;
+      for (let i = 0; i < N; i++) {
+        const pos = (i + lag) % N;
+        const j = Math.floor(pos), f = pos - j;
+        const v = x[j] * (1 - f) + x[(j + 1) % N] * f;
+        acf += x[i] * v;
+      }
+      const corr = acf / e;
+      cands.push([k, corr]);
+      if (corr > bestCorr) { bestCorr = corr; bestK = k; }
+    }
+    if (bestCorr >= 0.85) {
+      for (const [k, corr] of cands) if (corr >= bestCorr * 0.9 && k > bestK) bestK = k;
+      return { cps: bestK / N, conf: Math.min(1, bestCorr) };
+    }
+    if (N <= 1024) return { cps: 1 / N, conf: 0.75 };
+    return null;
+  }
+
+  Emu.SamplePitchUtil = { detectCps, makeSampleWave, sampleHash, getTuningMap, saveTuningMap, loopCps,
+                          getKindMap, saveKindMap, applyKindOverride, setKindOverride };
 })(globalThis);
 
 /*
@@ -7230,6 +7341,9 @@
       const t = U.getTuningMap()[r.hash];
       if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
       r.wave = U.makeSampleWave(pcm, r.conf >= 0.5 ? r.cps : 0);
+      // 打楽器/音階の手動上書きをconfへ反映(Emu.SamplePitchUtil。ロール/鍵盤/変換の
+      // 4箇所がこの1点で追随する)。キャッシュへ入れる前に適用する
+      Emu.SamplePitchUtil.applyKindOverride(r);
       this._pitchCache.set(key, r);
       return r;
     }
@@ -7243,6 +7357,39 @@
       for (let i = 0; i < n; i++) pcm[i] = (rom[start + i] - 0x80) / 128;
       return pcm;
     }
+
+    /**
+     * スナップショットの sample({kind,start,end}) → デコード済みPCM(Float32Array、-1..1)。
+     * vgm2mmlのドラム→@DPCM変換が実サンプルを必要とするための公開口。
+     * ROMはこのチップ(=キャプチャWorker側)にしか無く、関数はpostMessageを越えられないので、
+     * キャプチャの最後にここを呼んで実データだけをメインスレッドへ渡す
+     * (src/emulator/vgmPlayer.js の collectUsedSamples 参照)。
+     */
+    /**
+     * 打楽器/音階の手動上書き。kind: 'drum' | 'pitch' | null(=自動へ戻す)。
+     * ピッチ解析の信頼度(conf)による自動判定が外れた曲を、ユーザーが耳で直すための口。
+     * 指定はサンプル内容のハッシュをキーに localStorage へ入る(setSampleTuningと同じ流儀。
+     * ROMアドレスと違い、同じ音なら別のゲーム/リビジョンでも効く)。
+     * ★confへの反映は Emu.SamplePitchUtil.applyKindOverride が samplePitch() の中で行うので、
+     *   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換が自動的に追随する。
+     */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      // 「音階として扱う」を選んでも、周期がまったく検出できていない(cps=0)サンプルは
+      // 使える音程が無い。呼び出し側へ知らせて基準音の手動補正を促す(黙って無視しない)
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.start + ':' + sample.end); // 次回参照で上書きを反映し直す
+      return { kind: kind || null, needsTuning: needsTuning };
+    }
+
+    samplePcm(sample) {
+      if (!sample) return null;
+      return this._decodeSample(sample.start, sample.end);
+    }
+
     /** 手動ピッチ補正(表示専用)。cps=null で解除。ym2610.js setSampleTuning と同じ永続化。 */
     setSampleTuning(kind, start, end, cps) {
       const r = this.samplePitch(kind, start, end);
@@ -7270,7 +7417,7 @@
       const vol = c.volume / 246; // 音量カーブ適用後の振幅比(最大値246で正規化)
       out.push({ active: c.play && vol > 0, vol, rawVol: c.rawVol, rawVolMax: 255, panL: 1, panR: 1,
         rate, seq: c.seq, lenSec: rate > 0 ? lenBytes / rate : 0,
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'ga20', start: c.start, end: c.end } : null });
     }
@@ -7440,6 +7587,9 @@
       const t = U.getTuningMap()[r.hash];
       if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
       r.wave = U.makeSampleWave(pcm, r.conf >= 0.5 ? r.cps : 0);
+      // 打楽器/音階の手動上書きをconfへ反映(Emu.SamplePitchUtil。ロール/鍵盤/変換の
+      // 4箇所がこの1点で追随する)。キャッシュへ入れる前に適用する
+      Emu.SamplePitchUtil.applyKindOverride(r);
       this._pitchCache.set(key, r);
       return r;
     }
@@ -7452,6 +7602,39 @@
       for (let i = 0; i < n; i++) pcm[i] = (rom[start + i] - 0x80) / 128;
       return pcm;
     }
+
+    /**
+     * スナップショットの sample({kind,start,end}) → デコード済みPCM(Float32Array、-1..1)。
+     * vgm2mmlのドラム→@DPCM変換が実サンプルを必要とするための公開口。
+     * ROMはこのチップ(=キャプチャWorker側)にしか無く、関数はpostMessageを越えられないので、
+     * キャプチャの最後にここを呼んで実データだけをメインスレッドへ渡す
+     * (src/emulator/vgmPlayer.js の collectUsedSamples 参照)。
+     */
+    /**
+     * 打楽器/音階の手動上書き。kind: 'drum' | 'pitch' | null(=自動へ戻す)。
+     * ピッチ解析の信頼度(conf)による自動判定が外れた曲を、ユーザーが耳で直すための口。
+     * 指定はサンプル内容のハッシュをキーに localStorage へ入る(setSampleTuningと同じ流儀。
+     * ROMアドレスと違い、同じ音なら別のゲーム/リビジョンでも効く)。
+     * ★confへの反映は Emu.SamplePitchUtil.applyKindOverride が samplePitch() の中で行うので、
+     *   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換が自動的に追随する。
+     */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      // 「音階として扱う」を選んでも、周期がまったく検出できていない(cps=0)サンプルは
+      // 使える音程が無い。呼び出し側へ知らせて基準音の手動補正を促す(黙って無視しない)
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.start + ':' + sample.end); // 次回参照で上書きを反映し直す
+      return { kind: kind || null, needsTuning: needsTuning };
+    }
+
+    samplePcm(sample) {
+      if (!sample) return null;
+      return this._decodeSample(sample.start, sample.end);
+    }
+
     /** 手動ピッチ補正(表示専用)。ga20.js/ym2610.jsと同じlocalStorage永続化。 */
     setSampleTuning(kind, start, end, cps) {
       const r = this.samplePitch(kind, start, end);
@@ -7483,7 +7666,7 @@
       out.push({ active: c.play && vmax > 0 && rate > 0, vol: vmax / 127, rawVol: vmax, rawVolMax: 127,
         panL: volL >> 3, panR: volR >> 3,
         rate, seq: c.seq, loop: c.loop, lenSec: c.loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'segapcm', start: c.smpStart, end: c.smpEnd } : null });
     }
@@ -7729,6 +7912,9 @@
       const t = U.getTuningMap()[r.hash];
       if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
       r.wave = U.makeSampleWave(pcm, r.conf >= 0.5 ? r.cps : 0);
+      // 打楽器/音階の手動上書きをconfへ反映(Emu.SamplePitchUtil。ロール/鍵盤/変換の
+      // 4箇所がこの1点で追随する)。キャッシュへ入れる前に適用する
+      Emu.SamplePitchUtil.applyKindOverride(r);
       this._pitchCache.set(key, r);
       return r;
     }
@@ -7745,6 +7931,39 @@
       }
       return pcm;
     }
+
+    /**
+     * スナップショットの sample({kind,start,end}) → デコード済みPCM(Float32Array、-1..1)。
+     * vgm2mmlのドラム→@DPCM変換が実サンプルを必要とするための公開口。
+     * ROMはこのチップ(=キャプチャWorker側)にしか無く、関数はpostMessageを越えられないので、
+     * キャプチャの最後にここを呼んで実データだけをメインスレッドへ渡す
+     * (src/emulator/vgmPlayer.js の collectUsedSamples 参照)。
+     */
+    /**
+     * 打楽器/音階の手動上書き。kind: 'drum' | 'pitch' | null(=自動へ戻す)。
+     * ピッチ解析の信頼度(conf)による自動判定が外れた曲を、ユーザーが耳で直すための口。
+     * 指定はサンプル内容のハッシュをキーに localStorage へ入る(setSampleTuningと同じ流儀。
+     * ROMアドレスと違い、同じ音なら別のゲーム/リビジョンでも効く)。
+     * ★confへの反映は Emu.SamplePitchUtil.applyKindOverride が samplePitch() の中で行うので、
+     *   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換が自動的に追随する。
+     */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      // 「音階として扱う」を選んでも、周期がまったく検出できていない(cps=0)サンプルは
+      // 使える音程が無い。呼び出し側へ知らせて基準音の手動補正を促す(黙って無視しない)
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.start + ':' + sample.end); // 次回参照で上書きを反映し直す
+      return { kind: kind || null, needsTuning: needsTuning };
+    }
+
+    samplePcm(sample) {
+      if (!sample) return null;
+      return this._decodeSample(sample.start, sample.end);
+    }
+
     /** 手動ピッチ補正(表示専用)。ga20/segapcm/ym2610と同じlocalStorage永続化。 */
     setSampleTuning(kind, start, end, cps) {
       const r = this.samplePitch(kind, start, end);
@@ -7777,7 +7996,7 @@
       out.push({ active: c.key && vmax > 0 && rate > 0, vol: vmax / 255, rawVol: vmax, rawVolMax: 255,
         panL: volL >> 4, panR: volR >> 4,
         rate, seq: c.seq, loop, lenSec: loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'c140', start: c.smpStart, end: c.smpEnd } : null });
     }
@@ -7785,6 +8004,1731 @@
   };
 
   Emu.C140Audio = C140Audio;
+})(globalThis);
+
+/*
+ * Namco C352 32ch PCM 音源 (VGM: chip 'c352'。ナムコ System 11/12/22/Super 22/
+ * NB-1/NB-2/ND-1 等。Ridge Racer / Rave Racer / Air Combat 22 / The Outfoxies 等)
+ * MML.Emu.C352Audio
+ *
+ * 8bit符号付き または 8bit μ-law(フラグbit3)のPCM×32ch、4出力(フロントL/R+リアL/R、
+ * 本実装はフロント+リアを合算してステレオへ)。挙動は MAME c352.cpp(=superctrの実チップ
+ * 解析。libvgm c352.cも同一)準拠:
+ *   サンプルレート = clock/divider(dividerはVGMヘッダ0xD6の値×4、0なら288。
+ *   System 22: 24.576MHz/288 → 85333Hz)
+ *   レジスタは16bitワード、ボイスregs=voice*8+n:
+ *     +0 音量フロント(上位=L/下位=R) / +1 音量リア(同) / +2 周波数(16bit。
+ *     1出力サンプルごとにcounterへ加算、0x10000溢れで次のROMバイトへ=再生レート
+ *     fs*freq/65536 バイト/秒) / +3 フラグ / +4 バンク / +5 開始 / +6 終了 / +7 ループ
+ *   フラグ: bit15=BUSY, 14=KEYON, 13=KEYOFF, 11=LOOPHIST, 9/8/7=位相反転(RL/FL/FR。
+ *     FRはリアRにも効く=実チップの実測挙動), 6=LDIR(ピンポン進行方向), 5=LINK,
+ *     4=ノイズ(LFSR), 3=μ-law, 2=補間オフ, 1=ループ, 0=逆再生(1|2=ピンポンループ)
+ *   キーオン/オフはレジスタ0x202への書込みで一括実行(KEYON/KEYOFFフラグの立っている
+ *   ボイスへ適用。C140と違い+5書込み即時ではない)。
+ *   アドレス: pos=(bank<<16)|start から±1ずつ進み、(pos&0xFFFF)==end で終端処理
+ *   (ループ=下位16bitのみ差し替え、LINK+ループ=(start<<16)|loop へ飛ぶ長尺形式)。
+ * VGM: コマンド 0xE1 aa bb dd ee(レジスタ=aabb、aaのbit7=デュアル2個目、データ=ddee)、
+ * ROMはデータブロック0x92、分周はヘッダ0xD6(値×4)。
+ *
+ * ★C140/GA20/SegaPCMと同じく周波数レジスタで1サンプルを音階演奏するチップなので、
+ * ピッチは Emu.SamplePitchUtil(ym2610.js共有)で得る。補間(FILTERフラグ無し時の線形
+ * 補間)は実チップの実装済み機能なのでそのまま掛ける(C140のZOH判断とは別物)。
+ * 出力レート85kHz級でZOHイメージも不可聴域のため出力LPFは持たない。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const NUM_CH = 32;
+
+  // フラグ(MAME c352.cpp)
+  const FLG_BUSY = 0x8000, FLG_KEYON = 0x4000, FLG_KEYOFF = 0x2000, FLG_LOOPHIST = 0x0800,
+    FLG_PHASERL = 0x0200, FLG_PHASEFL = 0x0100, FLG_PHASEFR = 0x0080, FLG_LDIR = 0x0040,
+    FLG_LINK = 0x0020, FLG_NOISE = 0x0010, FLG_MULAW = 0x0008, FLG_FILTER = 0x0004,
+    FLG_LOOP = 0x0002, FLG_REVERSE = 0x0001;
+
+  // μ-law展開表(MAME/libvgm準拠=実チップ解析。区分線形の折れ線、上位側は下位の反転)
+  const MULAW_TBL = new Int16Array(256);
+  {
+    let j = 0;
+    for (let i = 0; i < 128; i++) {
+      MULAW_TBL[i] = j << 5;
+      if (i < 16) j += 1;
+      else if (i < 24) j += 2;
+      else if (i < 48) j += 4;
+      else if (i < 100) j += 8;
+      else j += 16;
+    }
+    for (let i = 128; i < 256; i++) MULAW_TBL[i] = (~MULAW_TBL[i - 128]) & 0xFFE0; // Int16Arrayが符号化
+  }
+
+  class C352Audio {
+    /**
+     * @param {number} [clock=24576000] - マスタークロック
+     * @param {number} [divider=288] - 分周(VGMヘッダ0xD6の値×4。サンプルレート=clock/divider)
+     */
+    constructor(clock, divider) {
+      this.clockHz = clock || 24576000;
+      this.cyclesPerSample = divider || 288;
+      this.baseRate = this.clockHz / this.cyclesPerSample; // System 22: 85333Hz
+      this.sampleRate = this.baseRate; // playRate/スナップショットの周波数基準
+      this.rom = null;
+      this.mute = new Array(NUM_CH).fill(false);
+      this.vol = new Array(NUM_CH).fill(1);
+      this._pitchCache = new Map(); // 'start:end' → {cps, conf, …}
+      this._muFlags = new Map();    // 'start:end' → μ-lawサンプルか(キーオン時に記録、解析のデコード切替用)
+      this.reset();
+    }
+    reset() {
+      this.ch = [];
+      // seq: キーオン通番(先読みキャプチャ用)。smpStart/End: ピッチ解析用のROM上絶対アドレス
+      for (let i = 0; i < NUM_CH; i++) this.ch.push({
+        volF: 0, volR: 0, freq: 0, flags: 0, bank: 0, start: 0, end: 0, loop: 0,
+        pos: 0, counter: 0, sample: 0, lastSample: 0, seq: 0, smpStart: 0, smpEnd: 0, smpLoop: 0, smpPingPong: false });
+      this.random = 0x1234; // ノイズLFSR
+      this.cyc = 0;
+      this.lastL = 0; this.lastR = 0;
+    }
+
+    /** VGMデータブロック 0x92(C352 ROM)。 */
+    loadRom(romSize, start, data) {
+      let rom = this.rom;
+      const need = Math.max(romSize >>> 0, start + data.length);
+      if (!rom || rom.length < need) { const n = new Uint8Array(need); if (rom) n.set(rom, 0); rom = this.rom = n; }
+      rom.set(data, start);
+      this._pitchCache.clear();
+    }
+
+    /** レジスタ書込み(VGM 0xE1 aabb ddee、16bitワードアドレス/データ) */
+    write(reg, val) {
+      reg &= 0x3FF; val &= 0xFFFF;
+      if (reg < 0x100) {
+        const c = this.ch[reg >> 3];
+        switch (reg & 7) {
+          case 0: c.volF = val; break;
+          case 1: c.volR = val; break;
+          case 2: c.freq = val; break;
+          case 3: c.flags = val; break;
+          case 4: c.bank = val; break;
+          case 5: c.start = val; break;
+          case 6: c.end = val; break;
+          case 7: c.loop = val; break;
+        }
+        return;
+      }
+      if (reg !== 0x202) return; // 0x200/0x201(コントロール)は音に影響しないので保持しない
+      // キーオン/オフ一括実行
+      for (let i = 0; i < NUM_CH; i++) {
+        const c = this.ch[i];
+        if (c.flags & FLG_KEYON) {
+          c.pos = ((c.bank << 16) | c.start) >>> 0;
+          c.sample = 0; c.lastSample = 0;
+          c.counter = 0xFFFF; // 次のティックで必ず最初のバイトをフェッチ
+          c.flags = (c.flags | FLG_BUSY) & ~(FLG_KEYON | FLG_LOOPHIST);
+          c.seq++;
+          // ピッチ解析用の絶対アドレス範囲。終端比較は pos の下位16bitだけなので、
+          // 順再生で end < start のサンプルは**64Kバンク境界をまたいで次バンクで終わる**
+          // (Outfoxies「City of Blue」のベース: start=EC24 end=47BC bank=C → 実体は
+          // C_EC24..D_47BC。min/max正規化すると全く別領域を解析してしまい conf=0 になる)。
+          // 逆再生(REVERSE単独)は start から下って end で停止 = 領域 [end, start]、
+          // end > start なら前バンクへまたぐ。ピンポン(LOOP|REVERSE)はLDIR=0で前進開始
+          // なので順再生と同じ扱い。
+          const B = c.bank << 16;
+          if ((c.flags & FLG_REVERSE) && !(c.flags & FLG_LOOP)) {
+            c.smpStart = Math.max(0, B + c.end - (c.end > c.start ? 0x10000 : 0));
+            c.smpEnd = B + c.start + 1; // startのバイトから読まれる(inclusive)
+          } else {
+            c.smpStart = B + c.start;
+            c.smpEnd = B + c.end + (c.end < c.start ? 0x10000 : 0) + 1; // endのバイトも読まれる(inclusive)
+          }
+          // ループ位置(絶対)。MAMEの終端処理は pos = (pos & 0xFF0000) | loop なので、
+          // バンクまたぎサンプルではループは「end到達時のバンク」に落ちる。
+          // ピッチ解析のループタイル・フォールバック(samplePitch)用。
+          if (c.flags & FLG_LOOP) {
+            c.smpLoop = B + (c.end < c.start ? 0x10000 : 0) + c.loop;
+            c.smpPingPong = !!(c.flags & FLG_REVERSE);
+            if (!(c.smpLoop >= c.smpStart && c.smpLoop < c.smpEnd)) c.smpLoop = 0; // 範囲外(LINK等)は使わない
+          } else { c.smpLoop = 0; c.smpPingPong = false; }
+        } else if (c.flags & FLG_KEYOFF) {
+          c.flags &= ~(FLG_BUSY | FLG_KEYOFF);
+          c.counter = 0xFFFF;
+        }
+      }
+    }
+
+    // 再生レート(1秒あたりのROMバイト数)
+    playRate(i) { return this.ch[i].freq / 65536 * this.sampleRate; }
+
+    _fetch(c) {
+      c.lastSample = c.sample;
+      if (c.flags & FLG_NOISE) {
+        this.random = ((this.random >> 1) ^ ((-(this.random & 1)) & 0xFFF6)) & 0xFFFF;
+        c.sample = (this.random << 16) >> 16; // u16→s16
+        return;
+      }
+      const v = this.rom ? (this.rom[c.pos >>> 0] || 0) : 0;
+      c.sample = (c.flags & FLG_MULAW) ? MULAW_TBL[v] : (((v << 24) >> 24) << 8);
+      const pos16 = c.pos & 0xFFFF;
+      if ((c.flags & FLG_LOOP) && (c.flags & FLG_REVERSE)) {
+        // ピンポンループ(end↔loop間を往復)
+        if ((c.flags & FLG_LDIR) && pos16 === c.loop) c.flags &= ~FLG_LDIR;
+        else if (!(c.flags & FLG_LDIR) && pos16 === c.end) c.flags |= FLG_LDIR;
+        c.pos = (c.pos + ((c.flags & FLG_LDIR) ? -1 : 1)) >>> 0;
+      } else if (pos16 === c.end) {
+        if ((c.flags & FLG_LINK) && (c.flags & FLG_LOOP)) {
+          c.pos = ((c.start << 16) | c.loop) >>> 0; // 長尺形式: 次の64Kバンクへリンク
+          c.flags |= FLG_LOOPHIST;
+        } else if (c.flags & FLG_LOOP) {
+          c.pos = ((c.pos & 0xFF0000) | c.loop) >>> 0;
+          c.flags |= FLG_LOOPHIST;
+        } else {
+          c.flags = (c.flags | FLG_KEYOFF) & ~FLG_BUSY;
+          c.sample = 0;
+        }
+      } else {
+        c.pos = (c.pos + ((c.flags & FLG_REVERSE) ? -1 : 1)) >>> 0;
+      }
+    }
+
+    _calcSample() {
+      let l = 0, r = 0;
+      for (let i = 0; i < NUM_CH; i++) {
+        const c = this.ch[i];
+        if (!(c.flags & FLG_BUSY)) continue;
+        const next = c.counter + c.freq;
+        if (next & 0x10000) this._fetch(c);
+        if ((next ^ c.counter) & 0x18000) c.lastSample = c.sample; // MAME: 桁上がり検出の補間基準更新
+        c.counter = next & 0xFFFF;
+        if (this.mute[i]) continue;
+        // 補間(実チップ実装。FILTERフラグ=補間オフ)
+        const s = (c.flags & FLG_FILTER) ? c.sample
+          : c.lastSample + c.counter * (c.sample - c.lastSample) / 65536;
+        const g = this.vol[i];
+        const fl = (c.volF >> 8) & 0xFF, fr = c.volF & 0xFF;
+        const rl = (c.volR >> 8) & 0xFF, rr = c.volR & 0xFF;
+        const sFL = (c.flags & FLG_PHASEFL) ? -s : s;
+        const sRL = (c.flags & FLG_PHASERL) ? -s : s;
+        const sR = (c.flags & FLG_PHASEFR) ? -s : s; // FRフラグはフロントR/リアR両方に効く
+        l += (sFL * fl + sRL * rl) * g;
+        r += (sR * fr + sR * rr) * g;
+      }
+      // 1chフルスケール ≒ 32767*255(フロント+リア両方フルなら2倍)。32ch合算を±1.0程度へ
+      // (C140と同じ正規化。実曲の合算過熱は再生段リミッタ任せ)
+      this.lastL = l / (32768 * 255 * 2);
+      this.lastR = r / (32768 * 255 * 2);
+    }
+
+    clock() {
+      if (++this.cyc < this.cyclesPerSample) return;
+      this.cyc = 0;
+      this._calcSample();
+    }
+    mixSample() { return { left: this.lastL, right: this.lastR }; }
+
+    /** サンプル(ROM上のstart..end-1)の基本周期解析(キャッシュ)。c140/ga20と同じ設計。
+     *  μ-lawかどうかはキーオン時に _muFlags へ記録した値でデコードを切り替える。
+     *  ★C352の音階サンプルには「短い一発+末尾の単一周期ループ」のシンセ波形方式が多い
+     *  (Rave Racer「Exh Notes」ベース: 全長144バイト+18バイトループ)。この形は自己相関に
+     *  必要な繰り返しが範囲内に無く detectCps が落ちるので、失敗時は**ループ区間をタイル状に
+     *  繰り返したバッファ**で再解析する(ピンポンループは順+逆で1周期)。 */
+    samplePitch(kind, start, end, loop, pingPong) {
+      if (start === undefined || end === undefined || !(end > start) || !this.rom) return null;
+      // キーはc140と同じ start:end(loopは初回解析の補助情報。手動キャリブレーション
+      // (setSampleTuning=loop無し呼び出し)が同じキャッシュエントリを更新できるようにする)
+      const key = start + ':' + end;
+      let r = this._pitchCache.get(key);
+      if (r) return r;
+      const U = Emu.SamplePitchUtil;
+      const mu = !!this._muFlags.get(start + ':' + end);
+      const pcm = this._decodeSample(start, end, mu);
+      let auto = U.detectCps(pcm);
+      let wavePcm = pcm;
+      if (auto.conf < 0.5 && loop && loop >= start && loop < end) {
+        const loopLen = end - loop;
+        if (loopLen >= 2 && loopLen <= 2048) {
+          // ループ区間を4096サンプル以上になるまで繰り返す(ピンポンは往復で1周期)
+          const one = this._decodeSample(loop, end, mu);
+          const unit = pingPong ? 2 * one.length - 2 : one.length;
+          const reps = Math.max(2, Math.ceil(4096 / unit));
+          const tiled = new Float32Array(unit * reps);
+          for (let rI = 0; rI < reps; rI++) {
+            const base = rI * unit;
+            tiled.set(one, base);
+            if (pingPong) for (let i = 1; i < one.length - 1; i++) tiled[base + one.length - 1 + i] = one[one.length - 1 - i];
+          }
+          const a2 = U.detectCps(tiled);
+          if (a2.conf >= 0.5) { auto = a2; wavePcm = tiled; }
+        }
+      }
+      r = { cps: auto.cps, conf: auto.conf, cpsAuto: auto.cps, confAuto: auto.conf, manual: false,
+        hash: U.sampleHash(this.rom, start, Math.min(end, start + pcm.length)), wave: null, lenBytes: pcm.length };
+      const t = U.getTuningMap()[r.hash];
+      if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
+      r.wave = U.makeSampleWave(wavePcm, r.conf >= 0.5 ? r.cps : 0);
+      // 打楽器/音階の手動上書きをconfへ反映(Emu.SamplePitchUtil。ロール/鍵盤/変換の
+      // 4箇所がこの1点で追随する)。キャッシュへ入れる前に適用する
+      Emu.SamplePitchUtil.applyKindOverride(r);
+      this._pitchCache.set(key, r);
+      return r;
+    }
+    _decodeSample(start, end, mu) {
+      const rom = this.rom;
+      const MAX_BYTES = 64 * 1024;
+      const e = Math.min(end, start + MAX_BYTES, rom.length);
+      const n = Math.max(0, e - start);
+      if (mu === undefined) mu = !!this._muFlags.get(start + ':' + end);
+      const pcm = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const v = rom[start + i];
+        pcm[i] = (mu ? MULAW_TBL[v] : (((v << 24) >> 24) << 8)) / 32768;
+      }
+      return pcm;
+    }
+
+    /**
+     * スナップショットの sample({kind,start,end}) → デコード済みPCM(Float32Array、-1..1)。
+     * vgm2mmlのドラム→@DPCM変換が実サンプルを必要とするための公開口。
+     * ROMはこのチップ(=キャプチャWorker側)にしか無く、関数はpostMessageを越えられないので、
+     * キャプチャの最後にここを呼んで実データだけをメインスレッドへ渡す
+     * (src/emulator/vgmPlayer.js の collectUsedSamples 参照)。
+     */
+    /**
+     * 打楽器/音階の手動上書き。kind: 'drum' | 'pitch' | null(=自動へ戻す)。
+     * ピッチ解析の信頼度(conf)による自動判定が外れた曲を、ユーザーが耳で直すための口。
+     * 指定はサンプル内容のハッシュをキーに localStorage へ入る(setSampleTuningと同じ流儀。
+     * ROMアドレスと違い、同じ音なら別のゲーム/リビジョンでも効く)。
+     * ★confへの反映は Emu.SamplePitchUtil.applyKindOverride が samplePitch() の中で行うので、
+     *   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換が自動的に追随する。
+     */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      // 「音階として扱う」を選んでも、周期がまったく検出できていない(cps=0)サンプルは
+      // 使える音程が無い。呼び出し側へ知らせて基準音の手動補正を促す(黙って無視しない)
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.start + ':' + sample.end); // 次回参照で上書きを反映し直す
+      return { kind: kind || null, needsTuning: needsTuning };
+    }
+
+    samplePcm(sample) {
+      if (!sample) return null;
+      const mu = !!this._muFlags.get(sample.start + ':' + sample.end);
+      return this._decodeSample(sample.start, sample.end, mu);
+    }
+
+    /** 手動ピッチ補正(表示専用)。c140/ga20/ym2610と同じlocalStorage永続化。 */
+    setSampleTuning(kind, start, end, cps) {
+      const r = this.samplePitch(kind, start, end);
+      if (!r) return null;
+      const U = Emu.SamplePitchUtil;
+      const map = U.getTuningMap();
+      if (cps && cps > 0) { map[r.hash] = cps; r.cps = cps; r.conf = 1; r.manual = true; }
+      else { delete map[r.hash]; r.cps = r.cpsAuto; r.conf = r.confAuto; r.manual = false; }
+      U.saveTuningMap(map);
+      r.wave = U.makeSampleWave(this._decodeSample(start, end), r.conf >= 0.5 ? r.cps : 0);
+      return r;
+    }
+  }
+
+  // 鍵盤表示用スナップショット(C140と同じ形の配列32要素):
+  // { active, vol(0-1)、rawVol(4出力の最大0-255)、panL/panR(0-15表示値)、rate、seq、
+  //   loop、lenSec(ループ中はInfinity)、pitchHz、pitchConf、pitchManual、waveData、sample、noise }
+  Emu.snapshotC352 = function (chip) {
+    const out = [];
+    for (let i = 0; i < NUM_CH; i++) {
+      const c = chip.ch[i];
+      const volL = Math.max((c.volF >> 8) & 0xFF, (c.volR >> 8) & 0xFF); // フロント/リアの大きい方
+      const volR = Math.max(c.volF & 0xFF, c.volR & 0xFF);
+      const vmax = Math.max(volL, volR);
+      const rate = chip.playRate(i);
+      const noise = !!(c.flags & FLG_NOISE);
+      if (c.seq && !noise) chip._muFlags.set(c.smpStart + ':' + c.smpEnd, !!(c.flags & FLG_MULAW));
+      const p = (c.seq && !noise) ? chip.samplePitch('c352', c.smpStart, c.smpEnd, c.smpLoop, c.smpPingPong) : null;
+      const lenBytes = p ? p.lenBytes : Math.max(0, c.smpEnd - c.smpStart);
+      const loop = !!(c.flags & FLG_LOOP); // ピンポン(REVLOOP)もbit1を含む
+      out.push({ active: !!(c.flags & FLG_BUSY) && vmax > 0 && rate > 0, vol: vmax / 255, rawVol: vmax, rawVolMax: 255,
+        panL: volL >> 4, panR: volR >> 4,
+        rate, seq: c.seq, loop, lenSec: loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        waveData: p ? p.wave : null,
+        sample: (c.seq && !noise) ? { kind: 'c352', start: c.smpStart, end: c.smpEnd } : null,
+        noise });
+    }
+    return out;
+  };
+
+  Emu.C352Audio = C352Audio;
+})(globalThis);
+
+/*
+ * OKI MSM6258 (OKIM6258) ADPCM音声 (VGM: chip 'okim6258'。Sharp X68000の内蔵ADPCM。
+ * YM2151とペアでドラム/ボイスを担当。Namachuukei 68 / グラディウス各種 / コーエー作品等)
+ * MML.Emu.OKIM6258Audio
+ *
+ * 4bit OKI(Dialogic系)ADPCM×1ch・12bit内部信号。ROMを持たず、CPUがデータレジスタへ
+ * 1バイトずつ流し込むストリーミング方式(VGMではDACストリーム制御0x90-0x95のchipType 0x17、
+ * またはコマンド0xB7の直書き)。チップは masterClock/divider のレートで
+ * **上位→下位ニブルの順**に1サンプル1ニブル消費する。
+ * ★ニブル順は実データで検証済み: 実VGM(信長の野望・音声サンプル)のデータバンクを両順で
+ *   デコードすると高域エネルギー比が上位先行0.12/下位先行0.71で、上位先行だけが音声になる。
+ * MAME okim6258.cpp + VGMPlay okim6258.c(Valley Bell)準拠:
+ *   レジスタ(VGM 0xB7 aa dd、aaのbit7=デュアル2個目):
+ *     0x00 制御: bit0=停止 / bit1=再生開始(開始時 signal=-2, step=0, ニブル位相/FIFOリセット)。
+ *                bit0もbit1も無い書込みは停止(MAME準拠)
+ *     0x01 データ: ADPCM 1バイト(8段FIFO。VGMPlayと同じくストリームの粒度ズレを吸収)
+ *     0x02 パン: bit1=左ミュート / bit0=右ミュート(X68000は8255ポートCのL/Rゲート相当)
+ *     0x08-0x0B マスタークロック実行時変更(リトルエンディアン4バイト) / 0x0C 分周変更
+ *   分周表 {1024, 768, 512, 512}(初期値はVGMヘッダ0x94 flags bit0-1)。
+ *   4MHz/512=7813Hz、8MHz時は15.6kHz等。X68000はレート切替を分周/クロック変更で行う。
+ *   flags bit2=3bit ADPCMモード(未実装: X68000は4bit固定。使用VGMは未確認)、
+ *   bit3=DAC 10bit/12bit(10bit時は下位2bit切り捨て=振幅は変えない解釈。
+ *   VGMPlayの±511クランプ解釈だと音量が1/4になり実機比で明らかに小さいため採らない)
+ *
+ * データ枯渇時は信号を保持し、枯渇が続いたら緩やかに0へ減衰(ストリーム粒度ズレでの
+ * プチノイズ/DC張り付き防止)。regsOnlyキャプチャ(clock()無し)ではFIFOが消費されないが、
+ * 満杯時は捨てるだけなので安全。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const DIVIDERS = [1024, 768, 512, 512];
+
+  // OKI ADPCM差分表(MAME compute_tables: 49ステップ×16ニブル)
+  const INDEX_SHIFT = [-1, -1, -1, -1, 2, 4, 6, 8];
+  const DIFF = new Int16Array(49 * 16);
+  for (let step = 0; step < 49; step++) {
+    const sv = Math.floor(16 * Math.pow(11 / 10, step));
+    for (let n = 0; n < 16; n++) {
+      const d = ((n >> 2) & 1) * sv + ((n >> 1) & 1) * (sv >> 1) + (n & 1) * (sv >> 2) + (sv >> 3);
+      DIFF[step * 16 + n] = (n & 8) ? -d : d;
+    }
+  }
+
+  class OKIM6258Audio {
+    /**
+     * @param {number} [clock=4000000] - マスタークロック(ヘッダ0x90。clock()の呼び出しレート)
+     * @param {number} [flags=0] - ヘッダ0x94: bit0-1=分周、bit2=3bit ADPCM、bit3=12bit DAC
+     */
+    constructor(clock, flags) {
+      this.clockHz = clock || 4000000;
+      this.masterClock = this.clockHz; // 0x08-0x0Bで実行時変更されうる
+      this.initDivider = DIVIDERS[flags & 3];
+      this.out12bit = !!(flags & 8);
+      this.mute = [false];
+      this.vol = [1];
+      this.reset();
+    }
+    reset() {
+      this.divider = this.initDivider;
+      this.playing = false;
+      this.signal = -2;
+      this.step = 0;
+      this.nibbleLow = false; // false=次は上位ニブル(=新バイトが要る)。上位→下位の順(冒頭コメント)
+      this.fifo = new Uint8Array(8);
+      this.fifoR = 0; this.fifoW = 0; this.fifoLen = 0;
+      this.curByte = 0; this.haveByte = false;
+      this.emptyCount = 0;
+      this.pan = 0;
+      this.cyc = 0;
+      this.lastL = 0; this.lastR = 0;
+      this.seq = 0; // 再生開始通番(ロール/キャプチャ用)
+      this.bytesIn = 0;       // データレジスタ受信総量
+      this._lastBytesIn = 0;  // スナップショット間の流量差分用
+    }
+
+    /** レジスタ書込み(VGM 0xB7 / DACストリームのデータ配送) */
+    write(reg, val) {
+      switch (reg & 0x0F) {
+        case 0x00: // 制御
+          if (val & 0x01) { this.playing = false; break; }
+          if (val & 0x02) {
+            if (!this.playing) {
+              this.playing = true;
+              this.signal = -2; this.step = 0;
+              this.nibbleLow = false; this.haveByte = false;
+              this.fifoR = 0; this.fifoW = 0; this.fifoLen = 0;
+              this.emptyCount = 0;
+              this.seq++;
+            }
+          } else this.playing = false;
+          break;
+        case 0x01: // データ(FIFOへ。満杯なら捨てる=regsOnlyキャプチャの防波堤)
+          if (this.fifoLen < 8) { this.fifo[this.fifoW] = val & 0xFF; this.fifoW = (this.fifoW + 1) & 7; this.fifoLen++; }
+          this.emptyCount = 0;
+          this.bytesIn++; // 発音区間推定用(スナップショットが流量差分を見る)
+          break;
+        case 0x02: this.pan = val & 0xFF; break;
+        case 0x08: case 0x09: case 0x0A: case 0x0B: { // マスタークロック変更(LE 4バイト)
+          const sh = (reg & 3) * 8;
+          this.masterClock = ((this.masterClock & ~(0xFF << sh)) | ((val & 0xFF) << sh)) >>> 0;
+          break;
+        }
+        case 0x0C: this.divider = DIVIDERS[val & 3]; break;
+      }
+    }
+
+    _sample() {
+      if (!this.playing) {
+        // 停止中: 残留信号を緩やかに0へ(ハードステップのクリック防止)
+        if (this.signal) { this.signal = Math.trunc(this.signal * 0.9); this._out(); }
+        return;
+      }
+      if (!this.nibbleLow) {
+        // 新しいバイトが要る
+        if (this.fifoLen > 0) {
+          this.curByte = this.fifo[this.fifoR]; this.fifoR = (this.fifoR + 1) & 7; this.fifoLen--;
+          this.haveByte = true; this.emptyCount = 0;
+        } else {
+          this.haveByte = false;
+          if (this.emptyCount < 1000) this.emptyCount++;
+        }
+      }
+      if (this.haveByte) {
+        const nib = this.nibbleLow ? (this.curByte & 15) : (this.curByte >> 4) & 15;
+        this.nibbleLow = !this.nibbleLow;
+        this.signal += DIFF[this.step * 16 + nib];
+        if (this.signal > 2047) this.signal = 2047; else if (this.signal < -2048) this.signal = -2048;
+        this.step += INDEX_SHIFT[nib & 7];
+        if (this.step > 48) this.step = 48; else if (this.step < 0) this.step = 0;
+      } else if (this.emptyCount > 4) {
+        // データ枯渇が続く: 信号を減衰(短い枯渇はそのまま保持)
+        this.signal = Math.trunc(this.signal * 0.95);
+      }
+      this._out();
+    }
+    _out() {
+      let s = this.signal;
+      if (!this.out12bit) s &= ~3; // 10bit DAC: 下位2bit切り捨て
+      const v = this.mute[0] ? 0 : (s / 2048) * this.vol[0];
+      this.lastL = (this.pan & 0x02) ? 0 : v;
+      this.lastR = (this.pan & 0x01) ? 0 : v;
+    }
+
+    clock() {
+      // アダプタはヘッダクロックで叩く。実行時クロック変更(0x08-0x0B)は進み係数で反映
+      this.cyc += this.masterClock / this.clockHz;
+      if (this.cyc < this.divider) return;
+      this.cyc -= this.divider;
+      this._sample();
+    }
+    mixSample() { return { left: this.lastL, right: this.lastR }; }
+
+    /** 現在のADPCM出力レート(サンプル/秒) */
+    playRate() { return this.masterClock / this.divider; }
+  }
+
+  // 鍵盤表示用スナップショット(配列1要素。YMDA/PWM/RF5Cと同じ「サンプル」行向け):
+  // { active, vol, rawVol(現在振幅0-255)、panL/panR(0-15)、rate、seq }
+  // 発音判定は「再生中かつデータが流れている(前回スナップショットからの流量差分>0)」。
+  // X68000のドライバは再生ビットを立てっぱなしでDACストリームだけon/offする曲が多く
+  // (悪魔城ドラキュラ実測: 15秒間play1回・ストリーム断続)、playing単独だと点きっぱなしになる。
+  // 流量はregsOnlyキャプチャ(clock()無し)でもストリームエンジンが配送するので正確。
+  // vol はライブ時=現在振幅、キャプチャ時(振幅が出ない)=下限0.3を保証。
+  Emu.snapshotOKIM6258 = function (chip) {
+    const amp = Math.min(1, Math.abs(chip.signal) / 2048);
+    const flow = chip.bytesIn - chip._lastBytesIn;
+    chip._lastBytesIn = chip.bytesIn;
+    const active = chip.playing && (flow > 0 || amp > 0.005);
+    return [{
+      active,
+      vol: active ? Math.max(0.3, amp) : 0,
+      rawVol: Math.round(amp * 255), rawVolMax: 255,
+      panL: (chip.pan & 0x02) ? 0 : 15, panR: (chip.pan & 0x01) ? 0 : 15,
+      rate: chip.playRate(), seq: chip.seq
+    }];
+  };
+
+  Emu.OKIM6258Audio = OKIM6258Audio;
+})(globalThis);
+
+/*
+ * Capcom QSound (DL-1425) 16ch PCM 音源 (VGM: chip 'qsound'。CPS1ダッシュ/CPS2。
+ * Cadillacs and Dinosaurs / Street Fighter II' / Super SF2 / ヴァンパイア等)
+ * MML.Emu.QSoundAudio
+ *
+ * 実体はDSP16A上のプログラムだが、本実装は旧MAME/VGMPlayのHLE(qsound.c)準拠の
+ * 「8bit符号付きPCM×16ch+平方根パン」再現(エコー/フィルタ/SE用ADPCM 3chは未実装。
+ * 音楽再生に使われるのは16ch PCMで、VGMPlayも長年このHLEを既定にしていた)。
+ *   サンプルレート = clock/166(VGMヘッダ0xB4=4MHz → 24096Hz)
+ *   レジスタ(VGMコマンド 0xC4 mm ll rr: 値=mmll 16bit、レジスタ=rr):
+ *     0x00-0x7F: chレジスタ(ch=rr>>3, r=rr&7)
+ *       r0=バンク(**ch+1に効く**=実機の変な仕様。(値&0x7F)<<16がROMオフセット)
+ *       r1=開始(=現在アドレス直書き。ラッチ無し。**音量>0なら書込み=キーオン/リトリガ**)
+ *       r2=ピッチ(値*16を16.16アカムへ加算=再生レート rate*値/4096 バイト/秒。
+ *          **0は一時停止**=DSPは進行が止まるだけでキーオフではない) r3=不明(ドライバは
+ *          開始と同値を書く=DSPのアドレス小数部か) r4=ループ長(終端からの距離。
+ *          0=ワンショット) r5=終端(排他) r6=音量(0でキーオフ、非0書込みで未発音ならキーオン)
+ *   ★キーオン規則は旧MAME HLEの「音量エッジのみ」から拡張済み: CPS2実ドライバは
+ *     r2=0→r1→r3→r6→r2 の手順で音量エッジを作らず、ワンショット終端後はr1だけで再開する
+ *     (Night Warriors実測。旧規則のままだと音が永久に消えるchが出る)。
+ *     0x80-0x8F: chパン(値0x0110-0x0130、0x0120=中央。表=√則 pan_table[i]=256/√32*√i)
+ *     0x93/0xBA-0xC9等: エコー/不明(無視)
+ *   アドレスはバンク内16bitで**ラップ**する(バンクまたぎは無い)。終端でループ長>0なら
+ *   address -= loop(ループ区間=[end-loop, end))、0ならキーオフ。
+ * VGM: ROMはデータブロック0x8F(ROMサイズ+開始+データ)。デュアルは実機に存在しないので非対応。
+ *
+ * ★ピッチはC352と同じく Emu.SamplePitchUtil + ループ区間タイル・フォールバック
+ * (短い一発+単一周期ループのシンセ波形方式に対応)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const NUM_CH = 16;
+
+  // 平方根パン表(旧MAME): pan_table[0..32] = 256/√32 * √i
+  const PAN_TBL = new Int32Array(33);
+  for (let i = 0; i <= 32; i++) PAN_TBL[i] = Math.floor(256 / Math.sqrt(32) * Math.sqrt(i));
+
+  // ループ区間の基本周期推定は Emu.SamplePitchUtil.loopCps へ共有化済み(ym2610.js。
+  // このチップで実証した「ループ因数分解方式」。MultiPCM等の他ループ型PCMも使う)
+  const qsoundLoopCps = (one) => Emu.SamplePitchUtil.loopCps(one);
+
+  class QSoundAudio {
+    /** @param {number} [clock=4000000] - クロック(サンプルレート=clock/166) */
+    constructor(clock) {
+      this.clockHz = clock || 4000000;
+      this.cyclesPerSample = 166;
+      this.sampleRate = this.clockHz / 166; // 4MHz → 24096Hz
+      this.rom = null;
+      this.mute = new Array(NUM_CH).fill(false);
+      this.vol = new Array(NUM_CH).fill(1);
+      this._pitchCache = new Map(); // 'start:end' → {cps, conf, …}
+      this.reset();
+    }
+    reset() {
+      this.ch = [];
+      // key: 発音中 / bank: ROMオフセット / addr: 現在アドレス(16bit+ラップ) / frac: 16bit小数
+      // seq: キーオン通番 / smpStart/End/Loop: ピッチ解析用の絶対アドレス(キーオン時ラッチ)
+      for (let i = 0; i < NUM_CH; i++) this.ch.push({
+        key: false, bank: 0, addr: 0, frac: 0, pitch: 0, loop: 0, end: 0, chVol: 0,
+        lvol: PAN_TBL[16], rvol: PAN_TBL[16], pan: 0x120,
+        seq: 0, smpStart: 0, smpEnd: 0, smpLoop: 0 });
+      this.cyc = 0;
+      this.lastL = 0; this.lastR = 0;
+    }
+
+    /** VGMデータブロック 0x8F(QSound ROM)。 */
+    loadRom(romSize, start, data) {
+      let rom = this.rom;
+      const need = Math.max(romSize >>> 0, start + data.length);
+      if (!rom || rom.length < need) { const n = new Uint8Array(need); if (rom) n.set(rom, 0); rom = this.rom = n; }
+      rom.set(data, start);
+      this._pitchCache.clear();
+    }
+
+    // キーオン時のサンプル同定(ピッチ解析用)
+    _latchSample(c) {
+      c.smpStart = c.bank + (c.addr & 0xFFFF);
+      c.smpEnd = c.bank + c.end; // endは排他(address>=endで終端処理、endのバイトは鳴らない)
+      // ループ区間=[end-loop, end)。範囲外/ワンショットは0
+      c.smpLoop = (c.loop > 0 && c.loop <= c.end) ? c.bank + c.end - c.loop : 0;
+      if (!(c.smpEnd > c.smpStart)) { c.smpEnd = c.smpStart; c.smpLoop = 0; }
+    }
+
+    /** レジスタ書込み(VGM 0xC4 値16bit → レジスタrr) */
+    write(reg, val) {
+      reg &= 0xFF; val &= 0xFFFF;
+      if (reg < 0x80) {
+        let i = reg >> 3;
+        const r = reg & 7;
+        const c0 = this.ch[i];
+        switch (r) {
+          case 0: // バンク(実機仕様: 次のチャンネルに効く)
+            this.ch[(i + 1) & 0x0F].bank = (val & 0x7F) << 16;
+            break;
+          case 1: // 開始=現在アドレス直書き(DSPにキーフラグは無く、アドレス書込み=新音開始)。
+            // ★旧MAME HLEの「音量0→非0エッジのみキーオン」だとCPS2ドライバの実手順
+            // (r2=0→r1→r3→r6→r2、音量エッジ無し)や「ワンショット終端後にr1だけで再開」を
+            // 取りこぼして音が永久に消える(Night Warriors PHOBOSステージch2で79回実測)。
+            // 音量が生きていればアドレス書込みで常にキーオン(リトリガ)する。
+            c0.addr = val;
+            if (c0.chVol > 0) { c0.key = true; c0.frac = 0; c0.seq++; this._latchSample(c0); }
+            break;
+          case 2: // ピッチ。★0はキーオフではなく**一時停止**(DSPは進行が止まるだけ。
+            // 0でkeyを殺すと、ピッチだけでビブラート/再開を書くドライバ(Night Warriors
+            // DONOVANステージch7/8実測)がkey=falseのまま置き去りになり音が消える)
+            c0.pitch = val;
+            break;
+          case 4: c0.loop = val; break;
+          case 5: c0.end = val; break;
+          case 6: // 音量(0でキーオフ、0→非0でキーオン)
+            if (!val) c0.key = false;
+            else if (!c0.key) {
+              c0.key = true; c0.frac = 0;
+              c0.seq++;
+              this._latchSample(c0);
+            }
+            c0.chVol = val;
+            break;
+          // r3/r7: 不明/未使用
+        }
+        return;
+      }
+      if (reg < 0x90) { // パン(0x0110-0x0130、0x120=中央)
+        const c = this.ch[reg - 0x80];
+        let p = (val - 0x10) & 0x3F;
+        if (p > 32) p = 32;
+        c.rvol = PAN_TBL[p];
+        c.lvol = PAN_TBL[32 - p];
+        c.pan = val;
+        return;
+      }
+      // 0x93(エコーfeedback)/0xBA-0xC9(エコー系)/その他: 未実装(無視)
+    }
+
+    // 再生レート(1秒あたりのROMバイト数)。ピッチ値0x1000=等速(チップレート)
+    playRate(i) { return this.ch[i].pitch / 4096 * this.sampleRate; }
+
+    _calcSample() {
+      let l = 0, r = 0;
+      const rom = this.rom;
+      if (rom) {
+        for (let i = 0; i < NUM_CH; i++) {
+          const c = this.ch[i];
+          if (!c.key || !c.pitch) continue; // pitch=0は一時停止(進行せず無音)
+          // 16.16アカム(旧MAME: offset += pitch*16; address += offset>>16)
+          c.frac += c.pitch << 4;
+          c.addr += c.frac >> 16;
+          c.frac &= 0xFFFF;
+          if (c.addr >= c.end) {
+            if (c.loop) {
+              c.addr -= c.loop;
+              if (c.addr >= c.end) c.addr = c.end - c.loop; // 飛び越え保険(VGMPlay準拠)
+              c.addr &= 0xFFFF;
+            } else { c.key = false; continue; }
+          }
+          if (this.mute[i]) continue;
+          const s = (rom[c.bank + (c.addr & 0xFFFF)] << 24) >> 24; // 8bit符号付き
+          // 旧MAME: out += sample * lvol(0-256) * vol(16bit) >> 14 → ±32767級へ正規化
+          const g = c.chVol * this.vol[i];
+          l += (s * c.lvol * g) / 16384;
+          r += (s * c.rvol * g) / 16384;
+        }
+      }
+      // 1chフルスケール(vol=0x2000, パン端=256) ≒ 127*256*8192>>14 = 16256。16ch合算を±1.0程度へ
+      this.lastL = l / (32768 * 2);
+      this.lastR = r / (32768 * 2);
+    }
+
+    clock() {
+      if (++this.cyc < this.cyclesPerSample) return;
+      this.cyc = 0;
+      this._calcSample();
+    }
+    mixSample() { return { left: this.lastL, right: this.lastR }; }
+
+    /** サンプル基本周期解析(キャッシュ)。c352と同じ設計+ループ区間タイル・フォールバック。
+     *  QSoundは8bit符号付き固定なのでμ-law切替は無い。 */
+    samplePitch(kind, start, end, loop) {
+      if (start === undefined || end === undefined || !(end > start) || !this.rom) return null;
+      const key = start + ':' + end;
+      let r = this._pitchCache.get(key);
+      if (r) return r;
+      const U = Emu.SamplePitchUtil;
+      const pcm = this._decodeSample(start, end);
+      let auto = U.detectCps(pcm);
+      let wavePcm = pcm;
+      if (auto.conf < 0.5 && loop && loop >= start && loop < end) {
+        // ループ因数分解方式: ハードウェアループは継ぎ目なく繋がる=**ループ長は基本周期の整数倍**。
+        // k周期仮説(lag=L/k)ごとに巡回自己相関を測り、高相関の最大kを基本周期に採る。
+        // ★汎用detectCpsのタイル再解析は探索上限(PITCH_MAX_LAG=800)があり、CPS2のベース
+        // (Night Warriors実測: ループ2941バイト=3周期、周期981サンプル)を検出できない。
+        // ループ長という既知の構造を使えば上限なしで正確に取れる。
+        const loopLen = end - loop;
+        if (loopLen >= 16 && loopLen <= 16384) {
+          const one = this._decodeSample(loop, end);
+          const r2 = qsoundLoopCps(one);
+          if (r2) { auto = r2; wavePcm = one; }
+        }
+      }
+      r = { cps: auto.cps, conf: auto.conf, cpsAuto: auto.cps, confAuto: auto.conf, manual: false,
+        hash: U.sampleHash(this.rom, start, Math.min(end, start + pcm.length)), wave: null, lenBytes: pcm.length };
+      const t = U.getTuningMap()[r.hash];
+      if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
+      r.wave = U.makeSampleWave(wavePcm, r.conf >= 0.5 ? r.cps : 0);
+      // 打楽器/音階の手動上書きをconfへ反映(Emu.SamplePitchUtil。ロール/鍵盤/変換の
+      // 4箇所がこの1点で追随する)。キャッシュへ入れる前に適用する
+      Emu.SamplePitchUtil.applyKindOverride(r);
+      this._pitchCache.set(key, r);
+      return r;
+    }
+    _decodeSample(start, end) {
+      const rom = this.rom;
+      const MAX_BYTES = 64 * 1024;
+      const e = Math.min(end, start + MAX_BYTES, rom.length);
+      const n = Math.max(0, e - start);
+      const pcm = new Float32Array(n);
+      for (let i = 0; i < n; i++) pcm[i] = ((rom[start + i] << 24) >> 24) / 128;
+      return pcm;
+    }
+
+    /**
+     * スナップショットの sample({kind,start,end}) → デコード済みPCM(Float32Array、-1..1)。
+     * vgm2mmlのドラム→@DPCM変換が実サンプルを必要とするための公開口。
+     * ROMはこのチップ(=キャプチャWorker側)にしか無く、関数はpostMessageを越えられないので、
+     * キャプチャの最後にここを呼んで実データだけをメインスレッドへ渡す
+     * (src/emulator/vgmPlayer.js の collectUsedSamples 参照)。
+     */
+    /**
+     * 打楽器/音階の手動上書き。kind: 'drum' | 'pitch' | null(=自動へ戻す)。
+     * ピッチ解析の信頼度(conf)による自動判定が外れた曲を、ユーザーが耳で直すための口。
+     * 指定はサンプル内容のハッシュをキーに localStorage へ入る(setSampleTuningと同じ流儀。
+     * ROMアドレスと違い、同じ音なら別のゲーム/リビジョンでも効く)。
+     * ★confへの反映は Emu.SamplePitchUtil.applyKindOverride が samplePitch() の中で行うので、
+     *   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換が自動的に追随する。
+     */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      // 「音階として扱う」を選んでも、周期がまったく検出できていない(cps=0)サンプルは
+      // 使える音程が無い。呼び出し側へ知らせて基準音の手動補正を促す(黙って無視しない)
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.start + ':' + sample.end); // 次回参照で上書きを反映し直す
+      return { kind: kind || null, needsTuning: needsTuning };
+    }
+
+    samplePcm(sample) {
+      if (!sample) return null;
+      return this._decodeSample(sample.start, sample.end);
+    }
+
+    /** 手動ピッチ補正(表示専用)。c352等と同じlocalStorage永続化。 */
+    setSampleTuning(kind, start, end, cps) {
+      const r = this.samplePitch(kind, start, end);
+      if (!r) return null;
+      const U = Emu.SamplePitchUtil;
+      const map = U.getTuningMap();
+      if (cps && cps > 0) { map[r.hash] = cps; r.cps = cps; r.conf = 1; r.manual = true; }
+      else { delete map[r.hash]; r.cps = r.cpsAuto; r.conf = r.confAuto; r.manual = false; }
+      U.saveTuningMap(map);
+      r.wave = U.makeSampleWave(this._decodeSample(start, end), r.conf >= 0.5 ? r.cps : 0);
+      return r;
+    }
+  }
+
+  // 鍵盤表示用スナップショット(C352と同じ形の配列16要素)。
+  // 音量はCadillacs実測で最大0x9D5(典型0x1D6-0x7C8)の16bit値。0x1000を表示フルスケールとする。
+  Emu.snapshotQSound = function (chip) {
+    const out = [];
+    for (let i = 0; i < NUM_CH; i++) {
+      const c = chip.ch[i];
+      const rate = chip.playRate(i);
+      const vol = Math.min(1, c.chVol / 0x1000);
+      const p = c.seq ? chip.samplePitch('qsound', c.smpStart, c.smpEnd, c.smpLoop) : null;
+      const lenBytes = p ? p.lenBytes : Math.max(0, c.smpEnd - c.smpStart);
+      const loop = c.loop > 0;
+      out.push({ active: c.key && vol > 0 && rate > 0, vol, rawVol: Math.min(255, c.chVol >> 4), rawVolMax: 255,
+        panL: Math.min(15, c.lvol >> 4), panR: Math.min(15, c.rvol >> 4),
+        rate, seq: c.seq, loop, lenSec: loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        waveData: p ? p.wave : null,
+        sample: c.seq ? { kind: 'qsound', start: c.smpStart, end: c.smpEnd } : null });
+    }
+    return out;
+  };
+
+  Emu.QSoundAudio = QSoundAudio;
+})(globalThis);
+
+/*
+ * OKI MSM6295 (OKIM6295) 4ch ADPCM 音源 (VGM: chip 'okim6295'。東亜プラン2/ライジング/
+ * NMK/データイースト/アイレム等、90年代アーケードの定番PCM。YM2151等とペアが多い。
+ * Battle Garegga / Armed Police Batrider / Truxton II / Batsugun 等)
+ * MML.Emu.OKIM6295Audio
+ *
+ * 4bit OKI ADPCM×4ch・12bit内部信号(OKIM6258と同じ折れ線テーブル)、モノラル出力。
+ * ROM先頭にフレーズ表(128フレーズ×8バイト: +0-2=開始/+3-5=終了(24bit BE)、inclusive)。
+ * MAME okim6295.cpp 準拠:
+ *   サンプルレート = masterClock/divider(divider=132(pin7=H)/165(pin7=L)。
+ *   例: 1.056MHz/132=8kHz)。1出力サンプル=1ニブル消費、**上位→下位ニブルの順**
+ *   (MAME okiadpcm: shift=((sample&1)<<2)^4)。ループ機能は無い(全てワンショット)。
+ *   コマンド(1ポート): 0x80|フレーズ → 2バイト目 上位4bit=ボイス選択マスク/下位4bit=音量
+ *   (減衰表 volume_table、0=0dB〜8=-24dB、9以降=無音)。bit7=0の書込み=停止
+ *   (bit3-6がボイスマスク)。キーオンで signal=-2, step=0 リセット。
+ * VGM: コマンド 0xB8 aa dd(aaのbit7=デュアル2個目)。aa=仮想レジスタ(VGMPlay拡張):
+ *   0x00=コマンド / 0x08-0x0B=マスタークロック実行時変更(LE) / 0x0C=pin7(分周切替) /
+ *   0x0E=NMK112バンクモード / 0x0F=通常バンク(値×0x40000) / 0x10-0x13=NMK112バンク0-3。
+ *   ROMはデータブロック0x8B、ヘッダ0x98(クロック。bit31=pin7)。
+ * バンク(VGMPlay memory_raw_read準拠):
+ *   通常: bankOffs|offset(バンク=256KB単位)
+ *   NMK112(ライジング/NMK系): 64KB×4窓。nmkMode bit7=フレーズ表(先頭0x400)も
+ *   0x100単位でバンク窓0-3に従う。
+ *
+ * ★ピッチ解析: 音程レジスタは無い(固定レート)が、YM2610 ADPCM-Aと同じ
+ * 「音程ごとに別サンプル」方式の曲があるので、フレーズをADPCMデコードして
+ * SamplePitchUtil で解析(取れた区間だけ絶対音名)。アドレスはキーオン時の
+ * バンク状態で絶対化してラッチする。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const NUM_CH = 4;
+
+  // OKI ADPCM差分表(okim6258.jsと同じMAME compute_tables)
+  const INDEX_SHIFT = [-1, -1, -1, -1, 2, 4, 6, 8];
+  const DIFF = new Int16Array(49 * 16);
+  for (let step = 0; step < 49; step++) {
+    const sv = Math.floor(16 * Math.pow(11 / 10, step));
+    for (let n = 0; n < 16; n++) {
+      const d = ((n >> 2) & 1) * sv + ((n >> 1) & 1) * (sv >> 1) + (n & 1) * (sv >> 2) + (sv >> 3);
+      DIFF[step * 16 + n] = (n & 8) ? -d : d;
+    }
+  }
+  // 音量減衰表(MAME s_volume_table: 0x20=0dB、約-3dB/段、9以降は無音)
+  const VOL_TBL = [0x20, 0x16, 0x10, 0x0B, 0x08, 0x06, 0x04, 0x03, 0x02, 0, 0, 0, 0, 0, 0, 0];
+
+  class OKIM6295Audio {
+    /**
+     * @param {number} [clock=1056000] - マスタークロック(clock()の呼び出しレート)
+     * @param {boolean} [pin7=false] - ヘッダ0x98 bit31。分周=pin7?132:165
+     */
+    constructor(clock, pin7) {
+      this.clockHz = clock || 1056000;
+      this.masterClock = this.clockHz; // 0x08-0x0Bで実行時変更されうる
+      this.divider = pin7 ? 132 : 165;
+      this.rom = null;
+      this.mute = new Array(NUM_CH).fill(false);
+      this.vol = new Array(NUM_CH).fill(1);
+      this._pitchCache = new Map(); // 'start:end'(絶対バイトアドレス) → {cps, conf, …}
+      this.reset();
+    }
+    reset() {
+      this.ch = [];
+      // sample: ニブル位置 / count: 総ニブル数 / chVol: 減衰表の値(0-0x20)
+      // seq: キーオン通番 / smpStart/End: ピッチ解析用の絶対バイトアドレス(キーオン時ラッチ)
+      for (let i = 0; i < NUM_CH; i++) this.ch.push({
+        playing: false, base: 0, sample: 0, count: 0, chVol: 0,
+        signal: -2, step: 0, seq: 0, smpStart: 0, smpEnd: 0, phrase: -1 });
+      this.pendingPhrase = -1;
+      this.bankOffs = 0;
+      this.nmkMode = 0;
+      this.nmkBank = [0, 0, 0, 0];
+      this.cyc = 0;
+      this.lastL = 0; this.lastR = 0;
+    }
+
+    /** VGMデータブロック 0x8B(OKIM6295 ROM)。 */
+    loadRom(romSize, start, data) {
+      let rom = this.rom;
+      const need = Math.max(romSize >>> 0, start + data.length);
+      if (!rom || rom.length < need) { const n = new Uint8Array(need); if (rom) n.set(rom, 0); rom = this.rom = n; }
+      rom.set(data, start);
+      this._pitchCache.clear();
+    }
+
+    // バンク適用済みの絶対ROMアドレス(MAME nmk112.cpp準拠)
+    _mapAddr(offset) {
+      if (!this.nmkMode) return this.bankOffs | offset;
+      if (offset < 0x400 && (this.nmkMode & 0x80)) {
+        // NMK112のフレーズ表バンク(0x100単位ページ、ページN=窓Nのバンクに従う)。
+        // ★マッピングは「バンクだけ差し替えてオフセットは丸ごと維持」= bank<<16 | offset。
+        //   MAME nmk112の memcpy(&rom[N*0x100], &rom[bankaddr + N*0x100], 0x100) と等価。
+        //   当初 (offset&0xFF)|bank<<16 と下位1バイトだけ残す誤実装で、ページ1-3のフレーズ表
+        //   (フレーズ0x20以降=ガレッガのコーラス/ボイス)が別領域を読みプチノイズ化していた
+        //   (ページ0のドラムだけ偶然正しく鳴る)。実測: フレーズ0x21-24が正しい読みだと
+        //   連続サンプルチェーン(10400→13f2c→17a5a→1b587→1f0b3)になる。
+        return offset | (this.nmkBank[(offset >> 8) & 3] << 16);
+      }
+      return (offset & 0xFFFF) | (this.nmkBank[(offset >> 16) & 3] << 16);
+    }
+    _read(offset) {
+      const a = this._mapAddr(offset);
+      return this.rom && a < this.rom.length ? this.rom[a] : 0;
+    }
+
+    /** レジスタ書込み(VGM 0xB8 aa dd) */
+    write(reg, val) {
+      switch (reg & 0x1F) {
+        case 0x00: this._command(val & 0xFF); break;
+        case 0x08: case 0x09: case 0x0A: case 0x0B: { // マスタークロック変更(LE 4バイト)
+          const sh = (reg & 3) * 8;
+          this.masterClock = ((this.masterClock & ~(0xFF << sh)) | ((val & 0xFF) << sh)) >>> 0;
+          break;
+        }
+        case 0x0C: this.divider = (val & 1) ? 132 : 165; break; // pin7
+        case 0x0E: this.nmkMode = val & 0xFF; break;
+        case 0x0F: this.bankOffs = (val & 0xFF) * 0x40000; break;
+        case 0x10: case 0x11: case 0x12: case 0x13: this.nmkBank[reg & 3] = val & 0xFF; break;
+      }
+    }
+
+    _command(data) {
+      if (this.pendingPhrase >= 0) {
+        // 2バイト目: 上位4bit=ボイスマスク、下位4bit=音量
+        const phrase = this.pendingPhrase;
+        this.pendingPhrase = -1;
+        const mask = (data >> 4) & 0x0F;
+        const volume = VOL_TBL[data & 0x0F];
+        for (let i = 0; i < NUM_CH; i++) {
+          if (!(mask & (1 << i))) continue;
+          const c = this.ch[i];
+          const base = phrase * 8;
+          const start = ((this._read(base) << 16) | (this._read(base + 1) << 8) | this._read(base + 2)) & 0x3FFFF;
+          const stop = ((this._read(base + 3) << 16) | (this._read(base + 4) << 8) | this._read(base + 5)) & 0x3FFFF;
+          if (start >= stop) { c.playing = false; continue; } // 不正フレーズは無視(MAME準拠)
+          c.playing = true;
+          c.base = start;
+          c.sample = 0;
+          c.count = 2 * (stop - start + 1);
+          c.chVol = volume;
+          c.signal = -2; c.step = 0;
+          c.phrase = phrase;
+          c.seq++;
+          // ピッチ解析用: キーオン時のバンク状態で絶対化(以降バンクが変わっても解析対象は固定)
+          c.smpStart = this._mapAddr(start);
+          c.smpEnd = c.smpStart + (stop - start + 1);
+        }
+        return;
+      }
+      if (data & 0x80) { this.pendingPhrase = data & 0x7F; return; }
+      // 停止コマンド: bit3-6がボイスマスク
+      const stopMask = (data >> 3) & 0x0F;
+      for (let i = 0; i < NUM_CH; i++) if (stopMask & (1 << i)) this.ch[i].playing = false;
+    }
+
+    // 再生レート(ニブル/秒=サンプル/秒。音程レジスタは無く固定)
+    playRate() { return this.masterClock / this.divider; }
+
+    _calcSample() {
+      let out = 0;
+      for (let i = 0; i < NUM_CH; i++) {
+        const c = this.ch[i];
+        if (!c.playing) continue;
+        const byte = this._read(c.base + (c.sample >> 1));
+        const nib = (c.sample & 1) ? (byte & 15) : (byte >> 4) & 15; // 上位→下位
+        c.signal += DIFF[c.step * 16 + nib];
+        if (c.signal > 2047) c.signal = 2047; else if (c.signal < -2048) c.signal = -2048;
+        c.step += INDEX_SHIFT[nib & 7];
+        if (c.step > 48) c.step = 48; else if (c.step < 0) c.step = 0;
+        if (++c.sample >= c.count) c.playing = false;
+        if (this.mute[i]) continue;
+        out += (c.signal / 2048) * (c.chVol / 0x20) * this.vol[i];
+      }
+      // 4ch合算(1chフルスケール=1.0)。モノラルなのでL/R同値
+      this.lastL = this.lastR = out / 2;
+    }
+
+    clock() {
+      this.cyc += this.masterClock / this.clockHz;
+      if (this.cyc < this.divider) return;
+      this.cyc -= this.divider;
+      this._calcSample();
+    }
+    mixSample() { return { left: this.lastL, right: this.lastR }; }
+
+    /** フレーズ(ROM絶対アドレス[start,end))のADPCMデコード+基本周期解析(キャッシュ)。
+     *  ループが無いチップなのでタイル・フォールバックは不要。 */
+    samplePitch(kind, start, end) {
+      if (start === undefined || end === undefined || !(end > start) || !this.rom) return null;
+      const key = start + ':' + end;
+      let r = this._pitchCache.get(key);
+      if (r) return r;
+      const U = Emu.SamplePitchUtil;
+      const pcm = this._decodeSample(start, end);
+      // cpsは「1ニブル=1サンプル」のデコード列で検出した値。playRate()もニブル/秒なので
+      // pitchHz = cps × rate がそのまま成り立つ(バイト基準への換算はしない)
+      const auto = U.detectCps(pcm);
+      r = { cps: auto.cps, conf: auto.conf, cpsAuto: auto.cps, confAuto: auto.conf, manual: false, wave: null,
+        lenBytes: Math.min(end - start, 64 * 1024), lenNibbles: pcm.length,
+        hash: U.sampleHash(this.rom, start, Math.min(end, start + 64 * 1024)) };
+      const t = U.getTuningMap()[r.hash];
+      if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
+      r.wave = U.makeSampleWave(pcm, r.conf >= 0.5 ? r.cps : 0);
+      // 打楽器/音階の手動上書きをconfへ反映(Emu.SamplePitchUtil。ロール/鍵盤/変換の
+      // 4箇所がこの1点で追随する)。キャッシュへ入れる前に適用する
+      Emu.SamplePitchUtil.applyKindOverride(r);
+      this._pitchCache.set(key, r);
+      return r;
+    }
+    _decodeSample(start, end) {
+      const rom = this.rom;
+      const MAX_BYTES = 64 * 1024;
+      const e = Math.min(end, start + MAX_BYTES, rom.length);
+      const nBytes = Math.max(0, e - start);
+      const pcm = new Float32Array(nBytes * 2);
+      let sig = -2, st = 0;
+      let o = 0;
+      for (let i = 0; i < nBytes; i++) {
+        const b = rom[start + i];
+        for (const nib of [(b >> 4) & 15, b & 15]) { // 上位→下位(再生と同順)
+          sig += DIFF[st * 16 + nib];
+          if (sig > 2047) sig = 2047; else if (sig < -2048) sig = -2048;
+          st += INDEX_SHIFT[nib & 7];
+          if (st > 48) st = 48; else if (st < 0) st = 0;
+          pcm[o++] = sig / 2048;
+        }
+      }
+      return pcm;
+    }
+
+    /**
+     * スナップショットの sample({kind,start,end}) → デコード済みPCM(Float32Array、-1..1)。
+     * vgm2mmlのドラム→@DPCM変換が実サンプルを必要とするための公開口。
+     * ROMはこのチップ(=キャプチャWorker側)にしか無く、関数はpostMessageを越えられないので、
+     * キャプチャの最後にここを呼んで実データだけをメインスレッドへ渡す
+     * (src/emulator/vgmPlayer.js の collectUsedSamples 参照)。
+     */
+    /**
+     * 打楽器/音階の手動上書き。kind: 'drum' | 'pitch' | null(=自動へ戻す)。
+     * ピッチ解析の信頼度(conf)による自動判定が外れた曲を、ユーザーが耳で直すための口。
+     * 指定はサンプル内容のハッシュをキーに localStorage へ入る(setSampleTuningと同じ流儀。
+     * ROMアドレスと違い、同じ音なら別のゲーム/リビジョンでも効く)。
+     * ★confへの反映は Emu.SamplePitchUtil.applyKindOverride が samplePitch() の中で行うので、
+     *   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換が自動的に追随する。
+     */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      // 「音階として扱う」を選んでも、周期がまったく検出できていない(cps=0)サンプルは
+      // 使える音程が無い。呼び出し側へ知らせて基準音の手動補正を促す(黙って無視しない)
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.start + ':' + sample.end); // 次回参照で上書きを反映し直す
+      return { kind: kind || null, needsTuning: needsTuning };
+    }
+
+    samplePcm(sample) {
+      if (!sample) return null;
+      return this._decodeSample(sample.start, sample.end);
+    }
+
+    /** 手動ピッチ補正(表示専用)。他チップと同じlocalStorage永続化。 */
+    setSampleTuning(kind, start, end, cps) {
+      const r = this.samplePitch(kind, start, end);
+      if (!r) return null;
+      const U = Emu.SamplePitchUtil;
+      const map = U.getTuningMap();
+      if (cps && cps > 0) { map[r.hash] = cps; r.cps = cps; r.conf = 1; r.manual = true; }
+      else { delete map[r.hash]; r.cps = r.cpsAuto; r.conf = r.confAuto; r.manual = false; }
+      U.saveTuningMap(map);
+      r.wave = U.makeSampleWave(this._decodeSample(start, end), r.conf >= 0.5 ? r.cps : 0);
+      return r;
+    }
+  }
+
+  // 鍵盤表示用スナップショット(配列4要素、YM2610 ADPCM-Aと同じ「音程ごとに別サンプル」型):
+  // { active, vol(0-1)、rawVol(減衰表値0-0x20)、panL/panR(モノ=15固定)、rate、seq、
+  //   loop(常にfalse)、lenSec、pitchHz、pitchConf、pitchManual、waveData、sample }
+  Emu.snapshotOKIM6295 = function (chip) {
+    const out = [];
+    const rate = chip.playRate();
+    for (let i = 0; i < NUM_CH; i++) {
+      const c = chip.ch[i];
+      const p = c.seq ? chip.samplePitch('okim6295', c.smpStart, c.smpEnd) : null;
+      const lenNib = c.count || (p ? p.lenNibbles : 0);
+      out.push({ active: c.playing && c.chVol > 0, vol: c.chVol / 0x20, rawVol: c.chVol, rawVolMax: 0x20,
+        panL: 15, panR: 15,
+        rate, seq: c.seq, loop: false, lenSec: rate > 0 ? lenNib / rate : 0,
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        waveData: p ? p.wave : null,
+        sample: c.seq ? { kind: 'okim6295', start: c.smpStart, end: c.smpEnd } : null });
+    }
+    return out;
+  };
+
+  Emu.OKIM6295Audio = OKIM6295Audio;
+})(globalThis);
+
+/*
+ * Sega MultiPCM (315-5560 / YMW-258-F) 28ch PCM 音源 (VGM: chip 'multipcm'。
+ * セガ Model 1(Virtua Racing/Virtua Fighter=デュアル構成)/Model 2(Daytona USA/Virtua Cop)/
+ * System Multi 32(OutRunners)。Model 1系のリップは音楽全体がMultiPCMに載る)
+ * MML.Emu.MultiPCMAudio
+ *
+ * 8bit符号付きPCM×28スロット、ADSRエンベロープ+TL+4bitパン内蔵。**全サンプルがループ**
+ * (ワンショットはEGのディケイで無音化する方式=SPC/YMF278系の設計)。
+ * MAME multipcm.cpp(ElSemiコア)準拠:
+ *   サンプルレート = clock/180(8MHz → 44444Hz。分周の根拠はコンストラクタのコメント)
+ *   ポート(VGMコマンド 0xB5 aa dd、aaのbit7=デュアル2個目):
+ *     0=データ / 1=スロット選択(値0-31、7/15/23/31は無効=28ch) / 2=スロットレジスタ選択
+ *   スロットレジスタ:
+ *     r0=パン(上位4bit、0=中央/1-7=右寄せ/9-15=左寄せ/8=ミュート相当)
+ *     r1=サンプル番号下位8bit(書込み時にROM先頭のサンプル表12バイトを読込む)
+ *     r2=bit0:サンプル番号bit8、bit2-7:F-number下位6bit
+ *     r3=bit0-3:F-number上位4bit、bit4-7:オクターブ(-1バイアス、8以上=負)
+ *       再生ステップ = (1024+F)/1024 × 2^oct(F-number線形=OPL系と同じ)
+ *     r4=bit7:キーオン(オフセット0からEGアタック開始)/0:キーオフ(リリースへ)
+ *     r5=bit1-7:TL(0.375dB/step)、bit0=1:徐々に遷移/0:即時
+ *     r6/r7=LFO(ビブラート/トレモロ)…未実装(本実装の割り切り)
+ *   サンプル表(ROM先頭、番号×12バイト): +0-2=開始22bit(上位2bit=フォーマット、
+ *   12bitサンプルは未実装=セガ系は8bit)、+3-4=ループ点、+5-6=0x10000-終了位置、
+ *   +7=LFO、+8=AR/D1R、+9=DL/D2R、+10=KRS/RR、+11=AM
+ *   EG: ATTACK→DECAY1→(DLで)DECAY2→(キーオフで)RELEASE。時間はElSemiのBaseTimes表
+ *   (アタックms、ディケイ系は×14.32833)、レート=4×値+キースケール(RC≠15のとき2×RC+oct)。
+ *   減衰ドメインは線形インデックス0-1023(=0〜-96dBを指数変換)、DLは3dB/段。
+ * VGM: ROMはデータブロック0x89(デュアルはサイズbit31)、ヘッダ0x88。
+ *   セガバンキング: コマンド **0xC3 cc bb aa**(値=aabb、ccのbit0=Lバンク/bit1=Rバンク、
+ *   bit7=デュアル2個目)。アドレス0x100000-0x1FFFFFの窓をbit19で2分し、
+ *   物理 = bank(値<<16) | (addr & 0x7FFFF)(VGMPlay multipcm.c準拠)。
+ *
+ * ★ピッチ: F-number/octレジスタで1サンプルを音階演奏(C140系)+全サンプルループなので、
+ * 解析は detectCps → 失敗時 SamplePitchUtil.loopCps(ループ因数分解、QSoundで実証)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const NUM_CH = 28;
+  // スロット選択値(0-31)→スロット番号(8個ごとに1つ無効)
+  const VALUE_TO_SLOT = [];
+  for (let i = 0; i < 32; i++) VALUE_TO_SLOT.push((i & 7) === 7 ? -1 : (i >> 3) * 7 + (i & 7));
+
+  // EG時間表(ElSemi/MAME multipcm: アタックのフルスケール遷移ms。レート0-3は無限=保持)
+  const BASE_TIMES_MS = [
+    0, 0, 0, 0, 6222.95, 4978.37, 4148.66, 3556.01, 3111.47, 2489.21, 2074.33, 1778.00,
+    1555.74, 1244.63, 1037.19, 889.08, 777.87, 622.31, 518.59, 444.54, 388.93, 311.16,
+    259.32, 222.27, 194.47, 155.60, 129.66, 111.16, 97.23, 77.82, 64.85, 55.60,
+    48.62, 38.91, 32.43, 27.80, 24.31, 19.46, 16.24, 13.92, 12.15, 9.75, 8.12, 6.98,
+    6.08, 4.90, 4.08, 3.49, 3.04, 2.49, 2.13, 1.90, 1.72, 1.41, 1.18, 1.04,
+    0.91, 0.73, 0.59, 0.50, 0.45, 0.45, 0.45, 0.45];
+  const AR2DR = 14.32833; // ディケイ系はアタックの約14.3倍遅い(ElSemi定数)
+  const EG_MAX = 1023;    // 線形音量インデックス(1023=0dB、0=-96dB)
+  const DB_RANGE = 96;
+
+  // 状態: 0=off, 1=attack, 2=decay1, 3=decay2, 4=release
+  const EG_OFF = 0, EG_ATTACK = 1, EG_DECAY1 = 2, EG_DECAY2 = 3, EG_RELEASE = 4;
+
+  class MultiPCMAudio {
+    /** @param {number} [clock=8000000] - クロック(サンプルレート=clock/180) */
+    constructor(clock) {
+      this.clockHz = clock || 8000000;
+      // ★分周は180(ElSemi/VGMPlayのMULTIPCM_CLOCKDIV=180系譜。8MHz→44444Hz)。
+      //   MAME現行のclock/224だと全サンプルが3/4速+約4半音フラットになる。
+      //   OutRunners「Mega Driver」の実盤FLACとのクロマ(調)照合で確定:
+      //   ÷180=相関0.998(ピークE一致)/÷224=0.969(調性拡散)/÷224×4/3=0.986(Fへ半音シャープ)。
+      //   VGMリップのヘッダクロックは180分周前提で書かれている。
+      this.cyclesPerSample = 180;
+      this.sampleRate = this.clockHz / 180;
+      this.rom = null;
+      this.mute = new Array(NUM_CH).fill(false);
+      this.vol = new Array(NUM_CH).fill(1);
+      this._pitchCache = new Map(); // '物理start:len' → {cps, conf, …}
+      this.reset();
+    }
+    reset() {
+      this.ch = [];
+      for (let i = 0; i < NUM_CH; i++) this.ch.push({
+        regs: new Uint8Array(8),
+        playing: false, pan: 0,
+        smpNum: 0, start: 0, loop: 0, end: 0, fmt: 0,
+        ar: 0, d1r: 0, dl: 0, d2r: 0, rr: 0, krs: 0,
+        pos: 0, frac: 0, step: 0, octSigned: 0,
+        tlIdx: 0, tlDestIdx: 0,
+        egState: EG_OFF, egVol: 0, egRate: 0, egTarget: 0,
+        seq: 0, physStart: 0, smpLen: 0, loopOff: 0, lenSecEst: 0 });
+      this.curSlot = 0;
+      this.curAddr = 0;
+      this.bankL = 0; this.bankR = 0;
+      this.bankingEnabled = false;
+      this.bankFromCommand = false;
+      this.cyc = 0;
+      this.lastL = 0; this.lastR = 0;
+    }
+
+    /** VGMデータブロック 0x89(MultiPCM ROM)。 */
+    loadRom(romSize, start, data) {
+      let rom = this.rom;
+      const need = Math.max(romSize >>> 0, start + data.length);
+      if (!rom || rom.length < need) { const n = new Uint8Array(need); if (rom) n.set(rom, 0); rom = this.rom = n; }
+      rom.set(data, start);
+      this._pitchCache.clear();
+    }
+    // ★リップ欠陥の救済(OutRunners等のMulti32): ブート時(ログ開始前)にバンクが設定済みで
+    // 0xC3がVGMに1つも無いのに、サンプル表はバンク窓(0x100000-0x1FFFFF)経由のアドレスを指す。
+    // トラックごとにバンクが違い(Mega Driver=0x380000/Splash Wave=0x180000等)、ROMデータ
+    // ブロックは物理位置に置かれる。「窓が空なら〜」の事前判定はSplash Wave(物理0x180000台=
+    // 窓の上半分と重なる位置にデータ)で誤爆したため、**キーオン時の遅延検証**にする:
+    // マッピング先が空(先頭2KBが全ゼロ)のとき、データが実在する0x80000境界バンクを
+    // 全候補から探して(非ゼロ密度最大)その窓半分に採用する。
+    // 本物の0xC3が来た曲(Model 1/2等)は探索しない(空=本当に無音データかもしれないため)。
+    _findAutoBank(start, len) {
+      const rom = this.rom;
+      const off = start & 0x7FFFF;
+      const density = (base) => {
+        if (base + off >= rom.length) return -1;
+        let nz = 0;
+        const n = Math.min(len, 2048);
+        for (let i = 0; i < n; i += 16) if (rom[base + off + i]) nz++;
+        return nz;
+      };
+      let best = -1, bestBase = -1;
+      for (let base = 0; base + 0x80000 <= rom.length; base += 0x80000) {
+        const d = density(base);
+        if (d > best) { best = d; bestBase = base; }
+      }
+      return best > 8 ? bestBase : -1; // それらしいデータが無ければ諦める
+    }
+    _autoBankAtKeyon(c) {
+      if (this.bankFromCommand || !this.rom || this.rom.length <= 0x200000) return;
+      if (c.start < 0x100000 || c.start >= 0x200000) return;
+      // 現在のマッピング先にデータがあるなら何もしない
+      let nz = 0;
+      const n = Math.min(c.smpLen, 2048);
+      for (let i = 0; i < n; i += 16) if (this.rom[c.physStart + i]) nz++;
+      if (nz > 8) return;
+      const base = this._findAutoBank(c.start, c.smpLen);
+      if (base < 0) return;
+      if (c.start & 0x080000) this.bankR = base; else this.bankL = base;
+      this.bankingEnabled = true;
+      c.physStart = this._mapAddr(c.start);
+    }
+
+    /** セガバンキング(VGM 0xC3): bit0=Lバンク(0x100000-0x17FFFF)、bit1=Rバンク(0x180000-) */
+    bankWrite(sel, val) {
+      if (sel & 1) this.bankL = (val << 16) >>> 0;
+      if (sel & 2) this.bankR = (val << 16) >>> 0;
+      this.bankingEnabled = true;
+      this.bankFromCommand = true; // 本物の0xC3がある曲では遅延自動バンク探索をしない
+    }
+    // 論理→物理アドレス。★バンキングは0xC3書込みがあった曲だけ有効(VGMPlayのSegaBanking
+    // フラグ相当)。サンプルアドレスは22bit=4MB直接参照でき、OutRunners等はバンク無しで
+    // 0x100000以上を直に指す。無条件適用するとbank=0の別領域を読んで無音/ゴミになる。
+    _mapAddr(addr) {
+      if (this.bankingEnabled && addr >= 0x100000) {
+        return ((addr & 0x080000) ? this.bankR : this.bankL) | (addr & 0x7FFFF);
+      }
+      return addr;
+    }
+    _read(addr) {
+      const a = this._mapAddr(addr >>> 0);
+      return this.rom && a < this.rom.length ? this.rom[a] : 0;
+    }
+
+    /** ポート書込み(VGM 0xB5 aa dd: aa=0データ/1スロット選択/2レジスタ選択) */
+    write(port, val) {
+      val &= 0xFF;
+      switch (port & 7) {
+        case 1: this.curSlot = VALUE_TO_SLOT[val & 0x1F]; break;
+        case 2: this.curAddr = Math.min(7, val); break;
+        case 0: {
+          const i = this.curSlot;
+          if (i < 0) break;
+          this._writeSlot(this.ch[i], this.curAddr, val);
+          break;
+        }
+      }
+    }
+
+    _writeSlot(c, reg, val) {
+      c.regs[reg] = val;
+      switch (reg) {
+        case 0: c.pan = (val >> 4) & 0xF; break;
+        case 1: { // サンプル番号下位。★発音中は即時反映しない(MAMEは即時だが、キーオン前の
+          // 数サンプル間、旧ノートが新サンプルのアドレス空間を読んでフルスケールのゴミを
+          // 出す=Virtua Racingのプチノイズ実測1.1の正体)。キーオン時に regs[1]/regs[2] から
+          // 読み直すので、ここでは未発音スロットだけ即時ロード(表示用)。
+          if (!c.playing) this._loadSample(c, val | ((c.regs[2] & 1) << 8));
+          break;
+        }
+        case 2: case 3: { // ピッチ: F-number 10bit + oct 4bit(-1バイアス、線形F-number)
+          const octRaw = ((c.regs[3] >> 4) - 1) & 0xF;
+          c.octSigned = octRaw >= 8 ? octRaw - 16 : octRaw;
+          const fnum = ((c.regs[3] & 0xF) << 6) | (c.regs[2] >> 2);
+          c.step = (1024 + fnum) / 1024 * Math.pow(2, c.octSigned);
+          break;
+        }
+        case 4: // キーオン/オフ
+          if (val & 0x80) {
+            this._loadSample(c, c.regs[1] | ((c.regs[2] & 1) << 8)); // サンプル情報はここでラッチ
+            c.playing = true;
+            c.pos = 0; c.frac = 0;
+            c.egState = EG_ATTACK;
+            // ★EGは現在レベルからアタック(0リセットすると、リリース途中のスロットへの
+            //   再キーオンで振幅が一瞬0へ飛びプチノイズになる)
+            c.egRate = this._egStep(c.ar, c, false);
+            c.seq++;
+            c.physStart = this._mapAddr(c.start);
+            this._autoBankAtKeyon(c); // リップ欠陥の救済(マッピング先が空ならバンク探索)
+            this._estimateLen(c);
+          } else if (c.playing) {
+            // RR=0xFも即時停止でなく最速リリース(ElSemi: rate 63=0.45ms)。即時0だと
+            // 波形途中でフルスケール級のハードカット=プチノイズになる(Virtua Racing実測1.1)
+            c.egState = EG_RELEASE;
+            c.egRate = this._egStep(Math.max(1, c.rr), c, true);
+          }
+          break;
+        case 5: { // TL(0.375dB/step)。★bit0=0が「徐々に遷移」、bit0=1が「即時」(MAME準拠。
+          // 当初極性を逆にしていて、ドライバのフェード書込み(0xfe等)が即時-47dBカット=
+          // フルスケール級プチノイズになっていた。Virtua Racing実測: TLだけをスロット5本へ
+          // 一斉書込みするフェード手順)
+          c.tlDestIdx = (val >> 1) & 0x7F;
+          if (val & 1) c.tlIdx = c.tlDestIdx;
+          break;
+        }
+        // r6/r7: LFO未実装
+      }
+    }
+
+    _loadSample(c, num) {
+      c.smpNum = num;
+      const a = num * 12;
+      const b = (o) => this._read(a + o);
+      c.fmt = (b(0) >> 6) & 3; // 0=8bit(12bitは未実装。セガ系ROMは8bit)
+      c.start = ((b(0) << 16) | (b(1) << 8) | b(2)) & 0x3FFFFF;
+      c.loop = (b(3) << 8) | b(4);
+      c.end = 0xFFFF - ((b(5) << 8) | b(6)); // 格納値は負の長さ(MAME: 0xFFFF - 値。off-by-oneでループ末尾に1バイト余分に入るとユニゾンベースのループ折返しが同時クリック化する)
+      c.ar = b(8) >> 4; c.d1r = b(8) & 0xF;
+      c.dl = b(9) >> 4; c.d2r = b(9) & 0xF;
+      c.krs = b(10) >> 4; c.rr = b(10) & 0xF;
+      if (c.end <= 0 || c.end > 0x10000) c.end = 0x10000;
+      if (c.loop >= c.end) c.loop = 0;
+      c.smpLen = c.end;
+      c.loopOff = c.loop;
+    }
+
+    // EGレート(4×値+キースケール)→ 1出力サンプルあたりの線形インデックス増分
+    _egStep(val, c, decay) {
+      if (val <= 0) return 0; // 保持
+      const ks = (c.krs === 0xF) ? 0 : Math.max(0, Math.min(15, 2 * c.krs + c.octSigned));
+      const r = Math.max(0, Math.min(63, 4 * val + ks));
+      let ms = BASE_TIMES_MS[r];
+      if (ms <= 0) return 0;
+      if (decay) ms *= AR2DR;
+      return EG_MAX / (ms / 1000 * this.sampleRate);
+    }
+    // DL(3dB/段)→線形インデックスの目標値
+    _dlTarget(c) {
+      const db = c.dl >= 15 ? DB_RANGE : c.dl * 3;
+      return Math.max(0, EG_MAX - db * EG_MAX / DB_RANGE);
+    }
+    // キーオン時のEG可聴時間の見積り(regsOnlyキャプチャの発音区間窓用。
+    // 全サンプルループなので「終わり」はEGが決める。D2R=0(保持)ならInfinity)
+    _estimateLen(c) {
+      // ★Infinity×0=NaNに注意(D1R=0かつDL=0のサステイン音で発生し、キャプチャの
+      //   発音窓が f < NaN=false で即死していた)。段ごとに有限性を確認して合算する。
+      const t = (val, decay) => {
+        const step = this._egStep(val, c, decay);
+        return step > 0 ? EG_MAX / step / this.sampleRate : Infinity;
+      };
+      const dlDb = c.dl >= 15 ? DB_RANGE : c.dl * 3;
+      const tA = t(c.ar, false);
+      let sec = tA === Infinity ? 0 : tA; // AR保持は_egAdvance側で即時扱いなので0
+      if (dlDb > 0) {
+        const tD1 = t(c.d1r, true);
+        if (tD1 === Infinity) { c.lenSecEst = Infinity; return; } // ディケイ1が進まない=持続
+        sec += tD1 * (dlDb / DB_RANGE);
+        if (dlDb >= DB_RANGE - 6) { c.lenSecEst = sec; return; } // DLでほぼ無音
+      }
+      const tD2 = t(c.d2r, true);
+      c.lenSecEst = tD2 === Infinity ? Infinity : sec + tD2 * ((DB_RANGE - dlDb) / DB_RANGE);
+      // loop=0のワンショットはサンプル終端でも終わる(EG見積りとの短い方)
+      if (!c.loop && c.step > 0) {
+        const smpSec = c.smpLen / (c.step * this.sampleRate);
+        if (smpSec < c.lenSecEst) c.lenSecEst = smpSec;
+      }
+    }
+
+    _egAdvance(c) {
+      switch (c.egState) {
+        case EG_ATTACK:
+          c.egVol += c.egRate || EG_MAX; // レート0(保持)はアタックだけ即時扱い
+          if (c.egVol >= EG_MAX) { c.egVol = EG_MAX; c.egState = EG_DECAY1; c.egRate = this._egStep(c.d1r, c, true); c.egTarget = this._dlTarget(c); }
+          break;
+        case EG_DECAY1:
+          c.egVol -= c.egRate;
+          if (c.egVol <= c.egTarget) { c.egVol = c.egTarget; c.egState = EG_DECAY2; c.egRate = this._egStep(c.d2r, c, true); }
+          break;
+        case EG_DECAY2:
+        case EG_RELEASE:
+          c.egVol -= c.egRate;
+          if (c.egVol <= 0) { c.egVol = 0; c.playing = false; c.egState = EG_OFF; }
+          break;
+      }
+    }
+    // 線形インデックス→ゲイン(0〜-96dB指数変換)
+    _egGain(c) {
+      if (c.egVol >= EG_MAX) return 1;
+      if (c.egVol <= 0) return 0;
+      return Math.pow(10, -(EG_MAX - c.egVol) * DB_RANGE / EG_MAX / 20);
+    }
+
+    _calcSample() {
+      let l = 0, r = 0;
+      if (this.rom) {
+        for (let i = 0; i < NUM_CH; i++) {
+          const c = this.ch[i];
+          if (!c.playing) continue;
+          // 位置進行。★loopオフセット0は「ループ」ではなく**ワンショット=終端で停止**
+          // (OutRunners「Mega Driver」9秒のギターベンドで発覚: loop0のまま先頭へ巻き戻すと
+          // 「切れてまた頭から再生」になる。実測: loop0ノートの中央値はキーオフが終端の
+          // 少し前(p50 -0.1〜0秒)=ドライバはワンショット自然終了前提で、終端後キーオフも
+          // 9%あるが実盤FLACにリスタート音は無い)。loop>0のみ末尾ループ。
+          c.frac += c.step;
+          const adv = c.frac | 0;
+          if (adv) {
+            c.frac -= adv;
+            c.pos += adv;
+            if (c.pos >= c.end) {
+              if (!c.loop) { c.playing = false; c.egState = EG_OFF; continue; }
+              while (c.pos >= c.end) c.pos -= c.end - c.loop;
+            }
+          }
+          this._egAdvance(c);
+          if (!c.playing) continue;
+          // TL補間(MAME: 減衰減少=音量上げは78.2ms/フルレンジ、増加=下げは156.4ms)
+          if (c.tlIdx !== c.tlDestIdx) {
+            if (c.tlIdx > c.tlDestIdx) {
+              c.tlIdx = Math.max(c.tlDestIdx, c.tlIdx - 128 / (0.0782 * this.sampleRate));
+            } else {
+              c.tlIdx = Math.min(c.tlDestIdx, c.tlIdx + 128 / (0.1564 * this.sampleRate));
+            }
+          }
+          if (this.mute[i]) continue;
+          const s0 = ((this._read(c.start + c.pos) << 24) >> 24);
+          const s1 = ((this._read(c.start + (c.pos + 1 >= c.end ? c.loop : c.pos + 1)) << 24) >> 24);
+          const s = (s0 + (s1 - s0) * c.frac) * 256; // 線形補間(MAME準拠)
+          const g = this._egGain(c) * Math.pow(10, -c.tlIdx * 0.375 / 20) * this.vol[i];
+          // パン: 0=中央、1-7=右寄せ(左を3dB/段減衰)、9-15=左寄せ、8=両ミュート相当
+          const p = c.pan >= 8 ? c.pan - 16 : c.pan;
+          const attL = p > 0 ? Math.pow(10, -p * 3 / 20) : (p === -8 ? 0 : 1);
+          const attR = p < 0 ? Math.pow(10, p * 3 / 20) : 1;
+          l += s * g * attL;
+          r += s * g * attR;
+        }
+      }
+      // 1chフルスケール≒32767。28ch合算を±1.0程度へ(実曲の同時発音を考慮した経験値)
+      this.lastL = l / (32768 * 3);
+      this.lastR = r / (32768 * 3);
+    }
+
+    clock() {
+      if (++this.cyc < this.cyclesPerSample) return;
+      this.cyc = 0;
+      this._calcSample();
+    }
+    mixSample() { return { left: this.lastL, right: this.lastR }; }
+
+    /** 再生レート(1秒あたりのサンプルバイト数) */
+    playRate(i) { return this.ch[i].step * this.sampleRate; }
+
+    /** サンプル(物理[start,end)、ループ点=startからのオフセットloopOff)の基本周期解析
+     *  (キャッシュ)。他チップと同じ(kind,start,end)署名=手動キャリブレーション互換。
+     *  全サンプルループなので detectCps 失敗時は loopCps(ループ因数分解)へ。 */
+    samplePitch(kind, start, end, loopOff) {
+      if (start === undefined || end === undefined || !(end > start) || !this.rom) return null;
+      const key = start + ':' + end;
+      let r = this._pitchCache.get(key);
+      if (r) return r;
+      const U = Emu.SamplePitchUtil;
+      const len = end - start;
+      const pcm = this._decodeSample(start, end);
+      let auto = U.detectCps(pcm);
+      let wavePcm = pcm;
+      if (auto.conf < 0.5 && loopOff > 0 && loopOff < len && (len - loopOff) >= 16 && (len - loopOff) <= 16384) {
+        const one = this._decodeSample(start + loopOff, end);
+        const r2 = U.loopCps(one);
+        if (r2) { auto = r2; wavePcm = one; }
+      }
+      r = { cps: auto.cps, conf: auto.conf, cpsAuto: auto.cps, confAuto: auto.conf, manual: false, wave: null,
+        lenBytes: pcm.length,
+        hash: U.sampleHash(this.rom, start, Math.min(end, start + 64 * 1024)) };
+      const t = U.getTuningMap()[r.hash];
+      if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
+      r.wave = U.makeSampleWave(wavePcm, r.conf >= 0.5 ? r.cps : 0);
+      // 打楽器/音階の手動上書きをconfへ反映(Emu.SamplePitchUtil。ロール/鍵盤/変換の
+      // 4箇所がこの1点で追随する)。キャッシュへ入れる前に適用する
+      Emu.SamplePitchUtil.applyKindOverride(r);
+      this._pitchCache.set(key, r);
+      return r;
+    }
+    _decodeSample(start, end) {
+      const rom = this.rom;
+      const n = Math.max(0, Math.min(end - start, 64 * 1024, rom.length - start));
+      const pcm = new Float32Array(n);
+      for (let i = 0; i < n; i++) pcm[i] = ((rom[start + i] << 24) >> 24) / 128;
+      return pcm;
+    }
+
+    /**
+     * スナップショットの sample({kind,start,end}) → デコード済みPCM(Float32Array、-1..1)。
+     * vgm2mmlのドラム→@DPCM変換が実サンプルを必要とするための公開口。
+     * ROMはこのチップ(=キャプチャWorker側)にしか無く、関数はpostMessageを越えられないので、
+     * キャプチャの最後にここを呼んで実データだけをメインスレッドへ渡す
+     * (src/emulator/vgmPlayer.js の collectUsedSamples 参照)。
+     */
+    /**
+     * 打楽器/音階の手動上書き。kind: 'drum' | 'pitch' | null(=自動へ戻す)。
+     * ピッチ解析の信頼度(conf)による自動判定が外れた曲を、ユーザーが耳で直すための口。
+     * 指定はサンプル内容のハッシュをキーに localStorage へ入る(setSampleTuningと同じ流儀。
+     * ROMアドレスと違い、同じ音なら別のゲーム/リビジョンでも効く)。
+     * ★confへの反映は Emu.SamplePitchUtil.applyKindOverride が samplePitch() の中で行うので、
+     *   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換が自動的に追随する。
+     */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      // 「音階として扱う」を選んでも、周期がまったく検出できていない(cps=0)サンプルは
+      // 使える音程が無い。呼び出し側へ知らせて基準音の手動補正を促す(黙って無視しない)
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.start + ':' + sample.end); // 次回参照で上書きを反映し直す
+      return { kind: kind || null, needsTuning: needsTuning };
+    }
+
+    samplePcm(sample) {
+      if (!sample) return null;
+      return this._decodeSample(sample.start, sample.end);
+    }
+
+    /** 手動ピッチ補正(表示専用)。他チップと同じlocalStorage永続化。 */
+    setSampleTuning(kind, start, end, cps) {
+      const r = this.samplePitch(kind, start, end);
+      if (!r) return null;
+      const U = Emu.SamplePitchUtil;
+      const map = U.getTuningMap();
+      if (cps && cps > 0) { map[r.hash] = cps; r.cps = cps; r.conf = 1; r.manual = true; }
+      else { delete map[r.hash]; r.cps = r.cpsAuto; r.conf = r.confAuto; r.manual = false; }
+      U.saveTuningMap(map);
+      r.wave = U.makeSampleWave(this._decodeSample(start, end), r.conf >= 0.5 ? r.cps : 0);
+      return r;
+    }
+  }
+
+  // 鍵盤表示用スナップショット(配列28要素、C352/QSoundと同じ3段階表示向け):
+  // { active, vol(EG×TL)、rawVol、panL/panR(0-15)、rate、seq、loop(常にtrue=Infinity側は
+  //   lenSecEstで判定)、lenSec(EG見積り)、pitchHz、pitchConf、pitchManual、waveData、sample }
+  Emu.snapshotMultiPCM = function (chip) {
+    const out = [];
+    for (let i = 0; i < NUM_CH; i++) {
+      const c = chip.ch[i];
+      const rate = chip.playRate(i);
+      // ライブはEG実値、regsOnlyキャプチャはEGが回らない(egVol=0のまま)のでTLのみで表示
+      // regsOnlyキャプチャ(EGが回らない=egVolが0のまま)はエンベロープ1扱い。
+      // ライブは実EGレベルをそのまま使う(★以前は床値0.05を敷いていて、リリース済み/
+      // ほぼ無音のスロットまで常時アクティブ=鍵盤の同時発光行が28本に張り付き、
+      // 描画負荷で表示/音声が追い付かなくなっていた。OutRunnersで発覚)。
+      // TLはランプ途中値でなく目標値(tlDestIdx)を表示する(regsOnlyではランプが
+      // 進まないため。78-156msの遷移は表示粒度では無視してよい)。
+      const egG = c.egState === EG_ATTACK && c.egVol === 0 ? 1 : chip._egGain(c);
+      const tlG = Math.pow(10, -c.tlDestIdx * 0.375 / 20);
+      const vol = Math.min(1, (c.playing ? egG : 0) * tlG);
+      const p = c.seq ? chip.samplePitch('multipcm', c.physStart, c.physStart + c.smpLen, c.loopOff) : null;
+      const pan = c.pan >= 8 ? c.pan - 16 : c.pan;
+      out.push({ active: c.playing && vol > 0.01 && rate > 0, vol, rawVol: Math.round(vol * 255), rawVolMax: 255,
+        panL: pan > 0 ? Math.max(0, 15 - pan * 2) : 15, panR: pan < 0 ? Math.max(0, 15 + pan * 2) : 15,
+        rate, seq: c.seq, loop: c.lenSecEst === Infinity, lenSec: c.lenSecEst,
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        waveData: p ? p.wave : null,
+        sample: c.seq ? { kind: 'multipcm', start: c.physStart, end: c.physStart + c.smpLen } : null });
+    }
+    return out;
+  };
+
+  Emu.MultiPCMAudio = MultiPCMAudio;
+
+  // ───────────────────────────────────────────────────────────────────────
+  // チャンネルプール式ドライバの割当逆算(ソフトウェアチャンネル合成)
+  //
+  // セガ系ドライバはスロットを共有プールとして扱い、ノートオンごとに次の空きスロットへ
+  // 巡回割当する(実測: 発音行がPCM1→28へ行進)。物理スロット表示は実機に忠実だが、
+  // 1本のメロディが行をまたいで散り、鍵盤/ロール/MML変換の可読性が壊れる。
+  // このクラスはスナップショット列(フレーム×スロット)を受け取り、
+  // 「音色(サンプル同定)が同じ・時間的に連続・音程が近い」ノートを同じ論理チャンネルへ
+  // 束ね直した同型のスナップショット列を返す(=下流の鍵盤/ロール/変換がそのまま使える)。
+  //
+  // 使い方: フレームごとに step(physSnap) → 論理スナップショット(同じ形の配列)。
+  // ライブ(rAF駆動)とキャプチャ(フレーム駆動)の両方から同じ実装を使う。
+  // 割当規則:
+  //  1) 発音中のノート(スロットi×キーオン通番seq)は同じ論理レーンに固定
+  //  2) 新しいノートは「同じ音色のレーンのうち、空いていて音程が近く直近に使ったもの」
+  //  3) 無ければ未使用レーン、それも無ければ最も昔に使ったレーンを奪う
+  Emu.PoolChannelRegrouper = class {
+    constructor(numCh) {
+      this.numCh = numCh;
+      this.lanes = [];
+      for (let i = 0; i < numCh; i++) this.lanes.push({
+        instKey: null, boundSlot: -1, boundSeq: -1, lastStep: -1e9, lastMidi: 0, outSeq: 0 });
+      this.stepCount = 0;
+      this._idle = { active: false, vol: 0, rawVol: 0, rawVolMax: 255, panL: 15, panR: 15,
+        rate: 0, seq: 0, loop: false, lenSec: 0, pitchHz: 0, pitchConf: 0, pitchManual: false,
+        waveData: null, sample: null };
+    }
+    step(snap) {
+      this.stepCount++;
+      const lanes = this.lanes;
+      const out = new Array(this.numCh);
+      const slotLane = new Array(snap.length).fill(-1);
+      // 1) 既存バインドの継続判定
+      for (let li = 0; li < lanes.length; li++) {
+        const L = lanes[li];
+        if (L.boundSlot < 0) continue;
+        const c = snap[L.boundSlot];
+        if (c && c.active && c.seq === L.boundSeq) {
+          slotLane[L.boundSlot] = li;
+        } else {
+          if (c && c.pitchHz > 0) L.lastMidi = 69 + 12 * Math.log2(c.pitchHz / 440);
+          L.lastStep = this.stepCount;
+          L.boundSlot = -1; L.boundSeq = -1;
+        }
+      }
+      // 2) 新規ノートの割当
+      for (let s = 0; s < snap.length; s++) {
+        const c = snap[s];
+        if (!c || !c.active || slotLane[s] >= 0) continue;
+        const instKey = c.sample ? (c.sample.start + ':' + c.sample.end) : 'x';
+        const midi = c.pitchHz > 0 ? 69 + 12 * Math.log2(c.pitchHz / 440) : null;
+        let best = -1, bestScore = -Infinity;
+        let firstUnused = -1, oldest = -1, oldestStep = Infinity;
+        for (let li = 0; li < lanes.length; li++) {
+          const L = lanes[li];
+          if (L.boundSlot >= 0) continue; // 発音中レーンは奪わない
+          if (L.instKey === null) { if (firstUnused < 0) firstUnused = li; continue; }
+          if (L.lastStep < oldestStep) { oldestStep = L.lastStep; oldest = li; }
+          if (L.instKey !== instKey) continue;
+          // 同音色: 直近使用ほど・音程が近いほど高得点(メロディの連続性を優先)
+          const recency = -(this.stepCount - L.lastStep) * 0.05;
+          const pitchDist = (midi !== null && L.lastMidi) ? -Math.abs(midi - L.lastMidi) : 0;
+          const score = recency + pitchDist;
+          if (score > bestScore) { bestScore = score; best = li; }
+        }
+        // マルチサンプル楽器(音程ごとに別サンプル=Outfoxiesのコーラス等)対策:
+        // 同音色レーンが無くても、直近(30ステップ≒0.5秒)に空いたレーンで音程が近ければ
+        // 同じ楽器の続きとみなして引き継ぐ(音程なしノート=ドラムは対象外なので
+        // ドラムがメロディレーンへ混ざることはない)
+        if (best < 0 && midi !== null) {
+          let jScore = -Infinity;
+          for (let li2 = 0; li2 < lanes.length; li2++) {
+            const L2 = lanes[li2];
+            if (L2.boundSlot >= 0 || L2.instKey === null || !L2.lastMidi) continue;
+            const age = this.stepCount - L2.lastStep;
+            if (age > 30) continue;
+            const d = Math.abs(midi - L2.lastMidi);
+            if (d > 7) continue;
+            const sc = -age * 0.1 - d;
+            if (sc > jScore) { jScore = sc; best = li2; }
+          }
+        }
+        const li = best >= 0 ? best : (firstUnused >= 0 ? firstUnused : oldest);
+        if (li < 0) continue; // 全レーン発音中(スロット数=レーン数なので通常起きない)
+        const L = lanes[li];
+        L.instKey = instKey;
+        L.boundSlot = s; L.boundSeq = c.seq;
+        if (midi !== null) L.lastMidi = midi;
+        L.outSeq++;
+        slotLane[s] = li;
+      }
+      // 3) 出力(論理seq=レーン内通番。ロールのリトリガー検出が正しく効くように)
+      for (let li = 0; li < lanes.length; li++) {
+        const L = lanes[li];
+        if (L.boundSlot >= 0) {
+          const c = snap[L.boundSlot];
+          out[li] = Object.assign({}, c, { seq: L.outSeq });
+        } else {
+          out[li] = Object.assign({}, this._idle, { seq: L.outSeq });
+        }
+      }
+      return out;
+    }
+  };
 })(globalThis);
 
 /*
@@ -7999,7 +9943,12 @@
  *   ラッパー、ADPCM-A/B=ymfm移植。ROMはデータブロック0x82/0x83)+AY8910Audio(SSG流用)、
  *   YM2151(OPM、アーケード/X68000)=expansion/ym2151.js(コマンド0x54、デュアル2個目=0xA4)、
  *   GA20(Irem M92/M107 PCM)=expansion/ga20.js(コマンド0xBF、ROMはデータブロック0x93)、
- *   SegaPCM(OutRun/After Burner等)=expansion/segapcm.js(コマンド0xC0、ROMはデータブロック0x80)
+ *   SegaPCM(OutRun/After Burner等)=expansion/segapcm.js(コマンド0xC0、ROMはデータブロック0x80)、
+ *   C352(ナムコ System 11/12/22等)=expansion/c352.js(コマンド0xE1、ROMはデータブロック0x92)、
+ *   OKIM6258(X68000 ADPCM)=expansion/okim6258.js(コマンド0xB7、データはDACストリーム0x17経由)、
+ *   QSound(カプコンCPS1ダッシュ/CPS2)=expansion/qsound.js(コマンド0xC4、ROMはデータブロック0x8F)、
+ *   OKIM6295(東亜プラン/ライジング等)=expansion/okim6295.js(コマンド0xB8、ROMはデータブロック0x8B)、
+ *   MultiPCM(セガModel 1/2/Multi 32)=expansion/multipcm.js(コマンド0xB5、バンク0xC3、ROMは0x89)
  * ヘッダのクロックが非ゼロでも未実装のチップは、コマンド長規則で読み飛ばすだけ
  * (ROADMAP.md VGM節: 全チップ実装は不要)。
  *
@@ -8042,7 +9991,7 @@
   // 他形式(MD全体0.13、SPC基準)に近づくよう1.0(実測: Metal Slug 0.17〜0.21、Last Resort 0.10〜0.12、
   // Neo Turf Masters 0.29〜0.42=元々ホットな曲、ピークはリミッタ任せ)。SSGはFMに対して MAME neogeo
   // ドライバのルーティング比(SSG 0.28 : FM 0.98)を目安に0.8(暫定。実機録音との比較は未実施)。
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ga20: 3.0, segapcm: 2.0, c140: 1.0 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 1.0, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -8304,6 +10253,88 @@
     };
   }
 
+  // C352(Namco System 11/12/22/NB-1/2/ND-1): 32ch PCM(expansion/c352.js)。コマンドは
+  // 0xE1 aa bb dd ee(レジスタ=aabb 16bitワード、aaのbit7=デュアル2個目、データ=ddee)、
+  // ROMはデータブロック0x92。サンプルレート=クロック/分周(ヘッダ0xD6の値×4、0=288)。
+  function makeC352Adapter(info) {
+    const chip = new Emu.C352Audio(info.clock, info.c352Div || 288);
+    return {
+      id: 'c352', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.c352,
+      write(reg, dd) { chip.write(reg, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.c352) Emu.applyMute(chip.mute, e.c352); },
+      applyVolume(v) { const e = v.expansion || v; if (e.c352) Emu.applyVolume(chip.vol, e.c352); }
+    };
+  }
+
+  // QSound(カプコンCPS1ダッシュ/CPS2): 16ch PCM(expansion/qsound.js)。コマンドは
+  // 0xC4 mm ll rr(値=mmll、レジスタ=rr)、ROMはデータブロック0x8F。デュアルは実機に無い。
+  function makeQsoundAdapter(info) {
+    const chip = new Emu.QSoundAudio(info.clock);
+    return {
+      id: 'qsound', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.qsound,
+      write(reg, dd) { chip.write(reg, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.qsound) Emu.applyMute(chip.mute, e.qsound); },
+      applyVolume(v) { const e = v.expansion || v; if (e.qsound) Emu.applyVolume(chip.vol, e.qsound); }
+    };
+  }
+
+  // MultiPCM(セガModel 1/2/Multi 32の28ch PCM): expansion/multipcm.js。コマンドは
+  // 0xB5 aa dd(aa=ポート0-2、bit7=デュアル2個目)、バンクは0xC3 cc bbaa(専用case)、
+  // ROMはデータブロック0x89。
+  function makeMultiPcmAdapter(info) {
+    // クロックはヘッダ値をそのまま使う(サンプルレート=clock/180。分周の根拠は
+    // multipcm.jsコンストラクタのコメント参照。一時期「Multi32はヘッダ×4/3」補正を
+    // 入れたが、実盤FLACのクロマ照合で「分周180+ヘッダそのまま」が正と確定し撤去)。
+    const chip = new Emu.MultiPCMAudio(info.clock);
+    return {
+      id: 'multipcm', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.multipcm,
+      write(port, dd) { chip.write(port, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.multipcm) Emu.applyMute(chip.mute, e.multipcm); },
+      applyVolume(v) { const e = v.expansion || v; if (e.multipcm) Emu.applyVolume(chip.vol, e.multipcm); }
+    };
+  }
+
+  // OKIM6295(東亜プラン/ライジング等の4ch ADPCM): expansion/okim6295.js。コマンドは
+  // 0xB8 aa dd(aaのbit7=デュアル2個目、aa=仮想レジスタ: 0=コマンド/0x0F=バンク/
+  // 0x0E,0x10-0x13=NMK112)。ROMはデータブロック0x8B、pin7(分周132/165)はクロックbit31。
+  function makeOkim6295Adapter(info) {
+    const chip = new Emu.OKIM6295Audio(info.clock, !!info.pin7);
+    return {
+      id: 'okim6295', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.okim6295,
+      write(reg, dd) { chip.write(reg, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.okim6295) Emu.applyMute(chip.mute, e.okim6295); },
+      applyVolume(v) { const e = v.expansion || v; if (e.okim6295) Emu.applyVolume(chip.vol, e.okim6295); }
+    };
+  }
+
+  // OKIM6258(Sharp X68000 ADPCM): 1ch ストリーミングADPCM(expansion/okim6258.js)。
+  // コマンドは 0xB7 aa dd(aaのbit7=デュアル2個目)。ROMは持たず、データは
+  // DACストリーム制御(0x90-0x95、chipType 0x17)がデータバンク(type 0x04)から
+  // データレジスタ(offset 1)へ配送する。初期分周はヘッダ0x94のflags。
+  function makeOkim6258Adapter(info) {
+    const chip = new Emu.OKIM6258Audio(info.clock, info.okiFlags || 0);
+    return {
+      id: 'okim6258', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.okim6258,
+      write(reg, dd) { chip.write(reg, dd); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.okim6258) Emu.applyMute(chip.mute, e.okim6258); },
+      applyVolume(v) { const e = v.expansion || v; if (e.okim6258) Emu.applyVolume(chip.vol, e.okim6258); }
+    };
+  }
+
   function makePwmAdapter(info) {
     const chip = new Emu.PWM32XAudio();
     return {
@@ -8339,7 +10370,9 @@
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
     sn76489: makeSnAdapter, ym2612: makeYm2612Adapter, pwm: makePwmAdapter,
     rf5c68: makeRfAdapter('rf5c68'), rf5c164: makeRfAdapter('rf5c164'), ym2610: makeYm2610Adapter,
-    ym2151: makeYm2151Adapter, ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter
+    ym2151: makeYm2151Adapter, ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter,
+    c352: makeC352Adapter, okim6258: makeOkim6258Adapter, qsound: makeQsoundAdapter,
+    okim6295: makeOkim6295Adapter, multipcm: makeMultiPcmAdapter
   };
 
   // ---------------------------------------------------------------------------
@@ -8416,6 +10449,10 @@
         // 刈り=「PCMの抜けが弱い」の実体だった(2026-08-28)。比率を保ったまま両チップ×0.5で
         // 介入0%・RMS-13〜-15dB(MD/SPC基準近傍)に収める。
         if ((info.id === 'ym2151' || info.id === 'ga20') && h.chips.ym2151 && h.chips.ga20) a.gain *= 0.5;
+        // 東亜プラン2/ライジング(YM2151+OKIM6295): FM:ADPCM比は既定ゲイン比でRMSほぼ1:1
+        // (Battle Garegga実測 0.197:0.198)だが合算が過熱(RMS0.28/ピーク1.41)するため、
+        // アイレムM92と同じ「比率を保ったまま両チップ縮小」で×0.7(RMS-14dB級/ピーク~1.0)。
+        if ((info.id === 'ym2151' || info.id === 'okim6295') && h.chips.ym2151 && h.chips.okim6295) a.gain *= 0.7;
         this.adapters.push(a); this.adapterById[info.id] = a;
         if (info.dual) {
           // デュアルチップ(クロック値bit30): 2個目は同じ設定で別インスタンス。クロックは
@@ -8428,6 +10465,7 @@
           if (info.id === 'sn76489' && h.chips.ym2612) b.gain *= 0.5;
           if (info.id === 'ym2151' && h.chips.c140) b.gain *= 1.7;
           if ((info.id === 'ym2151' || info.id === 'ga20') && h.chips.ym2151 && h.chips.ga20) b.gain *= 0.5;
+          if ((info.id === 'ym2151' || info.id === 'okim6295') && h.chips.ym2151 && h.chips.okim6295) b.gain *= 0.7;
           b.second = true;
           this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
         }
@@ -8478,10 +10516,11 @@
           case 0x67: { // データブロック: 0x67 0x66 tt ss ss ss ss data...
             const type = d[p + 1];
             let size = (d[p + 2] | (d[p + 3] << 8) | (d[p + 4] << 16) | (d[p + 5] << 24)) >>> 0;
-            size &= 0x7FFFFFFF; // bit31 = デュアルチップ2個目のフラグ
+            const second = !!(size & 0x80000000); // bit31 = デュアルチップ2個目のROM/RAM
+            size &= 0x7FFFFFFF;
             const start = p + 6;
             const block = d.subarray(start, Math.min(d.length, start + size));
-            this._dataBlock(type, block);
+            this._dataBlock(type, block, second);
             this.pos = start + size; break;
           }
           case 0x50: this._writeSn(d[p], false); this.pos = p + 1; break;
@@ -8498,8 +10537,17 @@
           case 0xB9: this._chipWrite('huc6280', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB2: this._chipWrite('pwm', (d[p] >> 4) & 0x0F, ((d[p] & 0x0F) << 8) | d[p + 1], false); this.pos = p + 2; break; // 32X PWM: reg=a, 12bit値
           case 0xBF: this._chipWrite('ga20', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // GA20(Irem)
+          case 0xB7: this._chipWrite('okim6258', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // OKIM6258(X68000 ADPCM)
+          case 0xB8: this._chipWrite('okim6295', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // OKIM6295(4ch ADPCM)
+          case 0xB5: this._chipWrite('multipcm', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // MultiPCM(ポート0-2)
+          case 0xC3: { // MultiPCMセガバンキング: cc bb aa(値=aabb、ccのbit0/1=L/Rバンク、bit7=2個目)
+            const mp = this.adapterById[(d[p] & 0x80) ? 'multipcm_2' : 'multipcm'];
+            if (mp) mp.chip.bankWrite(d[p] & 0x7F, d[p + 1] | (d[p + 2] << 8));
+            this.pos = p + 3; break;
+          }
           case 0xB0: this._chipWrite('rf5c68', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB1: this._chipWrite('rf5c164', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          case 0xC4: this._chipWrite('qsound', d[p + 2], (d[p] << 8) | d[p + 1], false); this.pos = p + 3; break; // QSound: mm ll rr(値=mmll、レジスタ=rr)
           case 0xC0: { // SegaPCM: bbaa dd(offset=aabb、bit15=デュアル2個目)
             const off = d[p] | (d[p + 1] << 8);
             this._chipWrite('segapcm', off & 0x7FFF, d[p + 2], !!(off & 0x8000));
@@ -8509,6 +10557,7 @@
           case 0xC2: this._rfMemWrite('rf5c164', d[p] | (d[p + 1] << 8), d[p + 2]); this.pos = p + 3; break; // RF5C164 メモリ書込み
           case 0xD2: this._sccWrite(d[p] & 0x7F, d[p + 1], d[p + 2], !!(d[p] & 0x80)); this.pos = p + 3; break;
           case 0xD4: this._chipWrite('c140', ((d[p] & 0x7F) << 8) | d[p + 1], d[p + 2], !!(d[p] & 0x80)); this.pos = p + 3; break; // C140(Namco)
+          case 0xE1: this._chipWrite('c352', ((d[p] & 0x7F) << 8) | d[p + 1], (d[p + 2] << 8) | d[p + 3], !!(d[p] & 0x80)); this.pos = p + 4; break; // C352(Namco、16bitデータ)
           case 0x52: this._ymWrite(0, d[p], d[p + 1], false); this.pos = p + 2; break;
           case 0x53: this._ymWrite(1, d[p], d[p + 1], false); this.pos = p + 2; break;
           case 0xA2: this._ymWrite(0, d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2612
@@ -8577,8 +10626,15 @@
       this.ended = true;
     }
 
-    _dataBlock(type, block) {
+    // ROMサイズ(4)+開始アドレス(4)+データ、の共通形式で1チップに紐づくROMブロック(型→チップid)
+    static get ROM_BLOCK_CHIP() {
+      return { 0x80: 'segapcm', 0x89: 'multipcm', 0x8B: 'okim6295', 0x8D: 'c140', 0x8F: 'qsound', 0x92: 'c352', 0x93: 'ga20' };
+    }
+    // second: データブロックサイズのbit31=デュアルチップ2個目のROM/RAM(Batriderの
+    // デュアルOKIM6295等。以前は捨てて全部1個目へロードし、2個目のROMが1個目を上書きしていた)
+    _dataBlock(type, block, second) {
       this.dataBlocks.push({ type, size: block.length });
+      const ad = (id) => this.adapterById[second ? id + '_2' : id];
       if (type < 0x40) { // 非圧縮ストリーム(0x00=YM2612 PCM 等): typeごとに連結してバンクにする
         const bank = this.dataBanks[type] || (this.dataBanks[type] = { data: new Uint8Array(0), blocks: [] });
         const merged = new Uint8Array(bank.data.length + block.length);
@@ -8588,43 +10644,28 @@
         return;
       }
       if (type === 0xC2) { // NES APU RAM書込み: 先頭2バイト=開始アドレス
-        const nes = this.adapterById.nes;
+        const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
       if (type === 0xC0 || type === 0xC1) { // RF5C68(0xC0)/RF5C164(0xC1) 波形RAM書込み: 先頭2バイト=絶対アドレス
-        const rf = this.adapterById[type === 0xC0 ? 'rf5c68' : 'rf5c164'];
+        const rf = ad(type === 0xC0 ? 'rf5c68' : 'rf5c164');
         if (rf && block.length >= 2) rf.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
-      if (type === 0x82 || type === 0x83) { // YM2610 ADPCM-A(0x82) / ADPCM-B(0x83) ROM: ROMサイズ(4)+開始アドレス(4)+データ
-        const y = this.adapterById.ym2610;
+      if (type === 0x82 || type === 0x83) { // YM2610 ADPCM-A(0x82) / ADPCM-B(0x83) ROM: 共通形式(kind付き)
+        const y = ad('ym2610');
         if (y && block.length >= 8) {
           const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
           const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
           y.loadRom(type === 0x83 ? 'b' : 'a', romSize, start, block.subarray(8));
         }
       }
-      if (type === 0x93) { // GA20 ROM: ROMサイズ(4)+開始アドレス(4)+データ(0x82/0x83と同形式)
-        const g = this.adapterById.ga20;
-        if (g && block.length >= 8) {
+      const romChip = VgmPlayer.ROM_BLOCK_CHIP[type];
+      if (romChip) {
+        const a = ad(romChip);
+        if (a && block.length >= 8) {
           const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
           const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
-          g.loadRom(romSize, start, block.subarray(8));
-        }
-      }
-      if (type === 0x80) { // SegaPCM ROM: 同形式
-        const sp = this.adapterById.segapcm;
-        if (sp && block.length >= 8) {
-          const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
-          const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
-          sp.loadRom(romSize, start, block.subarray(8));
-        }
-      }
-      if (type === 0x8D) { // C140 ROM: 同形式
-        const cn = this.adapterById.c140;
-        if (cn && block.length >= 8) {
-          const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
-          const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
-          cn.loadRom(romSize, start, block.subarray(8));
+          a.loadRom(romSize, start, block.subarray(8));
         }
       }
       // その他(YM2612 PCM=0x00, 圧縮ブロック, 各種ROMダンプ)は未実装チップ向けなので保持しない
@@ -8698,6 +10739,7 @@
             const v16 = s.stepSize >= 2 ? (bank.data[s.pos + s.stepBase] | (bank.data[s.pos + s.stepBase + 1] << 8)) : v;
             this._chipWrite('pwm', s.port & 0x0F, v16 & 0xFFF, false);
           }
+          else if (s.chipType === 0x17) this._chipWrite('okim6258', s.cmd & 0x7F, v, s.second); // X68000 ADPCM: データレジスタ(通常cmd=0x01)へ1バイト
           // 他チップのストリーム(未実装チップ向け)は無視
           s.pos += s.stepSize;
         }
@@ -8828,8 +10870,18 @@
       ym2610fm: has('ym2610') ? { snapshots: [] } : null,
       ym2151: has('ym2151') ? { snapshots: [] } : null,
       ga20: has('ga20') ? { snapshots: [] } : null,
-      segapcm: has('segapcm') ? { snapshots: [] } : null,
-      c140: has('c140') ? { snapshots: [] } : null,
+      // snapshots=物理スロット、logical=割当逆算(ソフトウェアチャンネル合成、
+      // Emu.PoolChannelRegrouper)。ペア交互/巡回割当のドライバ対策で両方を常時保持する
+      segapcm: has('segapcm') ? { snapshots: [], logical: [] } : null,
+      c140: has('c140') ? { snapshots: [], logical: [] } : null,
+      c352: has('c352') ? { snapshots: [], logical: [] } : null,
+      okim6258: has('okim6258') ? { snapshots: [] } : null,
+      qsound: has('qsound') ? { snapshots: [], logical: [] } : null,
+      okim6295: has('okim6295') ? { snapshots: [] } : null,
+      // multipcm: snapshots=物理スロット(実機のまま)、logical=割当逆算(ソフトウェア
+      // チャンネル合成)。チャンネルプール式ドライバ対策で両方を常時保持し、
+      // 鍵盤/ロール/変換が表示モードに応じて選ぶ(Emu.PoolChannelRegrouper参照)
+      multipcm: has('multipcm') ? { snapshots: [], logical: [] } : null,
       pwm: has('pwm') ? { snapshots: [] } : null,
       rf5c164: has('rf5c164') ? { snapshots: [] } : null,
       rf5c68: has('rf5c68') ? { snapshots: [] } : null
@@ -8843,6 +10895,20 @@
     const spcmState = { seq: new Array(16).fill(0), end: new Array(16).fill(-1) };
     // C140: 同じ推定(キーオン/オフは明示レジスタなのでエッジは正確。ワンショット終端だけ窓で切る)
     const c140State = { seq: new Array(24).fill(0), end: new Array(24).fill(-1) };
+    // C352: 同上(キーオン/オフは0x202トリガで明示。ワンショット終端だけ窓で切る)
+    const c352State = { seq: new Array(32).fill(0), end: new Array(32).fill(-1) };
+    // QSound: 同上(キーオン/オフは音量/ピッチレジスタで明示。ワンショット終端だけ窓で切る)
+    const qsState = { seq: new Array(16).fill(0), end: new Array(16).fill(-1) };
+    // OKIM6295: 同上(全ワンショット。停止コマンドは明示、終端だけ窓で切る)
+    const okiState = { seq: new Array(4).fill(0), end: new Array(4).fill(-1) };
+    // MultiPCM: キーオン/オフは明示(r4)だが、キーオフ無しのワンショット(ドラム)はEGの
+    // ディケイで無音化する方式なので、キーオン時のEG可聴時間見積り(lenSec)で窓を切る
+    const mpcmState = { seq: new Array(28).fill(0), end: new Array(28).fill(-1) };
+    const mpcmRegrouper = data.multipcm ? new Emu.PoolChannelRegrouper(28) : null;
+    const spcmRegrouper = data.segapcm ? new Emu.PoolChannelRegrouper(16) : null;
+    const c140Regrouper = data.c140 ? new Emu.PoolChannelRegrouper(24) : null;
+    const c352Regrouper = data.c352 ? new Emu.PoolChannelRegrouper(32) : null;
+    const qsRegrouper = data.qsound ? new Emu.PoolChannelRegrouper(16) : null;
     let kssFrameWrites = [];
     const nesRegs = {};
     if (data.kss && data.kss.scc && data.kss.sccPlus) {
@@ -8913,6 +10979,7 @@
           c.active = c.active && f < st.end[i];
         }
         data.segapcm.snapshots.push(s);
+        data.segapcm.logical.push(spcmRegrouper.step(s));
       }
       if (data.c140) {
         const s = Emu.snapshotC140(player.adapterById.c140.chip);
@@ -8923,7 +10990,54 @@
           c.active = c.active && f < st.end[i];
         }
         data.c140.snapshots.push(s);
+        data.c140.logical.push(c140Regrouper.step(s));
       }
+      if (data.c352) {
+        const s = Emu.snapshotC352(player.adapterById.c352.chip);
+        const st = c352State;
+        for (let i = 0; i < 32; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = c.lenSec === Infinity ? Infinity : f + c.lenSec * FRAME_RATE; }
+          c.active = c.active && f < st.end[i];
+        }
+        data.c352.snapshots.push(s);
+        data.c352.logical.push(c352Regrouper.step(s));
+      }
+      if (data.qsound) {
+        const s = Emu.snapshotQSound(player.adapterById.qsound.chip);
+        const st = qsState;
+        for (let i = 0; i < 16; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = c.lenSec === Infinity ? Infinity : f + c.lenSec * FRAME_RATE; }
+          c.active = c.active && f < st.end[i];
+        }
+        data.qsound.snapshots.push(s);
+        data.qsound.logical.push(qsRegrouper.step(s));
+      }
+      if (data.multipcm) {
+        const s = Emu.snapshotMultiPCM(player.adapterById.multipcm.chip);
+        const st = mpcmState;
+        for (let i = 0; i < 28; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = c.lenSec === Infinity ? Infinity : f + c.lenSec * FRAME_RATE; }
+          c.active = c.active && f < st.end[i];
+        }
+        data.multipcm.snapshots.push(s);
+        data.multipcm.logical.push(mpcmRegrouper.step(s));
+      }
+      if (data.okim6295) {
+        const s = Emu.snapshotOKIM6295(player.adapterById.okim6295.chip);
+        const st = okiState;
+        for (let i = 0; i < 4; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = f + c.lenSec * FRAME_RATE; }
+          c.active = c.active && f < st.end[i];
+        }
+        data.okim6295.snapshots.push(s);
+      }
+      // OKIM6258: 再生/停止が制御レジスタ書込みで明示されるので推定不要(activeは正確)。
+      // 音程情報は無い(ストリーミングADPCM)のでロールはDMC式の疑似ノート表示のみ。
+      if (data.okim6258) data.okim6258.snapshots.push(Emu.snapshotOKIM6258(player.adapterById.okim6258.chip));
       if (data.ym2151) {
         // YM2612と同じ: 先読みはEGが進まないので発音判定/音量はレジスタ由来(keyOn/tlVol)へ差し替える
         const s = Emu.snapshotYM2151(player.adapterById.ym2151.chip);
@@ -8966,8 +11080,55 @@
     if (data.nes && player.adapterById.nes.ramLoaded) {
       data.nes.dpcmRom = player.adapterById.nes.ram.slice(0xC000, 0x10000);
     }
+    collectUsedSamples(data, player);
     return data;
   };
+
+  // ── 使われたサンプルの実PCMを取り出す(dpcmRomと同じ「最後に一度だけ」の考え方) ──
+  // サンプルROMはチップ側にしか無く、キャプチャはWorkerで走るうえ関数はpostMessageを
+  // 越えられないので、キャプチャの最後に「実際にキーオンされたサンプルだけ」をデコードして
+  // 実データとして持たせる。vgm2mmlのドラム→@DPCM変換(打点の合成)がこれを使う。
+  // 実測: 1曲あたり5〜13種・ROM生バイトで14〜252KB程度しか使われないので全部持ってよい。
+  const USED_SAMPLE_MAX_TOTAL = 16 * 1024 * 1024; // デコード後の合計サンプル数の上限(安全弁)
+  function collectUsedSamples(data, player) {
+    // [dataのキー, スナップショットからチャンネル配列を取り出す関数, adapterId]
+    const SRC = [
+      ['ga20', (s) => s, 'ga20'], ['segapcm', (s) => s, 'segapcm'],
+      ['c140', (s) => s, 'c140'], ['c352', (s) => s, 'c352'],
+      ['qsound', (s) => s, 'qsound'], ['okim6295', (s) => s, 'okim6295'],
+      ['multipcm', (s) => s, 'multipcm'],
+      // ★YM2610のアダプタはチップを .chip ではなく .fm で持つ(SSGと2個持ちのため)
+      ['ym2610fm', (s) => (s && s.adpcmA ? s.adpcmA.concat(s.adpcmB ? [s.adpcmB] : []) : null), 'ym2610', (a) => a.fm],
+    ];
+    let total = 0;
+    for (const [key, chansOf, adapterId, chipOf] of SRC) {
+      const entry = data[key];
+      const adapter = player.adapterById[adapterId];
+      const chip = adapter && (chipOf ? chipOf(adapter) : adapter.chip);
+      if (!entry || !entry.snapshots || !chip || !chip.samplePcm) continue;
+      const seen = new Map(); // 'kind:start:end' → sample
+      for (const fr of entry.snapshots) {
+        const chans = chansOf(fr);
+        if (!chans) continue;
+        for (const c of chans) {
+          if (!c || !c.sample) continue;
+          const k = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end;
+          if (!seen.has(k)) seen.set(k, c.sample);
+        }
+      }
+      if (!seen.size) continue;
+      const out = {};
+      for (const [k, sample] of seen) {
+        if (total >= USED_SAMPLE_MAX_TOTAL) break;
+        let pcm = null;
+        try { pcm = chip.samplePcm(sample); } catch (e) { pcm = null; }
+        if (!pcm || !pcm.length) continue;
+        total += pcm.length;
+        out[k] = pcm;
+      }
+      entry.samples = out;
+    }
+  }
 
   Emu.VgmPlayer = VgmPlayer;
   Emu.VGM_FRAME_RATE = FRAME_RATE;
@@ -9149,6 +11310,28 @@
   // 自動スクロールの余白(白鍵単位)と追従の速さ(1フレームあたり残差のこの割合だけ寄せる)
   const LANE_SCROLL_MARGIN = 1;
   const LANE_SCROLL_EASE = 0.15;
+  // スポットライト(案D): チャンネル一覧の行にホバー/クリックすると、ロール上でその行の
+  // ノートだけを原色・最前面で描き、他chはこの不透明度まで減光する。ミュート(=音も消える)
+  // とは別軸の「注目だけ」の仕組みで、PCM多chがドラムを叩いていて音符が重なるときに
+  // 「今どの行を見ているか」を切り分けるために使う。
+  const SPOTLIGHT_DIM_ALPHA = 0.16;
+  // ── ドラム区画(音程ロールと同じcanvasの低音側に置く) ─────────────
+  // 打楽器として鳴っているサンプルPCM(pcmSampleRow の drumKey)は音程軸に載せられないので、
+  // 音程鍵盤(MIDI_MIN=C1)より低音側に「1レーン=1サンプル」の区画を作ってそこへ置く。
+  // 音程軸の単位は白鍵1本ぶん(wk)で、ドラム1レーンは DRUM_LANE_WHITE 本ぶんの幅を持つ
+  // (白鍵と同じ幅だとラベルが入らないので少し広くしてある)。ドラムが1つも無い曲では
+  // レーン数0=区画の幅0になり、音程軸の座標は従来と完全に一致する。
+  // レーン割当そのもの(どのサンプルが何番レーンか・上限・溢れの扱い)は
+  // src/convert/drumMap.js に置いてある。vgm2mmlのドラム音符出力と同じ表を使うため。
+  const DRUM_LANE_WHITE = 1.5;  // ドラム1レーンの幅(白鍵何本ぶんか)
+  // レーンの色 = どの太鼓か。チャンネルの色(=どのスロットが鳴らしたか)とは別軸なので、
+  // 打点は「塗り=このレーン色 / 枠線=チャンネル色」の二重符号化で描く。プール式チップ
+  // (C140/C352/QSound/MultiPCM)は同じ太鼓が毎回別スロットへ移るため、色をchに割り当てると
+  // 太鼓の色が踊ってしまう。塗りをサンプル側に固定するとその問題が出ない。
+  const DRUM_LANE_COLORS = ['#e8564a', '#f0a232', '#4a9de8', '#9b6ef3', '#22b3a4', '#d94fa0',
+                            '#7a8a99', '#c2a03a', '#5ac47a', '#ff7fa8', '#8ab4ff', '#d0703a',
+                            '#59c2c9', '#b06ee0', '#9aa832', '#e06060'];
+  const DRUM_OTHER_COLOR = '#8a93a1'; // 「その他」レーン
   function loadLayoutSettings() {
     const out = Object.assign({}, LAYOUT_DEFAULTS);
     try {
@@ -9175,17 +11358,22 @@
   // 縦向きの写像は従来実装と同じ式(H - t)になるよう書いてあり、丸めまで含めて描画結果は不変。
   // visibleWhite: 音程軸に収める白鍵の本数(省略=鍵盤全体TOTAL_WHITE。チャンネルごとのレーンは
   // LANE_VISIBLE_WHITEで、表示窓の左端(低音側)の白鍵位置offsetPxは呼び出し側がkeyX()の結果から引く)
-  function makeRollGeom(orientation, W, H, visibleWhite) {
+  // nDrum: ドラム区画のレーン数(0=区画なし)。音程軸は [ドラム区画][音程鍵盤] の並びで、
+  // 全体の長さは (nDrum * DRUM_LANE_WHITE + TOTAL_WHITE) 白鍵ぶん。keyX()が返す音程側の
+  // 座標には drumOff(区画の幅px)を足して使う。
+  function makeRollGeom(orientation, W, H, visibleWhite, nDrum) {
     const vertical = orientation !== 'horizontal';
     const pitchLen = vertical ? W : H;
     const timeLen = vertical ? H : W;
-    const wk = pitchLen / (visibleWhite || TOTAL_WHITE);
+    const drumUnits = (nDrum || 0) * DRUM_LANE_WHITE;
+    const wk = pitchLen / (visibleWhite || (TOTAL_WHITE + drumUnits));
     const bk = Math.max(3, wk * 0.60);
     // 先読み時間幅(秒)と、秒→時間軸pxの変換。時間軸320pxのとき従来通り4秒/80px/秒になる
     const windowSec = timeLen / ROLL_PX_PER_SEC;
     const tPx = (sec) => (sec / windowSec) * timeLen;
     return {
       vertical, W, H, pitchLen, timeLen, wk, bk, windowSec, tPx,
+      nDrum: nDrum || 0, drumOff: drumUnits * wk, drumLaneW: DRUM_LANE_WHITE * wk,
       // 音程軸[pLo, pLo+pSize) × 時間軸[tLo, tHi) の矩形をcanvas座標{x,y,w,h}へ。
       // minT: 時間軸方向の最小サイズ(px)。短い音符も見えるように下限を設ける用途
       rect(pLo, pSize, tLo, tHi, minT) {
@@ -9198,6 +11386,20 @@
       // 点(p, t) → canvas座標
       point(p, t) { return vertical ? { x: p, y: H - t } : { x: t, y: H - p }; },
     };
+  }
+
+  // ドラム区画のレーン lane の音程軸上の範囲(px)。sub/subN を渡すと、レーンをsubN分割した
+  // うちの sub 番目(同時発音の横並び)の範囲を返す。
+  // note列クリックで「打楽器/音階の指定」を出す行(サンプルPCM系のチャンネル)。
+  // NA/NB=YM2610 ADPCM、GA=GA20、SP=SegaPCM、CN=C140、CS=C352、QS=QSound、
+  // OK=OKIM6295、MP=MultiPCM
+  const SAMPLE_ROW_RE = /^(N[AB]\d?|GA\d|SP\d+|CN\d+|CS\d+|QS\d+|OK\d|MP\d+)$/;
+
+  function drumLaneX(lane, sub, subN, laneW) {
+    const n = Math.max(1, subN || 1);
+    const s = Math.min(n - 1, Math.max(0, sub || 0));
+    const w = laneW / n;
+    return { x: lane * laneW + s * w, size: w };
   }
 
   const WHITE_IDX = [0,-1,1,-1,2,3,-1,4,-1,5,-1,6];
@@ -9385,6 +11587,20 @@
     // VGM: C140(CN1-24)。chip.mute[]はch 0-23
     const cn = id.match(/^CN(\d+)$/);
     if (cn) return { section: 'expansion', chip: 'c140', type: 'array', index: +cn[1] - 1 };
+    // VGM: C352(CS1-32)。chip.mute[]はch 0-31
+    const cs = id.match(/^CS(\d+)$/);
+    if (cs) return { section: 'expansion', chip: 'c352', type: 'array', index: +cs[1] - 1 };
+    // VGM: OKIM6258(X68000 ADPCM、1ch)。chip.mute[]は1要素
+    if (id === 'OKI') return { section: 'expansion', chip: 'okim6258', type: 'array', index: 0 };
+    // VGM: QSound(QS1-16)。chip.mute[]はch 0-15
+    const qs = id.match(/^QS(\d+)$/);
+    if (qs) return { section: 'expansion', chip: 'qsound', type: 'array', index: +qs[1] - 1 };
+    // VGM: OKIM6295(OK1-4)。chip.mute[]はch 0-3('OKI'=OKIM6258は上の完全一致で先に拾われる)
+    const ok = id.match(/^OK(\d)$/);
+    if (ok) return { section: 'expansion', chip: 'okim6295', type: 'array', index: +ok[1] - 1 };
+    // VGM: MultiPCM(MP1-28)。chip.mute[]はch 0-27('M5P1'等MMC5とは前方不一致)
+    const mp = id.match(/^MP(\d+)$/);
+    if (mp) return { section: 'expansion', chip: 'multipcm', type: 'array', index: +mp[1] - 1 };
     // VGM: YM2610(Neo Geo) FM(NF1-4)。内蔵SSGはKP1-3行(chip 'psg')を流用し、vgmPlayer.jsの
     // YM2610アダプタが e.psg を自分のSSGへ適用する
     const nf = id.match(/^NF(\d)$/);
@@ -9430,8 +11646,20 @@
     { header: 'YM2151 (OPM , X68000 / Arcade)', prefix: 'OM', name: (id) => 'FM' + id.slice(2) },
     // GA1-4は完全一致(ids)で拾う(GBの'GALL'と prefix 'GA' を衝突させない)
     { header: 'GA20 (Irem M92 / M107 PCM)', ids: { GA1: 'PCM1', GA2: 'PCM2', GA3: 'PCM3', GA4: 'PCM4' } },
-    { header: 'SegaPCM (315-5218 , OutRun / After Burner)', prefix: 'SP', name: (id) => 'PCM' + id.slice(2) },
-    { header: 'C140 (Namco System 2 / 21)', prefix: 'CN', name: (id) => 'PCM' + id.slice(2) },
+    // pool: サンプルPCM系はドライバがスロットをペア交互/巡回割当する曲がある
+    // (実測: SegaPCM 8-23%移動 / C140 37-100% / C352 74-79% / QSound 8-63% / MultiPCM 100%)。
+    // ヘッダに「合成ch/実機スロット」トグルを出し、割当逆算した表示・変換と選べるようにする
+    { header: 'SegaPCM (315-5218 , OutRun / After Burner)', prefix: 'SP', name: (id) => 'PCM' + id.slice(2), pool: 'segapcm' },
+    { header: 'C140 (Namco System 2 / 21)', prefix: 'CN', name: (id) => 'PCM' + id.slice(2), pool: 'c140' },
+    { header: 'C352 (Namco System 11 / 12 / 22)', prefix: 'CS', name: (id) => 'PCM' + id.slice(2), pool: 'c352' },
+    { header: 'OKIM6258 (MSM6258 , Sharp X68000)', ids: { OKI: 'ADPCM' } },
+    { header: 'QSound (DL-1425 , Capcom CPS2)', prefix: 'QS', name: (id) => 'PCM' + id.slice(2), pool: 'qsound' },
+    // ★prefix 'OK' は 'OKI'(OKIM6258)にも前方一致するが、完全一致(ids)が全グループ横断で
+    //   先に評価されるので衝突しない(getChannelDisplayの2段ループ参照)
+    { header: 'OKIM6295 (MSM6295 , Toaplan / Raizing etc.)', prefix: 'OK', name: (id) => 'ADPCM' + id.slice(2) },
+    // pool: チャンネルプール式(ドライバがボイスを巡回割当する)チップの印。ヘッダ行に
+    // 「実機スロット/合成ch」の表示モード切替を出す(_rebuildRows参照)
+    { header: 'MultiPCM (315-5560 , Sega Model 1 / 2)', prefix: 'MP', name: (id) => 'PCM' + id.slice(2), pool: 'multipcm' },
     // NF1-4は完全一致(ids)で先に拾う(N163のprefix 'N' と衝突させない)
     { header: 'YM2610 (OPNB , Neo Geo)', ids: { NF1: 'FM1', NF2: 'FM2', NF3: 'FM3', NF4: 'FM4', NF5: 'FM5', NF6: 'FM6',
         NA1: 'PCMA1', NA2: 'PCMA2', NA3: 'PCMA3', NA4: 'PCMA4', NA5: 'PCMA5', NA6: 'PCMA6', NB: 'PCMB' } }, // NA=ADPCM-A, NB=ADPCM-B
@@ -9441,10 +11669,10 @@
   ];
   function getChannelDisplay(id) {
     for (const g of CHANNEL_DISPLAY_GROUPS) {
-      if (g.ids && g.ids[id]) return { header: g.header, name: g.ids[id] };
+      if (g.ids && g.ids[id]) return { header: g.header, name: g.ids[id], pool: g.pool };
     }
     for (const g of CHANNEL_DISPLAY_GROUPS) {
-      if (g.prefix && id.startsWith(g.prefix)) return { header: g.header, name: g.name(id) };
+      if (g.prefix && id.startsWith(g.prefix)) return { header: g.header, name: g.name(id), pool: g.pool };
     }
     return { header: '', name: id };
   }
@@ -9580,6 +11808,23 @@
   //    (目安。ピッチベンド等の相対的な上下動は正しく追従する)。
   // 解析の信頼度しきい値(pitchConf、0-1: 窓ごとの検出周期が中央値±3%で一致した割合)
   const ADPCM_PITCH_CONF = 0.5;
+
+  // サンプルPCM系チップ(GA20/SegaPCM/C140/C352/QSound/MultiPCM/OKIM6295/YM2610 ADPCM-A)の
+  // 「ピッチ解析が信頼できなかった」行の共通形。音階演奏していない=打楽器/効果音なので、
+  // ロールでは音程軸ではなくドラム区画(音程鍵盤より低音側のレーン群)へ置く。
+  //  drumKey: どの太鼓かの同定キー。ドラム区画のレーンはこのキー単位で割り当てる。
+  //           sample.start はサンプルROM上の開始アドレスで、同じ音なら曲中ずっと同じ値になる
+  //           (vgm2mml/expansion/opn.js が既にリトリガー判定のキーに使っているのと同じ考え方)。
+  //           サンプル同定情報を持たないチップ(OKIM6258/PWM/RF5C68/164 = ROMもアドレスも無い
+  //           ストリーミングDAC)ではnullになり、従来どおり dmcRateIdx 経由の疑似音程に落ちる。
+  //  drumSeq: キーオン通番。同じ太鼓を連打したとき区間が1本に融合しないよう区切りに使う。
+  function pcmSampleRow(c) {
+    return {
+      sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
+      drumKey: c.sample ? (c.sample.kind + ':' + c.sample.start) : null,
+      drumSeq: c.seq || 0,
+    };
+  }
   function adpcmPitchToMidi(ch) {
     if (ch.adpcmExact) return ch.freq > 0 ? freqToMidi(ch.freq) : null;
     const rateHz = ch.freq, refRate = ch.adpcmRefRate;
@@ -10110,9 +12355,9 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `GA${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: gaWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
-                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
+                    : pcmSampleRow(c)) });
       }
     }
 
@@ -10130,9 +12375,9 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `SP${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 127,
           wave: spWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
-                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
+                    : pcmSampleRow(c)) });
       }
     }
 
@@ -10149,9 +12394,28 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `CN${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: cnWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
-                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
+                    : pcmSampleRow(c)) });
+      }
+    }
+
+    if (chips.includes('c352')) {
+      // C352(VGM: ナムコSystem 11/12/22等): 32ch PCM。CN/SP/GA行と同じ3段階表示
+      // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。ノイズフラグの
+      // ボイス(LFSR)はサンプルが無いのでピッチ解析対象外=「サンプル」行のまま。
+      const live = extraSnaps && extraSnaps.c352Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.c352 ? extraSnaps.c352[frameIdx] : null);
+      const csWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 32; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (30 + ch * 5) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `CS${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: csWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
       }
     }
 
@@ -10191,18 +12455,84 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `NA${ch + 1}`, color: `hsl(${hue},80%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
           wave: adpcmWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
-                    : { sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0 }) });
+                    : pcmSampleRow(c)) });
       }
       {
         const c = s && s.adpcmB ? s.adpcmB : { vol: 0, rawVol: 0, rawVolMax: 255, active: false, panL: 1, panR: 1, rate: 0, refRate: 1, pitchHz: 0, pitchConf: 0 };
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: 'NB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: adpcmWave(c), active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
           panL: c.panL, panR: c.panR });
       }
+    }
+
+    if (chips.includes('qsound')) {
+      // QSound(VGM: カプコンCPS1ダッシュ/CPS2): 16ch PCM。CS/SP/GA行と同じ3段階表示
+      // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。
+      const live = extraSnaps && extraSnaps.qsoundLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.qsound ? extraSnaps.qsound[frameIdx] : null);
+      const qsWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 16; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (260 + ch * 7) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `QS${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: qsWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
+    if (chips.includes('multipcm')) {
+      // MultiPCM(VGM: セガModel 1/2/Multi 32): 28ch PCM。CS/QS行と同じ3段階表示
+      // (F-number/octで1サンプルを音階演奏するチップなのでピッチ解析が通れば絶対音名)。
+      const live = extraSnaps && extraSnaps.multipcmLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.multipcm ? extraSnaps.multipcm[frameIdx] : null);
+      const mpWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 28; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (190 + ch * 6) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `MP${ch + 1}`, color: `hsl(${hue},72%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: mpWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
+    if (chips.includes('okim6295')) {
+      // OKIM6295(VGM: 東亜プラン/ライジング等): 4ch ADPCM。音程レジスタは無い(固定レート)が
+      // 「音程ごとに別サンプル」方式の曲があるので、NA/GA行と同じ3段階表示
+      // (フレーズのピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。モノラル。
+      const live = extraSnaps && extraSnaps.okim6295Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.okim6295 ? extraSnaps.okim6295[frameIdx] : null);
+      const okWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 4; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (100 + ch * 15) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `OK${ch + 1}`, color: `hsl(${hue},70%,58%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0x20,
+          wave: okWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
+    if (chips.includes('okim6258')) {
+      // OKIM6258(VGM: X68000 ADPCM): 1chストリーミングADPCM。ROMも音程レジスタも無いので
+      // YMDA/PWMと同じ「サンプル」行(音量=現在振幅、キャプチャ時は再生中の下限0.3)。
+      const live = extraSnaps && extraSnaps.okim6258Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.okim6258 ? extraSnaps.okim6258[frameIdx] : null);
+      const c = s ? s[0] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0 };
+      channels.push({ id: 'OKI', color: '#ff9944', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+        wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
+        panL: c.panL, panR: c.panR });
     }
 
     if (chips.includes('pwm')) {
@@ -10330,7 +12660,20 @@
   // 生周波数(Hz)をvolSeqと同じ「区切らず積む」考え方で保持する(丸め後のmidiは一定のまま、
   // 実際の周波数だけがビブラート等で揺れている様子を後で細線描画するため)。
   function buildNoteTimelineFromChannelFrames(getChannelsAtFrame, totalFrames, frameDur) {
-    const tracks = new Map(); // id → { id, color, notes:[], cur:{startFrame,midi,volQ,freqs}|null }
+    const tracks = new Map(); // id → { id, color, notes:[], cur:{startFrame,midi,drumKey,volQ,freqs}|null }
+    // ドラム区画のレーン割当はここではやらない。RollBuild.vgm はチップごとに
+    // この関数を別々に呼んでタイムラインを連結するので、ここで割り当てると
+    // 2つのサンプルチップを積んだVGMで両方が「レーン0」から番号を振ってしまう。
+    // noteにはdrumKeyだけ載せ、曲全体が揃った受け取り側で一括して割り当てる
+    // (KeyboardDisplay._rebuildDrumLanes → MML.Convert.DrumMap.build)。
+    const pushNote = (track, endSec) => {
+      const c = track.cur;
+      const note = { startSec: c.startFrame * frameDur, endSec, midi: c.midi,
+                     vol: c.volQ / ROLL_VOL_LEVELS, freqSeq: c.freqs };
+      if (c.drumKey) note.drumKey = c.drumKey;
+      track.notes.push(note);
+      track.cur = null;
+    };
     for (let f = 0; f < totalFrames; f++) {
       const channels = getChannelsAtFrame(f) || [];
       for (const ch of channels) {
@@ -10344,25 +12687,31 @@
         // この共通経路(NSF/MML再生のロール、および全フォーマット共通の鍵盤ハイライトdrawPiano)は
         // ノイズ・DPCM双方を丸ごと除外していたため、NSFのノイズ/DPCMがロールにも鍵盤にも出ない・
         // GBSのノイズが鍵盤に出ない、という食い違いになっていた。
-        let midi, pitchFreq;
+        //  drumKey付き(打楽器として鳴っているサンプルPCM)は音程を持たないので、midiではなく
+        //  drumKeyの側で同一性を判断する。以降 midi と drumKey は排他(どちらか一方だけ非null)。
+        let midi, pitchFreq, drumKey = null, drumSeq = 0;
         if (!ch.active) { midi = null; pitchFreq = 0; }
+        else if (ch.drumKey) { midi = null; pitchFreq = 0; drumKey = ch.drumKey; drumSeq = ch.drumSeq || 0; }
         else if (ch.noise) { midi = noisePeriodIndexToMidi(ch.noiseIndex); pitchFreq = ch.noiseFreq; }
         else if (ch.adpcmPitch) { midi = adpcmPitchToMidi(ch); pitchFreq = ch.freq; }
         else if (ch.sample) { midi = dmcRateIndexToMidi(ch.dmcRateIdx); pitchFreq = ch.dmcFreq; }
         else { midi = ch.freq ? freqToMidi(ch.freq) : null; pitchFreq = ch.freq; }
-        const volQ = midi !== null ? quantizeVol(ch.vol) : 0;
-        if (track.cur && (midi === null || midi !== track.cur.midi || volQ !== track.cur.volQ)) {
-          track.notes.push({ startSec: track.cur.startFrame * frameDur, endSec: f * frameDur, midi: track.cur.midi, vol: track.cur.volQ / ROLL_VOL_LEVELS, freqSeq: track.cur.freqs });
-          track.cur = null;
+        const sounding = midi !== null || drumKey !== null;
+        const volQ = sounding ? quantizeVol(ch.vol) : 0;
+        const cur = track.cur;
+        // drumSeqはキーオン通番。同じ太鼓を同じ音量で連打したとき(16分のハイハット等)、
+        // これを見ないと区間が1本の長い棒に融合してしまう
+        if (cur && (!sounding || midi !== cur.midi || drumKey !== cur.drumKey || drumSeq !== cur.drumSeq || volQ !== cur.volQ)) {
+          pushNote(track, f * frameDur);
         }
-        if (midi !== null && !track.cur) track.cur = { startFrame: f, midi, volQ, freqs: [] };
+        if (sounding && !track.cur) track.cur = { startFrame: f, midi, drumKey, drumSeq, volQ, freqs: [] };
         if (track.cur) track.cur.freqs.push(pitchFreq);
       }
     }
     const totalSec = totalFrames * frameDur;
     const result = [];
     for (const track of tracks.values()) {
-      if (track.cur) track.notes.push({ startSec: track.cur.startFrame * frameDur, endSec: totalSec, midi: track.cur.midi, vol: track.cur.volQ / ROLL_VOL_LEVELS, freqSeq: track.cur.freqs });
+      if (track.cur) pushNote(track, totalSec);
       result.push({ id: track.id, color: track.color, notes: track.notes });
     }
     result.frameDur = frameDur; // セント偏差オーバーレイ描画時にfreqSeqのフレーム間隔を復元するため
@@ -10995,7 +13344,9 @@
   // 付く、高音が上)。音程軸の座標はロール側と同じkeyX()を共有する。
   // visibleWhite/offsetWhite(省略可): 鍵盤全体でなく白鍵visibleWhite本ぶんの音程窓を、白鍵offsetWhite
   // (小数可)から表示する(チャンネルごとのレーン用。ロール側と同じ窓を使う)
-  function drawPiano(canvas, channels, orientation, visibleWhite, offsetWhite) {
+  // drums: {lanes:[{label,color}], laneOf:Map(drumKey→レーン番号)} ドラム区画のパッド。
+  // 省略/空なら区画なし(音程軸の座標は従来と完全に一致する)。
+  function drawPiano(canvas, channels, orientation, visibleWhite, offsetWhite, drums) {
     const vertical = orientation !== 'horizontal';
     // 内部解像度は表示サイズ(CSS px、border除く)に合わせる。表示サイズは_cachedWidth/_cachedHeight
     // (ResizeObserverでキャッシュ)を優先し、毎フレームoffsetWidth/clientHeightを読んで
@@ -11008,15 +13359,26 @@
     const W = canvas.width, H = canvas.height;
     const pitchLen = vertical ? W : H;   // 音程軸の長さ
     const keyLen = vertical ? H : W;     // 鍵の長さ
-    const wkW = pitchLen / (visibleWhite || TOTAL_WHITE);  // 白鍵1本の太さ(音程軸方向)
+    const drumLanes = (drums && drums.lanes) || [];
+    const drumUnits = drumLanes.length * DRUM_LANE_WHITE;
+    const wkW = pitchLen / (visibleWhite || (TOTAL_WHITE + drumUnits));  // 白鍵1本の太さ(音程軸方向)
     const offPx = (offsetWhite || 0) * wkW;  // 表示窓の低音側の端(px)。keyX()の結果からこれを引く
+    const drumLaneW = DRUM_LANE_WHITE * wkW;
+    const pitchOff = drumUnits * wkW - offPx; // 音程側の座標補正(ドラム区画ぶん右へ + 窓スクロール)
     const bkW = Math.max(3, wkW * 0.60); // 黒鍵の太さ
     const bkH = Math.round(keyLen * 0.62); // 黒鍵の長さ
     const ctx = canvas.getContext('2d');
 
     const keyColors = {};
+    const laneColors = {}; // ドラム区画: レーン番号 → 今そこを鳴らしているchの色
     for (const ch of channels) {
       if (!ch.active) continue;
+      // 打楽器として鳴っているサンプルPCMは音程を持たないのでドラム区画のパッドを光らせる
+      if (ch.drumKey && drums && drums.laneOf) {
+        const lane = drums.laneOf.get(ch.drumKey);
+        if (lane !== undefined && laneColors[lane] === undefined) laneColors[lane] = ch.color;
+        continue;
+      }
       // ノイズch/DPCM(サンプル)chはそれぞれch.noiseIndex/ch.dmcRateIdxを疑似ノートとして使う
       // (noisePeriodIndexToMidi/dmcRateIndexToMidi冒頭コメント参照)。YM2610 ADPCM-A/Bは
       // 解析済みピッチ(adpcmExact)またはDelta-N由来レートを adpcmPitchToMidi で音程へ。
@@ -11029,13 +13391,53 @@
 
     ctx.clearRect(0, 0, W, H);
 
+    // ドラム区画のパッド(鍵盤の代わり)。1パッド=1サンプル。手前側(=ロールと反対の端)に
+    // レーン色の帯とラベルを出し、鳴っている間は鍵と同じくchの色で点灯する。
+    for (let i = 0; i < drumLanes.length; i++) {
+      const x0 = i * drumLaneW - offPx;
+      if (x0 + drumLaneW < 0 || x0 > pitchLen) continue; // 表示窓の外
+      const laneColor = drumLanes[i].color || DRUM_OTHER_COLOR;
+      const lit = laneColors[i];
+      ctx.fillStyle = lit || '#2f2c3a';
+      ctx.strokeStyle = '#44404a';
+      ctx.lineWidth = 0.5;
+      if (vertical) {
+        ctx.fillRect(x0 + 0.5, 0.5, drumLaneW - 1, keyLen - 1);
+        ctx.strokeRect(x0 + 0.5, 0.5, drumLaneW - 1, keyLen - 1);
+        ctx.fillStyle = laneColor; // ロール側(上端)にレーン色の帯 = ロールの打点の塗りと同じ色
+        ctx.fillRect(x0 + 1.5, 1.5, drumLaneW - 3, 5);
+        if (drumLaneW >= 9) { // ラベルは縦書き(90度回転)。レーンが細いときは省略
+          ctx.save();
+          ctx.translate(x0 + drumLaneW / 2, keyLen - 5);
+          ctx.rotate(-Math.PI / 2);
+          ctx.fillStyle = lit ? '#1a1830' : '#a9a3bb';
+          ctx.font = Math.min(9, Math.floor(drumLaneW) - 2) + 'px ' + fontStack('mono');
+          ctx.textBaseline = 'middle';
+          ctx.fillText(drumLanes[i].label, 0, 0);
+          ctx.restore();
+        }
+      } else {
+        const y = H - x0 - drumLaneW;
+        ctx.fillRect(0.5, y + 0.5, keyLen - 1, drumLaneW - 1);
+        ctx.strokeRect(0.5, y + 0.5, keyLen - 1, drumLaneW - 1);
+        ctx.fillStyle = laneColor; // ロール側(右端)にレーン色の帯
+        ctx.fillRect(keyLen - 6.5, y + 1.5, 5, drumLaneW - 3);
+        if (drumLaneW >= 9) {
+          ctx.fillStyle = lit ? '#1a1830' : '#a9a3bb';
+          ctx.font = Math.min(9, Math.floor(drumLaneW) - 2) + 'px ' + fontStack('mono');
+          ctx.textBaseline = 'middle';
+          ctx.fillText(drumLanes[i].label, 4, y + drumLaneW / 2 + 0.5);
+        }
+      }
+    }
+
     for (let midi = MIDI_MIN; midi <= MIDI_MAX; midi++) {
       const rel = midi - MIDI_MIN;
       const semi = rel % 12;
       if (IS_BLACK[semi]) continue;
       const pos = keyX(midi, wkW);
       if (!pos) continue;
-      pos.x -= offPx;
+      pos.x += pitchOff;
       if (pos.x + wkW < 0 || pos.x > pitchLen) continue; // 表示窓の外
       const color = keyColors[midi];
       ctx.fillStyle = color ? color : '#d4cfbc';
@@ -11078,7 +13480,7 @@
       if (!IS_BLACK[semi]) continue;
       const pos = keyX(midi, wkW);
       if (!pos) continue;
-      pos.x -= offPx;
+      pos.x += pitchOff;
       if (pos.x + bkW < 0 || pos.x - bkW > pitchLen) continue; // 表示窓の外
       const color = keyColors[midi];
       ctx.fillStyle = color ? color : '#1a1830';
@@ -11123,17 +13525,23 @@
       this._lastDmc4011 = null;   // DMC $4011 直接書き込み検出用（前回のレジスタ値）
       this._speedDenom = 1;        // 再生速度分母(1〜8。実速度=1/_speedDenom)
       this._rollTimeline = null;  // ピアノロール用ノート区間 [{color, notes:[{startSec,endSec,midi}]}]
+      this._drumLanes = [];       // ドラム区画のレーン表 [{key,label,color,subN}](_rebuildDrumLanes)
+      this._drumLaneOf = new Map(); // drumKey → レーン番号(鍵盤のパッド点灯用)
       this._rollCursor = {};      // track.id → 「もう画面上端より上に流れ去った」最初のnote index(_renderRollの走査起点キャッシュ)
       this._rollSongTimeBase = 0; // 最後に実測位置が更新された時点での「曲内基準の経過時間」(確定値)
       this._rollLastRawPos = null; // 直前に_renderRollへ渡された実時間(壁時計)位置
       this._rollBaseWallMs = null; // _rollSongTimeBase確定時点のperformance.now()(補間の起点)
       this.onMuteChange = null;
+      this._poolModes = {};             // チャンネルプール式チップの表示モード(chipToken → 'logical'|'phys')
+      this.onPoolModeChange = null;     // (chipToken, mode) => void  ヘッダのモード切替
       this.onSpcMuteChange = null; // (voiceIndex:number, muted:bool) => void
       this.onSpeedChange = null;   // (factor:number) => void  曲切替をまたいで保持する
       this.onMasterVolumeChange = null; // (vol:0〜1) => void  曲切替をまたいで保持する
       this.onLayoutChange = null;       // (layout) => void  setLayout()で設定が変わった時
       this.onRollSeek = null;           // (seconds:実時間) => 実際にシークした秒|null  ロールのドラッグシーク(_attachRollSeekDrag)
       this._rollDrag = null;            // ドラッグシーク中の状態 {id,x,y,startPos,pos,moved}
+      this._spotlightHoverId = null;    // スポットライト(案D): ホバー中の行のch.id(一時的)
+      this._spotlightPinnedId = null;   // スポットライト(案D): ch名クリックで固定した行のch.id(ホバーより優先)
       this._rollSeekBarEls = null;      // ロール見出し行に置くシークバー要素(setRollSeekBar)
       this._lanes = [];                 // チャンネルごとのレーン [{id, laneEl, rollCanvas, pianoCanvas}](_rebuildLanes)
       this._lanesEl = null;
@@ -11157,6 +13565,16 @@
       this._masterVolume = loadMasterVolume(); // localStorage永続化(mml_masterVolume)
       this.onVolumeChange = null;       // () => void  ch別音量バー操作時(getVolumeConfig()参照)
       this.onAdpcmCalibrate = null;     // (ch) => void  YM2610 ADPCM行のnote列クリック(手動ピッチ補正。ch.adpcmSample={kind,start,end})
+      // ドラム区画のパッドクリック試聴。(sampleKey, mode:'raw'|'dpcm') => void
+      // ★PCM→DMCは必ず劣化するので、レートを耳で決められることが必須(ユーザー指示)。
+      //   パッドは1枚=1サンプルなので「複数chが同時に鳴っていて何を聴いているか分からない」
+      //   問題が原理的に起きない。
+      this.onDrumAudition = null;
+      this._drumAuditionMode = 'raw';
+      // (ch, kind:'drum'|'pitch'|null) => void  note列の小メニューでの打楽器/音階の手動指定
+      this.onSampleKind = null;
+      this._sampleMenuEl = null;
+      this._sampleMenuOutside = null;
       this.onSpcVolumeChange = null;    // (volArray:number[8]) => void
       this._channelVolumes = loadChannelVolumes();   // channelId → 0〜2(1=100%、localStorage永続化)
       this._spcVoiceVolumes = loadSpcVoiceVolumes(); // [V0..V7] → 0〜2(1=100%、localStorage永続化)
@@ -11332,12 +13750,19 @@
       // 他フォーマットは空欄のまま(_rebuildRows参照)。
       // dot 列オフセット不要（kbd-h-part が dot+パート文字両方をカバー）
       this._headerEl = header;
+      // DPCM(打楽器を実サンプルのまま焼く)の実コスト表示。借用先にDPCMを選んだ瞬間に
+      // 「1本増やしたらROMが何KB増えるか」が見えないと選びようがないため、割当UIのすぐ下に出す
+      // (ユーザー要望。実機ROMの容量を意識する方針 [[nsf-export-size-consciousness]])
+      this._dpcmCostEl = document.createElement('div');
+      this._dpcmCostEl.className = 'kbd-dpcm-cost';
+      this._dpcmCostEl.style.display = 'none';
       left.appendChild(header);
 
       this._rowsEl = document.createElement('div');
       this._rowsEl.className = 'kbd-rows';
       // 行本体は内側の要素に入れる(.kbd-rowsは縦スクロールの箱、.kbd-rows-innerが1列/多段の
       // 並べ方を担当。多段のとき高さauto=中身なりに伸びるので、はみ出しは横でなく縦スクロールになる)
+      left.appendChild(this._dpcmCostEl);
       this._rowsInnerEl = document.createElement('div');
       this._rowsInnerEl.className = 'kbd-rows-inner';
       this._rowsEl.appendChild(this._rowsInnerEl);
@@ -11590,6 +14015,11 @@
         `<span class="kbd-roll-toggle">${rollCollapsed ? '▶' : '▼'}</span>` +
         `<span class="kbd-roll-label">${T('ピアノロール')}</span>` +
         `<span class="kbd-roll-seek-slot"></span>` + // main.jsから渡されるシークバー(setRollSeekBar)の置き場
+        `<span class="kbd-roll-drum-audition" style="display:none">` +
+          `<span class="kbd-roll-drum-label">${T('パッド試聴')}</span>` +
+          `<button type="button" class="kbd-drum-aud-btn kbd-drum-aud-btn--on" data-mode="raw">${T('原音')}</button>` +
+          `<button type="button" class="kbd-drum-aud-btn" data-mode="dpcm">DPCM</button>` +
+        `</span>` +
         `<label class="kbd-roll-cents-toggle">` +
         `<input type="checkbox" class="kbd-roll-cents-checkbox"${this._showCentsOverlay ? ' checked' : ''}>` +
         `${T('セント偏差')}</label>`;
@@ -11600,6 +14030,18 @@
       this._mountRollSeekBar(seekSlot);
       // オーバーレイのON/OFFはロール見出しクリック(折りたたみ)とは独立させるため、
       // クリックイベントの伝播をここで止める(bubbling先のrollHeaderハンドラを発火させない)。
+      // ドラム区画のパッド試聴の切替(原音 / DPCM変換後)。区画があるときだけ出す
+      this._drumAuditionEl = rollHeader.querySelector('.kbd-roll-drum-audition');
+      for (const btn of rollHeader.querySelectorAll('.kbd-drum-aud-btn')) {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._drumAuditionMode = btn.dataset.mode;
+          for (const b of rollHeader.querySelectorAll('.kbd-drum-aud-btn')) {
+            b.classList.toggle('kbd-drum-aud-btn--on', b.dataset.mode === this._drumAuditionMode);
+          }
+        });
+      }
+
       const centsCheckbox = rollHeader.querySelector('.kbd-roll-cents-checkbox');
       centsCheckbox.addEventListener('click', (e) => e.stopPropagation());
       centsCheckbox.addEventListener('change', () => {
@@ -11742,11 +14184,16 @@
         for (const l of this._lanes) {
           // 音程窓はロール側(_updateLaneScroll)が決めた位置に合わせる(未決定なら鍵盤全体の代わりにC4中心)
           const off = l.scrollWhite == null ? Math.max(0, keyX(60, 1).x - LANE_VISIBLE_WHITE / 2) : l.scrollWhite;
-          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, LANE_VISIBLE_WHITE, off);
+          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, LANE_VISIBLE_WHITE, off, this._drumsForPiano());
+          if (this._drumLanes && this._drumLanes.length) this._attachDrumAudition(l.pianoCanvas);
         }
         return;
       }
-      drawPiano(this._canvas, allChannels, this._layout.rollOrientation);
+      drawPiano(this._canvas, allChannels, this._layout.rollOrientation, 0, 0, this._drumsForPiano());
+      // ドラム区画があるときだけパッド試聴を有効にする(区画=パッドが無ければ押す物が無い)
+      const hasDrums = !!(this._drumLanes && this._drumLanes.length);
+      if (hasDrums) this._attachDrumAudition(this._canvas);
+      if (this._drumAuditionEl) this._drumAuditionEl.style.display = (hasDrums && this.onDrumAudition) ? '' : 'none';
     }
 
     // 表示中の再生ソースをタイトル行のバッジに出す。kind: 'mml' | 'nsf'|'spc'|'kss'|'gbs'|'hes'
@@ -11946,6 +14393,54 @@
     // ドラッグ中に_renderRoll()を即時呼びするための「直前の実測位置」(無ければ0)。
     // _renderRoll()はドラッグ中は表示位置に_rollDrag.posを使うので値自体は補間の帳尻用
     _rollLastRawPosForDrag() { return this._rollLastRawPos == null ? 0 : this._rollLastRawPos; }
+
+    // ── スポットライト(案D) ────────────────────────────────────────
+    // チャンネル一覧の行にホバー(一時)/ch名クリック(固定)で「注目ch」を決め、ロール描画で
+    // そのchだけを原色・最前面に、他chをSPOTLIGHT_DIM_ALPHAまで減光する。
+    // ★ホバー中はホバーが勝ち、マウスが一覧から離れたら固定へ戻る。固定は「マウスを離しても
+    //   注目を失わない」ためのもので、他の行を覗く操作を殺すためのものではないため。
+    _effectiveSpotlightId() { return this._spotlightHoverId || this._spotlightPinnedId; }
+
+    // 停止中はrAFが回っていないので、注目chが変わったらその場で描き直す。
+    // _renderRoll()は同じrawPosを渡しても位置を進めない(実測差分ぶんしか加算しない)ので安全。
+    _redrawRollForSpotlight() {
+      if (!this._rollTimeline) return;
+      this._renderRoll(this._rollLastRawPosForDrag());
+    }
+
+    _setSpotlightHover(id) {
+      if (this._spotlightHoverId === id) return;
+      this._spotlightHoverId = id;
+      this._redrawRollForSpotlight();
+    }
+
+    // ch名クリックで固定のON/OFF。同じ行をもう一度クリックすると解除する
+    _toggleSpotlightPin(id) {
+      this._spotlightPinnedId = (this._spotlightPinnedId === id) ? null : id;
+      this._applySpotlightClasses();
+      this._redrawRollForSpotlight();
+    }
+
+    // 固定中の行に目印クラスを付ける(行の再構築後にも呼んで状態を復元する)
+    _applySpotlightClasses() {
+      for (const r of (this._rowEls || []).concat(this._spcRowEls || [])) {
+        if (!r || !r.row) continue;
+        r.row.classList.toggle('kbd-ch-row--spot', r.id === this._spotlightPinnedId);
+      }
+    }
+
+    // 1行にスポットライトの操作を取り付ける(メイン一覧・SPCボイス行の両方から呼ぶ)。
+    // ホバーは行全体、固定はch名セルのクリック(丸=色ピッカー/波形=大波形/note=キャリブレーションと
+    // 衝突しない場所を選ぶ)
+    _attachSpotlight(row, id) {
+      row.addEventListener('mouseenter', () => this._setSpotlightHover(id));
+      row.addEventListener('mouseleave', () => this._setSpotlightHover(null));
+      const nameEl = row.querySelector('.kbd-name');
+      if (!nameEl) return;
+      nameEl.classList.add('kbd-name--clickable');
+      nameEl.title = T('クリックでこのチャンネルに注目(他chを減光)。もう一度クリックで解除');
+      nameEl.addEventListener('click', () => this._toggleSpotlightPin(id));
+    }
 
     // 実効的なロールの置き場。'window'は別ウィンドウのコンテナ(#pianoRollDisplay)が
     // 無いページでは'bottom'扱いにする
@@ -12173,7 +14668,7 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'segapcm', 'c140', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
@@ -12200,6 +14695,11 @@
       this._extraSnaps.ga20Live = typeof result.getGa20 === 'function' ? result.getGa20 : null;
       this._extraSnaps.segapcmLive = typeof result.getSegaPcm === 'function' ? result.getSegaPcm : null;
       this._extraSnaps.c140Live = typeof result.getC140 === 'function' ? result.getC140 : null;
+      this._extraSnaps.c352Live = typeof result.getC352 === 'function' ? result.getC352 : null;
+      this._extraSnaps.okim6258Live = typeof result.getOkim6258 === 'function' ? result.getOkim6258 : null;
+      this._extraSnaps.qsoundLive = typeof result.getQsound === 'function' ? result.getQsound : null;
+      this._extraSnaps.okim6295Live = typeof result.getOkim6295 === 'function' ? result.getOkim6295 : null;
+      this._extraSnaps.multipcmLive = typeof result.getMultiPcm === 'function' ? result.getMultiPcm : null;
       this._extraSnaps.pwmLive = typeof result.getPwm === 'function' ? result.getPwm : null;
       this._extraSnaps.rf5c164Live = typeof result.getRf5c164 === 'function' ? result.getRf5c164 : null;
       this._extraSnaps.rf5c68Live = typeof result.getRf5c68 === 'function' ? result.getRf5c68 : null;
@@ -12244,6 +14744,7 @@
       } else {
         this._rollTimeline = null;
       }
+      this._rebuildDrumLanes();
     }
 
     // ピアノロール用タイムラインを直接差し替える(共通形状: [{color, notes:[{startSec,endSec,midi}]}])。
@@ -12252,6 +14753,185 @@
     setRollTimeline(timeline) {
       this._rollTimeline = timeline || null;
       this._rollCursor = {};
+      this._rebuildDrumLanes();
+    }
+
+    // ドラム区画のレーン表を、タイムラインのノートに書き込まれた drumLane/drumKey から組み直す。
+    // ★配列に生やしたプロパティ(result.drumLanes のような形)はWorkerからのpostMessageの
+    //   構造化複製で消えるため、レーン表そのものは渡さず「noteが持っている情報から復元する」
+    //   方式にしてある(assignDrumLanes冒頭のコメント参照)。
+    // this._drumLanes: [{key, label, color, subN}]  区画に出す順(=レーン番号順)
+    // this._drumLaneOf: Map(drumKey → レーン番号)   鍵盤のパッド点灯(drawPiano)用
+    // drawPiano()へ渡すドラム区画の情報。区画が無いときはundefinedを返し、鍵盤の描画を
+    // 従来と完全に同じにする
+    /**
+     * DPCMの実コスト表示。cost = {clips, segments, bytes} | null(=DPCM未使用で非表示)。
+     * 'pending' を渡すと計算中の表示にする。
+     */
+    setDpcmCost(cost) {
+      if (!this._dpcmCostEl) return;
+      if (!cost) { this._dpcmCostEl.style.display = 'none'; return; }
+      this._dpcmCostEl.style.display = '';
+      if (cost === 'pending') { this._dpcmCostEl.textContent = T('DPCM: 計算中…'); return; }
+      const kb = (cost.bytes / 1024).toFixed(1);
+      this._dpcmCostEl.innerHTML =
+        `<span class="kbd-dpcm-cost-label">DPCM</span>` +
+        T('定義 {clips} / 打点 {segments} / ROM {kb} KB', { clips: cost.clips, segments: cost.segments, kb });
+      // ROMが大きいときは色で警告(NSFのバンク1本=8KB、実用の目安として32KB/64KB)
+      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--warn', cost.bytes >= 32 * 1024);
+      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--over', cost.bytes >= 64 * 1024);
+    }
+
+    // note列クリックの小メニュー。「このサンプルは打楽器か音階か」の手動指定と、
+    // 既存の基準音キャリブレーションをまとめて出す。
+    // ★指定はサンプル単位(chではない)。プール式チップは同じ太鼓が毎回別スロットへ移るので、
+    //   ch単位で持つと指定が飛ぶ。
+    _openSampleMenu(anchorEl, ch) {
+      this._closeSampleMenu();
+      const menu = document.createElement('div');
+      menu.className = 'kbd-sample-menu';
+      const cur = ch.sampleKind || 'auto'; // 'auto'|'drum'|'pitch'(extractChannelsが載せる)
+      const items = [
+        ['auto', T('自動判定にまかせる')],
+        ['drum', T('打楽器として扱う')],
+        ['pitch', T('音階として扱う')],
+      ];
+      for (const [kind, label] of items) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'kbd-sample-menu-item' + (kind === cur ? ' kbd-sample-menu-item--on' : '');
+        b.textContent = label;
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._closeSampleMenu();
+          if (this.onSampleKind) this.onSampleKind(ch, kind === 'auto' ? null : kind);
+        });
+        menu.appendChild(b);
+      }
+      if (this.onAdpcmCalibrate) {
+        const sep = document.createElement('div');
+        sep.className = 'kbd-sample-menu-sep';
+        menu.appendChild(sep);
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'kbd-sample-menu-item';
+        b.textContent = T('基準音を手動補正…');
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._closeSampleMenu();
+          this.onAdpcmCalibrate(ch);
+        });
+        menu.appendChild(b);
+      }
+      document.body.appendChild(menu);
+      const r = anchorEl.getBoundingClientRect();
+      menu.style.left = Math.round(Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+      menu.style.top = Math.round(Math.min(r.bottom + 2, window.innerHeight - menu.offsetHeight - 8)) + 'px';
+      this._sampleMenuEl = menu;
+      // 次のクリックで閉じる(メニュー内のクリックは上でstopPropagation済み)
+      this._sampleMenuOutside = () => this._closeSampleMenu();
+      setTimeout(() => document.addEventListener('click', this._sampleMenuOutside, { once: true }), 0);
+    }
+
+    _closeSampleMenu() {
+      if (this._sampleMenuOutside) {
+        document.removeEventListener('click', this._sampleMenuOutside);
+        this._sampleMenuOutside = null;
+      }
+      if (this._sampleMenuEl && this._sampleMenuEl.parentNode) this._sampleMenuEl.parentNode.removeChild(this._sampleMenuEl);
+      this._sampleMenuEl = null;
+    }
+
+    _drumsForPiano() {
+      if (!this._drumLanes || !this._drumLanes.length) return undefined;
+      return { lanes: this._drumLanes, laneOf: this._drumLaneOf };
+    }
+
+    // 鍵盤canvasのクリック位置 → ドラム区画のレーン番号(区画の外なら-1)。
+    // 座標系は drawPiano と同じ(音程軸は縦向き=x、横向き=下から上へのy)
+    _drumLaneAtPoint(canvas, clientX, clientY) {
+      const lanes = this._drumLanes || [];
+      if (!lanes.length) return -1;
+      const r = canvas.getBoundingClientRect();
+      const vertical = this._layout.rollOrientation !== 'horizontal';
+      const pitchLen = vertical ? r.width : r.height;
+      const p = vertical ? (clientX - r.left) : (r.bottom - clientY);
+      const wk = pitchLen / (TOTAL_WHITE + lanes.length * DRUM_LANE_WHITE);
+      const lane = Math.floor(p / (DRUM_LANE_WHITE * wk));
+      return (lane >= 0 && lane < lanes.length) ? lane : -1;
+    }
+
+    // 鍵盤canvasにパッド試聴のクリックを取り付ける(_buildRollPane / _rebuildLanes から)
+    _attachDrumAudition(canvas) {
+      if (!canvas || canvas._drumAuditionWired) return;
+      canvas._drumAuditionWired = true;
+      canvas.addEventListener('click', (e) => {
+        const lane = this._drumLaneAtPoint(canvas, e.clientX, e.clientY);
+        if (lane < 0 || !this.onDrumAudition) return;
+        const info = this._drumLanes[lane];
+        if (!info || !info.key || info.key === '*') return;
+        this.onDrumAudition(info.key, this._drumAuditionMode);
+      });
+      canvas.addEventListener('mousemove', (e) => {
+        const lane = this._drumLaneAtPoint(canvas, e.clientX, e.clientY);
+        canvas.style.cursor = (lane >= 0 && this.onDrumAudition) ? 'pointer' : '';
+      });
+    }
+
+    _rebuildDrumLanes() {
+      this._drumLanes = [];
+      this._drumLaneOf = new Map();
+      const DrumMap = MML.Convert && MML.Convert.DrumMap;
+      const tracks = this._rollTimeline || [];
+      if (!DrumMap || !tracks.length) return;
+
+      // 1) 曲全体の打点を集めてレーンを決める(vgm2mmlのドラム音符出力と同じ表)
+      const obs = [];
+      for (const track of tracks) {
+        for (const n of track.notes) if (n.drumKey) obs.push({ key: n.drumKey, sec: n.startSec });
+      }
+      if (!obs.length) return;
+      const map = DrumMap.build(obs);
+
+      // 2) 各打点にレーン番号を書き戻し、レーンごとに集める
+      const byLane = map.lanes.map(() => []);
+      for (const track of tracks) {
+        for (const n of track.notes) {
+          if (!n.drumKey) continue;
+          const lane = map.laneOf.has(n.drumKey) ? map.laneOf.get(n.drumKey) : map.otherLane;
+          if (lane < 0 || lane >= byLane.length) { delete n.drumLane; continue; }
+          n.drumLane = lane;
+          byLane[lane].push(n);
+        }
+      }
+
+      // 3) レーン内の同時発音をサブスロットへ振る(貪欲な区間彩色。開始時刻の昇順に、
+      //    「まだ前の打点が終わっている」一番若いサブスロットへ入れる)。分割数は曲全体で
+      //    決まるので、再生位置によって打点の幅が踊らない。
+      const lanes = [];
+      const labels = DrumMap.labels(map.lanes.map((l) => l.key));
+      for (let i = 0; i < byLane.length; i++) {
+        const notes = byLane[i];
+        notes.sort((a, b) => a.startSec - b.startSec);
+        const ends = [];
+        for (const n of notes) {
+          let s = 0;
+          while (s < ends.length && ends[s] > n.startSec + 1e-9) s++;
+          n.drumSub = s;
+          ends[s] = n.endSec;
+        }
+        const subN = Math.max(1, ends.length);
+        for (const n of notes) n.drumSubN = subN;
+        const isOther = map.lanes[i].key === null;
+        lanes.push({
+          key: map.lanes[i].key,
+          label: isOther ? T('他') : (labels[i] || ''),
+          color: isOther ? DRUM_OTHER_COLOR : DRUM_LANE_COLORS[i % DRUM_LANE_COLORS.length],
+          subN,
+        });
+      }
+      this._drumLanes = lanes;
+      this._drumLaneOf = map.laneOf;
     }
 
     // regSnapshots形式(NSFのライブ再生を裏で先読みキャプチャした結果など)からピアノロールの
@@ -12266,6 +14946,7 @@
     setRollTimelineFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots) {
       this._rollCursor = {};
       this._rollTimeline = this.buildRollTracksFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots);
+      this._rebuildDrumLanes();
     }
 
     // setRollTimelineFromRegSnapshots()のトラック構築部分。VGM(main.js playVgmStream)のように
@@ -12304,6 +14985,10 @@
       this._conversionDiffs = null;
       this._prevSpcVoices = [];
       this._muteState.clear();
+      // スポットライト(案D)の固定も新ファイルへは持ち越さない(ミュート状態と同じ扱い。
+      // 前の曲にしか無いch.idが固定されたまま残ると、注目が効かない見た目になるため)
+      this._spotlightPinnedId = null;
+      this._spotlightHoverId = null;
       // 大波形の選択(_selectedId)はここでは変えない。新ファイルの実際のチャンネル構成が
       // 判明した時点(次のsetSource()/updateSpcVoices()の実データ呼び出し)で、同じchが
       // 新ファイルにもあれば維持、無ければ一番若いchへ切り替える判定を1回だけ行う
@@ -12729,6 +15414,35 @@
             const headerRow = document.createElement('div');
             headerRow.className = 'kbd-chip-header';
             headerRow.textContent = disp.header;
+            // チャンネルプール/ペア交互割当のチップ: 表示モード切替(実機スロット=素材のまま /
+            // 合成ch=割当逆算)。行構成は同じでデータ系列だけが替わる。見た目は2状態の
+            // トグルスイッチ(クリックで切替、点灯側が現在モード)。
+            if (disp.pool) {
+              const sw = document.createElement('span');
+              sw.className = 'kbd-pool-toggle';
+              sw.dataset.pool = disp.pool;
+              sw.style.cssText = 'display:inline-flex;margin-left:8px;font-size:9px;border:1px solid #444;border-radius:8px;overflow:hidden;cursor:pointer;user-select:none;vertical-align:middle;';
+              sw.title = T('チャンネルプール式音源の表示モード: 実機スロット=ドライバの巡回割当そのまま / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す');
+              const mk = (label) => { const s = document.createElement('span'); s.textContent = label; s.style.cssText = 'padding:1px 6px;'; return s; };
+              const segL = mk(T('合成ch')), segP = mk(T('実機スロット'));
+              sw.appendChild(segL); sw.appendChild(segP);
+              const paint = () => {
+                const logical = (this._poolModes[disp.pool] || 'logical') === 'logical';
+                segL.style.background = logical ? '#3a6ea5' : '#22242e';
+                segL.style.color = logical ? '#fff' : '#667';
+                segP.style.background = logical ? '#22242e' : '#3a6ea5';
+                segP.style.color = logical ? '#667' : '#fff';
+              };
+              sw._paint = paint; // setPoolModes()からの再描画用
+              paint();
+              sw.addEventListener('click', () => {
+                const mode = (this._poolModes[disp.pool] || 'logical') === 'logical' ? 'phys' : 'logical';
+                this._poolModes[disp.pool] = mode;
+                paint();
+                if (this.onPoolModeChange) this.onPoolModeChange(disp.pool, mode);
+              });
+              headerRow.appendChild(sw);
+            }
             group.appendChild(headerRow);
           }
           lastHeader = disp.header;
@@ -12788,13 +15502,16 @@
         // main.jsがプロンプトを出してチップの setSampleTuning を呼ぶ)。対象は「今その行で鳴っている
         // サンプル」(ch.adpcmSample)なので、直近の update() の channels(_lastChannels)から引く
         // (_prevChannelsは行再構築時にしか更新されず古い)
-        if (/^N[AB]\d?$/.test(ch.id)) {
+        // note列クリック: サンプルPCM系の行(adpcmSampleを持つ行)なら「打楽器/音階の手動指定 +
+        // 基準音の手動補正」の小メニューを出す。★どちらもサンプル単位の指定なので、
+        // 「今その行で鳴っているサンプル」(_lastChannels)を対象にする
+        if (SAMPLE_ROW_RE.test(ch.id)) {
           const noteElForClick = row.querySelector('.kbd-note');
           noteElForClick.classList.add('kbd-note--clickable');
-          noteElForClick.title = T('クリックでこのサンプルの基準音を手動補正');
+          noteElForClick.title = T('クリックで打楽器/音階の指定と基準音の手動補正');
           noteElForClick.addEventListener('click', () => {
             const cur = (this._lastChannels || this._prevChannels || []).find(c => c.id === chId);
-            if (cur && cur.adpcmSample && this.onAdpcmCalibrate) this.onAdpcmCalibrate(cur);
+            if (cur && cur.adpcmSample) this._openSampleMenu(noteElForClick, cur);
           });
         }
 
@@ -12802,6 +15519,8 @@
 
         // チャンネル割当(part列のチップ + 割当表示ONのときのセレクト。案E)
         if (!ch.isAllRow) this._wireAssign(row, ch);
+        // スポットライト(案D): 行ホバー=一時的に注目、ch名クリック=固定
+        if (!ch.isAllRow) this._attachSpotlight(row, ch.id);
 
         group.appendChild(row);
         this._rowEls.push({
@@ -12836,6 +15555,7 @@
       }
       this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
       this._renderMuteAllBtn();
+      this._applySpotlightClasses(); // 固定中のスポットライトの目印を新しい行へ復元
     }
 
     // ch別音量スライダー(音量バー領域に重ねる半透明オーバーレイ)を1行ぶん配線する。
@@ -13145,6 +15865,16 @@
             el.noteEl.style.color = midi !== null ? '#e6e6ef' : '#555566';
             el.freqEl.textContent = ch.freq > 0 ? Math.round(ch.freq).toLocaleString() + ' Hz' : '';
           }
+        } else if (ch.drumKey && this._drumLaneOf && this._drumLaneOf.has(ch.drumKey)) {
+          // 打楽器として鳴っているサンプルPCM: note列は「今このスロットが鳴らしている太鼓」
+          // (ドラム区画のレーンのラベルと色)。プール式チップは同じ太鼓が毎回別スロットへ
+          // 移るので、行を見ただけでどの音か分かるこの表示が効く。
+          // (従来はdmcRateIdxを出していたが、この経路では常に固定値15で情報が無かった)
+          const laneIdx = this._drumLaneOf.get(ch.drumKey);
+          const laneInfo = this._drumLanes[laneIdx];
+          el.noteEl.textContent = (laneInfo && laneInfo.label) || '?';
+          el.noteEl.style.color = (laneInfo && laneInfo.color) || '#e6e6ef';
+          el.freqEl.textContent = ch.dmcFreq > 0 ? Math.round(ch.dmcFreq).toLocaleString() + ' Hz' : '';
         } else if (ch.sample) {
           // note: $4010 再生速度インデックス / freq: DPCM再生周波数
           el.noteEl.textContent = String(ch.dmcRateIdx);
@@ -13192,6 +15922,14 @@
       // ピアノロールはSPCモード中は updateSpcVoices() 側が描画するため、ここでは
       // それ以外(NSF/MML/KSS)のときだけ描画する(同じcanvasへの二重描画を避ける)。
       if (this._mode !== 'spc') this._renderRoll(posSeconds);
+    }
+
+    /** チャンネルプール式チップの表示モード初期値(main.jsがlocalStorageから復元して渡す)。 */
+    setPoolModes(modes) {
+      Object.assign(this._poolModes, modes || {});
+      for (const sw of this._rowsInnerEl.querySelectorAll('.kbd-pool-toggle')) {
+        if (sw._paint) sw._paint(); // data-poolごとに自分のモードを塗り直す
+      }
     }
 
     // トラックid(NSF:'P1'等/SPC:'V0'-'V7'/KSS:'KP1'等)がミュート中かどうかを判定する。
@@ -13270,9 +16008,11 @@
     // 目標へは毎フレーム残差の一部ずつ寄せる(LANE_SCROLL_EASE)ので滑らかに追従する。
     // 音符が1つも無い間は動かさない。lane.scrollWhite = 窓の低音側端の白鍵位置(小数)
     _updateLaneScroll(lane, pos, windowSec) {
-      const maxOff = TOTAL_WHITE - LANE_VISIBLE_WHITE;
+      // 音程軸の単位は白鍵1本。ドラム区画があるぶん全体の長さが伸び、音程側の座標も右へずれる
+      const drumUnits = (this._drumLanes || []).length * DRUM_LANE_WHITE;
+      const maxOff = TOTAL_WHITE + drumUnits - LANE_VISIBLE_WHITE;
       const track = this._rollTimeline && this._rollTimeline.find(t => t.id === lane.id);
-      if (lane.scrollWhite == null) lane.scrollWhite = Math.max(0, Math.min(maxOff, keyX(60, 1).x - LANE_VISIBLE_WHITE / 2)); // 初期値: C4中心
+      if (lane.scrollWhite == null) lane.scrollWhite = Math.max(0, Math.min(maxOff, drumUnits + keyX(60, 1).x - LANE_VISIBLE_WHITE / 2)); // 初期値: C4中心
       if (!track || !track.notes.length) return;
       const winEnd = pos + windowSec;
       // 白鍵単位の位置(黒鍵は隣接白鍵の境界)。keyX(midi,1)は白鍵幅1としたときの座標
@@ -13284,9 +16024,17 @@
         const n = notes[i];
         if (n.endSec <= pos) continue;
         if (n.startSec >= winEnd) break;
-        const kp = keyX(n.midi, 1);
-        if (!kp) continue;
-        const p0 = kp.isBlack ? kp.x - 0.3 : kp.x, p1 = kp.isBlack ? kp.x + 0.3 : kp.x + 1;
+        let p0, p1;
+        if (n.drumLane !== undefined) {
+          // ドラムの打点はレーン番号が音程軸上の位置(1レーン=DRUM_LANE_WHITE白鍵ぶん)
+          const d = drumLaneX(n.drumLane, n.drumSub, n.drumSubN, DRUM_LANE_WHITE);
+          p0 = d.x; p1 = d.x + d.size;
+        } else {
+          const kp = keyX(n.midi, 1);
+          if (!kp) continue;
+          p0 = (kp.isBlack ? kp.x - 0.3 : kp.x) + drumUnits;
+          p1 = (kp.isBlack ? kp.x + 0.3 : kp.x + 1) + drumUnits;
+        }
         if (p0 < lo) lo = p0;
         if (p1 > hi) hi = p1;
         // 注目音: 鳴っている音(startSec<=pos)があればそれ、無ければ最も近い未来の音
@@ -13318,7 +16066,8 @@
       if (newW === 0 || newH === 0) return;
       if (canvas.width !== newW) canvas.width = newW;
       if (canvas.height !== newH) canvas.height = newH;
-      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? LANE_VISIBLE_WHITE : 0);
+      const nDrum = (this._drumLanes || []).length;
+      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? LANE_VISIBLE_WHITE : 0, nDrum);
       const { wk: wkW, bk: bkW, H } = g;
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, H);
@@ -13326,6 +16075,34 @@
       const winEnd = pos + windowSec;
       if (lane) this._updateLaneScroll(lane, pos, windowSec);
       const offPx = lane ? lane.scrollWhite * wkW : 0; // 音程窓の低音側端(px)。keyX()の結果から引く
+      const pitchOff = g.drumOff - offPx; // 音程側の座標補正(ドラム区画ぶん右へ + 窓スクロール)
+
+      // ドラム区画のレーングリッド(淡い下地+レーン境界)。音程鍵盤より低音側に置く。
+      for (let i = 0; i < nDrum; i++) {
+        const d = drumLaneX(i, 0, 1, g.drumLaneW);
+        const x0 = d.x - offPx;
+        if (x0 + d.size < 0 || x0 > g.pitchLen) continue;
+        ctx.fillStyle = '#000000';
+        ctx.globalAlpha = i % 2 ? 0.06 : 0.12; // 交互の縞でレーンの境目を分かりやすく(黒鍵の網掛けと同系)
+        let r = g.rect(x0, d.size, 0, g.timeLen);
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#3d3d4a';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        if (g.vertical) { const x = Math.round(x0) + 0.5; ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+        else { const y = Math.round(H - x0) + 0.5; ctx.moveTo(0, y); ctx.lineTo(g.W, y); }
+        ctx.stroke();
+      }
+      // ドラム区画と音程鍵盤の境目(区画があるときだけ)
+      if (nDrum) {
+        ctx.strokeStyle = '#7a86a8';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        if (g.vertical) { const x = Math.round(g.drumOff - offPx) + 0.5; ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+        else { const y = Math.round(H - (g.drumOff - offPx)) + 0.5; ctx.moveTo(0, y); ctx.lineTo(g.W, y); }
+        ctx.stroke();
+      }
 
       // 鍵盤ごとの音程グリッド(白鍵の境界線+黒鍵レーンの淡い網掛け)とCの音名ラベル。
       // グリッドは音程軸に直交する全時間帯の帯/線なので、時間軸[0, timeLen)いっぱいに引く。
@@ -13334,7 +16111,7 @@
         const semi = rel % 12;
         const keyPos = keyX(midi, wkW);
         if (!keyPos) continue;
-        keyPos.x -= offPx;
+        keyPos.x += pitchOff;
         if (keyPos.x + wkW < 0 || keyPos.x - wkW > g.pitchLen) continue; // 音程窓の外
         if (IS_BLACK[semi]) {
           ctx.fillStyle = '#000000';
@@ -13405,9 +16182,19 @@
       // 曲が長い/ノート数が多いほど毎フレーム全ノート走査のコストが線形に効いてくるため、
       // 未再生ノートだけを毎フレーム定数時間で拾えるようにする最適化(文字数の多いMMLで
       // ピアノロールがカクつく問題の対策)
-      for (const track of this._rollTimeline) {
+      // スポットライト(案D): 注目chがあるときは他chを減光し、注目chは最後=最前面に描く
+      // (ノートは不透明塗りなので、描画順が後のchが必ず勝つ。並べ替えないと注目chが
+      // 他chに上書きされて「注目しているのに見えない」ことがある)。
+      const spotId = this._effectiveSpotlightId();
+      const spotActive = !!spotId && this._rollTimeline.some(t => t.id === spotId);
+      const drawOrder = spotActive
+        ? this._rollTimeline.filter(t => t.id !== spotId).concat(this._rollTimeline.filter(t => t.id === spotId))
+        : this._rollTimeline;
+
+      for (const track of drawOrder) {
         if (onlyId !== null && track.id !== onlyId) continue; // レーン表示: このchのノートだけ
         if (this._isTrackMuted(track.id)) continue; // ミュート中のチャンネルは描画しない
+        const dimAlpha = (spotActive && track.id !== spotId) ? SPOTLIGHT_DIM_ALPHA : 1;
         const notes = track.notes;
         let idx = this._rollCursor[track.id] || 0;
         if (idx > notes.length) idx = notes.length;
@@ -13416,18 +16203,47 @@
         for (let i = idx; i < notes.length; i++) {
           const note = notes[i];
           if (note.startSec >= winEnd) break; // 以降は全て未来のノート(startSec昇順のため打ち切れる)
-          const keyPos = keyX(note.midi, wkW);
-          if (!keyPos) continue;
-          keyPos.x -= offPx;
-          if (keyPos.x + wkW < 0 || keyPos.x - wkW > g.pitchLen) continue; // 音程窓の外
-          const relEnd = Math.min(windowSec, note.endSec - pos);
-          const relStart = Math.max(0, note.startSec - pos);
-          // 音程軸: 白鍵は境界線1px内側、黒鍵はレーン幅いっぱい。時間軸: 最低2pxは見えるようにする
-          const pLo = keyPos.isBlack ? keyPos.x - bkW / 2 : keyPos.x + 0.5;
-          const pSize = keyPos.isBlack ? bkW : (wkW - 1);
-          const r = g.rect(pLo, pSize, g.tPx(relStart), g.tPx(relEnd), 2);
           // 音量による濃淡はやめ、常にチャンネル本来の色をそのまま(不透明・フィルタ無し)で描く。
           const noteColor = this._getColor(track.id, track.color);
+          const isDrum = note.drumLane !== undefined;
+          let pLo, pSize;
+          if (isDrum) {
+            // ドラム区画の打点。レーン=どのサンプルか、レーン内の分割=同時発音の横並び
+            if (note.drumLane >= nDrum) continue; // レーン表より後に来たタイムライン(再構築待ち)
+            const d = drumLaneX(note.drumLane, note.drumSub, note.drumSubN, g.drumLaneW);
+            const x0 = d.x - offPx;
+            if (x0 + d.size < 0 || x0 > g.pitchLen) continue;
+            pLo = x0 + 1;
+            pSize = Math.max(2, d.size - 2);
+          } else {
+            const keyPos = keyX(note.midi, wkW);
+            if (!keyPos) continue;
+            keyPos.x += pitchOff;
+            if (keyPos.x + wkW < 0 || keyPos.x - wkW > g.pitchLen) continue; // 音程窓の外
+            // 音程軸: 白鍵は境界線1px内側、黒鍵はレーン幅いっぱい
+            pLo = keyPos.isBlack ? keyPos.x - bkW / 2 : keyPos.x + 0.5;
+            pSize = keyPos.isBlack ? bkW : (wkW - 1);
+          }
+          const relEnd = Math.min(windowSec, note.endSec - pos);
+          const relStart = Math.max(0, note.startSec - pos);
+          // 時間軸: 最低2pxは見えるようにする
+          const r = g.rect(pLo, pSize, g.tPx(relStart), g.tPx(relEnd), 2);
+          ctx.globalAlpha = dimAlpha;
+          if (isDrum) {
+            // 塗り=サンプル(どの太鼓か) / 枠線=チャンネル(どのスロットが鳴らしたか)の二重符号化。
+            // プール式チップでは同じ太鼓が毎回別スロットへ移るので、色をchに割り当てると
+            // 太鼓の色が踊る。塗りをサンプル側に固定するとその問題が出ない。
+            const laneInfo = this._drumLanes[note.drumLane];
+            ctx.fillStyle = (laneInfo && laneInfo.color) || DRUM_OTHER_COLOR;
+            ctx.fillRect(r.x, r.y, r.w, r.h);
+            if (r.w > 3 && r.h > 3) {
+              ctx.strokeStyle = noteColor;
+              ctx.lineWidth = 1.5;
+              ctx.strokeRect(r.x + 0.75, r.y + 0.75, r.w - 1.5, r.h - 1.5);
+            }
+            ctx.globalAlpha = 1;
+            continue; // ドラムの打点にセント偏差オーバーレイは無い(音程を持たないため)
+          }
           ctx.fillStyle = noteColor;
           ctx.fillRect(r.x, r.y, r.w, r.h);
 
@@ -13454,6 +16270,7 @@
               ctx.stroke();
             }
           }
+          ctx.globalAlpha = 1;
         }
       }
 
@@ -13468,7 +16285,7 @@
           for (const [midi, fill] of [[d.gotMidi, true], [d.expectedMidi, false]]) {
             const keyPos = keyX(midi, wkW);
             if (!keyPos) continue;
-            keyPos.x -= offPx;
+            keyPos.x += pitchOff;
             if (keyPos.x + wkW < 0 || keyPos.x - wkW > g.pitchLen) continue;
             const pLo = keyPos.isBlack ? keyPos.x - bkW / 2 : keyPos.x + 0.5;
             const pSize = keyPos.isBlack ? bkW : (wkW - 1);
@@ -13541,6 +16358,8 @@
       this._attachColorPicker(row.querySelector('.kbd-dot'), v.label, v.color);
       // チャンネル割当(part列チップ + 割当表示ONのときのセレクト)
       this._wireAssign(row, { id: v.label, target: target });
+      // スポットライト(案D): メイン一覧と同じ操作をSPCボイス行にも付ける
+      this._attachSpotlight(row, v.label);
 
       const lrEls = row.querySelectorAll('.kbds-lr');
       return {
@@ -13630,6 +16449,7 @@
         });
         this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
         this._renderMuteAllBtn();
+        this._applySpotlightClasses(); // 固定中のスポットライトの目印を新しい行へ復元
       }
       // 大波形に表示するボイスを新しい一覧に合わせる(選択がSPCボイス以外ならV0を一時表示)。
       // ★SPCのボイス数は常に8で固定のため、reset()でファイルを読み込み直しても行の再構築
@@ -13818,6 +16638,10 @@
  *   V      … v<n>(音量そのもの)。false なら v も出さず既定音量
  *   SWEEP  … s<speed>,<depth>(2A03ハードウェアスイープ)
  *   INST   … @<n>(音色/デューティ)、OP<n>(VRC7音色)、MH<n>(FDS変調)、N<n>(FME7ノイズ周期)
+ *   DRUM   … VGMのサンプルPCM(C140/C352/QSound/MultiPCM/SegaPCM/GA20/OKIM6295/YM2610
+ *            ADPCM-A)で音程が取れなかった発音=打楽器を、1本のドラムパートとして音符化する
+ *            (サンプルごとに疑似音程を割り当てる。src/convert/drumMap.js)。falseなら従来
+ *            どおり休符(ドラムはMMLに出ない)
  *
  * 譜面整形(既定 false = 従来通り):
  *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)
@@ -13842,7 +16666,7 @@
   const MML   = global.MML   = global.MML   || {};
   MML.Convert = MML.Convert || {};
 
-  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST'];
+  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
   const SHAPE_KEYS = ['SHAPE_REST', 'SHAPE_QUANT'];
   // PCM品質(冒頭コメント参照)。boolean群とは別に許容値で正規化する
   const PCM_RATE_VALUES = ['max', 8, 4, 2, 1];
@@ -13854,10 +16678,10 @@
 
   const PRESETS = {
     // 忠実再現(従来の既定)
-    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true,
+    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
                 SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave' },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
-    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true,
+    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
                 SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave' },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
@@ -17355,7 +20179,9 @@
   };
 
   // ── VGM(チップファミリごとに上の各ビルダー/共通抽出経路を連結)─────────
-  RollBuild.vgm = function (data, done) {
+  // opts.poolMode: チャンネルプール式チップの表示モード({multipcm:'logical'|'phys'})。
+  // 'logical'なら割当逆算済みスナップショット(data.multipcm.logical)でロールを組む
+  RollBuild.vgm = function (data, done, opts) {
     const frameRate = data.frameRate;
     const sr = 44100;
     const buildTracks = MML.UI.buildRollTracksFromRegSnapshots;
@@ -17376,13 +20202,15 @@
     }
     // スナップショット型チップ: extractChannels(keyboard.js)が読むextraSnapsに
     // フレーム毎スナップショット配列を渡して同じ抽出経路でトラック化する
-    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ga20', 'segapcm', 'c140', 'pwm', 'rf5c164', 'rf5c68'];
+    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ga20', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
     const chipToken = { sn: 'sn76489' };
+    const poolMode = (opts && opts.poolMode) || {};
     for (const key of snapChips) {
       if (!data[key]) continue;
       const token = chipToken[key] || key;
-      const extra = {}; extra[key] = data[key].snapshots;
-      const t = buildTracks(data[key].snapshots, [], done, sr / frameRate, sr, ['vgm', token], null, extra);
+      const snaps = (poolMode[key] === 'logical' && data[key].logical) ? data[key].logical : data[key].snapshots;
+      const extra = {}; extra[key] = snaps;
+      const t = buildTracks(snaps, [], done, sr / frameRate, sr, ['vgm', token], null, extra);
       if (t) tracks = tracks.concat(t);
     }
     return tracks;
@@ -17468,7 +20296,8 @@
       }) };
     }
     if (format === 'vgm') {
-      return { build: (data, done) => ({ timeline: RollBuild.vgm(data, done), info: {} }) };
+      // params.poolMode: プール式チップの表示モード(Worker実行時はopt.roll経由で届く)
+      return { build: (data, done) => ({ timeline: RollBuild.vgm(data, done, params), info: {} }) };
     }
     return null;
   };

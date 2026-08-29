@@ -303,12 +303,9 @@
       } else {
         this._scanOpll = null;
       }
-      if (this._lastMute) {
-        const exp = this._lastMute.expansion || this._lastMute;
-        if (exp.psg) MML.Emu.applyMute(this._scanPsg.mute, exp.psg);
-        if (exp.scc) MML.Emu.applyMute(this._scanScc.mute, exp.scc);
-        if (exp.opll && this._scanOpll) MML.Emu.applyMute(this._scanOpll.mute, exp.opll);
-      }
+      // ★ミュート/ch別音量はスキャンへ反映しない。これらは「聴き方」の設定であって曲の
+      // 内容ではないため、全chミュートすると曲が終わったと誤判定して次の曲へ飛んでしまう
+      // (ユーザー報告。以前は「実再生と無音判定基準を揃える」ため反映していた)。
       if (this._lastVolume) {
         const exp = this._lastVolume.expansion || this._lastVolume;
         if (exp.psg) MML.Emu.applyVolume(this._scanPsg.vol, exp.psg);
@@ -421,6 +418,8 @@
         out[i] = y;
         this.samplePos++;
         if (this._silenceScanFrame >= 0 && !this._silenceFired && f >= this._silenceScanFrame) {
+          // ★ミュート中は通知しない(main.js syncSilenceDetect)
+          if (this.silenceDetectEnabled === false) continue;
           this._silenceFired = true;
           if (this.onSilenceTimeout) this.onSilenceTimeout();
         }

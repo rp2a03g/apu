@@ -107,6 +107,136 @@
     }
     return out;
   }
+  // ── 打楽器(ピッチ解析が通らなかったサンプル発音)の音符化 ────────────────
+  // 音程レジスタで音階演奏していないサンプル(ドラム/効果音)は絶対音程を持たないので、
+  // 「1サンプル=1レーン=1音程」のドラムマップ(src/convert/drumMap.js)で疑似音程を与える。
+  // ピアノロールのドラム区画と同じ表を使うので、ロールで見た太鼓とMMLに出た音符が一致する
+  // ([[roll-as-mml-debugger]])。drumMapが無ければ従来どおり休符。
+  //  ・rawFreqは付けない: 実周波数ではないのでデチューン補正/ビブラート統合の対象外にする
+  //    (mergeRapidArpeggioはrawFreq無しで素通り、mergeAlternatingVibratoはpitchSeq無しで素通り)
+  //  ・key: レーンごとに変えて、別の太鼓へ移ったところで必ずイベントが切れるようにする
+  function drumState(c, retrigger, drumMap) {
+    const DrumMap = MML.Convert && MML.Convert.DrumMap;
+    if (!drumMap || !DrumMap || !c.active || !c.sample) return { note: null, attDb: 0 };
+    const k = DrumMap.key(c.sample);
+    const lane = drumMap.laneOf.has(k) ? drumMap.laneOf.get(k) : drumMap.otherLane;
+    const note = DrumMap.noteOf(lane);
+    if (note === null) return { note: null, attDb: 0 };
+    const att = c.vol > 0 ? Math.min(96, -20 * Math.log10(c.vol)) : 96;
+    return { note, attDb: att, retrigger, key: 'drum' + lane };
+  }
+
+  // ドラムマップを組むための観測列。ドラムマップは曲全体で1つなので、
+  // 全サンプルチップぶんを converter.js が集めてから DrumMap.build する。
+  // getCh(f) はそのフレームのチャンネル状態(無ければnull)。
+  function drumObs(total, frameDur, getCh, out) {
+    const DrumMap = MML.Convert && MML.Convert.DrumMap;
+    if (!DrumMap) return out;
+    let prevSeq = null;
+    for (let f = 0; f < total; f++) {
+      const c = getCh(f);
+      if (!c) { prevSeq = null; continue; }
+      const isKeyOn = c.seq !== prevSeq && c.seq > 0;
+      prevSeq = c.seq;
+      if (!isKeyOn || !c.active || !c.sample) continue;
+      if (c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0) continue; // 音程が取れた=打楽器扱いしない
+      out.push({ key: DrumMap.key(c.sample), sec: f * frameDur });
+    }
+    return out;
+  }
+
+  /**
+   * サンプルPCMチップのスナップショット列から打楽器の観測列を集める(converter.js用)。
+   * kind: 'pcm'(snapshots[f][ch]) / 'adpcmA'(snapshots[f].adpcmA[ch])
+   */
+  MML.Vgm2MmlExpansion.collectDrumObs = function (snapshots, numCh, frameDur, kind, out) {
+    const total = snapshots.length;
+    const res = out || [];
+    for (let ch = 0; ch < numCh; ch++) {
+      drumObs(total, frameDur, (f) => {
+        const s = snapshots[f];
+        if (!s) return null;
+        return kind === 'adpcmA' ? (s.adpcmA && s.adpcmA[ch]) : s[ch];
+      }, res);
+    }
+    return res;
+  };
+
+  /**
+   * サンプルPCMチップの打楽器を「1本のドラムパート」にまとめる。
+   *
+   * なぜスロットごとに出さないか(★設計の要点):
+   *   プール式チップ(C140/C352/QSound/MultiPCM)はドライバがスロットを巡回割当するので、
+   *   1組のドラムキットが実機上は何本ものスロットへ散る(実測: Dragon Saber の C140 は
+   *   8種類の太鼓が7スロットにまたがっていた)。スロットごとに音符を出すと、借用先の枠
+   *   (N163 8ch等)をドラムだけで食い潰してメロディが落ちる。曲としては「ドラム=1パート」
+   *   なので、ここで1本へ束ね直す。
+   *
+   * MMLパートは単音なので、同時に鳴っている打点は1つに絞る: 直近に叩かれたものを採る
+   * (新しい打点が前の打点を切る = 実際のドラムパートの読み方と同じ)。
+   *
+   * getCh(f, ch) はそのフレーム・そのチャンネルの状態(無ければnull)。
+   * attOf(c) は減衰量(dB)。省略時は振幅比 c.vol から求める。
+   */
+  const DRUM_PEAK_LOOKAHEAD = 3; // 打点の音量を決めるとき先読みするフレーム数
+  function drumChannelOf(total, numCh, drumMap, getCh, attOf) {
+    const lastOn = new Array(numCh).fill(-1);   // ch → 最後にキーオンされたフレーム
+    const prevSeq = new Array(numCh).fill(null);
+    let prevPick = -1;
+    let curAtt = 0;   // いま鳴っている打点の音量(打点の途中では変えない。下のコメント参照)
+    const attOfCh = attOf || ((ch) => (ch.vol > 0 ? Math.min(96, -20 * Math.log10(ch.vol)) : 96));
+    const events = collect(total, (f) => {
+      let bestCh = -1, bestOn = -1;
+      for (let ch = 0; ch < numCh; ch++) {
+        const c = getCh(f, ch);
+        if (!c) { prevSeq[ch] = null; continue; }
+        if (c.seq !== prevSeq[ch] && c.seq > 0) lastOn[ch] = f;
+        prevSeq[ch] = c.seq;
+        if (!c.active || !c.sample) continue;
+        if (c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0) continue; // 音程が取れた=打楽器でない
+        if (lastOn[ch] > bestOn) { bestOn = lastOn[ch]; bestCh = ch; }
+      }
+      if (bestCh < 0) { prevPick = -1; return { note: null, attDb: 0 }; }
+      const c = getCh(f, bestCh);
+      const st = drumState(c, false, drumMap);
+      if (st.note === null) { prevPick = -1; return st; }
+      // このフレームで叩き直された、または別スロットの打点へ移った = 打ち直し
+      st.retrigger = (bestOn === f) || (prevPick !== bestCh);
+      // ★打点1つの中では音量を変えない。サンプル自身の減衰(や、キーオンと音量書き込みが
+      //   1フレームずれるドライバ)を「演奏された音量変化」として拾うと、1フレームだけの
+      //   微小イベントに刻まれて 192分音符だらけの読めない譜面になる。打点の頭で数フレーム
+      //   先読みして一番大きい値(=velocity)を採り、その打点が終わるまで保持する。
+      if (st.retrigger || prevPick !== bestCh) {
+        curAtt = attOfCh(c);
+        for (let k = 1; k <= DRUM_PEAK_LOOKAHEAD && f + k < total; k++) {
+          const cn = getCh(f + k, bestCh);
+          if (!cn || !cn.active || cn.seq !== c.seq) break; // 次の打点まで来たら打ち切る
+          curAtt = Math.min(curAtt, attOfCh(cn));
+        }
+      }
+      st.attDb = curAtt;
+      prevPick = bestCh;
+      return st;
+    });
+    return { events: events.map(toCommon), hasVolume: true };
+  }
+
+  /**
+   * ドラムパート1本を返す(converter.js用)。kind: 'pcm' / 'adpcmA'。
+   * drumMapが無ければ空チャンネル(従来と同じ=何も出ない)。
+   */
+  MML.Vgm2MmlExpansion.drumChannel = function (snapshots, numCh, drumMap, kind, attOf, chans) {
+    if (!drumMap) return { events: [], hasVolume: true };
+    const use = chans || null; // 省略時は全ch。DPCMへ載せたchを外すために使う
+    const getCh = (f, ch) => {
+      if (use && use.indexOf(ch) < 0) return null;
+      const s = snapshots[f];
+      if (!s) return null;
+      return kind === 'adpcmA' ? (s.adpcmA && s.adpcmA[ch]) : s[ch];
+    };
+    return drumChannelOf(snapshots.length, numCh, drumMap, getCh, attOf || null);
+  };
+
   const waveCache = new WeakMap(); // waveData配列 → 32点(同じサンプルの再変換を避ける)
   function n163WaveOf(c) {
     if (!c.waveData) return null;
@@ -133,6 +263,8 @@
         const retrigger = c.seq !== prevSeq && c.seq > 0;
         prevSeq = c.seq;
         const pitched = c.active && c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        // 音程が取れなかったサンプル(ドラム/効果音)はここでは休符のまま。まとめて
+        // 1本のドラムパートへ出す(drumChannelOf参照)ので、スロット側にも出すと二重になる
         if (!pitched) return { note: null, attDb: 0 };
         const att = c.vol > 0 ? Math.min(96, -20 * Math.log10(c.vol)) : 96;
         return { note: freqToNoteNumber(c.pitchHz), attDb: att, retrigger, rawFreq: c.pitchHz,
@@ -145,6 +277,10 @@
   MML.Vgm2MmlExpansion.ga20 = (snapshots) => pcmChannels(snapshots, 4);
   MML.Vgm2MmlExpansion.segapcm = (snapshots) => pcmChannels(snapshots, 16);
   MML.Vgm2MmlExpansion.c140 = (snapshots) => pcmChannels(snapshots, 24);
+  MML.Vgm2MmlExpansion.c352 = (snapshots) => pcmChannels(snapshots, 32);
+  MML.Vgm2MmlExpansion.qsound = (snapshots) => pcmChannels(snapshots, 16);
+  MML.Vgm2MmlExpansion.okim6295 = (snapshots) => pcmChannels(snapshots, 4);
+  MML.Vgm2MmlExpansion.multipcm = (snapshots) => pcmChannels(snapshots, 28);
 
   /** YM2610 ADPCM-A(6ch)/ADPCM-B: snapshots[f].adpcmA[i] / .adpcmB */
   MML.Vgm2MmlExpansion.adpcm = function (snapshots) {
@@ -157,6 +293,7 @@
         const retrigger = c.seq !== prevSeq && c.seq > 0;
         prevSeq = c.seq;
         const pitched = c.active && c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        // 音程なし(ADPCM-Aのドラム等)はここでは休符。ドラムパート側で拾う(drumChannelOf参照)
         if (!pitched) return { note: null, attDb: 0 };
         // key: 同じ音程でもサンプル(波形)が変われば別イベント(N163の音色が変わる)
         const w = n163WaveOf(c);

@@ -371,6 +371,38 @@
     try { global.localStorage.setItem(TUNING_KEY, JSON.stringify(map)); } catch (e) { /* ignore */ }
   }
 
+  // ── 打楽器/音階の手動上書き ────────────────────────────────────────────
+  // 「このサンプルは打楽器か、音階楽器か」はピッチ解析の信頼度(conf>=0.5)で自動判定して
+  // いるが、外れる曲がある。ユーザーが耳で決めた指定をここへ集約する。
+  // ★applyKindOverride を samplePitch() の中で conf に反映させることで、
+  //   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換の4箇所が
+  //   すべて自動的に追随する(判定の分岐を増やさない)。
+  // キーはサンプル内容のハッシュ(チューニングと同じ)。ROM上のアドレスと違い、
+  // 別のゲーム/別のリビジョンでも同じ音なら同じ指定が効く。
+  const KIND_KEY = 'samplePitchKind'; // localStorage: { [sampleHash]: 'drum' | 'pitch' }
+  function getKindMap() {
+    try { return JSON.parse(global.localStorage.getItem(KIND_KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function saveKindMap(map) {
+    try { global.localStorage.setItem(KIND_KEY, JSON.stringify(map)); } catch (e) { /* ignore */ }
+  }
+  /** samplePitch() の結果 r に手動指定を反映する(r.kindManual に指定内容を残す) */
+  function applyKindOverride(r) {
+    if (!r || !r.hash) return r;
+    const k = getKindMap()[r.hash];
+    if (k === 'drum') { r.conf = 0; r.kindManual = 'drum'; }
+    else if (k === 'pitch' && r.cps > 0) { r.conf = 1; r.kindManual = 'pitch'; }
+    else r.kindManual = null;
+    return r;
+  }
+  /** 手動指定の設定/解除。kind: 'drum' | 'pitch' | null(=自動へ戻す) */
+  function setKindOverride(hash, kind) {
+    if (!hash) return;
+    const map = getKindMap();
+    if (kind === 'drum' || kind === 'pitch') map[hash] = kind; else delete map[hash];
+    saveKindMap(map);
+  }
+
   // 波形アイコン用の128点。cps>0(音程あり)なら持続部(先頭40%位置)から1周期を線形補間で切り出し、
   // 音程なし(ドラム等)ならサンプル全体を128区間に分け各区間の絶対値最大(符号付き)=概形。
   // どちらも最大絶対値で正規化(±1)。
@@ -474,6 +506,8 @@
       // 手動キャリブレーション(localStorage、サンプル内容のハッシュがキーなので同じゲームの他トラックでも効く)
       const t = getTuningMap()[r.hash];
       if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
+      // 打楽器/音階の手動上書きをconfへ反映(ロール/鍵盤/変換の4箇所がこの1点で追随する)
+      applyKindOverride(r);
       r.wave = makeSampleWave(pcm, r.conf >= 0.5 ? r.cps : 0);
       this._pitchCache.set(key, r);
       return r;
@@ -485,6 +519,39 @@
       const e = Math.min(end, start + MAX_BYTES);
       return kind === 'b' ? decodeAdpcmB(rom, start, e) : decodeAdpcmA(rom, start, e);
     }
+
+    /**
+     * スナップショットの sample({kind,start,end}) → デコード済みPCM(Float32Array、-1..1)。
+     * vgm2mmlのドラム→@DPCM変換が実サンプルを必要とするための公開口。
+     * ROMはこのチップ(=キャプチャWorker側)にしか無く、関数はpostMessageを越えられないので、
+     * キャプチャの最後にここを呼んで実データだけをメインスレッドへ渡す
+     * (src/emulator/vgmPlayer.js の collectUsedSamples 参照)。
+     */
+    /**
+     * 打楽器/音階の手動上書き。kind: 'drum' | 'pitch' | null(=自動へ戻す)。
+     * ピッチ解析の信頼度(conf)による自動判定が外れた曲を、ユーザーが耳で直すための口。
+     * 指定はサンプル内容のハッシュをキーに localStorage へ入る(setSampleTuningと同じ流儀。
+     * ROMアドレスと違い、同じ音なら別のゲーム/リビジョンでも効く)。
+     * ★confへの反映は Emu.SamplePitchUtil.applyKindOverride が samplePitch() の中で行うので、
+     *   ロールのドラム区画・鍵盤のnote列・vgm2mmlのドラムパート・DPCM変換が自動的に追随する。
+     */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      // 「音階として扱う」を選んでも、周期がまったく検出できていない(cps=0)サンプルは
+      // 使える音程が無い。呼び出し側へ知らせて基準音の手動補正を促す(黙って無視しない)
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.kind + ':' + sample.start + ':' + sample.end); // 次回参照で上書きを反映し直す
+      return { kind: kind || null, needsTuning: needsTuning };
+    }
+
+    samplePcm(sample) {
+      if (!sample) return null;
+      return this._decodeSample(sample.kind, sample.start, sample.end);
+    }
+
     /**
      * サンプルの手動ピッチ補正(表示専用)。cps=null で解除。localStorage に永続化し、
      * 同じ内容のサンプル(ハッシュ一致)なら別トラック/別セッションでも効く。
@@ -567,7 +634,7 @@
       // 変化とサンプル長から「鳴っている区間」を推定するために使う(ライブ表示は playing で足りる)
       adpcmA.push({ active: c.playing && vol > 0, vol, rawVol: il, rawVolMax: 31, panL: A.panL(i) ? 1 : 0, panR: A.panR(i) ? 1 : 0,
         rate: rateA, seq: c.seq, lenSec: A.lengthSeconds(i),
-        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
+        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'a', start: c.smpStart, end: c.smpEnd } : null }); // 手動キャリブレーション用の同定情報
     }
@@ -576,7 +643,7 @@
     const pb = B.seq ? chip.samplePitch('b', B.smpStart, B.smpEnd) : null;
     const adpcmB = { active: B.playing && !!(B.regs[0x00] & 0x80) && lvl > 0, vol: lvl / 255, rawVol: lvl, rawVolMax: 255,
       panL: B.panL() ? 1 : 0, panR: B.panR() ? 1 : 0, rate: rateB, seq: B.seq, lenSec: B.lengthSeconds(), executing: !!(B.regs[0x00] & 0x80),
-      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0, pitchManual: !!(pb && pb.manual),
+      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0, pitchManual: !!(pb && pb.manual), sampleKind: pb ? (pb.kindManual || 'auto') : 'auto',
       waveData: pb ? pb.wave : null,
       sample: B.seq ? { kind: 'b', start: B.smpStart, end: B.smpEnd } : null,
       // refRate: ピッチ解析が信頼できない時のフォールバック用。ADPCM-Bの再生レート(Delta-N由来)を
@@ -593,5 +660,46 @@
   // getTuningMap/saveTuningMap の localStorage キーはYM2610と共通('ym2610AdpcmTuning')だが、
   // キーはサンプル内容ハッシュなのでチップをまたいで共有しても衝突しない(むしろ同じサンプルなら
   // 同じ補正が効くのが望ましい)。
-  Emu.SamplePitchUtil = { detectCps, makeSampleWave, sampleHash, getTuningMap, saveTuningMap };
+  // ループ区間の基本周期推定(qsound.jsで実証した「ループ因数分解方式」の共有版)。
+  // ハードウェアループは継ぎ目なく繋がる=ループ長は基本周期の整数倍。k=2..64の lag=N/k で
+  // 巡回自己相関(補間つき)を測り、最大相関の90%以上の中で最大のk(=最高周波数解釈)を採る。
+  // 汎用detectCpsは探索上限(PITCH_MAX_LAG)を長周期ベースが超えるが、この方式は上限なし。
+  // どのkも通らなければ「ループ全体=1周期」(単一周期シンセ波形。≤1024サンプルに限る)。
+  // 返り値は detectCps 互換 {cps, conf} または null。
+  function loopCps(one) {
+    const N = one.length;
+    if (N < 16) return null;
+    let mean = 0;
+    for (let i = 0; i < N; i++) mean += one[i];
+    mean /= N;
+    const x = new Float32Array(N);
+    let e = 0;
+    for (let i = 0; i < N; i++) { x[i] = one[i] - mean; e += x[i] * x[i]; }
+    if (e < 1e-9) return null;
+    let bestK = 0, bestCorr = 0;
+    const cands = [];
+    for (let k = 2; k <= 64; k++) {
+      const lag = N / k;
+      if (lag < 8) break;
+      let acf = 0;
+      for (let i = 0; i < N; i++) {
+        const pos = (i + lag) % N;
+        const j = Math.floor(pos), f = pos - j;
+        const v = x[j] * (1 - f) + x[(j + 1) % N] * f;
+        acf += x[i] * v;
+      }
+      const corr = acf / e;
+      cands.push([k, corr]);
+      if (corr > bestCorr) { bestCorr = corr; bestK = k; }
+    }
+    if (bestCorr >= 0.85) {
+      for (const [k, corr] of cands) if (corr >= bestCorr * 0.9 && k > bestK) bestK = k;
+      return { cps: bestK / N, conf: Math.min(1, bestCorr) };
+    }
+    if (N <= 1024) return { cps: 1 / N, conf: 0.75 };
+    return null;
+  }
+
+  Emu.SamplePitchUtil = { detectCps, makeSampleWave, sampleHash, getTuningMap, saveTuningMap, loopCps,
+                          getKindMap, saveKindMap, applyKindOverride, setKindOverride };
 })(window);

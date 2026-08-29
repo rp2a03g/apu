@@ -44,17 +44,17 @@
     { id: 'ay8910',   name: 'AY8910',     offset: 0x74, minVer: 0x151, impl: true },
     { id: 'gb',       name: 'GB DMG',     offset: 0x80, minVer: 0x161, impl: true },
     { id: 'nes',      name: 'NES APU',    offset: 0x84, minVer: 0x161, impl: true },
-    { id: 'multipcm', name: 'MultiPCM',   offset: 0x88, minVer: 0x161 },
+    { id: 'multipcm', name: 'MultiPCM',   offset: 0x88, minVer: 0x161, impl: true },
     { id: 'upd7759',  name: 'uPD7759',    offset: 0x8C, minVer: 0x161 },
-    { id: 'okim6258', name: 'OKIM6258',   offset: 0x90, minVer: 0x161 },
-    { id: 'okim6295', name: 'OKIM6295',   offset: 0x98, minVer: 0x161 },
+    { id: 'okim6258', name: 'OKIM6258',   offset: 0x90, minVer: 0x161, impl: true },
+    { id: 'okim6295', name: 'OKIM6295',   offset: 0x98, minVer: 0x161, impl: true },
     { id: 'k051649',  name: 'K051649',    offset: 0x9C, minVer: 0x161, impl: true },
     { id: 'k054539',  name: 'K054539',    offset: 0xA0, minVer: 0x161 },
     { id: 'huc6280',  name: 'HuC6280',    offset: 0xA4, minVer: 0x161, impl: true },
     { id: 'c140',     name: 'C140',       offset: 0xA8, minVer: 0x161, impl: true },
     { id: 'k053260',  name: 'K053260',    offset: 0xAC, minVer: 0x161 },
     { id: 'pokey',    name: 'Pokey',      offset: 0xB0, minVer: 0x161 },
-    { id: 'qsound',   name: 'QSound',     offset: 0xB4, minVer: 0x161 },
+    { id: 'qsound',   name: 'QSound',     offset: 0xB4, minVer: 0x161, impl: true },
     { id: 'scsp',     name: 'SCSP',       offset: 0xB8, minVer: 0x171 },
     { id: 'wswan',    name: 'WonderSwan', offset: 0xC0, minVer: 0x171 },
     { id: 'vsu',      name: 'VSU',        offset: 0xC4, minVer: 0x171 },
@@ -62,7 +62,7 @@
     { id: 'es5503',   name: 'ES5503',     offset: 0xCC, minVer: 0x171 },
     { id: 'es5506',   name: 'ES5505/6',   offset: 0xD0, minVer: 0x171 },
     { id: 'x1_010',   name: 'X1-010',     offset: 0xD8, minVer: 0x171 },
-    { id: 'c352',     name: 'C352',       offset: 0xDC, minVer: 0x171 },
+    { id: 'c352',     name: 'C352',       offset: 0xDC, minVer: 0x171, impl: true },
     { id: 'ga20',     name: 'GA20',       offset: 0xE0, minVer: 0x171, impl: true },
     { id: 'mikey',    name: 'Mikey',      offset: 0xE4, minVer: 0x172 }
   ];
@@ -139,6 +139,9 @@
       if (c.id === 'k051649') info.sccPlus = flag31;         // bit31: SCC+ (K052539)
       if (c.id === 'segapcm') info.intf = rd32(0x3C);        // 0x3C: Sega PCM interface register(バンク構成)
       if (c.id === 'c140') info.c140Type = (0x96 < headerEnd) ? bytes[0x96] : 0; // 0x96: 0=System2, 1=System21, 2=C219
+      if (c.id === 'c352') info.c352Div = ((0xD6 < headerEnd ? bytes[0xD6] : 0) * 4) || 288; // 0xD6: 分周/4(0=既定288)
+      if (c.id === 'okim6258') info.okiFlags = (0x94 < headerEnd) ? bytes[0x94] : 0; // 0x94: bit0-1=分周, bit2=3bit ADPCM, bit3=12bit DAC
+      if (c.id === 'okim6295') info.pin7 = flag31; // bit31: pin7(分周132/165切替)
       chips[c.id] = info;
       usedChips.push(info);
     }

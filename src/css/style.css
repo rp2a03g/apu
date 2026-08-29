@@ -2029,6 +2029,67 @@ button.secondary {
 .kbd-wave--clickable { cursor: pointer; }
 /* YM2610 ADPCM行のnote列(クリックで手動ピッチ補正) */
 .kbd-note--clickable { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+
+/* スポットライト(案D): ch名クリックで「この行に注目」を固定できることを示すカーソルと、
+   固定中の行の目印。ホバー中は行全体をわずかに明るくして、今どの行に注目しているかを
+   一覧側でも分かるようにする(ロール側は他chが減光される) */
+.kbd-name--clickable { cursor: pointer; }
+
+/* ドラム区画のパッド試聴(原音 / DPCM変換後のA/B)。ロール見出し行に置く小さなトグル */
+.kbd-roll-drum-audition { display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; font-size: 10px; }
+.kbd-roll-drum-label { color: var(--text-muted); }
+.kbd-drum-aud-btn {
+  padding: 1px 6px; font-size: 10px; line-height: 1.4; cursor: pointer;
+  border: 1px solid #444; background: #22242e; color: #667; border-radius: 8px;
+}
+.kbd-drum-aud-btn--on { background: #3a6ea5; color: #fff; border-color: #3a6ea5; }
+
+/* 鍵盤表示ヘッダの小さなボタン(ファイルを開く / to MML / 曲終了後の挙動)。
+   ヘッダ左端は「鍵盤表示」の文字ではなくこれらのボタンになった */
+.kbd-hdr-btn {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 22px; padding: 0; cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-radius: 4px;
+  color: var(--text-secondary);
+}
+.kbd-hdr-btn:hover { background: rgba(58, 110, 165, 0.18); border-color: rgba(58, 110, 165, 0.5); color: var(--text); }
+.kbd-hdr-btn svg { width: 16px; height: 16px; }
+.kbd-tomml-btn { width: auto; padding: 0 6px; }
+.kbd-tomml-text { font-size: 10px; font-weight: 700; white-space: nowrap; }
+.kbd-repeat-btn--stop { color: var(--text-muted); }
+
+/* DPCMの実コスト(定義数/打点数/ROM容量)。割当UIのすぐ下に出し、chを1本足した瞬間に
+   容量がどう動くかが見えるようにする */
+.kbd-dpcm-cost {
+  flex: none; padding: 2px 8px; font-size: 10px; font-family: var(--mono);
+  color: var(--text-secondary); background: rgba(58, 110, 165, 0.10);
+  border-top: 1px solid rgba(58, 110, 165, 0.35); display: flex; align-items: center; gap: 6px;
+}
+.kbd-dpcm-cost-label {
+  padding: 0 5px; border-radius: 7px; background: #3a6ea5; color: #fff; font-weight: 700;
+}
+.kbd-dpcm-cost--warn { background: rgba(210, 150, 40, 0.16); border-top-color: rgba(210, 150, 40, 0.5); }
+.kbd-dpcm-cost--warn .kbd-dpcm-cost-label { background: #c98a00; }
+.kbd-dpcm-cost--over { background: rgba(209, 72, 58, 0.16); border-top-color: rgba(209, 72, 58, 0.55); }
+.kbd-dpcm-cost--over .kbd-dpcm-cost-label { background: #d1483a; }
+
+/* note列クリックの小メニュー(打楽器/音階の手動指定 + 基準音の手動補正) */
+.kbd-sample-menu {
+  position: fixed; z-index: 400; min-width: 150px; padding: 3px;
+  background: #2a2c36; border: 1px solid #4a4d5a; border-radius: 5px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45); display: flex; flex-direction: column;
+}
+.kbd-sample-menu-item {
+  padding: 4px 9px; font-size: 11px; text-align: left; cursor: pointer;
+  background: transparent; border: 0; color: #d5d5e0; border-radius: 3px; white-space: nowrap;
+}
+.kbd-sample-menu-item:hover { background: #3a6ea5; color: #fff; }
+.kbd-sample-menu-item--on { color: #8ab4ff; font-weight: 700; }
+.kbd-sample-menu-item--on::before { content: '● '; }
+.kbd-sample-menu-sep { height: 1px; margin: 3px 4px; background: #4a4d5a; }
+.kbd-ch-row:hover { background: rgba(255, 255, 255, 0.05); }
+.kbd-ch-row--spot { background: rgba(120, 170, 255, 0.16); }
+.kbd-ch-row--spot .kbd-name { color: var(--text); }
 .kbd-wave--selected {
   outline: 2px solid var(--accent);
   outline-offset: 0;

@@ -666,25 +666,9 @@
       this._scanApu = new MML.Emu.APU2A03(this._scanBus);
       this._scanBus.setApu(this._scanApu);
       for (const w of this.initWrites) this._scanBus.write(w.addr, w.value);
-      // ミュート中のchは実際に聴こえないので、スキャンにも同じミュート設定を反映する
-      // (実再生と無音判定基準を揃える。_lastMuteはapplyMute()参照)。
-      if (this._lastMute) {
-        if (this._lastMute.apu) MML.Emu.applyMute(this._scanApu.mute, this._lastMute.apu);
-        if (this._lastMute.expansion) {
-          for (const [name, chip] of Object.entries(this._scanBus.expansion)) {
-            if (this._lastMute.expansion[name]) MML.Emu.applyMute(chip.mute, this._lastMute.expansion[name]);
-          }
-        }
-      }
-      // ch別音量も無音判定基準に含めるため、ミュートと同様スキャン側にも反映する
-      if (this._lastVolume) {
-        if (this._lastVolume.apu) MML.Emu.applyVolume(this._scanApu.vol, this._lastVolume.apu);
-        if (this._lastVolume.expansion) {
-          for (const [name, chip] of Object.entries(this._scanBus.expansion)) {
-            if (this._lastVolume.expansion[name]) MML.Emu.applyVolume(chip.vol, this._lastVolume.expansion[name]);
-          }
-        }
-      }
+      // ★ミュート/ch別音量はスキャンへ反映しない。これらは「聴き方」の設定であって曲の
+      // 内容ではないため、全chミュートすると曲が終わったと誤判定して次の曲へ飛んでしまう
+      // (ユーザー報告。以前は「実再生と無音判定基準を揃える」ため反映していた)。
     }
 
     _scanApplyFrame(f) {
@@ -797,6 +781,8 @@
         // 実再生が到達したら通知する。実際に10秒待つ必要はない(既に先読みで
         // SILENCE_SEC秒以上無音が続くと確認済みのため)。
         if (this._silenceScanFrame >= 0 && !this._silenceFired && f >= this._silenceScanFrame) {
+          // ★ミュート中は通知しない(main.js syncSilenceDetect)
+          if (this.silenceDetectEnabled === false) continue;
           this._silenceFired = true;
           if (this.onSilenceTimeout) this.onSilenceTimeout();
         }

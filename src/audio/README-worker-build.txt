@@ -47,7 +47,7 @@ Workerプロトコル:
   - src/emulator/nsfPlayer.js, kssPlayer.js, gbsPlayer.js, hesPlayer.js, vgmPlayer.js
   - src/emulator/capture.js
   - src/emulator/expansion/*.js (vrc6/vrc7/fds/mmc5/n163/fme7/ay8910Msx/sccAudio/
-    opllNuked/opllMsx/sn76489/ym2612Nuked/ym2612/ym2610/ym2151/ga20/segapcm/c140/pwm32x/rf5c164)
+    opllNuked/opllMsx/sn76489/ym2612Nuked/ym2612/ym2610/ym2151/ga20/segapcm/c140/c352/okim6258/qsound/okim6295/multipcm/pwm32x/rf5c164)
   - src/audio/nsf-capture-worker-impl.js, capture-worker-multi-impl.js
 
 --- 再ビルドコマンド (PowerShell) ---

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-08-28 13:02:11
+ * Built by tools/build-capture-workers.ps1 at 2026-08-29 11:11:52
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-08-28 13:02:11';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-08-29 11:11:52';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -3931,6 +3931,10 @@
  *   V      … v<n>(音量そのもの)。false なら v も出さず既定音量
  *   SWEEP  … s<speed>,<depth>(2A03ハードウェアスイープ)
  *   INST   … @<n>(音色/デューティ)、OP<n>(VRC7音色)、MH<n>(FDS変調)、N<n>(FME7ノイズ周期)
+ *   DRUM   … VGMのサンプルPCM(C140/C352/QSound/MultiPCM/SegaPCM/GA20/OKIM6295/YM2610
+ *            ADPCM-A)で音程が取れなかった発音=打楽器を、1本のドラムパートとして音符化する
+ *            (サンプルごとに疑似音程を割り当てる。src/convert/drumMap.js)。falseなら従来
+ *            どおり休符(ドラムはMMLに出ない)
  *
  * 譜面整形(既定 false = 従来通り):
  *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)
@@ -3955,7 +3959,7 @@
   const MML   = global.MML   = global.MML   || {};
   MML.Convert = MML.Convert || {};
 
-  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST'];
+  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
   const SHAPE_KEYS = ['SHAPE_REST', 'SHAPE_QUANT'];
   // PCM品質(冒頭コメント参照)。boolean群とは別に許容値で正規化する
   const PCM_RATE_VALUES = ['max', 8, 4, 2, 1];
@@ -3967,10 +3971,10 @@
 
   const PRESETS = {
     // 忠実再現(従来の既定)
-    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true,
+    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
                 SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave' },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
-    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true,
+    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
                 SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave' },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
@@ -5942,7 +5946,9 @@
   };
 
   // ── VGM(チップファミリごとに上の各ビルダー/共通抽出経路を連結)─────────
-  RollBuild.vgm = function (data, done) {
+  // opts.poolMode: チャンネルプール式チップの表示モード({multipcm:'logical'|'phys'})。
+  // 'logical'なら割当逆算済みスナップショット(data.multipcm.logical)でロールを組む
+  RollBuild.vgm = function (data, done, opts) {
     const frameRate = data.frameRate;
     const sr = 44100;
     const buildTracks = MML.UI.buildRollTracksFromRegSnapshots;
@@ -5963,13 +5969,15 @@
     }
     // スナップショット型チップ: extractChannels(keyboard.js)が読むextraSnapsに
     // フレーム毎スナップショット配列を渡して同じ抽出経路でトラック化する
-    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ga20', 'segapcm', 'c140', 'pwm', 'rf5c164', 'rf5c68'];
+    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ga20', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
     const chipToken = { sn: 'sn76489' };
+    const poolMode = (opts && opts.poolMode) || {};
     for (const key of snapChips) {
       if (!data[key]) continue;
       const token = chipToken[key] || key;
-      const extra = {}; extra[key] = data[key].snapshots;
-      const t = buildTracks(data[key].snapshots, [], done, sr / frameRate, sr, ['vgm', token], null, extra);
+      const snaps = (poolMode[key] === 'logical' && data[key].logical) ? data[key].logical : data[key].snapshots;
+      const extra = {}; extra[key] = snaps;
+      const t = buildTracks(snaps, [], done, sr / frameRate, sr, ['vgm', token], null, extra);
       if (t) tracks = tracks.concat(t);
     }
     return tracks;
@@ -6055,7 +6063,8 @@
       }) };
     }
     if (format === 'vgm') {
-      return { build: (data, done) => ({ timeline: RollBuild.vgm(data, done), info: {} }) };
+      // params.poolMode: プール式チップの表示モード(Worker実行時はopt.roll経由で届く)
+      return { build: (data, done) => ({ timeline: RollBuild.vgm(data, done, params), info: {} }) };
     }
     return null;
   };

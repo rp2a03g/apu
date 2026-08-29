@@ -79,7 +79,7 @@
   function _cloneableRoll(roll) {
     if (!roll) return undefined;
     const out = {};
-    for (const k of ['frameRate', 'samplesPerFrame', 'sampleRate', 'chips', 'fineTune']) {
+    for (const k of ['frameRate', 'samplesPerFrame', 'sampleRate', 'chips', 'fineTune', 'poolMode']) {
       if (roll[k] !== undefined) out[k] = roll[k];
     }
     return out;
@@ -422,7 +422,7 @@
              Emu.APU2A03, Emu.FDSAudio, Emu.APUGb, Emu.APUHuC6280,
              Emu.AY8910Audio, Emu.SCCAudio, Emu.OPLLAudio, Emu.OPLLNuked, Emu.SN76489Audio,
              Emu.YM2612Nuked, Emu.YM2610Audio, Emu.YM2151Audio,
-             Emu.GA20Audio, Emu.SegaPCMAudio, Emu.C140Audio, Emu.PWM32XAudio, Emu.RF5C164Audio,
+             Emu.GA20Audio, Emu.SegaPCMAudio, Emu.C140Audio, Emu.C352Audio, Emu.OKIM6258Audio, Emu.QSoundAudio, Emu.OKIM6295Audio, Emu.MultiPCMAudio, Emu.PWM32XAudio, Emu.RF5C164Audio,
              Emu.snapshotGbApuForCapture, Emu.snapshotHesApuForCapture,
              MML.RollBuild && MML.RollBuild.vgm,
              MML.UI && MML.UI.buildRollTracksFromRegSnapshots,

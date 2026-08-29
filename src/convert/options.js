@@ -24,6 +24,10 @@
  *   V      … v<n>(音量そのもの)。false なら v も出さず既定音量
  *   SWEEP  … s<speed>,<depth>(2A03ハードウェアスイープ)
  *   INST   … @<n>(音色/デューティ)、OP<n>(VRC7音色)、MH<n>(FDS変調)、N<n>(FME7ノイズ周期)
+ *   DRUM   … VGMのサンプルPCM(C140/C352/QSound/MultiPCM/SegaPCM/GA20/OKIM6295/YM2610
+ *            ADPCM-A)で音程が取れなかった発音=打楽器を、1本のドラムパートとして音符化する
+ *            (サンプルごとに疑似音程を割り当てる。src/convert/drumMap.js)。falseなら従来
+ *            どおり休符(ドラムはMMLに出ない)
  *
  * 譜面整形(既定 false = 従来通り):
  *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)
@@ -48,7 +52,7 @@
   const MML   = global.MML   = global.MML   || {};
   MML.Convert = MML.Convert || {};
 
-  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST'];
+  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
   const SHAPE_KEYS = ['SHAPE_REST', 'SHAPE_QUANT'];
   // PCM品質(冒頭コメント参照)。boolean群とは別に許容値で正規化する
   const PCM_RATE_VALUES = ['max', 8, 4, 2, 1];
@@ -60,10 +64,10 @@
 
   const PRESETS = {
     // 忠実再現(従来の既定)
-    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true,
+    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
                 SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave' },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
-    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true,
+    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
                 SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave' },
   };
   MML.Convert.CMD_PRESETS = PRESETS;

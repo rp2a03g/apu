@@ -161,12 +161,223 @@
 
   // --- 鍵盤表示 ---
   const keyboardDisplay = new MML.UI.KeyboardDisplay(document.getElementById('keyboardDisplay'));
+  // ── 無音自動送りとミュートの関係 ────────────────────────────────────────
+  // ★ミュートは「聴き方」の設定であって曲の内容ではないので、無音判定に混ぜない。
+  //   VGM/KSS/GBS/HESはライブ出力(=ミュート適用後)を見て10秒無音で次の曲へ進むため、
+  //   全chミュートすると必ず曲が飛んでしまっていた(ユーザー報告: ワルキューレの伝説3曲目)。
+  //   1つでもミュートがある間は判定自体を止める(NSFの先読みスキャン側は別途ミュート非適用)。
+  function syncSilenceDetect() {
+    // ★プレイヤーの let 宣言はこの関数より後ろにあるので、初期化前(TDZ)に呼ばれることがある。
+    //   その時点ではまだプレイヤーが無く何もする必要が無いので握りつぶしてよい
+    try {
+      const enabled = !(keyboardDisplay.hasAnyMute && keyboardDisplay.hasAnyMute());
+      for (const p of [activePlayer, vgmActivePlayer, kssActivePlayer, gbsActivePlayer, hesActivePlayer, spcActivePlayer]) {
+        if (p) p.silenceDetectEnabled = enabled;
+      }
+    } catch (e) { /* 初期化順の都合。再生開始時に必ず呼び直される */ }
+  }
+
   keyboardDisplay.onMuteChange = () => {
+    syncSilenceDetect();
     scheduleRerenderOnMute();
     mmlHighlightLastFrame = -1; // ミュート変更を即座にハイライト表示へ反映させる
     updateMmlRangeHighlight();
   };
   keyboardDisplay.onVolumeChange = () => { scheduleRerenderOnVolume(); };
+  // ── ドラム区画のパッド試聴(原音 / DPCM変換後) ────────────────────────────
+  // vgmDrumSamples: 'kind:start' → { pcm: Float32Array, rate: Hz }
+  // VGMのキャプチャが終わったときに main.js が組んで keyboardDisplay へ渡す
+  // (実データの出どころは src/emulator/vgmPlayer.js collectUsedSamples)。
+  let vgmDrumSamples = {};
+  let auditionSource = null; // 再生中のノード(次を鳴らすとき止める)
+
+  function playFloatPcm(pcm, rateHz) {
+    if (!pcm || !pcm.length || !(rateHz > 0)) return;
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    if (auditionSource) { try { auditionSource.stop(); } catch (e) { /* ignore */ } auditionSource = null; }
+    // AudioBufferのサンプルレートには下限があるので、低いDMCレートはそのままだと作れない。
+    // コンテキストのレートへ線形補間で伸ばしてから鳴らす(音は同じ)
+    const ctxRate = audioCtx.sampleRate;
+    const n = Math.max(1, Math.round(pcm.length * ctxRate / rateHz));
+    const buf = audioCtx.createBuffer(1, n, ctxRate);
+    const out = buf.getChannelData(0);
+    const step = rateHz / ctxRate;
+    let pos = 0;
+    for (let i = 0; i < n; i++) {
+      const idx = pos | 0;
+      const a = pcm[Math.min(idx, pcm.length - 1)];
+      const b = pcm[Math.min(idx + 1, pcm.length - 1)];
+      out[i] = a + (b - a) * (pos - idx);
+      pos += step;
+    }
+    const srcNode = audioCtx.createBufferSource();
+    srcNode.buffer = buf;
+    const g = audioCtx.createGain();
+    g.gain.value = 0.9;
+    srcNode.connect(g).connect(audioCtx.destination);
+    srcNode.start();
+    auditionSource = srcNode;
+  }
+
+  // そのサンプルを鳴らしているチャンネルに指定されたDMCレート('auto'しか無ければ null)。
+  // ★変換側(dpcmDrums)と同じく、複数chが同じサンプルを鳴らしていれば最高音質の方を採る。
+  //   以前は「どれか1つの指定を全サンプルへ」だったため、ADPCM1を4kHzにするとADPCM2の
+  //   サンプルまで4kHzで試聴されていた(ユーザー報告)
+  function currentDpcmRateIndex(info) {
+    const map = (typeof getVgmDpcmRate === 'function') ? getVgmDpcmRate() : {};
+    const chipOf = { ga20: 'ga20', segapcm: 'spcm', c140: 'c140', c352: 'c352',
+                     qsound: 'qs', okim6295: 'oki', multipcm: 'mp', ym2610fm: 'pcma' };
+    let best = null;
+    const prefix = info && chipOf[info.chip];
+    for (const id of Object.keys(map)) {
+      const v = map[id];
+      if (v === undefined || v === null || v === '' || v === 'auto') continue;
+      const n = parseInt(v, 10);
+      if (!Number.isFinite(n)) continue;
+      if (prefix && info.chans && info.chans.length) {
+        const m = new RegExp('^' + prefix + ':(\d+)$').exec(id);
+        if (!m || info.chans.indexOf(+m[1]) < 0) continue; // このサンプルを鳴らさないch
+      }
+      if (best === null || n > best) best = n;
+    }
+    return best;
+  }
+
+  keyboardDisplay.onDrumAudition = (sampleKey, mode) => {
+    const s = vgmDrumSamples[sampleKey];
+    if (!s) return;
+    if (mode !== 'dpcm') { playFloatPcm(s.pcm, s.rate); return; }
+    // ★DPCM側は「簡易再生」ではなく、MML変換と同じ encode → decode を必ず通す
+    //   (そうしないと実際に鳴る音と試聴が食い違う。[[hes-dda-clip-boundary-frame-mixing]]の
+    //    ネイティブ再生と同じ方針)
+    const table = MML.Dpcm.DMC_RATE_TABLE_NTSC;
+    let ri = currentDpcmRateIndex(s);
+    if (ri === null) { // 自動: dpcmDrums と同じ選び方
+      const cmd = MML.UI.ConvertSettings ? MML.Convert.normalizeCmd(MML.UI.ConvertSettings.get()) : {};
+      const pr = cmd.PCM_RATE != null ? cmd.PCM_RATE : 'max';
+      ri = (pr === 'max') ? table.length - 1 : table.length - 1;
+    }
+    const dstRate = table[ri];
+    const n = Math.max(1, Math.round(s.pcm.length * dstRate / s.rate));
+    const res = new Float32Array(n);
+    const step = s.rate / dstRate;
+    let pos = 0;
+    for (let i = 0; i < n; i++) {
+      const idx = pos | 0;
+      const a = s.pcm[Math.min(idx, s.pcm.length - 1)];
+      const b = s.pcm[Math.min(idx + 1, s.pcm.length - 1)];
+      res[i] = a + (b - a) * (pos - idx);
+      pos += step;
+    }
+    const dac = Math.max(0, Math.min(127, Math.round((res[0] + 1) / 2 * 127)));
+    const enc = MML.Dpcm.encode(res, dstRate, ri, { startCounter: dac });
+    const dec = MML.Dpcm.decode(enc.bytes, enc.sampleCount, dac);
+    playFloatPcm(dec, dstRate);
+  };
+
+  // ── 打楽器/音階の手動上書き ────────────────────────────────────────────
+  // ピッチ解析の信頼度(conf>=0.5)による自動判定が外れた曲を、耳で直すための指定。
+  // ★指定はチップ側(Emu.SamplePitchUtil、サンプル内容のハッシュで localStorage 永続化)に
+  //   入り、samplePitch() が conf に反映する。よってロールのドラム区画・鍵盤のnote列・
+  //   vgm2mmlのドラムパート・DPCM変換の4箇所がこの1点で自動的に追随する。
+  keyboardDisplay.onSampleKind = (ch, kind) => {
+    const smp = ch.adpcmSample;
+    if (!smp) return;
+    const chip = sampleChipFor(smp.kind);
+    if (!chip || !chip.setSampleKind) return;
+    const res = chip.setSampleKind(smp, kind) || {};
+    // 「音階として扱う」を選んだのに周期が検出できていないサンプルは、基準音が無いと
+    // 音程を決めようがない。そのまま基準音の入力へ繋ぐ(黙って何も起きないのを避ける)
+    if (res.needsTuning && keyboardDisplay.onAdpcmCalibrate) {
+      setTimeout(() => keyboardDisplay.onAdpcmCalibrate(ch), 0);
+    }
+    // 判定が変わるとロールのドラム区画の中身が変わるので、保持済みキャプチャから組み直す
+    if (vgmCaptureMirror && MML.RollBuild) {
+      try {
+        const t = MML.RollBuild.vgm(vgmCaptureMirror.data, vgmCaptureMirror.done, { poolMode: vgmPoolModes });
+        keyboardDisplay.setRollTimeline(t);
+      } catch (e) { console.warn('打楽器/音階の指定後のロール再構築に失敗:', e); }
+      updateVgmDrumSamples(vgmCaptureMirror.data);
+      scheduleDpcmCostUpdate();
+    }
+  };
+
+  // sample.kind('c140'/'a'/'b'/'ga20'…) → 解析を持っているチップ本体。
+  // onAdpcmCalibrate の分岐と同じ対応表(YM2610だけアダプタが .fm でチップを持つ)
+  function sampleChipFor(kindStr) {
+    const p = vgmActivePlayer && vgmActivePlayer.player;
+    if (!p || !p.adapterById) return null;
+    if (kindStr === 'a' || kindStr === 'b') {
+      const a = p.adapterById.ym2610;
+      return a ? a.fm : null;
+    }
+    const a = p.adapterById[kindStr];
+    return a ? a.chip : null;
+  }
+
+  // ── DPCMの実コスト表示(割当を変えるたびに再計算) ────────────────────────
+  // 借用先にDPCMを選んだchが増えるとROMがどれだけ増えるかは、実際に区間を切って
+  // ミックス→重複排除→DMC化してみないと分からない(重複排除の効き方が曲次第のため)。
+  // 実測で137定義・25秒ぶんの全工程が146msなので、そのまま本番と同じ計算を回して出す。
+  // 割当セレクトの連打で詰まらないようデバウンスする。
+  let dpcmCostTimer = null;
+  function scheduleDpcmCostUpdate() {
+    if (dpcmCostTimer) clearTimeout(dpcmCostTimer);
+    dpcmCostTimer = setTimeout(() => { dpcmCostTimer = null; recomputeDpcmCost(); }, 250);
+  }
+  function recomputeDpcmCost() {
+    const mirror = vgmCaptureMirror;
+    if (!mirror || !mirror.data || !loadedVgmHeader || !MML.Vgm2MmlExpansion.dpcmDrums) {
+      keyboardDisplay.setDpcmCost(null);
+      return;
+    }
+    const Plan = MML.Convert.ChannelPlan;
+    const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
+    const chips = MML.VGM2MML.DRUM_CHIPS || [];
+    const byChip = new Map();
+    let rateIndex = null;
+    for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
+      if (s.kind !== 'pcm' || s.ch < 0) continue;
+      const chId = Plan.chIdForVgmSource(s.id);
+      const ent = (chId && Plan.get(chId)) || {};
+      if ((ent.target || def[s.id] || 'skip') !== 'dpcm') continue;
+      if (!byChip.has(s.chip)) byChip.set(s.chip, []);
+      byChip.get(s.chip).push(s.ch);
+      const v = ent.tone;
+      if (rateIndex === null && v !== undefined && v !== null && v !== '' && v !== 'auto') {
+        const n = parseInt(v, 10);
+        if (Number.isFinite(n)) rateIndex = n;
+      }
+    }
+    const sources = [];
+    let totalFrames = 0;
+    for (const [chipFlag, chans] of byChip) {
+      const d = chips.find(x => x.flag === chipFlag);
+      const e = d && mirror.data[d.data];
+      if (!d || !e || !e.samples) continue;
+      totalFrames = Math.max(totalFrames, e.snapshots.length);
+      sources.push({ chip: chipFlag, snapshots: e.snapshots, chans, shape: d.shape, samples: e.samples });
+    }
+    if (!sources.length || !totalFrames) { keyboardDisplay.setDpcmCost(null); return; }
+    keyboardDisplay.setDpcmCost('pending');
+    // 計算自体は同期だが、'計算中…'を一度描かせてから走らせる
+    setTimeout(() => {
+      try {
+        const cmd = MML.Convert.normalizeCmd(MML.UI.ConvertSettings ? MML.UI.ConvertSettings.get() : null);
+        const r = MML.Vgm2MmlExpansion.dpcmDrums(sources, MML.Emu.VGM_FRAME_RATE,
+          { totalFrames, pcmRate: cmd.PCM_RATE, rateIndex });
+        keyboardDisplay.setDpcmCost(r.stats);
+      } catch (e) {
+        console.error('DPCMコスト計算に失敗:', e);
+        keyboardDisplay.setDpcmCost(null);
+      }
+    }, 0);
+  }
+  if (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.onChange) {
+    MML.Convert.ChannelPlan.onChange(() => scheduleDpcmCostUpdate());
+  }
+
   // YM2610 ADPCM行(NA1-6/NB)のnote列クリック → そのサンプルの基準音を手動補正(表示専用)。
   // 入力: 音名(例 "C4"、"a#3")=そのサンプルの現在の再生レートでその音になるよう基準を設定 /
   //       "+20"/"-15" = 現在の表示音程からのセント補正 / 空欄 = 補正解除。
@@ -183,6 +394,14 @@
       ? (p && p.adapterById.segapcm && p.adapterById.segapcm.chip)
       : smp.kind === 'c140'
       ? (p && p.adapterById.c140 && p.adapterById.c140.chip)
+      : smp.kind === 'c352'
+      ? (p && p.adapterById.c352 && p.adapterById.c352.chip)
+      : smp.kind === 'qsound'
+      ? (p && p.adapterById.qsound && p.adapterById.qsound.chip)
+      : smp.kind === 'okim6295'
+      ? (p && p.adapterById.okim6295 && p.adapterById.okim6295.chip)
+      : smp.kind === 'multipcm'
+      ? (p && p.adapterById.multipcm && p.adapterById.multipcm.chip)
       : (p && p.adapterById.ym2610 && p.adapterById.ym2610.fm);
     if (!fm) return;
     const info = fm.samplePitch(smp.kind, smp.start, smp.end);
@@ -249,6 +468,8 @@
   // 曲数はファイルごとに違うので、有効/無効の判定は入力欄のmin/maxから行う(下記
   // updateKeyboardTransport)。1曲だけのNSF等では ⏮⏭ もグレーアウトする。
   const SOUND_FORMAT_SONG_INPUT = { nsf: 'nsfSongIndex', kss: 'kssSongIndex', gbs: 'gbsSongIndex', hes: 'hesTrackIndex' };
+  // 鍵盤表示ヘッダへ複製した「to MML」ボタンが押す実体(今表示している形式のもの)
+  const SOUND_FORMAT_TOMML_BTN = { nsf: 'btnNsf2Mml', spc: 'btnSpc2Mml', kss: 'btnKss2Mml', gbs: 'btnGbs2Mml', hes: 'btnHes2Mml', vgm: 'btnVgm2Mml' };
 
   let kbdSourceKind = null;     // 鍵盤表示が今表示しているソース 'mml' | 形式名 | null
   let loadedSoundFormat = null; // 直近に読み込んだサウンドファイルの形式(MML再生へ切り替えた後も覚えておく)
@@ -1377,11 +1598,30 @@
 
   // 曲リストの最後まで達したら先頭(0/最小値)へ戻ってループする「自動送り」版。
   // ボタン操作のchangeXxxSong/Track(クランプ)とは違い、無限に再生が続けられるようラップする。
+  // ── 曲が終わった後の挙動(鍵盤表示ヘッダのアイコンで選ぶ) ──────────────────
+  //   'next'    … 次の曲(またはアーカイブの次エントリ)へ。従来の挙動
+  //   'one'     … 同じ曲を繰り返す
+  //   'shuffle' … 同じファイル/アーカイブの中からランダムに選ぶ
+  //   'stop'    … 停止する
+  function repeatMode() { return keyboardDisplay.getRepeatMode ? keyboardDisplay.getRepeatMode() : 'next'; }
+  // モードに応じた次のインデックスを返す(cur/min/maxは曲番号の範囲)。nullなら停止
+  function nextIndexFor(cur, min, max) {
+    const mode = repeatMode();
+    if (mode === 'stop') return null;
+    if (mode === 'one') return cur;
+    if (mode === 'shuffle' && max > min) {
+      let v = cur;
+      for (let i = 0; i < 8 && v === cur; i++) v = min + Math.floor(Math.random() * (max - min + 1));
+      return v;
+    }
+    return wrapIndex(cur + 1, min, max);
+  }
+
   function autoAdvanceNsfSong() {
     if (!loadedNsfHeader) return;
     const totalSongs = Math.max(1, loadedNsfHeader.totalSongs);
-    let songNo = (parseInt(nsfSongIndexEl.value, 10) || 1) + 1;
-    if (songNo > totalSongs) songNo = 1;
+    const songNo = nextIndexFor(parseInt(nsfSongIndexEl.value, 10) || 1, 1, totalSongs);
+    if (songNo === null) { updateKeyboardTransport(); return; }
     nsfSongIndexEl.value = String(songNo);
     lastNsfCaptureResult = null;
     playNsfStream();
@@ -1389,22 +1629,24 @@
   function autoAdvanceKssSong() {
     const min = parseInt(kssSongIndexEl.min, 10) || 0;
     const max = parseInt(kssSongIndexEl.max, 10) || 255;
-    let v = (parseInt(kssSongIndexEl.value, 10) || 0) + 1;
-    if (v > max) v = min;
+    const v = nextIndexFor(parseInt(kssSongIndexEl.value, 10) || 0, min, max);
+    if (v === null) { updateKeyboardTransport(); return; }
     kssSongIndexEl.value = String(v);
     playKssStream();
   }
   function autoAdvanceGbsSong() {
     const min = parseInt(gbsSongIndexEl.min, 10) || 0;
     const max = parseInt(gbsSongIndexEl.max, 10) || 0;
-    let v = (parseInt(gbsSongIndexEl.value, 10) || 0) + 1;
-    if (v > max) v = min;
+    const v = nextIndexFor(parseInt(gbsSongIndexEl.value, 10) || 0, min, max);
+    if (v === null) { updateKeyboardTransport(); return; }
     gbsSongIndexEl.value = String(v);
     playGbsStream();
   }
   function autoAdvanceHesTrack() {
-    let v = (parseInt(hesTrackIndexEl.value, 10) || 0) + 1;
-    if (v > 255) v = 0;
+    const hMin = parseInt(hesTrackIndexEl.min, 10) || 0;
+    const hMax = parseInt(hesTrackIndexEl.max, 10) || 255;
+    const v = nextIndexFor(parseInt(hesTrackIndexEl.value, 10) || 0, hMin, hMax);
+    if (v === null) { updateKeyboardTransport(); return; }
     hesTrackIndexEl.value = String(v);
     playHesStream();
   }
@@ -1433,6 +1675,9 @@
   // 操作対象はバッジと同じ「今表示している方」(MML再生 / サウンドファイル再生)。
   // どちらの経路も、既にある本体側のボタンと同じ関数へ集約する(挙動を二重に持たない)。
   function updateKeyboardTransport() {
+    // 再生開始/停止のたびに、無音判定の有効/無効(ミュート中は無効)を今のプレイヤーへ入れ直す。
+    // プレイヤーは曲ごとに作り直されるので、ミュート変更時だけでは間に合わない
+    syncSilenceDetect();
     const kind = kbdSourceKind;
     const p = currentTransportPlayer();
     let playing = false, canPlay = false, canStop = false, canPrevNext = false;
@@ -1454,6 +1699,21 @@
     }
     keyboardDisplay.setTransportState({ playing, canPlay, canStop, canPrevNext, canToggleSource: !!loadedSoundFormat });
   }
+
+  // 鍵盤表示ヘッダへ移した「ファイルを開く」/「to MML」。実体は既存のボタンをそのまま押す
+  keyboardDisplay.onOpenFile = () => {
+    const win = document.getElementById('win-soundplay');
+    const btn = document.querySelector('.icon-btn.toggle-btn[data-target="win-soundplay"]');
+    if (win && getComputedStyle(win).display === 'none' && btn) btn.click();
+    const fileBtn = win && win.querySelector('input[type="file"]');
+    if (fileBtn) fileBtn.click();
+  };
+  keyboardDisplay.onToMml = () => {
+    // 今表示している形式の「MMLへ変換」ボタンを押す
+    const id = SOUND_FORMAT_TOMML_BTN[kbdSourceKind];
+    const btn = id && document.getElementById(id);
+    if (btn) btn.click();
+  };
 
   keyboardDisplay.onTransport = (action) => {
     const kind = kbdSourceKind;
@@ -2326,7 +2586,8 @@
     }
     if (lastPlayMode === 'nsf') {
       nsfRollToken++; // 進行中の先読みキャプチャ結果を無効化
-      keyboardDisplay.setRollTimeline(null);
+      // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
+      //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
     }
     nsfPlaybackOffset = 0;
     updateNsfPlayButton();
@@ -2683,6 +2944,9 @@
     capturedBuffer       = null;
     lastNsfCaptureResult = null;
     lastPlayMode         = 'nsf';
+    // 新しい曲を鳴らし始めるのでロールは一旦消す(停止では消さない。stopNsfFilePlayback参照)。
+    // 消さないと新しいキャプチャのonRollが届くまで前の曲のロールが残ったままになる
+    keyboardDisplay.setRollTimeline(null);
     setKbdSource('nsf', fileInputName(nsfFileEl)); // 再生開始時にもバッジを更新(MML再生後に再生し直した場合など)
     nsfBufferedFraction  = 0;
     updateSeekBufferedUI();
@@ -2796,11 +3060,19 @@
     }).catch(() => { /* 先読みキャプチャ失敗時は再生を開始できない */ });
   }
 
+  // 曲送り/戻しは端で折り返す(送り→最後まで行ったら最初へ、戻し→最初で戻ったら最後へ)。
+  // 以前は端で止まる(clamp)だけだった
+  function wrapIndex(v, min, max) {
+    if (max < min) return min;
+    const n = max - min + 1;
+    return min + (((v - min) % n) + n) % n;
+  }
+
   function changeNsfSong(delta) {
     if (!loadedNsfHeader) return;
     const totalSongs = Math.max(1, loadedNsfHeader.totalSongs);
     let songNo = parseInt(nsfSongIndexEl.value, 10) || 1;
-    songNo = Math.max(1, Math.min(totalSongs, songNo + delta));
+    songNo = wrapIndex(songNo + delta, 1, totalSongs);
     nsfSongIndexEl.value = String(songNo);
     // 曲が変わるので Worklet を停止して最初からストリーミング
     stopNsfFilePlayback();
@@ -2954,7 +3226,8 @@
       spcActivePlayer = null;
     }
     spcRollToken++; // 進行中の先読みキャプチャ結果を無効化
-    keyboardDisplay.setRollTimeline(null);
+    // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
+    //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
     updateSpcPlayButton();
   }
 
@@ -3790,7 +4063,8 @@
       kssActivePlayer = null;
     }
     kssRollToken++; // 進行中の先読みキャプチャ結果を無効化
-    keyboardDisplay.setRollTimeline(null);
+    // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
+    //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
     updateKssPlayButton();
   }
 
@@ -3960,8 +4234,7 @@
   function changeKssSong(delta) {
     const min = parseInt(kssSongIndexEl.min, 10) || 0;
     const max = parseInt(kssSongIndexEl.max, 10) || 255;
-    let v = (parseInt(kssSongIndexEl.value, 10) || 0) + delta;
-    v = Math.max(min, Math.min(max, v));
+    let v = wrapIndex((parseInt(kssSongIndexEl.value, 10) || 0) + delta, min, max);
     kssSongIndexEl.value = String(v);
     // NSFのchangeNsfSong()と同じく、再生中かどうかに関係なく無条件に再生を開始する
     // (以前はkssActivePlayerがある時だけ再開しており、ファイル読込直後は曲送りボタンが
@@ -4149,7 +4422,8 @@
       gbsActivePlayer = null;
     }
     gbsRollToken++; // 進行中の先読みキャプチャ結果を無効化
-    keyboardDisplay.setRollTimeline(null);
+    // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
+    //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
     updateGbsPlayButton();
   }
 
@@ -4291,8 +4565,7 @@
   function changeGbsSong(delta) {
     const min = parseInt(gbsSongIndexEl.min, 10) || 0;
     const max = parseInt(gbsSongIndexEl.max, 10) || 0;
-    let v = (parseInt(gbsSongIndexEl.value, 10) || 0) + delta;
-    v = Math.max(min, Math.min(max, v));
+    let v = wrapIndex((parseInt(gbsSongIndexEl.value, 10) || 0) + delta, min, max);
     gbsSongIndexEl.value = String(v);
     // NSFのchangeNsfSong()と同じく無条件に再生を開始する(KSSと同じ理由、changeKssSong参照)
     stopGbsPlayback();
@@ -4486,7 +4759,8 @@
       hesActivePlayer = null;
     }
     hesRollToken++; // 進行中の先読みキャプチャ結果を無効化
-    keyboardDisplay.setRollTimeline(null);
+    // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
+    //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
     updateHesPlayButton();
   }
 
@@ -4636,8 +4910,9 @@
   }
 
   function changeHesTrack(delta) {
-    let v = (parseInt(hesTrackIndexEl.value, 10) || 0) + delta;
-    v = Math.max(0, Math.min(255, v));
+    const hMin = parseInt(hesTrackIndexEl.min, 10) || 0;
+    const hMax = parseInt(hesTrackIndexEl.max, 10) || 255;
+    let v = wrapIndex((parseInt(hesTrackIndexEl.value, 10) || 0) + delta, hMin, hMax);
     hesTrackIndexEl.value = String(v);
     // NSFのchangeNsfSong()と同じく無条件に再生を開始する(KSS/GBSと同じ理由、changeKssSong参照)
     stopHesPlayback();
@@ -4861,7 +5136,8 @@
       vgmActivePlayer = null;
     }
     vgmRollToken++;
-    keyboardDisplay.setRollTimeline(null);
+    // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
+    //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
     updateVgmPlayButton();
   }
 
@@ -4891,12 +5167,53 @@
     if (h.chips.ga20) chips.push('ga20');
     if (h.chips.segapcm) chips.push('segapcm');
     if (h.chips.c140) chips.push('c140');
+    if (h.chips.c352) chips.push('c352');
+    if (h.chips.okim6258) chips.push('okim6258');
+    if (h.chips.qsound) chips.push('qsound');
+    if (h.chips.okim6295) chips.push('okim6295');
+    if (h.chips.multipcm) chips.push('multipcm');
     if (h.chips.ym2610) { chips.push('ym2610fm'); chips.push('kssPsg'); } // SSGはKSS PSG行(KP1-3)を流用
     if (h.chips.pwm) chips.push('pwm');
     if (h.chips.rf5c164) chips.push('rf5c164');
     if (h.chips.rf5c68) chips.push('rf5c68');
     return chips;
   }
+
+  // ── チャンネルプール式チップの表示モード(実機スロット/合成ch) ──────────
+  // 'logical'=割当逆算(Emu.PoolChannelRegrouper)、'phys'=物理スロットそのまま。
+  // 鍵盤ヘッダの切替UI(keyboard.js)⇔ここ⇔ロール/変換の三者で共有し、localStorageへ永続化。
+  const POOL_MODE_KEY = 'vgmPoolModes';
+  // プール/ペア交互割当が実測されたPCMチップ(keyboard.jsのpool印と対応)。
+  // 既定: 完全プール式で劇的改善のMultiPCMのみ合成ch(既定8枠カバー率45%→100%)、
+  // 他はペア交互でも音符ストリームはほぼ安定と実測されたため実機スロット既定
+  // (Outfoxies等のマルチサンプル曲では合成が僅かに劣るケースもある。トグルで曲別に選ぶ)
+  const POOL_CHIP_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', c140: 'phys', segapcm: 'phys' };
+  const vgmPoolModes = (() => {
+    try { return Object.assign({}, POOL_CHIP_DEFAULTS, JSON.parse(localStorage.getItem(POOL_MODE_KEY) || '{}')); }
+    catch (e) { return Object.assign({}, POOL_CHIP_DEFAULTS); }
+  })();
+  // ライブスナップショットの合成ch変換(モードがlogicalのチップだけ通す)
+  const POOL_CHIP_CHANNELS = { multipcm: 28, c352: 32, qsound: 16, c140: 24, segapcm: 16 };
+  function poolLive(token, snap) {
+    if (!snap || vgmPoolModes[token] !== 'logical') return snap;
+    if (!vgmLiveRegroupers[token]) vgmLiveRegroupers[token] = new MML.Emu.PoolChannelRegrouper(POOL_CHIP_CHANNELS[token]);
+    return vgmLiveRegroupers[token].step(snap);
+  }
+  const vgmLiveRegroupers = {}; // chipToken → PoolChannelRegrouperインスタンス(再生/モード切替でリセット)
+  let vgmCaptureMirror = null;  // 進行中/完了済みキャプチャの{data, done, token}(モード切替時のロール再構築用)
+  keyboardDisplay.setPoolModes(vgmPoolModes);
+  keyboardDisplay.onPoolModeChange = (token, mode) => {
+    vgmPoolModes[token] = mode;
+    try { localStorage.setItem(POOL_MODE_KEY, JSON.stringify(vgmPoolModes)); } catch (e) { /* ignore */ }
+    delete vgmLiveRegroupers[token]; // ライブ表示は次フレームから新モードで束ね直す
+    // ロールは保持済みキャプチャデータから選択モードで再構築する(Workerを待たない)
+    if (vgmCaptureMirror && vgmCaptureMirror.token === vgmRollToken && MML.RollBuild) {
+      try {
+        const t = MML.RollBuild.vgm(vgmCaptureMirror.data, vgmCaptureMirror.done, { poolMode: vgmPoolModes });
+        keyboardDisplay.setRollTimeline(t);
+      } catch (e) { console.warn('表示モード切替のロール再構築に失敗:', e); }
+    }
+  };
 
   // VGM再生中のライブチップスナップショット(鍵盤表示用)。既存の各フォーマット向け
   // ライブ関数(liveGbsApu/liveHesApu/liveKssPsg等)と同じ形を、VgmPlayerのアダプタから返す。
@@ -4928,9 +5245,21 @@
 ,
     getGa20: () => { const a = vgmAdapter('ga20'); return a ? MML.Emu.snapshotGA20(a.chip) : null; }
 ,
-    getSegaPcm: () => { const a = vgmAdapter('segapcm'); return a ? MML.Emu.snapshotSegaPCM(a.chip) : null; }
+    getSegaPcm: () => { const a = vgmAdapter('segapcm'); return a ? poolLive('segapcm', MML.Emu.snapshotSegaPCM(a.chip)) : null; }
 ,
-    getC140: () => { const a = vgmAdapter('c140'); return a ? MML.Emu.snapshotC140(a.chip) : null; }
+    getC140: () => { const a = vgmAdapter('c140'); return a ? poolLive('c140', MML.Emu.snapshotC140(a.chip)) : null; }
+,
+    getC352: () => { const a = vgmAdapter('c352'); return a ? poolLive('c352', MML.Emu.snapshotC352(a.chip)) : null; }
+,
+    getOkim6258: () => { const a = vgmAdapter('okim6258'); return a ? MML.Emu.snapshotOKIM6258(a.chip) : null; }
+,
+    getQsound: () => { const a = vgmAdapter('qsound'); return a ? poolLive('qsound', MML.Emu.snapshotQSound(a.chip)) : null; }
+,
+    getOkim6295: () => { const a = vgmAdapter('okim6295'); return a ? MML.Emu.snapshotOKIM6295(a.chip) : null; }
+,
+    // プール/ペア交互割当チップは表示モードで分岐(poolLive):
+    // 'logical'=割当逆算(音色×音程連続性でメロディを同じ行へ)、'phys'=実機スロットのまま
+    getMultiPcm: () => { const a = vgmAdapter('multipcm'); return a ? poolLive('multipcm', MML.Emu.snapshotMultiPCM(a.chip)) : null; }
 ,
     getYm2610Fm: () => { const a = vgmAdapter('ym2610'); return a ? MML.Emu.snapshotYM2610(a.fm) : null; }
 ,
@@ -5026,6 +5355,11 @@
       getGa20: liveVgm.getGa20,
       getSegaPcm: liveVgm.getSegaPcm,
       getC140: liveVgm.getC140,
+      getC352: liveVgm.getC352,
+      getOkim6258: liveVgm.getOkim6258,
+      getQsound: liveVgm.getQsound,
+      getOkim6295: liveVgm.getOkim6295,
+      getMultiPcm: liveVgm.getMultiPcm,
       getPwm: liveVgm.getPwm,
       getRf5c164: liveVgm.getRf5c164,
       getRf5c68: liveVgm.getRf5c68
@@ -5036,6 +5370,11 @@
     // キャプチャWorker内で行い、onRollで完成品を受け取る
     keyboardDisplay.setRollTimeline(null);
     const myToken = ++vgmRollToken;
+    // 曲が変わるのでプール式チップのライブ束ね直し状態とロール再構築用ミラーをリセット
+    for (const k of Object.keys(vgmLiveRegroupers)) delete vgmLiveRegroupers[k];
+    vgmCaptureMirror = null;
+    vgmDrumSamples = {};
+    keyboardDisplay.setDpcmCost(null);
     // captureVgmSongWorkerAsync: コマンド消化+スナップショット採取をWeb Workerで実行
     // (NSF/KSS/GBSと同じ仕組み、src/audio/capture-worker-client.js。Worker不可時は
     // メインスレッド版へ自動フォールバック)
@@ -5043,6 +5382,7 @@
       durationSeconds: captureDuration,
       shouldCancel: () => myToken !== vgmRollToken,
       roll: {
+        poolMode: Object.assign({}, vgmPoolModes), // プール式チップの表示モード(Worker内ロール構築用)
         onRoll: (timeline) => {
           if (myToken !== vgmRollToken) return;
           keyboardDisplay.setRollTimeline(timeline);
@@ -5052,9 +5392,66 @@
       if (myToken !== vgmRollToken) return;
       vgmBufferedFraction = total > 0 ? done / total : 0;
       updateSeekBufferedUI();
+      // 表示モード切替時のロール再構築用に、進行中キャプチャの参照を保持する
+      vgmCaptureMirror = { data, done, token: myToken };
+      updateVgmDrumSamples(data);
+      scheduleDpcmCostUpdate();
+    }).then(() => {
+      // ★実サンプル(data[chip].samples)はキャプチャ完了後にまとめて付く
+      //   (Worker経路では 'done' の finalMeta で届く。src/audio/capture-worker-multi-impl.js)。
+      //   進捗コールバックの時点ではまだ無いので、完了後にもう一度拾い直さないと
+      //   ドラムパッドの試聴が「押しても鳴らない」ままになる
+      if (myToken !== vgmRollToken || !vgmCaptureMirror) return;
+      updateVgmDrumSamples(vgmCaptureMirror.data);
+      scheduleDpcmCostUpdate();
     }).catch((e) => {
       console.error('VGM先読みキャプチャに失敗:', e);
     });
+  }
+
+  // キャプチャ結果の実サンプル(vgmPlayer.js collectUsedSamples)を、ドラム区画のパッド試聴が
+  // 引ける形へ。パッドのキーは DrumMap.key = 'kind:start' なので、'kind:start:end' の
+  // サンプル表からその形へ詰め替える。rateは最初にそのサンプルがキーオンされたときの再生レート。
+  function updateVgmDrumSamples(data) {
+    const out = {};
+    const CH = [['ga20', 4, 'pcm'], ['segapcm', 16, 'pcm'], ['c140', 24, 'pcm'], ['c352', 32, 'pcm'],
+                ['qsound', 16, 'pcm'], ['okim6295', 4, 'pcm'], ['multipcm', 28, 'pcm'],
+                ['ym2610fm', 6, 'adpcmA']];
+    for (const [key, n, shape] of CH) {
+      const e = data && data[key];
+      if (!e || !e.samples || !e.snapshots) continue;
+      // サンプルごとの再生レートを最初のキーオンから拾う
+      const rateOf = {};
+      for (const fr of e.snapshots) {
+        if (!fr) continue;
+        const chans = shape === 'adpcmA' ? (fr.adpcmA || []) : fr;
+        for (let i = 0; i < n; i++) {
+          const c = chans[i];
+          if (!c || !c.sample || !(c.rate > 0)) continue;
+          const k = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end;
+          if (rateOf[k] === undefined) rateOf[k] = c.rate;
+        }
+      }
+      // そのサンプルを鳴らしたチャンネル(試聴のDMCレートを引くのに使う)
+      const chansOf = {};
+      for (const fr of e.snapshots) {
+        if (!fr) continue;
+        const chans = shape === 'adpcmA' ? (fr.adpcmA || []) : fr;
+        for (let i = 0; i < n; i++) {
+          const c = chans[i];
+          if (!c || !c.sample) continue;
+          const k = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end;
+          (chansOf[k] = chansOf[k] || new Set()).add(i);
+        }
+      }
+      for (const k of Object.keys(e.samples)) {
+        const padKey = k.slice(0, k.lastIndexOf(':')); // 'kind:start:end' → 'kind:start'
+        if (out[padKey]) continue;
+        out[padKey] = { pcm: e.samples[k], rate: rateOf[k] || 0,
+                        chip: key, chans: Array.from(chansOf[k] || []) };
+      }
+    }
+    vgmDrumSamples = out;
   }
 
   async function exportVgmWav() {
@@ -5135,6 +5532,15 @@
       map[s.id] = ent.target || def[s.id] || 'skip';
       if (map[s.id] !== (def[s.id] || 'skip')) changed = true;
     }
+    // ★ドラムパート(合成ch)は鍵盤に行が無いので割当UIから直接触れない。既定では
+    //   SN76489のノイズが2A03ノイズ(1枠しかない)を先に取り、ドラムは'skip'になる。
+    //   ユーザーがSNノイズをスキップにして枠を空けたら、ドラムがそこへ入れるようにする
+    //   (=「2つあったらどっちを鳴らすか」を鍵盤側の操作だけで選べるようにする)。
+    const noiseTaken = src.some(s => map[s.id] === 'noise');
+    if (!noiseTaken) {
+      const drum = src.find(s => /:drum$/.test(s.id) && map[s.id] === 'skip');
+      if (drum) { map[drum.id] = 'noise'; changed = true; }
+    }
     return changed ? map : null;
   }
   // VRC7を借用先に選んだchの音色プリセット(sourceId → 'auto'|'0'..'15')。
@@ -5154,6 +5560,24 @@
     return map;
   }
 
+  // 借用先にDPCMを選んだchのDMCレート指定(sourceId → '0'..'15' | 'auto')。
+  // 鍵盤の割当UIでは「音色」枠のセレクトに相乗りしている(channelPlan toneKindFor='dpcmRate')。
+  // ★PCM→DMCは必ず劣化するので自動任せにせず、耳で選べるようにするための指定(ユーザー指示)
+  function getVgmDpcmRate() {
+    const Plan = MML.Convert.ChannelPlan;
+    const map = {};
+    if (!loadedVgmHeader) return map;
+    const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
+    for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
+      const chId = Plan.chIdForVgmSource(s.id);
+      const ent = (chId && Plan.get(chId)) || {};
+      const target = ent.target || def[s.id] || 'skip';
+      if (target !== 'dpcm') continue;
+      map[s.id] = ent.tone !== undefined ? ent.tone : 'auto';
+    }
+    return map;
+  }
+
   async function runVgm2Mml() {
     if (!loadedVgmBytes) {
       vgmFileStatusEl.innerHTML = '<div class="error">' + T('先にVGMファイルを読み込んでください。') + '</div>';
@@ -5169,7 +5593,7 @@
     const vgmManualBpm = getManualBpm('vgm');
     let result;
     try {
-      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), tone: planConvertOptions().tone, cmd: MML.UI.ConvertSettings.get(), onProgress: makeCaptureProgress(vgmFileStatusEl) });
+      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), dpcmRate: getVgmDpcmRate(), tone: planConvertOptions().tone, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
     } catch (e) {
       vgmIsRendering = false;
       updateVgmPlayButton();
@@ -5197,10 +5621,15 @@
       : (({ gb: T('(2A03/FDSを借用して再生)'), hes: T('(N163を借用して再生)'), nes: '' })[result.family] || '');
     const ignoredMsg = (result.ignoredChips && result.ignoredChips.length)
       ? T('。対象外の音源は無視: {chips}', { chips: result.ignoredChips.join(', ') }) : '';
+    // DPCM(打楽器を実サンプルのまま焼いた分)の実測コスト。実機ROMの容量を意識できるよう
+    // 定義数とバイト数をその場に出す(ユーザー要望)
+    const ds = result.dpcmStats;
+    const dpcmMsg = ds ? '<div>' + T('DPCM: 定義 {clips} 件 / 打点 {segments} 個 / ROM {kb} KB',
+      { clips: ds.clips, segments: ds.segments, kb: (ds.bytes / 1024).toFixed(1) }) + '</div>' : '';
     vgmFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力{borrow}{ignored}',
         { mode: vgmManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: (result.chips || []).join(', '), borrow: borrowNote, ignored: ignoredMsg }) + '</div>' +
-      renderPitchCheck(result.pitchCheck);
+      dpcmMsg + renderPitchCheck(result.pitchCheck);
 
     rangeStartSec = 0;
     rangeEndSec = null;
@@ -5395,7 +5824,7 @@
     function changeArchiveTrack(delta) {
       if (!archive) return;
       const n = archive.playlist.length;
-      const next = Math.max(0, Math.min(n - 1, archive.index + delta));
+      const next = wrapIndex(archive.index + delta, 0, n - 1); // 端で折り返す
       if (next === archive.index) return;
       stopAllFormatPlayback();
       loadArchiveIndex(next, true);
@@ -5404,8 +5833,20 @@
     // 1ファイル1曲の形式(SPC/VGM)の再生終了/無音時の自動送り: アーカイブを開いていれば次の
     // エントリへ(末尾は先頭へラップ)、単体ファイルなら何もしない(従来どおり停止のまま)。
     archiveAutoAdvanceOrStop = () => {
-      if (!archive || archive.playlist.length <= 1) return;
-      loadArchiveIndex(archive.index + 1, true);
+      // 曲が終わった後の挙動(鍵盤表示ヘッダのアイコン)に従う。
+      // ★「同じ曲を繰り返す」は単体ファイル(アーカイブ無し/1曲だけ)でも効かせる。
+      //   以前はここで即returnしていたため、単体のSPC/VGMではリピートが効かなかった
+      if (!archive || archive.playlist.length <= 1) {
+        if (repeatMode() === 'one') {
+          const playFn = { spc: playSpcStream, vgm: playVgmStream }[lastPlayMode];
+          if (playFn) { playFn(); return; }
+        }
+        updateKeyboardTransport();
+        return;
+      }
+      const next = nextIndexFor(archive.index, 0, archive.playlist.length - 1);
+      if (next === null) { updateKeyboardTransport(); return; }
+      loadArchiveIndex(next, true);
     };
 
     // 鍵盤表示タイトル行の ⏮/⏭ 用。アーカイブ(m3u)を開いていればそちらのファイル送りを
