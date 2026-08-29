@@ -15,6 +15,8 @@
   const MML = global.MML = global.MML || {};
   MML.UI = MML.UI || {};
 
+  // 'vgm' → 'btnVgmTempoTap' のような index.html 側のボタンidを組み立てる(main.js と同じ規則)
+  const btnId = (fmt, suffix) => 'btn' + fmt[0].toUpperCase() + fmt.slice(1) + suffix;
   const T = (key, params) => MML.I18n.t(key, params);
   const STORAGE_KEY = 'mml.convertCmd.v1';
 
@@ -60,6 +62,11 @@
     ['octave', T('中(オクターブ連動・推奨)')],
     ['off',    T('低(SA不使用・従来)')],
   ];
+  // 同時発音をミックスして1サンプルに焼くときのDMCレートの決め方(src/convert/options.js RATE_MIX)
+  const RATE_MIX_OPTIONS = () => [
+    ['quality', T('高音質優先(寄与するサンプルの最高レート)')],
+    ['size', T('容量優先(最低レートに合わせる)')],
+  ];
   const PRESET_LABELS = () => ({ faithful: T('忠実再現'), plain: T('プレーン譜面') });
 
   let current = null; // 正規化済み cmd
@@ -95,7 +102,10 @@
   }
   function onKey(e) { if (e.key === 'Escape') closeModal(); }
 
-  function openModal() {
+  // ctx: { format, onConvert } … 「to MML」から開いたときは、この画面の中で変換まで完結させる
+  //   (ユーザー要望: ボタンを押したら設定画面を出し、その中にコンバート開始ボタンを置く)
+  function openModal(ctx) {
+    ctx = ctx || {};
     closeModal();
     const backdrop = document.createElement('div');
     backdrop.className = 'es-backdrop';
@@ -114,6 +124,15 @@
     closeBtn.textContent = '×';
     closeBtn.setAttribute('aria-label', T('閉じる'));
     closeBtn.addEventListener('click', closeModal);
+    // 「to MML」から開いたときは、見出しの左に「コンバート開始」を置く(ユーザー指示)
+    if (typeof ctx.onConvert === 'function') {
+      const go = document.createElement('button');
+      go.type = 'button';
+      go.className = 'cs-convert';
+      go.textContent = T('コンバート開始');
+      go.addEventListener('click', () => { closeModal(); ctx.onConvert(); });
+      header.appendChild(go);
+    }
     header.appendChild(title);
     header.appendChild(closeBtn);
     modal.appendChild(header);
@@ -125,6 +144,7 @@
     note.className = 'cs-note';
     note.textContent = T('NSF/SPC/KSS/GBS/HES/VGM → MML 変換で出力するコマンドを選びます(全形式共通、次回の変換から有効)。');
     body.appendChild(note);
+
 
     // プリセット
     const presetSection = document.createElement('div');
@@ -153,6 +173,69 @@
     presetRow.appendChild(customTag);
     presetSection.appendChild(presetRow);
     body.appendChild(presetSection);
+
+    // 変換テンポ(プリセットの直下)。実体は各フォーマットのパネルにある <prefix>TempoBpm 入力で、
+    // ここはその代理(どちらから変えても同じ値)。自動(空欄)と手動、手動タップの3通り。
+    const tempoSrc = ctx.format ? document.getElementById(ctx.format + 'TempoBpm') : null;
+    if (tempoSrc) {
+      const sec = document.createElement('div');
+      sec.className = 'es-section';
+      const h = document.createElement('h3');
+      h.textContent = T('変換テンポ');
+      sec.appendChild(h);
+
+      const row = document.createElement('div');
+      row.className = 'cs-tempo-row';
+      const autoBtn = document.createElement('button');
+      autoBtn.type = 'button';
+      autoBtn.className = 'es-preset';
+      autoBtn.textContent = T('自動(推定)');
+      const tempoInput = document.createElement('input');
+      tempoInput.type = 'number';
+      tempoInput.min = '40'; tempoInput.max = '400'; tempoInput.step = '0.1';
+      tempoInput.placeholder = T('自動');
+      tempoInput.className = 'cs-tempo';
+      const tapBtn = document.createElement('button');
+      tapBtn.type = 'button';
+      tapBtn.className = 'es-preset cs-tap';
+      tapBtn.textContent = T('タップ');
+      const tapOut = document.createElement('span');
+      tapOut.className = 'cs-desc';
+
+      const syncTempo = () => {
+        tempoInput.value = tempoSrc.value;
+        autoBtn.classList.toggle('es-preset--active', !tempoSrc.value);
+      };
+      tempoInput.addEventListener('input', () => { tempoSrc.value = tempoInput.value; syncTempo(); });
+      autoBtn.addEventListener('click', () => {
+        const sc = document.getElementById(btnId(ctx.format, 'TempoClear'));
+        if (sc) sc.click(); else tempoSrc.value = '';
+        syncTempo();
+        tapOut.textContent = '';
+      });
+
+      // タップと自動はパネル側の実装(main.js setupTempoControl)が正典。ここは同じボタンを
+      // 押しているだけ ─ 計測窓や外れタップ除去のロジックを二重に持たないため
+      tapBtn.addEventListener('click', () => {
+        const st = document.getElementById(btnId(ctx.format, 'TempoTap'));
+        if (st) st.click();
+        syncTempo();
+        const info = document.getElementById(ctx.format + 'TempoTapInfo');
+        tapOut.textContent = info ? info.textContent : (tempoSrc.value ? tempoSrc.value + ' BPM' : '');
+      });
+
+      row.appendChild(autoBtn);
+      row.appendChild(tempoInput);
+      row.appendChild(tapBtn);
+      row.appendChild(tapOut);
+      sec.appendChild(row);
+      const d = document.createElement('span');
+      d.className = 'cs-desc';
+      d.textContent = T('BPM(40〜400)。「自動」なら音符の長さから推定、「タップ」は曲に合わせて数回押すと決まります');
+      sec.appendChild(d);
+      body.appendChild(sec);
+      syncTempo();
+    }
 
     // チェックボックス群
     const checks = {};
@@ -188,7 +271,10 @@
     const pcmSec = document.createElement('div');
     pcmSec.className = 'es-section';
     const pcmH = document.createElement('h3');
-    pcmH.textContent = T('PCM品質');
+    // ★PCM品質(PCM_RATE)は将来削除する。サンプルPCMでは「ソースレートのn倍」方式が効かず
+    //   (再生レートがDMC最高以上のことが多い)、ドラム(DPCM)パネルのサンプルごとの
+    //   レート指定へ一本化していく。今はHESのDDA抽出だけがこの設定を見ている。
+    pcmH.textContent = T('PCM品質(将来削除予定)');
     pcmSec.appendChild(pcmH);
     const pcmRow = document.createElement('label');
     pcmRow.className = 'cs-row';
@@ -204,10 +290,35 @@
     });
     const pcmDesc = document.createElement('span');
     pcmDesc.className = 'cs-desc';
-    pcmDesc.textContent = T('PCM→DPCM変換のレート(HESのDDA等)。高いほどアタックが鈍らずノイズも減るが.dmcデータが大きくなる');
+    pcmDesc.textContent = T('PCM→DPCM変換のレート(現在はHESのDDA抽出のみ)。サンプルごとの指定へ移行中のため、この設定は将来なくなります');
     pcmRow.appendChild(pcmSel); pcmRow.appendChild(pcmDesc);
     pcmSec.appendChild(pcmRow);
     body.appendChild(pcmSec);
+
+    // 打楽器(DPCM)のミックス時レート
+    const rmSec = document.createElement('div');
+    rmSec.className = 'es-section';
+    const rmH = document.createElement('h3');
+    rmH.textContent = T('打楽器(DPCM)');
+    rmSec.appendChild(rmH);
+    const rmRow = document.createElement('label');
+    rmRow.className = 'cs-row';
+    const rmSel = document.createElement('select');
+    for (const [val, label] of RATE_MIX_OPTIONS()) {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      rmSel.appendChild(o);
+    }
+    rmSel.addEventListener('change', () => {
+      current = MML.Convert.normalizeCmd(Object.assign({}, current, { RATE_MIX: rmSel.value }));
+      save(); syncChecks(); refreshButtons();
+    });
+    const rmDesc = document.createElement('span');
+    rmDesc.className = 'cs-desc';
+    rmDesc.textContent = T('同時に鳴っている打点はミックスして1サンプルに焼くため、レートを1つしか選べません。そのときの決め方(サンプルごとの指定は「ドラム(DPCM)」パネル)');
+    rmRow.appendChild(rmSel); rmRow.appendChild(rmDesc);
+    rmSec.appendChild(rmRow);
+    body.appendChild(rmSec);
 
     // ピッチ精度(SA)
     const saSec = document.createElement('div');
@@ -238,6 +349,7 @@
       for (const [k, cb] of Object.entries(checks)) cb.checked = !!current[k];
       pcmSel.value = String(current.PCM_RATE != null ? current.PCM_RATE : 'max');
       saSel.value = current.PITCH_SA || 'octave';
+      rmSel.value = current.RATE_MIX || 'quality';
       const name = MML.Convert.cmdPresetName(current);
       for (const [n, b] of Object.entries(presetButtons)) b.classList.toggle('es-preset--active', n === name);
       customTag.style.display = name === 'custom' ? '' : 'none';
@@ -245,6 +357,7 @@
     syncChecks();
 
     modal.appendChild(body);
+
     backdrop.appendChild(modal);
     document.body.appendChild(backdrop);
     modalEl = backdrop;

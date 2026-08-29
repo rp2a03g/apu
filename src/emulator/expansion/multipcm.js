@@ -477,7 +477,7 @@
       out.push({ active: c.playing && vol > 0.01 && rate > 0, vol, rawVol: Math.round(vol * 255), rawVolMax: 255,
         panL: pan > 0 ? Math.max(0, 15 - pan * 2) : 15, panR: pan < 0 ? Math.max(0, 15 + pan * 2) : 15,
         rate, seq: c.seq, loop: c.lenSecEst === Infinity, lenSec: c.lenSecEst,
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'multipcm', start: c.physStart, end: c.physStart + c.smpLen } : null });
     }

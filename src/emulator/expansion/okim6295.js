@@ -289,7 +289,7 @@
       out.push({ active: c.playing && c.chVol > 0, vol: c.chVol / 0x20, rawVol: c.chVol, rawVolMax: 0x20,
         panL: 15, panR: 15,
         rate, seq: c.seq, loop: false, lenSec: rate > 0 ? lenNib / rate : 0,
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'okim6295', start: c.smpStart, end: c.smpEnd } : null });
     }

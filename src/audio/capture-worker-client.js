@@ -62,7 +62,8 @@
   }
 
   // optから構造化クローン可能な値だけを明示的に抜き出す(shouldCancel等の関数は不可)
-  const OPT_KEYS = ['songIndex', 'durationSeconds', 'sampleRate', 'pal', 'regsOnly', 'mute', 'track'];
+  // ym2608RhythmRom: YM2608内蔵リズムROM(Uint8Array。WorkerにlocalStorageが無いためバイト列で渡す)
+  const OPT_KEYS = ['songIndex', 'durationSeconds', 'sampleRate', 'pal', 'regsOnly', 'mute', 'track', 'ym2608RhythmRom'];
   function _cloneableOpt(opt) {
     const out = {};
     for (const k of OPT_KEYS) if (opt[k] !== undefined) out[k] = opt[k];
@@ -385,11 +386,12 @@
     if (!opt.regsOnly) return Emu.captureKssSongAsync(kssBytes, opt, onProgress);
     return _runMultiCapture('kss', 'kssCapture',
       () => [MML.KSS && MML.KSS.parseHeader, Emu.CPUZ80, Emu.KssBus, Emu.KssPlayer,
-             Emu.AY8910Audio, Emu.SCCAudio, Emu.OPLLAudio, Emu.OPLLNuked, Emu.captureKssSongAsync,
+             Emu.AY8910Audio, Emu.SCCAudio, Emu.OPLLAudio, Emu.OPLLNuked, Emu.OPLAudio, Emu.captureKssSongAsync,
              MML.RollBuild && MML.RollBuild.kss,
              MML.Kss2MmlExpansion && MML.Kss2MmlExpansion.ay,
              MML.Kss2MmlExpansion && MML.Kss2MmlExpansion.scc,
-             MML.Kss2MmlExpansion && MML.Kss2MmlExpansion.opll].concat(_rollProbes()),
+             MML.Kss2MmlExpansion && MML.Kss2MmlExpansion.opll,
+             MML.Kss2MmlExpansion && MML.Kss2MmlExpansion.opl].concat(_rollProbes()),
       Emu.captureKssSongAsync, kssBytes, opt, onProgress,
       { writeLog: [] },
       (mirror) => [mirror.writeLog],
@@ -421,7 +423,8 @@
       () => [MML.VGM && MML.VGM.parseHeader, Emu.VgmPlayer, Emu.captureVgmSongAsync,
              Emu.APU2A03, Emu.FDSAudio, Emu.APUGb, Emu.APUHuC6280,
              Emu.AY8910Audio, Emu.SCCAudio, Emu.OPLLAudio, Emu.OPLLNuked, Emu.SN76489Audio,
-             Emu.YM2612Nuked, Emu.YM2610Audio, Emu.YM2151Audio,
+             Emu.YM2612Nuked, Emu.YM2610Audio, Emu.YM2151Audio, Emu.YM2203Audio, Emu.YM2608Audio, Emu.OPLAudio,
+             MML.Kss2MmlExpansion && MML.Kss2MmlExpansion.opl,
              Emu.GA20Audio, Emu.SegaPCMAudio, Emu.C140Audio, Emu.C352Audio, Emu.OKIM6258Audio, Emu.QSoundAudio, Emu.OKIM6295Audio, Emu.MultiPCMAudio, Emu.PWM32XAudio, Emu.RF5C164Audio,
              Emu.snapshotGbApuForCapture, Emu.snapshotHesApuForCapture,
              MML.RollBuild && MML.RollBuild.vgm,

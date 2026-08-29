@@ -13,6 +13,11 @@
  *   YM2610(OPNB、Neo Geo)=expansion/ym2610.js(FM=レジスタ配置がYM2612と同一なのでYM2612コアの
  *   ラッパー、ADPCM-A/B=ymfm移植。ROMはデータブロック0x82/0x83)+AY8910Audio(SSG流用)、
  *   YM2151(OPM、アーケード/X68000)=expansion/ym2151.js(コマンド0x54、デュアル2個目=0xA4)、
+ *   YM2203(OPN、PC-88/PC-98/アーケード)=expansion/ym2203.js(FM=YM2612コアのラッパー3ch+
+ *   内蔵SSG=AY8910Audio。コマンド0x55、デュアル2個目=0xA5。プリスケーラ0x2D-0x2Fはチップ側)、
+ *   YM2608(OPNA、PC-88 SB2/PC-98)=expansion/ym2608.js(FM 6ch=YM2612コアのラッパー+SSG+
+ *   内蔵リズム+ADPCM-B。コマンド0x56/0x57、デュアル2個目=0xA6/0xA7。DELTA-Tはデータブロック0x81、
+ *   リズムROMはEmu.setYm2608RhythmRom=opt.ym2608RhythmRom経由)、
  *   GA20(Irem M92/M107 PCM)=expansion/ga20.js(コマンド0xBF、ROMはデータブロック0x93)、
  *   SegaPCM(OutRun/After Burner等)=expansion/segapcm.js(コマンド0xC0、ROMはデータブロック0x80)、
  *   C352(ナムコ System 11/12/22等)=expansion/c352.js(コマンド0xE1、ROMはデータブロック0x92)、
@@ -45,6 +50,10 @@
  *    ymfm裏取り済み)。SSGはヘッダ値/2でAY8910Audio.clock()を呼ぶ(実SSGクロックはヘッダ値/4、
  *    AY8910Audioは実クロックの2倍で叩く既存規約のため)。
  *  - YM2151: ヘッダ値(3579545/4000000)そのまま(内部/64で1サンプル=55930/62500Hz)。
+ *  - YM2203: ヘッダ値そのままで chip.clock()(チップ内部でプリスケーラに応じてFMコアを2/4/6回、
+ *    SSGを1/2/4回進める。既定1/6でFMサンプル=clock/72、SSG実クロック=clock/2)。
+ *  - YM2608: ヘッダ値そのままで chip.clock()(同上。既定1/6でFMサンプル=clock/144、
+ *    SSG実クロック=clock/4。PC-88 SB2: 7987200Hz → FM 55.5kHz / SSG 1.9968MHz)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -62,7 +71,12 @@
   // 他形式(MD全体0.13、SPC基準)に近づくよう1.0(実測: Metal Slug 0.17〜0.21、Last Resort 0.10〜0.12、
   // Neo Turf Masters 0.29〜0.42=元々ホットな曲、ピークはリミッタ任せ)。SSGはFMに対して MAME neogeo
   // ドライバのルーティング比(SSG 0.28 : FM 0.98)を目安に0.8(暫定。実機録音との比較は未実施)。
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 1.0, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0 };
+  // ym2203/ym2203ssg: FMはYM2612系コア(TLに余裕を持たせた書き方の曲が多い)なので2.0、
+  // SSGはYM2610で採ったFM:SSG=1.0:0.8の比をFM2.0へスケールして1.6(暫定。実機照合は未実施)。
+  // opl(YM3812/YM3526/Y8950共通): 出力尺度はYM2151と同じ(±8192合算/(8192*6))だが、OPL曲は
+  // 2opで音量を稼ぐ書き方が多く2.0では過熱(実測: Bubble Bobble RMS-10dB/ピーク1.56クリップ)。
+  // 1.4でRMS-13〜-15dB級(MD/SPC基準近傍。Bubble Bobble/Xevious Fardraut/Haunted Castle実測)。
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 1.0, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -279,6 +293,91 @@
     };
   }
 
+  // YM2203(OPN): FM 3ch+内蔵SSG(expansion/ym2203.js。SSG=AY8910Audioをチップが内蔵し、
+  // clock()もチップ側がプリスケーラに応じてFM/SSG両方を進める)。VGMコマンドは 0x55 aa dd、
+  // デュアル2個目は 0xA5。SSGレジスタ(0x00-0x0F)の振り分けはチップのwriteReg()が行う。
+  // 鍵盤: FMはOP1-3行(chip 'ym2203fm'、デュアルはOP4-6)、SSGはKSS PSG表示のKP1-3(KP4-6)行を流用。
+  function makeYm2203Adapter(info) {
+    const fm = new Emu.YM2203Audio(info.clock);
+    return {
+      id: 'ym2203', clockHz: info.clock, accum: 0, fm, gain: CHIP_GAIN.ym2203, ssgGain: CHIP_GAIN.ym2203ssg,
+      write(aa, dd) { fm.writeReg(aa, dd); },
+      clock() { fm.clock(); },
+      flushWrites() { fm.flushWrites(); },
+      mix(out) {
+        const s = fm.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain;
+        const sg = fm.ssg.mixSample() * this.ssgGain; out[0] += sg; out[1] += sg;
+      },
+      // 2個目のチップ(this.second)は鍵盤のOP4-6/KP4-6行=配列index 3-5 を自分のch0-2として読む
+      applyMute(m) {
+        const e = m.expansion || m;
+        if (e.ym2203fm) { Emu.applyMute(fm.mute, this.second ? e.ym2203fm.slice(3) : e.ym2203fm); fm.syncMuteVol(); }
+        if (e.psg) Emu.applyMute(fm.ssg.mute, this.second ? e.psg.slice(3) : e.psg);
+      },
+      applyVolume(v) {
+        const e = v.expansion || v;
+        if (e.ym2203fm) { Emu.applyVolume(fm.vol, this.second ? e.ym2203fm.slice(3) : e.ym2203fm); fm.syncMuteVol(); }
+        if (e.psg) Emu.applyVolume(fm.ssg.vol, this.second ? e.psg.slice(3) : e.psg);
+      },
+      // 拡張ヘッダのチップ音量/全体音量(reset()が掛ける)はFM/SSG両方に効かせる
+      scaleGain(f) { this.gain *= f; this.ssgGain *= f; }
+    };
+  }
+
+  // YM2608(OPNA): FM 6ch+内蔵SSG+内蔵リズム6ch+ADPCM-B(expansion/ym2608.js。SSG=AY8910Audioを
+  // チップが内蔵し、clock()もチップ側がプリスケーラに応じて進める)。VGMコマンドは
+  // 0x56(ポート0)/0x57(ポート1)、デュアル2個目は0xA6/0xA7。DELTA-Tメモリはデータブロック0x81。
+  // 鍵盤: FMはOA1-6行(chip 'ym2608fm')、リズム/ADPCM-BはOABD等/OAB行(chip 'ym2608adpcm'、
+  // 0-5=リズム, 6=B)、SSGはKSS PSG表示のKP1-3行を流用。
+  function makeYm2608Adapter(info) {
+    const fm = new Emu.YM2608Audio(info.clock);
+    return {
+      id: 'ym2608', clockHz: info.clock, accum: 0, fm, gain: CHIP_GAIN.ym2608, ssgGain: CHIP_GAIN.ym2608ssg,
+      write(port, aa, dd) { fm.writeReg(port, aa, dd); },
+      loadRom(romSize, start, data) { fm.loadRom('b', romSize, start, data); },
+      clock() { fm.clock(); },
+      flushWrites() { fm.flushWrites(); },
+      mix(out) {
+        const s = fm.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain;
+        const sg = fm.ssg.mixSample() * this.ssgGain; out[0] += sg; out[1] += sg;
+      },
+      applyMute(m) {
+        const e = m.expansion || m;
+        if (e.ym2608fm) { Emu.applyMute(fm.mute, e.ym2608fm); fm.syncMuteVol(); }
+        if (e.ym2608adpcm) Emu.applyMute(fm.muteAdpcm, e.ym2608adpcm);
+        if (e.psg) Emu.applyMute(fm.ssg.mute, e.psg);
+      },
+      applyVolume(v) {
+        const e = v.expansion || v;
+        if (e.ym2608fm) { Emu.applyVolume(fm.vol, e.ym2608fm); fm.syncMuteVol(); }
+        if (e.ym2608adpcm) Emu.applyVolume(fm.volAdpcm, e.ym2608adpcm);
+        if (e.psg) Emu.applyVolume(fm.ssg.vol, e.psg);
+      },
+      // 拡張ヘッダのチップ音量/全体音量(reset()が掛ける)はFM/SSG両方に効かせる
+      scaleGain(f) { this.gain *= f; this.ssgGain *= f; }
+    };
+  }
+
+  // OPL系(YM3812=OPL2 / YM3526=OPL / Y8950=MSX-AUDIO): 2op FM×9ch+リズム(expansion/opl.js)。
+  // コマンドは 0x5A/0x5B/0x5C aa dd、デュアル2個目=0xAA/0xAB/0xAC。Y8950のDELTA-Tメモリは
+  // データブロック0x88。鍵盤はOL1-9行+リズム行(chip 'opl'、ミュート添字はEmu.OPL_MUTE)。
+  // 3チップは同一コアのtype違いなので、鍵盤/ミュート/変換の語彙('opl')を共有する
+  // (実VGMでOPL系同士が同居する構成は無い)。
+  function makeOplAdapter(id) {
+    return function (info) {
+      const chip = new Emu.OPLAudio(info.clock, { type: id });
+      return {
+        id, clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.opl,
+        write(aa, dd) { chip.writeReg(aa, dd); },
+        loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); }, // Y8950のみ実体あり
+        clock() { chip.clock(); },
+        mix(out) { const s = chip.mixSample() * this.gain; out[0] += s; out[1] += s; },
+        applyMute(m) { const e = m.expansion || m; if (e.opl) Emu.applyMute(chip.mute, e.opl); },
+        applyVolume(v) { const e = v.expansion || v; if (e.opl) Emu.applyVolume(chip.vol, e.opl); }
+      };
+    };
+  }
+
   // GA20(Irem M92/M107 PCM): 4ch 8bit PCM(expansion/ga20.js)。コマンドは 0xBF aa dd
   // (aaのbit7=デュアル2個目)、ROMはデータブロック0x93。
   function makeGa20Adapter(info) {
@@ -441,7 +540,9 @@
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
     sn76489: makeSnAdapter, ym2612: makeYm2612Adapter, pwm: makePwmAdapter,
     rf5c68: makeRfAdapter('rf5c68'), rf5c164: makeRfAdapter('rf5c164'), ym2610: makeYm2610Adapter,
-    ym2151: makeYm2151Adapter, ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter,
+    ym2151: makeYm2151Adapter, ym2203: makeYm2203Adapter, ym2608: makeYm2608Adapter,
+    ym3812: makeOplAdapter('ym3812'), ym3526: makeOplAdapter('ym3526'), y8950: makeOplAdapter('y8950'),
+    ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter,
     c352: makeC352Adapter, okim6258: makeOkim6258Adapter, qsound: makeQsoundAdapter,
     okim6295: makeOkim6295Adapter, multipcm: makeMultiPcmAdapter
   };
@@ -524,6 +625,10 @@
         // (Battle Garegga実測 0.197:0.198)だが合算が過熱(RMS0.28/ピーク1.41)するため、
         // アイレムM92と同じ「比率を保ったまま両チップ縮小」で×0.7(RMS-14dB級/ピーク~1.0)。
         if ((info.id === 'ym2151' || info.id === 'okim6295') && h.chips.ym2151 && h.chips.okim6295) a.gain *= 0.7;
+        // デュアルYM2203(Avengers等のアーケード): 2個で単純加算するとMD基準のgain2.0が実質4.0に
+        // なり過熱する(実測: Avengers Boss RMS-8.1dB/ピーク2.4=クリップ)。FM:SSG比を保ったまま
+        // 両チップ×0.5して単チップ相当の合算レベルに収める(RMS-14dB級)。
+        if (info.id === 'ym2203' && info.dual) a.scaleGain(0.5);
         this.adapters.push(a); this.adapterById[info.id] = a;
         if (info.dual) {
           // デュアルチップ(クロック値bit30): 2個目は同じ設定で別インスタンス。クロックは
@@ -537,6 +642,7 @@
           if (info.id === 'ym2151' && h.chips.c140) b.gain *= 1.7;
           if ((info.id === 'ym2151' || info.id === 'ga20') && h.chips.ym2151 && h.chips.ga20) b.gain *= 0.5;
           if ((info.id === 'ym2151' || info.id === 'okim6295') && h.chips.ym2151 && h.chips.okim6295) b.gain *= 0.7;
+          if (info.id === 'ym2203') b.scaleGain(0.5);
           b.second = true;
           this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
         }
@@ -601,6 +707,18 @@
           case 0xA1: this._chipWrite('ym2413', d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2413
           case 0x54: this._chipWrite('ym2151', d[p], d[p + 1], false); this.pos = p + 2; break; // YM2151(OPM)
           case 0xA4: this._chipWrite('ym2151', d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2151
+          case 0x55: this._chipWrite('ym2203', d[p], d[p + 1], false); this.pos = p + 2; break; // YM2203(OPN)
+          case 0xA5: this._chipWrite('ym2203', d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2203
+          case 0x5A: this._chipWrite('ym3812', d[p], d[p + 1], false); this.pos = p + 2; break; // YM3812(OPL2)
+          case 0xAA: this._chipWrite('ym3812', d[p], d[p + 1], true); this.pos = p + 2; break;
+          case 0x5B: this._chipWrite('ym3526', d[p], d[p + 1], false); this.pos = p + 2; break; // YM3526(OPL)
+          case 0xAB: this._chipWrite('ym3526', d[p], d[p + 1], true); this.pos = p + 2; break;
+          case 0x5C: this._chipWrite('y8950', d[p], d[p + 1], false); this.pos = p + 2; break; // Y8950(MSX-AUDIO)
+          case 0xAC: this._chipWrite('y8950', d[p], d[p + 1], true); this.pos = p + 2; break;
+          case 0x56: this._ym2608Write(0, d[p], d[p + 1], false); this.pos = p + 2; break; // YM2608(OPNA) ポート0
+          case 0x57: this._ym2608Write(1, d[p], d[p + 1], false); this.pos = p + 2; break; // YM2608 ポート1
+          case 0xA6: this._ym2608Write(0, d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2608
+          case 0xA7: this._ym2608Write(1, d[p], d[p + 1], true); this.pos = p + 2; break;
           // 0xA0/0xB3/0xB4/0xB9/0xD2: レジスタ(ポート)のbit7=1が2個目のチップ
           case 0xA0: this._chipWrite('ay8910', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB3: this._chipWrite('gb', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
@@ -722,6 +840,14 @@
         const rf = ad(type === 0xC0 ? 'rf5c68' : 'rf5c164');
         if (rf && block.length >= 2) rf.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
+      if (type === 0x81 || type === 0x88) { // DELTA-Tメモリ: 0x81=YM2608 / 0x88=Y8950(共通形式)
+        const y = ad(type === 0x81 ? 'ym2608' : 'y8950');
+        if (y && block.length >= 8) {
+          const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
+          const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
+          y.loadRom(romSize, start, block.subarray(8));
+        }
+      }
       if (type === 0x82 || type === 0x83) { // YM2610 ADPCM-A(0x82) / ADPCM-B(0x83) ROM: 共通形式(kind付き)
         const y = ad('ym2610');
         if (y && block.length >= 8) {
@@ -773,6 +899,14 @@
       if (!a) return;
       a.write(port, aa, dd);
       if (this.onWrite) this.onWrite('ym2610', port, aa, dd);
+    }
+
+    _ym2608Write(port, aa, dd, second) {
+      const key = second ? 'ym2608_2' : 'ym2608';
+      const a = this.adapterById[key];
+      if (!a) return;
+      a.write(port, aa, dd);
+      if (this.onWrite) this.onWrite(key, port, aa, dd);
     }
 
     _stream(id) {
@@ -917,6 +1051,9 @@
   //   kss: writeLog[f] = [{addr,value,io}] (AY=io 0xA0/0xA1, OPLL=io 0x7C/0x7D, SCC=mem 0x9800/0xB800台)
   // ---------------------------------------------------------------------------
   Emu.captureVgmSongAsync = async function (vgmBytes, opt, onProgress) {
+    // YM2608内蔵リズムROM: Worker実行時はlocalStorageが無いのでopt経由で受け取る
+    // (main.jsがlocalStorageから復元してoptへ入れる。無ければリズムのみ無音)
+    if (opt.ym2608RhythmRom && Emu.setYm2608RhythmRom) Emu.setYm2608RhythmRom(opt.ym2608RhythmRom);
     const player = new VgmPlayer(vgmBytes);
     const h = player.header;
     const durationSeconds = opt.durationSeconds || Math.max(1, h.durationSeconds || 30);
@@ -931,15 +1068,24 @@
       // clock: kss2mml抽出器(AY/SCC)に渡す「Z80相当クロック」(=AY実クロック×2)。MSXの3.58MHz固定では
       // 別クロックのAY(Exed Exes 1.5MHz等)やYM2610内蔵SSG(チップクロック/4)のロール音程がずれる。
       // vgm2mml/converter.js の kssClock と同じ優先順位。
-      kss: (has('ay8910') || has('k051649') || has('ym2413') || has('ym2610'))
-        ? { writeLog: [], ay: has('ay8910') || has('ym2610'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus),
+      kss: (has('ay8910') || has('k051649') || has('ym2413') || has('ym2610') || has('ym2203') || has('ym2608') || has('ym3812') || has('ym3526') || has('y8950'))
+        ? { writeLog: [], ay: has('ay8910') || has('ym2610') || has('ym2203') || has('ym2608'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus),
+            // OPL(YM3812/YM3526/Y8950): 書込みは io 0xC0/0xC1 として同じwriteLogへ流す
+            // (KSSのMSX-AUDIOと同じ形。抽出器 Kss2MmlExpansion.opl をKSS/VGMで共有するため)
+            opl: has('ym3812') || has('ym3526') || has('y8950'),
+            oplClock: has('ym3812') ? player.adapterById.ym3812.clockHz : has('ym3526') ? player.adapterById.ym3526.clockHz
+                    : has('y8950') ? player.adapterById.y8950.clockHz : 3579545,
             clock: has('ay8910') ? player.adapterById.ay8910.clockHz : has('ym2610') ? player.adapterById.ym2610.clockHz / 2
+                 : has('ym2203') ? player.adapterById.ym2203.fm.ssgTickHz
+                 : has('ym2608') ? player.adapterById.ym2608.fm.ssgTickHz
                  : has('k051649') ? player.adapterById.k051649.clockHz : has('ym2413') ? player.adapterById.ym2413.clockHz : 3579545 }
         : null,
       sn: has('sn76489') ? { snapshots: [], clock: player.adapterById.sn76489.clockHz } : null,
       ym2612: has('ym2612') ? { snapshots: [] } : null,
       ym2610fm: has('ym2610') ? { snapshots: [] } : null,
       ym2151: has('ym2151') ? { snapshots: [] } : null,
+      ym2203fm: has('ym2203') ? { snapshots: [] } : null,
+      ym2608fm: has('ym2608') ? { snapshots: [] } : null,
       ga20: has('ga20') ? { snapshots: [] } : null,
       // snapshots=物理スロット、logical=割当逆算(ソフトウェアチャンネル合成、
       // Emu.PoolChannelRegrouper)。ペア交互/巡回割当のドライバ対策で両方を常時保持する
@@ -960,6 +1106,8 @@
     let nesFrameWrites = [];
     // YM2610 ADPCM のロール用発音区間推定の状態(上のループ内コメント参照)
     const adpcmState = { aSeq: new Array(6).fill(0), aEnd: new Array(6).fill(-1), bSeq: 0, bEnd: -1 };
+    // YM2608 リズム/ADPCM-B も同じ推定(スナップショット形状がYM2610と同一)
+    const adpcm2608State = { aSeq: new Array(6).fill(0), aEnd: new Array(6).fill(-1), bSeq: 0, bEnd: -1 };
     // GA20 も同じ推定(clock()を回さないと0x00終端で止まらないため、キーオン通番+サンプル長で区間を切る)
     const ga20State = { seq: new Array(4).fill(0), end: new Array(4).fill(-1) };
     // SegaPCM: ワンショットは同じ推定。ループ再生(lenSec=Infinity)は明示停止(reg86書込み)まで鳴る
@@ -992,7 +1140,14 @@
         case 'ay8910': kssFrameWrites.push({ addr: 0xA0, value: a & 0x0F, io: true }, { addr: 0xA1, value: b, io: true }); break;
         // YM2610: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
         case 'ym2610': if (a === 0 && b < 0x0E) kssFrameWrites.push({ addr: 0xA0, value: b & 0x0F, io: true }, { addr: 0xA1, value: c, io: true }); break;
+        // YM2203: (addr, data)。addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
+        case 'ym2203': if (a < 0x0E) kssFrameWrites.push({ addr: 0xA0, value: a & 0x0F, io: true }, { addr: 0xA1, value: b, io: true }); break;
+        // YM2608: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
+        case 'ym2608': if (a === 0 && b < 0x0E) kssFrameWrites.push({ addr: 0xA0, value: b & 0x0F, io: true }, { addr: 0xA1, value: c, io: true }); break;
         case 'ym2413': kssFrameWrites.push({ addr: 0x7C, value: a, io: true }, { addr: 0x7D, value: b, io: true }); break;
+        // OPL系: MSX-AUDIOのポート(0xC0=アドレス/0xC1=データ)としてKSSと同じ形でログする
+        case 'ym3812': case 'ym3526': case 'y8950':
+          kssFrameWrites.push({ addr: 0xC0, value: a, io: true }, { addr: 0xC1, value: b, io: true }); break;
         case 'k051649': kssFrameWrites.push({ addr: d, value: c, io: false }); break;
       }
     };
@@ -1115,6 +1270,40 @@
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2151.snapshots.push(s);
       }
+      if (data.ym2203fm) {
+        // YM2612と同じ: 先読みはEGが進まないので発音判定/音量はレジスタ由来(keyOn/tlVol)へ差し替える
+        const s = Emu.snapshotYM2203(player.adapterById.ym2203.fm);
+        for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
+        data.ym2203fm.snapshots.push(s);
+        // プリスケーラでSSG実クロックが変わる(Avengersは1/3=SSG実クロック2倍)ため、
+        // ロール/変換が読むkss.clockを毎フレーム追随させる(通常は曲頭の1回で確定する)
+        if (data.kss && !player.adapterById.ay8910 && !player.adapterById.ym2610) {
+          data.kss.clock = player.adapterById.ym2203.fm.ssgTickHz;
+        }
+      }
+      if (data.ym2608fm) {
+        // YM2610と同じ: FMはkeyOn/tlVolへ差し替え、リズム/ADPCM-Bはキーオン通番+サンプル長で
+        // 発音区間を推定(clock()を回さないため)
+        const s = Emu.snapshotYM2608(player.adapterById.ym2608.fm);
+        for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
+        const st8 = adpcm2608State;
+        for (let i = 0; i < 6; i++) {
+          const c = s.adpcmA[i];
+          if (c.seq !== st8.aSeq[i]) { st8.aSeq[i] = c.seq; st8.aEnd[i] = f + c.lenSec * FRAME_RATE; }
+          c.active = c.vol > 0 && f < st8.aEnd[i];
+        }
+        {
+          const c = s.adpcmB;
+          if (c.seq !== st8.bSeq) { st8.bSeq = c.seq; st8.bEnd = f + c.lenSec * FRAME_RATE; }
+          if (!c.executing) st8.bEnd = -1;
+          c.active = c.vol > 0 && f < st8.bEnd;
+        }
+        data.ym2608fm.snapshots.push(s);
+        // プリスケーラでSSG実クロックが変わりうるため、ロール/変換が読むclockを追随させる
+        if (data.kss && !player.adapterById.ay8910 && !player.adapterById.ym2610 && !player.adapterById.ym2203) {
+          data.kss.clock = player.adapterById.ym2608.fm.ssgTickHz;
+        }
+      }
       if (data.ym2610fm) {
         const s = Emu.snapshotYM2610(player.adapterById.ym2610.fm);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
@@ -1168,8 +1357,9 @@
       ['c140', (s) => s, 'c140'], ['c352', (s) => s, 'c352'],
       ['qsound', (s) => s, 'qsound'], ['okim6295', (s) => s, 'okim6295'],
       ['multipcm', (s) => s, 'multipcm'],
-      // ★YM2610のアダプタはチップを .chip ではなく .fm で持つ(SSGと2個持ちのため)
+      // ★YM2610/YM2608のアダプタはチップを .chip ではなく .fm で持つ(SSGと2個持ちのため)
       ['ym2610fm', (s) => (s && s.adpcmA ? s.adpcmA.concat(s.adpcmB ? [s.adpcmB] : []) : null), 'ym2610', (a) => a.fm],
+      ['ym2608fm', (s) => (s && s.adpcmA ? s.adpcmA.concat(s.adpcmB ? [s.adpcmB] : []) : null), 'ym2608', (a) => a.fm],
     ];
     let total = 0;
     for (const [key, chansOf, adapterId, chipOf] of SRC) {

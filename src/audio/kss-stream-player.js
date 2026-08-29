@@ -129,6 +129,7 @@
       if (exp.psg) MML.Emu.applyMute(this.player.psg.mute, exp.psg);
       if (exp.scc) MML.Emu.applyMute(this.player.scc.mute, exp.scc);
       if (exp.opll && this.player.opll) MML.Emu.applyMute(this.player.opll.mute, exp.opll);
+      if (exp.opl && this.player.opl) MML.Emu.applyMute(this.player.opl.mute, exp.opl);
     }
 
     getPosition() {
@@ -182,6 +183,7 @@
       this.psg              = null;
       this.scc              = null;
       this.opll             = null;
+      this.opl              = null; // MSX-AUDIO(Y8950)
       this._headerOpt       = null; // busOpt相当(header/songData)
       this.writeLog         = null; // captureKssSongAsyncが進行中に育てる配列への参照
       this.totalFrames      = 0;
@@ -202,7 +204,7 @@
       this._silenceFired    = false;
       this._silenceScanFrame = -1;
       this._scanDone         = false;
-      this._scanBus = null; this._scanPsg = null; this._scanScc = null; this._scanOpll = null;
+      this._scanBus = null; this._scanPsg = null; this._scanScc = null; this._scanOpll = null; this._scanOpl = null;
       this._scanFrame = -1;
       this._scanSongFramePos = 0;
       this._scanCycleAccum = 0;
@@ -243,6 +245,13 @@
         this.bus.registerChip('opll', this.opll);
       } else {
         this.opll = null;
+      }
+      // MSX-AUDIO(Y8950): kssPlayer.jsと同じ配線(3.58MHz、ポート0xC0/0xC1はバスが振り分ける)
+      if (header.device.mode === 'MSX' && header.device.msxAudio && MML.Emu.OPLAudio) {
+        this.opl = new MML.Emu.OPLAudio(MML.KSS.Z80_CLOCK, { type: 'y8950' });
+        this.bus.registerChip('opl', this.opl);
+      } else {
+        this.opl = null;
       }
       if (this._lastMute) this.applyMute(this._lastMute);
       if (this._lastVolume) this.applyVolume(this._lastVolume);
@@ -303,6 +312,12 @@
       } else {
         this._scanOpll = null;
       }
+      if (header.device.mode === 'MSX' && header.device.msxAudio && MML.Emu.OPLAudio) {
+        this._scanOpl = new MML.Emu.OPLAudio(MML.KSS.Z80_CLOCK, { type: 'y8950' });
+        this._scanBus.registerChip('opl', this._scanOpl);
+      } else {
+        this._scanOpl = null;
+      }
       // ★ミュート/ch別音量はスキャンへ反映しない。これらは「聴き方」の設定であって曲の
       // 内容ではないため、全chミュートすると曲が終わったと誤判定して次の曲へ飛んでしまう
       // (ユーザー報告。以前は「実再生と無音判定基準を揃える」ため反映していた)。
@@ -311,6 +326,7 @@
         if (exp.psg) MML.Emu.applyVolume(this._scanPsg.vol, exp.psg);
         if (exp.scc) MML.Emu.applyVolume(this._scanScc.vol, exp.scc);
         if (exp.opll && this._scanOpll) MML.Emu.applyVolume(this._scanOpll.vol, exp.opll);
+        if (exp.opl && this._scanOpl) MML.Emu.applyVolume(this._scanOpl.vol, exp.opl);
       }
     }
 
@@ -363,10 +379,12 @@
           this._scanPsg.clock();
           this._scanScc.clock();
           if (this._scanOpll) this._scanOpll.clock();
+          if (this._scanOpl) this._scanOpl.clock();
           this._scanCycleAccum -= 1;
         }
         let raw = this._scanPsg.mixSample() + this._scanScc.mixSample();
         if (this._scanOpll) raw += this._scanOpll.mixSample();
+        if (this._scanOpl) raw += this._scanOpl.mixSample() * 0.7;
         const y = raw - this._scanDcPrevX + 0.999 * this._scanDcPrevY;
         this._scanDcPrevX = raw; this._scanDcPrevY = y;
 
@@ -409,10 +427,12 @@
           this.psg.clock();
           this.scc.clock();
           if (this.opll) this.opll.clock();
+          if (this.opl) this.opl.clock();
           this.cycleAccum -= 1;
         }
         let raw = this.psg.mixSample() + this.scc.mixSample();
         if (this.opll) raw += this.opll.mixSample();
+        if (this.opl) raw += this.opl.mixSample() * 0.7; // 0.7=VGM較正比(opl 1.4/ym2413 1.99)
         const y = raw - this.dcPrevX + 0.999 * this.dcPrevY;
         this.dcPrevX = raw; this.dcPrevY = y;
         out[i] = y;
@@ -481,6 +501,7 @@
       if (exp.psg) MML.Emu.applyMute(this.psg.mute, exp.psg);
       if (exp.scc) MML.Emu.applyMute(this.scc.mute, exp.scc);
       if (exp.opll && this.opll) MML.Emu.applyMute(this.opll.mute, exp.opll);
+      if (exp.opl && this.opl) MML.Emu.applyMute(this.opl.mute, exp.opl);
       // 再生中のミュート切替は無音判定の基準に影響するため先読みスキャンをやり直す
       if (this._headerOpt) this._resetScan(Math.max(0, this.currentFrame));
     }
@@ -494,6 +515,7 @@
       if (exp.psg) MML.Emu.applyVolume(this.psg.vol, exp.psg);
       if (exp.scc) MML.Emu.applyVolume(this.scc.vol, exp.scc);
       if (exp.opll && this.opll) MML.Emu.applyVolume(this.opll.vol, exp.opll);
+      if (exp.opl && this.opl) MML.Emu.applyVolume(this.opl.vol, exp.opl);
       if (this._headerOpt) this._resetScan(Math.max(0, this.currentFrame));
     }
 

@@ -1186,7 +1186,13 @@ button.secondary {
 /* 既定から変更した行は文字をアクセント色にする(どの行を触ったか一目で分かるように) */
 .kbd-part--custom { color: var(--accent); border-color: var(--accent); }
 /* スキップ(変換対象外)の行は減光。「この音は変換に乗らない」を聴きながら分かるようにする */
-.kbd-ch-row--skip { opacity: 0.45; }
+/* スキップ行は「左端〜ch名」だけ落とす(ユーザー指示)。行全体を落とすと、そのすぐ右にある
+   借用先セレクト自体が読みづらくなり、スキップから戻す操作がしにくかった */
+.kbd-ch-row--skip > .kbd-dot,
+.kbd-ch-row--skip > .kbd-part,
+.kbd-ch-row--skip > .kbd-mute,
+.kbd-ch-row--skip > .kbd-mute-ph,
+.kbd-ch-row--skip > .kbd-name { opacity: 0.45; }
 /* 借用先が他chと重複している行(先に置かれた方が勝ち、後は変換対象外になる) */
 .kbd-ch-row--conflict .kbd-part { color: var(--error); border-color: var(--error); }
 .kbd-ch-row--conflict .kbd-assign-target { border-color: var(--error); }
@@ -1198,6 +1204,12 @@ button.secondary {
 .kbd-left--assign .kbd-assign { display: flex; align-items: center; gap: 4px; }
 .kbd-assign-target { flex: none; width: 112px; }
 .kbd-assign-tone { flex: none; width: 84px; }
+/* 借用先にDPCMを選んだ行だけ出る「パッド」ボタン(ドラム(DPCM)パネルを開く) */
+.kbd-assign-drum {
+  flex: none; padding: 1px 7px; font-size: 10px; cursor: pointer;
+  border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 4px;
+}
+.kbd-assign-drum:hover { background: rgba(58, 110, 165, 0.18); color: var(--text); }
 .kbd-assign-target, .kbd-assign-tone {
   height: 16px;
   padding: 0 2px;
@@ -2073,9 +2085,90 @@ button.secondary {
 .kbd-dpcm-cost--over { background: rgba(209, 72, 58, 0.16); border-top-color: rgba(209, 72, 58, 0.55); }
 .kbd-dpcm-cost--over .kbd-dpcm-cost-label { background: #d1483a; }
 
+/* 変換設定ダイアログ: 縦に長くなりすぎたので2段組にして横へ広げる(ユーザー要望) */
+.cs-modal { width: min(880px, 94vw); max-width: 94vw; }
+.cs-modal .es-modal-body {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; align-content: start;
+}
+.cs-modal .es-modal-body > .cs-note, .cs-modal .es-modal-body > .cs-span { grid-column: 1 / -1; }
+.cs-tempo { width: 76px; }
+.cs-tempo-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cs-tempo-row .es-preset { flex: 0 0 auto; min-width: 0; padding: 4px 12px; }
+/* コンバート開始は見出しの左端(ユーザー指示) */
+.cs-modal .es-modal-header { display: flex; align-items: center; gap: 10px; }
+.cs-convert {
+  padding: 4px 14px; font-size: 12px; cursor: pointer; border-radius: 5px; font-weight: 700;
+  background: #3a6ea5; border: 1px solid #3a6ea5; color: #fff;
+}
+.cs-convert:hover { filter: brightness(1.1); }
+.cs-modal .es-modal-header > span { flex: 1; }
+@media (max-width: 700px) {
+  .cs-modal .es-modal-body { grid-template-columns: 1fr; }
+}
+
+/* ドラム(DPCM)パネル: 1行=1サンプル。列幅はヘッダと行で同じクラスを使って揃える */
+.drum-panel { display: flex; flex-direction: column; height: 100%; font-size: 11px; }
+.drum-panel-head, .drum-panel-row {
+  display: flex; align-items: center; gap: 6px; padding: 3px 6px; white-space: nowrap;
+}
+.drum-panel-head { font-weight: 700; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+.drum-panel-row { border-bottom: 1px solid rgba(128, 128, 128, 0.14); }
+.drum-panel-row:hover { background: rgba(58, 110, 165, 0.08); }
+.drum-panel-row--off { opacity: 0.45; }
+/* 差し替えの名前だけ残ってPCMが未登録(ページ再読み込み後)。選び直しを促す */
+.drum-panel-row--missing .dp-inc { border-color: #c98a00; color: #c98a00; }
+/* 同定情報(ハッシュ)が届いていない行。設定を保存できないので操作を止めて理由を出す */
+.drum-panel-row--nohash { background: rgba(209, 72, 58, 0.10); }
+.drum-panel-row--nohash .dp-c-label::after { content: ' ⚠'; color: #d1483a; }
+.drum-panel-body { flex: 1; overflow-y: auto; }
+.drum-panel-empty { padding: 14px 8px; color: var(--text-muted); }
+.drum-panel-foot {
+  padding: 4px 8px; font-family: var(--mono); color: var(--text-secondary);
+  border-top: 1px solid var(--border); background: rgba(58, 110, 165, 0.08);
+}
+.drum-panel-foot--warn { background: rgba(210, 150, 40, 0.16); }
+.drum-panel-foot--over { background: rgba(209, 72, 58, 0.16); }
+.dp-c-color { flex: none; width: 14px; }
+.dp-c-color i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.dp-c-label { flex: none; width: 92px; font-family: var(--mono); }
+.dp-name {
+  width: 100%; box-sizing: border-box; font: inherit; font-family: var(--mono);
+  padding: 1px 3px; border: 1px solid transparent; border-radius: 3px;
+  background: transparent; color: var(--text);
+}
+.dp-name::placeholder { color: var(--text-muted); opacity: 0.8; }
+.dp-name:hover { border-color: var(--border); }
+.dp-name:focus { border-color: var(--accent); background: var(--bg); outline: none; }
+.dp-c-vol { flex: none; width: 118px; display: flex; align-items: center; gap: 5px; }
+.dp-vol { flex: 1; min-width: 0; }
+.dp-vol-num { flex: none; width: 34px; text-align: right; font-family: var(--mono); font-size: 10px; }
+.dp-vol-num--warn { color: #c98a00; font-weight: 700; }
+.drum-panel-head .dp-c-vol { display: block; }
+.dp-c-hits  { flex: none; width: 42px; text-align: right; font-family: var(--mono); }
+.dp-c-on    { flex: none; width: 34px; text-align: center; }
+.dp-c-rate  { flex: none; width: 92px; }
+.dp-c-rate select { width: 100%; font-size: 11px; }
+.dp-c-inc   { flex: 1; min-width: 110px; max-width: 220px; display: flex; align-items: center; gap: 3px; }
+.dp-c-play  { flex: none; width: 96px; display: flex; gap: 4px; align-items: center; }
+/* 列見出しで「何を鳴らすか」を示し、押すところは音符マークだけにする(ユーザー指示) */
+.drum-panel-head .dp-c-play i { font-style: normal; width: 46px; font-size: 10px; text-align: center; }
+.dp-play { width: 46px; text-align: center; line-height: 1.2; }
+.dp-inc { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.dp-inc, .dp-inc-clear, .dp-play {
+  padding: 1px 6px; font-size: 10px; cursor: pointer;
+  border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 4px;
+}
+.dp-inc:hover, .dp-inc-clear:hover, .dp-play:hover { background: rgba(58, 110, 165, 0.18); color: var(--text); }
+.dp-play { font-size: 14px; padding: 0; }
+
 /* note列クリックの小メニュー(打楽器/音階の手動指定 + 基準音の手動補正) */
 .kbd-sample-menu {
-  position: fixed; z-index: 400; min-width: 150px; padding: 3px;
+  position: fixed;
+  /* ★.float-window はドラッグ/フォーカスのたびにインラインz-indexが増加し永続化されるので、
+     数百程度の固定値では簡単に追い越されて背面に隠れる(.kbd-color-picker と同じ理由)。
+     実際、差し替えメニューが「押しても何も出てこない」不具合になっていた。 */
+  z-index: 2147483647;
+  min-width: 150px; padding: 3px;
   background: #2a2c36; border: 1px solid #4a4d5a; border-radius: 5px;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45); display: flex; flex-direction: column;
 }
@@ -2253,7 +2346,8 @@ button.secondary {
 .help-card--flash { animation: help-card-flash 1.2s ease-out 1; }
 
 /* ---- 変換設定ダイアログ(src/ui/convertSettings.js、es-modal を流用) ---- */
-.cs-modal { max-width: 560px; }
+/* 幅は上の2段組の定義(.cs-modal { width: min(880px, 94vw) })が正典。
+   ここにあった max-width:560px は1段組時代の名残で、2段組を潰してしまうので外した */
 .cs-note { margin: 0 0 12px; font-size: 12px; color: var(--text-muted); }
 .cs-row {
   display: grid;

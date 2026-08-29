@@ -237,7 +237,7 @@
       out.push({ active: c.play && vmax > 0 && rate > 0, vol: vmax / 127, rawVol: vmax, rawVolMax: 127,
         panL: volL >> 3, panR: volR >> 3,
         rate, seq: c.seq, loop: c.loop, lenSec: c.loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'segapcm', start: c.smpStart, end: c.smpEnd } : null });
     }

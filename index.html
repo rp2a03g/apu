@@ -124,6 +124,20 @@
     </div>
   </section>
 
+  <!-- ドラム(DPCM)パネル: サンプル1つ=1行。変換する/しない・DMCレート・外部ファイルでの
+       差し替え・試聴をここでまとめて詰める。設定の単位はチャンネルではなくサンプル
+       (src/convert/drumSamples.js、キーはサンプル内容のハッシュ) -->
+  <section class="float-window" id="win-drums"
+    data-default-left="120" data-default-top="200" data-default-width="620" data-default-height="380">
+    <div class="float-window-header">
+      <span>ドラム(DPCM)</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <div id="drumPanel"></div>
+    </div>
+  </section>
+
   <section class="float-window" id="win-dpcm"
     data-default-left="660" data-default-top="560" data-default-width="480" data-default-height="320">
     <div class="float-window-header">
@@ -476,6 +490,7 @@
   <script src="src/mml/waveformEditor.js"></script>
   <script src="src/convert/options.js"></script>
   <script src="src/convert/drumMap.js"></script>
+  <script src="src/convert/drumSamples.js"></script>
   <script src="src/convert/bpm.js"></script>
   <script src="src/convert/duration.js"></script>
   <script src="src/convert/envelope.js"></script>
@@ -691,6 +706,7 @@
   <script src="src/ui/floatingWindows.js"></script>
   <script src="src/ui/waveClipboard.js"></script>
   <script src="src/ui/colorPicker.js"></script>
+  <script src="src/ui/drumPanel.js"></script>
   <script src="src/ui/keyboard.js"></script>
   <script src="src/ui/fdsWaveEditor.js"></script>
   <script src="src/ui/n163WaveEditor.js"></script>
@@ -720,6 +736,7 @@
   <script src="src/kss2mml/expansion/ay.js"></script>
   <script src="src/kss2mml/expansion/scc.js"></script>
   <script src="src/kss2mml/expansion/opll.js"></script>
+  <script src="src/kss2mml/expansion/opl.js"></script>
   <script src="src/kss2mml/converter.js"></script>
   <script src="src/gbs/gbsHeader.js"></script>
   <script src="src/emulator/cpuSm83.js"></script>
@@ -750,6 +767,9 @@
   <script src="src/emulator/expansion/ym2612Nuked.js"></script>
   <script src="src/emulator/expansion/ym2610.js"></script>
   <script src="src/emulator/expansion/ym2151.js"></script>
+  <script src="src/emulator/expansion/ym2203.js"></script>
+  <script src="src/emulator/expansion/ym2608.js"></script>
+  <script src="src/emulator/expansion/opl.js"></script>
   <script src="src/emulator/expansion/ga20.js"></script>
   <script src="src/emulator/expansion/segapcm.js"></script>
   <script src="src/emulator/expansion/c140.js"></script>

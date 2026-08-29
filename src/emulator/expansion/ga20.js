@@ -196,7 +196,7 @@
       const vol = c.volume / 246; // 音量カーブ適用後の振幅比(最大値246で正規化)
       out.push({ active: c.play && vol > 0, vol, rawVol: c.rawVol, rawVolMax: 255, panL: 1, panR: 1,
         rate, seq: c.seq, lenSec: rate > 0 ? lenBytes / rate : 0,
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'ga20', start: c.start, end: c.end } : null });
     }

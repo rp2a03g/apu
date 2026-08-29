@@ -86,6 +86,7 @@
       frameRate: capture.frameRate,
       clock: MML.KSS.Z80_CLOCK,
       hasOpll: header.device.mode === 'MSX' && header.device.fmpac,
+      hasOpl: header.device.mode === 'MSX' && header.device.msxAudio,
       songLabel: String(songIndex)
     }, options);
   };
@@ -110,6 +111,8 @@
     for (let i = 0; i < 3; i++) out.push({ id: `KP${i + 1}`, label: `PSG ch${i + 1}`, chip: 'ay8910', kind: 'square', ch: i, nativeFamily: 'fme7' });
     if (caps.hasScc) for (let i = 0; i < 5; i++) out.push({ id: `KS${i + 1}`, label: `SCC ch${i + 1}`, chip: 'k051649', kind: 'wave', ch: i, nativeFamily: 'n163' });
     if (caps.hasOpll) for (let i = 0; i < 9; i++) out.push({ id: `KF${i + 1}`, label: `FMPAC ch${i + 1}`, chip: 'ym2413', kind: 'fm', ch: i, nativeFamily: 'vrc7' });
+    // MSX-AUDIO(Y8950): 2op FM×9ch。音色はOPLLカスタム音色へ直接変換(kss2mml/expansion/opl.js)
+    if (caps.hasOpl) for (let i = 0; i < 9; i++) out.push({ id: `OL${i + 1}`, label: `MSX-AUDIO ch${i + 1}`, chip: 'opl', kind: 'fm', ch: i, nativeFamily: 'vrc7' });
     return out;
   };
   // 既定の割当(従来の固定割当と同じ: PSG→FME-7、SCC→N163、FMPAC→VRC7の先頭6ch)
@@ -119,6 +122,8 @@
     for (const s of MML.KSS2MML.sourceChannels(caps)) {
       if (/^KS/.test(s.id)) plan[s.id] = `n163_${s.ch}`;
       else if (/^KF/.test(s.id)) plan[s.id] = s.ch < 6 ? `vrc7_${s.ch}` : 'skip';
+      // MSX-AUDIOはFMPAC非搭載時のみVRC7へ(両搭載時はVRC7 6枠をFMPACが取る)
+      else if (/^OL/.test(s.id)) plan[s.id] = (!caps.hasOpll && s.ch < 6) ? `vrc7_${s.ch}` : 'skip';
     }
     return plan;
   };
@@ -133,6 +138,7 @@
     const clock = cap.clock || MML.KSS.Z80_CLOCK;
     const frameRate = cap.frameRate;
     const hasOpll = !!cap.hasOpll;
+    const hasOpl = !!cap.hasOpl;
     const songIndex = cap.songLabel;
     const sourceLabel = cap.sourceLabel || 'KSS';
 
@@ -172,8 +178,9 @@
     const hasScc = sccResult.channels.some(ch => ch.events.some(ev => ev.note !== null));
 
     let expansions, expansionLetterMap, scoreChannels, borrowNotes = [], chanDesc = '';
+    let preferOplForNote = false; // 既定経路で「FMPAC無音→MSX-AUDIOがVRC7枠を使用」になったか(ヘッダコメント用)
     if (customPlan) {
-      const caps = { hasScc, hasOpll };
+      const caps = { hasScc, hasOpll, hasOpl };
       const r = MML.Convert.Borrow.compose({
         sources: MML.KSS2MML.sourceChannels(caps),
         plan: Object.assign({}, MML.KSS2MML.defaultPlan(caps), customPlan),
@@ -189,6 +196,7 @@
           if (chip === 'ay8910') return MML.Kss2MmlExpansion.ay(writeLog, totalFrames, clock, reg).channels;
           if (chip === 'k051649') return MML.Kss2MmlExpansion.scc(writeLog, totalFrames, clock, waveReg, reg).channels;
           if (chip === 'ym2413') return MML.Kss2MmlExpansion.opll(writeLog, totalFrames, toneReg).channels;
+          if (chip === 'opl') return MML.Kss2MmlExpansion.opl(writeLog, totalFrames, clock, toneReg).channels;
           return null;
         },
       });
@@ -200,7 +208,7 @@
         .map(t => `${MML.Convert.ChannelPlan.letterOfTarget(t)}=${r.placed[t].source.label}`)
         .sort().join(' ');
     } else {
-    expansions = ['fme7'].concat(hasScc ? ['n163'] : []).concat(hasOpll ? ['vrc7'] : []);
+    expansions = ['fme7'].concat(hasScc ? ['n163'] : []).concat((hasOpll || hasOpl) ? ['vrc7'] : []);
     expansionLetterMap = MML.Mml.assignExpansionLetters(expansions);
 
     scoreChannels = [];
@@ -249,9 +257,15 @@
       }
     }
 
-    // FMPAC(6ch) → vrc7 (OPLL=YM2413そのものなのでそのまま正しく再生できる)
-    if (hasOpll) {
-      const opllResult = MML.Kss2MmlExpansion.opll(writeLog, totalFrames, vrc7ToneReg);
+    // FMPAC(6ch) → vrc7 (OPLL=YM2413そのものなのでそのまま正しく再生できる)。
+    // ★FMPACとMSX-AUDIOを両方宣言するKSS(コンパイル系。曲番号+64でMSX-AUDIO版を選ぶ
+    //   Xevious Fardraut等)は、FMPACが完全に無音の曲ならVRC7枠をMSX-AUDIOへ譲る
+    //   (実際に鳴っている方を変換する)。FMPACだけの曲は従来どおり(無音でも枠を出す)。
+    const opllProbe = hasOpll ? MML.Kss2MmlExpansion.opll(writeLog, totalFrames, vrc7ToneReg) : null;
+    const opllSilent = !opllProbe || !opllProbe.channels.some(ch => ch.events.some(ev => ev.note !== null));
+    const preferOpl = hasOpl && hasOpll && opllSilent;
+    if (hasOpll && !preferOpl) {
+      const opllResult = opllProbe;
       // PSG/SCCと同じ理由でVRC7側も音程補正する(VRC7のfnum式を使用)。
       MML.Convert.detectChorusDetune(opllResult.channels, vrc7FnumRaw, { cmd });
       const vrc7Letters = expansionLetterMap.vrc7;
@@ -275,6 +289,27 @@
       }
       opllChannels.forEach((ch, i) => scoreChannels.push(Object.assign({}, ch, { letter: vrc7Letters[i], hasDetune: true, hasNoteEnv: true })));
     }
+
+    // MSX-AUDIO(Y8950、9ch) → vrc7(音色はOPLLカスタム音色へ直接変換=2op同士でほぼ忠実)。
+    // FMPACと両搭載の曲はVRC7 6枠をFMPACが取るので対象外(割当UIで振り替え可能)。
+    // 溢れ時の前詰めはFMPACブロックと同じ。リズムモード打楽器とADPCMは変換対象外
+    // (kss2mml/expansion/opl.js冒頭コメント)。
+    if (hasOpl && (!hasOpll || preferOpl)) {
+      preferOplForNote = preferOpl;
+      const oplResult = MML.Kss2MmlExpansion.opl(writeLog, totalFrames, clock, vrc7ToneReg);
+      MML.Convert.detectChorusDetune(oplResult.channels, vrc7FnumRaw, { cmd });
+      const vrc7Letters = expansionLetterMap.vrc7;
+      MML.Convert.assignNoteEnvelope(oplResult.channels, noteEnvReg);
+      let oplChannels = oplResult.channels;
+      const cap6 = vrc7Letters.length;
+      if (oplChannels.length > cap6) {
+        const sounding = oplChannels.filter(ch => ch.events.some(ev => ev.note !== null));
+        const overflow = oplChannels.slice(cap6).some(ch => ch.events.some(ev => ev.note !== null));
+        oplChannels = (overflow && sounding.length <= cap6) ? sounding : oplChannels.slice(0, cap6);
+        if (oplChannels.length > cap6) oplChannels = oplChannels.slice(0, cap6);
+      }
+      oplChannels.forEach((ch, i) => scoreChannels.push(Object.assign({}, ch, { letter: vrc7Letters[i], hasDetune: true, hasNoteEnv: true })));
+    }
     } // ← 既定割当の従来経路ここまで(customPlanのときは上のBorrow.compose()を使う)
 
     // 音長に加え、チャンネル毎の発音開始間隔(IOI)も検出材料にする
@@ -296,7 +331,7 @@
 
     const headerComment = [
       `; =========================================================`,
-      `; ${sourceLabel} → MML 変換 (MSX: PSG${hasScc ? ' + SCC' : ''}${hasOpll ? ' + FMPAC' : ''})`,
+      `; ${sourceLabel} → MML 変換 (MSX: PSG${hasScc ? ' + SCC' : ''}${hasOpll ? ' + FMPAC' : ''}${hasOpl ? ' + MSX-AUDIO' : ''})`,
       `; 曲番号   : ${songIndex}`,
       `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
       `; 分解能   : 480 TPQN (MIDI準拠)`,
@@ -304,7 +339,10 @@
       customPlan
         ? `; チャンネル: ${chanDesc || '-'} (借用先の割当: ユーザー指定)`
         : `; チャンネル: A-D=未使用(2A03) X-Z=PSG(FME-7として再生)${hasScc ? ' P-W=SCC(N163として近似再生)' : ''}`,
-      (!customPlan && hasOpll) ? `;             G-L=FMPAC(VRC7として再生)` : `;`,
+      (!customPlan && hasOpll && !preferOplForNote) ? `;             G-L=FMPAC(VRC7として再生)` : `;`,
+      // MSX-AUDIO関連の2行は該当時のみ挿入(空の`;`行を足すと全KSSの出力が変わるため)
+      ...((!customPlan && hasOpl && (!hasOpll || preferOplForNote)) ? [`;             G-L=MSX-AUDIO(Y8950、音色をOPLL/VRC7自作音色へ変換して再生。リズム/ADPCMは対象外)`] : []),
+      ...((!customPlan && hasOpl && hasOpll && !preferOplForNote) ? [`; ※ MSX-AUDIOはVRC7の枠をFMPACが使用しているため変換対象外です(鍵盤表示のチャンネル割当で変更できます)。`] : []),
       `; ※ このアプリのMMLプレイヤーはNES音源専用のため、MSX音源はレジスタ互換/構造が`,
       `;    近いNES拡張音源(PSG→FME-7, FMPAC→VRC7, SCC→N163)を借りて再生します`,
       `;    (割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
@@ -338,7 +376,7 @@
 
     return {
       mml, bpm: Math.round(bpm), pitchCheck,
-      chips: ['PSG'].concat(hasScc ? ['SCC'] : []).concat(hasOpll ? ['FMPAC'] : []),
+      chips: ['PSG'].concat(hasScc ? ['SCC'] : []).concat(hasOpll ? ['FMPAC'] : []).concat(hasOpl ? ['MSX-AUDIO'] : []),
       expansions,
       n163Wave: sccResult.n163Wave
     };

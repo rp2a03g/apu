@@ -135,7 +135,7 @@
       if (d.fmunit) list.push('FM Unit (Y8950)');
     } else {
       if (d.fmpac) list.push('FMPAC (OPLL/YM2413)');
-      if (d.msxAudio) list.push(T('MSX-AUDIO (Y8950, 未対応)'));
+      if (d.msxAudio) list.push('MSX-AUDIO (Y8950)');
     }
     return list;
   };

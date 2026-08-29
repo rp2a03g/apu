@@ -57,6 +57,11 @@
   // PCM品質(冒頭コメント参照)。boolean群とは別に許容値で正規化する
   const PCM_RATE_VALUES = ['max', 8, 4, 2, 1];
   const PITCH_SA_VALUES = ['octave', 'note', 'off'];
+  // 同時発音をミックスして1サンプルに焼くときのDMCレートの決め方
+  //   'quality' … 寄与するサンプルのうち最高音質を採る(既定)
+  //   'size'    … 最低に合わせて容量を優先する
+  const RATE_MIX_VALUES = ['quality', 'size'];
+  MML.Convert.RATE_MIX_VALUES = RATE_MIX_VALUES;
   MML.Convert.CMD_KEYS = CMD_KEYS;
   MML.Convert.SHAPE_KEYS = SHAPE_KEYS;
   MML.Convert.PCM_RATE_VALUES = PCM_RATE_VALUES;
@@ -65,10 +70,10 @@
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave' },
+                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality' },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave' },
+                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality' },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
 
@@ -83,6 +88,7 @@
         if (PCM_RATE_VALUES.indexOf(v) >= 0) out.PCM_RATE = v;
       }
       if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
+      if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
     }
     return out;
   };
@@ -92,7 +98,7 @@
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
       const p = PRESETS[name];
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA'].every(k => p[k] === n[k])) return name;
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA', 'RATE_MIX'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };

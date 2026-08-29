@@ -191,6 +191,14 @@
   let vgmDrumSamples = {};
   let auditionSource = null; // 再生中のノード(次を鳴らすとき止める)
 
+  /** 倍率1.0ならそのまま返す(無駄なコピーを避ける)。それ以外は掛けた新しい配列を返す */
+  function applyGain(pcm, gain) {
+    if (!pcm || !(gain >= 0) || gain === 1) return pcm;
+    const out = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) out[i] = pcm[i] * gain;
+    return out;
+  }
+
   function playFloatPcm(pcm, rateHz) {
     if (!pcm || !pcm.length || !(rateHz > 0)) return;
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -220,54 +228,35 @@
     auditionSource = srcNode;
   }
 
-  // そのサンプルを鳴らしているチャンネルに指定されたDMCレート('auto'しか無ければ null)。
-  // ★変換側(dpcmDrums)と同じく、複数chが同じサンプルを鳴らしていれば最高音質の方を採る。
-  //   以前は「どれか1つの指定を全サンプルへ」だったため、ADPCM1を4kHzにするとADPCM2の
-  //   サンプルまで4kHzで試聴されていた(ユーザー報告)
-  function currentDpcmRateIndex(info) {
-    const map = (typeof getVgmDpcmRate === 'function') ? getVgmDpcmRate() : {};
-    const chipOf = { ga20: 'ga20', segapcm: 'spcm', c140: 'c140', c352: 'c352',
-                     qsound: 'qs', okim6295: 'oki', multipcm: 'mp', ym2610fm: 'pcma' };
-    let best = null;
-    const prefix = info && chipOf[info.chip];
-    for (const id of Object.keys(map)) {
-      const v = map[id];
-      if (v === undefined || v === null || v === '' || v === 'auto') continue;
-      const n = parseInt(v, 10);
-      if (!Number.isFinite(n)) continue;
-      if (prefix && info.chans && info.chans.length) {
-        const m = new RegExp('^' + prefix + ':(\d+)$').exec(id);
-        if (!m || info.chans.indexOf(+m[1]) < 0) continue; // このサンプルを鳴らさないch
-      }
-      if (best === null || n > best) best = n;
-    }
-    return best;
-  }
-
   keyboardDisplay.onDrumAudition = (sampleKey, mode) => {
     const s = vgmDrumSamples[sampleKey];
     if (!s) return;
-    if (mode !== 'dpcm') { playFloatPcm(s.pcm, s.rate); return; }
+    // ★レート・差し替え・変換有無はサンプル単位の設定から引く(src/convert/drumSamples.js)
+    const DS = MML.Convert.DrumSamples;
+    const st = DS ? DS.resolve(s.hash, s.pcm, s.rate) : { pcm: s.pcm, srcRate: s.rate, rate: 'auto', gain: 1 };
+    // ★変換ボリュームは試聴にも同じ倍率で効かせる(ユーザー指示)。「原音」側にも掛けるのは、
+    //   このボタンが「元のPCM」ではなく「いまの設定で変換元として使われる音」の試聴だから
+    //   (差し替えファイルもここから鳴る)。原音とDPCMの音量差で品質を誤判断しないためでもある
+    const gain = st.gain != null ? st.gain : 1;
+    if (mode !== 'dpcm') { playFloatPcm(applyGain(st.pcm, gain), st.srcRate); return; }
     // ★DPCM側は「簡易再生」ではなく、MML変換と同じ encode → decode を必ず通す
     //   (そうしないと実際に鳴る音と試聴が食い違う。[[hes-dda-clip-boundary-frame-mixing]]の
     //    ネイティブ再生と同じ方針)
     const table = MML.Dpcm.DMC_RATE_TABLE_NTSC;
-    let ri = currentDpcmRateIndex(s);
-    if (ri === null) { // 自動: dpcmDrums と同じ選び方
-      const cmd = MML.UI.ConvertSettings ? MML.Convert.normalizeCmd(MML.UI.ConvertSettings.get()) : {};
-      const pr = cmd.PCM_RATE != null ? cmd.PCM_RATE : 'max';
-      ri = (pr === 'max') ? table.length - 1 : table.length - 1;
-    }
+    // 'auto' は dpcmDrums と同じく最高レート(サンプルPCMの再生レートはDMC最高以上のことが多い)
+    let ri = (st.rate !== 'auto' && st.rate !== null && st.rate !== undefined) ? (parseInt(st.rate, 10) | 0) : table.length - 1;
+    if (!(ri >= 0 && ri < table.length)) ri = table.length - 1;
     const dstRate = table[ri];
-    const n = Math.max(1, Math.round(s.pcm.length * dstRate / s.rate));
+    const src = st.pcm, srcRate = st.srcRate;
+    const n = Math.max(1, Math.round(src.length * dstRate / srcRate));
     const res = new Float32Array(n);
-    const step = s.rate / dstRate;
+    const step = srcRate / dstRate;
     let pos = 0;
     for (let i = 0; i < n; i++) {
       const idx = pos | 0;
-      const a = s.pcm[Math.min(idx, s.pcm.length - 1)];
-      const b = s.pcm[Math.min(idx + 1, s.pcm.length - 1)];
-      res[i] = a + (b - a) * (pos - idx);
+      const a = src[Math.min(idx, src.length - 1)];
+      const b = src[Math.min(idx + 1, src.length - 1)];
+      res[i] = (a + (b - a) * (pos - idx)) * gain;
       pos += step;
     }
     const dac = Math.max(0, Math.min(127, Math.round((res[0] + 1) / 2 * 127)));
@@ -314,6 +303,126 @@
     }
     const a = p.adapterById[kindStr];
     return a ? a.chip : null;
+  }
+
+  // ── ドラム(DPCM)パネル ────────────────────────────────────────────────
+  // 1行=1サンプル。設定の単位がチャンネルではなくサンプルなので、鍵盤の割当UIではなく
+  // 専用の表で扱う(src/ui/drumPanel.js、設定の実体は src/convert/drumSamples.js)。
+  // 鍵盤左端のドラムパッドは「クリックで即試聴」、この表は「じっくり詰める」用。
+  // 外部ファイルでサンプルを差し替える(インクルード)。DPCMコンバータと同じ経路で
+  // 音声ファイルを読み、デコードしたPCMをそのサンプルの代わりに使う。
+  // ★差し替えたPCMは変換にも試聴にもそのまま乗る(drumSamples.resolve が一括で返すため)。
+  let drumIncludeInput = null;
+  // DPCMコンバータで開いている音をそのままパッドへ割り当てる(融合)
+  function includeFromConverter(row) {
+    if (!row || !row.hash || !lastDpcmSource) return;
+    MML.Convert.DrumSamples.setIncludePcm(row.hash, lastDpcmSource.name, lastDpcmSource.pcm, lastDpcmSource.rate);
+    MML.UI.DrumPanel.render();
+    scheduleDpcmCostUpdate();
+  }
+  function converterSourceName() { return lastDpcmSource ? lastDpcmSource.name : null; }
+
+  function includeDrumSample(row) {
+    if (!row || !row.hash) return;
+    if (!drumIncludeInput) {
+      drumIncludeInput = document.createElement('input');
+      drumIncludeInput.type = 'file';
+      drumIncludeInput.accept = 'audio/*';
+      drumIncludeInput.style.display = 'none';
+      document.body.appendChild(drumIncludeInput);
+    }
+    drumIncludeInput.onchange = async () => {
+      const file = drumIncludeInput.files && drumIncludeInput.files[0];
+      drumIncludeInput.value = '';
+      if (!file) return;
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = await audioCtx.decodeAudioData(await file.arrayBuffer());
+        // モノラル化(左右の平均)。DPCMは元々モノラル
+        const n = buf.length;
+        const pcm = new Float32Array(n);
+        for (let c = 0; c < buf.numberOfChannels; c++) {
+          const d = buf.getChannelData(c);
+          for (let i = 0; i < n; i++) pcm[i] += d[i] / buf.numberOfChannels;
+        }
+        MML.Convert.DrumSamples.setIncludePcm(row.hash, file.name, pcm, buf.sampleRate);
+        MML.UI.DrumPanel.render();
+        scheduleDpcmCostUpdate();
+      } catch (e) {
+        console.error('差し替えファイルの読み込みに失敗:', e);
+        alert(T('音声ファイルを読み込めませんでした: {msg}', { msg: e.message }));
+      }
+    };
+    drumIncludeInput.click();
+  }
+
+  const DRUM_ROW_COLORS = ['#e8564a', '#f0a232', '#4a9de8', '#9b6ef3', '#22b3a4', '#d94fa0',
+                          '#7a8a99', '#c2a03a', '#5ac47a', '#ff7fa8', '#8ab4ff', '#d0703a'];
+  function refreshDrumPanel() {
+    const P = MML.UI.DrumPanel;
+    if (!P) return;
+    const lanes = keyboardDisplay.getDrumLanes ? keyboardDisplay.getDrumLanes() : [];
+    const hits = keyboardDisplay.getDrumHitCounts ? keyboardDisplay.getDrumHitCounts() : {};
+    const laneOf = {};
+    for (const l of lanes) if (l.key && l.key !== '*') laneOf[l.key] = l;
+
+    // ★一覧に出すサンプル = 「ロールのドラム区画に出ているもの」+「DPCMへ載せたchが鳴らすもの」。
+    //   後者は音程が取れていてもDPCMへ変換されるので、パッドにも出す必要がある
+    //   (DPCMで音律を奏でることもある。ユーザー指示)
+    const dpcmChanOf = {}; // chipフラグ → Set(ch)
+    if (loadedVgmHeader && MML.VGM2MML.sourceChannels) {
+      const Plan = MML.Convert.ChannelPlan;
+      const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
+      for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
+        if (s.kind !== 'pcm' || s.ch < 0) continue;
+        const chId = Plan.chIdForVgmSource(s.id);
+        const ent = (chId && Plan.get(chId)) || {};
+        if ((ent.target || def[s.id] || 'skip') !== 'dpcm') continue;
+        (dpcmChanOf[s.chip] = dpcmChanOf[s.chip] || new Set()).add(s.ch);
+      }
+    }
+    const CHIP_OF_DATA = { ga20: 'ga20', segapcm: 'segapcm', c140: 'c140', c352: 'c352',
+                          qsound: 'qsound', okim6295: 'okim6295', multipcm: 'multipcm', ym2610fm: 'ym2610', ym2608fm: 'ym2608' };
+    const keys = [];
+    for (const l of lanes) if (l.key && l.key !== '*') keys.push(l.key);
+    for (const k of Object.keys(vgmDrumSamples)) {
+      if (keys.indexOf(k) >= 0) continue;
+      const s = vgmDrumSamples[k];
+      const flag = CHIP_OF_DATA[s.chip];
+      const set = flag && dpcmChanOf[flag];
+      if (set && (s.chans || []).some(ch => set.has(ch))) keys.push(k);
+    }
+
+    const labels = MML.Convert.DrumMap ? MML.Convert.DrumMap.labels(keys) : keys;
+    const DS = MML.Convert.DrumSamples;
+    const laneNames = {}; // drumKey → ユーザーが付けた名前(ロールのパッドへ流す)
+    const rows = keys.map((k, i) => {
+      const s = vgmDrumSamples[k], l = laneOf[k];
+      const name = (DS && s && s.hash) ? (DS.get(s.hash).name || null) : null;
+      if (name) laneNames[k] = name;
+      return { key: k,
+               // label は「名前が未設定のときに出す既定表示」。名前そのものは行側が設定から引く
+               label: (l && l.autoLabel) || (l && l.label) || labels[i] || k,
+               color: (l && l.color) || DRUM_ROW_COLORS[i % DRUM_ROW_COLORS.length],
+               hits: hits[k] || 0,
+               hash: s ? s.hash : null, pcm: s ? s.pcm : null, srcRate: s ? s.rate : 0 };
+    });
+    // ★パッド名はロールのドラム区画と同期させる(ユーザー指示)。名前の実体はサンプルの
+    //   ハッシュ側にあり、ロールのノートはハッシュを持たないのでここで橋渡しする
+    if (keyboardDisplay.setDrumLaneNames) keyboardDisplay.setDrumLaneNames(laneNames);
+    P.setRows(rows);
+  }
+
+  if (MML.UI.DrumPanel) {
+    MML.UI.DrumPanel.mount(document.getElementById('drumPanel'), {
+      onChange: () => { scheduleDpcmCostUpdate(); },
+      // 名前を変えたらロールのパッドへ流し直す(ROMコストは名前では変わらないので再計算しない)
+      onRename: () => { refreshDrumPanel(); },
+      onPlay: (row, mode) => { if (keyboardDisplay.onDrumAudition) keyboardDisplay.onDrumAudition(row.key, mode); },
+      onInclude: (row) => includeDrumSample(row),
+      onIncludeFromConverter: (row) => includeFromConverter(row),
+      converterName: () => converterSourceName(),
+    });
   }
 
   // ── DPCMの実コスト表示(割当を変えるたびに再計算) ────────────────────────
@@ -367,7 +476,8 @@
         const cmd = MML.Convert.normalizeCmd(MML.UI.ConvertSettings ? MML.UI.ConvertSettings.get() : null);
         const r = MML.Vgm2MmlExpansion.dpcmDrums(sources, MML.Emu.VGM_FRAME_RATE,
           { totalFrames, pcmRate: cmd.PCM_RATE, rateIndex });
-        keyboardDisplay.setDpcmCost(r.stats);
+          keyboardDisplay.setDpcmCost(r.stats);
+        if (MML.UI.DrumPanel) MML.UI.DrumPanel.setCost(r.stats);
       } catch (e) {
         console.error('DPCMコスト計算に失敗:', e);
         keyboardDisplay.setDpcmCost(null);
@@ -661,6 +771,10 @@
   function liveKssOpll() {
     if (!kssActivePlayer || !kssActivePlayer.player || !kssActivePlayer.player.opll) return null;
     return MML.Emu.snapshotOPLL(kssActivePlayer.player.opll);
+  }
+  function liveKssOpl() {
+    if (!kssActivePlayer || !kssActivePlayer.player || !kssActivePlayer.player.opl) return null;
+    return MML.Emu.snapshotOPL(kssActivePlayer.player.opl);
   }
 
   // GBS再生中のライブAPUスナップショット(鍵盤表示用)
@@ -1708,6 +1822,19 @@
     const fileBtn = win && win.querySelector('input[type="file"]');
     if (fileBtn) fileBtn.click();
   };
+  // 割当セルの「パッド」ボタン → ドラム(DPCM)パネルを開く
+  keyboardDisplay.onOpenDrumPanel = () => {
+    const w = document.getElementById('win-drums');
+    if (w && getComputedStyle(w).display === 'none') {
+      const btn = document.querySelector('.toggle-btn[data-target="win-drums"]');
+      if (btn) btn.click(); else w.style.display = 'flex';
+    }
+    // ★表示するだけでは鍵盤表示の背面に隠れる(zIndexは触ったウィンドウほど大きくなり
+    //   永続化されるため)。開いたのに何も出てこないように見えるので必ず最前面へ出す
+    if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-drums');
+    refreshDrumPanel();
+  };
+
   keyboardDisplay.onToMml = () => {
     // 今表示している形式の「MMLへ変換」ボタンを押す
     const id = SOUND_FORMAT_TOMML_BTN[kbdSourceKind];
@@ -2378,6 +2505,9 @@
   const dpcmRateEl = document.getElementById('dpcmRate');
   const dpcmOutputEl = document.getElementById('dpcmOutput');
   let lastDpcmResult = null;
+  // DPCMコンバータで最後に読み込んだ音声の元PCM。ドラム(DPCM)パネルの「差し替え」から
+  // そのまま使えるようにする(コンバータとドラムパネルの融合。ユーザー要望)
+  let lastDpcmSource = null; // { name, pcm: Float32Array, rate: Hz }
 
   MML.Dpcm.DMC_RATE_TABLE_NTSC.forEach((hz, i) => {
     const opt = document.createElement('option');
@@ -2412,6 +2542,8 @@
     const rateIndex = parseInt(dpcmRateEl.value, 10);
     const result = MML.Dpcm.encode(samples, audioBuffer.sampleRate, rateIndex);
     lastDpcmResult = result;
+    lastDpcmSource = { name: file.name, pcm: samples, rate: audioBuffer.sampleRate };
+    if (MML.UI.DrumPanel) MML.UI.DrumPanel.render(); // 「コンバータの音を使う」候補が増えたので出し直す
 
     let out = '';
     out += T('元サンプルレート      : {rate} Hz', { rate: audioBuffer.sampleRate }) + '\n';
@@ -3084,7 +3216,8 @@
   document.getElementById('btnNsfFilePlay').addEventListener('click', playNsfStream);
   document.getElementById('btnNsfFileStop').addEventListener('click', stopNsfFilePlayback);
   document.getElementById('btnNsfExportWav').addEventListener('click', exportNsfWav);
-  document.getElementById('btnNsf2Mml').addEventListener('click', runNsf2Mml);
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  document.getElementById('btnNsf2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'nsf', onConvert: runNsf2Mml }));
   document.getElementById('btnNsfSongPrev').addEventListener('click', () => changeNsfSong(-1));
   document.getElementById('btnNsfSongNext').addEventListener('click', () => changeNsfSong(1));
   nsfSongIndexEl.addEventListener('change', () => {
@@ -3976,7 +4109,8 @@
     keyboardDisplay.setMode('nsf');
   });
   document.getElementById('btnSpcExportWav').addEventListener('click', exportSpcWav);
-  document.getElementById('btnSpc2Mml').addEventListener('click', runSpc2Mml);
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  document.getElementById('btnSpc2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'spc', onConvert: runSpc2Mml }));
 
   // ── KSS ファイル読み込み・再生 ────────────────────────────────────
   const kssFileEl       = document.getElementById('kssFile');
@@ -4004,6 +4138,7 @@
     const chips = ['kss', 'kssPsg'];
     if (sccUsed) chips.push('kssScc');
     if (header && header.device.mode === 'MSX' && header.device.fmpac) chips.push('kssOpll');
+    if (header && header.device.mode === 'MSX' && header.device.msxAudio) chips.push('opl'); // MSX-AUDIO(Y8950)=OL行
     return chips;
   }
 
@@ -4154,8 +4289,9 @@
         memSnapshots: null,
         getKssPsg: liveKssPsg,
         getKssScc: liveKssScc,
-        getKssOpll: liveKssOpll
-      }, () => kssActivePlayer ? kssActivePlayer.getPosition() : 0, kssMonitorChips(loadedKssHeader, sccUsed));
+        getKssOpll: liveKssOpll,
+        getOpl: liveKssOpl
+}, () => kssActivePlayer ? kssActivePlayer.getPosition() : 0, kssMonitorChips(loadedKssHeader, sccUsed));
       // ★setMonitorSource()はsetSource()経由でロールのタイムラインを必ず捨てる
       // (keyboard.js setSource末尾の this._rollTimeline = null)。既に受け取っている
       // 最新のタイムラインをここで戻さないと、onRollがonProgressより先に届いた場合に
@@ -4346,7 +4482,8 @@
     keyboardDisplay.setMode('nsf');
   });
   document.getElementById('btnKssExportWav').addEventListener('click', exportKssWav);
-  document.getElementById('btnKss2Mml').addEventListener('click', runKss2Mml);
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  document.getElementById('btnKss2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'kss', onConvert: runKss2Mml }));
   document.getElementById('btnKssSongPrev').addEventListener('click', () => changeKssSong(-1));
   document.getElementById('btnKssSongNext').addEventListener('click', () => changeKssSong(1));
 
@@ -4688,7 +4825,8 @@
     keyboardDisplay.setMode('nsf');
   });
   document.getElementById('btnGbsExportWav').addEventListener('click', exportGbsWav);
-  document.getElementById('btnGbs2Mml').addEventListener('click', runGbs2Mml);
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  document.getElementById('btnGbs2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'gbs', onConvert: runGbs2Mml }));
   document.getElementById('btnGbsSongPrev').addEventListener('click', () => changeGbsSong(-1));
   document.getElementById('btnGbsSongNext').addEventListener('click', () => changeGbsSong(1));
 
@@ -5037,7 +5175,8 @@
     keyboardDisplay.setMode('nsf');
   });
   document.getElementById('btnHesExportWav').addEventListener('click', exportHesWav);
-  document.getElementById('btnHes2Mml').addEventListener('click', runHes2Mml);
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  document.getElementById('btnHes2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'hes', onConvert: runHes2Mml }));
   document.getElementById('btnHesTrackPrev').addEventListener('click', () => changeHesTrack(-1));
   document.getElementById('btnHesTrackNext').addEventListener('click', () => changeHesTrack(1));
 
@@ -5096,6 +5235,65 @@
     vgmFileHeaderEl.appendChild(pre);
   }
 
+  // ── YM2608 内蔵リズムROM(ym2608_adpcm_rom.bin、8192バイト) ─────────────
+  // チップ内蔵のマスクROM(BD/SD/CYM/HH/TOM/RIM)は著作物のため同梱しない(MAME等と同じ扱い)。
+  // ユーザーが読み込ませたものをlocalStorageへbase64で永続化し、起動時に復元して
+  // エミュレータ(Emu.setYm2608RhythmRom)へ渡す。Worker側キャプチャへは playVgmStream が
+  // opt.ym2608RhythmRom で渡す(WorkerにlocalStorageは無い)。未読込ならリズムだけ無音
+  // (キーオンは見えるので鍵盤/ロールの点灯は出る)。
+  const YM2608_ROM_KEY = 'ym2608AdpcmRom';
+  const YM2608_ROM_SIZE = 8192;
+  (function restoreYm2608RhythmRom() {
+    try {
+      const b64 = localStorage.getItem(YM2608_ROM_KEY);
+      if (b64) MML.Emu.setYm2608RhythmRom(Uint8Array.from(atob(b64), c => c.charCodeAt(0)));
+    } catch (e) { /* ignore */ }
+  })();
+  function updateYm2608RomNotice(h) {
+    const old = document.getElementById('ym2608RomNotice');
+    if (old) old.remove();
+    if (!h || !h.chips || !h.chips.ym2608 || MML.Emu.getYm2608RhythmRom()) return;
+    const div = document.createElement('div');
+    div.id = 'ym2608RomNotice';
+    div.className = 'warn';
+    const msg = document.createElement('div');
+    msg.textContent = T('YM2608の内蔵リズムROMが未読込のため、リズム(ドラム)は無音になります(FM/SSG/ADPCM-Bは鳴ります)。');
+    const btn = document.createElement('button');
+    btn.className = 'secondary';
+    btn.textContent = T('リズムROMを読み込む (ym2608_adpcm_rom.bin)');
+    btn.addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.bin,.rom';
+      input.onchange = async () => {
+        const f = input.files[0];
+        if (!f) return;
+        try {
+          const bytes = new Uint8Array(await f.arrayBuffer());
+          if (bytes.length !== YM2608_ROM_SIZE) {
+            alert(T('リズムROMのサイズが不正です({size}バイト。期待値は8192バイト=ym2608_adpcm_rom.bin)。', { size: bytes.length }));
+            return;
+          }
+          let b64 = '';
+          for (let i = 0; i < bytes.length; i++) b64 += String.fromCharCode(bytes[i]);
+          try { localStorage.setItem(YM2608_ROM_KEY, btoa(b64)); } catch (e) { /* 永続化失敗は無視(今セッションは有効) */ }
+          MML.Emu.setYm2608RhythmRom(bytes);
+          // 再生中のチップにも即反映(次のリズムキーオンから鳴る)。ロール/ドラムパッドは
+          // 次の再生開始時のキャプチャから反映される
+          const a = vgmActivePlayer && vgmActivePlayer.player ? vgmActivePlayer.player.adapterById.ym2608 : null;
+          if (a) a.fm.loadRhythmRom(bytes);
+          updateYm2608RomNotice(loadedVgmHeader);
+        } catch (e) {
+          alert(T('リズムROMを読み込めませんでした: {msg}', { msg: e.message }));
+        }
+      };
+      input.click();
+    });
+    div.appendChild(msg);
+    div.appendChild(btn);
+    vgmFileHeaderEl.appendChild(div);
+  }
+
   async function loadVgmFile() {
     const file = vgmFileEl.files[0];
     if (!file) return;
@@ -5117,6 +5315,7 @@
       loadedVgmBytes = bytes;
       loadedVgmHeader = h;
       renderVgmHeader(h);
+      updateYm2608RomNotice(h);
       vgmSetPlanDefaults(h);
       vgmPlayDurEl.value = String(vgmDefaultDuration(h));
       vgmFileStatusEl.innerHTML = '';
@@ -5173,6 +5372,9 @@
     if (h.chips.okim6295) chips.push('okim6295');
     if (h.chips.multipcm) chips.push('multipcm');
     if (h.chips.ym2610) { chips.push('ym2610fm'); chips.push('kssPsg'); } // SSGはKSS PSG行(KP1-3)を流用
+    if (h.chips.ym2203) { chips.push('ym2203fm'); if (!chips.includes('kssPsg')) chips.push('kssPsg'); } // SSGはKP1-3(デュアルはKP4-6)を流用
+    if (h.chips.ym2608) { chips.push('ym2608fm'); if (!chips.includes('kssPsg')) chips.push('kssPsg'); } // SSGはKP1-3を流用
+    if (h.chips.ym3812 || h.chips.ym3526 || h.chips.y8950) chips.push('opl'); // OPL系はOL行を共有
     if (h.chips.pwm) chips.push('pwm');
     if (h.chips.rf5c164) chips.push('rf5c164');
     if (h.chips.rf5c68) chips.push('rf5c68');
@@ -5230,10 +5432,16 @@
     // SSGはAY-3-8910互換なのでKSS PSG表示をそのまま流用)。
     getKssPsg: () => {
       const a = vgmAdapter('ay8910');
-      // clockHzは各アダプタのclock()呼び出しレート(AYアダプタ=ヘッダ値×2、YM2610=ヘッダ値/2)
+      // clockHzは各アダプタのclock()呼び出しレート(AYアダプタ=ヘッダ値×2、YM2610=ヘッダ値/2、
+      // YM2203=チップのssgTickHz(プリスケーラ追随))
       if (a) { const s = MML.Emu.snapshotAY8910(a.chip, a.clockHz); const b = vgmAdapter('ay8910_2'); return b ? s.concat(MML.Emu.snapshotAY8910(b.chip, b.clockHz)) : s; }
       const y = vgmAdapter('ym2610');
-      return y ? MML.Emu.snapshotAY8910(y.ssg, y.clockHz / 2) : null;
+      if (y) return MML.Emu.snapshotAY8910(y.ssg, y.clockHz / 2);
+      const o = vgmAdapter('ym2203');
+      if (o) { const s = MML.Emu.snapshotAY8910(o.fm.ssg, o.fm.ssgTickHz); const o2 = vgmAdapter('ym2203_2'); return o2 ? s.concat(MML.Emu.snapshotAY8910(o2.fm.ssg, o2.fm.ssgTickHz)) : s; }
+      const p8 = vgmAdapter('ym2608');
+      if (p8) return MML.Emu.snapshotAY8910(p8.fm.ssg, p8.fm.ssgTickHz);
+      return null;
     },
     getKssScc: () => { const a = vgmAdapter('k051649'); return a ? MML.Emu.snapshotSCC(a.chip) : null; },
     getKssOpll: () => { const a = vgmAdapter('ym2413'); return a ? MML.Emu.snapshotOPLL(a.chip) : null; },
@@ -5262,6 +5470,19 @@
     getMultiPcm: () => { const a = vgmAdapter('multipcm'); return a ? poolLive('multipcm', MML.Emu.snapshotMultiPCM(a.chip)) : null; }
 ,
     getYm2610Fm: () => { const a = vgmAdapter('ym2610'); return a ? MML.Emu.snapshotYM2610(a.fm) : null; }
+,
+    // デュアルチップ(2個目)があればFM 3ch+3chを連結して返す(鍵盤はOP1-6行として出す)
+    getYm2203Fm: () => {
+      const a = vgmAdapter('ym2203');
+      if (!a) return null;
+      const s = MML.Emu.snapshotYM2203(a.fm);
+      const b = vgmAdapter('ym2203_2');
+      return b ? { channels: s.channels.concat(MML.Emu.snapshotYM2203(b.fm).channels) } : s;
+    }
+,
+    getYm2608Fm: () => { const a = vgmAdapter('ym2608'); return a ? MML.Emu.snapshotYM2608(a.fm) : null; }
+,
+    getOpl: () => { const a = vgmAdapter('ym3812') || vgmAdapter('ym3526') || vgmAdapter('y8950'); return a ? MML.Emu.snapshotOPL(a.chip) : null; }
 ,
     getPwm: () => { const a = vgmAdapter('pwm'); return a ? MML.Emu.snapshotPWM32X(a.chip) : null; }
 ,
@@ -5351,6 +5572,9 @@
       getSn76489: liveVgm.getSn76489,
       getYm2612: liveVgm.getYm2612,
       getYm2610Fm: liveVgm.getYm2610Fm,
+      getYm2203Fm: liveVgm.getYm2203Fm,
+      getYm2608Fm: liveVgm.getYm2608Fm,
+      getOpl: liveVgm.getOpl,
       getYm2151: liveVgm.getYm2151,
       getGa20: liveVgm.getGa20,
       getSegaPcm: liveVgm.getSegaPcm,
@@ -5380,6 +5604,8 @@
     // メインスレッド版へ自動フォールバック)
     MML.Emu.captureVgmSongWorkerAsync(loadedVgmBytes, {
       durationSeconds: captureDuration,
+      // YM2608内蔵リズムROM(WorkerにはlocalStorageが無いのでバイト列で渡す)
+      ym2608RhythmRom: MML.Emu.getYm2608RhythmRom ? MML.Emu.getYm2608RhythmRom() : null,
       shouldCancel: () => myToken !== vgmRollToken,
       roll: {
         poolMode: Object.assign({}, vgmPoolModes), // プール式チップの表示モード(Worker内ロール構築用)
@@ -5403,6 +5629,7 @@
       //   ドラムパッドの試聴が「押しても鳴らない」ままになる
       if (myToken !== vgmRollToken || !vgmCaptureMirror) return;
       updateVgmDrumSamples(vgmCaptureMirror.data);
+      refreshDrumPanel();
       scheduleDpcmCostUpdate();
     }).catch((e) => {
       console.error('VGM先読みキャプチャに失敗:', e);
@@ -5416,7 +5643,7 @@
     const out = {};
     const CH = [['ga20', 4, 'pcm'], ['segapcm', 16, 'pcm'], ['c140', 24, 'pcm'], ['c352', 32, 'pcm'],
                 ['qsound', 16, 'pcm'], ['okim6295', 4, 'pcm'], ['multipcm', 28, 'pcm'],
-                ['ym2610fm', 6, 'adpcmA']];
+                ['ym2610fm', 6, 'adpcmA'], ['ym2608fm', 6, 'adpcmA']];
     for (const [key, n, shape] of CH) {
       const e = data && data[key];
       if (!e || !e.samples || !e.snapshots) continue;
@@ -5433,7 +5660,7 @@
         }
       }
       // そのサンプルを鳴らしたチャンネル(試聴のDMCレートを引くのに使う)
-      const chansOf = {};
+      const chansOf = {}, hashOf = {};
       for (const fr of e.snapshots) {
         if (!fr) continue;
         const chans = shape === 'adpcmA' ? (fr.adpcmA || []) : fr;
@@ -5442,12 +5669,13 @@
           if (!c || !c.sample) continue;
           const k = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end;
           (chansOf[k] = chansOf[k] || new Set()).add(i);
+          if (!hashOf[k] && c.sampleHash) hashOf[k] = c.sampleHash; // サンプル単位設定のキー
         }
       }
       for (const k of Object.keys(e.samples)) {
         const padKey = k.slice(0, k.lastIndexOf(':')); // 'kind:start:end' → 'kind:start'
         if (out[padKey]) continue;
-        out[padKey] = { pcm: e.samples[k], rate: rateOf[k] || 0,
+        out[padKey] = { pcm: e.samples[k], rate: rateOf[k] || 0, hash: hashOf[k] || null,
                         chip: key, chans: Array.from(chansOf[k] || []) };
       }
     }
@@ -5560,24 +5788,6 @@
     return map;
   }
 
-  // 借用先にDPCMを選んだchのDMCレート指定(sourceId → '0'..'15' | 'auto')。
-  // 鍵盤の割当UIでは「音色」枠のセレクトに相乗りしている(channelPlan toneKindFor='dpcmRate')。
-  // ★PCM→DMCは必ず劣化するので自動任せにせず、耳で選べるようにするための指定(ユーザー指示)
-  function getVgmDpcmRate() {
-    const Plan = MML.Convert.ChannelPlan;
-    const map = {};
-    if (!loadedVgmHeader) return map;
-    const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
-    for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
-      const chId = Plan.chIdForVgmSource(s.id);
-      const ent = (chId && Plan.get(chId)) || {};
-      const target = ent.target || def[s.id] || 'skip';
-      if (target !== 'dpcm') continue;
-      map[s.id] = ent.tone !== undefined ? ent.tone : 'auto';
-    }
-    return map;
-  }
-
   async function runVgm2Mml() {
     if (!loadedVgmBytes) {
       vgmFileStatusEl.innerHTML = '<div class="error">' + T('先にVGMファイルを読み込んでください。') + '</div>';
@@ -5593,7 +5803,7 @@
     const vgmManualBpm = getManualBpm('vgm');
     let result;
     try {
-      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), dpcmRate: getVgmDpcmRate(), tone: planConvertOptions().tone, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
+      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), tone: planConvertOptions().tone, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
     } catch (e) {
       vgmIsRendering = false;
       updateVgmPlayButton();
@@ -5646,7 +5856,8 @@
     keyboardDisplay.setMode('nsf');
   });
   document.getElementById('btnVgmExportWav').addEventListener('click', exportVgmWav);
-  document.getElementById('btnVgm2Mml').addEventListener('click', runVgm2Mml);
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  document.getElementById('btnVgm2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'vgm', onConvert: runVgm2Mml }));
 
   // ==========================================================================
   // 統合サウンドファイルウィンドウ: 拡張子でNSF/SPC/KSSパネルを切り替える

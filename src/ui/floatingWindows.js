@@ -54,6 +54,12 @@
     updateSizeIndicator(win);
   }
 
+    // id → そのウィンドウを最前面へ出す関数(init内のクロージャを外から呼べるようにする)。
+  // ★「パッド」ボタンのようにコードから開くウィンドウは、表示はされても他のウィンドウの
+  //   背面に隠れることがある(zIndexはドラッグ/クリックのたびに増えて永続化されるため、
+  //   一度も触っていないウィンドウのzは相対的に低いまま)。
+  const frontFns = new Map();
+
   function init() {
     let zCounter = 100;
     const windows = Array.from(document.querySelectorAll('.float-window'));
@@ -102,6 +108,7 @@
         persist();
         setActiveWin(win);
       }
+      if (id) frontFns.set(id, bringToFront);
 
       // --- ドラッグ移動 ---
       let dragging = false;
@@ -238,5 +245,12 @@
   }
 
   window.MML = window.MML || {};
-  window.MML.FloatingWindows = { init: init, initSplitters: initSplitters };
+  /** 指定ウィンドウを最前面へ(id文字列か要素)。未登録なら何もしない */
+  function bringToFront(idOrEl) {
+    const id = typeof idOrEl === 'string' ? idOrEl : (idOrEl && idOrEl.id);
+    const fn = id && frontFns.get(id);
+    if (fn) fn();
+  }
+
+  window.MML.FloatingWindows = { init: init, initSplitters: initSplitters, bringToFront: bringToFront };
 })();

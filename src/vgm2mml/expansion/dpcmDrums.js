@@ -35,6 +35,7 @@
   MML.Vgm2MmlExpansion = MML.Vgm2MmlExpansion || {};
 
   const ADPCM_PITCH_CONF = 0.5;   // keyboard.js / opn.js と同じしきい値
+
   const MAX_CLIP_SEC = 1.5;       // 1クリップの上限(ROM容量の歯止め)
   const PHASE_QUANT_SEC = 1 / 480; // 位相の量子化(重複排除用。1/8フレーム)
   const VOL_QUANT = 16;           // 音量の量子化段数(重複排除用)
@@ -60,6 +61,7 @@
    * opn.js drumChannelOf と同じ理由)。
    */
   function collectHits(sources, totalFrames) {
+    const DS = (MML.Convert && MML.Convert.DrumSamples) || null;
     const hits = [];
     for (const src of sources) {
       const getCh = (f, ch) => {
@@ -74,19 +76,32 @@
           const isKeyOn = c && c.seq !== prevSeq && c.seq > 0;
           if (c) prevSeq = c.seq;
           const sounding = !!(c && c.active && c.sample);
-          // 音程が取れたチャンネルは音階楽器なので打楽器として扱わない
-          const pitched = !!(c && c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0);
-          if (cur && (isKeyOn || !sounding || pitched)) { cur.endFrame = f; cur = null; }
-          if (isKeyOn && sounding && !pitched) {
+          // ★このチャンネルはユーザーが明示的にDPCMへ載せた先なので、音程が取れたサンプルも
+          //   変換対象にする(DPCMで音律を奏でることもある。ユーザー指示)。
+          //   以前は音程が取れると除外していたため、旋律を鳴らすPCM chをDPCMへ割り当てても
+          //   何も出なかった。
+          if (cur && (isKeyOn || !sounding)) { cur.endFrame = f; cur = null; }
+          if (isKeyOn && sounding) {
             const key = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end;
             if (src.samples[key]) {
-              // rateIndex: そのチャンネルに割当UIで指定されたDMCレート(未指定はnull=自動)。
-              // ★レートはEパート全体で1つではなく打点(クリップ)ごとに決まる。
-              //   @DPCM<n>定義がそれぞれ freq を持てるため。
-              cur = { key, pcm: src.samples[key], rate: c.rate || 0, vol: c.vol || 0,
-                      rateIndex: (src.rates && src.rates[ch] != null) ? src.rates[ch] : null,
-                      startFrame: f, endFrame: totalFrames };
-              if (cur.rate > 0) hits.push(cur); else cur = null;
+              // ★設定はチャンネル単位ではなくサンプル単位(ドラム区画のパッド1枚)。
+              //   src/convert/drumSamples.js。@DPCM<n>定義は元々サンプルごとにfreqを持てるうえ、
+              //   プール式チップは同じ太鼓が毎回別スロットへ移るのでch単位だと指定が飛ぶ。
+              const st = DS ? DS.resolve(c.sampleHash, src.samples[key], c.rate || 0)
+                            : { enabled: true, rate: 'auto', gain: 1, name: null,
+                                pcm: src.samples[key], srcRate: c.rate || 0 };
+              // 「変換しない」サンプルは打点自体を作らない(MMLもその分が休符になる)
+              if (st.enabled && st.pcm && st.pcm.length && st.srcRate > 0) {
+                const ri = (st.rate !== 'auto' && st.rate !== null && st.rate !== undefined)
+                  ? (parseInt(st.rate, 10) | 0) : null;
+                // ★変換ボリューム(パッド設定)はチャンネル音量へ畳んで持つ。DPCMは実機で
+                //   @vが効かないので、波形を小さくするのがそのまま音量調整になる
+                const gain = st.gain != null ? st.gain : 1;
+                cur = { key, hash: c.sampleHash || null, pcm: st.pcm, rate: st.srcRate,
+                        vol: (c.vol || 0) * gain, name: st.name || null,
+                        rateIndex: ri, startFrame: f, endFrame: totalFrames };
+                hits.push(cur);
+              }
             }
           }
         }
@@ -124,6 +139,7 @@
 
     const defs = [], files = [], events = [];
     const clipIndexByKey = new Map();
+    const usedNames = new Set();
     let dropped = 0;
 
     for (let oi = 0; oi < onsets.length; oi++) {
@@ -146,20 +162,27 @@
       // 最高レートに張り付いて効かない(実測: C140/QSoundは max〜2 で同じ結果)。
       // 音質とROM容量を実際に取引できるよう、UIからはDMCレートを直接選べるようにする。
       const srcRateMax = Math.max(...live.map(h => h.rate));
-      // このクリップに寄与している打点のうち、指定レートがあればその最大(=最高音質)を使う。
-      // ミックスは1つのサンプルに焼くので1つのレートしか選べない。低い方に合わせると
-      // 「33kHzを指定したchの音まで4kHzになる」ので、高い方を採る(ユーザー報告の件)。
+      // ミックスは1つのサンプルに焼くのでレートは1つしか選べない。どちらを採るかは
+      // 変換設定の RATE_MIX で選ぶ('quality'=最高音質を採る(既定) / 'size'=最低に合わせて容量優先)
+      const preferHigh = opt.rateMix !== 'size';
       let chanRate = null;
-      for (const h of live) if (h.rateIndex != null && (chanRate === null || h.rateIndex > chanRate)) chanRate = h.rateIndex;
+      for (const h of live) {
+        if (h.rateIndex == null) continue;
+        if (chanRate === null) chanRate = h.rateIndex;
+        else chanRate = preferHigh ? Math.max(chanRate, h.rateIndex) : Math.min(chanRate, h.rateIndex);
+      }
       const rateIndex = (opt.rateIndex != null && opt.rateIndex >= 0 && opt.rateIndex < table.length)
         ? opt.rateIndex
         : (chanRate !== null ? chanRate : dmcRateIndexFor(srcRateMax, pcmRate, table));
       const dstRate = table[rateIndex];
 
       // ── 同一性キー(重複排除)。位相・音量・長さを量子化して、繰り返しパターンを畳む ──
+      // ★再生レートもキーに含める。同じサンプルでもレートが違えば別の音(音階演奏)なので、
+      //   含めないと違う音程のクリップが同じ定義に畳まれてしまう
       const parts = live.map(h => {
         const phase = (t0 - h.startFrame) / frameRate;
-        return h.key + '@' + Math.round(phase / PHASE_QUANT_SEC) + 'v' + Math.round(h.vol * VOL_QUANT);
+        return h.key + '@' + Math.round(phase / PHASE_QUANT_SEC) + 'v' + Math.round(h.vol * VOL_QUANT)
+             + 'r' + Math.round(h.rate);
       }).sort();
       const clipKey = rateIndex + '|' + Math.round(lenSec / LEN_QUANT_SEC) + '|' + parts.join('+');
 
@@ -182,7 +205,7 @@
         const encoded = MML.Dpcm.encode(mix, dstRate, rateIndex, { startCounter: dac });
         if (!encoded || !encoded.bytes || !encoded.bytes.length) { dropped++; continue; }
         index = defs.length;
-        const name = `vgm_dpcm_${index}.dmc`;
+        const name = clipFileName(live, index, usedNames);
         files.push({ name, bytes: encoded.bytes });
         defs.push({ index, file: name, freq: rateIndex, size: encoded.bytes.length,
                     sampleCount: encoded.sampleCount, dac, mode: 0 });
@@ -194,6 +217,40 @@
     const bytes = files.reduce((a, f) => a + f.bytes.length, 0);
     return { defs, files, events, stats: { clips: defs.length, bytes, segments: events.length, dropped } };
   };
+
+  /**
+   * クリップの .dmc ファイル名。パッドで付けた表示名(src/convert/drumSamples.js の name)を
+   * そのまま使う(ユーザー指示)。ミックスされた区間は鳴っている音を '+' で連ねる。
+   * ★MMLの @DPCM 定義に文字列として入るので DrumSamples.sanitizeName を必ず通す。
+   *   日本語名などで空になったら従来の連番名へ落とす。
+   */
+  /** 'rom:294064:294500' → '47CF0'(ドラム区画の既定ラベルと同じ、開始アドレスの16進) */
+  function addrLabel(key) {
+    const a = String(key || '').split(':')[1];
+    const n = parseInt(a, 10);
+    return Number.isFinite(n) ? n.toString(16).toUpperCase() : '';
+  }
+
+  function clipFileName(live, index, used) {
+    const DS = (MML.Convert && MML.Convert.DrumSamples) || null;
+    const san = DS ? DS.sanitizeName : ((x) => String(x || '').replace(/[^0-9A-Za-z_.-]+/g, '_'));
+    const parts = [];
+    for (const h of live) {
+      // ★名前が無い/日本語などで sanitize すると空になる場合は、そのサンプルのROMアドレス
+      //   (パッドの既定ラベルと同じ)で埋める。ここで黙って落とすと、ミックスされたクリップが
+      //   単独クリップと同じ名前になって取り違える
+      const n = (h.name ? san(h.name) : '') || addrLabel(h.key);
+      if (n && parts.indexOf(n) < 0) parts.push(n);
+    }
+    let base = parts.slice(0, 3).join('+');
+    if (parts.length > 3) base += '+etc';
+    if (!base) base = `vgm_dpcm_${index}`;
+    // 同名衝突(別クリップが同じ顔ぶれ=位相/長さ違い)は連番で分ける
+    let name = base + '.dmc';
+    for (let i = 2; used.has(name); i++) name = base + '_' + i + '.dmc';
+    used.add(name);
+    return name;
+  }
 
   // HESと同じ選び方(src/convert/options.js PCM_RATE)。'max'=常に最高レート、
   // 数値=ソースレートのn倍以上の最小レート、1=最も近いレート(データ最小)

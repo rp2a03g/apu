@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-08-29 11:11:52
+ * Built by tools/build-capture-workers.ps1 at 2026-08-30 07:56:07
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-08-29 11:11:52';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-08-30 07:56:07';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -42,12 +42,12 @@
     { id: 'ym2151',   name: 'YM2151',     offset: 0x30, minVer: 0x110, impl: true },
     { id: 'segapcm',  name: 'SegaPCM',    offset: 0x38, minVer: 0x151, impl: true },
     { id: 'rf5c68',   name: 'RF5C68',     offset: 0x40, minVer: 0x151, impl: true },
-    { id: 'ym2203',   name: 'YM2203',     offset: 0x44, minVer: 0x151 },
-    { id: 'ym2608',   name: 'YM2608',     offset: 0x48, minVer: 0x151 },
+    { id: 'ym2203',   name: 'YM2203',     offset: 0x44, minVer: 0x151, impl: true },
+    { id: 'ym2608',   name: 'YM2608',     offset: 0x48, minVer: 0x151, impl: true },
     { id: 'ym2610',   name: 'YM2610/B',   offset: 0x4C, minVer: 0x151, impl: true },
-    { id: 'ym3812',   name: 'YM3812',     offset: 0x50, minVer: 0x151 },
-    { id: 'ym3526',   name: 'YM3526',     offset: 0x54, minVer: 0x151 },
-    { id: 'y8950',    name: 'Y8950',      offset: 0x58, minVer: 0x151 },
+    { id: 'ym3812',   name: 'YM3812',     offset: 0x50, minVer: 0x151, impl: true },
+    { id: 'ym3526',   name: 'YM3526',     offset: 0x54, minVer: 0x151, impl: true },
+    { id: 'y8950',    name: 'Y8950',      offset: 0x58, minVer: 0x151, impl: true },
     { id: 'ymf262',   name: 'YMF262',     offset: 0x5C, minVer: 0x151 },
     { id: 'ymf278b',  name: 'YMF278B',    offset: 0x60, minVer: 0x151 },
     { id: 'ymf271',   name: 'YMF271',     offset: 0x64, minVer: 0x151 },
@@ -6089,19 +6089,35 @@
   const ADPCMA_ADDR_SHIFT = 8;
 
   class AdpcmA {
-    constructor(owner) {
+    /**
+     * @param {object} owner - romA / sampleRate を持つチップ本体
+     * @param {{fixedAddr?: Array<{start:number,end:number}>}} [opts]
+     *   fixedAddr: サンプルの開始/終了(バイト、endは実機表と同じinclusive)を固定する。
+     *   YM2608の内蔵リズム(6サンプルのアドレスがROM固定でレジスタが無い)用。
+     *   省略時は従来どおり開始/終了レジスタ(YM2610 ADPCM-A)。
+     */
+    constructor(owner, opts) {
       this.owner = owner;
+      this.fixedAddr = (opts && opts.fixedAddr) || null;
       this.regs = new Uint8Array(0x30);
       this.ch = [];
       // seq: キーオン通番(clock()を回さない先読みキャプチャがキーオンを検出するため。ロール用)
       for (let i = 0; i < 6; i++) this.ch.push({ playing: false, curnibble: 0, curbyte: 0, curaddress: 0, acc: 0, stepIndex: 0, seq: 0 });
       this.reset();
     }
+    // ch i の開始バイトアドレス(fixedAddr優先)
+    _startAddr(i) {
+      if (this.fixedAddr) return this.fixedAddr[i].start;
+      return (this.regs[0x10 + i] | (this.regs[0x18 + i] << 8)) << ADPCMA_ADDR_SHIFT;
+    }
+    // ch i の終了バイトアドレス(exclusive、fixedAddr優先)
+    _endAddr(i) {
+      if (this.fixedAddr) return this.fixedAddr[i].end + 1;
+      return ((this.regs[0x20 + i] | (this.regs[0x28 + i] << 8)) + 1) << ADPCMA_ADDR_SHIFT;
+    }
     // ch i の現在の開始/終了レジスタから求めたサンプル長(秒)。ADPCM-Aは18518Hz(=FMサンプルレート/3)固定
     lengthSeconds(i) {
-      const start = (this.regs[0x10 + i] | (this.regs[0x18 + i] << 8)) << ADPCMA_ADDR_SHIFT;
-      const end = ((this.regs[0x20 + i] | (this.regs[0x28 + i] << 8)) + 1) << ADPCMA_ADDR_SHIFT;
-      const bytes = Math.max(0, end - start);
+      const bytes = Math.max(0, this._endAddr(i) - this._startAddr(i));
       return bytes * 2 / (this.owner.sampleRate / 3);
     }
     reset() {
@@ -6121,13 +6137,13 @@
       const c = this.ch[i];
       c.playing = on;
       if (on) {
-        c.curaddress = (this.regs[0x10 + i] | (this.regs[0x18 + i] << 8)) << ADPCMA_ADDR_SHIFT;
+        c.curaddress = this._startAddr(i);
         c.curnibble = 0; c.curbyte = 0; c.acc = 0; c.stepIndex = 0;
         c.seq++;
         // 鳴っているサンプルの範囲(バイト)。ドライバがキーオン後に次の音のレジスタを先書きしても
         // 表示側(ピッチ解析)が正しいサンプルを見られるようキーオン時点で確定させる
         c.smpStart = c.curaddress;
-        c.smpEnd = ((this.regs[0x20 + i] | (this.regs[0x28 + i] << 8)) + 1) << ADPCMA_ADDR_SHIFT;
+        c.smpEnd = this._endAddr(i);
       }
     }
     // FMサンプル3回に1回。
@@ -6139,7 +6155,7 @@
         let data;
         if (c.curnibble === 0) {
           // 終了アドレス(inclusive)の次のバイトを読もうとした時点で停止。比較は下位20bitのみ
-          const end = ((this.regs[0x20 + i] | (this.regs[0x28 + i] << 8)) + 1) << ADPCMA_ADDR_SHIFT;
+          const end = this._endAddr(i);
           if (((c.curaddress ^ end) & 0xFFFFF) === 0) { c.playing = false; c.acc = 0; continue; }
           c.curbyte = rom && c.curaddress < rom.length ? rom[c.curaddress] : 0;
           c.curaddress = (c.curaddress + 1) & 0xFFFFFF;
@@ -6173,8 +6189,18 @@
   const ADPCMB_ADDR_SHIFT = 8;
 
   class AdpcmB {
-    constructor(owner) {
+    /**
+     * @param {object} owner - romB / sampleRate を持つチップ本体
+     * @param {{addrShift?: number, forceExternal?: boolean}} [opts]
+     *   addrShift: 開始/終了/リミットレジスタ値→バイトアドレスのシフト。
+     *   YM2610=8(256バイト単位、既定)、YM2608/Y8950=5(32バイト単位。MAME ymdeltat portshift)。
+     *   forceExternal: control1へ外部メモリ・録音無効を強制(YM2610の実機挙動、既定true)。
+     *   Y8950はCPU書込み(REC|MEMDATA)を使うので false にする(書込み自体は呼び出し側が実装)。
+     */
+    constructor(owner, opts) {
       this.owner = owner;
+      this.addrShift = (opts && opts.addrShift) || ADPCMB_ADDR_SHIFT;
+      this.forceExternal = !opts || opts.forceExternal !== false;
       this.regs = new Uint8Array(0x11);
       this.reset();
     }
@@ -6190,8 +6216,8 @@
     }
     // 現在の開始/終了/Δ-Nから求めたサンプル長(秒)。リピート時は無限(Infinity)
     lengthSeconds() {
-      const start = (this.regs[0x02] | (this.regs[0x03] << 8)) << ADPCMB_ADDR_SHIFT;
-      const end = ((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << ADPCMB_ADDR_SHIFT;
+      const start = (this.regs[0x02] | (this.regs[0x03] << 8)) << this.addrShift;
+      const end = ((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << this.addrShift;
       const rate = this.rate();
       if (this.regs[0x00] & 0x10) return Infinity;
       return rate > 0 ? Math.max(0, end - start) * 2 / rate : 0;
@@ -6199,7 +6225,7 @@
     // reg = port0 アドレス - 0x10 (0x00-0x0B)
     write(reg, data) {
       // YM2610は外部モード強制・録音無効(ymfm ym2610::write_data)
-      if (reg === 0x00) data = (data | 0x20) & ~0x40;
+      if (reg === 0x00 && this.forceExternal) data = (data | 0x20) & ~0x40;
       this.regs[reg] = data;
       if (reg === 0x00) {
         if (data & 0x80) this._loadStart(); // start
@@ -6208,14 +6234,14 @@
     }
     _loadStart() {
       this.playing = true;
-      this.curaddress = (this.regs[0x02] | (this.regs[0x03] << 8)) << ADPCMB_ADDR_SHIFT;
+      this.curaddress = (this.regs[0x02] | (this.regs[0x03] << 8)) << this.addrShift;
       this.curnibble = 0; this.curbyte = 0; this.position = 0; this.acc = 0; this.prevAcc = 0; this.step = ADPCMB_STEP_MIN;
       this.seq++;
       this.smpStart = this.curaddress; // 鳴っているサンプルの範囲(AdpcmA.ch[].smpStart/Endと同じ用途)
-      this.smpEnd = ((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << ADPCMB_ADDR_SHIFT;
+      this.smpEnd = ((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << this.addrShift;
     }
-    _atEnd() { return this.curaddress === ((((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << ADPCMB_ADDR_SHIFT) - 1); }
-    _atLimit() { return this.curaddress === ((((this.regs[0x0C] | (this.regs[0x0D] << 8)) + 1) << ADPCMB_ADDR_SHIFT) - 1); }
+    _atEnd() { return this.curaddress === ((((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << this.addrShift) - 1); }
+    _atLimit() { return this.curaddress === ((((this.regs[0x0C] | (this.regs[0x0D] << 8)) + 1) << this.addrShift) - 1); }
     // FMサンプル毎
     clock() {
       if (!(this.regs[0x00] & 0x80) || !this.playing) { this.playing = false; return; }
@@ -6656,7 +6682,7 @@
       // 変化とサンプル長から「鳴っている区間」を推定するために使う(ライブ表示は playing で足りる)
       adpcmA.push({ active: c.playing && vol > 0, vol, rawVol: il, rawVolMax: 31, panL: A.panL(i) ? 1 : 0, panR: A.panR(i) ? 1 : 0,
         rate: rateA, seq: c.seq, lenSec: A.lengthSeconds(i),
-        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'a', start: c.smpStart, end: c.smpEnd } : null }); // 手動キャリブレーション用の同定情報
     }
@@ -6665,7 +6691,7 @@
     const pb = B.seq ? chip.samplePitch('b', B.smpStart, B.smpEnd) : null;
     const adpcmB = { active: B.playing && !!(B.regs[0x00] & 0x80) && lvl > 0, vol: lvl / 255, rawVol: lvl, rawVolMax: 255,
       panL: B.panL() ? 1 : 0, panR: B.panR() ? 1 : 0, rate: rateB, seq: B.seq, lenSec: B.lengthSeconds(), executing: !!(B.regs[0x00] & 0x80),
-      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0, pitchManual: !!(pb && pb.manual), sampleKind: pb ? (pb.kindManual || 'auto') : 'auto',
+      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0, pitchManual: !!(pb && pb.manual), sampleKind: pb ? (pb.kindManual || 'auto') : 'auto', sampleHash: pb ? pb.hash : null,
       waveData: pb ? pb.wave : null,
       sample: B.seq ? { kind: 'b', start: B.smpStart, end: B.smpEnd } : null,
       // refRate: ピッチ解析が信頼できない時のフォールバック用。ADPCM-Bの再生レート(Delta-N由来)を
@@ -6724,6 +6750,23 @@
 
   Emu.SamplePitchUtil = { detectCps, makeSampleWave, sampleHash, getTuningMap, saveTuningMap, loopCps,
                           getKindMap, saveKindMap, applyKindOverride, setKindOverride };
+
+  // ── OPNファミリ共有(YM2608=ym2608.jsが流用) ─────────────────────────
+  // AdpcmA(fixedAddr指定でYM2608内蔵リズムに使える)/AdpcmB(addrShift=5でYM2608 DELTA-T)/
+  // デコーダ、そして表示用サンプルピッチ解析API一式。
+  // attachSampleApi: YM2610Audioのピッチ解析メソッド群(this.romA/romB/_pitchCacheしか
+  // 参照しない)を別チップのprototypeへそのまま移植する(実装の複製を作らない)。
+  Emu.OpnAdpcm = {
+    AdpcmA, AdpcmB, decodeAdpcmA, decodeAdpcmB, ADPCM_SCALE,
+    attachSampleApi(proto) {
+      proto.loadRom = YM2610Audio.prototype.loadRom;
+      proto.samplePitch = YM2610Audio.prototype.samplePitch;
+      proto._decodeSample = YM2610Audio.prototype._decodeSample;
+      proto.samplePcm = YM2610Audio.prototype.samplePcm;
+      proto.setSampleTuning = YM2610Audio.prototype.setSampleTuning;
+      proto.setSampleKind = YM2610Audio.prototype.setSampleKind;
+    }
+  };
 })(globalThis);
 
 /*
@@ -7220,6 +7263,952 @@
 })(globalThis);
 
 /*
+ * YM2203 (OPN) 音源エミュレータ — FM 3ch + SSG(AY-3-8910互換 3ch) (PC-8801/PC-9801/アーケード, VGM)
+ * MML.Emu.YM2203Audio
+ *
+ * ★FM部は YM2612コア(ym2612Nuked.js=Nuked-OPN2移植)の薄いラッパー(ym2610.jsと同じ発想)。
+ * YM2203のFMレジスタ配置はYM2612のポート0と同一(0x30 DT/MUL … 0xB0-0xB2 FB/AL、0x24-0x27
+ * タイマ/ch3モード、0x28 キーオン(値0-2)、0x90 SSG-EG、周波数式も同じ)で、違いは
+ *   (1) チャンネルが3本だけ(ポート1が無い。コアのch3-5は常時ミュート)、
+ *   (2) LFO(0x22)・ステレオ/AMS/PMS(0xB4-0xB6)・DAC(0x2A/0x2B)が存在しない(書込みを弾く。
+ *       コアはreset()でpan L/R=1にするので、0xB4を一切書かなければ常に両ch出力=モノラルで正しい)、
+ *   (3) プリスケーラ(0x2D/0x2E/0x2F)がある(下記)、
+ * の3点だけ。コアは chipType 'ym3438'(ラダー無し、内部加算)で使う(OPN/OPNAはYM2612固有の
+ * 9bit DACラダー効果を持たない)。
+ *
+ * ★プリスケーラ(MAME fm.cpp OPNPrescaler_w と同じ意味論):
+ *   sel(2bit、リセット時2=1/6)を 0x2D で |=2、0x2E で |=1、0x2F で =0 に更新し、
+ *     sel 0/1: FM=クロック/2(サンプルレート=clock/24)、SSG実クロック=clock×2
+ *     sel 2  : FM=クロック/6(=clock/72、既定)、        SSG実クロック=clock/2
+ *     sel 3  : FM=クロック/3(=clock/36)、              SSG実クロック=clock
+ *   本クラスの clock() はマスタークロック毎に1回呼ばれ、内部でコアを fmMult回
+ *   (=12/プリスケーラ: 2/4/6回)、SSGを ssgMult回(=SSG実クロック×2/クロック: 1/2/4回、
+ *   AY8910Audioは「実クロックの2倍で叩く」既存規約)回す。全selで整数倍になるので誤差なし。
+ *   コアの sampleRate はスナップショットの周波数換算にだけ使われるので直接書き換えて追随させる。
+ *   ★実曲でも使われる: Avengers(カプコン、2xYM2203@1.5MHz)は 0x2D→0x2E で 1/3 を選ぶ。
+ *
+ * SSG部は Emu.AY8910Audio をそのまま内蔵する(YM2610のSSGと同じ流用。音色・エンベロープとも
+ * AY-3-8910互換)。レジスタ0x00-0x0Fへの書込みは writeReg() が内部で振り分ける。
+ * ミックスはアダプタ側(vgmPlayer.js)が FM と SSG を別ゲインで足す(chip.ssg を直接読む)。
+ *
+ * 外部I/F: writeReg(reg,val) / clock()(マスタークロック毎) / mixSample()(FMのみ) /
+ * ssg(AY8910Audio) / ssgTickHz(SSGのclock()呼び出しレート=実クロック×2。表示用) /
+ * mute[3] / vol[3](書き換えたら syncMuteVol()) / core / flushWrites() / Emu.snapshotYM2203(chip)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  // sel → [fmMult(コアclock回数/マスタークロック), ssgMult(SSG clock回数/マスタークロック)]
+  // fmMult = 12/プリスケーラ。コアは内部で/144するので サンプルレート=clock*fmMult/144=clock/(12*pres)
+  const PRESCALE = [[6, 4], [6, 4], [2, 1], [4, 2]];
+
+  class YM2203Audio {
+    /**
+     * @param {number} [clock=3993600] - マスタークロック(PC-88: 3993600 / アーケード: 3000000-4000000)
+     */
+    constructor(clock) {
+      this.clockHz = clock || 3993600;
+      this.mute = new Array(3).fill(false);
+      this.vol = new Array(3).fill(1);
+      this.ssg = new Emu.AY8910Audio();
+      this._sel = 2; // プリスケーラ選択(リセット時 1/6)
+      this._makeCore();
+      this.syncMuteVol();
+    }
+
+    _makeCore() {
+      const [fmMult, ssgMult] = PRESCALE[this._sel];
+      this.fmMult = fmMult; this.ssgMult = ssgMult;
+      if (!this.core) this.core = new Emu.YM2612Nuked(this.clockHz * fmMult, { chipType: 'ym3438' });
+      // スナップショットの周波数換算用(コアのピッチ自体はclock()の呼び出し回数で決まる)
+      this.core.sampleRate = this.clockHz * fmMult / 144;
+    }
+
+    /** SSGのclock()呼び出しレート(=AY実クロック×2)。鍵盤スナップショット/抽出器のclock引数用 */
+    get ssgTickHz() { return this.clockHz * this.ssgMult; }
+
+    // mute[]/vol[](3ch)をコアの7要素へ写す。ch3-5(存在しない)とDAC(6)は常時ミュート。
+    syncMuteVol() {
+      const c = this.core;
+      for (let i = 0; i < 7; i++) c.mute[i] = true;
+      for (let i = 0; i < 3; i++) { c.mute[i] = !!this.mute[i]; c.vol[i] = this.vol[i]; }
+    }
+
+    reset() {
+      this.core.reset();
+      this._sel = 2;
+      this._makeCore();
+      this.syncMuteVol();
+    }
+
+    /** レジスタ書込み(1ポート)。SSG領域(0x00-0x0F)は内蔵AYへ振り分ける。 */
+    writeReg(reg, val) {
+      reg &= 0xFF; val &= 0xFF;
+      if (reg < 0x10) { this.ssg.writeInternal(reg & 0x0F, val); return; }
+      if (reg === 0x22 || reg === 0x2A || reg === 0x2B) return; // LFO/DACはYM2203に無い
+      if (reg >= 0x2D && reg <= 0x2F) { // プリスケーラ
+        const sel = reg === 0x2D ? (this._sel | 2) : reg === 0x2E ? (this._sel | 1) : 0;
+        if (sel !== this._sel) { this._sel = sel; this._makeCore(); }
+        return;
+      }
+      if (reg >= 0xB4 && reg < 0xC0) return; // ステレオ/AMS/PMS無し(panを落とされないよう弾く)
+      this.core.writeReg(0, reg, val);
+    }
+
+    clock() {
+      for (let i = 0; i < this.fmMult; i++) this.core.clock();
+      for (let i = 0; i < this.ssgMult; i++) this.ssg.clock();
+    }
+    /** FM部のみ。SSGはアダプタが this.ssg.mixSample() を別ゲインで足す */
+    mixSample() { return this.core.mixSample(); }
+    // 書込みキュー適用(clock()を回さない先読み/シーク経路用)
+    flushWrites() { if (this.core.flushWrites) this.core.flushWrites(); }
+  }
+
+  // 鍵盤表示用スナップショット: YM2612版の6chから実チャンネル(0-2)を抜き出す(形は同じ)。
+  // SSGは Emu.snapshotAY8910(chip.ssg, chip.ssgTickHz) を呼び出し側が別途使う。
+  Emu.snapshotYM2203 = function (chip) {
+    const s = Emu.snapshotYM2612(chip.core);
+    return { channels: s.channels.slice(0, 3) };
+  };
+
+  Emu.YM2203Audio = YM2203Audio;
+})(globalThis);
+
+/*
+ * YM2608 (OPNA) 音源エミュレータ — FM 6ch + SSG + 内蔵リズム6ch + ADPCM-B (PC-8801/PC-9801, VGM)
+ * MML.Emu.YM2608Audio
+ *
+ * ★FM部は YM2612コア(ym2612Nuked.js=Nuked-OPN2移植)の薄いラッパー(ym2610/ym2203と同じ発想)。
+ * OPNAのFMはOPN2(YM2612)の元になった設計で、レジスタ配置(0x30-0xB6 両ポート6ch、0x22 LFO、
+ * 0x24-0x28 タイマ/ch3モード/キーオン、0xB4-B6 ステレオ/AMS/PMS、SSG-EG)は完全に同一。違いは
+ *   (1) ch6 DAC(0x2A/0x2B、YM2612固有)が無い(書込みを弾く)、
+ *   (2) SSG(port0 0x00-0x0F)・リズム(port0 0x10-0x1D)・ADPCM-B(port1 0x00-0x10)が挟まる、
+ *   (3) プリスケーラ(0x2D-0x2F)がある、
+ *   (4) 0x29=IRQ許可+SCH(3ch/6chモード)。実VGM(Snatcher)は冒頭で0x9F(6ch)を書く。
+ *       3chモードのゲートは未実装(6chモード前提。3chモード曲はch4-6を書かないので実害なし)。
+ * コアは chipType 'ym3438'(ラダー無し、内部加算)。
+ *
+ * ★プリスケーラ(MAME fm.cpp OPNPrescaler_w、pre_divider=2): sel既定2=1/6。
+ *   sel2: FMサンプル=clock/144(コアをマスタークロック毎に1回)、SSG実クロック=clock/4
+ *   sel3: FM=clock/72(コア2回)、SSG=clock/2
+ *   sel0/1: FM=clock/48(コア3回)、SSG=clock
+ *   SSGはAY8910Audioの「実クロックの2倍で叩く」規約に合わせ、1マスタークロックあたり
+ *   ssgStep(0.5/1/2)ティックを小数アキュムレータで進める。
+ *   PC-88 SB2: 7987200Hz → FM 55.5kHz / SSG 1.9968MHz(YM2203の3.9936MHz/2と同じ実クロック)。
+ *
+ * ★内蔵リズム: ADPCM-A 6ch(BD/SD/TOP CYM/HH/TOM/RIM)。デコーダ/音量/パンはYM2610の
+ *   ADPCM-Aと同一で、サンプルは**チップ内蔵の8KBマスクROM**・アドレス固定(レジスタ無し)。
+ *   ym2610.jsの共有クラス Emu.OpnAdpcm.AdpcmA を fixedAddr(MAME fm.cのアドレス表)で流用し、
+ *   レジスタは port0 0x10-0x1D → -0x10 でYM2610と同配置(0x00キー/0x01 RTL/0x08-0x0D IL+パン)。
+ *   ★ROMデータ(ym2608_adpcm_rom.bin、8192バイト)は著作物のため同梱しない。
+ *   Emu.setYm2608RhythmRom(bytes) で外部から与える(main.jsがlocalStorageから復元+
+ *   ファイル読込UIを出す)。無ければリズムのみ無音(キーオン検出=鍵盤/ロール表示は動く)。
+ *
+ * ★ADPCM-B(DELTA-T): YM2610と同じ共有クラス(Emu.OpnAdpcm.AdpcmB)を addrShift=5
+ *   (32バイト単位。MAME ymdeltat: YM2608/Y8950=5、YM2610=8)で流用。メモリはVGMデータブロック
+ *   0x81(DELTA-T ROM)→ loadRom('b',...)。x1bit DRAM等のメモリタイプ差は未実装(shift5固定)。
+ *
+ * 表示用サンプルピッチ解析はYM2610の実装(samplePitch等)を Emu.OpnAdpcm.attachSampleApi で
+ * そのままprototypeへ移植(kind 'a'=リズムROM、'b'=DELTA-Tメモリ)。
+ *
+ * 外部I/F: writeReg(port,reg,val) / clock()(マスタークロック毎) / mixSample()(FM+リズム+ADPCM-B。
+ * SSGは .ssg をアダプタが別ゲインで加算) / ssg / ssgTickHz / loadRom('b',...) / loadRhythmRom(bytes) /
+ * mute[6] / vol[6] / muteAdpcm[7](リズム1-6, B) / volAdpcm[7] / syncMuteVol() / flushWrites() /
+ * Emu.snapshotYM2608(chip)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const CYCLES_PER_SAMPLE = 144;
+
+  // 内蔵リズムROM上の固定アドレス(inclusive。MAME fm.c YM2608_ADPCM_ROM_addr)
+  const RHYTHM_ADDR = [
+    { start: 0x0000, end: 0x01BF }, // BD (bass drum)
+    { start: 0x01C0, end: 0x043F }, // SD (snare drum)
+    { start: 0x0440, end: 0x1B7F }, // TOP (cymbal)
+    { start: 0x1B80, end: 0x1CFF }, // HH (hi-hat)
+    { start: 0x1D00, end: 0x1F7F }, // TOM (tom tom)
+    { start: 0x1F80, end: 0x1FFF }  // RIM (rim shot)
+  ];
+  Emu.YM2608_RHYTHM_ADDR = RHYTHM_ADDR;
+
+  // 内蔵リズムROM(8192バイト)。著作物のため同梱せず、アプリ側(main.js)がユーザーの
+  // ym2608_adpcm_rom.bin を読み込んで設定する。Worker側へは captureVgmSongAsync の
+  // opt.ym2608RhythmRom で渡る(workerにlocalStorageは無い)。
+  let RHYTHM_ROM = null;
+  Emu.setYm2608RhythmRom = function (bytes) {
+    RHYTHM_ROM = bytes && bytes.length ? new Uint8Array(bytes) : null;
+  };
+  Emu.getYm2608RhythmRom = function () { return RHYTHM_ROM; };
+
+  // sel → [fmMult(コアclock回数/マスタークロック), ssgStep(SSGティック数/マスタークロック)]
+  // fmMult: FMサンプルレート=clock*fmMult/144。ssgStep=SSG実クロック×2/clock。
+  const PRESCALE = [[3, 2], [3, 2], [1, 0.5], [2, 1]];
+
+  class YM2608Audio {
+    /**
+     * @param {number} [clock=7987200] - マスタークロック(PC-88 SB2/PC-98: 7987200)
+     */
+    constructor(clock) {
+      this.clockHz = clock || 7987200;
+      this.core = new Emu.YM2612Nuked(this.clockHz, { chipType: 'ym3438' });
+      this.ssg = new Emu.AY8910Audio();
+      this.mute = new Array(6).fill(false);
+      this.vol = new Array(6).fill(1);
+      this.muteAdpcm = new Array(7).fill(false); // 0-5=リズムBD/SD/TOP/HH/TOM/RIM, 6=ADPCM-B
+      this.volAdpcm = new Array(7).fill(1);
+      this.romA = RHYTHM_ROM;  // リズムROM(attachSampleApiのkind 'a'が読む)
+      this.romB = null;        // DELTA-Tメモリ(VGMデータブロック0x81)
+      this._pitchCache = new Map();
+      this.adpcmA = new Emu.OpnAdpcm.AdpcmA(this, { fixedAddr: RHYTHM_ADDR });
+      this.adpcmB = new Emu.OpnAdpcm.AdpcmB(this, { addrShift: 5 });
+      this._sel = 2;
+      this._applyPrescale();
+      this.cyc = 0; this.cycA = 0; this.ssgAcc = 0;
+      this.adpcmL = 0; this.adpcmR = 0;
+      this.syncMuteVol();
+    }
+
+    _applyPrescale() {
+      const [fmMult, ssgStep] = PRESCALE[this._sel];
+      this.fmMult = fmMult; this.ssgStep = ssgStep;
+      // sampleRateはスナップショットの周波数換算とADPCMのレート計算に使う
+      // (コアのピッチ自体はclock()の呼び出し回数で決まる)
+      this.sampleRate = this.core.sampleRate = this.clockHz * fmMult / CYCLES_PER_SAMPLE;
+    }
+
+    /** SSGのclock()呼び出しレート(=AY実クロック×2)。鍵盤スナップショット/抽出器のclock引数用 */
+    get ssgTickHz() { return this.clockHz * this.ssgStep; }
+
+    // mute[]/vol[](FM 6ch)をコアの7要素へ写す。DAC(6)は常時ミュート(YM2608に無い)。
+    syncMuteVol() {
+      const c = this.core;
+      c.mute[6] = true;
+      for (let i = 0; i < 6; i++) { c.mute[i] = !!this.mute[i]; c.vol[i] = this.vol[i]; }
+    }
+
+    reset() {
+      this.core.reset(); this.adpcmA.reset(); this.adpcmB.reset();
+      this._sel = 2; this._applyPrescale();
+      this.cyc = 0; this.cycA = 0; this.ssgAcc = 0; this.adpcmL = 0; this.adpcmR = 0;
+      this.syncMuteVol();
+    }
+
+    /** 内蔵リズムROM(8192バイト)。ピッチ解析キャッシュも破棄する */
+    loadRhythmRom(bytes) {
+      this.romA = bytes && bytes.length ? new Uint8Array(bytes) : null;
+      this._pitchCache.clear();
+    }
+
+    writeReg(port, reg, val) {
+      reg &= 0xFF; val &= 0xFF;
+      if (port === 0) {
+        if (reg < 0x10) { this.ssg.writeInternal(reg & 0x0F, val); return; }
+        if (reg < 0x1E) { this.adpcmA.write(reg - 0x10, val); return; }  // リズム(YM2610と同配置へ)
+        if (reg < 0x20) return;
+        if (reg === 0x29) return;                       // IRQ許可+SCH(6chモード前提。冒頭コメント参照)
+        if (reg === 0x2A || reg === 0x2B) return;       // YM2612のDAC。YM2608には無い
+        if (reg >= 0x2D && reg <= 0x2F) {               // プリスケーラ
+          const sel = reg === 0x2D ? (this._sel | 2) : reg === 0x2E ? (this._sel | 1) : 0;
+          if (sel !== this._sel) { this._sel = sel; this._applyPrescale(); }
+          return;
+        }
+      } else if (reg <= 0x10) {                          // ADPCM-B(DELTA-T)
+        this.adpcmB.write(reg, val); return;
+      } else if (reg < 0x30) {
+        return;
+      }
+      this.core.writeReg(port, reg, val);
+    }
+
+    clock() {
+      for (let k = 0; k < this.fmMult; k++) {
+        this.core.clock();
+        if (++this.cyc < CYCLES_PER_SAMPLE) continue;
+        this.cyc = 0;
+        // FMサンプル毎: ADPCM-B。3回に1回: リズム(ADPCM-A。18.5kHz@7.987MHz)
+        this.adpcmB.clock();
+        if (++this.cycA >= 3) { this.cycA = 0; this.adpcmA.clock(); }
+        let l = 0, r = 0;
+        const A = this.adpcmA;
+        for (let i = 0; i < 6; i++) {
+          if (this.muteAdpcm[i] || !A.ch[i].playing) continue;
+          const v = A.value(i) * this.volAdpcm[i];
+          if (A.panL(i)) l += v;
+          if (A.panR(i)) r += v;
+        }
+        if (!this.muteAdpcm[6] && this.adpcmB.playing) {
+          const v = this.adpcmB.value() * this.volAdpcm[6];
+          if (this.adpcmB.panL()) l += v;
+          if (this.adpcmB.panR()) r += v;
+        }
+        this.adpcmL = l * Emu.OpnAdpcm.ADPCM_SCALE; this.adpcmR = r * Emu.OpnAdpcm.ADPCM_SCALE;
+      }
+      this.ssgAcc += this.ssgStep;
+      while (this.ssgAcc >= 1) { this.ssgAcc -= 1; this.ssg.clock(); }
+    }
+    /** FM+リズム+ADPCM-B。SSGはアダプタが this.ssg.mixSample() を別ゲインで足す */
+    mixSample() {
+      const s = this.core.mixSample();
+      return { left: s.left + this.adpcmL, right: s.right + this.adpcmR };
+    }
+    // 書込みキュー適用(clock()を回さない先読み/シーク経路用)
+    flushWrites() { if (this.core.flushWrites) this.core.flushWrites(); }
+  }
+
+  // 表示用サンプルピッチ解析API(loadRom/samplePitch/samplePcm/setSampleTuning/setSampleKind)を
+  // YM2610の実装からそのまま移植(this.romA/romB/_pitchCacheしか参照しない)
+  Emu.OpnAdpcm.attachSampleApi(YM2608Audio.prototype);
+
+  // 鍵盤表示用スナップショット: FM 6ch(YM2612版そのまま)+リズム(adpcmA[6])+adpcmB。
+  // 形は Emu.snapshotYM2610 と同一(キャプチャ/ロール/変換の adpcmA/adpcmB 経路を全部流用する)。
+  Emu.snapshotYM2608 = function (chip) {
+    const s = Emu.snapshotYM2612(chip.core);
+    const A = chip.adpcmA, B = chip.adpcmB;
+    const tl = (A.regs[0x01] & 0x3F);
+    const adpcmA = [];
+    const rateA = chip.sampleRate / 3;
+    for (let i = 0; i < 6; i++) {
+      const il = A.regs[0x08 + i] & 0x1F;
+      const att = (il ^ 0x1F) + (tl ^ 0x3F);
+      const vol = att >= 63 ? 0 : Math.max(0, 1 - att / 63);
+      const c = A.ch[i];
+      const p = c.seq ? chip.samplePitch('a', c.smpStart, c.smpEnd) : null;
+      adpcmA.push({ active: c.playing && vol > 0, vol, rawVol: il, rawVolMax: 31, panL: A.panL(i) ? 1 : 0, panR: A.panR(i) ? 1 : 0,
+        rate: rateA, seq: c.seq, lenSec: A.lengthSeconds(i),
+        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
+        waveData: p ? p.wave : null,
+        sample: c.seq ? { kind: 'a', start: c.smpStart, end: c.smpEnd } : null });
+    }
+    const lvl = B.regs[0x0B];
+    const rateB = B.rate();
+    const pb = B.seq ? chip.samplePitch('b', B.smpStart, B.smpEnd) : null;
+    const adpcmB = { active: B.playing && !!(B.regs[0x00] & 0x80) && lvl > 0, vol: lvl / 255, rawVol: lvl, rawVolMax: 255,
+      panL: B.panL() ? 1 : 0, panR: B.panR() ? 1 : 0, rate: rateB, seq: B.seq, lenSec: B.lengthSeconds(), executing: !!(B.regs[0x00] & 0x80),
+      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0, pitchManual: !!(pb && pb.manual), sampleKind: pb ? (pb.kindManual || 'auto') : 'auto', sampleHash: pb ? pb.hash : null,
+      waveData: pb ? pb.wave : null,
+      sample: B.seq ? { kind: 'b', start: B.smpStart, end: B.smpEnd } : null,
+      refRate: rateA };  // ピッチ解析が通らない時の疑似音程基準(YM2610のNB行と同じ考え方)
+    return { channels: s.channels, adpcmA, adpcmB };
+  };
+
+  Emu.YM2608Audio = YM2608Audio;
+})(globalThis);
+
+/*
+ * OPL系FM音源エミュレータ — YM3526(OPL) / YM3812(OPL2) / Y8950(MSX-AUDIO) (VGM / KSS)
+ * MML.Emu.OPLAudio
+ *
+ * 2オペレータFM×9ch、またはリズムモード(6メロディ+5打楽器)。EG(AR/DR/SL/RR、EGT=サステイン
+ * 保持ビット、KSR)、KSL(キースケールレベル)、固定LFO(AM≈3.7Hz/VIB≈6.1Hz、深度は0xBDの
+ * グローバルビット)、フィードバック、接続(CNT: 0=FM直列 1=加算)。モノラル出力。
+ *  - YM3812(OPL2)のみ: 波形選択(WS 0-3: サイン/半サイン/絶対値/四半パルス、0x01 bit5で有効化)
+ *  - Y8950のみ: ADPCM-B(DELTA-T 1ch)。ym2610.jsの共有クラス(Emu.OpnAdpcm.AdpcmB)を
+ *    addrShift=5(YM2608と同じ32バイト単位)で流用し、Y8950レジスタ(0x07-0x12)を
+ *    共有クラスのOPNA配置へ写像する。メモリはVGMデータブロック0x88、またはKSS(MSX-AUDIO)の
+ *    データレジスタ(0x0F)経由のCPU書込み(REC|MEMDATAモード)で埋まる。
+ *
+ * 設計は ym2151.js(OPM)と同じ「dB単位のログサイン+EG」方式(EGレベル0..1023、1単位=
+ * 0.09375dB、TL=6bit×8単位、振幅=2^(-att/64)、オペレータ出力±8192)。EG増分表/レート選択も
+ * 同じOPNファミリ共通表(OPLのレート値は rate=4*R+RKS、EGクロックは毎サンプル=OPNの3倍速。
+ * MAME fmopl.cと同じ時間スケール)。
+ *
+ * ★リズム(HH/SD/CYM)の位相ビット細工とノイズLFSRは、die解析済みの opllNuked.js
+ *   (Nuked-OPLL。OPLLのリズム回路はOPL由来で同一)から式を移植:
+ *     HH: サイン索引 = rm_bit<<9 | ((rm_bit^noise) ? 0xd0 : 0x34)
+ *     SD: hh_bit8<<9 | ((hh_bit8^noise)<<8) / CYM: rm_bit<<9 | 0x100 / TOM,BD: 通常
+ *     rm_bit = (hh2^hh7)|(hh3^tc5)|(tc3^tc5)、ノイズ=23bit LFSR(タップ14)
+ *   ビブラートの8ステップ表(±f>>7/±f>>8)も同じ(OPLは0xBD bit6=深度で半減)。
+ *   KSLも同じ回路(KSLTABLE - (8-block)*8)で、OPL2/OPL3系のビット解釈
+ *   {0:off, 1:3dB/oct, 2:1.5dB/oct, 3:6dB/oct} を使う。
+ *
+ * 音程: F-Number(10bit)+Block。freq = fnum × 2^(block-1) × fs / 2^19、fs = clock/72
+ * (3579545Hz → 49716Hz。OPLLと同じ)。A4=440Hz ≒ fnum 577 / block 4。
+ *
+ * ミュート添字(mute[]/vol[]): 0-8=メロディch、9-13=BD,SD,TOM,CYM,HH(opllNuked.jsの
+ * MUTE_*と同じ並び)、14=ADPCM-B(Y8950)。リズムモード中のch7/ch8はスロット単位で
+ * SD/HH/TOM/CYMに分離してミュートできる。
+ *
+ * 外部I/F: writeReg(reg,val) / readStatus()(Y8950: KSSのポート0xC0読出し用) /
+ * clock()(マスタークロック毎、/72で1サンプル) / mixSample()(モノラル、数値) /
+ * loadRom(romSize,start,data)(Y8950 DELTA-T、VGMデータブロック0x88) /
+ * mute[15] / vol[15] / Emu.snapshotOPL(chip)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const NUM_CH = 9;
+  const CYCLES_PER_SAMPLE = 72;
+  const EG_MAX = 1023;
+  const SIN_LEN = 1024;
+  const SIN_MASK = SIN_LEN - 1;
+  const PHASE_BITS = 20;
+  const PHASE_MASK = (1 << PHASE_BITS) - 1;
+  const PHASE_TO_SIN = PHASE_BITS - 10;
+
+  const MUTE_BD = 9, MUTE_SD = 10, MUTE_TOM = 11, MUTE_CYM = 12, MUTE_HH = 13, MUTE_ADPCM = 14;
+  const NUM_MUTE = 15;
+
+  // ── テーブル(ym2151.jsと同型) ──
+  const SIN_ATT = new Uint16Array(SIN_LEN);
+  const SIN_SIGN = new Int8Array(SIN_LEN);
+  for (let i = 0; i < SIN_LEN; i++) {
+    const s = Math.sin((i + 0.5) * 2 * Math.PI / SIN_LEN);
+    SIN_SIGN[i] = s < 0 ? -1 : 1;
+    const a = Math.abs(s);
+    SIN_ATT[i] = a < 1e-6 ? EG_MAX : Math.min(EG_MAX, Math.round(-20 * Math.log10(a) / 0.09375));
+  }
+  const EXP_LEN = 4096;
+  const EXP_TAB = new Float32Array(EXP_LEN);
+  for (let i = 0; i < EXP_LEN; i++) EXP_TAB[i] = i >= EG_MAX ? 0 : 8192 * Math.pow(2, -i / 64);
+
+  const MUL_TAB = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 20, 24, 24, 30, 30]; // ×2表現(0→0.5、11=10,13=12,14=15,15=15はOPL実機の丸め)
+  const SL_TAB = new Uint16Array(16);
+  for (let i = 0; i < 16; i++) SL_TAB[i] = i < 15 ? i * 32 : 992; // 3dB/step、15=93dB
+
+  // KSL基礎表(opllNuked.js EG_KSLTABLEと同じ die 由来値)。索引=F-Number上位4bit
+  const KSL_TAB = [0, 32, 40, 45, 48, 51, 53, 55, 56, 58, 59, 60, 61, 62, 63, 64];
+  // KSL設定 → 右シフト量(OPL2/OPL3系: 1=3dB/oct, 2=1.5dB/oct, 3=6dB/oct)
+  const KSL_SHIFT = [31, 1, 2, 0];
+
+  // EG増分表(OPN/OPM/OPL共通の一般値。ym2151.jsと同一)
+  const EG_INC = [
+    0,1,0,1,0,1,0,1,  0,1,0,1,1,1,0,1,  0,1,1,1,0,1,1,1,  0,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,  1,1,1,2,1,1,1,2,  1,2,1,2,1,2,1,2,  1,2,2,2,1,2,2,2,
+    2,2,2,2,2,2,2,2,  2,2,2,4,2,2,2,4,  2,4,2,4,2,4,2,4,  2,4,4,4,2,4,4,4,
+    4,4,4,4,4,4,4,4,  4,4,4,8,4,4,4,8,  4,8,4,8,4,8,4,8,  4,8,8,8,4,8,8,8,
+    8,8,8,8,8,8,8,8,  16,16,16,16,16,16,16,16,  0,0,0,0,0,0,0,0
+  ];
+  const EG_SEL = new Uint8Array(64);
+  const EG_SHIFT = new Uint8Array(64);
+  for (let r = 0; r < 64; r++) {
+    const rn = r >> 2, sub = r & 3;
+    if (rn === 0) { EG_SEL[r] = sub < 2 ? 18 : 0; EG_SHIFT[r] = 11; continue; }
+    if (rn === 1) { EG_SEL[r] = sub < 2 ? 0 : 2; EG_SHIFT[r] = 10; continue; }
+    if (rn <= 11) { EG_SEL[r] = sub; EG_SHIFT[r] = 11 - rn; continue; }
+    if (rn <= 14) { EG_SEL[r] = 4 + (rn - 12) * 4 + sub; EG_SHIFT[r] = 0; continue; }
+    EG_SEL[r] = 16; EG_SHIFT[r] = 0;
+  }
+
+  // スロットレジスタオフセット(0x00-0x15、グループ8個中6個有効) → (ch, op)
+  const SLOT_CH = new Int8Array(32).fill(-1);
+  const SLOT_OP = new Int8Array(32);
+  for (let s = 0; s < 0x16; s++) {
+    const k = s & 7;
+    if (k >= 6) continue;
+    SLOT_CH[s] = (s >> 3) * 3 + (k % 3);
+    SLOT_OP[s] = k < 3 ? 0 : 1;
+  }
+
+  const EG_OFF = 0, EG_REL = 1, EG_SUS = 2, EG_DEC = 3, EG_ATT = 4;
+
+  class Slot {
+    constructor() { this.reset(); }
+    reset() {
+      this.am = false; this.vib = false; this.egt = false; this.ksrFlag = false; this.mul = 2;
+      this.ksl = 0; this.tl = 0;
+      this.ar = 0; this.dr = 0; this.sl = 0; this.rr = 0;
+      this.ws = 0;
+      this.state = EG_OFF; this.volume = EG_MAX;
+      this.phase = 0; this.inc = 0; this.rks = 0; this.kslAtt = 0;
+      this.keySrc = 0; // bit0=メロディKON(0xB0 bit5) / bit1=リズム(0xBD)
+      this.prev = [0, 0];
+    }
+    rate(r) { return r === 0 ? 0 : Math.min(63, 4 * r + this.rks); }
+  }
+
+  class Channel {
+    constructor(idx) { this.idx = idx; this.slots = [new Slot(), new Slot()]; this.reset(); }
+    reset() {
+      for (const s of this.slots) s.reset();
+      this.fnum = 0; this.block = 0; this.kcode = 0; this.fb = 0; this.cnt = 0; this.kon = false;
+    }
+  }
+
+  // Y8950 ADPCMレジスタ → 共有AdpcmB(OPNA配置)のレジスタ番号
+  const Y8950_DT_MAP = { 0x07: 0x00, 0x08: 0x01, 0x09: 0x02, 0x0A: 0x03, 0x0B: 0x04, 0x0C: 0x05, 0x10: 0x09, 0x11: 0x0A, 0x12: 0x0B };
+  const Y8950_RAM_SIZE = 256 * 1024; // 仕様上の最大(MSX-AUDIOカートは32KB/256KB)
+
+  class OPLAudio {
+    /**
+     * @param {number} [clock=3579545] - マスタークロック(サンプルレート=clock/72)
+     * @param {{type?: 'ym3526'|'ym3812'|'y8950'}} [opts]
+     */
+    constructor(clock, opts) {
+      this.clockHz = clock || 3579545;
+      this.sampleRate = this.clockHz / CYCLES_PER_SAMPLE;
+      this.type = (opts && opts.type) || 'ym3812';
+      this.hasWave = this.type === 'ym3812';
+      this.hasAdpcm = this.type === 'y8950';
+      this.mute = new Array(NUM_MUTE).fill(false);
+      this.vol = new Array(NUM_MUTE).fill(1);
+      this.channels = [];
+      for (let i = 0; i < NUM_CH; i++) this.channels.push(new Channel(i));
+      if (this.hasAdpcm) {
+        this.romB = null; // DELTA-Tメモリ(VGM: ROMブロック / KSS: CPU書込みRAM)
+        this._pitchCache = new Map();
+        this.adpcmB = new Emu.OpnAdpcm.AdpcmB(this, { addrShift: 5, forceExternal: false });
+        this._dtWriteAddr = 0;
+      }
+      this._init();
+    }
+    _init() {
+      for (const c of this.channels) c.reset();
+      this.regs = new Uint8Array(256);
+      this.cyc = 0;
+      this.egCnt = 0;
+      this.wse = false;       // 0x01 bit5(OPL2波形選択有効)
+      this.nts = false;       // 0x08 bit6(キーボードスプリット)
+      this.rhythm = 0;        // 0xBD生値(bit5=リズムモード, bit4-0=BD,SD,TOM,TC,HH)
+      this.amDeep = false; this.vibDeep = false;
+      this.lfoCnt = 0;        // サンプルカウンタ(vib=>>10で8ステップ、am=>>6で210ステップ三角)
+      this.amStep = 0; this.amDir = 0; this.amVal = 0;
+      this.noise = 1;         // 23bit LFSR
+      this.adpcmOut = 0;
+      this.last = 0;
+      this._latch = 0;
+      if (this.hasAdpcm) { this.adpcmB.reset(); this._dtWriteAddr = 0; }
+    }
+    reset() { this._init(); }
+
+    /** Y8950 DELTA-Tメモリ(VGMデータブロック0x88) */
+    loadRom(romSize, start, data) {
+      if (!this.hasAdpcm) return;
+      let rom = this.romB;
+      const need = Math.max(romSize >>> 0, start + data.length);
+      if (!rom || rom.length < need) { const n = new Uint8Array(need); if (rom) n.set(rom, 0); rom = this.romB = n; }
+      rom.set(data, start);
+      if (this._pitchCache) this._pitchCache.clear();
+    }
+
+    /** ステータス読出し(Y8950/KSSのポート0xC0)。BUF_RDY(bit3)常時セット、EOS(bit4)=再生終了 */
+    readStatus() {
+      if (!this.hasAdpcm) return 0x06; // OPL: タイマフラグ無し(未実装)、bit1-2は常に1を返す実装が多い
+      const eos = this.adpcmB.seq > 0 && !this.adpcmB.playing;
+      return 0x08 | (eos ? 0x10 : 0);
+    }
+
+    // ── KSS(MSX-AUDIO)用のI/Oポートインターフェース(kssBus.js chips.opl) ──
+    /** port 0xC0=アドレスラッチ / 0xC1=データ */
+    ioWrite(port, value) {
+      if ((port & 1) === 0) this._latch = value & 0xFF;
+      else this.writeReg(this._latch || 0, value);
+    }
+    /** データポート読出し(レジスタ影を返す。ADPCMメモリ読出しモードは未実装) */
+    readData() { return this.regs[this._latch || 0]; }
+
+    writeReg(reg, val) {
+      reg &= 0xFF; val &= 0xFF;
+      this.regs[reg] = val;
+      if (reg < 0x20) {
+        if (reg === 0x01) { this.wse = this.hasWave && !!(val & 0x20); return; }
+        if (reg === 0x08) { this.nts = !!(val & 0x40); return; } // CSMは未実装(実曲で未使用)
+        if (this.hasAdpcm) {
+          if (reg === 0x0F) { this._dtWriteData(val); return; }
+          const m = Y8950_DT_MAP[reg];
+          if (m !== undefined) {
+            // 0x08(control2)はY8950にパンが無いので両ch ONを強制(共有クラスのビット位置合わせ)
+            if (m === 0x01) val = (val & 0x3F) | 0xC0;
+            if (m === 0x00) {
+              // REC|MEMDATA=CPU書込みモード: 再生を止めて書込みポインタを開始アドレスへ
+              if ((val & 0x60) === 0x60) {
+                this.adpcmB.regs[0x00] = val;
+                this.adpcmB.playing = false;
+                this._dtWriteAddr = (this.adpcmB.regs[0x02] | (this.adpcmB.regs[0x03] << 8)) << 5;
+                return;
+              }
+            }
+            this.adpcmB.write(m, val);
+            return;
+          }
+          if (reg <= 0x19) return; // プリスケール/DAC/IOポートは未実装
+        }
+        return;
+      }
+      if (reg === 0xBD) {
+        const prev = this.rhythm;
+        this.rhythm = val;
+        this.amDeep = !!(val & 0x80); this.vibDeep = !!(val & 0x40);
+        this._rhythmKeys(prev, val);
+        return;
+      }
+      if (reg >= 0xA0 && reg <= 0xA8) { const c = this.channels[reg - 0xA0]; c.fnum = (c.fnum & 0x300) | val; this._refreshCh(c); return; }
+      if (reg >= 0xB0 && reg <= 0xB8) {
+        const c = this.channels[reg - 0xB0];
+        c.fnum = (c.fnum & 0xFF) | ((val & 3) << 8);
+        c.block = (val >> 2) & 7;
+        this._refreshCh(c);
+        const on = !!(val & 0x20);
+        if (on !== c.kon) {
+          c.kon = on;
+          this._key(c.slots[0], 1, on);
+          this._key(c.slots[1], 1, on);
+        }
+        return;
+      }
+      if (reg >= 0xC0 && reg <= 0xC8) { const c = this.channels[reg - 0xC0]; c.fb = (val >> 1) & 7; c.cnt = val & 1; return; }
+      const si = reg & 0x1F;
+      const ch = SLOT_CH[si];
+      if (ch < 0) return;
+      const s = this.channels[ch].slots[SLOT_OP[si]];
+      switch (reg & 0xE0) {
+        case 0x20:
+          s.am = !!(val & 0x80); s.vib = !!(val & 0x40); s.egt = !!(val & 0x20); s.ksrFlag = !!(val & 0x10);
+          s.mul = MUL_TAB[val & 0x0F];
+          this._refreshCh(this.channels[ch]);
+          break;
+        case 0x40: s.ksl = (val >> 6) & 3; s.tl = (val & 0x3F) << 3; this._refreshCh(this.channels[ch]); break;
+        case 0x60: s.ar = (val >> 4) & 15; s.dr = val & 15; break;
+        case 0x80: s.sl = SL_TAB[(val >> 4) & 15]; s.rr = val & 15; break;
+        case 0xE0: if (this.hasWave) s.ws = val & 3; break;
+      }
+    }
+
+    // 位相増分・キースケールレート・KSL減衰を再計算
+    _refreshCh(c) {
+      c.kcode = (c.block << 1) | (this.nts ? (c.fnum >> 8) & 1 : (c.fnum >> 9) & 1);
+      const kslBase = Math.max(0, KSL_TAB[c.fnum >> 6] - ((8 - c.block) << 3)); // 0..64(0.375dB×2単位)
+      for (const s of c.slots) {
+        s.rks = s.ksrFlag ? c.kcode : (c.kcode >> 2);
+        // (kslBase<<1)>>shift は0.375dB単位 → 家内単位(0.09375dB)へ×4
+        s.kslAtt = s.ksl ? (((kslBase << 1) >> KSL_SHIFT[s.ksl]) << 2) : 0;
+        // incはビブラート適用込みで毎サンプル計算する(_slotInc)ので、素の値だけ持つ
+      }
+    }
+
+    // ビブラート込みの位相増分。f2 = fnum<<1 の領域で8ステップ表(opllNukedと同じ)を適用
+    _slotInc(c, s) {
+      let f2 = c.fnum << 1;
+      if (s.vib) {
+        const step = (this.lfoCnt >> 10) & 7;
+        const d = this.vibDeep ? 0 : 1; // 浅い時は半分
+        switch (step) {
+          case 1: case 3: f2 += f2 >> (8 + d); break;
+          case 2: f2 += f2 >> (7 + d); break;
+          case 5: case 7: f2 -= f2 >> (8 + d); break;
+          case 6: f2 -= f2 >> (7 + d); break;
+        }
+      }
+      return ((((f2 << c.block) >> 1) * s.mul) >> 1) & PHASE_MASK;
+    }
+
+    // キーオン/オフ(src: 1=メロディKON, 2=リズム)
+    _key(s, src, on) {
+      const before = s.keySrc;
+      if (on) s.keySrc |= src; else s.keySrc &= ~src;
+      if (before === 0 && s.keySrc) {
+        s.phase = 0;
+        if (s.rate(s.ar) >= 62) { s.volume = 0; s.state = (s.sl === 0) ? EG_SUS : EG_DEC; }
+        else { s.state = EG_ATT; }
+      } else if (before && s.keySrc === 0) {
+        if (s.state > EG_REL) s.state = EG_REL;
+      }
+    }
+
+    // 0xBDのリズムキービット変化を各スロットへ(BD=ch6両op、HH=ch7 mod、SD=ch7 car、
+    // TOM=ch8 mod、CYM(TC)=ch8 car)
+    _rhythmKeys(prev, val) {
+      const en = !!(val & 0x20);
+      const key = (bit, slots) => {
+        const on = en && !!(val & bit);
+        for (const s of slots) this._key(s, 2, on);
+      };
+      key(0x10, [this.channels[6].slots[0], this.channels[6].slots[1]]); // BD
+      key(0x01, [this.channels[7].slots[0]]);                            // HH
+      key(0x08, [this.channels[7].slots[1]]);                            // SD
+      key(0x04, [this.channels[8].slots[0]]);                            // TOM
+      key(0x02, [this.channels[8].slots[1]]);                            // CYM
+    }
+
+    // Y8950: データレジスタ(0x0F)へのCPU書込み(REC|MEMDATAモードでメモリへ格納)
+    _dtWriteData(v) {
+      if ((this.adpcmB.regs[0x00] & 0x60) !== 0x60) return;
+      if (!this.romB || !(this.romB instanceof Uint8Array) || this.romB.length < Y8950_RAM_SIZE) {
+        const n = new Uint8Array(Y8950_RAM_SIZE);
+        if (this.romB) n.set(this.romB.subarray(0, Math.min(this.romB.length, n.length)), 0);
+        this.romB = n;
+      }
+      this.romB[this._dtWriteAddr & (Y8950_RAM_SIZE - 1)] = v;
+      this._dtWriteAddr++;
+      if (this._pitchCache) this._pitchCache.clear();
+    }
+
+    // ── EG(毎サンプル。OPLのEGクロックはfs) ──
+    _advanceEg() {
+      const cnt = ++this.egCnt;
+      for (const c of this.channels) {
+        for (const s of c.slots) {
+          switch (s.state) {
+            case EG_ATT: {
+              const r = s.rate(s.ar);
+              const sh = EG_SHIFT[r];
+              if ((cnt & ((1 << sh) - 1)) === 0) {
+                const inc = EG_INC[EG_SEL[r] * 8 + ((cnt >> sh) & 7)];
+                s.volume += (~s.volume * inc) >> 3;
+                if (s.volume <= 0) { s.volume = 0; s.state = (s.sl === 0 && s.egt) ? EG_SUS : EG_DEC; }
+              }
+              break;
+            }
+            case EG_DEC: {
+              const r = s.rate(s.dr);
+              const sh = EG_SHIFT[r];
+              if ((cnt & ((1 << sh) - 1)) === 0) {
+                s.volume += EG_INC[EG_SEL[r] * 8 + ((cnt >> sh) & 7)];
+                if (s.volume >= s.sl) {
+                  s.volume = Math.min(s.volume, EG_MAX);
+                  // EGT=1: SLで保持(キーオフでEG_RELへ) / EGT=0: SL以降もRRレートで減衰(打楽器型。
+                  // EG_RELはキーオン状態と無関係に進むのでそのまま流用できる)
+                  s.state = s.egt ? EG_SUS : EG_REL;
+                }
+              }
+              break;
+            }
+            case EG_SUS:
+              break; // EGT=1はキーオフまで保持
+            case EG_REL: {
+              const r = s.rate(s.rr);
+              const sh = EG_SHIFT[r];
+              if ((cnt & ((1 << sh) - 1)) === 0) {
+                s.volume += EG_INC[EG_SEL[r] * 8 + ((cnt >> sh) & 7)];
+                if (s.volume >= EG_MAX) { s.volume = EG_MAX; s.state = EG_OFF; }
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // ── LFO(AM: 210ステップ三角×64サンプル≈3.7Hz / VIB: 8ステップ×1024サンプル≈6.1Hz) ──
+    _advanceLfo() {
+      this.lfoCnt = (this.lfoCnt + 1) & 0xFFFF;
+      if ((this.lfoCnt & 63) === 0) {
+        // 三角波 0..26(0.1875dB単位、MAME fmopl同様)を0.5ずつ上下(105ステップ×2)
+        if (this.amDir === 0) { if (++this.amStep >= 105) this.amDir = 1; }
+        else { if (--this.amStep <= 0) this.amDir = 0; }
+        this.amVal = (this.amStep * 26 / 105) | 0;
+      }
+      // ノイズLFSR(23bit、タップ14。opllNuked/実チップと同型)。毎サンプル1シフト
+      let nbit = (this.noise ^ (this.noise >>> 14)) & 1;
+      nbit |= this.noise === 0 ? 1 : 0;
+      this.noise = ((nbit << 22) | (this.noise >>> 1)) >>> 0;
+    }
+    _amAtt() { // 家内単位(0.09375dB)
+      const v = this.amDeep ? this.amVal : (this.amVal >> 2);
+      return v << 1; // 0.1875dB → ×2
+    }
+
+    // ── オペレータ出力(波形選択込み) ──
+    _opOut(s, att, modIndex) {
+      const idx = ((s.phase >> PHASE_TO_SIN) + modIndex) & SIN_MASK;
+      return this._wave(s.ws, idx, att);
+    }
+    _wave(ws, idx, att) {
+      if (!this.wse || ws === 0) {
+        const a = att + SIN_ATT[idx];
+        return a >= EXP_LEN ? 0 : SIN_SIGN[idx] * EXP_TAB[a];
+      }
+      switch (ws) {
+        case 1: { // 半サイン(後半無音)
+          if (idx & 512) return 0;
+          const a = att + SIN_ATT[idx];
+          return a >= EXP_LEN ? 0 : EXP_TAB[a];
+        }
+        case 2: { // 絶対値サイン
+          const a = att + SIN_ATT[idx & 511];
+          return a >= EXP_LEN ? 0 : EXP_TAB[a];
+        }
+        default: { // 四半パルス(各半周期の前半のみ)
+          if (idx & 256) return 0;
+          const a = att + SIN_ATT[idx & 255];
+          return a >= EXP_LEN ? 0 : EXP_TAB[a];
+        }
+      }
+    }
+    _egOut(s) { return Math.min(EG_MAX, s.volume + s.tl + s.kslAtt + (s.am ? this._amAtt() : 0)); }
+
+    // リズム用: スロットの位相からサイン索引(HH/SD/CYMは実機の位相ビット細工)
+    _rhythmIndex(kind, hhPhase, tcPhase) {
+      const hh2 = (hhPhase >> (2 + PHASE_TO_SIN)) & 1, hh3 = (hhPhase >> (3 + PHASE_TO_SIN)) & 1;
+      const hh7 = (hhPhase >> (7 + PHASE_TO_SIN)) & 1, hh8 = (hhPhase >> (8 + PHASE_TO_SIN)) & 1;
+      const tc3 = (tcPhase >> (3 + PHASE_TO_SIN)) & 1, tc5 = (tcPhase >> (5 + PHASE_TO_SIN)) & 1;
+      const rmBit = (hh2 ^ hh7) | (hh3 ^ tc5) | (tc3 ^ tc5);
+      const nz = this.noise & 1;
+      if (kind === 'hh') return ((rmBit << 9) | ((rmBit ^ nz) ? 0xd0 : 0x34)) & SIN_MASK;
+      if (kind === 'sd') return ((hh8 << 9) | ((hh8 ^ nz) << 8)) & SIN_MASK;
+      return ((rmBit << 9) | 0x100) & SIN_MASK; // cym(TC)
+    }
+
+    _calcSample() {
+      this._advanceEg();
+      this._advanceLfo();
+      const rhythmOn = !!(this.rhythm & 0x20);
+      let out = 0;
+      // 位相を全スロット進める(進める前の値で今サンプルを計算)
+      const phases = [];
+      for (const c of this.channels) {
+        for (const s of c.slots) {
+          phases.push(s.phase);
+          s.phase = (s.phase + this._slotInc(c, s)) & PHASE_MASK;
+        }
+      }
+      const melodyN = rhythmOn ? 6 : 9;
+      for (let i = 0; i < melodyN; i++) {
+        const c = this.channels[i];
+        const [m, cr] = c.slots;
+        const fbIn = c.fb ? ((m.prev[0] + m.prev[1]) >> (9 - c.fb)) : 0;
+        const om = this._opOut(m, this._egOut(m), fbIn);
+        m.prev[0] = m.prev[1]; m.prev[1] = om;
+        let o;
+        if (c.cnt) o = om + this._opOut(cr, this._egOut(cr), 0);
+        else o = this._opOut(cr, this._egOut(cr), om >> 1);
+        if (!this.mute[i]) out += o * this.vol[i];
+      }
+      if (rhythmOn) {
+        const ch6 = this.channels[6], ch7 = this.channels[7], ch8 = this.channels[8];
+        const hhPhase = phases[7 * 2], tcPhase = phases[8 * 2 + 1];
+        // BD: 通常の2op FM(×2)
+        {
+          const [m, cr] = ch6.slots;
+          const fbIn = ch6.fb ? ((m.prev[0] + m.prev[1]) >> (9 - ch6.fb)) : 0;
+          const om = this._opOut(m, this._egOut(m), fbIn);
+          m.prev[0] = m.prev[1]; m.prev[1] = om;
+          const o = ch6.cnt ? this._opOut(cr, this._egOut(cr), 0) : this._opOut(cr, this._egOut(cr), om >> 1);
+          if (!this.mute[MUTE_BD]) out += 2 * o * this.vol[MUTE_BD];
+        }
+        // HH(ch7 mod) / SD(ch7 car) / TOM(ch8 mod) / CYM(ch8 car): 単オペ×2
+        const one = (s, idx) => { const a = this._egOut(s); return this._wave(0, idx, a); };
+        {
+          const s = ch7.slots[0];
+          const o = one(s, this._rhythmIndex('hh', hhPhase, tcPhase));
+          if (!this.mute[MUTE_HH]) out += 2 * o * this.vol[MUTE_HH];
+        }
+        {
+          const s = ch7.slots[1];
+          const o = one(s, this._rhythmIndex('sd', hhPhase, tcPhase));
+          if (!this.mute[MUTE_SD]) out += 2 * o * this.vol[MUTE_SD];
+        }
+        {
+          const s = ch8.slots[0];
+          const o = one(s, (phases[8 * 2] >> PHASE_TO_SIN) & SIN_MASK);
+          if (!this.mute[MUTE_TOM]) out += 2 * o * this.vol[MUTE_TOM];
+        }
+        {
+          const s = ch8.slots[1];
+          const o = one(s, this._rhythmIndex('cym', hhPhase, tcPhase));
+          if (!this.mute[MUTE_CYM]) out += 2 * o * this.vol[MUTE_CYM];
+        }
+      }
+      // ADPCM-B(Y8950): FMサンプルと同レートでクロック
+      if (this.hasAdpcm) {
+        this.adpcmB.clock();
+        this.adpcmOut = (!this.mute[MUTE_ADPCM] && this.adpcmB.playing)
+          ? this.adpcmB.value() * this.vol[MUTE_ADPCM] * (8192 / 16384) : 0;
+      }
+      // 9ch合算を±1.0程度へ(ym2151の按分と同じ感覚)
+      this.last = (out + this.adpcmOut) / (8192 * 6);
+    }
+
+    clock() {
+      if (++this.cyc < CYCLES_PER_SAMPLE) return;
+      this.cyc = 0;
+      this._calcSample();
+    }
+    mixSample() { return this.last; }
+  }
+
+  // ── 鍵盤表示用スナップショット ──
+  // channels[9]: { freq, vol, rawVol, active, keyOn, tlVol, patch } + rhythm行(rhythmOn時):
+  // rhythm: { on, bd:{...}, sd, tom, cym, hh } 各 { keyOn, vol, freq(TOM/HH/SDはch7/8のfnum由来) }
+  Emu.snapshotOPL = function (chip) {
+    const out = { channels: [], rhythm: null };
+    const rhythmOn = !!(chip.rhythm & 0x20);
+    const melodyN = rhythmOn ? 6 : 9;
+    const freqOf = (c, s) => c.fnum > 0 ? c.fnum * Math.pow(2, c.block - 1) * chip.sampleRate / (1 << 19) * (s.mul / 2) : 0;
+    for (let i = 0; i < NUM_CH; i++) {
+      const c = chip.channels[i];
+      const cr = c.slots[1];
+      const inMelody = i < melodyN;
+      const carAtt = Math.min(EG_MAX, cr.volume + cr.tl);
+      const modS = c.slots[0];
+      const anyOn = inMelody && (cr.state !== EG_OFF || (c.cnt === 1 && modS.state !== EG_OFF));
+      const vol = anyOn ? Math.max(0, 1 - carAtt / EG_MAX) : 0;
+      const tlVol = Math.max(0, 1 - Math.min(504, cr.tl) / 504);
+      const freq = freqOf(c, cr);
+      const active = anyOn && vol > 0.02 && freq > 0;
+      out.channels.push({
+        freq, vol, rawVol: Math.round(vol * 15), active, keyOn: inMelody && c.kon, tlVol,
+        panL: 1, panR: 1,
+        patch: Emu.decodeOplPatch(chip.regs, i, chip.hasWave)
+      });
+    }
+    if (rhythmOn) {
+      const r = chip.rhythm;
+      // freqSlot: 音程表示に使うスロット(BD=ch6キャリア、TOM=ch8モジュレータ)。SD/CYM/HHは音程なし
+      const drum = (slots, bit, c, freqSlot) => {
+        let att = EG_MAX;
+        let on = false;
+        for (const s of slots) { if (s.state !== EG_OFF) { on = true; att = Math.min(att, Math.min(EG_MAX, s.volume + s.tl)); } }
+        return { keyOn: !!(r & bit), active: on && att < EG_MAX - 16, vol: on ? Math.max(0, 1 - att / EG_MAX) : 0,
+                 freq: c ? freqOf(c, freqSlot) : 0 };
+      };
+      const ch6 = chip.channels[6], ch7 = chip.channels[7], ch8 = chip.channels[8];
+      out.rhythm = {
+        on: true,
+        bd: drum(ch6.slots, 0x10, ch6, ch6.slots[1]),
+        hh: drum([ch7.slots[0]], 0x01, null, null),
+        sd: drum([ch7.slots[1]], 0x08, null, null),
+        tom: drum([ch8.slots[0]], 0x04, ch8, ch8.slots[0]),
+        cym: drum([ch8.slots[1]], 0x02, null, null)
+      };
+    }
+    if (chip.hasAdpcm) {
+      const B = chip.adpcmB;
+      const lvl = B.regs[0x0B];
+      const rateB = B.rate();
+      const pb = (B.seq && chip.samplePitch) ? chip.samplePitch('b', B.smpStart, B.smpEnd) : null;
+      out.adpcmB = { active: B.playing && !!(B.regs[0x00] & 0x80) && lvl > 0, vol: lvl / 255, rawVol: lvl, rawVolMax: 255,
+        panL: 1, panR: 1, rate: rateB, seq: B.seq, lenSec: B.lengthSeconds(), executing: !!(B.regs[0x00] & 0x80),
+        pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0, pitchManual: !!(pb && pb.manual),
+        sampleKind: pb ? (pb.kindManual || 'auto') : 'auto', sampleHash: pb ? pb.hash : null,
+        waveData: pb ? pb.wave : null,
+        sample: B.seq ? { kind: 'b', start: B.smpStart, end: B.smpEnd } : null,
+        refRate: chip.sampleRate / 3 };
+    }
+    return out;
+  };
+
+  // レジスタ影から2op音色を取り出す。鍵盤の音色表示は既存のOPLL書式(formatOpllPatch)を
+  // 流用するため type:'opll' 互換の形で返す(PM=VIB, EG=EGT, KR=KSR, KL=KSL, WF=半波近似
+  // (OPL2のWS1-3を1bitへ落とす)。CNT=1(加算接続)とWSの2bit値はOPLLに表現が無いので
+  // 表示上は落ちる。inst=0は「ユーザー音色」表示のため)。
+  Emu.decodeOplPatch = function (regs, ch, hasWave) {
+    const so = [(ch % 3) + ((ch / 3) | 0) * 8, (ch % 3) + 3 + ((ch / 3) | 0) * 8];
+    const wse = hasWave && !!(regs[0x01] & 0x20);
+    const op = (s) => ({
+      AM: (regs[0x20 + s] >> 7) & 1, PM: (regs[0x20 + s] >> 6) & 1, EG: (regs[0x20 + s] >> 5) & 1,
+      KR: (regs[0x20 + s] >> 4) & 1, ML: regs[0x20 + s] & 15,
+      KL: (regs[0x40 + s] >> 6) & 3, TL: regs[0x40 + s] & 0x3F,
+      AR: (regs[0x60 + s] >> 4) & 15, DR: regs[0x60 + s] & 15,
+      SL: (regs[0x80 + s] >> 4) & 15, RR: regs[0x80 + s] & 15,
+      WF: (wse && (regs[0xE0 + s] & 3) >= 1) ? 1 : 0,
+      FB: (regs[0xC0 + ch] >> 1) & 7
+    });
+    return { type: 'opll', inst: 0, cnt: regs[0xC0 + ch] & 1, mod: op(so[0]), car: op(so[1]) };
+  };
+
+  // 表示用サンプルピッチ解析API(Y8950 ADPCM-B、romB/_pitchCacheのみ参照)
+  if (Emu.OpnAdpcm && Emu.OpnAdpcm.attachSampleApi) Emu.OpnAdpcm.attachSampleApi(OPLAudio.prototype);
+
+  Emu.OPL_MUTE = { BD: MUTE_BD, SD: MUTE_SD, TOM: MUTE_TOM, CYM: MUTE_CYM, HH: MUTE_HH, ADPCM: MUTE_ADPCM, NUM: NUM_MUTE };
+  Emu.OPLAudio = OPLAudio;
+})(globalThis);
+
+/*
  * Irem GA20 4ch PCM 音源 (VGM: chip 'ga20'。アイレム M92/M107 基板、YM2151とペア)
  * MML.Emu.GA20Audio
  *
@@ -7417,7 +8406,7 @@
       const vol = c.volume / 246; // 音量カーブ適用後の振幅比(最大値246で正規化)
       out.push({ active: c.play && vol > 0, vol, rawVol: c.rawVol, rawVolMax: 255, panL: 1, panR: 1,
         rate, seq: c.seq, lenSec: rate > 0 ? lenBytes / rate : 0,
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'ga20', start: c.start, end: c.end } : null });
     }
@@ -7666,7 +8655,7 @@
       out.push({ active: c.play && vmax > 0 && rate > 0, vol: vmax / 127, rawVol: vmax, rawVolMax: 127,
         panL: volL >> 3, panR: volR >> 3,
         rate, seq: c.seq, loop: c.loop, lenSec: c.loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'segapcm', start: c.smpStart, end: c.smpEnd } : null });
     }
@@ -7996,7 +8985,7 @@
       out.push({ active: c.key && vmax > 0 && rate > 0, vol: vmax / 255, rawVol: vmax, rawVolMax: 255,
         panL: volL >> 4, panR: volR >> 4,
         rate, seq: c.seq, loop, lenSec: loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'c140', start: c.smpStart, end: c.smpEnd } : null });
     }
@@ -8351,7 +9340,7 @@
       out.push({ active: !!(c.flags & FLG_BUSY) && vmax > 0 && rate > 0, vol: vmax / 255, rawVol: vmax, rawVolMax: 255,
         panL: volL >> 4, panR: volR >> 4,
         rate, seq: c.seq, loop, lenSec: loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: (c.seq && !noise) ? { kind: 'c352', start: c.smpStart, end: c.smpEnd } : null,
         noise });
@@ -8826,7 +9815,7 @@
       out.push({ active: c.key && vol > 0 && rate > 0, vol, rawVol: Math.min(255, c.chVol >> 4), rawVolMax: 255,
         panL: Math.min(15, c.lvol >> 4), panR: Math.min(15, c.rvol >> 4),
         rate, seq: c.seq, loop, lenSec: loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'qsound', start: c.smpStart, end: c.smpEnd } : null });
     }
@@ -9127,7 +10116,7 @@
       out.push({ active: c.playing && c.chVol > 0, vol: c.chVol / 0x20, rawVol: c.chVol, rawVolMax: 0x20,
         panL: 15, panR: 15,
         rate, seq: c.seq, loop: false, lenSec: rate > 0 ? lenNib / rate : 0,
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'okim6295', start: c.smpStart, end: c.smpEnd } : null });
     }
@@ -9616,7 +10605,7 @@
       out.push({ active: c.playing && vol > 0.01 && rate > 0, vol, rawVol: Math.round(vol * 255), rawVolMax: 255,
         panL: pan > 0 ? Math.max(0, 15 - pan * 2) : 15, panR: pan < 0 ? Math.max(0, 15 + pan * 2) : 15,
         rate, seq: c.seq, loop: c.lenSecEst === Infinity, lenSec: c.lenSecEst,
-        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'multipcm', start: c.physStart, end: c.physStart + c.smpLen } : null });
     }
@@ -9942,6 +10931,11 @@
  *   YM2610(OPNB、Neo Geo)=expansion/ym2610.js(FM=レジスタ配置がYM2612と同一なのでYM2612コアの
  *   ラッパー、ADPCM-A/B=ymfm移植。ROMはデータブロック0x82/0x83)+AY8910Audio(SSG流用)、
  *   YM2151(OPM、アーケード/X68000)=expansion/ym2151.js(コマンド0x54、デュアル2個目=0xA4)、
+ *   YM2203(OPN、PC-88/PC-98/アーケード)=expansion/ym2203.js(FM=YM2612コアのラッパー3ch+
+ *   内蔵SSG=AY8910Audio。コマンド0x55、デュアル2個目=0xA5。プリスケーラ0x2D-0x2Fはチップ側)、
+ *   YM2608(OPNA、PC-88 SB2/PC-98)=expansion/ym2608.js(FM 6ch=YM2612コアのラッパー+SSG+
+ *   内蔵リズム+ADPCM-B。コマンド0x56/0x57、デュアル2個目=0xA6/0xA7。DELTA-Tはデータブロック0x81、
+ *   リズムROMはEmu.setYm2608RhythmRom=opt.ym2608RhythmRom経由)、
  *   GA20(Irem M92/M107 PCM)=expansion/ga20.js(コマンド0xBF、ROMはデータブロック0x93)、
  *   SegaPCM(OutRun/After Burner等)=expansion/segapcm.js(コマンド0xC0、ROMはデータブロック0x80)、
  *   C352(ナムコ System 11/12/22等)=expansion/c352.js(コマンド0xE1、ROMはデータブロック0x92)、
@@ -9974,6 +10968,10 @@
  *    ymfm裏取り済み)。SSGはヘッダ値/2でAY8910Audio.clock()を呼ぶ(実SSGクロックはヘッダ値/4、
  *    AY8910Audioは実クロックの2倍で叩く既存規約のため)。
  *  - YM2151: ヘッダ値(3579545/4000000)そのまま(内部/64で1サンプル=55930/62500Hz)。
+ *  - YM2203: ヘッダ値そのままで chip.clock()(チップ内部でプリスケーラに応じてFMコアを2/4/6回、
+ *    SSGを1/2/4回進める。既定1/6でFMサンプル=clock/72、SSG実クロック=clock/2)。
+ *  - YM2608: ヘッダ値そのままで chip.clock()(同上。既定1/6でFMサンプル=clock/144、
+ *    SSG実クロック=clock/4。PC-88 SB2: 7987200Hz → FM 55.5kHz / SSG 1.9968MHz)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -9991,7 +10989,12 @@
   // 他形式(MD全体0.13、SPC基準)に近づくよう1.0(実測: Metal Slug 0.17〜0.21、Last Resort 0.10〜0.12、
   // Neo Turf Masters 0.29〜0.42=元々ホットな曲、ピークはリミッタ任せ)。SSGはFMに対して MAME neogeo
   // ドライバのルーティング比(SSG 0.28 : FM 0.98)を目安に0.8(暫定。実機録音との比較は未実施)。
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 1.0, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0 };
+  // ym2203/ym2203ssg: FMはYM2612系コア(TLに余裕を持たせた書き方の曲が多い)なので2.0、
+  // SSGはYM2610で採ったFM:SSG=1.0:0.8の比をFM2.0へスケールして1.6(暫定。実機照合は未実施)。
+  // opl(YM3812/YM3526/Y8950共通): 出力尺度はYM2151と同じ(±8192合算/(8192*6))だが、OPL曲は
+  // 2opで音量を稼ぐ書き方が多く2.0では過熱(実測: Bubble Bobble RMS-10dB/ピーク1.56クリップ)。
+  // 1.4でRMS-13〜-15dB級(MD/SPC基準近傍。Bubble Bobble/Xevious Fardraut/Haunted Castle実測)。
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 1.0, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -10208,6 +11211,91 @@
     };
   }
 
+  // YM2203(OPN): FM 3ch+内蔵SSG(expansion/ym2203.js。SSG=AY8910Audioをチップが内蔵し、
+  // clock()もチップ側がプリスケーラに応じてFM/SSG両方を進める)。VGMコマンドは 0x55 aa dd、
+  // デュアル2個目は 0xA5。SSGレジスタ(0x00-0x0F)の振り分けはチップのwriteReg()が行う。
+  // 鍵盤: FMはOP1-3行(chip 'ym2203fm'、デュアルはOP4-6)、SSGはKSS PSG表示のKP1-3(KP4-6)行を流用。
+  function makeYm2203Adapter(info) {
+    const fm = new Emu.YM2203Audio(info.clock);
+    return {
+      id: 'ym2203', clockHz: info.clock, accum: 0, fm, gain: CHIP_GAIN.ym2203, ssgGain: CHIP_GAIN.ym2203ssg,
+      write(aa, dd) { fm.writeReg(aa, dd); },
+      clock() { fm.clock(); },
+      flushWrites() { fm.flushWrites(); },
+      mix(out) {
+        const s = fm.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain;
+        const sg = fm.ssg.mixSample() * this.ssgGain; out[0] += sg; out[1] += sg;
+      },
+      // 2個目のチップ(this.second)は鍵盤のOP4-6/KP4-6行=配列index 3-5 を自分のch0-2として読む
+      applyMute(m) {
+        const e = m.expansion || m;
+        if (e.ym2203fm) { Emu.applyMute(fm.mute, this.second ? e.ym2203fm.slice(3) : e.ym2203fm); fm.syncMuteVol(); }
+        if (e.psg) Emu.applyMute(fm.ssg.mute, this.second ? e.psg.slice(3) : e.psg);
+      },
+      applyVolume(v) {
+        const e = v.expansion || v;
+        if (e.ym2203fm) { Emu.applyVolume(fm.vol, this.second ? e.ym2203fm.slice(3) : e.ym2203fm); fm.syncMuteVol(); }
+        if (e.psg) Emu.applyVolume(fm.ssg.vol, this.second ? e.psg.slice(3) : e.psg);
+      },
+      // 拡張ヘッダのチップ音量/全体音量(reset()が掛ける)はFM/SSG両方に効かせる
+      scaleGain(f) { this.gain *= f; this.ssgGain *= f; }
+    };
+  }
+
+  // YM2608(OPNA): FM 6ch+内蔵SSG+内蔵リズム6ch+ADPCM-B(expansion/ym2608.js。SSG=AY8910Audioを
+  // チップが内蔵し、clock()もチップ側がプリスケーラに応じて進める)。VGMコマンドは
+  // 0x56(ポート0)/0x57(ポート1)、デュアル2個目は0xA6/0xA7。DELTA-Tメモリはデータブロック0x81。
+  // 鍵盤: FMはOA1-6行(chip 'ym2608fm')、リズム/ADPCM-BはOABD等/OAB行(chip 'ym2608adpcm'、
+  // 0-5=リズム, 6=B)、SSGはKSS PSG表示のKP1-3行を流用。
+  function makeYm2608Adapter(info) {
+    const fm = new Emu.YM2608Audio(info.clock);
+    return {
+      id: 'ym2608', clockHz: info.clock, accum: 0, fm, gain: CHIP_GAIN.ym2608, ssgGain: CHIP_GAIN.ym2608ssg,
+      write(port, aa, dd) { fm.writeReg(port, aa, dd); },
+      loadRom(romSize, start, data) { fm.loadRom('b', romSize, start, data); },
+      clock() { fm.clock(); },
+      flushWrites() { fm.flushWrites(); },
+      mix(out) {
+        const s = fm.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain;
+        const sg = fm.ssg.mixSample() * this.ssgGain; out[0] += sg; out[1] += sg;
+      },
+      applyMute(m) {
+        const e = m.expansion || m;
+        if (e.ym2608fm) { Emu.applyMute(fm.mute, e.ym2608fm); fm.syncMuteVol(); }
+        if (e.ym2608adpcm) Emu.applyMute(fm.muteAdpcm, e.ym2608adpcm);
+        if (e.psg) Emu.applyMute(fm.ssg.mute, e.psg);
+      },
+      applyVolume(v) {
+        const e = v.expansion || v;
+        if (e.ym2608fm) { Emu.applyVolume(fm.vol, e.ym2608fm); fm.syncMuteVol(); }
+        if (e.ym2608adpcm) Emu.applyVolume(fm.volAdpcm, e.ym2608adpcm);
+        if (e.psg) Emu.applyVolume(fm.ssg.vol, e.psg);
+      },
+      // 拡張ヘッダのチップ音量/全体音量(reset()が掛ける)はFM/SSG両方に効かせる
+      scaleGain(f) { this.gain *= f; this.ssgGain *= f; }
+    };
+  }
+
+  // OPL系(YM3812=OPL2 / YM3526=OPL / Y8950=MSX-AUDIO): 2op FM×9ch+リズム(expansion/opl.js)。
+  // コマンドは 0x5A/0x5B/0x5C aa dd、デュアル2個目=0xAA/0xAB/0xAC。Y8950のDELTA-Tメモリは
+  // データブロック0x88。鍵盤はOL1-9行+リズム行(chip 'opl'、ミュート添字はEmu.OPL_MUTE)。
+  // 3チップは同一コアのtype違いなので、鍵盤/ミュート/変換の語彙('opl')を共有する
+  // (実VGMでOPL系同士が同居する構成は無い)。
+  function makeOplAdapter(id) {
+    return function (info) {
+      const chip = new Emu.OPLAudio(info.clock, { type: id });
+      return {
+        id, clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.opl,
+        write(aa, dd) { chip.writeReg(aa, dd); },
+        loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); }, // Y8950のみ実体あり
+        clock() { chip.clock(); },
+        mix(out) { const s = chip.mixSample() * this.gain; out[0] += s; out[1] += s; },
+        applyMute(m) { const e = m.expansion || m; if (e.opl) Emu.applyMute(chip.mute, e.opl); },
+        applyVolume(v) { const e = v.expansion || v; if (e.opl) Emu.applyVolume(chip.vol, e.opl); }
+      };
+    };
+  }
+
   // GA20(Irem M92/M107 PCM): 4ch 8bit PCM(expansion/ga20.js)。コマンドは 0xBF aa dd
   // (aaのbit7=デュアル2個目)、ROMはデータブロック0x93。
   function makeGa20Adapter(info) {
@@ -10370,7 +11458,9 @@
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
     sn76489: makeSnAdapter, ym2612: makeYm2612Adapter, pwm: makePwmAdapter,
     rf5c68: makeRfAdapter('rf5c68'), rf5c164: makeRfAdapter('rf5c164'), ym2610: makeYm2610Adapter,
-    ym2151: makeYm2151Adapter, ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter,
+    ym2151: makeYm2151Adapter, ym2203: makeYm2203Adapter, ym2608: makeYm2608Adapter,
+    ym3812: makeOplAdapter('ym3812'), ym3526: makeOplAdapter('ym3526'), y8950: makeOplAdapter('y8950'),
+    ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter,
     c352: makeC352Adapter, okim6258: makeOkim6258Adapter, qsound: makeQsoundAdapter,
     okim6295: makeOkim6295Adapter, multipcm: makeMultiPcmAdapter
   };
@@ -10453,6 +11543,10 @@
         // (Battle Garegga実測 0.197:0.198)だが合算が過熱(RMS0.28/ピーク1.41)するため、
         // アイレムM92と同じ「比率を保ったまま両チップ縮小」で×0.7(RMS-14dB級/ピーク~1.0)。
         if ((info.id === 'ym2151' || info.id === 'okim6295') && h.chips.ym2151 && h.chips.okim6295) a.gain *= 0.7;
+        // デュアルYM2203(Avengers等のアーケード): 2個で単純加算するとMD基準のgain2.0が実質4.0に
+        // なり過熱する(実測: Avengers Boss RMS-8.1dB/ピーク2.4=クリップ)。FM:SSG比を保ったまま
+        // 両チップ×0.5して単チップ相当の合算レベルに収める(RMS-14dB級)。
+        if (info.id === 'ym2203' && info.dual) a.scaleGain(0.5);
         this.adapters.push(a); this.adapterById[info.id] = a;
         if (info.dual) {
           // デュアルチップ(クロック値bit30): 2個目は同じ設定で別インスタンス。クロックは
@@ -10466,6 +11560,7 @@
           if (info.id === 'ym2151' && h.chips.c140) b.gain *= 1.7;
           if ((info.id === 'ym2151' || info.id === 'ga20') && h.chips.ym2151 && h.chips.ga20) b.gain *= 0.5;
           if ((info.id === 'ym2151' || info.id === 'okim6295') && h.chips.ym2151 && h.chips.okim6295) b.gain *= 0.7;
+          if (info.id === 'ym2203') b.scaleGain(0.5);
           b.second = true;
           this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
         }
@@ -10530,6 +11625,18 @@
           case 0xA1: this._chipWrite('ym2413', d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2413
           case 0x54: this._chipWrite('ym2151', d[p], d[p + 1], false); this.pos = p + 2; break; // YM2151(OPM)
           case 0xA4: this._chipWrite('ym2151', d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2151
+          case 0x55: this._chipWrite('ym2203', d[p], d[p + 1], false); this.pos = p + 2; break; // YM2203(OPN)
+          case 0xA5: this._chipWrite('ym2203', d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2203
+          case 0x5A: this._chipWrite('ym3812', d[p], d[p + 1], false); this.pos = p + 2; break; // YM3812(OPL2)
+          case 0xAA: this._chipWrite('ym3812', d[p], d[p + 1], true); this.pos = p + 2; break;
+          case 0x5B: this._chipWrite('ym3526', d[p], d[p + 1], false); this.pos = p + 2; break; // YM3526(OPL)
+          case 0xAB: this._chipWrite('ym3526', d[p], d[p + 1], true); this.pos = p + 2; break;
+          case 0x5C: this._chipWrite('y8950', d[p], d[p + 1], false); this.pos = p + 2; break; // Y8950(MSX-AUDIO)
+          case 0xAC: this._chipWrite('y8950', d[p], d[p + 1], true); this.pos = p + 2; break;
+          case 0x56: this._ym2608Write(0, d[p], d[p + 1], false); this.pos = p + 2; break; // YM2608(OPNA) ポート0
+          case 0x57: this._ym2608Write(1, d[p], d[p + 1], false); this.pos = p + 2; break; // YM2608 ポート1
+          case 0xA6: this._ym2608Write(0, d[p], d[p + 1], true); this.pos = p + 2; break; // 2個目のYM2608
+          case 0xA7: this._ym2608Write(1, d[p], d[p + 1], true); this.pos = p + 2; break;
           // 0xA0/0xB3/0xB4/0xB9/0xD2: レジスタ(ポート)のbit7=1が2個目のチップ
           case 0xA0: this._chipWrite('ay8910', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB3: this._chipWrite('gb', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
@@ -10651,6 +11758,14 @@
         const rf = ad(type === 0xC0 ? 'rf5c68' : 'rf5c164');
         if (rf && block.length >= 2) rf.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
+      if (type === 0x81 || type === 0x88) { // DELTA-Tメモリ: 0x81=YM2608 / 0x88=Y8950(共通形式)
+        const y = ad(type === 0x81 ? 'ym2608' : 'y8950');
+        if (y && block.length >= 8) {
+          const romSize = (block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24)) >>> 0;
+          const start = (block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)) >>> 0;
+          y.loadRom(romSize, start, block.subarray(8));
+        }
+      }
       if (type === 0x82 || type === 0x83) { // YM2610 ADPCM-A(0x82) / ADPCM-B(0x83) ROM: 共通形式(kind付き)
         const y = ad('ym2610');
         if (y && block.length >= 8) {
@@ -10702,6 +11817,14 @@
       if (!a) return;
       a.write(port, aa, dd);
       if (this.onWrite) this.onWrite('ym2610', port, aa, dd);
+    }
+
+    _ym2608Write(port, aa, dd, second) {
+      const key = second ? 'ym2608_2' : 'ym2608';
+      const a = this.adapterById[key];
+      if (!a) return;
+      a.write(port, aa, dd);
+      if (this.onWrite) this.onWrite(key, port, aa, dd);
     }
 
     _stream(id) {
@@ -10846,6 +11969,9 @@
   //   kss: writeLog[f] = [{addr,value,io}] (AY=io 0xA0/0xA1, OPLL=io 0x7C/0x7D, SCC=mem 0x9800/0xB800台)
   // ---------------------------------------------------------------------------
   Emu.captureVgmSongAsync = async function (vgmBytes, opt, onProgress) {
+    // YM2608内蔵リズムROM: Worker実行時はlocalStorageが無いのでopt経由で受け取る
+    // (main.jsがlocalStorageから復元してoptへ入れる。無ければリズムのみ無音)
+    if (opt.ym2608RhythmRom && Emu.setYm2608RhythmRom) Emu.setYm2608RhythmRom(opt.ym2608RhythmRom);
     const player = new VgmPlayer(vgmBytes);
     const h = player.header;
     const durationSeconds = opt.durationSeconds || Math.max(1, h.durationSeconds || 30);
@@ -10860,15 +11986,24 @@
       // clock: kss2mml抽出器(AY/SCC)に渡す「Z80相当クロック」(=AY実クロック×2)。MSXの3.58MHz固定では
       // 別クロックのAY(Exed Exes 1.5MHz等)やYM2610内蔵SSG(チップクロック/4)のロール音程がずれる。
       // vgm2mml/converter.js の kssClock と同じ優先順位。
-      kss: (has('ay8910') || has('k051649') || has('ym2413') || has('ym2610'))
-        ? { writeLog: [], ay: has('ay8910') || has('ym2610'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus),
+      kss: (has('ay8910') || has('k051649') || has('ym2413') || has('ym2610') || has('ym2203') || has('ym2608') || has('ym3812') || has('ym3526') || has('y8950'))
+        ? { writeLog: [], ay: has('ay8910') || has('ym2610') || has('ym2203') || has('ym2608'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus),
+            // OPL(YM3812/YM3526/Y8950): 書込みは io 0xC0/0xC1 として同じwriteLogへ流す
+            // (KSSのMSX-AUDIOと同じ形。抽出器 Kss2MmlExpansion.opl をKSS/VGMで共有するため)
+            opl: has('ym3812') || has('ym3526') || has('y8950'),
+            oplClock: has('ym3812') ? player.adapterById.ym3812.clockHz : has('ym3526') ? player.adapterById.ym3526.clockHz
+                    : has('y8950') ? player.adapterById.y8950.clockHz : 3579545,
             clock: has('ay8910') ? player.adapterById.ay8910.clockHz : has('ym2610') ? player.adapterById.ym2610.clockHz / 2
+                 : has('ym2203') ? player.adapterById.ym2203.fm.ssgTickHz
+                 : has('ym2608') ? player.adapterById.ym2608.fm.ssgTickHz
                  : has('k051649') ? player.adapterById.k051649.clockHz : has('ym2413') ? player.adapterById.ym2413.clockHz : 3579545 }
         : null,
       sn: has('sn76489') ? { snapshots: [], clock: player.adapterById.sn76489.clockHz } : null,
       ym2612: has('ym2612') ? { snapshots: [] } : null,
       ym2610fm: has('ym2610') ? { snapshots: [] } : null,
       ym2151: has('ym2151') ? { snapshots: [] } : null,
+      ym2203fm: has('ym2203') ? { snapshots: [] } : null,
+      ym2608fm: has('ym2608') ? { snapshots: [] } : null,
       ga20: has('ga20') ? { snapshots: [] } : null,
       // snapshots=物理スロット、logical=割当逆算(ソフトウェアチャンネル合成、
       // Emu.PoolChannelRegrouper)。ペア交互/巡回割当のドライバ対策で両方を常時保持する
@@ -10889,6 +12024,8 @@
     let nesFrameWrites = [];
     // YM2610 ADPCM のロール用発音区間推定の状態(上のループ内コメント参照)
     const adpcmState = { aSeq: new Array(6).fill(0), aEnd: new Array(6).fill(-1), bSeq: 0, bEnd: -1 };
+    // YM2608 リズム/ADPCM-B も同じ推定(スナップショット形状がYM2610と同一)
+    const adpcm2608State = { aSeq: new Array(6).fill(0), aEnd: new Array(6).fill(-1), bSeq: 0, bEnd: -1 };
     // GA20 も同じ推定(clock()を回さないと0x00終端で止まらないため、キーオン通番+サンプル長で区間を切る)
     const ga20State = { seq: new Array(4).fill(0), end: new Array(4).fill(-1) };
     // SegaPCM: ワンショットは同じ推定。ループ再生(lenSec=Infinity)は明示停止(reg86書込み)まで鳴る
@@ -10921,7 +12058,14 @@
         case 'ay8910': kssFrameWrites.push({ addr: 0xA0, value: a & 0x0F, io: true }, { addr: 0xA1, value: b, io: true }); break;
         // YM2610: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
         case 'ym2610': if (a === 0 && b < 0x0E) kssFrameWrites.push({ addr: 0xA0, value: b & 0x0F, io: true }, { addr: 0xA1, value: c, io: true }); break;
+        // YM2203: (addr, data)。addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
+        case 'ym2203': if (a < 0x0E) kssFrameWrites.push({ addr: 0xA0, value: a & 0x0F, io: true }, { addr: 0xA1, value: b, io: true }); break;
+        // YM2608: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
+        case 'ym2608': if (a === 0 && b < 0x0E) kssFrameWrites.push({ addr: 0xA0, value: b & 0x0F, io: true }, { addr: 0xA1, value: c, io: true }); break;
         case 'ym2413': kssFrameWrites.push({ addr: 0x7C, value: a, io: true }, { addr: 0x7D, value: b, io: true }); break;
+        // OPL系: MSX-AUDIOのポート(0xC0=アドレス/0xC1=データ)としてKSSと同じ形でログする
+        case 'ym3812': case 'ym3526': case 'y8950':
+          kssFrameWrites.push({ addr: 0xC0, value: a, io: true }, { addr: 0xC1, value: b, io: true }); break;
         case 'k051649': kssFrameWrites.push({ addr: d, value: c, io: false }); break;
       }
     };
@@ -11044,6 +12188,40 @@
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2151.snapshots.push(s);
       }
+      if (data.ym2203fm) {
+        // YM2612と同じ: 先読みはEGが進まないので発音判定/音量はレジスタ由来(keyOn/tlVol)へ差し替える
+        const s = Emu.snapshotYM2203(player.adapterById.ym2203.fm);
+        for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
+        data.ym2203fm.snapshots.push(s);
+        // プリスケーラでSSG実クロックが変わる(Avengersは1/3=SSG実クロック2倍)ため、
+        // ロール/変換が読むkss.clockを毎フレーム追随させる(通常は曲頭の1回で確定する)
+        if (data.kss && !player.adapterById.ay8910 && !player.adapterById.ym2610) {
+          data.kss.clock = player.adapterById.ym2203.fm.ssgTickHz;
+        }
+      }
+      if (data.ym2608fm) {
+        // YM2610と同じ: FMはkeyOn/tlVolへ差し替え、リズム/ADPCM-Bはキーオン通番+サンプル長で
+        // 発音区間を推定(clock()を回さないため)
+        const s = Emu.snapshotYM2608(player.adapterById.ym2608.fm);
+        for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
+        const st8 = adpcm2608State;
+        for (let i = 0; i < 6; i++) {
+          const c = s.adpcmA[i];
+          if (c.seq !== st8.aSeq[i]) { st8.aSeq[i] = c.seq; st8.aEnd[i] = f + c.lenSec * FRAME_RATE; }
+          c.active = c.vol > 0 && f < st8.aEnd[i];
+        }
+        {
+          const c = s.adpcmB;
+          if (c.seq !== st8.bSeq) { st8.bSeq = c.seq; st8.bEnd = f + c.lenSec * FRAME_RATE; }
+          if (!c.executing) st8.bEnd = -1;
+          c.active = c.vol > 0 && f < st8.bEnd;
+        }
+        data.ym2608fm.snapshots.push(s);
+        // プリスケーラでSSG実クロックが変わりうるため、ロール/変換が読むclockを追随させる
+        if (data.kss && !player.adapterById.ay8910 && !player.adapterById.ym2610 && !player.adapterById.ym2203) {
+          data.kss.clock = player.adapterById.ym2608.fm.ssgTickHz;
+        }
+      }
       if (data.ym2610fm) {
         const s = Emu.snapshotYM2610(player.adapterById.ym2610.fm);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
@@ -11097,8 +12275,9 @@
       ['c140', (s) => s, 'c140'], ['c352', (s) => s, 'c352'],
       ['qsound', (s) => s, 'qsound'], ['okim6295', (s) => s, 'okim6295'],
       ['multipcm', (s) => s, 'multipcm'],
-      // ★YM2610のアダプタはチップを .chip ではなく .fm で持つ(SSGと2個持ちのため)
+      // ★YM2610/YM2608のアダプタはチップを .chip ではなく .fm で持つ(SSGと2個持ちのため)
       ['ym2610fm', (s) => (s && s.adpcmA ? s.adpcmA.concat(s.adpcmB ? [s.adpcmB] : []) : null), 'ym2610', (a) => a.fm],
+      ['ym2608fm', (s) => (s && s.adpcmA ? s.adpcmA.concat(s.adpcmB ? [s.adpcmB] : []) : null), 'ym2608', (a) => a.fm],
     ];
     let total = 0;
     for (const [key, chansOf, adapterId, chipOf] of SRC) {
@@ -11323,6 +12502,17 @@
   // レーン数0=区画の幅0になり、音程軸の座標は従来と完全に一致する。
   // レーン割当そのもの(どのサンプルが何番レーンか・上限・溢れの扱い)は
   // src/convert/drumMap.js に置いてある。vgm2mmlのドラム音符出力と同じ表を使うため。
+  /**
+   * 音源の識別色 '#rrggbb' → セレクトの候補一覧に敷く薄い背景色。
+   * 明度は明暗テーマの両方で文字が読めるよう、下地へ薄く乗せるだけにする。
+   */
+  function tintOf(hex) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
+    if (!m) return '';
+    const n = parseInt(m[1], 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, 0.18)`;
+  }
+
   const DRUM_LANE_WHITE = 1.5;  // ドラム1レーンの幅(白鍵何本ぶんか)
   // レーンの色 = どの太鼓か。チャンネルの色(=どのスロットが鳴らしたか)とは別軸なので、
   // 打点は「塗り=このレーン色 / 枠線=チャンネル色」の二重符号化で描く。プール式チップ
@@ -11332,6 +12522,25 @@
                             '#7a8a99', '#c2a03a', '#5ac47a', '#ff7fa8', '#8ab4ff', '#d0703a',
                             '#59c2c9', '#b06ee0', '#9aa832', '#e06060'];
   const DRUM_OTHER_COLOR = '#8a93a1'; // 「その他」レーン
+
+  // 曲が終わった後の挙動。ヘッダの1つのアイコンをクリックのたびに巡回して選ぶ
+  // 複数の元chを1本にまとめて載せられる借用先(重複=競合ではない)。
+  // DPCMは「選んだPCMチャンネルの打楽器を、同時発音ぶんはミックスして1本のサンプル列にする」
+  // という作りなので、何本選んでもよい
+  const MULTI_SOURCE_TARGETS = new Set(['dpcm']);
+
+  const REPEAT_MODES = ['next', 'one', 'shuffle', 'stop'];
+  const REPEAT_MODE_KEY = 'mml_repeatMode';
+  const REPEAT_ICONS = {
+    next: { label: () => T('曲が終わったら: 次の曲へ'),
+      svg: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9.5M11.5 4.8 14 7l-2.5 2.2"/><path d="M16 13H6.5M8.5 10.8 6 13l2.5 2.2"/></svg>' },
+    one: { label: () => T('曲が終わったら: 同じ曲を繰り返す'),
+      svg: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 8.5A4.5 4.5 0 0 1 10 4h5M12.5 1.8 15 4l-2.5 2.2"/><path d="M14.5 11.5A4.5 4.5 0 0 1 10 16H5M7.5 13.8 5 16l2.5 2.2"/><text x="10" y="12.6" font-size="7" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">1</text></svg>' },
+    shuffle: { label: () => T('曲が終わったら: ランダム再生'),
+      svg: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h3l8 8h3M3 14h3l8-8h3"/><path d="M14.8 3.8 17 6l-2.2 2.2M14.8 11.8 17 14l-2.2 2.2"/></svg>' },
+    stop: { label: () => T('曲が終わったら: 停止'),
+      svg: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="10" height="10" rx="1.5"/></svg>' },
+  };
   function loadLayoutSettings() {
     const out = Object.assign({}, LAYOUT_DEFAULTS);
     try {
@@ -11578,6 +12787,22 @@
     // VGM: YM2151(OPM、OM1-8=FM ch)。chip.mute[]はch 0-7
     const om = id.match(/^OM(\d)$/);
     if (om) return { section: 'expansion', chip: 'ym2151', type: 'array', index: +om[1] - 1 };
+    // VGM: YM2203(OPN、OP1-3=FM ch、デュアル2個目はOP4-6=index 3-5。vgmPlayer.js側が
+    // 2個目のch0-2として読む)。内蔵SSGはKP1-3(KP4-6)行(chip 'psg')を流用
+    const op = id.match(/^OP(\d)$/);
+    if (op) return { section: 'expansion', chip: 'ym2203fm', type: 'array', index: +op[1] - 1 };
+    // VGM: YM2608(OPNA、OA1-6=FM ch)。内蔵リズム(OABD/OASD/OACY/OAHH/OATM/OARM)と
+    // ADPCM-B(OAB)は chip.muteAdpcm[] の 0-5 / 6。内蔵SSGはKP1-3行(chip 'psg')を流用
+    const OA_RHYTHM = { OABD: 0, OASD: 1, OACY: 2, OAHH: 3, OATM: 4, OARM: 5, OAB: 6 };
+    if (OA_RHYTHM[id] !== undefined) return { section: 'expansion', chip: 'ym2608adpcm', type: 'array', index: OA_RHYTHM[id] };
+    const oa = id.match(/^OA(\d)$/);
+    if (oa) return { section: 'expansion', chip: 'ym2608fm', type: 'array', index: +oa[1] - 1 };
+    // OPL系(KSSのMSX-AUDIO / VGMのYM3812・YM3526・Y8950): OL1-9=メロディch、リズム/ADPCMは
+    // chip.mute[]の9-14(Emu.OPL_MUTE: BD=9,SD=10,TOM=11,CYM=12,HH=13,ADPCM=14)
+    const OL_FIXED = { OLBD: 9, OLSD: 10, OLTM: 11, OLCY: 12, OLHH: 13, OLB: 14 };
+    if (OL_FIXED[id] !== undefined) return { section: 'expansion', chip: 'opl', type: 'array', index: OL_FIXED[id] };
+    const ol = id.match(/^OL(\d)$/);
+    if (ol) return { section: 'expansion', chip: 'opl', type: 'array', index: +ol[1] - 1 };
     // VGM: GA20(Irem PCM、GA1-4)。chip.mute[]はch 0-3(GALLはGB行なので\dで区別される)
     const ga = id.match(/^GA(\d)$/);
     if (ga) return { section: 'expansion', chip: 'ga20', type: 'array', index: +ga[1] - 1 };
@@ -11644,6 +12869,14 @@
     { header: 'SN76489 (SG-1000 / Master System / Game Gear / Mega Drive PSG)', ids: { SN1: 'P1', SN2: 'P2', SN3: 'P3', SNN: 'No', SN4: 'P1(2)', SN5: 'P2(2)', SN6: 'P3(2)', SNN2: 'No(2)' } },
     { header: 'YM2612 (OPN2 , Mega Drive FM)', ids: { YMDA: 'DAC' }, prefix: 'YM', name: (id) => 'FM' + id.slice(2) },
     { header: 'YM2151 (OPM , X68000 / Arcade)', prefix: 'OM', name: (id) => 'FM' + id.slice(2) },
+    // OP4-6はデュアルチップ2個目のFM1-3(内蔵SSGはKP1-6行を流用)
+    { header: 'YM2203 (OPN , PC-8801 / Arcade)', prefix: 'OP', name: (id) => { const n = +id.slice(2); return n <= 3 ? 'FM' + n : 'FM' + (n - 3) + '(2)'; } },
+    // OABD等=内蔵リズム、OAB=ADPCM-B(完全一致で先に拾う)。内蔵SSGはKP1-3行を流用
+    { header: 'YM2608 (OPNA , PC-8801 SB2 / PC-9801)', ids: { OABD: 'BD', OASD: 'SD', OACY: 'Cym', OAHH: 'HH', OATM: 'Tom', OARM: 'Rim', OAB: 'PCMB' },
+      prefix: 'OA', name: (id) => 'FM' + id.slice(2) },
+    // OPL系(YM3812/YM3526/Y8950): OLBD等=リズムモード打楽器、OLB=Y8950 ADPCM-B
+    { header: 'OPL (YM3812 / YM3526 / Y8950 MSX-AUDIO)', ids: { OLBD: 'BD', OLSD: 'SD', OLTM: 'Tom', OLCY: 'Cym', OLHH: 'HH', OLB: 'ADPCM' },
+      prefix: 'OL', name: (id) => 'FM' + id.slice(2) },
     // GA1-4は完全一致(ids)で拾う(GBの'GALL'と prefix 'GA' を衝突させない)
     { header: 'GA20 (Irem M92 / M107 PCM)', ids: { GA1: 'PCM1', GA2: 'PCM2', GA3: 'PCM3', GA4: 'PCM4' } },
     // pool: サンプルPCM系はドライバがスロットをペア交互/巡回割当する曲がある
@@ -11740,6 +12973,9 @@
     return `<span class="kbd-assign">` +
       `<select class="kbd-assign-target"></select>` +
       `<select class="kbd-assign-tone"></select>` +
+      // 借用先にDPCMを選んだ行だけ出す「パッド」ボタン(ドラム(DPCM)パネルを開く)。
+      // ツールバーではなくここに置く: DPCMを選んだ流れでそのまま詰められるため
+      `<button type="button" class="kbd-assign-drum" style="display:none">${T('パッド')}</button>` +
       `</span>`;
   }
 
@@ -12321,6 +13557,110 @@
         const d = s ? s.dac : { enabled: false, level: 0, vol: 0, active: false };
         channels.push({ id: 'YMDA', color: '#aa44ff', freq: 0, vol: d.vol, rawVol: d.enabled ? d.level : null, rawVolMax: 255,
           wave: { t: 'sample' }, active: !!d.active, sample: true, dmcReg: d.level, dmcRateIdx: 15, dmcFreq: 0 });
+      }
+    }
+
+    if (chips.includes('ym2608fm')) {
+      // YM2608(VGM: OPNA、PC-88 SB2/PC-98): 4op FM×6ch(YM2612と同じFM波形表示)+
+      // 内蔵リズム6行(BD/SD/Cym/HH/Tom/Rim。固定サンプルなので音程なしの「サンプル」行)+
+      // ADPCM-B行(NB行と同じ3段階表示)。内蔵SSGは 'kssPsg' のKP1-3行として別途出す。
+      const live = extraSnaps && extraSnaps.ym2608FmLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.ym2608fm ? extraSnaps.ym2608fm[frameIdx] : null);
+      const COLS = ['#ffcc00', '#ffd422', '#ffdd44', '#ffe566', '#ffee88', '#fff2aa'];
+      for (let ch = 0; ch < 6; ch++) {
+        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, waveData: null };
+        const wave = (c.waveData && c.waveData.length && c.active)
+          ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
+          : { t: 'fm', nx: 256, ny: 256 };
+        channels.push({ id: `OA${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
+      }
+      // 内蔵リズム: NA行と同じデータ形状(ロール/ドラム区画/パッド流用)。ピッチ解析は
+      // ドラム音なので通常conf<0.5=「サンプル」行のまま。リズムROM未読込でもキーオンは
+      // 見えるので行は光る(音は出ない)。
+      const RIDS = ['OABD', 'OASD', 'OACY', 'OAHH', 'OATM', 'OARM'];
+      const adpcmWave8 = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 6; ch++) {
+        const c = s && s.adpcmA ? s.adpcmA[ch] : { vol: 0, rawVol: 0, rawVolMax: 31, active: false, panL: 1, panR: 1, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (20 + ch * 12) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: RIDS[ch], color: `hsl(${hue},80%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
+          wave: adpcmWave8(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+      {
+        const c = s && s.adpcmB ? s.adpcmB : { vol: 0, rawVol: 0, rawVolMax: 255, active: false, panL: 1, panR: 1, rate: 0, refRate: 1, pitchHz: 0, pitchConf: 0 };
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: 'OAB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: adpcmWave8(c), active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
+          panL: c.panL, panR: c.panR });
+      }
+    }
+
+    if (chips.includes('opl')) {
+      // OPL系(VGM: YM3812/YM3526/Y8950、KSS: MSX-AUDIO): 2op FM×9ch、またはリズムモード
+      // (6メロディ+BD/SD/TOM/CYM/HH)。表示流儀はkssOpll(FMPAC)と同じで、リズムモードは
+      // 一度見たら以後保持する単調運用(extraSnaps.oplRhythmSeen)。
+      const live = extraSnaps && extraSnaps.oplLive;
+      const s = live ? live() : null;
+      if (s && s.rhythm && s.rhythm.on && extraSnaps) extraSnaps.oplRhythmSeen = true;
+      const oplRhythm = !!(extraSnaps && extraSnaps.oplRhythmSeen);
+      const MCOLS = ['#66ffcc', '#55eebb', '#44ddaa', '#33cc99', '#22bb88', '#11aa77', '#66e0d0', '#55d0c0', '#44c0b0'];
+      for (let ch = 0; ch < (oplRhythm ? 6 : 9); ch++) {
+        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false };
+        channels.push({ id: `OL${ch + 1}`, color: MCOLS[ch % MCOLS.length], freq: c.freq, vol: c.vol,
+          rawVol: c.rawVol, rawVolMax: 15,
+          wave: { t: 'fm', nx: 256, ny: 256 }, active: c.active, fmPatch: c.patch || null });
+      }
+      if (oplRhythm) {
+        // ★ロール(src/kss2mml/expansion/opl.js RHYTHM_DEFS)と同じ規則で音程を決める:
+        //   BD(ch6)/TOM(ch8)は実音程(範囲内なら)、SD/CYM/HHは疑似音程レーン
+        const r = (s && s.rhythm) || null;
+        const RCOLS = { bd: '#ff5555', sd: '#ffaa55', tom: '#aaff55', cym: '#55ffaa', hh: '#55aaff' };
+        const RIDS = { bd: 'OLBD', sd: 'OLSD', tom: 'OLTM', cym: 'OLCY', hh: 'OLHH' };
+        const RPSEUDO = { bd: 0, sd: 2, tom: 4, cym: 6, hh: 8 };
+        const RLABEL = { bd: 'BD', sd: 'SD', tom: 'TOM', cym: 'CYM', hh: 'HH' };
+        for (const key of ['bd', 'sd', 'tom', 'cym', 'hh']) {
+          const d = r ? r[key] : { keyOn: false, active: false, vol: 0, freq: 0 };
+          const realMidi = freqToMidi(d.freq);
+          const row = { id: RIDS[key], color: RCOLS[key], freq: realMidi !== null ? d.freq : 0, vol: d.vol,
+            rawVol: null, rawVolMax: null,
+            wave: realMidi !== null ? { t: 'pulse', hi: 0.5, nx: 2, ny: 2 } : { t: 'noise', short: true, nx: 93, ny: 2 },
+            active: d.active, drum: true };
+          if (realMidi === null) { row.noise = true; row.noiseIndex = RPSEUDO[key]; row.noiseShort = true; row.noiseLabel = RLABEL[key]; }
+          channels.push(row);
+        }
+      }
+      // Y8950 ADPCM-B行(NB/OAB行と同じ3段階表示。スナップショットが持つ時だけ)
+      if (s && s.adpcmB) {
+        const c = s.adpcmB;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: 'OLB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' },
+          active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
+          panL: 1, panR: 1 });
+      }
+    }
+
+    if (chips.includes('ym2203fm')) {
+      // YM2203(VGM: OPN、PC-88/PC-98/アーケード): 4op FM×3ch(YM2612と同じFM波形表示)。
+      // 内蔵SSGは 'kssPsg' のKP1-3行として別途出す(main.js vgmKeyboardChips)。デュアルチップは
+      // ライブスナップショットが6ch(3+3)で返り、OP4-6/KP4-6行が2個目になる。
+      const live = extraSnaps && extraSnaps.ym2203FmLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.ym2203fm ? extraSnaps.ym2203fm[frameIdx] : null);
+      const COLS = ['#ffcc00', '#ffdd44', '#ffe566', '#ffee88', '#fff2aa', '#fff8cc'];
+      const nFm = s && s.channels ? s.channels.length : 3;
+      for (let ch = 0; ch < nFm; ch++) {
+        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, waveData: null };
+        const wave = (c.waveData && c.waveData.length && c.active)
+          ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
+          : { t: 'fm', nx: 256, ny: 256 };
+        channels.push({ id: `OP${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
       }
     }
 
@@ -13413,7 +14753,9 @@
           ctx.fillStyle = lit ? '#1a1830' : '#a9a3bb';
           ctx.font = Math.min(9, Math.floor(drumLaneW) - 2) + 'px ' + fontStack('mono');
           ctx.textBaseline = 'middle';
-          ctx.fillText(drumLanes[i].label, 0, 0);
+          // ★名前はユーザーが自由に付けられるので、パッドの長さに収める(はみ出すと
+          //   隣のレーンや音程鍵盤の上に文字が乗る)
+          ctx.fillText(drumLanes[i].label, 0, 0, keyLen - 10);
           ctx.restore();
         }
       } else {
@@ -13426,7 +14768,7 @@
           ctx.fillStyle = lit ? '#1a1830' : '#a9a3bb';
           ctx.font = Math.min(9, Math.floor(drumLaneW) - 2) + 'px ' + fontStack('mono');
           ctx.textBaseline = 'middle';
-          ctx.fillText(drumLanes[i].label, 4, y + drumLaneW / 2 + 0.5);
+          ctx.fillText(drumLanes[i].label, 4, y + drumLaneW / 2 + 0.5, keyLen - 12);
         }
       }
     }
@@ -13452,6 +14794,13 @@
           ctx.fillRect(pos.x + 0.5, keyLen - 8, wkW - 1, 7);
           ctx.globalAlpha = 1;
         }
+        // Cの音名(横向きと同じく鍵に書く)。黒鍵に隠れない手前側=下端寄りへ
+        if (semi === 0 && wkW >= 8) {
+          ctx.fillStyle = color ? '#1a1830' : '#6b6b7a';
+          ctx.font = Math.min(9, Math.floor(wkW) - 1) + 'px ' + fontStack('sans');
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(midiToName(midi), pos.x + 2, keyLen - 9);
+        }
       } else {
         const y = H - pos.x - wkW; // 高音が上: 音程軸pをcanvasの下から上へ
         ctx.fillRect(0.5, y + 0.5, keyLen - 1, wkW - 1);
@@ -13462,9 +14811,7 @@
           ctx.fillRect(1, y + 0.5, 7, wkW - 1);
           ctx.globalAlpha = 1;
         }
-        // Cの音名は鍵の上(黒鍵に隠れない手前側)に書く(縦向きはロール側のレーン先頭に
-        // 書いているが、横向きはレーンが薄くて文字が入らないため鍵に書く)。鍵が細すぎる
-        // ときは省略する
+        // Cの音名は鍵の上(黒鍵に隠れない手前側)に書く。鍵が細すぎるときは省略する
         if (semi === 0 && wkW >= 8) {
           ctx.fillStyle = color ? '#1a1830' : '#6b6b7a';
           ctx.font = Math.min(9, Math.floor(wkW) - 1) + 'px ' + fontStack('sans');
@@ -13527,6 +14874,7 @@
       this._rollTimeline = null;  // ピアノロール用ノート区間 [{color, notes:[{startSec,endSec,midi}]}]
       this._drumLanes = [];       // ドラム区画のレーン表 [{key,label,color,subN}](_rebuildDrumLanes)
       this._drumLaneOf = new Map(); // drumKey → レーン番号(鍵盤のパッド点灯用)
+      this._drumLaneNames = {};   // drumKey → ユーザーが付けた表示名(ドラム(DPCM)パネルから同期)
       this._rollCursor = {};      // track.id → 「もう画面上端より上に流れ去った」最初のnote index(_renderRollの走査起点キャッシュ)
       this._rollSongTimeBase = 0; // 最後に実測位置が更新された時点での「曲内基準の経過時間」(確定値)
       this._rollLastRawPos = null; // 直前に_renderRollへ渡された実時間(壁時計)位置
@@ -13571,6 +14919,16 @@
       //   問題が原理的に起きない。
       this.onDrumAudition = null;
       this._drumAuditionMode = 'raw';
+      this.onOpenDrumPanel = null;    // 割当セルの「パッド」ボタン(ドラム(DPCM)パネルを開く)
+      this.onOpenFile = null;         // ヘッダの「ファイルを開く」
+      this.onToMml = null;            // ヘッダの「to MML」
+      this.onRepeatModeChange = null; // 曲が終わった後の挙動が変わったとき
+      this._repeatBtnEl = null;
+      this._repeatMode = 'next';
+      try {
+        const m = localStorage.getItem(REPEAT_MODE_KEY);
+        if (m && REPEAT_MODES.indexOf(m) >= 0) this._repeatMode = m;
+      } catch (e) { /* ignore */ }
       // (ch, kind:'drum'|'pitch'|null) => void  note列の小メニューでの打楽器/音階の手動指定
       this.onSampleKind = null;
       this._sampleMenuEl = null;
@@ -13587,6 +14945,15 @@
       this._layout = loadLayoutSettings();         // ロールの向き/置き場/一覧の多段(localStorage永続化)
       // 下配置でのロール高さ / 右配置での一覧幅(どちらもスプリッターで変更、localStorage永続化)
       this._rollHeight = ROLL_CANVAS_HEIGHT;
+      // 一覧/大波形のサイズ(スプリッターで可変。0=未設定でCSS既定)
+      this._listRowsHeight = 0;
+      this._bigWaveWidth = 0;
+      try {
+        const rh = parseInt(localStorage.getItem('mml_keyboardRowsHeight'), 10);
+        if (Number.isFinite(rh) && rh >= 60) this._listRowsHeight = rh;
+        const ww = parseInt(localStorage.getItem('mml_keyboardWaveWidth'), 10);
+        if (Number.isFinite(ww) && ww >= 120) this._bigWaveWidth = ww;
+      } catch (e) { /* ignore */ }
       this._listWidth = null;
       try {
         const h = parseInt(localStorage.getItem('mml_pianoRollHeight'), 10);
@@ -13692,6 +15059,17 @@
       // アーカイブ(m3u)を開いていればその曲送り、実ファイル単体なら曲番号送りで、
       // MML再生を表示中は操作対象が無いのでグレーアウトする(setTransportState)。
       const transportBar = this._buildTransportBar();
+      // 曲が終わった後の挙動(次の曲 / 1曲リピート / ランダム / 停止)。1つのアイコンが
+      // クリックのたびに切り替わる。ファイル名バッジの左に置く
+      const repeatBtn = this._buildRepeatBtn();
+      // ファイルを開く / to MML。ヘッダ左端(旧「鍵盤表示」の文字の位置)へ移す。
+      // 元のツールバー側のボタンをそのまま押す複製なので、動作の実体は1箇所のまま
+      const openBtn = this._buildProxyBtn('kbd-open-btn', T('ファイルを開く'),
+        '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.5c0-.83.67-1.5 1.5-1.5h3.4l1.4 1.6H16c.83 0 1.5.67 1.5 1.5v7c0 .83-.67 1.5-1.5 1.5H4c-.83 0-1.5-.67-1.5-1.5v-8.6Z"/></svg>',
+        () => { if (this.onOpenFile) this.onOpenFile(); });
+      const toMmlBtn = this._buildProxyBtn('kbd-tomml-btn', T('MMLへ変換'),
+        '<span class="kbd-tomml-text">to MML</span>',
+        () => { if (this.onToMml) this.onToMml(); });
 
       const winEl = this.container.closest('.float-window');
       const headerEl = winEl && winEl.querySelector('.float-window-header');
@@ -13700,18 +15078,25 @@
           const old = headerEl.querySelector(sel);
           if (old) old.remove();
         }
+        for (const sel of ['.kbd-open-btn', '.kbd-tomml-btn', '.kbd-repeat-btn']) {
+          const old = headerEl.querySelector(sel);
+          if (old) old.remove();
+        }
         const closeBtn = headerEl.querySelector('.float-window-close');
-        headerEl.insertBefore(layoutBtn, closeBtn || null);
-
-        headerEl.insertBefore(speedBar, layoutBtn);
+        headerEl.insertBefore(speedBar, closeBtn || null);
         headerEl.insertBefore(masterVolBar, speedBar);
-        // タイトル: 「鍵盤表示」+ 何を表示しているかのバッジ(MML / NSF · ファイル名 等。
-        // どちらを再生中なのか分かりづらいという要望から。setSourceInfo()で更新)
+        // ★ヘッダ左端は「鍵盤表示」という文字ではなく[ファイルを開く][レイアウト][to MML]。
+        //   タイトル文字はウィンドウの見出しとして自明なので置かない(ユーザー指示)
         const titleEl = headerEl.querySelector('span');
         if (titleEl && !titleEl.classList.contains('kbd-src-badge')) {
-          titleEl.textContent = T('鍵盤表示');
+          titleEl.textContent = '';
+          titleEl.style.display = 'none';
           this._titleEl = titleEl;
         }
+        // 並びは [ファイルを開く][to MML][レイアウト](ユーザー指示で to MML と レイアウトを入れ替え)
+        headerEl.insertBefore(openBtn, titleEl || masterVolBar);
+        headerEl.insertBefore(toMmlBtn, titleEl || masterVolBar);
+        headerEl.insertBefore(layoutBtn, titleEl || masterVolBar);
         this._srcBadgeEl = document.createElement('span');
         this._srcBadgeEl.className = 'kbd-src-badge';
         this._srcBadgeEl.addEventListener('click', (e) => {
@@ -13719,9 +15104,10 @@
           if (!this._transportState.canToggleSource) return;
           if (this.onSourceToggle) this.onSourceToggle();
         });
-        if (this._titleEl) this._titleEl.insertAdjacentElement('afterend', this._srcBadgeEl);
-        else headerEl.insertBefore(this._srcBadgeEl, masterVolBar);
-        this._srcBadgeEl.insertAdjacentElement('afterend', transportBar);
+        // ファイル名バッジの左に [再生コントロール][終了後の挙動] を置く(ユーザー指示)
+        headerEl.insertBefore(this._srcBadgeEl, masterVolBar);
+        headerEl.insertBefore(transportBar, this._srcBadgeEl);
+        headerEl.insertBefore(repeatBtn, this._srcBadgeEl);
         this._renderSourceBadge();
         this._renderTransport();
       } else {
@@ -13928,6 +15314,25 @@
         left.style.width = w + 'px';
       }, () => left.offsetWidth, () => {
         try { localStorage.setItem('mml_keyboardListWidth', String(this._listWidth)); } catch (e) { /* ignore */ }
+      });
+      // 一覧(音源ごとのCH表示)と大波形の間のスプリッター。大波形が一覧の下にあるとき(縦並び)
+      // はCH一覧の高さを、右にあるとき(横並び)は大波形の幅を変える。ユーザー要望で
+      // 「各表示の境目でサイズを変えられる」ようにするためのもの
+      this._waveSplitterEl = this._makeSplitter('horizontal', (delta, start) => {
+        const h = Math.max(60, Math.round(start + delta));
+        this._listRowsHeight = h;
+        this._rowsEl.style.flex = 'none';
+        this._rowsEl.style.height = h + 'px';
+      }, () => this._rowsEl.offsetHeight, () => {
+        try { localStorage.setItem('mml_keyboardRowsHeight', String(this._listRowsHeight)); } catch (e) { /* ignore */ }
+      });
+      this._waveSplitterVEl = this._makeSplitter('vertical', (delta, start) => {
+        const w = Math.max(120, Math.round(start - delta)); // 左へドラッグ=大波形が広くなる
+        this._bigWaveWidth = w;
+        this._bigWaveEl.style.flex = 'none';
+        this._bigWaveEl.style.width = w + 'px';
+      }, () => this._bigWaveEl.offsetWidth, () => {
+        try { localStorage.setItem('mml_keyboardWaveWidth', String(this._bigWaveWidth)); } catch (e) { /* ignore */ }
       });
       // 一覧(上段)とロールペイン(下段)の間のスプリッター(ロールを下に置く配置でのみ表示。
       // ドラッグでロールの高さを変える。高さはlocalStorageに保存)
@@ -14255,6 +15660,52 @@
       return bar;
     }
 
+    // ヘッダへ置く小さな代理ボタン(実体は別の場所のボタン/main.jsのコールバック)
+    _buildProxyBtn(cls, title, innerHtml, onClick) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'kbd-hdr-btn ' + cls;
+      b.title = title;
+      b.setAttribute('aria-label', title);
+      b.innerHTML = innerHtml;
+      b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+      return b;
+    }
+
+    // 曲が終わった後の挙動。1つのアイコンをクリックのたびに次のモードへ回す
+    _buildRepeatBtn() {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'kbd-hdr-btn kbd-repeat-btn';
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const i = REPEAT_MODES.indexOf(this._repeatMode);
+        this.setRepeatMode(REPEAT_MODES[(i + 1) % REPEAT_MODES.length]);
+        if (this.onRepeatModeChange) this.onRepeatModeChange(this._repeatMode);
+      });
+      this._repeatBtnEl = b;
+      this._renderRepeatBtn();
+      return b;
+    }
+
+    setRepeatMode(mode) {
+      if (REPEAT_MODES.indexOf(mode) < 0) mode = 'next';
+      this._repeatMode = mode;
+      try { localStorage.setItem(REPEAT_MODE_KEY, mode); } catch (e) { /* ignore */ }
+      this._renderRepeatBtn();
+    }
+    getRepeatMode() { return this._repeatMode; }
+
+    _renderRepeatBtn() {
+      const b = this._repeatBtnEl;
+      if (!b) return;
+      const info = REPEAT_ICONS[this._repeatMode] || REPEAT_ICONS.next;
+      b.innerHTML = info.svg;
+      b.title = info.label();
+      b.setAttribute('aria-label', info.label());
+      b.classList.toggle('kbd-repeat-btn--stop', this._repeatMode === 'stop');
+    }
+
     // main.js が再生状態の変化ごとに呼ぶ。state: { playing, canPlay, canStop, canPrevNext, canToggleSource }
     setTransportState(state) {
       const s = this._transportState;
@@ -14341,9 +15792,56 @@
     // 実際のシークは onRollSeek(実時間の秒) に委ね(main.js: seekToSeconds)、ドラッグ中は
     // 間引いて呼び、離した時に最終位置で呼ぶ。返ってきた(クランプ後の)秒で表示位置を合わせる。
     // ドラッグ中の描画は _renderRoll() が _rollDrag.pos を優先する。
+    // ロール上の点(clientX/Y)にノートがあればそのトラックidを返す(無ければnull)。
+    // 判定は _drawRollCanvas の描画と同じ座標計算を使う。
+    //  ・ノートの上 → そのchを大波形へフォーカスする(ドラッグシークはしない)
+    //  ・ノートの無いところ → 従来どおりドラッグでシーク
+    _trackAtRollPoint(canvas, clientX, clientY, onlyId, lane) {
+      if (!this._rollTimeline || !this._rollTimeline.length) return null;
+      const r = canvas.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      const nDrum = (this._drumLanes || []).length;
+      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? LANE_VISIBLE_WHITE : 0, nDrum);
+      // CSS表示サイズ → canvas内部解像度
+      const cx = (clientX - r.left) * (canvas.width / r.width);
+      const cy = (clientY - r.top) * (canvas.height / r.height);
+      // canvas座標 → (音程軸p, 時間軸t)。makeRollGeom の point() の逆変換
+      const p = g.vertical ? cx : (g.H - cy);
+      const t = g.vertical ? (g.H - cy) : cx;
+      if (t < 0 || t > g.timeLen) return null;
+      const pos = this._rollLastDrawnPos || 0;
+      const sec = pos + t / ROLL_PX_PER_SEC;
+      const wkW = g.wk, bkW = g.bk;
+      const offPx = lane ? lane.scrollWhite * wkW : 0;
+      const pitchOff = g.drumOff - offPx;
+      // 手前(描画順が後=最前面)から探したいので逆順に見る
+      for (let ti = this._rollTimeline.length - 1; ti >= 0; ti--) {
+        const track = this._rollTimeline[ti];
+        if (onlyId !== null && track.id !== onlyId) continue;
+        for (const note of track.notes) {
+          if (note.startSec > sec || note.endSec <= sec) continue;
+          let pLo, pSize;
+          if (note.drumLane !== undefined) {
+            if (note.drumLane >= nDrum) continue;
+            const d = drumLaneX(note.drumLane, note.drumSub, note.drumSubN, g.drumLaneW);
+            pLo = d.x - offPx + 1;
+            pSize = Math.max(2, d.size - 2);
+          } else {
+            const kp = keyX(note.midi, wkW);
+            if (!kp) continue;
+            kp.x += pitchOff;
+            pLo = kp.isBlack ? kp.x - bkW / 2 : kp.x + 0.5;
+            pSize = kp.isBlack ? bkW : (wkW - 1);
+          }
+          if (p >= pLo && p < pLo + pSize) return track.id;
+        }
+      }
+      return null;
+    }
+
     _attachRollSeekDrag(canvas) {
       canvas.classList.add('kbd-roll--seekable');
-      canvas.title = T('ドラッグでシーク(縦向きは上下、横向きは左右)');
+      canvas.title = T('音符をクリックでそのchを波形表示へ / 音符の無いところをドラッグでシーク');
       const SEEK_THROTTLE_MS = 60;
       let lastSeekMs = 0;
       const applySeek = (songSec, force) => {
@@ -14359,6 +15857,9 @@
       };
       canvas.addEventListener('pointerdown', (e) => {
         if (e.button !== 0 || !this._rollTimeline) return;
+        // ノートの上で押した場合はシークせず、そのchを大波形へフォーカスする
+        const hit = this._trackAtRollPoint(canvas, e.clientX, e.clientY, canvas._rollOnlyId != null ? canvas._rollOnlyId : null, canvas._rollLane || null);
+        if (hit) { this._selectWave(hit); e.preventDefault(); return; }
         this._rollDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, startPos: this._rollLastDrawnPos || 0, pos: this._rollLastDrawnPos || 0, moved: false };
         try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* キャプチャ不可でも要素上のmoveで追従する */ }
         canvas.classList.add('dragging');
@@ -14408,7 +15909,11 @@
       this._renderRoll(this._rollLastRawPosForDrag());
     }
 
+    // ★ホバーでのピックアップは「その行の小波形が大波形として選択されている」ときだけ効かせる
+    //   (ユーザー指示)。一覧の上をマウスが通るだけで次々ロールが切り替わるのを避け、
+    //   「注目したいchを波形で選んでから、その行を指す」という操作に揃える。
     _setSpotlightHover(id) {
+      if (id !== null && id !== this._shownWaveId) id = null;
       if (this._spotlightHoverId === id) return;
       this._spotlightHoverId = id;
       this._redrawRollForSpotlight();
@@ -14482,8 +15987,30 @@
       const big = this._bigWaveEl;
       if (!big) return;
       if (big.parentNode) big.parentNode.removeChild(big);
-      if (this._bigWaveBelow()) this._leftEl.appendChild(big);
-      else this._mainEl.appendChild(big);
+      for (const sp of [this._waveSplitterEl, this._waveSplitterVEl]) {
+        if (sp && sp.parentNode) sp.parentNode.removeChild(sp);
+      }
+      // 置き場に応じて向きの合うスプリッターを一覧と大波形の間へ挟む。
+      // 置き場が変わったらインラインサイズは捨てる(縦横で意味が変わるため)
+      if (this._bigWaveBelow()) {
+        this._bigWaveEl.style.flex = '';
+        this._bigWaveEl.style.width = '';
+        this._leftEl.appendChild(this._waveSplitterEl);
+        this._leftEl.appendChild(big);
+        if (this._listRowsHeight) {
+          this._rowsEl.style.flex = 'none';
+          this._rowsEl.style.height = this._listRowsHeight + 'px';
+        }
+      } else {
+        this._rowsEl.style.flex = '';
+        this._rowsEl.style.height = '';
+        this._mainEl.appendChild(this._waveSplitterVEl);
+        this._mainEl.appendChild(big);
+        if (this._bigWaveWidth) {
+          big.style.flex = 'none';
+          big.style.width = this._bigWaveWidth + 'px';
+        }
+      }
     }
 
     // レイアウト設定をCSSクラス/インラインサイズへ反映する(向き・置き場・多段・折りたたみ)
@@ -14668,7 +16195,7 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
@@ -14692,6 +16219,9 @@
       this._extraSnaps.ymLive = typeof result.getYm2612 === 'function' ? result.getYm2612 : null;
       this._extraSnaps.ym2610FmLive = typeof result.getYm2610Fm === 'function' ? result.getYm2610Fm : null;
       this._extraSnaps.ym2151Live = typeof result.getYm2151 === 'function' ? result.getYm2151 : null;
+      this._extraSnaps.ym2203FmLive = typeof result.getYm2203Fm === 'function' ? result.getYm2203Fm : null;
+      this._extraSnaps.ym2608FmLive = typeof result.getYm2608Fm === 'function' ? result.getYm2608Fm : null;
+      this._extraSnaps.oplLive = typeof result.getOpl === 'function' ? result.getOpl : null;
       this._extraSnaps.ga20Live = typeof result.getGa20 === 'function' ? result.getGa20 : null;
       this._extraSnaps.segapcmLive = typeof result.getSegaPcm === 'function' ? result.getSegaPcm : null;
       this._extraSnaps.c140Live = typeof result.getC140 === 'function' ? result.getC140 : null;
@@ -14842,6 +16372,36 @@
       this._sampleMenuEl = null;
     }
 
+    /** ドラム区画のレーン表(ドラム(DPCM)パネル用)。[{key,label,color,subN}] */
+    getDrumLanes() { return (this._drumLanes || []).slice(); }
+
+    /**
+     * ドラム区画のパッド名を差し替える。map は { drumKey → 表示名 }。
+     * ★名前の実体は「サンプル内容のハッシュ」で持っている(src/convert/drumSamples.js)。
+     *   ロールのノートはハッシュを持たない(Workerからの構造化複製で載せる情報を増やしたくない)ので、
+     *   drumKey↔ハッシュの対応を知っている main.js 側から名前だけを流し込む形にしてある。
+     */
+    setDrumLaneNames(map) {
+      this._drumLaneNames = map || {};
+      if (!this._drumLanes || !this._drumLanes.length) return;
+      for (const l of this._drumLanes) {
+        if (l.key && this._drumLaneNames[l.key]) l.label = this._drumLaneNames[l.key];
+        else if (l.key) l.label = l.autoLabel;
+      }
+      // 停止中でもその場で見た目を更新する(パッドの文字はロールと鍵盤の両方に出る)
+      this._redrawRollForSpotlight();
+      this._drawPianos(this._lastChannels || []);
+    }
+
+    /** サンプルごとの打点数(ドラム(DPCM)パネルの「打点」列)。drumKey → 件数 */
+    getDrumHitCounts() {
+      const out = {};
+      for (const track of (this._rollTimeline || [])) {
+        for (const n of track.notes) if (n.drumKey) out[n.drumKey] = (out[n.drumKey] || 0) + 1;
+      }
+      return out;
+    }
+
     _drumsForPiano() {
       if (!this._drumLanes || !this._drumLanes.length) return undefined;
       return { lanes: this._drumLanes, laneOf: this._drumLaneOf };
@@ -14923,9 +16483,12 @@
         const subN = Math.max(1, ends.length);
         for (const n of notes) n.drumSubN = subN;
         const isOther = map.lanes[i].key === null;
+        const auto = isOther ? T('他') : (labels[i] || '');
+        const named = (!isOther && this._drumLaneNames) ? this._drumLaneNames[map.lanes[i].key] : null;
         lanes.push({
           key: map.lanes[i].key,
-          label: isOther ? T('他') : (labels[i] || ''),
+          autoLabel: auto,   // 名前を消したときに戻す既定ラベル(ROMアドレスの16進)
+          label: named || auto,
           color: isOther ? DRUM_OTHER_COLOR : DRUM_LANE_COLORS[i % DRUM_LANE_COLORS.length],
           subN,
         });
@@ -15114,6 +16677,11 @@
       });
       // クリックが行の他の操作(大波形選択・色ピッカー)に伝播しないようにする
       for (const el of [targetSel, toneSel]) el.addEventListener('click', (e) => e.stopPropagation());
+      const drumBtn = row.querySelector('.kbd-assign-drum');
+      if (drumBtn) drumBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.onOpenDrumPanel) this.onOpenDrumPanel();
+      });
     }
 
     // この曲に実在する借用先(表示中の各行の既定の借用先)。NSFのように「同じ音源の
@@ -15131,10 +16699,28 @@
     }
 
     // 借用先を選び直す。既定と同じ値を選んだらユーザー指定を消して「自動」に戻す
+    // 借用先を1つの枠へ移すと、そこに先に居たchは行き場を失う(変換器は先に置かれた方を
+    // 採り、後は「対象外」にする)。UI上は赤い重複表示が出るだけで、ユーザーは自分で
+    // 前のchをスキップにし直す必要があった。★2A03ノイズのように枠が1つしか無い借用先では
+    // これが「どちらを鳴らすか選ぶ」操作そのものなので、選んだ時点で前のchを自動でスキップへ
+    // 落とし、ラジオボタンのように振る舞わせる(SN76489デュアルのノイズ2本、SNノイズと
+    // サンプルPCMのドラムパートの取り合いが実例)。
     _setAssignTarget(chId, value) {
       const plan = channelPlan();
       if (!plan) return;
       const def = this._defaultTargetOf(chId);
+      // ★DPCMだけは例外。複数のPCMチャンネルをまとめて1本のDPCMパートへ焼く設計
+      //   (同時発音区間はミックスして1サンプルにする。src/vgm2mml/expansion/dpcmDrums.js)
+      //   なので、ここで他chを追い出すとドラムを複数ch選べなくなる。
+      if (value && value !== 'skip' && !MULTI_SOURCE_TARGETS.has(value)) {
+        for (const el of this._rowEls) {
+          if (el.id === chId) continue;
+          const cur = (plan.get(el.id) || {}).target || el.defaultTarget || 'skip';
+          if (cur !== value) continue;
+          const otherDef = this._defaultTargetOf(el.id);
+          plan.set(el.id, { target: otherDef === 'skip' ? null : 'skip' });
+        }
+      }
       plan.set(chId, { target: value === def ? null : value, tone: null });
     }
 
@@ -15158,11 +16744,21 @@
           // 行内のセレクトは幅が狭いので「(既定)」は付けない(既定から変えた行はpart列の
           // チップがアクセント色になるので区別はつく)。ポップオーバー側には付ける。
           o.textContent = plan.targetLabel(t);
+          // 音源ごとの色分けは「選ぶとき(=リストを開いたとき)」だけ、薄い背景色で出す。
+          // ★文字色は塗らない(読みづらいというユーザー指摘)。行に閉じているセレクト本体も
+          //   既定の見た目のままにして、色は候補一覧の中でのグルーピングだけに使う。
+          const c = plan.colorOfTarget ? plan.colorOfTarget(t) : '';
+          if (c) o.style.backgroundColor = tintOf(c);
           el.targetSel.appendChild(o);
         }
       }
       el.targetSel.value = target;
+      // 以前は借用先の色をセレクト本文とpart列の文字色に塗っていた。もう塗らないので、
+      // 行を作り直さずに切り替わったときのために明示的に消しておく
+      el.targetSel.style.color = '';
+      if (el.partEl) el.partEl.style.color = '';
 
+      if (el.drumBtn) el.drumBtn.style.display = (target === 'dpcm') ? '' : 'none';
       const toneKind = plan.toneKindFor(target);
       if (!toneKind) { el.toneSel.style.display = 'none'; el.toneSig = ''; return; }
       el.toneSel.style.display = '';
@@ -15204,7 +16800,8 @@
         el.partEl.textContent = el.letter || (editable ? '—' : '');
         el.partEl.classList.toggle('kbd-part--custom', custom);
         el.row.classList.toggle('kbd-ch-row--skip', editable && el.target === 'skip');
-        const dup = editable && el.target !== 'skip' && count[el.target] > 1;
+        // DPCMは複数chをまとめて載せる先なので重複扱いにしない(上の MULTI_SOURCE_TARGETS 参照)
+        const dup = editable && el.target !== 'skip' && !MULTI_SOURCE_TARGETS.has(el.target) && count[el.target] > 1;
         el.row.classList.toggle('kbd-ch-row--conflict', dup);
         if (el.partEl) {
           el.partEl.title = dup ? T('この借用先は他のチャンネルと重複しています')
@@ -15482,6 +17079,8 @@
             this._muteState.set(ch.id, !checkbox.checked);
             if (this.onMuteChange) this.onMuteChange(this.getMuteConfig());
             this._renderMuteAllBtn(); // 見出しの一括ミュートボタンの状態を追随させる
+            // ミュートはロールの見え方(減光)にも効くので、停止中でもその場で描き直す
+            this._redrawRollForSpotlight();
           });
         }
         if (!ch.isAllRow) this._attachVolumeSlider(row, ch.id);
@@ -15492,7 +17091,13 @@
         if (waveCanvas) {
           waveCanvas.classList.add('kbd-wave--clickable');
           if (chId === this._shownWaveId) waveCanvas.classList.add('kbd-wave--selected');
-          waveCanvas.addEventListener('click', () => this._selectWave(chId));
+          waveCanvas.addEventListener('click', () => {
+            this._selectWave(chId);
+            // ★選んだ直後はカーソルがその行の上にあるので、そのままピックアップさせる。
+            //   ホバーはmouseenterでしか発火しないため、クリックで選んだだけでは
+            //   ロールが反応しなかった(ユーザー報告)
+            this._setSpotlightHover(chId);
+          });
         }
 
         // 丸のクリックで色ピッカーを開く(選んだ色は即localStorageへ保存され全表示に反映)
@@ -15543,6 +17148,7 @@
           partEl: row.querySelector('.kbd-part'),
           targetSel: row.querySelector('.kbd-assign-target'),
           toneSel: row.querySelector('.kbd-assign-tone'),
+          drumBtn: row.querySelector('.kbd-assign-drum'),
           defaultTarget: ch.defaultTarget,
           target: ch.target,
         });
@@ -15692,6 +17298,13 @@
     }
 
     // 現在のチェックボックス状態からミュート設定を返す
+    /** 1つでもミュートされている行があるか(無音自動送りの判定を止めるため。main.js参照) */
+    hasAnyMute() {
+      for (const el of this._rowEls) if (el.checkbox && !el.checkbox.checked) return true;
+      for (const el of (this._spcRowEls || [])) if (el.checkbox && !el.checkbox.checked) return true;
+      return false;
+    }
+
     getMuteConfig() {
       const config = { apu: {}, expansion: {} };
       for (const el of this._rowEls) {
@@ -15997,7 +17610,12 @@
         this._rollCursor = {};
       }
       this._rollLastDrawnPos = pos;
-      for (const t of targets) this._drawRollCanvas(t.canvas, pos, t.onlyId, t.lane || null);
+      for (const t of targets) {
+        // ヒットテスト(_trackAtRollPoint)が同じ座標系を使えるよう、そのcanvasの表示条件を控える
+        t.canvas._rollOnlyId = t.onlyId;
+        t.canvas._rollLane = t.lane || null;
+        this._drawRollCanvas(t.canvas, pos, t.onlyId, t.lane || null);
+      }
     }
 
     // チャンネルごとのレーンの音程窓(白鍵LANE_VISIBLE_WHITE本ぶん)を、そのchの「鳴っている音+
@@ -16133,14 +17751,8 @@
             ctx.lineTo(g.W, y);
           }
           ctx.stroke();
-          // Cの音名ラベル(縦向きのみ。横向きはレーンが薄くて入らないので鍵盤側drawPiano()が
-          // 鍵の上に書く)
-          if (semi === 0 && g.vertical) {
-            ctx.fillStyle = '#6b6b7a';
-            ctx.font = '9px ' + fontStack('sans');
-            ctx.textBaseline = 'top';
-            ctx.fillText(midiToName(midi), keyPos.x + 2, 1);
-          }
+          // ★音名ラベルはロールではなく鍵盤(drawPiano)に書く。以前は縦向きだけロールの
+          //   上端に書いていたが、横向きは鍵に書いており置き場が食い違っていた(ユーザー指摘)。
         }
       }
 
@@ -16193,8 +17805,10 @@
 
       for (const track of drawOrder) {
         if (onlyId !== null && track.id !== onlyId) continue; // レーン表示: このchのノートだけ
-        if (this._isTrackMuted(track.id)) continue; // ミュート中のチャンネルは描画しない
-        const dimAlpha = (spotActive && track.id !== spotId) ? SPOTLIGHT_DIM_ALPHA : 1;
+        // ミュート中のchは「消す」のではなくスポットライトと同じ減光で描く。
+        // 消してしまうと、そのchが元々何も鳴っていないのか消しているのか区別できない
+        const muted = this._isTrackMuted(track.id);
+        const dimAlpha = (muted || (spotActive && track.id !== spotId)) ? SPOTLIGHT_DIM_ALPHA : 1;
         const notes = track.notes;
         let idx = this._rollCursor[track.id] || 0;
         if (idx > notes.length) idx = notes.length;
@@ -16352,7 +17966,10 @@
       const chId = v.label;
       waveCanvas.classList.add('kbd-wave--clickable');
       if (chId === this._shownWaveId) waveCanvas.classList.add('kbd-wave--selected');
-      waveCanvas.addEventListener('click', () => this._selectWave(chId));
+      waveCanvas.addEventListener('click', () => {
+        this._selectWave(chId);
+        this._setSpotlightHover(chId); // NSF側と同じく、選んだ直後にロールもピックアップ
+      });
 
       // 丸のクリックで色ピッカーを開く
       this._attachColorPicker(row.querySelector('.kbd-dot'), v.label, v.color);
@@ -16671,6 +18288,11 @@
   // PCM品質(冒頭コメント参照)。boolean群とは別に許容値で正規化する
   const PCM_RATE_VALUES = ['max', 8, 4, 2, 1];
   const PITCH_SA_VALUES = ['octave', 'note', 'off'];
+  // 同時発音をミックスして1サンプルに焼くときのDMCレートの決め方
+  //   'quality' … 寄与するサンプルのうち最高音質を採る(既定)
+  //   'size'    … 最低に合わせて容量を優先する
+  const RATE_MIX_VALUES = ['quality', 'size'];
+  MML.Convert.RATE_MIX_VALUES = RATE_MIX_VALUES;
   MML.Convert.CMD_KEYS = CMD_KEYS;
   MML.Convert.SHAPE_KEYS = SHAPE_KEYS;
   MML.Convert.PCM_RATE_VALUES = PCM_RATE_VALUES;
@@ -16679,10 +18301,10 @@
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave' },
+                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality' },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave' },
+                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality' },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
 
@@ -16697,6 +18319,7 @@
         if (PCM_RATE_VALUES.indexOf(v) >= 0) out.PCM_RATE = v;
       }
       if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
+      if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
     }
     return out;
   };
@@ -16706,7 +18329,7 @@
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
       const p = PRESETS[name];
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA'].every(k => p[k] === n[k])) return name;
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA', 'RATE_MIX'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };
@@ -18720,6 +20343,230 @@
 })(globalThis);
 
 /*
+ * OPL系(Y8950=MSX-AUDIO / YM3812 / YM3526) → MML共通イベント形式 抽出
+ * MML.Kss2MmlExpansion.opl(writeLog, totalFrames, clock, toneReg) → { channels: [9], rhythm, adpcm }
+ *
+ * ポート0xC0=アドレスラッチ, 0xC1=データ書込(MSX-AUDIOの実I/Oポート。VGMのYM3812/YM3526/
+ * Y8950も captureVgmSongAsync が同じ形でwriteLogへ流すので、KSS/VGMで本抽出器を共有する)。
+ *   0xA0+ch=fnum下位8bit, 0xB0+ch=bit5キーオン/bit4-2ブロック/bit1-0 fnum上位,
+ *   0xC0+ch=FB/CNT, スロット別 0x20/0x40/0x60/0x80/0xE0(+オフセット表)。
+ *   0xBD: bit5=リズムモード, bit4-0=BD,SD,TOM,CYM,HH キーオン。
+ * 音程: freq = fnum × 2^(block-1) × fs / 2^19、fs = clock/72(3.58MHzで49716Hz)。
+ * 音量: キャリアTL(6bit×0.75dB)→ OPLL流の減衰値 v = TL>>2(0-15、3dB/step。値が大きいほど
+ * 小さい音=OPLL/VRC7と同じ向き。roll側は attenuated=true で反転表示する)。
+ *
+ * ★音色はOPLLカスタム音色(@OP 8バイト)へ直接変換して vrc7Tone で出す(2op同士なので
+ *   4op→2op変換より遥かに忠実。opllNuked.jsのPATCH_*と同じバイト並び):
+ *     b0/b1 = AM|VIB|EGT|KSR|MULT (mod/car)
+ *     b2    = KSL(mod)<<6 | TL(mod)   ※CNT=1(加算接続)はOPLLに無いのでTL=63(キャリアのみ)
+ *     b3    = KSL(car)<<6 | DC<<4 | DM<<3 | FB  ※DC/DM=半波フラグ。OPL2のWS1(半サイン)を
+ *             そのまま写像、WS2/WS3も半波で近似(YM3526はWS無し=常に0)
+ *     b4-b7 = AR|DR(mod,car), SL|RR(mod,car)
+ *
+ * リズムモード: OPLLと同じ流儀(kss2mml/expansion/opll.js RHYTHM_DEFS)で、リズムを使う曲は
+ * メロディ6ch+打楽器5種(BD/TOMは実音程、SD/CYM/HHは疑似音程レーン)。channelsは常に9本
+ * 固定でリズム時のch7-9は空(ロールの進捗再構築でトラック集合が変わらないようにする)。
+ *
+ * ADPCM-B(Y8950): writeLogからはサンプル内容が見えない(CPUがデータポートへ流し込むため)
+ * ので、音符化はせず打点だけを1レーンの疑似音程で出す(rhythmと同じ noiseRollIndex 方式、
+ * ロール/鍵盤のOLB行用)。MML変換ではチャンネルにしない。
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  MML.Kss2MmlExpansion = MML.Kss2MmlExpansion || {};
+
+  const NUM_MELODY_MAX = 9;
+  const NUM_MELODY_RHYTHM = 6;
+
+  function freqToNoteNumber(freq) {
+    if (freq <= 0) return null;
+    const n = Math.round(57 + 12 * Math.log2(freq / 440));
+    return (n >= 0 && n <= 119) ? n : null;
+  }
+
+  // ch → (mod, car) スロットレジスタオフセット
+  function slotOf(ch) {
+    const g = (ch / 3) | 0, k = ch % 3;
+    return [g * 8 + k, g * 8 + k + 3];
+  }
+
+  function buildTimeline(writeLog) {
+    let latch = 0;
+    const regs = new Uint8Array(256);
+    const keyon = new Array(NUM_MELODY_MAX).fill(false);
+    let rhythmKeys = 0;
+    let rhythmUsed = false;
+    let adpcmOn = false;
+    const frames = writeLog.map(writes => {
+      const attack = new Array(NUM_MELODY_MAX).fill(false);
+      const rhythmAttack = { bd: false, sd: false, tom: false, cym: false, hh: false };
+      let adpcmAttack = false;
+      for (const { addr, value, io } of writes) {
+        if (!io) continue;
+        if (addr === 0xC0) { latch = value & 0xFF; continue; }
+        if (addr !== 0xC1) continue;
+        regs[latch] = value;
+        if (latch >= 0xB0 && latch <= 0xB8) {
+          const ch = latch - 0xB0;
+          const on = !!(value & 0x20);
+          if (on && !keyon[ch]) attack[ch] = true;
+          keyon[ch] = on;
+        } else if (latch === 0xBD) {
+          if (value & 0x20) {
+            rhythmUsed = true;
+            const rising = value & ~rhythmKeys;
+            if (rising & 0x10) rhythmAttack.bd = true;
+            if (rising & 0x08) rhythmAttack.sd = true;
+            if (rising & 0x04) rhythmAttack.tom = true;
+            if (rising & 0x02) rhythmAttack.cym = true;
+            if (rising & 0x01) rhythmAttack.hh = true;
+            rhythmKeys = value & 0x1F;
+          } else {
+            rhythmKeys = 0;
+          }
+        } else if (latch === 0x07) {
+          // ADPCM-B(Y8950)制御: START(bit7)かつRECでない書込みを打点とする
+          const on = (value & 0x80) !== 0 && (value & 0x40) === 0;
+          if (on && !adpcmOn) adpcmAttack = true;
+          adpcmOn = on;
+        }
+      }
+      return { regs: regs.slice(), attack, rhythmAttack, adpcmAttack };
+    });
+    return { frames, rhythmUsed };
+  }
+
+  // 現在のレジスタ影から ch の音色をOPLLカスタム音色8バイトへ(冒頭コメント参照)
+  function opllToneBytes(regs, ch) {
+    const [m, c] = slotOf(ch);
+    const wse = !!(regs[0x01] & 0x20);
+    const half = (s) => (wse && (regs[0xE0 + s] & 3) >= 1) ? 1 : 0;
+    const b20 = (s) => regs[0x20 + s] & 0xFF; // AM|VIB|EGT|KSR|MULT: OPLLと同じビット並び
+    const cnt = regs[0xC0 + ch] & 1;
+    const fb = (regs[0xC0 + ch] >> 1) & 7;
+    const mTL = cnt ? 0x3F : (regs[0x40 + m] & 0x3F);
+    return [
+      b20(m), b20(c),
+      ((regs[0x40 + m] >> 6) << 6) | mTL,
+      ((regs[0x40 + c] >> 6) << 6) | (half(c) << 4) | (half(m) << 3) | fb,
+      regs[0x60 + m], regs[0x60 + c],
+      regs[0x80 + m], regs[0x80 + c]
+    ];
+  }
+
+  function extractChannelEvents(timeline, ch, fs, toneReg) {
+    const events = [];
+    const [, car] = slotOf(ch);
+    let cur = null;
+    function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
+    for (let f = 0; f < timeline.length; f++) {
+      const { regs, attack } = timeline[f];
+      const fnum = regs[0xA0 + ch] | ((regs[0xB0 + ch] & 3) << 8);
+      const block = (regs[0xB0 + ch] >> 2) & 7;
+      const keyon = !!(regs[0xB0 + ch] & 0x20);
+      const volume = Math.min(15, (regs[0x40 + car] & 0x3F) >> 2); // 減衰値(0=最大、OPLL向き)
+      const freqHz = (keyon && fnum > 0) ? fnum * Math.pow(2, block - 1) * fs / 524288 : null;
+      const note = freqHz != null ? freqToNoteNumber(freqHz) : null;
+      const vrc7Tone = (toneReg && note !== null) ? toneReg.assign(opllToneBytes(regs, ch)) : undefined;
+      if (!cur) { cur = { note, volume, instrument: 0, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
+      if (attack[ch] || note !== cur.note || volume !== cur.volume || vrc7Tone !== cur.vrc7Tone) {
+        flush(f);
+        cur = { note, volume, instrument: 0, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
+      }
+    }
+    flush(timeline.length);
+    return events;
+  }
+
+  // リズム5種(OPLLのRHYTHM_DEFSと同じ流儀。BD/TOMは実音程、他は疑似音程レーン)。
+  // 音量はスロットのTL>>2(BD=ch6car, SD=ch7car, TOM=ch8mod, CYM=ch8car, HH=ch7mod)
+  const RHYTHM_DEFS = [
+    { key: 'bd',  bit: 0x10, tlSlot: () => slotOf(6)[1], rollIndex: 0, fnumCh: 6 },
+    { key: 'sd',  bit: 0x08, tlSlot: () => slotOf(7)[1], rollIndex: 2, fnumCh: null },
+    { key: 'tom', bit: 0x04, tlSlot: () => slotOf(8)[0], rollIndex: 4, fnumCh: 8 },
+    { key: 'cym', bit: 0x02, tlSlot: () => slotOf(8)[1], rollIndex: 6, fnumCh: null },
+    { key: 'hh',  bit: 0x01, tlSlot: () => slotOf(7)[0], rollIndex: 8, fnumCh: null }
+  ];
+
+  function extractRhythmEvents(timeline, def, fs) {
+    const events = [];
+    const tlSlot = def.tlSlot();
+    let cur = null;
+    function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
+    for (let f = 0; f < timeline.length; f++) {
+      const { regs, rhythmAttack } = timeline[f];
+      const on = (regs[0xBD] & 0x20) !== 0 && (regs[0xBD] & def.bit) !== 0;
+      if (!on) { flush(f); continue; }
+      const volume = Math.min(15, (regs[0x40 + tlSlot] & 0x3F) >> 2);
+      let note = def.rollIndex, useRollIndex = true;
+      if (def.fnumCh !== null) {
+        const ch = def.fnumCh;
+        const fnum = regs[0xA0 + ch] | ((regs[0xB0 + ch] & 3) << 8);
+        const block = (regs[0xB0 + ch] >> 2) & 7;
+        const n = fnum > 0 ? freqToNoteNumber(fnum * Math.pow(2, block - 1) * fs / 524288) : null;
+        if (n !== null && n + 12 >= 24) { note = n; useRollIndex = false; }
+      }
+      const attack = !!rhythmAttack[def.key];
+      const mk = (retrigger) => useRollIndex
+        ? { note, noiseRollIndex: def.rollIndex, volume, start: f, end: f, retrigger }
+        : { note, volume, start: f, end: f, retrigger };
+      if (!cur) { cur = mk(true); continue; }
+      if (attack || volume !== cur.volume || note !== cur.note) { flush(f); cur = mk(attack); }
+      else cur.end = f;
+    }
+    flush(timeline.length);
+    return events;
+  }
+
+  // ADPCM-B(Y8950)の打点(1レーンの疑似音程。ロール/鍵盤のOLB行用、MML変換対象外)
+  function extractAdpcmEvents(timeline) {
+    const events = [];
+    let cur = null;
+    function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
+    for (let f = 0; f < timeline.length; f++) {
+      const { regs, adpcmAttack } = timeline[f];
+      const on = (regs[0x07] & 0x80) !== 0 && (regs[0x07] & 0x40) === 0;
+      if (!on) { flush(f); continue; }
+      const volume = Math.min(15, 15 - (regs[0x12] >> 4)); // level(0-255)→減衰値の向きへ
+      if (!cur) { cur = { note: 10, noiseRollIndex: 10, volume, start: f, end: f, retrigger: true }; continue; }
+      if (adpcmAttack || volume !== cur.volume) { flush(f); cur = { note: 10, noiseRollIndex: 10, volume, start: f, end: f, retrigger: !!adpcmAttack }; }
+      else cur.end = f;
+    }
+    flush(timeline.length);
+    return events;
+  }
+
+  MML.Kss2MmlExpansion.opl = function (writeLog, totalFrames, clock, toneReg) {
+    const fs = (clock || 3579545) / 72;
+    const { frames: timeline, rhythmUsed } = buildTimeline(writeLog);
+    const toCommon = ev => Object.assign(
+      { start: ev.start, end: ev.end, note: ev.note, volume: ev.volume, instrument: ev.instrument, retrigger: ev.retrigger },
+      ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
+      ev.vrc7Tone !== undefined ? { vrc7Tone: ev.vrc7Tone } : {},
+      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}
+    );
+    const rhythm = rhythmUsed
+      ? RHYTHM_DEFS.reduce((acc, def) => { acc[def.key] = extractRhythmEvents(timeline, def, fs); return acc; }, {})
+      : null;
+    const adpcm = extractAdpcmEvents(timeline);
+    return {
+      rhythmUsed,
+      rhythm,
+      adpcm: adpcm.length ? adpcm : null,
+      channels: Array.from({ length: NUM_MELODY_MAX }, (_, ch) => ({
+        events: (rhythmUsed && ch >= NUM_MELODY_RHYTHM)
+          ? []
+          : MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, ch, fs, toneReg)).map(toCommon),
+        hasVolume: true,
+        hasInstrument: true,
+        hasVrc7Tone: !!toneReg
+      }))
+    };
+  };
+})(globalThis);
+
+/*
  * GB音量エンベロープ(NRx2)の解析的シミュレーション
  * MML.Gbs2MmlExpansion.hwEnvelope = { volumeAt, updateAnchor }
  *
@@ -20008,7 +21855,9 @@
   // PSG→KP/SCC→KS/FMPAC→KF は src/ui/keyboard.js の extractChannels() の色分けと揃える。
   // clockOverride(省略可): AY/SCC抽出器に渡すZ80相当クロック。KSSは常にMSXの3.58MHz、
   // VGMはチップごとに違う(vgmPlayer.js captureVgmSongAsync の kss.clock)ので呼び出し側が渡す。
-  RollBuild.kss = function (writeLog, totalFrames, frameRate, header, sccUsed, clockOverride) {
+  // oplOpts(省略可): { used, clock, adpcm } — OPL系(KSSのMSX-AUDIO / VGMのYM3812・YM3526・
+  // Y8950)のOL行を作る。KSSは header.device.msxAudio から、VGMは data.kss.opl/oplClock から。
+  RollBuild.kss = function (writeLog, totalFrames, frameRate, header, sccUsed, clockOverride, oplOpts) {
     const frameDur = 1 / frameRate;
     const clock = clockOverride || (MML.KSS ? MML.KSS.Z80_CLOCK : 3579545);
     // volume は ay/scc/opll いずれも0-15(4bit)なので/15で0-1に正規化する。
@@ -20084,6 +21933,22 @@
             notes: toNotes(opllResult.rhythm[key] || [], true) });
         }
       }
+    }
+
+    // OPL系(MSX-AUDIO/YM3812/YM3526/Y8950): KF行と同じ流儀でOL行。音量はOPLL同様
+    // 減衰値(attenuated=true)。リズムモード曲は打楽器5行、Y8950 ADPCM打点はOLB行。
+    if (oplOpts && oplOpts.used && MML.Kss2MmlExpansion.opl) {
+      const oplResult = MML.Kss2MmlExpansion.opl(writeLog, totalFrames, oplOpts.clock);
+      const OL_COLS = ['#66ffcc', '#55eebb', '#44ddaa', '#33cc99', '#22bb88', '#11aa77', '#66e0d0', '#55d0c0', '#44c0b0'];
+      oplResult.channels.forEach((ch, i) => tracks.push({ id: `OL${i + 1}`, color: OL_COLS[i % OL_COLS.length], notes: toNotes(ch.events, true) }));
+      if (oplResult.rhythm) {
+        const RCOLS = { bd: '#ff5555', sd: '#ffaa55', tom: '#aaff55', cym: '#55ffaa', hh: '#55aaff' };
+        const RIDS = { bd: 'OLBD', sd: 'OLSD', tom: 'OLTM', cym: 'OLCY', hh: 'OLHH' };
+        for (const key of ['bd', 'sd', 'tom', 'cym', 'hh']) {
+          tracks.push({ id: RIDS[key], color: RCOLS[key], notes: toNotes(oplResult.rhythm[key] || [], true) });
+        }
+      }
+      if (oplResult.adpcm) tracks.push({ id: 'OLB', color: '#cc66ff', notes: toNotes(oplResult.adpcm, true) });
     }
 
     return tracks;
@@ -20196,13 +22061,14 @@
     if (data.kss) {
       const wl = data.kss.writeLog.slice(0, done);
       const fakeHeader = { device: { mode: 'MSX', fmpac: data.kss.opll } };
-      const kssTracks = RollBuild.kss(wl, done, frameRate, fakeHeader, data.kss.scc, data.kss.clock);
+      const kssTracks = RollBuild.kss(wl, done, frameRate, fakeHeader, data.kss.scc, data.kss.clock,
+        data.kss.opl ? { used: true, clock: data.kss.oplClock } : null);
       // AY未使用(SCC/OPLLのみ)のVGMではKP行が鍵盤に無いのでロール側も落とす
       tracks = tracks.concat(data.kss.ay ? kssTracks : kssTracks.filter(t => !/^KP\d/.test(t.id)));
     }
     // スナップショット型チップ: extractChannels(keyboard.js)が読むextraSnapsに
     // フレーム毎スナップショット配列を渡して同じ抽出経路でトラック化する
-    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ga20', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
     const chipToken = { sn: 'sn76489' };
     const poolMode = (opts && opts.poolMode) || {};
     for (const key of snapChips) {
@@ -20260,12 +22126,15 @@
       const sccPossible = RollBuild.kssHasSccDecoder(params.header);
       let sccUsed = false;
       let scanned = 0;
+      // MSX-AUDIO(Y8950)を積むKSSはOL行も作る(クロックはMSX固定3.58MHz)
+      const oplOpts = (params.header && params.header.device && params.header.device.msxAudio)
+        ? { used: true, clock: 3579545 } : null;
       return { build: (data, done) => {
         // SCCは「使われたと分かった時点で行を足す」単調運用(main.js playKssStream参照)
         if (sccPossible && !sccUsed && RollBuild.kssWriteLogUsesScc(data.writeLog, scanned, done)) sccUsed = true;
         scanned = done;
         return {
-          timeline: RollBuild.kss(data.writeLog.slice(0, done), done, params.frameRate, params.header, sccUsed),
+          timeline: RollBuild.kss(data.writeLog.slice(0, done), done, params.frameRate, params.header, sccUsed, null, oplOpts),
           info: { sccUsed }
         };
       } };

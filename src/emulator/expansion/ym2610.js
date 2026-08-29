@@ -67,19 +67,35 @@
   const ADPCMA_ADDR_SHIFT = 8;
 
   class AdpcmA {
-    constructor(owner) {
+    /**
+     * @param {object} owner - romA / sampleRate を持つチップ本体
+     * @param {{fixedAddr?: Array<{start:number,end:number}>}} [opts]
+     *   fixedAddr: サンプルの開始/終了(バイト、endは実機表と同じinclusive)を固定する。
+     *   YM2608の内蔵リズム(6サンプルのアドレスがROM固定でレジスタが無い)用。
+     *   省略時は従来どおり開始/終了レジスタ(YM2610 ADPCM-A)。
+     */
+    constructor(owner, opts) {
       this.owner = owner;
+      this.fixedAddr = (opts && opts.fixedAddr) || null;
       this.regs = new Uint8Array(0x30);
       this.ch = [];
       // seq: キーオン通番(clock()を回さない先読みキャプチャがキーオンを検出するため。ロール用)
       for (let i = 0; i < 6; i++) this.ch.push({ playing: false, curnibble: 0, curbyte: 0, curaddress: 0, acc: 0, stepIndex: 0, seq: 0 });
       this.reset();
     }
+    // ch i の開始バイトアドレス(fixedAddr優先)
+    _startAddr(i) {
+      if (this.fixedAddr) return this.fixedAddr[i].start;
+      return (this.regs[0x10 + i] | (this.regs[0x18 + i] << 8)) << ADPCMA_ADDR_SHIFT;
+    }
+    // ch i の終了バイトアドレス(exclusive、fixedAddr優先)
+    _endAddr(i) {
+      if (this.fixedAddr) return this.fixedAddr[i].end + 1;
+      return ((this.regs[0x20 + i] | (this.regs[0x28 + i] << 8)) + 1) << ADPCMA_ADDR_SHIFT;
+    }
     // ch i の現在の開始/終了レジスタから求めたサンプル長(秒)。ADPCM-Aは18518Hz(=FMサンプルレート/3)固定
     lengthSeconds(i) {
-      const start = (this.regs[0x10 + i] | (this.regs[0x18 + i] << 8)) << ADPCMA_ADDR_SHIFT;
-      const end = ((this.regs[0x20 + i] | (this.regs[0x28 + i] << 8)) + 1) << ADPCMA_ADDR_SHIFT;
-      const bytes = Math.max(0, end - start);
+      const bytes = Math.max(0, this._endAddr(i) - this._startAddr(i));
       return bytes * 2 / (this.owner.sampleRate / 3);
     }
     reset() {
@@ -99,13 +115,13 @@
       const c = this.ch[i];
       c.playing = on;
       if (on) {
-        c.curaddress = (this.regs[0x10 + i] | (this.regs[0x18 + i] << 8)) << ADPCMA_ADDR_SHIFT;
+        c.curaddress = this._startAddr(i);
         c.curnibble = 0; c.curbyte = 0; c.acc = 0; c.stepIndex = 0;
         c.seq++;
         // 鳴っているサンプルの範囲(バイト)。ドライバがキーオン後に次の音のレジスタを先書きしても
         // 表示側(ピッチ解析)が正しいサンプルを見られるようキーオン時点で確定させる
         c.smpStart = c.curaddress;
-        c.smpEnd = ((this.regs[0x20 + i] | (this.regs[0x28 + i] << 8)) + 1) << ADPCMA_ADDR_SHIFT;
+        c.smpEnd = this._endAddr(i);
       }
     }
     // FMサンプル3回に1回。
@@ -117,7 +133,7 @@
         let data;
         if (c.curnibble === 0) {
           // 終了アドレス(inclusive)の次のバイトを読もうとした時点で停止。比較は下位20bitのみ
-          const end = ((this.regs[0x20 + i] | (this.regs[0x28 + i] << 8)) + 1) << ADPCMA_ADDR_SHIFT;
+          const end = this._endAddr(i);
           if (((c.curaddress ^ end) & 0xFFFFF) === 0) { c.playing = false; c.acc = 0; continue; }
           c.curbyte = rom && c.curaddress < rom.length ? rom[c.curaddress] : 0;
           c.curaddress = (c.curaddress + 1) & 0xFFFFFF;
@@ -151,8 +167,18 @@
   const ADPCMB_ADDR_SHIFT = 8;
 
   class AdpcmB {
-    constructor(owner) {
+    /**
+     * @param {object} owner - romB / sampleRate を持つチップ本体
+     * @param {{addrShift?: number, forceExternal?: boolean}} [opts]
+     *   addrShift: 開始/終了/リミットレジスタ値→バイトアドレスのシフト。
+     *   YM2610=8(256バイト単位、既定)、YM2608/Y8950=5(32バイト単位。MAME ymdeltat portshift)。
+     *   forceExternal: control1へ外部メモリ・録音無効を強制(YM2610の実機挙動、既定true)。
+     *   Y8950はCPU書込み(REC|MEMDATA)を使うので false にする(書込み自体は呼び出し側が実装)。
+     */
+    constructor(owner, opts) {
       this.owner = owner;
+      this.addrShift = (opts && opts.addrShift) || ADPCMB_ADDR_SHIFT;
+      this.forceExternal = !opts || opts.forceExternal !== false;
       this.regs = new Uint8Array(0x11);
       this.reset();
     }
@@ -168,8 +194,8 @@
     }
     // 現在の開始/終了/Δ-Nから求めたサンプル長(秒)。リピート時は無限(Infinity)
     lengthSeconds() {
-      const start = (this.regs[0x02] | (this.regs[0x03] << 8)) << ADPCMB_ADDR_SHIFT;
-      const end = ((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << ADPCMB_ADDR_SHIFT;
+      const start = (this.regs[0x02] | (this.regs[0x03] << 8)) << this.addrShift;
+      const end = ((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << this.addrShift;
       const rate = this.rate();
       if (this.regs[0x00] & 0x10) return Infinity;
       return rate > 0 ? Math.max(0, end - start) * 2 / rate : 0;
@@ -177,7 +203,7 @@
     // reg = port0 アドレス - 0x10 (0x00-0x0B)
     write(reg, data) {
       // YM2610は外部モード強制・録音無効(ymfm ym2610::write_data)
-      if (reg === 0x00) data = (data | 0x20) & ~0x40;
+      if (reg === 0x00 && this.forceExternal) data = (data | 0x20) & ~0x40;
       this.regs[reg] = data;
       if (reg === 0x00) {
         if (data & 0x80) this._loadStart(); // start
@@ -186,14 +212,14 @@
     }
     _loadStart() {
       this.playing = true;
-      this.curaddress = (this.regs[0x02] | (this.regs[0x03] << 8)) << ADPCMB_ADDR_SHIFT;
+      this.curaddress = (this.regs[0x02] | (this.regs[0x03] << 8)) << this.addrShift;
       this.curnibble = 0; this.curbyte = 0; this.position = 0; this.acc = 0; this.prevAcc = 0; this.step = ADPCMB_STEP_MIN;
       this.seq++;
       this.smpStart = this.curaddress; // 鳴っているサンプルの範囲(AdpcmA.ch[].smpStart/Endと同じ用途)
-      this.smpEnd = ((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << ADPCMB_ADDR_SHIFT;
+      this.smpEnd = ((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << this.addrShift;
     }
-    _atEnd() { return this.curaddress === ((((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << ADPCMB_ADDR_SHIFT) - 1); }
-    _atLimit() { return this.curaddress === ((((this.regs[0x0C] | (this.regs[0x0D] << 8)) + 1) << ADPCMB_ADDR_SHIFT) - 1); }
+    _atEnd() { return this.curaddress === ((((this.regs[0x04] | (this.regs[0x05] << 8)) + 1) << this.addrShift) - 1); }
+    _atLimit() { return this.curaddress === ((((this.regs[0x0C] | (this.regs[0x0D] << 8)) + 1) << this.addrShift) - 1); }
     // FMサンプル毎
     clock() {
       if (!(this.regs[0x00] & 0x80) || !this.playing) { this.playing = false; return; }
@@ -634,7 +660,7 @@
       // 変化とサンプル長から「鳴っている区間」を推定するために使う(ライブ表示は playing で足りる)
       adpcmA.push({ active: c.playing && vol > 0, vol, rawVol: il, rawVolMax: 31, panL: A.panL(i) ? 1 : 0, panR: A.panR(i) ? 1 : 0,
         rate: rateA, seq: c.seq, lenSec: A.lengthSeconds(i),
-        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto',
+        pitchHz: p ? p.cps * rateA : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
         sample: c.seq ? { kind: 'a', start: c.smpStart, end: c.smpEnd } : null }); // 手動キャリブレーション用の同定情報
     }
@@ -643,7 +669,7 @@
     const pb = B.seq ? chip.samplePitch('b', B.smpStart, B.smpEnd) : null;
     const adpcmB = { active: B.playing && !!(B.regs[0x00] & 0x80) && lvl > 0, vol: lvl / 255, rawVol: lvl, rawVolMax: 255,
       panL: B.panL() ? 1 : 0, panR: B.panR() ? 1 : 0, rate: rateB, seq: B.seq, lenSec: B.lengthSeconds(), executing: !!(B.regs[0x00] & 0x80),
-      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0, pitchManual: !!(pb && pb.manual), sampleKind: pb ? (pb.kindManual || 'auto') : 'auto',
+      pitchHz: pb ? pb.cps * rateB : 0, pitchConf: pb ? pb.conf : 0, pitchManual: !!(pb && pb.manual), sampleKind: pb ? (pb.kindManual || 'auto') : 'auto', sampleHash: pb ? pb.hash : null,
       waveData: pb ? pb.wave : null,
       sample: B.seq ? { kind: 'b', start: B.smpStart, end: B.smpEnd } : null,
       // refRate: ピッチ解析が信頼できない時のフォールバック用。ADPCM-Bの再生レート(Delta-N由来)を
@@ -702,4 +728,21 @@
 
   Emu.SamplePitchUtil = { detectCps, makeSampleWave, sampleHash, getTuningMap, saveTuningMap, loopCps,
                           getKindMap, saveKindMap, applyKindOverride, setKindOverride };
+
+  // ── OPNファミリ共有(YM2608=ym2608.jsが流用) ─────────────────────────
+  // AdpcmA(fixedAddr指定でYM2608内蔵リズムに使える)/AdpcmB(addrShift=5でYM2608 DELTA-T)/
+  // デコーダ、そして表示用サンプルピッチ解析API一式。
+  // attachSampleApi: YM2610Audioのピッチ解析メソッド群(this.romA/romB/_pitchCacheしか
+  // 参照しない)を別チップのprototypeへそのまま移植する(実装の複製を作らない)。
+  Emu.OpnAdpcm = {
+    AdpcmA, AdpcmB, decodeAdpcmA, decodeAdpcmB, ADPCM_SCALE,
+    attachSampleApi(proto) {
+      proto.loadRom = YM2610Audio.prototype.loadRom;
+      proto.samplePitch = YM2610Audio.prototype.samplePitch;
+      proto._decodeSample = YM2610Audio.prototype._decodeSample;
+      proto.samplePcm = YM2610Audio.prototype.samplePcm;
+      proto.setSampleTuning = YM2610Audio.prototype.setSampleTuning;
+      proto.setSampleKind = YM2610Audio.prototype.setSampleKind;
+    }
+  };
 })(window);

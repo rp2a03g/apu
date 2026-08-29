@@ -34,6 +34,11 @@
         this.opll = new Emu.OPLLAudio();
         this.bus.registerChip('opll', this.opll);
       }
+      // MSX-AUDIO(Y8950): ポート0xC0/0xC1(kssBus.js chips.opl)。3.58MHz駆動でclock/72=49716Hz
+      if (this.header.device.mode === 'MSX' && this.header.device.msxAudio && Emu.OPLAudio) {
+        this.opl = new Emu.OPLAudio(MML.KSS.Z80_CLOCK, { type: 'y8950' });
+        this.bus.registerChip('opl', this.opl);
+      }
 
       this.cpu = new Emu.CPUZ80(this.bus);
 
@@ -62,6 +67,7 @@
       this.psg.reset();
       this.scc.reset();
       if (this.opll) this.opll.reset();
+      if (this.opl) this.opl.reset();
       this.cpu.a = songIndex & 0xFF;
       this.cpu.iff1 = false;
       this.cpu.iff2 = false;
@@ -94,7 +100,7 @@
       const samplesThisFrame = Math.round(sampleRate / this.frameRate);
       const out = regsOnly ? null : new Float32Array(samplesThisFrame);
 
-      const cpu = this.cpu, psg = this.psg, scc = this.scc, opll = this.opll;
+      const cpu = this.cpu, psg = this.psg, scc = this.scc, opll = this.opll, opl = this.opl;
 
       if (!cpu.callActive) {
         this._playFrameAccum += this.speedFactor;
@@ -120,11 +126,14 @@
           psg.clock();
           scc.clock();
           if (opll) opll.clock();
+          if (opl) opl.clock();
           this.cycleAccum -= 1;
         }
         if (!regsOnly) {
           let sample = psg.mixSample() + scc.mixSample();
           if (opll) sample += opll.mixSample();
+          // 0.7 = VGM側の較正比(CHIP_GAIN.opl 1.4 / ym2413 1.99)をKSSの素通しミックスへ写す
+          if (opl) sample += opl.mixSample() * 0.7;
           out[i] = sample;
         }
       }
@@ -161,6 +170,7 @@
       if (opt.mute.psg) Emu.applyMute(player.psg.mute, opt.mute.psg);
       if (opt.mute.scc) Emu.applyMute(player.scc.mute, opt.mute.scc);
       if (opt.mute.opll && player.opll) Emu.applyMute(player.opll.mute, opt.mute.opll);
+      if (opt.mute.opl && player.opl) Emu.applyMute(player.opl.mute, opt.mute.opl);
     }
     const sampleRate = opt.sampleRate || 44100;
     const regsOnly = !!opt.regsOnly;

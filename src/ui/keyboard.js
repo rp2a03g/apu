@@ -94,6 +94,17 @@
   // レーン数0=区画の幅0になり、音程軸の座標は従来と完全に一致する。
   // レーン割当そのもの(どのサンプルが何番レーンか・上限・溢れの扱い)は
   // src/convert/drumMap.js に置いてある。vgm2mmlのドラム音符出力と同じ表を使うため。
+  /**
+   * 音源の識別色 '#rrggbb' → セレクトの候補一覧に敷く薄い背景色。
+   * 明度は明暗テーマの両方で文字が読めるよう、下地へ薄く乗せるだけにする。
+   */
+  function tintOf(hex) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
+    if (!m) return '';
+    const n = parseInt(m[1], 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, 0.18)`;
+  }
+
   const DRUM_LANE_WHITE = 1.5;  // ドラム1レーンの幅(白鍵何本ぶんか)
   // レーンの色 = どの太鼓か。チャンネルの色(=どのスロットが鳴らしたか)とは別軸なので、
   // 打点は「塗り=このレーン色 / 枠線=チャンネル色」の二重符号化で描く。プール式チップ
@@ -368,6 +379,22 @@
     // VGM: YM2151(OPM、OM1-8=FM ch)。chip.mute[]はch 0-7
     const om = id.match(/^OM(\d)$/);
     if (om) return { section: 'expansion', chip: 'ym2151', type: 'array', index: +om[1] - 1 };
+    // VGM: YM2203(OPN、OP1-3=FM ch、デュアル2個目はOP4-6=index 3-5。vgmPlayer.js側が
+    // 2個目のch0-2として読む)。内蔵SSGはKP1-3(KP4-6)行(chip 'psg')を流用
+    const op = id.match(/^OP(\d)$/);
+    if (op) return { section: 'expansion', chip: 'ym2203fm', type: 'array', index: +op[1] - 1 };
+    // VGM: YM2608(OPNA、OA1-6=FM ch)。内蔵リズム(OABD/OASD/OACY/OAHH/OATM/OARM)と
+    // ADPCM-B(OAB)は chip.muteAdpcm[] の 0-5 / 6。内蔵SSGはKP1-3行(chip 'psg')を流用
+    const OA_RHYTHM = { OABD: 0, OASD: 1, OACY: 2, OAHH: 3, OATM: 4, OARM: 5, OAB: 6 };
+    if (OA_RHYTHM[id] !== undefined) return { section: 'expansion', chip: 'ym2608adpcm', type: 'array', index: OA_RHYTHM[id] };
+    const oa = id.match(/^OA(\d)$/);
+    if (oa) return { section: 'expansion', chip: 'ym2608fm', type: 'array', index: +oa[1] - 1 };
+    // OPL系(KSSのMSX-AUDIO / VGMのYM3812・YM3526・Y8950): OL1-9=メロディch、リズム/ADPCMは
+    // chip.mute[]の9-14(Emu.OPL_MUTE: BD=9,SD=10,TOM=11,CYM=12,HH=13,ADPCM=14)
+    const OL_FIXED = { OLBD: 9, OLSD: 10, OLTM: 11, OLCY: 12, OLHH: 13, OLB: 14 };
+    if (OL_FIXED[id] !== undefined) return { section: 'expansion', chip: 'opl', type: 'array', index: OL_FIXED[id] };
+    const ol = id.match(/^OL(\d)$/);
+    if (ol) return { section: 'expansion', chip: 'opl', type: 'array', index: +ol[1] - 1 };
     // VGM: GA20(Irem PCM、GA1-4)。chip.mute[]はch 0-3(GALLはGB行なので\dで区別される)
     const ga = id.match(/^GA(\d)$/);
     if (ga) return { section: 'expansion', chip: 'ga20', type: 'array', index: +ga[1] - 1 };
@@ -434,6 +461,14 @@
     { header: 'SN76489 (SG-1000 / Master System / Game Gear / Mega Drive PSG)', ids: { SN1: 'P1', SN2: 'P2', SN3: 'P3', SNN: 'No', SN4: 'P1(2)', SN5: 'P2(2)', SN6: 'P3(2)', SNN2: 'No(2)' } },
     { header: 'YM2612 (OPN2 , Mega Drive FM)', ids: { YMDA: 'DAC' }, prefix: 'YM', name: (id) => 'FM' + id.slice(2) },
     { header: 'YM2151 (OPM , X68000 / Arcade)', prefix: 'OM', name: (id) => 'FM' + id.slice(2) },
+    // OP4-6はデュアルチップ2個目のFM1-3(内蔵SSGはKP1-6行を流用)
+    { header: 'YM2203 (OPN , PC-8801 / Arcade)', prefix: 'OP', name: (id) => { const n = +id.slice(2); return n <= 3 ? 'FM' + n : 'FM' + (n - 3) + '(2)'; } },
+    // OABD等=内蔵リズム、OAB=ADPCM-B(完全一致で先に拾う)。内蔵SSGはKP1-3行を流用
+    { header: 'YM2608 (OPNA , PC-8801 SB2 / PC-9801)', ids: { OABD: 'BD', OASD: 'SD', OACY: 'Cym', OAHH: 'HH', OATM: 'Tom', OARM: 'Rim', OAB: 'PCMB' },
+      prefix: 'OA', name: (id) => 'FM' + id.slice(2) },
+    // OPL系(YM3812/YM3526/Y8950): OLBD等=リズムモード打楽器、OLB=Y8950 ADPCM-B
+    { header: 'OPL (YM3812 / YM3526 / Y8950 MSX-AUDIO)', ids: { OLBD: 'BD', OLSD: 'SD', OLTM: 'Tom', OLCY: 'Cym', OLHH: 'HH', OLB: 'ADPCM' },
+      prefix: 'OL', name: (id) => 'FM' + id.slice(2) },
     // GA1-4は完全一致(ids)で拾う(GBの'GALL'と prefix 'GA' を衝突させない)
     { header: 'GA20 (Irem M92 / M107 PCM)', ids: { GA1: 'PCM1', GA2: 'PCM2', GA3: 'PCM3', GA4: 'PCM4' } },
     // pool: サンプルPCM系はドライバがスロットをペア交互/巡回割当する曲がある
@@ -530,6 +565,9 @@
     return `<span class="kbd-assign">` +
       `<select class="kbd-assign-target"></select>` +
       `<select class="kbd-assign-tone"></select>` +
+      // 借用先にDPCMを選んだ行だけ出す「パッド」ボタン(ドラム(DPCM)パネルを開く)。
+      // ツールバーではなくここに置く: DPCMを選んだ流れでそのまま詰められるため
+      `<button type="button" class="kbd-assign-drum" style="display:none">${T('パッド')}</button>` +
       `</span>`;
   }
 
@@ -1111,6 +1149,110 @@
         const d = s ? s.dac : { enabled: false, level: 0, vol: 0, active: false };
         channels.push({ id: 'YMDA', color: '#aa44ff', freq: 0, vol: d.vol, rawVol: d.enabled ? d.level : null, rawVolMax: 255,
           wave: { t: 'sample' }, active: !!d.active, sample: true, dmcReg: d.level, dmcRateIdx: 15, dmcFreq: 0 });
+      }
+    }
+
+    if (chips.includes('ym2608fm')) {
+      // YM2608(VGM: OPNA、PC-88 SB2/PC-98): 4op FM×6ch(YM2612と同じFM波形表示)+
+      // 内蔵リズム6行(BD/SD/Cym/HH/Tom/Rim。固定サンプルなので音程なしの「サンプル」行)+
+      // ADPCM-B行(NB行と同じ3段階表示)。内蔵SSGは 'kssPsg' のKP1-3行として別途出す。
+      const live = extraSnaps && extraSnaps.ym2608FmLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.ym2608fm ? extraSnaps.ym2608fm[frameIdx] : null);
+      const COLS = ['#ffcc00', '#ffd422', '#ffdd44', '#ffe566', '#ffee88', '#fff2aa'];
+      for (let ch = 0; ch < 6; ch++) {
+        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, waveData: null };
+        const wave = (c.waveData && c.waveData.length && c.active)
+          ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
+          : { t: 'fm', nx: 256, ny: 256 };
+        channels.push({ id: `OA${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
+      }
+      // 内蔵リズム: NA行と同じデータ形状(ロール/ドラム区画/パッド流用)。ピッチ解析は
+      // ドラム音なので通常conf<0.5=「サンプル」行のまま。リズムROM未読込でもキーオンは
+      // 見えるので行は光る(音は出ない)。
+      const RIDS = ['OABD', 'OASD', 'OACY', 'OAHH', 'OATM', 'OARM'];
+      const adpcmWave8 = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 6; ch++) {
+        const c = s && s.adpcmA ? s.adpcmA[ch] : { vol: 0, rawVol: 0, rawVolMax: 31, active: false, panL: 1, panR: 1, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (20 + ch * 12) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: RIDS[ch], color: `hsl(${hue},80%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
+          wave: adpcmWave8(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+      {
+        const c = s && s.adpcmB ? s.adpcmB : { vol: 0, rawVol: 0, rawVolMax: 255, active: false, panL: 1, panR: 1, rate: 0, refRate: 1, pitchHz: 0, pitchConf: 0 };
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: 'OAB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: adpcmWave8(c), active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
+          panL: c.panL, panR: c.panR });
+      }
+    }
+
+    if (chips.includes('opl')) {
+      // OPL系(VGM: YM3812/YM3526/Y8950、KSS: MSX-AUDIO): 2op FM×9ch、またはリズムモード
+      // (6メロディ+BD/SD/TOM/CYM/HH)。表示流儀はkssOpll(FMPAC)と同じで、リズムモードは
+      // 一度見たら以後保持する単調運用(extraSnaps.oplRhythmSeen)。
+      const live = extraSnaps && extraSnaps.oplLive;
+      const s = live ? live() : null;
+      if (s && s.rhythm && s.rhythm.on && extraSnaps) extraSnaps.oplRhythmSeen = true;
+      const oplRhythm = !!(extraSnaps && extraSnaps.oplRhythmSeen);
+      const MCOLS = ['#66ffcc', '#55eebb', '#44ddaa', '#33cc99', '#22bb88', '#11aa77', '#66e0d0', '#55d0c0', '#44c0b0'];
+      for (let ch = 0; ch < (oplRhythm ? 6 : 9); ch++) {
+        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false };
+        channels.push({ id: `OL${ch + 1}`, color: MCOLS[ch % MCOLS.length], freq: c.freq, vol: c.vol,
+          rawVol: c.rawVol, rawVolMax: 15,
+          wave: { t: 'fm', nx: 256, ny: 256 }, active: c.active, fmPatch: c.patch || null });
+      }
+      if (oplRhythm) {
+        // ★ロール(src/kss2mml/expansion/opl.js RHYTHM_DEFS)と同じ規則で音程を決める:
+        //   BD(ch6)/TOM(ch8)は実音程(範囲内なら)、SD/CYM/HHは疑似音程レーン
+        const r = (s && s.rhythm) || null;
+        const RCOLS = { bd: '#ff5555', sd: '#ffaa55', tom: '#aaff55', cym: '#55ffaa', hh: '#55aaff' };
+        const RIDS = { bd: 'OLBD', sd: 'OLSD', tom: 'OLTM', cym: 'OLCY', hh: 'OLHH' };
+        const RPSEUDO = { bd: 0, sd: 2, tom: 4, cym: 6, hh: 8 };
+        const RLABEL = { bd: 'BD', sd: 'SD', tom: 'TOM', cym: 'CYM', hh: 'HH' };
+        for (const key of ['bd', 'sd', 'tom', 'cym', 'hh']) {
+          const d = r ? r[key] : { keyOn: false, active: false, vol: 0, freq: 0 };
+          const realMidi = freqToMidi(d.freq);
+          const row = { id: RIDS[key], color: RCOLS[key], freq: realMidi !== null ? d.freq : 0, vol: d.vol,
+            rawVol: null, rawVolMax: null,
+            wave: realMidi !== null ? { t: 'pulse', hi: 0.5, nx: 2, ny: 2 } : { t: 'noise', short: true, nx: 93, ny: 2 },
+            active: d.active, drum: true };
+          if (realMidi === null) { row.noise = true; row.noiseIndex = RPSEUDO[key]; row.noiseShort = true; row.noiseLabel = RLABEL[key]; }
+          channels.push(row);
+        }
+      }
+      // Y8950 ADPCM-B行(NB/OAB行と同じ3段階表示。スナップショットが持つ時だけ)
+      if (s && s.adpcmB) {
+        const c = s.adpcmB;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: 'OLB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' },
+          active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
+          panL: 1, panR: 1 });
+      }
+    }
+
+    if (chips.includes('ym2203fm')) {
+      // YM2203(VGM: OPN、PC-88/PC-98/アーケード): 4op FM×3ch(YM2612と同じFM波形表示)。
+      // 内蔵SSGは 'kssPsg' のKP1-3行として別途出す(main.js vgmKeyboardChips)。デュアルチップは
+      // ライブスナップショットが6ch(3+3)で返り、OP4-6/KP4-6行が2個目になる。
+      const live = extraSnaps && extraSnaps.ym2203FmLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.ym2203fm ? extraSnaps.ym2203fm[frameIdx] : null);
+      const COLS = ['#ffcc00', '#ffdd44', '#ffe566', '#ffee88', '#fff2aa', '#fff8cc'];
+      const nFm = s && s.channels ? s.channels.length : 3;
+      for (let ch = 0; ch < nFm; ch++) {
+        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, waveData: null };
+        const wave = (c.waveData && c.waveData.length && c.active)
+          ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
+          : { t: 'fm', nx: 256, ny: 256 };
+        channels.push({ id: `OP${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
       }
     }
 
@@ -2203,7 +2345,9 @@
           ctx.fillStyle = lit ? '#1a1830' : '#a9a3bb';
           ctx.font = Math.min(9, Math.floor(drumLaneW) - 2) + 'px ' + fontStack('mono');
           ctx.textBaseline = 'middle';
-          ctx.fillText(drumLanes[i].label, 0, 0);
+          // ★名前はユーザーが自由に付けられるので、パッドの長さに収める(はみ出すと
+          //   隣のレーンや音程鍵盤の上に文字が乗る)
+          ctx.fillText(drumLanes[i].label, 0, 0, keyLen - 10);
           ctx.restore();
         }
       } else {
@@ -2216,7 +2360,7 @@
           ctx.fillStyle = lit ? '#1a1830' : '#a9a3bb';
           ctx.font = Math.min(9, Math.floor(drumLaneW) - 2) + 'px ' + fontStack('mono');
           ctx.textBaseline = 'middle';
-          ctx.fillText(drumLanes[i].label, 4, y + drumLaneW / 2 + 0.5);
+          ctx.fillText(drumLanes[i].label, 4, y + drumLaneW / 2 + 0.5, keyLen - 12);
         }
       }
     }
@@ -2322,6 +2466,7 @@
       this._rollTimeline = null;  // ピアノロール用ノート区間 [{color, notes:[{startSec,endSec,midi}]}]
       this._drumLanes = [];       // ドラム区画のレーン表 [{key,label,color,subN}](_rebuildDrumLanes)
       this._drumLaneOf = new Map(); // drumKey → レーン番号(鍵盤のパッド点灯用)
+      this._drumLaneNames = {};   // drumKey → ユーザーが付けた表示名(ドラム(DPCM)パネルから同期)
       this._rollCursor = {};      // track.id → 「もう画面上端より上に流れ去った」最初のnote index(_renderRollの走査起点キャッシュ)
       this._rollSongTimeBase = 0; // 最後に実測位置が更新された時点での「曲内基準の経過時間」(確定値)
       this._rollLastRawPos = null; // 直前に_renderRollへ渡された実時間(壁時計)位置
@@ -2366,6 +2511,7 @@
       //   問題が原理的に起きない。
       this.onDrumAudition = null;
       this._drumAuditionMode = 'raw';
+      this.onOpenDrumPanel = null;    // 割当セルの「パッド」ボタン(ドラム(DPCM)パネルを開く)
       this.onOpenFile = null;         // ヘッダの「ファイルを開く」
       this.onToMml = null;            // ヘッダの「to MML」
       this.onRepeatModeChange = null; // 曲が終わった後の挙動が変わったとき
@@ -2539,9 +2685,10 @@
           titleEl.style.display = 'none';
           this._titleEl = titleEl;
         }
+        // 並びは [ファイルを開く][to MML][レイアウト](ユーザー指示で to MML と レイアウトを入れ替え)
         headerEl.insertBefore(openBtn, titleEl || masterVolBar);
-        headerEl.insertBefore(layoutBtn, titleEl || masterVolBar);
         headerEl.insertBefore(toMmlBtn, titleEl || masterVolBar);
+        headerEl.insertBefore(layoutBtn, titleEl || masterVolBar);
         this._srcBadgeEl = document.createElement('span');
         this._srcBadgeEl.className = 'kbd-src-badge';
         this._srcBadgeEl.addEventListener('click', (e) => {
@@ -3640,7 +3787,7 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
@@ -3664,6 +3811,9 @@
       this._extraSnaps.ymLive = typeof result.getYm2612 === 'function' ? result.getYm2612 : null;
       this._extraSnaps.ym2610FmLive = typeof result.getYm2610Fm === 'function' ? result.getYm2610Fm : null;
       this._extraSnaps.ym2151Live = typeof result.getYm2151 === 'function' ? result.getYm2151 : null;
+      this._extraSnaps.ym2203FmLive = typeof result.getYm2203Fm === 'function' ? result.getYm2203Fm : null;
+      this._extraSnaps.ym2608FmLive = typeof result.getYm2608Fm === 'function' ? result.getYm2608Fm : null;
+      this._extraSnaps.oplLive = typeof result.getOpl === 'function' ? result.getOpl : null;
       this._extraSnaps.ga20Live = typeof result.getGa20 === 'function' ? result.getGa20 : null;
       this._extraSnaps.segapcmLive = typeof result.getSegaPcm === 'function' ? result.getSegaPcm : null;
       this._extraSnaps.c140Live = typeof result.getC140 === 'function' ? result.getC140 : null;
@@ -3814,6 +3964,36 @@
       this._sampleMenuEl = null;
     }
 
+    /** ドラム区画のレーン表(ドラム(DPCM)パネル用)。[{key,label,color,subN}] */
+    getDrumLanes() { return (this._drumLanes || []).slice(); }
+
+    /**
+     * ドラム区画のパッド名を差し替える。map は { drumKey → 表示名 }。
+     * ★名前の実体は「サンプル内容のハッシュ」で持っている(src/convert/drumSamples.js)。
+     *   ロールのノートはハッシュを持たない(Workerからの構造化複製で載せる情報を増やしたくない)ので、
+     *   drumKey↔ハッシュの対応を知っている main.js 側から名前だけを流し込む形にしてある。
+     */
+    setDrumLaneNames(map) {
+      this._drumLaneNames = map || {};
+      if (!this._drumLanes || !this._drumLanes.length) return;
+      for (const l of this._drumLanes) {
+        if (l.key && this._drumLaneNames[l.key]) l.label = this._drumLaneNames[l.key];
+        else if (l.key) l.label = l.autoLabel;
+      }
+      // 停止中でもその場で見た目を更新する(パッドの文字はロールと鍵盤の両方に出る)
+      this._redrawRollForSpotlight();
+      this._drawPianos(this._lastChannels || []);
+    }
+
+    /** サンプルごとの打点数(ドラム(DPCM)パネルの「打点」列)。drumKey → 件数 */
+    getDrumHitCounts() {
+      const out = {};
+      for (const track of (this._rollTimeline || [])) {
+        for (const n of track.notes) if (n.drumKey) out[n.drumKey] = (out[n.drumKey] || 0) + 1;
+      }
+      return out;
+    }
+
     _drumsForPiano() {
       if (!this._drumLanes || !this._drumLanes.length) return undefined;
       return { lanes: this._drumLanes, laneOf: this._drumLaneOf };
@@ -3895,9 +4075,12 @@
         const subN = Math.max(1, ends.length);
         for (const n of notes) n.drumSubN = subN;
         const isOther = map.lanes[i].key === null;
+        const auto = isOther ? T('他') : (labels[i] || '');
+        const named = (!isOther && this._drumLaneNames) ? this._drumLaneNames[map.lanes[i].key] : null;
         lanes.push({
           key: map.lanes[i].key,
-          label: isOther ? T('他') : (labels[i] || ''),
+          autoLabel: auto,   // 名前を消したときに戻す既定ラベル(ROMアドレスの16進)
+          label: named || auto,
           color: isOther ? DRUM_OTHER_COLOR : DRUM_LANE_COLORS[i % DRUM_LANE_COLORS.length],
           subN,
         });
@@ -4086,6 +4269,11 @@
       });
       // クリックが行の他の操作(大波形選択・色ピッカー)に伝播しないようにする
       for (const el of [targetSel, toneSel]) el.addEventListener('click', (e) => e.stopPropagation());
+      const drumBtn = row.querySelector('.kbd-assign-drum');
+      if (drumBtn) drumBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.onOpenDrumPanel) this.onOpenDrumPanel();
+      });
     }
 
     // この曲に実在する借用先(表示中の各行の既定の借用先)。NSFのように「同じ音源の
@@ -4148,11 +4336,21 @@
           // 行内のセレクトは幅が狭いので「(既定)」は付けない(既定から変えた行はpart列の
           // チップがアクセント色になるので区別はつく)。ポップオーバー側には付ける。
           o.textContent = plan.targetLabel(t);
+          // 音源ごとの色分けは「選ぶとき(=リストを開いたとき)」だけ、薄い背景色で出す。
+          // ★文字色は塗らない(読みづらいというユーザー指摘)。行に閉じているセレクト本体も
+          //   既定の見た目のままにして、色は候補一覧の中でのグルーピングだけに使う。
+          const c = plan.colorOfTarget ? plan.colorOfTarget(t) : '';
+          if (c) o.style.backgroundColor = tintOf(c);
           el.targetSel.appendChild(o);
         }
       }
       el.targetSel.value = target;
+      // 以前は借用先の色をセレクト本文とpart列の文字色に塗っていた。もう塗らないので、
+      // 行を作り直さずに切り替わったときのために明示的に消しておく
+      el.targetSel.style.color = '';
+      if (el.partEl) el.partEl.style.color = '';
 
+      if (el.drumBtn) el.drumBtn.style.display = (target === 'dpcm') ? '' : 'none';
       const toneKind = plan.toneKindFor(target);
       if (!toneKind) { el.toneSel.style.display = 'none'; el.toneSig = ''; return; }
       el.toneSel.style.display = '';
@@ -4485,7 +4683,13 @@
         if (waveCanvas) {
           waveCanvas.classList.add('kbd-wave--clickable');
           if (chId === this._shownWaveId) waveCanvas.classList.add('kbd-wave--selected');
-          waveCanvas.addEventListener('click', () => this._selectWave(chId));
+          waveCanvas.addEventListener('click', () => {
+            this._selectWave(chId);
+            // ★選んだ直後はカーソルがその行の上にあるので、そのままピックアップさせる。
+            //   ホバーはmouseenterでしか発火しないため、クリックで選んだだけでは
+            //   ロールが反応しなかった(ユーザー報告)
+            this._setSpotlightHover(chId);
+          });
         }
 
         // 丸のクリックで色ピッカーを開く(選んだ色は即localStorageへ保存され全表示に反映)
@@ -4536,6 +4740,7 @@
           partEl: row.querySelector('.kbd-part'),
           targetSel: row.querySelector('.kbd-assign-target'),
           toneSel: row.querySelector('.kbd-assign-tone'),
+          drumBtn: row.querySelector('.kbd-assign-drum'),
           defaultTarget: ch.defaultTarget,
           target: ch.target,
         });
@@ -5353,7 +5558,10 @@
       const chId = v.label;
       waveCanvas.classList.add('kbd-wave--clickable');
       if (chId === this._shownWaveId) waveCanvas.classList.add('kbd-wave--selected');
-      waveCanvas.addEventListener('click', () => this._selectWave(chId));
+      waveCanvas.addEventListener('click', () => {
+        this._selectWave(chId);
+        this._setSpotlightHover(chId); // NSF側と同じく、選んだ直後にロールもピックアップ
+      });
 
       // 丸のクリックで色ピッカーを開く
       this._attachColorPicker(row.querySelector('.kbd-dot'), v.label, v.color);

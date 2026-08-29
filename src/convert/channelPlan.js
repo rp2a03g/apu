@@ -57,16 +57,28 @@
   }
 
   // 借用先の表示名(パート文字は letterOfTarget() が動的に前置するのでここには含めない)
+  // ★借用先の名前は全部英語で統一する(ユーザー指示)。チップ名+チャンネル名なので
+  //   翻訳する意味が薄く、日英が混ざると一覧としてかえって読みにくいため。
   const TARGET_NAME = function () {
     return {
-      skip: T('スキップ'),
-      pulse1: '2A03 Pulse1', pulse2: '2A03 Pulse2', triangle: T('2A03 三角波'), noise: T('2A03 ノイズ'), dpcm: '2A03 DPCM',
-      fds: T('FDS 波形'),
-      vrc6pulse1: 'VRC6 Pulse1', vrc6pulse2: 'VRC6 Pulse2', vrc6saw: T('VRC6 ノコギリ'),
+      skip: T('スキップ'), // これだけは操作(=変換しない)なので訳す
+      pulse1: '2A03 Pulse1', pulse2: '2A03 Pulse2', triangle: '2A03 Triangle', noise: '2A03 Noise', dpcm: '2A03 DPCM',
+      fds: 'FDS Wave',
+      vrc6pulse1: 'VRC6 Pulse1', vrc6pulse2: 'VRC6 Pulse2', vrc6saw: 'VRC6 Saw',
       fme7a: 'FME-7 A', fme7b: 'FME-7 B', fme7c: 'FME-7 C',
       mmc5pulse1: 'MMC5 Pulse1', mmc5pulse2: 'MMC5 Pulse2',
     };
   };
+
+  // 借用先チップごとの色(セレクトの項目とpart列チップの文字色)。音源の区別を色でも付ける
+  const CHIP_COLOR = {
+    '2a03': '#d1483a', fds: '#c98a00', vrc7: '#8a5cd6', vrc6: '#1e9e5a',
+    n163: '#3a6ea5', fme7: '#c2456f', mmc5: '#2a8f96',
+  };
+  function colorOfTarget(type) {
+    const tt = targetInfo(type);
+    return (tt && tt.chip && CHIP_COLOR[tt.chip]) || '';
+  }
 
   function targetInfo(type) { return TARGETS[type] || TARGETS.skip; }
 
@@ -124,11 +136,14 @@
   const WAVE_T = ['fds'].concat(N163_T).concat(VRC7_T).concat(PULSE_T);
   const NOISE_T = ['noise'];
   const PCM_T = ['dpcm'].concat(VRC7_T).concat(N163_T).concat(['pulse1', 'pulse2', 'triangle']);
+  // ★FDSは波形メモリchなので、音程を持つ元chならどの種別からでも選べてよい。
+  //   以前は 'wave'/'any' にしか入れておらず、FM/PCM/矩形波の行で F: が出なかった
+  //   (ユーザー報告「変換先にF:のFDSがない」)。ノイズだけは対象外。
   const KIND_TARGETS = {
-    square: SQUARE_T, wave: WAVE_T, noise: NOISE_T,
-    fm: VRC7_T.concat(SQUARE_T.filter(function (t) { return VRC7_T.indexOf(t) < 0; })),
-    fm4: VRC7_T.concat(SQUARE_T.filter(function (t) { return VRC7_T.indexOf(t) < 0; })),
-    pcm: PCM_T,
+    square: ['fds'].concat(SQUARE_T), wave: WAVE_T, noise: NOISE_T,
+    fm: ['fds'].concat(VRC7_T, SQUARE_T.filter(function (t) { return VRC7_T.indexOf(t) < 0; })),
+    fm4: ['fds'].concat(VRC7_T, SQUARE_T.filter(function (t) { return VRC7_T.indexOf(t) < 0; })),
+    pcm: ['fds'].concat(PCM_T),
     any: ['fds', 'dpcm'].concat(SQUARE_T),
   };
   // 借用先の並びはチャンネル文字のアルファベット順(A-Z → a,b)。ラベルが「P: N163 ch1」と
@@ -166,11 +181,10 @@
   function toneKindFor(type, fmt) {
     const cap = capsOf(fmt).tone;
     if (!cap) return null;
-    // DPCM(サンプルPCMの打楽器を実サンプルのままDMCへ変換して載せる)は「音色」ではなく
-    // DMCレートを選ぶ。置き場(借用先の隣の小さいセレクト)と保存経路(ent.tone)が同じなので
-    // 音色セレクトへ相乗りする。★PCMからDMCへは必ず劣化するので、自動任せにせず
-    // ユーザーが耳で選べることを必須にする(ユーザー指示)。
-    if (type === 'dpcm') return 'dpcmRate';
+    // ★DPCMのDMCレートは「チャンネル単位」ではなく「サンプル単位」で持つ(2026-08-29)。
+    //   @DPCM<n>定義は元々サンプルごとにfreqを持てるうえ、プール式チップは同じ太鼓が
+    //   毎回別スロットへ移るのでch単位だと指定が飛ぶ。設定はドラム一覧パネル側
+    //   (src/convert/drumSamples.js)。ここでは音色セレクトを出さない。
     if (cap === 'vrc7') return /^vrc7_/.test(type) ? 'vrc7' : null;
     if (/^(pulse1|pulse2|mmc5pulse1|mmc5pulse2)$/.test(type)) return 'duty4';
     if (/^vrc6pulse/.test(type)) return 'duty8';
@@ -185,12 +199,6 @@
     return type !== 'skip' && type !== 'dpcm' && type !== 'triangle';
   }
   function toneOptionsFor(kind, srcKind) {
-    if (kind === 'dpcmRate') {
-      const table = (MML.Dpcm && MML.Dpcm.DMC_RATE_TABLE_NTSC) || [];
-      const opts = [['auto', T('自動')]];
-      for (let i = table.length - 1; i >= 0; i--) opts.push([String(i), (table[i] / 1000).toFixed(1) + 'kHz']);
-      return { def: 'auto', opts: opts };
-    }
     if (kind === 'duty4') {
       return { def: '2', opts: [['0', '@0 12.5%'], ['1', '@1 25%'], ['2', '@2 50%'], ['3', '@3 75%']] };
     }
@@ -221,8 +229,14 @@
     [/^KS([1-5])$/, function (m) { return ['wave', 'scc:' + (+m[1] - 1)]; }],               // SCC
     [/^KF([1-9])$/, function (m) { return ['fm', 'opll:' + (+m[1] - 1)]; }],                // YM2413 / FMPAC メロディ
     [/^KF(BD|SD|TOM|CYM|HH)$/, function () { return ['fm', null]; }],                       // OPLLリズム(割当対象外)
+    [/^OL([1-9])$/, function (m) { return ['fm', 'opl:' + (+m[1] - 1)]; }],                 // OPL系(YM3812/YM3526/Y8950/MSX-AUDIO)
+    [/^OL(BD|SD|TM|CY|HH|B)$/, function () { return ['fm', null]; }],                       // OPLリズム/ADPCM(割当対象外)
     [/^YM([1-6])$/, function (m) { return ['fm4', 'opn:' + (+m[1] - 1)]; }],                // YM2612
     [/^OM([1-8])$/, function (m) { return ['fm4', 'opm:' + (+m[1] - 1)]; }],                // YM2151
+    [/^OP([1-3])$/, function (m) { return ['fm4', 'opn3:' + (+m[1] - 1)]; }],               // YM2203 FM(OP4-6=デュアル2個目は割当対象外)
+    [/^OA([1-6])$/, function (m) { return ['fm4', 'opna:' + (+m[1] - 1)]; }],               // YM2608 FM
+    [/^OAB$/, function () { return ['pcm', 'pcmb8:0']; }],                                  // YM2608 ADPCM-B
+    [/^OA(BD|SD|CY|HH|TM|RM)$/, function () { return ['pcm', null]; }],                     // YM2608 リズム(ドラムパートのみ・割当対象外)
     [/^NF([1-6])$/, function (m) { return ['fm4', 'opnb:' + (+m[1] - 1)]; }],               // YM2610 FM
     [/^NA([1-6])$/, function (m) { return ['pcm', 'pcma:' + (+m[1] - 1)]; }],               // YM2610 ADPCM-A
     [/^NB$/, function () { return ['pcm', 'pcmb:0']; }],                                    // YM2610 ADPCM-B
@@ -249,12 +263,13 @@
 
   // 逆引き: 変換器のソースID(VGM) → 鍵盤表示の行ID。VGMの構成駆動の既定割当
   // (MML.VGM2MML.defaultPlan)を鍵盤の行へ移すのに使う。
-  const VGM_SRC_TO_CH = { ay: 'KP', scc: 'KS', opll: 'KF', opn: 'YM', opm: 'OM', opnb: 'NF', pcma: 'NA', ga20: 'GA', spcm: 'SP', c140: 'CN', c352: 'CS', qs: 'QS', oki: 'OK', mp: 'MP' };
+  const VGM_SRC_TO_CH = { ay: 'KP', scc: 'KS', opll: 'KF', opn: 'YM', opm: 'OM', opn3: 'OP', opna: 'OA', opnb: 'NF', opl: 'OL', pcma: 'NA', ga20: 'GA', spcm: 'SP', c140: 'CN', c352: 'CS', qs: 'QS', oki: 'OK', mp: 'MP' };
   function chIdForVgmSource(srcId) {
     const m = /^([a-z0-9]+):(.+)$/.exec(srcId || '');
     if (!m) return null;
     const kind = m[1], rest = m[2];
     if (kind === 'pcmb') return 'NB';
+    if (kind === 'pcmb8') return 'OAB'; // YM2608 ADPCM-B
     if (/^sn[01]$/.test(kind)) {
       const chip = kind === 'sn1' ? 1 : 0;
       if (rest === 'noise') return chip ? 'SNN2' : 'SNN';
@@ -324,6 +339,7 @@
     hasVolSliderFor: hasVolSliderFor,
     channelKind: channelKind,
     vgmSourceId: vgmSourceId,
+    colorOfTarget: colorOfTarget,
     chIdForVgmSource: chIdForVgmSource,
 
     // 今どの形式を表示/再生しているか(setKbdSource経由。何度呼ばれても割当は消さない)
