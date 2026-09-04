@@ -187,8 +187,8 @@
 
   // 鍵盤表示用スナップショット: FM 6ch(YM2612版そのまま)+リズム(adpcmA[6])+adpcmB。
   // 形は Emu.snapshotYM2610 と同一(キャプチャ/ロール/変換の adpcmA/adpcmB 経路を全部流用する)。
-  Emu.snapshotYM2608 = function (chip) {
-    const s = Emu.snapshotYM2612(chip.core);
+  Emu.snapshotYM2608 = function (chip, opt) {
+    const s = Emu.snapshotYM2612(chip.core, opt);
     const A = chip.adpcmA, B = chip.adpcmB;
     const tl = (A.regs[0x01] & 0x3F);
     const adpcmA = [];

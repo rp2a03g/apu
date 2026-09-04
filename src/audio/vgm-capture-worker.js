@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 02:47:03
+ * Built by tools/build-capture-workers.ps1 at 2026-09-05 03:52:51
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-05 02:47:03';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-05 03:52:51';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -5073,6 +5073,24 @@
       this._div = 0;
     }
 
+    // ── シーク用の状態保存/復元(2026-09-04、VgmPlayerのチェックポイント) ──────────
+    // SN76489はレジスタ影と内部カウンタが全部小さい素の値なので、そのまま丸ごと持てる。
+    // ★ここに無いフィールドは復元されない。フィールドを足したらここも足すこと
+    //   (VgmPlayer側は「全チップがgetState/setStateを持つ曲」でしかチェックポイントを使わない)。
+    getState() {
+      return { period: this.period.slice(), att: this.att.slice(), counter: this.counter.slice(),
+               level: this.level.slice(), noiseReg: this.noiseReg, noiseCounter: this.noiseCounter,
+               noiseFlip: this.noiseFlip, lfsr: this.lfsr, noiseOut: this.noiseOut,
+               latch: this.latch, stereo: this.stereo, _div: this._div };
+    }
+    setState(s) {
+      if (!s) return;
+      this.period.set(s.period); this.att.set(s.att); this.counter.set(s.counter); this.level.set(s.level);
+      this.noiseReg = s.noiseReg; this.noiseCounter = s.noiseCounter; this.noiseFlip = s.noiseFlip;
+      this.lfsr = s.lfsr; this.noiseOut = s.noiseOut; this.latch = s.latch; this.stereo = s.stereo;
+      this._div = s._div;
+    }
+
     /** データポート書込み */
     write(value) {
       value &= 0xFF;
@@ -6018,8 +6036,41 @@
 
     // ── 鍵盤表示用スナップショット(Emu.snapshotYM2612 の実体) ──
     // スロット番号: op1=ch, op2=ch+12, op3=ch+6, op4=ch+18
-    snapshot() {
+    /**
+     * ch の音色パラメータ。★レジスタが前回と同じなら**前回のオブジェクトをそのまま返す**
+     * (2026-09-04)。decodeOpnPatch は4オペレータ×10項目のオブジェクトを毎回作るので、
+     * 毎フレーム全chぶん作ると先読みキャプチャの保持量が跳ね上がる
+     * (実測: 1フレーム15,432Bのうち patch が10,440B=68%。2分の曲で106MB)。
+     * 音色は鳴っている間ほぼ変わらないので、使い回せば曲全体でも数個で済む。
+     * ★共有して安全なのは、受け取り側(vgm2mml/expansion/opn.js、鍵盤表示)が
+     *   patch を読むだけで書き換えないため。
+     */
+    _patchOf(ch) {
+      const cache = this._patchCache || (this._patchCache = []);
+      const port = ch < 3 ? 0 : 1, off = ch % 3;
+      const r = this.regs[port];
+      let e = cache[ch];
+      if (!e) e = cache[ch] = { bytes: new Uint8Array(PATCH_SLOT_OFFSETS.length * PATCH_OP_REGS.length + 2), patch: null };
+      const b = e.bytes;
+      let i = 0, same = !!e.patch;
+      for (const so of PATCH_SLOT_OFFSETS) {
+        const o = off + so;
+        for (const base of PATCH_OP_REGS) { const v = r[base + o]; if (b[i] !== v) { b[i] = v; same = false; } i++; }
+      }
+      for (const base of [0xB0, 0xB4]) { const v = r[base + off]; if (b[i] !== v) { b[i] = v; same = false; } i++; }
+      if (!same) e.patch = Emu.decodeOpnPatch(this.regs, ch);
+      return e.patch;
+    }
+
+    /**
+     * @param {object} [opt] opt.skipWave=true で表示専用の合成波形(waveData)を作らない。
+     *   先読みキャプチャ(regsOnly)は波形を使わない(ロール構築と変換が読むのは
+     *   freq/vol/active/patch だけ)ので、毎フレーム128点の配列を作って抱えるのは無駄
+     *   (実測で1フレームの14%)。ライブの鍵盤表示は従来どおり作る。
+     */
+    snapshot(opt) {
       const c = this;
+      const skipWave = !!(opt && opt.skipWave);
       const fs = this.sampleRate;
       const CARRIERS = [[3], [3], [3], [3], [1, 3], [1, 2, 3], [1, 2, 3], [0, 1, 2, 3]];
       const slotOf = (ch, op) => [ch, ch + 12, ch + 6, ch + 18][op];
@@ -6039,11 +6090,11 @@
         const tlVol = Math.max(0, 1 - minTl / 127);
         const active = anyOn && vol > 0.02 && freq > 0 && !(ch === 5 && c.dacen);
         let waveData = null;
-        if (active) {
+        if (active && !skipWave) {
           const slots4 = [0, 1, 2, 3].map((op) => slotOf(ch, op));
           waveData = nukedSynthWave(slots4.map((s) => c.pg_inc[s]), slots4.map((s) => c.eg_out[s]), algo, c.fb[ch]);
         }
-        out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol, algo, fb: c.fb[ch], panL: c.pan_l[ch], panR: c.pan_r[ch], waveData, patch: Emu.decodeOpnPatch(c.regs, ch) });
+        out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol, algo, fb: c.fb[ch], panL: c.pan_l[ch], panR: c.pan_r[ch], waveData, patch: c._patchOf(ch) });
       }
       const level = ((c.dacdata >> 1) ^ 0x80) & 0xff;
       out.dac = { enabled: !!c.dacen, level, active: !!c.dacen, vol: c.dacen ? Math.min(1, Math.abs(level - 0x80) / 64) : 0 };
@@ -6054,6 +6105,11 @@
   // OPN(YM2612/YM2610)のレジスタ影(regs[port][reg])から ch(0-5)の音色パラメータを取り出す
   // (鍵盤の大波形表示の下に音色データを出すため)。
   // ops はop1,op2,op3,op4の論理順(レジスタ上のスロット順 +0,+4,+8,+12 は op1,op3,op2,op4)。
+  // 音色パラメータが載っているレジスタ(ch内オフセット)。同じ内容なら decodeOpnPatch を
+  // 呼び直さず前回のオブジェクトを使い回すための比較に使う(_patchOf 参照)
+  const PATCH_SLOT_OFFSETS = [0, 8, 4, 12];
+  const PATCH_OP_REGS = [0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90];
+
   Emu.decodeOpnPatch = function (regs, ch) {
     const port = ch < 3 ? 0 : 1, off = ch % 3;
     const r = regs[port];
@@ -6075,7 +6131,7 @@
   };
 
   // 鍵盤表示用スナップショット(OPN系の共通入口。YM2610のFM段もこれを通る)
-  Emu.snapshotYM2612 = function (chip) { return chip.snapshot(); };
+  Emu.snapshotYM2612 = function (chip, opt) { return chip.snapshot(opt); };
 
   Emu.YM2612Nuked = YM2612Nuked;
 })(globalThis);
@@ -6726,8 +6782,8 @@
   //   pitchHz/pitchConf: 鳴っているサンプルのピッチ解析(samplePitch)結果 × 現在の再生レート。
   //   conf<0.5 は表示側で音程なし扱い(ドラム等)。ADPCM-Aは音程レジスタが無いのでこれが唯一の音程情報、
   //   ADPCM-Bは refRate ベースの仮基準(下記)より優先して使う。
-  Emu.snapshotYM2610 = function (chip) {
-    const s = Emu.snapshotYM2612(chip.core);
+  Emu.snapshotYM2610 = function (chip, opt) {
+    const s = Emu.snapshotYM2612(chip.core, opt);
     const A = chip.adpcmA, B = chip.adpcmB;
     const tl = (A.regs[0x01] & 0x3F);
     const adpcmA = [];
@@ -7260,8 +7316,31 @@
       L: (b >> 6) & 1, R: (b >> 7) & 1, ops };
   };
 
-  Emu.snapshotYM2151 = function (chip) {
+  // 音色パラメータが載っているレジスタ(ch内オフセット)。中身が同じなら decodeOpmPatch を
+  // 呼び直さず前回のオブジェクトを使い回すための比較に使う(ym2612Nuked.js _patchOf と同じ理屈)
+  const OPM_PATCH_REGS = [0x40, 0x60, 0x80, 0xA0, 0xC0, 0xE0];
+  function opmPatchOf(chip, i) {
+    const cache = chip._patchCache || (chip._patchCache = []);
+    let e = cache[i];
+    if (!e) e = cache[i] = { bytes: new Uint8Array(OPM_PATCH_REGS.length * 4 + 2), patch: null };
+    const b = e.bytes, r = chip.regs;
+    let k = 0, same = !!e.patch;
+    for (const base of OPM_PATCH_REGS) {
+      for (let op = 0; op < 4; op++) { const v = r[base + i + op * 8]; if (b[k] !== v) { b[k] = v; same = false; } k++; }
+    }
+    for (const base of [0x20, 0x38]) { const v = r[base + i]; if (b[k] !== v) { b[k] = v; same = false; } k++; }
+    if (!same) e.patch = Emu.decodeOpmPatch(chip.regs, i);
+    return e.patch;
+  }
+
+  /**
+   * @param {object} [opt] opt.skipWave=true で表示専用の合成波形を作らない。
+   *   先読みキャプチャ(regsOnly)はロール構築と変換しか読まないので、毎フレーム
+   *   8ch×128点の配列を抱えるのは無駄(ym2612Nuked.js snapshot と同じ扱い)。
+   */
+  Emu.snapshotYM2151 = function (chip, opt) {
     const N = 128;
+    const skipWave = !!(opt && opt.skipWave);
     const out = { channels: [] };
     for (let i = 0; i < NUM_CH; i++) {
       const ch = chip.channels[i];
@@ -7286,8 +7365,8 @@
       const tlVol = Math.max(0, 1 - minTl / 1016);
       const active = anyOn && vol > 0.02 && freq > 0;
       // 波形の概形(現在のパラメータからの簡易合成)
-      const wave = new Array(N).fill(0);
-      if (active) {
+      const wave = skipWave ? null : new Array(N).fill(0);
+      if (active && !skipWave) {
         const incs = ch.slots.map(s => s.inc || 1);
         const base = incs[3] || 1;
         let mx = 1e-6;
@@ -7314,7 +7393,7 @@
       out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol,
         algo: ch.algo, fb: ch.fb, panL: ch.left ? 1 : 0, panR: ch.right ? 1 : 0,
         noise: chip.noiseEnable && i === 7,
-        waveData: wave, patch: Emu.decodeOpmPatch(chip.regs, i) });
+        waveData: wave, patch: opmPatchOf(chip, i) });
     }
     return out;
   };
@@ -7428,8 +7507,8 @@
 
   // 鍵盤表示用スナップショット: YM2612版の6chから実チャンネル(0-2)を抜き出す(形は同じ)。
   // SSGは Emu.snapshotAY8910(chip.ssg, chip.ssgTickHz) を呼び出し側が別途使う。
-  Emu.snapshotYM2203 = function (chip) {
-    const s = Emu.snapshotYM2612(chip.core);
+  Emu.snapshotYM2203 = function (chip, opt) {
+    const s = Emu.snapshotYM2612(chip.core, opt);
     return { channels: s.channels.slice(0, 3) };
   };
 
@@ -7625,8 +7704,8 @@
 
   // 鍵盤表示用スナップショット: FM 6ch(YM2612版そのまま)+リズム(adpcmA[6])+adpcmB。
   // 形は Emu.snapshotYM2610 と同一(キャプチャ/ロール/変換の adpcmA/adpcmB 経路を全部流用する)。
-  Emu.snapshotYM2608 = function (chip) {
-    const s = Emu.snapshotYM2612(chip.core);
+  Emu.snapshotYM2608 = function (chip, opt) {
+    const s = Emu.snapshotYM2612(chip.core, opt);
     const A = chip.adpcmA, B = chip.adpcmB;
     const tl = (A.regs[0x01] & 0x3F);
     const adpcmA = [];
@@ -11040,6 +11119,10 @@
   const VGM_RATE = 44100;
   const FRAME_RATE = 60;
   const DAC_HITS_MAX = 200000; // ストリーミングDAC打点の記録上限(_dacHitStart)
+  // 先読みキャプチャのスナップショットは表示専用の合成波形を作らない(2026-09-04)。
+  // ロール構築と変換が読むのは freq/vol/active/patch だけで、毎フレーム128点の配列を
+  // 全chぶん抱えると保持量が跳ね上がる(実測でスナップショット1フレームの14%)。
+  const SNAP_CAPTURE = { skipWave: true };
   const SAMPLES_PER_FRAME = VGM_RATE / FRAME_RATE; // 735
 
   // 各フォーマットのストリームプレイヤーが使っている実測校正済みgain
@@ -12212,7 +12295,7 @@
       if (data.ym2612) {
         // 先読みはチップのclock()を回さない(EGが進まない)ので、ロール用の発音判定/音量は
         // レジスタだけから決まる keyOn/tlVol に差し替える(ライブ表示はEG由来のactive/volを使う)
-        const s = Emu.snapshotYM2612(player.adapterById.ym2612.chip);
+        const s = Emu.snapshotYM2612(player.adapterById.ym2612.chip, SNAP_CAPTURE);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2612.snapshots.push(s);
       }
@@ -12297,13 +12380,13 @@
       if (data.okim6258) data.okim6258.snapshots.push(Emu.snapshotOKIM6258(player.adapterById.okim6258.chip));
       if (data.ym2151) {
         // YM2612と同じ: 先読みはEGが進まないので発音判定/音量はレジスタ由来(keyOn/tlVol)へ差し替える
-        const s = Emu.snapshotYM2151(player.adapterById.ym2151.chip);
+        const s = Emu.snapshotYM2151(player.adapterById.ym2151.chip, SNAP_CAPTURE);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2151.snapshots.push(s);
       }
       if (data.ym2203fm) {
         // YM2612と同じ: 先読みはEGが進まないので発音判定/音量はレジスタ由来(keyOn/tlVol)へ差し替える
-        const s = Emu.snapshotYM2203(player.adapterById.ym2203.fm);
+        const s = Emu.snapshotYM2203(player.adapterById.ym2203.fm, SNAP_CAPTURE);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2203fm.snapshots.push(s);
         // プリスケーラでSSG実クロックが変わる(Avengersは1/3=SSG実クロック2倍)ため、
@@ -12315,7 +12398,7 @@
       if (data.ym2608fm) {
         // YM2610と同じ: FMはkeyOn/tlVolへ差し替え、リズム/ADPCM-Bはキーオン通番+サンプル長で
         // 発音区間を推定(clock()を回さないため)
-        const s = Emu.snapshotYM2608(player.adapterById.ym2608.fm);
+        const s = Emu.snapshotYM2608(player.adapterById.ym2608.fm, SNAP_CAPTURE);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         const st8 = adpcm2608State;
         for (let i = 0; i < 6; i++) {
@@ -12336,7 +12419,7 @@
         }
       }
       if (data.ym2610fm) {
-        const s = Emu.snapshotYM2610(player.adapterById.ym2610.fm);
+        const s = Emu.snapshotYM2610(player.adapterById.ym2610.fm, SNAP_CAPTURE);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         // ADPCM-A/B: clock()を回さないので playing は終端で落ちない。キーオン通番(seq)の変化を発音開始、
         // そこからサンプル長(lenSec)ぶんを発音区間として推定する(ADPCM-Bはリピート中=Infinity、

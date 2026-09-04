@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 02:47:03
+ * Built by tools/build-capture-workers.ps1 at 2026-09-05 03:52:51
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-05 02:47:03';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-05 03:52:51';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -3761,8 +3761,8 @@
   //   pitchHz/pitchConf: 鳴っているサンプルのピッチ解析(samplePitch)結果 × 現在の再生レート。
   //   conf<0.5 は表示側で音程なし扱い(ドラム等)。ADPCM-Aは音程レジスタが無いのでこれが唯一の音程情報、
   //   ADPCM-Bは refRate ベースの仮基準(下記)より優先して使う。
-  Emu.snapshotYM2610 = function (chip) {
-    const s = Emu.snapshotYM2612(chip.core);
+  Emu.snapshotYM2610 = function (chip, opt) {
+    const s = Emu.snapshotYM2612(chip.core, opt);
     const A = chip.adpcmA, B = chip.adpcmB;
     const tl = (A.regs[0x01] & 0x3F);
     const adpcmA = [];

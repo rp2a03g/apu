@@ -644,8 +644,8 @@
   //   pitchHz/pitchConf: 鳴っているサンプルのピッチ解析(samplePitch)結果 × 現在の再生レート。
   //   conf<0.5 は表示側で音程なし扱い(ドラム等)。ADPCM-Aは音程レジスタが無いのでこれが唯一の音程情報、
   //   ADPCM-Bは refRate ベースの仮基準(下記)より優先して使う。
-  Emu.snapshotYM2610 = function (chip) {
-    const s = Emu.snapshotYM2612(chip.core);
+  Emu.snapshotYM2610 = function (chip, opt) {
+    const s = Emu.snapshotYM2612(chip.core, opt);
     const A = chip.adpcmA, B = chip.adpcmB;
     const tl = (A.regs[0x01] & 0x3F);
     const adpcmA = [];

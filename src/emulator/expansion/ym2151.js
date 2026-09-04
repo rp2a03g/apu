@@ -429,8 +429,31 @@
       L: (b >> 6) & 1, R: (b >> 7) & 1, ops };
   };
 
-  Emu.snapshotYM2151 = function (chip) {
+  // 音色パラメータが載っているレジスタ(ch内オフセット)。中身が同じなら decodeOpmPatch を
+  // 呼び直さず前回のオブジェクトを使い回すための比較に使う(ym2612Nuked.js _patchOf と同じ理屈)
+  const OPM_PATCH_REGS = [0x40, 0x60, 0x80, 0xA0, 0xC0, 0xE0];
+  function opmPatchOf(chip, i) {
+    const cache = chip._patchCache || (chip._patchCache = []);
+    let e = cache[i];
+    if (!e) e = cache[i] = { bytes: new Uint8Array(OPM_PATCH_REGS.length * 4 + 2), patch: null };
+    const b = e.bytes, r = chip.regs;
+    let k = 0, same = !!e.patch;
+    for (const base of OPM_PATCH_REGS) {
+      for (let op = 0; op < 4; op++) { const v = r[base + i + op * 8]; if (b[k] !== v) { b[k] = v; same = false; } k++; }
+    }
+    for (const base of [0x20, 0x38]) { const v = r[base + i]; if (b[k] !== v) { b[k] = v; same = false; } k++; }
+    if (!same) e.patch = Emu.decodeOpmPatch(chip.regs, i);
+    return e.patch;
+  }
+
+  /**
+   * @param {object} [opt] opt.skipWave=true で表示専用の合成波形を作らない。
+   *   先読みキャプチャ(regsOnly)はロール構築と変換しか読まないので、毎フレーム
+   *   8ch×128点の配列を抱えるのは無駄(ym2612Nuked.js snapshot と同じ扱い)。
+   */
+  Emu.snapshotYM2151 = function (chip, opt) {
     const N = 128;
+    const skipWave = !!(opt && opt.skipWave);
     const out = { channels: [] };
     for (let i = 0; i < NUM_CH; i++) {
       const ch = chip.channels[i];
@@ -455,8 +478,8 @@
       const tlVol = Math.max(0, 1 - minTl / 1016);
       const active = anyOn && vol > 0.02 && freq > 0;
       // 波形の概形(現在のパラメータからの簡易合成)
-      const wave = new Array(N).fill(0);
-      if (active) {
+      const wave = skipWave ? null : new Array(N).fill(0);
+      if (active && !skipWave) {
         const incs = ch.slots.map(s => s.inc || 1);
         const base = incs[3] || 1;
         let mx = 1e-6;
@@ -483,7 +506,7 @@
       out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol,
         algo: ch.algo, fb: ch.fb, panL: ch.left ? 1 : 0, panR: ch.right ? 1 : 0,
         noise: chip.noiseEnable && i === 7,
-        waveData: wave, patch: Emu.decodeOpmPatch(chip.regs, i) });
+        waveData: wave, patch: opmPatchOf(chip, i) });
     }
     return out;
   };

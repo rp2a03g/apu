@@ -814,8 +814,41 @@
 
     // ── 鍵盤表示用スナップショット(Emu.snapshotYM2612 の実体) ──
     // スロット番号: op1=ch, op2=ch+12, op3=ch+6, op4=ch+18
-    snapshot() {
+    /**
+     * ch の音色パラメータ。★レジスタが前回と同じなら**前回のオブジェクトをそのまま返す**
+     * (2026-09-04)。decodeOpnPatch は4オペレータ×10項目のオブジェクトを毎回作るので、
+     * 毎フレーム全chぶん作ると先読みキャプチャの保持量が跳ね上がる
+     * (実測: 1フレーム15,432Bのうち patch が10,440B=68%。2分の曲で106MB)。
+     * 音色は鳴っている間ほぼ変わらないので、使い回せば曲全体でも数個で済む。
+     * ★共有して安全なのは、受け取り側(vgm2mml/expansion/opn.js、鍵盤表示)が
+     *   patch を読むだけで書き換えないため。
+     */
+    _patchOf(ch) {
+      const cache = this._patchCache || (this._patchCache = []);
+      const port = ch < 3 ? 0 : 1, off = ch % 3;
+      const r = this.regs[port];
+      let e = cache[ch];
+      if (!e) e = cache[ch] = { bytes: new Uint8Array(PATCH_SLOT_OFFSETS.length * PATCH_OP_REGS.length + 2), patch: null };
+      const b = e.bytes;
+      let i = 0, same = !!e.patch;
+      for (const so of PATCH_SLOT_OFFSETS) {
+        const o = off + so;
+        for (const base of PATCH_OP_REGS) { const v = r[base + o]; if (b[i] !== v) { b[i] = v; same = false; } i++; }
+      }
+      for (const base of [0xB0, 0xB4]) { const v = r[base + off]; if (b[i] !== v) { b[i] = v; same = false; } i++; }
+      if (!same) e.patch = Emu.decodeOpnPatch(this.regs, ch);
+      return e.patch;
+    }
+
+    /**
+     * @param {object} [opt] opt.skipWave=true で表示専用の合成波形(waveData)を作らない。
+     *   先読みキャプチャ(regsOnly)は波形を使わない(ロール構築と変換が読むのは
+     *   freq/vol/active/patch だけ)ので、毎フレーム128点の配列を作って抱えるのは無駄
+     *   (実測で1フレームの14%)。ライブの鍵盤表示は従来どおり作る。
+     */
+    snapshot(opt) {
       const c = this;
+      const skipWave = !!(opt && opt.skipWave);
       const fs = this.sampleRate;
       const CARRIERS = [[3], [3], [3], [3], [1, 3], [1, 2, 3], [1, 2, 3], [0, 1, 2, 3]];
       const slotOf = (ch, op) => [ch, ch + 12, ch + 6, ch + 18][op];
@@ -835,11 +868,11 @@
         const tlVol = Math.max(0, 1 - minTl / 127);
         const active = anyOn && vol > 0.02 && freq > 0 && !(ch === 5 && c.dacen);
         let waveData = null;
-        if (active) {
+        if (active && !skipWave) {
           const slots4 = [0, 1, 2, 3].map((op) => slotOf(ch, op));
           waveData = nukedSynthWave(slots4.map((s) => c.pg_inc[s]), slots4.map((s) => c.eg_out[s]), algo, c.fb[ch]);
         }
-        out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol, algo, fb: c.fb[ch], panL: c.pan_l[ch], panR: c.pan_r[ch], waveData, patch: Emu.decodeOpnPatch(c.regs, ch) });
+        out.channels.push({ freq, vol, rawVol: Math.round(vol * 15), active, keyOn, tlVol, algo, fb: c.fb[ch], panL: c.pan_l[ch], panR: c.pan_r[ch], waveData, patch: c._patchOf(ch) });
       }
       const level = ((c.dacdata >> 1) ^ 0x80) & 0xff;
       out.dac = { enabled: !!c.dacen, level, active: !!c.dacen, vol: c.dacen ? Math.min(1, Math.abs(level - 0x80) / 64) : 0 };
@@ -850,6 +883,11 @@
   // OPN(YM2612/YM2610)のレジスタ影(regs[port][reg])から ch(0-5)の音色パラメータを取り出す
   // (鍵盤の大波形表示の下に音色データを出すため)。
   // ops はop1,op2,op3,op4の論理順(レジスタ上のスロット順 +0,+4,+8,+12 は op1,op3,op2,op4)。
+  // 音色パラメータが載っているレジスタ(ch内オフセット)。同じ内容なら decodeOpnPatch を
+  // 呼び直さず前回のオブジェクトを使い回すための比較に使う(_patchOf 参照)
+  const PATCH_SLOT_OFFSETS = [0, 8, 4, 12];
+  const PATCH_OP_REGS = [0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90];
+
   Emu.decodeOpnPatch = function (regs, ch) {
     const port = ch < 3 ? 0 : 1, off = ch % 3;
     const r = regs[port];
@@ -871,7 +909,7 @@
   };
 
   // 鍵盤表示用スナップショット(OPN系の共通入口。YM2610のFM段もこれを通る)
-  Emu.snapshotYM2612 = function (chip) { return chip.snapshot(); };
+  Emu.snapshotYM2612 = function (chip, opt) { return chip.snapshot(opt); };
 
   Emu.YM2612Nuked = YM2612Nuked;
 })(window);

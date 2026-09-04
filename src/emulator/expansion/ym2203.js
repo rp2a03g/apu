@@ -104,8 +104,8 @@
 
   // 鍵盤表示用スナップショット: YM2612版の6chから実チャンネル(0-2)を抜き出す(形は同じ)。
   // SSGは Emu.snapshotAY8910(chip.ssg, chip.ssgTickHz) を呼び出し側が別途使う。
-  Emu.snapshotYM2203 = function (chip) {
-    const s = Emu.snapshotYM2612(chip.core);
+  Emu.snapshotYM2203 = function (chip, opt) {
+    const s = Emu.snapshotYM2612(chip.core, opt);
     return { channels: s.channels.slice(0, 3) };
   };
 

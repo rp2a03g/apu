@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 02:47:03
+ * Built by tools/build-capture-workers.ps1 at 2026-09-05 03:52:51
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-09-05 02:47:03';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-09-05 03:52:51';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析

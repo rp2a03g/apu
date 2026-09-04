@@ -62,6 +62,10 @@
   const VGM_RATE = 44100;
   const FRAME_RATE = 60;
   const DAC_HITS_MAX = 200000; // ストリーミングDAC打点の記録上限(_dacHitStart)
+  // 先読みキャプチャのスナップショットは表示専用の合成波形を作らない(2026-09-04)。
+  // ロール構築と変換が読むのは freq/vol/active/patch だけで、毎フレーム128点の配列を
+  // 全chぶん抱えると保持量が跳ね上がる(実測でスナップショット1フレームの14%)。
+  const SNAP_CAPTURE = { skipWave: true };
   const SAMPLES_PER_FRAME = VGM_RATE / FRAME_RATE; // 735
 
   // 各フォーマットのストリームプレイヤーが使っている実測校正済みgain
@@ -1234,7 +1238,7 @@
       if (data.ym2612) {
         // 先読みはチップのclock()を回さない(EGが進まない)ので、ロール用の発音判定/音量は
         // レジスタだけから決まる keyOn/tlVol に差し替える(ライブ表示はEG由来のactive/volを使う)
-        const s = Emu.snapshotYM2612(player.adapterById.ym2612.chip);
+        const s = Emu.snapshotYM2612(player.adapterById.ym2612.chip, SNAP_CAPTURE);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2612.snapshots.push(s);
       }
@@ -1319,13 +1323,13 @@
       if (data.okim6258) data.okim6258.snapshots.push(Emu.snapshotOKIM6258(player.adapterById.okim6258.chip));
       if (data.ym2151) {
         // YM2612と同じ: 先読みはEGが進まないので発音判定/音量はレジスタ由来(keyOn/tlVol)へ差し替える
-        const s = Emu.snapshotYM2151(player.adapterById.ym2151.chip);
+        const s = Emu.snapshotYM2151(player.adapterById.ym2151.chip, SNAP_CAPTURE);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2151.snapshots.push(s);
       }
       if (data.ym2203fm) {
         // YM2612と同じ: 先読みはEGが進まないので発音判定/音量はレジスタ由来(keyOn/tlVol)へ差し替える
-        const s = Emu.snapshotYM2203(player.adapterById.ym2203.fm);
+        const s = Emu.snapshotYM2203(player.adapterById.ym2203.fm, SNAP_CAPTURE);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2203fm.snapshots.push(s);
         // プリスケーラでSSG実クロックが変わる(Avengersは1/3=SSG実クロック2倍)ため、
@@ -1337,7 +1341,7 @@
       if (data.ym2608fm) {
         // YM2610と同じ: FMはkeyOn/tlVolへ差し替え、リズム/ADPCM-Bはキーオン通番+サンプル長で
         // 発音区間を推定(clock()を回さないため)
-        const s = Emu.snapshotYM2608(player.adapterById.ym2608.fm);
+        const s = Emu.snapshotYM2608(player.adapterById.ym2608.fm, SNAP_CAPTURE);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         const st8 = adpcm2608State;
         for (let i = 0; i < 6; i++) {
@@ -1358,7 +1362,7 @@
         }
       }
       if (data.ym2610fm) {
-        const s = Emu.snapshotYM2610(player.adapterById.ym2610.fm);
+        const s = Emu.snapshotYM2610(player.adapterById.ym2610.fm, SNAP_CAPTURE);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         // ADPCM-A/B: clock()を回さないので playing は終端で落ちない。キーオン通番(seq)の変化を発音開始、
         // そこからサンプル長(lenSec)ぶんを発音区間として推定する(ADPCM-Bはリピート中=Infinity、
