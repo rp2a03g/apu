@@ -155,7 +155,8 @@
       };
       sentSnap = data.snapshots.length;
       for (let c = 0; c < 6; c++) {
-        chunk.dpcmTrace.push(data.dpcmTrace[c].slice(sentDpcm[c]));
+        // dpcmTraceは列ごとの型付き配列(Emu.HesTraceBuf)なので、列ごとに差分を切って送る
+        chunk.dpcmTrace.push(data.dpcmTrace[c].slicePlain(sentDpcm[c]));
         sentDpcm[c] = data.dpcmTrace[c].length;
         chunk.controlTrace.push(data.controlTrace[c].slice(sentCtl[c]));
         sentCtl[c] = data.controlTrace[c].length;

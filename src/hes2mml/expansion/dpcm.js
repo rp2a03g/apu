@@ -218,12 +218,26 @@
     if (bestCh < 0) return { channel: -1, clips: [], events: [] };
 
     const trace = dpcmTrace[bestCh] || [];
-    const hasSeq = trace.length > 0 && trace[0].seq !== undefined &&
-      bestRuns.length > 0 && bestRuns[0].startSeq !== undefined;
+    const hasSeq = trHasSeq(trace) && bestRuns.length > 0 && bestRuns[0].startSeq !== undefined;
     return hasSeq
       ? extractBySeq(bestCh, trace, bestRuns, frameRate)
       : extractByFrames(bestCh, trace, bestRuns, frameRate);
   };
+
+  // ── dpcmTraceの読み出しアダプタ(2026-09-04) ──────────────────────────────
+  // dpcmTraceは列ごとの型付き配列(Emu.HesTraceBuf)になった。1件=JSオブジェクトだと
+  // 実測181B/件で、DDAは1PCMサンプルごとに1件積むため60秒で116MBを占めていたため。
+  // ★ここから下の抽出ロジックは1件を {frame,t,seq,value,src} のオブジェクトとして
+  //   読む前提で書かれているので、必要になった時だけ組み立てて渡す(一時オブジェクトなので
+  //   run単位で捨てられ、曲全体を抱え込まない)。古い形(オブジェクト配列)もそのまま読める。
+  const trIsArr = (tr) => Array.isArray(tr);
+  const trLen = (tr) => (tr ? tr.length : 0);
+  const trSeqAt = (tr, i) => (trIsArr(tr) ? tr[i].seq : tr.seq[i]);
+  const trFrameAt = (tr, i) => (trIsArr(tr) ? tr[i].frame : tr.frame[i]);
+  const trValueAt = (tr, i) => (trIsArr(tr) ? tr[i].value : tr.value[i]);
+  const trAt = (tr, i) => (trIsArr(tr) ? tr[i]
+    : { frame: tr.frame[i], t: tr.t[i], seq: tr.seq[i], value: tr.value[i], src: tr.src[i] });
+  const trHasSeq = (tr) => (trLen(tr) > 0 && (trIsArr(tr) ? tr[0].seq !== undefined : true));
 
   // クリップのレート推定: 書込みの分数フレーム時刻tが使えるなら
   // 「サンプル間隔の実測平均」= (件数-1) ÷ (最後と最初のtの差の秒数)。
@@ -247,9 +261,9 @@
     let pos = 0;
 
     for (const run of runs) {
-      while (pos < trace.length && trace[pos].seq < run.startSeq) pos++;
+      while (pos < trLen(trace) && trSeqAt(trace, pos) < run.startSeq) pos++;
       const ws = [];
-      while (pos < trace.length && trace[pos].seq < run.endSeq) { ws.push(trace[pos]); pos++; }
+      while (pos < trLen(trace) && trSeqAt(trace, pos) < run.endSeq) { ws.push(trAt(trace, pos)); pos++; }
       if (ws.length < MIN_CLIP_SAMPLES) continue;
 
       // run内の書込みを3種に分類しつつ、ROM読出しアドレスの連続セグメントに分ける:
@@ -339,8 +353,8 @@
 
     for (const run of runs) {
       const samples = [];
-      while (tracePos < trace.length && trace[tracePos].frame < run.end) {
-        if (trace[tracePos].frame >= run.start) samples.push(trace[tracePos].value);
+      while (tracePos < trLen(trace) && trFrameAt(trace, tracePos) < run.end) {
+        if (trFrameAt(trace, tracePos) >= run.start) samples.push(trValueAt(trace, tracePos));
         tracePos++;
       }
       if (samples.length < MIN_CLIP_SAMPLES) continue;
@@ -375,7 +389,7 @@
       const runs = buildChannelRuns(controlTrace[ch] || [], totalFrames);
       if (!runs.length) continue;
       const trace = dpcmTrace[ch] || [];
-      const hasSeq = trace.length > 0 && trace[0].seq !== undefined && runs[0].startSeq !== undefined;
+      const hasSeq = trHasSeq(trace) && runs[0].startSeq !== undefined;
       const r = hasSeq ? extractBySeq(ch, trace, runs, frameRate, reg) : extractByFrames(ch, trace, runs, frameRate, reg);
       if (!r.events.length) continue;
       channels.push(ch);

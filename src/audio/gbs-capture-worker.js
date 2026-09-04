@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 03:57:10
+ * Built by tools/build-capture-workers.ps1 at 2026-09-05 04:37:46
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-09-05 03:57:10';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-09-05 04:37:46';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -3934,7 +3934,8 @@
       };
       sentSnap = data.snapshots.length;
       for (let c = 0; c < 6; c++) {
-        chunk.dpcmTrace.push(data.dpcmTrace[c].slice(sentDpcm[c]));
+        // dpcmTraceは列ごとの型付き配列(Emu.HesTraceBuf)なので、列ごとに差分を切って送る
+        chunk.dpcmTrace.push(data.dpcmTrace[c].slicePlain(sentDpcm[c]));
         sentDpcm[c] = data.dpcmTrace[c].length;
         chunk.controlTrace.push(data.controlTrace[c].slice(sentCtl[c]));
         sentCtl[c] = data.controlTrace[c].length;

@@ -481,7 +481,7 @@
       // 進行中に育つ鏡像(既存onProgress契約と同形状)
       const mirror = {
         snapshots: [],
-        dpcmTrace: [[], [], [], [], [], []],
+        dpcmTrace: [0, 1, 2, 3, 4, 5].map(() => new Emu.HesTraceBuf()), // 列持ち(hesPlayer.js参照)
         controlTrace: [[], [], [], [], [], []],
         samplesReady: 0,
         frameRate: undefined
@@ -520,7 +520,7 @@
           if (m.frameRate !== undefined) mirror.frameRate = m.frameRate;
           for (let i = 0; i < m.snapshots.length; i++) mirror.snapshots[m.snapStart + i] = m.snapshots[i];
           for (let c = 0; c < 6; c++) {
-            for (let i = 0; i < m.dpcmTrace[c].length; i++) mirror.dpcmTrace[c].push(m.dpcmTrace[c][i]);
+            mirror.dpcmTrace[c].appendPlain(m.dpcmTrace[c]); // 列ごとの差分を追記(HesTraceBuf)
             for (let i = 0; i < m.controlTrace[c].length; i++) mirror.controlTrace[c].push(m.controlTrace[c][i]);
           }
           if (opt.shouldCancel && opt.shouldCancel()) { finish(); return; }

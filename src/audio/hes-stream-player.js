@@ -361,7 +361,7 @@
       this._ddaFrameEntries = null;
       // 現在の再生位置より前のトレースはスキップする(再トリガー/巻き戻り防止)
       if (this.ddaTrace) {
-        while (this._ddaTracePos < this.ddaTrace.length && this.ddaTrace[this._ddaTracePos].frame < this.currentFrame) this._ddaTracePos++;
+        while (this._ddaTracePos < this.ddaTrace.length && this.ddaTrace.frame[this._ddaTracePos] < this.currentFrame) this._ddaTracePos++;
       }
     }
 
@@ -474,10 +474,10 @@
       this._ddaFrameEntries = null;
       if (this.ddaChannel < 0 || !this.ddaTrace) return;
       const trace = this.ddaTrace;
-      while (this._ddaTracePos < trace.length && trace[this._ddaTracePos].frame < f) this._ddaTracePos++;
+      while (this._ddaTracePos < trace.length && trace.frame[this._ddaTracePos] < f) this._ddaTracePos++;
       const entries = [];
       let p = this._ddaTracePos;
-      while (p < trace.length && trace[p].frame === f) { entries.push(trace[p].value); p++; }
+      while (p < trace.length && trace.frame[p] === f) { entries.push(trace.value[p]); p++; }
       this._ddaTracePos = p;
       if (entries.length > 0) this._ddaFrameEntries = entries;
     }
@@ -590,7 +590,7 @@
       this._ddaTracePos = 0;
       this._ddaFrameEntries = null;
       if (this.ddaTrace) {
-        while (this._ddaTracePos < this.ddaTrace.length && this.ddaTrace[this._ddaTracePos].frame < targetFrame) this._ddaTracePos++;
+        while (this._ddaTracePos < this.ddaTrace.length && this.ddaTrace.frame[this._ddaTracePos] < targetFrame) this._ddaTracePos++;
       }
       if (targetFrame >= 0 && snaps[targetFrame]) this._applyFrame(targetFrame);
       this.samplePos     = samplePos;

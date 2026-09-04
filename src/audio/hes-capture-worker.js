@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 03:57:10
+ * Built by tools/build-capture-workers.ps1 at 2026-09-05 04:37:46
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-05 03:57:10';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-05 04:37:46';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -1176,6 +1176,65 @@
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
 
+  /**
+   * DDA(PCM)書込み列を列ごとの型付き配列で持つ入れ物(2026-09-04)。
+   *
+   * DDAは「PCM 1サンプルにつき1件」積むので件数が桁違いに多い(実測: NCS91002.hes
+   * 60秒で672,906件)。1件を {frame,t,seq,value,src} のJSオブジェクトにすると
+   * **実測181B/件=116MB**(RSSで確認)になり、キャプチャWorkerとメインで2部持つと
+   * 1曲で数百MBに達していた。列持ちなら 4+4+4+1+4 = 17B/件で1/10以下になる。
+   *
+   * 参照側は `trace[i].frame` ではなく `trace.frame[i]` で読む。
+   *   length … 件数(配列の確保量ではない)
+   *   frame  … 書込み時のフレーム番号
+   *   t      … 分数フレーム時刻(frame + フレーム内位置)
+   *   seq    … controlTraceと共通の書込み順連番
+   *   value  … $0806へ書かれた5bit値
+   *   src    … 読出し元ROM物理オフセット(不明なら-1)
+   */
+  class HesTraceBuf {
+    constructor(cap) {
+      this.length = 0;
+      this._alloc(Math.max(1024, cap | 0));
+    }
+    _alloc(cap) {
+      const old = this.length;
+      const frame = new Int32Array(cap), t = new Float32Array(cap), seq = new Int32Array(cap);
+      const value = new Uint8Array(cap), src = new Int32Array(cap);
+      if (old) {
+        frame.set(this.frame.subarray(0, old)); t.set(this.t.subarray(0, old));
+        seq.set(this.seq.subarray(0, old)); value.set(this.value.subarray(0, old));
+        src.set(this.src.subarray(0, old));
+      }
+      this.frame = frame; this.t = t; this.seq = seq; this.value = value; this.src = src;
+      this._cap = cap;
+    }
+    push(frame, t, seq, value, src) {
+      if (this.length >= this._cap) this._alloc(this._cap * 2);
+      const i = this.length++;
+      this.frame[i] = frame; this.t[i] = t; this.seq[i] = seq; this.value[i] = value; this.src[i] = src;
+    }
+    /** 確保量を実件数まで切り詰める(キャプチャ完了時。倍々確保の余りを返す) */
+    trim() { if (this._cap > this.length) this._alloc(Math.max(1, this.length)); }
+    /** [from, length) を列ごとのコピーで取り出す(Workerの差分送信用) */
+    slicePlain(from) {
+      const n = this.length - from;
+      return { n, frame: this.frame.slice(from, this.length), t: this.t.slice(from, this.length),
+               seq: this.seq.slice(from, this.length), value: this.value.slice(from, this.length),
+               src: this.src.slice(from, this.length) };
+    }
+    /** slicePlain() で作った塊を末尾へ足す(Worker受信側) */
+    appendPlain(c) {
+      if (!c || !c.n) return;
+      while (this.length + c.n > this._cap) this._alloc(this._cap * 2);
+      const i = this.length;
+      this.frame.set(c.frame, i); this.t.set(c.t, i); this.seq.set(c.seq, i);
+      this.value.set(c.value, i); this.src.set(c.src, i);
+      this.length += c.n;
+    }
+  }
+  Emu.HesTraceBuf = HesTraceBuf;
+
   class HesPlayer {
     /**
      * @param {Uint8Array} hesBytes - HESファイルの完全なバイナリ
@@ -1320,12 +1379,26 @@
   // (実測: TP03018.hes index77でノイズの音程が常に同じに聞こえる不具合の真因)。
   // noiseOn自体は活性判定の簡易フラグとして他箇所で使われ続けるためそのまま残し、
   // 生のnoiseCtrlを別フィールドとして追加する。
+  // 波形(32要素)は書き換えられたときしか変わらないので、内容が同じなら前フレームの
+  // 配列をそのまま使い回す(2026-09-04)。毎フレーム・全chぶん Array.from すると
+  // スナップショットの約1/3を占めるが、実測では21,624個作って**変わったのは200回=0.9%**
+  // (NCS91002・60秒)。★受け取り側(hes2mml/expansion/wave.js、ロール構築)は
+  // 読むだけで書き換えないので共有して安全。
+  const waveCache = [];
+  function waveOf(c, i) {
+    let e = waveCache[i];
+    if (!e) e = waveCache[i] = { raw: new Uint8Array(c.wave.length), arr: null };
+    let same = e.arr !== null;
+    for (let k = 0; k < c.wave.length; k++) { if (e.raw[k] !== c.wave[k]) { e.raw[k] = c.wave[k]; same = false; } }
+    if (!same) e.arr = Array.from(c.wave);
+    return e.arr;
+  }
   function snapshotApu(apu) {
-    const arr = apu.ch.map(c => ({
+    const arr = apu.ch.map((c, i) => ({
       on: c.on, dda: c.dda, noiseOn: c.hasNoise && (c.noiseCtrl & 0x80) !== 0,
       noiseCtrl: c.noiseCtrl,
       freq: c.freq, vol: c.volume, balance: c.balance,
-      wave: Array.from(c.wave), dac: c.dac
+      wave: waveOf(c, i), dac: c.dac
     }));
     // $0801(全体バランス)。従来はチャンネル別の$0805(c.balance)しか記録しておらず、
     // 全体バランスだけで片方の出力バスへ振り切って無音化するケースを抽出側が検知
@@ -1407,7 +1480,11 @@
     //         lastDataAddr(直近のデータ読出し論理アドレス)を物理へ換算し、さらに
     //         「ROMバイト==書込み値」の一致検証を通ったものだけ採用する。
     //         同一ドラム=同一ROM開始アドレスなので重複排除が確定的になる。
-    const dpcmTrace = [[], [], [], [], [], []]; // ch毎: [{frame, t, seq, value, src}]
+    // ★列ごとの型付き配列で持つ(2026-09-04)。DDAは「PCM 1サンプルごとに1件」積むので、
+    //   1件を {frame,t,seq,value,src} のJSオブジェクトにすると実測181B/件になり、
+    //   60秒・67万件で116MB(実RSSで確認)を占めていた。列持ちなら17B/件。
+    //   参照側は trace[i].frame ではなく trace.frame[i] で読む(Emu.HesTraceBuf)。
+    const dpcmTrace = [0, 1, 2, 3, 4, 5].map(() => new HesTraceBuf());
     // $0804(chの on/DDA 制御レジスタ)書込みをch別・書込み順に記録する(hes2mml/expansion/
     // dpcm.js向け)。DDA(PCM)で打楽器を鳴らす曲は1音ごとに on/dda を素早くon/offし直すことが
     // 多く、その切替がフレーム(1/60秒)より短い間隔で起きうる。snapshots(フレーム単位の
@@ -1490,7 +1567,7 @@
               if (off >= 0 && off < player.bus.rom.length && (player.bus.rom[off] & 0x1F) === (value & 0x1F)) src = off;
             }
           }
-          dpcmTrace[sel].push({ frame: currentFrame, t, seq: traceSeq++, value: value & 0x1F, src });
+          dpcmTrace[sel].push(currentFrame, t, traceSeq++, value & 0x1F, src);
         }
       }
     };
@@ -1536,12 +1613,14 @@
         if (onProgress) onProgress(f, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace, pitchTrace });
         await yieldFn();
         if (opt.shouldCancel && opt.shouldCancel()) {
+          for (const b of dpcmTrace) b.trim(); // 倍々確保の余りを返す
           return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, pitchTrace, player, frameRate: player.frameRate };
         }
         sliceStart = performance.now();
       }
     }
     if (onProgress) onProgress(totalFrames, totalFrames, { snapshots, samplesReady: outPos, frameRate: player.frameRate, dpcmTrace, controlTrace, pitchTrace });
+    for (const b of dpcmTrace) b.trim(); // 倍々確保の余りを返す
     return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, pitchTrace, player, frameRate: player.frameRate };
   };
 
@@ -3747,12 +3826,26 @@
     if (bestCh < 0) return { channel: -1, clips: [], events: [] };
 
     const trace = dpcmTrace[bestCh] || [];
-    const hasSeq = trace.length > 0 && trace[0].seq !== undefined &&
-      bestRuns.length > 0 && bestRuns[0].startSeq !== undefined;
+    const hasSeq = trHasSeq(trace) && bestRuns.length > 0 && bestRuns[0].startSeq !== undefined;
     return hasSeq
       ? extractBySeq(bestCh, trace, bestRuns, frameRate)
       : extractByFrames(bestCh, trace, bestRuns, frameRate);
   };
+
+  // ── dpcmTraceの読み出しアダプタ(2026-09-04) ──────────────────────────────
+  // dpcmTraceは列ごとの型付き配列(Emu.HesTraceBuf)になった。1件=JSオブジェクトだと
+  // 実測181B/件で、DDAは1PCMサンプルごとに1件積むため60秒で116MBを占めていたため。
+  // ★ここから下の抽出ロジックは1件を {frame,t,seq,value,src} のオブジェクトとして
+  //   読む前提で書かれているので、必要になった時だけ組み立てて渡す(一時オブジェクトなので
+  //   run単位で捨てられ、曲全体を抱え込まない)。古い形(オブジェクト配列)もそのまま読める。
+  const trIsArr = (tr) => Array.isArray(tr);
+  const trLen = (tr) => (tr ? tr.length : 0);
+  const trSeqAt = (tr, i) => (trIsArr(tr) ? tr[i].seq : tr.seq[i]);
+  const trFrameAt = (tr, i) => (trIsArr(tr) ? tr[i].frame : tr.frame[i]);
+  const trValueAt = (tr, i) => (trIsArr(tr) ? tr[i].value : tr.value[i]);
+  const trAt = (tr, i) => (trIsArr(tr) ? tr[i]
+    : { frame: tr.frame[i], t: tr.t[i], seq: tr.seq[i], value: tr.value[i], src: tr.src[i] });
+  const trHasSeq = (tr) => (trLen(tr) > 0 && (trIsArr(tr) ? tr[0].seq !== undefined : true));
 
   // クリップのレート推定: 書込みの分数フレーム時刻tが使えるなら
   // 「サンプル間隔の実測平均」= (件数-1) ÷ (最後と最初のtの差の秒数)。
@@ -3776,9 +3869,9 @@
     let pos = 0;
 
     for (const run of runs) {
-      while (pos < trace.length && trace[pos].seq < run.startSeq) pos++;
+      while (pos < trLen(trace) && trSeqAt(trace, pos) < run.startSeq) pos++;
       const ws = [];
-      while (pos < trace.length && trace[pos].seq < run.endSeq) { ws.push(trace[pos]); pos++; }
+      while (pos < trLen(trace) && trSeqAt(trace, pos) < run.endSeq) { ws.push(trAt(trace, pos)); pos++; }
       if (ws.length < MIN_CLIP_SAMPLES) continue;
 
       // run内の書込みを3種に分類しつつ、ROM読出しアドレスの連続セグメントに分ける:
@@ -3868,8 +3961,8 @@
 
     for (const run of runs) {
       const samples = [];
-      while (tracePos < trace.length && trace[tracePos].frame < run.end) {
-        if (trace[tracePos].frame >= run.start) samples.push(trace[tracePos].value);
+      while (tracePos < trLen(trace) && trFrameAt(trace, tracePos) < run.end) {
+        if (trFrameAt(trace, tracePos) >= run.start) samples.push(trValueAt(trace, tracePos));
         tracePos++;
       }
       if (samples.length < MIN_CLIP_SAMPLES) continue;
@@ -3904,7 +3997,7 @@
       const runs = buildChannelRuns(controlTrace[ch] || [], totalFrames);
       if (!runs.length) continue;
       const trace = dpcmTrace[ch] || [];
-      const hasSeq = trace.length > 0 && trace[0].seq !== undefined && runs[0].startSeq !== undefined;
+      const hasSeq = trHasSeq(trace) && runs[0].startSeq !== undefined;
       const r = hasSeq ? extractBySeq(ch, trace, runs, frameRate, reg) : extractByFrames(ch, trace, runs, frameRate, reg);
       if (!r.events.length) continue;
       channels.push(ch);
@@ -4608,7 +4701,8 @@
       };
       sentSnap = data.snapshots.length;
       for (let c = 0; c < 6; c++) {
-        chunk.dpcmTrace.push(data.dpcmTrace[c].slice(sentDpcm[c]));
+        // dpcmTraceは列ごとの型付き配列(Emu.HesTraceBuf)なので、列ごとに差分を切って送る
+        chunk.dpcmTrace.push(data.dpcmTrace[c].slicePlain(sentDpcm[c]));
         sentDpcm[c] = data.dpcmTrace[c].length;
         chunk.controlTrace.push(data.controlTrace[c].slice(sentCtl[c]));
         sentCtl[c] = data.controlTrace[c].length;
