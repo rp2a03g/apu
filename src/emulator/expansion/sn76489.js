@@ -65,6 +65,24 @@
       this._div = 0;
     }
 
+    // ── シーク用の状態保存/復元(2026-09-04、VgmPlayerのチェックポイント) ──────────
+    // SN76489はレジスタ影と内部カウンタが全部小さい素の値なので、そのまま丸ごと持てる。
+    // ★ここに無いフィールドは復元されない。フィールドを足したらここも足すこと
+    //   (VgmPlayer側は「全チップがgetState/setStateを持つ曲」でしかチェックポイントを使わない)。
+    getState() {
+      return { period: this.period.slice(), att: this.att.slice(), counter: this.counter.slice(),
+               level: this.level.slice(), noiseReg: this.noiseReg, noiseCounter: this.noiseCounter,
+               noiseFlip: this.noiseFlip, lfsr: this.lfsr, noiseOut: this.noiseOut,
+               latch: this.latch, stereo: this.stereo, _div: this._div };
+    }
+    setState(s) {
+      if (!s) return;
+      this.period.set(s.period); this.att.set(s.att); this.counter.set(s.counter); this.level.set(s.level);
+      this.noiseReg = s.noiseReg; this.noiseCounter = s.noiseCounter; this.noiseFlip = s.noiseFlip;
+      this.lfsr = s.lfsr; this.noiseOut = s.noiseOut; this.latch = s.latch; this.stereo = s.stereo;
+      this._div = s._div;
+    }
+
     /** データポート書込み */
     write(value) {
       value &= 0xFF;

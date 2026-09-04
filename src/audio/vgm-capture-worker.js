@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 03:52:51
+ * Built by tools/build-capture-workers.ps1 at 2026-09-05 03:57:10
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-05 03:52:51';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-05 03:57:10';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -5325,6 +5325,10 @@
   // これを超えてキューがたまっていたら「レジスタごとの最終値」へ畳む(flushWrites参照)。
   // 通常再生では clock() が随時消化するので数十件しかたまらず、ここには当たらない
   const COLLAPSE_THRESHOLD = 4096;
+  // getState/setState で写さないフィールド(チップ構成とUI設定。時間で変わる状態ではない)。
+  // regs は Array of Uint8Array なので個別に扱う(下の getState 参照)
+  const STATE_SKIP = new Set(['clockHz', 'sampleRate', 'chipType', 'chip_type', 'mute', 'vol',
+                              'writebuf', 'writeHead', '_patchCache', 'regs']);
   const CYCLES_PER_SAMPLE = 24;   // OPN2サイクル(=マスタークロック/6)
 
   // 鍵盤表示用: 1周期ぶんのFM波形を「今のパラメータで再合成した概形」として作る
@@ -5516,6 +5520,37 @@
     }
     /** まだ適用していない書込みの件数 */
     get pendingWrites() { return this.writebuf.length - this.writeHead; }
+
+    // ── シーク用の状態保存/復元(2026-09-04、VgmPlayerのチェックポイント) ──────────
+    // ★レジスタ影を書き直す方式は採らない。キーオン(reg 0x28)はデータ側にch番号が入る
+    //   一括レジスタで、影には最後の1回しか残らないため各chのキー状態を再現できない。
+    //   状態フィールドを丸ごと写す方が単純で、しかも**正確**(EGの位相まで戻る)。
+    //   対象は reset() が設定する可変フィールドだけ(STATE_SKIP は構成値/表示設定)。
+    // 保存前にキューを流しておくので writebuf は空。約2.7KB/回。
+    getState() {
+      this.flushWrites(true);
+      const out = {};
+      for (const k of Object.keys(this)) {
+        if (STATE_SKIP.has(k)) continue;
+        const v = this[k];
+        if (typeof v === 'number' || typeof v === 'boolean') out[k] = v;
+        else if (ArrayBuffer.isView(v)) out[k] = v.slice();
+      }
+      out.regs = [this.regs[0].slice(), this.regs[1].slice()];
+      return out;
+    }
+    setState(s) {
+      if (!s) return;
+      for (const k of Object.keys(s)) {
+        if (k === 'regs') continue;
+        const v = s[k], cur = this[k];
+        if (ArrayBuffer.isView(cur) && ArrayBuffer.isView(v)) cur.set(v);
+        else this[k] = v;
+      }
+      this.regs[0].set(s.regs[0]); this.regs[1].set(s.regs[1]);
+      this.writebuf = []; this.writeHead = 0;
+      this._patchCache = null; // 音色の使い回しキャッシュは作り直させる
+    }
     /**
      * たまった書込みキューを (port, reg) ごとの最後の値だけへ畳む。キューは writeReg() が
      * 「アドレス→データ」の対で積むので、対で読み直して最後の1組を残す(順序は Map が保つ)。
@@ -11123,6 +11158,10 @@
   // ロール構築と変換が読むのは freq/vol/active/patch だけで、毎フレーム128点の配列を
   // 全chぶん抱えると保持量が跳ね上がる(実測でスナップショット1フレームの14%)。
   const SNAP_CAPTURE = { skipWave: true };
+  // シーク用チェックポイントの間隔と上限(VGMサンプル=44100Hz基準)。
+  // 5秒間隔なら1回あたり約3KB×(曲長/5秒)で、5分の曲でも200KB程度
+  const CHECKPOINT_INTERVAL = 5 * 44100;
+  const CHECKPOINT_MAX = 512; // 42分ぶん。異常に長いログでも青天井にしない
   const SAMPLES_PER_FRAME = VGM_RATE / FRAME_RATE; // 735
 
   // 各フォーマットのストリームプレイヤーが使っている実測校正済みgain
@@ -12089,8 +12128,74 @@
      * (シーク用。レジスタ状態は正しく復元されるが、エンベロープ等の時間経過状態は
      * 進んでいない。KSSのwriteLog再生シークと同じ割り切り)。
      */
+    // ── シーク用チェックポイント(2026-09-04) ──────────────────────────────────
+    // シークは曲頭からコマンドを流し直すので、長い曲ほど重い(実測: 2分の曲の末尾で
+    // 543ms、ドラッグすると積み上がって固まる)。一定間隔で状態を控えておき、
+    // 直近のところから再開すれば「間隔ぶん」で済む。
+    // ★対応できるのは全チップが getState/setState を持つ曲だけ。1つでも欠けたら
+    //   誤った状態で鳴らすより従来どおり頭から流す(canCheckpoint)。
+    // 1回あたり実測2.7〜3.4KB(サンプルROM等の不変データは含めない)なので、
+    // 5秒間隔・5分の曲でも200KB程度。
+    get canCheckpoint() {
+      if (this._ckOk === undefined) {
+        this._ckOk = this.adapters.every((a) => {
+          const chip = a.chip || a.fm || a.apu || null;
+          return !chip || (typeof chip.getState === 'function' && typeof chip.setState === 'function');
+        });
+      }
+      return this._ckOk;
+    }
+    _saveCheckpoint() {
+      const chips = [];
+      for (const a of this.adapters) {
+        const chip = a.chip || a.fm || a.apu || null;
+        chips.push(chip ? chip.getState() : null);
+      }
+      const streams = {};
+      for (const id in this.streams) streams[id] = Object.assign({}, this.streams[id]);
+      return { samplePos: this.samplePos, pos: this.pos, waitRemaining: this.waitRemaining,
+               pcmPos: this.pcmPos, loopCount: this.loopCount, streams, chips,
+               dacHitsLen: this.dacHits.length };
+    }
+    _restoreCheckpoint(cp) {
+      for (let i = 0; i < this.adapters.length; i++) {
+        const a = this.adapters[i], chip = a.chip || a.fm || a.apu || null;
+        if (chip && cp.chips[i]) chip.setState(cp.chips[i]);
+      }
+      this.samplePos = cp.samplePos; this.pos = cp.pos; this.waitRemaining = cp.waitRemaining;
+      this.pcmPos = cp.pcmPos; this.loopCount = cp.loopCount;
+      this.streams = {};
+      for (const id in cp.streams) this.streams[id] = Object.assign({}, cp.streams[id]);
+      // 打点は「そこまでに拾った分」へ戻す(シークで重複して積まないように)
+      this.dacHits.length = Math.min(this.dacHits.length, cp.dacHitsLen);
+      this._dacCur = null;
+      this.ended = false;
+    }
+    /** 進行中に一定間隔で状態を控える(fastForward/renderFrame から呼ぶ) */
+    _noteCheckpoint() {
+      if (!this.canCheckpoint) return;
+      const cps = this._checkpoints || (this._checkpoints = []);
+      const last = cps.length ? cps[cps.length - 1].samplePos : -Infinity;
+      if (this.samplePos - last < CHECKPOINT_INTERVAL) return;
+      if (cps.length >= CHECKPOINT_MAX) return;
+      cps.push(this._saveCheckpoint());
+    }
+    /**
+     * 目標位置へシークする。控えてあるチェックポイントのうち手前で一番近いものから
+     * 再開し、足りない分だけコマンドを流す。チェックポイントが無ければ従来どおり頭から。
+     */
+    seekTo(targetSample) {
+      const cps = this._checkpoints || [];
+      let best = null;
+      for (const cp of cps) { if (cp.samplePos <= targetSample && (!best || cp.samplePos > best.samplePos)) best = cp; }
+      if (best && this.canCheckpoint) this._restoreCheckpoint(best);
+      else { const keep = this._checkpoints; this.reset(); this._checkpoints = keep; }
+      this.fastForward(targetSample);
+    }
+
     fastForward(targetSample) {
       while (this.samplePos < targetSample && !this.ended) {
+        this._noteCheckpoint();
         if (this.waitRemaining === 0) this._runCommands();
         const step = Math.min(this.waitRemaining, targetSample - this.samplePos);
         if (step <= 0) { if (this.ended) break; continue; }
@@ -12123,6 +12228,9 @@
      */
     renderFrame(sampleRate, regsOnly, stereo) {
       const samplesThisFrame = Math.round(sampleRate / FRAME_RATE);
+      // 再生しながらもチェックポイントを控える(一度通ったところへのシークが速くなる)。
+      // regsOnlyのキャプチャ経路は別インスタンスなので対象外にする
+      if (!regsOnly) this._noteCheckpoint();
       if (regsOnly) {
         // 速度は無関係(キャプチャはVGM時間で進める)
         for (let i = 0; i < SAMPLES_PER_FRAME; i++) this._stepVgmSample();

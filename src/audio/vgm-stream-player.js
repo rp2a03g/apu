@@ -170,11 +170,12 @@
       if (!this.player) return;
       const sr = this.audioCtx.sampleRate;
       const targetVgmSample = Math.max(0, Math.floor((samplePos / sr) * this.speedFactor * VGM_RATE));
-      this.player.reset();
+      // seekTo は控えてあるチェックポイント(5秒間隔)の手前から再開する。
+      // 無い/対応外のチップがある曲では中で reset()+頭から流す(VgmPlayer.seekTo参照)
+      this.player.seekTo(targetVgmSample);
       this.player.speedFactor = this.speedFactor;
       if (this._lastMute) this.player.applyMute(this._lastMute);
       if (this._lastVolume) this.player.applyVolume(this._lastVolume);
-      this.player.fastForward(targetVgmSample);
       this._resetState();
       this._samplePos = samplePos;
       this.currentFrame = Math.floor(targetVgmSample / (VGM_RATE / this.frameRate));

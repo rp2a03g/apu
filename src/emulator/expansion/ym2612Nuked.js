@@ -103,6 +103,10 @@
   // これを超えてキューがたまっていたら「レジスタごとの最終値」へ畳む(flushWrites参照)。
   // 通常再生では clock() が随時消化するので数十件しかたまらず、ここには当たらない
   const COLLAPSE_THRESHOLD = 4096;
+  // getState/setState で写さないフィールド(チップ構成とUI設定。時間で変わる状態ではない)。
+  // regs は Array of Uint8Array なので個別に扱う(下の getState 参照)
+  const STATE_SKIP = new Set(['clockHz', 'sampleRate', 'chipType', 'chip_type', 'mute', 'vol',
+                              'writebuf', 'writeHead', '_patchCache', 'regs']);
   const CYCLES_PER_SAMPLE = 24;   // OPN2サイクル(=マスタークロック/6)
 
   // 鍵盤表示用: 1周期ぶんのFM波形を「今のパラメータで再合成した概形」として作る
@@ -294,6 +298,37 @@
     }
     /** まだ適用していない書込みの件数 */
     get pendingWrites() { return this.writebuf.length - this.writeHead; }
+
+    // ── シーク用の状態保存/復元(2026-09-04、VgmPlayerのチェックポイント) ──────────
+    // ★レジスタ影を書き直す方式は採らない。キーオン(reg 0x28)はデータ側にch番号が入る
+    //   一括レジスタで、影には最後の1回しか残らないため各chのキー状態を再現できない。
+    //   状態フィールドを丸ごと写す方が単純で、しかも**正確**(EGの位相まで戻る)。
+    //   対象は reset() が設定する可変フィールドだけ(STATE_SKIP は構成値/表示設定)。
+    // 保存前にキューを流しておくので writebuf は空。約2.7KB/回。
+    getState() {
+      this.flushWrites(true);
+      const out = {};
+      for (const k of Object.keys(this)) {
+        if (STATE_SKIP.has(k)) continue;
+        const v = this[k];
+        if (typeof v === 'number' || typeof v === 'boolean') out[k] = v;
+        else if (ArrayBuffer.isView(v)) out[k] = v.slice();
+      }
+      out.regs = [this.regs[0].slice(), this.regs[1].slice()];
+      return out;
+    }
+    setState(s) {
+      if (!s) return;
+      for (const k of Object.keys(s)) {
+        if (k === 'regs') continue;
+        const v = s[k], cur = this[k];
+        if (ArrayBuffer.isView(cur) && ArrayBuffer.isView(v)) cur.set(v);
+        else this[k] = v;
+      }
+      this.regs[0].set(s.regs[0]); this.regs[1].set(s.regs[1]);
+      this.writebuf = []; this.writeHead = 0;
+      this._patchCache = null; // 音色の使い回しキャッシュは作り直させる
+    }
     /**
      * たまった書込みキューを (port, reg) ごとの最後の値だけへ畳む。キューは writeReg() が
      * 「アドレス→データ」の対で積むので、対で読み直して最後の1組を残す(順序は Map が保つ)。
