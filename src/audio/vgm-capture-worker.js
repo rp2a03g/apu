@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 02:11:07
+ * Built by tools/build-capture-workers.ps1 at 2026-09-05 02:47:03
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-05 02:11:07';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-05 02:47:03';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -5419,8 +5419,13 @@
       c.status = 0; c.status_time = 0;
       for (let i = 0; i < 24; i++) { c.eg_out[i] = 0x3ff; c.eg_level[i] = 0x3ff; c.eg_state[i] = eg_num_release; c.multi[i] = 1; }
       for (let i = 0; i < 6; i++) { c.pan_l[i] = 1; c.pan_r[i] = 1; }
-      // 書込みキュー(サイクル単位のタイムスタンプ、OPN2_WRITEBUF_DELAY間隔)
-      c.writebuf = []; c.writebuf_lasttime = 0; c.writebuf_samplecnt = 0;
+      // 書込みキュー(サイクル単位のタイムスタンプ、OPN2_WRITEBUF_DELAY間隔)。
+      // ★消化は shift() ではなく読み出し位置 writeHead で進める(2026-09-04)。
+      //   実機より速く書きまくる曲ではキューが数十万件たまり、shift() のO(n)が
+      //   O(n²)になって再生が実時間の4倍まで落ちる(スーパーファンタジーゾーン
+      //   「Shop (Old)」実測: 3秒の音を作るのに12秒・キュー最大262,292件)。
+      //   opllNuked.js が同じ理由で先に writeHead 方式にしてある。
+      c.writebuf = []; c.writeHead = 0; c.writebuf_lasttime = 0; c.writebuf_samplecnt = 0;
       // 出力(1サンプル=24サイクル合算)
       c.accL = 0; c.accR = 0; c.lastL = 0; c.lastR = 0; c.cyc6 = 0;
       // レジスタ影(スナップショット用: どのチャンネルにどんな書込みがあったか)
@@ -5449,10 +5454,12 @@
       this._clock();
       this.accL += this.mol; this.accR += this.mor;
       // 書込みキューの消化(実機の書込みタイミング整流)
-      while (this.writebuf.length && this.writebuf[0].time <= this.writebuf_samplecnt) {
-        const w = this.writebuf.shift();
+      while (this.writeHead < this.writebuf.length && this.writebuf[this.writeHead].time <= this.writebuf_samplecnt) {
+        const w = this.writebuf[this.writeHead++];
         this._write(w.port, w.data);
       }
+      // 読み切ったら配列ごと捨てる(長い曲で使用済み要素が延々残らないように)
+      if (this.writeHead >= this.writebuf.length && this.writeHead > 0) { this.writebuf = []; this.writeHead = 0; }
       this.writebuf_samplecnt++;
       if (this.cycles === 0) { // 24サイクル=1サンプル完了
         // 6ch×(9bit×3 ±ラダー)≒±4608 を ±1.2 程度へ(他チップと揃えた出力尺度)
@@ -5484,11 +5491,13 @@
      *     DAC多用曲13件で抽出結果が変わった)。
      */
     flushWrites(collapse) {
-      if (collapse && this.writebuf.length > COLLAPSE_THRESHOLD) this._collapseWriteBuf();
+      if (collapse && this.pendingWrites > COLLAPSE_THRESHOLD) this._collapseWriteBuf();
       let guard = 0;
-      while (this.writebuf.length && guard++ < 50000000) this.clock();
+      while (this.pendingWrites && guard++ < 50000000) this.clock();
       for (let i = 0; i < CYCLES_PER_SAMPLE * 6; i++) this.clock();
     }
+    /** まだ適用していない書込みの件数 */
+    get pendingWrites() { return this.writebuf.length - this.writeHead; }
     /**
      * たまった書込みキューを (port, reg) ごとの最後の値だけへ畳む。キューは writeReg() が
      * 「アドレス→データ」の対で積むので、対で読み直して最後の1組を残す(順序は Map が保つ)。
@@ -5497,10 +5506,10 @@
      * 想定外の並びを見つけたら畳まずに諦める(正確さを優先)。
      */
     _collapseWriteBuf() {
-      const buf = this.writebuf;
-      if (buf.length & 1) return;
+      const buf = this.writebuf, head = this.writeHead;
+      if ((buf.length - head) & 1) return;
       const last = new Map();
-      for (let i = 0; i < buf.length; i += 2) {
+      for (let i = head; i < buf.length; i += 2) {
         const a = buf[i], d = buf[i + 1];
         if ((a.port & 1) !== 0 || (d.port & 1) !== 1) return; // アドレス→データの対でない
         const reg = a.data;
@@ -5509,6 +5518,7 @@
         last.set(key, { aPort: a.port, reg, dPort: d.port, data: d.data });
       }
       this.writebuf = [];
+      this.writeHead = 0;
       this.writebuf_lasttime = this.writebuf_samplecnt;
       for (const w of last.values()) {
         this._writeBuffered(w.aPort, w.reg);
