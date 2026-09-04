@@ -543,8 +543,9 @@
   function synthDrumChIds() {
     const Plan = MML.Convert.ChannelPlan;
     if (!Plan || !Plan.isSynthDrumTarget) return [];
-    const all = Plan.all();
-    return Object.keys(all).filter(id => Plan.isSynthDrumTarget(id, all[id].target));
+    // ★既定で E(DPCM) の行(VGMのDAC等)も対象にするので effectiveTargets を使う
+    const all = Plan.effectiveTargets ? Plan.effectiveTargets() : {};
+    return Object.keys(all).filter(id => Plan.isSynthDrumTarget(id, all[id]));
   }
   const synthDrumKeyOf = (chId, midi) => 'syn:' + chId + ':' + midi;
   // ── SPC: 借用先にE(DPCM)を選んだボイス(2026-09-04) ────────────────────────
@@ -557,8 +558,8 @@
   function spcDpcmVoiceIds() {
     const Plan = MML.Convert.ChannelPlan;
     if (!Plan || Plan.format() !== 'spc') return [];
-    const all = Plan.all();
-    return Object.keys(all).filter(id => /^V[0-7]$/.test(id) && all[id].target === 'dpcm');
+    const all = Plan.effectiveTargets ? Plan.effectiveTargets() : {};
+    return Object.keys(all).filter(id => /^V[0-7]$/.test(id) && all[id] === 'dpcm');
   }
   function spcDpcmVoiceNums() { return spcDpcmVoiceIds().map(id => +id.slice(1)); }
   let spcPitchSrcnCache = null; // srcn集合(BRR台帳が変わるたびに捨てる)
@@ -668,51 +669,165 @@
     return { frameRate, totalFrames: Math.max(1, Math.ceil(endSec * frameRate)) };
   }
   // 1chだけをレンダリングして音声(Float32Array)を返す。形式ごとの音声付きキャプチャを使う
-  async function renderIsolatedChannel(chId, durationSeconds) {
+  // ★分離レンダリングは「再生しながら裏で走る」ので、1スライスのブロック時間を短く抑える
+  //   (2026-09-04)。既定の15msでも再生とロール描画に割り込むため、明示的に小さく渡す。
+  //   実測(OutRunners 3分・VGMのFM 1ch): 64フレームごとのyieldだと47秒中44秒が
+  //   メインスレッド占有(50ms超の長タスク176回・最長531ms)で、音がカクつく。
+  const ISOLATE_SLICE_MS = 6;
+  // ★yieldは setTimeout(0) ではなく MessageChannel を使う(キャプチャWorkerの macroYield と同じ)。
+  //   setTimeout には4msの下限クランプがあり(非表示タブでは1秒まで伸びる)、6msスライスだと
+  //   待ち時間の方が長くなって所要時間が何倍にもなる。MessageChannelはクランプされない。
+  function isolateYield() {
+    return new Promise((resolve) => {
+      const ch = new MessageChannel();
+      ch.port1.onmessage = () => { ch.port1.close(); resolve(); };
+      ch.port2.postMessage(0);
+    });
+  }
+  /** 表示中の形式の先読みキャプチャがまだ伸びているか(分離レンダリングの二重実行よけ) */
+  function captureStillGrowing() {
+    const fmt = (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.format()) || kbdSourceKind;
+    const f = { nsf: () => nsfBufferedFraction, spc: () => spcBufferedFraction, kss: () => kssBufferedFraction,
+                gbs: () => gbsBufferedFraction, hes: () => hesBufferedFraction, vgm: () => vgmBufferedFraction }[fmt];
+    return !!f && f() < 0.999;
+  }
+  /** ログから打点が取れる行(VGMのDAC)。分離レンダリングが要らないので待つ必要も無い */
+  function isLogDrumRow(chId) { return !!DAC_ROW_CHIP[chId]; }
+  /** 分離レンダリングの進捗表示(ドラム(DPCM)パネルの下段)。chId=null で消す */
+  function setDrumRenderStatus(chId, frac) {
+    if (!MML.UI.DrumPanel || !MML.UI.DrumPanel.setStatus) return;
+    if (!chId) { MML.UI.DrumPanel.setStatus(''); return; }
+    const pct = frac > 0 ? '  ' + Math.round(frac * 100) + '%' : '';
+    MML.UI.DrumPanel.setStatus(T('打楽器の分離レンダリング中: {ch}', { ch: chId }) + pct);
+  }
+  async function renderIsolatedChannel(chId, durationSeconds, onProgress) {
     // ★形式は ChannelPlan 側から取る。変換直後は鍵盤のソースが MML 再生('mml')へ切り替わり
     //   kbdSourceKind では元形式が分からなくなる(実際に空振りした)
     const fmt = (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.format()) || kbdSourceKind;
     const cfg = soloMuteConfig(chId);
     const sampleRate = 44100;
+    const slice = { sliceBudgetMs: ISOLATE_SLICE_MS, yieldFn: isolateYield };
     if (fmt === 'nsf' && loadedNsfBytes) {
       const songNo = parseInt(nsfSongIndexEl.value, 10) || 1;
-      const r = await MML.Emu.captureSongAsync(loadedNsfBytes, { songIndex: songNo - 1, durationSeconds, sampleRate, mute: cfg });
+      const r = await MML.Emu.captureSongAsync(loadedNsfBytes, Object.assign({ songIndex: songNo - 1, durationSeconds, sampleRate, mute: cfg }, slice), onProgress);
       return { audio: r.audio, sampleRate: r.sampleRate || sampleRate };
     }
     if (fmt === 'gbs' && loadedGbsBytes) {
       // 曲番号は表示値−firstSong(runGbs2Mml と同じ換算)
       const disp = parseInt(gbsSongIndexEl.value, 10) || loadedGbsHeader.firstSong;
       const songIndex = Math.max(0, disp - loadedGbsHeader.firstSong);
-      const r = await MML.Emu.captureGbsSongAsync(loadedGbsBytes, { songIndex, durationSeconds, sampleRate, mute: cfg.expansion.gb || {} });
+      const r = await MML.Emu.captureGbsSongAsync(loadedGbsBytes, Object.assign({ songIndex, durationSeconds, sampleRate, mute: cfg.expansion.gb || {} }, slice), onProgress);
       return { audio: r.audio, sampleRate };
     }
     if (fmt === 'kss' && loadedKssBytes) {
-      const r = await MML.Emu.captureKssSongAsync(loadedKssBytes, { songIndex: parseInt(kssSongIndexEl.value, 10) || 0, durationSeconds, sampleRate, mute: cfg.expansion });
+      const r = await MML.Emu.captureKssSongAsync(loadedKssBytes, Object.assign({ songIndex: parseInt(kssSongIndexEl.value, 10) || 0, durationSeconds, sampleRate, mute: cfg.expansion }, slice), onProgress);
       return { audio: r.audio, sampleRate };
     }
     if (fmt === 'hes' && loadedHesBytes) {
-      const r = await MML.Emu.captureHesSongAsync(loadedHesBytes, { track: parseInt(hesTrackIndexEl.value, 10) || 0, durationSeconds, sampleRate, mute: cfg.expansion.hes || {} });
+      const r = await MML.Emu.captureHesSongAsync(loadedHesBytes, Object.assign({ track: parseInt(hesTrackIndexEl.value, 10) || 0, durationSeconds, sampleRate, mute: cfg.expansion.hes || {} }, slice), onProgress);
       return { audio: r.audio, sampleRate };
     }
     if (fmt === 'vgm' && loadedVgmBytes) {
-      // exportVgmWav と同じ描き方(コマンド消化+チップ合成)。ステレオをモノラルへ
+      // exportVgmWav と同じ描き方(コマンド消化+チップ合成)。ステレオをモノラルへ。
+      // yieldはフレーム数ではなく経過時間で判断する(1フレームの重さがチップ構成で
+      // 何倍も変わるため、64フレーム固定だと重い曲で数百msブロックする)
       const player = new MML.Emu.VgmPlayer(loadedVgmBytes);
       player.applyMute(cfg);
       const totalFrames = Math.ceil(durationSeconds * player.frameRate);
       const total = Math.round(totalFrames * sampleRate / player.frameRate);
       const audio = new Float32Array(total);
       let pos = 0;
+      let sliceStart = performance.now();
       for (let f = 0; f < totalFrames && pos < total && !player.ended; f++) {
         const chunk = player.renderFrame(sampleRate, false, true);
         const L = chunk.l || chunk.left || chunk[0], R = chunk.r || chunk.right || chunk[1];
         const n = L ? L.length : 0;
         for (let i = 0; i < n && pos < total; i++, pos++) audio[pos] = (L[i] + (R ? R[i] : L[i])) * 0.5;
-        if ((f & 63) === 0) await new Promise(r => setTimeout(r, 0));
+        if (performance.now() - sliceStart >= ISOLATE_SLICE_MS) {
+          if (onProgress) onProgress(f, totalFrames);
+          await isolateYield();
+          sliceStart = performance.now();
+        }
       }
       return { audio: audio.subarray(0, pos), sampleRate };
     }
     return null;
   }
+  // ── VGM: ストリーミングDACの打点をログから引く(2026-09-04) ────────────────
+  // YM2612のDAC・32X PWM・OKIM6258は、鳴っている音から打点を推測すると同じ太鼓が
+  // 何種類にも割れる(切り出し長・音量・直前のフィルタ状態が毎回違うため)。
+  // VGMログは「どこから流し始めたか」(0xE0シーク / 0x93・0x95のstart)を持っているので、
+  // **その開始アドレスをそのままサンプル同定に使う**(C140などの sample.start と同じ)。
+  // 実測 OutRunners「Mega Driver」: 実ドラムは8種類・各5〜23回、レートも約5kHzで一定。
+  // 無音(DACレベル書き込みだけ)や短すぎる繋ぎは vgmPlayer.js collectDacHits が落としている。
+  // ★ログ由来の経路は今のところ YM2612 のDAC(符号なし8bit生PCM)だけ。
+  //   32X PWM は12bit・L/R別ストリーム、OKIM6258 はADPCMで、バイト列の意味が違ううえ
+  //   手元に検証できる曲が無い。それらは従来どおり分離レンダリング+オンセット検出に任せる
+  //   (vgmPlayer.js 側は3チップぶん打点を記録しているので、検証でき次第ここへ足せる)。
+  const DAC_ROW_CHIP = { YMDA: 'ym2612' };
+  /** データバンクのバイト列 → Float32(-1..1)。PWMは2バイト12bit、他は符号なし8bit */
+  function decodeDacBytes(bank, start, bytes, stepSize) {
+    if (stepSize >= 2) {
+      const n = Math.floor(bytes / stepSize);
+      const out = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const o = start + i * stepSize;
+        out[i] = (((bank[o] | (bank[o + 1] << 8)) & 0xFFF) - 2048) / 2048;
+      }
+      return out;
+    }
+    const n = Math.min(bytes, Math.max(0, bank.length - start));
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) out[i] = (bank[start + i] - 128) / 128;
+    return out;
+  }
+  function vgmDacDrumFor(chId, frameInfo) {
+    const chip = DAC_ROW_CHIP[chId];
+    const dp = vgmCaptureMirror && vgmCaptureMirror.data && vgmCaptureMirror.data.dacpcm;
+    const d = dp && dp.log; // 1段包んである理由は vgmPlayer.js collectDacHits 参照
+    if (!chip || !d || !d.hits || !d.hits.length) return null;
+    const list = d.hits.filter(h => h.chip === chip);
+    if (!list.length) return null;
+    const U = MML.Emu && MML.Emu.SamplePitchUtil;
+    // 同じ開始アドレス=同じサンプル。パッドの代表PCMは一番長く流れた分を採る
+    const longest = new Map();
+    for (const h of list) {
+      const cur = longest.get(h.start);
+      if (!cur || h.bytes > cur.bytes) longest.set(h.start, h);
+    }
+    const samples = {};
+    for (const [start, h] of longest) {
+      const bank = d.banks[h.bankType];
+      if (!bank) continue;
+      const pcm = decodeDacBytes(bank, start, h.bytes, h.stepSize || 1);
+      if (pcm.length < 8) continue;
+      const u8 = new Uint8Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) u8[i] = Math.max(0, Math.min(255, Math.round(pcm[i] * 127 + 128)));
+      const key = 'dacpcm:' + start;
+      samples[key] = { key, pcm, rate: h.rate,
+        hash: (U && U.sampleHash) ? ('dac-' + U.sampleHash(u8, 0, u8.length)) : null,
+        chip: 'dacpcm', chans: [chId] };
+    }
+    const hits = [], notes = [];
+    let seq = 0;
+    for (const h of list) {
+      const key = 'dacpcm:' + h.start;
+      const s = samples[key];
+      if (!s) continue;
+      const st = Math.min(h.startFrame, frameInfo.totalFrames);
+      const en = Math.max(st + 1, Math.min(h.endFrame, frameInfo.totalFrames));
+      // ★レートは打点ごとの実測値ではなくパッド共通の値を使う。0x8n経路の実測レートは
+      //   打点ごとに数十Hz揺れる(5012/5079…)ため、そのまま渡すと DrumHits.dpcm の
+      //   重複排除キーが打点ごとに変わり、9種類の太鼓が100定義に膨れる(実測)
+      hits.push({ key, sampleKey: key, hash: s.hash, pcm: s.pcm, rate: s.rate, vol: 1,
+                  startFrame: st, endFrame: en, exactEnd: true, chId });
+      notes.push({ startSec: st / frameInfo.frameRate, endSec: en / frameInfo.frameRate,
+                   midi: null, drumKey: key, drumSeq: ++seq, vol: 1, freqSeq: [] });
+    }
+    if (!hits.length) return null;
+    return { hits, samples, notes };
+  }
+
   // ── サンプル再生ch(ストリーミングDAC)の打点検出(2026-09-04) ──────────────
   // YM2612のDAC・32X PWM・RF5C164/68・OKIM6258はレジスタ上「1本の連続したPCMストリーム」で、
   // どこが1発の太鼓なのかがレジスタからは分からない(ロールのノート境界は音量段の変わり目)。
@@ -919,17 +1034,36 @@
     }
     const jobs = [];
     const info = synthDrumFrameInfo();
+    let logDrumUpdated = false; // ログ由来の打点(VGMのDAC)は同期で決まるので、最後にロールへ流す
     for (const id of ids) {
       // 済みでも、その後キャプチャが伸びていたら(先読み途中で打楽器化した場合)全長で取り直す
       const done = synthDrum.byCh.get(id);
       if (done && done.totalFrames >= info.totalFrames * 0.98) continue;
+      // ★先読みキャプチャがまだ伸びている間は分離レンダリングを始めない(2026-09-04)。
+      //   途中の長さで走らせても、完了時に全長でもう一度走ることになり、重い処理が
+      //   2回ぶん再生に割り込む(実測: VGM 3分1chで1回47秒・メインスレッド占有44秒)。
+      //   キャプチャ完了時に各形式の .then() が synthDrumEnsure() を呼び直すので取りこぼさない。
+      if (!isLogDrumRow(id) && captureStillGrowing()) continue;
+      // VGMのストリーミングDACはログから打点が取れるので、分離レンダリングは要らない
+      // (音から推測すると同じ太鼓が何種類にも割れる。vgmDacDrumFor 冒頭コメント参照)
+      const fromLog = vgmDacDrumFor(id, info);
+      if (fromLog) {
+        fromLog.totalFrames = info.totalFrames;
+        synthDrum.byCh.set(id, fromLog);
+        Object.assign(drumSampleStore, fromLog.samples);
+        logDrumUpdated = true;
+        continue;
+      }
       if (synthDrum.pending.has(id)) { jobs.push(synthDrum.pending.get(id)); continue; }
       const token = synthDrum.token;
-      const statusEl = document.getElementById('kbdDrumRenderStatus');
-      if (statusEl) statusEl.textContent = T('打楽器の分離レンダリング中: {ch}', { ch: id });
+      // ★進捗を必ず出す(2026-09-04)。曲の長さぶん再エミュレーションするので数十秒かかり
+      //   (実測: VGM 3分1chで47秒)、無表示だと「急に重くなった」ようにしか見えない。
+      //   以前は存在しない要素(kbdDrumRenderStatus)へ書いていて何も出ていなかった
+      setDrumRenderStatus(id, 0);
       const p = (async () => {
         try {
-          const r = await renderIsolatedChannel(id, info.totalFrames / info.frameRate);
+          const r = await renderIsolatedChannel(id, info.totalFrames / info.frameRate,
+            (done, total) => { if (token === synthDrum.token) setDrumRenderStatus(id, total > 0 ? done / total : 0); });
           if (token !== synthDrum.token || !r) return;
           const built = buildSynthHits(id, r.audio, r.sampleRate, info);
           built.totalFrames = info.totalFrames;
@@ -939,7 +1073,7 @@
           console.error('打楽器の分離レンダリングに失敗:', id, e);
         } finally {
           synthDrum.pending.delete(id);
-          if (statusEl && !synthDrum.pending.size) statusEl.textContent = '';
+          if (!synthDrum.pending.size) setDrumRenderStatus(null);
           if (token === synthDrum.token) {
             // 束ね直し(remap)の結果をロールにも反映する。サンプル再生chは1発ごとの仮キーで
             // 先に描いてあるので、レンダリングが終わった時点でパッドが正しい数に収束する
@@ -951,6 +1085,12 @@
       })();
       synthDrum.pending.set(id, p);
       jobs.push(p);
+    }
+    if (logDrumUpdated) {
+      // ログ由来の打点はレンダリングを待たないので、ここでロール/パッド/コストへ即反映する
+      if (synthDrum.rawRoll) keyboardDisplay.setRollTimeline(applySynthDrumToRoll(synthDrum.rawRoll));
+      refreshDrumPanel();
+      scheduleDpcmCostUpdate();
     }
     return Promise.all(jobs);
   }
@@ -1142,7 +1282,9 @@
   // 既定経路(出力が一切変わらない道)を通る。
   function planConvertOptions() {
     const Plan = MML.Convert && MML.Convert.ChannelPlan;
-    if (!Plan || !Plan.isCustom()) return { channelMap: null, tone: {} };
+    // ★drumHits は既定のままでも返す(2026-09-04): VGMのDACのように「既定がE(DPCM)」の行が
+    //   あるので、ユーザーが何も触っていない状態こそが普通のケースになった
+    if (!Plan || !Plan.isCustom()) return { channelMap: null, tone: {}, drumHits: synthDrumHitsAll() };
     const all = Plan.all();
     const channelMap = {};
     const tone = {};
@@ -6514,6 +6656,11 @@
       const chId = Plan.chIdForVgmSource(srcId);
       if (chId) map[chId] = plan[srcId];
     }
+    // ストリーミングDACの既定は E(DPCM)(2026-09-04、ユーザー指示)。メガドライブの
+    // ドラムはYM2612のDACに載っていることがほとんどで、打点はVGMログの
+    // シーク位置から正確に取れる(vgmDacDrumFor)。他に行き場が無い行でもある
+    // (音程を持たないので旋律chへは載せられない)。
+    if (h.chips && h.chips.ym2612) map.YMDA = 'dpcm';
     Plan.newFile('vgm', map);
   }
   // 現在の割当をVGM変換器のソースID体系で返す。既定と全く同じなら null(=構成から自動)
@@ -6577,7 +6724,11 @@
     let result;
     try {
       await synthDrumEnsure(); // 打楽器化したchの分離レンダリングを確定させる
-      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), tone: planConvertOptions().tone, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
+      // ★drumHits(E へ載せたchの打点)を渡し忘れていた: VGMだけ他5形式と違って
+      //   planConvertOptions() の tone しか取っていなかったため、YM2612のDACなどを
+      //   打楽器化してもMMLのEパートに出なかった(2026-09-04修正)
+      const planOpt = planConvertOptions();
+      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), tone: planOpt.tone, drumHits: planOpt.drumHits, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
     } catch (e) {
       vgmIsRendering = false;
       updateVgmPlayButton();

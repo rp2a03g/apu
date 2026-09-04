@@ -2135,6 +2135,11 @@ button.secondary {
   padding: 4px 8px; font-family: var(--mono); color: var(--text-secondary);
   border-top: 1px solid var(--border); background: rgba(58, 110, 165, 0.08);
 }
+/* 進行中の作業(分離レンダリング)。数十秒かかるので必ず見えるところに出す */
+.drum-panel-status {
+  padding: 4px 8px; font-family: var(--mono); color: var(--text-secondary);
+  border-top: 1px solid var(--border); background: rgba(210, 150, 40, 0.16);
+}
 .drum-panel-foot--warn { background: rgba(210, 150, 40, 0.16); }
 .drum-panel-foot--over { background: rgba(209, 72, 58, 0.16); }
 .dp-c-color { flex: none; width: 14px; }

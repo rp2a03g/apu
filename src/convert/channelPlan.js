@@ -414,6 +414,15 @@
       for (const kv of entries) o[kv[0]] = Object.assign({}, kv[1]);
       return o;
     },
+    // chId → 実際に効いている借用先(ユーザー指定が無ければ setDefaults/newFile で与えた既定)。
+    // ★all() は「既定から変えた分」しか返さないので、既定で E(DPCM) の行(VGMのDAC等)を
+    //   拾うにはこちらを使う(2026-09-04)。
+    effectiveTargets: function () {
+      const o = {};
+      for (const kv of defaults) o[kv[0]] = kv[1];
+      for (const kv of entries) if (kv[1].target) o[kv[0]] = kv[1].target;
+      return o;
+    },
     onChange: function (fn) { listeners.push(fn); },
   };
 

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-04 18:00:38
+ * Built by tools/build-capture-workers.ps1 at 2026-09-04 21:43:46
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-04 18:00:38';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-04 21:43:46';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成

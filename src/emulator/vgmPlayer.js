@@ -61,6 +61,7 @@
 
   const VGM_RATE = 44100;
   const FRAME_RATE = 60;
+  const DAC_HITS_MAX = 200000; // ストリーミングDAC打点の記録上限(_dacHitStart)
   const SAMPLES_PER_FRAME = VGM_RATE / FRAME_RATE; // 735
 
   // 各フォーマットのストリームプレイヤーが使っている実測校正済みgain
@@ -659,6 +660,17 @@
       // YM2612 PCM(type 0x00)は 0x8n(DAC書込+待ち)と 0xE0(シーク)が使う
       this.dataBanks = {};
       this.pcmPos = 0;         // 0xE0 シーク位置(YM2612 PCMバンク内)
+      // ── ストリーミングDACの「1発」をログから取る(2026-09-04) ──────────────
+      // YM2612のDACや32X PWM/OKIM6258はレジスタ上ただのバイト列で、鳴っている音から
+      // 打点を推測しても同じ太鼓が別物に割れてしまう。VGMは「どこから流し始めたか」を
+      // 0xE0シーク/0x93・0x95のstartアドレスで持っているので、**それをサンプル同定に使う**
+      // (C140などが sample.start を持つのと同じ意味論)。
+      //   dacHits: [{ chip, start, bytes, startSample, endSample }]
+      //   ・0xE0 が現在位置と違うところへ飛んだら「打ち直し」。同じ位置への再シークは
+      //     ロガーの都合なので継続扱い(OutRunners実測: 打ち直し4375回に対し継続1回)
+      //   ・バイト内容が一定の区間はDACの無音レベル(0x80)を書いているだけなので後段で捨てる
+      this.dacHits = [];
+      this._dacCur = null;
       // DACストリーム制御(0x90-0x95): id → {chipType, port, cmd, bankType, stepSize, stepBase, freq, acc, pos, end, loop, reverse, active}
       this.streams = {};
       this.overrideWait62 = 0; // 0x64 による 0x62/0x63 の待ち上書き
@@ -753,7 +765,11 @@
           case 0xA3: this._ymWrite(1, d[p], d[p + 1], true); this.pos = p + 2; break;
           case 0x58: this._ym2610Write(0, d[p], d[p + 1]); this.pos = p + 2; break; // YM2610(Neo Geo) ポート0
           case 0x59: this._ym2610Write(1, d[p], d[p + 1]); this.pos = p + 2; break; // YM2610 ポート1
-          case 0xE0: this.pcmPos = (d[p] | (d[p + 1] << 8) | (d[p + 2] << 16) | (d[p + 3] << 24)) >>> 0; this.pos = p + 4; break;
+          case 0xE0: {
+            const t = (d[p] | (d[p + 1] << 8) | (d[p + 2] << 16) | (d[p + 3] << 24)) >>> 0;
+            if (t !== this.pcmPos) this._dacHitStart('ym2612', 0x00, t); // 位置が飛んだ=打ち直し
+            this.pcmPos = t; this.pos = p + 4; break;
+          }
           case 0x90: { // ストリーム設定: ss tt pp cc
             const s = this._stream(d[p]); s.chipType = d[p + 1] & 0x7F; s.second = !!(d[p + 1] & 0x80); s.port = d[p + 2]; s.cmd = d[p + 3];
             this.pos = p + 4; break;
@@ -790,6 +806,7 @@
               const bank = this.dataBanks[0x00];
               if (bank && this.pcmPos < bank.data.length) this._ymWrite(0, 0x2A, bank.data[this.pcmPos], false);
               this.pcmPos++;
+              if (this._dacCur) { this._dacCur.bytes++; this._dacCur.endSample = this.samplePos; }
               this.waitRemaining = op & 0x0F; this.pos = p; break;
             }
             const len = operandLength(op);
@@ -912,6 +929,24 @@
     _stream(id) {
       return this.streams[id] || (this.streams[id] = { chipType: 0, second: false, port: 0, cmd: 0, bankType: 0, stepSize: 1, stepBase: 0, freq: 0, acc: 0, pos: 0, end: 0, loop: false, reverse: false, active: false });
     }
+
+    /**
+     * ストリーミングDACの打点を開始する(直前の打点は確定して積む)。
+     * chip: 'ym2612'(0x8n経路) / 'pwm' / 'okim6258'(DACストリーム経路)
+     * bankType: どのデータバンクから流しているか(PCMの取り出しに使う)
+     */
+    _dacHitStart(chip, bankType, start) {
+      // 打点が異常に増える曲(壊れたログ)で無制限に伸びないよう歯止めを置く。
+      // ★shift()で古いのを捨てるとO(n)が毎回走って主スレッドが焼き付く
+      //   ([[write-queue-needs-unclocked-path-guard]]と同じ罠)。上限に当たったら記録を止める
+      if (this.dacHits.length >= DAC_HITS_MAX) { this._dacCur = null; return; }
+      if (this._dacCur) this.dacHits.push(this._dacCur);
+      this._dacCur = { chip, bankType, start, bytes: 0, startSample: this.samplePos, endSample: this.samplePos };
+    }
+    /** 取得済みのDAC打点(進行中の1件も含む)。データバンクは取り出し側が dataBanks から引く */
+    getDacHits() {
+      return this._dacCur ? this.dacHits.concat([this._dacCur]) : this.dacHits.slice();
+    }
     // mode: bit7=ループ, bit4=逆再生, 下位2bit: 0=長さ無視(終端まで) 1=コマンド数 2=ミリ秒 3=終端まで
     _streamStart(s, start, mode, len) {
       const bank = this.dataBanks[s.bankType];
@@ -924,6 +959,20 @@
       else if (lm === 2) s.end = Math.min(bank.data.length, s.pos + Math.round(s.freq * len / 1000) * s.stepSize);
       else s.end = bank.data.length;
       s.acc = 0; s.active = s.freq > 0 && s.pos < s.end;
+      // DACストリームは開始アドレスがそのままサンプル同定になる(0x8n経路の0xE0と同じ意味)。
+      // 書込み先チップごとに打点を積む(YM2612 DAC / 32X PWM / OKIM6258)
+      if (s.active) {
+        const chip = s.chipType === 0x02 ? 'ym2612' : s.chipType === 0x11 ? 'pwm' : s.chipType === 0x17 ? 'okim6258' : null;
+        if (chip) {
+          this._dacHitStart(chip, s.bankType, s.start);
+          // ストリームは長さが分かっているので、その場でバイト数を確定させておく
+          // (実際の消化は _stepStreams。途中で 0x94 停止されたら短くなるが、パッドの
+          //  同定は開始アドレスで行うので影響しない)
+          this._dacCur.bytes = Math.max(0, Math.floor((s.end - s.start) / Math.max(1, s.stepSize)));
+          this._dacCur.rate = s.freq;
+          this._dacCur.stepSize = s.stepSize;
+        }
+      }
     }
     // 1VGMサンプルぶんストリームを進める(0x90-0x95。現状の書込み先はYM2612(chipType 2)のみ実装)
     _stepStreams() {
@@ -1341,8 +1390,49 @@
       data.nes.dpcmRom = player.adapterById.nes.ram.slice(0xC000, 0x10000);
     }
     collectUsedSamples(data, player);
+    collectDacHits(data, player, FRAME_RATE);
     return data;
   };
+
+  // ── ストリーミングDACの打点(ログ由来)を取り出す(2026-09-04) ──────────────
+  // YM2612のDAC/32X PWM/OKIM6258は「鳴っている音」から打点を推測すると、同じ太鼓が
+  // 切り出し長・音量・直前の状態の違いで別物に割れてしまう(OutRunners実測: 51打点=35種)。
+  // VGMログは「どこから流し始めたか」を持っているので、その開始アドレスをそのまま
+  // サンプル同定に使う(C140などの sample.start と同じ意味論)。実測では
+  // 「02 - Mega Driver」の実ドラムは8種類・各5〜23回で、レートも約5kHzで一定。
+  const DAC_IDLE_RANGE = 8;   // バイトの振れ幅がこれ以下なら無音(DACレベル書き込みだけ)
+  const DAC_MIN_BYTES = 48;   // これ未満は打点として短すぎる(可聴でない繋ぎ)
+  function collectDacHits(data, player, frameRate) {
+    const hits = player.getDacHits ? player.getDacHits() : [];
+    if (!hits.length) return;
+    const banks = {};
+    const out = [];
+    for (const h of hits) {
+      if (!(h.bytes >= DAC_MIN_BYTES)) continue;
+      const bank = player.dataBanks[h.bankType];
+      if (!bank || !bank.data) continue;
+      const end = Math.min(bank.data.length, h.start + h.bytes);
+      if (end - h.start < DAC_MIN_BYTES) continue;
+      // 無音判定: その区間のバイトがほぼ一定なら、DACを黙らせているだけ(bank[0..]=0x80 等)
+      let mn = 255, mx = 0;
+      for (let i = h.start; i < end; i++) { const v = bank.data[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+      if (mx - mn <= DAC_IDLE_RANGE) continue;
+      // 再生レート: ストリーム経路は freq が正、0x8n経路は「バイト数÷経過VGMサンプル」で実測する
+      const dur = Math.max(1, h.endSample - h.startSample);
+      const rate = h.rate > 0 ? h.rate : (h.bytes / dur * 44100);
+      if (!(rate > 0)) continue;
+      out.push({ chip: h.chip, bankType: h.bankType, start: h.start, bytes: end - h.start,
+                 stepSize: h.stepSize || 1, rate,
+                 startFrame: Math.round(h.startSample / 44100 * frameRate),
+                 endFrame: Math.max(1, Math.round((h.startSample + dur) / 44100 * frameRate)) });
+      if (!banks[h.bankType]) banks[h.bankType] = bank.data;
+    }
+    // ★Worker経路の都合でオブジェクトに1段包む: 進行中の差分送信は「配列=増分/オブジェクト=丸ごと」
+    //   だが、キャプチャ完了後に足したものは finalMeta(非配列プロパティ)でしか届かない
+    //   (src/audio/capture-worker-multi-impl.js diffPayload)。打点リストは完了後に作るので、
+    //   配列のまま置くと丸ごと落ちる。collectUsedSamples の samples が object なのと同じ理屈。
+    if (out.length) data.dacpcm = { log: { hits: out, banks } };
+  }
 
   // ── 使われたサンプルの実PCMを取り出す(dpcmRomと同じ「最後に一度だけ」の考え方) ──
   // サンプルROMはチップ側にしか無く、キャプチャはWorkerで走るうえ関数はpostMessageを

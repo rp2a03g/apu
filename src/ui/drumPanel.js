@@ -3,6 +3,7 @@
  *   MML.UI.DrumPanel.mount(el, hooks)  … 描画先と外部フックを渡す
  *   MML.UI.DrumPanel.setRows(rows)     … 行データを差し替える(再生/変換のたびに呼ぶ)
  *   MML.UI.DrumPanel.setCost(stats)    … 合計ROMの表示
+ *   MML.UI.DrumPanel.setStatus(text)   … 進行中の作業(分離レンダリング等)の表示。空文字で消す
  *
  * 行データ rows: [{ key, hash, label, color, hits, pcm, srcRate }]
  *   key   … 'c140:294064'(ドラム区画のパッドと同じキー)
@@ -22,6 +23,7 @@
   let rows = [];
   let costEl = null;
   let bodyEl = null;
+  let statusEl = null;
 
   function DS() { return MML.Convert && MML.Convert.DrumSamples; }
 
@@ -56,16 +58,26 @@
           `<span class="dp-c-inc">${T('差し替え')}</span>` +
         `</div>` +
         `<div class="drum-panel-body"></div>` +
+        `<div class="drum-panel-status" hidden></div>` +
         `<div class="drum-panel-foot"></div>` +
       `</div>`;
     bodyEl = rootEl.querySelector('.drum-panel-body');
     costEl = rootEl.querySelector('.drum-panel-foot');
+    statusEl = rootEl.querySelector('.drum-panel-status');
     render();
   }
 
   function setRows(next) {
     rows = Array.isArray(next) ? next : [];
     render();
+  }
+
+  // 進行中の作業の表示。分離レンダリングは曲の長さぶん再エミュレーションするので数十秒かかる。
+  // 何も出さないと「急に重くなった」ようにしか見えないので、必ずここへ出す
+  function setStatus(text) {
+    if (!statusEl) return;
+    statusEl.textContent = text || '';
+    statusEl.hidden = !text;
   }
 
   function setCost(stats) {
@@ -240,5 +252,5 @@
     }
   }
 
-  UI.DrumPanel = { mount, setRows, setCost, render };
+  UI.DrumPanel = { mount, setRows, setCost, setStatus, render };
 })(window);
