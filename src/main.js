@@ -3974,17 +3974,38 @@
   document.getElementById('btnTransportStop').addEventListener('click', transportStop);
   document.getElementById('btnRangeReset').addEventListener('click', () => resetPlaybackRangeToFull(currentDuration()));
   // シークバー(range input)の入力→シーク。主/副どのインスタンスからでも同じ処理
+  // ★シークは「まとめて1回」にする(2026-09-04)。<input type="range"> はドラッグ中
+  //   1ピクセル動くごとに input を撃つので、素直に毎回シークすると重い曲で固まる。
+  //   形式によってはシーク1回が数百ms(曲頭からコマンドを早送りするため。実測:
+  //   バーチャレーシングデラックス「Replay」で1回543ms)で、ドラッグ中に数十回積もると
+  //   ブラウザが数秒〜数十秒止まる(ユーザー報告「シークするとものすごいガクつく」)。
+  //   時間表示とハンドルは即座に動かし、実シークだけを間引く(最後の位置へは必ず行く)。
+  const SEEK_COALESCE_MS = 120;
   function setupSeekBarInput(inst) {
-    inst.barEl.addEventListener('input', () => {
-      const frac = parseInt(inst.barEl.value, 10) / SEEK_RESOLUTION;
-      const total = currentTransportPlayer() ? workletDuration : (capturedBuffer ? capturedBuffer.duration : 0);
-      if (!total) return;
-      const want = frac * total;
+    let timer = null;
+    let pending = null;
+    const run = () => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (pending === null) return;
+      const { want, total } = pending;
+      pending = null;
       const got = seekToSeconds(want);
       // バッファ済み範囲より先へはシークできないので、ハンドル自体を実際にシークした位置へ
       // スナップバックする(seekToSeconds()のクランプ参照)
       if (got !== null && got < want) setSeekBarValue(Math.round((got / total) * SEEK_RESOLUTION));
+    };
+    inst.barEl.addEventListener('input', () => {
+      const frac = parseInt(inst.barEl.value, 10) / SEEK_RESOLUTION;
+      const total = currentTransportPlayer() ? workletDuration : (capturedBuffer ? capturedBuffer.duration : 0);
+      if (!total) return;
+      pending = { want: frac * total, total };
+      setTimeDisplay(`${formatTime(pending.want)} / ${formatTime(total)}`); // 表示だけ先に追随させる
+      // ドラッグ中(inputが連射される間)は実シークを後ろへ倒し続け、手が止まったら1回だけ実行
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(run, SEEK_COALESCE_MS);
     });
+    // 離した瞬間/クリック/キー操作は change が来るので、そこで待たずに最終位置へ飛ぶ
+    inst.barEl.addEventListener('change', run);
   }
   setupSeekBarInput(seekBars[0]);
   // 鍵盤表示のピアノロール見出し行にも同じシークバー(副インスタンス)を置く。
