@@ -6567,6 +6567,12 @@
       //   進捗コールバックの時点ではまだ無いので、完了後にもう一度拾い直さないと
       //   ドラムパッドの試聴が「押しても鳴らない」ままになる
       if (myToken !== vgmRollToken || !vgmCaptureMirror) return;
+      // 先読みキャプチャが曲全体を歩きながら作ったシーク用チェックポイントを実再生側へ渡す。
+      // これで「まだ再生していない位置」への初回シークも手前5秒からの再開で済む
+      // (VgmPlayer.serializeSeekData/adoptSeekData)
+      const sd = vgmCaptureMirror.data.vgmSeek && vgmCaptureMirror.data.vgmSeek.all;
+      const lp = vgmActivePlayer && vgmActivePlayer.player;
+      if (sd && lp && lp.adoptSeekData) { try { lp.adoptSeekData(sd); } catch (e) { console.warn('シーク用チェックポイントの取り込みに失敗:', e); } }
       updateVgmDrumSamples(vgmCaptureMirror.data);
       synthDrumEnsure(); // 打楽器化(E選択)済みの合成音chがあれば全長でレンダリングし直す
       refreshDrumPanel();

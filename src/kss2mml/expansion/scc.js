@@ -86,12 +86,16 @@
     const state = makeSccDecoder();
     return writeLog.map(writes => {
       let rangeWriteCount = 0;
-      for (const { addr, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite)
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, io = (pw >> 24) & 1;
         if (io) continue;
         if ((addr >= 0x9800 && addr <= 0x9FFF) || (addr >= 0xB800 && addr <= 0xBFFF)) rangeWriteCount++;
       }
       const isBulkCopy = rangeWriteCount > BULK_COPY_THRESHOLD_PER_FRAME;
-      for (const { addr, value, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (io) continue;
         if (isBulkCopy && ((addr >= 0x9800 && addr <= 0x9FFF) || (addr >= 0xB800 && addr <= 0xBFFF))) continue;
         const off = decodeAddr(state, addr, value);

@@ -304,10 +304,13 @@
     //   一括レジスタで、影には最後の1回しか残らないため各chのキー状態を再現できない。
     //   状態フィールドを丸ごと写す方が単純で、しかも**正確**(EGの位相まで戻る)。
     //   対象は reset() が設定する可変フィールドだけ(STATE_SKIP は構成値/表示設定)。
-    // 保存前にキューを流しておくので writebuf は空。約2.7KB/回。
+    // ★getStateはチップを一切進めないこと(2026-09-04)。以前は先に flushWrites() を
+    //   呼んでいたが、あれは末尾で必ず1サンプルぶん clock() を回すので、先読みキャプチャの
+    //   途中で状態を控えると**EGが余分に進んで抽出結果が変わる**(畳み込みをキャプチャ経路へ
+    //   効かせてメガドライブ13曲の出力が変わったのと同じ罠)。未適用の書込みキューは
+    //   状態の一部としてそのまま持つ。約2.7KB/回。
     getState() {
-      this.flushWrites(true);
-      const out = {};
+      const out = { _wq: this.writebuf.slice(this.writeHead).map((w) => ({ port: w.port, data: w.data, time: w.time })) };
       for (const k of Object.keys(this)) {
         if (STATE_SKIP.has(k)) continue;
         const v = this[k];
@@ -320,13 +323,15 @@
     setState(s) {
       if (!s) return;
       for (const k of Object.keys(s)) {
-        if (k === 'regs') continue;
+        if (k === 'regs' || k === '_wq') continue;
         const v = s[k], cur = this[k];
         if (ArrayBuffer.isView(cur) && ArrayBuffer.isView(v)) cur.set(v);
         else this[k] = v;
       }
       this.regs[0].set(s.regs[0]); this.regs[1].set(s.regs[1]);
-      this.writebuf = []; this.writeHead = 0;
+      // 未適用だった書込みキューも戻す(getStateがチップを進めない代わり)
+      this.writebuf = (s._wq || []).map((w) => ({ port: w.port, data: w.data, time: w.time }));
+      this.writeHead = 0;
       this._patchCache = null; // 音色の使い回しキャッシュは作り直させる
     }
     /**

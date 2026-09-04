@@ -58,7 +58,9 @@
       const attack = new Array(NUM_MELODY_MAX).fill(false);
       const rhythmAttack = { bd: false, sd: false, tom: false, cym: false, hh: false };
       let adpcmAttack = false;
-      for (const { addr, value, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (!io) continue;
         if (addr === 0xC0) { latch = value & 0xFF; continue; }
         if (addr !== 0xC1) continue;

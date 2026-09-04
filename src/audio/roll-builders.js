@@ -108,11 +108,13 @@
   // 0xA0-0xAF側も見る。
   RollBuild.kssWriteLogUsesScc = function (writeLog, from, to) {
     for (let f = from; f < to && f < writeLog.length; f++) {
-      for (const w of writeLog[f]) {
-        if (w.io) continue;
-        const off = (w.addr >= 0x9800 && w.addr <= 0x98FF) ? w.addr - 0x9800
-          : (w.addr >= 0xB800 && w.addr <= 0xB8FF) ? w.addr - 0xB800 : -1;
-        if (off < 0 || w.value === 0) continue;
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite)
+      for (const pw of writeLog[f]) {
+        if ((pw >> 24) & 1) continue;
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF;
+        const off = (addr >= 0x9800 && addr <= 0x98FF) ? addr - 0x9800
+          : (addr >= 0xB800 && addr <= 0xB8FF) ? addr - 0xB800 : -1;
+        if (off < 0 || value === 0) continue;
         if ((off >= 0x80 && off <= 0x8F) || (off >= 0xA0 && off <= 0xAF)) return true;
       }
     }

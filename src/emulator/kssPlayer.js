@@ -9,6 +9,20 @@
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
 
+  /**
+   * writeLogの1書込みを1つの整数へ詰める(2026-09-04)。
+   *   bit0-15 = addr(メモリアドレス or I/Oポート) / bit16-23 = value / bit24 = io(1ならI/O)
+   *
+   * {addr,value,io}のJSオブジェクトは**実測75〜90B/件**で、KSSは1フレーム平均84〜152件
+   * 書くため60秒で27〜41MB(実RSS)を占めていた。詰めればフレームごとの Int32Array で
+   * 4B/件になる(実測 xak.kss 60秒: 27MB → 1.2MB)。
+   * ★型付き配列なので構造化クローン(キャプチャWorkerの差分送信)もそのまま通る。
+   * ★VGM側(vgmPlayer.js data.kss.writeLog)も同じ詰め方で作ること。読む側は
+   *   kss2mml/expansion/*.js と kss-stream-player.js と roll-builders.js。
+   */
+  const packWrite = (addr, value, io) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0);
+  Emu.kssPackWrite = packWrite;
+
   // INIT/PLAY呼び出し時のスタックポインタ初期値(libkss exec_setup の 0xF380 と同じ。
   // MSX BIOSワークエリアの直下で、実機ドライバが LD SP,0F380h とするのと同じ位置)
   const STACK_TOP = 0xF380;
@@ -161,8 +175,8 @@
     //  読むピアノロール/MML変換側はSCCのレジスタ窓が0xB800へ移ったことを知らず、
     //  スナッチャー系のSCCパートが「音符ゼロ」になる)。NSF側のinitWritesと同じ考え方。
     const initWrites = [];
-    player.bus.onWrite = (addr, value) => initWrites.push({ addr, value, io: false });
-    player.bus.onIoWrite = (port, value) => initWrites.push({ addr: port, value, io: true });
+    player.bus.onWrite = (addr, value) => initWrites.push(packWrite(addr, value, 0));
+    player.bus.onIoWrite = (port, value) => initWrites.push(packWrite(port, value, 1));
     player.initSong(opt.songIndex || 0);
     player.bus.onWrite = null;
     player.bus.onIoWrite = null;
@@ -190,12 +204,12 @@
 
     for (let f = 0; f < totalFrames; f++) {
       const frameWrites = f === 0 ? initWrites : []; // フレーム0はINIT中の書込みから続ける
-      player.bus.onWrite = (addr, value) => frameWrites.push({ addr, value, io: false });
-      player.bus.onIoWrite = (port, value) => frameWrites.push({ addr: port, value, io: true });
+      player.bus.onWrite = (addr, value) => frameWrites.push(packWrite(addr, value, 0));
+      player.bus.onIoWrite = (port, value) => frameWrites.push(packWrite(port, value, 1));
       const frameBuf = player.renderFrame(sampleRate, regsOnly);
       player.bus.onWrite = null;
       player.bus.onIoWrite = null;
-      writeLog.push(frameWrites);
+      writeLog.push(Int32Array.from(frameWrites)); // 詰めた整数の型付き配列で持つ(packWrite参照)
       if (!regsOnly) { for (let i = 0; i < frameBuf.length && outPos < audio.length; i++) audio[outPos++] = frameBuf[i]; }
       if (f === 0 || performance.now() - sliceStart >= sliceBudgetMs) {
         if (onProgress) onProgress(f, totalFrames, writeLog);

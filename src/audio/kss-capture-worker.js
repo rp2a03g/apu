@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 04:37:46
+ * Built by tools/build-capture-workers.ps1 at 2026-09-05 06:15:35
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-05 04:37:46';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-05 06:15:35';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -4717,6 +4717,20 @@
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
 
+  /**
+   * writeLogの1書込みを1つの整数へ詰める(2026-09-04)。
+   *   bit0-15 = addr(メモリアドレス or I/Oポート) / bit16-23 = value / bit24 = io(1ならI/O)
+   *
+   * {addr,value,io}のJSオブジェクトは**実測75〜90B/件**で、KSSは1フレーム平均84〜152件
+   * 書くため60秒で27〜41MB(実RSS)を占めていた。詰めればフレームごとの Int32Array で
+   * 4B/件になる(実測 xak.kss 60秒: 27MB → 1.2MB)。
+   * ★型付き配列なので構造化クローン(キャプチャWorkerの差分送信)もそのまま通る。
+   * ★VGM側(vgmPlayer.js data.kss.writeLog)も同じ詰め方で作ること。読む側は
+   *   kss2mml/expansion/*.js と kss-stream-player.js と roll-builders.js。
+   */
+  const packWrite = (addr, value, io) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0);
+  Emu.kssPackWrite = packWrite;
+
   // INIT/PLAY呼び出し時のスタックポインタ初期値(libkss exec_setup の 0xF380 と同じ。
   // MSX BIOSワークエリアの直下で、実機ドライバが LD SP,0F380h とするのと同じ位置)
   const STACK_TOP = 0xF380;
@@ -4869,8 +4883,8 @@
     //  読むピアノロール/MML変換側はSCCのレジスタ窓が0xB800へ移ったことを知らず、
     //  スナッチャー系のSCCパートが「音符ゼロ」になる)。NSF側のinitWritesと同じ考え方。
     const initWrites = [];
-    player.bus.onWrite = (addr, value) => initWrites.push({ addr, value, io: false });
-    player.bus.onIoWrite = (port, value) => initWrites.push({ addr: port, value, io: true });
+    player.bus.onWrite = (addr, value) => initWrites.push(packWrite(addr, value, 0));
+    player.bus.onIoWrite = (port, value) => initWrites.push(packWrite(port, value, 1));
     player.initSong(opt.songIndex || 0);
     player.bus.onWrite = null;
     player.bus.onIoWrite = null;
@@ -4898,12 +4912,12 @@
 
     for (let f = 0; f < totalFrames; f++) {
       const frameWrites = f === 0 ? initWrites : []; // フレーム0はINIT中の書込みから続ける
-      player.bus.onWrite = (addr, value) => frameWrites.push({ addr, value, io: false });
-      player.bus.onIoWrite = (port, value) => frameWrites.push({ addr: port, value, io: true });
+      player.bus.onWrite = (addr, value) => frameWrites.push(packWrite(addr, value, 0));
+      player.bus.onIoWrite = (port, value) => frameWrites.push(packWrite(port, value, 1));
       const frameBuf = player.renderFrame(sampleRate, regsOnly);
       player.bus.onWrite = null;
       player.bus.onIoWrite = null;
-      writeLog.push(frameWrites);
+      writeLog.push(Int32Array.from(frameWrites)); // 詰めた整数の型付き配列で持つ(packWrite参照)
       if (!regsOnly) { for (let i = 0; i < frameBuf.length && outPos < audio.length; i++) audio[outPos++] = frameBuf[i]; }
       if (f === 0 || performance.now() - sliceStart >= sliceBudgetMs) {
         if (onProgress) onProgress(f, totalFrames, writeLog);
@@ -6527,7 +6541,9 @@
     // 既定値から始める。0のまま始めると全chがトーン+ノイズ有効として抽出されてしまう
     regs[7] = 0x38;
     return writeLog.map(writes => {
-      for (const { addr, value, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (!io) continue;
         if (addr === 0xA0) addrReg = value & 0x0F;
         else if (addr === 0xA1) regs[addrReg] = value;
@@ -6733,12 +6749,16 @@
     const state = makeSccDecoder();
     return writeLog.map(writes => {
       let rangeWriteCount = 0;
-      for (const { addr, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite)
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, io = (pw >> 24) & 1;
         if (io) continue;
         if ((addr >= 0x9800 && addr <= 0x9FFF) || (addr >= 0xB800 && addr <= 0xBFFF)) rangeWriteCount++;
       }
       const isBulkCopy = rangeWriteCount > BULK_COPY_THRESHOLD_PER_FRAME;
-      for (const { addr, value, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (io) continue;
         if (isBulkCopy && ((addr >= 0x9800 && addr <= 0x9FFF) || (addr >= 0xB800 && addr <= 0xBFFF))) continue;
         const off = decodeAddr(state, addr, value);
@@ -6905,7 +6925,9 @@
     let rhythmUsed = false;
     const frames = writeLog.map(writes => {
       const attack = new Array(NUM_MELODY_MAX).fill(false);
-      for (const { addr, value, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (!io) continue;
         // 0xF0/0xF1 は FM-PAC の別名ポート(src/emulator/kssBus.js ioWrite 参照)
         if (addr === 0x7C || addr === 0xF0) { latch = value & 0x3F; continue; }
@@ -7111,7 +7133,9 @@
       const attack = new Array(NUM_MELODY_MAX).fill(false);
       const rhythmAttack = { bd: false, sd: false, tom: false, cym: false, hh: false };
       let adpcmAttack = false;
-      for (const { addr, value, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (!io) continue;
         if (addr === 0xC0) { latch = value & 0xFF; continue; }
         if (addr !== 0xC1) continue;
@@ -7385,11 +7409,13 @@
   // 0xA0-0xAF側も見る。
   RollBuild.kssWriteLogUsesScc = function (writeLog, from, to) {
     for (let f = from; f < to && f < writeLog.length; f++) {
-      for (const w of writeLog[f]) {
-        if (w.io) continue;
-        const off = (w.addr >= 0x9800 && w.addr <= 0x98FF) ? w.addr - 0x9800
-          : (w.addr >= 0xB800 && w.addr <= 0xB8FF) ? w.addr - 0xB800 : -1;
-        if (off < 0 || w.value === 0) continue;
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite)
+      for (const pw of writeLog[f]) {
+        if ((pw >> 24) & 1) continue;
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF;
+        const off = (addr >= 0x9800 && addr <= 0x98FF) ? addr - 0x9800
+          : (addr >= 0xB800 && addr <= 0xB8FF) ? addr - 0xB800 : -1;
+        if (off < 0 || value === 0) continue;
         if ((off >= 0x80 && off <= 0x8F) || (off >= 0xA0 && off <= 0xAF)) return true;
       }
     }

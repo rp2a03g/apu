@@ -282,11 +282,13 @@
       return !!(this.writeLog && this.writeLog[f]);
     }
 
+    // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
     _applyWrites(writes) {
       if (!writes) return;
-      for (const w of writes) {
-        if (w.io) this.bus.ioWrite(w.addr, w.value);
-        else this.bus.write(w.addr, w.value);
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF;
+        if ((pw >> 24) & 1) this.bus.ioWrite(addr, value);
+        else this.bus.write(addr, value);
       }
     }
 
@@ -332,9 +334,10 @@
 
     _scanApplyWrites(writes) {
       if (!writes) return;
-      for (const w of writes) {
-        if (w.io) this._scanBus.ioWrite(w.addr, w.value);
-        else this._scanBus.write(w.addr, w.value);
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF;
+        if ((pw >> 24) & 1) this._scanBus.ioWrite(addr, value);
+        else this._scanBus.write(addr, value);
       }
     }
 

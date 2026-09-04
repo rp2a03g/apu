@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 04:37:46
+ * Built by tools/build-capture-workers.ps1 at 2026-09-05 06:15:35
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-05 04:37:46';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-05 06:15:35';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -5605,10 +5605,13 @@
     //   一括レジスタで、影には最後の1回しか残らないため各chのキー状態を再現できない。
     //   状態フィールドを丸ごと写す方が単純で、しかも**正確**(EGの位相まで戻る)。
     //   対象は reset() が設定する可変フィールドだけ(STATE_SKIP は構成値/表示設定)。
-    // 保存前にキューを流しておくので writebuf は空。約2.7KB/回。
+    // ★getStateはチップを一切進めないこと(2026-09-04)。以前は先に flushWrites() を
+    //   呼んでいたが、あれは末尾で必ず1サンプルぶん clock() を回すので、先読みキャプチャの
+    //   途中で状態を控えると**EGが余分に進んで抽出結果が変わる**(畳み込みをキャプチャ経路へ
+    //   効かせてメガドライブ13曲の出力が変わったのと同じ罠)。未適用の書込みキューは
+    //   状態の一部としてそのまま持つ。約2.7KB/回。
     getState() {
-      this.flushWrites(true);
-      const out = {};
+      const out = { _wq: this.writebuf.slice(this.writeHead).map((w) => ({ port: w.port, data: w.data, time: w.time })) };
       for (const k of Object.keys(this)) {
         if (STATE_SKIP.has(k)) continue;
         const v = this[k];
@@ -5621,13 +5624,15 @@
     setState(s) {
       if (!s) return;
       for (const k of Object.keys(s)) {
-        if (k === 'regs') continue;
+        if (k === 'regs' || k === '_wq') continue;
         const v = s[k], cur = this[k];
         if (ArrayBuffer.isView(cur) && ArrayBuffer.isView(v)) cur.set(v);
         else this[k] = v;
       }
       this.regs[0].set(s.regs[0]); this.regs[1].set(s.regs[1]);
-      this.writebuf = []; this.writeHead = 0;
+      // 未適用だった書込みキューも戻す(getStateがチップを進めない代わり)
+      this.writebuf = (s._wq || []).map((w) => ({ port: w.port, data: w.data, time: w.time }));
+      this.writeHead = 0;
       this._patchCache = null; // 音色の使い回しキャッシュは作り直させる
     }
     /**
@@ -12250,15 +12255,57 @@
       this._dacCur = null;
       this.ended = false;
     }
-    /** 進行中に一定間隔で状態を控える(fastForward/renderFrame から呼ぶ) */
-    _noteCheckpoint() {
+    /**
+     * 進行中に一定間隔で状態を控える(fastForward/renderFrame から呼ぶ)。
+     * @param {boolean} [flushFirst] 早送り経路だけ true。早送りは clock() を回さないので
+     *   書込みキューが伸び続け、そのまま控えるとキュー全体のコピーが毎回走って重くなる
+     *   (実測: 60秒地点のシークが 7ms → 348ms)。控える前に流して空にしておく。
+     *   ★キャプチャ経路(renderFrame)では絶対に流さないこと。あそこでの flushWrites は
+     *     末尾で1サンプルぶん clock() を回すため、EGが余分に進んで抽出結果が変わる。
+     */
+    _noteCheckpoint(flushFirst) {
       if (!this.canCheckpoint) return;
       const cps = this._checkpoints || (this._checkpoints = []);
       const last = cps.length ? cps[cps.length - 1].samplePos : -Infinity;
       if (this.samplePos - last < CHECKPOINT_INTERVAL) return;
       if (cps.length >= CHECKPOINT_MAX) return;
+      if (flushFirst) this._flushWrites(true);
       cps.push(this._saveCheckpoint());
     }
+    /**
+     * 控えたチェックポイントを他のプレイヤーへ渡せる形にする(2026-09-04)。
+     * 先読みキャプチャは曲全体をコマンド解釈しながら歩くので、そこで作った控えを
+     * 実再生側のプレイヤーへ渡せば「まだ通っていない位置」への初回シークも速くなる。
+     * ★データバンク(0x67で読み込むPCM/ADPCMの元データ)も一緒に渡すこと。
+     *   チェックポイント復元はコマンド位置を飛ばすので、曲頭のデータブロックを
+     *   読んでいないプレイヤーではDACのバンクが空のまま鳴らすことになる。
+     *   バンクは曲中で足されるだけ(既存の内容は変わらない)なので、最終状態を渡して安全。
+     */
+    serializeSeekData() {
+      if (!this.canCheckpoint || !this._checkpoints || !this._checkpoints.length) return null;
+      const banks = {};
+      for (const type of Object.keys(this.dataBanks)) {
+        const b = this.dataBanks[type];
+        banks[type] = { data: b.data, blocks: b.blocks };
+      }
+      return { checkpoints: this._checkpoints, banks };
+    }
+    /** serializeSeekData() の結果を取り込む(実再生側のプレイヤーで呼ぶ) */
+    adoptSeekData(sd) {
+      if (!sd || !sd.checkpoints || !this.canCheckpoint) return;
+      for (const type of Object.keys(sd.banks || {})) {
+        const cur = this.dataBanks[type];
+        // まだ読んでいない/短いバンクだけ差し替える(自分で読んだ分を壊さない)
+        if (!cur || !cur.data || cur.data.length < sd.banks[type].data.length) {
+          this.dataBanks[type] = { data: sd.banks[type].data, blocks: sd.banks[type].blocks };
+        }
+      }
+      const cps = this._checkpoints || (this._checkpoints = []);
+      const have = new Set(cps.map((c) => c.samplePos));
+      for (const cp of sd.checkpoints) if (!have.has(cp.samplePos)) cps.push(cp);
+      cps.sort((a, b) => a.samplePos - b.samplePos);
+    }
+
     /**
      * 目標位置へシークする。控えてあるチェックポイントのうち手前で一番近いものから
      * 再開し、足りない分だけコマンドを流す。チェックポイントが無ければ従来どおり頭から。
@@ -12274,7 +12321,7 @@
 
     fastForward(targetSample) {
       while (this.samplePos < targetSample && !this.ended) {
-        this._noteCheckpoint();
+        this._noteCheckpoint(true); // 早送りは控える前にキューを流す(_noteCheckpoint参照)
         if (this.waitRemaining === 0) this._runCommands();
         const step = Math.min(this.waitRemaining, targetSample - this.samplePos);
         if (step <= 0) { if (this.ended) break; continue; }
@@ -12307,9 +12354,11 @@
      */
     renderFrame(sampleRate, regsOnly, stereo) {
       const samplesThisFrame = Math.round(sampleRate / FRAME_RATE);
-      // 再生しながらもチェックポイントを控える(一度通ったところへのシークが速くなる)。
-      // regsOnlyのキャプチャ経路は別インスタンスなので対象外にする
-      if (!regsOnly) this._noteCheckpoint();
+      // 再生しながらチェックポイントを控える(一度通ったところへのシークが速くなる)。
+      // 先読みキャプチャ(regsOnly)でも控える: 曲全体を歩くので、その控えを実再生側へ
+      // 渡せば未到達位置への初回シークも速くなる(serializeSeekData/adoptSeekData)。
+      // ★getState()はチップを一切進めないので、控えても抽出結果は変わらない
+      this._noteCheckpoint();
       if (regsOnly) {
         // 速度は無関係(キャプチャはVGM時間で進める)
         for (let i = 0; i < SAMPLES_PER_FRAME; i++) this._stepVgmSample();
@@ -12433,23 +12482,23 @@
     const nesRegs = {};
     if (data.kss && data.kss.scc && data.kss.sccPlus) {
       // kss2mml/expansion/scc.js のデコーダにSCC+配置(0xB800台)を認識させる前置き書込み
-      kssFrameWrites.push({ addr: 0xBFFE, value: 0x20, io: false }, { addr: 0xB000, value: 0x80, io: false });
+      kssFrameWrites.push(Emu.kssPackWrite(0xBFFE, 0x20, 0), Emu.kssPackWrite(0xB000, 0x80, 0));
     }
     player.onWrite = (id, a, b, c, d) => {
       switch (id) {
         case 'nes': nesFrameWrites.push({ addr: c, value: b }); nesRegs[c] = b; break;
-        case 'ay8910': kssFrameWrites.push({ addr: 0xA0, value: a & 0x0F, io: true }, { addr: 0xA1, value: b, io: true }); break;
+        case 'ay8910': kssFrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
         // YM2610: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
-        case 'ym2610': if (a === 0 && b < 0x0E) kssFrameWrites.push({ addr: 0xA0, value: b & 0x0F, io: true }, { addr: 0xA1, value: c, io: true }); break;
+        case 'ym2610': if (a === 0 && b < 0x0E) kssFrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
         // YM2203: (addr, data)。addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
-        case 'ym2203': if (a < 0x0E) kssFrameWrites.push({ addr: 0xA0, value: a & 0x0F, io: true }, { addr: 0xA1, value: b, io: true }); break;
+        case 'ym2203': if (a < 0x0E) kssFrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
         // YM2608: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
-        case 'ym2608': if (a === 0 && b < 0x0E) kssFrameWrites.push({ addr: 0xA0, value: b & 0x0F, io: true }, { addr: 0xA1, value: c, io: true }); break;
-        case 'ym2413': kssFrameWrites.push({ addr: 0x7C, value: a, io: true }, { addr: 0x7D, value: b, io: true }); break;
+        case 'ym2608': if (a === 0 && b < 0x0E) kssFrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
+        case 'ym2413': kssFrameWrites.push(Emu.kssPackWrite(0x7C, a, 1), Emu.kssPackWrite(0x7D, b, 1)); break;
         // OPL系: MSX-AUDIOのポート(0xC0=アドレス/0xC1=データ)としてKSSと同じ形でログする
         case 'ym3812': case 'ym3526': case 'y8950':
-          kssFrameWrites.push({ addr: 0xC0, value: a, io: true }, { addr: 0xC1, value: b, io: true }); break;
-        case 'k051649': kssFrameWrites.push({ addr: d, value: c, io: false }); break;
+          kssFrameWrites.push(Emu.kssPackWrite(0xC0, a, 1), Emu.kssPackWrite(0xC1, b, 1)); break;
+        case 'k051649': kssFrameWrites.push(Emu.kssPackWrite(d, c, 0)); break;
       }
     };
     // ★2026-08-20 スライスを「フレーム数固定」から「時間予算固定」へ変更(NSFの
@@ -12470,7 +12519,7 @@
       }
       if (data.gb) data.gb.snapshots.push(Emu.snapshotGbApuForCapture(player.adapterById.gb.apu));
       if (data.hes) data.hes.snapshots.push(Emu.snapshotHesApuForCapture(player.adapterById.huc6280.apu));
-      if (data.kss) { data.kss.writeLog.push(kssFrameWrites); kssFrameWrites = []; }
+      if (data.kss) { data.kss.writeLog.push(Int32Array.from(kssFrameWrites)); kssFrameWrites = []; }
       if (data.sn) {
         const s1 = Emu.snapshotSN76489(player.adapterById.sn76489.chip, data.sn.clock);
         const a2 = player.adapterById.sn76489_2;
@@ -12643,6 +12692,11 @@
     }
     collectUsedSamples(data, player);
     collectDacHits(data, player, FRAME_RATE);
+    // シーク用チェックポイント(未到達位置への初回シークを速くする)。dacpcmと同じ理由で
+    // オブジェクトに1段包む(キャプチャ完了後に足すプロパティは finalMeta でしか届かず、
+    // 配列のまま置くと丸ごと落ちる。capture-worker-multi-impl.js diffPayload)
+    const seek = player.serializeSeekData();
+    if (seek) data.vgmSeek = { all: seek };
     return data;
   };
 
@@ -20414,7 +20468,9 @@
     // 既定値から始める。0のまま始めると全chがトーン+ノイズ有効として抽出されてしまう
     regs[7] = 0x38;
     return writeLog.map(writes => {
-      for (const { addr, value, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (!io) continue;
         if (addr === 0xA0) addrReg = value & 0x0F;
         else if (addr === 0xA1) regs[addrReg] = value;
@@ -20620,12 +20676,16 @@
     const state = makeSccDecoder();
     return writeLog.map(writes => {
       let rangeWriteCount = 0;
-      for (const { addr, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite)
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, io = (pw >> 24) & 1;
         if (io) continue;
         if ((addr >= 0x9800 && addr <= 0x9FFF) || (addr >= 0xB800 && addr <= 0xBFFF)) rangeWriteCount++;
       }
       const isBulkCopy = rangeWriteCount > BULK_COPY_THRESHOLD_PER_FRAME;
-      for (const { addr, value, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (io) continue;
         if (isBulkCopy && ((addr >= 0x9800 && addr <= 0x9FFF) || (addr >= 0xB800 && addr <= 0xBFFF))) continue;
         const off = decodeAddr(state, addr, value);
@@ -20792,7 +20852,9 @@
     let rhythmUsed = false;
     const frames = writeLog.map(writes => {
       const attack = new Array(NUM_MELODY_MAX).fill(false);
-      for (const { addr, value, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (!io) continue;
         // 0xF0/0xF1 は FM-PAC の別名ポート(src/emulator/kssBus.js ioWrite 参照)
         if (addr === 0x7C || addr === 0xF0) { latch = value & 0x3F; continue; }
@@ -20998,7 +21060,9 @@
       const attack = new Array(NUM_MELODY_MAX).fill(false);
       const rhythmAttack = { bd: false, sd: false, tom: false, cym: false, hh: false };
       let adpcmAttack = false;
-      for (const { addr, value, io } of writes) {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+      for (const pw of writes) {
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (!io) continue;
         if (addr === 0xC0) { latch = value & 0xFF; continue; }
         if (addr !== 0xC1) continue;
@@ -22539,11 +22603,13 @@
   // 0xA0-0xAF側も見る。
   RollBuild.kssWriteLogUsesScc = function (writeLog, from, to) {
     for (let f = from; f < to && f < writeLog.length; f++) {
-      for (const w of writeLog[f]) {
-        if (w.io) continue;
-        const off = (w.addr >= 0x9800 && w.addr <= 0x98FF) ? w.addr - 0x9800
-          : (w.addr >= 0xB800 && w.addr <= 0xB8FF) ? w.addr - 0xB800 : -1;
-        if (off < 0 || w.value === 0) continue;
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite)
+      for (const pw of writeLog[f]) {
+        if ((pw >> 24) & 1) continue;
+        const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF;
+        const off = (addr >= 0x9800 && addr <= 0x98FF) ? addr - 0x9800
+          : (addr >= 0xB800 && addr <= 0xB8FF) ? addr - 0xB800 : -1;
+        if (off < 0 || value === 0) continue;
         if ((off >= 0x80 && off <= 0x8F) || (off >= 0xA0 && off <= 0xAF)) return true;
       }
     }
