@@ -62,7 +62,8 @@
   // listColumns:     'single' = 1列 / 'auto' = 幅に応じて自動多段
   // rollLanes:       'all' = 全チャンネルを1つの鍵盤/ロールに重ねて表示
   //                  'perChannel' = 使用チャンネルごとに鍵盤+ロールのレーンを並べる(縦向き=横に並ぶ、
-  //                                 横向き=縦に積む。収まらない分はスクロール)
+  //                                 横向き=縦に積む。各レーンはそのchの音域ぶんの大きさを持ち、
+  //                                 収まらない分は .kbd-lanes 全体がスクロールする)
   // 既定値は従来の見た目(縦・下・1列・まとめて)。localStorageに永続化する。
   const LAYOUT_STORAGE_KEY = 'mml_keyboardLayout_v1';
   const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'bottom', listColumns: 'single', rollLanes: 'all' });
@@ -72,15 +73,20 @@
     listColumns: ['single', 'auto'],
     rollLanes: ['all', 'perChannel'],
   });
-  // チャンネルごとのレーン: 鍵盤全体(50白鍵)ではなく、白鍵LANE_VISIBLE_WHITE個ぶん(≈1.4オクターブ)の
-  // 音程窓だけを表示し、そのchの音符が窓からはみ出しそうなら音程方向に自動スクロールして追従する
-  // (_updateLaneScroll参照)。LANE_MIN_PXはレーンの音程軸方向の最小px(縦向き=幅、横向き=高さ)で、
-  // 1白鍵≈15px。style.cssの.kbd-laneの値と一致させること
-  const LANE_VISIBLE_WHITE = 10;
-  const LANE_MIN_PX = 150;
-  // 自動スクロールの余白(白鍵単位)と追従の速さ(1フレームあたり残差のこの割合だけ寄せる)
-  const LANE_SCROLL_MARGIN = 1;
-  const LANE_SCROLL_EASE = 0.15;
+  // チャンネルごとのレーン: そのchが曲全体で鳴らす音域(+使っているドラムレーン)だけを
+  // 音程軸いっぱいに表示する(_updateLaneRanges)。音域はchごとに違うので拡大率もchごとに違い、
+  // 音程方向のスクロール/自動追従は無い(白鍵10本の窓を自動スクロールさせる旧方式は、
+  // 窓が動くたびに音程の基準が変わって見づらかった)。
+  // レーンの大きさ(音程軸方向のpx。縦向き=幅、横向き=高さ)は既定で LANE_PX_PER_WHITE×音域幅、
+  // レーンの境目のスプリッターをドラッグすると個別に変えられる(=そのレーンだけ拡大縮小する)。
+  // 全レーンの合計が入り切らないぶんは .kbd-lanes が音程軸方向にスクロールする。
+  const LANE_PX_PER_WHITE = 15;  // 既定の拡大率(白鍵1本あたりpx)。旧実装の窓(白鍵10本=150px)と同じ
+  const LANE_MIN_PX = 40;        // レーンの音程軸方向の最小px(ドラッグの下限)
+  const LANE_MIN_WHITE = 7;      // 音域が狭いchでも最低このぶんは見せる(白鍵7本=1オクターブ)
+  const LANE_RANGE_PAD = 0.5;    // 音域の両端に足す余白(白鍵)。端の音符が枠に張り付かないように
+  const LANE_UNKNOWN_PX = 150;   // 音域が分からないレーン(1音も鳴らないch/先読み未完)の既定の大きさ
+  const LANE_LABEL_PX = 14;      // .kbd-lane-labelの高さ。横向きではレーンの大きさに含まれる
+                                 // (style.cssの.kbd-lane-labelのheightと一致させること)
   // スポットライト(案D): チャンネル一覧の行にホバー/クリックすると、ロール上でその行の
   // ノートだけを原色・最前面で描き、他chはこの不透明度まで減光する。ミュート(=音も消える)
   // とは別軸の「注目だけ」の仕組みで、PCM多chがドラムを叩いていて音符が重なるときに
@@ -158,7 +164,7 @@
   //   horizontal: p→y(下→上)、t→x(左→右)   … 音符が右から流れてくる
   // 縦向きの写像は従来実装と同じ式(H - t)になるよう書いてあり、丸めまで含めて描画結果は不変。
   // visibleWhite: 音程軸に収める白鍵の本数(省略=鍵盤全体TOTAL_WHITE。チャンネルごとのレーンは
-  // LANE_VISIBLE_WHITEで、表示窓の左端(低音側)の白鍵位置offsetPxは呼び出し側がkeyX()の結果から引く)
+  // そのchの音域ぶん=lane.visWhiteで、表示窓の低音側の端(lane.offWhite)は呼び出し側がkeyX()の結果から引く)
   // nDrum: ドラム区画のレーン数(0=区画なし)。音程軸は [ドラム区画][音程鍵盤] の並びで、
   // 全体の長さは (nDrum * DRUM_LANE_WHITE + TOTAL_WHITE) 白鍵ぶん。keyX()が返す音程側の
   // 座標には drumOff(区画の幅px)を足して使う。
@@ -2483,7 +2489,8 @@
       this._spotlightHoverId = null;    // スポットライト(案D): ホバー中の行のch.id(一時的)
       this._spotlightPinnedId = null;   // スポットライト(案D): ch名クリックで固定した行のch.id(ホバーより優先)
       this._rollSeekBarEls = null;      // ロール見出し行に置くシークバー要素(setRollSeekBar)
-      this._lanes = [];                 // チャンネルごとのレーン [{id, laneEl, rollCanvas, pianoCanvas}](_rebuildLanes)
+      this._lanes = [];                 // チャンネルごとのレーン [{id, laneEl, rollCanvas, pianoCanvas, offWhite, visWhite}](_rebuildLanes)
+      this._laneSizes = new Map();      // id → レーンの音程軸方向のpx。スプリッターで変えた分だけ入る(空=既定の自動割り付け)
       this._lanesEl = null;
       this._sizeObserver = null;
       this._sourceInfo = null;          // 表示中の再生ソース {kind, name}(setSourceInfo)。タイトル行のバッジに出す
@@ -3129,7 +3136,8 @@
     }
 
     // チャンネルごとのレーン表示の中身を、現在の一覧(NSF等: _rowEls / SPC: _spcRowEls)に
-    // 合わせて作り直す。各レーンは [ラベル(色丸+パート文字+ch名)] + [ロールcanvas+鍵盤canvas]。
+    // 合わせて作り直す。各レーンは [ラベル(色丸+パート文字+ch名)] + [ロールcanvas+鍵盤canvas]で、
+    // 間にはドラッグで大きさ(=拡大率)を変えるスプリッターを挟む。
     // 一覧が組み直された時(_rebuildRows/updateSpcVoices/setMode)と設定切替時に呼ぶ。
     // 'all'モードでは中身を空にしておく(描画コストをかけない)
     _rebuildLanes() {
@@ -3139,11 +3147,15 @@
       for (const l of this._lanes) {
         try { this._sizeObserver.unobserve(l.rollCanvas); this._sizeObserver.unobserve(l.pianoCanvas); } catch (e) { /* ignore */ }
       }
+      const prevIds = this._lanes.map(l => l.id).join('\u0000');
       this._lanes = [];
       lanesEl.innerHTML = '';
       if (this._layout.rollLanes !== 'perChannel') return;
       const rows = (this._mode === 'spc' ? this._spcRowEls : this._rowEls).filter(el => !el.isAllRow && el.waveCanvas);
+      // チャンネルの顔ぶれが変わったら(=別の曲/別のフォーマット)、手で変えた大きさは捨てて既定へ戻す
+      if (rows.map(r => r.id).join('\u0000') !== prevIds) this._laneSizes.clear();
       for (const rowEl of rows) {
+        if (this._lanes.length) lanesEl.appendChild(this._makeLaneSplitter(this._lanes.length - 1));
         const lane = document.createElement('div');
         lane.className = 'kbd-lane';
         const label = document.createElement('div');
@@ -3171,7 +3183,132 @@
         lanesEl.appendChild(lane);
         this._sizeObserver.observe(rollCanvas);
         this._sizeObserver.observe(pianoCanvas);
-        this._lanes.push({ id: rowEl.id, laneEl: lane, rollCanvas, pianoCanvas, scrollWhite: null });
+        // offWhite/visWhite(音程窓)は_updateLaneRanges()がタイムラインから決める。
+        // それまでの初期値は鍵盤全体(まとめ表示と同じ見え方)
+        this._lanes.push({ id: rowEl.id, laneEl: lane, rollCanvas, pianoCanvas, offWhite: 0, visWhite: 0, rangeKnown: false });
+      }
+      this._updateLaneRanges();
+    }
+
+    // レーンの境目のスプリッター。ドラッグでその手前(縦向き=左、横向き=上)のレーンの大きさを
+    // 変える = そのchのロール/鍵盤だけが拡大縮小する。全体が入り切らなくなったぶんは
+    // .kbd-lanes がスクロールする。ダブルクリックで全レーンを既定の大きさへ戻す。
+    _makeLaneSplitter(index) {
+      const horizontal = this._layout.rollOrientation === 'horizontal';
+      const el = this._makeSplitter(horizontal ? 'horizontal' : 'vertical', (delta, start) => {
+        const lane = this._lanes[index];
+        if (!lane) return;
+        this._laneSizes.set(lane.id, Math.max(LANE_MIN_PX, Math.round(start + delta)));
+        this._applyLaneSizes();
+      }, () => {
+        // 掴んだ瞬間に全レーンの「今の実寸」を固定値へ焼き付ける。自動割り付け(flex-grow)の
+        // ままだと1つ変えた余りが他レーンへ再配分され、掴んだ境目がポインタからズレるため
+        this._freezeLaneSizes();
+        const lane = this._lanes[index];
+        return lane ? (this._laneSizes.get(lane.id) || 0) : 0;
+      });
+      el.classList.add('kbd-lane-splitter');
+      el.title = T('ドラッグでこのチャンネルの表示幅(拡大率)を変える / ダブルクリックで既定に戻す');
+      el.addEventListener('dblclick', () => {
+        this._laneSizes.clear();
+        this._applyLaneSizes();
+      });
+      return el;
+    }
+
+    // 各レーンの音程窓を「そのchが曲全体で鳴らす音域」に合わせる。
+    //   lane.offWhite = 窓の低音側の端(白鍵単位。ドラム区画を含む音程軸の座標)
+    //   lane.visWhite = 窓の幅(白鍵の本数)。canvasの音程軸長さ÷これが拡大率になる
+    // タイムラインが無い/そのchの音符が1つも無い間は鍵盤全体(まとめ表示と同じ)にする。
+    // タイムラインやドラム区画が変わるたびに呼ぶ(_rebuildDrumLanes の呼び出し元と対)。
+    _updateLaneRanges() {
+      if (!this._lanes.length) return;
+      const drumUnits = (this._drumLanes || []).length * DRUM_LANE_WHITE;
+      const total = TOTAL_WHITE + drumUnits;
+      for (const lane of this._lanes) {
+        const track = this._rollTimeline && this._rollTimeline.find(t => t.id === lane.id);
+        let lo = Infinity, hi = -Infinity;
+        for (const note of (track ? track.notes : [])) {
+          let p0, p1;
+          if (note.drumLane !== undefined) {
+            // ドラムの打点はレーン番号が音程軸上の位置(1レーン=DRUM_LANE_WHITE白鍵ぶん)
+            const d = drumLaneX(note.drumLane, 0, 1, DRUM_LANE_WHITE);
+            p0 = d.x; p1 = d.x + d.size;
+          } else {
+            const kp = keyX(note.midi, 1);
+            if (!kp) continue;
+            p0 = (kp.isBlack ? kp.x - 0.3 : kp.x) + drumUnits;
+            p1 = (kp.isBlack ? kp.x + 0.3 : kp.x + 1) + drumUnits;
+          }
+          if (p0 < lo) lo = p0;
+          if (p1 > hi) hi = p1;
+        }
+        if (lo === Infinity) {
+          // 1音も鳴らないch(や先読みキャプチャ完了前)は音域が決まらない。鍵盤全体を出すが、
+          // 音域が分かっているレーンと同じ拡大率で場所を取らないよう大きさは控えめにする
+          lane.offWhite = 0; lane.visWhite = total; lane.rangeKnown = false;
+          continue;
+        }
+        lane.rangeKnown = true;
+        lo -= LANE_RANGE_PAD; hi += LANE_RANGE_PAD;
+        if (hi - lo < LANE_MIN_WHITE) {  // 1音しか鳴らさないch等が極端に拡大されないように
+          const c = (lo + hi) / 2;
+          lo = c - LANE_MIN_WHITE / 2;
+          hi = c + LANE_MIN_WHITE / 2;
+        }
+        lo = Math.max(0, lo); hi = Math.min(total, hi);
+        lane.offWhite = lo;
+        lane.visWhite = Math.max(1, hi - lo);
+      }
+      this._applyLaneSizes();
+    }
+
+    // レーンの音程軸方向の大きさをDOMへ反映する。
+    // 既定(手で変えていない状態)は音域幅×LANE_PX_PER_WHITE = どのレーンも同じ拡大率にし、
+    // 音程軸に余りがあれば音域幅に比例して配って隙間を埋める(flex-growを大きさに比例させる)。
+    // スプリッターで1つでも変えたら全レーンを固定px(=はみ出したぶんはスクロール)へ切り替える。
+    _applyLaneSizes() {
+      const extra = this._layout.rollOrientation === 'horizontal' ? LANE_LABEL_PX : 0; // 横向きはラベル行もレーンの高さに含まれる
+      const fixed = this._laneSizes.size > 0;
+      for (const lane of this._lanes) {
+        const base = lane.rangeKnown
+          ? Math.max(LANE_MIN_PX, Math.round((lane.visWhite || 0) * LANE_PX_PER_WHITE) + extra)
+          : LANE_UNKNOWN_PX + extra;
+        const size = fixed ? (this._laneSizes.get(lane.id) || base) : base;
+        lane.laneEl.style.flex = fixed ? ('0 0 ' + size + 'px') : (base + ' 0 ' + base + 'px');
+      }
+      this._scheduleLaneRedraw();
+    }
+
+    // レーンの大きさを変えた直後の描き直し。停止中はrAFが回っていないので自分で1回描く。
+    // canvasの表示サイズはResizeObserverがキャッシュするが反映は次フレーム以降なので、
+    // ここではレイアウト確定後(rAF)に実寸を読んでキャッシュを更新してから描く。
+    _scheduleLaneRedraw() {
+      if (this._laneRedrawPending || !this._lanes.length) return;
+      this._laneRedrawPending = true;
+      const run = () => {
+        this._laneRedrawPending = false;
+        for (const lane of this._lanes) {
+          for (const c of [lane.rollCanvas, lane.pianoCanvas]) {
+            const w = c.clientWidth, h = c.clientHeight;
+            if (w) c._cachedWidth = w;
+            if (h) c._cachedHeight = h;
+          }
+        }
+        this._redrawRollForSpotlight();
+        this._drawPianos(this._lastChannels || []);
+      };
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+      else run();
+    }
+
+    // 自動割り付け中のレーンを「今の実寸」で固定値に置き換える(スプリッターを掴んだ瞬間に呼ぶ)
+    _freezeLaneSizes() {
+      const horizontal = this._layout.rollOrientation === 'horizontal';
+      for (const lane of this._lanes) {
+        if (this._laneSizes.has(lane.id)) continue;
+        const px = horizontal ? lane.laneEl.offsetHeight : lane.laneEl.offsetWidth;
+        this._laneSizes.set(lane.id, Math.max(LANE_MIN_PX, Math.round(px) || LANE_MIN_PX));
       }
     }
 
@@ -3179,9 +3316,8 @@
     _drawPianos(allChannels) {
       if (this._layout.rollLanes === 'perChannel' && this._lanes.length) {
         for (const l of this._lanes) {
-          // 音程窓はロール側(_updateLaneScroll)が決めた位置に合わせる(未決定なら鍵盤全体の代わりにC4中心)
-          const off = l.scrollWhite == null ? Math.max(0, keyX(60, 1).x - LANE_VISIBLE_WHITE / 2) : l.scrollWhite;
-          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, LANE_VISIBLE_WHITE, off, this._drumsForPiano());
+          // 音程窓はロール側と共通(_updateLaneRanges が決めたそのchの音域)
+          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, l.visWhite || 0, l.offWhite || 0, this._drumsForPiano());
           if (this._drumLanes && this._drumLanes.length) this._attachDrumAudition(l.pianoCanvas);
         }
         return;
@@ -3393,7 +3529,7 @@
       const r = canvas.getBoundingClientRect();
       if (!r.width || !r.height) return null;
       const nDrum = (this._drumLanes || []).length;
-      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? LANE_VISIBLE_WHITE : 0, nDrum);
+      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? (lane.visWhite || 0) : 0, nDrum);
       // CSS表示サイズ → canvas内部解像度
       const cx = (clientX - r.left) * (canvas.width / r.width);
       const cy = (clientY - r.top) * (canvas.height / r.height);
@@ -3404,7 +3540,7 @@
       const pos = this._rollLastDrawnPos || 0;
       const sec = pos + t / ROLL_PX_PER_SEC;
       const wkW = g.wk, bkW = g.bk;
-      const offPx = lane ? lane.scrollWhite * wkW : 0;
+      const offPx = lane ? (lane.offWhite || 0) * wkW : 0;
       const pitchOff = g.drumOff - offPx;
       // 手前(描画順が後=最前面)から探したいので逆順に見る
       for (let ti = this._rollTimeline.length - 1; ti >= 0; ti--) {
@@ -3683,6 +3819,8 @@
         }
       }
       if (!changed) return;
+      // 手で変えたレーンの大きさは向き(幅⇔高さ)や分割方法が変わると意味が変わるので捨てる
+      this._laneSizes.clear();
       saveLayoutSettings(this._layout);
       this._mountRollPane();
       this._mountBigWave();
@@ -3867,6 +4005,7 @@
         this._rollTimeline = null;
       }
       this._rebuildDrumLanes();
+      this._updateLaneRanges();
     }
 
     // ピアノロール用タイムラインを直接差し替える(共通形状: [{color, notes:[{startSec,endSec,midi}]}])。
@@ -3876,6 +4015,7 @@
       this._rollTimeline = timeline || null;
       this._rollCursor = {};
       this._rebuildDrumLanes();
+      this._updateLaneRanges();
     }
 
     // ドラム区画のレーン表を、タイムラインのノートに書き込まれた drumLane/drumKey から組み直す。
@@ -4102,6 +4242,7 @@
       this._rollCursor = {};
       this._rollTimeline = this.buildRollTracksFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots);
       this._rebuildDrumLanes();
+      this._updateLaneRanges();
     }
 
     // setRollTimelineFromRegSnapshots()のトラック構築部分。VGM(main.js playVgmStream)のように
@@ -5210,64 +5351,10 @@
       }
     }
 
-    // チャンネルごとのレーンの音程窓(白鍵LANE_VISIBLE_WHITE本ぶん)を、そのchの「鳴っている音+
-    // 先読み範囲[pos, pos+windowSec)内の音符」が収まるようにスクロールさせる。
-    // 動かし方はデッドゾーン方式: 必要な音域が今の窓(余白LANE_SCROLL_MARGIN白鍵を除く)に
-    // 収まっていれば動かさない。はみ出す側があればその側だけ必要最小限ずらし、音域が窓より
-    // 広くて収まらないときは「今鳴っている音(無ければ一番近い未来の音)」を窓の中央に置く。
-    // 目標へは毎フレーム残差の一部ずつ寄せる(LANE_SCROLL_EASE)ので滑らかに追従する。
-    // 音符が1つも無い間は動かさない。lane.scrollWhite = 窓の低音側端の白鍵位置(小数)
-    _updateLaneScroll(lane, pos, windowSec) {
-      // 音程軸の単位は白鍵1本。ドラム区画があるぶん全体の長さが伸び、音程側の座標も右へずれる
-      const drumUnits = (this._drumLanes || []).length * DRUM_LANE_WHITE;
-      const maxOff = TOTAL_WHITE + drumUnits - LANE_VISIBLE_WHITE;
-      const track = this._rollTimeline && this._rollTimeline.find(t => t.id === lane.id);
-      if (lane.scrollWhite == null) lane.scrollWhite = Math.max(0, Math.min(maxOff, drumUnits + keyX(60, 1).x - LANE_VISIBLE_WHITE / 2)); // 初期値: C4中心
-      if (!track || !track.notes.length) return;
-      const winEnd = pos + windowSec;
-      // 白鍵単位の位置(黒鍵は隣接白鍵の境界)。keyX(midi,1)は白鍵幅1としたときの座標
-      let lo = Infinity, hi = -Infinity, focus = null, focusStart = Infinity;
-      const notes = track.notes;
-      // startSec昇順なので、終わった音を飛ばしつつ先読み範囲まで見る(ノート数は多くても
-      // 範囲は数秒ぶんなので線形走査で十分。位置はレーンごとに独立なのでcursorは使わない)
-      for (let i = 0; i < notes.length; i++) {
-        const n = notes[i];
-        if (n.endSec <= pos) continue;
-        if (n.startSec >= winEnd) break;
-        let p0, p1;
-        if (n.drumLane !== undefined) {
-          // ドラムの打点はレーン番号が音程軸上の位置(1レーン=DRUM_LANE_WHITE白鍵ぶん)
-          const d = drumLaneX(n.drumLane, n.drumSub, n.drumSubN, DRUM_LANE_WHITE);
-          p0 = d.x; p1 = d.x + d.size;
-        } else {
-          const kp = keyX(n.midi, 1);
-          if (!kp) continue;
-          p0 = (kp.isBlack ? kp.x - 0.3 : kp.x) + drumUnits;
-          p1 = (kp.isBlack ? kp.x + 0.3 : kp.x + 1) + drumUnits;
-        }
-        if (p0 < lo) lo = p0;
-        if (p1 > hi) hi = p1;
-        // 注目音: 鳴っている音(startSec<=pos)があればそれ、無ければ最も近い未来の音
-        const key = n.startSec <= pos ? -1 : n.startSec;
-        if (key < focusStart) { focusStart = key; focus = (p0 + p1) / 2; }
-      }
-      if (lo === Infinity) return;
-      const vis = LANE_VISIBLE_WHITE, m = LANE_SCROLL_MARGIN;
-      let target = lane.scrollWhite;
-      if (hi - lo + 2 * m <= vis) {
-        if (lo - m < target) target = lo - m;
-        else if (hi + m > target + vis) target = hi + m - vis;
-      } else {
-        target = focus - vis / 2;
-      }
-      target = Math.max(0, Math.min(maxOff, target));
-      const diff = target - lane.scrollWhite;
-      lane.scrollWhite = Math.abs(diff) < 0.005 ? target : lane.scrollWhite + diff * LANE_SCROLL_EASE;
-    }
-
     // 1枚のロールcanvasを曲内秒posの状態で描く。onlyId!=nullならそのチャンネルのノートだけ描く
-    // (チャンネルごとのレーン表示用。laneが渡されたら音程窓=白鍵LANE_VISIBLE_WHITE本ぶんを
-    // lane.scrollWhiteから表示し、描画前に_updateLaneScroll()で窓を追従させる)。
+    // (チャンネルごとのレーン表示用。laneが渡されたら音程窓=そのchの音域[lane.offWhite,
+    // +lane.visWhite)だけを音程軸いっぱいに描く。窓は_updateLaneRanges()が曲全体から決めた
+    // 固定値で、再生中に動かない)。
     _drawRollCanvas(canvas, pos, onlyId, lane) {
       // 内部解像度は表示サイズ(CSS px)に追随させる(縦向き・一覧の下配置ではCSSの固定高さ
       // ROLL_CANVAS_HEIGHTと一致する)。フォールバックのclientHeightはborder-topを含まない値
@@ -5277,14 +5364,13 @@
       if (canvas.width !== newW) canvas.width = newW;
       if (canvas.height !== newH) canvas.height = newH;
       const nDrum = (this._drumLanes || []).length;
-      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? LANE_VISIBLE_WHITE : 0, nDrum);
+      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? (lane.visWhite || 0) : 0, nDrum);
       const { wk: wkW, bk: bkW, H } = g;
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, H);
       const windowSec = g.windowSec;
       const winEnd = pos + windowSec;
-      if (lane) this._updateLaneScroll(lane, pos, windowSec);
-      const offPx = lane ? lane.scrollWhite * wkW : 0; // 音程窓の低音側端(px)。keyX()の結果から引く
+      const offPx = lane ? (lane.offWhite || 0) * wkW : 0; // 音程窓の低音側端(px)。keyX()の結果から引く
       const pitchOff = g.drumOff - offPx; // 音程側の座標補正(ドラム区画ぶん右へ + 窓スクロール)
 
       // ドラム区画のレーングリッド(淡い下地+レーン境界)。音程鍵盤より低音側に置く。

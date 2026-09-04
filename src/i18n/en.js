@@ -470,6 +470,8 @@
     'サウンドファイル再生を表示中': 'Showing sound file playback',
     'クリックでMML再生 / サウンドファイル再生を切り替え': 'Click to switch between MML playback and sound file playback',
     'ドラッグでシーク(縦向きは上下、横向きは左右)': 'Drag to seek (up/down when vertical, left/right when horizontal)',
+    'ドラッグでこのチャンネルの表示幅(拡大率)を変える / ダブルクリックで既定に戻す':
+      'Drag to resize this channel (zoom) / double-click to reset all lanes',
     '鍵盤表示のレイアウト設定': 'Keyboard display layout',
     'ピアノロールの向き': 'Piano roll orientation',
     '縦 (音符が上から鍵盤へ降る)': 'Vertical (notes fall onto the keys)',

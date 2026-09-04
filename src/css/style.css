@@ -1737,8 +1737,11 @@ button.secondary {
 }
 /* --- チャンネルごとのレーン表示(レイアウト設定 rollLanes='perChannel'、keyboard.js _rebuildLanes) ---
    まとめ表示の本体(.kbd-roll-body)の代わりに .kbd-lanes を出し、その中に使用chぶんのレーン
-   [ラベル + (ロール+鍵盤)] を並べる。縦向き=横並び(横スクロール)、横向き=縦積み(縦スクロール)。
-   各レーンは最小サイズ(keyboard.jsのLANE_MIN_PX)を持ち、余裕があれば均等に伸びる */
+   [ラベル + (ロール+鍵盤)] を、間にスプリッター(.kbd-lane-splitter)を挟んで並べる。
+   縦向き=横並び(横スクロール)、横向き=縦積み(縦スクロール)。
+   各レーンの音程軸方向の大きさ(縦向き=幅、横向き=高さ)は、そのchの音域の広さと
+   スプリッターのドラッグから keyboard.js の _applyLaneSizes() がインラインstyleで決めるので、
+   ここでは最小値も固定値も置かない(置くとJSの指定が効かなくなる) */
 .kbd-lanes {
   display: none;               /* レーン表示のときだけ keyboard.js が表示する */
   flex: none;                  /* 下配置: 高さはinline style(ロール高さ+鍵盤高さ) */
@@ -1753,8 +1756,8 @@ button.secondary {
 .kbd-roll-wrap--lanes > .kbd-lanes { display: flex; }
 .kbd-roll-wrap--fill.kbd-roll-wrap--lanes > .kbd-lanes { flex: 1 1 0; }
 .kbd-lane {
-  flex: 1 0 150px;             /* 150px = LANE_MIN_PX(音程軸方向の最小サイズ。白鍵10本ぶんの音程窓、1白鍵≈15px) */
-  min-width: 150px;
+  flex: 0 0 auto;              /* 実際の値は keyboard.js _applyLaneSizes() がインラインstyleで入れる */
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1787,15 +1790,19 @@ button.secondary {
   overflow-y: auto;
 }
 .kbd-roll-wrap--horizontal .kbd-lane {
-  flex: 1 0 164px;             /* LANE_MIN_PX + ラベル行(14px) */
+  flex: 0 0 auto;              /* 同上(横向きは高さ。ラベル行14pxを含む) */
   min-width: 0;
-  min-height: 164px;
+  min-height: 0;
   border-right: none;
   border-bottom: 1px solid var(--border);
 }
 .kbd-roll-wrap--horizontal .kbd-lane:last-child { border-bottom: none; }
 .kbd-roll-wrap--horizontal .kbd-lane .kbd-roll { min-width: 0; }
 .kbd-roll-wrap--horizontal .kbd-lane .kbd-piano-wrap { border-top: none; }
+
+/* レーンの境目: ドラッグでそのレーンだけ拡大縮小(keyboard.js _makeLaneSplitter)。
+   .kbd-splitter と同じ「大きさ0+::afterのつかみ代」方式。レーン側のborderが境界線になる */
+.kbd-lane-splitter { align-self: stretch; }
 
 /* ロールをドラッグしてシーク(keyboard.js _attachRollSeekDrag) */
 .kbd-roll--seekable { cursor: grab; touch-action: none; }
