@@ -184,12 +184,30 @@
     updateMmlRangeHighlight();
   };
   keyboardDisplay.onVolumeChange = () => { scheduleRerenderOnVolume(); };
-  // ── ドラム区画のパッド試聴(原音 / DPCM変換後) ────────────────────────────
-  // vgmDrumSamples: 'kind:start' → { pcm: Float32Array, rate: Hz }
-  // VGMのキャプチャが終わったときに main.js が組んで keyboardDisplay へ渡す
-  // (実データの出どころは src/emulator/vgmPlayer.js collectUsedSamples)。
-  let vgmDrumSamples = {};
+  // ── ドラムサンプル台帳(全形式共用、2026-09-03) ──────────────────────────
+  // drumSampleStore: パッドのキー('kind:start' = MML.Convert.DrumMap.key と同じ粒度)
+  //   → { pcm: Float32Array, rate: Hz, hash, chip, chans }
+  // 各形式のキャプチャが終わったときに組み直す(VGM: updateVgmDrumSamples、
+  // 実データの出どころは src/emulator/vgmPlayer.js collectUsedSamples)。
+  // パッド試聴・ドラム(DPCM)パネル・DPCMコスト表示はこの台帳だけを見る。
+  let drumSampleStore = {};
+  // 打点プロバイダ(形式ごと): いま表示中の曲について「DPCMへ載せる打点リスト」を作る係。
+  //   { format, frameRate, totalFrames, build(rateIndex) → hits, listedKeys() → [パッドに出すキー] }
+  // hits の形は src/convert/drumHits.js 冒頭参照。DPCMコスト表示(recomputeDpcmCost)が使う。
+  let drumHitsProvider = null;
   let auditionSource = null; // 再生中のノード(次を鳴らすとき止める)
+
+  /**
+   * 台帳をフォーマット側の採取結果で差し替える(キャプチャ完了時)。
+   * ★合成音chの打楽器化(synthDrum、キー 'syn:*')で登録済みのサンプルは残す(2026-09-04修正)。
+   *   以前は各 updateXxxDrumSamples が drumSampleStore を丸ごと置き換えていたため、
+   *   キャプチャ途中でEを選ぶと完了時にPCMだけ消え、パッドの試聴もDPCMコスト計算も壊れていた。
+   */
+  function setDrumSampleStore(store) {
+    const keep = {};
+    for (const k of Object.keys(drumSampleStore)) if (k.startsWith('syn:')) keep[k] = drumSampleStore[k];
+    drumSampleStore = Object.assign(keep, store || {});
+  }
 
   /** 倍率1.0ならそのまま返す(無駄なコピーを避ける)。それ以外は掛けた新しい配列を返す */
   function applyGain(pcm, gain) {
@@ -229,7 +247,7 @@
   }
 
   keyboardDisplay.onDrumAudition = (sampleKey, mode) => {
-    const s = vgmDrumSamples[sampleKey];
+    const s = drumSampleStore[sampleKey];
     if (!s) return;
     // ★レート・差し替え・変換有無はサンプル単位の設定から引く(src/convert/drumSamples.js)
     const DS = MML.Convert.DrumSamples;
@@ -282,15 +300,35 @@
       setTimeout(() => keyboardDisplay.onAdpcmCalibrate(ch), 0);
     }
     // 判定が変わるとロールのドラム区画の中身が変わるので、保持済みキャプチャから組み直す
-    if (vgmCaptureMirror && MML.RollBuild) {
+    afterSampleKindChange();
+  };
+
+  // 「打楽器/音階」の指定が変わったあとの追随(鍵盤のnote列メニューとドラムパネルの共通処理)。
+  // ★2026-09-04: 以前はVGMのときだけ組み直していたので、他形式では指定しても何も起きなかった。
+  function afterSampleKindChange() {
+    spcPitchSrcnCache = null;
+    const fmt = (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.format()) || kbdSourceKind;
+    if (fmt === 'vgm' && vgmCaptureMirror && MML.RollBuild) {
+      // VGMはサンプルの音程判定そのものが変わる(ドラム区画に出る音符の集合が変わる)ので全再構築
       try {
         const t = MML.RollBuild.vgm(vgmCaptureMirror.data, vgmCaptureMirror.done, { poolMode: vgmPoolModes });
-        keyboardDisplay.setRollTimeline(t);
+        pushRollTimeline(t);
       } catch (e) { console.warn('打楽器/音階の指定後のロール再構築に失敗:', e); }
       updateVgmDrumSamples(vgmCaptureMirror.data);
-      scheduleDpcmCostUpdate();
+    } else if (synthDrum.rawRoll) {
+      // SPC等: ロールのパッド置き換えは applySynthDrumToRoll が指定を見て毎回やり直す
+      keyboardDisplay.setRollTimeline(applySynthDrumToRoll(synthDrum.rawRoll));
     }
-  };
+    refreshDrumPanel();
+    scheduleDpcmCostUpdate();
+  }
+  // ドラム(DPCM)パネルの「扱い」列。指定先は鍵盤のnote列メニューと同じ1点(内容ハッシュ)
+  function setDrumSampleKind(hash, kind) {
+    const U = MML.Emu && MML.Emu.SamplePitchUtil;
+    if (!hash || !U || !U.setKindOverride) return;
+    U.setKindOverride(hash, kind === 'auto' ? null : kind);
+    afterSampleKindChange();
+  }
 
   // sample.kind('c140'/'a'/'b'/'ga20'…) → 解析を持っているチップ本体。
   // onAdpcmCalibrate の分岐と同じ対応表(YM2610だけアダプタが .fm でチップを持つ)
@@ -368,43 +406,39 @@
 
     // ★一覧に出すサンプル = 「ロールのドラム区画に出ているもの」+「DPCMへ載せたchが鳴らすもの」。
     //   後者は音程が取れていてもDPCMへ変換されるので、パッドにも出す必要がある
-    //   (DPCMで音律を奏でることもある。ユーザー指示)
-    const dpcmChanOf = {}; // chipフラグ → Set(ch)
-    if (loadedVgmHeader && MML.VGM2MML.sourceChannels) {
-      const Plan = MML.Convert.ChannelPlan;
-      const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
-      for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
-        if (s.kind !== 'pcm' || s.ch < 0) continue;
-        const chId = Plan.chIdForVgmSource(s.id);
-        const ent = (chId && Plan.get(chId)) || {};
-        if ((ent.target || def[s.id] || 'skip') !== 'dpcm') continue;
-        (dpcmChanOf[s.chip] = dpcmChanOf[s.chip] || new Set()).add(s.ch);
-      }
-    }
-    const CHIP_OF_DATA = { ga20: 'ga20', segapcm: 'segapcm', c140: 'c140', c352: 'c352',
-                          qsound: 'qsound', okim6295: 'okim6295', multipcm: 'multipcm', ym2610fm: 'ym2610', ym2608fm: 'ym2608' };
+    //   (DPCMで音律を奏でることもある。ユーザー指示)。後者の判定は形式ごとに違うので
+    //   打点プロバイダ(drumHitsProvider.listedKeys)に任せる
     const keys = [];
     for (const l of lanes) if (l.key && l.key !== '*') keys.push(l.key);
-    for (const k of Object.keys(vgmDrumSamples)) {
-      if (keys.indexOf(k) >= 0) continue;
-      const s = vgmDrumSamples[k];
-      const flag = CHIP_OF_DATA[s.chip];
-      const set = flag && dpcmChanOf[flag];
-      if (set && (s.chans || []).some(ch => set.has(ch))) keys.push(k);
-    }
+    const extra = ((drumHitsProvider && drumHitsProvider.listedKeys) ? (drumHitsProvider.listedKeys() || []) : [])
+      .concat(synthDrumSampleKeys()); // 合成音chの打楽器化分(main.js synthDrum)
+    for (const k of extra) if (keys.indexOf(k) < 0 && drumSampleStore[k]) keys.push(k);
 
-    const labels = MML.Convert.DrumMap ? MML.Convert.DrumMap.labels(keys) : keys;
     const DS = MML.Convert.DrumSamples;
+    const U = MML.Emu && MML.Emu.SamplePitchUtil;
+    const kindMap = (U && U.getKindMap) ? U.getKindMap() : null;
+    // ★「音階として扱う」と指定したサンプルは打点リストから外れるので、そのままだと行ごと
+    //   消えて指定を戻せなくなる(2026-09-04修正)。この曲の台帳にある限り一覧に残す
+    if (kindMap) {
+      for (const k of Object.keys(drumSampleStore)) {
+        const s = drumSampleStore[k];
+        if (s && s.hash && kindMap[s.hash] === 'pitch' && keys.indexOf(k) < 0) keys.push(k);
+      }
+    }
+    const labels = MML.Convert.DrumMap ? MML.Convert.DrumMap.labels(keys) : keys;
     const laneNames = {}; // drumKey → ユーザーが付けた名前(ロールのパッドへ流す)
     const rows = keys.map((k, i) => {
-      const s = vgmDrumSamples[k], l = laneOf[k];
+      const s = drumSampleStore[k], l = laneOf[k];
       const name = (DS && s && s.hash) ? (DS.get(s.hash).name || null) : null;
       if (name) laneNames[k] = name;
       return { key: k,
                // label は「名前が未設定のときに出す既定表示」。名前そのものは行側が設定から引く
-               label: (l && l.autoLabel) || (l && l.label) || labels[i] || k,
+               // 台帳が既定ラベルを持つ形式(HESのROMオフセット/clip番号)はそれを優先する
+               label: (s && s.label) || (l && l.autoLabel) || (l && l.label) || labels[i] || k,
                color: (l && l.color) || DRUM_ROW_COLORS[i % DRUM_ROW_COLORS.length],
                hits: hits[k] || 0,
+               // 扱い(自動/打楽器/音階)の現在値。実体はサンプル内容ハッシュ単位の上書き
+               kind: (s && s.hash && kindMap) ? (kindMap[s.hash] || 'auto') : 'auto',
                hash: s ? s.hash : null, pcm: s ? s.pcm : null, srcRate: s ? s.rate : 0 };
     });
     // ★パッド名はロールのドラム区画と同期させる(ユーザー指示)。名前の実体はサンプルの
@@ -419,6 +453,8 @@
       // 名前を変えたらロールのパッドへ流し直す(ROMコストは名前では変わらないので再計算しない)
       onRename: () => { refreshDrumPanel(); },
       onPlay: (row, mode) => { if (keyboardDisplay.onDrumAudition) keyboardDisplay.onDrumAudition(row.key, mode); },
+      // 扱い(自動/打楽器/音階)の手動上書き。鍵盤のnote列メニュー(VGMのPCM行)と同じ1点へ書く
+      onKind: (row, kind) => setDrumSampleKind(row.hash, kind),
       onInclude: (row) => includeDrumSample(row),
       onIncludeFromConverter: (row) => includeFromConverter(row),
       converterName: () => converterSourceName(),
@@ -435,48 +471,45 @@
     if (dpcmCostTimer) clearTimeout(dpcmCostTimer);
     dpcmCostTimer = setTimeout(() => { dpcmCostTimer = null; recomputeDpcmCost(); }, 250);
   }
+  // 形式非依存: 打点プロバイダ(drumHitsProvider)から打点リストをもらい、変換と同じ
+  // MML.Convert.DrumHits.dpcm を回して定義数/打点数/ROM量を出す
   function recomputeDpcmCost() {
-    const mirror = vgmCaptureMirror;
-    if (!mirror || !mirror.data || !loadedVgmHeader || !MML.Vgm2MmlExpansion.dpcmDrums) {
-      keyboardDisplay.setDpcmCost(null);
+    const prov = drumHitsProvider;
+    if (!MML.Convert.DrumHits || !MML.Dpcm) { keyboardDisplay.setDpcmCost(null); return; }
+    const synthHits = synthDrumHitsAll();
+    // 形式が実サイズを直接答えられる(NSF: ROMバイト列そのまま、再エンコードしない)ならそれを使う。
+    // 合成音chの打楽器化分(再エンコード)があればその見積りを足す
+    if (prov && typeof prov.stats === 'function') {
+      let st = null;
+      try {
+        st = prov.stats();
+        if (synthHits.length && st) {
+          const cmd = MML.Convert.normalizeCmd(MML.UI.ConvertSettings ? MML.UI.ConvertSettings.get() : null);
+          const r = MML.Convert.DrumHits.dpcm(synthHits, prov.frameRate, { totalFrames: prov.totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY });
+          st = { clips: st.clips + r.stats.clips, bytes: st.bytes + r.stats.bytes, segments: st.segments + r.stats.segments, dropped: st.dropped + r.stats.dropped };
+        }
+      } catch (e) { console.error('DPCMコスト計算に失敗:', e); }
+      keyboardDisplay.setDpcmCost(st);
+      if (MML.UI.DrumPanel) MML.UI.DrumPanel.setCost(st);
       return;
     }
-    const Plan = MML.Convert.ChannelPlan;
-    const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
-    const chips = MML.VGM2MML.DRUM_CHIPS || [];
-    const byChip = new Map();
-    let rateIndex = null;
-    for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
-      if (s.kind !== 'pcm' || s.ch < 0) continue;
-      const chId = Plan.chIdForVgmSource(s.id);
-      const ent = (chId && Plan.get(chId)) || {};
-      if ((ent.target || def[s.id] || 'skip') !== 'dpcm') continue;
-      if (!byChip.has(s.chip)) byChip.set(s.chip, []);
-      byChip.get(s.chip).push(s.ch);
-      const v = ent.tone;
-      if (rateIndex === null && v !== undefined && v !== null && v !== '' && v !== 'auto') {
-        const n = parseInt(v, 10);
-        if (Number.isFinite(n)) rateIndex = n;
-      }
-    }
-    const sources = [];
-    let totalFrames = 0;
-    for (const [chipFlag, chans] of byChip) {
-      const d = chips.find(x => x.flag === chipFlag);
-      const e = d && mirror.data[d.data];
-      if (!d || !e || !e.samples) continue;
-      totalFrames = Math.max(totalFrames, e.snapshots.length);
-      sources.push({ chip: chipFlag, snapshots: e.snapshots, chans, shape: d.shape, samples: e.samples });
-    }
-    if (!sources.length || !totalFrames) { keyboardDisplay.setDpcmCost(null); return; }
+    let hits = [], rateIndex = null;
+    try {
+      const b = prov ? prov.build() : null;
+      if (b && Array.isArray(b)) hits = b;
+      else if (b && b.hits) { hits = b.hits; rateIndex = b.rateIndex != null ? b.rateIndex : null; }
+    } catch (e) { console.error('DPCM打点の収集に失敗:', e); }
+    hits = (hits || []).concat(synthHits);
+    const info = synthDrumFrameInfo();
+    if (!hits.length || !info.totalFrames) { keyboardDisplay.setDpcmCost(null); if (MML.UI.DrumPanel) MML.UI.DrumPanel.setCost(null); return; }
     keyboardDisplay.setDpcmCost('pending');
     // 計算自体は同期だが、'計算中…'を一度描かせてから走らせる
     setTimeout(() => {
       try {
         const cmd = MML.Convert.normalizeCmd(MML.UI.ConvertSettings ? MML.UI.ConvertSettings.get() : null);
-        const r = MML.Vgm2MmlExpansion.dpcmDrums(sources, MML.Emu.VGM_FRAME_RATE,
-          { totalFrames, pcmRate: cmd.PCM_RATE, rateIndex });
-          keyboardDisplay.setDpcmCost(r.stats);
+        const r = MML.Convert.DrumHits.dpcm(hits, info.frameRate,
+          { totalFrames: info.totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, rateIndex });
+        keyboardDisplay.setDpcmCost(r.stats);
         if (MML.UI.DrumPanel) MML.UI.DrumPanel.setCost(r.stats);
       } catch (e) {
         console.error('DPCMコスト計算に失敗:', e);
@@ -484,8 +517,526 @@
       }
     }, 0);
   }
+
+  // ── 合成音chの打楽器化(分離レンダリング → 打点)(2026-09-03、ユーザー合意) ─────────────
+  // 割当UIでサンプルPCM以外の行に E(DPCM) を選ぶと「このchは打楽器」。他chを全部ミュートして
+  // そのchだけをレンダリングし、ロールのノート(オンセット/音高/音量)で切り出した音を
+  // 「1音高=1パッド」のサンプルにする。打点は各 *2mml の options.drumHits として渡り、
+  // src/convert/drumHits.js が @DPCM へ焼く。GBSのように実PCMを持たない形式でも
+  // ドラムパッドに乗るのはこの経路(GBのノイズドラム→DPCM等)。
+  //   ・キーは 'syn:<行ID>:<midi>'。ロールのドラム区画/パッド/変換で同じ
+  //   ・代表サンプル=その音高で最も長い打点の切り出し(短い打点は次のトリガーで切れる=DMCと同じ)
+  //   ・レンダリングは形式ごとの音声付きキャプチャ(captureXxxSongAsync + ミュート)。数秒かかる
+  //     ので割当変更時に裏で回し、結果はキャッシュ。曲/形式が変わったら捨てる
+  const synthDrum = {
+    byCh: new Map(),     // chId → { hits, samples }
+    pending: new Map(),  // chId → Promise
+    token: 0,            // 曲/形式が変わるたび +1(古いレンダリング結果を捨てる)
+    rawRoll: null,       // 打楽器化を適用する前のロールタイムライン(全形式共通形状)
+  };
+  MML._synthDrum = synthDrum; // 診断用(DevToolsから状態を見る。[[remote-console-diagnosis-technique]])
+  function synthDrumReset() {
+    for (const ent of synthDrum.byCh.values()) for (const k of Object.keys(ent.samples)) delete drumSampleStore[k];
+    synthDrum.byCh.clear(); synthDrum.pending.clear(); synthDrum.token++; synthDrum.rawRoll = null;
+  }
+  // いま打楽器化されている合成音chのID一覧(割当が 'dpcm' で、サンプルPCMでない行)
+  function synthDrumChIds() {
+    const Plan = MML.Convert.ChannelPlan;
+    if (!Plan || !Plan.isSynthDrumTarget) return [];
+    const all = Plan.all();
+    return Object.keys(all).filter(id => Plan.isSynthDrumTarget(id, all[id].target));
+  }
+  const synthDrumKeyOf = (chId, midi) => 'syn:' + chId + ':' + midi;
+  // ── SPC: 借用先にE(DPCM)を選んだボイス(2026-09-04) ────────────────────────
+  // SPCボイスは実BRRサンプルを持つので分離レンダリング(synthDrum)は要らない。E を選ぶと
+  // 「そのボイスが鳴らした全サンプルをパッドにする」意味になり、複数ボイスをEにすれば
+  // 打点は1本のDPCMへまとまる(DrumHits.dpcm が同時打点をミックス)。
+  // 例外は「音階として扱う」と指定したsrcn(=従来の音程付きDPCM)。指定の実体は
+  // Emu.SamplePitchUtil のkind上書き(BRR内容ハッシュ、localStorage)で、変換・ロール・
+  // パッドの3箇所がこの1点を見る。
+  function spcDpcmVoiceIds() {
+    const Plan = MML.Convert.ChannelPlan;
+    if (!Plan || Plan.format() !== 'spc') return [];
+    const all = Plan.all();
+    return Object.keys(all).filter(id => /^V[0-7]$/.test(id) && all[id].target === 'dpcm');
+  }
+  function spcDpcmVoiceNums() { return spcDpcmVoiceIds().map(id => +id.slice(1)); }
+  let spcPitchSrcnCache = null; // srcn集合(BRR台帳が変わるたびに捨てる)
+  function spcPitchSrcnSet() {
+    if (spcPitchSrcnCache) return spcPitchSrcnCache;
+    const kinds = spcDrumKindsOf(spcActiveBrrSamples) || {};
+    const s = new Set();
+    for (const k of Object.keys(kinds)) if (kinds[k] === 'pitch') s.add(parseInt(k, 10));
+    spcPitchSrcnCache = s;
+    return s;
+  }
+  // ロールの1トラック → 打点ノート列(同音高で隙間なく続くノート=音量段の分割は1打点に統合)。
+  // ★サンプル再生ch(note.sampleRow: YM2612のDAC・32X PWM・RF5C・OKIM6258など)はここでは
+  //   扱わない。あれはレジスタ上「1本の連続したストリーム」で、ロールのノート境界は音量段の
+  //   変わり目でしかなく打点ではない(OutRunners実測: 10秒で96ノート・全て隣接・音高は
+  //   レート由来の固定値)。分離レンダリングした音から立ち上がりを拾う別経路
+  //   (buildSynthHitsFromOnsets)が担当し、結果は synthDrum.byCh[id].notes に入る。
+  function synthDrumNotes(track) {
+    const out = [];
+    let seq = 0;
+    for (const n of track.notes) {
+      if (n.midi == null || n.drumKey || n.sampleRow) continue;
+      const key = synthDrumKeyOf(track.id, n.midi);
+      const last = out[out.length - 1];
+      if (last && last.drumKey === key && Math.abs(last.endSec - n.startSec) < 1e-3) {
+        last.endSec = n.endSec; last.vol = Math.max(last.vol, n.vol || 0); continue;
+      }
+      out.push({ startSec: n.startSec, endSec: n.endSec, midi: null, drumKey: key, drumSeq: ++seq,
+                 vol: n.vol || 0, freqSeq: [], srcMidi: n.midi });
+    }
+    return out;
+  }
+  // ロールタイムラインの受け口(全形式共通)。打楽器化したchのノートをドラム区画のノートへ置き換える
+  function pushRollTimeline(timeline) {
+    synthDrum.rawRoll = timeline;
+    keyboardDisplay.setRollTimeline(applySynthDrumToRoll(timeline));
+  }
+  // SPC: 借用先にE(DPCM)を選んだボイスは、そのボイスが鳴らした全BRRサンプルがパッドになる
+  // (音階として扱う指定のsrcnは除く)。ロールでも同じ見え方にするため、音程ノートを
+  // drumKey='brr:<srcn>' のドラム区画ノートへ置き換える。srcnはRollBuild.spcがノートに載せる。
+  // ★キーは変換側(MML.SPC2MML.drumHits)と同一なので、ロールのパッドとMMLの@DPCMが一致する
+  //   ([[roll-as-mml-debugger]])。
+  function spcDpcmVoiceNotes(track) {
+    const pitchSrcns = spcPitchSrcnSet();
+    const out = [];
+    let seq = 0;
+    for (const n of track.notes) {
+      if (n.drumKey) { out.push(n); continue; }
+      if (n.midi == null || n.srcn == null || pitchSrcns.has(n.srcn)) { out.push(n); continue; }
+      const key = 'brr:' + n.srcn;
+      const last = out[out.length - 1];
+      if (last && last.drumKey === key && Math.abs(last.endSec - n.startSec) < 1e-3) {
+        last.endSec = n.endSec; last.vol = Math.max(last.vol, n.vol || 0); continue;
+      }
+      out.push({ startSec: n.startSec, endSec: n.endSec, midi: null, drumKey: key, drumSeq: ++seq,
+                 vol: n.vol || 0, freqSeq: [], srcn: n.srcn });
+    }
+    return out;
+  }
+  function applySynthDrumToRoll(timeline) {
+    if (!timeline) return timeline;
+    const ids = synthDrumChIds();
+    const spcIds = spcDpcmVoiceIds();
+    if (!ids.length && !spcIds.length) return timeline;
+    return timeline.map(tr => {
+      if (spcIds.indexOf(tr.id) >= 0) return Object.assign({}, tr, { notes: spcDpcmVoiceNotes(tr) });
+      if (ids.indexOf(tr.id) < 0) return tr;
+      // サンプル再生chの打点は分離レンダリング後に決まる(ent.notes)。それまでは何も出さない
+      const ent = synthDrum.byCh.get(tr.id);
+      const drumNotes = (ent && ent.notes && ent.notes.length) ? ent.notes : synthDrumNotes(tr);
+      return Object.assign({}, tr, { notes: drumNotes.concat(tr.notes.filter(n => n.midi == null && !n.drumKey)) });
+    });
+  }
+  // そのchだけ生かしたミュート設定(表示中の行から組む。形状は getMuteConfig と同じ)
+  function soloMuteConfig(chId) {
+    const cfg = keyboardDisplay.getMuteConfig();
+    for (const k of Object.keys(cfg.apu)) cfg.apu[k] = true;
+    for (const chip of Object.keys(cfg.expansion)) {
+      const e = cfg.expansion[chip];
+      if (Array.isArray(e)) { for (let i = 0; i < e.length; i++) e[i] = true; }
+      else for (const k of Object.keys(e)) e[k] = true;
+    }
+    const mi = keyboardDisplay.getMuteInfoFor ? keyboardDisplay.getMuteInfoFor(chId) : null;
+    if (mi) {
+      if (mi.section === 'apu') cfg.apu[mi.key] = false;
+      else {
+        const e = cfg.expansion[mi.chip] = cfg.expansion[mi.chip] || (mi.type === 'array' ? [] : {});
+        if (mi.type === 'array') e[mi.index] = false; else e[mi.key] = false;
+      }
+    }
+    return cfg;
+  }
+  // 表示中の形式のフレームレートと総フレーム数(打点のフレーム換算用)
+  function synthDrumFrameInfo() {
+    const prov = drumHitsProvider;
+    if (prov && prov.frameRate && prov.totalFrames) return { frameRate: prov.frameRate, totalFrames: prov.totalFrames };
+    const fmt = kbdSourceKind;
+    let frameRate = 60;
+    if (fmt === 'nsf') frameRate = 60.0988;
+    else if (fmt === 'gbs' && loadedGbsHeader) frameRate = loadedGbsHeader.playFps || 60;
+    else if (fmt === 'kss' && loadedKssHeader) frameRate = loadedKssHeader.device.palMode ? MML.KSS.PAL_FPS : MML.KSS.NTSC_FPS;
+    else if (fmt === 'hes') frameRate = MML.HES.VBLANK_FPS;
+    else if (fmt === 'vgm') frameRate = MML.Emu.VGM_FRAME_RATE;
+    // 総フレームはロールの最終ノートから(キャプチャ長そのものは形式ごとにローカル変数なので)
+    let endSec = 0;
+    for (const tr of (synthDrum.rawRoll || [])) for (const n of tr.notes) if (n.endSec > endSec) endSec = n.endSec;
+    return { frameRate, totalFrames: Math.max(1, Math.ceil(endSec * frameRate)) };
+  }
+  // 1chだけをレンダリングして音声(Float32Array)を返す。形式ごとの音声付きキャプチャを使う
+  async function renderIsolatedChannel(chId, durationSeconds) {
+    // ★形式は ChannelPlan 側から取る。変換直後は鍵盤のソースが MML 再生('mml')へ切り替わり
+    //   kbdSourceKind では元形式が分からなくなる(実際に空振りした)
+    const fmt = (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.format()) || kbdSourceKind;
+    const cfg = soloMuteConfig(chId);
+    const sampleRate = 44100;
+    if (fmt === 'nsf' && loadedNsfBytes) {
+      const songNo = parseInt(nsfSongIndexEl.value, 10) || 1;
+      const r = await MML.Emu.captureSongAsync(loadedNsfBytes, { songIndex: songNo - 1, durationSeconds, sampleRate, mute: cfg });
+      return { audio: r.audio, sampleRate: r.sampleRate || sampleRate };
+    }
+    if (fmt === 'gbs' && loadedGbsBytes) {
+      // 曲番号は表示値−firstSong(runGbs2Mml と同じ換算)
+      const disp = parseInt(gbsSongIndexEl.value, 10) || loadedGbsHeader.firstSong;
+      const songIndex = Math.max(0, disp - loadedGbsHeader.firstSong);
+      const r = await MML.Emu.captureGbsSongAsync(loadedGbsBytes, { songIndex, durationSeconds, sampleRate, mute: cfg.expansion.gb || {} });
+      return { audio: r.audio, sampleRate };
+    }
+    if (fmt === 'kss' && loadedKssBytes) {
+      const r = await MML.Emu.captureKssSongAsync(loadedKssBytes, { songIndex: parseInt(kssSongIndexEl.value, 10) || 0, durationSeconds, sampleRate, mute: cfg.expansion });
+      return { audio: r.audio, sampleRate };
+    }
+    if (fmt === 'hes' && loadedHesBytes) {
+      const r = await MML.Emu.captureHesSongAsync(loadedHesBytes, { track: parseInt(hesTrackIndexEl.value, 10) || 0, durationSeconds, sampleRate, mute: cfg.expansion.hes || {} });
+      return { audio: r.audio, sampleRate };
+    }
+    if (fmt === 'vgm' && loadedVgmBytes) {
+      // exportVgmWav と同じ描き方(コマンド消化+チップ合成)。ステレオをモノラルへ
+      const player = new MML.Emu.VgmPlayer(loadedVgmBytes);
+      player.applyMute(cfg);
+      const totalFrames = Math.ceil(durationSeconds * player.frameRate);
+      const total = Math.round(totalFrames * sampleRate / player.frameRate);
+      const audio = new Float32Array(total);
+      let pos = 0;
+      for (let f = 0; f < totalFrames && pos < total && !player.ended; f++) {
+        const chunk = player.renderFrame(sampleRate, false, true);
+        const L = chunk.l || chunk.left || chunk[0], R = chunk.r || chunk.right || chunk[1];
+        const n = L ? L.length : 0;
+        for (let i = 0; i < n && pos < total; i++, pos++) audio[pos] = (L[i] + (R ? R[i] : L[i])) * 0.5;
+        if ((f & 63) === 0) await new Promise(r => setTimeout(r, 0));
+      }
+      return { audio: audio.subarray(0, pos), sampleRate };
+    }
+    return null;
+  }
+  // ── サンプル再生ch(ストリーミングDAC)の打点検出(2026-09-04) ──────────────
+  // YM2612のDAC・32X PWM・RF5C164/68・OKIM6258はレジスタ上「1本の連続したPCMストリーム」で、
+  // どこが1発の太鼓なのかがレジスタからは分からない(ロールのノート境界は音量段の変わり目)。
+  // そこで分離レンダリングした音そのものから立ち上がりを拾い、似た音を1パッドへ束ねる。
+  // メガドライブ曲のドラムはここに載っていることが多い(ユーザー報告「アウトランでE→パッド出ず」)。
+  const ONSET_HOP_SEC = 0.005;   // 包絡の刻み
+  const ONSET_WIN = 8;           // 直前の平均を取る区間数(=40ms)
+  const ONSET_RATIO = 1.8;       // 直前平均の何倍で「立ち上がり」とみなすか
+  const ONSET_FLOOR = 0.06;      // 全体ピークに対する下限(これ未満は無音扱い)
+  const ONSET_MIN_GAP = 0.045;   // 連続する打点の最小間隔[秒]
+  const HIT_MAX_SEC = 0.6;       // 1打点の切り出し上限(ROM容量の歯止め)
+  const SIM_THRESHOLDS = [0.75, 0.65, 0.55]; // パッドが増えすぎたら順に緩める
+  const SIM_MAX_PADS = 16;
+
+  /** DC除去(1極ハイパスy=x-x1+0.998y1)。DACの出力は無信号でも一定値なので必須 */
+  function removeDc(audio) {
+    const out = new Float32Array(audio.length);
+    let px = 0, py = 0;
+    for (let i = 0; i < audio.length; i++) { const v = audio[i] - px + 0.998 * py; out[i] = v; px = audio[i]; py = v; }
+    return out;
+  }
+  /** 短時間RMSの立ち上がり検出 → 打点の開始時刻[秒]の配列 */
+  function detectOnsets(pcm, sampleRate) {
+    const hop = Math.max(1, Math.round(ONSET_HOP_SEC * sampleRate));
+    const n = Math.floor(pcm.length / hop);
+    if (n < ONSET_WIN + 2) return [];
+    const e = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let s = 0;
+      for (let j = i * hop; j < (i + 1) * hop; j++) s += pcm[j] * pcm[j];
+      e[i] = Math.sqrt(s / hop);
+    }
+    let peak = 0;
+    for (let i = 0; i < n; i++) if (e[i] > peak) peak = e[i];
+    if (!(peak > 0)) return [];
+    const floor = peak * ONSET_FLOOR;
+    const minGap = Math.max(1, Math.round(ONSET_MIN_GAP / ONSET_HOP_SEC));
+    const out = [];
+    let last = -1e9;
+    for (let i = ONSET_WIN; i < n; i++) {
+      let m = 0;
+      for (let k = i - ONSET_WIN; k < i; k++) m += e[k];
+      m /= ONSET_WIN;
+      if (e[i] > floor && e[i] > ONSET_RATIO * Math.max(m, floor * 0.25) && i - last >= minGap) {
+        out.push(i * ONSET_HOP_SEC); last = i;
+      }
+    }
+    return out;
+  }
+  /**
+   * 打点の特徴ベクトル: 立ち上がり80msを24区間に割り、各区間のRMS(包絡)とゼロ交差率
+   * (音の高さ・ノイズらしさ)を並べて、それぞれ長さ1へ正規化したもの。
+   * 音量差・切り出し長の差には鈍く、太鼓の種類(キック/スネア/ハイハット)には敏感。
+   */
+  const FEAT_BINS = 24, FEAT_SEC = 0.08;
+  function hitFeature(clip, sampleRate) {
+    const span = Math.max(FEAT_BINS, Math.min(clip.length, Math.round(FEAT_SEC * sampleRate)));
+    const v = new Float64Array(FEAT_BINS * 2);
+    for (let i = 0; i < FEAT_BINS; i++) {
+      const a = Math.floor(i * span / FEAT_BINS), b = Math.max(a + 1, Math.floor((i + 1) * span / FEAT_BINS));
+      let s = 0, z = 0;
+      for (let j = a; j < b && j < clip.length; j++) {
+        s += clip[j] * clip[j];
+        if (j > a && (clip[j] >= 0) !== (clip[j - 1] >= 0)) z++;
+      }
+      v[i] = Math.sqrt(s / (b - a)); v[FEAT_BINS + i] = z / (b - a);
+    }
+    let na = 0, nb = 0;
+    for (let i = 0; i < FEAT_BINS; i++) { na += v[i] * v[i]; nb += v[FEAT_BINS + i] * v[FEAT_BINS + i]; }
+    na = Math.sqrt(na) || 1; nb = Math.sqrt(nb) || 1;
+    for (let i = 0; i < FEAT_BINS; i++) { v[i] /= na; v[FEAT_BINS + i] /= nb; }
+    return v;
+  }
+  const featSim = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s / 2; };
+  /** 特徴ベクトル列 → パッド番号列(貪欲クラスタリング。パッドが増えすぎたら閾値を緩める) */
+  function clusterHits(feats) {
+    let best = null;
+    for (const th of SIM_THRESHOLDS) {
+      const reps = [], of = [];
+      for (const f of feats) {
+        let bi = -1, bs = -1;
+        for (let k = 0; k < reps.length; k++) { const s = featSim(f, reps[k]); if (s > bs) { bs = s; bi = k; } }
+        if (bi >= 0 && bs >= th) of.push(bi); else { of.push(reps.length); reps.push(f); }
+      }
+      best = { of, pads: reps.length };
+      if (reps.length <= SIM_MAX_PADS) break;
+    }
+    return best || { of: [], pads: 0 };
+  }
+  /** サンプル再生ch用: レンダリング音から打点を検出してパッド/打点/ロール用ノートを作る */
+  function buildSynthHitsFromOnsets(chId, audio, sampleRate, frameInfo) {
+    const pcmAll = removeDc(audio);
+    const onsets = detectOnsets(pcmAll, sampleRate);
+    if (!onsets.length) return { hits: [], samples: {}, notes: [] };
+    const U = MML.Emu && MML.Emu.SamplePitchUtil;
+    const clips = [], feats = [], peaks = [];
+    for (let i = 0; i < onsets.length; i++) {
+      const endSec = Math.min(onsets[i] + HIT_MAX_SEC,
+        i + 1 < onsets.length ? onsets[i + 1] + 0.05 : onsets[i] + HIT_MAX_SEC);
+      const s0 = Math.max(0, Math.floor(onsets[i] * sampleRate));
+      const s1 = Math.min(pcmAll.length, Math.ceil(endSec * sampleRate));
+      const clip = pcmAll.subarray(s0, s1);
+      let pk = 0;
+      for (let j = 0; j < clip.length; j++) { const a = Math.abs(clip[j]); if (a > pk) pk = a; }
+      clips.push(clip); peaks.push(pk); feats.push(hitFeature(clip, sampleRate));
+    }
+    const { of } = clusterHits(feats);
+    // パッドごとの代表波形は「その仲間の中で一番長い切り出し」(短い打点だけだと尻尾が欠ける)
+    const repIdx = [];
+    for (let i = 0; i < of.length; i++) {
+      const p = of[i];
+      if (repIdx[p] === undefined || clips[i].length > clips[repIdx[p]].length) repIdx[p] = i;
+    }
+    const samples = {};
+    const keyOfPad = repIdx.map((_, p) => synthDrumKeyOf(chId, 'd') + (p + 1));
+    for (let p = 0; p < repIdx.length; p++) {
+      const src = clips[repIdx[p]];
+      const pk = peaks[repIdx[p]];
+      if (src.length < 8 || !(pk > 0)) continue; // 無音の区間はパッドにしない
+      const pcm = new Float32Array(src.length);
+      for (let i = 0; i < src.length; i++) pcm[i] = pk > 0 ? src[i] / pk * 0.98 : 0; // DMCの7bitを使い切る
+      const u8 = new Uint8Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) u8[i] = Math.max(0, Math.min(255, Math.round(pcm[i] * 127 + 128)));
+      samples[keyOfPad[p]] = { key: keyOfPad[p], pcm, rate: sampleRate,
+        hash: (U && U.sampleHash) ? ('syn-' + U.sampleHash(u8, 0, u8.length)) : null,
+        label: chId + ' ' + (p + 1), chip: 'synth', chans: [chId] };
+    }
+    let maxPeak = 0;
+    for (const p of peaks) if (p > maxPeak) maxPeak = p;
+    if (!(maxPeak > 0)) maxPeak = 1;
+    const hits = [], notes = [];
+    for (let i = 0; i < onsets.length; i++) {
+      const key = keyOfPad[of[i]];
+      const s = samples[key];
+      if (!s) continue;
+      const endSec = i + 1 < onsets.length ? onsets[i + 1] : onsets[i] + HIT_MAX_SEC;
+      const st = Math.round(onsets[i] * frameInfo.frameRate);
+      const en = Math.max(st + 1, Math.round(endSec * frameInfo.frameRate));
+      hits.push({ key, sampleKey: key, hash: s.hash, pcm: s.pcm, rate: s.rate, label: s.label,
+                  vol: peaks[i] / maxPeak, startFrame: st, endFrame: en, exactEnd: true, chId });
+      notes.push({ startSec: onsets[i], endSec, midi: null, drumKey: key, drumSeq: i + 1,
+                   vol: peaks[i] / maxPeak, freqSeq: [] });
+    }
+    return { hits, samples, notes };
+  }
+
+  // レンダリング済み音声とロールのノートから打点/サンプル表を作る
+  function buildSynthHits(chId, audio, sampleRate, frameInfo) {
+    const tl = synthDrum.rawRoll || keyboardDisplay.getRollTimeline();
+    const tr = tl && tl.find(t => t.id === chId);
+    if (!tr || !audio || !audio.length) return { hits: [], samples: {} };
+    // ストリーミングDACの行は音そのものから打点を拾う(上のコメント参照)
+    if (tr.notes.some(n => n.sampleRow)) return buildSynthHitsFromOnsets(chId, audio, sampleRate, frameInfo);
+    const notes = synthDrumNotes(tr);
+    if (!notes.length) return { hits: [], samples: {} };
+    const U = MML.Emu && MML.Emu.SamplePitchUtil;
+    const byKey = new Map();
+    notes.forEach((n, i) => {
+      const cur = byKey.get(n.drumKey);
+      const len = n.endSec - n.startSec;
+      if (!cur || len > cur.len) byKey.set(n.drumKey, { n, i, len });
+    });
+    const samples = {};
+    for (const [key, rep] of byKey) {
+      const n = rep.n;
+      // 切り出し: ノートの頭〜終わり+短い尻尾(次の打点まで、最大80ms)
+      const next = notes[rep.i + 1];
+      const tail = Math.min(0.08, next ? Math.max(0, next.startSec - n.endSec) : 0.08);
+      const s0 = Math.max(0, Math.floor(n.startSec * sampleRate));
+      const s1 = Math.min(audio.length, Math.ceil((n.endSec + tail) * sampleRate));
+      if (s1 - s0 < 8) continue;
+      const pcm = new Float32Array(s1 - s0);
+      let peak = 0;
+      for (let i = 0; i < pcm.length; i++) { pcm[i] = audio[s0 + i]; const a = Math.abs(pcm[i]); if (a > peak) peak = a; }
+      if (peak > 0) for (let i = 0; i < pcm.length; i++) pcm[i] = pcm[i] / peak * 0.98; // DMCの7bitを使い切る
+      const u8 = new Uint8Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) u8[i] = Math.max(0, Math.min(255, Math.round(pcm[i] * 127 + 128)));
+      const hash = (U && U.sampleHash) ? ('syn-' + U.sampleHash(u8, 0, u8.length)) : null;
+      const label = chId + ' ' + (MML.UI.midiToNoteName ? MML.UI.midiToNoteName(n.srcMidi) : String(n.srcMidi));
+      samples[key] = { key, pcm, rate: sampleRate, hash, label, chip: 'synth', chans: [chId] };
+    }
+    let maxVol = 0;
+    for (const n of notes) if (n.vol > maxVol) maxVol = n.vol;
+    if (!(maxVol > 0)) maxVol = 1;
+    const hits = [];
+    for (const n of notes) {
+      const s = samples[n.drumKey];
+      if (!s) continue;
+      const st = Math.round(n.startSec * frameInfo.frameRate);
+      hits.push({ key: n.drumKey, sampleKey: n.drumKey, hash: s.hash, pcm: s.pcm, rate: s.rate, label: s.label,
+                  vol: n.vol / maxVol, startFrame: st, endFrame: Math.max(st + 1, Math.round(n.endSec * frameInfo.frameRate)),
+                  exactEnd: true, chId });
+    }
+    return { hits, samples };
+  }
+  // 打楽器化されたchのレンダリングを揃える(未レンダリングのchを裏で回し、外れたchを台帳から外す)。
+  // 変換の直前に await して打点を確定させる
+  function synthDrumEnsure() {
+    const ids = synthDrumChIds();
+    for (const [id, ent] of Array.from(synthDrum.byCh)) {
+      if (ids.indexOf(id) >= 0) continue;
+      for (const k of Object.keys(ent.samples)) delete drumSampleStore[k];
+      synthDrum.byCh.delete(id);
+    }
+    const jobs = [];
+    const info = synthDrumFrameInfo();
+    for (const id of ids) {
+      // 済みでも、その後キャプチャが伸びていたら(先読み途中で打楽器化した場合)全長で取り直す
+      const done = synthDrum.byCh.get(id);
+      if (done && done.totalFrames >= info.totalFrames * 0.98) continue;
+      if (synthDrum.pending.has(id)) { jobs.push(synthDrum.pending.get(id)); continue; }
+      const token = synthDrum.token;
+      const statusEl = document.getElementById('kbdDrumRenderStatus');
+      if (statusEl) statusEl.textContent = T('打楽器の分離レンダリング中: {ch}', { ch: id });
+      const p = (async () => {
+        try {
+          const r = await renderIsolatedChannel(id, info.totalFrames / info.frameRate);
+          if (token !== synthDrum.token || !r) return;
+          const built = buildSynthHits(id, r.audio, r.sampleRate, info);
+          built.totalFrames = info.totalFrames;
+          synthDrum.byCh.set(id, built);
+          Object.assign(drumSampleStore, built.samples);
+        } catch (e) {
+          console.error('打楽器の分離レンダリングに失敗:', id, e);
+        } finally {
+          synthDrum.pending.delete(id);
+          if (statusEl && !synthDrum.pending.size) statusEl.textContent = '';
+          if (token === synthDrum.token) {
+            // 束ね直し(remap)の結果をロールにも反映する。サンプル再生chは1発ごとの仮キーで
+            // 先に描いてあるので、レンダリングが終わった時点でパッドが正しい数に収束する
+            if (synthDrum.rawRoll) keyboardDisplay.setRollTimeline(applySynthDrumToRoll(synthDrum.rawRoll));
+            refreshDrumPanel();
+            scheduleDpcmCostUpdate();
+          }
+        }
+      })();
+      synthDrum.pending.set(id, p);
+      jobs.push(p);
+    }
+    return Promise.all(jobs);
+  }
+  // 打楽器化された全chの打点(変換の options.drumHits / DPCMコスト表示用)
+  function synthDrumHitsAll() {
+    const out = [];
+    for (const id of synthDrumChIds()) {
+      const ent = synthDrum.byCh.get(id);
+      if (ent) out.push(...ent.hits);
+    }
+    return out;
+  }
+  function synthDrumSampleKeys() {
+    const out = [];
+    for (const id of synthDrumChIds()) {
+      const ent = synthDrum.byCh.get(id);
+      if (ent) out.push(...Object.keys(ent.samples));
+    }
+    return out;
+  }
+
+  // VGMの打点プロバイダ。割当UIで借用先に 'dpcm' を選んだPCMソースchの打点を集める
+  // (vgm2mml/converter.js の dpcmDrums 呼び出しと同じ選び方)。
+  function vgmDrumHitsProvider(mirror) {
+    const dpcmSources = () => {
+      const Plan = MML.Convert.ChannelPlan;
+      const out = { byChip: new Map(), rateIndex: null };
+      if (!loadedVgmHeader || !mirror || !mirror.data) return out;
+      const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
+      for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
+        if (s.kind !== 'pcm' || s.ch < 0) continue;
+        const chId = Plan.chIdForVgmSource(s.id);
+        const ent = (chId && Plan.get(chId)) || {};
+        if ((ent.target || def[s.id] || 'skip') !== 'dpcm') continue;
+        if (!out.byChip.has(s.chip)) out.byChip.set(s.chip, []);
+        out.byChip.get(s.chip).push(s.ch);
+        const v = ent.tone;
+        if (out.rateIndex === null && v !== undefined && v !== null && v !== '' && v !== 'auto') {
+          const n = parseInt(v, 10);
+          if (Number.isFinite(n)) out.rateIndex = n;
+        }
+      }
+      return out;
+    };
+    const CHIP_OF_DATA = { ga20: 'ga20', segapcm: 'segapcm', c140: 'c140', c352: 'c352',
+                          qsound: 'qsound', okim6295: 'okim6295', multipcm: 'multipcm', ym2610fm: 'ym2610', ym2608fm: 'ym2608' };
+    return {
+      format: 'vgm',
+      frameRate: MML.Emu.VGM_FRAME_RATE,
+      get totalFrames() { return mirror && mirror.done ? mirror.done : 0; },
+      build() {
+        const { byChip, rateIndex } = dpcmSources();
+        const chips = MML.VGM2MML.DRUM_CHIPS || [];
+        const sources = [];
+        let totalFrames = 0;
+        for (const [chipFlag, chans] of byChip) {
+          const d = chips.find(x => x.flag === chipFlag);
+          const e = d && mirror.data[d.data];
+          if (!d || !e || !e.samples) continue;
+          totalFrames = Math.max(totalFrames, e.snapshots.length);
+          sources.push({ chip: chipFlag, snapshots: e.snapshots, chans, shape: d.shape, samples: e.samples });
+        }
+        if (!sources.length || !totalFrames || !MML.Vgm2MmlExpansion.collectDrumHits) return null;
+        return { hits: MML.Vgm2MmlExpansion.collectDrumHits(sources, MML.Emu.VGM_FRAME_RATE, totalFrames), rateIndex };
+      },
+      // パッド一覧に足すキー = DPCMへ載せたchが鳴らしたサンプル(音程が取れていてもDPCMになる)
+      listedKeys() {
+        const { byChip } = dpcmSources();
+        const keys = [];
+        for (const k of Object.keys(drumSampleStore)) {
+          const s = drumSampleStore[k];
+          const set = byChip.get(CHIP_OF_DATA[s.chip]);
+          if (set && (s.chans || []).some(ch => set.indexOf(ch) >= 0)) keys.push(k);
+        }
+        return keys;
+      },
+    };
+  }
   if (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.onChange) {
-    MML.Convert.ChannelPlan.onChange(() => scheduleDpcmCostUpdate());
+    MML.Convert.ChannelPlan.onChange(() => {
+      // 合成音chの打楽器化(E選択)が変わったら: ロールを組み直し、未レンダリングのchを裏で回す
+      if (synthDrum.rawRoll) keyboardDisplay.setRollTimeline(applySynthDrumToRoll(synthDrum.rawRoll));
+      synthDrumEnsure();
+      refreshDrumPanel();
+      scheduleDpcmCostUpdate();
+    });
   }
 
   // YM2610 ADPCM行(NA1-6/NB)のnote列クリック → そのサンプルの基準音を手動補正(表示専用)。
@@ -599,7 +1150,8 @@
       if (all[id].target) channelMap[id] = all[id].target;
       if (all[id].tone !== undefined) tone[id] = all[id].tone;
     }
-    return { channelMap, tone };
+    // drumHits: E(DPCM)へ載せた合成音chの打点(分離レンダリング済み。synthDrumEnsure を await してから呼ぶ)
+    return { channelMap, tone, drumHits: synthDrumHitsAll() };
   }
 
   function setKbdSource(kind, name) {
@@ -2831,6 +3383,7 @@
     const nsfManualBpm = getManualBpm('nsf');
     let converted;
     try {
+      await synthDrumEnsure(); // 打楽器化したchの分離レンダリングを確定させる
       converted = MML.NSF2MML.convert(
         result.writeLog, loadedNsfBytes, loadedNsfHeader, songNo - 1, result.initRegs, result.initWrites,
         Object.assign({ bpm: nsfManualBpm, n163Snapshots: result.n163Snapshots, cmd: MML.UI.ConvertSettings.get() }, planConvertOptions()));
@@ -3136,8 +3689,14 @@
     // 最初の1回でplayer.load()して再生を開始する(以降のチャンクを待つ必要はない)。
     // ロールのタイムライン構築はキャプチャWorker内で行い、opt.roll.onRollで完成品を受け取る
     const myNsfRollToken = ++nsfRollToken;
+    // 曲が変わるのでドラムパッド台帳/打点プロバイダ(前の曲・前の形式のもの)を捨てる
+    drumSampleStore = {};
+    drumHitsProvider = null;
+    synthDrumReset();
+    keyboardDisplay.setDpcmCost(null);
     const nsfSamplesPerFrame = audioCtx.sampleRate / MML.Emu.FRAME_RATE_NTSC;
     let nsfPlaybackLoaded = false;
+    let nsfLatestCap = null; // 進行中キャプチャの {writeLog, initRegs}(完了時にDPCMサンプルを台帳へ)
     // captureSongWorkerAsync: 6502+チップエミュレーションをWeb Workerで実行し、メイン
     // スレッド(オーディオコールバック/ロール描画)とのCPU取り合いによるカクつきを解消する。
     // Worker不可・バンドル未ビルド時は従来のメインスレッド版へ自動フォールバック
@@ -3150,11 +3709,12 @@
         samplesPerFrame: nsfSamplesPerFrame, sampleRate: audioCtx.sampleRate, chips: captureChips,
         onRoll: (timeline) => {
           if (myNsfRollToken !== nsfRollToken) return;
-          keyboardDisplay.setRollTimeline(timeline);
+          pushRollTimeline(timeline);
         }
       }
     }, (done, total, regSnapshots, writeLog, n163Snapshots, initRegs, initWrites) => {
       if (myNsfRollToken !== nsfRollToken) return; // 曲切替/停止で無効化済み
+      nsfLatestCap = { writeLog, initRegs, songNo }; // 完了時のドラムパッド台帳更新用
 
       if (!nsfPlaybackLoaded) {
         nsfPlaybackLoaded = true;
@@ -3189,6 +3749,14 @@
 
       nsfBufferedFraction = total > 0 ? done / total : 0;
       updateSeekBufferedUI();
+    }).then(() => {
+      // キャプチャ完了: DPCMサンプルの打点/波形をドラムパッド台帳と打点プロバイダへ
+      // (VGM/HES/SPCと同じ役割。サンプルの同定は nsf2mml/converter.js dmcHits)
+      if (myNsfRollToken !== nsfRollToken || !nsfLatestCap) return;
+      updateNsfDrumSamples(nsfLatestCap.writeLog, nsfLatestCap.initRegs);
+      synthDrumEnsure(); // 打楽器化(E選択)済みの合成音chがあれば全長でレンダリングし直す
+      refreshDrumPanel();
+      scheduleDpcmCostUpdate();
     }).catch(() => { /* 先読みキャプチャ失敗時は再生を開始できない */ });
   }
 
@@ -3449,11 +4017,22 @@
     // 原音チューニング補正マップを一度だけ算出(BRRサンプルは曲頭から不変なので、ごく短い
     // キャプチャで全サンプルを収集できる)。ロール再構築ごとに再計算しないよう使い回す。
     let spcFineTune = null;
+    let spcBrrSamples = null;
     try {
-      spcFineTune = MML.SPC2MML.computeSrcnFineTune(MML.SPC2MML.capture(loadedSpcBytes, 0.05).brrSamples);
+      spcBrrSamples = MML.SPC2MML.capture(loadedSpcBytes, 0.05).brrSamples;
+      spcFineTune = MML.SPC2MML.computeSrcnFineTune(spcBrrSamples);
     } catch (_) { /* 失敗時は補正なし(従来動作)で続行 */ }
     // ライブ鍵盤(updateVoiceMonitor)も同じ補正で表示するため共有する
     spcActiveFineTune = spcFineTune;
+    spcActiveBrrSamples = spcBrrSamples;
+    spcPitchSrcnCache = null;
+    // 打楽器/音階の手動上書き(BRR内容ハッシュ→kind)。ロール(Worker)と変換の両方へ渡す
+    const spcDrumKinds = spcDrumKindsOf(spcBrrSamples);
+    // 曲が変わるのでドラムパッド台帳/打点プロバイダ(前の曲・前の形式のもの)を捨てる
+    drumSampleStore = {};
+    drumHitsProvider = null;
+    synthDrumReset();
+    keyboardDisplay.setDpcmCost(null);
 
     // バックグラウンドキャプチャ。ピアノロールと実再生の両方の情報源を兼ねる。
     // onProgressで途中経過(その時点までのframeLog、進行中の配列への参照なので以後
@@ -3482,10 +4061,19 @@
       updateSeekBufferedUI();
     }, () => myRollToken !== spcRollToken, {
       fineTune: spcFineTune,
+      drumKinds: spcDrumKinds,
       onRoll: (timeline) => {
         if (myRollToken !== spcRollToken) return;
-        keyboardDisplay.setRollTimeline(timeline);
+        pushRollTimeline(timeline);
       }
+    }).then((res) => {
+      // キャプチャ完了: 打楽器サンプルの打点/PCMをドラムパッド台帳と打点プロバイダへ
+      // (HES/VGMと同じ役割。判定と打点はMML変換と同じ MML.SPC2MML.drumSrcns/drumHits)
+      if (myRollToken !== spcRollToken || !res || !res.log) return;
+      updateSpcDrumSamples(res.log, spcBrrSamples, spcFineTune, spcDrumKinds);
+      synthDrumEnsure(); // 打楽器化(E選択)済みの合成音chがあれば全長でレンダリングし直す
+      refreshDrumPanel();
+      scheduleDpcmCostUpdate();
     }).catch((e) => {
       // 先読み失敗時はピアノロールなしで続行するが、原因を追えるようログには残す
       console.error('SPC先読みキャプチャに失敗:', e);
@@ -3786,7 +4374,8 @@
       // 同期版fromSpcでなくチャンク実行のcaptureAsync(進捗表示付き)を使う。
       const { log, brrSamples, envLog } = await MML.SPC2MML.captureAsync(loadedSpcBytes, duration,
         makeCaptureProgress(spcFileStatusEl));
-      result = MML.SPC2MML.convert(log, brrSamples, { envLog, channelMap, bpm: spcManualBpm, cmd: MML.UI.ConvertSettings.get() });
+      result = MML.SPC2MML.convert(log, brrSamples, { envLog, channelMap, bpm: spcManualBpm, cmd: MML.UI.ConvertSettings.get(),
+        drumKinds: spcDrumKindsOf(brrSamples) });
     } catch (e) {
       spcIsRendering = false;
       spcFileStatusEl.innerHTML = '<div class="error">' + T('変換エラー: {msg}', { msg: e.message }) + '</div>';
@@ -3839,6 +4428,9 @@
   // 原音チューニング補正マップ(再生開始時に算出、srcn→半音)。ロール/MML変換と同じ
   // 補正をライブ鍵盤にも適用して表示を一致させる。未算出時はnull(=補正0で基準だけ揃える)。
   let spcActiveFineTune = null;
+  // 再生中の曲のBRRサンプル表(srcn → {bytes,...})。パッド/割当UI側から「音階として扱う」
+  // 指定(srcn集合)を引くのに使う(spcPitchSrcnSet)
+  let spcActiveBrrSamples = null;
   const SPC_REF_HZ = 440 * Math.pow(2, 3 / 12); // ≈523.25Hz。pitch=0x1000・補正0のときのHz(=C5)
   function spcTuneForSrcn(srcn) {
     return spcActiveFineTune ? (spcActiveFineTune[srcn] || 0) : 0;
@@ -4297,7 +4889,7 @@
       // 最新のタイムラインをここで戻さないと、onRollがonProgressより先に届いた場合に
       // ロールが空のまま復帰しない。曲送りでワーカーが温まっていると必ずこの順序になり、
       // 「前の絵が残ったまま音符が出ない/動かない」状態になっていた。
-      if (kssLastRollTimeline) keyboardDisplay.setRollTimeline(kssLastRollTimeline);
+      if (kssLastRollTimeline) pushRollTimeline(kssLastRollTimeline);
     }
 
     resetPlaybackRangeToFull(captureDuration);
@@ -4318,6 +4910,11 @@
     // onRoll(timeline, info)で完成品を受け取る
     keyboardDisplay.setRollTimeline(null);
     const myKssRollToken = ++kssRollToken;
+    // 曲が変わるのでドラムパッド台帳/打点プロバイダ/合成音chのレンダリング結果を捨てる
+    drumSampleStore = {};
+    drumHitsProvider = null;
+    synthDrumReset();
+    keyboardDisplay.setDpcmCost(null);
     // SCCは「使われたと分かった時点で行を足す」単調な運用にする(出したり消したりすると
     // 再生中に行数が揺れて見づらいため)。判定はWorker側のロール構築ジョブが行う。
     let kssSccUsed = false;
@@ -4343,7 +4940,7 @@
             // ため、この直後のsetRollTimelineで必ず新しいタイムラインが入る)
             applyKssMonitorSource(kssSccUsed);
           }
-          keyboardDisplay.setRollTimeline(timeline);
+          pushRollTimeline(timeline);
         }
       }
     }, (done, total, writeLog) => {
@@ -4359,6 +4956,12 @@
 
       kssBufferedFraction = total > 0 ? done / total : 0;
       updateSeekBufferedUI();
+    }).then(() => {
+      // キャプチャ完了: 打楽器化(E選択)済みの合成音chがあれば全長でレンダリングする
+      if (myKssRollToken !== kssRollToken) return;
+      synthDrumEnsure();
+      refreshDrumPanel();
+      scheduleDpcmCostUpdate();
     }).catch((e) => {
       // 先読み失敗時はピアノロールなしで続行するが、原因を追えるようログには残す
       // (ここを完全に握り潰していたため、Kss2MmlExpansion.sccのTypeErrorで
@@ -4440,6 +5043,7 @@
     const kssManualBpm = getManualBpm('kss');
     let result;
     try {
+      await synthDrumEnsure(); // 打楽器化したchの分離レンダリングを確定させる
       result = await MML.KSS2MML.fromKss(loadedKssBytes, songNo, duration, Object.assign({ bpm: kssManualBpm, cmd: MML.UI.ConvertSettings.get(), onProgress: makeCaptureProgress(kssFileStatusEl) }, planConvertOptions()));
     } catch (e) {
       kssIsRendering = false;
@@ -4457,6 +5061,8 @@
     // 変換結果はNES拡張音源(FME-7/N163/VRC7)を借りて再生する設計。有効化はMML本文に
     // 埋め込まれた#EX-*ディレクティブで行われるため、波形エディタへの反映のみ行う
     if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
+    // 打楽器化したch(E=DPCM)の .dmc: 保存用にダウンロードしつつ dpcmSampleCache へ入れて即再生可能に
+    for (const f of (result.dpcmFiles || [])) { downloadBin(f.name, f.bytes); dpcmSampleCache[f.name] = f.bytes; }
 
     kssFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FME-7/N163/VRC7を借用して再生)',
@@ -4655,6 +5261,11 @@
     // ロールのタイムライン構築はキャプチャWorker内で行い、onRollで完成品を受け取る
     keyboardDisplay.setRollTimeline(null);
     const myGbsRollToken = ++gbsRollToken;
+    // 曲が変わるのでドラムパッド台帳/打点プロバイダ/合成音chのレンダリング結果を捨てる
+    drumSampleStore = {};
+    drumHitsProvider = null;
+    synthDrumReset();
+    keyboardDisplay.setDpcmCost(null);
     let gbsPlaybackLoaded = false;
     let gbsLastRollTimeline = null; // setMonitorSource後の復元用(KSSと同じ理由)
     // captureGbsSongWorkerAsync: エミュレーションをWeb Workerで実行(NSF/KSSと同じ仕組み、
@@ -4668,7 +5279,7 @@
         onRoll: (timeline) => {
           if (myGbsRollToken !== gbsRollToken) return;
           gbsLastRollTimeline = timeline; // setMonitorSource後の復元用(KSSと同じ理由)
-          keyboardDisplay.setRollTimeline(timeline);
+          pushRollTimeline(timeline);
         }
       }
     }, (done, total, data) => {
@@ -4693,6 +5304,12 @@
 
       gbsBufferedFraction = total > 0 ? done / total : 0;
       updateSeekBufferedUI();
+    }).then(() => {
+      // キャプチャ完了: 打楽器化(E選択)済みの合成音chがあれば全長でレンダリングする
+      if (myGbsRollToken !== gbsRollToken) return;
+      synthDrumEnsure();
+      refreshDrumPanel();
+      scheduleDpcmCostUpdate();
     }).catch((e) => {
       // 先読み失敗時はピアノロールなしで続行するが、原因を追えるようログには残す(KSSと同じ理由)
       console.error('GBS先読みキャプチャに失敗:', e);
@@ -4784,6 +5401,7 @@
     const gbsManualBpm = getManualBpm('gbs');
     let result;
     try {
+      await synthDrumEnsure(); // 打楽器化したchの分離レンダリングを確定させる
       result = await MML.GBS2MML.fromGbs(loadedGbsBytes, songIndex, duration, Object.assign({ bpm: gbsManualBpm, cmd: MML.UI.ConvertSettings.get(), onProgress: makeCaptureProgress(gbsFileStatusEl) }, planConvertOptions()));
     } catch (e) {
       gbsIsRendering = false;
@@ -4801,6 +5419,8 @@
     // 変換結果はNES拡張音源(FDS)を借りて再生する設計。有効化はMML本文に埋め込まれた
     // #EX-*ディレクティブで行われるため、波形エディタへの反映のみ行う
     if (result.fdsWave && MML.WaveformEditor.fdsWave) MML.WaveformEditor.fdsWave.setData(result.fdsWave);
+    // 打楽器化したch(E=DPCM)の .dmc: 保存用にダウンロードしつつ dpcmSampleCache へ入れて即再生可能に
+    for (const f of (result.dpcmFiles || [])) { downloadBin(f.name, f.bytes); dpcmSampleCache[f.name] = f.bytes; }
 
     gbsFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FDSを借用して再生)',
@@ -4995,6 +5615,11 @@
     // onRoll(timeline, info)で完成品を受け取る
     keyboardDisplay.setRollTimeline(null);
     const myHesRollToken = ++hesRollToken;
+    // 曲が変わるのでドラムパッド台帳/打点プロバイダ(前の曲・前の形式のもの)を捨てる
+    drumSampleStore = {};
+    drumHitsProvider = null;
+    synthDrumReset();
+    keyboardDisplay.setDpcmCost(null);
     let hesPlaybackLoaded = false;
     let hesLastRollTimeline = null; // setMonitorSource後の復元用(KSSと同じ理由)
     let hesLatestData = null; // onRollでsetDdaChannelに渡す生dpcmTrace(進行中の鏡像)への参照
@@ -5010,7 +5635,7 @@
         onRoll: (timeline, info) => {
           if (myHesRollToken !== hesRollToken) return;
           hesLastRollTimeline = timeline; // setMonitorSource後の復元用(KSSと同じ理由)
-          keyboardDisplay.setRollTimeline(timeline);
+          pushRollTimeline(timeline);
           // DDA(PCM)担当ch: 判定(曲全体でDDA区間が最も長い1ch)はWorker側ジョブが行い、
           // 実際の再生に使う生のdpcmTrace列はこちらが保持する鏡像から渡す
           // (hes-stream-player.js HesReplayStreamPlayer.setDdaChannel()参照)。
@@ -5036,15 +5661,158 @@
           getHesApu: liveHesApu
         }, () => hesActivePlayer ? hesActivePlayer.getPosition() : 0, ['hes']);
         // setMonitorSource()はロールを捨てるので、既に届いていれば戻す(KSSと同じ)
-        if (hesLastRollTimeline) keyboardDisplay.setRollTimeline(hesLastRollTimeline);
+        if (hesLastRollTimeline) pushRollTimeline(hesLastRollTimeline);
         transportPlay();
       }
 
       hesBufferedFraction = total > 0 ? done / total : 0;
       updateSeekBufferedUI();
+    }).then(() => {
+      // キャプチャ完了: DDA(PCM)の打点/サンプルをドラムパッド台帳と打点プロバイダへ
+      // (VGMの updateVgmDrumSamples と同じ役割。抽出はMML変換と同じ ddaHits)
+      if (myHesRollToken !== hesRollToken || !hesLatestData) return;
+      updateHesDrumSamples(hesLatestData, hesFrameRate);
+      synthDrumEnsure(); // 打楽器化(E選択)済みの合成音chがあれば全長でレンダリングし直す
+      refreshDrumPanel();
+      scheduleDpcmCostUpdate();
     }).catch((e) => {
       console.error('HES先読みキャプチャに失敗:', e);
     });
+  }
+
+  // NSF: DPCMサンプルの打点 → ドラムパッド台帳+打点プロバイダ。
+  // 変換はROMバイト列そのまま(無損失)なので、コストは再エンコードせず実サイズを答える
+  // (provider.stats)。パッド設定の「変換しない」を外したぶんは差し引く
+  function updateNsfDrumSamples(writeLog, initRegs) {
+    setDrumSampleStore({});
+    drumHitsProvider = null;
+    if (!writeLog || !loadedNsfBytes || !loadedNsfHeader || !MML.NSF2MML.dmcHits) return;
+    let r;
+    try { r = MML.NSF2MML.dmcHits(writeLog, loadedNsfBytes, loadedNsfHeader, { initRegs }); }
+    catch (e) { console.warn('NSF DPCM打点の収集に失敗:', e); return; }
+    if (!r.hits.length) return;
+    const store = {};
+    for (const k of Object.keys(r.samples)) {
+      const s = r.samples[k];
+      store[k] = { pcm: s.pcm, rate: s.rate, hash: s.hash, label: s.label, chip: 'nsf', chans: [0], bytes: s.bytes };
+    }
+    setDrumSampleStore(store);
+    drumHitsProvider = {
+      format: 'nsf', frameRate: 60.0988, totalFrames: writeLog.length,
+      build: () => r.hits,
+      listedKeys: () => Object.keys(store),
+      stats: () => {
+        const DS = MML.Convert.DrumSamples;
+        let bytes = 0, clips = 0, segments = 0;
+        const used = new Set();
+        for (const h of r.hits) {
+          const s = store[h.key];
+          if (!s) continue;
+          if (DS && s.hash && DS.get(s.hash).enabled === false) continue;
+          segments++;
+          if (!used.has(h.key)) { used.add(h.key); clips++; bytes += s.bytes.length; }
+        }
+        return { clips, bytes, segments, dropped: 0 };
+      },
+    };
+  }
+
+  // SPC: BRRサンプルごとの打楽器/音階の手動上書き(srcn → 'drum' | 'pitch')。
+  // 指定の実体は Emu.SamplePitchUtil のkind上書き(内容ハッシュ、localStorage)なので、
+  // 同じサンプルを使う別曲/別リビジョンでも効く(VGMのサンプルPCMと同じ流儀)
+  function spcDrumKindsOf(brrSamples) {
+    const U = MML.Emu && MML.Emu.SamplePitchUtil;
+    if (!brrSamples || !U || !U.getKindMap || !MML.SPC2MML.brrHash) return null;
+    const map = U.getKindMap();
+    const out = {};
+    let any = false;
+    for (const srcn of Object.keys(brrSamples)) {
+      const h = MML.SPC2MML.brrHash(brrSamples[srcn]);
+      const k = h && map[h];
+      if (k === 'drum' || k === 'pitch') { out[srcn] = k; any = true; }
+    }
+    return any ? out : null;
+  }
+
+  // SPC: 打楽器サンプルの打点 → ドラムパッド台帳+打点プロバイダ。判定/打点はMML変換と
+  // 同じ関数(MML.SPC2MML.drumSrcns/drumHits)。対象は「自動判定に当たったsrcnを鳴らす全ボイス」
+  // + 「借用先にE(DPCM)を選んだボイスの全srcn(音階指定を除く)」(2026-09-04)
+  function updateSpcDrumSamples(log, brrSamples, fineTune, drumKinds) {
+    setDrumSampleStore({});
+    drumHitsProvider = null;
+    if (!log || !log.length || !brrSamples || !MML.SPC2MML.drumHits) return;
+    let voiceEvents, drumSrcns;
+    try {
+      voiceEvents = MML.SPC2MML.extractVoiceEvents(log, { srcnFineTune: fineTune });
+      drumSrcns = MML.SPC2MML.drumSrcns(voiceEvents, fineTune, drumKinds || null);
+    } catch (e) { console.warn('SPC打楽器打点の収集に失敗:', e); return; }
+    // 打楽器/音階の手動指定はパッドから後で変えられるので、自動判定は毎回引き直す
+    // (変換 MML.SPC2MML.convert 側も同じ入力から同じ判定をする)
+    const drumSrcnsNow = () => {
+      const kinds = spcDrumKindsOf(spcActiveBrrSamples);
+      try { return MML.SPC2MML.drumSrcns(voiceEvents, fineTune, kinds || null); }
+      catch (e) { return drumSrcns; }
+    };
+    // ボイスの借用先ごとの区分け(変換時 src/spc2mml/converter.js と同じ読み方)。
+    //   melo = 自動判定に当たったsrcnだけ打点にするボイス / dpcm = 全srcnを打点にするボイス(E)
+    const voicePlanNow = () => {
+      const Plan = MML.Convert.ChannelPlan;
+      const melo = [], dpcm = [];
+      for (let ch = 0; ch < 8; ch++) {
+        const ent = Plan.get(`V${ch}`) || {};
+        const type = ent.target || SPC_DEFAULT_TARGETS[`V${ch}`] || 'skip';
+        if (type === 'skip') continue;
+        (type === 'dpcm' ? dpcm : melo).push(ch);
+      }
+      return { melo, dpcm };
+    };
+    const hitsNow = () => {
+      const { melo, dpcm } = voicePlanNow();
+      return MML.SPC2MML.drumHits(voiceEvents, brrSamples, drumSrcnsNow(), melo,
+        { dpcmChans: dpcm, pitchSrcns: spcPitchSrcnSet() });
+    };
+    // 台帳(パッド一覧/試聴)は「全ボイス・全srcn」で作っておき、一覧に出すキーだけを
+    // listedKeys() で絞る。こうしておくとEを付け外ししてもPCMを取り直さずに済む
+    const all = MML.SPC2MML.drumHits(voiceEvents, brrSamples, drumSrcns, [0, 1, 2, 3, 4, 5, 6, 7],
+      { dpcmChans: [0, 1, 2, 3, 4, 5, 6, 7], pitchSrcns: null });
+    const store = {};
+    for (const k of Object.keys(all.samples)) {
+      const s = all.samples[k];
+      store[k] = { pcm: s.pcm, rate: s.rate, hash: s.hash, label: s.label, chip: 'spc', chans: [] };
+    }
+    for (const h of all.hits) if (store[h.key] && store[h.key].chans.indexOf(h.ch) < 0) store[h.key].chans.push(h.ch);
+    setDrumSampleStore(store);
+    drumHitsProvider = {
+      format: 'spc', frameRate: MML.SPC2MML.FRAME_RATE, totalFrames: log.length,
+      build: () => hitsNow().hits,
+      // 一覧に出すのは「実際にDPCMへ焼かれるサンプル」だけ(自動判定の打楽器 + Eボイスの全srcn)
+      listedKeys: () => Object.keys(hitsNow().samples),
+    };
+  }
+
+  // HESのDDA(PCM)→ドラムパッド台帳+打点プロバイダ。DDAは常にE(DPCM)へ載るので
+  // 打点は全部が対象、パッド一覧にも全サンプルを出す
+  function updateHesDrumSamples(data, frameRate) {
+    setDrumSampleStore({});
+    drumHitsProvider = null;
+    if (!data || !data.snapshots || !data.dpcmTrace || !data.controlTrace) return;
+    if (!MML.Hes2MmlExpansion || !MML.Hes2MmlExpansion.ddaHits) return;
+    let r;
+    try { r = MML.Hes2MmlExpansion.ddaHits(data.snapshots, data.dpcmTrace, data.controlTrace, frameRate); }
+    catch (e) { console.warn('HES DDA打点の収集に失敗:', e); return; }
+    if (!r.hits.length) return;
+    const store = {};
+    for (const k of Object.keys(r.samples)) {
+      const s = r.samples[k];
+      store[k] = { pcm: s.pcm, rate: s.rate, hash: s.hash, label: s.label || null, chip: 'hes', chans: [] };
+    }
+    for (const h of r.hits) if (store[h.key] && store[h.key].chans.indexOf(h.ch) < 0) store[h.key].chans.push(h.ch);
+    setDrumSampleStore(store);
+    drumHitsProvider = {
+      format: 'hes', frameRate, totalFrames: data.snapshots.length,
+      build: () => r.hits,
+      listedKeys: () => Object.keys(store),
+    };
   }
 
   function changeHesTrack(delta) {
@@ -5121,6 +5889,7 @@
     const hesManualBpm = getManualBpm('hes');
     let result;
     try {
+      await synthDrumEnsure(); // 打楽器化したchの分離レンダリングを確定させる
       result = await MML.HES2MML.fromHes(loadedHesBytes, track, duration, Object.assign({ bpm: hesManualBpm, cmd: MML.UI.ConvertSettings.get(), onProgress: makeCaptureProgress(hesFileStatusEl) }, planConvertOptions()));
     } catch (e) {
       hesIsRendering = false;
@@ -5412,7 +6181,7 @@
     if (vgmCaptureMirror && vgmCaptureMirror.token === vgmRollToken && MML.RollBuild) {
       try {
         const t = MML.RollBuild.vgm(vgmCaptureMirror.data, vgmCaptureMirror.done, { poolMode: vgmPoolModes });
-        keyboardDisplay.setRollTimeline(t);
+        pushRollTimeline(t);
       } catch (e) { console.warn('表示モード切替のロール再構築に失敗:', e); }
     }
   };
@@ -5597,7 +6366,9 @@
     // 曲が変わるのでプール式チップのライブ束ね直し状態とロール再構築用ミラーをリセット
     for (const k of Object.keys(vgmLiveRegroupers)) delete vgmLiveRegroupers[k];
     vgmCaptureMirror = null;
-    vgmDrumSamples = {};
+    drumSampleStore = {};
+    drumHitsProvider = null;
+    synthDrumReset();
     keyboardDisplay.setDpcmCost(null);
     // captureVgmSongWorkerAsync: コマンド消化+スナップショット採取をWeb Workerで実行
     // (NSF/KSS/GBSと同じ仕組み、src/audio/capture-worker-client.js。Worker不可時は
@@ -5611,7 +6382,7 @@
         poolMode: Object.assign({}, vgmPoolModes), // プール式チップの表示モード(Worker内ロール構築用)
         onRoll: (timeline) => {
           if (myToken !== vgmRollToken) return;
-          keyboardDisplay.setRollTimeline(timeline);
+          pushRollTimeline(timeline);
         }
       }
     }, (done, total, data) => {
@@ -5629,6 +6400,7 @@
       //   ドラムパッドの試聴が「押しても鳴らない」ままになる
       if (myToken !== vgmRollToken || !vgmCaptureMirror) return;
       updateVgmDrumSamples(vgmCaptureMirror.data);
+      synthDrumEnsure(); // 打楽器化(E選択)済みの合成音chがあれば全長でレンダリングし直す
       refreshDrumPanel();
       scheduleDpcmCostUpdate();
     }).catch((e) => {
@@ -5679,7 +6451,8 @@
                         chip: key, chans: Array.from(chansOf[k] || []) };
       }
     }
-    vgmDrumSamples = out;
+    setDrumSampleStore(out);
+    drumHitsProvider = vgmDrumHitsProvider(vgmCaptureMirror);
   }
 
   async function exportVgmWav() {
@@ -5803,6 +6576,7 @@
     const vgmManualBpm = getManualBpm('vgm');
     let result;
     try {
+      await synthDrumEnsure(); // 打楽器化したchの分離レンダリングを確定させる
       result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), tone: planConvertOptions().tone, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
     } catch (e) {
       vgmIsRendering = false;

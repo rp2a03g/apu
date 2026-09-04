@@ -2114,7 +2114,9 @@ button.secondary {
 }
 
 /* ドラム(DPCM)パネル: 1行=1サンプル。列幅はヘッダと行で同じクラスを使って揃える */
-.drum-panel { display: flex; flex-direction: column; height: 100%; font-size: 11px; }
+/* 列は固定幅の積み上げなので、窓が狭いと行がはみ出す。縦(本体)と横(表全体)で
+   スクロールを分けて、ヘッダと行が必ず同じ位置に並ぶようにする */
+.drum-panel { display: flex; flex-direction: column; height: 100%; font-size: 11px; overflow-x: auto; }
 .drum-panel-head, .drum-panel-row {
   display: flex; align-items: center; gap: 6px; padding: 3px 6px; white-space: nowrap;
 }
@@ -2152,6 +2154,8 @@ button.secondary {
 .dp-vol-num--warn { color: #c98a00; font-weight: 700; }
 .drum-panel-head .dp-c-vol { display: block; }
 .dp-c-hits  { flex: none; width: 42px; text-align: right; font-family: var(--mono); }
+.dp-c-kind  { flex: none; width: 62px; }
+.dp-c-kind select { width: 100%; font-size: 11px; }
 .dp-c-on    { flex: none; width: 34px; text-align: center; }
 .dp-c-rate  { flex: none; width: 92px; }
 .dp-c-rate select { width: 100%; font-size: 11px; }

@@ -47,20 +47,32 @@
   };
 
   // ── SPC ──────────────────────────────────────────────────────────────
-  RollBuild.spc = function (log, frameRate, srcnFineTune) {
+  // drumKinds(省略可): srcn → 'drum' | 'pitch' の手動上書き(main.jsがBRR内容ハッシュで引く)。
+  // 打楽器と判定したsrcnの発音は音程ノートではなく drumKey 付きノート(ドラム区画/パッド)に
+  // する。判定はMML変換と同じ MML.SPC2MML.drumSrcns(ロール=MML変換デバッガの方針)。
+  RollBuild.spc = function (log, frameRate, srcnFineTune, drumKinds) {
     const frameDur = 1 / frameRate;
     // MML変換と同じ原音チューニング補正を渡し、ロール表示の音程も実機発音に一致させる
     // (ロール=MML変換デバッガの方針。補正マップは再生開始時に一度だけ算出して使い回す)。
     const voiceEvents = MML.SPC2MML.extractVoiceEvents(log, { srcnFineTune });
+    const drumSrcns = (drumKinds !== false && MML.SPC2MML.drumSrcns)
+      ? MML.SPC2MML.drumSrcns(voiceEvents, srcnFineTune, drumKinds || null) : new Set();
+    let drumSeq = 0;
     return voiceEvents.map((events, ch) => ({
       id: `V${ch}`,
       color: `hsl(${ch * 45},90%,65%)`,
       notes: events
         .filter(e => e.pitchSemi !== null)
+        // 打楽器サンプルの発音: 音程軸ではなくドラム区画へ(midi無し、drumKey='brr:<srcn>')
+        .map(e => (!e.non && drumSrcns.has(e.srcn))
+          ? { drum: true, startSec: e.frame * frameDur, endSec: (e.frame + e.len) * frameDur, midi: null,
+              drumKey: 'brr:' + e.srcn, drumSeq: ++drumSeq, vol: Math.max(0, Math.min(1, (e.vol || 0) / 127)), freqSeq: [] }
+          : e)
         // 音量シェーディング用の簡易近似: ADSRモード(adsr1 bit7=1)ならサスティンレベル(adsr2 bit5-7、
         // 0-7)を目安の音量とする。GAINモード(直接指定)は減衰カーブを追わず常に最大音量扱い。
         // pitchSemi は note-number 空間(57=A4=MIDI69)なので MIDI へは +12。
         .reduce((acc, e) => {
+          if (e.drum) { acc.push(e); return acc; } // ドラム区画のノートはそのまま
           // freqSeq(セント偏差オーバーレイ用): DSPピッチレジスタ(pitch=0x1000で原音32kHz)を
           // pitchToSemitone(src/spc2mml/converter.js)と同じ式でHzへ変換する。
           const tune = (srcnFineTune && srcnFineTune[e.srcn]) || 0;
@@ -74,6 +86,9 @@
             acc.push({
               startSec: steps[si].start * frameDur, endSec: steps[si].end * frameDur, midi: steps[si].note,
               vol, freqSeq: si === 0 ? freqSeq : [],
+              // srcn: 借用先にE(DPCM)を選んだボイスをロール上でパッドへ置き換えるのに使う
+              // (main.js applySynthDrumToRoll。ノートからBRRサンプルを特定できるのはこれだけ)
+              srcn: e.srcn,
             });
           }
           return acc;
@@ -248,7 +263,11 @@
   };
 
   // ── HES ──────────────────────────────────────────────────────────────
-  RollBuild.hes = function (snapshots, frameRate) {
+  // dpcmTrace/controlTrace(省略可): 渡されると DDA(PCM)の打点を drumKey 付きノートとして
+  // 該当chのトラックへ足す(ロールのドラム区画/パッドに出る。VGMのサンプルPCMと同じ形)。
+  // 打点の同定は hes2mml/expansion/dpcm.js ddaHits(MML変換と同じ登録簿)なので、
+  // ロールで見た太鼓と変換で出る @DPCM が一致する([[roll-as-mml-debugger]])。
+  RollBuild.hes = function (snapshots, frameRate, dpcmTrace, controlTrace) {
     const frameDur = 1 / frameRate;
     // @EN(高速アルペジオ)統合済みイベントの展開はKSS側と同じ(RollBuild.expandNoteEnv参照)。
     const toNotes = (events) => {
@@ -286,6 +305,20 @@
       }
       tracks.push({ id: `PSG${i}`, color: colors[i % colors.length], notes });
     });
+    // DDA(PCM)の打点 → ドラム区画のノート(midi無し、drumKey/drumSeq付き)。
+    // 同じ太鼓の連打が1本に融合しないよう drumSeq に打点の通番を入れる
+    if (dpcmTrace && controlTrace && MML.Hes2MmlExpansion && MML.Hes2MmlExpansion.ddaHits) {
+      try {
+        const { hits } = MML.Hes2MmlExpansion.ddaHits(snapshots, dpcmTrace, controlTrace, frameRate);
+        hits.forEach((h, i) => {
+          const tr = tracks[h.ch];
+          if (!tr) return;
+          tr.notes.push({ startSec: h.startFrame * frameDur, endSec: h.endFrame * frameDur, midi: null,
+                          drumKey: h.key, drumSeq: i + 1, vol: h.vol, freqSeq: [] });
+        });
+        for (const tr of tracks) tr.notes.sort((a, b) => a.startSec - b.startSec);
+      } catch (e) { /* DDA抽出の失敗でロール全体を落とさない */ }
+    }
     return tracks;
   };
 
@@ -399,7 +432,7 @@
     if (format === 'hes') {
       return { build: (data, done) => {
         const snaps = data.snapshots.slice(0, done);
-        const out = { timeline: RollBuild.hes(snaps, params.frameRate), info: {} };
+        const out = { timeline: RollBuild.hes(snaps, params.frameRate, data.dpcmTrace, data.controlTrace), info: {} };
         // DDA(PCM)を担当するchの判定(曲全体でDDA区間が最も長い1ch)も同じ頻度で更新する。
         // 実際の再生に使う生のdpcmTrace列はメインスレッド側が保持しているので、
         // ここではチャンネル番号だけをinfoで返す(main.js側でsetDdaChannel)。
@@ -412,7 +445,7 @@
     }
     if (format === 'spc') {
       return { build: (data, done) => ({
-        timeline: RollBuild.spc(data.frameLog.slice(0, done), params.frameRate, params.fineTune || null),
+        timeline: RollBuild.spc(data.frameLog.slice(0, done), params.frameRate, params.fineTune || null, params.drumKinds || null),
         info: {}
       }) };
     }

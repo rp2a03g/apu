@@ -67,6 +67,11 @@
     ['quality', T('高音質優先(寄与するサンプルの最高レート)')],
     ['size', T('容量優先(最低レートに合わせる)')],
   ];
+  // 打楽器の同時発音(src/convert/options.js DRUM_POLY)
+  const DRUM_POLY_OPTIONS = () => [
+    ['mix', T('ミックス(重なった打点をその瞬間の音で焼く・忠実)')],
+    ['mono', T('単音(直近の打点だけ・定義がサンプル数までで済む)')],
+  ];
   const PRESET_LABELS = () => ({ faithful: T('忠実再現'), plain: T('プレーン譜面') });
 
   let current = null; // 正規化済み cmd
@@ -318,6 +323,24 @@
     rmDesc.textContent = T('同時に鳴っている打点はミックスして1サンプルに焼くため、レートを1つしか選べません。そのときの決め方(サンプルごとの指定は「ドラム(DPCM)」パネル)');
     rmRow.appendChild(rmSel); rmRow.appendChild(rmDesc);
     rmSec.appendChild(rmRow);
+    // 同時発音の扱い(ミックス/単音)。全形式のドラム(DPCM)経路に効く
+    const dpRow = document.createElement('label');
+    dpRow.className = 'cs-row';
+    const dpSel = document.createElement('select');
+    for (const [val, label] of DRUM_POLY_OPTIONS()) {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      dpSel.appendChild(o);
+    }
+    dpSel.addEventListener('change', () => {
+      current = MML.Convert.normalizeCmd(Object.assign({}, current, { DRUM_POLY: dpSel.value }));
+      save(); syncChecks(); refreshButtons();
+    });
+    const dpDesc = document.createElement('span');
+    dpDesc.className = 'cs-desc';
+    dpDesc.textContent = T('打点が重なる曲はミックスだと組合せぶん定義が増えます(実測: 2chのDDAで54定義36KB→単音7定義)。ROMを抑えたいときは単音に。');
+    dpRow.appendChild(dpSel); dpRow.appendChild(dpDesc);
+    rmSec.appendChild(dpRow);
     body.appendChild(rmSec);
 
     // ピッチ精度(SA)
@@ -350,6 +373,7 @@
       pcmSel.value = String(current.PCM_RATE != null ? current.PCM_RATE : 'max');
       saSel.value = current.PITCH_SA || 'octave';
       rmSel.value = current.RATE_MIX || 'quality';
+      dpSel.value = current.DRUM_POLY || 'mix';
       const name = MML.Convert.cmdPresetName(current);
       for (const [n, b] of Object.entries(presetButtons)) b.classList.toggle('es-preset--active', n === name);
       customTag.style.display = name === 'custom' ? '' : 'none';

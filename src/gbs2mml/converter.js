@@ -243,8 +243,26 @@
     });
     const { scoreChannels, expansions, letterMap } = r;
 
+    // E(DPCM)へ載せたch(打楽器化): 分離レンダリングした打点(options.drumHits、main.js synthDrum)を
+    // 共通コア(src/convert/drumHits.js)で @DPCM 化してEパートにする。GBのノイズドラム等がこれで
+    // 実音のままNESへ渡る。定義があればEチャンネルは自動で有効(#EX宣言は不要)
+    const dpcmDefLines = [], dpcmFiles = [];
+    let drumNote = null;
+    if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
+      const d = MML.Convert.DrumHits.dpcm(options.drumHits, frameRate, {
+        totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'gb_drum', maxClipSec: 10 });
+      if (d.defs.length) {
+        for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
+        dpcmFiles.push(...d.files);
+        scoreChannels.push({ letter: 'E', events: d.events, hasInstrument: true, isDrum: true });
+        scoreChannels.sort((a, b) => a.letter.localeCompare(b.letter));
+        drumNote = `打楽器化したchを実音のままDPCM(E)へ変換しました: 定義${d.stats.clips}件 / 打点${d.stats.segments}個 / ROM ${(d.stats.bytes / 1024).toFixed(1)}KB`;
+      }
+    }
+
     const noteDurations = [];
     for (const ch of scoreChannels) {
+      if (ch.isDrum) continue; // ドラムはテンポ推定から外す(vgm2mml と同じ理由)
       const sounding = ch.events.filter(ev => ev.note !== null);
       for (const ev of sounding) noteDurations.push(ev.end - ev.start);
       noteDurations.push(...MML.Convert.onsetIntervals(sounding.map(ev => ev.start)));
@@ -267,6 +285,7 @@
       `; ※ このアプリのMMLプレイヤーはNES音源専用のため、GBの各chはNES側の音源へ載せています`,
       `;    (割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
       ...r.notes.map(n => `; ※ ${n}`),
+      ...(drumNote ? [`; ※ ${drumNote}`] : []),
       `; =========================================================`,
       ``
     ].join('\n');
@@ -277,7 +296,7 @@
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       headerLines: [
-        ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+        ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(expansions.indexOf('fds') >= 0 ? fdsWaveReg.defLines() : []),
         ...(expansions.indexOf('n163') >= 0 ? n163WaveReg.defLines() : []),
         ...(expansions.indexOf('vrc7') >= 0 ? vrc7ToneReg.defLines() : [])
@@ -292,7 +311,8 @@
       mml, bpm: Math.round(bpm), pitchCheck,
       chips: ['CH1', 'CH2', 'CH3', 'CH4'],
       expansions,
-      fdsWave
+      fdsWave,
+      dpcmFiles // 打楽器化したchの @DPCM(main.js が dpcmSampleCache へ入れて即再生/NSF書き出し)
     };
   }
 })(window);

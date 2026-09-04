@@ -184,7 +184,10 @@
     if (fds) out.fds = { gain: fds.volGain, env: !!fds.volEnvEnabled, effectiveFreq: fds.effectiveFreq, modEnabled: !!fds.modEnabled };
     // DPCM: 実出力レベル(outputLevel 0-127)と、メモリ上のサンプルをデルタ復号した波形
     if (apu.dmc) {
-      const dmc = { level: apu.dmc.outputLevel };
+      // playing: 実際にサンプルを読み進めている最中か($4015 bit4 の書込み値ではなく実状態。
+      // 鍵盤/ロールの発声判定用。鳴り終わると bytesRemaining=0 かつ shiftReg を出し切る)
+      const dmc = { level: apu.dmc.outputLevel, seq: apu.dmc.seq || 0,
+                    playing: apu.dmc.bytesRemaining > 0 || (apu.dmc.bitsRemaining > 0 && !apu.dmc.silence) };
       if (bus) {
         const s = _dmcSample(bus, apu.dmc.sampleAddr, apu.dmc.sampleLength);
         if (s) { dmc.addr = s.addr; dmc.len = s.len; dmc.samples = s.samples; }

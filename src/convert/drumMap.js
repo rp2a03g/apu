@@ -31,6 +31,13 @@
 
   const MAX_LANES = 16; // これを超えたサンプルは末尾の「その他」レーンへまとめる
   const NOTE_BASE = 16; // レーン0のノート番号(ppmck 2A03ノイズchの音域 16〜31 の下端)
+  // ロール表示用のレーン上限(2026-09-04)。16はあくまで「2A03ノイズ疑似音程のドラムパートで
+  // 使えるノート数」の制約であって、見るだけのロールを縛る理由が無い。HESのようにDDAクリップだけで
+  // 16枠を使い切る形式では、追加した打楽器(合成音chのE指定など)が全部「その他」1本に潰れて
+  // 「ロールにパッドが出てこない」ように見えていた(ユーザー報告、NCS91002 track0 で実測)。
+  // ★並びは初出時刻順なので、先頭16レーンの番号は表示側と変換側で必ず一致する
+  //   (食い違うのは16番目以降=変換側では「その他」に入るぶんだけ)。
+  const DISPLAY_MAX_LANES = 32;
 
   /** サンプル同定情報 {kind, start} → 文字列キー。持たないチップ(ストリーミングDAC)はnull */
   function keyOf(sample) {
@@ -43,7 +50,8 @@
    *   laneOf:    Map(key → レーン番号)
    *   otherLane: 「その他」レーンの番号(溢れが無ければ -1)
    */
-  function build(obs) {
+  function build(obs, opt) {
+    const maxLanes = (opt && opt.maxLanes > 0) ? opt.maxLanes : MAX_LANES;
     const stat = new Map();
     for (const o of obs) {
       if (!o || !o.key) continue;
@@ -53,14 +61,14 @@
     }
     const all = Array.from(stat.values())
       .sort((a, b) => (a.first - b.first) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    const overflow = all.length > MAX_LANES;
-    const named = overflow ? all.slice(0, MAX_LANES - 1) : all;
+    const overflow = all.length > maxLanes;
+    const named = overflow ? all.slice(0, maxLanes - 1) : all;
     const laneOf = new Map();
     named.forEach((s, i) => laneOf.set(s.key, i));
-    const otherLane = overflow ? MAX_LANES - 1 : -1;
+    const otherLane = overflow ? maxLanes - 1 : -1;
     const lanes = named.map((s) => ({ key: s.key, first: s.first, count: s.count }));
     if (overflow) {
-      const rest = all.slice(MAX_LANES - 1);
+      const rest = all.slice(maxLanes - 1);
       for (const s of rest) laneOf.set(s.key, otherLane);
       lanes.push({ key: null, first: rest[0].first, count: rest.reduce((a, s) => a + s.count, 0) });
     }
@@ -78,22 +86,40 @@
    * ★C140/C352はアドレスが16bitに収まらないので、下位4桁固定だと
    *   0x00000 と 0x70000 が両方 '0000' になる。
    */
+  // ★アドレスを持たないキーもある(2026-09-04)。合成音chの打楽器化は 'syn:<行ID>:<midi>'、
+  //   SPCのBRRは 'brr:<srcn>' のようにROMアドレスではないので、そのまま読める形へ落とす
+  //   (以前は parseInt が NaN になり全部 '?' 表示だった)。
+  function nonAddrLabel(k) {
+    const parts = String(k).split(':');
+    if (parts[0] === 'syn') return parts.slice(1).join(' '); // 'syn:PSG3:37' → 'PSG3 37'
+    return parts.slice(1).join(':') || String(k);
+  }
+  // SPCのBRRはROMアドレスではなくサンプル番号(srcn)。16進にすると実機の呼び名と食い違うので
+  // そのまま10進で 'srcn20' と出す(パッド台帳側のラベルとも揃う)
+  const SRCN_KEY = /^brr:(\d+)$/;
   function labels(keys) {
+    // アドレス系のキーだけを16進の短縮対象にし、それ以外(syn: 等)は素の表記を使う。
+    // ★1つ目の':'の直後が数値ならアドレス。NSFのDMCは 'dmc:<開始>:<長さ>' のように
+    //   後ろが続くので、末尾まで数値であることは条件にしない
     const hex = keys.map((k) => {
-      if (!k) return null;
-      const start = parseInt(k.slice(k.indexOf(':') + 1), 10);
-      return Number.isFinite(start) ? start.toString(16).toUpperCase() : '?';
+      if (!k || SRCN_KEY.test(k)) return null;
+      const m = /^[^:]*:(\d+)(?::|$)/.exec(k);
+      return m ? parseInt(m[1], 10).toString(16).toUpperCase() : null;
+    });
+    const other = keys.map((k, i) => {
+      if (!k || hex[i] !== null) return null;
+      const s = SRCN_KEY.exec(k);
+      return s ? 'srcn' + s[1] : nonAddrLabel(k);
     });
     const real = hex.filter((h) => h !== null);
+    const finish = (map) => keys.map((k, i) => (!k ? null : hex[i] === null ? other[i] : map(hex[i])));
     for (let len = 4; len <= 8; len++) {
-      const cut = real.map((h) => h.slice(-len).padStart(Math.min(len, h.length), '0'));
-      if (new Set(cut).size === real.length) {
-        let i = 0;
-        return hex.map((h) => (h === null ? null : cut[i++]));
-      }
+      const cut = new Map();
+      for (const h of real) cut.set(h, h.slice(-len).padStart(Math.min(len, h.length), '0'));
+      if (new Set(cut.values()).size === new Set(real).size) return finish((h) => cut.get(h));
     }
-    return hex;
+    return finish((h) => h);
   }
 
-  MML.Convert.DrumMap = { MAX_LANES, NOTE_BASE, key: keyOf, build, noteOf, labels };
+  MML.Convert.DrumMap = { MAX_LANES, DISPLAY_MAX_LANES, NOTE_BASE, key: keyOf, build, noteOf, labels };
 })(window);

@@ -15,6 +15,11 @@
   if (!I18n) { console.error('[i18n] en.js: i18n.js より先に読み込まれています'); return; }
 
   I18n.register('en', 'English', {
+    '打楽器の分離レンダリング中: {ch}': 'Rendering isolated drum channel: {ch}',
+    'ミックス(重なった打点をその瞬間の音で焼く・忠実)': 'Mix (bake overlapping hits as heard; faithful)',
+    '単音(直近の打点だけ・定義がサンプル数までで済む)': 'Mono (latest hit only; definitions stay at the sample count)',
+    '打点が重なる曲はミックスだと組合せぶん定義が増えます(実測: 2chのDDAで54定義36KB→単音7定義)。ROMを抑えたいときは単音に。': 'When hits overlap, Mix creates one definition per combination (measured: 2-ch DDA gave 54 defs / 36 KB vs 7 defs in Mono). Choose Mono to save ROM.',
+    '(打楽器化)': ' (as drums)',
 
     // ---- ヘッダー / ウィンドウ名 (index.html) ----
     'MMLコンパイラ（拡張音源対応）・NSF書き出し・NSF/SPC/KSSファイル再生・DPCMコンバータ・シンタックスハイライト':
@@ -330,7 +335,11 @@
     '差し替え済み': 'Replaced',
     '元のサンプルに戻す': 'Restore the original sample',
     '合計 定義 {clips} / 打点 {segments} / ROM {kb} KB': 'Total: {clips} defs / {segments} hits / {kb} KB ROM',
-    '打楽器のサンプルがありません。VGMを再生してキャプチャが終わると一覧に出ます。': 'No percussion samples yet. Play a VGM; they appear once the capture finishes.',
+    '打楽器のサンプルがありません。曲を再生してキャプチャが終わると一覧に出ます(鍵盤表示の割当で借用先にE(DPCM)を選んだchもここに出ます)。': 'No percussion samples yet. Play a song; they appear once the capture finishes (channels you borrow to E (DPCM) in the keyboard view show up here too).',
+    '扱い': 'Treat as',
+    '打楽器': 'Percussion',
+    '音階': 'Pitched',
+    'このサンプルを打楽器(パッド)として扱うか、音階を持つサンプルとして扱うか': 'Whether this sample is percussion (a pad) or a pitched instrument',
     '音声ファイルを読み込めませんでした: {msg}': 'Could not load the audio file: {msg}',
     'ドラム(DPCM)': 'Drums (DPCM)',
     'MMLへ変換': 'Convert to MML',

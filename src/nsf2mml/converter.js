@@ -535,6 +535,47 @@
     return files;
   }
 
+  // ── DPCMサンプルの打点リスト/サンプル表(2026-09-03、ドラムパッド全形式展開) ──────
+  // ロールのドラム区画・パッド試聴・ドラム(DPCM)パネルが使う。キーは鍵盤のDM行と同じ
+  // 'dmc:<sampleAddr>:<sampleLen>'(バンクスイッチNSFはファイルキー側で区別するので、
+  // 同じ(addr,len)で中身が違うサンプルは 'dmc:<addr>:<len>:<bank>' になる)。
+  // pcm は実機DMCと同じ遷移でデルタ復号した波形(MML.Dpcm.decode)、rate はトリガー時の
+  // $4010 レート。DPCMは音量を持たないので vol=1。
+  //   hits:    [{ key, hash, pcm, rate, vol:1, startFrame, endFrame, label, fileKey, trig }]
+  //   samples: { key → { key, pcm, rate, hash, label, bytes, fileKey } }
+  MML.NSF2MML = MML.NSF2MML || {};
+  MML.NSF2MML.dmcHits = function (writeLog, nsfBytes, header, options) {
+    options = options || {};
+    const timeline = buildTimeline(writeLog, options.initRegs || null);
+    const triggers = extractDmcTriggers(timeline, writeLog, header || {});
+    const bankInfo = computeBankInfo(nsfBytes, header || {}, options.dpcmRom);
+    const U = (global.Emu && global.Emu.SamplePitchUtil) || (MML.Emu && MML.Emu.SamplePitchUtil) || null;
+    const samples = {}, hits = [];
+    const totalFrames = timeline.length;
+    for (let i = 0; i < triggers.length; i++) {
+      const trig = triggers[i];
+      const fileKey = dmcTriggerFileKey(trig, bankInfo);
+      // キーは鍵盤/ロール(keyboard.js DM行)と同じ 'dmc:<addr>:<len>'。バンクスイッチで中身が
+      // 違うサンプルも同じパッドにまとまる(ロール側はバンクを知れないため。稀なので許容)
+      const key = 'dmc:' + trig.sampleAddr + ':' + trig.sampleLen;
+      let s = samples[key];
+      if (!s) {
+        const bytes = resolveDmcBytes(bankInfo, trig.bankState, trig.sampleAddr, trig.sampleLen);
+        if (!bytes) continue;
+        const pcm = MML.Dpcm ? MML.Dpcm.decode(bytes, bytes.length * 8, trig.dac) : null;
+        if (!pcm) continue;
+        s = { key, pcm, rate: MML.Dpcm.DMC_RATE_TABLE_NTSC[trig.rate & 0xF], bytes, fileKey,
+              hash: (U && U.sampleHash) ? ('dmc-' + U.sampleHash(bytes, 0, bytes.length)) : null,
+              label: trig.sampleAddr.toString(16).toUpperCase() };
+        samples[key] = s;
+      }
+      const end = i + 1 < triggers.length ? triggers[i + 1].start : totalFrames;
+      hits.push({ key, sampleKey: key, hash: s.hash, pcm: s.pcm, rate: MML.Dpcm.DMC_RATE_TABLE_NTSC[trig.rate & 0xF],
+                  label: s.label, vol: 1, startFrame: trig.start, endFrame: Math.max(trig.start + 1, end), fileKey, trig });
+    }
+    return { hits, samples, triggers, bankInfo };
+  };
+
   // ppmckcの実装(nes_include/ppmck/dpcm.h)は「音符バイト=dpcm_dataテーブルの
   // 行インデックス」で、各行が[$4010制御(レート+ループ),$4011初期DAC,$4012アドレス,
   // $4013長さ]を丸ごと持つ(音高からレートを動的計算する仕組みは実機には無い)。
@@ -584,7 +625,7 @@
   // BPM検出・音長量子化・チャンネルMML生成は共通モジュール
   // (src/convert/bpm.js, duration.js, mmlEmit.js) に切り出し済み。
 
-  MML.NSF2MML = {};
+  MML.NSF2MML = MML.NSF2MML || {}; // dmcHits(上)が先に生やしている
 
   MML.NSF2MML.convert = function (writeLog, nsfBytes, header, songIndex, initRegs, initWrites, options) {
     options = options || {};
@@ -603,9 +644,39 @@
     const evB = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractPulseEvents(timeline, 'p2', 2)));
     const evC = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractTriEvents(timeline)));
     const evD = extractNoiseEvents(timeline);
-    const dmcTriggers = extractDmcTriggers(timeline, writeLog, header);
+    let dmcTriggers = extractDmcTriggers(timeline, writeLog, header);
     const bankInfo    = computeBankInfo(nsfBytes, header || {}, options.dpcmRom);
-    const dpcmFiles   = extractDpcmFiles(dmcTriggers, bankInfo);
+    let dpcmFiles   = extractDpcmFiles(dmcTriggers, bankInfo);
+    // ドラム(DPCM)パネルのサンプル単位設定(src/convert/drumSamples.js)を反映する(2026-09-03):
+    //   変換しない … そのサンプルのトリガーを落とす(その分は休符。音声サンプルを外してROMを減らす用途)
+    //   名前       … .dmc のファイル名にする
+    // レート変更/差し替え/音量はNSFでは無損失経路(ROMバイト列そのまま)を崩すので今は反映しない
+    // (必要なら src/convert/drumHits.js の再エンコード経路へ載せる)。
+    // 設定はサンプル内容のハッシュで引く(dmcHits と同じ計算)。
+    if (MML.Convert.DrumSamples && dpcmFiles.length && cmd.DRUM !== false) {
+      const DS = MML.Convert.DrumSamples;
+      const U = (global.Emu && global.Emu.SamplePitchUtil) || (MML.Emu && MML.Emu.SamplePitchUtil) || null;
+      const dropKeys = new Set();
+      for (const f of dpcmFiles) {
+        const hash = (U && U.sampleHash) ? ('dmc-' + U.sampleHash(f.bytes, 0, f.bytes.length)) : null;
+        if (!hash) continue;
+        const st = DS.get(hash);
+        if (st.enabled === false) { dropKeys.add(f.fileKey); continue; }
+        const nm = st.name ? DS.sanitizeName(st.name) : '';
+        if (nm) f.name = nm + '.dmc';
+      }
+      if (dropKeys.size) {
+        dmcTriggers = dmcTriggers.filter(t => !dropKeys.has(dmcTriggerFileKey(t, bankInfo)));
+        dpcmFiles = dpcmFiles.filter(f => !dropKeys.has(f.fileKey));
+      }
+      // 名前の衝突(別サンプルに同名を付けた)は連番で分ける
+      const used = new Set();
+      for (const f of dpcmFiles) {
+        let n = f.name;
+        for (let i = 2; used.has(n); i++) n = f.name.replace(/\.dmc$/, '') + '_' + i + '.dmc';
+        used.add(n); f.name = n;
+      }
+    }
 
     // テンポ推定: 全有音イベントの音長 + チャンネル毎の発音開始間隔(IOI)から。
     // IOIはゲートタイム(音符を短く切る発音)の影響を受けないため音長より頑健。
@@ -634,6 +705,23 @@
     // DPCM: ppmckc準拠(音符=テーブル行選択)で@DPCM<n>定義+実際のノートイベントを作る
     const { defs: dpcmDefs, comboIndexByKey: dpcmComboIndex } = buildDpcmDefs(dmcTriggers, dpcmFiles, bankInfo);
     const dpcmEvents = buildDpcmEvents(dmcTriggers, dpcmComboIndex, totalFrames, bankInfo);
+    // 合成音ch(パルス/三角/ノイズ/拡張)をE(DPCM)へ載せた打点(options.drumHits、main.js synthDrum)。
+    // 実機DPCMの定義(ROMそのまま)の後ろへ再エンコードした定義を連番で足す(src/convert/drumHits.js)
+    let synthDrumStats = null;
+    if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
+      const r = MML.Convert.DrumHits.dpcm(options.drumHits, FPS, {
+        totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'nsf_drum', maxClipSec: 10 });
+      const base = dpcmDefs.length;
+      for (const d of r.defs) {
+        dpcmFiles.push({ name: d.file, bytes: r.files[d.index].bytes, fileKey: 'synth:' + d.file });
+        dpcmDefs.push({ index: base + d.index, file: d.file, freq: d.freq, size: d.size, dac: d.dac, mode: d.mode });
+      }
+      for (const ev of r.events) dpcmEvents.push({ start: ev.start, end: ev.end, note: 48, instrument: base + ev.instrument });
+      dpcmEvents.sort((a, b) => a.start - b.start);
+      // 打点が重なる区間は直近の打点が勝つ(DPCMは1本)。前のイベントの尻尾を次の頭で切る
+      for (let i = 0; i + 1 < dpcmEvents.length; i++) if (dpcmEvents[i].end > dpcmEvents[i + 1].start) dpcmEvents[i].end = Math.max(dpcmEvents[i].start + 1, dpcmEvents[i + 1].start);
+      synthDrumStats = r.stats;
+    }
 
     // 拡張音源(複数同時使用可)を header.extraChips から全て検出する。
     // 順序はsrc/mml/compiler.jsのEXPANSION_PRIORITY(実機ppmck固定優先順位)に合わせる
@@ -947,6 +1035,9 @@
       const ch = byLetter.get(src.letter);
       if (!ch) continue;
       if (target === 'skip') { moves.push({ ch, to: null }); continue; }
+      // 'dpcm'(E): このchを打楽器として分離レンダリングした打点(options.drumHits)がEへ入る。
+      // 旋律としての出力は消す(二重発音の防止。DM行自身は元々Eなので対象外)
+      if (target === 'dpcm' && src.family !== 'dpcm') { moves.push({ ch, to: null }); continue; }
       const info = Plan.targetInfo(target);
       const dstLetter = Plan.letterOfTarget(target);
       if (!dstLetter || dstLetter === src.letter) continue;

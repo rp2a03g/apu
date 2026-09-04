@@ -265,9 +265,13 @@
     //    ファミリごとに抽出し直して該当chだけ採る。vgm2mmlのextractGroupと同じ考え方) ──
     const extracted = {}; // sourceId → channel
     const groups = {};    // chip → Set(family)
+    // ★E(DPCM)へ載せたchはここでは扱わない: 合成音chの打楽器化は分離レンダリングした打点
+    //   (options.drumHits、main.js synthDrum)が各 *2mml のE経路へ直接入る。旋律として
+    //   借用先へ載せると二重になるので、抽出も配置も外す
+    const isDpcm = t => familyOf(t) === 'dpcm';
     for (const s of src) {
       const t = plan[s.id] || 'skip';
-      if (t === 'skip') continue;
+      if (t === 'skip' || isDpcm(t)) continue;
       (groups[s.chip] = groups[s.chip] || new Set()).add(familyOf(t));
     }
     for (const chip of Object.keys(groups)) {
@@ -284,7 +288,7 @@
     const placed = {}; // targetType → { source, channel }
     for (const s of src) {
       const t = plan[s.id] || 'skip';
-      if (t === 'skip' || !extracted[s.id]) continue;
+      if (t === 'skip' || isDpcm(t) || !extracted[s.id]) continue;
       if (placed[t]) {
         notes.push(`${s.label} は ${Plan.targetLabel(t)} が既に ${placed[t].source.label} に使われているため変換対象外です。`);
         continue;

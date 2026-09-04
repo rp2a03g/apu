@@ -105,14 +105,14 @@
         runStart = ev;
       } else if (runStart != null) {
         if (ev.frame > runStart.frame || (ev.seq !== undefined && ev.seq > runStart.seq)) {
-          runs.push({ start: runStart.frame, end: ev.frame, startSeq: runStart.seq, endSeq: ev.seq, startFrame: runStart.frame, endFrame: ev.frame });
+          runs.push({ start: runStart.frame, end: ev.frame, startSeq: runStart.seq, endSeq: ev.seq, startFrame: runStart.frame, endFrame: ev.frame, vol: runStart.vol });
         }
         runStart = null;
       }
       active = newActive;
     }
     if (runStart != null && totalFrames > runStart.frame) {
-      runs.push({ start: runStart.frame, end: totalFrames, startSeq: runStart.seq, endSeq: Infinity, startFrame: runStart.frame, endFrame: totalFrames });
+      runs.push({ start: runStart.frame, end: totalFrames, startSeq: runStart.seq, endSeq: Infinity, startFrame: runStart.frame, endFrame: totalFrames, vol: runStart.vol });
     }
     return runs;
   }
@@ -153,6 +153,7 @@
         return hit;
       }
       const index = this._register(samples, rateHz);
+      this.clips[index].addr = startAddr; // ドラムのID(パッド/打点のキーに使う)
       this.byAddr.set(startAddr, index);
       return index;
     }
@@ -238,8 +239,10 @@
   }
 
   // ---- seq/t/src有りトレースの精密抽出(2026-08-26、冒頭コメント参照) ----------------
-  function extractBySeq(channel, trace, runs, frameRate) {
-    const reg = new ClipRegistry();
+  // regOpt: 複数chで1つの登録簿を共有するとき(extractDdaClipsAll)に渡す。同じドラムが別chで
+  // 鳴っても1定義にまとまる
+  function extractBySeq(channel, trace, runs, frameRate, regOpt) {
+    const reg = regOpt || new ClipRegistry();
     const events = [];
     let pos = 0;
 
@@ -298,7 +301,7 @@
             ? (samples.length - 1) / ((last.t - first.t) / frameRate)
             : estimateRate(ws, 0, ws.length, run.endFrame - run.startFrame, frameRate);
           const clipIndex = reg.addByAddr(first.src, samples, rateHz);
-          events.push({ start: first.frame, end: last.frame + 1, clipIndex });
+          events.push({ start: first.frame, end: last.frame + 1, clipIndex, vol: run.vol });
         }
       } else {
         // バイト列一致モード: run全体を1クリップとして扱う(seq精密区切りにより
@@ -306,7 +309,7 @@
         const samples = ws.map((w) => w.value);
         const rateHz = estimateRate(ws, 0, ws.length, run.endFrame - run.startFrame, frameRate);
         const clipIndex = reg.addBySamples(samples, rateHz);
-        events.push({ start: ws[0].frame, end: ws[ws.length - 1].frame + 1, clipIndex });
+        events.push({ start: ws[0].frame, end: ws[ws.length - 1].frame + 1, clipIndex, vol: run.vol });
       }
     }
 
@@ -329,8 +332,8 @@
   // ---- 旧トレース(seq無し)のフォールバック抽出(従来ロジック) ------------------------
   // 境界フレームの混入(冒頭コメントの真因1)は原理的に避けられないが、緩和済みの
   // ClipRegistry.addBySamples(前方一致+相対長さ許容+オフセット探索)で旧実装よりは潰せる。
-  function extractByFrames(channel, trace, runs, frameRate) {
-    const reg = new ClipRegistry();
+  function extractByFrames(channel, trace, runs, frameRate, regOpt) {
+    const reg = regOpt || new ClipRegistry();
     const events = [];
     let tracePos = 0;
 
@@ -345,7 +348,7 @@
       const seconds = (run.end - run.start) / frameRate;
       const rateHz = seconds > 0 ? samples.length / seconds : MML.Dpcm.DMC_RATE_TABLE_NTSC[7];
       const clipIndex = reg.addBySamples(samples, rateHz);
-      events.push({ start: run.start, end: run.end, clipIndex });
+      events.push({ start: run.start, end: run.end, clipIndex, vol: run.vol });
     }
 
     return { channel, clips: reg.clips, events };
@@ -356,36 +359,106 @@
   // ネイティブ再生(src/audio/hes-stream-player.js HesReplayStreamPlayer)がMML.Dpcm.decode()で
   // 復号する際、この正確なサンプル数が必要(2026-08、ユーザー指摘: ネイティブ再生も
   // 自作の簡略再生ではなく、MML変換と同じencode→decode往復を必ず経由させる)。
-  MML.Hes2MmlExpansion.dpcm = function (snapshots, dpcmTrace, controlTrace, frameRate, cmd) {
-    const { channel, clips, events: ddaEvents } = MML.Hes2MmlExpansion.extractDdaClips(snapshots, dpcmTrace, controlTrace, frameRate);
-    const defs = [], files = [], events = [];
-    const pcmRate = cmd && cmd.PCM_RATE != null ? cmd.PCM_RATE : 'max';
-
-    for (const clip of clips) {
-      const rateIndex = dmcRateIndexFor(clip.rateHz, pcmRate);
-      // 5bit(0-31)を-1..1へ正規化してDPCMエンコーダへ渡す
-      const floatSamples = new Float32Array(clip.samples.length);
-      for (let i = 0; i < clip.samples.length; i++) floatSamples[i] = (clip.samples[i] / 31) * 2 - 1;
-      // 初期DAC: 先頭サンプル値を7bit化してエンコーダのカウンタ開始値にし、同じ値を
-      // @DPCM定義のdac($4011初期書込み)へ入れる。旧来のdac=255(書込み省略)+カウンタ64
-      // 固定だと、再生開始時のDACが前の音の最終値のままでエンコーダの仮定とズレ、
-      // 頭に追従ランプ(クリック)が乗っていた。
-      const dac = Math.max(0, Math.min(127, Math.round((clip.samples[0] / 31) * 127)));
-      const encoded = MML.Dpcm.encode(floatSamples, clip.rateHz, rateIndex, { startCounter: dac });
-
-      const index = defs.length;
-      const name = `hes_dpcm_${index}.dmc`;
-      files.push({ name, bytes: encoded.bytes });
-      // mode=0固定(ワンショット、ループしない)。
-      defs.push({ index, file: name, freq: rateIndex, size: encoded.bytes.length, sampleCount: encoded.sampleCount, dac, mode: 0 });
+  // ---- 全6ch版(2026-09-03) ---------------------------------------------------------
+  // extractDdaClips は「最長の1ch」だけを返す(ネイティブ再生 hes-stream-player.js の
+  // ch選定用に残す)。MML変換とロール/パッドは、DDAを使う全chの打点を1つの登録簿で
+  // 集めたこちらを使う。同時に鳴った打点は src/convert/drumHits.js が1クリップへミックス
+  // するので、DPCM 1本の制約は変換側で吸収される(実測: NCS91002 は3chでDDAを使い、
+  // 旧方式は書込みの51%を捨てていた)。
+  // 戻り値: { channels:[DDAを使うch...], clips:[{samples, rateHz, addr?}], events:[{ch, start, end, clipIndex, vol}] }
+  MML.Hes2MmlExpansion.extractDdaClipsAll = function (snapshots, dpcmTrace, controlTrace, frameRate) {
+    const totalFrames = snapshots.length;
+    const reg = new ClipRegistry();
+    const events = [];
+    const channels = [];
+    for (let ch = 0; ch < 6; ch++) {
+      const runs = buildChannelRuns(controlTrace[ch] || [], totalFrames);
+      if (!runs.length) continue;
+      const trace = dpcmTrace[ch] || [];
+      const hasSeq = trace.length > 0 && trace[0].seq !== undefined && runs[0].startSeq !== undefined;
+      const r = hasSeq ? extractBySeq(ch, trace, runs, frameRate, reg) : extractByFrames(ch, trace, runs, frameRate, reg);
+      if (!r.events.length) continue;
+      channels.push(ch);
+      for (const ev of r.events) events.push(Object.assign({ ch }, ev));
     }
+    events.sort((a, b) => a.start - b.start || a.ch - b.ch);
+    return { channels, clips: reg.clips, events };
+  };
 
-    for (const ev of ddaEvents) {
-      // 実機DMCと同じくノート自体はレートに影響しない(常に基準ノートo4c=48で@<n>を選ぶだけ、
-      // nsf2mml/converter.js buildDpcmEventsと同じ設計)。
-      events.push({ start: ev.start, end: ev.end, note: 48, instrument: ev.clipIndex });
-    }
+  // クリップ → パッド/打点のキー。アドレス同定できたクリップはROMオフセット(=ドラムのID)、
+  // バイト列同定はクリップ番号(接頭辞を変えて衝突を避ける。DrumMap.labels は ':' の後ろの
+  // 10進を16進表示にするので、どちらも短いラベルになる)
+  function clipKey(clip, index) {
+    return clip.addr != null ? ('dda:' + clip.addr) : ('ddab:' + index);
+  }
 
-    return { channel, defs, files, events };
+  /**
+   * DDAの打点リスト(src/convert/drumHits.js の hit 形)+サンプル表。
+   * ロール/パッド/変換の3者がこれを共有する。
+   *   hits:    [{ key, sampleKey, hash, pcm, rate, vol, startFrame, endFrame, ch }]
+   *   samples: { key → { pcm, rate, hash } }  パッド台帳(main.js drumSampleStore)用
+   *   channels: DDAを使ったch
+   * vol は「そのrunの$0804音量 ÷ 曲中のDDA最大音量」。単chで音量一定の曲は常に1.0
+   * (=旧実装と同じ振幅で焼く)。複数chの相対音量はミックス時に効く。
+   */
+  MML.Hes2MmlExpansion.ddaHits = function (snapshots, dpcmTrace, controlTrace, frameRate) {
+    const all = MML.Hes2MmlExpansion.extractDdaClipsAll(snapshots, dpcmTrace, controlTrace, frameRate);
+    const U = (global.Emu && global.Emu.SamplePitchUtil) || (MML.Emu && MML.Emu.SamplePitchUtil) || null;
+    const samples = {};
+    const byIndex = all.clips.map((clip, i) => {
+      const pcm = new Float32Array(clip.samples.length);
+      for (let k = 0; k < clip.samples.length; k++) pcm[k] = (clip.samples[k] / 31) * 2 - 1;
+      let hash = null;
+      if (U && U.sampleHash) {
+        const u8 = Uint8Array.from(clip.samples, (v) => v & 0x1F);
+        hash = 'dda-' + U.sampleHash(u8, 0, u8.length);
+      }
+      const key = clipKey(clip, i);
+      // .dmc/パッドの既定ラベル: ROMオフセットの16進、バイト列同定は clip<n>
+      const label = clip.addr != null ? clip.addr.toString(16).toUpperCase() : ('clip' + i);
+      const s = { key, pcm, rate: clip.rateHz, hash, label };
+      samples[key] = s;
+      return s;
+    });
+    let maxVol = 0;
+    for (const ev of all.events) if (ev.vol > maxVol) maxVol = ev.vol;
+    if (!(maxVol > 0)) maxVol = 31;
+    const hits = all.events.map((ev) => {
+      const s = byIndex[ev.clipIndex];
+      return { key: s.key, sampleKey: s.key, hash: s.hash, pcm: s.pcm, rate: s.rate, label: s.label,
+               vol: (ev.vol != null ? ev.vol : maxVol) / maxVol,
+               startFrame: ev.start, endFrame: ev.end, ch: ev.ch,
+               // 鳴り止みはCPUの書込み範囲(end)そのもの。サンプル長÷推定レートで切らない
+               exactEnd: true };
+    });
+    return { hits, samples, channels: all.channels };
+  };
+
+  // channel/defs/files/eventsを返す。defsの各要素にsampleCount(実際のPCMサンプル数。
+  // sizeはNSF側配置用のバイト数で16byte境界に切り上げ済みのため別物)も含める。
+  // 2026-09-03: DMC化は src/convert/drumHits.js(全形式共通)へ。ここは打点リストを渡すだけ。
+  //   ・全DDAchを対象にし、同時発音はミックスした1クリップになる
+  //   ・サンプル単位の設定(パッド: 変換しない/レート/音量/名前/差し替え)が効く
+  //   ・.dmc の名前はパッド名、無ければROMオフセットの16進
+  // 旧実装との差(単chの曲): 定義内容は同じ(dac=先頭値、レート選択も同じ関数)で、
+  // ファイル名だけ hes_dpcm_<n>.dmc → <ROMオフセット16進>.dmc に変わる。
+  // extraHits(省略可): 合成音ch(PSGの波形ch)を打楽器化した打点(main.js synthDrum、
+  // options.drumHits)。DDAの打点と一緒にE(DPCM)へ焼く
+  MML.Hes2MmlExpansion.dpcm = function (snapshots, dpcmTrace, controlTrace, frameRate, cmd, extraHits) {
+    const dda = MML.Hes2MmlExpansion.ddaHits(snapshots, dpcmTrace, controlTrace, frameRate);
+    const channels = dda.channels;
+    const hits = dda.hits.concat(extraHits || []);
+    const empty = { channel: -1, channels: [], defs: [], files: [], events: [], stats: null };
+    if (!hits.length || !MML.Convert.DrumHits) return empty;
+    const r = MML.Convert.DrumHits.dpcm(hits, frameRate, {
+      totalFrames: snapshots.length,
+      pcmRate: cmd && cmd.PCM_RATE != null ? cmd.PCM_RATE : 'max',
+      rateMix: cmd && cmd.RATE_MIX,
+      poly: cmd && cmd.DRUM_POLY,
+      prefix: 'hes_dpcm',
+      maxClipSec: 10, // DDAはCPUが書いた分しか無い(=有限)ので、VGMのROM歯止め1.5秒は外す
+      volQuant: 2,    // $0804音量の微差(1dB未満)で定義を増やさない(実測: HC92056で5→6定義)
+    });
+    return { channel: channels.length ? channels[0] : -1, channels, defs: r.defs, files: r.files, events: r.events, stats: r.stats };
   };
 })(window);

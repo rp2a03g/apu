@@ -104,7 +104,7 @@
     if (!RollBuild || !msg.opt || !msg.opt.roll) return null;
     let params;
     if (format === 'kss') params = { frameRate: msg.opt.roll.frameRate, header: MML.KSS.parseHeader(msg.bytes) };
-    else if (format === 'spc') params = { frameRate: MML.SPC2MML.FRAME_RATE, fineTune: msg.opt.roll.fineTune || null };
+    else if (format === 'spc') params = { frameRate: MML.SPC2MML.FRAME_RATE, fineTune: msg.opt.roll.fineTune || null, drumKinds: msg.opt.roll.drumKinds || null };
     else params = msg.opt.roll; // gbs/hes: {frameRate} / vgm: {}
     const job = RollBuild.createRollJob(format, params);
     if (!job) return null;

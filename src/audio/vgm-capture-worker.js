@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-04 11:34:59
+ * Built by tools/build-capture-workers.ps1 at 2026-09-04 18:00:38
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-04 11:34:59';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-04 18:00:38';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -431,7 +431,10 @@
     if (fds) out.fds = { gain: fds.volGain, env: !!fds.volEnvEnabled, effectiveFreq: fds.effectiveFreq, modEnabled: !!fds.modEnabled };
     // DPCM: 実出力レベル(outputLevel 0-127)と、メモリ上のサンプルをデルタ復号した波形
     if (apu.dmc) {
-      const dmc = { level: apu.dmc.outputLevel };
+      // playing: 実際にサンプルを読み進めている最中か($4015 bit4 の書込み値ではなく実状態。
+      // 鍵盤/ロールの発声判定用。鳴り終わると bytesRemaining=0 かつ shiftReg を出し切る)
+      const dmc = { level: apu.dmc.outputLevel, seq: apu.dmc.seq || 0,
+                    playing: apu.dmc.bytesRemaining > 0 || (apu.dmc.bitsRemaining > 0 && !apu.dmc.silence) };
       if (bus) {
         const s = _dmcSample(bus, apu.dmc.sampleAddr, apu.dmc.sampleLength);
         if (s) { dmc.addr = s.addr; dmc.len = s.len; dmc.samples = s.samples; }
@@ -912,6 +915,9 @@
       this.shiftReg = 0;
       this.silence = true;
       this.irqFlag = false;
+      // キーオン通番: $4015 bit4 でサンプル再生が始まるたびに +1。ロールのドラム区画が
+      // 「同じサンプルの連打」を1本に融合させない区切りに使う(VGMのサンプルPCMの seq と同じ役割)
+      this.seq = 0;
     }
 
     writeReg(index, value) {
@@ -941,6 +947,7 @@
       } else if (this.bytesRemaining === 0) {
         this.currentAddr = this.sampleAddr;
         this.bytesRemaining = this.sampleLength;
+        this.seq++;
       }
     }
 
@@ -13268,8 +13275,25 @@
         ? { t: 'wave', data: dmc.samples, nx: dmc.len * 8, ny: 128, sig: dmc.addr + ':' + dmc.len, pcm: true }
         : { t: 'sample', nx: 0, ny: 0 };
       // dmcDirect: $4011 直接書込み(生PCM)の検出対象はこの行だけ(update()参照)
+      // drumKey/drumSeq(2026-09-03): サンプル(アドレス+長さ)が分かるときはロールをレート
+      // 疑似音程ではなくドラム区画(1サンプル=1レーン)へ。VGMのサンプルPCM行と同じ形。
+      // キーは nsf2mml/converter.js dmcHits と同じ 'dmc:<addr>:<len>'
+      // APUエンベロープが無い経路(キャプチャWorkerのロール構築)では $4012/$4013 のレジスタ値から
+      // 同じキーを組む。通番は extraSnaps.dmcSeq(writeLogの$4015 bit4書込みの累計。nsf2mml
+      // extractDmcTriggers と同じ数え方)から取る
+      const regLen = snap[0x4013];
+      const regKey = (regLen !== undefined) ? ('dmc:' + (0xC000 + (snap[0x4012] || 0) * 64) + ':' + (regLen * 16 + 1)) : null;
+      const dmcKey = (dmc && dmc.len > 0) ? ('dmc:' + dmc.addr + ':' + dmc.len) : regKey;
+      const dmcSeq = (dmc && dmc.seq) ? dmc.seq
+        : ((extraSnaps && extraSnaps.dmcSeq && extraSnaps.dmcSeq[frameIdx]) || 0);
+      // 発声中か: $4015 bit4(最後に書かれた値)だけでは鳴り終わりが分からない。ライブ経路は
+      // APUの実状態(bytesRemaining/bitsRemaining)、履歴経路は buildDmcTimeline が $4013 の長さと
+      // $4010 のレート/ループから求めた終了フレームで切る
+      const dmcPlaying = (dmc && dmc.playing !== undefined) ? dmc.playing
+        : ((extraSnaps && extraSnaps.dmcEnd) ? frameIdx < extraSnaps.dmcEnd[frameIdx] : true);
       channels.push({ id: 'DM', color: '#aa44ff', freq: 0, vol: level / 127, rawVol: level, rawVolMax: 127,
-        wave, active: !!(status & 0x10), sample: true, dmcRateIdx, dmcFreq, dmcReg: dv, dmcDirect: true });
+        wave, active: !!(status & 0x10) && dmcPlaying, sample: true, dmcRateIdx, dmcFreq, dmcReg: dv, dmcDirect: true,
+        drumKey: dmcKey, drumSeq: dmcSeq });
     }
     } // !isKss && !isGbs
 
@@ -14017,6 +14041,11 @@
       const note = { startSec: c.startFrame * frameDur, endSec, midi: c.midi,
                      vol: c.volQ / ROLL_VOL_LEVELS, freqSeq: c.freqs };
       if (c.drumKey) note.drumKey = c.drumKey;
+      // sampleRow: サンプル再生ch(2A03 DMC/YM2612 DAC/32X PWM/RF5C…)のノート。midiは
+      // レート由来の疑似音程なので「音高=楽器の区別」にならない。E(DPCM)へ載せて打楽器化する
+      // ときは1発ごとに切り出して内容で束ねる必要があるため、印だけ付けておく
+      // (main.js synthDrumNotes / buildSynthHits。2026-09-04)
+      if (c.sampleRow) note.sampleRow = true;
       track.notes.push(note);
       track.cur = null;
     };
@@ -14047,10 +14076,14 @@
         const cur = track.cur;
         // drumSeqはキーオン通番。同じ太鼓を同じ音量で連打したとき(16分のハイハット等)、
         // これを見ないと区間が1本の長い棒に融合してしまう
-        if (cur && (!sounding || midi !== cur.midi || drumKey !== cur.drumKey || drumSeq !== cur.drumSeq || volQ !== cur.volQ)) {
+        // ★ドラム区画(drumKey)のノートは音量変化で割らない: DPCMは出力レベル=波形そのもの、
+        //   サンプルPCMも減衰はサンプル自身が持つので、割ると1打点が数十の細切れになり
+        //   パッドの打点数も実トリガー数と食い違う(実測: Super C 126トリガー→1707ノート)
+        if (cur && (!sounding || midi !== cur.midi || drumKey !== cur.drumKey || drumSeq !== cur.drumSeq || (!drumKey && volQ !== cur.volQ))) {
           pushNote(track, f * frameDur);
         }
-        if (sounding && !track.cur) track.cur = { startFrame: f, midi, drumKey, drumSeq, volQ, freqs: [] };
+        if (sounding && !track.cur) track.cur = { startFrame: f, midi, drumKey, drumSeq, volQ, freqs: [],
+                                                  sampleRow: !!ch.sample && !drumKey };
         if (track.cur) track.cur.freqs.push(pitchFreq);
       }
     }
@@ -16377,6 +16410,7 @@
       this._rollBaseWallMs = null;
       this._state = {
         regSnapshots: result.regSnapshots || [],
+        writeLog: result.writeLog || [], // ロール構築でDPCMの発声終了(buildDmcTimeline)を出すのに使う
         totalFrames: result.totalFrames || 0,
         samplesPerFrame: result.samplesPerFrame || 735,
         sampleRate: result.sampleRate || 44100,
@@ -16403,8 +16437,9 @@
         // ロール構築専用にLive系を外し、writeLog由来の履歴配列(n163/fme7/vrc7)または
         // レジスタスナップショット直読み(mmc5)にフォールバックさせる
         // (setRollTimelineFromRegSnapshots()と同じ考え方)。
+        const dmcTl = buildDmcTimeline(this._state.writeLog || [], this._state.totalFrames, frameDur);
         const rollExtraSnaps = Object.assign({}, this._extraSnaps,
-          { n163Live: null, fme7Live: null, vrc7Live: null, mmc5Live: null });
+          { n163Live: null, fme7Live: null, vrc7Live: null, mmc5Live: null, dmcSeq: dmcTl.seq, dmcEnd: dmcTl.end });
         this._rollTimeline = buildNoteTimelineFromChannelFrames(
           (f) => extractChannels(this._state.regSnapshots[f] || {}, rollExtraSnaps, f, this._chips),
           this._state.totalFrames, frameDur
@@ -16591,7 +16626,9 @@
         for (const n of track.notes) if (n.drumKey) obs.push({ key: n.drumKey, sec: n.startSec });
       }
       if (!obs.length) return;
-      const map = DrumMap.build(obs);
+      // 表示用は上限を広く取る(DISPLAY_MAX_LANES)。16はドラムパートを2A03ノイズへ焼くときの
+      // ノート数制約で、ロールを縛る理由が無い。先頭16レーンの番号は変換側と一致する
+      const map = DrumMap.build(obs, { maxLanes: DrumMap.DISPLAY_MAX_LANES });
 
       // 2) 各打点にレーン番号を書き戻し、レーンごとに集める
       const byLane = map.lanes.map(() => []);
@@ -16884,7 +16921,9 @@
           o.value = t;
           // 行内のセレクトは幅が狭いので「(既定)」は付けない(既定から変えた行はpart列の
           // チップがアクセント色になるので区別はつく)。ポップオーバー側には付ける。
-          o.textContent = plan.targetLabel(t);
+          // サンプルPCMでない行の E(DPCM) は「このchを打楽器として分離レンダリングしてDPCM化」
+          // (main.js synthDrum)なので、そう読める語を添える
+          o.textContent = plan.targetLabel(t) + ((t === 'dpcm' && plan.isSynthDrumTarget && plan.isSynthDrumTarget(el.id, t)) ? T('(打楽器化)') : '');
           // 音源ごとの色分けは「選ぶとき(=リストを開いたとき)」だけ、薄い背景色で出す。
           // ★文字色は塗らない(読みづらいというユーザー指摘)。行に閉じているセレクト本体も
           //   既定の見た目のままにして、色は候補一覧の中でのグルーピングだけに使う。
@@ -16980,7 +17019,9 @@
       for (const t of (list.indexOf(target) >= 0 ? list : list.concat([target]))) {
         const o = document.createElement('option');
         o.value = t;
-        o.textContent = plan.targetLabel(t) + (t === el.defaultTarget ? T('(既定)') : '');
+        o.textContent = plan.targetLabel(t)
+          + ((t === 'dpcm' && plan.isSynthDrumTarget && plan.isSynthDrumTarget(chId, t)) ? T('(打楽器化)') : '')
+          + (t === el.defaultTarget ? T('(既定)') : '');
         targetSel.appendChild(o);
       }
       targetSel.value = target;
@@ -17445,6 +17486,12 @@
       for (const el of (this._spcRowEls || [])) if (el.checkbox && !el.checkbox.checked) return true;
       return false;
     }
+
+    // 行ID → ミュート設定の座標({section, chip, key|index, type})。main.js の合成音ch打楽器化
+    // (他chを全部ミュートして1chだけレンダリング)が「1chだけ生かした設定」を組むのに使う
+    getMuteInfoFor(id) { return getMuteInfo(id) || null; }
+    // 現在のピアノロールのタイムライン(共通形状 [{id, color, notes:[{startSec,endSec,midi,vol,drumKey?}]}])
+    getRollTimeline() { return this._rollTimeline || null; }
 
     getMuteConfig() {
       const config = { apu: {}, expansion: {} };
@@ -18293,17 +18340,56 @@
   // 同名メソッドの実体。this非依存の純粋関数なので、キャプチャWorkerバンドル
   // (NSF/VGMのロール構築オフスレッド化)からも直接呼べるようモジュールレベルに置く。
   // 詳細コメントはKeyboardDisplay.setRollTimelineFromRegSnapshots参照)。
+  // DPCMの発声タイムライン(writeLogから)。フレームごとに
+  //   seq[f] … キーオン通番の累計($4015 bit4書込みを1トリガーと数える。nsf2mml extractDmcTriggers と同じ)
+  //   end[f] … いま鳴っているサンプルが鳴り終わるフレーム(ループなら Infinity、鳴っていなければ 0)
+  // を返す。★$4015 のbit4は「最後に書かれた値」なので、それだけを見るとサンプルが鳴り終わっても
+  // 次のトリガー/停止書込みまで発声中に見える(ロールの棒が実発声より長く伸びていた)。
+  // 実機DMCは $4013 の長さ(len*16+1 バイト×8bit)を $4010 のレート(CPUクロック÷周期)で
+  // 読み切ったら止まる(bit6のループ時は再開)ので、それを計算して発声の終わりにする。
+  // 再生中の再トリガー(bytesRemaining>0 のときの bit4 書込み)は実機では無視されるので、
+  // 終了時刻の更新も「鳴り終わってからのトリガー」だけにする(通番は従来どおり全部数える)。
+  function buildDmcTimeline(wl, totalFrames, frameDur) {
+    const seq = new Int32Array(totalFrames);
+    const end = new Float64Array(totalFrames);
+    let n = 0, curEnd = 0;
+    let rateIdx = 0, loop = false, lenReg = 0;
+    for (let f = 0; f < totalFrames; f++) {
+      for (const w of (wl[f] || [])) {
+        if (w.addr === 0x4010) { rateIdx = w.value & 0x0F; loop = !!(w.value & 0x40); }
+        else if (w.addr === 0x4013) lenReg = w.value & 0xFF;
+        else if (w.addr === 0x4015) {
+          if (w.value & 0x10) {
+            n++;
+            if (f >= curEnd) {
+              const bytes = lenReg * 16 + 1;
+              const rateHz = CPU_CLOCK / DMC_RATE[rateIdx];
+              curEnd = loop ? Infinity : f + (bytes * 8 / rateHz) / frameDur;
+            }
+          } else {
+            curEnd = 0; // bit4クリア=停止
+          }
+        }
+      }
+      seq[f] = n;
+      end[f] = curEnd;
+    }
+    return { seq, end };
+  }
+
   function buildRollTracksFromRegSnapshotsPure(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots, extra) {
     if (!regSnapshots || totalFrames <= 0) return null;
     const wl = writeLog || [];
+    const frameDur = samplesPerFrame / sampleRate;
+    const dmcTl = buildDmcTimeline(wl, totalFrames, frameDur);
     const extraSnaps = Object.assign({}, extra || {}, {
+      dmcSeq: dmcTl.seq, dmcEnd: dmcTl.end,
       vrc7: chips.includes('vrc7') ? buildVrc7Snapshots(wl) : null,
       n163: chips.includes('n163')
         ? (n163Snapshots && n163Snapshots.length ? buildN163SnapshotsFromLiveRam(n163Snapshots) : buildN163Snapshots(wl))
         : null,
       fme7: chips.includes('fme7') ? buildFme7Snapshots(wl) : null,
     });
-    const frameDur = samplesPerFrame / sampleRate;
     return buildNoteTimelineFromChannelFrames(
       (f) => extractChannels(regSnapshots[f] || {}, extraSnaps, f, chips),
       totalFrames, frameDur
@@ -18379,6 +18465,12 @@
   //   'size'    … 最低に合わせて容量を優先する
   const RATE_MIX_VALUES = ['quality', 'size'];
   MML.Convert.RATE_MIX_VALUES = RATE_MIX_VALUES;
+  // 打楽器の同時発音の扱い(src/convert/drumHits.js poly)
+  //   'mix'  … その瞬間に鳴っている打点をミックスして1クリップに焼く(既定、忠実)
+  //   'mono' … ミックスしない。直近に叩かれた打点だけを鳴らす(定義がサンプル数までしか
+  //            増えないので容量制御に使う。実測: NCS91002 はミックス54定義36KB→単音7定義)
+  const DRUM_POLY_VALUES = ['mix', 'mono'];
+  MML.Convert.DRUM_POLY_VALUES = DRUM_POLY_VALUES;
   MML.Convert.CMD_KEYS = CMD_KEYS;
   MML.Convert.SHAPE_KEYS = SHAPE_KEYS;
   MML.Convert.PCM_RATE_VALUES = PCM_RATE_VALUES;
@@ -18387,10 +18479,10 @@
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality' },
+                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality', DRUM_POLY: 'mix' },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality' },
+                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality', DRUM_POLY: 'mix' },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
 
@@ -18406,6 +18498,7 @@
       }
       if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
+      if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
     }
     return out;
   };
@@ -18415,7 +18508,7 @@
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
       const p = PRESETS[name];
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA', 'RATE_MIX'].every(k => p[k] === n[k])) return name;
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA', 'RATE_MIX', 'DRUM_POLY'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };
@@ -21547,14 +21640,14 @@
         runStart = ev;
       } else if (runStart != null) {
         if (ev.frame > runStart.frame || (ev.seq !== undefined && ev.seq > runStart.seq)) {
-          runs.push({ start: runStart.frame, end: ev.frame, startSeq: runStart.seq, endSeq: ev.seq, startFrame: runStart.frame, endFrame: ev.frame });
+          runs.push({ start: runStart.frame, end: ev.frame, startSeq: runStart.seq, endSeq: ev.seq, startFrame: runStart.frame, endFrame: ev.frame, vol: runStart.vol });
         }
         runStart = null;
       }
       active = newActive;
     }
     if (runStart != null && totalFrames > runStart.frame) {
-      runs.push({ start: runStart.frame, end: totalFrames, startSeq: runStart.seq, endSeq: Infinity, startFrame: runStart.frame, endFrame: totalFrames });
+      runs.push({ start: runStart.frame, end: totalFrames, startSeq: runStart.seq, endSeq: Infinity, startFrame: runStart.frame, endFrame: totalFrames, vol: runStart.vol });
     }
     return runs;
   }
@@ -21595,6 +21688,7 @@
         return hit;
       }
       const index = this._register(samples, rateHz);
+      this.clips[index].addr = startAddr; // ドラムのID(パッド/打点のキーに使う)
       this.byAddr.set(startAddr, index);
       return index;
     }
@@ -21680,8 +21774,10 @@
   }
 
   // ---- seq/t/src有りトレースの精密抽出(2026-08-26、冒頭コメント参照) ----------------
-  function extractBySeq(channel, trace, runs, frameRate) {
-    const reg = new ClipRegistry();
+  // regOpt: 複数chで1つの登録簿を共有するとき(extractDdaClipsAll)に渡す。同じドラムが別chで
+  // 鳴っても1定義にまとまる
+  function extractBySeq(channel, trace, runs, frameRate, regOpt) {
+    const reg = regOpt || new ClipRegistry();
     const events = [];
     let pos = 0;
 
@@ -21740,7 +21836,7 @@
             ? (samples.length - 1) / ((last.t - first.t) / frameRate)
             : estimateRate(ws, 0, ws.length, run.endFrame - run.startFrame, frameRate);
           const clipIndex = reg.addByAddr(first.src, samples, rateHz);
-          events.push({ start: first.frame, end: last.frame + 1, clipIndex });
+          events.push({ start: first.frame, end: last.frame + 1, clipIndex, vol: run.vol });
         }
       } else {
         // バイト列一致モード: run全体を1クリップとして扱う(seq精密区切りにより
@@ -21748,7 +21844,7 @@
         const samples = ws.map((w) => w.value);
         const rateHz = estimateRate(ws, 0, ws.length, run.endFrame - run.startFrame, frameRate);
         const clipIndex = reg.addBySamples(samples, rateHz);
-        events.push({ start: ws[0].frame, end: ws[ws.length - 1].frame + 1, clipIndex });
+        events.push({ start: ws[0].frame, end: ws[ws.length - 1].frame + 1, clipIndex, vol: run.vol });
       }
     }
 
@@ -21771,8 +21867,8 @@
   // ---- 旧トレース(seq無し)のフォールバック抽出(従来ロジック) ------------------------
   // 境界フレームの混入(冒頭コメントの真因1)は原理的に避けられないが、緩和済みの
   // ClipRegistry.addBySamples(前方一致+相対長さ許容+オフセット探索)で旧実装よりは潰せる。
-  function extractByFrames(channel, trace, runs, frameRate) {
-    const reg = new ClipRegistry();
+  function extractByFrames(channel, trace, runs, frameRate, regOpt) {
+    const reg = regOpt || new ClipRegistry();
     const events = [];
     let tracePos = 0;
 
@@ -21787,7 +21883,7 @@
       const seconds = (run.end - run.start) / frameRate;
       const rateHz = seconds > 0 ? samples.length / seconds : MML.Dpcm.DMC_RATE_TABLE_NTSC[7];
       const clipIndex = reg.addBySamples(samples, rateHz);
-      events.push({ start: run.start, end: run.end, clipIndex });
+      events.push({ start: run.start, end: run.end, clipIndex, vol: run.vol });
     }
 
     return { channel, clips: reg.clips, events };
@@ -21798,37 +21894,107 @@
   // ネイティブ再生(src/audio/hes-stream-player.js HesReplayStreamPlayer)がMML.Dpcm.decode()で
   // 復号する際、この正確なサンプル数が必要(2026-08、ユーザー指摘: ネイティブ再生も
   // 自作の簡略再生ではなく、MML変換と同じencode→decode往復を必ず経由させる)。
-  MML.Hes2MmlExpansion.dpcm = function (snapshots, dpcmTrace, controlTrace, frameRate, cmd) {
-    const { channel, clips, events: ddaEvents } = MML.Hes2MmlExpansion.extractDdaClips(snapshots, dpcmTrace, controlTrace, frameRate);
-    const defs = [], files = [], events = [];
-    const pcmRate = cmd && cmd.PCM_RATE != null ? cmd.PCM_RATE : 'max';
-
-    for (const clip of clips) {
-      const rateIndex = dmcRateIndexFor(clip.rateHz, pcmRate);
-      // 5bit(0-31)を-1..1へ正規化してDPCMエンコーダへ渡す
-      const floatSamples = new Float32Array(clip.samples.length);
-      for (let i = 0; i < clip.samples.length; i++) floatSamples[i] = (clip.samples[i] / 31) * 2 - 1;
-      // 初期DAC: 先頭サンプル値を7bit化してエンコーダのカウンタ開始値にし、同じ値を
-      // @DPCM定義のdac($4011初期書込み)へ入れる。旧来のdac=255(書込み省略)+カウンタ64
-      // 固定だと、再生開始時のDACが前の音の最終値のままでエンコーダの仮定とズレ、
-      // 頭に追従ランプ(クリック)が乗っていた。
-      const dac = Math.max(0, Math.min(127, Math.round((clip.samples[0] / 31) * 127)));
-      const encoded = MML.Dpcm.encode(floatSamples, clip.rateHz, rateIndex, { startCounter: dac });
-
-      const index = defs.length;
-      const name = `hes_dpcm_${index}.dmc`;
-      files.push({ name, bytes: encoded.bytes });
-      // mode=0固定(ワンショット、ループしない)。
-      defs.push({ index, file: name, freq: rateIndex, size: encoded.bytes.length, sampleCount: encoded.sampleCount, dac, mode: 0 });
+  // ---- 全6ch版(2026-09-03) ---------------------------------------------------------
+  // extractDdaClips は「最長の1ch」だけを返す(ネイティブ再生 hes-stream-player.js の
+  // ch選定用に残す)。MML変換とロール/パッドは、DDAを使う全chの打点を1つの登録簿で
+  // 集めたこちらを使う。同時に鳴った打点は src/convert/drumHits.js が1クリップへミックス
+  // するので、DPCM 1本の制約は変換側で吸収される(実測: NCS91002 は3chでDDAを使い、
+  // 旧方式は書込みの51%を捨てていた)。
+  // 戻り値: { channels:[DDAを使うch...], clips:[{samples, rateHz, addr?}], events:[{ch, start, end, clipIndex, vol}] }
+  MML.Hes2MmlExpansion.extractDdaClipsAll = function (snapshots, dpcmTrace, controlTrace, frameRate) {
+    const totalFrames = snapshots.length;
+    const reg = new ClipRegistry();
+    const events = [];
+    const channels = [];
+    for (let ch = 0; ch < 6; ch++) {
+      const runs = buildChannelRuns(controlTrace[ch] || [], totalFrames);
+      if (!runs.length) continue;
+      const trace = dpcmTrace[ch] || [];
+      const hasSeq = trace.length > 0 && trace[0].seq !== undefined && runs[0].startSeq !== undefined;
+      const r = hasSeq ? extractBySeq(ch, trace, runs, frameRate, reg) : extractByFrames(ch, trace, runs, frameRate, reg);
+      if (!r.events.length) continue;
+      channels.push(ch);
+      for (const ev of r.events) events.push(Object.assign({ ch }, ev));
     }
+    events.sort((a, b) => a.start - b.start || a.ch - b.ch);
+    return { channels, clips: reg.clips, events };
+  };
 
-    for (const ev of ddaEvents) {
-      // 実機DMCと同じくノート自体はレートに影響しない(常に基準ノートo4c=48で@<n>を選ぶだけ、
-      // nsf2mml/converter.js buildDpcmEventsと同じ設計)。
-      events.push({ start: ev.start, end: ev.end, note: 48, instrument: ev.clipIndex });
-    }
+  // クリップ → パッド/打点のキー。アドレス同定できたクリップはROMオフセット(=ドラムのID)、
+  // バイト列同定はクリップ番号(接頭辞を変えて衝突を避ける。DrumMap.labels は ':' の後ろの
+  // 10進を16進表示にするので、どちらも短いラベルになる)
+  function clipKey(clip, index) {
+    return clip.addr != null ? ('dda:' + clip.addr) : ('ddab:' + index);
+  }
 
-    return { channel, defs, files, events };
+  /**
+   * DDAの打点リスト(src/convert/drumHits.js の hit 形)+サンプル表。
+   * ロール/パッド/変換の3者がこれを共有する。
+   *   hits:    [{ key, sampleKey, hash, pcm, rate, vol, startFrame, endFrame, ch }]
+   *   samples: { key → { pcm, rate, hash } }  パッド台帳(main.js drumSampleStore)用
+   *   channels: DDAを使ったch
+   * vol は「そのrunの$0804音量 ÷ 曲中のDDA最大音量」。単chで音量一定の曲は常に1.0
+   * (=旧実装と同じ振幅で焼く)。複数chの相対音量はミックス時に効く。
+   */
+  MML.Hes2MmlExpansion.ddaHits = function (snapshots, dpcmTrace, controlTrace, frameRate) {
+    const all = MML.Hes2MmlExpansion.extractDdaClipsAll(snapshots, dpcmTrace, controlTrace, frameRate);
+    const U = (global.Emu && global.Emu.SamplePitchUtil) || (MML.Emu && MML.Emu.SamplePitchUtil) || null;
+    const samples = {};
+    const byIndex = all.clips.map((clip, i) => {
+      const pcm = new Float32Array(clip.samples.length);
+      for (let k = 0; k < clip.samples.length; k++) pcm[k] = (clip.samples[k] / 31) * 2 - 1;
+      let hash = null;
+      if (U && U.sampleHash) {
+        const u8 = Uint8Array.from(clip.samples, (v) => v & 0x1F);
+        hash = 'dda-' + U.sampleHash(u8, 0, u8.length);
+      }
+      const key = clipKey(clip, i);
+      // .dmc/パッドの既定ラベル: ROMオフセットの16進、バイト列同定は clip<n>
+      const label = clip.addr != null ? clip.addr.toString(16).toUpperCase() : ('clip' + i);
+      const s = { key, pcm, rate: clip.rateHz, hash, label };
+      samples[key] = s;
+      return s;
+    });
+    let maxVol = 0;
+    for (const ev of all.events) if (ev.vol > maxVol) maxVol = ev.vol;
+    if (!(maxVol > 0)) maxVol = 31;
+    const hits = all.events.map((ev) => {
+      const s = byIndex[ev.clipIndex];
+      return { key: s.key, sampleKey: s.key, hash: s.hash, pcm: s.pcm, rate: s.rate, label: s.label,
+               vol: (ev.vol != null ? ev.vol : maxVol) / maxVol,
+               startFrame: ev.start, endFrame: ev.end, ch: ev.ch,
+               // 鳴り止みはCPUの書込み範囲(end)そのもの。サンプル長÷推定レートで切らない
+               exactEnd: true };
+    });
+    return { hits, samples, channels: all.channels };
+  };
+
+  // channel/defs/files/eventsを返す。defsの各要素にsampleCount(実際のPCMサンプル数。
+  // sizeはNSF側配置用のバイト数で16byte境界に切り上げ済みのため別物)も含める。
+  // 2026-09-03: DMC化は src/convert/drumHits.js(全形式共通)へ。ここは打点リストを渡すだけ。
+  //   ・全DDAchを対象にし、同時発音はミックスした1クリップになる
+  //   ・サンプル単位の設定(パッド: 変換しない/レート/音量/名前/差し替え)が効く
+  //   ・.dmc の名前はパッド名、無ければROMオフセットの16進
+  // 旧実装との差(単chの曲): 定義内容は同じ(dac=先頭値、レート選択も同じ関数)で、
+  // ファイル名だけ hes_dpcm_<n>.dmc → <ROMオフセット16進>.dmc に変わる。
+  // extraHits(省略可): 合成音ch(PSGの波形ch)を打楽器化した打点(main.js synthDrum、
+  // options.drumHits)。DDAの打点と一緒にE(DPCM)へ焼く
+  MML.Hes2MmlExpansion.dpcm = function (snapshots, dpcmTrace, controlTrace, frameRate, cmd, extraHits) {
+    const dda = MML.Hes2MmlExpansion.ddaHits(snapshots, dpcmTrace, controlTrace, frameRate);
+    const channels = dda.channels;
+    const hits = dda.hits.concat(extraHits || []);
+    const empty = { channel: -1, channels: [], defs: [], files: [], events: [], stats: null };
+    if (!hits.length || !MML.Convert.DrumHits) return empty;
+    const r = MML.Convert.DrumHits.dpcm(hits, frameRate, {
+      totalFrames: snapshots.length,
+      pcmRate: cmd && cmd.PCM_RATE != null ? cmd.PCM_RATE : 'max',
+      rateMix: cmd && cmd.RATE_MIX,
+      poly: cmd && cmd.DRUM_POLY,
+      prefix: 'hes_dpcm',
+      maxClipSec: 10, // DDAはCPUが書いた分しか無い(=有限)ので、VGMのROM歯止め1.5秒は外す
+      volQuant: 2,    // $0804音量の微差(1dB未満)で定義を増やさない(実測: HC92056で5→6定義)
+    });
+    return { channel: channels.length ? channels[0] : -1, channels, defs: r.defs, files: r.files, events: r.events, stats: r.stats };
   };
 })(globalThis);
 
@@ -21881,20 +22047,32 @@
   };
 
   // ── SPC ──────────────────────────────────────────────────────────────
-  RollBuild.spc = function (log, frameRate, srcnFineTune) {
+  // drumKinds(省略可): srcn → 'drum' | 'pitch' の手動上書き(main.jsがBRR内容ハッシュで引く)。
+  // 打楽器と判定したsrcnの発音は音程ノートではなく drumKey 付きノート(ドラム区画/パッド)に
+  // する。判定はMML変換と同じ MML.SPC2MML.drumSrcns(ロール=MML変換デバッガの方針)。
+  RollBuild.spc = function (log, frameRate, srcnFineTune, drumKinds) {
     const frameDur = 1 / frameRate;
     // MML変換と同じ原音チューニング補正を渡し、ロール表示の音程も実機発音に一致させる
     // (ロール=MML変換デバッガの方針。補正マップは再生開始時に一度だけ算出して使い回す)。
     const voiceEvents = MML.SPC2MML.extractVoiceEvents(log, { srcnFineTune });
+    const drumSrcns = (drumKinds !== false && MML.SPC2MML.drumSrcns)
+      ? MML.SPC2MML.drumSrcns(voiceEvents, srcnFineTune, drumKinds || null) : new Set();
+    let drumSeq = 0;
     return voiceEvents.map((events, ch) => ({
       id: `V${ch}`,
       color: `hsl(${ch * 45},90%,65%)`,
       notes: events
         .filter(e => e.pitchSemi !== null)
+        // 打楽器サンプルの発音: 音程軸ではなくドラム区画へ(midi無し、drumKey='brr:<srcn>')
+        .map(e => (!e.non && drumSrcns.has(e.srcn))
+          ? { drum: true, startSec: e.frame * frameDur, endSec: (e.frame + e.len) * frameDur, midi: null,
+              drumKey: 'brr:' + e.srcn, drumSeq: ++drumSeq, vol: Math.max(0, Math.min(1, (e.vol || 0) / 127)), freqSeq: [] }
+          : e)
         // 音量シェーディング用の簡易近似: ADSRモード(adsr1 bit7=1)ならサスティンレベル(adsr2 bit5-7、
         // 0-7)を目安の音量とする。GAINモード(直接指定)は減衰カーブを追わず常に最大音量扱い。
         // pitchSemi は note-number 空間(57=A4=MIDI69)なので MIDI へは +12。
         .reduce((acc, e) => {
+          if (e.drum) { acc.push(e); return acc; } // ドラム区画のノートはそのまま
           // freqSeq(セント偏差オーバーレイ用): DSPピッチレジスタ(pitch=0x1000で原音32kHz)を
           // pitchToSemitone(src/spc2mml/converter.js)と同じ式でHzへ変換する。
           const tune = (srcnFineTune && srcnFineTune[e.srcn]) || 0;
@@ -21908,6 +22086,9 @@
             acc.push({
               startSec: steps[si].start * frameDur, endSec: steps[si].end * frameDur, midi: steps[si].note,
               vol, freqSeq: si === 0 ? freqSeq : [],
+              // srcn: 借用先にE(DPCM)を選んだボイスをロール上でパッドへ置き換えるのに使う
+              // (main.js applySynthDrumToRoll。ノートからBRRサンプルを特定できるのはこれだけ)
+              srcn: e.srcn,
             });
           }
           return acc;
@@ -22082,7 +22263,11 @@
   };
 
   // ── HES ──────────────────────────────────────────────────────────────
-  RollBuild.hes = function (snapshots, frameRate) {
+  // dpcmTrace/controlTrace(省略可): 渡されると DDA(PCM)の打点を drumKey 付きノートとして
+  // 該当chのトラックへ足す(ロールのドラム区画/パッドに出る。VGMのサンプルPCMと同じ形)。
+  // 打点の同定は hes2mml/expansion/dpcm.js ddaHits(MML変換と同じ登録簿)なので、
+  // ロールで見た太鼓と変換で出る @DPCM が一致する([[roll-as-mml-debugger]])。
+  RollBuild.hes = function (snapshots, frameRate, dpcmTrace, controlTrace) {
     const frameDur = 1 / frameRate;
     // @EN(高速アルペジオ)統合済みイベントの展開はKSS側と同じ(RollBuild.expandNoteEnv参照)。
     const toNotes = (events) => {
@@ -22120,6 +22305,20 @@
       }
       tracks.push({ id: `PSG${i}`, color: colors[i % colors.length], notes });
     });
+    // DDA(PCM)の打点 → ドラム区画のノート(midi無し、drumKey/drumSeq付き)。
+    // 同じ太鼓の連打が1本に融合しないよう drumSeq に打点の通番を入れる
+    if (dpcmTrace && controlTrace && MML.Hes2MmlExpansion && MML.Hes2MmlExpansion.ddaHits) {
+      try {
+        const { hits } = MML.Hes2MmlExpansion.ddaHits(snapshots, dpcmTrace, controlTrace, frameRate);
+        hits.forEach((h, i) => {
+          const tr = tracks[h.ch];
+          if (!tr) return;
+          tr.notes.push({ startSec: h.startFrame * frameDur, endSec: h.endFrame * frameDur, midi: null,
+                          drumKey: h.key, drumSeq: i + 1, vol: h.vol, freqSeq: [] });
+        });
+        for (const tr of tracks) tr.notes.sort((a, b) => a.startSec - b.startSec);
+      } catch (e) { /* DDA抽出の失敗でロール全体を落とさない */ }
+    }
     return tracks;
   };
 
@@ -22233,7 +22432,7 @@
     if (format === 'hes') {
       return { build: (data, done) => {
         const snaps = data.snapshots.slice(0, done);
-        const out = { timeline: RollBuild.hes(snaps, params.frameRate), info: {} };
+        const out = { timeline: RollBuild.hes(snaps, params.frameRate, data.dpcmTrace, data.controlTrace), info: {} };
         // DDA(PCM)を担当するchの判定(曲全体でDDA区間が最も長い1ch)も同じ頻度で更新する。
         // 実際の再生に使う生のdpcmTrace列はメインスレッド側が保持しているので、
         // ここではチャンネル番号だけをinfoで返す(main.js側でsetDdaChannel)。
@@ -22246,7 +22445,7 @@
     }
     if (format === 'spc') {
       return { build: (data, done) => ({
-        timeline: RollBuild.spc(data.frameLog.slice(0, done), params.frameRate, params.fineTune || null),
+        timeline: RollBuild.spc(data.frameLog.slice(0, done), params.frameRate, params.fineTune || null, params.drumKinds || null),
         info: {}
       }) };
     }
@@ -22364,7 +22563,7 @@
     if (!RollBuild || !msg.opt || !msg.opt.roll) return null;
     let params;
     if (format === 'kss') params = { frameRate: msg.opt.roll.frameRate, header: MML.KSS.parseHeader(msg.bytes) };
-    else if (format === 'spc') params = { frameRate: MML.SPC2MML.FRAME_RATE, fineTune: msg.opt.roll.fineTune || null };
+    else if (format === 'spc') params = { frameRate: MML.SPC2MML.FRAME_RATE, fineTune: msg.opt.roll.fineTune || null, drumKinds: msg.opt.roll.drumKinds || null };
     else params = msg.opt.roll; // gbs/hes: {frameRate} / vgm: {}
     const job = RollBuild.createRollJob(format, params);
     if (!job) return null;

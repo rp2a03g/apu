@@ -104,7 +104,9 @@
       { maxAbsorbCents: cmd.PITCH_SA === 'off' ? 70 : null });
     const noiseResult = MML.Hes2MmlExpansion.noise(snapshots, envReg, capture.controlTrace);
     const hasNoise = noiseResult.events.some(ev => ev.note !== null);
-    const dpcmResult = MML.Hes2MmlExpansion.dpcm(snapshots, capture.dpcmTrace, capture.controlTrace, frameRate, cmd);
+    // options.drumHits: 合成音ch(PSG波形ch)を打楽器化した打点(main.js synthDrum)。DDAと一緒にEへ
+    const dpcmResult = MML.Hes2MmlExpansion.dpcm(snapshots, capture.dpcmTrace, capture.controlTrace, frameRate, cmd,
+      cmd.DRUM !== false ? (options.drumHits || null) : null);
     const hasDpcm = dpcmResult.defs.length > 0;
 
     // rawLength(N163波形の実サンプル数、常に32)を付与してからdetune計算に渡す

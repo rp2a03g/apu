@@ -178,6 +178,10 @@
     const hasScc = sccResult.channels.some(ch => ch.events.some(ev => ev.note !== null));
 
     let expansions, expansionLetterMap, scoreChannels, borrowNotes = [], chanDesc = '';
+    // E(DPCM)へ載せたch(打楽器化、ユーザー指定経路のみ): 分離レンダリングした打点
+    // (options.drumHits、main.js synthDrum)を共通コア(src/convert/drumHits.js)で @DPCM 化する
+    const dpcmDefLines = [], dpcmFiles = [];
+    let drumNote = null;
     let preferOplForNote = false; // 既定経路で「FMPAC無音→MSX-AUDIOがVRC7枠を使用」になったか(ヘッダコメント用)
     if (customPlan) {
       const caps = { hasScc, hasOpll, hasOpl };
@@ -204,6 +208,17 @@
       expansions = r.expansions;
       expansionLetterMap = r.letterMap;
       borrowNotes = r.notes;
+      if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
+        const d = MML.Convert.DrumHits.dpcm(options.drumHits, frameRate, {
+          totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'kss_drum', maxClipSec: 10 });
+        if (d.defs.length) {
+          for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
+          dpcmFiles.push(...d.files);
+          scoreChannels.push({ letter: 'E', events: d.events, hasInstrument: true, isDrum: true });
+          scoreChannels.sort((a, b) => a.letter.localeCompare(b.letter));
+          drumNote = `打楽器化したchを実音のままDPCM(E)へ変換しました: 定義${d.stats.clips}件 / 打点${d.stats.segments}個 / ROM ${(d.stats.bytes / 1024).toFixed(1)}KB`;
+        }
+      }
       chanDesc = Object.keys(r.placed)
         .map(t => `${MML.Convert.ChannelPlan.letterOfTarget(t)}=${r.placed[t].source.label}`)
         .sort().join(' ');
@@ -316,6 +331,7 @@
     // (ゲートタイムで音符が短く切られてもIOIはグリッドに乗るため頑健)。
     const noteDurations = [];
     for (const ch of scoreChannels) {
+      if (ch.isDrum) continue; // ドラム(E)はテンポ推定から外す(vgm2mml と同じ理由)
       const sounding = ch.events.filter(ev => ev.note !== null);
       for (const ev of sounding) noteDurations.push(ev.end - ev.start);
       noteDurations.push(...MML.Convert.onsetIntervals(sounding.map(ev => ev.start)));
@@ -348,6 +364,7 @@
       `;    (割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
       hasScc ? `;    SCCの波形はN163形式(4bit,32点)に変換した近似のため音色は完全一致しません。` : `;`,
       ...borrowNotes.map(n => `; ※ ${n}`),
+      ...(drumNote ? [`; ※ ${drumNote}`] : []),
       `; =========================================================`,
       ``
     ].join('\n');
@@ -361,7 +378,7 @@
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       headerLines: [
-        ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+        ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(expansions.indexOf('n163') >= 0 ? n163WaveReg.defLines() : []),
         ...(expansions.indexOf('vrc7') >= 0 ? vrc7ToneReg.defLines() : [])
       ]
@@ -378,7 +395,8 @@
       mml, bpm: Math.round(bpm), pitchCheck,
       chips: ['PSG'].concat(hasScc ? ['SCC'] : []).concat(hasOpll ? ['FMPAC'] : []).concat(hasOpl ? ['MSX-AUDIO'] : []),
       expansions,
-      n163Wave: sccResult.n163Wave
+      n163Wave: sccResult.n163Wave,
+      dpcmFiles // 打楽器化したchの @DPCM(ユーザー指定経路のみ。main.js が dpcmSampleCache へ)
     };
   };
 })(window);

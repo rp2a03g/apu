@@ -313,6 +313,9 @@
       this.shiftReg = 0;
       this.silence = true;
       this.irqFlag = false;
+      // キーオン通番: $4015 bit4 でサンプル再生が始まるたびに +1。ロールのドラム区画が
+      // 「同じサンプルの連打」を1本に融合させない区切りに使う(VGMのサンプルPCMの seq と同じ役割)
+      this.seq = 0;
     }
 
     writeReg(index, value) {
@@ -342,6 +345,7 @@
       } else if (this.bytesRemaining === 0) {
         this.currentAddr = this.sampleAddr;
         this.bytesRemaining = this.sampleLength;
+        this.seq++;
       }
     }
 

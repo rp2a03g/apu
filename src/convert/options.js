@@ -62,6 +62,12 @@
   //   'size'    … 最低に合わせて容量を優先する
   const RATE_MIX_VALUES = ['quality', 'size'];
   MML.Convert.RATE_MIX_VALUES = RATE_MIX_VALUES;
+  // 打楽器の同時発音の扱い(src/convert/drumHits.js poly)
+  //   'mix'  … その瞬間に鳴っている打点をミックスして1クリップに焼く(既定、忠実)
+  //   'mono' … ミックスしない。直近に叩かれた打点だけを鳴らす(定義がサンプル数までしか
+  //            増えないので容量制御に使う。実測: NCS91002 はミックス54定義36KB→単音7定義)
+  const DRUM_POLY_VALUES = ['mix', 'mono'];
+  MML.Convert.DRUM_POLY_VALUES = DRUM_POLY_VALUES;
   MML.Convert.CMD_KEYS = CMD_KEYS;
   MML.Convert.SHAPE_KEYS = SHAPE_KEYS;
   MML.Convert.PCM_RATE_VALUES = PCM_RATE_VALUES;
@@ -70,10 +76,10 @@
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality' },
+                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality', DRUM_POLY: 'mix' },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality' },
+                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality', DRUM_POLY: 'mix' },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
 
@@ -89,6 +95,7 @@
       }
       if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
+      if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
     }
     return out;
   };
@@ -98,7 +105,7 @@
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
       const p = PRESETS[name];
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA', 'RATE_MIX'].every(k => p[k] === n[k])) return name;
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA', 'RATE_MIX', 'DRUM_POLY'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };

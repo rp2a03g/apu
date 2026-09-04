@@ -227,6 +227,80 @@
     return tune;
   }
   MML.SPC2MML.computeSrcnFineTune = computeSrcnFineTune;
+  MML.SPC2MML.decodeBrrBytes = (bytes) => decodeBrrBytes(bytes);
+  MML.SPC2MML.DSP_RATE = DSP_RATE;
+
+  // ── 打楽器サンプルの判定と打点リスト(2026-09-03、ドラムパッド全形式展開) ──────────
+  // 「どのsrcnが打楽器か」を決める。優先順:
+  //   1. 手動上書き drumKinds[srcn] ('drum' | 'pitch')。鍵盤/パッドからの指定
+  //      (Emu.SamplePitchUtil のkind上書きをBRR内容ハッシュで引いたもの。main.js参照)
+  //   2. 自動: 原音周期が検出できず(computeSrcnFineTuneの補正が無い=conf<0.8)、かつ
+  //      曲中で使われたピッチが DRUM_MAX_PITCHES 種以下(タムの高低程度まで。旋律楽器は
+  //      周期が取れなくても多数のピッチで弾かれるので除外される)
+  // ノイズ(NON)で鳴っているイベントはサンプルではないので対象外(ノイズ借用先へ行く)。
+  const DRUM_MAX_PITCHES = 3;
+  MML.SPC2MML.brrHash = function (brr) {
+    const U = (global.Emu && global.Emu.SamplePitchUtil) || (MML.Emu && MML.Emu.SamplePitchUtil) || null;
+    if (!brr || !brr.bytes || !brr.bytes.length || !U || !U.sampleHash) return null;
+    return 'brr-' + U.sampleHash(brr.bytes, 0, brr.bytes.length);
+  };
+  MML.SPC2MML.drumSrcns = function (voiceEvents, srcnFineTune, drumKinds) {
+    const stat = new Map(); // srcn → Set(pitch)
+    for (const evs of voiceEvents || []) {
+      for (const ev of evs) {
+        if (ev.pitchSemi === null || ev.non) continue;
+        let s = stat.get(ev.srcn);
+        if (!s) { s = new Set(); stat.set(ev.srcn, s); }
+        s.add(ev.pitch);
+      }
+    }
+    const out = new Set();
+    for (const [srcn, pitches] of stat) {
+      const k = drumKinds && drumKinds[srcn];
+      if (k === 'drum') { out.add(srcn); continue; }
+      if (k === 'pitch') continue;
+      const untuned = !srcnFineTune || srcnFineTune[srcn] === undefined;
+      if (untuned && pitches.size <= DRUM_MAX_PITCHES) out.add(srcn);
+    }
+    return out;
+  };
+  /**
+   * 打楽器srcnの発音 → 打点リスト(src/convert/drumHits.js の hit 形)+パッド台帳用サンプル表。
+   * chans: 自動判定(drumSrcns)を適用する対象ボイス番号の配列(省略時は全8ボイス)。
+   * opt.dpcmChans: 借用先にE(DPCM)を選んだボイス。そのボイスの発音は drumSrcns の判定に
+   *   関わらず全部が打点(パッド)になる。opt.pitchSrcns にあるsrcnだけは除外して
+   *   音程付きDPCM経路へ残す(2026-09-04、複数chをDPCM1本へまとめる使い方への対応)。
+   *   hits:    [{ key:'brr:<srcn>', hash, pcm, rate(実際に鳴った速さ), vol(0..1), startFrame, endFrame, ch }]
+   *   samples: { key → { key, pcm, rate(初出の打点の速さ), hash, label } }
+   */
+  MML.SPC2MML.drumHits = function (voiceEvents, brrSamples, drumSrcns, chans, opt) {
+    const hits = [], samples = {};
+    const dpcmChans = (opt && opt.dpcmChans) || [];
+    const pitchSrcns = (opt && opt.pitchSrcns) || null;
+    const list = Array.from(new Set((chans || (dpcmChans.length ? [] : [0, 1, 2, 3, 4, 5, 6, 7])).concat(dpcmChans)));
+    const isDrumEvent = (ch, ev) => (dpcmChans.indexOf(ch) >= 0)
+      ? !(pitchSrcns && pitchSrcns.has(ev.srcn))   // Eボイス: 音階指定以外は全部パッド
+      : drumSrcns.has(ev.srcn);                    // それ以外: 自動判定に当たったsrcnだけ
+    for (const ch of list) {
+      for (const ev of (voiceEvents[ch] || [])) {
+        if (ev.pitchSemi === null || ev.non || !isDrumEvent(ch, ev)) continue;
+        const brr = brrSamples && brrSamples[ev.srcn];
+        if (!brr || !brr.bytes || !brr.bytes.length) continue;
+        const key = 'brr:' + ev.srcn;
+        const rate = DSP_RATE * (ev.pitch || 0x1000) / 0x1000; // pitch=0x1000 で原音32kHz
+        let s = samples[key];
+        if (!s) {
+          s = { key, pcm: decodeBrrBytes(brr.bytes), rate, hash: MML.SPC2MML.brrHash(brr), label: 'srcn' + ev.srcn };
+          samples[key] = s;
+        }
+        hits.push({ key, sampleKey: key, hash: s.hash, pcm: s.pcm, rate, label: s.label,
+                    vol: Math.max(0, Math.min(1, (ev.vol || 0) / 127)),
+                    startFrame: ev.frame, endFrame: ev.frame + ev.len, ch });
+      }
+    }
+    hits.sort((a, b) => a.startFrame - b.startFrame);
+    return { hits, samples };
+  };
   // BPM検出・音長量子化・チャンネルMML生成は共通モジュール
   // (src/convert/bpm.js, duration.js, mmlEmit.js) に切り出し済み。
 
@@ -753,6 +827,44 @@
     const srcnFineTune = computeSrcnFineTune(brrSamples);
     const voiceEvents = MML.SPC2MML.extractVoiceEvents(log, { srcnFineTune, envLog: options.envLog });
     const tuneOf = (srcn) => srcnFineTune ? (srcnFineTune[srcn] || 0) : 0;
+
+    // ── 打楽器サンプルの打点を旋律から切り出す(2026-09-03、2026-09-04にE指定を追加) ────
+    // 打楽器の発音は、そのボイスの借用先ではなく「実サンプルのままDPCM(E)」へ行く
+    // (src/convert/drumHits.js。打点が重なればその瞬間の音をミックスした1クリップになる)。
+    // 打楽器とみなす条件はボイスの借用先で変わる:
+    //   ・E(dpcm)以外のボイス … drumSrcns の自動判定に当たったsrcnだけ
+    //   ・E(dpcm)のボイス     … そのボイスが鳴らした **全srcn**(パッド化。ユーザー合意 2026-09-04)。
+    //                            ただしパッドで「音階として扱う」と指定したsrcnだけは従来どおり
+    //                            音程付きDPCM(BRR丸ごと@DPCM+音符で音程)へ回す
+    // 複数ボイスをEにすると、打点は全部この1本のDPCMへまとまる(同時に鳴った分は
+    // DrumHits.dpcm がミックスして1クリップにする)。切り出した分は旋律側では休符。
+    // cmd.DRUM=false なら従来どおり(打楽器も音程ノートのまま)。
+    const drumOn = cmd.DRUM !== false && !!(MML.Convert.DrumHits && MML.Dpcm);
+    const drumSrcnSet = drumOn ? MML.SPC2MML.drumSrcns(voiceEvents, srcnFineTune, options.drumKinds || null) : new Set();
+    // 「音階として扱う」の手動指定(srcn → 'pitch')。Eボイスの中でここに載ったsrcnだけ音程付きDPCM
+    const pitchSrcnSet = new Set();
+    for (const k of Object.keys(options.drumKinds || {})) {
+      if (options.drumKinds[k] === 'pitch') pitchSrcnSet.add(parseInt(k, 10));
+    }
+    const dpcmChans = [];   // E(dpcm)を選んだボイス
+    const meloChans = [];   // それ以外(skip以外)のボイス
+    for (let ch = 0; ch < 8; ch++) {
+      const cfg = channelMap[ch];
+      if (!cfg || cfg.type === 'skip') continue;
+      (cfg.type === 'dpcm' ? dpcmChans : meloChans).push(ch);
+    }
+    let drumHitsAll = [];
+    if (drumOn && (drumSrcnSet.size || dpcmChans.length)) {
+      const r = MML.SPC2MML.drumHits(voiceEvents, brrSamples, drumSrcnSet, meloChans,
+        { dpcmChans, pitchSrcns: pitchSrcnSet });
+      drumHitsAll = r.hits;
+      // 旋律側からは切り出す(Eボイスは元々旋律を出さないので meloChans だけでよい)
+      for (const ch of meloChans) {
+        voiceEvents[ch] = voiceEvents[ch].filter(ev => !(ev.pitchSemi !== null && !ev.non && drumSrcnSet.has(ev.srcn)));
+      }
+    }
+    // options.drumHits: 外から渡された打点(合成音chの分離レンダリング。SPCでは通常空)
+    if (drumOn && options.drumHits && options.drumHits.length) drumHitsAll = drumHitsAll.concat(options.drumHits);
     // ピッチエンベロープ(厳密周期ビブラート)の共有レジストリ(DESIGN-PITCH.md Phase 1)。
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry(cmd);
     // ノートエンベロープ(高速アルペジオ)の共有レジストリ(2026-08-14拡張)。
@@ -762,11 +874,19 @@
     //         指定時もフレームグリッドへ吸着補正) ──
     // 音長(len)に加え、チャンネル毎の発音開始間隔(IOI)も検出材料にする。
     // IOIはゲートタイムで音符が短く切られてもグリッドに乗るため頑健。
+    // 打楽器の打点(Eへ切り出した分)もテンポ推定の材料に戻す(音長+発音開始間隔を、切り出す前の
+    // ボイスイベント列と同じ並びで)。SPCは従来から打楽器のボイスイベントを含めて推定しており、
+    // 推定入力を同じにしておかないとテンポが変わる(実測: 打点を外すと2333曲中320曲、IOIだけ
+    // 戻しても250曲が2〜3倍/1/2〜1/3に振れた)。vgm2mmlは逆にドラムを外しているが、あちらは
+    // サンプルPCMのリトリガー間隔が音符長として混ざる問題があったため。SPCの打点は元々ノート長そのもの
     const noteDurations = [];
     for (let ch = 0; ch < 8; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip') continue;
-      const sounding = voiceEvents[ch].filter(ev => ev.pitchSemi !== null);
+      const sounding = voiceEvents[ch].filter(ev => ev.pitchSemi !== null)
+        .map(ev => ({ frame: ev.frame, len: ev.len }))
+        .concat(drumHitsAll.filter(h => h.ch === ch).map(h => ({ frame: h.startFrame, len: h.endFrame - h.startFrame })))
+        .sort((a, b) => a.frame - b.frame);
       for (const ev of sounding) noteDurations.push(ev.len);
       noteDurations.push(...MML.Convert.onsetIntervals(sounding.map(ev => ev.frame)));
     }
@@ -871,11 +991,17 @@
     // 最寄りのハードウェアレートへ量子化される(NSF側のような複数レート定義の
     // 使い分けはしない。BRRサンプルにNES実機のような固定サンプルテーブルの
     // 概念が無いため)。
+    // ★2026-09-04: Eボイスの発音は既定でパッド(打楽器)へ回るようになったので、ここに来るのは
+    //   パッドで「音階として扱う」と指定したsrcnだけ(pitchSrcnSet)。打楽器化そのものを切って
+    //   いる(cmd.DRUM=false)ときは従来どおり全srcnがこちら。
     const dpcmSrcns = new Set();
     for (let ch = 0; ch < 8; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type !== 'dpcm') continue;
-      for (const ev of voiceEvents[ch]) dpcmSrcns.add(ev.srcn);
+      for (const ev of voiceEvents[ch]) {
+        if (drumOn && !pitchSrcnSet.has(ev.srcn)) continue;
+        dpcmSrcns.add(ev.srcn);
+      }
     }
 
     // srcn → DPCM インデックス (@N) の対応表
@@ -915,6 +1041,19 @@
           instrument: srcnToDpcmIdx[ev.srcn]
         });
       }
+    }
+    // ── 打楽器サンプルの打点 → @DPCM(共通コア)。定義は音程付きDPCMの後ろへ連番で足す ──
+    let drumDpcm = null;
+    if (drumHitsAll.length) {
+      drumDpcm = MML.Convert.DrumHits.dpcm(drumHitsAll, FPS_SPC, {
+        totalFrames: FRAMES, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'spc_drum',
+        maxClipSec: 10, // BRRは有限長。VGMのROM歯止め1.5秒は外す
+      });
+      const base = dmcFiles.length;
+      for (const d of drumDpcm.defs) {
+        dmcFiles.push({ name: d.file, bytes: drumDpcm.files[d.index].bytes, rateIndex: d.freq, dac: d.dac, mode: d.mode });
+      }
+      for (const ev of drumDpcm.events) dpcmNoteEvents.push({ start: ev.start, end: ev.end, note: 48, instrument: base + ev.instrument });
     }
     dpcmNoteEvents.sort((a, b) => a.start - b.start);
 
@@ -1055,7 +1194,13 @@
     // @DPCM<n>定義(実機ppmckcと同じ書式)。以後Eチャンネルの音符で@<n>により選択する
     for (let i = 0; i < dmcFiles.length; i++) {
       const f = dmcFiles[i];
-      mml += `@DPCM${i} = { "${f.name}", ${f.rateIndex}, ${f.bytes.length}, 255, 0 }\n`;
+      // 音程付きDPCM(BRR全体)はdac=255(初期DAC書込み省略)、打楽器クリップは先頭値のdac
+      mml += `@DPCM${i} = { "${f.name}", ${f.rateIndex}, ${f.bytes.length}, ${f.dac != null ? f.dac : 255}, ${f.mode || 0} }\n`;
+    }
+    if (drumDpcm) {
+      const st = drumDpcm.stats;
+      mml += `; 打楽器サンプル(srcn ${Array.from(drumSrcnSet).sort((a, b) => a - b).join(',')})を実サンプルのままDPCM(E)へ: `
+           + `定義${st.clips}件 / 打点${st.segments}個 / ROM ${(st.bytes / 1024).toFixed(1)}KB\n`;
     }
 
     // 実測エンベロープ由来の音量テーブル定義 (@vN / @vr0)

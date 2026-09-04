@@ -139,13 +139,36 @@
   // ★FDSは波形メモリchなので、音程を持つ元chならどの種別からでも選べてよい。
   //   以前は 'wave'/'any' にしか入れておらず、FM/PCM/矩形波の行で F: が出なかった
   //   (ユーザー報告「変換先にF:のFDSがない」)。ノイズだけは対象外。
+  // ★'dpcm'(E)は全種別で選べる(2026-09-03、ドラムパッド全形式展開): サンプルPCM以外の行で
+  //   E を選ぶと「このchは打楽器」の手動判定になり、他chをミュートして分離レンダリングした
+  //   音がドラムパッド(1音高=1パッド)になって @DPCM へ焼かれる(main.js synthDrum参照)。
+  //   GBのノイズやPSGのドラム音をDPCM化する道がこれ。
+  // ★'brr'(SPCボイス)はサンプルを持つのでPCM系だが、ノイズ(NON)でも鳴るので 'noise'(D)も選べる
+  //   (2026-09-04。ユーザー報告「SPCのノイズパートに2A03のノイズが選べない」。spc2mml側は
+  //   type 'noise' + ev.non を既に処理できる: src/spc2mml/converter.js spcNoiseNoteNum)
   const KIND_TARGETS = {
-    square: ['fds'].concat(SQUARE_T), wave: WAVE_T, noise: NOISE_T,
-    fm: ['fds'].concat(VRC7_T, SQUARE_T.filter(function (t) { return VRC7_T.indexOf(t) < 0; })),
-    fm4: ['fds'].concat(VRC7_T, SQUARE_T.filter(function (t) { return VRC7_T.indexOf(t) < 0; })),
+    square: ['fds', 'dpcm'].concat(SQUARE_T), wave: ['dpcm'].concat(WAVE_T), noise: ['dpcm'].concat(NOISE_T),
+    fm: ['fds', 'dpcm'].concat(VRC7_T, SQUARE_T.filter(function (t) { return VRC7_T.indexOf(t) < 0; })),
+    fm4: ['fds', 'dpcm'].concat(VRC7_T, SQUARE_T.filter(function (t) { return VRC7_T.indexOf(t) < 0; })),
     pcm: ['fds'].concat(PCM_T),
+    brr: ['fds', 'dpcm', 'noise'].concat(SQUARE_T),
     any: ['fds', 'dpcm'].concat(SQUARE_T),
   };
+  // 「E(DPCM)へ載せた合成音ch」か(=他chをミュートして分離レンダリングし、打楽器化する対象)。
+  // ★判定は「実サンプル表を持つ行か」であって kind の網羅ではない(2026-09-04修正)。
+  //   以前は kind 'pcm'/'any' を除外していたが、'any' は **CH_KIND表に載っていない行の既定値**
+  //   でもあるため、実サンプルを持たない行まで巻き添えで除外されていた:
+  //     VGM  … YM2612 DAC(YMDA) / 32X PWM(PWL,PWR) / RF5C164・68(RC*,RB*) / OKIM6258(OKI)
+  //     NSF  … MMC5 PCM(M5PC)
+  //   メガドライブ曲のドラムはDAC(YMDA)に載っていることが多く、Eを選んでも何も起きなかった
+  //   (ユーザー報告「アウトランでDPCMを選んでもパッドに出てこない」)。
+  //   実サンプルを持つのは VGMのPCMチップ(kind 'pcm')/ SPCボイス(kind 'brr')/ NSFのDM行だけ。
+  const SAMPLE_KINDS = { pcm: true, brr: true };
+  function isSynthDrumTarget(chId, target) {
+    if (target !== 'dpcm' || !chId) return false;
+    if (chId === 'DM') return false;
+    return !SAMPLE_KINDS[channelKind(chId)];
+  }
   // 借用先の並びはチャンネル文字のアルファベット順(A-Z → a,b)。ラベルが「P: N163 ch1」と
   // 文字始まりなので、そのまま読める順になる。localeCompareは環境によっては 'a' < 'B' と
   // 判定するため、実機ppmckの文字順(大文字A-Zのあとに小文字a,b)になるコードポイント比較にする。
@@ -224,7 +247,7 @@
   // ソースID(VGMの 'ay:0' 等)とは体系が違うので、ここで橋渡しする。
   // 各要素は [正規表現, m => [kind, vgmSourceId]](vgmSourceIdはVGM変換時のみ意味を持つ)
   const CH_KIND = [
-    [/^V[0-7]$/, function () { return ['any', null]; }],                                    // SPC ボイス
+    [/^V[0-7]$/, function () { return ['brr', null]; }],                                    // SPC ボイス(BRRサンプル)
     [/^KP([1-3])$/, function (m) { return ['square', 'ay:' + (+m[1] - 1)]; }],              // AY8910 / YM2610 SSG
     [/^KS([1-5])$/, function (m) { return ['wave', 'scc:' + (+m[1] - 1)]; }],               // SCC
     [/^KF([1-9])$/, function (m) { return ['fm', 'opll:' + (+m[1] - 1)]; }],                // YM2413 / FMPAC メロディ
@@ -313,6 +336,8 @@
     // 2A03パルスと周期式・音量尺度が同一なので、曲で未使用でも移動先として出してよい。
     const list = sameFamilyTargets(defTgt).filter(t =>
       TARGETS[t].chip !== 'n163' || !avail || !avail.length || avail.indexOf(t) >= 0 || t === defTgt);
+    // 打楽器化(E=DPCMへ分離レンダリング)はNSFでも全行で選べる(KIND_TARGETS のコメント参照)
+    if (list.indexOf('dpcm') < 0 && chId !== 'DM') list.push('dpcm');
     return ['skip'].concat(sortByLetter(list));
   }
 
@@ -323,7 +348,8 @@
   const listeners = [];
 
   function notify() {
-    for (const fn of listeners) { try { fn(); } catch (e) { /* UI側の失敗で変換は止めない */ } }
+    // UI側の失敗で変換は止めないが、黙って握り潰すとバグが見えないのでログには出す
+    for (const fn of listeners) { try { fn(); } catch (e) { console.error('[ChannelPlan] onChange listener failed:', e); } }
   }
 
   const Plan = {
@@ -341,6 +367,7 @@
     vgmSourceId: vgmSourceId,
     colorOfTarget: colorOfTarget,
     chIdForVgmSource: chIdForVgmSource,
+    isSynthDrumTarget: isSynthDrumTarget,
 
     // 今どの形式を表示/再生しているか(setKbdSource経由。何度呼ばれても割当は消さない)
     setFormat: function (fmt) {

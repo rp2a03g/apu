@@ -436,9 +436,12 @@
         sources.push({ chip: chipFlag, snapshots: entry.snapshots, chans: dpcmChans[chipFlag],
                        shape: d.shape, samples: entry.samples });
       }
-      if (sources.length) {
+      // options.drumHits: 合成音ch(FM/PSG/SN等)をE(DPCM)へ載せた分の打点(main.js synthDrum、
+      // 他chミュートの分離レンダリング)。サンプルPCMの打点と一緒に焼く
+      const extraHits = cmd.DRUM !== false ? (options.drumHits || []) : [];
+      if (sources.length || extraHits.length) {
         dpcmResult = MML.Vgm2MmlExpansion.dpcmDrums(sources, frameRate, {
-          totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX });
+          totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, extraHits });
         if (!dpcmResult.defs.length) dpcmResult = null;
       }
     }
@@ -478,7 +481,8 @@
     }
 
     function extractGroup(chipKey, extractFn) {
-      const items = src.filter(s => s.chip === chipKey && s.kind !== 'noise' && plan[s.id] !== 'skip');
+      // 'dpcm'(合成音chの打楽器化)は分離レンダリングの打点で扱うので旋律の抽出からは外す
+      const items = src.filter(s => s.chip === chipKey && s.kind !== 'noise' && plan[s.id] !== 'skip' && plan[s.id] !== 'dpcm');
       const fams = [...new Set(items.map(s => familyOf(plan[s.id])))];
       for (const fam of fams) {
         const res = extractFn(regFor(chipKey, fam), fam);

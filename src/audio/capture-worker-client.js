@@ -80,7 +80,7 @@
   function _cloneableRoll(roll) {
     if (!roll) return undefined;
     const out = {};
-    for (const k of ['frameRate', 'samplesPerFrame', 'sampleRate', 'chips', 'fineTune', 'poolMode']) {
+    for (const k of ['frameRate', 'samplesPerFrame', 'sampleRate', 'chips', 'fineTune', 'poolMode', 'drumKinds']) {
       if (roll[k] !== undefined) out[k] = roll[k];
     }
     return out;
@@ -91,7 +91,7 @@
     if (!roll || typeof roll.onRoll !== 'function' || !MML.RollBuild) return null;
     let params;
     if (format === 'kss') params = { frameRate: roll.frameRate, header: roll.header };
-    else if (format === 'spc') params = { frameRate: MML.SPC2MML.FRAME_RATE, fineTune: roll.fineTune || null };
+    else if (format === 'spc') params = { frameRate: MML.SPC2MML.FRAME_RATE, fineTune: roll.fineTune || null, drumKinds: roll.drumKinds || null };
     else params = roll;
     const job = MML.RollBuild.createRollJob(format, params);
     if (!job) return null;

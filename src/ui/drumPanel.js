@@ -49,6 +49,7 @@
           `<span class="dp-c-label">${T('サンプル')}</span>` +
           `<span class="dp-c-play"><i>${T('オリジナル')}</i><i>DPCM</i></span>` +
           `<span class="dp-c-hits">${T('打点')}</span>` +
+          `<span class="dp-c-kind">${T('扱い')}</span>` +
           `<span class="dp-c-on">${T('変換')}</span>` +
           `<span class="dp-c-vol">${T('ボリューム')}</span>` +
           `<span class="dp-c-rate">${T('DMCレート')}</span>` +
@@ -117,7 +118,8 @@
   function render() {
     if (!bodyEl) return;
     if (!rows.length) {
-      bodyEl.innerHTML = `<div class="drum-panel-empty">${T('打楽器のサンプルがありません。VGMを再生してキャプチャが終わると一覧に出ます。')}</div>`;
+      // ★形式非依存の文言にする(2026-09-04)。全6形式でこのパネルを使うので「VGMを再生して」は誤り
+      bodyEl.innerHTML = `<div class="drum-panel-empty">${T('打楽器のサンプルがありません。曲を再生してキャプチャが終わると一覧に出ます(鍵盤表示の割当で借用先にE(DPCM)を選んだchもここに出ます)。')}</div>`;
       return;
     }
     bodyEl.innerHTML = '';
@@ -145,6 +147,13 @@
           `<button type="button" class="dp-play" data-mode="dpcm" title="${T('DPCM変換後を鳴らす')}">♪</button>` +
         `</span>` +
         `<span class="dp-c-hits">${r.hits != null ? r.hits : ''}</span>` +
+        // 扱い: 打楽器(パッド)か音階付きサンプルか。自動判定を手で上書きする
+        // (実体は Emu.SamplePitchUtil のkind上書き=サンプル内容ハッシュ。ロール/鍵盤/変換が同じ1点を見る)
+        `<span class="dp-c-kind"><select class="dp-kind" title="${T('このサンプルを打楽器(パッド)として扱うか、音階を持つサンプルとして扱うか')}">` +
+          `<option value="auto">${T('自動')}</option>` +
+          `<option value="drum">${T('打楽器')}</option>` +
+          `<option value="pitch">${T('音階')}</option>` +
+        `</select></span>` +
         `<span class="dp-c-on"><input type="checkbox" class="dp-on"${st.enabled === false ? '' : ' checked'}></span>` +
         `<span class="dp-c-vol">` +
           `<input type="range" class="dp-vol" min="1" max="100" step="1" value="${vol}">` +
@@ -156,6 +165,13 @@
             `${st.include ? (st.include.name || T('差し替え済み')) : T('ファイル…')}${missing ? ' ' + T('(要再読込)') : ''}</button>` +
           (st.include ? `<button type="button" class="dp-inc-clear" title="${T('元のサンプルに戻す')}">×</button>` : '') +
         `</span>`;
+      const kindSel = row.querySelector('.dp-kind');
+      kindSel.value = r.kind || 'auto';
+      kindSel.disabled = noHash;
+      kindSel.addEventListener('change', () => {
+        if (hooks.onKind) hooks.onKind(r, kindSel.value);
+      });
+
       const sel = row.querySelector('.dp-rate');
       for (const [v, label] of opts) {
         const o = document.createElement('option');
