@@ -1039,21 +1039,26 @@
       // 済みでも、その後キャプチャが伸びていたら(先読み途中で打楽器化した場合)全長で取り直す
       const done = synthDrum.byCh.get(id);
       if (done && done.totalFrames >= info.totalFrames * 0.98) continue;
+      // ★VGMのストリーミングDAC(YMDA)は必ずログ由来だけで決める(2026-09-04)。
+      //   打点が無ければ「そのchはDACを使っていない」ということなので、何も作らずに終わる。
+      //   ここで分離レンダリングへ落ちると、YMDAの既定がE(DPCM)である以上
+      //   **DACを使っていないメガドライブ曲でも毎回フル再エミュレーションが走る**
+      //   (ユーザー報告「ローリングサンダー2はPCM無いのに重い」の原因)。
+      if (isLogDrumRow(id)) {
+        const fromLog = vgmDacDrumFor(id, info);
+        if (fromLog) {
+          fromLog.totalFrames = info.totalFrames;
+          synthDrum.byCh.set(id, fromLog);
+          Object.assign(drumSampleStore, fromLog.samples);
+          logDrumUpdated = true;
+        }
+        continue;
+      }
       // ★先読みキャプチャがまだ伸びている間は分離レンダリングを始めない(2026-09-04)。
       //   途中の長さで走らせても、完了時に全長でもう一度走ることになり、重い処理が
       //   2回ぶん再生に割り込む(実測: VGM 3分1chで1回47秒・メインスレッド占有44秒)。
       //   キャプチャ完了時に各形式の .then() が synthDrumEnsure() を呼び直すので取りこぼさない。
-      if (!isLogDrumRow(id) && captureStillGrowing()) continue;
-      // VGMのストリーミングDACはログから打点が取れるので、分離レンダリングは要らない
-      // (音から推測すると同じ太鼓が何種類にも割れる。vgmDacDrumFor 冒頭コメント参照)
-      const fromLog = vgmDacDrumFor(id, info);
-      if (fromLog) {
-        fromLog.totalFrames = info.totalFrames;
-        synthDrum.byCh.set(id, fromLog);
-        Object.assign(drumSampleStore, fromLog.samples);
-        logDrumUpdated = true;
-        continue;
-      }
+      if (captureStillGrowing()) continue;
       if (synthDrum.pending.has(id)) { jobs.push(synthDrum.pending.get(id)); continue; }
       const token = synthDrum.token;
       // ★進捗を必ず出す(2026-09-04)。曲の長さぶん再エミュレーションするので数十秒かかり

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-04 21:43:46
+ * Built by tools/build-capture-workers.ps1 at 2026-09-05 02:11:07
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-04 21:43:46';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-05 02:11:07';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -3753,7 +3753,7 @@
       return { left: s.left + this.adpcmL, right: s.right + this.adpcmR };
     }
     // 書込みキュー適用(clock()を回さない先読み/シーク経路用)
-    flushWrites() { if (this.core.flushWrites) this.core.flushWrites(); }
+    flushWrites(collapse) { if (this.core.flushWrites) this.core.flushWrites(collapse); }
   }
 
   // 鍵盤表示用スナップショット: FMはYM2612版の6chから実チャンネルを抜き出す(形は同じ)。

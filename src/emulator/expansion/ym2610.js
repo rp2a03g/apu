@@ -636,7 +636,7 @@
       return { left: s.left + this.adpcmL, right: s.right + this.adpcmR };
     }
     // 書込みキュー適用(clock()を回さない先読み/シーク経路用)
-    flushWrites() { if (this.core.flushWrites) this.core.flushWrites(); }
+    flushWrites(collapse) { if (this.core.flushWrites) this.core.flushWrites(collapse); }
   }
 
   // 鍵盤表示用スナップショット: FMはYM2612版の6chから実チャンネルを抜き出す(形は同じ)。

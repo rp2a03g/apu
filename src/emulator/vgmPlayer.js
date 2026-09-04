@@ -233,7 +233,7 @@
       mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
       // 書込みはキュー経由でclock()内に適用されるので、clock()を回さない経路(先読み/シーク)は
       // これで適用させる(VgmPlayer._flushWrites)
-      flushWrites() { if (chip.flushWrites) chip.flushWrites(); },
+      flushWrites(collapse) { if (chip.flushWrites) chip.flushWrites(collapse); },
       applyMute(m) { const e = m.expansion || m; if (e.ym2612) Emu.applyMute(chip.mute, e.ym2612); },
       applyVolume(v) { const e = v.expansion || v; if (e.ym2612) Emu.applyVolume(chip.vol, e.ym2612); }
     };
@@ -256,7 +256,7 @@
       },
       loadRom(kind, romSize, start, data) { fm.loadRom(kind, romSize, start, data); },
       clock() { fm.clock(); if ((this._ssgToggle ^= 1) === 0) ssg.clock(); },
-      flushWrites() { fm.flushWrites(); },
+      flushWrites(collapse) { fm.flushWrites(collapse); },
       mix(out) {
         const s = fm.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain;
         const sg = ssg.mixSample() * this.ssgGain; out[0] += sg; out[1] += sg;
@@ -304,7 +304,7 @@
       id: 'ym2203', clockHz: info.clock, accum: 0, fm, gain: CHIP_GAIN.ym2203, ssgGain: CHIP_GAIN.ym2203ssg,
       write(aa, dd) { fm.writeReg(aa, dd); },
       clock() { fm.clock(); },
-      flushWrites() { fm.flushWrites(); },
+      flushWrites(collapse) { fm.flushWrites(collapse); },
       mix(out) {
         const s = fm.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain;
         const sg = fm.ssg.mixSample() * this.ssgGain; out[0] += sg; out[1] += sg;
@@ -337,7 +337,7 @@
       write(port, aa, dd) { fm.writeReg(port, aa, dd); },
       loadRom(romSize, start, data) { fm.loadRom('b', romSize, start, data); },
       clock() { fm.clock(); },
-      flushWrites() { fm.flushWrites(); },
+      flushWrites(collapse) { fm.flushWrites(collapse); },
       mix(out) {
         const s = fm.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain;
         const sg = fm.ssg.mixSample() * this.ssgGain; out[0] += sg; out[1] += sg;
@@ -1038,15 +1038,19 @@
         // ストリームはサンプル単位でしか進められないが、シーク用途では最終位置だけ合えばよい
         for (let i = 0; i < step; i++) this._stepStreams();
       }
-      this._flushWrites();
+      this._flushWrites(true); // シークは時間経過を再現していないので畳んでよい
     }
 
     // clock()を回さずにコマンドだけ消化した後(fastForward / renderFrame regsOnly)、書込みを
     // キュー経由で適用するチップ(Nuked-OPN2版YM2612/YM2610)にキューを消化させる。
     // これが無いと、Nukedコアではキャプチャの鍵盤スナップショット/ロールが空になり、シーク後は
     // 曲頭からの全書込みがキューに溜まったまま再生が始まって暫く音が崩れる。
-    _flushWrites() {
-      for (const a of this.adapters) if (a.flushWrites) a.flushWrites();
+    // collapse: シーク(fastForward)からの呼び出しだけ true。溜まりきったキューを
+    // レジスタごとの最終値へ畳んでよい合図(ym2612Nuked.flushWrites 参照)。
+    // キャプチャの毎フレーム経路では畳まない(そこでのclock()はエンベロープを実際に進めており、
+    // 鍵盤スナップショットの発音判定がそれに依存している)
+    _flushWrites(collapse) {
+      for (const a of this.adapters) if (a.flushWrites) a.flushWrites(collapse);
     }
 
     /**

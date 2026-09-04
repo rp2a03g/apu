@@ -100,6 +100,9 @@
   ];
 
   const OPN2_WRITEBUF_DELAY = 15; // サイクル
+  // これを超えてキューがたまっていたら「レジスタごとの最終値」へ畳む(flushWrites参照)。
+  // 通常再生では clock() が随時消化するので数十件しかたまらず、ここには当たらない
+  const COLLAPSE_THRESHOLD = 4096;
   const CYCLES_PER_SAMPLE = 24;   // OPN2サイクル(=マスタークロック/6)
 
   // 鍵盤表示用: 1周期ぶんのFM波形を「今のパラメータで再合成した概形」として作る
@@ -263,10 +266,50 @@
      * 適用されるので最終レジスタ状態は同じ。キーオンのEGへの反映など数サイクル遅れて
      * 効く状態のために、空になった後さらに1サンプルぶん(24サイクル)回す。
      */
-    flushWrites() {
+    /**
+     * @param {boolean} [collapse] シーク(fastForward)専用。キューが大きいときは
+     *   「レジスタごとの最後の値」だけへ畳んでから流す(2026-09-04)。
+     *   早送りは clock() を回さないので、86秒の曲を頭からシークするとキューが数十万件たまり、
+     *   それを OPN2_WRITEBUF_DELAY(15サイクル)間隔で律儀に流すために1000万回以上
+     *   clock() を回すことになる(実測: View of Dynamism 5秒地点で981ms → 曲末なら約16秒、
+     *   ブラウザが固まる)。早送りの時点でそもそも時間経過は再現していないので、
+     *   最終レジスタ状態さえ合えばよい。
+     *   ★キャプチャの毎フレーム経路(renderFrame regsOnly)では畳んではいけない。
+     *     そこでの「キューを流すための clock()」はエンベロープを実際に進めており、
+     *     鍵盤スナップショットの音量/発音判定がそれに依存している(畳むとメガドライブの
+     *     DAC多用曲13件で抽出結果が変わった)。
+     */
+    flushWrites(collapse) {
+      if (collapse && this.writebuf.length > COLLAPSE_THRESHOLD) this._collapseWriteBuf();
       let guard = 0;
       while (this.writebuf.length && guard++ < 50000000) this.clock();
       for (let i = 0; i < CYCLES_PER_SAMPLE * 6; i++) this.clock();
+    }
+    /**
+     * たまった書込みキューを (port, reg) ごとの最後の値だけへ畳む。キューは writeReg() が
+     * 「アドレス→データ」の対で積むので、対で読み直して最後の1組を残す(順序は Map が保つ)。
+     * ★キーオン(reg 0x28)はデータ側にチャンネル番号が入っているので、reg だけで畳むと
+     *   最後に叩いた1chぶんしか残らない。0x28 は下位ニブル(ch指定)もキーに含める。
+     * 想定外の並びを見つけたら畳まずに諦める(正確さを優先)。
+     */
+    _collapseWriteBuf() {
+      const buf = this.writebuf;
+      if (buf.length & 1) return;
+      const last = new Map();
+      for (let i = 0; i < buf.length; i += 2) {
+        const a = buf[i], d = buf[i + 1];
+        if ((a.port & 1) !== 0 || (d.port & 1) !== 1) return; // アドレス→データの対でない
+        const reg = a.data;
+        const key = (a.port << 16) | (reg << 8) | (reg === 0x28 ? (d.data & 0x0F) : 0);
+        last.delete(key); // 書いた順を最後尾へ寄せ直す
+        last.set(key, { aPort: a.port, reg, dPort: d.port, data: d.data });
+      }
+      this.writebuf = [];
+      this.writebuf_lasttime = this.writebuf_samplecnt;
+      for (const w of last.values()) {
+        this._writeBuffered(w.aPort, w.reg);
+        this._writeBuffered(w.dPort, w.data);
+      }
     }
 
     _write(port, data) {

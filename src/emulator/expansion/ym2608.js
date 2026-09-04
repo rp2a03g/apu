@@ -178,7 +178,7 @@
       return { left: s.left + this.adpcmL, right: s.right + this.adpcmR };
     }
     // 書込みキュー適用(clock()を回さない先読み/シーク経路用)
-    flushWrites() { if (this.core.flushWrites) this.core.flushWrites(); }
+    flushWrites(collapse) { if (this.core.flushWrites) this.core.flushWrites(collapse); }
   }
 
   // 表示用サンプルピッチ解析API(loadRom/samplePitch/samplePcm/setSampleTuning/setSampleKind)を
