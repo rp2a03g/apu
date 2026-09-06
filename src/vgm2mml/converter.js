@@ -307,7 +307,9 @@
     // YM2610 ADPCM: B(1ch、Δ-Nで音階演奏されることが多い)はVRC7の空き→2A03パルスA、
     // A(6ch、音程サンプルは音程ごとに別サンプル)はN163の空きへ。ドラム等音程なしのサンプルは
     // 抽出段階で休符になるので、割り当てても音符が無ければ空チャンネルになるだけ
-    for (const s of src.filter(s => s.kind === 'pcm' && /^pcmb/.test(s.id))) plan[s.id] = used.vrc7 < cap.vrc7 ? `vrc7_${take('vrc7')}` : 'pulse1';
+    // ★VRC7に空きが無いとき(YM2608=FM6ch、YM2610B)の落とし先は DPCM(E)。以前は 2A03 パルスA だったが、
+    //   ADPCM-Bは実サンプルなので矩形波へ載せるより実サンプルのままDMCへ焼く方が近い(ユーザー指定 2026-09-06)
+    for (const s of src.filter(s => s.kind === 'pcm' && /^pcmb/.test(s.id))) plan[s.id] = used.vrc7 < cap.vrc7 ? `vrc7_${take('vrc7')}` : 'dpcm';
     for (const s of src.filter(s => s.kind === 'pcm' && !/^pcmb/.test(s.id))) plan[s.id] = used.n163 < cap.n163 ? `n163_${take('n163')}` : 'skip';
     // SN76489: チップ単位でまとまって入る所へ
     const snChips = [...new Set(src.filter(s => s.chip === 'sn76489').map(s => s.chipIndex))];
@@ -448,23 +450,36 @@
     //   (両方へ出すと同じ打点が二重に鳴る)。
     let dpcmResult = null;
     const dpcmChans = {}; // chipフラグ → [ch番号...]
+    // ADPCMソース(sourceChannelsの chip は 'ym2610adpcm'/'ym2608adpcm' で DRUM_CHIPS のフラグと違う)。
+    // ★以前はここで引けず、ADPCM-A/B を E(DPCM) に割り当てても何も焼かれていなかった。
+    //   drumFlag は「ノイズ側ドラムパートから外すch」(dpcmChans)のキー。ADPCM-B(pcmb)は
+    //   snapshot の adpcmB(1本)なので shape を分け、ch番号は使わない
+    const ADPCM_DPCM_DATA = {
+      ym2610adpcm: { data: 'ym2610fm', drumFlag: 'ym2610' },
+      ym2608adpcm: { data: 'ym2608fm', drumFlag: 'ym2608' },
+    };
     if (MML.Vgm2MmlExpansion.dpcmDrums && MML.Dpcm) {
       const bySrcChip = new Map();
       for (const s of src) {
         if (s.kind !== 'pcm' || s.ch < 0 || plan[s.id] !== 'dpcm') continue;
-        if (!bySrcChip.has(s.chip)) bySrcChip.set(s.chip, []);
-        bySrcChip.get(s.chip).push(s);
+        const key = s.chip + (/^pcmb/.test(s.id) ? ':B' : '');
+        if (!bySrcChip.has(key)) bySrcChip.set(key, []);
+        bySrcChip.get(key).push(s);
       }
       const sources = [];
-      for (const [chipFlag, items] of bySrcChip) {
+      for (const [key, items] of bySrcChip) {
+        const chipFlag = items[0].chip;
+        const isB = /:B$/.test(key);
         const d = DRUM_CHIPS.find(x => x.flag === chipFlag);
-        const entry = d && data[d.data];
-        if (!d || !entry || !entry.samples) continue;
-        dpcmChans[chipFlag] = items.map(s => s.ch);
+        const ad = ADPCM_DPCM_DATA[chipFlag];
+        const entry = d ? data[d.data] : (ad ? data[ad.data] : null);
+        if (!entry || !entry.samples) continue;
+        const shape = isB ? 'adpcmB' : (d ? d.shape : 'adpcmA');
+        const chans = items.map(s => s.ch);
+        if (!isB) dpcmChans[d ? d.flag : ad.drumFlag] = chans;
         // ★DMCレート・変換する/しない・外部ファイルでの差し替えは、チャンネルではなく
         //   サンプル単位の設定(src/convert/drumSamples.js)。dpcmDrums が直接読む。
-        sources.push({ chip: chipFlag, snapshots: entry.snapshots, chans: dpcmChans[chipFlag],
-                       shape: d.shape, samples: entry.samples });
+        sources.push({ chip: chipFlag, snapshots: entry.snapshots, chans, shape, samples: entry.samples });
       }
       // options.drumHits: 合成音ch(FM/PSG/SN等)をE(DPCM)へ載せた分の打点(main.js synthDrum、
       // 他chミュートの分離レンダリング)。サンプルPCMの打点と一緒に焼く

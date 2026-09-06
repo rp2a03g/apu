@@ -2721,7 +2721,9 @@
   keyboardDisplay.onSourceListRequest = () => {
     if (!kbdSourceKind || kbdSourceKind === 'mml') return null;
     const ai = archiveInfo();
-    if (ai && ai.titles.length > 1) return { name: ai.name, items: ai.titles, index: ai.index };
+    // アーカイブ(m3u)はzipのファイル名ではなく「いま選ばれている曲名」を出す(ユーザー指定 2026-09-06)。
+    // リスト名はツールチップへ
+    if (ai && ai.titles.length > 1) return { name: ai.titles[ai.index] || ai.name, listName: ai.name, items: ai.titles, index: ai.index };
     const fmt = loadedSoundFormat;
     const fileName = (ai && ai.name) || fileInputName(document.getElementById('soundFile'))
       || (fmt ? fileInputName(document.getElementById(fmt + 'File')) : '') || '';
@@ -6866,7 +6868,8 @@
     const out = {};
     const CH = [['ga20', 4, 'pcm'], ['segapcm', 16, 'pcm'], ['c140', 24, 'pcm'], ['c352', 32, 'pcm'],
                 ['qsound', 16, 'pcm'], ['okim6295', 4, 'pcm'], ['multipcm', 28, 'pcm'],
-                ['ym2610fm', 6, 'adpcmA'], ['ym2608fm', 6, 'adpcmA']];
+                ['ym2610fm', 6, 'adpcmA'], ['ym2608fm', 6, 'adpcmA'],
+                ['ym2610fm', 1, 'adpcmB'], ['ym2608fm', 1, 'adpcmB']]; // ADPCM-B は snapshot.adpcmB の1本
     for (const [key, n, shape] of CH) {
       const e = data && data[key];
       if (!e || !e.samples || !e.snapshots) continue;
@@ -6874,7 +6877,7 @@
       const rateOf = {};
       for (const fr of e.snapshots) {
         if (!fr) continue;
-        const chans = shape === 'adpcmA' ? (fr.adpcmA || []) : fr;
+        const chans = shape === 'adpcmB' ? [fr.adpcmB] : shape === 'adpcmA' ? (fr.adpcmA || []) : fr;
         for (let i = 0; i < n; i++) {
           const c = chans[i];
           if (!c || !c.sample || !(c.rate > 0)) continue;
@@ -6886,7 +6889,7 @@
       const chansOf = {}, hashOf = {};
       for (const fr of e.snapshots) {
         if (!fr) continue;
-        const chans = shape === 'adpcmA' ? (fr.adpcmA || []) : fr;
+        const chans = shape === 'adpcmB' ? [fr.adpcmB] : shape === 'adpcmA' ? (fr.adpcmA || []) : fr;
         for (let i = 0; i < n; i++) {
           const c = chans[i];
           if (!c || !c.sample) continue;

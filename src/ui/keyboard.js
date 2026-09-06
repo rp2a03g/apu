@@ -2567,7 +2567,7 @@
       this._transportState = { playing: false, canPlay: false, canStop: false, canPrevNext: false, canToggleSource: false };
       this.onTransport = null;          // (action:'play'|'stop'|'prev'|'next') => void
       this.onSourceToggle = null;       // () => void  バッジ(MML/FILE)クリックでMML↔サウンドファイル切替
-      this.onSourceListRequest = null;  // () => { name, items:[string]|null, index } | null  ファイル名/リスト名と曲一覧(main.js)
+      this.onSourceListRequest = null;  // () => { name, listName?, items:[string]|null, index } | null  表示名(アーカイブなら曲名)と曲一覧(main.js)
       this.onSourceSelect = null;       // (index) => void  ファイル名の一覧から曲を選んだとき
       this._rollLastDrawnPos = 0;       // _renderRoll()が最後に描いた曲内秒(ドラッグ開始位置の基準)
       this._pendingSelectionReset = false; // reset()が立てるフラグ。次に実データでチャンネル一覧が
@@ -3462,7 +3462,8 @@
       el.style.display = '';
       if (el.textContent !== name) el.textContent = name;
       el.classList.toggle('kbd-src-name--pick', pickable);
-      el.title = name + (pickable ? '\n' + T('クリックで曲を選ぶ') : '');
+      // アーカイブなら1行目にリスト名(zip/m3u)、2行目に曲名
+      el.title = (list && list.listName ? list.listName + '\n' : '') + name + (pickable ? '\n' + T('クリックで曲を選ぶ') : '');
     }
     refreshSourceName() { this._renderSourceName(); }
     _openSourcePopover() {

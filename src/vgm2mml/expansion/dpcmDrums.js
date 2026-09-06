@@ -43,7 +43,8 @@
       const getCh = (f, ch) => {
         const s = src.snapshots[f];
         if (!s) return null;
-        return src.shape === 'adpcmA' ? (s.adpcmA && s.adpcmA[ch]) : s[ch];
+        // adpcmB は1本(ch番号は使わない)。sample は {kind:'b', start, end}
+        return src.shape === 'adpcmB' ? s.adpcmB : src.shape === 'adpcmA' ? (s.adpcmA && s.adpcmA[ch]) : s[ch];
       };
       for (const ch of src.chans) {
         let prevSeq = null, cur = null;
