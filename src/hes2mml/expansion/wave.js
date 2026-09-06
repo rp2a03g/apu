@@ -124,19 +124,74 @@
   // 同一フレーム内に複数書込みがある場合は直前ノートの残りが先行しているだけ)。
   // 開始フレーム内に書込みが無い(音量変化を伴わないノート境界)場合はフレーム原点に
   // フォールバックし、書込みがまだ一度も無い区間はfallbackSeq(スナップショット列)を使う。
-  function resampleSeq(timeline, startFrame, endFrame, fallbackSeq) {
+  // ★T_EPS: 駆動がフレームと厳密に同期している曲(VGMのVSYNC駆動ドライバ等)では、書込み時刻が
+  // 毎フレーム同じ小数部(f + s/735)になり、t0+k と書込みの t が「同じ値のはず」なのに
+  // 浮動小数の丸めで1ulp前後する。<= の判定がフレームごとに含む/含まないへ揺れると、
+  // 対策前より酷い1フレーム違い変種を量産する(実測: Star Parodier #1 @v101→132)。
+  // 同一位相の書込みは必ず含める意味で、微小な許容(1e-6フレーム≒0.0007サンプル)を持たせる。
+  const T_EPS = 1e-6;
+  // ★サンプル点のオフセット(sampleOffset): t0+k ちょうどで読むか、半フレーム後ろ(t0+k+0.5)で読むか。
+  //  - 駆動レートがフレームレートとほぼ同じ曲(VGMのVSYNC駆動ドライバ: 実測1.003フレーム周期、
+  //    VGMログ由来の±0.02フレームの揺らぎ付き)では、k番目の書込みが t0+k の直前/直後に揺れて
+  //    着地し、ちょうどの時刻で読むと「含む/含まない」がノートごとに変わる=対策前より酷い
+  //    1フレーム違い変種を量産する(実測: Star Parodier #1 @v101→132、近似重複ペア78→153)。
+  //    半フレームずらせば周期1.00±0.02の書込みからは常に約0.5フレーム離れて読める。
+  //  - 一方、タイマー駆動(HES NX91002: 54.9Hz=1.094フレーム周期)は音符開始(VSYNC)と
+  //    エンベロープ段(タイマー)が別クロックで位相がノートごとに違い、0.5をずらすと段の
+  //    境目とサンプル点の余裕がかえって減る曲がある(実測: idx32 @v33→42)。こちらは
+  //    従来どおり t0 ちょうど(オフセット0)が良い。
+  //  よって書込み間隔の中央値がほぼ整数フレーム(フレーム同期駆動)のときだけ0.5を使う。
+  function sampleOffsetFor(timelines) {
+    const gaps = [];
+    for (const tl of timelines) {
+      if (!tl) continue;
+      for (let i = 1; i < tl.length; i++) { const g = tl[i].t - tl[i - 1].t; if (g > 0.05) gaps.push(g); }
+    }
+    if (gaps.length < 8) return 0;
+    gaps.sort((a, b) => a - b);
+    const med = gaps[gaps.length >> 1];
+    const r = Math.round(med);
+    return (r >= 1 && Math.abs(med - r) < 0.05) ? 0.5 : 0;
+  }
+  MML.Hes2MmlExpansion._sampleOffsetFor = sampleOffsetFor; // noise.jsから共用
+  // 開始フレーム [startFrame, startFrame+1) 内の最後の書込み時刻(無ければnull)。
+  // 複数のタイムライン(音量とピッチ)を渡せば、その全体で最後のもの=ノートのアタック
+  // tick の時刻を返す。★音量列とピッチ列で原点を別々に取ってはいけない: 開始フレームに
+  // 音量書込みが無いノート(レガートの音程変化・音量が同値のまま続く打ち直し)は原点が
+  // フレーム格子に落ち、駆動tickに対する位相がノートごとに変わって変種を生む
+  // (実測: VGM Tengai Makyou II #2 で@EPが8→56に膨れた)。同じtickで書かれた音量と
+  // ピッチの時刻差は数μsなので、どちらを原点にしても同じ列になる。
+  function noteAnchorT(startFrame, timelines) {
+    let t0 = null;
+    for (const timeline of timelines) {
+      if (!timeline || timeline.length === 0) continue;
+      let lo = 0, hi = timeline.length;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (timeline[m].t < startFrame) lo = m + 1; else hi = m; }
+      for (let i = lo; i < timeline.length && timeline[i].t < startFrame + 1; i++) if (t0 === null || timeline[i].t > t0) t0 = timeline[i].t;
+    }
+    return t0;
+  }
+  MML.Hes2MmlExpansion._noteAnchorT = noteAnchorT; // noise.jsから共用
+
+  // anchorT: noteAnchorT の結果(省略時はこのタイムライン単独で求め、無ければフレーム原点)
+  // sampleOffset: sampleOffsetFor の結果(省略時0)
+  function resampleSeq(timeline, startFrame, endFrame, fallbackSeq, anchorT, sampleOffset) {
     if (!timeline || timeline.length === 0) return fallbackSeq;
     let lo = 0, hi = timeline.length;
     while (lo < hi) { const m = (lo + hi) >> 1; if (timeline[m].t < startFrame) lo = m + 1; else hi = m; }
-    let anchor = -1;
-    for (let i = lo; i < timeline.length && timeline[i].t < startFrame + 1; i++) anchor = i;
-    const t0 = anchor >= 0 ? timeline[anchor].t : startFrame;
+    if (anchorT === undefined) anchorT = noteAnchorT(startFrame, [timeline]);
+    const t0 = anchorT != null ? anchorT : startFrame;
     const len = endFrame - startFrame;
     const out = new Array(len);
     let j = lo - 1;
     for (let k = 0; k < len; k++) {
-      const sampleT = t0 + k;
-      while (j + 1 < timeline.length && timeline[j + 1].t <= sampleT) j++;
+      const sampleT = t0 + k + (sampleOffset || 0);
+      // ★終端フレーム endFrame 以降の書込みは見ない: そこにあるのは次ノートのアタック/
+      // 休符のオフ書込み(スナップショット endFrame が見るのは次ノート)。sampleOffsetで半フレーム
+      // 後ろへずらした最後のサンプル点は endFrame を跨ぐことがあり、制限しないと全ての列の
+      // 末尾に次ノートの音量(…10 12)やピッチ(…-92)が1個混入して別テーブルに化ける
+      // (実測: Dragon Slayer #2 @v42→68、Tengai Makyou II #2 @EP8→56)。
+      while (j + 1 < timeline.length && timeline[j + 1].t <= sampleT + T_EPS && timeline[j + 1].t < endFrame) j++;
       out[k] = j >= 0 ? timeline[j].v : (fallbackSeq ? fallbackSeq[k] : 0);
     }
     return out;
@@ -264,10 +319,12 @@
       // 前に行い、以後の利用は全て正規化済み列を見る。
       const volTimeline = controlTrace ? buildVolTimeline(controlTrace[i]) : null;
       const pitchTimeline = pitchTrace ? buildPitchTimeline(pitchTrace[i]) : null;
+      const sampleOffset = sampleOffsetFor([volTimeline, pitchTimeline]);
       for (const ev of rawEvents) {
         if (ev.note === null) continue;
-        if (volTimeline) ev.volSeq = resampleSeq(volTimeline, ev.start, ev.end, ev.volSeq);
-        if (pitchTimeline) ev.pitchSeq = resampleSeq(pitchTimeline, ev.start, ev.end, ev.pitchSeq);
+        const anchorT = noteAnchorT(ev.start, [volTimeline, pitchTimeline]); // 音量/ピッチで原点を共有(noteAnchorT参照)
+        if (volTimeline) ev.volSeq = resampleSeq(volTimeline, ev.start, ev.end, ev.volSeq, anchorT, sampleOffset);
+        if (pitchTimeline) ev.pitchSeq = resampleSeq(pitchTimeline, ev.start, ev.end, ev.pitchSeq, anchorT, sampleOffset);
       }
       channels.push({
         // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)+

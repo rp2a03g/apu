@@ -294,7 +294,7 @@
     [/^OL(BD|SD|TM|CY|HH|B)$/, function () { return ['fm', null]; }],                       // OPLリズム/ADPCM(割当対象外)
     [/^YM([1-6])$/, function (m) { return ['fm4', 'opn:' + (+m[1] - 1)]; }],                // YM2612
     [/^OM([1-8])$/, function (m) { return ['fm4', 'opm:' + (+m[1] - 1)]; }],                // YM2151
-    [/^OP([1-3])$/, function (m) { return ['fm4', 'opn3:' + (+m[1] - 1)]; }],               // YM2203 FM(OP4-6=デュアル2個目は割当対象外)
+    [/^OP([1-6])$/, function (m) { return ['fm4', 'opn3:' + (+m[1] - 1)]; }],               // YM2203 FM(OP4-6=デュアル2個目のFM1-3。2026-09-06から変換対象)
     [/^OA([1-6])$/, function (m) { return ['fm4', 'opna:' + (+m[1] - 1)]; }],               // YM2608 FM
     [/^OAB$/, function () { return ['pcm', 'pcmb8:0']; }],                                  // YM2608 ADPCM-B
     [/^OA(BD|SD|CY|HH|TM|RM)$/, function () { return ['pcm', null]; }],                     // YM2608 リズム(ドラムパートのみ・割当対象外)

@@ -1243,7 +1243,16 @@
       frameRate: FRAME_RATE, header: h, totalFrames,
       nes: has('nes') ? { regSnapshots: [], writeLog: [], fds: !!player.adapterById.nes.fds } : null,
       gb: has('gb') ? { snapshots: [] } : null,
-      hes: has('huc6280') ? { snapshots: [] } : null,
+      // hes: ctlTrace/pitchTrace は hesPlayer.js の controlTrace/pitchTrace と同じ内容だが、
+      // Worker差分プロトコル(capture-worker-multi-impl.js diffPayload: 1段ネスト配列まで)に
+      // 乗るよう ch別二重配列ではなく {ch,...} 付きの平坦な1本にして積む。vgm2mml/converter.js
+      // が ch別に振り分けてから HES2MML.convertCapture へ渡す。用途はソフト音量エンベロープ/
+      // ピッチ列の位相エイリアシング対策(hes2mml/expansion/wave.js buildVolTimeline参照)。
+      // VGMは書込みごとにサンプル精度の時刻を持つので、HES同様にノート相対時刻で
+      // リサンプルできる(これが無いと wave.js は従来のフレーム格子スナップショット列に
+      // フォールバックし、駆動レートがフレームレートと合わない曲で@vが1フレーム違いの
+      // 変種として量産される)。
+      hes: has('huc6280') ? { snapshots: [], ctlTrace: [], pitchTrace: [] } : null,
       // YM2610の内蔵SSG(AY互換)は kss.writeLog へ AY8910書込みとして流し込む(KP1-3行/kss2mml流用)。
       // clock: kss2mml抽出器(AY/SCC)に渡す「Z80相当クロック」(=AY実クロック×2)。MSXの3.58MHz固定では
       // 別クロックのAY(Exed Exes 1.5MHz等)やYM2610内蔵SSG(チップクロック/4)のロール音程がずれる。
@@ -1310,6 +1319,26 @@
     const qsRegrouper = data.qsound ? new Emu.PoolChannelRegrouper(16) : null;
     let kssFrameWrites = [];
     const nesRegs = {};
+    // HuC6280書込みトレース(上の data.hes コメント参照)。t は分数フレーム時刻
+    // (hesPlayer.js の currentFrame + frameSamplePos/frameSampleCount と同じ意味)。
+    let curFrame = 0;
+    let hesSeq = 0;
+    const hesApu = data.hes ? player.adapterById.huc6280.apu : null;
+    const hesTraceWrite = (aa) => {
+      const t = curFrame + Math.min(1, Math.max(0, (player.samplePos - curFrame * SAMPLES_PER_FRAME) / SAMPLES_PER_FRAME));
+      const ctl = (ch) => {
+        const c = hesApu.ch[ch];
+        data.hes.ctlTrace.push({ ch, frame: curFrame, t, seq: hesSeq++, on: c.on, dda: c.dda, vol: c.volume, bal: c.balance, gbal: hesApu.balance });
+      };
+      switch (aa) {
+        case 0x01: for (let ch = 0; ch < Emu.APUHuC6280_CH_COUNT; ch++) ctl(ch); break; // 全体バランス=全chの実効音量が変わる
+        case 0x04: case 0x05: if (hesApu.selected < Emu.APUHuC6280_CH_COUNT) ctl(hesApu.selected); break;
+        case 0x02: case 0x03:
+          if (hesApu.selected < Emu.APUHuC6280_CH_COUNT)
+            data.hes.pitchTrace.push({ ch: hesApu.selected, t, freq: hesApu.ch[hesApu.selected].freq });
+          break;
+      }
+    };
     if (data.kss && data.kss.scc && data.kss.sccPlus) {
       // kss2mml/expansion/scc.js のデコーダにSCC+配置(0xB800台)を認識させる前置き書込み
       kssFrameWrites.push(Emu.kssPackWrite(0xBFFE, 0x20, 0), Emu.kssPackWrite(0xB000, 0x80, 0));
@@ -1329,6 +1358,7 @@
         case 'ym3812': case 'ym3526': case 'y8950':
           kssFrameWrites.push(Emu.kssPackWrite(0xC0, a, 1), Emu.kssPackWrite(0xC1, b, 1)); break;
         case 'k051649': kssFrameWrites.push(Emu.kssPackWrite(d, c, 0)); break;
+        case 'huc6280': hesTraceWrite(a); break; // (reg, value)。書込み適用後に呼ばれるのでAPUの状態をそのまま記録
       }
     };
     // ★2026-08-20 スライスを「フレーム数固定」から「時間予算固定」へ変更(NSFの
@@ -1338,6 +1368,7 @@
     const yieldFn = opt.yieldFn || (() => new Promise(r => setTimeout(r, 0)));
     let sliceStart = performance.now();
     for (let f = 0; f < totalFrames; f++) {
+      curFrame = f;
       player.renderFrame(VGM_RATE, true);
       if (data.nes) {
         data.nes.writeLog.push(nesFrameWrites);
@@ -1453,6 +1484,10 @@
       if (data.ym2203fm) {
         // YM2612と同じ: 先読みはEGが進まないので発音判定/音量はレジスタ由来(keyOn/tlVol)へ差し替える
         const s = Emu.snapshotYM2203(player.adapterById.ym2203.fm, SNAP_CAPTURE);
+        // デュアルチップ(Avengers等): ライブ表示(main.js getYm2203Fm)と同じく ym2203_2 のFM3chを後ろに足す
+        // (OP4-6行)。★ここに無いとロールと変換だけ2個目が空になる(鍵盤の行はライブで出るので気付きにくい)
+        const a2 = player.adapterById.ym2203_2;
+        if (a2) s.channels = s.channels.concat(Emu.snapshotYM2203(a2.fm, SNAP_CAPTURE).channels);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2203fm.snapshots.push(s);
         // プリスケーラでSSG実クロックが変わる(Avengersは1/3=SSG実クロック2倍)ため、

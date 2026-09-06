@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-06 17:59:42
+ * Built by tools/build-capture-workers.ps1 at 2026-09-07 05:18:52
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-06 17:59:42';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-07 05:18:52';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -12492,7 +12492,16 @@
       frameRate: FRAME_RATE, header: h, totalFrames,
       nes: has('nes') ? { regSnapshots: [], writeLog: [], fds: !!player.adapterById.nes.fds } : null,
       gb: has('gb') ? { snapshots: [] } : null,
-      hes: has('huc6280') ? { snapshots: [] } : null,
+      // hes: ctlTrace/pitchTrace は hesPlayer.js の controlTrace/pitchTrace と同じ内容だが、
+      // Worker差分プロトコル(capture-worker-multi-impl.js diffPayload: 1段ネスト配列まで)に
+      // 乗るよう ch別二重配列ではなく {ch,...} 付きの平坦な1本にして積む。vgm2mml/converter.js
+      // が ch別に振り分けてから HES2MML.convertCapture へ渡す。用途はソフト音量エンベロープ/
+      // ピッチ列の位相エイリアシング対策(hes2mml/expansion/wave.js buildVolTimeline参照)。
+      // VGMは書込みごとにサンプル精度の時刻を持つので、HES同様にノート相対時刻で
+      // リサンプルできる(これが無いと wave.js は従来のフレーム格子スナップショット列に
+      // フォールバックし、駆動レートがフレームレートと合わない曲で@vが1フレーム違いの
+      // 変種として量産される)。
+      hes: has('huc6280') ? { snapshots: [], ctlTrace: [], pitchTrace: [] } : null,
       // YM2610の内蔵SSG(AY互換)は kss.writeLog へ AY8910書込みとして流し込む(KP1-3行/kss2mml流用)。
       // clock: kss2mml抽出器(AY/SCC)に渡す「Z80相当クロック」(=AY実クロック×2)。MSXの3.58MHz固定では
       // 別クロックのAY(Exed Exes 1.5MHz等)やYM2610内蔵SSG(チップクロック/4)のロール音程がずれる。
@@ -12559,6 +12568,26 @@
     const qsRegrouper = data.qsound ? new Emu.PoolChannelRegrouper(16) : null;
     let kssFrameWrites = [];
     const nesRegs = {};
+    // HuC6280書込みトレース(上の data.hes コメント参照)。t は分数フレーム時刻
+    // (hesPlayer.js の currentFrame + frameSamplePos/frameSampleCount と同じ意味)。
+    let curFrame = 0;
+    let hesSeq = 0;
+    const hesApu = data.hes ? player.adapterById.huc6280.apu : null;
+    const hesTraceWrite = (aa) => {
+      const t = curFrame + Math.min(1, Math.max(0, (player.samplePos - curFrame * SAMPLES_PER_FRAME) / SAMPLES_PER_FRAME));
+      const ctl = (ch) => {
+        const c = hesApu.ch[ch];
+        data.hes.ctlTrace.push({ ch, frame: curFrame, t, seq: hesSeq++, on: c.on, dda: c.dda, vol: c.volume, bal: c.balance, gbal: hesApu.balance });
+      };
+      switch (aa) {
+        case 0x01: for (let ch = 0; ch < Emu.APUHuC6280_CH_COUNT; ch++) ctl(ch); break; // 全体バランス=全chの実効音量が変わる
+        case 0x04: case 0x05: if (hesApu.selected < Emu.APUHuC6280_CH_COUNT) ctl(hesApu.selected); break;
+        case 0x02: case 0x03:
+          if (hesApu.selected < Emu.APUHuC6280_CH_COUNT)
+            data.hes.pitchTrace.push({ ch: hesApu.selected, t, freq: hesApu.ch[hesApu.selected].freq });
+          break;
+      }
+    };
     if (data.kss && data.kss.scc && data.kss.sccPlus) {
       // kss2mml/expansion/scc.js のデコーダにSCC+配置(0xB800台)を認識させる前置き書込み
       kssFrameWrites.push(Emu.kssPackWrite(0xBFFE, 0x20, 0), Emu.kssPackWrite(0xB000, 0x80, 0));
@@ -12578,6 +12607,7 @@
         case 'ym3812': case 'ym3526': case 'y8950':
           kssFrameWrites.push(Emu.kssPackWrite(0xC0, a, 1), Emu.kssPackWrite(0xC1, b, 1)); break;
         case 'k051649': kssFrameWrites.push(Emu.kssPackWrite(d, c, 0)); break;
+        case 'huc6280': hesTraceWrite(a); break; // (reg, value)。書込み適用後に呼ばれるのでAPUの状態をそのまま記録
       }
     };
     // ★2026-08-20 スライスを「フレーム数固定」から「時間予算固定」へ変更(NSFの
@@ -12587,6 +12617,7 @@
     const yieldFn = opt.yieldFn || (() => new Promise(r => setTimeout(r, 0)));
     let sliceStart = performance.now();
     for (let f = 0; f < totalFrames; f++) {
+      curFrame = f;
       player.renderFrame(VGM_RATE, true);
       if (data.nes) {
         data.nes.writeLog.push(nesFrameWrites);
@@ -12702,6 +12733,10 @@
       if (data.ym2203fm) {
         // YM2612と同じ: 先読みはEGが進まないので発音判定/音量はレジスタ由来(keyOn/tlVol)へ差し替える
         const s = Emu.snapshotYM2203(player.adapterById.ym2203.fm, SNAP_CAPTURE);
+        // デュアルチップ(Avengers等): ライブ表示(main.js getYm2203Fm)と同じく ym2203_2 のFM3chを後ろに足す
+        // (OP4-6行)。★ここに無いとロールと変換だけ2個目が空になる(鍵盤の行はライブで出るので気付きにくい)
+        const a2 = player.adapterById.ym2203_2;
+        if (a2) s.channels = s.channels.concat(Emu.snapshotYM2203(a2.fm, SNAP_CAPTURE).channels);
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2203fm.snapshots.push(s);
         // プリスケーラでSSG実クロックが変わる(Avengersは1/3=SSG実クロック2倍)ため、
@@ -13501,12 +13536,26 @@
   // チャンネル割当(変換元ch → NSF側の借用先パート)の共通モジュール。読み込み順の都合で
   // 未定義でも鍵盤表示は動く(その場合はpart列が従来どおりの固定表示になるだけ)。
   function channelPlan() { return (MML.Convert && MML.Convert.ChannelPlan) || null; }
+  // 今の表示元がMML再生か(setSourceInfo経由)。MML側に切り替えている間はチャンネル割当も
+  // 「割当先の音で聴く」も意味が無いので、両方まとめて無効にする(ユーザー指定 2026-09-06)。
+  // ★ChannelPlan.setFormat は MML では呼ばれず直前のサウンドファイルの形式が残るため、
+  //   plan.editable() だけで判定すると MML 再生に割当プレビューのミュートが掛かって無音になる
+  //   (実際に起きた: VGMで🎧をONにした後のMML再生が全chミュート)。
+  let sourceIsMml = false;
+  function assignEditable() {
+    const plan = channelPlan();
+    return !!plan && plan.editable() && !sourceIsMml;
+  }
+  function assignLockReason() {
+    if (sourceIsMml) return T('MML再生中はチャンネル割当と「割当先の音で聴く」は使えません(サウンドファイルの再生時だけ意味があります)');
+    const plan = channelPlan();
+    return plan ? (plan.lockReason() || '') : '';
+  }
 
   // part列(丸の隣のパート文字)。クリックで1行ぶんの割当ポップオーバーを開けるチップにする。
   // 割当を変更できないフォーマット(NSF等)では従来どおりただの文字表示のまま。
   function partChipHtml(ch) {
-    const plan = channelPlan();
-    const editable = !!plan && plan.editable() && !ch.isAllRow && ch.target !== undefined;
+    const editable = assignEditable() && !ch.isAllRow && ch.target !== undefined;
     const cls = 'kbd-part' + (editable ? ' kbd-part--editable' : '');
     return `<span class="${cls}" data-ch="${ch.id || ''}">${ch.letter || (editable ? '—' : '')}</span>`;
   }
@@ -15517,7 +15566,9 @@
       // どうかで、MML再生を表示中は常に false(=グレーアウト)。
       this._transportState = { playing: false, canPlay: false, canStop: false, canPrevNext: false, canToggleSource: false };
       this.onTransport = null;          // (action:'play'|'stop'|'prev'|'next') => void
-      this.onSourceToggle = null;       // () => void  バッジ(ファイル名)クリックでMML↔サウンドファイル切替
+      this.onSourceToggle = null;       // () => void  バッジ(MML/FILE)クリックでMML↔サウンドファイル切替
+      this.onSourceListRequest = null;  // () => { name, listName?, items:[string]|null, index } | null  表示名(アーカイブなら曲名)と曲一覧(main.js)
+      this.onSourceSelect = null;       // (index) => void  ファイル名の一覧から曲を選んだとき
       this._rollLastDrawnPos = 0;       // _renderRoll()が最後に描いた曲内秒(ドラッグ開始位置の基準)
       this._pendingSelectionReset = false; // reset()が立てるフラグ。次に実データでチャンネル一覧が
                                             // 判明した時(setSource()/updateSpcVoices())、大波形の選択
@@ -15691,7 +15742,7 @@
           const old = headerEl.querySelector(sel);
           if (old) old.remove();
         }
-        for (const sel of ['.kbd-open-btn', '.kbd-tomml-btn', '.kbd-repeat-btn']) {
+        for (const sel of ['.kbd-open-btn', '.kbd-tomml-btn', '.kbd-repeat-btn', '.kbd-src-name']) {
           const old = headerEl.querySelector(sel);
           if (old) old.remove();
         }
@@ -15717,10 +15768,17 @@
           if (!this._transportState.canToggleSource) return;
           if (this.onSourceToggle) this.onSourceToggle();
         });
-        // ファイル名バッジの左に [再生コントロール][終了後の挙動] を置く(ユーザー指示)
+        // 並びは [再生コントロール][MML/FILEバッジ][終了後の挙動][ファイル名/リスト名](ユーザー指示 2026-09-06)。
+        // バッジは「今どちらを表示しているか」だけを示し、名前は右の別ボタンに出す。名前のボタンは
+        // 曲一覧(アーカイブのm3u/複数曲形式の曲番号)から選べるドロップダウンになる
+        this._srcNameEl = document.createElement('button');
+        this._srcNameEl.type = 'button';
+        this._srcNameEl.className = 'kbd-hdr-btn kbd-src-name';
+        this._srcNameEl.addEventListener('click', (e) => { e.stopPropagation(); this._openSourcePopover(); });
         headerEl.insertBefore(this._srcBadgeEl, masterVolBar);
+        headerEl.insertBefore(this._srcNameEl, masterVolBar);
         headerEl.insertBefore(transportBar, this._srcBadgeEl);
-        headerEl.insertBefore(repeatBtn, this._srcBadgeEl);
+        headerEl.insertBefore(repeatBtn, this._srcNameEl);
         this._renderSourceBadge();
         this._renderTransport();
       } else {
@@ -15969,7 +16027,7 @@
       this._buildRollPane();
       this._mountRollPane();
       this._mountBigWave();
-      this._leftEl.classList.toggle('kbd-left--assign', !!this._assignMode);
+      this._leftEl.classList.toggle('kbd-left--assign', !!this._assignMode && !sourceIsMml);
       this._applyLayoutClasses();
       // チャンネル割当が変わったら(この鍵盤表示のセレクト経由でも、他のUI経由でも)
       // part列の文字・スキップ減光・重複警告を貼り直す
@@ -16364,6 +16422,15 @@
     setSourceInfo(kind, name) {
       this._sourceInfo = kind ? { kind, name: name || '' } : null;
       this._renderSourceBadge();
+      // MML側へ切り替えたら割当UI(part列・借用先列・🎧)をまとめて無効に、ファイル側へ戻したら復帰
+      const wasMml = sourceIsMml;
+      sourceIsMml = kind === 'mml';
+      if (wasMml !== sourceIsMml) {
+        if (this._leftEl) this._leftEl.classList.toggle('kbd-left--assign', !!this._assignMode && !sourceIsMml);
+        this._renderAssignToggle();
+        this._renderPreviewToggle();
+        if (this._previewMode) this._notifyPreview(); // ミュート設定/プレビュー計画を今の表示元で組み直す
+      }
     }
     _renderSourceBadge() {
       const el = this._srcBadgeEl;
@@ -16374,15 +16441,65 @@
       el.style.display = '';
       const isMml = info.kind === 'mml';
       el.classList.add(isMml ? 'kbd-src-badge--mml' : 'kbd-src-badge--file');
-      const kindLabel = info.kind.toUpperCase();
-      // 表示は「MML · タイトル」/「NSF · ファイル名」。長い名前は省略記号にしてtitleに全文
-      const name = info.name || '';
-      el.textContent = name ? `${kindLabel} · ${name}` : kindLabel;
-      const base = (isMml ? T('MML再生を表示中') : T('サウンドファイル再生を表示中')) + (name ? `: ${name}` : '');
+      // バッジは MML / FILE の2択(今どちらの再生を表示・操作しているか)。名前は右の別ボタンへ
+      el.textContent = isMml ? 'MML' : 'FILE';
+      const base = isMml ? T('MML再生を表示中') : T('サウンドファイル再生を表示中');
       el.title = this._transportState.canToggleSource
         ? base + '\n' + T('クリックでMML再生 / サウンドファイル再生を切り替え')
         : base;
       el.classList.toggle('kbd-src-badge--clickable', !!this._transportState.canToggleSource);
+      this._renderSourceName();
+    }
+    // ファイル名(MMLならタイトル)/アーカイブのリスト名。曲一覧があればクリックで選べる
+    _renderSourceName() {
+      const el = this._srcNameEl;
+      if (!el) return;
+      const info = this._sourceInfo;
+      const list = (info && this.onSourceListRequest) ? (this.onSourceListRequest() || null) : null;
+      const name = (list && list.name) || (info && info.name) || '';
+      const pickable = !!(list && list.items && list.items.length > 1);
+      if (!name) { el.style.display = 'none'; el.textContent = ''; return; }
+      el.style.display = '';
+      if (el.textContent !== name) el.textContent = name;
+      el.classList.toggle('kbd-src-name--pick', pickable);
+      // アーカイブなら1行目にリスト名(zip/m3u)、2行目に曲名
+      el.title = (list && list.listName ? list.listName + '\n' : '') + name + (pickable ? '\n' + T('クリックで曲を選ぶ') : '');
+    }
+    refreshSourceName() { this._renderSourceName(); }
+    _openSourcePopover() {
+      this._closeSourcePopover();
+      const list = this.onSourceListRequest ? this.onSourceListRequest() : null;
+      if (!list || !list.items || list.items.length < 2) return;
+      const pop = document.createElement('div');
+      pop.className = 'kbd-src-pop';
+      let curEl = null;
+      list.items.forEach((label, i) => {
+        const row = document.createElement('div');
+        row.className = 'kbd-src-pop-item' + (i === list.index ? ' kbd-src-pop-item--cur' : '');
+        row.textContent = label;
+        row.title = label;
+        row.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._closeSourcePopover();
+          if (this.onSourceSelect) this.onSourceSelect(i);
+        });
+        pop.appendChild(row);
+        if (i === list.index) curEl = row;
+      });
+      const r = this._srcNameEl.getBoundingClientRect();
+      pop.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 430)) + 'px';
+      pop.style.top = (r.bottom + 4) + 'px';
+      document.body.appendChild(pop);
+      this._srcPopEl = pop;
+      if (curEl) curEl.scrollIntoView({ block: 'center' });
+      const onDown = (e) => { if (!pop.contains(e.target)) this._closeSourcePopover(); };
+      const onKey = (e) => { if (e.key === 'Escape') this._closeSourcePopover(); };
+      this._srcPopCleanup = () => { document.removeEventListener('mousedown', onDown, true); document.removeEventListener('keydown', onKey, true); };
+      setTimeout(() => { document.addEventListener('mousedown', onDown, true); document.addEventListener('keydown', onKey, true); }, 0);
+    }
+    _closeSourcePopover() {
+      if (this._srcPopCleanup) { this._srcPopCleanup(); this._srcPopCleanup = null; }
+      if (this._srcPopEl) { this._srcPopEl.remove(); this._srcPopEl = null; }
     }
 
     // ── タイトル行の再生コントロール(⏮ ▶/⏸ ■ ⏭) ───────────────────
@@ -17500,7 +17617,7 @@
       const plan = channelPlan();
       if (!plan) return;
       const chId = ch.id;
-      const editable = plan.editable();
+      const editable = assignEditable();
       const partEl = row.querySelector('.kbd-part');
       const targetSel = row.querySelector('.kbd-assign-target');
       const toneSel = row.querySelector('.kbd-assign-tone');
@@ -17509,12 +17626,12 @@
           partEl.title = T('クリックで借用先(NSF側のパート)を選ぶ');
           partEl.addEventListener('click', (e) => { e.stopPropagation(); this._openAssignPopover(partEl, chId); });
         } else {
-          partEl.title = plan.lockReason() || '';
+          partEl.title = assignLockReason();
         }
       }
       if (!targetSel || !toneSel) return;
       targetSel.disabled = toneSel.disabled = !editable;
-      if (!editable) targetSel.title = plan.lockReason() || '';
+      if (!editable) targetSel.title = assignLockReason();
       targetSel.addEventListener('change', () => this._setAssignTarget(chId, targetSel.value));
       toneSel.addEventListener('change', () => {
         const cur = plan.get(chId) || {};
@@ -17761,7 +17878,7 @@
     _setAssignMode(on) {
       this._assignMode = !!on;
       try { localStorage.setItem('mml_kbdAssignMode', on ? '1' : '0'); } catch (e) { /* private browsing等 */ }
-      this._leftEl.classList.toggle('kbd-left--assign', this._assignMode);
+      this._leftEl.classList.toggle('kbd-left--assign', this._assignMode && !sourceIsMml);
       this._applyLayoutClasses();
       this._refreshAssignUi();
       // 「借用先/音色」列(200px)が入りきらない幅のままだと右側の列(L/R・vol・wave)が
@@ -17790,19 +17907,18 @@
     isPreviewMode() { return !!this._previewMode; }
     _notifyPreview() { if (this.onPreviewChange) this.onPreviewChange(); }
     _renderPreviewToggle() {
-      const plan = channelPlan();
       if (!this._previewBtns) return;
-      const editable = !!plan && plan.editable();
+      const editable = assignEditable();
       for (const btn of this._previewBtns) {
         btn.classList.toggle('kbd-preview-btn--on', !!this._previewMode);
         btn.disabled = !editable;
-        btn.title = editable ? T('割当先の音で聴く(元chをミュートし、借用先のNSF音源で鳴らす。スキップは無音、DPCMは元のまま)') : (plan ? plan.lockReason() : '');
+        btn.title = editable ? T('割当先の音で聴く(元chをミュートし、借用先のNSF音源で鳴らす。スキップは無音、DPCMは元のまま)') : assignLockReason();
       }
     }
     // 表示中の一覧の行ごとの割当(プレビュー用)。tone は選択が無ければ借用先ごとの既定値
     getPreviewPlan() {
       const plan = channelPlan();
-      if (!plan || !plan.editable()) return [];
+      if (!assignEditable()) return [];
       const rows = (this._mode === 'spc' ? this._spcRowEls : this._rowEls).filter(el => !el.isAllRow && el.partEl && el.checkbox);
       const out = [];
       for (const el of rows) {
@@ -17820,7 +17936,7 @@
     _previewMutesRow(el) {
       if (!this._previewMode || el.isAllRow || !el.partEl) return false;
       const plan = channelPlan();
-      if (!plan || !plan.editable()) return false;
+      if (!assignEditable()) return false;   // MML表示中は元chを消さない
       if (plan.isUnassignable && plan.isUnassignable(el.id)) return false;
       const target = (plan.get(el.id) || {}).target || el.defaultTarget || 'skip';
       return target !== 'dpcm';
@@ -17846,13 +17962,12 @@
     _renderAssignToggle() {
       const plan = channelPlan();
       if (!this._assignBtns) return;
-      const editable = !!plan && plan.editable();
+      const editable = assignEditable();
       for (const btn of this._assignBtns) {
         btn.classList.toggle('kbd-assign-btn--on', !!this._assignMode);
         btn.classList.toggle('kbd-assign-btn--custom', !!plan && plan.isCustom());
         btn.disabled = !editable;
-        btn.title = editable ? T('チャンネル割当(変換元ch → NSF側のパート)を表示')
-          : (plan ? plan.lockReason() : '');
+        btn.title = editable ? T('チャンネル割当(変換元ch → NSF側のパート)を表示') : assignLockReason();
       }
     }
 
@@ -22013,19 +22128,74 @@
   // 同一フレーム内に複数書込みがある場合は直前ノートの残りが先行しているだけ)。
   // 開始フレーム内に書込みが無い(音量変化を伴わないノート境界)場合はフレーム原点に
   // フォールバックし、書込みがまだ一度も無い区間はfallbackSeq(スナップショット列)を使う。
-  function resampleSeq(timeline, startFrame, endFrame, fallbackSeq) {
+  // ★T_EPS: 駆動がフレームと厳密に同期している曲(VGMのVSYNC駆動ドライバ等)では、書込み時刻が
+  // 毎フレーム同じ小数部(f + s/735)になり、t0+k と書込みの t が「同じ値のはず」なのに
+  // 浮動小数の丸めで1ulp前後する。<= の判定がフレームごとに含む/含まないへ揺れると、
+  // 対策前より酷い1フレーム違い変種を量産する(実測: Star Parodier #1 @v101→132)。
+  // 同一位相の書込みは必ず含める意味で、微小な許容(1e-6フレーム≒0.0007サンプル)を持たせる。
+  const T_EPS = 1e-6;
+  // ★サンプル点のオフセット(sampleOffset): t0+k ちょうどで読むか、半フレーム後ろ(t0+k+0.5)で読むか。
+  //  - 駆動レートがフレームレートとほぼ同じ曲(VGMのVSYNC駆動ドライバ: 実測1.003フレーム周期、
+  //    VGMログ由来の±0.02フレームの揺らぎ付き)では、k番目の書込みが t0+k の直前/直後に揺れて
+  //    着地し、ちょうどの時刻で読むと「含む/含まない」がノートごとに変わる=対策前より酷い
+  //    1フレーム違い変種を量産する(実測: Star Parodier #1 @v101→132、近似重複ペア78→153)。
+  //    半フレームずらせば周期1.00±0.02の書込みからは常に約0.5フレーム離れて読める。
+  //  - 一方、タイマー駆動(HES NX91002: 54.9Hz=1.094フレーム周期)は音符開始(VSYNC)と
+  //    エンベロープ段(タイマー)が別クロックで位相がノートごとに違い、0.5をずらすと段の
+  //    境目とサンプル点の余裕がかえって減る曲がある(実測: idx32 @v33→42)。こちらは
+  //    従来どおり t0 ちょうど(オフセット0)が良い。
+  //  よって書込み間隔の中央値がほぼ整数フレーム(フレーム同期駆動)のときだけ0.5を使う。
+  function sampleOffsetFor(timelines) {
+    const gaps = [];
+    for (const tl of timelines) {
+      if (!tl) continue;
+      for (let i = 1; i < tl.length; i++) { const g = tl[i].t - tl[i - 1].t; if (g > 0.05) gaps.push(g); }
+    }
+    if (gaps.length < 8) return 0;
+    gaps.sort((a, b) => a - b);
+    const med = gaps[gaps.length >> 1];
+    const r = Math.round(med);
+    return (r >= 1 && Math.abs(med - r) < 0.05) ? 0.5 : 0;
+  }
+  MML.Hes2MmlExpansion._sampleOffsetFor = sampleOffsetFor; // noise.jsから共用
+  // 開始フレーム [startFrame, startFrame+1) 内の最後の書込み時刻(無ければnull)。
+  // 複数のタイムライン(音量とピッチ)を渡せば、その全体で最後のもの=ノートのアタック
+  // tick の時刻を返す。★音量列とピッチ列で原点を別々に取ってはいけない: 開始フレームに
+  // 音量書込みが無いノート(レガートの音程変化・音量が同値のまま続く打ち直し)は原点が
+  // フレーム格子に落ち、駆動tickに対する位相がノートごとに変わって変種を生む
+  // (実測: VGM Tengai Makyou II #2 で@EPが8→56に膨れた)。同じtickで書かれた音量と
+  // ピッチの時刻差は数μsなので、どちらを原点にしても同じ列になる。
+  function noteAnchorT(startFrame, timelines) {
+    let t0 = null;
+    for (const timeline of timelines) {
+      if (!timeline || timeline.length === 0) continue;
+      let lo = 0, hi = timeline.length;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (timeline[m].t < startFrame) lo = m + 1; else hi = m; }
+      for (let i = lo; i < timeline.length && timeline[i].t < startFrame + 1; i++) if (t0 === null || timeline[i].t > t0) t0 = timeline[i].t;
+    }
+    return t0;
+  }
+  MML.Hes2MmlExpansion._noteAnchorT = noteAnchorT; // noise.jsから共用
+
+  // anchorT: noteAnchorT の結果(省略時はこのタイムライン単独で求め、無ければフレーム原点)
+  // sampleOffset: sampleOffsetFor の結果(省略時0)
+  function resampleSeq(timeline, startFrame, endFrame, fallbackSeq, anchorT, sampleOffset) {
     if (!timeline || timeline.length === 0) return fallbackSeq;
     let lo = 0, hi = timeline.length;
     while (lo < hi) { const m = (lo + hi) >> 1; if (timeline[m].t < startFrame) lo = m + 1; else hi = m; }
-    let anchor = -1;
-    for (let i = lo; i < timeline.length && timeline[i].t < startFrame + 1; i++) anchor = i;
-    const t0 = anchor >= 0 ? timeline[anchor].t : startFrame;
+    if (anchorT === undefined) anchorT = noteAnchorT(startFrame, [timeline]);
+    const t0 = anchorT != null ? anchorT : startFrame;
     const len = endFrame - startFrame;
     const out = new Array(len);
     let j = lo - 1;
     for (let k = 0; k < len; k++) {
-      const sampleT = t0 + k;
-      while (j + 1 < timeline.length && timeline[j + 1].t <= sampleT) j++;
+      const sampleT = t0 + k + (sampleOffset || 0);
+      // ★終端フレーム endFrame 以降の書込みは見ない: そこにあるのは次ノートのアタック/
+      // 休符のオフ書込み(スナップショット endFrame が見るのは次ノート)。sampleOffsetで半フレーム
+      // 後ろへずらした最後のサンプル点は endFrame を跨ぐことがあり、制限しないと全ての列の
+      // 末尾に次ノートの音量(…10 12)やピッチ(…-92)が1個混入して別テーブルに化ける
+      // (実測: Dragon Slayer #2 @v42→68、Tengai Makyou II #2 @EP8→56)。
+      while (j + 1 < timeline.length && timeline[j + 1].t <= sampleT + T_EPS && timeline[j + 1].t < endFrame) j++;
       out[k] = j >= 0 ? timeline[j].v : (fallbackSeq ? fallbackSeq[k] : 0);
     }
     return out;
@@ -22153,10 +22323,12 @@
       // 前に行い、以後の利用は全て正規化済み列を見る。
       const volTimeline = controlTrace ? buildVolTimeline(controlTrace[i]) : null;
       const pitchTimeline = pitchTrace ? buildPitchTimeline(pitchTrace[i]) : null;
+      const sampleOffset = sampleOffsetFor([volTimeline, pitchTimeline]);
       for (const ev of rawEvents) {
         if (ev.note === null) continue;
-        if (volTimeline) ev.volSeq = resampleSeq(volTimeline, ev.start, ev.end, ev.volSeq);
-        if (pitchTimeline) ev.pitchSeq = resampleSeq(pitchTimeline, ev.start, ev.end, ev.pitchSeq);
+        const anchorT = noteAnchorT(ev.start, [volTimeline, pitchTimeline]); // 音量/ピッチで原点を共有(noteAnchorT参照)
+        if (volTimeline) ev.volSeq = resampleSeq(volTimeline, ev.start, ev.end, ev.volSeq, anchorT, sampleOffset);
+        if (pitchTimeline) ev.pitchSeq = resampleSeq(pitchTimeline, ev.start, ev.end, ev.pitchSeq, anchorT, sampleOffset);
       }
       channels.push({
         // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)+
@@ -22304,7 +22476,7 @@
     if (timelines) {
       for (const ev of events) {
         const tl = ev.srcCh != null ? timelines[ev.srcCh] : null;
-        if (ev.note !== null && tl) ev.volSeq = MML.Hes2MmlExpansion._resampleSeq(tl, ev.start, ev.end, ev.volSeq);
+        if (ev.note !== null && tl) ev.volSeq = MML.Hes2MmlExpansion._resampleSeq(tl, ev.start, ev.end, ev.volSeq, undefined, MML.Hes2MmlExpansion._sampleOffsetFor([tl]));
       }
     }
     function toVolumeFields(volSeq) {

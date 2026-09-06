@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-06 17:59:42
+ * Built by tools/build-capture-workers.ps1 at 2026-09-07 05:18:52
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-06 17:59:42';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-07 05:18:52';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成
@@ -5055,12 +5055,26 @@
   // チャンネル割当(変換元ch → NSF側の借用先パート)の共通モジュール。読み込み順の都合で
   // 未定義でも鍵盤表示は動く(その場合はpart列が従来どおりの固定表示になるだけ)。
   function channelPlan() { return (MML.Convert && MML.Convert.ChannelPlan) || null; }
+  // 今の表示元がMML再生か(setSourceInfo経由)。MML側に切り替えている間はチャンネル割当も
+  // 「割当先の音で聴く」も意味が無いので、両方まとめて無効にする(ユーザー指定 2026-09-06)。
+  // ★ChannelPlan.setFormat は MML では呼ばれず直前のサウンドファイルの形式が残るため、
+  //   plan.editable() だけで判定すると MML 再生に割当プレビューのミュートが掛かって無音になる
+  //   (実際に起きた: VGMで🎧をONにした後のMML再生が全chミュート)。
+  let sourceIsMml = false;
+  function assignEditable() {
+    const plan = channelPlan();
+    return !!plan && plan.editable() && !sourceIsMml;
+  }
+  function assignLockReason() {
+    if (sourceIsMml) return T('MML再生中はチャンネル割当と「割当先の音で聴く」は使えません(サウンドファイルの再生時だけ意味があります)');
+    const plan = channelPlan();
+    return plan ? (plan.lockReason() || '') : '';
+  }
 
   // part列(丸の隣のパート文字)。クリックで1行ぶんの割当ポップオーバーを開けるチップにする。
   // 割当を変更できないフォーマット(NSF等)では従来どおりただの文字表示のまま。
   function partChipHtml(ch) {
-    const plan = channelPlan();
-    const editable = !!plan && plan.editable() && !ch.isAllRow && ch.target !== undefined;
+    const editable = assignEditable() && !ch.isAllRow && ch.target !== undefined;
     const cls = 'kbd-part' + (editable ? ' kbd-part--editable' : '');
     return `<span class="${cls}" data-ch="${ch.id || ''}">${ch.letter || (editable ? '—' : '')}</span>`;
   }
@@ -7071,7 +7085,9 @@
       // どうかで、MML再生を表示中は常に false(=グレーアウト)。
       this._transportState = { playing: false, canPlay: false, canStop: false, canPrevNext: false, canToggleSource: false };
       this.onTransport = null;          // (action:'play'|'stop'|'prev'|'next') => void
-      this.onSourceToggle = null;       // () => void  バッジ(ファイル名)クリックでMML↔サウンドファイル切替
+      this.onSourceToggle = null;       // () => void  バッジ(MML/FILE)クリックでMML↔サウンドファイル切替
+      this.onSourceListRequest = null;  // () => { name, listName?, items:[string]|null, index } | null  表示名(アーカイブなら曲名)と曲一覧(main.js)
+      this.onSourceSelect = null;       // (index) => void  ファイル名の一覧から曲を選んだとき
       this._rollLastDrawnPos = 0;       // _renderRoll()が最後に描いた曲内秒(ドラッグ開始位置の基準)
       this._pendingSelectionReset = false; // reset()が立てるフラグ。次に実データでチャンネル一覧が
                                             // 判明した時(setSource()/updateSpcVoices())、大波形の選択
@@ -7245,7 +7261,7 @@
           const old = headerEl.querySelector(sel);
           if (old) old.remove();
         }
-        for (const sel of ['.kbd-open-btn', '.kbd-tomml-btn', '.kbd-repeat-btn']) {
+        for (const sel of ['.kbd-open-btn', '.kbd-tomml-btn', '.kbd-repeat-btn', '.kbd-src-name']) {
           const old = headerEl.querySelector(sel);
           if (old) old.remove();
         }
@@ -7271,10 +7287,17 @@
           if (!this._transportState.canToggleSource) return;
           if (this.onSourceToggle) this.onSourceToggle();
         });
-        // ファイル名バッジの左に [再生コントロール][終了後の挙動] を置く(ユーザー指示)
+        // 並びは [再生コントロール][MML/FILEバッジ][終了後の挙動][ファイル名/リスト名](ユーザー指示 2026-09-06)。
+        // バッジは「今どちらを表示しているか」だけを示し、名前は右の別ボタンに出す。名前のボタンは
+        // 曲一覧(アーカイブのm3u/複数曲形式の曲番号)から選べるドロップダウンになる
+        this._srcNameEl = document.createElement('button');
+        this._srcNameEl.type = 'button';
+        this._srcNameEl.className = 'kbd-hdr-btn kbd-src-name';
+        this._srcNameEl.addEventListener('click', (e) => { e.stopPropagation(); this._openSourcePopover(); });
         headerEl.insertBefore(this._srcBadgeEl, masterVolBar);
+        headerEl.insertBefore(this._srcNameEl, masterVolBar);
         headerEl.insertBefore(transportBar, this._srcBadgeEl);
-        headerEl.insertBefore(repeatBtn, this._srcBadgeEl);
+        headerEl.insertBefore(repeatBtn, this._srcNameEl);
         this._renderSourceBadge();
         this._renderTransport();
       } else {
@@ -7523,7 +7546,7 @@
       this._buildRollPane();
       this._mountRollPane();
       this._mountBigWave();
-      this._leftEl.classList.toggle('kbd-left--assign', !!this._assignMode);
+      this._leftEl.classList.toggle('kbd-left--assign', !!this._assignMode && !sourceIsMml);
       this._applyLayoutClasses();
       // チャンネル割当が変わったら(この鍵盤表示のセレクト経由でも、他のUI経由でも)
       // part列の文字・スキップ減光・重複警告を貼り直す
@@ -7918,6 +7941,15 @@
     setSourceInfo(kind, name) {
       this._sourceInfo = kind ? { kind, name: name || '' } : null;
       this._renderSourceBadge();
+      // MML側へ切り替えたら割当UI(part列・借用先列・🎧)をまとめて無効に、ファイル側へ戻したら復帰
+      const wasMml = sourceIsMml;
+      sourceIsMml = kind === 'mml';
+      if (wasMml !== sourceIsMml) {
+        if (this._leftEl) this._leftEl.classList.toggle('kbd-left--assign', !!this._assignMode && !sourceIsMml);
+        this._renderAssignToggle();
+        this._renderPreviewToggle();
+        if (this._previewMode) this._notifyPreview(); // ミュート設定/プレビュー計画を今の表示元で組み直す
+      }
     }
     _renderSourceBadge() {
       const el = this._srcBadgeEl;
@@ -7928,15 +7960,65 @@
       el.style.display = '';
       const isMml = info.kind === 'mml';
       el.classList.add(isMml ? 'kbd-src-badge--mml' : 'kbd-src-badge--file');
-      const kindLabel = info.kind.toUpperCase();
-      // 表示は「MML · タイトル」/「NSF · ファイル名」。長い名前は省略記号にしてtitleに全文
-      const name = info.name || '';
-      el.textContent = name ? `${kindLabel} · ${name}` : kindLabel;
-      const base = (isMml ? T('MML再生を表示中') : T('サウンドファイル再生を表示中')) + (name ? `: ${name}` : '');
+      // バッジは MML / FILE の2択(今どちらの再生を表示・操作しているか)。名前は右の別ボタンへ
+      el.textContent = isMml ? 'MML' : 'FILE';
+      const base = isMml ? T('MML再生を表示中') : T('サウンドファイル再生を表示中');
       el.title = this._transportState.canToggleSource
         ? base + '\n' + T('クリックでMML再生 / サウンドファイル再生を切り替え')
         : base;
       el.classList.toggle('kbd-src-badge--clickable', !!this._transportState.canToggleSource);
+      this._renderSourceName();
+    }
+    // ファイル名(MMLならタイトル)/アーカイブのリスト名。曲一覧があればクリックで選べる
+    _renderSourceName() {
+      const el = this._srcNameEl;
+      if (!el) return;
+      const info = this._sourceInfo;
+      const list = (info && this.onSourceListRequest) ? (this.onSourceListRequest() || null) : null;
+      const name = (list && list.name) || (info && info.name) || '';
+      const pickable = !!(list && list.items && list.items.length > 1);
+      if (!name) { el.style.display = 'none'; el.textContent = ''; return; }
+      el.style.display = '';
+      if (el.textContent !== name) el.textContent = name;
+      el.classList.toggle('kbd-src-name--pick', pickable);
+      // アーカイブなら1行目にリスト名(zip/m3u)、2行目に曲名
+      el.title = (list && list.listName ? list.listName + '\n' : '') + name + (pickable ? '\n' + T('クリックで曲を選ぶ') : '');
+    }
+    refreshSourceName() { this._renderSourceName(); }
+    _openSourcePopover() {
+      this._closeSourcePopover();
+      const list = this.onSourceListRequest ? this.onSourceListRequest() : null;
+      if (!list || !list.items || list.items.length < 2) return;
+      const pop = document.createElement('div');
+      pop.className = 'kbd-src-pop';
+      let curEl = null;
+      list.items.forEach((label, i) => {
+        const row = document.createElement('div');
+        row.className = 'kbd-src-pop-item' + (i === list.index ? ' kbd-src-pop-item--cur' : '');
+        row.textContent = label;
+        row.title = label;
+        row.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._closeSourcePopover();
+          if (this.onSourceSelect) this.onSourceSelect(i);
+        });
+        pop.appendChild(row);
+        if (i === list.index) curEl = row;
+      });
+      const r = this._srcNameEl.getBoundingClientRect();
+      pop.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 430)) + 'px';
+      pop.style.top = (r.bottom + 4) + 'px';
+      document.body.appendChild(pop);
+      this._srcPopEl = pop;
+      if (curEl) curEl.scrollIntoView({ block: 'center' });
+      const onDown = (e) => { if (!pop.contains(e.target)) this._closeSourcePopover(); };
+      const onKey = (e) => { if (e.key === 'Escape') this._closeSourcePopover(); };
+      this._srcPopCleanup = () => { document.removeEventListener('mousedown', onDown, true); document.removeEventListener('keydown', onKey, true); };
+      setTimeout(() => { document.addEventListener('mousedown', onDown, true); document.addEventListener('keydown', onKey, true); }, 0);
+    }
+    _closeSourcePopover() {
+      if (this._srcPopCleanup) { this._srcPopCleanup(); this._srcPopCleanup = null; }
+      if (this._srcPopEl) { this._srcPopEl.remove(); this._srcPopEl = null; }
     }
 
     // ── タイトル行の再生コントロール(⏮ ▶/⏸ ■ ⏭) ───────────────────
@@ -9054,7 +9136,7 @@
       const plan = channelPlan();
       if (!plan) return;
       const chId = ch.id;
-      const editable = plan.editable();
+      const editable = assignEditable();
       const partEl = row.querySelector('.kbd-part');
       const targetSel = row.querySelector('.kbd-assign-target');
       const toneSel = row.querySelector('.kbd-assign-tone');
@@ -9063,12 +9145,12 @@
           partEl.title = T('クリックで借用先(NSF側のパート)を選ぶ');
           partEl.addEventListener('click', (e) => { e.stopPropagation(); this._openAssignPopover(partEl, chId); });
         } else {
-          partEl.title = plan.lockReason() || '';
+          partEl.title = assignLockReason();
         }
       }
       if (!targetSel || !toneSel) return;
       targetSel.disabled = toneSel.disabled = !editable;
-      if (!editable) targetSel.title = plan.lockReason() || '';
+      if (!editable) targetSel.title = assignLockReason();
       targetSel.addEventListener('change', () => this._setAssignTarget(chId, targetSel.value));
       toneSel.addEventListener('change', () => {
         const cur = plan.get(chId) || {};
@@ -9315,7 +9397,7 @@
     _setAssignMode(on) {
       this._assignMode = !!on;
       try { localStorage.setItem('mml_kbdAssignMode', on ? '1' : '0'); } catch (e) { /* private browsing等 */ }
-      this._leftEl.classList.toggle('kbd-left--assign', this._assignMode);
+      this._leftEl.classList.toggle('kbd-left--assign', this._assignMode && !sourceIsMml);
       this._applyLayoutClasses();
       this._refreshAssignUi();
       // 「借用先/音色」列(200px)が入りきらない幅のままだと右側の列(L/R・vol・wave)が
@@ -9344,19 +9426,18 @@
     isPreviewMode() { return !!this._previewMode; }
     _notifyPreview() { if (this.onPreviewChange) this.onPreviewChange(); }
     _renderPreviewToggle() {
-      const plan = channelPlan();
       if (!this._previewBtns) return;
-      const editable = !!plan && plan.editable();
+      const editable = assignEditable();
       for (const btn of this._previewBtns) {
         btn.classList.toggle('kbd-preview-btn--on', !!this._previewMode);
         btn.disabled = !editable;
-        btn.title = editable ? T('割当先の音で聴く(元chをミュートし、借用先のNSF音源で鳴らす。スキップは無音、DPCMは元のまま)') : (plan ? plan.lockReason() : '');
+        btn.title = editable ? T('割当先の音で聴く(元chをミュートし、借用先のNSF音源で鳴らす。スキップは無音、DPCMは元のまま)') : assignLockReason();
       }
     }
     // 表示中の一覧の行ごとの割当(プレビュー用)。tone は選択が無ければ借用先ごとの既定値
     getPreviewPlan() {
       const plan = channelPlan();
-      if (!plan || !plan.editable()) return [];
+      if (!assignEditable()) return [];
       const rows = (this._mode === 'spc' ? this._spcRowEls : this._rowEls).filter(el => !el.isAllRow && el.partEl && el.checkbox);
       const out = [];
       for (const el of rows) {
@@ -9374,7 +9455,7 @@
     _previewMutesRow(el) {
       if (!this._previewMode || el.isAllRow || !el.partEl) return false;
       const plan = channelPlan();
-      if (!plan || !plan.editable()) return false;
+      if (!assignEditable()) return false;   // MML表示中は元chを消さない
       if (plan.isUnassignable && plan.isUnassignable(el.id)) return false;
       const target = (plan.get(el.id) || {}).target || el.defaultTarget || 'skip';
       return target !== 'dpcm';
@@ -9400,13 +9481,12 @@
     _renderAssignToggle() {
       const plan = channelPlan();
       if (!this._assignBtns) return;
-      const editable = !!plan && plan.editable();
+      const editable = assignEditable();
       for (const btn of this._assignBtns) {
         btn.classList.toggle('kbd-assign-btn--on', !!this._assignMode);
         btn.classList.toggle('kbd-assign-btn--custom', !!plan && plan.isCustom());
         btn.disabled = !editable;
-        btn.title = editable ? T('チャンネル割当(変換元ch → NSF側のパート)を表示')
-          : (plan ? plan.lockReason() : '');
+        btn.title = editable ? T('チャンネル割当(変換元ch → NSF側のパート)を表示') : assignLockReason();
       }
     }
 

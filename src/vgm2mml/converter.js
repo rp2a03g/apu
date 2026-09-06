@@ -232,7 +232,8 @@
     // 既定割当では7ch目以降がskipになる(ユーザーが割当UIで他の借用先へ逃がせる)。
     if (c.ym2151) for (let i = 0; i < 8; i++) out.push({ id: `opm:${i}`, label: `YM2151 FM${i + 1}`, kind: 'fm4', chip: 'ym2151', chipIndex: 0, ch: i });
     // YM2203(OPN): 4op FM×3ch。抽出・4op→2op変換はYM2612と同じ経路(snapshotの形が同一)
-    if (c.ym2203) for (let i = 0; i < 3; i++) out.push({ id: `opn3:${i}`, label: `YM2203 FM${i + 1}`, kind: 'fm4', chip: 'ym2203', chipIndex: 0, ch: i });
+    // デュアル(クロックbit30)は2個目のFM3chを ch3-5 として続ける(スナップショットは6ch連結。鍵盤のOP4-6行と同じ)
+    if (c.ym2203) for (let i = 0; i < (c.ym2203.dual ? 6 : 3); i++) out.push({ id: `opn3:${i}`, label: `YM2203 FM${(i % 3) + 1}${i >= 3 ? '(2)' : ''}`, kind: 'fm4', chip: 'ym2203', chipIndex: i >= 3 ? 1 : 0, ch: i });
     // YM2608(OPNA): 4op FM×6ch+ADPCM-B。内蔵リズム(6ch)はドラムパート(DRUM_CHIPS)のみ
     // (音程ごとのサンプルではなく固定ドラム音のため、スロット単位の音符化はしない)
     if (c.ym2608) {
@@ -343,7 +344,7 @@
       const tt = TARGET_TYPES[t] || TARGET_TYPES.skip;
       // ドラムパート(合成ch)はラベルがそのまま1グループ("C140 Drums")
       const key = /:drum$/.test(s.id) ? s.label
-        : s.label.replace(/ ch\d+$| noise$/, '').replace(/ (FM|ADPCM-A|PCM)\d+$/, ' $1') + (s.kind === 'noise' ? ' noise' : '');
+        : s.label.replace(/ ch\d+$| noise$/, '').replace(/ (FM|ADPCM-A|PCM)\d+(\(2\))?$/, ' $1$2') + (s.kind === 'noise' ? ' noise' : '');
       const dst = (t === 'skip' || !tt.chip) ? null : (tt.chip === '2a03' ? `2A03 ${tt.letter}` : tt.chip.toUpperCase().replace('FME7', 'FME-7'));
       if (!groups.has(key)) groups.set(key, new Set());
       if (dst) groups.get(key).add(dst);
@@ -386,7 +387,6 @@
     const vrc7ToneReg = new MML.Convert.WaveRegistry('@OP');
     const notes = ignoredNote ? [ignoredNote] : [];
     if (c.ay8910 && c.ay8910.dual) notes.push('2個目のAY8910(デュアルチップ)は変換対象外のため無視しました。');
-    if (c.ym2203 && c.ym2203.dual) notes.push('2個目のYM2203(デュアルチップ)は変換対象外のため無視しました(再生と鍵盤表示には反映されます)。');
     // 既定割当が借用先不足でskipにしたFMチャンネル(YM2151 8ch > VRC7 6ch 等)はその旨を注記する
     // (ユーザーが明示的にskipへ変えたものは対象外)
     const autoSkippedFm = src.filter(s => (s.kind === 'fm4' || s.kind === 'fm') && plan[s.id] === 'skip'
@@ -562,7 +562,7 @@
       for (const s of src) if (s.chip === 'ym2151' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
     }
     if (data.ym2203fm && c.ym2203) {
-      const r = MML.Vgm2MmlExpansion.opn(data.ym2203fm.snapshots, 3);
+      const r = MML.Vgm2MmlExpansion.opn(data.ym2203fm.snapshots, c.ym2203.dual ? 6 : 3);
       for (const s of src) if (s.chip === 'ym2203' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
     }
     if (data.ym2608fm && c.ym2608) {
@@ -1045,8 +1045,17 @@
         snapshots: data.gb.snapshots, frameRate: data.frameRate, songLabel: label, sourceLabel: 'VGM'
       }, options);
     } else if (family === 'hes') {
+      // vgmPlayer.js は HuC6280 の書込みトレースを {ch,...} 付きの平坦な1本で積む
+      // (Worker差分プロトコルの都合)。hes2mml が期待する ch別配列へ振り分ける。
+      // 旧キャプチャ(ctlTrace無し)は空配列=従来のスナップショット列にフォールバック。
+      const splitByCh = (flat) => {
+        const per = Array.from({ length: MML.Hes2MmlExpansion.CH_COUNT }, () => []);
+        for (const e of (flat || [])) if (per[e.ch]) per[e.ch].push(e);
+        return per;
+      };
       result = MML.HES2MML.convertCapture({
-        snapshots: data.hes.snapshots, dpcmTrace: [], controlTrace: [],
+        snapshots: data.hes.snapshots, dpcmTrace: [],
+        controlTrace: splitByCh(data.hes.ctlTrace), pitchTrace: splitByCh(data.hes.pitchTrace),
         frameRate: data.frameRate, trackLabel: label, sourceLabel: 'VGM'
       }, options);
     }

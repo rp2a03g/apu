@@ -127,7 +127,7 @@
     if (timelines) {
       for (const ev of events) {
         const tl = ev.srcCh != null ? timelines[ev.srcCh] : null;
-        if (ev.note !== null && tl) ev.volSeq = MML.Hes2MmlExpansion._resampleSeq(tl, ev.start, ev.end, ev.volSeq);
+        if (ev.note !== null && tl) ev.volSeq = MML.Hes2MmlExpansion._resampleSeq(tl, ev.start, ev.end, ev.volSeq, undefined, MML.Hes2MmlExpansion._sampleOffsetFor([tl]));
       }
     }
     function toVolumeFields(volSeq) {
