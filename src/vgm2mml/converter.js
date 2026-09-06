@@ -213,6 +213,13 @@
     // YM2203(OPN)/YM2608(OPNA)の内蔵SSGも同じAY経路(captureVgmSongAsyncがkss.writeLogへ流す)。
     if (c.ym2203 && !c.ay8910 && !c.ym2610) for (let i = 0; i < 3; i++) out.push({ id: `ay:${i}`, label: `YM2203 SSG ch${i + 1}`, kind: 'square', chip: 'ay8910', chipIndex: 0, ch: i });
     if (c.ym2608 && !c.ay8910 && !c.ym2610 && !c.ym2203) for (let i = 0; i < 3; i++) out.push({ id: `ay:${i}`, label: `YM2608 SSG ch${i + 1}`, kind: 'square', chip: 'ay8910', chipIndex: 0, ch: i });
+    // 2個目のPSG(デュアルAY8910 / 2個目のYM2203・YM2608・YM2610の内蔵SSG): 抽出は kss2.writeLog から同じAY経路。
+    // chipIndex 1 で1個目と区別する(extractGroup がchipIndexで振り分ける)。鍵盤の行は KP4-6
+    {
+      const ayChip = c.ay8910 ? ['AY8910', c.ay8910] : c.ym2610 ? ['YM2610 SSG', c.ym2610]
+        : c.ym2203 ? ['YM2203 SSG', c.ym2203] : c.ym2608 ? ['YM2608 SSG', c.ym2608] : null;
+      if (ayChip && ayChip[1].dual) for (let i = 0; i < 3; i++) out.push({ id: `ay2:${i}`, label: `${ayChip[0]}(2) ch${i + 1}`, kind: 'square', chip: 'ay8910', chipIndex: 1, ch: i });
+    }
     if (c.k051649) for (let i = 0; i < 5; i++) out.push({ id: `scc:${i}`, label: `SCC ch${i + 1}`, kind: 'wave', chip: 'k051649', chipIndex: 0, ch: i });
     // YM2413はメロディ9ch(★2026-08-22に6→9へ。リズムモード曲は抽出側が6chしか返さないので
     // ch7-9は空チャンネルとして扱われる。src/kss2mml/expansion/opll.js 参照)
@@ -304,7 +311,9 @@
     for (const s of src.filter(s => s.kind === 'wave')) plan[s.id] = used.n163 < cap.n163 ? `n163_${take('n163')}` : 'skip';
     // FM(OPLL 2op / OPN 4op)はVRC7へ(6ch)。YM2612は6chでちょうど埋まる
     for (const s of src.filter(s => s.kind === 'fm' || s.kind === 'fm4')) plan[s.id] = used.vrc7 < cap.vrc7 ? `vrc7_${take('vrc7')}` : 'skip';
-    for (const s of src.filter(s => s.kind === 'square' && s.chip === 'ay8910')) plan[s.id] = used.fme7 < cap.fme7 ? ['fme7a', 'fme7b', 'fme7c'][take('fme7')] : 'skip';
+    for (const s of src.filter(s => s.kind === 'square' && s.chip === 'ay8910' && s.chipIndex === 0)) plan[s.id] = used.fme7 < cap.fme7 ? ['fme7a', 'fme7b', 'fme7c'][take('fme7')] : 'skip';
+    // 2個目のPSG(ay2)は 2A03 パルスA/B + MMC5 パルス1 へ(ユーザー指定 2026-09-06。FME-7は1個目で埋まる)
+    for (const s of src.filter(s => s.kind === 'square' && s.chip === 'ay8910' && s.chipIndex === 1)) plan[s.id] = ['pulse1', 'pulse2', 'mmc5pulse1'][s.ch] || 'skip';
     // YM2610 ADPCM: B(1ch、Δ-Nで音階演奏されることが多い)はVRC7の空き→2A03パルスA、
     // A(6ch、音程サンプルは音程ごとに別サンプル)はN163の空きへ。ドラム等音程なしのサンプルは
     // 抽出段階で休符になるので、割り当てても音符が無ければ空チャンネルになるだけ
@@ -525,9 +534,11 @@
       notes.push(`打楽器(音程の取れないサンプル)を1本のドラムパートにまとめ、サンプルごとに音程を割り当てました: ${rows.join(' ')} (アドレスはサンプルROM上の開始位置)。`);
     }
 
-    function extractGroup(chipKey, extractFn) {
-      // 'dpcm'(合成音chの打楽器化)は分離レンダリングの打点で扱うので旋律の抽出からは外す
-      const items = src.filter(s => s.chip === chipKey && s.kind !== 'noise' && plan[s.id] !== 'skip' && plan[s.id] !== 'dpcm');
+    function extractGroup(chipKey, extractFn, chipIndex) {
+      // 'dpcm'(合成音chの打楽器化)は分離レンダリングの打点で扱うので旋律の抽出からは外す。
+      // chipIndex: 同じチップ種別の2個目(デュアルAY等)を別のwriteLogから抽出するときに 1 を渡す
+      const ci = chipIndex || 0;
+      const items = src.filter(s => s.chip === chipKey && (s.chipIndex || 0) === ci && s.kind !== 'noise' && plan[s.id] !== 'skip' && plan[s.id] !== 'dpcm');
       const fams = [...new Set(items.map(s => familyOf(plan[s.id])))];
       for (const fam of fams) {
         const res = extractFn(regFor(chipKey, fam), fam);
@@ -536,6 +547,9 @@
     }
     if (data.kss && data.kss.ay && hasAySource) {
       extractGroup('ay8910', (reg) => MML.Kss2MmlExpansion.ay(data.kss.writeLog, totalFrames, kssClock, reg).channels);
+    }
+    if (data.kss2 && data.kss2.ay && src.some(s => s.chip === 'ay8910' && s.chipIndex === 1)) {
+      extractGroup('ay8910', (reg) => MML.Kss2MmlExpansion.ay(data.kss2.writeLog, totalFrames, data.kss2.clock || kssClock, reg).channels, 1);
     }
     let sccResult = null, sccUsed = false;
     if (data.kss && data.kss.scc && c.k051649) {
@@ -866,6 +880,15 @@
     const isAy = s.chip === 'ay8910';
     const nativeVrc7 = s.kind === 'fm' && fam === 'vrc7' && (vrc7Inst === 'auto' || vrc7Inst == null);
     const nativeFme7 = s.kind === 'square' && fam === 'fme7';
+    // SCC→N163: 抽出器(Kss2MmlExpansion.scc)が波形メモリを @N として n163WaveReg に登録済みなので、そのまま使う
+    // (tone で固定波形を選んだときだけ下の n163 分岐で差し替える)。
+    // ★以前はここで止まらず n163 分岐に落ち、ev.n163Wave が無いので全部 N163_SQUARE_WAVE に化けていた
+    const nativeScc = s.kind === 'wave' && s.chip === 'k051649' && fam === 'n163' && !MML.Convert.Borrow.toneWave(tone);
+    if (nativeScc) {
+      // 周期式(デチューン/EP)が参照する波形長を @N の実長(SCCは32)にそろえる
+      for (const ev of events) if (ev.note !== null && ev.instrument !== undefined && n163WaveReg.waves[ev.instrument]) ev.rawLength = n163WaveReg.waves[ev.instrument].length;
+      return;
+    }
     if (nativeVrc7 || nativeFme7 || (fam === 'noise' && s.kind === 'noise')) return; // そのまま(旋律→ノイズは下で周期へ写す)
     const dutyOf = (max, def) => { const n = parseInt(tone, 10); return (isFinite(n) && n >= 0 && n <= max) ? n : def; };
     // AYのミキサー: ノイズ単独(mode 2)は矩形波系の借用先では鳴らせないので休符に、

@@ -1269,6 +1269,15 @@
                  : has('ym2608') ? player.adapterById.ym2608.fm.ssgTickHz
                  : has('k051649') ? player.adapterById.k051649.clockHz : has('ym2413') ? player.adapterById.ym2413.clockHz : 3579545 }
         : null,
+      // 2個目のPSG(デュアルAY8910、YM2203/YM2608/YM2610の2個目の内蔵SSG): KSS形式のwriteLogはPSG1個ぶんの
+      // ポート(0xA0/0xA1)しか持てないので、2個目は別のwriteLog(kss2)へ同じ形で流す。ロールは KP4-6 行、
+      // 変換は ay2:0-2 として同じ抽出器(Kss2MmlExpansion.ay)を使う(2026-09-06)
+      kss2: (has('ay8910_2') || has('ym2610_2') || has('ym2203_2') || has('ym2608_2'))
+        ? { writeLog: [], ay: true,
+            clock: has('ay8910_2') ? player.adapterById.ay8910_2.clockHz : has('ym2610_2') ? player.adapterById.ym2610_2.clockHz / 2
+                 : has('ym2203_2') ? player.adapterById.ym2203_2.fm.ssgTickHz
+                 : player.adapterById.ym2608_2.fm.ssgTickHz }
+        : null,
       sn: has('sn76489') ? { snapshots: [], clock: player.adapterById.sn76489.clockHz } : null,
       ym2612: has('ym2612') ? { snapshots: [] } : null,
       ym2610fm: has('ym2610') ? { snapshots: [] } : null,
@@ -1318,6 +1327,7 @@
     const c352Regrouper = data.c352 ? new Emu.PoolChannelRegrouper(32) : null;
     const qsRegrouper = data.qsound ? new Emu.PoolChannelRegrouper(16) : null;
     let kssFrameWrites = [];
+    let kss2FrameWrites = []; // 2個目のPSG(data.kss2)
     const nesRegs = {};
     // HuC6280書込みトレース(上の data.hes コメント参照)。t は分数フレーム時刻
     // (hesPlayer.js の currentFrame + frameSamplePos/frameSampleCount と同じ意味)。
@@ -1347,6 +1357,11 @@
       switch (id) {
         case 'nes': nesFrameWrites.push({ addr: c, value: b }); nesRegs[c] = b; break;
         case 'ay8910': kssFrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
+        // 2個目のチップ('_2')の内蔵SSG/AYは kss2 へ(1個目と同じ形)
+        case 'ay8910_2': kss2FrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
+        case 'ym2610_2': if (a === 0 && b < 0x0E) kss2FrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
+        case 'ym2203_2': if (a < 0x0E) kss2FrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
+        case 'ym2608_2': if (a === 0 && b < 0x0E) kss2FrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
         // YM2610: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
         case 'ym2610': if (a === 0 && b < 0x0E) kssFrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
         // YM2203: (addr, data)。addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
@@ -1381,6 +1396,7 @@
       if (data.gb) data.gb.snapshots.push(Emu.snapshotGbApuForCapture(player.adapterById.gb.apu));
       if (data.hes) data.hes.snapshots.push(Emu.snapshotHesApuForCapture(player.adapterById.huc6280.apu));
       if (data.kss) { data.kss.writeLog.push(Int32Array.from(kssFrameWrites)); kssFrameWrites = []; }
+      if (data.kss2) { data.kss2.writeLog.push(Int32Array.from(kss2FrameWrites)); kss2FrameWrites = []; }
       if (data.sn) {
         const s1 = Emu.snapshotSN76489(player.adapterById.sn76489.chip, data.sn.clock);
         const a2 = player.adapterById.sn76489_2;
@@ -1487,7 +1503,10 @@
         // デュアルチップ(Avengers等): ライブ表示(main.js getYm2203Fm)と同じく ym2203_2 のFM3chを後ろに足す
         // (OP4-6行)。★ここに無いとロールと変換だけ2個目が空になる(鍵盤の行はライブで出るので気付きにくい)
         const a2 = player.adapterById.ym2203_2;
-        if (a2) s.channels = s.channels.concat(Emu.snapshotYM2203(a2.fm, SNAP_CAPTURE).channels);
+        if (a2) {
+          s.channels = s.channels.concat(Emu.snapshotYM2203(a2.fm, SNAP_CAPTURE).channels);
+          if (data.kss2) data.kss2.clock = a2.fm.ssgTickHz; // 2個目のプリスケーラも追随
+        }
         for (const c of s.channels) { c.active = c.keyOn && c.freq > 0; c.vol = c.tlVol; c.rawVol = Math.round(c.tlVol * 15); }
         data.ym2203fm.snapshots.push(s);
         // プリスケーラでSSG実クロックが変わる(Avengersは1/3=SSG実クロック2倍)ため、

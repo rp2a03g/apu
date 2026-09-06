@@ -286,7 +286,7 @@
   // 各要素は [正規表現, m => [kind, vgmSourceId]](vgmSourceIdはVGM変換時のみ意味を持つ)
   const CH_KIND = [
     [/^V[0-7]$/, function () { return ['brr', null]; }],                                    // SPC ボイス(BRRサンプル)
-    [/^KP([1-3])$/, function (m) { return ['square', 'ay:' + (+m[1] - 1)]; }],              // AY8910 / YM2610 SSG
+    [/^KP([1-6])$/, function (m) { return ['square', (+m[1] <= 3 ? 'ay:' + (+m[1] - 1) : 'ay2:' + (+m[1] - 4))]; }], // AY8910 / 内蔵SSG(KP4-6=2個目のチップ)
     [/^KS([1-5])$/, function (m) { return ['wave', 'scc:' + (+m[1] - 1)]; }],               // SCC
     [/^KF([1-9])$/, function (m) { return ['fm', 'opll:' + (+m[1] - 1)]; }],                // YM2413 / FMPAC メロディ
     [/^KF(BD|SD|TOM|CYM|HH)$/, function () { return ['fm', null]; }],                       // OPLLリズム(割当対象外)
@@ -335,6 +335,7 @@
     const kind = m[1], rest = m[2];
     if (kind === 'pcmb') return 'NB';
     if (kind === 'pcmb8') return 'OAB'; // YM2608 ADPCM-B
+    if (kind === 'ay2') return /^\d+$/.test(rest) ? 'KP' + (+rest + 4) : null; // 2個目のPSG → KP4-6
     if (/^sn[01]$/.test(kind)) {
       const chip = kind === 'sn1' ? 1 : 0;
       if (rest === 'noise') return chip ? 'SNN2' : 'SNN';

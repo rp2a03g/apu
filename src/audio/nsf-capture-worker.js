@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-07 05:18:52
+ * Built by tools/build-capture-workers.ps1 at 2026-09-07 05:24:20
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-07 05:18:52';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-07 05:24:20';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成
@@ -11138,6 +11138,14 @@
         data.kss.opl ? { used: true, clock: data.kss.oplClock } : null);
       // AY未使用(SCC/OPLLのみ)のVGMではKP行が鍵盤に無いのでロール側も落とす
       tracks = tracks.concat(data.kss.ay ? kssTracks : kssTracks.filter(t => !/^KP\d/.test(t.id)));
+    }
+    // 2個目のPSG(vgmPlayer.js captureVgmSongAsync の kss2): 同じKSS抽出器で作って KP4-6 へ付け替える
+    if (data.kss2) {
+      const wl2 = data.kss2.writeLog.slice(0, done);
+      const t2 = RollBuild.kss(wl2, done, frameRate, { device: { mode: 'MSX', fmpac: false } }, false, data.kss2.clock, null)
+        .filter(t => /^KP[1-3]$/.test(t.id))
+        .map(t => Object.assign({}, t, { id: 'KP' + (+t.id.slice(2) + 3) }));
+      tracks = tracks.concat(t2);
     }
     // スナップショット型チップ: extractChannels(keyboard.js)が読むextraSnapsに
     // フレーム毎スナップショット配列を渡して同じ抽出経路でトラック化する
