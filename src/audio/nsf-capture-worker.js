@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 06:15:35
+ * Built by tools/build-capture-workers.ps1 at 2026-09-06 17:59:42
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-05 06:15:35';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-06 17:59:42';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成
@@ -2474,6 +2474,10 @@
     return neg ? ~out : out;
   }
 
+  // 音色エディタの逆算(src/ui/vrc7ToneSolver.js)が定常状態の1周期を実機と同じ演算で
+  // 作るために使う。LOGSIN/EXPROM表そのものは外へ出さない(表を持ち出すと写しがずれる)
+  OPLLNuked.opOut = opOut;
+
   Emu.OPLLNuked = OPLLNuked;
 })(globalThis);
 
@@ -2554,6 +2558,10 @@
     };
   }
   const PATCH = VRC7_INST.map(dump2patch); // [16] {mod,car}
+  // 変換側(src/convert/vrc7Tone.js の「近いプリセット探し」)にも同じ表が要る。あちらは
+  // Workerバンドルにエミュレータを同梱できない都合で自前の写しを持っているので、
+  // tools/headless/check-all.js がこの export と突き合わせて食い違いを検出する。
+  Emu.VRC7_INST = VRC7_INST;
 
   // ---- テーブル ----
   function Min(a, b) { return a < b ? a : b; }
@@ -5065,6 +5073,11 @@
       '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
       '<path d="M3 6h5M3 14h5"/><path d="M12 6h5M12 14h5"/><path d="M8 6c2.5 0 1.5 8 4 8"/><path d="M8 14c2.5 0 1.5-8 4-8"/></svg></button>';
   }
+  // 見出しの「借用先」列に置く「割当先の音で聴く」トグル(src/audio/assign-preview.js)。
+  // ONで元chをミュートし、借用先のNSF音源で鳴らし直す(変換後の音色を再生中に確かめる)。
+  function headerPreviewBtnHtml() {
+    return `<button type="button" class="kbd-preview-btn" aria-label="${T('割当先の音で聴く')}">\u{1F3A7}</button>`;
+  }
   // 見出しの mute 列に置く一括ミュートボタン。全chミュートでなければ全ミュート、
   // 全ミュート済みなら全解除(トグル)。
   function headerMuteAllBtnHtml() {
@@ -5993,11 +6006,14 @@
     if (chips.includes('okim6258')) {
       // OKIM6258(VGM: X68000 ADPCM): 1chストリーミングADPCM。ROMも音程レジスタも無いので
       // YMDA/PWMと同じ「サンプル」行(音量=現在振幅、キャプチャ時は再生中の下限0.3)。
+      // 波形アイコンはDACストリームで流れているサンプルの128点(okim6258.js snapshot の waveData、
+      // NA行等と同じ makeSampleWave: 音程あり=1周期/無し=全体の概形)。無ければ従来の破線
       const live = extraSnaps && extraSnaps.okim6258Live;
       const s = live ? live() : (extraSnaps && extraSnaps.okim6258 ? extraSnaps.okim6258[frameIdx] : null);
-      const c = s ? s[0] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0 };
+      const c = s ? s[0] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, waveData: null };
+      const okiWave = (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
       channels.push({ id: 'OKI', color: '#ff9944', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
-        wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
+        wave: okiWave, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
         panL: c.panL, panR: c.panR });
     }
 
@@ -6275,6 +6291,9 @@
   }
 
   // ── 鍵盤描画 ────────────────────────────────────────────────
+
+  // 演奏入力で押している鍵の色(チャンネル色と衝突しにくい彩度の高い青緑)
+  const PERFORM_KEY_COLOR = '#22d3ee';
 
   function keyX(midi, wkW) {
     if (midi < MIDI_MIN || midi > MIDI_MAX) return null;
@@ -6821,7 +6840,9 @@
   // (小数可)から表示する(チャンネルごとのレーン用。ロール側と同じ窓を使う)
   // drums: {lanes:[{label,color}], laneOf:Map(drumKey→レーン番号)} ドラム区画のパッド。
   // 省略/空なら区画なし(音程軸の座標は従来と完全に一致する)。
-  function drawPiano(canvas, channels, orientation, visibleWhite, offsetWhite, drums) {
+  // performNotes: 演奏入力(src/ui/performInput.js)で今押されている音のMIDIノート番号。
+  // 再生中のチャンネルとは別の色(アクセント色)で点灯させ、自分が弾いた音を区別できるようにする
+  function drawPiano(canvas, channels, orientation, visibleWhite, offsetWhite, drums, performNotes) {
     const vertical = orientation !== 'horizontal';
     // 内部解像度は表示サイズ(CSS px、border除く)に合わせる。表示サイズは_cachedWidth/_cachedHeight
     // (ResizeObserverでキャッシュ)を優先し、毎フレームoffsetWidth/clientHeightを読んで
@@ -6843,6 +6864,10 @@
     const bkW = Math.max(3, wkW * 0.60); // 黒鍵の太さ
     const bkH = Math.round(keyLen * 0.62); // 黒鍵の長さ
     const ctx = canvas.getContext('2d');
+    // ★クリック位置→ノート番号の逆写像(_noteAtPoint)のために、この描画で使った幾何を
+    //   canvasへ焼き付けておく。向き・レーンごとの音程窓・ドラム区画の有無で値が変わるため、
+    //   逆写像側で計算し直すと必ずどこかの組み合わせでずれる
+    canvas._pianoGeom = { vertical, wkW, bkW, bkH, pitchOff, pitchLen, keyLen, W, H };
 
     const keyColors = {};
     const laneColors = {}; // ドラム区画: レーン番号 → 今そこを鳴らしているchの色
@@ -6863,6 +6888,8 @@
         : (ch.freq ? freqToMidi(ch.freq) : null);
       if (midi !== null && !keyColors[midi]) keyColors[midi] = ch.color;
     }
+    // 自分が弾いている音は再生中の音より手前(上書き)で光らせる
+    for (const m of (performNotes || [])) keyColors[m] = PERFORM_KEY_COLOR;
 
     ctx.clearRect(0, 0, W, H);
 
@@ -7015,6 +7042,10 @@
       this._rollLastRawPos = null; // 直前に_renderRollへ渡された実時間(壁時計)位置
       this._rollBaseWallMs = null; // _rollSongTimeBase確定時点のperformance.now()(補間の起点)
       this.onMuteChange = null;
+      // 割当プレビュー(「割当先の音で聴く」)。セッション内だけの状態(再読込で必ずOFF=元の音)
+      this._previewMode = false;
+      this.onPreviewChange = null;      // () => void  ON/OFF・割当・ミュートが変わったとき(main.js syncAssignPreview)
+      this.spcLiveRows = null;          // () => rows[] SPC再生中のボイス状態(main.js spcPreviewRows)。getLiveChannels()が使う
       this._poolModes = {};             // チャンネルプール式チップの表示モード(chipToken → 'logical'|'phys')
       this.onPoolModeChange = null;     // (chipToken, mode) => void  ヘッダのモード切替
       this.onSpcMuteChange = null; // (voiceIndex:number, muted:bool) => void
@@ -7261,7 +7292,7 @@
         headerAssignBtnHtml() +
         headerMuteAllBtnHtml() +
         `<span class="kbd-h-name">ch</span>` +
-        `<span class="kbd-h-assign">${T('借用先')}</span>` +
+        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}</span>` +
         `<span class="kbds-h-lr kbds-h-l">L</span>` +
         `<span class="kbds-h-lr">R</span>` +
         headerVolResetBtnHtml() +
@@ -7301,7 +7332,7 @@
         headerAssignBtnHtml() +
         headerMuteAllBtnHtml() +
         `<span class="kbd-h-name">ch</span>` +
-        `<span class="kbd-h-assign">${T('借用先')}</span>` +
+        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}</span>` +
         `<span class="kbds-h-lr kbds-h-l">L</span>` +
         `<span class="kbds-h-lr">R</span>` +
         headerVolResetBtnHtml() +
@@ -7324,6 +7355,11 @@
       for (const b of this._assignBtns) {
         b.addEventListener('click', (e) => { e.stopPropagation(); this._setAssignMode(!this._assignMode); });
       }
+      this._previewBtns = Array.prototype.slice.call(left.querySelectorAll('.kbd-preview-btn'));
+      for (const b of this._previewBtns) {
+        b.addEventListener('click', (e) => { e.stopPropagation(); this._setPreviewMode(!this._previewMode); });
+      }
+      this._renderPreviewToggle();
       this._muteAllBtns = Array.prototype.slice.call(left.querySelectorAll('.kbd-muteall-btn'));
       for (const b of this._muteAllBtns) {
         b.addEventListener('click', (e) => { e.stopPropagation(); this._toggleAllMute(); });
@@ -7849,17 +7885,27 @@
       }
     }
 
+    // 鍵盤だけ描き直す。停止中(rAFが回っていない)に演奏入力で押した鍵を点灯させるために、
+    // src/ui/performInput.js が押鍵のたびに呼ぶ。ロールは触らないので安い
+    refreshPianos() {
+      this._drawPianos(this._lastChannels || []);
+    }
+
     // 鍵盤描画: 全チャンネルまとめ(1枚)か、レーンごと(そのchだけ)か
     _drawPianos(allChannels) {
+      const PI = MML.UI && MML.UI.PerformInput;
+      const performNotes = (PI && PI.isArmed()) ? PI.heldNotes() : null;
       if (this._layout.rollLanes === 'perChannel' && this._lanes.length) {
         for (const l of this._lanes) {
           // 音程窓はロール側と共通(_updateLaneRanges が決めたそのchの音域)
-          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, l.visWhite || 0, l.offWhite || 0, this._drumsForPiano());
+          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, l.visWhite || 0, l.offWhite || 0, this._drumsForPiano(), performNotes);
           if (this._drumLanes && this._drumLanes.length) this._attachDrumAudition(l.pianoCanvas);
+          this._attachPerformInput(l.pianoCanvas);
         }
         return;
       }
-      drawPiano(this._canvas, allChannels, this._layout.rollOrientation, 0, 0, this._drumsForPiano());
+      drawPiano(this._canvas, allChannels, this._layout.rollOrientation, 0, 0, this._drumsForPiano(), performNotes);
+      this._attachPerformInput(this._canvas);
       // ドラム区画があるときだけパッド試聴を有効にする(区画=パッドが無ければ押す物が無い)
       const hasDrums = !!(this._drumLanes && this._drumLanes.length);
       if (hasDrums) this._attachDrumAudition(this._canvas);
@@ -8692,6 +8738,87 @@
       return (lane >= 0 && lane < lanes.length) ? lane : -1;
     }
 
+    // 鍵盤canvasのクリック位置 → MIDIノート番号(鍵の上でなければ null)。
+    // 幾何は直前の drawPiano が canvas._pianoGeom へ焼き付けたものを使う。
+    // 黒鍵は白鍵の手前(ロール側)に乗っているので先に判定する。
+    _noteAtPoint(canvas, clientX, clientY) {
+      const g = canvas._pianoGeom;
+      if (!g) return null;
+      const r = canvas.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      // canvasの内部解像度は表示サイズに合わせてあるが、途中で変わる瞬間に備えて比率補正する
+      const cx = (clientX - r.left) * (g.W / r.width);
+      const cy = (clientY - r.top) * (g.H / r.height);
+      // p: 音程軸(低音→高音)、q: 鍵の長さ方向(0=ロール側の端)
+      const p = g.vertical ? cx : (g.H - cy);
+      const q = g.vertical ? cy : (g.keyLen - cx);
+      if (q < 0 || q > g.keyLen || p < 0 || p > g.pitchLen) return null;
+      if (q <= g.bkH) {
+        for (let midi = MIDI_MIN; midi <= MIDI_MAX; midi++) {
+          const rel = midi - MIDI_MIN;
+          if (!IS_BLACK[rel % 12]) continue;
+          const pos = keyX(midi, g.wkW);
+          if (!pos) continue;
+          const x = pos.x + g.pitchOff;
+          if (p >= x - g.bkW / 2 && p <= x + g.bkW / 2) return midi;
+        }
+      }
+      for (let midi = MIDI_MIN; midi <= MIDI_MAX; midi++) {
+        const rel = midi - MIDI_MIN;
+        if (IS_BLACK[rel % 12]) continue;
+        const pos = keyX(midi, g.wkW);
+        if (!pos) continue;
+        const x = pos.x + g.pitchOff;
+        if (p >= x && p < x + g.wkW) return midi;
+      }
+      return null;
+    }
+
+    // 鍵盤canvasに演奏入力(押している間だけ鳴らす/ドラッグでグリッサンド)を取り付ける。
+    // 実際に効くのは演奏入力モード中だけ。ドラム区画の上では null が返るのでパッド試聴と衝突しない
+    _attachPerformInput(canvas) {
+      if (!canvas || canvas._performWired) return;
+      canvas._performWired = true;
+      const PI = () => (MML.UI && MML.UI.PerformInput);
+      let playing = null;   // 今このcanvasから鳴らしている音
+      const release = (e) => {
+        if (playing == null) return;
+        const pi = PI();
+        if (pi) pi.noteOff(playing, 'piano', e);
+        playing = null;
+      };
+      canvas.addEventListener('pointerdown', (e) => {
+        const pi = PI();
+        if (!pi || !pi.isArmed()) return;
+        const midi = this._noteAtPoint(canvas, e.clientX, e.clientY);
+        if (midi == null) return;
+        e.preventDefault();
+        try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        release(e);
+        playing = midi;
+        pi.noteOn(midi, 'piano', e);
+      });
+      canvas.addEventListener('pointermove', (e) => {
+        const pi = PI();
+        if (!pi) return;
+        if (playing == null) {
+          if (pi.isArmed()) {
+            canvas.style.cursor = (this._noteAtPoint(canvas, e.clientX, e.clientY) != null) ? 'pointer' : '';
+          }
+          return;
+        }
+        // 押したままなぞる = グリッサンド。同じ鍵の中では打ち直さない
+        const midi = this._noteAtPoint(canvas, e.clientX, e.clientY);
+        if (midi == null || midi === playing) return;
+        pi.noteOff(playing, 'piano', e);
+        playing = midi;
+        pi.noteOn(midi, 'piano', e);
+      });
+      canvas.addEventListener('pointerup', release);
+      canvas.addEventListener('pointercancel', release);
+      canvas.addEventListener('pointerleave', release);
+    }
+
     // 鍵盤canvasにパッド試聴のクリックを取り付ける(_buildRollPane / _rebuildLanes から)
     _attachDrumAudition(canvas) {
       if (!canvas || canvas._drumAuditionWired) return;
@@ -8945,7 +9072,7 @@
       targetSel.addEventListener('change', () => this._setAssignTarget(chId, targetSel.value));
       toneSel.addEventListener('change', () => {
         const cur = plan.get(chId) || {};
-        const kind = plan.toneKindFor(cur.target || this._defaultTargetOf(chId));
+        const kind = plan.toneKindFor(cur.target || this._defaultTargetOf(chId), undefined, plan.channelKind(chId));
         const def = kind ? plan.toneOptionsFor(kind, plan.channelKind(chId)).def : null;
         plan.set(chId, { tone: toneSel.value === def ? null : toneSel.value });
       });
@@ -9035,7 +9162,7 @@
       if (el.partEl) el.partEl.style.color = '';
 
       if (el.drumBtn) el.drumBtn.style.display = (target === 'dpcm') ? '' : 'none';
-      const toneKind = plan.toneKindFor(target);
+      const toneKind = plan.toneKindFor(target, undefined, srcKind);
       if (!toneKind) { el.toneSel.style.display = 'none'; el.toneSig = ''; return; }
       el.toneSel.style.display = '';
       const to = plan.toneOptionsFor(toneKind, srcKind);
@@ -9086,6 +9213,8 @@
         this._syncAssignSelects(el);
       }
       this._renderAssignToggle();
+      this._renderPreviewToggle();
+      this._notifyPreview();
     }
 
     // part列チップのクリックで開く1行ぶんの割当ポップオーバー(縦置き・多段・別窓など
@@ -9124,7 +9253,7 @@
       targetSel.addEventListener('change', () => { this._setAssignTarget(chId, targetSel.value); this._openAssignPopover(anchorEl, chId); });
       pop.appendChild(rowOf(T('借用先'), targetSel));
 
-      const toneKind = plan.toneKindFor(target);
+      const toneKind = plan.toneKindFor(target, undefined, srcKind);
       if (toneKind) {
         const to = plan.toneOptionsFor(toneKind, srcKind);
         const toneSel = document.createElement('select');
@@ -9152,6 +9281,14 @@
       }
       const foot = document.createElement('div');
       foot.className = 'kbd-assign-pop-foot';
+      const pvLabel = document.createElement('label');
+      pvLabel.className = 'kbd-assign-pop-preview';
+      pvLabel.title = T('割当先の音で聴く(元chをミュートし、借用先のNSF音源で鳴らす。スキップは無音、DPCMは元のまま)');
+      const pvChk = document.createElement('input');
+      pvChk.type = 'checkbox'; pvChk.checked = this._previewMode;
+      pvChk.addEventListener('change', () => this._setPreviewMode(pvChk.checked));
+      pvLabel.appendChild(pvChk); pvLabel.appendChild(document.createTextNode('\u{1F3A7} ' + T('割当先の音で聴く')));
+      foot.appendChild(pvLabel);
       const auto = document.createElement('button');
       auto.type = 'button';
       auto.textContent = T('自動に戻す');
@@ -9193,6 +9330,71 @@
           if (winEl.offsetWidth < need) winEl.style.width = need + 'px';
         }
       }
+    }
+
+    // ── 割当プレビュー(「割当先の音で聴く」、src/audio/assign-preview.js) ────────────
+    // ONの間、割当を持つ行は元chをミュートして借用先のNSF音源で鳴らす。スキップ行は無音、
+    // E(DPCM)行と割当対象外の行(リズム等)は元の音のまま。再生側の実体は main.js が持ち、
+    // ここは「何を・どの音色で」(getPreviewPlan)と「今の元chの状態」(getLiveChannels)を渡すだけ。
+    _setPreviewMode(on) {
+      this._previewMode = !!on;
+      this._renderPreviewToggle();
+      this._notifyPreview();
+    }
+    isPreviewMode() { return !!this._previewMode; }
+    _notifyPreview() { if (this.onPreviewChange) this.onPreviewChange(); }
+    _renderPreviewToggle() {
+      const plan = channelPlan();
+      if (!this._previewBtns) return;
+      const editable = !!plan && plan.editable();
+      for (const btn of this._previewBtns) {
+        btn.classList.toggle('kbd-preview-btn--on', !!this._previewMode);
+        btn.disabled = !editable;
+        btn.title = editable ? T('割当先の音で聴く(元chをミュートし、借用先のNSF音源で鳴らす。スキップは無音、DPCMは元のまま)') : (plan ? plan.lockReason() : '');
+      }
+    }
+    // 表示中の一覧の行ごとの割当(プレビュー用)。tone は選択が無ければ借用先ごとの既定値
+    getPreviewPlan() {
+      const plan = channelPlan();
+      if (!plan || !plan.editable()) return [];
+      const rows = (this._mode === 'spc' ? this._spcRowEls : this._rowEls).filter(el => !el.isAllRow && el.partEl && el.checkbox);
+      const out = [];
+      for (const el of rows) {
+        if (plan.isUnassignable && plan.isUnassignable(el.id)) continue;
+        const ent = plan.get(el.id) || {};
+        const target = ent.target || el.defaultTarget || 'skip';
+        const kind = plan.channelKind(el.id);
+        const toneKind = plan.toneKindFor(target, undefined, kind);
+        const tone = ent.tone !== undefined ? ent.tone : (toneKind ? plan.toneOptionsFor(toneKind, kind).def : null);
+        out.push({ id: el.id, target, tone, kind, muted: !el.checkbox.checked });
+      }
+      return out;
+    }
+    // プレビュー中に元chをミュートする行か(getMuteConfig/previewSpcMuteMaskが使う)
+    _previewMutesRow(el) {
+      if (!this._previewMode || el.isAllRow || !el.partEl) return false;
+      const plan = channelPlan();
+      if (!plan || !plan.editable()) return false;
+      if (plan.isUnassignable && plan.isUnassignable(el.id)) return false;
+      const target = (plan.get(el.id) || {}).target || el.defaultTarget || 'skip';
+      return target !== 'dpcm';
+    }
+    // SPC: プレビューで消す元ボイスのビットマスク(main.js effectiveSpcMute が spcMutedVoices とORする)
+    previewSpcMuteMask() {
+      let mask = 0;
+      this._spcRowEls.forEach((el, idx) => { if (this._previewMutesRow(el)) mask |= (1 << idx); });
+      return mask;
+    }
+    // 「今の元chの状態」を extractChannels() と同じ形で返す(再生側の onaudioprocess から毎フレーム呼ばれる)。
+    // ライブ追跡のフォーマット(regSnapshots=[liveSnap]+Live関数)ではフレーム番号に関わらず現在値、
+    // 全フレーム分のスナップショットがある場合はそのフレームの値。SPCはmain.jsのライブ関数へ委譲
+    getLiveChannels(frameIdx) {
+      if (this._mode === 'spc') return this.spcLiveRows ? this.spcLiveRows() : null;
+      if (!this._state) return null;
+      const snaps = this._state.regSnapshots || [];
+      const live = snaps.length <= 1;
+      const fi = live ? 0 : Math.max(0, Math.min(snaps.length - 1, frameIdx | 0));
+      return extractChannels(snaps[fi] || {}, this._extraSnaps, fi, this._chips);
     }
 
     _renderAssignToggle() {
@@ -9237,6 +9439,7 @@
         if (this.onMuteChange) this.onMuteChange(this.getMuteConfig());
       }
       this._renderMuteAllBtn();
+      this._notifyPreview();
     }
     // 見出しの vol 列のボタン: 全chの音量スライダーを100%へ戻す(行ごとのダブルクリックの
     // 全ch版)。ミュートと違いトグルではなく常にリセット。
@@ -9356,6 +9559,7 @@
           checkbox.addEventListener('change', () => {
             this._muteState.set(ch.id, !checkbox.checked);
             if (this.onMuteChange) this.onMuteChange(this.getMuteConfig());
+            this._notifyPreview();
             this._renderMuteAllBtn(); // 見出しの一括ミュートボタンの状態を追随させる
             // ミュートはロールの見え方(減光)にも効くので、停止中でもその場で描き直す
             this._redrawRollForSpotlight();
@@ -9589,12 +9793,14 @@
     // 現在のピアノロールのタイムライン(共通形状 [{id, color, notes:[{startSec,endSec,midi,vol,drumKey?}]}])
     getRollTimeline() { return this._rollTimeline || null; }
 
-    getMuteConfig() {
+    // opts.ignorePreview: 「割当先の音で聴く」中の元ch消し込みを含めない(WAV書き出しは常に元の音)
+    getMuteConfig(opts) {
       const config = { apu: {}, expansion: {} };
+      const withPreview = !(opts && opts.ignorePreview);
       for (const el of this._rowEls) {
         const mi = el.muteInfo;
         if (!mi) continue;
-        const muted = !el.checkbox.checked;
+        const muted = !el.checkbox.checked || (withPreview && this._previewMutesRow(el));
         if (mi.section === 'apu') {
           config.apu[mi.key] = muted;
         } else {
@@ -10187,6 +10393,7 @@
       checkbox.addEventListener('change', () => {
         if (this.onSpcMuteChange) this.onSpcMuteChange(idx, !checkbox.checked);
         this._renderMuteAllBtn(); // 見出しの一括ミュートボタンの状態を追随させる
+        this._notifyPreview();
       });
       this._attachSpcVolumeSlider(row, idx);
 

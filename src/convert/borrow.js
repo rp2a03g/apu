@@ -44,6 +44,9 @@
   const pulsePeriodRaw = freq => CPU_CLOCK_NTSC / (16 * freq) - 1;   // 2A03/MMC5パルス
   const triPeriodRaw = freq => CPU_CLOCK_NTSC / (32 * freq) - 1;     // 2A03三角波
   const vrc6PulsePeriodRaw = freq => CPU_CLOCK_NTSC / (16 * freq) - 1;
+  // VRC6のこぎり波は7段アキュムレータ×2=14クロックで1周期(compiler.js sawPeriod と同じ式)。
+  // パルスの16で代用するとデチューン/EPの生値が14%ずれる
+  const vrc6SawPeriodRaw = freq => CPU_CLOCK_NTSC / (14 * freq) - 1;
   const fdsPeriodRaw = freq => (freq * 65536 * 64) / CPU_CLOCK_NTSC; // FDS(gbs2mml/expansion/wave.jsと同じ式)
 
   // ── 音量の写像 ──────────────────────────────────────────────
@@ -101,7 +104,7 @@
     const srcMax = s.volMax || 15;
     const dstMax = FAMILY_VOL_MAX[fam] !== undefined ? FAMILY_VOL_MAX[fam] : 15;
     if (fam === s.nativeFamily && srcMax === dstMax) return null;
-    if (fam === 'noise' || fam === 'triangle') return null; // ノイズは音量そのまま、三角波は音量が無い
+    if (fam === 'triangle' || (fam === 'noise' && s.kind === 'noise')) return null; // ノイズ→ノイズは音量そのまま、三角波は音量が無い(旋律→ノイズは線形4bitへ)
     const t = new Array(srcMax + 1);
     for (let v = 0; v <= srcMax; v++) {
       const att = attOf(s, v, srcMax);
@@ -125,6 +128,33 @@
     return (MML.VGM2MML && MML.VGM2MML.opnToOpllBytes) ? MML.VGM2MML.opnToOpllBytes(p) : null;
   }
 
+  // ── 旋律ch → 2A03ノイズ(D) ───────────────────────────────────
+  // FMやPSGで「ノイズっぽく」鳴らしているパートを2A03ノイズへ載せる(2026-09-05、ユーザー要望)。
+  // 音程はノイズの周期index(0=最も明るい)へ写し、ノート番号は nsf2mml/gbs2mml のノイズと同じ
+  // 31-idx 空間にする(compiler.js noisePeriodIndex = 15-(note%16))。周期は tone が '0'-'15' なら
+  // 固定、'auto'/未指定なら基音(OPNはキャリアの倍率ML込み)から最寄りのシフトレートへ
+  // (MML.Convert.ChannelPlan.noiseIndexFor。割当プレビューも同じ式)。音量は呼び出し側で線形4bit済み。
+  // ピッチ系の付帯情報(EN/EP/D/波形/音色)はノイズでは意味を持たないので落とす。
+  const OPN_CARRIERS = [[3], [3], [3], [3], [1, 3], [1, 2, 3], [1, 2, 3], [0, 1, 2, 3]];
+  function opnCarrierMul(p) {
+    if (!p || !p.ops) return 1;
+    let m = 0;
+    for (const i of OPN_CARRIERS[p.AL & 7]) if (p.ops[i]) m = Math.max(m, p.ops[i].ML || 0);
+    return m || 0.5; // ML=0 は実機で×0.5
+  }
+  function pitchedToNoise(ch, tone) {
+    const Plan = MML.Convert.ChannelPlan;
+    for (const ev of ch.events) {
+      if (ev.note !== null && ev.note !== undefined) {
+        const freq = ev.freqHz || ev.rawFreq || 440 * Math.pow(2, (ev.note - 57) / 12);
+        ev.note = 31 - Plan.noiseIndexFor(tone, freq, opnCarrierMul(ev.opnPatch));
+      }
+      for (const k of ['instrument', 'n163Wave', 'vrc7Tone', 'opnPatch', 'rawLength', 'fme7Noise', 'rawFreq', 'freqHz', 'freqSeq', 'pitchSeq', 'noteEnvOffsets', 'detune']) delete ev[k];
+    }
+    ch.hasInstrument = false; ch.hasVrc7Tone = false; ch.hasFme7Noise = false;
+    ch.hasNoteEnv = false; ch.hasPitchMod = false; ch.hasDetune = false;
+  }
+
   /**
    * ソースチャンネルのイベントを借用先ファミリの語彙へ整形する(破壊的。呼び出し側でコピー済み)。
    * s.nativeFamily と同じファミリへ載せる場合は「元のまま正しく鳴る」ので何もしない
@@ -141,7 +171,7 @@
     const vrc7ToneReg = ctx && ctx.vrc7ToneReg;
     const isAy = s.chip === 'ay8910';
     const nativeVrc7 = s.nativeFamily === 'vrc7' && fam === 'vrc7' && (tone === 'auto' || tone == null);
-    if (fam === 'noise') return; // ノイズはノイズにしか載せないので整形不要
+    if (fam === 'noise' && s.kind === 'noise') return; // ノイズ→ノイズは整形不要(旋律→ノイズは下で周期へ写す)
     if (nativeVrc7 || (fam === s.nativeFamily && fam !== 'vrc7' && (!tone || tone === 'copy'))) return;
 
     // AYのミキサー: ノイズ単独(mode 2)は矩形波系の借用先では鳴らせないので休符に、
@@ -168,7 +198,9 @@
     // 音色/波形: 借用先ごとに作り直す。N163以外へ載せるときは rawLength(N163波形長)も落とす
     // (applyPitchDetune/assignPitchEnvelope の periodForFreq が ev 経由で参照するため)
     const clearWave = (ev) => { delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; };
-    if (fam === 'vrc7' && tone === '0' && s.kind === 'fm4' && vrc7ToneReg) {
+    if (fam === 'noise') {
+      pitchedToNoise(ch, tone);
+    } else if (fam === 'vrc7' && tone === '0' && s.kind === 'fm4' && vrc7ToneReg) {
       // OPN 4op → VRC7 2op 自作音色(opnToOpllBytes)。音色ごとに @OP<n> を登録し OP<n>+@0 で切り替える
       for (const ev of events) {
         delete ev.n163Wave; delete ev.rawLength;
@@ -295,12 +327,17 @@
       }
       const fam = familyOf(t);
       // 種別と借用先の相性(UI外から不正な組合せが来た時の防御)
-      if ((s.kind === 'noise') !== (fam === 'noise')) {
+      if (s.kind === 'noise' && fam !== 'noise') {
         notes.push(`${s.label} → ${Plan.targetLabel(t)} は種別が合わないため変換対象外です。`);
         continue;
       }
       const ch = Object.assign({}, extracted[s.id], { events: extracted[s.id].events.map(ev => Object.assign({}, ev)) });
       adaptEvents(ch, s, fam, { tone: toneOf(s.id), n163WaveReg: regs.n163WaveReg, vrc7ToneReg: regs.vrc7ToneReg });
+      // ★動かさないのはYM2413(OPLL)だけ。OPLLの自作音色はVRC7と同じく$00-$07の1組を
+      //   全chで共有する設計なので、抽出結果は最初から1系統に収まっている(実機がそう鳴らしていた)。
+      //   OPL(YM3812/YM3526/Y8950)はチャンネルごとに独立した音色レジスタを持ち、それを
+      //   OPLLカスタム音色8バイトへ変換しているので、OPN 4op と同じく衝突しうる(下の resolveConflicts)
+      if (fam === 'vrc7') ch.vrc7ToneFixed = (s.chip === 'ym2413');
       placed[t] = { source: s, channel: ch };
     }
 
@@ -309,6 +346,42 @@
     for (const t of Object.keys(placed)) {
       const f = familyOf(t);
       (byFamily[f] = byFamily[f] || []).push(Object.assign({ type: t }, placed[t]));
+    }
+
+    // ── VRC7自作音色(@0)の同時使用を1系統へ解く ──────────────────────────
+    // 実機の自作音色スロットは$00-$07の1組だけで全ch共有。OPN 4op→2op変換や
+    // SPCのサンプル推定音色はチャンネルごとに別音色を作るので、そのままだと2ch以上が
+    // 重なった瞬間に src/mml/compiler.js の同時使用チェックへ引っかかり、MMLが
+    // コンパイルできず全パート無音になる。あぶれたチャンネルはいちばん近い内蔵
+    // プリセットへ落とす(src/convert/vrc7Tone.js)。
+    if (regs.vrc7ToneReg && byFamily.vrc7) {
+      MML.Convert.Vrc7Tone.resolveConflicts(
+        byFamily.vrc7.map(p => p.channel), regs.vrc7ToneReg,
+        {
+          onDemote: (ch, presetByTone) => {
+            ch.vrc7Demoted = presetByTone;
+            const p = byFamily.vrc7.find(x => x.channel === ch);
+            notes.push(`${p ? p.source.label : ''} は VRC7の自作音色(@0)が実機の制約でチップ全体に1音色しか` +
+              `持てないため、いちばん近い内蔵音色(${MML.Convert.Vrc7Tone.presetListOf(presetByTone)})へ置き換えました。`);
+          }
+        });
+      // プリセットへ落としたぶんの @OP<n> 定義は誰も参照しなくなる。NSF書き出しで
+      // 音色テーブル+分岐コードとしてROMを食う([[nsf-export-size-consciousness]])ので詰める
+      MML.Convert.Vrc7Tone.compactRegistry(regs.vrc7ToneReg, byFamily.vrc7.map(p => p.channel));
+    }
+
+    // ── N163内蔵RAMへ波形が収まらない曲を収まる形へ ──────────────────────
+    // 波形に使えるのは 128-8*有効ch数 バイトだけ。あふれるとコンパイルエラーで再生も
+    // 書き出しもできないため、変換設定 N163_WAVE='fit'(既定)ならあふれたぶんの波形を
+    // 半分ずつ縮める(src/convert/n163Fit.js)。★下の音程補正より前に呼ぶこと:
+    // N163の周波数式は波形長を含むので、縮めた後の長さで生レジスタ値を出す必要がある
+    let n163FitNotes = [];
+    if (regs.n163WaveReg && byFamily.n163) {
+      // スロット順(P-W)に並べ直してから渡す(有効ch数の判定が位置依存のため)
+      const slots = [];
+      for (const p of byFamily.n163) slots[Plan.targetInfo(p.type).index] = p.channel;
+      n163FitNotes = MML.Convert.N163Fit.apply(slots, regs.n163WaveReg, cmd);
+      notes.push(...n163FitNotes);
     }
     const expansions = [];
     for (const t of Object.keys(placed)) {
@@ -327,7 +400,7 @@
     const waveLen = o.n163WaveLen || N163_WAVE_LEN;
     const periodFnFor = {
       fme7: fme7PeriodRaw, n163: n163FreqRegRaw(waveLen, n163NumCh), pulse: pulsePeriodRaw,
-      triangle: triPeriodRaw, vrc6pulse: vrc6PulsePeriodRaw, vrc6saw: vrc6PulsePeriodRaw,
+      triangle: triPeriodRaw, vrc6pulse: vrc6PulsePeriodRaw, vrc6saw: vrc6SawPeriodRaw,
       vrc7: vrc7FnumRaw, fds: fdsPeriodRaw, noise: null
     };
 
@@ -380,6 +453,7 @@
     pulsePeriodRaw,
     triPeriodRaw,
     vrc6PulsePeriodRaw,
+    vrc6SawPeriodRaw,
     fdsPeriodRaw,
     logToLinearTable,
     logToVrc7Table,
@@ -391,6 +465,7 @@
     mapConstVolumes,
     envRegFor,
     adaptEvents,
+    pitchedToNoise,
     toneWave,
     compose,
   };

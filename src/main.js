@@ -42,6 +42,7 @@
   MML.FloatingWindows.initSplitters();
   MML.UI.FdsWaveEditor.init(mmlSourceEl);
   MML.UI.N163WaveEditor.init(mmlSourceEl);
+  MML.UI.Vrc7ToneEditor.init(mmlSourceEl);
 
   // MML.Mml.compile()のresult.expansionsは'dpcm'を含みうる(チャンネル文字割当等の
   // 内部処理で拡張音源と同じ優先順位機構を借用しているため)。しかしDPCMは2A03内蔵
@@ -78,8 +79,65 @@
   }
 
   // 鍵盤表示のチェックボックス状態からミュート設定を取得する
-  function getChannelMuteConfig() {
-    return keyboardDisplay.getMuteConfig();
+  // ignorePreview=true: 「割当先の音で聴く」の元ch消し込みを含めない(WAV書き出し用。書き出しは常に元の音)
+  function getChannelMuteConfig(ignorePreview) {
+    return keyboardDisplay.getMuteConfig(ignorePreview ? { ignorePreview: true } : undefined);
+  }
+
+  // ── 割当プレビュー(「割当先の音で聴く」、src/audio/assign-preview.js) ─────────────
+  // 鍵盤表示のチャンネル割当で選んだ借用先のNSF音源で、再生中の元chを鳴らし直す。実体は
+  // 1つで、再生を始めるたびに(NSF/SPC/KSS/GBS/HES/VGM)そのプレイヤーへ載せる(attachAssignPreview)。
+  // 元chの消し込みは鍵盤表示の getMuteConfig()/previewSpcMuteMask() がミュート設定へ重ねる。
+  let assignPreview = null;
+  function attachAssignPreview(player) {
+    if (!MML.Audio.AssignPreview || !player || !player.audioCtx) return;
+    if (!assignPreview) assignPreview = new MML.Audio.AssignPreview(player.audioCtx.sampleRate);
+    player.preview = assignPreview;
+    // フォーマットごとにプレイヤーのgainが違う(実測RMS校正)ので、NSF再生と同じ音量へ補正する
+    assignPreview.hostGain = player._baseGain || (player.gainNode ? player.gainNode.gain.value : 1.56);
+    assignPreview.reset();
+    syncAssignPreview();
+  }
+  function syncAssignPreview() {
+    if (!assignPreview) return;
+    const plan = MML.Convert && MML.Convert.ChannelPlan;
+    const on = keyboardDisplay.isPreviewMode() && !!plan && plan.editable();
+    assignPreview.setPlan(on ? keyboardDisplay.getPreviewPlan() : []);
+    assignPreview.setProvider((f) => keyboardDisplay.getLiveChannels(f));
+    assignPreview.enabled = on;
+    // 元chのミュート(プレビュー分を含む)を再生中のプレイヤーへ貼り直す
+    scheduleRerenderOnMute();
+    if (spcActivePlayer) spcActivePlayer.applyMute(effectiveSpcMute());
+  }
+  // SPCのボイスミュート: ユーザーのミュート(spcMutedVoices) + プレビューで消す元ボイス
+  function effectiveSpcMute() {
+    return spcMutedVoices | (keyboardDisplay.previewSpcMuteMask ? keyboardDisplay.previewSpcMuteMask() : 0);
+  }
+  // SPC再生中のボイス状態を鍵盤表示の行(V0-V7)と同じ形で返す(プレビューが毎フレーム読む。
+  // updateVoiceMonitor は80ms間隔の表示用なので使わず、ライブDSPから直接組む)
+  function spcPreviewRows() {
+    const p = spcActivePlayer && spcActivePlayer.player;
+    if (!p || !p.dsp) return null;
+    const dsp = p.dsp, regs = dsp.regs, voices = dsp.voices;
+    const nonReg = regs[0x3D];
+    // ノイズ周期($6C下位5bit)→2A03ノイズのノート番号(31-周期index)。spc2mmlと同じ規則
+    const noiseNote = MML.SPC2MML && MML.SPC2MML.noiseNoteNum ? MML.SPC2MML.noiseNoteNum(regs[0x6C] & 0x1F) : null;
+    const noiseIndex = noiseNote === null ? null : Math.max(0, Math.min(15, 31 - noiseNote));
+    const rows = [];
+    for (let ch = 0; ch < 8; ch++) {
+      const v = voices[ch];
+      const base = ch << 4;
+      const pitch = regs[base + 2] | ((regs[base + 3] & 0x3F) << 8);
+      const srcn = regs[base + 4];
+      const active = v.envMode !== 'off' && v.env > 0;
+      const noise = !!(nonReg & (1 << ch));
+      // ボイス音量(VOL_L/R、符号付き7bit)の大きい方をエンベロープに掛ける(定位は落とす)
+      const vv = Math.max(Math.abs((regs[base] << 24) >> 24), Math.abs((regs[base + 1] << 24) >> 24)) / 127;
+      rows.push({ id: `V${ch}`, active, vol: active ? (v.env / 0x7FF) * vv : 0,
+        freq: active && !noise ? pitchToHz(pitch, spcTuneForSrcn(srcn)) : 0,
+        noise, noiseIndex, noiseShort: false });
+    }
+    return rows;
   }
 
   // ミュート変更 → ストリーミング再生中は即時反映、それ以外は再レンダリング
@@ -184,6 +242,8 @@
     updateMmlRangeHighlight();
   };
   keyboardDisplay.onVolumeChange = () => { scheduleRerenderOnVolume(); };
+  keyboardDisplay.onPreviewChange = () => syncAssignPreview();
+  keyboardDisplay.spcLiveRows = spcPreviewRows;
   // ── ドラムサンプル台帳(全形式共用、2026-09-03) ──────────────────────────
   // drumSampleStore: パッドのキー('kind:start' = MML.Convert.DrumMap.key と同じ粒度)
   //   → { pcm: Float32Array, rate: Hz, hash, chip, chans }
@@ -261,8 +321,9 @@
     //   (そうしないと実際に鳴る音と試聴が食い違う。[[hes-dda-clip-boundary-frame-mixing]]の
     //    ネイティブ再生と同じ方針)
     const table = MML.Dpcm.DMC_RATE_TABLE_NTSC;
-    // 'auto' は dpcmDrums と同じく最高レート(サンプルPCMの再生レートはDMC最高以上のことが多い)
-    let ri = (st.rate !== 'auto' && st.rate !== null && st.rate !== undefined) ? (parseInt(st.rate, 10) | 0) : table.length - 1;
+    // 'auto' は変換(drumHits.js)と同じくドラム(DPCM)パネル最下段の DMC_RATE(既定は最高レート)
+    const autoRate = MML.Convert.normalizeCmd(MML.UI.ConvertSettings ? MML.UI.ConvertSettings.get() : null).DMC_RATE;
+    let ri = (st.rate !== 'auto' && st.rate !== null && st.rate !== undefined) ? (parseInt(st.rate, 10) | 0) : autoRate;
     if (!(ri >= 0 && ri < table.length)) ri = table.length - 1;
     const dstRate = table[ri];
     const src = st.pcm, srcRate = st.srcRate;
@@ -485,7 +546,7 @@
         st = prov.stats();
         if (synthHits.length && st) {
           const cmd = MML.Convert.normalizeCmd(MML.UI.ConvertSettings ? MML.UI.ConvertSettings.get() : null);
-          const r = MML.Convert.DrumHits.dpcm(synthHits, prov.frameRate, { totalFrames: prov.totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY });
+          const r = MML.Convert.DrumHits.dpcm(synthHits, prov.frameRate, { totalFrames: prov.totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY });
           st = { clips: st.clips + r.stats.clips, bytes: st.bytes + r.stats.bytes, segments: st.segments + r.stats.segments, dropped: st.dropped + r.stats.dropped };
         }
       } catch (e) { console.error('DPCMコスト計算に失敗:', e); }
@@ -508,7 +569,7 @@
       try {
         const cmd = MML.Convert.normalizeCmd(MML.UI.ConvertSettings ? MML.UI.ConvertSettings.get() : null);
         const r = MML.Convert.DrumHits.dpcm(hits, info.frameRate,
-          { totalFrames: info.totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, rateIndex });
+          { totalFrames: info.totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, rateIndex });
         keyboardDisplay.setDpcmCost(r.stats);
         if (MML.UI.DrumPanel) MML.UI.DrumPanel.setCost(r.stats);
       } catch (e) {
@@ -760,13 +821,21 @@
   // **その開始アドレスをそのままサンプル同定に使う**(C140などの sample.start と同じ)。
   // 実測 OutRunners「Mega Driver」: 実ドラムは8種類・各5〜23回、レートも約5kHzで一定。
   // 無音(DACレベル書き込みだけ)や短すぎる繋ぎは vgmPlayer.js collectDacHits が落としている。
-  // ★ログ由来の経路は今のところ YM2612 のDAC(符号なし8bit生PCM)だけ。
-  //   32X PWM は12bit・L/R別ストリーム、OKIM6258 はADPCMで、バイト列の意味が違ううえ
-  //   手元に検証できる曲が無い。それらは従来どおり分離レンダリング+オンセット検出に任せる
-  //   (vgmPlayer.js 側は3チップぶん打点を記録しているので、検証でき次第ここへ足せる)。
-  const DAC_ROW_CHIP = { YMDA: 'ym2612' };
-  /** データバンクのバイト列 → Float32(-1..1)。PWMは2バイト12bit、他は符号なし8bit */
-  function decodeDacBytes(bank, start, bytes, stepSize) {
+  // ★ログ由来の経路は YM2612 のDAC(符号なし8bit生PCM)と OKIM6258(X68000、4bit OKI ADPCM)。
+  //   OKIM6258 はDACストリーム(chipType 0x17)で1バイト=2サンプルを流すので、バンクの
+  //   ADPCMバイト列をそのままデコードすればパッドの原音になる(2026-09-05。デコーダは
+  //   src/emulator/expansion/okim6258.js Emu.decodeOKIM6258Adpcm、実再生と同じ差分表)。
+  //   ストリーム周波数はバイトレートなのでサンプルレートはその2倍。
+  //   ★0xB7 直書きでデータを流す曲はストリーム打点が無いのでパッドは出ない(YMDAの
+  //     「打点が無ければDAC未使用」と同じ扱い。分離レンダリングへは落とさない)。
+  //   32X PWM は12bit・L/R別ストリームで手元に検証できる曲が無く、従来どおり
+  //   分離レンダリング+オンセット検出に任せる(vgmPlayer.js 側は打点を記録済み)。
+  const DAC_ROW_CHIP = { YMDA: 'ym2612', OKI: 'okim6258' };
+  /** データバンクのバイト列 → Float32(-1..1)。OKIM6258はADPCM、PWMは2バイト12bit、他は符号なし8bit */
+  function decodeDacBytes(bank, start, bytes, stepSize, chip) {
+    if (chip === 'okim6258' && MML.Emu && MML.Emu.decodeOKIM6258Adpcm) {
+      return MML.Emu.decodeOKIM6258Adpcm(bank, start, Math.min(bytes, Math.max(0, bank.length - start)));
+    }
     if (stepSize >= 2) {
       const n = Math.floor(bytes / stepSize);
       const out = new Float32Array(n);
@@ -799,12 +868,14 @@
     for (const [start, h] of longest) {
       const bank = d.banks[h.bankType];
       if (!bank) continue;
-      const pcm = decodeDacBytes(bank, start, h.bytes, h.stepSize || 1);
+      const pcm = decodeDacBytes(bank, start, h.bytes, h.stepSize || 1, chip);
       if (pcm.length < 8) continue;
       const u8 = new Uint8Array(pcm.length);
       for (let i = 0; i < pcm.length; i++) u8[i] = Math.max(0, Math.min(255, Math.round(pcm[i] * 127 + 128)));
       const key = 'dacpcm:' + start;
-      samples[key] = { key, pcm, rate: h.rate,
+      // OKIM6258はストリーム周波数がバイトレート(1バイト=2ニブル=2サンプル)なので2倍
+      const rate = chip === 'okim6258' ? h.rate * 2 : h.rate;
+      samples[key] = { key, pcm, rate,
         hash: (U && U.sampleHash) ? ('dac-' + U.sampleHash(u8, 0, u8.length)) : null,
         chip: 'dacpcm', chans: [chId] };
     }
@@ -1317,6 +1388,8 @@
   // 差し替える(archiveAutoAdvanceOrStopと同じ流儀。archive変数がそのIIFE内ローカルのため)。
   let archiveTrackCount = () => 0;
   let archiveChangeTrack = () => {};
+  let archiveInfo = () => null;          // () => { name, titles:[string], index } | null  (鍵盤表示のファイル名ボタンの曲一覧)
+  let archiveSelectTrack = () => {};     // (index) => void
 
   // --- 再生速度(1/1〜1/8。音程を保ったままテンポだけ落とす) ---
   // 現在アクティブなプレイヤー(MML/NSF/SPCのいずれか)に速度を適用し、
@@ -2003,6 +2076,12 @@
   // 動かした範囲をそのまま尊重する(applyMmlPlaybackMarkers参照)。undefined = 未初期化
   let lastStartMarkerFrame;
   let lastEndMarkerFrame;
+  // 再生範囲(青→赤)をくり返す。ONだと終了点で止めずに開始点へ戻す。
+  // 重ね録り(src/ui/recordPanel.js)は「1周ぶん録る」ためにこの折り返しで録音を閉じる。
+  let loopRange = (function () {
+    try { return localStorage.getItem('mml.loopRange') === '1'; } catch (e) { return false; }
+  })();
+
   // 終了点に到達したら1回だけ自動一時停止する。停止位置より手前へシークし直すまで再武装しない
   // （そうしないと、終了点で止まった直後に▶を押した瞬間また即座に止まってしまう）
   let rangeEndArmed = true;
@@ -2043,6 +2122,62 @@
     updateVgmPlayButton();
   }
 
+  /*
+   * 「今この瞬間に鳴っている曲の位置」と、そのオーディオ時刻の対応表。
+   * ★getTransportPosition()(= getPosition())と currentTime を直接突き合わせてはいけない。
+   *   ScriptProcessorNodeは1バッファ先(4096sample≒93ms)を埋めるので必ずずれる。
+   *   src/audio/stream-player.js の songTimeAt() が e.playbackTime 基準の正しい対応を持つ
+   *   (実測: この対応表で予約したマーカー音と曲の音の一致は誤差5ms)。
+   * MML再生時のみ。サウンドファイル再生や停止中は null。
+   */
+  function getPlaybackClock() {
+    const p = currentTransportPlayer();
+    if (!p || typeof p.songTimeAt !== 'function' || !p.isPlaying || !audioCtx) return null;
+    const ctxTime = audioCtx.currentTime;
+    const songSec = p.songTimeAt(ctxTime);
+    return (songSec == null) ? null : { songSec, ctxTime };
+  }
+
+  /*
+   * 再生UIの更新を次フレームへ予約する。前の予約は取り消すので、何度呼んでも
+   * 走るのは1本だけ(ハートビートと同時に呼ばれても増えない)。
+   */
+  function scheduleTransportUi() {
+    if (transportRaf) cancelAnimationFrame(transportRaf);
+    transportRaf = requestAnimationFrame(updateTransportUI);
+    ensureTransportHeartbeat();
+  }
+
+  /*
+   * ★requestAnimationFrameが回らない環境の保険(2026-09-06)。
+   *   再生範囲の終端での停止/くり返しは updateTransportUI() の中にあるため、rAFが
+   *   止まると「終了点で止まらない/ループが折り返さない」が起きる。背面タブでは
+   *   rAFは完全に止まり、埋め込みプレビューでは可視でも回らない環境がある(実測)。
+   *   setIntervalは背面でも1秒までしか間引かれないので最低限の頻度は保てる。
+   *   可視時はrAFが先に回るのでこちらは実質何もしない(updateTransportUIは冪等)。
+   *
+   * ★常駐タイマーにしてはいけない: index.html の <script> を順に読むだけの
+   *   ヘッドレスハーネス(tools/headless/load.js)でも main.js は評価されるため、
+   *   モジュール直下に setInterval を置くとNodeのイベントループが終わらず
+   *   `node tools/headless/convert.js` が永久にぶら下がる(実際に踏んだ)。
+   *   再生が始まったときだけ起こし、止まったら自分で片付ける。
+   */
+  let transportHeartbeat = null;
+  function ensureTransportHeartbeat() {
+    if (transportHeartbeat !== null) return;
+    transportHeartbeat = setInterval(() => {
+      const pl = currentTransportPlayer();
+      const playing = pl ? pl.isPlaying : transportPlaying;
+      if (playing) updateTransportUI();
+      else stopTransportHeartbeat();
+    }, 250);
+  }
+  function stopTransportHeartbeat() {
+    if (transportHeartbeat === null) return;
+    clearInterval(transportHeartbeat);
+    transportHeartbeat = null;
+  }
+
   function getTransportPosition() {
     const p = currentTransportPlayer();
     if (p) {
@@ -2068,6 +2203,9 @@
     updateSeekBufferedUI();
     if (!duration) return;
     const pos = getTransportPosition();
+    // メトロノームの同期は対応表(songTimeAt)が立ってから成立するので、毎フレーム機会を与える
+    // (同期要求が無ければ何もしない)
+    if (MML.UI.MetronomePanel) MML.UI.MetronomePanel.tickPlaybackSync();
     setSeekBarValue(Math.round((pos / duration) * SEEK_RESOLUTION));
     setTimeDisplay(`${formatTime(pos)} / ${formatTime(duration)}`);
     if (playing && isFadeableSoundFileMode() && p && p.gainNode && audioCtx) {
@@ -2077,15 +2215,20 @@
       if (pos >= duration) {
         if (isSoundFileMode()) finishSoundFilePlayback(); else transportStop();
       } else if (rangeEndSec !== null && pos >= rangeEndSec) {
-        if (rangeEndArmed) {
+        if (loopRange && canSeek()) {
+          // くり返し: 止めずに開始点へ戻す。重ね録り中はここで1周ぶんを閉じる
+          transportSeek(rangeStartSec || 0);
+          if (MML.UI.RecordPanel) MML.UI.RecordPanel.onLoopWrapped();
+          scheduleTransportUi();
+        } else if (rangeEndArmed) {
           rangeEndArmed = false;
           if (isSoundFileMode()) finishSoundFilePlayback(); else transportStop();
         } else {
-          transportRaf = requestAnimationFrame(updateTransportUI);
+          scheduleTransportUi();
         }
       } else {
         rangeEndArmed = true;
-        transportRaf = requestAnimationFrame(updateTransportUI);
+        scheduleTransportUi();
       }
     } else {
       if (rangeEndSec === null || pos < rangeEndSec) rangeEndArmed = true;
@@ -2511,6 +2654,7 @@
       canPrevNext = archiveTrackCount() > 1 || multiSong;
     }
     keyboardDisplay.setTransportState({ playing, canPlay, canStop, canPrevNext, canToggleSource: !!loadedSoundFormat });
+    keyboardDisplay.refreshSourceName(); // 曲送り/アーカイブ選択で名前と一覧の現在位置を追随させる
   }
 
   // 鍵盤表示ヘッダへ移した「ファイルを開く」/「to MML」。実体は既存のボタンをそのまま押す
@@ -2571,6 +2715,37 @@
   // どちらも「相手を止めて自分を再生する」経路(prepareMmlStream / 各形式の再生ボタン)を
   // そのまま使うので、鍵盤表示・ピアノロール・シークバーも一緒に切り替わる。
   // サウンドファイルを一度も開いていなければ切り替え先が無いので何もしない。
+  // 鍵盤表示タイトル行のファイル名ボタン: 表示する名前と、クリックで選べる曲一覧。
+  // アーカイブ(m3u)ならリスト名+エントリ一覧、複数曲形式(NSF/KSS/GBS/HES)ならファイル名+曲番号、
+  // 1ファイル1曲ならファイル名だけ。MML側はタイトル(setKbdSourceの名前)をそのまま使う
+  keyboardDisplay.onSourceListRequest = () => {
+    if (!kbdSourceKind || kbdSourceKind === 'mml') return null;
+    const ai = archiveInfo();
+    if (ai && ai.titles.length > 1) return { name: ai.name, items: ai.titles, index: ai.index };
+    const fmt = loadedSoundFormat;
+    const fileName = (ai && ai.name) || fileInputName(document.getElementById('soundFile'))
+      || (fmt ? fileInputName(document.getElementById(fmt + 'File')) : '') || '';
+    const songEl = SOUND_FORMAT_SONG_INPUT[fmt] ? document.getElementById(SOUND_FORMAT_SONG_INPUT[fmt]) : null;
+    if (songEl) {
+      const min = parseInt(songEl.min, 10) || 0, max = parseInt(songEl.max, 10);
+      if (Number.isFinite(max) && max > min) {
+        const items = [];
+        for (let n = min; n <= max; n++) items.push(T('曲 {n}', { n }));
+        return { name: fileName, items, index: (parseInt(songEl.value, 10) || min) - min };
+      }
+    }
+    return { name: fileName, items: null, index: 0 };
+  };
+  keyboardDisplay.onSourceSelect = (i) => {
+    const ai = archiveInfo();
+    if (ai && ai.titles.length > 1) { archiveSelectTrack(i); return; }
+    const fmt = loadedSoundFormat;
+    const songEl = SOUND_FORMAT_SONG_INPUT[fmt] ? document.getElementById(SOUND_FORMAT_SONG_INPUT[fmt]) : null;
+    if (!songEl) return;
+    const min = parseInt(songEl.min, 10) || 0;
+    songEl.value = String(min + i);
+    songEl.dispatchEvent(new Event('change')); // 各形式の曲番号欄の change ハンドラが停止→再生まで行う
+  };
   keyboardDisplay.onSourceToggle = () => {
     if (!loadedSoundFormat) return;
     if (!kbdSourceKind || kbdSourceKind === 'mml') {
@@ -2592,8 +2767,9 @@
       if (p.isPlaying) return;
       if (audioCtx) audioCtx.resume();
       p.play();
+      if (MML.UI.MetronomePanel) MML.UI.MetronomePanel.requestPlaybackSync();
       updateFormatPlayButtons();
-      transportRaf = requestAnimationFrame(updateTransportUI);
+      scheduleTransportUi();
       return;
     }
     if (!capturedBuffer) return;
@@ -2607,7 +2783,7 @@
     transportSource = source;
     transportStartTime = audioCtx.currentTime;
     transportPlaying = true;
-    transportRaf = requestAnimationFrame(updateTransportUI);
+    scheduleTransportUi();
   }
 
   function transportPause() {
@@ -2669,7 +2845,9 @@
       p.seek(Math.round(Math.max(0, Math.min(workletDuration, seconds)) * audioCtx.sampleRate));
       if (wasPlaying) {
         p.play();
-        transportRaf = requestAnimationFrame(updateTransportUI);
+        // 曲の位置が飛んだので、メトロノームは新しい拍へ合わせ直す
+        if (MML.UI.MetronomePanel) MML.UI.MetronomePanel.requestPlaybackSync();
+        scheduleTransportUi();
       } else {
         updateTransportUI();
       }
@@ -3674,7 +3852,7 @@
       songIndex: songNo - 1,
       durationSeconds: duration,
       sampleRate,
-      mute: getChannelMuteConfig()
+      mute: getChannelMuteConfig(true)
     }, (done, total) => {
       nsfFileStatusEl.innerHTML = '<div>' + T('WAV書き出し中… {pct}%', { pct: Math.round(done / total * 100) }) + '</div>';
     });
@@ -3791,6 +3969,7 @@
     // (MmlStreamPlayerと同じ「書き込みログをCPU無しで再生する」方式のため)。
     const player = new MML.Audio.NsfReplayStreamPlayer(audioCtx);
     player._baseGain = player.gainNode.gain.value;
+    attachAssignPreview(player);
     endFadeActive = false;
     player.onEnded = () => {
       if (transportRaf) cancelAnimationFrame(transportRaf);
@@ -3973,6 +4152,99 @@
   });
   document.getElementById('btnTransportStop').addEventListener('click', transportStop);
   document.getElementById('btnRangeReset').addEventListener('click', () => resetPlaybackRangeToFull(currentDuration()));
+  (function initLoopButton() {
+    const btn = document.getElementById('btnLoopRange');
+    const sync = () => {
+      btn.classList.toggle('is-active', loopRange);
+      btn.title = loopRange ? T('再生範囲のくり返しをやめる') : T('再生範囲をくり返す');
+      btn.setAttribute('aria-pressed', loopRange ? 'true' : 'false');
+    };
+    btn.addEventListener('click', () => {
+      loopRange = !loopRange;
+      try { localStorage.setItem('mml.loopRange', loopRange ? '1' : '0'); } catch (e) { /* ignore */ }
+      sync();
+    });
+    sync();
+  })();
+
+  // --- メトロノーム(src/ui/metronomePanel.js / src/input/metronome.js) ---
+  // ROADMAPフェーズ3(MIDI録音)・フェーズ4(鼻歌入力)が乗る拍の時間軸を、まず単体で使える
+  // 道具として用意したもの。入力オフセットの較正値(MML.Input.Latency)も録音側がそのまま使う。
+  MML.UI.MetronomePanel.init({
+    toggleEl:    document.getElementById('btnMetronome'),
+    settingsEl:  document.getElementById('btnMetronomeSettings'),
+    getAudioCtx: () => {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      return audioCtx;
+    },
+    getMmlTempo: currentMmlTempo,
+    getPlaybackClock
+  });
+
+  // --- 演奏入力(src/ui/performInput.js) ---
+  // PC鍵盤/画面ピアノ → MML.Input.NoteSource → src/audio/live-monitor.js(借用先の音源で発音)。
+  // 押している鍵の点灯は鍵盤表示側が PerformInput.heldNotes() を引いて描くので、
+  // 停止中(rAFが回っていない)でも見えるよう、押鍵のたびに鍵盤だけ描き直させる。
+  MML.UI.PerformInput.init({
+    toggleEl:    document.getElementById('btnPerformInput'),
+    settingsEl:  document.getElementById('btnPerformInputSettings'),
+    getAudioCtx: () => {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      return audioCtx;
+    },
+    onArmedChange: (on) => {
+      if (keyboardDisplay) keyboardDisplay.refreshPianos();
+      // Escや入力欄フォーカスで演奏入力が切れたら、録音も一緒に閉じる
+      if (!on && MML.UI.RecordPanel) MML.UI.RecordPanel.onPerformDisarmed();
+    },
+    onNotesChange: () => { if (keyboardDisplay) keyboardDisplay.refreshPianos(); }
+  });
+
+  // --- 演奏の録音 → MML挿入(src/ui/recordPanel.js) ---
+  // 停止すると結果ダイアログが開き、挿入される文字列そのものを確認してから本文へ入る
+  // (INV-6: 既存MMLは黙って書き換えない)。
+  MML.UI.RecordPanel.init({
+    toggleEl:    document.getElementById('btnRecordPerformance'),
+    getAudioCtx: () => {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      return audioCtx;
+    },
+    getEditor: () => mmlSourceEl,
+    // 挿入先のチャンネル文字は直近のコンパイル結果から。未コンパイルなら2A03の4本
+    getChannelLetters: () => (lastMmlCompiled && lastMmlCompiled.channelLetters) || null,
+    getMmlTempo: currentMmlTempo,
+    // 重ね録り: 再生中かどうかと、打鍵の時刻→曲の位置 の変換
+    getPlaybackClock,
+    getSongTimeAt: (ctxTime) => {
+      const p = currentTransportPlayer();
+      return (p && typeof p.songTimeAt === 'function') ? p.songTimeAt(ctxTime) : null;
+    },
+    // 既に音符が書かれているチャンネル文字(重ね録りの書き出し先を未使用へ寄せる)
+    getUsedLetters: () => {
+      try { return Object.keys(MML.Mml.splitChannels(mmlSourceEl.value).channels); }
+      catch (e) { return []; }
+    }
+  });
+
+  // MML本文の最初の t<n> を返す(無ければnull)。判定規則はコンパイラのグローバルテンポ
+  // 決定(src/mml/compiler.js「グローバルテンポ」)と同じ splitChannels+tokenize にしてあり、
+  // 「メトロノームのテンポと実際の再生テンポが食い違う」ことが起きないようにしている。
+  // compile()を通さないのは、まだ一度も再生していないMMLでも追従させたいため。
+  let mmlTempoCache = { src: null, bpm: null };
+  function currentMmlTempo() {
+    const src = mmlSourceEl.value;
+    if (mmlTempoCache.src === src) return mmlTempoCache.bpm;
+    let bpm = null;
+    try {
+      const { channels } = MML.Mml.splitChannels(src);
+      for (const ch of Object.keys(channels)) {
+        const tok = MML.Mml.tokenize(channels[ch].text).find(t => t.type === 'tempo');
+        if (tok && Number.isFinite(tok.value) && tok.value > 0) { bpm = tok.value; break; }
+      }
+    } catch (e) { /* 編集途中の壊れたMMLは静かに諦める(手動テンポへ落ちる) */ }
+    mmlTempoCache = { src, bpm };
+    return bpm;
+  }
   // シークバー(range input)の入力→シーク。主/副どのインスタンスからでも同じ処理
   // ★シークは「まとめて1回」にする(2026-09-04)。<input type="range"> はドラッグ中
   //   1ピクセル動くごとに input を撃つので、素直に毎回シークすると重い曲で固まる。
@@ -4159,6 +4431,7 @@
     // 再生用と先読み用の2本を同時に走らせてCPUを食い合っていたのを1本にまとめる」こと。
     const player = new MML.Audio.SpcReplayStreamPlayer(audioCtx);
     player._baseGain = player.gainNode.gain.value;
+    attachAssignPreview(player);
     endFadeActive = false;
     player.onEnded = () => {
       updateSpcPlayButton();
@@ -4220,7 +4493,7 @@
 
       if (!spcPlaybackLoaded) {
         spcPlaybackLoaded = true;
-        player.load(loadedSpcBytes, frames, frameLog, spcMutedVoices);
+        player.load(loadedSpcBytes, frames, frameLog, effectiveSpcMute());
         player.applyVolume(keyboardDisplay.getSpcVolumeConfig());
         transportPlay();
       }
@@ -4678,7 +4951,7 @@
         // applyMute()経由にすることでSpcReplayStreamPlayer側が_lastMutedとして保持し、
         // シーク時の再構築(_buildChips())後も設定が消えないようにする(dsp.mutedVoicesを
         // 直接上書きするだけだと再構築のたびにリセットされてしまう)。
-        if (spcActivePlayer) spcActivePlayer.applyMute(spcMutedVoices);
+        if (spcActivePlayer) spcActivePlayer.applyMute(effectiveSpcMute());
         updateMuteButton(ch, spcMutedVoices);
       });
     }
@@ -4778,7 +5051,7 @@
       // カード背景: ミュート中は暗く（spcMutedVoices を正とする）
       cardEl.style.background = muted ? '#111' : (active ? '#1a2040' : '#1a1a2e');
       cardEl.style.borderColor = active && !muted ? `hsl(${ch * 45},70%,40%)` : '#444';
-      updateMuteButton(ch, dsp.mutedVoices);
+      updateMuteButton(ch, spcMutedVoices); // dsp側はプレビューの消し込みを含むので、表示はユーザー指定のマスクで
     }
 
     // 鍵盤表示に SPC ボイス状態を同期
@@ -4845,7 +5118,7 @@
   // 鍵盤表示側のミュートチェックボックス操作 → ボイスモニターと同じミュート機構に反映
   keyboardDisplay.onSpcMuteChange = (idx, muted) => {
     spcMutedVoices = muted ? (spcMutedVoices | (1 << idx)) : (spcMutedVoices & ~(1 << idx));
-    if (spcActivePlayer) spcActivePlayer.applyMute(spcMutedVoices);
+    if (spcActivePlayer) spcActivePlayer.applyMute(effectiveSpcMute());
     updateMuteButton(idx, spcMutedVoices);
   };
   // ch別音量スライダー(V0〜V7)。SPCはミュートと同じくビットマスクではなく配列そのものを
@@ -5017,6 +5290,7 @@
     // レジスタ状態が実CPU駆動と200フレームぶん完全一致することを確認済み)。
     const player = new MML.Audio.KssReplayStreamPlayer(audioCtx);
     player._baseGain = player.gainNode.gain.value;
+    attachAssignPreview(player);
     endFadeActive = false;
     player.onEnded = () => {
       updateKssPlayButton();
@@ -5166,7 +5440,7 @@
     kssFileStatusEl.innerHTML = '<div>' + T('WAV書き出し用レンダリング中…') + '</div>';
 
     const result = await MML.Emu.captureKssSongAsync(loadedKssBytes, {
-      songIndex: songNo, durationSeconds: duration, sampleRate, mute: getChannelMuteConfig().expansion
+      songIndex: songNo, durationSeconds: duration, sampleRate, mute: getChannelMuteConfig(true).expansion
     }, (done, total) => {
       kssFileStatusEl.innerHTML = '<div>' + T('WAV書き出し中… {pct}%', { pct: Math.round(done / total * 100) }) + '</div>';
     });
@@ -5393,6 +5667,7 @@
     // (KssReplayStreamPlayerと対になるGbsReplayStreamPlayer、src/audio/gbs-stream-player.js)。
     const player = new MML.Audio.GbsReplayStreamPlayer(audioCtx);
     player._baseGain = player.gainNode.gain.value;
+    attachAssignPreview(player);
     endFadeActive = false;
     player.onEnded = () => {
       updateGbsPlayButton();
@@ -5749,6 +6024,7 @@
     // スナップショットでは追いきれない)を受ける。
     const player = new MML.Audio.HesReplayStreamPlayer(audioCtx);
     player._baseGain = player.gainNode.gain.value;
+    attachAssignPreview(player);
     endFadeActive = false;
     player.onEnded = () => {
       updateHesPlayButton();
@@ -6460,6 +6736,7 @@
 
     const player = new MML.Audio.VgmStreamPlayer(audioCtx);
     player._baseGain = player.gainNode.gain.value;
+    attachAssignPreview(player);
     endFadeActive = false;
     player.onEnded = () => {
       updateVgmPlayButton();
@@ -6647,7 +6924,7 @@
     // ★2026-08-22: WAV書き出しにも鍵盤のch別ミュート/音量を反映する(他形式と同じ挙動)。
     // 以前は新しいVgmPlayerを作るだけで適用しておらず、「1chだけ書き出す」ができなかった
     // (KSSは効くのにVGMだけ全ch鳴る、という食い違いになっていた)。
-    player.applyMute(getChannelMuteConfig());
+    player.applyMute(getChannelMuteConfig(true));
     player.applyVolume(getChannelVolumeConfig());
     const totalFrames = Math.ceil(duration * player.frameRate);
     const totalSamples = Math.round(totalFrames * sampleRate / player.frameRate);
@@ -6692,7 +6969,10 @@
     // ドラムはYM2612のDACに載っていることがほとんどで、打点はVGMログの
     // シーク位置から正確に取れる(vgmDacDrumFor)。他に行き場が無い行でもある
     // (音程を持たないので旋律chへは載せられない)。
+    // X68000のADPCM(OKIM6258)も同じ(2026-09-05、ユーザー指示): ドラム/ボイスがここに載り、
+    // 打点はDACストリームの開始アドレスから取れる(DAC_ROW_CHIP)。
     if (h.chips && h.chips.ym2612) map.YMDA = 'dpcm';
+    if (h.chips && h.chips.okim6258) map.OKI = 'dpcm';
     Plan.newFile('vgm', map);
   }
   // 現在の割当をVGM変換器のソースID体系で返す。既定と全く同じなら null(=構成から自動)
@@ -6725,6 +7005,19 @@
   }
   // VRC7を借用先に選んだchの音色プリセット(sourceId → 'auto'|'0'..'15')。
   // 鍵盤側の「音色」セレクト(tone)がそのままこの値になる。
+  // 借用先ごとの音色(デューティ/波形/ノイズ周期)をVGMのソースID('opn:0' 等)で引ける形にする
+  // (getVgmVrc7Inst と同じ写像。planConvertOptions().tone は鍵盤の行IDキーなので VGM では使わない)
+  function getVgmTone() {
+    const Plan = MML.Convert.ChannelPlan;
+    const map = {};
+    if (!loadedVgmHeader) return map;
+    for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
+      const chId = Plan.chIdForVgmSource(s.id);
+      const ent = (chId && Plan.get(chId)) || {};
+      if (ent.tone !== undefined) map[s.id] = ent.tone;
+    }
+    return map;
+  }
   function getVgmVrc7Inst() {
     const Plan = MML.Convert.ChannelPlan;
     const map = {};
@@ -6760,7 +7053,7 @@
       //   planConvertOptions() の tone しか取っていなかったため、YM2612のDACなどを
       //   打楽器化してもMMLのEパートに出なかった(2026-09-04修正)
       const planOpt = planConvertOptions();
-      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), tone: planOpt.tone, drumHits: planOpt.drumHits, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
+      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), tone: getVgmTone(), drumHits: planOpt.drumHits, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
     } catch (e) {
       vgmIsRendering = false;
       updateVgmPlayButton();
@@ -7021,6 +7314,14 @@
     // 優先し、単体ファイルなら曲番号送りへ落ちる(updateKeyboardTransport / onTransport参照)
     archiveTrackCount = () => (archive ? archive.playlist.length : 0);
     archiveChangeTrack = (delta) => changeArchiveTrack(delta);
+    archiveInfo = () => archive
+      ? { name: archive.name, titles: archive.playlist.map((it, i) => `${i + 1}. ${it.title}`), index: archive.index }
+      : null;
+    archiveSelectTrack = (i) => {
+      if (!archive || i === archive.index || i < 0 || i >= archive.playlist.length) return;
+      stopAllFormatPlayback();
+      loadArchiveIndex(i, true);
+    };
 
     if (archiveBarEl) {
       document.getElementById('btnArchivePrev').addEventListener('click', () => changeArchiveTrack(-1));

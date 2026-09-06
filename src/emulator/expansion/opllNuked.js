@@ -1130,5 +1130,9 @@
     return neg ? ~out : out;
   }
 
+  // 音色エディタの逆算(src/ui/vrc7ToneSolver.js)が定常状態の1周期を実機と同じ演算で
+  // 作るために使う。LOGSIN/EXPROM表そのものは外へ出さない(表を持ち出すと写しがずれる)
+  OPLLNuked.opOut = opOut;
+
   Emu.OPLLNuked = OPLLNuked;
 })(window);

@@ -51,7 +51,7 @@
 - **コア層** = `src/emulator/` `src/mml/`(lexer/compiler/player) `src/convert/`
   `src/asm/` `src/nsf/` `src/spc/` `src/kss/` `src/gbs/` `src/hes/` `src/dpcm/` `src/driver/`
   `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` `src/gbs2mml/` `src/hes2mml/`
-  および将来の `src/ir/` `src/input/` `src/share/`。
+  `src/vgm2mml/` `src/input/`、および将来の `src/ir/` `src/share/`。
   これらは `document`/`window.document`/DOM API を一切参照しないピュアJSであること
   (AudioWorklet内でも動く必要があるため。`globalThis` 置換でバンドルされる)。
 - **UI層** = `src/main.js` `src/ui/` `index.html` `src/mml/syntaxHighlight.js`
@@ -198,7 +198,7 @@ structuredClone/JSON.stringifyがそのまま通ること)。
 | `src/convert/` | フォーマット非依存の BPM検出・音長量子化・MML生成 | コア |
 | `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` `src/gbs2mml/` `src/hes2mml/` `src/vgm2mml/` | 各形式→ノート抽出(vgm2mmlはチップファミリごとに他の*2mmlへ委譲。kss/gbs/hesは`convertCapture`でキャプチャと変換を分離済み) | コア |
 | `src/ir/` (新設) | Song IR 定義・検証・移行・MML⇔IR変換 | コア |
-| `src/input/` (新設) | MIDI/鼻歌/タップ → TimedPitchEvent → IR | コア(*) |
+| `src/input/` | メトロノーム(metronome.js)・入力レイテンシ/時間軸写像(latency.js)・演奏入力の合流点(noteSource.js: 全入力源 → TimedPitchEvent)・PC鍵盤の配列(keyMap.js)・tick格子への量子化と和音のまとめ(quantize.js)・Web MIDIアダプタ(midiInput.js)。今後 鼻歌(pitchDetect.js/micInput.js)を足す | コア(*) |
 | `src/share/` (新設) | URL圧縮共有・コンペマニフェスト読み込み | コア |
 | `src/vendor/` (新設) | 外部ライブラリの同梱コピー(lz-string等)。CDN読み込み禁止(INV-1) | — |
 | `src/audio/` | AudioWorklet・ストリーム再生(手動結合バンドル含む) | 境界 |

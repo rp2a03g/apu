@@ -169,9 +169,9 @@ function parseCmdFlags(preset, cmdStr) {
   for (const kv of (cmdStr || '').split(',').filter(Boolean)) {
     const [k, v] = kv.split('=');
     const raw = v === undefined ? '1' : v.trim();
-    // 真偽値っぽい語はboolean、それ以外は文字列/数値のまま(PCM_RATE=4, DRUM_POLY=mono, PITCH_SA=off 等の
+    // 真偽値っぽい語はboolean、それ以外は文字列/数値のまま(DMC_RATE=14, DRUM_POLY=mono, PITCH_SA=off 等の
     // 列挙値設定に対応。'off' は PITCH_SA の値でもあるので、キーが列挙値設定のときは文字列で渡す)
-    const enumKey = ['PCM_RATE', 'PITCH_SA', 'RATE_MIX', 'DRUM_POLY'].indexOf(k.trim()) >= 0;
+    const enumKey = ['DMC_RATE', 'PITCH_SA', 'RATE_MIX', 'DRUM_POLY', 'N163_WAVE'].indexOf(k.trim()) >= 0;
     if (enumKey) out[k.trim()] = isNaN(Number(raw)) ? raw : Number(raw);
     else out[k.trim()] = !(raw === '0' || raw === 'false' || raw === 'off');
   }

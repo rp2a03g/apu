@@ -221,6 +221,11 @@ header h1.app-title {
   flex-shrink: 0;
   padding: 8px 12px 0;
 }
+/* ★ボタンが増えてもシークバーを潰さない(2026-09-06、メトロノーム/演奏入力の追加時)。
+   nowrapのままだと width:100% のシークバーだけが縮み、幅660pxの既定ウィンドウでは
+   89pxまで潰れて開始点/終了点ハンドルが掴めなくなる。幅が足りないときは
+   シークバーと時間表示だけを次の行へ送り、そこで全幅を使わせる */
+.mml-top-toolbar { flex-wrap: wrap; }
 
 .mml-top-toolbar #timeDisplay {
   flex: none;
@@ -231,8 +236,10 @@ header h1.app-title {
 }
 
 .mml-top-toolbar .seek-bar-wrap {
-  flex: 1;
-  min-width: 80px;
+  /* flex-basis と min-width を 200px にしてあるのは、幅が足りないときに
+     「シークバーを潰す」のではなく「次の行へ送る」ようにするため(上の flex-wrap 参照) */
+  flex: 1 1 200px;
+  min-width: 200px;
   margin: 0;
 }
 
@@ -363,6 +370,30 @@ textarea {
   padding: 8px;
   resize: vertical;
 }
+
+/* --- 入力欄/セレクトの共通見た目 ---
+   UA既定の真っ白な地は明るいテーマで光って目に痛い(ユーザー指摘 2026-09-06)。
+   凹んだ面(--surface)に薄い内側の影で「値を入れる窪み」に見せ、フォーカス中だけアクセント色の
+   縁+淡い輪で示す。色は必ず変数経由(ライト/ダークの全プリセットで成立させるため)。
+   チェックボックス等はUAの描画に任せ、accent-color だけ合わせる */
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]),
+select {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-family: var(--sans);
+  box-shadow: inset 0 1px 2px var(--hover-bg);
+  outline: none;
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):focus,
+select:focus {
+  border-color: var(--accent);
+  box-shadow: inset 0 1px 2px var(--hover-bg), 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+input:disabled, select:disabled { opacity: 0.55; }
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 
 .toolbar {
   display: flex;
@@ -763,6 +794,157 @@ button.secondary {
   align-items: center;
 }
 
+/* --- VRC7音色エディタ: 構成図の下に2オペレータぶんのパラメータを左右に並べる
+   (図のモジュレータ/キャリアのブロックと列が縦に揃うようにする) --- */
+/* 音色エディタの本体: 左=構成図(2セル)+数値入力 / 右=「出力波形からデータを逆算」の列(260px固定)。
+   右列は 見出し → 逆算/消去/候補 → 倍音バー → 出力波形 → 音量の時間変化 の順に縦に積む */
+.vrc7-tone-editor .vrc7-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 3px;
+}
+.vrc7-tone-editor .vrc7-left {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.vrc7-tone-editor .vrc7-op-params {
+  display: flex;
+  gap: 8px;
+  margin-top: 3px;
+}
+.vrc7-tone-editor .vrc7-solve-col {
+  flex: 0 0 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.vrc7-tone-editor .vrc7-solve-col canvas { width: 100%; height: auto; margin-top: 0; }
+.vrc7-tone-editor .vrc7-solve-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 2px 0 0;
+}
+/* オペレータごとに枠で囲む(入力ボックスと隣の列のラベルが詰まって見誤るため)。
+   枠の色は構成図のブロック色と同じにして、どちらのオペレータの値か一目で分かるようにする */
+.vrc7-tone-editor .vrc7-op-group {
+  flex: 1 1 0;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 5px 4px;
+}
+.vrc7-tone-editor .vrc7-op-group[data-op="mod"] { border-color: #6b5220; }
+.vrc7-tone-editor .vrc7-op-group[data-op="car"] { border-color: #2b5872; }
+.vrc7-tone-editor .vrc7-op-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  /* ★列の間を広く取る。ここが詰まっていると「値」と隣の列の「ラベル」が続いて読めてしまう */
+  column-gap: 14px;
+  row-gap: 1px;
+}
+/* 左列と右列の境目に薄い区切り線 */
+.vrc7-tone-editor .vrc7-op-cols > .vrc7-op-col:last-child {
+  border-left: 1px solid var(--border);
+  padding-left: 8px;
+}
+.vrc7-tone-editor .vrc7-solve-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  font-size: 10px;
+}
+.vrc7-tone-editor .vrc7-solve-row select {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 10px;
+}
+/* 見出しは2列ぶんをまたぐ(モジュレータ=1-2列 / キャリア=3-4列) */
+.vrc7-tone-editor .vrc7-op-head {
+  margin: 1px 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.vrc7-tone-editor .vrc7-fb-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.vrc7-tone-editor .vrc7-fb-row input { width: 46px; }
+.vrc7-tone-editor .vrc7-sample-mml {
+  flex: 1 1 auto;
+  min-width: 110px;
+  /* ★グローバルの textarea{min-height:320px} に負けるので min-height ごと上書きする
+     (既存の .fds-sample-mml と同じ対策) */
+  min-height: 44px;
+  height: 44px;
+  max-height: 120px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.35;
+  resize: vertical;
+}
+/* 試聴の行は1行に収める(フレーズ欄だけ伸びる) */
+.vrc7-tone-editor .vrc7-audition {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+}
+.vrc7-tone-editor .vrc7-op-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+/* 構成図のブロック色(vrc7ToneEditor.js COL_MOD / COL_CAR)と同じ色にする */
+.vrc7-tone-editor .vrc7-op-swatch--mod { background: #e0a83c; }
+.vrc7-tone-editor .vrc7-op-swatch--car { background: #57b6e0; }
+.vrc7-tone-editor .vrc7-op-col label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  /* ウィンドウを広げても値の欄がラベルから遠く離れないよう頭打ちにする */
+  max-width: 230px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+/* 試聴の行はツールバー直下に置いて、スクロールしなくても押せるようにする */
+.vrc7-tone-editor .vrc7-audition label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.vrc7-tone-editor .vrc7-op-col input[type="number"] {
+  width: 46px;
+  flex: none;
+}
+.vrc7-tone-editor .vrc7-op-col input[type="checkbox"] {
+  margin: 0 15px 0 0;
+}
+.vrc7-tone-editor .vrc7-op-na {
+  opacity: 0.55;
+}
+.vrc7-tone-editor canvas {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  display: block;
+  max-width: 100%;
+  margin-top: 2px;
+}
+
 /* --- サウンドファイルを開くウィンドウ: ヘッダ情報・ボタン類を一回り小さく表示 --- */
 .compact-soundplay {
   font-size: 11px;
@@ -1099,6 +1281,56 @@ button.secondary {
 /* サウンドファイルを開いている時だけバッジをクリック可能にする(MML↔サウンドファイル切替) */
 .kbd-src-badge--clickable { cursor: pointer; }
 .kbd-src-badge--clickable:hover { filter: brightness(1.15); }
+/* バッジの右のファイル名/リスト名(MMLならタイトル)。曲一覧があるときはクリックでドロップダウン */
+/* ★.kbd-hdr-btn(width:24px / flex:none / inline-flex中央寄せ)より後ろで効かせるため2クラスで指定する */
+.kbd-hdr-btn.kbd-src-name {
+  flex: 1 1 auto;      /* 余った幅を名前に使い、狭いときは縮む(末尾を…にする) */
+  min-width: 56px;
+  width: auto;
+  max-width: 260px;
+  padding: 0 6px;
+  text-align: left;
+  font-size: 11px;
+  font-family: var(--mono);
+  display: inline-block;
+  line-height: 20px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+.kbd-hdr-btn.kbd-src-name:hover { background: transparent; border-color: transparent; color: var(--text-secondary); }
+.kbd-hdr-btn.kbd-src-name--pick { cursor: pointer; }
+.kbd-hdr-btn.kbd-src-name--pick::after { content: ' ▾'; opacity: 0.7; }
+.kbd-hdr-btn.kbd-src-name--pick:hover { background: rgba(58, 110, 165, 0.18); border-color: rgba(58, 110, 165, 0.5); color: var(--text); }
+.kbd-src-pop {
+  position: fixed;
+  z-index: 2147483646;
+  min-width: 200px;
+  max-width: 420px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 4px 0;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  font-size: 11px;
+  font-family: var(--mono);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+.kbd-src-pop-item { padding: 3px 10px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kbd-src-pop-item:hover { background: var(--hover-bg); }
+.kbd-src-pop-item--cur { color: var(--accent); font-weight: 600; }
+
+/* サウンドファイルを開くウィンドウはヘッダ情報とログだけを残す(ユーザー指示 2026-09-06)。
+   再生/停止/曲送り/曲選択/to MML/変換設定は鍵盤表示のタイトル行へ移した。
+   ★要素そのものは消さない: 鍵盤表示のボタンは「ここの隠れたボタンを click() する」代理で、
+     main.js もidで配線しているため。表示だけ落とす(インライン style を上書きするので !important) */
+.compact-soundplay .toolbar,
+.compact-soundplay #archiveBar,
+.compact-soundplay #archiveTrackBar,
+.compact-soundplay #spcVoiceMonitor { display: none !important; }
 
 /* 鍵盤表示タイトル行の再生コントロール(⏮ ▶/⏸ ■ ⏭、keyboard.js _buildTransportBar)。
    バッジ(ファイル名)の右に置き、今表示している方(MML / サウンドファイル)を操作する */
@@ -1161,6 +1393,28 @@ button.secondary {
   background: var(--surface);
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.28);
 }
+/* 「割当先の音で聴く」トグル(見出しの借用先列とポップオーバー。src/audio/assign-preview.js) */
+.kbd-preview-btn {
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 16px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  vertical-align: middle;
+}
+.kbd-preview-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.kbd-preview-btn:disabled { opacity: 0.4; cursor: default; }
+.kbd-preview-btn.kbd-preview-btn--on {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.kbd-assign-pop-foot { justify-content: space-between; align-items: center; gap: 8px; }
+.kbd-assign-pop-preview { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary); cursor: pointer; }
 /* 既定から変更されている(ユーザー指定あり)ときは小さな印を出す */
 .kbd-assign-btn--custom::after {
   content: '';
@@ -2116,7 +2370,10 @@ button.secondary {
 /* ドラム(DPCM)パネル: 1行=1サンプル。列幅はヘッダと行で同じクラスを使って揃える */
 /* 列は固定幅の積み上げなので、窓が狭いと行がはみ出す。縦(本体)と横(表全体)で
    スクロールを分けて、ヘッダと行が必ず同じ位置に並ぶようにする */
-.drum-panel { display: flex; flex-direction: column; height: 100%; font-size: 11px; overflow-x: auto; }
+/* ウィンドウ本体(.float-window-body=縦flex)いっぱいに伸ばす。伸ばさないと最下段の共通設定が
+   一覧の直下に来て「一番下」にならない(#drumPanel は素の div なので flex:1 が要る) */
+#drumPanel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.drum-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; font-size: 11px; overflow-x: auto; }
 .drum-panel-head, .drum-panel-row {
   display: flex; align-items: center; gap: 6px; padding: 3px 6px; white-space: nowrap;
 }
@@ -2142,6 +2399,11 @@ button.secondary {
 }
 .drum-panel-foot--warn { background: rgba(210, 150, 40, 0.16); }
 .drum-panel-foot--over { background: rgba(209, 72, 58, 0.16); }
+/* 最下段: DPCM変換の共通設定(DMCレート/重複打点のレート/同時打点の扱い)。変換設定ダイアログから移した */
+.drum-panel-opts { border-top: 1px solid var(--border); padding: 4px 8px 6px; display: flex; flex-direction: column; gap: 3px; }
+.drum-panel-opts .dp-opt { display: grid; grid-template-columns: 9em auto 1fr; align-items: center; gap: 8px; }
+.drum-panel-opts .dp-opt-name { font-weight: 700; color: var(--text-muted); }
+.drum-panel-opts .dp-opt-desc { color: var(--text-muted); font-size: 10px; }
 .dp-c-color { flex: none; width: 14px; }
 .dp-c-color i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 .dp-c-label { flex: none; width: 92px; font-family: var(--mono); }
@@ -2376,3 +2638,160 @@ button.secondary {
 .cs-key { font-size: 12px; }
 .cs-desc { font-size: 12px; color: var(--text-muted); }
 .convert-settings-btn--active { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ---- メトロノーム(src/ui/metronomePanel.js) ---- */
+/* ON中のトグルボタン。拍ごとに .is-beat が90msだけ付く(小節頭は .is-accent も) */
+.metro-toggle.is-active { color: var(--accent); border-color: var(--border); }
+.metro-toggle.is-beat   { background: var(--hover-bg); }
+.metro-toggle.is-accent { background: var(--accent); color: var(--on-accent); }
+
+.metro-pop {
+  position: fixed;
+  /* .kbd-layout-pop と同じ理由(float-windowのz-indexが増え続けるため最前面固定) */
+  z-index: 2147483647;
+  width: 268px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  font-size: 12px;
+  cursor: default;
+}
+.metro-sec { margin-bottom: 8px; }
+.metro-sec:last-child { margin-bottom: 0; }
+.metro-sec-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+.metro-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.metro-opt input[type=radio] { margin: 0; accent-color: var(--accent); cursor: pointer; }
+.metro-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+.metro-row > span:first-child { flex: none; width: 84px; color: var(--text-secondary); }
+.metro-row select { flex: 1; min-width: 0; font-size: 11px; }
+.metro-row-vol input[type=range] { flex: 1; min-width: 0; height: 12px; margin: 0; }
+.metro-num { width: 4.5em; font-size: 11px; font-family: var(--mono); }
+.metro-unit { flex: none; color: var(--text-muted); }
+.metro-hint { color: var(--text-muted); }
+.metro-note { margin-top: 4px; font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+.metro-btn {
+  flex: none;
+  font-size: 11px;
+  padding: 2px 8px;
+  background: var(--control-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.metro-btn:disabled { opacity: 0.4; cursor: default; }
+
+.metro-cal {
+  margin-top: 6px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.metro-cal-text { font-size: 11px; color: var(--text-secondary); line-height: 1.4; }
+/* 叩く的。フォーカスを持たせてスペースキーでも打てるようにしている */
+.metro-cal-pad {
+  display: block;
+  width: 100%;
+  margin: 6px 0 4px;
+  padding: 14px 0;
+  font-size: 12px;
+  background: var(--control-bg);
+  color: var(--text);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.metro-cal-pad:active { background: var(--accent); color: var(--on-accent); }
+.metro-cal-pad:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.metro-cal-status {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  min-height: 1.2em;
+}
+
+/* ---- 演奏入力(src/ui/performInput.js) ---- */
+.perform-toggle.is-active { color: var(--accent); }
+.perform-pop { width: 300px; }
+.perform-keyguide { display: flex; flex-direction: column; gap: 3px; }
+.perform-keyrow { display: flex; gap: 2px; }
+/* キーキャップ。黒鍵に当たるキーは反転色にして、指の位置を目で追えるようにする */
+.perform-key {
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: center;
+  font-size: 9px;
+  font-family: var(--mono);
+  line-height: 1.6;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--control-bg);
+  color: var(--text-secondary);
+  overflow: hidden;
+}
+.perform-key--black { background: var(--text); color: var(--panel); border-color: var(--text); }
+
+/* ---- 演奏の録音(src/ui/recordPanel.js) ---- */
+/* 録音中は赤。点滅させて「今録れている」ことを外さないようにする */
+.record-toggle.is-recording { color: var(--error); animation: rec-blink 1s steps(2, start) infinite; }
+@keyframes rec-blink { 50% { opacity: 0.35; } }
+
+.rec-modal { width: min(560px, 94vw); }
+.rec-info { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+.rec-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+.rec-label { flex: none; width: 84px; font-size: 12px; color: var(--text-secondary); }
+.rec-row select { font-size: 12px; }
+.rec-row input[type=range] { flex: 1; min-width: 0; }
+.rec-unit { flex: none; width: 40px; text-align: right; font-size: 11px; font-family: var(--mono); color: var(--text-muted); }
+.rec-modes { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rec-mode { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; }
+.rec-mode input { margin: 0; accent-color: var(--accent); cursor: pointer; }
+.rec-note { margin: 6px 0 4px; font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+/* 挿入される文字列そのもの。横に長い行は折り返さずスクロールさせる(実物と見た目を合わせる) */
+.rec-preview {
+  margin: 0;
+  padding: 8px;
+  max-height: 40vh;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre;
+}
+.es-modal-footer .rec-insert { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+
+.rec-warn { margin: 0 0 8px; padding: 6px 8px; font-size: 11px; line-height: 1.4; color: var(--error); border: 1px solid var(--error); border-radius: 4px; }
+
+/* ループ再生(main.js btnLoopRange)。ONのときだけアクセント色 */
+.loop-toggle.is-active { color: var(--accent); }
+
+/* MIDI機器の一覧(src/ui/performInput.js) */
+.perform-midi-list { margin-top: 2px; }
+.perform-midi-list .metro-opt { white-space: normal; }

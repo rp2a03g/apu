@@ -2385,13 +2385,21 @@
   // OP<n>(VRC7)/MH<n>(FDS)のような音符に紐付かない即時コマンドを、記録された
   // フレーム位置のwriteLogへ差し込む。resolverはimmediateWrite 1件から
   // { writes, frameOffset } (frameOffsetは省略可、delay等の追加オフセット用)を返す
-  function spliceImmediateWrites(writeLog, immediateWrites, kind, totalFrames, resolver) {
+  // prepend: そのフレームの音符側の書き込みより**前**へ差し込む。
+  // ★VRC7のOP<n>(カスタム音色ロード)はこれが必須。同じフレームに音符の頭が来ると、
+  //   末尾へ足す従来の動作では「キーオン → 音色ロード」の順になり、キーオンした時点の
+  //   音色(リセット直後は全0=AR0=最も遅い立ち上がり)でエンベロープが走り出してしまう。
+  //   実測(mod AR=15の音色): 1音目だけピーク0.0000=完全に無音、2音目以降は0.1304。
+  //   実機のドライバも「音色をロードしてからキーオン」する順なので、そちらへ揃える。
+  function spliceImmediateWrites(writeLog, immediateWrites, kind, totalFrames, resolver, prepend) {
     for (const iw of immediateWrites) {
       if (iw.kind !== kind) continue;
       const resolved = resolver(iw);
       if (!resolved || !resolved.writes || resolved.writes.length === 0) continue;
       const frame = Math.min(Math.max(0, iw.frame + (resolved.frameOffset || 0)), totalFrames - 1);
-      writeLog[frame] = [...writeLog[frame], ...resolved.writes];
+      writeLog[frame] = prepend
+        ? [...resolved.writes, ...writeLog[frame]]
+        : [...writeLog[frame], ...resolved.writes];
     }
   }
 
@@ -2777,8 +2785,11 @@
         });
         // 共有バッファアロケータ: 曲全体のN163使用状況から、時間軸で重ならない範囲だけ
         // 波形データを再利用しながらRAM上のバイト位置を割り当てる。空き容量を超えて
-        // 同時使用される場合(波形用RAMは64byte=128サンプル)はconflictとして記録し、エラーへ変換する
-        const allocResult = MML.N163Alloc.allocate(letters, segmentsByChannel, envelopes.n, totalFrames);
+        // 同時使用される場合はconflictとして記録し、エラーへ変換する。
+        // ★波形に使えるバイト数は 128-8*numN163Ch(有効ch数ぶんレジスタが上から占める)。
+        //   ここを64固定にしていたため、6chしか使わない曲が本来収まるのに落ちていた
+        const allocResult = MML.N163Alloc.allocate(letters, segmentsByChannel, envelopes.n, totalFrames,
+          Math.max(1, numN163Ch));
         for (const c of allocResult.conflicts) errors.push({ message: c.message });
         extra = { numN163Ch: Math.max(1, numN163Ch), n163Occurrences: allocResult.occurrences };
       }
@@ -2786,8 +2797,10 @@
         tracks[ch] = buildExpansionWriteLog(exp, ch, index, segmentsByChannel[ch], totalFrames, envelopes, dpcmLayout, dpcmSamples, extra);
         // OP<n>(VRC7音色)/MH<n>(FDS変調)による曲中の動的切り替えをこのchへ差し込む
         if (exp === 'vrc7') {
+          // 第6引数 true = 音符の書き込みより前へ(音色をロードしてからキーオンする。
+          // spliceImmediateWrites 冒頭のコメント参照)
           spliceImmediateWrites(tracks[ch], immediateWritesByChannel[ch], 'vrc7Tone', totalFrames,
-            iw => resolveVrc7ToneWrite(iw, envelopes));
+            iw => resolveVrc7ToneWrite(iw, envelopes), true);
         } else if (exp === 'fds') {
           spliceImmediateWrites(tracks[ch], immediateWritesByChannel[ch], 'fdsMod', totalFrames,
             iw => resolveFdsModWrite(iw, envelopes));
@@ -2924,6 +2937,8 @@
   // s<speed>,<depth> → $4001/$4005の生バイト。NSF書き出し(src/nsf/mckBytecode.js)も
   // 同じバイトをバイトコードへ埋め込むため、ブラウザ再生と完全に同じ値になるよう共有する
   Mml.sweepRegisterByte = sweepRegisterByte;
+  // 周波数→各チップの周期/周波数レジスタ値(割当プレビュー src/audio/assign-preview.js が同じ式で鳴らすために公開)
+  Mml.pitchRegs = { pulsePeriod, trianglePeriod, noisePeriodIndex, sawPeriod, fme7Period, fdsFreqToPeriod, n163FreqReg, vrc7FreqToFnumBlock };
   Mml.CHANNEL_BASE = CHANNEL_BASE;
   Mml.CHIP_CHANNEL_COUNTS = CHIP_CHANNEL_COUNTS;
   Mml.EXPANSION_PRIORITY = EXPANSION_PRIORITY;

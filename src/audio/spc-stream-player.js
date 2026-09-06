@@ -281,6 +281,7 @@
       // 前フレームに残っていた書き込み(offが末尾付近のもの)を取りこぼさず流してから移る
       if (this.currentFrame >= 0) this._applyWritesUpTo(Infinity);
       this.currentFrame = f;
+      this._previewDue = true; // 割当プレビュー: このフレームの元ch状態を次の出力サンプルで拾う
       // frame0の先頭SEEDED_FRAME0_LEN件は_buildChips()の初期化と重複するので飛ばす
       this._writeIdx = (f === 0) ? SEEDED_FRAME0_LEN : 0;
     }
@@ -329,8 +330,12 @@
           if (this.onEnded) this.onEnded();
           return;
         }
-        outL[i] = stalled ? 0 : this._lastL;
-        outR[i] = stalled ? 0 : this._lastR;
+        // 割当プレビュー(src/audio/assign-preview.js)。フレーム境界は_applyFrame()が印を付ける
+        const pv = this.preview && this.preview.enabled && !stalled ? this.preview : null;
+        if (pv && this._previewDue) { this._previewDue = false; pv.onFrame(this.currentFrame); }
+        const ps = pv ? pv.render() : 0;
+        outL[i] = stalled ? 0 : this._lastL + ps;
+        outR[i] = stalled ? 0 : this._lastR + ps;
         if (!stalled) this.samplePos++;
       }
     }

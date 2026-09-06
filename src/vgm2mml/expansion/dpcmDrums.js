@@ -73,7 +73,7 @@
   /**
    * @param {Array} sources 上記の形
    * @param {number} frameRate
-   * @param {object} opt { totalFrames, pcmRate, rateMix, rateIndex }
+   * @param {object} opt { totalFrames, dmcRate, rateMix, poly, rateIndex, extraHits }(src/convert/drumHits.js dpcm と同じ)
    */
   MML.Vgm2MmlExpansion.dpcmDrums = function (sources, frameRate, opt) {
     opt = opt || {};

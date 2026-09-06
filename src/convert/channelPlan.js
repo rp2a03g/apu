@@ -163,6 +163,10 @@
   //   メガドライブ曲のドラムはDAC(YMDA)に載っていることが多く、Eを選んでも何も起きなかった
   //   (ユーザー報告「アウトランでDPCMを選んでもパッドに出てこない」)。
   //   実サンプルを持つのは VGMのPCMチップ(kind 'pcm')/ SPCボイス(kind 'brr')/ NSFのDM行だけ。
+  // ★旋律ch(矩形波/波形/FM/PCM)も D(2A03ノイズ)へ載せられる(2026-09-05、ユーザー要望「FMでノイズを
+  //   鳴らしているパートに2A03ノイズを割り当てたい」)。音程はノイズ周期へ写す(noiseIndexFor、
+  //   借用先の音色選択 'noisePeriod' で自動/固定を選ぶ)。逆(ノイズ→旋律)は従来どおり不可。
+  for (const k of ['square', 'wave', 'fm', 'fm4', 'pcm', 'any']) if (KIND_TARGETS[k].indexOf('noise') < 0) KIND_TARGETS[k].push('noise');
   const SAMPLE_KINDS = { pcm: true, brr: true };
   function isSynthDrumTarget(chId, target) {
     if (target !== 'dpcm' || !chId) return false;
@@ -188,11 +192,11 @@
   //   wave  … FDS/N163の波形(既定copy=元の波形/サンプル1周期をコピー)
   //   vrc7  … VRC7音色(@0自作=元から変換/@1-15プリセット)
   // フォーマットごとに変換器が実際に受け取れる指定。UIに「効かない選択肢」を出さないための表。
-  //   tone   : true=全借用先で音色を選べる / 'vrc7'=VRC7を選んだときだけ(VGMのvrc7Instのみ対応)
+  //   tone   : true=全借用先で音色を選べる / 'vrc7'=VRC7を選んだときだけ
   //   volPct : 変換音量(channelMap[ch].volPct)を受けるか
   const CAPS = {
     spc: { tone: true, volPct: true },
-    vgm: { tone: 'vrc7', volPct: false },
+    vgm: { tone: true, volPct: false }, // 2026-09-05: デューティ/波形も vgm2mml adaptEvents が受けるようになった
     kss: { tone: true, volPct: false },
     gbs: { tone: true, volPct: false },
     hes: { tone: true, volPct: false },
@@ -201,9 +205,11 @@
   };
   function capsOf(fmt) { return CAPS[fmt || curFormat] || { tone: false, volPct: false }; }
 
-  function toneKindFor(type, fmt) {
+  // srcKind(省略可): 元chの種別。ノイズ借用先の周期選択は旋律chから載せるときだけ出す
+  function toneKindFor(type, fmt, srcKind) {
     const cap = capsOf(fmt).tone;
     if (!cap) return null;
+    if (type === 'noise') return (srcKind && srcKind !== 'noise') ? 'noisePeriod' : null;
     // ★DPCMのDMCレートは「チャンネル単位」ではなく「サンプル単位」で持つ(2026-08-29)。
     //   @DPCM<n>定義は元々サンプルごとにfreqを持てるうえ、プール式チップは同じ太鼓が
     //   毎回別スロットへ移るのでch単位だと指定が飛ぶ。設定はドラム一覧パネル側
@@ -233,13 +239,45 @@
         ['copy', T('元の波形をコピー')], ['pulse50', T('矩形波50%')],
         ['sin', T('サイン波')], ['triangle', T('三角波')], ['saw', T('ノコギリ波')]] };
     }
+    if (kind === 'noisePeriod') {
+      // 2A03ノイズの周期index(0=最も明るい/447kHz … 15=最も暗い/440Hz)。'auto'は音程から最寄りのレート
+      const opts = [['auto', T('ノイズ周期: 音程から自動')]];
+      for (let i = 0; i < 16; i++) {
+        const rate = 1789773 / NOISE_PERIODS[i];
+        const label = rate >= 1000 ? Math.round(rate / 1000) + 'kHz' : Math.round(rate) + 'Hz';
+        opts.push([String(i), T('周期 {n}', { n: i }) + ' (' + label + ')']);
+      }
+      return { def: 'auto', opts: opts };
+    }
     // vrc7: 元がFM(OPLL)なら「元の音色」、OPN系4opなら@0(4op→2op自動変換)が既定
     const names = (MML.VGM2MML && MML.VGM2MML.VRC7_PRESET_NAMES) || [];
     const opts = [];
     if (srcKind === 'fm') opts.push(['auto', T('元の音色')]);
-    opts.push(['0', srcKind === 'fm4' ? T('@0 自作音色(4op→2op自動変換)') : T('@0 自作音色(元の音から変換)')]);
+    // ★「同時1音色まで」: 実機VRC7の自作音色スロットは$00-$07の1組だけで全ch共有のため、
+    //   重なったぶんは変換側でいちばん近い内蔵音色へ落ちる(src/convert/vrc7Tone.js)
+    opts.push(['0', srcKind === 'fm4'
+      ? T('@0 自作音色(4op→2op自動変換、同時1音色まで)')
+      : T('@0 自作音色(元の音から変換、同時1音色まで)')]);
     for (let i = 1; i <= 15; i++) opts.push([String(i), ('@' + i + ' ' + (names[i] || '')).trim()]);
     return { def: srcKind === 'fm' ? 'auto' : srcKind === 'fm4' ? '0' : '1', opts: opts };
+  }
+
+  // ── 旋律 → 2A03ノイズの周期 ─────────────────────────────────────
+  // 2A03ノイズの周期表(apu2a03.js と同じ)。シフトレート = CPU/周期。
+  const NOISE_PERIODS = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068];
+  // 基音 freq[Hz]×mul(FMキャリアの倍率。不明なら1)をノイズのシフトレートとみなし、最寄りの周期indexを返す。
+  // レート表は idx15=440Hz から idx0=447kHz までほぼ10オクターブ/15段(1.5段/oct)なので、
+  // 「1オクターブ上がると1.5段明るくなる」単調な対応になる(spc2mmlのspcNoiseNoteNumと同じ発想)。
+  function noiseIndexForFreq(freq, mul) {
+    const f = (freq || 0) * (mul || 1);
+    if (!(f > 0)) return 15;
+    return Math.max(0, Math.min(15, 15 - Math.round(1.5 * Math.log2(f / 440))));
+  }
+  // tone('auto'|未指定|'0'-'15') に従って周期indexを決める(変換とプレビューで共用)
+  function noiseIndexFor(tone, freq, mul) {
+    const n = parseInt(tone, 10);
+    if (isFinite(n) && n >= 0 && n <= 15) return n;
+    return noiseIndexForFreq(freq, mul);
   }
 
   // ── 元ch(鍵盤表示のch.id)の種別と、変換器側のソースID ──────────────
@@ -282,6 +320,10 @@
     return ['any', null];
   }
   function channelKind(chId) { return lookupCh(chId)[0]; }
+  // 割当対象外の行(OPLL/OPL/YM2608のリズム・ADPCM)。part列に文字が無い行のうち「変換器が別経路で扱う」もの。
+  // 割当プレビュー(「割当先の音で聴く」)ではスキップ扱いにせず元の音のまま鳴らす
+  const UNASSIGNABLE_RE = /^(KF(BD|SD|TOM|CYM|HH)|OL(BD|SD|TM|CY|HH|B)|OA(BD|SD|CY|HH|TM|RM))$/;
+  function isUnassignable(chId) { return UNASSIGNABLE_RE.test(chId || ''); }
   function vgmSourceId(chId) { return lookupCh(chId)[1]; }
 
   // 逆引き: 変換器のソースID(VGM) → 鍵盤表示の行ID。VGMの構成駆動の既定割当
@@ -362,8 +404,11 @@
     targetOfLetter: targetOfLetter,
     toneKindFor: toneKindFor,
     toneOptionsFor: toneOptionsFor,
+    noiseIndexForFreq: noiseIndexForFreq,
+    noiseIndexFor: noiseIndexFor,
     hasVolSliderFor: hasVolSliderFor,
     channelKind: channelKind,
+    isUnassignable: isUnassignable,
     vgmSourceId: vgmSourceId,
     colorOfTarget: colorOfTarget,
     chIdForVgmSource: chIdForVgmSource,

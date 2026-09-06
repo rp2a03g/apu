@@ -73,6 +73,42 @@
       this.seq = 0; // 再生開始通番(ロール/キャプチャ用)
       this.bytesIn = 0;       // データレジスタ受信総量
       this._lastBytesIn = 0;  // スナップショット間の流量差分用
+      // いま流し込まれているサンプル(DACストリームの開始アドレス=同定キー)。鍵盤表示の
+      // 波形アイコン用で、音の生成には使わない。setStreamSample() が vgmPlayer から呼ぶ
+      this.streamSample = null;     // { data: Uint8Array, start, len }
+      this._sampleCache = new Map(); // 'start:len' → { wave: Float32Array|null, hash, cps, conf }
+    }
+
+    /**
+     * DACストリームが流し始めたサンプルを教える(vgmPlayer.js _streamStart、chipType 0x17)。
+     * チップ自身はROMを持たない(CPUが1バイトずつ流す)ので、他のPCMチップの「ROM上の
+     * サンプル」に当たるものは「バンク上の開始アドレス〜バイト数」。鍵盤行の波形アイコンを
+     * YM2610 ADPCM等と同じ makeSampleWave(音程あり=1周期/無し=全体の概形)で出すために持つ。
+     */
+    setStreamSample(data, start, len) {
+      this.streamSample = (data && len > 0) ? { data, start, len } : null;
+    }
+    /** streamSample の表示用解析(キャッシュ)。復号は decodeOKIM6258Adpcm と同じ */
+    _sampleInfo() {
+      const s = this.streamSample;
+      if (!s) return null;
+      const key = s.start + ':' + s.len;
+      let r = this._sampleCache.get(key);
+      if (r) return r;
+      const U = Emu.SamplePitchUtil;
+      const MAX_BYTES = 32 * 1024; // 長いボイス(ADPCMの読み上げ等)は先頭だけ見る(解析コスト上限)
+      const len = Math.min(s.len, MAX_BYTES);
+      const pcm = Emu.decodeOKIM6258Adpcm(s.data, s.start, len);
+      r = { wave: null, hash: null, cps: 0, conf: 0 };
+      if (U && pcm.length >= 8) {
+        const auto = U.detectCps(pcm);
+        r.cps = auto.cps; r.conf = auto.conf;
+        r.hash = U.sampleHash(s.data, s.start, s.start + len);
+        r.wave = U.makeSampleWave(pcm, auto.conf >= 0.5 ? auto.cps : 0);
+      }
+      // キャッシュは同じ Float32Array を毎フレーム使い回す(キャプチャ保持メモリを増やさない)
+      this._sampleCache.set(key, r);
+      return r;
     }
 
     /** レジスタ書込み(VGM 0xB7 / DACストリームのデータ配送) */
@@ -163,18 +199,51 @@
   // (悪魔城ドラキュラ実測: 15秒間play1回・ストリーム断続)、playing単独だと点きっぱなしになる。
   // 流量はregsOnlyキャプチャ(clock()無し)でもストリームエンジンが配送するので正確。
   // vol はライブ時=現在振幅、キャプチャ時(振幅が出ない)=下限0.3を保証。
+  // waveData は流れているサンプル(DACストリーム)の128点波形(他のADPCM行と同じ makeSampleWave)。
+  // 同じサンプルなら同じ Float32Array を返す(キャプチャ側で毎フレーム複製しないため)。
   Emu.snapshotOKIM6258 = function (chip) {
     const amp = Math.min(1, Math.abs(chip.signal) / 2048);
     const flow = chip.bytesIn - chip._lastBytesIn;
     chip._lastBytesIn = chip.bytesIn;
     const active = chip.playing && (flow > 0 || amp > 0.005);
+    const info = chip._sampleInfo ? chip._sampleInfo() : null;
+    const ss = chip.streamSample;
     return [{
       active,
       vol: active ? Math.max(0.3, amp) : 0,
       rawVol: Math.round(amp * 255), rawVolMax: 255,
       panL: (chip.pan & 0x02) ? 0 : 15, panR: (chip.pan & 0x01) ? 0 : 15,
-      rate: chip.playRate(), seq: chip.seq
+      rate: chip.playRate(), seq: chip.seq,
+      waveData: info ? info.wave : null,
+      sample: ss ? { kind: 'oki', start: ss.start, end: ss.start + ss.len } : null,
+      sampleHash: info ? info.hash : null
     }];
+  };
+
+  /**
+   * ADPCMバイト列 → Float32(-1..1)(ドラムパッドの原音取り出し用。main.js vgmDacDrumFor)
+   * チップの再生開始(制御レジスタbit1)と同じ初期状態(signal=-2, step=0)から、
+   * 上位→下位ニブルの順に _sample() と同じ差分表で復号する。1バイト=2サンプル。
+   * @param {Uint8Array} bytes  データバンク
+   * @param {number} start      開始オフセット(DACストリームの開始アドレス=サンプル同定キー)
+   * @param {number} len        バイト数
+   */
+  Emu.decodeOKIM6258Adpcm = function (bytes, start, len) {
+    const n = Math.max(0, Math.min(len | 0, bytes.length - start));
+    const out = new Float32Array(n * 2);
+    let signal = -2, step = 0;
+    for (let i = 0; i < n; i++) {
+      const b = bytes[start + i];
+      for (let k = 0; k < 2; k++) {
+        const nib = k === 0 ? (b >> 4) & 15 : b & 15;
+        signal += DIFF[step * 16 + nib];
+        if (signal > 2047) signal = 2047; else if (signal < -2048) signal = -2048;
+        step += INDEX_SHIFT[nib & 7];
+        if (step > 48) step = 48; else if (step < 0) step = 0;
+        out[i * 2 + k] = signal / 2048;
+      }
+    }
+    return out;
   };
 
   Emu.OKIM6258Audio = OKIM6258Audio;

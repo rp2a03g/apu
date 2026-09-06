@@ -16,10 +16,17 @@
 
   I18n.register('en', 'English', {
     '打楽器の分離レンダリング中: {ch}': 'Rendering isolated drum channel: {ch}',
-    'ミックス(重なった打点をその瞬間の音で焼く・忠実)': 'Mix (bake overlapping hits as heard; faithful)',
-    '単音(直近の打点だけ・定義がサンプル数までで済む)': 'Mono (latest hit only; definitions stay at the sample count)',
-    '打点が重なる曲はミックスだと組合せぶん定義が増えます(実測: 2chのDDAで54定義36KB→単音7定義)。ROMを抑えたいときは単音に。': 'When hits overlap, Mix creates one definition per combination (measured: 2-ch DDA gave 54 defs / 36 KB vs 7 defs in Mono). Choose Mono to save ROM.',
     '(打楽器化)': ' (as drums)',
+    // ---- ドラム(DPCM)パネル最下段の共通設定 (src/ui/drumPanel.js) ----
+    'DMCレートを「自動」にしたサンプルに使うレート(33.1〜4.2kHz)。音質の良さとROM容量は比例します': 'Rate used for samples whose DMC rate is "Auto" (33.1-4.2 kHz). Quality and ROM size scale together',
+    '重複打点のレート': 'Overlap rate',
+    '同時に鳴った打点のDMCレートが異なるとき、高い方と低い方のどちらに合わせるか': 'When simultaneous hits have different DMC rates, follow the higher or the lower one',
+    '高': 'Higher',
+    '低': 'Lower',
+    '同時打点の扱い': 'Overlapping hits',
+    '別チャンネルなどで打点が重なったとき、組み合わせぶんDPCM定義を増やす(ミックス)か、直近の1音に抑える(単音)か。ミックスは同時発音の組み合わせぶん.dmcファイルが増えます': 'When hits overlap (e.g. from different channels), add one DPCM definition per combination (Mix) or keep only the latest hit (Mono). Mix creates one .dmc per combination',
+    'ミックス': 'Mix',
+    '単音': 'Mono',
 
     // ---- ヘッダー / ウィンドウ名 (index.html) ----
     'MMLコンパイラ（拡張音源対応）・NSF書き出し・NSF/SPC/KSSファイル再生・DPCMコンバータ・シンタックスハイライト':
@@ -34,6 +41,114 @@
     '鍵盤表示': 'Keyboard',
     'FDS波形エディタ': 'FDS Wave Editor',
     'N163波形エディタ': 'N163 Wave Editor',
+    'VRC7音色エディタ': 'VRC7 Tone Editor',
+    'MMLへ書き出す書式': 'Format written back to the MML',
+    '@OT (読める書式)': '@OT (readable)',
+    '@OP (8バイト)': '@OP (8 bytes)',
+    '内蔵音色を読み込む(反映を押すまでMMLへは書き込まれません)':
+      'Load a built-in tone (nothing is written to the MML until you press Apply)',
+    '貼り付け(反映を押すまでMMLへは書き込まれません)':
+      'Paste (nothing is written to the MML until you press Apply)',
+    '図の波形・エンベロープと試聴に使う音の高さ': 'Pitch used for the wave/envelope display and the audition',
+    'FM音源の構成図。エンベロープの■をドラッグ、タグ(EG/KR/AM/VB/WF)をクリック、FBのバーをクリックで直接編集できます':
+      'FM block diagram. Edit it directly: drag the envelope handles, click the EG/KR/AM/VB/WF tags, click the FB bar',
+    '図のエンベロープの■をドラッグ / タグをクリック / FBのバーをクリックでも変えられます':
+      'You can also drag the envelope handles, click the tags, or click the FB bar in the diagram',
+    '音量 v': 'Volume v',
+    '音程': 'Pitch',
+    'ML 倍率': 'ML multiple',
+    'TL 変調の深さ': 'TL mod depth',
+    'AR 立ち上がり': 'AR attack',
+    'DR 減衰': 'DR decay',
+    'SL 持続レベル': 'SL sustain level',
+    'RR リリース': 'RR release',
+    'KL 音階減衰': 'KL key scale level',
+    'EG 持続音': 'EG sustained',
+    'KR 音階レート': 'KR key scale rate',
+    'AM トレモロ': 'AM tremolo',
+    'VB ビブラート': 'VB vibrato',
+    'WF 半波整流': 'WF half-wave',
+    'モジュレータ(変調波)': 'Modulator',
+    'キャリア(搬送波)': 'Carrier',
+    '位相 PG': 'Phase PG',
+    'エンベロープ EG': 'Envelope EG',
+    'モジュレータ': 'Modulator',
+    'キャリア': 'Carrier',
+    '位相を変調': 'phase mod',
+    '出力': 'Out',
+    '出力波形(1周期)': 'Output wave (1 cycle)',
+    '音量の時間変化(離鍵あり)': 'Level over time (with key-off)',
+    '実際に鳴らしたときの音量の時間変化(1秒鳴らして離鍵)':
+      'Level over time when actually played (1 s held, then key-off)',
+    '音が出ていません': 'No sound',
+    'FM音源の構成図。エンベロープの■をドラッグ、タグ(EG/KR/AM/VB/WF)をクリック、FBのバーをクリックで直接編集できます。右端の出力波形セルはドラッグで目標の波形を手描きできます(逆算用)':
+      'FM block diagram. Edit it directly: drag the envelope handles, click the EG/KR/AM/VB/WF tags, click the FB bar. Drag inside the output cell on the right to hand-draw a target wave (for the solver)',
+    '逆算':
+      'Solve',
+    '消去':
+      'Clear',
+    '目標の波形(出力セルに手描き/倍音バー)に近い音色パラメータを総当たりで探します':
+      'Brute-force search for tone parameters close to the target wave (hand-drawn in the output cell / harmonic bars)',
+    '目標の波形を消す':
+      'Clear the target wave',
+    '逆算の候補(実チップで鳴らした波形の一致率順)。選ぶと図と数値に入ります':
+      'Solver candidates (ordered by waveform match when played on the real chip). Selecting one loads it into the diagram and the fields',
+    '倍音の振幅。緑=目標(ドラッグで変えられます) / 青=いまの音色。目標が無いときは出力セルに手描きするか、ここをドラッグすると今の音色を出発点にした目標ができます':
+      'Harmonic amplitudes. Green = target (drag to change) / blue = current tone. With no target yet, hand-draw in the output cell or drag here to start a target from the current tone',
+    '目標':
+      'target',
+    'いま':
+      'now',
+    '倍音':
+      'harmonics',
+    '出力波形(1周期)。ドラッグで目標を手描き':
+      'Output wave (1 cycle). Drag to hand-draw a target',
+    '目標: 出力セルのドラッグで手描き / 倍音バーで振幅を変更':
+      'Target: hand-draw by dragging in the output cell / change amplitudes with the harmonic bars',
+    '逆算中… {p}%':
+      'Solving... {p}%',
+    '逆算: 候補を実チップで鳴らして照合中…':
+      'Solving: playing candidates on the real chip...',
+    '逆算完了: 最良の一致率 {c}%(候補{n}件)。選び直しは右の一覧から':
+      'Solved: best match {c}% ({n} candidates). Pick another from the list',
+    '逆算するには目標の波形が要ります(出力セルにドラッグで手描き、または倍音バーをドラッグ)':
+      'The solver needs a target wave (drag in the output cell to hand-draw, or drag the harmonic bars)',
+    '{i}: 一致{c}% DM{dm} DC{dc} ML{mlm}:{mlc} FB{fb} TL{tl}':
+      '{i}: match {c}% DM{dm} DC{dc} ML{mlm}:{mlc} FB{fb} TL{tl}',
+    'エンベロープが減衰型(EG-TYP消灯)のため定常波形が無く、一致率は目安です':
+      'The envelope is percussive (EG-TYP off), so there is no steady wave; the match figure is only a rough guide',
+    'ピーク: 左右にドラッグ=AR(立ち上がりの速さ) / 上下=TL(変調の深さ)':
+      'Peak: drag left/right = AR (attack speed) / up/down = TL (modulation depth)',
+    'ピーク: 左右にドラッグ=AR(立ち上がりの速さ)。高さはMMLの v<n> で決まるので動かせません':
+      'Peak: drag left/right = AR (attack speed). Its height comes from the MML v<n>, so it cannot be moved',
+    'ひざ: 左右にドラッグ=DR(減衰の速さ) / 上下=SL(持続レベル)':
+      'Knee: drag left/right = DR (decay speed) / up/down = SL (sustain level)',
+    'リリース終端: 左右にドラッグ=RR(離鍵後に消える速さ。EG-TYP消灯時は押鍵中に減衰する速さ)':
+      'Release end: drag left/right = RR (fade speed after key-off; with EG-TYP off, the decay speed while held)',
+    'TL 変調の深さ: 上下にドラッグ。上=0=いちばん深い(倍音が多く明るい) / 下=63=変調なし(サイン波)':
+      'TL modulation depth: drag up/down. Top = 0 = deepest (rich, bright) / bottom = 63 = none (pure sine)',
+    'FB 自己帰還: クリック/ドラッグで0-7。モジュレータが自分の出力で自分を変調する量。大きいほどノコギリ波に近づく':
+      'FB feedback: click/drag for 0-7. How much the modulator modulates itself with its own output. Higher = closer to a sawtooth',
+    'VIB ビブラート: クリックで反転。チップ内蔵のLFO(約6.4Hz)で音程を揺らす':
+      'VIB vibrato: click to toggle. Wobbles the pitch with the built-in LFO of the chip (about 6.4 Hz)',
+    'AM トレモロ: クリックで反転。チップ内蔵のLFO(約3.7Hz)で音量を揺らす':
+      'AM tremolo: click to toggle. Wobbles the level with the built-in LFO of the chip (about 3.7 Hz)',
+    'KSR 音階レート: クリックで反転。点灯=高い音ほどエンベロープが速くなる':
+      'KSR key scale rate: click to toggle. On = the envelope runs faster for higher notes',
+    'EG-TYP 持続音: クリックで反転。点灯=押している間SLの高さで鳴り続ける / 消灯=RRの速さで減衰する打楽器的な音':
+      'EG-TYP sustained: click to toggle. On = keeps sounding at SL while held / off = percussive, decays at the RR speed',
+    'DM 変調波の半波整流: クリックで反転。点灯=負側を0にした波形で変調する(倍音の付き方が変わる)':
+      'DM modulator half-wave: click to toggle. On = modulates with the negative half clamped to 0 (changes the harmonic character)',
+    'DC 搬送波の半波整流: クリックで反転。点灯=負側を0にした波形を出力する(偶数倍音が増える)':
+      'DC carrier half-wave: click to toggle. On = outputs the wave with the negative half clamped to 0 (adds even harmonics)',
+    '内蔵音色から…': 'From a built-in tone...',
+    'ラグランジュポイント': 'Lagrange Point',
+    'サンプル#{n}({songs})': 'Sample #{n} ({songs})',
+    '出力波形からデータを逆算': 'Solve the data from an output wave',
+    '目標の波形(出力波形に手描き/倍音バー)に近い音色パラメータを総当たりで探します': 'Brute-force search for tone parameters close to the target wave (hand-drawn on the output wave / harmonic bars)',
+    '倍音の振幅。緑=目標(ドラッグで変えられます) / 青=いまの音色。目標が無いときは出力波形に手描きするか、ここをドラッグすると今の音色を出発点にした目標ができます':
+      'Harmonic amplitudes. Green = target (drag to change) / blue = current tone. With no target yet, hand-draw on the output wave or drag here to start a target from the current tone',
+    '出力波形(1周期)。ドラッグで目標を手描きできます。緑=目標 / 青=いまの音色': 'Output wave (1 cycle). Drag to hand-draw a target. Green = target / blue = current tone',
     '閉じる': 'Close',
 
     // ---- MMLウィンドウ ----
@@ -63,6 +178,114 @@
     '▶ 再生': '▶ Play',
     '一時停止': 'Pause',
     '再生': 'Play',
+
+    // ---- メトロノーム (index.html / src/ui/metronomePanel.js) ----
+    'メトロノーム': 'Metronome',
+    'メトロノームを鳴らす': 'Start the metronome',
+    'メトロノームを止める': 'Stop the metronome',
+    'メトロノームの設定': 'Metronome settings',
+    'テンポ': 'Tempo',
+    'MMLに追従': 'Follow MML',
+    '({bpm} BPM)': '({bpm} BPM)',
+    '(未検出 → 手動値)': '(not found -> manual)',
+    '手動': 'Manual',
+    '拍子': 'Meter',
+    '1小節の拍数': 'Beats per bar',
+    '刻み': 'Subdivision',
+    '4分音符': 'Quarter notes',
+    '8分音符': 'Eighth notes',
+    '3連8分音符': 'Eighth triplets',
+    '16分音符': 'Sixteenth notes',
+    'カウントイン': 'Count-in',
+    '1小節': '1 bar',
+    '{n}小節': '{n} bars',
+    'クリック音量': 'Click volume',
+    '入力オフセット': 'Input offset',
+    '較正…': 'Calibrate...',
+    '録音時に入力の時刻からこの値を引きます。クリックより遅れて叩く癖があればプラスになります。':
+      'This value is subtracted from input timestamps when recording. It is positive if you tend to play behind the click.',
+    'ここを叩く': 'Tap here',
+    'やめる': 'Cancel',
+    'クリック音に合わせて、下のパッドを{n}回叩いてください(スペースキーでも可)。':
+      'Tap the pad below {n} times in time with the click (the space bar works too).',
+    'カウントイン… {n}': 'Count-in... {n}',
+    'うまく測れませんでした。もう一度お試しください。': 'Could not get a reliable measurement. Please try again.',
+    '入力オフセットを {ms} ms に設定しました。': 'Input offset set to {ms} ms.',
+    'ばらつき ±{jitter} ms / {used}回を採用({rejected}回を除外)':
+      'Spread +/-{jitter} ms - {used} taps used, {rejected} discarded',
+
+    // ---- 演奏入力 (index.html / src/ui/performInput.js) ----
+    '演奏入力': 'Play input',
+    '演奏入力の設定': 'Play input settings',
+    '演奏入力: PC鍵盤と画面ピアノで音を出す': 'Play input: use the computer keys and the on-screen piano',
+    '演奏入力を終える (Esc)': 'Leave play input (Esc)',
+    '鳴らす音源': 'Instrument',
+    '波形/音色': 'Wave / patch',
+    '演奏': 'Performance',
+    'オクターブ': 'Octave',
+    '同時発音数': 'Voices',
+    '強さ': 'Velocity',
+    'PC鍵盤': 'Computer keys',
+
+    // ---- MIDI入力 (src/input/midiInput.js / src/ui/performInput.js) ----
+    'MIDI機器': 'MIDI devices',
+    'チャンネル': 'Channel',
+    'MIDI入力を使う': 'Use MIDI input',
+    'このブラウザはWeb MIDIに対応していません。': 'This browser does not support the Web MIDI API.',
+    'MIDIの使用が許可されませんでした。': 'Permission to use MIDI was not granted.',
+    'MIDIを開けませんでした: {msg}': 'Could not open MIDI: {msg}',
+    'チェックを入れると接続します(初回は許可を聞かれます)。':
+      'Tick to connect (the browser asks for permission the first time).',
+    '接続済み。MIDI機器は見つかりません(挿すとここに出ます)。':
+      'Connected. No MIDI devices found - plug one in and it appears here.',
+    '↑↓でオクターブ移動。画面のピアノをクリックしても鳴ります。Escで演奏入力を終えます。':
+      'Up/Down shifts the octave. Clicking the on-screen piano plays too. Esc leaves play input.',
+
+    // ---- 演奏の録音 (index.html / src/ui/recordPanel.js) ----
+    'ループ再生': 'Loop playback',
+    '再生範囲をくり返す': 'Repeat the playback range',
+    '再生範囲のくり返しをやめる': 'Stop repeating the playback range',
+    '演奏を録音': 'Record performance',
+    '演奏を録音してMMLにする': 'Record a performance and turn it into MML',
+    '録音を止める': 'Stop recording',
+    '録音結果': 'Recorded take',
+    '格子': 'Grid',
+    '3連16分音符': 'Sixteenth triplets',
+    '32分音符': 'Thirty-second notes',
+    '吸着の強さ': 'Snap strength',
+    '音の長さ': 'Note length',
+    '和音': 'Chords',
+    'アルペジオにする (EN)': 'Arpeggiate (EN)',
+    'チャンネルに分ける': 'Split across channels',
+    '★{letters}には既に音符があるので、並列ではなく続きとして鳴ります。':
+      ' NOTE: {letters} already has notes, so this plays after them instead of alongside.',
+    '{n}声': '{n} voices',
+    '{letters} の{n}チャンネルに分けて、MMLの末尾へ足します。':
+      'Splits across {n} channels ({letters}) and appends them at the end of the MML.',
+    'いちばん上の音だけ': 'Top note only',
+    '・和音{n}個': ' - {n} chords',
+    '先頭の @EN 定義行はMMLのいちばん上へ入ります(定義は曲全体で共有されるため)。':
+      'The @EN definition lines go at the very top of the MML (definitions are shared by the whole song).',
+    '隙間を詰める': 'Fill the gaps',
+    'そのまま': 'As played',
+    '挿入先': 'Insert into',
+    'カーソル位置': 'At the cursor',
+    '末尾に新しい行': 'A new line at the end',
+    'カーソル位置に差し込みます。以降の既定音価は変えません(全ての音符に音価を書きます)。ただしオクターブ(o<n>)は後ろの音符にも効き続けます。':
+      'Inserted at the cursor. The default note length is left alone (every note carries an explicit length), but the octave (o<n>) still applies to the notes after it.',
+    'MMLの末尾に「{letter} …」の行を足します。{letter}には既に音符があるので、その続きとして鳴ります。':
+      'Adds a "{letter} ..." line at the end. {letter} already has notes, so this plays after them.',
+    '未使用の{letter}へ新しいパートとして書き出します。': 'Writes a new part on the unused channel {letter}.',
+    '未使用の{letter}へ書き出します。先頭の休符で位置が合うので、曲に重なって鳴ります。':
+      'Writes to the unused channel {letter}. A leading rest lines it up, so it plays together with the song.',
+    '{letter}(使用中)': '{letter} (in use)',
+    '(重ね録りの位置合わせは失われます)': ' (the overdub alignment is lost)',
+    '{bpm} BPM / {beats}拍子 / {bars}小節 / {notes}音': '{bpm} BPM - {beats}/4 - {bars} bars - {notes} notes',
+    '(短すぎる{n}音は除外)': ' ({n} too-short notes dropped)',
+    'もう一度録る': 'Record again',
+    '挿入': 'Insert',
+    'MML本文のテンポ({mml} BPM)と録音時のテンポ({rec} BPM)が違います。挿入した音符はMML側のテンポで鳴ります。':
+      'The MML tempo ({mml} BPM) differs from the tempo you recorded at ({rec} BPM). The inserted notes will play at the MML tempo.',
 
     // ---- DPCMコンバータ ----
     'DMCレート': 'DMC rate',
@@ -202,6 +425,7 @@
       'VRC7 has only one custom tone slot (@0): around {sec}s, {chA} (OP{a}) and {chB} (OP{b}) use different custom tones at the same time',
     '元の音色': 'Original patch',
     '@0 自作音色(4op→2op自動変換)': '@0 custom patch (auto 4op→2op)',
+    '@0 自作音色(4op→2op自動変換、同時1音色まで)': '@0 custom patch (auto 4op→2op; one at a time)',
     'DPCM変換': 'DPCM',
     'F: FDS 波形': 'F: FDS wave',
     '素(BRR)': 'Raw (BRR)',
@@ -287,6 +511,13 @@
     'チャンネル割当': 'Channel mapping',
     // ---- チャンネル割当(鍵盤表示の行から借用先を決める。src/convert/channelPlan.js) ----
     '借用先': 'Target',
+    '割当先の音で聴く': 'Hear as assigned',
+    'クリックで曲を選ぶ': 'Click to choose a track',
+    '曲 {n}': 'Track {n}',
+    'MML再生中はチャンネル割当と「割当先の音で聴く」は使えません(サウンドファイルの再生時だけ意味があります)': 'Channel assignment and "Hear as assigned" are unavailable while on the MML side (they only apply to sound-file playback)',
+    'ノイズ周期: 音程から自動': 'Noise period: auto from pitch',
+    '周期 {n}': 'Period {n}',
+    '割当先の音で聴く(元chをミュートし、借用先のNSF音源で鳴らす。スキップは無音、DPCMは元のまま)': 'Hear as assigned (mutes the source channels and plays them through the target NSF chips; skipped rows are silent, DPCM rows stay original)',
     '全チャンネルをミュート': 'Mute all channels',
     '全チャンネルのミュートを解除': 'Unmute all channels',
     '全チャンネルの音量を100%に戻す': 'Reset all channel volumes to 100%',
@@ -301,6 +532,7 @@
     'VRC6 ノコギリ': 'VRC6 saw',
     '元の波形をコピー': 'Copy source wave',
     '@0 自作音色(元の音から変換)': '@0 custom tone (converted from the source)',
+    '@0 自作音色(元の音から変換、同時1音色まで)': '@0 custom tone (converted from the source; one at a time)',
     // YM2610 ADPCM 手動ピッチ補正(keyboard.js / main.js onAdpcmCalibrate)
     'クリックでこのサンプルの基準音を手動補正': 'Click to calibrate this sample\'s base pitch manually',
     'クリックでこのチャンネルに注目(他chを減光)。もう一度クリックで解除': 'Click to spotlight this channel in the piano roll (others dimmed). Click again to clear',
@@ -322,11 +554,6 @@
     '自動(推定)': 'Auto (estimated)',
     'BPM(40〜400)。空欄なら音符の長さから自動推定します': 'BPM (40-400). Leave empty to estimate from note lengths',
     'コンバート開始': 'Start conversion',
-    '高音質優先(寄与するサンプルの最高レート)': 'Favor quality (highest rate among contributors)',
-    '容量優先(最低レートに合わせる)': 'Favor size (match the lowest rate)',
-    '同時に鳴っている打点はミックスして1サンプルに焼くため、レートを１つしか選べません。そのときの決め方(サンプルごとの指定は「ドラム(DPCM)」パネル)': 'Simultaneous hits are mixed into one sample, so only one rate can be used. This picks how (per-sample rates live in the Drums (DPCM) panel)',
-    'PCM品質(将来削除予定)': 'PCM quality (to be removed)',
-    'PCM→DPCM変換のレート(現在はHESのDDA抽出のみ)。サンプルごとの指定へ移行中のため、この設定は将来なくなります': 'PCM to DPCM rate (currently only HES DDA extraction). Being replaced by per-sample rates, so this setting will go away',
     'サンプル': 'Sample',
     '打点': 'Hits',
     '差し替え': 'Replace',
@@ -463,8 +690,8 @@
     'チャンネル指定が認識できません: "{text}"': 'Unrecognized channel specification: "{text}"',
     '@N{instrument} の波形長{len}サンプルはN163内蔵RAMの空き容量(最大{max}サンプル)を超えています':
       '@N{instrument} is {len} samples long, which exceeds the N163 internal RAM (max {max} samples)',
-    'フレーム{frame}: @N{instrument}(ch{channel})をN163内蔵RAMに配置できません({bytes}byte必要・空き不足。同時使用中の波形の合計が波形用の64バイト=128サンプルを超えています)':
-      'Frame {frame}: cannot place @N{instrument} (ch{channel}) in N163 internal RAM ({bytes} bytes needed, not enough free; the waves in use at once exceed the 64 bytes = 128 samples available for waves)',
+    'フレーム{frame}: @N{instrument}(ch{channel})をN163内蔵RAMに配置できません({bytes}byte必要・空き不足。同時使用中の波形の合計が、{numCh}ch使用時に波形へ使える{max}バイト={maxLen}サンプルを超えています)':
+      'Frame {frame}: cannot place @N{instrument} (ch{channel}) in N163 internal RAM ({bytes} bytes needed, not enough free; the waves in use at once exceed the {max} bytes = {maxLen} samples available for waves with {numCh} channels enabled)',
     'KSSヘッダは最低16バイト必要です': 'A KSS header needs at least 16 bytes',
     'SCC/SCC+ (Konami、使用時のみ)': 'SCC/SCC+ (Konami, only when used)',
     'MSX-AUDIO (Y8950, 未対応)': 'MSX-AUDIO (Y8950, unsupported)',
@@ -554,14 +781,11 @@
     '音符直後の1/32未満の休符(ゲートタイムの隙間)を音符に繋げる': 'Merge rests shorter than 1/32 right after a note (gate-time gaps) into the note',
     '16分音符格子へ丸める': 'Snap to 16th-note grid',
     '音符/休符の境界を16分音符の格子に揃える(3連符は崩れる)': 'Align note/rest boundaries to a 16th-note grid (triplets are lost)',
-    'PCM品質': 'PCM quality',
-    '最高(33kHz固定・データ大)': 'Highest (fixed 33 kHz, larger data)',
-    '8倍(ソースレートの8倍以上)': '8x (lowest rate ≥ 8x the source rate)',
-    '4倍': '4x',
-    '2倍': '2x',
-    '等倍(従来・データ最小)': '1x (legacy, smallest data)',
-    'PCM→DPCM変換のレート(HESのDDA等)。高いほどアタックが鈍らずノイズも減るが.dmcデータが大きくなる': 'DMC rate for PCM→DPCM conversion (e.g. HES DDA). Higher keeps attacks sharper and reduces carrier noise, but .dmc files grow',
     'ピッチ精度(SA)': 'Pitch precision (SA)',
+    '収まるように縮める(あふれたぶんだけ半分に)': 'Shrink to fit (only the waves that overflow, halved)',
+    '元の長さのまま(その曲は再生できない)': 'Keep the original length (that song will not play)',
+    'N163が波形に使えるRAMは 128-8×使用ch数 バイトだけ(8ch使用なら64バイト=128サンプル)。同時に鳴る波形が入り切らない曲で、はみ出したぶんの波形長を落とすかどうか。落とさないとコンパイルエラーで再生・書き出しができません':
+      'N163 has only 128-8×(channels in use) bytes of RAM for waves (64 bytes = 128 samples with 8 channels). Whether to shorten the overflowing waves when the waves sounding at once do not fit. Without shrinking, the song fails to compile and can be neither played nor exported',
     '高(音符ごと最適)': 'High (per-note optimal)',
     '中(オクターブ連動・推奨)': 'Medium (octave-linked, recommended)',
     '低(SA不使用・従来)': 'Low (no SA, legacy)',

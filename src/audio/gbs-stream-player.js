@@ -390,7 +390,8 @@
           continue;
         }
         this._songFramePos = nextSongFramePos;
-        if (f !== this.currentFrame) this._applyFrame(f);
+        const pv = this.preview && this.preview.enabled ? this.preview : null; // 割当プレビュー(src/audio/assign-preview.js)
+        if (f !== this.currentFrame) { this._applyFrame(f); if (pv) pv.onFrame(f); }
 
         this.cycleAccum += this.clockHz / sr;
         while (this.cycleAccum >= 1) {
@@ -402,7 +403,7 @@
         const yR = raw.right - this.dcPrevXR + 0.999 * this.dcPrevYR;
         this.dcPrevXL = raw.left;  this.dcPrevYL = yL;
         this.dcPrevXR = raw.right; this.dcPrevYR = yR;
-        outL[i] = yL; outR[i] = yR;
+        if (pv) { const s = pv.render(); outL[i] = yL + s; outR[i] = yR + s; } else { outL[i] = yL; outR[i] = yR; }
         this.samplePos++;
         if (this._silenceScanFrame >= 0 && !this._silenceFired && f >= this._silenceScanFrame) {
           // ★ミュート中は通知しない(main.js syncSilenceDetect)

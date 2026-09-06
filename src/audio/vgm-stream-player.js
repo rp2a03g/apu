@@ -91,6 +91,12 @@
           this.frameBuffer = this.player.renderFrame(sr, false, true);
           this.frameOffset = 0;
           this.currentFrame++;
+          // 割当プレビュー(src/audio/assign-preview.js): このフレームの元ch状態でNSF側チップを鳴らし、フレーム全体へ足す
+          if (this.preview && this.preview.enabled) {
+            const pv = this.preview, fb = this.frameBuffer;
+            pv.onFrame(this.currentFrame);
+            for (let i = 0; i < fb.left.length; i++) { const s = pv.render(); fb.left[i] += s; fb.right[i] += s; }
+          }
         }
         const fb = this.frameBuffer;
         const toCopy = Math.min(fb.left.length - this.frameOffset, outL.length - outPos);

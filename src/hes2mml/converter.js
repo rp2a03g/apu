@@ -115,6 +115,13 @@
       for (const ev of ch.events) if (ev.note !== null) ev.rawLength = 32;
     }
 
+    // N163内蔵RAM(波形に使えるのは128-8*有効ch数バイト)に収まらない曲を収まる形へ
+    // (変換設定 N163_WAVE。src/convert/n163Fit.js)。★音程補正より前に呼ぶこと:
+    // N163の周波数式は波形長を含むため、縮めた後の長さで生レジスタ値を出さないとズレる。
+    // ユーザー割当経路(customPlan)は借用層 borrow.compose 側で同じ処理を通す
+    const n163FitNotes = options.channelMap ? []
+      : MML.Convert.N163Fit.apply(waveResult.channels, n163WaveReg, cmd);
+
     // ユーザーがチャンネル割当(鍵盤表示、案E)を既定から変えたときは、以下の音程補正/EN/EPは
     // 借用先ファミリごとに共通借用層(src/convert/borrow.js)側で行う(借用先が変われば
     // 生周期の換算式が変わるため、ここでN163前提の補正を掛けてはいけない)。
@@ -217,6 +224,7 @@
       `;    ・読込済みになるため、変換直後の再生・NSF書き出しでそのまま鳴らせます`,
       `;    (借用先の割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
       ...borrowNotes.map(n => `; ※ ${n}`),
+      ...n163FitNotes.map(n => `; ※ ${n}`),
       `; =========================================================`,
       ``
     ].join('\n');

@@ -632,6 +632,10 @@
     return { refNote, deltas };
   }
 
+  // ★和音→アルペジオ(src/input/quantize.js)でも同じ符号化を使うので公開する。
+  //   EN<n>の中身の作り方が2箇所に分かれると、片方だけ直して食い違う
+  MML.Convert.buildNoteEnvelopeDeltas = buildNoteEnvelopeDeltas;
+
   // mergeAlternatingVibratoと同じ「隣接イベント列→統合後イベント列」形式。
   // 統合したイベントには ev.noteEnvOffsets(累積差分配列)を付与する(登録・EN<n>への
   // 割当ては呼び出し元のassignNoteEnvelopeが曲全体で共有するNoteEnvelopeRegistry経由で

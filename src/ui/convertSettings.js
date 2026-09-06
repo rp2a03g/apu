@@ -46,15 +46,8 @@
     ]],
   ];
 
-  // PCM品質(HES DDA→@DPCMのDMCレート選択、src/convert/options.js PCM_RATE参照)。
-  // select値はlocalStorage往復で文字列になるためnormalizeCmd側で数値へ戻す。
-  const PCM_RATE_OPTIONS = () => [
-    ['max', T('最高(33kHz固定・データ大)')],
-    ['8',   T('8倍(ソースレートの8倍以上)')],
-    ['4',   T('4倍')],
-    ['2',   T('2倍')],
-    ['1',   T('等倍(従来・データ最小)')],
-  ];
+  // ★DPCM(打楽器)の設定(DMC_RATE/RATE_MIX/DRUM_POLY)はこのダイアログには無い(2026-09-05)。
+  //   ドラム(DPCM)パネル最下段(src/ui/drumPanel.js)から set() で同じ cmd に書き込まれる。
 
   // ピッチ精度(N163出力のSA<num>自動選択、src/convert/pitch.js n163SaForBase参照)
   const PITCH_SA_OPTIONS = () => [
@@ -62,20 +55,16 @@
     ['octave', T('中(オクターブ連動・推奨)')],
     ['off',    T('低(SA不使用・従来)')],
   ];
-  // 同時発音をミックスして1サンプルに焼くときのDMCレートの決め方(src/convert/options.js RATE_MIX)
-  const RATE_MIX_OPTIONS = () => [
-    ['quality', T('高音質優先(寄与するサンプルの最高レート)')],
-    ['size', T('容量優先(最低レートに合わせる)')],
-  ];
-  // 打楽器の同時発音(src/convert/options.js DRUM_POLY)
-  const DRUM_POLY_OPTIONS = () => [
-    ['mix', T('ミックス(重なった打点をその瞬間の音で焼く・忠実)')],
-    ['mono', T('単音(直近の打点だけ・定義がサンプル数までで済む)')],
+  // N163内蔵RAMに波形が収まらないときの扱い(src/convert/options.js N163_WAVE)
+  const N163_WAVE_OPTIONS = () => [
+    ['fit', T('収まるように縮める(あふれたぶんだけ半分に)')],
+    ['keep', T('元の長さのまま(その曲は再生できない)')],
   ];
   const PRESET_LABELS = () => ({ faithful: T('忠実再現'), plain: T('プレーン譜面') });
 
   let current = null; // 正規化済み cmd
   let modalEl = null;
+  const listeners = []; // set() で外から変えられたときの通知先(ダイアログ外のUIが同じ cmd を持つため)
 
   function load() {
     try {
@@ -91,6 +80,15 @@
     if (!current) load();
     return Object.assign({}, current);
   }
+  // ダイアログの外(ドラム(DPCM)パネルのDMCレート等)から一部のキーを書き換える。
+  // 保存・ボタン表示の更新・購読者への通知まで行う
+  function set(patch) {
+    if (!current) load();
+    current = MML.Convert.normalizeCmd(Object.assign({}, current, patch || {}));
+    save(); refreshButtons();
+    for (const fn of listeners) { try { fn(get()); } catch (e) { console.error(e); } }
+  }
+  function onChange(fn) { if (typeof fn === 'function') listeners.push(fn); }
 
   // 各「to MML」ボタンのラベルに現在のプリセット名を添える(設定が既定以外だと一目で分かるように)
   function refreshButtons() {
@@ -166,7 +164,10 @@
       b.className = 'es-preset';
       b.textContent = label;
       b.addEventListener('click', () => {
-        current = MML.Convert.normalizeCmd(MML.Convert.CMD_PRESETS[name]);
+        // DPCMキー(ドラム(DPCM)パネル側の設定)はプリセットに含まれないので今の値を残す
+        const keep = {};
+        for (const k of (MML.Convert.DPCM_KEYS || [])) keep[k] = current[k];
+        current = MML.Convert.normalizeCmd(Object.assign({}, keep, MML.Convert.CMD_PRESETS[name]));
         save(); syncChecks(); refreshButtons();
       });
       presetButtons[name] = b;
@@ -203,7 +204,7 @@
       const tapBtn = document.createElement('button');
       tapBtn.type = 'button';
       tapBtn.className = 'es-preset cs-tap';
-      tapBtn.textContent = T('タップ');
+      tapBtn.textContent = T('タップ') + ' 👆'; // パネル側の「👆 タップ」と同じ絵文字(ユーザー指定)
       const tapOut = document.createElement('span');
       tapOut.className = 'cs-desc';
 
@@ -272,77 +273,6 @@
       body.appendChild(sec);
     }
 
-    // PCM品質(select 1つの独立セクション)
-    const pcmSec = document.createElement('div');
-    pcmSec.className = 'es-section';
-    const pcmH = document.createElement('h3');
-    // ★PCM品質(PCM_RATE)は将来削除する。サンプルPCMでは「ソースレートのn倍」方式が効かず
-    //   (再生レートがDMC最高以上のことが多い)、ドラム(DPCM)パネルのサンプルごとの
-    //   レート指定へ一本化していく。今はHESのDDA抽出だけがこの設定を見ている。
-    pcmH.textContent = T('PCM品質(将来削除予定)');
-    pcmSec.appendChild(pcmH);
-    const pcmRow = document.createElement('label');
-    pcmRow.className = 'cs-row';
-    const pcmSel = document.createElement('select');
-    for (const [val, label] of PCM_RATE_OPTIONS()) {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      pcmSel.appendChild(o);
-    }
-    pcmSel.addEventListener('change', () => {
-      current = MML.Convert.normalizeCmd(Object.assign({}, current, { PCM_RATE: pcmSel.value }));
-      save(); syncChecks(); refreshButtons();
-    });
-    const pcmDesc = document.createElement('span');
-    pcmDesc.className = 'cs-desc';
-    pcmDesc.textContent = T('PCM→DPCM変換のレート(現在はHESのDDA抽出のみ)。サンプルごとの指定へ移行中のため、この設定は将来なくなります');
-    pcmRow.appendChild(pcmSel); pcmRow.appendChild(pcmDesc);
-    pcmSec.appendChild(pcmRow);
-    body.appendChild(pcmSec);
-
-    // 打楽器(DPCM)のミックス時レート
-    const rmSec = document.createElement('div');
-    rmSec.className = 'es-section';
-    const rmH = document.createElement('h3');
-    rmH.textContent = T('打楽器(DPCM)');
-    rmSec.appendChild(rmH);
-    const rmRow = document.createElement('label');
-    rmRow.className = 'cs-row';
-    const rmSel = document.createElement('select');
-    for (const [val, label] of RATE_MIX_OPTIONS()) {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      rmSel.appendChild(o);
-    }
-    rmSel.addEventListener('change', () => {
-      current = MML.Convert.normalizeCmd(Object.assign({}, current, { RATE_MIX: rmSel.value }));
-      save(); syncChecks(); refreshButtons();
-    });
-    const rmDesc = document.createElement('span');
-    rmDesc.className = 'cs-desc';
-    rmDesc.textContent = T('同時に鳴っている打点はミックスして1サンプルに焼くため、レートを1つしか選べません。そのときの決め方(サンプルごとの指定は「ドラム(DPCM)」パネル)');
-    rmRow.appendChild(rmSel); rmRow.appendChild(rmDesc);
-    rmSec.appendChild(rmRow);
-    // 同時発音の扱い(ミックス/単音)。全形式のドラム(DPCM)経路に効く
-    const dpRow = document.createElement('label');
-    dpRow.className = 'cs-row';
-    const dpSel = document.createElement('select');
-    for (const [val, label] of DRUM_POLY_OPTIONS()) {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      dpSel.appendChild(o);
-    }
-    dpSel.addEventListener('change', () => {
-      current = MML.Convert.normalizeCmd(Object.assign({}, current, { DRUM_POLY: dpSel.value }));
-      save(); syncChecks(); refreshButtons();
-    });
-    const dpDesc = document.createElement('span');
-    dpDesc.className = 'cs-desc';
-    dpDesc.textContent = T('打点が重なる曲はミックスだと組合せぶん定義が増えます(実測: 2chのDDAで54定義36KB→単音7定義)。ROMを抑えたいときは単音に。');
-    dpRow.appendChild(dpSel); dpRow.appendChild(dpDesc);
-    rmSec.appendChild(dpRow);
-    body.appendChild(rmSec);
-
     // ピッチ精度(SA)
     const saSec = document.createElement('div');
     saSec.className = 'es-section';
@@ -366,14 +296,31 @@
     saDesc.textContent = T('N163出力のSA<n>(D/EP/MPの倍率)の選び方。深いビブラートをテーブルのbyte幅を超えて表現する');
     saRow.appendChild(saSel); saRow.appendChild(saDesc);
     saSec.appendChild(saRow);
+
+    // N163波形(内蔵RAMに収まらないときの扱い)。SCC/PCエンジン/PCM系をN163へ載せる曲に効く
+    const nwRow = document.createElement('label');
+    nwRow.className = 'cs-row';
+    const nwSel = document.createElement('select');
+    for (const [val, label] of N163_WAVE_OPTIONS()) {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      nwSel.appendChild(o);
+    }
+    nwSel.addEventListener('change', () => {
+      current = MML.Convert.normalizeCmd(Object.assign({}, current, { N163_WAVE: nwSel.value }));
+      save(); syncChecks(); refreshButtons();
+    });
+    const nwDesc = document.createElement('span');
+    nwDesc.className = 'cs-desc';
+    nwDesc.textContent = T('N163が波形に使えるRAMは 128-8×使用ch数 バイトだけ(8ch使用なら64バイト=128サンプル)。同時に鳴る波形が入り切らない曲で、はみ出したぶんの波形長を落とすかどうか。落とさないとコンパイルエラーで再生・書き出しができません');
+    nwRow.appendChild(nwSel); nwRow.appendChild(nwDesc);
+    saSec.appendChild(nwRow);
     body.appendChild(saSec);
 
     function syncChecks() {
       for (const [k, cb] of Object.entries(checks)) cb.checked = !!current[k];
-      pcmSel.value = String(current.PCM_RATE != null ? current.PCM_RATE : 'max');
       saSel.value = current.PITCH_SA || 'octave';
-      rmSel.value = current.RATE_MIX || 'quality';
-      dpSel.value = current.DRUM_POLY || 'mix';
+      nwSel.value = current.N163_WAVE || 'fit';
       const name = MML.Convert.cmdPresetName(current);
       for (const [n, b] of Object.entries(presetButtons)) b.classList.toggle('es-preset--active', n === name);
       customTag.style.display = name === 'custom' ? '' : 'none';
@@ -394,5 +341,5 @@
     refreshButtons();
   }
 
-  MML.UI.ConvertSettings = { init, get, open: openModal };
+  MML.UI.ConvertSettings = { init, get, set, onChange, open: openModal };
 })(window);

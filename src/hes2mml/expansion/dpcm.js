@@ -61,35 +61,12 @@
   // 内のガード参照)。実測のドラム/ボイスは200〜2700サンプルなので十分に安全な下限
   const MIN_ADDR_SEG_SAMPLES = 32;
 
-  // 実測レート(Hz)に対数距離で最も近いDMCレートインデックス(0-15)を選ぶ
-  function bestDmcRateIndex(rateHz) {
-    const table = MML.Dpcm.DMC_RATE_TABLE_NTSC;
-    let best = 0, bestDiff = Infinity;
-    for (let i = 0; i < table.length; i++) {
-      const diff = Math.abs(Math.log2(rateHz / table[i]));
-      if (diff < bestDiff) { bestDiff = diff; best = i; }
-    }
-    return best;
-  }
-
-  // PCM品質設定(cmd.PCM_RATE、src/convert/options.js冒頭コメント参照)に従って
-  // DMCレートを選ぶ。1bitデルタ変調は1bitあたり±2/127しか動けないため、ソースの
-  // バイトレートと同程度のDMCレート(旧来の「最も近いレート」)では
+  // DMCレートの選択は src/convert/drumHits.js(全形式共通)側。パッドのサンプル単位指定が
+  // 「自動」なら cmd.DMC_RATE(ドラム(DPCM)パネル最下段)。1bitデルタ変調は1bitあたり
+  // ±2/127しか動けないため、ソースのバイトレートと同程度のDMCレートでは
   //   (a) 5bitの1LSB遷移にすら2bit必要でアタックが盛大になまる(スロープ過負荷)
   //   (b) 平坦部の+2/-2交互トグルがレート/2の可聴キーン音になる(実測4.4kHz運用で約2.2kHz)
-  // の両方を踏む。倍率を上げるほど追従が効きアイドルトーンも高域へ逃げるが、
-  // データ量はレートに比例して増える(ユーザー判断でサイズと品質を選ぶ)。
-  //   'max' … 常に最高レート33.1kHz(既定)
-  //   8/4/2 … ソースレートのn倍以上となる最小レート(テーブル上限で頭打ち)
-  //   1     … 従来互換(最も近いレート、データ最小)
-  function dmcRateIndexFor(rateHz, pcmRate) {
-    const table = MML.Dpcm.DMC_RATE_TABLE_NTSC;
-    if (pcmRate === 'max' || pcmRate == null) return table.length - 1;
-    const mult = typeof pcmRate === 'number' ? pcmRate : parseInt(pcmRate, 10) || 4;
-    if (mult <= 1) return bestDmcRateIndex(rateHz);
-    for (let i = 0; i < table.length; i++) if (table[i] >= rateHz * mult) return i;
-    return table.length - 1;
-  }
+  // の両方を踏むので、既定は最高レート33.1kHz。
 
   // controlTrace(書込み順の{frame,on,dda}イベント列)から、on&&ddaが連続している
   // 区間列を作る。書込み順に状態遷移を追うため、1フレーム内で複数回on/offが
@@ -466,7 +443,7 @@
     if (!hits.length || !MML.Convert.DrumHits) return empty;
     const r = MML.Convert.DrumHits.dpcm(hits, frameRate, {
       totalFrames: snapshots.length,
-      pcmRate: cmd && cmd.PCM_RATE != null ? cmd.PCM_RATE : 'max',
+      dmcRate: cmd && cmd.DMC_RATE,
       rateMix: cmd && cmd.RATE_MIX,
       poly: cmd && cmd.DRUM_POLY,
       prefix: 'hes_dpcm',

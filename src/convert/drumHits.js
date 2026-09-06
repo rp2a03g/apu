@@ -27,8 +27,9 @@
  *   ・定義爆発への備え: クリップの同一性キーは「(サンプル, 量子化した位相, 量子化した音量,
  *     再生レート)の集合 + 量子化した長さ」。繰り返しの多いドラムパターンが同じ定義に畳まれる
  *   ・打点1つの中では音量を変えない(サンプル自身の減衰を拾うと192分音符だらけになる)
- *   ・DMCレートはサンプル単位設定(パッド)が優先、無ければ PCM_RATE。ミックス区間で複数の
- *     指定が衝突したら RATE_MIX('quality'=高い方 / 'size'=低い方)
+ *   ・DMCレートはサンプル単位設定(パッド)が優先、「自動」なら DMC_RATE(ドラム(DPCM)パネル
+ *     最下段、src/convert/options.js)。ミックス区間で複数の指定が衝突したら
+ *     RATE_MIX('quality'=高い方 / 'size'=低い方)
  */
 (function (global) {
   'use strict';
@@ -61,23 +62,6 @@
     if (hit.exactEnd) return true;
     const elapsed = (f - hit.startFrame) / frameRate;
     return elapsed * hit.rate < hit.pcm.length;
-  }
-
-  // HESと同じ選び方(src/convert/options.js PCM_RATE)。'max'=常に最高レート、
-  // 数値=ソースレートのn倍以上の最小レート、1=最も近いレート(データ最小)
-  function dmcRateIndexFor(rateHz, pcmRate, table) {
-    if (pcmRate === 'max' || pcmRate == null) return table.length - 1;
-    const mult = typeof pcmRate === 'number' ? pcmRate : parseInt(pcmRate, 10) || 4;
-    if (mult <= 1) {
-      let best = 0, bestD = Infinity;
-      for (let i = 0; i < table.length; i++) {
-        const d = Math.abs(table[i] - rateHz);
-        if (d < bestD) { bestD = d; best = i; }
-      }
-      return best;
-    }
-    for (let i = 0; i < table.length; i++) if (table[i] >= rateHz * mult) return i;
-    return table.length - 1;
   }
 
   /** 'c140:294064' / 'rom:294064:294500' → '47CF0'(パッドの既定ラベルと同じ、開始位置の16進) */
@@ -139,17 +123,19 @@
    * 打点リスト → @DPCM 定義/ファイル/イベント
    * @param {Array} hits  上記の打点
    * @param {number} frameRate
-   * @param {object} opt { totalFrames, pcmRate, rateMix, rateIndex(強制), prefix(既定ファイル名の頭) }
+   * @param {object} opt { totalFrames, dmcRate(「自動」のサンプルに使うDMCレートindex、既定15),
+   *                       rateMix, poly, rateIndex(強制), prefix(既定ファイル名の頭) }
    */
   function dpcm(hits, frameRate, opt) {
     opt = opt || {};
     const totalFrames = opt.totalFrames || 0;
-    const pcmRate = opt.pcmRate != null ? opt.pcmRate : 'max';
+    const table = MML.Dpcm.DMC_RATE_TABLE_NTSC;
+    // パッドで「自動」のままのサンプルに使うレート(cmd.DMC_RATE)。範囲外・未指定は最高レート
+    const autoRate = (opt.dmcRate >= 0 && opt.dmcRate < table.length) ? (opt.dmcRate | 0) : table.length - 1;
     const maxClipSec = opt.maxClipSec > 0 ? opt.maxClipSec : MAX_CLIP_SEC;
     // 重複排除キーの音量量子化。HESのDDAは$0804の音量が打点ごとに27〜31/31程度で揺れる
     // (1dB未満)ので、細かく刻むと同じ太鼓が定義を増やす。形式側が段数を指定できる
     const volQuant = opt.volQuant > 0 ? opt.volQuant : VOL_QUANT;
-    const table = MML.Dpcm.DMC_RATE_TABLE_NTSC;
     const empty = { defs: [], files: [], events: [], stats: { clips: 0, bytes: 0, segments: 0, dropped: 0 } };
     if (!hits || !hits.length || !totalFrames || !frameRate) return empty;
 
@@ -196,7 +182,8 @@
       lenSec = Math.min(lenSec, maxClipSec);
       if (!(lenSec > 0)) continue;
 
-      const srcRateMax = Math.max(...live.map(h => h.rate));
+      // レートの優先順位: 形式側の強制 > パッドのサンプル単位指定(複数あれば RATE_MIX で高低を選ぶ)
+      //                  > 「自動」のサンプル向け既定(DMC_RATE)
       const preferHigh = opt.rateMix !== 'size';
       let chanRate = null;
       for (const h of live) {
@@ -206,7 +193,7 @@
       }
       const rateIndex = (opt.rateIndex != null && opt.rateIndex >= 0 && opt.rateIndex < table.length)
         ? opt.rateIndex
-        : (chanRate !== null ? chanRate : dmcRateIndexFor(srcRateMax, pcmRate, table));
+        : (chanRate !== null ? chanRate : autoRate);
       const dstRate = table[rateIndex];
 
       const parts = live.map(h => {
@@ -294,5 +281,5 @@
     };
   }
 
-  MML.Convert.DrumHits = { dpcm, obs, channel, dmcRateIndexFor, MAX_CLIP_SEC };
+  MML.Convert.DrumHits = { dpcm, obs, channel, MAX_CLIP_SEC };
 })(window);

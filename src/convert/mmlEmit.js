@@ -306,7 +306,12 @@
 
     // 曲(このチャンネル)で最も多い音価をl<n>としてチャンネル先頭で宣言し、以後
     // 一致する音符/休符は数値部分を省略する(renderEvents内のomitDefaultLen参照)。
-    flags.defaultLen = MML.Convert.detectDefaultLength(filled, fpb);
+    // ★opts.noDefaultLen: l<n> を宣言せず、全ての音符に音価を明示する。
+    //   既存MMLのカーソル位置へ断片を差し込む用途(src/ui/recordPanel.js)向け。
+    //   l<n> はそれ以降の既定音価を変えてしまうので、差し込んだ後ろに元からあった
+    //   音符の意味まで書き換わってしまう(INV-6: 既存MMLを黙って変えない)。
+    //   -1 はどの音価とも一致しないので omitDefaultLen が常に素通しになる。
+    flags.defaultLen = opts.noDefaultLen ? -1 : MML.Convert.detectDefaultLength(filled, fpb);
 
     let line = `${letter} ${tempoPrefix}`;
     let col  = line.length;
@@ -323,8 +328,10 @@
     }
 
     const state = newState();
-    appendToken(`l${flags.defaultLen}`);
-    state.hasEmitted = true;
+    if (!opts.noDefaultLen) {
+      appendToken(`l${flags.defaultLen}`);
+      state.hasEmitted = true;
+    }
     renderEvents(filled, fpb, flags, state, appendToken);
 
     lines.push(line.trimEnd());

@@ -4442,9 +4442,12 @@ SONG_LOOP_PTR_HI:
     // (実使用ch数)とNSF書き出しで$7F・周波数値・レジスタ配置が全て食い違っていた
     // (女神転生II 11曲目=4ch使用曲で発覚)。有効ch数より上のレター(音符無し)は実機上の
     // 実体が無い(レジスタ配置がRAM範囲外へはみ出す)ためドライバのチャンネル一覧から除外する
+    // 有効ch数は下のN163共有バッファ割り当て(波形に使えるバイト数=128-8*numCh)でも要るので
+    // ブロックの外へ出しておく
+    let numN163Ch = 8;
     if (expansions.includes('n163')) {
       const n163All = expansionLetterMap.n163 || [];
-      let numN163Ch = 0;
+      numN163Ch = 0;
       n163All.forEach((ch, index) => {
         if ((segmentsByChannel[ch] || []).some(s => s.freq != null)) numN163Ch = index + 1;
       });
@@ -4481,8 +4484,10 @@ SONG_LOOP_PTR_HI:
     // compiler.js側と同じくエラーとして書き出しを中断する。
     const n163RelocsByChannel = {};
     if (expansions.includes('n163')) {
+      // ★numN163Ch(=$7Fへ書く有効ch数)で波形に使えるバイト数が決まる(128-8*numCh)。
+      //   compiler.js側と同じ値を渡さないと、プレビューは通るのに書き出しだけ落ちる
       const allocResult = MML.N163Alloc.allocate(
-        Array.from(n163Letters), segmentsByChannel, envelopes.n, compileResult.totalFrames);
+        Array.from(n163Letters), segmentsByChannel, envelopes.n, compileResult.totalFrames, numN163Ch);
       if (allocResult.conflicts.length > 0) {
         return {
           nsfBytes: null,

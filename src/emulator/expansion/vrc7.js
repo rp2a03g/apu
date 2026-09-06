@@ -75,6 +75,10 @@
     };
   }
   const PATCH = VRC7_INST.map(dump2patch); // [16] {mod,car}
+  // 変換側(src/convert/vrc7Tone.js の「近いプリセット探し」)にも同じ表が要る。あちらは
+  // Workerバンドルにエミュレータを同梱できない都合で自前の写しを持っているので、
+  // tools/headless/check-all.js がこの export と突き合わせて食い違いを検出する。
+  Emu.VRC7_INST = VRC7_INST;
 
   // ---- テーブル ----
   function Min(a, b) { return a < b ? a : b; }

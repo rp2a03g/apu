@@ -495,7 +495,8 @@
         }
         if (!this._isFrameReady(f)) { outL[i] = 0; outR[i] = 0; continue; }
         this._songFramePos = nextSongFramePos;
-        if (f !== this.currentFrame) this._applyFrame(f);
+        const pv = this.preview && this.preview.enabled ? this.preview : null; // 割当プレビュー(src/audio/assign-preview.js)
+        if (f !== this.currentFrame) { this._applyFrame(f); if (pv) pv.onFrame(f); }
 
         // DDAchのdacを、このフレーム内の生トレース密度に応じてサンプル単位で更新する
         // (CPU駆動再生が実際に書き込んでいた生の値の並びを、記録済みの書込みタイミングの
@@ -522,7 +523,7 @@
         const yR = raw.right - this.dcPrevXR + 0.999 * this.dcPrevYR;
         this.dcPrevXL = raw.left;  this.dcPrevYL = yL;
         this.dcPrevXR = raw.right; this.dcPrevYR = yR;
-        outL[i] = yL; outR[i] = yR;
+        if (pv) { const s = pv.render(); outL[i] = yL + s; outR[i] = yR + s; } else { outL[i] = yL; outR[i] = yR; }
         this.samplePos++;
         if (this._silenceScanFrame >= 0 && !this._silenceFired && f >= this._silenceScanFrame) {
           // ★ミュート中は通知しない(main.js syncSilenceDetect)

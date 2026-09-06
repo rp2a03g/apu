@@ -710,7 +710,7 @@
     let synthDrumStats = null;
     if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
       const r = MML.Convert.DrumHits.dpcm(options.drumHits, FPS, {
-        totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'nsf_drum', maxClipSec: 10 });
+        totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'nsf_drum', maxClipSec: 10 });
       const base = dpcmDefs.length;
       for (const d of r.defs) {
         dpcmFiles.push({ name: d.file, bytes: r.files[d.index].bytes, fileKey: 'synth:' + d.file });
@@ -944,6 +944,13 @@
       expansions.sort((a, b) => MML.Mml.EXPANSION_PRIORITY.indexOf(a) - MML.Mml.EXPANSION_PRIORITY.indexOf(b));
     }
 
+    // VRC7自作音色(@0)の同時使用を1系統へ(src/convert/vrc7Tone.js)。元がVRC7なので実機は
+    // 必ず1系統に収まっているはずだが、ドライバが音符ごとに$00-$07を書き直す曲だと
+    // フレーム単位のスナップショットがchごとに別の瞬間の値を拾って衝突しうる。
+    // 放置するとMMLがコンパイルできず全パート無音になるので、ここでも通す
+    // (衝突が無ければ何もしないので既定のNSFでは出力不変)
+    const vrc7Notes = MML.Convert.Vrc7Tone.resolveForScore(scoreChannels, vrc7ToneReg);
+
     // @DPCM<n>定義行(実機ppmckcと同じ書式)。ヘッダー行として他の音色定義と同列に出す
     const dpcmDefLines = dpcmDefs.map(d =>
       `@DPCM${d.index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac}, ${d.mode} }`);
@@ -968,10 +975,10 @@
 
     // チャンネル割当をユーザーが変えたときだけ、実際の並びと適用できなかった指定を書き添える
     // (上のヘッダコメントは既定の並び前提の固定文なので、そこは触らず追記する)
-    const planComment = options.channelMap
+    const planComment = (options.channelMap
       ? [`; チャンネル割当: ユーザー指定 (${scoreChannels.map(c => c.letter).join('')})`,
-        ...planNotes.map(n => `; ※ ${n}`), ``].join('\n')
-      : '';
+        ...planNotes.map(n => `; ※ ${n}`), ``]
+      : []).concat(vrc7Notes.length ? [...vrc7Notes.map(n => `; ※ ${n}`), ``] : []).join('\n');
     const mml = [headerComment + planComment, scoreText].join('\n');
 
     // 変換結果の音程検証(src/convert/verify.js): 最終MMLを実コンパイルして

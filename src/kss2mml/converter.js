@@ -210,7 +210,7 @@
       borrowNotes = r.notes;
       if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
         const d = MML.Convert.DrumHits.dpcm(options.drumHits, frameRate, {
-          totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'kss_drum', maxClipSec: 10 });
+          totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'kss_drum', maxClipSec: 10 });
         if (d.defs.length) {
           for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
           dpcmFiles.push(...d.files);
@@ -345,6 +345,13 @@
     // ([[tempo-rounding-drift-future-issue]]参照)。
     const fpb = frameRate * 60 / Math.round(bpm);
 
+    // VRC7自作音色(@0)の同時使用を1系統へ(src/convert/vrc7Tone.js)。
+    // ★元がOPLLでも衝突しうる: ドライバが音符ごとに$00-$07を書き直す曲だと、フレーム単位の
+    //   スナップショットがchごとに別の瞬間の値を拾い、抽出結果としてch別の音色になる
+    //   (実測: Labyrinth 魔王の迷宮でG-Jが4種)。放置するとMMLがコンパイルできず全パート無音。
+    //   ユーザー割当経路(borrow.compose)は既に解決済みなので、そちらから来た場合は何もしない
+    const vrc7Notes = MML.Convert.Vrc7Tone.resolveForScore(scoreChannels, vrc7ToneReg);
+
     const headerComment = [
       `; =========================================================`,
       `; ${sourceLabel} → MML 変換 (MSX: PSG${hasScc ? ' + SCC' : ''}${hasOpll ? ' + FMPAC' : ''}${hasOpl ? ' + MSX-AUDIO' : ''})`,
@@ -364,6 +371,7 @@
       `;    (割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
       hasScc ? `;    SCCの波形はN163形式(4bit,32点)に変換した近似のため音色は完全一致しません。` : `;`,
       ...borrowNotes.map(n => `; ※ ${n}`),
+      ...vrc7Notes.map(n => `; ※ ${n}`),
       ...(drumNote ? [`; ※ ${drumNote}`] : []),
       `; =========================================================`,
       ``

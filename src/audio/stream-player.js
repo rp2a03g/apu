@@ -147,6 +147,8 @@
       this.dcPrevY        = 0;
       this.isPlaying      = false;
       this.onEnded        = null;
+      this._anchorCtxTime   = null; // 直近のバッファが鳴り始める contextTime
+      this._anchorSamplePos = 0;    // そのバッファ先頭の samplePos
       this._createNode();
     }
 
@@ -167,6 +169,13 @@
       this.node.onaudioprocess = (e) => {
         const out = e.outputBuffer.getChannelData(0);
         if (!this.tracks || !this.isPlaying) { out.fill(0); return; }
+        // ★曲の位置 ⇔ AudioContextの時刻 の対応表(songTimeAt/ctxTimeAt)。
+        //   e.playbackTime = このバッファの先頭が鳴る時刻(currentTimeと同じ時間軸)。
+        //   getPosition()はバッファを埋め終えた後の位置なので、そのまま
+        //   currentTimeと突き合わせると1バッファぶん(4096sample≒93ms)先走る。
+        //   メトロノームの同期と重ね録りの時刻合わせはこの対応表を使うこと。
+        this._anchorCtxTime = e.playbackTime;
+        this._anchorSamplePos = this.samplePos;
         this._fill(out);
       };
     }
@@ -243,7 +252,7 @@
     }
 
     play()  { this.isPlaying = true; }
-    pause() { this.isPlaying = false; }
+    pause() { this.isPlaying = false; this._anchorCtxTime = null; }
 
     stop() {
       this.isPlaying = false;
@@ -279,6 +288,7 @@
       this.samplePos     = samplePos;
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
+      this._anchorCtxTime = null;   // 次のバッファで取り直す
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
     }
@@ -323,6 +333,24 @@
     // 必要な箇所(MML再生ハイライト・CPU/サウンドレジスタモニタ)はこちらを使うこと。
     getCurrentFrame() {
       return Math.max(0, this.currentFrame);
+    }
+
+    /*
+     * 曲の位置(秒、getPosition()と同じ単位) ⇔ AudioContextの時刻 の相互変換。
+     * 1サンプル=1/sampleRate秒で等速に進むので、直近のバッファの対応点1つあれば
+     * 前後どちらへも外挿できる(傾きは常に1)。再生していなければ null。
+     *
+     * 用途: メトロノームを曲の拍へ合わせる / 重ね録りで打鍵の時刻を曲の位置へ写す。
+     * ★getPosition()とcurrentTimeを直接突き合わせてはいけない(1バッファぶんずれる)。
+     */
+    songTimeAt(ctxTime) {
+      if (!this.isPlaying || this._anchorCtxTime == null) return null;
+      return this._anchorSamplePos / this.audioCtx.sampleRate + (ctxTime - this._anchorCtxTime);
+    }
+
+    ctxTimeAt(songSec) {
+      if (!this.isPlaying || this._anchorCtxTime == null) return null;
+      return this._anchorCtxTime + (songSec - this._anchorSamplePos / this.audioCtx.sampleRate);
     }
 
     destroy() {
@@ -763,7 +791,8 @@
           continue;
         }
         this._songFramePos = nextSongFramePos;
-        if (f !== this.currentFrame) this._applyFrame(f);
+        const pv = this.preview && this.preview.enabled ? this.preview : null; // 割当プレビュー(src/audio/assign-preview.js)
+        if (f !== this.currentFrame) { this._applyFrame(f); if (pv) pv.onFrame(f); }
 
         this.cycleAccum += CPU_CLOCK_NTSC / sr;
         while (this.cycleAccum >= 1) {
@@ -775,7 +804,7 @@
         for (const name in this.bus.expansion) raw += this.bus.expansion[name].mixSample();
         const y = raw - this.dcPrevX + 0.999 * this.dcPrevY;
         this.dcPrevX = raw; this.dcPrevY = y;
-        out[i] = y;
+        out[i] = pv ? y + pv.render() : y;
         this.samplePos++;
         // 先読みスキャン(scanSilenceStep)が見つけておいた無音区間の開始フレームに
         // 実再生が到達したら通知する。実際に10秒待つ必要はない(既に先読みで

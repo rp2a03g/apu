@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 06:15:35
+ * Built by tools/build-capture-workers.ps1 at 2026-09-06 17:59:42
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-05 06:15:35';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-06 17:59:42';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -4456,6 +4456,10 @@
     if (halfWave && neg) return 0;
     return neg ? ~out : out;
   }
+
+  // 音色エディタの逆算(src/ui/vrc7ToneSolver.js)が定常状態の1周期を実機と同じ演算で
+  // 作るために使う。LOGSIN/EXPROM表そのものは外へ出さない(表を持ち出すと写しがずれる)
+  OPLLNuked.opOut = opOut;
 
   Emu.OPLLNuked = OPLLNuked;
 })(globalThis);
@@ -9684,6 +9688,42 @@
       this.seq = 0; // 再生開始通番(ロール/キャプチャ用)
       this.bytesIn = 0;       // データレジスタ受信総量
       this._lastBytesIn = 0;  // スナップショット間の流量差分用
+      // いま流し込まれているサンプル(DACストリームの開始アドレス=同定キー)。鍵盤表示の
+      // 波形アイコン用で、音の生成には使わない。setStreamSample() が vgmPlayer から呼ぶ
+      this.streamSample = null;     // { data: Uint8Array, start, len }
+      this._sampleCache = new Map(); // 'start:len' → { wave: Float32Array|null, hash, cps, conf }
+    }
+
+    /**
+     * DACストリームが流し始めたサンプルを教える(vgmPlayer.js _streamStart、chipType 0x17)。
+     * チップ自身はROMを持たない(CPUが1バイトずつ流す)ので、他のPCMチップの「ROM上の
+     * サンプル」に当たるものは「バンク上の開始アドレス〜バイト数」。鍵盤行の波形アイコンを
+     * YM2610 ADPCM等と同じ makeSampleWave(音程あり=1周期/無し=全体の概形)で出すために持つ。
+     */
+    setStreamSample(data, start, len) {
+      this.streamSample = (data && len > 0) ? { data, start, len } : null;
+    }
+    /** streamSample の表示用解析(キャッシュ)。復号は decodeOKIM6258Adpcm と同じ */
+    _sampleInfo() {
+      const s = this.streamSample;
+      if (!s) return null;
+      const key = s.start + ':' + s.len;
+      let r = this._sampleCache.get(key);
+      if (r) return r;
+      const U = Emu.SamplePitchUtil;
+      const MAX_BYTES = 32 * 1024; // 長いボイス(ADPCMの読み上げ等)は先頭だけ見る(解析コスト上限)
+      const len = Math.min(s.len, MAX_BYTES);
+      const pcm = Emu.decodeOKIM6258Adpcm(s.data, s.start, len);
+      r = { wave: null, hash: null, cps: 0, conf: 0 };
+      if (U && pcm.length >= 8) {
+        const auto = U.detectCps(pcm);
+        r.cps = auto.cps; r.conf = auto.conf;
+        r.hash = U.sampleHash(s.data, s.start, s.start + len);
+        r.wave = U.makeSampleWave(pcm, auto.conf >= 0.5 ? auto.cps : 0);
+      }
+      // キャッシュは同じ Float32Array を毎フレーム使い回す(キャプチャ保持メモリを増やさない)
+      this._sampleCache.set(key, r);
+      return r;
     }
 
     /** レジスタ書込み(VGM 0xB7 / DACストリームのデータ配送) */
@@ -9774,18 +9814,51 @@
   // (悪魔城ドラキュラ実測: 15秒間play1回・ストリーム断続)、playing単独だと点きっぱなしになる。
   // 流量はregsOnlyキャプチャ(clock()無し)でもストリームエンジンが配送するので正確。
   // vol はライブ時=現在振幅、キャプチャ時(振幅が出ない)=下限0.3を保証。
+  // waveData は流れているサンプル(DACストリーム)の128点波形(他のADPCM行と同じ makeSampleWave)。
+  // 同じサンプルなら同じ Float32Array を返す(キャプチャ側で毎フレーム複製しないため)。
   Emu.snapshotOKIM6258 = function (chip) {
     const amp = Math.min(1, Math.abs(chip.signal) / 2048);
     const flow = chip.bytesIn - chip._lastBytesIn;
     chip._lastBytesIn = chip.bytesIn;
     const active = chip.playing && (flow > 0 || amp > 0.005);
+    const info = chip._sampleInfo ? chip._sampleInfo() : null;
+    const ss = chip.streamSample;
     return [{
       active,
       vol: active ? Math.max(0.3, amp) : 0,
       rawVol: Math.round(amp * 255), rawVolMax: 255,
       panL: (chip.pan & 0x02) ? 0 : 15, panR: (chip.pan & 0x01) ? 0 : 15,
-      rate: chip.playRate(), seq: chip.seq
+      rate: chip.playRate(), seq: chip.seq,
+      waveData: info ? info.wave : null,
+      sample: ss ? { kind: 'oki', start: ss.start, end: ss.start + ss.len } : null,
+      sampleHash: info ? info.hash : null
     }];
+  };
+
+  /**
+   * ADPCMバイト列 → Float32(-1..1)(ドラムパッドの原音取り出し用。main.js vgmDacDrumFor)
+   * チップの再生開始(制御レジスタbit1)と同じ初期状態(signal=-2, step=0)から、
+   * 上位→下位ニブルの順に _sample() と同じ差分表で復号する。1バイト=2サンプル。
+   * @param {Uint8Array} bytes  データバンク
+   * @param {number} start      開始オフセット(DACストリームの開始アドレス=サンプル同定キー)
+   * @param {number} len        バイト数
+   */
+  Emu.decodeOKIM6258Adpcm = function (bytes, start, len) {
+    const n = Math.max(0, Math.min(len | 0, bytes.length - start));
+    const out = new Float32Array(n * 2);
+    let signal = -2, step = 0;
+    for (let i = 0; i < n; i++) {
+      const b = bytes[start + i];
+      for (let k = 0; k < 2; k++) {
+        const nib = k === 0 ? (b >> 4) & 15 : b & 15;
+        signal += DIFF[step * 16 + nib];
+        if (signal > 2047) signal = 2047; else if (signal < -2048) signal = -2048;
+        step += INDEX_SHIFT[nib & 7];
+        if (step > 48) step = 48; else if (step < 0) step = 0;
+        out[i * 2 + k] = signal / 2048;
+      }
+    }
+    return out;
   };
 
   Emu.OKIM6258Audio = OKIM6258Audio;
@@ -12155,6 +12228,12 @@
           this._dacCur.bytes = Math.max(0, Math.floor((s.end - s.start) / Math.max(1, s.stepSize)));
           this._dacCur.rate = s.freq;
           this._dacCur.stepSize = s.stepSize;
+          // OKIM6258はROMを持たないので、鍵盤行の波形アイコン用に「いま流しているサンプル」を
+          // チップへ教える(expansion/okim6258.js setStreamSample)。音の生成には関与しない
+          if (chip === 'okim6258') {
+            const a = this.adapterById[s.second ? 'okim6258_2' : 'okim6258'];
+            if (a && a.chip && a.chip.setStreamSample) a.chip.setStreamSample(bank.data, s.start, this._dacCur.bytes);
+          }
         }
       }
     }
@@ -13440,6 +13519,11 @@
       '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
       '<path d="M3 6h5M3 14h5"/><path d="M12 6h5M12 14h5"/><path d="M8 6c2.5 0 1.5 8 4 8"/><path d="M8 14c2.5 0 1.5-8 4-8"/></svg></button>';
   }
+  // 見出しの「借用先」列に置く「割当先の音で聴く」トグル(src/audio/assign-preview.js)。
+  // ONで元chをミュートし、借用先のNSF音源で鳴らし直す(変換後の音色を再生中に確かめる)。
+  function headerPreviewBtnHtml() {
+    return `<button type="button" class="kbd-preview-btn" aria-label="${T('割当先の音で聴く')}">\u{1F3A7}</button>`;
+  }
   // 見出しの mute 列に置く一括ミュートボタン。全chミュートでなければ全ミュート、
   // 全ミュート済みなら全解除(トグル)。
   function headerMuteAllBtnHtml() {
@@ -14368,11 +14452,14 @@
     if (chips.includes('okim6258')) {
       // OKIM6258(VGM: X68000 ADPCM): 1chストリーミングADPCM。ROMも音程レジスタも無いので
       // YMDA/PWMと同じ「サンプル」行(音量=現在振幅、キャプチャ時は再生中の下限0.3)。
+      // 波形アイコンはDACストリームで流れているサンプルの128点(okim6258.js snapshot の waveData、
+      // NA行等と同じ makeSampleWave: 音程あり=1周期/無し=全体の概形)。無ければ従来の破線
       const live = extraSnaps && extraSnaps.okim6258Live;
       const s = live ? live() : (extraSnaps && extraSnaps.okim6258 ? extraSnaps.okim6258[frameIdx] : null);
-      const c = s ? s[0] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0 };
+      const c = s ? s[0] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, waveData: null };
+      const okiWave = (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
       channels.push({ id: 'OKI', color: '#ff9944', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
-        wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
+        wave: okiWave, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
         panL: c.panL, panR: c.panR });
     }
 
@@ -14650,6 +14737,9 @@
   }
 
   // ── 鍵盤描画 ────────────────────────────────────────────────
+
+  // 演奏入力で押している鍵の色(チャンネル色と衝突しにくい彩度の高い青緑)
+  const PERFORM_KEY_COLOR = '#22d3ee';
 
   function keyX(midi, wkW) {
     if (midi < MIDI_MIN || midi > MIDI_MAX) return null;
@@ -15196,7 +15286,9 @@
   // (小数可)から表示する(チャンネルごとのレーン用。ロール側と同じ窓を使う)
   // drums: {lanes:[{label,color}], laneOf:Map(drumKey→レーン番号)} ドラム区画のパッド。
   // 省略/空なら区画なし(音程軸の座標は従来と完全に一致する)。
-  function drawPiano(canvas, channels, orientation, visibleWhite, offsetWhite, drums) {
+  // performNotes: 演奏入力(src/ui/performInput.js)で今押されている音のMIDIノート番号。
+  // 再生中のチャンネルとは別の色(アクセント色)で点灯させ、自分が弾いた音を区別できるようにする
+  function drawPiano(canvas, channels, orientation, visibleWhite, offsetWhite, drums, performNotes) {
     const vertical = orientation !== 'horizontal';
     // 内部解像度は表示サイズ(CSS px、border除く)に合わせる。表示サイズは_cachedWidth/_cachedHeight
     // (ResizeObserverでキャッシュ)を優先し、毎フレームoffsetWidth/clientHeightを読んで
@@ -15218,6 +15310,10 @@
     const bkW = Math.max(3, wkW * 0.60); // 黒鍵の太さ
     const bkH = Math.round(keyLen * 0.62); // 黒鍵の長さ
     const ctx = canvas.getContext('2d');
+    // ★クリック位置→ノート番号の逆写像(_noteAtPoint)のために、この描画で使った幾何を
+    //   canvasへ焼き付けておく。向き・レーンごとの音程窓・ドラム区画の有無で値が変わるため、
+    //   逆写像側で計算し直すと必ずどこかの組み合わせでずれる
+    canvas._pianoGeom = { vertical, wkW, bkW, bkH, pitchOff, pitchLen, keyLen, W, H };
 
     const keyColors = {};
     const laneColors = {}; // ドラム区画: レーン番号 → 今そこを鳴らしているchの色
@@ -15238,6 +15334,8 @@
         : (ch.freq ? freqToMidi(ch.freq) : null);
       if (midi !== null && !keyColors[midi]) keyColors[midi] = ch.color;
     }
+    // 自分が弾いている音は再生中の音より手前(上書き)で光らせる
+    for (const m of (performNotes || [])) keyColors[m] = PERFORM_KEY_COLOR;
 
     ctx.clearRect(0, 0, W, H);
 
@@ -15390,6 +15488,10 @@
       this._rollLastRawPos = null; // 直前に_renderRollへ渡された実時間(壁時計)位置
       this._rollBaseWallMs = null; // _rollSongTimeBase確定時点のperformance.now()(補間の起点)
       this.onMuteChange = null;
+      // 割当プレビュー(「割当先の音で聴く」)。セッション内だけの状態(再読込で必ずOFF=元の音)
+      this._previewMode = false;
+      this.onPreviewChange = null;      // () => void  ON/OFF・割当・ミュートが変わったとき(main.js syncAssignPreview)
+      this.spcLiveRows = null;          // () => rows[] SPC再生中のボイス状態(main.js spcPreviewRows)。getLiveChannels()が使う
       this._poolModes = {};             // チャンネルプール式チップの表示モード(chipToken → 'logical'|'phys')
       this.onPoolModeChange = null;     // (chipToken, mode) => void  ヘッダのモード切替
       this.onSpcMuteChange = null; // (voiceIndex:number, muted:bool) => void
@@ -15636,7 +15738,7 @@
         headerAssignBtnHtml() +
         headerMuteAllBtnHtml() +
         `<span class="kbd-h-name">ch</span>` +
-        `<span class="kbd-h-assign">${T('借用先')}</span>` +
+        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}</span>` +
         `<span class="kbds-h-lr kbds-h-l">L</span>` +
         `<span class="kbds-h-lr">R</span>` +
         headerVolResetBtnHtml() +
@@ -15676,7 +15778,7 @@
         headerAssignBtnHtml() +
         headerMuteAllBtnHtml() +
         `<span class="kbd-h-name">ch</span>` +
-        `<span class="kbd-h-assign">${T('借用先')}</span>` +
+        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}</span>` +
         `<span class="kbds-h-lr kbds-h-l">L</span>` +
         `<span class="kbds-h-lr">R</span>` +
         headerVolResetBtnHtml() +
@@ -15699,6 +15801,11 @@
       for (const b of this._assignBtns) {
         b.addEventListener('click', (e) => { e.stopPropagation(); this._setAssignMode(!this._assignMode); });
       }
+      this._previewBtns = Array.prototype.slice.call(left.querySelectorAll('.kbd-preview-btn'));
+      for (const b of this._previewBtns) {
+        b.addEventListener('click', (e) => { e.stopPropagation(); this._setPreviewMode(!this._previewMode); });
+      }
+      this._renderPreviewToggle();
       this._muteAllBtns = Array.prototype.slice.call(left.querySelectorAll('.kbd-muteall-btn'));
       for (const b of this._muteAllBtns) {
         b.addEventListener('click', (e) => { e.stopPropagation(); this._toggleAllMute(); });
@@ -16224,17 +16331,27 @@
       }
     }
 
+    // 鍵盤だけ描き直す。停止中(rAFが回っていない)に演奏入力で押した鍵を点灯させるために、
+    // src/ui/performInput.js が押鍵のたびに呼ぶ。ロールは触らないので安い
+    refreshPianos() {
+      this._drawPianos(this._lastChannels || []);
+    }
+
     // 鍵盤描画: 全チャンネルまとめ(1枚)か、レーンごと(そのchだけ)か
     _drawPianos(allChannels) {
+      const PI = MML.UI && MML.UI.PerformInput;
+      const performNotes = (PI && PI.isArmed()) ? PI.heldNotes() : null;
       if (this._layout.rollLanes === 'perChannel' && this._lanes.length) {
         for (const l of this._lanes) {
           // 音程窓はロール側と共通(_updateLaneRanges が決めたそのchの音域)
-          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, l.visWhite || 0, l.offWhite || 0, this._drumsForPiano());
+          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, l.visWhite || 0, l.offWhite || 0, this._drumsForPiano(), performNotes);
           if (this._drumLanes && this._drumLanes.length) this._attachDrumAudition(l.pianoCanvas);
+          this._attachPerformInput(l.pianoCanvas);
         }
         return;
       }
-      drawPiano(this._canvas, allChannels, this._layout.rollOrientation, 0, 0, this._drumsForPiano());
+      drawPiano(this._canvas, allChannels, this._layout.rollOrientation, 0, 0, this._drumsForPiano(), performNotes);
+      this._attachPerformInput(this._canvas);
       // ドラム区画があるときだけパッド試聴を有効にする(区画=パッドが無ければ押す物が無い)
       const hasDrums = !!(this._drumLanes && this._drumLanes.length);
       if (hasDrums) this._attachDrumAudition(this._canvas);
@@ -17067,6 +17184,87 @@
       return (lane >= 0 && lane < lanes.length) ? lane : -1;
     }
 
+    // 鍵盤canvasのクリック位置 → MIDIノート番号(鍵の上でなければ null)。
+    // 幾何は直前の drawPiano が canvas._pianoGeom へ焼き付けたものを使う。
+    // 黒鍵は白鍵の手前(ロール側)に乗っているので先に判定する。
+    _noteAtPoint(canvas, clientX, clientY) {
+      const g = canvas._pianoGeom;
+      if (!g) return null;
+      const r = canvas.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      // canvasの内部解像度は表示サイズに合わせてあるが、途中で変わる瞬間に備えて比率補正する
+      const cx = (clientX - r.left) * (g.W / r.width);
+      const cy = (clientY - r.top) * (g.H / r.height);
+      // p: 音程軸(低音→高音)、q: 鍵の長さ方向(0=ロール側の端)
+      const p = g.vertical ? cx : (g.H - cy);
+      const q = g.vertical ? cy : (g.keyLen - cx);
+      if (q < 0 || q > g.keyLen || p < 0 || p > g.pitchLen) return null;
+      if (q <= g.bkH) {
+        for (let midi = MIDI_MIN; midi <= MIDI_MAX; midi++) {
+          const rel = midi - MIDI_MIN;
+          if (!IS_BLACK[rel % 12]) continue;
+          const pos = keyX(midi, g.wkW);
+          if (!pos) continue;
+          const x = pos.x + g.pitchOff;
+          if (p >= x - g.bkW / 2 && p <= x + g.bkW / 2) return midi;
+        }
+      }
+      for (let midi = MIDI_MIN; midi <= MIDI_MAX; midi++) {
+        const rel = midi - MIDI_MIN;
+        if (IS_BLACK[rel % 12]) continue;
+        const pos = keyX(midi, g.wkW);
+        if (!pos) continue;
+        const x = pos.x + g.pitchOff;
+        if (p >= x && p < x + g.wkW) return midi;
+      }
+      return null;
+    }
+
+    // 鍵盤canvasに演奏入力(押している間だけ鳴らす/ドラッグでグリッサンド)を取り付ける。
+    // 実際に効くのは演奏入力モード中だけ。ドラム区画の上では null が返るのでパッド試聴と衝突しない
+    _attachPerformInput(canvas) {
+      if (!canvas || canvas._performWired) return;
+      canvas._performWired = true;
+      const PI = () => (MML.UI && MML.UI.PerformInput);
+      let playing = null;   // 今このcanvasから鳴らしている音
+      const release = (e) => {
+        if (playing == null) return;
+        const pi = PI();
+        if (pi) pi.noteOff(playing, 'piano', e);
+        playing = null;
+      };
+      canvas.addEventListener('pointerdown', (e) => {
+        const pi = PI();
+        if (!pi || !pi.isArmed()) return;
+        const midi = this._noteAtPoint(canvas, e.clientX, e.clientY);
+        if (midi == null) return;
+        e.preventDefault();
+        try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        release(e);
+        playing = midi;
+        pi.noteOn(midi, 'piano', e);
+      });
+      canvas.addEventListener('pointermove', (e) => {
+        const pi = PI();
+        if (!pi) return;
+        if (playing == null) {
+          if (pi.isArmed()) {
+            canvas.style.cursor = (this._noteAtPoint(canvas, e.clientX, e.clientY) != null) ? 'pointer' : '';
+          }
+          return;
+        }
+        // 押したままなぞる = グリッサンド。同じ鍵の中では打ち直さない
+        const midi = this._noteAtPoint(canvas, e.clientX, e.clientY);
+        if (midi == null || midi === playing) return;
+        pi.noteOff(playing, 'piano', e);
+        playing = midi;
+        pi.noteOn(midi, 'piano', e);
+      });
+      canvas.addEventListener('pointerup', release);
+      canvas.addEventListener('pointercancel', release);
+      canvas.addEventListener('pointerleave', release);
+    }
+
     // 鍵盤canvasにパッド試聴のクリックを取り付ける(_buildRollPane / _rebuildLanes から)
     _attachDrumAudition(canvas) {
       if (!canvas || canvas._drumAuditionWired) return;
@@ -17320,7 +17518,7 @@
       targetSel.addEventListener('change', () => this._setAssignTarget(chId, targetSel.value));
       toneSel.addEventListener('change', () => {
         const cur = plan.get(chId) || {};
-        const kind = plan.toneKindFor(cur.target || this._defaultTargetOf(chId));
+        const kind = plan.toneKindFor(cur.target || this._defaultTargetOf(chId), undefined, plan.channelKind(chId));
         const def = kind ? plan.toneOptionsFor(kind, plan.channelKind(chId)).def : null;
         plan.set(chId, { tone: toneSel.value === def ? null : toneSel.value });
       });
@@ -17410,7 +17608,7 @@
       if (el.partEl) el.partEl.style.color = '';
 
       if (el.drumBtn) el.drumBtn.style.display = (target === 'dpcm') ? '' : 'none';
-      const toneKind = plan.toneKindFor(target);
+      const toneKind = plan.toneKindFor(target, undefined, srcKind);
       if (!toneKind) { el.toneSel.style.display = 'none'; el.toneSig = ''; return; }
       el.toneSel.style.display = '';
       const to = plan.toneOptionsFor(toneKind, srcKind);
@@ -17461,6 +17659,8 @@
         this._syncAssignSelects(el);
       }
       this._renderAssignToggle();
+      this._renderPreviewToggle();
+      this._notifyPreview();
     }
 
     // part列チップのクリックで開く1行ぶんの割当ポップオーバー(縦置き・多段・別窓など
@@ -17499,7 +17699,7 @@
       targetSel.addEventListener('change', () => { this._setAssignTarget(chId, targetSel.value); this._openAssignPopover(anchorEl, chId); });
       pop.appendChild(rowOf(T('借用先'), targetSel));
 
-      const toneKind = plan.toneKindFor(target);
+      const toneKind = plan.toneKindFor(target, undefined, srcKind);
       if (toneKind) {
         const to = plan.toneOptionsFor(toneKind, srcKind);
         const toneSel = document.createElement('select');
@@ -17527,6 +17727,14 @@
       }
       const foot = document.createElement('div');
       foot.className = 'kbd-assign-pop-foot';
+      const pvLabel = document.createElement('label');
+      pvLabel.className = 'kbd-assign-pop-preview';
+      pvLabel.title = T('割当先の音で聴く(元chをミュートし、借用先のNSF音源で鳴らす。スキップは無音、DPCMは元のまま)');
+      const pvChk = document.createElement('input');
+      pvChk.type = 'checkbox'; pvChk.checked = this._previewMode;
+      pvChk.addEventListener('change', () => this._setPreviewMode(pvChk.checked));
+      pvLabel.appendChild(pvChk); pvLabel.appendChild(document.createTextNode('\u{1F3A7} ' + T('割当先の音で聴く')));
+      foot.appendChild(pvLabel);
       const auto = document.createElement('button');
       auto.type = 'button';
       auto.textContent = T('自動に戻す');
@@ -17568,6 +17776,71 @@
           if (winEl.offsetWidth < need) winEl.style.width = need + 'px';
         }
       }
+    }
+
+    // ── 割当プレビュー(「割当先の音で聴く」、src/audio/assign-preview.js) ────────────
+    // ONの間、割当を持つ行は元chをミュートして借用先のNSF音源で鳴らす。スキップ行は無音、
+    // E(DPCM)行と割当対象外の行(リズム等)は元の音のまま。再生側の実体は main.js が持ち、
+    // ここは「何を・どの音色で」(getPreviewPlan)と「今の元chの状態」(getLiveChannels)を渡すだけ。
+    _setPreviewMode(on) {
+      this._previewMode = !!on;
+      this._renderPreviewToggle();
+      this._notifyPreview();
+    }
+    isPreviewMode() { return !!this._previewMode; }
+    _notifyPreview() { if (this.onPreviewChange) this.onPreviewChange(); }
+    _renderPreviewToggle() {
+      const plan = channelPlan();
+      if (!this._previewBtns) return;
+      const editable = !!plan && plan.editable();
+      for (const btn of this._previewBtns) {
+        btn.classList.toggle('kbd-preview-btn--on', !!this._previewMode);
+        btn.disabled = !editable;
+        btn.title = editable ? T('割当先の音で聴く(元chをミュートし、借用先のNSF音源で鳴らす。スキップは無音、DPCMは元のまま)') : (plan ? plan.lockReason() : '');
+      }
+    }
+    // 表示中の一覧の行ごとの割当(プレビュー用)。tone は選択が無ければ借用先ごとの既定値
+    getPreviewPlan() {
+      const plan = channelPlan();
+      if (!plan || !plan.editable()) return [];
+      const rows = (this._mode === 'spc' ? this._spcRowEls : this._rowEls).filter(el => !el.isAllRow && el.partEl && el.checkbox);
+      const out = [];
+      for (const el of rows) {
+        if (plan.isUnassignable && plan.isUnassignable(el.id)) continue;
+        const ent = plan.get(el.id) || {};
+        const target = ent.target || el.defaultTarget || 'skip';
+        const kind = plan.channelKind(el.id);
+        const toneKind = plan.toneKindFor(target, undefined, kind);
+        const tone = ent.tone !== undefined ? ent.tone : (toneKind ? plan.toneOptionsFor(toneKind, kind).def : null);
+        out.push({ id: el.id, target, tone, kind, muted: !el.checkbox.checked });
+      }
+      return out;
+    }
+    // プレビュー中に元chをミュートする行か(getMuteConfig/previewSpcMuteMaskが使う)
+    _previewMutesRow(el) {
+      if (!this._previewMode || el.isAllRow || !el.partEl) return false;
+      const plan = channelPlan();
+      if (!plan || !plan.editable()) return false;
+      if (plan.isUnassignable && plan.isUnassignable(el.id)) return false;
+      const target = (plan.get(el.id) || {}).target || el.defaultTarget || 'skip';
+      return target !== 'dpcm';
+    }
+    // SPC: プレビューで消す元ボイスのビットマスク(main.js effectiveSpcMute が spcMutedVoices とORする)
+    previewSpcMuteMask() {
+      let mask = 0;
+      this._spcRowEls.forEach((el, idx) => { if (this._previewMutesRow(el)) mask |= (1 << idx); });
+      return mask;
+    }
+    // 「今の元chの状態」を extractChannels() と同じ形で返す(再生側の onaudioprocess から毎フレーム呼ばれる)。
+    // ライブ追跡のフォーマット(regSnapshots=[liveSnap]+Live関数)ではフレーム番号に関わらず現在値、
+    // 全フレーム分のスナップショットがある場合はそのフレームの値。SPCはmain.jsのライブ関数へ委譲
+    getLiveChannels(frameIdx) {
+      if (this._mode === 'spc') return this.spcLiveRows ? this.spcLiveRows() : null;
+      if (!this._state) return null;
+      const snaps = this._state.regSnapshots || [];
+      const live = snaps.length <= 1;
+      const fi = live ? 0 : Math.max(0, Math.min(snaps.length - 1, frameIdx | 0));
+      return extractChannels(snaps[fi] || {}, this._extraSnaps, fi, this._chips);
     }
 
     _renderAssignToggle() {
@@ -17612,6 +17885,7 @@
         if (this.onMuteChange) this.onMuteChange(this.getMuteConfig());
       }
       this._renderMuteAllBtn();
+      this._notifyPreview();
     }
     // 見出しの vol 列のボタン: 全chの音量スライダーを100%へ戻す(行ごとのダブルクリックの
     // 全ch版)。ミュートと違いトグルではなく常にリセット。
@@ -17731,6 +18005,7 @@
           checkbox.addEventListener('change', () => {
             this._muteState.set(ch.id, !checkbox.checked);
             if (this.onMuteChange) this.onMuteChange(this.getMuteConfig());
+            this._notifyPreview();
             this._renderMuteAllBtn(); // 見出しの一括ミュートボタンの状態を追随させる
             // ミュートはロールの見え方(減光)にも効くので、停止中でもその場で描き直す
             this._redrawRollForSpotlight();
@@ -17964,12 +18239,14 @@
     // 現在のピアノロールのタイムライン(共通形状 [{id, color, notes:[{startSec,endSec,midi,vol,drumKey?}]}])
     getRollTimeline() { return this._rollTimeline || null; }
 
-    getMuteConfig() {
+    // opts.ignorePreview: 「割当先の音で聴く」中の元ch消し込みを含めない(WAV書き出しは常に元の音)
+    getMuteConfig(opts) {
       const config = { apu: {}, expansion: {} };
+      const withPreview = !(opts && opts.ignorePreview);
       for (const el of this._rowEls) {
         const mi = el.muteInfo;
         if (!mi) continue;
-        const muted = !el.checkbox.checked;
+        const muted = !el.checkbox.checked || (withPreview && this._previewMutesRow(el));
         if (mi.section === 'apu') {
           config.apu[mi.key] = muted;
         } else {
@@ -18562,6 +18839,7 @@
       checkbox.addEventListener('change', () => {
         if (this.onSpcMuteChange) this.onSpcMuteChange(idx, !checkbox.checked);
         this._renderMuteAllBtn(); // 見出しの一括ミュートボタンの状態を追随させる
+        this._notifyPreview();
       });
       this._attachSpcVolumeSlider(row, idx);
 
@@ -18913,13 +19191,26 @@
  *     src/convert/pitch.js n163SaForBase冒頭コメント参照)。既定'octave'(オクターブ連動、
  *     セント精度がオクターブ非依存でテーブル共有も効く)。'note'=音符ごと最高精度、
  *     'off'=SA不使用(従来互換、深い変調は割当失敗して落ちる)。
- *   PCM_RATE … PCM→DPCM変換の品質(DMCレートの選び方)。'max' | 8 | 4 | 2 | 1
- *     1bitデルタ変調は1bitあたり±2/127しか動けないため、ソースのバイトレートに対して
- *     何倍のDMCレートを使うかが追従能力(アタックのなまり)とアイドルトーン
- *     (平坦部で乗るレート/2のキーン音)を直接決める。倍率が上がるほど高音質・データ大。
- *     'max'=常に最高レート33.1kHz(既定) / 8,4,2=ソースレートのn倍以上の最小レート /
- *     1=従来互換(最も近いレート、データ最小)。現状の消費者はhes2mml/expansion/dpcm.js
- *     (HES DDA抽出)のみ。SPCのBRR→DPCMはDSPレート32kHz≒テーブル上限のため対象外。
+ *   N163_WAVE … N163内蔵RAM(波形に使えるのは 128-8*有効ch数 バイト)に波形が収まらないときの扱い。
+ *     'fit'(既定) … 収まるまで波形長を半分ずつ落とす(32→16→8→4サンプル)。★曲全体を一律に
+ *       落とすのではなく「あふれた瞬間に居る波形」を大きい順に、必要な数だけ縮める。縮めた
+ *       ぶんはヘッダコメントに明記する。8ch使う曲(1chあたり8バイト=16サンプルが上限)の
+ *       アーケード系VGMなど、実機のN163曲でも普通に行う詰め方。
+ *     'keep' … 元の波形長のまま出す。収まらない曲はコンパイルエラーで再生も書き出しも
+ *       できないが、本家ppmckへ持って行って手で詰め直したい場合はこちら。
+ *
+ * DPCM(打楽器)キー(2026-09-05、変換設定ダイアログからドラム(DPCM)パネル最下段へ移動):
+ *   DMC_RATE  … サンプルごとのDMCレート指定が「自動」のときに使うレート。DMCレート表
+ *     (MML.Dpcm.DMC_RATE_TABLE_NTSC)のindex 0..15、既定15(33.1kHz)。1bitデルタ変調は
+ *     1bitあたり±2/127しか動けないため、レートが追従能力(アタックのなまり)とアイドルトーン
+ *     (平坦部で乗るレート/2のキーン音)を直接決める。音質とデータ量はレートに比例する。
+ *     ★旧 PCM_RATE('max'|8|4|2|1=ソースレートの倍率方式)は廃止。サンプルPCMは再生レートが
+ *       DMC上限以上のことが多く倍率方式が効かなかった。旧キーは読み捨てる(数値が衝突するため
+ *       キー名を変えた)
+ *   RATE_MIX  … 同時に鳴った打点のDMCレート指定が食い違うとき、'quality'=高い方 / 'size'=低い方
+ *   DRUM_POLY … 打点が重なったとき 'mix'=その瞬間の音をミックスして1クリップ / 'mono'=直近1音
+ *   これらはプリセット(忠実再現/プレーン譜面)の一致判定に含めない(パネル側の独立した設定)。
+ *   全形式のドラム(DPCM)経路(src/convert/drumHits.js)が見る。
  */
 (function (global) {
   'use strict';
@@ -18928,12 +19219,13 @@
 
   const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
   const SHAPE_KEYS = ['SHAPE_REST', 'SHAPE_QUANT'];
-  // PCM品質(冒頭コメント参照)。boolean群とは別に許容値で正規化する
-  const PCM_RATE_VALUES = ['max', 8, 4, 2, 1];
   const PITCH_SA_VALUES = ['octave', 'note', 'off'];
+  // ── DPCM(打楽器)キー(冒頭コメント参照)。ドラム(DPCM)パネル最下段の設定 ──
+  // DMC_RATE: DMCレート表のindex(0=4.2kHz … 15=33.1kHz)。「自動」のサンプルに使う
+  const DMC_RATE_MAX = 15;
   // 同時発音をミックスして1サンプルに焼くときのDMCレートの決め方
-  //   'quality' … 寄与するサンプルのうち最高音質を採る(既定)
-  //   'size'    … 最低に合わせて容量を優先する
+  //   'quality' … 寄与するサンプルのうち高い方を採る(既定)
+  //   'size'    … 低い方に合わせて容量を優先する
   const RATE_MIX_VALUES = ['quality', 'size'];
   MML.Convert.RATE_MIX_VALUES = RATE_MIX_VALUES;
   // 打楽器の同時発音の扱い(src/convert/drumHits.js poly)
@@ -18942,44 +19234,53 @@
   //            増えないので容量制御に使う。実測: NCS91002 はミックス54定義36KB→単音7定義)
   const DRUM_POLY_VALUES = ['mix', 'mono'];
   MML.Convert.DRUM_POLY_VALUES = DRUM_POLY_VALUES;
+  const DPCM_KEYS = ['DMC_RATE', 'RATE_MIX', 'DRUM_POLY'];
+  const DPCM_DEFAULTS = { DMC_RATE: DMC_RATE_MAX, RATE_MIX: 'quality', DRUM_POLY: 'mix' };
+  MML.Convert.DPCM_KEYS = DPCM_KEYS;
+  MML.Convert.DPCM_DEFAULTS = DPCM_DEFAULTS;
+  // N163内蔵RAMに波形が収まらないときの扱い(冒頭コメント参照)
+  const N163_WAVE_VALUES = ['fit', 'keep'];
+  MML.Convert.N163_WAVE_VALUES = N163_WAVE_VALUES;
   MML.Convert.CMD_KEYS = CMD_KEYS;
   MML.Convert.SHAPE_KEYS = SHAPE_KEYS;
-  MML.Convert.PCM_RATE_VALUES = PCM_RATE_VALUES;
   MML.Convert.PITCH_SA_VALUES = PITCH_SA_VALUES;
 
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality', DRUM_POLY: 'mix' },
+                SHAPE_REST: false, SHAPE_QUANT: false, PITCH_SA: 'octave', N163_WAVE: 'fit' },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality', DRUM_POLY: 'mix' },
+                SHAPE_REST: true, SHAPE_QUANT: true, PITCH_SA: 'octave', N163_WAVE: 'fit' },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
 
-  // options.cmd(部分指定可)を全キー揃った正規形にする。省略キーは faithful 既定。
+  // options.cmd(部分指定可)を全キー揃った正規形にする。省略キーは faithful 既定
+  // (DPCMキーは DPCM_DEFAULTS)。
   MML.Convert.normalizeCmd = function (cmd) {
-    const out = Object.assign({}, PRESETS.faithful);
+    const out = Object.assign({}, DPCM_DEFAULTS, PRESETS.faithful);
     if (cmd && typeof cmd === 'object') {
       for (const k of [...CMD_KEYS, ...SHAPE_KEYS]) if (cmd[k] != null) out[k] = !!cmd[k];
-      // 数値は文字列でも受ける(localStorage/JSON経由やUIのselect値が'4'等になるため)
-      if (cmd.PCM_RATE != null) {
-        const v = cmd.PCM_RATE === 'max' ? 'max' : parseInt(cmd.PCM_RATE, 10);
-        if (PCM_RATE_VALUES.indexOf(v) >= 0) out.PCM_RATE = v;
+      // 数値は文字列でも受ける(localStorage/JSON経由やUIのselect値が'14'等になるため)
+      if (cmd.DMC_RATE != null) {
+        const v = parseInt(cmd.DMC_RATE, 10);
+        if (v >= 0 && v <= DMC_RATE_MAX) out.DMC_RATE = v;
       }
       if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
       if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
+      if (cmd.N163_WAVE != null && N163_WAVE_VALUES.indexOf(cmd.N163_WAVE) >= 0) out.N163_WAVE = cmd.N163_WAVE;
     }
     return out;
   };
 
-  // どれかがプリセットと完全一致すればその名前、無ければ 'custom'
+  // どれかがプリセットと完全一致すればその名前、無ければ 'custom'。
+  // DPCMキー(DPCM_KEYS)はドラム(DPCM)パネル側の設定なので一致判定に含めない
   MML.Convert.cmdPresetName = function (cmd) {
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
-      const p = PRESETS[name];
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA', 'RATE_MIX', 'DRUM_POLY'].every(k => p[k] === n[k])) return name;
+      const p = MML.Convert.normalizeCmd(PRESETS[name]);
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PITCH_SA', 'N163_WAVE'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };
@@ -19702,6 +20003,10 @@
     }
     return { refNote, deltas };
   }
+
+  // ★和音→アルペジオ(src/input/quantize.js)でも同じ符号化を使うので公開する。
+  //   EN<n>の中身の作り方が2箇所に分かれると、片方だけ直して食い違う
+  MML.Convert.buildNoteEnvelopeDeltas = buildNoteEnvelopeDeltas;
 
   // mergeAlternatingVibratoと同じ「隣接イベント列→統合後イベント列」形式。
   // 統合したイベントには ev.noteEnvOffsets(累積差分配列)を付与する(登録・EN<n>への
@@ -22077,35 +22382,12 @@
   // 内のガード参照)。実測のドラム/ボイスは200〜2700サンプルなので十分に安全な下限
   const MIN_ADDR_SEG_SAMPLES = 32;
 
-  // 実測レート(Hz)に対数距離で最も近いDMCレートインデックス(0-15)を選ぶ
-  function bestDmcRateIndex(rateHz) {
-    const table = MML.Dpcm.DMC_RATE_TABLE_NTSC;
-    let best = 0, bestDiff = Infinity;
-    for (let i = 0; i < table.length; i++) {
-      const diff = Math.abs(Math.log2(rateHz / table[i]));
-      if (diff < bestDiff) { bestDiff = diff; best = i; }
-    }
-    return best;
-  }
-
-  // PCM品質設定(cmd.PCM_RATE、src/convert/options.js冒頭コメント参照)に従って
-  // DMCレートを選ぶ。1bitデルタ変調は1bitあたり±2/127しか動けないため、ソースの
-  // バイトレートと同程度のDMCレート(旧来の「最も近いレート」)では
+  // DMCレートの選択は src/convert/drumHits.js(全形式共通)側。パッドのサンプル単位指定が
+  // 「自動」なら cmd.DMC_RATE(ドラム(DPCM)パネル最下段)。1bitデルタ変調は1bitあたり
+  // ±2/127しか動けないため、ソースのバイトレートと同程度のDMCレートでは
   //   (a) 5bitの1LSB遷移にすら2bit必要でアタックが盛大になまる(スロープ過負荷)
   //   (b) 平坦部の+2/-2交互トグルがレート/2の可聴キーン音になる(実測4.4kHz運用で約2.2kHz)
-  // の両方を踏む。倍率を上げるほど追従が効きアイドルトーンも高域へ逃げるが、
-  // データ量はレートに比例して増える(ユーザー判断でサイズと品質を選ぶ)。
-  //   'max' … 常に最高レート33.1kHz(既定)
-  //   8/4/2 … ソースレートのn倍以上となる最小レート(テーブル上限で頭打ち)
-  //   1     … 従来互換(最も近いレート、データ最小)
-  function dmcRateIndexFor(rateHz, pcmRate) {
-    const table = MML.Dpcm.DMC_RATE_TABLE_NTSC;
-    if (pcmRate === 'max' || pcmRate == null) return table.length - 1;
-    const mult = typeof pcmRate === 'number' ? pcmRate : parseInt(pcmRate, 10) || 4;
-    if (mult <= 1) return bestDmcRateIndex(rateHz);
-    for (let i = 0; i < table.length; i++) if (table[i] >= rateHz * mult) return i;
-    return table.length - 1;
-  }
+  // の両方を踏むので、既定は最高レート33.1kHz。
 
   // controlTrace(書込み順の{frame,on,dda}イベント列)から、on&&ddaが連続している
   // 区間列を作る。書込み順に状態遷移を追うため、1フレーム内で複数回on/offが
@@ -22482,7 +22764,7 @@
     if (!hits.length || !MML.Convert.DrumHits) return empty;
     const r = MML.Convert.DrumHits.dpcm(hits, frameRate, {
       totalFrames: snapshots.length,
-      pcmRate: cmd && cmd.PCM_RATE != null ? cmd.PCM_RATE : 'max',
+      dmcRate: cmd && cmd.DMC_RATE,
       rateMix: cmd && cmd.RATE_MIX,
       poly: cmd && cmd.DRUM_POLY,
       prefix: 'hes_dpcm',

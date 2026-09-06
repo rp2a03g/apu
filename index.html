@@ -61,6 +61,9 @@
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-n163wave" title="N163波形エディタ" aria-label="N163波形エディタ">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13h2.5V7h2.5v6h2.5V7h2.5v6h2.5V7H17"/></svg>
         </button>
+        <button class="icon-btn icon-btn-title toggle-btn" data-target="win-vrc7tone" title="VRC7音色エディタ" aria-label="VRC7音色エディタ">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 14.5c1-7 2.4-7 3.4 0"/><path d="M5.9 14.5c1-9.5 2.4-9.5 3.4 0"/><path d="M9.3 14.5c1-5 2.4-5 3.4 0"/><path d="M12.7 14.5c1-8 2.4-8 3.4 0"/><path d="M17.5 14.5H2"/></svg>
+        </button>
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-help" title="MMLコマンドヘルプ" aria-label="MMLコマンドヘルプ">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7.5"/><path d="M7.8 7.6a2.3 2.3 0 1 1 3.1 2.2c-.6.25-.9.8-.9 1.5"/><path d="M10 14.2h.01"/></svg>
         </button>
@@ -94,6 +97,25 @@
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v9"/><path d="M6.2 8.8 10 12.6l3.8-3.8"/><path d="M4 15.5h12"/></svg>
         </button>
         <span class="icon-toolbar-sep"></span>
+        <button class="icon-btn secondary metro-toggle" id="btnMetronome" title="メトロノームを鳴らす" aria-label="メトロノーム" aria-pressed="false">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 2.8h4.2l3.3 14.4H4.6z"/><path d="M10 15.6 13.4 5.2"/><path d="M6.2 11.6h7.6"/></svg>
+        </button>
+        <button class="icon-btn secondary" id="btnMetronomeSettings" title="メトロノームの設定" aria-label="メトロノームの設定">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.6v2.1M10 15.3v2.1M17.4 10h-2.1M4.7 10H2.6M15.1 4.9l-1.5 1.5M6.4 13.6l-1.5 1.5M15.1 15.1l-1.5-1.5M6.4 6.4 4.9 4.9"/></svg>
+        </button>
+        <button class="icon-btn secondary perform-toggle" id="btnPerformInput" title="演奏入力: PC鍵盤と画面ピアノで音を出す" aria-label="演奏入力" aria-pressed="false">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5.5" width="15" height="9" rx="1"/><path d="M7.5 5.5v9M12.5 5.5v9"/><path d="M6 5.5v4h3v-4M10.8 5.5v4h3v-4"/></svg>
+        </button>
+        <button class="icon-btn secondary" id="btnPerformInputSettings" title="演奏入力の設定" aria-label="演奏入力の設定">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.6v2.1M10 15.3v2.1M17.4 10h-2.1M4.7 10H2.6M15.1 4.9l-1.5 1.5M6.4 13.6l-1.5 1.5M15.1 15.1l-1.5-1.5M6.4 6.4 4.9 4.9"/></svg>
+        </button>
+        <button class="icon-btn secondary record-toggle" id="btnRecordPerformance" title="演奏を録音してMMLにする" aria-label="演奏を録音" aria-pressed="false">
+          <svg viewBox="0 0 20 20" fill="currentColor"><circle cx="10" cy="10" r="5.5"/></svg>
+        </button>
+        <span class="icon-toolbar-sep"></span>
+        <button class="icon-btn secondary loop-toggle" id="btnLoopRange" title="再生範囲をくり返す" aria-label="ループ再生" aria-pressed="false">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 6.5h9a3 3 0 0 1 0 6H5.5a3 3 0 0 1 0-6Z"/><path d="M7.6 4.6 5.4 6.5l2.2 1.9"/><path d="M12.4 10.6l2.2 1.9-2.2 1.9"/></svg>
+        </button>
         <button class="icon-btn secondary" id="btnRangeReset" title="開始点・終了点を曲の最初と最後にリセット" aria-label="再生範囲をリセット">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 10a5.5 5.5 0 1 1 1.6 3.9"/><path d="M4.5 13.6v-3.6h3.6"/></svg>
         </button>
@@ -497,6 +519,8 @@
   <script src="src/convert/envelope.js"></script>
   <script src="src/convert/pitch.js"></script>
   <script src="src/convert/waveRegistry.js"></script>
+  <script src="src/convert/vrc7Tone.js"></script>
+  <script src="src/convert/n163Fit.js"></script>
   <script src="src/convert/detune.js"></script>
   <script src="src/convert/retrigger.js"></script>
   <script src="src/convert/mmlEmit.js"></script>
@@ -619,6 +643,119 @@
     </div>
   </section>
 
+  <!-- VRC7(OPLL)2オペレータFM音色エディタ: @OP<n>/@OT<n> をFM音源の図解として編集する
+       (src/ui/vrc7ToneEditor.js。FDS/N163波形エディタと同じ書き込みタイミング規約) -->
+  <section class="float-window" id="win-vrc7tone"
+    data-default-left="290" data-default-top="110" data-default-width="900" data-default-height="620">
+    <div class="float-window-header">
+      <span>VRC7音色エディタ</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body compact-wave-editor vrc7-tone-editor">
+      <div class="toolbar">
+        <button id="vrc7ToneAdd" class="secondary" title="新規定義を追加">＋</button>
+        <select id="vrc7ToneIndex" title="インデックス"></select>
+        <select id="vrc7ToneFormat" title="MMLへ書き出す書式">
+          <option value="ot">@OT (読める書式)</option>
+          <option value="op">@OP (8バイト)</option>
+        </select>
+        <select id="vrc7TonePreset" title="内蔵音色を読み込む(反映を押すまでMMLへは書き込まれません)"></select>
+        <button id="vrc7ToneSave" class="secondary" title="ファイルとして保存">💾</button>
+        <button id="vrc7ToneLoad" class="secondary" title="ファイルから読み込み(反映を押すまでMMLへは書き込まれません)">📂</button>
+        <button id="vrc7ToneCopy" class="secondary" title="コピー">📋</button>
+        <button id="vrc7TonePaste" class="secondary" title="貼り付け(反映を押すまでMMLへは書き込まれません)">📥</button>
+        <button id="vrc7ToneApply" title="現在の内容をMMLへ反映">反映</button>
+        <button id="vrc7ToneHelp" class="secondary" title="説明を表示/非表示">❓</button>
+      </div>
+      <div id="vrc7ToneHelpText" class="fds-help-text" style="display:none;">
+        VRC7(OPLL)は2オペレータFM音源です。モジュレータがキャリアの位相を変調し、キャリアの出力が音になります。
+        変調が深いほど倍音が増えて明るい音になります。自作音色スロットは実機の制約でチップ全体に1つしかないため、
+        同時に鳴らせる自作音色は1種類だけです(音符側は@0で選び、OP&lt;n&gt;で中身を差し替えます)。
+        キャリアのTLはMMLのv&lt;n&gt;(音量)が担当するので音色側にはありません。
+      </div>
+      <div class="toolbar vrc7-audition">
+        <button id="vrc7TonePlay" title="サンプル再生">▶</button>
+        <button id="vrc7ToneStop" class="secondary" title="停止">■</button>
+        <label>音量 v<input type="text" id="vrc7ToneEnvelope" value="4" style="width:64px" title="v&lt;n&gt;(0が最大)。&quot;,&quot;や&quot;|&quot;を含めると@vテーブルとして解釈します" /></label>
+        <label>音程<select id="vrc7ToneNote" title="図の波形・エンベロープと試聴に使う音の高さ"></select></label>
+        <label style="flex:1;min-width:190px;align-items:flex-start;">フレーズ
+          <textarea id="vrc7ToneSampleMml" class="vrc7-sample-mml" spellcheck="false" rows="3"></textarea>
+        </label>
+      </div>
+      <!-- 左=構成図(モジュレータ/キャリア)+数値入力 / 右=「出力波形からデータを逆算」の列。
+           逆算・消去・候補一覧・倍音バーは出力波形の上に置く(ユーザー指定) -->
+      <div class="vrc7-main">
+        <div class="vrc7-left">
+          <canvas id="vrc7ToneDiagram" width="590" height="216"
+            title="FM音源の構成図。エンベロープの■をドラッグ、タグ(EG/KR/AM/VB/WF)をクリック、FBのバーをクリックで直接編集できます"></canvas>
+      <div class="vrc7-op-params">
+        <div class="vrc7-op-group" data-op="mod">
+          <div class="vrc7-op-head"><span class="vrc7-op-swatch vrc7-op-swatch--mod"></span>モジュレータ(変調波)</div>
+          <div class="vrc7-op-cols">
+            <div class="vrc7-op-col">
+              <label>ML 倍率<input type="number" id="vrc7ToneModML" min="0" max="15" step="1" /></label>
+              <label>TL 変調の深さ<input type="number" id="vrc7ToneModTL" min="0" max="63" step="1" /></label>
+              <label>AR 立ち上がり<input type="number" id="vrc7ToneModAR" min="0" max="15" step="1" /></label>
+              <label>DR 減衰<input type="number" id="vrc7ToneModDR" min="0" max="15" step="1" /></label>
+              <label>SL 持続レベル<input type="number" id="vrc7ToneModSL" min="0" max="15" step="1" /></label>
+              <label>RR リリース<input type="number" id="vrc7ToneModRR" min="0" max="15" step="1" /></label>
+            </div>
+            <div class="vrc7-op-col">
+              <label>KL 音階減衰<input type="number" id="vrc7ToneModKL" min="0" max="3" step="1" /></label>
+              <label>EG 持続音<input type="checkbox" id="vrc7ToneModEG" /></label>
+              <label>KR 音階レート<input type="checkbox" id="vrc7ToneModKR" /></label>
+              <label>AM トレモロ<input type="checkbox" id="vrc7ToneModAM" /></label>
+              <label>VB ビブラート<input type="checkbox" id="vrc7ToneModVB" /></label>
+              <label>WF 半波整流<input type="checkbox" id="vrc7ToneModWF" /></label>
+            </div>
+          </div>
+          <label class="vrc7-fb-row">FB 自己帰還
+            <input type="number" id="vrc7ToneFB" min="0" max="7" step="1" />
+          </label>
+        </div>
+        <div class="vrc7-op-group" data-op="car">
+          <div class="vrc7-op-head"><span class="vrc7-op-swatch vrc7-op-swatch--car"></span>キャリア(搬送波)</div>
+          <div class="vrc7-op-cols">
+            <div class="vrc7-op-col">
+              <label>ML 倍率<input type="number" id="vrc7ToneCarML" min="0" max="15" step="1" /></label>
+              <label class="vrc7-op-na">TL <span>= v&lt;n&gt;</span></label>
+              <label>AR 立ち上がり<input type="number" id="vrc7ToneCarAR" min="0" max="15" step="1" /></label>
+              <label>DR 減衰<input type="number" id="vrc7ToneCarDR" min="0" max="15" step="1" /></label>
+              <label>SL 持続レベル<input type="number" id="vrc7ToneCarSL" min="0" max="15" step="1" /></label>
+              <label>RR リリース<input type="number" id="vrc7ToneCarRR" min="0" max="15" step="1" /></label>
+            </div>
+            <div class="vrc7-op-col">
+              <label>KL 音階減衰<input type="number" id="vrc7ToneCarKL" min="0" max="3" step="1" /></label>
+              <label>EG 持続音<input type="checkbox" id="vrc7ToneCarEG" /></label>
+              <label>KR 音階レート<input type="checkbox" id="vrc7ToneCarKR" /></label>
+              <label>AM トレモロ<input type="checkbox" id="vrc7ToneCarAM" /></label>
+              <label>VB ビブラート<input type="checkbox" id="vrc7ToneCarVB" /></label>
+              <label>WF 半波整流<input type="checkbox" id="vrc7ToneCarWF" /></label>
+            </div>
+          </div>
+        </div>
+      </div>
+        </div>
+        <div class="vrc7-solve-col">
+          <div class="vrc7-solve-head">出力波形からデータを逆算</div>
+          <div class="toolbar vrc7-solve-row">
+            <button id="vrc7ToneSolve" class="secondary" title="目標の波形(出力波形に手描き/倍音バー)に近い音色パラメータを総当たりで探します">逆算</button>
+            <button id="vrc7ToneTargetClear" class="secondary" title="目標の波形を消す">消去</button>
+            <select id="vrc7ToneSolveList" title="逆算の候補(実チップで鳴らした波形の一致率順)。選ぶと図と数値に入ります"></select>
+          </div>
+          <canvas id="vrc7ToneHarm" width="260" height="72"
+            title="倍音の振幅。緑=目標(ドラッグで変えられます) / 青=いまの音色。目標が無いときは出力波形に手描きするか、ここをドラッグすると今の音色を出発点にした目標ができます"></canvas>
+          <canvas id="vrc7ToneOut" width="260" height="160"
+            title="出力波形(1周期)。ドラッグで目標を手描きできます。緑=目標 / 青=いまの音色"></canvas>
+          <canvas id="vrc7ToneEnvOut" width="260" height="128"
+            title="実際に鳴らしたときの音量の時間変化(1秒鳴らして離鍵)"></canvas>
+        </div>
+      </div>
+      <div id="vrc7ToneValues" class="fds-values-text"></div>
+      <div id="vrc7ToneStatus" class="output fds-status-output"></div>
+    </div>
+  </section>
+
   <section class="float-window" id="win-n163wave"
     data-default-left="680" data-default-top="100" data-default-width="480" data-default-height="420">
     <div class="float-window-header">
@@ -711,7 +848,19 @@
   <script src="src/ui/keyboard.js"></script>
   <script src="src/ui/fdsWaveEditor.js"></script>
   <script src="src/ui/n163WaveEditor.js"></script>
+  <script src="src/ui/vrc7ToneSolver.js"></script>
+  <script src="src/ui/vrc7ToneEditor.js"></script>
   <script src="src/ui/helpPanel.js"></script>
+  <!-- リアルタイム入力(ROADMAPフェーズ3/4)の土台: メトロノームと入力レイテンシ -->
+  <script src="src/input/metronome.js"></script>
+  <script src="src/input/latency.js"></script>
+  <script src="src/input/noteSource.js"></script>
+  <script src="src/input/keyMap.js"></script>
+  <script src="src/input/quantize.js"></script>
+  <script src="src/input/midiInput.js"></script>
+  <script src="src/ui/metronomePanel.js"></script>
+  <script src="src/ui/performInput.js"></script>
+  <script src="src/ui/recordPanel.js"></script>
   <script src="src/nsf2mml/expansion/vrc6.js"></script>
   <script src="src/nsf2mml/expansion/mmc5.js"></script>
   <script src="src/nsf2mml/expansion/fme7.js"></script>
@@ -720,6 +869,8 @@
   <script src="src/nsf2mml/expansion/vrc7.js"></script>
   <script src="src/nsf2mml/converter.js"></script>
   <script src="src/audio/stream-player.js"></script>
+  <script src="src/audio/assign-preview.js"></script>
+  <script src="src/audio/live-monitor.js"></script>
   <script src="src/spc/spcHeader.js"></script>
   <script src="src/emulator/spc700.js"></script>
   <script src="src/emulator/spcDsp.js"></script>

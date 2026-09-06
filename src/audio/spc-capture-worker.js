@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-05 06:15:35
+ * Built by tools/build-capture-workers.ps1 at 2026-09-06 17:59:42
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-05 06:15:35';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-06 17:59:42';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -1851,6 +1851,7 @@
   MML.SPC2MML.computeSrcnFineTune = computeSrcnFineTune;
   MML.SPC2MML.decodeBrrBytes = (bytes) => decodeBrrBytes(bytes);
   MML.SPC2MML.DSP_RATE = DSP_RATE;
+  MML.SPC2MML.noiseNoteNum = spcNoiseNoteNum; // 割当プレビュー(main.js spcPreviewRows)がノイズ周期→2A03ノイズ音程に使う
 
   // ── 打楽器サンプルの判定と打点リスト(2026-09-03、ドラムパッド全形式展開) ──────────
   // 「どのsrcnが打楽器か」を決める。優先順:
@@ -2668,7 +2669,7 @@
     let drumDpcm = null;
     if (drumHitsAll.length) {
       drumDpcm = MML.Convert.DrumHits.dpcm(drumHitsAll, FPS_SPC, {
-        totalFrames: FRAMES, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'spc_drum',
+        totalFrames: FRAMES, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'spc_drum',
         maxClipSec: 10, // BRRは有限長。VGMのROM歯止め1.5秒は外す
       });
       const base = dmcFiles.length;
@@ -2895,7 +2896,13 @@
       const chEvents = events.map(ev => {
         // ノイズ借用先: NON(ノイズ有効)ボイスはFLGレート→2A03ノイズ周期idxのノートへ。
         // NONでないボイス(旋律サンプルをノイズchへ割り当てた場合)は従来通りpitchSemi。
-        const note = (isNoiseTarget && ev.non) ? spcNoiseNoteNum(ev.noiseRate) : ev.pitchSemi;
+        // 旋律サンプルをノイズchへ割り当てた場合は音程→ノイズ周期(cfg.tone: 'auto'/固定。channelPlan.js
+        // noiseIndexFor、borrow.js pitchedToNoise と同じ式)。以前は pitchSemi をそのまま出していた
+        // (compiler側で note%16 になり音程と無関係な周期になっていた)
+        const note = (isNoiseTarget && ev.non) ? spcNoiseNoteNum(ev.noiseRate)
+          : (isNoiseTarget && ev.pitchSemi !== null && MML.Convert.ChannelPlan)
+            ? 31 - MML.Convert.ChannelPlan.noiseIndexFor(cfg.tone, ev.rawFreq || 440 * Math.pow(2, (ev.pitchSemi - 57) / 12), 1)
+          : ev.pitchSemi;
         const common = {
           start: ev.frame, end: ev.frame + ev.len, note,
           rawFreq: ev.rawFreq,
@@ -2952,6 +2959,13 @@
     // 全チャンネル横断でコーラス検知+D<n>補正(nsf2mmlと同じ「1回だけまとめて」方式)
     MML.Convert.detectChorusDetune(detuneEntries, detuneEntries.map(e => e.periodFn), { cmd });
 
+    // ── VRC7自作音色(@0)の同時使用を1系統へ解く ──────────────────────────
+    // 実機の自作音色スロットは$00-$07の1組だけで全ch共有。BRRサンプルから推定した音色は
+    // ボイスごとに違うので、2ch以上を@0にすると src/mml/compiler.js の同時使用チェックへ
+    // 引っかかりMMLがコンパイルできず全パート無音になる。あぶれたチャンネルはいちばん
+    // 近い内蔵プリセットへ落とす(src/convert/vrc7Tone.js。vgm2mml/borrow.jsと同じ処理)
+    const vrc7Notes = MML.Convert.Vrc7Tone.resolveForScore(scoreChannels, vrc7ToneReg).map(n => `; ※ ${n}`);
+
     if (dpcmLetter) {
       scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents, hasInstrument: true });
     }
@@ -2959,7 +2973,7 @@
     if (scoreChannels.length > 0) {
       mml += MML.Convert.emitScore(scoreChannels, fpb,
         { totalFrames: FRAMES, tempoBpm: bpm, cmd,
-          headerLines: [...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
+          headerLines: [...vrc7Notes, ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
             ...pitchReg.defLines(), ...noteEnvReg.defLines()] }) + '\n';
     }
 
@@ -3027,13 +3041,26 @@
  *     src/convert/pitch.js n163SaForBase冒頭コメント参照)。既定'octave'(オクターブ連動、
  *     セント精度がオクターブ非依存でテーブル共有も効く)。'note'=音符ごと最高精度、
  *     'off'=SA不使用(従来互換、深い変調は割当失敗して落ちる)。
- *   PCM_RATE … PCM→DPCM変換の品質(DMCレートの選び方)。'max' | 8 | 4 | 2 | 1
- *     1bitデルタ変調は1bitあたり±2/127しか動けないため、ソースのバイトレートに対して
- *     何倍のDMCレートを使うかが追従能力(アタックのなまり)とアイドルトーン
- *     (平坦部で乗るレート/2のキーン音)を直接決める。倍率が上がるほど高音質・データ大。
- *     'max'=常に最高レート33.1kHz(既定) / 8,4,2=ソースレートのn倍以上の最小レート /
- *     1=従来互換(最も近いレート、データ最小)。現状の消費者はhes2mml/expansion/dpcm.js
- *     (HES DDA抽出)のみ。SPCのBRR→DPCMはDSPレート32kHz≒テーブル上限のため対象外。
+ *   N163_WAVE … N163内蔵RAM(波形に使えるのは 128-8*有効ch数 バイト)に波形が収まらないときの扱い。
+ *     'fit'(既定) … 収まるまで波形長を半分ずつ落とす(32→16→8→4サンプル)。★曲全体を一律に
+ *       落とすのではなく「あふれた瞬間に居る波形」を大きい順に、必要な数だけ縮める。縮めた
+ *       ぶんはヘッダコメントに明記する。8ch使う曲(1chあたり8バイト=16サンプルが上限)の
+ *       アーケード系VGMなど、実機のN163曲でも普通に行う詰め方。
+ *     'keep' … 元の波形長のまま出す。収まらない曲はコンパイルエラーで再生も書き出しも
+ *       できないが、本家ppmckへ持って行って手で詰め直したい場合はこちら。
+ *
+ * DPCM(打楽器)キー(2026-09-05、変換設定ダイアログからドラム(DPCM)パネル最下段へ移動):
+ *   DMC_RATE  … サンプルごとのDMCレート指定が「自動」のときに使うレート。DMCレート表
+ *     (MML.Dpcm.DMC_RATE_TABLE_NTSC)のindex 0..15、既定15(33.1kHz)。1bitデルタ変調は
+ *     1bitあたり±2/127しか動けないため、レートが追従能力(アタックのなまり)とアイドルトーン
+ *     (平坦部で乗るレート/2のキーン音)を直接決める。音質とデータ量はレートに比例する。
+ *     ★旧 PCM_RATE('max'|8|4|2|1=ソースレートの倍率方式)は廃止。サンプルPCMは再生レートが
+ *       DMC上限以上のことが多く倍率方式が効かなかった。旧キーは読み捨てる(数値が衝突するため
+ *       キー名を変えた)
+ *   RATE_MIX  … 同時に鳴った打点のDMCレート指定が食い違うとき、'quality'=高い方 / 'size'=低い方
+ *   DRUM_POLY … 打点が重なったとき 'mix'=その瞬間の音をミックスして1クリップ / 'mono'=直近1音
+ *   これらはプリセット(忠実再現/プレーン譜面)の一致判定に含めない(パネル側の独立した設定)。
+ *   全形式のドラム(DPCM)経路(src/convert/drumHits.js)が見る。
  */
 (function (global) {
   'use strict';
@@ -3042,12 +3069,13 @@
 
   const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
   const SHAPE_KEYS = ['SHAPE_REST', 'SHAPE_QUANT'];
-  // PCM品質(冒頭コメント参照)。boolean群とは別に許容値で正規化する
-  const PCM_RATE_VALUES = ['max', 8, 4, 2, 1];
   const PITCH_SA_VALUES = ['octave', 'note', 'off'];
+  // ── DPCM(打楽器)キー(冒頭コメント参照)。ドラム(DPCM)パネル最下段の設定 ──
+  // DMC_RATE: DMCレート表のindex(0=4.2kHz … 15=33.1kHz)。「自動」のサンプルに使う
+  const DMC_RATE_MAX = 15;
   // 同時発音をミックスして1サンプルに焼くときのDMCレートの決め方
-  //   'quality' … 寄与するサンプルのうち最高音質を採る(既定)
-  //   'size'    … 最低に合わせて容量を優先する
+  //   'quality' … 寄与するサンプルのうち高い方を採る(既定)
+  //   'size'    … 低い方に合わせて容量を優先する
   const RATE_MIX_VALUES = ['quality', 'size'];
   MML.Convert.RATE_MIX_VALUES = RATE_MIX_VALUES;
   // 打楽器の同時発音の扱い(src/convert/drumHits.js poly)
@@ -3056,44 +3084,53 @@
   //            増えないので容量制御に使う。実測: NCS91002 はミックス54定義36KB→単音7定義)
   const DRUM_POLY_VALUES = ['mix', 'mono'];
   MML.Convert.DRUM_POLY_VALUES = DRUM_POLY_VALUES;
+  const DPCM_KEYS = ['DMC_RATE', 'RATE_MIX', 'DRUM_POLY'];
+  const DPCM_DEFAULTS = { DMC_RATE: DMC_RATE_MAX, RATE_MIX: 'quality', DRUM_POLY: 'mix' };
+  MML.Convert.DPCM_KEYS = DPCM_KEYS;
+  MML.Convert.DPCM_DEFAULTS = DPCM_DEFAULTS;
+  // N163内蔵RAMに波形が収まらないときの扱い(冒頭コメント参照)
+  const N163_WAVE_VALUES = ['fit', 'keep'];
+  MML.Convert.N163_WAVE_VALUES = N163_WAVE_VALUES;
   MML.Convert.CMD_KEYS = CMD_KEYS;
   MML.Convert.SHAPE_KEYS = SHAPE_KEYS;
-  MML.Convert.PCM_RATE_VALUES = PCM_RATE_VALUES;
   MML.Convert.PITCH_SA_VALUES = PITCH_SA_VALUES;
 
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, SHAPE_QUANT: false, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality', DRUM_POLY: 'mix' },
+                SHAPE_REST: false, SHAPE_QUANT: false, PITCH_SA: 'octave', N163_WAVE: 'fit' },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, SHAPE_QUANT: true, PCM_RATE: 'max', PITCH_SA: 'octave', RATE_MIX: 'quality', DRUM_POLY: 'mix' },
+                SHAPE_REST: true, SHAPE_QUANT: true, PITCH_SA: 'octave', N163_WAVE: 'fit' },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
 
-  // options.cmd(部分指定可)を全キー揃った正規形にする。省略キーは faithful 既定。
+  // options.cmd(部分指定可)を全キー揃った正規形にする。省略キーは faithful 既定
+  // (DPCMキーは DPCM_DEFAULTS)。
   MML.Convert.normalizeCmd = function (cmd) {
-    const out = Object.assign({}, PRESETS.faithful);
+    const out = Object.assign({}, DPCM_DEFAULTS, PRESETS.faithful);
     if (cmd && typeof cmd === 'object') {
       for (const k of [...CMD_KEYS, ...SHAPE_KEYS]) if (cmd[k] != null) out[k] = !!cmd[k];
-      // 数値は文字列でも受ける(localStorage/JSON経由やUIのselect値が'4'等になるため)
-      if (cmd.PCM_RATE != null) {
-        const v = cmd.PCM_RATE === 'max' ? 'max' : parseInt(cmd.PCM_RATE, 10);
-        if (PCM_RATE_VALUES.indexOf(v) >= 0) out.PCM_RATE = v;
+      // 数値は文字列でも受ける(localStorage/JSON経由やUIのselect値が'14'等になるため)
+      if (cmd.DMC_RATE != null) {
+        const v = parseInt(cmd.DMC_RATE, 10);
+        if (v >= 0 && v <= DMC_RATE_MAX) out.DMC_RATE = v;
       }
       if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
       if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
+      if (cmd.N163_WAVE != null && N163_WAVE_VALUES.indexOf(cmd.N163_WAVE) >= 0) out.N163_WAVE = cmd.N163_WAVE;
     }
     return out;
   };
 
-  // どれかがプリセットと完全一致すればその名前、無ければ 'custom'
+  // どれかがプリセットと完全一致すればその名前、無ければ 'custom'。
+  // DPCMキー(DPCM_KEYS)はドラム(DPCM)パネル側の設定なので一致判定に含めない
   MML.Convert.cmdPresetName = function (cmd) {
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
-      const p = PRESETS[name];
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PCM_RATE', 'PITCH_SA', 'RATE_MIX', 'DRUM_POLY'].every(k => p[k] === n[k])) return name;
+      const p = MML.Convert.normalizeCmd(PRESETS[name]);
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PITCH_SA', 'N163_WAVE'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };
@@ -3816,6 +3853,10 @@
     }
     return { refNote, deltas };
   }
+
+  // ★和音→アルペジオ(src/input/quantize.js)でも同じ符号化を使うので公開する。
+  //   EN<n>の中身の作り方が2箇所に分かれると、片方だけ直して食い違う
+  MML.Convert.buildNoteEnvelopeDeltas = buildNoteEnvelopeDeltas;
 
   // mergeAlternatingVibratoと同じ「隣接イベント列→統合後イベント列」形式。
   // 統合したイベントには ev.noteEnvOffsets(累積差分配列)を付与する(登録・EN<n>への

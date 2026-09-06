@@ -5,6 +5,11 @@
  *   MML.UI.DrumPanel.setCost(stats)    … 合計ROMの表示
  *   MML.UI.DrumPanel.setStatus(text)   … 進行中の作業(分離レンダリング等)の表示。空文字で消す
  *
+ * 最下段はDPCM変換の共通設定(2026-09-05、変換設定ダイアログから移動): DMCレート(「自動」の
+ * サンプルに使うレート)/重複打点のレート(高/低)/同時打点の扱い(ミックス/単音)。実体は
+ * 変換設定の cmd(src/convert/options.js DMC_RATE/RATE_MIX/DRUM_POLY)で、
+ * MML.UI.ConvertSettings.set() 経由で保存する(各 *2mml が options.cmd で受け取るため)。
+ *
  * 行データ rows: [{ key, hash, label, color, hits, pcm, srcRate }]
  *   key   … 'c140:294064'(ドラム区画のパッドと同じキー)
  *   hash  … サンプル内容のハッシュ(設定の保存キー。src/convert/drumSamples.js)
@@ -24,8 +29,11 @@
   let costEl = null;
   let bodyEl = null;
   let statusEl = null;
+  let optsEl = null;
+  let optSels = null; // { DMC_RATE, RATE_MIX, DRUM_POLY } の <select>
 
   function DS() { return MML.Convert && MML.Convert.DrumSamples; }
+  function CS() { return MML.UI.ConvertSettings || null; }
 
   /** 属性値へ入れる文字のエスケープ(名前はユーザーが自由に打てるので必須) */
   function esc(v) {
@@ -33,11 +41,65 @@
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  function rateOptions() {
+  // DMCレート表(index 15=33.1kHz … 0=4.2kHz)を高い順に。withAuto=行の「自動」を先頭に足す
+  function rateOptions(withAuto) {
     const table = (MML.Dpcm && MML.Dpcm.DMC_RATE_TABLE_NTSC) || [];
-    const opts = [['auto', T('自動')]];
+    const opts = withAuto === false ? [] : [['auto', T('自動')]];
     for (let i = table.length - 1; i >= 0; i--) opts.push([String(i), (table[i] / 1000).toFixed(1) + 'kHz']);
     return opts;
+  }
+
+  // ── 最下段: DPCM変換の共通設定(冒頭コメント参照) ─────────────────────────
+  //   [cmdキー, ラベル, 説明, 選択肢[[値, 表示], ...]]
+  function optRows() {
+    return [
+      ['DMC_RATE', T('DMCレート'),
+        T('DMCレートを「自動」にしたサンプルに使うレート(33.1〜4.2kHz)。音質の良さとROM容量は比例します'),
+        rateOptions(false)],
+      ['RATE_MIX', T('重複打点のレート'),
+        T('同時に鳴った打点のDMCレートが異なるとき、高い方と低い方のどちらに合わせるか'),
+        [['quality', T('高')], ['size', T('低')]]],
+      ['DRUM_POLY', T('同時打点の扱い'),
+        T('別チャンネルなどで打点が重なったとき、組み合わせぶんDPCM定義を増やす(ミックス)か、直近の1音に抑える(単音)か。ミックスは同時発音の組み合わせぶん.dmcファイルが増えます'),
+        [['mix', T('ミックス')], ['mono', T('単音')]]],
+    ];
+  }
+  function renderOpts() {
+    if (!optsEl) return;
+    optsEl.innerHTML = '';
+    optSels = {};
+    for (const [key, name, desc, opts] of optRows()) {
+      const row = document.createElement('label');
+      row.className = 'dp-opt';
+      const n = document.createElement('span');
+      n.className = 'dp-opt-name';
+      n.textContent = name;
+      const sel = document.createElement('select');
+      sel.className = 'dp-opt-sel';
+      for (const [v, label] of opts) {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = label;
+        sel.appendChild(o);
+      }
+      sel.addEventListener('change', () => {
+        if (CS()) CS().set({ [key]: sel.value });
+        if (hooks.onChange) hooks.onChange(); // ROMコストの再計算(DMCレートで.dmcの大きさが変わる)
+      });
+      sel.addEventListener('mousedown', (e) => e.stopPropagation());
+      const d = document.createElement('span');
+      d.className = 'dp-opt-desc';
+      d.textContent = desc;
+      row.appendChild(n); row.appendChild(sel); row.appendChild(d);
+      optsEl.appendChild(row);
+      optSels[key] = sel;
+    }
+    syncOpts();
+  }
+  // 今の cmd を select へ反映(他所から set() された場合も ConvertSettings.onChange 経由でここへ来る)
+  function syncOpts() {
+    if (!optSels || !CS() || !MML.Convert || !MML.Convert.normalizeCmd) return;
+    const cmd = MML.Convert.normalizeCmd(CS().get());
+    for (const key of Object.keys(optSels)) optSels[key].value = String(cmd[key]);
   }
 
   function mount(el, h) {
@@ -60,10 +122,14 @@
         `<div class="drum-panel-body"></div>` +
         `<div class="drum-panel-status" hidden></div>` +
         `<div class="drum-panel-foot"></div>` +
+        `<div class="drum-panel-opts"></div>` +
       `</div>`;
     bodyEl = rootEl.querySelector('.drum-panel-body');
     costEl = rootEl.querySelector('.drum-panel-foot');
     statusEl = rootEl.querySelector('.drum-panel-status');
+    optsEl = rootEl.querySelector('.drum-panel-opts');
+    renderOpts();
+    if (CS() && CS().onChange) CS().onChange(syncOpts);
     render();
   }
 

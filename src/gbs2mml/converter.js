@@ -250,7 +250,7 @@
     let drumNote = null;
     if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
       const d = MML.Convert.DrumHits.dpcm(options.drumHits, frameRate, {
-        totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'gb_drum', maxClipSec: 10 });
+        totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'gb_drum', maxClipSec: 10 });
       if (d.defs.length) {
         for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
         dpcmFiles.push(...d.files);

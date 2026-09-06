@@ -229,6 +229,7 @@
   MML.SPC2MML.computeSrcnFineTune = computeSrcnFineTune;
   MML.SPC2MML.decodeBrrBytes = (bytes) => decodeBrrBytes(bytes);
   MML.SPC2MML.DSP_RATE = DSP_RATE;
+  MML.SPC2MML.noiseNoteNum = spcNoiseNoteNum; // 割当プレビュー(main.js spcPreviewRows)がノイズ周期→2A03ノイズ音程に使う
 
   // ── 打楽器サンプルの判定と打点リスト(2026-09-03、ドラムパッド全形式展開) ──────────
   // 「どのsrcnが打楽器か」を決める。優先順:
@@ -1046,7 +1047,7 @@
     let drumDpcm = null;
     if (drumHitsAll.length) {
       drumDpcm = MML.Convert.DrumHits.dpcm(drumHitsAll, FPS_SPC, {
-        totalFrames: FRAMES, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'spc_drum',
+        totalFrames: FRAMES, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'spc_drum',
         maxClipSec: 10, // BRRは有限長。VGMのROM歯止め1.5秒は外す
       });
       const base = dmcFiles.length;
@@ -1273,7 +1274,13 @@
       const chEvents = events.map(ev => {
         // ノイズ借用先: NON(ノイズ有効)ボイスはFLGレート→2A03ノイズ周期idxのノートへ。
         // NONでないボイス(旋律サンプルをノイズchへ割り当てた場合)は従来通りpitchSemi。
-        const note = (isNoiseTarget && ev.non) ? spcNoiseNoteNum(ev.noiseRate) : ev.pitchSemi;
+        // 旋律サンプルをノイズchへ割り当てた場合は音程→ノイズ周期(cfg.tone: 'auto'/固定。channelPlan.js
+        // noiseIndexFor、borrow.js pitchedToNoise と同じ式)。以前は pitchSemi をそのまま出していた
+        // (compiler側で note%16 になり音程と無関係な周期になっていた)
+        const note = (isNoiseTarget && ev.non) ? spcNoiseNoteNum(ev.noiseRate)
+          : (isNoiseTarget && ev.pitchSemi !== null && MML.Convert.ChannelPlan)
+            ? 31 - MML.Convert.ChannelPlan.noiseIndexFor(cfg.tone, ev.rawFreq || 440 * Math.pow(2, (ev.pitchSemi - 57) / 12), 1)
+          : ev.pitchSemi;
         const common = {
           start: ev.frame, end: ev.frame + ev.len, note,
           rawFreq: ev.rawFreq,
@@ -1330,6 +1337,13 @@
     // 全チャンネル横断でコーラス検知+D<n>補正(nsf2mmlと同じ「1回だけまとめて」方式)
     MML.Convert.detectChorusDetune(detuneEntries, detuneEntries.map(e => e.periodFn), { cmd });
 
+    // ── VRC7自作音色(@0)の同時使用を1系統へ解く ──────────────────────────
+    // 実機の自作音色スロットは$00-$07の1組だけで全ch共有。BRRサンプルから推定した音色は
+    // ボイスごとに違うので、2ch以上を@0にすると src/mml/compiler.js の同時使用チェックへ
+    // 引っかかりMMLがコンパイルできず全パート無音になる。あぶれたチャンネルはいちばん
+    // 近い内蔵プリセットへ落とす(src/convert/vrc7Tone.js。vgm2mml/borrow.jsと同じ処理)
+    const vrc7Notes = MML.Convert.Vrc7Tone.resolveForScore(scoreChannels, vrc7ToneReg).map(n => `; ※ ${n}`);
+
     if (dpcmLetter) {
       scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents, hasInstrument: true });
     }
@@ -1337,7 +1351,7 @@
     if (scoreChannels.length > 0) {
       mml += MML.Convert.emitScore(scoreChannels, fpb,
         { totalFrames: FRAMES, tempoBpm: bpm, cmd,
-          headerLines: [...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
+          headerLines: [...vrc7Notes, ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
             ...pitchReg.defLines(), ...noteEnvReg.defLines()] }) + '\n';
     }
 

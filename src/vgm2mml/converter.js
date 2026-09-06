@@ -87,6 +87,11 @@
     mmc5pulse2: { chip: 'mmc5', index: 1, family: 'pulse' },
     vrc6pulse1: { chip: 'vrc6', index: 0, family: 'vrc6pulse' },
     vrc6pulse2: { chip: 'vrc6', index: 1, family: 'vrc6pulse' },
+    // ★UI(src/convert/channelPlan.js TARGET_LIST)が出す借用先はここにも必ず載せること。
+    //   無いと describePlan の tt.chip が null になり「Cannot read properties of null (reading 'toUpperCase')」
+    //   で変換全体が落ちる(VRC6のこぎり波を選んで実際に起きた)
+    vrc6saw:    { chip: 'vrc6', index: 2, family: 'vrc6saw' },
+    fds:        { chip: 'fds',  index: 0, family: 'fds' },
   };
   for (let i = 0; i < 8; i++) TARGET_TYPES['n163_' + i] = { chip: 'n163', index: i, family: 'n163' };
   for (let i = 0; i < 6; i++) TARGET_TYPES['vrc7_' + i] = { chip: 'vrc7', index: i, family: 'vrc7' };
@@ -110,9 +115,9 @@
 
   // VRC7を借用先に選んだときの音色プリセット(VRC7内蔵ROM音色1-15。名前はNESdev wikiのVRC7音色表)。
   // OPLL(YM2413)ソースは元の音色番号/カスタム音色をそのまま使う 'auto' が既定。
-  const VRC7_PRESET_NAMES = ['', 'Buzzy Bell', 'Guitar', 'Wurly', 'Flute', 'Clarinet', 'Synth', 'Trumpet', 'Organ',
-    'Bells', 'Vibes', 'Vibraphone', 'Tutti', 'Fretless', 'Synth Bass', 'Sweep'];
+  const VRC7_PRESET_NAMES = MML.Convert.Vrc7Tone.PRESET_NAMES;
   MML.VGM2MML.VRC7_PRESET_NAMES = VRC7_PRESET_NAMES;
+  const presetListOf = MML.Convert.Vrc7Tone.presetListOf;
   MML.VGM2MML.vrc7InstOptions = function (kind) {
     const list = [];
     if (kind === 'fm') list.push({ value: 'auto', label: '元の音色' });
@@ -128,12 +133,28 @@
   //    モジュレータ = そのキャリアを直接変調するop(複数ならTL最小、無ければ無音のモジュレータ=TL63)。
   //  - ML: そのまま(両者とも0=½,1-15)。DT: OPLLに無いので捨てる。
   //  - TL(モジュレータ): 0.75dB/段どうし、6bitへ飽和(min(63,TL))。キャリアTLは音量(v)側で表現済みなので0。
-  //  - AR/DR: 5bit→4bit(>>1。どちらも最大が「即時」)。SL: 3dB/段どうしでそのまま。RR: 4bitどうしそのまま。
-  //  - SR(D2R): OPLLには持続レートが無い → SR==0 なら EG=1(SLで持続)、SR>0 なら EG=0(減衰音、SL到達後は
-  //    RRで減衰し続けるので RR:=max(RR,SR>>1)。キーオフ後は固定レートになる=OPNのRRは失われる)。
+  //  - AR/DR: 5bit→4bit。★単純な >>1 ではなく (r-3)>>1(opnRateToOpll。実測でオフセットが
+  //    1.5段ずれており、>>1だと約4倍速い減衰になる)。SL: 3dB/段どうしでそのまま。
+  //  - SR(D2R): OPLLには持続レートが無い → SR==0 なら EG=1(SLで持続、RR=OPNのRR=離鍵レート)、
+  //    SR>0 なら EG=0(減衰音。SL到達後はRRで減衰し続けるので **RR:=SR>>1**。EG=0のキーオフは
+  //    固定レート7なのでOPNのRRは表現できず捨てる)。★ここを max(RR,SR>>1) にすると、離鍵を
+  //    速くするためRR=15にしてあるだけの普通の音色が「鳴った瞬間に消える」音になる(2026-09-05修正)。
   //  - KS(0-3)→KR(1bit): KS>=2 なら1。KL: OPNに無いので0。AM: op.AM かつ AMS>0。VB: PMS>0 なら両op。
   //  - FB: OPNではop1の自己帰還なので、モジュレータにop1を選んだときだけ引き継ぐ。波形(DC/DM): OPNは
   //    正弦のみなので0。SSG-EG: 表現できないので無視。
+  // OPNの5bitレート(AR/DR/SR、0-31) → OPLLの4bitレート(0-15)。
+  // ★単純な >>1 は誤り(2026-09-05修正)。傾きは合っている(OPNは+2で倍速、OPLLは+1で倍速)が
+  //   オフセットが約1.5段ぶんずれており、>>1 だと**約4倍速い**減衰になる。
+  //   両エミュレータで同じ「AR最速・SL=0・持続減衰レートR」を実際に鳴らして -20dB 到達時間を
+  //   突き合わせた実測(2026-09-05):
+  //     OPN DR/SR:  6→4120ms  8→2060ms 10→1030ms 12→520ms 14→260ms 16→140ms 20→40ms
+  //     OPLL DR/RR: 1→5770ms  2→2890ms  3→1440ms  4→730ms  5→360ms  6→190ms  8→20ms
+  //   → 一致するのは OPLL = OPN/2 - 1.5、整数へは切り捨て(= (r-3)>>1)。
+  //   切り捨て(遅い側)に寄せるのは、速すぎると音が消えてしまい「鳴っていない」ことになるため。
+  //   これを >>1 にしていたせいで、4op→2op変換した音色はアタックだけ鳴って即消えていた
+  //   (実測: Virtua Racing Deluxe「Replay」のFM1が、同じ譜面のプリセット再生に対しRMSで1/2)。
+  const opnRateToOpll = (r) => Math.max(0, Math.min(15, ((r | 0) - 3) >> 1));
+
   const OPN_MODULATORS = [ // アルゴリズムごとの「op i を直接変調するop」(論理op index)
     { 3: [2] }, { 3: [2] }, { 3: [0, 2] }, { 3: [1, 2] }, { 1: [0], 3: [2] }, { 1: [0], 2: [0], 3: [0] }, { 1: [0] }, {}
   ];
@@ -149,10 +170,18 @@
     const C = p.ops[car];
     const M = mod >= 0 ? p.ops[mod] : { TL: 127, ML: 1, AR: 31, DR: 0, SR: 0, SL: 0, RR: 15, KS: 0, AM: 0 };
     const conv = (o) => {
+      // ★EG=0(減衰音)のときのRRは「キーオン中の持続減衰レート」であって離鍵時の速さではない
+      //   (src/emulator/expansion/vrc7.js updateEG: SUSTINE=RR、RELEASEはEG=0なら固定レート7)。
+      //   ここに従来 max(RR, SR>>1) を入れていたため、離鍵を速くするつもりでRR=15にしてある
+      //   ごく普通のOPN音色が「鳴った瞬間に消える」音になっていた(実測: Virtua Racing Deluxeの
+      //   ロングトーンがピーク0.007=ほぼ無音)。EG=0ならOPNのD2R(SR)だけを写し、
+      //   表現できないOPNのRRは捨てる。EG=1(持続音)のRRは離鍵レートとしてそのまま使える。
       const eg = o.SR === 0 ? 1 : 0;
-      const rr = eg ? o.RR : Math.max(o.RR, o.SR >> 1);
+      // EG=1(持続音)のRRは離鍵レート=OPNのRRをそのまま(どちらも4bit)。
+      // EG=0(減衰音)のRRはキーオン中の持続減衰レートなので、OPNのSR(5bit)をレート換算する
+      const rr = eg ? (o.RR & 15) : opnRateToOpll(o.SR);
       return { AM: (o.AM && p.AMS > 0) ? 1 : 0, PM: p.PMS > 0 ? 1 : 0, EG: eg, KR: o.KS >= 2 ? 1 : 0, ML: o.ML & 15,
-        AR: o.AR >> 1, DR: o.DR >> 1, SL: o.SL & 15, RR: rr & 15 };
+        AR: opnRateToOpll(o.AR), DR: opnRateToOpll(o.DR), SL: o.SL & 15, RR: rr };
     };
     const m = conv(M), c = conv(C);
     // FBはOPNではop1の自己帰還。選んだモジュレータがop1のときだけ引き継ぐ(他のopに帰還は無い)
@@ -313,7 +342,7 @@
       // ドラムパート(合成ch)はラベルがそのまま1グループ("C140 Drums")
       const key = /:drum$/.test(s.id) ? s.label
         : s.label.replace(/ ch\d+$| noise$/, '').replace(/ (FM|ADPCM-A|PCM)\d+$/, ' $1') + (s.kind === 'noise' ? ' noise' : '');
-      const dst = t === 'skip' ? null : (tt.chip === '2a03' ? `2A03 ${tt.letter}` : tt.chip.toUpperCase().replace('FME7', 'FME-7'));
+      const dst = (t === 'skip' || !tt.chip) ? null : (tt.chip === '2a03' ? `2A03 ${tt.letter}` : tt.chip.toUpperCase().replace('FME7', 'FME-7'));
       if (!groups.has(key)) groups.set(key, new Set());
       if (dst) groups.get(key).add(dst);
     }
@@ -351,6 +380,7 @@
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry(cmd);
     const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry(cmd);
     const n163WaveReg = MML.Convert.n163WaveRegistry();
+    const fdsWaveReg = new MML.Convert.WaveRegistry('@FM'); // FDSへ載せた矩形波系ソースの波形(@FM<n>)
     const vrc7ToneReg = new MML.Convert.WaveRegistry('@OP');
     const notes = ignoredNote ? [ignoredNote] : [];
     if (c.ay8910 && c.ay8910.dual) notes.push('2個目のAY8910(デュアルチップ)は変換対象外のため無視しました。');
@@ -441,7 +471,7 @@
       const extraHits = cmd.DRUM !== false ? (options.drumHits || []) : [];
       if (sources.length || extraHits.length) {
         dpcmResult = MML.Vgm2MmlExpansion.dpcmDrums(sources, frameRate, {
-          totalFrames, pcmRate: cmd.PCM_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, extraHits });
+          totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, extraHits });
         if (!dpcmResult.defs.length) dpcmResult = null;
       }
     }
@@ -569,6 +599,11 @@
       const v = options.vrc7Inst && options.vrc7Inst[s.id];
       return v !== undefined && v !== null && v !== '' ? String(v) : MML.VGM2MML.defaultVrc7Inst(s.kind);
     };
+    // 借用先ごとの音色(options.tone[ソースID]、channelPlan.js toneOptionsFor の語彙): デューティ/波形/ノイズ周期
+    const toneOf = (s) => {
+      const v = options.tone && options.tone[s.id];
+      return v !== undefined && v !== null && v !== '' ? String(v) : undefined;
+    };
     if (data.sn && c.sn76489) {
       const nChips = c.sn76489.dual ? 2 : 1;
       for (let k = 0; k < nChips; k++) {
@@ -597,11 +632,16 @@
       const tt = TARGET_TYPES[t];
       if (!tt) continue;
       // 種別と借用先の相性(UI外から不正な組合せが来た時の防御)
-      if ((s.kind === 'noise') !== (tt.family === 'noise')) { conflicts.push(`${s.label} → ${t} は種別が合わないため変換対象外です。`); continue; }
-      if (s.kind === 'wave' && tt.family !== 'n163' && tt.family !== 'vrc7') { conflicts.push(`${s.label} → ${t} は波形音源/VRC7以外へ載せられないため変換対象外です。`); continue; }
+      if (s.kind === 'noise' && tt.family !== 'noise') { conflicts.push(`${s.label} → ${t} は種別が合わないため変換対象外です。`); continue; }
+      if (s.kind === 'wave' && tt.family !== 'n163' && tt.family !== 'vrc7' && tt.family !== 'fds') { conflicts.push(`${s.label} → ${t} は波形音源/VRC7以外へ載せられないため変換対象外です。`); continue; }
       const ch = Object.assign({}, extracted[s.id], { events: extracted[s.id].events.map(ev => Object.assign({}, ev)) });
       if (s.ch < 0) ch.isDrum = true; // 合成chのドラムパート(テンポ推定から外す。下記コメント参照)
-      adaptEvents(ch, s, tt.family, n163WaveReg, tt.family === 'vrc7' ? vrc7InstOf(s) : null, vrc7ToneReg);
+      adaptEvents(ch, s, tt.family, n163WaveReg, tt.family === 'vrc7' ? vrc7InstOf(s) : null, vrc7ToneReg, toneOf(s), fdsWaveReg);
+      // ★動かさないのはYM2413(OPLL)だけ。OPLLの自作音色はVRC7と同じく$00-$07の1組を
+      //   全chで共有する設計なので、抽出結果は最初から1系統に収まっている(実機がそう鳴らしていた)。
+      //   OPL(YM3812/YM3526/Y8950)はチャンネルごとに独立した音色レジスタを持ち、それを
+      //   OPLLカスタム音色8バイトへ変換しているので、OPN 4op と同じく衝突しうる(下の resolveConflicts)
+      if (tt.family === 'vrc7') ch.vrc7ToneFixed = (s.chip === 'ym2413');
       placed[t] = { source: s, channel: ch };
     }
     notes.push(...conflicts);
@@ -609,6 +649,26 @@
     // 借用先ファミリごとの後処理(音程補正・EN・EP)
     const byFamily = {};
     for (const [t, p] of Object.entries(placed)) { const f = TARGET_TYPES[t].family; (byFamily[f] = byFamily[f] || []).push({ type: t, ...p }); }
+
+    // ── VRC7自作音色(@0)の同時使用を1系統へ解く ──────────────────────────
+    // 実機の自作音色スロットは$00-$07の1組だけで全ch共有。OPN 4op→2op変換はチャンネル
+    // ごとに別音色を作るので、そのままだと2ch以上が重なった瞬間に src/mml/compiler.js の
+    // 同時使用チェックへ引っかかり、MMLがコンパイルできず全パート無音になっていた。
+    // 同時に鳴るぶんが1音色に収まるようチャンネル単位で割り当て直し、あぶれたチャンネルは
+    // いちばん近い内蔵プリセットへ落とす(src/convert/vrc7Tone.js)。
+    MML.Convert.Vrc7Tone.resolveConflicts(
+      (byFamily.vrc7 || []).map(p => p.channel), vrc7ToneReg,
+      { onDemote: (ch, presetByTone) => { ch.vrc7Demoted = presetByTone; } });
+
+    // ── N163内蔵RAMへ波形が収まらない曲を収まる形へ ──────────────────────
+    // 波形に使えるのは 128-8*有効ch数 バイトだけ。あふれるとコンパイルエラーで再生も
+    // 書き出しもできないため、変換設定 N163_WAVE='fit'(既定)ならあふれたぶんの波形を
+    // 半分ずつ縮める(src/convert/n163Fit.js)。★下の音程補正より前に呼ぶこと
+    if (byFamily.n163) {
+      const slots = [];
+      for (const p of byFamily.n163) slots[TARGET_TYPES[p.type].index] = p.channel;
+      notes.push(...MML.Convert.N163Fit.apply(slots, n163WaveReg, cmd));
+    }
     const expansions = [];
     for (const t of Object.keys(placed)) { const chip = TARGET_TYPES[t].chip; if (chip !== '2a03' && !expansions.includes(chip)) expansions.push(chip); }
     const prio = MML.Mml.EXPANSION_PRIORITY || ['fds', 'vrc7', 'vrc6', 'n163', 'fme7', 'mmc5'];
@@ -619,7 +679,8 @@
     for (const p of (byFamily.n163 || [])) if (p.channel.events.some(ev => ev.note !== null)) n163NumCh = Math.max(n163NumCh, TARGET_TYPES[p.type].index + 1);
     const periodFnFor = {
       fme7: fme7PeriodRaw, n163: n163FreqRegRaw(N163_WAVE_LEN, n163NumCh), pulse: pulsePeriodRaw,
-      triangle: triPeriodRaw, vrc6pulse: vrc6PulsePeriodRaw, vrc7: vrc7FnumRaw, noise: null
+      triangle: triPeriodRaw, vrc6pulse: vrc6PulsePeriodRaw, vrc6saw: MML.Convert.Borrow.vrc6SawPeriodRaw,
+      vrc7: vrc7FnumRaw, fds: MML.Convert.Borrow.fdsPeriodRaw, noise: null
     };
     const scoreChannels = [];
     for (const [fam, list] of Object.entries(byFamily)) {
@@ -678,9 +739,28 @@
       const letter = tt.chip === '2a03' ? tt.letter : (letterMap[tt.chip] || [])[tt.index];
       // VRC7へ載せたチャンネルは使ったプリセット音色も併記(OPLL元音色そのままなら書かない)
       let inst = '';
-      if (tt.chip === 'vrc7') { const v = vrc7InstOf(p.source); if (v === '0') inst = '(@0 自作音色=4op→2op変換)'; else if (v !== 'auto') inst = `(@${v} ${VRC7_PRESET_NAMES[parseInt(v, 10)] || ''})`; }
+      if (tt.chip === 'vrc7') {
+        const v = vrc7InstOf(p.source);
+        const dem = p.channel.vrc7Demoted;
+        if (dem) inst = `(${presetListOf(dem)}へ代替)`;
+        else if (v === '0') inst = '(@0 自作音色=4op→2op変換)';
+        else if (v !== 'auto') inst = `(@${v} ${VRC7_PRESET_NAMES[parseInt(v, 10)] || ''})`;
+      }
       return `${letter}=${p.source.label}${inst}`;
     }).join(' ');
+    // 自作音色から内蔵プリセットへ落としたチャンネルの説明(1系統制約の説明つき)
+    const demotedDesc = Object.entries(placed)
+      .filter(([, p]) => p.channel.vrc7Demoted)
+      .map(([t, p]) => {
+        const tt = TARGET_TYPES[t];
+        const letter = (letterMap[tt.chip] || [])[tt.index];
+        return `${letter}(${p.source.label})=${presetListOf(p.channel.vrc7Demoted)}`;
+      });
+    if (demotedDesc.length) {
+      notes.push('VRC7の自作音色(@0)は実機の制約でチップ全体に1音色しか持てないため、同時に鳴る' +
+        `ぶんに収まらなかった ${demotedDesc.length} チャンネルはいちばん近い内蔵音色へ置き換えました: ${demotedDesc.join(' ')}。` +
+        '(鍵盤表示の「音色」列で好みのプリセットに変更できます)');
+    }
     const isCustom = !!options.channelMap && Object.keys(options.channelMap).some(k => options.channelMap[k] !== MML.VGM2MML.defaultPlan(h)[k]);
 
     const headerComment = [
@@ -695,7 +775,8 @@
       `; ※ このアプリのMMLプレイヤーはNES音源専用のため、AY8910→FME-7(互換)、YM2413→VRC7(同一)、`,
       `;    SCC→N163(波形近似)、SN76489等の矩形波はFME-7の空き→N163(矩形波@N)の順に、ノイズは`,
       `;    2A03ノイズ(D)へ載せています(割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
-      `;    YM2612/YM2610/YM2151/YM2203/YM2608のFMはVRC7へ(4op→2op、音色はプリセットから選択。音程・TL由来の音量のみ再現)、`,
+      `;    YM2612/YM2610/YM2151/YM2203/YM2608のFMはVRC7へ(4op→2op自動変換で@0自作音色に。ただし実機の自作音色`,
+      `;    スロットは$00-$07の1組を全chで共有するため、同時に鳴るぶんに収まらないchはいちばん近い内蔵音色へ)、`,
       `;    YM2610 ADPCM-A/Bはサンプルのピッチ解析で得た音程と音量だけを載せています。`,
       `;    線形音量の借用先(N163/2A03/MMC5/VRC6)へ載せた音量は対数DAC→線形へ換算した値です。`,
       ...notes.map(n => `; ※ ${n}`),
@@ -709,11 +790,16 @@
     // @DPCM<n> 定義(1個でもあればEチャンネルが自動的に有効になる。#EX-*宣言は不要)
     const dpcmDefLines = dpcmResult ? dpcmResult.defs.map(d =>
       `@DPCM${d.index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac}, ${d.mode} }`) : [];
+    // resolveConflicts でプリセットへ落としたぶんの @OP<n> 定義は誰も参照しなくなる。
+    // NSF書き出しで音色テーブル+分岐コードとしてROMを食う([[nsf-export-size-consciousness]])ので
+    // 捨てて番号を詰める(イベント側の vrc7Tone も同時に振り直される)
+    MML.Convert.Vrc7Tone.compactRegistry(vrc7ToneReg, (byFamily.vrc7 || []).map(p => p.channel));
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       headerLines: [
         ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(expansions.includes('n163') ? n163WaveReg.defLines() : []),
+        ...(expansions.includes('fds') ? fdsWaveReg.defLines() : []),
         ...(expansions.includes('vrc7') ? vrc7ToneReg.defLines() : [])
       ]
     });
@@ -759,12 +845,14 @@
   // ソースチャンネルのイベントを借用先ファミリの語彙へ整形する(破壊的。呼び出し側でコピー済み)。
   // vrc7Inst: 借用先がVRC7のときの音色('auto'=OPLLソースの元音色/カスタム音色をそのまま、'1'-'15'=プリセット、
   //           '0'=OPN 4op音色を2op自作音色(@OP)へ自動変換して OP<n>+@0)
-  function adaptEvents(ch, s, fam, n163WaveReg, vrc7Inst, vrc7ToneReg) {
+  // tone: 借用先ごとの音色(デューティ '0'-'3'/'0'-'7'、波形 'copy'|'pulse50'|…、ノイズ周期 'auto'|'0'-'15')
+  function adaptEvents(ch, s, fam, n163WaveReg, vrc7Inst, vrc7ToneReg, tone, fdsWaveReg) {
     const events = ch.events;
     const isAy = s.chip === 'ay8910';
     const nativeVrc7 = s.kind === 'fm' && fam === 'vrc7' && (vrc7Inst === 'auto' || vrc7Inst == null);
     const nativeFme7 = s.kind === 'square' && fam === 'fme7';
-    if (nativeVrc7 || nativeFme7 || fam === 'noise') return; // そのまま
+    if (nativeVrc7 || nativeFme7 || (fam === 'noise' && s.kind === 'noise')) return; // そのまま(旋律→ノイズは下で周期へ写す)
+    const dutyOf = (max, def) => { const n = parseInt(tone, 10); return (isFinite(n) && n >= 0 && n <= max) ? n : def; };
     // AYのミキサー: ノイズ単独(mode 2)は矩形波系の借用先では鳴らせないので休符に、
     // トーン+ノイズ(mode 3)はトーンだけ残す。FME-7以外ではN<n>も出さない
     for (const ev of events) {
@@ -774,7 +862,7 @@
     ch.hasFme7Noise = false;
     // 音量: 借用先の尺度へ。AY/SN→線形は従来どおり LIN_TABLE(エンベロープ表も同じ表で写像済み)、
     // それ以外(attDbを持つOPN/ADPCM、OPLL→非VRC7、AY/SN→VRC7/FME-7以外の対数)は減衰dB経由
-    const linearFam = fam === 'n163' || fam === 'pulse' || fam === 'vrc6pulse';
+    const linearFam = fam === 'n163' || fam === 'pulse' || fam === 'vrc6pulse' || fam === 'vrc6saw' || fam === 'fds';
     if (linearFam && LIN_TABLE[s.chip] && s.kind === 'square') {
       mapConstVolumes(events, LIN_TABLE[s.chip]);
     } else if (fam === 'vrc7' && VRC7_TABLE[s.chip] && s.kind === 'square') {
@@ -784,7 +872,9 @@
       for (const ev of events) if (ev.note !== null && (ev.attDb !== undefined || ev.volume !== undefined)) ev.volume = conv(sourceAttDb(s, ev));
     }
     for (const ev of events) delete ev.attDb;
-    if (fam === 'vrc7' && vrc7Inst === '0' && s.kind === 'fm4' && vrc7ToneReg) {
+    if (fam === 'noise') {
+      MML.Convert.Borrow.pitchedToNoise(ch, tone);
+    } else if (fam === 'vrc7' && vrc7Inst === '0' && s.kind === 'fm4' && vrc7ToneReg) {
       // OPN 4op → VRC7 2op 自作音色(opnToOpllBytes)。音色ごとに @OP<n> を登録し OP<n>+@0 で切り替える
       for (const ev of events) {
         delete ev.n163Wave;
@@ -801,31 +891,55 @@
       for (const ev of events) { if (ev.note !== null) ev.instrument = inst; delete ev.vrc7Tone; delete ev.n163Wave; delete ev.opnPatch; }
       ch.hasVrc7Tone = false; ch.hasInstrument = true;
     } else if (fam === 'n163') {
-      // ADPCM(サンプル1周期の波形あり)はその波形を、他は矩形波を @N に登録して音色にする
+      // ADPCM(サンプル1周期の波形あり)はその波形を、他は矩形波を @N に登録して音色にする。tone の固定波形が優先
+      const forcedWave = MML.Convert.Borrow.toneWave(tone);
       for (const ev of events) {
         if (ev.note === null) { delete ev.n163Wave; continue; }
-        const wave = (ev.n163Wave && ev.n163Wave.length === N163_WAVE_LEN) ? ev.n163Wave : N163_SQUARE_WAVE;
+        const wave = forcedWave || ((ev.n163Wave && ev.n163Wave.length === N163_WAVE_LEN) ? ev.n163Wave : N163_SQUARE_WAVE);
         ev.instrument = n163WaveReg.assign(wave); ev.rawLength = N163_WAVE_LEN;
         delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch;
       }
       ch.hasInstrument = true; ch.hasVrc7Tone = false;
     } else if (fam === 'pulse') {
-      // 2A03/MMC5パルス: @2=デューティ50%(矩形波)
-      for (const ev of events) { if (ev.note !== null) ev.instrument = 2; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
+      // 2A03/MMC5パルス: 既定@2=デューティ50%(矩形波)。tone で @0-@3
+      const duty = dutyOf(3, 2);
+      for (const ev of events) { if (ev.note !== null) ev.instrument = duty; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
       ch.hasInstrument = true; ch.hasVrc7Tone = false;
     } else if (fam === 'vrc6pulse') {
-      // VRC6パルス: @7=デューティ50%(8/16)
-      for (const ev of events) { if (ev.note !== null) ev.instrument = 7; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
+      // VRC6パルス: 既定@7=デューティ50%(8/16)。tone で @0-@7
+      const duty = dutyOf(7, 7);
+      for (const ev of events) { if (ev.note !== null) ev.instrument = duty; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
       ch.hasInstrument = true; ch.hasVrc7Tone = false;
     } else if (fam === 'fme7') {
       // FME-7: @1=トーンのみ
       for (const ev of events) { if (ev.note !== null) ev.instrument = 1; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
+      ch.hasInstrument = true; ch.hasVrc7Tone = false;
+    } else if (fam === 'vrc6saw') {
+      // VRC6のこぎり波: 音色指定は無い(音量は0-63だが借用元の0-15をそのまま使う。src/convert/borrow.js と同じ)
+      for (const ev of events) { delete ev.instrument; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
+      ch.hasInstrument = false; ch.hasVrc7Tone = false;
+    } else if (fam === 'fds') {
+      // FDS: 元が波形を持つ(SCC等)ならそれを64サンプル/0-63へ引き伸ばし、無ければ矩形波を @FM に登録して音色にする
+      const forced = MML.Convert.Borrow.toneWave(tone);
+      for (const ev of events) {
+        if (ev.note === null) { delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; continue; }
+        const src16 = forced || ((ev.n163Wave && ev.n163Wave.length) ? ev.n163Wave : N163_SQUARE_WAVE);
+        ev.instrument = fdsWaveReg.assign(toFdsWave(src16));
+        delete ev.rawLength; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch;
+      }
       ch.hasInstrument = true; ch.hasVrc7Tone = false;
     } else if (fam === 'triangle') {
       // 三角波: 音量・音色は無い。音程だけ
       for (const ev of events) { delete ev.volume; delete ev.envelopeV; delete ev.envelopeVr; delete ev.instrument; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
       ch.hasVolume = false; ch.hasEnvelope = false; ch.hasInstrument = false; ch.hasVrc7Tone = false;
     }
+  }
+  // 0-15/任意長の波形(N163形式)を FDS の 64サンプル/0-63 へ(最近傍で引き伸ばす)
+  function toFdsWave(w) {
+    const n = w.length, max = Math.max(1, ...w);
+    const out = new Array(64);
+    for (let i = 0; i < 64; i++) out[i] = Math.max(0, Math.min(63, Math.round(w[Math.floor(i * n / 64)] * 63 / max)));
+    return out;
   }
 
   /**
@@ -866,8 +980,14 @@
     }
     const family = families[0];
     const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', ym2610: 'psg', ym2612: 'psg', ym2151: 'psg', ym2203: 'psg', ym2608: 'psg', ym3812: 'psg', ym3526: 'psg', y8950: 'psg', ga20: 'psg', segapcm: 'psg', c140: 'psg', c352: 'psg', qsound: 'psg', okim6295: 'psg', multipcm: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };
-    const ignoredChips = h.usedChips.filter(ch => !ch.impl || famOf[ch.id] !== family).map(ch => ch.name);
+    // ストリーミングDAC(YM2612 DAC / OKIM6258)は旋律の変換対象ではないが、main.js が
+    // ログから打点を取って options.drumHits で渡してくると E(DPCM) へ焼かれる(2026-09-05)。
+    // その場合は「無視した」と言わない(X68000曲は音源がYM2151+OKIM6258しか無いので目立つ)
+    const dacDrumChip = { OKI: 'okim6258', YMDA: 'ym2612' };
+    const dacDrumChips = new Set((options.drumHits || []).map(x => dacDrumChip[x.chId]).filter(Boolean));
+    const ignoredChips = h.usedChips.filter(ch => (!ch.impl || famOf[ch.id] !== family) && !dacDrumChips.has(ch.id)).map(ch => ch.name);
     const ignoredNotes = [];
+    if (dacDrumChips.has('okim6258')) ignoredNotes.push('OKIM6258(ADPCM)の打点は E(DPCM) へ変換しています(DACストリームの開始アドレスでサンプルを同定)。');
     // 音程が取れなかったサンプルの行方は options.cmd.DRUM で変わる(休符 / ドラムパートへ)
     const drumOn = MML.Convert.normalizeCmd(options.cmd).DRUM !== false;
     const noPitchNote = drumOn

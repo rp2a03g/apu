@@ -17,7 +17,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { convertBytes, expandInput } = require('./convert');
+const { convertBytes, expandInput, ctx } = require('./convert');
 const { ROOT } = require('./load');
 
 // Windows でも Node はスラッシュ区切りを受け付ける(バックスラッシュのエスケープ事故を避ける)
@@ -61,13 +61,31 @@ async function collectSongs(files, maxEntries, corpus) {
   return songs;
 }
 
+/**
+ * 出来上がったMMLが実際にコンパイルできるかを見る。
+ * ★SHA比較だけでは「変換は通るがコンパイルエラーで再生も書き出しもできないMML」を
+ *   取りこぼす。実際、VRC7自作音色の同時使用チェック追加(2026-08-27)でメガドライブ等の
+ *   VGMが全滅していたのに、この回帰は最後まで緑のままだった。コンパイルエラーは
+ *   ベースラインとの差分に関係なく常に失敗として扱う。
+ */
+function compileError(mml) {
+  try {
+    const errs = ctx().Mml.compile(mml, {}).errors || [];
+    return errs.length ? (errs[0].lineNo ? `[Line ${errs[0].lineNo}] ` : '') + errs[0].message : null;
+  } catch (e) {
+    return `${e.constructor.name}: ${e.message}`;
+  }
+}
+
 async function runOne(item, seconds) {
   if (item.openError) return { ok: false, error: item.openError };
   try {
     const bytes = item.read ? await item.read() : item.bytes;
     const r = await convertBytes(bytes, item.format, { seconds });
+    const compErr = compileError(r.mml);
     return {
       ok: true,
+      ...(compErr ? { compileError: compErr } : {}),
       format: r.format,
       bpm: r.bpm,
       expansions: (r.expansions || []).slice().sort(),
@@ -109,6 +127,7 @@ async function main() {
   const entries = {};
   const failed = [];
   const changed = [];
+  const uncompilable = [];
   const t0 = Date.now();
 
   for (let i = 0; i < files.length; i++) {
@@ -124,6 +143,7 @@ async function main() {
     entries[key] = rec;
 
     let mark = '.';
+    if (r.ok && r.compileError) { uncompilable.push({ key, error: r.compileError }); mark = 'C'; }
     if (!r.ok) { failed.push({ key, error: r.error }); mark = 'X'; }
     else if (baseline && baseline[key] && baseline[key].sha !== r.sha) {
       changed.push({ key, from: baseline[key], to: rec }); mark = '~';
@@ -138,6 +158,7 @@ async function main() {
   console.log(`\n対象   : ${files.length} 曲 (各 ${seconds} 秒, ヘッダ既定の曲番号)`);
   console.log(`成功   : ${okCount}`);
   console.log(`失敗   : ${failed.length}`);
+  console.log(`コンパイル不可: ${uncompilable.length}`);
   console.log(`所要   : ${elapsed} 秒`);
 
   if (failed.length) {
@@ -145,9 +166,18 @@ async function main() {
     for (const f of failed) console.log(`  ${f.key}\n      ${f.error}`);
   }
 
+  if (uncompilable.length) {
+    console.log('\n--- 変換はできたがMMLがコンパイルできない曲(再生も書き出しも不可) ---');
+    for (const f of uncompilable.slice(0, 20)) console.log(`  ${f.key}\n      ${f.error}`);
+    if (uncompilable.length > 20) console.log(`  …他 ${uncompilable.length - 20} 曲`);
+  }
+
   if (update) {
     fs.writeFileSync(manifestPath, JSON.stringify({ corpus, seconds, created: new Date().toISOString(), entries }, null, 1));
     console.log(`\nベースラインを書き出しました: ${path.relative(ROOT, manifestPath)}`);
+    // コンパイル不可はベースラインの差分と無関係に常にバグなので --update でも失敗にする
+    // (「今の出力」を正としてしまうと、鳴らないMMLがそのまま正解として焼き付いてしまう)
+    if (uncompilable.length) process.exit(1);
     return;
   }
 
@@ -169,7 +199,7 @@ async function main() {
   }
 
   const newFailures = failed.filter((f) => baseline[f.key] && baseline[f.key].ok);
-  if (newFailures.length || changed.length) process.exit(1);
+  if (newFailures.length || changed.length || uncompilable.length) process.exit(1);
 }
 
 main().catch((e) => { console.error(e.stack || e.message); process.exit(3); });

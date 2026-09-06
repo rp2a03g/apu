@@ -979,6 +979,12 @@
           this._dacCur.bytes = Math.max(0, Math.floor((s.end - s.start) / Math.max(1, s.stepSize)));
           this._dacCur.rate = s.freq;
           this._dacCur.stepSize = s.stepSize;
+          // OKIM6258はROMを持たないので、鍵盤行の波形アイコン用に「いま流しているサンプル」を
+          // チップへ教える(expansion/okim6258.js setStreamSample)。音の生成には関与しない
+          if (chip === 'okim6258') {
+            const a = this.adapterById[s.second ? 'okim6258_2' : 'okim6258'];
+            if (a && a.chip && a.chip.setStreamSample) a.chip.setStreamSample(bank.data, s.start, this._dacCur.bytes);
+          }
         }
       }
     }
