@@ -25,10 +25,11 @@
 
   // FME-7: freq = CLOCK / (32 * period)。src/mml/compiler.jsのfme7Period()と同じ式だが、
   // ここでは丸めない(生の連続値)。detectChorusDetune(src/convert/detune.js)は「理論値の
-  // 周期」と「実測値の周期」の差をD<n>として使うため、この2つを個別に整数へ丸めてから
-  // 引き算すると、両方が同じ整数へ丸め込まれて差が消えてしまうことがある(Ys1 12曲目の
-  // F5で実測: 高い音域ほど1周期あたりのHz幅が広がり、四捨五入で相殺されて本来必要な
-  // 補正がD0に消えてしまっていた)。丸めるのは差を求めた後の1回だけにする(detune.js側で行う)。
+  // 周期」と「実測値の周期」から D<n> を求めるため、ここでは丸めない。丸めは detune.js 側で
+  // 「D = round(実測) − round(理論値)」として行う(再生側がテーブルの整数値+D を鳴らす以上、
+  // 両方が同じ整数へ丸まるなら D0 が正しい=テーブル値が既に実測へ一番近い格子点。
+  // ★2026-09-07 まで round(実測−理論値) としていたため、テーブル側の丸めと逆向きに出ると
+  // 1格子ずれていた。detune.js の履歴コメント参照)。
   function fme7PeriodRaw(freq) {
     return CPU_CLOCK_NTSC / (32 * freq);
   }
@@ -128,7 +129,12 @@
     return plan;
   };
 
+  // 基準ピッチ(#TUNING)の自動検出: 変換本体(convertKssOnce)を必要なら2回走らせる
+  // (src/convert/options.js MML.Convert.autoTune 参照。全 *2mml 共通の入口の作り)
   MML.KSS2MML.convertCapture = function (cap, options) {
+    return MML.Convert.autoTune(options, (o) => convertKssOnce(cap, o));
+  };
+  function convertKssOnce(cap, options) {
     options = options || {};
     // 変換設定(src/convert/options.js): コマンド使用/不使用・譜面整形(全レジストリ・
     // detune.js・emitScore へ同じ cmd を渡す)
@@ -373,6 +379,7 @@
       ...borrowNotes.map(n => `; ※ ${n}`),
       ...vrc7Notes.map(n => `; ※ ${n}`),
       ...(drumNote ? [`; ※ ${drumNote}`] : []),
+      ...MML.Convert.tuningCommentLines(),
       `; =========================================================`,
       ``
     ].join('\n');
@@ -386,7 +393,7 @@
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       headerLines: [
-        ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+        ...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(expansions.indexOf('n163') >= 0 ? n163WaveReg.defLines() : []),
         ...(expansions.indexOf('vrc7') >= 0 ? vrc7ToneReg.defLines() : [])
       ]
@@ -400,7 +407,7 @@
       : null;
 
     return {
-      mml, bpm: Math.round(bpm), pitchCheck,
+      mml, bpm: Math.round(bpm), pitchCheck, scoreChannels,
       chips: ['PSG'].concat(hasScc ? ['SCC'] : []).concat(hasOpll ? ['FMPAC'] : []).concat(hasOpl ? ['MSX-AUDIO'] : []),
       expansions,
       n163Wave: sccResult.n163Wave,

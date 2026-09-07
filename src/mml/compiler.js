@@ -135,6 +135,9 @@
  *   #TITLE/#COMPOSER/#MAKER/#PROGRAMER <str>  メタ情報(戻り値のmetaに格納。再生には影響しない)
  *   #OCTAVE-REV <n>  0以外で`>``<`(オクターブ上げ/下げ)の意味を反転
  *   #GATE-DENOM <n>  q<n>のゲート分母を8から変更(既定8)
+ *   #TUNING <cent>   基準ピッチ。全音符の周波数を12平均律(A4=440Hz)からこのセント数だけずらす(小数可、±1200)。
+ *                    音名は変わらない(キー/トランスポーズではない)。*2mml変換が曲全体の音程偏差を
+ *                    自動検出して出す(src/convert/options.js detectTuning)。NSF書き出しも同じ値を使う
  *   #EX-VRC6/#EX-VRC7/#EX-DISKFM/#EX-MMC5/#EX-NAMCO106/#EX-FME7
  *                    拡張音源の使用宣言。opt.expansions(UI選択)と統合される
  *                    (MML本文がこれらを含めば、UIで選択していなくてもその音源が有効になる)
@@ -260,9 +263,12 @@
     return result;
   }
 
+  // #TUNING(基準ピッチ、セント)の周波数比。Mml.compile() が曲ごとに設定する(lexer.js settings.tuningCents)。
+  // ppmckDriver.js の noteFrequency も同じ比で周波数テーブルを作る(ブラウザ再生とNSF書き出しの一致)
+  let tuningRatio = 1;
   function noteFrequency(noteNumber) {
     // noteNumber: o4 a (A4=440Hz) を基準(57)とした半音単位の値
-    return 440 * Math.pow(2, (noteNumber - 57) / 12);
+    return 440 * Math.pow(2, (noteNumber - 57) / 12) * tuningRatio;
   }
 
   // D<n>(デチューン)。算出済みの周期/周波数レジスタ値へ生のオフセットを加算し、
@@ -2576,6 +2582,8 @@
     const errors = [];
     const { channels, errors: splitErrors, envelopes, meta, settings, detectedExpansions } = Mml.splitChannels(source);
     errors.push(...splitErrors);
+    // #TUNING(基準ピッチ): 以降の noteFrequency() 全てに効く(compile は同期処理なので曲ごとに設定し直すだけでよい)
+    tuningRatio = Math.pow(2, ((settings && settings.tuningCents) || 0) / 1200);
 
     // #EX-VRC6等でMML本文が宣言した拡張音源は、opt.expansions(UI選択)と統合する
     // (INV-2: MMLテキストが正典。UIの選択有無に関わらずMML側の宣言を尊重する)

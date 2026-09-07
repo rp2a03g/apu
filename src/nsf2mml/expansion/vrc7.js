@@ -15,8 +15,8 @@
 
   function freqToNoteNumber(freq) {
     if (freq <= 0) return null;
-    const n = Math.round(57 + 12 * Math.log2(freq / 440));
-    return (n >= 0 && n <= 119) ? n : null;
+    // 丸めは全形式共通(基準ピッチ #TUNING 込み。src/convert/options.js MML.Convert.freqToNote)
+    return MML.Convert.freqToNote(freq);
   }
   // vrc7FreqToFnumBlock()の逆関数: freq = fnum * 2^block * 49716 / 2^19
   function vrc7Freq(fnum, block) { return (fnum * 49716 * Math.pow(2, block)) / 524288; }

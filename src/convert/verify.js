@@ -100,7 +100,10 @@
       const chips = ['nes', ...(compiled.expansions || []).filter((e) => e !== 'dpcm')];
       const rollTracks = MML.UI.buildRollTracksFromRegSnapshots(
         snapshots, writeLog, compiled.totalFrames, sampleRate / compiled.frameRate,
-        sampleRate, chips, null) || [];
+        sampleRate, chips, null,
+        // #TUNING(基準ピッチ)込みで音名へ丸める(keyboard.js freqToMidi)。これが無いと全体ずれのある
+        // 曲で「変換元は c、鳴った音は c+」という偽の不一致が出る
+        { tuningCents: (compiled.settings && compiled.settings.tuningCents) || 0 }) || [];
       const trackById = new Map(rollTracks.map((t) => [t.id, t]));
       // N163のロール行idは N1=内部ch7(最上位) の逆順(keyboard.js snapshotN163参照)。
       // コンパイラはレターk(0始まり)を内部ch (8-numCh)+k に置くため、対応する行は

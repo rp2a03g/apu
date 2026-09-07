@@ -99,7 +99,8 @@
   // が実測した基本周波数から算出した tune を渡すことで実機の発音音程に一致させる。
   function pitchToSemitone(pitch, tune = 0) {
     if (pitch <= 0) return null;
-    const semi = Math.round(12 * Math.log2(pitch / 0x1000) + tune) + 60;
+    // 基準ピッチ(#TUNING、MML.Convert.tuningCents)込み。他形式の freqToNote と同じ丸め基準
+    const semi = Math.round(12 * Math.log2(pitch / 0x1000) + tune - MML.Convert.tuningCents() / 100) + 60;
     return (semi >= 0 && semi <= 119) ? semi : null;
   }
 
@@ -142,35 +143,71 @@
   }
 
   // ── BRR サンプルの原音(基本周波数)検出 ───────────────────────────
-  // pitch=0x1000(原音・32kHz再生)で鳴らした時の基本周波数[Hz]を自己相関で推定する。
+  // pitch=0x1000(原音・32kHz再生)で鳴らした時の基本周波数[Hz]をYIN(CMNDF)で推定する。
   // 旋律楽器のように明確な周期を持つ波形では高い信頼度で検出できる。打楽器/ノイズは
   // 周期が不明瞭で信頼度が低くなるため、呼び出し側(computeSrcnFineTune)で閾値により
-  // フォールバックする。倍音/低調波の取り違えを避けるため、自己相関のピーク(全体最大の
-  // 90%超)のうち最短ラグ=基本波を採用する。
+  // フォールバックする。
   // brrBytes: BRRサンプル全体。loopByteOffset(省略可): DIRのループ開始アドレスの
-  // サンプル先頭からのバイトオフセット(_collectBrrSamplesが採取)。あればループ以降=
-  // 完全な定常部を解析窓にする(アタック過渡による誤検出を避ける)。
+  // サンプル先頭からのバイトオフセット(_collectBrrSamplesが採取)。
+  // 戻り値 { freq, conf, period(サンプル、実数), cycleStart(1周期を切り出すのに適した定常部の先頭),
+  //          percussive(打楽器らしい: 解析区間内で振幅が1/3未満に減衰する、またはループ長そのものしか周期が無い
+  //          256サンプル以上のループ=ノイズのループ。drumSrcns の自動判定が「原音不明」と同列に使う) }
   //
   // ★2026-08-25 自己相関の「最初の0.9maxピーク」方式からYIN(CMNDF)方式へ全面差し替え。
   // 旧方式は倍音の強いサンプル(FF4のブラス系srcn65等)で第2〜4倍音のラグを掴み、原音推定が
   // 丸ごと1〜2オクターブずれて全ノートのオクターブが崩壊していた(実測: V2の実出力280Hzに
-  // 対し変換はo6=1109Hz)。YINは累積平均正規化差分d'(τ)が「最初に閾値を下回る谷」を採る
-  // 標準的なオクターブ頑健化で、倍音ラグでは谷が浅くならないため誤爆しない。
-  // 谷は放物線補間でサブサンプル化(整数ラグだと高音サンプルほど±数十セント粗くなるため)。
+  // 対し変換はo6=1109Hz)。谷は放物線補間でサブサンプル化(整数ラグだと高音サンプルほど
+  // ±数十セント粗くなるため)。
+  //
+  // ★2026-09-07 「SPC変換が音痴に聞こえる」の真因2件を修正(実音声ソロ再生との照合で確認):
+  //  1. 短いループ波形が解析不能だった。解析窓(W+maxTau≈2200サンプル)より短い単周期波形
+  //     (ループ32〜240サンプルのチップ音風サンプル。Konami/Capcom系に多い)は配列外を読んで
+  //     NaN→conf 0→補正なし(C5仮定)となり、そのボイス丸ごと任意の音程へ転んでいた
+  //     (FF4 Theme of Love 主旋律=ループ32=1000Hz が11半音低い、Contra III が1半音高い等。
+  //     コーパス標本143曲中61曲で旋律サンプルが半音以上ズレていた)。
+  //     → ループ有りのサンプルは、DSPが実際に鳴らすのと同じく**ループ区間を繰り返し並べた
+  //     (タイルした)波形**を解析する。短い波形も解析でき、単周期ループは厳密値になる。
+  //  2. 倍音の強い波形で第3倍音を掴んでいた。「最初に閾値0.15を切る谷」が倍音位置(τ=33)で
+  //     止まり、基本波の谷(τ=96、d'=0.011)を見なかった(Corridors of Time 主旋律が18半音上、
+  //     オクターブ違いも同型)。→ 最初の谷 t1 の整数倍(k=2..6)に**明らかに深い谷**があれば
+  //     基本波はそちら(最小谷 m に対し d' < 2m+0.01 を満たす最小の τ を採る。倍音の谷は
+  //     基本波の谷より必ず浅く、純粋な単周期ループは全部 0 なので t1 のまま)。
+  //  タイルした波形はループ長 ll 自身で必ず d'=0 になるので、ll≤maxTau の打楽器のループ尾
+  //  (減衰後の小さな切れ端をループさせたもの)まで「音程あり」になりうる。ループ区間の振幅が
+  //  サンプル全体の1/10未満なら音色の本体ではないとみなし、従来どおりサンプル全体を解析する
+  //  (打楽器は conf<0.8 のままにして drumSrcns の自動判定を変えない)。
   function detectBrrFundamental(brrBytes, loopByteOffset) {
     const pcm = decodeBrrBytes(brrBytes);
     const L0 = pcm.length;
-    if (L0 < 256) return null;
-    const W = 1024;                       // 差分積分の窓幅
-    const maxTau = Math.min(1200, L0 >> 1); // 最低約27Hzまで
-    // 解析開始点: ループ開始(=定常部)が分かればそこ、無ければ従来の「少し後ろ」。
-    // 窓+最大ラグが収まらない場合は後ろから詰める
-    let start = loopByteOffset != null && loopByteOffset >= 0
-      ? Math.floor(loopByteOffset / 9) * 16
-      : Math.min(L0 >> 2, 512);
-    if (start + W + maxTau > L0) start = Math.max(0, L0 - W - maxTau);
-    if (maxTau < 32) return null;
-    const x = pcm;
+    if (L0 < 32) return null;
+    const loopStart = (loopByteOffset != null && loopByteOffset >= 0) ? Math.floor(loopByteOffset / 9) * 16 : null;
+    const loopFlag = brrBytes.length >= 9 && (brrBytes[brrBytes.length - 9] & 2) !== 0;
+    let looped = loopFlag && loopStart != null && loopStart < L0 && (L0 - loopStart) >= 16;
+    if (looped) {
+      // ループ区間が本体か(打楽器の減衰尾ではないか)を振幅比で判定
+      let sumAll = 0, sumLoop = 0;
+      for (let i = 0; i < L0; i++) { const a = Math.abs(pcm[i]); sumAll += a; if (i >= loopStart) sumLoop += a; }
+      const meanAll = sumAll / L0, meanLoop = sumLoop / (L0 - loopStart);
+      if (!(meanLoop >= meanAll * 0.1)) looped = false;
+    }
+    let x, W, maxTau, start;
+    if (looped) {
+      const ll = L0 - loopStart;
+      W = 4096; maxTau = 1200;                   // 最低約27Hzまで
+      const N = W + maxTau + 1;
+      x = new Float32Array(N);
+      for (let i = 0; i < N; i++) x[i] = pcm[loopStart + (i % ll)];
+      start = 0;
+    } else {
+      if (L0 < 256) return null;
+      W = Math.min(1024, L0 >> 1);                // 差分積分の窓幅
+      maxTau = Math.min(1200, L0 - W - 1);
+      if (maxTau < 32) return null;
+      // 解析開始点: 「少し後ろ」(アタック過渡を避ける)。窓+最大ラグが収まらない場合は後ろから詰める
+      start = Math.min(L0 >> 2, 512);
+      if (start + W + maxTau > L0) start = Math.max(0, L0 - W - maxTau);
+      x = pcm;
+    }
     // d(τ) = Σ_{i<W} (x[i]-x[i+τ])^2 → d'(τ) = d(τ)·τ / Σ_{u≤τ} d(u)
     const d = new Float64Array(maxTau);
     for (let tau = 1; tau < maxTau; tau++) {
@@ -193,6 +230,19 @@
       for (let tau = 2; tau < maxTau - 1; tau++) if (dn[tau] < mn) { mn = dn[tau]; period = tau; }
       if (period < 0) return null;
     }
+    // 倍音判定(上記★2): t1 の整数倍付近の局所最小を候補にし、明らかに深い谷があればそちらを基本波にする
+    const cands = [[period, dn[period]]];
+    for (let k = 2; k <= 6; k++) {
+      const c = period * k;
+      if (c >= maxTau - 2) break;
+      let best = -1, bv = Infinity;
+      for (let t = Math.max(2, c - (k + 2)); t <= Math.min(maxTau - 2, c + (k + 2)); t++) if (dn[t] < bv) { bv = dn[t]; best = t; }
+      if (best > 0) cands.push([best, bv]);
+    }
+    let m = Infinity;
+    for (const c of cands) if (c[1] < m) m = c[1];
+    const thr = 2 * m + 0.01;
+    for (const c of cands) if (c[1] < thr) { period = c[0]; break; }
     // 谷の放物線補間(サブサンプル精度)
     let refined = period;
     const y0 = dn[period - 1], y1 = dn[period], y2 = dn[period + 1];
@@ -201,8 +251,29 @@
       const delta = 0.5 * (y0 - y2) / denom;
       if (delta > -1 && delta < 1) refined = period + delta;
     }
+    // 打楽器らしさ(★2026-09-07): 原音推定が短いループでも成功するようになった副作用で、以前は「原音不明」を
+    // 手掛かりに打楽器と判定していたキック(減衰する低いサイン波)やノイズのループ(ループ長でしか繰り返さない
+    // 切れ端)が音程付きへ回ってしまう。解析区間(ループ有りならループ区間、256サンプル未満の単周期ループは除く)の
+    // 末尾1/4と先頭1/4のRMS比が0.35未満=減衰、またはループ長≥256でループ長そのものが周期=ノイズループを
+    // percussive とし、drumSrcns が「原音不明」と同じ扱いにする(コーパス標本143曲で減衰比は打楽器≤0.3/
+    // 持続音≥0.9に二極化し、この境目で誤分類なし)
+    let percussive = false;
+    {
+      const ll = looped ? (L0 - loopStart) : 0;
+      const rs = looped ? (ll >= 256 ? loopStart : -1) : 0;
+      if (rs >= 0) {
+        const q = Math.floor((L0 - rs) / 4);
+        if (q >= 8) {
+          let a = 0, b = 0;
+          for (let i = rs; i < rs + q; i++) a += pcm[i] * pcm[i];
+          for (let i = L0 - q; i < L0; i++) b += pcm[i] * pcm[i];
+          if (a > 0 && Math.sqrt(b / a) < 0.35) percussive = true;
+        }
+      }
+      if (looped && ll >= 256 && Math.abs(refined - ll) <= ll * 0.01) percussive = true;
+    }
     // 信頼度: 1 - d'(谷)。周期が明瞭なほど1に近づく(打楽器/ノイズは低くなり補正対象外へ)
-    return { freq: DSP_RATE / refined, conf: 1 - Math.min(1, y1) };
+    return { freq: DSP_RATE / refined, conf: 1 - Math.min(1, y1), period: refined, cycleStart: looped ? loopStart : start, percussive };
   }
 
   // ── srcn ごとの原音チューニング補正(半音)を算出 ─────────────────
@@ -213,9 +284,13 @@
   // (原音がC5付近のサンプル→補正≈0)も従来どおりの結果を保つ。
   const REFERENCE_HZ = 440 * Math.pow(2, 3 / 12); // ≈523.25Hz(C5)
   const FUNDAMENTAL_CONF_MIN = 0.8;
+  // 戻り値は { [srcn]: 半音(実数) }。加えて予約キー percussive に「打楽器らしい」srcnの配列を持つ
+  // (detectBrrFundamental の percussive。数値キーと衝突せず、Workerへの postMessage も素通りするので
+  //  ロール(roll-builders.js)/鍵盤(main.js)/変換の3経路へ配管を足さずに drumSrcns まで届く)
   function computeSrcnFineTune(brrSamples) {
     const tune = {};
     if (!brrSamples) return tune;
+    const percussive = [];
     for (const srcn in brrSamples) {
       const brr = brrSamples[srcn];
       if (!brr || !brr.bytes || brr.bytes.length === 0) continue;
@@ -223,7 +298,9 @@
       if (f && f.conf >= FUNDAMENTAL_CONF_MIN && f.freq > 0) {
         tune[srcn] = 12 * Math.log2(f.freq / REFERENCE_HZ);
       }
+      if (f && f.percussive) percussive.push(+srcn);
     }
+    tune.percussive = percussive;
     return tune;
   }
   MML.SPC2MML.computeSrcnFineTune = computeSrcnFineTune;
@@ -235,7 +312,8 @@
   // 「どのsrcnが打楽器か」を決める。優先順:
   //   1. 手動上書き drumKinds[srcn] ('drum' | 'pitch')。鍵盤/パッドからの指定
   //      (Emu.SamplePitchUtil のkind上書きをBRR内容ハッシュで引いたもの。main.js参照)
-  //   2. 自動: 原音周期が検出できず(computeSrcnFineTuneの補正が無い=conf<0.8)、かつ
+  //   2. 自動: 原音周期が検出できず(computeSrcnFineTuneの補正が無い=conf<0.8)、または打楽器らしい
+  //      (減衰/ノイズループ。computeSrcnFineTune の予約キー percussive)、かつ
   //      曲中で使われたピッチが DRUM_MAX_PITCHES 種以下(タムの高低程度まで。旋律楽器は
   //      周期が取れなくても多数のピッチで弾かれるので除外される)
   // ノイズ(NON)で鳴っているイベントはサンプルではないので対象外(ノイズ借用先へ行く)。
@@ -261,7 +339,8 @@
       if (k === 'drum') { out.add(srcn); continue; }
       if (k === 'pitch') continue;
       const untuned = !srcnFineTune || srcnFineTune[srcn] === undefined;
-      if (untuned && pitches.size <= DRUM_MAX_PITCHES) out.add(srcn);
+      const percussive = !!(srcnFineTune && srcnFineTune.percussive && srcnFineTune.percussive.indexOf(srcn) >= 0);
+      if ((untuned || percussive) && pitches.size <= DRUM_MAX_PITCHES) out.add(srcn);
     }
     return out;
   };
@@ -814,7 +893,16 @@
   }
 
   // ── MML 生成 ─────────────────────────────────────────────────────────
+  // 基準ピッチ(#TUNING)の自動検出: 変換本体(convertSpcOnce)を必要なら2回走らせる
+  // (src/convert/options.js MML.Convert.autoTune 参照。全 *2mml 共通の入口の作り)
+  // SPC の絶対音程は BRR サンプルの原音推定(computeSrcnFineTune)に依存する。2026-09-07 の推定修正
+  //   (detectBrrFundamental 冒頭コメント)までは推定の偏りが曲全体のずれに見えたため SPC だけ厳しい guard
+  //   (15セント/四分位範囲15)を掛けていたが、修正後は曲内の推定が揃い(Chrono Trigger 全曲で四分位範囲
+  //   0〜7)、残る中央値±10セントは曲固有の実際のずれ(例: Wind Scene +9.4 で D が11個)なので他形式と同じ既定にした
   MML.SPC2MML.convert = function (log, brrSamples, options = {}) {
+    return MML.Convert.autoTune(options, (o) => convertSpcOnce(log, brrSamples, o));
+  };
+  function convertSpcOnce(log, brrSamples, options = {}) {
     const FRAMES = log.length;
 
     // デフォルトマップ: V0→A, V1→B ... V3→D, V4→スキップ
@@ -1078,15 +1166,17 @@
     // detectBrrFundamentalを流用)。周期が取れない打楽器/ノイズ系は従来通りサンプル全体を
     // リサンプリング(それらしい倍音構成にはならないが無音よりまし)。振幅は最大値で正規化。
     const waveCache = {}; // srcn → { fds: [], n163: [] }
-    function extractCyclePcm(brrBytes) {
+    function extractCyclePcm(brrBytes, loopByteOffset) {
       const pcm = decodeBrrBytes(brrBytes);
       if (pcm.length === 0) return new Float32Array([0]);
-      const fund = detectBrrFundamental(brrBytes);
+      const fund = detectBrrFundamental(brrBytes, loopByteOffset);
       let cycle = pcm;
       if (fund && fund.conf >= FUNDAMENTAL_CONF_MIN && fund.freq > 0) {
-        const period = Math.max(2, Math.round(DSP_RATE / fund.freq));
-        const start = Math.min(pcm.length >> 2, 512); // detectBrrFundamentalと同じ定常部開始
-        if (start + period <= pcm.length) cycle = pcm.slice(start, start + period);
+        const period = Math.max(2, Math.round(fund.period));
+        // 定常部の先頭(ループ有りならループ開始)から1周期。ループが1周期より短い場合はループを繰り返して埋める
+        const start = fund.cycleStart;
+        const ll = pcm.length - start;
+        if (ll > 0) { cycle = new Float32Array(period); for (let i = 0; i < period; i++) cycle[i] = pcm[start + (i % ll)]; }
       }
       let peak = 0;
       for (const v of cycle) peak = Math.max(peak, Math.abs(v));
@@ -1100,7 +1190,7 @@
     function getWave(srcn) {
       if (waveCache[srcn]) return waveCache[srcn];
       const brr = brrSamples[srcn];
-      const cycle = brr && brr.bytes.length > 0 ? extractCyclePcm(brr.bytes) : new Float32Array([0]);
+      const cycle = brr && brr.bytes.length > 0 ? extractCyclePcm(brr.bytes, brr.loopByteOffset) : new Float32Array([0]);
       waveCache[srcn] = { fds: pcmToFdsWave(cycle), n163: pcmToN163Wave(cycle) };
       return waveCache[srcn];
     }
@@ -1175,7 +1265,7 @@
     function getOpllToneIdx(srcn) {
       if (opllPatchCache[srcn] !== undefined) return opllPatchCache[srcn];
       const brr = brrSamples[srcn];
-      const cycle = brr && brr.bytes.length > 0 ? extractCyclePcm(brr.bytes) : new Float32Array([0]);
+      const cycle = brr && brr.bytes.length > 0 ? extractCyclePcm(brr.bytes, brr.loopByteOffset) : new Float32Array([0]);
       const idx = vrc7ToneReg.assign(pcmToOpllPatch(Array.from(cycle)));
       opllPatchCache[srcn] = idx;
       return idx;
@@ -1183,6 +1273,7 @@
 
     // ── MML 生成 ─────────────────────────────────────────────────────
     let mml = `; SPC → MML 変換 (${Math.round(bpm)} BPM, ${FRAMES} フレーム, 分解能480TPQN)\n`;
+    for (const line of MML.Convert.tuningCommentLines()) mml += line + '\n'; // 基準ピッチ(#TUNING)の説明
     if (usedExpansions.length) mml += `; 拡張音源: ${usedExpansions.join(', ')}\n`;
     // #EX-*(機能する本文ディレクティブ。上の`; `コメントとは別。これがないと
     // MML本文だけからは拡張音源が有効にならず、UI側の操作が必要になってしまう)
@@ -1351,7 +1442,7 @@
     if (scoreChannels.length > 0) {
       mml += MML.Convert.emitScore(scoreChannels, fpb,
         { totalFrames: FRAMES, tempoBpm: bpm, cmd,
-          headerLines: [...vrc7Notes, ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
+          headerLines: [...MML.Convert.tuningHeaderLines(), ...vrc7Notes, ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
             ...pitchReg.defLines(), ...noteEnvReg.defLines()] }) + '\n';
     }
 
@@ -1368,7 +1459,7 @@
           compileOpts: { dpcmSamples: Object.fromEntries(dmcFiles.map(f => [f.name, f.bytes])) } })
       : null;
 
-    return { mml, dmcFiles, bpm: Math.round(bpm), expansion, expansions: usedExpansions, fdsWave, n163Wave, pitchCheck };
+    return { mml, dmcFiles, bpm: Math.round(bpm), expansion, expansions: usedExpansions, fdsWave, n163Wave, pitchCheck, scoreChannels };
   };
 
   MML.SPC2MML.fromSpc = function (spcBytes, durationSec, options) {

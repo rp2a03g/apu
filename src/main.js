@@ -3058,6 +3058,31 @@
       lines + more + '</div>';
   }
 
+  // *2MML変換の基準ピッチ自動検出(result.tuning、src/convert/options.js autoTune)のステータス行。
+  // 適用したときだけ出す(閾値未満・固定指定のときは従来と同じ出力なので何も言わない)
+  // 適用しなかったときも「測った結果と理由」を必ず出す(不適用=無風ではなく、二極化や閾値未満で
+  // 見送ったことがユーザーに見えるように)。内訳はチャンネル文字の群ごとの中央値(G-L=OPLL/VRC7,
+  // X-Z=PSG/FME7 …)で、「OPLLは+9だがPSGは-2」のような基準の食い違いを読めるようにする。
+  function renderTuning(t) {
+    if (!t) return '';
+    const fmt = MML.Convert.formatTuningCents;
+    const detail = (t.count ? T('偏差の中央値 {median} cent、四分位範囲 {iqr}、音符 {n} 個', { median: fmt(t.median || 0), iqr: (t.iqr || 0).toFixed(1), n: t.count }) : T('音符が無いため測れません'));
+    const groups = (t.byGroup || []).filter(g => g.count > 0).map(g => `${g.group} ${fmt(g.median)} (${g.count})`).join(' / ');
+    const groupsHtml = groups ? '<div class="cs-desc">' + T('内訳(チャンネル群ごとの中央値)') + ': ' + groups + '</div>' : '';
+    if (t.cents) {
+      const hz = (440 * Math.pow(2, t.cents / 1200)).toFixed(1);
+      return '<div>' + T('基準ピッチ: 12平均律から {cents} cent (A4={hz}Hz) のずれを検出し、#TUNING で補正しました', { cents: fmt(t.cents), hz }) + ' (' + detail + ')</div>' + groupsHtml;
+    }
+    const reasons = {
+      fixed: T('12平均律固定の設定なので補正しません'),
+      few: T('音符が少なすぎるため補正しません'),
+      iqr: T('偏差のばらつきが大きく(四分位範囲が30 cent 超)、曲全体の基準ずれとは言えないため補正しません'),
+      fit: T('補正すると ±10 cent に乗る音符の割合が {before}→{after} に下がる(チップや区間で基準が食い違っている)ため補正しません', { before: (t.fitBefore || 0).toFixed(2), after: (t.fitAfter || 0).toFixed(2) }),
+      below: T('最小偏差 {min} cent 未満なので補正しません', { min: t.minCents != null ? t.minCents : MML.Convert.TUNING_MIN_DEFAULT }),
+    };
+    return '<div>' + T('基準ピッチ: {detail} → 補正なし。{reason}', { detail, reason: reasons[t.reason] || '' }) + '</div>' + groupsHtml;
+  }
+
   function getMmlOpt() {
     refreshDpcmSampleList(mmlSourceEl.value);
     return {
@@ -3288,6 +3313,7 @@
         { regSnapshots, writeLog, cpuSnapshots: null, memSnapshots: null,
           sampleRate: audioCtx.sampleRate, samplesPerFrame,
           totalFrames: compiled.totalFrames,
+          tuningCents: (compiled.settings && compiled.settings.tuningCents) || 0, // #TUNING(鍵盤/ロールの音名丸め)
           getApuEnv: liveApuEnv, getN163: liveN163,
           getFME7: liveFME7, getMmc5: liveMMC5, getVRC7: liveVRC7 }, // 音量/拡張音源表示をライブ反映
         getTransportPosition,
@@ -3743,7 +3769,7 @@
     nsfFileStatusEl.innerHTML = '<div class="ok">' +
       T('MML変換完了 ({mode} {bpm} BPM{exp}{dpcm}) → MMLエディタに出力しました',
         { mode: nsfManualBpm ? T('指定') : T('推定'), bpm: converted.bpm, exp: expMsg, dpcm: dpcmMsg }) + '</div>' +
-      renderPitchCheck(converted.pitchCheck);
+      renderTuning(converted.tuning) + renderPitchCheck(converted.pitchCheck);
 
     // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
     // 各種UIをMML本文に反映する(再生は開始しない)。
@@ -4850,7 +4876,7 @@
     spcFileStatusEl.innerHTML = '<div class="ok">' +
       T('MML変換完了 ({mode} {bpm} BPM{exp}{dpcm}) → MMLエディタに出力',
         { mode: spcManualBpm ? T('指定') : T('推定'), bpm: result.bpm, exp: expMsg, dpcm: dmcMsg }) + '</div>' +
-      renderPitchCheck(result.pitchCheck);
+      renderTuning(result.tuning) + renderPitchCheck(result.pitchCheck);
 
     // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
     // 各種UIをMML本文に反映する(再生は開始しない)。
@@ -5511,7 +5537,7 @@
     kssFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FME-7/N163/VRC7を借用して再生)',
         { mode: kssManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', ') }) + '</div>' +
-      renderPitchCheck(result.pitchCheck);
+      renderTuning(result.tuning) + renderPitchCheck(result.pitchCheck);
 
     // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
     // 各種UIをMML本文に反映する(再生は開始しない)。
@@ -5870,7 +5896,7 @@
     gbsFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FDSを借用して再生)',
         { mode: gbsManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', ') }) + '</div>' +
-      renderPitchCheck(result.pitchCheck);
+      renderTuning(result.tuning) + renderPitchCheck(result.pitchCheck);
 
     // 変換直後にコンパイルだけ実行し、DPCMサンプル欄/チャンネル選択欄/モニタ等の
     // 各種UIをMML本文に反映する(再生は開始しない)。新規変換された曲なので、前回再生
@@ -6373,7 +6399,7 @@
           { mode: hesManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', '), dpcm: dpcmMsg + hesBorrow })
         : T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}{dpcm}) → MMLエディタに出力(N163を借用して再生)',
           { mode: hesManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', '), dpcm: dpcmMsg })) + '</div>' +
-      renderPitchCheck(result.pitchCheck);
+      renderTuning(result.tuning) + renderPitchCheck(result.pitchCheck);
 
     rangeStartSec = 0;
     rangeEndSec = null;
@@ -7092,7 +7118,7 @@
     vgmFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力{borrow}{ignored}',
         { mode: vgmManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: (result.chips || []).join(', '), borrow: borrowNote, ignored: ignoredMsg }) + '</div>' +
-      dpcmMsg + renderPitchCheck(result.pitchCheck);
+      dpcmMsg + renderTuning(result.tuning) + renderPitchCheck(result.pitchCheck);
 
     rangeStartSec = 0;
     rangeEndSec = null;

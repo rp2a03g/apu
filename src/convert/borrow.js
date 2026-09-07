@@ -146,7 +146,7 @@
     const Plan = MML.Convert.ChannelPlan;
     for (const ev of ch.events) {
       if (ev.note !== null && ev.note !== undefined) {
-        const freq = ev.freqHz || ev.rawFreq || 440 * Math.pow(2, (ev.note - 57) / 12);
+        const freq = ev.freqHz || ev.rawFreq || MML.Convert.noteToFreq(ev.note);
         ev.note = 31 - Plan.noiseIndexFor(tone, freq, opnCarrierMul(ev.opnPatch));
       }
       for (const k of ['instrument', 'n163Wave', 'vrc7Tone', 'opnPatch', 'rawLength', 'fme7Noise', 'rawFreq', 'freqHz', 'freqSeq', 'pitchSeq', 'noteEnvOffsets', 'detune']) delete ev[k];

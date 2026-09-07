@@ -129,8 +129,8 @@
   // 周波数 → MML noteNumber (o4a=57)
   function freqToNote(freq) {
     if (freq <= 0) return null;
-    const n = Math.round(57 + 12 * Math.log2(freq / 440));
-    return (n >= 0 && n <= 119) ? n : null;
+    // 丸めは全形式共通(基準ピッチ #TUNING 込み。src/convert/options.js MML.Convert.freqToNote)
+    return MML.Convert.freqToNote(freq);
   }
   // ノイズ periodIdx (0-15) → MML noteNumber
   // noisePeriodIndex(noteNumber) = 15 - (noteNumber % 16)
@@ -627,7 +627,12 @@
 
   MML.NSF2MML = MML.NSF2MML || {}; // dmcHits(上)が先に生やしている
 
+  // 基準ピッチ(#TUNING)の自動検出: 変換本体(convertNsfOnce)を必要なら2回走らせる
+  // (src/convert/options.js MML.Convert.autoTune 参照。全 *2mml 共通の入口の作り)
   MML.NSF2MML.convert = function (writeLog, nsfBytes, header, songIndex, initRegs, initWrites, options) {
+    return MML.Convert.autoTune(options, (o) => convertNsfOnce(writeLog, nsfBytes, header, songIndex, initRegs, initWrites, o));
+  };
+  function convertNsfOnce(writeLog, nsfBytes, header, songIndex, initRegs, initWrites, options) {
     options = options || {};
     // 変換設定(src/convert/options.js): コマンド使用/不使用・譜面整形。全レジストリと
     // detune.js・emitScore へ同じ cmd を渡す
@@ -766,6 +771,7 @@
         `; ※ DPCMは抽出済み.dmcファイルを「MML作曲」パネルのDPCMサンプル欄で選択する`,
         `;   か、そのまま再コンパイルすると自動でキャッシュされたバイト列が使われます。`
       ] : []),
+      ...MML.Convert.tuningCommentLines(),
       `; =========================================================`,
       ``
     ].join('\n');
@@ -969,7 +975,7 @@
 
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
-      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+      headerLines: [...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(), ...fdsModDefLines]
     });
 
@@ -988,7 +994,7 @@
           compileOpts: { dpcmSamples: Object.fromEntries(dpcmFiles.map(f => [f.name, f.bytes])) } })
       : null;
 
-    return { mml, dpcmFiles, bpm: Math.round(bpm), expansions, fdsWave, n163Wave, pitchCheck };
+    return { mml, dpcmFiles, bpm: Math.round(bpm), expansions, fdsWave, n163Wave, pitchCheck, scoreChannels };
   };
 
   // ── チャンネル割当(案E) ────────────────────────────────────────

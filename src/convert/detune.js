@@ -50,7 +50,10 @@
   const MML = global.MML = global.MML || {};
   MML.Convert = MML.Convert || {};
 
-  function idealFreqOf(note) { return 440 * Math.pow(2, (note - 57) / 12); }
+  // 「そのノート番号が変換先で実際に鳴る周波数」。基準ピッチ(#TUNING)込み(options.js noteToFreq)。
+  // #TUNING は再生側の周波数テーブルごとずらすので、D<n> の理論値もずらした基準で取らないと
+  // 全体ずれのぶんまで D<n> に二重計上される
+  function idealFreqOf(note) { return MML.Convert.noteToFreq(note); }
 
   // opts.cmd(src/convert/options.js)の D===false なら何もしない(最寄り半音のまま)
   MML.Convert.applyPitchDetune = function (channels, periodForFreq, opts) {
@@ -68,7 +71,11 @@
         const cents = 1200 * Math.log2(ev.rawFreq / ideal);
         if (Math.abs(cents) < minCents) continue;
         const idealPeriod = periodForFreq(ideal, ev);
-        const d = Math.round(periodForFreq(ev.rawFreq, ev) - idealPeriod);
+        // 再生側(compiler.js/ppmckDriver.js)は「テーブルの整数値 round(idealPeriod) + D」を鳴らす。
+        // したがって D は「実測値を格子へ丸めた整数 − テーブルの整数」で求める(=実測に一番近い
+        // 格子点に必ず着地する)。★2026-09-07修正: 以前は round(raw − idealUnrounded) だったため、
+        // テーブル側の丸めと逆向きに出ると1格子ぶん(FME-7 の o6 では約48セント=ほぼ半音)ずれた
+        const d = Math.round(periodForFreq(ev.rawFreq, ev)) - Math.round(idealPeriod);
         if (d === 0) continue;
         const maxAbsDetune = Math.abs(idealPeriod) * maxAbsDetuneRatio;
         ev.detune = Math.max(-maxAbsDetune, Math.min(maxAbsDetune, d));
@@ -112,23 +119,27 @@
    *   1. 「異なるチャンネル」×「同じノート番号」×「時間区間(start/end)が重なる」もの同士を
    *      1グループにまとめる(Union-Findで推移的に連結)。単独(グループサイズ1)のノートは
    *      コーラスではないので一切補正しない。
-   *   2. グループ内で理論値に一番近いメンバー(closest)を探す。
-   *      - closest自身の理論値からのズレがminCents未満なら、各メンバーを個別に理論値へ
-   *        補正する(closestは元々ズレが小さいため実質無補正になり、結果的に「closestは
-   *        無補正・他だけ補正」と同じになる。メインを誤判定するリスクは無い)。
-   *      - closestの理論値からのズレがminCents以上(=グループ全体がまとまって理論値から
-   *        離れている)場合だけ、closestを無補正の基準点として強制固定し、残りをclosestの
-   *        「実測値」との差で補正する(★2026-08-02修正: 以前はここも理論値との差で補正して
-   *        いたが、それだとclosest自身の理論値からのズレ分だけ他メンバーとの相対差が
-   *        水増しされてしまうバグだった。例: closest=+10セント、他方=+15セントの2音を
-   *        理論値基準で補正すると、closestは無補正=0セントに飛び、他方は+15セントのまま
-   *        →相対差が本来の5セントから15セントへ3倍に拡大する。F1 Spirit(MSX) index64の
-   *        Q/Rチャンネル(コーラス幅が原曲1.6Hzのはずが変換後6.8Hzまで開いた)で実測発覚)。
-   *        closestの実測値を基準にすれば、closestは理論値へ丸まったまま・他メンバーは
-   *        closestとの相対差(=原曲の相対差そのもの)だけ動くので、コーラス幅は保たれる。
-   *        こちらは旧detectChorusDetuneと同じ「一番近い方をメインとみなす」判定だが、発動
-   *        するのは「グループ全員が理論値から十分離れている」稀なケースに限られるため、
-   *        FF(MSX)のような誤判定が起こる場面自体が大きく減る。
+   *   2. グループ内で理論値に一番近いメンバー(closest)を探し、各メンバー w について(w のチップの
+   *      レジスタ空間で) T=round(理論値)、rc=round(closest実測)、rw=round(w実測) を取り、
+   *        D_w = (rw − rc) + common、 common = (rc≠T かつ その音域の1格子 ≥ 10セント) ? rc − T : 0
+   *      とする(0 なら付けない)。再生側は「テーブルの整数値 T + D」を鳴らすので、
+   *        - コーラス幅(rw − rc)は丸めた実測値同士の整数差としてそのまま保たれる(二重丸め無し)
+   *        - グループ全体がテーブルから1格子ずれている(rc≠T)とき、closest をテーブル値に固定すると
+   *          全員が1格子ぶん実測からずれる。その1格子が聴こえる(10セント以上=JND、applyPitchDetune
+   *          の minCents と同じ基準。FME-7 の o6 では1格子≈48セントで半音転ぶ)なら common で全員を
+   *          実測の格子へ乗せ、聴こえない(2A03 中音域の1格子≈7セント等)なら固定したままにして
+   *          ネイティブ変換で意味の無い D±1 を量産しない
+   *        ★判定は closest のセント偏差ではなく「1格子の大きさ」で行う。偏差が10セント未満でも
+   *          rc≠T になり得る(高音域で理論値が .5 付近)が、そのとき相対差 rw−rc を T 基準で鳴らすと
+   *          w が1格子ずれる(FF(MSX) 1曲目で実測: この判定の取り違えで不一致が6件残った)
+   *      ★履歴: 2026-08-02 版は「理論値に一番近いメンバー(closest)を無補正の基準に固定し、他を
+   *        closest の実測値との相対差 round(raw − raw_closest) で補正」していた(F1 Spirit index64 の
+   *        Q/R でコーラス幅が 1.6Hz→6.8Hz に開いた「水増し」対策)。しかし基準側が鳴らすのは
+   *        raw_closest ではなくテーブルの整数値なので、相対差の丸めがテーブル側の丸めと逆向きに
+   *        出ると1格子ぶんずれる。Final Fantasy(MSX2, PSG) 1曲目の g6/a6 で実測: 基準 35.50・他 36.00
+   *        (テーブル 36)に対し D=round(0.5)=1 → 37 で鳴り、約48セント低い f+6 に転んだ(2026-09-07)。
+   *        絶対値方式なら基準 36(D0)・他 36(D0) で両方とも最寄り格子に乗り、F1 Spirit の相対差も
+   *        「丸めた実測値同士の差」で保たれるので水増しは起きない。
    */
   MML.Convert.detectChorusDetune = function (channels, periodForFreq, opts) {
     opts = opts || {};
@@ -175,20 +186,25 @@
       const withCents = group.map(g => ({
         g, cents: 1200 * Math.log2(g.ev.rawFreq / ideal)
       }));
+
       let closest = withCents[0];
       for (const w of withCents) if (Math.abs(w.cents) < Math.abs(closest.cents)) closest = w;
-      // グループ全員が理論値から十分離れている場合だけ、closestを無補正の基準点に固定する
-      const anchorClosest = Math.abs(closest.cents) >= minCents;
+      // グループ全体のテーブルからの1格子ずれ(common)を付けるのは、その1格子が聴こえる(10セント以上)音域だけ
+      const COMMON_MIN_CENTS = 10;
 
       for (const w of withCents) {
-        if (anchorClosest && w === closest) continue; // 基準点として無補正のまま
         if (Math.abs(w.cents) < minCents) continue;
         const pf = pfFor(w.g.ci);
         const idealPeriod = pf(ideal, w.g.ev);
-        // anchorClosest時はclosestの「実測値」を基準に相対差を取る(理論値基準だとclosest自身の
-        // 理論値からのズレ分だけ相対差が水増しされるバグだったため、上のコメント参照)。
-        const basePeriod = anchorClosest ? pf(closest.g.ev.rawFreq, w.g.ev) : idealPeriod;
-        const d = Math.round(pf(w.g.ev.rawFreq, w.g.ev) - basePeriod);
+        // 冒頭コメントのアルゴリズム 2。全て w のチップのレジスタ空間で整数に丸めてから差を取る
+        // (再生側が鳴らすのは「テーブルの整数値 T + D」なので、丸めは各値に1回ずつ、差は整数同士)
+        const T = Math.round(idealPeriod);
+        const rc = Math.round(pf(closest.g.ev.rawFreq, w.g.ev));
+        const rw = Math.round(pf(w.g.ev.rawFreq, w.g.ev));
+        // 1格子の大きさ(セント)。周期型(period∝1/f)も位相加算型(freqReg∝f)も |T|→|T|+1 の比で近似できる
+        const unitCents = T !== 0 ? 1200 * Math.log2(1 + 1 / Math.abs(T)) : 0;
+        const common = (rc !== T && unitCents >= COMMON_MIN_CENTS) ? rc - T : 0;
+        const d = (rw - rc) + common;
         if (d === 0) continue;
         const maxAbsDetune = Math.abs(idealPeriod) * maxAbsDetuneRatio;
         w.g.ev.detune = Math.max(-maxAbsDetune, Math.min(maxAbsDetune, d));

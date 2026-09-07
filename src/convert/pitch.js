@@ -577,7 +577,10 @@
   // 何セントずれているかを返す(-50〜+50の範囲)。
   function centsFromNearestSemitone(freq) {
     if (!(freq > 0)) return Infinity;
-    const cont = 57 + 12 * Math.log2(freq / 440);
+    // 基準ピッチ(#TUNING、src/convert/options.js MML.Convert.tuningCents)込み。抽出器の丸め
+    // (freqToNote)と同じ基準で「半音に乗っているか」を判定しないと、全体ずれのある曲で
+    // 綺麗なアルペジオまで「半音に乗っていない」と誤判定して EN 統合から漏れる
+    const cont = 57 + 12 * Math.log2(freq / 440) - MML.Convert.tuningCents() / 100;
     return (cont - Math.round(cont)) * 100;
   }
 

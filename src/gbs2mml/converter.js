@@ -67,7 +67,12 @@
     return { GB1: 'pulse1', GB2: 'pulse2', GW: 'fds', GN: 'noise' };
   };
 
+  // 基準ピッチ(#TUNING)の自動検出: 変換本体(convertGbsOnce)を必要なら2回走らせる
+  // (src/convert/options.js MML.Convert.autoTune 参照。全 *2mml 共通の入口の作り)
   MML.GBS2MML.convertCapture = function (cap, options) {
+    return MML.Convert.autoTune(options, (o) => convertGbsOnce(cap, o));
+  };
+  function convertGbsOnce(cap, options) {
     options = options || {};
     // 変換設定(src/convert/options.js): コマンド使用/不使用・譜面整形(全レジストリ・
     // detune.js・emitScore へ同じ cmd を渡す)
@@ -174,6 +179,7 @@
       `; ※ このアプリのMMLプレイヤーはNES音源専用のため、GBのCH1/CH2/CH4はレジスタ構造が`,
       `;    近い2A03コアへそのまま、CH3(波形メモリ)は実機較正済みの音量バランスを持つFDSへ載せています。`,
       hasWave ? `;    FDS波形はGBの4bit値をビット拡張して6bitへ、音量は4段階(mute/100/50/25%)を0/15/8/4へ対応させた値です。` : `;`,
+      ...MML.Convert.tuningCommentLines(),
       `; =========================================================`,
       ``
     ].join('\n');
@@ -183,7 +189,7 @@
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       headerLines: [
-        ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+        ...MML.Convert.tuningHeaderLines(), ...directiveLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(hasWave ? fdsWaveReg.defLines() : [])
       ]
     });
@@ -196,7 +202,7 @@
       : null;
 
     return {
-      mml, bpm: Math.round(bpm), pitchCheck,
+      mml, bpm: Math.round(bpm), pitchCheck, scoreChannels,
       chips: ['CH1', 'CH2', 'CH4'].concat(hasWave ? ['CH3'] : []),
       expansions,
       fdsWave: waveResult.fdsWave
@@ -286,6 +292,7 @@
       `;    (割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
       ...r.notes.map(n => `; ※ ${n}`),
       ...(drumNote ? [`; ※ ${drumNote}`] : []),
+      ...MML.Convert.tuningCommentLines(),
       `; =========================================================`,
       ``
     ].join('\n');
@@ -296,7 +303,7 @@
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       headerLines: [
-        ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+        ...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(expansions.indexOf('fds') >= 0 ? fdsWaveReg.defLines() : []),
         ...(expansions.indexOf('n163') >= 0 ? n163WaveReg.defLines() : []),
         ...(expansions.indexOf('vrc7') >= 0 ? vrc7ToneReg.defLines() : [])
@@ -308,7 +315,7 @@
       : null;
 
     return {
-      mml, bpm: Math.round(bpm), pitchCheck,
+      mml, bpm: Math.round(bpm), pitchCheck, scoreChannels,
       chips: ['CH1', 'CH2', 'CH3', 'CH4'],
       expansions,
       fdsWave,

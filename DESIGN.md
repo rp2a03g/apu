@@ -288,6 +288,23 @@ structuredClone/JSON.stringifyがそのまま通ること)。
   detectChorusDetune)を取り違えないこと**: ネイティブ変換にapplyPitchDetuneを使うと単独
   ノートのノイズまで誤って補正してしまい、借用変換にdetectChorusDetuneを使うと単独ノートの
   二重量子化ズレ(本来の問題)が無補正のまま残ってしまう。
+- **D<n> の値は「実測値をレジスタ格子へ丸めた整数 − テーブルの整数値」で求めること(2026-09-07)。**
+  再生側(compiler.js / ppmckDriver.js)が鳴らすのは「周波数テーブルの整数値 round(理論値) + D」
+  なので、round(実測 − 理論値) のように差を取ってから丸めると、テーブル側の丸めと逆向きに出た
+  ときに1格子ずれる(FME-7 の o6 では1格子≈48セント=半音転ぶ。Final Fantasy(MSX2, PSG) 1曲目で
+  実証、音程検証28件不一致→0件)。`detectChorusDetune` はコーラス幅を「丸めた実測値同士の整数差」で
+  保ち、グループ全体の1格子ずれ(rc≠T)は「その音域の1格子が10セント以上」のときだけ全員に足す
+  (中音域の数セントの格子ずれで意味の無い D±1 を量産しない)。詳細は detune.js 冒頭コメント。
+- **どちらの経路でも、周波数→ノート番号の丸めは `MML.Convert.freqToNote()`(src/convert/options.js)
+  を使い、独自に `Math.round(57 + 12*log2(f/440))` を書かないこと(2026-09-07)。** 曲全体の基準ピッチ
+  (`#TUNING`、セント)はここ1か所で効いている。ドライバ固有の音程表で曲全体が数十セントずれている曲は、
+  A440基準のままだと借用変換で全音符に無意味なD<n>が付き、ネイティブ変換では系統的にずれた音程で鳴り、
+  偏差が±50セント付近なら音符ごとに丸めの向きが変わって半音が転ぶ。`MML.Convert.autoTune()` が全音符の
+  偏差(長さ重み付き中央値、`detectTuning`)を測り、閾値以上ならその基準で変換本体をもう一度走らせて
+  `#TUNING` をヘッダに出す。理論値側(`detune.js idealFreqOf`、`pitch.js centsFromNearestSemitone`、
+  `compiler.js`/`ppmckDriver.js` の `noteFrequency`、`keyboard.js freqToMidi`)も同じ値を見るので、
+  抽出・再生・NSF書き出し・音程検証・ロール表示の基準が常に一致する。音名は変わらない
+  (キー/トランスポーズとは別の、チューナーの A4=447Hz のような全体ずらし)。
 
 ## 6. 検証方法(この開発環境の前提)
 

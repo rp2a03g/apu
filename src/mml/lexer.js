@@ -382,7 +382,7 @@
     const errors = [];
     const envelopes = { v: {}, vr: {}, ep: {}, en: {}, mp: {}, op: {}, fm: {}, n: {}, mw: {}, mh: {}, dpcm: {}, duty: {} };
     const meta = { title: null, composer: null, maker: null, programer: null };
-    const settings = { octaveRev: 0, gateDenom: 8 };
+    const settings = { octaveRev: 0, gateDenom: 8, tuningCents: 0 };
     const detectedExpansions = [];
     const macros = {};
     const { rawLines, lineStarts } = splitLinesWithOffsets(source);
@@ -406,6 +406,14 @@
             case 'PROGRAMER': meta.programer = directive.args; break;
             case 'OCTAVE-REV': settings.octaveRev = parseInt(directive.args, 10) || 0; break;
             case 'GATE-DENOM': settings.gateDenom = parseInt(directive.args, 10) || 8; break;
+            case 'TUNING': {
+              // 基準ピッチ(セント、小数可)。全音符の周波数を12平均律(A4=440Hz)からこのぶんずらす。
+              // 音名は変わらない(キー/トランスポーズではない)。*2mml が曲全体の音程偏差を自動検出
+              // して出す(src/convert/options.js detectTuning)。±1200(1オクターブ)を超える値は意味が無い
+              const c = parseFloat(directive.args);
+              settings.tuningCents = isFinite(c) ? Math.max(-1200, Math.min(1200, c)) : 0;
+              break;
+            }
             default: {
               if (EX_CHIP_MAP[directive.name]) detectedExpansions.push(EX_CHIP_MAP[directive.name]);
               else if (BANKING_DIRECTIVES.has(directive.name) || UNSUPPORTED_FILE_DIRECTIVES.has(directive.name)) {

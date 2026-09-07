@@ -77,7 +77,12 @@
     return plan;
   };
 
+  // 基準ピッチ(#TUNING)の自動検出: 変換本体(convertHesOnce)を必要なら2回走らせる
+  // (src/convert/options.js MML.Convert.autoTune 参照。全 *2mml 共通の入口の作り)
   MML.HES2MML.convertCapture = function (cap, options) {
+    return MML.Convert.autoTune(options, (o) => convertHesOnce(cap, o));
+  };
+  function convertHesOnce(cap, options) {
     options = options || {};
     // 変換設定(src/convert/options.js): コマンド使用/不使用・譜面整形(全レジストリ・
     // detune.js・emitScore へ同じ cmd を渡す)
@@ -225,6 +230,7 @@
       `;    (借用先の割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
       ...borrowNotes.map(n => `; ※ ${n}`),
       ...n163FitNotes.map(n => `; ※ ${n}`),
+      ...MML.Convert.tuningCommentLines(),
       `; =========================================================`,
       ``
     ].join('\n');
@@ -240,7 +246,7 @@
 
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
-      headerLines: [...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+      headerLines: [...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(!customPlan || expansions.indexOf('n163') >= 0 ? n163WaveReg.defLines() : [])]
     });
     const mml = [headerComment, scoreText].join('\n');
@@ -262,7 +268,7 @@
       : null;
 
     return {
-      mml, bpm: Math.round(bpm), pitchCheck,
+      mml, bpm: Math.round(bpm), pitchCheck, scoreChannels,
       chips: ['PSG0', 'PSG1', 'PSG2', 'PSG3', 'PSG4', 'PSG5'].concat(hasNoise ? ['NOISE'] : []).concat(hasDpcm ? ['DDA'] : []),
       expansions,
       n163Wave: uiWave,

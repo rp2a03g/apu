@@ -24,8 +24,8 @@
 
   function freqToNoteNumber(freq) {
     if (freq <= 0) return null;
-    const n = Math.round(57 + 12 * Math.log2(freq / 440));
-    return (n >= 0 && n <= 119) ? n : null;
+    // 丸めは全形式共通(基準ピッチ #TUNING 込み。src/convert/options.js MML.Convert.freqToNote)
+    return MML.Convert.freqToNote(freq);
   }
   // 5B(YM2149)は内蔵1/2プリスケーラにより f=CLOCK/(32*period)(NESdev "Sunsoft 5B audio")。
   // MSXのPSG(kss2mml/expansion/ay.js)は入力クロックが半分なので同じ式で分母32=実質16になる

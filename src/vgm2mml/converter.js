@@ -809,6 +809,7 @@
       `;    YM2610 ADPCM-A/Bはサンプルのピッチ解析で得た音程と音量だけを載せています。`,
       `;    線形音量の借用先(N163/2A03/MMC5/VRC6)へ載せた音量は対数DAC→線形へ換算した値です。`,
       ...notes.map(n => `; ※ ${n}`),
+      ...MML.Convert.tuningCommentLines(),
       `; =========================================================`,
       ``
     ].join('\n');
@@ -826,7 +827,7 @@
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       headerLines: [
-        ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+        ...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(expansions.includes('n163') ? n163WaveReg.defLines() : []),
         ...(expansions.includes('fds') ? fdsWaveReg.defLines() : []),
         ...(expansions.includes('vrc7') ? vrc7ToneReg.defLines() : [])
@@ -843,6 +844,7 @@
       mml,
       bpm: Math.round(bpm),
       pitchCheck,
+      scoreChannels,
       chips: h.usedChips.filter(ch => ['ay8910', 'k051649', 'ym2413', 'sn76489', 'ym2612', 'ym2610', 'ym2151', 'ym2203', 'ym2608', 'ym3812', 'ym3526', 'y8950', 'ga20', 'segapcm', 'c140', 'c352', 'qsound', 'okim6295', 'multipcm'].includes(ch.id)).map(ch => ch.name + (ch.dual ? ' x2' : '')),
       expansions,
       assignments,
@@ -1048,7 +1050,9 @@
 
     let result;
     if (family === 'psg') {
-      result = composePsgLike(data, h, label, options, ignoredNote);
+      // 基準ピッチ(#TUNING)の自動検出(src/convert/options.js autoTune)。nes/gb/hes ファミリは
+      // 委譲先(NSF2MML.convert 等)の入口が同じ仕組みで包んでいる
+      result = MML.Convert.autoTune(options, (o) => composePsgLike(data, h, label, o, ignoredNote));
     } else if (family === 'nes') {
       const header = {
         extraChips: data.nes.fds ? MML.NSF.CHIP_FLAGS.FDS : 0,

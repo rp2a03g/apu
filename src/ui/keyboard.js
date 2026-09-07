@@ -632,9 +632,12 @@
 
   // ── 周波数 / MIDI 変換 ────────────────────────────────────────
 
+  // 基準ピッチ(#TUNING、セント)。MML再生(setSource の result.tuningCents)と変換結果の音程検証
+  // (buildRollTracksFromRegSnapshotsPure の extra.tuningCents)が設定する。実ファイル再生は0
+  let rollTuningCents = 0;
   function freqToMidi(f) {
     if (!f || f <= 0) return null;
-    const m = Math.round(69 + 12 * Math.log2(f / 440));
+    const m = Math.round(69 + 12 * Math.log2(f / 440) - rollTuningCents / 100);
     return (m >= MIDI_MIN && m <= MIDI_MAX) ? m : null;
   }
 
@@ -4065,6 +4068,9 @@
 
     setSource(result, chips) {
       this._chips = Array.isArray(chips) ? chips.filter(c => c && c !== 'none') : [];
+      // 基準ピッチ(#TUNING): MML再生(main.js setMonitorSource が compiled.settings.tuningCents を渡す)の
+      // 鍵盤ハイライト/ロールを、ずらした基準で音名に丸める。実ファイル再生は未指定=0
+      rollTuningCents = (result && result.tuningCents) ? +result.tuningCents : 0;
       // L/R(ステレオパン)列はHES/GBSのみ意味を持つため、他フォーマットでは非表示にする
       // (表示/パネル幅はCSS側の.kbd-left--hes/.kbd-left--gbsで切り替え、詳細はstyle.css参照)。
       this._leftEl.classList.toggle('kbd-left--hes', this._chips.includes('hes'));
@@ -5982,6 +5988,9 @@
         partEl: row.querySelector('.kbd-part'),
         targetSel: row.querySelector('.kbd-assign-target'),
         toneSel: row.querySelector('.kbd-assign-tone'),
+        // ★「パッド」ボタン(_syncAssignSelects が target===dpcm のとき表示する)。NSF側の行(_rowEls)には
+        //   あったがSPCボイス行では参照を持っておらず、Eを選んでもボタンが出なかった(2026-09-07修正)
+        drumBtn: row.querySelector('.kbd-assign-drum'),
         defaultTarget,
         target,
         letter,
@@ -6254,10 +6263,16 @@
         : null,
       fme7: chips.includes('fme7') ? buildFme7Snapshots(wl) : null,
     });
-    return buildNoteTimelineFromChannelFrames(
-      (f) => extractChannels(regSnapshots[f] || {}, extraSnaps, f, chips),
-      totalFrames, frameDur
-    );
+    // extra.tuningCents(#TUNING、verify.js): 構築の間だけ音名の丸め基準をずらす(呼び出し元は
+    // 変換中のメインスレッドで、鍵盤が別ファイルを表示中かもしれないので必ず元へ戻す)
+    const prevTuning = rollTuningCents;
+    if (extra && extra.tuningCents != null) rollTuningCents = +extra.tuningCents || 0;
+    try {
+      return buildNoteTimelineFromChannelFrames(
+        (f) => extractChannels(regSnapshots[f] || {}, extraSnaps, f, chips),
+        totalFrames, frameDur
+      );
+    } finally { rollTuningCents = prevTuning; }
   }
 
   UI.KeyboardDisplay = KeyboardDisplay;

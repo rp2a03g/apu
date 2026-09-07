@@ -60,6 +60,11 @@
     ['fit', T('収まるように縮める(あふれたぶんだけ半分に)')],
     ['keep', T('元の長さのまま(その曲は再生できない)')],
   ];
+  // 基準ピッチ(全体オフセット、src/convert/options.js TUNING/TUNING_MIN。detectTuning冒頭コメント参照)
+  const TUNING_OPTIONS = () => [
+    ['auto', T('自動検出(曲全体の偏差を測る・推奨)')],
+    ['a440', T('12平均律固定(A4=440Hz・従来)')],
+  ];
   const PRESET_LABELS = () => ({ faithful: T('忠実再現'), plain: T('プレーン譜面') });
 
   let current = null; // 正規化済み cmd
@@ -317,10 +322,56 @@
     saSec.appendChild(nwRow);
     body.appendChild(saSec);
 
+    // 基準ピッチ(全体オフセット)。ドライバ固有の音程表で曲全体が数十セントずれている曲向け
+    // (玄人向け: 閾値も出す。既定5セント未満は何もしない=従来と同じ出力)
+    const tnSec = document.createElement('div');
+    tnSec.className = 'es-section';
+    const tnH = document.createElement('h3');
+    tnH.textContent = T('基準ピッチ');
+    tnSec.appendChild(tnH);
+    const tnRow = document.createElement('label');
+    tnRow.className = 'cs-row';
+    const tnSel = document.createElement('select');
+    for (const [val, label] of TUNING_OPTIONS()) {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      tnSel.appendChild(o);
+    }
+    tnSel.addEventListener('change', () => {
+      current = MML.Convert.normalizeCmd(Object.assign({}, current, { TUNING: tnSel.value }));
+      save(); syncChecks(); refreshButtons();
+    });
+    const tnDesc = document.createElement('span');
+    tnDesc.className = 'cs-desc';
+    tnDesc.textContent = T('曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。音名は変わらず(キーとは別)、再生とNSF書き出しの周波数テーブルが同じだけずれる。SPCは絶対音程がサンプル原音の推定に依存するため、15セント以上の安定した偏差に限って適用する');
+    tnRow.appendChild(tnSel); tnRow.appendChild(tnDesc);
+    tnSec.appendChild(tnRow);
+    const tmRow = document.createElement('label');
+    tmRow.className = 'cs-row';
+    const tmKey = document.createElement('span');
+    tmKey.className = 'cs-key';
+    tmKey.textContent = T('最小偏差(セント)');
+    const tmIn = document.createElement('input');
+    tmIn.type = 'number';
+    tmIn.min = '0'; tmIn.max = String(MML.Convert.TUNING_MIN_MAX); tmIn.step = '0.5';
+    tmIn.addEventListener('change', () => {
+      current = MML.Convert.normalizeCmd(Object.assign({}, current, { TUNING_MIN: tmIn.value }));
+      save(); syncChecks(); refreshButtons();
+    });
+    const tmDesc = document.createElement('span');
+    tmDesc.className = 'cs-desc';
+    tmDesc.textContent = T('自動検出のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5。0〜50)。小さくするほど僅かなずれでも #TUNING が付く');
+    tmRow.appendChild(tmKey); tmRow.appendChild(tmIn); tmRow.appendChild(tmDesc);
+    tnSec.appendChild(tmRow);
+    body.appendChild(tnSec);
+
     function syncChecks() {
       for (const [k, cb] of Object.entries(checks)) cb.checked = !!current[k];
       saSel.value = current.PITCH_SA || 'octave';
       nwSel.value = current.N163_WAVE || 'fit';
+      tnSel.value = current.TUNING || 'auto';
+      tmIn.value = String(current.TUNING_MIN != null ? current.TUNING_MIN : MML.Convert.TUNING_MIN_DEFAULT);
+      tmIn.disabled = current.TUNING !== 'auto';
       const name = MML.Convert.cmdPresetName(current);
       for (const [n, b] of Object.entries(presetButtons)) b.classList.toggle('es-preset--active', n === name);
       customTag.style.display = name === 'custom' ? '' : 'none';

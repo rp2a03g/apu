@@ -35,8 +35,8 @@
 
   function freqToNoteNumber(freq) {
     if (freq <= 0) return null;
-    const n = Math.round(57 + 12 * Math.log2(freq / 440));
-    return (n >= 0 && n <= 119) ? n : null;
+    // 丸めは全形式共通(基準ピッチ #TUNING 込み。src/convert/options.js MML.Convert.freqToNote)
+    return MML.Convert.freqToNote(freq);
   }
 
   const CH_INDEX = { ch1: 0, ch2: 1 };
