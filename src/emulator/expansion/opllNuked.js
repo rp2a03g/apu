@@ -1134,5 +1134,22 @@
   // 作るために使う。LOGSIN/EXPROM表そのものは外へ出さない(表を持ち出すと写しがずれる)
   OPLLNuked.opOut = opOut;
 
+  // 内蔵音色ROMをレジスタ$00-$07と同じ8バイト並びで返す(type: 'ym2413' | 'ds1001'(VRC7)、inst 1-15)。
+  // 変換側(src/convert/toneDerive.js)が「YM2413のプリセット音色の波形」をN163等へ写すときに使う。
+  // ★VRC7(ds1001)側の写しは src/convert/vrc7Tone.js PRESETS にもある(Workerバンドル都合の複製)
+  OPLLNuked.presetBytes = function (type, inst) {
+    const rom = type === 'ds1001' ? PATCH_DS1001 : PATCH_YM2413;
+    const p = rom[(inst | 0) - 1];
+    if (!p) return null;
+    const b20 = (i) => (p.am[i] << 7) | (p.vib[i] << 6) | (p.et[i] << 5) | (p.ksr[i] << 4) | (p.multi[i] & 15);
+    return [
+      b20(0), b20(1),
+      ((p.ksl[0] & 3) << 6) | (p.tl & 63),
+      ((p.ksl[1] & 3) << 6) | ((p.dc & 1) << 4) | ((p.dm & 1) << 3) | (p.fb & 7),
+      (p.ar[0] << 4) | p.dr[0], (p.ar[1] << 4) | p.dr[1],
+      (p.sl[0] << 4) | p.rr[0], (p.sl[1] << 4) | p.rr[1]
+    ];
+  };
+
   Emu.OPLLNuked = OPLLNuked;
 })(window);

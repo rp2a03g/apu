@@ -12,16 +12,11 @@
   /**
    * writeLogの1書込みを1つの整数へ詰める(2026-09-04)。
    *   bit0-15 = addr(メモリアドレス or I/Oポート) / bit16-23 = value / bit24 = io(1ならI/O)
-   *
-   * {addr,value,io}のJSオブジェクトは**実測75〜90B/件**で、KSSは1フレーム平均84〜152件
-   * 書くため60秒で27〜41MB(実RSS)を占めていた。詰めればフレームごとの Int32Array で
-   * 4B/件になる(実測 xak.kss 60秒: 27MB → 1.2MB)。
-   * ★型付き配列なので構造化クローン(キャプチャWorkerの差分送信)もそのまま通る。
-   * ★VGM側(vgmPlayer.js data.kss.writeLog)も同じ詰め方で作ること。読む側は
-   *   kss2mml/expansion/*.js と kss-stream-player.js と roll-builders.js。
+   * 定義の実体は src/emulator/capture.js の Emu.kssPackWrite(KSS/VGM両方のWorkerバンドルに
+   * 入る共通ファイル)。ここでは遅延参照だけ持つ(バンドル内の読み込み順に依存しないため)。
+   * VGM側(vgmPlayer.js data.kss.writeLog)も同じ詰め方で作る。
    */
-  const packWrite = (addr, value, io) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0);
-  Emu.kssPackWrite = packWrite;
+  const packWrite = (addr, value, io) => Emu.kssPackWrite(addr, value, io);
 
   // INIT/PLAY呼び出し時のスタックポインタ初期値(libkss exec_setup の 0xF380 と同じ。
   // MSX BIOSワークエリアの直下で、実機ドライバが LD SP,0F380h とするのと同じ位置)

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-07 13:16:57
+ * Built by tools/build-capture-workers.ps1 at 2026-09-07 16:00:06
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-07 13:16:57';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-07 16:00:06';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成
@@ -102,40 +102,6 @@
     view.setUint32(124, 0, true);
 
     return new Uint8Array(buf);
-  };
-
-  /*
-   * 旧ppmckドライバ(Famicompo mini / FCM3〜4 時代、2004〜2005年頃)の N106 判定。
-   *
-   * 当時の N106(N163) 仕様理解は VirtuaNES 0.97 / VirtuaNSF 1.0.x 系の実装
-   * (波形長レジスタ +4 は bit2-4 の3bit、length = 0x20 - (+4 & 0x1C) = 最大32サンプル)
-   * に基づいており、ドライバは波形設定で `ORA #$80` を書いていた。実機/現行仕様では
-   * +4 の bit2-7 が波形長(length = 256 - (+4 & 0xFC))なので、同じ値が実機では
-   * 128 - 4n サンプル(4倍長)と解釈され、音程が2オクターブ落ち、波形メモリの他領域
-   * (他の波形・レジスタ)まで読んで音色も崩れる。現行ppmckは同じ箇所で `ORA #$E0`
-   * (= 256 - 32 + 4n の現行エンコード)を書く。
-   *
-   * 判定はその波形設定ルーチンの機械語列で行う(変数アドレスはビルドごとに違うので
-   * ワイルドカード):
-   *   ORA #$80 / STA abs,X / STA $4800 / LSR abs / LDA #$10 / SEC / SBC abs
-   *   (n106_7c,x に保存 → $4800 へ波形長 → temporary を半分にして 16 - n = 転送バイト数)
-   * `emu sound/famicompo` の実ファイル25本がこの列に一致し、現行ppmck生成物(ORA #$E0)
-   * は22本とも不一致(2026-09-07 実測)。
-   *
-   * @param {Uint8Array} program - ヘッダ(128バイト)を除いたプログラムイメージ
-   * @returns {boolean}
-   */
-  const LEGACY_N106_SIG = [0x09, 0x80, 0x9D, null, null, 0x8D, 0x00, 0x48, 0x4E, null, null, 0xA9, 0x10, 0x38, 0xED];
-  NSF.detectLegacyN163Driver = function (program) {
-    if (!program || program.length < LEGACY_N106_SIG.length) return false;
-    const sig = LEGACY_N106_SIG;
-    outer: for (let i = 0, n = program.length - sig.length; i <= n; i++) {
-      for (let j = 0; j < sig.length; j++) {
-        if (sig[j] !== null && program[i + j] !== sig[j]) continue outer;
-      }
-      return true;
-    }
-    return false;
   };
 
   /**
@@ -2512,6 +2478,23 @@
   // 作るために使う。LOGSIN/EXPROM表そのものは外へ出さない(表を持ち出すと写しがずれる)
   OPLLNuked.opOut = opOut;
 
+  // 内蔵音色ROMをレジスタ$00-$07と同じ8バイト並びで返す(type: 'ym2413' | 'ds1001'(VRC7)、inst 1-15)。
+  // 変換側(src/convert/toneDerive.js)が「YM2413のプリセット音色の波形」をN163等へ写すときに使う。
+  // ★VRC7(ds1001)側の写しは src/convert/vrc7Tone.js PRESETS にもある(Workerバンドル都合の複製)
+  OPLLNuked.presetBytes = function (type, inst) {
+    const rom = type === 'ds1001' ? PATCH_DS1001 : PATCH_YM2413;
+    const p = rom[(inst | 0) - 1];
+    if (!p) return null;
+    const b20 = (i) => (p.am[i] << 7) | (p.vib[i] << 6) | (p.et[i] << 5) | (p.ksr[i] << 4) | (p.multi[i] & 15);
+    return [
+      b20(0), b20(1),
+      ((p.ksl[0] & 3) << 6) | (p.tl & 63),
+      ((p.ksl[1] & 3) << 6) | ((p.dc & 1) << 4) | ((p.dm & 1) << 3) | (p.fb & 7),
+      (p.ar[0] << 4) | p.dr[0], (p.ar[1] << 4) | p.dr[1],
+      (p.sl[0] << 4) | p.rr[0], (p.sl[1] << 4) | p.rr[1]
+    ];
+  };
+
   Emu.OPLLNuked = OPLLNuked;
 })(globalThis);
 
@@ -3492,15 +3475,8 @@
  *     これが標準の N163 挙動(NSFPlay/Mesen/VirtuaNSF既定と同じ)。ただし「古いドライバ」で
  *     作られた一部NSF(例: Famicompo mini vol.3 entry023)は波形長を最大32サンプル前提で
  *     使っており、256版だと音程・波形テーブルが崩れる。VirtuaNSFはこれ用に「N163を32サンプル
- *     に制限するモード」を別途用意している(readme 1.0.7.1)。
- *     → legacyWaveLen=true で対応(2026-09-07)。旧ドライバは +4 に (n<<2)|$80 を書く
- *     (VirtuaNES 0.97 の APU_N106: tonelen = 0x20-(data&0x1C))。VirtuaNESの周波数式は
- *     実機式と同じ f = CPU*freq/(15*65536*length*numCh) なので、違いは波形長の解釈だけ。
- *     そこで「+4 への書き込み値を現行エンコードへ書き換えて RAM に置く」方式にした:
- *       (v & 0x1F) | 0xE0   … 256-(0xE0|(n<<2)) = 32-4n = 0x20-(v&0x1C) と同じ長さ
- *     RAM 自体が現行仕様の値になるため、音声合成・鍵盤/ロール(snapshotN163)・
- *     nsf2mml の波形抽出・n163Snapshots 経由の再生(NsfReplayStreamPlayer)が全て
- *     無変更で正しくなる。判定は MML.NSF.detectLegacyN163Driver(nsfBus.js から設定)。
+ *     に制限するモード」を別途用意している(readme 1.0.7.1)。必要なら length を
+ *     `0x20-(+4&0x1C)` に切替えるオプション化で対応可能(現状は標準の256版を既定とする)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -3518,9 +3494,6 @@
       this.rrIndex = 0;       // 有効ch内の巡回位置
       this.mute = new Array(NUM_CHANNELS).fill(false);
       this.vol = new Array(NUM_CHANNELS).fill(1);
-      // 旧ppmckドライバ(波形長32サンプル形式)互換。true のとき +4 レジスタへの書き込みを
-      // 現行エンコードへ変換して格納する(ファイル冒頭コメント 注2 参照)。
-      this.legacyWaveLen = false;
     }
 
     reset() {
@@ -3537,12 +3510,6 @@
         this.addr = value & 0x7F;
         this.autoInc = (value & 0x80) !== 0;
       } else if (addr === 0x4800) {
-        // 旧ドライバ互換: チャンネルレジスタ +4(波形長|周波数上位)への書き込みは
-        // bit2-4 の3bit波形長(0x20-(v&0x1C))を現行の6bit形式(0xE0|(v&0x1C))へ変換する。
-        // 周波数上位2bit(bit0-1)はそのまま。
-        if (this.legacyWaveLen && this.addr >= 0x40 && (this.addr & 7) === 4) {
-          value = (value & 0x1F) | 0xE0;
-        }
         this.ram[this.addr] = value;
         if (this.autoInc) this.addr = (this.addr + 1) & 0x7F;
       }
@@ -3875,16 +3842,6 @@
       if (extraChips & FLAGS.MMC5) this.expansion.mmc5 = new Emu.MMC5Audio();
       if (extraChips & FLAGS.N163) this.expansion.n163 = new Emu.N163Audio();
       if (extraChips & FLAGS.FME7) this.expansion.fme7 = new Emu.FME7Audio();
-      // 旧ppmckドライバ(Famicompo mini 時代、N106波形長を32サンプル形式で書く)の判定。
-      // opt.n163Legacy で明示指定がなければプログラム本体の機械語列から自動判定する
-      // (NsfPlayer/NsfReplayStreamPlayer/キャプチャWorker/ヘッドレスの全経路がここを通る)。
-      // 詳細は nsfHeader.js detectLegacyN163Driver と n163.js 冒頭コメント 注2。
-      if (this.expansion.n163) {
-        this.n163Legacy = opt.n163Legacy !== undefined
-          ? !!opt.n163Legacy
-          : !!(MML.NSF.detectLegacyN163Driver && MML.NSF.detectLegacyN163Driver(opt.program));
-        this.expansion.n163.legacyWaveLen = this.n163Legacy;
-      }
 
       this.loadAddr = opt.loadAddr;
       this.useBankswitch = (opt.bankswitch || []).some(b => b !== 0);
@@ -4235,6 +4192,24 @@
 (function (global) {
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
+
+  /**
+   * KSS形式writeLogの1書込みを1つの整数へ詰める(2026-09-04)。
+   *   bit0-15 = addr(メモリアドレス or I/Oポート) / bit16-23 = value / bit24 = io(1ならI/O)
+   *
+   * {addr,value,io}のJSオブジェクトは実測75〜90B/件で、KSSは1フレーム平均84〜152件書くため
+   * 60秒で27〜41MB(実RSS)を占めていた。詰めればフレームごとの Int32Array で4B/件になる
+   * (実測 xak.kss 60秒: 27MB → 1.2MB)。型付き配列なので構造化クローン(キャプチャWorkerの
+   * 差分送信)もそのまま通る。読む側は kss2mml/expansion/*.js と kss-stream-player.js と
+   * roll-builders.js。
+   *
+   * ★定義場所はここ(capture.js)。KSS(kssPlayer.js)とVGM(vgmPlayer.js: AY/SSG/SCC/OPLL/OPLの
+   *   書込みをKSS形式で積む)の両方が使い、両方のWorkerバンドルに入る唯一の共通ファイルのため。
+   *   以前は kssPlayer.js にあり、VGMのWorkerバンドル(kssPlayer.jsを含まない)で
+   *   「Emu.kssPackWrite is not a function」で落ちて、AY/SSG/OPLを使うVGMのロールが空になる
+   *   (途中で落ちると取得済み範囲で打ち切られる)不具合の原因になっていた(2026-09-07)。
+   */
+  Emu.kssPackWrite = (addr, value, io) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0);
 
   /**
    * チャンネルごとのミュート設定をチップの mute プロパティへ反映する。
@@ -5308,6 +5283,14 @@
   function midiToName(m) {
     return NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1);
   }
+  // 鍵盤の描画範囲(C1〜C8)の外でも音名を返す(note列の表示用)。以前は範囲外を '??' にしていたが、
+  // OPMのキャリアMUL0.5のベース(21Hz=E0付近)やMUL3の高音(8kHz=B8)は実在の音程なので、
+  // 「何の音か分からない」より音名(範囲外は色を落として区別)の方が読める(2026-09-07)
+  function freqToMidiAny(f) {
+    if (!f || f <= 0) return null;
+    const m = Math.round(69 + 12 * Math.log2(f / 440) - rollTuningCents / 100);
+    return (m >= 0 && m <= 127) ? m : null;
+  }
 
   // ── APU 2A03 周波数計算 ───────────────────────────────────────
 
@@ -5826,10 +5809,15 @@
       const oplRhythm = !!(extraSnaps && extraSnaps.oplRhythmSeen);
       const MCOLS = ['#66ffcc', '#55eebb', '#44ddaa', '#33cc99', '#22bb88', '#11aa77', '#66e0d0', '#55d0c0', '#44c0b0'];
       for (let ch = 0; ch < (oplRhythm ? 6 : 9); ch++) {
-        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false };
+        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, waveData: null };
+        // 波形列はOPN/OPM行と同じく実際の合成波形(opl.js snapshotOPL の waveData。波形選択WS/
+        // 接続/帰還込み)。無い時だけ汎用FMアイコン
+        const wave = (c.waveData && c.waveData.length && c.active)
+          ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
+          : { t: 'fm', nx: 256, ny: 256 };
         channels.push({ id: `OL${ch + 1}`, color: MCOLS[ch % MCOLS.length], freq: c.freq, vol: c.vol,
           rawVol: c.rawVol, rawVolMax: 15,
-          wave: { t: 'fm', nx: 256, ny: 256 }, active: c.active, fmPatch: c.patch || null });
+          wave, active: c.active, fmPatch: c.patch || null });
       }
       if (oplRhythm) {
         // ★ロール(src/kss2mml/expansion/opl.js RHYTHM_DEFS)と同じ規則で音程を決める:
@@ -10150,7 +10138,11 @@
             el.noteEl.textContent = midiToName(midi);
             el.freqEl.textContent = dispFreq.toFixed(1) + ' Hz';
           } else {
-            el.noteEl.textContent = ch.freq > 0 ? '??' : '—';
+            // 鍵盤範囲外(C1未満/C8超)は音名を出しつつ色を落とす(freqToMidiAny参照)。
+            // 周波数はあるのに音名が決まらないときだけ '??'
+            const any = freqToMidiAny(ch.freq);
+            el.noteEl.textContent = any !== null ? midiToName(any) : (ch.freq > 0 ? '??' : '—');
+            if (any !== null) el.noteEl.style.color = '#9a9ab0';
             el.freqEl.textContent = ch.freq > 0 ? dispFreq.toFixed(1) + ' Hz' : '';
           }
           // FDSのピッチモジュレーション(MH<n>)有効中はfreq列を黄色で強調し、
@@ -10757,7 +10749,9 @@
             el.noteEl.textContent = midiToName(midi);
             el.freqEl.textContent = v.freq.toFixed(1) + ' Hz';
           } else {
-            el.noteEl.textContent = v.freq > 0 ? '??' : '—';
+            const any = freqToMidiAny(v.freq);
+            el.noteEl.textContent = any !== null ? midiToName(any) : (v.freq > 0 ? '??' : '—');
+            if (any !== null) el.noteEl.style.color = '#9a9ab0';
             el.freqEl.textContent = v.freq > 0 ? v.freq.toFixed(1) + ' Hz' : '';
           }
           // $3Dでノイズ発声中のchはnote列を黄色で強調

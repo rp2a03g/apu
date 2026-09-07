@@ -772,7 +772,7 @@
         const v = vrc7InstOf(p.source);
         const dem = p.channel.vrc7Demoted;
         if (dem) inst = `(${presetListOf(dem)}へ代替)`;
-        else if (v === '0') inst = '(@0 自作音色=4op→2op変換)';
+        else if (v === '0') inst = p.source.kind === 'fm4' ? '(@0 自作音色=4op→2op変換)' : '(@0 自作音色=元の波形から逆算)';
         else if (v !== 'auto') inst = `(@${v} ${VRC7_PRESET_NAMES[parseInt(v, 10)] || ''})`;
       }
       return `${letter}=${p.source.label}${inst}`;
@@ -912,6 +912,8 @@
       for (const ev of events) if (ev.note !== null && (ev.attDb !== undefined || ev.volume !== undefined)) ev.volume = conv(sourceAttDb(s, ev));
     }
     for (const ev of events) delete ev.attDb;
+    const TD = MML.Convert.ToneDerive;
+    const deriveRegs = { n163WaveReg, vrc7ToneReg };
     if (fam === 'noise') {
       MML.Convert.Borrow.pitchedToNoise(ch, tone);
     } else if (fam === 'vrc7' && vrc7Inst === '0' && s.kind === 'fm4' && vrc7ToneReg) {
@@ -925,17 +927,33 @@
         delete ev.opnPatch;
       }
       ch.hasVrc7Tone = true; ch.hasInstrument = true;
+    } else if (fam === 'vrc7' && vrc7Inst === '0' && vrc7ToneReg && TD && s.kind !== 'fm') {
+      // 矩形波(AY/SN)/波形(SCC)/PCMの1周期 → VRC7 2op 自作音色。元の音の波形から逆算する
+      // (src/convert/toneDerive.js。音色エディタの「出力波形から逆算」と同じ探索)。
+      // ★以前はこの分岐が無く、'0'を選んでも下のプリセット分岐で @1 に落ちていた(2026-09-07)
+      let any = false;
+      for (const ev of events) {
+        if (ev.note === null) { delete ev.vrc7Tone; delete ev.n163Wave; delete ev.opnPatch; continue; }
+        const bytes = TD.vrc7BytesForEvent(ev, s, deriveRegs);
+        if (bytes) { ev.instrument = 0; ev.vrc7Tone = vrc7ToneReg.assign(bytes); any = true; }
+        else { ev.instrument = 1; delete ev.vrc7Tone; }
+        delete ev.n163Wave; delete ev.opnPatch;
+      }
+      ch.hasVrc7Tone = any; ch.hasInstrument = true;
     } else if (fam === 'vrc7') {
       // VRC7プリセット音色。OPLLソースの元音色/カスタム音色は捨てる
       const inst = Math.max(1, Math.min(15, parseInt(vrc7Inst, 10) || 1));
       for (const ev of events) { if (ev.note !== null) ev.instrument = inst; delete ev.vrc7Tone; delete ev.n163Wave; delete ev.opnPatch; }
       ch.hasVrc7Tone = false; ch.hasInstrument = true;
     } else if (fam === 'n163') {
-      // ADPCM(サンプル1周期の波形あり)はその波形を、他は矩形波を @N に登録して音色にする。tone の固定波形が優先
+      // 元の音の1周期(ADPCM/PCMのサンプル波形、FM音色の定常波形=src/convert/toneDerive.js、
+      // SCC波形)を @N に登録して音色にする。波形が取れない矩形波系だけ矩形波。tone の固定波形が優先。
+      // ★以前はFM(OPN/OPM/OPLL/OPL)→N163が常に矩形波だった(2026-09-07)
       const forcedWave = MML.Convert.Borrow.toneWave(tone);
       for (const ev of events) {
         if (ev.note === null) { delete ev.n163Wave; continue; }
-        const wave = forcedWave || ((ev.n163Wave && ev.n163Wave.length === N163_WAVE_LEN) ? ev.n163Wave : N163_SQUARE_WAVE);
+        const derived = forcedWave ? null : (TD ? TD.n163WaveForEvent(ev, s, deriveRegs, N163_WAVE_LEN) : null);
+        const wave = forcedWave || derived || N163_SQUARE_WAVE;
         ev.instrument = n163WaveReg.assign(wave); ev.rawLength = N163_WAVE_LEN;
         delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch;
       }
@@ -959,11 +977,13 @@
       for (const ev of events) { delete ev.instrument; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; }
       ch.hasInstrument = false; ch.hasVrc7Tone = false;
     } else if (fam === 'fds') {
-      // FDS: 元が波形を持つ(SCC等)ならそれを64サンプル/0-63へ引き伸ばし、無ければ矩形波を @FM に登録して音色にする
+      // FDS: 元が波形を持つ(SCC/PCM/FM音色の定常波形)ならそれを64サンプル/0-63へ引き伸ばし、
+      // 無ければ矩形波を @FM に登録して音色にする
       const forced = MML.Convert.Borrow.toneWave(tone);
       for (const ev of events) {
         if (ev.note === null) { delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; continue; }
-        const src16 = forced || ((ev.n163Wave && ev.n163Wave.length) ? ev.n163Wave : N163_SQUARE_WAVE);
+        const derived = forced ? null : (TD ? TD.n163WaveForEvent(ev, s, deriveRegs) : null);
+        const src16 = forced || derived || ((ev.n163Wave && ev.n163Wave.length) ? ev.n163Wave : N163_SQUARE_WAVE);
         ev.instrument = fdsWaveReg.assign(toFdsWave(src16));
         delete ev.rawLength; delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch;
       }

@@ -13,6 +13,24 @@
   const Emu = MML.Emu = MML.Emu || {};
 
   /**
+   * KSS形式writeLogの1書込みを1つの整数へ詰める(2026-09-04)。
+   *   bit0-15 = addr(メモリアドレス or I/Oポート) / bit16-23 = value / bit24 = io(1ならI/O)
+   *
+   * {addr,value,io}のJSオブジェクトは実測75〜90B/件で、KSSは1フレーム平均84〜152件書くため
+   * 60秒で27〜41MB(実RSS)を占めていた。詰めればフレームごとの Int32Array で4B/件になる
+   * (実測 xak.kss 60秒: 27MB → 1.2MB)。型付き配列なので構造化クローン(キャプチャWorkerの
+   * 差分送信)もそのまま通る。読む側は kss2mml/expansion/*.js と kss-stream-player.js と
+   * roll-builders.js。
+   *
+   * ★定義場所はここ(capture.js)。KSS(kssPlayer.js)とVGM(vgmPlayer.js: AY/SSG/SCC/OPLL/OPLの
+   *   書込みをKSS形式で積む)の両方が使い、両方のWorkerバンドルに入る唯一の共通ファイルのため。
+   *   以前は kssPlayer.js にあり、VGMのWorkerバンドル(kssPlayer.jsを含まない)で
+   *   「Emu.kssPackWrite is not a function」で落ちて、AY/SSG/OPLを使うVGMのロールが空になる
+   *   (途中で落ちると取得済み範囲で打ち切られる)不具合の原因になっていた(2026-09-07)。
+   */
+  Emu.kssPackWrite = (addr, value, io) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0);
+
+  /**
    * チャンネルごとのミュート設定をチップの mute プロパティへ反映する。
    * target がオブジェクトならキー一致、配列ならインデックス一致で上書きする。
    */

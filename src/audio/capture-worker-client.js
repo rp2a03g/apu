@@ -296,7 +296,7 @@
    *        第3引数以降からロールジョブ用のdata形状を作る(kss: writeLog→{writeLog}等)
    */
   function _runMultiCapture(format, bundleKey, probesFn, fallbackFn, bytes, opt, onProgress,
-                            seedMirror, progressArgs, resultOf, fallbackRollData) {
+                            seedMirror, progressArgs, resultOf, fallbackRollData, retryOnMidFailure) {
     // フォールバック(メインスレッドキャプチャ)時は、ロール構築も同じコードを
     // メインスレッドでスロットル付き実行して配信契約を維持する
     const runFallback = () => {
@@ -338,7 +338,12 @@
 
       const failover = (message) => {
         if (settled) return;
-        if (!sawProgress) {
+        // retryOnMidFailure: 進捗を受け取った後にWorkerが落ちても、頭からメインスレッドで
+        // やり直せる形式(VGM: onProgressの受け手が鏡像を毎回丸ごと差し替えるだけで、
+        // 途中まで受け取った鏡像に再生側が依存しない)。KSS/GBSは最初の進捗で再生プレイヤーが
+        // 鏡像の配列参照を掴む(その後も伸び続ける前提)ため、やり直すと再生側が古い配列を
+        // 見続ける。そちらは従来どおり取得済み範囲で打ち切る。
+        if (!sawProgress || retryOnMidFailure) {
           console.warn(`[capture-worker] Workerエラー(${format})。メインスレッドへフォールバック:`, message);
           settled = true;
           try { worker.terminate(); } catch (e) { /* ignore */ }
@@ -387,6 +392,7 @@
     return _runMultiCapture('kss', 'kssCapture',
       () => [MML.KSS && MML.KSS.parseHeader, Emu.CPUZ80, Emu.KssBus, Emu.KssPlayer,
              Emu.AY8910Audio, Emu.SCCAudio, Emu.OPLLAudio, Emu.OPLLNuked, Emu.OPLAudio, Emu.captureKssSongAsync,
+             Emu.kssPackWrite, // writeLogの詰め方(capture.js)。無いバンドルは実行時に落ちる
              MML.RollBuild && MML.RollBuild.kss,
              MML.Kss2MmlExpansion && MML.Kss2MmlExpansion.ay,
              MML.Kss2MmlExpansion && MML.Kss2MmlExpansion.scc,
@@ -421,6 +427,11 @@
   Emu.captureVgmSongWorkerAsync = function (vgmBytes, opt = {}, onProgress = null) {
     return _runMultiCapture('vgm', 'vgmCapture',
       () => [MML.VGM && MML.VGM.parseHeader, Emu.VgmPlayer, Emu.captureVgmSongAsync,
+             // ★Workerが実行時に呼ぶ共通関数もプローブに入れる(バンドルに入っていなければ
+             //   鮮度チェックで弾かれてメインスレッドへ落ちる)。kssPackWrite が vgm バンドルに
+             //   無かった時は、AY/SSG/OPL/SCCの最初の書込みで Worker が落ち、進捗送信後なら
+             //   「取得済み範囲で打ち切り」=ロール空・ドラムパッド無しになっていた(2026-09-07)
+             Emu.kssPackWrite,
              Emu.APU2A03, Emu.FDSAudio, Emu.APUGb, Emu.APUHuC6280,
              Emu.AY8910Audio, Emu.SCCAudio, Emu.OPLLAudio, Emu.OPLLNuked, Emu.SN76489Audio,
              Emu.YM2612Nuked, Emu.YM2610Audio, Emu.YM2151Audio, Emu.YM2203Audio, Emu.YM2608Audio, Emu.OPLAudio,
@@ -436,7 +447,8 @@
       {},
       (mirror) => [mirror],
       (mirror) => mirror,
-      (data) => data);
+      (data) => data,
+      true); // 途中で落ちたら頭からメインスレッドでやり直す(failover参照)
   };
 
   // =========================================================================

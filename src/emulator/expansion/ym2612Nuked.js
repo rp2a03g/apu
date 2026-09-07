@@ -952,4 +952,7 @@
   Emu.snapshotYM2612 = function (chip, opt) { return chip.snapshot(opt); };
 
   Emu.YM2612Nuked = YM2612Nuked;
+  // 鍵盤表示と同じ簡易合成(実機のlogsin/exp表)を変換側(src/convert/toneDerive.js: OPN音色→N163波形)
+  // からも使えるように公開する。pgInc は比だけが効く(op4基準)ので ML 値をそのまま渡してよい
+  YM2612Nuked.synthWave = nukedSynthWave;
 })(window);

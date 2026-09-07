@@ -17,6 +17,11 @@ captureHesSongAsync)をWeb Workerで実行するための自己完結ビルド�
     ソースのtoStringがバンドル文字列に含まれるか)を行い、再ビルド忘れの古い
     バンドルを検出したらconsole警告してメインスレッド版へフォールバックする
     (古いエミュレータのWorkerは現行と違う結果を吐くため、正しさ優先)
+  - ★Workerが実行時に呼ぶ共通関数(例: Emu.kssPackWrite=src/emulator/capture.js)を
+    新しく使い始めたら、定義ファイルがそのバンドルのFilesに入っているかを確認し、
+    capture-worker-client.js のプローブにもその関数を足すこと。鮮度チェックは
+    「バンドルに無い関数」を検出できない(2026-09-07: vgmバンドルに kssPackWrite が
+    無く、AY/SSG/OPLを使うVGMのWorkerが途中で落ちてロールが空になっていた)
 
 ピアノロールのタイムライン構築もWorker内で行う(2026-08-21):
   - 構築ロジックは src/audio/roll-builders.js (MML.RollBuild、メインスレッドと共有)。

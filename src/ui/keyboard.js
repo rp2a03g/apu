@@ -729,6 +729,14 @@
   function midiToName(m) {
     return NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1);
   }
+  // 鍵盤の描画範囲(C1〜C8)の外でも音名を返す(note列の表示用)。以前は範囲外を '??' にしていたが、
+  // OPMのキャリアMUL0.5のベース(21Hz=E0付近)やMUL3の高音(8kHz=B8)は実在の音程なので、
+  // 「何の音か分からない」より音名(範囲外は色を落として区別)の方が読める(2026-09-07)
+  function freqToMidiAny(f) {
+    if (!f || f <= 0) return null;
+    const m = Math.round(69 + 12 * Math.log2(f / 440) - rollTuningCents / 100);
+    return (m >= 0 && m <= 127) ? m : null;
+  }
 
   // ── APU 2A03 周波数計算 ───────────────────────────────────────
 
@@ -1247,10 +1255,15 @@
       const oplRhythm = !!(extraSnaps && extraSnaps.oplRhythmSeen);
       const MCOLS = ['#66ffcc', '#55eebb', '#44ddaa', '#33cc99', '#22bb88', '#11aa77', '#66e0d0', '#55d0c0', '#44c0b0'];
       for (let ch = 0; ch < (oplRhythm ? 6 : 9); ch++) {
-        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false };
+        const c = s ? s.channels[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, waveData: null };
+        // 波形列はOPN/OPM行と同じく実際の合成波形(opl.js snapshotOPL の waveData。波形選択WS/
+        // 接続/帰還込み)。無い時だけ汎用FMアイコン
+        const wave = (c.waveData && c.waveData.length && c.active)
+          ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
+          : { t: 'fm', nx: 256, ny: 256 };
         channels.push({ id: `OL${ch + 1}`, color: MCOLS[ch % MCOLS.length], freq: c.freq, vol: c.vol,
           rawVol: c.rawVol, rawVolMax: 15,
-          wave: { t: 'fm', nx: 256, ny: 256 }, active: c.active, fmPatch: c.patch || null });
+          wave, active: c.active, fmPatch: c.patch || null });
       }
       if (oplRhythm) {
         // ★ロール(src/kss2mml/expansion/opl.js RHYTHM_DEFS)と同じ規則で音程を決める:
@@ -5571,7 +5584,11 @@
             el.noteEl.textContent = midiToName(midi);
             el.freqEl.textContent = dispFreq.toFixed(1) + ' Hz';
           } else {
-            el.noteEl.textContent = ch.freq > 0 ? '??' : '—';
+            // 鍵盤範囲外(C1未満/C8超)は音名を出しつつ色を落とす(freqToMidiAny参照)。
+            // 周波数はあるのに音名が決まらないときだけ '??'
+            const any = freqToMidiAny(ch.freq);
+            el.noteEl.textContent = any !== null ? midiToName(any) : (ch.freq > 0 ? '??' : '—');
+            if (any !== null) el.noteEl.style.color = '#9a9ab0';
             el.freqEl.textContent = ch.freq > 0 ? dispFreq.toFixed(1) + ' Hz' : '';
           }
           // FDSのピッチモジュレーション(MH<n>)有効中はfreq列を黄色で強調し、
@@ -6178,7 +6195,9 @@
             el.noteEl.textContent = midiToName(midi);
             el.freqEl.textContent = v.freq.toFixed(1) + ' Hz';
           } else {
-            el.noteEl.textContent = v.freq > 0 ? '??' : '—';
+            const any = freqToMidiAny(v.freq);
+            el.noteEl.textContent = any !== null ? midiToName(any) : (v.freq > 0 ? '??' : '—');
+            if (any !== null) el.noteEl.style.color = '#9a9ab0';
             el.freqEl.textContent = v.freq > 0 ? v.freq.toFixed(1) + ' Hz' : '';
           }
           // $3Dでノイズ発声中のchはnote列を黄色で強調

@@ -198,8 +198,22 @@
     // 音色/波形: 借用先ごとに作り直す。N163以外へ載せるときは rawLength(N163波形長)も落とす
     // (applyPitchDetune/assignPitchEnvelope の periodForFreq が ev 経由で参照するため)
     const clearWave = (ev) => { delete ev.n163Wave; delete ev.vrc7Tone; delete ev.opnPatch; };
+    const TD = MML.Convert.ToneDerive;
+    const deriveRegs = { n163WaveReg, vrc7ToneReg };
     if (fam === 'noise') {
       pitchedToNoise(ch, tone);
+    } else if (fam === 'vrc7' && tone === '0' && vrc7ToneReg && TD && s.kind !== 'fm' && s.kind !== 'fm4') {
+      // 矩形波(PSG)/波形(SCC/HuC6280)/PCM → VRC7 2op 自作音色。元の音の波形から逆算する
+      // (src/convert/toneDerive.js)。★以前は '0' を選んでも下のプリセット分岐で @1 に落ちていた
+      let any = false;
+      for (const ev of events) {
+        if (ev.note === null) { clearWave(ev); delete ev.rawLength; continue; }
+        const bytes = TD.vrc7BytesForEvent(ev, s, deriveRegs);
+        if (bytes) { ev.instrument = 0; ev.vrc7Tone = vrc7ToneReg.assign(bytes); any = true; }
+        else { ev.instrument = 1; delete ev.vrc7Tone; }
+        delete ev.n163Wave; delete ev.opnPatch; delete ev.rawLength;
+      }
+      ch.hasVrc7Tone = any; ch.hasInstrument = true;
     } else if (fam === 'vrc7' && tone === '0' && s.kind === 'fm4' && vrc7ToneReg) {
       // OPN 4op → VRC7 2op 自作音色(opnToOpllBytes)。音色ごとに @OP<n> を登録し OP<n>+@0 で切り替える
       for (const ev of events) {
@@ -217,11 +231,13 @@
       for (const ev of events) { if (ev.note !== null) ev.instrument = inst; clearWave(ev); delete ev.rawLength; }
       ch.hasVrc7Tone = false; ch.hasInstrument = true;
     } else if (fam === 'n163') {
-      // 元が波形を持つ(SCC/HuC6280/ADPCM)ならそれを、無ければ矩形波を @N に登録して音色にする
+      // 元が波形を持つ(SCC/HuC6280/ADPCM)ならそれを、FM(OPLL/OPL/OPN)なら音色の定常波形
+      // (src/convert/toneDerive.js)を、どちらも無ければ矩形波を @N に登録して音色にする
       const forced = toneWave(tone);
       for (const ev of events) {
         if (ev.note === null) { clearWave(ev); continue; }
-        const wave = forced || ((ev.n163Wave && ev.n163Wave.length) ? ev.n163Wave : N163_SQUARE_WAVE);
+        const derived = forced ? null : (TD ? TD.n163WaveForEvent(ev, s, deriveRegs, N163_WAVE_LEN) : null);
+        const wave = forced || derived || ((ev.n163Wave && ev.n163Wave.length) ? ev.n163Wave : N163_SQUARE_WAVE);
         ev.instrument = n163WaveReg.assign(wave); ev.rawLength = wave.length;
         clearWave(ev);
       }

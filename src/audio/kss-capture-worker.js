@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-07 13:16:57
+ * Built by tools/build-capture-workers.ps1 at 2026-09-07 16:00:06
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-07 13:16:57';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-07 16:00:06';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -2491,6 +2491,23 @@
   // 作るために使う。LOGSIN/EXPROM表そのものは外へ出さない(表を持ち出すと写しがずれる)
   OPLLNuked.opOut = opOut;
 
+  // 内蔵音色ROMをレジスタ$00-$07と同じ8バイト並びで返す(type: 'ym2413' | 'ds1001'(VRC7)、inst 1-15)。
+  // 変換側(src/convert/toneDerive.js)が「YM2413のプリセット音色の波形」をN163等へ写すときに使う。
+  // ★VRC7(ds1001)側の写しは src/convert/vrc7Tone.js PRESETS にもある(Workerバンドル都合の複製)
+  OPLLNuked.presetBytes = function (type, inst) {
+    const rom = type === 'ds1001' ? PATCH_DS1001 : PATCH_YM2413;
+    const p = rom[(inst | 0) - 1];
+    if (!p) return null;
+    const b20 = (i) => (p.am[i] << 7) | (p.vib[i] << 6) | (p.et[i] << 5) | (p.ksr[i] << 4) | (p.multi[i] & 15);
+    return [
+      b20(0), b20(1),
+      ((p.ksl[0] & 3) << 6) | (p.tl & 63),
+      ((p.ksl[1] & 3) << 6) | ((p.dc & 1) << 4) | ((p.dm & 1) << 3) | (p.fb & 7),
+      (p.ar[0] << 4) | p.dr[0], (p.ar[1] << 4) | p.dr[1],
+      (p.sl[0] << 4) | p.rr[0], (p.sl[1] << 4) | p.rr[1]
+    ];
+  };
+
   Emu.OPLLNuked = OPLLNuked;
 })(globalThis);
 
@@ -3886,6 +3903,13 @@
  * 同じOPNファミリ共通表(OPLのレート値は rate=4*R+RKS、EGクロックは毎サンプル=OPNの3倍速。
  * MAME fmopl.cと同じ時間スケール)。
  *
+ * ★変調量の尺度(2026-09-07修正): モジュレータ→キャリアは出力>>1(±8192→±4096=サイン表
+ *   1024点の4周期ぶん。MAME fmopl/Nuked-OPLLの「12bit出力をそのまま位相へ」と同じ深さ)、
+ *   帰還は(直前2出力の和)>>(10-FB)(FB=7で±2048=2周期。Nuked-OPLLの「2出力の平均>>(7-FB)」
+ *   =11bit出力で2周期、MAME fmopl の out<<(FB+7)>>16 と同じ)。以前は帰還が >>(9-FB) で
+ *   実機の2倍の深さになっており、FB=7の音色(Bubble Bobble FM8等)が実機よりずっと
+ *   ノイジーに崩れていた。ym2151.js(OPM)の >>(10-FB) と同じ値に揃えた。
+ *
  * ★リズム(HH/SD/CYM)の位相ビット細工とノイズLFSRは、die解析済みの opllNuked.js
  *   (Nuked-OPLL。OPLLのリズム回路はOPL由来で同一)から式を移植:
  *     HH: サイン索引 = rm_bit<<9 | ((rm_bit^noise) ? 0xd0 : 0x34)
@@ -4330,7 +4354,7 @@
       for (let i = 0; i < melodyN; i++) {
         const c = this.channels[i];
         const [m, cr] = c.slots;
-        const fbIn = c.fb ? ((m.prev[0] + m.prev[1]) >> (9 - c.fb)) : 0;
+        const fbIn = c.fb ? ((m.prev[0] + m.prev[1]) >> (10 - c.fb)) : 0;
         const om = this._opOut(m, this._egOut(m), fbIn);
         m.prev[0] = m.prev[1]; m.prev[1] = om;
         let o;
@@ -4344,7 +4368,7 @@
         // BD: 通常の2op FM(×2)
         {
           const [m, cr] = ch6.slots;
-          const fbIn = ch6.fb ? ((m.prev[0] + m.prev[1]) >> (9 - ch6.fb)) : 0;
+          const fbIn = ch6.fb ? ((m.prev[0] + m.prev[1]) >> (10 - ch6.fb)) : 0;
           const om = this._opOut(m, this._egOut(m), fbIn);
           m.prev[0] = m.prev[1]; m.prev[1] = om;
           const o = ch6.cnt ? this._opOut(cr, this._egOut(cr), 0) : this._opOut(cr, this._egOut(cr), om >> 1);
@@ -4391,10 +4415,38 @@
     mixSample() { return this.last; }
   }
 
+  // 鍵盤表示の波形列/大波形用: いまのEG状態・波形選択(WS)・接続・帰還で2opを定常状態として
+  // 1周期(キャリア基準128点)合成する(ym2151.js snapshot の簡易合成と同じ考え方)。
+  // ★これが無いと鍵盤の波形アイコンが汎用FMアイコン(=サイン波)になり、YM3812の波形選択も
+  //   モジュレーションも見えず「波形が全部サイン波」に見える(2026-09-07)
+  function synthOplWave(chip, c) {
+    const N = 128;
+    const [m, cr] = c.slots;
+    const wave = new Array(N).fill(0);
+    const ratio = (m.mul || 1) / (cr.mul || 1);
+    const attM = chip._egOut(m), attC = chip._egOut(cr);
+    let p0 = 0, p1 = 0, mx = 1e-6;
+    // 帰還を定常化するため2周期回して後半だけ採る
+    for (let n = 0; n < 2 * N; n++) {
+      const k = n % N;
+      const phm = Math.round(k / N * SIN_LEN * ratio) & SIN_MASK;
+      const phc = Math.round(k / N * SIN_LEN) & SIN_MASK;
+      const fbIn = c.fb ? ((p0 + p1) >> (10 - c.fb)) : 0;
+      const om = chip._wave(m.ws, (phm + fbIn) & SIN_MASK, attM);
+      p0 = p1; p1 = om;
+      const v = c.cnt ? om + chip._wave(cr.ws, phc, attC) : chip._wave(cr.ws, (phc + (om >> 1)) & SIN_MASK, attC);
+      if (n >= N) { wave[k] = v; if (Math.abs(v) > mx) mx = Math.abs(v); }
+    }
+    for (let k = 0; k < N; k++) wave[k] /= mx;
+    return wave;
+  }
+
   // ── 鍵盤表示用スナップショット ──
-  // channels[9]: { freq, vol, rawVol, active, keyOn, tlVol, patch } + rhythm行(rhythmOn時):
+  // channels[9]: { freq, vol, rawVol, active, keyOn, tlVol, patch, waveData } + rhythm行(rhythmOn時):
   // rhythm: { on, bd:{...}, sd, tom, cym, hh } 各 { keyOn, vol, freq(TOM/HH/SDはch7/8のfnum由来) }
-  Emu.snapshotOPL = function (chip) {
+  // opt.skipWave=true で waveData(表示専用の合成波形128点)を作らない(先読みキャプチャ向け)
+  Emu.snapshotOPL = function (chip, opt) {
+    const skipWave = !!(opt && opt.skipWave);
     const out = { channels: [], rhythm: null };
     const rhythmOn = !!(chip.rhythm & 0x20);
     const melodyN = rhythmOn ? 6 : 9;
@@ -4413,6 +4465,7 @@
       out.channels.push({
         freq, vol, rawVol: Math.round(vol * 15), active, keyOn: inMelody && c.kon, tlVol,
         panL: 1, panR: 1,
+        waveData: (active && !skipWave) ? synthOplWave(chip, c) : null,
         patch: Emu.decodeOplPatch(chip.regs, i, chip.hasWave)
       });
     }
@@ -4724,16 +4777,11 @@
   /**
    * writeLogの1書込みを1つの整数へ詰める(2026-09-04)。
    *   bit0-15 = addr(メモリアドレス or I/Oポート) / bit16-23 = value / bit24 = io(1ならI/O)
-   *
-   * {addr,value,io}のJSオブジェクトは**実測75〜90B/件**で、KSSは1フレーム平均84〜152件
-   * 書くため60秒で27〜41MB(実RSS)を占めていた。詰めればフレームごとの Int32Array で
-   * 4B/件になる(実測 xak.kss 60秒: 27MB → 1.2MB)。
-   * ★型付き配列なので構造化クローン(キャプチャWorkerの差分送信)もそのまま通る。
-   * ★VGM側(vgmPlayer.js data.kss.writeLog)も同じ詰め方で作ること。読む側は
-   *   kss2mml/expansion/*.js と kss-stream-player.js と roll-builders.js。
+   * 定義の実体は src/emulator/capture.js の Emu.kssPackWrite(KSS/VGM両方のWorkerバンドルに
+   * 入る共通ファイル)。ここでは遅延参照だけ持つ(バンドル内の読み込み順に依存しないため)。
+   * VGM側(vgmPlayer.js data.kss.writeLog)も同じ詰め方で作る。
    */
-  const packWrite = (addr, value, io) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0);
-  Emu.kssPackWrite = packWrite;
+  const packWrite = (addr, value, io) => Emu.kssPackWrite(addr, value, io);
 
   // INIT/PLAY呼び出し時のスタックポインタ初期値(libkss exec_setup の 0xF380 と同じ。
   // MSX BIOSワークエリアの直下で、実機ドライバが LD SP,0F380h とするのと同じ位置)
@@ -4953,6 +5001,24 @@
 (function (global) {
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
+
+  /**
+   * KSS形式writeLogの1書込みを1つの整数へ詰める(2026-09-04)。
+   *   bit0-15 = addr(メモリアドレス or I/Oポート) / bit16-23 = value / bit24 = io(1ならI/O)
+   *
+   * {addr,value,io}のJSオブジェクトは実測75〜90B/件で、KSSは1フレーム平均84〜152件書くため
+   * 60秒で27〜41MB(実RSS)を占めていた。詰めればフレームごとの Int32Array で4B/件になる
+   * (実測 xak.kss 60秒: 27MB → 1.2MB)。型付き配列なので構造化クローン(キャプチャWorkerの
+   * 差分送信)もそのまま通る。読む側は kss2mml/expansion/*.js と kss-stream-player.js と
+   * roll-builders.js。
+   *
+   * ★定義場所はここ(capture.js)。KSS(kssPlayer.js)とVGM(vgmPlayer.js: AY/SSG/SCC/OPLL/OPLの
+   *   書込みをKSS形式で積む)の両方が使い、両方のWorkerバンドルに入る唯一の共通ファイルのため。
+   *   以前は kssPlayer.js にあり、VGMのWorkerバンドル(kssPlayer.jsを含まない)で
+   *   「Emu.kssPackWrite is not a function」で落ちて、AY/SSG/OPLを使うVGMのロールが空になる
+   *   (途中で落ちると取得済み範囲で打ち切られる)不具合の原因になっていた(2026-09-07)。
+   */
+  Emu.kssPackWrite = (addr, value, io) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0);
 
   /**
    * チャンネルごとのミュート設定をチップの mute プロパティへ反映する。

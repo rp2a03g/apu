@@ -126,6 +126,32 @@ function main() {
     ng += ngS;
     rows.push(['vrc7tone', '-', '-', String(ng), '-', '-']);
     if (ng) bad++;
+
+    // 音色派生(src/convert/toneDerive.js): FM音色→N163波形が矩形波以外になること、
+    // 矩形波→VRC7自作音色の逆算が8バイト返し、その音色の定常波形が矩形波と相関0.8以上あること。
+    // どちらかが壊れると「FM→N163が全部矩形波」「@0を選んでも@1に落ちる」の退行になる(2026-09-07)
+    const TD = MML.Convert.ToneDerive;
+    let ngD = (TD && S && Emu.OPLLNuked && Emu.OPLLNuked.presetBytes) ? 0 : 1;
+    const dres = [];
+    if (!ngD) {
+      const isSquare = (w) => w.every((v, i) => v === (i < w.length / 2 ? 15 : 0));
+      const organ = TD.toN163(TD.opllSteadyWave(Emu.OPLLNuked.presetBytes('ym2413', 8)));
+      if (!organ || organ.length !== 32 || isSquare(organ) || new Set(organ).size < 4) ngD++;
+      dres.push(`OPLL Organ→@N ${organ ? new Set(organ).size + '段階' : 'null'}`);
+      const opn = TD.toN163(TD.opnSteadyWave({ AL: 4, FB: 3, AMS: 0, PMS: 0,
+        ops: [{ TL: 30, ML: 2, SL: 0, SR: 0 }, { TL: 0, ML: 1, SL: 0, SR: 0 }, { TL: 40, ML: 1, SL: 0, SR: 0 }, { TL: 0, ML: 1, SL: 0, SR: 0 }] }));
+      if (!opn || isSquare(opn) || new Set(opn).size < 4) ngD++;
+      dres.push(`OPN alg4→@N ${opn ? new Set(opn).size + '段階' : 'null'}`);
+      const sq = TD.squareWave(0.5);
+      const bytes = TD.vrc7BytesFromWave(sq);
+      let c = 0;
+      if (bytes && bytes.length === 8) c = S.corr(S.resample(sq, S.N), S.resample(TD.opllSteadyWave(bytes), S.N));
+      if (!(c >= 0.8)) ngD++;
+      dres.push(`矩形波→VRC7@0 一致率 ${c.toFixed(3)}`);
+    }
+    process.stderr.write((ngD === 0 ? '音色派生: OK(' : '音色派生: ★NG(') + dres.join(' / ') + ')\n');
+    rows.push(['tonederive', '-', '-', String(ngD), '-', '-']);
+    if (ngD) bad++;
   }
 
   if (!argv.includes('--no-cpu')) {
