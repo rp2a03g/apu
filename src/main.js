@@ -3539,7 +3539,7 @@
     return names.length > 0 ? names.join(', ') : T('なし (2A03のみ)');
   }
 
-  function renderNsfFileHeader(header) {
+  function renderNsfFileHeader(header, legacyN163) {
     let out = '';
     out += `Magic OK       : ${header.magicOk}\n`;
     out += `Version        : ${header.version}\n`;
@@ -3562,6 +3562,17 @@
     pre.className = header.magicOk ? 'ok' : 'error';
     pre.textContent = out;
     nsfFileHeaderEl.appendChild(pre);
+
+    // 旧ppmckドライバ(Famicompo mini 時代)のN106判定。当時のVirtuaNES系の解釈
+    // (波形長 最大32サンプル)で書かれたNSFは実機仕様のままだと音程が2オクターブ落ちて
+    // 音色も崩れるため、エミュレータ側で旧解釈に切り替える(nsfBus.js/n163.js)。
+    // ここでは検出結果をログに出すだけ。N163を使わないNSFでは同じドライバでも無関係なので出さない。
+    if (legacyN163 && (header.extraChips & MML.NSF.CHIP_FLAGS.N163)) {
+      const note = document.createElement('div');
+      note.className = 'ok';
+      note.textContent = T('旧ppmckドライバ(Famicompo mini 時代)を検出: N163の波形長を旧解釈(VirtuaNES互換・最大32サンプル)で鳴らします。実機仕様で鳴らすと音程が2オクターブ落ち音色も崩れるため、当時の聴こえ方を再現します。');
+      nsfFileHeaderEl.appendChild(note);
+    }
   }
 
   async function loadNsfFile() {
@@ -3596,7 +3607,7 @@
 
     loadedNsfBytes = bytes;
     loadedNsfHeader = header;
-    renderNsfFileHeader(header);
+    renderNsfFileHeader(header, MML.NSF.detectLegacyN163Driver(bytes.slice(128)));
 
     const totalSongs = Math.max(1, header.totalSongs);
     nsfSongIndexEl.min = '1';
@@ -5011,26 +5022,31 @@
     return { mode: 'gain', kind, value: gainReg & 0x1F };
   }
 
-  // 大波形パネル用: 素のBRR値・ガウス補間後の滑らかな波形・(PM有効chなら)ピッチ変調後の
-  // 波形を非破壊プレビューで生成する（dspの実状態は変更しない。previewVoiceOutput参照）。
-  function buildSpcWaveLayers(v, pitchVal, ch, pmOn, voices) {
+  // 大波形パネル用: 素のBRR値(現ブロック16点)・ガウス補間後の連続波形(同じ横軸=サンプル位置)・
+  // 現在ピッチで実際に出る出力サンプル(点)・(PM有効chなら)ピッチ変調後の出力サンプル(点)を
+  // 非破壊プレビューで生成する(dspの実状態は変更しない。Emu.previewVoiceWave 参照)。
+  // 横軸は全レイヤーとも「現ブロック内のサンプル位置 0〜16」で、BRRの階段と補間曲線が重なる。
+  function buildSpcWaveLayers(v, dsp, pitchVal, ch, pmOn, voices) {
     const raw = Array.from(v.brrBuf.subarray(4, 20), s => s / 32768);
-    const SMOOTH_COUNT = 48;
-    const smooth = MML.Emu.previewVoiceOutput(v, pitchVal, SMOOTH_COUNT).map(s => s / 32768);
-    let smoothPM = null;
+    const pv = MML.Emu.previewVoiceWave(v, dsp, pitchVal);
+    const curve = Array.from(pv.curve, s => s / 32768);
+    const dots = (pts) => ({ data: pts.map(q => q.v / 32768), xs: pts.map(q => q.p / 16) });
+    const out = dots(pv.points);
+    let outPM = null;
     if (ch > 0 && pmOn) {
       const prevOut = voices[ch - 1].outSample;
       let modPitch = (pitchVal * (prevOut + 0x8000)) >> 15;
       modPitch = Math.max(0, Math.min(0x3FFF, modPitch));
-      smoothPM = MML.Emu.previewVoiceOutput(v, modPitch, SMOOTH_COUNT).map(s => s / 32768);
+      outPM = dots(MML.Emu.previewVoiceWave(v, dsp, modPitch).points);
     }
     return {
       t: 'wave', nx: 16, ny: 32768, signed: true,
       data: raw,
       layers: [
         { data: raw, mode: 'steps', color: '#8a8a98', label: T('素(BRR)') },
-        { data: smooth, mode: 'line', color: '#6ea8ff', label: T('ガウス補間') },
-      ].concat(smoothPM ? [{ data: smoothPM, mode: 'line', dash: [4, 3], color: '#ff8844', label: T('PM変調後') }] : []),
+        { data: curve, mode: 'line', color: '#6ea8ff', label: T('ガウス補間') },
+        { data: out.data, xs: out.xs, mode: 'dots', color: '#6ea8ff', label: T('出力サンプル') },
+      ].concat(outPM ? [{ data: outPM.data, xs: outPM.xs, mode: 'dots', hollow: true, color: '#ff8844', label: T('PM変調後') }] : []),
     };
   }
 
@@ -5100,7 +5116,7 @@
       const pmOn = !!(pmonReg & (1 << ch));
       const noiseOn = !!(nonReg & (1 << ch));
       const echoOn = !!(eonReg & (1 << ch));
-      const wave = active ? buildSpcWaveLayers(v, pitch, ch, pmOn, voices) : null;
+      const wave = active ? buildSpcWaveLayers(v, dsp, pitch, ch, pmOn, voices) : null;
       spcVoices.push({
         label:  `V${ch}`,
         freq:   active && !muted ? pitchToHz(pitch, spcTuneForSrcn(srcn)) : 0,

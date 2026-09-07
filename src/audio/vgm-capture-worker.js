@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-07 10:11:53
+ * Built by tools/build-capture-workers.ps1 at 2026-09-07 13:16:57
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-07 10:11:53';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-07 13:16:57';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -14902,6 +14902,7 @@
           const d = layer.data;
           let h = d.length;
           for (let i = 0; i < d.length; i++) h = (h * 31 + Math.round(d[i] * 1000)) | 0;
+          if (layer.xs) for (let i = 0; i < layer.xs.length; i++) h = (h * 31 + Math.round(layer.xs[i] * 1000)) | 0;
           s += ':' + d.length + ':' + h;
         }
       } else if (wave.sig) {
@@ -15257,8 +15258,18 @@
             ctx.arc(x, y, 3 * S, 0, Math.PI * 2);
             ctx.fill();
           }
+        } else if (layer.mode === 'dots') {
+          // 出力サンプル(点)。xs[k] は横位置(0〜1、サンプル位置/16)。hollow は輪郭だけ(PM変調後)
+          ctx.lineWidth = 1.5 * S;
+          for (let k = 0; k < d.length; k++) {
+            const x = x0 + (layer.xs ? layer.xs[k] : k / d.length) * w;
+            const y = mid - d[k] * amp;
+            ctx.beginPath();
+            ctx.arc(x, y, 3 * S, 0, Math.PI * 2);
+            if (layer.hollow) ctx.stroke(); else ctx.fill();
+          }
         } else {
-          // ガウス補間後・PM変調後: 連続的な線形補間曲線
+          // ガウス補間後: 連続的な線形補間曲線(横軸=サンプル位置、BRRの階段と同じ)
           ctx.lineWidth = 2.2 * S;
           ctx.beginPath();
           for (let i = 0; i <= w; i++) {

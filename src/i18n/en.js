@@ -361,6 +361,8 @@
     'NTSC Speed     : {v} (1/1,000,000秒)': 'NTSC speed     : {v} (1/1,000,000 s)',
     'PAL Speed      : {v} (1/1,000,000秒)': 'PAL speed      : {v} (1/1,000,000 s)',
     '拡張音源       : {chips} ({hex})': 'Expansion      : {chips} ({hex})',
+    '旧ppmckドライバ(Famicompo mini 時代)を検出: N163の波形長を旧解釈(VirtuaNES互換・最大32サンプル)で鳴らします。実機仕様で鳴らすと音程が2オクターブ落ち音色も崩れるため、当時の聴こえ方を再現します。':
+      'Legacy ppmck driver (Famicompo mini era) detected: N163 wave length is played with the old interpretation (VirtuaNES-compatible, max 32 samples). Under the real-hardware spec the pitch would drop two octaves and the timbre would break, so this reproduces how it sounded back then.',
     '曲 {song} / {total}  再生時間: {time}': 'Track {song} / {total}  Length: {time}',
     'MML変換中…': 'Converting to MML...',
     '変換エラー: {msg}': 'Conversion error: {msg}',
@@ -431,6 +433,7 @@
     '素(BRR)': 'Raw (BRR)',
     'ガウス補間': 'Gaussian',
     'PM変調後': 'After PM',
+    '出力サンプル': 'Output samples',
 
     // ---- KSSパネル ----
     'ヘッダ情報 (KSS: MSX PSG/SCC/FMPAC)': 'Header (KSS: MSX PSG/SCC/FMPAC)',

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-07 10:11:53
+ * Built by tools/build-capture-workers.ps1 at 2026-09-07 13:16:57
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-07 10:11:53';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-07 13:16:57';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -820,23 +820,60 @@
   // ほぼ 2048 になる単位利得カーネルでなければならない。
   //   G[n] = round(h((511.5 - n)/256) * scale),  h(u) = exp(-u^2 / (2σ^2))
   // σ=0.63 で実機ピーク(≈1305)を再現し、全列合計が 2044〜2050(±0.3%)に収まる。
-  const GAUSS = (() => {
-    const SIGMA = 0.63;
-    const h = (u) => Math.exp(-(u * u) / (2 * SIGMA * SIGMA));
-    // f=0..1 の全列平均合計が 2048 になるよう scale を決定(単位利得化)
-    let colAvg = 0;
-    for (let p = 0; p < 256; p++) {
-      const f = (p + 0.5) / 256;
-      colAvg += h(1 + f) + h(f) + h(1 - f) + h(2 - f);
-    }
-    const scale = 2048 / (colAvg / 256);
-    const t = new Int16Array(512);
-    for (let n = 0; n < 512; n++) {
-      const u = (511.5 - n) / 256;
-      t[n] = Math.round(h(u) * scale);
-    }
-    return t;
-  })();
+  // ★2026-09-07 σ=0.63 のガウス関数から合成した近似表(実機との最大差20、8kHzで0.14dB差)を、
+  // 実機DSPのROM表そのもの(blargg snes_spc / snes9x SPC_DSP.cpp の gauss[512]、fullsnes と同一)へ
+  // 差し替えた。鍵盤表示の「ガウス補間」の図と実出力を実機どおりにするため。
+  const GAUSS = new Int16Array([
+       0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+       1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   2,   2,   2,   2,   2,
+       2,   2,   3,   3,   3,   3,   3,   4,   4,   4,   4,   4,   5,   5,   5,   5,
+       6,   6,   6,   6,   7,   7,   7,   8,   8,   8,   9,   9,   9,  10,  10,  10,
+      11,  11,  11,  12,  12,  13,  13,  14,  14,  15,  15,  15,  16,  16,  17,  17,
+      18,  19,  19,  20,  20,  21,  21,  22,  23,  23,  24,  24,  25,  26,  27,  27,
+      28,  29,  29,  30,  31,  32,  32,  33,  34,  35,  36,  36,  37,  38,  39,  40,
+      41,  42,  43,  44,  45,  46,  47,  48,  49,  50,  51,  52,  53,  54,  55,  56,
+      58,  59,  60,  61,  62,  64,  65,  66,  67,  69,  70,  71,  73,  74,  76,  77,
+      78,  80,  81,  83,  84,  86,  87,  89,  90,  92,  94,  95,  97,  99, 100, 102,
+     104, 106, 107, 109, 111, 113, 115, 117, 118, 120, 122, 124, 126, 128, 130, 132,
+     134, 137, 139, 141, 143, 145, 147, 150, 152, 154, 156, 159, 161, 163, 166, 168,
+     171, 173, 175, 178, 180, 183, 186, 188, 191, 193, 196, 199, 201, 204, 207, 210,
+     212, 215, 218, 221, 224, 227, 230, 233, 236, 239, 242, 245, 248, 251, 254, 257,
+     260, 263, 267, 270, 273, 276, 280, 283, 286, 290, 293, 297, 300, 304, 307, 311,
+     314, 318, 321, 325, 328, 332, 336, 339, 343, 347, 351, 354, 358, 362, 366, 370,
+     374, 378, 381, 385, 389, 393, 397, 401, 405, 410, 414, 418, 422, 426, 430, 434,
+     439, 443, 447, 451, 456, 460, 464, 469, 473, 477, 482, 486, 491, 495, 499, 504,
+     508, 513, 517, 522, 527, 531, 536, 540, 545, 550, 554, 559, 563, 568, 573, 577,
+     582, 587, 592, 596, 601, 606, 611, 615, 620, 625, 630, 635, 640, 644, 649, 654,
+     659, 664, 669, 674, 678, 683, 688, 693, 698, 703, 708, 713, 718, 723, 728, 732,
+     737, 742, 747, 752, 757, 762, 767, 772, 777, 782, 787, 792, 797, 802, 806, 811,
+     816, 821, 826, 831, 836, 841, 846, 851, 855, 860, 865, 870, 875, 880, 884, 889,
+     894, 899, 904, 908, 913, 918, 923, 927, 932, 937, 941, 946, 951, 955, 960, 965,
+     969, 974, 978, 983, 988, 992, 997,1001,1005,1010,1014,1019,1023,1027,1032,1036,
+    1040,1045,1049,1053,1057,1061,1066,1070,1074,1078,1082,1086,1090,1094,1098,1102,
+    1106,1109,1113,1117,1121,1125,1128,1132,1136,1139,1143,1146,1150,1153,1157,1160,
+    1164,1167,1170,1174,1177,1180,1183,1186,1190,1193,1196,1199,1202,1205,1207,1210,
+    1213,1216,1219,1221,1224,1227,1229,1232,1234,1237,1239,1241,1244,1246,1248,1251,
+    1253,1255,1257,1259,1261,1263,1265,1267,1269,1270,1272,1274,1275,1277,1279,1280,
+    1282,1283,1284,1286,1287,1288,1290,1291,1292,1293,1294,1295,1296,1297,1297,1298,
+    1299,1300,1300,1301,1302,1302,1303,1303,1303,1304,1304,1304,1304,1304,1305,1305,
+  ]);
+
+  // ── ガウス補間(実機の演算順そのまま) ──────────────────────────────
+  // buf: brrBuf(履歴4+現ブロック16[+先読み])、i: sampleIdx、frac: 8bit 小数(pitchFrac>>4)。
+  // タップは古い順に buf[1+i], buf[2+i], buf[3+i], buf[4+i](=サンプル i−3 … i)。
+  // frac=0 のとき重みは s[i−2] を中心に対称、frac→1 で s[i−1] 中心へ移る。つまり出力は
+  // 「サンプル位置 (i−2)+frac/256」の値(鍵盤表示の横軸合わせに使う)。
+  // 実機は各タップを個別に >>11 し、3タップ目までの和を16bitに折り返してから4タップ目を
+  // 足し、クランプして最下位ビットを落とす(blargg SPC_DSP.cpp 準拠。以前は合計してから
+  // >>11 していたため数LSBの丸め差があり、大音量時の折り返し歪みも無かった)
+  function gaussInterp(buf, i, frac) {
+    let out = (GAUSS[0xFF - frac] * buf[1 + i]) >> 11;
+    out += (GAUSS[0x1FF - frac] * buf[2 + i]) >> 11;
+    out += (GAUSS[0x100 + frac] * buf[3 + i]) >> 11;
+    out = (out << 16) >> 16;
+    out += (GAUSS[frac] * buf[4 + i]) >> 11;
+    return Math.max(-32768, Math.min(32767, out)) & ~1;
+  }
 
   // ── エンベロープレートテーブル ──────────────────────────────────
   // 各エントリ = 何 DSP サンプルごとに envelope を更新するか
@@ -1114,15 +1151,7 @@
     // sampleIdx=i(0-15) → buf[4+i], buf[3+i], buf[2+i], buf[1+i] を参照
     // i=0 のとき buf[1-3] は直前ブロックの末尾サンプルを正しく参照する
     _getSample(v) {
-      const i   = v.sampleIdx;
-      const s0  = v.brrBuf[1 + i];
-      const s1  = v.brrBuf[2 + i];
-      const s2  = v.brrBuf[3 + i];
-      const s3  = v.brrBuf[4 + i];
-      const frac = (v.pitchFrac >> 4) & 0xFF;
-      const out = (GAUSS[0xFF - frac] * s0 + GAUSS[0x1FF - frac] * s1 +
-                   GAUSS[0x100 + frac] * s2 + GAUSS[frac] * s3) >> 11;
-      return Math.max(-32768, Math.min(32767, out));
+      return gaussInterp(v.brrBuf, v.sampleIdx, (v.pitchFrac >> 4) & 0xFF);
     }
 
     // ── ノイズ更新 ────────────────────────────────────────────────
@@ -1304,31 +1333,56 @@
     }
   }
 
-  // ── 鍵盤表示(大波形)プレビュー用: ガウス補間+ピッチ進行を dsp本体と同じ式で
-  // 非破壊に計算する。voice本体(sampleIdx/pitchFrac)は変更しない。ブロック境界を
-  // 跨ぐ新規BRRフェッチは行わず、現在のbrrBuf(16サンプル+履歴4)内で折り返す簡易プレビュー。
-  function previewVoiceOutput(voice, pitchVal, count) {
+  // ── 鍵盤表示(大波形)プレビュー用: 現ブロックのガウス補間後の連続波形と、現在ピッチでの
+  // 実際の出力サンプル位置を、dsp本体と同じ式で非破壊に計算する(voice本体は変更しない)。
+  //   curve[k] (k=0..16*STEPS-1): サンプル位置 p=k/STEPS(0〜16、現ブロック内)の補間値。
+  //     位置 p は (i−2)+frac/256 なので i=floor(p)+2、ブロック末尾(i=16,17)は次ブロックの
+  //     先頭2サンプルが要る → 次ブロックを非破壊にデコードして継ぎ足す(ループ/終端は
+  //     brrAddr が既に次に読む先を指しているのでそのまま使える)
+  //   points: 現在位置から DSP と同じ順(位置を進めてから補間)で出す出力サンプル。ブロックを
+  //     抜けるまで(最大 maxPoints 個)。{ p: 位置(0〜16), v: 値 }
+  // ★2026-09-07 以前は「48出力サンプルを現ブロック内で折り返して並べただけ」で、BRR16点と
+  //   横軸が対応せず(48出力サンプルの元波形上の長さは 48×pitch/4096 で pitch 依存)、境界の先も
+  //   実出力と違っていた。位置基準の曲線+出力点に改めた。
+  function previewVoiceWave(voice, dsp, pitchVal, opts) {
+    const STEPS = (opts && opts.steps) || 8;
+    const maxPoints = (opts && opts.maxPoints) || 64;
+    const ext = new Int16Array(20 + 16);
+    ext.set(voice.brrBuf.subarray(0, 20), 0);
+    if (dsp && voice.envMode !== 'off') {
+      try {
+        const res = decodeBrrBlock(dsp.origRam || dsp.ram, voice.brrAddr, voice.brrPrev1, voice.brrPrev2);
+        ext.set(res.samples, 20);
+      } catch (e) { /* 先読み不能なら 0 のまま */ }
+    }
+    const curve = new Float32Array(16 * STEPS);
+    for (let k = 0; k < curve.length; k++) {
+      const p = k / STEPS;
+      const i = Math.floor(p) + 2;
+      const frac = Math.round((p - Math.floor(p)) * 256) & 0xFF;
+      curve[k] = gaussInterp(ext, i, frac);
+    }
+    const points = [];
     let sampleIdx = voice.sampleIdx, pitchFrac = voice.pitchFrac;
-    const buf = voice.brrBuf;
-    const out = new Array(count);
-    for (let n = 0; n < count; n++) {
-      const i = sampleIdx;
-      const s0 = buf[1 + i], s1 = buf[2 + i], s2 = buf[3 + i], s3 = buf[4 + i];
-      const frac = (pitchFrac >> 4) & 0xFF;
-      const v = (GAUSS[0xFF - frac] * s0 + GAUSS[0x1FF - frac] * s1 +
-                 GAUSS[0x100 + frac] * s2 + GAUSS[frac] * s3) >> 11;
-      out[n] = Math.max(-32768, Math.min(32767, v));
+    for (let n = 0; n < maxPoints; n++) {
       pitchFrac += pitchVal;
       const steps = (pitchFrac >> 12) & 0xF;
       pitchFrac &= 0xFFF;
-      sampleIdx = (sampleIdx + steps) % 16;
+      const next = sampleIdx + steps;
+      if (next >= 16) break;            // 次ブロックへ(実機はここでフェッチ)
+      sampleIdx = next;
+      const frac = (pitchFrac >> 4) & 0xFF;
+      const p = (sampleIdx - 2) + frac / 256;
+      // ブロック先頭2サンプル分(i=0,1)は位置が負=前ブロックの末尾に当たるので図の範囲外として省く
+      if (p >= 0) points.push({ p, v: gaussInterp(ext, sampleIdx, frac) });
     }
-    return out;
+    return { curve, points };
   }
 
   Emu.SpcDsp = SpcDsp;
   Emu.decodeBrrBlock = decodeBrrBlock;
-  Emu.previewVoiceOutput = previewVoiceOutput;
+  Emu.previewVoiceWave = previewVoiceWave;
+  Emu.gaussInterp = gaussInterp;
   Emu.GAUSS = GAUSS;
 
 })(globalThis);

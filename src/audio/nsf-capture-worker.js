@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-07 10:11:53
+ * Built by tools/build-capture-workers.ps1 at 2026-09-07 13:16:57
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-07 10:11:53';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-07 13:16:57';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成
@@ -102,6 +102,40 @@
     view.setUint32(124, 0, true);
 
     return new Uint8Array(buf);
+  };
+
+  /*
+   * 旧ppmckドライバ(Famicompo mini / FCM3〜4 時代、2004〜2005年頃)の N106 判定。
+   *
+   * 当時の N106(N163) 仕様理解は VirtuaNES 0.97 / VirtuaNSF 1.0.x 系の実装
+   * (波形長レジスタ +4 は bit2-4 の3bit、length = 0x20 - (+4 & 0x1C) = 最大32サンプル)
+   * に基づいており、ドライバは波形設定で `ORA #$80` を書いていた。実機/現行仕様では
+   * +4 の bit2-7 が波形長(length = 256 - (+4 & 0xFC))なので、同じ値が実機では
+   * 128 - 4n サンプル(4倍長)と解釈され、音程が2オクターブ落ち、波形メモリの他領域
+   * (他の波形・レジスタ)まで読んで音色も崩れる。現行ppmckは同じ箇所で `ORA #$E0`
+   * (= 256 - 32 + 4n の現行エンコード)を書く。
+   *
+   * 判定はその波形設定ルーチンの機械語列で行う(変数アドレスはビルドごとに違うので
+   * ワイルドカード):
+   *   ORA #$80 / STA abs,X / STA $4800 / LSR abs / LDA #$10 / SEC / SBC abs
+   *   (n106_7c,x に保存 → $4800 へ波形長 → temporary を半分にして 16 - n = 転送バイト数)
+   * `emu sound/famicompo` の実ファイル25本がこの列に一致し、現行ppmck生成物(ORA #$E0)
+   * は22本とも不一致(2026-09-07 実測)。
+   *
+   * @param {Uint8Array} program - ヘッダ(128バイト)を除いたプログラムイメージ
+   * @returns {boolean}
+   */
+  const LEGACY_N106_SIG = [0x09, 0x80, 0x9D, null, null, 0x8D, 0x00, 0x48, 0x4E, null, null, 0xA9, 0x10, 0x38, 0xED];
+  NSF.detectLegacyN163Driver = function (program) {
+    if (!program || program.length < LEGACY_N106_SIG.length) return false;
+    const sig = LEGACY_N106_SIG;
+    outer: for (let i = 0, n = program.length - sig.length; i <= n; i++) {
+      for (let j = 0; j < sig.length; j++) {
+        if (sig[j] !== null && program[i + j] !== sig[j]) continue outer;
+      }
+      return true;
+    }
+    return false;
   };
 
   /**
@@ -3458,8 +3492,15 @@
  *     これが標準の N163 挙動(NSFPlay/Mesen/VirtuaNSF既定と同じ)。ただし「古いドライバ」で
  *     作られた一部NSF(例: Famicompo mini vol.3 entry023)は波形長を最大32サンプル前提で
  *     使っており、256版だと音程・波形テーブルが崩れる。VirtuaNSFはこれ用に「N163を32サンプル
- *     に制限するモード」を別途用意している(readme 1.0.7.1)。必要なら length を
- *     `0x20-(+4&0x1C)` に切替えるオプション化で対応可能(現状は標準の256版を既定とする)。
+ *     に制限するモード」を別途用意している(readme 1.0.7.1)。
+ *     → legacyWaveLen=true で対応(2026-09-07)。旧ドライバは +4 に (n<<2)|$80 を書く
+ *     (VirtuaNES 0.97 の APU_N106: tonelen = 0x20-(data&0x1C))。VirtuaNESの周波数式は
+ *     実機式と同じ f = CPU*freq/(15*65536*length*numCh) なので、違いは波形長の解釈だけ。
+ *     そこで「+4 への書き込み値を現行エンコードへ書き換えて RAM に置く」方式にした:
+ *       (v & 0x1F) | 0xE0   … 256-(0xE0|(n<<2)) = 32-4n = 0x20-(v&0x1C) と同じ長さ
+ *     RAM 自体が現行仕様の値になるため、音声合成・鍵盤/ロール(snapshotN163)・
+ *     nsf2mml の波形抽出・n163Snapshots 経由の再生(NsfReplayStreamPlayer)が全て
+ *     無変更で正しくなる。判定は MML.NSF.detectLegacyN163Driver(nsfBus.js から設定)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -3477,6 +3518,9 @@
       this.rrIndex = 0;       // 有効ch内の巡回位置
       this.mute = new Array(NUM_CHANNELS).fill(false);
       this.vol = new Array(NUM_CHANNELS).fill(1);
+      // 旧ppmckドライバ(波形長32サンプル形式)互換。true のとき +4 レジスタへの書き込みを
+      // 現行エンコードへ変換して格納する(ファイル冒頭コメント 注2 参照)。
+      this.legacyWaveLen = false;
     }
 
     reset() {
@@ -3493,6 +3537,12 @@
         this.addr = value & 0x7F;
         this.autoInc = (value & 0x80) !== 0;
       } else if (addr === 0x4800) {
+        // 旧ドライバ互換: チャンネルレジスタ +4(波形長|周波数上位)への書き込みは
+        // bit2-4 の3bit波形長(0x20-(v&0x1C))を現行の6bit形式(0xE0|(v&0x1C))へ変換する。
+        // 周波数上位2bit(bit0-1)はそのまま。
+        if (this.legacyWaveLen && this.addr >= 0x40 && (this.addr & 7) === 4) {
+          value = (value & 0x1F) | 0xE0;
+        }
         this.ram[this.addr] = value;
         if (this.autoInc) this.addr = (this.addr + 1) & 0x7F;
       }
@@ -3825,6 +3875,16 @@
       if (extraChips & FLAGS.MMC5) this.expansion.mmc5 = new Emu.MMC5Audio();
       if (extraChips & FLAGS.N163) this.expansion.n163 = new Emu.N163Audio();
       if (extraChips & FLAGS.FME7) this.expansion.fme7 = new Emu.FME7Audio();
+      // 旧ppmckドライバ(Famicompo mini 時代、N106波形長を32サンプル形式で書く)の判定。
+      // opt.n163Legacy で明示指定がなければプログラム本体の機械語列から自動判定する
+      // (NsfPlayer/NsfReplayStreamPlayer/キャプチャWorker/ヘッドレスの全経路がここを通る)。
+      // 詳細は nsfHeader.js detectLegacyN163Driver と n163.js 冒頭コメント 注2。
+      if (this.expansion.n163) {
+        this.n163Legacy = opt.n163Legacy !== undefined
+          ? !!opt.n163Legacy
+          : !!(MML.NSF.detectLegacyN163Driver && MML.NSF.detectLegacyN163Driver(opt.program));
+        this.expansion.n163.legacyWaveLen = this.n163Legacy;
+      }
 
       this.loadAddr = opt.loadAddr;
       this.useBankswitch = (opt.bankswitch || []).some(b => b !== 0);
@@ -6402,6 +6462,7 @@
           const d = layer.data;
           let h = d.length;
           for (let i = 0; i < d.length; i++) h = (h * 31 + Math.round(d[i] * 1000)) | 0;
+          if (layer.xs) for (let i = 0; i < layer.xs.length; i++) h = (h * 31 + Math.round(layer.xs[i] * 1000)) | 0;
           s += ':' + d.length + ':' + h;
         }
       } else if (wave.sig) {
@@ -6757,8 +6818,18 @@
             ctx.arc(x, y, 3 * S, 0, Math.PI * 2);
             ctx.fill();
           }
+        } else if (layer.mode === 'dots') {
+          // 出力サンプル(点)。xs[k] は横位置(0〜1、サンプル位置/16)。hollow は輪郭だけ(PM変調後)
+          ctx.lineWidth = 1.5 * S;
+          for (let k = 0; k < d.length; k++) {
+            const x = x0 + (layer.xs ? layer.xs[k] : k / d.length) * w;
+            const y = mid - d[k] * amp;
+            ctx.beginPath();
+            ctx.arc(x, y, 3 * S, 0, Math.PI * 2);
+            if (layer.hollow) ctx.stroke(); else ctx.fill();
+          }
         } else {
-          // ガウス補間後・PM変調後: 連続的な線形補間曲線
+          // ガウス補間後: 連続的な線形補間曲線(横軸=サンプル位置、BRRの階段と同じ)
           ctx.lineWidth = 2.2 * S;
           ctx.beginPath();
           for (let i = 0; i <= w; i++) {
