@@ -47,6 +47,26 @@
     setChannel(ch) { channel = Math.max(0, Math.min(16, Math.round(ch) || 0)); },
 
     /*
+     * 今の許可状態を聞く('granted' | 'prompt' | 'denied' | 'unknown' | 'unsupported')。
+     * ★この問い合わせ自体はダイアログを出さない。
+     *   requestMIDIAccess() は許可が 'prompt' のとき必ずダイアログを出すので、
+     *   起動時の自動接続を 'granted' のときだけに絞るために使う
+     *   (絞らないと、許可を覚えてくれない場所では開くたびに毎回聞かれる)。
+     */
+    async permissionState() {
+      if (!api.isSupported()) return 'unsupported';
+      if (!navigator.permissions || !navigator.permissions.query) return 'unknown';
+      // sysex を明示する形と省略形の両方を試す(実装によってどちらかが TypeError になる)
+      for (const q of [{ name: 'midi', sysex: false }, { name: 'midi' }]) {
+        try {
+          const st = await navigator.permissions.query(q);
+          if (st && st.state) return st.state;
+        } catch (e) { /* 次の形を試す */ }
+      }
+      return 'unknown';
+    },
+
+    /*
      * MIDIAccessを取得して受信を始める。★ユーザー操作から呼ぶこと
      * (許可プロンプトが出る場面なので、ページ読み込み中に勝手に呼ばない)。
      * sysex は要求しない: 音符を受け取るだけなら不要で、要求すると許可の敷居が上がる。

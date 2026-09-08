@@ -557,17 +557,34 @@
     const MI = MML.Input.MidiInput;
     const st = MI.getStatus();
     els.midiDevices.innerHTML = '';
-    if (els.midiCheck) els.midiCheck.checked = MI.isEnabled();
+    // チェックは「使いたいか」(保存される意図)を表す。実際に繋がっているかは下の文で出す
+    if (els.midiCheck) els.midiCheck.checked = state.midi;
 
     let msg = '';
+    let needConnect = false;
     if (!MI.isSupported()) msg = T('このブラウザはWeb MIDIに対応していません。');
     else if (st.state === 'denied') msg = T('MIDIの使用が許可されませんでした。');
     else if (st.state === 'error')  msg = T('MIDIを開けませんでした: {msg}', { msg: st.message });
-    else if (!MI.isEnabled())       msg = T('チェックを入れると接続します(初回は許可を聞かれます)。');
+    else if (!MI.isEnabled()) {
+      // ★起動時に自動で繋がない(毎回許可を聞かれるのを避けるため)ので、
+      //   使う意図があるのに未接続、という状態が普通に起こる。押せば繋がることを見せる
+      msg = state.midi ? T('まだ接続していません。「接続」を押すとMIDI機器を探します。')
+                       : T('チェックを入れると接続します(初回は許可を聞かれます)。');
+      needConnect = true;
+    }
 
     const list = MI.isEnabled() ? MI.getInputs() : [];
     if (msg) {
       els.midiDevices.appendChild(el('div', 'metro-note', msg));
+      if (needConnect) {
+        const btn = el('button', 'metro-btn', T('接続'));
+        btn.type = 'button';
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          await setMidiEnabled(true);
+        });
+        els.midiDevices.appendChild(btn);
+      }
       return;
     }
     if (!list.length) {
@@ -663,9 +680,16 @@
       if (toggleEl)   toggleEl.addEventListener('click', toggle);
       if (settingsEl) settingsEl.addEventListener('click', openPopover);
       updateToggleUI();
-      // 前回ONにしていたら繋ぎ直す。許可済みならプロンプトは出ないので黙って復帰し、
-      // 拒否/未許可なら state.midi が false に戻るだけ(エラーは出さない)
-      if (state.midi) setMidiEnabled(true);
+      // ★起動時に requestMIDIAccess() を呼んではいけない。許可が 'prompt' の環境
+      //   (file:// のように許可を覚えてくれない場所)では、開くたびに毎回
+      //   ダイアログが出てしまう(実際に踏んだ: 2026-09-06)。
+      //   既に 'granted' のときだけ黙って繋ぎ直し、それ以外は接続ボタンを出す。
+      if (state.midi && MML.Input.MidiInput.isSupported()) {
+        MML.Input.MidiInput.permissionState().then((st) => {
+          if (st === 'granted') setMidiEnabled(true);
+          else renderMidiDevices();
+        });
+      }
     },
 
     isArmed() { return armed; },
