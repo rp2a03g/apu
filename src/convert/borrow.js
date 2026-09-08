@@ -479,7 +479,7 @@
         if (!have[letterMap.n163[i]]) scoreChannels.push({ letter: letterMap.n163[i], events: [], hasVolume: true, hasInstrument: true });
       }
     }
-    scoreChannels.sort((a, b) => a.letter.localeCompare(b.letter));
+    MML.Convert.sortChannelsByLetter(scoreChannels);
 
     return { scoreChannels, expansions, letterMap, n163NumCh, notes, placed };
   }

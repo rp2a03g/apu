@@ -38,7 +38,9 @@
  *                 q で書く(休符や k<len> の細切れを出さない)。レガートと長い無音は切らない。false なら
  *                 厳密一致のゲートだけ(以前の挙動)
  *   GATE_TOL    … その許容フレーム数(0〜8、既定2)
- *   PART_ORDER/BARS_PER_LINE/BAR_ALIGN … 出力の書式(2026-09-08、本ファイル LAYOUT_DEFAULTS 参照。プリセット外)
+ *   PART_ORDER/BARS_PER_LINE/BAR_ALIGN/CHANNEL_ORDER … 出力の書式(2026-09-08、本ファイル LAYOUT_DEFAULTS
+ *                 参照。プリセット外)。CHANNEL_ORDER='letter' はアルファベット順(既定)、'source' は
+ *                 変換元の割り当て順(各 *2mml が積んだ順=元の音源のチャンネル順)
  *   LEN_SNAP    … 音長を丸める(2026-09-08、既定2フレーム、0=厳密)。音符/休符の長さがこのフレーム数以内で
  *                 大きな音価に乗るならタイの列(4&2&8..&64.&192)にせず 1 個で書き、余りは次の音符へ持ち越す
  *                 (src/convert/duration.js framesToLengths の slackFrames。持ち越しは ±許容に収め、一致は持ち越し込みで
@@ -117,17 +119,44 @@
   MML.Convert.LEN_SNAP_DEFAULT = LEN_SNAP_DEFAULT;
   MML.Convert.LEN_SNAP_MAX = LEN_SNAP_MAX;
   MML.Convert.lenSnapOf = (cmd) => (cmd && cmd.LEN_SNAP > 0) ? Math.min(LEN_SNAP_MAX, cmd.LEN_SNAP) : 0;
+
+  // ── チャンネルの並び順(2026-09-09) ──────────────────────────────────────
+  // 各 *2mml は scoreChannels へ「元の音源のチャンネル順」で積み、最後にレター順へ並べ替える。
+  // その並べ替えで元の順を失わないよう、積んだ順を srcIndex として刻んでおく(CHANNEL_ORDER='source')。
+  //   stampChannelSource … まだ刻まれていないものだけ現在の並びで採番(後から足した ch は末尾に続く)
+  //   sortChannelsByLetter … 刻んでからレター順(各 *2mml の従来の sort を置き換える)
+  //   orderChannels … 出力直前の並べ替え。配列は作り直すので呼び元の並びは変えない
+  MML.Convert.stampChannelSource = function (channels) {
+    let next = 0;
+    for (const ch of channels || []) if (ch && ch.srcIndex != null && ch.srcIndex >= next) next = ch.srcIndex + 1;
+    for (const ch of channels || []) if (ch && ch.srcIndex == null) ch.srcIndex = next++;
+    return channels;
+  };
+  MML.Convert.sortChannelsByLetter = function (channels) {
+    MML.Convert.stampChannelSource(channels);
+    channels.sort((a, b) => a.letter.localeCompare(b.letter));
+    return channels;
+  };
+  MML.Convert.orderChannels = function (channels, order) {
+    const out = (channels || []).slice();
+    MML.Convert.stampChannelSource(out);
+    if (order === 'source') out.sort((a, b) => (a.srcIndex - b.srcIndex) || a.letter.localeCompare(b.letter));
+    else out.sort((a, b) => a.letter.localeCompare(b.letter));
+    return out;
+  };
   // 出力の書式(2026-09-08、src/convert/mmlEmit.js emitScore)。プリセットには含めない(内容でなく見た目)
   //   PART_ORDER    … 'block'=チャンネル順に BARS_PER_LINE 小節ずつ並べる / 'part'=パートごとに最後まで出してから次へ
   //   BARS_PER_LINE … 1行に入れる小節数(1〜16、既定4)
   //   BAR_ALIGN     … 小節の区切りを全パートで桁揃えする(false=スペース1つで区切る、既定)
   const PART_ORDER_VALUES = ['block', 'part'];
+  const CHANNEL_ORDER_VALUES = ['letter', 'source'];
   const BARS_PER_LINE_MAX = 16;
-  const LAYOUT_DEFAULTS = { PART_ORDER: 'block', BARS_PER_LINE: 4, BAR_ALIGN: false };
+  const LAYOUT_DEFAULTS = { PART_ORDER: 'block', BARS_PER_LINE: 4, BAR_ALIGN: false, CHANNEL_ORDER: 'letter' };
   const LAYOUT_KEYS = Object.keys(LAYOUT_DEFAULTS);
   MML.Convert.LAYOUT_DEFAULTS = LAYOUT_DEFAULTS;
   MML.Convert.LAYOUT_KEYS = LAYOUT_KEYS;
   MML.Convert.PART_ORDER_VALUES = PART_ORDER_VALUES;
+  MML.Convert.CHANNEL_ORDER_VALUES = CHANNEL_ORDER_VALUES;
   MML.Convert.BARS_PER_LINE_MAX = BARS_PER_LINE_MAX;
   // 音符の区切り(冒頭コメント NOTE_END)
   const NOTE_END_VALUES = ['next', 'zero'];
@@ -200,6 +229,7 @@
         if (v >= 0 && v <= LEN_SNAP_MAX) out.LEN_SNAP = v;
       }
       if (cmd.PART_ORDER != null && PART_ORDER_VALUES.indexOf(cmd.PART_ORDER) >= 0) out.PART_ORDER = cmd.PART_ORDER;
+      if (cmd.CHANNEL_ORDER != null && CHANNEL_ORDER_VALUES.indexOf(cmd.CHANNEL_ORDER) >= 0) out.CHANNEL_ORDER = cmd.CHANNEL_ORDER;
       if (cmd.BARS_PER_LINE != null) {
         const v = parseInt(cmd.BARS_PER_LINE, 10);
         if (v >= 1 && v <= BARS_PER_LINE_MAX) out.BARS_PER_LINE = v;

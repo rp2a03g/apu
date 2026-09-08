@@ -187,7 +187,7 @@
         .map(t => `${MML.Convert.ChannelPlan.letterOfTarget(t)}=${r.placed[t].source.label}`).sort().join(' ');
       if (hasNoise) scoreChannels.push(Object.assign({}, noiseResult, { letter: 'D' }));
       if (hasDpcm) scoreChannels.push({ letter: expansionLetterMap.dpcm[0], events: dpcmResult.events, hasInstrument: true });
-      scoreChannels.sort((a, b) => a.letter.localeCompare(b.letter));
+      MML.Convert.sortChannelsByLetter(scoreChannels);
     } else {
     expansions = ['n163'];
     // dpcmは実機ppmck同様レター体系上は常にEを固定占有する(使わなくても他チップの

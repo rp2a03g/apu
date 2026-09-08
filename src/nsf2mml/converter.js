@@ -1250,7 +1250,7 @@
       mv.ch.letter = mv.to;
       if (mv.chip && mv.chip !== '2a03' && mv.chip !== 'dpcm' && addedChips.indexOf(mv.chip) < 0) addedChips.push(mv.chip);
     }
-    scoreChannels.sort((a, b) => a.letter.localeCompare(b.letter));
+    MML.Convert.sortChannelsByLetter(scoreChannels);
     return { addedChips };
   }
 

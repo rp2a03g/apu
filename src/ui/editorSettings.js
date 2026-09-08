@@ -80,6 +80,8 @@
     ['--tok-comment', 'コメント'],
     ['--playing-fg', '再生位置ハイライト文字'],
     ['--playing-outline', '再生位置ハイライト縁取り'],
+    ['--follow-fg', '追尾チャンネルのハイライト文字'],
+    ['--follow-outline', '追尾チャンネルのハイライト縁取り'],
   ];
 
   // 全プリセット共通の設計方針(2026-08-16、「MMLがみづらい」というユーザー指摘を受けて全面刷新):
@@ -113,6 +115,7 @@
         '--tok-cmd-perf': '#cf222e', '--tok-cmd-special': '#a626a4',
         '--tok-def-envelope': '#0f766e', '--tok-def-tone': '#667a00', '--tok-comment': '#6a737d',
         '--playing-fg': '#ffffff', '--playing-outline': '#000000',
+        '--follow-fg': '#ffe14d', '--follow-outline': '#000000',
       },
     },
     {
@@ -134,6 +137,7 @@
         '--tok-cmd-perf': '#ff7a7a', '--tok-cmd-special': '#f38ad4',
         '--tok-def-envelope': '#66d9ef', '--tok-def-tone': '#b8e05a', '--tok-comment': '#7d828d',
         '--playing-fg': '#ffffff', '--playing-outline': '#000000',
+        '--follow-fg': '#ffe14d', '--follow-outline': '#000000',
       },
     },
     {
@@ -156,6 +160,7 @@
         '--tok-cmd-perf': '#c42b1c', '--tok-cmd-special': '#c239b3',
         '--tok-def-envelope': '#038387', '--tok-def-tone': '#667a00', '--tok-comment': '#6b6b6b',
         '--playing-fg': '#ffffff', '--playing-outline': '#000000',
+        '--follow-fg': '#ffe14d', '--follow-outline': '#000000',
       },
     },
     {
@@ -182,6 +187,7 @@
         '--tok-cmd-perf': '#d16969', '--tok-cmd-special': '#f44747',
         '--tok-def-envelope': '#4ec9b0', '--tok-def-tone': '#4fc1ff', '--tok-comment': '#6a9955',
         '--playing-fg': '#ffffff', '--playing-outline': '#000000',
+        '--follow-fg': '#ffe14d', '--follow-outline': '#000000',
       },
     },
     {
@@ -207,6 +213,7 @@
         '--tok-cmd-perf': '#f0a090', '--tok-cmd-special': '#f28fb8',
         '--tok-def-envelope': '#62d46a', '--tok-def-tone': '#7fe0d0', '--tok-comment': '#8f95a7',
         '--playing-fg': '#ffffff', '--playing-outline': '#000000',
+        '--follow-fg': '#ffe14d', '--follow-outline': '#000000',
       },
     },
   ];

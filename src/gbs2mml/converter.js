@@ -262,7 +262,7 @@
         for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
         dpcmFiles.push(...d.files);
         scoreChannels.push({ letter: 'E', events: d.events, hasInstrument: true, isDrum: true });
-        scoreChannels.sort((a, b) => a.letter.localeCompare(b.letter));
+        MML.Convert.sortChannelsByLetter(scoreChannels);
         drumNote = `打楽器化したchを実音のままDPCM(E)へ変換しました: 定義${d.stats.clips}件 / 打点${d.stats.segments}個 / ROM ${(d.stats.bytes / 1024).toFixed(1)}KB`;
       }
     }

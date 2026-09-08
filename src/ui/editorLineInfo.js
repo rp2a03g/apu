@@ -27,6 +27,7 @@
   const STORAGE_KEY = 'mml_lineNumbers';
   const CLASS_ON = 'mml-editor--linenum';
   const CLASS_CURSOR = 'mml-line--cursor';
+  const CLASS_PLAYING = 'mml-line--playing'; // 追尾チャンネルが今鳴っている行(main.js が毎更新で呼ぶ)
 
   let textarea = null;
   let overlay = null;
@@ -38,6 +39,7 @@
   let enabled = true;
   let gutterDigits = 0;
   let cursorLineEl = null; // 現在 CLASS_CURSOR を付けている .mml-line
+  let playingLineEl = null; // 同 CLASS_PLAYING(追尾チャンネルの現在行)
   let lastLine = -1;
   let lastCol = -1;
 
@@ -89,6 +91,17 @@
     }
   }
 
+  // 追尾チャンネルの現在行を強調する(2026-09-09、ユーザー要望「追尾と行番号有効時、行番号も追尾」)。
+  // 引数はハイライト中の span(main.js の followEl)。その論理行(.mml-line)へ印を移す。
+  // null で消す。行番号OFFのときはガター自体が出ないので何もしない
+  function setPlayingLineEl(el) {
+    const lineEl = (enabled && el && el.closest) ? el.closest('.mml-line') : null;
+    if (lineEl === playingLineEl) return;
+    if (playingLineEl) playingLineEl.classList.remove(CLASS_PLAYING);
+    playingLineEl = lineEl;
+    if (playingLineEl) playingLineEl.classList.add(CLASS_PLAYING);
+  }
+
   function updateCursor(force) {
     const { line, col } = cursorLineCol();
     if (!force && line === lastLine && col === lastCol) return;
@@ -138,6 +151,7 @@
   }
 
   UI.EditorLineInfo = {
+    setPlayingLineEl,
     /*
      * opts: { textarea, overlay, editorEl, toggleEl, posEl, onLayoutChange }
      *   onLayoutChange: ガター幅/表示モードが変わり折り返し位置がずれうる時に呼ぶ
@@ -176,6 +190,7 @@
       if (!textarea) return;
       if (enabled) updateGutterWidth(false);
       cursorLineEl = null; // 旧DOMの要素なので参照を捨てる
+      playingLineEl = null;
       updateCursor(true);
     },
 

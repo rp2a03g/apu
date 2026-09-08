@@ -64,6 +64,9 @@
   /* 再生中の現在位置ハイライト(白文字+黒縁取り。どの背景色でも読めるようプリセット間で共通) */
   --playing-fg: #ffffff;
   --playing-outline: #000000;
+  /* 追尾チャンネル(mmlFollowChannel)のハイライト。白の再生位置と見分けるため黄 */
+  --follow-fg: #ffe14d;
+  --follow-outline: #000000;
 }
 
 * { box-sizing: border-box; }
@@ -647,6 +650,12 @@ button.secondary {
   color: var(--mml-editor-fg);
   font-weight: 700;
 }
+/* 追尾チャンネル(mmlFollowChannel)が今鳴っている行の番号(src/ui/editorLineInfo.js
+   setPlayingLineEl)。カーソル行より目立たせたいので本文と同じ追尾色で塗る */
+.mml-editor--linenum .mml-line--playing::before {
+  color: var(--follow-fg);
+  font-weight: 700;
+}
 /* 行番号OFFのとき右下に出す「行 N, 列 M」。スクロールバーと被らないよう右に余白を取る */
 .mml-cursor-pos {
   position: absolute;
@@ -684,6 +693,18 @@ button.secondary {
      1px -1px 0 var(--playing-outline),
     -1px  1px 0 var(--playing-outline),
      1px  1px 0 var(--playing-outline);
+}
+
+/* 追尾チャンネル(エディタ上の「追尾」セレクト)だけは別色にする。全チャンネルが同じ白だと
+   どれを追っているのか分からない、というユーザー指摘(2026-09-09)。.mml-playing の後に
+   置いて同詳細度で上書きする(どちらも単一クラス) */
+.mml-playing-follow {
+  color: var(--follow-fg);
+  text-shadow:
+    -1px -1px 0 var(--follow-outline),
+     1px -1px 0 var(--follow-outline),
+    -1px  1px 0 var(--follow-outline),
+     1px  1px 0 var(--follow-outline);
 }
 
 /* シークバーの開始点(青)〜終了点(赤)ハンドルが示す再生範囲を常時背景色で示す。
@@ -2417,8 +2438,22 @@ button.secondary {
    譜面の書き方 → 詳細設定(折りたたみ)。説明は各行の薄い文かホバーの title に留めて1画面に収める */
 .cs-modal { width: min(720px, 94vw); max-width: 94vw; }
 .cs-modal .es-modal-body { display: block; }
-.cs-modal .es-section { margin-bottom: 14px; }
-.cs-modal .es-section h3 { margin-bottom: 6px; }
+/* 項目の区切りが分かりにくい、というユーザー指摘(2026-09-09)への対応:
+   セクションは枠で囲み、中の行は1本の区切り線で分ける。説明は短文だけを出し、
+   長文は行の title(ホバー)へ回す(convertSettings.js line()) */
+.cs-modal .es-section {
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px 4px;
+}
+.cs-modal .es-section h3 {
+  margin: 0 0 4px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--border);
+}
+.cs-line + .cs-line { border-top: 1px solid var(--border); }
+.cs-modal .es-section > .cs-desc { padding-top: 2px; }
 /* 出すコマンド: チェック付きチップを横に並べる */
 .cs-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .cs-chip {
@@ -2432,15 +2467,23 @@ button.secondary {
 .cs-chip .cs-key { font-family: inherit; }
 /* 譜面の書き方 / 詳細設定: 1行=コントロール+名前+追加入力(許容フレーム等)+説明 */
 .cs-line {
-  display: grid; grid-template-columns: minmax(1.2em, auto) 10em auto 1fr; align-items: center; gap: 8px;
-  padding: 4px 0; cursor: pointer;
+  display: grid; grid-template-columns: 1.4em 11.5em auto 1fr; align-items: center; gap: 8px;
+  padding: 5px 2px; cursor: pointer;
 }
-.cs-line select { font-size: 12px; padding: 2px 4px; max-width: 14em; }
+.cs-line:hover { background: var(--hover-bg); }
+.cs-line > .cs-key { font-weight: 600; }
+.cs-line select { font-size: 12px; padding: 2px 4px; max-width: 15em; }
+.cs-line .cs-inline select { max-width: 13em; }
 .cs-line input[type="checkbox"] { margin: 0 4px; }
 .cs-inline { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; white-space: nowrap; }
 .cs-num { width: 3.2em; font-size: 12px; padding: 2px 4px; text-align: right; }
 .cs-num:disabled { opacity: 0.5; }
-.cs-details { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 6px; }
+.cs-details {
+  margin: 0 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px 4px;
+}
 .cs-details > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-muted); user-select: none; }
 .cs-details[open] > summary { margin-bottom: 4px; }
 .cs-tempo { width: 76px; }
@@ -2457,7 +2500,7 @@ button.secondary {
 .cs-convert:hover { filter: brightness(1.1); }
 .cs-modal .es-modal-header > span { flex: 1; }
 @media (max-width: 700px) {
-  .cs-line { grid-template-columns: minmax(1.2em, auto) 1fr auto; }
+  .cs-line { grid-template-columns: 1.4em 1fr auto; }
   .cs-line > .cs-desc { grid-column: 1 / -1; }
 }
 

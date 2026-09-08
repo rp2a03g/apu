@@ -736,7 +736,7 @@
       const have = new Set(scoreChannels.map(ch => ch.letter));
       for (let i = 0; i < n163NumCh; i++) if (!have.has(letterMap.n163[i])) scoreChannels.push({ letter: letterMap.n163[i], events: [], hasVolume: true, hasInstrument: true });
     }
-    scoreChannels.sort((a, b) => a.letter.localeCompare(b.letter));
+    MML.Convert.sortChannelsByLetter(scoreChannels);
 
     // ── テンポ・出力 ──
     // ★ドラムパートはテンポ推定に混ぜない。イベントの切れ目が「演奏された音符の長さ」ではなく

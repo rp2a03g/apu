@@ -457,6 +457,9 @@
     const measuresPerLine = opts.measuresPerLine || Math.max(1, layout.BARS_PER_LINE | 0) || 4;
     const partOrder = layout.PART_ORDER === 'part' ? 'part' : 'block';
     const barAlign = !!layout.BAR_ALIGN;
+    // チャンネルの並び順(CHANNEL_ORDER): アルファベット順(既定)/変換元の割り当て順。
+    // 配列を作り直すので呼び元(各 *2mml の scoreChannels)の並びは変わらない
+    channelsData = MML.Convert.orderChannels(channelsData, layout.CHANNEL_ORDER);
     const framesPerMeasure = fpb * beatsPerMeasure;
     const measureCount = Math.max(1, Math.ceil(totalFrames / framesPerMeasure));
 

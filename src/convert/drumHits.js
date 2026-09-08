@@ -40,6 +40,9 @@
   const PHASE_QUANT_SEC = 1 / 480; // 位相の量子化(重複排除用。1/8フレーム)
   const VOL_QUANT = 16;            // 音量の量子化段数(重複排除用)
   const LEN_QUANT_SEC = 1 / 480;   // 長さの量子化(重複排除用)
+  const NORM_MAX_BOOST = 12;       // 曲全体の音量正規化(下 dpcm() 参照)の上限。SPC40曲の実測で
+                                   // 必要ゲインは中央5.3・90%点9.7・最大12.2だったので、そこまでは届かせる
+  const NORM_DEADBAND = 1.05;      // 同・これ未満の持ち上げは行わない(既に全振幅の形式の出力を変えない)
 
   /** サンプル列を srcRate から dstRate へ線形補間でリサンプル(区間 [from, from+len) 秒ぶん) */
   function resampleInto(out, outOff, outLen, pcm, srcRate, dstRate, fromSec, gain) {
@@ -148,6 +151,29 @@
     if (!live0.length) return empty;
     live0.sort((a, b) => a.startFrame - b.startFrame);
 
+    // ── 曲全体の音量正規化(2026-09-09) ────────────────────────────────────
+    // DMC(DPCM)チャンネルには音量指定が無く、焼いた波形の振幅がそのまま再生音量になる。
+    // 素材の振幅は形式によって桁が違う: HESのDDAは5bit値を[-1,1]へ写すので常にほぼ全振幅、
+    // SPCのBRRは実測でピーク中央値0.43、しかも vol はVOLレジスタ/127(中央値0.29)なので
+    // 積は0.13程度にしかならず、DPCMのドラムだけ約18dB小さく聞こえていた(ユーザー報告)。
+    // 曲内で最も大きい打点が全振幅に届くよう、曲全体へ同じゲインを掛ける(打点ごとの
+    // 強弱の比は保つ)。既に全振幅の形式はゲイン1のまま=出力不変。持ち上げのみ(1未満に
+    // しない。過剰な持ち上げで無音付近のノイズを増幅しないよう上限あり)
+    const peakOf = new Map(); // 同じサンプルを何十回も叩く曲があるので pcm 配列ごとに1回だけ走査
+    let maxHitPeak = 0;
+    for (const h of live0) {
+      let p = peakOf.get(h.pcm);
+      if (p === undefined) {
+        p = 0;
+        for (let i = 0; i < h.pcm.length; i++) { const a = Math.abs(h.pcm[i]); if (a > p) p = a; }
+        peakOf.set(h.pcm, p);
+      }
+      const v = p * (h.vol || 0);
+      if (v > maxHitPeak) maxHitPeak = v;
+    }
+    const wanted = maxHitPeak > 0 ? 1 / maxHitPeak : 1;
+    const normGain = wanted > NORM_DEADBAND ? Math.min(NORM_MAX_BOOST, wanted) : 1;
+
     // 区間の切れ目 = 打点の頭
     const onsets = Array.from(new Set(live0.map(h => h.startFrame))).sort((a, b) => a - b);
     const defs = [], files = [], events = [];
@@ -209,7 +235,7 @@
         const mix = new Float32Array(n);
         for (const h of live) {
           const phase = (t0 - h.startFrame) / frameRate;
-          resampleInto(mix, 0, n, h.pcm, h.rate, dstRate, phase, h.vol);
+          resampleInto(mix, 0, n, h.pcm, h.rate, dstRate, phase, h.vol * normGain);
         }
         let peak = 0;
         for (let i = 0; i < n; i++) { const a = Math.abs(mix[i]); if (a > peak) peak = a; }
@@ -227,7 +253,7 @@
       events.push({ start: t0, end: Math.max(t0 + 1, t1), note: 48, instrument: index });
     }
     const bytes = files.reduce((a, f) => a + f.bytes.length, 0);
-    return { defs, files, events, stats: { clips: defs.length, bytes, segments: events.length, dropped } };
+    return { defs, files, events, stats: { clips: defs.length, bytes, segments: events.length, dropped, normGain } };
   }
 
   /** 打点リスト → DrumMap.build 用の観測列 */

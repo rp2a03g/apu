@@ -1813,7 +1813,11 @@
   }
 
   function clearMmlPlaybackHighlight() {
-    for (const el of mmlHighlightedElements) el.classList.remove('mml-playing');
+    for (const el of mmlHighlightedElements) {
+      el.classList.remove('mml-playing');
+      if (el._mmlFollow) { el.classList.remove('mml-playing-follow'); el._mmlFollow = false; }
+    }
+    if (MML.UI.EditorLineInfo && MML.UI.EditorLineInfo.setPlayingLineEl) MML.UI.EditorLineInfo.setPlayingLineEl(null);
     mmlHighlightedElements.clear();
     mmlHighlightLastFrame = -1;
     mmlHighlightLastFollowSrc = -1;
@@ -1868,6 +1872,11 @@
       const r = findActiveHighlightRange(compiled.highlightRanges[ch], frameIndex, ch);
       if (!r) continue;
       let first = null;
+      // 追尾チャンネル(mmlFollowChannel)だけは別色(.mml-playing-follow、色設定の「追尾チャンネル…」)。
+      // 全チャンネルが同じ白だと、どれを追っているのか譜面上で見分けられなかった。
+      // ★クラスの付け外しは追尾状態が変わった要素だけ(_mmlFollow)。毎フレーム全要素へ
+      //   classList を書くと再生中にスタイル再計算が走る(.mml-playing と同じ配慮)
+      const isFollow = ch === followCh;
       forEachElementInRange(r.srcStart, r.srcEnd, (el) => {
         if (first === null) first = el;
         if (el._mmlGen !== gen) {
@@ -1876,16 +1885,26 @@
             el.classList.add('mml-playing');
             mmlHighlightedElements.add(el);
           }
+          if (!el._mmlFollow !== !isFollow) {
+            el.classList.toggle('mml-playing-follow', isFollow);
+            el._mmlFollow = isFollow;
+          }
         }
       });
-      if (ch === followCh && first !== null) followEl = first;
+      if (isFollow && first !== null) followEl = first;
     }
     // 今回の世代番号が付かなかった(=もう対象でなくなった)要素だけ消す
     for (const el of mmlHighlightedElements) {
       if (el._mmlGen !== gen) {
         el.classList.remove('mml-playing');
+        if (el._mmlFollow) { el.classList.remove('mml-playing-follow'); el._mmlFollow = false; }
         mmlHighlightedElements.delete(el);
       }
+    }
+    // 行番号ガターも追尾チャンネルの現在行を強調する(行番号ONのときだけ効く)。
+    // 追随スクロールのON/OFFとは独立: 追尾チャンネルを選んでいれば番号は付いていく
+    if (MML.UI.EditorLineInfo && MML.UI.EditorLineInfo.setPlayingLineEl) {
+      MML.UI.EditorLineInfo.setPlayingLineEl(followEl);
     }
 
     if (mmlAutoScrollEnableEl.checked && followEl) {
@@ -2829,6 +2848,7 @@
 
   function transportStop() {
     mmlHighlightSuppressed = true;
+    clearMmlPlaybackHighlight();
     if (mmlExternalSourceOnEnded) { const fn = mmlExternalSourceOnEnded; mmlExternalSourceOnEnded = null; try { fn(); } catch (e) { console.error(e); } }
     mmlPlaybackStopped = true;
     // ヘルプの実演再生(外部ソース)だった場合は、退避しておいたユーザーの再生範囲を戻す。

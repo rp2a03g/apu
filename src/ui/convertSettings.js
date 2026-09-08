@@ -63,6 +63,11 @@
     ['a440', T('12平均律固定(A4=440Hz・従来)')],
   ];
   const PRESET_LABELS = () => ({ faithful: T('忠実再現'), plain: T('プレーン譜面') });
+  // 出力の書式: チャンネルの並び順(src/convert/options.js CHANNEL_ORDER)
+  const CHANNEL_ORDER_OPTIONS = () => [
+    ['letter', T('アルファベット順')],
+    ['source', T('変換元の割り当て順')],
+  ];
   // 出力の書式: パートの並び(src/convert/options.js PART_ORDER)
   const PART_ORDER_OPTIONS = () => [
     ['block', T('チャンネル順に小節ブロック')],
@@ -145,6 +150,20 @@
     if (text != null) e.textContent = text;
     return e;
   }
+  // 見出し直下の短い説明。長文はホバー(title)へ回す(2026-09-09「説明が横に長い」対策)
+  // セレクトと付随入力(最小偏差など)を1つのセルへまとめる
+  function inline2(a, b) {
+    const w = document.createElement('span');
+    w.className = 'cs-inline';
+    w.appendChild(a);
+    if (b) w.appendChild(b);
+    return w;
+  }
+  function descLine(short, help) {
+    const d = el('div', 'cs-desc', short);
+    if (help) d.title = help;
+    return d;
+  }
   function section(title) {
     const sec = el('div', 'es-section');
     sec.appendChild(el('h3', null, title));
@@ -211,7 +230,7 @@
     const customTag = el('span', 'es-preset--custom', T('カスタム'));
     presetRow.appendChild(customTag);
     presetSec.appendChild(presetRow);
-    presetSec.appendChild(el('div', 'cs-desc', T('「忠実再現」は元曲の演奏をそのまま、「プレーン譜面」は音階と音色だけ(編曲の出発点)。どれかを触ると「カスタム」になります')));
+    presetSec.appendChild(descLine(T('忠実再現=元曲の演奏そのまま / プレーン譜面=音階と音色だけ'), T('「忠実再現」は元曲の演奏をそのまま、「プレーン譜面」は音階と音色だけ(編曲の出発点)。どれかを触ると「カスタム」になります')));
     body.appendChild(presetSec);
 
     // ── 変換テンポ(プリセットの直下)。実体は各フォーマットのパネルにある <prefix>TempoBpm 入力で、
@@ -252,7 +271,7 @@
       });
       row.appendChild(autoBtn); row.appendChild(tempoInput); row.appendChild(tapBtn); row.appendChild(tapOut);
       sec.appendChild(row);
-      sec.appendChild(el('div', 'cs-desc', T('BPM(40〜400)。「自動」なら音符の長さから推定、「タップ」は曲に合わせて数回押すと決まります')));
+      sec.appendChild(descLine(T('BPM 40〜400。空欄で自動推定'), T('BPM(40〜400)。「自動」なら音符の長さから推定、「タップ」は曲に合わせて数回押すと決まります')));
       body.appendChild(sec);
       syncTempo();
     }
@@ -274,15 +293,18 @@
       checks[key] = cb;
     }
     cmdSec.appendChild(chips);
-    cmdSec.appendChild(el('div', 'cs-desc', T('OFFにしたコマンドは出力しません(説明は各項目にマウスを載せると出ます)')));
+    cmdSec.appendChild(descLine(T('OFFにしたコマンドは出力しません'), T('OFFにしたコマンドは出力しません(説明は各項目にマウスを載せると出ます)')));
     body.appendChild(cmdSec);
 
     // ── 3. 譜面の書き方 ──
     const wrSec = section(T('譜面の書き方'));
     wrSec.classList.add('cs-span');
-    // 1行 = [コントロール][名前][追加入力(許容フレーム等、無ければ空)][説明] の4列グリッド(CSS .cs-line)
-    const line = (control, label, desc, extra) => {
+    // 1行 = [コントロール][名前][追加入力(許容フレーム等、無ければ空)][短い説明] の4列グリッド(CSS .cs-line)。
+    // help(長い説明)は行の title へ回す: 長文を横へ並べると読みづらい、というユーザー指摘(2026-09-09)。
+    // 行の間には区切り線を入れる(CSS .cs-line + .cs-line)
+    const line = (control, label, desc, extra, help) => {
       const row = el('label', 'cs-line');
+      if (help) row.title = help;
       row.appendChild(control || el('span'));
       row.appendChild(el('span', 'cs-key', label));
       row.appendChild(extra || el('span'));
@@ -290,7 +312,7 @@
       return row;
     };
     const neSel = makeSelect(NOTE_END_OPTIONS(), () => setKey('NOTE_END', neSel.value));
-    wrSec.appendChild(line(neSel, T('音符の区切り'), T('「次の音符まで」は音符をキーオン間隔まで伸ばし、無音を@v表の末尾0かゲートで表す(再生は変わらない)。「音量ゼロ」は元の細かい区切りのまま')));
+    wrSec.appendChild(line(null, T('音符の区切り'), T('音符をどこで終わらせるか'), neSel, T('「次の音符まで」は音符をキーオン間隔まで伸ばし、無音を@v表の末尾0かゲートで表す(再生は変わらない)。「音量ゼロ」は元の細かい区切りのまま')));
     const gaCb = document.createElement('input'); gaCb.type = 'checkbox';
     gaCb.addEventListener('change', () => setKey('GATE_APPROX', gaCb.checked));
     const gtIn = document.createElement('input');
@@ -301,7 +323,7 @@
     gtWrap.appendChild(el('span', null, T('許容')));
     gtWrap.appendChild(gtIn);
     gtWrap.appendChild(el('span', null, T('フレーム')));
-    wrSec.appendChild(line(gaCb, T('ゲートを揃える(近似)'), T('キーオフ位置のずれが許容内の音符を、チャンネルで最も多く合う q に揃える(休符や k を出さない)。レガートは切らない'), gtWrap));
+    wrSec.appendChild(line(gaCb, T('ゲートを揃える(近似)'), T('休符や k を出さず q でそろえる'), gtWrap, T('キーオフ位置のずれが許容内の音符を、チャンネルで最も多く合う q に揃える(休符や k を出さない)。レガートは切らない')));
     // 音長を丸める(LEN_SNAP、src/convert/duration.js framesToLengths の slackFrames)
     const lsIn = document.createElement('input');
     lsIn.type = 'number'; lsIn.min = '0'; lsIn.max = String(MML.Convert.LEN_SNAP_MAX); lsIn.step = '1'; lsIn.className = 'cs-num';
@@ -311,21 +333,24 @@
     lsWrap.appendChild(el('span', null, T('許容')));
     lsWrap.appendChild(lsIn);
     lsWrap.appendChild(el('span', null, T('フレーム')));
-    wrSec.appendChild(line(null, T('音長を丸める(近似)'), T('音符/休符の長さが許容フレーム数以内で大きな音価に乗るなら、タイの列(4&2&8..&64.&192)にせず1個で書く。余りは次の音符へ持ち越すので誤差は溜まらない。0で厳密(192分音符単位)'), lsWrap));
+    wrSec.appendChild(line(null, T('音長を丸める(近似)'), T('タイの列にせず1個の音価で書く'), lsWrap, T('音符/休符の長さが許容フレーム数以内で大きな音価に乗るなら、タイの列(4&2&8..&64.&192)にせず1個で書く。余りは次の音符へ持ち越すので誤差は溜まらない。0で厳密(192分音符単位)')));
     const srCb = document.createElement('input'); srCb.type = 'checkbox';
     srCb.addEventListener('change', () => setKey('SHAPE_REST', srCb.checked));
-    wrSec.appendChild(line(srCb, T('短い休符を吸収(近似)'), T('音符直後の1/32未満の休符を音符に繋げる(伸ばした区間は最後の音量のまま鳴る)')));
+    wrSec.appendChild(line(srCb, T('短い休符を吸収(近似)'), T('音符直後の短い休符を音符に繋げる'), null, T('音符直後の1/32未満の休符を音符に繋げる(伸ばした区間は最後の音量のまま鳴る)')));
     const emCb = document.createElement('input'); emCb.type = 'checkbox';
     emCb.addEventListener('change', () => setKey('ENV_MERGE', emCb.checked));
-    wrSec.appendChild(line(emCb, T('似た@v表を統合(近似)'), T('段の並びが同じで長さが±1違うだけの@v/@vr表を1本にまとめる(段の境目が最大1フレーム動く)')));
+    wrSec.appendChild(line(emCb, T('似た@v表を統合(近似)'), T('長さ違いの表を1本にまとめる'), null, T('段の並びが同じで長さが±1違うだけの@v/@vr表を1本にまとめる(段の境目が最大1フレーム動く)')));
     checks.GATE_APPROX = gaCb; checks.SHAPE_REST = srCb; checks.ENV_MERGE = emCb;
     body.appendChild(wrSec);
 
     // ── 3b. 出力の書式(パートの並び / 1行の小節数 / 小節揃え) ──
     const lySec = section(T('出力の書式'));
     lySec.classList.add('cs-span');
+    const coSel = makeSelect(CHANNEL_ORDER_OPTIONS(), () => setKey('CHANNEL_ORDER', coSel.value));
+    lySec.appendChild(line(null, T('チャンネルの並び順'), T('A,B,C… 順か、元の音源のch順か'), coSel,
+      T('「アルファベット順」はパート文字の順(A,B,C…)。「変換元の割り当て順」は元の音源のチャンネル順(FM1,FM2…PSG1… の並び)で、割り当て先の文字が飛んでいてもその順に出す')));
     const poSel = makeSelect(PART_ORDER_OPTIONS(), () => setKey('PART_ORDER', poSel.value));
-    lySec.appendChild(line(poSel, T('パートの並び'), T('「チャンネル順に小節ブロック」は全パートを数小節ずつ縦に並べる。「パートごとにまとめる」はAを最後まで書いてからB、と1パートずつ続ける')));
+    lySec.appendChild(line(null, T('パートの並び'), T('全パートを数小節ずつ並べるか、1パートずつか'), poSel, T('「チャンネル順に小節ブロック」は全パートを数小節ずつ縦に並べる。「パートごとにまとめる」はAを最後まで書いてからB、と1パートずつ続ける')));
     const bpIn = document.createElement('input');
     bpIn.type = 'number'; bpIn.min = '1'; bpIn.max = String(MML.Convert.BARS_PER_LINE_MAX); bpIn.step = '1'; bpIn.className = 'cs-num';
     bpIn.addEventListener('change', () => setKey('BARS_PER_LINE', bpIn.value));
@@ -333,10 +358,10 @@
     const bpWrap = el('span', 'cs-inline');
     bpWrap.appendChild(bpIn);
     bpWrap.appendChild(el('span', null, T('小節')));
-    lySec.appendChild(line(null, T('1行の小節数'), T('この小節数ごとに改行する(1〜16)'), bpWrap));
+    lySec.appendChild(line(null, T('1行の小節数'), T('この小節数ごとに改行する'), bpWrap, T('この小節数ごとに改行する(1〜16)')));
     const baCb = document.createElement('input'); baCb.type = 'checkbox';
     baCb.addEventListener('change', () => setKey('BAR_ALIGN', baCb.checked));
-    lySec.appendChild(line(baCb, T('小節を揃える'), T('小節の区切りを全パートで同じ桁に揃える(空白で埋める)。OFFならスペース1つで区切る')));
+    lySec.appendChild(line(baCb, T('小節を揃える'), T('小節の頭を縦にそろえる'), null, T('小節の区切りを全パートで同じ桁に揃える(空白で埋める)。OFFならスペース1つで区切る')));
     checks.BAR_ALIGN = baCb;
     body.appendChild(lySec);
 
@@ -345,9 +370,9 @@
     det.className = 'cs-details cs-span';
     det.appendChild(el('summary', null, T('詳細設定')));
     const saSel = makeSelect(PITCH_SA_OPTIONS(), () => setKey('PITCH_SA', saSel.value));
-    det.appendChild(line(saSel, T('ピッチ精度(SA)'), T('N163出力のSA<n>(D/EP/MPの倍率)の選び方。深いビブラートをテーブルのbyte幅を超えて表現する')));
+    det.appendChild(line(null, T('ピッチ精度(SA)'), T('N163のSA<n>の選び方'), saSel, T('N163出力のSA<n>(D/EP/MPの倍率)の選び方。深いビブラートをテーブルのbyte幅を超えて表現する')));
     const nwSel = makeSelect(N163_WAVE_OPTIONS(), () => setKey('N163_WAVE', nwSel.value));
-    det.appendChild(line(nwSel, T('N163波形'), T('N163が波形に使えるRAMは 128-8×使用ch数 バイトだけ。同時に鳴る波形が入り切らない曲で、はみ出したぶんの波形長を落とすかどうか。落とさないとコンパイルエラーで再生・書き出しができません')));
+    det.appendChild(line(null, T('N163波形'), T('波形がRAMに入り切らないとき'), nwSel, T('N163が波形に使えるRAMは 128-8×使用ch数 バイトだけ。同時に鳴る波形が入り切らない曲で、はみ出したぶんの波形長を落とすかどうか。落とさないとコンパイルエラーで再生・書き出しができません')));
     const tnSel = makeSelect(TUNING_OPTIONS(), () => setKey('TUNING', tnSel.value));
     const tmIn = document.createElement('input');
     tmIn.type = 'number'; tmIn.min = '0'; tmIn.max = String(MML.Convert.TUNING_MIN_MAX); tmIn.step = '0.5'; tmIn.className = 'cs-num';
@@ -358,7 +383,7 @@
     tmWrap.appendChild(el('span', null, T('最小偏差')));
     tmWrap.appendChild(tmIn);
     tmWrap.appendChild(el('span', null, T('セント')));
-    det.appendChild(line(tnSel, T('基準ピッチ'), T('曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。音名は変わらず、再生とNSF書き出しの周波数テーブルが同じだけずれる'), tmWrap));
+    det.appendChild(line(null, T('基準ピッチ'), T('曲全体の音程のずれを測って補正'), inline2(tnSel, tmWrap), T('曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。音名は変わらず、再生とNSF書き出しの周波数テーブルが同じだけずれる')));
     body.appendChild(det);
 
     function syncAll() {
@@ -367,6 +392,7 @@
       gtIn.value = String(current.GATE_TOL != null ? current.GATE_TOL : MML.Convert.GATE_TOL_DEFAULT);
       gtIn.disabled = !current.GATE_APPROX;
       lsIn.value = String(current.LEN_SNAP != null ? current.LEN_SNAP : MML.Convert.LEN_SNAP_DEFAULT);
+      coSel.value = current.CHANNEL_ORDER || 'letter';
       poSel.value = current.PART_ORDER || 'block';
       bpIn.value = String(current.BARS_PER_LINE || 4);
       saSel.value = current.PITCH_SA || 'octave';
