@@ -4,6 +4,9 @@
  *   node tools/headless/regress.js --corpus "C:/Users/user/Desktop/emu sound/nsf" --update
  *   node tools/headless/regress.js --corpus "C:/Users/user/Desktop/emu sound/nsf"
  *   node tools/headless/regress.js --corpus ... --dump out/   (本文も残して目視diff用)
+ *   node tools/headless/regress.js --corpus ... --cmd NOTE_END=zero --dump out/
+ *       (変換設定を変えて走らせる。ベースラインは既定設定の SHA なので差分は出て当然。
+ *        --dump した本文を別設定の --dump と比べる用途: 「設定 A と B で出力が同じか」の実測)
  *
  * 変換結果そのものではなく SHA-256 を manifest に持つ(数百曲分の本文をgitに
  * 入れると重いため)。「どの曲が変わったか」は manifest で分かり、「どう変わったか」は
@@ -17,7 +20,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { convertBytes, expandInput, ctx } = require('./convert');
+const { convertBytes, expandInput, ctx, parseCmdFlags } = require('./convert');
 const { ROOT } = require('./load');
 
 // Windows でも Node はスラッシュ区切りを受け付ける(バックスラッシュのエスケープ事故を避ける)
@@ -77,11 +80,11 @@ function compileError(mml) {
   }
 }
 
-async function runOne(item, seconds) {
+async function runOne(item, seconds, cmd) {
   if (item.openError) return { ok: false, error: item.openError };
   try {
     const bytes = item.read ? await item.read() : item.bytes;
-    const r = await convertBytes(bytes, item.format, { seconds });
+    const r = await convertBytes(bytes, item.format, { seconds, cmd });
     const compErr = compileError(r.mml);
     return {
       ok: true,
@@ -109,6 +112,7 @@ async function main() {
   const dumpDir = flag('--dump', null);
   const corpus = flag('--corpus', DEFAULT_CORPUS);
   const seconds = parseInt(flag('--sec', '15'), 10);
+  const cmd = parseCmdFlags(flag('--preset', null), flag('--cmd', null)); // 省略時 undefined=既定設定
   const only = flag("--only", null);
   const verbose = argv.includes("--verbose");
   const name = flag('--name', path.basename(corpus));
@@ -136,7 +140,7 @@ async function main() {
     // --verbose は「どの曲で固まっているか」を見るためのもの。変換前に名前を出す
     if (verbose) process.stderr.write(`[${i + 1}/${files.length}] ${key} ... `);
     const tOne = Date.now();
-    const r = await runOne(item, seconds);
+    const r = await runOne(item, seconds, cmd);
     if (verbose) process.stderr.write(`${Date.now() - tOne}ms ${r.ok ? '' : r.error}\n`);
     if (dumpDir && r.ok) fs.writeFileSync(path.join(dumpDir, key.replace(/[\\/:*?"<>|!]/g, '_') + '.mml'), r.mml);
     const { mml, ...rec } = r;

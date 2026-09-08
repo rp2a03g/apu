@@ -42,8 +42,20 @@
  *                  (実質42が最大。43以上は実機の8bit桁溢れで鋸波が崩れるだけで音量は
  *                  上がらない)。@v/@vrのテーブル値も同じ範囲)
  *   v+<n> v-<n>    音量の相対増減 (省略時は±1)
- *   q<n>           ゲートタイム (0-8, 8で音長いっぱい)
- *   @q<n>          ゲートタイムをフレーム単位で指定(音符終端の<n>フレーム前でノートオフ)
+ *   q<n>[,<m>]     ゲートタイム (0-8、8で音長いっぱい。<m>はフレーム数の加減、省略時0)。
+ *                  ゲート長は実機ppmckc(datamake.c calcGateTime)と同じ
+ *                  floor(音長×n/8)+m(音長以下に頭打ち、音長>0なら最低1フレーム)。
+ *                  ★2026-09-08まで Math.round だったが、実機は整数除算=切り捨て。q6 の
+ *                    13フレーム音符は実機9フレームに対して10で鳴っていた(Famicompo
+ *                    「Wing Defenders」の実測で発覚)
+ *   @q<n>          ゲートタイムをフレーム単位で指定(音符終端の<n>フレーム前でノートオフ。
+ *                  実機ppmckc _QUONTIZE2 = q<denom>,-<n> と同じ)
+ *   k<len>         キーオフ(実機 _KEY_OFF「リリースエンベロープが発動する休符」)。直前の音符を
+ *                  その場でゲートオフし<len>ぶん待つ(@vr があればリリースが鳴る)。直前が音符で
+ *                  なければただの休符。<len>省略時は l<n>
+ *   @k<n>          キーオンから<n>フレームでキーオフ(本ツール独自拡張。k<len>のフレーム版で
+ *                  q/@qより優先、音長以下なら音長いっぱい。0で解除)。固定オン長で鳴らす
+ *                  ドライバ(Konami等)の曲を、音符長=キーオン間隔のまま1コマンドで表せる
  *   t<n>           テンポ (BPM。曲中の任意の位置で変更可)
  *   K<n>           移調 (半音、符号あり)
  *   D<n>           デチューン (周期/周波数レジスタへの生オフセット、符号あり。以降の音符に
@@ -209,6 +221,7 @@
 
   const CPU_CLOCK_NTSC = 1789773;
   const FRAME_RATE_NTSC = 60.0988;
+  Mml.FRAME_RATE_NTSC = FRAME_RATE_NTSC; // 変換側(src/convert/envelope.js applyNoteEnd)が元曲のフレームレートとの比を取る
 
   const NOTE_SEMITONES = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
 
@@ -583,7 +596,7 @@
     const volMax = caps.volMax == null ? 15 : caps.volMax;
     const volDefault = caps.volDefault == null ? volMax : caps.volDefault;
     const state = {
-      octave: 4, defaultLength: 4, volume: volDefault, gate: 8, instrument: defaultInstrument || 0,
+      octave: 4, defaultLength: 4, volume: volDefault, gate: 8, gateAdjust: 0, keyOnFrames: 0, instrument: defaultInstrument || 0,
       envelopeV: null, envelopeVr: 255, transpose: 0, detune: 0, qFrames: null,
       vibrato: null, pitchEnv: null, pitchEnvDelay: 0, portamento: null, noteEnv: null,
       sweepSpeed: 0, sweepDepth: 0, fme7Noise: null, fme7EnvShape: null, fme7EnvPeriod: 0,
@@ -680,7 +693,7 @@
           const idx = noteHistory.length - 1 - state.selfDelay;
           if (idx >= 0) {
             const target = noteHistory[idx];
-            const gf = computeGateFrames({ gate: state.gate, gateDenom: cfg.gateDenom, qFrames: state.qFrames }, frames);
+            const gf = computeGateFrames({ gate: state.gate, gateAdjust: state.gateAdjust, gateDenom: cfg.gateDenom, qFrames: state.qFrames, keyOnFrames: state.keyOnFrames }, frames);
             // attack: 実機ppmckはリリース区間を「ノートオン」として出力する
             // (putReleaseEffect → putAsm(fp, note))ので、このピッチブレークは
             // タイ(&)のレガートと違い打ち直しを伴う。writePitchModulation参照
@@ -699,8 +712,11 @@
           envelopeV: state.envelopeV,
           envelopeVr: state.envelopeVr,
           gate: state.gate,
+          gateAdjust: state.gateAdjust,
           gateDenom: cfg.gateDenom,
           qFrames: state.qFrames,
+          keyOnFrames: state.keyOnFrames,
+          keyOffAt: null,
           vibrato: state.vibrato,
           pitchEnv: state.pitchEnv,
           pitchEnvDelay: state.pitchEnvDelay,
@@ -726,6 +742,24 @@
       }
     }
 
+    // k<len>: 直前の音符をその場でゲートオフして frames ぶん待つ(実機 _KEY_OFF は
+    // putReleaseEffect を delta_time ぶん出す=音符の続きとしてリリース区間を伸ばす)。
+    // 音符のゲートは音符自身の長さで計算した値(q/@q/@k)を keyOffAt に固定してから
+    // durationFrames を伸ばす。直前が音符でなければ(休符の後・先頭)ただの休符
+    function pushKeyOff(frames, srcStart, srcEnd) {
+      const prev = segments.length > 0 ? segments[segments.length - 1] : null;
+      if (prev && prev.freq != null) {
+        const g = computeGateFrames(prev, prev.durationFrames);
+        prev.keyOffAt = prev.keyOffAt == null ? g : Math.min(prev.keyOffAt, g);
+        prev.durationFrames += frames;
+        prev.tieNext = false;
+        if (srcEnd != null) prev.srcEnd = srcEnd;
+        elapsedFrames += frames;
+      } else {
+        pushNote(frames, null, null, srcStart, srcEnd);
+      }
+    }
+
     for (const tok of tokens) {
       switch (tok.type) {
         case 'octave': state.octave = tok.value; break;
@@ -744,8 +778,21 @@
           }
           state.volume = Math.max(0, Math.min(volMax, tok.value)); state.envelopeV = null; state.fme7EnvShape = null; break;
         case 'volumeRel': state.volume = Math.max(0, Math.min(volMax, state.volume + tok.delta)); state.envelopeV = null; state.fme7EnvShape = null; break;
-        case 'gate': state.gate = Math.max(0, Math.min(8, tok.value)); state.qFrames = null; break;
+        // 実機ppmckcは rate が 0〜denom の範囲外、rate=0でadjust<=0、rate=denomでadjust>0 を
+        // エラーにする。ここは範囲に丸めるだけに留める(rateの上限は #GATE-DENOM)
+        case 'gate':
+          state.gate = Math.max(0, Math.min(cfg.gateDenom || 8, tok.value));
+          state.gateAdjust = tok.adjust | 0;
+          state.qFrames = null;
+          break;
         case 'quantizeFrames': state.qFrames = Math.max(0, tok.value); break;
+        case 'keyOnFrames': state.keyOnFrames = Math.max(0, tok.value | 0); break;
+        case 'keyOff': {
+          const lenResult = framesForLength(tok.length, tok.dots, state.defaultLength, tempo, lengthCarry);
+          lengthCarry = lenResult.carryOut;
+          pushKeyOff(lenResult.frames, tok.srcStart, tok.srcEnd);
+          break;
+        }
         case 'tempo': tempo = tok.value; break;
         case 'transpose': state.transpose = tok.value; break;
         case 'detune': state.detune = tok.value; break;
@@ -936,12 +983,29 @@
     };
   }
 
-  // セグメントのゲート長(フレーム数)を算出する。@q<n>(フレーム単位の早期ノートオフ)が
-  // 指定されていればそちらを優先し、無ければ従来通り q<n>(0-8, 8分率)を使う
+  // セグメントのゲート長(フレーム数)を算出する。優先順位:
+  //   @k<n>(キーオンからnフレーム、本ツール独自) > @q<n>(終端のnフレーム前) >
+  //   q<rate>,<adjust>(実機ppmckc datamake.c calcGateTime と同じ式:
+  //     gate = (dur*rate)/denom(整数除算=切り捨て) + adjust、dur超は dur、負は 0、
+  //     dur>0 で gate<=0 なら 1)
+  // k<len> で固定された keyOffAt があればそれ以下に切る。
+  // NSF書き出し(src/nsf/mckBytecode.js)もこの関数(Mml.segmentGateFrames)を使う
   function computeGateFrames(seg, dur) {
-    if (seg.qFrames != null) return Math.max(1, dur - seg.qFrames);
-    return Math.max(1, Math.round(dur * (seg.gate / (seg.gateDenom || 8))));
+    let g;
+    if (seg.keyOnFrames > 0) g = Math.min(dur, seg.keyOnFrames);
+    else if (seg.qFrames != null) g = Math.max(1, dur - seg.qFrames);
+    else g = MML.Mml.ppmckGateFrames(dur, seg.gate == null ? 8 : seg.gate, seg.gateDenom || 8, seg.gateAdjust || 0);
+    if (seg.keyOffAt != null) g = Math.min(g, seg.keyOffAt);
+    return Math.max(1, Math.min(dur, g));
   }
+  Mml.segmentGateFrames = computeGateFrames;
+  Mml.ppmckGateFrames = function (dur, rate, denom, adjust) {
+    let gate = Math.floor((dur * rate) / (denom || 8)) + (adjust | 0);
+    if (gate > dur) gate = dur;
+    else if (gate < 0) gate = 0;
+    if (dur !== 0 && gate <= 0) gate = 1;
+    return gate;
+  };
 
   // ノートエンベロープ(EN)は「前回値からの相対値」の累積(cumulative)。
   // ループがあれば周回後もループ区間の合計を繰り返し足し込み、無ければ全体の合計で頭打ちにする。

@@ -61,18 +61,9 @@
     return Math.max(1, n);
   }
 
-  // VRC7: freq = fnum * 2^block * 49716 / 2^19 (src/mml/compiler.jsのvrc7FreqToFnumBlock()
-  // と同じ式・同じblock選択、丸めない生の連続値)。fnumは同一block内では周波数に比例する
-  // ため、block自体は変えずfnumだけの差としてD<n>を計算できる(compiler.js側もblockは
-  // 動かさずfnumだけにapplyDetuneするよう対応済み)。デチューン量はごく小さい(数Hz程度)
-  // ため、理論値とズラした値でblockの選択が食い違うことは通常無い。
-  function vrc7FnumRaw(freq) {
-    for (let block = 0; block <= 7; block++) {
-      const fnum = (freq * 524288) / (49716 * Math.pow(2, block));
-      if (fnum <= 511) return fnum;
-    }
-    return 511;
-  }
+  // VRC7: fnum換算は src/convert/borrow.js に集約(block は音符の理論値側で固定。境界をまたぐ
+  // 実測値で D が上限に張り付く件の修正、2026-09-07)
+  function vrc7FnumRaw(freq, ev) { return MML.Convert.Borrow.vrc7FnumRaw(freq, ev); }
 
   MML.KSS2MML.fromKss = async function (kssBytes, songIndex, durationSeconds, options) {
     options = options || {};
@@ -390,6 +381,8 @@
       ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${(expansionLetterMap.n163 || []).length}`
       : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
 
+    // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
+    MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, frameRate);
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       headerLines: [

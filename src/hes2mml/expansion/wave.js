@@ -197,6 +197,8 @@
     return out;
   }
   MML.Hes2MmlExpansion._resampleSeq = resampleSeq; // noise.jsから共用
+  // KSS/VGM の AY・SCC 抽出器(src/kss2mml/expansion/ay.js, scc.js)からも同じ正規化を使う(2026-09-08)
+  MML.Convert.TickResample = { resampleSeq, noteAnchorT, sampleOffsetFor };
 
   // PSGの5bit(0-31)波形をN163の4bit(0-15)へビット深度変換する(単純な1bit右シフト、
   // 0-31を0-15へ均等対応。情報量の損失は最小限)。
@@ -298,9 +300,13 @@
   // 深い変調もEP/MPで表現できるため既定は無制限。SA不使用(変換設定PITCH_SA='off')のときだけ
   // 呼び出し元が70を渡し、表現不能な深い統合を音符の交互のまま残す(従来動作)。
   MML.Hes2MmlExpansion.wave = function (snapshots, waveReg, envReg, controlTrace, pitchTrace, opts) {
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },

@@ -186,6 +186,8 @@
 
     const directiveLines = hasWave ? [MML.Mml.EX_CHIP_DIRECTIVE.fds] : [];
 
+    // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
+    MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, frameRate);
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       headerLines: [
@@ -300,6 +302,8 @@
     const directiveLines = expansions.map(chip => chip === 'n163'
       ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${(letterMap.n163 || []).length}`
       : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
+    // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
+    MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, frameRate);
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       headerLines: [

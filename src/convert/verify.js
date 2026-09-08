@@ -144,7 +144,9 @@
           // FME7のノイズ単独ミキサー(@2)はノート番号=ノイズ周期なので対象外
           if (ev.fme7Noise !== undefined && ev.instrument === 2) { skipped++; continue; }
           const startSec = ev.start / frameRate;
-          const endSec = ev.end / frameRate;
+          // NOTE_END='next'(src/convert/envelope.js absorbSilenceIntoEnvelopes)で次の音符の頭まで
+          // 伸ばした音符は、伸ばした区間が無音(表の末尾0保持)なので可聴区間だけをサンプルする
+          const endSec = (ev.audibleEnd != null ? ev.audibleEnd : ev.end) / frameRate;
           const len = endSec - startSec;
           if (len < 0.1) { skipped++; continue; } // 短すぎる音符は境界ドリフトの誤検出源
           if (!track) { missing++; continue; }

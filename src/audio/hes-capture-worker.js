@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-07 16:00:06
+ * Built by tools/build-capture-workers.ps1 at 2026-09-08 08:48:20
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-07 16:00:06';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-08 08:48:20';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -1640,8 +1640,11 @@
  *   (1) 割当層(EnvelopeRegistry/PitchEnvelopeRegistry/NoteEnvelopeRegistry/detune.js)で
  *       登録自体を止める(→ ヘッダの @v/@EP/@MP/@EN テーブル定義も自然に消える)
  *   (2) 出力層(mmlEmit.js emitScore/emitChannel)でチャンネルフラグをANDマスクする(安全網)
- *   (3) 譜面整形(短い休符の吸収・音長の格子量子化)を emitScore 手前のイベント整形で行う
+ *   (3) 譜面整形(短い休符の吸収)を emitScore 手前のイベント整形で行う
  * の3段で効かせる。
+ * これとは別に、音符の区切り方(NOTE_END、下記)は各 *2mml が emitScore の直前に
+ * MML.Convert.applyNoteEnd(src/convert/envelope.js)を呼んで効かせる
+ * (エンベロープ表の登録先が要るため emitScore 内では行えない)。
  *
  * cmd の各キー(全て boolean。省略時は true = 従来通り忠実再現):
  *   D      … D<n>(チャンネル/チップ間デチューン、detune.js)
@@ -1661,9 +1664,30 @@
  *            (サンプルごとに疑似音程を割り当てる。src/convert/drumMap.js)。falseなら従来
  *            どおり休符(ドラムはMMLに出ない)
  *
- * 譜面整形(既定 false = 従来通り):
- *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)
- *   SHAPE_QUANT … イベント境界を16分音符格子へ丸める
+ * 譜面整形(既定 false = 従来通り。★近似=音が変わりうる整形はここに集める):
+ *   ENV_MERGE   … 似た @v 表を統合する(2026-09-08)。値の並び(段の値列)が同じで各段の長さが±1・全体長も
+ *                 ±1以内の表を、最も多くの音符が参照する変種へ寄せる(EnvelopeRegistry.mergeSimilar)。
+ *                 ドライバのエンベロープが自走タイマー(2.33フレーム周期等)で進む曲では段の位置が音符の
+ *                 開始位相ごとに違い、同じ楽器でも 3,2,2 / 2,3,2 / 2,2,3 の変種が量産される。ppmck の
+ *                 @v はフレーム毎の絶対値なので正確に1本にはできず、これは段の境目が最大1フレーム動く
+ *                 近似(ハードウェア減衰表・exact 表は対象外)
+ *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)。
+ *                 伸ばした区間は最後の音量のまま鳴るので近似
+ *   (旧 SHAPE_QUANT「16分音符格子へ丸める」は 2026-09-07 に廃止。キーオン自体が格子から
+ *    外れている曲にしか効かず、丸めれば必ずタイミングが崩れるため。保存済み設定に残って
+ *    いても読み捨てる)
+ *
+ * 音符の区切り(2026-09-07。細かい音長 `@v156 d+4&d+64.&d+192 r…` 対策):
+ *   NOTE_END … 'next'(既定) | 'zero'
+ *     抽出器は音量レジスタが0になった瞬間に音符を閉じるため、音長が「減衰が0に達した
+ *     フレーム」というテンポ格子と無関係な値になる(同じ情報は @v 表にもあり二重表現)。
+ *     'next' … 音符の直後の休符を音符に吸収して次の音符の頭まで伸ばす(音長=キーオン間隔)。
+ *              無音区間は、減衰が自然に0へ到達した@v付き音符なら @v表の末尾に 0 を1つ足して
+ *              (コンパイラ stepEnvelope も NSF ドライバも末尾値を保持する)、それ以外は
+ *              ゲートタイム q<n>/@q<n>(コンパイラはゲートオフを休符と同じに書く)で表す。
+ *              どちらも再生結果は完全に同じ(タイミング不変の厳密な変形)
+ *     'zero' … 従来どおり音量0で区切る(最も細かく、そのままの姿)
+ *     詳細・対象外は envelope.js applyNoteEnd 冒頭コメント。
  *
  * 値キー(booleanでない設定。2026-08-26):
  *   PITCH_SA … N163出力のSA<num>(ピッチシフト量)自動選択。'octave' | 'note' | 'off'
@@ -1704,7 +1728,10 @@
   MML.Convert = MML.Convert || {};
 
   const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
-  const SHAPE_KEYS = ['SHAPE_REST', 'SHAPE_QUANT'];
+  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE'];
+  // 音符の区切り(冒頭コメント NOTE_END)
+  const NOTE_END_VALUES = ['next', 'zero'];
+  MML.Convert.NOTE_END_VALUES = NOTE_END_VALUES;
   const PITCH_SA_VALUES = ['octave', 'note', 'off'];
   // ── DPCM(打楽器)キー(冒頭コメント参照)。ドラム(DPCM)パネル最下段の設定 ──
   // DMC_RATE: DMCレート表のindex(0=4.2kHz … 15=33.1kHz)。「自動」のサンプルに使う
@@ -1740,11 +1767,11 @@
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, SHAPE_QUANT: false, PITCH_SA: 'octave', N163_WAVE: 'fit',
+                SHAPE_REST: false, ENV_MERGE: false, NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, SHAPE_QUANT: true, PITCH_SA: 'octave', N163_WAVE: 'fit',
+                SHAPE_REST: true, ENV_MERGE: false, NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
@@ -1761,6 +1788,7 @@
         if (v >= 0 && v <= DMC_RATE_MAX) out.DMC_RATE = v;
       }
       if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
+      if (cmd.NOTE_END != null && NOTE_END_VALUES.indexOf(cmd.NOTE_END) >= 0) out.NOTE_END = cmd.NOTE_END;
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
       if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
       if (cmd.N163_WAVE != null && N163_WAVE_VALUES.indexOf(cmd.N163_WAVE) >= 0) out.N163_WAVE = cmd.N163_WAVE;
@@ -1779,7 +1807,7 @@
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
       const p = MML.Convert.normalizeCmd(PRESETS[name]);
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };
@@ -1993,11 +2021,10 @@
   // 新しい配列を返す(元は変更しない)。
   //   SHAPE_REST : 音符の直後の休符(または隙間)が restThreshold フレーム未満なら直前の
   //                音符を延ばして埋める(ゲートタイムの隙間除去)
-  //   SHAPE_QUANT: 各イベントの start を grid フレーム格子へ丸め、end は次イベントの start
-  //                (最後は元の end を丸めた値)。長さ0になったイベントは捨てる
+  //   (SHAPE_QUANT=16分格子への丸めは 2026-09-07 に廃止。冒頭コメント参照)
   MML.Convert.shapeEvents = function (events, fpb, cmd) {
     const c = MML.Convert.normalizeCmd(cmd);
-    if (!c.SHAPE_REST && !c.SHAPE_QUANT) return events;
+    if (!c.SHAPE_REST) return events;
     let evs = (events || []).slice().sort((a, b) => a.start - b.start).map(e => Object.assign({}, e));
 
     if (c.SHAPE_REST) {
@@ -2006,7 +2033,9 @@
       for (let i = 0; i < evs.length; i++) {
         const ev = evs[i];
         const prev = out[out.length - 1];
-        if (ev.note === null && prev && prev.note !== null && (ev.end - ev.start) < restThreshold) {
+        // リリース表(@vr)付きの音符の直後の休符はリリースが鳴る区間(mmlEmit が k<len> で出す)
+        // なので吸収しない
+        if (ev.note === null && prev && prev.note !== null && prev.envelopeVr == null && (ev.end - ev.start) < restThreshold) {
           prev.end = Math.max(prev.end, ev.end); // 休符を直前の音符へ吸収
           continue;
         }
@@ -2015,23 +2044,6 @@
           prev.end = ev.start;
         }
         out.push(ev);
-      }
-      evs = out;
-    }
-
-    if (c.SHAPE_QUANT) {
-      const grid = fpb / 4; // 16分音符
-      const snap = (f) => Math.round(f / grid) * grid;
-      const out = [];
-      for (let i = 0; i < evs.length; i++) {
-        const ev = evs[i];
-        const s = snap(ev.start);
-        const e = (i + 1 < evs.length && evs[i + 1].start <= ev.end) ? snap(evs[i + 1].start) : snap(ev.end);
-        if (e <= s) continue;
-        const prev = out[out.length - 1];
-        if (prev && prev.end > s) prev.end = s;
-        if (prev && prev.end <= prev.start) out.pop();
-        out.push(Object.assign(ev, { start: s, end: e }));
       }
       evs = out;
     }
@@ -3592,6 +3604,8 @@
     return out;
   }
   MML.Hes2MmlExpansion._resampleSeq = resampleSeq; // noise.jsから共用
+  // KSS/VGM の AY・SCC 抽出器(src/kss2mml/expansion/ay.js, scc.js)からも同じ正規化を使う(2026-09-08)
+  MML.Convert.TickResample = { resampleSeq, noteAnchorT, sampleOffsetFor };
 
   // PSGの5bit(0-31)波形をN163の4bit(0-15)へビット深度変換する(単純な1bit右シフト、
   // 0-31を0-15へ均等対応。情報量の損失は最小限)。
@@ -3693,9 +3707,13 @@
   // 深い変調もEP/MPで表現できるため既定は無制限。SA不使用(変換設定PITCH_SA='off')のときだけ
   // 呼び出し元が70を渡し、表現不能な深い統合を音符の交互のまま残す(従来動作)。
   MML.Hes2MmlExpansion.wave = function (snapshots, waveReg, envReg, controlTrace, pitchTrace, opts) {
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
@@ -3870,9 +3888,13 @@
         if (ev.note !== null && tl) ev.volSeq = MML.Hes2MmlExpansion._resampleSeq(tl, ev.start, ev.end, ev.volSeq, undefined, MML.Hes2MmlExpansion._sampleOffsetFor([tl]));
       }
     }
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },

@@ -83,8 +83,10 @@ async function expandInput(file) {
 async function probe(bytes, format) {
   const MML = ctx();
   if (format === 'vgm') bytes = await MML.Archive.gunzipIfNeeded(bytes);
+  // NSFe は素のNSFバイト列へ正規化してから同じ経路へ(ブラウザの loadNsfFile と同じ)
+  if (format === 'nsf' && MML.NSF.isNsfe(bytes)) bytes = MML.NSF.normalize(bytes).bytes;
   const header = {
-    nsf: () => MML.NSF.parseHeader(bytes),
+    nsf: () => MML.NSF.normalize(bytes).header,
     spc: () => MML.SPC.parseHeader(bytes),
     kss: () => MML.KSS.parseHeader(bytes),
     gbs: () => MML.GBS.parseHeader(bytes),
@@ -171,7 +173,7 @@ function parseCmdFlags(preset, cmdStr) {
     const raw = v === undefined ? '1' : v.trim();
     // 真偽値っぽい語はboolean、それ以外は文字列/数値のまま(DMC_RATE=14, DRUM_POLY=mono, PITCH_SA=off 等の
     // 列挙値設定に対応。'off' は PITCH_SA の値でもあるので、キーが列挙値設定のときは文字列で渡す)
-    const enumKey = ['DMC_RATE', 'PITCH_SA', 'RATE_MIX', 'DRUM_POLY', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].indexOf(k.trim()) >= 0;
+    const enumKey = ['DMC_RATE', 'PITCH_SA', 'RATE_MIX', 'DRUM_POLY', 'N163_WAVE', 'TUNING', 'TUNING_MIN', 'NOTE_END'].indexOf(k.trim()) >= 0;
     if (enumKey) out[k.trim()] = isNaN(Number(raw)) ? raw : Number(raw);
     else out[k.trim()] = !(raw === '0' || raw === 'false' || raw === 'off');
   }
@@ -189,7 +191,7 @@ async function convertFile(file, opt = {}) {
   return Object.assign(r, { file, key: item.key, entries: items.length });
 }
 
-module.exports = { convertFile, convertBytes, expandInput, probe, defaultSong, detectFormat, isArchive, SONG_EXTS, ctx };
+module.exports = { convertFile, convertBytes, expandInput, probe, defaultSong, detectFormat, isArchive, SONG_EXTS, ctx, parseCmdFlags };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -199,7 +201,7 @@ if (require.main === module) {
     return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : def;
   };
   if (!file) {
-    console.error('usage: node tools/headless/convert.js <file> [--song N] [--entry N] [--sec S] [-o out.mml] [--list] [--preset plain|faithful] [--cmd D=0,EP=0,...]');
+    console.error('usage: node tools/headless/convert.js <file> [--song N] [--entry N] [--sec S] [-o out.mml] [--list] [--preset plain|faithful] [--cmd D=0,EP=0,NOTE_END=zero,...]');
     process.exit(2);
   }
 

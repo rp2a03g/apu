@@ -52,9 +52,18 @@
   // 固定音量モードのまま音量だけ変化する間は区切らずvolSeqに積む
   // (ソフトウェア音量エンベロープ抽出用。src/nsf2mml/converter.jsのパルス抽出と同じ考え方)。
   // エンベロープモード中にenvKey(周期/ループ)が変わった場合のみ別ノートとして区切る。
+  // 楽器化(2026-09-08、src/nsf2mml/converter.js の 2A03 パルス抽出と同じ規則。判定は
+  // MML.NSF2MML.Instrument を共有): デューティ変化では区切らず dutySeq に積む、同じ音程の打ち直しで
+  // 音量が下がっていくものはリリース開始(keyOffAt)、デューティ変化+音量上昇は再トリガーとして区切る
   function extractPulseEvents(timeline, chKey, statusBit, attackIdx) {
     const events = [];
     let cur = null;
+    const Inst = MML.NSF2MML.Instrument;
+    const frameInfo = (f2) => {
+      const t2 = timeline[f2];
+      if (!t2) return null;
+      return { attack: !!t2.attack[attackIdx], constVol: !!(t2[chKey].ctrl & 0x10), vol: t2[chKey].ctrl & 0x0F };
+    };
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
     for (let f = 0; f < timeline.length; f++) {
       const t = timeline[f];
@@ -70,24 +79,35 @@
       const freq = pulseFreq(period);
       const note = (active && audible && freq > 0) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
-      if (!cur) { cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: false }; continue; }
-      if (t.attack[attackIdx] || note !== cur.note || duty !== cur.duty || constVol !== cur.constVol ||
-          (!constVol && envKey !== cur.envKey)) {
-        const pureNoteChange = !t.attack[attackIdx] && note !== cur.note && duty === cur.duty &&
+      const begin = (tieCandidate) => { cur = { note, duty, vol: volume, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period], dutySeq: [duty], keyOffAt: null, tieCandidate }; };
+      if (!cur) { begin(false); continue; }
+      const releaseMark = !!t.attack[attackIdx] && note !== null &&
+        Inst.isReleaseRewrite(frameInfo, f, cur, note === cur.note, constVol, volume);
+      const lastDuty = cur.dutySeq[cur.dutySeq.length - 1];
+      const retrigger = !t.attack[attackIdx] && Inst.isRetrigger(cur, constVol, duty, volume);
+      if (t.attack[attackIdx] && !releaseMark) {
+        flush(f); begin(false);
+      } else if (!releaseMark && (retrigger || note !== cur.note || constVol !== cur.constVol ||
+          (!constVol && envKey !== cur.envKey))) {
+        const pureNoteChange = !retrigger && note !== cur.note && duty === lastDuty &&
           constVol === cur.constVol && (constVol || envKey === cur.envKey);
-        flush(f);
-        cur = { note, duty, constVol, envKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: pureNoteChange };
+        flush(f); begin(pureNoteChange);
       } else {
+        if (releaseMark) cur.keyOffAt = f - cur.start;
         cur.pitchSeq.push(period);
-        if (constVol) cur.volSeq.push(volume);
+        cur.dutySeq.push(duty);
+        if (constVol) { cur.vol = volume; cur.volSeq.push(volume); }
       }
     }
     flush(timeline.length);
     return events;
   }
 
-  MML.Nsf2MmlExpansion.mmc5 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg, noteEnvReg) {
+  // inst: { vrReg, dutyReg, cmd }(楽器化の登録先。converter.js が渡す。無ければ従来どおり)
+  MML.Nsf2MmlExpansion.mmc5 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg, noteEnvReg, inst) {
     const timeline = buildTimeline(writeLog, initRegs);
+    const Inst = MML.NSF2MML.Instrument;
+    const cmd = (inst && inst.cmd) || MML.Convert.normalizeCmd(null);
     // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)+
     // P-5「不明瞭→EPテーブル」側(2026-08-12)
     const evP1 = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractPulseEvents(timeline, 'p1', 1, 0)));
@@ -103,8 +123,7 @@
         // 変換設定ENV=OFF時はnull → ピーク値のv<n>へ(src/convert/options.js plainVolume)
         return hwIdx == null ? { volume: MML.Convert.plainVolume(shape) } : { envelopeV: hwIdx };
       }
-      const idx = envReg.assign(ev.volSeq);
-      return idx == null ? { volume: MML.Convert.plainVolume(ev.volSeq) } : { envelopeV: idx };
+      return Inst.volumeFields(ev, envReg, inst && inst.vrReg);
     }
     // MMC5パルスは周期レジスタ(値が下がるほど音程が上がる)なのでdirectionUp=false
     // (src/convert/pitch.js fitVibrato参照)。
@@ -119,8 +138,13 @@
       const idx = noteEnvReg.registerShape(ev.noteEnvOffsets);
       return idx != null ? { noteEnv: idx } : {};
     }
+    for (const evs of [evP1, evP2]) {
+      for (const ev of evs) if (ev.note !== null) Inst.decideKeyOff(ev, cmd);
+      Inst.markSilence(evs, e => e.note === null);
+    }
     const toCommon = ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
+      { start: ev.start, end: Inst.endOf(ev), note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq, tieCandidate: ev.tieCandidate },
+      ev.note !== null ? Inst.toneFields(ev, inst && inst.dutyReg, cmd) : {},
       ev.note !== null ? toVolumeFields(ev) : {},
       ev.note !== null ? toPitchFields(ev) : {},
       ev.note !== null ? toNoteEnvFields(ev) : {}

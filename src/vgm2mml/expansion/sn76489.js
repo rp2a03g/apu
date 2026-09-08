@@ -106,9 +106,13 @@
   MML.Vgm2MmlExpansion.sn76489 = function (snapshots, clock, envReg, chip) {
     const base = (chip || 0) * 4;
     if (base > 0 && !(snapshots.length && snapshots[0].length > base)) return { tones: [0, 1, 2].map(() => ({ events: [], hasVolume: true, hasEnvelope: true, hasInstrument: true, hasFme7Noise: true })), noise: { events: [], hasVolume: true, hasEnvelope: true } };
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     const toneToCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },

@@ -84,7 +84,9 @@
     ['tok-cmd-volume', '[vV]\\d*'],          // v<n>
     ['tok-cmd-length', '[tT]\\d*'],          // t<n>(テンポ)
     ['tok-cmd-length', 'l\\d*\\.*'],         // l<n>(デフォルト音長、小文字のみ)
-    ['tok-cmd-length', '[qQ]\\d*'],          // q<n>(ゲート)
+    ['tok-cmd-length', '[qQ]\\d*(?:,-?\\d+)?'], // q<n>[,<m>](ゲート)
+    ['tok-cmd-length', '@k\\d*'],                // @k<n>(キーオンからnフレームでキーオフ)
+    ['tok-rest', 'k\\d*\\.*'],                   // k<len>(キーオフ=リリースが鳴る休符)
     ['tok-cmd-length', '[wW]\\d*\\.*'],      // w<len>(ウェイト)
     ['tok-cmd-length', '&'],                 // タイ
     ['tok-cmd-length', '\\^'],               // 音長タイ(短縮形)

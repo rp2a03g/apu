@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-07 16:00:06
+ * Built by tools/build-capture-workers.ps1 at 2026-09-08 08:48:20
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,10 +9,10 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-07 16:00:06';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-08 08:48:20';
   MML.WorkerBundles.nsfCapture = function () {
 /*
- * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成
+ * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
  * 参考: NESdev Wiki "NSF" フォーマット仕様
  */
 (function (global) {
@@ -104,6 +104,40 @@
     return new Uint8Array(buf);
   };
 
+  /*
+   * 旧ppmckドライバ(Famicompo mini / FCM3〜4 時代、2004〜2005年頃)の N106 判定。
+   *
+   * 当時の N106(N163) 仕様理解は VirtuaNES 0.97 / VirtuaNSF 1.0.x 系の実装
+   * (波形長レジスタ +4 は bit2-4 の3bit、length = 0x20 - (+4 & 0x1C) = 最大32サンプル)
+   * に基づいており、ドライバは波形設定で `ORA #$80` を書いていた。実機/現行仕様では
+   * +4 の bit2-7 が波形長(length = 256 - (+4 & 0xFC))なので、同じ値が実機では
+   * 128 - 4n サンプル(4倍長)と解釈され、音程が2オクターブ落ち、波形メモリの他領域
+   * (他の波形・レジスタ)まで読んで音色も崩れる。現行ppmckは同じ箇所で `ORA #$E0`
+   * (= 256 - 32 + 4n の現行エンコード)を書く。
+   *
+   * 判定はその波形設定ルーチンの機械語列で行う(変数アドレスはビルドごとに違うので
+   * ワイルドカード):
+   *   ORA #$80 / STA abs,X / STA $4800 / LSR abs / LDA #$10 / SEC / SBC abs
+   *   (n106_7c,x に保存 → $4800 へ波形長 → temporary を半分にして 16 - n = 転送バイト数)
+   * `emu sound/famicompo` の実ファイル25本がこの列に一致し、現行ppmck生成物(ORA #$E0)
+   * は22本とも不一致(2026-09-07 実測)。
+   *
+   * @param {Uint8Array} program - ヘッダ(128バイト)を除いたプログラムイメージ
+   * @returns {boolean}
+   */
+  const LEGACY_N106_SIG = [0x09, 0x80, 0x9D, null, null, 0x8D, 0x00, 0x48, 0x4E, null, null, 0xA9, 0x10, 0x38, 0xED];
+  NSF.detectLegacyN163Driver = function (program) {
+    if (!program || program.length < LEGACY_N106_SIG.length) return false;
+    const sig = LEGACY_N106_SIG;
+    outer: for (let i = 0, n = program.length - sig.length; i <= n; i++) {
+      for (let j = 0; j < sig.length; j++) {
+        if (sig[j] !== null && program[i + j] !== sig[j]) continue outer;
+      }
+      return true;
+    }
+    return false;
+  };
+
   /**
    * 128バイトのNSFヘッダを解析してオブジェクトに変換する
    * @param {Uint8Array} bytes
@@ -139,6 +173,206 @@
       palNtscBit: view.getUint8(122),
       extraChips: view.getUint8(123)
     };
+  };
+  // =========================================================================
+  // NSFe (拡張NSF、チャンク形式)
+  // 参考: NESdev Wiki "NSFe" / Disch の原仕様(2003)
+  //
+  //   "NSFE" (4バイト) の後に { size:u32LE, id:4文字ASCII, data[size] } のチャンクが並ぶ。
+  //   idの先頭が大文字のチャンクは必須(理解できなければ再生不可)、小文字は任意(無視可)。
+  //     INFO  load/init/play(各u16LE)、PAL/NTSCビット、拡張音源フラグ、曲数、開始曲(0始まり)
+  //     DATA  プログラムイメージ(NSFの128バイト以降と同じもの)
+  //     BANK  バンクスイッチ初期値(最大8バイト、不足分は0)
+  //     RATE  NTSC/PAL/Dendy再生速度(各u16LE、1/1000000秒。NSFの$6E/$78と同じ単位)
+  //     NSF2  NSF2機能フラグ(1バイト、NSFヘッダ$7Cと同じ)
+  //     plst  再生順(曲番号の列、0始まり)   time/fade  曲ごとの演奏時間/フェード(i32LE、ms、-1=既定)
+  //     tlbl/taut  曲ごとのラベル/作者(0終端文字列の列)   auth  タイトル/アーティスト/著作権/リッパー
+  //     text  自由文   regn  地域対応ビット+推奨地域   mixe  ミックスレベル   VRC7  VRC7/YM2413種別+パッチ
+  //     NEND  終端
+  //
+  //   このツールでは、NSFe を「128バイトのNSFヘッダ + DATA」の素のNSFバイト列へ変換して
+  //   既存の再生/キャプチャ/変換経路(全てNSFバイト列を受け取る)へそのまま流し、曲ラベルや
+  //   演奏時間などNSFヘッダに載らない情報は header.nsfe に別枠で持たせる(UI側で表示/利用)。
+  //   曲番号は内部では0始まり(NSFeのINFO/plst/time等の番号と同じ)、NSFヘッダの開始曲は
+  //   1始まりなので +1 して詰める。
+  // =========================================================================
+
+  NSF.isNsfe = function (bytes) {
+    return !!bytes && bytes.length >= 4 &&
+      bytes[0] === 0x4E && bytes[1] === 0x53 && bytes[2] === 0x46 && bytes[3] === 0x45; // "NSFE"
+  };
+
+  // 0終端文字列の列をデコードする。仕様上はUTF-8だが2003年頃(Famicompo)のファイルは
+  // Shift-JIS/Latin-1で書かれているものがあるので、UTF-8として不正ならShift-JIS→Latin-1の順に落とす
+  let _utf8 = null, _sjis = null;
+  function decodeText(u8) {
+    if (typeof TextDecoder === 'undefined') return String.fromCharCode.apply(null, u8);
+    if (!_utf8) {
+      try { _utf8 = new TextDecoder('utf-8', { fatal: true }); } catch (e) { _utf8 = null; }
+      try { _sjis = new TextDecoder('shift_jis'); } catch (e) { _sjis = null; }
+    }
+    if (_utf8) { try { return _utf8.decode(u8); } catch (e) { /* not UTF-8 */ } }
+    let ascii = true;
+    for (let i = 0; i < u8.length; i++) if (u8[i] >= 0x80) { ascii = false; break; }
+    if (ascii) return String.fromCharCode.apply(null, u8);
+    if (_sjis) { try { return _sjis.decode(u8); } catch (e) { /* fallthrough */ } }
+    let s = '';
+    for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+    return s;
+  }
+  // 0終端文字列の列 → 文字列配列。末尾の空白は落とす(Famicompo 2003の一部はNSFヘッダ流用の31文字空白詰め)
+  function splitZStrings(u8) {
+    const out = [];
+    let start = 0;
+    for (let i = 0; i < u8.length; i++) {
+      if (u8[i] === 0) { out.push(decodeText(u8.subarray(start, i)).replace(/\s+$/, '')); start = i + 1; }
+    }
+    if (start < u8.length) out.push(decodeText(u8.subarray(start)).replace(/\s+$/, '')); // 0終端が無い最後の文字列
+    return out;
+  }
+
+  /**
+   * NSFeを解析し、素のNSFバイト列とメタ情報に変換する。
+   * @param {Uint8Array} bytes - "NSFE"で始まるファイル全体
+   * @returns {{bytes:Uint8Array, header:object}}
+   *   bytes  … 128バイトNSFヘッダ + DATA(既存のNSF経路へそのまま渡せる)
+   *   header … parseHeader() と同じ形 + 以下
+   *     songName/artist/copyright … authチャンクの全文(NSFヘッダの31文字制限を受けない)
+   *     nsfe … { ripper, text, trackLabels[], trackAuthors[], times[](ms or null), fades[](ms or null),
+   *              playlist[](0始まりの曲番号 or null), dendySpeed, nsf2Flags, regn, vrc7, mixe, chunks[] }
+   * @throws 必須チャンクの欠落/未知の必須チャンク/壊れたチャンク
+   */
+  NSF.parseNsfe = function (bytes) {
+    if (!NSF.isNsfe(bytes)) throw new Error('NSFeのマジックナンバーが不正です');
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let info = null, data = null, bank = null, rate = null;
+    const meta = {
+      ripper: '', text: '', trackLabels: null, trackAuthors: null, times: null, fades: null,
+      playlist: null, dendySpeed: null, nsf2Flags: 0, regn: null, vrc7: null, mixe: null, chunks: []
+    };
+    let auth = null;
+    let p = 4;
+    let ended = false;
+    while (p + 8 <= bytes.length && !ended) {
+      const size = view.getUint32(p, true);
+      const id = String.fromCharCode(bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7]);
+      if (p + 8 + size > bytes.length) throw new Error('NSFeのチャンクがファイル末尾を越えています: ' + id);
+      const body = bytes.subarray(p + 8, p + 8 + size);
+      meta.chunks.push(id);
+      const bv = new DataView(bytes.buffer, bytes.byteOffset + p + 8, size);
+      switch (id) {
+        case 'INFO':
+          if (size < 8) throw new Error('NSFeのINFOチャンクが短すぎます');
+          info = {
+            loadAddr: bv.getUint16(0, true), initAddr: bv.getUint16(2, true), playAddr: bv.getUint16(4, true),
+            palNtscBit: body[6], extraChips: body[7],
+            totalSongs: size >= 9 ? (body[8] || 1) : 1,
+            startingSong: size >= 10 ? body[9] : 0 // 0始まり
+          };
+          break;
+        case 'DATA': data = body; break;
+        case 'BANK': bank = Array.from(body.subarray(0, 8)); while (bank.length < 8) bank.push(0); break;
+        case 'RATE':
+          rate = {};
+          if (size >= 2) rate.ntsc = bv.getUint16(0, true);
+          if (size >= 4) rate.pal = bv.getUint16(2, true);
+          if (size >= 6) rate.dendy = bv.getUint16(4, true);
+          break;
+        case 'NSF2': if (size >= 1) meta.nsf2Flags = body[0]; break;
+        case 'plst': meta.playlist = Array.from(body); break;
+        case 'time': case 'fade': {
+          const arr = [];
+          for (let i = 0; i + 4 <= size; i += 4) { const v = bv.getInt32(i, true); arr.push(v < 0 ? null : v); }
+          meta[id === 'time' ? 'times' : 'fades'] = arr;
+          break;
+        }
+        case 'tlbl': meta.trackLabels = splitZStrings(body); break;
+        case 'taut': meta.trackAuthors = splitZStrings(body); break;
+        case 'auth': auth = splitZStrings(body); break;
+        case 'text': meta.text = decodeText(body).replace(/\0+$/, ''); break;
+        case 'regn': meta.regn = { support: body[0] || 0, preferred: size >= 2 ? body[1] : null }; break;
+        case 'mixe': meta.mixe = Array.from(body); break;
+        case 'VRC7': meta.vrc7 = { variant: body[0] || 0, patches: size > 1 ? Array.from(body.subarray(1)) : null }; break;
+        case 'NEND': ended = true; break;
+        default:
+          // 大文字始まり=必須チャンク。理解できないものがあれば正しく鳴らせないので中断する
+          if (id.charCodeAt(0) >= 0x41 && id.charCodeAt(0) <= 0x5A) throw new Error('未対応の必須NSFeチャンクです: ' + id);
+          break;
+      }
+      p += 8 + size;
+    }
+    if (!info) throw new Error('NSFeにINFOチャンクがありません');
+    if (!data) throw new Error('NSFeにDATAチャンクがありません');
+
+    const songName = auth && auth[0] ? auth[0] : '';
+    const artist = auth && auth[1] ? auth[1] : '';
+    const copyright = auth && auth[2] ? auth[2] : '';
+    meta.ripper = auth && auth[3] ? auth[3] : '';
+    const toAscii = s => s.replace(/[^\x20-\x7E]/g, '?').slice(0, 31); // NSFヘッダは0終端込み32バイトASCII
+
+    const hdr = NSF.buildHeader({
+      totalSongs: Math.min(255, info.totalSongs),
+      startingSong: info.startingSong + 1,
+      loadAddr: info.loadAddr, initAddr: info.initAddr, playAddr: info.playAddr,
+      songName: toAscii(songName), artist: toAscii(artist), copyright: toAscii(copyright),
+      ntscSpeed: rate && rate.ntsc !== undefined ? rate.ntsc : 16639,
+      palSpeed: rate && rate.pal !== undefined ? rate.pal : 19997,
+      bankswitch: bank || [0, 0, 0, 0, 0, 0, 0, 0],
+      palNtscBit: info.palNtscBit,
+      extraChips: info.extraChips
+    });
+    if (meta.nsf2Flags) {
+      // NSF2機能フラグを持つならNSF2ヘッダとして詰める($05=2、$7C=フラグ、$7D-$7F=データ長)
+      hdr[5] = 2;
+      hdr[0x7C] = meta.nsf2Flags;
+      hdr[0x7D] = data.length & 0xFF; hdr[0x7E] = (data.length >> 8) & 0xFF; hdr[0x7F] = (data.length >> 16) & 0xFF;
+    }
+    if (rate && rate.dendy !== undefined) meta.dendySpeed = rate.dendy;
+
+    const out = new Uint8Array(128 + data.length);
+    out.set(hdr, 0);
+    out.set(data, 128);
+    const header = NSF.parseHeader(out);
+    header.isNsfe = true;
+    header.songName = songName;
+    header.artist = artist;
+    header.copyright = copyright;
+    header.nsfe = meta;
+    return { bytes: out, header };
+  };
+
+  /**
+   * NSF/NSFe どちらでも受け取り、素のNSFバイト列とヘッダを返す(読み込み口はこれを使う)。
+   * NSFのときは bytes をそのまま返す(header.isNsfe = false, header.nsfe = null)。
+   * @param {Uint8Array} bytes
+   * @returns {{bytes:Uint8Array, header:object, isNsfe:boolean}}
+   */
+  NSF.normalize = function (bytes) {
+    if (NSF.isNsfe(bytes)) {
+      const r = NSF.parseNsfe(bytes);
+      return { bytes: r.bytes, header: r.header, isNsfe: true };
+    }
+    if (bytes.length < 128) throw new Error('NSFヘッダは128バイト必要です');
+    const header = NSF.parseHeader(bytes);
+    header.isNsfe = false;
+    header.nsfe = null;
+    return { bytes, header, isNsfe: false };
+  };
+
+  /** NSFeの曲ラベル(無ければnull)。songIndexは0始まり */
+  NSF.trackLabel = function (header, songIndex) {
+    const m = header && header.nsfe;
+    if (!m || !m.trackLabels) return null;
+    const s = m.trackLabels[songIndex];
+    return s ? s : null;
+  };
+
+  /** NSFeの演奏時間(ms、無ければnull)。songIndexは0始まり */
+  NSF.trackTimeMs = function (header, songIndex) {
+    const m = header && header.nsfe;
+    if (!m || !m.times) return null;
+    const v = m.times[songIndex];
+    return (v === undefined || v === null) ? null : v;
   };
 })(globalThis);
 
@@ -3475,8 +3709,15 @@
  *     これが標準の N163 挙動(NSFPlay/Mesen/VirtuaNSF既定と同じ)。ただし「古いドライバ」で
  *     作られた一部NSF(例: Famicompo mini vol.3 entry023)は波形長を最大32サンプル前提で
  *     使っており、256版だと音程・波形テーブルが崩れる。VirtuaNSFはこれ用に「N163を32サンプル
- *     に制限するモード」を別途用意している(readme 1.0.7.1)。必要なら length を
- *     `0x20-(+4&0x1C)` に切替えるオプション化で対応可能(現状は標準の256版を既定とする)。
+ *     に制限するモード」を別途用意している(readme 1.0.7.1)。
+ *     → legacyWaveLen=true で対応(2026-09-07)。旧ドライバは +4 に (n<<2)|$80 を書く
+ *     (VirtuaNES 0.97 の APU_N106: tonelen = 0x20-(data&0x1C))。VirtuaNESの周波数式は
+ *     実機式と同じ f = CPU*freq/(15*65536*length*numCh) なので、違いは波形長の解釈だけ。
+ *     そこで「+4 への書き込み値を現行エンコードへ書き換えて RAM に置く」方式にした:
+ *       (v & 0x1F) | 0xE0   … 256-(0xE0|(n<<2)) = 32-4n = 0x20-(v&0x1C) と同じ長さ
+ *     RAM 自体が現行仕様の値になるため、音声合成・鍵盤/ロール(snapshotN163)・
+ *     nsf2mml の波形抽出・n163Snapshots 経由の再生(NsfReplayStreamPlayer)が全て
+ *     無変更で正しくなる。判定は MML.NSF.detectLegacyN163Driver(nsfBus.js から設定)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -3494,6 +3735,9 @@
       this.rrIndex = 0;       // 有効ch内の巡回位置
       this.mute = new Array(NUM_CHANNELS).fill(false);
       this.vol = new Array(NUM_CHANNELS).fill(1);
+      // 旧ppmckドライバ(波形長32サンプル形式)互換。true のとき +4 レジスタへの書き込みを
+      // 現行エンコードへ変換して格納する(ファイル冒頭コメント 注2 参照)。
+      this.legacyWaveLen = false;
     }
 
     reset() {
@@ -3510,6 +3754,12 @@
         this.addr = value & 0x7F;
         this.autoInc = (value & 0x80) !== 0;
       } else if (addr === 0x4800) {
+        // 旧ドライバ互換: チャンネルレジスタ +4(波形長|周波数上位)への書き込みは
+        // bit2-4 の3bit波形長(0x20-(v&0x1C))を現行の6bit形式(0xE0|(v&0x1C))へ変換する。
+        // 周波数上位2bit(bit0-1)はそのまま。
+        if (this.legacyWaveLen && this.addr >= 0x40 && (this.addr & 7) === 4) {
+          value = (value & 0x1F) | 0xE0;
+        }
         this.ram[this.addr] = value;
         if (this.autoInc) this.addr = (this.addr + 1) & 0x7F;
       }
@@ -3842,6 +4092,16 @@
       if (extraChips & FLAGS.MMC5) this.expansion.mmc5 = new Emu.MMC5Audio();
       if (extraChips & FLAGS.N163) this.expansion.n163 = new Emu.N163Audio();
       if (extraChips & FLAGS.FME7) this.expansion.fme7 = new Emu.FME7Audio();
+      // 旧ppmckドライバ(Famicompo mini 時代、N106波形長を32サンプル形式で書く)の判定。
+      // opt.n163Legacy で明示指定がなければプログラム本体の機械語列から自動判定する
+      // (NsfPlayer/NsfReplayStreamPlayer/キャプチャWorker/ヘッドレスの全経路がここを通る)。
+      // 詳細は nsfHeader.js detectLegacyN163Driver と n163.js 冒頭コメント 注2。
+      if (this.expansion.n163) {
+        this.n163Legacy = opt.n163Legacy !== undefined
+          ? !!opt.n163Legacy
+          : !!(MML.NSF.detectLegacyN163Driver && MML.NSF.detectLegacyN163Driver(opt.program));
+        this.expansion.n163.legacyWaveLen = this.n163Legacy;
+      }
 
       this.loadAddr = opt.loadAddr;
       this.useBankswitch = (opt.bankswitch || []).some(b => b !== 0);
@@ -4209,7 +4469,13 @@
    *   「Emu.kssPackWrite is not a function」で落ちて、AY/SSG/OPLを使うVGMのロールが空になる
    *   (途中で落ちると取得済み範囲で打ち切られる)不具合の原因になっていた(2026-09-07)。
    */
-  Emu.kssPackWrite = (addr, value, io) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0);
+  // frac: フレーム内の書込み時刻(0〜1、省略時0)を bit25-30 に 1/64 フレーム刻みで詰める(2026-09-08)。
+  // kss2mml の AY/SCC 抽出器がソフトエンベロープの位相エイリアシング対策(hes2mml/expansion/wave.js
+  // resampleSeq)に使う。writeLog の形(Int32Array のフレーム配列)は変えないので Worker プロトコルと
+  // ロール構築(addr/value/io だけを見る)はそのまま。旧ログ(frac 無し)は 0 として扱われ従来どおり
+  Emu.kssPackWrite = (addr, value, io, frac) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0) |
+    ((frac > 0 ? Math.min(63, Math.round(frac * 64)) : 0) << 25);
+  Emu.kssUnpackFrac = (pw) => ((pw >>> 25) & 0x3F) / 64;
 
   /**
    * チャンネルごとのミュート設定をチップの mute プロパティへ反映する。

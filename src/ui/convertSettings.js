@@ -40,10 +40,16 @@
     [T('音符の抽出'), [
       ['DRUM', T('打楽器を音符にする'), T('VGMのサンプルPCMで音程が取れなかった発音(ドラム/効果音)を1本のドラムパートにまとめ、サンプルごとに音程を割り当てる(OFFなら休符)')],
     ]],
-    [T('譜面整形'), [
-      ['SHAPE_REST',  T('短い休符を吸収'),     T('音符直後の1/32未満の休符(ゲートタイムの隙間)を音符に繋げる')],
-      ['SHAPE_QUANT', T('16分音符格子へ丸める'), T('音符/休符の境界を16分音符の格子に揃える(3連符は崩れる)')],
+    [T('譜面整形(近似)'), [
+      ['SHAPE_REST',  T('短い休符を吸収'),     T('音符直後の1/32未満の休符(ゲートタイムの隙間)を音符に繋げる。伸ばした区間は最後の音量のまま鳴る(音が変わりうる整形はこの欄に集める)')],
+      ['ENV_MERGE',   T('似た@v表を統合'),     T('段の値の並びが同じで各段の長さが±1違うだけの@v/@vr表を、最も多く使われる変種にまとめる。ドライバの自走タイマーで段の位置が音符ごとにずれる曲向け。段の境目が最大1フレーム動く')],
     ]],
+  ];
+
+  // 音符の区切り(src/convert/options.js NOTE_END、src/convert/envelope.js absorbSilenceIntoEnvelopes)
+  const NOTE_END_OPTIONS = () => [
+    ['next', T('次の音符まで(休符を@vに吸収・推奨)')],
+    ['zero', T('音量ゼロで区切る(最も細かい・従来)')],
   ];
 
   // ★DPCM(打楽器)の設定(DMC_RATE/RATE_MIX/DRUM_POLY)はこのダイアログには無い(2026-09-05)。
@@ -278,6 +284,31 @@
       body.appendChild(sec);
     }
 
+    // 音符の区切り(NOTE_END)。厳密な変形なので譜面整形(近似)とは別の欄に置く
+    const neSec = document.createElement('div');
+    neSec.className = 'es-section';
+    const neH = document.createElement('h3');
+    neH.textContent = T('音符の区切り');
+    neSec.appendChild(neH);
+    const neRow = document.createElement('label');
+    neRow.className = 'cs-row';
+    const neSel = document.createElement('select');
+    for (const [val, label] of NOTE_END_OPTIONS()) {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      neSel.appendChild(o);
+    }
+    neSel.addEventListener('change', () => {
+      current = MML.Convert.normalizeCmd(Object.assign({}, current, { NOTE_END: neSel.value }));
+      save(); syncChecks(); refreshButtons();
+    });
+    const neDesc = document.createElement('span');
+    neDesc.className = 'cs-desc';
+    neDesc.textContent = T('元曲は音量が0に落ちた瞬間で音符が終わるため、音長が「減衰が0に達した時刻」という細かい値(d+4&d+64.&d+192 r…)になる。「次の音符まで」は音符をキーオン間隔まで伸ばし、無音区間を@v表の末尾の0(減衰が自然に0へ到達した音符)またはゲートタイム q<n>/@q<n>(それ以外)で表す。再生もNSF書き出しも変わらない厳密な変形');
+    neRow.appendChild(neSel); neRow.appendChild(neDesc);
+    neSec.appendChild(neRow);
+    body.appendChild(neSec);
+
     // ピッチ精度(SA)
     const saSec = document.createElement('div');
     saSec.className = 'es-section';
@@ -367,6 +398,7 @@
 
     function syncChecks() {
       for (const [k, cb] of Object.entries(checks)) cb.checked = !!current[k];
+      neSel.value = current.NOTE_END || 'next';
       saSel.value = current.PITCH_SA || 'octave';
       nwSel.value = current.N163_WAVE || 'fit';
       tnSel.value = current.TUNING || 'auto';

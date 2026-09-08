@@ -28,7 +28,13 @@
    *   「Emu.kssPackWrite is not a function」で落ちて、AY/SSG/OPLを使うVGMのロールが空になる
    *   (途中で落ちると取得済み範囲で打ち切られる)不具合の原因になっていた(2026-09-07)。
    */
-  Emu.kssPackWrite = (addr, value, io) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0);
+  // frac: フレーム内の書込み時刻(0〜1、省略時0)を bit25-30 に 1/64 フレーム刻みで詰める(2026-09-08)。
+  // kss2mml の AY/SCC 抽出器がソフトエンベロープの位相エイリアシング対策(hes2mml/expansion/wave.js
+  // resampleSeq)に使う。writeLog の形(Int32Array のフレーム配列)は変えないので Worker プロトコルと
+  // ロール構築(addr/value/io だけを見る)はそのまま。旧ログ(frac 無し)は 0 として扱われ従来どおり
+  Emu.kssPackWrite = (addr, value, io, frac) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0) |
+    ((frac > 0 ? Math.min(63, Math.round(frac * 64)) : 0) << 25);
+  Emu.kssUnpackFrac = (pw) => ((pw >>> 25) & 0x3F) / 64;
 
   /**
    * チャンネルごとのミュート設定をチップの mute プロパティへ反映する。

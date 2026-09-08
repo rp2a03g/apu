@@ -49,13 +49,23 @@
     // ミキサー(reg7)を一度も書かない曲があるため、エミュレータ(ay8910Msx.js)と同じ
     // 既定値から始める。0のまま始めると全chがトーン+ノイズ有効として抽出されてしまう
     regs[7] = 0x38;
-    return writeLog.map(writes => {
-      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+    // 書込み時刻付きトレース(位相エイリアシング対策、extractToneEvents 参照)。ch別の音量 [{t,v}] と
+    // 周期 [{t,v}]。t は分数フレーム(kssPackWrite の frac、旧ログは全て .0 で hasFrac=false)
+    const traces = { vol: [[], [], []], pitch: [[], [], []], hasFrac: false };
+    const timeline = writeLog.map((writes, f) => {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24 / frac=bit25-30
       for (const pw of writes) {
         const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (!io) continue;
         if (addr === 0xA0) addrReg = value & 0x0F;
-        else if (addr === 0xA1) regs[addrReg] = value;
+        else if (addr === 0xA1) {
+          regs[addrReg] = value;
+          const frac = ((pw >>> 25) & 0x3F) / 64;
+          if (frac > 0) traces.hasFrac = true;
+          const t = f + frac;
+          if (addrReg >= 8 && addrReg <= 10) traces.vol[addrReg - 8].push({ t, v: (value & 0x10) ? 15 : (value & 0x0F) });
+          else if (addrReg <= 5) { const ch = addrReg >> 1; traces.pitch[ch].push({ t, v: regs[ch * 2] | ((regs[ch * 2 + 1] & 0x0F) << 8) }); }
+        }
       }
       const periods = [
         regs[0] | ((regs[1] & 0x0F) << 8),
@@ -77,6 +87,25 @@
         (((regs[7] >> ch) & 1) ? 0 : 1) | (((regs[7] >> (3 + ch)) & 1) ? 0 : 2));
       return { periods, volumes, modes, noisePeriod: regs[6] & 0x1F };
     });
+    timeline.traces = traces;
+    return timeline;
+  }
+  // ソフトエンベロープ/ピッチ列の位相エイリアシング対策(hes2mml/expansion/wave.js buildVolTimeline
+  // 冒頭コメント参照)。ドライバのタイマー周期がフレームと合わない曲(MSX の 60Hz/50Hz 混在、VGM の
+  // VSYNC ドライバの揺らぎ)では、同じエンベロープでも段の位置が±1フレームずれた変種(11 11 11 10 10 …
+  // と 11 11 10 10 10 …)が量産される。書込み時刻トレースがあれば、音符の開始書込みを原点にした
+  // 相対時刻で音量列/周期列を読み直す。マージ処理より前に、イベント長を変えずに行う
+  function resampleEvents(events, traces, ch) {
+    const R = MML.Convert.TickResample;
+    if (!R || !traces || !traces.hasFrac) return;
+    const vt = traces.vol[ch], pt = traces.pitch[ch];
+    const off = R.sampleOffsetFor([vt, pt]);
+    for (const ev of events) {
+      if (ev.note === null) continue;
+      const a = R.noteAnchorT(ev.start, [vt, pt]);
+      if (vt.length) ev.volSeq = R.resampleSeq(vt, ev.start, ev.end, ev.volSeq, a, off);
+      if (pt.length) ev.pitchSeq = R.resampleSeq(pt, ev.start, ev.end, ev.pitchSeq, a, off);
+    }
   }
 
   // ピッチ/トーン有効状態が同じ間は音量変化だけでは区切らずvolSeqに積む
@@ -131,14 +160,19 @@
       }
     }
     flush(timeline.length);
+    resampleEvents(events, timeline.traces, chIndex);
     return events;
   }
 
   MML.Kss2MmlExpansion.ay = function (writeLog, totalFrames, clock, envReg) {
     const timeline = buildTimeline(writeLog, clock);
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     // pitchEp(EP<n>参照)は借用先(FME7)の生レジスタ空間への変換が必要なため、ここでは
     // 付けずev.freqSeq(Hz)だけ残し、呼び出し元のkss2mml/converter.jsが

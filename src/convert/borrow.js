@@ -76,7 +76,13 @@
   // envReg.assign(volSeq) を写像テーブル経由にするプロキシ(抽出器はassignしか使わない)
   function mappedEnvReg(envReg, table) {
     const top = table.length - 1;
-    return { assign: seq => envReg.assign(seq.map(v => table[Math.max(0, Math.min(top, v))])) };
+    const map = seq => seq.map(v => table[Math.max(0, Math.min(top, v))]);
+    return {
+      assign: seq => envReg.assign(map(seq)),
+      // 楽器化(リリース切り出し、envelope.js volumeFieldsWithRelease)も写像経由で通す
+      volumeFieldsWithRelease: seq => envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(map(seq))
+        : (() => { const idx = envReg.assign(map(seq)); return idx == null ? { volume: MML.Convert.plainVolume(map(seq)) } : { envelopeV: idx }; })()
+    };
   }
   // 抽出器が定数音量として残した ev.volume も同じ表で写像する
   function mapConstVolumes(events, table) {

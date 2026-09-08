@@ -99,9 +99,13 @@
     // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)+
     // P-5「不明瞭→EPテーブル」側(2026-08-12)
     const events = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractEvents(snapshots)));
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },

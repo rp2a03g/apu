@@ -684,10 +684,27 @@
           }
           break;
         }
+        // q<rate>[,<adjust>] ゲートタイム(実機ppmckc datamake.c _QUONTIZE)。<rate>は 0〜#GATE-DENOM
+        // (既定8)、<adjust>はフレーム数の加減(符号付き、省略時0)。ゲート長は
+        // floor(音長×rate/denom)+adjust(compiler.js computeGateFrames、実機calcGateTime)。
+        // このツール独自の @q<n>(終端のnフレーム前)は q8,-n と同じ意味
+        // k<len> キーオフ(実機ppmckc _KEY_OFF「長さつきキーオフ」、ppmck-ja.txt「リリース
+        // エンベロープが発動する休符」)。直前の音符をゲートオフして<len>ぶん待つ。<len>省略時は
+        // l<n>。大文字Kは移調(K<n>)なので小文字のみ
+        case 'k': {
+          i++;
+          const length = readNumber();
+          let dots = 0;
+          while (i < n && str[i] === '.') { dots++; i++; }
+          tokens.push(tagSource({ type: 'keyOff', length, dots }, tokStart));
+          break;
+        }
         case 'q': case 'Q': {
           i++;
           const v = readNumber();
-          tokens.push({ type: 'gate', value: v == null ? 8 : v });
+          let adjust = null;
+          if (str[i] === ',') { i++; adjust = readSignedNumber(); }
+          tokens.push({ type: 'gate', value: v == null ? 8 : v, adjust: adjust == null ? 0 : adjust });
           break;
         }
         case 't': case 'T': {
@@ -723,6 +740,13 @@
             i++;
             const v = readNumber();
             tokens.push({ type: 'quantizeFrames', value: v == null ? 0 : v });
+          } else if (str[i] === 'k' || str[i] === 'K') {
+            // @k<n> キーオンから<n>フレームでキーオフ(本ツール独自拡張。k<len>のフレーム版で、
+            // q/@qより優先。0で解除)。固定オン長で鳴らすドライバの曲を1コマンドで表すため
+            // (compiler.js segmentGateFrames、src/convert/envelope.js applyNoteEnd)
+            i++;
+            const v = readNumber();
+            tokens.push({ type: 'keyOnFrames', value: v == null ? 0 : v });
           } else if (str[i] === 't' || str[i] === 'T') {
             // @t<len>,<num> テンポ2: 音長<len>が確実に<num>フレームになるようテンポを
             // 逆算する(t<n>の整数BPM丸めによるフレーム数の端数化を避けるための実機コマンド)。

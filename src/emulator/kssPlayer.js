@@ -16,7 +16,7 @@
    * 入る共通ファイル)。ここでは遅延参照だけ持つ(バンドル内の読み込み順に依存しないため)。
    * VGM側(vgmPlayer.js data.kss.writeLog)も同じ詰め方で作る。
    */
-  const packWrite = (addr, value, io) => Emu.kssPackWrite(addr, value, io);
+  const packWrite = (addr, value, io, frac) => Emu.kssPackWrite(addr, value, io, frac);
 
   // INIT/PLAY呼び出し時のスタックポインタ初期値(libkss exec_setup の 0xF380 と同じ。
   // MSX BIOSワークエリアの直下で、実機ドライバが LD SP,0F380h とするのと同じ位置)
@@ -125,6 +125,7 @@
       // cycleAccum/チップのclock()は常に3.58MHz基準。CPUだけ cpuCyclesPerChipCycle 倍で進める。
       const cpuPerChip = this.cpuCyclesPerChipCycle;
       for (let i = 0; i < samplesThisFrame; i++) {
+        this.frameSampleFrac = i / samplesThisFrame; // 書込みログの分数フレーム時刻(captureKssSongAsync 参照)
         this.cycleAccum += cyclesPerSample;
         while (this.cycleAccum >= 1) {
           if (this.cpuDebt <= 0) {
@@ -199,8 +200,8 @@
 
     for (let f = 0; f < totalFrames; f++) {
       const frameWrites = f === 0 ? initWrites : []; // フレーム0はINIT中の書込みから続ける
-      player.bus.onWrite = (addr, value) => frameWrites.push(packWrite(addr, value, 0));
-      player.bus.onIoWrite = (port, value) => frameWrites.push(packWrite(port, value, 1));
+      player.bus.onWrite = (addr, value) => frameWrites.push(packWrite(addr, value, 0, player.frameSampleFrac));
+      player.bus.onIoWrite = (port, value) => frameWrites.push(packWrite(port, value, 1, player.frameSampleFrac));
       const frameBuf = player.renderFrame(sampleRate, regsOnly);
       player.bus.onWrite = null;
       player.bus.onIoWrite = null;

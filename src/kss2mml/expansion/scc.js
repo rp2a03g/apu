@@ -84,7 +84,9 @@
     const wave = [];
     for (let i = 0; i < 5; i++) wave.push(new Int8Array(32));
     const state = makeSccDecoder();
-    return writeLog.map(writes => {
+    // 書込み時刻付きトレース(位相エイリアシング対策。ay.js resampleEvents と同じ)
+    const traces = { vol: [[], [], [], [], []], pitch: [[], [], [], [], []], hasFrac: false };
+    const timeline = writeLog.map((writes, f) => {
       let rangeWriteCount = 0;
       // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite)
       for (const pw of writes) {
@@ -100,6 +102,9 @@
         if (isBulkCopy && ((addr >= 0x9800 && addr <= 0x9FFF) || (addr >= 0xB800 && addr <= 0xBFFF))) continue;
         const off = decodeAddr(state, addr, value);
         if (off < 0) continue;
+        const frac = ((pw >>> 25) & 0x3F) / 64;
+        if (frac > 0) traces.hasFrac = true;
+        const tWrite = f + frac;
         if (state.plus) {
           // SCC+: 0x00-0x9F=波形ch0-4 / 0xA0-0xA9=周波数 / 0xAA-0xAE=音量 / 0xAF=有効ビット
           if (off < 0xA0) { wave[off >> 5][off & 0x1F] = value; continue; }
@@ -107,8 +112,10 @@
             const ch = (off - 0xA0) >> 1;
             if (off & 1) freq[ch] = (freq[ch] & 0x00FF) | ((value & 0x0F) << 8);
             else freq[ch] = (freq[ch] & 0x0F00) | value;
+            traces.pitch[ch].push({ t: tWrite, v: freq[ch] });
           } else if (off <= 0xAE) {
             volume[off - 0xAA] = value & 0x0F;
+            traces.vol[off - 0xAA].push({ t: tWrite, v: value & 0x0F });
           } else if (off === 0xAF) {
             enable = value & 0x1F;
           }
@@ -126,8 +133,10 @@
           const ch = (off - 0x80) >> 1;
           if (off & 1) freq[ch] = (freq[ch] & 0x00FF) | ((value & 0x0F) << 8);
           else freq[ch] = (freq[ch] & 0x0F00) | value;
+          traces.pitch[ch].push({ t: tWrite, v: freq[ch] });
         } else if (off <= 0x8E) {
           volume[off - 0x8A] = value & 0x0F;
+          traces.vol[off - 0x8A].push({ t: tWrite, v: value & 0x0F });
         } else if (off === 0x8F) {
           enable = value & 0x1F;
         }
@@ -135,6 +144,21 @@
       // wave はチャンネルごとに独立コピーして返す(以降の書込みで上書きされないよう)
       return { freq: Array.from(freq), volume: Array.from(volume), enable, wave: wave.map(w => w.slice()) };
     });
+    timeline.traces = traces;
+    return timeline;
+  }
+  // ay.js resampleEvents と同じ(位相エイリアシング対策)
+  function resampleEvents(events, traces, ch) {
+    const R = MML.Convert.TickResample;
+    if (!R || !traces || !traces.hasFrac) return;
+    const vt = traces.vol[ch], pt = traces.pitch[ch];
+    const off = R.sampleOffsetFor([vt, pt]);
+    for (const ev of events) {
+      if (ev.note === null) continue;
+      const a = R.noteAnchorT(ev.start, [vt, pt]);
+      if (vt.length) ev.volSeq = R.resampleSeq(vt, ev.start, ev.end, ev.volSeq, a, off);
+      if (pt.length) ev.pitchSeq = R.resampleSeq(pt, ev.start, ev.end, ev.pitchSeq, a, off);
+    }
   }
 
   // ピッチが同じ間は音色(波形)切替だけでは区切らないが、音量がそれまでの減衰傾向から
@@ -177,6 +201,7 @@
       }
     }
     flush(timeline.length);
+    resampleEvents(events, timeline.traces, ch);
     return events;
   }
 
@@ -188,9 +213,13 @@
   // 不具合になっていた。ay.jsのenvRegと同じくnull許容にする。
   MML.Kss2MmlExpansion.scc = function (writeLog, totalFrames, clock, waveReg, envReg) {
     const timeline = buildTimeline(writeLog);
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     // pitchEpは呼び出し元(kss2mml/converter.js)がev.freqSeqから借用先(N163)の
     // 生レジスタ空間へ変換して付与する(ay.jsと同じ理由、DESIGN-PITCH.md Phase 1)。

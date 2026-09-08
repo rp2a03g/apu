@@ -463,11 +463,9 @@
         resetDedupAtLoop();
       }
       elapsed += seg.durationFrames;
-      const gateDenom = seg.gateDenom || 8;
-      const gate = seg.gate == null ? 8 : seg.gate;
-      const gateFrames = seg.qFrames != null
-        ? Math.max(1, seg.durationFrames - seg.qFrames)
-        : Math.max(1, Math.round(seg.durationFrames * (gate / gateDenom)));
+      // ゲート長は compiler.js computeGateFrames と同じ(@k > @q > q<rate>,<adjust>(実機ppmckc
+      // calcGateTime=切り捨て) > k<len> の keyOffAt)
+      const gateFrames = MML.Mml.segmentGateFrames(seg, seg.durationFrames);
 
       if (seg.freq != null) {
         // 音量の指定方法は3つ排他で、compiler.jsのsegmentsToWriteLogFme7と同じ優先順位

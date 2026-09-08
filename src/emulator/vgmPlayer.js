@@ -1332,6 +1332,9 @@
     // HuC6280書込みトレース(上の data.hes コメント参照)。t は分数フレーム時刻
     // (hesPlayer.js の currentFrame + frameSamplePos/frameSampleCount と同じ意味)。
     let curFrame = 0;
+    // KSS形式 writeLog の各書込みに分数フレーム時刻を詰める(kssPackWrite の frac。kss2mml の AY/SCC 抽出器が
+    // 位相エイリアシング対策のリサンプルに使う。hesTraceWrite の t と同じ定義)
+    const kpk = (a, v, io) => Emu.kssPackWrite(a, v, io, Math.min(1, Math.max(0, (player.samplePos - curFrame * SAMPLES_PER_FRAME) / SAMPLES_PER_FRAME)));
     let hesSeq = 0;
     const hesApu = data.hes ? player.adapterById.huc6280.apu : null;
     const hesTraceWrite = (aa) => {
@@ -1351,28 +1354,28 @@
     };
     if (data.kss && data.kss.scc && data.kss.sccPlus) {
       // kss2mml/expansion/scc.js のデコーダにSCC+配置(0xB800台)を認識させる前置き書込み
-      kssFrameWrites.push(Emu.kssPackWrite(0xBFFE, 0x20, 0), Emu.kssPackWrite(0xB000, 0x80, 0));
+      kssFrameWrites.push(kpk(0xBFFE, 0x20, 0), kpk(0xB000, 0x80, 0));
     }
     player.onWrite = (id, a, b, c, d) => {
       switch (id) {
         case 'nes': nesFrameWrites.push({ addr: c, value: b }); nesRegs[c] = b; break;
-        case 'ay8910': kssFrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
+        case 'ay8910': kssFrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
         // 2個目のチップ('_2')の内蔵SSG/AYは kss2 へ(1個目と同じ形)
-        case 'ay8910_2': kss2FrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
-        case 'ym2610_2': if (a === 0 && b < 0x0E) kss2FrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
-        case 'ym2203_2': if (a < 0x0E) kss2FrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
-        case 'ym2608_2': if (a === 0 && b < 0x0E) kss2FrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
+        case 'ay8910_2': kss2FrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
+        case 'ym2610_2': if (a === 0 && b < 0x0E) kss2FrameWrites.push(kpk(0xA0, b & 0x0F, 1), kpk(0xA1, c, 1)); break;
+        case 'ym2203_2': if (a < 0x0E) kss2FrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
+        case 'ym2608_2': if (a === 0 && b < 0x0E) kss2FrameWrites.push(kpk(0xA0, b & 0x0F, 1), kpk(0xA1, c, 1)); break;
         // YM2610: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
-        case 'ym2610': if (a === 0 && b < 0x0E) kssFrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
+        case 'ym2610': if (a === 0 && b < 0x0E) kssFrameWrites.push(kpk(0xA0, b & 0x0F, 1), kpk(0xA1, c, 1)); break;
         // YM2203: (addr, data)。addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
-        case 'ym2203': if (a < 0x0E) kssFrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
+        case 'ym2203': if (a < 0x0E) kssFrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
         // YM2608: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
-        case 'ym2608': if (a === 0 && b < 0x0E) kssFrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
-        case 'ym2413': kssFrameWrites.push(Emu.kssPackWrite(0x7C, a, 1), Emu.kssPackWrite(0x7D, b, 1)); break;
+        case 'ym2608': if (a === 0 && b < 0x0E) kssFrameWrites.push(kpk(0xA0, b & 0x0F, 1), kpk(0xA1, c, 1)); break;
+        case 'ym2413': kssFrameWrites.push(kpk(0x7C, a, 1), kpk(0x7D, b, 1)); break;
         // OPL系: MSX-AUDIOのポート(0xC0=アドレス/0xC1=データ)としてKSSと同じ形でログする
         case 'ym3812': case 'ym3526': case 'y8950':
-          kssFrameWrites.push(Emu.kssPackWrite(0xC0, a, 1), Emu.kssPackWrite(0xC1, b, 1)); break;
-        case 'k051649': kssFrameWrites.push(Emu.kssPackWrite(d, c, 0)); break;
+          kssFrameWrites.push(kpk(0xC0, a, 1), kpk(0xC1, b, 1)); break;
+        case 'k051649': kssFrameWrites.push(kpk(d, c, 0)); break;
         case 'huc6280': hesTraceWrite(a); break; // (reg, value)。書込み適用後に呼ばれるのでAPUの状態をそのまま記録
       }
     };

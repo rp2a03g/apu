@@ -818,6 +818,8 @@
       ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${(letterMap.n163 || []).length}`
       : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
     // @DPCM<n> 定義(1個でもあればEチャンネルが自動的に有効になる。#EX-*宣言は不要)
+    // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
+    MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, frameRate);
     const dpcmDefLines = dpcmResult ? dpcmResult.defs.map(d =>
       `@DPCM${d.index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac}, ${d.mode} }`) : [];
     // resolveConflicts でプリセットへ落としたぶんの @OP<n> 定義は誰も参照しなくなる。

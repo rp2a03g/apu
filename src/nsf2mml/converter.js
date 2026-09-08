@@ -87,16 +87,9 @@
   function vrc6SawPeriodRaw(freq) { return CPU_CLOCK / (14 * freq) - 1; }   // vrc6.js sawFreq()の逆関数
   function fme7ToneRaw(freq) { return CPU_CLOCK / (32 * freq); }           // fme7.js toneFreq()の逆関数
   function fdsPeriodRaw(freq) { return freq * 65536 * 64 / CPU_CLOCK; }    // fds.js fdsFreq()の逆関数
-  // vrc7.js vrc7Freq(fnum,block)の逆関数。kss2mml/converter.jsのvrc7FnumRawと同じ式で、
-  // blockは自己選択(生fnum値なので同一block内なら周波数に比例、ズレは小さいため常に
-  // block自体は揺れない前提で問題ない)。
-  function vrc7FnumRaw(freq) {
-    for (let block = 0; block <= 7; block++) {
-      const fnum = (freq * 524288) / (49716 * Math.pow(2, block));
-      if (fnum <= 511) return fnum;
-    }
-    return 511;
-  }
+  // vrc7.js vrc7Freq(fnum,block)の逆関数。src/convert/borrow.js に集約(block は音符の理論値側で
+  // 固定。「ズレは小さいので block は揺れない」前提は境界付近の音符で破れていた、2026-09-07)
+  function vrc7FnumRaw(freq, ev) { return MML.Convert.Borrow.vrc7FnumRaw(freq, ev); }
   // n163.js freq=freqReg*CLOCK/(15*65536*length*numCh)の逆関数。
   // ★lengthは必ず「そのノートが実際にコンパイル時に使う波形長」と一致させること
   // (D<n>算出時のlengthと適用時のlengthが食い違うと、女神転生II 11曲目で実測した通り
@@ -222,12 +215,30 @@
     // toVolumeFields側で実測レベル列をソフトウェアエンベロープ(@v<n>)として書き出す
     // (これが無いと、統合された2音目以降のアタックが消えて最初の減衰カーブのまま
     //  0まで落ちて無音になる。FamicomBox「Game Select」で実測)
+    // dutySeq: フレーム毎のデューティ(2026-09-08、楽器化)。デューティの変化では音符を区切らず
+    //   ここに積む(以前は区切って再アタックしていた=元曲に無い位相リセット+エンベロープ再開)。
+    //   変化があれば nsf2mml 側で @<n>={...} デューティエンベロープ(@@<n>)にする
+    // keyOffAt: リリース開始(音符先頭からのフレーム数)。固定音量モードで「同じ音程のまま $4003 を
+    //   書き直し、その音量が直前以下」の書き込みは、mck ドライバの putReleaseEffect(リリース
+    //   区間の先頭をノートオンとして打ち直す)そのもの。以前は再アタックとみなして音符を割っていた
+    //   (Famicompo「Wing Defenders」で実測)。ここで割らずにマークだけ付け、volSeq をそのまま
+    //   積み続ける(toVolumeFields が keyOffAt で @v と @vr に切り分ける)。同じ音程・音量以下の
+    //   打ち直しは固定音量モードでは位相リセット以外に音の違いが無いので、本物の再アタック
+    //   (エコー等)をリリースと読んでも音は変わらない
     function begin(f, note, vol, duty, constVol, envKey, rawFreq, period, tieCandidate, sweep, sweepKey, attackNow) {
       cur = { note, vol, duty, constVol, envKey, start: f, end: f, volSeq: [vol], pitchSeq: [period], rawFreq,
         tieCandidate: !!tieCandidate, sweep: sweep || null, sweepKey: sweepKey || 0,
-        hwEnvSeq: [!!attackNow] };
+        hwEnvSeq: [!!attackNow], dutySeq: [duty], keyOffAt: null };
     }
 
+    // リリース判定用のフレーム情報(MML.NSF2MML.Instrument.decaysAfter 参照)
+    const Inst = MML.NSF2MML.Instrument;
+    const frameInfo = (f2) => {
+      const t2 = timeline[f2];
+      if (!t2) return null;
+      const r2 = t2[chKey];
+      return { attack: !!t2.attack[chKey], constVol: !!(r2[0] & 0x10), vol: r2[0] & 0xF };
+    };
     const isPulse1 = chKey === 'p1';
     // スイープユニットの内部状態(実機apu2a03.js PulseChannelと同じ)。writeLogには
     // レジスタへの書き込みしか残らないため、スイープが実際に書き換えていく周期は
@@ -302,19 +313,30 @@
         begin(f, note, vol, duty, constVol, envKey, rawFreq, period, false, sweep, sweepKey, t.attack[chKey]);
         continue;
       }
-      // アタック書き込みがあれば必ず新イベント
-      if (t.attack[chKey]) {
+      // アタック書き込み: 同じ音程・固定音量のまま音量が直前以下で、かつその後数フレームの
+      // うちに直前の音量より確実に下がる(=減衰していく)なら「リリース開始」(begin の keyOffAt
+      // 参照)、それ以外は新イベント。★「その後下がる」の確認が無いと、一定音量で同じ音を
+      // 連打するだけの曲(c8 c8 c8 c8、$4003 を毎回書き直す)が1つの長い音符に化ける
+      const releaseMark = !!t.attack[chKey] && note !== null && sweepKey === cur.sweepKey &&
+        Inst.isReleaseRewrite(frameInfo, f, cur, note === cur.note, constVol, vol);
+      // デューティ変化+音量上昇の再トリガー(Instrument.isRetrigger)は新しい音符。音量が上がらない
+      // デューティ変化(立ち上がりの音色、DQ2 の余韻の音色落とし)は区切らず dutySeq に積む
+      const lastDuty = cur.dutySeq[cur.dutySeq.length - 1];
+      const retrigger = !t.attack[chKey] && Inst.isRetrigger(cur, constVol, duty, vol);
+      if (t.attack[chKey] && !releaseMark) {
         flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period, false, sweep, sweepKey, true);
-      } else if (note !== cur.note || duty !== cur.duty || constVol !== cur.constVol ||
-                 sweepKey !== cur.sweepKey || (!constVol && envKey !== cur.envKey)) {
-        // 音程だけが変わった(デューティ/固定音量切替/エンベロープ周期/スイープは不変)場合のみ
-        // タイ候補とする
-        const pureNoteChange = note !== cur.note && duty === cur.duty && constVol === cur.constVol &&
+      } else if (!releaseMark && (retrigger || note !== cur.note || constVol !== cur.constVol ||
+                 sweepKey !== cur.sweepKey || (!constVol && envKey !== cur.envKey))) {
+        // 音程だけが変わった(デューティ(直前フレームと比較)/固定音量切替/エンベロープ周期/スイープは
+        // 不変で再トリガーでもない)場合のみタイ候補とする
+        const pureNoteChange = !retrigger && note !== cur.note && duty === lastDuty && constVol === cur.constVol &&
           sweepKey === cur.sweepKey && !sweepEnabled && (constVol || envKey === cur.envKey);
         flush(f); begin(f, note, vol, duty, constVol, envKey, rawFreq, period, pureNoteChange, sweep, sweepKey, false);
       } else {
+        if (releaseMark) cur.keyOffAt = f - cur.start;
         cur.pitchSeq.push(period);
         cur.hwEnvSeq.push(false); // アタックは必ず上の分岐で新イベントになるためここは常にfalse
+        cur.dutySeq.push(duty);
         if (constVol) {
           // 固定音量モードのまま音量だけ変化する場合はソフトウェアエンベロープの
           // 一部として同一ノートに積む(区切らない)。
@@ -385,6 +407,13 @@
     const events = [];
     let cur = null;
     let silenceAtFrame = Infinity; // 長さカウンタ(halt=0)による自然消音フレーム
+    // リリース判定(パルスと同じ。$400F の打ち直しで同じ周期のまま音量が下がっていく=リリース開始)
+    const Inst = MML.NSF2MML.Instrument;
+    const frameInfo = (f2) => {
+      const t2 = timeline[f2];
+      if (!t2) return null;
+      return { attack: !!t2.attack.no, constVol: !!(t2.no[0] & 0x10), vol: t2.no[0] & 0xF };
+    };
 
     function flush(end) {
       if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; }
@@ -407,14 +436,17 @@
       if (lengthHalt && f < silenceAtFrame) silenceAtFrame = Infinity;
       const on = active && (constVol ? rawVol > 0 : true) && f < silenceAtFrame;
 
-      if (!cur) { cur = { periodIdx, mode, vol, on, constVol, envKey, start: f, end: f, volSeq: [vol] }; continue; }
+      if (!cur) { cur = { periodIdx, mode, vol, on, constVol, envKey, start: f, end: f, volSeq: [vol], keyOffAt: null }; continue; }
 
-      if (t.attack.no) {
-        flush(f); cur = { periodIdx, mode, vol, on, constVol, envKey, start: f, end: f, volSeq: [vol] };
-      } else if (periodIdx !== cur.periodIdx || mode !== cur.mode || on !== cur.on ||
-                 constVol !== cur.constVol || (!constVol && envKey !== cur.envKey)) {
-        flush(f); cur = { periodIdx, mode, vol, on, constVol, envKey, start: f, end: f, volSeq: [vol] };
+      const releaseMark = !!t.attack.no && on && cur.on &&
+        Inst.isReleaseRewrite(frameInfo, f, cur, periodIdx === cur.periodIdx && mode === cur.mode, constVol, vol);
+      if (t.attack.no && !releaseMark) {
+        flush(f); cur = { periodIdx, mode, vol, on, constVol, envKey, start: f, end: f, volSeq: [vol], keyOffAt: null };
+      } else if (!releaseMark && (periodIdx !== cur.periodIdx || mode !== cur.mode || on !== cur.on ||
+                 constVol !== cur.constVol || (!constVol && envKey !== cur.envKey))) {
+        flush(f); cur = { periodIdx, mode, vol, on, constVol, envKey, start: f, end: f, volSeq: [vol], keyOffAt: null };
       } else if (constVol) {
+        if (releaseMark) cur.keyOffAt = f - cur.start;
         cur.vol = vol;
         cur.volSeq.push(vol);
       }
@@ -627,6 +659,116 @@
 
   MML.NSF2MML = MML.NSF2MML || {}; // dmcHits(上)が先に生やしている
 
+  // ── 楽器化(2026-09-08)。2A03パルス/ノイズ/MMC5パルス(expansion/mmc5.js)で共有 ──
+  // 「複数の音符に割れていた1音を楽器定義(@v+@vr+@@/@@r+ゲート)へ畳む」ための判定と出力フィールド。
+  // 抽出器側(extractPulseEvents 等)は ev.keyOffAt(リリース開始)/ev.dutySeq(フレーム毎のデューティ)
+  // /ev.volSeq を積み、ここで @v/@vr/@@/@@r へ切り分ける。詳細は各関数のコメントと README「楽器化」
+  MML.NSF2MML.Instrument = (function () {
+    const RELEASE_LOOKAHEAD = 6;   // リリース判定で先読みするフレーム数
+    const DUTY_ATTACK_FRAMES = 4;  // ここまでのデューティ変化は「立ち上がりの音色」
+
+    // frameInfo(f) → { attack, constVol, vol } | null(範囲外)。f で打ち直した音量 v0 のあと
+    // RELEASE_LOOKAHEAD フレーム以内に、固定音量のまま base(打ち直し直前の音量)より小さい音量に
+    // なれば true。v0 より上がる瞬間があれば立ち上がり(13→15→減衰の再アタック。DQ2 の同音連打で
+    // 実測)なので false。途中で再アタック/エンベロープモード切替があれば打ち切り
+    function decaysAfter(frameInfo, f, base) {
+      const i0 = frameInfo(f);
+      if (!i0) return false;
+      for (let k = 1; k <= RELEASE_LOOKAHEAD; k++) {
+        const i2 = frameInfo(f + k);
+        if (!i2 || i2.attack || !i2.constVol) break;
+        if (i2.vol > i0.vol) return false;
+        if (i2.vol < base) return true;
+      }
+      return false;
+    }
+    // アタック書き込み(キーオン)が「リリース開始」か: 同じ音程・固定音量のまま、打ち直した音量が
+    // 直前以下で、その後確実に下がる。mck ドライバの putReleaseEffect(リリース区間の先頭をノートオン
+    // として打ち直す)そのもの。固定音量モードでは位相リセット以外に音の違いが無いので、本物の
+    // 再アタック(エコー等)をリリースと読んでも音は変わらない
+    function isReleaseRewrite(frameInfo, f, cur, samePitch, constVol, vol) {
+      return cur.keyOffAt == null && samePitch && constVol && cur.constVol && vol <= cur.vol &&
+        decaysAfter(frameInfo, f, cur.vol);
+    }
+    // $4003 を書かずに「デューティを変えつつ音量を上げる」のは、位相リセットのクリックを避けて
+    // 再アタックするドライバの書き方(Konami: 音符の頭だけデューティ2・音量6)。新しい音符として区切る
+    function isRetrigger(cur, constVol, duty, vol) {
+      const lastDuty = cur.dutySeq[cur.dutySeq.length - 1];
+      return constVol && cur.constVol && duty !== lastDuty && vol > cur.vol;
+    }
+    // キーオフ位置(keyOffAt)の確定。抽出器が打ち直しで付けたものが無ければ、固定音量モードの音符で
+    // 「デューティが音符の途中(先頭 DUTY_ATTACK_FRAMES 以降)で1回だけ変わりそのまま終わる」場合を
+    // キーオフとみなす(ドラゴンクエストII等: 減衰の最後に音色を 1→0 へ落として余韻にする=実機
+    // ppmck の @@r そのもの)。以前はここで音符を割って再アタックしていた(元曲に無い位相リセット)
+    function decideKeyOff(ev, cmd) {
+      if (ev.keyOffAt != null || !ev.constVol || !ev.dutySeq || ev.dutySeq.length < 2 || !cmd.INST) return;
+      const ds = ev.dutySeq;
+      const changes = [];
+      for (let i = 1; i < ds.length; i++) if (ds[i] !== ds[i - 1]) changes.push(i);
+      if (changes.length === 1 && changes[0] >= DUTY_ATTACK_FRAMES) ev.keyOffAt = changes[0];
+    }
+    // リリース付きの音符が「無音で終わった」(次のイベントが休符)かを控える。isSilent(ev) は
+    // そのチャンネルの休符判定(パルス: note===null、ノイズ: !on)
+    function markSilence(events, isSilent) {
+      for (let i = 0; i < events.length; i++) {
+        if (events[i].keyOffAt != null) events[i].endedBySilence = (i + 1 >= events.length) || isSilent(events[i + 1]);
+      }
+    }
+    // 音符の終端(キーオフがあればそこ)
+    function endOf(ev) { return (ev.keyOffAt != null && ev.keyOffAt > 0) ? ev.start + ev.keyOffAt : ev.end; }
+    // 固定音量モードの音量列 → { volume | envelopeV, envelopeVr?, releaseEnd? }
+    // リリース(keyOffAt): 音量列を本体(@v)とリリース(@vr)に切り分ける。音符は keyOffAt で終わり、以後は
+    // mmlEmit が k<len> で、NOTE_END='next' のゲート吸収なら q/@q/@k で「ゲートオフ=リリース開始」を
+    // 再現する。リリースが 0 に達しないまま無音になった(例: 音量 2 を保持したあと切れる)場合、表に
+    // 0 を足すと保持フレーム数ぶんの表(2 2 2 … 0)が音符長ごとに量産されるので足さず、無音の始まり
+    // (元イベントの end)を releaseEnd に残す(mmlEmit はそこまでを k、以降を r で出し、NOTE_END の
+    // ゲート吸収はその連鎖を対象外にする)
+    function volumeFields(ev, envReg, vrReg) {
+      if (vrReg && ev.keyOffAt != null && ev.keyOffAt > 0 && ev.keyOffAt < ev.volSeq.length) {
+        const body = ev.volSeq.slice(0, ev.keyOffAt);
+        const rel = ev.volSeq.slice(ev.keyOffAt);
+        const vrIdx = vrReg.assignHold(rel);
+        const idx = envReg.assign(body);
+        const fields = idx == null ? { volume: MML.Convert.plainVolume(body) } : { envelopeV: idx };
+        fields._volSeq = body; // スラー連鎖の音量連結(envelope.js mergeSlurVolumes)用
+        if (vrIdx != null) {
+          fields.envelopeVr = vrIdx;
+          if (ev.endedBySilence && rel[rel.length - 1] !== 0 && ev.end > ev.start + ev.keyOffAt) fields.releaseEnd = ev.end;
+        }
+        return fields;
+      }
+      // 打ち直しの印が無ければ、他形式と同じ印無しのリリース切り出し(envelope.js detectRelease)
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(ev.volSeq)
+        : (() => { const idx = envReg.assign(ev.volSeq); return idx == null ? { volume: MML.Convert.plainVolume(ev.volSeq) } : { envelopeV: idx }; })();
+    }
+    // デューティ列(dutySeq) → { toneEnv?, releaseTone? }
+    //   ・キーオフ(keyOffAt)より前の本体で変化が無い … 従来どおり固定の @<duty>(instrument)
+    //   ・本体の変化が先頭 DUTY_ATTACK_FRAMES 以内だけ({3 1 1 1…}) … 立ち上がりの音色として
+    //     @<n>={3 1}(末尾保持)を登録し @@<n> で選ぶ(mck 風の音色)
+    //   ・それ以外(音符の途中で何度も変わる) … ループ検出込みの表(デューティ LFO)
+    //   ・キーオフ以降のデューティが本体の最後と違う … リリース音色 @@r<n>(実機 _REL_ORG_TONE、
+    //     @vr の音色版。ゲートオフの瞬間に音色を差し替える)として @<n>={…} を別に登録する
+    function toneFields(ev, dutyReg, cmd) {
+      if (!dutyReg || !ev.dutySeq || !cmd.INST) return {};
+      const cut = ev.keyOffAt != null ? Math.max(1, ev.keyOffAt) : ev.dutySeq.length;
+      const body = ev.dutySeq.slice(0, cut);
+      const rel = ev.dutySeq.slice(cut);
+      const fields = {};
+      if (new Set(body).size > 1) {
+        let lastChange = 0;
+        for (let i = 1; i < body.length; i++) if (body[i] !== body[i - 1]) lastChange = i;
+        const idx = lastChange < DUTY_ATTACK_FRAMES ? dutyReg.assignHold(body) : dutyReg.assign(body);
+        if (idx != null) fields.toneEnv = idx;
+      }
+      if (rel.length > 0 && rel.some(d => d !== body[body.length - 1])) {
+        const idx = dutyReg.assignHold(rel);
+        if (idx != null) fields.releaseTone = idx;
+      }
+      return fields;
+    }
+    return { decaysAfter, isReleaseRewrite, isRetrigger, decideKeyOff, markSilence, endOf, volumeFields, toneFields, DUTY_ATTACK_FRAMES };
+  })();
+
   // 基準ピッチ(#TUNING)の自動検出: 変換本体(convertNsfOnce)を必要なら2回走らせる
   // (src/convert/options.js MML.Convert.autoTune 参照。全 *2mml 共通の入口の作り)
   MML.NSF2MML.convert = function (writeLog, nsfBytes, header, songIndex, initRegs, initWrites, options) {
@@ -759,6 +901,8 @@
       `; Artist   : ${artist}`,
       `; Copyright: ${copy}`,
       `; Song     : ${songNo} / ${totalS}`,
+      // NSFe の曲ラベル(tlbl)があれば添える(NSFヘッダには曲ごとの名前が無い)
+      ...(MML.NSF.trackLabel && MML.NSF.trackLabel(header, songIndex) ? [`; Track    : ${MML.NSF.trackLabel(header, songIndex)}`] : []),
       `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
       `; 分解能   : 480 TPQN (MIDI準拠)`,
       `; 変換     : Sound Emulation Foundry`,
@@ -808,15 +952,21 @@
             levels.push(levelAt(since));
           }
           const idx = envReg.assign(levels);
-          return idx == null ? { volume: MML.Convert.plainVolume(levels) } : { envelopeV: idx };
+          return idx == null ? { volume: MML.Convert.plainVolume(levels), _volSeq: levels } : { envelopeV: idx, _volSeq: levels };
         }
         const idx = envReg.registerShape(shape, true);
         // 変換設定ENV=OFF時はnull → ピーク値のv<n>へ(src/convert/options.js plainVolume)
         return idx == null ? { volume: MML.Convert.plainVolume(shape) } : { envelopeV: idx };
       }
-      const idx = envReg.assign(ev.volSeq);
-      return idx == null ? { volume: MML.Convert.plainVolume(ev.volSeq) } : { envelopeV: idx };
+      // リリース(keyOffAt)の切り分けと通常の @v/v は共有ヘルパー(MML.NSF2MML.Instrument)
+      return Inst.volumeFields(ev, envReg, inst.vrReg);
     }
+    // 楽器化(2026-09-08): リリース表(@vr<n>)とデューティ(音色)エンベロープ表(@<n>={...})の登録先。
+    // 判定・切り分けは MML.NSF2MML.Instrument(このファイル上部)。拡張音源(MMC5)にも渡す
+    const Inst = MML.NSF2MML.Instrument;
+    const inst = { vrReg: envReg.release, dutyReg: new MML.Convert.EnvelopeRegistry(cmd, '@'), cmd }; // @vr は envReg が持つ(defLines が一緒に出す)
+    const vrReg = inst.vrReg, dutyReg = inst.dutyReg;
+    const toToneFields = (ev) => Inst.toneFields(ev, dutyReg, cmd);
 
     // ピッチエンベロープ(厳密周期ビブラート)を曲全体で共有登録するレジストリ
     // (DESIGN-PITCH.md Phase 1)。基準点はev.rawFreqと同じ生成元(ev.pitchSeq[0])
@@ -845,9 +995,18 @@
     // イベントを共通形式 { start, end, note, volume?/envelopeV?, instrument?, rawFreq? } に整形
     // (tieCandidateはスラー分割判定用にそのまま素通しする。src/convert/pitch.js
     // markSlurTies参照)
+    // リリース(keyOffAt)付きの音符は「次が休符=無音で終わった」かを先に控える(toVolumeFields が
+    // リリース表の末尾に 0 を足すかの判断に使う)
+    for (const evs of [evA, evB]) {
+      for (const ev of evs) if (ev.note !== null) Inst.decideKeyOff(ev, cmd);
+      Inst.markSilence(evs, e => e.note === null);
+    }
+    Inst.markSilence(evD, e => !e.on);
     const toCommon = (ev) => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq,
+      { start: ev.start, end: Inst.endOf(ev),
+        note: ev.note, instrument: ev.duty, rawFreq: ev.rawFreq,
         tieCandidate: ev.tieCandidate, sweep: ev.sweep || null },
+      ev.note !== null ? toToneFields(ev) : {},
       ev.note !== null ? toVolumeFields(ev) : {},
       ev.note !== null ? toPitchFields(ev) : {},
       ev.note !== null ? toNoteEnvFields(ev) : {}
@@ -860,7 +1019,7 @@
       ev.note !== null ? toNoteEnvFields(ev) : {}
     ));
     const chEventsD = evD.map(ev => Object.assign(
-      { start: ev.start, end: ev.end, note: ev.on ? noisePeriodToNoteNum(ev.periodIdx) : null },
+      { start: ev.start, end: Inst.endOf(ev), note: ev.on ? noisePeriodToNoteNum(ev.periodIdx) : null },
       ev.on ? toVolumeFields(ev) : {}
     ));
     // スラー分割(2026-08-12): 純粋な音程変化のみで区切られ、両側とも十分な長さ+
@@ -917,7 +1076,7 @@
       if (!extractor) continue;
       const result = extractor(writeLog, totalFrames, envReg,
         chip === 'fds' ? fdsWaveReg : chip === 'n163' ? n163WaveReg : chip === 'vrc7' ? vrc7ToneReg : undefined,
-        initRegs, initWrites, options.n163Snapshots, pitchReg, noteEnvReg);
+        initRegs, initWrites, options.n163Snapshots, pitchReg, noteEnvReg, inst);
       const letters = expansionLetterMap[chip];
       const hasPitchModForChip = chip !== 'vrc7'; // VRC7はfnum/block対数空間でD/EP/MP非対応(DESIGN-PITCH.md §7)
       // EN(ノートエンベロープ)はfnum/blockを都度再計算するだけなのでVRC7でも使える
@@ -973,9 +1132,12 @@
       ``
     ];
 
+    // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
+    MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, FPS);
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
-      headerLines: [...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+      headerLines: [...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...dutyReg.defLines(),
+        ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(), ...fdsModDefLines]
     });
 

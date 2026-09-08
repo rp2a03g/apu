@@ -56,7 +56,12 @@
   // VRC7のfnum換算(kss2mml/converter.js vrc7FnumRawと同じ式)。fnum/blockの対数表現のため
   // EP/MP/PT(生レジスタ加算のピッチ変調)は使えないが、D<n>はfnumが同一block内で周波数に
   // 比例するため使える(compiler.js segmentsToWriteLogVrc7参照)。detectChorusDetune専用。
-  function vrc7FnumRawSpc(freq) {
+  // ★Workerバンドル(tools/build-capture-workers.ps1)に borrow.js が入らないため、ここは
+  // src/convert/borrow.js vrc7FnumRaw と同じ内容の自前コピー(block は音符の理論値側で固定、
+  // 境界をまたぐ実測値で D が上限に張り付く件の修正、2026-09-07)。変更時は両方揃えること。
+  function vrc7FnumRawSpc(freq, ev) {
+    const blockOf = f => { for (let b = 0; b <= 7; b++) if (Math.round((f * 524288) / (49716 * Math.pow(2, b))) <= 511) return b; return 7; };
+    if (ev && ev.note != null) return (freq * 524288) / (49716 * Math.pow(2, blockOf(MML.Convert.noteToFreq(ev.note))));
     for (let block = 0; block <= 7; block++) {
       const fnum = (freq * 524288) / (49716 * Math.pow(2, block));
       if (fnum <= 511) return fnum;
@@ -1295,11 +1300,13 @@
            + `定義${st.clips}件 / 打点${st.segments}個 / ROM ${(st.bytes / 1024).toFixed(1)}KB\n`;
     }
 
-    // 実測エンベロープ由来の音量テーブル定義 (@vN / @vr0)
-    for (const line of envReg.defLines()) mml += line + '\n';
-    if (releaseTable) {
-      mml += `@vr0 = { ${releaseTable.join(' ')} }\n`;
-    }
+    // 実測エンベロープ由来の音量テーブル定義(@v<n>)は、音符の区切り(applyNoteEnd)が表を書き換えた
+    // 後に出す必要があるので、emitScore の headerLines に移した(下)。
+    // ★@vr0(KOFF 後のリリース表)は廃止(2026-09-08): 実機 DSP のリリースは毎サンプル env-=8 で
+    //   最大値からでも約256サンプル=8ms(1フレーム未満)で 0 に落ちる。フレーム単位の表では {0} に
+    //   なり、q8 の音符では鳴る経路も無かった。ADSR の減衰・サステインは KON 中の実測列(@v)が
+    //   すでに持っているので、SPC の音符は「@v 付き、キーオフで終わる」だけの他形式と同じ形にする
+    //   (これで NOTE_END の吸収・ゲートも SPC に効く)
 
     mml += '\n';
 
@@ -1376,7 +1383,6 @@
           start: ev.frame, end: ev.frame + ev.len, note,
           rawFreq: ev.rawFreq,
           envelopeV: hasEnvelope && ev.envelopeIdx !== undefined ? ev.envelopeIdx : undefined,
-          envelopeVr: hasEnvelope && ev.envelopeIdx !== undefined ? 0 : undefined,
           volume: !hasVolume ? undefined
             : (cmd.ENV && envCapableType(targetType))
               ? (ev.envelopeIdx !== undefined ? undefined : ev.plainVol)
@@ -1439,11 +1445,17 @@
       scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents, hasInstrument: true });
     }
 
+    // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前。
+    // SPC の音符は KOFF で終わり(KOFF 後のリリースは1フレーム未満で無音)、ADSR は KON 中の実測列
+    // (@v)に入っているので、他形式と同じく休符の吸収・ゲートが効く
+    MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, FPS_SPC);
     if (scoreChannels.length > 0) {
       mml += MML.Convert.emitScore(scoreChannels, fpb,
         { totalFrames: FRAMES, tempoBpm: bpm, cmd,
-          headerLines: [...MML.Convert.tuningHeaderLines(), ...vrc7Notes, ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
+          headerLines: [...MML.Convert.tuningHeaderLines(), ...vrc7Notes, ...envReg.defLines(), ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
             ...pitchReg.defLines(), ...noteEnvReg.defLines()] }) + '\n';
+    } else {
+      for (const line of envReg.defLines()) mml += line + '\n';
     }
 
     // ── 波形データを options に付加して返す ─────────────────────────

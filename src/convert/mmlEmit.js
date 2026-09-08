@@ -30,7 +30,10 @@
  *    コンパイラ側は明示的なv<n>でstate.envelopeV/fme7EnvShapeをnullにクリアするため)
  *   totalFrames  … 末尾休符を補うための曲全体のフレーム数
  *   cmd          … 変換設定(src/convert/options.js)。上記フラグをANDマスクし、譜面整形
- *                   (SHAPE_REST/SHAPE_QUANT)をギャップ補完前に掛ける
+ *                   (SHAPE_REST)をギャップ補完前に掛ける。音符の区切り(NOTE_END)は
+ *                   ここでは扱わない(呼び出し側が emitScore の前に MML.Convert.applyNoteEnd で
+ *                   済ませておく。同関数が付ける ev.gate('q6'/'@q3'/'q8')はここで状態
+ *                   コマンドとして出す。初期状態は q8=コンパイラの既定)
  *
  * 音価の継続(タイ)は必ず & (note/rest名を繰り返す) で行う。
  * 字句解析器 (src/mml/lexer.js) は & のみを tie として認識し、^ は無視される
@@ -99,13 +102,41 @@
     for (const ev of events) {
       const dur = ev.end - ev.start;
       if (dur <= 0) continue;
+      state.durCarryBefore = state.durCarry;
       const { lengths, carryOut } = MML.Convert.framesToLengths(dur, fpb, state.durCarry);
       state.durCarry = carryOut;
 
       if (ev.note === null) {
-        emit(fmtLens('r', lengths), true);
+        // リリース表(@vr)付きの音符に直接続く休符は k<len>(実機ppmckの「リリースエンベロープが
+        // 発動する休符」)で出す。r で出すとゲートオフ=音符終端でリリースが鳴らず音が変わる。
+        // 小節境界で分割された続き(continued)も k のまま繋ぐ
+        const prevEv = state.prevEv;
+        const useK = (prevEv && prevEv.note !== null && prevEv.envelopeVr != null && prevEv.envelopeVr !== 255 && prevEv.end === ev.start) ||
+                     (ev.continued && state.prevRestWasK);
+        // リリース表が 0 に達しないまま無音になる音符(prevEv.releaseEnd、nsf2mml toVolumeFields 参照)は
+        // releaseEnd までを k、以降を r で出す(r で音量 0 になる)。framesToLengths は上で dur 全体に
+        // 対して呼び済みなので、直前の carry から k と r に分け直す
+        const relEnd = useK && !ev.continued && prevEv.releaseEnd != null ? prevEv.releaseEnd : null;
+        if (relEnd != null && relEnd < ev.end) {
+          const kFrames = relEnd - ev.start;
+          const kq = MML.Convert.framesToLengths(kFrames, fpb, state.durCarryBefore);
+          const rq = MML.Convert.framesToLengths(dur - kFrames, fpb, kq.carryOut);
+          state.durCarry = rq.carryOut;
+          emit(fmtLens('k', kq.lengths), true);
+          emit(fmtLens('r', rq.lengths), true);
+          state.prevRestWasK = false;
+          state.prevEv = ev;
+          continue;
+        }
+        // r は従来どおり & で繋がない(音的に同じ)。k は繋ぐ(実機ppmckは k のたびにリリース効果を
+        // 出し直すので、小節をまたぐ続きは k8&k4 のようにタイで1つの k にする)
+        emit((useK && ev.continued ? '&' : '') + fmtLens(useK ? 'k' : 'r', lengths), true);
+        state.prevRestWasK = useK;
+        state.prevEv = ev;
         continue;
       }
+      state.prevRestWasK = false;
+      state.prevEv = ev;
 
       // ev.slurTie(スラー分割、2026-08-12): 純粋な音程変化だけで区切られた隣接イベントを
       // 独立した再アタックではなくタイ(&)で繋ぐ(src/convert/pitch.js markSlurTies参照)。
@@ -113,14 +144,33 @@
       // 扱いをする(compiler.js側のタイ処理はタイで繋いだ2音目以降が独自のD/EP/MP/PTを
       // 持てない設計のため、どのみち出力しても再生時に無視される)。
       if (!ev.continued && !ev.slurTie) {
+        // ゲートタイム(src/convert/envelope.js applyNoteEnd が連鎖の先頭に付ける)。他の状態
+        // コマンドと同じく前回と違うときだけ出す。付いていない音符は前の状態を引き継ぐ
+        // (applyNoteEnd は状態が変わる音符にだけ付ける)。
+        // コンパイラ側は q/@q(curGateQ)と @k(curGateK、q/@q より優先)の2つの状態を持つので、
+        // '@k<n>' 以外へ戻るときは先に @k0 で解除してから q/@q を出す
+        if (ev.gate !== undefined) {
+          if (ev.gate.slice(0, 2) === '@k') {
+            const n = parseInt(ev.gate.slice(2), 10) || 0;
+            if (n !== state.curGateK) { emit(ev.gate); state.curGateK = n; }
+          } else {
+            if (state.curGateK !== 0) { emit('@k0'); state.curGateK = 0; }
+            if (ev.gate !== state.curGateQ) { emit(ev.gate); state.curGateQ = ev.gate; }
+          }
+        }
         if (flags.hasVrc7Tone && ev.vrc7Tone !== undefined && ev.vrc7Tone !== state.curVrc7Tone) {
           emit(`OP${ev.vrc7Tone}`); state.curVrc7Tone = ev.vrc7Tone;
         }
         if (flags.hasFdsMod && ev.fdsMod !== undefined && ev.fdsMod !== state.curFdsMod) {
           emit(ev.fdsMod === 'off' ? 'MHOF' : `MH${ev.fdsMod}`); state.curFdsMod = ev.fdsMod;
         }
-        if (flags.hasInstrument && ev.instrument !== undefined && ev.instrument !== state.curInst) {
-          emit(`@${ev.instrument}`); state.curInst = ev.instrument;
+        // 音色: ev.toneEnv(デューティ=音色エンベロープ番号、@<n>={...} を @@<n> で選ぶ)があれば
+        // そちらを優先。コンパイラは @<n>(固定音色)で @@ を解除するので、@@ の後に同じ番号の
+        // @<n> を出す必要があるときは curInst を忘れる
+        if (flags.hasInstrument && ev.toneEnv != null) {
+          if (ev.toneEnv !== state.curToneEnv) { emit(`@@${ev.toneEnv}`); state.curToneEnv = ev.toneEnv; state.curInst = -1; }
+        } else if (flags.hasInstrument && ev.instrument !== undefined && (ev.instrument !== state.curInst || state.curToneEnv != null)) {
+          emit(`@${ev.instrument}`); state.curInst = ev.instrument; state.curToneEnv = null;
         }
         // ハードウェアスイープ(2A03パルスのみ)。D<n>等と同じく未指定イベントはOFF扱いに
         // して、前回との差分があるときだけ出す(直前の音符のスイープを引きずらないため)
@@ -209,6 +259,23 @@
         if (flags.hasFme7Noise && ev.fme7Noise !== undefined && ev.fme7Noise !== state.curFme7Noise) {
           emit(`N${ev.fme7Noise}`); state.curFme7Noise = ev.fme7Noise;
         }
+        // リリース表 @vr<n>(ゲートオフの瞬間から鳴る)。@v の有無に関わらず効くので v<n> の音符でも
+        // 出す。無い音符では @vr255(解除、コンパイラの既定)へ戻す。初期状態は 255
+        // リリースは「ゲートオフ(q/@q/@k)」か「k<len>」でしか発動しない。ゲートが音長いっぱい
+        // (q8 かつ @k0)の音符では、リリース無しの音符でも直前の @vr/@@r を残したままで音は変わらない
+        // (k は mmlEmit がリリース付きの音符の直後にしか出さない)ので、@vr255/@@r255 への解除を
+        // 出さずに済ませ、音符ごとの @vr0 @@r0 / @vr255 @@r255 の往復を避ける
+        const gateFull = state.curGateQ === 'q8' && state.curGateK === 0;
+        if (flags.hasEnvelope) {
+          const vr = (ev.envelopeVr !== undefined && ev.envelopeVr !== null) ? ev.envelopeVr : 255;
+          if (vr !== state.curEnvVr && !(vr === 255 && gateFull)) { emit(`@vr${vr}`); state.curEnvVr = vr; }
+        }
+        // リリース音色 @@r<n>(ゲートオフの瞬間にデューティ(音色)エンベロープ表 n へ差し替える。
+        // 無い音符では @@r255=解除へ戻す(上と同じくゲートが音長いっぱいなら残す)。初期状態は 255)
+        if (flags.hasInstrument) {
+          const rt = (ev.releaseTone !== undefined && ev.releaseTone !== null) ? ev.releaseTone : 255;
+          if (rt !== state.curRelTone && !(rt === 255 && gateFull)) { emit(`@@r${rt}`); state.curRelTone = rt; }
+        }
         if (flags.hasFme7Env && ev.fme7EnvShape !== undefined) {
           if (ev.fme7EnvPeriod !== undefined && ev.fme7EnvPeriod !== state.curFme7Period) {
             emit(`M${ev.fme7EnvPeriod}`); state.curFme7Period = ev.fme7EnvPeriod;
@@ -220,9 +287,6 @@
           }
           state.curVolMode = 'fme7env';
         } else if (flags.hasEnvelope && ev.envelopeV !== undefined) {
-          if (ev.envelopeVr !== undefined && ev.envelopeVr !== state.curEnvVr) {
-            emit(`@vr${ev.envelopeVr}`); state.curEnvVr = ev.envelopeVr;
-          }
           // v<n>とhasEnvelopeを併用するチャンネル(NSF/KSSの帯域)では、直前がv<n>だった
           // 場合コンパイラ側のstate.envelopeVがnullにクリアされているため、値が前回の
           // @v<n>と同じ番号でも必ずトークンを出し直して再セットする(state.curVolMode参照)。
@@ -263,10 +327,11 @@
 
   function newState() {
     return {
-      curOct: -1, curVol: -1, curInst: -1, curEnvV: -1, curEnvVr: -1,
+      curOct: -1, curVol: -1, curInst: -1, curEnvV: -1, curEnvVr: 255, curToneEnv: null, curRelTone: 255,
+      prevEv: null, prevRestWasK: false,
       curFme7Shape: -1, curFme7Period: -1, curFme7Noise: -1, curVolMode: null, durCarry: 0,
       curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, curPitchSa: 0, curPitchEp: null, curPitchEpDelay: 0,
-      curNoteEnv: null, curVibrato: null, curSweep: 's0',
+      curNoteEnv: null, curVibrato: null, curSweep: 's0', curGateQ: 'q8', curGateK: 0,
       curPortamentoTarget: null, curPortamentoDuration: 0, curPortamentoDelay: 0,
       lastWasNote: false, hasEmitted: false
     };
@@ -383,13 +448,9 @@
     const framesPerMeasure = fpb * beatsPerMeasure;
     const measureCount = Math.max(1, Math.ceil(totalFrames / framesPerMeasure));
 
-    // 小節境界。譜面整形の格子量子化(SHAPE_QUANT、src/convert/options.js)がONのときは
-    // イベント境界が fpb/4 の倍数(一般に非整数)に揃っているため、境界も丸めずに
-    // 厳密値を使う(整数に丸めると格子から僅かにズレた位置で分割され &g96&g192 の
-    // ような端数タイが湧く)。OFF時は従来通り整数に丸める(出力不変)。
-    const quantized = !!(opts.cmd && MML.Convert.normalizeCmd(opts.cmd).SHAPE_QUANT);
+    // 小節境界(整数フレームに丸める)
     const boundaries = [];
-    for (let m = 1; m < measureCount; m++) boundaries.push(quantized ? m * framesPerMeasure : Math.round(m * framesPerMeasure));
+    for (let m = 1; m < measureCount; m++) boundaries.push(Math.round(m * framesPerMeasure));
 
     const lines = [];
     if (opts.headerLines) lines.push(...opts.headerLines);
@@ -400,7 +461,7 @@
 
     // チャンネルごとに: ギャップ補完 → 小節境界で分割 → 小節バケツへ → テキスト化
     const perChannelMeasureTexts = channelsData.map(chan => {
-      // 変換設定(src/convert/options.js opts.cmd): 譜面整形(短い休符吸収/格子量子化)を
+      // 変換設定(src/convert/options.js opts.cmd): 譜面整形(短い休符吸収)を
       // ギャップ補完の前に掛け、コマンドフラグは下でANDマスクする(割当層で止め切れ
       // なかった分の安全網)
       const filled  = fillGaps(MML.Convert.shapeEvents(chan.events, fpb, opts.cmd), totalFrames);

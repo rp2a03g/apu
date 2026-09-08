@@ -218,7 +218,7 @@
     const text = MML.Convert.emitScore(channelsData, MML.Convert.TPQN, {
       totalFrames: q.totalTicks,
       beatsPerMeasure: take.beatsPerBar,
-      cmd: { SHAPE_REST: false, SHAPE_QUANT: false }
+      cmd: { SHAPE_REST: false }
     });
     return { q, text, defLines: [], letters: ls };
   }
@@ -321,7 +321,7 @@
       // カーソル挿入は1行に収める(途中で折り返すとチャンネル文字の無い行ができて壊れる)
       wrapCol: cursorMode ? 1e9 : 80,
       // 譜面整形はここでは掛けない(量子化は src/input/quantize.js が済ませている)
-      cmd: { SHAPE_REST: false, SHAPE_QUANT: false },
+      cmd: { SHAPE_REST: false },
       hasNoteEnv: hasEn
     });
     // ★カーソル挿入でENを使ったら、断片の最後で必ず ENOF に戻す。

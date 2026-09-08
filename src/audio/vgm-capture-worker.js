@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-07 16:00:06
+ * Built by tools/build-capture-workers.ps1 at 2026-09-08 08:48:20
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-07 16:00:06';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-08 08:48:20';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -275,7 +275,13 @@
    *   「Emu.kssPackWrite is not a function」で落ちて、AY/SSG/OPLを使うVGMのロールが空になる
    *   (途中で落ちると取得済み範囲で打ち切られる)不具合の原因になっていた(2026-09-07)。
    */
-  Emu.kssPackWrite = (addr, value, io) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0);
+  // frac: フレーム内の書込み時刻(0〜1、省略時0)を bit25-30 に 1/64 フレーム刻みで詰める(2026-09-08)。
+  // kss2mml の AY/SCC 抽出器がソフトエンベロープの位相エイリアシング対策(hes2mml/expansion/wave.js
+  // resampleSeq)に使う。writeLog の形(Int32Array のフレーム配列)は変えないので Worker プロトコルと
+  // ロール構築(addr/value/io だけを見る)はそのまま。旧ログ(frac 無し)は 0 として扱われ従来どおり
+  Emu.kssPackWrite = (addr, value, io, frac) => (addr & 0xFFFF) | ((value & 0xFF) << 16) | (io ? 0x1000000 : 0) |
+    ((frac > 0 ? Math.min(63, Math.round(frac * 64)) : 0) << 25);
+  Emu.kssUnpackFrac = (pw) => ((pw >>> 25) & 0x3F) / 64;
 
   /**
    * チャンネルごとのミュート設定をチップの mute プロパティへ反映する。
@@ -12655,6 +12661,9 @@
     // HuC6280書込みトレース(上の data.hes コメント参照)。t は分数フレーム時刻
     // (hesPlayer.js の currentFrame + frameSamplePos/frameSampleCount と同じ意味)。
     let curFrame = 0;
+    // KSS形式 writeLog の各書込みに分数フレーム時刻を詰める(kssPackWrite の frac。kss2mml の AY/SCC 抽出器が
+    // 位相エイリアシング対策のリサンプルに使う。hesTraceWrite の t と同じ定義)
+    const kpk = (a, v, io) => Emu.kssPackWrite(a, v, io, Math.min(1, Math.max(0, (player.samplePos - curFrame * SAMPLES_PER_FRAME) / SAMPLES_PER_FRAME)));
     let hesSeq = 0;
     const hesApu = data.hes ? player.adapterById.huc6280.apu : null;
     const hesTraceWrite = (aa) => {
@@ -12674,28 +12683,28 @@
     };
     if (data.kss && data.kss.scc && data.kss.sccPlus) {
       // kss2mml/expansion/scc.js のデコーダにSCC+配置(0xB800台)を認識させる前置き書込み
-      kssFrameWrites.push(Emu.kssPackWrite(0xBFFE, 0x20, 0), Emu.kssPackWrite(0xB000, 0x80, 0));
+      kssFrameWrites.push(kpk(0xBFFE, 0x20, 0), kpk(0xB000, 0x80, 0));
     }
     player.onWrite = (id, a, b, c, d) => {
       switch (id) {
         case 'nes': nesFrameWrites.push({ addr: c, value: b }); nesRegs[c] = b; break;
-        case 'ay8910': kssFrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
+        case 'ay8910': kssFrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
         // 2個目のチップ('_2')の内蔵SSG/AYは kss2 へ(1個目と同じ形)
-        case 'ay8910_2': kss2FrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
-        case 'ym2610_2': if (a === 0 && b < 0x0E) kss2FrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
-        case 'ym2203_2': if (a < 0x0E) kss2FrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
-        case 'ym2608_2': if (a === 0 && b < 0x0E) kss2FrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
+        case 'ay8910_2': kss2FrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
+        case 'ym2610_2': if (a === 0 && b < 0x0E) kss2FrameWrites.push(kpk(0xA0, b & 0x0F, 1), kpk(0xA1, c, 1)); break;
+        case 'ym2203_2': if (a < 0x0E) kss2FrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
+        case 'ym2608_2': if (a === 0 && b < 0x0E) kss2FrameWrites.push(kpk(0xA0, b & 0x0F, 1), kpk(0xA1, c, 1)); break;
         // YM2610: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
-        case 'ym2610': if (a === 0 && b < 0x0E) kssFrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
+        case 'ym2610': if (a === 0 && b < 0x0E) kssFrameWrites.push(kpk(0xA0, b & 0x0F, 1), kpk(0xA1, c, 1)); break;
         // YM2203: (addr, data)。addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
-        case 'ym2203': if (a < 0x0E) kssFrameWrites.push(Emu.kssPackWrite(0xA0, a & 0x0F, 1), Emu.kssPackWrite(0xA1, b, 1)); break;
+        case 'ym2203': if (a < 0x0E) kssFrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
         // YM2608: (port, addr, data)。port0 addr<0x0E が内蔵SSG(AY互換レジスタ0-13)
-        case 'ym2608': if (a === 0 && b < 0x0E) kssFrameWrites.push(Emu.kssPackWrite(0xA0, b & 0x0F, 1), Emu.kssPackWrite(0xA1, c, 1)); break;
-        case 'ym2413': kssFrameWrites.push(Emu.kssPackWrite(0x7C, a, 1), Emu.kssPackWrite(0x7D, b, 1)); break;
+        case 'ym2608': if (a === 0 && b < 0x0E) kssFrameWrites.push(kpk(0xA0, b & 0x0F, 1), kpk(0xA1, c, 1)); break;
+        case 'ym2413': kssFrameWrites.push(kpk(0x7C, a, 1), kpk(0x7D, b, 1)); break;
         // OPL系: MSX-AUDIOのポート(0xC0=アドレス/0xC1=データ)としてKSSと同じ形でログする
         case 'ym3812': case 'ym3526': case 'y8950':
-          kssFrameWrites.push(Emu.kssPackWrite(0xC0, a, 1), Emu.kssPackWrite(0xC1, b, 1)); break;
-        case 'k051649': kssFrameWrites.push(Emu.kssPackWrite(d, c, 0)); break;
+          kssFrameWrites.push(kpk(0xC0, a, 1), kpk(0xC1, b, 1)); break;
+        case 'k051649': kssFrameWrites.push(kpk(d, c, 0)); break;
         case 'huc6280': hesTraceWrite(a); break; // (reg, value)。書込み適用後に呼ばれるのでAPUの状態をそのまま記録
       }
     };
@@ -19413,8 +19422,11 @@
  *   (1) 割当層(EnvelopeRegistry/PitchEnvelopeRegistry/NoteEnvelopeRegistry/detune.js)で
  *       登録自体を止める(→ ヘッダの @v/@EP/@MP/@EN テーブル定義も自然に消える)
  *   (2) 出力層(mmlEmit.js emitScore/emitChannel)でチャンネルフラグをANDマスクする(安全網)
- *   (3) 譜面整形(短い休符の吸収・音長の格子量子化)を emitScore 手前のイベント整形で行う
+ *   (3) 譜面整形(短い休符の吸収)を emitScore 手前のイベント整形で行う
  * の3段で効かせる。
+ * これとは別に、音符の区切り方(NOTE_END、下記)は各 *2mml が emitScore の直前に
+ * MML.Convert.applyNoteEnd(src/convert/envelope.js)を呼んで効かせる
+ * (エンベロープ表の登録先が要るため emitScore 内では行えない)。
  *
  * cmd の各キー(全て boolean。省略時は true = 従来通り忠実再現):
  *   D      … D<n>(チャンネル/チップ間デチューン、detune.js)
@@ -19434,9 +19446,30 @@
  *            (サンプルごとに疑似音程を割り当てる。src/convert/drumMap.js)。falseなら従来
  *            どおり休符(ドラムはMMLに出ない)
  *
- * 譜面整形(既定 false = 従来通り):
- *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)
- *   SHAPE_QUANT … イベント境界を16分音符格子へ丸める
+ * 譜面整形(既定 false = 従来通り。★近似=音が変わりうる整形はここに集める):
+ *   ENV_MERGE   … 似た @v 表を統合する(2026-09-08)。値の並び(段の値列)が同じで各段の長さが±1・全体長も
+ *                 ±1以内の表を、最も多くの音符が参照する変種へ寄せる(EnvelopeRegistry.mergeSimilar)。
+ *                 ドライバのエンベロープが自走タイマー(2.33フレーム周期等)で進む曲では段の位置が音符の
+ *                 開始位相ごとに違い、同じ楽器でも 3,2,2 / 2,3,2 / 2,2,3 の変種が量産される。ppmck の
+ *                 @v はフレーム毎の絶対値なので正確に1本にはできず、これは段の境目が最大1フレーム動く
+ *                 近似(ハードウェア減衰表・exact 表は対象外)
+ *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)。
+ *                 伸ばした区間は最後の音量のまま鳴るので近似
+ *   (旧 SHAPE_QUANT「16分音符格子へ丸める」は 2026-09-07 に廃止。キーオン自体が格子から
+ *    外れている曲にしか効かず、丸めれば必ずタイミングが崩れるため。保存済み設定に残って
+ *    いても読み捨てる)
+ *
+ * 音符の区切り(2026-09-07。細かい音長 `@v156 d+4&d+64.&d+192 r…` 対策):
+ *   NOTE_END … 'next'(既定) | 'zero'
+ *     抽出器は音量レジスタが0になった瞬間に音符を閉じるため、音長が「減衰が0に達した
+ *     フレーム」というテンポ格子と無関係な値になる(同じ情報は @v 表にもあり二重表現)。
+ *     'next' … 音符の直後の休符を音符に吸収して次の音符の頭まで伸ばす(音長=キーオン間隔)。
+ *              無音区間は、減衰が自然に0へ到達した@v付き音符なら @v表の末尾に 0 を1つ足して
+ *              (コンパイラ stepEnvelope も NSF ドライバも末尾値を保持する)、それ以外は
+ *              ゲートタイム q<n>/@q<n>(コンパイラはゲートオフを休符と同じに書く)で表す。
+ *              どちらも再生結果は完全に同じ(タイミング不変の厳密な変形)
+ *     'zero' … 従来どおり音量0で区切る(最も細かく、そのままの姿)
+ *     詳細・対象外は envelope.js applyNoteEnd 冒頭コメント。
  *
  * 値キー(booleanでない設定。2026-08-26):
  *   PITCH_SA … N163出力のSA<num>(ピッチシフト量)自動選択。'octave' | 'note' | 'off'
@@ -19477,7 +19510,10 @@
   MML.Convert = MML.Convert || {};
 
   const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
-  const SHAPE_KEYS = ['SHAPE_REST', 'SHAPE_QUANT'];
+  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE'];
+  // 音符の区切り(冒頭コメント NOTE_END)
+  const NOTE_END_VALUES = ['next', 'zero'];
+  MML.Convert.NOTE_END_VALUES = NOTE_END_VALUES;
   const PITCH_SA_VALUES = ['octave', 'note', 'off'];
   // ── DPCM(打楽器)キー(冒頭コメント参照)。ドラム(DPCM)パネル最下段の設定 ──
   // DMC_RATE: DMCレート表のindex(0=4.2kHz … 15=33.1kHz)。「自動」のサンプルに使う
@@ -19513,11 +19549,11 @@
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, SHAPE_QUANT: false, PITCH_SA: 'octave', N163_WAVE: 'fit',
+                SHAPE_REST: false, ENV_MERGE: false, NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, SHAPE_QUANT: true, PITCH_SA: 'octave', N163_WAVE: 'fit',
+                SHAPE_REST: true, ENV_MERGE: false, NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
@@ -19534,6 +19570,7 @@
         if (v >= 0 && v <= DMC_RATE_MAX) out.DMC_RATE = v;
       }
       if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
+      if (cmd.NOTE_END != null && NOTE_END_VALUES.indexOf(cmd.NOTE_END) >= 0) out.NOTE_END = cmd.NOTE_END;
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
       if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
       if (cmd.N163_WAVE != null && N163_WAVE_VALUES.indexOf(cmd.N163_WAVE) >= 0) out.N163_WAVE = cmd.N163_WAVE;
@@ -19552,7 +19589,7 @@
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
       const p = MML.Convert.normalizeCmd(PRESETS[name]);
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };
@@ -19766,11 +19803,10 @@
   // 新しい配列を返す(元は変更しない)。
   //   SHAPE_REST : 音符の直後の休符(または隙間)が restThreshold フレーム未満なら直前の
   //                音符を延ばして埋める(ゲートタイムの隙間除去)
-  //   SHAPE_QUANT: 各イベントの start を grid フレーム格子へ丸め、end は次イベントの start
-  //                (最後は元の end を丸めた値)。長さ0になったイベントは捨てる
+  //   (SHAPE_QUANT=16分格子への丸めは 2026-09-07 に廃止。冒頭コメント参照)
   MML.Convert.shapeEvents = function (events, fpb, cmd) {
     const c = MML.Convert.normalizeCmd(cmd);
-    if (!c.SHAPE_REST && !c.SHAPE_QUANT) return events;
+    if (!c.SHAPE_REST) return events;
     let evs = (events || []).slice().sort((a, b) => a.start - b.start).map(e => Object.assign({}, e));
 
     if (c.SHAPE_REST) {
@@ -19779,7 +19815,9 @@
       for (let i = 0; i < evs.length; i++) {
         const ev = evs[i];
         const prev = out[out.length - 1];
-        if (ev.note === null && prev && prev.note !== null && (ev.end - ev.start) < restThreshold) {
+        // リリース表(@vr)付きの音符の直後の休符はリリースが鳴る区間(mmlEmit が k<len> で出す)
+        // なので吸収しない
+        if (ev.note === null && prev && prev.note !== null && prev.envelopeVr == null && (ev.end - ev.start) < restThreshold) {
           prev.end = Math.max(prev.end, ev.end); // 休符を直前の音符へ吸収
           continue;
         }
@@ -19788,23 +19826,6 @@
           prev.end = ev.start;
         }
         out.push(ev);
-      }
-      evs = out;
-    }
-
-    if (c.SHAPE_QUANT) {
-      const grid = fpb / 4; // 16分音符
-      const snap = (f) => Math.round(f / grid) * grid;
-      const out = [];
-      for (let i = 0; i < evs.length; i++) {
-        const ev = evs[i];
-        const s = snap(ev.start);
-        const e = (i + 1 < evs.length && evs[i + 1].start <= ev.end) ? snap(evs[i + 1].start) : snap(ev.end);
-        if (e <= s) continue;
-        const prev = out[out.length - 1];
-        if (prev && prev.end > s) prev.end = s;
-        if (prev && prev.end <= prev.start) out.pop();
-        out.push(Object.assign(ev, { start: s, end: e }));
       }
       evs = out;
     }
@@ -21217,13 +21238,23 @@
     // ミキサー(reg7)を一度も書かない曲があるため、エミュレータ(ay8910Msx.js)と同じ
     // 既定値から始める。0のまま始めると全chがトーン+ノイズ有効として抽出されてしまう
     regs[7] = 0x38;
-    return writeLog.map(writes => {
-      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
+    // 書込み時刻付きトレース(位相エイリアシング対策、extractToneEvents 参照)。ch別の音量 [{t,v}] と
+    // 周期 [{t,v}]。t は分数フレーム(kssPackWrite の frac、旧ログは全て .0 で hasFrac=false)
+    const traces = { vol: [[], [], []], pitch: [[], [], []], hasFrac: false };
+    const timeline = writeLog.map((writes, f) => {
+      // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24 / frac=bit25-30
       for (const pw of writes) {
         const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF, io = (pw >> 24) & 1;
         if (!io) continue;
         if (addr === 0xA0) addrReg = value & 0x0F;
-        else if (addr === 0xA1) regs[addrReg] = value;
+        else if (addr === 0xA1) {
+          regs[addrReg] = value;
+          const frac = ((pw >>> 25) & 0x3F) / 64;
+          if (frac > 0) traces.hasFrac = true;
+          const t = f + frac;
+          if (addrReg >= 8 && addrReg <= 10) traces.vol[addrReg - 8].push({ t, v: (value & 0x10) ? 15 : (value & 0x0F) });
+          else if (addrReg <= 5) { const ch = addrReg >> 1; traces.pitch[ch].push({ t, v: regs[ch * 2] | ((regs[ch * 2 + 1] & 0x0F) << 8) }); }
+        }
       }
       const periods = [
         regs[0] | ((regs[1] & 0x0F) << 8),
@@ -21245,6 +21276,25 @@
         (((regs[7] >> ch) & 1) ? 0 : 1) | (((regs[7] >> (3 + ch)) & 1) ? 0 : 2));
       return { periods, volumes, modes, noisePeriod: regs[6] & 0x1F };
     });
+    timeline.traces = traces;
+    return timeline;
+  }
+  // ソフトエンベロープ/ピッチ列の位相エイリアシング対策(hes2mml/expansion/wave.js buildVolTimeline
+  // 冒頭コメント参照)。ドライバのタイマー周期がフレームと合わない曲(MSX の 60Hz/50Hz 混在、VGM の
+  // VSYNC ドライバの揺らぎ)では、同じエンベロープでも段の位置が±1フレームずれた変種(11 11 11 10 10 …
+  // と 11 11 10 10 10 …)が量産される。書込み時刻トレースがあれば、音符の開始書込みを原点にした
+  // 相対時刻で音量列/周期列を読み直す。マージ処理より前に、イベント長を変えずに行う
+  function resampleEvents(events, traces, ch) {
+    const R = MML.Convert.TickResample;
+    if (!R || !traces || !traces.hasFrac) return;
+    const vt = traces.vol[ch], pt = traces.pitch[ch];
+    const off = R.sampleOffsetFor([vt, pt]);
+    for (const ev of events) {
+      if (ev.note === null) continue;
+      const a = R.noteAnchorT(ev.start, [vt, pt]);
+      if (vt.length) ev.volSeq = R.resampleSeq(vt, ev.start, ev.end, ev.volSeq, a, off);
+      if (pt.length) ev.pitchSeq = R.resampleSeq(pt, ev.start, ev.end, ev.pitchSeq, a, off);
+    }
   }
 
   // ピッチ/トーン有効状態が同じ間は音量変化だけでは区切らずvolSeqに積む
@@ -21299,14 +21349,19 @@
       }
     }
     flush(timeline.length);
+    resampleEvents(events, timeline.traces, chIndex);
     return events;
   }
 
   MML.Kss2MmlExpansion.ay = function (writeLog, totalFrames, clock, envReg) {
     const timeline = buildTimeline(writeLog, clock);
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     // pitchEp(EP<n>参照)は借用先(FME7)の生レジスタ空間への変換が必要なため、ここでは
     // 付けずev.freqSeq(Hz)だけ残し、呼び出し元のkss2mml/converter.jsが
@@ -21424,7 +21479,9 @@
     const wave = [];
     for (let i = 0; i < 5; i++) wave.push(new Int8Array(32));
     const state = makeSccDecoder();
-    return writeLog.map(writes => {
+    // 書込み時刻付きトレース(位相エイリアシング対策。ay.js resampleEvents と同じ)
+    const traces = { vol: [[], [], [], [], []], pitch: [[], [], [], [], []], hasFrac: false };
+    const timeline = writeLog.map((writes, f) => {
       let rangeWriteCount = 0;
       // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite)
       for (const pw of writes) {
@@ -21440,6 +21497,9 @@
         if (isBulkCopy && ((addr >= 0x9800 && addr <= 0x9FFF) || (addr >= 0xB800 && addr <= 0xBFFF))) continue;
         const off = decodeAddr(state, addr, value);
         if (off < 0) continue;
+        const frac = ((pw >>> 25) & 0x3F) / 64;
+        if (frac > 0) traces.hasFrac = true;
+        const tWrite = f + frac;
         if (state.plus) {
           // SCC+: 0x00-0x9F=波形ch0-4 / 0xA0-0xA9=周波数 / 0xAA-0xAE=音量 / 0xAF=有効ビット
           if (off < 0xA0) { wave[off >> 5][off & 0x1F] = value; continue; }
@@ -21447,8 +21507,10 @@
             const ch = (off - 0xA0) >> 1;
             if (off & 1) freq[ch] = (freq[ch] & 0x00FF) | ((value & 0x0F) << 8);
             else freq[ch] = (freq[ch] & 0x0F00) | value;
+            traces.pitch[ch].push({ t: tWrite, v: freq[ch] });
           } else if (off <= 0xAE) {
             volume[off - 0xAA] = value & 0x0F;
+            traces.vol[off - 0xAA].push({ t: tWrite, v: value & 0x0F });
           } else if (off === 0xAF) {
             enable = value & 0x1F;
           }
@@ -21466,8 +21528,10 @@
           const ch = (off - 0x80) >> 1;
           if (off & 1) freq[ch] = (freq[ch] & 0x00FF) | ((value & 0x0F) << 8);
           else freq[ch] = (freq[ch] & 0x0F00) | value;
+          traces.pitch[ch].push({ t: tWrite, v: freq[ch] });
         } else if (off <= 0x8E) {
           volume[off - 0x8A] = value & 0x0F;
+          traces.vol[off - 0x8A].push({ t: tWrite, v: value & 0x0F });
         } else if (off === 0x8F) {
           enable = value & 0x1F;
         }
@@ -21475,6 +21539,21 @@
       // wave はチャンネルごとに独立コピーして返す(以降の書込みで上書きされないよう)
       return { freq: Array.from(freq), volume: Array.from(volume), enable, wave: wave.map(w => w.slice()) };
     });
+    timeline.traces = traces;
+    return timeline;
+  }
+  // ay.js resampleEvents と同じ(位相エイリアシング対策)
+  function resampleEvents(events, traces, ch) {
+    const R = MML.Convert.TickResample;
+    if (!R || !traces || !traces.hasFrac) return;
+    const vt = traces.vol[ch], pt = traces.pitch[ch];
+    const off = R.sampleOffsetFor([vt, pt]);
+    for (const ev of events) {
+      if (ev.note === null) continue;
+      const a = R.noteAnchorT(ev.start, [vt, pt]);
+      if (vt.length) ev.volSeq = R.resampleSeq(vt, ev.start, ev.end, ev.volSeq, a, off);
+      if (pt.length) ev.pitchSeq = R.resampleSeq(pt, ev.start, ev.end, ev.pitchSeq, a, off);
+    }
   }
 
   // ピッチが同じ間は音色(波形)切替だけでは区切らないが、音量がそれまでの減衰傾向から
@@ -21517,6 +21596,7 @@
       }
     }
     flush(timeline.length);
+    resampleEvents(events, timeline.traces, ch);
     return events;
   }
 
@@ -21528,9 +21608,13 @@
   // 不具合になっていた。ay.jsのenvRegと同じくnull許容にする。
   MML.Kss2MmlExpansion.scc = function (writeLog, totalFrames, clock, waveReg, envReg) {
     const timeline = buildTimeline(writeLog);
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     // pitchEpは呼び出し元(kss2mml/converter.js)がev.freqSeqから借用先(N163)の
     // 生レジスタ空間へ変換して付与する(ay.jsと同じ理由、DESIGN-PITCH.md Phase 1)。
@@ -22112,9 +22196,13 @@
     // mergeVibratoAndArpeggio(mergeRapidArpeggio+mergeAlternatingVibrato)の直後に
     // 呼ぶ既存の呼び出し規約通り(pitch.js mergeUnclearPitchRuns冒頭コメント参照)。
     const events = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractEvents(snapshots, chKey, playFps)));
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
@@ -22199,9 +22287,13 @@
 
   MML.Gbs2MmlExpansion.noise = function (snapshots, envReg, playFps) {
     const events = extractEvents(snapshots, playFps);
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },
@@ -22312,9 +22404,13 @@
     // 分節のヒステリシス化(DESIGN-PITCH.md Phase 2)+高速アルペジオ→EN統合(2026-08-14)+
     // P-5「不明瞭→EPテーブル」側(2026-08-12)
     const events = MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractEvents(snapshots)));
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
@@ -22531,6 +22627,8 @@
     return out;
   }
   MML.Hes2MmlExpansion._resampleSeq = resampleSeq; // noise.jsから共用
+  // KSS/VGM の AY・SCC 抽出器(src/kss2mml/expansion/ay.js, scc.js)からも同じ正規化を使う(2026-09-08)
+  MML.Convert.TickResample = { resampleSeq, noteAnchorT, sampleOffsetFor };
 
   // PSGの5bit(0-31)波形をN163の4bit(0-15)へビット深度変換する(単純な1bit右シフト、
   // 0-31を0-15へ均等対応。情報量の損失は最小限)。
@@ -22632,9 +22730,13 @@
   // 深い変調もEP/MPで表現できるため既定は無制限。SA不使用(変換設定PITCH_SA='off')のときだけ
   // 呼び出し元が70を渡し、表現不能な深い統合を音符の交互のまま残す(従来動作)。
   MML.Hes2MmlExpansion.wave = function (snapshots, waveReg, envReg, controlTrace, pitchTrace, opts) {
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
@@ -22809,9 +22911,13 @@
         if (ev.note !== null && tl) ev.volSeq = MML.Hes2MmlExpansion._resampleSeq(tl, ev.start, ev.end, ev.volSeq, undefined, MML.Hes2MmlExpansion._sampleOffsetFor([tl]));
       }
     }
+    // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
+    // (MML.Convert.EnvelopeRegistry.volumeFieldsWithRelease、src/convert/envelope.js detectRelease)。
+    // 返る keyOffAt/releaseTailLast は applyNoteEnd 冒頭の applyReleaseSplits が音符の終端へ反映する
     function toVolumeFields(volSeq) {
-      const idx = envReg ? envReg.assign(volSeq) : null;
-      return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx };
+      if (!envReg) return { volume: MML.Convert.plainVolume(volSeq) };
+      return envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(volSeq)
+        : (() => { const idx = envReg.assign(volSeq); return idx == null ? { volume: MML.Convert.plainVolume(volSeq) } : { envelopeV: idx }; })();
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },
