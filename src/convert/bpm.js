@@ -5,7 +5,9 @@
  * MML.Convert.onsetIntervals(startFrames) → number[]
  *
  * グリッド探索(フレーム/拍 fpq を1〜120で全探索)で「音価の何%がその
- * グリッドの整数倍に近いか(カバー率)」を求める。
+ * グリッドの整数倍に近いか(カバー率)」を求める(2026-09-08 から一致1件を、その音価が
+ * 素直な音符で書けるかの重み simplicity で数える。材料は音長でなく発音開始間隔 IOI、
+ * tempoMaterial 参照)。
  *
  * 旧実装は「閾値を超えた候補のうち最も粗いグリッド」を採用していたが、
  * これには実測済みの構造的欠陥が2つあった:
@@ -41,11 +43,24 @@
     return n >= 1 && Math.abs(d - n * tick) < tol;
   }
 
+  // 音価の「書きやすさ」(2026-09-08): グリッドの何tick(1/32単位)かを n として、2 の冪を除いた
+  // 奇数部 m が 1(音符1個)→1.0、3(付点)→0.85、5・7(タイ/複付点)→0.6、それ以上→0.4。
+  // 細かいグリッド(tick 2〜3 フレーム)は整数の音価をほとんど何でも「説明」できてしまうので
+  // カバー率だけでは常に勝つ(Wing Defenders: 真の t71 より t200 が選ばれ、譜面が付点と
+  // タイだらけになる)。そのグリッドで音符がどれだけ素直に書けるかを一致に掛けて選ぶ。
+  // 倍/半テンポは n が 2 倍/半分になるだけで m は変わらないので、その判定は従来どおり
+  // 典型テンポ帯の事前分布(LOG_PENALTY)に任せる
+  function simplicity(n) {
+    let m = Math.max(1, n);
+    while (m % 2 === 0) m /= 2;
+    return m === 1 ? 1.0 : m === 3 ? 0.85 : (m === 5 || m === 7) ? 0.6 : 0.4;
+  }
+
   function coverageFor(ds, fpq) {
     const tick = fpq / 8; // 最小グリッド = 1/32音符
     const tol  = tick * REL_TOLERANCE;
     let matched = 0;
-    for (const d of ds) if (matches(d, tick, tol)) matched++;
+    for (const d of ds) if (matches(d, tick, tol)) matched += simplicity(Math.round(d / tick));
     return matched / ds.length;
   }
 
@@ -66,6 +81,19 @@
     for (let i = 1; i < startFrames.length; i++) {
       out.push(startFrames[i] - startFrames[i - 1]);
     }
+    return out;
+  };
+
+  // テンポ検出の材料(2026-09-08): 発音開始間隔(IOI)を主とし、音長(end-start)は IOI が取れない
+  // チャンネル最後の音符だけ使う。以前は全音符の音長も混ぜていたが、ドライバのゲートタイムで
+  // 切られた音長(例: Wing Defenders は13フレーム間隔の音符が9フレームで切れる)がグリッドを
+  // 引っ張り、ゲート長のほうを16分音符とみなす速いテンポ(t106、真は t69)を選んでいた。
+  // NOTE_END='next'(既定)では音符の書き長さが IOI そのものなので、IOI がグリッドに乗る
+  // テンポこそが譜面をきれいにする。休符を挟む音符も「音長+休符=次の IOI」で IOI に含まれる
+  MML.Convert.tempoMaterial = function (startFrames, durationFrames) {
+    const out = MML.Convert.onsetIntervals(startFrames);
+    const n = startFrames.length;
+    if (n > 0 && durationFrames && durationFrames.length === n) out.push(durationFrames[n - 1]);
     return out;
   };
 

@@ -103,7 +103,7 @@
       const dur = ev.end - ev.start;
       if (dur <= 0) continue;
       state.durCarryBefore = state.durCarry;
-      const { lengths, carryOut } = MML.Convert.framesToLengths(dur, fpb, state.durCarry);
+      const { lengths, carryOut } = MML.Convert.framesToLengths(dur, fpb, state.durCarry, flags.lenSnap);
       state.durCarry = carryOut;
 
       if (ev.note === null) {
@@ -119,8 +119,8 @@
         const relEnd = useK && !ev.continued && prevEv.releaseEnd != null ? prevEv.releaseEnd : null;
         if (relEnd != null && relEnd < ev.end) {
           const kFrames = relEnd - ev.start;
-          const kq = MML.Convert.framesToLengths(kFrames, fpb, state.durCarryBefore);
-          const rq = MML.Convert.framesToLengths(dur - kFrames, fpb, kq.carryOut);
+          const kq = MML.Convert.framesToLengths(kFrames, fpb, state.durCarryBefore, flags.lenSnap);
+          const rq = MML.Convert.framesToLengths(dur - kFrames, fpb, kq.carryOut, flags.lenSnap);
           state.durCarry = rq.carryOut;
           emit(fmtLens('k', kq.lengths), true);
           emit(fmtLens('r', rq.lengths), true);
@@ -357,6 +357,7 @@
     // 変換設定(src/convert/options.js): コマンドマスク+譜面整形
     const maskedFlags = MML.Convert.maskEmitFlags(flags, opts.cmd);
     Object.assign(flags, maskedFlags);
+    flags.lenSnap = MML.Convert.lenSnapOf(opts.cmd); // 音長を丸める(LEN_SNAP、duration.js framesToLengths)
 
     const lines = [];
     if (opts.headerLines) lines.push(...opts.headerLines);
@@ -376,7 +377,7 @@
     //   l<n> はそれ以降の既定音価を変えてしまうので、差し込んだ後ろに元からあった
     //   音符の意味まで書き換わってしまう(INV-6: 既存MMLを黙って変えない)。
     //   -1 はどの音価とも一致しないので omitDefaultLen が常に素通しになる。
-    flags.defaultLen = opts.noDefaultLen ? -1 : MML.Convert.detectDefaultLength(filled, fpb);
+    flags.defaultLen = opts.noDefaultLen ? -1 : MML.Convert.detectDefaultLength(filled, fpb, flags.lenSnap);
 
     let line = `${letter} ${tempoPrefix}`;
     let col  = line.length;
@@ -407,17 +408,24 @@
   // ── 小節境界での分割 ─────────────────────────────────────────────────
   // boundaries(昇順のフレーム位置配列)をまたぐイベントを2つに割り、
   // 後半に continued:true を付与する。
-  function splitAtBoundaries(events, boundaries) {
+  // tol(フレーム、LEN_SNAP「音長を丸める」): 小節線が音符の始点/終点からこのフレーム数未満しか離れて
+  // いなければそこでは割らない。小数テンポの曲は音符が小節線から少しずつずれるので、2tick 手前で始まる
+  // 4分音符が a192&a8..&a64. のように小節線で千切れていた。割らない側の小節には音符が無いままになる
+  // (縦の並びは小節番号で揃うので、その小節は空欄)
+  function splitAtBoundaries(events, boundaries, tol) {
     const result = [];
     let bi = 0;
+    tol = tol || 0;
     for (const ev of events) {
       while (bi < boundaries.length && boundaries[bi] <= ev.start) bi++;
       let segStart = ev.start;
       let continued = false;
       while (bi < boundaries.length && boundaries[bi] < ev.end) {
-        result.push(Object.assign({}, ev, { start: segStart, end: boundaries[bi], continued }));
-        segStart = boundaries[bi];
-        continued = true;
+        if (boundaries[bi] - segStart > tol && ev.end - boundaries[bi] > tol) { // 小節線は整数に丸めてあるので tol ちょうども切れ端扱い
+          result.push(Object.assign({}, ev, { start: segStart, end: boundaries[bi], continued }));
+          segStart = boundaries[bi];
+          continued = true;
+        }
         bi++;
       }
       result.push(Object.assign({}, ev, { start: segStart, end: ev.end, continued }));
@@ -465,7 +473,7 @@
       // ギャップ補完の前に掛け、コマンドフラグは下でANDマスクする(割当層で止め切れ
       // なかった分の安全網)
       const filled  = fillGaps(MML.Convert.shapeEvents(chan.events, fpb, opts.cmd), totalFrames);
-      const split   = splitAtBoundaries(filled, boundaries);
+      const split   = splitAtBoundaries(filled, boundaries, MML.Convert.lenSnapOf(opts.cmd));
       const buckets = bucketByMeasure(split, framesPerMeasure, measureCount);
       const flags = MML.Convert.maskEmitFlags({
         hasVolume: !!chan.hasVolume, hasInstrument: !!chan.hasInstrument,
@@ -482,7 +490,8 @@
         hasNoteEnv: chan.hasNoteEnv != null ? !!chan.hasNoteEnv : !!chan.hasPitchMod,
         // 曲(このチャンネル)で最も多い音価をl<n>としてチャンネル先頭で宣言し、以後
         // 一致する音符/休符は数値部分を省略する(renderEvents内のomitDefaultLen参照)。
-        defaultLen: MML.Convert.detectDefaultLength(filled, fpb)
+        defaultLen: MML.Convert.detectDefaultLength(filled, fpb, MML.Convert.lenSnapOf(opts.cmd)),
+        lenSnap: MML.Convert.lenSnapOf(opts.cmd) // 音長を丸める(LEN_SNAP、duration.js framesToLengths)
       }, opts.cmd);
       const state = newState();
       let first = true;

@@ -33,6 +33,16 @@
  *            どおり休符(ドラムはMMLに出ない)
  *
  * 譜面整形(既定 false = 従来通り。★近似=音が変わりうる整形はここに集める):
+ *   GATE_APPROX … ゲートを揃える(2026-09-08、既定 true)。NOTE_END='next' のゲート候補に、キーオフ位置の
+ *                 ずれが GATE_TOL フレーム以内の q<n> も許し、切り替えを重くしてチャンネルの大半を1つの
+ *                 q で書く(休符や k<len> の細切れを出さない)。レガートと長い無音は切らない。false なら
+ *                 厳密一致のゲートだけ(以前の挙動)
+ *   GATE_TOL    … その許容フレーム数(0〜8、既定2)
+ *   LEN_SNAP    … 音長を丸める(2026-09-08、既定2フレーム、0=厳密)。音符/休符の長さがこのフレーム数以内で
+ *                 大きな音価に乗るならタイの列(4&2&8..&64.&192)にせず 1 個で書き、余りは次の音符へ持ち越す
+ *                 (src/convert/duration.js framesToLengths の slackFrames。持ち越しは ±許容に収め、一致は持ち越し込みで
+ *                 許容の2倍以内の最も近い音価。小節線から許容以内の音符は小節線で割らない)。ドライバのテンポが小数で音符長が
+ *                 ±1〜2 フレーム揺れる曲(ppmck の t71 等)の譜面を素直にする。境界のずれは最大このフレーム数
  *   ENV_MERGE   … 似た @v 表を統合する(2026-09-08)。値の並び(段の値列)が同じで各段の長さが±1・全体長も
  *                 ±1以内の表を、最も多くの音符が参照する変種へ寄せる(EnvelopeRegistry.mergeSimilar)。
  *                 ドライバのエンベロープが自走タイマー(2.33フレーム周期等)で進む曲では段の位置が音符の
@@ -96,7 +106,16 @@
   MML.Convert = MML.Convert || {};
 
   const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
-  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE'];
+  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE', 'GATE_APPROX'];
+  // GATE_TOL: ゲートを揃える(GATE_APPROX)ときに許すキーオフ位置のずれ(フレーム、0〜8、既定2)
+  const GATE_TOL_DEFAULT = 2, GATE_TOL_MAX = 8;
+  MML.Convert.GATE_TOL_DEFAULT = GATE_TOL_DEFAULT;
+  MML.Convert.GATE_TOL_MAX = GATE_TOL_MAX;
+  // LEN_SNAP: 音長を丸める許容フレーム数(0=厳密(192分)、1〜4、既定2。src/convert/duration.js framesToLengths)
+  const LEN_SNAP_DEFAULT = 2, LEN_SNAP_MAX = 4;
+  MML.Convert.LEN_SNAP_DEFAULT = LEN_SNAP_DEFAULT;
+  MML.Convert.LEN_SNAP_MAX = LEN_SNAP_MAX;
+  MML.Convert.lenSnapOf = (cmd) => (cmd && cmd.LEN_SNAP > 0) ? Math.min(LEN_SNAP_MAX, cmd.LEN_SNAP) : 0;
   // 音符の区切り(冒頭コメント NOTE_END)
   const NOTE_END_VALUES = ['next', 'zero'];
   MML.Convert.NOTE_END_VALUES = NOTE_END_VALUES;
@@ -135,11 +154,13 @@
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, ENV_MERGE: false, NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
+                SHAPE_REST: false, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT,
+                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, ENV_MERGE: false, NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
+                SHAPE_REST: true, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT,
+                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
@@ -157,6 +178,14 @@
       }
       if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
       if (cmd.NOTE_END != null && NOTE_END_VALUES.indexOf(cmd.NOTE_END) >= 0) out.NOTE_END = cmd.NOTE_END;
+      if (cmd.GATE_TOL != null) {
+        const v = parseInt(cmd.GATE_TOL, 10);
+        if (v >= 0 && v <= GATE_TOL_MAX) out.GATE_TOL = v;
+      }
+      if (cmd.LEN_SNAP != null) {
+        const v = parseInt(cmd.LEN_SNAP, 10);
+        if (v >= 0 && v <= LEN_SNAP_MAX) out.LEN_SNAP = v;
+      }
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
       if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
       if (cmd.N163_WAVE != null && N163_WAVE_VALUES.indexOf(cmd.N163_WAVE) >= 0) out.N163_WAVE = cmd.N163_WAVE;
@@ -175,7 +204,7 @@
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
       const p = MML.Convert.normalizeCmd(PRESETS[name]);
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'GATE_TOL', 'LEN_SNAP', 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };

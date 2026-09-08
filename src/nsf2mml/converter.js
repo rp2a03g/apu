@@ -719,21 +719,25 @@
     // 固定音量モードの音量列 → { volume | envelopeV, envelopeVr?, releaseEnd? }
     // リリース(keyOffAt): 音量列を本体(@v)とリリース(@vr)に切り分ける。音符は keyOffAt で終わり、以後は
     // mmlEmit が k<len> で、NOTE_END='next' のゲート吸収なら q/@q/@k で「ゲートオフ=リリース開始」を
-    // 再現する。リリースが 0 に達しないまま無音になった(例: 音量 2 を保持したあと切れる)場合、表に
-    // 0 を足すと保持フレーム数ぶんの表(2 2 2 … 0)が音符長ごとに量産されるので足さず、無音の始まり
-    // (元イベントの end)を releaseEnd に残す(mmlEmit はそこまでを k、以降を r で出し、NOTE_END の
-    // ゲート吸収はその連鎖を対象外にする)
+    // 再現する。リリースの最後の段が短い(末尾値の連続が RELEASE_TAIL_ZERO_MAX 以下)まま無音になった
+    // 音符は、その無音がリリース表の最終段 0 そのもの(例: Wing Defenders の {4 4 3 2} → {4 4 3 2 0})
+    // なので 0 を足す(MML.Convert.releaseWithZero)。これで音符はゲートで伸ばせて q6 だけで書ける。
+    // 末尾値を長く保持したあと切れる場合(例: 音量 2 を保持したあと切れる)は、0 を足すと保持フレーム数
+    // ぶんの表(2 2 2 … 0)が音符長ごとに量産されるので足さず、無音の始まり(元イベントの end)を
+    // releaseEnd に残す(mmlEmit はそこまでを k、以降を r で出し、NOTE_END のゲート吸収はその連鎖を
+    // 対象外にする)
     function volumeFields(ev, envReg, vrReg) {
       if (vrReg && ev.keyOffAt != null && ev.keyOffAt > 0 && ev.keyOffAt < ev.volSeq.length) {
         const body = ev.volSeq.slice(0, ev.keyOffAt);
-        const rel = ev.volSeq.slice(ev.keyOffAt);
+        const endedSilent = ev.endedBySilence && ev.end > ev.start + ev.keyOffAt;
+        const rel = MML.Convert.releaseWithZero(ev.volSeq.slice(ev.keyOffAt), endedSilent);
         const vrIdx = vrReg.assignHold(rel);
         const idx = envReg.assign(body);
         const fields = idx == null ? { volume: MML.Convert.plainVolume(body) } : { envelopeV: idx };
         fields._volSeq = body; // スラー連鎖の音量連結(envelope.js mergeSlurVolumes)用
         if (vrIdx != null) {
           fields.envelopeVr = vrIdx;
-          if (ev.endedBySilence && rel[rel.length - 1] !== 0 && ev.end > ev.start + ev.keyOffAt) fields.releaseEnd = ev.end;
+          if (endedSilent && rel[rel.length - 1] !== 0) fields.releaseEnd = ev.end;
         }
         return fields;
       }
@@ -825,7 +829,7 @@
       }
     }
 
-    // テンポ推定: 全有音イベントの音長 + チャンネル毎の発音開始間隔(IOI)から。
+    // テンポ推定: チャンネル毎の発音開始間隔(IOI)から(MML.Convert.tempoMaterial、src/convert/bpm.js)。
     // IOIはゲートタイム(音符を短く切る発音)の影響を受けないため音長より頑健。
     const timingChannels = [
       evA.filter(e => e.note !== null),
@@ -835,8 +839,7 @@
     ];
     const noteDurations = [];
     for (const chEvents of timingChannels) {
-      for (const e of chEvents) noteDurations.push(e.end - e.start);
-      noteDurations.push(...MML.Convert.onsetIntervals(chEvents.map(e => e.start)));
+      noteDurations.push(...MML.Convert.tempoMaterial(chEvents.map(e => e.start), chEvents.map(e => e.end - e.start)));
     }
 
     const bpm = options.bpm

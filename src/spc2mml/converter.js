@@ -981,8 +981,7 @@
         .map(ev => ({ frame: ev.frame, len: ev.len }))
         .concat(drumHitsAll.filter(h => h.ch === ch).map(h => ({ frame: h.startFrame, len: h.endFrame - h.startFrame })))
         .sort((a, b) => a.frame - b.frame);
-      for (const ev of sounding) noteDurations.push(ev.len);
-      noteDurations.push(...MML.Convert.onsetIntervals(sounding.map(ev => ev.frame)));
+      noteDurations.push(...MML.Convert.tempoMaterial(sounding.map(ev => ev.frame), sounding.map(ev => ev.len)));
     }
     const bpm = options.bpm
       ? MML.Convert.refineBpm(options.bpm, noteDurations, FPS_SPC)

@@ -9,6 +9,8 @@
  * 狙い: 熟練者が「ほぼ音階だけのプレーンな譜面」から編曲を始められるよう、セント単位の
  * 補正コマンド(D/EP/MP/PT/EN)や音量エンベロープ(@v)を出す/出さないを選べるようにする。
  * 6形式共通の1つの設定で、ダイアログの見た目はカラー設定(editorSettings.js の es-modal)を流用。
+ * 画面構成は 2026-09-08 に整理(プリセット/テンポ → 出すコマンド(チップ) → 譜面の書き方 → 詳細設定(折りたたみ))。
+ * 項目の説明はホバーの title か各行の薄い文で出し、1画面に収める。
  */
 (function (global) {
   'use strict';
@@ -20,41 +22,30 @@
   const T = (key, params) => MML.I18n.t(key, params);
   const STORAGE_KEY = 'mml.convertCmd.v1';
 
-  // 表示グループ(見出し, [[キー, ラベル, 説明], ...])
-  const GROUPS = () => [
-    [T('ピッチコマンド'), [
-      ['D',  'D<n>',  T('チャンネル間デチューン(セント単位の音程補正)')],
-      ['EP', 'EP<n>', T('ピッチエンベロープ(MP/PTで表せない揺れの受け皿)')],
-      ['MP', 'MP<n>', T('ビブラート')],
-      ['PT', 'PT<n>', T('ポルタメント')],
-      ['EN', 'EN<n>', T('高速アルペジオ(OFF時は基音1音にまとめる)')],
-    ]],
-    [T('音量コマンド'), [
-      ['ENV', '@v/@vr', T('音量エンベロープ(OFF時はピーク音量を v で出す)')],
-      ['V',   'v<n>',   T('音量そのもの(OFFなら v を一切出さない)')],
-    ]],
-    [T('音色コマンド'), [
-      ['INST',  '@ OP MH N', T('音色/デューティ/VRC7音色/FDS変調/FME7ノイズ周期')],
-      ['SWEEP', 's<n>,<n>',  T('2A03ハードウェアスイープ')],
-    ]],
-    [T('音符の抽出'), [
-      ['DRUM', T('打楽器を音符にする'), T('VGMのサンプルPCMで音程が取れなかった発音(ドラム/効果音)を1本のドラムパートにまとめ、サンプルごとに音程を割り当てる(OFFなら休符)')],
-    ]],
-    [T('譜面整形(近似)'), [
-      ['SHAPE_REST',  T('短い休符を吸収'),     T('音符直後の1/32未満の休符(ゲートタイムの隙間)を音符に繋げる。伸ばした区間は最後の音量のまま鳴る(音が変わりうる整形はこの欄に集める)')],
-      ['ENV_MERGE',   T('似た@v表を統合'),     T('段の値の並びが同じで各段の長さが±1違うだけの@v/@vr表を、最も多く使われる変種にまとめる。ドライバの自走タイマーで段の位置が音符ごとにずれる曲向け。段の境目が最大1フレーム動く')],
-    ]],
+  // ── 画面構成(2026-09-08 に整理。ユーザー要望「ややこしくなったのでスッキリ」) ──
+  //   1. プリセット + 変換テンポ
+  //   2. 出すコマンド … チェック付きのチップを1段に並べる(説明はホバーの title)
+  //   3. 譜面の書き方 … 音符の区切り / ゲートを揃える(近似)+許容 / 短い休符を吸収(近似) / 似た@v表を統合(近似)
+  //      「(近似)」が付くものは音が数フレーム変わりうる整形、付かないものは再生が変わらない厳密な変形
+  //   4. 詳細設定(折りたたみ) … ピッチ精度(SA) / N163波形 / 基準ピッチ+最小偏差
+  // 出すコマンド(キー, チップ表示, ホバー説明)
+  const CMD_CHIPS = () => [
+    ['D',     'D',        T('チャンネル間デチューン(セント単位の音程補正)')],
+    ['EP',    'EP',       T('ピッチエンベロープ(MP/PTで表せない揺れの受け皿)')],
+    ['MP',    'MP',       T('ビブラート')],
+    ['PT',    'PT',       T('ポルタメント')],
+    ['EN',    'EN',       T('高速アルペジオ(OFF時は基音1音にまとめる)')],
+    ['ENV',   '@v/@vr',   T('音量エンベロープ(OFF時はピーク音量を v で出す)')],
+    ['V',     'v',        T('音量そのもの(OFFなら v を一切出さない)')],
+    ['INST',  '@ OP MH N', T('音色/デューティ/VRC7音色/FDS変調/FME7ノイズ周期')],
+    ['SWEEP', 's',        T('2A03ハードウェアスイープ')],
+    ['DRUM',  T('ドラム'), T('VGMのサンプルPCMで音程が取れなかった発音(ドラム/効果音)を1本のドラムパートにまとめ、サンプルごとに音程を割り当てる(OFFなら休符)')],
   ];
-
-  // 音符の区切り(src/convert/options.js NOTE_END、src/convert/envelope.js absorbSilenceIntoEnvelopes)
+  // 音符の区切り(src/convert/options.js NOTE_END、src/convert/envelope.js applyNoteEnd)
   const NOTE_END_OPTIONS = () => [
-    ['next', T('次の音符まで(休符を@vに吸収・推奨)')],
-    ['zero', T('音量ゼロで区切る(最も細かい・従来)')],
+    ['next', T('次の音符まで(推奨)')],
+    ['zero', T('音量ゼロで区切る')],
   ];
-
-  // ★DPCM(打楽器)の設定(DMC_RATE/RATE_MIX/DRUM_POLY)はこのダイアログには無い(2026-09-05)。
-  //   ドラム(DPCM)パネル最下段(src/ui/drumPanel.js)から set() で同じ cmd に書き込まれる。
-
   // ピッチ精度(N163出力のSA<num>自動選択、src/convert/pitch.js n163SaForBase参照)
   const PITCH_SA_OPTIONS = () => [
     ['note',   T('高(音符ごと最適)')],
@@ -116,109 +107,97 @@
   }
   function onKey(e) { if (e.key === 'Escape') closeModal(); }
 
+  // 小さな DOM ヘルパー
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function section(title) {
+    const sec = el('div', 'es-section');
+    sec.appendChild(el('h3', null, title));
+    return sec;
+  }
+  function makeSelect(options, onchange) {
+    const sel = document.createElement('select');
+    for (const [val, label] of options) {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      sel.appendChild(o);
+    }
+    sel.addEventListener('change', onchange);
+    return sel;
+  }
+
   // ctx: { format, onConvert } … 「to MML」から開いたときは、この画面の中で変換まで完結させる
   //   (ユーザー要望: ボタンを押したら設定画面を出し、その中にコンバート開始ボタンを置く)
   function openModal(ctx) {
     ctx = ctx || {};
     closeModal();
-    const backdrop = document.createElement('div');
-    backdrop.className = 'es-backdrop';
+    const backdrop = el('div', 'es-backdrop');
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeModal(); });
 
-    const modal = document.createElement('div');
-    modal.className = 'es-modal cs-modal';
-
-    const header = document.createElement('div');
-    header.className = 'es-modal-header';
-    const title = document.createElement('span');
-    title.textContent = T('変換設定');
-    const closeBtn = document.createElement('button');
+    const modal = el('div', 'es-modal cs-modal');
+    const header = el('div', 'es-modal-header');
+    const closeBtn = el('button', 'es-modal-close', '×');
     closeBtn.type = 'button';
-    closeBtn.className = 'es-modal-close';
-    closeBtn.textContent = '×';
     closeBtn.setAttribute('aria-label', T('閉じる'));
     closeBtn.addEventListener('click', closeModal);
     // 「to MML」から開いたときは、見出しの左に「コンバート開始」を置く(ユーザー指示)
     if (typeof ctx.onConvert === 'function') {
-      const go = document.createElement('button');
+      const go = el('button', 'cs-convert', T('コンバート開始'));
       go.type = 'button';
-      go.className = 'cs-convert';
-      go.textContent = T('コンバート開始');
       go.addEventListener('click', () => { closeModal(); ctx.onConvert(); });
       header.appendChild(go);
     }
-    header.appendChild(title);
+    header.appendChild(el('span', null, T('変換設定')));
     header.appendChild(closeBtn);
     modal.appendChild(header);
 
-    const body = document.createElement('div');
-    body.className = 'es-modal-body';
+    const body = el('div', 'es-modal-body cs-body');
+    const commit = () => { save(); syncAll(); refreshButtons(); };
+    const setKey = (k, v) => { current = MML.Convert.normalizeCmd(Object.assign({}, current, { [k]: v })); commit(); };
 
-    const note = document.createElement('p');
-    note.className = 'cs-note';
-    note.textContent = T('NSF/SPC/KSS/GBS/HES/VGM → MML 変換で出力するコマンドを選びます(全形式共通、次回の変換から有効)。');
-    body.appendChild(note);
-
-
-    // プリセット
-    const presetSection = document.createElement('div');
-    presetSection.className = 'es-section';
-    const presetHeading = document.createElement('h3');
-    presetHeading.textContent = T('プリセット');
-    presetSection.appendChild(presetHeading);
-    const presetRow = document.createElement('div');
-    presetRow.className = 'es-preset-row';
+    // ── 1. プリセット(+カスタム表示) ──
+    const presetSec = section(T('プリセット'));
+    const presetRow = el('div', 'es-preset-row');
     const presetButtons = {};
     for (const [name, label] of Object.entries(PRESET_LABELS())) {
-      const b = document.createElement('button');
+      const b = el('button', 'es-preset', label);
       b.type = 'button';
-      b.className = 'es-preset';
-      b.textContent = label;
       b.addEventListener('click', () => {
         // DPCMキー(ドラム(DPCM)パネル側の設定)はプリセットに含まれないので今の値を残す
         const keep = {};
         for (const k of (MML.Convert.DPCM_KEYS || [])) keep[k] = current[k];
         current = MML.Convert.normalizeCmd(Object.assign({}, keep, MML.Convert.CMD_PRESETS[name]));
-        save(); syncChecks(); refreshButtons();
+        commit();
       });
       presetButtons[name] = b;
       presetRow.appendChild(b);
     }
-    const customTag = document.createElement('span');
-    customTag.className = 'es-preset--custom';
-    customTag.textContent = T('カスタム');
+    const customTag = el('span', 'es-preset--custom', T('カスタム'));
     presetRow.appendChild(customTag);
-    presetSection.appendChild(presetRow);
-    body.appendChild(presetSection);
+    presetSec.appendChild(presetRow);
+    presetSec.appendChild(el('div', 'cs-desc', T('「忠実再現」は元曲の演奏をそのまま、「プレーン譜面」は音階と音色だけ(編曲の出発点)。どれかを触ると「カスタム」になります')));
+    body.appendChild(presetSec);
 
-    // 変換テンポ(プリセットの直下)。実体は各フォーマットのパネルにある <prefix>TempoBpm 入力で、
+    // ── 変換テンポ(プリセットの直下)。実体は各フォーマットのパネルにある <prefix>TempoBpm 入力で、
     // ここはその代理(どちらから変えても同じ値)。自動(空欄)と手動、手動タップの3通り。
     const tempoSrc = ctx.format ? document.getElementById(ctx.format + 'TempoBpm') : null;
     if (tempoSrc) {
-      const sec = document.createElement('div');
-      sec.className = 'es-section';
-      const h = document.createElement('h3');
-      h.textContent = T('変換テンポ');
-      sec.appendChild(h);
-
-      const row = document.createElement('div');
-      row.className = 'cs-tempo-row';
-      const autoBtn = document.createElement('button');
+      const sec = section(T('変換テンポ'));
+      const row = el('div', 'cs-tempo-row');
+      const autoBtn = el('button', 'es-preset', T('自動(推定)'));
       autoBtn.type = 'button';
-      autoBtn.className = 'es-preset';
-      autoBtn.textContent = T('自動(推定)');
       const tempoInput = document.createElement('input');
       tempoInput.type = 'number';
       tempoInput.min = '40'; tempoInput.max = '400'; tempoInput.step = '0.1';
       tempoInput.placeholder = T('自動');
       tempoInput.className = 'cs-tempo';
-      const tapBtn = document.createElement('button');
+      const tapBtn = el('button', 'es-preset cs-tap', T('タップ') + ' 👆'); // パネル側の「👆 タップ」と同じ絵文字(ユーザー指定)
       tapBtn.type = 'button';
-      tapBtn.className = 'es-preset cs-tap';
-      tapBtn.textContent = T('タップ') + ' 👆'; // パネル側の「👆 タップ」と同じ絵文字(ユーザー指定)
-      const tapOut = document.createElement('span');
-      tapOut.className = 'cs-desc';
-
+      const tapOut = el('span', 'cs-desc');
       const syncTempo = () => {
         tempoInput.value = tempoSrc.value;
         autoBtn.classList.toggle('es-preset--active', !tempoSrc.value);
@@ -230,7 +209,6 @@
         syncTempo();
         tapOut.textContent = '';
       });
-
       // タップと自動はパネル側の実装(main.js setupTempoControl)が正典。ここは同じボタンを
       // 押しているだけ ─ 計測窓や外れタップ除去のロジックを二重に持たないため
       tapBtn.addEventListener('click', () => {
@@ -240,165 +218,104 @@
         const info = document.getElementById(ctx.format + 'TempoTapInfo');
         tapOut.textContent = info ? info.textContent : (tempoSrc.value ? tempoSrc.value + ' BPM' : '');
       });
-
-      row.appendChild(autoBtn);
-      row.appendChild(tempoInput);
-      row.appendChild(tapBtn);
-      row.appendChild(tapOut);
+      row.appendChild(autoBtn); row.appendChild(tempoInput); row.appendChild(tapBtn); row.appendChild(tapOut);
       sec.appendChild(row);
-      const d = document.createElement('span');
-      d.className = 'cs-desc';
-      d.textContent = T('BPM(40〜400)。「自動」なら音符の長さから推定、「タップ」は曲に合わせて数回押すと決まります');
-      sec.appendChild(d);
+      sec.appendChild(el('div', 'cs-desc', T('BPM(40〜400)。「自動」なら音符の長さから推定、「タップ」は曲に合わせて数回押すと決まります')));
       body.appendChild(sec);
       syncTempo();
     }
 
-    // チェックボックス群
+    // ── 2. 出すコマンド(チップ) ──
+    const cmdSec = section(T('出すコマンド'));
+    cmdSec.classList.add('cs-span');
+    const chips = el('div', 'cs-chips');
     const checks = {};
-    for (const [heading, items] of GROUPS()) {
-      const sec = document.createElement('div');
-      sec.className = 'es-section';
-      const h = document.createElement('h3');
-      h.textContent = heading;
-      sec.appendChild(h);
-      for (const [key, label, desc] of items) {
-        const row = document.createElement('label');
-        row.className = 'cs-row';
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.addEventListener('change', () => {
-          current[key] = cb.checked;
-          save(); syncChecks(); refreshButtons();
-        });
-        const name = document.createElement('code');
-        name.className = 'cs-key';
-        name.textContent = label;
-        const d = document.createElement('span');
-        d.className = 'cs-desc';
-        d.textContent = desc;
-        row.appendChild(cb); row.appendChild(name); row.appendChild(d);
-        sec.appendChild(row);
-        checks[key] = cb;
-      }
-      body.appendChild(sec);
+    for (const [key, label, desc] of CMD_CHIPS()) {
+      const chip = el('label', 'cs-chip');
+      chip.title = desc;
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.addEventListener('change', () => setKey(key, cb.checked));
+      chip.appendChild(cb);
+      chip.appendChild(el('code', 'cs-key', label));
+      chips.appendChild(chip);
+      checks[key] = cb;
     }
+    cmdSec.appendChild(chips);
+    cmdSec.appendChild(el('div', 'cs-desc', T('OFFにしたコマンドは出力しません(説明は各項目にマウスを載せると出ます)')));
+    body.appendChild(cmdSec);
 
-    // 音符の区切り(NOTE_END)。厳密な変形なので譜面整形(近似)とは別の欄に置く
-    const neSec = document.createElement('div');
-    neSec.className = 'es-section';
-    const neH = document.createElement('h3');
-    neH.textContent = T('音符の区切り');
-    neSec.appendChild(neH);
-    const neRow = document.createElement('label');
-    neRow.className = 'cs-row';
-    const neSel = document.createElement('select');
-    for (const [val, label] of NOTE_END_OPTIONS()) {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      neSel.appendChild(o);
-    }
-    neSel.addEventListener('change', () => {
-      current = MML.Convert.normalizeCmd(Object.assign({}, current, { NOTE_END: neSel.value }));
-      save(); syncChecks(); refreshButtons();
-    });
-    const neDesc = document.createElement('span');
-    neDesc.className = 'cs-desc';
-    neDesc.textContent = T('元曲は音量が0に落ちた瞬間で音符が終わるため、音長が「減衰が0に達した時刻」という細かい値(d+4&d+64.&d+192 r…)になる。「次の音符まで」は音符をキーオン間隔まで伸ばし、無音区間を@v表の末尾の0(減衰が自然に0へ到達した音符)またはゲートタイム q<n>/@q<n>(それ以外)で表す。再生もNSF書き出しも変わらない厳密な変形');
-    neRow.appendChild(neSel); neRow.appendChild(neDesc);
-    neSec.appendChild(neRow);
-    body.appendChild(neSec);
+    // ── 3. 譜面の書き方 ──
+    const wrSec = section(T('譜面の書き方'));
+    wrSec.classList.add('cs-span');
+    // 1行 = [コントロール][名前][追加入力(許容フレーム等、無ければ空)][説明] の4列グリッド(CSS .cs-line)
+    const line = (control, label, desc, extra) => {
+      const row = el('label', 'cs-line');
+      row.appendChild(control || el('span'));
+      row.appendChild(el('span', 'cs-key', label));
+      row.appendChild(extra || el('span'));
+      row.appendChild(el('span', 'cs-desc', desc || ''));
+      return row;
+    };
+    const neSel = makeSelect(NOTE_END_OPTIONS(), () => setKey('NOTE_END', neSel.value));
+    wrSec.appendChild(line(neSel, T('音符の区切り'), T('「次の音符まで」は音符をキーオン間隔まで伸ばし、無音を@v表の末尾0かゲートで表す(再生は変わらない)。「音量ゼロ」は元の細かい区切りのまま')));
+    const gaCb = document.createElement('input'); gaCb.type = 'checkbox';
+    gaCb.addEventListener('change', () => setKey('GATE_APPROX', gaCb.checked));
+    const gtIn = document.createElement('input');
+    gtIn.type = 'number'; gtIn.min = '0'; gtIn.max = String(MML.Convert.GATE_TOL_MAX); gtIn.step = '1'; gtIn.className = 'cs-num';
+    gtIn.addEventListener('change', () => setKey('GATE_TOL', gtIn.value));
+    gtIn.addEventListener('click', (e) => e.preventDefault());
+    const gtWrap = el('span', 'cs-inline');
+    gtWrap.appendChild(el('span', null, T('許容')));
+    gtWrap.appendChild(gtIn);
+    gtWrap.appendChild(el('span', null, T('フレーム')));
+    wrSec.appendChild(line(gaCb, T('ゲートを揃える(近似)'), T('キーオフ位置のずれが許容内の音符を、チャンネルで最も多く合う q に揃える(休符や k を出さない)。レガートは切らない'), gtWrap));
+    // 音長を丸める(LEN_SNAP、src/convert/duration.js framesToLengths の slackFrames)
+    const lsIn = document.createElement('input');
+    lsIn.type = 'number'; lsIn.min = '0'; lsIn.max = String(MML.Convert.LEN_SNAP_MAX); lsIn.step = '1'; lsIn.className = 'cs-num';
+    lsIn.addEventListener('change', () => setKey('LEN_SNAP', lsIn.value));
+    lsIn.addEventListener('click', (e) => e.preventDefault());
+    const lsWrap = el('span', 'cs-inline');
+    lsWrap.appendChild(el('span', null, T('許容')));
+    lsWrap.appendChild(lsIn);
+    lsWrap.appendChild(el('span', null, T('フレーム')));
+    wrSec.appendChild(line(null, T('音長を丸める(近似)'), T('音符/休符の長さが許容フレーム数以内で大きな音価に乗るなら、タイの列(4&2&8..&64.&192)にせず1個で書く。余りは次の音符へ持ち越すので誤差は溜まらない。0で厳密(192分音符単位)'), lsWrap));
+    const srCb = document.createElement('input'); srCb.type = 'checkbox';
+    srCb.addEventListener('change', () => setKey('SHAPE_REST', srCb.checked));
+    wrSec.appendChild(line(srCb, T('短い休符を吸収(近似)'), T('音符直後の1/32未満の休符を音符に繋げる(伸ばした区間は最後の音量のまま鳴る)')));
+    const emCb = document.createElement('input'); emCb.type = 'checkbox';
+    emCb.addEventListener('change', () => setKey('ENV_MERGE', emCb.checked));
+    wrSec.appendChild(line(emCb, T('似た@v表を統合(近似)'), T('段の並びが同じで長さが±1違うだけの@v/@vr表を1本にまとめる(段の境目が最大1フレーム動く)')));
+    checks.GATE_APPROX = gaCb; checks.SHAPE_REST = srCb; checks.ENV_MERGE = emCb;
+    body.appendChild(wrSec);
 
-    // ピッチ精度(SA)
-    const saSec = document.createElement('div');
-    saSec.className = 'es-section';
-    const saH = document.createElement('h3');
-    saH.textContent = T('ピッチ精度(SA)');
-    saSec.appendChild(saH);
-    const saRow = document.createElement('label');
-    saRow.className = 'cs-row';
-    const saSel = document.createElement('select');
-    for (const [val, label] of PITCH_SA_OPTIONS()) {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      saSel.appendChild(o);
-    }
-    saSel.addEventListener('change', () => {
-      current = MML.Convert.normalizeCmd(Object.assign({}, current, { PITCH_SA: saSel.value }));
-      save(); syncChecks(); refreshButtons();
-    });
-    const saDesc = document.createElement('span');
-    saDesc.className = 'cs-desc';
-    saDesc.textContent = T('N163出力のSA<n>(D/EP/MPの倍率)の選び方。深いビブラートをテーブルのbyte幅を超えて表現する');
-    saRow.appendChild(saSel); saRow.appendChild(saDesc);
-    saSec.appendChild(saRow);
-
-    // N163波形(内蔵RAMに収まらないときの扱い)。SCC/PCエンジン/PCM系をN163へ載せる曲に効く
-    const nwRow = document.createElement('label');
-    nwRow.className = 'cs-row';
-    const nwSel = document.createElement('select');
-    for (const [val, label] of N163_WAVE_OPTIONS()) {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      nwSel.appendChild(o);
-    }
-    nwSel.addEventListener('change', () => {
-      current = MML.Convert.normalizeCmd(Object.assign({}, current, { N163_WAVE: nwSel.value }));
-      save(); syncChecks(); refreshButtons();
-    });
-    const nwDesc = document.createElement('span');
-    nwDesc.className = 'cs-desc';
-    nwDesc.textContent = T('N163が波形に使えるRAMは 128-8×使用ch数 バイトだけ(8ch使用なら64バイト=128サンプル)。同時に鳴る波形が入り切らない曲で、はみ出したぶんの波形長を落とすかどうか。落とさないとコンパイルエラーで再生・書き出しができません');
-    nwRow.appendChild(nwSel); nwRow.appendChild(nwDesc);
-    saSec.appendChild(nwRow);
-    body.appendChild(saSec);
-
-    // 基準ピッチ(全体オフセット)。ドライバ固有の音程表で曲全体が数十セントずれている曲向け
-    // (玄人向け: 閾値も出す。既定5セント未満は何もしない=従来と同じ出力)
-    const tnSec = document.createElement('div');
-    tnSec.className = 'es-section';
-    const tnH = document.createElement('h3');
-    tnH.textContent = T('基準ピッチ');
-    tnSec.appendChild(tnH);
-    const tnRow = document.createElement('label');
-    tnRow.className = 'cs-row';
-    const tnSel = document.createElement('select');
-    for (const [val, label] of TUNING_OPTIONS()) {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      tnSel.appendChild(o);
-    }
-    tnSel.addEventListener('change', () => {
-      current = MML.Convert.normalizeCmd(Object.assign({}, current, { TUNING: tnSel.value }));
-      save(); syncChecks(); refreshButtons();
-    });
-    const tnDesc = document.createElement('span');
-    tnDesc.className = 'cs-desc';
-    tnDesc.textContent = T('曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。音名は変わらず(キーとは別)、再生とNSF書き出しの周波数テーブルが同じだけずれる。SPCは絶対音程がサンプル原音の推定に依存するため、15セント以上の安定した偏差に限って適用する');
-    tnRow.appendChild(tnSel); tnRow.appendChild(tnDesc);
-    tnSec.appendChild(tnRow);
-    const tmRow = document.createElement('label');
-    tmRow.className = 'cs-row';
-    const tmKey = document.createElement('span');
-    tmKey.className = 'cs-key';
-    tmKey.textContent = T('最小偏差(セント)');
+    // ── 4. 詳細設定(折りたたみ) ──
+    const det = document.createElement('details');
+    det.className = 'cs-details cs-span';
+    det.appendChild(el('summary', null, T('詳細設定')));
+    const saSel = makeSelect(PITCH_SA_OPTIONS(), () => setKey('PITCH_SA', saSel.value));
+    det.appendChild(line(saSel, T('ピッチ精度(SA)'), T('N163出力のSA<n>(D/EP/MPの倍率)の選び方。深いビブラートをテーブルのbyte幅を超えて表現する')));
+    const nwSel = makeSelect(N163_WAVE_OPTIONS(), () => setKey('N163_WAVE', nwSel.value));
+    det.appendChild(line(nwSel, T('N163波形'), T('N163が波形に使えるRAMは 128-8×使用ch数 バイトだけ。同時に鳴る波形が入り切らない曲で、はみ出したぶんの波形長を落とすかどうか。落とさないとコンパイルエラーで再生・書き出しができません')));
+    const tnSel = makeSelect(TUNING_OPTIONS(), () => setKey('TUNING', tnSel.value));
     const tmIn = document.createElement('input');
-    tmIn.type = 'number';
-    tmIn.min = '0'; tmIn.max = String(MML.Convert.TUNING_MIN_MAX); tmIn.step = '0.5';
-    tmIn.addEventListener('change', () => {
-      current = MML.Convert.normalizeCmd(Object.assign({}, current, { TUNING_MIN: tmIn.value }));
-      save(); syncChecks(); refreshButtons();
-    });
-    const tmDesc = document.createElement('span');
-    tmDesc.className = 'cs-desc';
-    tmDesc.textContent = T('自動検出のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5。0〜50)。小さくするほど僅かなずれでも #TUNING が付く');
-    tmRow.appendChild(tmKey); tmRow.appendChild(tmIn); tmRow.appendChild(tmDesc);
-    tnSec.appendChild(tmRow);
-    body.appendChild(tnSec);
+    tmIn.type = 'number'; tmIn.min = '0'; tmIn.max = String(MML.Convert.TUNING_MIN_MAX); tmIn.step = '0.5'; tmIn.className = 'cs-num';
+    tmIn.addEventListener('change', () => setKey('TUNING_MIN', tmIn.value));
+    tmIn.addEventListener('click', (e) => e.preventDefault());
+    const tmWrap = el('span', 'cs-inline');
+    tmWrap.title = T('自動検出のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5。0〜50)。小さくするほど僅かなずれでも #TUNING が付く');
+    tmWrap.appendChild(el('span', null, T('最小偏差')));
+    tmWrap.appendChild(tmIn);
+    tmWrap.appendChild(el('span', null, T('セント')));
+    det.appendChild(line(tnSel, T('基準ピッチ'), T('曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。音名は変わらず、再生とNSF書き出しの周波数テーブルが同じだけずれる'), tmWrap));
+    body.appendChild(det);
 
-    function syncChecks() {
+    function syncAll() {
       for (const [k, cb] of Object.entries(checks)) cb.checked = !!current[k];
       neSel.value = current.NOTE_END || 'next';
+      gtIn.value = String(current.GATE_TOL != null ? current.GATE_TOL : MML.Convert.GATE_TOL_DEFAULT);
+      gtIn.disabled = !current.GATE_APPROX;
+      lsIn.value = String(current.LEN_SNAP != null ? current.LEN_SNAP : MML.Convert.LEN_SNAP_DEFAULT);
       saSel.value = current.PITCH_SA || 'octave';
       nwSel.value = current.N163_WAVE || 'fit';
       tnSel.value = current.TUNING || 'auto';
@@ -408,10 +325,9 @@
       for (const [n, b] of Object.entries(presetButtons)) b.classList.toggle('es-preset--active', n === name);
       customTag.style.display = name === 'custom' ? '' : 'none';
     }
-    syncChecks();
+    syncAll();
 
     modal.appendChild(body);
-
     backdrop.appendChild(modal);
     document.body.appendChild(backdrop);
     modalEl = backdrop;

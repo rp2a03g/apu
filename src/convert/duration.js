@@ -56,17 +56,38 @@
   const QUANTUM = TABLE[TABLE.length - 1][0]; // 10 tick (192分音符)
   const SLACK   = QUANTUM / 2;                // マッチ許容誤差 = 5 tick
 
-  MML.Convert.framesToLengths = function (frames, fpb, carryIn) {
+  // slackFrames(2026-09-08、変換設定 LEN_SNAP「音長を丸める」): 音符の境界が元曲からこのフレーム数まで
+  // ずれてよい(0/省略なら 192 分の半分=5tick の厳密量子化)。ドライバのテンポが小数(ppmck t71 は 4分=
+  // 50.8 フレーム)だと音符長が格子から ±1〜2 フレームずれ続け、全音符が 4&2&8..&64.&192 のような
+  // タイの列になる。
+  //   ・境界のずれ = carry(元曲の位置 − 書いた位置)。carryOut は ±tol に収める(超過分は捨てる)
+  //   ・音価の一致は rem + 2·tol まで許す: 持ち越しが逆向きに最大 tol 溜まっていても、音符自身のずれが
+  //     tol 以内なら必ず 1 個の音価に乗るように(tol だけだと Wing Defenders の 16 分×8 連続で +0.3
+  //     フレームずつ溜まった carry が次の 4 分音符を 8..&64. に割っていた)
+  //   ・余り(rem)は tol 以下になったら止める(tol〜2tol の余りは小さな音価で埋めてから carry へ)
+  MML.Convert.framesToLengths = function (frames, fpb, carryIn, slackFrames) {
     carryIn = carryIn || 0;
     const ticksPerFrame = TPQN / fpb;
     const target = frames * ticksPerFrame + carryIn;
+    const tol = Math.max(SLACK, (slackFrames || 0) * ticksPerFrame);
+    const slack = slackFrames > 0 ? tol * 2 : tol;
 
     const result = [];
     let rem = target;
-    while (rem > SLACK) {
+    while (rem > tol) {
       let best = null;
-      for (const [t, name] of TABLE) {
-        if (t <= rem + SLACK) { best = [t, name]; break; }
+      if (slackFrames > 0) {
+        // 丸めモード: 許容内(t ≤ rem+2tol)の音価のうち rem に最も近いもの(降順表なので最初に見つかる
+        // 大きい方を無条件に取ると、16分(120tick)の音符が 24..(140tick)に化ける)
+        for (const [t, name] of TABLE) {
+          if (t > rem + slack) continue;
+          if (!best || Math.abs(t - rem) < Math.abs(best[0] - rem)) best = [t, name];
+          if (t < rem) break; // これより小さい音価は遠ざかるだけ
+        }
+      } else {
+        for (const [t, name] of TABLE) {
+          if (t <= rem + slack) { best = [t, name]; break; }
+        }
       }
       if (!best) break;
       result.push(best[1]);
@@ -83,7 +104,8 @@
       consumed = QUANTUM;
     }
 
-    return { lengths: result, carryOut: target - consumed };
+    const carryOut = target - consumed;
+    return { lengths: result, carryOut: slackFrames > 0 ? Math.max(-tol, Math.min(tol, carryOut)) : carryOut };
   };
 
   // events(隙間補完済み、note=null休符含む)を通しでframesToLengths相当の量子化を行い、
@@ -91,14 +113,14 @@
   // l<n>(デフォルト音長)をチャンネル先頭で宣言し、以後その値と一致する音符/休符は
   // 数値部分を省略してMMLを見やすくするための下調べに使う(呼び出し側の
   // src/convert/mmlEmit.js参照)。該当データが無ければMML既定値の4を返す。
-  MML.Convert.detectDefaultLength = function (events, fpb) {
+  MML.Convert.detectDefaultLength = function (events, fpb, slackFrames) {
     const counts = new Map();
     let carry = 0;
     const sorted = (events || []).slice().sort((a, b) => a.start - b.start);
     for (const ev of sorted) {
       const dur = ev.end - ev.start;
       if (dur <= 0) continue;
-      const { lengths, carryOut } = MML.Convert.framesToLengths(dur, fpb, carry);
+      const { lengths, carryOut } = MML.Convert.framesToLengths(dur, fpb, carry, slackFrames);
       carry = carryOut;
       for (const l of lengths) {
         const m = /^(\d+)/.exec(l);

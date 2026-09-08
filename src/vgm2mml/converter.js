@@ -747,8 +747,7 @@
     for (const ch of scoreChannels) {
       if (ch.isDrum) continue;
       const sounding = ch.events.filter(ev => ev.note !== null);
-      for (const ev of sounding) noteDurations.push(ev.end - ev.start);
-      noteDurations.push(...MML.Convert.onsetIntervals(sounding.map(ev => ev.start)));
+      noteDurations.push(...MML.Convert.tempoMaterial(sounding.map(ev => ev.start), sounding.map(ev => ev.end - ev.start)));
     }
     const bpm = options.bpm
       ? MML.Convert.refineBpm(options.bpm, noteDurations, frameRate)

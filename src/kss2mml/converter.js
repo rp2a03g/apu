@@ -324,14 +324,13 @@
     }
     } // ← 既定割当の従来経路ここまで(customPlanのときは上のBorrow.compose()を使う)
 
-    // 音長に加え、チャンネル毎の発音開始間隔(IOI)も検出材料にする
-    // (ゲートタイムで音符が短く切られてもIOIはグリッドに乗るため頑健)。
+    // チャンネル毎の発音開始間隔(IOI)を検出材料にする(MML.Convert.tempoMaterial、src/convert/bpm.js。
+    // ゲートタイムで音符が短く切られてもIOIはグリッドに乗るため頑健)。
     const noteDurations = [];
     for (const ch of scoreChannels) {
       if (ch.isDrum) continue; // ドラム(E)はテンポ推定から外す(vgm2mml と同じ理由)
       const sounding = ch.events.filter(ev => ev.note !== null);
-      for (const ev of sounding) noteDurations.push(ev.end - ev.start);
-      noteDurations.push(...MML.Convert.onsetIntervals(sounding.map(ev => ev.start)));
+      noteDurations.push(...MML.Convert.tempoMaterial(sounding.map(ev => ev.start), sounding.map(ev => ev.end - ev.start)));
     }
     const bpm = options.bpm
       ? MML.Convert.refineBpm(options.bpm, noteDurations, frameRate)

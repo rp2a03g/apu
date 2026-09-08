@@ -177,14 +177,25 @@
   // ★OP<n>を出さずに@0で鳴る音符は、そのチャンネルが最後にロードした音色で鳴る
   //   (compiler.jsの同時使用チェックの toneAt() と同じ解釈)。ここでも直前の音色を
   //   引き継がせないと、その区間だけ「誰も使っていない」ことになって取りこぼす。
+  // ★区間の終わりは次の音符の始まりまで(上限 NOTE_END_REACH フレーム)伸ばして見る(2026-09-08)。
+  //   この解決は各 *2mml で applyNoteEnd(音符の区切り、src/convert/envelope.js)より前に走るが、
+  //   applyNoteEnd は音符をキーオン間隔まで(ゲートで無音を表して)伸ばすので、抽出時点の end で
+  //   重なりを見ると、伸びた先で別の自作音色と重なってコンパイル不能になる(実測: Lagrange Point
+  //   14.9秒で I(OP0) と L(OP1))。伸び代の上限は applyNoteEnd の maxGap(2拍)相当
+  const NOTE_END_REACH = 120;
   function customIntervals(ch) {
     const out = [];
     let last = null;
-    for (const ev of ch.events || []) {
+    const evs = (ch.events || []).slice().sort((a, b) => a.start - b.start);
+    for (let i = 0; i < evs.length; i++) {
+      const ev = evs[i];
       if (ev.vrc7Tone !== undefined) last = ev.vrc7Tone;
       if (ev.note === null || last === null) continue;
       if ((ev.instrument || 0) !== 0) continue; // @0以外はプリセット指定なので無関係
-      if (ev.end > ev.start) out.push({ s: ev.start, e: ev.end, tone: last });
+      if (ev.end <= ev.start) continue;
+      let e = ev.end;
+      for (let j = i + 1; j < evs.length; j++) if (evs[j].note !== null) { e = Math.max(e, Math.min(evs[j].start, ev.end + NOTE_END_REACH)); break; }
+      out.push({ s: ev.start, e, tone: last });
     }
     return out;
   }

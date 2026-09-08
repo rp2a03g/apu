@@ -431,7 +431,15 @@
   // 戻り値: { absorbed, gated } … (1)/(2) で伸ばした連鎖の数
   const KEYOFF_RELEASE_LETTERS = /^[G-L]$/; // VRC7 の完全固定チャンネル文字(assignExpansionLetters)
   const GATE_FULL = 'q8';                     // コンパイラの既定(ゲート無し)
-  const GATE_SWITCH_COST = 4;                 // 状態コマンド 1 個のコスト(休符トークン 1 個 = 1 に対して)
+  const GATE_SWITCH_COST_EXACT = 4;           // 状態コマンド 1 個のコスト(休符トークン 1 個 = 1 に対して)
+  const GATE_SWITCH_COST_APPROX = 4;          // 近似モード: 状態コマンド 1 個のコスト
+  const GATE_DEV_COST = 0.5;                  // 近似モード: キーオフ位置のずれ 1 フレームあたりのコスト
+  const GATE_AT_BIAS = 0.5;                   // 近似モード: @q/@k より q<n>(比率)を優先する読みやすさの重み
+  // 近似モード: 音符の間に残る休符/k トークン 1 個のコスト。読みやすさの目的(ユーザー要望「音が繋がって
+  // 演奏が読める」)では休符の細切れが一番の敵なので、状態コマンド 1 個(4)に近い重さにする。Wing Defenders:
+  // 13/76/51 フレームの音符が全て「次の 4 フレーム前」でキーオフ → @q4 一本(202 フレームの音符だけ @q10)。
+  // 休符 1 個 = 2 だと @q4→@q10→@q4 の切り替え 2 回より q8 のまま k を並べる方が安く見えてしまう
+  const GATE_REST_COST_APPROX = 3;
 
   // ゲート状態 s のとき、音長 D フレームの音符が実際に鳴るフレーム数(compiler.js computeGateFrames
   // =実機ppmckc calcGateTime の切り捨て式。MML.Mml が無い環境(Worker)は使わないので直書きしない)
@@ -453,21 +461,29 @@
   //   @k<A>(キーオンから A フレーム、本ツール独自)は D-A>=2 のとき候補(D'=D-1 でも無音が残る)。
   //   固定オン長のドライバ(Konami 等)ではこれ1つで全音符が表せ、レガート(D<=A)の音符にも
   //   そのまま掛けられる(keepsFull)
-  function gateCandidates(D, A) {
+  // tol(GATE_TOL、GATE_APPROX 時): キーオフ位置のずれをこのフレーム数まで許し、候補に dev(ずれ)を付ける。
+  //   ゲートの近似(2026-09-08、ユーザー要望「音が繋がって演奏が読める方が大事」): 厳密一致だけだと
+  //   ドライバのキーオフ位置が比率でも固定フレームでもない曲(Wing Defenders: 短い音符は q6、長い音符は
+  //   次の4フレーム前)で統一できるゲートが無く、休符や k が細切れのまま残る。数フレームのずれは
+  //   音楽的に聞こえないので、許容内なら同じ q で書く(レガートと長い無音は切らない)
+  function gateCandidates(D, A, tol) {
     const c = [];
-    if (D - A >= 2) c.push('@k' + A);
+    if (D - A >= 2) c.push({ s: '@k' + A, dev: 0 });
     for (let n = 1; n <= 7; n++) {
       const q = 'q' + n;
-      if (gateFramesOf(q, D) !== A) continue;
+      const g = gateFramesOf(q, D);
+      const dev = Math.abs(g - A);
+      if (dev > (tol || 0) || g >= D) continue;
+      // D±1(コンパイル後の carry)でも無音が残ること。厳密(tol=0)ではずれも1フレーム以内に限る
       let ok = true;
       for (const d of [D - 1, D + 1]) {
         if (d < 2) continue;
-        const g = gateFramesOf(q, d);
-        if (g >= d || Math.abs(g - A) > 1) ok = false;
+        const g2 = gateFramesOf(q, d);
+        if (g2 >= d || (!tol && Math.abs(g2 - A) > 1)) ok = false;
       }
-      if (ok) c.push(q);
+      if (ok) c.push({ s: q, dev });
     }
-    if (D - A >= 1) c.push('@q' + (D - A));
+    if (D - A >= 1) c.push({ s: '@q' + (D - A), dev: 0 });
     return c;
   }
 
@@ -480,11 +496,14 @@
     if (c.NOTE_END !== 'next') { if (envReg) envReg.compact(scoreChannels); return stats; }
     const beat = fpb > 0 ? fpb : 60;
     const maxGap = beat * 2;
+    const approx = !!c.GATE_APPROX;
+    const tol = Math.max(0, Math.min(8, c.GATE_TOL | 0));
     const compiledFps = (MML.Mml && MML.Mml.FRAME_RATE_NTSC) || 60.0988;
     const ratio = srcFps > 0 ? compiledFps / srcFps : 1;
     const toC = (frames) => Math.max(1, Math.round(frames * ratio)); // 元曲フレーム数 → コンパイル後
     // 音長トークン数の見積もり(休符/音符を何個の音価に分けて書くことになるか)
-    const frags = (frames) => frames <= 0 ? 0 : MML.Convert.framesToLengths(frames, beat, 0).lengths.length;
+    const lenSnap = MML.Convert.lenSnapOf(c); // 音長の丸め(LEN_SNAP)込みで mmlEmit と同じ分割数にする
+    const frags = (frames) => frames <= 0 ? 0 : MML.Convert.framesToLengths(frames, beat, 0, lenSnap).lengths.length;
 
     for (const ch of scoreChannels || []) {
       if (!ch || !ch.events) continue;
@@ -535,31 +554,42 @@
                 cn.kind = 'env';                       // (1) 済み: ゲートオフが可聴長以降なら状態を問わない
               }
             }
-            if (cn.kind === 'gap') cn.cands = gateCandidates(cn.Dc, cn.Ac);
+            if (cn.kind === 'gap') cn.cands = gateCandidates(cn.Dc, cn.Ac, approx ? tol : 0);
           }
         }
       }
 
-      // (2) 動的計画法: 状態=ゲートコマンド。コスト=状態コマンド数×GATE_SWITCH_COST + 音長トークン数
-      //   costOf(cn, s): この連鎖を状態 s で書くコスト(不可なら Infinity)。absorbed は伸ばすか
+      // (2) 動的計画法: 状態=ゲートコマンド。コスト=状態コマンド数×切り替えコスト + 音長トークン数
+      //   (+近似モードではキーオフ位置のずれ×GATE_DEV_COST と @q/@k のバイアス)
+      //   costOf(cn, s): この連鎖を状態 s で書くコスト(不可なら null)。absorbed は伸ばすか
+      const SWITCH = approx ? GATE_SWITCH_COST_APPROX : GATE_SWITCH_COST_EXACT;
+      // @q<n>(ppmck 本家の q8,-n)は独自拡張の @k<n> より優先(同じずれ 0 なら @k を 2 倍重くして同点を避ける)
+      const bias = (s) => !approx || s[0] !== '@' ? 0 : (s[1] === 'k' ? GATE_AT_BIAS * 2 : GATE_AT_BIAS);
+      const REST = approx ? GATE_REST_COST_APPROX : 1;
       const costOf = (cn, s) => {
         if (cn.kind === 'tight') return keepsFull(s, cn.Ac) ? { cost: frags(cn.A), absorbed: false } : null;
-        if (cn.kind === 'rest') return keepsFull(s, cn.Ac) ? { cost: frags(cn.A) + frags(cn.gap), absorbed: false } : null;
-        if (cn.kind === 'env') return gateFramesOf(s, cn.Dc) >= cn.Ac ? { cost: frags(cn.D), absorbed: false } : null;
-        if (cn.cands.indexOf(s) >= 0) return { cost: frags(cn.D), absorbed: true };
-        return keepsFull(s, cn.Ac) ? { cost: frags(cn.A) + frags(cn.gap), absorbed: false } : null;
+        if (cn.kind === 'rest') return keepsFull(s, cn.Ac) ? { cost: frags(cn.A) + frags(cn.gap) * REST, absorbed: false } : null;
+        if (cn.kind === 'env') {
+          const g = gateFramesOf(s, cn.Dc);
+          if (g >= cn.Ac) return { cost: frags(cn.D), absorbed: false };
+          if (approx && cn.Ac - g <= tol) return { cost: frags(cn.D) + (cn.Ac - g) * GATE_DEV_COST, absorbed: false }; // 減衰の尾を数フレーム切るだけ
+          return null;
+        }
+        const cand = cn.cands.find(x => x.s === s);
+        if (cand) return { cost: frags(cn.D) + cand.dev * GATE_DEV_COST + bias(s), absorbed: true };
+        return keepsFull(s, cn.Ac) ? { cost: frags(cn.A) + frags(cn.gap) * REST, absorbed: false } : null;
       };
       let prevRow = new Map([[GATE_FULL, { cost: 0, from: null, absorbed: false }]]);
       const rows = [];
       for (const cn of chains) {
-        const states = new Set([GATE_FULL, ...(cn.cands || []), ...prevRow.keys()]);
+        const states = new Set([GATE_FULL, ...(cn.cands || []).map(x => x.s), ...prevRow.keys()]);
         const row = new Map();
         for (const s of states) {
           const r = costOf(cn, s);
           if (!r) continue;
           let best = null;
           for (const [p, pr] of prevRow) {
-            const total = pr.cost + (p === s ? 0 : GATE_SWITCH_COST) + r.cost;
+            const total = pr.cost + (p === s ? 0 : SWITCH) + r.cost;
             if (!best || total < best.cost || (total === best.cost && p === s)) best = { cost: total, from: p, absorbed: r.absorbed };
           }
           if (best) row.set(s, best);
@@ -740,6 +770,18 @@
       return this._release;
     }
   });
+  // リリース列の末尾に 0 を足す(2026-09-08): 音符が無音で終わっていて(endedSilent)、リリースの最後の
+  // 段が短い(末尾値の連続が RELEASE_TAIL_ZERO_MAX 以下)なら、その無音はリリース表の最終段 0 そのもの
+  // ({4 4 3 2} → {4 4 3 2 0})。0 を足せば「表が 0 に達しないまま無音」(releaseEnd、k…r… 書き)に
+  // ならず、音符をゲートで伸ばして q<n> だけで書ける。末尾値を長く保持してから切れる列は、0 を足すと
+  // 保持長ごとに表が量産されるので足さない(呼び出し側が releaseEnd を付ける)
+  const RELEASE_TAIL_ZERO_MAX = 3;
+  MML.Convert.releaseWithZero = function (rel, endedSilent) {
+    if (!endedSilent || !rel || rel.length === 0 || rel[rel.length - 1] === 0) return rel;
+    let run = 1;
+    while (run < rel.length && rel[rel.length - 1 - run] === rel[rel.length - 1]) run++;
+    return run <= RELEASE_TAIL_ZERO_MAX ? [...rel, 0] : rel;
+  };
   // 音量列 → { volume | envelopeV, envelopeVr?, keyOffAt?, releaseTailLast? }
   // keyOffAt が付いた音符は applyReleaseSplits(applyNoteEnd 冒頭)で終端をキーオフ位置へ縮め、
   // リリースが 0 に達しないまま次が休符なら releaseEnd を付ける(mmlEmit が k…r… で出す)
@@ -790,7 +832,12 @@
           continue;
         }
         const nextIsRest = !next || next.note == null;
-        if (nextIsRest && tailLast !== 0) ev.releaseEnd = ev.end;
+        if (nextIsRest && tailLast !== 0) {
+          // 無音で終わる音符: リリースの最終段が短ければ表に 0 を足して登録し直す(releaseWithZero)
+          const rel = reg && seq ? MML.Convert.releaseWithZero(seq.slice(keyOffAt), true) : null;
+          const vr = rel && rel[rel.length - 1] === 0 ? reg.release.assignHold(rel) : null;
+          if (vr != null) ev.envelopeVr = vr; else ev.releaseEnd = ev.end;
+        }
         ev.audibleEnd = undefined;
         ev.end = ev.start + keyOffAt;
         if (next && next.note != null && next.start < ev.end) ev.end = next.start;

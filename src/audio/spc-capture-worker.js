@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-08 08:48:20
+ * Built by tools/build-capture-workers.ps1 at 2026-09-08 11:40:19
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-08 08:48:20';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-08 11:40:19';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -2657,8 +2657,7 @@
         .map(ev => ({ frame: ev.frame, len: ev.len }))
         .concat(drumHitsAll.filter(h => h.ch === ch).map(h => ({ frame: h.startFrame, len: h.endFrame - h.startFrame })))
         .sort((a, b) => a.frame - b.frame);
-      for (const ev of sounding) noteDurations.push(ev.len);
-      noteDurations.push(...MML.Convert.onsetIntervals(sounding.map(ev => ev.frame)));
+      noteDurations.push(...MML.Convert.tempoMaterial(sounding.map(ev => ev.frame), sounding.map(ev => ev.len)));
     }
     const bpm = options.bpm
       ? MML.Convert.refineBpm(options.bpm, noteDurations, FPS_SPC)
@@ -2976,11 +2975,13 @@
            + `定義${st.clips}件 / 打点${st.segments}個 / ROM ${(st.bytes / 1024).toFixed(1)}KB\n`;
     }
 
-    // 実測エンベロープ由来の音量テーブル定義 (@vN / @vr0)
-    for (const line of envReg.defLines()) mml += line + '\n';
-    if (releaseTable) {
-      mml += `@vr0 = { ${releaseTable.join(' ')} }\n`;
-    }
+    // 実測エンベロープ由来の音量テーブル定義(@v<n>)は、音符の区切り(applyNoteEnd)が表を書き換えた
+    // 後に出す必要があるので、emitScore の headerLines に移した(下)。
+    // ★@vr0(KOFF 後のリリース表)は廃止(2026-09-08): 実機 DSP のリリースは毎サンプル env-=8 で
+    //   最大値からでも約256サンプル=8ms(1フレーム未満)で 0 に落ちる。フレーム単位の表では {0} に
+    //   なり、q8 の音符では鳴る経路も無かった。ADSR の減衰・サステインは KON 中の実測列(@v)が
+    //   すでに持っているので、SPC の音符は「@v 付き、キーオフで終わる」だけの他形式と同じ形にする
+    //   (これで NOTE_END の吸収・ゲートも SPC に効く)
 
     mml += '\n';
 
@@ -3057,7 +3058,6 @@
           start: ev.frame, end: ev.frame + ev.len, note,
           rawFreq: ev.rawFreq,
           envelopeV: hasEnvelope && ev.envelopeIdx !== undefined ? ev.envelopeIdx : undefined,
-          envelopeVr: hasEnvelope && ev.envelopeIdx !== undefined ? 0 : undefined,
           volume: !hasVolume ? undefined
             : (cmd.ENV && envCapableType(targetType))
               ? (ev.envelopeIdx !== undefined ? undefined : ev.plainVol)
@@ -3120,16 +3120,17 @@
       scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents, hasInstrument: true });
     }
 
-    // ★音符の区切り NOTE_END(MML.Convert.applyNoteEnd)は SPC では呼ばない。
-    //   SPC の @v 付き音符は全て @vr0(リリース表)を伴う「音符の終わり=キーオフでリリース開始」の
-    //   意味論だが、q<n> を一切出していないため現状 @vr0 が鳴る経路が無い(既定 q8 ではリリース
-    //   区間が存在しない、compiler.js 冒頭コメント)。ゲートタイムで休符を吸収すると @vr0 が
-    //   鳴り始めて音が変わる(良い方向だが別件として扱う)。
+    // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前。
+    // SPC の音符は KOFF で終わり(KOFF 後のリリースは1フレーム未満で無音)、ADSR は KON 中の実測列
+    // (@v)に入っているので、他形式と同じく休符の吸収・ゲートが効く
+    MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, FPS_SPC);
     if (scoreChannels.length > 0) {
       mml += MML.Convert.emitScore(scoreChannels, fpb,
         { totalFrames: FRAMES, tempoBpm: bpm, cmd,
-          headerLines: [...MML.Convert.tuningHeaderLines(), ...vrc7Notes, ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
+          headerLines: [...MML.Convert.tuningHeaderLines(), ...vrc7Notes, ...envReg.defLines(), ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
             ...pitchReg.defLines(), ...noteEnvReg.defLines()] }) + '\n';
+    } else {
+      for (const line of envReg.defLines()) mml += line + '\n';
     }
 
     // ── 波形データを options に付加して返す ─────────────────────────
@@ -3190,6 +3191,15 @@
  *            どおり休符(ドラムはMMLに出ない)
  *
  * 譜面整形(既定 false = 従来通り。★近似=音が変わりうる整形はここに集める):
+ *   GATE_APPROX … ゲートを揃える(2026-09-08、既定 true)。NOTE_END='next' のゲート候補に、キーオフ位置の
+ *                 ずれが GATE_TOL フレーム以内の q<n> も許し、切り替えを重くしてチャンネルの大半を1つの
+ *                 q で書く(休符や k<len> の細切れを出さない)。レガートと長い無音は切らない。false なら
+ *                 厳密一致のゲートだけ(以前の挙動)
+ *   GATE_TOL    … その許容フレーム数(0〜8、既定2)
+ *   LEN_SNAP    … 音長を丸める(2026-09-08、既定2フレーム、0=厳密)。音符/休符の長さがこのフレーム数以内で
+ *                 大きな音価に乗るならタイの列(4&2&8..&64.&192)にせず 1 個で書き、余りは次の音符へ持ち越す
+ *                 (src/convert/duration.js framesToLengths の slackFrames)。ドライバのテンポが小数で音符長が
+ *                 ±1〜2 フレーム揺れる曲(ppmck の t71 等)の譜面を素直にする。境界のずれは最大このフレーム数
  *   ENV_MERGE   … 似た @v 表を統合する(2026-09-08)。値の並び(段の値列)が同じで各段の長さが±1・全体長も
  *                 ±1以内の表を、最も多くの音符が参照する変種へ寄せる(EnvelopeRegistry.mergeSimilar)。
  *                 ドライバのエンベロープが自走タイマー(2.33フレーム周期等)で進む曲では段の位置が音符の
@@ -3253,7 +3263,16 @@
   MML.Convert = MML.Convert || {};
 
   const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
-  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE'];
+  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE', 'GATE_APPROX'];
+  // GATE_TOL: ゲートを揃える(GATE_APPROX)ときに許すキーオフ位置のずれ(フレーム、0〜8、既定2)
+  const GATE_TOL_DEFAULT = 2, GATE_TOL_MAX = 8;
+  MML.Convert.GATE_TOL_DEFAULT = GATE_TOL_DEFAULT;
+  MML.Convert.GATE_TOL_MAX = GATE_TOL_MAX;
+  // LEN_SNAP: 音長を丸める許容フレーム数(0=厳密(192分)、1〜4、既定2。src/convert/duration.js framesToLengths)
+  const LEN_SNAP_DEFAULT = 2, LEN_SNAP_MAX = 4;
+  MML.Convert.LEN_SNAP_DEFAULT = LEN_SNAP_DEFAULT;
+  MML.Convert.LEN_SNAP_MAX = LEN_SNAP_MAX;
+  MML.Convert.lenSnapOf = (cmd) => (cmd && cmd.LEN_SNAP > 0) ? Math.min(LEN_SNAP_MAX, cmd.LEN_SNAP) : 0;
   // 音符の区切り(冒頭コメント NOTE_END)
   const NOTE_END_VALUES = ['next', 'zero'];
   MML.Convert.NOTE_END_VALUES = NOTE_END_VALUES;
@@ -3292,11 +3311,13 @@
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, ENV_MERGE: false, NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
+                SHAPE_REST: false, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT,
+                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, ENV_MERGE: false, NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
+                SHAPE_REST: true, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT,
+                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
@@ -3314,6 +3335,14 @@
       }
       if (cmd.PITCH_SA != null && PITCH_SA_VALUES.indexOf(cmd.PITCH_SA) >= 0) out.PITCH_SA = cmd.PITCH_SA;
       if (cmd.NOTE_END != null && NOTE_END_VALUES.indexOf(cmd.NOTE_END) >= 0) out.NOTE_END = cmd.NOTE_END;
+      if (cmd.GATE_TOL != null) {
+        const v = parseInt(cmd.GATE_TOL, 10);
+        if (v >= 0 && v <= GATE_TOL_MAX) out.GATE_TOL = v;
+      }
+      if (cmd.LEN_SNAP != null) {
+        const v = parseInt(cmd.LEN_SNAP, 10);
+        if (v >= 0 && v <= LEN_SNAP_MAX) out.LEN_SNAP = v;
+      }
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
       if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
       if (cmd.N163_WAVE != null && N163_WAVE_VALUES.indexOf(cmd.N163_WAVE) >= 0) out.N163_WAVE = cmd.N163_WAVE;
@@ -3332,7 +3361,7 @@
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
       const p = MML.Convert.normalizeCmd(PRESETS[name]);
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'GATE_TOL', 'LEN_SNAP', 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };
