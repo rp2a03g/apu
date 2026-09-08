@@ -452,7 +452,11 @@
     opts = opts || {};
     const totalFrames     = opts.totalFrames || 0;
     const beatsPerMeasure = opts.beatsPerMeasure || 4;
-    const measuresPerLine = opts.measuresPerLine || 4;
+    // 出力の書式(変換設定 src/convert/options.js LAYOUT_DEFAULTS): 1行の小節数 / パートの並び / 小節揃え
+    const layout = Object.assign({}, MML.Convert.LAYOUT_DEFAULTS || {}, opts.cmd || {});
+    const measuresPerLine = opts.measuresPerLine || Math.max(1, layout.BARS_PER_LINE | 0) || 4;
+    const partOrder = layout.PART_ORDER === 'part' ? 'part' : 'block';
+    const barAlign = !!layout.BAR_ALIGN;
     const framesPerMeasure = fpb * beatsPerMeasure;
     const measureCount = Math.max(1, Math.ceil(totalFrames / framesPerMeasure));
 
@@ -503,23 +507,37 @@
       });
     });
 
-    // 小節ごとに全チャンネル中の最大幅で列を揃える
+    // 小節揃え(BAR_ALIGN): 小節ごとに全チャンネル中の最大幅で列を揃える。OFF ならスペース1つで区切る
     const colWidth = [];
     for (let m = 0; m < measureCount; m++) {
       let w = 0;
-      for (const texts of perChannelMeasureTexts) w = Math.max(w, texts[m].length);
+      if (barAlign) for (const texts of perChannelMeasureTexts) w = Math.max(w, texts[m].trimStart().length);
       colWidth.push(w);
     }
+    const lineOf = (ci, blockStart, blockEnd) => {
+      let line = `${channelsData[ci].letter} `;
+      for (let m = blockStart; m < blockEnd; m++) {
+        const t = perChannelMeasureTexts[ci][m].trimStart(); // 小節頭がコマンドだと先頭に区切り空白が付くので落とす
+        if (barAlign) line += t.padEnd(colWidth[m]) + ' ';
+        else if (t) line += t + ' '; // 空の小節(音符が続いているだけ)は詰める
+      }
+      return line.trimEnd();
+    };
 
+    if (partOrder === 'part') {
+      // パートごとにまとめる: A を最後まで出してから B へ(パートの間は空行)
+      for (let ci = 0; ci < channelsData.length; ci++) {
+        if (ci > 0) lines.push('');
+        for (let blockStart = 0; blockStart < measureCount; blockStart += measuresPerLine) {
+          lines.push(lineOf(ci, blockStart, Math.min(measureCount, blockStart + measuresPerLine)));
+        }
+      }
+      return lines.join('\n');
+    }
+    // チャンネル順に小節ブロックで並べる(既定): 全パートを BARS_PER_LINE 小節ずつ縦に揃える
     for (let blockStart = 0; blockStart < measureCount; blockStart += measuresPerLine) {
       const blockEnd = Math.min(measureCount, blockStart + measuresPerLine);
-      for (let ci = 0; ci < channelsData.length; ci++) {
-        let line = `${channelsData[ci].letter} `;
-        for (let m = blockStart; m < blockEnd; m++) {
-          line += perChannelMeasureTexts[ci][m].padEnd(colWidth[m]) + ' ';
-        }
-        lines.push(line.trimEnd());
-      }
+      for (let ci = 0; ci < channelsData.length; ci++) lines.push(lineOf(ci, blockStart, blockEnd));
       if (blockEnd < measureCount) lines.push('');
     }
 

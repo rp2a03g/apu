@@ -63,6 +63,12 @@
     ['a440', T('12平均律固定(A4=440Hz・従来)')],
   ];
   const PRESET_LABELS = () => ({ faithful: T('忠実再現'), plain: T('プレーン譜面') });
+  // 出力の書式: パートの並び(src/convert/options.js PART_ORDER)
+  const PART_ORDER_OPTIONS = () => [
+    ['block', T('チャンネル順に小節ブロック')],
+    ['part',  T('パートごとにまとめる')],
+  ];
+  let modalPos = null; // ドラッグで動かした位置(次に開いたときも同じ場所に)
 
   let current = null; // 正規化済み cmd
   let modalEl = null;
@@ -104,6 +110,31 @@
   function closeModal() {
     if (modalEl) { modalEl.remove(); modalEl = null; }
     document.removeEventListener('keydown', onKey);
+  }
+  // 見出し行のドラッグでダイアログを動かす(ユーザー要望 2026-09-08)。動かした位置は次回も使う
+  function makeDraggable(modal, header) {
+    const place = (x, y) => {
+      const w = modal.offsetWidth || 600, h = modal.offsetHeight || 400;
+      x = Math.max(0, Math.min(window.innerWidth - Math.min(w, 120), x));
+      y = Math.max(0, Math.min(window.innerHeight - 40, y));
+      modal.classList.add('cs-modal--moved');
+      modal.style.left = x + 'px';
+      modal.style.top = y + 'px';
+      modalPos = { x, y };
+      void h;
+    };
+    if (modalPos) requestAnimationFrame(() => place(modalPos.x, modalPos.y));
+    let drag = null;
+    header.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || e.target.closest('button, input, select, label')) return;
+      const r = modal.getBoundingClientRect();
+      drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+      e.preventDefault();
+    });
+    const onMove = (e) => { if (drag) place(e.clientX - drag.dx, e.clientY - drag.dy); };
+    const onUp = () => { drag = null; };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   }
   function onKey(e) { if (e.key === 'Escape') closeModal(); }
 
@@ -154,6 +185,7 @@
     header.appendChild(el('span', null, T('変換設定')));
     header.appendChild(closeBtn);
     modal.appendChild(header);
+    makeDraggable(modal, header);
 
     const body = el('div', 'es-modal-body cs-body');
     const commit = () => { save(); syncAll(); refreshButtons(); };
@@ -167,9 +199,9 @@
       const b = el('button', 'es-preset', label);
       b.type = 'button';
       b.addEventListener('click', () => {
-        // DPCMキー(ドラム(DPCM)パネル側の設定)はプリセットに含まれないので今の値を残す
+        // DPCMキー(ドラム(DPCM)パネル側の設定)と出力の書式はプリセットに含まれないので今の値を残す
         const keep = {};
-        for (const k of (MML.Convert.DPCM_KEYS || [])) keep[k] = current[k];
+        for (const k of [...(MML.Convert.DPCM_KEYS || []), ...(MML.Convert.LAYOUT_KEYS || [])]) keep[k] = current[k];
         current = MML.Convert.normalizeCmd(Object.assign({}, keep, MML.Convert.CMD_PRESETS[name]));
         commit();
       });
@@ -289,6 +321,25 @@
     checks.GATE_APPROX = gaCb; checks.SHAPE_REST = srCb; checks.ENV_MERGE = emCb;
     body.appendChild(wrSec);
 
+    // ── 3b. 出力の書式(パートの並び / 1行の小節数 / 小節揃え) ──
+    const lySec = section(T('出力の書式'));
+    lySec.classList.add('cs-span');
+    const poSel = makeSelect(PART_ORDER_OPTIONS(), () => setKey('PART_ORDER', poSel.value));
+    lySec.appendChild(line(poSel, T('パートの並び'), T('「チャンネル順に小節ブロック」は全パートを数小節ずつ縦に並べる。「パートごとにまとめる」はAを最後まで書いてからB、と1パートずつ続ける')));
+    const bpIn = document.createElement('input');
+    bpIn.type = 'number'; bpIn.min = '1'; bpIn.max = String(MML.Convert.BARS_PER_LINE_MAX); bpIn.step = '1'; bpIn.className = 'cs-num';
+    bpIn.addEventListener('change', () => setKey('BARS_PER_LINE', bpIn.value));
+    bpIn.addEventListener('click', (e) => e.preventDefault());
+    const bpWrap = el('span', 'cs-inline');
+    bpWrap.appendChild(bpIn);
+    bpWrap.appendChild(el('span', null, T('小節')));
+    lySec.appendChild(line(null, T('1行の小節数'), T('この小節数ごとに改行する(1〜16)'), bpWrap));
+    const baCb = document.createElement('input'); baCb.type = 'checkbox';
+    baCb.addEventListener('change', () => setKey('BAR_ALIGN', baCb.checked));
+    lySec.appendChild(line(baCb, T('小節を揃える'), T('小節の区切りを全パートで同じ桁に揃える(空白で埋める)。OFFならスペース1つで区切る')));
+    checks.BAR_ALIGN = baCb;
+    body.appendChild(lySec);
+
     // ── 4. 詳細設定(折りたたみ) ──
     const det = document.createElement('details');
     det.className = 'cs-details cs-span';
@@ -316,6 +367,8 @@
       gtIn.value = String(current.GATE_TOL != null ? current.GATE_TOL : MML.Convert.GATE_TOL_DEFAULT);
       gtIn.disabled = !current.GATE_APPROX;
       lsIn.value = String(current.LEN_SNAP != null ? current.LEN_SNAP : MML.Convert.LEN_SNAP_DEFAULT);
+      poSel.value = current.PART_ORDER || 'block';
+      bpIn.value = String(current.BARS_PER_LINE || 4);
       saSel.value = current.PITCH_SA || 'octave';
       nwSel.value = current.N163_WAVE || 'fit';
       tnSel.value = current.TUNING || 'auto';

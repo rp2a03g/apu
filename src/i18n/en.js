@@ -237,6 +237,9 @@
     'このブラウザはWeb MIDIに対応していません。': 'This browser does not support the Web MIDI API.',
     'MIDIの使用が許可されませんでした。': 'Permission to use MIDI was not granted.',
     'MIDIを開けませんでした: {msg}': 'Could not open MIDI: {msg}',
+    'まだ接続していません。「接続」を押すとMIDI機器を探します。':
+      'Not connected yet. Press Connect to look for MIDI devices.',
+    '接続': 'Connect',
     'チェックを入れると接続します(初回は許可を聞かれます)。':
       'Tick to connect (the browser asks for permission the first time).',
     '接続済み。MIDI機器は見つかりません(挿すとここに出ます)。':
@@ -816,6 +819,16 @@
     '曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。音名は変わらず、再生とNSF書き出しの周波数テーブルが同じだけずれる': 'Measures how many cents the whole song is offset from 12-TET (A4=440Hz), rounds notes against the shifted reference and writes #TUNING in the header. Note names stay the same; playback and NSF export shift their frequency tables by the same amount',
     '最小偏差': 'min. offset',
     'セント': 'cents',
+    '出力の書式': 'Output layout',
+    'パートの並び': 'Part order',
+    'チャンネル順に小節ブロック': 'Channels interleaved per bar block',
+    'パートごとにまとめる': 'One part at a time',
+    '「チャンネル順に小節ブロック」は全パートを数小節ずつ縦に並べる。「パートごとにまとめる」はAを最後まで書いてからB、と1パートずつ続ける': '"Channels interleaved" stacks all parts a few bars at a time. "One part at a time" writes A to the end, then B, and so on',
+    '1行の小節数': 'Bars per line',
+    'この小節数ごとに改行する(1〜16)': 'Start a new line every this many bars (1-16)',
+    '小節': 'bars',
+    '小節を揃える': 'Align bars',
+    '小節の区切りを全パートで同じ桁に揃える(空白で埋める)。OFFならスペース1つで区切る': 'Pad bars so their boundaries line up across all parts. Off: a single space between bars',
     '短い休符を吸収': 'Absorb short rests',
     '似た@v表を統合': 'Merge similar @v tables',
     '段の値の並びが同じで各段の長さが±1違うだけの@v/@vr表を、最も多く使われる変種にまとめる。ドライバの自走タイマーで段の位置が音符ごとにずれる曲向け。段の境目が最大1フレーム動く': 'Merge @v/@vr tables whose step values are the same and whose step lengths differ by at most 1 into the most-used variant. For drivers whose free-running envelope timer shifts the steps per note. Step boundaries may move by up to 1 frame',

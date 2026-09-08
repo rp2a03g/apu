@@ -2447,7 +2447,9 @@ button.secondary {
 .cs-tempo-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .cs-tempo-row .es-preset { flex: 0 0 auto; min-width: 0; padding: 4px 12px; }
 /* コンバート開始は見出しの左端(ユーザー指示) */
-.cs-modal .es-modal-header { display: flex; align-items: center; gap: 10px; }
+.cs-modal .es-modal-header { display: flex; align-items: center; gap: 10px; cursor: move; user-select: none; }
+/* 見出し行のドラッグで動かしたあと(convertSettings.js makeDraggable): 中央寄せをやめて指定位置に固定 */
+.cs-modal--moved { position: fixed; margin: 0; }
 .cs-convert {
   padding: 4px 14px; font-size: 12px; cursor: pointer; border-radius: 5px; font-weight: 700;
   background: #3a6ea5; border: 1px solid #3a6ea5; color: #fff;

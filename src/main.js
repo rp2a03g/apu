@@ -54,6 +54,8 @@
   MML.UI.FdsWaveEditor.init(mmlSourceEl);
   MML.UI.N163WaveEditor.init(mmlSourceEl);
   MML.UI.Vrc7ToneEditor.init(mmlSourceEl);
+  // エディタのキー操作: Tab=タブ文字(フォーカスを飛ばさない)、F5=再生/一時停止(src/ui/editorKeys.js)
+  MML.UI.EditorKeys.init(mmlSourceEl, { playPause: () => document.getElementById('btnMmlCapture').click() });
 
   // MML.Mml.compile()のresult.expansionsは'dpcm'を含みうる(チャンネル文字割当等の
   // 内部処理で拡張音源と同じ優先順位機構を借用しているため)。しかしDPCMは2A03内蔵
