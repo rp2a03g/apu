@@ -33,6 +33,16 @@
       if (extraChips & FLAGS.MMC5) this.expansion.mmc5 = new Emu.MMC5Audio();
       if (extraChips & FLAGS.N163) this.expansion.n163 = new Emu.N163Audio();
       if (extraChips & FLAGS.FME7) this.expansion.fme7 = new Emu.FME7Audio();
+      // 旧ppmckドライバ(Famicompo mini 時代、N106波形長を32サンプル形式で書く)の判定。
+      // opt.n163Legacy で明示指定がなければプログラム本体の機械語列から自動判定する
+      // (NsfPlayer/NsfReplayStreamPlayer/キャプチャWorker/ヘッドレスの全経路がここを通る)。
+      // 詳細は nsfHeader.js detectLegacyN163Driver と n163.js 冒頭コメント 注2。
+      if (this.expansion.n163) {
+        this.n163Legacy = opt.n163Legacy !== undefined
+          ? !!opt.n163Legacy
+          : !!(MML.NSF.detectLegacyN163Driver && MML.NSF.detectLegacyN163Driver(opt.program));
+        this.expansion.n163.legacyWaveLen = this.n163Legacy;
+      }
 
       this.loadAddr = opt.loadAddr;
       this.useBankswitch = (opt.bankswitch || []).some(b => b !== 0);

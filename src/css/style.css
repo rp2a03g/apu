@@ -604,6 +604,73 @@ button.secondary {
   display: block;
 }
 
+/* --- 行番号ガター / カーソル位置バッジ(src/ui/editorLineInfo.js) ---
+   .mml-editor--linenum が付いている間だけ有効。幅は --mml-gutter-w 1変数から派生する
+   (JSが行数の桁数から calc(<桁>ch + 14px) を入れる)。
+   番号は各 .mml-line の::beforeにCSSカウンタで付け、インラインブロック+負マージンで
+   行の字送りに影響しない幅0の要素としてパディング領域(ガター帯)へはみ出させる。
+   ★.mml-line に position:relative を付けない(上のコメント参照。offsetTopが壊れる) */
+.mml-editor { --mml-gutter-w: 0px; }
+.mml-editor--linenum .mml-highlight,
+.mml-editor--linenum textarea {
+  padding-left: calc(8px + var(--mml-gutter-w));
+}
+/* ガター帯: 半透明(--hover-bg)で地色がどのプリセットでも少しだけ沈んで見える */
+.mml-editor--linenum::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--mml-gutter-w);
+  background: var(--hover-bg);
+  border-right: 1px solid var(--border);
+  border-radius: 3px 0 0 3px;
+  pointer-events: none;
+}
+.mml-editor--linenum .mml-highlight { counter-reset: mml-line; }
+.mml-editor--linenum .mml-line { counter-increment: mml-line; }
+.mml-editor--linenum .mml-line::before {
+  content: counter(mml-line);
+  display: inline-block;
+  box-sizing: border-box;
+  width: var(--mml-gutter-w);
+  margin-left: calc(-1 * var(--mml-gutter-w) - 8px);
+  margin-right: 8px;
+  padding-right: 6px;
+  text-align: right;
+  color: var(--tok-comment);
+  user-select: none;
+}
+/* カーソルのある行の番号は本文色+太字で強調(番号の幅は固定なので本文の字送りは動かない) */
+.mml-editor--linenum .mml-line--cursor::before {
+  color: var(--mml-editor-fg);
+  font-weight: 700;
+}
+/* 行番号OFFのとき右下に出す「行 N, 列 M」。スクロールバーと被らないよう右に余白を取る */
+.mml-cursor-pos {
+  position: absolute;
+  right: 18px;
+  bottom: 6px;
+  z-index: 2;
+  pointer-events: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 1px 6px;
+  color: var(--tok-comment);
+  background: var(--mml-editor-bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  opacity: 0.92;
+}
+/* エラーログの [Line N]: クリックでエディタのその行へ移動(main.js) */
+.mml-err-line {
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+.mml-err-line:hover { color: var(--accent); }
+
 /* 再生中の現在位置ハイライト: 既存のtok-*(音符=青, コマンド=紫, オクターブ/タイ=橙,
    ループ=赤, 数値=緑, チャンネル=金)のどれとも被らない明るい白系にし、背景色(下の
    mml-range-selected)の上に乗っても視認できるよう黒縁取り(text-shadowで疑似アウトライン)を付ける。

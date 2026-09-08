@@ -26,8 +26,15 @@
  *     これが標準の N163 挙動(NSFPlay/Mesen/VirtuaNSF既定と同じ)。ただし「古いドライバ」で
  *     作られた一部NSF(例: Famicompo mini vol.3 entry023)は波形長を最大32サンプル前提で
  *     使っており、256版だと音程・波形テーブルが崩れる。VirtuaNSFはこれ用に「N163を32サンプル
- *     に制限するモード」を別途用意している(readme 1.0.7.1)。必要なら length を
- *     `0x20-(+4&0x1C)` に切替えるオプション化で対応可能(現状は標準の256版を既定とする)。
+ *     に制限するモード」を別途用意している(readme 1.0.7.1)。
+ *     → legacyWaveLen=true で対応(2026-09-07)。旧ドライバは +4 に (n<<2)|$80 を書く
+ *     (VirtuaNES 0.97 の APU_N106: tonelen = 0x20-(data&0x1C))。VirtuaNESの周波数式は
+ *     実機式と同じ f = CPU*freq/(15*65536*length*numCh) なので、違いは波形長の解釈だけ。
+ *     そこで「+4 への書き込み値を現行エンコードへ書き換えて RAM に置く」方式にした:
+ *       (v & 0x1F) | 0xE0   … 256-(0xE0|(n<<2)) = 32-4n = 0x20-(v&0x1C) と同じ長さ
+ *     RAM 自体が現行仕様の値になるため、音声合成・鍵盤/ロール(snapshotN163)・
+ *     nsf2mml の波形抽出・n163Snapshots 経由の再生(NsfReplayStreamPlayer)が全て
+ *     無変更で正しくなる。判定は MML.NSF.detectLegacyN163Driver(nsfBus.js から設定)。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -45,6 +52,9 @@
       this.rrIndex = 0;       // 有効ch内の巡回位置
       this.mute = new Array(NUM_CHANNELS).fill(false);
       this.vol = new Array(NUM_CHANNELS).fill(1);
+      // 旧ppmckドライバ(波形長32サンプル形式)互換。true のとき +4 レジスタへの書き込みを
+      // 現行エンコードへ変換して格納する(ファイル冒頭コメント 注2 参照)。
+      this.legacyWaveLen = false;
     }
 
     reset() {
@@ -61,6 +71,12 @@
         this.addr = value & 0x7F;
         this.autoInc = (value & 0x80) !== 0;
       } else if (addr === 0x4800) {
+        // 旧ドライバ互換: チャンネルレジスタ +4(波形長|周波数上位)への書き込みは
+        // bit2-4 の3bit波形長(0x20-(v&0x1C))を現行の6bit形式(0xE0|(v&0x1C))へ変換する。
+        // 周波数上位2bit(bit0-1)はそのまま。
+        if (this.legacyWaveLen && this.addr >= 0x40 && (this.addr & 7) === 4) {
+          value = (value & 0x1F) | 0xE0;
+        }
         this.ram[this.addr] = value;
         if (this.autoInc) this.addr = (this.addr + 1) & 0x7F;
       }

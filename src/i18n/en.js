@@ -168,6 +168,9 @@
     'MMLファイルの保存に失敗しました: {msg}': 'Failed to save the MML file: {msg}',
     '開始点・終了点を曲の最初と最後にリセット': 'Reset start/end points to the whole song',
     '↺ 再生範囲をリセット': '↺ Reset range',
+    '行番号': 'Line numbers',
+    '行 {line}, 列 {col}': 'Ln {line}, Col {col}',
+    'クリックでエディタのこの行へ移動': 'Click to jump to this line in the editor',
     '再生中ハイライト': 'Highlight while playing',
     '追随スクロール': 'Auto-scroll',
     '追随チャンネル:': 'Follow channel:',
@@ -341,8 +344,8 @@
     'タップ1回目… 拍に合わせて続けてタップ': 'First tap... keep tapping on the beat',
     '{n}回タップ → {bpm} BPM': '{n} taps → {bpm} BPM',
     '自動検出に戻しました': 'Back to auto detection',
-    '対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)':
-      'Unsupported file type: .{ext}\n(Supported: NSF, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)',
+    '対応していないファイル形式です: .{ext}\n(対応形式: NSF/NSFE, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)':
+      'Unsupported file type: .{ext}\n(Supported: NSF/NSFE, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)',
     'NSF (ファミコン)': 'NSF (NES)',
     'SPC (スーパーファミコン)': 'SPC (SNES)',
     'KSS (MSX)': 'KSS (MSX)',
@@ -352,7 +355,13 @@
       'Open an NSF/SPC/KSS/GBS/HES/VGM file (or a zip/7z containing them) to show the player here.',
 
     // ---- NSFパネル ----
-    'ヘッダ情報 (NSF)': 'Header (NSF)',
+    'ヘッダ情報 (NSF/NSFe)': 'Header (NSF/NSFe)',
+    'NSFeファイルを解析できませんでした: {msg}': 'Could not parse the NSFe file: {msg}',
+    '形式           : NSFe (チャンク: {chunks})': 'Format         : NSFe (chunks: {chunks})',
+    'Dendy Speed    : {v} (1/1,000,000秒)': 'Dendy speed    : {v} (1/1,000,000 s)',
+    '再生順(plst)   : {list}': 'Playlist (plst): {list}',
+    '曲一覧         :': 'Tracks         :',
+    'テキスト       :': 'Text           :',
     'ファイルサイズが小さすぎます（NSFヘッダは128バイト必要です）。':
       'File is too small (an NSF header needs 128 bytes).',
     'NSFヘッダのマジックナンバーが不正です（NSFファイルではない可能性があります）。':
@@ -506,8 +515,8 @@
     '次の曲': 'Next track',
     'アーカイブ内のファイルを開けませんでした: {msg}': 'Could not open a file inside the archive: {msg}',
     'アーカイブを解析できませんでした: {msg}': 'Could not parse the archive: {msg}',
-    'アーカイブ内に対応するサウンドファイル(NSF/SPC/KSS/GBS/HES/VGM)がありません。':
-      'The archive contains no supported sound files (NSF/SPC/KSS/GBS/HES/VGM).',
+    'アーカイブ内に対応するサウンドファイル(NSF/NSFE/SPC/KSS/GBS/HES/VGM)がありません。':
+      'The archive contains no supported sound files (NSF/NSFE/SPC/KSS/GBS/HES/VGM).',
     'MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力{borrow}{ignored}':
       'Converted to MML ({mode} {bpm} BPM, chips: {chips}) → written to the MML editor{borrow}{ignored}',
     '(借用先: {assign})': ' (targets: {assign})',

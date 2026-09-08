@@ -14,7 +14,7 @@ MMLコンパイラ・6502アセンブラ・NSFジェネレーター・音源エ�
 - `src/asm/opcodes.js` — 6502 命令セット（合法151オペコード）の定義
 - `src/asm/assembler.js` — 2パス方式の簡易6502アセンブラ
   - ラベル、各種アドレッシングモード、`.org` `.byte`/`.db` `.word`/`.dw` `.res`/`.ds` ディレクティブに対応
-- `src/nsf/nsfHeader.js` — NSF 128バイトヘッダの生成・解析
+- `src/nsf/nsfHeader.js` — NSF 128バイトヘッダの生成・解析。**NSFe(チャンク形式のNSF拡張、2026-09-07)**も読める: `MML.NSF.normalize(bytes)` が NSF/NSFe どちらでも「128バイトヘッダ+DATA」の素のNSFバイト列と `header` を返し、再生/キャプチャ/変換/Worker/ヘッドレスは従来のNSF経路をそのまま通す(INFO/DATA/BANK/RATE/NSF2 をヘッダへ詰め、auth の全文(31文字制限なし、UTF-8→Shift-JIS→Latin-1 の順で判別)を `header.songName` 等へ)。NSFヘッダに載らない曲ラベル(tlbl/taut)・演奏時間(time/fade)・再生順(plst)・text/regn/mixe/VRC7 は `header.nsfe` に別枠で入り、NSFパネルのヘッダ情報と鍵盤表示タイトル行の曲一覧に出す。演奏時間は曲が変わったときに再生時間欄へ反映(SPCのID666と同じ扱い)、再生順があれば曲送り/自動送りはその並びで進む。未知の大文字(必須)チャンクはエラー、小文字は無視。検証データ: `emu sound/famicompo/Famicompo/`(44本、全て INFO/time/fade/auth/DATA、1本だけBANK)
 - `src/nsf/nsfBuilder.js` — ヘッダ＋プログラムイメージからNSFバイナリを生成、ダウンロード
 
 ### Phase 2: NSF対応エミュレータ（6502 CPU + 2A03音源）
@@ -106,6 +106,7 @@ MMLコンパイラ・6502アセンブラ・NSFジェネレーター・音源エ�
   - textareaの背後にオーバーレイ`<pre>`を重ね、入力/スクロールに同期してハイライトHTMLを更新するオーバーレイ方式
 - `index.html` / `src/main.js`
   - 「MML作曲」パネルのテキストエリアにシンタックスハイライトを統合
+  - 行番号ガター(タイトル行の「行番号」チェック、`src/ui/editorLineInfo.js`)。OFFのときはエディタ右下に「行 N, 列 M」を表示。エラーログの `[Line N]` はクリックでその行へ移動
   - 「波形エディタ」パネルを追加（FDS/N163波形編集、プリセットボタン）
   - 「DPCMコンバータ」パネルを追加（音声ファイル読込→DPCM変換→ダンプ表示→プレビュー再生→バイナリダウンロード）
 - `src/ui/keyboard.js` — `MML.UI.KeyboardDisplay`（鍵盤表示ウィンドウ: チャンネル一覧+大波形+ピアノロール+鍵盤）

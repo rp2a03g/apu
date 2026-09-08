@@ -25,6 +25,17 @@
   MML.Mml.attachHighlighter(mmlSourceEl, mmlHighlightEl, () => {
     mmlHighlightIndex = MML.Mml.buildOffsetIndex(mmlHighlightEl);
     mmlHighlightIndexGen++;
+    MML.UI.EditorLineInfo.refresh(); // 行番号ガターの桁数/カーソル行の印を作り直したオーバーレイへ付け直す
+  });
+  // 行番号ガター(ON)/カーソル位置バッジ(OFF)の切り替え(src/ui/editorLineInfo.js)。
+  // ガターの幅が変わると折り返し位置=要素のoffsetTopもずれるので、位置キャッシュを捨てさせる
+  MML.UI.EditorLineInfo.init({
+    textarea: mmlSourceEl,
+    overlay: mmlHighlightEl,
+    editorEl: mmlHighlightEl.parentElement,
+    toggleEl: document.getElementById('mmlLineNumbers'),
+    posEl: document.getElementById('mmlCursorPos'),
+    onLayoutChange: () => { mmlHighlightIndexGen++; },
   });
   // ウィンドウ幅が変わると行の折り返しが変わり要素のoffsetTopもずれるため、位置キャッシュを無効化する
   window.addEventListener('resize', () => { mmlHighlightIndexGen++; });
@@ -2576,7 +2587,9 @@
   function autoAdvanceNsfSong() {
     if (!loadedNsfHeader) return;
     const totalSongs = Math.max(1, loadedNsfHeader.totalSongs);
-    const songNo = nextIndexFor(parseInt(nsfSongIndexEl.value, 10) || 1, 1, totalSongs);
+    const cur = parseInt(nsfSongIndexEl.value, 10) || 1;
+    // 「次の曲」でNSFeの再生順(plst)があればその並びで進む。他のモードは曲番号の範囲で選ぶ
+    const songNo = (repeatMode() === 'next' && nsfePlaylist(loadedNsfHeader)) ? stepNsfSong(cur, 1) : nextIndexFor(cur, 1, totalSongs);
     if (songNo === null) { updateKeyboardTransport(); return; }
     nsfSongIndexEl.value = String(songNo);
     lastNsfCaptureResult = null;
@@ -2732,7 +2745,10 @@
       const min = parseInt(songEl.min, 10) || 0, max = parseInt(songEl.max, 10);
       if (Number.isFinite(max) && max > min) {
         const items = [];
-        for (let n = min; n <= max; n++) items.push(T('曲 {n}', { n }));
+        for (let n = min; n <= max; n++) {
+          const label = (fmt === 'nsf' && loadedNsfHeader) ? MML.NSF.trackLabel(loadedNsfHeader, n - 1) : null; // NSFeの曲ラベル(tlbl)
+          items.push(label ? `${n}. ${label}` : T('曲 {n}', { n }));
+        }
         return { name: fileName, items, index: (parseInt(songEl.value, 10) || min) - min };
       }
     }
@@ -3035,6 +3051,25 @@
   // 整形し、ロールへ赤マーカー(keyboardDisplay.setConversionDiffs)も渡す共通ヘルパー。
   // 全フォーマットの「MML変換完了」ステータスの直後に足して使う。
   // compile()のwarnings(音域外で鳴らない箇所)をHTML化する。errorsと違い再生は続行する
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // コンパイルエラー一覧を「[Line N] メッセージ」形式のHTMLにする。[Line N]はクリックで
+  // エディタのその行へ移動できる(MML.UI.EditorLineInfo.gotoLine、下のクリック委譲参照)。
+  // メッセージにはMML本文の断片("チャンネル指定が認識できません: ..."等)が入るので必ずエスケープする
+  function renderCompileErrors(errors) {
+    return errors.map(e => (e.lineNo
+      ? `<span class="mml-err-line" data-line="${e.lineNo}" title="${T('クリックでエディタのこの行へ移動')}">[Line ${e.lineNo}]</span> `
+      : '') + escapeHtml(e.message)).join('\n');
+  }
+  for (const el of [mmlOutputEl, captureOutputEl]) {
+    el.addEventListener('click', (ev) => {
+      const t = ev.target.closest && ev.target.closest('.mml-err-line');
+      if (t) MML.UI.EditorLineInfo.gotoLine(Number(t.dataset.line));
+    });
+  }
+
   function renderCompileWarnings(warnings) {
     if (!warnings || !warnings.length) return '';
     return '<div class="error">' +
@@ -3209,8 +3244,7 @@
 
     if (result.errors.length > 0) {
       msg.className = 'error';
-      msg.textContent = T('MMLコンパイルエラーのため書き出せません:') + '\n' +
-        result.errors.map(e => e.lineNo ? `[Line ${e.lineNo}] ${e.message}` : e.message).join('\n');
+      msg.innerHTML = escapeHtml(T('MMLコンパイルエラーのため書き出せません:')) + '\n' + renderCompileErrors(result.errors);
       mmlOutputEl.appendChild(msg);
       return;
     }
@@ -3275,7 +3309,7 @@
     const compiled = MML.Mml.compile(externalSource != null ? externalSource : mmlSourceEl.value, getMmlOpt());
     if (compiled.errors.length > 0) {
       captureOutputEl.innerHTML =
-        `<div class="error">${compiled.errors.map(e => e.lineNo ? `[Line ${e.lineNo}] ${e.message}` : e.message).join('\n')}</div>`;
+        `<div class="error">${renderCompileErrors(compiled.errors)}</div>`;
       btnMmlCapture.disabled = false;
       return;
     }
@@ -3539,6 +3573,42 @@
     return names.length > 0 ? names.join(', ') : T('なし (2A03のみ)');
   }
 
+  // ---- NSFe(曲ラベル/演奏時間/再生順) ----
+  // 再生順チャンク(plst、0始まりの曲番号列)。範囲外を除いて空なら無し扱い
+  function nsfePlaylist(header) {
+    const pl = header && header.nsfe && header.nsfe.playlist;
+    if (!pl || pl.length === 0) return null;
+    const total = Math.max(1, header.totalSongs);
+    const valid = pl.filter(i => i >= 0 && i < total);
+    return valid.length > 0 ? valid : null;
+  }
+  // NSFeのtimeチャンク(曲ごとの演奏時間)を再生時間欄へ反映する。曲が変わったときだけ
+  // 書き換える(同じ曲で再生し直すときはユーザーが手で直した値を尊重する)。SPCのID666と同じ扱い。
+  // 時間はフェード開始までの長さなので、そのまま「再生時間」(この後FADE_SEC秒フェード)に入れる
+  let nsfeAppliedSong = 0;
+  function applyNsfeDuration(songNo) {
+    if (!loadedNsfHeader || !loadedNsfHeader.nsfe || songNo === nsfeAppliedSong) return;
+    nsfeAppliedSong = songNo;
+    const ms = MML.NSF.trackTimeMs(loadedNsfHeader, songNo - 1);
+    if (ms === null || ms <= 0) return;
+    const min = parseInt(nsfPlayDurationEl.min, 10) || 1;
+    const max = parseInt(nsfPlayDurationEl.max, 10) || 3600;
+    nsfPlayDurationEl.value = String(Math.max(min, Math.min(max, Math.round(ms / 1000))));
+  }
+  // 曲送り(±1)。NSFeの再生順(plst)があればその並びで進み、無ければ曲番号順にラップ
+  function stepNsfSong(songNo, delta) {
+    const total = Math.max(1, loadedNsfHeader.totalSongs);
+    const pl = nsfePlaylist(loadedNsfHeader);
+    if (!pl) return wrapIndex(songNo + delta, 1, total);
+    const pos = pl.indexOf(songNo - 1);
+    if (pos < 0) return pl[0] + 1;
+    return pl[wrapIndex(pos + delta, 0, pl.length - 1)] + 1;
+  }
+  function formatMsAsClock(ms) {
+    const s = Math.round(ms / 1000);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }
+
   function renderNsfFileHeader(header, legacyN163) {
     let out = '';
     out += `Magic OK       : ${header.magicOk}\n`;
@@ -3556,6 +3626,28 @@
     out += `PAL/NTSC Bit   : ${toHex(header.palNtscBit, 2)}\n`;
     out += T('拡張音源       : {chips} ({hex})',
       { chips: describeChips(header.extraChips), hex: toHex(header.extraChips, 2) }) + '\n';
+
+    // NSFe固有の情報(NSFヘッダに載らないもの)
+    if (header.nsfe) {
+      const m = header.nsfe;
+      out += T('形式           : NSFe (チャンク: {chunks})', { chunks: m.chunks.join(' ') }) + '\n';
+      if (m.ripper) out += `Ripper         : ${m.ripper}\n`;
+      if (m.dendySpeed !== null) out += T('Dendy Speed    : {v} (1/1,000,000秒)', { v: m.dendySpeed }) + '\n';
+      if (m.nsf2Flags) out += `NSF2 Flags     : ${toHex(m.nsf2Flags, 2)}\n`;
+      if (m.playlist) out += T('再生順(plst)   : {list}', { list: m.playlist.map(i => i + 1).join(', ') }) + '\n';
+      if (m.trackLabels || m.times || m.trackAuthors) {
+        out += T('曲一覧         :') + '\n';
+        const n = Math.max(1, header.totalSongs);
+        for (let i = 0; i < n; i++) {
+          const label = (m.trackLabels && m.trackLabels[i]) || '';
+          const author = (m.trackAuthors && m.trackAuthors[i]) ? ` (${m.trackAuthors[i]})` : '';
+          const t = (m.times && m.times[i] !== null && m.times[i] !== undefined) ? formatMsAsClock(m.times[i]) : '';
+          const fd = (m.fades && m.fades[i]) ? ` +fade ${formatMsAsClock(m.fades[i])}` : '';
+          out += `  ${String(i + 1).padStart(3)}. ${label}${author}${t ? `  [${t}${fd}]` : ''}\n`;
+        }
+      }
+      if (m.text) out += T('テキスト       :') + '\n' + m.text.split(/\r?\n/).map(l => '  ' + l).join('\n') + '\n';
+    }
 
     nsfFileHeaderEl.innerHTML = '';
     const pre = document.createElement('div');
@@ -3592,17 +3684,30 @@
     lastNsfCaptureResult = null;
 
     const arrayBuffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(arrayBuffer);
+    const rawBytes = new Uint8Array(arrayBuffer);
 
-    if (bytes.length < 128) {
-      nsfFileHeaderEl.innerHTML = '<div class="error">' + T('ファイルサイズが小さすぎます（NSFヘッダは128バイト必要です）。') + '</div>';
-      return;
-    }
-
-    const header = MML.NSF.parseHeader(bytes);
-    if (!header.magicOk) {
-      nsfFileHeaderEl.innerHTML = '<div class="error">' + T('NSFヘッダのマジックナンバーが不正です（NSFファイルではない可能性があります）。') + '</div>';
-      return;
+    // NSFe(チャンク形式のNSF拡張)は「128バイトNSFヘッダ+DATA」の素のNSFバイト列へ変換し、
+    // 以降の再生/キャプチャ/変換は従来のNSF経路をそのまま通す。曲ラベル/演奏時間/再生順など
+    // NSFヘッダに載らない情報は header.nsfe に別枠で入る(src/nsf/nsfHeader.js parseNsfe)
+    let bytes, header;
+    if (MML.NSF.isNsfe(rawBytes)) {
+      try {
+        ({ bytes, header } = MML.NSF.normalize(rawBytes));
+      } catch (e) {
+        nsfFileHeaderEl.innerHTML = '<div class="error">' + T('NSFeファイルを解析できませんでした: {msg}', { msg: e.message }) + '</div>';
+        return;
+      }
+    } else {
+      if (rawBytes.length < 128) {
+        nsfFileHeaderEl.innerHTML = '<div class="error">' + T('ファイルサイズが小さすぎます（NSFヘッダは128バイト必要です）。') + '</div>';
+        return;
+      }
+      bytes = rawBytes;
+      header = MML.NSF.parseHeader(bytes);
+      if (!header.magicOk) {
+        nsfFileHeaderEl.innerHTML = '<div class="error">' + T('NSFヘッダのマジックナンバーが不正です（NSFファイルではない可能性があります）。') + '</div>';
+        return;
+      }
     }
 
     loadedNsfBytes = bytes;
@@ -3612,8 +3717,13 @@
     const totalSongs = Math.max(1, header.totalSongs);
     nsfSongIndexEl.min = '1';
     nsfSongIndexEl.max = String(totalSongs);
-    nsfSongIndexEl.value = String(Math.min(totalSongs, Math.max(1, header.startingSong || 1)));
+    // NSFeの再生順(plst)があればその先頭から、無ければヘッダの開始曲から
+    const pl = nsfePlaylist(header);
+    const firstSong = pl ? pl[0] + 1 : (header.startingSong || 1);
+    nsfSongIndexEl.value = String(Math.min(totalSongs, Math.max(1, firstSong)));
     nsfSongTotalEl.textContent = `/ ${totalSongs}`;
+    nsfeAppliedSong = 0;
+    applyNsfeDuration(parseInt(nsfSongIndexEl.value, 10));
 
     nsfFileStatusEl.innerHTML = '';
     updateKeyboardTransport(); // 曲数が確定したので鍵盤表示の⏮⏭の有効/無効を決め直す(1曲のNSFは無効)
@@ -3977,6 +4087,7 @@
     let songNo = parseInt(nsfSongIndexEl.value, 10) || 1;
     songNo = Math.max(1, Math.min(totalSongs, songNo));
     nsfSongIndexEl.value = String(songNo);
+    applyNsfeDuration(songNo); // NSFeの曲別演奏時間(曲が変わったときだけ再生時間欄を書き換える)
 
     const duration    = parseInt(nsfPlayDurationEl.value, 10) || 30;
     // 「指定した再生時間ぶん鳴らした後、そこからさらにFADE_SEC秒かけてフェードアウトする」
@@ -4137,7 +4248,7 @@
     if (!loadedNsfHeader) return;
     const totalSongs = Math.max(1, loadedNsfHeader.totalSongs);
     let songNo = parseInt(nsfSongIndexEl.value, 10) || 1;
-    songNo = wrapIndex(songNo + delta, 1, totalSongs);
+    songNo = stepNsfSong(songNo, delta); // totalSongs内でラップ(NSFeなら再生順plstに従う)
     nsfSongIndexEl.value = String(songNo);
     // 曲が変わるので Worklet を停止して最初からストリーミング
     stopNsfFilePlayback();
@@ -7211,7 +7322,7 @@
     // 解析/解凍は src/archive/archive.js(MML.Archive。7zは sevenzip.js + lzma.js)。
     // アーカイブ内エントリのフォーマットは拡張子で決めるが、gzip(.vgz)は各loadXxxFile側が
     // 中身で判別する。
-    const ARCHIVE_EXTS = ['nsf', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz'];
+    const ARCHIVE_EXTS = ['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz'];
     const archiveBarEl = document.getElementById('archiveBar');
     const archiveTrackBarEl = document.getElementById('archiveTrackBar');
     const archiveNameEl = document.getElementById('archiveName');
@@ -7317,7 +7428,7 @@
         playlist = await MML.Archive.buildPlaylist(parsed.entries, ARCHIVE_EXTS, (m3u) => MML.Archive.readEntry(bytes, m3u));
       } catch (e) { alert(T('アーカイブを解析できませんでした: {msg}', { msg: e.message })); return false; }
       if (playlist.length === 0) {
-        alert(T('アーカイブ内に対応するサウンドファイル(NSF/SPC/KSS/GBS/HES/VGM)がありません。'));
+        alert(T('アーカイブ内に対応するサウンドファイル(NSF/NSFE/SPC/KSS/GBS/HES/VGM)がありません。'));
         return false;
       }
       stopAllFormatPlayback();
@@ -7390,6 +7501,7 @@
       if ((ext === 'zip' || ext === '7z') && !(opts && opts.fromArchive)) return openArchive(file);
       if (!(opts && opts.fromArchive)) clearArchive(); // 単体ファイルを開いたらアーカイブ曲リストは閉じる
       if (ext === 'vgz') ext = 'vgm'; // gzip圧縮VGM(中身の判別はloadVgmFile側)
+      if (ext === 'nsfe') ext = 'nsf'; // NSFe(チャンク形式のNSF拡張。素のNSFへの変換はloadNsfFile→MML.NSF.normalize)
       // MMLテキスト(.mml/.txt)はサウンドファイルではなくMMLエディタ側で開く。
       // 戻り値'mml'はformatToPlayFnに載っていないので、ドラッグ&ドロップでも
       // 読み込むだけで自動再生はしない(コンパイル準備まではopenMmlTextFileが行う)
@@ -7398,7 +7510,7 @@
       }
       const targetInputId = formatToInputId[ext];
       if (!targetInputId) {
-        alert(T('対応していないファイル形式です: .{ext}\n(対応形式: NSF, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)', { ext }));
+        alert(T('対応していないファイル形式です: .{ext}\n(対応形式: NSF/NSFE, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)', { ext }));
         return false;
       }
       ensureSoundWindowOpen();

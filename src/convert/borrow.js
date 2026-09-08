@@ -34,7 +34,26 @@
   function n163FreqRegRaw(waveLen, numCh) {
     return freq => freq * 15 * 65536 * waveLen * numCh / CPU_CLOCK_NTSC;
   }
-  function vrc7FnumRaw(freq) {
+  // VRC7: freq = fnum * 2^block * 49716 / 2^19(compiler.js vrc7FreqToFnumBlock() の逆関数、丸めない
+  // 生の連続値)。再生側は「理論値(音符)の block を固定し、fnum だけに D<n> を足す」ので、
+  // D の材料となる実測周波数も同じ block で fnum に換算しないと辻褄が合わない。
+  // ev(音符イベント、ev.note)があれば block を ev.note の理論周波数から compiler.js と同じ規則
+  // (round(fnum) <= 511)で決め、freq をその block 内の fnum として返す(511 を超えてもそのまま)。
+  // ★2026-09-07: 以前は freq 自身で block を自己選択していたため、理論値より数十セント低いだけで
+  // block 境界の反対側に落ちる音符(fnum 258 に対し実測 510)で D が上限(fnum 幅の半分)に
+  // 張り付き、VGM の YM2151→VRC7 で 122 音が約7度上ずって鳴っていた。
+  // ev 無し(単独の周波数換算)は従来通り自己選択+511 クランプ。
+  function vrc7BlockOf(freq) {
+    for (let block = 0; block <= 7; block++) {
+      if (Math.round((freq * 524288) / (49716 * Math.pow(2, block))) <= 511) return block;
+    }
+    return 7;
+  }
+  function vrc7FnumRaw(freq, ev) {
+    if (ev && ev.note != null) {
+      const block = vrc7BlockOf(MML.Convert.noteToFreq(ev.note));
+      return (freq * 524288) / (49716 * Math.pow(2, block));
+    }
     for (let block = 0; block <= 7; block++) {
       const fnum = (freq * 524288) / (49716 * Math.pow(2, block));
       if (fnum <= 511) return fnum;

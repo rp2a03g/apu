@@ -77,7 +77,9 @@
         // テーブル側の丸めと逆向きに出ると1格子ぶん(FME-7 の o6 では約48セント=ほぼ半音)ずれた
         const d = Math.round(periodForFreq(ev.rawFreq, ev)) - Math.round(idealPeriod);
         if (d === 0) continue;
-        const maxAbsDetune = Math.abs(idealPeriod) * maxAbsDetuneRatio;
+        // 上限は整数に落とす(D<n>は整数。VRC7のfnum等、理論値が非整数のチップで上限に張り付くと
+        // D129.18… のような小数が出ていた。2026-09-07)
+        const maxAbsDetune = Math.floor(Math.abs(idealPeriod) * maxAbsDetuneRatio);
         ev.detune = Math.max(-maxAbsDetune, Math.min(maxAbsDetune, d));
         // SA<num>(N163、pitch.js n163SaForBase参照): この音符のEP/MPが>>saで登録済みの
         // 場合、再生側はDにも同じシフトを掛けるため、Dも縮めて出力する。
@@ -206,7 +208,7 @@
         const common = (rc !== T && unitCents >= COMMON_MIN_CENTS) ? rc - T : 0;
         const d = (rw - rc) + common;
         if (d === 0) continue;
-        const maxAbsDetune = Math.abs(idealPeriod) * maxAbsDetuneRatio;
+        const maxAbsDetune = Math.floor(Math.abs(idealPeriod) * maxAbsDetuneRatio); // 整数上限(applyPitchDetune参照)
         w.g.ev.detune = Math.max(-maxAbsDetune, Math.min(maxAbsDetune, d));
         // SA<num>: applyPitchDetune側と同じ理由(同上コメント参照)
         if (w.g.ev.pitchSa) w.g.ev.detune = Math.round(w.g.ev.detune / (1 << w.g.ev.pitchSa));

@@ -36,14 +36,8 @@
   function fme7PeriodRaw(freq) { return CPU_CLOCK_NTSC / (32 * freq); }
   // N163: freqReg = freq*15*65536*waveLen*numCh/CLOCK(kss2mml/converter.jsのn163FreqRegRawと同じ)。
   function n163FreqRegRaw(waveLen, numCh) { return freq => freq * 15 * 65536 * waveLen * numCh / CPU_CLOCK_NTSC; }
-  // VRC7: kss2mml/converter.jsのvrc7FnumRawと同じ
-  function vrc7FnumRaw(freq) {
-    for (let block = 0; block <= 7; block++) {
-      const fnum = (freq * 524288) / (49716 * Math.pow(2, block));
-      if (fnum <= 511) return fnum;
-    }
-    return 511;
-  }
+  // VRC7: src/convert/borrow.js に集約(block は音符の理論値側で固定、2026-09-07)
+  function vrc7FnumRaw(freq, ev) { return MML.Convert.Borrow.vrc7FnumRaw(freq, ev); }
 
   // 対数DAC(dbPerStep/段)の4bit音量値を線形4bit(N163)へ換算する表
   function logToLinearTable(dbPerStep) {
@@ -818,14 +812,14 @@
       ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${(letterMap.n163 || []).length}`
       : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
     // @DPCM<n> 定義(1個でもあればEチャンネルが自動的に有効になる。#EX-*宣言は不要)
-    // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
-    MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, frameRate);
     const dpcmDefLines = dpcmResult ? dpcmResult.defs.map(d =>
       `@DPCM${d.index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac}, ${d.mode} }`) : [];
     // resolveConflicts でプリセットへ落としたぶんの @OP<n> 定義は誰も参照しなくなる。
     // NSF書き出しで音色テーブル+分岐コードとしてROMを食う([[nsf-export-size-consciousness]])ので
     // 捨てて番号を詰める(イベント側の vrc7Tone も同時に振り直される)
     MML.Convert.Vrc7Tone.compactRegistry(vrc7ToneReg, (byFamily.vrc7 || []).map(p => p.channel));
+    // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
+    MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, frameRate);
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       headerLines: [
