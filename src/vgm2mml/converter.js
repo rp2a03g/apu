@@ -303,8 +303,13 @@
     const cap = { fme7: 3, n163: 8, vrc7: 6, noise: 1 };
     const take = (chip) => { const i = used[chip]++; return i; };
     for (const s of src.filter(s => s.kind === 'wave')) plan[s.id] = used.n163 < cap.n163 ? `n163_${take('n163')}` : 'skip';
-    // FM(OPLL 2op / OPN 4op)はVRC7へ(6ch)。YM2612は6chでちょうど埋まる
-    for (const s of src.filter(s => s.kind === 'fm' || s.kind === 'fm4')) plan[s.id] = used.vrc7 < cap.vrc7 ? `vrc7_${take('vrc7')}` : 'skip';
+    // FM(OPLL 2op / OPN 4op)はVRC7へ(6ch)。YM2612は6chでちょうど埋まる。
+    // VRC7からあふれたぶん(YM2151=8ch、YM2413のch7-9)は下で N163 の余りへ回す
+    const fmOverflow = [];
+    for (const s of src.filter(s => s.kind === 'fm' || s.kind === 'fm4')) {
+      if (used.vrc7 < cap.vrc7) plan[s.id] = `vrc7_${take('vrc7')}`;
+      else { plan[s.id] = 'skip'; fmOverflow.push(s); }
+    }
     for (const s of src.filter(s => s.kind === 'square' && s.chip === 'ay8910' && s.chipIndex === 0)) plan[s.id] = used.fme7 < cap.fme7 ? ['fme7a', 'fme7b', 'fme7c'][take('fme7')] : 'skip';
     // 2個目のPSG(ay2)は 2A03 パルスA/B + MMC5 パルス1 へ(ユーザー指定 2026-09-06。FME-7は1個目で埋まる)
     for (const s of src.filter(s => s.kind === 'square' && s.chip === 'ay8910' && s.chipIndex === 1)) plan[s.id] = ['pulse1', 'pulse2', 'mmc5pulse1'][s.ch] || 'skip';
@@ -330,6 +335,11 @@
       const noise = src.find(s => s.chip === 'sn76489' && s.chipIndex === k && s.kind === 'noise');
       if (noise) plan[noise.id] = used.noise < cap.noise ? (take('noise'), 'noise') : 'skip';
     }
+    // ★VRC7(6ch)からあふれたFMは、他を全部置いた後に残った N163 の空きへ(ユーザー報告 2026-09-10:
+    //   R-Type Leo 2曲目で YM2151 FM7 のバッキングが丸ごと消えていた)。YM2151は8chなので既定では
+    //   必ず2本あふれる。N163を先に取りに行かないのは、SCC/PCM/SN76489 の従来の割当を1つも
+    //   動かさないため(N163が埋まる C140/SegaPCM 構成では従来どおり skip のまま)
+    for (const s of fmOverflow) { if (used.n163 < cap.n163) plan[s.id] = `n163_${take('n163')}`; }
     // ドラムパートは2A03ノイズchへ(1本だけ)。SN76489のノイズを先に評価しているのは、
     // SN+サンプルPCMの構成でSNノイズの割当が従来から変わらないようにするため
     for (const s of src.filter(s => s.kind === 'noise' && s.chip !== 'sn76489')) {
@@ -377,7 +387,13 @@
     const totalFrames = data.totalFrames;
     const c = h.chips;
     const src = MML.VGM2MML.sourceChannels(h);
-    const plan = Object.assign({}, MML.VGM2MML.defaultPlan(h), options.channelMap || {});
+    const defPlan = MML.VGM2MML.defaultPlan(h);
+    const plan = Object.assign({}, defPlan, options.channelMap || {});
+    // 既定割当がVRC7からあふれたFMをN163の空きへ回したぶん(defaultPlan参照)。音符が1つも
+    // 無ければ載せない=空のN163チャンネルのために #EX-NAMCO106 を足さない
+    // (NSF書き出しのROMを無駄に食うため。ユーザーが明示指定したものは指定どおり空でも載せる)
+    const autoFmOnN163 = new Set(src.filter(s2 => (s2.kind === 'fm' || s2.kind === 'fm4')
+      && /^n163_/.test(defPlan[s2.id] || '') && !(options.channelMap && options.channelMap[s2.id])).map(s2 => s2.id));
     // 変換設定(src/convert/options.js): コマンド使用/不使用・譜面整形(全レジストリ・
     // detune.js・emitScore へ同じ cmd を渡す)
     const cmd = MML.Convert.normalizeCmd(options.cmd);
@@ -394,13 +410,27 @@
     // (ユーザーが明示的にskipへ変えたものは対象外)
     const autoSkippedFm = src.filter(s => (s.kind === 'fm4' || s.kind === 'fm') && plan[s.id] === 'skip'
       && !(options.channelMap && options.channelMap[s.id] === 'skip'));
-    if (autoSkippedFm.length) notes.push(`${autoSkippedFm.map(s => s.label).join(', ')} は借用先(VRC7は6ch)の空きが無いため変換対象外です(鍵盤表示のチャンネル割当で変更できます)。`);
+    if (autoSkippedFm.length) notes.push(`${autoSkippedFm.map(s => s.label).join(', ')} は借用先(VRC7の6ch・N163の8ch)に空きが無いため変換対象外です(鍵盤表示のチャンネル割当で変更できます)。`);
 
     // 借用先ファミリに応じた音量写像プロキシ(対数DAC元→線形先のときだけ写像)
     const familyOf = t => (TARGET_TYPES[t] || TARGET_TYPES.skip).family || null;
     const needsLinear = fam => fam === 'n163' || fam === 'pulse' || fam === 'vrc6pulse';
     const regFor = (chip, fam) => (needsLinear(fam) && LIN_TABLE[chip]) ? mappedEnvReg(envReg, LIN_TABLE[chip])
       : (fam === 'vrc7' && VRC7_TABLE[chip]) ? mappedEnvReg(envReg, VRC7_TABLE[chip]) : envReg;
+
+    // ── 音色ごとの設定(src/convert/toneSettings.js、2026-09-09) ─────────────────────
+    // options.toneSettings … main.js が ToneSettings.snapshot() で作った素のオブジェクト(無ければ従来どおり)
+    // ★抽出のskipゲート(wantExtract)より前で決めること。音色一覧の「載せ先」は抽出済みの
+    //   イベントから音色キーを引いて効かせるので、ここが後ろにあると借用先skipのchは
+    //   そもそも抽出されず、音色一覧で載せ先を指定しても何も出なかった(ユーザー報告 2026-09-10)
+    const TS = (MML.Convert.ToneSettings && options.toneSettings) ? MML.Convert.ToneSettings.lookup(options.toneSettings) : null;
+    const TK = MML.Convert.ToneKey;
+    const keyOf = (ev, s) => (TK ? TK.ofEvent(ev, s) : null);
+    const useTone = !!(TS && !TS.isEmpty() && TK);
+    // 抽出するか。借用先が skip でも、音色ごとの設定があるときは旋律chを抽出しておく
+    // (音色一覧の「載せ先」で仮想ソースへ分割できるようにするため。分割されなければ
+    //  下の配置ループが skip として捨てるだけなので出力は変わらない)
+    const wantExtract = (s) => plan[s.id] !== 'skip' || (useTone && s.ch >= 0);
 
     // ── 抽出(ソースチップごと。同じチップ内でも借用先ファミリが違えば音量写像が違うので、
     //    ファミリごとに抽出し直して該当chだけ採る) ──
@@ -532,7 +562,7 @@
       // 'dpcm'(合成音chの打楽器化)は分離レンダリングの打点で扱うので旋律の抽出からは外す。
       // chipIndex: 同じチップ種別の2個目(デュアルAY等)を別のwriteLogから抽出するときに 1 を渡す
       const ci = chipIndex || 0;
-      const items = src.filter(s => s.chip === chipKey && (s.chipIndex || 0) === ci && s.kind !== 'noise' && plan[s.id] !== 'skip' && plan[s.id] !== 'dpcm');
+      const items = src.filter(s => s.chip === chipKey && (s.chipIndex || 0) === ci && s.kind !== 'noise' && wantExtract(s) && plan[s.id] !== 'dpcm');
       const fams = [...new Set(items.map(s => familyOf(plan[s.id])))];
       for (const fam of fams) {
         const res = extractFn(regFor(chipKey, fam), fam);
@@ -549,74 +579,74 @@
     if (data.kss && data.kss.scc && c.k051649) {
       sccResult = MML.Kss2MmlExpansion.scc(data.kss.writeLog, totalFrames, kssClock, n163WaveReg, envReg);
       sccUsed = sccResult.channels.some(ch => ch.events.some(ev => ev.note !== null));
-      if (sccUsed) for (const s of src) if (s.chip === 'k051649' && plan[s.id] !== 'skip') extracted[s.id] = sccResult.channels[s.ch];
+      if (sccUsed) for (const s of src) if (s.chip === 'k051649' && wantExtract(s)) extracted[s.id] = sccResult.channels[s.ch];
     }
     if (data.kss && data.kss.opll && c.ym2413) {
       const r = MML.Kss2MmlExpansion.opll(data.kss.writeLog, totalFrames, vrc7ToneReg);
       // リズムモード曲は r.channels が6本しか無いので、ch7-9は未定義のまま置かない
-      for (const s of src) if (s.chip === 'ym2413' && plan[s.id] !== 'skip' && r.channels[s.ch]) extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'ym2413' && wantExtract(s) && r.channels[s.ch]) extracted[s.id] = r.channels[s.ch];
     }
     if (data.kss && data.kss.opl && (c.ym3812 || c.ym3526 || c.y8950)) {
       const r = MML.Kss2MmlExpansion.opl(data.kss.writeLog, totalFrames, data.kss.oplClock, vrc7ToneReg);
-      for (const s of src) if (s.chip === 'opl' && plan[s.id] !== 'skip' && r.channels[s.ch]) extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'opl' && wantExtract(s) && r.channels[s.ch]) extracted[s.id] = r.channels[s.ch];
     }
     // OPN系FM(YM2612/YM2610)と YM2610 ADPCM: イベントは借用先非依存(attDb)なので1回抽出して全部に使う
     if (data.ym2612 && c.ym2612) {
       const r = MML.Vgm2MmlExpansion.opn(data.ym2612.snapshots, 6);
-      for (const s of src) if (s.chip === 'ym2612' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'ym2612' && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
     }
     if (data.ym2151 && c.ym2151) {
       const r = MML.Vgm2MmlExpansion.opn(data.ym2151.snapshots, 8);
-      for (const s of src) if (s.chip === 'ym2151' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'ym2151' && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
     }
     if (data.ym2203fm && c.ym2203) {
       const r = MML.Vgm2MmlExpansion.opn(data.ym2203fm.snapshots, c.ym2203.dual ? 6 : 3);
-      for (const s of src) if (s.chip === 'ym2203' && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'ym2203' && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
     }
     if (data.ym2608fm && c.ym2608) {
       const r = MML.Vgm2MmlExpansion.opn(data.ym2608fm.snapshots, 6);
-      for (const s of src) if (s.chip === 'ym2608' && s.ch >= 0 && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'ym2608' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
       // ADPCM-B(Δ-Nで音階演奏)はYM2610と同じ抽出器(スナップショット形状が同一)。
       // リズム(adpcmA)側はドラムパート(DRUM_CHIPS/drumChannel)が拾うのでここでは使わない
       const ad = MML.Vgm2MmlExpansion.adpcm(data.ym2608fm.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'ym2608adpcm' && plan[s.id] !== 'skip') extracted[s.id] = ad.b;
+      for (const s of src) if (s.chip === 'ym2608adpcm' && wantExtract(s)) extracted[s.id] = ad.b;
     }
     if (data.ga20 && c.ga20) {
       const r = MML.Vgm2MmlExpansion.ga20(data.ga20.snapshots, drumMap);
       // ★ s.ch >= 0 は合成チャンネル(ドラムパート、ch:-1)を除くため。付け忘れると
       //   channels[-1]=undefined でドラムパートの抽出結果を上書きしてしまう
-      for (const s of src) if (s.chip === 'ga20' && s.ch >= 0 && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'ga20' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
     }
     if (data.segapcm && c.segapcm) {
       const r = MML.Vgm2MmlExpansion.segapcm(data.segapcm.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'segapcm' && s.ch >= 0 && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'segapcm' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
     }
     if (data.c140 && c.c140) {
       const r = MML.Vgm2MmlExpansion.c140(data.c140.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'c140' && s.ch >= 0 && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'c140' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
     }
     if (data.c352 && c.c352) {
       const r = MML.Vgm2MmlExpansion.c352(data.c352.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'c352' && s.ch >= 0 && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'c352' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
     }
     if (data.qsound && c.qsound) {
       const r = MML.Vgm2MmlExpansion.qsound(data.qsound.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'qsound' && s.ch >= 0 && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'qsound' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
     }
     if (data.okim6295 && c.okim6295) {
       const r = MML.Vgm2MmlExpansion.okim6295(data.okim6295.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'okim6295' && s.ch >= 0 && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'okim6295' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
     }
     if (data.multipcm && c.multipcm) {
       const r = MML.Vgm2MmlExpansion.multipcm(data.multipcm.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'multipcm' && s.ch >= 0 && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'multipcm' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
     }
     if (data.ym2610fm && c.ym2610) {
       const nFm = c.ym2610.ym2610b ? 6 : 4;
       const r = MML.Vgm2MmlExpansion.opn(data.ym2610fm.snapshots, nFm);
-      for (const s of src) if (s.chip === 'ym2610' && s.ch >= 0 && plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
+      for (const s of src) if (s.chip === 'ym2610' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
       const ad = MML.Vgm2MmlExpansion.adpcm(data.ym2610fm.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'ym2610adpcm' && plan[s.id] !== 'skip') extracted[s.id] = s.ch === 6 ? ad.b : ad.a[s.ch];
+      for (const s of src) if (s.chip === 'ym2610adpcm' && wantExtract(s)) extracted[s.id] = s.ch === 6 ? ad.b : ad.a[s.ch];
     }
     const vrc7InstOf = (s) => {
       const v = options.vrc7Inst && options.vrc7Inst[s.id];
@@ -630,7 +660,7 @@
     if (data.sn && c.sn76489) {
       const nChips = c.sn76489.dual ? 2 : 1;
       for (let k = 0; k < nChips; k++) {
-        const items = src.filter(s => s.chip === 'sn76489' && s.chipIndex === k && plan[s.id] !== 'skip');
+        const items = src.filter(s => s.chip === 'sn76489' && s.chipIndex === k && wantExtract(s));
         const fams = [...new Set(items.filter(s => s.kind !== 'noise').map(s => familyOf(plan[s.id])))];
         let noiseDone = false;
         for (const fam of fams.length ? fams : [null]) {
@@ -644,22 +674,17 @@
     }
 
     // ── 音色ごとの設定(src/convert/toneSettings.js、2026-09-09) ─────────────────────
-    // options.toneSettings … main.js が ToneSettings.snapshot() で作った素のオブジェクト(無ければ従来どおり)
-    const TS = (MML.Convert.ToneSettings && options.toneSettings) ? MML.Convert.ToneSettings.lookup(options.toneSettings) : null;
-    const TK = MML.Convert.ToneKey;
-    const keyOf = (ev, s) => (TK ? TK.ofEvent(ev, s) : null);
-    const useTone = !!(TS && !TS.isEmpty() && TK);
     const demotions = []; // VRC7自作音色があぶれてプリセットへ落ちた音色 [{key, preset, label}]
     // 音色ごとの載せ先で1本の元chを分割する(borrow.js compose と同じ考え方。仮想ソース id 'opn:2@triangle')。
     // 別ファミリでの抽出し直しが要るのは音量写像が抽出時に効く AY/SN だけ(他は attDb で借用先非依存)
-    const extractForFam = (s, fam) => {
+    const extractForFam = (s, fam, base) => {
       if (s.chip === 'ay8910' && data.kss) {
         const wl = (s.chipIndex || 0) === 1 ? (data.kss2 && data.kss2.writeLog) : data.kss.writeLog;
         const clk = (s.chipIndex || 0) === 1 ? ((data.kss2 && data.kss2.clock) || kssClock) : kssClock;
         return wl ? MML.Kss2MmlExpansion.ay(wl, totalFrames, clk, regFor('ay8910', fam)).channels[s.ch] : null;
       }
       if (s.chip === 'sn76489' && data.sn) return MML.Vgm2MmlExpansion.sn76489(data.sn.snapshots, data.sn.clock, regFor('sn76489', fam), s.chipIndex || 0).tones[s.ch];
-      return extracted[s.id];
+      return base || extracted[s.id];
     };
     const restOf = (ev) => ({ start: ev.start, end: ev.end, note: null });
     const splitSources = [];
@@ -667,7 +692,9 @@
       for (const s of src) {
         const t = plan[s.id];
         const base = extracted[s.id];
-        if (!base || !t || t === 'skip' || t === 'dpcm' || s.ch < 0) continue;
+        // t === 'skip' でも通す: 音色一覧で載せ先を指定した音色だけ仮想ソースへ分けて載せる
+        // (チャンネル自体は skip のまま。指定の無い音色はどこにも出ない)
+        if (!base || !t || t === 'dpcm' || s.ch < 0) continue;
         const overrides = new Map();
         for (const ev of base.events) {
           if (ev.note === null) continue;
@@ -684,7 +711,7 @@
           if (tt2 === 'skip') { notes.push(`${s.label} の音色 ${names.join(', ')} はスキップ指定のため変換対象外です。`); continue; }
           if (tt2 === 'dpcm') { notes.push(`${s.label} の音色 ${names.join(', ')} → E(DPCM) は音色単位の打楽器化に未対応のため変換対象外です(チャンネル単位でEを選ぶか、サンプルの「扱い」で打楽器にしてください)。`); continue; }
           if (!TARGET_TYPES[tt2]) continue;
-          const chFam = extractForFam(s, TARGET_TYPES[tt2].family);
+          const chFam = extractForFam(s, TARGET_TYPES[tt2].family, base);
           if (!chFam) continue;
           const keySet = new Set(keys);
           const vs = Object.assign({}, s, { id: `${s.id}@${tt2}`, label: `${s.label}[${names.join(',')}]`, splitFrom: s.id });
@@ -704,6 +731,7 @@
       const t = plan[s.id];
       if (t === 'dpcm') continue; // DPCMは dpcmDrums が1本へ合成済み(下で直接scoreChannelsへ入れる)
       if (!t || t === 'skip' || !extracted[s.id]) continue;
+      if (autoFmOnN163.has(s.id) && !extracted[s.id].events.some(ev => ev.note !== null)) { plan[s.id] = 'skip'; continue; }
       if (placed[t]) { conflicts.push(`${s.label} は ${t} が既に ${placed[t].source.label} に使われているため変換対象外です。`); continue; }
       const tt = TARGET_TYPES[t];
       if (!tt) continue;
@@ -734,6 +762,10 @@
       placed[t] = { source: s, channel: ch };
     }
     notes.push(...conflicts);
+    // VRC7(6ch)からあふれてN163へ載ったFM(YM2151の7-8ch等)。音色は4op→2op変換した波形の
+    // 近似になるので、そうと分かるように書いておく
+    const fmOnN163 = allSrc.filter(s2 => autoFmOnN163.has(s2.id) && /^n163_/.test(plan[s2.id] || ''));
+    if (fmOnN163.length) notes.push(`${fmOnN163.map(s2 => s2.label).join(', ')} は借用先のVRC7(6ch)に収まらないため、N163の空きチャンネルへ波形近似で載せました(鍵盤表示のチャンネル割当で変更できます)。`);
 
     // 借用先ファミリごとの後処理(音程補正・EN・EP)
     const byFamily = {};
