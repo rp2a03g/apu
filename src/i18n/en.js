@@ -293,32 +293,65 @@
     'MML本文のテンポ({mml} BPM)と録音時のテンポ({rec} BPM)が違います。挿入した音符はMML側のテンポで鳴ります。':
       'The MML tempo ({mml} BPM) differs from the tempo you recorded at ({rec} BPM). The inserted notes will play at the MML tempo.',
 
-    // ---- DPCMコンバータ ----
+    // ---- DPCMコンバータ(@DPCM定義エディタ、src/ui/dpcmEditor.js) ----
     'DMCレート': 'DMC rate',
     '変換': 'Convert',
-    '▶ プレビュー再生': '▶ Preview',
-    'バイナリをダウンロード': 'Download binary',
-    '音声ファイルを選択してください。': 'Please choose an audio file.',
-    '元サンプルレート      : {rate} Hz': 'Source sample rate : {rate} Hz',
-    '元サンプル数          : {n}': 'Source samples     : {n}',
-    'DMCレート             : {idx} ({hz} Hz)': 'DMC rate           : {idx} ({hz} Hz)',
-    'エンコード後サンプル数: {n}': 'Encoded samples    : {n}',
-    'データサイズ          : {n} bytes': 'Data size          : {n} bytes',
-    '再生時間              : {time}': 'Duration           : {time}',
-    '--- バイナリダンプ (先頭256バイト) ---': '--- Binary dump (first 256 bytes) ---',
-
-    // ---- @DPCM サンプル読み込み ----
-    '読込中…': 'Loading...',
-    '変換中…': 'Converting...',
-    '読み込み済み({n}バイト、.dmc生データ)。再コンパイル/再生してください':
-      'Loaded ({n} bytes, raw .dmc). Recompile / play to apply.',
-    '読み込み済み({n}バイト、レート{freq}={hz}Hz)。再コンパイル/再生してください':
-      'Loaded ({n} bytes, rate {freq} = {hz} Hz). Recompile / play to apply.',
-    '変換失敗: {msg}': 'Conversion failed: {msg}',
-    'MML内で参照されている@DPCMサンプル:': '@DPCM samples referenced by this MML:',
-    '"{file}" (レート{freq}):': '"{file}" (rate {freq}):',
-    '読み込み済み({n}バイト)': 'Loaded ({n} bytes)',
-    '未読み込み(この曲は無音になります)': 'Not loaded (this part will be silent)',
+    'ファイル名': 'File name',
+    '行はMML本文の @DPCM<n> 定義です。📂 で音声ファイル(.dmcなら変換なしでそのまま)を読み、♪ で原音/変換後を聴き比べ、「反映」でMMLへ書き込みます。反映するまでMMLは変わりません(色の付いた「反映」=未反映)。DMC 1本は4081バイトまでなので、超える音は下段で区切ります: 「限界で分割」で上限に収まるように切るか、波形をダブルクリックして区切りを足し、境目をドラッグして聞きながら決めます(境目のダブルクリックで区切りを削除。上=オリジナル/下=DPCMで、クリックした側の音でその区間だけ試聴)。区間ごとに番号・使用/未使用・DMCレートがあり、未使用(グレー)は反映されず、上限超え(赤)のままでは反映できません。反映後のファイル名は <名前>_<区間番号>.dmc です。':
+      'Each row is a @DPCM<n> definition in the MML. Load an audio file with 📂 (a .dmc is used as-is, no conversion), compare the original and the converted sound with ♪, and press Apply to write it to the MML. Nothing changes in the MML until you apply (a colored Apply button = not applied yet). One DMC sample holds at most 4081 bytes, so longer sounds are cut in the lower pane: press "Cut at limit" to fit the limit, or double-click the waveform to add a boundary, then drag the boundaries while listening (double-click a boundary to remove it; top = original, bottom = DPCM, and clicking a lane auditions that segment with the sound of that lane). Each segment has a number, a used/unused flag and its own DMC rate; unused segments (gray) are not applied, and segments over the limit (red) block applying. Files are named <name>_<segment number>.dmc.',
+    '上限を超えている区間を、そのDMCレートで上限に収まる本数に均等に切ります。あとは境目をドラッグして調整してください':
+      'Cuts every over-limit segment evenly into as many pieces as its DMC rate needs to fit the limit. Then drag the boundaries to adjust',
+    '限界で分割': 'Cut at limit',
+    'DPCM変換後を鳴らす(使用区間を順に)': 'Play the DPCM result (used segments in order)',
+    '境目をドラッグ / 波形をダブルクリックで区切りを追加・境目をダブルクリックで削除 / 上段(オリジナル)クリックで原音・下段(DPCM)クリックで変換後を区間試聴': 'Drag a boundary / double-click the waveform to add a boundary, double-click a boundary to remove it / click the top lane for the original, the bottom lane for the DPCM result',
+    '使用する区間がありません(全区間が未使用)': 'No segment is in use (all are unused)',
+    '区間{k}が{n}バイトで上限{max}を超えています。「限界で分割」か境目の移動、または未使用にしてください':
+      'Segment {k} is {n} bytes, over the limit of {max}. Use "Cut at limit", move the boundaries, or mark it unused',
+    '反映しました: @DPCM{a}〜 {n}本 / 合計{bytes}バイト。区間を続けて鳴らすには E @{a} c @{b} c … のように並べます':
+      'Applied: @DPCM{a}… {n} samples / {bytes} bytes total. To play them back to back, write E @{a} c @{b} c …',
+    'DMC 1本の上限({max}バイト)を超えています。「限界で分割」か、波形をダブルクリックして区切ってください':
+      'Exceeds the per-sample limit ({max} bytes). Use "Cut at limit" or double-click the waveform to add boundaries',
+    '{n}区間': '{n} segments',
+    '(未使用{m})': ' ({m} unused)',
+    'サイズ超過': 'over limit',
+    '全区間のDMCレートをまとめて変えます(区間ごとの指定は下段)': 'Sets the DMC rate of every segment at once (per-segment rates are in the lower pane)',
+    '{n}区間 {t} / 1本の上限 {max}バイト(={tmax} @{hz}Hz)': '{n} segments, {t} / limit per sample {max} bytes (= {tmax} at {hz} Hz)',
+    'この区間を試聴': 'Audition this segment',
+    '反映に含める(外すとグレーになり、.dmcも定義も作られません)': 'Include in Apply (unchecked = gray; no .dmc or definition is written)',
+    '使用': 'Use',
+    '未使用': 'unused',
+    'この区間のDMCレート': 'DMC rate of this segment',
+    '前の区間と結合': 'Merge with the previous segment',
+    '上限に収まるように {n} 区間へ切りました。境目をドラッグして調整できます': 'Cut into {n} segments to fit the limit. Drag the boundaries to adjust',
+    'ループ': 'Loop',
+    'サイズ': 'Size',
+    '状態': 'Status',
+    '原音': 'Original',
+    '合計 {n}定義 / {kb} KB (DMC領域16KB)': 'Total {n} definitions / {kb} KB (DMC area is 16 KB)',
+    '@DPCM定義がありません。＋で追加するか、MML本文に @DPCM<n> = { "file.dmc", 15, 0, 64, 0 } を書いてください':
+      'No @DPCM definitions. Add one with ＋, or write @DPCM<n> = { "file.dmc", 15, 0, 64, 0 } in the MML',
+    '音声ファイル / .dmc を読み込む(反映を押すまでMMLへは書き込まれません)':
+      'Load an audio file / .dmc (nothing is written to the MML until you press Apply)',
+    '変換後の.dmcを保存': 'Save the converted .dmc',
+    'この定義をMMLから削除': 'Remove this definition from the MML',
+    '@DPCM{n} をMMLから削除しますか?': 'Remove @DPCM{n} from the MML?',
+    '分割 {k}/{n} (@DPCM{p})': 'piece {k}/{n} (of @DPCM{p})',
+    '未読込': 'not loaded',
+    '未反映': 'not applied',
+    '反映済み': 'applied',
+    '元が.dmc': 'source is .dmc',
+    '.dmc(台帳)': '.dmc (registry)',
+    '@DPCM{n}: 波形なし(ファイル未読込)': '@DPCM{n}: no waveform (file not loaded)',
+    '@DPCM{n}: 分割の子(@DPCM{p} の行で編集)': '@DPCM{n}: split piece (edit it on the @DPCM{p} row)',
+    '先に 📂 で音声ファイルか .dmc を読み込んでください': 'Load an audio file or a .dmc with 📂 first',
+    '反映しました: @DPCM{a} "{file}" {bytes}バイト': 'Applied: @DPCM{a} "{file}" {bytes} bytes',
+    '元が.dmcファイルのため変換はしません(レートとループは指定できます): {n}バイト':
+      'The source is a .dmc, so no conversion is done (rate and loop can still be set): {n} bytes',
+    '読み込みました: {name} {rate}Hz {n}サンプル → DMC {hz}Hz {m}サンプル({bytes}バイト)':
+      'Loaded: {name} {rate} Hz, {n} samples → DMC {hz} Hz, {m} samples ({bytes} bytes)',
+    '{n}個の.dmcをダウンロードしました': 'Downloaded {n} .dmc files',
+    '保存しました: {file} ({n}バイト)': 'Saved: {file} ({n} bytes)',
+    '保存に失敗しました: {msg}': 'Failed to save: {msg}',
 
     // ---- MMLコンパイル / NSF書き出し ----
     'コンパイル中…': 'Compiling...',

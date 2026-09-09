@@ -394,6 +394,16 @@
         mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新のため
       }
 
+      // 未反映の印(セクションごと): ローカル(キャンバス/数値欄/読み込み/貼り付け)を触ったら
+      // その「反映」ボタンを色付きにし、反映するかMMLから読み直すと戻す
+      const dirty = { FM: false, MW: false, MH: false };
+      function setDirty(tag, v) {
+        dirty[tag] = v;
+        const btn = document.getElementById(`fdsWave${ID_TAG[tag]}Apply`);
+        if (btn) btn.classList.toggle('apply-btn--dirty', v);
+      }
+      Object.values(mhInputs).forEach((el) => el.addEventListener('input', () => setDirty('MH', true)));
+
       // --- ローカル(このウィンドウ内)の現在値の取得/設定 ---
       function getLocalData(tag) {
         if (tag === 'FM') return fmSection.canvas.data.slice();
@@ -409,6 +419,7 @@
         mhInputs.freq.value = String(freq);
         mhInputs.depth.value = String(depth);
         mhInputs.waveform.value = String(waveform);
+        setDirty('MH', true); // 読み込み/貼り付け由来。MMLからの読み直しは loadFromMml が直後に戻す
       }
 
       // --- MMLからの読み込み(インデックス選択時・ウィンドウを開いた時にのみ呼ぶ) ---
@@ -418,10 +429,11 @@
         if (values) {
           // @MWはMML上は生コード(0-7)。エディタ表示は実際に鳴る累積カーブなので変換する
           setLocalData(tag, tag === 'MW' ? computeModCurve(values) : values);
-          return;
+        } else {
+          const defaults = tag === 'FM' ? sineDefault(64, 63) : tag === 'MW' ? new Array(32).fill(0) : [0, 0, 0, 0];
+          setLocalData(tag, defaults);
         }
-        const defaults = tag === 'FM' ? sineDefault(64, 63) : tag === 'MW' ? new Array(32).fill(0) : [0, 0, 0, 0];
-        setLocalData(tag, defaults);
+        setDirty(tag, false);
       }
       function loadAllFromMml() {
         loadFromMml('FM'); loadFromMml('MW'); loadFromMml('MH');
@@ -462,9 +474,11 @@
       // --- FM/MWキャンバス(値表示欄をドラッグ中もリアルタイム更新するが、MMLへは書かない) ---
       fmSection.canvas = new WaveBarCanvas(document.getElementById('fdsWaveFmCanvas'), 64, 0, 63, (data) => {
         fmValuesEl.textContent = data.join(' ');
+        setDirty('FM', true);
       });
       mwSection.canvas = new WaveBarCanvas(document.getElementById('fdsWaveMwCanvas'), 32, -64, 63, (data) => {
         mwValuesEl.textContent = data.join(' ');
+        setDirty('MW', true);
       }, (data, idx, rawValue) => nearestAchievableValue(idx === 0 ? 0 : data[idx - 1], rawValue));
 
       // --- 説明(❓)トグル ---
@@ -514,6 +528,7 @@
         const local = getLocalData(tag);
         const toWrite = tag === 'MW' ? codesFromCurve(local) : local;
         writeDef(tag, section.currentIndex, toWrite);
+        setDirty(tag, false);
         regenerateSamplePhraseIfClean();
       }
       document.getElementById('fdsWaveFmApply').addEventListener('click', () => onApplyClick('FM'));

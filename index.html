@@ -142,7 +142,6 @@
       <div class="pane-splitter" id="mmlSplitter" title="ドラッグでエディタの高さを変更"></div>
       <!-- 下ペイン: コントロール + 出力 -->
       <div class="mml-bottom-pane">
-        <div id="dpcmSampleList" class="output mml-output-area" style="margin-top:4px;display:none;"></div>
         <div id="mmlOutput" class="output mml-log-area"></div>
         <div id="captureOutput" class="output mml-log-area" style="margin-top:4px;"></div>
       </div>
@@ -163,25 +162,16 @@
     </div>
   </section>
 
+  <!-- DPCMコンバータ: @DPCM<n>定義のエディタ(1定義=1行、ローカル編集→「反映」でMMLへ)。
+       中身は src/ui/dpcmEditor.js が組み立てる。定義のダブルクリックでも開く -->
   <section class="float-window" id="win-dpcm"
-    data-default-left="660" data-default-top="560" data-default-width="480" data-default-height="320">
+    data-default-left="520" data-default-top="140" data-default-width="820" data-default-height="460">
     <div class="float-window-header">
       <span>DPCMコンバータ</span>
       <button class="float-window-close" aria-label="閉じる">×</button>
     </div>
     <div class="float-window-body">
-      <h2>DPCMコンバータ</h2>
-      <div class="toolbar">
-        <input type="file" id="dpcmFile" accept="audio/*" />
-        <label style="display:flex;align-items:center;gap:4px;">DMCレート
-          <select id="dpcmRate"></select>
-        </label>
-        <button id="btnDpcmConvert">変換</button>
-        <button id="btnDpcmPreview" class="secondary">▶ プレビュー再生</button>
-        <button id="btnDpcmStop" class="secondary">■ 停止</button>
-        <button id="btnDpcmDownload" class="secondary">バイナリをダウンロード</button>
-      </div>
-      <div id="dpcmOutput" class="output" style="min-height: 100px;"></div>
+      <div id="dpcmEditor"></div>
     </div>
   </section>
 
@@ -849,6 +839,7 @@
   <script src="src/ui/waveClipboard.js"></script>
   <script src="src/ui/colorPicker.js"></script>
   <script src="src/ui/drumPanel.js"></script>
+  <script src="src/ui/dpcmEditor.js"></script>
   <script src="src/ui/keyboard.js"></script>
   <script src="src/ui/fdsWaveEditor.js"></script>
   <script src="src/ui/n163WaveEditor.js"></script>

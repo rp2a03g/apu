@@ -252,6 +252,10 @@
       let currentIndex = 0;
       let patch = defaultPatch();
       let outFormat = 'ot';
+      // 未反映の印: 音色(patch/書式)を触るたびに redraw() が通るのでそこで立て、
+      // 反映するかMMLから読み直す(loadFromMml)と戻す
+      let dirty = false;
+      function setDirty(v) { dirty = v; $('vrc7ToneApply').classList.toggle('apply-btn--dirty', v); }
 
       const selectEl = $('vrc7ToneIndex');
       const formatEl = $('vrc7ToneFormat');
@@ -911,6 +915,7 @@
       // 再描画(図はすぐ、実チップの計算は間引く)
       let redrawTimer = null;
       function redraw(immediate) {
+        setDirty(true);
         valuesEl.textContent = formatDefOneLine(currentIndex, patch, outFormat);
         if (redrawTimer) clearTimeout(redrawTimer);
         if (immediate) { recomputeOutput(); drawDiagram(); return; }
@@ -967,6 +972,7 @@
         else { patch = defaultPatch(); }
         syncInputsFromPatch();
         redraw(true);
+        setDirty(false);
       }
       selectEl.addEventListener('change', () => {
         currentIndex = parseInt(selectEl.value, 10) || 0;
@@ -974,7 +980,7 @@
         regenerateSamplePhraseIfClean();
       });
       formatEl.addEventListener('change', () => { outFormat = formatEl.value; redraw(true); });
-      noteEl.addEventListener('change', () => { redraw(true); regenerateSamplePhraseIfClean(); });
+      noteEl.addEventListener('change', () => { const d = dirty; redraw(true); setDirty(d); regenerateSamplePhraseIfClean(); }); // 音程は定義に入らない
 
       // --- 内蔵音色プリセット(die dumpの実ROM値。src/convert/vrc7Tone.js) ---
       (function fillPresets() {
@@ -1086,6 +1092,7 @@
       $('vrc7ToneApply').addEventListener('click', () => {
         readPatchFromInputs();
         writeDef(currentIndex, patch, outFormat);
+        setDirty(false);
         regenerateSamplePhraseIfClean();
         checkCompileErrors();
       });

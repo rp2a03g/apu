@@ -234,8 +234,15 @@
 
       let currentIndex = 0;
 
+      // 未反映の印: ローカル(キャンバス/読み込み/貼り付け)を触ったら「反映」ボタンを色付きにし、
+      // 反映するかMMLから読み直す(インデックス選択/ダブルクリック/ウィンドウを開く)と戻す
+      const applyBtn = document.getElementById('n163WaveApply');
+      let dirty = false;
+      function setDirty(v) { dirty = v; applyBtn.classList.toggle('apply-btn--dirty', v); }
+
       const canvas = new WaveBarCanvas(document.getElementById('n163WaveCanvas'), 16, (data) => {
         valuesEl.textContent = data.join(' ');
+        setDirty(true);
       });
 
       // --- テキストへの書き戻し(反映・新規・プリセット読込・貼り付け時にのみ呼ぶ) ---
@@ -286,6 +293,7 @@
           canvas.setLength(data.length);
         }
         canvas.setData(data);
+        setDirty(false);
       }
 
       selectEl.addEventListener('change', () => {
@@ -346,8 +354,9 @@
           statusEl.textContent = '';
         }
       }
-      document.getElementById('n163WaveApply').addEventListener('click', () => {
+      applyBtn.addEventListener('click', () => {
         writeDef(currentIndex, canvas.data);
+        setDirty(false);
         regenerateSamplePhraseIfClean();
         checkCompileErrors();
       });

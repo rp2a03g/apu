@@ -425,14 +425,19 @@
   // 音声ファイルを読み、デコードしたPCMをそのサンプルの代わりに使う。
   // ★差し替えたPCMは変換にも試聴にもそのまま乗る(drumSamples.resolve が一括で返すため)。
   let drumIncludeInput = null;
-  // DPCMコンバータで開いている音をそのままパッドへ割り当てる(融合)
+  // DPCMコンバータで選択中の行の音をそのままパッドへ割り当てる(融合。src/ui/dpcmEditor.js currentSource)
+  function converterSource() {
+    return (MML.UI.DpcmEditor && MML.UI.DpcmEditor.currentSource) ? MML.UI.DpcmEditor.currentSource() : null;
+  }
   function includeFromConverter(row) {
-    if (!row || !row.hash || !lastDpcmSource) return;
-    MML.Convert.DrumSamples.setIncludePcm(row.hash, lastDpcmSource.name, lastDpcmSource.pcm, lastDpcmSource.rate);
+    const src = converterSource();
+    if (!row || !row.hash || !src) return;
+    MML.Convert.DrumSamples.setIncludePcm(row.hash, src.name, src.pcm, src.rate);
     MML.UI.DrumPanel.render();
+    refreshDrumPanel();
     scheduleDpcmCostUpdate();
   }
-  function converterSourceName() { return lastDpcmSource ? lastDpcmSource.name : null; }
+  function converterSourceName() { const src = converterSource(); return src ? src.name : null; }
 
   function includeDrumSample(row) {
     if (!row || !row.hash) return;
@@ -503,12 +508,15 @@
     const laneNames = {}; // drumKey → ユーザーが付けた名前(ロールのパッドへ流す)
     const rows = keys.map((k, i) => {
       const s = drumSampleStore[k], l = laneOf[k];
-      const name = (DS && s && s.hash) ? (DS.get(s.hash).name || null) : null;
-      if (name) laneNames[k] = name;
+      const st = (DS && s && s.hash) ? DS.get(s.hash) : null;
+      const name = st ? (st.name || null) : null;
+      // 差し替え(インクルード)したサンプルは、名前を付けていなければファイル名をパッドに出す(ユーザー指示)
+      const incName = (st && st.include && st.include.name) ? st.include.name.replace(/.[^.]*$/, '') : null;
+      if (name || incName) laneNames[k] = name || incName;
       return { key: k,
                // label は「名前が未設定のときに出す既定表示」。名前そのものは行側が設定から引く
                // 台帳が既定ラベルを持つ形式(HESのROMオフセット/clip番号)はそれを優先する
-               label: (s && s.label) || (l && l.autoLabel) || (l && l.label) || labels[i] || k,
+               label: incName || (s && s.label) || (l && l.autoLabel) || (l && l.label) || labels[i] || k,
                color: (l && l.color) || DRUM_ROW_COLORS[i % DRUM_ROW_COLORS.length],
                hits: hits[k] || 0,
                // 扱い(自動/打楽器/音階)の現在値。実体はサンプル内容ハッシュ単位の上書き
@@ -1989,16 +1997,8 @@
   }
   requestAnimationFrame(monitorLoop);
 
-  // --- エミュレータ試聴(DPCMプレビュー等で共用) ---
+  // --- 音声デコード/試聴用のAudioContext(ドラムパネルの差し替え読み込み・パッド試聴で共用) ---
   let audioCtx = null;
-  let currentSource = null;
-
-  function stopPreview() {
-    if (currentSource) {
-      try { currentSource.stop(); } catch (e) { /* already stopped */ }
-      currentSource = null;
-    }
-  }
 
   // --- Phase 3: 一括キャプチャ & シーク/早送り/巻き戻し再生 ---
   const captureOutputEl = document.getElementById('captureOutput');
@@ -2961,111 +2961,28 @@
     return writeLog;
   }
 
-  // --- フェーズ1.7: MML本文の@DPCM<n>参照ファイルの読み込みUI ---
-  // ファイル名(@DPCM<n>={"file",...}の"file")をキーにエンコード済みバイト列を
-  // キャッシュする。セッション内で一度読み込めば、再コンパイル・再生時に
-  // 都度ファイル選択し直す必要はない(compiler.jsのopt.dpcmSamples[filename]と対応)
+  // --- @DPCM<n>参照ファイルの台帳 ---
+  // ファイル名(@DPCM<n>={"file",...}の"file")をキーにエンコード済みバイト列を持つ
+  // (compiler.jsのopt.dpcmSamples[filename]と対応)。入口は2つ:
+  //   ・DPCMコンバータ(src/ui/dpcmEditor.js)で「反映」したもの
+  //   ・*2mml変換が出力した .dmc(setDpcmSampleBytes。ファイル再選択なしで即再生/NSF書き出しできる)
+  // 以前はMMLエディタ下部に「参照ファイルの選択UI」があったが、コンバータへ統合した
+  // (定義をダブルクリック→行の📂で読み込む→反映)。
   const dpcmSampleCache = {};
-  const dpcmSampleListEl = document.getElementById('dpcmSampleList');
-
-  // MML本文をスキャンし、@DPCM<n>定義から{ file: freq }を集める
-  // (ファイル名が重複する場合は先に出現した定義のfreqを採用する)
-  function scanDpcmFileDefs(source) {
-    const { envelopes } = MML.Mml.splitChannels(source);
-    const files = {};
-    for (const idx of Object.keys(envelopes.dpcm)) {
-      const def = envelopes.dpcm[idx];
-      if (def.file && !(def.file in files)) files[def.file] = def.freq || 0;
-    }
-    return files;
+  function setDpcmSampleBytes(name, bytes) {
+    dpcmSampleCache[name] = bytes;
+    if (MML.UI.DpcmEditor && MML.UI.DpcmEditor.refresh) MML.UI.DpcmEditor.refresh();
   }
-
-  // .dmcは既に2A03 DMC形式(1bitデルタ変調)にエンコード済みの生バイナリなので、
-  // decodeAudioData(PCM前提のデコーダ)には通さずそのままキャッシュする。
-  // 拡張子はファイル選択(input.files[0].name)側で判定する(MML本文の"file"文字列と
-  // 一致させる必要があるため、キーはfilenameのまま変えない)
-  function isDmcFilename(name) {
-    return /\.dmc$/i.test(name || '');
+  // MML本文を丸ごと差し替えたとき(ファイルを開く/変換結果)に呼ぶ。コンバータが持つ未反映の音は捨てる
+  function resetDpcmEditor() {
+    if (MML.UI.DpcmEditor && MML.UI.DpcmEditor.reset) MML.UI.DpcmEditor.reset();
   }
-
-  async function loadDpcmSampleFile(filename, freq, file, statusEl) {
-    try {
-      if (isDmcFilename(file.name)) {
-        statusEl.textContent = T('読込中…');
-        const arrayBuffer = await file.arrayBuffer();
-        dpcmSampleCache[filename] = new Uint8Array(arrayBuffer);
-        statusEl.textContent = T('読み込み済み({n}バイト、.dmc生データ)。再コンパイル/再生してください',
-          { n: dpcmSampleCache[filename].length });
-        statusEl.className = 'ok';
-        return;
-      }
-      statusEl.textContent = T('変換中…');
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const arrayBuffer = await file.arrayBuffer();
-      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-      let samples;
-      if (audioBuffer.numberOfChannels === 1) {
-        samples = audioBuffer.getChannelData(0);
-      } else {
-        const ch0 = audioBuffer.getChannelData(0);
-        const ch1 = audioBuffer.getChannelData(1);
-        samples = new Float32Array(ch0.length);
-        for (let i = 0; i < ch0.length; i++) samples[i] = (ch0[i] + ch1[i]) / 2;
-      }
-      const result = MML.Dpcm.encode(samples, audioBuffer.sampleRate, freq);
-      dpcmSampleCache[filename] = result.bytes;
-      statusEl.textContent = T('読み込み済み({n}バイト、レート{freq}={hz}Hz)。再コンパイル/再生してください',
-        { n: result.bytes.length, freq, hz: result.rateHz.toFixed(0) });
-      statusEl.className = 'ok';
-    } catch (e) {
-      statusEl.textContent = T('変換失敗: {msg}', { msg: e.message });
-      statusEl.className = 'error';
-    }
-  }
-
-  // MML本文中の@DPCM参照ファイル一覧を、ファイル選択UIとして表示する。
-  // 既に読み込み済み(dpcmSampleCacheにある)ファイルは行を保持したまま状態表示のみ更新する
-  function refreshDpcmSampleList(source) {
-    const files = scanDpcmFileDefs(source);
-    const names = Object.keys(files);
-    if (names.length === 0) {
-      dpcmSampleListEl.style.display = 'none';
-      dpcmSampleListEl.innerHTML = '';
-      return;
-    }
-    dpcmSampleListEl.style.display = '';
-    dpcmSampleListEl.innerHTML = '';
-    const title = document.createElement('div');
-    title.textContent = T('MML内で参照されている@DPCMサンプル:');
-    dpcmSampleListEl.appendChild(title);
-    for (const filename of names) {
-      const freq = files[filename];
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:2px;';
-
-      const label = document.createElement('span');
-      label.textContent = T('"{file}" (レート{freq}):', { file: filename, freq });
-      row.appendChild(label);
-
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'audio/*,.dmc';
-      row.appendChild(input);
-
-      const status = document.createElement('span');
-      status.className = dpcmSampleCache[filename] ? 'ok' : '';
-      status.textContent = dpcmSampleCache[filename]
-        ? T('読み込み済み({n}バイト)', { n: dpcmSampleCache[filename].length })
-        : T('未読み込み(この曲は無音になります)');
-      row.appendChild(status);
-
-      input.addEventListener('change', () => {
-        const f = input.files[0];
-        if (f) loadDpcmSampleFile(filename, freq, f, status);
-      });
-
-      dpcmSampleListEl.appendChild(row);
-    }
+  if (MML.UI.DpcmEditor) {
+    MML.UI.DpcmEditor.init(mmlSourceEl, {
+      getSample: (name) => dpcmSampleCache[name] || null,
+      setSample: (name, bytes) => { dpcmSampleCache[name] = bytes; },
+      onApplied: () => { if (MML.UI.DrumPanel) MML.UI.DrumPanel.render(); },
+    });
   }
 
   // --- Phase 4: MMLコンパイラ ---
@@ -3141,7 +3058,6 @@
   }
 
   function getMmlOpt() {
-    refreshDpcmSampleList(mmlSourceEl.value);
     return {
       fdsWave: MML.WaveformEditor.getFdsWave(),
       n163Wave: MML.WaveformEditor.getN163Wave(),
@@ -3209,6 +3125,7 @@
     mmlSourceEl.value = text;
     mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新
     markMmlTextSynced(file.name);
+    resetDpcmEditor();
 
     // 別の曲を読み込んだので、前の曲の再生範囲(青/赤ハンドル)は引き継がない
     // (NSF2MML等の変換直後と同じ扱い。[[mml-conversion-stale-playback-range-bug]])
@@ -3460,95 +3377,6 @@
     stop() { transportStop(); },
     isExternal() { return mmlExternalSourceLabel != null; }
   };
-
-  // --- Phase 6: DPCMコンバータ ---
-  const dpcmFileEl = document.getElementById('dpcmFile');
-  const dpcmRateEl = document.getElementById('dpcmRate');
-  const dpcmOutputEl = document.getElementById('dpcmOutput');
-  let lastDpcmResult = null;
-  // DPCMコンバータで最後に読み込んだ音声の元PCM。ドラム(DPCM)パネルの「差し替え」から
-  // そのまま使えるようにする(コンバータとドラムパネルの融合。ユーザー要望)
-  let lastDpcmSource = null; // { name, pcm: Float32Array, rate: Hz }
-
-  MML.Dpcm.DMC_RATE_TABLE_NTSC.forEach((hz, i) => {
-    const opt = document.createElement('option');
-    opt.value = String(i);
-    opt.textContent = `${i}: ${hz.toFixed(1)} Hz`;
-    dpcmRateEl.appendChild(opt);
-  });
-  dpcmRateEl.value = '15';
-
-  async function convertDpcm() {
-    const file = dpcmFileEl.files[0];
-    if (!file) {
-      dpcmOutputEl.innerHTML = '<div class="error">' + T('音声ファイルを選択してください。') + '</div>';
-      return;
-    }
-
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
-    const arrayBuffer = await file.arrayBuffer();
-    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-
-    let samples;
-    if (audioBuffer.numberOfChannels === 1) {
-      samples = audioBuffer.getChannelData(0);
-    } else {
-      const ch0 = audioBuffer.getChannelData(0);
-      const ch1 = audioBuffer.getChannelData(1);
-      samples = new Float32Array(ch0.length);
-      for (let i = 0; i < ch0.length; i++) samples[i] = (ch0[i] + ch1[i]) / 2;
-    }
-
-    const rateIndex = parseInt(dpcmRateEl.value, 10);
-    const result = MML.Dpcm.encode(samples, audioBuffer.sampleRate, rateIndex);
-    lastDpcmResult = result;
-    lastDpcmSource = { name: file.name, pcm: samples, rate: audioBuffer.sampleRate };
-    if (MML.UI.DrumPanel) MML.UI.DrumPanel.render(); // 「コンバータの音を使う」候補が増えたので出し直す
-
-    let out = '';
-    out += T('元サンプルレート      : {rate} Hz', { rate: audioBuffer.sampleRate }) + '\n';
-    out += T('元サンプル数          : {n}', { n: samples.length }) + '\n';
-    out += T('DMCレート             : {idx} ({hz} Hz)', { idx: rateIndex, hz: result.rateHz.toFixed(1) }) + '\n';
-    out += T('エンコード後サンプル数: {n}', { n: result.sampleCount }) + '\n';
-    out += T('データサイズ          : {n} bytes', { n: result.bytes.length }) + '\n';
-    out += T('再生時間              : {time}', { time: formatTime(result.sampleCount / result.rateHz) }) + '\n\n';
-    out += T('--- バイナリダンプ (先頭256バイト) ---') + '\n';
-    out += MML.Dpcm.hexDump(result.bytes.slice(0, 256));
-
-    dpcmOutputEl.innerHTML = '';
-    const pre = document.createElement('div');
-    pre.className = 'ok';
-    pre.textContent = out;
-    dpcmOutputEl.appendChild(pre);
-  }
-
-  function previewDpcm() {
-    if (!lastDpcmResult) return;
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    stopPreview();
-
-    const decoded = MML.Dpcm.decode(lastDpcmResult.bytes, lastDpcmResult.sampleCount);
-    const buffer = audioCtx.createBuffer(1, decoded.length, lastDpcmResult.rateHz);
-    buffer.getChannelData(0).set(decoded);
-
-    const source = audioCtx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(MML.Audio.getMasterGain(audioCtx));
-    source.start();
-    currentSource = source;
-  }
-
-  function downloadDpcm() {
-    if (!lastDpcmResult) return;
-    const blob = new Blob([lastDpcmResult.bytes], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'dpcm.bin';
-    a.click();
-    URL.revokeObjectURL(url);
-  }
 
   // --- NSFファイル読み込み・再生 ---
   const nsfFileEl = document.getElementById('nsfFile');
@@ -3890,6 +3718,7 @@
 
     // MML エディタに挿入
     mmlSourceEl.value = converted.mml;
+    resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新
 
     // 抽出済み波形を波形エディタへ反映(拡張音源の有効化自体はMML本文に埋め込まれた
@@ -3902,7 +3731,7 @@
     // しなくてもそのまま再生・NSF書き出しできるようにする
     for (const f of converted.dpcmFiles) {
       downloadBin(f.name, f.bytes);
-      dpcmSampleCache[f.name] = f.bytes;
+      setDpcmSampleBytes(f.name, f.bytes);
     }
 
     const dpcmMsg = converted.dpcmFiles.length > 0
@@ -4297,10 +4126,6 @@
     if (loadedNsfBytes) playNsfStream();
   });
 
-  document.getElementById('btnDpcmConvert').addEventListener('click', convertDpcm);
-  document.getElementById('btnDpcmPreview').addEventListener('click', previewDpcm);
-  document.getElementById('btnDpcmStop').addEventListener('click', stopPreview);
-  document.getElementById('btnDpcmDownload').addEventListener('click', downloadDpcm);
 
   document.getElementById('btnMmlExportNsf').addEventListener('click', exportMmlNsf);
   // MMLエディタのファイル操作(開く/保存)。開くのは.mml/.txtのみ
@@ -5000,6 +4825,7 @@
 
     // MML エディタへ出力
     mmlSourceEl.value = result.mml;
+    resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input'));
 
     // 抽出したFDS/N163波形を波形エディタへ反映(getMmlOpt()はここからのみ波形を読むため)
@@ -5009,7 +4835,7 @@
     // DPCM ファイルをダウンロード(保存用)。同時にdpcmSampleCacheへ直接投入
     for (const f of result.dmcFiles || []) {
       downloadBin(f.name, f.bytes);
-      dpcmSampleCache[f.name] = f.bytes;
+      setDpcmSampleBytes(f.name, f.bytes);
     }
 
     const dmcMsg = (result.dmcFiles && result.dmcFiles.length > 0)
@@ -5675,13 +5501,14 @@
     updateKssPlayButton();
 
     mmlSourceEl.value = result.mml;
+    resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input'));
 
     // 変換結果はNES拡張音源(FME-7/N163/VRC7)を借りて再生する設計。有効化はMML本文に
     // 埋め込まれた#EX-*ディレクティブで行われるため、波形エディタへの反映のみ行う
     if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
     // 打楽器化したch(E=DPCM)の .dmc: 保存用にダウンロードしつつ dpcmSampleCache へ入れて即再生可能に
-    for (const f of (result.dpcmFiles || [])) { downloadBin(f.name, f.bytes); dpcmSampleCache[f.name] = f.bytes; }
+    for (const f of (result.dpcmFiles || [])) { downloadBin(f.name, f.bytes); setDpcmSampleBytes(f.name, f.bytes); }
 
     kssFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FME-7/N163/VRC7を借用して再生)',
@@ -6034,13 +5861,14 @@
     updateGbsPlayButton();
 
     mmlSourceEl.value = result.mml;
+    resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input'));
 
     // 変換結果はNES拡張音源(FDS)を借りて再生する設計。有効化はMML本文に埋め込まれた
     // #EX-*ディレクティブで行われるため、波形エディタへの反映のみ行う
     if (result.fdsWave && MML.WaveformEditor.fdsWave) MML.WaveformEditor.fdsWave.setData(result.fdsWave);
     // 打楽器化したch(E=DPCM)の .dmc: 保存用にダウンロードしつつ dpcmSampleCache へ入れて即再生可能に
-    for (const f of (result.dpcmFiles || [])) { downloadBin(f.name, f.bytes); dpcmSampleCache[f.name] = f.bytes; }
+    for (const f of (result.dpcmFiles || [])) { downloadBin(f.name, f.bytes); setDpcmSampleBytes(f.name, f.bytes); }
 
     gbsFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FDSを借用して再生)',
@@ -6523,6 +6351,7 @@
     updateHesPlayButton();
 
     mmlSourceEl.value = result.mml;
+    resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input'));
 
     if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
@@ -6532,7 +6361,7 @@
     // そのまま再生・NSF書き出しできるようにする(nsf2mml/converter.jsと同じパターン)
     for (const f of (result.dpcmFiles || [])) {
       downloadBin(f.name, f.bytes);
-      dpcmSampleCache[f.name] = f.bytes;
+      setDpcmSampleBytes(f.name, f.bytes);
     }
     const dpcmMsg = (result.dpcmFiles && result.dpcmFiles.length > 0)
       ? T('、DPCM {n} ファイル出力', { n: result.dpcmFiles.length }) : '';
@@ -7242,6 +7071,7 @@
     updateVgmPlayButton();
 
     mmlSourceEl.value = result.mml;
+    resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input'));
 
     // 委譲先ファミリに応じた波形エディタ反映(nsf2mml: FDS/N163、kss2mml: SCC→N163、gbs2mml: GB波形→FDS)
@@ -7249,7 +7079,7 @@
     if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
     for (const f of (result.dpcmFiles || [])) {
       downloadBin(f.name, f.bytes);
-      dpcmSampleCache[f.name] = f.bytes;
+      setDpcmSampleBytes(f.name, f.bytes);
     }
 
     // 借用先の説明(ファミリごと)。ネイティブ変換(NES)は借用無し。

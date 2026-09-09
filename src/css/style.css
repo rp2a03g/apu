@@ -2923,3 +2923,82 @@ button.secondary {
 /* MIDI機器の一覧(src/ui/performInput.js) */
 .perform-midi-list { margin-top: 2px; }
 .perform-midi-list .metro-opt { white-space: normal; }
+
+/* --- DPCMコンバータ(@DPCM定義エディタ、src/ui/dpcmEditor.js): ドラム(DPCM)パネルと同じ1定義=1行の表 --- */
+.dpcm-ed { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; font-size: 11px; }
+.dpcm-ed-toolbar { margin: 0 0 3px; align-items: center; }
+.dpcm-ed-total { margin-left: auto; color: var(--text-muted); font-family: var(--mono); }
+.dpcm-ed-total--over { color: #d1483a; font-weight: 700; }
+.dpcm-ed-head, .dpcm-ed-row {
+  display: flex; align-items: center; gap: 6px; padding: 2px 6px; white-space: nowrap; min-width: 0;
+}
+.dpcm-ed-head { font-weight: 700; color: var(--text-muted); border-bottom: 1px solid var(--border); flex: none; }
+.dpcm-ed-body { flex: 1 1 auto; min-height: 60px; overflow-y: auto; overflow-x: hidden; }
+.dpcm-ed-row { border-bottom: 1px solid rgba(128, 128, 128, 0.14); cursor: default; }
+.dpcm-ed-row:hover { background: rgba(58, 110, 165, 0.08); }
+.dpcm-ed-row--sel { background: rgba(58, 110, 165, 0.18); }
+.dpcm-ed-row--sel:hover { background: rgba(58, 110, 165, 0.24); }
+.dpcm-ed-row--dirty .de-c-state { color: #e0a030; font-weight: 700; }
+.dpcm-ed-row--child { opacity: 0.75; }
+.dpcm-ed-row--child .de-c-idx::before { content: '└'; margin-right: 2px; color: var(--text-muted); }
+.dpcm-ed-empty { padding: 14px 8px; color: var(--text-muted); white-space: normal; }
+.de-c-idx   { flex: none; width: 26px; text-align: right; font-family: var(--mono); }
+.de-c-file  { flex: none; display: flex; gap: 3px; }
+.de-c-file button { padding: 1px 5px; font-size: 11px; }
+.de-c-name  { flex: 1 1 110px; min-width: 90px; max-width: 240px; font-family: var(--mono); }
+.de-name {
+  width: 100%; box-sizing: border-box; font: inherit; font-family: var(--mono);
+  padding: 1px 3px; border: 1px solid transparent; border-radius: 3px;
+  background: transparent; color: var(--text);
+}
+.de-name:hover:not(:disabled) { border-color: var(--border); }
+.de-name:focus { border-color: var(--accent); background: var(--bg); outline: none; }
+.de-c-play  { flex: none; width: 96px; display: flex; gap: 4px; align-items: center; }
+.dpcm-ed-head .de-c-play i { font-style: normal; width: 46px; font-size: 10px; text-align: center; }
+.de-play {
+  width: 46px; text-align: center; line-height: 1.2; padding: 0; font-size: 14px; cursor: pointer;
+  border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 4px;
+}
+.de-play:hover:not(:disabled) { background: rgba(58, 110, 165, 0.18); color: var(--text); }
+.de-play:disabled { opacity: 0.35; cursor: default; }
+.de-c-rate  { flex: none; width: 82px; }
+.de-c-rate select { width: 100%; font-size: 11px; }
+.de-c-loop  { flex: none; width: 36px; text-align: center; }
+.de-c-size  { flex: none; width: 88px; font-family: var(--mono); color: var(--text-secondary); font-size: 10px; }
+.de-c-state { flex: none; width: 118px; overflow: hidden; text-overflow: ellipsis; color: var(--text-muted); font-size: 10px; }
+.de-state--ok { color: #5ac47a; }
+.de-state--none { color: var(--text-muted); font-style: italic; }
+.de-state--child { color: var(--text-muted); }
+.de-state--over { color: #ff8a7a; font-weight: 700; }
+.de-c-ops   { flex: none; display: flex; gap: 3px; align-items: center; margin-left: auto; }
+.de-c-ops button { padding: 1px 6px; font-size: 11px; }
+.de-c-ops .de-del { padding: 1px 5px; }
+.dpcm-ed-wave { flex: none; border-top: 1px solid var(--border); padding-top: 3px; margin-top: 3px; }
+.dpcm-ed-wave--empty .dpcm-ed-canvas { opacity: 0.45; }
+.dpcm-ed-wave-bar { margin: 0 0 3px; align-items: center; }
+.dpcm-ed-wave-title { font-family: var(--mono); font-weight: 700; }
+.dpcm-ed-wave-info { color: var(--text-muted); font-size: 10px; margin-left: auto; }
+.dpcm-ed-split-lab { display: flex; align-items: center; gap: 4px; }
+.dpcm-ed-canvas { display: block; width: 100%; height: 202px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
+/* 区間の一覧(番号/使用/レート/サイズ/結合)。番号クリックで試聴、未使用=薄く、上限超え=赤 */
+.dpcm-ed-segs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.de-seg { display: flex; align-items: center; gap: 4px; padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; background: rgba(111,177,255,0.06); font-size: 10px; }
+.de-seg--unused { opacity: 0.55; background: rgba(128,128,136,0.14); }
+.de-seg--over { border-color: #d1483a; background: rgba(209,72,58,0.16); }
+.de-seg-no { font-size: 12px; min-width: 16px; text-align: center; cursor: pointer; color: var(--accent); }
+.de-seg-no:hover { text-decoration: underline; }
+.de-seg-used-lab { display: flex; align-items: center; gap: 2px; }
+.de-seg-rate { font-size: 10px; padding: 0 2px; }
+.de-seg-size { font-family: var(--mono); color: var(--text-secondary); }
+.de-seg--over .de-seg-size { color: #ff8a7a; font-weight: 700; }
+.de-seg-merge { padding: 0 4px; font-size: 10px; }
+.dpcm-ed-status { margin-top: 3px; white-space: pre-wrap; }
+
+/* 波形/音色エディタ共通: ローカルで編集したままMMLへ書いていない(=未反映)ときの「反映」ボタン。
+   反映を押すか、インデックスを選び直してMMLから読み直すと元に戻る */
+button.apply-btn--dirty {
+  background: #e0a030;
+  color: #1a1408;
+  box-shadow: 0 0 0 2px rgba(224, 160, 48, 0.35);
+}
+button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align: 1px; }
