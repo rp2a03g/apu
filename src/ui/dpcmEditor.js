@@ -10,11 +10,9 @@
  *     読む。.dmc は「元が.dmc」と表示して変換はしない(レート/ループ/試聴だけ)
  *   ・♪ で原音と変換後を試聴。下段に選択行の波形(上=オリジナル、下=DPCM)を出し、再生位置を重ねる
  *   ・DMC 1本の上限は $4013 の 4081 バイト。encode() は16バイト単位で出すので実質 4080 バイト
- *     = 32640 サンプル(MAX_BYTES/MAX_SAMPLES)。読み込んだ音がこれを超えても勝手には切らず
- *     エラー表示にし、ユーザーが「限界で分割」(そのレートの上限に収まる均等割り)か
- *     波形のダブルクリックで区切りを足す。境目はドラッグで動かす(上限で拘束はしない=
- *     超えた区間は赤く出してエラーのまま残す)。区間ごとに 番号 / 使用・未使用 / DMCレート を持ち、
- *     未使用の区間はグレーで反映されない。区間の ✕ で前の区間と結合
+ *     = 32640 サンプル。読み込んだ音がこれを超えても勝手には切らずエラー表示にし、ユーザーが
+ *     「限界で分割」(そのレートの上限に収まる均等割り)か波形のダブルクリックで区切りを足す。
+ *     下段の分割ビューは src/ui/dpcmSplitView.js(ドラム(DPCM)パネルと共用の部品、2026-09-10)
  *   ・反映すると使用区間ごとに @DPCM 定義を書き、.dmc は <名前>_<区間番号>.dmc(1区間だけなら <名前>.dmc)。
  *     2つ目以降の定義は親の直後の行へ連番で挿入し、その行は「分割 k/N」と出して親の行から一括で扱う
  *   ・反映するまでMML本文には何も書かない。未反映の行は「反映」ボタンの色と状態列で分かる
@@ -31,22 +29,16 @@
   const UI = MML.UI = MML.UI || {};
   const T = (key, params) => (MML.I18n ? MML.I18n.t(key, params) : key);
 
-  const HW_MAX_BYTES = 4081;            // 実機 $4013=255 → 255*16+1
-  const MAX_BYTES = 4080;               // encode() の出力は16バイト単位なのでここが実質上限
-  const MAX_SAMPLES = MAX_BYTES * 8;    // 32640
-  const SNAP_SAMPLES = 128;             // .dmc を分割するときの粒度(16バイト)
-  const LANE_H = 96;                    // 波形キャンバスの1レーン(上=オリジナル/下=DPCM)の高さ
-  const LANE_GAP = 10;
+  // 区間の計算・変換・試聴は分割ビューの部品(src/ui/dpcmSplitView.js)と共有する
+  const M = UI.DpcmSplitView.model;
+  const { HW_MAX_BYTES, MAX_BYTES, rateHz, clamp, fmtTime, clampVol, fillRateSelect,
+          hasData, isDmcRow, segRate, segSamples, segBytes, segOver, resetSegs, invalidateAll,
+          ensurePiece, decodePiece, previewPcm, usedSegs, totalUsedBytes, totalSeconds } = M;
 
-  function rateTable() { return (MML.Dpcm && MML.Dpcm.DMC_RATE_TABLE_NTSC) || []; }
-  function rateHz(i) { return rateTable()[i] || 33143.9; }
-  function bytesForSamples(n) { return Math.ceil(n / 8 / 16) * 16 || 16; }
-  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
   function esc(v) {
     return String(v == null ? '' : v)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
-  function fmtTime(sec) { return (sec >= 10 ? sec.toFixed(1) : sec.toFixed(2)) + 's'; }
   function sanitize(name) {
     const DS = MML.Convert && MML.Convert.DrumSamples;
     const s = DS ? DS.sanitizeName(name) : String(name || '').replace(/[^0-9A-Za-z_.+-]+/g, '_');
@@ -94,10 +86,8 @@
   //   base      … ファイル名(拡張子なし)。反映時に <base>.dmc / 分割なら <base>_<区間番号>.dmc
   //   pcm/srcRate … 読み込んだ音声(変換元)。.dmc を読んだ/台帳から拾ったときは dmc の方
   //   dmc/dmcFrom … 変換済み生データと出所('file' | 'cache')
-  //   rate/loop/dac … @DPCM の freq(行の一括値)/mode/dac
-  //   segs      … 区間 [{end, rate, used}]。end=区間の終わり(全体に対する割合 0-1、最後は1)、
-  //               区間kは [segs[k-1].end, segs[k].end)。rate=区間ごとのDMCレート、used=反映するか
-  //   pieces    … 区間ごとの変換結果キャッシュ [{bytes, sampleCount, dac}|null]
+  //   rate/loop/dac/vol … @DPCM の freq(行の一括値)/mode/dac、変換ボリューム(1-100)
+  //   segs/pieces … 区間と変換キャッシュ(dpcmSplitView.js 冒頭コメント参照。ここでは segs[].rate は常に数値)
   //   pieceIndices/pieceNos … 反映済みの分割定義(2本目以降)の番号と、その区間番号。次の反映で使い回す
   //   pieceOf/pieceNo … この行が分割で生まれた子のとき、親の番号と区間番号
   function newLocal(def) {
@@ -114,130 +104,6 @@
       previewPcm: null, previewKey: null,
     };
   }
-  function hasData(L) { return !!(L.pcm || L.dmc); }
-  function isDmcRow(L) { return !L.pcm && !!L.dmc; }
-  /** 変換ボリューム(%)を 1〜100 に丸める(ドラム(DPCM)パネルと同じ範囲。0は「鳴らさない」と紛らわしいので下限1) */
-  function clampVol(v) {
-    const n = Math.round(Number(v));
-    return Number.isFinite(n) ? Math.max(1, Math.min(100, n)) : 100;
-  }
-  // 全体の長さ(元データのサンプル数。PCM行=元のレート、.dmc行=DMCサンプル)
-  function srcLength(L) { return L.pcm ? L.pcm.length : (L.dmc ? L.dmc.length * 8 : 0); }
-  function segStart(L, k) { return k > 0 ? L.segs[k - 1].end : 0; }
-  function segRange(L, k) { return [segStart(L, k), L.segs[k].end]; }
-  // 区間のDMCサンプル数(encode() のリサンプルと同じ丸め)
-  function segSamples(L, k) {
-    const [t0, t1] = segRange(L, k);
-    const N = srcLength(L);
-    const a = Math.round(t0 * N), b = Math.max(a + 1, Math.round(t1 * N));
-    if (L.pcm) return Math.max(1, Math.round((b - a) * rateHz(L.segs[k].rate) / L.srcRate));
-    return b - a;
-  }
-  function segBytes(L, k) {
-    const p = L.pieces[k];
-    return p ? p.bytes.length : bytesForSamples(segSamples(L, k));
-  }
-  function segSeconds(L, k) { return segSamples(L, k) / rateHz(L.segs[k].rate); }
-  function segOver(L, k) { return segBytes(L, k) > MAX_BYTES; }
-  // .dmc の区切りは16バイト境界へ吸着する(1バイト=8サンプルの生データを切るため)
-  function snapFrac(L, t) {
-    const N = srcLength(L);
-    if (!N) return t;
-    if (isDmcRow(L)) return clamp(Math.round(t * N / SNAP_SAMPLES) * SNAP_SAMPLES / N, 0, 1);
-    return clamp(t, 0, 1);
-  }
-  function resetSegs(L) { L.segs = [{ end: 1, rate: L.rate, used: true }]; L.pieces = [null]; }
-  function invalidateAll(L) { L.pieces = L.segs.map(() => null); }
-  // 区間kを割合tで2つに切る(番号は後ろへずれる)
-  function splitAt(L, k, t) {
-    const [t0, t1] = segRange(L, k);
-    const minF = SNAP_SAMPLES / Math.max(1, srcLength(L));
-    t = snapFrac(L, t);
-    if (t <= t0 + minF || t >= t1 - minF) return false;
-    const s = L.segs[k];
-    L.segs.splice(k, 0, { end: t, rate: s.rate, used: s.used });
-    L.pieces.splice(k, 0, null);
-    L.pieces[k + 1] = null;
-    return true;
-  }
-  // 区間kを前の区間と結合する(レートと使用は前の区間の値を引き継ぐ)
-  function mergeWithPrev(L, k) {
-    if (k <= 0) return false;
-    const prev = L.segs[k - 1];
-    L.segs.splice(k - 1, 2, { end: L.segs[k].end, rate: prev.rate, used: prev.used || L.segs[k].used });
-    L.pieces.splice(k - 1, 2, null);
-    return true;
-  }
-  // 上限を超えている使用区間を、そのレートで上限に収まる本数へ均等に切る
-  function autoCut(L) {
-    let cut = 0;
-    for (let k = 0; k < L.segs.length; k++) {
-      const s = L.segs[k];
-      if (!s.used || !segOver(L, k)) continue;
-      const n = Math.ceil(segSamples(L, k) / MAX_SAMPLES);
-      const [t0, t1] = segRange(L, k);
-      const parts = [];
-      for (let i = 1; i < n; i++) parts.push({ end: snapFrac(L, t0 + (t1 - t0) * i / n), rate: s.rate, used: s.used });
-      parts.push(s);
-      L.segs.splice(k, 1, ...parts);
-      L.pieces.splice(k, 1, ...parts.map(() => null));
-      k += parts.length - 1;
-      cut++;
-    }
-    return cut;
-  }
-  function dac0(L) { return (L.dac == null || L.dac === 255) ? 64 : (L.dac & 0x7F); }
-  function encodeSeg(L, k) {
-    const [t0, t1] = segRange(L, k);
-    if (L.pcm) {
-      // ★変換元は previewPcm(=ボリュームを掛けた後の波形)。上段の表示・原音の試聴と同じものを焼く
-      const src = previewPcm(L);
-      const N = src.length;
-      const a = Math.round(t0 * N), b = Math.max(a + 1, Math.round(t1 * N));
-      const seg = src.subarray(a, b);
-      // 先頭サンプル値を$4011初期値にすると頭の追従ランプ(クリック)が消える(drumHits.js と同じ)
-      const dac = clamp(Math.round((seg[0] + 1) / 2 * 127), 0, 127);
-      const r = MML.Dpcm.encode(seg, L.srcRate, L.segs[k].rate, { startCounter: dac });
-      return { bytes: r.bytes, sampleCount: r.sampleCount, dac: r.startCounter };
-    }
-    const N = L.dmc.length * 8;
-    const a = Math.round(t0 * N), b = Math.max(a + SNAP_SAMPLES, Math.round(t1 * N));
-    let dac = dac0(L);
-    if (a > 0) {
-      // 区間の頭のDAC値 = 直前までを復号したときのカウンタ(復号値からカウンタへ戻す。厳密に可逆)
-      const dec = MML.Dpcm.decode(L.dmc, a, dac);
-      dac = clamp(Math.round((dec[a - 1] + 1) / 2 * 127), 0, 127);
-    }
-    const bytes = L.dmc.slice(a >> 3, Math.min(L.dmc.length, b >> 3));
-    return { bytes, sampleCount: bytes.length * 8, dac };
-  }
-  function ensurePiece(L, k) {
-    if (!L.pieces[k]) L.pieces[k] = encodeSeg(L, k);
-    return L.pieces[k];
-  }
-  function decodePiece(p) { return MML.Dpcm.decode(p.bytes, p.sampleCount, p.dac); }
-  // 上段(オリジナル)の波形 = 「いまの設定で変換元として使われる音」。PCM行はボリュームを掛けた後、
-  // .dmc行は復号した音(既に1bit化済みなので掛けようがない=ボリュームは無効)。
-  // 割合表示なのでレートが変わっても形は同じ。encodeSeg もここを変換元にする
-  function previewPcm(L) {
-    const key = L.pcm ? ('pcm:' + L.vol) : ('dmc:' + dac0(L));
-    if (L.previewPcm && L.previewKey === key) return L.previewPcm;
-    if (L.pcm) {
-      const g = clampVol(L.vol) / 100;
-      if (g === 1) L.previewPcm = L.pcm;
-      else {
-        const out = new Float32Array(L.pcm.length);
-        for (let i = 0; i < out.length; i++) out[i] = L.pcm[i] * g;
-        L.previewPcm = out;
-      }
-    } else if (L.dmc) L.previewPcm = MML.Dpcm.decode(L.dmc, L.dmc.length * 8, dac0(L));
-    else L.previewPcm = null;
-    L.previewKey = key;
-    return L.previewPcm;
-  }
-  function usedSegs(L) { return L.segs.map((s, k) => k).filter(k => L.segs[k].used); }
-  function totalUsedBytes(L) { return usedSegs(L).reduce((s, k) => s + segBytes(L, k), 0); }
-  function totalSeconds(L) { return L.segs.reduce((s, _, k) => s + segSeconds(L, k), 0); }
 
   // ── 本体 ─────────────────────────────────────────────────────────────────
   const api = {};
@@ -253,16 +119,13 @@
     let rows = [];                 // [{index, def}]  MML本文の定義(表示順=番号順)
     const locals = new Map();      // index → local
     let selected = null;           // 選択中の行番号
-    let audioCtx = null;
-    let playing = null;            // { srcs, startAt, items:[{at, dur, t0, t1}], total }
-    let rafId = 0;
+    let audioCtx = null;           // 音声ファイルの decodeAudioData 用(試聴は分割ビューが持つ)
+    let view = null;               // 下段の分割ビュー(dpcmSplitView.js)
 
     // 表の中身(行/区間)は render() が作り直すが、見出し・ボタン・説明文は下のシェルに
     // 埋まっているので、言語切替では buildShell() でシェルごと作り直す
-    // (keyboard.js / helpPanel.js と同じ MML.I18n.onChange の規約)。要素を持ち直すため
-    // 参照は let にし、window側に一度だけ付けるリスナーは常に最新の変数を見るようにする
-    let bodyEl, totalEl, helpBox, waveEl, waveTitleEl, waveInfoEl, autoCutBtn, canvas, segsEl, statusEl;
-    let resizeObs = null;
+    // (keyboard.js / helpPanel.js と同じ MML.I18n.onChange の規約)。要素を持ち直すため参照は let
+    let bodyEl, totalEl, helpBox, waveEl, statusEl;
 
     function shellHtml() {
       return `<div class="dpcm-ed compact-wave-editor">` +
@@ -287,18 +150,7 @@
           `<span class="de-c-ops"></span>` +
         `</div>` +
         `<div class="dpcm-ed-body"></div>` +
-        `<div class="dpcm-ed-wave">` +
-          `<div class="toolbar dpcm-ed-wave-bar">` +
-            `<span class="dpcm-ed-wave-title"></span>` +
-            `<button type="button" class="secondary dpcm-ed-autocut" title="${T('上限を超えている区間を、そのDMCレートで上限に収まる本数に均等に切ります。あとは境目をドラッグして調整してください')}">${T('限界で分割')}</button>` +
-            `<button type="button" class="dpcm-ed-play-raw" title="${T('原音を鳴らす')}">▶ ${T('原音')}</button>` +
-            `<button type="button" class="dpcm-ed-play-dpcm" title="${T('DPCM変換後を鳴らす(使用区間を順に)')}">▶ DPCM</button>` +
-            `<button type="button" class="secondary dpcm-ed-stop" title="${T('停止')}">■</button>` +
-            `<span class="dpcm-ed-wave-info"></span>` +
-          `</div>` +
-          `<canvas class="dpcm-ed-canvas" width="600" height="${LANE_H * 2 + LANE_GAP}" title="${T('境目をドラッグ / 波形をダブルクリックで区切りを追加・境目をダブルクリックで削除 / 上段(オリジナル)クリックで原音・下段(DPCM)クリックで変換後を区間試聴')}"></canvas>` +
-          `<div class="dpcm-ed-segs"></div>` +
-        `</div>` +
+        `<div class="dpcm-ed-wave"></div>` +
         `<div class="output fds-status-output dpcm-ed-status"></div>` +
       `</div>`;
     }
@@ -308,39 +160,35 @@
     function buildShell() {
       const helpOpen = !!(helpBox && helpBox.style.display !== 'none');
       const status = statusEl ? { text: statusEl.textContent, cls: statusEl.className } : null;
+      if (view) view.destroy();
       rootEl.innerHTML = shellHtml();
       bodyEl = rootEl.querySelector('.dpcm-ed-body');
       totalEl = rootEl.querySelector('.dpcm-ed-total');
       helpBox = rootEl.querySelector('.dpcm-ed-help');
       waveEl = rootEl.querySelector('.dpcm-ed-wave');
-      waveTitleEl = rootEl.querySelector('.dpcm-ed-wave-title');
-      waveInfoEl = rootEl.querySelector('.dpcm-ed-wave-info');
-      autoCutBtn = rootEl.querySelector('.dpcm-ed-autocut');
-      canvas = rootEl.querySelector('.dpcm-ed-canvas');
-      segsEl = rootEl.querySelector('.dpcm-ed-segs');
       statusEl = rootEl.querySelector('.dpcm-ed-status');
       if (helpOpen) helpBox.style.display = 'block';
       if (status) { statusEl.textContent = status.text; statusEl.className = status.cls; }
       rootEl.querySelector('.dpcm-ed-add').addEventListener('click', onAdd);
       rootEl.querySelector('.dpcm-ed-help-btn').addEventListener('click', onHelpToggle);
-      autoCutBtn.addEventListener('click', onAutoCut);
-      rootEl.querySelector('.dpcm-ed-play-raw').addEventListener('click', onPlayRaw);
-      rootEl.querySelector('.dpcm-ed-play-dpcm').addEventListener('click', onPlayDpcm);
-      rootEl.querySelector('.dpcm-ed-stop').addEventListener('click', stop);
-      canvas.addEventListener('mousedown', onCanvasDown);
-      canvas.addEventListener('dblclick', onCanvasDblClick);
-      canvas.addEventListener('mousemove', onCanvasMove);
-      if (window.ResizeObserver) {
-        if (resizeObs) resizeObs.disconnect();
-        resizeObs = new ResizeObserver(() => drawWave());
-        resizeObs.observe(waveEl);
-      }
+      view = UI.DpcmSplitView.create(waveEl, {
+        onChange: (L) => { L.dirty = true; render(); },
+        onStatus: setStatus,
+        title: (L) => `@DPCM${selected} ${L.base}.dmc`,
+        emptyText: () => {
+          const S = selected != null ? locals.get(selected) : null;
+          return !S ? ''
+            : (S.pieceOf != null) ? T('@DPCM{n}: 分割の子(@DPCM{p} の行で編集)', { n: selected, p: S.pieceOf })
+            : T('@DPCM{n}: 波形なし(ファイル未読込)', { n: selected });
+        },
+      });
     }
 
     function setStatus(text, cls) {
       statusEl.className = 'output fds-status-output dpcm-ed-status' + (cls ? ' ' + cls : '');
       statusEl.textContent = text || '';
     }
+    function stop() { if (view) view.stop(); }
 
     // ── MML ⇄ 行 ─────────────────────────────────────────────────────────
     function rebuildRows() {
@@ -460,7 +308,7 @@
       const files = used.map(k => multi ? `${base}_${k + 1}.dmc` : `${base}.dmc`);
       pieces.forEach((p, i) => {
         // 子(2本目以降)は直前の定義の直後へ置き、MML上でも順に並ぶようにする
-        writeDef(indices[i], { file: files[i], freq: L.segs[used[i]].rate, size: p.bytes.length, dac: p.dac, mode: L.loop ? 1 : 0 }, i > 0 ? indices[i - 1] : null);
+        writeDef(indices[i], { file: files[i], freq: segRate(L, used[i]), size: p.bytes.length, dac: p.dac, mode: L.loop ? 1 : 0 }, i > 0 ? indices[i - 1] : null);
         if (hooks.setSample) hooks.setSample(files[i], p.bytes);
       });
       L.dirty = false;
@@ -491,6 +339,10 @@
     function pickFile(index) {
       pickIndex = index;
       fileInput.click();
+    }
+    function ensureAudio() {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
     }
     async function loadFile(index, file) {
       const L = locals.get(index);
@@ -584,134 +436,27 @@
     }
     function defOf(index) { const r = rows.find(x => x.index === index); return r ? r.def : null; }
 
-    // ── 試聴 ─────────────────────────────────────────────────────────────
-    function ensureAudio() {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-    }
-    function stop() {
-      if (playing) { for (const s of playing.srcs) { try { s.stop(); } catch (e) { /* ignore */ } } playing = null; }
-      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
-      drawWave();
-    }
-    // AudioBufferのサンプルレートには下限があるので、DMCレートのままでは作れない。
-    // コンテキストのレートへ線形補間で伸ばしてから鳴らす(main.js playFloatPcm と同じ)
-    function makeBuffer(pcm, hz) {
-      const ctxRate = audioCtx.sampleRate;
-      const n = Math.max(1, Math.round(pcm.length * ctxRate / hz));
-      const buf = audioCtx.createBuffer(1, n, ctxRate);
-      const out = buf.getChannelData(0);
-      const step = hz / ctxRate;
-      let pos = 0;
-      for (let i = 0; i < n; i++) {
-        const idx = pos | 0;
-        const a = pcm[Math.min(idx, pcm.length - 1)], b = pcm[Math.min(idx + 1, pcm.length - 1)];
-        out[i] = a + (b - a) * (pos - idx);
-        pos += step;
-      }
-      return buf;
-    }
-    // items: [{pcm, hz, t0, t1}] を順に鳴らす(区間ごとにレートが違ってもよい)。t0/t1 は再生位置線用の割合
-    function playSequence(items) {
-      items = items.filter(it => it.pcm && it.pcm.length && it.hz > 0);
-      if (!items.length) return;
-      ensureAudio();
-      stop();
-      const dest = (MML.Audio && MML.Audio.getMasterGain) ? MML.Audio.getMasterGain(audioCtx) : audioCtx.destination;
-      const g = audioCtx.createGain();
-      g.gain.value = 0.9;
-      g.connect(dest);
-      const startAt = audioCtx.currentTime + 0.02;
-      const srcs = [];
-      const sched = [];
-      let at = 0;
-      for (const it of items) {
-        const buf = makeBuffer(it.pcm, it.hz);
-        const src = audioCtx.createBufferSource();
-        src.buffer = buf;
-        src.connect(g);
-        src.start(startAt + at);
-        srcs.push(src);
-        sched.push({ at, dur: buf.duration, t0: it.t0, t1: it.t1 });
-        at += buf.duration;
-      }
-      playing = { srcs, startAt, items: sched, total: at };
-      srcs[srcs.length - 1].onended = () => { if (playing && playing.srcs === srcs) { playing = null; drawWave(); } };
-      tick();
-    }
-    function tick() {
-      rafId = 0;
-      if (!playing) return;
-      drawWave();
-      rafId = requestAnimationFrame(tick);
-    }
-    function playheadFrac() {
-      if (!playing || !audioCtx) return null;
-      const el = audioCtx.currentTime - playing.startAt;
-      if (el < 0) return playing.items[0].t0;
-      for (const it of playing.items) {
-        if (el < it.at + it.dur) return it.t0 + clamp((el - it.at) / it.dur, 0, 1) * (it.t1 - it.t0);
-      }
-      return null;
-    }
+    // ── 試聴(行の ♪。分割ビューの再生機構を使う) ───────────────────────────
     function playRaw(index) {
       const L = locals.get(index);
-      if (!L) return;
+      if (!L || !view) return;
       if (L.pieceOf != null) { playDpcm(index); return; }
-      // 原音側にもボリュームを掛ける(previewPcm)。このボタンは「元のPCM」ではなく
-      // 「いまの設定で変換元として使われる音」の試聴なので(ドラム(DPCM)パネルと同じ考え方)
-      if (L.pcm) playSequence([{ pcm: previewPcm(L), hz: L.srcRate, t0: 0, t1: 1 }]);
-      else if (L.dmc) playSequence([{ pcm: previewPcm(L), hz: rateHz(L.rate), t0: 0, t1: 1 }]); // .dmc は復号した音しか無い
+      if (hasData(L)) view.playRaw();
     }
     function playDpcm(index) {
       const L = locals.get(index);
-      if (!L) return;
+      if (!L || !view) return;
       if (L.pieceOf != null) {
         const d = defOf(index);
         const bytes = (d && hooks.getSample) ? hooks.getSample(d.file) : null;
         if (!bytes) return;
-        playSequence([{ pcm: MML.Dpcm.decode(bytes, bytes.length * 8, (d.dac == null || d.dac === 255) ? 64 : (d.dac & 0x7F)), hz: rateHz(d.freq), t0: 0, t1: 1 }]);
+        view.playSequence([{ pcm: MML.Dpcm.decode(bytes, bytes.length * 8, (d.dac == null || d.dac === 255) ? 64 : (d.dac & 0x7F)), hz: rateHz(d.freq), t0: 0, t1: 1 }]);
         return;
       }
-      if (!hasData(L)) return;
-      // 使用区間を順に(未使用は飛ばす=反映後に鳴る形)
-      playSequence(usedSegs(L).map(k => {
-        const [t0, t1] = segRange(L, k);
-        return { pcm: decodePiece(ensurePiece(L, k)), hz: rateHz(L.segs[k].rate), t0, t1 };
-      }));
-    }
-    // 区間kの試聴。lane='raw' なら上段(オリジナル)、それ以外は下段(DPCM変換後)の音
-    function playSeg(index, k, lane) {
-      const L = locals.get(index);
-      if (!L || !hasData(L) || !L.segs[k]) return;
-      const [t0, t1] = segRange(L, k);
-      if (lane === 'raw') {
-        // .dmc行のオリジナルは復号した音そのもの(元PCMが存在しない)。PCM行はボリューム込み
-        const src = previewPcm(L);
-        if (!src) return;
-        const N = src.length;
-        const a = Math.round(t0 * N), b = Math.max(a + 1, Math.round(t1 * N));
-        playSequence([{ pcm: src.subarray(a, b), hz: L.pcm ? L.srcRate : rateHz(L.segs[k].rate), t0, t1 }]);
-        return;
-      }
-      playSequence([{ pcm: decodePiece(ensurePiece(L, k)), hz: rateHz(L.segs[k].rate), t0, t1 }]);
+      if (hasData(L)) view.playDpcm();
     }
 
     // ── 表の描画 ───────────────────────────────────────────────────────────
-    function rateOptions() {
-      const table = rateTable();
-      const opts = [];
-      for (let i = table.length - 1; i >= 0; i--) opts.push([String(i), (table[i] / 1000).toFixed(1) + 'kHz']);
-      return opts;
-    }
-    function fillRateSelect(sel, value) {
-      for (const [v, label] of rateOptions()) {
-        const o = document.createElement('option');
-        o.value = v; o.textContent = label;
-        sel.appendChild(o);
-      }
-      sel.value = String(value);
-    }
     function rowState(L) {
       if (L.pieceOf != null) {
         const owner = locals.get(L.pieceOf);
@@ -845,230 +590,12 @@
       for (const el of bodyEl.querySelectorAll('.dpcm-ed-row')) el.classList.toggle('dpcm-ed-row--sel', +el.dataset.index === selected);
       renderWave();
     }
-
-    // ── 下段: 波形(上=オリジナル/下=DPCM) + 区間 ───────────────────────────
+    // 下段(分割ビュー): 選択中の親行でデータがあるものだけ編集対象にする
     function selLocal() {
       const L = selected != null ? locals.get(selected) : null;
       return (L && L.pieceOf == null && hasData(L)) ? L : null;
     }
-    // 区間を触った後の共通処理(変換キャッシュはドラッグ中に捨ててあるので、ここで描き直す)
-    function segsChanged(L) {
-      L.dirty = true;
-      render();
-    }
-    function renderWave() {
-      const L = selLocal();
-      waveEl.classList.toggle('dpcm-ed-wave--empty', !L);
-      segsEl.innerHTML = '';
-      if (!L) {
-        const S = selected != null ? locals.get(selected) : null;
-        waveTitleEl.textContent = !S ? ''
-          : (S.pieceOf != null) ? T('@DPCM{n}: 分割の子(@DPCM{p} の行で編集)', { n: selected, p: S.pieceOf })
-          : T('@DPCM{n}: 波形なし(ファイル未読込)', { n: selected });
-        waveInfoEl.textContent = '';
-        autoCutBtn.disabled = true;
-        drawWave();
-        return;
-      }
-      waveTitleEl.textContent = `@DPCM${selected} ${L.base}.dmc`;
-      // 使用区間の変換をここでまとめて行う(ドラッグ中は捨ててあり、止めた時のこの描画で下段のDPCM波形が出る)
-      for (const k of usedSegs(L)) ensurePiece(L, k);
-      autoCutBtn.disabled = !usedSegs(L).some(k => segOver(L, k));
-      waveInfoEl.textContent = T('{n}区間 {t} / 1本の上限 {max}バイト(={tmax} @{hz}Hz)', { n: L.segs.length, t: fmtTime(totalSeconds(L)), max: HW_MAX_BYTES, tmax: fmtTime(MAX_SAMPLES / rateHz(L.rate)), hz: rateHz(L.rate).toFixed(0) });
-      // 区間の一覧: 番号 / 使用 / レート / サイズ / 結合
-      L.segs.forEach((s, k) => {
-        const over = segOver(L, k);
-        const el = document.createElement('div');
-        el.className = 'de-seg' + (s.used ? '' : ' de-seg--unused') + (over && s.used ? ' de-seg--over' : '');
-        el.innerHTML =
-          `<b class="de-seg-no" title="${T('この区間を試聴')}">${k + 1}</b>` +
-          `<label class="de-seg-used-lab" title="${T('反映に含める(外すとグレーになり、.dmcも定義も作られません)')}"><input type="checkbox" class="de-seg-used"${s.used ? ' checked' : ''}>${T('使用')}</label>` +
-          `<select class="de-seg-rate" title="${T('この区間のDMCレート')}"></select>` +
-          `<span class="de-seg-size">${segBytes(L, k)}B ${fmtTime(segSeconds(L, k))}</span>` +
-          (k > 0 ? `<button type="button" class="secondary de-seg-merge" title="${T('前の区間と結合')}">✕</button>` : '');
-        fillRateSelect(el.querySelector('.de-seg-rate'), s.rate);
-        el.querySelector('.de-seg-rate').addEventListener('change', (e) => { s.rate = parseInt(e.target.value, 10) | 0; L.pieces[k] = null; segsChanged(L); });
-        el.querySelector('.de-seg-used').addEventListener('change', (e) => { s.used = e.target.checked; segsChanged(L); });
-        const mg = el.querySelector('.de-seg-merge');
-        if (mg) mg.addEventListener('click', () => { if (mergeWithPrev(L, k)) segsChanged(L); });
-        el.querySelector('.de-seg-no').addEventListener('click', () => playSeg(selected, k));
-        for (const c of el.querySelectorAll('input, select, button')) c.addEventListener('mousedown', (e) => e.stopPropagation());
-        segsEl.appendChild(el);
-      });
-      drawWave();
-    }
-    function onAutoCut() {
-      const L = selLocal();
-      if (!L) return;
-      const n = autoCut(L);
-      if (n) { segsChanged(L); setStatus(T('上限に収まるように {n} 区間へ切りました。境目をドラッグして調整できます', { n: L.segs.length }), 'ok'); }
-    }
-    function onPlayRaw() { if (selected != null) playRaw(selected); }
-    function onPlayDpcm() { if (selected != null) playDpcm(selected); }
-
-    function fitCanvas() {
-      const w = Math.max(200, Math.floor(waveEl.clientWidth) - 2);
-      if (canvas.width !== w) canvas.width = w;
-    }
-    // 1レーンぶんの波形(列ごとの最小/最大)を [x0,x1) に描く。pcm はそのレーンの区間ぶん
-    function drawLane(ctx, pcm, x0, x1, top, h, color) {
-      if (!pcm || !pcm.length || x1 <= x0) return;
-      const mid = top + h / 2, amp = h / 2 - 2;
-      const per = pcm.length / (x1 - x0);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (let x = x0; x < x1; x++) {
-        const a = Math.floor((x - x0) * per), e = Math.max(a + 1, Math.floor((x - x0 + 1) * per));
-        let lo = 1, hi = -1;
-        for (let i = a; i < e && i < pcm.length; i++) { const v = pcm[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
-        if (lo > hi) continue;
-        ctx.moveTo(x + 0.5, mid - hi * amp);
-        ctx.lineTo(x + 0.5, mid - lo * amp + 1);
-      }
-      ctx.stroke();
-    }
-    function drawWave() {
-      const L = selLocal();
-      const ctx = canvas.getContext('2d');
-      fitCanvas();
-      const w = canvas.width, h = canvas.height;
-      const topA = 0, topB = LANE_H + LANE_GAP;
-      ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = '#14141a';
-      ctx.fillRect(0, 0, w, h);
-      ctx.font = '10px sans-serif';
-      ctx.textBaseline = 'top';
-      ctx.fillStyle = '#6a6a78';
-      ctx.fillText(T('オリジナル'), 4, topA + 2);
-      ctx.fillText('DPCM', 4, topB + 2);
-      if (!L) return;
-      const pcm = previewPcm(L);
-      if (!pcm || !pcm.length) return;
-      const N = pcm.length;
-      for (let k = 0; k < L.segs.length; k++) {
-        const s = L.segs[k];
-        const [t0, t1] = segRange(L, k);
-        const x0 = Math.round(t0 * w), x1 = Math.max(x0 + 1, Math.round(t1 * w));
-        const over = s.used && segOver(L, k);
-        // 区間の背景: 未使用=グレー / 上限超え=赤 / それ以外は交互
-        ctx.fillStyle = !s.used ? 'rgba(128,128,136,0.22)' : over ? 'rgba(209,72,58,0.28)' : (k & 1 ? 'rgba(111,177,255,0.10)' : 'rgba(111,177,255,0.04)');
-        ctx.fillRect(x0, 0, x1 - x0, h);
-        // 上: オリジナル(未使用は暗く)
-        const a = Math.round(t0 * N), b = Math.max(a + 1, Math.round(t1 * N));
-        // ★オリジナルは暗めの色にする。上に重ねる区間番号/サイズの文字が波形に埋もれないため
-        drawLane(ctx, pcm.subarray(a, b), x0, x1, topA, LANE_H, s.used ? '#2f5680' : '#3b3e4a');
-        // 下: DPCM(変換済みの区間だけ。ドラッグ中は捨ててあるので描かない=止めた時に出る)
-        if (s.used && L.pieces[k]) drawLane(ctx, decodePiece(L.pieces[k]), x0, x1, topB, LANE_H, over ? '#ff8a7a' : '#8ad48a');
-        // ラベル: 番号(大きめ) + バイト数/時間
-        const label = `${segBytes(L, k)}B ${fmtTime(segSeconds(L, k))}` + (s.used ? '' : ' ' + T('未使用'));
-        ctx.fillStyle = over ? '#ff8a7a' : (s.used ? '#c8d0e0' : '#8a8a98');
-        if (x1 - x0 > 22) {
-          ctx.font = 'bold 13px sans-serif';
-          ctx.fillText(String(k + 1), x0 + 4, topA + 14);
-          ctx.font = '10px sans-serif';
-          if (x1 - x0 > 60) ctx.fillText(label, x0 + 18, topA + 16, x1 - x0 - 22);
-        }
-      }
-      ctx.strokeStyle = '#3a3a48';
-      ctx.beginPath();
-      ctx.moveTo(0, topA + LANE_H / 2 + 0.5); ctx.lineTo(w, topA + LANE_H / 2 + 0.5);
-      ctx.moveTo(0, topB + LANE_H / 2 + 0.5); ctx.lineTo(w, topB + LANE_H / 2 + 0.5);
-      ctx.stroke();
-      // 境目(ハンドル)
-      for (let k = 0; k + 1 < L.segs.length; k++) {
-        const x = Math.round(L.segs[k].end * w) + 0.5;
-        ctx.strokeStyle = k === dragIdx ? '#ffd166' : '#ffb347';
-        ctx.lineWidth = k === dragIdx ? 2 : 1.5;
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
-        ctx.fillStyle = ctx.strokeStyle;
-        ctx.beginPath(); ctx.moveTo(x - 5, 0); ctx.lineTo(x + 5, 0); ctx.lineTo(x, 7); ctx.closePath(); ctx.fill();
-        ctx.beginPath(); ctx.moveTo(x - 5, h); ctx.lineTo(x + 5, h); ctx.lineTo(x, h - 7); ctx.closePath(); ctx.fill();
-      }
-      // 再生位置(両レーンにまたがる)
-      const f = playheadFrac();
-      if (f != null) {
-        const x = Math.round(f * w) + 0.5;
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
-      }
-    }
-
-    // ── 境目のドラッグ / 区間クリックで試聴 / ダブルクリックで区切り追加 ──────────
-    let dragIdx = -1;
-    let dragMoved = false;
-    let downX = 0;
-    function fracAt(e) {
-      const rc = canvas.getBoundingClientRect();
-      return clamp((e.clientX - rc.left) / rc.width, 0, 1);
-    }
-    function handleAt(L, e) {
-      const rc = canvas.getBoundingClientRect();
-      const x = e.clientX - rc.left;
-      let best = -1, bestD = 6;
-      for (let k = 0; k + 1 < L.segs.length; k++) { const d = Math.abs(L.segs[k].end * rc.width - x); if (d < bestD) { bestD = d; best = k; } }
-      return best;
-    }
-    // クリックした縦位置がどちらのレーンか('raw'=上段オリジナル / 'dpcm'=下段)
-    function laneAt(e) {
-      const rc = canvas.getBoundingClientRect();
-      const y = (e.clientY - rc.top) * (canvas.height / rc.height);
-      return y < LANE_H + LANE_GAP / 2 ? 'raw' : 'dpcm';
-    }
-    function segAt(L, t) {
-      for (let k = 0; k < L.segs.length; k++) { const [t0, t1] = segRange(L, k); if (t >= t0 && t < t1) return k; }
-      return L.segs.length - 1;
-    }
-    // 境目kの移動先: 両隣の境目の内側(最小区間ぶんは空ける)。上限では拘束しない(超えたら赤で示す)
-    function clampSplit(L, k, t) {
-      const lo = segStart(L, k), hi = L.segs[k + 1].end;
-      const minF = SNAP_SAMPLES / Math.max(1, srcLength(L));
-      return snapFrac(L, clamp(t, lo + minF, hi - minF));
-    }
-    function onCanvasDown(e) {
-      const L = selLocal();
-      if (!L) return;
-      e.preventDefault();
-      downX = e.clientX; dragMoved = false;
-      dragIdx = handleAt(L, e);
-      drawWave();
-    }
-    window.addEventListener('mousemove', (e) => {
-      const L = selLocal();
-      if (!L || dragIdx < 0) return;
-      if (Math.abs(e.clientX - downX) > 1) dragMoved = true;
-      L.segs[dragIdx].end = clampSplit(L, dragIdx, fracAt(e));
-      L.pieces[dragIdx] = null; L.pieces[dragIdx + 1] = null;
-      drawWave();
-    });
-    window.addEventListener('mouseup', (e) => {
-      const L = selLocal();
-      if (!L) { dragIdx = -1; return; }
-      if (dragIdx >= 0) {
-        const moved = dragMoved;
-        dragIdx = -1;
-        if (moved) segsChanged(L); else drawWave();
-        return;
-      }
-      if (e.target !== canvas) return;
-      // 区間クリック → その区間だけ試聴。上段のオリジナルを押せば原音、下段を押せばDPCM変換後
-      playSeg(selected, segAt(L, fracAt(e)), laneAt(e));
-    });
-    function onCanvasDblClick(e) {
-      const L = selLocal();
-      if (!L) return;
-      stop();
-      // 境目の上なら区切りを消す(前の区間と結合)、それ以外なら区切りを足す
-      const h = handleAt(L, e);
-      if (h >= 0) { if (mergeWithPrev(L, h + 1)) segsChanged(L); return; }
-      const t = fracAt(e);
-      if (splitAt(L, segAt(L, t), t)) segsChanged(L);
-    }
-    function onCanvasMove(e) {
-      const L = selLocal();
-      canvas.style.cursor = (!L) ? 'default' : (dragIdx >= 0 || handleAt(L, e) >= 0) ? 'ew-resize' : 'pointer';
-    }
+    function renderWave() { if (view) view.setLocal(selLocal()); }
 
     // ── ツールバー ─────────────────────────────────────────────────────────
     function onAdd() {

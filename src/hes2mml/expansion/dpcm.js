@@ -396,13 +396,20 @@
     const all = MML.Hes2MmlExpansion.extractDdaClipsAll(snapshots, dpcmTrace, controlTrace, frameRate);
     const U = (global.Emu && global.Emu.SamplePitchUtil) || (MML.Emu && MML.Emu.SamplePitchUtil) || null;
     const samples = {};
+    const HASH_SAMPLES = 8192; // 下のハッシュ参照(≈1.7秒 @4.8kHz)
     const byIndex = all.clips.map((clip, i) => {
       const pcm = new Float32Array(clip.samples.length);
       for (let k = 0; k < clip.samples.length; k++) pcm[k] = (clip.samples[k] / 31) * 2 - 1;
       let hash = null;
       if (U && U.sampleHash) {
         const u8 = Uint8Array.from(clip.samples, (v) => v & 0x1F);
-        hash = 'dda-' + U.sampleHash(u8, 0, u8.length);
+        // ★先頭 HASH_SAMPLES サンプルだけで採る(2026-09-10)。DDAのストリーム(音声など)はクリップの
+        //   長さがキャプチャ時間で変わる(再生中の途中経過と変換用の全曲)ので、全長で採ると同じ音声が
+        //   別サンプル扱いになり、パッドの設定(名前/レート/分割)が引き継がれない。
+        //   範囲を「秒×推定レート」にしないこと: 推定レートはキャプチャごとに微妙に違い、範囲が
+        //   1サンプルずれるだけでハッシュが変わる(実測: 同じ曲で dda-9215cc13 と dda-9315cda6)。
+        //   打楽器の短い1発は従来どおり全長のハッシュ(=値は変わらない)
+        hash = 'dda-' + U.sampleHash(u8, 0, Math.min(u8.length, HASH_SAMPLES));
       }
       const key = clipKey(clip, i);
       // .dmc/パッドの既定ラベル: ROMオフセットの16進、バイト列同定は clip<n>

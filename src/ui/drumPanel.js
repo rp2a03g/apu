@@ -31,6 +31,15 @@
   let statusEl = null;
   let optsEl = null;
   let optSels = null; // { DMC_RATE, RATE_MIX, DRUM_POLY } の <select>
+  // 下段の分割ビュー(src/ui/dpcmSplitView.js、DPCMコンバータ下段と同じ部品。2026-09-10)。
+  // 行をクリックで選ぶと、そのサンプルの波形(上=オリジナル/下=DPCM)と区間が出て、境目・使用/未使用・
+  // 区間ごとのレートを聞きながら決められる。決めた分割はサンプル単位の設定(drumSamples.js split)に
+  // 保存され、変換(共通層 drumHits.js)が「単独で鳴っている区間」に効かせる。未設定なら自動分割
+  let splitEl = null;
+  let splitView = null;
+  let splitResetBtn = null;
+  let selectedKey = null;
+  let splitLocal = null;  // 表示中の L(dpcmSplitView.js 冒頭コメントの形)。hash/key/title を足してある
 
   function DS() { return MML.Convert && MML.Convert.DrumSamples; }
   function CS() { return MML.UI.ConvertSettings || null; }
@@ -120,6 +129,7 @@
           `<span class="dp-c-inc">${T('差し替え')}</span>` +
         `</div>` +
         `<div class="drum-panel-body"></div>` +
+        `<div class="drum-panel-split"></div>` +
         `<div class="drum-panel-status" hidden></div>` +
         `<div class="drum-panel-foot"></div>` +
         `<div class="drum-panel-opts"></div>` +
@@ -128,6 +138,29 @@
     costEl = rootEl.querySelector('.drum-panel-foot');
     statusEl = rootEl.querySelector('.drum-panel-status');
     optsEl = rootEl.querySelector('.drum-panel-opts');
+    splitEl = rootEl.querySelector('.drum-panel-split');
+    if (MML.UI.DpcmSplitView) {
+      splitView = MML.UI.DpcmSplitView.create(splitEl, {
+        rateAuto: true, autoLabel: T('自動(行のレート)'),
+        onChange: (L) => persistSplit(L),
+        title: (L) => L.title || '',
+        emptyText: () => T('行を選ぶと、そのサンプルの波形と分割がここに出ます'),
+      });
+      // 「自動に戻す」: 手動の分割を消す(ビューのツールバーの末尾に足す)
+      splitResetBtn = document.createElement('button');
+      splitResetBtn.type = 'button';
+      splitResetBtn.className = 'secondary dp-split-reset';
+      splitResetBtn.textContent = T('自動に戻す');
+      splitResetBtn.title = T('手動の分割を消して、共通層の自動分割(上限を超えるときだけ均等に切る)に戻します');
+      splitResetBtn.addEventListener('click', () => {
+        if (!splitLocal || !splitLocal.hash || !DS()) return;
+        DS().set(splitLocal.hash, { split: null });
+        render();
+        if (hooks.onChange) hooks.onChange();
+      });
+      const bar = splitEl.querySelector('.dpcm-ed-wave-bar');
+      if (bar) bar.insertBefore(splitResetBtn, bar.querySelector('.dpcm-ed-wave-info'));
+    }
     renderOpts();
     if (CS() && CS().onChange) CS().onChange(syncOpts);
     render();
@@ -195,11 +228,123 @@
     setTimeout(() => document.addEventListener('click', closeIncludeMenu, { once: true }), 0);
   }
 
+  // ── 下段の分割ビュー ─────────────────────────────────────────────────────
+  // 行の設定(レート/音量/差し替え)とパネル最下段の DMC_RATE から、分割ビューが扱う L を組む。
+  // 手動の分割(split)が無ければ、共通層 drumHits.js と同じ自動分割(上限に収まる本数の均等割り)を
+  // 見せる。境目を動かした時点で手動になり保存される
+  function buildLocal(r) {
+    const M = MML.UI.DpcmSplitView && MML.UI.DpcmSplitView.model;
+    if (!M || !DS() || !r || !r.hash) return null;
+    const st = DS().get(r.hash);
+    const inc = DS().getIncludePcm(r.hash);
+    const pcm = (inc && inc.pcm) ? inc.pcm : r.pcm;
+    const srcRate = (inc && inc.rate > 0) ? inc.rate : r.srcRate;
+    if (!pcm || !pcm.length || !(srcRate > 0)) return null;
+    const cmd = (CS() && MML.Convert && MML.Convert.normalizeCmd) ? MML.Convert.normalizeCmd(CS().get()) : { DMC_RATE: 15 };
+    const rate = (st.rate === 'auto' || st.rate == null) ? (cmd.DMC_RATE | 0) : (parseInt(st.rate, 10) | 0);
+    const L = { key: r.key, hash: r.hash, baseTitle: st.name || r.label || r.key, title: '',
+                pcm, srcRate, dmc: null, dmcFrom: null, dac: 64, rate, vol: M.clampVol(st.vol),
+                segs: [{ end: 1, rate: null, used: true }], pieces: [null], previewPcm: null, previewKey: null,
+                manual: false };
+    const split = DS().sanitizeSplit(st.split);
+    if (split) {
+      // 保存は秒(drumSamples.js 参照)。ビューは割合なので、いまのクリップ長で割る。決めたときより
+      // 長いクリップなら残りを未使用の区間として足す(境目は動かさない)。末尾の1フレーム以内は末尾へ吸着
+      const total = pcm.length / srcRate;
+      L.segs = [];
+      let prev = 0;
+      for (const s of split.segs) {
+        let end = Math.min(1, s.end / total);
+        if (s.end >= total - 1 / 60) end = 1;
+        if (end <= prev) continue;
+        L.segs.push({ end, rate: s.rate, used: s.used });
+        prev = end;
+      }
+      if (!L.segs.length) L.segs = [{ end: 1, rate: null, used: true }];
+      else if (L.segs[L.segs.length - 1].end < 1) L.segs.push({ end: 1, rate: null, used: false });
+      L.manual = true;
+    } else {
+      L.segs = autoSegs(L);
+    }
+    L.pieces = L.segs.map(() => null);
+    return L;
+  }
+  // 共通層 drumHits.js の自動分割を再現した区間列: 上限に収まる本数の均等割り。ただし共通層は
+  // 1打点を最大 MAX_CLIP_SEC(10秒)までしか焼かないので、それより長いサンプルは先頭10秒ぶんを
+  // 割り、残りを「未使用」の区間として見せる(境目を動かした時点で手動になり、全長が使える)
+  function autoSegs(L) {
+    const M = MML.UI.DpcmSplitView.model;
+    const capSec = (MML.Convert.DrumHits && MML.Convert.DrumHits.MAX_CLIP_SEC) || 10;
+    const len = L.pcm.length, capN = Math.min(len, Math.round(capSec * L.srcRate));
+    const c = capN / len;
+    const K = M.requiredPieces(c < 1 ? Object.assign({}, L, { pcm: L.pcm.subarray(0, capN) }) : L);
+    const segs = [];
+    for (let k = 1; k <= K; k++) segs.push({ end: k === K ? c : c * k / K, rate: null, used: true });
+    if (c < 1) segs.push({ end: 1, rate: null, used: false });
+    else segs[K - 1].end = 1;
+    return segs;
+  }
+  function autoCapSec(L) {
+    const capSec = (MML.Convert.DrumHits && MML.Convert.DrumHits.MAX_CLIP_SEC) || 10;
+    return (L.pcm.length / L.srcRate > capSec) ? capSec : 0;
+  }
+  // 手動の分割かどうか: 区間が1つで既定(全区間使用・レート行任せ)なら「自動」と同じなので保存しない
+  function isDefaultSplit(L) {
+    const auto = autoSegs(L);
+    if (L.segs.length !== auto.length) return false;
+    return L.segs.every((s, k) => Math.abs(s.end - auto[k].end) < 1e-6 && (s.used !== false) === auto[k].used && s.rate == null);
+  }
+  function persistSplit(L) {
+    if (!DS() || !L || !L.hash) return;
+    const dflt = isDefaultSplit(L);
+    L.manual = !dflt;
+    const total = L.pcm.length / L.srcRate; // 保存は秒(drumSamples.js 参照)
+    DS().set(L.hash, { split: dflt ? null : { segs: L.segs.map(s => ({ end: s.end * total, rate: s.rate == null ? null : s.rate, used: s.used !== false })) } });
+    L.title = titleOf(L); // onChange の直後にビューが描き直すので、ここで見出しを差し替えておけば反映される
+    if (splitResetBtn) splitResetBtn.hidden = !L.manual;
+    syncBadges();
+    if (hooks.onChange) hooks.onChange(); // ROMコスト再計算(区間の未使用/レートでサイズが変わる)
+  }
+  function syncSplit() {
+    if (!splitView) return;
+    const r = selectedKey != null ? rows.find(x => x.key === selectedKey) : null;
+    if (!r) { selectedKey = null; splitLocal = null; splitView.setLocal(null); if (splitResetBtn) splitResetBtn.hidden = true; return; }
+    splitLocal = buildLocal(r);
+    if (splitLocal) splitLocal.title = titleOf(splitLocal);
+    splitView.setLocal(splitLocal);
+    if (splitResetBtn) splitResetBtn.hidden = !(splitLocal && splitLocal.manual);
+  }
+  // 分割ビューの見出し: 名前 + いまの分割が自動か手動か(自動なら共通層が何本にするか)
+  function titleOf(L) {
+    const K = L.segs.filter(s => s.used !== false).length, cap = autoCapSec(L);
+    return (L.baseTitle || '') + '  ' + (L.manual
+      ? T('分割 {n}区間(手動)', { n: L.segs.length })
+      : cap ? T('{n}区間に分割して変換します(自動、先頭{sec}秒まで。境目を動かすと全長が使えます)', { n: K, sec: cap })
+      : (K > 1 ? T('{n}区間に分割して変換します(自動)', { n: K }) : T('1本で収まります')));
+  }
+  function selectRow(key) {
+    selectedKey = key;
+    for (const el of bodyEl.querySelectorAll('.drum-panel-row')) el.classList.toggle('drum-panel-row--sel', el.dataset.key === key);
+    syncSplit();
+  }
+  // 行の「✂N」(手動の分割あり)を付け直す(分割ビューで変えたときは行を作り直さずここだけ更新)
+  function syncBadges() {
+    if (!bodyEl || !DS()) return;
+    for (const el of bodyEl.querySelectorAll('.drum-panel-row')) {
+      const r = rows.find(x => x.key === el.dataset.key);
+      const badge = el.querySelector('.dp-split-badge');
+      if (!r || !badge) continue;
+      const sp = r.hash ? DS().get(r.hash).split : null;
+      badge.textContent = (sp && sp.segs && sp.segs.length) ? '✂' + sp.segs.length : '';
+    }
+  }
+
   function render() {
     if (!bodyEl) return;
     if (!rows.length) {
       // ★形式非依存の文言にする(2026-09-04)。全6形式でこのパネルを使うので「VGMを再生して」は誤り
       bodyEl.innerHTML = `<div class="drum-panel-empty">${T('打楽器のサンプルがありません。曲を再生してキャプチャが終わると一覧に出ます(鍵盤表示の割当で借用先にE(DPCM)を選んだchもここに出ます)。')}</div>`;
+      syncSplit();
       return;
     }
     bodyEl.innerHTML = '';
@@ -215,12 +360,18 @@
       const vol = DS() ? DS().clampVol(st.vol) : 100;
       const row = document.createElement('div');
       row.className = 'drum-panel-row' + (st.enabled === false ? ' drum-panel-row--off' : '')
-        + (missing ? ' drum-panel-row--missing' : '') + (noHash ? ' drum-panel-row--nohash' : '');
+        + (missing ? ' drum-panel-row--missing' : '') + (noHash ? ' drum-panel-row--nohash' : '')
+        + (r.key === selectedKey ? ' drum-panel-row--sel' : '');
+      row.dataset.key = r.key;
+      row.dataset.hash = r.hash || '';
+      const sp = st.split && st.split.segs && st.split.segs.length ? st.split.segs.length : 0;
       row.innerHTML =
         `<span class="dp-c-color"><i style="background:${r.color || '#888'}"></i></span>` +
         // 名前は編集できる。付けた名前はロールのパッドと @DPCM の書き出しファイル名にも使う
         `<span class="dp-c-label"><input type="text" class="dp-name" value="${esc(st.name || '')}"` +
-          ` placeholder="${esc(r.label || '?')}" title="${esc(r.key)}"></span>` +
+          ` placeholder="${esc(r.label || '?')}" title="${esc(r.key)}">` +
+          // ✂N = 手動の分割あり(下段で編集)
+          `<span class="dp-split-badge" title="${T('境目・使用/未使用・区間ごとのレートを手で決めた分割。行を選ぶと下段に出ます')}">${sp ? '✂' + sp : ''}</span></span>` +
         // 試聴はサンプルのすぐ右。押すところは音符マークにして、何を鳴らすかは列見出しで示す
         `<span class="dp-c-play">` +
           `<button type="button" class="dp-play" data-mode="raw" title="${T('原音を鳴らす')}">♪</button>` +
@@ -261,7 +412,13 @@
       sel.value = String(st.rate);
       sel.addEventListener('change', () => {
         if (DS()) DS().set(r.hash, { rate: sel.value === 'auto' ? 'auto' : parseInt(sel.value, 10) });
+        if (r.key === selectedKey) syncSplit(); // 下段の区間サイズは行のレートで変わる
         if (hooks.onChange) hooks.onChange();
+      });
+      // 行のクリック(操作部品以外)でそのサンプルを選び、下段に波形と分割を出す
+      row.addEventListener('mousedown', (e) => {
+        if (e.target.closest('button, input, select, label')) return;
+        selectRow(r.key);
       });
       const nameEl = row.querySelector('.dp-name');
       nameEl.addEventListener('change', () => {
@@ -289,6 +446,7 @@
       volEl.addEventListener('input', syncVolWarn);
       volEl.addEventListener('change', () => {
         if (DS()) DS().set(r.hash, { vol: parseInt(volEl.value, 10) });
+        if (r.key === selectedKey) syncSplit(); // 下段の上段波形/DPCMはボリューム込み
         if (hooks.onChange) hooks.onChange();
       });
       volEl.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -318,6 +476,7 @@
       });
       bodyEl.appendChild(row);
     }
+    syncSplit(); // 行を作り直したので下段(選択中の行)も追従させる
   }
 
   UI.DrumPanel = { mount, setRows, setCost, setStatus, render };

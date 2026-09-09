@@ -2596,7 +2596,20 @@ button.secondary {
 /* 同定情報(ハッシュ)が届いていない行。設定を保存できないので操作を止めて理由を出す */
 .drum-panel-row--nohash { background: rgba(209, 72, 58, 0.10); }
 .drum-panel-row--nohash .dp-c-label::after { content: ' ⚠'; color: #d1483a; }
-.drum-panel-body { flex: 1; overflow-y: auto; }
+.drum-panel-body { flex: 1; overflow-y: auto; min-height: 72px; }
+.drum-panel-row--sel { background: rgba(58, 110, 165, 0.18); }
+.drum-panel-row--sel:hover { background: rgba(58, 110, 165, 0.24); }
+.dp-c-label { display: flex; align-items: center; gap: 2px; }
+.dp-split-badge { flex: none; font-size: 9px; color: #ffb347; font-weight: 700; cursor: default; }
+/* 下段: 選択したサンプルの分割ビュー(src/ui/dpcmSplitView.js。DPCMコンバータ下段と同じ部品) */
+.drum-panel-split { flex: none; border-top: 1px solid var(--border); padding: 3px 8px 4px; font-size: 11px; }
+.drum-panel-split .dpcm-ed-wave-bar { margin: 0 0 3px; align-items: center; }
+.drum-panel-split .dpcm-ed-wave-title { font-family: var(--mono); font-weight: 700; }
+.drum-panel-split .dpcm-ed-wave-info { color: var(--text-muted); font-size: 10px; margin-left: auto; }
+.drum-panel-split .dpcm-ed-canvas { height: 150px; }
+.drum-panel-split button { font-size: 11px; padding: 2px 7px; }
+.drum-panel-split .de-seg-rate { max-width: 110px; }
+.drum-panel-split .dpcm-ed-segs { max-height: 64px; overflow-y: auto; }
 .drum-panel-empty { padding: 14px 8px; color: var(--text-muted); }
 .drum-panel-foot {
   padding: 4px 8px; font-family: var(--mono); color: var(--text-secondary);

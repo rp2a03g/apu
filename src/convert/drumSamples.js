@@ -33,7 +33,13 @@
   MML.Convert = MML.Convert || {};
 
   const KEY = 'drumSampleSettings'; // localStorage: { [sampleHash]: {enabled, rate, include} }
-  const DEFAULTS = { enabled: true, rate: 'auto', vol: 100, include: null, name: null };
+  // split(2026-09-10): 長いサンプルの分割(ドラム(DPCM)パネル下段の分割ビューで編集)。
+  //   { segs: [{ end, rate, used }] } … end=区間の終わり(サンプル先頭からの秒。割合ではない:
+  //   DDAのようなストリームはキャプチャ時間でクリップの長さが変わるので、割合だと境目がずれる)、
+  //   rate=区間のDMCレート(null=行のレートに従う)、used=反映に含めるか。null なら共通層の自動分割
+  //   (src/convert/drumHits.js が上限を超えるときだけフレーム整数で均等に切る)。
+  //   最後の end より後ろ(決めたときより長いクリップの残り)は未使用扱い
+  const DEFAULTS = { enabled: true, rate: 'auto', vol: 100, include: null, name: null, split: null };
 
   // 差し替え用PCMの実体(セッション中のみ)。hash → { name, pcm: Float32Array, rate: Hz }
   const includePcm = new Map();
@@ -65,6 +71,21 @@
   }
 
   function clear(hash) { set(hash, Object.assign({}, DEFAULTS)); }
+
+  /** split 設定の形を整える(壊れていれば null=自動)。segs は end(秒) 昇順に揃える */
+  function sanitizeSplit(sp) {
+    if (!sp || !Array.isArray(sp.segs) || !sp.segs.length) return null;
+    const segs = [];
+    let prev = 0;
+    for (const s of sp.segs) {
+      const end = Number(s && s.end);
+      if (!Number.isFinite(end) || !(end > prev)) continue;
+      const rate = (s.rate == null || s.rate === 'auto') ? null : Math.max(0, Math.min(15, s.rate | 0));
+      segs.push({ end, rate, used: s.used !== false });
+      prev = end;
+    }
+    return segs.length ? { segs } : null;
+  }
 
   /** 変換ボリューム(%)を 1〜100 に丸める。0を許すと「変換しない」と意味が重なるので下限は1 */
   function clampVol(v) {
@@ -117,11 +138,13 @@
       includedName: inc ? inc.name : (s.include ? s.include.name : null),
       // 名前だけ残っていてPCMが未登録(再読み込み後など)。UIが「読み込み直して」と出せる
       includeMissing: !!(s.include && !inc),
+      // 手動の分割(共通層 drumHits.js が「単独で鳴っている区間」に効かせる。上の DEFAULTS 参照)
+      split: sanitizeSplit(s.split),
     };
   }
 
   MML.Convert.DrumSamples = {
-    DEFAULTS, get, set, clear, resolve, clampVol, sanitizeName,
+    DEFAULTS, get, set, clear, resolve, clampVol, sanitizeName, sanitizeSplit,
     setIncludePcm, getIncludePcm,
     all: load,
   };

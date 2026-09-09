@@ -120,6 +120,8 @@
       vol: (h.vol || 0) * (st.gain != null ? st.gain : 1),
       name: h.name || st.name || null,
       rateIndex: h.rateIndex != null ? h.rateIndex : ri,
+      // 手動の分割(パネル下段の分割ビュー、src/ui/dpcmSplitView.js)。単独で鳴っている区間にだけ効く(下 dpcm())
+      split: st.split || null,
     });
   }
 
@@ -201,53 +203,90 @@
     //     から外す(変換設定 DPCM_EXACT、既定ON)。丸めると継ぎ目に空白/食い込みが出る
     //   ・定義は必要になった区間まで(打点が次のオンセットで切られる場合、その先の区間は作らない)。
     //     区間 k を焼くには k-1 の終端DACが要るので順に焼く(台帳 cache.pieces に控える)
-    function splitClip(live, t0, lenSec, rateIndex, dstRate, name0) {
-      const n = Math.max(1, Math.round(lenSec * dstRate));
-      const spf = dstRate / frameRate;                        // 1フレームのDMCサンプル数
-      const maxFrames = Math.max(1, Math.floor(MAX_SAMPLES / spf));
-      const totalF = Math.max(1, Math.ceil(n / spf));
-      const K = Math.ceil(totalF / maxFrames);
-      const base = Math.floor(totalF / K), extra = totalF - base * K;
-      const cache = { frames: [], mixes: [], pieces: [], endDac: [], peakGain: 1, stem: name0.replace(/\.dmc$/i, '') };
-      let f = 0, peak = 0;
-      for (let k = 0; k < K; k++) {
-        const fk = base + (k < extra ? 1 : 0);
-        const a = Math.round(f * spf), b = Math.min(n, Math.round((f + fk) * spf));
+    //   ・手動の分割(manual、パネル下段の分割ビュー src/ui/dpcmSplitView.js で決めた
+    //     {end, rate, used} の列)があればそれを区間にする。区間ごとにレートが違ってよく、未使用の区間は
+    //     定義も打点も作らない(その間は休符=DMCは直前の区間の末尾で止まる)。手動で切った区間が
+    //     それでも上限を超えていたら、その区間だけ均等に切り足す(<名前>_<k>_<j>.dmc)
+    //   区間の並び(cache.plan): [{ f0(t0からのフレーム), frames, rate, used, no(表示番号 "3" / "3_2") }]
+    function planPieces(lenSec, rateIndex, manual) {
+      const spfOf = (ri) => table[ri] / frameRate;
+      // 全長のフレーム数はサンプル数から(ceil(n/spf)、段階1と同じ式)。lenSec*frameRate を直接丸めると
+      // 1フレーム違うことがあり、均等割りの配分が変わって出力(区間サイズ/DAC初期値)が揺れる
+      const totalF = Math.max(1, Math.ceil(Math.max(1, Math.round(lenSec * table[rateIndex])) / spfOf(rateIndex)));
+      const maxFramesOf = (ri) => Math.max(1, Math.floor(MAX_SAMPLES / spfOf(ri)));
+      // [f0, f1) をそのレートの上限に収まる本数へ均等割り
+      const evenly = (f0, f1, ri, used, no) => {
+        const F = f1 - f0;
+        const K = Math.max(1, Math.ceil(F / maxFramesOf(ri)));
+        const base = Math.floor(F / K), extra = F - base * K;
+        const out = [];
+        let f = f0;
+        for (let k = 0; k < K; k++) {
+          const fk = base + (k < extra ? 1 : 0);
+          if (fk > 0) out.push({ f0: f, frames: fk, rate: ri, used, no: K > 1 ? `${no}_${k + 1}` : String(no) });
+          f += fk;
+        }
+        return out;
+      };
+      if (!manual) return evenly(0, totalF, rateIndex, true, '').map((p, k) => Object.assign(p, { no: String(k + 1) }));
+      const plan = [];
+      let prev = 0;
+      manual.segs.forEach((s, k) => {
+        // 境目は秒→フレーム整数へ(次のトリガーが区間終端に乗るように)。末尾の1フレーム以内なら末尾へ
+        // 吸着。決めたときよりクリップが長ければ最後の境目から先は捨てる(未使用)、短ければ収まる区間まで
+        let f1 = Math.round(Math.max(0, Number(s.end)) * frameRate);
+        if (f1 >= totalF - 1) f1 = totalF;
+        if (f1 <= prev) return;
+        const ri = (s.rate == null || s.rate === 'auto') ? rateIndex : Math.max(0, Math.min(table.length - 1, s.rate | 0));
+        plan.push(...evenly(prev, f1, ri, s.used !== false, k + 1));
+        prev = f1;
+      });
+      return plan;
+    }
+    function splitClip(live, t0, lenSec, rateIndex, name0, manual) {
+      const cache = { plan: planPieces(lenSec, rateIndex, manual), mixes: [], pieces: [], endDac: [], peakGain: 1,
+                      stem: name0.replace(/\.dmc$/i, ''), live };
+      let peak = 0;
+      for (const p of cache.plan) {
+        const dstRate = table[p.rate], spf = dstRate / frameRate;
+        // 区間のサンプル範囲はフレーム境界×spf を丸めて(段階1と同じ)。末尾はクリップのサンプル数で止める
+        const a = Math.round(p.f0 * spf);
+        const b = Math.min(Math.round(lenSec * dstRate), Math.round((p.f0 + p.frames) * spf));
         const nk = Math.max(1, b - a);
         const mix = new Float32Array(nk);
-        for (const h of live) {
-          const phase = (t0 + f - h.startFrame) / frameRate;
-          resampleInto(mix, 0, nk, h.pcm, h.rate, dstRate, phase, h.vol * normGain);
+        if (p.used) {
+          for (const h of live) {
+            const phase = (t0 + p.f0 - h.startFrame) / frameRate;
+            resampleInto(mix, 0, nk, h.pcm, h.rate, dstRate, phase, h.vol * normGain);
+          }
+          for (let i = 0; i < nk; i++) { const v = Math.abs(mix[i]); if (v > peak) peak = v; }
         }
-        for (let i = 0; i < nk; i++) { const v = Math.abs(mix[i]); if (v > peak) peak = v; }
-        cache.frames.push(fk);
         cache.mixes.push(mix);
-        f += fk;
       }
       if (peak > 1) cache.peakGain = 1 / peak;
-      cache.rateIndex = rateIndex;
-      cache.dstRate = dstRate;
-      cache.live = live;
       return cache;
     }
-    // 区間 k までを焼いて定義を作る(k-1 までは焼けている前提。順に呼ぶ)
+    // 区間 k までを焼いて定義を作る(k-1 までは焼けている前提。順に呼ぶ)。未使用の区間は null
     function ensurePiece(cache, k) {
       for (let i = cache.pieces.length; i <= k; i++) {
+        const p = cache.plan[i];
+        if (!p.used) { cache.pieces.push(null); cache.endDac.push(null); continue; }
         const mix = cache.mixes[i];
         if (cache.peakGain !== 1) for (let j = 0; j < mix.length; j++) mix[j] *= cache.peakGain;
-        const dac = i === 0
-          ? Math.max(0, Math.min(127, Math.round((mix[0] + 1) / 2 * 127)))
-          : cache.endDac[i - 1];
-        const encoded = MML.Dpcm.encode(mix, cache.dstRate, cache.rateIndex, { startCounter: dac });
-        if (!encoded || !encoded.bytes || !encoded.bytes.length) { cache.pieces.push(null); cache.endDac.push(dac); continue; }
+        // DACの引き継ぎは直前の区間が使用中(=連続して鳴る)のときだけ。未使用を挟んだら頭の値から
+        const dac = (i > 0 && cache.endDac[i - 1] != null)
+          ? cache.endDac[i - 1]
+          : Math.max(0, Math.min(127, Math.round((mix[0] + 1) / 2 * 127)));
+        const encoded = MML.Dpcm.encode(mix, table[p.rate], p.rate, { startCounter: dac });
+        if (!encoded || !encoded.bytes || !encoded.bytes.length) { cache.pieces.push(null); cache.endDac.push(null); continue; }
         cache.endDac.push(MML.Dpcm.endCounter(encoded.bytes, encoded.sampleCount, encoded.startCounter));
-        let name = `${cache.stem}_${i + 1}.dmc`;
-        for (let d = 2; usedNames.has(name); d++) name = `${cache.stem}_${i + 1}_${d}.dmc`;
+        let name = `${cache.stem}_${p.no}.dmc`;
+        for (let d = 2; usedNames.has(name); d++) name = `${cache.stem}_${p.no}_${d}.dmc`;
         usedNames.add(name);
         const index = defs.length;
         files.push({ name, bytes: encoded.bytes });
-        defs.push({ index, file: name, freq: cache.rateIndex, size: encoded.bytes.length,
-                    sampleCount: encoded.sampleCount, dac: encoded.startCounter, mode: 0, piece: i + 1, pieces: cache.frames.length });
+        defs.push({ index, file: name, freq: p.rate, size: encoded.bytes.length,
+                    sampleCount: encoded.sampleCount, dac: encoded.startCounter, mode: 0, piece: p.no, pieces: cache.plan.length });
         cache.pieces.push(index);
         pieceDefs++;
       }
@@ -277,8 +316,11 @@
       //   無い(HESの ClipRegistry の前方一致共有と同じ意味論。定義数がぐっと減る)。
       //   ミックス区間はその瞬間の音を焼くので従来どおり区間長。
       const single = live.length === 1 && live[0].startFrame === t0;
+      // 手動の分割(パネル)は「単独で鳴っている区間」だけに効かせる。ミックス区間は自動。
+      // 手動はパネルでサンプル全長を見て決めているので、1打点の上限(maxClipSec)は掛けない
+      const manual = (single && live[0].split && live[0].split.segs && live[0].split.segs.length) ? live[0].split : null;
       let lenSec = single ? live[0].pcm.length / live[0].rate : (t1 - t0) / frameRate;
-      lenSec = Math.min(lenSec, maxClipSec);
+      if (!manual) lenSec = Math.min(lenSec, maxClipSec);
       if (!(lenSec > 0)) continue;
 
       // レートの優先順位: 形式側の強制 > パッドのサンプル単位指定(複数あれば RATE_MIX で高低を選ぶ)
@@ -302,23 +344,25 @@
       }).sort();
       const clipKey = rateIndex + '|' + Math.round(lenSec / LEN_QUANT_SEC) + '|' + parts.join('+');
 
-      let index = clipIndexByKey.get(clipKey);
-      // ── 上限超え(ストリーム): 区間に分割して区間ごとに打点を立てる(上 splitClip 参照) ──
-      if (bytesForSamples(Math.max(1, Math.round(lenSec * dstRate))) > MAX_BYTES) {
+      const manualKey = manual ? '|m' + manual.segs.map(s => `${Math.round(s.end * 4096)}:${s.rate == null ? 'a' : s.rate}:${s.used !== false ? 1 : 0}`).join(',') : '';
+      let index = clipIndexByKey.get(clipKey + manualKey);
+      // ── 上限超え(ストリーム)か手動の分割: 区間に分割して区間ごとに打点を立てる(上 splitClip 参照) ──
+      if (manual || bytesForSamples(Math.max(1, Math.round(lenSec * dstRate))) > MAX_BYTES) {
         let cache = index;
         if (cache === undefined) {
-          cache = splitClip(live, t0, lenSec, rateIndex, dstRate, clipFileName(live, defs.length, usedNames, opt.prefix));
-          clipIndexByKey.set(clipKey, cache);
-          splitClips++;
+          cache = splitClip(live, t0, lenSec, rateIndex, clipFileName(live, defs.length, usedNames, opt.prefix), manual);
+          clipIndexByKey.set(clipKey + manualKey, cache);
+          if (cache.plan.length > 1) splitClips++;
         }
         const endF = Math.max(t0 + 1, t1); // 音が止まる/次のオンセットまで。その先の区間は作らない
-        let f = t0;
-        for (let k = 0; k < cache.frames.length && f < endF; k++) {
-          const fk = cache.frames[k];
+        for (let k = 0; k < cache.plan.length; k++) {
+          const p = cache.plan[k];
+          const f = t0 + p.f0;
+          if (f >= endF) break;
           const idx = ensurePiece(cache, k);
-          if (idx == null) { dropped++; f += fk; continue; }
-          events.push({ start: f, end: Math.min(f + fk, endF), note: 48, instrument: idx, exact: true });
-          f += fk;
+          if (idx == null) { if (p.used) dropped++; continue; } // 未使用の区間は休符(定義も打点も無し)
+          // 手動分割で1区間だけ(=上限内)なら普通の打点と同じ扱い(exact にしない)
+          events.push({ start: f, end: Math.min(f + p.frames, endF), note: 48, instrument: idx, exact: cache.plan.length > 1 });
         }
         continue;
       }

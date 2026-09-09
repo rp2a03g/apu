@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-09 19:33:28
+ * Built by tools/build-capture-workers.ps1 at 2026-09-10 07:08:33
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-09 19:33:28';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-10 07:08:33';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -1782,16 +1782,23 @@
     for (const ch of channels || []) if (ch && ch.srcIndex == null) ch.srcIndex = next++;
     return channels;
   };
+  // チャンネル文字の比較は必ずコードポイント順(A-Z のあとに a,b)。
+  // ★localeCompare は 'a' < 'B' と判定するので使わない: 実機ppmckの文字順は大文字A-Zのあとに
+  //   小文字a,b(拡張音源のE-Zab)なのに、出力が aAbBCDEFG と大小交互に並んで音源ごとの
+  //   まとまりが崩れていた(2026-09-10 ユーザー指摘)。同じ理由の前例が
+  //   src/convert/channelPlan.js sortByLetter にある
+  const byLetter = (a, b) => (a.letter < b.letter ? -1 : a.letter > b.letter ? 1 : 0);
+  MML.Convert.compareChannelLetter = byLetter;
   MML.Convert.sortChannelsByLetter = function (channels) {
     MML.Convert.stampChannelSource(channels);
-    channels.sort((a, b) => a.letter.localeCompare(b.letter));
+    channels.sort(byLetter);
     return channels;
   };
   MML.Convert.orderChannels = function (channels, order) {
     const out = (channels || []).slice();
     MML.Convert.stampChannelSource(out);
-    if (order === 'source') out.sort((a, b) => (a.srcIndex - b.srcIndex) || a.letter.localeCompare(b.letter));
-    else out.sort((a, b) => a.letter.localeCompare(b.letter));
+    if (order === 'source') out.sort((a, b) => (a.srcIndex - b.srcIndex) || byLetter(a, b));
+    else out.sort(byLetter);
     return out;
   };
   // 出力の書式(2026-09-08、src/convert/mmlEmit.js emitScore)。プリセットには含めない(内容でなく見た目)
@@ -4441,13 +4448,20 @@
     const all = MML.Hes2MmlExpansion.extractDdaClipsAll(snapshots, dpcmTrace, controlTrace, frameRate);
     const U = (global.Emu && global.Emu.SamplePitchUtil) || (MML.Emu && MML.Emu.SamplePitchUtil) || null;
     const samples = {};
+    const HASH_SAMPLES = 8192; // 下のハッシュ参照(≈1.7秒 @4.8kHz)
     const byIndex = all.clips.map((clip, i) => {
       const pcm = new Float32Array(clip.samples.length);
       for (let k = 0; k < clip.samples.length; k++) pcm[k] = (clip.samples[k] / 31) * 2 - 1;
       let hash = null;
       if (U && U.sampleHash) {
         const u8 = Uint8Array.from(clip.samples, (v) => v & 0x1F);
-        hash = 'dda-' + U.sampleHash(u8, 0, u8.length);
+        // ★先頭 HASH_SAMPLES サンプルだけで採る(2026-09-10)。DDAのストリーム(音声など)はクリップの
+        //   長さがキャプチャ時間で変わる(再生中の途中経過と変換用の全曲)ので、全長で採ると同じ音声が
+        //   別サンプル扱いになり、パッドの設定(名前/レート/分割)が引き継がれない。
+        //   範囲を「秒×推定レート」にしないこと: 推定レートはキャプチャごとに微妙に違い、範囲が
+        //   1サンプルずれるだけでハッシュが変わる(実測: 同じ曲で dda-9215cc13 と dda-9315cda6)。
+        //   打楽器の短い1発は従来どおり全長のハッシュ(=値は変わらない)
+        hash = 'dda-' + U.sampleHash(u8, 0, Math.min(u8.length, HASH_SAMPLES));
       }
       const key = clipKey(clip, i);
       // .dmc/パッドの既定ラベル: ROMオフセットの16進、バイト列同定は clip<n>
