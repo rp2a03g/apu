@@ -868,7 +868,8 @@
         dpcmFiles.push({ name: d.file, bytes: r.files[d.index].bytes, fileKey: 'synth:' + d.file });
         dpcmDefs.push({ index: base + d.index, file: d.file, freq: d.freq, size: d.size, dac: d.dac, mode: d.mode });
       }
-      for (const ev of r.events) dpcmEvents.push({ start: ev.start, end: ev.end, note: 48, instrument: base + ev.instrument });
+      // exact: 分割したストリーム区間(drumHits.js)。出力側で音長を丸めない
+      for (const ev of r.events) dpcmEvents.push({ start: ev.start, end: ev.end, note: 48, instrument: base + ev.instrument, exact: !!ev.exact });
       dpcmEvents.sort((a, b) => a.start - b.start);
       // 打点が重なる区間は直近の打点が勝つ(DPCMは1本)。前のイベントの尻尾を次の頭で切る
       for (let i = 0; i + 1 < dpcmEvents.length; i++) if (dpcmEvents[i].end > dpcmEvents[i + 1].start) dpcmEvents[i].end = Math.max(dpcmEvents[i].start + 1, dpcmEvents[i + 1].start);

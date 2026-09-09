@@ -36,7 +36,11 @@
   const MML = global.MML = global.MML || {};
   MML.Convert = MML.Convert || {};
 
-  const MAX_CLIP_SEC = 1.5;        // 1クリップの上限(ROM容量の歯止め)
+  // 1クリップの上限(秒)。以前は VGM 向けに 1.5 秒で黙って切っていたが、DMC 1本の上限(4080バイト、
+  // 33.1kHz で 0.98 秒)を超えるクリップは下の dpcm() が区間に分割して連続再生するようになった
+  // (2026-09-09)ので、ここは「ストリーム再生としてどこまで載せるか」の歯止め。ROM量はパネルの
+  // 合計表示(16KB=DMC領域)で見せる
+  const MAX_CLIP_SEC = 10;
   const PHASE_QUANT_SEC = 1 / 480; // 位相の量子化(重複排除用。1/8フレーム)
   const VOL_QUANT = 16;            // 音量の量子化段数(重複排除用)
   const LEN_QUANT_SEC = 1 / 480;   // 長さの量子化(重複排除用)
@@ -175,9 +179,80 @@
     // 区間の切れ目 = 打点の頭
     const onsets = Array.from(new Set(live0.map(h => h.startFrame))).sort((a, b) => a - b);
     const defs = [], files = [], events = [];
-    const clipIndexByKey = new Map();
+    const clipIndexByKey = new Map(); // clipKey → 定義番号 | 分割クリップの台帳(下 splitClip)
     const usedNames = new Set();
-    let dropped = 0;
+    let dropped = 0, splitClips = 0, pieceDefs = 0;
+    const MAX_BYTES = MML.Dpcm.MAX_ENCODED_BYTES || 4080;
+    const MAX_SAMPLES = MML.Dpcm.MAX_ENCODED_SAMPLES || (MAX_BYTES * 8);
+    const bytesForSamples = (s) => Math.ceil(s / 8 / 16) * 16 || 16;
+
+    // ── DMC 1本の上限を超えるクリップ(ストリーム再生)の分割(2026-09-09) ──────────
+    // 4080バイト(33.1kHzで0.98秒)を超える音は、実機でも1本のサンプルでは鳴らせない
+    // (以前はコンパイル側が $4013=255 で頭打ちにして途中から無音になっていた)。
+    // フレーム整数の区間へ分割し、区間ごとに @DPCM 定義と打点を作る。E チャンネルの
+    // MML は `@5 c(59f) @6 c(59f) …` と並び、実機DMCは次のトリガーが来るまで鳴り続けるので
+    // それだけで連続再生になる。
+    //   ・区間長をフレームの整数倍にする: 次のトリガー(=次の音符の頭)が区間の終端に正確に
+    //     重なる(半端だと最大0.5フレーム=8msの空白か食い込みが出る)
+    //   ・区間の $4011 初期値(dac)は直前の区間を焼き終えたDACカウンタ(MML.Dpcm.endCounter):
+    //     継ぎ目でDACが飛ばないのでプチ音が出ない
+    //   ・ピーク正規化はクリップ全体で1回(区間ごとに掛けると継ぎ目でゲインが段になる)
+    //   ・区間の打点イベントには exact:true を付け、出力側(mmlEmit.js)が音長の丸め(LEN_SNAP/LEN_DP)
+    //     から外す(変換設定 DPCM_EXACT、既定ON)。丸めると継ぎ目に空白/食い込みが出る
+    //   ・定義は必要になった区間まで(打点が次のオンセットで切られる場合、その先の区間は作らない)。
+    //     区間 k を焼くには k-1 の終端DACが要るので順に焼く(台帳 cache.pieces に控える)
+    function splitClip(live, t0, lenSec, rateIndex, dstRate, name0) {
+      const n = Math.max(1, Math.round(lenSec * dstRate));
+      const spf = dstRate / frameRate;                        // 1フレームのDMCサンプル数
+      const maxFrames = Math.max(1, Math.floor(MAX_SAMPLES / spf));
+      const totalF = Math.max(1, Math.ceil(n / spf));
+      const K = Math.ceil(totalF / maxFrames);
+      const base = Math.floor(totalF / K), extra = totalF - base * K;
+      const cache = { frames: [], mixes: [], pieces: [], endDac: [], peakGain: 1, stem: name0.replace(/\.dmc$/i, '') };
+      let f = 0, peak = 0;
+      for (let k = 0; k < K; k++) {
+        const fk = base + (k < extra ? 1 : 0);
+        const a = Math.round(f * spf), b = Math.min(n, Math.round((f + fk) * spf));
+        const nk = Math.max(1, b - a);
+        const mix = new Float32Array(nk);
+        for (const h of live) {
+          const phase = (t0 + f - h.startFrame) / frameRate;
+          resampleInto(mix, 0, nk, h.pcm, h.rate, dstRate, phase, h.vol * normGain);
+        }
+        for (let i = 0; i < nk; i++) { const v = Math.abs(mix[i]); if (v > peak) peak = v; }
+        cache.frames.push(fk);
+        cache.mixes.push(mix);
+        f += fk;
+      }
+      if (peak > 1) cache.peakGain = 1 / peak;
+      cache.rateIndex = rateIndex;
+      cache.dstRate = dstRate;
+      cache.live = live;
+      return cache;
+    }
+    // 区間 k までを焼いて定義を作る(k-1 までは焼けている前提。順に呼ぶ)
+    function ensurePiece(cache, k) {
+      for (let i = cache.pieces.length; i <= k; i++) {
+        const mix = cache.mixes[i];
+        if (cache.peakGain !== 1) for (let j = 0; j < mix.length; j++) mix[j] *= cache.peakGain;
+        const dac = i === 0
+          ? Math.max(0, Math.min(127, Math.round((mix[0] + 1) / 2 * 127)))
+          : cache.endDac[i - 1];
+        const encoded = MML.Dpcm.encode(mix, cache.dstRate, cache.rateIndex, { startCounter: dac });
+        if (!encoded || !encoded.bytes || !encoded.bytes.length) { cache.pieces.push(null); cache.endDac.push(dac); continue; }
+        cache.endDac.push(MML.Dpcm.endCounter(encoded.bytes, encoded.sampleCount, encoded.startCounter));
+        let name = `${cache.stem}_${i + 1}.dmc`;
+        for (let d = 2; usedNames.has(name); d++) name = `${cache.stem}_${i + 1}_${d}.dmc`;
+        usedNames.add(name);
+        const index = defs.length;
+        files.push({ name, bytes: encoded.bytes });
+        defs.push({ index, file: name, freq: cache.rateIndex, size: encoded.bytes.length,
+                    sampleCount: encoded.sampleCount, dac: encoded.startCounter, mode: 0, piece: i + 1, pieces: cache.frames.length });
+        cache.pieces.push(index);
+        pieceDefs++;
+      }
+      return cache.pieces[k];
+    }
 
     for (let oi = 0; oi < onsets.length; oi++) {
       const t0 = onsets[oi];
@@ -228,6 +303,25 @@
       const clipKey = rateIndex + '|' + Math.round(lenSec / LEN_QUANT_SEC) + '|' + parts.join('+');
 
       let index = clipIndexByKey.get(clipKey);
+      // ── 上限超え(ストリーム): 区間に分割して区間ごとに打点を立てる(上 splitClip 参照) ──
+      if (bytesForSamples(Math.max(1, Math.round(lenSec * dstRate))) > MAX_BYTES) {
+        let cache = index;
+        if (cache === undefined) {
+          cache = splitClip(live, t0, lenSec, rateIndex, dstRate, clipFileName(live, defs.length, usedNames, opt.prefix));
+          clipIndexByKey.set(clipKey, cache);
+          splitClips++;
+        }
+        const endF = Math.max(t0 + 1, t1); // 音が止まる/次のオンセットまで。その先の区間は作らない
+        let f = t0;
+        for (let k = 0; k < cache.frames.length && f < endF; k++) {
+          const fk = cache.frames[k];
+          const idx = ensurePiece(cache, k);
+          if (idx == null) { dropped++; f += fk; continue; }
+          events.push({ start: f, end: Math.min(f + fk, endF), note: 48, instrument: idx, exact: true });
+          f += fk;
+        }
+        continue;
+      }
       if (index === undefined) {
         const n = Math.max(1, Math.round(lenSec * dstRate));
         const mix = new Float32Array(n);
@@ -251,7 +345,7 @@
       events.push({ start: t0, end: Math.max(t0 + 1, t1), note: 48, instrument: index });
     }
     const bytes = files.reduce((a, f) => a + f.bytes.length, 0);
-    return { defs, files, events, stats: { clips: defs.length, bytes, segments: events.length, dropped, normGain } };
+    return { defs, files, events, stats: { clips: defs.length, bytes, segments: events.length, dropped, normGain, splitClips, pieceDefs } };
   }
 
   /** 打点リスト → DrumMap.build 用の観測列 */

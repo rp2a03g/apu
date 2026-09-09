@@ -352,13 +352,17 @@
     const ldCb = document.createElement('input'); ldCb.type = 'checkbox';
     ldCb.addEventListener('change', () => setKey('LEN_DP', ldCb.checked));
     wrSec.appendChild(line(ldCb, T('音長をチャンネル全体で最適化(忠実)'), T('全ての境界のずれを許容内に収める'), null, T('音符ごとに直前の余りだけを見て最も近い音価を選ぶ代わりに、チャンネル全体を見渡して「音価の書きにくさ+境界のずれ」の合計が最小になる音価を動的計画法で選ぶ。全ての境界のずれが「音長を丸める」の許容フレーム以内に収まる(OFFだと持ち越しの超過分は捨てられ、曲が進むと黙ってずれる)。格子に乗らない音符が多い曲では3連系やタイが増えるのでプレーン譜面ではOFF')));
+    // 分割DPCMの音長は丸めない(DPCM_EXACT、src/convert/drumHits.js の分割 + mmlEmit.js/duration.js の exact)
+    const deCb = document.createElement('input'); deCb.type = 'checkbox';
+    deCb.addEventListener('change', () => setKey('DPCM_EXACT', deCb.checked));
+    wrSec.appendChild(line(deCb, T('分割DPCMの音長は丸めない(忠実)'), T('ストリーム再生の継ぎ目を守る'), null, T('DMC 1本の上限(4081バイト)を超える長いサンプルは区間に分割して連続再生します。その区間の音長を「音長を丸める」「チャンネル全体で最適化」の対象から外し、フレーム単位で厳密に書きます(丸めると継ぎ目に空白や食い込みが出ます)')));
     const srCb = document.createElement('input'); srCb.type = 'checkbox';
     srCb.addEventListener('change', () => setKey('SHAPE_REST', srCb.checked));
     wrSec.appendChild(line(srCb, T('短い休符を吸収(近似)'), T('音符直後の短い休符を音符に繋げる'), null, T('音符直後の1/32未満の休符を音符に繋げる(伸ばした区間は最後の音量のまま鳴る)')));
     const emCb = document.createElement('input'); emCb.type = 'checkbox';
     emCb.addEventListener('change', () => setKey('ENV_MERGE', emCb.checked));
     wrSec.appendChild(line(emCb, T('似た@v表を統合(近似)'), T('長さ違いの表を1本にまとめる'), null, T('段の並びが同じで長さが±1違うだけの@v/@vr表を1本にまとめる(段の境目が最大1フレーム動く)')));
-    checks.GATE_APPROX = gaCb; checks.LEN_DP = ldCb; checks.SHAPE_REST = srCb; checks.ENV_MERGE = emCb;
+    checks.GATE_APPROX = gaCb; checks.LEN_DP = ldCb; checks.DPCM_EXACT = deCb; checks.SHAPE_REST = srCb; checks.ENV_MERGE = emCb;
     body.appendChild(wrSec);
 
     // ── 3b. 出力の書式(パートの並び / 1行の小節数 / 小節揃え) ──

@@ -82,7 +82,9 @@
   function buildLengthPlan(events, fpb, lenSnap, cmd) {
     if (!MML.Convert.lenDpOf(cmd) || !MML.Convert.quantizeSeq) return null;
     const durs = events.map(e => e.end - e.start);
-    const plan = MML.Convert.quantizeSeq(durs, fpb, lenSnap);
+    // 分割DPCM(ストリーム)の区間は長さを厳密に(DPCM_EXACT、duration.js quantizeSeq の exactMask)
+    const exact = MML.Convert.dpcmExactOf(cmd) ? events.map(e => !!e.exact) : null;
+    const plan = MML.Convert.quantizeSeq(durs, fpb, lenSnap, exact);
     const map = new Map();
     events.forEach((e, i) => { if (durs[i] > 0) map.set(e, plan[i]); });
     return map;
@@ -112,7 +114,8 @@
         if (!ch || ch.isDrum || !ch.events || !ch.events.length) continue;
         const filled = fillGaps(MML.Convert.shapeEvents(ch.events, fpb, cmd), opts.totalFrames || 0);
         const durs = filled.map(e => e.end - e.start);
-        const plan = dp ? MML.Convert.quantizeSeq(durs, fpb, snap) : null;
+        const exact = MML.Convert.dpcmExactOf(cmd) ? filled.map(e => !!e.exact) : null;
+        const plan = dp ? MML.Convert.quantizeSeq(durs, fpb, snap, exact) : null;
         let carry = 0;
         for (let i = 0; i < filled.length; i++) {
           if (!(durs[i] > 0)) continue;
@@ -154,15 +157,39 @@
       name + omitDefaultLen(lengths[0], defaultLen) +
       lengths.slice(1).map(l => `&${name}${omitDefaultLen(l, defaultLen)}`).join('');
 
-    for (const ev of events) {
+    for (let evIdx = 0; evIdx < events.length; evIdx++) {
+      const ev = events[evIdx];
       const dur = ev.end - ev.start;
       if (dur <= 0) continue;
       state.durCarryBefore = state.durCarry;
+      // 分割DPCMのチェーンの直前のイベント: 位置を厳密に(持ち越しをここで吸収し、丸めは 192 分の半分まで)。
+      // チェーンの頭がフレーム整数からずれて入ると、区間の長さは厳密でも境界のフレーム丸めが
+      // 区間ごとに違う向きへ転び、継ぎ目が±1フレーム揺れる(duration.js quantizeSeq の strictPos と同じ理由)
+      const beforeChain = flags.dpcmExact && !ev.exact && evIdx + 1 < events.length && !!events[evIdx + 1].exact;
       // flags.plan(LEN_DP、buildLengthPlan): チャンネル全体で決めた音価があればそれを使う(持ち越しは無し)
       const planned = flags.plan ? flags.plan.get(ev) : null;
-      const { lengths, carryOut } = planned
-        ? { lengths: planned, carryOut: 0 }
-        : MML.Convert.framesToLengths(dur, fpb, state.durCarry, flags.lenSnap);
+      let lengths, carryOut;
+      if (planned) { lengths = planned; carryOut = 0; }
+      else if (flags.dpcmExact && ev.exact) {
+        // 分割DPCM(ストリーム再生の区間、src/convert/drumHits.js): 長さを厳密に書く。
+        //   ・チェーンに入る前の持ち越し(durCarry)は吸収せず素通しにする(吸収すると先頭区間が
+        //     短くなり継ぎ目で音が切れる。そのずれはチェーンの後の普通の音符が吸収する)
+        //   ・区間ごとの端数(192分の半分以内)はチェーン内だけの持ち越し(exactCarry)で次の区間へ渡す。
+        //     区間の頭は元曲でフレーム整数なので、チェーン内の累積ずれを ±5tick(0.3フレーム未満)に
+        //     抑えれば、コンパイラが丸めた後のトリガー位置は必ず元のフレームに乗る
+        const q = MML.Convert.framesToLengths(dur, fpb, state.exactCarry, 0);
+        lengths = q.lengths; state.exactCarry = q.carryOut; carryOut = state.durCarry;
+      } else if (beforeChain) {
+        // チェーンの直前: 位置を厳密に合わせ、残った端数(±5tick)はチェーン内の持ち越しとして渡す
+        const q = MML.Convert.framesToLengths(dur, fpb, state.durCarry + state.exactCarry, 0);
+        state.exactCarry = q.carryOut;
+        lengths = q.lengths; carryOut = 0;
+      } else {
+        // チェーンを抜けたら、チェーン内の端数を普通の持ち越しへ合流させる
+        const q = MML.Convert.framesToLengths(dur, fpb, state.durCarry + state.exactCarry, flags.lenSnap);
+        state.exactCarry = 0;
+        lengths = q.lengths; carryOut = q.carryOut;
+      }
       state.durCarry = carryOut;
 
       if (ev.note === null) {
@@ -389,6 +416,7 @@
       curOct: -1, curVol: -1, curInst: -1, curEnvV: -1, curEnvVr: 255, curToneEnv: null, curRelTone: 255,
       prevEv: null, prevRestWasK: false,
       curFme7Shape: -1, curFme7Period: -1, curFme7Noise: -1, curVolMode: null, durCarry: 0,
+      exactCarry: 0, // 分割DPCM(ストリーム)の区間チェーン内だけで閉じる持ち越し(下 renderEvents 参照)
       curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, curPitchSa: 0, curPitchEp: null, curPitchEpDelay: 0,
       curNoteEnv: null, curVibrato: null, curSweep: 's0', curGateQ: 'q8', curGateK: 0,
       curPortamentoTarget: null, curPortamentoDuration: 0, curPortamentoDelay: 0,
@@ -417,6 +445,7 @@
     const maskedFlags = MML.Convert.maskEmitFlags(flags, opts.cmd);
     Object.assign(flags, maskedFlags);
     flags.lenSnap = MML.Convert.lenSnapOf(opts.cmd); // 音長を丸める(LEN_SNAP、duration.js framesToLengths)
+    flags.dpcmExact = MML.Convert.dpcmExactOf(opts.cmd); // 分割DPCMの音長は丸めない(DPCM_EXACT)
 
     const lines = [];
     if (opts.headerLines) lines.push(...opts.headerLines);
@@ -560,6 +589,7 @@
         // 一致する音符/休符は数値部分を省略する(renderEvents内のomitDefaultLen参照)。
         defaultLen: MML.Convert.detectDefaultLength(plan ? split : filled, fpb, MML.Convert.lenSnapOf(opts.cmd), plan),
         lenSnap: MML.Convert.lenSnapOf(opts.cmd), // 音長を丸める(LEN_SNAP、duration.js framesToLengths)
+        dpcmExact: MML.Convert.dpcmExactOf(opts.cmd), // 分割DPCMの音長は丸めない(DPCM_EXACT)
         plan // 音長をチャンネル全体で最適化(LEN_DP、buildLengthPlan)
       }, opts.cmd);
       const state = newState();

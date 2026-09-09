@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-09 16:07:14
+ * Built by tools/build-capture-workers.ps1 at 2026-09-09 19:33:28
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-09 16:07:14';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-09 19:33:28';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -17446,9 +17446,10 @@
       this._dpcmCostEl.innerHTML =
         `<span class="kbd-dpcm-cost-label">DPCM</span>` +
         T('定義 {clips} / 打点 {segments} / ROM {kb} KB', { clips: cost.clips, segments: cost.segments, kb });
-      // ROMが大きいときは色で警告(NSFのバンク1本=8KB、実用の目安として32KB/64KB)
-      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--warn', cost.bytes >= 32 * 1024);
-      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--over', cost.bytes >= 64 * 1024);
+      // ROMが大きいときは色で警告。DMC領域は16KB固定(窓4-7=$C000-$FFFF。ブラウザ再生もNSF書き出しも
+      // 0x4000 で頭打ちにし、超えたサンプルは無音)。12KBで注意、16KBで超過
+      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--warn', cost.bytes >= 12 * 1024);
+      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--over', cost.bytes >= 16 * 1024);
     }
 
     /**
@@ -19725,6 +19726,10 @@
  *                 3連8分の隣で持ち越しが逆向きに溜まり `16.` になる、を直す。境界のずれは常に LEN_SNAP 以内に
  *                 収める(greedy は持ち越しの超過を捨てて黙ってずれる)ので、格子に乗らない音符の多い実曲では
  *                 3連系やタイが少し増える。合成曲の往復テストで音長一致 91%→97%
+ *   DPCM_EXACT  … 分割したDPCMの音長は丸めない(2026-09-09、既定 true)。DMC 1本の上限(4080バイト)を超える
+ *                 打点は src/convert/drumHits.js がフレーム整数の区間へ分割し、区間ごとに @DPCM 定義と打点を
+ *                 立てて連続再生する(ストリーム再生)。その区間の音長を LEN_SNAP/LEN_DP の丸めから外して
+ *                 厳密に書く。丸めると区間の継ぎ目に空白/食い込みが出るため。false なら普通の音符と同じ扱い
  *   ENV_MERGE   … 似た @v 表を統合する(2026-09-08)。値の並び(段の値列)が同じで各段の長さが±1・全体長も
  *                 ±1以内の表を、最も多くの音符が参照する変種へ寄せる(EnvelopeRegistry.mergeSimilar)。
  *                 ドライバのエンベロープが自走タイマー(2.33フレーム周期等)で進む曲では段の位置が音符の
@@ -19801,6 +19806,10 @@
   // LEN_DP: 音長をチャンネル全体で最適化する(2026-09-09、src/convert/duration.js quantizeSeq)。
   // 忠実再現プリセットは ON、プレーン譜面は OFF(格子に乗らない実曲では 3連系やタイが増えるため)
   MML.Convert.lenDpOf = (cmd) => !!(cmd && cmd.LEN_DP);
+  // DPCM_EXACT: 分割したDPCM(ストリーム再生の区間、src/convert/drumHits.js)の音長を LEN_SNAP/LEN_DP の
+  // 丸めから外して厳密に書く(2026-09-09、既定ON。省略時もON=未指定の古い設定と互換)。
+  // 区間の長さがずれると継ぎ目に空白/食い込みが出るため
+  MML.Convert.dpcmExactOf = (cmd) => !(cmd && cmd.DPCM_EXACT === false);
 
   // ── チャンネルの並び順(2026-09-09) ──────────────────────────────────────
   // 各 *2mml は scoreChannels へ「元の音源のチャンネル順」で積み、最後にレター順へ並べ替える。
@@ -19878,12 +19887,12 @@
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true,
+                SHAPE_REST: false, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false,
+                SHAPE_REST: true, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
   };
@@ -19911,6 +19920,7 @@
         if (v >= 0 && v <= LEN_SNAP_MAX) out.LEN_SNAP = v;
       }
       if (cmd.LEN_DP != null) out.LEN_DP = !!cmd.LEN_DP;
+      if (cmd.DPCM_EXACT != null) out.DPCM_EXACT = !!cmd.DPCM_EXACT;
       if (cmd.PART_ORDER != null && PART_ORDER_VALUES.indexOf(cmd.PART_ORDER) >= 0) out.PART_ORDER = cmd.PART_ORDER;
       if (cmd.CHANNEL_ORDER != null && CHANNEL_ORDER_VALUES.indexOf(cmd.CHANNEL_ORDER) >= 0) out.CHANNEL_ORDER = cmd.CHANNEL_ORDER;
       if (cmd.BARS_PER_LINE != null) {
@@ -19936,7 +19946,7 @@
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
       const p = MML.Convert.normalizeCmd(PRESETS[name]);
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'GATE_TOL', 'LEN_SNAP', 'LEN_DP', 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'GATE_TOL', 'LEN_SNAP', 'LEN_DP', 'DPCM_EXACT', 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };
@@ -21527,6 +21537,24 @@
     return wanted > NORM_DEADBAND ? Math.min(NORM_MAX_BOOST, wanted) : 1;
   }
 
+  // ── DMC 1本の上限 ─────────────────────────────────────────────────────
+  // 実機 $4013 は 255 → 255*16+1 = 4081 バイトが上限。encode() は16バイト単位で出すので
+  // 実質 4080 バイト = 32640 サンプルまで。これを超えるサンプルは分割して
+  // 別々の @DPCM 定義にし、連続して鳴らす(src/convert/drumHits.js の分割、src/ui/dpcmEditor.js)。
+  const HW_MAX_BYTES = 4081;
+  const MAX_ENCODED_BYTES = 4080;
+  const MAX_ENCODED_SAMPLES = MAX_ENCODED_BYTES * 8;
+
+  /** DPCMバイト列を復号し終えた時点のDACカウンタ(0-127)。分割した次の区間の $4011 初期値に使う */
+  function endCounter(bytes, sampleCount, startCounter) {
+    let counter = (startCounter != null) ? Math.max(0, Math.min(127, startCounter | 0)) : 64;
+    for (let i = 0; i < sampleCount; i++) {
+      const bit = (bytes[i >> 3] >> (i & 7)) & 1;
+      counter = bit ? stepUp(counter) : stepDown(counter);
+    }
+    return counter;
+  }
+
   /**
    * 16進数文字列ダンプ
    */
@@ -21547,8 +21575,12 @@
     decode,
     hexDump,
     normGain,
+    endCounter,
     NORM_MAX_BOOST,
-    NORM_DEADBAND
+    NORM_DEADBAND,
+    HW_MAX_BYTES,
+    MAX_ENCODED_BYTES,
+    MAX_ENCODED_SAMPLES
   };
 })(globalThis);
 

@@ -187,6 +187,24 @@
     return wanted > NORM_DEADBAND ? Math.min(NORM_MAX_BOOST, wanted) : 1;
   }
 
+  // ── DMC 1本の上限 ─────────────────────────────────────────────────────
+  // 実機 $4013 は 255 → 255*16+1 = 4081 バイトが上限。encode() は16バイト単位で出すので
+  // 実質 4080 バイト = 32640 サンプルまで。これを超えるサンプルは分割して
+  // 別々の @DPCM 定義にし、連続して鳴らす(src/convert/drumHits.js の分割、src/ui/dpcmEditor.js)。
+  const HW_MAX_BYTES = 4081;
+  const MAX_ENCODED_BYTES = 4080;
+  const MAX_ENCODED_SAMPLES = MAX_ENCODED_BYTES * 8;
+
+  /** DPCMバイト列を復号し終えた時点のDACカウンタ(0-127)。分割した次の区間の $4011 初期値に使う */
+  function endCounter(bytes, sampleCount, startCounter) {
+    let counter = (startCounter != null) ? Math.max(0, Math.min(127, startCounter | 0)) : 64;
+    for (let i = 0; i < sampleCount; i++) {
+      const bit = (bytes[i >> 3] >> (i & 7)) & 1;
+      counter = bit ? stepUp(counter) : stepDown(counter);
+    }
+    return counter;
+  }
+
   /**
    * 16進数文字列ダンプ
    */
@@ -207,7 +225,11 @@
     decode,
     hexDump,
     normGain,
+    endCounter,
     NORM_MAX_BOOST,
-    NORM_DEADBAND
+    NORM_DEADBAND,
+    HW_MAX_BYTES,
+    MAX_ENCODED_BYTES,
+    MAX_ENCODED_SAMPLES
   };
 })(window);

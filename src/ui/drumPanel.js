@@ -151,8 +151,10 @@
     if (!stats) { costEl.textContent = ''; return; }
     costEl.textContent = T('合計 定義 {clips} / 打点 {segments} / ROM {kb} KB',
       { clips: stats.clips, segments: stats.segments, kb: (stats.bytes / 1024).toFixed(1) });
-    costEl.classList.toggle('drum-panel-foot--warn', stats.bytes >= 32 * 1024);
-    costEl.classList.toggle('drum-panel-foot--over', stats.bytes >= 64 * 1024);
+    // ★DMC領域は16KB固定(ブラウザ再生 compiler.js layoutDpcmSamples も NSF書き出し ppmckDriver.js も
+    //   窓4-7=$C000-$FFFF で頭打ち。超えたぶんのサンプルは黙って無音になる)。12KBで注意、16KBで超過
+    costEl.classList.toggle('drum-panel-foot--warn', stats.bytes >= 12 * 1024);
+    costEl.classList.toggle('drum-panel-foot--over', stats.bytes >= 16 * 1024);
   }
 
   // 差し替えの小メニュー。DPCMコンバータで開いている音をそのまま使えるようにして、

@@ -167,8 +167,14 @@
   // durs: イベント列の長さ(フレーム)。戻り値は各イベントの音価トークン列(framesToLengths の lengths と同型)。
   // 誤差コスト = ERR_COST × (境界のずれフレーム)²、境界のずれは ±tol(slackFrames、最低1フレーム)以内に制限。
   // 状態数は各段 MAX_STATES に刈り込む(実測: 状態は多くても数十)
+  // exactMask(任意、2026-09-09): true のイベント(分割したDPCM=ストリーム再生の区間、src/convert/drumHits.js)
+  //   とその直前のイベントは、境界の「位置」を ±5tick(192分の半分=0.3フレーム未満)に拘束する。
+  //   区間の頭は元曲でフレーム整数なので、位置がそこまで近ければコンパイラの累積丸めで必ず元の
+  //   フレームにトリガーが乗り、区間の音の長さ(=固定)と次のトリガーの間隔が一致して継ぎ目が消える。
+  //   ★「長さ」で拘束してはいけない: 32フレーム=238.9tick に対して安い `8`(240tick)を選び続けると
+  //     1.1tick/区間ずつ位置が流れ、5区間で0.7フレーム→1フレーム遅れる(Truxton II で実測)
   const ERR_COST = 0.5, MAX_STATES = 64;
-  MML.Convert.quantizeSeq = function (durs, fpb, slackFrames) {
+  MML.Convert.quantizeSeq = function (durs, fpb, slackFrames, exactMask) {
     const tpf = TPQN / fpb;
     const tol = Math.max(SLACK, Math.max(1, slackFrames || 0) * tpf);
     const n = durs.length;
@@ -181,7 +187,10 @@
     for (let i = 0; i < n; i++) {
       if (!(durs[i] > 0)) { hist[i] = null; continue; }
       const next = new Map();
-      const lo = P[i + 1] - tol, hi = P[i + 1] + tol;
+      // 厳密な境界 = exact なイベントの終端と、その直前のイベントの終端(チェーンの頭)
+      const strict = !!(exactMask && (exactMask[i] || exactMask[i + 1]));
+      const posTol = strict ? SLACK : tol;
+      const lo = P[i + 1] - posTol, hi = P[i + 1] + posTol;
       for (const [w, st] of states) {
         let found = false;
         for (let k = lowerBound(lo - w); k < SUM_KEYS.length && w + SUM_KEYS[k] <= hi; k++) {

@@ -4318,9 +4318,10 @@
       this._dpcmCostEl.innerHTML =
         `<span class="kbd-dpcm-cost-label">DPCM</span>` +
         T('定義 {clips} / 打点 {segments} / ROM {kb} KB', { clips: cost.clips, segments: cost.segments, kb });
-      // ROMが大きいときは色で警告(NSFのバンク1本=8KB、実用の目安として32KB/64KB)
-      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--warn', cost.bytes >= 32 * 1024);
-      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--over', cost.bytes >= 64 * 1024);
+      // ROMが大きいときは色で警告。DMC領域は16KB固定(窓4-7=$C000-$FFFF。ブラウザ再生もNSF書き出しも
+      // 0x4000 で頭打ちにし、超えたサンプルは無音)。12KBで注意、16KBで超過
+      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--warn', cost.bytes >= 12 * 1024);
+      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--over', cost.bytes >= 16 * 1024);
     }
 
     /**

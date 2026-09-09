@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-09 16:07:14
+ * Built by tools/build-capture-workers.ps1 at 2026-09-09 19:33:28
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-09 16:07:14';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-09 19:33:28';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -2651,6 +2651,7 @@
       return (toneKeyCache[srcn] = h ? 'brr:' + h : null);
     };
     const toneDemotions = []; // VRC7自作音色があぶれてプリセットへ落ちた音色 [{key, preset, label}]
+    const splitNotes = [];    // 音色ごとの載せ先分割の注記(ヘッダコメントへ)
     // 音色ごとの載せ先(toneSettings[key].target)で1本のボイスを分割する: 「V2のベース音色だけ三角波へ」。
     // 分割先は仮想ボイス(index 8以降、channelMap[i].splitFrom=元ボイス)として以降のループに参加する
     // (元ボイスは単音なので分割後に重なりは無い。借用先の取り合いは他のボイスと同じ規則)。
@@ -2673,7 +2674,7 @@
         for (const [tt, srcns] of byTarget) {
           const moved = voiceEvents[ch].filter(ev => ev.pitchSemi !== null && !ev.non && srcns.has(ev.srcn));
           voiceEvents[ch] = voiceEvents[ch].filter(ev => !(ev.pitchSemi !== null && !ev.non && srcns.has(ev.srcn)));
-          if (tt === 'skip') continue;
+          if (tt === 'skip') { splitNotes.push(`V${ch} の音色 srcn${Array.from(srcns).join(',')} はスキップ指定のため変換対象外です。`); continue; }
           voiceEvents.push(moved);
           channelMap.push(Object.assign({}, cfg, { type: tt, splitFrom: ch, splitSrcns: Array.from(srcns) }));
         }
@@ -2909,7 +2910,8 @@
       for (const d of drumDpcm.defs) {
         dmcFiles.push({ name: d.file, bytes: drumDpcm.files[d.index].bytes, rateIndex: d.freq, dac: d.dac, mode: d.mode });
       }
-      for (const ev of drumDpcm.events) dpcmNoteEvents.push({ start: ev.start, end: ev.end, note: 48, instrument: base + ev.instrument });
+      // exact: 分割したストリーム区間(drumHits.js)。出力側で音長を丸めない
+      for (const ev of drumDpcm.events) dpcmNoteEvents.push({ start: ev.start, end: ev.end, note: 48, instrument: base + ev.instrument, exact: !!ev.exact });
     }
     dpcmNoteEvents.sort((a, b) => a.start - b.start);
 
@@ -3224,7 +3226,7 @@
           if (key) toneDemotions.push({ key, preset: presetByTone[idx], label: ch.letter || '' });
         }
       }
-    }).map(n => `; ※ ${n}`).concat(placeNotes.map(n => `; ※ ${n}`));
+    }).map(n => `; ※ ${n}`).concat(placeNotes.concat(splitNotes).map(n => `; ※ ${n}`));
 
     if (dpcmLetter) {
       scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents, hasInstrument: true });
@@ -3322,6 +3324,10 @@
  *                 3連8分の隣で持ち越しが逆向きに溜まり `16.` になる、を直す。境界のずれは常に LEN_SNAP 以内に
  *                 収める(greedy は持ち越しの超過を捨てて黙ってずれる)ので、格子に乗らない音符の多い実曲では
  *                 3連系やタイが少し増える。合成曲の往復テストで音長一致 91%→97%
+ *   DPCM_EXACT  … 分割したDPCMの音長は丸めない(2026-09-09、既定 true)。DMC 1本の上限(4080バイト)を超える
+ *                 打点は src/convert/drumHits.js がフレーム整数の区間へ分割し、区間ごとに @DPCM 定義と打点を
+ *                 立てて連続再生する(ストリーム再生)。その区間の音長を LEN_SNAP/LEN_DP の丸めから外して
+ *                 厳密に書く。丸めると区間の継ぎ目に空白/食い込みが出るため。false なら普通の音符と同じ扱い
  *   ENV_MERGE   … 似た @v 表を統合する(2026-09-08)。値の並び(段の値列)が同じで各段の長さが±1・全体長も
  *                 ±1以内の表を、最も多くの音符が参照する変種へ寄せる(EnvelopeRegistry.mergeSimilar)。
  *                 ドライバのエンベロープが自走タイマー(2.33フレーム周期等)で進む曲では段の位置が音符の
@@ -3398,6 +3404,10 @@
   // LEN_DP: 音長をチャンネル全体で最適化する(2026-09-09、src/convert/duration.js quantizeSeq)。
   // 忠実再現プリセットは ON、プレーン譜面は OFF(格子に乗らない実曲では 3連系やタイが増えるため)
   MML.Convert.lenDpOf = (cmd) => !!(cmd && cmd.LEN_DP);
+  // DPCM_EXACT: 分割したDPCM(ストリーム再生の区間、src/convert/drumHits.js)の音長を LEN_SNAP/LEN_DP の
+  // 丸めから外して厳密に書く(2026-09-09、既定ON。省略時もON=未指定の古い設定と互換)。
+  // 区間の長さがずれると継ぎ目に空白/食い込みが出るため
+  MML.Convert.dpcmExactOf = (cmd) => !(cmd && cmd.DPCM_EXACT === false);
 
   // ── チャンネルの並び順(2026-09-09) ──────────────────────────────────────
   // 各 *2mml は scoreChannels へ「元の音源のチャンネル順」で積み、最後にレター順へ並べ替える。
@@ -3475,12 +3485,12 @@
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true,
+                SHAPE_REST: false, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false,
+                SHAPE_REST: true, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
   };
@@ -3508,6 +3518,7 @@
         if (v >= 0 && v <= LEN_SNAP_MAX) out.LEN_SNAP = v;
       }
       if (cmd.LEN_DP != null) out.LEN_DP = !!cmd.LEN_DP;
+      if (cmd.DPCM_EXACT != null) out.DPCM_EXACT = !!cmd.DPCM_EXACT;
       if (cmd.PART_ORDER != null && PART_ORDER_VALUES.indexOf(cmd.PART_ORDER) >= 0) out.PART_ORDER = cmd.PART_ORDER;
       if (cmd.CHANNEL_ORDER != null && CHANNEL_ORDER_VALUES.indexOf(cmd.CHANNEL_ORDER) >= 0) out.CHANNEL_ORDER = cmd.CHANNEL_ORDER;
       if (cmd.BARS_PER_LINE != null) {
@@ -3533,7 +3544,7 @@
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
       const p = MML.Convert.normalizeCmd(PRESETS[name]);
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'GATE_TOL', 'LEN_SNAP', 'LEN_DP', 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'GATE_TOL', 'LEN_SNAP', 'LEN_DP', 'DPCM_EXACT', 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };

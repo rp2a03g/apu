@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-09 16:07:14
+ * Built by tools/build-capture-workers.ps1 at 2026-09-09 19:33:28
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-09 16:07:14';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-09 19:33:28';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -9138,9 +9138,10 @@
       this._dpcmCostEl.innerHTML =
         `<span class="kbd-dpcm-cost-label">DPCM</span>` +
         T('定義 {clips} / 打点 {segments} / ROM {kb} KB', { clips: cost.clips, segments: cost.segments, kb });
-      // ROMが大きいときは色で警告(NSFのバンク1本=8KB、実用の目安として32KB/64KB)
-      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--warn', cost.bytes >= 32 * 1024);
-      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--over', cost.bytes >= 64 * 1024);
+      // ROMが大きいときは色で警告。DMC領域は16KB固定(窓4-7=$C000-$FFFF。ブラウザ再生もNSF書き出しも
+      // 0x4000 で頭打ちにし、超えたサンプルは無音)。12KBで注意、16KBで超過
+      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--warn', cost.bytes >= 12 * 1024);
+      this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--over', cost.bytes >= 16 * 1024);
     }
 
     /**

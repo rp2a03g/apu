@@ -1234,7 +1234,8 @@
       for (const d of drumDpcm.defs) {
         dmcFiles.push({ name: d.file, bytes: drumDpcm.files[d.index].bytes, rateIndex: d.freq, dac: d.dac, mode: d.mode });
       }
-      for (const ev of drumDpcm.events) dpcmNoteEvents.push({ start: ev.start, end: ev.end, note: 48, instrument: base + ev.instrument });
+      // exact: 分割したストリーム区間(drumHits.js)。出力側で音長を丸めない
+      for (const ev of drumDpcm.events) dpcmNoteEvents.push({ start: ev.start, end: ev.end, note: 48, instrument: base + ev.instrument, exact: !!ev.exact });
     }
     dpcmNoteEvents.sort((a, b) => a.start - b.start);
 
