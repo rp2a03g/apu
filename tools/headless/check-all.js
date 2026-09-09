@@ -142,6 +142,13 @@ function main() {
         ops: [{ TL: 30, ML: 2, SL: 0, SR: 0 }, { TL: 0, ML: 1, SL: 0, SR: 0 }, { TL: 40, ML: 1, SL: 0, SR: 0 }, { TL: 0, ML: 1, SL: 0, SR: 0 }] }));
       if (!opn || isSquare(opn) || new Set(opn).size < 4) ngD++;
       dres.push(`OPN alg4→@N ${opn ? new Set(opn).size + '段階' : 'null'}`);
+      // SL(D1L)=15(=減衰しきる)の音色は、定常状態をそのまま採ると無音になり、平坦な=全部8の
+      // @N波形=直流=そのchだけ鳴らない、という退行になっていた(2026-09-09。撥弦/リード系の
+      // FM音色ではごく普通の設定で、4op音色2160通りの33%がこれに当たっていた)
+      const decay = TD.toN163(TD.opnSteadyWave({ AL: 1, FB: 7, AMS: 0, PMS: 0,
+        ops: [{ TL: 20, ML: 6, SL: 15, SR: 0 }, { TL: 30, ML: 13, SL: 15, SR: 0 }, { TL: 30, ML: 3, SL: 15, SR: 0 }, { TL: 60, ML: 1, SL: 15, SR: 0 }] }));
+      if (!decay || new Set(decay).size < 4) ngD++;
+      dres.push(`OPN SL=15→@N ${decay ? new Set(decay).size + '段階' : 'null(平坦)'}`);
       const sq = TD.squareWave(0.5);
       const bytes = TD.vrc7BytesFromWave(sq);
       let c = 0;

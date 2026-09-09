@@ -26,12 +26,6 @@
       <button class="icon-btn toggle-btn" data-target="win-pianoroll" id="btnTogglePianoRollWindow" title="ピアノロール" aria-label="ピアノロール" hidden>
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="14" rx="1"/><path d="M3 7h14M3 11h14M3 15h14"/><rect x="5" y="4.2" width="4" height="1.8" fill="currentColor" stroke="none"/><rect x="10" y="8.2" width="5" height="1.8" fill="currentColor" stroke="none"/><rect x="6" y="12.2" width="3" height="1.8" fill="currentColor" stroke="none"/></svg>
       </button>
-      <button class="icon-btn toggle-btn" data-target="win-monitor" title="レジスタ/メモリモニタ" aria-label="レジスタ/メモリモニタ">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="9" height="9" rx="1"/><path d="M7.5 2.5v3M10 2.5v3M12.5 2.5v3M7.5 14.5v3M10 14.5v3M12.5 14.5v3M2.5 7.5h3M2.5 10h3M2.5 12.5h3M14.5 7.5h3M14.5 10h3M14.5 12.5h3"/></svg>
-      </button>
-      <button class="icon-btn toggle-btn" data-target="win-dpcm" title="DPCMコンバータ" aria-label="DPCMコンバータ">
-        <svg viewBox="0 0 20 20" fill="currentColor"><rect x="2.5" y="8" width="2" height="4"/><rect x="6" y="4.5" width="2" height="11"/><rect x="9.5" y="1.5" width="2" height="17"/><rect x="13" y="6" width="2" height="8"/><rect x="16.2" y="9" width="1.8" height="2"/></svg>
-      </button>
 
       <span class="icon-toolbar-sep"></span>
 
@@ -63,6 +57,9 @@
         </button>
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-vrc7tone" title="VRC7音色エディタ" aria-label="VRC7音色エディタ">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 14.5c1-7 2.4-7 3.4 0"/><path d="M5.9 14.5c1-9.5 2.4-9.5 3.4 0"/><path d="M9.3 14.5c1-5 2.4-5 3.4 0"/><path d="M12.7 14.5c1-8 2.4-8 3.4 0"/><path d="M17.5 14.5H2"/></svg>
+        </button>
+        <button class="icon-btn icon-btn-title toggle-btn" data-target="win-dpcm" title="DPCMコンバータ" aria-label="DPCMコンバータ">
+          <svg viewBox="0 0 20 20" fill="currentColor"><rect x="2.5" y="8" width="2" height="4"/><rect x="6" y="4.5" width="2" height="11"/><rect x="9.5" y="1.5" width="2" height="17"/><rect x="13" y="6" width="2" height="8"/><rect x="16.2" y="9" width="1.8" height="2"/></svg>
         </button>
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-help" title="MMLコマンドヘルプ" aria-label="MMLコマンドヘルプ">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7.5"/><path d="M7.8 7.6a2.3 2.3 0 1 1 3.1 2.2c-.6.25-.9.8-.9 1.5"/><path d="M10 14.2h.01"/></svg>
@@ -139,7 +136,7 @@
         </div>
       </div>
       <!-- 縦スプリッター -->
-      <div class="pane-splitter" id="mmlSplitter" title="ドラッグでエディタの高さを変更"></div>
+      <div class="pane-splitter" id="mmlLogSplitter" data-resize="next" title="ドラッグでログ欄の高さを変更"></div>
       <!-- 下ペイン: コントロール + 出力 -->
       <div class="mml-bottom-pane">
         <div id="mmlOutput" class="output mml-log-area"></div>
@@ -442,26 +439,6 @@
         </div>
         <div id="vgmFileStatus" class="output" style="min-height:40px;"></div>
       </div>
-    </div>
-  </section>
-
-  <section class="float-window" id="win-monitor"
-    data-default-left="660" data-default-top="660" data-default-width="520" data-default-height="480">
-    <div class="float-window-header">
-      <span>レジスタ/メモリモニタ (リアルタイム)</span>
-      <button class="float-window-close" aria-label="閉じる">×</button>
-    </div>
-    <div class="float-window-body">
-      <h2>レジスタ/メモリモニタ (リアルタイム)</h2>
-      <p style="font-size:11px;color:#9999aa;margin:0 0 8px;">
-        MML再生・NSFファイル再生・キャプチャ再生中、サウンドレジスタ・CPUレジスタ・メモリ($0000-$00FF)の状態を16進数/2進数でリアルタイム表示します。
-      </p>
-      <h3 style="margin:4px 0;font-size:13px;color:var(--accent);">CPUレジスタ</h3>
-      <div id="cpuRegMonitor" class="output" style="min-height:80px;flex:none;"></div>
-      <h3 style="margin:8px 0 4px;font-size:13px;color:var(--accent);">サウンドレジスタ</h3>
-      <div id="soundRegMonitor" class="output" style="min-height:120px;max-height:160px;flex:none;"></div>
-      <h3 style="margin:8px 0 4px;font-size:13px;color:var(--accent);">メモリ ($0000-$00FF)</h3>
-      <div id="memMonitor" class="output" style="min-height:160px;"></div>
     </div>
   </section>
 
@@ -864,6 +841,8 @@
   <script src="src/nsf2mml/expansion/n163.js"></script>
   <script src="src/nsf2mml/expansion/vrc7.js"></script>
   <script src="src/nsf2mml/converter.js"></script>
+  <script src="src/audio/flacEncoder.js"></script>
+  <script src="src/audio/aacEncoder.js"></script>
   <script src="src/audio/stream-player.js"></script>
   <script src="src/audio/assign-preview.js"></script>
   <script src="src/audio/live-monitor.js"></script>

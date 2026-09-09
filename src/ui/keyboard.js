@@ -1532,10 +1532,16 @@
       // 32X PWM(VGM): 左右2chのPCM DAC。DMC/YMDAと同じ「サンプル」行(音量=振幅)
       const live = extraSnaps && extraSnaps.pwmLive;
       const s = live ? live() : (extraSnaps && extraSnaps.pwm ? extraSnaps.pwm[frameIdx] : null);
+      // wave列は直近に流れたサンプル128点(pwm32x.js waveOf)。32X側で合成済みの
+      // 1本のストリームなので音色は読み取れないが、鳴っているかは一目で分かる
+      // (ユーザー要望 2026-09-09)。先読みキャプチャ側には波形が無いので従来の破線
       for (const [id, key, color] of [['PWL', 'l', '#66ddff'], ['PWR', 'r', '#ff8866']]) {
         const c = s ? s[key] : { level: 0, vol: 0, active: false };
+        const w = (c.waveData && c.waveData.length)
+          ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
+          : { t: 'sample' };
         channels.push({ id, color, freq: 0, vol: c.vol, rawVol: c.level, rawVolMax: s ? s.cycle : 4095,
-          wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.level, dmcRateIdx: 15, dmcFreq: 0,
+          wave: w, active: !!c.active, sample: true, dmcReg: c.level, dmcRateIdx: 15, dmcFreq: 0,
           panL: key === 'l' ? 1 : 0, panR: key === 'r' ? 1 : 0 });
       }
     }
@@ -2401,6 +2407,9 @@
         if (lane !== undefined && laneColors[lane] === undefined) laneColors[lane] = ch.color;
         continue;
       }
+      // パッドに載っている行(_applyPadKeys)で打点が当たっていない間は、音程鍵盤側は光らせない
+      // (レート由来の疑似音程D#2に貼り付いて見えるのを避ける)
+      if (ch.padRow) continue;
       // ノイズch/DPCM(サンプル)chはそれぞれch.noiseIndex/ch.dmcRateIdxを疑似ノートとして使う
       // (noisePeriodIndexToMidi/dmcRateIndexToMidi冒頭コメント参照)。YM2610 ADPCM-A/Bは
       // 解析済みピッチ(adpcmExact)またはDelta-N由来レートを adpcmPitchToMidi で音程へ。
@@ -2613,6 +2622,10 @@
       this.onOpenDrumPanel = null;    // 割当セルの「パッド」ボタン(ドラム(DPCM)パネルを開く)
       this.onOpenFile = null;         // ヘッダの「ファイルを開く」
       this.onToMml = null;            // ヘッダの「to MML」
+      this.onMaxSecondsChange = null; // ロール見出しの演奏最大時間(秒)が変わったとき (sec) => void
+      this.onExport = null;           // ロール見出しの「出力」 (formatId, seconds) => void
+      this._exportOpt = null;         // setExportControls() の最後の内容(見出し再構築時に戻す)
+      this._exportFmtSig = null;      // 出力形式リストの中身(変わった時だけ作り直す)
       this.onRepeatModeChange = null; // 曲が終わった後の挙動が変わったとき
       this._repeatBtnEl = null;
       this._repeatMode = 'next';
@@ -2840,6 +2853,14 @@
       this._dpcmCostEl = document.createElement('div');
       this._dpcmCostEl.className = 'kbd-dpcm-cost';
       this._dpcmCostEl.style.display = 'none';
+      // ドラムパッドの下ごしらえ(分離レンダリング)の進捗。曲の長さぶん再エミュレーション
+      // するので数十秒〜数分かかる。ドラム(DPCM)パネルを開いていないと何も起きていないように
+      // 見えてしまうため、パッドと同じ鍵盤表示の中にも出す(ユーザー要望 2026-09-09)
+      this._dpcmStatusEl = document.createElement('div');
+      this._dpcmStatusEl.className = 'kbd-dpcm-status';
+      this._dpcmStatusEl.style.display = 'none';
+      this._dpcmStatusEl.innerHTML = '<span class="kbd-dpcm-status-text"></span>' +
+        '<span class="kbd-dpcm-status-bar"><i></i></span>';
       left.appendChild(header);
 
       this._rowsEl = document.createElement('div');
@@ -2847,6 +2868,7 @@
       // 行本体は内側の要素に入れる(.kbd-rowsは縦スクロールの箱、.kbd-rows-innerが1列/多段の
       // 並べ方を担当。多段のとき高さauto=中身なりに伸びるので、はみ出しは横でなく縦スクロールになる)
       left.appendChild(this._dpcmCostEl);
+      left.appendChild(this._dpcmStatusEl);
       this._rowsInnerEl = document.createElement('div');
       this._rowsInnerEl.className = 'kbd-rows-inner';
       this._rowsEl.appendChild(this._rowsInnerEl);
@@ -3123,6 +3145,16 @@
         `<span class="kbd-roll-toggle">${rollCollapsed ? '▶' : '▼'}</span>` +
         `<span class="kbd-roll-label">${T('ピアノロール')}</span>` +
         `<span class="kbd-roll-seek-slot"></span>` + // main.jsから渡されるシークバー(setRollSeekBar)の置き場
+        // 演奏最大時間(秒)+出力。時間表示の「/ 総時間」だった場所を入力欄にして、
+        // その右に出力形式と出力ボタンを置く(ユーザー指示 2026-09-09)。
+        // 実体は各フォーマットのパネルにある再生時間欄/書き出しボタンで、ここはその代理
+        `<span class="kbd-roll-export" style="display:none">` +
+          `<span class="kbd-roll-export-sep">/</span>` +
+          `<input type="number" class="kbd-max-sec" min="1" max="3600" step="1" title="${T('演奏最大時間(秒)')}">` +
+          `<span class="kbd-roll-export-unit">${T('秒')}</span>` +
+          `<select class="kbd-export-fmt" title="${T('出力形式')}"></select>` +
+          `<button type="button" class="kbd-export-btn" title="${T('この長さで書き出す')}">${T('出力')}</button>` +
+        `</span>` +
         `<span class="kbd-roll-drum-audition" style="display:none">` +
           `<span class="kbd-roll-drum-label">${T('パッド試聴')}</span>` +
           `<button type="button" class="kbd-drum-aud-btn kbd-drum-aud-btn--on" data-mode="raw">${T('原音')}</button>` +
@@ -3136,6 +3168,29 @@
       seekSlot.addEventListener('click', (e) => e.stopPropagation());
       seekSlot.addEventListener('mousedown', (e) => e.stopPropagation());
       this._mountRollSeekBar(seekSlot);
+      // 演奏最大時間+出力(setExportControls で main.js から中身と表示可否をもらう)
+      this._exportEl = rollHeader.querySelector('.kbd-roll-export');
+      this._maxSecEl = rollHeader.querySelector('.kbd-max-sec');
+      this._exportFmtEl = rollHeader.querySelector('.kbd-export-fmt');
+      const exportBtn = rollHeader.querySelector('.kbd-export-btn');
+      // 見出し行のクリック(ロールの折りたたみ)を起こさない
+      this._exportEl.addEventListener('click', (e) => e.stopPropagation());
+      this._exportEl.addEventListener('mousedown', (e) => e.stopPropagation());
+      this._maxSecEl.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') this._maxSecEl.blur(); });
+      this._maxSecEl.addEventListener('change', () => {
+        const v = Math.max(1, Math.min(3600, parseInt(this._maxSecEl.value, 10) || 0));
+        this._maxSecEl.value = String(v);
+        if (this.onMaxSecondsChange) this.onMaxSecondsChange(v);
+      });
+      exportBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!this.onExport) return;
+        const sec = Math.max(1, Math.min(3600, parseInt(this._maxSecEl.value, 10) || 0));
+        this.onExport(this._exportFmtEl.value, sec);
+      });
+      // 言語切替で見出しを作り直した後も状態を戻す(selectは新品なので必ず作り直させる)
+      this._exportFmtSig = null;
+      this.setExportControls(this._exportOpt);
       // オーバーレイのON/OFFはロール見出しクリック(折りたたみ)とは独立させるため、
       // クリックイベントの伝播をここで止める(bubbling先のrollHeaderハンドラを発火させない)。
       // ドラム区画のパッド試聴の切替(原音 / DPCM変換後)。区画があるときだけ出す
@@ -3677,6 +3732,37 @@
       this._rollSeekBarEls = wrapEl ? { wrapEl, timeEl } : null;
       const slot = this._rollHeaderEl && this._rollHeaderEl.querySelector('.kbd-roll-seek-slot');
       if (slot) this._mountRollSeekBar(slot);
+    }
+
+    /**
+     * ロール見出しの「演奏最大時間+出力」を更新する(main.jsが唯一の呼び出し元)。
+     * opt = { visible, seconds, formats:[[value,label], ...] }
+     * サウンドファイル再生中だけ出す(MML再生の総時間は曲の長さそのもので、指定する物ではない)。
+     */
+    setExportControls(opt) {
+      this._exportOpt = opt || null;
+      if (!this._exportEl) return;
+      const on = !!(opt && opt.visible);
+      this._exportEl.style.display = on ? '' : 'none';
+      if (!on) return;
+      // 中身が変わったときだけ作り直す(毎フレーム呼ばれるので、選択中の値を消さないため)
+      const sig = opt.formats ? opt.formats.map((f) => f[0]).join(',') : '';
+      if (opt.formats && this._exportFmtSig !== sig) {
+        this._exportFmtSig = sig;
+        const keep = this._exportFmtEl.value;
+        this._exportFmtEl.innerHTML = '';
+        for (const [value, label] of opt.formats) {
+          const o = document.createElement('option');
+          o.value = value; o.textContent = label;
+          this._exportFmtEl.appendChild(o);
+        }
+        if (opt.formats.some((f) => f[0] === keep)) this._exportFmtEl.value = keep;
+      }
+      // 入力中(フォーカス中)は書き換えない。打っている途中の値が毎フレーム消えてしまうため
+      if (document.activeElement !== this._maxSecEl && opt.seconds != null) {
+        const v = String(Math.round(opt.seconds));
+        if (this._maxSecEl.value !== v) this._maxSecEl.value = v;
+      }
     }
     _mountRollSeekBar(slot) {
       const els = this._rollSeekBarEls;
@@ -4222,6 +4308,23 @@
       this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--over', cost.bytes >= 64 * 1024);
     }
 
+    /**
+     * ドラムパッドの下ごしらえ(分離レンダリング)の進捗表示。
+     * text を空/nullにすると消える。frac は 0〜1(不明なら省略)。
+     * 呼び出し元は main.js setDrumRenderStatus(ドラム(DPCM)パネルの表示と対)。
+     */
+    setDpcmRenderStatus(text, frac) {
+      const el = this._dpcmStatusEl;
+      if (!el) return;
+      if (!text) { el.style.display = 'none'; return; }
+      el.style.display = '';
+      el.querySelector('.kbd-dpcm-status-text').textContent = text;
+      const bar = el.querySelector('.kbd-dpcm-status-bar');
+      const pct = (typeof frac === 'number' && frac > 0) ? Math.max(0, Math.min(1, frac)) : 0;
+      bar.style.display = pct > 0 ? '' : 'none';
+      bar.firstChild.style.width = (pct * 100).toFixed(1) + '%';
+    }
+
     // note列クリックの小メニュー。「このサンプルは打楽器か音階か」の手動指定と、
     // 既存の基準音キャリブレーションをまとめて出す。
     // ★指定はサンプル単位(chではない)。プール式チップは同じ太鼓が毎回別スロットへ移るので、
@@ -4429,12 +4532,67 @@
       });
     }
 
+    // ── 鍵盤側でパッドを光らせるための索引(2026-09-09) ──────────────────────
+    // ロールの打点(drumKey付きノート)は「行ID → 時刻順の区間表」で持っておく。
+    // 分離レンダリング由来のパッド(VGMのDAC/32X PWM、GBのノイズ等)やSPCのE指定ボイスは、
+    // ライブのレジスタ抽出(extractChannels)からは drumKey が分からない(サンプル同定情報が
+    // 無い)。そのため鍵盤表示は疑似音程(dmcRateIdx=15 → D#2)に落ちてしまい、ロールでは
+    // パッドに出ているのに鍵盤だけ D#2 に貼り付く、という食い違いが起きていた。
+    // 再生位置でこの表を引き、鳴っている打点の drumKey をライブの行へ被せて解消する。
+    _buildDrumNoteIndex(tracks) {
+      const idx = new Map();
+      for (const track of tracks) {
+        let list = null;
+        for (const n of track.notes) {
+          if (!n.drumKey) continue;
+          (list || (list = [])).push(n);
+        }
+        if (!list) continue;
+        list.sort((a, b) => a.startSec - b.startSec);
+        idx.set(track.id, list);
+      }
+      this._drumNotesByTrack = idx;
+    }
+
+    /**
+     * ライブのチャンネル配列へ「今この行が鳴らしている打点」の drumKey を被せる。
+     * 既に drumKey を持つ行(実サンプルのアドレスが分かるチップ)はそのまま。
+     * posSeconds はロールと同じ曲内の秒。
+     */
+    _applyPadKeys(channels, posSeconds) {
+      const idx = this._drumNotesByTrack;
+      if (!idx || !idx.size) return;
+      const t = (this._rollLastDrawnPos != null ? this._rollLastDrawnPos : posSeconds) || 0;
+      for (const ch of channels) {
+        if (!ch || ch.drumKey) continue;
+        const list = idx.get(ch.id);
+        if (!list) continue;
+        // この行はパッドに載っている。打点が来ていない間もレートの疑似音程(D#2)へは
+        // 落とさない(音程を持たない行なのでそこに意味は無く、ずっと貼り付いて見える)
+        ch.padRow = true;
+        // 打点は短い(数十ms)ので線形走査でよいが、曲が長いと件数が多い。
+        // 開始秒でソート済みなので二分探索で「開始が t 以下の最後の打点」を取る
+        let lo = 0, hi = list.length - 1, at = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (list[mid].startSec <= t) { at = mid; lo = mid + 1; } else hi = mid - 1;
+        }
+        // 同時発音(同じ行で区間が重なる)もあるので、少し手前まで遡って被っている物を探す
+        for (let i = at; i >= 0 && i > at - 8; i--) {
+          const n = list[i];
+          if (n.endSec > t) { ch.drumKey = n.drumKey; ch.active = true; break; }
+        }
+      }
+    }
+
     _rebuildDrumLanes() {
       this._drumLanes = [];
       this._drumLaneOf = new Map();
+      this._drumNotesByTrack = null;
       const DrumMap = MML.Convert && MML.Convert.DrumMap;
       const tracks = this._rollTimeline || [];
       if (!DrumMap || !tracks.length) return;
+      this._buildDrumNoteIndex(tracks);
 
       // 1) 曲全体の打点を集めてレーンを決める(vgm2mmlのドラム音符出力と同じ表)
       const obs = [];
@@ -5460,6 +5618,9 @@
 
       const snap = regSnapshots[fi] || {};
       const channels = extractChannels(snap, this._extraSnaps, fi, this._chips);
+      // ドラムパッドへ載せた行(分離レンダリング由来など)は、ロールの打点から
+      // 「今どのパッドが鳴っているか」を補う(_applyPadKeys 冒頭コメント参照)
+      this._applyPadKeys(channels, posSeconds);
       // 直近の抽出結果(_prevChannelsは行の再構築時にしか更新されない=行構成の基準用。
       // 「今この行で鳴っているもの」を要する処理(ADPCM手動キャリブレーションのクリック等)はこちらを見る)
       this._lastChannels = channels;
@@ -5569,6 +5730,12 @@
           el.noteEl.textContent = (laneInfo && laneInfo.label) || '?';
           el.noteEl.style.color = (laneInfo && laneInfo.color) || '#e6e6ef';
           el.freqEl.textContent = ch.dmcFreq > 0 ? Math.round(ch.dmcFreq).toLocaleString() + ' Hz' : '';
+        } else if (ch.padRow) {
+          // パッドに載っている行(_applyPadKeys)で、今この瞬間に当たっている打点が無い場合。
+          // レートの疑似音程を出しても意味が無いので空欄にする
+          el.noteEl.textContent = '—';
+          el.noteEl.style.color = '#555566';
+          el.freqEl.textContent = '';
         } else if (ch.sample) {
           // note: $4010 再生速度インデックス / freq: DPCM再生周波数
           el.noteEl.textContent = String(ch.dmcRateIdx);

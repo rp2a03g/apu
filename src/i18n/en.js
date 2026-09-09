@@ -36,8 +36,6 @@
     'サウンドファイルを開く': 'Open Sound File',
     'ファイルを開く': 'Open File',
     'ここにドロップしてサウンド/MMLファイルを開く': 'Drop here to open a sound or MML file',
-    'レジスタ/メモリモニタ': 'Register / Memory Monitor',
-    'レジスタ/メモリモニタ (リアルタイム)': 'Register / Memory Monitor (live)',
     '鍵盤表示': 'Keyboard',
     'FDS波形エディタ': 'FDS Wave Editor',
     'N163波形エディタ': 'N163 Wave Editor',
@@ -153,7 +151,7 @@
 
     // ---- MMLウィンドウ ----
     'MML作曲 & 再生・シーク': 'MML Composer & Playback',
-    'ドラッグでエディタの高さを変更': 'Drag to resize the editor',
+    'ドラッグでログ欄の高さを変更': 'Drag to resize the log area',
     '▶ MML再生': '▶ Play MML',
     '■ 停止': '■ Stop',
     'NSF出力': 'Export NSF',
@@ -420,8 +418,6 @@
     '、拡張音源: {chips}': ', expansion: {chips}',
     'WAV書き出し用レンダリング中…': 'Rendering for WAV export...',
     'WAV書き出し中… {pct}%': 'Exporting WAV... {pct}%',
-    'WAV + レジスタログ書き出し完了: {file}<br>音源: {chips}':
-      'WAV + register log exported: {file}<br>Chips: {chips}',
 
     // ---- SPCパネル ----
     'ヘッダ情報 (SPC)': 'Header (SPC)',
@@ -457,8 +453,6 @@
       '⚠ {n} pitch mismatches (these notes will sound at a different pitch; red boxes on the piano roll)',
     'MML変換完了 ({mode} {bpm} BPM{exp}{dpcm}) → MMLエディタに出力':
       'Converted to MML ({mode} {bpm} BPM{exp}{dpcm}) → written to the MML editor',
-    '書き出し完了: {name}.wav + {name}_dsp_log.csv<br>DSP書き込み {writes} 件 / KON {kon} 件 (先頭{sec}秒)':
-      'Exported: {name}.wav + {name}_dsp_log.csv<br>{writes} DSP writes / {kon} key-ons (first {sec} s)',
     'スキップ': 'Skip',
     'VRC7の音色プリセット': 'VRC7 instrument preset',
     '@0 自作音色(サンプルから変換)': '@0 custom tone (converted from the sample)',
@@ -493,7 +487,6 @@
     '音源        : {chips}': 'Chips       : {chips}',
     '曲番号範囲  : {first} 〜 {last}': 'Track range : {first} - {last}',
     '再生中: 曲{song}  (最大 {time})': 'Playing: track {song}  (max {time})',
-    '書き出し完了: {file} + regs.csv': 'Exported: {file} + regs.csv',
     'MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FME-7/N163/VRC7を借用して再生)':
       'Converted to MML ({mode} {bpm} BPM, chips: {chips}) → written to the MML editor (played back via FME-7/N163/VRC7)',
     'KSSピアノロール先読みに失敗:': 'Failed to pre-render the KSS piano roll:',
@@ -655,13 +648,6 @@
     // ---- モニタ ----
     'MML再生・NSFファイル再生・キャプチャ再生中、サウンドレジスタ・CPUレジスタ・メモリ($0000-$00FF)の状態を16進数/2進数でリアルタイム表示します。':
       'Shows sound registers, CPU registers and memory ($0000-$00FF) in hex/binary while MML, NSF or captured playback is running.',
-    'CPUレジスタ': 'CPU registers',
-    'サウンドレジスタ': 'Sound registers',
-    'メモリ ($0000-$00FF)': 'Memory ($0000-$00FF)',
-    '（再生中の情報がありません）': '(nothing is playing)',
-    '（MML再生中はCPUレジスタの情報はありません）': '(CPU registers are not available during MML playback)',
-    '（書き込みがありません）': '(no writes)',
-    '（MML再生中はメモリ情報はありません）': '(memory is not available during MML playback)',
 
     // ---- 波形エディタ (FDS / N163) ----
     '新規定義を追加': 'Add a new definition',
@@ -967,5 +953,14 @@
     'MSゴシック': 'MS Gothic',
     '游ゴシック UI': 'Yu Gothic UI',
     'monospace(総称)': 'monospace (generic)',
+    '演奏最大時間(秒)': 'Max playback time (seconds)',
+    '出力形式': 'Output format',
+    'この長さで書き出す': 'Export using this length',
+    'レジスタログ(CSV)': 'Register log (CSV)',
+    '変換ログ': 'Conversion log',
+    '秒': 's',
+    '書き出し完了: {file}<br>音源: {chips}': 'Exported: {file}<br>Chips: {chips}',
+    '書き出し完了: {name}_dsp_log.csv<br>DSP書き込み {writes} 件 / KON {kon} 件 (先頭{sec}秒)': 'Exported: {name}_dsp_log.csv<br>{writes} DSP writes / {kon} KON events (first {sec}s)',
+    '{label}書き出し中… {pct}%': 'Exporting {label}... {pct}%',
   });
 })(typeof window !== 'undefined' ? window : globalThis);

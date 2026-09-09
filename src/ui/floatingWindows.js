@@ -211,12 +211,16 @@
   function initSplitters() {
     document.querySelectorAll('.pane-splitter').forEach(splitter => {
       const id = splitter.id;
-      // スプリッターの直前の兄弟要素を上側ペインとして扱う
-      const topPane = splitter.previousElementSibling;
-      if (!topPane) return;
+      // 既定は「直前の兄弟=上側ペイン」の高さを変える。data-resize="next" を付けると
+      // 「直後の兄弟=下側ペイン」を変える(上側がflexで伸び縮みする作りのとき。
+      //  MMLエディタは下のログ欄を content 高さに固定し、エディタ側が余りを取る)
+      const next = splitter.dataset.resize === 'next';
+      const pane = next ? splitter.nextElementSibling : splitter.previousElementSibling;
+      if (!pane) return;
+      const minH = next ? 40 : 80;
 
       const saved = loadSplitterHeights()[id];
-      if (saved != null) topPane.style.height = saved + 'px';
+      if (saved != null) pane.style.height = saved + 'px';
 
       let dragging = false;
       let startY = 0, startH = 0;
@@ -224,22 +228,23 @@
       splitter.addEventListener('mousedown', e => {
         dragging = true;
         startY = e.clientY;
-        startH = topPane.offsetHeight;
+        startH = pane.offsetHeight;
         splitter.classList.add('dragging');
         e.preventDefault();
       });
 
       window.addEventListener('mousemove', e => {
         if (!dragging) return;
-        const newH = Math.max(80, startH + (e.clientY - startY));
-        topPane.style.height = newH + 'px';
+        // 下側ペインを変える場合はドラッグ方向が逆(下へ引く=下側が縮む)
+        const delta = next ? (startY - e.clientY) : (e.clientY - startY);
+        pane.style.height = Math.max(minH, startH + delta) + 'px';
       });
 
       window.addEventListener('mouseup', () => {
         if (!dragging) return;
         dragging = false;
         splitter.classList.remove('dragging');
-        if (id) saveSplitterHeight(id, topPane.offsetHeight);
+        if (id) saveSplitterHeight(id, pane.offsetHeight);
       });
     });
   }

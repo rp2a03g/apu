@@ -33,6 +33,18 @@
   const opllNuked = () => MML.Emu && MML.Emu.OPLLNuked;
   const opnSynth = () => MML.Emu && MML.Emu.YM2612Nuked && MML.Emu.YM2612Nuked.synthWave;
 
+  // 平坦(＝全サンプル同値)な1周期は直流なので音にならない。N163/FDSへ載せると
+  // toN163 の round((a+1)/2*15) が全部8になり、音量をいくら上げても鳴らないchができる。
+  // VRC7の逆算にかけても倍音が無く、意味のある音色は出てこない。呼び出し側の矩形波/
+  // プリセットのフォールバックへ落とすため、こう判定されたものは null 扱いにする。
+  // ±1正規化の合成波形にも0-15の波形メモリにも同じ関数を使う(どちらも「差が無い＝平坦」)。
+  function isFlatWave(w) {
+    if (!w || !w.length) return true;
+    let mn = Infinity, mx = -Infinity;
+    for (const v of w) { if (v < mn) mn = v; if (v > mx) mx = v; }
+    return (mx - mn) < 1e-3;
+  }
+
   // ── 1周期波形の合成 ──────────────────────────────────────────────
   // OPN系4op音色(vgm2mml/expansion/opn.js の opnPatch: {AL, FB, ops[4]{TL, ML, SL, SR, …}})
   // → ±1 正規化128点。定常状態のオペレータレベルは TL + SL(持続レベル)。SR>0(減衰し続ける
@@ -41,9 +53,17 @@
     const fn = opnSynth();
     if (!fn || !p || !p.ops || p.ops.length !== 4) return null;
     const pgInc = p.ops.map((o) => (o.ML & 15) === 0 ? 1 : (o.ML & 15) * 2);
-    const egOut = p.ops.map((o) => Math.min(0x3ff, ((o.TL & 127) << 3) + (((o.SL & 15) === 15 ? 31 : (o.SL & 15)) << 5)));
-    const w = fn(pgInc, egOut, p.AL & 7, p.FB & 7);
-    return w && w.length ? w : null;
+    // SL(D1L)=15 は実機では「減衰しきる」(-93dB)指定なので、定常状態をそのまま採ると無音になる。
+    // 撥弦系/リード系のFM音色ではごく普通の設定で、egOutが0x3FF(完全減衰)へ飽和した結果
+    // 合成波形が全サンプル0 → 平坦な@N波形 → そのchだけ鳴らない、という事故になっていた
+    // (Metal Slug 2 "Judgment" のYM2610 FM1が全編このパターンだった)。定常状態が無音に
+    // なったときだけ、持続レベルを足さない TL のみ(=アタック直後の「実際に鳴っている瞬間」)で
+    // 合成し直す。SL<15 の音色の出力はこれまでどおり一切変わらない。
+    const egFor = (useSl) => p.ops.map((o) => Math.min(0x3ff, ((o.TL & 127) << 3)
+      + (useSl ? (((o.SL & 15) === 15 ? 31 : (o.SL & 15)) << 5) : 0)));
+    let w = fn(pgInc, egFor(true), p.AL & 7, p.FB & 7);
+    if (isFlatWave(w)) w = fn(pgInc, egFor(false), p.AL & 7, p.FB & 7);
+    return (w && w.length && !isFlatWave(w)) ? w : null;
   }
   // OPLL/VRC7/OPL(OPLL形式へ変換済み)の自作音色8バイト → ±1 正規化128点。
   // モジュレータの定常レベルは TL + 4×SL(EGT=1で持続する音のみ。EGT=0は減衰しきるので TL のみ)
@@ -140,7 +160,7 @@
     steadyCache.set(key, w);
     return w;
   }
-  function sourceWave(ev, s, regs) {
+  function sourceWaveRaw(ev, s, regs) {
     if (!ev || ev.note === null) return null;
     const r = regs || {};
     if (ev.n163Wave && ev.n163Wave.length) return fromLevels(ev.n163Wave);
@@ -169,9 +189,17 @@
     return null;
   }
 
+  // 元の音がどの経路で来ても(FM合成・波形メモリ・PCMの1周期)、平坦なら音にならないので
+  // ここで一括して null にする。呼び出し側(vgm2mml/converter.js、convert/borrow.js)は
+  // null を矩形波/プリセットへのフォールバックとして既に扱っている
+  function sourceWave(ev, s, regs) {
+    const w = sourceWaveRaw(ev, s, regs);
+    return isFlatWave(w) ? null : w;
+  }
+
   /** N163/FDS向け: イベントの元の音を32点4bitへ(無ければ null=矩形波にする) */
   TD.n163WaveForEvent = function (ev, s, regs, len) {
-    if (ev && ev.n163Wave && ev.n163Wave.length === (len || N163_LEN)) return ev.n163Wave;
+    if (ev && ev.n163Wave && ev.n163Wave.length === (len || N163_LEN) && !isFlatWave(ev.n163Wave)) return ev.n163Wave;
     const w = sourceWave(ev, s, regs);
     return w ? toN163(w, len) : null;
   };
@@ -181,6 +209,7 @@
     return w ? vrc7BytesFromWave(w) : null;
   };
 
+  TD.isFlatWave = isFlatWave;
   TD.opnSteadyWave = opnSteadyWave;
   TD.opllSteadyWave = opllSteadyWave;
   TD.squareWave = squareWave;

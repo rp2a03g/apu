@@ -210,28 +210,9 @@
     return '$' + n.toString(16).toUpperCase().padStart(digits, '0');
   }
 
-  function hexDump(bytes, baseAddr) {
-    let lines = [];
-    for (let i = 0; i < bytes.length; i += 16) {
-      const addr = toHex((baseAddr + i) & 0xFFFF, 4);
-      const chunk = Array.from(bytes.slice(i, i + 16));
-      const hex = chunk.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
-      lines.push(`${addr}: ${hex}`);
-    }
-    return lines.join('\n');
-  }
-
-  function toBin(n, digits) {
-    return '%' + (n >>> 0).toString(2).padStart(digits, '0');
-  }
-
-  // --- レジスタ/メモリ モニタ（リアルタイム表示） ---
-  const cpuRegMonitorEl = document.getElementById('cpuRegMonitor');
-  const soundRegMonitorEl = document.getElementById('soundRegMonitor');
-  const memMonitorEl = document.getElementById('memMonitor');
-
   // --- 鍵盤表示 ---
   const keyboardDisplay = new MML.UI.KeyboardDisplay(document.getElementById('keyboardDisplay'));
+  MML._keyboardDisplay = keyboardDisplay; // 診断用(DevToolsから状態を見る。[[remote-console-diagnosis-technique]])
   // ── 無音自動送りとミュートの関係 ────────────────────────────────────────
   // ★ミュートは「聴き方」の設定であって曲の内容ではないので、無音判定に混ぜない。
   //   VGM/KSS/GBS/HESはライブ出力(=ミュート適用後)を見て10秒無音で次の曲へ進むため、
@@ -756,6 +737,14 @@
   //   実測(OutRunners 3分・VGMのFM 1ch): 64フレームごとのyieldだと47秒中44秒が
   //   メインスレッド占有(50ms超の長タスク176回・最長531ms)で、音がカクつく。
   const ISOLATE_SLICE_MS = 6;
+  // ただし何も鳴っていないなら割り込む相手がいないので、スライスを長く取って早く終わらせる
+  // (2026-09-09: 4分の32X曲でパッドが出るまで2分半かかり「出てこない」と見えていた)。
+  // 25msはrAFの描画1コマ(16ms)を1回落とす程度で、ロールが止まって見えるほどではない
+  const ISOLATE_SLICE_MS_IDLE = 25;
+  function isolateSliceMs() {
+    const p = currentTransportPlayer();
+    return (p && p.isPlaying) ? ISOLATE_SLICE_MS : ISOLATE_SLICE_MS_IDLE;
+  }
   // ★yieldは setTimeout(0) ではなく MessageChannel を使う(キャプチャWorkerの macroYield と同じ)。
   //   setTimeout には4msの下限クランプがあり(非表示タブでは1秒まで伸びる)、6msスライスだと
   //   待ち時間の方が長くなって所要時間が何倍にもなる。MessageChannelはクランプされない。
@@ -775,12 +764,16 @@
   }
   /** ログから打点が取れる行(VGMのDAC)。分離レンダリングが要らないので待つ必要も無い */
   function isLogDrumRow(chId) { return !!DAC_ROW_CHIP[chId]; }
-  /** 分離レンダリングの進捗表示(ドラム(DPCM)パネルの下段)。chId=null で消す */
+  /**
+   * 分離レンダリング(ドラムパッドの下ごしらえ)の進捗表示。chId=null で消す。
+   * 出す先はドラム(DPCM)パネルの下段と、鍵盤表示のパッドの上(パネルを開いていなくても
+   * 進み具合が見えるように。2026-09-09 ユーザー要望)。
+   */
   function setDrumRenderStatus(chId, frac) {
-    if (!MML.UI.DrumPanel || !MML.UI.DrumPanel.setStatus) return;
-    if (!chId) { MML.UI.DrumPanel.setStatus(''); return; }
-    const pct = frac > 0 ? '  ' + Math.round(frac * 100) + '%' : '';
-    MML.UI.DrumPanel.setStatus(T('打楽器の分離レンダリング中: {ch}', { ch: chId }) + pct);
+    const text = chId ? T('打楽器の分離レンダリング中: {ch}', { ch: chId })
+      + (frac > 0 ? '  ' + Math.round(frac * 100) + '%' : '') : '';
+    if (MML.UI.DrumPanel && MML.UI.DrumPanel.setStatus) MML.UI.DrumPanel.setStatus(text);
+    if (keyboardDisplay.setDpcmRenderStatus) keyboardDisplay.setDpcmRenderStatus(text, frac);
   }
   async function renderIsolatedChannel(chId, durationSeconds, onProgress) {
     // ★形式は ChannelPlan 側から取る。変換直後は鍵盤のソースが MML 再生('mml')へ切り替わり
@@ -788,7 +781,7 @@
     const fmt = (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.format()) || kbdSourceKind;
     const cfg = soloMuteConfig(chId);
     const sampleRate = 44100;
-    const slice = { sliceBudgetMs: ISOLATE_SLICE_MS, yieldFn: isolateYield };
+    const slice = { sliceBudgetMs: isolateSliceMs(), yieldFn: isolateYield };
     if (fmt === 'nsf' && loadedNsfBytes) {
       const songNo = parseInt(nsfSongIndexEl.value, 10) || 1;
       const r = await MML.Emu.captureSongAsync(loadedNsfBytes, Object.assign({ songIndex: songNo - 1, durationSeconds, sampleRate, mute: cfg }, slice), onProgress);
@@ -825,7 +818,7 @@
         const L = chunk.l || chunk.left || chunk[0], R = chunk.r || chunk.right || chunk[1];
         const n = L ? L.length : 0;
         for (let i = 0; i < n && pos < total; i++, pos++) audio[pos] = (L[i] + (R ? R[i] : L[i])) * 0.5;
-        if (performance.now() - sliceStart >= ISOLATE_SLICE_MS) {
+        if (performance.now() - sliceStart >= isolateSliceMs()) {
           if (onProgress) onProgress(f, totalFrames);
           await isolateYield();
           sliceStart = performance.now();
@@ -1368,6 +1361,29 @@
   const SOUND_FORMAT_SONG_INPUT = { nsf: 'nsfSongIndex', kss: 'kssSongIndex', gbs: 'gbsSongIndex', hes: 'hesTrackIndex' };
   // 鍵盤表示ヘッダへ複製した「to MML」ボタンが押す実体(今表示している形式のもの)
   const SOUND_FORMAT_TOMML_BTN = { nsf: 'btnNsf2Mml', spc: 'btnSpc2Mml', kss: 'btnKss2Mml', gbs: 'btnGbs2Mml', hes: 'btnHes2Mml', vgm: 'btnVgm2Mml' };
+  // 演奏最大時間(秒)の入力欄と書き出しボタン。鍵盤表示のロール見出しに置いた
+  // 「最大時間+出力形式+出力」(keyboard.js setExportControls)がこれらの代理になる
+  const SOUND_FORMAT_DUR_INPUT = { nsf: 'nsfPlayDuration', spc: 'spcPlayDuration', kss: 'kssPlayDuration', gbs: 'gbsPlayDuration', hes: 'hesPlayDuration', vgm: 'vgmPlayDuration' };
+  const SOUND_FORMAT_WAV_BTN = { nsf: 'btnNsfExportWav', spc: 'btnSpcExportWav', kss: 'btnKssExportWav', gbs: 'btnGbsExportWav', hes: 'btnHesExportWav', vgm: 'btnVgmExportWav' };
+  // 出力形式リスト。既定はWAV。レジスタログCSVはWAVと一緒に必ず出ていたのをやめ、
+  // 選んだときだけ出す独立した形式にした(2026-09-09 ユーザー指示)
+  // レジスタログを持つのは自前のCPUを回す形式(NSF/SPC/KSS)だけ。他は音声のみ
+  const EXPORT_REGLOG_FORMATS = { nsf: true, spc: true, kss: true };
+  // AACはブラウザ内蔵のWebCodecsに任せるので、対応しているときだけ選択肢に出す
+  // (src/audio/aacEncoder.js。Chromium系は通るが他は分からない)。判定は非同期なので
+  // 起動時に1回だけ測ってここへ控える
+  let aacExportAvailable = false;
+  (async () => {
+    try { aacExportAvailable = await MML.Audio.Aac.probe(44100, 2); } catch (e) { aacExportAvailable = false; }
+  })();
+  function exportFormatsFor(fmt) {
+    const list = [['wav', 'WAV'], ['flac', 'FLAC']];
+    if (aacExportAvailable) list.push(['aac', 'AAC (.m4a)']);
+    if (EXPORT_REGLOG_FORMATS[fmt]) list.push(['reglog', T('レジスタログ(CSV)')]);
+    return list;
+  }
+  // 直前に選ばれた出力形式('wav' | 'reglog')。各 exportXxxWav() がこれを見て出し分ける
+  let exportMode = 'wav';
 
   let kbdSourceKind = null;     // 鍵盤表示が今表示しているソース 'mml' | 形式名 | null
   let loadedSoundFormat = null; // 直近に読み込んだサウンドファイルの形式(MML再生へ切り替えた後も覚えておく)
@@ -1619,54 +1635,6 @@
       getPosition: getPositionSeconds
     };
     keyboardDisplay.setSource(result, chips || []);
-  }
-
-  function renderMonitor(frameIndex) {
-    if (!monitorState) {
-      cpuRegMonitorEl.textContent = T('（再生中の情報がありません）');
-      soundRegMonitorEl.textContent = T('（再生中の情報がありません）');
-      memMonitorEl.textContent = T('（再生中の情報がありません）');
-      return;
-    }
-
-    const { regSnapshots, cpuSnapshots, memSnapshots, regAddrs } = monitorState;
-
-    // --- CPUレジスタ ---
-    if (cpuSnapshots) {
-      const cpu = cpuSnapshots[frameIndex];
-      const flagNames = 'NV-BDIZC';
-      const flagsStr = flagNames.split('').map((name, i) => {
-        const bit = (cpu.P >> (7 - i)) & 1;
-        return `${name}:${bit}`;
-      }).join(' ');
-      cpuRegMonitorEl.textContent =
-        `A  = ${toHex(cpu.A, 2)}  ${toBin(cpu.A, 8)}\n` +
-        `X  = ${toHex(cpu.X, 2)}  ${toBin(cpu.X, 8)}\n` +
-        `Y  = ${toHex(cpu.Y, 2)}  ${toBin(cpu.Y, 8)}\n` +
-        `S  = ${toHex(cpu.S, 2)}  ${toBin(cpu.S, 8)}\n` +
-        `P  = ${toHex(cpu.P, 2)}  ${toBin(cpu.P, 8)}  (${flagsStr})\n` +
-        `PC = ${toHex(cpu.PC, 4)} ${toBin(cpu.PC, 16)}`;
-    } else {
-      cpuRegMonitorEl.textContent = T('（MML再生中はCPUレジスタの情報はありません）');
-    }
-
-    // --- サウンドレジスタ ---
-    if (regAddrs.length === 0) {
-      soundRegMonitorEl.textContent = T('（書き込みがありません）');
-    } else {
-      const snap = regSnapshots[frameIndex] || {};
-      soundRegMonitorEl.textContent = regAddrs.map((addr) => {
-        const value = snap[addr] !== undefined ? snap[addr] : 0;
-        return `${toHex(addr, 4)} = ${toHex(value, 2)}  ${toBin(value, 8)}`;
-      }).join('\n');
-    }
-
-    // --- メモリ ($0000-$00FF) ---
-    if (memSnapshots) {
-      memMonitorEl.textContent = hexDump(memSnapshots[frameIndex], 0);
-    } else {
-      memMonitorEl.textContent = T('（MML再生中はメモリ情報はありません）');
-    }
   }
 
   // --- MML再生連動ハイライト・追随スクロール ---
@@ -1961,7 +1929,6 @@
         ? activePlayer.getCurrentFrame()
         : Math.floor(pos / frameDuration);
       frameIndex = Math.max(0, Math.min(monitorState.totalFrames - 1, frameIndex));
-      renderMonitor(frameIndex);
       keyboardDisplay.update(pos);
       updateMmlPlaybackHighlight(frameIndex);
     } else {
@@ -2019,7 +1986,14 @@
   const seekBars = [];
   function forEachSeekBar(fn) { for (const sb of seekBars) fn(sb); }
   function setSeekBarValue(v) { forEachSeekBar((sb) => { sb.barEl.value = String(v); }); }
-  function setTimeDisplay(text) { forEachSeekBar((sb) => { if (sb.timeEl) sb.timeEl.textContent = text; }); }
+  // 時間表示は "経過 / 総時間"。鍵盤表示(ロール見出し)側は総時間の位置を
+  // 「演奏最大時間の入力ボックス」に置き換えたので、経過だけを出す(2026-09-09 ユーザー指示)
+  function setTimeDisplay(text) {
+    forEachSeekBar((sb) => {
+      if (!sb.timeEl) return;
+      sb.timeEl.textContent = sb.currentOnly ? String(text).split('/')[0].trim() : text;
+    });
+  }
   // 主インスタンス(index.htmlの固定id要素)
   seekBars.push({ wrapEl: seekBarWrapEl, barEl: seekBarEl, timeEl: timeDisplayEl,
     handleStartEl: seekHandleStartEl, handleEndEl: seekHandleEndEl,
@@ -2036,8 +2010,8 @@
       `<div class="seek-handle seek-handle-end" title="${T('終了点（ドラッグで移動）')}"></div>`;
     const timeEl = document.createElement('span');
     timeEl.className = 'seek-time seek-time--roll';
-    timeEl.textContent = timeDisplayEl.textContent || '00:00 / 00:00';
-    const inst = { wrapEl, barEl: wrapEl.querySelector('input'), timeEl,
+    timeEl.textContent = String(timeDisplayEl.textContent || '00:00').split('/')[0].trim();
+    const inst = { wrapEl, barEl: wrapEl.querySelector('input'), timeEl, currentOnly: true,
       handleStartEl: wrapEl.querySelector('.seek-handle-start'), handleEndEl: wrapEl.querySelector('.seek-handle-end'),
       rangeFillEl: wrapEl.querySelector('.seek-range-fill'), bufferedFillEl: wrapEl.querySelector('.seek-buffered-fill') };
     // 初期状態は主インスタンスの現在の表示をそのまま写す(以後はupdateTransportUI等が
@@ -2689,7 +2663,32 @@
     }
     keyboardDisplay.setTransportState({ playing, canPlay, canStop, canPrevNext, canToggleSource: !!loadedSoundFormat });
     keyboardDisplay.refreshSourceName(); // 曲送り/アーカイブ選択で名前と一覧の現在位置を追随させる
+    updateKeyboardExportControls();
   }
+
+  // ロール見出しの「演奏最大時間(秒)+出力形式+出力」。サウンドファイルを表示している
+  // ときだけ出す(MML再生の総時間は曲の長さそのもので、指定するものではない)
+  function keyboardDurationInput() {
+    const id = SOUND_FORMAT_DUR_INPUT[kbdSourceKind];
+    return id ? document.getElementById(id) : null;
+  }
+  function updateKeyboardExportControls() {
+    const durEl = keyboardDurationInput();
+    keyboardDisplay.setExportControls(durEl
+      ? { visible: true, seconds: parseInt(durEl.value, 10) || 0, formats: exportFormatsFor(kbdSourceKind) }
+      : { visible: false });
+  }
+  keyboardDisplay.onMaxSecondsChange = (sec) => {
+    const durEl = keyboardDurationInput();
+    if (durEl) durEl.value = String(sec);
+  };
+  keyboardDisplay.onExport = (fmtId, sec) => {
+    const durEl = keyboardDurationInput();
+    if (durEl) durEl.value = String(sec);
+    exportMode = ['wav', 'flac', 'aac', 'reglog'].indexOf(fmtId) >= 0 ? fmtId : 'wav';
+    const btn = document.getElementById(SOUND_FORMAT_WAV_BTN[kbdSourceKind] || '');
+    if (btn) btn.click(); // 実体は各形式パネルの書き出しボタン(隠してあるだけ)
+  };
 
   // 鍵盤表示ヘッダへ移した「ファイルを開く」/「to MML」。実体は既存のボタンをそのまま押す
   keyboardDisplay.onOpenFile = () => {
@@ -3806,6 +3805,38 @@
     return new Blob([buf], { type: 'audio/wav' });
   }
 
+  // ── 音声の書き出し(WAV / FLAC / AAC)を1か所にまとめる ─────────────────
+  // 形式は鍵盤表示のロール見出しで選ぶ(exportMode)。各 exportXxxWav() は
+  // 「レンダリングした生の波形と音量倍率」までを用意して、ここへ渡すだけにする。
+  //   ・WAV  … buildWavBlob(Stereo)。従来と同じ16bit PCM
+  //   ・FLAC … 自前エンコーダ(src/audio/flacEncoder.js)。可逆でWAVの6割弱
+  //   ・AAC  … WebCodecs + 自前のMP4多重化(src/audio/aacEncoder.js)。非可逆
+  // 進捗は statusEl へ出す(WAVは一瞬なので出さない)。戻り値は出したファイル名。
+  const EXPORT_EXT = { wav: 'wav', flac: 'flac', aac: 'm4a' };
+  async function downloadExportAudio(baseName, chans, sampleRate, gain, statusEl) {
+    const mode = EXPORT_EXT[exportMode] ? exportMode : 'wav';
+    const filename = baseName + '.' + EXPORT_EXT[mode];
+    const progress = (label) => (f) => {
+      if (statusEl) statusEl.innerHTML = '<div>' + T('{label}書き出し中… {pct}%', { label, pct: Math.round(f * 100) }) + '</div>';
+    };
+    let blob;
+    if (mode === 'flac') {
+      blob = await MML.Audio.Flac.encode(chans, sampleRate, { gain, onProgress: progress('FLAC'),
+        tags: { TITLE: baseName, ENCODER: 'Sound Emulation Foundry' } });
+    } else if (mode === 'aac') {
+      blob = await MML.Audio.Aac.encode(chans, sampleRate, { gain, onProgress: progress('AAC') });
+    } else if (chans.length >= 2) {
+      blob = buildWavBlobStereo(chans[0], chans[1], sampleRate, gain);
+    } else {
+      blob = buildWavBlob(chans[0], sampleRate, gain);
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+    return filename;
+  }
+
   // GBSライブ再生(GbsReplayStreamPlayer)と同じgain(2.5)+リミッタ(DynamicsCompressorNode)を
   // OfflineAudioContextでオフライン適用する(exportGbsWav用)。パラメータはgbs-stream-player.js
   // createLimiter()と完全に同じ値を使い、ライブ再生とWAV書き出しで同じ音になるようにする。
@@ -3860,33 +3891,30 @@
     updateNsfPlayButton();
     const songName = (loadedNsfHeader.songName || 'output').replace(/[^\w\-]/g, '_');
 
-    // gain=3.0 を適用したWAVを出力
-    const blob = buildWavBlob(result.audio, sampleRate, 3.0);
-    const filename = `${songName}_song${songNo}.wav`;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
-
-    // 全レジスタ書き込みログを出力（フレームごと・チップ名注記付き）
-    // chip 列は末尾に追加。既存の frame,addr,value 3列はそのまま残す（後方互換）。
-    let csv = 'frame,addr,value,chip\n';
-    result.writeLog.forEach((writes, f) => {
-      writes.forEach(w => {
-        csv += `${f},0x${w.addr.toString(16).toUpperCase()},0x${w.value.toString(16).toUpperCase().padStart(2,'0')},${regChipName(w.addr)}\n`;
+    // 出力形式は鍵盤表示の「出力形式」で選ぶ(既定WAV)。以前はWAVとレジスタログCSVが
+    // 必ず一緒に出ていたが、選んだ方だけを出すようにした(2026-09-09 ユーザー指示)
+    let filename;
+    if (exportMode === 'reglog') {
+      // 全レジスタ書き込みログ（フレームごと・チップ名注記付き）
+      // chip 列は末尾に追加。既存の frame,addr,value 3列はそのまま残す（後方互換）。
+      let csv = 'frame,addr,value,chip\n';
+      result.writeLog.forEach((writes, f) => {
+        writes.forEach(w => {
+          csv += `${f},0x${w.addr.toString(16).toUpperCase()},0x${w.value.toString(16).toUpperCase().padStart(2,'0')},${regChipName(w.addr)}\n`;
+        });
       });
-    });
-    const logBlob = new Blob([csv], { type: 'text/csv' });
-    const logUrl = URL.createObjectURL(logBlob);
-    const b = document.createElement('a');
-    b.href = logUrl; b.download = `${songName}_song${songNo}_regs.csv`; b.click();
-    URL.revokeObjectURL(logUrl);
+      filename = `${songName}_song${songNo}_regs.csv`;
+      downloadText(filename, csv);
+    } else {
+      // gain=3.0 を適用して選ばれた形式で出力(WAV/FLAC/AAC)
+      filename = await downloadExportAudio(`${songName}_song${songNo}`, [result.audio], sampleRate, 3.0, nsfFileStatusEl);
+    }
 
     // 有効音源リスト（2A03 + ヘッダの拡張音源フラグ）
     const activeChips = ['2A03'].concat(
       chipsFromExtraFlags(loadedNsfHeader.extraChips || 0).map(c => c.toUpperCase()));
     nsfFileStatusEl.innerHTML = '<div class="ok">' +
-      T('WAV + レジスタログ書き出し完了: {file}<br>音源: {chips}',
+      T('書き出し完了: {file}<br>音源: {chips}',
         { file: filename, chips: activeChips.join(', ') }) + '</div>';
   }
 
@@ -4706,11 +4734,12 @@
     // ガウシアン補間の修正で DSP 出力が本来レベルに戻ったため、ライブ再生の
     // gainNode と同じく 2.0 に下げてクリップを防ぐ（旧値 3.0）。
     // VOL_L/VOL_R($x2/$x3)を反映したステレオ出力。
-    const wavBlob = buildWavBlobStereo(audioL, audioR, sampleRate, 2.0);
-    const wavUrl  = URL.createObjectURL(wavBlob);
-    const wa = document.createElement('a');
-    wa.href = wavUrl; wa.download = `${name}.wav`; wa.click();
-    URL.revokeObjectURL(wavUrl);
+    // 出力形式(WAV / レジスタログ)は鍵盤表示の「出力形式」で選ぶ。以前は必ず両方出ていた
+    if (exportMode !== 'reglog') {
+      const file = await downloadExportAudio(name, [audioL, audioR], sampleRate, 2.0, spcFileStatusEl);
+      spcFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file }) + '</div>';
+      return;
+    }
 
     // ── DSP レジスタログ CSV 出力 ─────────────────────────────────
     // ヘッダ: 初期DSPレジスタ状態サマリ
@@ -4771,7 +4800,7 @@
     const totalWrites = dspWriteLog.length;
     const konCount    = konEvents.length;
     spcFileStatusEl.innerHTML =
-      '<div class="ok">' + T('書き出し完了: {name}.wav + {name}_dsp_log.csv<br>DSP書き込み {writes} 件 / KON {kon} 件 (先頭{sec}秒)',
+      '<div class="ok">' + T('書き出し完了: {name}_dsp_log.csv<br>DSP書き込み {writes} 件 / KON {kon} 件 (先頭{sec}秒)',
         { name, writes: totalWrites, kon: konCount, sec: LOG_SEC }) + '</div>';
   }
 
@@ -5451,24 +5480,20 @@
     kssIsRendering = false;
     updateKssPlayButton();
 
-    const filename = `kss_song${songNo}.wav`;
-    const blob = buildWavBlob(result.audio, sampleRate, 2.5);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
+    // 出力形式(WAV / レジスタログ)は鍵盤表示の「出力形式」で選ぶ。以前は必ず両方出ていた
+    let filename;
+    if (exportMode === 'reglog') {
+      let csv = 'frame,addr_or_port,io,value\n';
+      result.writeLog.forEach((writes, f) => {
+        writes.forEach(w => { csv += `${f},0x${w.addr.toString(16).toUpperCase()},${w.io ? 1 : 0},0x${w.value.toString(16).toUpperCase().padStart(2,'0')}\n`; });
+      });
+      filename = `kss_song${songNo}_regs.csv`;
+      downloadText(filename, csv);
+    } else {
+      filename = await downloadExportAudio(`kss_song${songNo}`, [result.audio], sampleRate, 2.5, kssFileStatusEl);
+    }
 
-    let csv = 'frame,addr_or_port,io,value\n';
-    result.writeLog.forEach((writes, f) => {
-      writes.forEach(w => { csv += `${f},0x${w.addr.toString(16).toUpperCase()},${w.io ? 1 : 0},0x${w.value.toString(16).toUpperCase().padStart(2,'0')}\n`; });
-    });
-    const logBlob = new Blob([csv], { type: 'text/csv' });
-    const logUrl = URL.createObjectURL(logBlob);
-    const b = document.createElement('a');
-    b.href = logUrl; b.download = `kss_song${songNo}_regs.csv`; b.click();
-    URL.revokeObjectURL(logUrl);
-
-    kssFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file} + regs.csv', { file: filename }) + '</div>';
+    kssFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file: filename }) + '</div>';
   }
 
   async function runKss2Mml() {
@@ -5819,13 +5844,8 @@
     // OfflineAudioContextでライブ再生と同一のgain→リミッタのグラフを通してから書き出す。
     const { left: limitedL, right: limitedR } = await applyGbsLimiterOffline(audioL, audioR, sampleRate);
 
-    const filename = `gbs_song${songNoDisplay}.wav`;
     // NR51(パンレジスタ)を反映したステレオ出力。gainはリミッタ側で適用済みなので1.0。
-    const blob = buildWavBlobStereo(limitedL, limitedR, sampleRate, 1.0);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
+    const filename = await downloadExportAudio(`gbs_song${songNoDisplay}`, [limitedL, limitedR], sampleRate, 1.0, gbsFileStatusEl);
 
     gbsFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file: filename }) + '</div>';
   }
@@ -6310,13 +6330,8 @@
     hesIsRendering = false;
     updateHesPlayButton();
 
-    const filename = `hes_track${track}.wav`;
     // $0805(chバランス)/$0801(全体バランス)を反映したステレオ出力。
-    const blob = buildWavBlobStereo(audioL, audioR, sampleRate, 4.0);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
+    const filename = await downloadExportAudio(`hes_track${track}`, [audioL, audioR], sampleRate, 4.0, hesFileStatusEl);
 
     hesFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file: filename }) + '</div>';
   }
@@ -6703,7 +6718,7 @@
 ,
     getOpl: () => { const a = vgmAdapter('ym3812') || vgmAdapter('ym3526') || vgmAdapter('y8950'); return a ? MML.Emu.snapshotOPL(a.chip) : null; }
 ,
-    getPwm: () => { const a = vgmAdapter('pwm'); return a ? MML.Emu.snapshotPWM32X(a.chip) : null; }
+    getPwm: () => { const a = vgmAdapter('pwm'); return a ? MML.Emu.snapshotPWM32X(a.chip, true) : null; }
 ,
     getRf5c164: () => { const a = vgmAdapter('rf5c164'); return a ? MML.Emu.snapshotRF5C164(a.chip) : null; },
     getRf5c68: () => { const a = vgmAdapter('rf5c68'); return a ? MML.Emu.snapshotRF5C164(a.chip) : null; }
@@ -6950,12 +6965,7 @@
     updateVgmPlayButton();
 
     const base = (MML.VGM.displayTitle(loadedVgmHeader) || fileInputName(vgmFileEl).replace(/\.[^.]+$/, '') || 'vgm').replace(/[\\/:*?"<>|]/g, '_');
-    const filename = `${base}.wav`;
-    const blob = buildWavBlobStereo(audioL.subarray(0, pos), audioR.subarray(0, pos), sampleRate, 1.0);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
+    const filename = await downloadExportAudio(base, [audioL.subarray(0, pos), audioR.subarray(0, pos)], sampleRate, 1.0, vgmFileStatusEl);
     vgmFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file: filename }) + '</div>';
   }
 
@@ -7376,11 +7386,17 @@
       return ext;
     }
 
+    // ファイル選択ダイアログもドラッグ&ドロップと同じく「開いたらそのまま再生」する
+    // (2026-09-09 ユーザー指示「鍵盤表示でファイル開いたら即再生」。鍵盤表示の
+    //  「開く」ボタンもこの input を click() するので、ここ1か所で全経路が揃う)。
+    // MMLテキスト('mml')は formatToPlayFn に載っていないので従来どおり読み込むだけ
     soundFileEl.addEventListener('change', async () => {
       const file = soundFileEl.files[0];
       if (!file) return;
       const ok = await openSoundFile(file);
-      if (!ok) soundFileEl.value = '';
+      if (!ok) { soundFileEl.value = ''; return; }
+      const playFn = formatToPlayFn[ok];
+      if (playFn) playFn();
     });
 
     // ヘッダーの「サウンドファイルを開く」ボタン: ウィンドウを開くのと同時に

@@ -16,6 +16,12 @@
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
 
+  // 鍵盤表示のwave列に出す「直近に流れたサンプル」の長さ。PWMは22kHz前後なので
+  // 128点=約6ms、1フレーム(1/60秒=約370点)の一部を切り出した眺めになる。
+  // 複数の音を32X側で合成してから流している(=1本のミックス済みストリーム)ので、
+  // 波形から音色を読み取れるわけではないが、鳴っている/止まっているは一目で分かる
+  const PWM_WAVE_LEN = 128;
+
   class PWM32XAudio {
     constructor() {
       this.mute = [false, false]; // L, R
@@ -26,21 +32,35 @@
       this.cycle = 0x1000 - 1;
       this.dataL = 0; this.dataR = 0;
       this.outL = 0; this.outR = 0;
+      // 直近の出力サンプルのリングバッファ(L/R別。書き込みのたびに1点進む)
+      this.histL = new Float32Array(PWM_WAVE_LEN);
+      this.histR = new Float32Array(PWM_WAVE_LEN);
+      this.histLPos = 0; this.histRPos = 0;
     }
     _scale(d) {
       const c = this.cycle > 0 ? this.cycle : 1;
       if (d > c) d = c;
       return (d - c / 2) / (c / 2);
     }
+    _pushL(v) { this.histL[this.histLPos] = v; this.histLPos = (this.histLPos + 1) % PWM_WAVE_LEN; }
+    _pushR(v) { this.histR[this.histRPos] = v; this.histRPos = (this.histRPos + 1) % PWM_WAVE_LEN; }
     write(reg, data) {
       data &= 0xFFF;
       switch (reg & 0x0F) {
         case 0x01: this.cycle = ((data - 1) & 0xFFF) || 1; this.outL = this._scale(this.dataL); this.outR = this._scale(this.dataR); break;
-        case 0x02: this.dataL = data; this.outL = this._scale(data); break;
-        case 0x03: this.dataR = data; this.outR = this._scale(data); break;
-        case 0x04: this.dataL = this.dataR = data; this.outL = this.outR = this._scale(data); break;
+        case 0x02: this.dataL = data; this.outL = this._scale(data); this._pushL(this.outL); break;
+        case 0x03: this.dataR = data; this.outR = this._scale(data); this._pushR(this.outR); break;
+        case 0x04: this.dataL = this.dataR = data; this.outL = this.outR = this._scale(data); this._pushL(this.outL); this._pushR(this.outR); break;
         default: break; // 0=制御 等は無視
       }
+    }
+    /** リングバッファを「古い→新しい」の順に並べ直した波形(鍵盤表示のwave列用) */
+    waveOf(ch) {
+      const src = ch ? this.histR : this.histL;
+      const pos = ch ? this.histRPos : this.histLPos;
+      const out = new Float32Array(PWM_WAVE_LEN);
+      for (let i = 0; i < PWM_WAVE_LEN; i++) out[i] = src[(pos + i) % PWM_WAVE_LEN];
+      return out;
     }
     clock() { /* 発振無し(ゼロ次ホールド) */ }
     mixSample() {
@@ -51,12 +71,18 @@
     }
   }
 
-  // 鍵盤表示用スナップショット: 左右のPCMレベル(0-1)と生値
-  Emu.snapshotPWM32X = function (chip) {
+  // 鍵盤表示用スナップショット: 左右のPCMレベル(0-1)と生値。
+  // withWave=true のときだけ直近128点の波形を積む(ライブ再生の鍵盤表示用)。
+  // 先読みキャプチャ側では付けない: 毎フレーム128点×2chの新しい配列を保持すると
+  // 3分の曲で10MB超になり、得られる物(数ms前の眺め)に見合わない
+  // ([[capture-memory-footprint]])
+  Emu.snapshotPWM32X = function (chip, withWave) {
     return {
       cycle: chip.cycle,
-      l: { level: chip.dataL, vol: Math.min(1, Math.abs(chip.outL)), active: chip.dataL > 0 && Math.abs(chip.outL) > 0.02 },
-      r: { level: chip.dataR, vol: Math.min(1, Math.abs(chip.outR)), active: chip.dataR > 0 && Math.abs(chip.outR) > 0.02 }
+      l: { level: chip.dataL, vol: Math.min(1, Math.abs(chip.outL)), active: chip.dataL > 0 && Math.abs(chip.outL) > 0.02,
+           waveData: withWave ? chip.waveOf(0) : null },
+      r: { level: chip.dataR, vol: Math.min(1, Math.abs(chip.outR)), active: chip.dataR > 0 && Math.abs(chip.outR) > 0.02,
+           waveData: withWave ? chip.waveOf(1) : null }
     };
   };
 

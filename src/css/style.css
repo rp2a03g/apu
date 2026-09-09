@@ -482,12 +482,14 @@ button.secondary {
   overflow: hidden !important;
 }
 
+/* エディタが余りを全部取り、下のログ欄はスプリッターで決めた高さに固定する
+   (2026-09-09: DPCM UIが別ウィンドウへ移った跡が空白のまま残っていたため入れ替えた) */
 .mml-editor-pane {
-  flex-shrink: 0;
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  height: 280px; /* JS で上書きされる */
+  min-height: 120px;
   padding: 8px 12px 0;
 }
 
@@ -514,9 +516,10 @@ button.secondary {
 .pane-splitter.dragging { background: var(--accent); }
 
 .mml-bottom-pane {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
+  flex: none;
+  height: 96px; /* JS(スプリッター)で上書きされる */
+  min-height: 40px;
+  overflow: hidden;
   padding: 6px 12px 10px;
   display: flex;
   flex-direction: column;
@@ -531,10 +534,11 @@ button.secondary {
 }
 
 /* ログ表示(mmlOutput/captureOutput)は常時2行ぶんの高さに固定し、それ以上はスクロールで見る */
+/* ログ2枚(コンパイル結果/キャプチャ)は下ペインを半分ずつ使う。ペインの高さは
+   スプリッターで変えられるので、38px固定の頃のように内容が読めないことはない */
 .mml-log-area {
-  flex: none;
-  min-height: 38px;
-  max-height: 38px;
+  flex: 1 1 0;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -754,6 +758,39 @@ button.secondary {
   color: var(--text-secondary);
   white-space: nowrap;
 }
+/* ロール見出しの「演奏最大時間(秒)+出力形式+出力」(keyboard.js _buildRollPane)。
+   時間表示の「/ 総時間」だった場所にそのまま入る大きさに収める */
+.kbd-roll-export {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  cursor: default;
+}
+.kbd-roll-export-sep { color: var(--text-faint); }
+.kbd-roll-export .kbd-max-sec {
+  width: 46px;
+  height: 16px;
+  padding: 0 2px;
+  font-size: 10px;
+  font-family: var(--mono);
+  text-align: right;
+}
+.kbd-roll-export .kbd-export-fmt {
+  height: 17px;
+  padding: 0 2px;
+  font-size: 10px;
+  max-width: 130px;
+}
+.kbd-roll-export .kbd-export-btn {
+  height: 17px;
+  padding: 0 7px;
+  font-size: 10px;
+  line-height: 1;
+}
+
 .seek-range-fill {
   position: absolute;
   left: 0;
@@ -2434,6 +2471,20 @@ button.secondary {
 .kbd-dpcm-cost--over { background: rgba(209, 72, 58, 0.16); border-top-color: rgba(209, 72, 58, 0.55); }
 .kbd-dpcm-cost--over .kbd-dpcm-cost-label { background: #d1483a; }
 
+/* ドラムパッドの下ごしらえ(分離レンダリング)の進捗(keyboard.js setDpcmRenderStatus)。
+   ドラム(DPCM)パネルを開いていなくても、パッドと同じ鍵盤表示の中で進み具合が分かるように */
+.kbd-dpcm-status {
+  flex: none; padding: 2px 8px; font-size: 10px; font-family: var(--mono);
+  color: var(--text-secondary); background: rgba(120, 120, 140, 0.12);
+  border-top: 1px solid var(--border); display: flex; align-items: center; gap: 8px;
+}
+.kbd-dpcm-status-text { flex: none; white-space: nowrap; }
+.kbd-dpcm-status-bar {
+  flex: 1 1 auto; min-width: 40px; height: 6px; border-radius: 3px;
+  background: rgba(0, 0, 0, 0.18); overflow: hidden;
+}
+.kbd-dpcm-status-bar > i { display: block; height: 100%; width: 0; background: var(--accent); }
+
 /* 変換設定ダイアログ(2026-09-08 に整理): 1段組で上から プリセット/テンポ → 出すコマンド(チップ) →
    譜面の書き方 → 詳細設定(折りたたみ)。説明は各行の薄い文かホバーの title に留めて1画面に収める */
 .cs-modal { width: min(720px, 94vw); max-width: 94vw; }
@@ -2493,12 +2544,34 @@ button.secondary {
 .cs-modal .es-modal-header { display: flex; align-items: center; gap: 10px; cursor: move; user-select: none; }
 /* 見出し行のドラッグで動かしたあと(convertSettings.js makeDraggable): 中央寄せをやめて指定位置に固定 */
 .cs-modal--moved { position: fixed; margin: 0; }
+/* 「コンバート開始」は見出し「変換設定」のすぐ右。押す物だと一目で分かる大きさ・
+   立体感にする(ユーザー指示 2026-09-09「もっとボタンぽく」) */
 .cs-convert {
-  padding: 4px 14px; font-size: 12px; cursor: pointer; border-radius: 5px; font-weight: 700;
-  background: #3a6ea5; border: 1px solid #3a6ea5; color: #fff;
+  flex: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 18px; font-size: 13px; cursor: pointer; border-radius: 6px; font-weight: 700;
+  background: linear-gradient(180deg, #4a83c4, #33608f);
+  border: 1px solid #2b5580; color: #fff;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.35) inset, 0 2px 4px rgba(0, 0, 0, 0.28);
 }
-.cs-convert:hover { filter: brightness(1.1); }
-.cs-modal .es-modal-header > span { flex: 1; }
+.cs-convert::before { content: '▶'; font-size: 10px; line-height: 1; }
+.cs-convert:hover { filter: brightness(1.12); }
+.cs-convert:active { box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35) inset; transform: translateY(1px); }
+.cs-convert:disabled { cursor: progress; filter: grayscale(0.5) brightness(0.9); }
+.cs-convert--busy::before { content: '…'; }
+/* 見出しは中身なりの幅、その右にボタン。× は右端へ寄せる */
+.cs-modal .es-modal-header > span { flex: none; }
+.cs-modal .es-modal-header > .es-modal-close { margin-left: auto; }
+/* 変換の進捗/結果ログ(実体は各パネルの #<fmt>FileStatus を写したもの) */
+.cs-log {
+  min-height: 44px; max-height: 160px; overflow-y: auto;
+  padding: 4px 6px; border-radius: 4px;
+  background: var(--surface); border: 1px solid var(--border);
+  font-family: var(--mono); font-size: 11px; color: var(--text-secondary);
+  white-space: pre-wrap; word-break: break-word;
+}
+.cs-log .ok { color: var(--ok); }
+.cs-log .error { color: var(--error); }
 @media (max-width: 700px) {
   .cs-line { grid-template-columns: 1.4em 1fr auto; }
   .cs-line > .cs-desc { grid-column: 1 / -1; }

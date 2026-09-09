@@ -77,6 +77,7 @@
 
   let current = null; // 正規化済み cmd
   let modalEl = null;
+  let logObserver = null; // 変換ログの写し取り(openModal / closeModal で対に)
   const listeners = []; // set() で外から変えられたときの通知先(ダイアログ外のUIが同じ cmd を持つため)
 
   function load() {
@@ -113,6 +114,7 @@
   }
 
   function closeModal() {
+    if (logObserver) { logObserver.disconnect(); logObserver = null; }
     if (modalEl) { modalEl.remove(); modalEl = null; }
     document.removeEventListener('keydown', onKey);
   }
@@ -194,14 +196,26 @@
     closeBtn.type = 'button';
     closeBtn.setAttribute('aria-label', T('閉じる'));
     closeBtn.addEventListener('click', closeModal);
-    // 「to MML」から開いたときは、見出しの左に「コンバート開始」を置く(ユーザー指示)
+    header.appendChild(el('span', null, T('変換設定')));
+    // 「to MML」から開いたときは、見出し「変換設定」の右に「コンバート開始」を置く(ユーザー指示 2026-09-09)。
+    // ★押しても閉じない: 進捗と変換結果のログはこのダイアログの中(下部のログ欄)に出す。
+    //   完了したらMMLエディタを最前面へ出す(変換結果をすぐ見られるように)
     if (typeof ctx.onConvert === 'function') {
       const go = el('button', 'cs-convert', T('コンバート開始'));
       go.type = 'button';
-      go.addEventListener('click', () => { closeModal(); ctx.onConvert(); });
+      go.addEventListener('click', async () => {
+        if (go.disabled) return;
+        go.disabled = true;
+        go.classList.add('cs-convert--busy');
+        try { await ctx.onConvert(); } catch (e) { console.error(e); }
+        go.disabled = false;
+        go.classList.remove('cs-convert--busy');
+        if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-mml');
+        const mmlWin = document.getElementById('win-mml');
+        if (mmlWin && mmlWin.style.display === 'none') mmlWin.style.display = 'flex';
+      });
       header.appendChild(go);
     }
-    header.appendChild(el('span', null, T('変換設定')));
     header.appendChild(closeBtn);
     modal.appendChild(header);
     makeDraggable(modal, header);
@@ -389,6 +403,28 @@
     tmWrap.appendChild(el('span', null, T('セント')));
     det.appendChild(line(null, T('基準ピッチ'), T('曲全体の音程のずれを測って補正'), inline2(tnSel, tmWrap), T('曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。音名は変わらず、再生とNSF書き出しの周波数テーブルが同じだけずれる')));
     body.appendChild(det);
+
+    // ── 変換の進捗と結果ログ(ユーザー指示 2026-09-09) ──
+    // 実体は各フォーマットのパネルにある #<fmt>FileStatus。キャプチャ進捗も完了メッセージも
+    // エラーもそこへ書かれるので、MutationObserver で写して1か所(このダイアログ)で読めるようにする
+    // (書き込み側6か所をいじらずに済み、新しいメッセージを足しても取りこぼさない)
+    if (ctx.format) {
+      const src = document.getElementById(ctx.format + 'FileStatus');
+      if (src) {
+        const logSec = section(T('変換ログ'));
+        logSec.classList.add('cs-span');
+        const log = el('div', 'cs-log');
+        log.innerHTML = src.innerHTML;
+        logSec.appendChild(log);
+        body.appendChild(logSec);
+        if (logObserver) logObserver.disconnect();
+        logObserver = new MutationObserver(() => {
+          log.innerHTML = src.innerHTML;
+          log.scrollTop = log.scrollHeight;
+        });
+        logObserver.observe(src, { childList: true, subtree: true, characterData: true });
+      }
+    }
 
     function syncAll() {
       for (const [k, cb] of Object.entries(checks)) cb.checked = !!current[k];
