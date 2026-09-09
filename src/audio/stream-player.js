@@ -96,11 +96,26 @@
   // (src/mml/compiler.jsのlayoutDpcmSamples、src/mml/player.jsと同じロジック。
   // APU2A03(null)だとDMCは常に無音になる)
   function buildDpcmBus(dpcmLayout) {
-    const mem = new Uint8Array(0x10000);
+    // ページ(16KB)ごとにサンプルを敷き、窓4-7($C000-$FFFF、4KB×4)がどのページのどの4KBを見るかを
+    // $5FFC-$5FFF への書込みで切り替える(2026-09-10、DPCMバンク切替)。番号付けはNSFと同じ
+    // 「仮想バンク=ページ×4+k」。compiler.js segmentsToWriteLogDpcm が出す疑似書込みを
+    // APU2A03.writeRegister が write() へ回してくる
+    let pages = 1;
+    for (const idx of Object.keys(dpcmLayout || {})) pages = Math.max(pages, (dpcmLayout[idx].page | 0) + 1);
+    const mem = new Uint8Array(pages * 0x4000);
     for (const idx of Object.keys(dpcmLayout || {})) {
-      mem.set(dpcmLayout[idx].bytes, dpcmLayout[idx].addr);
+      const l = dpcmLayout[idx];
+      mem.set(l.bytes, (l.page | 0) * 0x4000 + (l.addr - 0xC000));
     }
-    return { read: (addr) => mem[addr & 0xFFFF] };
+    const win = [0, 1, 2, 3]; // 窓4-7 → 仮想バンク(初期値=ページ0)
+    return {
+      read: (addr) => {
+        addr &= 0xFFFF;
+        if (addr < 0xC000) return 0;
+        return mem[(win[(addr - 0xC000) >> 12] * 0x1000 + (addr & 0x0FFF)) % mem.length];
+      },
+      write: (addr, value) => { if (addr >= 0x5FFC && addr <= 0x5FFF) win[addr - 0x5FFC] = value & 0xFF; },
+    };
   }
 
   // gain(3.0) はNSF拡張音源1つ分の音量を基準にチューニングされているため、

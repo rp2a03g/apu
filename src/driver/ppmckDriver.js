@@ -46,7 +46,10 @@
  *   窓0 ($8000-$8FFF, $5FF8) : 曲データ専用の切り替え窓。曲データバンクを動的にマップする
  *   窓1-7($9000-$FFFF, $5FF9-$5FFF) : ドライバ本体(コード+テーブル類)とDPCMサンプル($C000以降)を
  *                                       固定配置。窓→ファイル上バンク番号はNSFヘッダの
- *                                       bankswitch初期値で決め、ドライバは実行時に窓0しか切り替えない
+ *                                       bankswitch初期値で決め、ドライバは実行時に窓0しか切り替えない。
+ *                                       例外はDPCMが16KB(1ページ)に収まらない曲(2026-09-10): サンプルを
+ *                                       16KB=4バンクの「ページ」に分けて置き、トリガー時にそのページへ
+ *                                       窓4-7($5FFC-$5FFF)をまとめて切り替える(WFV_T28、DPCM_PAGE_TBL)
  *   ファイル上のバンク配置(2026-08-16、buildBankedNsfBytes参照):
  *     [0]=曲データ(窓0の初期値でもある) / [1..]=ドライバ本体(DPCM使用時はさらにDPCMサンプル) /
  *     その後ろ=残りの曲データ。1チャンネルが4096バイトを超える場合は複数バンクにまたがり、
@@ -77,7 +80,8 @@
   const TABLE_MAX = NOTE_TABLE_SIZE - 1;
   const BANK_SIZE = 4096;
   const DATA_START_BANK = 8; // 曲データの開始バンク(0=未使用, 1-3=ドライバ本体固定, 4-7=DPCM専用)
-  const DATA_DPCM_BANK = 4;  // DPCMサンプル領域の先頭バンク($C000)。実機DMCの読出し範囲$C000-$FFFF
+  const DATA_DPCM_BANK = 4;  // DPCMサンプル領域の先頭窓($C000)。実機DMCの読出し範囲$C000-$FFFF
+  const DPCM_PAGE_BANKS = 4; // 1ページ=16KB=4バンク(窓4-7をまとめて切り替える単位)
   // ドライバ本体の割当上限(バンク0-3=$8000-$BFFF、16384バイト)。DPCM使用時は
   // バンク4-7($C000-$FFFF)が実機DMCハードウェアの読み出し範囲としてサンプル専用になるため、
   // ドライバ本体はここに収める必要がある(超過時はbuildBankedNsfBytesがエラーを返す)
@@ -343,7 +347,10 @@
   // DPCM使用曲ではサンプル($C000固定)の直下に詰めるため$C000-コードバンク数×4KBを渡す
   // (buildBankedNsfBytes参照)。ドライバは絶対アドレスで自分自身を参照するのでorgで
   // 一意に決まり、窓→ファイル上バンク番号の対応はNSFヘッダのbankswitch初期値で吸収する
-  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa) {
+  // dpcmPageBank0(2026-09-10): DPCMページ0のファイル上バンク番号(=dpcmFileBank)。DPCM_PAGE_TBL の値
+  // (ページk=dpcmPageBank0+4k)に使う。サイズ測定用の1回目アセンブルでは0でよい(テーブル長は変わらない)
+  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa, dpcmPageBank0) {
+    dpcmPageBank0 = dpcmPageBank0 | 0;
     driverOrg = driverOrg || 0x9000;
     usesSweep = !!usesSweep;
     songAddrLo = songAddrLo || channelTypes.map(() => 0x00);
@@ -393,6 +400,9 @@
     const usesDpcm = expansions.includes('dpcm');
     // 実際にレイアウト済み(=ファイルが読み込まれ、16KB領域に収まった)サンプルのみ対象
     const dpcmIndices = usesDpcm ? Object.keys(dpcmLayout).map(Number).sort((a, b) => a - b) : [];
+    // DPCMのページ数(compiler.js layoutDpcmSamples。16KB=1ページ)。2以上ならトリガーで窓4-7を切り替える
+    const dpcmPageCount = dpcmIndices.reduce((m, idx) => Math.max(m, (dpcmLayout[idx].page | 0) + 1), 0);
+    const usesDpcmPaging = usesDpcm && dpcmPageCount > 1;
     // N163実チャンネル数: ハードウェアは内部8ch中「上位num個」だけを巡回・ミックスするため
     // (numChannels()参照)、使用チャンネル数numN163Chを$7Fに設定し、regBaseも
     // (8-numN163Ch)+ch にオフセットする必要がある(0番から詰めると鳴らない)。
@@ -508,7 +518,9 @@
     // RD_PITCHSHIFT設定用スクラッチ(PSNEWNOTE/PSOLDLO/PSOLDHI)の5byteを追加する。
     // PLAYIDX(2026-08-16 最適化)はPLAYのチャンネルループカウンタ1byte(旧実装は
     // LDX #i/JSR SERVICE_CHをチャンネル数ぶんアンロールしており5byte/chを消費していた)
-    const TRAILING_FIXED_SIZE = 14 + (usesPitchShift ? 5 : 0) + (usesPitchSa ? 3 : 0);
+    // DPCMPAGE(2026-09-10、DPCMバンク切替): いま窓4-7に見せているページの先頭バンク番号(1byte)。
+    // サンプルが2ページ(32KB)以上あるときだけ確保する
+    const TRAILING_FIXED_SIZE = 14 + (usesPitchShift ? 5 : 0) + (usesPitchSa ? 3 : 0) + (usesDpcmPaging ? 1 : 0);
     // CNT以降のチャンネル配列群の開始番地。$0100-$01FFは6502のハードウェアスタック
     // (JSR/RTS/PHA/PLAが暗黙に使う)なので、,X直接インデックスの配列であっても
     // 絶対に踏んではいけない(踏むとJSRの戻り先が化けて実機で不定動作/暴走する。
@@ -689,6 +701,9 @@
     const PLAYIDX = fixedBase + 13 + (usesPitchShift ? 5 : 0);
     // SA<num>用の24bitシフト加算スクラッチ(SA_ADD16参照、チャンネル非依存の使い捨て)
     const SAT0 = PLAYIDX + 1, SAT1 = PLAYIDX + 2, SAT2 = PLAYIDX + 3;
+    // DPCMPAGE: 窓4-7にいま見せているDPCMページの先頭バンク番号(usesDpcmPaging時のみ確保・参照。
+    // INITで$FF=未確定にし、最初のトリガーで必ず切り替える)
+    const DPCMPAGE = PLAYIDX + 1 + (usesPitchSa ? 3 : 0);
 
     const playLines = [];
     playLines.push(`    LDX #$00
@@ -701,6 +716,7 @@ PLAY_CHLOOP:
     BNE PLAY_CHLOOP`);
 
     const initExtra = [];
+    if (usesDpcmPaging) initExtra.push(`    LDA #$FF\n    STA ${hex(DPCMPAGE)}       ; DPCMページ未確定(最初のトリガーで窓4-7を必ず切り替える)`);
     if (usesMmc5) initExtra.push('    LDA #$03\n    STA $5015       ; MMC5パルス1/2有効化');
     // FME7のミキサ(R7)は音符ごとの@<n>で組み立てる(FME7_PREP)。初期値は全ch無音にし、
     // シャドウ変数(FMEMIX)も同じ値に合わせておく
@@ -2725,7 +2741,7 @@ ${toneLoadBlocks}`);
       // 分岐は全て短距離)。レート表(108byte)は基準freqが同じサンプル同士で共有する
       const rateTableSlotByFreq = new Map();
       const dpcmRateLabels = [];
-      const dpcmIdxBytes = [], dpcmModeBytes = [], dpcmDacBytes = [], dpcmAddrBytes = [], dpcmLenBytes = [];
+      const dpcmIdxBytes = [], dpcmModeBytes = [], dpcmDacBytes = [], dpcmAddrBytes = [], dpcmLenBytes = [], dpcmPageBytes = [];
       dpcmIndices.forEach((idx) => {
         const layout = dpcmLayout[idx];
         const def = dpcmSamples[idx] || {};
@@ -2747,6 +2763,8 @@ ${toneLoadBlocks}`);
         dpcmDacBytes.push(layout.dac != null ? (layout.dac & 0x7F) : 0xFF);
         dpcmAddrBytes.push(layout.addrReg & 0xff);
         dpcmLenBytes.push(layout.lengthReg & 0xff);
+        // ページの先頭バンク(ファイル上)。usesDpcmPaging のときだけテーブルに出す
+        dpcmPageBytes.push((dpcmPageBank0 + (layout.page | 0) * DPCM_PAGE_BANKS) & 0xff);
       });
       extraTables.push(
         `DPCM_IDX_TBL:\n${bytesToDb(new Uint8Array(dpcmIdxBytes))}\n` +
@@ -2754,10 +2772,12 @@ ${toneLoadBlocks}`);
         `DPCM_DAC_TBL:\n${bytesToDb(new Uint8Array(dpcmDacBytes))}\n` +
         `DPCM_ADDR_TBL:\n${bytesToDb(new Uint8Array(dpcmAddrBytes))}\n` +
         `DPCM_LEN_TBL:\n${bytesToDb(new Uint8Array(dpcmLenBytes))}\n` +
+        (usesDpcmPaging ? `DPCM_PAGE_TBL:\n${bytesToDb(new Uint8Array(dpcmPageBytes))}\n` : '') +
         `DPCM_RATE_LO:\n    .byte ${dpcmRateLabels.map(l => `<${l}`).join(',')}\n` +
         `DPCM_RATE_HI:\n    .byte ${dpcmRateLabels.map(l => `>${l}`).join(',')}`);
       extraHandlers.push(`
-; --- DPCM ($4010-4013、サンプル本体は固定バンク4-7=$C000-$FFFFに直接配置) ---
+; --- DPCM ($4010-4013、サンプル本体は窓4-7=$C000-$FFFFに直接配置。16KBを超える曲は
+;     16KBごとの「ページ」に分け、トリガー時に DPCM_PAGE_TBL のページへ窓4-7を切り替える) ---
 ; DUTY,X(@<n>で選択した@DPCM<n>番号)をDPCM_IDX_TBLから逆引きしてスロットYを得て、
 ; 以降は全て,Yテーブル参照(サンプル数に依らずコード固定長)。X(チャンネル)は保存
 WFV_T${TYPE_DPCM}:
@@ -2793,6 +2813,19 @@ DPCM_OK:
     BMI DPCM_NODAC
     STA $4011
 DPCM_NODAC:
+${usesDpcmPaging ? `    LDA DPCM_PAGE_TBL,Y ; そのサンプルのページ(ファイル上の先頭バンク番号)。窓4-7が別ページなら切り替える
+    CMP ${hex(DPCMPAGE)}
+    BEQ DPCM_PAGE_OK
+    STA ${hex(DPCMPAGE)}
+    STA $5FFC       ; 窓4-7 ← ページの4バンク(上で$4015=$0FによりDMCは止めてあるので読出し中の切替は無い)
+    CLC
+    ADC #$01
+    STA $5FFD
+    ADC #$01
+    STA $5FFE
+    ADC #$01
+    STA $5FFF
+DPCM_PAGE_OK:` : ''}
     LDA DPCM_ADDR_TBL,Y
     STA $4012
     LDA DPCM_LEN_TBL,Y
@@ -4770,7 +4803,7 @@ SONG_LOOP_PTR_HI:
     const dummyBank = channelLetters.map(() => 0);
     const probeSrc = buildFixedSource(channelTypes, dummyBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList,
       undefined, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite,
-      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, undefined, usesSweep, usesPitchSa);
+      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, undefined, usesSweep, usesPitchSa, 0);
     const probeAsm = MML.Asm.assemble(probeSrc, { origin: 0x8000 });
     if (probeAsm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: probeAsm.errors, bankCount: 0, unsupportedExpansions };
@@ -4804,14 +4837,17 @@ SONG_LOOP_PTR_HI:
           unsupportedExpansions
         };
       }
-      // DPCMサンプル本体は$C000から連続配置される(layoutDpcmSamples)。実際に使っている
-      // 末尾までのバンク数だけを確保する
-      let dpcmEnd = 0;
+      // DPCMサンプル本体は16KBの「ページ」ごとに$C000から連続配置される(layoutDpcmSamples)。
+      // 最後のページは実際に使っている末尾までのバンク数だけ、それより前のページは4バンク丸ごと
+      // 確保する(トリガー時に窓4-7をページ単位でまとめて切り替えるため。2026-09-10)
+      const endByPage = [];
       for (const idx of Object.keys(dpcmLayout)) {
         const layout = dpcmLayout[idx];
-        dpcmEnd = Math.max(dpcmEnd, layout.addr - 0xC000 + layout.bytes.length);
+        const pg = layout.page | 0;
+        endByPage[pg] = Math.max(endByPage[pg] || 0, layout.addr - 0xC000 + layout.bytes.length);
       }
-      dpcmBanks = Math.max(1, Math.ceil(dpcmEnd / BANK_SIZE));
+      const lastPage = endByPage.length - 1;
+      dpcmBanks = lastPage * DPCM_PAGE_BANKS + Math.max(1, Math.ceil((endByPage[lastPage] || 0) / BANK_SIZE));
       driverOrg = 0xC000 - driverCodeBanks * BANK_SIZE;
       dpcmFileBank = driverFileBank + driverCodeBanks;
     }
@@ -4824,7 +4860,7 @@ SONG_LOOP_PTR_HI:
     // orgの違いはゼロページ/絶対の選択や分岐距離に影響しないため)
     const { songBank, songAddrLo, songAddrHi, allDataBanks, songLoop } = layoutAllChannels(reservedBank);
 
-    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa);
+    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa, dpcmFileBank);
     const asm = MML.Asm.assemble(src, { origin: 0x8000 });
     if (asm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: asm.errors, bankCount: 0, unsupportedExpansions };
@@ -4861,7 +4897,7 @@ SONG_LOOP_PTR_HI:
     // 追加の6502コードは不要 — NSFロード時にNsfBus/実機側で$5FF8-$5FFFへ反映される)
     for (const idx of Object.keys(dpcmLayout)) {
       const layout = dpcmLayout[idx];
-      programBytes.set(layout.bytes, dpcmFileBank * BANK_SIZE + (layout.addr - 0xC000));
+      programBytes.set(layout.bytes, (dpcmFileBank + (layout.page | 0) * DPCM_PAGE_BANKS) * BANK_SIZE + (layout.addr - 0xC000));
     }
     for (const b of allDataBanks) {
       programBytes.set(b.data, b.bankNum * BANK_SIZE + b.offset);
@@ -4880,7 +4916,8 @@ SONG_LOOP_PTR_HI:
     const driverWin0 = (driverOrg - 0x8000) / BANK_SIZE;
     opt.bankswitch = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7].map(w => {
       if (w >= driverWin0 && w < driverWin0 + driverCodeBanks) return driverFileBank + (w - driverWin0);
-      if (dpcmUsed && w >= DATA_DPCM_BANK && w < DATA_DPCM_BANK + dpcmBanks) return dpcmFileBank + (w - DATA_DPCM_BANK);
+      // DPCMは初期状態でページ0を窓4-7へ(2ページ以上ある曲はトリガー時にドライバが切り替える)
+      if (dpcmUsed && w >= DATA_DPCM_BANK && w < DATA_DPCM_BANK + Math.min(DPCM_PAGE_BANKS, dpcmBanks)) return dpcmFileBank + (w - DATA_DPCM_BANK);
       return 0;
     }));
     if (MML.NSF.CHIP_FLAGS) {

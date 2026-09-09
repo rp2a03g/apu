@@ -456,6 +456,11 @@
           this.frameCounter = 0;
           if (this.frameMode5Step) { this.clockQuarterFrame(); this.clockHalfFrame(); }
           break;
+        default:
+          // NSF方式のバンク切替($5FF8-$5FFF)はAPUのレジスタではないが、MMLのブラウザ再生では
+          // DMCの読出し元(player.js/stream-player.js buildDpcmBus)のページ切替として使う(2026-09-10)
+          if (addr >= 0x5FF8 && addr <= 0x5FFF && this.bus && this.bus.write) this.bus.write(addr, value);
+          break;
       }
     }
 

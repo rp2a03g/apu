@@ -2509,8 +2509,10 @@
 
   // --- DPCM ---
   // @DPCM<n>で解決済みのサンプルバイト列(dpcmSamples、opt.dpcmSamplesで実バイトが
-  // 埋まったもの)を、DMCハードウェアが読める$C000-$FFFF(16KB)へ64バイト境界で
-  // 順に敷き詰め、$4010-4013相当のレジスタ値を計算する。
+  // 埋まったもの)を、DMCハードウェアが読める$C000-$FFFF(16KB=1ページ)へ64バイト境界で
+  // 順に敷き詰め、$4010-4013相当のレジスタ値を計算する。16KBに収まらない分は次のページ
+  // (2026-09-10、DPCMバンク切替): 再生側はトリガーの直前に $5FFC-$5FFF(窓4-7)を
+  // そのページへ切り替える(NSFはドライバ、ブラウザ再生は buildDpcmBus の疑似書込み)。
   // 注意: 実機の$4013(サンプル長)は「(値×16)+1」バイトという奇妙な単位のため、
   // 元データの長さそのままでは割り切れないことが多い。ここでは元データ全体が
   // 必ず収まるよう切り上げて(元データより最大15バイト多く、末尾はゼロパディング)
@@ -2519,7 +2521,8 @@
   // ROM配置(フェーズ1.7タスク4、$5FFC-$5FFFの専用バンク)とは別
   function layoutDpcmSamples(dpcmSamples) {
     const layout = {};
-    let offset = 0; // $C000からのオフセット(バイト)
+    let offset = 0; // ページ先頭($C000)からのオフセット(バイト)
+    let page = 0;   // 16KBページ番号(0起点)
     for (const idx of Object.keys(dpcmSamples)) {
       const def = dpcmSamples[idx];
       if (!def.bytes || def.bytes.length === 0) continue;
@@ -2527,10 +2530,13 @@
       const lengthReg = Math.min(255, Math.max(0, Math.ceil((rawLen - 1) / 16)));
       const playLen = lengthReg * 16 + 1;
       if (offset % 64 !== 0) offset += 64 - (offset % 64);
-      if (offset + playLen > 0x4000) continue; // 16KB上限を超える分は配置しない(該当サンプルは無音)
+      // 16KB(1ページ)に収まらなければ次のページへ。1本は最大4081バイトなので必ずどこかのページに
+      // 収まる。ページを跨ぐ配置はしない(DMCは$C000-$FFFFを連続に読むため)
+      if (offset + playLen > 0x4000) { page++; offset = 0; }
       const addr = 0xC000 + offset;
       layout[idx] = {
         addr,
+        page,
         addrReg: offset >> 6,
         lengthReg,
         playLen,
@@ -2548,6 +2554,14 @@
       offset += playLen;
     }
     return layout;
+  }
+
+  // ページ数(16KB単位)。2以上なら再生側は $5FFC-$5FFF の切替が要る(NSF書き出しは
+  // ppmckDriver.js が DPCM_PAGE_TBL を持ち、ドライバのRAMに1バイト増える)
+  function dpcmPageCount(layout) {
+    let n = 0;
+    for (const idx of Object.keys(layout || {})) n = Math.max(n, (layout[idx].page | 0) + 1);
+    return n;
   }
 
   // o4 c (noteNumber=48) を基準ノートとする。@DPCM<n>のfreq(0-15)は「基準ノートを
@@ -2581,6 +2595,7 @@
   // 方式に統一した(サンプル選択と音高を分離できる分、MML表現としては柔軟)
   function segmentsToWriteLogDpcm(segments, totalFrames, dpcmLayout, dpcmSamples) {
     const writeLog = newWriteLog(totalFrames);
+    const pages = dpcmPageCount(dpcmLayout);
     let frame = 0;
     for (const seg of segments) {
       if (frame >= totalFrames) break;
@@ -2593,6 +2608,13 @@
           const rateIndex = dpcmRateIndexForNote(def.freq, seg.noteNumber);
           const control = ((def.mode ? 0x40 : 0) | (rateIndex & 0x0F)) & 0x7F;
           writeLog[startFrame].push({ addr: 0x4015, value: 0x0F }); // DMC一旦停止(2A03他chは維持)
+          if (pages > 1) {
+            // ページ切替(2026-09-10): NSFと同じ $5FFC-$5FFF(窓4-7)へ「仮想バンク番号=ページ×4+k」を書く。
+            // ブラウザ再生は player.js/stream-player.js の buildDpcmBus がこれを受けて読出し元を切り替え
+            // (APU2A03.writeRegister が bus.write へ回す)、NSF書き出しはドライバが DPCM_PAGE_TBL から
+            // 同じ順で書く(ppmckDriver.js WFV_T28)。DMCを止めた直後なので読出し中の切替は起きない
+            for (let k = 0; k < 4; k++) writeLog[startFrame].push({ addr: 0x5FFC + k, value: layout.page * 4 + k });
+          }
           writeLog[startFrame].push({ addr: 0x4010, value: control });
           if (layout.dac != null) writeLog[startFrame].push({ addr: 0x4011, value: layout.dac });
           writeLog[startFrame].push({ addr: 0x4012, value: layout.addrReg });
@@ -3021,5 +3043,6 @@
   Mml.fdsDefaultWave = fdsDefaultWave;
   Mml.n163DefaultWave = n163DefaultWave;
   Mml.dpcmRateIndexForNote = dpcmRateIndexForNote;
+  Mml.dpcmPageCount = dpcmPageCount;
   Mml.DPCM_BASE_NOTE = DPCM_BASE_NOTE;
 })(window);
