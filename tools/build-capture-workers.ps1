@@ -36,6 +36,7 @@ $bundles = @(
             'src\emulator\nsfPlayer.js',
             'src\emulator\capture.js',
             'src\ui\keyboard.js',
+            'src\convert\toneKey.js',
             'src\audio\roll-builders.js',
             'src\audio\nsf-capture-worker-impl.js'
         )
@@ -61,6 +62,7 @@ $bundles = @(
             'src\kss2mml\expansion\scc.js',
             'src\kss2mml\expansion\opll.js',
             'src\kss2mml\expansion\opl.js',
+            'src\convert\toneKey.js',
             'src\audio\roll-builders.js',
             'src\audio\capture-worker-multi-impl.js'
         )
@@ -81,6 +83,7 @@ $bundles = @(
             'src\gbs2mml\expansion\pulse.js',
             'src\gbs2mml\expansion\noise.js',
             'src\gbs2mml\expansion\wave.js',
+            'src\convert\toneKey.js',
             'src\audio\roll-builders.js',
             'src\audio\capture-worker-multi-impl.js'
         )
@@ -136,6 +139,7 @@ $bundles = @(
             'src\hes2mml\expansion\wave.js',
             'src\hes2mml\expansion\noise.js',
             'src\hes2mml\expansion\dpcm.js',
+            'src\convert\toneKey.js',
             'src\audio\roll-builders.js',
             'src\audio\capture-worker-multi-impl.js'
         )
@@ -151,6 +155,7 @@ $bundles = @(
             'src\spc2mml\converter.js',
             'src\convert\options.js',
             'src\convert\pitch.js',
+            'src\convert\toneKey.js',
             'src\audio\roll-builders.js',
             'src\audio\capture-worker-multi-impl.js'
         )
@@ -171,6 +176,7 @@ $bundles = @(
             'src\hes2mml\expansion\wave.js',
             'src\hes2mml\expansion\noise.js',
             'src\hes2mml\expansion\dpcm.js',
+            'src\convert\toneKey.js',
             'src\audio\roll-builders.js',
             'src\audio\capture-worker-multi-impl.js'
         )

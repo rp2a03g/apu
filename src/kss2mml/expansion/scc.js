@@ -187,14 +187,17 @@
       const note = (enabled && volume > 0 && freqHz > 0) ? freqToNoteNumber(freqHz) : null;
       const wave = resampleWave(t.wave[ch]);
       const waveKey = wave.join(',');
-      if (!cur) { cur = { note, wave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: false }; continue; }
+      // srcWave: 生の32バイト波形(音色の同定 src/convert/toneKey.js 用。鍵盤のライブ表示と同じ生値で
+      // キーを作るため、4bitへ丸めた wave ではなくこちらを載せる)
+      const srcWave = t.wave[ch];
+      if (!cur) { cur = { note, wave, srcWave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: false }; continue; }
       const retrigger = note !== null && volume > cur.volSeq[cur.volSeq.length - 1];
       if (retrigger || note !== cur.note || (note !== null && waveKey !== cur.waveKey)) {
         // 音量ジャンプ(再アタック推定)・波形切替が無く、純粋に音程だけが変わった場合は
         // スラー分割のタイ候補とする(ay.jsと同じ考え方)
         const pureNoteChange = !retrigger && note !== cur.note && waveKey === cur.waveKey;
         flush(f);
-        cur = { note, wave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: pureNoteChange };
+        cur = { note, wave, srcWave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: pureNoteChange };
       } else {
         cur.volSeq.push(volume);
         cur.pitchSeq.push(period);
@@ -226,6 +229,7 @@
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(ev.wave) } : {},
+      (ev.note !== null && ev.srcWave) ? { srcWave: ev.srcWave } : {}, // 音色の同定(toneKey.js)
       ev.note !== null && ev.freqHz != null
         ? { rawFreq: ev.freqHz, freqSeq: ev.pitchSeq.map(p => p > 8 ? clock / (32 * (p + 1)) : 0) } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},

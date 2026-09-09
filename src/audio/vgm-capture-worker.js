@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-09 14:38:43
+ * Built by tools/build-capture-workers.ps1 at 2026-09-09 16:07:14
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-09 14:38:43';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-09 16:07:14';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -13721,6 +13721,8 @@
       // 借用先にDPCMを選んだ行だけ出す「パッド」ボタン(ドラム(DPCM)パネルを開く)。
       // ツールバーではなくここに置く: DPCMを選んだ流れでそのまま詰められるため
       `<button type="button" class="kbd-assign-drum" style="display:none">${T('パッド')}</button>` +
+      // 音色セレクトが出ない借用先で音色一覧(音色ごとの載せ先)を開くボタン(_syncAssignSelects が出し分け)
+      `<button type="button" class="kbd-assign-tones" style="display:none">♪…</button>` +
       `</span>`;
   }
 
@@ -13942,7 +13944,7 @@
       const { freq, muted, lenOk } = pulseChannelState(e, regPeriod, snap[0x4001] || 0, true);
       const rv = e ? e.level : (r & 0xF);
       channels.push({ id: 'P1', color: '#ff4466', freq, vol: e ? e.level / 15 : pulseVol(r), rawVol: rv, rawVolMax: 15,
-        envMode: e ? e.env : false,
+        envMode: e ? e.env : false, duty: (r >> 6) & 3,
         wave: { t: 'pulse', hi: APU_DUTY[(r >> 6) & 3], nx: 8, ny: 2 },
         active: !!(status & 1) && pulseActive(r) && freq > 0 && !muted && lenOk });
     }
@@ -13954,7 +13956,7 @@
       const { freq, muted, lenOk } = pulseChannelState(e, regPeriod, snap[0x4005] || 0, false);
       const rv = e ? e.level : (r & 0xF);
       channels.push({ id: 'P2', color: '#ff8800', freq, vol: e ? e.level / 15 : pulseVol(r), rawVol: rv, rawVolMax: 15,
-        envMode: e ? e.env : false,
+        envMode: e ? e.env : false, duty: (r >> 6) & 3,
         wave: { t: 'pulse', hi: APU_DUTY[(r >> 6) & 3], nx: 8, ny: 2 },
         active: !!(status & 2) && pulseActive(r) && freq > 0 && !muted && lenOk });
     }
@@ -14089,7 +14091,7 @@
         const vol = rv / 15;
         const duty = (ctrl >> 4) & 7; // VRC6 は High 区間 = (duty+1)/16
         const freq = (en && period > 0) ? CPU_CLOCK / (div * (period + 1)) : 0;
-        channels.push({ id, color, freq, vol, rawVol: rv, rawVolMax: 15,
+        channels.push({ id, color, freq, vol, rawVol: rv, rawVolMax: 15, duty,
           wave: { t: 'pulse', hi: (duty + 1) / 16, nx: 16, ny: 2 },
           active: en && vol > 0 && freq > 0 });
       }
@@ -14183,6 +14185,7 @@
         }
         channels.push({ id: i === 0 ? 'M5P1' : 'M5P2',
           color: i === 0 ? '#ff6655' : '#ffaa44', freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
+          duty: c.duty !== undefined ? c.duty : ((r >> 6) & 3),
           wave: { t: 'pulse', hi: APU_DUTY[c.duty !== undefined ? c.duty : ((r >> 6) & 3)], nx: 8, ny: 2 },
           active: c.active });
       }
@@ -14359,7 +14362,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: RIDS[ch], color: `hsl(${hue},80%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
           wave: adpcmWave8(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
       }
@@ -14368,7 +14371,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: 'OAB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: adpcmWave8(c), active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
           panL: c.panL, panR: c.panR });
       }
     }
@@ -14419,7 +14422,7 @@
         channels.push({ id: 'OLB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' },
           active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
           panL: 1, panR: 1 });
       }
     }
@@ -14473,7 +14476,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `GA${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: gaWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
       }
@@ -14493,7 +14496,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `SP${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 127,
           wave: spWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
       }
@@ -14512,7 +14515,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `CN${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: cnWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
       }
@@ -14531,7 +14534,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `CS${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: csWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
       }
@@ -14573,7 +14576,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `NA${ch + 1}`, color: `hsl(${hue},80%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
           wave: adpcmWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
       }
@@ -14582,7 +14585,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: 'NB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: adpcmWave(c), active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
           panL: c.panL, panR: c.panR });
       }
     }
@@ -14599,7 +14602,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `QS${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: qsWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
       }
@@ -14617,7 +14620,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `MP${ch + 1}`, color: `hsl(${hue},72%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: mpWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
       }
@@ -14636,7 +14639,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `OK${ch + 1}`, color: `hsl(${hue},70%,58%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0x20,
           wave: okWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
-          adpcmSample: c.sample || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
       }
@@ -14705,7 +14708,7 @@
       for (let i = 0; i < 2; i++) {
         const c = s ? s['ch' + (i + 1)] : { freq: 0, vol: 0, rawVol: 0, duty: 2, envPeriod: 0, active: false };
         channels.push({ id: PCOLS[i][0], color: PCOLS[i][1], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          envMode: (c.envPeriod || 0) > 0,
+          envMode: (c.envPeriod || 0) > 0, duty: c.duty,
           wave: { t: 'pulse', hi: APU_DUTY[c.duty], nx: 8, ny: 2 },
           active: c.active, panL: (nr51 >> (4 + i)) & 1, panR: (nr51 >> i) & 1 });
       }
@@ -14793,11 +14796,13 @@
     // 2つのサンプルチップを積んだVGMで両方が「レーン0」から番号を振ってしまう。
     // noteにはdrumKeyだけ載せ、曲全体が揃った受け取り側で一括して割り当てる
     // (KeyboardDisplay._rebuildDrumLanes → MML.Convert.DrumMap.build)。
+    const TK = MML.Convert && MML.Convert.ToneKey; // 音色キー(音色一覧パネル用。roll-builders.js toneOf と同じ役割)
     const pushNote = (track, endSec) => {
       const c = track.cur;
       const note = { startSec: c.startFrame * frameDur, endSec, midi: c.midi,
                      vol: c.volQ / ROLL_VOL_LEVELS, freqSeq: c.freqs };
       if (c.drumKey) note.drumKey = c.drumKey;
+      if (c.tone) note.tone = c.tone;
       // sampleRow: サンプル再生ch(2A03 DMC/YM2612 DAC/32X PWM/RF5C…)のノート。midiは
       // レート由来の疑似音程なので「音高=楽器の区別」にならない。E(DPCM)へ載せて打楽器化する
       // ときは1発ごとに切り出して内容で束ねる必要があるため、印だけ付けておく
@@ -14810,7 +14815,7 @@
       const channels = getChannelsAtFrame(f) || [];
       for (const ch of channels) {
         let track = tracks.get(ch.id);
-        if (!track) { track = { id: ch.id, color: ch.color, notes: [], cur: null }; tracks.set(ch.id, track); }
+        if (!track) { track = { id: ch.id, color: ch.color, notes: [], tones: {}, cur: null }; tracks.set(ch.id, track); }
         track.color = ch.color;
         // ノイズch/DPCM(サンプル)chはch.freqが常に0(実波形の「音程」ではないため)なので、
         // 代わりに周期選択レジスタのindex(0-15)をそのまま16音へ1:1対応させた疑似ノート番号
@@ -14839,8 +14844,16 @@
         if (cur && (!sounding || midi !== cur.midi || drumKey !== cur.drumKey || drumSeq !== cur.drumSeq || (!drumKey && volQ !== cur.volQ))) {
           pushNote(track, f * frameDur);
         }
-        if (sounding && !track.cur) track.cur = { startFrame: f, midi, drumKey, drumSeq, volQ, freqs: [],
-                                                  sampleRow: !!ch.sample && !drumKey };
+        if (sounding && !track.cur) {
+          // 音色キーは発音開始の瞬間だけ引く(毎フレーム引くと重い。ノート途中の音色変化は次のノートで拾う)
+          let tone;
+          if (TK && midi !== null) {
+            tone = TK.ofLive(ch);
+            if (tone && !track.tones[tone]) track.tones[tone] = TK.infoOfLive(ch, tone);
+          }
+          track.cur = { startFrame: f, midi, drumKey, drumSeq, volQ, freqs: [], tone,
+                        sampleRow: !!ch.sample && !drumKey };
+        }
         if (track.cur) track.cur.freqs.push(pitchFreq);
       }
     }
@@ -14848,7 +14861,7 @@
     const result = [];
     for (const track of tracks.values()) {
       if (track.cur) pushNote(track, totalSec);
-      result.push({ id: track.id, color: track.color, notes: track.notes });
+      result.push({ id: track.id, color: track.color, notes: track.notes, tones: track.tones });
     }
     result.frameDur = frameDur; // セント偏差オーバーレイ描画時にfreqSeqのフレーム間隔を復元するため
     return result;
@@ -15748,6 +15761,8 @@
       this.onDrumAudition = null;
       this._drumAuditionMode = 'raw';
       this.onOpenDrumPanel = null;    // 割当セルの「パッド」ボタン(ドラム(DPCM)パネルを開く)
+      this.onOpenTonePanel = null;    // (chId) => void 音色セレクトの「音色ごとに指定…」(音色一覧を開く。main.js)
+      this.toneOverrideCount = null;  // (chId) => number そのchの音色のうち音色ごとの指定を持つ数(main.js)
       this.onOpenFile = null;         // ヘッダの「ファイルを開く」
       this.onToMml = null;            // ヘッダの「to MML」
       this.onMaxSecondsChange = null; // ロール見出しの演奏最大時間(秒)が変わったとき (sec) => void
@@ -17515,6 +17530,22 @@
 
     /** ドラム区画のレーン表(ドラム(DPCM)パネル用)。[{key,label,color,subN}] */
     getDrumLanes() { return (this._drumLanes || []).slice(); }
+    /** ロールのタイムライン(音色一覧の目録 main.js rebuildToneInventory 用) */
+    getRollTimeline() { return this._rollTimeline; }
+    /** そのchに今効いている借用先(ユーザー指定 → 行の既定 → 割当計画の既定) */
+    getEffectiveTarget(chId) {
+      const plan = channelPlan();
+      if (!plan) return 'skip';
+      const ent = plan.get(chId) || {};
+      return ent.target || this._defaultTargetOf(chId) || 'skip';
+    }
+    /** そのchの表示色(色の上書き込み) */
+    getChannelColor(chId) {
+      const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+      return el ? el.color : null;
+    }
+    /** 割当UI(part列/セレクト/重複警告)の再描画を外から促す(音色ごとの指定の件数表示など) */
+    refreshAssignUi() { this._refreshAssignUi(); }
 
     /**
      * ドラム区画のパッド名を差し替える。map は { drumKey → 表示名 }。
@@ -17950,6 +17981,13 @@
       if (!editable) targetSel.title = assignLockReason();
       targetSel.addEventListener('change', () => this._setAssignTarget(chId, targetSel.value));
       toneSel.addEventListener('change', () => {
+        // 「音色ごとに指定…」: 値ではなく音色一覧(src/ui/tonePanel.js)をこのchで開く操作
+        if (toneSel.value === plan.TONE_PER_INSTRUMENT) {
+          const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+          if (el) this._syncAssignSelects(el);
+          if (this.onOpenTonePanel) this.onOpenTonePanel(chId);
+          return;
+        }
         const cur = plan.get(chId) || {};
         const kind = plan.toneKindFor(cur.target || this._defaultTargetOf(chId), undefined, plan.channelKind(chId));
         const def = kind ? plan.toneOptionsFor(kind, plan.channelKind(chId)).def : null;
@@ -17961,6 +17999,13 @@
       if (drumBtn) drumBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (this.onOpenDrumPanel) this.onOpenDrumPanel();
+      });
+      // 音色の選択肢が無い借用先(三角波/FME-7/のこぎり波等)でも音色ごとの載せ先は指定できるので、
+      // 音色セレクトが隠れるときはこのボタンで音色一覧を開く
+      const tonesBtn = row.querySelector('.kbd-assign-tones');
+      if (tonesBtn) tonesBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.onOpenTonePanel) this.onOpenTonePanel(chId);
       });
     }
 
@@ -17978,29 +18023,16 @@
       return (el && el.defaultTarget) || plan.defaultTarget(chId, 'skip');
     }
 
-    // 借用先を選び直す。既定と同じ値を選んだらユーザー指定を消して「自動」に戻す
-    // 借用先を1つの枠へ移すと、そこに先に居たchは行き場を失う(変換器は先に置かれた方を
-    // 採り、後は「対象外」にする)。UI上は赤い重複表示が出るだけで、ユーザーは自分で
-    // 前のchをスキップにし直す必要があった。★2A03ノイズのように枠が1つしか無い借用先では
-    // これが「どちらを鳴らすか選ぶ」操作そのものなので、選んだ時点で前のchを自動でスキップへ
-    // 落とし、ラジオボタンのように振る舞わせる(SN76489デュアルのノイズ2本、SNノイズと
-    // サンプルPCMのドラムパートの取り合いが実例)。
+    // 借用先を選び直す。既定と同じ値を選んだらユーザー指定を消して「自動」に戻す。
+    // 借用先が他のchと重なったときの扱いは全形式「赤い重複警告を出すだけ」に統一(2026-09-09、
+    // ユーザー指示)。以前はNSF側の行(_rowEls)だけ「先に居たchを自動でスキップへ落とす」ラジオ動作で、
+    // SPCの行(_spcRowEls)は警告だけ、と形式で挙動が違っていた。自動解除は選んだ側の意図を
+    // 越えて他の行を書き換えてしまうので、どちらを鳴らすかはユーザーが赤い行を見て決める。
+    // 変換器側は従来どおり先着優先(後のchは「変換対象外」の注記)。
     _setAssignTarget(chId, value) {
       const plan = channelPlan();
       if (!plan) return;
       const def = this._defaultTargetOf(chId);
-      // ★DPCMだけは例外。複数のPCMチャンネルをまとめて1本のDPCMパートへ焼く設計
-      //   (同時発音区間はミックスして1サンプルにする。src/vgm2mml/expansion/dpcmDrums.js)
-      //   なので、ここで他chを追い出すとドラムを複数ch選べなくなる。
-      if (value && value !== 'skip' && !MULTI_SOURCE_TARGETS.has(value)) {
-        for (const el of this._rowEls) {
-          if (el.id === chId) continue;
-          const cur = (plan.get(el.id) || {}).target || el.defaultTarget || 'skip';
-          if (cur !== value) continue;
-          const otherDef = this._defaultTargetOf(el.id);
-          plan.set(el.id, { target: otherDef === 'skip' ? null : 'skip' });
-        }
-      }
       plan.set(chId, { target: value === def ? null : value, tone: null });
     }
 
@@ -18042,6 +18074,16 @@
 
       if (el.drumBtn) el.drumBtn.style.display = (target === 'dpcm') ? '' : 'none';
       const toneKind = plan.toneKindFor(target, undefined, srcKind);
+      // 音色ごとの指定(src/convert/toneSettings.js)を持つ音色の数。セレクト/ボタンの表示に添える
+      const nTone = this.toneOverrideCount ? this.toneOverrideCount(el.id) : 0;
+      const perToneLabel = T('音色ごとに指定…') + (nTone ? ` (${nTone})` : '');
+      const showTonesBtn = !toneKind && plan.editable() && target !== 'skip' && target !== 'dpcm' && plan.format() !== 'nsf';
+      if (el.tonesBtn) {
+        el.tonesBtn.style.display = showTonesBtn ? '' : 'none';
+        el.tonesBtn.textContent = nTone ? `♪(${nTone})` : '♪…';
+        el.tonesBtn.title = perToneLabel;
+        el.tonesBtn.classList.toggle('kbd-assign-tones--custom', nTone > 0);
+      }
       if (!toneKind) { el.toneSel.style.display = 'none'; el.toneSig = ''; return; }
       el.toneSel.style.display = '';
       const to = plan.toneOptionsFor(toneKind, srcKind);
@@ -18054,7 +18096,17 @@
           o.value = pair[0]; o.textContent = pair[1];
           el.toneSel.appendChild(o);
         }
+        // 末尾に「音色ごとに指定…」(選ぶと音色一覧が開く。値としては保存しない。NSFは対象外)
+        if (plan.format() !== 'nsf') {
+          const o = document.createElement('option');
+          o.value = plan.TONE_PER_INSTRUMENT; o.className = 'kbd-assign-tone-per';
+          el.toneSel.appendChild(o);
+          el.perToneOpt = o;
+        } else el.perToneOpt = null;
       }
+      if (el.perToneOpt) el.perToneOpt.textContent = perToneLabel;
+      el.toneSel.classList.toggle('kbd-assign-tone--per', nTone > 0);
+      el.toneSel.title = nTone ? T('この行の音色 {n} 件に音色ごとの指定があります(音色一覧で変更)', { n: nTone }) : '';
       el.toneSel.value = ent.tone !== undefined ? ent.tone : to.def;
     }
 
@@ -18144,6 +18196,17 @@
         toneSel.value = ent.tone !== undefined ? ent.tone : to.def;
         toneSel.addEventListener('change', () => plan.set(chId, { tone: toneSel.value === to.def ? null : toneSel.value }));
         pop.appendChild(rowOf(T('音色'), toneSel));
+      }
+      // 音色ごとの指定(音色一覧パネル)。NSFはネイティブ変換なので対象外
+      if (plan.format() !== 'nsf' && target !== 'skip' && target !== 'dpcm') {
+        const nTone = this.toneOverrideCount ? this.toneOverrideCount(chId) : 0;
+        const tonesBtn = document.createElement('button');
+        tonesBtn.type = 'button';
+        tonesBtn.className = 'kbd-assign-pop-tones';
+        tonesBtn.textContent = T('音色ごとに指定…') + (nTone ? ` (${nTone})` : '');
+        tonesBtn.title = T('このchで使われている音色ごとに、載せ先と音色を指定する(音色一覧を開く)');
+        tonesBtn.addEventListener('click', () => { this._closeAssignPopover(); if (this.onOpenTonePanel) this.onOpenTonePanel(chId); });
+        pop.appendChild(rowOf(T('音色別'), tonesBtn));
       }
       if (plan.hasVolSliderFor(target)) {
         const volWrap = document.createElement('span');
@@ -18508,6 +18571,7 @@
           targetSel: row.querySelector('.kbd-assign-target'),
           toneSel: row.querySelector('.kbd-assign-tone'),
           drumBtn: row.querySelector('.kbd-assign-drum'),
+          tonesBtn: row.querySelector('.kbd-assign-tones'),
           defaultTarget: ch.defaultTarget,
           target: ch.target,
         });
@@ -19314,6 +19378,7 @@
         // ★「パッド」ボタン(_syncAssignSelects が target===dpcm のとき表示する)。NSF側の行(_rowEls)には
         //   あったがSPCボイス行では参照を持っておらず、Eを選んでもボタンが出なかった(2026-09-07修正)
         drumBtn: row.querySelector('.kbd-assign-drum'),
+        tonesBtn: row.querySelector('.kbd-assign-tones'),
         defaultTarget,
         target,
         letter,
@@ -21882,14 +21947,17 @@
       const note = (enabled && volume > 0 && freqHz > 0) ? freqToNoteNumber(freqHz) : null;
       const wave = resampleWave(t.wave[ch]);
       const waveKey = wave.join(',');
-      if (!cur) { cur = { note, wave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: false }; continue; }
+      // srcWave: 生の32バイト波形(音色の同定 src/convert/toneKey.js 用。鍵盤のライブ表示と同じ生値で
+      // キーを作るため、4bitへ丸めた wave ではなくこちらを載せる)
+      const srcWave = t.wave[ch];
+      if (!cur) { cur = { note, wave, srcWave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: false }; continue; }
       const retrigger = note !== null && volume > cur.volSeq[cur.volSeq.length - 1];
       if (retrigger || note !== cur.note || (note !== null && waveKey !== cur.waveKey)) {
         // 音量ジャンプ(再アタック推定)・波形切替が無く、純粋に音程だけが変わった場合は
         // スラー分割のタイ候補とする(ay.jsと同じ考え方)
         const pureNoteChange = !retrigger && note !== cur.note && waveKey === cur.waveKey;
         flush(f);
-        cur = { note, wave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: pureNoteChange };
+        cur = { note, wave, srcWave, waveKey, freqHz: note !== null ? freqHz : null, start: f, end: f, volSeq: [volume], pitchSeq: [period], tieCandidate: pureNoteChange };
       } else {
         cur.volSeq.push(volume);
         cur.pitchSeq.push(period);
@@ -21921,6 +21989,7 @@
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(ev.wave) } : {},
+      (ev.note !== null && ev.srcWave) ? { srcWave: ev.srcWave } : {}, // 音色の同定(toneKey.js)
       ev.note !== null && ev.freqHz != null
         ? { rawFreq: ev.freqHz, freqSeq: ev.pitchSeq.map(p => p > 8 ? clock / (32 * (p + 1)) : 0) } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
@@ -22029,14 +22098,16 @@
       const note = freqHz != null ? freqToNoteNumber(freqHz) : null;
       const vrc7Tone = (toneReg && note !== null && instrument === 0)
         ? toneReg.assign(Array.from(regs.slice(0, 8))) : undefined;
-      if (!cur) { cur = { note, volume, instrument, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
+      // srcTone: 自作音色の実体(音色の同定 src/convert/toneKey.js 用。toneReg 無しのロール構築でも載せる)
+      const srcTone = (note !== null && instrument === 0) ? Array.from(regs.slice(0, 8)) : undefined;
+      if (!cur) { cur = { note, volume, instrument, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
       if (attack[ch] || note !== cur.note || volume !== cur.volume || instrument !== cur.instrument ||
           vrc7Tone !== cur.vrc7Tone) {
         flush(f);
         // retrigger: このイベントが「キーオン(アタック)による打ち直し」で始まったか。
         // 音量エンベロープによる細切れ(1フレームごとの音量書換え)と区別するための印で、
         // ピアノロール側(src/main.js buildKssRollTimeline)が同音程の連結可否に使う。
-        cur = { note, volume, instrument, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
+        cur = { note, volume, instrument, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
       }
     }
     flush(timeline.length);
@@ -22103,6 +22174,7 @@
       { start: ev.start, end: ev.end, note: ev.note, volume: ev.volume, instrument: ev.instrument, retrigger: ev.retrigger },
       ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
       ev.vrc7Tone !== undefined ? { vrc7Tone: ev.vrc7Tone } : {},
+      ev.srcTone ? { srcTone: ev.srcTone } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}
     );
     // ★返すチャンネル本数は常に NUM_MELODY_MAX で固定する。
@@ -22262,11 +22334,12 @@
       const volume = Math.min(15, (regs[0x40 + car] & 0x3F) >> 2); // 減衰値(0=最大、OPLL向き)
       const freqHz = (keyon && fnum > 0) ? fnum * Math.pow(2, block - 1) * fs / 524288 : null;
       const note = freqHz != null ? freqToNoteNumber(freqHz) : null;
-      const vrc7Tone = (toneReg && note !== null) ? toneReg.assign(opllToneBytes(regs, ch)) : undefined;
-      if (!cur) { cur = { note, volume, instrument: 0, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
+      const srcTone = note !== null ? opllToneBytes(regs, ch) : undefined; // 音色の同定(src/convert/toneKey.js)
+      const vrc7Tone = (toneReg && srcTone) ? toneReg.assign(srcTone) : undefined;
+      if (!cur) { cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
       if (attack[ch] || note !== cur.note || volume !== cur.volume || vrc7Tone !== cur.vrc7Tone) {
         flush(f);
-        cur = { note, volume, instrument: 0, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
+        cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
       }
     }
     flush(timeline.length);
@@ -22338,6 +22411,7 @@
       { start: ev.start, end: ev.end, note: ev.note, volume: ev.volume, instrument: ev.instrument, retrigger: ev.retrigger },
       ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
       ev.vrc7Tone !== undefined ? { vrc7Tone: ev.vrc7Tone } : {},
+      ev.srcTone ? { srcTone: ev.srcTone } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}
     );
     const rhythm = rhythmUsed
@@ -22715,6 +22789,7 @@
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(expandTo6bit(ev.wave)) } : {},
+      ev.note !== null ? { srcWave: ev.wave } : {}, // 音色の同定(src/convert/toneKey.js)
       ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq, freqSeq: ev.pitchSeq.map(waveFreq) } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
       toVolumeFields(ev.volSeq)
@@ -22980,7 +23055,7 @@
       const resampled = resampleTo4bit(c.wave);
       const wave4 = useCanonicalRotation ? canonicalRotation(resampled) : resampled;
       const waveKey = wave4.join(',');
-      if (!cur) { cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: false }; continue; }
+      if (!cur) { cur = { note, wave: wave4, srcWave: c.wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: false }; continue; }
       if (note !== cur.note || (note !== null && waveKey !== cur.waveKey)) {
         // 「純粋な音程変化」(=タイで繋いでよいレガート)の判定。波形切替を伴わないことに加え、
         // ★この境界で音量が跳ね上がっていない(=打ち直しでない)ことも要る(2026-08-26修正)。
@@ -22993,7 +23068,7 @@
         const reattack = prevVol != null && (vol4 - prevVol) >= MML.Convert.RETRIGGER_JUMP_THRESHOLD;
         const pureNoteChange = !reattack && note !== cur.note && waveKey === cur.waveKey;
         flush(f);
-        cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: pureNoteChange };
+        cur = { note, wave: wave4, srcWave: c.wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: pureNoteChange };
       } else {
         cur.volSeq.push(vol4);
         cur.pitchSeq.push(c.freq);
@@ -23011,7 +23086,7 @@
       const ranges = MML.Convert.splitRetriggers(run.volSeq);
       for (const r of ranges) {
         events.push({
-          note: run.note, wave: run.wave, waveKey: run.waveKey, rawFreq: run.rawFreq,
+          note: run.note, wave: run.wave, srcWave: run.srcWave, waveKey: run.waveKey, rawFreq: run.rawFreq,
           start: run.start + r.start, end: run.start + r.end,
           volSeq: run.volSeq.slice(r.start, r.end),
           pitchSeq: run.pitchSeq.slice(r.start, r.end),
@@ -23041,6 +23116,7 @@
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(ev.wave) } : {},
+      (ev.note !== null && ev.srcWave) ? { srcWave: ev.srcWave } : {}, // 音色の同定(src/convert/toneKey.js)
       ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq, freqSeq: ev.pitchSeq.map(waveFreq) } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
       toVolumeFields(ev.volSeq)
@@ -23684,6 +23760,237 @@
 })(globalThis);
 
 /*
+ * 音色の同定キー — MML.Convert.ToneKey (2026-09-09、音色別指定「音色一覧」の土台)
+ *
+ * 「変換元チャンネルの中で使われている音色(楽器)1つ」を、形式に依らない文字列キーで同定する。
+ * 設定(src/convert/toneSettings.js)はこのキーで持つので、同じ音色が別チャンネルに出ても・
+ * 同じゲームの別トラックでも同じ設定が効く(DPCMパッドの「サンプル内容ハッシュ」と同じ考え方。
+ * src/convert/drumSamples.js 冒頭参照)。
+ *
+ * キーの形(先頭の種別で見分ける):
+ *   'brr:<hash>'    SPCのBRRサンプル(MML.SPC2MML.brrHash と同じ値)
+ *   'pcm:<hash>'    VGMのサンプルPCM(Emu.SamplePitchUtil.sampleHash)
+ *   'opn:<hash>'    OPN/OPM系4op FM音色(キャリアのTLは音量なので除いて同定)
+ *   'opll:<n>'      OPLL/VRC7の内蔵音色 @1-@15
+ *   'opllc:<hash>'  OPLL/VRC7 自作音色(レジスタ$00-$07の8バイト)。OPL(2op)の音色はOPLL形式へ
+ *                   変換済みのバイト列で同定する(抽出器 kss2mml/expansion/opl.js が変換する)
+ *   'wave:<hash>'   波形メモリ(SCC/GB波形/HuC6280/N163/FDS)。32点・0..15へ正規化してから同定
+ *   'duty:<n>'      デューティ矩形波(2A03/MMC5/GB=0-3、VRC6=0-7)
+ *   'sq:<chip>'     デューティ固定の矩形波(AY/SN76489)。チップに1音色
+ *   'tri' / 'saw' / 'noise' / 'sample'  音色の区別を持たない行
+ *
+ * ★同じ音色を「抽出器のイベント」(ofEvent)と「鍵盤/ロールのライブ状態」(ofLive)の両方から
+ *   同じキーに落とせることが要件。ロールのノートに載せたキーで音色一覧を組み、変換側は
+ *   イベントから引いた同じキーで設定を適用する。片方だけ変えるとキーが食い違って設定が効かなくなる。
+ *
+ * Worker(ロール構築 src/audio/roll-builders.js)でも動かすのでDOM/localStorageは触らない。
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  MML.Convert = MML.Convert || {};
+
+  const WAVE_LEN = 32;
+
+  // FNV-1a 32bit(整数列)。sampleHash と同じ系のハッシュだが入力が整数配列なので別実装
+  function fnv(values, seed) {
+    let h = seed === undefined ? 0x811c9dc5 : seed;
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i] | 0;
+      h ^= v & 0xff; h = Math.imul(h, 0x01000193);
+      h ^= (v >>> 8) & 0xff; h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16);
+  }
+
+  /** 任意長・任意値域の1周期波形 → 32点・0..15 の正規化波形(同定と表示に使う) */
+  function normalizeWave(data) {
+    if (!data || !data.length) return null;
+    const n = data.length;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < n; i++) { const v = +data[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    const out = new Array(WAVE_LEN);
+    if (!(hi > lo)) { out.fill(8); return out; }
+    for (let i = 0; i < WAVE_LEN; i++) {
+      const v = +data[Math.floor(i * n / WAVE_LEN)];
+      out[i] = Math.max(0, Math.min(15, Math.round((v - lo) / (hi - lo) * 15)));
+    }
+    return out;
+  }
+  function waveKey(data) {
+    const w = normalizeWave(data);
+    return w ? 'wave:' + fnv(w) : null;
+  }
+
+  // ── OPN/OPM 4op ───────────────────────────────────────────────────
+  // 各アルゴリズムのキャリア(出力に直結するop、論理op番号0-3)。キャリアのTLは音量なので同定から外す
+  const OPN_CARRIERS = [[3], [3], [3], [3], [1, 3], [1, 2, 3], [1, 2, 3], [0, 1, 2, 3]];
+  const OP_FIELDS = ['DT', 'ML', 'TL', 'KS', 'AR', 'DR', 'SR', 'SL', 'RR', 'AM', 'SE', 'DT2'];
+  function opnKey(p) {
+    if (!p || !p.ops || !p.ops.length) return null;
+    const alg = (p.AL || 0) & 7;
+    const carriers = OPN_CARRIERS[alg];
+    const vals = [alg, (p.FB || 0) & 7];
+    for (let i = 0; i < p.ops.length; i++) {
+      const o = p.ops[i] || {};
+      for (const f of OP_FIELDS) {
+        let v = o[f];
+        if (v === undefined) v = 0;
+        if (f === 'TL' && carriers.indexOf(i) >= 0) v = 0;
+        vals.push(v);
+      }
+    }
+    return 'opn:' + fnv(vals);
+  }
+
+  // ── OPLL/VRC7 ─────────────────────────────────────────────────────
+  // {mod, car} 形式の音色 → レジスタ$00-$07の8バイト(src/ui/keyboard.js opllPatchBytes と同じ並び)
+  function opllBytesOf(p) {
+    const m = p && p.mod, c = p && p.car;
+    if (!m || !c) return null;
+    return [
+      ((m.AM & 1) << 7) | ((m.PM & 1) << 6) | ((m.EG & 1) << 5) | ((m.KR & 1) << 4) | (m.ML & 15),
+      ((c.AM & 1) << 7) | ((c.PM & 1) << 6) | ((c.EG & 1) << 5) | ((c.KR & 1) << 4) | (c.ML & 15),
+      ((m.KL & 3) << 6) | (m.TL & 63),
+      ((c.KL & 3) << 6) | ((c.WF & 1) << 4) | ((m.WF & 1) << 3) | (m.FB & 7),
+      ((m.AR & 15) << 4) | (m.DR & 15),
+      ((c.AR & 15) << 4) | (c.DR & 15),
+      ((m.SL & 15) << 4) | (m.RR & 15),
+      ((c.SL & 15) << 4) | (c.RR & 15),
+    ];
+  }
+  function opllCustomKey(bytes) {
+    if (!bytes || bytes.length < 8) return null;
+    return 'opllc:' + fnv(Array.from(bytes).slice(0, 8));
+  }
+  function opllKey(inst, bytes) {
+    const n = inst | 0;
+    if (n > 0 && n <= 15) return 'opll:' + n;
+    return opllCustomKey(bytes);
+  }
+
+  // ── 抽出器イベント → キー ─────────────────────────────────────────
+  // ctx: { chip, kind, brrSamples? }(borrow.js の source s をそのまま渡せる)
+  // 抽出器がイベントに載せる同定情報:
+  //   ev.srcn(SPC) / ev.sampleHash(VGM PCM) / ev.opnPatch(OPN系) / ev.srcTone(OPLL/OPL 8バイト) /
+  //   ev.instrument(OPLLの内蔵音色番号・GB/2A03デューティ) / ev.srcWave(波形メモリの生波形)
+  function ofEvent(ev, ctx) {
+    if (!ev || ev.note === null) return null;
+    const chip = ctx && ctx.chip;
+    if (ev.srcn !== undefined && ctx && ctx.brrSamples) {
+      const h = MML.SPC2MML && MML.SPC2MML.brrHash ? MML.SPC2MML.brrHash(ctx.brrSamples[ev.srcn]) : null;
+      return h ? 'brr:' + h : 'brr:srcn' + ev.srcn;
+    }
+    if (ev.sampleHash) return 'pcm:' + ev.sampleHash;
+    if (ev.opnPatch) return opnKey(ev.opnPatch);
+    if (chip === 'ym2413' || chip === 'opl' || chip === 'vrc7') {
+      if (ev.srcTone) return opllCustomKey(ev.srcTone);
+      if (ev.instrument > 0) return 'opll:' + (ev.instrument & 15);
+      return null;
+    }
+    if (ev.srcWave) return waveKey(ev.srcWave);
+    if (chip === 'ay8910' || chip === 'sn76489') return 'sq:' + chip;
+    if (chip === 'gb' && ctx.kind === 'square') return ev.instrument !== undefined ? 'duty:' + (ev.instrument & 3) : 'duty:2';
+    return null;
+  }
+
+  // ── 鍵盤/ロールのライブ状態(extractChannels の1行) → キー ─────────────────
+  // 同定に使うのは: ch.fmPatch(OPN/OPM/OPLL) / ch.sampleHash(サンプルPCM) / ch.wave(波形) / ch.duty
+  const patchKeyCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+  function ofLive(ch) {
+    if (!ch) return null;
+    if (ch.srcn !== undefined && ch.brrHash) return 'brr:' + ch.brrHash;
+    if (ch.sampleHash) return 'pcm:' + ch.sampleHash;
+    const p = ch.fmPatch;
+    if (p) {
+      if (patchKeyCache && typeof p === 'object') {
+        const c = patchKeyCache.get(p);
+        if (c !== undefined) return c;
+      }
+      let k = null;
+      if (p.type === 'opll') k = opllKey(p.inst, opllBytesOf(p));
+      else if (p.ops) k = opnKey(p);
+      if (patchKeyCache && typeof p === 'object') patchKeyCache.set(p, k);
+      return k;
+    }
+    const w = ch.wave;
+    if (ch.noise) return 'noise';
+    if (!w) return null;
+    if (w.t === 'wave' && w.data && w.data.length) return waveKey(w.data);
+    if (w.t === 'pulse') {
+      if (ch.duty !== undefined && ch.duty !== null) return 'duty:' + ch.duty;
+      if (/^(KP|SN)\d/.test(ch.id || '')) return 'sq:' + (/^SN/.test(ch.id) ? 'sn76489' : 'ay8910');
+      return null;
+    }
+    if (w.t === 'tri') return 'tri';
+    if (w.t === 'saw') return 'saw';
+    if (w.t === 'sample') return 'sample';
+    return null;
+  }
+
+  // ── 表示・試聴用の付随情報(キーだけでは音が作れないので、初出時に一緒に控える) ────
+  //   { kind:'brr'|'pcm'|'opn'|'opll'|'wave'|'duty'|'sq'|'other', label, wave?(32点0..15), patch?, bytes?, inst?, duty? }
+  function infoOfLive(ch, key) {
+    if (!key) return null;
+    const kind = key.split(':')[0];
+    const info = { kind: kind === 'opllc' ? 'opll' : kind, label: '' };
+    const p = ch.fmPatch;
+    if (info.kind === 'opll' && p) {
+      info.inst = p.inst | 0;
+      info.bytes = opllBytesOf(p);
+      info.label = info.inst > 0 ? '@' + info.inst : 'OP';
+    } else if (info.kind === 'opn' && p) {
+      info.patch = p;
+      info.label = 'FM' + (p.AL !== undefined ? ' AL' + p.AL : '');
+    } else if (info.kind === 'wave' && ch.wave && ch.wave.data) {
+      info.wave = normalizeWave(ch.wave.data);
+      info.label = 'wave';
+    } else if (info.kind === 'duty') {
+      info.duty = ch.duty | 0;
+      info.label = 'duty ' + info.duty;
+    } else if (info.kind === 'sq') {
+      info.label = 'square';
+    } else if (info.kind === 'pcm') {
+      info.sample = ch.adpcmSample || null;
+      info.label = 'PCM';
+    }
+    return info;
+  }
+  function infoOfEvent(ev, ctx, key) {
+    if (!key) return null;
+    const kind = key.split(':')[0];
+    const info = { kind: kind === 'opllc' ? 'opll' : kind, label: '' };
+    if (info.kind === 'opll') {
+      if (ev.srcTone) { info.bytes = Array.from(ev.srcTone).slice(0, 8); info.inst = 0; info.label = 'OP'; }
+      else { info.inst = ev.instrument | 0; info.label = '@' + info.inst; }
+    } else if (info.kind === 'opn') {
+      info.patch = ev.opnPatch; info.label = 'FM AL' + (ev.opnPatch.AL | 0);
+    } else if (info.kind === 'wave') {
+      info.wave = normalizeWave(ev.srcWave); info.label = 'wave';
+    } else if (info.kind === 'duty') {
+      info.duty = ev.instrument | 0; info.label = 'duty ' + info.duty;
+    } else if (info.kind === 'sq') {
+      info.label = 'square';
+    } else if (info.kind === 'brr') {
+      info.srcn = ev.srcn; info.label = 'srcn' + ev.srcn;
+    } else if (info.kind === 'pcm') {
+      info.label = 'PCM';
+    }
+    return info;
+  }
+
+  /** 設定を持てるキーか(音色の区別が無い 'tri'/'saw'/'noise'/'sample' は対象外) */
+  function isAssignable(key) {
+    return !!key && /^(brr|pcm|opn|opll|opllc|wave|duty|sq):/.test(key);
+  }
+
+  MML.Convert.ToneKey = {
+    WAVE_LEN, fnv, normalizeWave, waveKey, opnKey, opllBytesOf, opllKey, opllCustomKey,
+    ofEvent, ofLive, infoOfLive, infoOfEvent, isAssignable,
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
  * ピアノロール タイムライン構築(全フォーマット共通・純粋関数)
  * MML.RollBuild
  *
@@ -23735,6 +24042,20 @@
   // drumKinds(省略可): srcn → 'drum' | 'pitch' の手動上書き(main.jsがBRR内容ハッシュで引く)。
   // 打楽器と判定したsrcnの発音は音程ノートではなく drumKey 付きノート(ドラム区画/パッド)に
   // する。判定はMML変換と同じ MML.SPC2MML.drumSrcns(ロール=MML変換デバッガの方針)。
+  // 音色キー(src/convert/toneKey.js)をロールのノートに載せ、トラックの tones 表に表示/試聴用の
+  // 付随情報を控える(音色一覧パネル src/ui/tonePanel.js の材料。main.js rebuildToneInventory)。
+  // ★ノートに載せるのは文字列キーだけ(Workerからの構造化複製で運ぶ量を増やさない)。
+  //   付随情報は音色ごとに1回、トラックオブジェクトのプロパティ tones に置く(配列に生やした
+  //   プロパティは複製で消えるので、必ずトラック(オブジェクト)側に置く)
+  RollBuild.toneOf = function (ev, ctx, tones) {
+    const TK = MML.Convert && MML.Convert.ToneKey;
+    if (!TK || !ctx) return undefined;
+    const k = TK.ofEvent(ev, ctx);
+    if (!k) return undefined;
+    if (tones && !tones[k]) tones[k] = TK.infoOfEvent(ev, ctx, k);
+    return k;
+  };
+
   RollBuild.spc = function (log, frameRate, srcnFineTune, drumKinds) {
     const frameDur = 1 / frameRate;
     // MML変換と同じ原音チューニング補正を渡し、ロール表示の音程も実機発音に一致させる
@@ -23825,7 +24146,7 @@
     // 標準MIDIより1オクターブ(12)低い。鍵盤描画に合わせるロール側でのみ+12補正する。
     // ★抽出イベントは「音量が1でも変わったら別イベント」に切れているため、音程が同じまま
     // 途切れず続いている区間を1本の音符に統合する(retriggerだけは区切りとして残す)。
-    const toNotes = (events, attenuated) => {
+    const toNotes = (events, attenuated, ctx, tones) => {
       const norm = (v) => {
         const n = Math.max(0, Math.min(15, v || 0));
         return (attenuated ? (15 - n) : n) / 15;
@@ -23843,6 +24164,7 @@
         // (RollBuild.expandNoteEnv参照。未統合イベントは1区間のまま素通りする)。
         // freqSeq(セント偏差オーバーレイ)と retrigger は元イベント先頭の区間にだけ効く。
         const steps = RollBuild.expandNoteEnv(e.start, e.end, midiOf(e), e.noteEnvOffsets);
+        const tone = RollBuild.toneOf(e, ctx, tones);
         for (let si = 0; si < steps.length; si++) {
           const st = steps[si];
           const prev = out[out.length - 1];
@@ -23850,8 +24172,11 @@
             prev.endSec = st.end * frameDur;
             prev.vol = Math.max(prev.vol, norm(e.volume));
             if (si === 0 && e.freqSeq) prev.freqSeq.push(...e.freqSeq);
+            if (!prev.tone && tone) prev.tone = tone;
           } else {
-            out.push({ startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: norm(e.volume), freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] });
+            const n = { startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: norm(e.volume), freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] };
+            if (tone) n.tone = tone;
+            out.push(n);
           }
           endFrame = st.end;
         }
@@ -23859,23 +24184,25 @@
       return out;
     };
     const tracks = [];
+    // 音色キー付きのトラック(ctx は toneKey.js ofEvent の文脈=チップと種別)
+    const mk = (id, color, events, attenuated, ctx) => { const tones = {}; return { id, color, notes: toNotes(events, attenuated, ctx, tones), tones }; };
 
     const ayResult = MML.Kss2MmlExpansion.ay(writeLog, totalFrames, clock);
     const KP_COLS = ['#66ddff', '#33aaff', '#0077dd'];
-    ayResult.channels.forEach((ch, i) => tracks.push({ id: `KP${i + 1}`, color: KP_COLS[i], notes: toNotes(ch.events) }));
+    ayResult.channels.forEach((ch, i) => tracks.push(mk(`KP${i + 1}`, KP_COLS[i], ch.events, false, { chip: 'ay8910', kind: 'square' })));
 
     // SCC未使用の曲では鍵盤表示側にもKS行を出さないので、ロールのトラックも作らない
     // (トラックidと鍵盤の行が1対1で対応している必要がある)
     if (sccUsed) {
       const sccResult = MML.Kss2MmlExpansion.scc(writeLog, totalFrames, clock);
-      sccResult.channels.forEach((ch, i) => tracks.push({ id: `KS${i + 1}`, color: `hsl(${(280 + i * 20) % 360},80%,60%)`, notes: toNotes(ch.events) }));
+      sccResult.channels.forEach((ch, i) => tracks.push(mk(`KS${i + 1}`, `hsl(${(280 + i * 20) % 360},80%,60%)`, ch.events, false, { chip: 'k051649', kind: 'wave' })));
     }
 
     if (header && header.device.mode === 'MSX' && header.device.fmpac) {
       const opllResult = MML.Kss2MmlExpansion.opll(writeLog, totalFrames);
       const KF_COLS = ['#ffcc00','#ffdd44','#ffe566','#ffee88','#fff2aa','#fff8cc','#ffd9a0','#ffe0b0','#ffe8c0'];
       // 第2引数true = OPLLの音量は減衰値なので表示用に反転する(toNotes冒頭のコメント参照)
-      opllResult.channels.forEach((ch, i) => tracks.push({ id: `KF${i + 1}`, color: KF_COLS[i % KF_COLS.length], notes: toNotes(ch.events, true) }));
+      opllResult.channels.forEach((ch, i) => tracks.push(mk(`KF${i + 1}`, KF_COLS[i % KF_COLS.length], ch.events, true, { chip: 'ym2413', kind: 'fm' })));
       // リズムモードの打楽器5行。id/色/並び順は鍵盤側(keyboard.js の kssOpll 分岐、
       // RCOLS/RLABEL)と1対1で合わせる。音程を持たないので疑似音程(noiseRollIndex)で
       // 5レーンに分けている(kss2mml/expansion/opll.js の RHYTHM_DEFS 参照)。
@@ -23894,7 +24221,7 @@
     if (oplOpts && oplOpts.used && MML.Kss2MmlExpansion.opl) {
       const oplResult = MML.Kss2MmlExpansion.opl(writeLog, totalFrames, oplOpts.clock);
       const OL_COLS = ['#66ffcc', '#55eebb', '#44ddaa', '#33cc99', '#22bb88', '#11aa77', '#66e0d0', '#55d0c0', '#44c0b0'];
-      oplResult.channels.forEach((ch, i) => tracks.push({ id: `OL${i + 1}`, color: OL_COLS[i % OL_COLS.length], notes: toNotes(ch.events, true) }));
+      oplResult.channels.forEach((ch, i) => tracks.push(mk(`OL${i + 1}`, OL_COLS[i % OL_COLS.length], ch.events, true, { chip: 'opl', kind: 'fm' })));
       if (oplResult.rhythm) {
         const RCOLS = { bd: '#ff5555', sd: '#ffaa55', tom: '#aaff55', cym: '#55ffaa', hh: '#55aaff' };
         const RIDS = { bd: 'OLBD', sd: 'OLSD', tom: 'OLTM', cym: 'OLCY', hh: 'OLHH' };
@@ -23914,12 +24241,13 @@
     // toNotes: 音程が同じまま途切れず続いている区間を1本の音符に統合する(GBは実トリガbitが
     // あるためretrigger判定はtriggerSeqの変化そのもの=抽出側で既にイベント境界として反映済み)。
     // @EN(高速アルペジオ)統合済みイベントの展開はKSS側と同じ(RollBuild.expandNoteEnv参照)。
-    const toNotes = (events) => {
+    const toNotes = (events, ctx, tones) => {
       const out = [];
       let endFrame = -1;
       for (const e of events) {
         if (e.note === null) { endFrame = -1; continue; }
         const steps = RollBuild.expandNoteEnv(e.start, e.end, e.note + 12, e.noteEnvOffsets);
+        const tone = RollBuild.toneOf(e, ctx, tones);
         for (let si = 0; si < steps.length; si++) {
           const st = steps[si];
           const prev = out[out.length - 1];
@@ -23927,8 +24255,11 @@
             prev.endSec = st.end * frameDur;
             prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
             if (si === 0 && e.freqSeq) prev.freqSeq.push(...e.freqSeq);
+            if (!prev.tone && tone) prev.tone = tone;
           } else {
-            out.push({ startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: (e.volume || 0) / 15, freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] });
+            const n = { startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: (e.volume || 0) / 15, freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] };
+            if (tone) n.tone = tone;
+            out.push(n);
           }
           endFrame = st.end;
         }
@@ -23936,16 +24267,17 @@
       return out;
     };
     const tracks = [];
+    const mk = (id, color, events, ctx) => { const tones = {}; return { id, color, notes: toNotes(events, ctx, tones), tones }; };
     // ★pulse()の音量はhwEnvelope.js側で64Hz実機クロックとplayFps(=frameRate)の位相を
     // 見て再計算するため、frameRateを渡さないとvolumeAt()内でNaNになり無音扱いになる。
     const ch1 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch1', null, frameRate);
     const ch2 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch2', null, frameRate);
     const noise = MML.Gbs2MmlExpansion.noise(snapshots, null, frameRate);
     const wave = MML.Gbs2MmlExpansion.wave(snapshots);
-    tracks.push({ id: 'GB1', color: '#66ddff', notes: toNotes(ch1.events) });
-    tracks.push({ id: 'GB2', color: '#0077dd', notes: toNotes(ch2.events) });
+    tracks.push(mk('GB1', '#66ddff', ch1.events, { chip: 'gb', kind: 'square' }));
+    tracks.push(mk('GB2', '#0077dd', ch2.events, { chip: 'gb', kind: 'square' }));
     tracks.push({ id: 'GN', color: '#aaaaaa', notes: toNotes(noise.events) });
-    tracks.push({ id: 'GW', color: '#ffcc00', notes: toNotes(wave.events) });
+    tracks.push(mk('GW', '#ffcc00', wave.events, { chip: 'gb', kind: 'wave' }));
     return tracks;
   };
 
@@ -23957,12 +24289,13 @@
   RollBuild.hes = function (snapshots, frameRate, dpcmTrace, controlTrace) {
     const frameDur = 1 / frameRate;
     // @EN(高速アルペジオ)統合済みイベントの展開はKSS側と同じ(RollBuild.expandNoteEnv参照)。
-    const toNotes = (events) => {
+    const toNotes = (events, ctx, tones) => {
       const out = [];
       let endFrame = -1;
       for (const e of events) {
         if (e.note === null) { endFrame = -1; continue; }
         const steps = RollBuild.expandNoteEnv(e.start, e.end, e.note + 12, e.noteEnvOffsets);
+        const tone = RollBuild.toneOf(e, ctx, tones);
         for (let si = 0; si < steps.length; si++) {
           const st = steps[si];
           const prev = out[out.length - 1];
@@ -23970,8 +24303,11 @@
             prev.endSec = st.end * frameDur;
             prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
             if (si === 0 && e.freqSeq) prev.freqSeq.push(...e.freqSeq);
+            if (!prev.tone && tone) prev.tone = tone;
           } else {
-            out.push({ startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: (e.volume || 0) / 15, freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] });
+            const n = { startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: (e.volume || 0) / 15, freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] };
+            if (tone) n.tone = tone;
+            out.push(n);
           }
           endFrame = st.end;
         }
@@ -23985,12 +24321,13 @@
     // ノイズはch4/5独自の発音で、行/鍵盤表示でも同じPSG4/PSG5の行がwave/noiseを兼ねる
     // (wave/noiseは同一chで排他なので時間的に重ならず、単純にマージしてよい)。
     waveResult.channels.forEach((ch, i) => {
-      let notes = toNotes(ch.events);
+      const tones = {};
+      let notes = toNotes(ch.events, { chip: 'huc6280', kind: 'wave' }, tones);
       if (i === 4 || i === 5) {
         const noiseNotes = toNotes(MML.Hes2MmlExpansion.noiseChannel(snapshots, i).events);
         if (noiseNotes.length) notes = notes.concat(noiseNotes).sort((a, b) => a.startSec - b.startSec);
       }
-      tracks.push({ id: `PSG${i}`, color: colors[i % colors.length], notes });
+      tracks.push({ id: `PSG${i}`, color: colors[i % colors.length], notes, tones });
     });
     // DDA(PCM)の打点 → ドラム区画のノート(midi無し、drumKey/drumSeq付き)。
     // 同じ太鼓の連打が1本に融合しないよう drumSeq に打点の通番を入れる

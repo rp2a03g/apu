@@ -205,22 +205,29 @@
   };
   function capsOf(fmt) { return CAPS[fmt || curFormat] || { tone: false, volPct: false }; }
 
+  // 借用先タイプ → 音色指定の種別(形式に依らない対応。変換器と音色ごとの設定 toneSettings.js が使う)
+  //   'noisePeriod' は旋律chをノイズへ載せるときだけ(ノイズ→ノイズは周期がそのまま)
+  function toneKindOfTarget(type, srcKind) {
+    if (type === 'noise') return (srcKind && srcKind !== 'noise') ? 'noisePeriod' : null;
+    if (/^(pulse1|pulse2|mmc5pulse1|mmc5pulse2)$/.test(type)) return 'duty4';
+    if (/^vrc6pulse/.test(type)) return 'duty8';
+    if (type === 'fds' || /^n163_/.test(type)) return 'wave';
+    if (/^vrc7_/.test(type)) return 'vrc7';
+    return null; // triangle/dpcm/vrc6saw/fme7/skip: 音色選択なし
+  }
   // srcKind(省略可): 元chの種別。ノイズ借用先の周期選択は旋律chから載せるときだけ出す
   function toneKindFor(type, fmt, srcKind) {
     const cap = capsOf(fmt).tone;
     if (!cap) return null;
-    if (type === 'noise') return (srcKind && srcKind !== 'noise') ? 'noisePeriod' : null;
     // ★DPCMのDMCレートは「チャンネル単位」ではなく「サンプル単位」で持つ(2026-08-29)。
     //   @DPCM<n>定義は元々サンプルごとにfreqを持てるうえ、プール式チップは同じ太鼓が
     //   毎回別スロットへ移るのでch単位だと指定が飛ぶ。設定はドラム一覧パネル側
     //   (src/convert/drumSamples.js)。ここでは音色セレクトを出さない。
     if (cap === 'vrc7') return /^vrc7_/.test(type) ? 'vrc7' : null;
-    if (/^(pulse1|pulse2|mmc5pulse1|mmc5pulse2)$/.test(type)) return 'duty4';
-    if (/^vrc6pulse/.test(type)) return 'duty8';
-    if (type === 'fds' || /^n163_/.test(type)) return 'wave';
-    if (/^vrc7_/.test(type)) return 'vrc7';
-    return null; // triangle/noise/dpcm/vrc6saw/fme7/skip: 音色選択なし
+    return toneKindOfTarget(type, srcKind);
   }
+  // 音色セレクトに足す「音色ごとに指定…」の項目値(選ぶと音色一覧パネルが開く。値としては保存しない)
+  const TONE_PER_INSTRUMENT = '__perTone';
   // 変換音量スライダー(volPct)を出す借用先か。音量を出力できない先(skip/DPCM/三角波)と、
   // volPctを受け取らないフォーマットには出さない(src/convert/options.js channelVolScale 参照)
   function hasVolSliderFor(type, fmt) {
@@ -404,6 +411,8 @@
     letterOfTarget: letterOfTarget,
     targetOfLetter: targetOfLetter,
     toneKindFor: toneKindFor,
+    toneKindOfTarget: toneKindOfTarget,
+    TONE_PER_INSTRUMENT: TONE_PER_INSTRUMENT,
     toneOptionsFor: toneOptionsFor,
     noiseIndexForFreq: noiseIndexForFreq,
     noiseIndexFor: noiseIndexFor,

@@ -86,14 +86,16 @@
       const note = freqHz != null ? freqToNoteNumber(freqHz) : null;
       const vrc7Tone = (toneReg && note !== null && instrument === 0)
         ? toneReg.assign(Array.from(regs.slice(0, 8))) : undefined;
-      if (!cur) { cur = { note, volume, instrument, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
+      // srcTone: 自作音色の実体(音色の同定 src/convert/toneKey.js 用。toneReg 無しのロール構築でも載せる)
+      const srcTone = (note !== null && instrument === 0) ? Array.from(regs.slice(0, 8)) : undefined;
+      if (!cur) { cur = { note, volume, instrument, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
       if (attack[ch] || note !== cur.note || volume !== cur.volume || instrument !== cur.instrument ||
           vrc7Tone !== cur.vrc7Tone) {
         flush(f);
         // retrigger: このイベントが「キーオン(アタック)による打ち直し」で始まったか。
         // 音量エンベロープによる細切れ(1フレームごとの音量書換え)と区別するための印で、
         // ピアノロール側(src/main.js buildKssRollTimeline)が同音程の連結可否に使う。
-        cur = { note, volume, instrument, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
+        cur = { note, volume, instrument, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
       }
     }
     flush(timeline.length);
@@ -160,6 +162,7 @@
       { start: ev.start, end: ev.end, note: ev.note, volume: ev.volume, instrument: ev.instrument, retrigger: ev.retrigger },
       ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
       ev.vrc7Tone !== undefined ? { vrc7Tone: ev.vrc7Tone } : {},
+      ev.srcTone ? { srcTone: ev.srcTone } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}
     );
     // ★返すチャンネル本数は常に NUM_MELODY_MAX で固定する。

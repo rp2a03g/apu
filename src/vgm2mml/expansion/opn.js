@@ -70,6 +70,7 @@
     if (ev.note !== null && ev.rawFreq != null) out.rawFreq = ev.rawFreq;
     if (ev.n163Wave) out.n163Wave = ev.n163Wave;
     if (ev.opnPatch) out.opnPatch = ev.opnPatch; // 借用先VRC7の自作音色(4op→2op自動変換)用
+    if (ev.sampleHash) out.sampleHash = ev.sampleHash; // 音色の同定(src/convert/toneKey.js、サンプルPCM)
     if (ev.noteEnvOffsets) out.noteEnvOffsets = ev.noteEnvOffsets;
     return out;
   }
@@ -268,7 +269,7 @@
         if (!pitched) return { note: null, attDb: 0 };
         const att = c.vol > 0 ? Math.min(96, -20 * Math.log10(c.vol)) : 96;
         return { note: freqToNoteNumber(c.pitchHz), attDb: att, retrigger, rawFreq: c.pitchHz,
-          n163Wave: n163WaveOf(c), key: String(c.sample ? c.sample.start : '') };
+          n163Wave: n163WaveOf(c), sampleHash: c.sampleHash || undefined, key: String(c.sample ? c.sample.start : '') };
       });
       channels.push({ events: MML.Convert.mergeVibratoAndArpeggio(events).map(toCommon), hasVolume: true, hasInstrument: true });
     }
@@ -297,7 +298,7 @@
         if (!pitched) return { note: null, attDb: 0 };
         // key: 同じ音程でもサンプル(波形)が変われば別イベント(N163の音色が変わる)
         const w = n163WaveOf(c);
-        return { note: freqToNoteNumber(c.pitchHz), attDb: attOf(c), retrigger, rawFreq: c.pitchHz, n163Wave: w, key: c.seq !== undefined ? String(c.sample ? c.sample.start : '') : '' };
+        return { note: freqToNoteNumber(c.pitchHz), attDb: attOf(c), retrigger, rawFreq: c.pitchHz, n163Wave: w, sampleHash: c.sampleHash || undefined, key: c.seq !== undefined ? String(c.sample ? c.sample.start : '') : '' };
       });
       return { events: MML.Convert.mergeVibratoAndArpeggio(events).map(toCommon), hasVolume: true, hasInstrument: true };
     };

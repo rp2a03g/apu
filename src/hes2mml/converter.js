@@ -158,7 +158,7 @@
     // 割当の適用。既定のときは従来どおりPSG 6ch→N163固定で出力する=出力は不変。
     // ノイズ(D)とDDA(E=DPCM)は「PSGのモード」であってch単位の借用先ではないため、
     // どちらの経路でも従来どおり別枠で追加する。
-    let expansions, expansionLetterMap, scoreChannels, borrowNotes = [], chanDesc = '';
+    let expansions, expansionLetterMap, scoreChannels, borrowNotes = [], chanDesc = '', toneDemotions = [];
     if (customPlan) {
       const r = MML.Convert.Borrow.compose({
         sources: MML.HES2MML.sourceChannels(),
@@ -171,6 +171,7 @@
           vrc7ToneReg: new MML.Convert.WaveRegistry('@OP'),
         },
         toneOf: (id) => (options.tone || {})[id],
+        toneSettings: options.toneSettings || null, // 音色ごとの設定(src/convert/toneSettings.js)
         // PSGの抽出は借用先ファミリに依らず1回でよい(既に上で済ませてある)。ただし音量尺度が
         // 違うファミリ(FME-7/VRC7)へ載せる分は @v テーブルを写像した registry で取り直す
         extract: (chip, fam, reg) => (reg === envReg ? waveResult.channels
@@ -183,6 +184,7 @@
       expansionLetterMap = MML.Mml.assignExpansionLetters(expansions);
       scoreChannels = r.scoreChannels;
       borrowNotes = r.notes;
+      toneDemotions = r.demotions || [];
       chanDesc = Object.keys(r.placed)
         .map(t => `${MML.Convert.ChannelPlan.letterOfTarget(t)}=${r.placed[t].source.label}`).sort().join(' ');
       if (hasNoise) scoreChannels.push(Object.assign({}, noiseResult, { letter: 'D' }));
@@ -274,7 +276,8 @@
       chips: ['PSG0', 'PSG1', 'PSG2', 'PSG3', 'PSG4', 'PSG5'].concat(hasNoise ? ['NOISE'] : []).concat(hasDpcm ? ['DDA'] : []),
       expansions,
       n163Wave: uiWave,
-      dpcmFiles: dpcmResult.files
+      dpcmFiles: dpcmResult.files,
+      toneDemotions // 音色一覧パネル用(VRC7自作音色→プリセットへ落ちた音色)
     };
   };
 })(window);

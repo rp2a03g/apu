@@ -115,7 +115,9 @@
   // ロール構築系の共通プローブ(roll-builders.jsと、そこから呼ぶ依存の再ビルド忘れ検出)
   function _rollProbes() {
     const RB = MML.RollBuild || {};
-    return [RB.createRollJob, RB.makeThrottle];
+    // ToneKey(src/convert/toneKey.js): ロール構築がノートに音色キーを載せる(RollBuild.toneOf)。バンドル漏れの検出用
+    const TK = (MML.Convert && MML.Convert.ToneKey) || {};
+    return [RB.createRollJob, RB.makeThrottle, TK.ofEvent, TK.ofLive];
   }
 
   function _nsfProbes() {

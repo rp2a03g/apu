@@ -250,7 +250,7 @@
       const resampled = resampleTo4bit(c.wave);
       const wave4 = useCanonicalRotation ? canonicalRotation(resampled) : resampled;
       const waveKey = wave4.join(',');
-      if (!cur) { cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: false }; continue; }
+      if (!cur) { cur = { note, wave: wave4, srcWave: c.wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: false }; continue; }
       if (note !== cur.note || (note !== null && waveKey !== cur.waveKey)) {
         // 「純粋な音程変化」(=タイで繋いでよいレガート)の判定。波形切替を伴わないことに加え、
         // ★この境界で音量が跳ね上がっていない(=打ち直しでない)ことも要る(2026-08-26修正)。
@@ -263,7 +263,7 @@
         const reattack = prevVol != null && (vol4 - prevVol) >= MML.Convert.RETRIGGER_JUMP_THRESHOLD;
         const pureNoteChange = !reattack && note !== cur.note && waveKey === cur.waveKey;
         flush(f);
-        cur = { note, wave: wave4, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: pureNoteChange };
+        cur = { note, wave: wave4, srcWave: c.wave, waveKey, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol4], pitchSeq: [c.freq], tieCandidate: pureNoteChange };
       } else {
         cur.volSeq.push(vol4);
         cur.pitchSeq.push(c.freq);
@@ -281,7 +281,7 @@
       const ranges = MML.Convert.splitRetriggers(run.volSeq);
       for (const r of ranges) {
         events.push({
-          note: run.note, wave: run.wave, waveKey: run.waveKey, rawFreq: run.rawFreq,
+          note: run.note, wave: run.wave, srcWave: run.srcWave, waveKey: run.waveKey, rawFreq: run.rawFreq,
           start: run.start + r.start, end: run.start + r.end,
           volSeq: run.volSeq.slice(r.start, r.end),
           pitchSeq: run.pitchSeq.slice(r.start, r.end),
@@ -311,6 +311,7 @@
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(ev.wave) } : {},
+      (ev.note !== null && ev.srcWave) ? { srcWave: ev.srcWave } : {}, // 音色の同定(src/convert/toneKey.js)
       ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq, freqSeq: ev.pitchSeq.map(waveFreq) } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
       toVolumeFields(ev.volSeq)

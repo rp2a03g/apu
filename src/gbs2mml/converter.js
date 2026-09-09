@@ -235,6 +235,7 @@
       detuneMode: 'apply',
       regs: { envReg, pitchReg, noteEnvReg, n163WaveReg, vrc7ToneReg },
       toneOf: (id) => (options.tone || {})[id],
+      toneSettings: options.toneSettings || null, // 音色ごとの設定(src/convert/toneSettings.js)
       extract: (chip, fam, reg) => {
         // FDS波形は借用先がFDSのときだけ本物のレジストリへ登録する(他のファミリへ載せる
         // 抽出でも登録すると、誰も参照しない@FM定義がMML本文に残るため)
@@ -323,7 +324,8 @@
       chips: ['CH1', 'CH2', 'CH3', 'CH4'],
       expansions,
       fdsWave,
-      dpcmFiles // 打楽器化したchの @DPCM(main.js が dpcmSampleCache へ入れて即再生/NSF書き出し)
+      dpcmFiles, // 打楽器化したchの @DPCM(main.js が dpcmSampleCache へ入れて即再生/NSF書き出し)
+      toneDemotions: r.demotions || [] // 音色一覧パネル用(VRC7自作音色→プリセットへ落ちた音色)
     };
   }
 })(window);

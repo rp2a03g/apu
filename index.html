@@ -58,6 +58,9 @@
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-vrc7tone" title="VRC7音色エディタ" aria-label="VRC7音色エディタ">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 14.5c1-7 2.4-7 3.4 0"/><path d="M5.9 14.5c1-9.5 2.4-9.5 3.4 0"/><path d="M9.3 14.5c1-5 2.4-5 3.4 0"/><path d="M12.7 14.5c1-8 2.4-8 3.4 0"/><path d="M17.5 14.5H2"/></svg>
         </button>
+        <button class="icon-btn icon-btn-title toggle-btn" data-target="win-tones" title="音色一覧" aria-label="音色一覧">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5h15M2.5 10h15M2.5 13.5h15"/><path d="M5 4.5c1.2 1.4 2.3 1.4 3.5 0s2.3-1.4 3.5 0 2.3 1.4 3.5 0" opacity=".0"/><circle cx="6" cy="6.5" r="1.1" fill="currentColor"/><circle cx="11" cy="10" r="1.1" fill="currentColor"/><circle cx="8" cy="13.5" r="1.1" fill="currentColor"/></svg>
+        </button>
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-dpcm" title="DPCMコンバータ" aria-label="DPCMコンバータ">
           <svg viewBox="0 0 20 20" fill="currentColor"><rect x="2.5" y="8" width="2" height="4"/><rect x="6" y="4.5" width="2" height="11"/><rect x="9.5" y="1.5" width="2" height="17"/><rect x="13" y="6" width="2" height="8"/><rect x="16.2" y="9" width="1.8" height="2"/></svg>
         </button>
@@ -156,6 +159,20 @@
     </div>
     <div class="float-window-body">
       <div id="drumPanel"></div>
+    </div>
+  </section>
+
+  <!-- 音色一覧: この曲で使われている音色(楽器)1つ=1行。音色ごとに載せ先と借用先の音色を指定し、
+       元の音/変換後を試聴する。設定の単位はチャンネルでなく音色(src/convert/toneSettings.js、
+       キーは音色内容のハッシュ src/convert/toneKey.js)。中身は src/ui/tonePanel.js -->
+  <section class="float-window" id="win-tones"
+    data-default-left="140" data-default-top="220" data-default-width="860" data-default-height="400">
+    <div class="float-window-header">
+      <span>音色一覧</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <div id="tonePanel"></div>
     </div>
   </section>
 
@@ -496,6 +513,8 @@
   <script src="src/convert/retrigger.js"></script>
   <script src="src/convert/mmlEmit.js"></script>
   <script src="src/convert/verify.js"></script>
+  <script src="src/convert/toneKey.js"></script>
+  <script src="src/convert/toneSettings.js"></script>
   <script src="src/convert/channelPlan.js"></script>
   <script src="src/convert/borrow.js"></script>
   <script src="src/dpcm/dpcmConverter.js"></script>
@@ -816,6 +835,7 @@
   <script src="src/ui/waveClipboard.js"></script>
   <script src="src/ui/colorPicker.js"></script>
   <script src="src/ui/drumPanel.js"></script>
+  <script src="src/ui/tonePanel.js"></script>
   <script src="src/ui/dpcmEditor.js"></script>
   <script src="src/ui/keyboard.js"></script>
   <script src="src/ui/fdsWaveEditor.js"></script>

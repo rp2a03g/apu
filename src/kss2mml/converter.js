@@ -174,7 +174,7 @@
     const sccResult = MML.Kss2MmlExpansion.scc(writeLog, totalFrames, clock, sccProbeWave, sccProbeEnv);
     const hasScc = sccResult.channels.some(ch => ch.events.some(ev => ev.note !== null));
 
-    let expansions, expansionLetterMap, scoreChannels, borrowNotes = [], chanDesc = '';
+    let expansions, expansionLetterMap, scoreChannels, borrowNotes = [], chanDesc = '', toneDemotions = [];
     // E(DPCM)へ載せたch(打楽器化、ユーザー指定経路のみ): 分離レンダリングした打点
     // (options.drumHits、main.js synthDrum)を共通コア(src/convert/drumHits.js)で @DPCM 化する
     const dpcmDefLines = [], dpcmFiles = [];
@@ -188,6 +188,7 @@
         cmd,
         regs: { envReg, pitchReg, noteEnvReg, n163WaveReg, vrc7ToneReg },
         toneOf: (id) => (options.tone || {})[id],
+        toneSettings: options.toneSettings || null, // 音色ごとの設定(src/convert/toneSettings.js)
         n163WaveLen: MML.Kss2MmlExpansion.SCC_WAVE_LEN,
         extract: (chip, fam, reg) => {
           // 波形/音色レジストリは借用先がその音源のときだけ本物を渡す(他のファミリへ載せる
@@ -205,6 +206,7 @@
       expansions = r.expansions;
       expansionLetterMap = r.letterMap;
       borrowNotes = r.notes;
+      toneDemotions = r.demotions || [];
       if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
         const d = MML.Convert.DrumHits.dpcm(options.drumHits, frameRate, {
           totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'kss_drum', maxClipSec: 10 });
@@ -404,7 +406,8 @@
       chips: ['PSG'].concat(hasScc ? ['SCC'] : []).concat(hasOpll ? ['FMPAC'] : []).concat(hasOpl ? ['MSX-AUDIO'] : []),
       expansions,
       n163Wave: sccResult.n163Wave,
-      dpcmFiles // 打楽器化したchの @DPCM(ユーザー指定経路のみ。main.js が dpcmSampleCache へ)
+      dpcmFiles, // 打楽器化したchの @DPCM(ユーザー指定経路のみ。main.js が dpcmSampleCache へ)
+      toneDemotions // 音色一覧パネル用(VRC7自作音色→プリセットへ落ちた音色)
     };
   };
 })(window);

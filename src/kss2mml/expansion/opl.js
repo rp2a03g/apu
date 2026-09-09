@@ -126,11 +126,12 @@
       const volume = Math.min(15, (regs[0x40 + car] & 0x3F) >> 2); // 減衰値(0=最大、OPLL向き)
       const freqHz = (keyon && fnum > 0) ? fnum * Math.pow(2, block - 1) * fs / 524288 : null;
       const note = freqHz != null ? freqToNoteNumber(freqHz) : null;
-      const vrc7Tone = (toneReg && note !== null) ? toneReg.assign(opllToneBytes(regs, ch)) : undefined;
-      if (!cur) { cur = { note, volume, instrument: 0, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
+      const srcTone = note !== null ? opllToneBytes(regs, ch) : undefined; // 音色の同定(src/convert/toneKey.js)
+      const vrc7Tone = (toneReg && srcTone) ? toneReg.assign(srcTone) : undefined;
+      if (!cur) { cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
       if (attack[ch] || note !== cur.note || volume !== cur.volume || vrc7Tone !== cur.vrc7Tone) {
         flush(f);
-        cur = { note, volume, instrument: 0, vrc7Tone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
+        cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
       }
     }
     flush(timeline.length);
@@ -202,6 +203,7 @@
       { start: ev.start, end: ev.end, note: ev.note, volume: ev.volume, instrument: ev.instrument, retrigger: ev.retrigger },
       ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
       ev.vrc7Tone !== undefined ? { vrc7Tone: ev.vrc7Tone } : {},
+      ev.srcTone ? { srcTone: ev.srcTone } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}
     );
     const rhythm = rhythmUsed

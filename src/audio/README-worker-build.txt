@@ -23,6 +23,10 @@ captureHesSongAsync)をWeb Workerで実行するための自己完結ビルド�
     「バンドルに無い関数」を検出できない(2026-09-07: vgmバンドルに kssPackWrite が
     無く、AY/SSG/OPLを使うVGMのWorkerが途中で落ちてロールが空になっていた)
 
+  - ★src/convert/toneKey.js(音色キー)は全6バンドルに入れる(2026-09-09)。roll-builders.js の
+    RollBuild.toneOf と keyboard.js の buildNoteTimelineFromChannelFrames がノートに音色キーを
+    載せる。無いとWorker経由のロールだけ音色一覧が空になる(プローブは _rollProbes の TK.ofEvent/ofLive)
+
 ピアノロールのタイムライン構築もWorker内で行う(2026-08-21):
   - 構築ロジックは src/audio/roll-builders.js (MML.RollBuild、メインスレッドと共有)。
     NSF/VGMの共通抽出経路は src/ui/keyboard.js の純粋関数

@@ -643,11 +643,64 @@
       }
     }
 
+    // ── 音色ごとの設定(src/convert/toneSettings.js、2026-09-09) ─────────────────────
+    // options.toneSettings … main.js が ToneSettings.snapshot() で作った素のオブジェクト(無ければ従来どおり)
+    const TS = (MML.Convert.ToneSettings && options.toneSettings) ? MML.Convert.ToneSettings.lookup(options.toneSettings) : null;
+    const TK = MML.Convert.ToneKey;
+    const keyOf = (ev, s) => (TK ? TK.ofEvent(ev, s) : null);
+    const useTone = !!(TS && !TS.isEmpty() && TK);
+    const demotions = []; // VRC7自作音色があぶれてプリセットへ落ちた音色 [{key, preset, label}]
+    // 音色ごとの載せ先で1本の元chを分割する(borrow.js compose と同じ考え方。仮想ソース id 'opn:2@triangle')。
+    // 別ファミリでの抽出し直しが要るのは音量写像が抽出時に効く AY/SN だけ(他は attDb で借用先非依存)
+    const extractForFam = (s, fam) => {
+      if (s.chip === 'ay8910' && data.kss) {
+        const wl = (s.chipIndex || 0) === 1 ? (data.kss2 && data.kss2.writeLog) : data.kss.writeLog;
+        const clk = (s.chipIndex || 0) === 1 ? ((data.kss2 && data.kss2.clock) || kssClock) : kssClock;
+        return wl ? MML.Kss2MmlExpansion.ay(wl, totalFrames, clk, regFor('ay8910', fam)).channels[s.ch] : null;
+      }
+      if (s.chip === 'sn76489' && data.sn) return MML.Vgm2MmlExpansion.sn76489(data.sn.snapshots, data.sn.clock, regFor('sn76489', fam), s.chipIndex || 0).tones[s.ch];
+      return extracted[s.id];
+    };
+    const restOf = (ev) => ({ start: ev.start, end: ev.end, note: null });
+    const splitSources = [];
+    if (useTone) {
+      for (const s of src) {
+        const t = plan[s.id];
+        const base = extracted[s.id];
+        if (!base || !t || t === 'skip' || t === 'dpcm' || s.ch < 0) continue;
+        const overrides = new Map();
+        for (const ev of base.events) {
+          if (ev.note === null) continue;
+          const k = keyOf(ev, s);
+          const tt2 = k ? TS.targetFor(k) : undefined;
+          if (tt2 && tt2 !== t) overrides.set(k, tt2);
+        }
+        if (!overrides.size) continue;
+        extracted[s.id] = Object.assign({}, base, { events: base.events.map(ev => (ev.note !== null && overrides.has(keyOf(ev, s))) ? restOf(ev) : ev) });
+        const byTarget = new Map();
+        for (const [k, tt2] of overrides) { if (!byTarget.has(tt2)) byTarget.set(tt2, []); byTarget.get(tt2).push(k); }
+        for (const [tt2, keys] of byTarget) {
+          const names = keys.map(k => TS.nameOf(k) || k.replace(/^[a-z]+:/, '').slice(0, 6));
+          if (tt2 === 'skip') { notes.push(`${s.label} の音色 ${names.join(', ')} はスキップ指定のため変換対象外です。`); continue; }
+          if (tt2 === 'dpcm') { notes.push(`${s.label} の音色 ${names.join(', ')} → E(DPCM) は音色単位の打楽器化に未対応のため変換対象外です(チャンネル単位でEを選ぶか、サンプルの「扱い」で打楽器にしてください)。`); continue; }
+          if (!TARGET_TYPES[tt2]) continue;
+          const chFam = extractForFam(s, TARGET_TYPES[tt2].family);
+          if (!chFam) continue;
+          const keySet = new Set(keys);
+          const vs = Object.assign({}, s, { id: `${s.id}@${tt2}`, label: `${s.label}[${names.join(',')}]`, splitFrom: s.id });
+          extracted[vs.id] = Object.assign({}, chFam, { events: chFam.events.map(ev => (ev.note !== null && keySet.has(keyOf(ev, s))) ? ev : restOf(ev)) });
+          plan[vs.id] = tt2;
+          splitSources.push(vs);
+        }
+      }
+    }
+    const allSrc = src.concat(splitSources);
+
     // ── 借用先ごとにイベントを整形して台帳へ ──
     // slotsByFamily: family → { index → {source, channel} }
     const placed = {}; // targetType → { source, channel }
     const conflicts = [];
-    for (const s of src) {
+    for (const s of allSrc) {
       const t = plan[s.id];
       if (t === 'dpcm') continue; // DPCMは dpcmDrums が1本へ合成済み(下で直接scoreChannelsへ入れる)
       if (!t || t === 'skip' || !extracted[s.id]) continue;
@@ -659,7 +712,20 @@
       if (s.kind === 'wave' && tt.family !== 'n163' && tt.family !== 'vrc7' && tt.family !== 'fds') { conflicts.push(`${s.label} → ${t} は波形音源/VRC7以外へ載せられないため変換対象外です。`); continue; }
       const ch = Object.assign({}, extracted[s.id], { events: extracted[s.id].events.map(ev => Object.assign({}, ev)) });
       if (s.ch < 0) ch.isDrum = true; // 合成chのドラムパート(テンポ推定から外す。下記コメント参照)
-      adaptEvents(ch, s, tt.family, n163WaveReg, tt.family === 'vrc7' ? vrc7InstOf(s) : null, vrc7ToneReg, toneOf(s), fdsWaveReg);
+      // 音色ごとの音色指定(toneSettings[key].tone[種別])。チャンネルの指定を音色単位で上書きする
+      const baseS = s.splitFrom ? (src.find(x => x.id === s.splitFrom) || s) : s;
+      const toneKind = (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.toneKindOfTarget) ? MML.Convert.ChannelPlan.toneKindOfTarget(t, s.kind) : null;
+      const toneIdxKey = {};
+      const actx = { toneKeyOf: (ev) => keyOf(ev, s), toneIdxKey };
+      if (useTone && toneKind) {
+        actx.toneOfEvent = (ev) => {
+          const v = TS.toneFor(keyOf(ev, s), toneKind);
+          if (v === undefined) return null;
+          return toneKind === 'vrc7' ? { vrc7Inst: v } : { tone: v };
+        };
+      }
+      adaptEvents(ch, s, tt.family, n163WaveReg, tt.family === 'vrc7' ? vrc7InstOf(baseS) : null, vrc7ToneReg, toneOf(baseS), fdsWaveReg, actx);
+      ch.toneIdxKey = toneIdxKey;
       // ★動かさないのはYM2413(OPLL)だけ。OPLLの自作音色はVRC7と同じく$00-$07の1組を
       //   全chで共有する設計なので、抽出結果は最初から1系統に収まっている(実機がそう鳴らしていた)。
       //   OPL(YM3812/YM3526/Y8950)はチャンネルごとに独立した音色レジスタを持ち、それを
@@ -681,7 +747,15 @@
     // いちばん近い内蔵プリセットへ落とす(src/convert/vrc7Tone.js)。
     MML.Convert.Vrc7Tone.resolveConflicts(
       (byFamily.vrc7 || []).map(p => p.channel), vrc7ToneReg,
-      { onDemote: (ch, presetByTone) => { ch.vrc7Demoted = presetByTone; } });
+      { onDemote: (ch, presetByTone) => {
+        ch.vrc7Demoted = presetByTone;
+        // 音色一覧パネルで「この音色は→@nへ落ちた」と示すため、登録番号→音色キーで控える
+        const p = (byFamily.vrc7 || []).find(x => x.channel === ch);
+        for (const idx of Object.keys(presetByTone || {})) {
+          const key = ch.toneIdxKey && ch.toneIdxKey[idx];
+          if (key) demotions.push({ key, preset: presetByTone[idx], label: p ? p.source.label : '' });
+        }
+      } });
 
     // ── N163内蔵RAMへ波形が収まらない曲を収まる形へ ──────────────────────
     // 波形に使えるのは 128-8*有効ch数 バイトだけ。あふれるとコンパイルエラーで再生も
@@ -849,7 +923,8 @@
       // @DPCM<n>の実バイト列(main.jsがdpcmSampleCacheへ入れて即再生/NSF書き出しできるようにする。
       // hes2mml/converter.js と同じ形)。ROM容量の目安も一緒に返す
       dpcmFiles: dpcmResult ? dpcmResult.files : [],
-      dpcmStats: dpcmResult ? dpcmResult.stats : null
+      dpcmStats: dpcmResult ? dpcmResult.stats : null,
+      toneDemotions: demotions // 音色一覧パネル用(VRC7自作音色→プリセットへ落ちた音色)
     };
   }
 
@@ -870,11 +945,41 @@
   }
 
   // ソースチャンネルのイベントを借用先ファミリの語彙へ整形する(破壊的。呼び出し側でコピー済み)。
+  // 音色ごとの指定(2026-09-09、src/convert/toneSettings.js): ctx.toneOfEvent(ev) が音色(楽器)単位の
+  // 指定 { vrc7Inst?, tone? } を返すときは、イベントを「効く指定」でグループに分けてグループごとに
+  // adaptGroup を通す(borrow.js adaptEvents と同じ考え方。全イベント同じなら従来と同じ1回の処理)。
+  function adaptEvents(ch, s, fam, n163WaveReg, vrc7Inst, vrc7ToneReg, tone, fdsWaveReg, ctx) {
+    if (!ctx || typeof ctx.toneOfEvent !== 'function') { adaptGroup(ch, ch.events, s, fam, n163WaveReg, vrc7Inst, vrc7ToneReg, tone, fdsWaveReg, ctx); return; }
+    const groups = new Map();
+    for (const ev of ch.events) {
+      const ov = ev.note === null ? null : ctx.toneOfEvent(ev);
+      const vi = (ov && ov.vrc7Inst != null) ? String(ov.vrc7Inst) : vrc7Inst;
+      const tn = (ov && ov.tone != null) ? String(ov.tone) : tone;
+      const gk = (vi == null ? '' : vi) + '|' + (tn == null ? '' : tn);
+      let g = groups.get(gk);
+      if (!g) { g = { vi, tn, events: [] }; groups.set(gk, g); }
+      g.events.push(ev);
+    }
+    if (groups.size <= 1) {
+      const only = groups.values().next().value;
+      adaptGroup(ch, ch.events, s, fam, n163WaveReg, only ? only.vi : vrc7Inst, vrc7ToneReg, only ? only.tn : tone, fdsWaveReg, ctx);
+      return;
+    }
+    for (const g of groups.values()) adaptGroup(ch, g.events, s, fam, n163WaveReg, g.vi, vrc7ToneReg, g.tn, fdsWaveReg, ctx);
+    ch.hasInstrument = ch.events.some(ev => ev.instrument !== undefined);
+    ch.hasVrc7Tone = ch.events.some(ev => ev.vrc7Tone !== undefined);
+  }
+  // ソースチャンネルのイベントを借用先ファミリの語彙へ整形する(破壊的。呼び出し側でコピー済み)。
   // vrc7Inst: 借用先がVRC7のときの音色('auto'=OPLLソースの元音色/カスタム音色をそのまま、'1'-'15'=プリセット、
   //           '0'=OPN 4op音色を2op自作音色(@OP)へ自動変換して OP<n>+@0)
   // tone: 借用先ごとの音色(デューティ '0'-'3'/'0'-'7'、波形 'copy'|'pulse50'|…、ノイズ周期 'auto'|'0'-'15')
-  function adaptEvents(ch, s, fam, n163WaveReg, vrc7Inst, vrc7ToneReg, tone, fdsWaveReg) {
-    const events = ch.events;
+  function adaptGroup(ch, events, s, fam, n163WaveReg, vrc7Inst, vrc7ToneReg, tone, fdsWaveReg, ctx) {
+    // VRC7自作音色の登録番号 → 音色キー(あぶれ報告用。borrow.js adaptGroup と同じ)
+    const noteToneIdx = (ev, idx) => {
+      if (!ctx || !ctx.toneIdxKey || typeof ctx.toneKeyOf !== 'function' || idx === undefined) return;
+      const k = ctx.toneKeyOf(ev);
+      if (k && ctx.toneIdxKey[idx] === undefined) ctx.toneIdxKey[idx] = k;
+    };
     const isAy = s.chip === 'ay8910';
     const nativeVrc7 = s.kind === 'fm' && fam === 'vrc7' && (vrc7Inst === 'auto' || vrc7Inst == null);
     const nativeFme7 = s.kind === 'square' && fam === 'fme7';
@@ -911,7 +1016,7 @@
     const TD = MML.Convert.ToneDerive;
     const deriveRegs = { n163WaveReg, vrc7ToneReg };
     if (fam === 'noise') {
-      MML.Convert.Borrow.pitchedToNoise(ch, tone);
+      MML.Convert.Borrow.pitchedToNoise(ch, tone, events);
     } else if (fam === 'vrc7' && vrc7Inst === '0' && s.kind === 'fm4' && vrc7ToneReg) {
       // OPN 4op → VRC7 2op 自作音色(opnToOpllBytes)。音色ごとに @OP<n> を登録し OP<n>+@0 で切り替える
       for (const ev of events) {
@@ -920,6 +1025,7 @@
         const bytes = opnToOpllBytes(ev.opnPatch);
         ev.instrument = 0;
         ev.vrc7Tone = bytes ? vrc7ToneReg.assign(bytes) : undefined;
+        noteToneIdx(ev, ev.vrc7Tone);
         delete ev.opnPatch;
       }
       ch.hasVrc7Tone = true; ch.hasInstrument = true;
@@ -931,7 +1037,7 @@
       for (const ev of events) {
         if (ev.note === null) { delete ev.vrc7Tone; delete ev.n163Wave; delete ev.opnPatch; continue; }
         const bytes = TD.vrc7BytesForEvent(ev, s, deriveRegs);
-        if (bytes) { ev.instrument = 0; ev.vrc7Tone = vrc7ToneReg.assign(bytes); any = true; }
+        if (bytes) { ev.instrument = 0; ev.vrc7Tone = vrc7ToneReg.assign(bytes); noteToneIdx(ev, ev.vrc7Tone); any = true; }
         else { ev.instrument = 1; delete ev.vrc7Tone; }
         delete ev.n163Wave; delete ev.opnPatch;
       }

@@ -148,7 +148,8 @@
       const vv = Math.max(Math.abs((regs[base] << 24) >> 24), Math.abs((regs[base + 1] << 24) >> 24)) / 127;
       rows.push({ id: `V${ch}`, active, vol: active ? (v.env / 0x7FF) * vv : 0,
         freq: active && !noise ? pitchToHz(pitch, spcTuneForSrcn(srcn)) : 0,
-        noise, noiseIndex, noiseShort: false });
+        noise, noiseIndex, noiseShort: false,
+        srcn, brrHash: spcBrrHashOf(srcn) }); // 音色キー(src/convert/toneKey.js ofLive)用
     }
     return rows;
   }
@@ -524,6 +525,240 @@
     });
   }
 
+  // ── 音色一覧(音色ごとの変換設定、2026-09-09) ──────────────────────────────────
+  // 実体: 設定は src/convert/toneSettings.js(キー=src/convert/toneKey.js、localStorage永続化)、
+  // 表は src/ui/tonePanel.js。ここは「この曲で使われている音色の目録」を作って表へ渡し、
+  // 試聴と変換オプション(planConvertOptions の toneSettings)への橋渡しをする。
+  // 目録の材料はロールのタイムライン: ノートに載った音色キー(n.tone、roll-builders.js toneOf /
+  // keyboard.js buildNoteTimelineFromChannelFrames)とトラックの tones 表(表示/試聴用の付随情報)。
+  // SPCはノートの srcn からBRRハッシュで引く(Workerに brrSamples が無いのでメイン側で解決)。
+  let toneInventory = [];
+  let toneInventoryTimer = null;
+  let spcBrrHashFor = null;
+  const spcBrrHashCache = new Map(); // srcn → 'brr-…'
+  function spcBrrHashOf(srcn) {
+    if (spcBrrHashFor !== spcActiveBrrSamples) { spcBrrHashCache.clear(); spcBrrHashFor = spcActiveBrrSamples; }
+    if (!spcActiveBrrSamples || srcn == null) return null;
+    if (spcBrrHashCache.has(srcn)) return spcBrrHashCache.get(srcn);
+    const h = MML.SPC2MML && MML.SPC2MML.brrHash ? MML.SPC2MML.brrHash(spcActiveBrrSamples[srcn]) : null;
+    spcBrrHashCache.set(srcn, h);
+    return h;
+  }
+  function scheduleToneInventory() {
+    if (toneInventoryTimer) clearTimeout(toneInventoryTimer);
+    toneInventoryTimer = setTimeout(() => { toneInventoryTimer = null; rebuildToneInventory(); }, 200);
+  }
+  function rebuildToneInventory() {
+    const TK = MML.Convert.ToneKey, Plan = MML.Convert.ChannelPlan;
+    if (!TK || !Plan) return;
+    const tl = synthDrum.rawRoll || (keyboardDisplay.getRollTimeline ? keyboardDisplay.getRollTimeline() : null) || [];
+    const isSpc = Plan.format() === 'spc';
+    const map = new Map();
+    for (const tr of tl) {
+      const tones = tr.tones || {};
+      for (const n of tr.notes || []) {
+        let key = n.tone, info = key ? tones[key] : null;
+        if (!key && isSpc && n.srcn != null && n.midi != null) {
+          const h = spcBrrHashOf(n.srcn);
+          key = h ? 'brr:' + h : null;
+          info = { kind: 'brr', srcn: n.srcn, label: 'srcn' + n.srcn };
+        }
+        if (!key || !TK.isAssignable(key)) continue;
+        let r = map.get(key);
+        if (!r) {
+          const k0 = key.split(':')[0];
+          r = { key, kind: k0 === 'opllc' ? 'opll' : k0, label: (info && info.label) || key, info: info || {},
+                chans: [], chanSet: new Set(), count: 0, first: n.startSec };
+          map.set(key, r);
+        } else if (info && (!r.info || !Object.keys(r.info).length)) r.info = info;
+        r.count++;
+        if (n.startSec < r.first) r.first = n.startSec;
+        if (!r.chanSet.has(tr.id)) { r.chanSet.add(tr.id); r.chans.push({ id: tr.id }); }
+      }
+    }
+    toneInventory = Array.from(map.values());
+    for (const r of toneInventory) {
+      for (const c of r.chans) {
+        c.target = keyboardDisplay.getEffectiveTarget ? keyboardDisplay.getEffectiveTarget(c.id) : 'skip';
+        c.letter = (c.target && c.target !== 'skip') ? Plan.letterOfTarget(c.target) : '';
+      }
+      r.color = keyboardDisplay.getChannelColor ? keyboardDisplay.getChannelColor(r.chans[0].id) : null;
+      // 試聴用の実PCM(SPCのBRR / VGMのサンプル。台帳 drumSampleStore はハッシュを持つ)
+      if (r.kind === 'brr' && spcActiveBrrSamples && r.info && r.info.srcn != null) {
+        const brr = spcActiveBrrSamples[r.info.srcn];
+        if (brr && brr.bytes && brr.bytes.length && MML.SPC2MML.decodeBrrBytes) { r.pcm = MML.SPC2MML.decodeBrrBytes(brr.bytes); r.srcRate = 32000; }
+      } else if (r.kind === 'pcm') {
+        const h = r.key.slice(4);
+        const s = Object.keys(drumSampleStore).map(k => drumSampleStore[k]).find(x => x && x.hash === h);
+        if (s) { r.pcm = s.pcm; r.srcRate = s.rate; }
+      }
+    }
+    if (MML.UI.TonePanel) MML.UI.TonePanel.setRows(toneInventory);
+    if (keyboardDisplay.refreshAssignUi) keyboardDisplay.refreshAssignUi(); // 「音色ごとに指定…(n)」の件数
+  }
+  /** planConvertOptions 用: この曲に出てくる音色キー */
+  function toneInventoryKeys() { return toneInventory.map(r => r.key); }
+  /** 鍵盤の音色セレクト「音色ごとに指定…(n)」用: そのchの音色のうち設定(音色/載せ先)を持つ数 */
+  keyboardDisplay.toneOverrideCount = (chId) => {
+    const S = MML.Convert.ToneSettings;
+    if (!S) return 0;
+    let n = 0;
+    for (const r of toneInventory) {
+      if (!r.chanSet.has(chId)) continue;
+      const st = S.get(r.key);
+      if (st.tone || st.target) n++;
+    }
+    return n;
+  };
+  // 割当セルの「音色ごとに指定…」→ 音色一覧ウィンドウをそのchで絞って開く
+  keyboardDisplay.onOpenTonePanel = (chId) => {
+    const w = document.getElementById('win-tones');
+    if (w && getComputedStyle(w).display === 'none') {
+      const btn = document.querySelector('.toggle-btn[data-target="win-tones"]');
+      if (btn) btn.click(); else w.style.display = 'flex';
+    }
+    if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-tones');
+    rebuildToneInventory();
+    if (MML.UI.TonePanel) MML.UI.TonePanel.setFilter(chId || null);
+  };
+  // 変換結果の「VRC7自作音色があぶれてプリセットへ落ちた音色」を一覧の注記へ
+  function noteToneDemotions(result) {
+    if (MML.UI.TonePanel) MML.UI.TonePanel.setDemotions((result && result.toneDemotions) || []);
+  }
+
+  // ── 音色の試聴 ─────────────────────────────────────────────────────
+  // 'raw' … 元の音: サンプルは実PCM、それ以外は音色の1周期波形(FMは定常波形)を鳴らす
+  // 'mml' … 変換後: いまの載せ先/音色指定で1行のMMLを組み、変換と同じコンパイラ+NSF音源で鳴らす
+  //          (最終出力と同じ経路で鳴らすので別実装の乖離が無い。[[roll-as-mml-debugger]] と同じ考え)
+  let toneAuditionPlayer = null;
+  function stopToneAudition() {
+    if (toneAuditionPlayer) { try { toneAuditionPlayer.stop(); } catch (e) { /* ignore */ } toneAuditionPlayer = null; }
+  }
+  // 音色の1周期(±1、任意長)。無ければ null(サンプルのみ等)
+  function toneCycleOf(row) {
+    const TD = MML.Convert.ToneDerive, info = row.info || {};
+    if (info.wave && info.wave.length) return info.wave.map(v => v / 7.5 - 1);
+    if (row.kind === 'opn' && info.patch && TD) return TD.opnSteadyWave(info.patch);
+    if (row.kind === 'opll' && TD) {
+      let bytes = info.bytes;
+      if (!bytes && info.inst > 0 && MML.Emu.OPLLNuked && MML.Emu.OPLLNuked.presetBytes) bytes = MML.Emu.OPLLNuked.presetBytes('ym2413', info.inst);
+      return bytes ? TD.opllSteadyWave(bytes) : null;
+    }
+    if (row.kind === 'duty' || row.kind === 'sq') {
+      const d = row.kind === 'duty' ? [0.125, 0.25, 0.5, 0.75][(info.duty | 0) & 3] : 0.5;
+      return Array.from({ length: 64 }, (_, i) => (i / 64 < d ? 1 : -1));
+    }
+    return null;
+  }
+  // 借用先の音色定義+@指定を作る(変換 borrow.js adaptEvents と同じ材料から)
+  function toneAuditionMml(row, ctx) {
+    const Plan = MML.Convert.ChannelPlan, TD = MML.Convert.ToneDerive, B = MML.Convert.Borrow;
+    const target = ctx.target;
+    if (!target || target === 'skip' || target === 'dpcm') return null;
+    const tt = Plan.targetInfo(target);
+    const letter = Plan.letterOfTarget(target);
+    if (!tt.chip || !letter) return null;
+    const toneKind = ctx.toneKind;
+    const st = ctx.st || {};
+    // 効く音色指定: 音色の設定 → チャンネルの指定 → 既定
+    let tone;
+    if (toneKind) {
+      tone = st.tone && st.tone[toneKind] !== undefined ? st.tone[toneKind] : undefined;
+      if (tone === undefined) {
+        const ch0 = (row.chans || [])[0];
+        const ent = ch0 ? (Plan.get(ch0.id) || {}) : {};
+        tone = ent.tone !== undefined ? ent.tone : Plan.toneOptionsFor(toneKind, row.kind === 'opn' ? 'fm4' : row.kind === 'opll' ? 'fm' : 'any').def;
+      }
+    }
+    const lines = [];
+    if (tt.chip !== '2a03') lines.push(tt.chip === 'n163' ? `${MML.Mml.EX_CHIP_DIRECTIVE.n163} ${tt.index + 1}` : MML.Mml.EX_CHIP_DIRECTIVE[tt.chip]);
+    let inst = '', vol = 'v12', pre = '';
+    const cycle = toneCycleOf(row);
+    const wave32 = (B && B.toneWave(tone)) || (cycle && TD ? TD.toN163(cycle, 32) : null) || B.N163_SQUARE_WAVE;
+    if (tt.family === 'pulse' || tt.family === 'vrc6pulse') {
+      const def = tt.family === 'pulse' ? 2 : 7;
+      const n = parseInt(tone, 10);
+      inst = '@' + (isFinite(n) ? n : def);
+    } else if (tt.family === 'fme7') { inst = '@1'; }
+    else if (tt.family === 'n163') {
+      const reg = MML.Convert.n163WaveRegistry();
+      inst = '@' + reg.assign(wave32);
+      lines.push(...reg.defLines());
+    } else if (tt.family === 'fds') {
+      const reg = new MML.Convert.WaveRegistry('@FM');
+      const mx = Math.max(1, ...wave32);
+      const w64 = Array.from({ length: 64 }, (_, i) => Math.max(0, Math.min(63, Math.round(wave32[Math.floor(i / 2)] * 63 / mx))));
+      inst = '@' + reg.assign(w64);
+      lines.push(...reg.defLines());
+      vol = 'v32';
+    } else if (tt.family === 'vrc7') {
+      vol = 'v2';
+      const info = row.info || {};
+      if (tone === 'auto' && row.kind === 'opll' && info.inst > 0) inst = '@' + info.inst;
+      else if (tone === '0' || tone === 'auto') {
+        let bytes = (row.kind === 'opll' && info.bytes) ? info.bytes : null;
+        if (!bytes && row.kind === 'opn' && info.patch && MML.VGM2MML && MML.VGM2MML.opnToOpllBytes) bytes = MML.VGM2MML.opnToOpllBytes(info.patch);
+        if (!bytes && cycle && TD && TD.vrc7BytesFromWave) bytes = TD.vrc7BytesFromWave(cycle);
+        if (bytes) {
+          const reg = new MML.Convert.WaveRegistry('@OP');
+          const idx = reg.assign(Array.from(bytes));
+          lines.push(...reg.defLines());
+          pre = `OP${idx} `; inst = '@0';
+        } else inst = '@1';
+      } else inst = '@' + Math.max(1, Math.min(15, parseInt(tone, 10) || 1));
+    } else if (tt.family === 'noise') {
+      const idx = Plan.noiseIndexFor(tone, 261.63, 1);
+      const n = 31 - idx;
+      const NAMES = ['c', 'c+', 'd', 'd+', 'e', 'f', 'f+', 'g', 'g+', 'a', 'a+', 'b'];
+      lines.push(`${letter} v12 o${Math.floor(n / 12)} ${NAMES[n % 12]}8 r8 ${NAMES[n % 12]}8 r8 ${NAMES[n % 12]}4`);
+      return lines.join('\n') + '\n';
+    } else if (tt.family === 'triangle') { vol = ''; }
+    else if (tt.family === 'vrc6saw') { vol = 'v40'; }
+    lines.push(`${letter} ${pre}${inst} ${vol} o4 c4 e4 g4 >c2`.replace(/\s+/g, ' '));
+    return lines.join('\n') + '\n';
+  }
+  function toneAudition(row, mode, ctx) {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    stopToneAudition();
+    if (mode !== 'mml') {
+      if (row.pcm && row.pcm.length) { playFloatPcm(row.pcm, row.srcRate || 32000); return; }
+      const cyc = toneCycleOf(row);
+      if (!cyc || !cyc.length) return;
+      const sr = audioCtx.sampleRate, dur = 0.9, n = Math.round(sr * dur), out = new Float32Array(n), f = 261.63;
+      for (let i = 0; i < n; i++) {
+        const ph = (i * f / sr) % 1, t = i / n;
+        const env = t < 0.55 ? 1 : 1 - (t - 0.55) / 0.45;
+        out[i] = Math.max(-1, Math.min(1, cyc[Math.floor(ph * cyc.length)] || 0)) * 0.45 * env;
+      }
+      playFloatPcm(out, sr);
+      return;
+    }
+    let src;
+    try { src = toneAuditionMml(row, ctx || {}); } catch (e) { console.warn('音色試聴のMML生成に失敗:', e); return; }
+    if (!src) return;
+    const compiled = MML.Mml.compile(src, { dpcmSamples: dpcmSampleCache });
+    if (compiled.errors && compiled.errors.length) { console.warn('音色試聴MMLのコンパイルエラー:', compiled.errors, src); return; }
+    if (auditionSource) { try { auditionSource.stop(); } catch (e) { /* ignore */ } auditionSource = null; }
+    const p = new MML.Audio.MmlStreamPlayer(audioCtx);
+    p.load(compiled, null);
+    p.onEnded = () => { if (toneAuditionPlayer === p) toneAuditionPlayer = null; };
+    p.play();
+    toneAuditionPlayer = p;
+  }
+
+  if (MML.UI.TonePanel) {
+    MML.UI.TonePanel.mount(document.getElementById('tonePanel'), {
+      onChange: () => { if (keyboardDisplay.refreshAssignUi) keyboardDisplay.refreshAssignUi(); },
+      onPlay: (row, mode, ctx) => toneAudition(row, mode, ctx),
+      // NSFはネイティブ変換で音色ごとの指定が効かない(一覧のみ。[[nsf-to-nsf-borrow-rearrange-todo]])
+      editable: () => { const P = MML.Convert.ChannelPlan; return !!(P && P.editable() && P.format() !== 'nsf'); },
+    });
+    if (MML.Convert.ToneSettings && MML.Convert.ToneSettings.onChange) {
+      MML.Convert.ToneSettings.onChange(() => { if (keyboardDisplay.refreshAssignUi) keyboardDisplay.refreshAssignUi(); });
+    }
+  }
+
   // ── DPCMの実コスト表示(割当を変えるたびに再計算) ────────────────────────
   // 借用先にDPCMを選んだchが増えるとROMがどれだけ増えるかは、実際に区間を切って
   // ミックス→重複排除→DMC化してみないと分からない(重複排除の効き方が曲次第のため)。
@@ -659,6 +894,7 @@
   function pushRollTimeline(timeline) {
     synthDrum.rawRoll = timeline;
     keyboardDisplay.setRollTimeline(applySynthDrumToRoll(timeline));
+    scheduleToneInventory(); // 音色一覧(使われている音色の目録)も同じ材料から組み直す
   }
   // SPC: 借用先にE(DPCM)を選んだボイスは、そのボイスが鳴らした全BRRサンプルがパッドになる
   // (音階として扱う指定のsrcnは除く)。ロールでも同じ見え方にするため、音程ノートを
@@ -1266,6 +1502,7 @@
       synthDrumEnsure();
       refreshDrumPanel();
       scheduleDpcmCostUpdate();
+      scheduleToneInventory(); // 音色一覧の「使用ch」(パート文字/借用先)も追随
     });
   }
 
@@ -1395,9 +1632,16 @@
   // 既定経路(出力が一切変わらない道)を通る。
   function planConvertOptions() {
     const Plan = MML.Convert && MML.Convert.ChannelPlan;
+    // 音色ごとの設定(src/convert/toneSettings.js): この曲に出てくる音色ぶんだけ渡す。1つでも
+    // 「変換に効く指定」があれば、既定割当のままでもユーザー指定経路(借用層)を通す必要がある
+    // (既定経路は音色を見ない)。NSFはネイティブ変換で対象外
+    const TSm = MML.Convert && MML.Convert.ToneSettings;
+    const keys = toneInventoryKeys();
+    const toneSettings = (TSm && Plan && Plan.format() !== 'nsf') ? TSm.snapshot(keys) : null;
+    const toneCustom = !!(TSm && toneSettings && TSm.hasAny(keys));
     // ★drumHits は既定のままでも返す(2026-09-04): VGMのDACのように「既定がE(DPCM)」の行が
     //   あるので、ユーザーが何も触っていない状態こそが普通のケースになった
-    if (!Plan || !Plan.isCustom()) return { channelMap: null, tone: {}, drumHits: synthDrumHitsAll() };
+    if (!Plan || (!Plan.isCustom() && !toneCustom)) return { channelMap: null, tone: {}, drumHits: synthDrumHitsAll(), toneSettings: null };
     const all = Plan.all();
     const channelMap = {};
     const tone = {};
@@ -1406,7 +1650,7 @@
       if (all[id].tone !== undefined) tone[id] = all[id].tone;
     }
     // drumHits: E(DPCM)へ載せた合成音chの打点(分離レンダリング済み。synthDrumEnsure を await してから呼ぶ)
-    return { channelMap, tone, drumHits: synthDrumHitsAll() };
+    return { channelMap, tone, drumHits: synthDrumHitsAll(), toneSettings: toneCustom ? toneSettings : null };
   }
 
   function setKbdSource(kind, name) {
@@ -4842,7 +5086,7 @@
       const { log, brrSamples, envLog } = await MML.SPC2MML.captureAsync(loadedSpcBytes, duration,
         makeCaptureProgress(spcFileStatusEl));
       result = MML.SPC2MML.convert(log, brrSamples, { envLog, channelMap, bpm: spcManualBpm, cmd: MML.UI.ConvertSettings.get(),
-        drumKinds: spcDrumKindsOf(brrSamples) });
+        drumKinds: spcDrumKindsOf(brrSamples), toneSettings: planConvertOptions().toneSettings });
     } catch (e) {
       spcIsRendering = false;
       spcFileStatusEl.innerHTML = '<div class="error">' + T('変換エラー: {msg}', { msg: e.message }) + '</div>';
@@ -4854,6 +5098,7 @@
 
     // MML エディタへ出力
     mmlSourceEl.value = result.mml;
+    noteToneDemotions(result);
     resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input'));
 
@@ -5526,6 +5771,7 @@
     updateKssPlayButton();
 
     mmlSourceEl.value = result.mml;
+    noteToneDemotions(result);
     resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input'));
 
@@ -5881,6 +6127,7 @@
     updateGbsPlayButton();
 
     mmlSourceEl.value = result.mml;
+    noteToneDemotions(result);
     resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input'));
 
@@ -6366,6 +6613,7 @@
     updateHesPlayButton();
 
     mmlSourceEl.value = result.mml;
+    noteToneDemotions(result);
     resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input'));
 
@@ -7070,7 +7318,7 @@
       //   planConvertOptions() の tone しか取っていなかったため、YM2612のDACなどを
       //   打楽器化してもMMLのEパートに出なかった(2026-09-04修正)
       const planOpt = planConvertOptions();
-      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), tone: getVgmTone(), drumHits: planOpt.drumHits, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
+      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), tone: getVgmTone(), drumHits: planOpt.drumHits, toneSettings: planOpt.toneSettings, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
     } catch (e) {
       vgmIsRendering = false;
       updateVgmPlayButton();
@@ -7081,6 +7329,7 @@
     updateVgmPlayButton();
 
     mmlSourceEl.value = result.mml;
+    noteToneDemotions(result);
     resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input'));
 

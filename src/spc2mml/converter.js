@@ -952,7 +952,8 @@
 
     // デフォルトマップ: V0→A, V1→B ... V3→D, V4→スキップ
     const DEFAULT_TYPES = ['pulse1','pulse2','triangle','noise','skip','skip','skip','skip'];
-    const channelMap = options.channelMap || DEFAULT_TYPES.map(t => ({ type: t }));
+    // ★複製する: 音色ごとの載せ先分割(下)が仮想ボイスを push するので、呼び出し元の配列を汚さない
+    const channelMap = (options.channelMap || DEFAULT_TYPES.map(t => ({ type: t }))).slice();
     // 変換設定(src/convert/options.js): コマンド使用/不使用・譜面整形
     const cmd = MML.Convert.normalizeCmd(options.cmd);
 
@@ -961,6 +962,48 @@
     const srcnFineTune = computeSrcnFineTune(brrSamples);
     const voiceEvents = MML.SPC2MML.extractVoiceEvents(log, { srcnFineTune, envLog: options.envLog });
     const tuneOf = (srcn) => srcnFineTune ? (srcnFineTune[srcn] || 0) : 0;
+
+    // ── 音色(BRRサンプル)ごとの設定(src/convert/toneSettings.js、2026-09-09) ────────────
+    // options.toneSettings … main.js が ToneSettings.snapshot() で作った素のオブジェクト(無ければ従来どおり)。
+    // キーは 'brr:<hash>'(src/convert/toneKey.js、ロールのノート srcn からも同じキーが引ける)
+    const TS = (MML.Convert.ToneSettings && options.toneSettings) ? MML.Convert.ToneSettings.lookup(options.toneSettings) : null;
+    const useTone = !!(TS && !TS.isEmpty());
+    const toneKeyCache = {};
+    const toneKeyOfSrcn = (srcn) => {
+      if (toneKeyCache[srcn] !== undefined) return toneKeyCache[srcn];
+      const h = MML.SPC2MML.brrHash(brrSamples[srcn]);
+      return (toneKeyCache[srcn] = h ? 'brr:' + h : null);
+    };
+    const toneDemotions = []; // VRC7自作音色があぶれてプリセットへ落ちた音色 [{key, preset, label}]
+    const splitNotes = [];    // 音色ごとの載せ先分割の注記(ヘッダコメントへ)
+    // 音色ごとの載せ先(toneSettings[key].target)で1本のボイスを分割する: 「V2のベース音色だけ三角波へ」。
+    // 分割先は仮想ボイス(index 8以降、channelMap[i].splitFrom=元ボイス)として以降のループに参加する
+    // (元ボイスは単音なので分割後に重なりは無い。借用先の取り合いは他のボイスと同じ規則)。
+    // E(dpcm)への分割はそのsrcnの発音をパッド(打楽器)へ回すのと同義になる(drumHits の dpcmChans)。
+    if (useTone) {
+      const nBase = voiceEvents.length;
+      for (let ch = 0; ch < nBase; ch++) {
+        const cfg = channelMap[ch];
+        if (!cfg || cfg.type === 'skip') continue;
+        const byTarget = new Map(); // 上書き載せ先 → Set(srcn)
+        for (const ev of voiceEvents[ch]) {
+          if (ev.pitchSemi === null || ev.non) continue;
+          const k = toneKeyOfSrcn(ev.srcn);
+          const tt = k ? TS.targetFor(k) : undefined;
+          if (!tt || tt === cfg.type) continue;
+          if (!byTarget.has(tt)) byTarget.set(tt, new Set());
+          byTarget.get(tt).add(ev.srcn);
+        }
+        if (!byTarget.size) continue;
+        for (const [tt, srcns] of byTarget) {
+          const moved = voiceEvents[ch].filter(ev => ev.pitchSemi !== null && !ev.non && srcns.has(ev.srcn));
+          voiceEvents[ch] = voiceEvents[ch].filter(ev => !(ev.pitchSemi !== null && !ev.non && srcns.has(ev.srcn)));
+          if (tt === 'skip') { splitNotes.push(`V${ch} の音色 srcn${Array.from(srcns).join(',')} はスキップ指定のため変換対象外です。`); continue; }
+          voiceEvents.push(moved);
+          channelMap.push(Object.assign({}, cfg, { type: tt, splitFrom: ch, splitSrcns: Array.from(srcns) }));
+        }
+      }
+    }
 
     // ── 打楽器サンプルの打点を旋律から切り出す(2026-09-03、2026-09-04にE指定を追加) ────
     // 打楽器の発音は、そのボイスの借用先ではなく「実サンプルのままDPCM(E)」へ行く
@@ -982,7 +1025,7 @@
     }
     const dpcmChans = [];   // E(dpcm)を選んだボイス
     const meloChans = [];   // それ以外(skip以外)のボイス
-    for (let ch = 0; ch < 8; ch++) {
+    for (let ch = 0; ch < voiceEvents.length; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip') continue;
       (cfg.type === 'dpcm' ? dpcmChans : meloChans).push(ch);
@@ -1015,7 +1058,7 @@
     // サンプルPCMのリトリガー間隔が音符長として混ざる問題があったため。SPCの打点は元々ノート長そのもの
     const noteDurations = [];
     const tempoChannels = []; // chooseTempoOctave 用(発音区間だけの簡易イベント列)
-    for (let ch = 0; ch < 8; ch++) {
+    for (let ch = 0; ch < voiceEvents.length; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip') continue;
       const sounding = voiceEvents[ch].filter(ev => ev.pitchSemi !== null)
@@ -1051,7 +1094,7 @@
     // チャンネル間の音量比を0..15レンジへ引き延ばす。音量が固定のDPCM割当ボイスと
     // スキップは基準に含めない(含めるとN163等が上限を使い切れない)。
     let songMaxVol = 0;
-    for (let ch = 0; ch < 8; ch++) {
+    for (let ch = 0; ch < voiceEvents.length; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || !envCapableType(cfg.type)) continue;
       for (const ev of voiceEvents[ch]) songMaxVol = Math.max(songMaxVol, ev.vol || 0);
@@ -1070,7 +1113,7 @@
     const envReg = new MML.Convert.EnvelopeRegistry(cmd);
     let usesReleaseTable = false;
 
-    for (let ch = 0; ch < 8; ch++) {
+    for (let ch = 0; ch < voiceEvents.length; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || !envCapableType(cfg.type)) continue;
       if (!cmd.ENV) continue; // 変換設定ENV=OFF: @v/@vrテーブルを作らずボイス音量のv<n>で代替
@@ -1103,7 +1146,7 @@
     // mmc5=a-b)から引く。
     const usedExpansions = [];
     let n163MaxIndex = -1;
-    for (let ch = 0; ch < 8; ch++) {
+    for (let ch = 0; ch < voiceEvents.length; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip' || cfg.type === 'dpcm') continue;
       const exp = TYPE_TO_EXPANSION[cfg.type];
@@ -1160,7 +1203,7 @@
     // 鳴った方が先の再生を上書きする実機同様の制約になる(開始フレーム順に
     // 並べるだけで自然にそうなる)。
     const dpcmNoteEvents = [];
-    for (let ch = 0; ch < 8; ch++) {
+    for (let ch = 0; ch < voiceEvents.length; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type !== 'dpcm') continue;
       for (const ev of voiceEvents[ch]) {
@@ -1358,7 +1401,9 @@
     // 小節揃えスコア形式(1曲まるごと1回のemitScore呼び出し)で出力する。
     const scoreChannels = [];
     const detuneEntries = [];
-    for (let ch = 0; ch < 8; ch++) {
+    const placedTypes = {}; // 借用先の取り合い(音色分割の仮想ボイスが既存ボイスと同じ先を選んだ等)。先着優先
+    const placeNotes = [];
+    for (let ch = 0; ch < voiceEvents.length; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip') continue;
 
@@ -1373,6 +1418,17 @@
 
       const targetLetter = letterForType(targetType);
       if (!targetLetter) continue;
+      if (placedTypes[targetType] !== undefined) { placeNotes.push(`V${cfg.splitFrom !== undefined ? cfg.splitFrom : ch} → ${targetType} は既に V${placedTypes[targetType]} に使われているため変換対象外です。`); continue; }
+      placedTypes[targetType] = cfg.splitFrom !== undefined ? cfg.splitFrom : ch;
+      // 音色(srcn)ごとの音色指定(toneSettings[key].tone[種別])。ボイスの指定 cfg.tone を音色単位で上書きする
+      const toneKind = MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.toneKindOfTarget ? MML.Convert.ChannelPlan.toneKindOfTarget(targetType, 'brr') : null;
+      const toneOfEv = (ev) => {
+        if (useTone && toneKind) {
+          const v = TS.toneFor(toneKeyOfSrcn(ev.srcn), toneKind);
+          if (v !== undefined) return v;
+        }
+        return cfg.tone;
+      };
 
       const hasEnvelope = envCapableType(targetType) && cmd.ENV;
       // FDS/N163はsrcnごとの自作波形を@<n>(instrument)で切り替える
@@ -1386,23 +1442,24 @@
       const isPulseTarget = targetType === 'pulse1' || targetType === 'pulse2' ||
         targetType === 'mmc5pulse1' || targetType === 'mmc5pulse2';
       const isVrc6PulseTarget = targetType === 'vrc6pulse1' || targetType === 'vrc6pulse2';
-      const dutyIdx = isPulseTarget
-        ? Math.max(0, Math.min(3, Number.isInteger(parseInt(cfg.tone, 10)) ? parseInt(cfg.tone, 10) : 2))
+      const dutyOf = (tone) => isPulseTarget
+        ? Math.max(0, Math.min(3, Number.isInteger(parseInt(tone, 10)) ? parseInt(tone, 10) : 2))
         : isVrc6PulseTarget
-          ? Math.max(0, Math.min(7, Number.isInteger(parseInt(cfg.tone, 10)) ? parseInt(cfg.tone, 10) : 7))
+          ? Math.max(0, Math.min(7, Number.isInteger(parseInt(tone, 10)) ? parseInt(tone, 10) : 7))
           : null;
       // FDS/N163の波形モード(cfg.tone): 'copy'(既定)/'pulse50'/'sin'/'triangle'/'saw'
-      const waveMode = (isFdsTarget || isN163Target) ? (cfg.tone || 'copy') : null;
-      const hasInstrument = isFdsTarget || isN163Target || isVrc7Target || dutyIdx !== null;
+      const waveModeOf = (tone) => (isFdsTarget || isN163Target) ? (tone || 'copy') : null;
+      const hasInstrument = isFdsTarget || isN163Target || isVrc7Target || isPulseTarget || isVrc6PulseTarget;
       const isNoiseTarget = targetType === 'noise';
       // チャンネル別の変換音量(volPct)。v<n>直接出力(ENV OFF時と VRC7)用
       const chVolScale = MML.Convert.channelVolScale(cfg);
       // VRC7の音色: ボイスモニターで選んだプリセット(@1-@15)。'0'は自作音色=BRRサンプル
       // から推定した@OP<n>をOP<n>+@0で使う(cfg.vrc7Inst。既定@1)
-      const vrc7Sel = cfg.vrc7Inst != null ? cfg.vrc7Inst : cfg.tone;
-      const vrc7Custom = isVrc7Target && String(vrc7Sel) === '0';
-      const vrc7Preset = (isVrc7Target && !vrc7Custom)
-        ? Math.max(1, Math.min(15, parseInt(vrc7Sel, 10) || 1)) : null;
+      // (音色ごとの指定があるときは toneOfEv(ev) が勝つ。cfg.vrc7Inst は旧ボイスモニター互換)
+      const vrc7SelOf = (ev) => { const t = toneOfEv(ev); return (t === cfg.tone && cfg.vrc7Inst != null) ? cfg.vrc7Inst : t; };
+      const vrc7CustomOf = (ev) => isVrc7Target && String(vrc7SelOf(ev)) === '0';
+      const vrc7PresetOf = (ev) => (isVrc7Target && !vrc7CustomOf(ev)) ? Math.max(1, Math.min(15, parseInt(vrc7SelOf(ev), 10) || 1)) : null;
+      let anyVrc7Custom = false;
       // ピッチエンベロープ(厳密周期ビブラート、DESIGN-PITCH.md Phase 1)。ev.pitchSeq
       // (DSP生ピッチレジスタ、Phase 0で追加済み)をHz経由で借用先チップの生レジスタ
       // 空間へ変換してから分類・登録する(KSS/GBS/HESと同じ「差を取ってから1回だけ
@@ -1421,7 +1478,7 @@
         // (compiler側で note%16 になり音程と無関係な周期になっていた)
         const note = (isNoiseTarget && ev.non) ? spcNoiseNoteNum(ev.noiseRate)
           : (isNoiseTarget && ev.pitchSemi !== null && MML.Convert.ChannelPlan)
-            ? 31 - MML.Convert.ChannelPlan.noiseIndexFor(cfg.tone, ev.rawFreq || 440 * Math.pow(2, (ev.pitchSemi - 57) / 12), 1)
+            ? 31 - MML.Convert.ChannelPlan.noiseIndexFor(toneOfEv(ev), ev.rawFreq || 440 * Math.pow(2, (ev.pitchSemi - 57) / 12), 1)
           : ev.pitchSemi;
         const common = {
           start: ev.frame, end: ev.frame + ev.len, note,
@@ -1435,13 +1492,13 @@
           verifySkip: chVolScale === 0 || undefined,
           instrument: (hasInstrument && note !== null && cmd.INST)
             ? (isFdsTarget
-                ? fdsWaveReg.assign(waveMode === 'copy' ? getWave(ev.srcn).fds : fixedWave('fds', waveMode))
+                ? fdsWaveReg.assign(waveModeOf(toneOfEv(ev)) === 'copy' ? getWave(ev.srcn).fds : fixedWave('fds', waveModeOf(toneOfEv(ev))))
               : isN163Target
-                ? n163WaveReg.assign(waveMode === 'copy' ? getWave(ev.srcn).n163 : fixedWave('n163', waveMode))
-              : isVrc7Target ? (vrc7Custom ? 0 : vrc7Preset)
-              : dutyIdx)
+                ? n163WaveReg.assign(waveModeOf(toneOfEv(ev)) === 'copy' ? getWave(ev.srcn).n163 : fixedWave('n163', waveModeOf(toneOfEv(ev))))
+              : isVrc7Target ? (vrc7CustomOf(ev) ? 0 : vrc7PresetOf(ev))
+              : dutyOf(toneOfEv(ev)))
             : undefined,
-          vrc7Tone: (vrc7Custom && note !== null && cmd.INST) ? getOpllToneIdx(ev.srcn) : undefined,
+          vrc7Tone: (vrc7CustomOf(ev) && note !== null && cmd.INST) ? (anyVrc7Custom = true, getOpllToneIdx(ev.srcn)) : undefined,
           tieCandidate: ev.tieCandidate,
         };
         if (periodFn && !(isNoiseTarget && ev.non) && ev.pitchSemi !== null && ev.pitchSeq && ev.pitchSeq.length > 0) {
@@ -1472,7 +1529,7 @@
       const detuneFn = periodFn || (isVrc7Target ? vrc7FnumRawSpc : null);
       if (detuneFn) detuneEntries.push({ events: chEvents, periodFn: detuneFn });
       scoreChannels.push({ letter: targetLetter, events: chEvents, hasEnvelope, hasVolume,
-        hasInstrument, hasVrc7Tone: vrc7Custom, hasDetune: !!detuneFn, hasPitchMod: !!periodFn,
+        hasInstrument, hasVrc7Tone: anyVrc7Custom, hasDetune: !!detuneFn, hasPitchMod: !!periodFn,
         hasNoteEnv: !!periodFn || isVrc7Target });
     }
     // 全チャンネル横断でコーラス検知+D<n>補正(nsf2mmlと同じ「1回だけまとめて」方式)
@@ -1483,7 +1540,16 @@
     // ボイスごとに違うので、2ch以上を@0にすると src/mml/compiler.js の同時使用チェックへ
     // 引っかかりMMLがコンパイルできず全パート無音になる。あぶれたチャンネルはいちばん
     // 近い内蔵プリセットへ落とす(src/convert/vrc7Tone.js。vgm2mml/borrow.jsと同じ処理)
-    const vrc7Notes = MML.Convert.Vrc7Tone.resolveForScore(scoreChannels, vrc7ToneReg).map(n => `; ※ ${n}`);
+    const vrc7Notes = MML.Convert.Vrc7Tone.resolveForScore(scoreChannels, vrc7ToneReg, {
+      // 音色一覧パネルで「この音色は→@nへ落ちた」と示すため、@OP登録番号→srcn→音色キーで控える
+      onDemote: (ch, presetByTone) => {
+        for (const idx of Object.keys(presetByTone || {})) {
+          const srcn = Object.keys(opllPatchCache).find(k => String(opllPatchCache[k]) === String(idx));
+          const key = srcn !== undefined ? toneKeyOfSrcn(+srcn) : null;
+          if (key) toneDemotions.push({ key, preset: presetByTone[idx], label: ch.letter || '' });
+        }
+      }
+    }).map(n => `; ※ ${n}`).concat(placeNotes.concat(splitNotes).map(n => `; ※ ${n}`));
 
     if (dpcmLetter) {
       scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents, hasInstrument: true });
@@ -1515,7 +1581,8 @@
           compileOpts: { dpcmSamples: Object.fromEntries(dmcFiles.map(f => [f.name, f.bytes])) } })
       : null;
 
-    return { mml, dmcFiles, bpm: Math.round(bpm), expansion, expansions: usedExpansions, fdsWave, n163Wave, pitchCheck, scoreChannels };
+    return { mml, dmcFiles, bpm: Math.round(bpm), expansion, expansions: usedExpansions, fdsWave, n163Wave, pitchCheck, scoreChannels,
+      toneDemotions }; // 音色一覧パネル用(VRC7自作音色→プリセットへ落ちた音色)
   };
 
   MML.SPC2MML.fromSpc = function (spcBytes, durationSec, options) {

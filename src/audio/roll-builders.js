@@ -50,6 +50,20 @@
   // drumKinds(省略可): srcn → 'drum' | 'pitch' の手動上書き(main.jsがBRR内容ハッシュで引く)。
   // 打楽器と判定したsrcnの発音は音程ノートではなく drumKey 付きノート(ドラム区画/パッド)に
   // する。判定はMML変換と同じ MML.SPC2MML.drumSrcns(ロール=MML変換デバッガの方針)。
+  // 音色キー(src/convert/toneKey.js)をロールのノートに載せ、トラックの tones 表に表示/試聴用の
+  // 付随情報を控える(音色一覧パネル src/ui/tonePanel.js の材料。main.js rebuildToneInventory)。
+  // ★ノートに載せるのは文字列キーだけ(Workerからの構造化複製で運ぶ量を増やさない)。
+  //   付随情報は音色ごとに1回、トラックオブジェクトのプロパティ tones に置く(配列に生やした
+  //   プロパティは複製で消えるので、必ずトラック(オブジェクト)側に置く)
+  RollBuild.toneOf = function (ev, ctx, tones) {
+    const TK = MML.Convert && MML.Convert.ToneKey;
+    if (!TK || !ctx) return undefined;
+    const k = TK.ofEvent(ev, ctx);
+    if (!k) return undefined;
+    if (tones && !tones[k]) tones[k] = TK.infoOfEvent(ev, ctx, k);
+    return k;
+  };
+
   RollBuild.spc = function (log, frameRate, srcnFineTune, drumKinds) {
     const frameDur = 1 / frameRate;
     // MML変換と同じ原音チューニング補正を渡し、ロール表示の音程も実機発音に一致させる
@@ -140,7 +154,7 @@
     // 標準MIDIより1オクターブ(12)低い。鍵盤描画に合わせるロール側でのみ+12補正する。
     // ★抽出イベントは「音量が1でも変わったら別イベント」に切れているため、音程が同じまま
     // 途切れず続いている区間を1本の音符に統合する(retriggerだけは区切りとして残す)。
-    const toNotes = (events, attenuated) => {
+    const toNotes = (events, attenuated, ctx, tones) => {
       const norm = (v) => {
         const n = Math.max(0, Math.min(15, v || 0));
         return (attenuated ? (15 - n) : n) / 15;
@@ -158,6 +172,7 @@
         // (RollBuild.expandNoteEnv参照。未統合イベントは1区間のまま素通りする)。
         // freqSeq(セント偏差オーバーレイ)と retrigger は元イベント先頭の区間にだけ効く。
         const steps = RollBuild.expandNoteEnv(e.start, e.end, midiOf(e), e.noteEnvOffsets);
+        const tone = RollBuild.toneOf(e, ctx, tones);
         for (let si = 0; si < steps.length; si++) {
           const st = steps[si];
           const prev = out[out.length - 1];
@@ -165,8 +180,11 @@
             prev.endSec = st.end * frameDur;
             prev.vol = Math.max(prev.vol, norm(e.volume));
             if (si === 0 && e.freqSeq) prev.freqSeq.push(...e.freqSeq);
+            if (!prev.tone && tone) prev.tone = tone;
           } else {
-            out.push({ startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: norm(e.volume), freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] });
+            const n = { startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: norm(e.volume), freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] };
+            if (tone) n.tone = tone;
+            out.push(n);
           }
           endFrame = st.end;
         }
@@ -174,23 +192,25 @@
       return out;
     };
     const tracks = [];
+    // 音色キー付きのトラック(ctx は toneKey.js ofEvent の文脈=チップと種別)
+    const mk = (id, color, events, attenuated, ctx) => { const tones = {}; return { id, color, notes: toNotes(events, attenuated, ctx, tones), tones }; };
 
     const ayResult = MML.Kss2MmlExpansion.ay(writeLog, totalFrames, clock);
     const KP_COLS = ['#66ddff', '#33aaff', '#0077dd'];
-    ayResult.channels.forEach((ch, i) => tracks.push({ id: `KP${i + 1}`, color: KP_COLS[i], notes: toNotes(ch.events) }));
+    ayResult.channels.forEach((ch, i) => tracks.push(mk(`KP${i + 1}`, KP_COLS[i], ch.events, false, { chip: 'ay8910', kind: 'square' })));
 
     // SCC未使用の曲では鍵盤表示側にもKS行を出さないので、ロールのトラックも作らない
     // (トラックidと鍵盤の行が1対1で対応している必要がある)
     if (sccUsed) {
       const sccResult = MML.Kss2MmlExpansion.scc(writeLog, totalFrames, clock);
-      sccResult.channels.forEach((ch, i) => tracks.push({ id: `KS${i + 1}`, color: `hsl(${(280 + i * 20) % 360},80%,60%)`, notes: toNotes(ch.events) }));
+      sccResult.channels.forEach((ch, i) => tracks.push(mk(`KS${i + 1}`, `hsl(${(280 + i * 20) % 360},80%,60%)`, ch.events, false, { chip: 'k051649', kind: 'wave' })));
     }
 
     if (header && header.device.mode === 'MSX' && header.device.fmpac) {
       const opllResult = MML.Kss2MmlExpansion.opll(writeLog, totalFrames);
       const KF_COLS = ['#ffcc00','#ffdd44','#ffe566','#ffee88','#fff2aa','#fff8cc','#ffd9a0','#ffe0b0','#ffe8c0'];
       // 第2引数true = OPLLの音量は減衰値なので表示用に反転する(toNotes冒頭のコメント参照)
-      opllResult.channels.forEach((ch, i) => tracks.push({ id: `KF${i + 1}`, color: KF_COLS[i % KF_COLS.length], notes: toNotes(ch.events, true) }));
+      opllResult.channels.forEach((ch, i) => tracks.push(mk(`KF${i + 1}`, KF_COLS[i % KF_COLS.length], ch.events, true, { chip: 'ym2413', kind: 'fm' })));
       // リズムモードの打楽器5行。id/色/並び順は鍵盤側(keyboard.js の kssOpll 分岐、
       // RCOLS/RLABEL)と1対1で合わせる。音程を持たないので疑似音程(noiseRollIndex)で
       // 5レーンに分けている(kss2mml/expansion/opll.js の RHYTHM_DEFS 参照)。
@@ -209,7 +229,7 @@
     if (oplOpts && oplOpts.used && MML.Kss2MmlExpansion.opl) {
       const oplResult = MML.Kss2MmlExpansion.opl(writeLog, totalFrames, oplOpts.clock);
       const OL_COLS = ['#66ffcc', '#55eebb', '#44ddaa', '#33cc99', '#22bb88', '#11aa77', '#66e0d0', '#55d0c0', '#44c0b0'];
-      oplResult.channels.forEach((ch, i) => tracks.push({ id: `OL${i + 1}`, color: OL_COLS[i % OL_COLS.length], notes: toNotes(ch.events, true) }));
+      oplResult.channels.forEach((ch, i) => tracks.push(mk(`OL${i + 1}`, OL_COLS[i % OL_COLS.length], ch.events, true, { chip: 'opl', kind: 'fm' })));
       if (oplResult.rhythm) {
         const RCOLS = { bd: '#ff5555', sd: '#ffaa55', tom: '#aaff55', cym: '#55ffaa', hh: '#55aaff' };
         const RIDS = { bd: 'OLBD', sd: 'OLSD', tom: 'OLTM', cym: 'OLCY', hh: 'OLHH' };
@@ -229,12 +249,13 @@
     // toNotes: 音程が同じまま途切れず続いている区間を1本の音符に統合する(GBは実トリガbitが
     // あるためretrigger判定はtriggerSeqの変化そのもの=抽出側で既にイベント境界として反映済み)。
     // @EN(高速アルペジオ)統合済みイベントの展開はKSS側と同じ(RollBuild.expandNoteEnv参照)。
-    const toNotes = (events) => {
+    const toNotes = (events, ctx, tones) => {
       const out = [];
       let endFrame = -1;
       for (const e of events) {
         if (e.note === null) { endFrame = -1; continue; }
         const steps = RollBuild.expandNoteEnv(e.start, e.end, e.note + 12, e.noteEnvOffsets);
+        const tone = RollBuild.toneOf(e, ctx, tones);
         for (let si = 0; si < steps.length; si++) {
           const st = steps[si];
           const prev = out[out.length - 1];
@@ -242,8 +263,11 @@
             prev.endSec = st.end * frameDur;
             prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
             if (si === 0 && e.freqSeq) prev.freqSeq.push(...e.freqSeq);
+            if (!prev.tone && tone) prev.tone = tone;
           } else {
-            out.push({ startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: (e.volume || 0) / 15, freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] });
+            const n = { startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: (e.volume || 0) / 15, freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] };
+            if (tone) n.tone = tone;
+            out.push(n);
           }
           endFrame = st.end;
         }
@@ -251,16 +275,17 @@
       return out;
     };
     const tracks = [];
+    const mk = (id, color, events, ctx) => { const tones = {}; return { id, color, notes: toNotes(events, ctx, tones), tones }; };
     // ★pulse()の音量はhwEnvelope.js側で64Hz実機クロックとplayFps(=frameRate)の位相を
     // 見て再計算するため、frameRateを渡さないとvolumeAt()内でNaNになり無音扱いになる。
     const ch1 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch1', null, frameRate);
     const ch2 = MML.Gbs2MmlExpansion.pulse(snapshots, 'ch2', null, frameRate);
     const noise = MML.Gbs2MmlExpansion.noise(snapshots, null, frameRate);
     const wave = MML.Gbs2MmlExpansion.wave(snapshots);
-    tracks.push({ id: 'GB1', color: '#66ddff', notes: toNotes(ch1.events) });
-    tracks.push({ id: 'GB2', color: '#0077dd', notes: toNotes(ch2.events) });
+    tracks.push(mk('GB1', '#66ddff', ch1.events, { chip: 'gb', kind: 'square' }));
+    tracks.push(mk('GB2', '#0077dd', ch2.events, { chip: 'gb', kind: 'square' }));
     tracks.push({ id: 'GN', color: '#aaaaaa', notes: toNotes(noise.events) });
-    tracks.push({ id: 'GW', color: '#ffcc00', notes: toNotes(wave.events) });
+    tracks.push(mk('GW', '#ffcc00', wave.events, { chip: 'gb', kind: 'wave' }));
     return tracks;
   };
 
@@ -272,12 +297,13 @@
   RollBuild.hes = function (snapshots, frameRate, dpcmTrace, controlTrace) {
     const frameDur = 1 / frameRate;
     // @EN(高速アルペジオ)統合済みイベントの展開はKSS側と同じ(RollBuild.expandNoteEnv参照)。
-    const toNotes = (events) => {
+    const toNotes = (events, ctx, tones) => {
       const out = [];
       let endFrame = -1;
       for (const e of events) {
         if (e.note === null) { endFrame = -1; continue; }
         const steps = RollBuild.expandNoteEnv(e.start, e.end, e.note + 12, e.noteEnvOffsets);
+        const tone = RollBuild.toneOf(e, ctx, tones);
         for (let si = 0; si < steps.length; si++) {
           const st = steps[si];
           const prev = out[out.length - 1];
@@ -285,8 +311,11 @@
             prev.endSec = st.end * frameDur;
             prev.vol = Math.max(prev.vol, (e.volume || 0) / 15);
             if (si === 0 && e.freqSeq) prev.freqSeq.push(...e.freqSeq);
+            if (!prev.tone && tone) prev.tone = tone;
           } else {
-            out.push({ startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: (e.volume || 0) / 15, freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] });
+            const n = { startSec: st.start * frameDur, endSec: st.end * frameDur, midi: st.note, vol: (e.volume || 0) / 15, freqSeq: (si === 0 && e.freqSeq) ? e.freqSeq.slice() : [] };
+            if (tone) n.tone = tone;
+            out.push(n);
           }
           endFrame = st.end;
         }
@@ -300,12 +329,13 @@
     // ノイズはch4/5独自の発音で、行/鍵盤表示でも同じPSG4/PSG5の行がwave/noiseを兼ねる
     // (wave/noiseは同一chで排他なので時間的に重ならず、単純にマージしてよい)。
     waveResult.channels.forEach((ch, i) => {
-      let notes = toNotes(ch.events);
+      const tones = {};
+      let notes = toNotes(ch.events, { chip: 'huc6280', kind: 'wave' }, tones);
       if (i === 4 || i === 5) {
         const noiseNotes = toNotes(MML.Hes2MmlExpansion.noiseChannel(snapshots, i).events);
         if (noiseNotes.length) notes = notes.concat(noiseNotes).sort((a, b) => a.startSec - b.startSec);
       }
-      tracks.push({ id: `PSG${i}`, color: colors[i % colors.length], notes });
+      tracks.push({ id: `PSG${i}`, color: colors[i % colors.length], notes, tones });
     });
     // DDA(PCM)の打点 → ドラム区画のノート(midi無し、drumKey/drumSeq付き)。
     // 同じ太鼓の連打が1本に融合しないよう drumSeq に打点の通番を入れる

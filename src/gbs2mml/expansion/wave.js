@@ -110,6 +110,7 @@
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, tieCandidate: ev.tieCandidate },
       (ev.note !== null && waveReg) ? { instrument: waveReg.assign(expandTo6bit(ev.wave)) } : {},
+      ev.note !== null ? { srcWave: ev.wave } : {}, // 音色の同定(src/convert/toneKey.js)
       ev.note !== null && ev.rawFreq != null ? { rawFreq: ev.rawFreq, freqSeq: ev.pitchSeq.map(waveFreq) } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
       toVolumeFields(ev.volSeq)

@@ -3081,3 +3081,49 @@ button.apply-btn--dirty {
   box-shadow: 0 0 0 2px rgba(224, 160, 48, 0.35);
 }
 button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align: 1px; }
+
+/* ── 音色一覧パネル(src/ui/tonePanel.js) ─────────────────────────────── */
+.tone-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; font-size: 11px; overflow-x: auto; }
+.tone-panel-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 8px; border-bottom: 1px solid var(--border); color: var(--text-muted); }
+.tone-panel-bar .tp-sort select { font-size: 11px; }
+.tp-filter-chip { font-size: 11px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--accent); background: rgba(58, 110, 165, 0.14); color: var(--text); cursor: pointer; }
+.tone-panel-head, .tone-panel-row { display: flex; align-items: center; gap: 6px; padding: 2px 8px; min-width: 780px; }
+.tone-panel-head { font-weight: 700; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+.tone-panel-row { border-bottom: 1px solid rgba(128, 128, 128, 0.14); }
+.tone-panel-row:hover { background: rgba(58, 110, 165, 0.08); }
+.tone-panel-row--custom .tp-c-label { box-shadow: inset 2px 0 0 var(--accent); }
+.tone-panel-body { flex: 1; overflow-y: auto; }
+.tone-panel-empty { padding: 14px 8px; color: var(--text-muted); }
+.tone-panel-foot { padding: 3px 8px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 10px; }
+.tp-c-icon  { flex: none; width: 46px; }
+.tp-c-icon canvas { display: block; }
+.tp-c-label { flex: none; width: 150px; display: flex; flex-direction: column; gap: 1px; padding-left: 4px; }
+.tp-name {
+  width: 100%; box-sizing: border-box; font-size: 11px; font-family: var(--mono);
+  background: var(--surface); color: var(--text); border: 1px solid transparent; border-radius: 3px; padding: 0 4px;
+}
+.tp-name::placeholder { color: var(--text-muted); opacity: 0.8; }
+.tp-name:hover { border-color: var(--border); }
+.tp-name:focus { border-color: var(--accent); background: var(--bg); outline: none; }
+.tp-kind { font-style: normal; font-size: 9px; color: var(--text-muted); padding-left: 4px; }
+.tp-c-chans { flex: none; width: 110px; font-family: var(--mono); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-c-count { flex: none; width: 40px; text-align: right; font-family: var(--mono); }
+.tp-c-play  { flex: none; width: 96px; display: flex; gap: 4px; align-items: center; }
+.tone-panel-head .tp-c-play i { font-style: normal; width: 46px; font-size: 10px; text-align: center; }
+.tp-play { width: 46px; text-align: center; line-height: 1.2; font-size: 14px; padding: 0; }
+.tp-play, .tp-clear, .kbd-assign-tones, .kbd-assign-pop-tones {
+  cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 4px;
+}
+.tp-play:hover, .tp-clear:hover, .kbd-assign-tones:hover, .kbd-assign-pop-tones:hover { background: rgba(58, 110, 165, 0.18); color: var(--text); }
+.tp-c-target { flex: none; width: 150px; }
+.tp-c-tone   { flex: none; width: 190px; }
+.tp-c-target select, .tp-c-tone select { width: 100%; font-size: 11px; font-family: var(--mono); }
+.tp-tone-none { color: var(--text-muted); font-size: 10px; }
+.tp-c-note  { flex: 1; min-width: 60px; display: flex; align-items: center; gap: 6px; font-size: 10px; }
+.tp-c-note--warn { color: #c98a00; }
+.tp-clear { font-size: 11px; padding: 0 5px; }
+/* 鍵盤の割当セル: 音色セレクトが出ない借用先で音色一覧を開くボタン / 音色ごとの指定がある行の印 */
+.kbd-assign-tones { flex: none; padding: 1px 6px; font-size: 10px; }
+.kbd-assign-tones--custom, .kbd-assign-tone--per { border-color: var(--accent) !important; }
+.kbd-assign-pop-tones { font-size: 11px; padding: 1px 8px; flex: 1; text-align: left; }
+

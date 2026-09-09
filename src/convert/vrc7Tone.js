@@ -324,10 +324,11 @@
    *  衝突が無ければ何もしないので、既に借用層で解決済みの経路から呼んでも安全)
    * @returns {Array<string>} ヘッダコメントに足す説明(0件なら衝突無し)
    */
-  V.resolveForScore = function (scoreChannels, toneReg) {
+  V.resolveForScore = function (scoreChannels, toneReg, opt) {
     const notes = [];
     V.resolveConflicts(scoreChannels, toneReg, {
       onDemote: (ch, presetByTone) => {
+        if (opt && typeof opt.onDemote === 'function') opt.onDemote(ch, presetByTone); // 呼び出し元の追加報告(音色一覧の「→@n」)
         notes.push(`${ch.letter ? ch.letter + ': ' : ''}VRC7の自作音色(@0)は実機の制約でチップ全体に` +
           `1音色しか持てないため、同時に鳴るぶんに収まらないこのチャンネルは` +
           `いちばん近い内蔵音色(${V.presetListOf(presetByTone)})へ置き換えました。`);
