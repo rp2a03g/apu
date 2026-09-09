@@ -1078,9 +1078,63 @@
   //   ストリーム周波数はバイトレートなのでサンプルレートはその2倍。
   //   ★0xB7 直書きでデータを流す曲はストリーム打点が無いのでパッドは出ない(YMDAの
   //     「打点が無ければDAC未使用」と同じ扱い。分離レンダリングへは落とさない)。
-  //   32X PWM は12bit・L/R別ストリームで手元に検証できる曲が無く、従来どおり
-  //   分離レンダリング+オンセット検出に任せる(vgmPlayer.js 側は打点を記録済み)。
-  const DAC_ROW_CHIP = { YMDA: 'ym2612', OKI: 'okim6258' };
+  //   32X PWM(2026-09-10、段階3): 0xB2直書きの1本のストリームで開始アドレスのような同定情報が
+  //   無いので、キャプチャがサンプル列そのものを記録し(vgmPlayer.js pwmRec → data.pwmStream)、
+  //   無音の切れ目でクリップに分けて「クリップ1本=打点1個」にする(vgmPwmStreamDrumFor)。
+  //   数秒〜数十秒の連続音声はそのまま長いクリップになり、共通層 drumHits.js の分割
+  //   (自動/パネル下段の手動)で区間ごとの @DPCM とトリガーへ。行は PWL に集約(L/Rを1本にまとめる)
+  const DAC_ROW_CHIP = { YMDA: 'ym2612', OKI: 'okim6258', PWL: 'pwm' };
+  const PWM_SIL = 0.02;        // これ未満(±1基準)は無音
+  const PWM_GAP_SEC = 0.25;    // 無音がこれ以上続いたらクリップの切れ目
+  const PWM_MIN_SEC = 0.01;    // これより短いクリップは捨てる
+  function vgmPwmStreamDrumFor(chId, frameInfo) {
+    const ps = vgmCaptureMirror && vgmCaptureMirror.data && vgmCaptureMirror.data.pwmStream;
+    const log = ps && ps.log;
+    if (!log || !log.samples || !log.samples.length || !log.frameEnd || !log.frameEnd.length) return null;
+    const S = log.samples, FE = log.frameEnd, N = S.length;
+    const frameRate = frameInfo.frameRate;
+    const rate0 = log.rate > 0 ? log.rate : 22050;
+    const gap = Math.max(1, Math.round(PWM_GAP_SEC * rate0)), minLen = Math.max(8, Math.round(PWM_MIN_SEC * rate0));
+    const sil = Math.round(PWM_SIL * 32767);
+    // サンプル番号 → フレーム(frameEnd は各フレーム末尾の累積本数)
+    const frameOf = (i) => { let lo = 0, hi = FE.length - 1; while (lo < hi) { const m = (lo + hi) >> 1; if (FE[m] > i) hi = m; else lo = m + 1; } return lo; };
+    const U = MML.Emu && MML.Emu.SamplePitchUtil;
+    const samples = {}, hits = [], notes = [];
+    let seq = 0, clipNo = 0;
+    let i = 0;
+    while (i < N) {
+      while (i < N && Math.abs(S[i]) < sil) i++;      // 無音を飛ばす
+      if (i >= N) break;
+      const a = i;
+      let lastLoud = i;
+      while (i < N) {
+        if (Math.abs(S[i]) >= sil) lastLoud = i;
+        else if (i - lastLoud >= gap) break;
+        i++;
+      }
+      const b = lastLoud + 1;
+      if (b - a < minLen) continue;
+      const st = Math.min(frameOf(a), frameInfo.totalFrames);
+      const en = Math.max(st + 1, Math.min(frameOf(b - 1) + 1, frameInfo.totalFrames));
+      // レートはクリップ自身の「本数÷長さ」(直書きの間隔は曲中ほぼ一定。フレーム境界の丸めは数秒で1%未満)
+      const rate = (b - a) / Math.max(1 / frameRate, (en - st) / frameRate);
+      const pcm = new Float32Array(b - a);
+      for (let k = 0; k < pcm.length; k++) pcm[k] = S[a + k] / 32767;
+      // ハッシュは先頭8192サンプル固定(HES DDA と同じ理由: キャプチャ時間でクリップ長が変わっても同じ設定を引く)
+      const hn = Math.min(pcm.length, 8192);
+      const u8 = new Uint8Array(hn);
+      for (let k = 0; k < hn; k++) u8[k] = Math.max(0, Math.min(255, Math.round(pcm[k] * 127 + 128)));
+      const key = 'pwm:' + a;
+      clipNo++;
+      samples[key] = { key, pcm, rate, hash: (U && U.sampleHash) ? ('pwm-' + U.sampleHash(u8, 0, hn)) : null,
+                       chip: 'pwmstream', chans: [chId], label: 'pwm' + clipNo };
+      hits.push({ key, sampleKey: key, hash: samples[key].hash, pcm, rate, vol: 1,
+                  startFrame: st, endFrame: en, exactEnd: true, chId });
+      notes.push({ startSec: st / frameRate, endSec: en / frameRate, midi: null, drumKey: key, drumSeq: ++seq, vol: 1, freqSeq: [] });
+    }
+    if (!hits.length) return null;
+    return { hits, samples, notes };
+  }
   /** データバンクのバイト列 → Float32(-1..1)。OKIM6258はADPCM、PWMは2バイト12bit、他は符号なし8bit */
   function decodeDacBytes(bank, start, bytes, stepSize, chip) {
     if (chip === 'okim6258' && MML.Emu && MML.Emu.decodeOKIM6258Adpcm) {
@@ -1102,6 +1156,7 @@
   }
   function vgmDacDrumFor(chId, frameInfo) {
     const chip = DAC_ROW_CHIP[chId];
+    if (chip === 'pwm') return vgmPwmStreamDrumFor(chId, frameInfo);
     const dp = vgmCaptureMirror && vgmCaptureMirror.data && vgmCaptureMirror.data.dacpcm;
     const d = dp && dp.log; // 1段包んである理由は vgmPlayer.js collectDacHits 参照
     if (!chip || !d || !d.hits || !d.hits.length) return null;
@@ -7238,6 +7293,8 @@
     // 打点はDACストリームの開始アドレスから取れる(DAC_ROW_CHIP)。
     if (h.chips && h.chips.ym2612) map.YMDA = 'dpcm';
     if (h.chips && h.chips.okim6258) map.OKI = 'dpcm';
+    // 32X PWM(2026-09-10): 合成済みストリーム(音声/ドラム)は E(DPCM) へ。L/R は PWL に集約(vgmPwmStreamDrumFor)
+    if (h.chips && h.chips.pwm) map.PWL = 'dpcm';
     Plan.newFile('vgm', map);
   }
   // 現在の割当をVGM変換器のソースID体系で返す。既定と全く同じなら null(=構成から自動)

@@ -1177,11 +1177,12 @@
     // ストリーミングDAC(YM2612 DAC / OKIM6258)は旋律の変換対象ではないが、main.js が
     // ログから打点を取って options.drumHits で渡してくると E(DPCM) へ焼かれる(2026-09-05)。
     // その場合は「無視した」と言わない(X68000曲は音源がYM2151+OKIM6258しか無いので目立つ)
-    const dacDrumChip = { OKI: 'okim6258', YMDA: 'ym2612' };
+    const dacDrumChip = { OKI: 'okim6258', YMDA: 'ym2612', PWL: 'pwm' };
     const dacDrumChips = new Set((options.drumHits || []).map(x => dacDrumChip[x.chId]).filter(Boolean));
     const ignoredChips = h.usedChips.filter(ch => (!ch.impl || famOf[ch.id] !== family) && !dacDrumChips.has(ch.id)).map(ch => ch.name);
     const ignoredNotes = [];
     if (dacDrumChips.has('okim6258')) ignoredNotes.push('OKIM6258(ADPCM)の打点は E(DPCM) へ変換しています(DACストリームの開始アドレスでサンプルを同定)。');
+    if (dacDrumChips.has('pwm')) ignoredNotes.push('32X PWM のストリームは無音の切れ目でクリップに分けて E(DPCM) へ変換しています(長いクリップは区間に分割)。');
     // 音程が取れなかったサンプルの行方は options.cmd.DRUM で変わる(休符 / ドラムパートへ)
     const drumOn = MML.Convert.normalizeCmd(options.cmd).DRUM !== false;
     const noPitchNote = drumOn

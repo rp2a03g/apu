@@ -1356,9 +1356,32 @@
       // kss2mml/expansion/scc.js のデコーダにSCC+配置(0xB800台)を認識させる前置き書込み
       kssFrameWrites.push(kpk(0xBFFE, 0x20, 0), kpk(0xB000, 0x80, 0));
     }
+    // 32X PWM のサンプル書込みをそのまま記録する(2026-09-10、段階3)。PWMは32X側で合成済みの
+    // 1本のストリーム(0xB2直書きが主で、開始アドレスのような同定情報が無い)なので、DACストリームの
+    // 打点ログ(dacHits)では捕まえられない。ここでは L/R を1サンプルにまとめた12bit値を
+    // cycle で±1へ正規化した Int16 として全部持ち(After Burner Complete: 97万書込み≈1MB)、
+    // フレームごとの累積本数(frameEnd)と一緒に data.pwmStream として渡す。main.js
+    // vgmPwmStreamDrumFor が無音の切れ目でクリップに分け、長いものは DrumHits の分割へ流す
+    const pwmRec = data.pwm ? { buf: new Int16Array(1 << 16), n: 0, pendingL: null, frameEnd: [] } : null;
+    const pwmPush = (v) => {
+      if (pwmRec.n >= pwmRec.buf.length) { const nb = new Int16Array(pwmRec.buf.length * 2); nb.set(pwmRec.buf); pwmRec.buf = nb; }
+      pwmRec.buf[pwmRec.n++] = v;
+    };
+    const pwmRecWrite = (reg, data12) => {
+      const chip = player.adapterById.pwm && player.adapterById.pwm.chip;
+      const cyc = chip && chip.cycle > 0 ? chip.cycle : 4095;
+      const v = Math.max(-32767, Math.min(32767, Math.round((Math.min(data12, cyc) - cyc / 2) / (cyc / 2) * 32767)));
+      switch (reg & 0x0F) {
+        case 0x02: if (pwmRec.pendingL != null) pwmPush(pwmRec.pendingL); pwmRec.pendingL = v; break; // L(次のRと対にする)
+        case 0x03: if (pwmRec.pendingL != null) { pwmPush((pwmRec.pendingL + v) >> 1); pwmRec.pendingL = null; } else pwmPush(v); break;
+        case 0x04: if (pwmRec.pendingL != null) { pwmPush(pwmRec.pendingL); pwmRec.pendingL = null; } pwmPush(v); break; // モノ
+        default: break;
+      }
+    };
     player.onWrite = (id, a, b, c, d) => {
       switch (id) {
         case 'nes': nesFrameWrites.push({ addr: c, value: b }); nesRegs[c] = b; break;
+        case 'pwm': if (pwmRec) pwmRecWrite(a, b); break; // (reg, 12bit値)
         case 'ay8910': kssFrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
         // 2個目のチップ('_2')の内蔵SSG/AYは kss2 へ(1個目と同じ形)
         case 'ay8910_2': kss2FrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
@@ -1406,6 +1429,7 @@
         data.sn.snapshots.push(a2 ? s1.concat(Emu.snapshotSN76489(a2.chip, a2.clockHz)) : s1);
       }
       if (data.pwm) data.pwm.snapshots.push(Emu.snapshotPWM32X(player.adapterById.pwm.chip));
+      if (pwmRec) pwmRec.frameEnd.push(pwmRec.n);
       if (data.rf5c164) data.rf5c164.snapshots.push(Emu.snapshotRF5C164(player.adapterById.rf5c164.chip));
       if (data.rf5c68) data.rf5c68.snapshots.push(Emu.snapshotRF5C164(player.adapterById.rf5c68.chip));
       if (data.ym2612) {
@@ -1579,6 +1603,12 @@
     }
     collectUsedSamples(data, player);
     collectDacHits(data, player, FRAME_RATE);
+    // 32X PWM のサンプル列(上の pwmRec)。dacpcm と同じ理由でオブジェクトに1段包む
+    if (pwmRec && pwmRec.n > 0) {
+      if (pwmRec.pendingL != null) pwmPush(pwmRec.pendingL);
+      data.pwmStream = { log: { samples: pwmRec.buf.slice(0, pwmRec.n), frameEnd: Uint32Array.from(pwmRec.frameEnd),
+                                rate: pwmRec.n / Math.max(1, totalFrames) * FRAME_RATE } };
+    }
     // シーク用チェックポイント(未到達位置への初回シークを速くする)。dacpcmと同じ理由で
     // オブジェクトに1段包む(キャプチャ完了後に足すプロパティは finalMeta でしか届かず、
     // 配列のまま置くと丸ごと落ちる。capture-worker-multi-impl.js diffPayload)
