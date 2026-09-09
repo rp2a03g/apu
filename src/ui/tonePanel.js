@@ -44,11 +44,21 @@
   const SRC_KIND = { brr: 'brr', pcm: 'pcm', opn: 'fm4', opll: 'fm', wave: 'wave', duty: 'square', sq: 'square' };
   function srcKindOf(row) { return SRC_KIND[row.kind] || 'any'; }
 
-  /** 行の「効いている載せ先」: 上書きがあればそれ、無ければ使用chの借用先(複数なら先頭) */
+  /**
+   * 行の「効いている載せ先」: 上書きがあればそれ、無ければ使用chの借用先。
+   * ★あるchで絞って開いているとき(鍵盤の♪ボタン経由)は、そのchの借用先を優先する(2026-09-10)。
+   *   以前は「この音色を鳴らす全chのうち最初の非skip」を返していたため、三角波の行から開いたのに
+   *   別chのパルスが「chに従う(…)」に出て、音色指定の選択肢もそちらのものになっていた(ユーザー報告)。
+   */
   function effectiveTarget(row, st) {
     if (st && st.target) return st.target;
-    const c = (row.chans || []).find(x => x.target && x.target !== 'skip');
-    return c ? c.target : ((row.chans || [])[0] || {}).target || 'skip';
+    const chans = row.chans || [];
+    if (filterCh) {
+      const f = chans.find(x => x.id === filterCh);
+      if (f && f.target) return f.target;
+    }
+    const c = chans.find(x => x.target && x.target !== 'skip');
+    return c ? c.target : (chans[0] || {}).target || 'skip';
   }
 
   // ── アイコン(波形/FM/サンプル) ─────────────────────────────────────
@@ -225,8 +235,12 @@
       const tgtSel = row.querySelector('.tp-target');
       const eff = effectiveTarget(r, st);
       const cands = P ? P.targetsForKind(srcKindOf(r)) : [];
+      // 「chに従う」の中身: 絞り込み中はそのchの借用先(effectiveTarget)。使用chで借用先が
+      // 分かれているときは「他」を添えて、1つだけを指しているように見せない
+      const chTargets = [...new Set((r.chans || []).map(c => c.target).filter(t => t && t !== 'skip'))];
+      const baseT = effectiveTarget(r, null);
       const chTargetLabel = (r.chans || []).length
-        ? T('chに従う({t})', { t: P ? P.targetLabel(effectiveTarget(r, null)) : effectiveTarget(r, null) })
+        ? T('chに従う({t})', { t: (P ? P.targetLabel(baseT) : baseT) + (chTargets.length > 1 ? T(' 他') : '') })
         : T('chに従う');
       const tOpts = [['', chTargetLabel]];
       for (const t of cands) tOpts.push([t, (P ? P.targetLabel(t) : t) + ((t === 'dpcm' && (r.kind === 'brr' || r.kind === 'pcm')) ? T('(打楽器として)') : ''), P && P.colorOfTarget ? tintOf(P.colorOfTarget(t)) : '']);
@@ -242,9 +256,16 @@
       const toneSel = row.querySelector('.tp-tone');
       const toneKind = P && P.toneKindOfTarget ? P.toneKindOfTarget(eff, srcKindOf(r)) : null;
       if (!toneKind) {
+        // 音色が1つしかない借用先(2A03三角波/VRC6のこぎり波/FME-7)。選ぶものが無いので、
+        // 空欄で「未設定」に見せず「音源そのまま」と明示する(2026-09-10、ユーザー指摘)
         toneSel.style.display = 'none';
         const sp = document.createElement('span'); sp.className = 'tp-tone-none';
-        sp.textContent = eff === 'skip' ? '' : T('(音色の選択なし)');
+        if (eff === 'skip') sp.textContent = '';
+        else if (eff === 'dpcm') sp.textContent = T('ドラム(DPCM)パネルで設定');
+        else {
+          sp.textContent = T('音源そのまま({t})', { t: (P ? P.targetLabel(eff) : eff).replace(/^[A-Za-z]: /, '') });
+          sp.title = T('この借用先は音色が1つだけなので、音源の音色そのままで鳴ります');
+        }
         toneSel.parentNode.appendChild(sp);
       } else {
         const to = P.toneOptionsFor(toneKind, srcKindOf(r));

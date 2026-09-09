@@ -1578,7 +1578,7 @@ button.secondary {
 
 /* 「借用先/音色」列。割当表示ON(.kbd-left--assign)のときだけ現れる。
    ヘッダ(.kbd-h-assign)と行(.kbd-assign)は同じ幅にして列を揃える */
-.kbd-h-assign, .kbd-assign { display: none; flex: none; width: 200px; }
+.kbd-h-assign, .kbd-assign { display: none; flex: none; width: 230px; }
 .kbd-left--assign .kbd-h-assign { display: inline-block; }
 .kbd-left--assign .kbd-assign { display: flex; align-items: center; gap: 4px; }
 .kbd-assign-target { flex: none; width: 112px; }
@@ -2277,10 +2277,10 @@ button.secondary {
 }
 /* チャンネル割当の「借用先/音色」列(200px+gap6px=206px)を出す間は、その分だけ一覧を広げる
    (widthを持たない幅いっぱい配置(.kbd-left--flex)は対象外。keyboard.jsのASSIGN_COL_WIDTHと一致させること) */
-.kbd-left.kbd-left--assign:not(.kbd-left--flex) { width: 526px; }
+.kbd-left.kbd-left--assign:not(.kbd-left--flex) { width: 556px; }
 .kbd-left.kbd-left--assign.kbd-left--hes:not(.kbd-left--flex),
-.kbd-left.kbd-left--assign.kbd-left--gbs:not(.kbd-left--flex) { width: 576px; }
-.kbd-left.kbd-left--assign.kbd-left--spc:not(.kbd-left--flex) { width: 718px; }
+.kbd-left.kbd-left--assign.kbd-left--gbs:not(.kbd-left--flex) { width: 606px; }
+.kbd-left.kbd-left--assign.kbd-left--spc:not(.kbd-left--flex) { width: 748px; }
 /* 一覧が幅いっぱいに広がる配置(下配置で多段、別ウィンドウ配置)。固定幅の指定より後ろに置いて優先させる */
 .kbd-left.kbd-left--flex {
   width: auto;
@@ -3100,7 +3100,7 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 .tone-panel-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 8px; border-bottom: 1px solid var(--border); color: var(--text-muted); }
 .tone-panel-bar .tp-sort select { font-size: 11px; }
 .tp-filter-chip { font-size: 11px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--accent); background: rgba(58, 110, 165, 0.14); color: var(--text); cursor: pointer; }
-.tone-panel-head, .tone-panel-row { display: flex; align-items: center; gap: 6px; padding: 2px 8px; min-width: 780px; }
+.tone-panel-head, .tone-panel-row { display: flex; align-items: center; gap: 6px; padding: 2px 8px; min-width: 810px; }
 .tone-panel-head { font-weight: 700; color: var(--text-muted); border-bottom: 1px solid var(--border); }
 .tone-panel-row { border-bottom: 1px solid rgba(128, 128, 128, 0.14); }
 .tone-panel-row:hover { background: rgba(58, 110, 165, 0.08); }
@@ -3128,7 +3128,7 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
   cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 4px;
 }
 .tp-play:hover, .tp-clear:hover, .kbd-assign-tones:hover, .kbd-assign-pop-tones:hover { background: rgba(58, 110, 165, 0.18); color: var(--text); }
-.tp-c-target { flex: none; width: 150px; }
+.tp-c-target { flex: none; width: 178px; }
 .tp-c-tone   { flex: none; width: 190px; }
 .tp-c-target select, .tp-c-tone select { width: 100%; font-size: 11px; font-family: var(--mono); }
 .tp-tone-none { color: var(--text-muted); font-size: 10px; }
@@ -3136,7 +3136,9 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 .tp-c-note--warn { color: #c98a00; }
 .tp-clear { font-size: 11px; padding: 0 5px; }
 /* 鍵盤の割当セル: 音色セレクトが出ない借用先で音色一覧を開くボタン / 音色ごとの指定がある行の印 */
-.kbd-assign-tones { flex: none; padding: 1px 6px; font-size: 10px; }
+.kbd-assign-tones { flex: none; padding: 1px 5px; font-size: 10px; }
+/* 音色が1つしかない借用先(三角波/のこぎり波/FME-7)の注記。選ぶものが無いことを空欄で表さない */
+.kbd-assign-plain { flex: none; font-style: normal; font-size: 10px; color: var(--text-muted); white-space: nowrap; }
 .kbd-assign-tones--custom, .kbd-assign-tone--per { border-color: var(--accent) !important; }
 .kbd-assign-pop-tones { font-size: 11px; padding: 1px 8px; flex: 1; text-align: left; }
 

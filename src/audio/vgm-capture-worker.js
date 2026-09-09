@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-09 19:33:28
+ * Built by tools/build-capture-workers.ps1 at 2026-09-10 07:58:04
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-09 19:33:28';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-10 07:58:04';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -13177,9 +13177,9 @@
   // SPCボイス一覧(part/mute/ch/L/R/vol/env/wave/PM/note/freq/echo)の全列が収まる一覧幅。
   // style.cssの .kbd-left.kbd-left--spc { width } と一致させること
   const SPC_LIST_MIN_WIDTH = 512;
-  // チャンネル割当の「借用先/音色」列(.kbd-h-assign/.kbd-assign の200px + gap)。
+  // チャンネル割当の「借用先/音色」列(.kbd-h-assign/.kbd-assign の230px + gap)。
   // style.css の .kbd-left--assign の各幅(=各フォーマットの固定幅+この値)と一致させること
-  const ASSIGN_COL_WIDTH = 206;
+  const ASSIGN_COL_WIDTH = 236;
   // 一覧の固定幅(style.css の .kbd-left / --hes / --gbs / --spc と一致させること)
   const LIST_WIDTH_NSF = 320, LIST_WIDTH_PAN = 370;
 
@@ -13721,8 +13721,10 @@
       // 借用先にDPCMを選んだ行だけ出す「パッド」ボタン(ドラム(DPCM)パネルを開く)。
       // ツールバーではなくここに置く: DPCMを選んだ流れでそのまま詰められるため
       `<button type="button" class="kbd-assign-drum" style="display:none">${T('パッド')}</button>` +
-      // 音色セレクトが出ない借用先で音色一覧(音色ごとの載せ先)を開くボタン(_syncAssignSelects が出し分け)
-      `<button type="button" class="kbd-assign-tones" style="display:none">♪…</button>` +
+      // 音色が1つしかない借用先(三角波/のこぎり波/FME-7)に出す注記。空欄だと「未設定」に見えるため
+      `<i class="kbd-assign-plain" style="display:none"></i>` +
+      // 音色一覧(音色ごとの載せ先/音色)を開くボタン。指定がある行は件数を出す(_syncAssignSelects)
+      `<button type="button" class="kbd-assign-tones" style="display:none">♪</button>` +
       `</span>`;
   }
 
@@ -18078,12 +18080,24 @@
       // 音色ごとの指定(src/convert/toneSettings.js)を持つ音色の数。セレクト/ボタンの表示に添える
       const nTone = this.toneOverrideCount ? this.toneOverrideCount(el.id) : 0;
       const perToneLabel = T('音色ごとに指定…') + (nTone ? ` (${nTone})` : '');
-      const showTonesBtn = !toneKind && plan.editable() && target !== 'skip' && target !== 'dpcm' && plan.format() !== 'nsf';
+      // ★♪ボタンは「音色ごとの指定が使える行」には常に出す(2026-09-10)。以前は音色セレクトが
+      //   隠れる行だけだったので、音色一覧で指定してもチャンネル一覧の見た目が変わらなかった
+      //   (件数がセレクトの最終項目にしか出ず、開かないと見えない。ユーザー報告)
+      const perOk = plan.editable() && target !== 'skip' && target !== 'dpcm' && plan.format() !== 'nsf';
       if (el.tonesBtn) {
-        el.tonesBtn.style.display = showTonesBtn ? '' : 'none';
-        el.tonesBtn.textContent = nTone ? `♪(${nTone})` : '♪…';
+        el.tonesBtn.style.display = perOk ? '' : 'none';
+        el.tonesBtn.textContent = nTone ? `♪${nTone}` : '♪';
         el.tonesBtn.title = perToneLabel;
         el.tonesBtn.classList.toggle('kbd-assign-tones--custom', nTone > 0);
+      }
+      // 音色が1つしかない借用先は選ぶものが無い。音源そのままで鳴ることを明示する
+      if (el.plainEl) {
+        const showPlain = !toneKind && target !== 'skip' && target !== 'dpcm';
+        el.plainEl.style.display = showPlain ? '' : 'none';
+        if (showPlain) {
+          el.plainEl.textContent = T('音源そのまま');
+          el.plainEl.title = T('{t} は音色が1つだけなので、音源の音色そのままで鳴ります', { t: plan.targetLabel(target) });
+        }
       }
       if (!toneKind) { el.toneSel.style.display = 'none'; el.toneSig = ''; return; }
       el.toneSel.style.display = '';
@@ -18573,6 +18587,7 @@
           toneSel: row.querySelector('.kbd-assign-tone'),
           drumBtn: row.querySelector('.kbd-assign-drum'),
           tonesBtn: row.querySelector('.kbd-assign-tones'),
+          plainEl: row.querySelector('.kbd-assign-plain'),
           defaultTarget: ch.defaultTarget,
           target: ch.target,
         });
@@ -19380,6 +19395,7 @@
         //   あったがSPCボイス行では参照を持っておらず、Eを選んでもボタンが出なかった(2026-09-07修正)
         drumBtn: row.querySelector('.kbd-assign-drum'),
         tonesBtn: row.querySelector('.kbd-assign-tones'),
+        plainEl: row.querySelector('.kbd-assign-plain'),
         defaultTarget,
         target,
         letter,
@@ -19823,16 +19839,23 @@
     for (const ch of channels || []) if (ch && ch.srcIndex == null) ch.srcIndex = next++;
     return channels;
   };
+  // チャンネル文字の比較は必ずコードポイント順(A-Z のあとに a,b)。
+  // ★localeCompare は 'a' < 'B' と判定するので使わない: 実機ppmckの文字順は大文字A-Zのあとに
+  //   小文字a,b(拡張音源のE-Zab)なのに、出力が aAbBCDEFG と大小交互に並んで音源ごとの
+  //   まとまりが崩れていた(2026-09-10 ユーザー指摘)。同じ理由の前例が
+  //   src/convert/channelPlan.js sortByLetter にある
+  const byLetter = (a, b) => (a.letter < b.letter ? -1 : a.letter > b.letter ? 1 : 0);
+  MML.Convert.compareChannelLetter = byLetter;
   MML.Convert.sortChannelsByLetter = function (channels) {
     MML.Convert.stampChannelSource(channels);
-    channels.sort((a, b) => a.letter.localeCompare(b.letter));
+    channels.sort(byLetter);
     return channels;
   };
   MML.Convert.orderChannels = function (channels, order) {
     const out = (channels || []).slice();
     MML.Convert.stampChannelSource(out);
-    if (order === 'source') out.sort((a, b) => (a.srcIndex - b.srcIndex) || a.letter.localeCompare(b.letter));
-    else out.sort((a, b) => a.letter.localeCompare(b.letter));
+    if (order === 'source') out.sort((a, b) => (a.srcIndex - b.srcIndex) || byLetter(a, b));
+    else out.sort(byLetter);
     return out;
   };
   // 出力の書式(2026-09-08、src/convert/mmlEmit.js emitScore)。プリセットには含めない(内容でなく見た目)
@@ -23733,13 +23756,20 @@
     const all = MML.Hes2MmlExpansion.extractDdaClipsAll(snapshots, dpcmTrace, controlTrace, frameRate);
     const U = (global.Emu && global.Emu.SamplePitchUtil) || (MML.Emu && MML.Emu.SamplePitchUtil) || null;
     const samples = {};
+    const HASH_SAMPLES = 8192; // 下のハッシュ参照(≈1.7秒 @4.8kHz)
     const byIndex = all.clips.map((clip, i) => {
       const pcm = new Float32Array(clip.samples.length);
       for (let k = 0; k < clip.samples.length; k++) pcm[k] = (clip.samples[k] / 31) * 2 - 1;
       let hash = null;
       if (U && U.sampleHash) {
         const u8 = Uint8Array.from(clip.samples, (v) => v & 0x1F);
-        hash = 'dda-' + U.sampleHash(u8, 0, u8.length);
+        // ★先頭 HASH_SAMPLES サンプルだけで採る(2026-09-10)。DDAのストリーム(音声など)はクリップの
+        //   長さがキャプチャ時間で変わる(再生中の途中経過と変換用の全曲)ので、全長で採ると同じ音声が
+        //   別サンプル扱いになり、パッドの設定(名前/レート/分割)が引き継がれない。
+        //   範囲を「秒×推定レート」にしないこと: 推定レートはキャプチャごとに微妙に違い、範囲が
+        //   1サンプルずれるだけでハッシュが変わる(実測: 同じ曲で dda-9215cc13 と dda-9315cda6)。
+        //   打楽器の短い1発は従来どおり全長のハッシュ(=値は変わらない)
+        hash = 'dda-' + U.sampleHash(u8, 0, Math.min(u8.length, HASH_SAMPLES));
       }
       const key = clipKey(clip, i);
       // .dmc/パッドの既定ラベル: ROMオフセットの16進、バイト列同定は clip<n>
