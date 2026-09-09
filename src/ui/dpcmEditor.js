@@ -108,6 +108,7 @@
       rate,
       loop: def ? !!def.mode : false,
       dac: def ? def.dac : 64,
+      vol: 100,
       dirty: false, segs: [{ end: 1, rate, used: true }], pieces: [null],
       pieceIndices: [], pieceNos: [], pieceOf: null, pieceNo: 0,
       previewPcm: null, previewKey: null,
@@ -115,6 +116,11 @@
   }
   function hasData(L) { return !!(L.pcm || L.dmc); }
   function isDmcRow(L) { return !L.pcm && !!L.dmc; }
+  /** 変換ボリューム(%)を 1〜100 に丸める(ドラム(DPCM)パネルと同じ範囲。0は「鳴らさない」と紛らわしいので下限1) */
+  function clampVol(v) {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) ? Math.max(1, Math.min(100, n)) : 100;
+  }
   // 全体の長さ(元データのサンプル数。PCM行=元のレート、.dmc行=DMCサンプル)
   function srcLength(L) { return L.pcm ? L.pcm.length : (L.dmc ? L.dmc.length * 8 : 0); }
   function segStart(L, k) { return k > 0 ? L.segs[k - 1].end : 0; }
@@ -184,9 +190,11 @@
   function encodeSeg(L, k) {
     const [t0, t1] = segRange(L, k);
     if (L.pcm) {
-      const N = L.pcm.length;
+      // ★変換元は previewPcm(=ボリュームを掛けた後の波形)。上段の表示・原音の試聴と同じものを焼く
+      const src = previewPcm(L);
+      const N = src.length;
       const a = Math.round(t0 * N), b = Math.max(a + 1, Math.round(t1 * N));
-      const seg = L.pcm.subarray(a, b);
+      const seg = src.subarray(a, b);
       // 先頭サンプル値を$4011初期値にすると頭の追従ランプ(クリック)が消える(drumHits.js と同じ)
       const dac = clamp(Math.round((seg[0] + 1) / 2 * 127), 0, 127);
       const r = MML.Dpcm.encode(seg, L.srcRate, L.segs[k].rate, { startCounter: dac });
@@ -208,12 +216,21 @@
     return L.pieces[k];
   }
   function decodePiece(p) { return MML.Dpcm.decode(p.bytes, p.sampleCount, p.dac); }
-  // 上段(オリジナル)の波形。PCM行=元の音、.dmc行=復号した音。割合表示なのでレートが変わっても形は同じ
+  // 上段(オリジナル)の波形 = 「いまの設定で変換元として使われる音」。PCM行はボリュームを掛けた後、
+  // .dmc行は復号した音(既に1bit化済みなので掛けようがない=ボリュームは無効)。
+  // 割合表示なのでレートが変わっても形は同じ。encodeSeg もここを変換元にする
   function previewPcm(L) {
-    const key = L.pcm ? 'pcm' : ('dmc:' + dac0(L));
+    const key = L.pcm ? ('pcm:' + L.vol) : ('dmc:' + dac0(L));
     if (L.previewPcm && L.previewKey === key) return L.previewPcm;
-    if (L.pcm) L.previewPcm = L.pcm;
-    else if (L.dmc) L.previewPcm = MML.Dpcm.decode(L.dmc, L.dmc.length * 8, dac0(L));
+    if (L.pcm) {
+      const g = clampVol(L.vol) / 100;
+      if (g === 1) L.previewPcm = L.pcm;
+      else {
+        const out = new Float32Array(L.pcm.length);
+        for (let i = 0; i < out.length; i++) out[i] = L.pcm[i] * g;
+        L.previewPcm = out;
+      }
+    } else if (L.dmc) L.previewPcm = MML.Dpcm.decode(L.dmc, L.dmc.length * 8, dac0(L));
     else L.previewPcm = null;
     L.previewKey = key;
     return L.previewPcm;
@@ -262,6 +279,7 @@
           `<span class="de-c-file"></span>` +
           `<span class="de-c-name">${T('ファイル名')}</span>` +
           `<span class="de-c-play"><i>${T('オリジナル')}</i><i>DPCM</i></span>` +
+          `<span class="de-c-vol">${T('ボリューム')}</span>` +
           `<span class="de-c-rate">${T('DMCレート')}</span>` +
           `<span class="de-c-loop">${T('ループ')}</span>` +
           `<span class="de-c-size">${T('サイズ')}</span>` +
@@ -640,7 +658,9 @@
       const L = locals.get(index);
       if (!L) return;
       if (L.pieceOf != null) { playDpcm(index); return; }
-      if (L.pcm) playSequence([{ pcm: L.pcm, hz: L.srcRate, t0: 0, t1: 1 }]);
+      // 原音側にもボリュームを掛ける(previewPcm)。このボタンは「元のPCM」ではなく
+      // 「いまの設定で変換元として使われる音」の試聴なので(ドラム(DPCM)パネルと同じ考え方)
+      if (L.pcm) playSequence([{ pcm: previewPcm(L), hz: L.srcRate, t0: 0, t1: 1 }]);
       else if (L.dmc) playSequence([{ pcm: previewPcm(L), hz: rateHz(L.rate), t0: 0, t1: 1 }]); // .dmc は復号した音しか無い
     }
     function playDpcm(index) {
@@ -666,8 +686,8 @@
       if (!L || !hasData(L) || !L.segs[k]) return;
       const [t0, t1] = segRange(L, k);
       if (lane === 'raw') {
-        // .dmc行のオリジナルは復号した音そのもの(元PCMが存在しない)
-        const src = L.pcm || previewPcm(L);
+        // .dmc行のオリジナルは復号した音そのもの(元PCMが存在しない)。PCM行はボリューム込み
+        const src = previewPcm(L);
         if (!src) return;
         const N = src.length;
         const a = Math.round(t0 * N), b = Math.max(a + 1, Math.round(t1 * N));
@@ -738,6 +758,10 @@
             `<button type="button" class="de-play" data-mode="raw" title="${T('原音を鳴らす')}"${(hasData(L) && !child && !isDmcRow(L)) ? '' : ' disabled'}>♪</button>` +
             `<button type="button" class="de-play" data-mode="dpcm" title="${T('DPCM変換後を鳴らす')}"${(hasData(L) || child) ? '' : ' disabled'}>♪</button>` +
           `</span>` +
+          `<span class="de-c-vol">` +
+            `<input type="range" class="de-vol" min="1" max="100" step="1" value="${clampVol(L.vol)}"${(child || isDmcRow(L)) ? ' disabled' : ''}>` +
+            `<span class="de-vol-num">${clampVol(L.vol)}%</span>` +
+          `</span>` +
           `<span class="de-c-rate"><select class="de-rate" title="${T('全区間のDMCレートをまとめて変えます(区間ごとの指定は下段)')}"${child ? ' disabled' : ''}></select></span>` +
           `<span class="de-c-loop"><input type="checkbox" class="de-loop"${L.loop ? ' checked' : ''}${child ? ' disabled' : ''}></span>` +
           `<span class="de-c-size">${esc(sizeText(L, r.def))}</span>` +
@@ -762,6 +786,28 @@
           else nameEl.value = L.base ? L.base + '.dmc' : r.def.file;
         });
         nameEl.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') nameEl.blur(); });
+        // ★DPCMは1bitデルタ変調なので、振幅を下げるほど量子化ノイズが相対的に大きくなる。
+        //   効きすぎる前に気づけるよう、ドラム(DPCM)パネルと同じ25%未満の印を出す
+        const volEl = row.querySelector('.de-vol');
+        const volNum = row.querySelector('.de-vol-num');
+        const syncVolWarn = () => {
+          const v = clampVol(volEl.value);
+          volNum.textContent = v + '%';
+          volNum.classList.toggle('de-vol-num--warn', v < 25);
+          volNum.title = isDmcRow(L)
+            ? T('元が.dmc(1bit化済み)のデータは変換しないため、ボリュームは掛けられません')
+            : v < 25
+              ? T('小さくしすぎるとDPCMの量子化ノイズが目立ちます(25%未満)。元のサンプル側を下げるか、鳴らさない方が良い場合があります')
+              : T('変換時にこのサンプルへ掛ける音量。DPCMは実機で@vが効かないので、ここが唯一の音量調整です');
+        };
+        syncVolWarn();
+        volEl.addEventListener('input', syncVolWarn);
+        volEl.addEventListener('change', () => {
+          L.vol = clampVol(volEl.value);
+          L.dirty = true; L.previewKey = null; invalidateAll(L);
+          selected = r.index;
+          render();
+        });
         const loopEl = row.querySelector('.de-loop');
         loopEl.addEventListener('change', () => { L.loop = loopEl.checked; L.dirty = true; render(); });
         for (const b of row.querySelectorAll('.de-play')) {
@@ -1072,11 +1118,12 @@
       locals.clear(); selected = null;
       if (win.style.display !== 'none') { rebuildRows(); render(); }
     };
-    // ドラム(DPCM)パネルの「コンバータの音を使う」向け: 選択行の元PCM
+    // ドラム(DPCM)パネルの「コンバータの音を使う」向け: 選択行の変換元(ボリューム込み)。
+    // 渡した先のパッドにも独自のボリュームがあり、そちらは重ねて掛かる
     api.currentSource = function () {
       const L = selected != null ? locals.get(selected) : null;
       if (!L || L.pieceOf != null || !L.pcm) return null;
-      return { name: (L.base || 'dpcm') + '.dmc', pcm: L.pcm, rate: L.srcRate };
+      return { name: (L.base || 'dpcm') + '.dmc', pcm: previewPcm(L), rate: L.srcRate };
     };
     api.stop = stop;
     // 行へファイルを流し込む(ドロップ等の外部経路用。📂 と同じ処理)

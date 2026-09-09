@@ -319,6 +319,7 @@
     'この区間を試聴': 'Audition this segment',
     '反映に含める(外すとグレーになり、.dmcも定義も作られません)': 'Include in Apply (unchecked = gray; no .dmc or definition is written)',
     '使用': 'Use',
+    '元が.dmc(1bit化済み)のデータは変換しないため、ボリュームは掛けられません': 'A .dmc source is already 1-bit encoded and is not converted, so volume cannot be applied',
     '未使用': 'unused',
     'この区間のDMCレート': 'DMC rate of this segment',
     '前の区間と結合': 'Merge with the previous segment',
