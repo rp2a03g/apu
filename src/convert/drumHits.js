@@ -40,9 +40,6 @@
   const PHASE_QUANT_SEC = 1 / 480; // 位相の量子化(重複排除用。1/8フレーム)
   const VOL_QUANT = 16;            // 音量の量子化段数(重複排除用)
   const LEN_QUANT_SEC = 1 / 480;   // 長さの量子化(重複排除用)
-  const NORM_MAX_BOOST = 12;       // 曲全体の音量正規化(下 dpcm() 参照)の上限。SPC40曲の実測で
-                                   // 必要ゲインは中央5.3・90%点9.7・最大12.2だったので、そこまでは届かせる
-  const NORM_DEADBAND = 1.05;      // 同・これ未満の持ち上げは行わない(既に全振幅の形式の出力を変えない)
 
   /** サンプル列を srcRate から dstRate へ線形補間でリサンプル(区間 [from, from+len) 秒ぶん) */
   function resampleInto(out, outOff, outLen, pcm, srcRate, dstRate, fromSec, gain) {
@@ -171,8 +168,9 @@
       const v = p * (h.vol || 0);
       if (v > maxHitPeak) maxHitPeak = v;
     }
-    const wanted = maxHitPeak > 0 ? 1 / maxHitPeak : 1;
-    const normGain = wanted > NORM_DEADBAND ? Math.min(NORM_MAX_BOOST, wanted) : 1;
+    // 正規化の方針(上限・不感帯)は焼き込み経路で共有する(src/dpcm/dpcmConverter.js)。
+    // SPCの音階付きDPCM(spc2mml の brrToDpcm)も同じ関数を使う
+    const normGain = MML.Dpcm.normGain(maxHitPeak);
 
     // 区間の切れ目 = 打点の頭
     const onsets = Array.from(new Set(live0.map(h => h.startFrame))).sort((a, b) => a - b);

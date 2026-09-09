@@ -172,6 +172,21 @@
     return out;
   }
 
+  // ── 曲全体の音量正規化(焼き込み経路で共有する方針) ─────────────────────────
+  // DMC(DPCM)チャンネルには音量指定が無く、焼いた波形の振幅がそのまま再生音量になる。
+  // ところが素材の振幅スケールは形式・経路ごとに桁が違う(HESのDDAは5bit値を[-1,1]へ
+  // 写すので常にほぼ全振幅、SPCのBRRは実測でピーク中央値0.43)。そのままだと
+  // 「この形式だけDPCMが小さい」という食い違いになるので、曲内で最も大きい素材が
+  // 全振幅に届くゲインを全体へ掛ける(素材どうしの音量比は保つ)。
+  // 持ち上げのみ・上限あり(無音付近のノイズを増幅しないため)。
+  // 呼ぶ側は「曲内の最大ピーク(素材の音量係数を掛けた後)」を渡す。
+  const NORM_MAX_BOOST = 12;   // SPC40曲の実測で必要ゲインは中央5.3・90%点9.7・最大12.2
+  const NORM_DEADBAND = 1.05;  // これ未満の持ち上げはしない(既に全振幅の形式は出力不変)
+  function normGain(maxPeak) {
+    const wanted = maxPeak > 0 ? 1 / maxPeak : 1;
+    return wanted > NORM_DEADBAND ? Math.min(NORM_MAX_BOOST, wanted) : 1;
+  }
+
   /**
    * 16進数文字列ダンプ
    */
@@ -190,6 +205,9 @@
     resample,
     encode,
     decode,
-    hexDump
+    hexDump,
+    normGain,
+    NORM_MAX_BOOST,
+    NORM_DEADBAND
   };
 })(window);

@@ -561,9 +561,49 @@
   }
 
   // ── PCM → DPCM エンコード (MML.Dpcm.encode を利用) ─────────────────
-  function brrToDpcm(brrBytes, rateIndex) {
-    const pcm = decodeBrrBytes(brrBytes);
+  // gain: 焼く前に掛ける倍率(曲全体の音量正規化 × パッドのサンプル音量)。
+  // ★DMCには音量指定が無く、焼いた波形の振幅がそのまま再生音量になる。BRRの生振幅は
+  //   実測でピーク中央値0.43しかないので、正規化しないと他形式のDPCMより約7dB小さく鳴る
+  //   (2026-09-09、ドラム経路 drumHits.js には同じ正規化が既に入っていた)。
+  function brrToDpcm(brrBytes, rateIndex, gain) {
+    let pcm = decodeBrrBytes(brrBytes);
+    if (gain != null && gain !== 1) {
+      const out = new Float32Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) out[i] = Math.max(-1, Math.min(1, pcm[i] * gain));
+      pcm = out;
+    }
     return MML.Dpcm.encode(pcm, DSP_RATE, rateIndex != null ? rateIndex : 15);
+  }
+
+  /**
+   * 音階付きDPCM(BRRサンプルをそのまま焼く経路)の音量係数を、曲内の全サンプルぶんまとめて決める。
+   * ドラム経路(drumHits.js)と同じ方針で「曲内で最も大きいサンプルが全振幅に届く」ゲインを
+   * 全サンプル共通で掛ける(サンプルどうしの音量比は保つ)。パッドで指定したサンプル音量も
+   * ここで掛ける(既定100%ならゲイン1=出力不変)。
+   * @returns {Map<number, number>} srcn → 掛けるゲイン
+   */
+  function pitchedDpcmGains(brrSamples, srcns) {
+    const DS = (MML.Convert && MML.Convert.DrumSamples) || null;
+    const perSample = new Map(); // srcn → パッドのサンプル音量(0..1)
+    let maxPeak = 0;
+    for (const srcn of srcns) {
+      const brr = brrSamples[srcn];
+      if (!brr || !brr.bytes || !brr.bytes.length) continue;
+      const pcm = decodeBrrBytes(brr.bytes);
+      let vol = 1;
+      if (DS) {
+        const hash = MML.SPC2MML.brrHash(brr);
+        if (hash) vol = DS.clampVol(DS.get(hash).vol) / 100;
+      }
+      let p = 0;
+      for (let i = 0; i < pcm.length; i++) { const a = Math.abs(pcm[i]); if (a > p) p = a; }
+      perSample.set(srcn, vol);
+      if (p * vol > maxPeak) maxPeak = p * vol;
+    }
+    const norm = (MML.Dpcm && MML.Dpcm.normGain) ? MML.Dpcm.normGain(maxPeak) : 1;
+    const out = new Map();
+    for (const [srcn, vol] of perSample) out.set(srcn, vol * norm);
+    return out;
   }
 
   // ── SPC キャプチャ ───────────────────────────────────────────────────
@@ -1104,10 +1144,12 @@
     const srcnToDpcmIdx = {};
     const dmcFiles = [];
     let dpcmIdx = 0;
+    // 曲全体の音量正規化(+パッドのサンプル音量)。ドラム経路と同じ方針でここでも掛ける
+    const pitchedGain = pitchedDpcmGains(brrSamples, dpcmSrcns);
     for (const srcn of dpcmSrcns) {
       const brr = brrSamples[srcn];
       if (!brr || brr.bytes.length === 0) continue;
-      const result = brrToDpcm(brr.bytes, 15);
+      const result = brrToDpcm(brr.bytes, 15, pitchedGain.get(srcn));
       srcnToDpcmIdx[srcn] = dpcmIdx;
       dmcFiles.push({ name: `dpcm_srcn${String(srcn).padStart(3,'0')}.dmc`, bytes: result.bytes, rateIndex: result.rateIndex });
       dpcmIdx++;
