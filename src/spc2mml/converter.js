@@ -974,6 +974,7 @@
     // 戻しても250曲が2〜3倍/1/2〜1/3に振れた)。vgm2mmlは逆にドラムを外しているが、あちらは
     // サンプルPCMのリトリガー間隔が音符長として混ざる問題があったため。SPCの打点は元々ノート長そのもの
     const noteDurations = [];
+    const tempoChannels = []; // chooseTempoOctave 用(発音区間だけの簡易イベント列)
     for (let ch = 0; ch < 8; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip') continue;
@@ -982,10 +983,12 @@
         .concat(drumHitsAll.filter(h => h.ch === ch).map(h => ({ frame: h.startFrame, len: h.endFrame - h.startFrame })))
         .sort((a, b) => a.frame - b.frame);
       noteDurations.push(...MML.Convert.tempoMaterial(sounding.map(ev => ev.frame), sounding.map(ev => ev.len)));
+      tempoChannels.push({ events: sounding.map(ev => ({ start: ev.frame, end: ev.frame + ev.len, note: 60 })) });
     }
+    // 2倍/半分の決着は「実際に音価を書いてみて素直な方」(MML.Convert.chooseTempoOctave、src/convert/mmlEmit.js)
     const bpm = options.bpm
       ? MML.Convert.refineBpm(options.bpm, noteDurations, FPS_SPC)
-      : MML.Convert.detectBpm(noteDurations, FPS_SPC);
+      : MML.Convert.chooseTempoOctave(MML.Convert.detectBpm(noteDurations, FPS_SPC), tempoChannels, FPS_SPC, { totalFrames: FRAMES, cmd });
     // MML本文に埋め込まれるテンポは整数(t<n>)に丸められる(mmlEmit.js)。音長量子化の
     // グリッド(fpb)も同じ丸め後の値で計算しないと、書き出し時と再生(コンパイル)時で
     // 基準テンポが食い違い、打ち直しの多いパートで誤差が蓄積してドリフトする

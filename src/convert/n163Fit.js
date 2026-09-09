@@ -107,10 +107,14 @@
     for (const ch of list) for (const ev of ch.events) totalFrames = Math.max(totalFrames, ev.end || 0);
 
     const original = waveReg.waves.map(w => w.length);
+    // 音符の境界は MML へ書き出す量子化で ±LEN_SNAP フレームずれる(src/convert/duration.js)。
+    // 変換元の区間どおりに判定すると「変換では収まったのにコンパイルで落ちる」ので、
+    // その分だけ常駐区間を広げて判定する(実測: Dimahoo 01、chP の @N5 がフレーム315で置けない)
+    const margin = (MML.Convert.lenSnapOf ? MML.Convert.lenSnapOf(cmd) : 2) + 1;
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const nMap = {};
       waveReg.waves.forEach((w, i) => { nMap[i] = w; });
-      const res = MML.N163Alloc.allocate(letters, segmentsByChannel, nMap, totalFrames, numCh);
+      const res = MML.N163Alloc.allocate(letters, segmentsByChannel, nMap, totalFrames, numCh, { margin });
       if (!res.conflicts.length) break;
 
       // あふれた瞬間に載っている波形のうち、いちばん大きいものを半分にする。
@@ -119,7 +123,7 @@
       const resident = new Set();
       for (const L of letters) {
         for (const iv of MML.N163Alloc.extractLoadIntervals(segmentsByChannel[L], nMap, totalFrames)) {
-          if (iv.startFrame <= frame && frame < iv.endFrameExclusive) resident.add(iv.instrument);
+          if (iv.startFrame - margin <= frame && frame < iv.endFrameExclusive + margin) resident.add(iv.instrument);
         }
       }
       resident.add(res.conflicts[0].instrument); // 置けなかった本人も候補に含める

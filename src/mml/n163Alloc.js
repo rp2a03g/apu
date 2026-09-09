@@ -171,15 +171,20 @@
   //           byteOffset,byteLen,lengthByte}], conflicts: [{frame,channel,instrument,message}] }
   // numCh: 実機$7Fへ設定する有効ch数(compiler.js numN163Ch / ppmckDriver.js numN163Ch)。
   //        波形に使えるバイト数がこれで決まる(maxBytesFor)。省略時は8ch相当=64byte。
-  N163Alloc.allocate = function (letters, segmentsByChannel, nMap, totalFrames, numCh) {
+  // opts.margin(フレーム、省略時0): 各波形の常駐区間を前後にこのフレーム数だけ広げて判定する。
+  // 変換側(src/convert/n163Fit.js)が「MML に書き出した後の量子化で音符の境界が ±LEN_SNAP フレーム
+  // ずれても収まるか」を見るために使う(2026-09-09: DP量子化で境界が動いた Dimahoo が、変換では
+  // 収めたつもりがコンパイルで落ちた)。コンパイラ自身の呼び出しは省略(=正確な区間)
+  N163Alloc.allocate = function (letters, segmentsByChannel, nMap, totalFrames, numCh, opts) {
     const maxBytes = N163Alloc.maxBytesFor(numCh);
     const maxSampleLen = maxBytes * 2;
+    const margin = Math.max(0, (opts && opts.margin) | 0);
     const events = [];
     for (const ch of (letters || [])) {
       const intervals = N163Alloc.extractLoadIntervals((segmentsByChannel || {})[ch], nMap, totalFrames);
       for (const iv of intervals) {
-        events.push({ kind: 'acquire', frame: iv.startFrame, channel: ch, instrument: iv.instrument, iv });
-        events.push({ kind: 'release', frame: iv.endFrameExclusive, channel: ch, instrument: iv.instrument, iv });
+        events.push({ kind: 'acquire', frame: Math.max(0, iv.startFrame - margin), channel: ch, instrument: iv.instrument, iv });
+        events.push({ kind: 'release', frame: iv.endFrameExclusive + margin, channel: ch, instrument: iv.instrument, iv });
       }
     }
     // 同フレームではrelease→acquireの順に処理する(再利用機会を最大化するため)

@@ -157,9 +157,10 @@
       const sounding = ch.events.filter(ev => ev.note !== null);
       noteDurations.push(...MML.Convert.tempoMaterial(sounding.map(ev => ev.start), sounding.map(ev => ev.end - ev.start)));
     }
+    // 2倍/半分の決着は「実際に音価を書いてみて素直な方」(MML.Convert.chooseTempoOctave、src/convert/mmlEmit.js)
     const bpm = options.bpm
       ? MML.Convert.refineBpm(options.bpm, noteDurations, frameRate)
-      : MML.Convert.detectBpm(noteDurations, frameRate);
+      : MML.Convert.chooseTempoOctave(MML.Convert.detectBpm(noteDurations, frameRate), scoreChannels, frameRate, { totalFrames, cmd });
     // MML本文に埋め込まれるテンポは整数(t<n>)に丸められる(mmlEmit.js)。音長量子化の
     // グリッド(fpb)も同じ丸め後の値で計算しないと、書き出し時と再生(コンパイル)時で
     // 基準テンポが食い違い、打ち直しの多いパート(ノイズ等)で誤差が蓄積してドリフトする
@@ -273,9 +274,10 @@
       const sounding = ch.events.filter(ev => ev.note !== null);
       noteDurations.push(...MML.Convert.tempoMaterial(sounding.map(ev => ev.start), sounding.map(ev => ev.end - ev.start)));
     }
+    // 2倍/半分の決着は「実際に音価を書いてみて素直な方」(MML.Convert.chooseTempoOctave、src/convert/mmlEmit.js)
     const bpm = options.bpm
       ? MML.Convert.refineBpm(options.bpm, noteDurations, frameRate)
-      : MML.Convert.detectBpm(noteDurations, frameRate);
+      : MML.Convert.chooseTempoOctave(MML.Convert.detectBpm(noteDurations, frameRate), scoreChannels, frameRate, { totalFrames, cmd });
     const fpb = frameRate * 60 / Math.round(bpm);
 
     const chanDesc = Object.keys(r.placed)

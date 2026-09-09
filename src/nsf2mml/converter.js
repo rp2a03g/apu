@@ -842,9 +842,11 @@
       noteDurations.push(...MML.Convert.tempoMaterial(chEvents.map(e => e.start), chEvents.map(e => e.end - e.start)));
     }
 
+    // 2倍/半分の決着は「実際に音価を書いてみて素直な方」(MML.Convert.chooseTempoOctave、src/convert/mmlEmit.js)
     const bpm = options.bpm
       ? MML.Convert.refineBpm(options.bpm, noteDurations, FPS)
-      : MML.Convert.detectBpm(noteDurations, FPS);
+      : MML.Convert.chooseTempoOctave(MML.Convert.detectBpm(noteDurations, FPS),
+          timingChannels.map(events => ({ events })), FPS, { totalFrames: timeline.length, cmd });
     // MML本文に埋め込まれるテンポは整数(t<n>)に丸められる(mmlEmit.js)。音長量子化の
     // グリッド(fpb)も同じ丸め後の値で計算しないと、書き出し時と再生(コンパイル)時で
     // 基準テンポが食い違い、打ち直しの多いパートで誤差が蓄積してドリフトする

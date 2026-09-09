@@ -1,6 +1,8 @@
 /*
  * フォーマット非依存 音長量子化 (MIDI標準分解能 480 TPQN)
- * MML.Convert.framesToLengths(frames, fpb, carryIn) → { lengths: ['4','8.',...], carryOut }
+ * MML.Convert.framesToLengths(frames, fpb, carryIn, slackFrames) → { lengths: ['4','8.',...], carryOut }
+ * MML.Convert.quantizeSeq(durs, fpb, slackFrames) → lengths[][] (チャンネル全体の最適化、2026-09-09)
+ * MML.Convert.detectDefaultLength(events, fpb, slackFrames, plan) → l<n> の n
  *
  * fpb = 1拍(4分音符)あたりのフレーム数。呼び出し側が実効fpsと検出/指定bpmから
  * 算出して渡す。
@@ -31,6 +33,21 @@
  * 持ち越して吸収する(その場の1音は多少ズレても曲全体では帳尻が合う)。
  * 複付点(×1.75)はtickが整数になるものだけ採用する(64..=52.5tick等は
  * 480TPQNグリッドに乗らないため除外。単付点×1.5は全音価で整数)。
+ * 3連2分(3)と3連4分(6)は付点なしのみ(2026-09-09): 無いと 3連4分が `12..` と `8.` の交互
+ * (平均は合うが1音ずつ±2フレームずれる)、3連2分が `4&12` のタイに化けていた。付点つき
+ * (`3..`=1120tick 等)を許すと、2進の音符が持ち越し込みで `3..&24` のように食われる
+ * (After Burner で28箇所)ので入れない。
+ *
+ * quantizeSeq(2026-09-09、変換設定 LEN_DP「音長をチャンネル全体で最適化」): framesToLengths を
+ * 音符ごとに順に呼ぶ greedy は、直前の音符の余り(carry)だけを見て「今の音符に最も近い音価」を
+ * 選ぶので、速いテンポで16分音符が 5,5,5,6 フレームと揺れると 6 の音符が `24..`(140tick)に
+ * なり、3連8分の隣で持ち越しが逆向きに溜まると `16.` に化ける。quantizeSeq はチャンネルの
+ * 全イベント列を見渡し、「トークンの書きにくさ + 各境界の位置ずれ(フレーム)の二乗」の合計が
+ * 最小になる音価の割り当てを動的計画法で選ぶ(状態=書いた累積tick、遷移=1〜3トークンの和)。
+ * 合成曲の往復テスト(tools/headless/tempo-bench.js)で正しいテンポのときの音長一致 91%→97%。
+ * 境界の位置ずれは常に slackFrames 以内に収める(greedy は carry の超過分を捨てるので、曲が
+ * 進むと黙ってずれていく)。その厳密さの代償として、格子に乗らない音符が多い実曲では
+ * greedy より 3連系やタイが少し増える(忠実さ優先。プレーン譜面プリセットでは OFF)。
  */
 (function (global) {
   'use strict';
@@ -41,13 +58,16 @@
   const WHOLE = TPQN * 4;   // 全音符 = 1920 tick
   MML.Convert.TPQN = TPQN;  // 将来のMIDI入出力/ピアノロールと共有するための公開定数
 
-  const DIVISIONS = [1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 192];
+  const DIVISIONS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 192];
+  const NO_DOT_DIVISIONS = new Set([3, 6]); // 冒頭コメント参照
+  const TRIPLET_DIVISIONS = new Set([3, 6, 12, 24, 48, 96]);
 
   // 音価テーブル(整数tick)はfpbに依存しないためモジュールロード時に1回だけ構築
   const TABLE = [];
   for (const div of DIVISIONS) {
     const base = WHOLE / div;
     TABLE.push([base, String(div)]);
+    if (NO_DOT_DIVISIONS.has(div)) continue;
     TABLE.push([base * 1.5, `${div}.`]);
     if (Number.isInteger(base * 1.75)) TABLE.push([base * 1.75, `${div}..`]);
   }
@@ -108,20 +128,120 @@
     return { lengths: result, carryOut: slackFrames > 0 ? Math.max(-tol, Math.min(tol, carryOut)) : carryOut };
   };
 
+  // ── チャンネル全体の音長最適化(DP、冒頭コメント quantizeSeq) ─────────────────────
+  // トークン1個の「書きにくさ」: 素の音価 1、付点 +0.5/個、3連系 +0.15、64分以下 +1、192分 +1
+  function tokenCost(name) {
+    const m = /^(\d+)(\.*)$/.exec(name);
+    const den = parseInt(m[1], 10), dots = m[2].length;
+    let c = 1 + 0.5 * dots;
+    if (TRIPLET_DIVISIONS.has(den)) c += 0.15;
+    if (den >= 64) c += 1.0;
+    if (den >= 192) c += 1.0;
+    return c;
+  }
+  const TOKEN_COST = new Map(TABLE.map(([, n]) => [n, tokenCost(n)]));
+  MML.Convert.lengthTokenCost = (name) => TOKEN_COST.has(name) ? TOKEN_COST.get(name) : 3;
+
+  // 1〜3トークンの和 → 最小コストのトークン列(タイは1個につき +0.2)。fpb に依存しないので1回だけ構築
+  const SUMS = new Map();
+  function putSum(s, c, toks) { const e = SUMS.get(s); if (!e || c < e.c) SUMS.set(s, { c, toks }); }
+  for (let i = 0; i < TABLE.length; i++) {
+    const [t1, n1] = TABLE[i];
+    putSum(t1, TOKEN_COST.get(n1), [n1]);
+    for (let j = i; j < TABLE.length; j++) {
+      const [t2, n2] = TABLE[j];
+      putSum(t1 + t2, TOKEN_COST.get(n1) + TOKEN_COST.get(n2) + 0.2, [n1, n2]);
+      for (let k = j; k < TABLE.length; k++) {
+        const [t3, n3] = TABLE[k];
+        putSum(t1 + t2 + t3, TOKEN_COST.get(n1) + TOKEN_COST.get(n2) + TOKEN_COST.get(n3) + 0.4, [n1, n2, n3]);
+      }
+    }
+  }
+  const SUM_KEYS = [...SUMS.keys()].sort((a, b) => a - b);
+  function lowerBound(v) {
+    let lo = 0, hi = SUM_KEYS.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (SUM_KEYS[m] < v) lo = m + 1; else hi = m; }
+    return lo;
+  }
+
+  // durs: イベント列の長さ(フレーム)。戻り値は各イベントの音価トークン列(framesToLengths の lengths と同型)。
+  // 誤差コスト = ERR_COST × (境界のずれフレーム)²、境界のずれは ±tol(slackFrames、最低1フレーム)以内に制限。
+  // 状態数は各段 MAX_STATES に刈り込む(実測: 状態は多くても数十)
+  const ERR_COST = 0.5, MAX_STATES = 64;
+  MML.Convert.quantizeSeq = function (durs, fpb, slackFrames) {
+    const tpf = TPQN / fpb;
+    const tol = Math.max(SLACK, Math.max(1, slackFrames || 0) * tpf);
+    const n = durs.length;
+    const P = new Array(n + 1); // 元曲の累積位置(tick)
+    P[0] = 0;
+    for (let i = 0; i < n; i++) P[i + 1] = P[i] + Math.max(0, durs[i]) * tpf;
+
+    let states = new Map([[0, { cost: 0, prev: null, toks: null }]]); // 書いた累積tick → 最小コスト
+    const hist = new Array(n);
+    for (let i = 0; i < n; i++) {
+      if (!(durs[i] > 0)) { hist[i] = null; continue; }
+      const next = new Map();
+      const lo = P[i + 1] - tol, hi = P[i + 1] + tol;
+      for (const [w, st] of states) {
+        let found = false;
+        for (let k = lowerBound(lo - w); k < SUM_KEYS.length && w + SUM_KEYS[k] <= hi; k++) {
+          const S = SUM_KEYS[k], e = SUMS.get(S);
+          const ef = (w + S - P[i + 1]) / tpf;
+          const c = st.cost + e.c + ERR_COST * ef * ef;
+          const cur = next.get(w + S);
+          if (!cur || c < cur.cost) next.set(w + S, { cost: c, prev: w, toks: e.toks });
+          found = true;
+        }
+        if (!found) {
+          // 窓内に和が無い(192分未満の極端に短いイベント等): 最も近い和で強行し、重いペナルティ
+          const r = Math.max(QUANTUM, P[i + 1] - w);
+          let k = Math.min(SUM_KEYS.length - 1, lowerBound(r));
+          if (k > 0 && Math.abs(SUM_KEYS[k - 1] - r) < Math.abs(SUM_KEYS[k] - r)) k--;
+          const S = SUM_KEYS[k], e = SUMS.get(S);
+          const c = st.cost + e.c + 3;
+          const cur = next.get(w + S);
+          if (!cur || c < cur.cost) next.set(w + S, { cost: c, prev: w, toks: e.toks });
+        }
+      }
+      if (next.size > MAX_STATES) {
+        states = new Map([...next].sort((a, b) => a[1].cost - b[1].cost).slice(0, MAX_STATES));
+      } else states = next;
+      hist[i] = states;
+    }
+
+    let bestKey = null, bestCost = Infinity;
+    for (const [w, st] of states) if (st.cost < bestCost) { bestCost = st.cost; bestKey = w; }
+    const out = new Array(n);
+    let w = bestKey;
+    for (let i = n - 1; i >= 0; i--) {
+      if (!hist[i]) { out[i] = [TABLE[TABLE.length - 1][1]]; continue; }
+      const st = hist[i].get(w);
+      out[i] = st.toks.slice();
+      w = st.prev;
+    }
+    return out;
+  };
+
   // events(隙間補完済み、note=null休符含む)を通しでframesToLengths相当の量子化を行い、
   // 生成される音価(付点は無視し数値部分のみ)のうち最も出現回数が多いものを返す。
   // l<n>(デフォルト音長)をチャンネル先頭で宣言し、以後その値と一致する音符/休符は
   // 数値部分を省略してMMLを見やすくするための下調べに使う(呼び出し側の
   // src/convert/mmlEmit.js参照)。該当データが無ければMML既定値の4を返す。
-  MML.Convert.detectDefaultLength = function (events, fpb, slackFrames) {
+  // plan(任意): quantizeSeq の結果(イベント → lengths の Map)。あればそれを数える
+  MML.Convert.detectDefaultLength = function (events, fpb, slackFrames, plan) {
     const counts = new Map();
     let carry = 0;
     const sorted = (events || []).slice().sort((a, b) => a.start - b.start);
     for (const ev of sorted) {
       const dur = ev.end - ev.start;
       if (dur <= 0) continue;
-      const { lengths, carryOut } = MML.Convert.framesToLengths(dur, fpb, carry, slackFrames);
-      carry = carryOut;
+      let lengths;
+      if (plan && plan.has(ev)) lengths = plan.get(ev);
+      else {
+        const q = MML.Convert.framesToLengths(dur, fpb, carry, slackFrames);
+        carry = q.carryOut;
+        lengths = q.lengths;
+      }
       for (const l of lengths) {
         const m = /^(\d+)/.exec(l);
         if (m) counts.set(m[1], (counts.get(m[1]) || 0) + 1);

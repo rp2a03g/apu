@@ -1,75 +1,115 @@
 /*
- * フォーマット非依存 BPM 自動検出
- * MML.Convert.detectBpm(durationFrames, fps) → bpm(number)
+ * フォーマット非依存 BPM 自動検出 (2026-09-09 全面改訂: 混合モデル尤度方式)
+ * MML.Convert.detectBpm(durationFrames, fps) → bpm(number、小数)
  * MML.Convert.refineBpm(userBpm, durationFrames, fps) → bpm(number)
+ * MML.Convert.tempoPrior(bpm) → テンポ事前分布のペナルティ(mmlEmit.js chooseTempoOctave と共有)
  * MML.Convert.onsetIntervals(startFrames) → number[]
+ * MML.Convert.tempoMaterial(startFrames, durationFrames) → number[]
  *
- * グリッド探索(フレーム/拍 fpq を1〜120で全探索)で「音価の何%がその
- * グリッドの整数倍に近いか(カバー率)」を求める(2026-09-08 から一致1件を、その音価が
- * 素直な音符で書けるかの重み simplicity で数える。材料は音長でなく発音開始間隔 IOI、
- * tempoMaterial 参照)。
+ * 材料は発音開始間隔(IOI、tempoMaterial 参照)。候補テンポごとに「各 IOI が
+ *   IOI = k × (4分音符のフレーム数 / 24) + ジッタ(σ フレーム) 、または外れ値(ε)
+ * という混合分布からどれだけ出やすいか」の対数尤度を合計し、最大の候補を採る。
+ * k(4分音符=24 のグリッド単位)ごとに音価としての事前重み NOTE_WEIGHTS を持つ:
+ *   4分/8分/16分=1.0(オクターブ中立)、32分・付点・2分/全音符は低め、
+ *   3連系(k=8,4,16 …)はさらに低め、タイ2個相当(k=30,15,…)は僅か。
  *
- * 旧実装は「閾値を超えた候補のうち最も粗いグリッド」を採用していたが、
- * これには実測済みの構造的欠陥が2つあった:
- *  (1) 曲の最短音符が8分以上だと、真のテンポの半分のグリッド(tick2倍)でも
- *      カバー率100%になり「より粗い」ため常に半テンポ(t60等)が選ばれる。
- *  (2) アルペジオ/効果音の1〜2フレーム音価が混入すると、それを説明できる
- *      極端に細かいグリッドだけが閾値を超え、倍々テンポ(t360等)が選ばれる。
- * 対策として、
- *  - 1〜2フレームの音価(通常テンポの64分未満=ほぼ確実にアルペジオ)は除外し、
- *  - 候補選択を「カバー率 − 典型テンポ帯中心からの対数距離ペナルティ」の
- *    合成スコア最大化に変更した。倍/半テンポは音楽的には同じ演奏の記譜違い
- *    (8分⇔16分)なので、カバー率が同等なら典型帯(130bpm近辺)に寄せるのが安全。
- *    ペナルティ係数を小さくしてあるため、本当に速い/遅いグリッドしか音価を
- *    説明できない曲ではカバー率差が勝ち、極端なテンポもそのまま採用される。
+ * 旧実装(2026-09-08 まで)は「fpq/8 = 1/32音符グリッドに IOI の何%が乗るか」のカバー率で、
+ * 実測で次の構造的欠陥があった(合成36曲の往復テストで正解 10/36、
+ * tools/headless/tempo-bench.js で再現できる):
+ *  (1) グリッドが2進固定なので三連(fpq/3)は原理的に乗らない。三連だけの音列では
+ *      当てられず、三連が半分以上の曲は全滅していた。→ グリッドを 1/24 拍にし、
+ *      三連位置は事前重みを下げて「説明はできるが2進より不利」にする。
+ *  (2) マッチ許容誤差がグリッド比例(tick×0.15)だったため、±1フレームのジッタがある曲
+ *      (SPC のタイマー駆動ドライバ等)は粗いグリッド=半分のテンポに転んでいた
+ *      (In the Wind: 56、真は113)。→ ジッタは絶対量 σ=0.6 フレームの正規分布で扱う。
+ *  (3) 説明できない IOI(アルペジオ/効果音の残り)が細かいグリッド=2倍テンポを有利にする。
+ *      → 外れ値の床 ε=0.1 と、IOI 値ごとの出現数を √ で圧縮(ハイハット175連打が
+ *      メロディ30音を押し流さないように)。4フレーム未満の IOI は材料から外す。
+ *  (4) 2倍/半分は音楽的に同じ演奏の記譜違いで、データだけでは決まらない。
+ *      → 典型テンポ帯の事前分布 PRIOR_QUAD × log2(bpm/125)² を足す。最終決定は
+ *      各 *2mml が MML.Convert.chooseTempoOctave(mmlEmit.js)で「B/2・B・2B で実際に
+ *      音価を書いてみて、譜面の複雑さ+この事前分布が最小のもの」を選ぶ。
+ *
+ * 探索は整数 BPM 40〜400 の全候補(小数テンポも隣の整数が拾う)→ 最良候補の近傍 ±1.5% を
+ * 小数 fpq で精密化(refineFpq)し、小数のまま返す。呼び出し側は MML 本文に埋め込む
+ * 整数 t<n> へ丸め、音長量子化の fpb も同じ丸め後の値で計算する(書き出し時と再生時の
+ * 基準テンポを揃える、[[tempo-rounding-drift-future-issue]])。精密化は「149 と 150 の
+ * どちらに丸めるべきか」を尤度で決めるためにある。
+ *
+ * 処理時間: 実測 5ms(整数探索)+30ms(精密化)/60秒キャプチャ。
  *
  * それでも自動検出には限界があるため、ユーザーが聴感で入力/タップしたBPMを
- * refineBpm()でエミュレータのフレームグリッド(fps*60/fpq, fpq整数)に吸着補正
- * して使う経路を用意した。ドライバのテンポはフレームカウンタ駆動が普通なので
- * 真のBPMはこの格子上にあり、タップの±数%誤差はここで吸収できる。
+ * refineBpm()で近傍の最良テンポへ吸着補正して使う経路を用意した。
  */
 (function (global) {
   'use strict';
   const MML     = global.MML     = global.MML     || {};
   MML.Convert   = MML.Convert   || {};
 
-  const REL_TOLERANCE      = 0.15; // マッチ判定の許容誤差(tickに対する割合)
-  const COVERAGE_THRESHOLD = 0.85; // 「グリッドで説明できた」と見なす目安(refineBpmで使用)
-  const LOG_CENTER         = 130;  // 典型的なゲーム音楽テンポ帯の中心
-  const LOG_PENALTY        = 0.10; // 中心から1オクターブ(×2/÷2)離れる毎のカバー率換算減点
+  // 音価の事前重み(k = 4分音符を24としたグリッド単位)
+  const NOTE_WEIGHTS = [
+    [24, 1.0], [12, 1.0], [6, 1.0],              // 4分 8分 16分
+    [3, 0.3],                                    // 32分
+    [48, 0.7], [96, 0.35],                       // 2分 全音符
+    [36, 0.5], [18, 0.5], [9, 0.35], [72, 0.25], // 付点4分 付点8分 付点16分 付点2分
+    [8, 0.35], [4, 0.25], [16, 0.25], [2, 0.05], // 3連8分 3連16分 3連4分 3連32分
+    [30, 0.1], [15, 0.1], [42, 0.1], [60, 0.1], [21, 0.08], [54, 0.08], [66, 0.08], [84, 0.08], // タイ2個相当
+  ];
+  const SIGMA     = 0.6;   // ジッタ(フレーム)。ドライバの小数テンポ/タイマー駆動で IOI は ±1 フレーム揺れる
+  const EPS       = 0.1;   // 外れ値の床(どの音価でも説明できない IOI の確率)
+  const MIN_IOI   = 4;     // これ未満のフレーム数はアルペジオ/効果音として材料から外す
+  const MAX_IOI   = 600;
+  const COUNT_POW = 0.5;   // IOI 値ごとの出現数の圧縮(√)
+  const PRIOR_CENTER = 125, PRIOR_QUAD = 0.8; // テンポ事前分布: PRIOR_QUAD × log2(bpm/PRIOR_CENTER)²
+  const BPM_MIN = 40, BPM_MAX = 400;
 
-  function matches(d, tick, tol) {
-    const n = Math.round(d / tick);
-    return n >= 1 && Math.abs(d - n * tick) < tol;
+  // テンポ事前分布のペナルティ(対数尤度と同じ単位、1音あたり)
+  MML.Convert.tempoPrior = function (bpm) {
+    const d = Math.log2(bpm / PRIOR_CENTER);
+    return PRIOR_QUAD * d * d;
+  };
+
+  // IOI の平坦配列 → [値, 重み] の一覧(値ごとにまとめ、出現数を pow で圧縮)
+  function ioiItems(durationFrames, pow) {
+    const hist = new Map();
+    for (const raw of durationFrames || []) {
+      const d = Math.round(raw);
+      if (d >= MIN_IOI && d <= MAX_IOI) hist.set(d, (hist.get(d) || 0) + 1);
+    }
+    const items = [];
+    let wsum = 0;
+    for (const [d, c] of hist) { const w = Math.pow(c, pow); items.push([d, w]); wsum += w; }
+    return { items, wsum };
   }
 
-  // 音価の「書きやすさ」(2026-09-08): グリッドの何tick(1/32単位)かを n として、2 の冪を除いた
-  // 奇数部 m が 1(音符1個)→1.0、3(付点)→0.85、5・7(タイ/複付点)→0.6、それ以上→0.4。
-  // 細かいグリッド(tick 2〜3 フレーム)は整数の音価をほとんど何でも「説明」できてしまうので
-  // カバー率だけでは常に勝つ(Wing Defenders: 真の t71 より t200 が選ばれ、譜面が付点と
-  // タイだらけになる)。そのグリッドで音符がどれだけ素直に書けるかを一致に掛けて選ぶ。
-  // 倍/半テンポは n が 2 倍/半分になるだけで m は変わらないので、その判定は従来どおり
-  // 典型テンポ帯の事前分布(LOG_PENALTY)に任せる
-  function simplicity(n) {
-    let m = Math.max(1, n);
-    while (m % 2 === 0) m /= 2;
-    return m === 1 ? 1.0 : m === 3 ? 0.85 : (m === 5 || m === 7) ? 0.6 : 0.4;
+  // 「4分音符 = fpq フレーム」のときの平均対数尤度
+  function meanLogLik(items, wsum, fpq) {
+    const tick = fpq / 24;
+    let ll = 0;
+    for (const [d, wt] of items) {
+      let p = EPS;
+      for (const [k, w] of NOTE_WEIGHTS) {
+        const z = (d - k * tick) / SIGMA;
+        if (z > -5 && z < 5) p += w * Math.exp(-0.5 * z * z);
+      }
+      ll += wt * Math.log(p);
+    }
+    return ll / wsum;
   }
 
-  function coverageFor(ds, fpq) {
-    const tick = fpq / 8; // 最小グリッド = 1/32音符
-    const tol  = tick * REL_TOLERANCE;
-    let matched = 0;
-    for (const d of ds) if (matches(d, tick, tol)) matched += simplicity(Math.round(d / tick));
-    return matched / ds.length;
-  }
-
-  // 1〜2フレームはアルペジオ/効果音(通常テンポでは64分音符未満)なので
-  // テンポ検出の材料から外す。混入すると細かすぎるグリッドを誤選択する。
-  function cleanDurations(durationFrames) {
-    return (durationFrames || [])
-      .map(d => Math.round(d))
-      .filter(d => d >= 3 && d <= 600);
+  // 整数 BPM 候補の近傍(±1.5%)で 4分音符のフレーム数(小数)を細かく総当たりし、尤度最大の値を返す。
+  // 精密化は出現数を圧縮しない(pow=1)全 IOI で行う(格子そのものを合わせる段なので数の多い音符が正)
+  function refineFpq(durationFrames, fps, bpm) {
+    const { items, wsum } = ioiItems(durationFrames, 1);
+    const f0 = fps * 60 / bpm;
+    if (wsum < 2) return f0;
+    let best = null;
+    const step = f0 * 0.0002;
+    for (let f = f0 * 0.985; f <= f0 * 1.015; f += step) {
+      const ll = meanLogLik(items, wsum, f);
+      if (!best || ll > best.ll) best = { f, ll };
+    }
+    return best.f;
   }
 
   // 発音開始時刻の列 → 隣接する発音開始間隔(IOI)の列。
@@ -98,57 +138,42 @@
   };
 
   MML.Convert.detectBpm = function (durationFrames, fps) {
-    const ds = cleanDurations(durationFrames);
-    if (ds.length < 2) return 120;
+    const { items, wsum } = ioiItems(durationFrames, COUNT_POW);
+    if (wsum < 2) return 120;
 
-    let best = null; // { fpq, bpm, coverage, score }
-    for (let fpq = 1; fpq <= 120; fpq++) {
-      const bpm = fps * 60 / fpq;
-      if (bpm < 40 || bpm > 400) continue;
-
-      const tick = fpq / 8;
-      if (tick < 0.4) continue;
-
-      const coverage = coverageFor(ds, fpq);
-      const score = coverage - LOG_PENALTY * Math.abs(Math.log2(bpm / LOG_CENTER));
-      if (!best || score > best.score) best = { fpq, bpm, coverage, score };
+    let best = null; // { bpm, score }
+    for (let bpm = BPM_MIN; bpm <= BPM_MAX; bpm++) {
+      const score = meanLogLik(items, wsum, fps * 60 / bpm) - MML.Convert.tempoPrior(bpm);
+      if (!best || score > best.score) best = { bpm, score };
     }
-    if (!best) return 120;
-
-    // 丸めずに返す(重要): 真のグリッドは「4分音符=整数フレーム(fpq)」なので
-    // 正確なBPMは fps*60/fpq という端数付きの値(例: 60.0988*60/30=120.198)。
-    // これを整数に丸めてから呼び出し側で fpb=fps*60/bpm と逆算すると
-    // fpb が 30.0494 のような非整数になり、音長量子化のグリッドが曲の実際の
-    // フレーム格子から毎拍0.05フレームずつズレて、連打パートに周期的な
-    // 補正音符(16..&96等)が混入する。表示用の丸めは表示側で行うこと。
-    return Math.max(40, Math.min(400, best.bpm));
+    // 小数のまま返す(重要): 真のグリッドは「4分音符=整数フレーム」であることが多く、
+    // 正確なBPMは fps*60/fpq という端数付きの値(例: 60.0988*60/24=150.25)。
+    // 呼び出し側が整数へ丸めて t<n> と fpb の両方に使う(冒頭コメント参照)。
+    const fpq = refineFpq(durationFrames, fps, best.bpm);
+    return Math.max(BPM_MIN, Math.min(BPM_MAX, fps * 60 / fpq));
   };
 
-  // ユーザー指定(数値入力/タップ)のBPMを、音価データと突き合わせて
-  // 近傍(±6%)のフレームグリッドBPMへ吸着させる。グリッド上のどの候補も
-  // 指定値の周囲の音価をうまく説明できない場合は指定値をそのまま返す
-  // (SPC等、ドライバが独自タイマー駆動でフレーム格子に乗らない場合もあるため)。
+  // ユーザー指定(数値入力/タップ)のBPMを、IOI と突き合わせて近傍(±6%)の最良テンポへ
+  // 吸着させる。指定値の周囲に材料をよく説明する候補が無い(尤度が指定値と同程度)なら
+  // 指定値をそのまま返す(SPC等、ドライバが独自タイマー駆動でフレーム格子に乗らない場合もあるため)。
   MML.Convert.refineBpm = function (userBpm, durationFrames, fps) {
     let bpm = Number(userBpm);
     if (!isFinite(bpm) || bpm <= 0) return 120;
-    bpm = Math.max(40, Math.min(400, bpm));
+    bpm = Math.max(BPM_MIN, Math.min(BPM_MAX, bpm));
 
-    const ds = cleanDurations(durationFrames);
-    if (ds.length < 2) return Math.round(bpm);
+    const { items, wsum } = ioiItems(durationFrames, COUNT_POW);
+    if (wsum < 2) return Math.round(bpm);
 
-    let best = null; // { bpm, coverage }
-    for (let fpq = 1; fpq <= 120; fpq++) {
-      const gridBpm = fps * 60 / fpq;
-      if (Math.abs(gridBpm / bpm - 1) > 0.06) continue;
-      if (fpq / 8 < 0.4) continue;
-      const coverage = coverageFor(ds, fpq);
-      if (!best || coverage > best.coverage) best = { bpm: gridBpm, coverage };
+    const base = meanLogLik(items, wsum, fps * 60 / bpm);
+    let best = null;
+    for (let cand = Math.ceil(bpm * 0.94); cand <= Math.floor(bpm * 1.06); cand++) {
+      const ll = meanLogLik(items, wsum, fps * 60 / cand);
+      if (!best || ll > best.ll) best = { bpm: cand, ll };
     }
-
-    // グリッド候補が指定値と同等以上に音価を説明できるならグリッドへ吸着。
-    // detectBpm同様、丸めると量子化グリッドがズレるため正確な値のまま返す。
-    if (best && best.coverage >= COVERAGE_THRESHOLD * 0.8) {
-      return Math.max(40, Math.min(400, best.bpm));
+    // 指定値より明らかに(1音あたり 0.05 nat 以上)良く説明できる候補があればそちらへ吸着
+    if (best && best.ll > base + 0.05) {
+      const fpq = refineFpq(durationFrames, fps, best.bpm);
+      return Math.max(BPM_MIN, Math.min(BPM_MAX, fps * 60 / fpq));
     }
     return bpm;
   };

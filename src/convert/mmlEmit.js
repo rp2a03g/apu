@@ -76,6 +76,61 @@
     return parseInt(m[1], 10) === defaultLen ? m[2] : lenStr;
   }
 
+  // ── 音長の計画(LEN_DP「音長をチャンネル全体で最適化」、src/convert/duration.js quantizeSeq) ──
+  // events(隙間補完・小節分割済み)ごとの音価トークン列を Map で返す。OFF なら null
+  // (renderEvents は従来どおり framesToLengths を音符ごとに呼ぶ)
+  function buildLengthPlan(events, fpb, lenSnap, cmd) {
+    if (!MML.Convert.lenDpOf(cmd) || !MML.Convert.quantizeSeq) return null;
+    const durs = events.map(e => e.end - e.start);
+    const plan = MML.Convert.quantizeSeq(durs, fpb, lenSnap);
+    const map = new Map();
+    events.forEach((e, i) => { if (durs[i] > 0) map.set(e, plan[i]); });
+    return map;
+  }
+
+  // ── テンポの2倍/半分の決定(2026-09-09、src/convert/bpm.js 冒頭コメント(4)) ──────────
+  // detectBpm が返した bpm と、その半分・2倍のうち [50,300] に入る候補それぞれで実際に音価を
+  // 書いてみて(隙間補完 → 量子化、小節分割はしない)、「音符1個あたりの音価トークンの書きにくさ
+  // (duration.js lengthTokenCost、タイ1個 +0.2)+テンポ事前分布(tempoPrior)」が最小の候補を返す。
+  // 2倍/半分は IOI だけでは決まらない(8分⇔16分の記譜違い)が、長い音符が多ければ遅い側、
+  // 32分だらけになるなら速い側が譜面として素直で、それは書いてみれば分かる。
+  // 小節線で割らないのは、割るとタイが小節の長い(遅い)テンポほど減って不公平になるため。
+  // channels: [{ events, isDrum? }](ドラムは除外)。fps: 元曲のフレームレート。opts: { totalFrames, cmd }
+  MML.Convert.chooseTempoOctave = function (bpm, channels, fps, opts) {
+    opts = opts || {};
+    if (!(bpm > 0) || !fps) return bpm;
+    const cmd = opts.cmd;
+    const snap = MML.Convert.lenSnapOf(cmd);
+    const dp = MML.Convert.lenDpOf(cmd) && !!MML.Convert.quantizeSeq;
+    const cands = [bpm / 2, bpm, bpm * 2].filter(b => b >= 50 && b <= 300);
+    if (cands.length <= 1) return bpm;
+    let best = null;
+    for (const cand of cands) {
+      const fpb = fps * 60 / Math.round(cand); // 各 *2mml と同じ丸め(t<n> 整数)で書く
+      let cost = 0, notes = 0;
+      for (const ch of channels || []) {
+        if (!ch || ch.isDrum || !ch.events || !ch.events.length) continue;
+        const filled = fillGaps(MML.Convert.shapeEvents(ch.events, fpb, cmd), opts.totalFrames || 0);
+        const durs = filled.map(e => e.end - e.start);
+        const plan = dp ? MML.Convert.quantizeSeq(durs, fpb, snap) : null;
+        let carry = 0;
+        for (let i = 0; i < filled.length; i++) {
+          if (!(durs[i] > 0)) continue;
+          let lengths;
+          if (plan) lengths = plan[i];
+          else { const q = MML.Convert.framesToLengths(durs[i], fpb, carry, snap); carry = q.carryOut; lengths = q.lengths; }
+          if (filled[i].note === null) continue;
+          notes++;
+          cost += lengths.reduce((a, l) => a + MML.Convert.lengthTokenCost(l), 0) + 0.2 * (lengths.length - 1);
+        }
+      }
+      if (!notes) return bpm;
+      const score = cost / notes + MML.Convert.tempoPrior(cand);
+      if (!best || score < best.score) best = { cand, score };
+    }
+    return best.cand;
+  };
+
   // ── イベント配列 → トークン列 (共通コア) ────────────────────────────
   // state (curOct/curVol/curInst/curEnvV/curEnvVr) は呼び出しをまたいで
   // 共有できるようにする(小節ごとに分けて呼んでも変化検出が継続するため)。
@@ -103,7 +158,11 @@
       const dur = ev.end - ev.start;
       if (dur <= 0) continue;
       state.durCarryBefore = state.durCarry;
-      const { lengths, carryOut } = MML.Convert.framesToLengths(dur, fpb, state.durCarry, flags.lenSnap);
+      // flags.plan(LEN_DP、buildLengthPlan): チャンネル全体で決めた音価があればそれを使う(持ち越しは無し)
+      const planned = flags.plan ? flags.plan.get(ev) : null;
+      const { lengths, carryOut } = planned
+        ? { lengths: planned, carryOut: 0 }
+        : MML.Convert.framesToLengths(dur, fpb, state.durCarry, flags.lenSnap);
       state.durCarry = carryOut;
 
       if (ev.note === null) {
@@ -377,7 +436,8 @@
     //   l<n> はそれ以降の既定音価を変えてしまうので、差し込んだ後ろに元からあった
     //   音符の意味まで書き換わってしまう(INV-6: 既存MMLを黙って変えない)。
     //   -1 はどの音価とも一致しないので omitDefaultLen が常に素通しになる。
-    flags.defaultLen = opts.noDefaultLen ? -1 : MML.Convert.detectDefaultLength(filled, fpb, flags.lenSnap);
+    flags.plan = buildLengthPlan(filled, fpb, flags.lenSnap, opts.cmd);
+    flags.defaultLen = opts.noDefaultLen ? -1 : MML.Convert.detectDefaultLength(filled, fpb, flags.lenSnap, flags.plan);
 
     let line = `${letter} ${tempoPrefix}`;
     let col  = line.length;
@@ -481,6 +541,7 @@
       // なかった分の安全網)
       const filled  = fillGaps(MML.Convert.shapeEvents(chan.events, fpb, opts.cmd), totalFrames);
       const split   = splitAtBoundaries(filled, boundaries, MML.Convert.lenSnapOf(opts.cmd));
+      const plan    = buildLengthPlan(split, fpb, MML.Convert.lenSnapOf(opts.cmd), opts.cmd);
       const buckets = bucketByMeasure(split, framesPerMeasure, measureCount);
       const flags = MML.Convert.maskEmitFlags({
         hasVolume: !!chan.hasVolume, hasInstrument: !!chan.hasInstrument,
@@ -497,8 +558,9 @@
         hasNoteEnv: chan.hasNoteEnv != null ? !!chan.hasNoteEnv : !!chan.hasPitchMod,
         // 曲(このチャンネル)で最も多い音価をl<n>としてチャンネル先頭で宣言し、以後
         // 一致する音符/休符は数値部分を省略する(renderEvents内のomitDefaultLen参照)。
-        defaultLen: MML.Convert.detectDefaultLength(filled, fpb, MML.Convert.lenSnapOf(opts.cmd)),
-        lenSnap: MML.Convert.lenSnapOf(opts.cmd) // 音長を丸める(LEN_SNAP、duration.js framesToLengths)
+        defaultLen: MML.Convert.detectDefaultLength(plan ? split : filled, fpb, MML.Convert.lenSnapOf(opts.cmd), plan),
+        lenSnap: MML.Convert.lenSnapOf(opts.cmd), // 音長を丸める(LEN_SNAP、duration.js framesToLengths)
+        plan // 音長をチャンネル全体で最適化(LEN_DP、buildLengthPlan)
       }, opts.cmd);
       const state = newState();
       let first = true;
