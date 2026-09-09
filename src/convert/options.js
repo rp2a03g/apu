@@ -150,16 +150,23 @@
     for (const ch of channels || []) if (ch && ch.srcIndex == null) ch.srcIndex = next++;
     return channels;
   };
+  // チャンネル文字の比較は必ずコードポイント順(A-Z のあとに a,b)。
+  // ★localeCompare は 'a' < 'B' と判定するので使わない: 実機ppmckの文字順は大文字A-Zのあとに
+  //   小文字a,b(拡張音源のE-Zab)なのに、出力が aAbBCDEFG と大小交互に並んで音源ごとの
+  //   まとまりが崩れていた(2026-09-10 ユーザー指摘)。同じ理由の前例が
+  //   src/convert/channelPlan.js sortByLetter にある
+  const byLetter = (a, b) => (a.letter < b.letter ? -1 : a.letter > b.letter ? 1 : 0);
+  MML.Convert.compareChannelLetter = byLetter;
   MML.Convert.sortChannelsByLetter = function (channels) {
     MML.Convert.stampChannelSource(channels);
-    channels.sort((a, b) => a.letter.localeCompare(b.letter));
+    channels.sort(byLetter);
     return channels;
   };
   MML.Convert.orderChannels = function (channels, order) {
     const out = (channels || []).slice();
     MML.Convert.stampChannelSource(out);
-    if (order === 'source') out.sort((a, b) => (a.srcIndex - b.srcIndex) || a.letter.localeCompare(b.letter));
-    else out.sort((a, b) => a.letter.localeCompare(b.letter));
+    if (order === 'source') out.sort((a, b) => (a.srcIndex - b.srcIndex) || byLetter(a, b));
+    else out.sort(byLetter);
     return out;
   };
   // 出力の書式(2026-09-08、src/convert/mmlEmit.js emitScore)。プリセットには含めない(内容でなく見た目)
