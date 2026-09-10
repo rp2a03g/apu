@@ -39,11 +39,51 @@
   // VRC7: src/convert/borrow.js に集約(block は音符の理論値側で固定、2026-09-07)
   function vrc7FnumRaw(freq, ev) { return MML.Convert.Borrow.vrc7FnumRaw(freq, ev); }
 
-  // 対数DAC(dbPerStep/段)の4bit音量値を線形4bit(N163)へ換算する表
-  function logToLinearTable(dbPerStep) {
+  // 対数DAC(dbPerStep/段)の4bit音量値を、借用先の音量レンジ(既定0-15)へ換算する表
+  function logToLinearTable(dbPerStep, max) {
+    const m = max == null ? 15 : max;
     const t = new Array(16);
-    for (let v = 0; v < 16; v++) t[v] = v === 0 ? 0 : Math.max(1, Math.round(15 * Math.pow(10, -dbPerStep * (15 - v) / 20)));
+    for (let v = 0; v < 16; v++) t[v] = v === 0 ? 0 : Math.max(1, Math.min(m, Math.round(m * Math.pow(10, -dbPerStep * (15 - v) / 20))));
     return t;
+  }
+  // 借用先ファミリの音量レンジ(src/convert/borrow.js FAMILY_VOL_MAX が正典。読み込み順の都合で遅延参照)
+  function famVolMax(fam) {
+    const T = MML.Convert.Borrow && MML.Convert.Borrow.FAMILY_VOL_MAX;
+    const m = T && T[fam];
+    return m == null ? 15 : m;
+  }
+  // 対数DACのチップ → 1段あたりのdB。LIN_TABLE/VRC7_TABLE と同じ顔ぶれ
+  const LIN_STEP = { ay8910: 1.5, sn76489: 2 };
+  const linTableCache = new Map();
+  // ★借用先ごとにレンジが違う(FDS=32/VRC6のこぎり=42)ので、表も借用先ごとに作る。
+  //   以前は 0-15 の LIN_TABLE 固定で、@v(エンベロープ表)と v(定数音量)で尺度が食い違っていた
+  function linTable(chip, fam) {
+    const step = LIN_STEP[chip];
+    if (!step) return null;
+    const max = famVolMax(fam);
+    const key = chip + '/' + max;
+    if (!linTableCache.has(key)) linTableCache.set(key, logToLinearTable(step, max));
+    return linTableCache.get(key);
+  }
+  // 対数DACの段数が分かっていないチップ(SCC等)向け: 生の0-15を借用先レンジへ比例配分するだけの表。
+  // ★対数か線形かの解釈は変えない(SCCの音量レジスタが線形か対数かは未確定で、v側の
+  //   sourceAttDb は既定1.5dB/段として扱っている)。ここで揃えるのは「天井」だけ:
+  //   これが無いと FDS/VRC6のこぎりへ載せたとき @v の上限が15のまま v だけ32/42になり、
+  //   同じチャンネルの中でエンベロープ付きの音だけ極端に小さくなる(2026-09-11)。
+  //   max が 15 の借用先では恒等写像なので、既定割当(N163等)の出力は変わらない。
+  function rangeTable(max) {
+    const t = new Array(16);
+    for (let v = 0; v < 16; v++) t[v] = v === 0 ? 0 : Math.max(1, Math.min(max, Math.round(v * max / 15)));
+    return t;
+  }
+  const rangeTableCache = new Map();
+  function envTable(chip, fam) {
+    const t = linTable(chip, fam);
+    if (t) return t;
+    const max = famVolMax(fam);
+    if (max === 15) return null; // 恒等写像なので素通りでよい
+    if (!rangeTableCache.has(max)) rangeTableCache.set(max, rangeTable(max));
+    return rangeTableCache.get(max);
   }
   // envReg.assign(volSeq) を写像テーブル経由にするプロキシ(抽出器はassignしか使わない)
   function mappedEnvReg(envReg, table) {
@@ -414,8 +454,10 @@
 
     // 借用先ファミリに応じた音量写像プロキシ(対数DAC元→線形先のときだけ写像)
     const familyOf = t => (TARGET_TYPES[t] || TARGET_TYPES.skip).family || null;
-    const needsLinear = fam => fam === 'n163' || fam === 'pulse' || fam === 'vrc6pulse';
-    const regFor = (chip, fam) => (needsLinear(fam) && LIN_TABLE[chip]) ? mappedEnvReg(envReg, LIN_TABLE[chip])
+    // ★vrc6saw/fds も線形音源(2026-09-11追加)。以前は外れていたため、これらへ載せると
+    //   @v だけ元の対数値のまま素通りし、v(定数音量)と別の尺度になっていた
+    const needsLinear = fam => fam === 'n163' || fam === 'pulse' || fam === 'vrc6pulse' || fam === 'vrc6saw' || fam === 'fds';
+    const regFor = (chip, fam) => (needsLinear(fam) && envTable(chip, fam)) ? mappedEnvReg(envReg, envTable(chip, fam))
       : (fam === 'vrc7' && VRC7_TABLE[chip]) ? mappedEnvReg(envReg, VRC7_TABLE[chip]) : envReg;
 
     // ── 音色ごとの設定(src/convert/toneSettings.js、2026-09-09) ─────────────────────
@@ -577,9 +619,16 @@
     }
     let sccResult = null, sccUsed = false;
     if (data.kss && data.kss.scc && c.k051649) {
-      sccResult = MML.Kss2MmlExpansion.scc(data.kss.writeLog, totalFrames, kssClock, n163WaveReg, envReg);
-      sccUsed = sccResult.channels.some(ch => ch.events.some(ev => ev.note !== null));
-      if (sccUsed) for (const s of src) if (s.chip === 'k051649' && wantExtract(s)) extracted[s.id] = sccResult.channels[s.ch];
+      // ★借用先ファミリごとに抽出し直す(2026-09-11)。SCCだけ envReg を直接渡していたため、
+      //   FDS/VRC6のこぎりへ載せても @v が 0-15 のまま素通りし、v(0-32/0-42)と天井が食い違っていた。
+      //   波形(@N)は同じ内容なら WaveRegistry が同じ番号を返すので、複数回抽出しても定義は増えない。
+      const items = src.filter(s => s.chip === 'k051649' && wantExtract(s));
+      const fams = [...new Set(items.map(s => familyOf(plan[s.id])))];
+      for (const fam of (fams.length ? fams : [null])) {
+        const r = MML.Kss2MmlExpansion.scc(data.kss.writeLog, totalFrames, kssClock, n163WaveReg, regFor('k051649', fam));
+        if (!sccResult) { sccResult = r; sccUsed = r.channels.some(ch => ch.events.some(ev => ev.note !== null)); }
+        if (sccUsed) for (const s of items) if (familyOf(plan[s.id]) === fam) extracted[s.id] = r.channels[s.ch];
+      }
     }
     if (data.kss && data.kss.opll && c.ym2413) {
       const r = MML.Kss2MmlExpansion.opll(data.kss.writeLog, totalFrames, vrc7ToneReg);
@@ -918,7 +967,7 @@
     ].join('\n');
 
     const directiveLines = expansions.map(chip => chip === 'n163'
-      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${(letterMap.n163 || []).length}`
+      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${MML.Mml.n163DeclaredCount(scoreChannels, letterMap.n163)}`
       : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
     // @DPCM<n> 定義(1個でもあればEチャンネルが自動的に有効になる。#EX-*宣言は不要)
     const dpcmDefLines = dpcmResult ? dpcmResult.defs.map(d =>
@@ -965,10 +1014,11 @@
 
   // 音量の減衰量(dB)→借用先の音量値。VRC7は「v0が最大・v15が最小」(このコンパイラ/ppmckのVRC7は
   // レジスタの減衰値をそのまま v に取る)、FME-7は v15 最大の3dB/段、線形音源は振幅比。
+  // linear の max は借用先ごと(famVolMax)。borrow.js VOL_FROM_DB と同じ規約
   const VOL_FROM_DB = {
     vrc7: att => Math.max(0, Math.min(15, Math.round(att / 3))),
     fme7: att => Math.max(0, Math.min(15, 15 - Math.round(att / 3))),
-    linear: att => (att >= 60 ? 0 : Math.max(1, Math.min(15, Math.round(15 * Math.pow(10, -att / 20)))))
+    linear: (att, max) => { const m = max == null ? 15 : max; return att >= 60 ? 0 : Math.max(1, Math.min(m, Math.round(m * Math.pow(10, -att / 20)))); }
   };
   // 4bit対数音量(AY=1.5dB/段(このコードベースの既定)、SN=2dB/段、OPLL/VRC7=3dB/段・反転)→減衰dB
   function sourceAttDb(s, ev) {
@@ -1039,12 +1089,13 @@
     // 音量: 借用先の尺度へ。AY/SN→線形は従来どおり LIN_TABLE(エンベロープ表も同じ表で写像済み)、
     // それ以外(attDbを持つOPN/ADPCM、OPLL→非VRC7、AY/SN→VRC7/FME-7以外の対数)は減衰dB経由
     const linearFam = fam === 'n163' || fam === 'pulse' || fam === 'vrc6pulse' || fam === 'vrc6saw' || fam === 'fds';
-    if (linearFam && LIN_TABLE[s.chip] && s.kind === 'square') {
-      mapConstVolumes(events, LIN_TABLE[s.chip]);
+    if (linearFam && linTable(s.chip, fam) && s.kind === 'square') {
+      mapConstVolumes(events, linTable(s.chip, fam)); // @v も regFor(…,fam) で同じ表に写像済み
     } else if (fam === 'vrc7' && VRC7_TABLE[s.chip] && s.kind === 'square') {
       mapConstVolumes(events, VRC7_TABLE[s.chip]); // エンベロープ表は regFor(…,'vrc7') で同じ表に写像済み
     } else if (fam !== 'triangle') {
-      const conv = fam === 'vrc7' ? VOL_FROM_DB.vrc7 : fam === 'fme7' ? VOL_FROM_DB.fme7 : VOL_FROM_DB.linear;
+      const conv = fam === 'vrc7' ? VOL_FROM_DB.vrc7 : fam === 'fme7' ? VOL_FROM_DB.fme7
+        : (att) => VOL_FROM_DB.linear(att, famVolMax(fam));
       for (const ev of events) if (ev.note !== null && (ev.attDb !== undefined || ev.volume !== undefined)) ev.volume = conv(sourceAttDb(s, ev));
     }
     for (const ev of events) delete ev.attDb;

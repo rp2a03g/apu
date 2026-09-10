@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-11 05:01:38
+ * Built by tools/build-capture-workers.ps1 at 2026-09-11 06:31:22
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-11 05:01:38';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-11 06:31:22';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -2780,7 +2780,11 @@
     // 頭打ち)、VRC6のこぎり波は$B000蓄積レート生値(実質42が最大。43以上は8bit桁溢れで
     // 音が崩れるだけ)。他は0-15。src/mml/compiler.js volMax(v<n>の上限63)のコメント参照。
     // 一律0-15にするとFDSは実効半分・のこぎりは1/3の音量しか出ず「音が小さい」となる。
-    const TARGET_VOL_MAX = { fds: 32, vrc6saw: 42 };
+    // 実体は src/convert/borrow.js FAMILY_VOL_MAX(2026-09-11に正典化。ここが元々正しく、
+    // vgm2mml(15固定)と borrow.js(63)がずれていた)。borrow.js は family 名キーだが、
+    // fds/vrc6saw は type 名と同じなのでそのまま引ける
+    const FAM_VOL_MAX = (MML.Convert.Borrow && MML.Convert.Borrow.FAMILY_VOL_MAX) || {};
+    const TARGET_VOL_MAX = { fds: FAM_VOL_MAX.fds || 32, vrc6saw: FAM_VOL_MAX.vrc6saw || 42 };
     const volStepOf = (vol, type) => {
       const m = TARGET_VOL_MAX[type] || 15;
       return Math.max(1, Math.round((vol || 0) * m / songMaxVol)); // 0でも1(発音はしている)

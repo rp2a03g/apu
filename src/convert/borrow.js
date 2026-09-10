@@ -69,10 +69,12 @@
   const fdsPeriodRaw = freq => (freq * 65536 * 64) / CPU_CLOCK_NTSC; // FDS(gbs2mml/expansion/wave.jsと同じ式)
 
   // ── 音量の写像 ──────────────────────────────────────────────
-  // 対数DAC(dbPerStep/段)の4bit音量値を線形4bit(N163/2A03/VRC6)へ換算する表
-  function logToLinearTable(dbPerStep) {
+  // 対数DAC(dbPerStep/段)の4bit音量値を、借用先の音量レンジ(既定0-15)へ換算する表。
+  // max は FAMILY_VOL_MAX の値(FDS=32/VRC6のこぎり=42)を渡す
+  function logToLinearTable(dbPerStep, max) {
+    const m = max == null ? 15 : max;
     const t = new Array(16);
-    for (let v = 0; v < 16; v++) t[v] = v === 0 ? 0 : Math.max(1, Math.round(15 * Math.pow(10, -dbPerStep * (15 - v) / 20)));
+    for (let v = 0; v < 16; v++) t[v] = v === 0 ? 0 : Math.max(1, Math.min(m, Math.round(m * Math.pow(10, -dbPerStep * (15 - v) / 20))));
     return t;
   }
   // 4bit対数音量 → VRC7の減衰値(v0=最大、3dB/段)
@@ -86,10 +88,13 @@
 
   // 音量の減衰量(dB)→借用先の音量値。VRC7は「v0が最大・v15が最小」(このコンパイラ/ppmckのVRC7は
   // レジスタの減衰値をそのまま v に取る)、FME-7は v15 最大の3dB/段、線形音源は振幅比。
+  // ★linear の max は借用先ごと(FAMILY_VOL_MAX)。以前は 15 を直書きしており、0-63 を持つ
+  //   FDS/VRC6のこぎり波でもレンジの上半分が一切使われず、実測で約6.6dB/約9dB小さく鳴っていた
+  //   (2026-09-11、ユーザー報告「YM2151→VRC6のこぎりの音量がおかしい」)。
   const VOL_FROM_DB = {
     vrc7: att => Math.max(0, Math.min(15, Math.round(att / 3))),
     fme7: att => Math.max(0, Math.min(15, 15 - Math.round(att / 3))),
-    linear: att => (att >= 60 ? 0 : Math.max(1, Math.min(15, Math.round(15 * Math.pow(10, -att / 20)))))
+    linear: (att, max) => { const m = max == null ? 15 : max; return att >= 60 ? 0 : Math.max(1, Math.min(m, Math.round(m * Math.pow(10, -att / 20)))); }
   };
 
   // envReg.assign(volSeq) を写像テーブル経由にするプロキシ(抽出器はassignしか使わない)
@@ -110,7 +115,13 @@
   }
 
   // 借用先ファミリの音量レンジ(FDSとVRC6のこぎり波だけ本家ppmck同様0-63、他は0-15)
-  const FAMILY_VOL_MAX = { pulse: 15, triangle: 15, noise: 15, n163: 15, fme7: 15, vrc7: 15, vrc6pulse: 15, vrc6saw: 63, fds: 63 };
+  // 借用先ファミリの音量レンジ。★FDS=32/VRC6のこぎり=42 は「コンパイラが受け付ける上限」(v0-63、
+  //   compiler.js volMax)ではなく **実機で意味のある上限**(2026-09-11に63から訂正):
+  //     ・VRC6のこぎり波は14ステップ中6回だけ蓄積レートを足し、8bitで溢れる。6×42=252で出力段が
+  //       最大の31に届き、43以上は最後の加算が折り返してのこぎりの形が壊れる(src/emulator/expansion/vrc6.js)
+  //     ・FDSは出力段が Math.min(32, gain)/32 なので33-63は32と同じ音(src/emulator/expansion/fds.js)
+  //   spc2mml は元からこの値(TARGET_VOL_MAX)を使っており、ここを正典にして3経路の食い違いを解消する
+  const FAMILY_VOL_MAX = { pulse: 15, triangle: 15, noise: 15, n163: 15, fme7: 15, vrc7: 15, vrc6pulse: 15, vrc6saw: 42, fds: 32 };
 
   // 変換元の音量値 v(0..srcMax)の減衰量[dB]。
   //   s.linear      … 抽出値が線形振幅(GB/HuC6280/2A03系)
@@ -248,7 +259,8 @@
     const hasAttDb = events.some(ev => ev.attDb !== undefined);
     if (hasAttDb) {
       if (fam !== 'triangle') {
-        const conv = fam === 'vrc7' ? VOL_FROM_DB.vrc7 : fam === 'fme7' ? VOL_FROM_DB.fme7 : VOL_FROM_DB.linear;
+        const conv = fam === 'vrc7' ? VOL_FROM_DB.vrc7 : fam === 'fme7' ? VOL_FROM_DB.fme7
+          : (att) => VOL_FROM_DB.linear(att, FAMILY_VOL_MAX[fam]);
         for (const ev of events) if (ev.note !== null && ev.attDb !== undefined) ev.volume = conv(ev.attDb);
       }
     } else {
@@ -616,6 +628,7 @@
     LIN_TABLE,
     VRC7_TABLE,
     VOL_FROM_DB,
+    FAMILY_VOL_MAX, // 借用先ファミリの音量レンジ(vgm2mml/spc2mml/assign-preview も同じ表を見る)
     volTableFor,
     mappedEnvReg,
     mapConstVolumes,

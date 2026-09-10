@@ -103,7 +103,10 @@
   function targetVol(family, att) {
     if (family === 'vrc7') return clamp(Math.round(att / 3), 0, 15);
     if (family === 'fme7') return clamp(15 - Math.round(att / 3), 0, 15);
-    const max = (family === 'fds' || family === 'vrc6saw') ? 63 : 15;
+    // 借用先の音量レンジは変換と同じ表を見る(src/convert/borrow.js FAMILY_VOL_MAX)。
+    // ★2026-09-11まで63を直書きしており、FDS(実効32)/VRC6のこぎり(実効42)で変換後と音量が違っていた
+    const T = (MML.Convert.Borrow && MML.Convert.Borrow.FAMILY_VOL_MAX) || {};
+    const max = T[family] == null ? 15 : T[family];
     if (att >= 60) return 0;
     return Math.max(1, Math.min(max, Math.round(max * Math.pow(10, -att / 20))));
   }
