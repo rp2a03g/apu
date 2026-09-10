@@ -135,7 +135,12 @@
   // 波形音源(SCC/GB波形/HuC6280 PSG)は波形メモリを持つ先(FDS/N163)を先頭に、矩形波系も選べる
   const WAVE_T = ['fds'].concat(N163_T).concat(VRC7_T).concat(PULSE_T);
   const NOISE_T = ['noise'];
-  const PCM_T = ['dpcm'].concat(VRC7_T).concat(N163_T).concat(['pulse1', 'pulse2', 'triangle']);
+  // サンプルPCM(VGMのC140/C352/QSound/OKIM6295/SegaPCM/MultiPCM/GA20/ADPCM)。ピッチ解析で
+  // 音階が取れた時点で「音程と音量を持つ普通の旋律ch」なので、載せ先は矩形波系も含めて brr(SPCボイス)
+  // と同じ全部にする。★2026-09-10まで pulse1/pulse2/triangle だけに絞っており、VRC6・FME-7・MMC5が
+  //   選べなかった(ユーザー報告「QSoundのPCMでVRC6/FME7/MMC5が選べない」)。絞る理由はコメントにも
+  //   変換器側にも無く、実測でも QSound ch→VRC6 は音符1097個がそのまま出てコンパイルも通る。
+  const PCM_T = ['dpcm'].concat(SQUARE_T);
   // ★FDSは波形メモリchなので、音程を持つ元chならどの種別からでも選べてよい。
   //   以前は 'wave'/'any' にしか入れておらず、FM/PCM/矩形波の行で F: が出なかった
   //   (ユーザー報告「変換先にF:のFDSがない」)。ノイズだけは対象外。

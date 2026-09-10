@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-10 08:33:40
+ * Built by tools/build-capture-workers.ps1 at 2026-09-10 10:11:06
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-10 08:33:40';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-10 10:11:06';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -7885,12 +7885,16 @@
       // 一覧(音源ごとのCH表示)と大波形の間のスプリッター。大波形が一覧の下にあるとき(縦並び)
       // はCH一覧の高さを、右にあるとき(横並び)は大波形の幅を変える。ユーザー要望で
       // 「各表示の境目でサイズを変えられる」ようにするためのもの
+      // ★対象は「いま見えている一覧」(_activeRowsEl)。SPC再生中はボイス一覧が別要素
+      //   (_spcSectionEl)で、隠れている _rowsEl の高さを変えても何も起きなかった
+      //   (ユーザー報告「SPC鳴らしてるときch枠が下に広げられない」2026-09-10)
       this._waveSplitterEl = this._makeSplitter('horizontal', (delta, start) => {
         const h = Math.max(60, Math.round(start + delta));
         this._listRowsHeight = h;
-        this._rowsEl.style.flex = 'none';
-        this._rowsEl.style.height = h + 'px';
-      }, () => this._rowsEl.offsetHeight, () => {
+        const el = this._activeRowsEl();
+        el.style.flex = 'none';
+        el.style.height = h + 'px';
+      }, () => this._activeRowsEl().offsetHeight, () => {
         try { localStorage.setItem('mml_keyboardRowsHeight', String(this._listRowsHeight)); } catch (e) { /* ignore */ }
       });
       this._waveSplitterVEl = this._makeSplitter('vertical', (delta, start) => {
@@ -8826,13 +8830,9 @@
         this._bigWaveEl.style.width = '';
         this._leftEl.appendChild(this._waveSplitterEl);
         this._leftEl.appendChild(big);
-        if (this._listRowsHeight) {
-          this._rowsEl.style.flex = 'none';
-          this._rowsEl.style.height = this._listRowsHeight + 'px';
-        }
+        this._applyRowsHeight();
       } else {
-        this._rowsEl.style.flex = '';
-        this._rowsEl.style.height = '';
+        this._applyRowsHeight();
         this._mainEl.appendChild(this._waveSplitterVEl);
         this._mainEl.appendChild(big);
         if (this._bigWaveWidth) {
@@ -9577,6 +9577,19 @@
       this.update(0);
     }
 
+    /** いま見えている一覧の枠。SPC再生中はボイス一覧(_spcSectionEl)が本体で _rowsEl は非表示 */
+    _activeRowsEl() { return this._mode === 'spc' ? this._spcSectionEl : this._rowsEl; }
+    /** 一覧の高さ(スプリッターで決めた値)を、見えている方だけに適用する */
+    _applyRowsHeight() {
+      const on = this._activeRowsEl();
+      const off = (on === this._rowsEl) ? this._spcSectionEl : this._rowsEl;
+      if (off) { off.style.flex = ''; off.style.height = ''; }
+      if (!on) return;
+      // 大波形が右にあるときは縦の取り合いが無いので高さ指定は捨てる(従来どおり)
+      if (this._bigWaveBelow() && this._listRowsHeight) { on.style.flex = 'none'; on.style.height = this._listRowsHeight + 'px'; }
+      else { on.style.flex = ''; on.style.height = ''; }
+    }
+
     // 表示モード切替: NSF/MMLチャンネル一覧 と SPCボイス一覧 は同時表示せず、
     // 再生中のファイル種別に応じて排他的に切り替える。
     setMode(mode) {
@@ -9591,6 +9604,7 @@
       // レイアウト(ロールの置き場/大波形の置き場)はNSF等と共通のまま(以前はSPC専用の
       // 1000px幅テーブル+大波形の重ね配置だったが、マスター値を1行にまとめて廃止した)
       this._leftEl.classList.toggle('kbd-left--spc', spc);
+      this._applyRowsHeight();    // 一覧の高さ指定を、切り替えた先の枠へ移す
       this._applyLayoutClasses(); // 右配置の一覧幅(SPCは下限あり)を反映
       // 大波形に表示するchを表示中の一覧に合わせる(選択chが無ければ一番若いch/V0を一時表示)
       this._syncShownWave(spc ? this._spcRowEls : this._rowEls);

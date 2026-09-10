@@ -737,7 +737,10 @@
       if (!tt) continue;
       // 種別と借用先の相性(UI外から不正な組合せが来た時の防御)
       if (s.kind === 'noise' && tt.family !== 'noise') { conflicts.push(`${s.label} → ${t} は種別が合わないため変換対象外です。`); continue; }
-      if (s.kind === 'wave' && tt.family !== 'n163' && tt.family !== 'vrc7' && tt.family !== 'fds') { conflicts.push(`${s.label} → ${t} は波形音源/VRC7以外へ載せられないため変換対象外です。`); continue; }
+      // ★波形音源(SCC)の借用先を n163/vrc7/fds に限る判定は撤去した(2026-09-10)。
+      //   下の adaptEvents は矩形波系(pulse/vrc6/fme7/mmc5)も三角波もノイズも扱えるようになっており、
+      //   同じ SCC を KSS 経由(src/convert/borrow.js compose、ガードは noise だけ)で変換すると通るのに
+      //   VGM 経由だけ「変換対象外」で無音になっていた。UI(channelPlan.js WAVE_T)も矩形波系を出している。
       const ch = Object.assign({}, extracted[s.id], { events: extracted[s.id].events.map(ev => Object.assign({}, ev)) });
       if (s.ch < 0) ch.isDrum = true; // 合成chのドラムパート(テンポ推定から外す。下記コメント参照)
       // 音色ごとの音色指定(toneSettings[key].tone[種別])。チャンネルの指定を音色単位で上書きする
