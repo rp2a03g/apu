@@ -10,7 +10,10 @@
   <header>
     <div class="header-top-row">
     <div class="icon-toolbar" id="iconToolbar">
-      <button class="icon-btn toggle-btn" data-target="win-soundplay" title="ファイルを開く" aria-label="ファイルを開く">
+      <!-- ファイルを開く: 押すとファイル選択ダイアログが直接出る。開いたものがサウンドファイルなら
+           鍵盤表示を開いて再生、MMLファイルならMMLエディタを開くだけ(main.js参照)。
+           かつては「サウンドファイルを開く」ウィンドウのトグルだったが、そのウィンドウは廃止した -->
+      <button class="icon-btn" id="btnOpenFile" title="ファイルを開く" aria-label="ファイルを開く">
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.5c0-.83.67-1.5 1.5-1.5h3.4l1.4 1.6H16c.83 0 1.5.67 1.5 1.5v7c0 .83-.67 1.5-1.5 1.5H4c-.83 0-1.5-.67-1.5-1.5v-8.6Z"/></svg>
       </button>
 
@@ -189,18 +192,13 @@
     </div>
   </section>
 
-  <section class="float-window" id="win-soundplay"
-    data-default-left="660" data-default-top="100" data-default-width="480" data-default-height="600">
-    <div class="float-window-header">
-      <div class="fw-header-extra">
-        <button class="icon-btn icon-btn-title" id="btnSoundFileOpenInline" title="ファイルを開く" aria-label="ファイルを開く">
-          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.5c0-.83.67-1.5 1.5-1.5h3.4l1.4 1.6H16c.83 0 1.5.67 1.5 1.5v7c0 .83-.67 1.5-1.5 1.5H4c-.83 0-1.5-.67-1.5-1.5v-8.6Z"/></svg>
-        </button>
-      </div>
-      <span id="soundPlayTitle">サウンドファイルを開く</span>
-      <button class="float-window-close" aria-label="閉じる">×</button>
-    </div>
-    <div class="float-window-body compact-soundplay">
+  <!-- サウンドファイルの読み込み/再生/変換/書き出しの「実体」。ウィンドウとしての
+       「サウンドファイルを開く」は廃止し(2026-09-10)、唯一残っていたヘッダ情報とログは
+       鍵盤表示のファイル情報ペインへ移した(main.js syncKeyboardFileInfo → keyboard.js setFileInfo)。
+       ★要素そのものは消さない: 鍵盤表示のボタン(開く/再生/停止/曲送り/to MML/出力)は
+         「ここの隠れたボタンを click() する」代理で、main.js も id で配線しているため。
+         #xxxFileHeader / #xxxFileStatus だけはこの箱から鍵盤表示側へ付け替えて表示する -->
+  <div id="soundFileControls" hidden>
       <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.zip,.7z,.mml,.txt" style="display:none" />
       <!-- 内部的にフォーマット別ロジックを呼び出すための非表示input（互換用） -->
       <input type="file" id="nsfFile" accept=".nsf,.nsfe" style="display:none" />
@@ -210,9 +208,10 @@
       <input type="file" id="hesFile" accept=".hes" style="display:none" />
       <input type="file" id="vgmFile" accept=".vgm,.vgz" style="display:none" />
 
-      <!-- アーカイブ(zip/7z)を開いた時だけ表示。ファイル名はここ(パネルの上)に、曲リスト(曲名+送り
-           ボタン)は他形式の「曲番号」行と同じ位置=各パネルの「ヘッダ情報」の直下へ移動して表示する
-           (main.js renderArchiveBar が #archiveTrackBar を表示中パネルの xxxFileHeader の直後へ付け替える) -->
+      <!-- アーカイブ(zip/7z)のファイル名。開いた時だけ表示し、置き場は鍵盤表示のファイル情報
+           ペインの一番上(main.js syncKeyboardFileInfo が #archiveBar ごと付け替える)。
+           曲リスト(#archiveTrackBar)は鍵盤表示タイトル行のファイル名ボタン(曲一覧)と ⏮⏭ が
+           担うので表示しない。選択状態の同期のためだけに残してある -->
       <div id="archiveBar" class="toolbar archive-bar" style="display:none;">
         <span class="archive-bar-icon" title="アーカイブ">📦</span>
         <span id="archiveName" class="archive-bar-name"></span>
@@ -232,7 +231,7 @@
       <!-- NSFパネル -->
       <div id="soundPanel-nsf" class="sound-format-panel" style="display:none;">
         <h3>ヘッダ情報 (NSF/NSFe)</h3>
-        <div id="nsfFileHeader" class="output" style="min-height:160px;"></div>
+        <div id="nsfFileHeader" class="output"></div>
         <div class="toolbar">
           <label style="display:flex;align-items:center;gap:4px;">曲番号
             <button id="btnNsfSongPrev" class="secondary">−</button>
@@ -266,13 +265,13 @@
           <button id="btnNsfTempoTap" class="secondary">👆 タップ</button>
           <button id="btnNsfTempoClear" class="secondary">自動</button>
         </div>
-        <div id="nsfFileStatus" class="output" style="min-height:40px;"></div>
+        <div id="nsfFileStatus" class="output"></div>
       </div>
 
       <!-- SPCパネル -->
       <div id="soundPanel-spc" class="sound-format-panel" style="display:none;">
         <h3>ヘッダ情報 (SPC)</h3>
-        <div id="spcFileHeader" class="output" style="min-height:160px;"></div>
+        <div id="spcFileHeader" class="output"></div>
         <div class="toolbar" style="margin-top:6px;">
           <label style="display:flex;align-items:center;gap:4px;">再生時間(秒)
             <input type="number" id="spcPlayDuration" value="180" min="1" max="3600" style="width:70px" />
@@ -298,7 +297,7 @@
           <button id="btnSpcTempoTap" class="secondary">👆 タップ</button>
           <button id="btnSpcTempoClear" class="secondary">自動</button>
         </div>
-        <div id="spcFileStatus" class="output" style="min-height:40px;"></div>
+        <div id="spcFileStatus" class="output"></div>
 
         <!-- SPC ボイスモニター（鍵盤表示・ミュート） -->
         <div id="spcVoiceMonitor" style="margin-top:8px;">
@@ -310,7 +309,7 @@
       <!-- KSSパネル -->
       <div id="soundPanel-kss" class="sound-format-panel" style="display:none;">
         <h3>ヘッダ情報 (KSS: MSX PSG/SCC/FMPAC)</h3>
-        <div id="kssFileHeader" class="output" style="min-height:140px;"></div>
+        <div id="kssFileHeader" class="output"></div>
         <div class="toolbar">
           <label style="display:flex;align-items:center;gap:4px;">曲番号
             <button id="btnKssSongPrev" class="secondary">−</button>
@@ -344,13 +343,13 @@
           <button id="btnKssTempoTap" class="secondary">👆 タップ</button>
           <button id="btnKssTempoClear" class="secondary">自動</button>
         </div>
-        <div id="kssFileStatus" class="output" style="min-height:40px;"></div>
+        <div id="kssFileStatus" class="output"></div>
       </div>
 
       <!-- GBSパネル -->
       <div id="soundPanel-gbs" class="sound-format-panel" style="display:none;">
         <h3>ヘッダ情報 (GBS: Game Boy)</h3>
-        <div id="gbsFileHeader" class="output" style="min-height:140px;"></div>
+        <div id="gbsFileHeader" class="output"></div>
         <div class="toolbar">
           <label style="display:flex;align-items:center;gap:4px;">曲番号
             <button id="btnGbsSongPrev" class="secondary">−</button>
@@ -384,13 +383,13 @@
           <button id="btnGbsTempoTap" class="secondary">👆 タップ</button>
           <button id="btnGbsTempoClear" class="secondary">自動</button>
         </div>
-        <div id="gbsFileStatus" class="output" style="min-height:40px;"></div>
+        <div id="gbsFileStatus" class="output"></div>
       </div>
 
       <!-- HESパネル -->
       <div id="soundPanel-hes" class="sound-format-panel" style="display:none;">
         <h3>ヘッダ情報 (HES: PC Engine/TurboGrafx-16)</h3>
-        <div id="hesFileHeader" class="output" style="min-height:140px;"></div>
+        <div id="hesFileHeader" class="output"></div>
         <div class="toolbar">
           <label style="display:flex;align-items:center;gap:4px;">トラック番号
             <button id="btnHesTrackPrev" class="secondary">−</button>
@@ -423,12 +422,12 @@
           <button id="btnHesTempoTap" class="secondary">👆 タップ</button>
           <button id="btnHesTempoClear" class="secondary">自動</button>
         </div>
-        <div id="hesFileStatus" class="output" style="min-height:40px;"></div>
+        <div id="hesFileStatus" class="output"></div>
       </div>
       <!-- VGMパネル(1ファイル1曲。曲送りは下記アーカイブ(zip/7z)バーが担う) -->
       <div id="soundPanel-vgm" class="sound-format-panel" style="display:none;">
         <h3>ヘッダ情報 (VGM)</h3>
-        <div id="vgmFileHeader" class="output" style="min-height:140px;"></div>
+        <div id="vgmFileHeader" class="output"></div>
         <div class="toolbar" style="margin-top:6px;">
           <label style="display:flex;align-items:center;gap:4px;">再生時間(秒)
             <input type="number" id="vgmPlayDuration" value="180" min="1" max="3600" style="width:70px" />
@@ -454,10 +453,9 @@
           <button id="btnVgmTempoTap" class="secondary">👆 タップ</button>
           <button id="btnVgmTempoClear" class="secondary">自動</button>
         </div>
-        <div id="vgmFileStatus" class="output" style="min-height:40px;"></div>
+        <div id="vgmFileStatus" class="output"></div>
       </div>
-    </div>
-  </section>
+  </div>
 
 
   <!-- 多言語表示: 辞書はコア層(DOM非依存)。言語を増やすときはここに1行追加する -->

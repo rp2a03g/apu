@@ -1070,38 +1070,9 @@ button.secondary {
   margin-top: 2px;
 }
 
-/* --- サウンドファイルを開くウィンドウ: ヘッダ情報・ボタン類を一回り小さく表示 --- */
-.compact-soundplay {
-  font-size: 11px;
-}
-.compact-soundplay h3 {
-  margin: 4px 0;
-  font-size: 11px;
-  color: var(--accent);
-}
-.compact-soundplay button {
-  font-size: 11px;
-  padding: 4px 10px;
-}
-.compact-soundplay .output {
-  font-size: 10px;
-}
-.compact-soundplay input[type="number"],
-.compact-soundplay input[type="text"] {
-  font-size: 11px;
-  padding: 3px 5px;
-}
-
-/* アーカイブ(zip)曲リストバー(サウンドファイルを開くウィンドウ内、zipを開いた時だけ表示) */
-.compact-soundplay .archive-bar {
-  align-items: center;
-  gap: 4px;
-  margin: 2px 0 6px;
-  padding: 3px 6px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--panel-raised);
-}
+/* --- サウンドファイルの読み込み/再生まわり(#soundFileControls は非表示の箱。
+       見えているのは鍵盤表示へ付け替えた分だけ) --- */
+/* アーカイブ(zip/7z)のファイル名(鍵盤表示のファイル情報ペインに出す) */
 .archive-bar-name {
   flex: 0 1 auto;
   max-width: 100%;
@@ -1110,14 +1081,8 @@ button.secondary {
   white-space: nowrap;
   color: var(--text);
 }
-.compact-soundplay .archive-bar-select {
-  flex: 1 1 auto;
-  min-width: 80px;
-  font-size: 11px;
-  padding: 2px 4px;
-}
-
-/* 再生/停止/WAVE書き出しをアイコン(+ラベル)ボタンにする(サウンドファイルを開くウィンドウ内) */
+/* 再生/停止/WAVE書き出しのアイコンボタン(#soundFileControls 内。今は鍵盤表示側のボタンが
+   代理で click() する隠しボタンなので画面には出ないが、押下判定のため大きさは持たせておく) */
 .icon-btn-sm {
   display: inline-flex;
   align-items: center;
@@ -1447,15 +1412,6 @@ button.secondary {
 .kbd-src-pop-item { padding: 3px 10px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kbd-src-pop-item:hover { background: var(--hover-bg); }
 .kbd-src-pop-item--cur { color: var(--accent); font-weight: 600; }
-
-/* サウンドファイルを開くウィンドウはヘッダ情報とログだけを残す(ユーザー指示 2026-09-06)。
-   再生/停止/曲送り/曲選択/to MML/変換設定は鍵盤表示のタイトル行へ移した。
-   ★要素そのものは消さない: 鍵盤表示のボタンは「ここの隠れたボタンを click() する」代理で、
-     main.js もidで配線しているため。表示だけ落とす(インライン style を上書きするので !important) */
-.compact-soundplay .toolbar,
-.compact-soundplay #archiveBar,
-.compact-soundplay #archiveTrackBar,
-.compact-soundplay #spcVoiceMonitor { display: none !important; }
 
 /* 鍵盤表示タイトル行の再生コントロール(⏮ ▶/⏸ ■ ⏭、keyboard.js _buildTransportBar)。
    バッジ(ファイル名)の右に置き、今表示している方(MML / サウンドファイル)を操作する */
@@ -2419,6 +2375,95 @@ button.secondary {
   max-width: 11em;
 }
 .kbd-bigwave--collapsed .kbd-bigwave-body { display: none !important; }
+
+/* ── チャンネル一覧の下の帯(keyboard.js _mountPanes) ─────────────────────
+   大波形とファイル情報のうち「一覧の下」に置かれた方が入る箱。両方が下に来たときだけ
+   .kbd-below--row が付いて左右に並ぶ(ファイル情報が左、大波形が右) */
+.kbd-below {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  min-width: 0;
+  min-height: 0;
+}
+.kbd-below--row { flex-direction: row; align-items: stretch; }
+/* 帯の中で横に並ぶときは大波形が余りを取る(縦積みのときの flex:none より後ろに置いて優先させる) */
+.kbd-below--row > .kbd-bigwave { flex: 1 1 0; min-width: 0; }
+
+/* ── ファイル情報ペイン(鍵盤表示) ────────────────────────────────────
+   旧「サウンドファイルを開く」ウィンドウに唯一残っていたヘッダ情報とログの引き取り先
+   (2026-09-10)。中身(#xxxFileHeader / #xxxFileStatus)は main.js が付け替える。
+   置き場(自動/上/下/左/右)は鍵盤表示のレイアウト設定で選ぶ。見出しクリックで畳める */
+.kbd-fileinfo {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.kbd-fileinfo--top { border-bottom: 1px solid var(--border); }
+.kbd-fileinfo--bottom { border-top: 1px solid var(--border); }
+.kbd-fileinfo--left { border-right: 1px solid var(--border); }
+.kbd-fileinfo--right { border-left: 1px solid var(--border); }
+/* 大波形と左右に並ぶときは上の仕切りが境界線を兼ねるので、境界線は大波形との間だけにする */
+.kbd-below--row > .kbd-fileinfo { border-top: none; border-right: 1px solid var(--border); }
+.kbd-fileinfo-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.kbd-fileinfo-toggle {
+  flex: none;
+  width: 10px;
+  text-align: center;
+  color: var(--accent);
+  font-size: 11px;
+}
+.kbd-fileinfo-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  color: var(--accent);
+}
+.kbd-fileinfo-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 6px 6px;
+}
+.kbd-fileinfo--collapsed .kbd-fileinfo-body { display: none; }
+.kbd-fileinfo-empty {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 2px 0;
+}
+/* ヘッダ情報とログ(.output)。ウィンドウ時代の大きな最小高さ/余白は帯には合わないので詰める */
+.kbd-fileinfo .output {
+  flex: none;
+  min-height: 0;
+  font-size: 10px;
+  padding: 4px 6px;
+}
+/* アーカイブ(zip/7z)を開いているときだけ出るファイル名の帯 */
+.kbd-fileinfo .archive-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-raised);
+}
 /* 大波形が一覧の下にあるとき: 行一覧(.kbd-rows)は中身なりの高さ(足りなければ縮んでスクロール)にして、
    大波形の帯がチャンネル行の直後に続くようにする(左ペインの最下部に張り付かせない) */
 .kbd-left--wave-below .kbd-rows { flex: 0 1 auto; }

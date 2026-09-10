@@ -64,14 +64,21 @@
   //                  'perChannel' = 使用チャンネルごとに鍵盤+ロールのレーンを並べる(縦向き=横に並ぶ、
   //                                 横向き=縦に積む。各レーンはそのchの音域ぶんの大きさを持ち、
   //                                 収まらない分は .kbd-lanes 全体がスクロールする)
-  // 既定値は従来の見た目(縦・下・1列・まとめて)。localStorageに永続化する。
+  // fileInfoPlacement: 開いているサウンドファイルのヘッダ情報(=ファイル情報ペイン)の置き場。
+  //                  'auto' = 他の置き場に合わせて自動で決める(_effectiveFileInfoPlacement)
+  //                  'top' / 'bottom' = チャンネル一覧の上 / 下
+  //                  'left' / 'right' = チャンネル一覧の左 / 右
+  //                  下配置のとき大波形も一覧の下にある(=一覧が多段)なら、ファイル情報と
+  //                  大波形は同じ帯(.kbd-below)に左右で並ぶ(ユーザー指示 2026-09-10)
+  // 既定値は従来の見た目(縦・下・1列・まとめて)+ファイル情報は自動。localStorageに永続化する。
   const LAYOUT_STORAGE_KEY = 'mml_keyboardLayout_v1';
-  const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'bottom', listColumns: 'single', rollLanes: 'all' });
+  const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'bottom', listColumns: 'single', rollLanes: 'all', fileInfoPlacement: 'auto' });
   const LAYOUT_CHOICES = Object.freeze({
     rollOrientation: ['vertical', 'horizontal'],
     rollPlacement: ['bottom', 'right', 'window'],
     listColumns: ['single', 'auto'],
     rollLanes: ['all', 'perChannel'],
+    fileInfoPlacement: ['auto', 'top', 'bottom', 'left', 'right'],
   });
   // チャンネルごとのレーン: そのchが曲全体で鳴らす音域(+使っているドラムレーン)だけを
   // 音程軸いっぱいに表示する(_updateLaneRanges)。音域はchごとに違うので拡大率もchごとに違い、
@@ -80,6 +87,8 @@
   // レーンの大きさ(音程軸方向のpx。縦向き=幅、横向き=高さ)は既定で LANE_PX_PER_WHITE×音域幅、
   // レーンの境目のスプリッターをドラッグすると個別に変えられる(=そのレーンだけ拡大縮小する)。
   // 全レーンの合計が入り切らないぶんは .kbd-lanes が音程軸方向にスクロールする。
+  const FILE_INFO_DEFAULT_W = 260; // ファイル情報ペインの既定の幅(左右に並ぶ置き場)
+  const FILE_INFO_DEFAULT_H = 120; // ファイル情報ペインの既定の高さ(上下に積む置き場)
   const LANE_PX_PER_WHITE = 15;  // 既定の拡大率(白鍵1本あたりpx)。旧実装の窓(白鍵10本=150px)と同じ
   const LANE_MIN_PX = 40;        // レーンの音程軸方向の最小px(ドラッグの下限)
   const LANE_MIN_WHITE = 7;      // 音域が狭いchでも最低このぶんは見せる(白鍵7本=1オクターブ)
@@ -2684,6 +2693,20 @@
       } catch (e) { /* ignore */ }
       this._rollCollapsed = false;
       this._bigWaveCollapsed = false;
+      // ファイル情報ペイン(開いているサウンドファイルのヘッダ情報。旧「サウンドファイルを開く」
+      // ウィンドウから移設)。置き場は _layout.fileInfoPlacement、大きさはスプリッターで可変
+      this._fileInfoWidth = 0;
+      this._fileInfoHeight = 0;
+      this._fileInfoCollapsed = false;
+      try {
+        const fw = parseInt(localStorage.getItem('mml_kbdFileInfoWidth'), 10);
+        if (Number.isFinite(fw) && fw >= 120) this._fileInfoWidth = fw;
+        const fh = parseInt(localStorage.getItem('mml_kbdFileInfoHeight'), 10);
+        if (Number.isFinite(fh) && fh >= 48) this._fileInfoHeight = fh;
+        this._fileInfoCollapsed = localStorage.getItem('mml_kbdFileInfoCollapsed') === '1';
+      } catch (e) { /* ignore */ }
+      this._fileInfoTitleKey = '';  // 見出しの原文(日本語)。言語切替のたびにT()で引き直す
+      this._fileInfoNodes = [];     // main.jsから預かった表示要素(#xxxFileHeader / #xxxFileStatus)
       this._build();
 
       /*
@@ -3048,6 +3071,39 @@
       big.appendChild(bigBody);
       this._bigWaveEl = big;
 
+      // ファイル情報ペイン(見出し=折りたたみトグル+タイトル / 本体=main.jsから預かる
+      // #xxxFileHeader・#xxxFileStatus の置き場)。旧「サウンドファイルを開く」ウィンドウに
+      // 唯一残っていたヘッダ情報を鍵盤表示へ引き取ったもの(ユーザー指示 2026-09-10)。
+      // 置き場(上/下/左/右/自動)はレイアウト設定で選ぶ → _mountPanes()
+      const fi = document.createElement('div');
+      fi.className = 'kbd-fileinfo';
+      const fiHeader = document.createElement('div');
+      fiHeader.className = 'kbd-fileinfo-header';
+      this._fiToggleEl = document.createElement('span');
+      this._fiToggleEl.className = 'kbd-fileinfo-toggle';
+      this._fiToggleEl.textContent = this._fileInfoCollapsed ? '▶' : '▼';
+      this._fiTitleEl = document.createElement('div');
+      this._fiTitleEl.className = 'kbd-fileinfo-title';
+      fiHeader.title = T('ファイル情報の表示/非表示');
+      fiHeader.addEventListener('click', () => {
+        this._fileInfoCollapsed = !this._fileInfoCollapsed;
+        try { localStorage.setItem('mml_kbdFileInfoCollapsed', this._fileInfoCollapsed ? '1' : '0'); } catch (e) { /* ignore */ }
+        this._applyLayoutClasses();
+      });
+      fiHeader.appendChild(this._fiToggleEl);
+      fiHeader.appendChild(this._fiTitleEl);
+      this._fiBodyEl = document.createElement('div');
+      this._fiBodyEl.className = 'kbd-fileinfo-body';
+      fi.appendChild(fiHeader);
+      fi.appendChild(this._fiBodyEl);
+      this._fileInfoEl = fi;
+      this._renderFileInfo();
+
+      // 一覧の下の帯。大波形とファイル情報のうち「一覧の下」に置かれる方が入る箱で、
+      // 両方が下に来たときは左右に並ぶ(ファイル情報が左、大波形が右)
+      this._belowEl = document.createElement('div');
+      this._belowEl.className = 'kbd-below';
+
       // 一覧と右隣(大波形 or ロールペイン)の間のスプリッター(ロールを右に置く配置でのみ表示。
       // ドラッグで一覧の幅を変える。幅はlocalStorageに保存)
       this._listSplitterEl = this._makeSplitter('vertical', (delta, start) => {
@@ -3096,7 +3152,7 @@
       // 応じた置き場(一覧の下/右/別ウィンドウ)へ_mountRollPane()で取り付ける。
       this._buildRollPane();
       this._mountRollPane();
-      this._mountBigWave();
+      this._mountPanes();
       this._leftEl.classList.toggle('kbd-left--assign', !!this._assignMode && !sourceIsMml);
       this._applyLayoutClasses();
       // チャンネル割当が変わったら(この鍵盤表示のセレクト経由でも、他のUI経由でも)
@@ -3991,23 +4047,78 @@
     _bigWaveBelow() {
       return this._effectivePlacement() !== 'bottom' || this._layout.listColumns === 'auto';
     }
-    _mountBigWave() {
-      const big = this._bigWaveEl;
-      if (!big) return;
-      if (big.parentNode) big.parentNode.removeChild(big);
-      for (const sp of [this._waveSplitterEl, this._waveSplitterVEl]) {
-        if (sp && sp.parentNode) sp.parentNode.removeChild(sp);
+    // チャンネル一覧が幅いっぱいに広がる配置か(下配置で多段、または別ウィンドウ配置)
+    _listFlexible() {
+      const placement = this._effectivePlacement();
+      return placement === 'window' || (placement === 'bottom' && this._layout.listColumns === 'auto');
+    }
+    // ファイル情報ペインの実際の置き場。'auto' は他の置き場から自動で決める:
+    //  ・大波形が一覧の下にあり、かつ一覧が幅いっぱい(多段/別ウィンドウ)
+    //      → 一覧の下(大波形と同じ帯に左右で並ぶ。ユーザー指示 2026-09-10)
+    //  ・それ以外(一覧が固定幅で左右に余裕が無い)
+    //      → 一覧の上(縦に足す方が場所を食わない)
+    _effectiveFileInfoPlacement() {
+      const p = this._layout.fileInfoPlacement;
+      if (LAYOUT_CHOICES.fileInfoPlacement.includes(p) && p !== 'auto') return p;
+      return (this._bigWaveBelow() && this._listFlexible()) ? 'bottom' : 'top';
+    }
+
+    // 大波形パネルとファイル情報ペインを、レイアウト設定に応じた置き場へ取り付ける。
+    //   大波形    : 一覧の右(.kbd-main内) or 一覧の下の帯(.kbd-below)
+    //   ファイル情報: 一覧の上/下(.kbd-left内) or 一覧の左/右(.kbd-main内)
+    // 「一覧の下」に来たものは .kbd-below にまとめ、両方が下なら左右に並べる(ファイル情報が左)。
+    _mountPanes() {
+      const big = this._bigWaveEl, fi = this._fileInfoEl, band = this._belowEl;
+      if (!big || !fi || !band) return;
+      // いったん全部外してから置き直す(置き場が変わるとスプリッターの向きも変わるため)
+      for (const el of [big, fi, band, this._waveSplitterEl, this._waveSplitterVEl,
+                        this._fiSplitterEl, this._bandSplitterEl]) {
+        if (el && el.parentNode) el.parentNode.removeChild(el);
       }
-      // 置き場に応じて向きの合うスプリッターを一覧と大波形の間へ挟む。
+      this._fiSplitterEl = null;
+      this._bandSplitterEl = null;
       // 置き場が変わったらインラインサイズは捨てる(縦横で意味が変わるため)
-      if (this._bigWaveBelow()) {
-        this._bigWaveEl.style.flex = '';
-        this._bigWaveEl.style.width = '';
-        this._leftEl.appendChild(this._waveSplitterEl);
-        this._leftEl.appendChild(big);
-        this._applyRowsHeight();
-      } else {
-        this._applyRowsHeight();
+      big.style.flex = '';
+      big.style.width = '';
+      const fiPlace = this._effectiveFileInfoPlacement();
+      const bigBelow = this._bigWaveBelow();
+
+      // ── 一覧の下の帯(.kbd-below) ─────────────────────────────
+      band.classList.toggle('kbd-below--row', fiPlace === 'bottom' && bigBelow);
+      if (fiPlace === 'bottom') band.appendChild(fi);
+      if (bigBelow) {
+        if (fiPlace === 'bottom') {
+          // 帯の中の仕切り。右へ引く=ファイル情報が広くなる
+          this._fiSplitterEl = this._makeSplitter('vertical', (delta, start) => {
+            const w = Math.max(120, Math.round(start + delta));
+            this._fileInfoWidth = w;
+            fi.style.flex = 'none';
+            fi.style.width = w + 'px';
+          }, () => fi.offsetWidth, () => this._saveFileInfoSize());
+          band.appendChild(this._fiSplitterEl);
+        }
+        band.appendChild(big);
+      }
+      if (band.firstChild) {
+        if (bigBelow) {
+          // 従来どおり「一覧の高さ」を変える仕切り(帯は中身なりの高さ)
+          this._leftEl.appendChild(this._waveSplitterEl);
+        } else {
+          // 帯にファイル情報しか無いとき。上へ引く=ファイル情報が高くなる
+          this._bandSplitterEl = this._makeSplitter('horizontal', (delta, start) => {
+            const h = Math.max(48, Math.round(start - delta));
+            this._fileInfoHeight = h;
+            fi.style.flex = 'none';
+            fi.style.height = h + 'px';
+          }, () => fi.offsetHeight, () => this._saveFileInfoSize());
+          this._leftEl.appendChild(this._bandSplitterEl);
+        }
+        this._leftEl.appendChild(band);
+      }
+      this._applyRowsHeight();
+
+      // ── 大波形が一覧の右(.kbd-main内) ───────────────────────────
+      if (!bigBelow) {
         this._mainEl.appendChild(this._waveSplitterVEl);
         this._mainEl.appendChild(big);
         if (this._bigWaveWidth) {
@@ -4015,6 +4126,104 @@
           big.style.width = this._bigWaveWidth + 'px';
         }
       }
+
+      // ── ファイル情報が一覧の上/左/右 ────────────────────────────
+      if (fiPlace === 'top') {
+        // 下へ引く=ファイル情報が高くなる
+        this._fiSplitterEl = this._makeSplitter('horizontal', (delta, start) => {
+          const h = Math.max(48, Math.round(start + delta));
+          this._fileInfoHeight = h;
+          fi.style.flex = 'none';
+          fi.style.height = h + 'px';
+        }, () => fi.offsetHeight, () => this._saveFileInfoSize());
+        this._leftEl.insertBefore(this._fiSplitterEl, this._leftEl.firstChild);
+        this._leftEl.insertBefore(fi, this._leftEl.firstChild);
+      } else if (fiPlace === 'left' || fiPlace === 'right') {
+        const toRight = fiPlace === 'right'; // 仕切りがペインの左に来るのでドラッグの向きが逆
+        this._fiSplitterEl = this._makeSplitter('vertical', (delta, start) => {
+          const w = Math.max(120, Math.round(toRight ? start - delta : start + delta));
+          this._fileInfoWidth = w;
+          fi.style.flex = 'none';
+          fi.style.width = w + 'px';
+        }, () => fi.offsetWidth, () => this._saveFileInfoSize());
+        if (toRight) {
+          this._mainEl.insertBefore(this._fiSplitterEl, this._leftEl.nextSibling);
+          this._mainEl.insertBefore(fi, this._fiSplitterEl.nextSibling);
+        } else {
+          this._mainEl.insertBefore(this._fiSplitterEl, this._leftEl);
+          this._mainEl.insertBefore(fi, this._fiSplitterEl);
+        }
+      }
+      this._applyFileInfoSize();
+    }
+
+    _saveFileInfoSize() {
+      try {
+        localStorage.setItem('mml_kbdFileInfoWidth', String(this._fileInfoWidth || 0));
+        localStorage.setItem('mml_kbdFileInfoHeight', String(this._fileInfoHeight || 0));
+      } catch (e) { /* ignore */ }
+    }
+
+    // ファイル情報ペインの置き場クラス・大きさ・折りたたみをインラインスタイルへ反映する
+    _applyFileInfoSize() {
+      const fi = this._fileInfoEl;
+      if (!fi) return;
+      const place = this._effectiveFileInfoPlacement();
+      const collapsed = this._fileInfoCollapsed;
+      for (const p of ['top', 'bottom', 'left', 'right']) fi.classList.toggle('kbd-fileinfo--' + p, p === place);
+      fi.classList.toggle('kbd-fileinfo--collapsed', collapsed);
+      if (this._fiToggleEl) this._fiToggleEl.textContent = collapsed ? '▶' : '▼';
+      fi.style.flex = '';
+      fi.style.width = '';
+      fi.style.height = '';
+      // 畳んだ間、およびサウンドファイルをまだ開いていない間(案内文1行だけ)は中身なりの
+      // 大きさにする。MMLしか使わない人の鍵盤表示から、空のペインが場所を取らないように
+      if (collapsed || !(this._fileInfoNodes || []).length) return;
+      // 左右に並ぶ置き場は幅を、上下に積む置き場は高さをスプリッターの値で固定する
+      const sideways = place === 'left' || place === 'right' || (place === 'bottom' && this._bigWaveBelow());
+      fi.style.flex = 'none';
+      if (sideways) fi.style.width = (this._fileInfoWidth || FILE_INFO_DEFAULT_W) + 'px';
+      else fi.style.height = (this._fileInfoHeight || FILE_INFO_DEFAULT_H) + 'px';
+    }
+
+    // ファイル情報ペインの中身を貼り直す(main.jsから預かった要素+見出し)。
+    // 見出しは原文(日本語)で持ち、言語切替で作り直されるたびにT()で引き直す
+    _renderFileInfo() {
+      if (!this._fiTitleEl || !this._fiBodyEl) return;
+      this._fiTitleEl.textContent = this._fileInfoTitleKey ? T(this._fileInfoTitleKey) : T('ファイル情報');
+      // 今出ている要素は「元の親」(#soundFileControls)へ返してから入れ替える。
+      // ★捨ててはいけない: これらは main.js / convertSettings.js が id で引く実体なので、
+      //   親から外れたままだと document.getElementById() が null になり、別のフォーマットへ
+      //   切り替えた後にヘッダ情報も変換ログも出なくなる
+      while (this._fiBodyEl.firstChild) {
+        const n = this._fiBodyEl.firstChild;
+        if (n._kbdFiHome) n._kbdFiHome.appendChild(n);
+        else this._fiBodyEl.removeChild(n);
+      }
+      const nodes = (this._fileInfoNodes || []).filter(n => n);
+      for (const n of nodes) {
+        if (!n._kbdFiHome && n.parentNode && n.parentNode !== this._fiBodyEl) n._kbdFiHome = n.parentNode;
+      }
+      if (!nodes.length) {
+        const empty = document.createElement('div');
+        empty.className = 'kbd-fileinfo-empty';
+        empty.textContent = T('サウンドファイルを開くと、ここにヘッダ情報が出ます。');
+        this._fiBodyEl.appendChild(empty);
+        return;
+      }
+      for (const n of nodes) this._fiBodyEl.appendChild(n);
+    }
+
+    /**
+     * ファイル情報ペインの中身を差し替える(main.jsのsyncKeyboardFileInfoから呼ぶ)。
+     * @param {string} titleKey 見出しの原文(日本語)。翻訳はこちら側でT()を通す
+     * @param {Element[]} nodes 表示する要素。main.jsが持つ #xxxFileHeader / #xxxFileStatus を付け替える
+     */
+    setFileInfo(titleKey, nodes) {
+      this._fileInfoTitleKey = titleKey || '';
+      this._fileInfoNodes = Array.isArray(nodes) ? nodes.slice() : [];
+      this._renderFileInfo();
+      this._applyFileInfoSize(); // 空↔中身ありで大きさの決め方が変わる
     }
 
     // レイアウト設定をCSSクラス/インラインサイズへ反映する(向き・置き場・多段・折りたたみ)
@@ -4050,7 +4259,7 @@
       if (left) {
         // 一覧の幅: 右配置=スプリッターで決めた固定幅 / 下配置で1列=CSS既定の固定幅(従来) /
         // それ以外(下配置で多段、別ウィンドウ配置)=幅いっぱい
-        const flexible = placement === 'window' || (placement === 'bottom' && L.listColumns === 'auto');
+        const flexible = this._listFlexible();
         left.classList.toggle('kbd-left--flex', flexible);
         left.classList.toggle('kbd-left--multicol', L.listColumns === 'auto');
         // 大波形を一覧の下に置くときは、行一覧を伸ばして最下部に張り付けるのでなく
@@ -4079,6 +4288,7 @@
         this._bigToggleEl.textContent = this._bigWaveCollapsed ? '▶' : '▼';
       }
       if (this._mainEl) this._mainEl.classList.toggle('kbd-main--roll-right', placement === 'right');
+      this._applyFileInfoSize(); // ファイル情報ペインの折りたたみ/大きさも一緒に反映する
     }
 
     // 現在のレイアウト設定(コピー)を返す
@@ -4099,7 +4309,7 @@
       this._laneSizes.clear();
       saveLayoutSettings(this._layout);
       this._mountRollPane();
-      this._mountBigWave();
+      this._mountPanes();
       this._rebuildLanes();
       this._applyLayoutClasses();
       // canvasの内部解像度は次の描画でサイズキャッシュから決め直す。向きが変わると
@@ -4136,6 +4346,13 @@
         { key: 'rollLanes', label: T('ピアノロールの鍵盤'), options: [
           ['all', T('全チャンネルを1つの鍵盤に')],
           ['perChannel', T('チャンネルごとに分割 (収まらない分はスクロール)')],
+        ] },
+        { key: 'fileInfoPlacement', label: T('ファイル情報の置き場'), options: [
+          ['auto', T('自動 (他の置き場に合わせる)')],
+          ['top', T('チャンネル一覧の上')],
+          ['bottom', T('チャンネル一覧の下')],
+          ['left', T('チャンネル一覧の左')],
+          ['right', T('チャンネル一覧の右')],
         ] },
       ];
       const pop = document.createElement('div');

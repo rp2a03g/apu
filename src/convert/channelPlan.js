@@ -402,9 +402,10 @@
   const defaults = new Map(); // chId → target(既定。setDefaults()で外から与える)
   const listeners = [];
 
-  function notify() {
+  // info: set() からは { chId, patch }(どの行の何が変わったか)。newFile/clear 等の一括操作は undefined
+  function notify(info) {
     // UI側の失敗で変換は止めないが、黙って握り潰すとバグが見えないのでログには出す
-    for (const fn of listeners) { try { fn(); } catch (e) { console.error('[ChannelPlan] onChange listener failed:', e); } }
+    for (const fn of listeners) { try { fn(info); } catch (e) { console.error('[ChannelPlan] onChange listener failed:', e); } }
   }
 
   const Plan = {
@@ -464,7 +465,7 @@
       const cur = Object.assign({}, entries.get(chId) || {}, patch);
       for (const k of Object.keys(cur)) if (cur[k] === null || cur[k] === undefined) delete cur[k];
       if (Object.keys(cur).length) entries.set(chId, cur); else entries.delete(chId);
-      notify();
+      notify({ chId, patch });
     },
     clearChannel: function (chId) { if (entries.delete(chId)) notify(); },
     clear: function () { if (entries.size) { entries.clear(); notify(); } },
@@ -483,6 +484,7 @@
       for (const kv of entries) if (kv[1].target) o[kv[0]] = kv[1].target;
       return o;
     },
+    // fn(info): info は set() 経由なら { chId, patch }、一括操作(newFile/clear)なら undefined
     onChange: function (fn) { listeners.push(fn); },
   };
 

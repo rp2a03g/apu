@@ -1550,8 +1550,22 @@
       },
     };
   }
+  // 鍵盤の行で借用先を変えたら、その行に出る音色の「載せ先」指定(音色一覧、localStorage)は解除する
+  // (音色指定と名前は残す)。優先順位は「音色の設定 > チャンネル」のままなので、以前に音色一覧で
+  // 指定した載せ先が残っていると、行で三角波を選んでも音色側のN163が勝って見た目と食い違う
+  // (ユーザー報告 2026-09-10: R-Type Leo FM7。音色一覧が壊れていた頃の指定が残っていた)。
+  // あとから行で選んだ操作を勝たせる(ユーザー選択 2026-09-10)。同じ音色を鳴らす他の行にも効く
+  function clearToneTargetsOnRow(chId) {
+    const S = MML.Convert.ToneSettings;
+    if (!S || !chId) return;
+    for (const r of toneInventory) {
+      if (!(r.chans || []).some(c => c.id === chId)) continue;
+      if (S.get(r.key).target) S.set(r.key, { target: null });
+    }
+  }
   if (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.onChange) {
-    MML.Convert.ChannelPlan.onChange(() => {
+    MML.Convert.ChannelPlan.onChange((info) => {
+      if (info && info.patch && 'target' in info.patch) clearToneTargetsOnRow(info.chId);
       // 合成音chの打楽器化(E選択)が変わったら: ロールを組み直し、未レンダリングのchを裏で回す
       if (synthDrum.rawRoll) keyboardDisplay.setRollTimeline(applySynthDrumToRoll(synthDrum.rawRoll));
       synthDrumEnsure();
@@ -2989,13 +3003,11 @@
     if (btn) btn.click(); // 実体は各形式パネルの書き出しボタン(隠してあるだけ)
   };
 
-  // 鍵盤表示ヘッダへ移した「ファイルを開く」/「to MML」。実体は既存のボタンをそのまま押す
+  // 鍵盤表示ヘッダへ移した「ファイルを開く」/「to MML」。実体は既存のボタンをそのまま押す。
+  // 「開く」はトップのファイルを開くアイコンと同じく、隠し input のダイアログを直接出す
   keyboardDisplay.onOpenFile = () => {
-    const win = document.getElementById('win-soundplay');
-    const btn = document.querySelector('.icon-btn.toggle-btn[data-target="win-soundplay"]');
-    if (win && getComputedStyle(win).display === 'none' && btn) btn.click();
-    const fileBtn = win && win.querySelector('input[type="file"]');
-    if (fileBtn) fileBtn.click();
+    const fileEl = document.getElementById('soundFile');
+    if (fileEl) fileEl.click();
   };
   // 割当セルの「パッド」ボタン → ドラム(DPCM)パネルを開く
   keyboardDisplay.onOpenDrumPanel = () => {
@@ -3398,13 +3410,19 @@
 
   // win-mmlはdata-always-visible="true"だがユーザーが閉じている場合がある。
   // トグルボタンのclick()経由にすると「閉じる」方向に働くことがあるため直接表示する
-  // (initUnifiedSoundFileWindow内のensureSoundWindowOpenと同じ理由・同じ手口)
+  // (initUnifiedSoundFileWindow内のensureKeyboardWindowOpenと同じ理由・同じ手口)。
+  // ★MMLファイルを開いたときの行き先はここ(ユーザー指示 2026-09-10:
+  //   「MMLファイルならMMLエディタを開いて何もしない」)
   function ensureMmlWindowOpen() {
     const win = document.getElementById('win-mml');
-    if (!win || win.style.display !== 'none') return;
-    win.style.display = 'flex';
-    const btn = document.querySelector('.toggle-btn[data-target="win-mml"]');
-    if (btn) btn.classList.add('active');
+    if (!win) return;
+    if (win.style.display === 'none') {
+      win.style.display = 'flex';
+      const btn = document.querySelector('.toggle-btn[data-target="win-mml"]');
+      if (btn) btn.classList.add('active');
+    }
+    // 表示するだけでは他のウィンドウの背面に隠れることがあるので必ず最前面へ出す
+    if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-mml');
   }
 
   // .mml/.txtを読み込んでMMLエディタへ展開する。ファイル選択ダイアログ・
@@ -7438,30 +7456,54 @@
   // ==========================================================================
   (function initUnifiedSoundFileWindow() {
     const soundFileEl = document.getElementById('soundFile');
-    const soundPlayTitleEl = document.getElementById('soundPlayTitle');
     const formatToInputId = { nsf: 'nsfFile', spc: 'spcFile', kss: 'kssFile', gbs: 'gbsFile', hes: 'hesFile', vgm: 'vgmFile' };
-    const formatToLabel = { nsf: T('NSF (ファミコン)'), spc: T('SPC (スーパーファミコン)'), kss: 'KSS (MSX)', gbs: 'GBS (Game Boy)', hes: 'HES (PC Engine)', vgm: 'VGM' };
+    // ファイル情報ペインの見出し。翻訳は keyboard.js 側でT()を通すので原文のまま渡す
+    const FORMAT_INFO_TITLE = {
+      nsf: 'ヘッダ情報 (NSF/NSFe)',
+      spc: 'ヘッダ情報 (SPC)',
+      kss: 'ヘッダ情報 (KSS: MSX PSG/SCC/FMPAC)',
+      gbs: 'ヘッダ情報 (GBS: Game Boy)',
+      hes: 'ヘッダ情報 (HES: PC Engine/TurboGrafx-16)',
+      vgm: 'ヘッダ情報 (VGM)',
+    };
 
-    const soundWinEl = document.getElementById('win-soundplay');
+    // 開いているフォーマットのヘッダ情報とログ(#xxxFileHeader / #xxxFileStatus)を、
+    // 鍵盤表示のファイル情報ペインへ付け替える。旧「サウンドファイルを開く」ウィンドウを
+    // 廃止した代わりの表示先で、置き場(一覧の上/下/左/右)は鍵盤表示のレイアウト設定で選ぶ
+    // (2026-09-10。要素そのものは #soundFileControls の中に作ったままで、親だけを移す)。
+    function syncKeyboardFileInfo(format) {
+      if (!keyboardDisplay.setFileInfo) return;
+      const title = FORMAT_INFO_TITLE[format];
+      if (!title) { keyboardDisplay.setFileInfo('', []); return; }
+      const nodes = [
+        archiveBarEl,                                        // zip/7zのファイル名(開いている時だけ表示)
+        document.getElementById(format + 'FileHeader'),
+        document.getElementById(format + 'FileStatus'),
+      ];
+      keyboardDisplay.setFileInfo(title, nodes);
+    }
 
     function showSoundPanel(format) {
       ['none', 'nsf', 'spc', 'kss', 'gbs', 'hes', 'vgm'].forEach((f) => {
         const panel = document.getElementById('soundPanel-' + f);
         if (panel) panel.style.display = f === format ? '' : 'none';
       });
-      soundPlayTitleEl.textContent = formatToLabel[format] || T('サウンドファイルを開く');
+      syncKeyboardFileInfo(format);
     }
 
-    // ウィンドウがまだ閉じていたら開く。openBtn.click()を使わない理由: openBtn自身にも
-    // 「開いたらファイル選択ダイアログを出す」リスナーが付いており(下記)、click()すると
-    // それも連動して発火しドラッグ&ドロップ直後に無関係なダイアログが開いてしまうため、
-    // floatingWindows.jsのsetVisible相当をここで直接行う(表示state管理はfloatingWindows.js
-    // 側のlocalStorage永続化に次のトグル操作時点で追いつくので実害はない)。
-    function ensureSoundWindowOpen() {
-      if (!soundWinEl || soundWinEl.style.display !== 'none') return;
-      soundWinEl.style.display = 'flex';
-      const btn = document.querySelector('.toggle-btn[data-target="win-soundplay"]');
-      if (btn) btn.classList.add('active');
+    // サウンドファイルを開いたら鍵盤表示を出す(旧「サウンドファイルを開く」ウィンドウの
+    // 代わり。ヘッダ情報も再生もここに集まっている)。トグルボタンのclick()を使わない理由は
+    // 「開いている時に押すと閉じる」方向へ働くため。floatingWindows.jsのsetVisible相当を直接行う
+    // (表示stateのlocalStorage永続化は次のトグル操作時点で追いつくので実害はない)。
+    function ensureKeyboardWindowOpen() {
+      const win = document.getElementById('win-keyboard');
+      if (!win) return;
+      if (win.style.display === 'none') {
+        win.style.display = 'flex';
+        const btn = document.querySelector('.toggle-btn[data-target="win-keyboard"]');
+        if (btn) btn.classList.add('active');
+      }
+      if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-keyboard');
     }
 
     // 拡張子→loadXxxFile()。ファイル選択ダイアログはinputのchangeイベント経由でこれと
@@ -7506,11 +7548,10 @@
       if (archiveSelectEl) archiveSelectEl.innerHTML = '';
     }
 
-    // アーカイブ表示: ファイル名はパネルの上の #archiveBar に、曲リスト(曲名+送りボタン)は
-    // 他形式の「曲番号」行と同じ位置に見えるよう、表示中フォーマットのパネルの
-    // 「ヘッダ情報」(#xxxFileHeader)の直後へ #archiveTrackBar を付け替える(ユーザー要望:
-    // VGMに限らず全形式で位置を揃える)。fmt省略時は現在読み込み中のフォーマット。
-    function renderArchiveBar(fmt) {
+    // アーカイブ表示: ファイル名は #archiveBar(鍵盤表示のファイル情報ペインの一番上)に出す。
+    // 曲リスト(#archiveTrackBar)は鍵盤表示タイトル行のファイル名ボタン(曲一覧のドロップダウン)
+    // と ⏮⏭ が担うので隠したままにし、ここでは選択状態の同期だけ行う。
+    function renderArchiveBar() {
       if (!archiveBarEl) return;
       if (!archive) { archiveBarEl.style.display = 'none'; if (archiveTrackBarEl) archiveTrackBarEl.style.display = 'none'; return; }
       archiveBarEl.style.display = '';
@@ -7525,14 +7566,6 @@
       });
       archiveSelectEl.value = String(archive.index);
       archiveTotalEl.textContent = `/ ${archive.playlist.length}`;
-      if (archiveTrackBarEl) {
-        const f = fmt || archive.loadedFormat;
-        const headerEl = f ? document.getElementById(`${f}FileHeader`) : null;
-        if (headerEl && headerEl.parentNode && archiveTrackBarEl.previousElementSibling !== headerEl) {
-          headerEl.parentNode.insertBefore(archiveTrackBarEl, headerEl.nextSibling);
-        }
-        archiveTrackBarEl.style.display = headerEl ? '' : 'none';
-      }
     }
 
     // 拡張m3u("file::KSS,song,...")の曲番号を、その形式の曲番号入力欄へ反映する。
@@ -7570,7 +7603,7 @@
           fmt = await openSoundFile(entryFile, { fromArchive: true });
           archive.loadedEntry = fmt ? item.entry : null;
           archive.loadedFormat = fmt || null;
-          renderArchiveBar(fmt || null); // フォーマットが確定したので曲リスト行を該当パネルへ付け替える
+          renderArchiveBar(); // フォーマットが確定したので曲名/選択状態を更新する
         }
         if (fmt) applyArchiveSong(fmt, item.song);
         if (fmt && autoplay) {
@@ -7601,7 +7634,7 @@
       }
       stopAllFormatPlayback();
       archive = { name: file.name, bytes, playlist, index: 0, loadedEntry: null, loadedFormat: null };
-      ensureSoundWindowOpen();
+      ensureKeyboardWindowOpen();
       renderArchiveBar();
       return loadArchiveIndex(0, false);
     }
@@ -7681,7 +7714,7 @@
         alert(T('対応していないファイル形式です: .{ext}\n(対応形式: NSF/NSFE, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)', { ext }));
         return false;
       }
-      ensureSoundWindowOpen();
+      ensureKeyboardWindowOpen();
       const targetInput = document.getElementById(targetInputId);
       const dt = new DataTransfer();
       dt.items.add(file);
@@ -7695,7 +7728,9 @@
     // ファイル選択ダイアログもドラッグ&ドロップと同じく「開いたらそのまま再生」する
     // (2026-09-09 ユーザー指示「鍵盤表示でファイル開いたら即再生」。鍵盤表示の
     //  「開く」ボタンもこの input を click() するので、ここ1か所で全経路が揃う)。
-    // MMLテキスト('mml')は formatToPlayFn に載っていないので従来どおり読み込むだけ
+    // MMLテキスト('mml')は formatToPlayFn に載っていないので読み込むだけ(ユーザー指示 2026-09-10:
+    // 「サウンドファイルなら鍵盤表示を開いて再生 / MMLファイルならMMLエディタを開いて何もしない」。
+    //  鍵盤表示を開くのは openSoundFile、MMLエディタを開くのは openMmlTextFile が行う)
     soundFileEl.addEventListener('change', async () => {
       const file = soundFileEl.files[0];
       if (!file) return;
@@ -7705,17 +7740,10 @@
       if (playFn) playFn();
     });
 
-    // ヘッダーの「サウンドファイルを開く」ボタン: ウィンドウを開くのと同時に
-    // ファイル選択ダイアログを直接表示する（floatingWindows.jsの汎用トグル処理の後に実行され、
-    // その時点でウィンドウの表示/非表示は確定している）
-    const openBtn = document.querySelector('.toggle-btn[data-target="win-soundplay"]');
-    if (openBtn && soundWinEl) {
-      openBtn.addEventListener('click', () => {
-        if (soundWinEl.style.display !== 'none') {
-          soundFileEl.click();
-        }
-      });
-    }
+    // トップのツールバーの「ファイルを開く」アイコン。かつては「サウンドファイルを開く」
+    // ウィンドウのトグルだったが、そのウィンドウを廃止したので今はダイアログを出すだけ
+    const openBtn = document.getElementById('btnOpenFile');
+    if (openBtn) openBtn.addEventListener('click', () => soundFileEl.click());
 
     // ドラッグ&ドロップでも同じ経路(openSoundFile)で開けるようにする。ウィンドウが
     // 閉じていてもページ上のどこにドロップしても拾う(ヘッダーの開くボタンと同じ
@@ -7748,24 +7776,20 @@
       const file = e.dataTransfer.files && e.dataTransfer.files[0];
       if (!file) return;
       // ドラッグ&ドロップは開いた直後に自動再生まで行う(ファイル選択ダイアログとの
-      // 唯一の挙動差。ensureSoundWindowOpen/showSoundPanel等の中身はopenSoundFile側で共通)。
+      // 唯一の挙動差。ensureKeyboardWindowOpen/showSoundPanel等の中身はopenSoundFile側で共通)。
       openSoundFile(file).then((ext) => {
         const playFn = ext && formatToPlayFn[ext];
         if (playFn) playFn();
       });
     });
 
-    // ウィンドウ自体のタイトル行にあるファイルを開くアイコン(ウィンドウが既に開いている状態で
-    // 別のファイルへ差し替える用)
-    const inlineOpenBtn = document.getElementById('btnSoundFileOpenInline');
-    if (inlineOpenBtn) inlineOpenBtn.addEventListener('click', () => soundFileEl.click());
-
-    // ウィンドウを閉じたら再生を止め、先読みキャプチャ(writeLog/snapshots等)も破棄する
-    // (floatingWindows.jsの汎用closeハンドラは表示/非表示の切替のみで、鳴りっぱなし・
-    // メモリ蓄積を防ぐ処理を持たないため、このウィンドウ専用に追加で配線する)。
-    const soundWinCloseBtn = soundWinEl ? soundWinEl.querySelector('.float-window-close') : null;
-    if (soundWinCloseBtn) {
-      soundWinCloseBtn.addEventListener('click', () => stopSoundFileWindowPlayback());
+    // 鍵盤表示を閉じたらサウンドファイルの再生を止め、先読みキャプチャ(writeLog/snapshots等)も
+    // 破棄する(floatingWindows.jsの汎用closeハンドラは表示/非表示の切替のみで、鳴りっぱなし・
+    // メモリ蓄積を防ぐ処理を持たないため追加で配線する)。旧「サウンドファイルを開く」
+    // ウィンドウの閉じるボタンが担っていた役目を、その表示先である鍵盤表示へ移したもの
+    const kbdWinCloseBtn = document.querySelector('#win-keyboard .float-window-close');
+    if (kbdWinCloseBtn) {
+      kbdWinCloseBtn.addEventListener('click', () => stopSoundFileWindowPlayback());
     }
   })();
 
