@@ -326,16 +326,49 @@
   }
 
   // #EX-*(拡張音源使用宣言)のチップ名対応表
+  // 受理する名前。N163は `#EX-N163` と本家ppmck綴りの `#EX-NAMCO106` の両方を通す
+  // (2026-09-10、ユーザー指示。古い綴りは互換のため残し、このツールが書き出すのは新しい方)
+  // FME-7も同じ扱い: 実チップ名の `#EX-SUNSOFT5B` を足し、`#EX-FME7` は互換で残す(2026-09-11)
   const EX_CHIP_MAP = {
     'EX-DISKFM': 'fds', 'EX-VRC7': 'vrc7', 'EX-VRC6': 'vrc6',
-    'EX-NAMCO106': 'n163', 'EX-FME7': 'fme7', 'EX-MMC5': 'mmc5'
+    'EX-NAMCO106': 'n163', 'EX-N163': 'n163',
+    'EX-FME7': 'fme7', 'EX-SUNSOFT5B': 'fme7', 'EX-MMC5': 'mmc5'
   };
 
-  // EX_CHIP_MAPの逆引き(nsf2mml/spc2mml/kss2mml等の自動変換がMML本文へ
-  // #EX-*ディレクティブを埋め込む際に使う)
+  // 書き出しに使う正典の綴り(nsf2mml/spc2mml/kss2mml等の自動変換がMML本文へ
+  // #EX-*ディレクティブを埋め込む際に使う)。★EX_CHIP_MAPの逆引きに頼らないこと:
+  // 別名を足した順で書き出し名が入れ替わってしまう
+  const EX_CHIP_CANONICAL = {
+    fds: 'EX-DISKFM', vrc7: 'EX-VRC7', vrc6: 'EX-VRC6',
+    n163: 'EX-N163', fme7: 'EX-SUNSOFT5B', mmc5: 'EX-MMC5'
+  };
   const EX_CHIP_DIRECTIVE = {};
-  for (const name in EX_CHIP_MAP) EX_CHIP_DIRECTIVE[EX_CHIP_MAP[name]] = '#' + name;
+  for (const chip in EX_CHIP_CANONICAL) EX_CHIP_DIRECTIVE[chip] = '#' + EX_CHIP_CANONICAL[chip];
   Mml.EX_CHIP_DIRECTIVE = EX_CHIP_DIRECTIVE;
+  Mml.EX_CHIP_ALIASES = EX_CHIP_MAP;
+
+  /**
+   * `#EX-NAMCO106 <n>` に書くチャンネル数 = 本文に出す n163 レターのうち最上位の位置+1。
+   *
+   * ★この数値は「本家ppmckでは意味がある」(ppmckc/datamake.c `_EX_NAMCO106`: n106_track_num に
+   *   入り、track_allow_flag へ先頭 n トラックぶんだけ許可を立てる)。少なく書くと本文に居る
+   *   上位トラックが INVALID_TRACK_HEADER で弾かれ、多く書くとN163の有効ch数レジスタが変わって
+   *   全chの音程がずれる。だから「音符を持つ最上位」ではなく「本文に出す最上位」で数える
+   *   (休符だけのチャンネルも本文に居る以上トラックとして許可が要る)。
+   * 一方このツールの compiler.js はこの数値を読まず、segmentsByChannel から自動検出する
+   *   (音符を持つ最上位レターの位置+1)。ppmckDriver.js も同じ規則。なので数値をどう書いても
+   *   ツール内の再生・NSF書き出しは変わらない。
+   * 以前はレター枠の数(常に8)を書いていた(ユーザー指摘 2026-09-10: FM7を三角波へ移して
+   *   N163を1本も鳴らしていないのに `8` と書いてあった)。
+   * @param {Array} scoreChannels 出力するチャンネル({letter, events})
+   * @param {string[]} n163Letters assignExpansionLetters(...).n163(P-W、常に8個)
+   */
+  Mml.n163DeclaredCount = function (scoreChannels, n163Letters) {
+    const used = new Set((scoreChannels || []).map(c => c && c.letter));
+    let n = 0;
+    (n163Letters || []).forEach((letter, i) => { if (used.has(letter)) n = i + 1; });
+    return Math.max(1, n);
+  };
 
   // バンキング系(本ツールはROMバンク分割を前提にしないため認識のみ・無視する)
   const BANKING_DIRECTIVES = new Set(['AUTO-BANKSWITCH', 'BANK-CHANGE', 'SETBANK', 'NO-BANKSWITCH']);

@@ -1024,9 +1024,15 @@
   function sourceAttDb(s, ev) {
     if (ev.attDb !== undefined) return ev.attDb;
     if (ev.volume === undefined) return 0;
-    if (s.chip === 'ym2413') return ev.volume * 3;
-    const step = s.chip === 'sn76489' ? 2 : 1.5;
-    return (15 - Math.max(0, Math.min(15, ev.volume))) * step;
+    const v = Math.max(0, Math.min(15, ev.volume));
+    // 音量則は src/convert/borrow.js CHIP_VOL_LAW が正典(SCCは線形、AYは3dB/段。2026-09-11)
+    const law = (MML.Convert.Borrow && MML.Convert.Borrow.CHIP_VOL_LAW || {})[s.chip];
+    if (law) {
+      if (law.linear) return v <= 0 ? 96 : -20 * Math.log10(v / 15);
+      if (law.attDb) return v * law.attDb;
+      return (15 - v) * law.stepDb;
+    }
+    return (15 - v) * 1.5;
   }
 
   // ソースチャンネルのイベントを借用先ファミリの語彙へ整形する(破壊的。呼び出し側でコピー済み)。

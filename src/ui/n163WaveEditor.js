@@ -472,7 +472,8 @@
         audioCtx.resume();
 
         let defText = extractDefinitionLines(mmlSourceEl.value);
-        if (!/^\s*#EX-NAMCO106\b/im.test(defText)) defText = '#EX-NAMCO106\n' + defText;
+        // N163の宣言はどちらの綴りでも通る(lexer.js EX_CHIP_MAP)。足すときは書き出しと同じ綴りで
+        if (!/^\s*#EX-(N163|NAMCO106)\b/im.test(defText)) defText = MML.Mml.EX_CHIP_DIRECTIVE.n163 + '\n' + defText;
         // 「反映」を押していなくても今キャンバスに描いている内容がそのまま鳴るよう、
         // 選択中インデックスの定義をローカルの現在値で上書きする形で追加する
         const liveDef = formatDefText(currentIndex, canvas.data);

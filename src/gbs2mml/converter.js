@@ -301,7 +301,7 @@
     ].join('\n');
 
     const directiveLines = expansions.map(chip => chip === 'n163'
-      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${(letterMap.n163 || []).length}`
+      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${MML.Mml.n163DeclaredCount(scoreChannels, letterMap.n163)}`
       : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
     // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
     MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, frameRate);

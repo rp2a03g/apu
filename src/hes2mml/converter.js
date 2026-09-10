@@ -68,7 +68,10 @@
   MML.HES2MML.sourceChannels = function () {
     return Array.from({ length: 6 }, (_, i) => ({
       id: `PSG${i}`, label: `PSG ch${i}`, chip: 'huc6280', kind: 'wave', ch: i,
-      linear: true, nativeFamily: 'n163',
+      // ★音量則は chip 名から引く(src/convert/borrow.js CHIP_VOL_LAW)。ここに linear: true と
+      //   書いてあったが誤りで、HuC6280のPSG音量は対数(MAME c6280「48dBを32段」=1.5dB/段。
+      //   抽出器が effVol>>1 で16段へ落とすので実効3dB/段)。2026-09-11訂正
+      nativeFamily: 'n163',
     }));
   };
   MML.HES2MML.defaultPlan = function () {
@@ -242,7 +245,7 @@
     // #EX-*: 既定は常にN163(6ch宣言)。ユーザー指定のときは実際に使った拡張音源だけ宣言する
     const directiveLines = customPlan
       ? expansions.filter(chip => chip !== 'dpcm').map(chip => chip === 'n163'
-        ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${(expansionLetterMap.n163 || []).length}`
+        ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${MML.Mml.n163DeclaredCount(scoreChannels, expansionLetterMap.n163)}`
         : MML.Mml.EX_CHIP_DIRECTIVE[chip])
       : [`${MML.Mml.EX_CHIP_DIRECTIVE.n163} ${N163_NUM_CH}`];
 

@@ -150,7 +150,7 @@
  *   #TUNING <cent>   基準ピッチ。全音符の周波数を12平均律(A4=440Hz)からこのセント数だけずらす(小数可、±1200)。
  *                    音名は変わらない(キー/トランスポーズではない)。*2mml変換が曲全体の音程偏差を
  *                    自動検出して出す(src/convert/options.js detectTuning)。NSF書き出しも同じ値を使う
- *   #EX-VRC6/#EX-VRC7/#EX-DISKFM/#EX-MMC5/#EX-NAMCO106/#EX-FME7
+ *   #EX-VRC6/#EX-VRC7/#EX-DISKFM/#EX-MMC5/#EX-N163(=#EX-NAMCO106)/#EX-SUNSOFT5B(=#EX-FME7)
  *                    拡張音源の使用宣言。opt.expansions(UI選択)と統合される
  *                    (MML本文がこれらを含めば、UIで選択していなくてもその音源が有効になる)
  *   #AUTO-BANKSWITCH/#BANK-CHANGE/#SETBANK/#NO-BANKSWITCH

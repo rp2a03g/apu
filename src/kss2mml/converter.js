@@ -42,7 +42,10 @@
   // ★2026-08-02修正: numChは固定8ではなくcompiler.js側の実際の自動検出値(音符を持つ
   // 最上位レターの位置+1、下のcomputeActualN163ChannelCount参照)を渡すこと。以前は
   // ここだけ8固定にしていたが、#EX-NAMCO106の後ろの数値はcompiler.js側では一切パースされず
-  // (単なる目印コメント、lexer.jsはディレクティブ名しか見ない)、実際に使われるnumN163Chは
+  // (lexer.jsはディレクティブ名しか見ない。★ただし本家ppmckは読む —— ppmckc/datamake.c の
+  //  _EX_NAMCO106 が n106_track_num に入れて先頭nトラックだけ許可するので、書き出したMMLを
+  //  本家でコンパイルするなら本文に出すch数と一致していないと弾かれる。Mml.n163DeclaredCount 参照)、
+  // 実際に使われるnumN163Chは
   // 常にsegmentsByChannelから自動検出した値(このゲームでは5)になる。freqRegはnumChに
   // 比例するため、ここで8を使うとD<n>が実際に必要な量の8/5=1.6倍(例: 13.5セント→21.6セント)
   // で書き込まれ、原曲の音程ズレそのものより大きく音痴になるバグだった(Gofer no Yabou II
@@ -380,7 +383,7 @@
     // #EX-*(機能する本文ディレクティブ。上の`; `コメントとは別。これがないと
     // MML本文だけからは拡張音源が有効にならず、UI側の操作が必要になってしまう)
     const directiveLines = expansions.map(chip => chip === 'n163'
-      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${(expansionLetterMap.n163 || []).length}`
+      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${MML.Mml.n163DeclaredCount(scoreChannels, expansionLetterMap.n163)}`
       : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
 
     // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前

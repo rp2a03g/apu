@@ -86,8 +86,13 @@
   //   { linear: true } … 抽出値が線形振幅(vol=振幅比)
   //   { step }         … 対数DAC。vol=(段/15)、減衰 = (1-vol)*15*step [dB]
   //   { att }          … 減衰値そのもの(OPLL/OPL/VRC7: 鍵盤表示のvolは(15-n)/15 に反転済み)
+  // ★音量則はチップの性質(src/convert/borrow.js CHIP_VOL_LAW が正典)。2026-09-11に実装と
+  //   突き合わせて訂正: AY(KP)とSCC(KS)を一括で1.5dB/段としていたが、AYは3dB/段でSCCは線形。
+  //   HES(PSG)は既定の線形へ落ちていたが実際は対数3dB/段。FME-7(FE)が元から3dBだったのと辻褄が合う
   function volSpecOf(id) {
-    if (/^KP\d$/.test(id) || /^KS\d$/.test(id)) return { step: 1.5 };   // AY/SSG, SCC
+    if (/^KP\d$/.test(id)) return { step: 3 };                           // AY/SSG(YM2149系)
+    if (/^KS\d$/.test(id)) return { linear: true };                      // SCC: 波形×音量の掛け算
+    if (/^PSG\d$/.test(id)) return { step: 3 };                          // HuC6280(抽出器が>>1で16段)
     if (/^SNN?\d?$/.test(id)) return { step: 2 };                        // SN76489
     if (/^(KF|OL)\d$/.test(id) || /^VR\d$/.test(id)) return { att: 3 };   // OPLL/OPL/VRC7
     if (/^FE\d$/.test(id)) return { step: 3 };                           // FME-7(YM2149)

@@ -114,7 +114,6 @@
     for (const ev of events) if (ev.volume !== undefined) ev.volume = table[Math.max(0, Math.min(top, ev.volume))];
   }
 
-  // 借用先ファミリの音量レンジ(FDSとVRC6のこぎり波だけ本家ppmck同様0-63、他は0-15)
   // 借用先ファミリの音量レンジ。★FDS=32/VRC6のこぎり=42 は「コンパイラが受け付ける上限」(v0-63、
   //   compiler.js volMax)ではなく **実機で意味のある上限**(2026-09-11に63から訂正):
   //     ・VRC6のこぎり波は14ステップ中6回だけ蓄積レートを足し、8bitで溢れる。6×42=252で出力段が
@@ -123,14 +122,41 @@
   //   spc2mml は元からこの値(TARGET_VOL_MAX)を使っており、ここを正典にして3経路の食い違いを解消する
   const FAMILY_VOL_MAX = { pulse: 15, triangle: 15, noise: 15, n163: 15, fme7: 15, vrc7: 15, vrc6pulse: 15, vrc6saw: 42, fds: 32 };
 
-  // 変換元の音量値 v(0..srcMax)の減衰量[dB]。
-  //   s.linear      … 抽出値が線形振幅(GB/HuC6280/2A03系)
-  //   nativeFamily=vrc7 / chip=ym2413 … 値そのものが減衰値(v0が最大、3dB/段)
-  //   それ以外      … 対数DAC(既定1.5dB/段。SN76489は2dB、FME-7は3dB)
+  // ── チップごとの音量則(正典) ────────────────────────────────────────
+  // ★2026-09-11、各エミュレータの実装と一次資料を突き合わせて訂正。音量則は「どの形式から
+  //   来たか」ではなく **チップの性質** なので、形式ごとの宣言ではなくここ1箇所で持つ。
+  //   vgm2mml の sourceAttDb と src/audio/assign-preview.js volSpecOf も同じ表を見る。
+  //   linear … 音量値が振幅そのもの / stepDb … 1段あたりの減衰dB / attDb … 値自体が減衰値
+  const CHIP_VOL_LAW = {
+    // SCC: mixSample が (sample * vol) >> 4 の掛け算。対数DACではない(sccAudio.js)
+    k051649: { linear: true },
+    // GB: パルスは4bit線形エンベロープ、波形chは音量シフト(apuGb.js)
+    gb: { linear: true },
+    // AY-3-8910/YM2149: 1.5dB/段の32段表を、4bitレジスタが channelLevel=v*2+1 で1段飛ばしに引く
+    //   → レジスタ1段は3dB(ay8910Msx.js)。NESdev Sunsoft 5B audio も「5bitで1.5dB/段、
+    //   4bit扱いなら3dB/段」と記す。★以前は1.5dBにしており、エンベロープ側の段数を流用していた
+    ay8910: { stepDb: 3 },
+    // HuC6280: 5bitで1.5dB/段の対数(MAME c6280 は「48dBを32段に配分」)。抽出器が effVol>>1 で
+    //   16段へ落とすので実効3dB/段(apuHuC6280.js gainFromIndex)。★以前は線形扱いだった
+    huc6280: { stepDb: 3 },
+    // SN76489: 2dB/段(sn76489.js VOL_TABLE)
+    sn76489: { stepDb: 2 },
+    // OPLL: 値そのものが減衰値(v0が最大、3dB/段)
+    ym2413: { attDb: 3 },
+  };
+
+  // 変換元の音量値 v(0..srcMax)の減衰量[dB]。チップ表(CHIP_VOL_LAW)が最優先。
+  // 表に無いチップは s.linear / s.logStepDb / nativeFamily から推定する(既定は対数1.5dB/段)。
   function attOf(s, v, srcMax) {
+    const law = CHIP_VOL_LAW[s.chip];
+    if (law) {
+      if (law.linear) return v <= 0 ? 96 : -20 * Math.log10(v / srcMax);
+      if (law.attDb) return v * law.attDb;
+      return (srcMax - v) * law.stepDb;
+    }
     if (s.linear) return v <= 0 ? 96 : -20 * Math.log10(v / srcMax);
-    if (s.nativeFamily === 'vrc7' || s.chip === 'ym2413') return v * 3;
-    const step = s.logStepDb || (s.chip === 'sn76489' ? 2 : 1.5);
+    if (s.nativeFamily === 'vrc7') return v * 3; // OPL(chip:'opl')など、減衰値をそのまま持つ元
+    const step = s.logStepDb || 1.5;
     return (srcMax - v) * step;
   }
   // 変換元の音量値 → 借用先の音量値の対応表(0..srcMax)。変換不要なら null。
@@ -629,6 +655,7 @@
     VRC7_TABLE,
     VOL_FROM_DB,
     FAMILY_VOL_MAX, // 借用先ファミリの音量レンジ(vgm2mml/spc2mml/assign-preview も同じ表を見る)
+    CHIP_VOL_LAW,   // チップごとの音量則(同上)
     volTableFor,
     mappedEnvReg,
     mapConstVolumes,

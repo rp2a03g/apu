@@ -25,7 +25,7 @@
 #MAKER 2026
 #PROGRAMER Sound Emulation Foundry
 
-;@help #EX-VRC6 #EX-VRC7 #EX-DISKFM #EX-MMC5 #EX-NAMCO106 #EX-FME7 :: 拡張音源の使用宣言 :: ヘッダ
+;@help #EX-VRC6 #EX-VRC7 #EX-DISKFM #EX-MMC5 #EX-N163 #EX-NAMCO106 #EX-SUNSOFT5B #EX-FME7 :: 拡張音源の使用宣言 :: ヘッダ
 ; チャンネルの割り当てと、使う拡張音源の宣言。#EX-*を書くとそのチップのチャンネルが増える
 ;  チャンネル対応表:
 ;    A = 2A03 パルス1		… 基本(音符/音長/オクターブ/タイ/休符/ループ/連符/
