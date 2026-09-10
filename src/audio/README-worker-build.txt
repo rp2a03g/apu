@@ -12,7 +12,7 @@ captureHesSongAsync)をWeb Workerで実行するための自己完結ビルド�
     gbs,vgm}Capture として通常の<script>タグで読み込まれる
   - src/audio/capture-worker-client.js が Function.prototype.toString でソース
     文字列を取り出し、Blob URL経由で new Worker() する(fetch()不使用。
-    file://のnull origin制約とworklet-loader.jsと同じ理由の回避策)
+    file://のnull origin制約を避けるための回避策)
   - クライアントは起動時に鮮度チェック(メインスレッドに読み込まれている現行
     ソースのtoStringがバンドル文字列に含まれるか)を行い、再ビルド忘れの古い
     バンドルを検出したらconsole警告してメインスレッド版へフォールバックする

@@ -180,6 +180,17 @@ function main() {
     if (code !== 0) bad++;
   }
 
+  if (!argv.includes('--no-i18n')) {
+    // 辞書の重複キー検査。en.js は素のオブジェクトリテラルなので同じキーを2回書くと
+    // 後勝ちで前の訳が黙って消える。i18n.js の missing() は未訳しか見ず、これまで
+    // どのlintも重複を見ていなかったため実際に3件入り込んでいた(2026-09-11)。
+    // 訳が同一なら無害だが、違う訳の重複は必ずどちらかの画面が誤訳になる。
+    process.stderr.write('\n=== i18n ===\n');
+    const dupNg = lintI18n();
+    rows.push(['i18n', '-', '-', String(dupNg), '-', '-']);
+    if (dupNg) bad++;
+  }
+
   console.log('\n' + '='.repeat(64));
   console.log('形式    対象    成功    失敗  ｺﾝﾊﾟｲﾙ不可    変化');
   for (const r of rows) {
@@ -188,6 +199,49 @@ function main() {
   console.log('='.repeat(64));
   console.log(bad === 0 ? '✅ 変化・新規失敗なし' : `❌ ${bad} 項目に変化または失敗`);
   process.exit(bad === 0 ? 0 : 1);
+}
+
+/**
+ * src/i18n/*.js の辞書から重複キーを探す。訳が違う重複だけを失敗扱いにする
+ * (同一訳の重複は冗長なだけで表示は壊れない)。
+ * 正規表現でJSを解析せず、行頭が引用符のキー行だけを素直に拾う。
+ */
+function lintI18n() {
+  const fs = require('fs');
+  const dir = path.join(__dirname, '..', '..', 'src', 'i18n');
+  const Q = String.fromCharCode(39);
+  let ng = 0;
+  for (const name of fs.readdirSync(dir)) {
+    if (!name.endsWith('.js') || name === 'i18n.js') continue;
+    const seen = new Map();
+    const dup = new Map();
+    let n = 0;
+    for (const line of fs.readFileSync(path.join(dir, name), 'utf8').split(/\r?\n/)) {
+      const t = line.trimStart();
+      if (!t.startsWith(Q)) continue;
+      const end = t.indexOf(Q + ':', 1);
+      if (end < 0) continue;
+      const key = t.slice(1, end);
+      const val = t.slice(end + 2).trim().replace(/,$/, '');
+      n++;
+      if (seen.has(key)) {
+        if (!dup.has(key)) dup.set(key, [seen.get(key)]);
+        dup.get(key).push(val);
+      }
+      seen.set(key, val);
+    }
+    const conflict = [...dup.entries()].filter(([, vals]) => new Set(vals).size > 1);
+    const same = dup.size - conflict.length;
+    process.stderr.write(`${name}: キー ${n} / 重複 ${dup.size}(訳違い ${conflict.length} / 同一訳 ${same})\n`);
+    for (const [key, vals] of conflict) {
+      process.stderr.write(`  ★訳が違う重複(後勝ちで前が死ぬ): ${JSON.stringify(key)} → ${vals.join(' / ')}\n`);
+    }
+    for (const [key] of dup) {
+      if (!conflict.some(([k]) => k === key)) process.stderr.write(`  同一訳の重複(冗長): ${JSON.stringify(key)}\n`);
+    }
+    ng += conflict.length;
+  }
+  return ng;
 }
 
 main();

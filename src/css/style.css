@@ -1825,6 +1825,12 @@ button.secondary {
      付けない(.kbd-vol-bar自体もborder-radiusを持つため見た目上のクリップは実害が薄い)。 */
 }
 
+/* 見かけ音量が干渉で下がっている行(三角波/ノイズ)。バーの短さが「レジスタが小さい」ではなく
+   「他chと共有する非線形DACに削られている」ことを示すため、枠を音量数値と同じ黄色にする。 */
+.kbd-vol-wrap--masked {
+  border-color: #ffcc44;
+}
+
 .kbd-vol-bar {
   display: block;
   height: 100%;

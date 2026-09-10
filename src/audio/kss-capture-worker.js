@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-10 11:05:21
+ * Built by tools/build-capture-workers.ps1 at 2026-09-11 05:01:38
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-10 11:05:21';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-11 05:01:38';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -5188,7 +5188,10 @@
       muted: typeof ch.isMuted === 'function' ? ch.isMuted() : false });
     const out = { pulse1: rd(apu.pulse1), pulse2: rd(apu.pulse2), noise: rd(apu.noise) };
     // 三角波は音量レジスタが無く、長さカウンタ+線形カウンタだけで発音が止まる
-    if (apu.triangle) out.triangle = { len: apu.triangle.lengthCounter, linear: apu.triangle.linearCounter };
+    // seq: シーケンサ位置。三角波は消音中も最後の値をDCとして保持し、そのDCが
+    // 非線形tndミキサー経由でノイズ/DPCMの聞こえ方に効くため、見かけ音量の計算に要る
+    if (apu.triangle) out.triangle = { len: apu.triangle.lengthCounter, linear: apu.triangle.linearCounter,
+                                       seq: apu.triangle.seqStep };
     // FDS $4080: bit7=1で直接ゲイン, bit7=0でエンベロープ(減衰)。実ゲイン(volGain 0-32)を採取。
     // effectiveFreq: モジュレーション適用後の実ピッチ(内部単位)。鍵盤表示でMH<n>使用中の
     // 実際に揺れているピッチをHz換算する用途(生の$4082/4083周期だけでは変調前の値になる)。
@@ -5201,7 +5204,9 @@
     if (apu.dmc) {
       // playing: 実際にサンプルを読み進めている最中か($4015 bit4 の書込み値ではなく実状態。
       // 鍵盤/ロールの発声判定用。鳴り終わると bytesRemaining=0 かつ shiftReg を出し切る)
-      const dmc = { level: apu.dmc.outputLevel, seq: apu.dmc.seq || 0,
+      // amp: 直近1フレームのDAC振幅(0〜127)=DPCMの体感音量。level(現在値)は波形の
+      // 位置でしかなく音量にならないため、鍵盤表示の音量数値はこちらを使う
+      const dmc = { level: apu.dmc.outputLevel, amp: apu.dmc.takeAmplitude(), seq: apu.dmc.seq || 0,
                     playing: apu.dmc.bytesRemaining > 0 || (apu.dmc.bitsRemaining > 0 && !apu.dmc.silence) };
       if (bus) {
         const s = _dmcSample(bus, apu.dmc.sampleAddr, apu.dmc.sampleLength);

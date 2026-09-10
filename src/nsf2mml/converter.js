@@ -58,7 +58,7 @@
   function lengthAudibleFrames(lengthCounterValue) {
     return Math.max(1, Math.ceil(lengthCounterValue / 2));
   }
-  // スイープユニット(実機/src/emulator/apu2a03.js PulseChannel、src/audio/mml-worklet.js)。
+  // スイープユニット(実機/src/emulator/apu2a03.js PulseChannel)。
   // negate時のパルス1は1の補数(さらに-1)、パルス2は2の補数。
   function sweepTargetPeriod(period, sweepReg, isPulse1) {
     const change = period >> (sweepReg & 7);

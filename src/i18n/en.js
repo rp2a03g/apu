@@ -440,8 +440,7 @@
     'MML変換用キャプチャ中… {pct}%': 'Capturing for MML conversion... {pct}%',
     // ---- 変換結果の音程検証 (src/convert/verify.js, main.js renderPitchCheck) ----
     '音程チェック: 実行不可 ({msg})': 'Pitch check: unavailable ({msg})',
-    'パルス': 'pulse',
-    '三角波': 'triangle',
+    'パルス': 'Pulse',
     '(他 {n} 音)': ' (and {n} more notes)',
     '{ch}: {note} ({sec}秒) は {chip} の音域より低いため鳴りません{more}。オクターブを上げてください':
       '{ch}: {note} (at {sec}s) is below the range of {chip}, so it will not sound{more}. Raise the octave.',
@@ -524,7 +523,6 @@
     'ゲーム      : {game}': 'Game        : {game}',
     'システム    : {system}': 'System      : {system}',
     '日付        : {date}': 'Date        : {date}',
-    '音源        : {chips}': 'Chips       : {chips}',
     '[未対応・読み飛ばし]': '[unsupported, skipped]',
     '長さ        : {time}{loop}': 'Length      : {time}{loop}',
     ' (ループ {loop})': ' (loop {loop})',
@@ -672,7 +670,6 @@
     'DPCM: 計算中…': 'DPCM: calculating…',
     '定義 {clips} / 打点 {segments} / ROM {kb} KB': '{clips} defs / {segments} hits / {kb} KB ROM',
     'パッド試聴': 'Audition pads',
-    '原音': 'Original',
     'DPCM: 定義 {clips} 件 / 打点 {segments} 個 / ROM {kb} KB': 'DPCM: {clips} definitions / {segments} hits / {kb} KB of ROM',
     '音符の抽出': 'Note extraction',
     '打楽器を音符にする': 'Turn percussion into notes',
@@ -831,7 +828,15 @@
     '音色データの書式': 'Patch data format',
     'レジスタ(バイナリ)': 'Registers (binary)',
     '@OP (バイナリ8バイト)': '@OP (raw 8 bytes)',
-    '$4011制御': 'driven by $4011',
+    '{src}と同じDACを共有しているため音量が下がっています(表示は実際に鳴っている割合)':
+      'Sharing one DAC with {src} pulls this level down (the number is the fraction actually sounding).',
+    '{src}と同じDACを共有しているため、実際の音量はこのレジスタ値より下がっています':
+      'Sharing one DAC with {src} means the real level is lower than this register value.',
+    'ノイズ|干渉源': 'the noise channel',
+    'DPCM($4011)|干渉源': 'DPCM ($4011)',
+    'ノイズとDPCM($4011)|干渉源': 'the noise channel and DPCM ($4011)',
+    '三角波|干渉源': 'the triangle channel',
+    '三角波とDPCM($4011)|干渉源': 'the triangle channel and DPCM ($4011)',
     '$4087 bit7=0 (モジュレーション有効)': '$4087 bit7=0 (modulation enabled)',
     'BRR (素 + ガウス補間)': 'BRR (raw + Gaussian)',
     'BRR (素 + ガウス補間 + PM)': 'BRR (raw + Gaussian + PM)',

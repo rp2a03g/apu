@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-10 11:05:21
+ * Built by tools/build-capture-workers.ps1 at 2026-09-11 05:01:38
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-10 11:05:21';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-11 05:01:38';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -444,7 +444,10 @@
       muted: typeof ch.isMuted === 'function' ? ch.isMuted() : false });
     const out = { pulse1: rd(apu.pulse1), pulse2: rd(apu.pulse2), noise: rd(apu.noise) };
     // 三角波は音量レジスタが無く、長さカウンタ+線形カウンタだけで発音が止まる
-    if (apu.triangle) out.triangle = { len: apu.triangle.lengthCounter, linear: apu.triangle.linearCounter };
+    // seq: シーケンサ位置。三角波は消音中も最後の値をDCとして保持し、そのDCが
+    // 非線形tndミキサー経由でノイズ/DPCMの聞こえ方に効くため、見かけ音量の計算に要る
+    if (apu.triangle) out.triangle = { len: apu.triangle.lengthCounter, linear: apu.triangle.linearCounter,
+                                       seq: apu.triangle.seqStep };
     // FDS $4080: bit7=1で直接ゲイン, bit7=0でエンベロープ(減衰)。実ゲイン(volGain 0-32)を採取。
     // effectiveFreq: モジュレーション適用後の実ピッチ(内部単位)。鍵盤表示でMH<n>使用中の
     // 実際に揺れているピッチをHz換算する用途(生の$4082/4083周期だけでは変調前の値になる)。
@@ -457,7 +460,9 @@
     if (apu.dmc) {
       // playing: 実際にサンプルを読み進めている最中か($4015 bit4 の書込み値ではなく実状態。
       // 鍵盤/ロールの発声判定用。鳴り終わると bytesRemaining=0 かつ shiftReg を出し切る)
-      const dmc = { level: apu.dmc.outputLevel, seq: apu.dmc.seq || 0,
+      // amp: 直近1フレームのDAC振幅(0〜127)=DPCMの体感音量。level(現在値)は波形の
+      // 位置でしかなく音量にならないため、鍵盤表示の音量数値はこちらを使う
+      const dmc = { level: apu.dmc.outputLevel, amp: apu.dmc.takeAmplitude(), seq: apu.dmc.seq || 0,
                     playing: apu.dmc.bytesRemaining > 0 || (apu.dmc.bitsRemaining > 0 && !apu.dmc.silence) };
       if (bus) {
         const s = _dmcSample(bus, apu.dmc.sampleAddr, apu.dmc.sampleLength);
@@ -939,6 +944,13 @@
       this.shiftReg = 0;
       this.silence = true;
       this.irqFlag = false;
+      // ── DAC振幅(体感音量)の計測 ──────────────────────────────
+      // $4011/outputLevel は「波形の現在位置」であって音量ではない(実測: SMB3のスネアは
+      // 減衰しても現在値の中央値は46のまま動かない)。1フレーム分のDAC値の振幅(peak-to-peak)を
+      // 取ると体感音量そのものになる(ミックス全体の実振幅との相関 r=0.91、$4011直書きスピーチで
+      // r=0.99)。DPCMサンプル再生と$4011直書きのどちらも同じ扱いで測れる。
+      this.ampMin = 127; this.ampMax = 0; this.ampCount = 0;
+      this.ampLast = 0; // 直近の計測窓の値(窓が空のまま読まれても直前値を保つ)
       // キーオン通番: $4015 bit4 でサンプル再生が始まるたびに +1。ロールのドラム区画が
       // 「同じサンプルの連打」を1本に融合させない区切りに使う(VGMのサンプルPCMの seq と同じ役割)
       this.seq = 0;
@@ -954,6 +966,10 @@
           break;
         case 1: // $4011
           this.outputLevel = value & 0x7F;
+          // 直書きPCM(スピーチ)もDACが動く。振幅計測に含める
+          if (this.outputLevel < this.ampMin) this.ampMin = this.outputLevel;
+          if (this.outputLevel > this.ampMax) this.ampMax = this.outputLevel;
+          this.ampCount++;
           break;
         case 2: // $4012
           this.sampleAddr = 0xC000 + (value * 64);
@@ -1013,7 +1029,25 @@
         }
         this.shiftReg >>= 1;
       }
+      // 体感音量(DAC振幅)の計測。毎CPUサイクルではなくDACが動きうるここだけで拾う
+      // (毎サイクル版はキャプチャが実測+10%重くなった)。無音中もここは回るので
+      // 「動いていない=振幅0=無音」も正しく出る。
+      if (this.outputLevel < this.ampMin) this.ampMin = this.outputLevel;
+      if (this.outputLevel > this.ampMax) this.ampMax = this.outputLevel;
+      this.ampCount++;
       this.bitsRemaining--;
+    }
+
+    /**
+     * 前回の呼び出しからのDAC振幅(peak-to-peak, 0〜127)を返して計測窓をリセットする。
+     * これがDPCMの体感音量。窓が空(前回から1サイクルも進んでいない)なら直前の値を返す。
+     */
+    takeAmplitude() {
+      if (this.ampCount > 0) {
+        this.ampLast = this.ampMax >= this.ampMin ? this.ampMax - this.ampMin : 0;
+        this.ampMin = 127; this.ampMax = 0; this.ampCount = 0;
+      }
+      return this.ampLast;
     }
 
     output() {
@@ -13938,6 +13972,68 @@
     return tndSum > 0 ? 159.79 / (1 / tndSum + 100) : 0;
   }
 
+  // ── 見かけ音量(tnd非線形ミキサーの干渉) ──────────────────────────
+  // ある1chの「実際の寄与」= そのchを鳴らした時と消した時の出力差。他chの出力が上がるほど小さくなる。
+  // ★非線形なので「他chの平均値を1回だけ式に入れる」やり方では合わない。他chが取りうる各状態で
+  //   寄与を出し、その出現比で平均する必要がある(Jensenの不等式)。各chの状態の動き方:
+  //     ノイズ … LFSRで 0 と level を往復する(実測デューティ0.518。ここでは1/2として扱う)
+  //     三角波 … 32段シーケンサで 0〜15 を往復する(消音中も最後の値をDCとして保持する)
+  //     DPCM  … その瞬間のDAC値そのもの(往復しないのでそのまま入れる)
+  //   APUを実際に回して三角波の寄与振幅を測った実測との比較(ノイズ15/DPCM0):
+  //     実測 0.920 / 状態を平均する今の式 0.900 / 平均値を1回入れる旧式 0.807
+  // シーケンサ位置(0〜31) → 出力レベル(0〜15)。apu2a03.js の TRIANGLE_SEQ と同じ対応
+  const TRIANGLE_SEQ_LEVEL = (seq) => (seq & 31) < 16 ? 15 - (seq & 31) : (seq & 31) - 16;
+  const TRI_FULL = tndOut(15, 0, 0);   // 三角波が単独で鳴っている時の寄与
+  const NOISE_FULL = tndOut(0, 15, 0); // ノイズが単独で最大レベルで鳴っている時の寄与
+
+  /**
+   * 三角波の実際の寄与(0〜1)。1 = 干渉なし。
+   * @param {number} noiseLevel 実際に聞こえているノイズのレベル(消音中は0を渡すこと)
+   * @param {number} dmcLevel   DPCMの現在のDAC値(0〜127)
+   */
+  function triApparent(noiseLevel, dmcLevel) {
+    const off = tndOut(15, 0, dmcLevel) - tndOut(0, 0, dmcLevel);
+    if (!(noiseLevel > 0)) return TRI_FULL > 0 ? Math.max(0, Math.min(1, off / TRI_FULL)) : 1;
+    const on = tndOut(15, noiseLevel, dmcLevel) - tndOut(0, noiseLevel, dmcLevel);
+    return Math.max(0, Math.min(1, ((on + off) / 2) / TRI_FULL));
+  }
+
+  /**
+   * ノイズの実際の寄与(0〜1)。1 = 単独で最大レベル。レベル自体の低さも含んだ絶対値。
+   * @param {number} noiseLevel ノイズのエンベロープ出力(0〜15)
+   * @param {?number} triSeq    三角波のシーケンサ値(0〜15)。不明ならnull=0〜15の平均で代表する
+   * @param {number} dmcLevel   DPCMの現在のDAC値(0〜127)
+   */
+  function noiseApparent(noiseLevel, triSeq, dmcLevel) {
+    if (!(noiseLevel > 0)) return 0;
+    let sum = 0, n = 0;
+    if (triSeq === null || triSeq === undefined) {
+      for (let v = 0; v <= 15; v++) { sum += tndOut(v, noiseLevel, dmcLevel) - tndOut(v, 0, dmcLevel); n++; }
+    } else {
+      sum = tndOut(triSeq, noiseLevel, dmcLevel) - tndOut(triSeq, 0, dmcLevel); n = 1;
+    }
+    return Math.max(0, Math.min(1, (sum / n) / NOISE_FULL));
+  }
+
+  // 見かけ音量の表示文字列。音量数値欄は20px=10pxフォントで3文字ぶんしかないため、
+  // 1未満は先頭の0を落として ".98" の3文字にし、1に丸まる時だけ "1.0" とする。
+  function apparentStr(r) {
+    if (!(r >= 0)) return null;
+    if (r >= 0.995) return "1.0";
+    return "." + String(Math.round(r * 100)).padStart(2, "0");
+  }
+
+  // 干渉源の名前(ツールチップの{src}に入る)。maskBy の値がそのままキー
+  const MASK_SRC = {
+    // ★「原文|文脈」形式。"三角波"等は波形名/チャンネル名として既にen.jsにあり、素のキーだと衝突して既存の訳を壊す(実測で重複を検出)
+    noise: "ノイズ|干渉源", dpcm: "DPCM($4011)|干渉源", noisedpcm: "ノイズとDPCM($4011)|干渉源",
+    tri: "三角波|干渉源", tridpcm: "三角波とDPCM($4011)|干渉源",
+  };
+  // 三角波は音量レジスタが無いので数値そのものが比率。ノイズは数値がレジスタ値なので言い方を変える
+  const MASK_TIP_RATIO = "{src}と同じDACを共有しているため音量が下がっています(表示は実際に鳴っている割合)";
+  const MASK_TIP_REG = "{src}と同じDACを共有しているため、実際の音量はこのレジスタ値より下がっています";
+
+
   // ── チャンネル状態抽出 ────────────────────────────────────────
 
   function extractChannels(snap, extraSnaps, frameIdx, chips) {
@@ -14011,33 +14107,41 @@
     const noiseRegPre = snap[0x400C] || 0;
     const eNoisePre = apuEnv ? apuEnv.noise : null;
     const noiseLevelPre = eNoisePre ? eNoisePre.level : (noiseRegPre & 0xF);
+    // ★干渉源になるのは「実際に音が出ているノイズ」だけ。$4015で無効、または長さカウンタが0の
+    //   ノイズはレベル値がレジスタに残っていても出力0で、三角波は一切減衰しない
+    //   (APUを回した実測でも減衰0。以前はレジスタ値だけを見て無音のノイズでも減衰表示していた)
+    const noiseAudiblePre = !!(status & 8) && noiseLevelPre > 0 &&
+      (!eNoisePre || eNoisePre.len === undefined || eNoisePre.len > 0);
+    const noiseMaskPre = noiseAudiblePre ? noiseLevelPre : 0;
+    // 三角波は消音中も最後のシーケンサ値をDCとして保持し、そのDCもtndミキサーに効く
+    const triSeqPre = (apuEnv && apuEnv.triangle && apuEnv.triangle.seq !== undefined)
+      ? TRIANGLE_SEQ_LEVEL(apuEnv.triangle.seq) : null;
     const dmcRegPre = (snap[0x4011] || 0) & 0x7F; // $4011 レジスタ値（直接書き込み検出用）
     const dmcPre = apuEnv ? apuEnv.dmc : null;
     const dmcLevelPre = (dmcPre && dmcPre.level !== undefined) ? dmcPre.level : dmcRegPre;
 
-    // APU Triangle (音量レジスタなし。ただし実機は非線形tndミキサーでnoise/dmcと
-    // 混ざるため、片方の出力レベルが上がるとtriangleの相対的な聞こえ方が下がる。
-    // tndOut()でtriangle単独の寄与分(masked時とmute時の差)を基準化し、
-    // Stevensのべき法則(知覚音量≈振幅比^0.6, sone尺度)で聴感寄りの値に変換して
-    // 「見かけ音量」として表示する。実レジスタ値ではないため envMode を流用し
-    // 黄色表示にして区別する。
+    // APU Triangle
+    // 音量レジスタが無いチャンネルなので、普段は音量数値を出さない(空欄)。
+    // ノイズ/DPCMと共有する非線形tndミキサーの干渉で実際の寄与が下がっている時だけ、
+    // その割合を ".98" の形で黄色表示する(レジスタ値ではないと分かる書き方にしてある)。
     {
       const lo = snap[0x400A] || 0, hi = snap[0x400B] || 0;
       const p = lo | ((hi & 7) << 8);
       const freq = p >= 4 ? CPU_CLOCK / (32 * (p + 1)) : 0;
-      const triContribution = tndOut(15, noiseLevelPre, dmcLevelPre) - tndOut(0, noiseLevelPre, dmcLevelPre);
-      const triContributionMax = tndOut(15, 0, 0);
-      const ratio = triContributionMax > 0 ? Math.max(0, Math.min(1, triContribution / triContributionMax)) : 1;
-      const vol = Math.pow(ratio, 0.6);
-      const masked = noiseLevelPre > 0 || dmcLevelPre > 0;
-      channels.push({ id: 'TR', color: '#00cc44', freq, vol, rawVol: masked ? Math.round(vol * 15) : null, rawVolMax: 15,
-        envMode: masked,
-        wave: { t: 'tri', nx: 32, ny: 16 },
+      const ratio = triApparent(noiseMaskPre, dmcLevelPre);
+      const masked = ratio < 0.995;
+      const maskBy = !masked ? null
+        : (noiseMaskPre > 0 && dmcLevelPre > 0) ? "noisedpcm" : (dmcLevelPre > 0 ? "dpcm" : "noise");
+      channels.push({ id: "TR", color: "#00cc44", freq, vol: ratio,
+        rawVol: masked ? apparentStr(ratio) : null, rawVolMax: 1,
+        envMode: false, maskBy, maskTip: MASK_TIP_RATIO,
+        wave: { t: "tri", nx: 32, ny: 16 },
         // 三角波は長さカウンタ/線形カウンタのどちらかが0になると消音する(レジスタ値は
         // 変わらないためライブ状態が無いと判定できない。nsf2mml側のtriangleAudibleFrames相当)
         active: !!(status & 4) && freq > 0 &&
           (!apuEnv || !apuEnv.triangle || (apuEnv.triangle.len > 0 && apuEnv.triangle.linear > 0)) });
     }
+
     // APU Noise
     {
       // $400E bit7=1 で短周期(93step)、0で長周期(32767step)。bit0-3 は周期テーブルのインデックス
@@ -14047,8 +14151,23 @@
       const e = eNoisePre;
       const rv = noiseLevelPre;
       const noiseFreq = CPU_CLOCK / NOISE_PERIOD[noiseIndex]; // LFSRシフトレート
-      channels.push({ id: 'NO', color: '#888888', freq: 0, vol: e ? e.level / 15 : pulseVol(noiseRegPre), rawVol: rv, rawVolMax: 15,
-        envMode: e ? e.env : false,
+      const triAudible = !!(status & 4) &&
+        (!apuEnv || !apuEnv.triangle || (apuEnv.triangle.len > 0 && apuEnv.triangle.linear > 0));
+      // ★三角波は鳴っている間 0〜15 を往復する。1フレームの瞬間値をそのまま使うと
+      //   フレームごとに 0〜15 へばらつき、ノイズのバーが毎フレーム暴れる。鳴っている間は
+      //   「0〜15の平均」で代表させ(null)、消音して値が固定されている時だけ保持値を使う。
+      const triMaskSeq = triAudible ? null : triSeqPre;
+      const triMasks = triAudible || (triSeqPre !== null && triSeqPre > 0);
+      const noiseRatio = noiseApparent(rv, triMaskSeq, dmcLevelPre);
+      const noiseMaskBy = (rv > 0 && (triMasks || dmcLevelPre > 0))
+        ? ((triMasks && dmcLevelPre > 0) ? 'tridpcm' : (dmcLevelPre > 0 ? 'dpcm' : 'tri')) : null;
+      // ★vol は「レジスタどおりの大きさ」のままにする。ピアノロールがこれを音の濃さに使っており、
+      //   ロールはMML変換の突き合わせ用(MMLに載るのはレジスタ値)なので、干渉ぶんを混ぜると
+      //   一定音量のドラムが濃淡バラバラに見えて変換バグと紛らわしくなる。
+      //   干渉を含んだ「実際に聞こえる大きさ」は volApparent に分け、鍵盤表示の音量バーだけが使う。
+      channels.push({ id: "NO", color: "#888888", freq: 0, vol: e ? e.level / 15 : pulseVol(noiseRegPre),
+        volApparent: noiseRatio, rawVol: rv, rawVolMax: 15,
+        envMode: e ? e.env : false, maskBy: noiseMaskBy, maskTip: MASK_TIP_REG,
         wave: { t: 'noise', short: noiseShort, nx: noiseShort ? 93 : 32767, ny: 2 },
         active: !!(status & 8) && pulseActive(noiseRegPre) && (!e || e.len === undefined || e.len > 0),
         noise: true, noiseShort, noiseIndex, noiseFreq });
@@ -14060,8 +14179,11 @@
       const dmcFreq = CPU_CLOCK / DMC_RATE[dmcRateIdx]; // DPCM再生周波数
       // DPCMサンプルをデルタ復号した波形（apuEnv.dmc 経由）。無ければ "固有波形なし" 扱い。
       const dmc = dmcPre;
-      // 音量はライブの実出力レベル(outputLevel 0-127)を優先。無ければ $4011 レジスタ値。
-      const level = dmcLevelPre;
+      // ★音量数値/バーは「DACの現在値」ではなく「直近1フレームのDAC振幅(0〜127)」を使う。
+      //   現在値は波形の位置でしかなく音量にならない(実測: SMB3のスネアが減衰しても現在値は
+      //   中央値46のまま。振幅は 94→68→42→28→16→10 と減衰をそのまま描く)。
+      //   振幅が取れない経路(キャプチャ済みログにampが無い等)だけ従来どおり現在値に落とす。
+      const level = (dmcPre && dmcPre.amp !== undefined) ? dmcPre.amp : dmcLevelPre;
       const wave = (dmc && dmc.len > 0)
         ? { t: 'wave', data: dmc.samples, nx: dmc.len * 8, ny: 128, sig: dmc.addr + ':' + dmc.len, pcm: true }
         : { t: 'sample', nx: 0, ny: 0 };
@@ -17339,7 +17461,9 @@
       fi.style.flex = '';
       fi.style.width = '';
       fi.style.height = '';
-      if (collapsed) return; // 畳んだ間は見出しの分だけ(大きさはCSS任せ)
+      // 畳んだ間、およびサウンドファイルをまだ開いていない間(案内文1行だけ)は中身なりの
+      // 大きさにする。MMLしか使わない人の鍵盤表示から、空のペインが場所を取らないように
+      if (collapsed || !(this._fileInfoNodes || []).length) return;
       // 左右に並ぶ置き場は幅を、上下に積む置き場は高さをスプリッターの値で固定する
       const sideways = place === 'left' || place === 'right' || (place === 'bottom' && this._bigWaveBelow());
       fi.style.flex = 'none';
@@ -17384,6 +17508,7 @@
       this._fileInfoTitleKey = titleKey || '';
       this._fileInfoNodes = Array.isArray(nodes) ? nodes.slice() : [];
       this._renderFileInfo();
+      this._applyFileInfoSize(); // 空↔中身ありで大きさの決め方が変わる
     }
 
     // レイアウト設定をCSSクラス/インラインサイズへ反映する(向き・置き場・多段・折りたたみ)
@@ -18834,6 +18959,7 @@
           isAllRow: !!ch.isAllRow,
           volBar: row.querySelector('.kbd-vol-bar'),
           volNum: row.querySelector('.kbd-vol-num'),
+          volWrap: row.querySelector('.kbd-vol-wrap'), volMasked: false, volTip: '',
           lEl: lrEls[0], rEl: lrEls[1],
           waveCanvas,
           waveSig: '',
@@ -19132,19 +19258,35 @@
         }
 
         const showVol = ch.active && !muted;
-        const pct = showVol ? Math.round(ch.vol * 100) : 0;
+        // volApparent(干渉ぶんを含む実際に聞こえる大きさ)があればバーはそちらを出す。
+        // vol はロールが使うレジスタどおりの値なので混ぜない。
+        const volShown = ch.volApparent !== undefined ? ch.volApparent : ch.vol;
+        const pct = showVol ? Math.round(volShown * 100) : 0;
         el.volBar.style.width = pct + '%';
         el.volBar.style.background = pct > 0 ? el.color : 'transparent';
 
-        // 減衰エンベロープ、または DMC 直接書き込み時は音量数値を黄色にして示す。
+        // 減衰エンベロープ、DMC直接書き込み、または見かけ音量が下がっている(maskBy)時は
+        // 音量数値を黄色にして「レジスタをそのまま読んだ値ではない/そのとおりには鳴っていない」を示す。
+        const masked = showVol && !!ch.maskBy;
         const rawStr = (showVol && ch.rawVol !== null && ch.rawVol !== undefined)
           ? String(ch.rawVol) : '';
         el.volNum.textContent = rawStr;
         el.volNum.style.color = !rawStr ? '#555566'
-          : ((ch.envMode === true || dmcWritten) ? '#ffcc44' : '#e6e6ef');
-        // Triangleの見かけ音量(黄色文字)はnoise/dmcとの非線形ミキサー干渉による推定値であり、
-        // 実レジスタ値ではないことを示すツールチップを付ける。
-        el.volNum.title = (ch.id === 'TR' && rawStr && ch.envMode === true) ? T('$4011制御') : '';
+          : ((ch.envMode === true || dmcWritten || masked) ? '#ffcc44' : '#e6e6ef');
+        // 干渉で音量が下がっている行は音量バーの枠も黄色にして、バーの短さが
+        // 「レジスタが小さい」ではなく「干渉で削られている」ことを示す。
+        if (el.volWrap && el.volMasked !== masked) {
+          el.volWrap.classList.toggle('kbd-vol-wrap--masked', masked);
+          el.volMasked = masked;
+        }
+        // カーソルを合わせた時の説明。干渉源(ノイズ/三角波/DPCM)を名指しする。
+        // 三角波は数値そのものが比率、ノイズは数値がレジスタ値なので言い回しを変える(maskTip)。
+        const tip = masked ? T(ch.maskTip || MASK_TIP_RATIO, { src: T(MASK_SRC[ch.maskBy] || '') }) : '';
+        if (el.volTip !== tip) {
+          el.volNum.title = tip;
+          if (el.volWrap) el.volWrap.title = tip;
+          el.volTip = tip;
+        }
 
         // 素波形アイコン: 発声中のみ更新。使っていないチャンネルは更新しない
         // （発声→停止の遷移時に1回だけ暗色で描き、以後は据え置き＝波形データのハッシュ計算も省略）。

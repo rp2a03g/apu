@@ -313,6 +313,13 @@
       this.shiftReg = 0;
       this.silence = true;
       this.irqFlag = false;
+      // ── DAC振幅(体感音量)の計測 ──────────────────────────────
+      // $4011/outputLevel は「波形の現在位置」であって音量ではない(実測: SMB3のスネアは
+      // 減衰しても現在値の中央値は46のまま動かない)。1フレーム分のDAC値の振幅(peak-to-peak)を
+      // 取ると体感音量そのものになる(ミックス全体の実振幅との相関 r=0.91、$4011直書きスピーチで
+      // r=0.99)。DPCMサンプル再生と$4011直書きのどちらも同じ扱いで測れる。
+      this.ampMin = 127; this.ampMax = 0; this.ampCount = 0;
+      this.ampLast = 0; // 直近の計測窓の値(窓が空のまま読まれても直前値を保つ)
       // キーオン通番: $4015 bit4 でサンプル再生が始まるたびに +1。ロールのドラム区画が
       // 「同じサンプルの連打」を1本に融合させない区切りに使う(VGMのサンプルPCMの seq と同じ役割)
       this.seq = 0;
@@ -328,6 +335,10 @@
           break;
         case 1: // $4011
           this.outputLevel = value & 0x7F;
+          // 直書きPCM(スピーチ)もDACが動く。振幅計測に含める
+          if (this.outputLevel < this.ampMin) this.ampMin = this.outputLevel;
+          if (this.outputLevel > this.ampMax) this.ampMax = this.outputLevel;
+          this.ampCount++;
           break;
         case 2: // $4012
           this.sampleAddr = 0xC000 + (value * 64);
@@ -387,7 +398,25 @@
         }
         this.shiftReg >>= 1;
       }
+      // 体感音量(DAC振幅)の計測。毎CPUサイクルではなくDACが動きうるここだけで拾う
+      // (毎サイクル版はキャプチャが実測+10%重くなった)。無音中もここは回るので
+      // 「動いていない=振幅0=無音」も正しく出る。
+      if (this.outputLevel < this.ampMin) this.ampMin = this.outputLevel;
+      if (this.outputLevel > this.ampMax) this.ampMax = this.outputLevel;
+      this.ampCount++;
       this.bitsRemaining--;
+    }
+
+    /**
+     * 前回の呼び出しからのDAC振幅(peak-to-peak, 0〜127)を返して計測窓をリセットする。
+     * これがDPCMの体感音量。窓が空(前回から1サイクルも進んでいない)なら直前の値を返す。
+     */
+    takeAmplitude() {
+      if (this.ampCount > 0) {
+        this.ampLast = this.ampMax >= this.ampMin ? this.ampMax - this.ampMin : 0;
+        this.ampMin = 127; this.ampMax = 0; this.ampCount = 0;
+      }
+      return this.ampLast;
     }
 
     output() {

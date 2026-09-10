@@ -29,6 +29,11 @@ function makeFakeElement(tag = 'div') {
         case 'textContent': case 'innerHTML': case 'innerText':
         case 'value': case 'id': case 'className': case 'title': return '';
         case 'checked': case 'disabled': case 'hidden': return false;
+        // 子/兄弟ノードは「無い」と答える(nullを返さないと while(el.firstChild) が無限ループになる。
+        // keyboard.js _renderFileInfo で実際に起きた、2026-09-10)
+        case 'firstChild': case 'lastChild': case 'firstElementChild': case 'lastElementChild':
+        case 'nextSibling': case 'previousSibling':
+        case 'nextElementSibling': case 'previousElementSibling': return null;
         case 'length': case 'offsetWidth': case 'offsetHeight':
         case 'clientWidth': case 'clientHeight':
         case 'scrollTop': case 'scrollLeft':

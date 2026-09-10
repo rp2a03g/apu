@@ -24,8 +24,10 @@
   `index.html` + `src/` を任意の静的ファイルサーバー(GitHub Pages等)に置けば全機能が動くこと。
 - npm/node/webpack等のビルドツールチェーンを導入しない。この環境にはNode/Pythonは無く、
   開発時のサーバーは `tools/static-server.ps1` (PowerShell) を使う。
-- AudioWorklet用バンドル(`src/audio/*-worklet.js`)は例外的な「手動結合ビルド」であり、
-  手順は `src/audio/README-worklet-build.txt` に従う(PowerShellのみで完結)。
+- キャプチャWorker用バンドル(`src/audio/*-capture-worker.js`)は例外的な「結合ビルド」であり、
+  `tools/build-capture-workers.ps1` で生成する(PowerShellのみで完結)。仕組みは
+  `src/audio/README-worker-build.txt` を参照。
+  (AudioWorklet用バンドルは index.html から一度も参照されない未使用コードだったため2026-09-11に削除した)
 - 将来サーバー機能(公式コンペ置き場・投票等)を作る場合も、それは**上乗せのオプション**とし、
   サーバーが無くてもツール本体の全機能が動く状態を保つ。
 
@@ -53,7 +55,7 @@
   `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` `src/gbs2mml/` `src/hes2mml/`
   `src/vgm2mml/` `src/input/`、および将来の `src/ir/` `src/share/`。
   これらは `document`/`window.document`/DOM API を一切参照しないピュアJSであること
-  (AudioWorklet内でも動く必要があるため。`globalThis` 置換でバンドルされる)。
+  (Web Worker内でも動く必要があるため。`globalThis` 置換でバンドルされる)。
 - **UI層** = `src/main.js` `src/ui/` `index.html` `src/mml/syntaxHighlight.js`
   `src/mml/waveformEditor.js`。UI層はコア層を呼ぶが、逆は禁止。
 - アプリの状態(現在の曲・再生位置・選択チャンネル等)は将来UI層を丸ごと差し替えられる
@@ -201,7 +203,7 @@ structuredClone/JSON.stringifyがそのまま通ること)。
 | `src/input/` | メトロノーム(metronome.js)・入力レイテンシ/時間軸写像(latency.js)・演奏入力の合流点(noteSource.js: 全入力源 → TimedPitchEvent)・PC鍵盤の配列(keyMap.js)・tick格子への量子化と和音のまとめ(quantize.js)・Web MIDIアダプタ(midiInput.js)。今後 鼻歌(pitchDetect.js/micInput.js)を足す | コア(*) |
 | `src/share/` (新設) | URL圧縮共有・コンペマニフェスト読み込み | コア |
 | `src/vendor/` (新設) | 外部ライブラリの同梱コピー(lz-string等)。CDN読み込み禁止(INV-1) | — |
-| `src/audio/` | AudioWorklet・ストリーム再生(手動結合バンドル含む) | 境界 |
+| `src/audio/` | ストリーム再生・キャプチャWorker(結合バンドル含む) | 境界 |
 | `src/i18n/` | 多言語辞書と文言取得(`MML.I18n`)。DOM非依存 | コア |
 | `src/ui/` `src/main.js` `index.html` | UI(`src/ui/i18nDom.js` = 辞書のDOM適用・言語選択) | UI |
 | `tools/` | 開発用: static-server.ps1、CPU検証ハーネス | 開発 |
@@ -212,12 +214,17 @@ structuredClone/JSON.stringifyがそのまま通ること)。
 ## 5. コーディング規約
 
 - 各ファイルは既存と同じ **IIFE + `window.MML.名前空間`** パターン。ES modules化しない
-  (Worklet手動結合バンドルが `)(window)` → `)(globalThis)` 置換で成立しているため)。
-- `src/emulator/` 等バンドル対象(README-worklet-build.txt記載のファイル)を編集したら、
-  **必ずWorkletバンドルを再ビルド**する。これを忘れるとメインスレッド側だけ直って
-  ストリーミング再生側が古いままになる(過去に多発)。
+  (キャプチャWorkerバンドルが `)(window)` → `)(globalThis)` 置換で成立しているため)。
+- `src/emulator/` `src/ui/keyboard.js` 等バンドル対象(`tools/build-capture-workers.ps1` の
+  `Files` に載っているファイル)を編集したら、**必ず `tools/build-capture-workers.ps1` を
+  実行して再ビルド**する。これを忘れるとメインスレッド側だけ直ってWorker側が古いままになる
+  (過去に多発)。クライアントは鮮度チェックで警告を出すが、頼らず必ず再ビルドすること。
 - コメント・UI文言は日本語で書く。既存コードのコメント密度・命名に合わせる。
 - **UI文言は日本語を「原文=辞書キー」として書き、表示は `MML.I18n.t()`(別名 `T()`)を通す**
+  - 追加する原文が**辞書に既にあるか必ず確認する**。`src/i18n/en.js` は素のオブジェクトなので
+    同じキーを2回書くと後勝ちで前の訳が黙って消える。同じ語を別の意味で使うときは
+    `原文|文脈` 形式のキーにする(例 `三角波|干渉源`。`t()` が `|` 以降を落として原文へ戻す)。
+    `tools/headless/check-all.js` の i18n lint が訳違いの重複を失敗として検出する。
   (gettext式。ビルドツールを導入できない INV-1 の制約下でキー名の二重管理を避けるため)。
   - `index.html` の静的文言は属性を足さなくてよい。`src/ui/i18nDom.js` がDOMを走査して
     辞書に載っている日本語を自動置換する(除外: `textarea` / `.output` / `[data-i18n-skip]`)。
@@ -326,7 +333,7 @@ structuredClone/JSON.stringifyがそのまま通ること)。
    IRを迂回して入力と出力を直結していないか / コアからDOMを触っていないか /
    MML全文再生成で上書きしていないか)
 2. ROADMAP.md の現在フェーズの範囲内か? 範囲外の作業を混ぜていないか?
-3. バンドル対象ファイルを触るか? → 触るならWorklet再ビルドまでが完了条件。
+3. バンドル対象ファイルを触るか? → 触るならキャプチャWorkerバンドル再ビルドまでが完了条件。
 4. **ユーザーに見える文言を追加/変更するか? → §5のi18n規約に従ったか?**
    新しいUI文言は「日本語の原文をキーにして `T()` を通し、同じ原文の訳を `src/i18n/en.js`
    にも追加する」までが完了条件。日本語だけ足して英語辞書を放置しない。
