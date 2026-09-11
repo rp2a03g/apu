@@ -43,25 +43,66 @@
   }
   const vrc7Vol = (att) => Math.max(0, Math.min(15, Math.round(att / 3)));
   // 音色の同一性キー(全パラメータ。モジュレータTLも音色なので含める=VRC7自作音色への変換結果が変わる単位)
-  function patchKey(p) {
+  // ★keepSeq(音量エンベロープを作るモード)のときはキャリアopのTLだけ外す。キャリアTLは
+  //   音色ではなく「そのchの音量」そのもの(fmAttDbが同じ値を読んでいる)で、ドライバが
+  //   TLを書き換えて音量を作る曲ではここが変わるたびにイベントが切れ、音量が動く音符が
+  //   細切れの定数音量になってしまう(=@v/EP/MPの材料が作れない)
+  function patchKey(p, keepSeq) {
     if (!p || !p.ops) return '';
-    return p.AL + '/' + p.FB + '/' + p.AMS + '/' + p.PMS + '/' + p.ops.map(o => [o.DT, o.ML, o.TL, o.KS, o.AR, o.DR, o.SR, o.SL, o.RR, o.AM, o.SE].join('.')).join('|');
+    const carriers = keepSeq ? CARRIER_OPS[p.AL & 7] : [];
+    return p.AL + '/' + p.FB + '/' + p.AMS + '/' + p.PMS + '/' + p.ops.map((o, i) => [o.DT, o.ML, carriers.indexOf(i) >= 0 ? 'v' : o.TL, o.KS, o.AR, o.DR, o.SR, o.SL, o.RR, o.AM, o.SE].join('.')).join('|');
   }
 
   // 連続フレームを同一イベントにまとめる共通ループ。frameState(f) → {note, attDb, retrigger, rawFreq, extra}
-  function collect(totalFrames, frameState) {
+  // 戻り値: { events, attByFrame, freqByFrame }
+  // opts.envelope(変換設定のENV): true なら音量(attDb)の変化だけではイベントを切らず、
+  //   フレームごとの音量/周波数を控える。ここで切ると音量が動く音符が細切れの定数音量イベントに
+  //   なり、@v(音量エンベロープ)にも EP/MP/PT(ピッチ変調)にもできない。切らずに列で持てば
+  //   sn76489.js の volSeq/pitchSeq と同じ土俵に乗る。falseなら従来どおり(定数音量で分割)。
+  function collect(totalFrames, frameState, opts) {
+    const keepSeq = !!(opts && opts.envelope);
     const events = [];
+    const attByFrame = keepSeq ? new Array(totalFrames).fill(0) : null;
+    const freqByFrame = keepSeq ? new Array(totalFrames).fill(0) : null;
     let cur = null;
     const flush = (end) => { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } };
     for (let f = 0; f < totalFrames; f++) {
       const st = frameState(f);
-      const same = cur && !st.retrigger && st.note === cur.note && st.attDb === cur.attDb && (st.key || '') === (cur.key || '');
+      if (keepSeq) {
+        attByFrame[f] = st.attDb;
+        freqByFrame[f] = (st.note !== null && st.rawFreq > 0) ? st.rawFreq : 0;
+      }
+      const same = cur && !st.retrigger && st.note === cur.note && (keepSeq || st.attDb === cur.attDb) && (st.key || '') === (cur.key || '');
       if (same) continue;
       flush(f);
       cur = { start: f, end: f, note: st.note, attDb: st.attDb, retrigger: !!st.retrigger, key: st.key,
         rawFreq: st.note !== null ? st.rawFreq : undefined, n163Wave: st.n163Wave, opnPatch: st.opnPatch };
     }
     flush(totalFrames);
+    return { events, attByFrame, freqByFrame };
+  }
+
+  // 音符区間ぶんの音量列/周波数列をイベントへ付ける(ev.attSeq / ev.freqSeq)。
+  // ★必ずビブラート/高速アルペジオの統合(mergeVibratoAndArpeggio)の後に呼ぶこと。
+  //   抽出時に持たせると、統合で作り直されたイベントの長さと列の長さがずれて
+  //   @vの表が音符の長さと合わなくなる。最終的な start/end で切り出せば必ず一致する。
+  // attSeq は減衰dBのまま(借用先の音量値への写像は converter.js adaptGroup が行う)。
+  // freqSeq は Hz(assignPitchEnvelope が periodFn で借用先の生周期へ直す)。
+  function withSeq(events, frames, opts) {
+    if (!frames || !frames.attByFrame) return events;
+    const noFreq = !!(opts && opts.noFreq);
+    for (const ev of events) {
+      if (ev.note === null || ev.end - ev.start < 2) continue;
+      const att = frames.attByFrame.slice(ev.start, ev.end);
+      if (att.some(a => a !== att[0])) ev.attSeq = att;
+      if (noFreq) continue;
+      const fq = frames.freqByFrame.slice(ev.start, ev.end);
+      if (!(fq[0] > 0)) continue;
+      // 途中の0(無音フレーム)は直前の値で埋める。音程が動いた区間だけ列として残す
+      let last = fq[0], moved = false;
+      for (let i = 0; i < fq.length; i++) { if (fq[i] > 0) last = fq[i]; else fq[i] = last; if (fq[i] !== fq[0]) moved = true; }
+      if (moved) ev.freqSeq = fq;
+    }
     return events;
   }
 
@@ -76,12 +117,12 @@
   }
 
   /** OPN FM: snapshots[f].channels[ch] */
-  MML.Vgm2MmlExpansion.opn = function (snapshots, numCh) {
+  MML.Vgm2MmlExpansion.opn = function (snapshots, numCh, opts) {
     const total = snapshots.length;
     const channels = [];
     for (let ch = 0; ch < numCh; ch++) {
       let prevKey = false;
-      const events = collect(total, (f) => {
+      const r = collect(total, (f) => {
         const s = snapshots[f] && snapshots[f].channels ? snapshots[f].channels[ch] : null;
         if (!s) { prevKey = false; return { note: null, attDb: 0 }; }
         const on = !!s.keyOn && s.freq > 0;
@@ -90,9 +131,9 @@
         if (!on) return { note: null, attDb: 0 };
         const att = fmAttDb(s.patch);
         // key: 音色パラメータが変わったら別イベント(VRC7自作音色への変換結果が変わるため)
-        return { note: freqToNoteNumber(s.freq), attDb: att, retrigger, rawFreq: s.freq, opnPatch: s.patch, key: patchKey(s.patch) };
-      });
-      channels.push({ events: MML.Convert.mergeVibratoAndArpeggio(events).map(toCommon), hasVolume: true, hasInstrument: true });
+        return { note: freqToNoteNumber(s.freq), attDb: att, retrigger, rawFreq: s.freq, opnPatch: s.patch, key: patchKey(s.patch, !!(opts && opts.envelope)) };
+      }, opts);
+      channels.push({ events: withSeq(MML.Convert.mergeVibratoAndArpeggio(r.events).map(toCommon), r), hasVolume: true, hasInstrument: true });
     }
     return { channels };
   };
@@ -186,7 +227,7 @@
     let prevPick = -1;
     let curAtt = 0;   // いま鳴っている打点の音量(打点の途中では変えない。下のコメント参照)
     const attOfCh = attOf || ((ch) => (ch.vol > 0 ? Math.min(96, -20 * Math.log10(ch.vol)) : 96));
-    const events = collect(total, (f) => {
+    const { events } = collect(total, (f) => {
       let bestCh = -1, bestOn = -1;
       for (let ch = 0; ch < numCh; ch++) {
         const c = getCh(f, ch);
@@ -253,12 +294,12 @@
    * ピッチ解析が信頼できる区間はADPCM-Bと同様に絶対音程の音符になる。
    * 音量: vol は振幅比(0..1)なので attDb = -20*log10(vol)。
    */
-  function pcmChannels(snapshots, numCh) {
+  function pcmChannels(snapshots, numCh, opts) {
     const total = snapshots.length;
     const channels = [];
     for (let chIdx = 0; chIdx < numCh; chIdx++) {
       let prevSeq = null;
-      const events = collect(total, (f) => {
+      const r = collect(total, (f) => {
         const c = snapshots[f] ? snapshots[f][chIdx] : null;
         if (!c) return { note: null, attDb: 0 };
         const retrigger = c.seq !== prevSeq && c.seq > 0;
@@ -270,25 +311,25 @@
         const att = c.vol > 0 ? Math.min(96, -20 * Math.log10(c.vol)) : 96;
         return { note: freqToNoteNumber(c.pitchHz), attDb: att, retrigger, rawFreq: c.pitchHz,
           n163Wave: n163WaveOf(c), sampleHash: c.sampleHash || undefined, key: String(c.sample ? c.sample.start : '') };
-      });
-      channels.push({ events: MML.Convert.mergeVibratoAndArpeggio(events).map(toCommon), hasVolume: true, hasInstrument: true });
+      }, opts);
+      channels.push({ events: withSeq(MML.Convert.mergeVibratoAndArpeggio(r.events).map(toCommon), r), hasVolume: true, hasInstrument: true });
     }
     return { channels };
   }
-  MML.Vgm2MmlExpansion.ga20 = (snapshots) => pcmChannels(snapshots, 4);
-  MML.Vgm2MmlExpansion.segapcm = (snapshots) => pcmChannels(snapshots, 16);
-  MML.Vgm2MmlExpansion.c140 = (snapshots) => pcmChannels(snapshots, 24);
-  MML.Vgm2MmlExpansion.c352 = (snapshots) => pcmChannels(snapshots, 32);
-  MML.Vgm2MmlExpansion.qsound = (snapshots) => pcmChannels(snapshots, 16);
-  MML.Vgm2MmlExpansion.okim6295 = (snapshots) => pcmChannels(snapshots, 4);
-  MML.Vgm2MmlExpansion.multipcm = (snapshots) => pcmChannels(snapshots, 28);
+  MML.Vgm2MmlExpansion.ga20 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 4, opts);
+  MML.Vgm2MmlExpansion.segapcm = (snapshots, drumMap, opts) => pcmChannels(snapshots, 16, opts);
+  MML.Vgm2MmlExpansion.c140 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 24, opts);
+  MML.Vgm2MmlExpansion.c352 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 32, opts);
+  MML.Vgm2MmlExpansion.qsound = (snapshots, drumMap, opts) => pcmChannels(snapshots, 16, opts);
+  MML.Vgm2MmlExpansion.okim6295 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 4, opts);
+  MML.Vgm2MmlExpansion.multipcm = (snapshots, drumMap, opts) => pcmChannels(snapshots, 28, opts);
 
   /** YM2610 ADPCM-A(6ch)/ADPCM-B: snapshots[f].adpcmA[i] / .adpcmB */
-  MML.Vgm2MmlExpansion.adpcm = function (snapshots) {
+  MML.Vgm2MmlExpansion.adpcm = function (snapshots, drumMap, opts) {
     const total = snapshots.length;
     const one = (get, attOf) => {
       let prevSeq = null;
-      const events = collect(total, (f) => {
+      const r = collect(total, (f) => {
         const c = snapshots[f] ? get(snapshots[f]) : null;
         if (!c) return { note: null, attDb: 0 };
         const retrigger = c.seq !== prevSeq && c.seq > 0;
@@ -299,8 +340,8 @@
         // key: 同じ音程でもサンプル(波形)が変われば別イベント(N163の音色が変わる)
         const w = n163WaveOf(c);
         return { note: freqToNoteNumber(c.pitchHz), attDb: attOf(c), retrigger, rawFreq: c.pitchHz, n163Wave: w, sampleHash: c.sampleHash || undefined, key: c.seq !== undefined ? String(c.sample ? c.sample.start : '') : '' };
-      });
-      return { events: MML.Convert.mergeVibratoAndArpeggio(events).map(toCommon), hasVolume: true, hasInstrument: true };
+      }, opts);
+      return { events: withSeq(MML.Convert.mergeVibratoAndArpeggio(r.events).map(toCommon), r), hasVolume: true, hasInstrument: true };
     };
     // ADPCM-A: vol は snapshot 側で 1-att/63(0.75dB単位63段) にしてあるので逆算
     const attA = (c) => Math.max(0, (1 - c.vol) * 63 * 0.75);

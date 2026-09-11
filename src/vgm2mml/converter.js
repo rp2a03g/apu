@@ -439,6 +439,14 @@
     const cmd = MML.Convert.normalizeCmd(options.cmd);
 
     const envReg = new MML.Convert.EnvelopeRegistry(cmd);
+    // OPN系FM・ADPCM・サンプルPCMの抽出オプション(src/vgm2mml/expansion/opn.js collect)。
+    // envelope:true で「音量が動いても音符を切らず、フレームごとの音量/音程を列で持つ」。
+    // その列が @v(音量エンベロープ)と EP/MP/PT(ピッチ変調)の材料になる。
+    // ★VRC7へ載せるchは false にする。VRC7は@v非対応(compiler.jsのVRC7経路はENのみ)なので、
+    //   列にまとめてしまうと音符の中の音量変化が1つの v<n> に潰れて消える。従来どおり
+    //   音量が変わったところでイベントを切り、v<n>を並べて出す。
+    //   変換設定でENVがOFFのときも同じ(列を作っても捨てるだけなので作らない)。
+    const envFamOk = (fam) => fam !== 'vrc7';
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry(cmd);
     const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry(cmd);
     const n163WaveReg = MML.Convert.n163WaveRegistry();
@@ -497,7 +505,7 @@
         const slots = items.map(s => plan[s.id]).filter(t => t && t !== 'skip');
         if (slots.length >= items.length) continue; // 全ch入るなら並べ替え不要
         if (!data[chipKey] || !MML.Vgm2MmlExpansion[chipKey]) continue;
-        const r = MML.Vgm2MmlExpansion[chipKey](data[chipKey].snapshots);
+        const r = MML.Vgm2MmlExpansion[chipKey](data[chipKey].snapshots, null, { envelope: false });
         const counts = items.map(s => ({ s, notes: r.channels[s.ch].events.filter(ev => ev.note !== null).length }));
         counts.sort((a, b) => b.notes - a.notes);
         for (const it of items) plan[it.id] = 'skip';
@@ -505,7 +513,6 @@
         counts.slice(0, slots.length).forEach((cn, k) => {
           if (cn.notes > 0) { plan[cn.s.id] = slots[k]; picked.push(cn.s.label.match(/\d+$/)[0]); }
         });
-        for (const s of items) if (plan[s.id] !== 'skip') extracted[s.id] = r.channels[s.ch];
         if (picked.length && counts.length > picked.length) {
           const chipName = items[0].label.replace(/ PCM\d+$/, '');
           notes.push(`${chipName} は${items.length}chのうち音符の多いch(${picked.join(',')})を既定割当に自動選択しました(鍵盤表示のチャンネル割当で変更できます)。`);
@@ -600,6 +607,16 @@
       notes.push(`打楽器(音程の取れないサンプル)を1本のドラムパートにまとめ、サンプルごとに音程を割り当てました: ${rows.join(' ')} (アドレスはサンプルROM上の開始位置)。`);
     }
 
+    // items(同じチップのソースch)を「@vを使える借用先か」で分け、必要なら2通り抽出する。
+    // run(opts)が抽出結果、pick(r, s)がそのソースchのチャンネル
+    function extractEnvModes(items, run, pick) {
+      const modeOf = (s) => cmd.ENV !== false && envFamOk(familyOf(plan[s.id]));
+      for (const m of [...new Set(items.map(modeOf))]) {
+        const r = run({ envelope: m });
+        for (const s of items) if (modeOf(s) === m) { const chn = pick(r, s); if (chn) extracted[s.id] = chn; }
+      }
+    }
+
     function extractGroup(chipKey, extractFn, chipIndex) {
       // 'dpcm'(合成音chの打楽器化)は分離レンダリングの打点で扱うので旋律の抽出からは外す。
       // chipIndex: 同じチップ種別の2個目(デュアルAY等)を別のwriteLogから抽出するときに 1 を渡す
@@ -641,61 +658,61 @@
     }
     // OPN系FM(YM2612/YM2610)と YM2610 ADPCM: イベントは借用先非依存(attDb)なので1回抽出して全部に使う
     if (data.ym2612 && c.ym2612) {
-      const r = MML.Vgm2MmlExpansion.opn(data.ym2612.snapshots, 6);
-      for (const s of src) if (s.chip === 'ym2612' && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
+      extractEnvModes(src.filter(s => s.chip === 'ym2612' && wantExtract(s)),
+        (o) => MML.Vgm2MmlExpansion.opn(data.ym2612.snapshots, 6, o), (r, s) => r.channels[s.ch]);
     }
     if (data.ym2151 && c.ym2151) {
-      const r = MML.Vgm2MmlExpansion.opn(data.ym2151.snapshots, 8);
-      for (const s of src) if (s.chip === 'ym2151' && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
+      extractEnvModes(src.filter(s => s.chip === 'ym2151' && wantExtract(s)),
+        (o) => MML.Vgm2MmlExpansion.opn(data.ym2151.snapshots, 8, o), (r, s) => r.channels[s.ch]);
     }
     if (data.ym2203fm && c.ym2203) {
-      const r = MML.Vgm2MmlExpansion.opn(data.ym2203fm.snapshots, c.ym2203.dual ? 6 : 3);
-      for (const s of src) if (s.chip === 'ym2203' && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
+      extractEnvModes(src.filter(s => s.chip === 'ym2203' && wantExtract(s)),
+        (o) => MML.Vgm2MmlExpansion.opn(data.ym2203fm.snapshots, c.ym2203.dual ? 6 : 3, o), (r, s) => r.channels[s.ch]);
     }
     if (data.ym2608fm && c.ym2608) {
-      const r = MML.Vgm2MmlExpansion.opn(data.ym2608fm.snapshots, 6);
-      for (const s of src) if (s.chip === 'ym2608' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
+      extractEnvModes(src.filter(s => s.chip === 'ym2608' && s.ch >= 0 && wantExtract(s)),
+        (o) => MML.Vgm2MmlExpansion.opn(data.ym2608fm.snapshots, 6, o), (r, s) => r.channels[s.ch]);
       // ADPCM-B(Δ-Nで音階演奏)はYM2610と同じ抽出器(スナップショット形状が同一)。
       // リズム(adpcmA)側はドラムパート(DRUM_CHIPS/drumChannel)が拾うのでここでは使わない
-      const ad = MML.Vgm2MmlExpansion.adpcm(data.ym2608fm.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'ym2608adpcm' && wantExtract(s)) extracted[s.id] = ad.b;
+      extractEnvModes(src.filter(s => s.chip === 'ym2608adpcm' && wantExtract(s)),
+        (o) => MML.Vgm2MmlExpansion.adpcm(data.ym2608fm.snapshots, drumMap, o), (r) => r.b);
     }
     if (data.ga20 && c.ga20) {
-      const r = MML.Vgm2MmlExpansion.ga20(data.ga20.snapshots, drumMap);
+      const pcmItems = src.filter(s => s.chip === 'ga20' && s.ch >= 0 && wantExtract(s));
       // ★ s.ch >= 0 は合成チャンネル(ドラムパート、ch:-1)を除くため。付け忘れると
       //   channels[-1]=undefined でドラムパートの抽出結果を上書きしてしまう
-      for (const s of src) if (s.chip === 'ga20' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
+      extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.ga20(data.ga20.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
     }
     if (data.segapcm && c.segapcm) {
-      const r = MML.Vgm2MmlExpansion.segapcm(data.segapcm.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'segapcm' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
+      const pcmItems = src.filter(s => s.chip === 'segapcm' && s.ch >= 0 && wantExtract(s));
+      extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.segapcm(data.segapcm.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
     }
     if (data.c140 && c.c140) {
-      const r = MML.Vgm2MmlExpansion.c140(data.c140.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'c140' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
+      const pcmItems = src.filter(s => s.chip === 'c140' && s.ch >= 0 && wantExtract(s));
+      extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.c140(data.c140.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
     }
     if (data.c352 && c.c352) {
-      const r = MML.Vgm2MmlExpansion.c352(data.c352.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'c352' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
+      const pcmItems = src.filter(s => s.chip === 'c352' && s.ch >= 0 && wantExtract(s));
+      extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.c352(data.c352.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
     }
     if (data.qsound && c.qsound) {
-      const r = MML.Vgm2MmlExpansion.qsound(data.qsound.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'qsound' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
+      const pcmItems = src.filter(s => s.chip === 'qsound' && s.ch >= 0 && wantExtract(s));
+      extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.qsound(data.qsound.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
     }
     if (data.okim6295 && c.okim6295) {
-      const r = MML.Vgm2MmlExpansion.okim6295(data.okim6295.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'okim6295' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
+      const pcmItems = src.filter(s => s.chip === 'okim6295' && s.ch >= 0 && wantExtract(s));
+      extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.okim6295(data.okim6295.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
     }
     if (data.multipcm && c.multipcm) {
-      const r = MML.Vgm2MmlExpansion.multipcm(data.multipcm.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'multipcm' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
+      const pcmItems = src.filter(s => s.chip === 'multipcm' && s.ch >= 0 && wantExtract(s));
+      extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.multipcm(data.multipcm.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
     }
     if (data.ym2610fm && c.ym2610) {
       const nFm = c.ym2610.ym2610b ? 6 : 4;
-      const r = MML.Vgm2MmlExpansion.opn(data.ym2610fm.snapshots, nFm);
-      for (const s of src) if (s.chip === 'ym2610' && s.ch >= 0 && wantExtract(s)) extracted[s.id] = r.channels[s.ch];
-      const ad = MML.Vgm2MmlExpansion.adpcm(data.ym2610fm.snapshots, drumMap);
-      for (const s of src) if (s.chip === 'ym2610adpcm' && wantExtract(s)) extracted[s.id] = s.ch === 6 ? ad.b : ad.a[s.ch];
+      extractEnvModes(src.filter(s => s.chip === 'ym2610' && s.ch >= 0 && wantExtract(s)),
+        (o) => MML.Vgm2MmlExpansion.opn(data.ym2610fm.snapshots, nFm, o), (r, s) => r.channels[s.ch]);
+      extractEnvModes(src.filter(s => s.chip === 'ym2610adpcm' && wantExtract(s)),
+        (o) => MML.Vgm2MmlExpansion.adpcm(data.ym2610fm.snapshots, drumMap, o), (r, s) => s.ch === 6 ? r.b : r.a[s.ch]);
     }
     const vrc7InstOf = (s) => {
       const v = options.vrc7Inst && options.vrc7Inst[s.id];
@@ -796,7 +813,7 @@
       const baseS = s.splitFrom ? (src.find(x => x.id === s.splitFrom) || s) : s;
       const toneKind = (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.toneKindOfTarget) ? MML.Convert.ChannelPlan.toneKindOfTarget(t, s.kind) : null;
       const toneIdxKey = {};
-      const actx = { toneKeyOf: (ev) => keyOf(ev, s), toneIdxKey };
+      const actx = { toneKeyOf: (ev) => keyOf(ev, s), toneIdxKey, envReg };
       if (useTone && toneKind) {
         actx.toneOfEvent = (ev) => {
           const v = TS.toneFor(keyOf(ev, s), toneKind);
@@ -1106,9 +1123,23 @@
     } else if (fam !== 'triangle') {
       const conv = fam === 'vrc7' ? VOL_FROM_DB.vrc7 : fam === 'fme7' ? VOL_FROM_DB.fme7
         : (att) => VOL_FROM_DB.linear(att, famVolMax(fam));
-      for (const ev of events) if (ev.note !== null && (ev.attDb !== undefined || ev.volume !== undefined)) ev.volume = conv(sourceAttDb(s, ev));
+      // ev.attSeq(音符区間の減衰dB列、opn.js withSeq)を借用先の音量値へ写して @v にする。
+      // ★VRC7は@v非対応(compiler.js のVRC7経路はENのみ。spc2mml envCapableType と同じ判断)なので
+      //   従来どおり定数音量のまま。写像は定数音量と同じ conv を通す=vと@vの尺度が必ず揃う
+      const envReg = (fam !== 'vrc7' && ctx) ? ctx.envReg : null;
+      for (const ev of events) {
+        if (ev.note === null || (ev.attDb === undefined && ev.volume === undefined)) continue;
+        ev.volume = conv(sourceAttDb(s, ev));
+        if (!envReg || !ev.attSeq || ev.attSeq.length < 2) continue;
+        const fields = envReg.volumeFieldsWithRelease(ev.attSeq.map(a => conv(a)));
+        if (fields.envelopeV != null || fields.envelopeVr != null) {
+          delete ev.volume;
+          Object.assign(ev, fields);
+          ch.hasEnvelope = true;
+        } else if (fields.volume != null) ev.volume = fields.volume;
+      }
     }
-    for (const ev of events) delete ev.attDb;
+    for (const ev of events) { delete ev.attDb; delete ev.attSeq; }
     const TD = MML.Convert.ToneDerive;
     const deriveRegs = { n163WaveReg, vrc7ToneReg };
     if (fam === 'noise') {
