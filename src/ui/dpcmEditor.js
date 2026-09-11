@@ -47,17 +47,20 @@
   function baseName(file) { return String(file || '').replace(/\.[^.]*$/, ''); }
 
   // ── MML本文の @DPCM<n> 定義(lexer.js DPCM_DEF_RE と同じ書式) ──────────────────
-  const DEF_RE = /@DPCM(\d+)\s*=\s*\{\s*"([^"]*)"\s*,([^}]*)\}/gi;
-  function parseNum(s) { return s[0] === '$' ? parseInt(s.slice(1), 16) : parseInt(s, 10); }
+  // 定義ブロックの位置探しは共通モジュール(src/mml/defBlocks.js)に任せ、
+  // ここでは中身 `"ファイル名", freq, size, dac, mode` の読み取りだけを行う
+  const Defs = MML.Defs;
+  const BODY_RE = /^\s*"([^"]*)"\s*,([\s\S]*)$/;
+  function parseNum(s) { return Defs.parseNumber(s); }
   function scanDefs(source) {
     const out = [];
-    DEF_RE.lastIndex = 0;
-    let m;
-    while ((m = DEF_RE.exec(source)) !== null) {
-      const p = m[3].trim().split(/[\s,]+/).filter(Boolean).map(parseNum);
+    for (const d of Defs.scan(source, 'DPCM')) {
+      const body = BODY_RE.exec(Defs.stripComments(source.slice(d.contentStart, d.contentEnd)));
+      if (!body) continue; // ファイル名が無い壊れた定義は無視する(コンパイル側でもエラーになる)
+      const p = body[2].trim().split(/[\s,]+/).filter(Boolean).map(parseNum);
       const num = (i, dflt) => (Number.isFinite(p[i]) ? p[i] : dflt);
-      out.push({ index: +m[1], file: m[2], freq: num(0, 0), size: num(1, 0), dac: num(2, 0), mode: num(3, 0),
-                 start: m.index, end: m.index + m[0].length });
+      out.push({ index: d.index, file: body[1], freq: num(0, 0), size: num(1, 0), dac: num(2, 0), mode: num(3, 0),
+                 start: d.start, end: d.end });
     }
     return out;
   }
@@ -65,21 +68,6 @@
   function findEnclosingDef(source, pos) { return scanDefs(source).find(d => pos >= d.start && pos <= d.end) || null; }
   function formatDef(index, d) {
     return `@DPCM${index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac}, ${d.mode} }`;
-  }
-  // 新規定義の挿入位置(FDS/N163エディタと同じ): 先頭から続く定義行ブロックの直後
-  function findInsertionOffset(source) {
-    const rawLines = source.split(/\r\n|\r|\n/);
-    let depth = 0, offset = 0;
-    for (const rawLine of rawLines) {
-      const ci = rawLine.indexOf(';');
-      const code = ci >= 0 ? rawLine.slice(0, ci) : rawLine;
-      const trimmed = code.trim();
-      const isDef = depth > 0 || trimmed === '' || trimmed[0] === '@' || trimmed[0] === '#' || trimmed[0] === '$';
-      if (!isDef) return offset;
-      for (const ch of code) { if (ch === '{') depth++; else if (ch === '}') depth = Math.max(0, depth - 1); }
-      offset += rawLine.length + 1;
-    }
-    return source.length;
   }
 
   // ── ローカル状態(行ごと。反映するまでMMLには書かない) ─────────────────────────
@@ -230,46 +218,15 @@
       if (selected == null && rows.length) selected = rows[0].index;
     }
 
-    function writeSource(newSource) {
-      const scrollTop = mmlSourceEl.scrollTop;
-      mmlSourceEl.value = newSource;
-      mmlSourceEl.scrollTop = scrollTop;
-      mmlSourceEl.dispatchEvent(new Event('input'));
-    }
+    function writeSource(newSource) { Defs.setSource(mmlSourceEl, newSource); }
     // anchorIndex: 新規の定義を「その定義の直後」に置く(分割の子を親の隣へ並べるため)。
     // 無ければ他のエディタと同じく先頭の定義ブロックの末尾へ
     function writeDef(index, d, anchorIndex) {
-      const text = formatDef(index, d);
-      const source = mmlSourceEl.value;
-      const range = findDefRange(source, index);
-      if (range) return writeSource(source.slice(0, range.start) + text + source.slice(range.end));
-      const anchor = anchorIndex != null ? findDefRange(source, anchorIndex) : null;
-      if (anchor) {
-        let at = anchor.end;
-        const nl = source.indexOf('\n', at);
-        at = nl < 0 ? source.length : nl + 1;
-        const lead = (at === source.length && source[at - 1] !== '\n') ? '\n' : '';
-        return writeSource(source.slice(0, at) + lead + text + '\n' + source.slice(at));
-      }
-      const offset = findInsertionOffset(source);
-      const sep = (offset > 0 && source[offset - 1] !== '\n') ? '\n' : '';
-      writeSource(source.slice(0, offset) + sep + text + '\n' + source.slice(offset));
+      const anchor = anchorIndex != null ? { anchor: { tag: 'DPCM', index: anchorIndex } } : null;
+      Defs.write(mmlSourceEl, 'DPCM', index, formatDef(index, d), anchor);
     }
-    function removeDef(index) {
-      const source = mmlSourceEl.value;
-      const range = findDefRange(source, index);
-      if (!range) return;
-      let end = range.end;
-      if (source[end] === '\r') end++;
-      if (source[end] === '\n') end++;
-      writeSource(source.slice(0, range.start) + source.slice(end));
-    }
-    function nextFreeIndex(used) {
-      let n = 0;
-      for (const d of scanDefs(mmlSourceEl.value)) n = Math.max(n, d.index + 1);
-      for (const u of used) n = Math.max(n, u + 1);
-      return n;
-    }
+    function removeDef(index) { Defs.erase(mmlSourceEl, 'DPCM', index); }
+    function nextFreeIndex(used) { return Defs.nextFreeIndex(mmlSourceEl.value, 'DPCM', used); }
 
     // ── 反映 ─────────────────────────────────────────────────────────────
     function applyRow(index) {

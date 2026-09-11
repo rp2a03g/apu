@@ -29,98 +29,22 @@
   // 表示文言の翻訳(src/i18n/i18n.js)。キーは日本語の原文そのもの
   const T = (key, params) => MML.I18n.t(key, params);
 
-  function parseMmlNumber(s) {
-    if (s[0] === '$') return parseInt(s.slice(1), 16);
-    return parseInt(s, 10);
-  }
-
-  // "@N<n> = { ... }" を全文から検索する。入れ子の{}が無い前提で
-  // 開き"{"の直後から最初の"}"までを内容とみなす(複数行にまたがっても素朴に扱える)
-  function scanDefs(source) {
-    const re = /@N(\d+)\s*=\s*\{/gi;
-    const results = [];
-    let m;
-    while ((m = re.exec(source)) !== null) {
-      const braceStart = m.index + m[0].length - 1;
-      const closeIdx = source.indexOf('}', braceStart);
-      if (closeIdx === -1) continue;
-      results.push({
-        index: parseInt(m[1], 10),
-        start: m.index,
-        end: closeIdx + 1,
-        contentStart: braceStart + 1,
-        contentEnd: closeIdx
-      });
-    }
-    return results;
-  }
-
-  function findDefRange(source, index) {
-    const defs = scanDefs(source);
-    for (const d of defs) if (d.index === index) return d;
-    return null;
-  }
-
-  function listIndices(source) {
-    return scanDefs(source).map(d => d.index).sort((a, b) => a - b);
-  }
+  // 定義ブロックの走査/読み書きは共通モジュール(src/mml/defBlocks.js)へ集約した
+  const Defs = MML.Defs;
+  const parseMmlNumber = (s) => Defs.parseNumber(s);
+  const listIndices = (source) => Defs.indices(source, 'N');
+  const findEnclosingDef = (source, pos) => Defs.enclosing(source, pos, 'N');
+  const extractDefinitionLines = (source) => Defs.definitionLines(source);
 
   // 先頭のバッファ番号を除いた波形値配列を返す(lexer.js parseN163WaveDefと同じ扱い)
   function readValues(source, index) {
-    const range = findDefRange(source, index);
-    if (!range) return null;
-    const content = source.slice(range.contentStart, range.contentEnd);
-    const parts = content.trim().split(/[\s,]+/).filter(s => s.length > 0).map(parseMmlNumber);
-    return parts.slice(1);
+    const values = Defs.values(source, 'N', index);
+    return values ? values.slice(1) : null;
   }
 
-  function findEnclosingDef(source, pos) {
-    return scanDefs(source).find(d => pos >= d.start && pos <= d.end) || null;
-  }
-
+  // 先頭に置くバッファ番号は本ツールでは常に0(n163Alloc.jsが実際の配置を決めるため無視される)
   function formatDefText(index, values) {
-    const perLine = 32;
-    const rows = [];
-    for (let i = 0; i < values.length; i += perLine) rows.push(values.slice(i, i + perLine).join(' '));
-    const body = rows.join('\n        ');
-    return `@N${index} = { 0, ${body} }`;
-  }
-
-  function findInsertionOffset(source) {
-    const rawLines = source.split(/\r\n|\r|\n/);
-    let depth = 0;
-    let offset = 0;
-    for (const rawLine of rawLines) {
-      const commentIdx = rawLine.indexOf(';');
-      const codePart = commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine;
-      const trimmed = codePart.trim();
-      const isDefLine = depth > 0 || trimmed === '' || trimmed[0] === '@' || trimmed[0] === '#' || trimmed[0] === '$';
-      if (!isDefLine) return offset;
-      for (const ch of codePart) {
-        if (ch === '{') depth++;
-        else if (ch === '}') depth = Math.max(0, depth - 1);
-      }
-      offset += rawLine.length + 1;
-    }
-    return source.length;
-  }
-
-  function extractDefinitionLines(source) {
-    const rawLines = source.split(/\r\n|\r|\n/);
-    const kept = [];
-    let depth = 0;
-    for (const rawLine of rawLines) {
-      const commentIdx = rawLine.indexOf(';');
-      const codePart = commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine;
-      const trimmed = codePart.trim();
-      const isDefLine = depth > 0 || trimmed === '' || trimmed[0] === '@' || trimmed[0] === '#' || trimmed[0] === '$';
-      if (isDefLine) kept.push(rawLine);
-      for (const ch of codePart) {
-        if (ch === '{') depth++;
-        else if (ch === '}') depth = Math.max(0, depth - 1);
-      }
-    }
-    return kept.join('\n');
+    return Defs.format('N', index, values, { perLine: 32, sep: ' ', prefix: '0, ' });
   }
 
   function defaultWave(length) {
@@ -247,21 +171,7 @@
 
       // --- テキストへの書き戻し(反映・新規・プリセット読込・貼り付け時にのみ呼ぶ) ---
       function writeDef(index, values) {
-        const text = formatDefText(index, values);
-        const source = mmlSourceEl.value;
-        const range = findDefRange(source, index);
-        let newSource;
-        if (range) {
-          newSource = source.slice(0, range.start) + text + source.slice(range.end);
-        } else {
-          const offset = findInsertionOffset(source);
-          const sep = (offset > 0 && source[offset - 1] !== '\n') ? '\n' : '';
-          newSource = source.slice(0, offset) + sep + text + '\n' + source.slice(offset);
-        }
-        const scrollTop = mmlSourceEl.scrollTop;
-        mmlSourceEl.value = newSource;
-        mmlSourceEl.scrollTop = scrollTop;
-        mmlSourceEl.dispatchEvent(new Event('input'));
+        Defs.write(mmlSourceEl, 'N', index, formatDefText(index, values));
       }
 
       function refreshIndexSelect() {

@@ -43,10 +43,7 @@
   const OPLL_CYCLES_PER_SAMPLE = 36; // vrc7.js CYCLES_PER_SAMPLE
   const VRC7_CLOCK = 1789773;
 
-  function parseMmlNumber(s) {
-    if (s[0] === '$') return parseInt(s.slice(1), 16);
-    return parseInt(s, 10);
-  }
+  const parseMmlNumber = (s) => MML.Defs.parseNumber(s);
 
   // ── 音色の内部表現 ───────────────────────────────────────────────
   // { fb, mod:{ML,TL,AR,DR,SL,RR,KL,EG,KR,AM,VB,WF}, car:{ 同(TLは持たない) } }
@@ -91,49 +88,31 @@
   }
 
   // ── MML本文の定義の走査(@OPと@OTの両方を同じ番号空間として扱う) ─────────
-  function scanDefs(source) {
-    const re = /@(OP|OT)(\d+)\s*=\s*\{/gi;
-    const out = [];
-    let m;
-    while ((m = re.exec(source)) !== null) {
-      const braceStart = m.index + m[0].length - 1;
-      const closeIdx = source.indexOf('}', braceStart);
-      if (closeIdx === -1) continue;
-      out.push({
-        kind: m[1].toLowerCase(), index: parseInt(m[2], 10),
-        start: m.index, end: closeIdx + 1,
-        contentStart: braceStart + 1, contentEnd: closeIdx
-      });
-    }
-    return out;
-  }
-  function findDefRange(source, index) {
-    return scanDefs(source).find(d => d.index === index) || null;
-  }
-  function listIndices(source) {
-    return [...new Set(scanDefs(source).map(d => d.index))].sort((a, b) => a - b);
-  }
-  function findEnclosingDef(source, pos) {
-    return scanDefs(source).find(d => pos >= d.start && pos <= d.end) || null;
-  }
-  // 定義ブロックの中身から ";" 以降の行コメントを取り除く。
-  // ★@OTは1行に11個ずつ並べて「; AR DR SL RR …」と見出しコメントを添える書き方が普通
-  //   (このエディタ自身もそう書き出すし、サンプルMMLの@OT0もそうなっている)。
-  //   コンパイラは行コメントを先に落としてから読むので、こちらも同じにしないと
-  //   コメントの語をパラメータとして数えてしまい、値が全部ずれる。
-  function stripComments(text) {
-    return text.split(/\r\n|\r|\n/).map(line => {
-      const i = line.indexOf(';');
-      return i >= 0 ? line.slice(0, i) : line;
-    }).join('\n');
-  }
+  // 定義ブロックの走査/読み書きは共通モジュール(src/mml/defBlocks.js)へ集約した。
+  // ★行コメントの除去も共通モジュール側で行う: @OTは1行に11個ずつ並べて
+  //   「; AR DR SL RR …」と見出しコメントを添える書き方が普通で(このエディタ自身も
+  //   そう書き出すし、サンプルMMLの@OT0もそうなっている)、落とさないとコメントの語を
+  //   パラメータとして数えてしまい値が全部ずれる。
+  const Defs = MML.Defs;
+  // kindはMML上の綴り('OP'/'OT')の小文字。このファイル内では 'op' / 'ot' で扱う
+  const scanDefs = (source) => Defs.scan(source, ['OP', 'OT'])
+    .map(d => ({ ...d, kind: d.tag.toLowerCase() }));
+  const findDefRange = (source, index) => {
+    const d = Defs.find(source, ['OP', 'OT'], index);
+    return d ? { ...d, kind: d.tag.toLowerCase() } : null;
+  };
+  const listIndices = (source) => Defs.indices(source, ['OP', 'OT']);
+  const findEnclosingDef = (source, pos) => {
+    const d = Defs.enclosing(source, pos, ['OP', 'OT']);
+    return d ? { ...d, kind: d.tag.toLowerCase() } : null;
+  };
+  const extractDefinitionLines = (s) => Defs.definitionLines(s);
 
   // 定義1件 → パッチ。@OTは lexer と同じ規則で8バイトへ畳んでから読む
   function readPatch(source, index) {
     const range = findDefRange(source, index);
     if (!range) return null;
-    const vals = stripComments(source.slice(range.contentStart, range.contentEnd))
-      .trim().split(/[\s,]+/).filter(s => s.length > 0).map(parseMmlNumber);
+    const vals = Defs.values(source, range.tag, index);
     if (range.kind === 'op') {
       if (vals.length < 8) return null;
       return { patch: bytesToPatch(vals), kind: 'op' };
@@ -161,29 +140,6 @@
       `; AR DR SL RR KL ML AM VB EG KR DT\n` +
       `  ${v.slice(2, 13).join(', ')},\n  ${v.slice(13, 24).join(', ')}\n}`;
   }
-
-  // 定義行だけを抜き出す/挿入位置を探す(FDS・N163エディタと同じ規則)
-  function scanDefinitionLines(source, keep) {
-    const rawLines = source.split(/\r\n|\r|\n/);
-    const kept = [];
-    let depth = 0, offset = 0;
-    for (const rawLine of rawLines) {
-      const commentIdx = rawLine.indexOf(';');
-      const codePart = commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine;
-      const trimmed = codePart.trim();
-      const isDefLine = depth > 0 || trimmed === '' || trimmed[0] === '@' || trimmed[0] === '#' || trimmed[0] === '$';
-      if (!isDefLine && !keep) return offset;
-      if (isDefLine && keep) kept.push(rawLine);
-      for (const ch of codePart) {
-        if (ch === '{') depth++;
-        else if (ch === '}') depth = Math.max(0, depth - 1);
-      }
-      offset += rawLine.length + 1;
-    }
-    return keep ? kept.join('\n') : source.length;
-  }
-  const extractDefinitionLines = (s) => scanDefinitionLines(s, true);
-  const findInsertionOffset = (s) => scanDefinitionLines(s, false);
 
   // ── 実機コアで鳴らして波形/エンベロープを得る ─────────────────────────
   // 表示用なので短く鳴らすだけ。VRC7は36サイクルで1サンプル進む(vrc7.js clock())
@@ -934,21 +890,8 @@
 
       // ── MMLへの書き戻し(反映・新規のときだけ) ─────────────────────────
       function writeDef(index, p, kind) {
-        const text = formatDefText(index, p, kind);
-        const source = mmlSourceEl.value;
-        const range = findDefRange(source, index);
-        let newSource;
-        if (range) {
-          newSource = source.slice(0, range.start) + text + source.slice(range.end);
-        } else {
-          const offset = findInsertionOffset(source);
-          const sep = (offset > 0 && source[offset - 1] !== '\n') ? '\n' : '';
-          newSource = source.slice(0, offset) + sep + text + '\n' + source.slice(offset);
-        }
-        const scrollTop = mmlSourceEl.scrollTop;
-        mmlSourceEl.value = newSource;
-        mmlSourceEl.scrollTop = scrollTop;
-        mmlSourceEl.dispatchEvent(new Event('input'));
+        // 差し替え先は@OP/@OTのどちらでもよい(同じ番号の既存定義をそのまま上書きする)
+        Defs.write(mmlSourceEl, ['OP', 'OT'], index, formatDefText(index, p, kind));
       }
 
       function refreshIndexSelect() {

@@ -96,6 +96,11 @@ MMLコンパイラ・6502アセンブラ・NSFジェネレーター・音源エ�
   - ドラッグでの波形編集、サイン波/三角波/サウトゥース/矩形波/ランダムのプリセット適用
   - `getFdsWave()` / `getN163Wave()` で現在の波形データを取得し、`MML.Mml.compile()`/`render()` の `opt.fdsWave` / `opt.n163Wave` に渡して拡張音源の初期波形として使用
   - N163側はその後、可変長の共有バッファモデル(`src/mml/n163Alloc.js`)に対応した専用エディタ `src/ui/n163WaveEditor.js` に置き換わっている（FDS用は`waveformEditor.js`のまま）
+- `src/mml/defBlocks.js` — `MML.Defs`
+  - MML本文中の定義ブロック `@TAG<n> = { ... }` の走査・読み書きを1箇所に集めた共通モジュール。FDS波形エディタ / N163波形エディタ / VRC7音色エディタ / DPCMコンバータ（および今後のエンベロープエディタ）が共有する
+  - `scan()`/`find()`/`indices()`/`enclosing()` で位置を探し、`tokens()`/`values()` で中身を読み、`format()` で整形し、`write()`/`erase()` でtextareaへ書き戻す（スクロール位置の保持とシンタックスハイライト更新用の`input`イベント発行も含む）。新規定義の挿入位置を返す `insertionOffset()`、試聴用の一時MMLへ持ち込む定義行を抜き出す `definitionLines()` も持つ
+  - 値の意味（波形なのか音色なのかエンベロープなのか）は一切解釈しない。解釈は各エディタ側の責務
+  - 行コメント(`;`以降)の扱いは`src/mml/lexer.js`と同じ：コメント内の `@FM0 = {` は定義として拾わず、コメント内の `}` は閉じ括弧として数えない（コメントアウトした定義をエディタが書き換えてしまうのを防ぐ）
 - `src/dpcm/dpcmConverter.js` — `MML.Dpcm`
   - `DMC_RATE_TABLE_NTSC`（$4010レート0-15に対応する再生周波数テーブル）
   - `encode(samples, srcRate, rateIndex)`：PCM波形をリサンプリングし、2A03 DMCチャンネル用の1bitデルタ変調(DPCM)バイト列に変換（16バイト境界にパディング）

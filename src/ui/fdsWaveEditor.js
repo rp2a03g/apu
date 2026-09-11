@@ -38,47 +38,15 @@
 
   // --- MML定義ブロックのパース/書き戻し用ヘルパー(lexer.jsの内部関数には依存しない) ---
 
-  function parseMmlNumber(s) {
-    if (s[0] === '$') return parseInt(s.slice(1), 16);
-    return parseInt(s, 10);
-  }
-
-  // "@TAG<n> = { ... }" を全文から検索する。入れ子の{}が無い前提で
-  // 開き"{"の直後から最初の"}"までを内容とみなす(複数行にまたがっても素朴に扱える)
-  function scanDefs(source, tag) {
-    const re = new RegExp('@' + tag + '(\\d+)\\s*=\\s*\\{', 'gi');
-    const results = [];
-    let m;
-    while ((m = re.exec(source)) !== null) {
-      const braceStart = m.index + m[0].length - 1;
-      const closeIdx = source.indexOf('}', braceStart);
-      if (closeIdx === -1) continue;
-      results.push({
-        index: parseInt(m[1], 10),
-        start: m.index,
-        end: closeIdx + 1,
-        contentStart: braceStart + 1,
-        contentEnd: closeIdx
-      });
-    }
-    return results;
-  }
-
-  function findDefRange(source, tag, index) {
-    const defs = scanDefs(source, tag);
-    for (const d of defs) if (d.index === index) return d;
-    return null;
-  }
-
-  function listIndices(source, tag) {
-    return scanDefs(source, tag).map(d => d.index).sort((a, b) => a - b);
-  }
+  // 定義ブロックの走査/読み書きは共通モジュール(src/mml/defBlocks.js)へ集約した
+  const Defs = MML.Defs;
+  const parseMmlNumber = (s) => Defs.parseNumber(s);
+  const listIndices = (source, tag) => Defs.indices(source, tag);
+  const extractDefinitionLines = (source) => Defs.definitionLines(source);
 
   function readValues(source, tag, index) {
-    const range = findDefRange(source, tag, index);
-    if (!range) return null;
-    const content = source.slice(range.contentStart, range.contentEnd);
-    const tokens = content.trim().split(/[\s,]+/).filter(s => s.length > 0);
+    const tokens = Defs.tokens(source, tag, index);
+    if (!tokens) return null;
     // @MWだけはMML表記(0/1/2/4/-1/-2/-4/R)なので、エディタ内部で扱う生コード(0-7)へ変換する。
     // 使えない値が書かれていた場合(コンパイル側ではエラーになる)は0(維持)として読む
     if (tag === 'MW') {
@@ -91,66 +59,17 @@
   }
 
   function findEnclosingDef(source, pos) {
-    for (const tag of ['FM', 'MW', 'MH']) {
-      const hit = scanDefs(source, tag).find(d => pos >= d.start && pos <= d.end);
-      if (hit) return { tag, index: hit.index };
-    }
-    return null;
-  }
-
-  function wrapValues(tag, index, values, perLine, sep) {
-    const rows = [];
-    for (let i = 0; i < values.length; i += perLine) rows.push(values.slice(i, i + perLine).join(sep));
-    const body = rows.join('\n        ');
-    return `@${tag}${index} = { ${body} }`;
+    const hit = Defs.enclosing(source, pos, ['FM', 'MW', 'MH']);
+    return hit ? { tag: hit.tag, index: hit.index } : null;
   }
 
   // valuesは@MWの場合も生コード(0-7)で受け取り、ここでMML表記へ変換して書き出す
   function formatDefText(tag, index, values) {
-    if (tag === 'FM') return wrapValues('FM', index, values, 32, ' ');
-    if (tag === 'MW') return wrapValues('MW', index, values.map(c => MML.Mml.fdsModCodeToToken(c)), 16, ', ');
-    return `@MH${index} = { ${values.join(', ')} }`;
-  }
-
-  // 新規定義の挿入位置: ソース先頭から続く定義行ブロック(@/#/$で始まる行、
-  // その{}内の継続行、空行、コメント行)の直後。channel本文の最初の行の手前を返す
-  function findInsertionOffset(source) {
-    const rawLines = source.split(/\r\n|\r|\n/);
-    let depth = 0;
-    let offset = 0;
-    for (const rawLine of rawLines) {
-      const commentIdx = rawLine.indexOf(';');
-      const codePart = commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine;
-      const trimmed = codePart.trim();
-      const isDefLine = depth > 0 || trimmed === '' || trimmed[0] === '@' || trimmed[0] === '#' || trimmed[0] === '$';
-      if (!isDefLine) return offset;
-      for (const ch of codePart) {
-        if (ch === '{') depth++;
-        else if (ch === '}') depth = Math.max(0, depth - 1);
-      }
-      offset += rawLine.length + 1;
+    if (tag === 'FM') return Defs.format('FM', index, values, { perLine: 32, sep: ' ' });
+    if (tag === 'MW') {
+      return Defs.format('MW', index, values.map(c => MML.Mml.fdsModCodeToToken(c)), { perLine: 16, sep: ', ' });
     }
-    return source.length;
-  }
-
-  // 定義行(@/#/$で始まる行、およびその{}内の継続行)だけを抽出する。
-  // サンプル再生用の一時MMLに、本文の音色/波形定義をそのまま持ち込むために使う
-  function extractDefinitionLines(source) {
-    const rawLines = source.split(/\r\n|\r|\n/);
-    const kept = [];
-    let depth = 0;
-    for (const rawLine of rawLines) {
-      const commentIdx = rawLine.indexOf(';');
-      const codePart = commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine;
-      const trimmed = codePart.trim();
-      const isDefLine = depth > 0 || trimmed === '' || trimmed[0] === '@' || trimmed[0] === '#' || trimmed[0] === '$';
-      if (isDefLine) kept.push(rawLine);
-      for (const ch of codePart) {
-        if (ch === '{') depth++;
-        else if (ch === '}') depth = Math.max(0, depth - 1);
-      }
-    }
-    return kept.join('\n');
+    return Defs.format('MH', index, values);
   }
 
   function sineDefault(length, maxValue) {
@@ -377,21 +296,8 @@
 
       // --- テキストへの書き戻し(反映・新規・プリセット読込・貼り付け時にのみ呼ぶ) ---
       function writeDef(tag, index, values) {
-        const text = formatDefText(tag, index, values);
-        const source = mmlSourceEl.value;
-        const range = findDefRange(source, tag, index);
-        let newSource;
-        if (range) {
-          newSource = source.slice(0, range.start) + text + source.slice(range.end);
-        } else {
-          const offset = findInsertionOffset(source);
-          const sep = (offset > 0 && source[offset - 1] !== '\n') ? '\n' : '';
-          newSource = source.slice(0, offset) + sep + text + '\n' + source.slice(offset);
-        }
-        const scrollTop = mmlSourceEl.scrollTop;
-        mmlSourceEl.value = newSource;
-        mmlSourceEl.scrollTop = scrollTop;
-        mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新のため
+        // Defs.writeがスクロール位置の保持とinputイベント(シンタックスハイライト更新)まで面倒を見る
+        Defs.write(mmlSourceEl, tag, index, formatDefText(tag, index, values));
       }
 
       // 未反映の印(セクションごと): ローカル(キャンバス/数値欄/読み込み/貼り付け)を触ったら

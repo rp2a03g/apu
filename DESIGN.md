@@ -57,7 +57,10 @@
   これらは `document`/`window.document`/DOM API を一切参照しないピュアJSであること
   (Web Worker内でも動く必要があるため。`globalThis` 置換でバンドルされる)。
 - **UI層** = `src/main.js` `src/ui/` `index.html` `src/mml/syntaxHighlight.js`
-  `src/mml/waveformEditor.js`。UI層はコア層を呼ぶが、逆は禁止。
+  `src/mml/waveformEditor.js` `src/mml/defBlocks.js`。UI層はコア層を呼ぶが、逆は禁止。
+  (`defBlocks.js` は定義ブロック `@TAG<n> = { ... }` の走査・書き戻しの共通モジュール。
+  文字列を受けて文字列を返す部分だけならDOM非依存だが、textareaへ書き戻す
+  `setSource`/`write`/`erase` を持つためUI層に置く。コア層からは呼ばない)
 - アプリの状態(現在の曲・再生位置・選択チャンネル等)は将来UI層を丸ごと差し替えられる
   (モバイルUI追加)ことを想定し、UI固有のDOM構造に依存させず main.js 内で一元管理する。
 
