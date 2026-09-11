@@ -1535,6 +1535,14 @@ button.secondary {
 /* 「借用先/音色」列。割当表示ON(.kbd-left--assign)のときだけ現れる。
    ヘッダ(.kbd-h-assign)と行(.kbd-assign)は同じ幅にして列を揃える */
 .kbd-h-assign, .kbd-assign { display: none; flex: none; width: 230px; }
+/* 試聴ボタンの右の「チャンネル別割り当てモード」表示(見出しの借用先列の余白に収める)。
+   他の見出し文字と紛れないようアクセント色にする(白では出さない、ユーザー指示 2026-09-12) */
+.kbd-h-assign-mode {
+  margin-left: 8px;
+  font-size: 10px;
+  white-space: nowrap;
+  color: var(--accent);
+}
 .kbd-left--assign .kbd-h-assign { display: inline-block; }
 .kbd-left--assign .kbd-assign { display: flex; align-items: center; gap: 4px; }
 .kbd-assign-target { flex: none; width: 112px; }
@@ -1800,6 +1808,28 @@ button.secondary {
   margin-top: 0;
   border-top: none;
 }
+/* 見出しクリックで音源ごとにch行を畳む。畳んだ側は▶+隠れているch数だけを見せる */
+.kbd-chip-header--toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.kbd-chip-header--toggle:hover { color: var(--accent); }
+.kbd-chip-toggle {
+  flex: none;
+  width: 9px;
+  font-size: 8px;
+  line-height: 1;
+}
+.kbd-chip-count {
+  font-weight: 400;
+  opacity: 0.7;
+  display: none;
+}
+.kbd-chip-group--collapsed .kbd-chip-count { display: inline; }
+.kbd-chip-group--collapsed > .kbd-ch-row { display: none; }
 /* 一覧の多段表示(レイアウト設定「一覧を多段」)。列数は一覧の幅÷列幅(ch行1本ぶん。L/R列のある
    HES/GBSは広め)で自動、各列の高さは均等(balance)。それでも収まらなければ.kbd-rowsが縦スクロール */
 .kbd-left--multicol .kbd-rows-inner {
@@ -2315,7 +2345,11 @@ button.secondary {
   user-select: none;
 }
 .kbd-bigwave.kbd-bigwave--below {
-  flex: none;
+  /* 帯(.kbd-below)と一緒に縮む。一覧が幅広い(割当表示ON等)と波形canvasは幅の半分の高さに
+     なるので、音色データと合わせて窓の高さを超えることがある。縮めないままだと一覧が
+     数pxまで潰されるので、ここは縮ませて自前の縦スクロール(overflow:hidden auto)に任せる */
+  flex: 1 1 auto;
+  min-height: 0;
   min-width: 0;
   align-items: stretch;
   justify-content: flex-start;
@@ -2388,7 +2422,10 @@ button.secondary {
 .kbd-below {
   display: flex;
   flex-direction: column;
-  flex: none;
+  /* 中身なりの高さを取るが、一覧の列(.kbd-left)が縦に溢れたときは一緒に縮む(0 1 auto)。
+     flex:none のままだと、ch数の多い曲で不足分がすべてch一覧(.kbd-rows)に回り、
+     一覧が数pxまで潰れて見えなくなる */
+  flex: 0 1 auto;
   min-width: 0;
   min-height: 0;
 }
@@ -2403,6 +2440,10 @@ button.secondary {
 .kbd-fileinfo {
   display: flex;
   flex-direction: column;
+  /* 隣の箱(.kbd-below / .kbd-roll-wrap)と同じく縮まない。min-height:0と併せると、
+     ch数の多い曲で一覧が縦に溢れたときにこのペインだけが0まで潰れて見出しごと消える
+     (大きさはkeyboard.jsの_applyFileInfoSizeがインラインstyleで決める) */
+  flex: none;
   min-width: 0;
   min-height: 0;
   overflow: hidden;

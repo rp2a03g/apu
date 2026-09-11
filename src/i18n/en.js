@@ -811,6 +811,9 @@
     '速度': 'Speed',
     '音量': 'Vol',
     '{ch} ミュート': 'Mute {ch}',
+    'クリックでこの音源のch一覧を開閉': 'Click to fold or unfold the channel list for this chip',
+    'チャンネル別割り当てモード': 'Per-channel assign mode',
+    '({n}ch)': '({n} ch)',
     '合成ch': 'Merged ch',
     '実機スロット': 'HW slots',
     'チャンネルプール式音源の表示モード: 実機スロット=ドライバの巡回割当そのまま / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す':

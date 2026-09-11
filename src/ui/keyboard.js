@@ -582,6 +582,11 @@
   function headerPreviewBtnHtml() {
     return `<button type="button" class="kbd-preview-btn" aria-label="${T('割当先の音で聴く')}">\u{1F3A7}</button>`;
   }
+  // 試聴ボタンの右に出す、割当表示ONの間だけのモード表示(ユーザー指示 2026-09-12)。
+  // 置き場は借用先列(230px)の余白の中なので、列幅も行との縦揃えも変わらない
+  function headerAssignModeHtml() {
+    return `<span class="kbd-h-assign-mode">${T('チャンネル別割り当てモード')}</span>`;
+  }
   // 見出しの mute 列に置く一括ミュートボタン。全chミュートでなければ全ミュート、
   // 全ミュート済みなら全解除(トグル)。
   function headerMuteAllBtnHtml() {
@@ -2793,6 +2798,13 @@
         if (Number.isFinite(fh) && fh >= 48) this._fileInfoHeight = fh;
         this._fileInfoCollapsed = localStorage.getItem('mml_kbdFileInfoCollapsed') === '1';
       } catch (e) { /* ignore */ }
+      // 音源(チップ)ごとのch一覧の折りたたみ。キーは見出し文字列(getChannelDisplay().header)
+      // そのもの。音源単位で覚えておきたい設定なので曲やフォーマットをまたいで残す
+      this._chipCollapsed = new Set();
+      try {
+        const raw = JSON.parse(localStorage.getItem('mml_kbdChipCollapsed') || '[]');
+        if (Array.isArray(raw)) this._chipCollapsed = new Set(raw.filter(v => typeof v === 'string'));
+      } catch (e) { /* ignore */ }
       this._fileInfoTitleKey = '';  // 見出しの原文(日本語)。言語切替のたびにT()で引き直す
       this._fileInfoNodes = [];     // main.jsから預かった表示要素(#xxxFileHeader / #xxxFileStatus)
       this._build();
@@ -2964,7 +2976,7 @@
         headerAssignBtnHtml() +
         headerMuteAllBtnHtml() +
         `<span class="kbd-h-name">ch</span>` +
-        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}</span>` +
+        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}${headerAssignModeHtml()}</span>` +
         `<span class="kbds-h-lr kbds-h-l">L</span>` +
         `<span class="kbds-h-lr">R</span>` +
         headerVolResetBtnHtml() +
@@ -3013,7 +3025,7 @@
         headerAssignBtnHtml() +
         headerMuteAllBtnHtml() +
         `<span class="kbd-h-name">ch</span>` +
-        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}</span>` +
+        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}${headerAssignModeHtml()}</span>` +
         `<span class="kbds-h-lr kbds-h-l">L</span>` +
         `<span class="kbds-h-lr">R</span>` +
         headerVolResetBtnHtml() +
@@ -4265,8 +4277,12 @@
       fi.style.width = '';
       fi.style.height = '';
       // 畳んだ間、およびサウンドファイルをまだ開いていない間(案内文1行だけ)は中身なりの
-      // 大きさにする。MMLしか使わない人の鍵盤表示から、空のペインが場所を取らないように
-      if (collapsed || !(this._fileInfoNodes || []).length) return;
+      // 大きさにする。MMLしか使わない人の鍵盤表示から、空のペインが場所を取らないように。
+      // ★flex:'none'(縮まない)まで指定すること。このペインは一覧の列(.kbd-left)の中で唯一
+      //   flex-shrinkが効く箱なので、ch数の多い曲(VGMのNamco System 2で33行など)で
+      //   一覧が縦に溢れると、見出し1行ぶんの高さごと0まで潰されて消えてしまう
+      //   (「畳むと畳むボタンの行まで消える」ユーザー報告 2026-09-12)
+      if (collapsed || !(this._fileInfoNodes || []).length) { fi.style.flex = 'none'; return; }
       // 左右に並ぶ置き場は幅を、上下に積む置き場は高さをスプリッターの値で固定する
       const sideways = place === 'left' || place === 'right' || (place === 'bottom' && this._bigWaveBelow());
       fi.style.flex = 'none';
@@ -5339,7 +5355,10 @@
         el.letter = el.target === 'skip' ? '' : plan.letterOfTarget(el.target);
         el.partEl.textContent = el.letter || (editable ? '—' : '');
         el.partEl.classList.toggle('kbd-part--custom', custom);
-        el.row.classList.toggle('kbd-ch-row--skip', editable && el.target === 'skip');
+        // スキップ行の減光は「割当表示ON(=借用先を編集している最中)」の間だけ。割当表示を
+        // 切ったら、割当が無い行も普通の明るさに戻す(減光したままだと、ただ曲を聴いている間も
+        // 半分の行が沈んで見える。ユーザー指示 2026-09-12)
+        el.row.classList.toggle('kbd-ch-row--skip', this._assignMode && editable && el.target === 'skip');
         // DPCMは複数chをまとめて載せる先なので重複扱いにしない(上の MULTI_SOURCE_TARGETS 参照)
         const dup = editable && el.target !== 'skip' && !MULTI_SOURCE_TARGETS.has(el.target) && count[el.target] > 1;
         el.row.classList.toggle('kbd-ch-row--conflict', dup);
@@ -5618,6 +5637,40 @@
       }
     }
 
+    // 音源(チップ)単位でch一覧を開閉する。見出しクリックから呼ばれ、状態はlocalStorageへ。
+    // ch行を隠すだけで、ミュート・音量・ピアノロールのレーンには一切触れない
+    // (「見えていないチャンネルが勝手に黙る」を避けるため)。
+    _toggleChipCollapse(chip) {
+      if (!chip) return;
+      if (this._chipCollapsed.has(chip)) this._chipCollapsed.delete(chip);
+      else this._chipCollapsed.add(chip);
+      try {
+        localStorage.setItem('mml_kbdChipCollapsed', JSON.stringify([...this._chipCollapsed]));
+      } catch (e) { /* ignore */ }
+      this._applyChipCollapse();
+    }
+
+    // 折りたたみ状態を現在の行へ反映する(行の再構築後と開閉のたび)。畳んだ音源の見出しには
+    // 隠れているch数を出し、行の更新はupdate()側で丸ごと省く(el.collapsed)
+    _applyChipCollapse() {
+      const groups = this._rowsInnerEl.querySelectorAll('.kbd-chip-group');
+      for (const group of groups) {
+        const chip = group.dataset.chip || '';
+        const collapsed = !!chip && this._chipCollapsed.has(chip);
+        group.classList.toggle('kbd-chip-group--collapsed', collapsed);
+        const tog = group.querySelector('.kbd-chip-toggle');
+        if (tog) tog.textContent = collapsed ? '▶' : '▼';
+        const count = group.querySelector('.kbd-chip-count');
+        if (count) count.textContent = T('({n}ch)', { n: group.querySelectorAll('.kbd-ch-row').length });
+      }
+      for (const el of this._rowEls) {
+        const collapsed = !!el.chip && this._chipCollapsed.has(el.chip);
+        // 畳んでいる間は更新を止めているので、開いた行は次のupdate()で必ず描き直させる
+        if (el.collapsed && !collapsed) el.waveSig = '';
+        el.collapsed = collapsed;
+      }
+    }
+
     _rebuildRows(channels) {
       this._rowsInnerEl.innerHTML = '';
       this._rowEls = [];
@@ -5636,8 +5689,22 @@
           this._rowsInnerEl.appendChild(group);
           if (disp.header) {
             const headerRow = document.createElement('div');
-            headerRow.className = 'kbd-chip-header';
-            headerRow.textContent = disp.header;
+            headerRow.className = 'kbd-chip-header kbd-chip-header--toggle';
+            headerRow.title = T('クリックでこの音源のch一覧を開閉');
+            // 見出しをクリックするとこの音源のch行だけを畳む(音源ごとの状態はlocalStorageへ保存)。
+            // 畳んだ側はch数だけを見出しに出し、行の更新(波形描画など)もupdate()側で省く
+            group.dataset.chip = disp.header;
+            const tog = document.createElement('span');
+            tog.className = 'kbd-chip-toggle';
+            const label = document.createElement('span');
+            label.className = 'kbd-chip-label';
+            label.textContent = disp.header;
+            const count = document.createElement('span');
+            count.className = 'kbd-chip-count';
+            headerRow.appendChild(tog);
+            headerRow.appendChild(label);
+            headerRow.appendChild(count);
+            headerRow.addEventListener('click', () => this._toggleChipCollapse(disp.header));
             // チャンネルプール/ペア交互割当のチップ: 表示モード切替(実機スロット=素材のまま /
             // 合成ch=割当逆算)。行構成は同じでデータ系列だけが替わる。見た目は2状態の
             // トグルスイッチ(クリックで切替、点灯側が現在モード)。
@@ -5659,7 +5726,8 @@
               };
               sw._paint = paint; // setPoolModes()からの再描画用
               paint();
-              sw.addEventListener('click', () => {
+              sw.addEventListener('click', (e) => {
+                e.stopPropagation(); // 見出しクリック(折りたたみ)と二重に反応させない
                 const mode = (this._poolModes[disp.pool] || 'logical') === 'logical' ? 'phys' : 'logical';
                 this._poolModes[disp.pool] = mode;
                 paint();
@@ -5759,6 +5827,8 @@
         this._rowEls.push({
           row,
           id: ch.id,
+          chip: lastHeader || '', // この行が属する音源の見出し(折りたたみ判定用)
+          collapsed: false,
           isAllRow: !!ch.isAllRow,
           volBar: row.querySelector('.kbd-vol-bar'),
           volNum: row.querySelector('.kbd-vol-num'),
@@ -5784,6 +5854,7 @@
           target: ch.target,
         });
       }
+      this._applyChipCollapse(); // 音源ごとの折りたたみ状態を新しい行へ反映
       // 大波形に表示するchを新しい一覧に合わせる(SPCモード中はSPC側の一覧が表示中なので触らない)
       if (this._mode !== 'spc') {
         this._consumePendingSelectionReset(this._rowEls.filter(el => el.waveCanvas).map(el => el.id));
@@ -6033,6 +6104,10 @@
       for (let i = 0; i < channels.length && i < this._rowEls.length; i++) {
         const ch = channels[i];
         const el = this._rowEls[i];
+
+        // 音源ごと折りたたみで隠れている行は見えないので、波形アイコンの描画ごと省く
+        // (鍵盤・ピアノロールは channels から直接描くのでここを飛ばしても欠けない)
+        if (el.collapsed) continue;
 
         // L/R列(SPCのステレオパン表示と同じ考え方、色もSPCの.kbds-lrに合わせグレー固定)。
         // panL/panRを持つch(HES: ALL行の$0801, 各chの$0805。GBS: ALL行のNR50, 各chのNR51)
