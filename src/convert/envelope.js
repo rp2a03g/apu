@@ -487,10 +487,31 @@
     return c;
   }
 
+  // 出力に現れない @v/@vr の参照を落とす(2026-09-11)。抽出器は音符か休符かに関わらず音量列を
+  // envReg へ登録する(sn76489.js/ay.js/scc.js/gbs・hes の toVolumeFields、nsf2mml 各拡張)ため、
+  // 休符イベントに envelopeV が付くことがある。mmlEmit は休符では音量系コマンドを一切出さない
+  // (note===null の分岐で continue する)ので、この参照は出力に現れない。にもかかわらず
+  // compact() からは「使われている表」に見えるため、誰も参照しない @v<n> の定義だけが残り、
+  // NSF書き出しのROMを無駄に食っていた(実測: After Burner II(メガドライブ)の X パートで
+  // 休符1つに1200要素の @v0 が付き、定義だけが出力に残っていた)。
+  // hasEnvelope が無いチャンネル(三角波など)の参照も同じ理由で出力に現れないので一緒に落とす。
+  // ★compact() より前、かつ ENV_MERGE(近似統合)より前に行うこと。使われない表を「使われている」
+  //   ものとして統合対象に混ぜない。
+  MML.Convert.dropUnusedVolumeRefs = function (scoreChannels) {
+    for (const ch of scoreChannels || []) {
+      if (!ch || !ch.events) continue;
+      for (const ev of ch.events) {
+        if (ev.note != null && ch.hasEnvelope) continue;
+        delete ev.envelopeV; delete ev.envelopeVr;
+      }
+    }
+  };
+
   MML.Convert.applyNoteEnd = function (scoreChannels, envReg, cmd, fpb, srcFps) {
     const c = MML.Convert.normalizeCmd(cmd);
     const stats = { absorbed: 0, gated: 0 };
     MML.Convert.applyReleaseSplits(scoreChannels); // 印無しリリース(volumeFieldsWithRelease)の終端反映。NOTE_END に関わらず行う
+    MML.Convert.dropUnusedVolumeRefs(scoreChannels); // 出力に現れない @v/@vr 参照を落とす(compact/ENV_MERGE より前)
     MML.Convert.mergeSlurVolumes(scoreChannels, envReg); // スラー連鎖の音量列を1本の表へ(同上)
     if (c.ENV_MERGE && envReg) { envReg.mergeSimilar(scoreChannels); if (envReg._release) envReg._release.mergeSimilar(scoreChannels, 'envelopeVr'); } // 近似統合(譜面整形(近似))
     if (c.NOTE_END !== 'next') { if (envReg) envReg.compact(scoreChannels); return stats; }
