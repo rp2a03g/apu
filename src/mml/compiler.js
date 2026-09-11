@@ -351,6 +351,26 @@
   // N163: 実機の出力周波数は f = CLOCK * freqReg / (15 * 65536 * waveLen * numCh)。
   // (時間多重のため有効ch数が多いほど1chの更新頻度が下がり、同じ freqReg でも音程が下がる)
   // これを反転して freqReg を求める。numCh を含めないと再生/NSF書き出しで音程がズレる。
+  /**
+   * N163の実効チャンネル数。`#EX-N163 <n>` / `#EX-NAMCO106 <n>` に数値があればそれを使い、
+   * 無ければ本文から自動検出する(音符を持つ最上位レターの位置+1)。
+   *
+   * ★数値を優先するのは本家ppmckと同じ(ppmckc/datamake.c `_EX_NAMCO106` → n106_track_num)。
+   *   実効ch数は 波形RAMの空き(128-8n) / 周波数レジスタの尺度(freqReg∝n) / 時間多重による
+   *   1chあたりの音量と更新レート の全てを決めるので、宣言と実装がズレると音痴・音量差・
+   *   波形あふれが同時に起きる(2026-09-11、変換設定 N163_CH の追加に合わせて宣言優先へ)。
+   * 数値なしの手書きMMLは従来どおり自動検出なので、既存の書き方は壊れない。
+   */
+  function n163NumChOf(letters, segmentsByChannel, settings) {
+    const declared = settings && settings.n163NumCh;
+    if (declared) return Math.max(1, Math.min(N163_CHANNEL_COUNT, declared));
+    let n = 0;
+    (letters || []).forEach((ch, index) => {
+      if ((segmentsByChannel[ch] || []).some(s => s.freq != null)) n = index + 1;
+    });
+    return Math.max(1, n);
+  }
+
   function n163FreqReg(freq, waveLen, numCh) {
     let r = Math.round((freq * 15 * 65536 * waveLen * (numCh || 1)) / CPU_CLOCK_NTSC);
     return Math.max(0, Math.min(262143, r));
@@ -2826,10 +2846,17 @@
         });
       }
       // N163の有効ch数(segmentsToWriteLogN163へ渡す値と同じ規則で求める)
-      let numN163 = 0;
-      (expansionLetterMap.n163 || []).forEach((L, i) => {
-        if ((segmentsByChannel[L] || []).some(s => s.freq != null)) numN163 = i + 1;
-      });
+      const numN163 = n163NumChOf(expansionLetterMap.n163, segmentsByChannel, settings);
+      // 宣言した実効ch数より上のN163チャンネルは実機に存在しない(本家ppmckは
+      // INVALID_TRACK_HEADER で弾く)。黙って消えると原因が分からないので警告する
+      if (settings && settings.n163NumCh) {
+        const over = (expansionLetterMap.n163 || []).filter((L, i) =>
+          i >= numN163 && (segmentsByChannel[L] || []).some(s => s.freq != null));
+        if (over.length) {
+          warnings.push({ message: T('{ch} は #EX-N163 の宣言({n}ch)より上のチャンネルなので鳴りません。宣言を増やすか、下のチャンネルへ移してください',
+            { ch: over.join(', '), n: numN163 }) });
+        }
+      }
       const nWaves = (envelopes && envelopes.n) || {};
       for (const ch of channelLetters) {
         const chip = chipOf[ch];
@@ -2873,19 +2900,16 @@
       // チャンネル数(音符を持つ最上位レターの位置+1)を有効ch数として全ライトへ伝える。
       let extra;
       if (exp === 'n163') {
-        let numN163Ch = 0;
-        letters.forEach((ch, index) => {
-          if ((segmentsByChannel[ch] || []).some(s => s.freq != null)) numN163Ch = index + 1;
-        });
+        const numN163Ch = n163NumChOf(letters, segmentsByChannel, settings);
         // 共有バッファアロケータ: 曲全体のN163使用状況から、時間軸で重ならない範囲だけ
         // 波形データを再利用しながらRAM上のバイト位置を割り当てる。空き容量を超えて
         // 同時使用される場合はconflictとして記録し、エラーへ変換する。
         // ★波形に使えるバイト数は 128-8*numN163Ch(有効ch数ぶんレジスタが上から占める)。
         //   ここを64固定にしていたため、6chしか使わない曲が本来収まるのに落ちていた
         const allocResult = MML.N163Alloc.allocate(letters, segmentsByChannel, envelopes.n, totalFrames,
-          Math.max(1, numN163Ch));
+          numN163Ch);
         for (const c of allocResult.conflicts) errors.push({ message: c.message });
-        extra = { numN163Ch: Math.max(1, numN163Ch), n163Occurrences: allocResult.occurrences };
+        extra = { numN163Ch: numN163Ch, n163Occurrences: allocResult.occurrences };
       }
       letters.forEach((ch, index) => {
         tracks[ch] = buildExpansionWriteLog(exp, ch, index, segmentsByChannel[ch], totalFrames, envelopes, dpcmLayout, dpcmSamples, extra);

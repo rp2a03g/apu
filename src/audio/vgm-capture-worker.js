@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-11 05:01:38
+ * Built by tools/build-capture-workers.ps1 at 2026-09-11 08:07:20
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-11 05:01:38';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-11 08:07:20';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -20181,6 +20181,18 @@
  *     src/convert/pitch.js n163SaForBase冒頭コメント参照)。既定'octave'(オクターブ連動、
  *     セント精度がオクターブ非依存でテーブル共有も効く)。'note'=音符ごと最高精度、
  *     'off'=SA不使用(従来互換、深い変調は割当失敗して落ちる)。
+ *   N163_CH … N163の実効チャンネル数(#EX-N163 <n> に書く値。'fixed8' | 'used')。
+ *     実機N163は8chを時間多重するので、有効ch数を減らすと1chあたりの取り分が増える。
+ *     ★1つ動かすと3つ同時に動く:
+ *       波形RAM  … 128-8*ch数 バイト(1ch=120 / 8ch=64)。減らすほど大きい波形を置ける
+ *       音量     … 出力は有効ch数で平均されるので、減らすほど同じ v が大きく鳴る(1chは5chの5倍)
+ *       周波数   … freqReg ∝ ch数。減らすほどレジスタ値が小さくなり、音程の刻みは粗く、
+ *                  出せる最高音は上がる(32サンプル波形で 8ch=1864Hz / 1ch=14915Hz)
+ *     'fixed8'(既定) … 常に8ch。ch数で変わる値を固定で扱えるので、曲によって音量や音域が
+ *       変わらない。波形RAMは64バイトに固定され、高い音は出しにくい。
+ *     'used' … 割り当てたスロットのうち一番大きい番号を使う(ch1+ch8なら8、ch2+ch6なら6)。
+ *       大きい波形を使いたい・音量を出したい・高い音を出したいときはこちら。
+ *     ★nsf2mmlだけは対象外。元がN163のネイティブ変換で、実効ch数は元の曲が決めているため。
  *   N163_WAVE … N163内蔵RAM(波形に使えるのは 128-8*有効ch数 バイト)に波形が収まらないときの扱い。
  *     'fit'(既定) … 収まるまで波形長を半分ずつ落とす(32→16→8→4サンプル)。★曲全体を一律に
  *       落とすのではなく「あふれた瞬間に居る波形」を大きい順に、必要な数だけ縮める。縮めた
@@ -20308,6 +20320,27 @@
   // N163内蔵RAMに波形が収まらないときの扱い(冒頭コメント参照)
   const N163_WAVE_VALUES = ['fit', 'keep'];
   MML.Convert.N163_WAVE_VALUES = N163_WAVE_VALUES;
+  // N163の実効チャンネル数の決め方(冒頭コメント参照)
+  const N163_CH_VALUES = ['fixed8', 'used'];
+  MML.Convert.N163_CH_VALUES = N163_CH_VALUES;
+
+  /**
+   * 変換器が使うN163の実効チャンネル数。変換設定 N163_CH('fixed8' | 'used')で決まる。
+   * 'used' は「使ったスロットのうち一番大きい番号+1」(ch1+ch8なら8、ch2+ch6なら6)。
+   * ここで返した値を必ず (1) 周波数式 (2) n163Fitの波形RAM枠 (3) #EX-N163の宣言 の
+   * 3か所すべてに使うこと。1つでも食い違うと音痴・音量差・波形あふれが起きる。
+   * ★lexer.js ではなくここに置くのは、SPCの変換がキャプチャWorkerのバンドル内でも
+   *   動くため(バンドルに入るのは src/convert/options.js。build-capture-workers.ps1 参照)。
+   * @param {object} cmd normalizeCmd済みの変換設定
+   * @param {number[]} usedIndexes 使ったN163スロット番号(0始まり)
+   */
+  MML.Convert.n163NumChFor = function (cmd, usedIndexes) {
+    if (!cmd || cmd.N163_CH !== 'used') return 8;
+    let n = 0;
+    for (const i of (usedIndexes || [])) n = Math.max(n, (i | 0) + 1);
+    return Math.max(1, Math.min(8, n));
+  };
+
   MML.Convert.CMD_KEYS = CMD_KEYS;
   MML.Convert.SHAPE_KEYS = SHAPE_KEYS;
   MML.Convert.PITCH_SA_VALUES = PITCH_SA_VALUES;
@@ -20316,12 +20349,12 @@
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
                 SHAPE_REST: false, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
-                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
+                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit', N163_CH: 'fixed8',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
                 SHAPE_REST: true, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
-                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit',
+                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit', N163_CH: 'fixed8',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
   };
   MML.Convert.CMD_PRESETS = PRESETS;
@@ -20359,6 +20392,7 @@
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
       if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
       if (cmd.N163_WAVE != null && N163_WAVE_VALUES.indexOf(cmd.N163_WAVE) >= 0) out.N163_WAVE = cmd.N163_WAVE;
+      if (cmd.N163_CH != null && N163_CH_VALUES.indexOf(cmd.N163_CH) >= 0) out.N163_CH = cmd.N163_CH;
       if (cmd.TUNING != null && TUNING_VALUES.indexOf(cmd.TUNING) >= 0) out.TUNING = cmd.TUNING;
       if (cmd.TUNING_MIN != null) {
         const v = parseFloat(cmd.TUNING_MIN);
@@ -20374,7 +20408,7 @@
     const n = MML.Convert.normalizeCmd(cmd);
     for (const name of Object.keys(PRESETS)) {
       const p = MML.Convert.normalizeCmd(PRESETS[name]);
-      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'GATE_TOL', 'LEN_SNAP', 'LEN_DP', 'DPCM_EXACT', 'PITCH_SA', 'N163_WAVE', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
+      if ([...CMD_KEYS, ...SHAPE_KEYS, 'NOTE_END', 'GATE_TOL', 'LEN_SNAP', 'LEN_DP', 'DPCM_EXACT', 'PITCH_SA', 'N163_WAVE', 'N163_CH', 'TUNING', 'TUNING_MIN'].every(k => p[k] === n[k])) return name;
     }
     return 'custom';
   };

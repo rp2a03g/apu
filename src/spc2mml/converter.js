@@ -1158,10 +1158,10 @@
       if (!usedExpansions.includes(exp)) usedExpansions.push(exp);
       if (exp === 'n163') n163MaxIndex = Math.max(n163MaxIndex, TYPE_TO_CHIP_INDEX[cfg.type]);
     }
-    // #EX-NAMCO106 <n> と周波数式(n163FreqRegRawSpc)が使う実効ch数。実機N163は有効ch数で
+    // #EX-N163 <n> と周波数式(n163FreqRegRawSpc)が使う実効ch数。実機N163は有効ch数で
     // 各chの更新レートが変わる=同じ周波数レジスタ値でも音程が変わるため、宣言と式は必ず
-    // 一致させること
-    const n163UsedCount = n163MaxIndex + 1;
+    // 一致させること。値は変換設定 N163_CH('fixed8' | 'used')で決まる
+    const n163UsedCount = n163MaxIndex < 0 ? 0 : MML.Convert.n163NumChFor(cmd, [n163MaxIndex]);
     const expansion = usedExpansions[0] || 'none'; // 後方互換(result.expansion)用
 
     // ── DPCM 変換 (全ボイス中で DPCM 指定されたものの srcn を収集) ──

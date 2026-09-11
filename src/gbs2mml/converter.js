@@ -250,7 +250,7 @@
         };
       },
     });
-    const { scoreChannels, expansions, letterMap } = r;
+    const { scoreChannels, expansions, letterMap, n163NumCh } = r;
 
     // E(DPCM)へ載せたch(打楽器化): 分離レンダリングした打点(options.drumHits、main.js synthDrum)を
     // 共通コア(src/convert/drumHits.js)で @DPCM 化してEパートにする。GBのノイズドラム等がこれで
@@ -301,7 +301,7 @@
     ].join('\n');
 
     const directiveLines = expansions.map(chip => chip === 'n163'
-      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${MML.Mml.n163DeclaredCount(scoreChannels, letterMap.n163)}`
+      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${n163NumCh}`
       : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
     // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
     MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, frameRate);

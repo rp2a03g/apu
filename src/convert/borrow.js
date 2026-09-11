@@ -569,12 +569,23 @@
     // 書き出しもできないため、変換設定 N163_WAVE='fit'(既定)ならあふれたぶんの波形を
     // 半分ずつ縮める(src/convert/n163Fit.js)。★下の音程補正より前に呼ぶこと:
     // N163の周波数式は波形長を含むので、縮めた後の長さで生レジスタ値を出す必要がある
+    // ★休符だけのN163チャンネルは出さない(ユーザー指示 2026-09-11)。実効ch数は
+    //   #EX-N163 の数値で伝わるので、空チャンネルを並べて位置を示す必要がなくなった
+    if (byFamily.n163) {
+      const sounding = byFamily.n163.filter(p => p.channel.events.some(ev => ev.note !== null));
+      for (const p of byFamily.n163) if (sounding.indexOf(p) < 0) delete placed[p.type];
+      if (sounding.length) byFamily.n163 = sounding; else delete byFamily.n163;
+    }
+    // N163の実効チャンネル数(変換設定 N163_CH)。周波数式・波形RAM枠・#EX-N163の宣言の
+    // 3か所すべてでこの値を使う(src/convert/options.js n163NumChFor 冒頭コメント)
+    const n163NumCh = MML.Convert.n163NumChFor(cmd,
+      (byFamily.n163 || []).map(p => Plan.targetInfo(p.type).index));
     let n163FitNotes = [];
     if (regs.n163WaveReg && byFamily.n163) {
       // スロット順(P-W)に並べ直してから渡す(有効ch数の判定が位置依存のため)
       const slots = [];
       for (const p of byFamily.n163) slots[Plan.targetInfo(p.type).index] = p.channel;
-      n163FitNotes = MML.Convert.N163Fit.apply(slots, regs.n163WaveReg, cmd);
+      n163FitNotes = MML.Convert.N163Fit.apply(slots, regs.n163WaveReg, cmd, n163NumCh);
       notes.push(...n163FitNotes);
     }
     const expansions = [];
@@ -586,11 +597,6 @@
     expansions.sort((a, b) => prio.indexOf(a) - prio.indexOf(b));
     const letterMap = expansions.length ? MML.Mml.assignExpansionLetters(expansions) : {};
 
-    // N163のnumChはcompiler.js側の自動検出(音符を持つ最上位レター位置+1)と一致させる
-    let n163NumCh = 1;
-    for (const p of (byFamily.n163 || [])) {
-      if (p.channel.events.some(ev => ev.note !== null)) n163NumCh = Math.max(n163NumCh, Plan.targetInfo(p.type).index + 1);
-    }
     const waveLen = o.n163WaveLen || N163_WAVE_LEN;
     const periodFnFor = {
       fme7: fme7PeriodRaw, n163: n163FreqRegRaw(waveLen, n163NumCh), pulse: pulsePeriodRaw,
@@ -622,14 +628,6 @@
         const flags = fam === 'vrc7' ? { hasDetune: true, hasNoteEnv: true }
           : fam === 'noise' ? {} : { hasDetune: true, hasPitchMod: true };
         scoreChannels.push(Object.assign({}, p.channel, { letter }, flags));
-      }
-    }
-    // N163: 途中の空きレターも空チャンネルとして出す(numCh検出をcompiler.jsと揃えるため)
-    if (letterMap.n163) {
-      const have = {};
-      for (const ch of scoreChannels) have[ch.letter] = true;
-      for (let i = 0; i < n163NumCh; i++) {
-        if (!have[letterMap.n163[i]]) scoreChannels.push({ letter: letterMap.n163[i], events: [], hasVolume: true, hasInstrument: true });
       }
     }
     MML.Convert.sortChannelsByLetter(scoreChannels);

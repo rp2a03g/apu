@@ -52,9 +52,15 @@
     ['octave', T('中(オクターブ連動・推奨)')],
     ['off',    T('低(SA不使用・従来)')],
   ];
+  // N163の実効チャンネル数(src/convert/options.js N163_CH)
+  const N163_CH_OPTIONS = () => [
+    ['fixed8', T('8ch固定(推奨)')],
+    ['used',   T('使ったch数だけ')],
+  ];
   // N163内蔵RAMに波形が収まらないときの扱い(src/convert/options.js N163_WAVE)
   const N163_WAVE_OPTIONS = () => [
-    ['fit', T('収まるように縮める(あふれたぶんだけ半分に)')],
+    ['both', T('RAMと音域の両方に収まるように縮める(推奨)')],
+    ['fit',  T('RAMに収まるようにだけ縮める')],
     ['keep', T('元の長さのまま(その曲は再生できない)')],
   ];
   // 基準ピッチ(全体オフセット、src/convert/options.js TUNING/TUNING_MIN。detectTuning冒頭コメント参照)
@@ -391,10 +397,6 @@
     const det = document.createElement('details');
     det.className = 'cs-details cs-span';
     det.appendChild(el('summary', null, T('詳細設定')));
-    const saSel = makeSelect(PITCH_SA_OPTIONS(), () => setKey('PITCH_SA', saSel.value));
-    det.appendChild(line(null, T('ピッチ精度(SA)'), T('N163のSA<n>の選び方'), saSel, T('N163出力のSA<n>(D/EP/MPの倍率)の選び方。深いビブラートをテーブルのbyte幅を超えて表現する')));
-    const nwSel = makeSelect(N163_WAVE_OPTIONS(), () => setKey('N163_WAVE', nwSel.value));
-    det.appendChild(line(null, T('N163波形'), T('波形がRAMに入り切らないとき'), nwSel, T('N163が波形に使えるRAMは 128-8×使用ch数 バイトだけ。同時に鳴る波形が入り切らない曲で、はみ出したぶんの波形長を落とすかどうか。落とさないとコンパイルエラーで再生・書き出しができません')));
     const tnSel = makeSelect(TUNING_OPTIONS(), () => setKey('TUNING', tnSel.value));
     const tmIn = document.createElement('input');
     tmIn.type = 'number'; tmIn.min = '0'; tmIn.max = String(MML.Convert.TUNING_MIN_MAX); tmIn.step = '0.5'; tmIn.className = 'cs-num';
@@ -407,6 +409,40 @@
     tmWrap.appendChild(el('span', null, T('セント')));
     det.appendChild(line(null, T('基準ピッチ'), T('曲全体の音程のずれを測って補正'), inline2(tnSel, tmWrap), T('曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。音名は変わらず、再生とNSF書き出しの周波数テーブルが同じだけずれる')));
     body.appendChild(det);
+
+    // ── N163(実効ch数・ピッチ精度・波形RAM)。1つの物理量で3つ同時に動くので1か所へ ──
+    const n163 = document.createElement('details');
+    n163.className = 'cs-details cs-span';
+    n163.appendChild(el('summary', null, T('N163 (ナムコ163)')));
+    n163.appendChild(descLine(
+      T('実効ch数を減らすと、波形を大きくでき、音量が出て、高い音まで出せます。代わりに音程の刻みが粗くなります。'),
+      T('実機N163は8chを時間多重するため、有効ch数が1つ動くと3つ同時に動きます。波形RAM=128-8×ch数バイト(1ch=120 / 8ch=64)。音量=出力は有効ch数で平均されるので1chは5chの5倍。周波数レジスタ=ch数に比例し、少ないほど刻みが粗く、出せる最高音は上がる(32サンプル波形で8ch=1864Hz / 1ch=14915Hz)')));
+    // いまの設定で出せる最高音。波形長は既定の32サンプルを基準に出す(実際の長さは曲ごとに
+    // 変わり、「RAMと音域の両方」を選んでいれば足りない波形だけ自動で縮む)
+    const rangeNote = el('div', 'cs-desc');
+    function updateN163Range() {
+      const Fit = MML.Convert && MML.Convert.N163Fit;
+      if (!Fit || !Fit.maxNoteFor) { rangeNote.textContent = ''; return; }
+      const numCh = (ncSel.value === 'used') ? null : 8;
+      const NN = ['c', 'c+', 'd', 'd+', 'e', 'f', 'f+', 'g', 'g+', 'a', 'a+', 'b'];
+      const name = (n) => NN[((n % 12) + 12) % 12] + Math.floor(n / 12 - 1);
+      if (numCh === null) {
+        rangeNote.textContent = T('出せる最高音は使ったch数で変わります(32サンプル波形で 1ch={n1} 〜 8ch={n8})',
+          { n1: name(Fit.maxNoteFor(32, 1)), n8: name(Fit.maxNoteFor(32, 8)) });
+      } else {
+        rangeNote.textContent = T('この設定(8ch・32サンプル波形)では {note} が最高です。これを超える音は波形を縮めて届かせます',
+          { note: name(Fit.maxNoteFor(32, 8)) });
+      }
+      rangeNote.title = T('N163の周波数レジスタは18bitで、freqReg = 音の周波数×15×65536×波形長×有効ch数÷CPUクロック。波形を半分にすると上限は1オクターブ上がります');
+    }
+    const ncSel = makeSelect(N163_CH_OPTIONS(), () => { setKey('N163_CH', ncSel.value); updateN163Range(); });
+    n163.appendChild(line(null, T('実効ch数'), T('#EX-N163 に書く値'), ncSel, T('8ch固定なら、ch数で変わる値(波形RAM・音量・音程の刻み)が曲によって変わりません。使ったch数だけにすると、使ったスロットの一番大きい番号がそのまま実効ch数になります(ch1とch8なら8、ch2とch6なら6)。大きい波形を使いたい・音量を出したい・高い音を出したいときはこちら。元がN163のNSF変換はこの設定の対象外で、元の曲のch数に従います')));
+    n163.appendChild(rangeNote);
+    const saSel = makeSelect(PITCH_SA_OPTIONS(), () => setKey('PITCH_SA', saSel.value));
+    n163.appendChild(line(null, T('ピッチ精度(SA)'), T('N163のSA<n>の選び方'), saSel, T('N163出力のSA<n>(D/EP/MPの倍率)の選び方。深いビブラートをテーブルのbyte幅を超えて表現する。SAは実効ch数に追随するので、ch数を変えてもEP/MPの刻みは一定に保たれます')));
+    const nwSel = makeSelect(N163_WAVE_OPTIONS(), () => setKey('N163_WAVE', nwSel.value));
+    n163.appendChild(line(null, T('波形RAM'), T('波形がRAMに入り切らないとき'), nwSel, T('N163が波形に使えるRAMは 128-8×実効ch数 バイトだけ。同時に鳴る波形が入り切らない曲で、はみ出したぶんの波形長を落とすかどうか。落とさないとコンパイルエラーで再生・書き出しができません')));
+    body.appendChild(n163);
 
     // ── 変換の進捗と結果ログ(ユーザー指示 2026-09-09) ──
     // 実体は各フォーマットのパネルにある #<fmt>FileStatus。キャプチャ進捗も完了メッセージも
@@ -439,8 +475,10 @@
       coSel.value = current.CHANNEL_ORDER || 'letter';
       poSel.value = current.PART_ORDER || 'block';
       bpIn.value = String(current.BARS_PER_LINE || 4);
+      ncSel.value = current.N163_CH || 'fixed8';
       saSel.value = current.PITCH_SA || 'octave';
-      nwSel.value = current.N163_WAVE || 'fit';
+      nwSel.value = current.N163_WAVE || 'both';
+      updateN163Range();
       tnSel.value = current.TUNING || 'auto';
       tmIn.value = String(current.TUNING_MIN != null ? current.TUNING_MIN : MML.Convert.TUNING_MIN_DEFAULT);
       tmIn.disabled = current.TUNING !== 'auto';

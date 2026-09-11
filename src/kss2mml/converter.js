@@ -183,6 +183,7 @@
     const dpcmDefLines = [], dpcmFiles = [];
     let drumNote = null;
     let preferOplForNote = false; // 既定経路で「FMPAC無音→MSX-AUDIOがVRC7枠を使用」になったか(ヘッダコメント用)
+    let n163NumCh = 1;              // N163の実効ch数(#EX-N163の数値。周波数式・波形RAM枠と必ず同じ値)
     if (customPlan) {
       const caps = { hasScc, hasOpll, hasOpl };
       const r = MML.Convert.Borrow.compose({
@@ -208,6 +209,7 @@
       scoreChannels = r.scoreChannels;
       expansions = r.expansions;
       expansionLetterMap = r.letterMap;
+      n163NumCh = r.n163NumCh;
       borrowNotes = r.notes;
       toneDemotions = r.demotions || [];
       if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
@@ -258,7 +260,11 @@
     if (hasScc) {
       // PSGと同じ理由でN163側も音程補正する(N163の周波数レジスタ式を使用)。numChは
       // compiler.js側の自動検出値と一致させる(上のn163FreqRegRawのコメント参照)。
-      const n163ActualNumCh = computeActualN163ChannelCount(sccResult.channels);
+      // SCCは5ch固定(スロット0-4)。変換設定 N163_CH が 'used' なら5、'fixed8' なら8。
+      // ★この値を周波数式と #EX-N163 の宣言の両方に使う(食い違うとD<n>のスケールがずれる)
+      const n163ActualNumCh = MML.Convert.n163NumChFor(cmd,
+        sccResult.channels.map((ch, i) => (ch.events.some(ev => ev.note !== null) ? i : -1)).filter(i => i >= 0));
+      n163NumCh = n163ActualNumCh;
       MML.Convert.detectChorusDetune(
         sccResult.channels, n163FreqRegRaw(MML.Kss2MmlExpansion.SCC_WAVE_LEN, n163ActualNumCh), { cmd });
       // 高速アルペジオ→EN統合(2026-08-14拡張)。ay.jsのブロックと同じ理由で
@@ -267,9 +273,12 @@
       MML.Convert.assignPitchEnvelope(
         sccResult.channels, n163FreqRegRaw(MML.Kss2MmlExpansion.SCC_WAVE_LEN, n163ActualNumCh), pitchReg,
         { saMode: cmd.PITCH_SA }); // 出力先N163: SA<num>自動選択(pitch.js n163SaForBase参照)
+      // ★休符だけのチャンネルは出さない(ユーザー指示 2026-09-11)。実効ch数は
+      //   #EX-N163 の数値で伝わるので、空チャンネルで位置を示す必要がなくなった
       const n163Letters = expansionLetterMap.n163;
       for (let i = 0; i < n163Letters.length; i++) {
-        const ch = sccResult.channels[i] || { events: [], hasVolume: true, hasInstrument: true };
+        const ch = sccResult.channels[i];
+        if (!ch || !ch.events.some(ev => ev.note !== null)) continue;
         scoreChannels.push(Object.assign({}, ch, { letter: n163Letters[i], hasDetune: true, hasPitchMod: true }));
       }
     }
@@ -383,7 +392,7 @@
     // #EX-*(機能する本文ディレクティブ。上の`; `コメントとは別。これがないと
     // MML本文だけからは拡張音源が有効にならず、UI側の操作が必要になってしまう)
     const directiveLines = expansions.map(chip => chip === 'n163'
-      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${MML.Mml.n163DeclaredCount(scoreChannels, expansionLetterMap.n163)}`
+      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${n163NumCh}`
       : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
 
     // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前

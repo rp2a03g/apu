@@ -20,14 +20,19 @@
   MML.HES2MML = {};
 
   const CPU_CLOCK_NTSC = 1789773; // 借用先(N163)のクロック。src/mml/compiler.jsと同じ値
-  const N163_NUM_CH = 6;          // 借用に使うNSF側N163の実効チャンネル数(固定)
+  const N163_SLOTS = 6;           // PSG 6ch をそのまま N163 の先頭6スロットへ載せる
 
   // N163周波数式の逆関数(nsf2mml/expansion/n163.jsと同じ式): freq = CPU*freqReg/(15*65536*length*numCh)
   // detune計算は差を取ってから1回だけ丸めるため、呼び出し側で先に丸めてはいけない
   // (src/convert/detune.js冒頭コメント)。
-  function n163PeriodRaw(freqHz, ev) {
-    const length = (ev && ev.rawLength) || 32;
-    return (freqHz * 15 * 65536 * length * N163_NUM_CH) / CPU_CLOCK_NTSC;
+  // ★numChは変換設定 N163_CH で決めた実効ch数を渡すこと。以前は6固定で、コンパイラが
+  //   本文から検出する値(音符を持つ最上位+1)と食い違う曲ではD<n>とEPの尺度がずれていた
+  //   (コーパス119曲中40曲で発生。2026-09-11修正)
+  function n163PeriodRawFor(numCh) {
+    return function (freqHz, ev) {
+      const length = (ev && ev.rawLength) || 32;
+      return (freqHz * 15 * 65536 * length * numCh) / CPU_CLOCK_NTSC;
+    };
   }
 
   MML.HES2MML.fromHes = async function (hesBytes, track, durationSeconds, options) {
@@ -127,8 +132,12 @@
     // (変換設定 N163_WAVE。src/convert/n163Fit.js)。★音程補正より前に呼ぶこと:
     // N163の周波数式は波形長を含むため、縮めた後の長さで生レジスタ値を出さないとズレる。
     // ユーザー割当経路(customPlan)は借用層 borrow.compose 側で同じ処理を通す
+    // 既定経路(PSG 6ch → N163)の実効ch数。音符のあるスロットだけ数える('used')か8固定
+    const hesN163NumCh = MML.Convert.n163NumChFor(cmd,
+      waveResult.channels.map((ch, i) => (ch.events.some(ev => ev.note !== null) ? i : -1)).filter(i => i >= 0));
+    const n163PeriodRaw = n163PeriodRawFor(hesN163NumCh);
     const n163FitNotes = options.channelMap ? []
-      : MML.Convert.N163Fit.apply(waveResult.channels, n163WaveReg, cmd);
+      : MML.Convert.N163Fit.apply(waveResult.channels, n163WaveReg, cmd, hesN163NumCh);
 
     // ユーザーがチャンネル割当(鍵盤表示、案E)を既定から変えたときは、以下の音程補正/EN/EPは
     // 借用先ファミリごとに共通借用層(src/convert/borrow.js)側で行う(借用先が変われば
@@ -162,6 +171,7 @@
     // ノイズ(D)とDDA(E=DPCM)は「PSGのモード」であってch単位の借用先ではないため、
     // どちらの経路でも従来どおり別枠で追加する。
     let expansions, expansionLetterMap, scoreChannels, borrowNotes = [], chanDesc = '', toneDemotions = [];
+    let n163NumCh = hesN163NumCh; // N163の実効ch数(#EX-N163の数値。周波数式・波形RAM枠と必ず同じ値)
     if (customPlan) {
       const r = MML.Convert.Borrow.compose({
         sources: MML.HES2MML.sourceChannels(),
@@ -186,6 +196,7 @@
       if (hasDpcm && expansions.indexOf('dpcm') < 0) expansions.unshift('dpcm');
       expansionLetterMap = MML.Mml.assignExpansionLetters(expansions);
       scoreChannels = r.scoreChannels;
+      n163NumCh = r.n163NumCh;
       borrowNotes = r.notes;
       toneDemotions = r.demotions || [];
       chanDesc = Object.keys(r.placed)
@@ -201,8 +212,15 @@
     const n163Letters = expansionLetterMap.n163;
     const dpcmLetter = hasDpcm ? expansionLetterMap.dpcm[0] : null;
 
-    scoreChannels = waveResult.channels.map((ch, i) =>
-      Object.assign({}, ch, { letter: n163Letters[i], hasDetune: true, hasPitchMod: true }));
+    // ★休符だけのチャンネルは出さない(ユーザー指示 2026-09-11)。実効ch数は
+    //   #EX-N163 の数値で伝わるので、空チャンネルで位置を示す必要がなくなった。
+    //   ただし全部休符の曲(15秒間まったく鳴らないHESが実測28曲)で全滅させると
+    //   本文にチャンネル行が1つも無いMMLになり「 t120」だけが残ってコンパイルエラーになる。
+    //   最低1本(P)は残して、無音のまま成立する従来どおりのMMLにする
+    const allWave = waveResult.channels
+      .map((ch, i) => Object.assign({}, ch, { letter: n163Letters[i], hasDetune: true, hasPitchMod: true }));
+    scoreChannels = allWave.filter(ch => ch.events.some(ev => ev.note !== null));
+    if (!scoreChannels.length) scoreChannels = allWave.slice(0, 1);
     if (hasNoise) scoreChannels.push(Object.assign({}, noiseResult, { letter: 'D' }));
     if (hasDpcm) scoreChannels.push({ letter: dpcmLetter, events: dpcmResult.events, hasInstrument: true });
     }
@@ -227,7 +245,7 @@
       `; 変換     : Sound Emulation Foundry`,
       customPlan
         ? `; チャンネル: ${chanDesc || '-'}${hasDpcm ? ` ${expansionLetterMap.dpcm[0]}=PSG DDA(PCM)` : ''}${hasNoise ? ' D=PSGノイズ' : ''} (借用先の割当: ユーザー指定)`
-        : `; チャンネル: ${hasDpcm ? expansionLetterMap.dpcm[0] + '=PSG DDA(PCM、2A03 DMCとして近似再生) ' : ''}${(expansionLetterMap.n163 || []).slice(0, N163_NUM_CH).join('')}=PSG ch0-5(N163として近似再生)${hasNoise ? ' D=PSGノイズ(ch4/5、2A03ノイズとして近似再生)' : ''}`,
+        : `; チャンネル: ${hasDpcm ? expansionLetterMap.dpcm[0] + '=PSG DDA(PCM、2A03 DMCとして近似再生) ' : ''}${(expansionLetterMap.n163 || []).slice(0, N163_SLOTS).join('')}=PSG ch0-5(N163として近似再生)${hasNoise ? ' D=PSGノイズ(ch4/5、2A03ノイズとして近似再生)' : ''}`,
       `; ※ このアプリのMMLプレイヤーはNES音源専用のため、PSGの6ch(いずれも32サンプル5bit`,
       `;    波形音源)はレジスタ構造が近いN163へ、ノイズモードは2A03ノイズへ、DDA(PCM)は`,
       `;    2A03 DMCへ載せています。DPCMサンプルは抽出済み.dmcファイルとして自動でダウンロード`,
@@ -247,7 +265,7 @@
       ? expansions.filter(chip => chip !== 'dpcm').map(chip => chip === 'n163'
         ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${MML.Mml.n163DeclaredCount(scoreChannels, expansionLetterMap.n163)}`
         : MML.Mml.EX_CHIP_DIRECTIVE[chip])
-      : [`${MML.Mml.EX_CHIP_DIRECTIVE.n163} ${N163_NUM_CH}`];
+      : [`${MML.Mml.EX_CHIP_DIRECTIVE.n163} ${n163NumCh}`];
 
     // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
     MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, frameRate);

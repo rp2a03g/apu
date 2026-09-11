@@ -4475,8 +4475,10 @@ SONG_LOOP_PTR_HI:
     tuningRatio = Math.pow(2, ((compileResult.settings && compileResult.settings.tuningCents) || 0) / 1200);
 
     // N163の有効チャンネル数($7Fに書く値、周波数テーブルの符号化、レジスタ配置の
-    // (8-num)+chオフセットの全てに効く)をcompiler.js(segmentsToWriteLogN163の呼び出し元)と
-    // 完全に同じ規則=「音符を持つ最上位レターの位置+1」で決める。以前は#EX-NAMCO106で
+    // (8-num)+chオフセットの全てに効く)をcompiler.js(n163NumChOf)と完全に同じ規則で決める。
+    // ★2026-09-11: 規則は「#EX-N163 <n> の数値があればそれ、無ければ音符を持つ最上位レター+1」。
+    //   数値優先は本家ppmck(datamake.c _EX_NAMCO106)と同じで、変換設定 N163_CH の
+    //   「8ch固定」を実際に効かせるために要る。以前は常に自動検出だった。以前は#EX-NAMCO106で
     // 宣言された8レター全部をチャンネルとして組み込み常に8ch扱いだったため、ブラウザ再生
     // (実使用ch数)とNSF書き出しで$7F・周波数値・レジスタ配置が全て食い違っていた
     // (女神転生II 11曲目=4ch使用曲で発覚)。有効ch数より上のレター(音符無し)は実機上の
@@ -4486,11 +4488,16 @@ SONG_LOOP_PTR_HI:
     let numN163Ch = 8;
     if (expansions.includes('n163')) {
       const n163All = expansionLetterMap.n163 || [];
-      numN163Ch = 0;
-      n163All.forEach((ch, index) => {
-        if ((segmentsByChannel[ch] || []).some(s => s.freq != null)) numN163Ch = index + 1;
-      });
-      numN163Ch = Math.max(1, numN163Ch);
+      const declared = compileResult.settings && compileResult.settings.n163NumCh;
+      if (declared) {
+        numN163Ch = Math.max(1, Math.min(8, declared));
+      } else {
+        numN163Ch = 0;
+        n163All.forEach((ch, index) => {
+          if ((segmentsByChannel[ch] || []).some(s => s.freq != null)) numN163Ch = index + 1;
+        });
+        numN163Ch = Math.max(1, numN163Ch);
+      }
       if (numN163Ch < n163All.length) {
         const dropped = new Set(n163All.slice(numN163Ch));
         expansionLetterMap = Object.assign({}, expansionLetterMap, { n163: n163All.slice(0, numN163Ch) });

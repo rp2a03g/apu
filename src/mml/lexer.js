@@ -415,7 +415,9 @@
     const errors = [];
     const envelopes = { v: {}, vr: {}, ep: {}, en: {}, mp: {}, op: {}, fm: {}, n: {}, mw: {}, mh: {}, dpcm: {}, duty: {} };
     const meta = { title: null, composer: null, maker: null, programer: null };
-    const settings = { octaveRev: 0, gateDenom: 8, tuningCents: 0 };
+    // n163NumCh: #EX-N163 / #EX-NAMCO106 の数値(実効チャンネル数)。
+    // 未指定(数値なし)なら null で、compiler.js が本文から自動検出する
+    const settings = { octaveRev: 0, gateDenom: 8, tuningCents: 0, n163NumCh: null };
     const detectedExpansions = [];
     const macros = {};
     const { rawLines, lineStarts } = splitLinesWithOffsets(source);
@@ -448,7 +450,15 @@
               break;
             }
             default: {
-              if (EX_CHIP_MAP[directive.name]) detectedExpansions.push(EX_CHIP_MAP[directive.name]);
+              if (EX_CHIP_MAP[directive.name]) {
+                detectedExpansions.push(EX_CHIP_MAP[directive.name]);
+                // N163だけは数値に意味がある(実効ch数。本家ppmck datamake.c の
+                // _EX_NAMCO106 と同じで n106_track_num になる)。0は本家同様1として扱う
+                if (EX_CHIP_MAP[directive.name] === 'n163') {
+                  const n = parseInt(directive.args, 10);
+                  if (isFinite(n)) settings.n163NumCh = Math.max(1, Math.min(8, n || 1));
+                }
+              }
               else if (BANKING_DIRECTIVES.has(directive.name) || UNSUPPORTED_FILE_DIRECTIVES.has(directive.name)) {
                 // 認識するが本ツールでは無視する(バンキング非対応/静的ホスティングのみのためファイル読込非対応)
               } else {

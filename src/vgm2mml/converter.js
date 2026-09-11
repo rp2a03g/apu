@@ -845,19 +845,27 @@
     // 波形に使えるのは 128-8*有効ch数 バイトだけ。あふれるとコンパイルエラーで再生も
     // 書き出しもできないため、変換設定 N163_WAVE='fit'(既定)ならあふれたぶんの波形を
     // 半分ずつ縮める(src/convert/n163Fit.js)。★下の音程補正より前に呼ぶこと
+    // ★休符だけのN163チャンネルは出さない(ユーザー指示 2026-09-11)。実効ch数は
+    //   #EX-N163 の数値で伝わるので、空チャンネルを並べて位置を示す必要がなくなった
+    if (byFamily.n163) {
+      const sounding = byFamily.n163.filter(p => p.channel.events.some(ev => ev.note !== null));
+      for (const p of byFamily.n163) if (sounding.indexOf(p) < 0) delete placed[p.type];
+      if (sounding.length) byFamily.n163 = sounding; else delete byFamily.n163;
+    }
+    // N163の実効チャンネス数(変換設定 N163_CH)。周波数式・波形RAM枠・#EX-N163の宣言の
+    // 3か所すべてでこの値を使う(src/convert/options.js n163NumChFor 冒頭コメント)
+    const n163NumCh = MML.Convert.n163NumChFor(cmd,
+      (byFamily.n163 || []).map(p => TARGET_TYPES[p.type].index));
     if (byFamily.n163) {
       const slots = [];
       for (const p of byFamily.n163) slots[TARGET_TYPES[p.type].index] = p.channel;
-      notes.push(...MML.Convert.N163Fit.apply(slots, n163WaveReg, cmd));
+      notes.push(...MML.Convert.N163Fit.apply(slots, n163WaveReg, cmd, n163NumCh));
     }
     const expansions = [];
     for (const t of Object.keys(placed)) { const chip = TARGET_TYPES[t].chip; if (chip !== '2a03' && !expansions.includes(chip)) expansions.push(chip); }
     const prio = MML.Mml.EXPANSION_PRIORITY || ['fds', 'vrc7', 'vrc6', 'n163', 'fme7', 'mmc5'];
     expansions.sort((a, b) => prio.indexOf(a) - prio.indexOf(b));
     const letterMap = expansions.length ? MML.Mml.assignExpansionLetters(expansions) : {};
-    // N163のnumChはcompiler.js側の自動検出(音符を持つ最上位レター位置+1)と一致させる
-    let n163NumCh = 1;
-    for (const p of (byFamily.n163 || [])) if (p.channel.events.some(ev => ev.note !== null)) n163NumCh = Math.max(n163NumCh, TARGET_TYPES[p.type].index + 1);
     const periodFnFor = {
       fme7: fme7PeriodRaw, n163: n163FreqRegRaw(N163_WAVE_LEN, n163NumCh), pulse: pulsePeriodRaw,
       triangle: triPeriodRaw, vrc6pulse: vrc6PulsePeriodRaw, vrc6saw: MML.Convert.Borrow.vrc6SawPeriodRaw,
@@ -889,10 +897,6 @@
       scoreChannels.push({ letter: 'E', events: dpcmResult.events, hasInstrument: true });
       const st = dpcmResult.stats;
       notes.push(`打楽器のPCMを実サンプルのままDPCM(Eパート)へ変換しました: 定義${st.clips}件 / 打点${st.segments}個 / ROM ${(st.bytes / 1024).toFixed(1)}KB(同時発音区間はその瞬間の音をミックスした1サンプルとして焼いています)。`);
-    }
-    if (letterMap.n163) {
-      const have = new Set(scoreChannels.map(ch => ch.letter));
-      for (let i = 0; i < n163NumCh; i++) if (!have.has(letterMap.n163[i])) scoreChannels.push({ letter: letterMap.n163[i], events: [], hasVolume: true, hasInstrument: true });
     }
     MML.Convert.sortChannelsByLetter(scoreChannels);
 
@@ -967,7 +971,7 @@
     ].join('\n');
 
     const directiveLines = expansions.map(chip => chip === 'n163'
-      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${MML.Mml.n163DeclaredCount(scoreChannels, letterMap.n163)}`
+      ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${n163NumCh}`
       : MML.Mml.EX_CHIP_DIRECTIVE[chip]);
     // @DPCM<n> 定義(1個でもあればEチャンネルが自動的に有効になる。#EX-*宣言は不要)
     const dpcmDefLines = dpcmResult ? dpcmResult.defs.map(d =>
