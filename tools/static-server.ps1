@@ -19,7 +19,8 @@ $mime = @{
     '.wav'  = 'audio/wav'
 }
 
-$SaveDir = "C:\Users\user\AppData\Local\Temp\claude\C--Users-user-Desktop-mml\9d5392d8-0e9f-47d6-8a43-c7eb3b58726a\scratchpad"
+# POST /save/<name> の保存先。既定は一時フォルダ配下。MML_SAVE_DIR で変えられる
+$SaveDir = if ($env:MML_SAVE_DIR) { $env:MML_SAVE_DIR } else { Join-Path $env:TEMP 'mml-static-server-save' }
 
 while ($listener.IsListening) {
     $context = $listener.GetContext()

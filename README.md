@@ -285,9 +285,14 @@ Chrome / Edge（Chromium系）で開発・確認している。次の機能はCh
 一括変換の回帰テスト、CPU命令テスト、MMLヘルプの自己点検などはここから走らせる。
 詳細は [tools/headless/README.md](tools/headless/README.md)。
 
+回帰テストは手元のサウンドファイル群（コーパス）に対して走らせる。置き場所は環境変数で指定する。
+ベースラインはコーパスと1対1に対応するので、リポジトリには入れていない（初回は `--update` で作る）。
+
 ```bash
-node tools/headless/check-all.js      # 全形式の回帰 + CPU命令テスト + ヘルプ点検
-node tools/headless/help-lint.js      # MMLヘルプの書式・網羅チェック
+export MML_CORPUS_ROOT="D:/snd"          # D:/snd/nsf, D:/snd/vgm ... を見る
+node tools/headless/check-all.js         # 全形式の回帰 + CPU命令テスト + ヘルプ点検
+node tools/headless/check-all.js --update  # 初回・意図した変化のあとはこれでベースライン更新
+node tools/headless/help-lint.js         # MMLヘルプの書式・網羅チェック(コーパス不要)
 ```
 
 ## ライセンス

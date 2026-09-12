@@ -1,8 +1,8 @@
 /*
  * 全部まとめて回す(改修後の一括チェック用)
  *
- *   node tools/headless/check-all.js                        既定コーパスで全形式
- *   node tools/headless/check-all.js --corpus-root "D:/snd"  コーパスの親を変える
+ *   node tools/headless/check-all.js                        全形式(要 MML_CORPUS_ROOT)
+ *   node tools/headless/check-all.js --corpus-root "D:/snd"  コーパスの親を引数で渡す
  *   node tools/headless/check-all.js --update                ベースライン更新
  *   node tools/headless/check-all.js --skip spc              時間のかかる形式を外す
  *   node tools/headless/check-all.js --no-cpu                CPU命令テストを省く
@@ -15,9 +15,9 @@
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-// コーパスの置き場所は環境ごとに違うので、環境変数 MML_CORPUS_ROOT で差し替えられる
-// (指定が無ければ開発機の既定パス)。1形式だけ見たいときは regress.js を直接呼ぶ。
-const DEFAULT_ROOT = process.env.MML_CORPUS_ROOT || 'C:/Users/user/Desktop/emu sound';
+// コーパスの置き場所は環境ごとに違うので、既定値は持たない。
+// 環境変数 MML_CORPUS_ROOT か --corpus-root で必ず指定する。
+const ENV_ROOT = process.env.MML_CORPUS_ROOT || null;
 const FORMATS = ['nsf', 'spc', 'kss', 'gbs', 'hes', 'vgm'];
 
 function run(args) {
@@ -28,7 +28,14 @@ function run(args) {
 function main() {
   const argv = process.argv.slice(2);
   const flag = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : d; };
-  const root = flag('--corpus-root', DEFAULT_ROOT);
+  const root = flag('--corpus-root', ENV_ROOT);
+  if (!root) {
+    console.error('コーパスの場所が指定されていません。');
+    console.error('  環境変数:  export MML_CORPUS_ROOT="D:/snd"   (D:/snd/nsf, D:/snd/vgm ... を見る)');
+    console.error('  引数:      node tools/headless/check-all.js --corpus-root "D:/snd"');
+    console.error(`  中身は形式ごとのサブディレクトリ: ${FORMATS.join(' / ')}`);
+    process.exit(2);
+  }
   const update = argv.includes('--update');
   const seconds = flag('--sec', '15');
   const skip = (flag('--skip', '') || '').split(',').filter(Boolean);

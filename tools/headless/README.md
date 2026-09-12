@@ -32,12 +32,16 @@ export PATH="$PATH:/path/to/nodejs"
 ベースラインは手元のコーパスと1対1に対応する曲名一覧なので、リポジトリには入れていない。
 初回は `--update` で作る（下記）。
 
-コーパスの置き場所は環境変数 `MML_CORPUS_ROOT` で差し替えられる。
-指定が無ければ開発機の既定パスを使う。
+コーパスの置き場所は環境変数 `MML_CORPUS_ROOT` で指定する。**既定値は持たない**ので、
+未指定のまま走らせると案内を出して終わる(exit 2)。中身は形式ごとのサブディレクトリ
+`nsf` `spc` `kss` `gbs` `hes` `vgm`。
 
 ```bash
 export MML_CORPUS_ROOT="D:/snd"      # D:/snd/nsf, D:/snd/vgm ... を見る
 ```
+
+引数で渡してもよい。`regress.js --corpus "D:/snd/nsf"` / `check-all.js --corpus-root "D:/snd"`。
+引数があれば環境変数より優先する。
 
 ## 使い方
 

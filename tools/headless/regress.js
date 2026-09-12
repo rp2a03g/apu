@@ -24,8 +24,9 @@ const { convertBytes, expandInput, ctx, parseCmdFlags } = require('./convert');
 const { ROOT } = require('./load');
 
 // Windows でも Node はスラッシュ区切りを受け付ける(バックスラッシュのエスケープ事故を避ける)
-// 環境変数 MML_CORPUS_ROOT があればその下の nsf/ を既定にする(check-all.js と同じ変数)
-const DEFAULT_CORPUS = (process.env.MML_CORPUS_ROOT || 'C:/Users/user/Desktop/emu sound') + '/nsf';
+// コーパスの既定値は持たない。--corpus か、環境変数 MML_CORPUS_ROOT(check-all.js と
+// 同じ変数。その下の nsf/ を見る)のどちらかで必ず指定する。
+const ENV_CORPUS = process.env.MML_CORPUS_ROOT ? process.env.MML_CORPUS_ROOT + '/nsf' : null;
 const SUPPORTED = /\.(nsfe?|spc|kss|gbs|hes|vgm|vgz|zip|7z)$/i;
 
 function sha(s) { return crypto.createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 16); }
@@ -114,7 +115,13 @@ async function main() {
   const flag = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : d; };
   const update = argv.includes('--update');
   const dumpDir = flag('--dump', null);
-  const corpus = flag('--corpus', DEFAULT_CORPUS);
+  const corpus = flag('--corpus', ENV_CORPUS);
+  if (!corpus) {
+    console.error('コーパスの場所が指定されていません。');
+    console.error('  引数:      node tools/headless/regress.js --corpus "path/to/corpus/nsf"');
+    console.error('  環境変数:  export MML_CORPUS_ROOT="D:/snd"   (--corpus 省略時は D:/snd/nsf を見る)');
+    process.exit(2);
+  }
   const seconds = parseInt(flag('--sec', '15'), 10);
   const cmd = parseCmdFlags(flag('--preset', null), flag('--cmd', null)); // 省略時 undefined=既定設定
   const only = flag("--only", null);
