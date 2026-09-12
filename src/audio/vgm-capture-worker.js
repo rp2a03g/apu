@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-11 08:07:20
+ * Built by tools/build-capture-workers.ps1 at 2026-09-12 18:40:34
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-11 08:07:20';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-12 18:40:34';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -10604,9 +10604,9 @@
  *   (アタックms、ディケイ系は×14.32833)、レート=4×値+キースケール(RC≠15のとき2×RC+oct)。
  *   減衰ドメインは線形インデックス0-1023(=0〜-96dBを指数変換)、DLは3dB/段。
  * VGM: ROMはデータブロック0x89(デュアルはサイズbit31)、ヘッダ0x88。
- *   セガバンキング: コマンド **0xC3 cc bb aa**(値=aabb、ccのbit0=Lバンク/bit1=Rバンク、
- *   bit7=デュアル2個目)。アドレス0x100000-0x1FFFFFの窓をbit19で2分し、
- *   物理 = bank(値<<16) | (addr & 0x7FFFF)(VGMPlay multipcm.c準拠)。
+ *   セガバンキング: コマンド **0xC3 cc bb aa**(値=aabb、ccのbit0/bit1=バンク2本、
+ *   bit7=デュアル2個目)。アドレス0x100000-0x1FFFFFの窓に対し
+ *   物理 = 1MBページ基底(値<<16) + (addr & 0xFFFFF)。bankWrite()のコメント参照。
  *
  * ★ピッチ: F-number/octレジスタで1サンプルを音階演奏(C140系)+全サンプルループなので、
  * 解析は detectCps → 失敗時 SamplePitchUtil.loopCps(ループ因数分解、QSoundで実証)。
@@ -10665,7 +10665,7 @@
         seq: 0, physStart: 0, smpLen: 0, loopOff: 0, lenSecEst: 0 });
       this.curSlot = 0;
       this.curAddr = 0;
-      this.bankL = 0; this.bankR = 0;
+      this.bankL = 0; this.bankR = 0; this.bankPage = 0; this._sawBankR = false;
       this.bankingEnabled = false;
       this.bankFromCommand = false;
       this.cyc = 0;
@@ -10690,20 +10690,20 @@
     // 本物の0xC3が来た曲(Model 1/2等)は探索しない(空=本当に無音データかもしれないため)。
     _findAutoBank(start, len) {
       const rom = this.rom;
-      const off = start & 0x7FFFF;
-      const density = (base) => {
-        if (base + off >= rom.length) return -1;
+      const off = start & 0xFFFFF; // ページ基底からの相対(A19はアドレス側が供給)
+      const density = (page) => {
+        if (page + off >= rom.length) return -1;
         let nz = 0;
         const n = Math.min(len, 2048);
-        for (let i = 0; i < n; i += 16) if (rom[base + off + i]) nz++;
+        for (let i = 0; i < n; i += 16) if (rom[page + off + i]) nz++;
         return nz;
       };
-      let best = -1, bestBase = -1;
-      for (let base = 0; base + 0x80000 <= rom.length; base += 0x80000) {
-        const d = density(base);
-        if (d > best) { best = d; bestBase = base; }
+      let best = -1, bestPage = -1;
+      for (let page = 0; page + 0x80000 <= rom.length; page += 0x80000) {
+        const d = density(page);
+        if (d > best) { best = d; bestPage = page; }
       }
-      return best > 8 ? bestBase : -1; // それらしいデータが無ければ諦める
+      return best > 8 ? bestPage : -1; // それらしいデータが無ければ諦める
     }
     _autoBankAtKeyon(c) {
       if (this.bankFromCommand || !this.rom || this.rom.length <= 0x200000) return;
@@ -10713,26 +10713,40 @@
       const n = Math.min(c.smpLen, 2048);
       for (let i = 0; i < n; i += 16) if (this.rom[c.physStart + i]) nz++;
       if (nz > 8) return;
-      const base = this._findAutoBank(c.start, c.smpLen);
-      if (base < 0) return;
-      if (c.start & 0x080000) this.bankR = base; else this.bankL = base;
+      const page = this._findAutoBank(c.start, c.smpLen);
+      if (page < 0) return;
+      this.bankPage = page;
       this.bankingEnabled = true;
       c.physStart = this._mapAddr(c.start);
     }
 
-    /** セガバンキング(VGM 0xC3): bit0=Lバンク(0x100000-0x17FFFF)、bit1=Rバンク(0x180000-) */
+    /*
+     * セガバンキング(VGM 0xC3 cc bb aa)。cc の bit0/bit1 で2つのバンク値が来るが、
+     * ★実ログでは両者は必ず「同じ1MBページの下半分/上半分」で、別ページを指すことはない
+     * (手元コーパス175曲の内訳: cc3=1つの値を両方に 136曲、cc1=X+0x80000 & cc2=X 22曲、
+     * cc1=0(=上半分を使わない) & cc2=X 17曲)。したがって窓(0x100000-0x1FFFFF)の写像は
+     * **1MBページ基底 + アドレス下位20bit** が正しく、A19(どちらの半分か)はアドレス自身が供給する。
+     * MAME/VGMPlay 式の「bit19でL/Rを選び bank|(addr&0x7FFFF)」にすると、cc3(Model 1/2)の曲で
+     * 上半分のサンプルが全部下半分へ落ち、別の音が鳴る(Daytona USAで発覚)。
+     * 実測: 窓内サンプル1279個のうち写像先にデータがあるのは本方式1279 / 旧方式841。
+     * ページ基底は cc bit1(下半分側)の値を採り、bit1が一度も来ていない間だけ bit0 を使う。
+     */
     bankWrite(sel, val) {
-      if (sel & 1) this.bankL = (val << 16) >>> 0;
-      if (sel & 2) this.bankR = (val << 16) >>> 0;
+      const base = (val << 16) >>> 0;
+      if (sel & 1) this.bankL = base;
+      if (sel & 2) { this.bankR = base; this._sawBankR = true; }
+      if ((sel & 2) || !this._sawBankR) this.bankPage = base;
       this.bankingEnabled = true;
       this.bankFromCommand = true; // 本物の0xC3がある曲では遅延自動バンク探索をしない
     }
     // 論理→物理アドレス。★バンキングは0xC3書込みがあった曲だけ有効(VGMPlayのSegaBanking
     // フラグ相当)。サンプルアドレスは22bit=4MB直接参照でき、OutRunners等はバンク無しで
     // 0x100000以上を直に指す。無条件適用するとbank=0の別領域を読んで無音/ゴミになる。
+    // 窓は 0x100000-0x1FFFFF の1MBだけ(MAMEの &0x1FFFFF 相当。手元コーパスに
+    // 0x200000以上を開始アドレスに持つサンプルは1つも無い)。
     _mapAddr(addr) {
-      if (this.bankingEnabled && addr >= 0x100000) {
-        return ((addr & 0x080000) ? this.bankR : this.bankL) | (addr & 0x7FFFF);
+      if (this.bankingEnabled && addr >= 0x100000 && addr < 0x200000) {
+        return (this.bankPage + (addr & 0xFFFFF)) >>> 0;
       }
       return addr;
     }
@@ -13779,6 +13793,11 @@
   function headerPreviewBtnHtml() {
     return `<button type="button" class="kbd-preview-btn" aria-label="${T('割当先の音で聴く')}">\u{1F3A7}</button>`;
   }
+  // 試聴ボタンの右に出す、割当表示ONの間だけのモード表示(ユーザー指示 2026-09-12)。
+  // 置き場は借用先列(230px)の余白の中なので、列幅も行との縦揃えも変わらない
+  function headerAssignModeHtml() {
+    return `<span class="kbd-h-assign-mode">${T('チャンネル別割り当てモード')}</span>`;
+  }
   // 見出しの mute 列に置く一括ミュートボタン。全chミュートでなければ全ミュート、
   // 全ミュート済みなら全解除(トグル)。
   function headerMuteAllBtnHtml() {
@@ -15990,6 +16009,13 @@
         if (Number.isFinite(fh) && fh >= 48) this._fileInfoHeight = fh;
         this._fileInfoCollapsed = localStorage.getItem('mml_kbdFileInfoCollapsed') === '1';
       } catch (e) { /* ignore */ }
+      // 音源(チップ)ごとのch一覧の折りたたみ。キーは見出し文字列(getChannelDisplay().header)
+      // そのもの。音源単位で覚えておきたい設定なので曲やフォーマットをまたいで残す
+      this._chipCollapsed = new Set();
+      try {
+        const raw = JSON.parse(localStorage.getItem('mml_kbdChipCollapsed') || '[]');
+        if (Array.isArray(raw)) this._chipCollapsed = new Set(raw.filter(v => typeof v === 'string'));
+      } catch (e) { /* ignore */ }
       this._fileInfoTitleKey = '';  // 見出しの原文(日本語)。言語切替のたびにT()で引き直す
       this._fileInfoNodes = [];     // main.jsから預かった表示要素(#xxxFileHeader / #xxxFileStatus)
       this._build();
@@ -16161,7 +16187,7 @@
         headerAssignBtnHtml() +
         headerMuteAllBtnHtml() +
         `<span class="kbd-h-name">ch</span>` +
-        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}</span>` +
+        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}${headerAssignModeHtml()}</span>` +
         `<span class="kbds-h-lr kbds-h-l">L</span>` +
         `<span class="kbds-h-lr">R</span>` +
         headerVolResetBtnHtml() +
@@ -16210,7 +16236,7 @@
         headerAssignBtnHtml() +
         headerMuteAllBtnHtml() +
         `<span class="kbd-h-name">ch</span>` +
-        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}</span>` +
+        `<span class="kbd-h-assign">${T('借用先')}${headerPreviewBtnHtml()}${headerAssignModeHtml()}</span>` +
         `<span class="kbds-h-lr kbds-h-l">L</span>` +
         `<span class="kbds-h-lr">R</span>` +
         headerVolResetBtnHtml() +
@@ -16910,6 +16936,13 @@
       el.title = (list && list.listName ? list.listName + '\n' : '') + name + (pickable ? '\n' + T('クリックで曲を選ぶ') : '');
     }
     refreshSourceName() { this._renderSourceName(); }
+    // 今表示している曲の名前(タイトル行のファイル名ボタンと同じ文字列)。
+    // ミニ操作窓の見出しと Media Session の曲名に使う
+    getSourceName() {
+      const info = this._sourceInfo;
+      const list = (info && this.onSourceListRequest) ? (this.onSourceListRequest() || null) : null;
+      return (list && list.name) || (info && info.name) || '';
+    }
     _openSourcePopover() {
       this._closeSourcePopover();
       const list = this.onSourceListRequest ? this.onSourceListRequest() : null;
@@ -17013,6 +17046,45 @@
       this._renderRepeatBtn();
     }
     getRepeatMode() { return this._repeatMode; }
+
+    // ── ミニ操作窓(src/ui/miniTransport.js)から使う公開API ────────────────
+    // 小窓はタイトル行のボタン群と同じ操作を提供するが、DOMは別に作るので
+    // 「今の見た目」と「切り替え方」だけをここから渡す(状態の持ち主はこのクラスのまま)。
+    getRepeatIcon() {
+      const info = REPEAT_ICONS[this._repeatMode] || REPEAT_ICONS.next;
+      return { svg: info.svg, label: info.label() };
+    }
+    cycleRepeatMode() {
+      const i = REPEAT_MODES.indexOf(this._repeatMode);
+      this.setRepeatMode(REPEAT_MODES[(i + 1) % REPEAT_MODES.length]);
+      if (this.onRepeatModeChange) this.onRepeatModeChange(this._repeatMode);
+      return this._repeatMode;
+    }
+    // 今表示しているチャンネル行のミュート状態。ALL行は含めない
+    getMuteRows() {
+      const spc = this._mode === 'spc';
+      const rows = (spc ? this._spcRowEls : this._rowEls).filter(el => !el.isAllRow && el.checkbox);
+      // 色は行の丸(.kbd-dot)に実際に出ている値をそのまま渡す。ユーザーが色を
+      // 変えた場合もこれで追随する(_getColorの上書きが既に入っているため)
+      return rows.map((el) => {
+        const dot = el.row && el.row.querySelector('.kbd-dot');
+        return {
+          id: el.id, label: el.id, muted: !el.checkbox.checked,
+          color: (dot && dot.style.background) || '',
+          chip: el.chip || '',
+        };
+      });
+    }
+    // 行のミュートを反転する。実体は行のチェックボックスを押すのと同じ経路を通すので、
+    // SPC(onSpcMuteChange)との分岐もチェックボックス側のハンドラがそのまま面倒を見る
+    toggleMuteRow(id) {
+      const all = this._rowEls.concat(this._spcRowEls);
+      const el = all.find(x => x.id === id && x.checkbox);
+      if (!el) return false;
+      el.checkbox.checked = !el.checkbox.checked;
+      el.checkbox.dispatchEvent(new Event('change'));
+      return true;
+    }
 
     _renderRepeatBtn() {
       const b = this._repeatBtnEl;
@@ -17462,8 +17534,12 @@
       fi.style.width = '';
       fi.style.height = '';
       // 畳んだ間、およびサウンドファイルをまだ開いていない間(案内文1行だけ)は中身なりの
-      // 大きさにする。MMLしか使わない人の鍵盤表示から、空のペインが場所を取らないように
-      if (collapsed || !(this._fileInfoNodes || []).length) return;
+      // 大きさにする。MMLしか使わない人の鍵盤表示から、空のペインが場所を取らないように。
+      // ★flex:'none'(縮まない)まで指定すること。このペインは一覧の列(.kbd-left)の中で唯一
+      //   flex-shrinkが効く箱なので、ch数の多い曲(VGMのNamco System 2で33行など)で
+      //   一覧が縦に溢れると、見出し1行ぶんの高さごと0まで潰されて消えてしまう
+      //   (「畳むと畳むボタンの行まで消える」ユーザー報告 2026-09-12)
+      if (collapsed || !(this._fileInfoNodes || []).length) { fi.style.flex = 'none'; return; }
       // 左右に並ぶ置き場は幅を、上下に積む置き場は高さをスプリッターの値で固定する
       const sideways = place === 'left' || place === 'right' || (place === 'bottom' && this._bigWaveBelow());
       fi.style.flex = 'none';
@@ -18536,7 +18612,10 @@
         el.letter = el.target === 'skip' ? '' : plan.letterOfTarget(el.target);
         el.partEl.textContent = el.letter || (editable ? '—' : '');
         el.partEl.classList.toggle('kbd-part--custom', custom);
-        el.row.classList.toggle('kbd-ch-row--skip', editable && el.target === 'skip');
+        // スキップ行の減光は「割当表示ON(=借用先を編集している最中)」の間だけ。割当表示を
+        // 切ったら、割当が無い行も普通の明るさに戻す(減光したままだと、ただ曲を聴いている間も
+        // 半分の行が沈んで見える。ユーザー指示 2026-09-12)
+        el.row.classList.toggle('kbd-ch-row--skip', this._assignMode && editable && el.target === 'skip');
         // DPCMは複数chをまとめて載せる先なので重複扱いにしない(上の MULTI_SOURCE_TARGETS 参照)
         const dup = editable && el.target !== 'skip' && !MULTI_SOURCE_TARGETS.has(el.target) && count[el.target] > 1;
         el.row.classList.toggle('kbd-ch-row--conflict', dup);
@@ -18815,6 +18894,40 @@
       }
     }
 
+    // 音源(チップ)単位でch一覧を開閉する。見出しクリックから呼ばれ、状態はlocalStorageへ。
+    // ch行を隠すだけで、ミュート・音量・ピアノロールのレーンには一切触れない
+    // (「見えていないチャンネルが勝手に黙る」を避けるため)。
+    _toggleChipCollapse(chip) {
+      if (!chip) return;
+      if (this._chipCollapsed.has(chip)) this._chipCollapsed.delete(chip);
+      else this._chipCollapsed.add(chip);
+      try {
+        localStorage.setItem('mml_kbdChipCollapsed', JSON.stringify([...this._chipCollapsed]));
+      } catch (e) { /* ignore */ }
+      this._applyChipCollapse();
+    }
+
+    // 折りたたみ状態を現在の行へ反映する(行の再構築後と開閉のたび)。畳んだ音源の見出しには
+    // 隠れているch数を出し、行の更新はupdate()側で丸ごと省く(el.collapsed)
+    _applyChipCollapse() {
+      const groups = this._rowsInnerEl.querySelectorAll('.kbd-chip-group');
+      for (const group of groups) {
+        const chip = group.dataset.chip || '';
+        const collapsed = !!chip && this._chipCollapsed.has(chip);
+        group.classList.toggle('kbd-chip-group--collapsed', collapsed);
+        const tog = group.querySelector('.kbd-chip-toggle');
+        if (tog) tog.textContent = collapsed ? '▶' : '▼';
+        const count = group.querySelector('.kbd-chip-count');
+        if (count) count.textContent = T('({n}ch)', { n: group.querySelectorAll('.kbd-ch-row').length });
+      }
+      for (const el of this._rowEls) {
+        const collapsed = !!el.chip && this._chipCollapsed.has(el.chip);
+        // 畳んでいる間は更新を止めているので、開いた行は次のupdate()で必ず描き直させる
+        if (el.collapsed && !collapsed) el.waveSig = '';
+        el.collapsed = collapsed;
+      }
+    }
+
     _rebuildRows(channels) {
       this._rowsInnerEl.innerHTML = '';
       this._rowEls = [];
@@ -18833,8 +18946,22 @@
           this._rowsInnerEl.appendChild(group);
           if (disp.header) {
             const headerRow = document.createElement('div');
-            headerRow.className = 'kbd-chip-header';
-            headerRow.textContent = disp.header;
+            headerRow.className = 'kbd-chip-header kbd-chip-header--toggle';
+            headerRow.title = T('クリックでこの音源のch一覧を開閉');
+            // 見出しをクリックするとこの音源のch行だけを畳む(音源ごとの状態はlocalStorageへ保存)。
+            // 畳んだ側はch数だけを見出しに出し、行の更新(波形描画など)もupdate()側で省く
+            group.dataset.chip = disp.header;
+            const tog = document.createElement('span');
+            tog.className = 'kbd-chip-toggle';
+            const label = document.createElement('span');
+            label.className = 'kbd-chip-label';
+            label.textContent = disp.header;
+            const count = document.createElement('span');
+            count.className = 'kbd-chip-count';
+            headerRow.appendChild(tog);
+            headerRow.appendChild(label);
+            headerRow.appendChild(count);
+            headerRow.addEventListener('click', () => this._toggleChipCollapse(disp.header));
             // チャンネルプール/ペア交互割当のチップ: 表示モード切替(実機スロット=素材のまま /
             // 合成ch=割当逆算)。行構成は同じでデータ系列だけが替わる。見た目は2状態の
             // トグルスイッチ(クリックで切替、点灯側が現在モード)。
@@ -18856,7 +18983,8 @@
               };
               sw._paint = paint; // setPoolModes()からの再描画用
               paint();
-              sw.addEventListener('click', () => {
+              sw.addEventListener('click', (e) => {
+                e.stopPropagation(); // 見出しクリック(折りたたみ)と二重に反応させない
                 const mode = (this._poolModes[disp.pool] || 'logical') === 'logical' ? 'phys' : 'logical';
                 this._poolModes[disp.pool] = mode;
                 paint();
@@ -18956,6 +19084,8 @@
         this._rowEls.push({
           row,
           id: ch.id,
+          chip: lastHeader || '', // この行が属する音源の見出し(折りたたみ判定用)
+          collapsed: false,
           isAllRow: !!ch.isAllRow,
           volBar: row.querySelector('.kbd-vol-bar'),
           volNum: row.querySelector('.kbd-vol-num'),
@@ -18981,6 +19111,7 @@
           target: ch.target,
         });
       }
+      this._applyChipCollapse(); // 音源ごとの折りたたみ状態を新しい行へ反映
       // 大波形に表示するchを新しい一覧に合わせる(SPCモード中はSPC側の一覧が表示中なので触らない)
       if (this._mode !== 'spc') {
         this._consumePendingSelectionReset(this._rowEls.filter(el => el.waveCanvas).map(el => el.id));
@@ -19230,6 +19361,10 @@
       for (let i = 0; i < channels.length && i < this._rowEls.length; i++) {
         const ch = channels[i];
         const el = this._rowEls[i];
+
+        // 音源ごと折りたたみで隠れている行は見えないので、波形アイコンの描画ごと省く
+        // (鍵盤・ピアノロールは channels から直接描くのでここを飛ばしても欠けない)
+        if (el.collapsed) continue;
 
         // L/R列(SPCのステレオパン表示と同じ考え方、色もSPCの.kbds-lrに合わせグレー固定)。
         // panL/panRを持つch(HES: ALL行の$0801, 各chの$0805。GBS: ALL行のNR50, 各chのNR51)
@@ -20193,13 +20328,17 @@
  *     'used' … 割り当てたスロットのうち一番大きい番号を使う(ch1+ch8なら8、ch2+ch6なら6)。
  *       大きい波形を使いたい・音量を出したい・高い音を出したいときはこちら。
  *     ★nsf2mmlだけは対象外。元がN163のネイティブ変換で、実効ch数は元の曲が決めているため。
- *   N163_WAVE … N163内蔵RAM(波形に使えるのは 128-8*有効ch数 バイト)に波形が収まらないときの扱い。
- *     'fit'(既定) … 収まるまで波形長を半分ずつ落とす(32→16→8→4サンプル)。★曲全体を一律に
- *       落とすのではなく「あふれた瞬間に居る波形」を大きい順に、必要な数だけ縮める。縮めた
- *       ぶんはヘッダコメントに明記する。8ch使う曲(1chあたり8バイト=16サンプルが上限)の
- *       アーケード系VGMなど、実機のN163曲でも普通に行う詰め方。
- *     'keep' … 元の波形長のまま出す。収まらない曲はコンパイルエラーで再生も書き出しも
- *       できないが、本家ppmckへ持って行って手で詰め直したい場合はこちら。
+ *   N163_WAVE … 波形長を自動で縮めるかどうか。縮めると2つの制約が同時にゆるむ。
+ *     (a) 内蔵RAM … 波形に使えるのは 128-8*有効ch数 バイトだけ
+ *     (b) 音域   … freqReg = freq*15*65536*波形長*ch数/CPU が18bitを超える音は鳴らない
+ *                  (32サンプル・8chなら a+6 が上限。波形を半分にすれば上限は1オクターブ上がる)
+ *     'both'(既定) … (a)と(b)の両方に収まるように縮める。音域の詰め直しは「音域外の音符が
+ *       実際に使っている @N」だけを対象にする(曲全体を一律に落とさない)。
+ *     'fit' … (a)のRAMだけ見る(従来の既定)。音域外の音符はコンパイル時に警告付きで無音になる。
+ *     'keep' … 何も縮めない。RAMに収まらない曲はコンパイルエラーで再生も書き出しもできないが、
+ *       本家ppmckへ持って行って手で詰め直したい場合はこちら。
+ *     ★どの場合も「あふれた瞬間に居る波形」を大きい順に必要な数だけ縮め、縮めたぶんは
+ *       ヘッダコメントに明記する。同じ @N を他のチャンネルが使っていればそちらの音色も鈍くなる。
  *
  * DPCM(打楽器)キー(2026-09-05、変換設定ダイアログからドラム(DPCM)パネル最下段へ移動):
  *   DMC_RATE  … サンプルごとのDMCレート指定が「自動」のときに使うレート。DMCレート表
@@ -20318,7 +20457,7 @@
   MML.Convert.DPCM_KEYS = DPCM_KEYS;
   MML.Convert.DPCM_DEFAULTS = DPCM_DEFAULTS;
   // N163内蔵RAMに波形が収まらないときの扱い(冒頭コメント参照)
-  const N163_WAVE_VALUES = ['fit', 'keep'];
+  const N163_WAVE_VALUES = ['both', 'fit', 'keep'];
   MML.Convert.N163_WAVE_VALUES = N163_WAVE_VALUES;
   // N163の実効チャンネル数の決め方(冒頭コメント参照)
   const N163_CH_VALUES = ['fixed8', 'used'];
@@ -20349,12 +20488,12 @@
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
                 SHAPE_REST: false, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
-                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit', N163_CH: 'fixed8',
+                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'fixed8',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
                 SHAPE_REST: true, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
-                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'fit', N163_CH: 'fixed8',
+                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'fixed8',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
   };
   MML.Convert.CMD_PRESETS = PRESETS;

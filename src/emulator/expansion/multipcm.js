@@ -26,9 +26,9 @@
  *   (アタックms、ディケイ系は×14.32833)、レート=4×値+キースケール(RC≠15のとき2×RC+oct)。
  *   減衰ドメインは線形インデックス0-1023(=0〜-96dBを指数変換)、DLは3dB/段。
  * VGM: ROMはデータブロック0x89(デュアルはサイズbit31)、ヘッダ0x88。
- *   セガバンキング: コマンド **0xC3 cc bb aa**(値=aabb、ccのbit0=Lバンク/bit1=Rバンク、
- *   bit7=デュアル2個目)。アドレス0x100000-0x1FFFFFの窓をbit19で2分し、
- *   物理 = bank(値<<16) | (addr & 0x7FFFF)(VGMPlay multipcm.c準拠)。
+ *   セガバンキング: コマンド **0xC3 cc bb aa**(値=aabb、ccのbit0/bit1=バンク2本、
+ *   bit7=デュアル2個目)。アドレス0x100000-0x1FFFFFの窓に対し
+ *   物理 = 1MBページ基底(値<<16) + (addr & 0xFFFFF)。bankWrite()のコメント参照。
  *
  * ★ピッチ: F-number/octレジスタで1サンプルを音階演奏(C140系)+全サンプルループなので、
  * 解析は detectCps → 失敗時 SamplePitchUtil.loopCps(ループ因数分解、QSoundで実証)。
@@ -87,7 +87,7 @@
         seq: 0, physStart: 0, smpLen: 0, loopOff: 0, lenSecEst: 0 });
       this.curSlot = 0;
       this.curAddr = 0;
-      this.bankL = 0; this.bankR = 0;
+      this.bankL = 0; this.bankR = 0; this.bankPage = 0; this._sawBankR = false;
       this.bankingEnabled = false;
       this.bankFromCommand = false;
       this.cyc = 0;
@@ -112,20 +112,20 @@
     // 本物の0xC3が来た曲(Model 1/2等)は探索しない(空=本当に無音データかもしれないため)。
     _findAutoBank(start, len) {
       const rom = this.rom;
-      const off = start & 0x7FFFF;
-      const density = (base) => {
-        if (base + off >= rom.length) return -1;
+      const off = start & 0xFFFFF; // ページ基底からの相対(A19はアドレス側が供給)
+      const density = (page) => {
+        if (page + off >= rom.length) return -1;
         let nz = 0;
         const n = Math.min(len, 2048);
-        for (let i = 0; i < n; i += 16) if (rom[base + off + i]) nz++;
+        for (let i = 0; i < n; i += 16) if (rom[page + off + i]) nz++;
         return nz;
       };
-      let best = -1, bestBase = -1;
-      for (let base = 0; base + 0x80000 <= rom.length; base += 0x80000) {
-        const d = density(base);
-        if (d > best) { best = d; bestBase = base; }
+      let best = -1, bestPage = -1;
+      for (let page = 0; page + 0x80000 <= rom.length; page += 0x80000) {
+        const d = density(page);
+        if (d > best) { best = d; bestPage = page; }
       }
-      return best > 8 ? bestBase : -1; // それらしいデータが無ければ諦める
+      return best > 8 ? bestPage : -1; // それらしいデータが無ければ諦める
     }
     _autoBankAtKeyon(c) {
       if (this.bankFromCommand || !this.rom || this.rom.length <= 0x200000) return;
@@ -135,26 +135,40 @@
       const n = Math.min(c.smpLen, 2048);
       for (let i = 0; i < n; i += 16) if (this.rom[c.physStart + i]) nz++;
       if (nz > 8) return;
-      const base = this._findAutoBank(c.start, c.smpLen);
-      if (base < 0) return;
-      if (c.start & 0x080000) this.bankR = base; else this.bankL = base;
+      const page = this._findAutoBank(c.start, c.smpLen);
+      if (page < 0) return;
+      this.bankPage = page;
       this.bankingEnabled = true;
       c.physStart = this._mapAddr(c.start);
     }
 
-    /** セガバンキング(VGM 0xC3): bit0=Lバンク(0x100000-0x17FFFF)、bit1=Rバンク(0x180000-) */
+    /*
+     * セガバンキング(VGM 0xC3 cc bb aa)。cc の bit0/bit1 で2つのバンク値が来るが、
+     * ★実ログでは両者は必ず「同じ1MBページの下半分/上半分」で、別ページを指すことはない
+     * (手元コーパス175曲の内訳: cc3=1つの値を両方に 136曲、cc1=X+0x80000 & cc2=X 22曲、
+     * cc1=0(=上半分を使わない) & cc2=X 17曲)。したがって窓(0x100000-0x1FFFFF)の写像は
+     * **1MBページ基底 + アドレス下位20bit** が正しく、A19(どちらの半分か)はアドレス自身が供給する。
+     * MAME/VGMPlay 式の「bit19でL/Rを選び bank|(addr&0x7FFFF)」にすると、cc3(Model 1/2)の曲で
+     * 上半分のサンプルが全部下半分へ落ち、別の音が鳴る(Daytona USAで発覚)。
+     * 実測: 窓内サンプル1279個のうち写像先にデータがあるのは本方式1279 / 旧方式841。
+     * ページ基底は cc bit1(下半分側)の値を採り、bit1が一度も来ていない間だけ bit0 を使う。
+     */
     bankWrite(sel, val) {
-      if (sel & 1) this.bankL = (val << 16) >>> 0;
-      if (sel & 2) this.bankR = (val << 16) >>> 0;
+      const base = (val << 16) >>> 0;
+      if (sel & 1) this.bankL = base;
+      if (sel & 2) { this.bankR = base; this._sawBankR = true; }
+      if ((sel & 2) || !this._sawBankR) this.bankPage = base;
       this.bankingEnabled = true;
       this.bankFromCommand = true; // 本物の0xC3がある曲では遅延自動バンク探索をしない
     }
     // 論理→物理アドレス。★バンキングは0xC3書込みがあった曲だけ有効(VGMPlayのSegaBanking
     // フラグ相当)。サンプルアドレスは22bit=4MB直接参照でき、OutRunners等はバンク無しで
     // 0x100000以上を直に指す。無条件適用するとbank=0の別領域を読んで無音/ゴミになる。
+    // 窓は 0x100000-0x1FFFFF の1MBだけ(MAMEの &0x1FFFFF 相当。手元コーパスに
+    // 0x200000以上を開始アドレスに持つサンプルは1つも無い)。
     _mapAddr(addr) {
-      if (this.bankingEnabled && addr >= 0x100000) {
-        return ((addr & 0x080000) ? this.bankR : this.bankL) | (addr & 0x7FFFF);
+      if (this.bankingEnabled && addr >= 0x100000 && addr < 0x200000) {
+        return (this.bankPage + (addr & 0xFFFFF)) >>> 0;
       }
       return addr;
     }
