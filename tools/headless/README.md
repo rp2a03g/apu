@@ -5,14 +5,15 @@
 `src/` は全ファイルが `(function(global){...})(window)` の素朴なIIFEで、単一グローバル
 `MML` にぶら下がるだけの構造(file:// 直開きを守るため ESM を使っていない)。
 そのおかげで「`index.html` の `<script>` を書かれた順に eval するだけ」でブラウザと
-同じ状態を Node 上に再現できる。118本すべてが 0.2 秒で読み込める。
+同じ状態を Node 上に再現できる。全168本が0.2秒ほどで読み込める。
 
 ## 前提
 
-Node.js が必要(`C:\Users\user\nodejs\node.exe`)。パスを通していないシェルからは
+Node.js が必要(依存パッケージは無し)。パスを通していないシェルからは、
+node.exe を置いた場所を先に通しておく。
 
 ```bash
-export PATH="$PATH:/c/Users/user/nodejs"
+export PATH="$PATH:/path/to/nodejs"
 ```
 
 ## ファイル
@@ -39,7 +40,7 @@ node tools/headless/load.js
 ### 1曲変換
 
 ```bash
-node tools/headless/convert.js "C:/Users/user/Desktop/emu sound/nsf/Babel no Tou (1986-07-18)(Namco).nsf" --sec 15
+node tools/headless/convert.js "path/to/song.nsf" --sec 15
 ```
 
 `--song N` で曲番号(省略時はヘッダの宣言値)、`-o out.mml` でファイル出力、
@@ -56,14 +57,14 @@ hes は「トラック番号そのもの」(HESの `firstTrack` は0/1始まり�
 ### 一括回帰テスト
 
 ```bash
-node tools/headless/regress.js --corpus "C:/Users/user/Desktop/emu sound/nsf" --update
+node tools/headless/regress.js --corpus "path/to/corpus/nsf" --update
 ```
 
 でベースラインを作り、改修後に `--update` 無しで実行すると、出力が変わった曲だけが
 列挙される(変化ありなら exit 1)。
 
 ```bash
-node tools/headless/regress.js --corpus "C:/Users/user/Desktop/emu sound/nsf"
+node tools/headless/regress.js --corpus "path/to/corpus/nsf"
 ```
 
 - `--sec N` … 1曲あたりの変換秒数(既定15)
