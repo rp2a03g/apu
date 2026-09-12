@@ -3725,6 +3725,13 @@
       el.title = (list && list.listName ? list.listName + '\n' : '') + name + (pickable ? '\n' + T('クリックで曲を選ぶ') : '');
     }
     refreshSourceName() { this._renderSourceName(); }
+    // 今表示している曲の名前(タイトル行のファイル名ボタンと同じ文字列)。
+    // ミニ操作窓の見出しと Media Session の曲名に使う
+    getSourceName() {
+      const info = this._sourceInfo;
+      const list = (info && this.onSourceListRequest) ? (this.onSourceListRequest() || null) : null;
+      return (list && list.name) || (info && info.name) || '';
+    }
     _openSourcePopover() {
       this._closeSourcePopover();
       const list = this.onSourceListRequest ? this.onSourceListRequest() : null;
@@ -3828,6 +3835,45 @@
       this._renderRepeatBtn();
     }
     getRepeatMode() { return this._repeatMode; }
+
+    // ── ミニ操作窓(src/ui/miniTransport.js)から使う公開API ────────────────
+    // 小窓はタイトル行のボタン群と同じ操作を提供するが、DOMは別に作るので
+    // 「今の見た目」と「切り替え方」だけをここから渡す(状態の持ち主はこのクラスのまま)。
+    getRepeatIcon() {
+      const info = REPEAT_ICONS[this._repeatMode] || REPEAT_ICONS.next;
+      return { svg: info.svg, label: info.label() };
+    }
+    cycleRepeatMode() {
+      const i = REPEAT_MODES.indexOf(this._repeatMode);
+      this.setRepeatMode(REPEAT_MODES[(i + 1) % REPEAT_MODES.length]);
+      if (this.onRepeatModeChange) this.onRepeatModeChange(this._repeatMode);
+      return this._repeatMode;
+    }
+    // 今表示しているチャンネル行のミュート状態。ALL行は含めない
+    getMuteRows() {
+      const spc = this._mode === 'spc';
+      const rows = (spc ? this._spcRowEls : this._rowEls).filter(el => !el.isAllRow && el.checkbox);
+      // 色は行の丸(.kbd-dot)に実際に出ている値をそのまま渡す。ユーザーが色を
+      // 変えた場合もこれで追随する(_getColorの上書きが既に入っているため)
+      return rows.map((el) => {
+        const dot = el.row && el.row.querySelector('.kbd-dot');
+        return {
+          id: el.id, label: el.id, muted: !el.checkbox.checked,
+          color: (dot && dot.style.background) || '',
+          chip: el.chip || '',
+        };
+      });
+    }
+    // 行のミュートを反転する。実体は行のチェックボックスを押すのと同じ経路を通すので、
+    // SPC(onSpcMuteChange)との分岐もチェックボックス側のハンドラがそのまま面倒を見る
+    toggleMuteRow(id) {
+      const all = this._rowEls.concat(this._spcRowEls);
+      const el = all.find(x => x.id === id && x.checkbox);
+      if (!el) return false;
+      el.checkbox.checked = !el.checkbox.checked;
+      el.checkbox.dispatchEvent(new Event('change'));
+      return true;
+    }
 
     _renderRepeatBtn() {
       const b = this._repeatBtnEl;

@@ -54,8 +54,12 @@
   MML.UI.FdsWaveEditor.init(mmlSourceEl);
   MML.UI.N163WaveEditor.init(mmlSourceEl);
   MML.UI.Vrc7ToneEditor.init(mmlSourceEl);
+  MML.UI.EnvelopeEditor.init(mmlSourceEl);
   // エディタのキー操作: Tab=タブ文字(フォーカスを飛ばさない)、F5=再生/一時停止(src/ui/editorKeys.js)
-  MML.UI.EditorKeys.init(mmlSourceEl, { playPause: () => document.getElementById('btnMmlCapture').click() });
+  MML.UI.EditorKeys.init(mmlSourceEl, {
+    playPause: () => document.getElementById('btnMmlCapture').click(),
+    save: (saveAs) => saveMmlFile({ saveAs }),
+  });
 
   // MML.Mml.compile()のresult.expansionsは'dpcm'を含みうる(チャンネル文字割当等の
   // 内部処理で拡張音源と同じ優先順位機構を借用しているため)。しかしDPCMは2A03内蔵
@@ -2977,6 +2981,129 @@
     keyboardDisplay.setTransportState({ playing, canPlay, canStop, canPrevNext, canToggleSource: !!loadedSoundFormat });
     keyboardDisplay.refreshSourceName(); // 曲送り/アーカイブ選択で名前と一覧の現在位置を追随させる
     updateKeyboardExportControls();
+    updateMiniTransport({ playing, canPlay, canStop, canPrevNext, kind });
+  }
+
+  // ── ミニ操作窓(src/ui/miniTransport.js) ───────────────────────────────
+  // 外部エディタで作業中に、ブラウザを前面へ出さずに操作するための小窓。
+  // 操作は鍵盤表示タイトル行と同じ関数(keyboardDisplay.onTransport等)へ流すので、
+  // ここがやるのは「今の状態を渡す」ことだけ。
+  const MiniTransport = MML.UI.MiniTransport;
+
+  // 今鳴っている(鳴らせる)曲の名前。MML側はファイル名、ファイル側は鍵盤表示と同じ文字列
+  function currentPlaybackTitle() {
+    const kind = kbdSourceKind;
+    if (!kind || kind === 'mml') {
+      return FileSync.fileName() || currentMmlFileName || T('MML');
+    }
+    return keyboardDisplay.getSourceName() || String(kind).toUpperCase();
+  }
+
+  function updateMiniTransport(s) {
+    if (!MiniTransport) return;
+    const icon = keyboardDisplay.getRepeatIcon();
+    MiniTransport.setState({
+      playing: s.playing, canPlay: s.canPlay, canStop: s.canStop, canPrevNext: s.canPrevNext,
+      canToggleSource: !!loadedSoundFormat,
+      kind: s.kind || 'mml',
+      title: currentPlaybackTitle(),
+      repeatSvg: icon.svg, repeatLabel: icon.label,
+    });
+    // チャンネル一覧は小窓を開いているときだけ作る(毎フレーム呼ばれるため)
+    if (MiniTransport.isOpen()) MiniTransport.setChannels(keyboardDisplay.getMuteRows());
+    updateMediaSession(s.playing);
+  }
+
+  function initMiniTransport() {
+    if (!MiniTransport) return;
+    MiniTransport.init({
+      // 操作は全部、鍵盤表示タイトル行と同じ入口へ入れる(二重実装を作らない)
+      onAction: (action) => keyboardDisplay.onTransport(action),
+      onToggleSource: () => keyboardDisplay.onSourceToggle(),
+      onRepeatCycle: () => { keyboardDisplay.cycleRepeatMode(); updateKeyboardTransport(); },
+      onMuteToggle: (id) => {
+        keyboardDisplay.toggleMuteRow(id);
+        MiniTransport.setChannels(keyboardDisplay.getMuteRows());
+      },
+      makeSeekBar: () => createSeekBarInstance(),
+      // 小窓だけで別の曲へ移れるように。実体は鍵盤表示ヘッダの「ファイルを開く」と同じ
+      onOpenFile: () => keyboardDisplay.onOpenFile(),
+      onCloseChange: (open) => {
+        const b = document.getElementById('btnMiniTransport');
+        if (b) b.setAttribute('aria-pressed', open ? 'true' : 'false');
+        updateKeyboardTransport();
+      },
+      // 小窓側のタイマーから呼ばれる。本体タブが最小化されると本体のrAFは止まるので、
+      // 小窓の表示(時間・シーク位置・ボタンの状態)はこちら側から進める
+      onTick: () => {
+        const pl = currentTransportPlayer();
+        if (pl ? pl.isPlaying : transportPlaying) updateTransportUI();
+        else updateKeyboardTransport();
+      },
+    });
+    const btn = document.getElementById('btnMiniTransport');
+    if (btn) {
+      btn.addEventListener('click', async () => {
+        if (MiniTransport.isOpen()) { MiniTransport.close(); return; }
+        const res = await openMiniTransport();
+        if (res && res.unsupported) {
+          mmlFileStatus(T('このブラウザはミニ操作窓(Document Picture-in-Picture)に対応していません。'), 'error');
+        } else if (res && res.error) {
+          mmlFileStatus(T('ミニ操作窓を開けませんでした: {msg}', { msg: res.error.message || res.error.name }), 'error');
+        }
+      });
+      btn.hidden = !MiniTransport.supported();
+    }
+    // ★ここで直接 updateKeyboardTransport() を呼ばないこと。この位置はまだ初期化の途中で、
+    //   その先の currentTransportPlayer() が未初期化の kssActivePlayer 等に触れて
+    //   ReferenceError(TDZ)になる。createSeekBarInstance に同じ注意書きがあるのと同じ理由。
+    //   初期状態の反映は初期化が終わってからで間に合う
+    setTimeout(updateKeyboardTransport, 0);
+  }
+
+  // ★クリックハンドラの中から呼ぶこと。requestWindow はユーザー操作が無いと拒否される
+  // (2026-09-12 実測: NotAllowedError "Document PiP requires user activation")。
+  // このため「ウィンドウを最小化したら自動で出す」は作れない。再生を押したときに出す方式にしてある
+  async function openMiniTransport() {
+    const res = await MiniTransport.open();
+    if (res && res.ok) {
+      MiniTransport.setChannels(keyboardDisplay.getMuteRows());
+      updateKeyboardTransport();
+    }
+    return res;
+  }
+
+  // ── OSのメディアコントロール(Media Session) ──────────────────────────
+  // Windowsのメディアパネルとメディアキーからの操作を、小窓と同じ入口へ流す。
+  // 曲名もそこへ出す。file:// でも動くことは実測済み(2026-09-12)
+  let mediaSessionBound = false;
+  let lastMediaTitle = '';
+  function updateMediaSession(playing) {
+    if (!('mediaSession' in navigator)) return;
+    const ms = navigator.mediaSession;
+    if (!mediaSessionBound) {
+      mediaSessionBound = true;
+      const bind = (act, fn) => { try { ms.setActionHandler(act, fn); } catch (e) { /* 未対応のアクションは無視 */ } };
+      // 再生と一時停止は同じトグル(各形式の再生ボタンが元々トグルなので合わせる)
+      bind('play', () => keyboardDisplay.onTransport('play'));
+      bind('pause', () => keyboardDisplay.onTransport('play'));
+      bind('stop', () => keyboardDisplay.onTransport('stop'));
+      bind('previoustrack', () => keyboardDisplay.onTransport('prev'));
+      bind('nexttrack', () => keyboardDisplay.onTransport('next'));
+    }
+    const title = currentPlaybackTitle();
+    if (title && title !== lastMediaTitle) {
+      lastMediaTitle = title;
+      try {
+        ms.metadata = new MediaMetadata({
+          title,
+          artist: T('Sound Emulation Foundry'),
+          album: kbdSourceKind && kbdSourceKind !== 'mml' ? String(kbdSourceKind).toUpperCase() : 'MML',
+        });
+      } catch (e) { /* MediaMetadata が無い環境では曲名を出さないだけ */ }
+    }
+    const want = playing ? 'playing' : 'paused';
+    if (ms.playbackState !== want) ms.playbackState = want;
   }
 
   // ロール見出しの「演奏最大時間(秒)+出力形式+出力」。サウンドファイルを表示している
@@ -3319,6 +3446,28 @@
     });
   }
 
+  // ログ欄2枚(上=コンパイル/ファイル操作の結果、下=再生準備)は中身があるときだけ見せる。
+  // 空のままだと「何も出ない枠」がエディタの下に居座って場所を食うため(ユーザー指摘 2026-09-11)。
+  // 両方とも空ならスプリッターごと下ペインを畳み、エディタが高さを全部使う。
+  // 畳むのは [hidden] 属性 + style.css の .mml-log-area[hidden] 等(下ペインのdisplay:flexに勝たせる)
+  const mmlLogSplitterEl = document.getElementById('mmlLogSplitter');
+  const mmlBottomPaneEl = document.querySelector('.mml-bottom-pane');
+  function syncMmlLogVisibility() {
+    let anyContent = false;
+    for (const el of [mmlOutputEl, captureOutputEl]) {
+      const has = el.childNodes.length > 0 && el.textContent.trim().length > 0;
+      el.hidden = !has;
+      if (has) anyContent = true;
+    }
+    if (mmlBottomPaneEl) mmlBottomPaneEl.hidden = !anyContent;
+    if (mmlLogSplitterEl) mmlLogSplitterEl.hidden = !anyContent;
+  }
+  for (const el of [mmlOutputEl, captureOutputEl]) {
+    new MutationObserver(syncMmlLogVisibility)
+      .observe(el, { childList: true, characterData: true, subtree: true });
+  }
+  syncMmlLogVisibility();
+
   function renderCompileWarnings(warnings) {
     if (!warnings || !warnings.length) return '';
     return '<div class="error">' +
@@ -3427,7 +3576,9 @@
 
   // .mml/.txtを読み込んでMMLエディタへ展開する。ファイル選択ダイアログ・
   // ドラッグ&ドロップ・トップのファイルを開くアイコンの3経路から共通で呼ばれる
-  async function openMmlTextFile(file) {
+  // handle(FileSystemFileHandle)を渡すと、そのファイルを外部エディタと同期する対象として
+  // 接続する(src/ui/fileSync.js)。渡されなければ同期は切る(=ただの読み込み)
+  async function openMmlTextFile(file, handle) {
     if (!file) return false;
     if (!confirmDiscardMmlEdits()) return false;
     let text;
@@ -3448,6 +3599,7 @@
     rangeStartSec = 0;
     rangeEndSec = null;
     prepareMmlStream(true);
+    if (handle) await FileSync.attach(handle, file, text); else FileSync.detach();
     mmlFileStatus(T('MMLファイルを読み込みました: {file} ({n}バイト)',
       { file: file.name, n: text.length }), 'ok');
     return true;
@@ -3455,11 +3607,28 @@
 
   // 保存。File System Access API(showSaveFilePicker)があれば保存先とファイル名を
   // 選べる本物の保存ダイアログを出し、無いブラウザでは従来どおりダウンロードに落とす
-  async function saveMmlFile() {
+  async function saveMmlFile(opts) {
     const text = mmlSourceEl.value;
     const suggestedName = currentMmlFileName
       ? currentMmlFileName.replace(/\.[^.]*$/, '') + '.mml'
       : 'song.mml';
+    // 外部エディタと同期中のファイルがあれば、そこへ黙って上書きする(テキストエディタの
+    // 「上書き保存」と同じ挙動)。保存先を選び直したいときは opts.saveAs で下のピッカーへ回す。
+    // Chromeの書き込み権限ダイアログはこのファイルへの初回保存時に1度だけ出る
+    if (!(opts && opts.saveAs) && FileSync.isConnected()) {
+      const res = await FileSync.write(text);
+      if (res.ok) {
+        markMmlTextSynced(FileSync.fileName());
+        mmlFileStatus(T('MMLファイルを保存しました: {file} ({n}バイト)',
+          { file: FileSync.fileName(), n: text.length }), 'ok');
+        return;
+      }
+      if (res.denied) {
+        mmlFileStatus(T('書き込みが許可されなかったため保存できませんでした。'), 'error');
+        return;
+      }
+      // それ以外の失敗(ファイルが消えた等)は下の「保存先を選ぶ」経路へ落とす
+    }
     if (window.showSaveFilePicker) {
       let handle;
       try {
@@ -3477,6 +3646,8 @@
           await writable.write(new Blob([text], { type: 'text/plain;charset=utf-8' }));
           await writable.close();
           markMmlTextSynced(handle.name);
+          // 保存した先をそのまま同期対象にする(以後この曲は外部エディタと往復できる)
+          await FileSync.attach(handle, null, text);
           mmlFileStatus(T('MMLファイルを保存しました: {file} ({n}バイト)',
             { file: handle.name, n: text.length }), 'ok');
         } catch (e) {
@@ -3489,6 +3660,126 @@
     markMmlTextSynced(suggestedName);
     mmlFileStatus(T('MMLファイルを保存しました: {file} ({n}バイト)',
       { file: suggestedName, n: text.length }), 'ok');
+  }
+
+  // --- 外部テキストエディタとの同期 (src/ui/fileSync.js) ---------------------
+  // MMLの正本をディスク上の.mmlに置いたまま、使い慣れたテキストエディタで編集してもらう
+  // ための配線。ディスク側が正で、エディタ側に未保存の変更があるときだけ判断を仰ぐ。
+  // 同期の仕組み・file://での可否・権限の挙動はすべて fileSync.js 冒頭に書いてある。
+  const FileSync = MML.UI.FileSync;
+
+  // 外部で保存された本文をエディタへ反映する。「開き直し」ではなく「同じ曲の更新」なので、
+  // カーソル位置・スクロール位置・再生範囲(青/赤ハンドル)は引き継ぐ。ここが
+  // openMmlTextFileと違うところ(あちらは別の曲なので範囲をリセットする)
+  function applyExternalMmlText(text, info) {
+    const selStart = mmlSourceEl.selectionStart;
+    const selEnd = mmlSourceEl.selectionEnd;
+    const scrollTop = mmlSourceEl.scrollTop;
+    mmlSourceEl.value = text;
+    mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新
+    mmlSourceEl.setSelectionRange(Math.min(selStart, text.length), Math.min(selEnd, text.length));
+    mmlSourceEl.scrollTop = scrollTop;
+    markMmlTextSynced(info && info.name);
+    prepareMmlStream(true);
+    mmlFileStatus(T('外部の更新を取り込みました: {file} ({time})',
+      { file: (info && info.name) || '', time: new Date().toLocaleTimeString() }), 'ok');
+  }
+
+  // 衝突(外部もエディタも変わった)ときは勝手に決めずにボタンで選ばせる。
+  // ダイアログにしないのは、外部エディタで保存するたびに前面に出てくると作業を邪魔するため
+  function mmlFileConflictStatus(name) {
+    mmlOutputEl.innerHTML = '';
+    const box = document.createElement('div');
+    box.className = 'error';
+    box.textContent = T('{file} が外部で更新されましたが、エディタ側にも未保存の変更があります。',
+      { file: name }) + ' ';
+    const take = document.createElement('button');
+    take.className = 'secondary';
+    take.textContent = T('外部の内容を取り込む');
+    take.addEventListener('click', () => FileSync.acceptPending());
+    const keep = document.createElement('button');
+    keep.className = 'secondary';
+    keep.textContent = T('エディタの内容で上書き保存');
+    keep.addEventListener('click', () => saveMmlFile());
+    box.appendChild(take);
+    box.appendChild(document.createTextNode(' '));
+    box.appendChild(keep);
+    mmlOutputEl.appendChild(box);
+  }
+
+  function initMmlFileSync() {
+    const linkEl = document.getElementById('mmlFileLink');
+    const nameEl = document.getElementById('mmlFileLinkName');
+    const actionEl = document.getElementById('mmlFileLinkAction');
+    const detachEl = document.getElementById('mmlFileLinkDetach');
+    const watchEl = document.getElementById('mmlFileWatchBtn');
+    if (!linkEl) return;
+
+    let lastConflictShown = false;
+
+    function render(st) {
+      const show = st.connected || st.resumable;
+      linkEl.hidden = !show;
+      if (!show) return;
+      nameEl.textContent = st.name || st.resumableName;
+      const live = st.connected && st.watching && !st.conflict;
+      const stale = !!st.conflict || !st.connected || !!st.error;
+      linkEl.classList.toggle('is-live', live);
+      linkEl.classList.toggle('is-stale', stale);
+      if (watchEl) {
+        watchEl.setAttribute('aria-pressed', st.watchEnabled ? 'true' : 'false');
+        watchEl.title = st.watchEnabled
+          ? T('外部エディタでの保存を自動で取り込む')
+          : T('自動取り込みは停止中（再生ボタンを押したときだけ取り込みます）');
+      }
+      if (st.conflict) {
+        actionEl.hidden = false;
+        actionEl.textContent = T('取り込む');
+        linkEl.title = T('外部で更新されています');
+      } else if (!st.connected || st.error) {
+        actionEl.hidden = false;
+        actionEl.textContent = T('再接続');
+        // 再読込するとハンドルの権限が'prompt'に戻るため、復帰には必ずクリックが要る
+        linkEl.title = T('クリックすると外部ファイルとの同期を再開します');
+      } else {
+        actionEl.hidden = true;
+        linkEl.title = T('外部エディタと同期中');
+      }
+      // 衝突は出た瞬間に1度だけ説明を出す(ポーリングのたびに書き直さない)
+      if (st.conflict && !lastConflictShown) mmlFileConflictStatus(st.name);
+      lastConflictShown = st.conflict;
+    }
+
+    FileSync.init({
+      onExternalChange: applyExternalMmlText,
+      onStateChange: render,
+      // エディタ側に未保存の変更があるか。openMmlTextFile/saveMmlFileと同じ基準を使う
+      isDirty: () => lastSyncedMmlText !== null && mmlSourceEl.value !== lastSyncedMmlText,
+    });
+
+    if (watchEl) {
+      watchEl.addEventListener('click', () => FileSync.setWatchEnabled(!FileSync.isWatchEnabled()));
+    }
+    actionEl.addEventListener('click', async () => {
+      const st = FileSync.state();
+      if (st.conflict) { FileSync.acceptPending(); return; }
+      const res = await FileSync.reconnect();
+      if (!res) {
+        mmlFileStatus(T('外部ファイルへ再接続できませんでした（権限が下りなかったか、ファイルが移動/削除されています）。'), 'error');
+        return;
+      }
+      if (res.conflicted) mmlFileConflictStatus(res.name);
+    });
+    detachEl.addEventListener('click', () => {
+      // ×は接続そのものを捨てる(記憶したハンドルも消すので、再読込しても「再接続」は出ない)。
+      // 戻る道が画面から消えてしまうので、やめた瞬間にここで案内する。
+      // 一時的に止めたいだけなら⟳(自動取り込みのON/OFF)の方
+      FileSync.detach();
+      mmlFileStatus(T('外部ファイルとの同期をやめました。もう一度同期するには「開く」でファイルを選ぶか、MMLファイルをウィンドウへドロップしてください。'), '');
+    });
+    // 外部エディタから戻ってきた瞬間に見に行く(最大1秒のポーリング待ちを省くだけ)。
+    // これも自動取り込みの一部なので auto を付ける(⟳がOFFならここでは取り込まない)
+    window.addEventListener('focus', () => { FileSync.checkNow({ auto: true }); });
   }
 
   function exportMmlNsf() {
@@ -4476,17 +4767,38 @@
   // MMLエディタのファイル操作(開く/保存)。開くのは.mml/.txtのみ
   (function initMmlFileButtons() {
     const openInput = document.getElementById('mmlOpenFile');
-    document.getElementById('btnMmlOpenFile').addEventListener('click', () => openInput.click());
+    // 「開く」はまずピッカー(showOpenFilePicker)を試す。ピッカーはハンドルを返すので、
+    // そのまま外部エディタとの同期対象にできる。file://でも開けることは実測済み。
+    // ピッカーを持たないブラウザ(Firefox等)だけが従来の<input type=file>へ落ちる
+    document.getElementById('btnMmlOpenFile').addEventListener('click', async () => {
+      const res = await FileSync.pickOpen();
+      if (res.aborted) return;
+      if (res.handle) {
+        try {
+          const file = await res.handle.getFile();
+          await openMmlTextFile(file, res.handle);
+        } catch (e) {
+          mmlFileStatus(T('MMLファイルの読み込みに失敗しました: {msg}', { msg: e.message }), 'error');
+        }
+        return;
+      }
+      openInput.click();
+    });
     openInput.addEventListener('change', async () => {
       const file = openInput.files[0];
       if (file) await openMmlTextFile(file);
       openInput.value = ''; // 同じファイルを続けて開き直せるようにする
     });
-    document.getElementById('btnMmlSaveFile').addEventListener('click', saveMmlFile);
+    document.getElementById('btnMmlSaveFile').addEventListener('click', () => saveMmlFile());
     // 起動直後のサンプルMMLを「未編集」の基準にする(この状態なら確認なしで開ける)
     markMmlTextSynced('');
+    initMmlFileSync();
   })();
-  document.getElementById('btnMmlCapture').addEventListener('click', () => {
+  document.getElementById('btnMmlCapture').addEventListener('click', async () => {
+    // 再生の直前に外部ファイルを1回見に行く(自動取り込みをOFFにしていても、
+    // 再生したときの音は必ずディスク上の最新と一致させる)。同期していないときは
+    // awaitを挟まない(クリックからAudioContext.resume()までを同じタスクに保つ)
+    if (FileSync.isConnected()) await FileSync.checkNow();
     const playing = activePlayer ? activePlayer.isPlaying : transportPlaying;
     if (playing) transportPause();
     else if (!mmlPlaybackStopped) transportPlay(); // 一時停止中: 再コンパイルせずその位置から再開
@@ -4628,6 +4940,7 @@
     const inst = createSeekBarInstance();
     keyboardDisplay.setRollSeekBar(inst.wrapEl, inst.timeEl);
   }
+  initMiniTransport(); // ミニ操作窓も同じ副インスタンスを1本使うので、seekBarsが揃うここで作る
 
   // ── SPC ファイル読み込み・再生 ────────────────────────────────────
   const spcFileEl       = document.getElementById('spcFile');
@@ -7707,7 +8020,9 @@
       // 戻り値'mml'はformatToPlayFnに載っていないので、ドラッグ&ドロップでも
       // 読み込むだけで自動再生はしない(コンパイル準備まではopenMmlTextFileが行う)
       if (ext === 'mml' || ext === 'txt') {
-        return (await openMmlTextFile(file)) ? 'mml' : false;
+        // opts.handle: ドラッグ&ドロップから拾えたFileSystemFileHandle。あれば
+        // そのまま外部エディタとの同期対象になる(src/ui/fileSync.js)
+        return (await openMmlTextFile(file, opts && opts.handle)) ? 'mml' : false;
       }
       const targetInputId = formatToInputId[ext];
       if (!targetInputId) {
@@ -7775,9 +8090,15 @@
       if (dropOverlayEl) dropOverlayEl.classList.remove('visible');
       const file = e.dataTransfer.files && e.dataTransfer.files[0];
       if (!file) return;
+      // DataTransferItemはこのハンドラを抜けると無効になるので、ハンドルの取得だけは
+      // ここで同期的に始める(awaitは後でよい)。.mmlをドロップしたときに外部エディタとの
+      // 同期対象にするために使う(src/ui/fileSync.js)。取れなければ従来どおり読むだけ
+      const handlePromise = MML.UI.FileSync.handleFromDropItem(e.dataTransfer.items && e.dataTransfer.items[0]);
       // ドラッグ&ドロップは開いた直後に自動再生まで行う(ファイル選択ダイアログとの
       // 唯一の挙動差。ensureKeyboardWindowOpen/showSoundPanel等の中身はopenSoundFile側で共通)。
-      openSoundFile(file).then((ext) => {
+      Promise.resolve(handlePromise).catch(() => null).then((handle) => {
+        return openSoundFile(file, { handle: (handle && handle.kind === 'file') ? handle : null });
+      }).then((ext) => {
         const playFn = ext && formatToPlayFn[ext];
         if (playFn) playFn();
       });

@@ -303,6 +303,149 @@ header h1.app-title {
 .fw-header-extra--right {
   margin-left: auto;
 }
+
+/* ミニ操作窓(src/ui/miniTransport.js)。本体の文書で組み立て、開くときだけ
+   Document Picture-in-Picture の小窓へ移す。小窓側の文書には .mini-tp / .seek- で
+   始まる規則だけを抜き出して流し込むので、ここのセレクタ名は変えないこと */
+.mini-tp-body { margin: 0; background: var(--panel); color: var(--text); font-family: var(--sans); }
+.mini-tp {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+}
+.mini-tp-row { display: flex; align-items: center; gap: 4px; }
+/* ★.mini-tp / .mini-tp-row の display:flex は [hidden] のUA既定(display:none)より
+   強いので、hidden を付けても消えない。畳んだ行と、本体側へ戻してある小窓の中身を
+   本当に消すためにこの2行が要る(小窓を閉じているあいだ中身は本体の文書に居る) */
+.mini-tp[hidden] { display: none !important; }
+.mini-tp [hidden] { display: none !important; }
+.mini-tp-main { gap: 2px; }
+.mini-tp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+}
+.mini-tp-btn:hover:not(:disabled) { background: var(--hover-bg); }
+.mini-tp-btn:disabled { opacity: .35; cursor: default; }
+.mini-tp-btn svg { width: 18px; height: 18px; }
+.mini-tp-btn .icon-pause { display: none; }
+.mini-tp-btn.is-playing .icon-play { display: none; }
+.mini-tp-btn.is-playing .icon-pause { display: inline; }
+.mini-tp-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--control-bg);
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  cursor: pointer;
+}
+.mini-tp-badge--mml { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.mini-tp-badge:disabled { opacity: .5; cursor: default; }
+.mini-tp-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+.mini-tp-close { width: 22px; color: var(--text-muted); font-size: 14px; }
+.mini-tp-seek { gap: 6px; }
+.mini-tp-seek .seek-bar-wrap { flex: 1 1 auto; }
+.mini-tp-seek .seek-time { flex: none; color: var(--text-muted); font-family: var(--mono); font-size: 11px; }
+.mini-tp-mutes-head {
+  justify-content: flex-start;
+  padding: 1px 2px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.mini-tp-mutes-head:hover { color: var(--text); }
+.mini-tp-mutes-head.has-muted { color: var(--error); }
+.mini-tp-mutes { flex-wrap: wrap; gap: 2px; }
+.mini-tp-mute {
+  --ch-color: var(--border);
+  min-width: 22px;
+  padding: 1px 4px 1px 3px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--ch-color);
+  border-radius: 3px;
+  /* ch一覧と同じ色をうっすら敷く。多chのとき目で追えるようにするためで、
+     文字が読めなくならないよう薄めに混ぜる(色の出どころは鍵盤表示の行の丸) */
+  background: color-mix(in srgb, var(--ch-color) 18%, var(--control-bg));
+  color: var(--text);
+  font-size: 10px;
+  font-family: var(--mono);
+  cursor: pointer;
+}
+.mini-tp-mute.is-muted {
+  background: var(--surface);
+  border-left-color: var(--border);
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+.mini-tp-foot { color: var(--text-muted); font-size: 11px; cursor: pointer; }
+
+/* 外部テキストエディタと同期中のファイル名(src/ui/fileSync.js)。
+   MMLウィンドウのタイトル右隣に出る。接続が切れている/衝突しているときは色で知らせる */
+.mml-file-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 40%;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  cursor: default;
+}
+.mml-file-link-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mml-file-link.is-live { border-color: var(--ok); }
+.mml-file-link.is-stale { border-color: var(--error); color: var(--error); }
+/* 自動取り込みのON/OFF。ONのあいだだけ押し込んだ見た目にする */
+.mml-file-link-watch[aria-pressed="true"] {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: var(--on-accent);
+}
+.mml-file-link-btn {
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  line-height: 1.4;
+  padding: 0 6px;
+  cursor: pointer;
+}
+.mml-file-link-btn:hover { background: var(--accent); color: var(--on-accent); }
+.mml-file-link-detach { padding: 0 5px; }
 .float-window-header input,
 .float-window-header select {
   cursor: default;
@@ -541,6 +684,13 @@ button.secondary {
   min-height: 0;
   overflow-y: auto;
 }
+
+/* 中身が無いログ欄は畳む(空の枠がエディタの下に残らないように)。両方空なら
+   main.js の syncMmlLogVisibility が下ペインとスプリッターにも [hidden] を付ける。
+   .mml-bottom-pane は display:flex を持つので !important でUAの[hidden]規則に勝たせる */
+.mml-log-area[hidden],
+.pane-splitter[hidden],
+.mml-bottom-pane[hidden] { display: none !important; }
 
 /* --- MMLシンタックスハイライト --- */
 .mml-editor {
@@ -3234,3 +3384,39 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 .kbd-assign-tones--custom, .kbd-assign-tone--per { border-color: var(--accent) !important; }
 .kbd-assign-pop-tones { font-size: 11px; padding: 1px 8px; flex: 1; text-align: left; }
 
+
+/* ── エンベロープエディタ(src/ui/envelopeEditor.js) ───────────────────────
+   音量/音色/ピッチ/ノートの4レーンを縦に積む。1レーン = 操作バー + キャンバス + 値テキスト。
+   キャンバスはフレーム数ぶん横に伸びるので、包む側だけ横スクロールさせる */
+.env-ed { display: flex; flex-direction: column; }
+.env-ed-top { align-items: center; gap: 8px; }
+.env-ed-top label { display: flex; align-items: center; gap: 4px; }
+.env-scale { color: var(--text-muted); font-size: 10px; }
+.env-note { color: var(--text-muted); font-size: 10px; }
+
+.env-lanes { display: flex; flex-direction: column; gap: 4px; }
+.env-lane { border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; background: var(--surface); }
+.env-lane-bar { flex-wrap: wrap; gap: 4px; margin: 0 0 3px; align-items: center; }
+.env-lane-bar label { display: flex; align-items: center; gap: 3px; color: var(--text-muted); font-size: 10px; }
+.env-lane-on { color: var(--text) !important; font-size: 11px !important; }
+.env-lane-on b { color: var(--accent); font-family: var(--mono); }
+.env-lane-extra { display: flex; align-items: center; gap: 3px; }
+/* 「反映」だけは右端へ寄せて、レーンごとの押し間違いを減らす */
+.env-lane-bar .env-apply { margin-left: auto; }
+
+.env-lane-canvas-wrap { overflow-x: auto; overflow-y: hidden; }
+.env-lane-canvas {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: crosshair;
+  display: block;
+}
+.env-lane-values { max-height: 26px; }
+
+/* 対象音源にそのエンベロープが存在しないレーン(三角波の音量など)。
+   消さずに理由を出したまま薄くする */
+.env-lane--off { opacity: 0.55; }
+.env-lane-disabled { font-size: 10px; color: var(--text-muted); padding: 2px 0; }
+.env-lane--off .env-lane-canvas-wrap,
+.env-lane--off .env-lane-values { display: none; }

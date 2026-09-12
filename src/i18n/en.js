@@ -164,6 +164,44 @@
     'MMLファイルを保存しました: {file} ({n}バイト)': 'Saved MML file: {file} ({n} bytes)',
     'MMLファイルの読み込みに失敗しました: {msg}': 'Failed to open the MML file: {msg}',
     'MMLファイルの保存に失敗しました: {msg}': 'Failed to save the MML file: {msg}',
+    // ---- ミニ操作窓 (src/ui/miniTransport.js) ----
+    'ミニ操作窓（常に手前に出る小さな再生操作窓。外部エディタで作業しながら再生できます）':
+      'Mini transport (a small always-on-top window, so you can play while working in another editor)',
+    '再生操作': 'Transport',
+    'ミニ操作窓': 'Mini transport',
+    '小窓を閉じる': 'Close this window',
+    'MML再生とファイル再生を切り替える': 'Switch between MML and file playback',
+    '切り替える相手のファイルがありません': 'No sound file is open to switch to',
+    'ミュート中': 'muted',
+    'chミュート ({n}ch)': 'Channel mute ({n} ch)',
+    '{n}個ミュート中': '{n} muted',
+    'チャンネルを畳む': 'Collapse channels',
+    'チャンネルを開く': 'Show channels',
+    'このブラウザはミニ操作窓(Document Picture-in-Picture)に対応していません。':
+      'This browser does not support the mini transport (Document Picture-in-Picture).',
+    'ミニ操作窓を開けませんでした: {msg}': 'Could not open the mini transport: {msg}',
+    'Sound Emulation Foundry': 'Sound Emulation Foundry',
+    // ---- 外部テキストエディタとの同期 (src/ui/fileSync.js) ----
+    '外部エディタでの保存を自動で取り込む': 'Pick up saves made in an external editor automatically',
+    '自動取り込みは停止中（再生ボタンを押したときだけ取り込みます）':
+      'Automatic reloading is off (the file is only reloaded when you press Play)',
+    '外部ファイルとの同期をやめる（戻すには「開く」かドロップでファイルを指定し直す。一時的に止めたいだけなら左の⟳）':
+      'Stop following this file (to resume, pick it again with Open or drop it here; use the ⟳ on the left to pause instead)',
+    '外部の更新を取り込みました: {file} ({time})': 'Picked up external changes: {file} ({time})',
+    '{file} が外部で更新されましたが、エディタ側にも未保存の変更があります。':
+      '{file} changed on disk, but the editor also has unsaved changes.',
+    '外部の内容を取り込む': 'Use the file on disk',
+    'エディタの内容で上書き保存': 'Overwrite with the editor',
+    '取り込む': 'Reload',
+    '再接続': 'Reconnect',
+    '外部で更新されています': 'Changed on disk',
+    'クリックすると外部ファイルとの同期を再開します': 'Click to resume following this file',
+    '外部エディタと同期中': 'Following this file',
+    '外部ファイルへ再接続できませんでした（権限が下りなかったか、ファイルが移動/削除されています）。':
+      'Could not reconnect to the file (permission was denied, or the file was moved or deleted).',
+    '外部ファイルとの同期をやめました。もう一度同期するには「開く」でファイルを選ぶか、MMLファイルをウィンドウへドロップしてください。':
+      'Stopped following the file. To start again, pick it with Open or drop an MML file onto this window.',
+    '書き込みが許可されなかったため保存できませんでした。': 'Could not save because write permission was denied.',
     '開始点・終了点を曲の最初と最後にリセット': 'Reset start/end points to the whole song',
     '↺ 再生範囲をリセット': '↺ Reset range',
     '行番号': 'Line numbers',
@@ -1044,5 +1082,42 @@
     '書き出し完了: {file}<br>音源: {chips}': 'Exported: {file}<br>Chips: {chips}',
     '書き出し完了: {name}_dsp_log.csv<br>DSP書き込み {writes} 件 / KON {kon} 件 (先頭{sec}秒)': 'Exported: {name}_dsp_log.csv<br>{writes} DSP writes / {kon} KON events (first {sec}s)',
     '{label}書き出し中… {pct}%': 'Exporting {label}... {pct}%',
+
+    // ---- エンベロープエディタ (src/ui/envelopeEditor.js) ----
+    // チップ名(FDS/N163/FME7/VRC7)は識別子なので訳さない = キーを置かない
+    'エンベロープエディタ': 'Envelope Editor',
+    '対象音源': 'Target chip',
+    '2A03 パルス': '2A03 Pulse',
+    'VRC6 パルス': 'VRC6 Pulse',
+    'VRC6 のこぎり波': 'VRC6 Saw',
+    'MMC5 パルス': 'MMC5 Pulse',
+    '試聴ch': 'Audition ch',
+    '音量なし': 'no volume',
+    '音量 0-{max}': 'Volume 0-{max}',
+    '音量 0-{max}(実効{eff}で頭打ち)': 'Volume 0-{max} (effective ceiling {eff})',
+    '音色 0-{max}': 'Tone 0-{max}',
+    '音色エンベロープなし': 'no tone envelope',
+    'ピッチ': 'Pitch',
+    'ノート': 'Note',
+    'リリース': 'Release',
+    '長さ': 'Length',
+    '範囲': 'Range',
+    'ゲート': 'Gate',
+    'チェックを入れたレーンだけが鳴ります': 'Only the checked lanes are played',
+    '鳴る音程': 'resulting pitch',
+    '和音生成': 'Build chord',
+    '和音を半音の並びで指定します(0=音符そのもの)': 'The chord as a list of semitones (0 = the note itself)',
+    '1音あたりのフレーム数': 'Frames per chord tone',
+    '和音とフレーム数からアルペジオの表を作る': 'Build an arpeggio table from the chord and the frame count',
+    '※ループ区間の合計が{n}半音なので、ループのたびに音程がずれ続けます':
+      'Note: the loop section adds up to {n} semitones, so the pitch keeps drifting on every pass',
+    '三角波には音量制御そのものがありません(@vは使えません)':
+      'The triangle channel has no volume control at all, so @v does not apply',
+    'このチャンネルにはデューティ(音色)エンベロープがありません。波形や音色番号を持つチップ(FDS/N163/VRC7)では @@<n> は @<n> と同じ音色選択になります':
+      'This channel has no duty (tone) envelope. On chips that carry waveforms or patch numbers (FDS/N163/VRC7), @@<n> is the same tone selection as @<n>',
+    'VRC7はfnum/blockの対数的な音程表現のため、EP(生レジスタへの加算)は対象外です':
+      'VRC7 expresses pitch logarithmically as fnum/block, so EP (a raw register offset) does not apply',
+    '4つのエンベロープを同じ時間軸(横1マス=1フレーム)で編集します。テーブル定義はチャンネルに紐づかないので、目盛り・音色の段数・試聴先は「対象音源」だけで決まります(表の中身は音源を変えても書き換えません)。キャンバスはドラッグで編集、Shift+クリックでループ位置(MMLの"|")を指定します。音量と音色は赤い縦線から右がリリースの表(@vr/@@r)で、区画ごとに自分の表と1対1に対応します。ノート(@EN)はMML上は前回値からの相対値ですが、ここでは実際に鳴る音程の階段を描き、反映のときに差分へ変換します。編集はこのウィンドウの中だけで、「反映」を押すまでMML本文は変わりません。':
+      'Edit all four envelopes on one shared time axis (one cell = one frame). Table definitions are not tied to a channel, so the scale, the number of tone steps and the audition target come from "Target chip" alone; changing it never rewrites a table. Drag on the canvas to edit, and Shift+click to set the loop point (the "|" in the MML). On the volume and tone lanes everything right of the red line is the release table (@vr/@@r), and each zone maps one-to-one onto its own table. Note (@EN) is stored in the MML as a value relative to the previous frame, but here you draw the pitch staircase you actually hear and it is converted to differences on Apply. Editing stays inside this window: the MML text does not change until you press Apply.',
   });
 })(typeof window !== 'undefined' ? window : globalThis);

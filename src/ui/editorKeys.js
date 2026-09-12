@@ -16,6 +16,9 @@
  * ■ F5
  *   エディタにフォーカスがあるあいだは F5 を再生/一時停止ボタン(btnMmlCapture)に割り当てる。
  *   既定の F5(ページ再読み込み)は未保存の MML を消してしまうので止める。
+ *
+ * ■ Ctrl+S / Ctrl+Shift+S
+ *   保存 / 名前を付けて保存(opts.save(saveAs))。既定の「ページを保存」は止める。
  */
 (function (global) {
   'use strict';
@@ -78,6 +81,13 @@
       if (e.key === 'F5' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
         e.preventDefault();
         if (typeof opts.playPause === 'function') opts.playPause();
+        return;
+      }
+      // Ctrl+S = 保存。既定のブラウザ「名前を付けてページを保存」は邪魔なので止める。
+      // 外部エディタと同じ指が使えないと、外部ファイルと往復する運用で毎回つまずく
+      if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey) && !e.altKey) {
+        e.preventDefault();
+        if (typeof opts.save === 'function') opts.save(e.shiftKey); // Shift+Ctrl+S = 名前を付けて保存
       }
     });
   }

@@ -30,6 +30,12 @@
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="14" rx="1"/><path d="M3 7h14M3 11h14M3 15h14"/><rect x="5" y="4.2" width="4" height="1.8" fill="currentColor" stroke="none"/><rect x="10" y="8.2" width="5" height="1.8" fill="currentColor" stroke="none"/><rect x="6" y="12.2" width="3" height="1.8" fill="currentColor" stroke="none"/></svg>
       </button>
 
+      <!-- 常に手前に出るミニ操作窓(src/ui/miniTransport.js)。もう一度押すと閉じる。
+           非対応ブラウザではJSがこのボタンごと隠す -->
+      <button class="icon-btn" id="btnMiniTransport" title="ミニ操作窓（常に手前に出る小さな再生操作窓。外部エディタで作業しながら再生できます）" aria-label="ミニ操作窓" aria-pressed="false">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="15" height="12" rx="1.5"/><rect x="10" y="9.5" width="6.5" height="5.5" rx="1" fill="currentColor" stroke="none"/></svg>
+      </button>
+
       <span class="icon-toolbar-sep"></span>
 
       <button class="icon-btn" id="btnEditorSettings" title="設定" aria-label="設定">
@@ -51,6 +57,15 @@
     data-default-left="20" data-default-top="90" data-default-width="660" data-default-height="600">
     <div class="float-window-header">
       <span>MML作曲 &amp; 再生・シーク</span>
+      <!-- 外部テキストエディタと同期中のファイル(src/ui/fileSync.js)。
+           未接続のあいだは丸ごと非表示(見出し行を常時占有しないため、設定もこの中に畳んである) -->
+      <span class="mml-file-link" id="mmlFileLink" hidden>
+        <button class="mml-file-link-btn mml-file-link-watch" id="mmlFileWatchBtn" aria-pressed="true"
+          title="外部エディタでの保存を自動で取り込む">⟳</button>
+        <span class="mml-file-link-name" id="mmlFileLinkName"></span>
+        <button class="mml-file-link-btn" id="mmlFileLinkAction" hidden></button>
+        <button class="mml-file-link-btn mml-file-link-detach" id="mmlFileLinkDetach" title="外部ファイルとの同期をやめる（戻すには「開く」かドロップでファイルを指定し直す。一時的に止めたいだけなら左の⟳）">×</button>
+      </span>
       <div class="fw-header-extra fw-header-extra--right">
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-fdswave" title="FDS波形エディタ" aria-label="FDS波形エディタ">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 10c1.4-5 3.4-5 5 0s3.6 5 5 0 3.6-5 5 0"/></svg>
@@ -60,6 +75,9 @@
         </button>
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-vrc7tone" title="VRC7音色エディタ" aria-label="VRC7音色エディタ">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 14.5c1-7 2.4-7 3.4 0"/><path d="M5.9 14.5c1-9.5 2.4-9.5 3.4 0"/><path d="M9.3 14.5c1-5 2.4-5 3.4 0"/><path d="M12.7 14.5c1-8 2.4-8 3.4 0"/><path d="M17.5 14.5H2"/></svg>
+        </button>
+        <button class="icon-btn icon-btn-title toggle-btn" data-target="win-envelope" title="エンベロープエディタ" aria-label="エンベロープエディタ">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16V6l3 2 3-4 3 7 3-3v8"/><path d="M2 16h16"/></svg>
         </button>
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-tones" title="音色一覧" aria-label="音色一覧">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5h15M2.5 10h15M2.5 13.5h15"/><path d="M5 4.5c1.2 1.4 2.3 1.4 3.5 0s2.3-1.4 3.5 0 2.3 1.4 3.5 0" opacity=".0"/><circle cx="6" cy="6.5" r="1.1" fill="currentColor"/><circle cx="11" cy="10" r="1.1" fill="currentColor"/><circle cx="8" cy="13.5" r="1.1" fill="currentColor"/></svg>
@@ -181,6 +199,20 @@
 
   <!-- DPCMコンバータ: @DPCM<n>定義のエディタ(1定義=1行、ローカル編集→「反映」でMMLへ)。
        中身は src/ui/dpcmEditor.js が組み立てる。定義のダブルクリックでも開く -->
+  <!-- エンベロープエディタ: @v/@vr(音量) @<n>/@@r(音色) @EP(ピッチ) @EN(ノート) を
+       同じ時間軸の4レーンとしてまとめて編集・試聴する(src/ui/envelopeEditor.js)。
+       FDS/N163/VRC7エディタと同じ書き込みタイミング規約(「反映」を押すまでMMLは変わらない) -->
+  <section class="float-window" id="win-envelope"
+    data-default-left="120" data-default-top="120" data-default-width="940" data-default-height="660">
+    <div class="float-window-header">
+      <span>エンベロープエディタ</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <div id="envelopeEditor"></div>
+    </div>
+  </section>
+
   <section class="float-window" id="win-dpcm"
     data-default-left="520" data-default-top="140" data-default-width="820" data-default-height="460">
     <div class="float-window-header">
@@ -842,6 +874,7 @@
   <script src="src/ui/n163WaveEditor.js"></script>
   <script src="src/ui/vrc7ToneSolver.js"></script>
   <script src="src/ui/vrc7ToneEditor.js"></script>
+  <script src="src/ui/envelopeEditor.js"></script>
   <script src="src/ui/helpPanel.js"></script>
   <script src="src/ui/editorLineInfo.js"></script>
   <!-- リアルタイム入力(ROADMAPフェーズ3/4)の土台: メトロノームと入力レイテンシ -->
@@ -938,6 +971,8 @@
   <script src="src/ui/editorSettings.js"></script>
   <script src="src/ui/convertSettings.js"></script>
   <script src="src/ui/editorKeys.js"></script>
+  <script src="src/ui/fileSync.js"></script>
+  <script src="src/ui/miniTransport.js"></script>
   <script src="src/main.js"></script>
 </body>
 </html>
