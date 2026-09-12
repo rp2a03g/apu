@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-12 18:40:34
+ * Built by tools/build-capture-workers.ps1 at 2026-09-12 18:40:59
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-12 18:40:34';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-12 18:40:59';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -9825,6 +9825,14 @@
       const t = (this._rollLastDrawnPos != null ? this._rollLastDrawnPos : posSeconds) || 0;
       for (const ch of channels) {
         if (!ch || ch.drumKey) continue;
+        // ★サンプルを自力で同定できる行(adpcmSampleを持つサンプルPCM系: MultiPCM/C352/
+        //   QSound/C140/SegaPCM/GA20/OKIM6295/YM2610 ADPCM)は対象外。打楽器として鳴って
+        //   いる間は extractChannels 側が既に drumKey を入れており、音階として鳴っている
+        //   間は本物の音程を持っている。ここで「この行はパッドに載っている」を行単位で
+        //   決めてしまうと、**プール割当チップ(同じ物理行が曲中で打楽器と音階楽器を
+        //   行き来する)で音階側の鍵盤が一度も光らなくなる**(Daytona USAで発覚 2026-09-12。
+        //   28行のうち1度でも打楽器を鳴らした行が全部padRow=音程鍵盤の点灯対象外になっていた)。
+        if ('adpcmSample' in ch) continue;
         const list = idx.get(ch.id);
         if (!list) continue;
         // この行はパッドに載っている。打点が来ていない間もレートの疑似音程(D#2)へは
