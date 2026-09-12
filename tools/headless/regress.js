@@ -33,6 +33,9 @@ function sha(s) { return crypto.createHash('sha256').update(s, 'utf8').digest('h
 /** コーパス直下と配下のサブディレクトリを再帰的に走査する(vgm/32x のような入れ子対策) */
 function listSongs(dir) {
   const out = [];
+  // コーパスの場所は環境ごとに違う。無いディレクトリは空として返し、
+  // 呼び出し側の「対象ファイルなし」メッセージに任せる(生の例外を出さない)
+  if (!fs.existsSync(dir)) return out;
   for (const ent of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     const full = path.join(dir, ent.name);
     if (ent.isDirectory()) out.push(...listSongs(full));
