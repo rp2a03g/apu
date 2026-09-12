@@ -1,8 +1,8 @@
 /*
  * 一括変換スナップショット回帰テスト(NSF/SPC/KSS/GBS/HES/VGM)
  *
- *   node tools/headless/regress.js --corpus "C:/Users/user/Desktop/emu sound/nsf" --update
- *   node tools/headless/regress.js --corpus "C:/Users/user/Desktop/emu sound/nsf"
+ *   node tools/headless/regress.js --corpus "path/to/corpus/nsf" --update
+ *   node tools/headless/regress.js --corpus "path/to/corpus/nsf"
  *   node tools/headless/regress.js --corpus ... --dump out/   (本文も残して目視diff用)
  *   node tools/headless/regress.js --corpus ... --cmd NOTE_END=zero --dump out/
  *       (変換設定を変えて走らせる。ベースラインは既定設定の SHA なので差分は出て当然。
