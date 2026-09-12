@@ -22,3 +22,7 @@ tools/headless/.vectors/
 
 # 一括変換の目視diff用ダンプ(regress.js --dump の出力)
 tools/headless/dump*/
+
+# 回帰テストのベースライン(手元のコーパス専用。曲名一覧を含み他人の環境では使えないため
+# リポジトリには入れない。node tools/headless/check-all.js --update で作り直す)
+tools/headless/baseline-*.json

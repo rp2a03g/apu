@@ -27,7 +27,17 @@ export PATH="$PATH:/path/to/nodejs"
 | `audio-check.js` | 実際に鳴らした音を数値で点検(クリップ/DC/無音/オクターブずれ/プチノイズ) |
 | `cpu-test.js` | CPU命令テストCLI(検証ロジックは `../cpu-test-core.js` をブラウザ版と共有) |
 | `help-lint.js` | MMLヘルプ(`;@help`タグ)の自己点検。書式・実演スニペットのコンパイル・コマンド網羅 |
-| `baseline-*.json` | 回帰テストのベースライン(曲ごとのSHA-256とメタ情報) |
+| `baseline-*.json` | 回帰テストのベースライン(曲ごとのSHA-256とメタ情報)。**gitignore済み** |
+
+ベースラインは手元のコーパスと1対1に対応する曲名一覧なので、リポジトリには入れていない。
+初回は `--update` で作る（下記）。
+
+コーパスの置き場所は環境変数 `MML_CORPUS_ROOT` で差し替えられる。
+指定が無ければ開発機の既定パスを使う。
+
+```bash
+export MML_CORPUS_ROOT="D:/snd"      # D:/snd/nsf, D:/snd/vgm ... を見る
+```
 
 ## 使い方
 

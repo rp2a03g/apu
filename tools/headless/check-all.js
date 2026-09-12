@@ -15,7 +15,9 @@
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const DEFAULT_ROOT = 'C:/Users/user/Desktop/emu sound';
+// コーパスの置き場所は環境ごとに違うので、環境変数 MML_CORPUS_ROOT で差し替えられる
+// (指定が無ければ開発機の既定パス)。1形式だけ見たいときは regress.js を直接呼ぶ。
+const DEFAULT_ROOT = process.env.MML_CORPUS_ROOT || 'C:/Users/user/Desktop/emu sound';
 const FORMATS = ['nsf', 'spc', 'kss', 'gbs', 'hes', 'vgm'];
 
 function run(args) {

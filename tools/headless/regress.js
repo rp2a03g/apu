@@ -24,7 +24,8 @@ const { convertBytes, expandInput, ctx, parseCmdFlags } = require('./convert');
 const { ROOT } = require('./load');
 
 // Windows でも Node はスラッシュ区切りを受け付ける(バックスラッシュのエスケープ事故を避ける)
-const DEFAULT_CORPUS = 'C:/Users/user/Desktop/emu sound/nsf';
+// 環境変数 MML_CORPUS_ROOT があればその下の nsf/ を既定にする(check-all.js と同じ変数)
+const DEFAULT_CORPUS = (process.env.MML_CORPUS_ROOT || 'C:/Users/user/Desktop/emu sound') + '/nsf';
 const SUPPORTED = /\.(nsfe?|spc|kss|gbs|hes|vgm|vgz|zip|7z)$/i;
 
 function sha(s) { return crypto.createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 16); }
