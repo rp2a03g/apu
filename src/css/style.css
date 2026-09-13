@@ -129,6 +129,15 @@ header h1.app-title {
   white-space: nowrap;
 }
 
+/* 版番号(src/version.js)。タイトルより控えめに */
+header h1.app-title .app-version {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: normal;
+  color: var(--text-muted);
+}
+header h1.app-title .app-version:empty { display: none; }
+
 .icon-toolbar {
   display: flex;
   align-items: center;

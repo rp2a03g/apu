@@ -7,6 +7,10 @@
   // 表示文言の翻訳(src/i18n/i18n.js)。キーは日本語の原文そのもの
   const T = (key, params) => MML.I18n.t(key, params);
 
+  // 版番号(src/version.js)をタイトルの横に出す。バグ報告でどの版かを伝えてもらうため
+  const appVersionEl = document.getElementById('appVersion');
+  if (appVersionEl && MML.VERSION) appVersionEl.textContent = 'v' + MML.VERSION;
+
   const mmlSourceEl = document.getElementById('mmlSource');
   const mmlOutputEl = document.getElementById('mmlOutput');
   mmlSourceEl.value = MML.Mml.SAMPLE_SOURCE;
