@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-12 18:40:59
+ * Built by tools/build-capture-workers.ps1 at 2026-09-13 15:33:18
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-12 18:40:59';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-13 15:33:18';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -39,6 +39,10 @@
 (function (global) {
   const MML = global.MML = global.MML || {};
   const HES = MML.HES = MML.HES || {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。キャプチャWorker内など MML.I18n が無い環境では素通し
+  const tr = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/\{(\w+)\}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
 
   HES.HEADER_SIZE = 0x20;
   HES.PAGE_SIZE = 0x2000; // 8KB
@@ -69,7 +73,7 @@
    * @returns {object}
    */
   HES.parseHeader = function (bytes) {
-    if (bytes.length < HES.HEADER_SIZE) throw new Error('HESヘッダは最低0x20バイト必要です');
+    if (bytes.length < HES.HEADER_SIZE) throw new Error(tr('HESヘッダは最低0x20バイト必要です'));
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const tag = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
     const magicOk = tag === 'HESM';

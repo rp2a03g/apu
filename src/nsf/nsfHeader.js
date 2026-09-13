@@ -5,6 +5,10 @@
 (function (global) {
   const MML = global.MML = global.MML || {};
   const NSF = MML.NSF = MML.NSF || {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。キャプチャWorker内など MML.I18n が無い環境では素通し
+  const tr = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/\{(\w+)\}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
 
   // 拡張音源フラグ (オフセット 0x7A / 122)
   NSF.CHIP_FLAGS = {
@@ -131,7 +135,7 @@
    * @returns {object}
    */
   NSF.parseHeader = function (bytes) {
-    if (bytes.length < 128) throw new Error('NSFヘッダは128バイト必要です');
+    if (bytes.length < 128) throw new Error(tr('NSFヘッダは128バイト必要です'));
     const view = new DataView(bytes.buffer, bytes.byteOffset, 128);
     const magicOk = bytes[0] === 0x4E && bytes[1] === 0x45 && bytes[2] === 0x53 && bytes[3] === 0x4D && bytes[4] === 0x1A;
     const readAscii = (offset, len) => {
@@ -230,7 +234,7 @@
    * @throws 必須チャンクの欠落/未知の必須チャンク/壊れたチャンク
    */
   NSF.parseNsfe = function (bytes) {
-    if (!NSF.isNsfe(bytes)) throw new Error('NSFeのマジックナンバーが不正です');
+    if (!NSF.isNsfe(bytes)) throw new Error(tr('NSFeのマジックナンバーが不正です'));
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let info = null, data = null, bank = null, rate = null;
     const meta = {
@@ -243,13 +247,13 @@
     while (p + 8 <= bytes.length && !ended) {
       const size = view.getUint32(p, true);
       const id = String.fromCharCode(bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7]);
-      if (p + 8 + size > bytes.length) throw new Error('NSFeのチャンクがファイル末尾を越えています: ' + id);
+      if (p + 8 + size > bytes.length) throw new Error(tr('NSFeのチャンクがファイル末尾を越えています: {id}', { id }));
       const body = bytes.subarray(p + 8, p + 8 + size);
       meta.chunks.push(id);
       const bv = new DataView(bytes.buffer, bytes.byteOffset + p + 8, size);
       switch (id) {
         case 'INFO':
-          if (size < 8) throw new Error('NSFeのINFOチャンクが短すぎます');
+          if (size < 8) throw new Error(tr('NSFeのINFOチャンクが短すぎます'));
           info = {
             loadAddr: bv.getUint16(0, true), initAddr: bv.getUint16(2, true), playAddr: bv.getUint16(4, true),
             palNtscBit: body[6], extraChips: body[7],
@@ -283,13 +287,13 @@
         case 'NEND': ended = true; break;
         default:
           // 大文字始まり=必須チャンク。理解できないものがあれば正しく鳴らせないので中断する
-          if (id.charCodeAt(0) >= 0x41 && id.charCodeAt(0) <= 0x5A) throw new Error('未対応の必須NSFeチャンクです: ' + id);
+          if (id.charCodeAt(0) >= 0x41 && id.charCodeAt(0) <= 0x5A) throw new Error(tr('未対応の必須NSFeチャンクです: {id}', { id }));
           break;
       }
       p += 8 + size;
     }
-    if (!info) throw new Error('NSFeにINFOチャンクがありません');
-    if (!data) throw new Error('NSFeにDATAチャンクがありません');
+    if (!info) throw new Error(tr('NSFeにINFOチャンクがありません'));
+    if (!data) throw new Error(tr('NSFeにDATAチャンクがありません'));
 
     const songName = auth && auth[0] ? auth[0] : '';
     const artist = auth && auth[1] ? auth[1] : '';
@@ -339,7 +343,7 @@
       const r = NSF.parseNsfe(bytes);
       return { bytes: r.bytes, header: r.header, isNsfe: true };
     }
-    if (bytes.length < 128) throw new Error('NSFヘッダは128バイト必要です');
+    if (bytes.length < 128) throw new Error(tr('NSFヘッダは128バイト必要です'));
     const header = NSF.parseHeader(bytes);
     header.isNsfe = false;
     header.nsfe = null;

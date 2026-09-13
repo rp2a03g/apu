@@ -9,6 +9,10 @@
 (function (global) {
   const MML = global.MML = global.MML || {};
   const GBS = MML.GBS = MML.GBS || {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。キャプチャWorker内など MML.I18n が無い環境では素通し
+  const tr = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/\{(\w+)\}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
 
   GBS.CPU_CLOCK = 4194304; // DMG CPU/APU共通クロック(Hz)
   GBS.VBLANK_FPS = GBS.CPU_CLOCK / 70224; // ≒59.7275Hz(TAC無効時、VBlank駆動でPLAYを呼ぶ頻度)
@@ -32,7 +36,7 @@
    * @returns {object}
    */
   GBS.parseHeader = function (bytes) {
-    if (bytes.length < 0x70) throw new Error('GBSヘッダは最低0x70バイト必要です');
+    if (bytes.length < 0x70) throw new Error(tr('GBSヘッダは最低0x70バイト必要です'));
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2]);
     const magicOk = magic === 'GBS';

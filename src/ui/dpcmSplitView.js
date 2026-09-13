@@ -233,7 +233,7 @@
       `<div class="toolbar dpcm-ed-wave-bar">` +
         `<span class="dpcm-ed-wave-title"></span>` +
         `<button type="button" class="secondary dpcm-ed-autocut" title="${T('上限を超えている区間を、そのDMCレートで上限に収まる本数に均等に切ります。あとは境目をドラッグして調整してください')}">${T('限界で分割')}</button>` +
-        `<button type="button" class="dpcm-ed-play-raw" title="${T('原音を鳴らす')}">▶ ${T('原音')}</button>` +
+        `<button type="button" class="dpcm-ed-play-raw" title="${T('原音を鳴らす')}">▶ <span>${T('原音')}</span></button>` + // 文言だけを独立したノードにして、言語切替で i18nDom が訳し直せるようにする
         `<button type="button" class="dpcm-ed-play-dpcm" title="${T('DPCM変換後を鳴らす(使用区間を順に)')}">▶ DPCM</button>` +
         `<button type="button" class="secondary dpcm-ed-stop" title="${T('停止')}">■</button>` +
         `<span class="dpcm-ed-wave-info"></span>` +

@@ -5208,7 +5208,7 @@
 
     spcIsRendering = true;
     updateSpcPlayButton();
-    spcFileStatusEl.innerHTML = '<div>' + T('WAV書き出し中… 0%') + '</div>';
+    spcFileStatusEl.innerHTML = '<div>' + T('WAV書き出し中… {pct}%', { pct: 0 }) + '</div>';
     await new Promise(r => setTimeout(r, 0));
 
     let   player       = new MML.Emu.SpcPlayer(loadedSpcBytes);

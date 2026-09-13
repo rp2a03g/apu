@@ -154,6 +154,9 @@
     sortSel.addEventListener('change', () => { sortMode = sortSel.value; render(); });
     sortSel.addEventListener('mousedown', (e) => e.stopPropagation());
     if (TS() && TS().onChange) TS().onChange(() => render());
+    // 行の選択肢(「chに従う(…)」等)と集計行は引数付きの文言なので、表示言語を切り替えたら描き直す。
+    // 見出しは素の原文なので i18nDom が自動で訳す
+    if (MML.I18n) MML.I18n.onChange(() => render());
     render();
   }
 

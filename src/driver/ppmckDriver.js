@@ -87,6 +87,10 @@
 (function (global) {
   const MML = global.MML = global.MML || {};
   const Driver = MML.Driver = MML.Driver || {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。MML.I18n が無い環境(ヘッドレス等)では素通し
+  const tr = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/{(w+)}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
 
   const CPU_CLOCK_NTSC = 1789773;
   const NOTE_TABLE_SIZE = 108; // 9オクターブ分(o0-o8相当)
@@ -4850,9 +4854,9 @@ SONG_LOOP_PTR_HI:
       if (probeAsm.bytes.length > DRIVER_CODE_LIMIT) {
         return {
           nsfBytes: null,
-          asmErrors: [{ lineNo: 0, message: `ドライバ本体が${probeAsm.bytes.length}バイトあり、割当領域` +
-            `(バンク0-3、${DRIVER_CODE_LIMIT}バイト)を超えています。カスタム音色/波形の定義数を` +
-            '減らしてください(DPCM使用時はバンク4-7がサンプル専用のため、ドライバはバンク0-3に収める必要があります)' }],
+          asmErrors: [{ lineNo: 0, message: tr('ドライバ本体が{size}バイトあり、割当領域(バンク0-3、{limit}バイト)を超えています。' +
+            'カスタム音色/波形の定義数を減らしてください(DPCM使用時はバンク4-7がサンプル専用のため、ドライバはバンク0-3に収める必要があります)',
+            { size: probeAsm.bytes.length, limit: DRIVER_CODE_LIMIT }) }],
           bankCount: 0,
           unsupportedExpansions
         };
@@ -4889,8 +4893,8 @@ SONG_LOOP_PTR_HI:
     if (driverBytes.length > driverCodeBanks * BANK_SIZE) {
       return {
         nsfBytes: null,
-        asmErrors: [{ lineNo: 0, message: `内部エラー: ドライバ本体のサイズが計測時(${(probeAsm.bytes.length - BANK_SIZE)}バイト)と` +
-          `再アセンブル時(${driverBytes.length}バイト)で一致しません` }],
+        asmErrors: [{ lineNo: 0, message: tr('内部エラー: ドライバ本体のサイズが計測時({a}バイト)と再アセンブル時({b}バイト)で一致しません',
+          { a: probeAsm.bytes.length - BANK_SIZE, b: driverBytes.length }) }],
         bankCount: 0,
         unsupportedExpansions
       };

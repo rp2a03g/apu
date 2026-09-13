@@ -142,7 +142,7 @@
             entries.push({ entry, origin: src.origin, originLabel: src.label, source: src.text });
           }
           for (const e of parsed.errors) {
-            lintLines.push(`[${src.label} ${e.lineNo}行] ${e.message}`);
+            lintLines.push(T('[{src} {line}行] {msg}', { src: src.label, line: e.lineNo, msg: e.message }));
           }
         }
         // カテゴリ選択肢
@@ -156,7 +156,7 @@
         categoryEl.appendChild(allOpt);
         for (const c of categories) {
           const o = document.createElement('option');
-          o.value = c; o.textContent = c;
+          o.value = c; o.textContent = T(c); // カテゴリ名は ;@help タグの原文(日本語)。辞書にあれば訳す
           categoryEl.appendChild(o);
         }
         categoryEl.value = categories.includes(keep) ? keep : '';

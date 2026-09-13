@@ -31,6 +31,30 @@
   function register(code, nativeName, dict) {
     dicts[code] = dict || {};
     nativeNames[code] = nativeName;
+    reverse = null;
+  }
+
+  /*
+   * 訳文 → 原文キーの逆引き(引数 {name} を含まない訳文だけ)。
+   * JSが英語表示のときに組み立てたDOMは、ノードの「原文」が英語になっている。そのまま日本語へ
+   * 切り替えると原文キーが分からず英語のまま残るので、DOM適用層(i18nDom.js)がここで原文へ戻す。
+   * 同じ訳文を持つキーが複数ある場合(Original ← 原音/オリジナル/元の音 等、12組)は辞書で先に
+   * 出てくる方を返す。いずれも近い言い換えで、再読み込みすれば各モジュールが正しい原文で描き直す。
+   */
+  let reverse = null;
+  function keyOf(text) {
+    if (!reverse) {
+      reverse = new Map();
+      for (const code of Object.keys(dicts)) {
+        for (const k of Object.keys(dicts[code])) {
+          const v = dicts[code][k];
+          if (typeof v !== 'string' || /\{\w+\}/.test(v)) continue;
+          const nv = v.trim().replace(/\s+/g, ' ');
+          if (nv && !reverse.has(nv)) reverse.set(nv, k);
+        }
+      }
+    }
+    return reverse.get(text) || null;
   }
 
   function languages() {
@@ -53,6 +77,21 @@
   function onChange(fn) { listeners.push(fn); }
 
   /*
+   * "原文|文脈" の文脈部分を落とす。
+   * ★原文そのものに縦棒が入っている文言がある(MMLのループ記号を説明する `"|"` 等)。
+   *   以前は最後の '|' 以降を無条件に落としていたため、日本語表示でもそこで文が切れていた
+   *   (エンベロープエディタの説明文、VRC7音色エディタの音量欄のツールチップ等)。
+   *   文脈ラベルは「引用符の外にある '|' + 引用符を含まない短い語」に限る。
+   */
+  function stripContext(key) {
+    const bar = key.lastIndexOf('|');
+    if (bar <= 0) return key;
+    const label = key.slice(bar + 1);
+    if (key[bar - 1] === '"' || label.length === 0 || label.length > 20 || /["'`]/.test(label)) return key;
+    return key.slice(0, bar);
+  }
+
+  /*
    * 文言取得。params を渡すと訳文中の {name} を置換する。
    *   t('停止')                          → 'Stop'
    *   t('{n}バイト読み込みました', {n:32}) → 'Loaded {n} bytes' → 'Loaded 32 bytes'
@@ -66,8 +105,7 @@
     }
     if (s === undefined) {
       // 未翻訳、または基準言語。"原文|文脈" のキーは文脈部分を落として原文に戻す
-      const bar = key.lastIndexOf('|');
-      s = (bar > 0) ? key.slice(0, bar) : key;
+      s = stripContext(key);
     }
     if (params) {
       s = s.replace(/\{(\w+)\}/g, (m, name) =>
@@ -100,6 +138,6 @@
   }
 
   MML.I18n = {
-    BASE_LANG, register, languages, getLang, setLang, onChange, t, missing, has,
+    BASE_LANG, register, languages, getLang, setLang, onChange, t, missing, has, keyOf,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

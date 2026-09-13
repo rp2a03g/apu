@@ -1119,5 +1119,78 @@
       'VRC7 expresses pitch logarithmically as fnum/block, so EP (a raw register offset) does not apply',
     '4つのエンベロープを同じ時間軸(横1マス=1フレーム)で編集します。テーブル定義はチャンネルに紐づかないので、目盛り・音色の段数・試聴先は「対象音源」だけで決まります(表の中身は音源を変えても書き換えません)。キャンバスはドラッグで編集、Shift+クリックでループ位置(MMLの"|")を指定します。音量と音色は赤い縦線から右がリリースの表(@vr/@@r)で、区画ごとに自分の表と1対1に対応します。ノート(@EN)はMML上は前回値からの相対値ですが、ここでは実際に鳴る音程の階段を描き、反映のときに差分へ変換します。編集はこのウィンドウの中だけで、「反映」を押すまでMML本文は変わりません。':
       'Edit all four envelopes on one shared time axis (one cell = one frame). Table definitions are not tied to a channel, so the scale, the number of tone steps and the audition target come from "Target chip" alone; changing it never rewrites a table. Drag on the canvas to edit, and Shift+click to set the loop point (the "|" in the MML). On the volume and tone lanes everything right of the red line is the release table (@vr/@@r), and each zone maps one-to-one onto its own table. Note (@EN) is stored in the MML as a value relative to the previous frame, but here you draw the pitch staircase you actually hear and it is converted to differences on Apply. Editing stays inside this window: the MML text does not change until you press Apply.',
+    // --- 2026-09-13 公開前の点検で見つかった未訳(静的HTML・ヘルプ・エラー文言) ---
+    'FB 自己帰還':
+      'FB feedback',
+    'MMLエディタ':
+      'MML Editor',
+    'MML再生':
+      'Play MML',
+    'VRC7(OPLL)は2オペレータFM音源です。モジュレータがキャリアの位相を変調し、キャリアの出力が音になります。 変調が深いほど倍音が増えて明るい音になります。自作音色スロットは実機の制約でチップ全体に1つしかないため、 同時に鳴らせる自作音色は1種類だけです(音符側は@0で選び、OP<n>で中身を差し替えます)。 キャリアのTLはMMLのv<n>(音量)が担当するので音色側にはありません。':
+      'VRC7 (OPLL) is a 2-operator FM chip. The modulator modulates the phase of the carrier, and the carrier output is what you hear. Deeper modulation adds harmonics and makes the sound brighter. The hardware has only one custom-tone slot for the whole chip, so only one custom tone can sound at a time (notes pick it with @0, and OP<n> swaps its contents). The carrier TL is controlled by the MML v<n> (volume), so it is not part of the tone.',
+    'WAVE書き出し':
+      'Export WAVE',
+    'v<n>(0が最大)。","や"|"を含めると@vテーブルとして解釈します':
+      'v<n> (0 is loudest). Include "," or "|" to have it read as an @v table',
+    'フォント':
+      'Font',
+    'フォントサイズ':
+      'Font size',
+    'フレーズ':
+      'Phrase',
+    '再生範囲をリセット':
+      'Reset playback range',
+    'ヘッダ':
+      'Headers',
+    '基本':
+      'Basics',
+    '拡張音源':
+      'Expansion Chips',
+    '音色系':
+      'Tone Commands',
+    '実演スニペットがありません':
+      'No demo snippet',
+    ';@help にコマンド名がありません':
+      ';@help has no command name',
+    'コマンド {cmd} の解説が重複しています({line}行目にもあります)':
+      'Command {cmd} is documented twice (also on line {line})',
+    '{cmds}: 説明本文がありません':
+      '{cmds}: no description text',
+    '{cmds}: 実演スニペットが例外で落ちました ({msg})':
+      '{cmds}: the demo snippet threw an exception ({msg})',
+    '{cmds}: 実演スニペットがコンパイルエラー — {msg}':
+      '{cmds}: the demo snippet failed to compile — {msg}',
+    '[{src} {line}行] {msg}':
+      '[{src} line {line}] {msg}',
+    'ドライバ本体が{size}バイトあり、割当領域(バンク0-3、{limit}バイト)を超えています。カスタム音色/波形の定義数を減らしてください(DPCM使用時はバンク4-7がサンプル専用のため、ドライバはバンク0-3に収める必要があります)':
+      'The driver is {size} bytes, which exceeds its area (banks 0-3, {limit} bytes). Reduce the number of custom tone/waveform definitions (with DPCM, banks 4-7 are reserved for samples, so the driver has to fit in banks 0-3)',
+    '内部エラー: ドライバ本体のサイズが計測時({a}バイト)と再アセンブル時({b}バイト)で一致しません':
+      'Internal error: the driver size at measurement ({a} bytes) differs from the reassembled size ({b} bytes)',
+    'MML変換に対応した音源がありません({chips})':
+      'No chip in this file can be converted to MML ({chips})',
+    'NSFヘッダは128バイト必要です':
+      'An NSF header needs 128 bytes',
+    'NSFeのマジックナンバーが不正です':
+      'Invalid NSFe magic number',
+    'NSFeのチャンクがファイル末尾を越えています: {id}':
+      'An NSFe chunk runs past the end of the file: {id}',
+    'NSFeのINFOチャンクが短すぎます':
+      'The NSFe INFO chunk is too short',
+    '未対応の必須NSFeチャンクです: {id}':
+      'Unsupported required NSFe chunk: {id}',
+    'NSFeにINFOチャンクがありません':
+      'The NSFe file has no INFO chunk',
+    'NSFeにDATAチャンクがありません':
+      'The NSFe file has no DATA chunk',
+    'SPCファイルが短すぎます（最低256バイト必要）':
+      'The SPC file is too short (at least 256 bytes required)',
+    'RAM領域がありません':
+      'The RAM section is missing',
+    'DSPレジスタ領域がありません':
+      'The DSP register section is missing',
+    'GBSヘッダは最低0x70バイト必要です':
+      'A GBS header needs at least 0x70 bytes',
+    'HESヘッダは最低0x20バイト必要です':
+      'An HES header needs at least 0x20 bytes',
   });
 })(typeof window !== 'undefined' ? window : globalThis);

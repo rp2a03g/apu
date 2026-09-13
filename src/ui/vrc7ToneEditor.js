@@ -926,7 +926,7 @@
       noteEl.addEventListener('change', () => { const d = dirty; redraw(true); setDirty(d); regenerateSamplePhraseIfClean(); }); // 音程は定義に入らない
 
       // --- 内蔵音色プリセット(die dumpの実ROM値。src/convert/vrc7Tone.js) ---
-      (function fillPresets() {
+      function fillPresets() {
         const names = (MML.Convert && MML.Convert.Vrc7Tone) ? MML.Convert.Vrc7Tone.PRESET_NAMES : [];
         presetEl.innerHTML = '';
         const head = document.createElement('option');
@@ -951,7 +951,10 @@
           });
           presetEl.appendChild(grp);
         });
-      })();
+      }
+      fillPresets();
+      // 見出しと「サンプル#n(曲番号)」は引数付きの文言なので、表示言語を切り替えたら作り直す
+      if (MML.I18n) MML.I18n.onChange(fillPresets);
       presetEl.addEventListener('change', () => {
         const v = presetEl.value;
         presetEl.value = '';

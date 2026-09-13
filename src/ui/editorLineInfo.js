@@ -111,6 +111,10 @@
     setCursorMarker(line);
   }
 
+  // 「行 {line}, 列 {col}」は引数付きの文言なので、表示言語を切り替えたら書き直す
+  // (起動時の言語確定でも呼ばれうるので、エディタへの接続前は何もしない)
+  if (MML.I18n) MML.I18n.onChange(() => { if (textarea) updateCursor(true); });
+
   function applyMode() {
     editorEl.classList.toggle(CLASS_ON, enabled);
     if (posEl) posEl.hidden = enabled;

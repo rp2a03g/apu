@@ -499,6 +499,8 @@
     load();
     document.querySelectorAll('.convert-settings-btn').forEach(btn => btn.addEventListener('click', openModal));
     refreshButtons();
+    // ボタンのツールチップは「変換設定: <プリセット名>」の組み立てなので、表示言語を切り替えたら付け直す
+    if (MML.I18n) MML.I18n.onChange(refreshButtons);
   }
 
   MML.UI.ConvertSettings = { init, get, set, onChange, open: openModal };

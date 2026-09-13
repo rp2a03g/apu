@@ -32,6 +32,10 @@
   'use strict';
   const MML = global.MML = global.MML || {};
   const HelpIndex = MML.HelpIndex = MML.HelpIndex || {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。ヘッドレス(help-lint.js)など MML.I18n が無い環境では素通し
+  const T = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/{(w+)}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
 
   const HELP_TAG_RE = /^;@help\s+(.*)$/;
   const HELP_EN_TAG_RE = /^;@help\.en\s+(.*)$/;
@@ -112,7 +116,7 @@
       if (!entry.title) entry.title = entry.commands.join(' ');
       if (!entry.category) entry.category = entry.chapter;
       if (entry.snippetLines.length === 0 && !entry.docOnly) {
-        errors.push({ lineNo: entry.lineNo, level: 'warn', message: '実演スニペットがありません', entry });
+        errors.push({ lineNo: entry.lineNo, level: 'warn', message: T('実演スニペットがありません'), entry });
       }
       entries.push(entry);
       entry = null;
@@ -138,7 +142,7 @@
         closeEntry();
         const args = parseTagArgs(tag[1]);
         if (args.commands.length === 0) {
-          errors.push({ lineNo, level: 'error', message: ';@help にコマンド名がありません' });
+          errors.push({ lineNo, level: 'error', message: T(';@help にコマンド名がありません') });
           continue;
         }
         entry = {
@@ -191,7 +195,7 @@
         if (seen.has(c)) {
           errors.push({
             lineNo: e.lineNo, level: 'warn',
-            message: `コマンド ${c} の解説が重複しています(${seen.get(c)}行目にもあります)`
+            message: T('コマンド {cmd} の解説が重複しています({line}行目にもあります)', { cmd: c, line: seen.get(c) })
           });
         } else seen.set(c, e.lineNo);
       }
@@ -308,18 +312,18 @@
     }));
     for (const entry of parsed.entries) {
       if (!entry.body) {
-        issues.push({ level: 'warn', lineNo: entry.lineNo, message: `${entry.commands.join(' ')}: 説明本文がありません` });
+        issues.push({ level: 'warn', lineNo: entry.lineNo, message: T('{cmds}: 説明本文がありません', { cmds: entry.commands.join(' ') }) });
       }
       if (!compileFn || !entry.snippet) continue;
       let compiled = null;
       try {
         compiled = compileFn(HelpIndex.playableSource(source, entry), {});
       } catch (err) {
-        issues.push({ level: 'error', lineNo: entry.lineNo, message: `${entry.commands.join(' ')}: 実演スニペットが例外で落ちました (${err && err.message})` });
+        issues.push({ level: 'error', lineNo: entry.lineNo, message: T('{cmds}: 実演スニペットが例外で落ちました ({msg})', { cmds: entry.commands.join(' '), msg: err && err.message }) });
         continue;
       }
       for (const err of (compiled.errors || [])) {
-        issues.push({ level: 'error', lineNo: entry.lineNo, message: `${entry.commands.join(' ')}: 実演スニペットがコンパイルエラー — ${err.message}` });
+        issues.push({ level: 'error', lineNo: entry.lineNo, message: T('{cmds}: 実演スニペットがコンパイルエラー — {msg}', { cmds: entry.commands.join(' '), msg: err.message }) });
       }
     }
     return { issues, entries: parsed.entries, chapters: parsed.chapters };

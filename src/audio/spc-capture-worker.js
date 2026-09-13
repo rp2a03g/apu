@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-12 18:40:59
+ * Built by tools/build-capture-workers.ps1 at 2026-09-13 15:33:18
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-12 18:40:59';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-13 15:33:18';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -19,6 +19,10 @@
   'use strict';
   const MML = global.MML = global.MML || {};
   const SPC = MML.SPC = MML.SPC || {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。キャプチャWorker内など MML.I18n が無い環境では素通し
+  const tr = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/\{(\w+)\}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
 
   // ファイル識別子 (先頭33バイト)
   const MAGIC = 'SNES-SPC700 Sound File Data v0.30';
@@ -47,7 +51,7 @@
    * @returns {object}
    */
   SPC.parseHeader = function (bytes) {
-    if (bytes.length < 0x100) throw new Error('SPCファイルが短すぎます（最低256バイト必要）');
+    if (bytes.length < 0x100) throw new Error(tr('SPCファイルが短すぎます（最低256バイト必要）'));
 
     // マジック確認
     let magic = '';
@@ -116,7 +120,7 @@
    * @returns {Uint8Array} 65536バイト
    */
   SPC.getRam = function (bytes) {
-    if (bytes.length < 0x10100) throw new Error('RAM領域がありません');
+    if (bytes.length < 0x10100) throw new Error(tr('RAM領域がありません'));
     return bytes.slice(0x100, 0x10100);
   };
 
@@ -126,7 +130,7 @@
    * @returns {Uint8Array} 128バイト
    */
   SPC.getDspRegs = function (bytes) {
-    if (bytes.length < 0x10180) throw new Error('DSPレジスタ領域がありません');
+    if (bytes.length < 0x10180) throw new Error(tr('DSPレジスタ領域がありません'));
     return bytes.slice(0x10100, 0x10180);
   };
 

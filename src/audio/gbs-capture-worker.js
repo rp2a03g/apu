@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-12 18:40:59
+ * Built by tools/build-capture-workers.ps1 at 2026-09-13 15:33:18
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-09-12 18:40:59';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-09-13 15:33:18';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -22,6 +22,10 @@
 (function (global) {
   const MML = global.MML = global.MML || {};
   const GBS = MML.GBS = MML.GBS || {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。キャプチャWorker内など MML.I18n が無い環境では素通し
+  const tr = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/\{(\w+)\}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
 
   GBS.CPU_CLOCK = 4194304; // DMG CPU/APU共通クロック(Hz)
   GBS.VBLANK_FPS = GBS.CPU_CLOCK / 70224; // ≒59.7275Hz(TAC無効時、VBlank駆動でPLAYを呼ぶ頻度)
@@ -45,7 +49,7 @@
    * @returns {object}
    */
   GBS.parseHeader = function (bytes) {
-    if (bytes.length < 0x70) throw new Error('GBSヘッダは最低0x70バイト必要です');
+    if (bytes.length < 0x70) throw new Error(tr('GBSヘッダは最低0x70バイト必要です'));
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2]);
     const magicOk = magic === 'GBS';

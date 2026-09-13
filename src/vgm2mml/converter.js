@@ -26,6 +26,10 @@
   'use strict';
   const MML = global.MML = global.MML || {};
   MML.VGM2MML = {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。MML.I18n が無い環境(ヘッドレス等)では素通し
+  const tr = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/{(w+)}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
 
   const CPU_CLOCK_NTSC = 1789773; // 借用先(FME-7/N163/2A03)のクロック。src/mml/compiler.jsと同じ値
   const N163_WAVE_LEN = 32;       // N163へ載せる矩形波の長さ(SCC近似と同じ32点で統一)
@@ -1265,7 +1269,7 @@
     if (data.hes) families.push('hes');
     if (families.length === 0) {
       const names = h.usedChips.map(ch => ch.name).join(', ') || '-';
-      throw new Error(`MML変換に対応した音源がありません(${names})`);
+      throw new Error(tr('MML変換に対応した音源がありません({chips})', { chips: names }));
     }
     const family = families[0];
     const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', ym2610: 'psg', ym2612: 'psg', ym2151: 'psg', ym2203: 'psg', ym2608: 'psg', ym3812: 'psg', ym3526: 'psg', y8950: 'psg', ga20: 'psg', segapcm: 'psg', c140: 'psg', c352: 'psg', qsound: 'psg', okim6295: 'psg', multipcm: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };

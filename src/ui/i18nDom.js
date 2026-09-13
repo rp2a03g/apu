@@ -29,6 +29,10 @@
    */
   const originalText = new WeakMap();  // textNode -> 原文
   const originalAttr = new WeakMap();  // element  -> { attr: 原文 }
+  // 最後にここで書き込んだ値。ノードの現在値がこれと違えば、その後JSが書き換えた(=新しい原文)とみなす。
+  // 覚えた原文を無条件に使うと、状態で変わる文言(再生⇔一時停止のツールチップ等)が言語切替のたびに古い値へ戻る
+  const writtenText = new WeakMap();   // textNode -> 最後に書いた値
+  const writtenAttr = new WeakMap();   // element  -> { attr: 最後に書いた値 }
 
   const HAS_JA = /[ぁ-ゖァ-ヺ一-鿿]/;
 
@@ -58,7 +62,8 @@
 
     for (const node of nodes) {
       let src = originalText.get(node);
-      if (src === undefined) {
+      const written = writtenText.get(node);
+      if (src === undefined || (written !== undefined && node.nodeValue !== written)) {
         src = node.nodeValue;
         originalText.set(node, src);
       }
@@ -67,10 +72,19 @@
       const lead = m[1], tail = m[3];
       const body = normalizeKey(m[2]);
       if (!body) continue;
-      const out = I18n.t(body);
-      if (out !== body) node.nodeValue = lead + out + tail;
-      else if (node.nodeValue !== src) node.nodeValue = src; // 基準言語へ戻すとき
+      const key = keyFor(body);
+      const out = I18n.t(key);
+      // 訳が無い・基準言語のままなら元の文字列(改行や字下げも保つ)。英語で作られた文言は原文へ戻して訳し直す
+      const next = (key === body && out === body) ? src : lead + out + tail;
+      if (node.nodeValue !== next) node.nodeValue = next;
+      writtenText.set(node, next);
     }
+  }
+
+  // DOM上の文字列 → 辞書キー。日本語ならそのまま、英語表示中にJSが組み立てた訳文なら原文キーへ逆引きする
+  function keyFor(text) {
+    if (HAS_JA.test(text) || !I18n.keyOf) return text;
+    return I18n.keyOf(text) || text;
   }
 
   function translateAttributes(root) {
@@ -78,15 +92,18 @@
     for (const el of els) {
       if (!el.getAttribute || shouldSkip(el)) continue;
       let saved = originalAttr.get(el);
+      let written = writtenAttr.get(el);
       for (const attr of ATTRS) {
         const cur = el.getAttribute(attr);
         if (cur === null) continue;
         if (!saved) { saved = {}; originalAttr.set(el, saved); }
-        if (saved[attr] === undefined) saved[attr] = cur;
+        if (!written) { written = {}; writtenAttr.set(el, written); }
+        if (saved[attr] === undefined || (written[attr] !== undefined && cur !== written[attr])) saved[attr] = cur;
         const src = normalizeKey(saved[attr]);
         if (!src) continue;
-        const out = I18n.t(src);
+        const out = I18n.t(keyFor(src));
         if (out !== cur) el.setAttribute(attr, out);
+        written[attr] = out;
       }
     }
   }
