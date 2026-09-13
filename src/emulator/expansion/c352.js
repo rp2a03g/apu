@@ -40,6 +40,7 @@
     FLG_LOOP = 0x0002, FLG_REVERSE = 0x0001;
 
   // μ-law展開表(MAME/libvgm準拠=実チップ解析。区分線形の折れ線、上位側は下位の反転)
+  // ★この生成ループは MAME c352.cpp と同じ定式(BSD-3-Clause, Copyright R. Belmont, superctr)。THIRD-PARTY-NOTICES.md 参照
   const MULAW_TBL = new Int16Array(256);
   {
     let j = 0;

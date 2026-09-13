@@ -94,6 +94,51 @@
 ppmck（h7）が「私が書いた部分のソースについては自由に利用してください」。
 GitHub上のフォーク（munshkr/ppmck、AoiMoe/ppmck）にライセンスファイルは無い。
 
+### 原典と一致している数値表・定式
+
+上の「参照」のファイルは、原典とトークン単位で比較してコードの移植でないことを確かめてある
+（2026-09-13。数値表を除いた6語連鎖の一致率は0〜4%で、実際に移植した Nuked-OPN2 / Nuked-OPLL /
+emu2413 の4〜13%とはっきり分かれる）。そのうえで、次の小さな部分は原典と同じ中身になっている。
+いずれもチップの挙動を表す表や定式だが、出所として著作者を記す。
+
+| 箇所 | 中身 | 原典 | ライセンス |
+|---|---|---|---|
+| `src/emulator/expansion/c352.js` の `MULAW_TBL` 生成ループ | μ-law 伸張表を作る10行ほどの定式 | MAME `c352.cpp`（Copyright R. Belmont, superctr） | BSD-3-Clause |
+| `src/emulator/expansion/multipcm.js` の `BASE_TIMES_MS` | EGのレートごとの遷移時間(ms)表 | MAME `multipcm.cpp`（Copyright Miguel Angel Horna。ElSemi による実測値） | BSD-3-Clause |
+| `src/emulator/expansion/opl.js` / `ym2151.js` の `EG_INC` | EGの増分パターン表 | MAME `fmopl.cpp` / `ym2151.cpp`（Copyright Jarek Burczynski, Tatsuyuki Satoh, Ernesto Corvi） | GPL-2.0+ |
+
+OKIM6258 / OKIM6295 の ADPCM 伸張（段階表 `16×1.1^n` と増分表）は、OKI / Dialogic ADPCM の
+公開仕様どおりの標準的な定式で、特定の実装の写しではない。
+
+BSD-3-Clause（MAME の `c352.cpp` / `multipcm.cpp`）の条件：
+
+```
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this
+   list of conditions and the following disclaimer in the documentation and/or
+   other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+```
+
 ### SNES DSP ガウス補間テーブル
 
 `src/emulator/spcDsp.js` の `GAUSS[512]` は SNES DSP の内蔵ROMに焼かれている

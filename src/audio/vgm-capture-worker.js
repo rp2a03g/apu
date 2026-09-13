@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-13 15:33:18
+ * Built by tools/build-capture-workers.ps1 at 2026-09-13 15:34:03
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-13 15:33:18';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-13 15:34:03';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -7160,6 +7160,7 @@
   for (let i = 0; i < 16; i++) SL_TAB[i] = i < 15 ? i * 32 : 992;
 
   // EG増分表(OPN/OPM共通の一般値)
+  // ★値は MAME ym2151.cpp の eg_inc と同じ(GPL-2.0+, Copyright Jarek Burczynski, Ernesto Corvi)。THIRD-PARTY-NOTICES.md 参照
   const EG_INC = [
     0,1,0,1,0,1,0,1,  0,1,0,1,1,1,0,1,  0,1,1,1,0,1,1,1,  0,1,1,1,1,1,1,1,
     1,1,1,1,1,1,1,1,  1,1,1,2,1,1,1,2,  1,2,1,2,1,2,1,2,  1,2,2,2,1,2,2,2,
@@ -8028,6 +8029,7 @@
   const KSL_SHIFT = [31, 1, 2, 0];
 
   // EG増分表(OPN/OPM/OPL共通の一般値。ym2151.jsと同一)
+  // ★値は MAME fmopl.cpp の eg_inc と同じ(GPL-2.0+, Copyright Jarek Burczynski, Tatsuyuki Satoh)。THIRD-PARTY-NOTICES.md 参照
   const EG_INC = [
     0,1,0,1,0,1,0,1,  0,1,0,1,1,1,0,1,  0,1,1,1,0,1,1,1,  0,1,1,1,1,1,1,1,
     1,1,1,1,1,1,1,1,  1,1,1,2,1,1,1,2,  1,2,1,2,1,2,1,2,  1,2,2,2,1,2,2,2,
@@ -9418,6 +9420,7 @@
     FLG_LOOP = 0x0002, FLG_REVERSE = 0x0001;
 
   // μ-law展開表(MAME/libvgm準拠=実チップ解析。区分線形の折れ線、上位側は下位の反転)
+  // ★この生成ループは MAME c352.cpp と同じ定式(BSD-3-Clause, Copyright R. Belmont, superctr)。THIRD-PARTY-NOTICES.md 参照
   const MULAW_TBL = new Int16Array(256);
   {
     let j = 0;
@@ -10621,6 +10624,7 @@
   for (let i = 0; i < 32; i++) VALUE_TO_SLOT.push((i & 7) === 7 ? -1 : (i >> 3) * 7 + (i & 7));
 
   // EG時間表(ElSemi/MAME multipcm: アタックのフルスケール遷移ms。レート0-3は無限=保持)
+  // ★値は MAME multipcm.cpp と同じ(BSD-3-Clause, Copyright Miguel Angel Horna)。THIRD-PARTY-NOTICES.md 参照
   const BASE_TIMES_MS = [
     0, 0, 0, 0, 6222.95, 4978.37, 4148.66, 3556.01, 3111.47, 2489.21, 2074.33, 1778.00,
     1555.74, 1244.63, 1037.19, 889.08, 777.87, 622.31, 518.59, 444.54, 388.93, 311.16,

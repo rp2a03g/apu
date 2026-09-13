@@ -67,6 +67,7 @@
   for (let i = 0; i < 16; i++) SL_TAB[i] = i < 15 ? i * 32 : 992;
 
   // EG増分表(OPN/OPM共通の一般値)
+  // ★値は MAME ym2151.cpp の eg_inc と同じ(GPL-2.0+, Copyright Jarek Burczynski, Ernesto Corvi)。THIRD-PARTY-NOTICES.md 参照
   const EG_INC = [
     0,1,0,1,0,1,0,1,  0,1,0,1,1,1,0,1,  0,1,1,1,0,1,1,1,  0,1,1,1,1,1,1,1,
     1,1,1,1,1,1,1,1,  1,1,1,2,1,1,1,2,  1,2,1,2,1,2,1,2,  1,2,2,2,1,2,2,2,

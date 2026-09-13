@@ -43,6 +43,7 @@
   for (let i = 0; i < 32; i++) VALUE_TO_SLOT.push((i & 7) === 7 ? -1 : (i >> 3) * 7 + (i & 7));
 
   // EG時間表(ElSemi/MAME multipcm: アタックのフルスケール遷移ms。レート0-3は無限=保持)
+  // ★値は MAME multipcm.cpp と同じ(BSD-3-Clause, Copyright Miguel Angel Horna)。THIRD-PARTY-NOTICES.md 参照
   const BASE_TIMES_MS = [
     0, 0, 0, 0, 6222.95, 4978.37, 4148.66, 3556.01, 3111.47, 2489.21, 2074.33, 1778.00,
     1555.74, 1244.63, 1037.19, 889.08, 777.87, 622.31, 518.59, 444.54, 388.93, 311.16,
