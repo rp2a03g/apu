@@ -1,6 +1,8 @@
 # 第三者のソフトウェアに関する表示 (Third-party notices)
 
 このプログラム本体は GPL-2.0 で配布している（[LICENSE](LICENSE)）。
+ただし NSF書き出し用サウンドドライバ `src/driver/ppmckDriver.js` だけは 0BSD
+（[LICENSE.0BSD](LICENSE.0BSD)）。
 その中には、他の作者が書いたコードを移植した部分と、他の実装を参照して
 書き起こした部分がある。ここではその出所・著作者・ライセンスをまとめる。
 
@@ -71,7 +73,26 @@
 | KSS のメモリマップ / 曲初期化 | libkss (digital-sound-antiques) `vm.c` / `mmap.c` | `src/emulator/kssBus.js`, `kssPlayer.js` |
 | SM83 (Game Boy CPU) | NESdev BBS "Game Boy CPU isn't a Z80. What is it?" | `src/emulator/cpuSm83.js` |
 | VRC6 のこぎり波 | NESdev Wiki | `src/emulator/expansion/vrc6.js` |
-| ppmck ドライバの設計 | ppmck (`nes_include/ppmck/`) の状態管理・バンク切替の考え方 | `src/driver/ppmckDriver.js`（コードは新規に書き起こし） |
+
+### mck / ppmck（NSF書き出し用サウンドドライバ）
+
+`src/driver/ppmckDriver.js` はこのプロジェクトのアセンブラ向けに書き起こしたドライバで、
+**本体と別に 0BSD で配布する**（[LICENSE.0BSD](LICENSE.0BSD)）。生成した6502コードは
+書き出したNSFに埋め込まれるため、NSFを使う人に義務を課さないようにしている。
+
+設計と一部のルーチンは mck / ppmck に由来する。
+
+- 全体の構造（1フレームごとのカウンタ管理、チャンネルごとのバンク切り替え）は
+  ppmck `nes_include/ppmck/{sounddrv,internal}.h` を土台にしている
+- MP（ソフトウェアLFO）の状態機械は ppmck の `lfo_sub` / `warizan_start` に合わせてある。
+  ソフトウェアLFOは mck（Izumi.）の時点からある機能
+- PS は後年のフォーク [AoiMoe/ppmck](https://github.com/AoiMoe/ppmck) の
+  `process_ps` / `pitchshift_setup` のアルゴリズムを、このドライバの状態遷移として書き直したもの
+- バイトコードのオペコード値（`src/nsf/mckBytecode.js`）は ppmck と同一
+
+配布条件は、mck が「転載・改変などは特に制限するつもりはありません」、
+ppmck（h7）が「私が書いた部分のソースについては自由に利用してください」。
+GitHub上のフォーク（munshkr/ppmck、AoiMoe/ppmck）にライセンスファイルは無い。
 
 ### SNES DSP ガウス補間テーブル
 

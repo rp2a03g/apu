@@ -299,6 +299,20 @@ node tools/headless/help-lint.js         # MMLヘルプの書式・網羅チェ�
 
 本体は GNU General Public License version 2 — [LICENSE](LICENSE)。
 
+### 書き出したNSFは自由に使ってよい
+
+**このツールで書き出したNSFは、条件なしで使ってよい。** 配布・販売・コンペ提出・
+ゲームへの組み込みのどれでも、ライセンス表示やクレジットは要らない。
+
+NSFに埋め込まれるのは、曲データと、サウンドドライバ `src/driver/ppmckDriver.js` が生成した
+6502コードだけ。曲データは作曲した人のもので、ドライバは本体のGPLとは別に
+**0BSD**（[LICENSE.0BSD](LICENSE.0BSD)）で配布しているので、どちらもGPLの義務は及ばない。
+ドライバだけを取り出して自作のプログラムに使うのも自由。
+
+ただし、他人の曲を変換して得たNSFは別の話で、下の「扱う音楽データについて」を参照。
+
+### 第三者のコード
+
 他の作者のコードを移植した部分（Nuked-OPLL、Nuked-OPN2、emu2413、LZMA SDK）と、
 他の実装を参照して書き起こした部分がある。出所・著作者・ライセンスは
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) にまとめてある。

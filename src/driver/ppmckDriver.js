@@ -1,4 +1,17 @@
 /*
+ * SPDX-License-Identifier: 0BSD
+ * Copyright (C) 2026 rp2a03g
+ *
+ * ★このファイルだけは本体(GPL-2.0)と別に 0BSD で配布する(全文は LICENSE.0BSD)。
+ *   ここで生成する6502コードと各種テーブルは、書き出したNSFにそのまま埋め込まれる。
+ *   書き出したNSFを使う人に、ライセンス上の義務も著作権表示も求めないため。
+ *   ⇒ このファイルにGPL/LGPLのコード(Nuked系など)を持ち込まないこと。
+ *
+ * ppmck系からの由来: MP(ソフトウェアLFO)の状態機械は ppmck の lfo_sub /
+ * warizan_start(mck由来の機能)に合わせてある。PS は後年のフォーク AoiMoe/ppmck の
+ * process_ps / pitchshift_setup のアルゴリズムを、このドライバの状態遷移として
+ * 書き直したもの。mck・ppmck ともに再利用・改変を制限しない配布条件。
+ *
  * MML.NSF.MckBytecode が生成するバイトコードを再生する6502サウンドドライバ+
  * NSFバンク切り替え対応の書き出し一式。ROADMAP.mdフェーズ1.6タスク2/3/5/6。
  * 実機ppmck(nes_include/ppmck/{sounddrv,internal}.h、https://github.com/munshkr/ppmck)の
