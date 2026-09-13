@@ -1,0 +1,50 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <clipPath id="round"><rect width="512" height="512" rx="112"/></clipPath>
+  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#262e40"/><stop offset="1" stop-color="#12161f"/></linearGradient>
+  <radialGradient id="halo" cx=".5" cy=".45" r=".5"><stop offset="0" stop-color="#ff7a1a" stop-opacity=".30"/><stop offset="1" stop-color="#ff7a1a" stop-opacity="0"/></radialGradient>
+  <radialGradient id="heat" cx=".5" cy=".4" r=".5"><stop offset="0" stop-color="#ff8a2a" stop-opacity=".45"/><stop offset="1" stop-color="#ff8a2a" stop-opacity="0"/></radialGradient>
+  <radialGradient id="pool" cx=".5" cy=".2" r=".8"><stop offset="0" stop-color="#fff6c2"/><stop offset=".5" stop-color="#ffb72a"/><stop offset="1" stop-color="#ff5a1c"/></radialGradient>
+  <linearGradient id="molten" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff6c2"/><stop offset=".45" stop-color="#ffb72a"/><stop offset="1" stop-color="#ff5a1c"/></linearGradient>
+  <linearGradient id="moltenV" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe27a"/><stop offset=".6" stop-color="#ffa424"/><stop offset="1" stop-color="#ff6a1e"/></linearGradient>
+  <linearGradient id="steel" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#8c95a6"/><stop offset=".4" stop-color="#d6dbe4"/><stop offset="1" stop-color="#6b7384"/></linearGradient>
+  <filter id="glow" filterUnits="userSpaceOnUse" x="-64" y="-64" width="640" height="640"><feGaussianBlur stdDeviation="8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+<g clip-path="url(#round)">
+<rect width="512" height="512" fill="url(#bg)"/>
+<rect width="512" height="512" fill="url(#halo)"/>
+  <!-- ピン -->
+  <rect x="96" y="238" width="44" height="18" rx="4" fill="#aab2c0"/><rect x="372" y="238" width="44" height="18" rx="4" fill="#aab2c0"/><rect x="96" y="278" width="44" height="18" rx="4" fill="#aab2c0"/><rect x="372" y="278" width="44" height="18" rx="4" fill="#aab2c0"/><rect x="96" y="318" width="44" height="18" rx="4" fill="#aab2c0"/><rect x="372" y="318" width="44" height="18" rx="4" fill="#aab2c0"/><rect x="96" y="358" width="44" height="18" rx="4" fill="#aab2c0"/><rect x="372" y="358" width="44" height="18" rx="4" fill="#aab2c0"/><rect x="96" y="398" width="44" height="18" rx="4" fill="#aab2c0"/><rect x="372" y="398" width="44" height="18" rx="4" fill="#aab2c0"/>
+  <!-- チップ本体 -->
+  <rect x="128" y="208" width="256" height="248" rx="18" fill="#2f3749" stroke="#56627a" stroke-width="6"/>
+  <ellipse cx="256" cy="214" rx="110" ry="46" fill="url(#heat)"/>
+  <!-- 窓と溝 -->
+  <rect x="164" y="272" width="184" height="148" rx="10" fill="#0d1017"/>
+  <path d="M182 386 H222 V314 H256 V386 H290 V314 H330" fill="none" stroke="#262d3b" stroke-width="16" stroke-linecap="square"/>
+  <!-- 湯口(ノッチ)→湯道 -->
+  <path d="M224 211 A32 32 0 0 0 288 211 Z" fill="#12161f"/>
+  <path d="M256 232 V314" stroke="url(#moltenV)" stroke-width="14" filter="url(#glow)"/>
+  <path d="M226 212 A30 26 0 0 0 286 212 Z" fill="url(#pool)" filter="url(#glow)"/>
+  <!-- 充填中の矩形波 -->
+  <path d="M256 314 H222 V386 H182" fill="none" stroke="url(#molten)" stroke-width="16" stroke-linecap="square" filter="url(#glow)"/>
+  <path d="M256 314 V386 H290 V314 H310" fill="none" stroke="url(#molten)" stroke-width="16" stroke-linecap="butt" filter="url(#glow)"/>
+  <circle cx="310" cy="314" r="8" fill="#fff6c2"/>
+  <!-- 注ぐ流れ(外側+芯) -->
+  <path d="M212 164 C232 172 247 188 249 218 L263 218 C263 184 254 156 232 146 Z" fill="url(#moltenV)" filter="url(#glow)"/>
+  <path d="M224 156 C241 165 254 186 256 212" fill="none" stroke="#fff8d6" stroke-width="6" stroke-linecap="round" opacity=".9"/>
+  <!-- しぶき・火花 -->
+  <circle cx="206" cy="202" r="7" fill="#ffc23a" filter="url(#glow)"/>
+  <circle cx="300" cy="186" r="6" fill="#ffb02a" filter="url(#glow)"/>
+  <circle cx="186" cy="190" r="4" fill="#ffd66a"/>
+  <circle cx="318" cy="164" r="4" fill="#ffd66a"/>
+  <circle cx="286" cy="148" r="3" fill="#fff0a8"/>
+  <path d="M332 196 l18 -10 M178 198 l-18 -8 M312 142 l10 -14" stroke="#ffcf5a" stroke-width="4" stroke-linecap="round"/>
+  <!-- 坩堝(大きく深く傾ける) -->
+  <g transform="translate(150 118) rotate(64) scale(.74)">
+    <path d="M-80 -70 H80 L56 58 Q52 76 34 76 H-34 Q-52 76 -56 58 Z" fill="url(#steel)"/>
+    <rect x="-90" y="-84" width="180" height="20" rx="10" fill="#e3e7ee"/>
+    <path d="M-74 -74 Q0 -60 74 -74 Q0 -86 -74 -74 Z" fill="url(#molten)"/>
+    <path d="M60 -80 Q100 -84 104 -64 Q96 -58 80 -66 Z" fill="url(#molten)" filter="url(#glow)"/>
+  </g>
+</g>
+</svg>

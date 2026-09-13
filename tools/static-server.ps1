@@ -17,6 +17,9 @@ $mime = @{
     '.spc'  = 'application/octet-stream'
     '.json' = 'application/json'
     '.wav'  = 'audio/wav'
+    '.svg'  = 'image/svg+xml'
+    '.png'  = 'image/png'
+    '.webmanifest' = 'application/manifest+json'
 }
 
 # POST /save/<name> の保存先。既定は一時フォルダ配下。MML_SAVE_DIR で変えられる
