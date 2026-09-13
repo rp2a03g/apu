@@ -46,6 +46,7 @@
       yieldFn: macroYield,
       // Worker内はUIをブロックしないのでスライスを大きめに取り、メッセージ数を抑える。
       // 30ms = cancel応答性とprogress粒度の上限でもある。
+      // (NSFの受信は軽いので細かく区切らない。細かく区切るのはVGMだけ: capture-worker-multi-impl.js WORKER_SLICE_MS_VGM)
       sliceBudgetMs: 30
     });
 

@@ -517,6 +517,10 @@
   //  1) 発音中のノート(スロットi×キーオン通番seq)は同じ論理レーンに固定
   //  2) 新しいノートは「同じ音色のレーンのうち、空いていて音程が近く直近に使ったもの」
   //  3) 無ければ未使用レーン、それも無ければ最も昔に使ったレーンを奪う
+  // プール式PCMチップのスロット数(vgmPlayer.js が new Emu.PoolChannelRegrouper(n) に渡す値と同じ)。
+  // 画面側で snapshots から logical を作り直すとき(roll-builders.js RollBuild.poolLogical)にも使う
+  Emu.POOL_CHIP_CHANNELS = { multipcm: 28, segapcm: 16, c140: 24, c352: 32, qsound: 16 };
+
   Emu.PoolChannelRegrouper = class {
     constructor(numCh) {
       this.numCh = numCh;

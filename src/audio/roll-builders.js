@@ -399,12 +399,36 @@
     for (const key of snapChips) {
       if (!data[key]) continue;
       const token = chipToken[key] || key;
-      const snaps = (poolMode[key] === 'logical' && data[key].logical) ? data[key].logical : data[key].snapshots;
+      const snaps = (poolMode[key] === 'logical') ? (RollBuild.poolLogical(data, key) || data[key].snapshots) : data[key].snapshots;
       const extra = {}; extra[key] = snaps;
       const t = buildTracks(snaps, [], done, sr / frameRate, sr, ['vgm', token], null, extra);
       if (t) tracks = tracks.concat(t);
     }
     return tracks;
+  };
+
+  // ── プール式PCMチップの「合成ch」スナップショット ─────────────────────
+  // logical は snapshots を Emu.PoolChannelRegrouper に先頭から順に通しただけの決定的なデータ。
+  // キャプチャWorkerは通信量を減らすため logical を送らない(2026-09-13。c140 では progress の
+  // 復元時間の約4割がこれだった)ので、画面側で合成ch表示が要るときだけここで作る。
+  // snapshots が伸びていれば続きから足す(回帰器は状態を持つので同じインスタンスで続ける)。
+  // メインスレッドで丸ごとキャプチャした data には logical が揃っているので、そのまま返す。
+  RollBuild.poolLogical = function (data, key) {
+    const d = data && data[key];
+    const Emu = MML.Emu;
+    if (!d || !Array.isArray(d.snapshots)) return null;
+    const st = d.__logicalState;
+    if (!st && Array.isArray(d.logical) && d.logical.length >= d.snapshots.length) return d.logical;
+    const numCh = Emu && Emu.POOL_CHIP_CHANNELS && Emu.POOL_CHIP_CHANNELS[key];
+    if (!numCh || !Emu.PoolChannelRegrouper) return null;
+    if (!st || d.logical !== st.out) {
+      // 列挙されない印にして、構造化複製やJSON化で運ばれないようにする
+      Object.defineProperty(d, '__logicalState', { value: { rg: new Emu.PoolChannelRegrouper(numCh), out: [] }, configurable: true, writable: true });
+      d.logical = d.__logicalState.out;
+    }
+    const S = d.__logicalState;
+    for (let i = S.out.length; i < d.snapshots.length; i++) S.out.push(S.rg.step(d.snapshots[i]));
+    return S.out;
   };
 
   // ── 構築スロットル ────────────────────────────────────────────────────

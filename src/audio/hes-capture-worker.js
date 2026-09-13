@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-13 15:34:03
+ * Built by tools/build-capture-workers.ps1 at 2026-09-13 18:27:31
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-13 15:34:03';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-13 18:27:31';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -5187,12 +5187,36 @@
     for (const key of snapChips) {
       if (!data[key]) continue;
       const token = chipToken[key] || key;
-      const snaps = (poolMode[key] === 'logical' && data[key].logical) ? data[key].logical : data[key].snapshots;
+      const snaps = (poolMode[key] === 'logical') ? (RollBuild.poolLogical(data, key) || data[key].snapshots) : data[key].snapshots;
       const extra = {}; extra[key] = snaps;
       const t = buildTracks(snaps, [], done, sr / frameRate, sr, ['vgm', token], null, extra);
       if (t) tracks = tracks.concat(t);
     }
     return tracks;
+  };
+
+  // ── プール式PCMチップの「合成ch」スナップショット ─────────────────────
+  // logical は snapshots を Emu.PoolChannelRegrouper に先頭から順に通しただけの決定的なデータ。
+  // キャプチャWorkerは通信量を減らすため logical を送らない(2026-09-13。c140 では progress の
+  // 復元時間の約4割がこれだった)ので、画面側で合成ch表示が要るときだけここで作る。
+  // snapshots が伸びていれば続きから足す(回帰器は状態を持つので同じインスタンスで続ける)。
+  // メインスレッドで丸ごとキャプチャした data には logical が揃っているので、そのまま返す。
+  RollBuild.poolLogical = function (data, key) {
+    const d = data && data[key];
+    const Emu = MML.Emu;
+    if (!d || !Array.isArray(d.snapshots)) return null;
+    const st = d.__logicalState;
+    if (!st && Array.isArray(d.logical) && d.logical.length >= d.snapshots.length) return d.logical;
+    const numCh = Emu && Emu.POOL_CHIP_CHANNELS && Emu.POOL_CHIP_CHANNELS[key];
+    if (!numCh || !Emu.PoolChannelRegrouper) return null;
+    if (!st || d.logical !== st.out) {
+      // 列挙されない印にして、構造化複製やJSON化で運ばれないようにする
+      Object.defineProperty(d, '__logicalState', { value: { rg: new Emu.PoolChannelRegrouper(numCh), out: [] }, configurable: true, writable: true });
+      d.logical = d.__logicalState.out;
+    }
+    const S = d.__logicalState;
+    for (let i = S.out.length; i < d.snapshots.length; i++) S.out.push(S.rg.step(d.snapshots[i]));
+    return S.out;
   };
 
   // ── 構築スロットル ────────────────────────────────────────────────────
@@ -5328,6 +5352,14 @@
   const MML = global.MML;
   const Emu = MML.Emu;
 
+  // Worker内で解析を進める1スライスの長さ(ms)。1スライスごとに進捗(progress)を1通送る。
+  // ★以前は30msだったが、30msぶんのデータ(VGMで3000〜5000件)をメインスレッドが受け取って復元するのに
+  //   40〜95msかかり、再生開始直後の画面の止まりと音声コールバックの遅れの原因になっていた
+  //   (2026-09-13 実Chromeで計測。Worker受信のうちロール(type:roll)は1〜2msで、重いのはprogressだった)。
+  //   送る総量は変えずに1通を小さくして、受信を短い処理に分ける。cancel応答性の上限でもある。
+  //   8msで1通の復元が最大32ms、4msで最大20〜25msになり、ワルキューレの伝説/レイブレーサーの開始直後の長いタスク(50ms超)が消えた。
+  const WORKER_SLICE_MS = 30;     // 既定(SPC/HES/KSS/GBS。受信が軽いので細かく区切る必要が無い)
+  const WORKER_SLICE_MS_VGM = 4;  // VGMだけ: PCMプール系で1通の復元が重いため細かく区切る
   // setTimeout(0)の4msクランプを回避するマクロタスクyield(nsf-capture-worker-impl.jsと同じ)
   function macroYield() {
     return new Promise((resolve) => {
@@ -5353,6 +5385,9 @@
         let subMeta = null;
         for (const k2 of Object.keys(v)) {
           const v2 = v[k2];
+          // プール式PCMチップの logical(合成ch)は snapshots から画面側で作り直せるので送らない
+          // (roll-builders.js RollBuild.poolLogical)。c140 で progress の復元時間の約4割を占めていた
+          if (k2 === 'logical' && Array.isArray(v.snapshots)) continue;
           if (Array.isArray(v2)) {
             const path = key + '.' + k2;
             const n = sent[path] || 0;
@@ -5422,7 +5457,7 @@
       if (sendRoll) sendRoll({ frameLog }, done, total);
     };
     await MML.SPC2MML.captureAsync(msg.bytes, msg.opt.durationSeconds, onProgress,
-      () => cancelled, { yieldFn: macroYield, sliceBudgetMs: 30 });
+      () => cancelled, { yieldFn: macroYield, sliceBudgetMs: WORKER_SLICE_MS });
     global.postMessage({ type: 'done', cancelled });
   }
 
@@ -5456,7 +5491,7 @@
       regsOnly: true,
       shouldCancel: () => cancelled,
       yieldFn: macroYield,
-      sliceBudgetMs: 30
+      sliceBudgetMs: WORKER_SLICE_MS
     });
     await Emu.captureHesSongAsync(msg.bytes, opt, onProgress);
     global.postMessage({ type: 'done', cancelled });
@@ -5501,9 +5536,21 @@
     const opt = Object.assign({}, msg.opt, {
       shouldCancel: () => cancelled,
       yieldFn: macroYield,
-      sliceBudgetMs: 30 // Worker内はUI非ブロックなので大きめ(=cancel応答性の上限)
+      sliceBudgetMs: msg.format === 'vgm' ? WORKER_SLICE_MS_VGM : WORKER_SLICE_MS
     });
 
+    // VGMだけ、送ったデータの大きさに応じて次の解析を少し待つ。PCMプール系の曲は1通の複製が重く、
+    // 解析が速すぎると画面側が受信の復元で埋まって、解析が終わるまで音と描画が詰まる(2026-09-13実測、
+    // ワルキューレの伝説3曲目で最初の1秒に復元650ms)。postMessage に掛かった時間(=複製の手間の目安)の
+    // PACE_RATIO 倍だけ待ち、画面側の受信を時間方向に薄める。軽い曲では待ち時間はほぼ0になる
+    const PACE_RATIO = msg.format === 'vgm' ? 3 : 0;
+    const PACE_MAX_MS = 120;
+    let paceMs = 0;
+    opt.yieldFn = () => {
+      if (paceMs <= 0) return macroYield();
+      const ms = paceMs; paceMs = 0;
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    };
     const sendRoll = makeRollSender(msg.format, msg);
     const sent = {};
     let metaSent = false;
@@ -5513,7 +5560,9 @@
       const { arrays, meta } = diffPayload(payload, sent, !metaSent);
       const chunk = { type: 'progress', done, total, arrays };
       if (!metaSent) { metaSent = true; chunk.meta = meta; }
+      const tPost = performance.now();
       global.postMessage(chunk);
+      if (PACE_RATIO > 0 && done < total) paceMs = Math.min(PACE_MAX_MS, (performance.now() - tPost) * PACE_RATIO);
       if (sendRoll) sendRoll(payload, done, total);
     };
 
