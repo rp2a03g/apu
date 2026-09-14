@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-13 18:27:31
+ * Built by tools/build-capture-workers.ps1 at 2026-09-14 06:23:59
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-13 18:27:31';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-14 06:23:59';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -2286,9 +2286,9 @@
   }
 
   // 末尾の「同一値が続く足踏み区間」だけを1個残してtrimする
-  // ([[envelope-nonloop-tail-trim-fix]]と同じ考え方: 非ループテーブルは末尾値を
-  // 永久ホールドする(compiler.js stepEnvelope参照)ため、末尾の重複はテーブル長を
-  // 縮めるだけで再生結果に影響しない)。
+  // ([[envelope-nonloop-tail-trim-fix]]と同じ考え方: 非ループの絶対オフセット列は末尾値を
+  // 保持し続ける意味なので、末尾の重複はテーブル長を縮めるだけで再生結果に影響しない。
+  // 実際の@EPテーブルは registerShape で差分列+末尾0へ変換される)。
   function trimTrailingHold(diff) {
     let end = diff.length;
     while (end > 1 && diff[end - 1] === diff[end - 2]) end--;
@@ -2403,17 +2403,38 @@
   // ようになったため、登録先インデックスとは別に呼び出し元のpitchModが持つdelayを
   // そのまま素通しで返す。テーブル自体にdelayの概念は無い=同じ形なら異なるdelay値の
   // 呼び出し同士でも同じテーブル番号を共有できる)。
-  // periodic: loop=0(テーブル全体が繰り返し単位、headの概念が無くなったため常に先頭から
-  // ループする)。literal/ramp: loop=null(非ループ、末尾を永久ホールド)。
+  //
+  // ★@EPの値は本家ppmck準拠の「毎フレームの差分の累積」(2026-09-13修正、compiler.js
+  // pitchEnvelopeValue参照。以前は各フレームの絶対オフセットをそのまま書いており、当ツール内では
+  // 辻褄が合っていたが本家ppmckcでコンパイルすると別の動きになっていた)。classifyPitchModが
+  // 返すvaluesは「基準からの絶対オフセット列」なので、ここで差分列へ変換して登録する
+  // (toCumulativeDeltas)。this.tables に持つのは差分列:
+  //  ・periodic: [a0 | a1-a0, ..., a(P-1)-a(P-2), a0-a(P-1)] loop=1。1周ぶんの差分の合計は
+  //    必ず0(閉じた巡回)なので周回しても音程がドリフトしない(buildNoteEnvelopeDeltasと同じ理屈)
+  //  ・literal/ramp: [a0, a1-a0, ..., a(n-1)-a(n-2)] loop=null。実機は「|」無しテーブルの末尾値を
+  //    足し続けるので、defLines(書き出し時)で末尾に 0 を付けて止める(tablesには付けずに持つ:
+  //    下記の前方一致共有を絶対オフセット時代と同じ条件で判定するため)
+  // 差分がbyte幅(EP_VALUE_MIN..MAX)を超える形は登録せずnullを返す(→基準音のみ)。
   // ★loop有り同士(片方でもloop!=null)は前方一致していても共有・置き換えを一切行わない
   // (envelope.js EnvelopeRegistry.registerShapeと同じ理由・同じガード。
   // [[envelope-registry-loop-upgrade-bug]]参照。ループ有りのvaluesは「最小の繰り返し単位」に
   // 切り詰められており配列長が観測フレーム数を反映しないため、前方一致だけを根拠にした
   // 共有/差し替えは無関係な変調を混同する事故になる)。
+  function toCumulativeDeltas(absValues, isPeriodic) {
+    if (!absValues || absValues.length === 0) return null;
+    const out = [absValues[0]];
+    for (let k = 1; k < absValues.length; k++) out.push(absValues[k] - absValues[k - 1]);
+    if (isPeriodic) out.push(absValues[0] - absValues[absValues.length - 1]);
+    if (out.some(v => v < EP_VALUE_MIN || v > EP_VALUE_MAX)) return null;
+    return { values: out, loop: isPeriodic ? 1 : null };
+  }
+  MML.Convert.toCumulativePitchDeltas = toCumulativeDeltas;
+
   MML.Convert.PitchEnvelopeRegistry.prototype.registerShape = function (pitchMod) {
     if (!pitchMod) return null;
     const isPeriodic = pitchMod.type === 'periodic';
-    const shape = { values: pitchMod.values, loop: isPeriodic ? 0 : null };
+    const shape = toCumulativeDeltas(pitchMod.values, isPeriodic);
+    if (!shape) return null;
     for (const [idx, existing] of this.tables) {
       if (existing.loop != null || shape.loop != null) continue;
       if (isPrefix(existing.values, shape.values)) {
@@ -2655,6 +2676,15 @@
         seq = pitchSeq.map(v => base + Math.round((v - base) / (1 << sa)));
       }
     }
+    // ★MMLのEP/PT値は全音源「正=音程が上がる」(2026-09-14統一、compiler.js pitchRegDir参照)。
+    // pitchSeqはレジスタ空間なので、周期レジスタ系(directionUp=false: 音程が上がると値が減る)は
+    // 基準値を軸に反転してからMML値として分類・登録する。MPのfitVibratoにも反転後の列を渡すので
+    // 方向は常に「上向き=正」(true)で扱う
+    if (directionUp === false) {
+      const base0 = seq[0];
+      seq = seq.map(v => 2 * base0 - v);
+      directionUp = true;
+    }
     const pitchMod = MML.Convert.classifyPitchMod(seq);
     if (!pitchMod) return null;
     if (pitchMod.type === 'ramp') {
@@ -2679,6 +2709,8 @@
       const t = this.tables.get(i);
       const parts = t.values.map(String);
       if (t.loop != null) parts.splice(t.loop, 0, '|');
+      // 非ループは末尾0で止める(registerShapeのコメント参照。末尾が既に0なら付けない)
+      else if (t.values[t.values.length - 1] !== 0) parts.push('0');
       return `@EP${i} = { ${parts.join(' ')} }`;
     });
     const mpLines = Array.from(this.vibratoTables.keys()).sort((a, b) => a - b).map(i => {
@@ -2812,7 +2844,8 @@
   // になる。詳細は下記)から、@EN<n>用の累積差分テーブルを作る。
   //
   // cumulativeEnvelopeValue(compiler.js)は値を毎フレーム加算していく「累積」方式で、
-  // stepEnvelope(EPで使用)のような単純な周期的インデックス参照ではない。そのため
+  // @v(stepEnvelope)のような単純な周期的インデックス参照ではない(EPも2026-09-13以降は
+  // 同じ累積方式、registerShape/toCumulativeDeltas参照)。そのため
   // ループ(loop=0)で正しく繰り返すには、1周期ぶんの差分の合計が必ず0になっている
   // 必要がある(そうでないと繰り返すたびに音程がドリフトしてしまう)。
   // 「周期内の最後のノート(cycleNotes末尾)」を基準(オフセット0)に選び、

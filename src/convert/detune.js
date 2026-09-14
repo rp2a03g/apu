@@ -56,6 +56,11 @@
   function idealFreqOf(note) { return MML.Convert.noteToFreq(note); }
 
   // opts.cmd(src/convert/options.js)の D===false なら何もしない(最寄り半音のまま)
+  // ★MMLのD<n>は全音源「正=音程が上がる」(2026-09-14統一、compiler.js pitchRegDir参照)。
+  // ここで求める d はレジスタ空間の差(周期レジスタ系は音程が上がると値が減る)なので、
+  // periodFnの増減方向で符号を付けてMML値にする(periodFnIncreasingと同じ2点比較)
+  function mmlDetuneSign(pf, ev) { return pf(2000, ev) > pf(200, ev) ? 1 : -1; }
+
   MML.Convert.applyPitchDetune = function (channels, periodForFreq, opts) {
     opts = opts || {};
     if (opts.cmd && MML.Convert.normalizeCmd(opts.cmd).D === false) return;
@@ -75,7 +80,7 @@
         // したがって D は「実測値を格子へ丸めた整数 − テーブルの整数」で求める(=実測に一番近い
         // 格子点に必ず着地する)。★2026-09-07修正: 以前は round(raw − idealUnrounded) だったため、
         // テーブル側の丸めと逆向きに出ると1格子ぶん(FME-7 の o6 では約48セント=ほぼ半音)ずれた
-        const d = Math.round(periodForFreq(ev.rawFreq, ev)) - Math.round(idealPeriod);
+        const d = (Math.round(periodForFreq(ev.rawFreq, ev)) - Math.round(idealPeriod)) * mmlDetuneSign(periodForFreq, ev);
         if (d === 0) continue;
         // 上限は整数に落とす(D<n>は整数。VRC7のfnum等、理論値が非整数のチップで上限に張り付くと
         // D129.18… のような小数が出ていた。2026-09-07)
@@ -206,7 +211,7 @@
         // 1格子の大きさ(セント)。周期型(period∝1/f)も位相加算型(freqReg∝f)も |T|→|T|+1 の比で近似できる
         const unitCents = T !== 0 ? 1200 * Math.log2(1 + 1 / Math.abs(T)) : 0;
         const common = (rc !== T && unitCents >= COMMON_MIN_CENTS) ? rc - T : 0;
-        const d = (rw - rc) + common;
+        const d = ((rw - rc) + common) * mmlDetuneSign(pf, w.g.ev);
         if (d === 0) continue;
         const maxAbsDetune = Math.floor(Math.abs(idealPeriod) * maxAbsDetuneRatio); // 整数上限(applyPitchDetune参照)
         w.g.ev.detune = Math.max(-maxAbsDetune, Math.min(maxAbsDetune, d));

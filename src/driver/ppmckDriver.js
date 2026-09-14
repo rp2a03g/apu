@@ -34,17 +34,19 @@
  * VRC6パルス1/2/矩形波(サウ)・FME7(LOOKUP_FME7_PERIOD)・FDS(WFV_T13/WFO_T13直書き)・
  * N163(WFV_Tn/WFO_Tnテンプレート、3byte/entryテーブルのためTABLE_MAX縮小版)・
  * VRC7(WFO_Tn新設、NOTE+ENVALからfnum/blockを再計算し$9010/$9030を再書込み)が対象。
- * ノイズのみ対象外(離散周期選択でアルペジオという概念が馴染まないため)。SPCブラウザ側
+ * ノイズも2026-09-14から対象(LOOKUP_NOISE_PERIOD: NOTE+ENVALを16で割った余りで周期index。本家ppmckも
+ * ノイズ周期にEN/EPが効く)。SPCブラウザ側
  * 抽出は対応済みだがSPCはNSF書き出し経路を持たないためこのドライバとは無関係。
  * FME7のノイズ(0xF1=N<n>)と@<n>によるミキサー制御(0=ミュート/1=トーン/2=ノイズ/
  * 3=トーン+ノイズ、@2はノート番号がノイズ周期)、およびハードウェアエンベロープ
  * (0xF2=S<n>/M<n>)は2026-07-28に実装(FME7_PREP/FME7_WRITE_VOL参照)。
  * デチューン(0xFA、D<n>)は2026-07-24実装(APPLY_DETUNE/APPLY_DETUNE_N163参照)。
  * ピッチエンベロープ(0xF8、EP<n>)・ソフトウェアビブラート(0xFB、MP<n>)は2026-08-11実装
- * (EP_LOOKUP/LFO_SUB/WRITE_FREQ_ONLY参照)。D<n>と全く同じ「発音周波数レジスタへの
+ * (EP_LOOKUP(累積、2026-09-13)/LFO_SUB/WRITE_FREQ_ONLY参照)。D<n>と全く同じ「発音周波数レジスタへの
  * 生オフセット加算」空間をAPPLY_DETUNE/APPLY_DETUNE_N163内で合算する。
  * D<n>/EP<n>/MP<n>いずれも2A03パルス/三角・VRC6・MMC5・FME7・FDS・N163に対応、
- * VRC7・ノイズは対象外(compiler.js側のブラウザ再生と同じ対応範囲、DESIGN-PITCH.md §7)。
+ * VRC7は対象外(compiler.js側のブラウザ再生と同じ対応範囲、DESIGN-PITCH.md §7)。ノイズは
+ * 2026-09-14から対象: 周期index(0-15)へD/EP/MP/PTを加算して0-15にクランプ(compiler.jsのノイズ経路と同じ)。
  *
  * --- データ埋め込みは実際に使うチップの分だけ ---
  * 各拡張チップの周波数テーブル・波形データ・レジスタ書き込みハンドラは、
@@ -769,9 +771,10 @@ PLAY_CHLOOP:
     // WFO_T*: EP<n>/MP<n>の毎フレーム継続再計算専用ハンドラ(周期/周波数レジスタのみ
     // 書き込み、音量レジスタは触らない)。WRITE_FREQ_ONLYのコメント参照。対象チップ
     // (2A03パルス/三角・VRC6・MMC5・FME7・FDS・N163、DESIGN-PITCH.md §7)のみエントリを
-    // 持ち、それ以外(VRC7・ノイズ・未使用スロット)はWFO_NONE(何もしない)を指す
+    // 持ち、それ以外(VRC7・未使用スロット)はWFO_NONE(何もしない)を指す。ノイズ(WFO_T3)は
+    // 2026-09-14から対象(本家ppmckもノイズ周期にEP/ENが効く。compiler.jsのノイズ経路と同じ)
     const wfoEntries = new Array(TYPE_COUNT).fill('WFO_NONE');
-    if (usesFreqOnly) { wfoEntries[0] = 'WFO_T0'; wfoEntries[1] = 'WFO_T1'; wfoEntries[2] = 'WFO_T2'; }
+    if (usesFreqOnly) { wfoEntries[0] = 'WFO_T0'; wfoEntries[1] = 'WFO_T1'; wfoEntries[2] = 'WFO_T2'; wfoEntries[3] = 'WFO_T3'; }
 
     // ソフトウェア音量エンベロープ(@v<n>)のテーブル本体をROMへ埋め込む(実際に使われて
     // いる場合のみ)。envIndexList[i]がmckBytecode.jsのOP_VOL_ENVで参照する番号iに対応する。
@@ -1019,9 +1022,15 @@ ${usesDutyEnv ? `APPLY_TONE_ENV:
         epDataBlocks.join('\n')
       );
       // --- EP<n>: X=チャンネル番号のまま呼ぶ。ENV_LOOKUPと全く同じテーブル探索
-      // (EPSEL[X]/EPTICK[X]からEP_LEN/EP_LOOPを引き、末尾ならループかホールド)だが、
-      // 結果を0-15にクランプするVOL[X]書込みではなく、符号付きbyteをそのまま16bitへ
-      // 符号拡張してEPVALLO/EPVALHI[X]へ書く(APPLY_DETUNE/APPLY_DETUNE_N163が読む)。
+      // (EPSEL[X]/EPTICK[X]からEP_LEN/EP_LOOPを引き、末尾ならループか末尾値の繰り返し)だが、
+      // 結果を0-15にクランプするVOL[X]書込みではなく、符号付きbyteを16bitへ符号拡張して
+      // ★累積値EPVALLO/EPVALHI[X]へ足し込む(APPLY_DETUNE/APPLY_DETUNE_N163が読む)。
+      // 2026-09-13修正: 本家ppmck(sounddrv.h sound_pitch_enverope→freq_add_mcknumber)は
+      // テーブル値を「現在のレジスタ値」へ毎フレーム加減算する累積方式(compiler.js
+      // pitchEnvelopeValue参照)。以前は@v同様に値を毎フレーム読み直す絶対方式で本家と違っていた。
+      // 「|」無しのテーブルは末尾値を繰り返し足し続ける(ppmckc checkLoopが末尾1値の前に
+      // ループ点を差し込むのと同じ結果。末尾が0なら止まる)。累積値はRD_NOTEで0へ戻す。
+      // ENVAL(EN_STEP)と同じ考え方だが、EPは16bit幅なので2バイトの符号付き加算になる。
       // PERLO/PERHI/PERLO2はENV_LOOKUPと同じ理由で使い回しスクラッチ(このルーチンの
       // 呼び出し元は直後に周期テーブル参照でこれらを上書きするだけなので安全) ---
       extraHandlers.push(`
@@ -1058,15 +1067,21 @@ EPLK_INBOUNDS:
 EPLK_NOCARRY:
     LDY #$00
     LDA (${hex(PERLO)}),Y
-    STA ${hex(EPVALLO)},X
+    STA ${hex(PERLO)}         ; 今回の差分(符号付きbyte)。PERLOはこの後どうせ上書きされるスクラッチ
     BPL EPLK_POS
     LDA #$FF
-    STA ${hex(EPVALHI)},X
-    JMP EPLK_DONE
+    JMP EPLK_ADD
 EPLK_POS:
     LDA #$00
+EPLK_ADD:
+    STA ${hex(PERHI)}         ; 符号拡張した上位バイト
+    CLC
+    LDA ${hex(EPVALLO)},X
+    ADC ${hex(PERLO)}
+    STA ${hex(EPVALLO)},X
+    LDA ${hex(EPVALHI)},X
+    ADC ${hex(PERHI)}
     STA ${hex(EPVALHI)},X
-EPLK_DONE:
     RTS
 
 ; --- EP<n>,<delay>(2026-08-11 別プロジェクトA): delayカウントダウン+テーブル参照を
@@ -1097,7 +1112,7 @@ EP_STEP_LOOKUP:
     // --- EN<n>(ノートエンベロープ=高速アルペジオ、2026-08-14)。EPと同じ「使われている
     // インデックスだけをコンパクトに詰める」方式(enIndexList/noteEnvIndexRemap、
     // buildBankedNsfBytes参照)。値は符号付きbyte(-128〜127、EP_DATAと同じ範囲)。
-    // ただしEP_LOOKUPと違い「テーブルの値をそのまま読み直す」方式ではなく、前回の
+    // EP_LOOKUP(2026-09-13以降は同じ累積方式)と同様、前回の
     // 累積値(ENVAL,X)へ今回ぶんの差分を足し込む方式(compiler.jsのcumulativeEnvelopeValue
     // が「values[0..tick]の総和」であることの、フレームごとの逐次計算版) ---
     const enTableCount = enIndexList.length;
@@ -1121,8 +1136,9 @@ EP_STEP_LOOKUP:
       // --- EN<n>: X=チャンネル番号のまま呼ぶ。テーブル探索自体はEP_LOOKUPと同型
       // (ENSEL[X]/ENTICK[X]からEN_LEN/EN_LOOPを引く)だが、末尾に達し「ループ無し」なら
       // それ以上は何もせず現状の累積値を保持したまま抜ける(compiler.js側の「非ループは
-      // 最終累積値を永久ホールド」と同じ意味。同じ末尾要素を足し込み続けるとドリフトする
-      // ため、EPの「末尾値を読み直す」方式とはここが違う)。ループ有りなら末尾を過ぎた分は
+      // 最終累積値を永久ホールド」と同じ意味。★本家ppmckは末尾の差分を足し続ける
+      // (ppmckc checkLoop)ので、ENのこの頭打ちは本家と違う既知の差。EPは2026-09-13に
+      // 本家準拠(末尾値を足し続ける、EP_LOOKUP参照)へ直した)。ループ有りなら末尾を過ぎた分は
       // ENTICKをループ開始位置へ巻き戻してから通常通り加算する ---
       extraHandlers.push(`
 EN_STEP:
@@ -1195,6 +1211,20 @@ CEILDIV_DONE:
     LDA ${hex(CDQ)}
     RTS`);
     }
+    // 音程方向テーブル PITCH_DIR_TABLE(compiler.jsのperiodFnIncreasing/pitchRegDir相当。実機の
+    // freq_vector_table)。CHTYPEをキーにした固定.byte配列: 周期レジスタ系(2A03パルス/三角・
+    // VRC6・MMC5・FME7、値が下がるほど音程が上がる)とノイズ(周期index、小さいほど高い)は$FF、
+    // 周波数レジスタ系(FDS/N163、値が上がるほど音程が上がる)は$01。用途は2つ:
+    //  ・LFO_SUB: MPの初期方向(「最初に音程が上がる」向き)
+    //  ・APPLY_DETUNE: D/EP/PTの符号(MML上は全音源「正=音程が上がる」なので、$FFの
+    //    チップではレジスタから減算する。2026-09-14統一)
+    // VRC7/未使用スロットは$FFで埋めるが参照されない
+    if (usesMp || usesAnyPitchOffset) {
+      const pitchDirTable = new Array(TYPE_COUNT).fill(0xff);
+      pitchDirTable[TYPE_FDS] = 0x01;
+      for (let ch = 0; ch < N163_CHANNEL_COUNT; ch++) pitchDirTable[TYPE_N163_BASE + ch] = 0x01;
+      extraTables.push(`PITCH_DIR_TABLE:\n${bytesToDb(new Uint8Array(pitchDirTable))}`);
+    }
     if (mpTableCount > 0) {
       const mpDelays = mpIndexList.map(idx => Math.max(0, Math.min(255, ((envelopes.mp[idx] || {}).delay) || 0)));
       const mpSpeeds = mpIndexList.map(idx => Math.max(1, Math.min(255, ((envelopes.mp[idx] || {}).speed) || 0)));
@@ -1204,19 +1234,6 @@ CEILDIV_DONE:
         `MP_SPEED:\n    .byte ${mpSpeeds.join(',')}\n` +
         `MP_DEPTH:\n    .byte ${mpDepths.join(',')}`
       );
-      // 方向テーブル(compiler.jsのperiodFnIncreasing相当。実機のfreq_vector_table)。
-      // CHTYPEをキーにした固定.byte配列: 周期レジスタ系(2A03/VRC6/MMC5/FME7、値が
-      // 下がるほど音程が上がる)は初期方向-1($FF)、周波数レジスタ系(FDS/N163、値が
-      // 上がるほど音程が上がる)は+1($01)。対象外チップ(VRC7/ノイズ/未使用)は
-      // $FFで埋めるが、これらのCHTYPEでMPACTが立つことはない(mmlEmit側がD/EP/MPを
-      // 対象チップにしか出力しないため)ので値自体は参照されない
-      const mpDirTable = new Array(TYPE_COUNT).fill(0xff);
-      [TYPE_2A03_PULSE_A, TYPE_2A03_PULSE_B, TYPE_2A03_TRI, TYPE_VRC6_PULSE1, TYPE_VRC6_PULSE2,
-        TYPE_VRC6_SAW, TYPE_MMC5_PULSE1, TYPE_MMC5_PULSE2, TYPE_FME7_CH0, TYPE_FME7_CH1, TYPE_FME7_CH2]
-        .forEach(t => { mpDirTable[t] = 0xff; });
-      mpDirTable[TYPE_FDS] = 0x01;
-      for (let ch = 0; ch < N163_CHANNEL_COUNT; ch++) mpDirTable[TYPE_N163_BASE + ch] = 0x01;
-      extraTables.push(`MP_DIR_TABLE:\n${bytesToDb(new Uint8Array(mpDirTable))}`);
       extraHandlers.push(`
 ; --- LFO_SUB: lfo_sub本体の忠実移植。X=チャンネル番号のまま呼ぶ(1フレーム分だけ状態を
 ; 進める。compiler.jsのvibratoSequence内側ループの1反復と同一)。delay中はデクリメントして
@@ -3506,7 +3523,7 @@ MP_INIT:
     STA ${hex(MPVALHI)},X
     LDA ${hex(CHTYPE)},X
     TAY
-    LDA MP_DIR_TABLE,Y
+    LDA PITCH_DIR_TABLE,Y
     STA ${hex(MPDIR)},X
     RTS` : ''}
 ${usesPortamento ? `
@@ -3842,6 +3859,8 @@ ${usesEp ? `    ; EP<n>,<delay>も同じ理由(@v<n>のRD_NOTE_NOENVと同一の
     STA ${hex(EPDELAY)},X
     LDA #$00
     STA ${hex(EPTICK)},X
+    STA ${hex(EPVALLO)},X  ; ★累積値も0から(2026-09-13、累積方式化。実機のfrequency_setが
+    STA ${hex(EPVALHI)},X  ;  ノートオンで基準値へ戻すのに対応。ENVALのRD_NOTEリセットと同じ)
     JSR EP_STEP
 RD_NOTE_NOEP:` : ''}
 ${usesEn ? `    ; EN<n>も"この音符から"必ずtick0/累積値0から再初期化する(@v<n>のRD_NOTE_NOENVと
@@ -4185,9 +4204,16 @@ ${usesAnyPitchOffset ? `; --- D<n>/EP<n>/MP<n>/PT<n>共通処理。呼出し前�
 ; 最終的な加算結果が負(PERHIのbit7が立つ)ならPERLO/PERHI=0にクランプする(JS側=
 ; compiler.jsのapplyDetuneのMath.max(0,...)と同じ意図。上限側のクランプは行わない=
 ; 極端に大きいオフセットでレジスタ幅を超えるケースは非対応、通常の用途の値では発生しない)。
+; ★符号(2026-09-14統一): MML上のD/EP/PTは全音源「正=音程が上がる」。PITCH_DIR_TABLE[CHTYPE]が
+; $FF(周期レジスタ系・ノイズ)なら D/EP/PT を減算、$01(FDS。N163はAPPLY_DETUNE_N163側)なら加算する。
+; MP(MPVAL、LFO_SUBが方向テーブルで既に向きを決めている)とPS(レジスタ差から直接算出)は常に加算。
+; compiler.js pitchRegisterOffset の offset = dir*(D+EP) + MP、+ dir*PT + PS と同じ。Yは破壊する。
 ; Xは破壊しない。D/EP/MP/PT/PS全部未使用の曲ではルーチン本体も全JSRも省略される
 ; (usesAnyPitchOffset、buildFixedSource末尾の行フィルタ参照) ---
 APPLY_DETUNE:
+` : ''}${usesAnyPitchOffset && (usesDetune || usesEp || usesPortamento) ? `    LDY ${hex(CHTYPE)},X
+    LDA PITCH_DIR_TABLE,Y
+    BMI AD_SUB
 ` : ''}${usesAnyPitchOffset && usesDetune ? `    CLC
     LDA ${hex(PERLO)}
     ADC ${hex(DETUNE_LO)},X
@@ -4202,19 +4228,43 @@ APPLY_DETUNE:
     LDA ${hex(PERHI)}
     ADC ${hex(EPVALHI)},X
     STA ${hex(PERHI)}
-` : ''}${usesMp ? `    CLC
-    LDA ${hex(PERLO)}
-    ADC ${hex(MPVALLO)},X
-    STA ${hex(PERLO)}
-    LDA ${hex(PERHI)}
-    ADC ${hex(MPVALHI)},X
-    STA ${hex(PERHI)}
 ` : ''}${usesPortamento ? `    CLC
     LDA ${hex(PERLO)}
     ADC ${hex(PTVALLO)},X
     STA ${hex(PERLO)}
     LDA ${hex(PERHI)}
     ADC ${hex(PTVALHI)},X
+    STA ${hex(PERHI)}
+` : ''}${usesAnyPitchOffset && (usesDetune || usesEp || usesPortamento) ? `    JMP AD_MPPS
+AD_SUB:
+` : ''}${usesAnyPitchOffset && usesDetune ? `    SEC
+    LDA ${hex(PERLO)}
+    SBC ${hex(DETUNE_LO)},X
+    STA ${hex(PERLO)}
+    LDA ${hex(PERHI)}
+    SBC ${hex(DETUNE_HI)},X
+    STA ${hex(PERHI)}
+` : ''}${usesEp ? `    SEC
+    LDA ${hex(PERLO)}
+    SBC ${hex(EPVALLO)},X
+    STA ${hex(PERLO)}
+    LDA ${hex(PERHI)}
+    SBC ${hex(EPVALHI)},X
+    STA ${hex(PERHI)}
+` : ''}${usesPortamento ? `    SEC
+    LDA ${hex(PERLO)}
+    SBC ${hex(PTVALLO)},X
+    STA ${hex(PERLO)}
+    LDA ${hex(PERHI)}
+    SBC ${hex(PTVALHI)},X
+    STA ${hex(PERHI)}
+` : ''}${usesAnyPitchOffset && (usesDetune || usesEp || usesPortamento) ? `AD_MPPS:
+` : ''}${usesMp ? `    CLC
+    LDA ${hex(PERLO)}
+    ADC ${hex(MPVALLO)},X
+    STA ${hex(PERLO)}
+    LDA ${hex(PERHI)}
+    ADC ${hex(MPVALHI)},X
     STA ${hex(PERHI)}
 ` : ''}${usesPitchShift ? `    CLC
     LDA ${hex(PERLO)}
@@ -4322,13 +4372,36 @@ SIL_T2:
     RTS
 
 ; --- 2A03ノイズ ($400C、1chのみなので固定アドレス) ---
-WFV_T3:
+; 周期index = 15 - ((NOTE + ENVAL) mod 16) をPERLO/PERHI(16bit)に置き、D/EP/MP/PTをAPPLY_DETUNEで
+; 加算(負は0にクランプ済み)したのち上限15でクランプする(compiler.jsのノイズ経路
+; noisePeriodIndex(round(note+en)) → clamp(idx+offset, 0, 15) と同じ。2026-09-14、本家ppmckの
+; sound_pitch_enverope/frequency_set がノイズにも効くのに合わせた) ---
+LOOKUP_NOISE_PERIOD:
     LDA ${hex(NOTE)},X
-    AND #$0F
+${usesEn ? `    CLC
+    ADC ${hex(ENVAL)},X
+` : ''}    AND #$0F
     STA ${hex(PERLO)}
     LDA #$0F
     SEC
-    SBC ${hex(PERLO)}      ; A = 15 - (note & 15)
+    SBC ${hex(PERLO)}      ; A = 15 - ((note+en) & 15)
+    STA ${hex(PERLO)}
+    LDA #$00
+    STA ${hex(PERHI)}
+${usesAnyPitchOffset ? `    JSR APPLY_DETUNE
+    LDA ${hex(PERHI)}
+    BNE LNP_CLAMP15        ; 16以上(負はAPPLY_DETUNEで0にクランプ済み)
+    LDA ${hex(PERLO)}
+    CMP #$10
+    BCC LNP_OK
+LNP_CLAMP15:
+    LDA #$0F
+    STA ${hex(PERLO)}
+LNP_OK:
+` : ''}    RTS
+WFV_T3:
+    JSR LOOKUP_NOISE_PERIOD
+    LDA ${hex(PERLO)}
     STA $400E
     LDA #$00
     STA $400F
@@ -4336,6 +4409,12 @@ WFV_T3:
     ORA ${hex(VOL)},X
     STA $400C
     RTS
+${usesFreqOnly ? `; ノイズのEP/MP/PT/EN継続フレーム(周期indexのみ再書込み)
+WFO_T3:
+    JSR LOOKUP_NOISE_PERIOD
+    LDA ${hex(PERLO)}
+    STA $400E
+    RTS` : ''}
 SIL_T3:
     LDA #$30
     STA $400C

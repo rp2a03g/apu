@@ -58,7 +58,9 @@
  *                  ドライバ(Konami等)の曲を、音符長=キーオン間隔のまま1コマンドで表せる
  *   t<n>           テンポ (BPM。曲中の任意の位置で変更可)
  *   K<n>           移調 (半音、符号あり)
- *   D<n>           デチューン (周期/周波数レジスタへの生オフセット、符号あり。以降の音符に
+ *   D<n>           デチューン (周期/周波数レジスタへの生オフセット、符号あり。★全音源で正=音程が
+ *                  上がる(2026-09-14統一、pitchRegDir参照。EP/PTも同じ向き。レジスタ値としては
+ *                  周期レジスタ系で減算になる)。以降の音符に
  *                  持続適用。同じ音を別チャンネルでわずかにずらして鳴らすコーラス効果等に使う。
  *                  2A03パルス/三角/ノイズ(A/B/C/D)・VRC6・MMC5・FME7・FDS・N163対応(N163は
  *                  周波数レジスタが18bit相当のスケールのため同じ値でも変化量は小さくなる)。
@@ -95,6 +97,12 @@
  *                  一字一句同じ「発音周波数の値に加算されます」であること、実機ドライバの
  *                  sound_pitch_enveropeが detune と同じ freq_add_mcknumber を呼ぶことを
  *                  実ソースで確認済み。以前の実装は値/128を半音とみなしていたが誤りだった)。
+ *                  ★値はENと同じ「毎フレームの差分の累積」(2026-09-13修正、pitchEnvelopeValue
+ *                  参照): 実機はテーブル値を基準値ではなく「現在のレジスタ値」へ毎フレーム
+ *                  足し込む(sound_freq_low/highを基準へ戻すのはノートオンのfrequency_setだけ)。
+ *                  「|」無しのテーブルは末尾の値を毎フレーム足し続ける(ppmckc checkLoopが
+ *                  末尾1値の前にループ点を差し込むため)ので、止めるには末尾を0にする。
+ *                  以前は@v用のstepEnvelope(各フレームの絶対値)を流用しており本家と違っていた。
  *                  対応チャンネルはD<n>と同じ(2A03全4ch・VRC6・MMC5・FME7・FDS・N163、
  *                  VRC7は対象外)
  *   MP<n> / MPOF   ソフトウェアビブラート。@MP<n>={delay,speed,depth}で定義。depthはEP/Dと
@@ -1029,6 +1037,9 @@
 
   // ノートエンベロープ(EN)は「前回値からの相対値」の累積(cumulative)。
   // ループがあれば周回後もループ区間の合計を繰り返し足し込み、無ければ全体の合計で頭打ちにする。
+  // (★本家ppmckcは「|」無しのテーブルにも末尾1値の前へループ点を差し込む(datamake.c checkLoop)
+  //  ので、実機のENは末尾の差分を足し続ける。ENのこの「頭打ち」は本家と違う既知の差、2026-09-13確認。
+  //  EPは同日に本家準拠へ直した: pitchEnvelopeValue参照)
   function cumulativeEnvelopeValue(table, tick) {
     const { values, loop } = table;
     if (values.length === 0) return 0;
@@ -1087,6 +1098,15 @@
   function periodFnIncreasing(periodFn) {
     return periodFn(2000) > periodFn(200);
   }
+  // ★MMLのD<n>/EP/PTの値は全音源「正=音程が上がる」(2026-09-14統一。本家ppmckの
+  // #PITCH-CORRECTION相当を常時適用したのと同じ向き)。レジスタへ足す向きはチップで違い、
+  // 周期レジスタ系(2A03パルス/三角/ノイズindex・VRC6・MMC5・FME7)は値が減ると音程が上がるので
+  // -1、周波数レジスタ系(FDS・N163、VRC7のfnum)は+1。MP(vibratoSequence)は以前から
+  // periodFnIncreasingで「最初に上がる」向きに正規化済みなので対象外。
+  // NSF書き出し側は ppmckDriver.js APPLY_DETUNE が PITCH_DIR_TABLE(CHTYPE別)で同じ符号を付ける
+  function pitchRegDir(periodFn) { return periodFnIncreasing(periodFn) ? 1 : -1; }
+  // 周期レジスタ系チップの無変調ノートでD<n>をレジスタへ足す値(符号反転)
+  function periodRegDetune(seg) { return -(seg.detune || 0); }
 
   // lfo_sub本体の忠実移植。1音符ぶん(dur フレーム)を一度に状態遷移させ、フレーム毎の
   // オフセット値配列を返す(stepEnvelopeの事前計算版と同じ考え方)。direction(+1/-1)は
@@ -1230,6 +1250,28 @@
 
   // EN(ノートエンベロープ)は「発音ノート番号の値に加算」(ppmck公式リファレンス通り、
   // 半音・ノート番号空間、前回値からの相対値の累積)。この関数だけがノート番号空間を扱う。
+  // ピッチエンベロープ(EP)の tick フレーム目のオフセット(周期/周波数レジスタへの生の加算量)。
+  // 本家ppmck準拠の「毎フレームの差分の累積」(2026-09-13修正。以前は@v用stepEnvelopeを流用して
+  // 「各フレームの絶対値」として読んでおり、実機と挙動が違っていた):
+  //  ・実機 sound_pitch_enverope → pitch_sub → freq_add_mcknumber は、テーブルの1バイトを
+  //    sound_freq_low/high(現在のレジスタ値)へそのまま加減算する。基準値へ戻すのは
+  //    ノートオン時の frequency_set(oto_set)だけ。ノートオンのフレームも do_effect が同じ
+  //    フレーム内で走るので tick0 から table[0] が効く(以前の実装と同じ起点)。
+  //  ・「|」有り: ループ区間の差分を周回して足し続ける(合計0なら往復ベンド)。
+  //  ・「|」無し: ppmckc の checkLoop が末尾1値の直前にループ点を差し込むため、実機は
+  //    末尾の差分を毎フレーム足し続ける(= loop を values.length-1 と見なす)。
+  //    「末尾を0で終える」のが本家流の止め方。ENのcumulativeEnvelopeValueの「頭打ち」とは
+  //    ここが違う(そちらは本家と違う既知の差、上記コメント参照)。
+  // NSF書き出し側(src/driver/ppmckDriver.js EP_LOOKUP)は同じ意味論の逐次加算版。
+  function pitchEnvelopeValue(table, tick) {
+    if (!table || table.values.length === 0) return 0;
+    if (table.loop == null || table.loop >= table.values.length) {
+      return cumulativeEnvelopeValue({ values: table.values, loop: table.values.length - 1 }, tick);
+    }
+    return cumulativeEnvelopeValue(table, tick);
+  }
+  Mml.pitchEnvelopeValue = pitchEnvelopeValue;
+
   function noteEnvelopeOffset(seg, envelopes, tick) {
     if (seg.noteEnv == null || seg.noteEnv === 255) return 0;
     const table = envelopes.en[seg.noteEnv];
@@ -1253,8 +1295,11 @@
   // tick索引で読むだけなので状態を持たない。
   // fx: fxOffsets(NO_FX_OFFSETS参照)。EPはtick+fx.ep、MP/PTは事前計算列の添字tick+fx.mp/
   // tick+fx.ptで参照する(PSでの効果継続用。psSeqだけはPS音符自身のグライドなので常にtick)
-  function pitchRegisterOffset(seg, envelopes, tick, vibSeq, ptSeq, psSeq, fx) {
+  // dir: pitchRegDir(periodFn)(+1/-1)。D/EP/PTのMML値(正=音程が上がる)をレジスタの向きへ直す。
+  // MP(vibSeq)とPS(psSeq)は既にレジスタ空間の値なので掛けない
+  function pitchRegisterOffset(seg, envelopes, tick, vibSeq, ptSeq, psSeq, fx, dir) {
     fx = fx || NO_FX_OFFSETS;
+    dir = dir || 1;
     let offset = seg.detune || 0;
     if (seg.pitchEnv != null && seg.pitchEnv !== 255) {
       const table = envelopes.ep[seg.pitchEnv];
@@ -1263,15 +1308,17 @@
       // tickをdelayぶん巻き戻してテーブル先頭(index0)から辿る。
       const delay = seg.pitchEnvDelay || 0;
       const epTick = tick + fx.ep;
-      if (table && epTick >= delay) offset += stepEnvelope(table, epTick - delay);
+      // 累積(本家準拠、pitchEnvelopeValue参照)。delay消化後の最初のフレームが table[0]
+      if (table && epTick >= delay) offset += pitchEnvelopeValue(table, epTick - delay);
     }
+    offset *= dir; // D+EP をレジスタの向きへ(正=音程が上がる → 周期レジスタ系は減算)
     if (vibSeq) offset += vibSeq[tick + fx.mp];
     // SA<num>(N163専用): 本家仕様どおりD/EP/MPの合算値を<num>回左シフトする
     // (実機はdetune_plus_with_asl等の共通aslループ、sounddrv.h freq_add_mcknumber参照)。
     // PT/PS(当プロジェクト独自拡張)はレジスタ値から直接算出した全精度オフセットなので
     // シフト対象にしない。
     if (seg.pitchSa) offset *= (1 << seg.pitchSa);
-    if (ptSeq) offset += ptSeq[tick + fx.pt];
+    if (ptSeq) offset += dir * ptSeq[tick + fx.pt];
     if (psSeq) offset += psSeq[tick];
     return offset;
   }
@@ -1290,8 +1337,9 @@
   function writePitchModulation(writeLog, startFrame, dur, seg, envelopes, periodFn, max, writeFn, fxOffsets) {
     const fx = fxOffsets || NO_FX_OFFSETS;
     const mpActive = seg.vibrato != null && seg.vibrato !== 255;
+    const dir = pitchRegDir(periodFn);
     const vibSeq = mpActive
-      ? vibratoSequence(envelopes.mp[seg.vibrato], dur + fx.mp, periodFnIncreasing(periodFn) ? 1 : -1)
+      ? vibratoSequence(envelopes.mp[seg.vibrato], dur + fx.mp, dir)
       : null;
     const ptSeq = seg.portamento ? portamentoSequence(seg.portamento, dur + fx.pt) : null;
     // PS(ポルタメント、実機準拠): oldReg(グライド元の音のレジスタ値)とnewReg(このセグメント
@@ -1331,7 +1379,7 @@
       const { freq: baseFreq, noteNumber: baseNoteNumber } = activePitchAt(seg, t);
       const enOffset = noteEnvelopeOffset(seg, envelopes, t + fx.en);
       const freq = enOffset === 0 ? baseFreq : noteFrequency(baseNoteNumber + enOffset);
-      const regOffset = pitchRegisterOffset(seg, envelopes, t, vibSeq, ptSeq, psSeq, fx);
+      const regOffset = pitchRegisterOffset(seg, envelopes, t, vibSeq, ptSeq, psSeq, fx, dir);
       const value = applyDetune(periodFn(freq), regOffset, max);
       const attack = attackFrames != null && attackFrames.has(t);
       if (value !== last || attack) {
@@ -1715,7 +1763,7 @@
               }, fx);
             smoothLastHi = lastHi;
           } else {
-            const period = applyDetune(pulsePeriod(seg.freq), seg.detune, 0x7FF);
+            const period = applyDetune(pulsePeriod(seg.freq), periodRegDetune(seg), 0x7FF);
             writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
             const hi = (period >> 8) & 0x07;
             if (!seg.smooth || hi !== smoothLastHi) writeLog[startFrame].push({ addr: base + 3, value: hi });
@@ -1760,7 +1808,7 @@
               }, fx);
             smoothLastHi = lastHi;
           } else {
-            const period = applyDetune(trianglePeriod(seg.freq), seg.detune, 0x7FF);
+            const period = applyDetune(trianglePeriod(seg.freq), periodRegDetune(seg), 0x7FF);
             writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
             const hi = (period >> 8) & 0x07;
             if (!seg.smooth || hi !== smoothLastHi) writeLog[startFrame].push({ addr: base + 3, value: hi });
@@ -1790,11 +1838,14 @@
           if (hasPitchModulation(seg) || seg.detune) {
             let lastIdx = -1;
             // ノイズchは周期/周波数レジスタではなく離散indexなのでperiodFnが無く、
-            // periodFnIncreasingによる方向自動判定ができない。実機のfreq_vector_table
-            // 相当の値も未確認のため、direction=+1固定とする(DESIGN.md §7でD/EP/MPの
-            // 適用対象外と位置づけているノイズchの中では既存の簡略対応の範囲内)。
+            // periodFnIncreasingによる方向自動判定ができない。direction=-1固定とする(下記)。
+            // ★NSF書き出し側(ppmckDriver.js LOOKUP_NOISE_PERIOD/WFO_T3、MP_DIR_TABLEのノイズ=+1)も
+            // 2026-09-14からこの経路と同じ計算(index+D/EP/MP/PT→0-15クランプ)で、6502との
+            // フレーム突き合わせで一致を確認済み。本家ppmckもノイズ周期にEP/ENが効く。
             const mpActive = seg.vibrato != null && seg.vibrato !== 255;
-            const vibSeq = mpActive ? vibratoSequence(env.mp[seg.vibrato], dur, 1) : null;
+            // ノイズの周期indexは小さいほど高い音なので、MP/D/EP/PTの向きは周期レジスタ系と同じ-1
+            // (MML値は全音源「正=音程が上がる」、pitchRegDir参照。2026-09-14)
+            const vibSeq = mpActive ? vibratoSequence(env.mp[seg.vibrato], dur, -1) : null;
             // ポルタメントはtarget自体が符号付きなのでMPのような方向判定は不要(ノイズchも
             // 同様に対応できる)
             const ptSeq = seg.portamento ? portamentoSequence(seg.portamento, dur) : null;
@@ -1802,7 +1853,7 @@
               const { noteNumber: baseNoteNumber } = activePitchAt(seg, t);
               const enOffset = noteEnvelopeOffset(seg, env, t);
               const baseIdx = noisePeriodIndex(Math.round(baseNoteNumber + enOffset));
-              const regOffset = pitchRegisterOffset(seg, env, t, vibSeq, ptSeq);
+              const regOffset = pitchRegisterOffset(seg, env, t, vibSeq, ptSeq, null, null, -1);
               const idx = Math.max(0, Math.min(15, Math.round(baseIdx + regOffset)));
               if (idx !== lastIdx) {
                 writeLog[startFrame + t].push({ addr: base + 2, value: idx & 0x0F });
@@ -1868,7 +1919,7 @@
                 }
               });
           } else {
-            const period = applyDetune(pulsePeriod(seg.freq), seg.detune, 0xFFF);
+            const period = applyDetune(pulsePeriod(seg.freq), periodRegDetune(seg), 0xFFF);
             writeLog[startFrame].push({ addr: base + 1, value: period & 0xFF });
             writeLog[startFrame].push({ addr: base + 2, value: 0x80 | ((period >> 8) & 0x0F) });
           }
@@ -1906,7 +1957,7 @@
                 }
               });
           } else {
-            const period = applyDetune(sawPeriod(seg.freq), seg.detune, 0xFFF);
+            const period = applyDetune(sawPeriod(seg.freq), periodRegDetune(seg), 0xFFF);
             writeLog[startFrame].push({ addr: 0xB001, value: period & 0xFF });
             writeLog[startFrame].push({ addr: 0xB002, value: 0x80 | ((period >> 8) & 0x0F) });
           }
@@ -1958,7 +2009,7 @@
               }
             });
         } else {
-          const period = applyDetune(pulsePeriod(seg.freq), seg.detune, 0x7FF);
+          const period = applyDetune(pulsePeriod(seg.freq), periodRegDetune(seg), 0x7FF);
           writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
           writeLog[startFrame].push({ addr: base + 3, value: (period >> 8) & 0x07 });
         }
@@ -2022,7 +2073,7 @@
                 writeLog[f].push({ addr: 0xE000, value: (period >> 8) & 0x0F });
               });
           } else {
-            const period = applyDetune(fme7Period(seg.freq), seg.detune, 0xFFF);
+            const period = applyDetune(fme7Period(seg.freq), periodRegDetune(seg), 0xFFF);
             writeLog[startFrame].push({ addr: 0xC000, value: periodRegLo });
             writeLog[startFrame].push({ addr: 0xE000, value: period & 0xFF });
             writeLog[startFrame].push({ addr: 0xC000, value: periodRegHi });
