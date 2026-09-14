@@ -222,13 +222,18 @@ async function main() {
 
   const items = await expandInput(file);
   const item = items[parseInt(flag('--entry', '0'), 10)];
-  const bytes = item.read ? await item.read() : item.bytes;
+  const rawBytes = item.read ? await item.read() : item.bytes;
   const seconds = parseInt(flag('--sec', '15'), 10);
+  // probe() は NSFe を素のNSFバイト列へ正規化し(VGMはgunzip)、ヘッダも返す。描画には
+  // 必ずこの正規化後のバイト列を渡す。生の NSFe を captureSong に渡すと INIT が
+  // "NSFE" マジックを命令として実行してしまい、エラーにならず全区間無音になる
+  // (ファミコンポの .nsfe 全部で踏んだ。convert.js は最初から probe 経由だった)
+  const { bytes, header } = await probe(rawBytes, item.format);
   // 曲番号の既定は convert.js と共通(ヘッダ宣言値)。ここを0固定にすると
   // 変換で見ている曲と別の曲を測ってしまい、数値の突き合わせができなくなる
   const song = flag('--song', null) != null
     ? parseInt(flag('--song', '0'), 10)
-    : defaultSong(item.format, (await probe(bytes, item.format)).header);
+    : defaultSong(item.format, header);
 
   const t0 = Date.now();
   const { audio, sampleRate } = await renderAudio(bytes, item.format, { song, seconds });
