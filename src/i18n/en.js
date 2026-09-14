@@ -1094,21 +1094,36 @@
     '試聴ch': 'Audition ch',
     '音量なし': 'no volume',
     '音量 0-{max}': 'Volume 0-{max}',
-    '音量 0-{max}(実効{eff}で頭打ち)': 'Volume 0-{max} (effective ceiling {eff})',
     '音色 0-{max}': 'Tone 0-{max}',
     '音色エンベロープなし': 'no tone envelope',
     'ピッチ': 'Pitch',
     'ノート': 'Note',
     'リリース': 'Release',
     '長さ': 'Length',
-    '範囲': 'Range',
     'ゲート': 'Gate',
     'チェックを入れたレーンだけが鳴ります': 'Only the checked lanes are played',
     '鳴る音程': 'resulting pitch',
-    '和音生成': 'Build chord',
-    '和音を半音の並びで指定します(0=音符そのもの)': 'The chord as a list of semitones (0 = the note itself)',
-    '1音あたりのフレーム数': 'Frames per chord tone',
-    '和音とフレーム数からアルペジオの表を作る': 'Build an arpeggio table from the chord and the frame count',
+    '実際のオフセット': 'resulting offset',
+    // 和音入力(ノートレーン)
+    '表に入る値(半音)': 'Table values (semitones)',
+    '表に入る値。弾いた音からの半音を鳴らす順に並べたもの(0=弾いた音)': 'What goes into the table: semitones from the played note, in playing order (0 = the played note)',
+    '弾いた音から': 'From played note',
+    '和音から作る': 'Build from chord',
+    '弾く音の例': 'Example played note',
+    '鍵盤と和音名を見やすくするための仮の音です。MMLには書き込まれません(表に入るのは数字だけ)': 'A stand-in note that makes the keyboard and chord names readable. It is never written to the MML; the table only stores the numbers',
+    '表に入るのは数字だけです。鳴る音は本文で弾く音で変わります': 'Only the numbers go into the table. The notes you hear depend on the note you play in the MML',
+    '{note} を弾くと {chord}': 'play {note} → {chord}',
+    '和音|エンベロープ': 'Chord',
+    '{n}音': '{n} notes',
+    'メジャー': 'major',
+    '並び|アルペジオ': 'Order',
+    '上昇': 'Up',
+    '下降': 'Down',
+    '往復': 'Up-down',
+    'クリック順': 'Click order',
+    '1音あたり': 'Per note',
+    'クリックで和音の音を足す/外す': 'Click to add or remove a chord note',
+    '※ループ区間の合計が{n}なので、ループのたびに音程がずれ続けます': '* The loop section sums to {n}, so the pitch keeps drifting every loop',
     '※ループ区間の合計が{n}半音なので、ループのたびに音程がずれ続けます':
       'Note: the loop section adds up to {n} semitones, so the pitch keeps drifting on every pass',
     '三角波には音量制御そのものがありません(@vは使えません)':
@@ -1117,8 +1132,8 @@
       'This channel has no duty (tone) envelope. On chips that carry waveforms or patch numbers (FDS/N163/VRC7), @@<n> is the same tone selection as @<n>',
     'VRC7はfnum/blockの対数的な音程表現のため、EP(生レジスタへの加算)は対象外です':
       'VRC7 expresses pitch logarithmically as fnum/block, so EP (a raw register offset) does not apply',
-    '4つのエンベロープを同じ時間軸(横1マス=1フレーム)で編集します。テーブル定義はチャンネルに紐づかないので、目盛り・音色の段数・試聴先は「対象音源」だけで決まります(表の中身は音源を変えても書き換えません)。キャンバスはドラッグで編集、Shift+クリックでループ位置(MMLの"|")を指定します。音量と音色は赤い縦線から右がリリースの表(@vr/@@r)で、区画ごとに自分の表と1対1に対応します。ノート(@EN)はMML上は前回値からの相対値ですが、ここでは実際に鳴る音程の階段を描き、反映のときに差分へ変換します。編集はこのウィンドウの中だけで、「反映」を押すまでMML本文は変わりません。':
-      'Edit all four envelopes on one shared time axis (one cell = one frame). Table definitions are not tied to a channel, so the scale, the number of tone steps and the audition target come from "Target chip" alone; changing it never rewrites a table. Drag on the canvas to edit, and Shift+click to set the loop point (the "|" in the MML). On the volume and tone lanes everything right of the red line is the release table (@vr/@@r), and each zone maps one-to-one onto its own table. Note (@EN) is stored in the MML as a value relative to the previous frame, but here you draw the pitch staircase you actually hear and it is converted to differences on Apply. Editing stays inside this window: the MML text does not change until you press Apply.',
+    '4つのエンベロープを同じ時間軸(横1マス=1フレーム)で編集します。テーブル定義はチャンネルに紐づかないので、目盛り・音色の段数・試聴先は「対象音源」だけで決まります(表の中身は音源を変えても書き換えません)。キャンバスはドラッグで値を描きます。ダブルクリックでその位置にループ位置(MMLの"|")を置き、ループ線をダブルクリックすると消えます。上端の目盛り帯では、ループのつまみ(▼)を左右にドラッグして動かし、表の終端のつまみをドラッグして長さを変えます。音量と音色は赤い縦線から右がリリースの表(@vr/@@r)で、区画ごとに自分の表と1対1に対応します。ノート(@EN)とピッチ(@EP)はMML上は前回値からの相対値ですが、ここでは実際に鳴る音程/オフセットの階段を描き、反映のときに差分へ変換します。ピッチとノートの縦幅は、値を描きながら上端や下端より外へドラッグすると広がり、左端の目盛りをダブルクリックすると表の値に合わせて縮みます。ノートは和音からも作れます。和音を選ぶか鍵盤をクリックすると、その場で表が作り直されます。表に入るのは弾いた音からの半音の数字だけで、どの音で鳴るかは本文で弾く音しだいです。「弾く音の例」は鍵盤と和音名を見やすくするための仮の音で、MMLには書き込まれません。編集はこのウィンドウの中だけで、「反映」を押すまでMML本文は変わりません。':
+      'Edit all four envelopes on one shared time axis (one cell = one frame). Table definitions are not tied to a channel, so the scale, the number of tone steps and the audition target come from "Target chip" alone; changing it never rewrites a table. Drag on the canvas to draw values. Double-click to place the loop point (the "|" in the MML) there, and double-click the loop line to remove it. In the ruler strip along the top, drag the loop marker (▼) to move it and drag the end marker of a table to change its length. On the volume and tone lanes everything right of the red line is the release table (@vr/@@r), and each zone maps one-to-one onto its own table. Note (@EN) and pitch (@EP) are stored in the MML as values relative to the previous frame, but here you draw the pitch/offset staircase you actually get and they are converted to differences on Apply. On the pitch and note lanes, drag past the top or bottom edge while drawing to stretch the vertical scale; double-click the scale on the left to shrink it back to fit the table. Note tables can also be built from a chord: pick a chord or click keys on the keyboard and the table is rebuilt on the spot. The table only stores numbers, semitones from whatever note is played, so the pitch you hear depends on the note you write in the MML. "Example played note" is a stand-in that makes the keyboard and chord names readable; it is never written to the MML. Editing stays inside this window: the MML text does not change until you press Apply.',
     // --- 2026-09-13 公開前の点検で見つかった未訳(静的HTML・ヘルプ・エラー文言) ---
     'FB 自己帰還':
       'FB feedback',

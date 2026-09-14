@@ -7,7 +7,7 @@
  *   @vr<n> = { ... }   リリース音量(@vの定義を流用可)     … 本文では @vr<n>
  *   @<n>   = { ... }   デューティ(音色)エンベロープ(絶対値) … 本文では @@<n>
  *                      そのリリース版は @@r<n>(同じ @<n>={...} の別番号を指す)
- *   @EP<n> = { ... }   ピッチエンベロープ(生レジスタオフセット、各フレームの絶対値)
+ *   @EP<n> = { ... }   ピッチエンベロープ(生レジスタオフセット、前フレームからの差分の累積)
  *   @EN<n> = { ... }   ノートエンベロープ(半音、前フレームからの相対値の累積)
  *
  * ■ なぜ1画面か
@@ -26,12 +26,15 @@
  * (@v/@)、右がリリースの表(@vr/@@r)。どちらの区画も自分の表と1対1に対応するので
  * 編集位置に迷いが無い(ループを展開した「実際に鳴る列」は描かない)。
  *
- * ■ ノートレーンだけ保存形式が違う
+ * ■ ピッチ/ノートレーンは保存形式が違う
  * @EN はMML上「前回値からの相対値」でその累積が音程になる(compiler.js
- * cumulativeEnvelopeValue)。編集は「実際に鳴る音程の階段」を描く方が分かりやすいので、
- * ローカル状態は累積値で持ち、MMLへ書く直前に差分へ変換する(FDS変調テーブルの
+ * cumulativeEnvelopeValue)。@EP も本家ppmck準拠で同じ「差分の累積」(2026-09-13修正、
+ * compiler.js pitchEnvelopeValue)。編集は「実際に鳴る音程/オフセットの階段」を描く方が
+ * 分かりやすいので、ローカル状態は累積値で持ち、MMLへ書く直前に差分へ変換する(FDS変調テーブルの
  * computeModCurve/codesFromCurve と同じ考え方)。キャンバス上で1点を動かしても
- * その後ろの音程がずれないよう、次のフレームの差分で辻褄を合わせる。
+ * その後ろの音程がずれないよう、次のフレームの差分で辻褄を合わせる。非ループの@EPは実機が
+ * 末尾の差分を足し続けるため、末尾の差分が0でなければ書き出し時に0を足して止める
+ * (描いた形のまま保持される)。
  *
  * ■ 書き込みタイミング
  * FDS/N163/VRC7エディタと同じ規約: キャンバス編集・数値入力はローカルのみ更新し、
@@ -52,7 +55,9 @@
   // letter: 試聴に使うチャンネル文字(実機ppmck固定割当。compiler.js assignExpansionLetters
   //   と同じ dpcm1=E / fds1=F / vrc7 6=G-L / vrc6 3=M-O / n163 8=P-W / fme7 3=X-Z / mmc5 2=a,b)
   // volMax: v<n>と@v<n>の最大値(compiler.js buildSegments の volMax と同じ)
-  // volEff: 実機で実際に効く上限(これ以上は音が大きくならない)。目盛りに線を引くだけ
+  // volEff: 実機で実際に効く上限(これ以上は音が大きくならない)。エディタの目盛りの最大はこちら
+  //   (2026-09-14ユーザー指示「FDSとVRC6ノコギリ波は実質の上限値をMAXに」。MML上は63まで書けるが、
+  //    効かない範囲を描かせても意味が無い。既存の表に上限超えの値があれば上限に張り付いて描かれる)
   // duty:   @<n>={...}(デューティエンベロープ)の段数。0=そのチャンネルには存在しない
   // pitch:  EP(ピッチエンベロープ)が使えるか。VRC7はfnum/blockの対数表現のため対象外
   const TARGETS = [
@@ -85,9 +90,18 @@
   const TEMP_REL_INDEX = 99;
 
   const DEFAULT_LEN = 8;
+  const MAX_LEN = 128;
   const CELL_W = 13;      // 1フレームの横幅(px)
-  const LANE_H = { bar: 74, grid: 0, signed: 74, step: 86 }; // gridは行数×ROW_Hで決める
+  const LANE_H = { bar: 74, grid: 0, signed: 74, step: 86 }; // 値の区画の高さ。gridは行数×ROW_H
   const ROW_H = 15;
+  // キャンバス上端の目盛り帯。ループ位置と終端(長さ)のつまみはここに置く。値の区画でドラッグすると
+  // 値を描いてしまうので、つまみのドラッグは帯の中だけで受ける(ダブルクリックはどちらでも効く)
+  const RULER_H = 12;
+  const SEP_W = 3;        // 本体とリリースの境目(キーオフの赤線)の幅
+  const SLACK = 3;        // 区画の右に空けておくマス数。終端つまみを掴んで右へ伸ばす余地
+  // 左端の目盛り欄(縦の値の数字)。4レーンとも同じ幅にして、同じフレームが縦に揃うようにする
+  const GUTTER = 26;
+  const RANGE_MAX = 127;  // ピッチ/ノートの縦幅(±)の上限
 
   // ── MML定義 ⇄ {values, loop} ────────────────────────────────────────
   // ループ位置はMML上 "|" の位置。省略時はnull(末尾の値を保持)
@@ -120,7 +134,7 @@
     return `@${tag}${index} = { ${rows.join('\n        ')} }`;
   }
 
-  // ノートレーン専用: 相対値(MML) ⇄ 累積値(編集表示)
+  // ピッチ/ノートレーン用: 相対値(MML) ⇄ 累積値(編集表示)
   function deltasToCum(deltas) {
     let acc = 0;
     return deltas.map((d) => (acc += d));
@@ -129,120 +143,399 @@
     let acc = 0;
     return cum.map((c) => { const d = c - acc; acc = c; return d; });
   }
+  const isCumulativeLane = (lane) => lane.key === 'en' || lane.key === 'ep';
+  // 編集表示(累積値)→MMLへ書く相対値。非ループのピッチは、実機が末尾の差分を足し続けるため
+  // 末尾の差分が0でなければ0を足して止める(ヘッダコメント参照)
+  function tableDeltas(lane, s) {
+    const d = cumToDeltas(s.values);
+    if (lane.key === 'ep' && s.loop == null && d.length && d[d.length - 1] !== 0) d.push(0);
+    return d;
+  }
+
+  // ── ノートレーンの和音入力 ──────────────────────────────────────────
+  // 2026-09-14ユーザー合意: 鍵盤を主にして、和音名(根音+種類を選ぶ)と数字の並びを連動させる。
+  //   弾く音の例 … 鍵盤と和音名を見せるための仮の音(コード上は chord.base)。MMLには書かれない。
+  //               表に入るのは「弾いた音からのずれ(半音)」の数字だけで、鳴る音は本文で弾く音で決まる
+  //   鍵盤 ……… クリックで音を足す/外す。何オクターブ目の音かが見えるので和音名を知らなくても組める
+  //   並び ……… 基準から(既定) / 上昇 / 下降 / 往復 / クリック順
+  // どれかを操作するたびにレーンの表を作り直す(反映を押すまでMMLは変わらない)。
+  const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  const BLACK_PC = new Set([1, 3, 6, 8, 10]);
+  const KB_LOW = -12;     // 鍵盤の範囲(基準の音からの半音)。1オクターブ下〜2オクターブ上
+  const KB_HIGH = 24;
+  // 和音の種類。音の数ごとに分けて選べるようにする(ユーザー指示「和音の数と一緒に」)。
+  // 名前はコード表記そのもの(万国共通なので訳さない)。長三和音だけは表記が空なので label で出す
+  const CHORD_GROUPS = [
+    { count: 3, items: [
+      { q: '', label: 'メジャー', iv: [0, 4, 7] }, { q: 'm', iv: [0, 3, 7] }, { q: 'dim', iv: [0, 3, 6] },
+      { q: 'aug', iv: [0, 4, 8] }, { q: 'sus2', iv: [0, 2, 7] }, { q: 'sus4', iv: [0, 5, 7] }] },
+    { count: 4, items: [
+      { q: '7', iv: [0, 4, 7, 10] }, { q: 'M7', iv: [0, 4, 7, 11] }, { q: 'm7', iv: [0, 3, 7, 10] },
+      { q: 'mM7', iv: [0, 3, 7, 11] }, { q: 'm7-5', iv: [0, 3, 6, 10] }, { q: 'dim7', iv: [0, 3, 6, 9] },
+      { q: '6', iv: [0, 4, 7, 9] }, { q: 'm6', iv: [0, 3, 7, 9] }, { q: 'add9', iv: [0, 4, 7, 14] },
+      { q: '7sus4', iv: [0, 5, 7, 10] }] },
+    { count: 5, items: [
+      { q: '9', iv: [0, 4, 7, 10, 14] }, { q: 'M9', iv: [0, 4, 7, 11, 14] }, { q: 'm9', iv: [0, 3, 7, 10, 14] },
+      { q: '69', iv: [0, 4, 7, 9, 14] }] }
+  ];
+  const CHORD_BY_Q = new Map();
+  for (const g of CHORD_GROUPS) for (const it of g.items) CHORD_BY_Q.set(it.q, it);
+  const pcOf = (n) => ((n % 12) + 12) % 12;
+
+  // 根音+種類 → 基準の音からの半音。根音は基準の音から±半オクターブ以内に置く(G/Cなら5つ下)
+  function tonesFromName(base, root, quality) {
+    const it = CHORD_BY_Q.get(quality);
+    if (!it) return null;
+    let off = pcOf(root - base);
+    if (off > 6) off -= 12;
+    return it.iv.map((i) => i + off);
+  }
+
+  // 音の集まり → 和音名(根音+種類)。オクターブの違いは無視して音名の集合で比べる。
+  // 同じ集合に複数の名前が付く場合(C6=Am7 等)は、一番低い音を根音とする方を優先する
+  function detectChord(base, tones) {
+    if (!tones.length) return null;
+    const pcs = new Set(tones.map((t) => pcOf(t + base)));
+    const lowest = pcOf(Math.min(...tones) + base);
+    let found = null;
+    for (let root = 0; root < 12; root++) {
+      for (const g of CHORD_GROUPS) {
+        for (const it of g.items) {
+          const set = new Set(it.iv.map((i) => pcOf(root + i)));
+          if (set.size !== pcs.size || [...set].some((p) => !pcs.has(p))) continue;
+          if (root === lowest) return { root, quality: it.q };
+          if (!found) found = { root, quality: it.q };
+        }
+      }
+    }
+    return found;
+  }
+
+  // 鳴らす順。基準から: 低い順に並べて基準の音(0)から始まるよう回す。和音に基準の音が
+  // 無いときは基準の音に一番近い音から始める(同じ近さなら低い方)
+  function chordSequence(chord) {
+    const asc = [...new Set(chord.tones)].sort((a, b) => a - b);
+    switch (chord.order) {
+      case 'up': return asc;
+      case 'down': return asc.slice().reverse();
+      case 'updown': return asc.concat(asc.slice(1, -1).reverse());
+      case 'click': return [...new Set(chord.tones)];
+      default: {
+        let start = 0;
+        asc.forEach((t, i) => { if (Math.abs(t) < Math.abs(asc[start])) start = i; });
+        return asc.slice(start).concat(asc.slice(0, start));
+      }
+    }
+  }
 
   // ── キャンバス1枚(本体の表 + リリースの表) ─────────────────────────
-  // zones: [{ values, loop, editable }] の1つか2つ。2つ目はリリース。
-  // 値の編集は onEdit(zoneIndex, frameIndex, value) で呼び出し側へ返す
+  // zones: [{ values, loop }] の1つか2つ。2つ目はリリース。
+  // 縦は上から「目盛り帯(RULER_H)」「値の区画」。横は区画0 → 境目(SEP_W) → 区画1 → 余白(SLACK)。
+  //
+  // 操作(2026-09-14ユーザー指示):
+  //   値の区画のドラッグ ………… 値を描く
+  //   目盛り帯の終端つまみ ……… 左右ドラッグで長さを変える
+  //   目盛り帯のループつまみ …… 左右ドラッグでループ位置を動かす
+  //   ダブルクリック …………… その場所にループ位置を置く。ループ線の上なら削除(帯でも値の区画でも効く)
+  // 値の区画でのダブルクリックは、その前の2回のmousedownで値を描いてしまっているので、
+  // 1回目のmousedownの直前に取っておいた値へ戻してからループ位置を置く。
+  //
+  // ピッチ/ノートの縦幅(2026-09-14ユーザー指示「範囲は縦にドラッグして延ばす。目盛り振っといて」):
+  //   値を描くドラッグで上端/下端より外へ出ると、はみ出した距離に応じて縦幅(±)が広がる。
+  //   広がり方はドラッグ開始時の縦幅を基準にした一定の比率(広がった後の目盛りで測ると加速してしまうため)。
+  //   左端の目盛り欄に数値を振り、目盛り帯の左端に今の縦幅(±n)を出す。目盛り欄のダブルクリックで
+  //   表の値ぴったりへ縮める(広げっぱなしで潰れた表を戻す手段)。
+  //
+  // 呼び出し側への通知: cb.edit(zone, frame, value) / cb.setLoop(zone, frame|null) /
+  //   cb.setLength(zone, len) / cb.restore(zone配列ぶんのvaluesのコピー) /
+  //   cb.setRange(n) / cb.fitRange()
+  const HANDLE_GRAB = 5;     // つまみを掴める左右の幅(px)
+  const DBL_GUARD_MS = 500;  // この間隔より空いたmousedownでだけ「描く前の値」を取り直す
+  const isCenteredKind = (kind) => kind === 'signed' || kind === 'step';
+
+  // 目盛りの刻み。数字どうしが TICK_MIN_PX 以上離れる最小のきりの良い数。
+  // span: 値の幅(音量は0..max、ピッチ/ノートは片側) / px: その幅に当たる画素数
+  const TICK_MIN_PX = 14;
+  function tickStep(kind, span, px) {
+    const cands = kind === 'step' ? [1, 2, 3, 6, 12, 24, 48]            // 半音: 半オクターブ/オクターブ
+      : kind === 'bar' ? [1, 2, 4, 5, 8, 10, 16, 20, 32]
+        : [1, 2, 4, 5, 8, 10, 16, 20, 25, 32, 50, 64, 100];
+    for (const c of cands) if ((c / (span || 1)) * px >= TICK_MIN_PX) return c;
+    return cands[cands.length - 1];
+  }
+
   class LaneCanvas {
-    constructor(canvas, lane, onEdit, onSetLoop) {
+    constructor(canvas, lane, cb) {
       this.canvas = canvas;
       this.lane = lane;
-      this.onEdit = onEdit;
-      this.onSetLoop = onSetLoop;
+      this.cb = cb;
       this.zones = [];
       this.range = { min: 0, max: 15, rows: 0 };
-      this.dragging = false;
-      canvas.addEventListener('mousedown', (e) => {
-        if (e.shiftKey) { this.setLoopAt(e); return; }
-        this.dragging = true;
-        this.paintAt(e);
-      });
-      canvas.addEventListener('mousemove', (e) => { if (this.dragging) this.paintAt(e); });
-      global.addEventListener('mouseup', () => { this.dragging = false; });
+      this.drag = null;          // { kind:'paint'|'loop'|'end', zone }
+      this.snapshot = null;      // 値を描く前の各区画のコピー(ダブルクリックで戻す)
+      this.lastDownAt = 0;
+
+      // ドラッグ中はキャンバスの外へ出ても追いかけたいので、windowへの登録はドラッグの間だけ
+      this.onWindowMove = (e) => this.dragMove(e);
+      this.onWindowUp = () => this.endDrag();
+      canvas.addEventListener('mousedown', (e) => this.down(e));
+      canvas.addEventListener('mousemove', (e) => { if (!this.drag) this.updateCursor(e); });
+      canvas.addEventListener('dblclick', (e) => this.dblclick(e));
+    }
+
+    valueH() {
+      return this.lane.kind === 'grid' ? Math.max(2, this.range.rows) * ROW_H : LANE_H[this.lane.kind];
+    }
+
+    // 各区画の左端x。区画0は目盛り欄の右、区画1は区画0の終端+境目
+    origins() {
+      const out = [];
+      let x = GUTTER;
+      for (let z = 0; z < this.zones.length; z++) {
+        out.push(x);
+        x += this.zones[z].values.length * CELL_W + SEP_W;
+      }
+      return out;
     }
 
     setZones(zones, range) {
       this.zones = zones;
       this.range = range;
-      const total = zones.reduce((n, z) => n + z.values.length, 0);
-      this.canvas.width = Math.max(1, total) * CELL_W + (zones.length > 1 ? 3 : 0);
-      this.canvas.height = this.lane.kind === 'grid' ? Math.max(2, range.rows) * ROW_H : LANE_H[this.lane.kind];
+      const ox = this.origins();
+      const last = zones.length - 1;
+      const contentW = last >= 0 ? ox[last] + zones[last].values.length * CELL_W : CELL_W;
+      this.canvas.width = contentW + SLACK * CELL_W;
+      this.canvas.height = RULER_H + this.valueH();
       this.draw();
     }
 
-    // キャンバスx座標 → { zone, frame }。区画の境目(3px)の上はnull
-    hit(e) {
+    local(e) {
       const rect = this.canvas.getBoundingClientRect();
-      const x = (e.clientX - rect.left) * (this.canvas.width / rect.width);
-      let base = 0;
-      for (let z = 0; z < this.zones.length; z++) {
-        const len = this.zones[z].values.length;
-        const left = base * CELL_W + (z > 0 ? 3 : 0);
-        const right = left + len * CELL_W;
-        if (x >= left && x < right) return { zone: z, frame: Math.floor((x - left) / CELL_W), x, rect };
-        base += len;
-      }
-      // 右端ちょうどは最後の区画の最後のフレーム扱い
-      const last = this.zones.length - 1;
-      if (last >= 0 && x >= 0) return { zone: last, frame: this.zones[last].values.length - 1, x, rect };
-      return null;
+      return {
+        x: (e.clientX - rect.left) * (this.canvas.width / (rect.width || 1)),
+        y: (e.clientY - rect.top) * (this.canvas.height / (rect.height || 1))
+      };
     }
 
-    valueAt(e) {
-      const rect = this.canvas.getBoundingClientRect();
-      const y = (e.clientY - rect.top) * (this.canvas.height / rect.height);
-      const h = this.canvas.height;
+    // x → その位置を受け持つ区画(左端がxより左にある最後の区画)とフレーム(区画内に丸める)
+    zoneAt(x) {
+      const ox = this.origins();
+      let z = 0;
+      for (let i = 0; i < ox.length; i++) if (x >= ox[i]) z = i;
+      const len = this.zones[z].values.length;
+      return { zone: z, ox: ox[z], frame: clamp(Math.floor((x - ox[z]) / CELL_W), 0, len - 1) };
+    }
+
+    // 目盛り帯のつまみ。近い方を返す(区画1のループ位置0と区画0の終端は3pxしか離れないため)
+    handleAt(x) {
+      const ox = this.origins();
+      let best = null;
+      const consider = (kind, zone, hx) => {
+        const d = Math.abs(x - hx);
+        if (d <= HANDLE_GRAB && (!best || d < best.d)) best = { kind, zone, d };
+      };
+      this.zones.forEach((zone, z) => {
+        consider('end', z, ox[z] + zone.values.length * CELL_W);
+        if (zone.loop != null) consider('loop', z, ox[z] + zone.loop * CELL_W);
+      });
+      return best;
+    }
+
+    valueAt(y) {
+      const h = this.valueH();
+      const vy = y - RULER_H;
       if (this.lane.kind === 'grid') {
-        return clamp(this.range.rows - 1 - Math.floor(y / ROW_H), 0, this.range.rows - 1);
+        return clamp(this.range.rows - 1 - Math.floor(vy / ROW_H), 0, this.range.rows - 1);
       }
       const { min, max } = this.range;
-      return Math.round(min + (max - min) * (1 - clamp(y, 0, h) / h));
+      return clamp(Math.round(min + (max - min) * (1 - clamp(vy, 0, h) / h)), min, max);
     }
 
-    paintAt(e) {
-      const hit = this.hit(e);
-      if (!hit || hit.frame < 0) return;
-      this.onEdit(hit.zone, hit.frame, clamp(this.valueAt(e), this.range.min, this.range.max));
+    updateCursor(e) {
+      const p = this.local(e);
+      let cursor = 'crosshair';
+      if (p.y < RULER_H) {
+        const hd = this.handleAt(p.x);
+        cursor = hd ? 'ew-resize' : 'default';
+      } else if (p.x < GUTTER) {
+        cursor = 'default';
+      }
+      this.canvas.style.cursor = cursor;
     }
 
-    setLoopAt(e) {
-      const hit = this.hit(e);
-      if (!hit || hit.frame < 0) return;
-      this.onSetLoop(hit.zone, hit.frame);
+    down(e) {
+      if (e.button !== 0 || !this.zones.length) return;
+      const p = this.local(e);
+      if (p.y >= RULER_H && p.x < GUTTER) return; // 目盛り欄はダブルクリック(縦幅を表に合わせる)専用
+      if (p.y < RULER_H) {
+        const hd = this.handleAt(p.x);
+        if (!hd) return; // 帯の空いた所はダブルクリック用(1回のクリックでは何もしない)
+        this.drag = { kind: hd.kind, zone: hd.zone };
+      } else {
+        const now = Date.now();
+        // ダブルクリック直後(snapshotを使い切った後)は間隔に関係なく取り直す。続けて素早く
+        // ダブルクリックしたとき、2回目の分を戻せなくなるため
+        if (!this.snapshot || now - this.lastDownAt > DBL_GUARD_MS) this.snapshot = this.zones.map((z) => z.values.slice());
+        this.lastDownAt = now;
+        this.drag = { kind: 'paint', range0: this.range.max };
+        this.paint(p);
+      }
+      e.preventDefault(); // ドラッグ中に文字選択が走らないように
+      global.addEventListener('mousemove', this.onWindowMove);
+      global.addEventListener('mouseup', this.onWindowUp);
+    }
+
+    dragMove(e) {
+      if (!this.drag) return;
+      const p = this.local(e);
+      const d = this.drag;
+      if (d.kind === 'paint') { this.paint(p); return; }
+      const ox = this.origins()[d.zone];
+      const cells = Math.round((p.x - ox) / CELL_W);
+      if (d.kind === 'end') {
+        const len = clamp(cells, 1, MAX_LEN);
+        if (len !== this.zones[d.zone].values.length) {
+          this.cb.setLength(d.zone, len);
+          this.revealEnd(d.zone);
+        }
+      } else {
+        const loop = clamp(cells, 0, this.zones[d.zone].values.length - 1);
+        if (loop !== this.zones[d.zone].loop) this.cb.setLoop(d.zone, loop);
+      }
+    }
+
+    endDrag() {
+      this.drag = null;
+      global.removeEventListener('mousemove', this.onWindowMove);
+      global.removeEventListener('mouseup', this.onWindowUp);
+    }
+
+    // 伸ばした終端が横スクロールの外へ出たら追いかける
+    revealEnd(zone) {
+      const wrap = this.canvas.parentElement;
+      if (!wrap) return;
+      const ox = this.origins()[zone];
+      const endX = ox + this.zones[zone].values.length * CELL_W + SLACK * CELL_W;
+      const scale = this.canvas.getBoundingClientRect().width / (this.canvas.width || 1);
+      const need = endX * scale - wrap.clientWidth;
+      if (need > wrap.scrollLeft) wrap.scrollLeft = need;
+    }
+
+    paint(p) {
+      const hit = this.zoneAt(p.x);
+      if (isCenteredKind(this.lane.kind)) {
+        const h = this.valueH();
+        const vy = p.y - RULER_H;
+        const over = vy < 0 ? -vy : vy > h ? vy - h : 0;
+        if (over > 0) {
+          // 上端/下端より外: ドラッグ開始時の縦幅を基準に、はみ出した距離ぶん縦幅を広げて端の値を描く
+          const r0 = (this.drag && this.drag.range0) || this.range.max;
+          const need = clamp(Math.ceil(r0 + (over / h) * 2 * r0), 1, RANGE_MAX);
+          if (need > this.range.max) this.cb.setRange(need); // renderLaneでthis.rangeが更新される
+          this.cb.edit(hit.zone, hit.frame, (vy < 0 ? 1 : -1) * this.range.max);
+          return;
+        }
+      }
+      this.cb.edit(hit.zone, hit.frame, this.valueAt(p.y));
+    }
+
+    dblclick(e) {
+      if (!this.zones.length) return;
+      const p = this.local(e);
+      if (p.y >= RULER_H && p.x < GUTTER) { this.cb.fitRange(); return; }
+      // 値の区画なら、ダブルクリックの2回のmousedownで描いてしまった値を元に戻す
+      if (p.y >= RULER_H && this.snapshot) this.cb.restore(this.snapshot);
+      this.snapshot = null;
+      const hit = this.zoneAt(p.x);
+      const zone = this.zones[hit.zone];
+      if (zone.loop != null && Math.abs(p.x - (hit.ox + zone.loop * CELL_W)) <= HANDLE_GRAB) {
+        this.cb.setLoop(hit.zone, null);
+      } else {
+        this.cb.setLoop(hit.zone, hit.frame);
+      }
     }
 
     draw() {
       const ctx = this.canvas.getContext('2d');
       const w = this.canvas.width, h = this.canvas.height;
+      const vh = this.valueH();
+      const top = RULER_H;
       ctx.clearRect(0, 0, w, h);
       ctx.fillStyle = '#14141a';
       ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = '#1c1c24';
+      ctx.fillRect(0, 0, w, RULER_H);
       if (!this.zones.length) return;
 
       const { min, max, rows } = this.range;
       const isGrid = this.lane.kind === 'grid';
-      const yOf = (v) => h - ((v - min) / (max - min || 1)) * h;
+      const yOf = (v) => top + vh - ((v - min) / (max - min || 1)) * vh;
+      const ox = this.origins();
+      const last = this.zones.length - 1;
+      const contentW = ox[last] + this.zones[last].values.length * CELL_W;
 
-      // 横罫線(gridは行、それ以外は4分割。signedは中心線を濃く)
-      ctx.strokeStyle = '#26262f';
+      // 表の外(右の余白)は暗くして「ここはまだ無いフレーム」と分かるようにする
+      ctx.fillStyle = '#0d0d11';
+      ctx.fillRect(contentW, top, w - contentW, vh);
+
+      // 左端の目盛り欄と横罫線。gridは行ごと、それ以外はきりの良い刻み(tickStep)で数値を振る
+      ctx.fillStyle = '#18181f';
+      ctx.fillRect(0, top, GUTTER, vh);
+      ctx.font = '8px monospace';
+      ctx.textBaseline = 'middle';
       ctx.lineWidth = 1;
-      ctx.beginPath();
+      const label = (text, y) => {
+        ctx.fillStyle = '#8a8a98';
+        ctx.textAlign = 'right';
+        ctx.fillText(text, GUTTER - 3, clamp(y, top + 4, h - 4));
+        ctx.textAlign = 'left';
+      };
+      const hLine = (y, color) => {
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(GUTTER, Math.round(y) + 0.5); ctx.lineTo(contentW, Math.round(y) + 0.5);
+        ctx.stroke();
+      };
       if (isGrid) {
-        for (let r = 1; r < rows; r++) { const y = r * ROW_H + 0.5; ctx.moveTo(0, y); ctx.lineTo(w, y); }
+        for (let r = 0; r < rows; r++) {
+          if (r > 0) hLine(top + r * ROW_H, '#26262f');
+          label(String(rows - 1 - r), top + r * ROW_H + ROW_H / 2);
+        }
       } else {
-        for (let i = 1; i < 4; i++) { const y = Math.round((i / 4) * h) + 0.5; ctx.moveTo(0, y); ctx.lineTo(w, y); }
+        // 音量は0..max、ピッチ/ノートは±max。どちらも片側の幅がmax
+        const st = tickStep(this.lane.kind, max, this.lane.kind === 'bar' ? vh : vh / 2);
+        const from = this.lane.kind === 'bar' ? 0 : -Math.floor(max / st) * st;
+        for (let t = from; t <= max; t += st) {
+          const y = yOf(t);
+          // ノートはオクターブ(12の倍数)の線を少し明るく
+          const strong = this.lane.kind === 'step' && t !== 0 && t % 12 === 0;
+          if (t !== 0 && t !== min) hLine(y, strong ? '#34343f' : '#26262f');
+          label(isCenteredKind(this.lane.kind) && t > 0 ? '+' + t : String(t), y);
+        }
+        // 目盛り帯の左端に今の縦幅。ドラッグで広げたことがここの数字で分かる
+        ctx.fillStyle = '#c8c8d4';
+        ctx.fillText(isCenteredKind(this.lane.kind) ? '±' + max : String(max), 2, RULER_H / 2 + 1);
       }
-      ctx.stroke();
-
-      let base = 0;
       for (let z = 0; z < this.zones.length; z++) {
         const zone = this.zones[z];
-        const ox = base * CELL_W + (z > 0 ? 3 : 0);
+        const x0 = ox[z];
         const len = zone.values.length;
 
-        // 縦罫線(4フレームごと)
+        // 縦罫線と目盛りの数字(4フレームごと)
         ctx.strokeStyle = '#21212a';
         ctx.beginPath();
-        for (let i = 4; i < len; i += 4) { const x = Math.round(ox + i * CELL_W) + 0.5; ctx.moveTo(x, 0); ctx.lineTo(x, h); }
+        for (let i = 4; i < len; i += 4) { const x = Math.round(x0 + i * CELL_W) + 0.5; ctx.moveTo(x, top); ctx.lineTo(x, h); }
         ctx.stroke();
+        ctx.fillStyle = '#6a6a78';
+        for (let i = 0; i < len; i += 4) ctx.fillText(String(i), x0 + i * CELL_W + 2, RULER_H / 2 + 1);
 
         ctx.fillStyle = z === 0 ? this.lane.color : this.lane.color + '80';
         for (let i = 0; i < len; i++) {
           const v = clamp(zone.values[i], min, max);
-          const x = ox + i * CELL_W;
+          const x = x0 + i * CELL_W;
           const cw = Math.max(1, CELL_W - 2);
           if (isGrid) {
-            ctx.fillRect(x, (rows - 1 - clamp(v, 0, rows - 1)) * ROW_H + 2, cw, ROW_H - 4);
+            ctx.fillRect(x, top + (rows - 1 - clamp(v, 0, rows - 1)) * ROW_H + 2, cw, ROW_H - 4);
           } else if (this.lane.kind === 'bar') {
             const y = yOf(v);
             ctx.fillRect(x, y, cw, Math.max(1, h - y));
@@ -254,43 +547,39 @@
           }
         }
 
-        // ループ位置(縦の破線)
+        // ループ位置: 値の区画は破線、目盛り帯は下向きの三角(ドラッグで動かすつまみ)
         if (zone.loop != null && zone.loop >= 0 && zone.loop < len) {
+          const x = Math.round(x0 + zone.loop * CELL_W) + 0.5;
           ctx.save();
           ctx.setLineDash([3, 3]);
           ctx.strokeStyle = '#e0a030';
           ctx.beginPath();
-          const x = Math.round(ox + zone.loop * CELL_W) + 0.5;
-          ctx.moveTo(x, 0); ctx.lineTo(x, h);
+          ctx.moveTo(x, top); ctx.lineTo(x, h);
           ctx.stroke();
           ctx.restore();
+          ctx.fillStyle = '#e0a030';
+          ctx.beginPath();
+          ctx.moveTo(x - 5, 1); ctx.lineTo(x + 5, 1); ctx.lineTo(x, RULER_H - 1);
+          ctx.closePath();
+          ctx.fill();
         }
-        base += len;
+
+        // 終端のつまみ(長さ)。本体の終端はキーオフの赤線と兼ねる
+        const xe = x0 + len * CELL_W;
+        const isKeyOff = z === 0 && this.zones.length > 1;
+        ctx.fillStyle = isKeyOff ? '#e05a5a' : '#9a9aa8';
+        ctx.fillRect(xe, 0, SEP_W, RULER_H);
+        ctx.fillRect(xe - 2, 2, SEP_W + 4, RULER_H - 4);
+        if (isKeyOff) ctx.fillRect(xe, top, SEP_W, vh);
+        else { ctx.fillStyle = '#4a4a56'; ctx.fillRect(xe, top, 1, vh); }
       }
 
-      // 区画の境目(キーオフ)
-      if (this.zones.length > 1) {
-        const x = this.zones[0].values.length * CELL_W;
-        ctx.fillStyle = '#e05a5a';
-        ctx.fillRect(x, 0, 3, h);
-      }
-
-      // 0の位置(signed)と実効上限(bar)
+      // 0の位置(ピッチ/ノート)と下端(音量)
       ctx.strokeStyle = '#5a5a68';
       ctx.beginPath();
-      const baseY = this.lane.kind === 'signed' ? yOf(0) : h;
-      ctx.moveTo(0, Math.round(baseY) - 0.5); ctx.lineTo(w, Math.round(baseY) - 0.5);
+      const baseY = isCenteredKind(this.lane.kind) ? yOf(0) : h;
+      ctx.moveTo(GUTTER, Math.round(baseY) - 0.5); ctx.lineTo(contentW, Math.round(baseY) - 0.5);
       ctx.stroke();
-      if (this.range.eff != null && this.range.eff < max) {
-        ctx.save();
-        ctx.setLineDash([2, 4]);
-        ctx.strokeStyle = '#8a8a98';
-        ctx.beginPath();
-        const y = Math.round(yOf(this.range.eff)) + 0.5;
-        ctx.moveTo(0, y); ctx.lineTo(w, y);
-        ctx.stroke();
-        ctx.restore();
-      }
     }
   }
 
@@ -313,6 +602,9 @@
           relOn: false, relIndex: 0, relIndexTouched: false,
           relValues: new Array(4).fill(0), relLoop: null,
           range: lane.key === 'ep' ? 32 : 12,  // 中心0の上下(ピッチ/ノートだけ使う)
+          // ノートレーンの和音入力(buildChordPanel参照)。tonesは基準の音からの半音で、並びは
+          // 鍵盤をクリックした順(和音名から作ったときは低い順)
+          chord: lane.key === 'en' ? { base: 0, root: 0, quality: '', tones: [0, 4, 7], order: 'base', step: 1 } : null,
           dirty: false
         });
       }
@@ -328,18 +620,6 @@
 
       // ── シェル ────────────────────────────────────────────────────
       function laneHtml(lane) {
-        // ピッチ/ノートは中心0の上下なので、縦の目盛り幅を数値で指定できるようにする
-        // (EPの生レジスタオフセットは曲によって数値の桁が全く違うため、固定だと潰れる)
-        const rangeBox = (lane.kind === 'signed' || lane.kind === 'step')
-          ? `<label>${T('範囲')} ±<input type="number" class="env-range" min="1" max="127" style="width:44px" /></label>`
-          : '';
-        const extra = rangeBox + (lane.key === 'en'
-          ? `<span class="env-lane-extra"><input type="text" class="env-en-chord" size="7" value="0,4,7"`
-            + ` title="${T('和音を半音の並びで指定します(0=音符そのもの)')}" />`
-            + `<input type="number" class="env-en-step" min="1" max="16" value="1" style="width:38px"`
-            + ` title="${T('1音あたりのフレーム数')}" />`
-            + `<button type="button" class="secondary env-en-gen" title="${T('和音とフレーム数からアルペジオの表を作る')}">${T('和音生成')}</button></span>`
-          : '');
         const rel = lane.relTag == null ? '' :
           `<label class="env-lane-relon"><input type="checkbox" class="env-rel-on" />${T('リリース')}</label>` +
           `<select class="env-rel-index" title="${T('インデックス')}"></select>` +
@@ -348,13 +628,15 @@
         return `<div class="env-lane" data-lane="${lane.key}">` +
           `<div class="toolbar env-lane-bar">` +
             `<label class="env-lane-on"><input type="checkbox" class="env-on" /><b>${lane.cmd}</b> ${T(lane.label)}</label>` +
+            // 反映はレーン名のすぐ右(2026-09-14ユーザー指示「右だと遠いので左に」)
+            `<button type="button" class="env-apply" title="${T('現在の内容をMMLへ反映')}">${T('反映')}</button>` +
             `<button type="button" class="secondary env-add" title="${T('新規定義を追加')}">＋</button>` +
             `<select class="env-index" title="${T('インデックス')}"></select>` +
             `<label>${T('長さ')}<input type="number" class="env-len" min="1" max="128" style="width:42px" /></label>` +
             `<label>${T('ループ')}<input type="number" class="env-loop" min="0" max="127" style="width:42px" placeholder="${T('なし')}" /></label>` +
-            extra + rel +
-            `<button type="button" class="env-apply" title="${T('現在の内容をMMLへ反映')}">${T('反映')}</button>` +
+            rel +
           `</div>` +
+          (lane.key === 'en' ? chordPanelHtml() : '') +
           `<div class="env-lane-canvas-wrap"><canvas class="env-lane-canvas"></canvas></div>` +
           `<div class="fds-values-text env-lane-values"></div>` +
           `<div class="env-lane-disabled" style="display:none;"></div>` +
@@ -371,7 +653,7 @@
             `<button type="button" class="secondary env-help-btn" title="${T('説明を表示/非表示')}">❓</button>` +
           `</div>` +
           `<div class="fds-help-text env-help" style="display:none;">` +
-            T('4つのエンベロープを同じ時間軸(横1マス=1フレーム)で編集します。テーブル定義はチャンネルに紐づかないので、目盛り・音色の段数・試聴先は「対象音源」だけで決まります(表の中身は音源を変えても書き換えません)。キャンバスはドラッグで編集、Shift+クリックでループ位置(MMLの"|")を指定します。音量と音色は赤い縦線から右がリリースの表(@vr/@@r)で、区画ごとに自分の表と1対1に対応します。ノート(@EN)はMML上は前回値からの相対値ですが、ここでは実際に鳴る音程の階段を描き、反映のときに差分へ変換します。編集はこのウィンドウの中だけで、「反映」を押すまでMML本文は変わりません。') +
+            T('4つのエンベロープを同じ時間軸(横1マス=1フレーム)で編集します。テーブル定義はチャンネルに紐づかないので、目盛り・音色の段数・試聴先は「対象音源」だけで決まります(表の中身は音源を変えても書き換えません)。キャンバスはドラッグで値を描きます。ダブルクリックでその位置にループ位置(MMLの"|")を置き、ループ線をダブルクリックすると消えます。上端の目盛り帯では、ループのつまみ(▼)を左右にドラッグして動かし、表の終端のつまみをドラッグして長さを変えます。音量と音色は赤い縦線から右がリリースの表(@vr/@@r)で、区画ごとに自分の表と1対1に対応します。ノート(@EN)とピッチ(@EP)はMML上は前回値からの相対値ですが、ここでは実際に鳴る音程/オフセットの階段を描き、反映のときに差分へ変換します。ピッチとノートの縦幅は、値を描きながら上端や下端より外へドラッグすると広がり、左端の目盛りをダブルクリックすると表の値に合わせて縮みます。ノートは和音からも作れます。和音を選ぶか鍵盤をクリックすると、その場で表が作り直されます。表に入るのは弾いた音からの半音の数字だけで、どの音で鳴るかは本文で弾く音しだいです。「弾く音の例」は鍵盤と和音名を見やすくするための仮の音で、MMLには書き込まれません。編集はこのウィンドウの中だけで、「反映」を押すまでMML本文は変わりません。') +
           `</div>` +
           `<div class="env-lanes">` + LANES.map(laneHtml).join('') + `</div>` +
           `<h3>${T('試聴')}</h3>` +
@@ -410,13 +692,18 @@
             relOn: q('.env-rel-on', root), relIndex: q('.env-rel-index', root),
             relLen: q('.env-rel-len', root), relLoop: q('.env-rel-loop', root),
             canvas: q('.env-lane-canvas', root), values: q('.env-lane-values', root),
-            disabled: q('.env-lane-disabled', root), range: q('.env-range', root),
-            chord: q('.env-en-chord', root), step: q('.env-en-step', root), gen: q('.env-en-gen', root)
+            disabled: q('.env-lane-disabled', root),
+            chordPanel: q('.env-chord', root)
           };
           els.lanes.set(lane.key, e);
-          canvases.set(lane.key, new LaneCanvas(e.canvas, lane,
-            (zone, frame, value) => editValue(lane, zone, frame, value),
-            (zone, frame) => setLoop(lane, zone, frame)));
+          canvases.set(lane.key, new LaneCanvas(e.canvas, lane, {
+            edit: (zone, frame, value) => editValue(lane, zone, frame, value),
+            setLoop: (zone, frame) => setLoop(lane, zone, frame),
+            setLength: (zone, len) => setLength(lane, zone, len),
+            restore: (snaps) => restoreValues(lane, snaps),
+            setRange: (n) => { state.get(lane.key).range = clamp(n, 1, RANGE_MAX); renderLane(lane); },
+            fitRange: () => { fitRange(lane); renderLane(lane); }
+          }));
           wireLane(lane, e);
         }
         wireShell();
@@ -442,12 +729,6 @@
         });
         e.apply.addEventListener('click', () => applyLane(lane));
         e.add.addEventListener('click', () => addDef(lane, false));
-        if (e.range) {
-          e.range.addEventListener('change', () => {
-            s.range = clamp(parseInt(e.range.value, 10) || 1, 1, 127);
-            renderLane(lane);
-          });
-        }
         if (e.relOn) {
           e.relOn.addEventListener('change', () => {
             s.relOn = e.relOn.checked;
@@ -467,23 +748,7 @@
             markDirty(lane); renderLane(lane);
           });
         }
-        if (e.gen) {
-          e.gen.addEventListener('click', () => {
-            const notes = e.chord.value.split(/[\s,]+/).filter(Boolean)
-              .map((t) => parseInt(t, 10)).filter((n) => Number.isFinite(n));
-            if (!notes.length) return;
-            const step = clamp(parseInt(e.step.value, 10) || 1, 1, 16);
-            const cum = [];
-            for (const n of notes) for (let k = 0; k < step; k++) cum.push(clamp(n, -48, 48));
-            // 最後に基準音へ戻る1フレームを足し、ループ位置を1にする。こうするとループ区間の
-            // 相対値の合計が0になり、何周しても音程がずれない(本家ppmckの @EN0={0 | 4 3 -7}
-            // と同じ形。合計が0でないと1周ごとに上がり続ける)
-            cum.push(cum[0]);
-            s.values = cum;
-            s.loop = 1;
-            markDirty(lane); renderLane(lane);
-          });
-        }
+        if (e.chordPanel && s.chord) wireChordPanel(lane, e.chordPanel);
       }
 
       function wireShell() {
@@ -538,7 +803,7 @@
 
       // 値の範囲(目盛り)。対象音源だけで決まる
       function rangeOf(lane) {
-        if (lane.key === 'v') return { min: 0, max: Math.max(1, target.volMax), rows: 0, eff: target.volEff };
+        if (lane.key === 'v') return { min: 0, max: Math.max(1, target.volEff || target.volMax), rows: 0 };
         if (lane.key === 'duty') return { min: 0, max: Math.max(1, target.duty - 1), rows: Math.max(2, target.duty) };
         const r = state.get(lane.key).range || (lane.key === 'ep' ? 32 : 12);
         return { min: -r, max: r, rows: 0 };
@@ -555,19 +820,212 @@
         const s = state.get(lane.key);
         const arr = zone === 0 ? s.values : s.relValues;
         if (frame < 0 || frame >= arr.length) return;
-        // ノートレーンのローカル状態は累積値(=鳴る音程)なので、1マス動かしても後ろの音程は
-        // 動かない。MMLへ書く直前のcumToDeltasが、そのフレームと次のフレームの相対値を
+        // ピッチ/ノートレーンのローカル状態は累積値(=鳴る音程/オフセット)なので、1マス動かしても
+        // 後ろは動かない。MMLへ書く直前のtableDeltasが、そのフレームと次のフレームの相対値を
         // 自動的に辻褄の合う値へ作り直す
         arr[frame] = value;
         markDirty(lane);
         renderLane(lane);
       }
 
+      // frame=null でループ位置を消す(キャンバスのダブルクリック/つまみのドラッグから呼ばれる)
       function setLoop(lane, zone, frame) {
         const s = state.get(lane.key);
-        if (zone === 0) s.loop = (s.loop === frame) ? null : frame;
-        else s.relLoop = (s.relLoop === frame) ? null : frame;
+        if (zone === 0) s.loop = frame;
+        else s.relLoop = frame;
         markDirty(lane);
+        renderLane(lane);
+      }
+
+      // ピッチ/ノートの縦幅を表の値ぴったりに合わせる(読み込み時と目盛り欄のダブルクリック)。
+      // 表が小さくても最低限の幅は残す(ノートは1オクターブ、ピッチは8)
+      function fitRange(lane) {
+        if (!isCenteredKind(lane.kind)) return;
+        const s = state.get(lane.key);
+        const peak = Math.max(...s.values.map((v) => Math.abs(v)), 0);
+        s.range = clamp(Math.max(lane.key === 'ep' ? 8 : 12, peak), 1, RANGE_MAX);
+      }
+
+      // ── ノートレーンの和音入力パネル ────────────────────────────────
+      function chordPanelHtml() {
+        const noteOpts = NOTE_NAMES.map((n, i) => `<option value="${i}">${n}</option>`).join('');
+        const qualOpts = CHORD_GROUPS.map((g) =>
+          `<optgroup label="${T('{n}音', { n: g.count })}">` +
+          g.items.map((it) => `<option value="${it.q}">${it.label ? T(it.label) : it.q}</option>`).join('') +
+          `</optgroup>`).join('');
+        // ★誤解させない並べ方(2026-09-14ユーザー指摘「基準の音と和音を入れたら、その音がMMLで鳴るかのような
+        //   誤解を与える。あくまで数値の設定をしているだけ」): 表に入るのは「弾いた音からの半音」の数字だけで、
+        //   実際に鳴る音は本文で弾く音で変わる。そこで
+        //   ・1段目の先頭に「表に入る値」(数字)を置き、これが本体だと分かるようにする
+        //   ・和音名と鍵盤は2段目の「作る道具」にし、音名は「弾く音の例」(仮の音、MMLには書かれない)として出す
+        //   ・鍵盤の下に「同じ数字でも弾く音が変わると別の和音になる」実例を2つ並べる(renderChordPanel)
+        return `<div class="env-chord">` +
+          `<div class="toolbar env-chord-bar">` +
+            `<label class="env-ch-main" title="${T('表に入る値。弾いた音からの半音を鳴らす順に並べたもの(0=弾いた音)')}">${T('表に入る値(半音)')}` +
+              `<input type="text" class="env-ch-nums" style="width:110px" /></label>` +
+            `<label>${T('並び|アルペジオ')}<select class="env-ch-order">` +
+              `<option value="base">${T('弾いた音から')}</option><option value="up">${T('上昇')}</option>` +
+              `<option value="down">${T('下降')}</option><option value="updown">${T('往復')}</option>` +
+              `<option value="click">${T('クリック順')}</option></select></label>` +
+            `<label>${T('1音あたり')}<input type="number" class="env-ch-step" min="1" max="16" style="width:40px" />${T('フレーム')}</label>` +
+          `</div>` +
+          `<div class="toolbar env-chord-bar">` +
+            `<label>${T('和音から作る')}` +
+              `<select class="env-ch-root"><option value="">—</option>${noteOpts}</select>` +
+              `<select class="env-ch-qual"><option value="-">—</option>${qualOpts}</select></label>` +
+            `<label title="${T('鍵盤と和音名を見やすくするための仮の音です。MMLには書き込まれません(表に入るのは数字だけ)')}">${T('弾く音の例')}` +
+              `<select class="env-ch-base">${noteOpts}</select></label>` +
+          `</div>` +
+          `<div class="env-kb" title="${T('クリックで和音の音を足す/外す')}"></div>` +
+          `<div class="env-ch-example"></div>` +
+        `</div>`;
+      }
+
+      function wireChordPanel(lane, panel) {
+        const s = state.get(lane.key);
+        const c = s.chord;
+        const $ = (sel) => panel.querySelector(sel);
+        $('.env-ch-base').addEventListener('change', (ev) => {
+          c.base = parseInt(ev.target.value, 10) || 0;
+          // 和音名が選ばれていればその和音のまま基準だけ変える(ずれが変わる)。手で組んだ音は
+          // ずれをそのまま保ち、名前だけ付け直す
+          const fromName = c.root !== '' && CHORD_BY_Q.has(c.quality)
+            ? tonesFromName(c.base, c.root, c.quality) : null;
+          if (fromName) c.tones = fromName; else nameFromTones(c);
+          applyChord(lane);
+        });
+        const onName = () => {
+          const root = $('.env-ch-root').value;
+          const qual = $('.env-ch-qual').value;
+          if (root === '' || !CHORD_BY_Q.has(qual)) return; // 片方だけ選んだ途中
+          c.root = parseInt(root, 10); c.quality = qual;
+          c.tones = tonesFromName(c.base, c.root, c.quality);
+          applyChord(lane);
+        };
+        $('.env-ch-root').addEventListener('change', onName);
+        $('.env-ch-qual').addEventListener('change', onName);
+        $('.env-ch-nums').addEventListener('input', (ev) => {
+          const parts = ev.target.value.split(/[\s,]+/).filter(Boolean);
+          const nums = parts.map((p) => parseInt(p, 10));
+          const ok = parts.length > 0 && nums.every((n) => Number.isFinite(n) && Math.abs(n) <= 48);
+          ev.target.classList.toggle('env-ch-nums--bad', !ok && parts.length > 0);
+          if (!ok) return;
+          c.tones = [...new Set(nums)];
+          nameFromTones(c);
+          applyChord(lane, { keepNums: true });
+        });
+        $('.env-ch-order').addEventListener('change', (ev) => { c.order = ev.target.value; applyChord(lane); });
+        $('.env-ch-step').addEventListener('change', (ev) => {
+          c.step = clamp(parseInt(ev.target.value, 10) || 1, 1, 16);
+          applyChord(lane);
+        });
+        $('.env-kb').addEventListener('mousedown', (ev) => {
+          const key = ev.target.closest('[data-tone]');
+          if (!key) return;
+          ev.preventDefault();
+          const t = parseInt(key.dataset.tone, 10);
+          const i = c.tones.indexOf(t);
+          if (i >= 0) c.tones.splice(i, 1); else c.tones.push(t);
+          nameFromTones(c);
+          applyChord(lane);
+        });
+      }
+
+      function nameFromTones(c) {
+        const hit = detectChord(c.base, c.tones);
+        c.root = hit ? hit.root : '';
+        c.quality = hit ? hit.quality : '-';
+      }
+
+      // 和音 → レーンの表(累積値)。最後に最初の音へ戻る1フレームを足してループ位置を1にするので、
+      // ループ区間の相対値の合計が0になり何周しても音程がずれない(本家ppmckの @EN0={0 | 4 3 -7} と同じ形)
+      function applyChord(lane, opt) {
+        const s = state.get(lane.key);
+        const c = s.chord;
+        if (c.tones.length) {
+          const cum = [];
+          for (const t of chordSequence(c)) for (let k = 0; k < c.step; k++) cum.push(t);
+          cum.push(cum[0]);
+          s.values = cum;
+          s.loop = 1;
+          fitRange(lane);
+          markDirty(lane);
+        }
+        renderLane(lane, opt);
+      }
+
+      // 表を読み込んだとき、ループ区間(無ければ全体)に出てくる音を出てきた順に拾って鍵盤へ映す。
+      // 表そのものは書き換えない
+      function chordFromTable(s) {
+        const c = s.chord;
+        const part = s.loop != null ? s.values.slice(s.loop) : s.values;
+        const tones = [...new Set(part)].filter((t) => t >= KB_LOW && t <= KB_HIGH);
+        if (!tones.length) return;
+        c.tones = tones;
+        nameFromTones(c);
+      }
+
+      function renderChordPanel(lane, opt) {
+        const s = state.get(lane.key);
+        const c = s.chord;
+        const panel = els.lanes.get(lane.key).chordPanel;
+        const $ = (sel) => panel.querySelector(sel);
+        $('.env-ch-base').value = String(c.base);
+        $('.env-ch-root').value = c.root === '' ? '' : String(c.root);
+        $('.env-ch-qual').value = c.quality;
+        if (!(opt && opt.keepNums)) {
+          const nums = $('.env-ch-nums');
+          nums.value = c.tones.join(',');
+          nums.classList.remove('env-ch-nums--bad');
+        }
+        $('.env-ch-order').value = c.order;
+        $('.env-ch-step').value = String(c.step);
+
+        // 同じ数字でも弾く音で別の和音になる、という実例。弾く音の例と、その4度上の2つを出す
+        const ex = $('.env-ch-example');
+        const tones = [...new Set(c.tones)].sort((a, b) => a - b);
+        if (tones.length) {
+          const sample = (played) => T('{note} を弾くと {chord}', {
+            note: NOTE_NAMES[played].toLowerCase(),
+            chord: tones.map((t) => NOTE_NAMES[pcOf(played + t)]).join(' ')
+          });
+          ex.textContent = T('表に入るのは数字だけです。鳴る音は本文で弾く音で変わります') + ':  ' +
+            sample(c.base) + '  /  ' + sample(pcOf(c.base + 5));
+        } else {
+          ex.textContent = '';
+        }
+
+        // 鍵盤。白鍵を並べ、黒鍵は直前の白鍵の右肩に重ねる。並びがクリック順のときは押した順番を出す
+        const kb = $('.env-kb');
+        const whites = [], blacks = [];
+        for (let t = KB_LOW; t <= KB_HIGH; t++) (BLACK_PC.has(pcOf(t + c.base)) ? blacks : whites).push(t);
+        const WK = 16, BK = 10;
+        const orderNo = (t) => (c.order === 'click' ? c.tones.indexOf(t) + 1 : 0);
+        let html = '';
+        whites.forEach((t, i) => {
+          const on = c.tones.includes(t);
+          const no = on ? orderNo(t) : 0;
+          html += `<div class="env-kb-w${on ? ' on' : ''}${t === 0 ? ' base' : ''}" data-tone="${t}" style="left:${i * WK}px">` +
+            (no ? `<i>${no}</i>` : '') +
+            (t === 0 ? `<b>${NOTE_NAMES[c.base]}</b>` : pcOf(t + c.base) === 0 ? `<u>C</u>` : '') + `</div>`;
+        });
+        for (const t of blacks) {
+          const leftWhite = whites.indexOf(t - 1);
+          if (leftWhite < 0) continue;
+          const on = c.tones.includes(t);
+          const no = on ? orderNo(t) : 0;
+          html += `<div class="env-kb-b${on ? ' on' : ''}${t === 0 ? ' base' : ''}" data-tone="${t}" style="left:${(leftWhite + 1) * WK - BK / 2}px">` +
+            (no ? `<i>${no}</i>` : '') + `</div>`;
+        }
+        kb.style.width = `${whites.length * WK}px`;
+        kb.innerHTML = html;
+      }
+
+      // ダブルクリックの2回のmousedownで描いてしまった値を、描く前のコピーへ戻す
+      function restoreValues(lane, snaps) {
+        const s = state.get(lane.key);
+        if (snaps[0] && snaps[0].length === s.values.length) s.values = snaps[0];
+        if (snaps[1] && snaps[1].length === s.relValues.length) s.relValues = snaps[1];
         renderLane(lane);
       }
 
@@ -586,7 +1044,7 @@
       }
 
       // ── 表示 ──────────────────────────────────────────────────────
-      function renderLane(lane) {
+      function renderLane(lane, opt) {
         const s = state.get(lane.key);
         const e = els.lanes.get(lane.key);
         const reason = laneAvailability(lane);
@@ -603,7 +1061,7 @@
 
         e.len.value = String(s.values.length);
         e.loop.value = s.loop == null ? '' : String(s.loop);
-        if (e.range) e.range.value = String(s.range);
+        if (e.chordPanel && s.chord) renderChordPanel(lane, opt);
         if (e.relOn) {
           e.relOn.checked = s.relOn;
           e.relIndex.disabled = !s.relOn;
@@ -613,6 +1071,7 @@
           e.relLoop.value = s.relLoop == null ? '' : String(s.relLoop);
         }
         e.values.textContent = valuesText(lane);
+        e.apply.classList.toggle('apply-btn--dirty', !!s.dirty); // シェルを作り直しても未反映の印を保つ
       }
 
       // 下に出す1行テキスト。ノートレーンは「MMLに書かれる相対値」と「鳴る音程」の両方を出す
@@ -623,13 +1082,16 @@
           if (loop != null && loop < parts.length) parts.splice(loop, 0, '|');
           return parts.join(' ');
         };
-        if (lane.key === 'en') {
-          const deltas = cumToDeltas(s.values);
+        if (isCumulativeLane(lane)) {
+          const deltas = tableDeltas(lane, s);
           const sum = s.loop == null ? 0 : deltas.slice(s.loop).reduce((a, b) => a + b, 0);
           const warn = (s.loop != null && sum !== 0)
-            ? '  ' + T('※ループ区間の合計が{n}半音なので、ループのたびに音程がずれ続けます', { n: sum })
+            ? '  ' + (lane.key === 'en'
+              ? T('※ループ区間の合計が{n}半音なので、ループのたびに音程がずれ続けます', { n: sum })
+              : T('※ループ区間の合計が{n}なので、ループのたびに音程がずれ続けます', { n: sum }))
             : '';
-          return `@EN: ${withLoop(deltas, s.loop)}   (${T('鳴る音程')}: ${s.values.join(' ')})${warn}`;
+          const shown = lane.key === 'en' ? T('鳴る音程') : T('実際のオフセット');
+          return `@${lane.tag}: ${withLoop(deltas, s.loop)}   (${shown}: ${s.values.join(' ')})${warn}`;
         }
         let text = withLoop(s.values, s.loop);
         if (lane.relTag != null && s.relOn) text += `   ${T('リリース')}: ` + withLoop(s.relValues, s.relLoop);
@@ -669,7 +1131,7 @@
         const src = mmlSourceEl.value;
         const main = readTable(src, lane.tag, s.index);
         if (main) {
-          s.values = lane.key === 'en' ? deltasToCum(main.values) : main.values.slice();
+          s.values = isCumulativeLane(lane) ? deltasToCum(main.values) : main.values.slice();
           s.loop = main.loop;
         }
         if (lane.relTag != null) {
@@ -679,12 +1141,8 @@
           if (rel) { s.relValues = rel.values.slice(); s.relLoop = rel.loop; }
         }
         if (!s.values.length) s.values = new Array(DEFAULT_LEN).fill(0);
-        // ピッチ/ノートの縦の目盛りは読み込んだ表に合わせて自動で広げる
-        // (EPの値は曲によって桁が全く違い、固定目盛りだと潰れて掴めないため)
-        if (lane.kind === 'signed' || lane.kind === 'step') {
-          const peak = Math.max(...s.values.map((v) => Math.abs(v)), 0);
-          s.range = clamp(Math.max(lane.key === 'ep' ? 8 : 12, Math.ceil(peak * 1.25)), 1, 127);
-        }
+        fitRange(lane);
+        if (s.chord) chordFromTable(s);
         s.dirty = false;
         els.lanes.get(lane.key).apply.classList.remove('apply-btn--dirty');
         renderLane(lane);
@@ -699,9 +1157,7 @@
       }
 
       function scaleText() {
-        const vol = target.volMax === 0 ? T('音量なし')
-          : target.volEff ? T('音量 0-{max}(実効{eff}で頭打ち)', { max: target.volMax, eff: target.volEff })
-            : T('音量 0-{max}', { max: target.volMax });
+        const vol = target.volMax === 0 ? T('音量なし') : T('音量 0-{max}', { max: target.volEff || target.volMax });
         const duty = target.duty ? T('音色 0-{max}', { max: target.duty - 1 }) : T('音色エンベロープなし');
         return `${vol} / ${duty} / ${T('試聴ch')} ${target.letter}`;
       }
@@ -710,7 +1166,7 @@
       function tableTextFor(lane, index, zone) {
         const s = state.get(lane.key);
         if (zone === 0) {
-          const vals = lane.key === 'en' ? cumToDeltas(s.values) : s.values;
+          const vals = isCumulativeLane(lane) ? tableDeltas(lane, s) : s.values;
           return formatTable(lane.tag, index, vals, s.loop);
         }
         return formatTable(lane.relTag, index, s.relValues, s.relLoop);
@@ -860,7 +1316,8 @@
       buildShell();
       reloadAll();
       if (MML.I18n && MML.I18n.onChange) {
-        MML.I18n.onChange(() => { buildShell(); reloadAll(); });
+        // 言語切替はシェルを作り直すだけで、MMLから読み直さない(読み直すと反映前の編集が消えるため)
+        MML.I18n.onChange(() => { buildShell(); if (els.phrase) els.phrase.value = phraseText; });
       }
     }
   };

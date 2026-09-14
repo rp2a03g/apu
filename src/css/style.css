@@ -3410,8 +3410,6 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 .env-lane-on { color: var(--text) !important; font-size: 11px !important; }
 .env-lane-on b { color: var(--accent); font-family: var(--mono); }
 .env-lane-extra { display: flex; align-items: center; gap: 3px; }
-/* 「反映」だけは右端へ寄せて、レーンごとの押し間違いを減らす */
-.env-lane-bar .env-apply { margin-left: auto; }
 
 .env-lane-canvas-wrap { overflow-x: auto; overflow-y: hidden; }
 .env-lane-canvas {
@@ -3429,3 +3427,27 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 .env-lane-disabled { font-size: 10px; color: var(--text-muted); padding: 2px 0; }
 .env-lane--off .env-lane-canvas-wrap,
 .env-lane--off .env-lane-values { display: none; }
+/* ノートレーンの和音入力(基準の音/和音/数字/並び + 鍵盤)。鍵盤は基準の音から-12〜+24半音 */
+.env-chord { margin: 0 0 3px; }
+.env-chord-bar { flex-wrap: wrap; gap: 6px; margin: 0 0 3px; align-items: center; }
+.env-chord-bar label { display: flex; align-items: center; gap: 3px; color: var(--text-muted); font-size: 10px; }
+.env-ch-nums { font-family: var(--mono); }
+.env-ch-nums--bad { outline: 1px solid #e05a5a; }
+.env-kb { position: relative; height: 40px; user-select: none; cursor: pointer; }
+.env-kb > div { position: absolute; top: 0; box-sizing: border-box; font-style: normal; }
+.env-kb-w { width: 16px; height: 40px; background: #e8e8ec; border: 1px solid #9a9aa8; border-radius: 0 0 3px 3px; }
+.env-kb-b { width: 10px; height: 24px; background: #2a2a32; border: 1px solid #111; border-radius: 0 0 2px 2px; z-index: 1; }
+.env-kb-w.on { background: #5ad4a0; }
+.env-kb-b.on { background: #1d9e75; }
+/* 基準の音(0)は枠を太くし、白鍵なら音名を出す */
+.env-kb .base { box-shadow: inset 0 0 0 2px #e0a030; }
+.env-kb b, .env-kb u { position: absolute; bottom: 1px; left: 0; right: 0; text-align: center; font-size: 8px; font-weight: normal; text-decoration: none; color: #555; }
+.env-kb b { color: #b07010; font-weight: bold; }
+/* クリック順のときの押した順番 */
+.env-kb i { position: absolute; top: 2px; left: 0; right: 0; text-align: center; font-size: 8px; font-style: normal; color: #123; }
+.env-kb-b i { color: #e8fff4; }
+/* 表に入る値(数字)がこのパネルの本体。和音名・鍵盤は作る道具なので、数字の欄だけ目立たせる */
+.env-ch-main { color: var(--text) !important; font-size: 11px !important; }
+.env-ch-main .env-ch-nums { font-weight: bold; }
+/* 同じ数字でも弾く音で別の和音になる、という実例 */
+.env-ch-example { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
