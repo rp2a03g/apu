@@ -318,6 +318,10 @@
   }
   MML.Vgm2MmlExpansion.ga20 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 4, opts);
   MML.Vgm2MmlExpansion.k007232 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 2, opts);
+  // ★ch数はスナップショットの幅から決める(デュアルは16)。呼び出し口が複数あり(既定割当の
+  //   並べ替えは引数なしで呼ぶ)、片方だけ8のままだと channels[8..15] が undefined になる。
+  MML.Vgm2MmlExpansion.k054539 = (snapshots, drumMap, opts) =>
+    pcmChannels(snapshots, ((snapshots && snapshots[0] && snapshots[0].length) >= 16) ? 16 : 8, opts);
   MML.Vgm2MmlExpansion.segapcm = (snapshots, drumMap, opts) => pcmChannels(snapshots, 16, opts);
   MML.Vgm2MmlExpansion.c140 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 24, opts);
   MML.Vgm2MmlExpansion.c352 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 32, opts);

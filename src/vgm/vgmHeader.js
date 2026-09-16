@@ -49,7 +49,7 @@
     { id: 'okim6258', name: 'OKIM6258',   offset: 0x90, minVer: 0x161, impl: true },
     { id: 'okim6295', name: 'OKIM6295',   offset: 0x98, minVer: 0x161, impl: true },
     { id: 'k051649',  name: 'K051649',    offset: 0x9C, minVer: 0x161, impl: true },
-    { id: 'k054539',  name: 'K054539',    offset: 0xA0, minVer: 0x161 },
+    { id: 'k054539',  name: 'K054539',    offset: 0xA0, minVer: 0x161, impl: true },
     { id: 'huc6280',  name: 'HuC6280',    offset: 0xA4, minVer: 0x161, impl: true },
     { id: 'c140',     name: 'C140',       offset: 0xA8, minVer: 0x161, impl: true },
     { id: 'k053260',  name: 'K053260',    offset: 0xAC, minVer: 0x161 },
@@ -151,6 +151,13 @@
       if (c.id === 'c352') info.c352Div = ((0xD6 < headerEnd ? bytes[0xD6] : 0) * 4) || 288; // 0xD6: 分周/4(0=既定288)
       if (c.id === 'okim6258') info.okiFlags = (0x94 < headerEnd) ? bytes[0x94] : 0; // 0x94: bit0-1=分周, bit2=3bit ADPCM, bit3=12bit DAC
       if (c.id === 'okim6295') info.pin7 = flag31; // bit31: pin7(分周132/165切替)
+      if (c.id === 'k054539') {
+        // 0x95: bit0=左右反転 / bit1=リバーブ無効 / bit2=キーオン時に位置を確定
+        info.k054Flags = (0x95 < headerEnd) ? bytes[0x95] : 0;
+        // ★2012-13年ごろの古いログは**クロック欄にサンプルレート(48000等)が入っている**。
+        //   1MHz未満なら×384して実クロックへ直す(libvgm VGMPlayer::LoadFile と同じ扱い)。
+        if (info.clock < 1000000) info.clock *= 384;
+      }
       if (c.id === 'msm5205') {
         info.msm6585 = flag31;                     // bit31: MSM6585(上位互換品。分周表が違う)
         if (flag31) info.name = 'MSM6585';

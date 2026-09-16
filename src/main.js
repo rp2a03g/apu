@@ -1609,7 +1609,7 @@
       }
       return out;
     };
-    const CHIP_OF_DATA = { ga20: 'ga20', k007232: 'k007232', segapcm: 'segapcm', c140: 'c140', c352: 'c352',
+    const CHIP_OF_DATA = { ga20: 'ga20', k007232: 'k007232', k054539: 'k054539', segapcm: 'segapcm', c140: 'c140', c352: 'c352',
                           qsound: 'qsound', okim6295: 'okim6295', multipcm: 'multipcm', ym2610fm: 'ym2610', ym2608fm: 'ym2608' };
     return {
       format: 'vgm',
@@ -8117,6 +8117,7 @@
     if (h.chips.ym2151) chips.push('ym2151');
     if (h.chips.ga20) chips.push('ga20');
     if (h.chips.k007232) chips.push('k007232');
+    if (h.chips.k054539) chips.push('k054539');
     if (h.chips.msm5205) chips.push('msm5205');
     if (h.chips.segapcm) chips.push('segapcm');
     if (h.chips.c140) chips.push('c140');
@@ -8221,6 +8222,11 @@
     getGa20: () => { const a = vgmAdapter('ga20'); return a ? MML.Emu.snapshotGA20(a.chip) : null; }
 ,
     getK007232: () => { const a = vgmAdapter('k007232'); return a ? MML.Emu.snapshotK007232(a.chip) : null; }
+,
+    // デュアル(サラマンダー2)は2個目を連結して16要素で返す(SN76489と同じ流儀。鍵盤は幅で追随)
+    getK054539: () => { const a = vgmAdapter('k054539'); if (!a) return null;
+      const s = MML.Emu.snapshotK054539(a.chip); const b = vgmAdapter('k054539_2');
+      return b ? s.concat(MML.Emu.snapshotK054539(b.chip)) : s; }
 ,
     getMsm5205: () => { const a = vgmAdapter('msm5205'); return a ? MML.Emu.snapshotMSM5205(a.chip) : null; }
 ,
@@ -8349,6 +8355,12 @@
       getOpl: liveVgm.getOpl,
       getYm2151: liveVgm.getYm2151,
       getGa20: liveVgm.getGa20,
+      // ★ここは「鍵盤表示へ渡すライブ取得関数」の明示リスト。新しいチップを足したら
+      //   liveVgm 側だけでなく**ここにも足す**こと。忘れると鍵盤の音量/波形/L-Rが
+      //   ライブ再生中だけ出ない(キャプチャ経路のロールは出るので気づきにくい)。
+      getK007232: liveVgm.getK007232,
+      getK054539: liveVgm.getK054539,
+      getMsm5205: liveVgm.getMsm5205,
       getSegaPcm: liveVgm.getSegaPcm,
       getC140: liveVgm.getC140,
       getC352: liveVgm.getC352,
@@ -8422,7 +8434,7 @@
   // サンプル表からその形へ詰め替える。rateは最初にそのサンプルがキーオンされたときの再生レート。
   function updateVgmDrumSamples(data) {
     const out = {};
-    const CH = [['ga20', 4, 'pcm'], ['k007232', 2, 'pcm'], ['segapcm', 16, 'pcm'], ['c140', 24, 'pcm'], ['c352', 32, 'pcm'],
+    const CH = [['ga20', 4, 'pcm'], ['k007232', 2, 'pcm'], ['k054539', 16, 'pcm'], ['segapcm', 16, 'pcm'], ['c140', 24, 'pcm'], ['c352', 32, 'pcm'],
                 ['qsound', 16, 'pcm'], ['okim6295', 4, 'pcm'], ['multipcm', 28, 'pcm'],
                 ['ym2610fm', 6, 'adpcmA'], ['ym2608fm', 6, 'adpcmA'],
                 ['ym2610fm', 1, 'adpcmB'], ['ym2608fm', 1, 'adpcmB']]; // ADPCM-B は snapshot.adpcmB の1本

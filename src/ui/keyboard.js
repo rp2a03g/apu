@@ -422,6 +422,9 @@
     // VGM: K007232(コナミPCM、K71-K72)。chip.mute[]はch 0-1
     const k7 = id.match(/^K7(\d)$/);
     if (k7) return { section: 'expansion', chip: 'k007232', type: 'array', index: +k7[1] - 1 };
+    // VGM: K054539(コナミ8ch PCM、K51-K58)。chip.mute[]はch 0-7
+    const k5 = id.match(/^K5(\d+)$/);
+    if (k5) return { section: 'expansion', chip: 'k054539', type: 'array', index: +k5[1] - 1 };
     // VGM: MSM5205/6585(PC Engine CD ADPCM等、1ch)。chip.mute[]は1要素
     if (id === 'M5') return { section: 'expansion', chip: 'msm5205', type: 'array', index: 0 };
     // VGM: SegaPCM(SP1-16)。chip.mute[]はch 0-15
@@ -1525,6 +1528,28 @@
         const hue = (285 + ch * 20) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `K7${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: kWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
+    if (chips.includes('k054539')) {
+      // K054539(VGM: コナミ・アーケード8ch PCM): GA1-4行と同じ3段階表示(ピッチ解析が
+      // 信頼できれば絶対音名、できなければ「サンプル」行)。24bitのピッチレジスタで
+      // 1サンプルを音階演奏するチップなので、音程が取れれば絶対音名になる。
+      // L/R列は定パワーのパン表(pantab)を 0-1 で出した値。8bit PCM / 16bit PCM / 4bit DPCM が混在する。
+      const live = extraSnaps && extraSnaps.k054539Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.k054539 ? extraSnaps.k054539[frameIdx] : null);
+      const kWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      // デュアルチップはスナップショットが16要素(8+8)で返る。2組目は K59-K516 行
+      const nCh = s && s.length >= 16 ? 16 : 8;
+      for (let ch = 0; ch < nCh; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (25 + ch * 16) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `K5${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: kWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
@@ -4717,7 +4742,7 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'k007232', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'k007232', 'k054539', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
@@ -4746,6 +4771,7 @@
       this._extraSnaps.oplLive = typeof result.getOpl === 'function' ? result.getOpl : null;
       this._extraSnaps.ga20Live = typeof result.getGa20 === 'function' ? result.getGa20 : null;
       this._extraSnaps.k007232Live = typeof result.getK007232 === 'function' ? result.getK007232 : null;
+      this._extraSnaps.k054539Live = typeof result.getK054539 === 'function' ? result.getK054539 : null;
       this._extraSnaps.msm5205Live = typeof result.getMsm5205 === 'function' ? result.getMsm5205 : null;
       this._extraSnaps.segapcmLive = typeof result.getSegaPcm === 'function' ? result.getSegaPcm : null;
       this._extraSnaps.c140Live = typeof result.getC140 === 'function' ? result.getC140 : null;

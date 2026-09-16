@@ -295,6 +295,9 @@
     // ピッチ解析で音程が取れた区間だけ音符になる
     if (c.ga20) for (let i = 0; i < 4; i++) out.push({ id: `ga20:${i}`, label: `GA20 PCM${i + 1}`, kind: 'pcm', chip: 'ga20', chipIndex: 0, ch: i });
     if (c.k007232) for (let i = 0; i < 2; i++) out.push({ id: `k7:${i}`, label: `K007232 PCM${i + 1}`, kind: 'pcm', chip: 'k007232', chipIndex: 0, ch: i });
+    // デュアル(サラマンダー2)は16ch。2個目は ch8-15(鍵盤の K59-K516 と同じ並び)
+    if (c.k054539) { const kn = c.k054539.dual ? 16 : 8;
+      for (let i = 0; i < kn; i++) out.push({ id: `k5:${i}`, label: `K054539${kn > 8 ? '#' + (i < 8 ? 1 : 2) : ''} PCM${(i % 8) + 1}`, kind: 'pcm', chip: 'k054539', chipIndex: i < 8 ? 0 : 1, ch: i }); }
     if (c.segapcm) for (let i = 0; i < 16; i++) out.push({ id: `spcm:${i}`, label: `SegaPCM PCM${i + 1}`, kind: 'pcm', chip: 'segapcm', chipIndex: 0, ch: i });
     if (c.c140) for (let i = 0; i < 24; i++) out.push({ id: `c140:${i}`, label: `C140 PCM${i + 1}`, kind: 'pcm', chip: 'c140', chipIndex: 0, ch: i });
     if (c.c352) for (let i = 0; i < 32; i++) out.push({ id: `c352:${i}`, label: `C352 PCM${i + 1}`, kind: 'pcm', chip: 'c352', chipIndex: 0, ch: i });
@@ -337,6 +340,7 @@
   const DRUM_CHIPS = [
     { flag: 'ga20',     key: 'ga20', name: 'GA20',            n: 4,  shape: 'pcm',    data: 'ga20' },
     { flag: 'k007232',  key: 'k7',   name: 'K007232',         n: 2,  shape: 'pcm',    data: 'k007232' },
+    { flag: 'k054539',  key: 'k5',   name: 'K054539',         n: 8,  shape: 'pcm',    data: 'k054539' },
     { flag: 'segapcm',  key: 'spcm', name: 'SegaPCM',         n: 16, shape: 'pcm',    data: 'segapcm' },
     { flag: 'c140',     key: 'c140', name: 'C140',            n: 24, shape: 'pcm',    data: 'c140' },
     { flag: 'c352',     key: 'c352', name: 'C352',            n: 32, shape: 'pcm',    data: 'c352' },
@@ -720,6 +724,10 @@
       const pcmItems = src.filter(s => s.chip === 'k007232' && s.ch >= 0 && wantExtract(s));
       extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.k007232(data.k007232.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
     }
+    if (data.k054539 && c.k054539) {
+      const pcmItems = src.filter(s => s.chip === 'k054539' && s.ch >= 0 && wantExtract(s));
+      extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.k054539(data.k054539.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
+    }
     if (data.segapcm && c.segapcm) {
       const pcmItems = src.filter(s => s.chip === 'segapcm' && s.ch >= 0 && wantExtract(s));
       extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.segapcm(data.segapcm.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
@@ -1061,7 +1069,7 @@
       bpm: Math.round(bpm),
       pitchCheck,
       scoreChannels,
-      chips: h.usedChips.filter(ch => ['ay8910', 'k051649', 'ym2413', 'sn76489', 'ym2612', 'ym2610', 'ym2151', 'ym2203', 'ym2608', 'ym3812', 'ym3526', 'y8950', 'ga20', 'k007232', 'segapcm', 'c140', 'c352', 'qsound', 'okim6295', 'multipcm', 'psx'].includes(ch.id)).map(ch => ch.name + (ch.dual ? ' x2' : '')),
+      chips: h.usedChips.filter(ch => ['ay8910', 'k051649', 'ym2413', 'sn76489', 'ym2612', 'ym2610', 'ym2151', 'ym2203', 'ym2608', 'ym3812', 'ym3526', 'y8950', 'ga20', 'k007232', 'k054539', 'segapcm', 'c140', 'c352', 'qsound', 'okim6295', 'multipcm', 'psx'].includes(ch.id)).map(ch => ch.name + (ch.dual ? ' x2' : '')),
       expansions,
       assignments,
       plan,
@@ -1334,7 +1342,7 @@
     // 変換ファミリ: PSG系(AY/SCC/OPLL/SN、同居可) / NES / GB / HES。複数同居していれば先頭だけ。
     const families = [];
     const msmDrum = !!(h.chips && h.chips.msm5205) && (options.drumHits || []).some(x => x.chId === 'M5');
-    if (data.kss || data.sn || data.ym2612 || data.ym2610fm || data.ym2151 || data.ym2203fm || data.ym2608fm || data.ga20 || data.k007232 || data.segapcm || data.c140 || data.c352 || data.qsound || data.okim6295 || data.multipcm || data.psx) families.push('psg');
+    if (data.kss || data.sn || data.ym2612 || data.ym2610fm || data.ym2151 || data.ym2203fm || data.ym2608fm || data.ga20 || data.k007232 || data.k054539 || data.segapcm || data.c140 || data.c352 || data.qsound || data.okim6295 || data.multipcm || data.psx) families.push('psg');
     if (data.nes) families.push('nes');
     if (data.gb) families.push('gb');
     if (data.hes) families.push('hes');
@@ -1343,7 +1351,7 @@
       throw new Error(tr('MML変換に対応した音源がありません({chips})', { chips: names }));
     }
     const family = families[0];
-    const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', ym2610: 'psg', ym2612: 'psg', ym2151: 'psg', ym2203: 'psg', ym2608: 'psg', ym3812: 'psg', ym3526: 'psg', y8950: 'psg', ga20: 'psg', k007232: 'psg', segapcm: 'psg', c140: 'psg', c352: 'psg', qsound: 'psg', okim6295: 'psg', multipcm: 'psg', psx: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };
+    const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', ym2610: 'psg', ym2612: 'psg', ym2151: 'psg', ym2203: 'psg', ym2608: 'psg', ym3812: 'psg', ym3526: 'psg', y8950: 'psg', ga20: 'psg', k007232: 'psg', k054539: 'psg', segapcm: 'psg', c140: 'psg', c352: 'psg', qsound: 'psg', okim6295: 'psg', multipcm: 'psg', psx: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };
     // ストリーミングDAC(YM2612 DAC / OKIM6258)は旋律の変換対象ではないが、main.js が
     // ログから打点を取って options.drumHits で渡してくると E(DPCM) へ焼かれる(2026-09-05)。
     // その場合は「無視した」と言わない(X68000曲は音源がYM2151+OKIM6258しか無いので目立つ)
@@ -1367,6 +1375,7 @@
     if ((h.chips.ym3812 || h.chips.ym3526 || h.chips.y8950) && family === 'psg') ignoredNotes.push(`OPLのリズムモード打楽器${h.chips.y8950 ? 'とY8950のADPCM' : ''}は変換対象外です(メロディchのみ。音色はOPLLカスタム音色へ変換)。`);
     if (h.chips.ga20 && family === 'psg') ignoredNotes.push(`GA20 PCM はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
     if (h.chips.k007232 && family === 'psg') ignoredNotes.push(`K007232 PCM はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
+    if (h.chips.k054539 && family === 'psg') ignoredNotes.push(`K054539 PCM はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
     if (h.chips.segapcm && family === 'psg') ignoredNotes.push(`SegaPCM はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
     if (h.chips.c140 && family === 'psg') ignoredNotes.push(`C140 はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
     if (h.chips.c352 && family === 'psg') ignoredNotes.push(`C352 はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);

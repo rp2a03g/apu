@@ -93,7 +93,7 @@
   // 正しいのに音量が全区間でちょうど2倍だった(Rave Racer 3曲)。1.0ではナムコSystem 22/NB系の全曲がリミッタ前で
   // ピーク1.0超(1.0〜2.1)・RMS -9.5〜-17dBFS と他のナムコ作品(C140のワルキューレ -18〜-20dBFS)より6〜8dB大きく、
   // 大きい所をリミッタが押しつぶしていた。0.5でVGMPlayと同じ比率になり、ピークは0.49〜1.06に収まる
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0, k007232: 1.6, msm5205: 1.45 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0, k007232: 1.6, msm5205: 1.45, k054539: 2.4 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -441,6 +441,26 @@
     };
   }
 
+  // K054539 のゲイン 2.4 は実測で決めた(90曲×15秒の掃引)。VGMPlay比は1.21で基準帯(1.6〜2.0)より
+  // 低いが、この素材はクレストファクタが高く、基準どおりに上げるとクリップする:
+  //   3.40 → クリップ2683・最大1.495 / 2.72 → 87・1.217 / **2.40 → 8・1.101** / 2.04 → 0・0.985
+  // 8サンプル(90曲1350秒中)はリミッタが透過的に処理できる範囲なので、音量を優先して2.4を採った。
+  // K054539(コナミPCM): 8ch ステレオPCM(expansion/k054539.js)。コマンドは 0xD3 pp aa dd
+  // (offset=(pp<<8)|aa、ppのbit7=デュアル2個目)、ROMはデータブロック0x8C。フラグはヘッダ0x95。
+  function makeK054539Adapter(info) {
+    const chip = new Emu.K054539Audio(info.clock, info.k054Flags || 0);
+    return {
+      id: 'k054539', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.k054539,
+      write(offset, dd) { chip.write(offset, dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      // 2個目のチップ(this.second)は鍵盤の K59-K516 行=配列 index 8-15 を自分の ch0-7 として読む
+      applyMute(m) { const e = m.expansion || m; if (e.k054539) Emu.applyMute(chip.mute, this.second ? e.k054539.slice(8) : e.k054539); },
+      applyVolume(v) { const e = v.expansion || v; if (e.k054539) Emu.applyVolume(chip.vol, this.second ? e.k054539.slice(8) : e.k054539); }
+    };
+  }
+
   // SegaPCM(315-5218): 16ch ステレオPCM(expansion/segapcm.js)。コマンドは 0xC0 bbaa dd
   // (offset=aabb、bit15=デュアル2個目)、ROMはデータブロック0x80。バンク構成はヘッダ0x3C(info.intf)。
   function makeSegaPcmAdapter(info) {
@@ -593,7 +613,7 @@
     ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter,
     c352: makeC352Adapter, okim6258: makeOkim6258Adapter, qsound: makeQsoundAdapter,
     okim6295: makeOkim6295Adapter, multipcm: makeMultiPcmAdapter,
-    k007232: makeK007232Adapter, msm5205: makeMsm5205Adapter
+    k007232: makeK007232Adapter, msm5205: makeMsm5205Adapter, k054539: makeK054539Adapter
   };
 
   // ---------------------------------------------------------------------------
@@ -678,6 +698,10 @@
         // なり過熱する(実測: Avengers Boss RMS-8.1dB/ピーク2.4=クリップ)。FM:SSG比を保ったまま
         // 両チップ×0.5して単チップ相当の合算レベルに収める(RMS-14dB級)。
         if (info.id === 'ym2203' && info.dual) a.scaleGain(0.5);
+        // デュアルK054539(サラマンダー2): VGMPlay は GetChipVolume で「2個使いなら各チップ÷個数」
+        // にしている。これを入れないと2個ぶんが素通しで合算2倍になる(実測: 単チップの曲は
+        // VGMPlay比0.80前後なのにサラマンダー2だけ1.63=ちょうど2倍)。
+        if (info.id === 'k054539' && info.dual) a.gain *= 0.5;
         // コナミ・アーケード(OPL系+SCC。ライブラリ内では Haunted Castle だけがこの同居):
         // このパックは**K007232を足す前から全曲的に0dBFSを超えていた**(23曲20秒の合計で
         // クリップ9211サンプル・最大ピーク1.49)。アイレムM92と同じ「比率を保ったまま全体を
@@ -719,6 +743,7 @@
           if ((info.id === 'ym2151' || info.id === 'ga20') && h.chips.ym2151 && h.chips.ga20) b.gain *= 0.5;
           if ((info.id === 'ym2151' || info.id === 'okim6295') && h.chips.ym2151 && h.chips.okim6295) b.gain *= 0.7;
           if (info.id === 'ym2203') b.scaleGain(0.5);
+          if (info.id === 'k054539') b.gain *= 0.5;
           if ((h.chips.ym3812 || h.chips.ym3526 || h.chips.y8950) && h.chips.k051649) {
             if (b.scaleGain) b.scaleGain(0.7); else b.gain *= 0.7;
           }
@@ -820,6 +845,8 @@
           // K007232(コナミPCM): 0x41 aa dd。aa=0x1F は「チップ読み出しの実行」で dd が読み出し
           // オフセット(5/11でキーオン)。Haunted Castle のドライバはこの経路でしか発音しない
           case 0x41: this._k007232Write(d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          // K054539(コナミ8ch PCM): 0xD3 pp aa dd。オフセットは16bit、ppのbit7=デュアル2個目
+          case 0xD3: this._chipWrite('k054539', ((d[p] & 0x7F) << 8) | d[p + 1], d[p + 2], !!(d[p] & 0x80)); this.pos = p + 3; break;
           // MSM5205/MSM6585(PC Engine CD ADPCM 等): 0x32 dd。上位ニブル=レジスタ、下位=値
           case 0x32: this._chipWrite('msm5205', (d[p] >> 4) & 0x07, d[p] & 0x0F, !!(d[p] & 0x80)); this.pos = p + 1; break;
           case 0xB7: this._chipWrite('okim6258', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // OKIM6258(X68000 ADPCM)
@@ -918,7 +945,7 @@
 
     // ROMサイズ(4)+開始アドレス(4)+データ、の共通形式で1チップに紐づくROMブロック(型→チップid)
     static get ROM_BLOCK_CHIP() {
-      return { 0x80: 'segapcm', 0x89: 'multipcm', 0x8B: 'okim6295', 0x8D: 'c140', 0x8F: 'qsound', 0x92: 'c352', 0x93: 'ga20', 0x94: 'k007232' };
+      return { 0x80: 'segapcm', 0x89: 'multipcm', 0x8B: 'okim6295', 0x8D: 'c140', 0x8F: 'qsound', 0x92: 'c352', 0x93: 'ga20', 0x94: 'k007232', 0x8C: 'k054539' };
     }
     // second: データブロックサイズのbit31=デュアルチップ2個目のROM/RAM(Batriderの
     // デュアルOKIM6295等。以前は捨てて全部1個目へロードし、2個目のROMが1個目を上書きしていた)
@@ -1372,6 +1399,7 @@
       ym2608fm: has('ym2608') ? { snapshots: [] } : null,
       ga20: has('ga20') ? { snapshots: [] } : null,
       k007232: has('k007232') ? { snapshots: [] } : null,
+      k054539: has('k054539') ? { snapshots: [] } : null,
       msm5205: has('msm5205') ? { snapshots: [] } : null,
       // snapshots=物理スロット、logical=割当逆算(ソフトウェアチャンネル合成、
       // Emu.PoolChannelRegrouper)。ペア交互/巡回割当のドライバ対策で両方を常時保持する
@@ -1398,6 +1426,8 @@
     const ga20State = { seq: new Array(4).fill(0), end: new Array(4).fill(-1) };
     // K007232 も同じ推定(終端はROMのbit7マーカーなので、キーオン通番+サンプル長で区間を切る)
     const k007232State = { seq: new Array(2).fill(0), end: new Array(2).fill(-1) };
+    // K054539 も同じ推定(終端はROMのマーカーなので、キーオン通番+サンプル長で区間を切る)
+    const k054539State = { seq: new Array(16).fill(0), end: new Array(16).fill(-1) };
     // SegaPCM: ワンショットは同じ推定。ループ再生(lenSec=Infinity)は明示停止(reg86書込み)まで鳴る
     const spcmState = { seq: new Array(16).fill(0), end: new Array(16).fill(-1) };
     // C140: 同じ推定(キーオン/オフは明示レジスタなのでエッジは正確。ワンショット終端だけ窓で切る)
@@ -1600,6 +1630,26 @@
         data.k007232.snapshots.push(s);
       }
       if (data.msm5205) data.msm5205.snapshots.push(Emu.snapshotMSM5205(player.adapterById.msm5205.chip));
+      if (data.k054539) {
+        const a2 = player.adapterById.k054539_2;
+        const s1 = Emu.snapshotK054539(player.adapterById.k054539.chip);
+        // デュアル(サラマンダー2)は2個目を連結して16要素にする。ロール/鍵盤/変換は幅で自動追随する。
+        // ★2個目のサンプルは2個目のROMから復号する必要があるので印を付ける(collectUsedSamples)
+        let s = s1;
+        if (a2) {
+          const s2 = Emu.snapshotK054539(a2.chip);
+          for (const c of s2) if (c.sample) c.sample.chip2 = true;
+          s = s1.concat(s2);
+        }
+        const st = k054539State;
+        for (let i = 0; i < s.length; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = f + c.lenSec * FRAME_RATE; }
+          // キーオフは 0x215 で明示されるので c.active に反映済み。ワンショットの終端だけ窓で切る
+          c.active = c.active && f < st.end[i];
+        }
+        data.k054539.snapshots.push(s);
+      }
       if (data.segapcm) {
         const s = Emu.snapshotSegaPCM(player.adapterById.segapcm.chip);
         const st = spcmState;
@@ -1821,7 +1871,8 @@
   function collectUsedSamples(data, player) {
     // [dataのキー, スナップショットからチャンネル配列を取り出す関数, adapterId]
     const SRC = [
-      ['ga20', (s) => s, 'ga20'], ['k007232', (s) => s, 'k007232'], ['segapcm', (s) => s, 'segapcm'],
+      ['ga20', (s) => s, 'ga20'], ['k007232', (s) => s, 'k007232'], ['k054539', (s) => s, 'k054539'],
+      ['segapcm', (s) => s, 'segapcm'],
       ['c140', (s) => s, 'c140'], ['c352', (s) => s, 'c352'],
       ['qsound', (s) => s, 'qsound'], ['okim6295', (s) => s, 'okim6295'],
       ['multipcm', (s) => s, 'multipcm'],
@@ -1835,13 +1886,16 @@
       const adapter = player.adapterById[adapterId];
       const chip = adapter && (chipOf ? chipOf(adapter) : adapter.chip);
       if (!entry || !entry.snapshots || !chip || !chip.samplePcm) continue;
+      const adapter2 = player.adapterById[adapterId + '_2'];
+      const chip2 = adapter2 && (chipOf ? chipOf(adapter2) : adapter2.chip);
       const seen = new Map(); // 'kind:start:end' → sample
       for (const fr of entry.snapshots) {
         const chans = chansOf(fr);
         if (!chans) continue;
         for (const c of chans) {
           if (!c || !c.sample) continue;
-          const k = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end;
+          // デュアルチップの2個目はROMが別なので、キーにも印を付けて別サンプルとして持つ
+          const k = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end + (c.sample.chip2 ? ':2' : '');
           if (!seen.has(k)) seen.set(k, c.sample);
         }
       }
@@ -1850,7 +1904,8 @@
       for (const [k, sample] of seen) {
         if (total >= USED_SAMPLE_MAX_TOTAL) break;
         let pcm = null;
-        try { pcm = chip.samplePcm(sample); } catch (e) { pcm = null; }
+        const src = (sample.chip2 && chip2) ? chip2 : chip;
+        try { pcm = src.samplePcm(sample); } catch (e) { pcm = null; }
         if (!pcm || !pcm.length) continue;
         total += pcm.length;
         out[k] = pcm;
