@@ -41,6 +41,7 @@ export PATH="$PATH:/path/to/nodejs"
 | `psf-loudness.js` | PSF再生ゲインの校正(SPC基準の生RMS比) |
 | `psf-convert-survey.js` | PSF→MML変換の品質調査(合成ch/実機スロット別のコンパイル可否・音程検証) |
 | `pool-regroup-score.js` | 合成ch(`Emu.PoolChannelRegrouper`)の採点。PSFドライバ内部のトラック構造体を正解にしてレーン純度/トラック集中度を出す |
+| `vgm-normalize-check.js` | VGMPlayの自動正規化(`NormalizeOverallVolume`)を再現し、自前の再生音量が何曲でVGMPlayと2倍/4倍ズレるかを数える。導入判断用(ROADMAP: K007232/MSM5205の節) |
 | `baseline-*.json` | 回帰テストのベースライン(曲ごとのSHA-256とメタ情報)。**gitignore済み** |
 
 ベースラインは手元のコーパスと1対1に対応する曲名一覧なので、リポジトリには入れていない。

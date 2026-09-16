@@ -64,7 +64,16 @@
     { id: 'x1_010',   name: 'X1-010',     offset: 0xD8, minVer: 0x171 },
     { id: 'c352',     name: 'C352',       offset: 0xDC, minVer: 0x171, impl: true },
     { id: 'ga20',     name: 'GA20',       offset: 0xE0, minVer: 0x171, impl: true },
-    { id: 'mikey',    name: 'Mikey',      offset: 0xE4, minVer: 0x172 }
+    { id: 'mikey',    name: 'Mikey',      offset: 0xE4, minVer: 0x172 },
+    // 0xE8以降は VGM 1.72 で追加された分(libvgm VGMPlayer::_CHIPCLK_OFS 準拠)。
+    // ★表に無いチップは usedChips にも入らず「未対応・読み飛ばし」の表示すら出ないので、
+    //   鳴らせないものも必ずここへ書く(Haunted Castle の K007232 を丸ごと落としていた)。
+    { id: 'k007232',  name: 'K007232',    offset: 0xE8, minVer: 0x172, impl: true },
+    { id: 'k005289',  name: 'K005289',    offset: 0xEC, minVer: 0x172 },
+    { id: 'msm5205',  name: 'MSM5205',    offset: 0xF0, minVer: 0x172, impl: true },
+    { id: 'msm5232',  name: 'MSM5232',    offset: 0xF4, minVer: 0x172 },
+    { id: 'bsmt2000', name: 'BSMT2000',   offset: 0xF8, minVer: 0x172 },
+    { id: 'ics2115',  name: 'ICS2115',    offset: 0xFC, minVer: 0x172 }
   ];
 
   function u16(b, o) { return b[o] | (b[o + 1] << 8); }
@@ -142,6 +151,12 @@
       if (c.id === 'c352') info.c352Div = ((0xD6 < headerEnd ? bytes[0xD6] : 0) * 4) || 288; // 0xD6: 分周/4(0=既定288)
       if (c.id === 'okim6258') info.okiFlags = (0x94 < headerEnd) ? bytes[0x94] : 0; // 0x94: bit0-1=分周, bit2=3bit ADPCM, bit3=12bit DAC
       if (c.id === 'okim6295') info.pin7 = flag31; // bit31: pin7(分周132/165切替)
+      if (c.id === 'msm5205') {
+        info.msm6585 = flag31;                     // bit31: MSM6585(上位互換品。分周表が違う)
+        if (flag31) info.name = 'MSM6585';
+        // 0xD7: bit0-1=プリスケーラ(S1/S2ピン)、bit2=4bit ADPCM(0なら3bit)
+        info.msmFlags = (0xD7 < headerEnd) ? bytes[0xD7] : 0;
+      }
       chips[c.id] = info;
       usedChips.push(info);
     }
@@ -170,7 +185,9 @@
       0x12: 'ay8910', 0x13: 'gb', 0x14: 'nes', 0x15: 'multipcm', 0x16: 'upd7759', 0x17: 'okim6258',
       0x18: 'okim6295', 0x19: 'k051649', 0x1A: 'k054539', 0x1B: 'huc6280', 0x1C: 'c140', 0x1D: 'k053260',
       0x1E: 'pokey', 0x1F: 'qsound', 0x20: 'scsp', 0x21: 'wswan', 0x22: 'vsu', 0x23: 'saa1099',
-      0x24: 'es5503', 0x25: 'es5506', 0x26: 'x1_010', 0x27: 'c352', 0x28: 'ga20'
+      0x24: 'es5503', 0x25: 'es5506', 0x26: 'x1_010', 0x27: 'c352', 0x28: 'ga20',
+      0x29: 'mikey', 0x2A: 'k007232', 0x2B: 'k005289', 0x2C: 'msm5205', 0x2D: 'msm5232',
+      0x2E: 'bsmt2000', 0x2F: 'ics2115'
     };
     const extra = { chipClocks: {}, chipVolumes: {} }; // chipVolumes[id or id+'_2'] = 倍率(1.0=100%)
     const extraRel = version >= 0x170 && dataOffset > 0xBC + 4 ? u32(bytes, 0xBC) : 0;

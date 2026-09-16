@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-16 18:14:36
+ * Built by tools/build-capture-workers.ps1 at 2026-09-16 20:37:14
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-16 18:14:36';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-16 20:37:14';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -5282,6 +5282,11 @@
     // VGM: GA20(Irem PCM、GA1-4)。chip.mute[]はch 0-3(GALLはGB行なので\dで区別される)
     const ga = id.match(/^GA(\d)$/);
     if (ga) return { section: 'expansion', chip: 'ga20', type: 'array', index: +ga[1] - 1 };
+    // VGM: K007232(コナミPCM、K71-K72)。chip.mute[]はch 0-1
+    const k7 = id.match(/^K7(\d)$/);
+    if (k7) return { section: 'expansion', chip: 'k007232', type: 'array', index: +k7[1] - 1 };
+    // VGM: MSM5205/6585(PC Engine CD ADPCM等、1ch)。chip.mute[]は1要素
+    if (id === 'M5') return { section: 'expansion', chip: 'msm5205', type: 'array', index: 0 };
     // VGM: SegaPCM(SP1-16)。chip.mute[]はch 0-15
     const sp = id.match(/^SP(\d+)$/);
     if (sp) return { section: 'expansion', chip: 'segapcm', type: 'array', index: +sp[1] - 1 };
@@ -6368,6 +6373,38 @@
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
       }
+    }
+
+    if (chips.includes('k007232')) {
+      // K007232(VGM: コナミ・アーケードPCM): 2ch 7bit PCM。GA1-4行と同じ3段階表示
+      // (ピッチ解析が信頼できれば絶対音名、できなければ「サンプル」行)。ピッチレジスタで
+      // 1サンプルを音階演奏するチップなので、音程が取れれば絶対音名になる。
+      // L/R列はch毎の左右音量レジスタ(0-255)を0-1へ正規化した値(片側0=完全に振り切り)。
+      const live = extraSnaps && extraSnaps.k007232Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.k007232 ? extraSnaps.k007232[frameIdx] : null);
+      const kWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 2; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (285 + ch * 20) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `K7${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: kWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
+    if (chips.includes('msm5205')) {
+      // MSM5205/6585(VGM: PC Engine CD ADPCM等): 1chストリーミングADPCM。ROMも音程レジスタも
+      // 無く、さらにPC EngineのVGMはDACストリームではなく 0x32 の直書きなので、サンプルの
+      // 同定キー(=波形アイコン)も取れない。OKI行と同じ「サンプル」行(音量=現在振幅)。
+      const live = extraSnaps && extraSnaps.msm5205Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.msm5205 ? extraSnaps.msm5205[frameIdx] : null);
+      const c = s ? s[0] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0 };
+      channels.push({ id: 'M5', color: '#ffbb55', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+        wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
+        panL: c.panL, panR: c.panR });
     }
 
     if (chips.includes('segapcm')) {
@@ -9543,7 +9580,7 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'k007232', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
@@ -9571,6 +9608,8 @@
       this._extraSnaps.ym2608FmLive = typeof result.getYm2608Fm === 'function' ? result.getYm2608Fm : null;
       this._extraSnaps.oplLive = typeof result.getOpl === 'function' ? result.getOpl : null;
       this._extraSnaps.ga20Live = typeof result.getGa20 === 'function' ? result.getGa20 : null;
+      this._extraSnaps.k007232Live = typeof result.getK007232 === 'function' ? result.getK007232 : null;
+      this._extraSnaps.msm5205Live = typeof result.getMsm5205 === 'function' ? result.getMsm5205 : null;
       this._extraSnaps.segapcmLive = typeof result.getSegaPcm === 'function' ? result.getSegaPcm : null;
       this._extraSnaps.c140Live = typeof result.getC140 === 'function' ? result.getC140 : null;
       this._extraSnaps.c352Live = typeof result.getC352 === 'function' ? result.getC352 : null;
@@ -12891,7 +12930,7 @@
     }
     // スナップショット型チップ: extractChannels(keyboard.js)が読むextraSnapsに
     // フレーム毎スナップショット配列を渡して同じ抽出経路でトラック化する
-    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'k007232', 'msm5205', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
     const chipToken = { sn: 'sn76489' };
     const poolMode = (opts && opts.poolMode) || {};
     for (const key of snapChips) {

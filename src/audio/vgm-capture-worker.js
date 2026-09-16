@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-16 18:14:36
+ * Built by tools/build-capture-workers.ps1 at 2026-09-16 20:37:14
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-16 18:14:36';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-16 20:37:14';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -77,7 +77,16 @@
     { id: 'x1_010',   name: 'X1-010',     offset: 0xD8, minVer: 0x171 },
     { id: 'c352',     name: 'C352',       offset: 0xDC, minVer: 0x171, impl: true },
     { id: 'ga20',     name: 'GA20',       offset: 0xE0, minVer: 0x171, impl: true },
-    { id: 'mikey',    name: 'Mikey',      offset: 0xE4, minVer: 0x172 }
+    { id: 'mikey',    name: 'Mikey',      offset: 0xE4, minVer: 0x172 },
+    // 0xE8以降は VGM 1.72 で追加された分(libvgm VGMPlayer::_CHIPCLK_OFS 準拠)。
+    // ★表に無いチップは usedChips にも入らず「未対応・読み飛ばし」の表示すら出ないので、
+    //   鳴らせないものも必ずここへ書く(Haunted Castle の K007232 を丸ごと落としていた)。
+    { id: 'k007232',  name: 'K007232',    offset: 0xE8, minVer: 0x172, impl: true },
+    { id: 'k005289',  name: 'K005289',    offset: 0xEC, minVer: 0x172 },
+    { id: 'msm5205',  name: 'MSM5205',    offset: 0xF0, minVer: 0x172, impl: true },
+    { id: 'msm5232',  name: 'MSM5232',    offset: 0xF4, minVer: 0x172 },
+    { id: 'bsmt2000', name: 'BSMT2000',   offset: 0xF8, minVer: 0x172 },
+    { id: 'ics2115',  name: 'ICS2115',    offset: 0xFC, minVer: 0x172 }
   ];
 
   function u16(b, o) { return b[o] | (b[o + 1] << 8); }
@@ -155,6 +164,12 @@
       if (c.id === 'c352') info.c352Div = ((0xD6 < headerEnd ? bytes[0xD6] : 0) * 4) || 288; // 0xD6: 分周/4(0=既定288)
       if (c.id === 'okim6258') info.okiFlags = (0x94 < headerEnd) ? bytes[0x94] : 0; // 0x94: bit0-1=分周, bit2=3bit ADPCM, bit3=12bit DAC
       if (c.id === 'okim6295') info.pin7 = flag31; // bit31: pin7(分周132/165切替)
+      if (c.id === 'msm5205') {
+        info.msm6585 = flag31;                     // bit31: MSM6585(上位互換品。分周表が違う)
+        if (flag31) info.name = 'MSM6585';
+        // 0xD7: bit0-1=プリスケーラ(S1/S2ピン)、bit2=4bit ADPCM(0なら3bit)
+        info.msmFlags = (0xD7 < headerEnd) ? bytes[0xD7] : 0;
+      }
       chips[c.id] = info;
       usedChips.push(info);
     }
@@ -183,7 +198,9 @@
       0x12: 'ay8910', 0x13: 'gb', 0x14: 'nes', 0x15: 'multipcm', 0x16: 'upd7759', 0x17: 'okim6258',
       0x18: 'okim6295', 0x19: 'k051649', 0x1A: 'k054539', 0x1B: 'huc6280', 0x1C: 'c140', 0x1D: 'k053260',
       0x1E: 'pokey', 0x1F: 'qsound', 0x20: 'scsp', 0x21: 'wswan', 0x22: 'vsu', 0x23: 'saa1099',
-      0x24: 'es5503', 0x25: 'es5506', 0x26: 'x1_010', 0x27: 'c352', 0x28: 'ga20'
+      0x24: 'es5503', 0x25: 'es5506', 0x26: 'x1_010', 0x27: 'c352', 0x28: 'ga20',
+      0x29: 'mikey', 0x2A: 'k007232', 0x2B: 'k005289', 0x2C: 'msm5205', 0x2D: 'msm5232',
+      0x2E: 'bsmt2000', 0x2F: 'ics2115'
     };
     const extra = { chipClocks: {}, chipVolumes: {} }; // chipVolumes[id or id+'_2'] = 倍率(1.0=100%)
     const extraRel = version >= 0x170 && dataOffset > 0xBC + 4 ? u32(bytes, 0xBC) : 0;
@@ -11217,6 +11234,471 @@
 })(globalThis);
 
 /*
+ * Konami K007232 2ch PCM 音源 (VGM: chip 'k007232'。コナミのアーケード基板。
+ * 悪魔城ドラキュラ(Haunted Castle)/AJAX/Chequered Flag 等で YM3812+SCC とペアを組み、
+ * 打楽器・ボイスを担当する)
+ * MML.Emu.K007232Audio
+ *
+ * 7bit符号なしPCM×2ch・ステレオ(ch毎に左右の音量レジスタを持つ)。サンプルROMは
+ * **bit7が終端マーカー**(値の下位7bitが波形、bit7が立っているバイトで終わり)。
+ * ループ有効なら開始アドレスへ戻る。出力レート = clock/128(3579545Hz → 27965Hz)。
+ * 挙動は libvgm emu/cores/k007232.c(MAME + cam900/Mao の改良版)準拠:
+ *   レジスタ(ch = offset/6、reg_base = ch*6):
+ *     +0/+1 ピッチ(+1のbit4-5がモード: 0/3=12bit値, 1=(256-lsb)<<4, 2=(16-nibble)<<8)
+ *     +2/+3/+4 開始アドレス(17bit。+4はbit0のみ)
+ *     +5 キーオン(**書込みでも読出しでもトリガ**。実チップは読み出しで発音する設計)
+ *     0x0C 外部ポート(基板側の音量ラッチ。VGMログでは 0x10-0x13 に変換済みなので無視)
+ *     0x0D ループ許可(bit0=ch0 / bit1=ch1)
+ *     0x10-0x13 音量(ch0左/ch0右/ch1左/ch1右、各0-255)
+ *     0x14/0x15 バンク(値<<17 を加算するベースアドレス)
+ *   出力 = Σ ((rom[addr] & 0x7F) - 0x40) * vol。
+ *   歩進: 出力1サンプルごとに counter -= 32、負になったら counter += 0x1000-step で addr++。
+ *   → 再生レート(バイト/秒) = clock / (4 * (0x1000 - step))。
+ * VGM: コマンド 0x41 aa dd(aaのbit7=デュアル2個目)。**aa=0x1F は「チップ読み出しの実行」**で、
+ * ddが読み出しオフセット(=5か11ならキーオン)。ROMはデータブロック type 0x94
+ * (ROMサイズ(4)+開始アドレス(4)+データ。GA20の0x93と同形式)。
+ *
+ * ★GA20/YM2610 ADPCM と同じく、鍵盤表示/vgm2mmlの音程は Emu.SamplePitchUtil の
+ * サンプル基本周期解析 × 再生レートで得る(手動キャリブレーションのlocalStorageも共通)。
+ * GA20と違って終端アドレスのレジスタが無いので、終端は ROM を bit7 まで走査して求める。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const NUM_CH = 2;
+  const CLOCK_DIV = 128;
+  const ADDR_MASK = 0x1FFFF;
+  const COUNTER_TOP = 0x1000;
+  const COUNTER_STEP = 32;
+  // 1ch フルスケール = 64(波形の片振幅) * 255(音量) = 16320。2ch合算で ±32640 を ±1.0 へ
+  const OUT_SCALE = 1 / 32768;
+  const MAX_SAMPLE_BYTES = 64 * 1024; // 終端走査/解析のコスト上限
+
+  class K007232Audio {
+    /**
+     * @param {number} [clock=3579545] - マスタークロック(出力レート=clock/128)
+     */
+    constructor(clock) {
+      this.clockHz = clock || 3579545;
+      this.sampleRate = this.clockHz / CLOCK_DIV;
+      this.mute = new Array(NUM_CH).fill(false);
+      this.vol = new Array(NUM_CH).fill(1);
+      this.rom = null;
+      this._pitchCache = new Map(); // 'start:end' → samplePitch 結果
+      this._endCache = new Map();   // start → 終端アドレス(bit7走査の結果)
+      this.reset();
+    }
+
+    reset() {
+      this.wreg = new Uint8Array(0x10);
+      this.loopEn = 0;
+      this.ch = [];
+      for (let i = 0; i < NUM_CH; i++) {
+        // seq: キーオン通番(clock()を回さない先読みキャプチャがキーオンを検出するため。ロール用)
+        this.ch.push({ start: 0, addr: 0, counter: COUNTER_TOP, step: 0, bank: 0, play: false, seq: 0, volL: 255, volR: 255 });
+      }
+      // デバイスリセット時の既定パン(libvgm device_reset_k007232 と同じ: ch0=左, ch1=右)
+      this.ch[0].volL = 255; this.ch[0].volR = 0;
+      this.ch[1].volL = 0; this.ch[1].volR = 255;
+      this.cyc = 0;
+      this.lastL = 0;
+      this.lastR = 0;
+    }
+
+    /** VGMデータブロック 0x94(K007232 ROM)。 */
+    loadRom(romSize, start, data) {
+      let rom = this.rom;
+      const need = Math.max(romSize >>> 0, start + data.length);
+      if (!rom || rom.length < need) { const n = new Uint8Array(need); if (rom) n.set(rom, 0); rom = this.rom = n; }
+      rom.set(data, start);
+      this._pitchCache.clear(); // ROMが変わったら解析結果は無効
+      this._endCache.clear();
+    }
+
+    /** レジスタ書込み(VGM 0x41 aa dd、aa<0x1F) */
+    write(reg, data) {
+      reg &= 0x7F; data &= 0xFF;
+      if (reg < this.wreg.length) this.wreg[reg] = data;
+      const ci = (reg / 6) | 0;
+      const base = ci * 6;
+      const c = ci < NUM_CH ? this.ch[ci] : null;
+      switch (reg) {
+        case 0x00: case 0x06: // ピッチ下位
+        case 0x01: case 0x07: { // ピッチ上位(bit4-5=モード)
+          if (!c) break;
+          const lsb = this.wreg[base + 0], msb = this.wreg[base + 1];
+          switch ((msb >> 4) & 0x03) {
+            case 0x01: c.step = (256 - lsb) << 4; break;
+            case 0x02: c.step = (16 - (msb & 0x0F)) << 8; break;
+            default: c.step = ((msb & 0x0F) << 8) | lsb; break; // 0/3: 12bit値
+          }
+          break;
+        }
+        case 0x02: case 0x08: // 開始アドレス 下位
+        case 0x03: case 0x09: // 同 中位
+        case 0x04: case 0x0A: // 同 上位(bit0のみ)
+          if (c) c.start = ((this.wreg[base + 4] & 0x01) << 16) | (this.wreg[base + 3] << 8) | this.wreg[base + 2];
+          break;
+        case 0x05: case 0x0B: // キーオン(書込みトリガ)
+          if (c) this._keyOn(ci);
+          break;
+        case 0x0C: break; // 外部ポート(VGMログでは0x10-0x13に変換済み。libvgm同様なにもしない)
+        case 0x0D: this.loopEn = data; break;
+        case 0x10: case 0x11: case 0x12: case 0x13: { // 音量(ch0左/ch0右/ch1左/ch1右)
+          const v = this.ch[(reg >> 1) & 1];
+          if (reg & 1) v.volR = data; else v.volL = data;
+          break;
+        }
+        case 0x14: case 0x15: this.ch[reg & 1].bank = data << 17; break; // バンク
+        default: break;
+      }
+    }
+
+    /**
+     * レジスタ読み出し(VGM 0x41 1F dd の dd)。実チップはオフセット5/11の読み出しで発音する
+     * (Haunted Castle のドライバはこの経路だけでキーオンしている)。
+     */
+    read(offset) {
+      if (offset === 0x05 || offset === 0x0B) this._keyOn(offset === 0x05 ? 0 : 1);
+      return 0;
+    }
+
+    _keyOn(i) {
+      const c = this.ch[i];
+      c.play = true;
+      c.addr = c.start;
+      c.counter = COUNTER_TOP;
+      c.seq++;
+    }
+
+    /** 再生レート(1秒あたりのROMバイト数) */
+    playRate(c) { return this.sampleRate * COUNTER_STEP / (COUNTER_TOP - c.step); }
+
+    _calcSample() {
+      const rom = this.rom;
+      let l = 0, r = 0;
+      if (rom) {
+        for (let i = 0; i < NUM_CH; i++) {
+          const c = this.ch[i];
+          if (!c.play) continue;
+          let pcmAddr = c.bank + (c.addr & ADDR_MASK);
+          if (pcmAddr >= rom.length) continue;
+          if (!this.mute[i]) {
+            const out = (rom[pcmAddr] & 0x7F) - 0x40;
+            l += out * c.volL * this.vol[i];
+            r += out * c.volR * this.vol[i];
+          }
+          c.counter -= COUNTER_STEP;
+          while (c.counter < 0 && c.play) {
+            c.counter += COUNTER_TOP - c.step;
+            c.addr++;
+            pcmAddr = c.bank + (c.addr & ADDR_MASK);
+            if (pcmAddr >= rom.length) { c.play = false; break; }
+            if ((rom[pcmAddr] & 0x80) || c.addr > ADDR_MASK) {
+              if (this.loopEn & (1 << i)) c.addr = c.start;
+              else c.play = false;
+            }
+          }
+        }
+      }
+      this.lastL = l * OUT_SCALE;
+      this.lastR = r * OUT_SCALE;
+    }
+
+    clock() {
+      if (++this.cyc < CLOCK_DIV) return;
+      this.cyc = 0;
+      this._calcSample();
+    }
+    mixSample() { return { left: this.lastL, right: this.lastR }; }
+
+    /**
+     * サンプル終端(bit7が立っているバイトの位置)。レジスタに終端アドレスが無いので
+     * ROMを走査して求める(結果はキャッシュ。ROM差し替えで破棄)。
+     */
+    sampleEnd(start) {
+      const rom = this.rom;
+      if (!rom || start >= rom.length) return start;
+      let e = this._endCache.get(start);
+      if (e !== undefined) return e;
+      const limit = Math.min(rom.length, start + MAX_SAMPLE_BYTES);
+      let p = start;
+      while (p < limit && !(rom[p] & 0x80)) p++;
+      e = p;
+      this._endCache.set(start, e);
+      return e;
+    }
+
+    /**
+     * サンプル(ROM上のstart..end-1)の基本周期解析(キャッシュ)。表示専用。
+     * ga20.js samplePitch と同じ契約(Emu.SamplePitchUtil を共有)。
+     * @returns {{cps, conf, cpsAuto, confAuto, manual, hash, wave, lenBytes}|null}
+     */
+    samplePitch(kind, start, end) {
+      if (start === undefined || end === undefined || !(end > start) || !this.rom) return null;
+      const key = start + ':' + end;
+      let r = this._pitchCache.get(key);
+      if (r) return r;
+      const U = Emu.SamplePitchUtil;
+      const pcm = this._decodeSample(start, end);
+      const auto = U.detectCps(pcm);
+      r = { cps: auto.cps, conf: auto.conf, cpsAuto: auto.cps, confAuto: auto.conf, manual: false,
+        hash: U.sampleHash(this.rom, start, Math.min(end, start + pcm.length)), wave: null, lenBytes: pcm.length };
+      const t = U.getTuningMap()[r.hash];
+      if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
+      r.wave = U.makeSampleWave(pcm, r.conf >= 0.5 ? r.cps : 0);
+      U.applyKindOverride(r);
+      this._pitchCache.set(key, r);
+      return r;
+    }
+
+    _decodeSample(start, end) {
+      const rom = this.rom;
+      const e = Math.min(end, start + MAX_SAMPLE_BYTES, rom.length);
+      const n = Math.max(0, e - start);
+      const pcm = new Float32Array(n);
+      for (let i = 0; i < n; i++) pcm[i] = ((rom[start + i] & 0x7F) - 0x40) / 64;
+      return pcm;
+    }
+
+    /** スナップショットの sample({kind,start,end}) → デコード済みPCM(ga20.js samplePcm と同契約) */
+    samplePcm(sample) {
+      if (!sample) return null;
+      return this._decodeSample(sample.start, sample.end);
+    }
+
+    /** 打楽器/音階の手動上書き(ga20.js setSampleKind と同契約) */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.start + ':' + sample.end);
+      return { kind: kind || null, needsTuning: needsTuning };
+    }
+
+    /** 手動ピッチ補正(表示専用。ga20.js setSampleTuning と同じ永続化) */
+    setSampleTuning(kind, start, end, cps) {
+      const r = this.samplePitch(kind, start, end);
+      if (!r) return null;
+      const U = Emu.SamplePitchUtil;
+      const map = U.getTuningMap();
+      if (cps && cps > 0) { map[r.hash] = cps; r.cps = cps; r.conf = 1; r.manual = true; }
+      else { delete map[r.hash]; r.cps = r.cpsAuto; r.conf = r.confAuto; r.manual = false; }
+      U.saveTuningMap(map);
+      r.wave = U.makeSampleWave(this._decodeSample(start, end), r.conf >= 0.5 ? r.cps : 0);
+      return r;
+    }
+  }
+
+  // 鍵盤表示用スナップショット(snapshotGA20 と同じ形の配列2要素)
+  Emu.snapshotK007232 = function (chip) {
+    const out = [];
+    for (let i = 0; i < NUM_CH; i++) {
+      const c = chip.ch[i];
+      const rate = chip.playRate(c);
+      const end = c.seq ? chip.sampleEnd(c.start) : c.start;
+      const p = c.seq ? chip.samplePitch('k007232', c.start, end) : null;
+      const lenBytes = p ? p.lenBytes : Math.max(0, end - c.start);
+      // 左右の音量レジスタ(0-255)。片側0でも鳴っているので大きい方を発音量とみなす
+      const vol = Math.max(c.volL, c.volR) / 255;
+      out.push({ active: c.play && vol > 0, vol, rawVol: Math.max(c.volL, c.volR), rawVolMax: 255,
+        panL: c.volL / 255, panR: c.volR / 255,
+        rate, seq: c.seq, lenSec: rate > 0 ? lenBytes / rate : 0,
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
+        sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
+        waveData: p ? p.wave : null,
+        sample: c.seq ? { kind: 'k007232', start: c.start, end } : null });
+    }
+    return out;
+  };
+
+  Emu.K007232Audio = K007232Audio;
+})(globalThis);
+
+/*
+ * OKI MSM5205 / MSM6585 ADPCM音声 (VGM: chip 'msm5205'。PC Engine CD-ROM² の ADPCM、
+ * および多数のアーケード基板のボイス/ドラム。スターパロジャー / ドラゴンスレイヤー英雄伝説 等)
+ * MML.Emu.MSM5205Audio
+ *
+ * 4bit(または3bit)ADPCM×1ch・10bit内部信号・モノラル。ROMを持たず、CPUが
+ * **1ニブルずつ**流し込むストリーミング方式(VGMコマンド 0x32 dd。上位ニブル=レジスタ、
+ * 下位ニブル=値)。チップは masterClock/prescaler のレートで8段FIFOから1ニブル消費し、
+ * FIFOが空の間は直前の信号を保持する(=データを流し込むテンポがそのまま再生ピッチになる)。
+ * 挙動は libvgm emu/cores/msm5205.c(eito/cam900/Valley Bell)準拠:
+ *   レジスタ(VGM 0x32 dd: reg=(dd>>4)&7, val=dd&0xF。ddのbit7=デュアル2個目):
+ *     0 リセット(非0で停止。変化時に signal/step をクリア、リセット中はFIFOも空に)
+ *     1 データ(ADPCM 1ニブル。8段FIFO。満杯なら捨てる)
+ *     2 VCK(スレーブモード時だけ有効。立ち上がりで1ニブル消費)
+ *     4 プリスケーラ(bit0=S1, bit1=S2) / 5 ビット幅(非0で4bit、0で3bit)
+ *   プリスケーラ表: MSM5205 {96, 64, 48, 1(スレーブ)} / MSM6585 {160, 80, 40, 20}
+ *   初期値はVGMヘッダ **0xD7**(bit0-1=プリスケーラ、bit2=4bit ADPCM)、
+ *   0xF0のbit31=MSM6585。
+ *   信号更新は加算ではなく**減衰付き**: signal = (diff<<8 + signal*245) >> 8 (≒0.957の漏れ積分)。
+ *   差分表は OKI系と同一(49ステップ×16ニブル。okim6258.js と同じ式)。
+ *
+ * ★PC Engine CD の曲は DACストリーム(0x90-0x95)ではなく 0x32 の直書きで流れてくるので、
+ * okim6258.js の streamSample のような「サンプルの同定キー」は存在しない。
+ * ドラムパッドの原音取り出し([[vgm-dac-drums-from-log]] の方式)はこの経路には使えず、
+ * 鍵盤表示/ロールでは「鳴っている1レーン」として出す。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const PIN_S1 = 0x01;
+  const PIN_S2 = 0x02;
+  const FIFO_LEN = 8;
+
+  // ADPCM差分表(libvgm compute_tables。okim6258.js の DIFF と同一式)
+  const INDEX_SHIFT = [-1, -1, -1, -1, 2, 4, 6, 8];
+  const DIFF = new Int16Array(49 * 16);
+  for (let step = 0; step < 49; step++) {
+    const sv = Math.floor(16 * Math.pow(11 / 10, step));
+    for (let n = 0; n < 16; n++) {
+      const d = ((n >> 2) & 1) * sv + ((n >> 1) & 1) * ((sv / 2) | 0) + (n & 1) * ((sv / 4) | 0) + ((sv / 8) | 0);
+      DIFF[step * 16 + n] = (n & 8) ? -d : d;
+    }
+  }
+
+  class MSM5205Audio {
+    /**
+     * @param {number} [clock=384000] - マスタークロック(ヘッダ0xF0)
+     * @param {number} [flags=0]      - ヘッダ0xD7: bit0-1=プリスケーラ、bit2=4bit ADPCM
+     * @param {boolean} [is6585=false]- ヘッダ0xF0のbit31(MSM6585)
+     */
+    constructor(clock, flags, is6585) {
+      this.clockHz = clock || 384000;
+      this.masterClock = this.clockHz;
+      this.is6585 = !!is6585;
+      this.initPrescaler = (flags || 0) & 0x03;
+      this.initBitWidth = ((flags || 0) & 0x04) ? 4 : 3;
+      this.mute = [false];
+      this.vol = [1];
+      this.reset();
+    }
+
+    reset() {
+      this.signal = -2;
+      this.step = 0;
+      this.vclk = 0;
+      this.resetFlag = 0;
+      this.prescalerBits = this.initPrescaler;
+      this.bitWidth = this.initBitWidth;
+      this.fifo = new Uint8Array(FIFO_LEN);
+      this.fifoR = 0; this.fifoW = 0;
+      this.cyc = 0;
+      this.last = 0;
+      this.seq = 0;          // 再生開始通番(ロール/キャプチャ用)
+      this.nibblesIn = 0;    // データレジスタ受信総量
+      this._lastNibblesIn = 0; // スナップショット間の流量差分用
+    }
+
+    /** プリスケーラ(分周比)。1 はスレーブモード(VCK入力駆動) */
+    prescaler() {
+      const p = this.prescalerBits;
+      if (this.is6585) return (p & PIN_S1) ? ((p & PIN_S2) ? 20 : 80) : ((p & PIN_S2) ? 40 : 160);
+      return (p & PIN_S1) ? ((p & PIN_S2) ? 1 : 64) : ((p & PIN_S2) ? 48 : 96);
+    }
+    /** 現在のADPCM出力レート(サンプル/秒) */
+    playRate() { const d = this.prescaler(); return d > 1 ? this.masterClock / d : 0; }
+
+    _fifoEmpty() { return this.fifoR === this.fifoW; }
+
+    /** レジスタ書込み(VGM 0x32: reg=(dd>>4)&7, val=dd&0xF) */
+    write(reg, val) {
+      switch (reg & 0x07) {
+        case 0: { // リセット
+          const old = this.resetFlag;
+          this.resetFlag = val;
+          if (old ^ val) { this.signal = 0; this.step = 0; }
+          if (this.resetFlag) { this.fifoR = 0; this.fifoW = 0; }
+          else if (old) this.seq++; // 停止→再生のエッジを発音区間の起点にする
+          break;
+        }
+        case 1: { // データ(1ニブル)
+          const next = (this.fifoW + 1) % FIFO_LEN;
+          if (next === this.fifoR) break; // FIFOあふれ: 捨てる(libvgm同様)
+          this.fifo[this.fifoW] = val & 0x0F;
+          this.fifoW = next;
+          this.nibblesIn++;
+          break;
+        }
+        case 2: { // VCK(スレーブモードのみ)
+          const old = this.vclk;
+          this.vclk = val;
+          if (this.prescaler() === 1 && ((old ^ val) & 1) && this.vclk) this._consume();
+          break;
+        }
+        case 4: this.prescalerBits = val & 0x03; break;
+        case 5: this.bitWidth = val ? 4 : 3; break;
+        default: break;
+      }
+    }
+
+    /** FIFOから1ニブル取り出して復号(libvgm clock_adpcm) */
+    _consume() {
+      if (this.mute[0] || this.resetFlag || this._fifoEmpty()) return;
+      let data = this.fifo[this.fifoR];
+      this.fifoR = (this.fifoR + 1) % FIFO_LEN;
+      if (this.bitWidth === 3) data <<= 1;
+      data &= 0x0F;
+      const diff = DIFF[this.step * 16 + data];
+      // ★加算ではなく減衰付き(libvgm: ((sample << 8) + (signal * 245)) >> 8)
+      this.signal = ((diff << 8) + (this.signal * 245)) >> 8;
+      if (this.signal > 2047) this.signal = 2047; else if (this.signal < -2048) this.signal = -2048;
+      this.step += INDEX_SHIFT[data & 7];
+      if (this.step > 48) this.step = 48; else if (this.step < 0) this.step = 0;
+    }
+
+    _out() {
+      const s = (this.mute[0] || this.resetFlag) ? 0 : this.signal;
+      this.last = (s / 2048) * this.vol[0];
+    }
+
+    clock() {
+      const div = this.prescaler();
+      if (div <= 1) { this._out(); return; } // スレーブモード: VCK書込みで進む
+      this.cyc += this.masterClock / this.clockHz;
+      if (this.cyc < div) return;
+      this.cyc -= div;
+      this._consume(); // FIFOが空なら直前の信号を保持(libvgm と同じ)
+      this._out();
+    }
+    mixSample() { return { left: this.last, right: this.last }; }
+  }
+
+  // 鍵盤表示用スナップショット(配列1要素。okim6258 と同じ「サンプル」行向け)。
+  // 発音判定は「リセットが解けていて、かつデータが流れている(前回からの流量差分>0)」。
+  // ドライバは再生ビットを立てっぱなしでニブル供給だけ止める曲があるため、流量を見る。
+  // 流量は regsOnly キャプチャ(clock()無し)でも書込みだけで積まれるので正確。
+  Emu.snapshotMSM5205 = function (chip) {
+    const amp = Math.min(1, Math.abs(chip.signal) / 2048);
+    const flow = chip.nibblesIn - chip._lastNibblesIn;
+    chip._lastNibblesIn = chip.nibblesIn;
+    const active = !chip.resetFlag && (flow > 0 || amp > 0.005);
+    return [{
+      active,
+      vol: active ? Math.max(0.3, amp) : 0,
+      rawVol: Math.round(amp * 255), rawVolMax: 255,
+      panL: 15, panR: 15,
+      rate: chip.playRate(), seq: chip.seq,
+      waveData: null, sample: null, sampleHash: null
+    }];
+  };
+
+  // 差分表は先読みキャプチャ側(vgmPlayer.js msmRecWrite)でも使う。キャプチャは clock() を
+  // 回さないのでチップ本体の signal は進まず、書込み列から同じ式で復号し直す必要がある。
+  // ★ここを直したらキャプチャ側の復号も同じ式であることを確認すること(音が変わる)。
+  Emu.MSM5205_DIFF = DIFF;
+  Emu.MSM5205_INDEX_SHIFT = INDEX_SHIFT;
+
+  Emu.MSM5205Audio = MSM5205Audio;
+})(globalThis);
+
+/*
  * Sega 32X PWM 音源 (VGM: chip 'pwm'、コマンド 0xB2)
  * MML.Emu.PWM32XAudio
  *
@@ -11464,9 +11946,13 @@
  *   OKIM6258(X68000 ADPCM)=expansion/okim6258.js(コマンド0xB7、データはDACストリーム0x17経由)、
  *   QSound(カプコンCPS1ダッシュ/CPS2)=expansion/qsound.js(コマンド0xC4、ROMはデータブロック0x8F)、
  *   OKIM6295(東亜プラン/ライジング等)=expansion/okim6295.js(コマンド0xB8、ROMはデータブロック0x8B)、
- *   MultiPCM(セガModel 1/2/Multi 32)=expansion/multipcm.js(コマンド0xB5、バンク0xC3、ROMは0x89)
+ *   MultiPCM(セガModel 1/2/Multi 32)=expansion/multipcm.js(コマンド0xB5、バンク0xC3、ROMは0x89)、
+ *   K007232(コナミ・アーケードPCM)=expansion/k007232.js(コマンド0x41、ROMはデータブロック0x94)、
+ *   MSM5205/6585(PC Engine CD ADPCM等)=expansion/msm5205.js(コマンド0x32、ROM無し)
  * ヘッダのクロックが非ゼロでも未実装のチップは、コマンド長規則で読み飛ばすだけ
- * (ROADMAP.md VGM節: 全チップ実装は不要)。
+ * (ROADMAP.md VGM節: 全チップ実装は不要)。ただし **vgmHeader.js の VGM.CHIPS には必ず載せる**
+ * — 表に無いチップは usedChips に入らず「未対応・読み飛ばし」の表示すら出ず、
+ * 「音が欠けているのに理由が分からない」状態になる(K007232 で実際に起きた)。
  *
  * 時間の扱い:
  *  - VGMの待ちはすべて44100Hzサンプル数。0x70-0x7Fの1〜16サンプル待ちも潰さず
@@ -11529,7 +12015,7 @@
   // 正しいのに音量が全区間でちょうど2倍だった(Rave Racer 3曲)。1.0ではナムコSystem 22/NB系の全曲がリミッタ前で
   // ピーク1.0超(1.0〜2.1)・RMS -9.5〜-17dBFS と他のナムコ作品(C140のワルキューレ -18〜-20dBFS)より6〜8dB大きく、
   // 大きい所をリミッタが押しつぶしていた。0.5でVGMPlayと同じ比率になり、ピークは0.49〜1.06に収まる
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0, k007232: 1.6, msm5205: 1.45 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -11846,6 +12332,37 @@
     };
   }
 
+  // K007232(コナミPCM): 2ch 7bitステレオPCM(expansion/k007232.js)。コマンドは 0x41 aa dd
+  // (aaのbit7=デュアル2個目、aa=0x1F は読み出しトリガ)、ROMはデータブロック0x94。
+  function makeK007232Adapter(info) {
+    const chip = new Emu.K007232Audio(info.clock);
+    return {
+      id: 'k007232', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.k007232,
+      write(aa, dd) { chip.write(aa, dd); },
+      read(dd) { chip.read(dd); },
+      loadRom(romSize, start, data) { chip.loadRom(romSize, start, data); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.k007232) Emu.applyMute(chip.mute, e.k007232); },
+      applyVolume(v) { const e = v.expansion || v; if (e.k007232) Emu.applyVolume(chip.vol, e.k007232); }
+    };
+  }
+
+  // MSM5205/MSM6585(PC Engine CD ADPCM 等): 1ch ストリーミングADPCM(expansion/msm5205.js)。
+  // コマンドは 0x32 dd(上位ニブル=レジスタ、下位=値、bit7=デュアル2個目)。ROMは持たない。
+  // プリスケーラ/ビット幅はヘッダ0xD7、MSM6585判定は0xF0のbit31(vgmHeader.js が解釈済み)。
+  function makeMsm5205Adapter(info) {
+    const chip = new Emu.MSM5205Audio(info.clock, info.msmFlags || 0, info.msm6585);
+    return {
+      id: 'msm5205', clockHz: info.clock, accum: 0, chip, gain: CHIP_GAIN.msm5205,
+      write(reg, val) { chip.write(reg, val); },
+      clock() { chip.clock(); },
+      mix(out) { const s = chip.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.msm5205) Emu.applyMute(chip.mute, e.msm5205); },
+      applyVolume(v) { const e = v.expansion || v; if (e.msm5205) Emu.applyVolume(chip.vol, e.msm5205); }
+    };
+  }
+
   // SegaPCM(315-5218): 16ch ステレオPCM(expansion/segapcm.js)。コマンドは 0xC0 bbaa dd
   // (offset=aabb、bit15=デュアル2個目)、ROMはデータブロック0x80。バンク構成はヘッダ0x3C(info.intf)。
   function makeSegaPcmAdapter(info) {
@@ -11997,7 +12514,8 @@
     ym3812: makeOplAdapter('ym3812'), ym3526: makeOplAdapter('ym3526'), y8950: makeOplAdapter('y8950'),
     ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter,
     c352: makeC352Adapter, okim6258: makeOkim6258Adapter, qsound: makeQsoundAdapter,
-    okim6295: makeOkim6295Adapter, multipcm: makeMultiPcmAdapter
+    okim6295: makeOkim6295Adapter, multipcm: makeMultiPcmAdapter,
+    k007232: makeK007232Adapter, msm5205: makeMsm5205Adapter
   };
 
   // ---------------------------------------------------------------------------
@@ -12082,6 +12600,33 @@
         // なり過熱する(実測: Avengers Boss RMS-8.1dB/ピーク2.4=クリップ)。FM:SSG比を保ったまま
         // 両チップ×0.5して単チップ相当の合算レベルに収める(RMS-14dB級)。
         if (info.id === 'ym2203' && info.dual) a.scaleGain(0.5);
+        // コナミ・アーケード(OPL系+SCC。ライブラリ内では Haunted Castle だけがこの同居):
+        // このパックは**K007232を足す前から全曲的に0dBFSを超えていた**(23曲20秒の合計で
+        // クリップ9211サンプル・最大ピーク1.49)。アイレムM92と同じ「比率を保ったまま全体を
+        // 縮小」で×0.7にすると合計639・最大1.41まで下がり、**全曲が変更前より良くなる**
+        // (K007232単独の効果音4曲はこの同居に当たらないので等倍のまま。ピーク0.35〜0.52)。
+        // 素材のクレストファクタが高く(VGMPlayリファレンスでも7前後)、RMSは-17dB級と
+        // 基準帯(-13〜-15dB)より低めになるが、リミッタを常時叩くよりはこちらを採る。
+        // ★「同じパック内でVGMPlay比が一定にならない」(10曲目1.90/8曲目3.81)の正体は
+        //   **VGMPlayの自動正規化 `NormalizeOverallVolume`**(libvgm player/vgmplayer.cpp)。
+        //   VGMPlayは各チップの音量に重み `_PB_VOL_AMNT` を掛けた総和 absVol を出し、
+        //   absVol <= 0x180 なら全チップ×2、**absVol > 0x300 なら全チップ÷2** を繰り返す。
+        //     10曲目: YM3812 154×2 + SCC 204×1 + K007232 256×1 = 768 = 0x300 → ちょうど閾値内で等倍
+        //     8曲目 : YM3812 179×2 + SCC 204×1 + K007232 256×1 = 818 = 0x332 → 超過して÷2
+        //   ヘッダ0x7C(音量修正)はこの総和に入らない(front-endのマスタ音量)ので、
+        //   0x7Cを0〜64で掃引しても両者ぴったり 2^(n/32) で一致する(実測確認済み)。
+        //   ★当プロジェクトはこの正規化を持たない。入れると **ライブラリ14597曲中11794曲(81%)の
+        //   音量が2倍/4倍動く**(×2が7588曲・×4が3812曲・×0.5が394曲)。CHIP_GAIN は
+        //   この正規化が無い前提で実測較正してある(C140/アイレムのCD照合等)ので、
+        //   足すと二重補正になる。採用するならCHIP_GAIN全面再較正とセットで、要判断。
+        if ((h.chips.ym3812 || h.chips.ym3526 || h.chips.y8950) && h.chips.k051649) {
+          if (a.scaleGain) a.scaleGain(0.7); else a.gain *= 0.7;
+        }
+        // PC Engine CD(HuC6280+MSM5205): ADPCMは素材自体がフルスケール近くまで振れていて
+        // (VGMPlayリファレンスも peak 0.909 / クレストファクタ7.2)、当プロジェクトの基準音量
+        // (VGMPlay比 約1.5倍)をそのまま掛けると確実にクリップする(実測 peak 1.336・780サンプル)。
+        // 同じく比率を保ったまま×0.7(peak 0.935 / クリップ0 / RMS -17.2dB)。
+        if (h.chips.msm5205) { if (a.scaleGain) a.scaleGain(0.7); else a.gain *= 0.7; }
         this.adapters.push(a); this.adapterById[info.id] = a;
         if (info.dual) {
           // デュアルチップ(クロック値bit30): 2個目は同じ設定で別インスタンス。クロックは
@@ -12096,6 +12641,10 @@
           if ((info.id === 'ym2151' || info.id === 'ga20') && h.chips.ym2151 && h.chips.ga20) b.gain *= 0.5;
           if ((info.id === 'ym2151' || info.id === 'okim6295') && h.chips.ym2151 && h.chips.okim6295) b.gain *= 0.7;
           if (info.id === 'ym2203') b.scaleGain(0.5);
+          if ((h.chips.ym3812 || h.chips.ym3526 || h.chips.y8950) && h.chips.k051649) {
+            if (b.scaleGain) b.scaleGain(0.7); else b.gain *= 0.7;
+          }
+          if (h.chips.msm5205) { if (b.scaleGain) b.scaleGain(0.7); else b.gain *= 0.7; }
           b.second = true;
           this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
         }
@@ -12190,6 +12739,11 @@
           case 0xB9: this._chipWrite('huc6280', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
           case 0xB2: this._chipWrite('pwm', (d[p] >> 4) & 0x0F, ((d[p] & 0x0F) << 8) | d[p + 1], false); this.pos = p + 2; break; // 32X PWM: reg=a, 12bit値
           case 0xBF: this._chipWrite('ga20', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // GA20(Irem)
+          // K007232(コナミPCM): 0x41 aa dd。aa=0x1F は「チップ読み出しの実行」で dd が読み出し
+          // オフセット(5/11でキーオン)。Haunted Castle のドライバはこの経路でしか発音しない
+          case 0x41: this._k007232Write(d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break;
+          // MSM5205/MSM6585(PC Engine CD ADPCM 等): 0x32 dd。上位ニブル=レジスタ、下位=値
+          case 0x32: this._chipWrite('msm5205', (d[p] >> 4) & 0x07, d[p] & 0x0F, !!(d[p] & 0x80)); this.pos = p + 1; break;
           case 0xB7: this._chipWrite('okim6258', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // OKIM6258(X68000 ADPCM)
           case 0xB8: this._chipWrite('okim6295', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // OKIM6295(4ch ADPCM)
           case 0xB5: this._chipWrite('multipcm', d[p] & 0x7F, d[p + 1], !!(d[p] & 0x80)); this.pos = p + 2; break; // MultiPCM(ポート0-2)
@@ -12286,7 +12840,7 @@
 
     // ROMサイズ(4)+開始アドレス(4)+データ、の共通形式で1チップに紐づくROMブロック(型→チップid)
     static get ROM_BLOCK_CHIP() {
-      return { 0x80: 'segapcm', 0x89: 'multipcm', 0x8B: 'okim6295', 0x8D: 'c140', 0x8F: 'qsound', 0x92: 'c352', 0x93: 'ga20' };
+      return { 0x80: 'segapcm', 0x89: 'multipcm', 0x8B: 'okim6295', 0x8D: 'c140', 0x8F: 'qsound', 0x92: 'c352', 0x93: 'ga20', 0x94: 'k007232' };
     }
     // second: データブロックサイズのbit31=デュアルチップ2個目のROM/RAM(Batriderの
     // デュアルOKIM6295等。以前は捨てて全部1個目へロードし、2個目のROMが1個目を上書きしていた)
@@ -12345,6 +12899,16 @@
       if (!a) return;
       const r = a.write(aa, dd);
       if (this.onWrite) this.onWrite(key, aa, dd, r);
+    }
+
+    // K007232: オフセット0x1F は読み出しトリガ(dd=読み出すオフセット)。それ以外は通常の書込み。
+    // onWrite には「実際にチップへ渡ったオフセット」を通知する(キャプチャがキーオンを拾えるように)。
+    _k007232Write(ofs, dd, second) {
+      const key = second ? 'k007232_2' : 'k007232';
+      const a = this.adapterById[key];
+      if (!a) return;
+      if (ofs === 0x1F) a.read(dd); else a.write(ofs, dd);
+      if (this.onWrite) this.onWrite(key, ofs, dd);
     }
 
     _sccWrite(pp, aa, dd, second) {
@@ -12729,6 +13293,8 @@
       ym2203fm: has('ym2203') ? { snapshots: [] } : null,
       ym2608fm: has('ym2608') ? { snapshots: [] } : null,
       ga20: has('ga20') ? { snapshots: [] } : null,
+      k007232: has('k007232') ? { snapshots: [] } : null,
+      msm5205: has('msm5205') ? { snapshots: [] } : null,
       // snapshots=物理スロット、logical=割当逆算(ソフトウェアチャンネル合成、
       // Emu.PoolChannelRegrouper)。ペア交互/巡回割当のドライバ対策で両方を常時保持する
       segapcm: has('segapcm') ? { snapshots: [], logical: [] } : null,
@@ -12752,6 +13318,8 @@
     const adpcm2608State = { aSeq: new Array(6).fill(0), aEnd: new Array(6).fill(-1), bSeq: 0, bEnd: -1 };
     // GA20 も同じ推定(clock()を回さないと0x00終端で止まらないため、キーオン通番+サンプル長で区間を切る)
     const ga20State = { seq: new Array(4).fill(0), end: new Array(4).fill(-1) };
+    // K007232 も同じ推定(終端はROMのbit7マーカーなので、キーオン通番+サンプル長で区間を切る)
+    const k007232State = { seq: new Array(2).fill(0), end: new Array(2).fill(-1) };
     // SegaPCM: ワンショットは同じ推定。ループ再生(lenSec=Infinity)は明示停止(reg86書込み)まで鳴る
     const spcmState = { seq: new Array(16).fill(0), end: new Array(16).fill(-1) };
     // C140: 同じ推定(キーオン/オフは明示レジスタなのでエッジは正確。ワンショット終端だけ窓で切る)
@@ -12822,10 +13390,49 @@
         default: break;
       }
     };
+    // MSM5205(PC Engine CD ADPCM等)のストリーム記録(2026-09-16)。PWMと同じ「同定情報が
+    // 無い1本のストリーム」なので、同じ形(samples + frameEnd)で持って main.js の
+    // クリップ分割へ流す。ただしPWMと違い**流れてくるのは生の値ではなく4bit ADPCM**なので、
+    // ここで msm5205.js と同じ差分表・同じ減衰付き更新で復号しながら積む
+    // (キャプチャは clock() を回さないのでチップ側の signal は進まない。regsOnly でも
+    //  書込みだけで再現できるのがストリーミングADPCMの利点)。
+    // ★ニブルが来ないフレーム(ドライバが供給を止めている区間)は無音として明示的に0を積む。
+    //   そうしないとサンプル列が時間的に詰まってしまい、無音の切れ目でクリップに分けられない。
+    const msmRec = data.msm5205 ? { buf: new Int16Array(1 << 16), n: 0, frameEnd: [], signal: 0, step: 0, reset: 0,
+                                    inFrame: 0, perFrame: 0 } : null;
+    const msmPush = (v) => {
+      if (msmRec.n >= msmRec.buf.length) { const nb = new Int16Array(msmRec.buf.length * 2); nb.set(msmRec.buf); msmRec.buf = nb; }
+      msmRec.buf[msmRec.n++] = v;
+    };
+    const msmRecWrite = (reg, val) => {
+      const chip = player.adapterById.msm5205 && player.adapterById.msm5205.chip;
+      switch (reg & 0x07) {
+        case 0: { // リセット: 立ち上がり/立ち下がりで内部状態をクリア(msm5205.js と同じ)
+          if (msmRec.reset ^ val) { msmRec.signal = 0; msmRec.step = 0; }
+          msmRec.reset = val;
+          break;
+        }
+        case 1: { // データ(1ニブル)。復号して1サンプル積む
+          if (msmRec.reset) break;
+          let d4 = val & 0x0F;
+          if (chip && chip.bitWidth === 3) d4 = (d4 << 1) & 0x0F;
+          const diff = Emu.MSM5205_DIFF ? Emu.MSM5205_DIFF[msmRec.step * 16 + d4] : 0;
+          msmRec.signal = ((diff << 8) + (msmRec.signal * 245)) >> 8;
+          if (msmRec.signal > 2047) msmRec.signal = 2047; else if (msmRec.signal < -2048) msmRec.signal = -2048;
+          msmRec.step += Emu.MSM5205_INDEX_SHIFT[d4 & 7];
+          if (msmRec.step > 48) msmRec.step = 48; else if (msmRec.step < 0) msmRec.step = 0;
+          msmPush(Math.max(-32767, Math.min(32767, msmRec.signal * 16)));
+          msmRec.inFrame++;
+          break;
+        }
+        default: break;
+      }
+    };
     player.onWrite = (id, a, b, c, d) => {
       switch (id) {
         case 'nes': nesFrameWrites.push({ addr: c, value: b }); nesRegs[c] = b; break;
         case 'pwm': if (pwmRec) pwmRecWrite(a, b); break; // (reg, 12bit値)
+        case 'msm5205': if (msmRec) msmRecWrite(a, b); break; // (reg, 4bit値)
         case 'ay8910': kssFrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
         // 2個目のチップ('_2')の内蔵SSG/AYは kss2 へ(1個目と同じ形)
         case 'ay8910_2': kss2FrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
@@ -12874,6 +13481,14 @@
       }
       if (data.pwm) data.pwm.snapshots.push(Emu.snapshotPWM32X(player.adapterById.pwm.chip));
       if (pwmRec) pwmRec.frameEnd.push(pwmRec.n);
+      if (msmRec) {
+        // ニブルが来なかったフレームは「そのフレーム分の無音」を積む(上のコメント参照)。
+        // 長さは直近の供給レート(1フレームあたりのニブル数)の移動平均。初回は8kHz/60Hz相当。
+        if (msmRec.inFrame > 0) msmRec.perFrame = msmRec.perFrame ? (msmRec.perFrame * 7 + msmRec.inFrame) / 8 : msmRec.inFrame;
+        else { const pad = Math.max(1, Math.round(msmRec.perFrame || 133)); for (let k = 0; k < pad; k++) msmPush(0); }
+        msmRec.inFrame = 0;
+        msmRec.frameEnd.push(msmRec.n);
+      }
       if (data.rf5c164) data.rf5c164.snapshots.push(Emu.snapshotRF5C164(player.adapterById.rf5c164.chip));
       if (data.rf5c68) data.rf5c68.snapshots.push(Emu.snapshotRF5C164(player.adapterById.rf5c68.chip));
       if (data.ym2612) {
@@ -12894,6 +13509,19 @@
         }
         data.ga20.snapshots.push(s);
       }
+      if (data.k007232) {
+        const s = Emu.snapshotK007232(player.adapterById.k007232.chip);
+        const st = k007232State;
+        for (let i = 0; i < 2; i++) {
+          const c = s[i];
+          if (c.seq !== st.seq[i]) { st.seq[i] = c.seq; st.end[i] = f + c.lenSec * FRAME_RATE; }
+          // ループ有効(0x0D)のサンプルは終端で止まらないが、ドライバが次のキーオンで
+          // 上書きするまで鳴り続けるのが実挙動なので、ワンショットと同じ窓で切る
+          c.active = c.active && f < st.end[i];
+        }
+        data.k007232.snapshots.push(s);
+      }
+      if (data.msm5205) data.msm5205.snapshots.push(Emu.snapshotMSM5205(player.adapterById.msm5205.chip));
       if (data.segapcm) {
         const s = Emu.snapshotSegaPCM(player.adapterById.segapcm.chip);
         const st = spcmState;
@@ -13053,6 +13681,11 @@
       data.pwmStream = { log: { samples: pwmRec.buf.slice(0, pwmRec.n), frameEnd: Uint32Array.from(pwmRec.frameEnd),
                                 rate: pwmRec.n / Math.max(1, totalFrames) * FRAME_RATE } };
     }
+    // MSM5205 のサンプル列(上の msmRec)。PWMと同じ形なので main.js 側は同じ分割器を使う
+    if (msmRec && msmRec.n > 0) {
+      data.msm5205Stream = { log: { samples: msmRec.buf.slice(0, msmRec.n), frameEnd: Uint32Array.from(msmRec.frameEnd),
+                                    rate: msmRec.n / Math.max(1, totalFrames) * FRAME_RATE } };
+    }
     // シーク用チェックポイント(未到達位置への初回シークを速くする)。dacpcmと同じ理由で
     // オブジェクトに1段包む(キャプチャ完了後に足すプロパティは finalMeta でしか届かず、
     // 配列のまま置くと丸ごと落ちる。capture-worker-multi-impl.js diffPayload)
@@ -13110,7 +13743,7 @@
   function collectUsedSamples(data, player) {
     // [dataのキー, スナップショットからチャンネル配列を取り出す関数, adapterId]
     const SRC = [
-      ['ga20', (s) => s, 'ga20'], ['segapcm', (s) => s, 'segapcm'],
+      ['ga20', (s) => s, 'ga20'], ['k007232', (s) => s, 'k007232'], ['segapcm', (s) => s, 'segapcm'],
       ['c140', (s) => s, 'c140'], ['c352', (s) => s, 'c352'],
       ['qsound', (s) => s, 'qsound'], ['okim6295', (s) => s, 'okim6295'],
       ['multipcm', (s) => s, 'multipcm'],
@@ -13670,6 +14303,11 @@
     // VGM: GA20(Irem PCM、GA1-4)。chip.mute[]はch 0-3(GALLはGB行なので\dで区別される)
     const ga = id.match(/^GA(\d)$/);
     if (ga) return { section: 'expansion', chip: 'ga20', type: 'array', index: +ga[1] - 1 };
+    // VGM: K007232(コナミPCM、K71-K72)。chip.mute[]はch 0-1
+    const k7 = id.match(/^K7(\d)$/);
+    if (k7) return { section: 'expansion', chip: 'k007232', type: 'array', index: +k7[1] - 1 };
+    // VGM: MSM5205/6585(PC Engine CD ADPCM等、1ch)。chip.mute[]は1要素
+    if (id === 'M5') return { section: 'expansion', chip: 'msm5205', type: 'array', index: 0 };
     // VGM: SegaPCM(SP1-16)。chip.mute[]はch 0-15
     const sp = id.match(/^SP(\d+)$/);
     if (sp) return { section: 'expansion', chip: 'segapcm', type: 'array', index: +sp[1] - 1 };
@@ -14756,6 +15394,38 @@
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
       }
+    }
+
+    if (chips.includes('k007232')) {
+      // K007232(VGM: コナミ・アーケードPCM): 2ch 7bit PCM。GA1-4行と同じ3段階表示
+      // (ピッチ解析が信頼できれば絶対音名、できなければ「サンプル」行)。ピッチレジスタで
+      // 1サンプルを音階演奏するチップなので、音程が取れれば絶対音名になる。
+      // L/R列はch毎の左右音量レジスタ(0-255)を0-1へ正規化した値(片側0=完全に振り切り)。
+      const live = extraSnaps && extraSnaps.k007232Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.k007232 ? extraSnaps.k007232[frameIdx] : null);
+      const kWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 2; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (285 + ch * 20) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `K7${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          wave: kWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
+    if (chips.includes('msm5205')) {
+      // MSM5205/6585(VGM: PC Engine CD ADPCM等): 1chストリーミングADPCM。ROMも音程レジスタも
+      // 無く、さらにPC EngineのVGMはDACストリームではなく 0x32 の直書きなので、サンプルの
+      // 同定キー(=波形アイコン)も取れない。OKI行と同じ「サンプル」行(音量=現在振幅)。
+      const live = extraSnaps && extraSnaps.msm5205Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.msm5205 ? extraSnaps.msm5205[frameIdx] : null);
+      const c = s ? s[0] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0 };
+      channels.push({ id: 'M5', color: '#ffbb55', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+        wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
+        panL: c.panL, panR: c.panR });
     }
 
     if (chips.includes('segapcm')) {
@@ -17931,7 +18601,7 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'k007232', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
@@ -17959,6 +18629,8 @@
       this._extraSnaps.ym2608FmLive = typeof result.getYm2608Fm === 'function' ? result.getYm2608Fm : null;
       this._extraSnaps.oplLive = typeof result.getOpl === 'function' ? result.getOpl : null;
       this._extraSnaps.ga20Live = typeof result.getGa20 === 'function' ? result.getGa20 : null;
+      this._extraSnaps.k007232Live = typeof result.getK007232 === 'function' ? result.getK007232 : null;
+      this._extraSnaps.msm5205Live = typeof result.getMsm5205 === 'function' ? result.getMsm5205 : null;
       this._extraSnaps.segapcmLive = typeof result.getSegaPcm === 'function' ? result.getSegaPcm : null;
       this._extraSnaps.c140Live = typeof result.getC140 === 'function' ? result.getC140 : null;
       this._extraSnaps.c352Live = typeof result.getC352 === 'function' ? result.getC352 : null;
@@ -25488,7 +26160,7 @@
     }
     // スナップショット型チップ: extractChannels(keyboard.js)が読むextraSnapsに
     // フレーム毎スナップショット配列を渡して同じ抽出経路でトラック化する
-    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'k007232', 'msm5205', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
     const chipToken = { sn: 'sn76489' };
     const poolMode = (opts && opts.poolMode) || {};
     for (const key of snapChips) {

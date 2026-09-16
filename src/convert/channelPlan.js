@@ -315,6 +315,7 @@
     [/^NA([1-6])$/, function (m) { return ['pcm', 'pcma:' + (+m[1] - 1)]; }],               // YM2610 ADPCM-A
     [/^NB$/, function () { return ['pcm', 'pcmb:0']; }],                                    // YM2610 ADPCM-B
     [/^GA([1-4])$/, function (m) { return ['pcm', 'ga20:' + (+m[1] - 1)]; }],               // GA20
+    [/^K7([1-2])$/, function (m) { return ['pcm', 'k7:' + (+m[1] - 1)]; }],                 // K007232
     [/^SP(\d+)$/, function (m) { return ['pcm', 'spcm:' + (+m[1] - 1)]; }],                 // SegaPCM
     [/^CN(\d+)$/, function (m) { return ['pcm', 'c140:' + (+m[1] - 1)]; }],                 // C140
     [/^CS(\d+)$/, function (m) { return ['pcm', 'c352:' + (+m[1] - 1)]; }],                 // C352
@@ -342,7 +343,7 @@
 
   // 逆引き: 変換器のソースID(VGM) → 鍵盤表示の行ID。VGMの構成駆動の既定割当
   // (MML.VGM2MML.defaultPlan)を鍵盤の行へ移すのに使う。
-  const VGM_SRC_TO_CH = { ay: 'KP', scc: 'KS', opll: 'KF', opn: 'YM', opm: 'OM', opn3: 'OP', opna: 'OA', opnb: 'NF', opl: 'OL', pcma: 'NA', ga20: 'GA', spcm: 'SP', c140: 'CN', c352: 'CS', qs: 'QS', oki: 'OK', mp: 'MP', psx: 'PX' };
+  const VGM_SRC_TO_CH = { ay: 'KP', scc: 'KS', opll: 'KF', opn: 'YM', opm: 'OM', opn3: 'OP', opna: 'OA', opnb: 'NF', opl: 'OL', pcma: 'NA', ga20: 'GA', k7: 'K7', spcm: 'SP', c140: 'CN', c352: 'CS', qs: 'QS', oki: 'OK', mp: 'MP', psx: 'PX' };
   function chIdForVgmSource(srcId) {
     const m = /^([a-z0-9]+):(.+)$/.exec(srcId || '');
     if (!m) return null;

@@ -317,6 +317,7 @@
     return { channels };
   }
   MML.Vgm2MmlExpansion.ga20 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 4, opts);
+  MML.Vgm2MmlExpansion.k007232 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 2, opts);
   MML.Vgm2MmlExpansion.segapcm = (snapshots, drumMap, opts) => pcmChannels(snapshots, 16, opts);
   MML.Vgm2MmlExpansion.c140 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 24, opts);
   MML.Vgm2MmlExpansion.c352 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 32, opts);

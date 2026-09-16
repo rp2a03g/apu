@@ -121,6 +121,10 @@
     const dpcmResult = MML.Hes2MmlExpansion.dpcm(snapshots, capture.dpcmTrace, capture.controlTrace, frameRate, cmd,
       cmd.DRUM !== false ? (options.drumHits || null) : null);
     const hasDpcm = dpcmResult.defs.length > 0;
+    // E(DPCM)へ載った音の出どころ表記。既定はHESの想定どおり「PSG DDA」だが、VGM経由の
+    // PC Engine CD曲は中身がMSM5205のADPCMなので呼び出し側が差し替える(vgm2mml converter)。
+    // ★両方が同時に載っている曲ではこの見出しは一方しか名乗らない(打点の内訳は別注記で出る)。
+    const dpcmSrcLabel = options.dpcmLabel || 'PSG DDA';
 
     // rawLength(N163波形の実サンプル数、常に32)を付与してからdetune計算に渡す
     // (applyPitchDetuneのperiodForFreqがev経由でlengthを参照するため)。
@@ -244,8 +248,8 @@
       `; 分解能   : 480 TPQN (MIDI準拠)`,
       `; 変換     : Sound Emulation Foundry`,
       customPlan
-        ? `; チャンネル: ${chanDesc || '-'}${hasDpcm ? ` ${expansionLetterMap.dpcm[0]}=PSG DDA(PCM)` : ''}${hasNoise ? ' D=PSGノイズ' : ''} (借用先の割当: ユーザー指定)`
-        : `; チャンネル: ${hasDpcm ? expansionLetterMap.dpcm[0] + '=PSG DDA(PCM、2A03 DMCとして近似再生) ' : ''}${(expansionLetterMap.n163 || []).slice(0, N163_SLOTS).join('')}=PSG ch0-5(N163として近似再生)${hasNoise ? ' D=PSGノイズ(ch4/5、2A03ノイズとして近似再生)' : ''}`,
+        ? `; チャンネル: ${chanDesc || '-'}${hasDpcm ? ` ${expansionLetterMap.dpcm[0]}=${dpcmSrcLabel}(PCM)` : ''}${hasNoise ? ' D=PSGノイズ' : ''} (借用先の割当: ユーザー指定)`
+        : `; チャンネル: ${hasDpcm ? expansionLetterMap.dpcm[0] + '=' + dpcmSrcLabel + '(PCM、2A03 DMCとして近似再生) ' : ''}${(expansionLetterMap.n163 || []).slice(0, N163_SLOTS).join('')}=PSG ch0-5(N163として近似再生)${hasNoise ? ' D=PSGノイズ(ch4/5、2A03ノイズとして近似再生)' : ''}`,
       `; ※ このアプリのMMLプレイヤーはNES音源専用のため、PSGの6ch(いずれも32サンプル5bit`,
       `;    波形音源)はレジスタ構造が近いN163へ、ノイズモードは2A03ノイズへ、DDA(PCM)は`,
       `;    2A03 DMCへ載せています。DPCMサンプルは抽出済み.dmcファイルとして自動でダウンロード`,

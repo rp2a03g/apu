@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-16 18:14:36
+ * Built by tools/build-capture-workers.ps1 at 2026-09-16 20:37:14
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-16 18:14:36';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-16 20:37:14';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -5512,7 +5512,7 @@
     }
     // スナップショット型チップ: extractChannels(keyboard.js)が読むextraSnapsに
     // フレーム毎スナップショット配列を渡して同じ抽出経路でトラック化する
-    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'k007232', 'msm5205', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
     const chipToken = { sn: 'sn76489' };
     const poolMode = (opts && opts.poolMode) || {};
     for (const key of snapChips) {
