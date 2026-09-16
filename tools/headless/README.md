@@ -27,6 +27,10 @@ export PATH="$PATH:/path/to/nodejs"
 | `audio-check.js` | 実際に鳴らした音を数値で点検(クリップ/DC/無音/オクターブずれ/プチノイズ) |
 | `cpu-test.js` | CPU命令テストCLI(検証ロジックは `../cpu-test-core.js` をブラウザ版と共有) |
 | `help-lint.js` | MMLヘルプ(`;@help`タグ)の自己点検。書式・実演スニペットのコンパイル・コマンド網羅 |
+| `notelist-check.js` | 楽譜出力用の音符列 `compile().noteList`(音価付き)の点検。フレーム合計/ticks逆算/タイ・連符・w・k・PS・`;@time``;@key` の固定ケース |
+| `score-check.js` | 楽譜の表記モデル(src/score/notation.js)と MusicXML 書き出しの点検。小節の合計/音価の厳密一致/タイ・連符・連桁の対応/XMLの整合。`--out DIR` で .musicxml を書く |
+| `score-midi-check.js` | MusicXML 書き出しの MuseScore 往復検証(MuseScore 4 の CLI が要る。`MUSESCORE_EXE` か既定パス)。.musicxml → MIDI にして開始tick/長さ/音高を表記モデルと突き合わせ、MuseScore のログに警告が無いことも見る。`--piano` でピアノ2段版 |
+| `musicxml-import-check.js` | MusicXML→MML 取り込み(src/score/musicxmlImport.js)の往復検証。自前の書き出し/MuseScore の書き直し/.mxl を取り込んで compile し、音高ごとの鳴っている区間が元と一致するか。引数に .musicxml を渡すと取り込み結果の MML を表示(`--out`) |
 | `baseline-*.json` | 回帰テストのベースライン(曲ごとのSHA-256とメタ情報)。**gitignore済み** |
 
 ベースラインは手元のコーパスと1対1に対応する曲名一覧なので、リポジトリには入れていない。

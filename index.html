@@ -91,6 +91,9 @@
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-help" title="MMLコマンドヘルプ" aria-label="MMLコマンドヘルプ">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7.5"/><path d="M7.8 7.6a2.3 2.3 0 1 1 3.1 2.2c-.6.25-.9.8-.9 1.5"/><path d="M10 14.2h.01"/></svg>
         </button>
+        <button class="icon-btn icon-btn-title toggle-btn" data-target="win-score" title="楽譜" aria-label="楽譜">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5h15M2.5 8h15M2.5 11h15M2.5 14h15"/><path d="M12.5 3.2v8.6"/><ellipse cx="11" cy="12.4" rx="1.8" ry="1.2" fill="currentColor" stroke="none"/><path d="M7 6.2v8.6"/><ellipse cx="5.5" cy="15.4" rx="1.8" ry="1.2" fill="currentColor" stroke="none"/></svg>
+        </button>
         <label><input type="checkbox" id="mmlLineNumbers" /> 行番号</label>
         <label><input type="checkbox" id="mmlHighlightEnable" checked /> 再生中ハイライト</label>
         <label><input type="checkbox" id="mmlAutoScrollEnable" /> 追随スクロール</label>
@@ -111,8 +114,8 @@
           <svg viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1.2"/></svg>
         </button>
         <span class="icon-toolbar-sep"></span>
-        <input type="file" id="mmlOpenFile" accept=".mml,.txt" style="display:none" />
-        <button class="icon-btn secondary" id="btnMmlOpenFile" title="MMLファイルを開く">
+        <input type="file" id="mmlOpenFile" accept=".mml,.txt,.musicxml,.xml,.mxl" style="display:none" />
+        <button class="icon-btn secondary" id="btnMmlOpenFile" title="MMLファイルを開く(MusicXML/.mxl の楽譜も取り込める)">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.5c0-.83.67-1.5 1.5-1.5h3.4l1.4 1.6H16c.83 0 1.5.67 1.5 1.5v7c0 .83-.67 1.5-1.5 1.5H4c-.83 0-1.5-.67-1.5-1.5v-8.6Z"/></svg>
         </button>
         <button class="icon-btn secondary" id="btnMmlSaveFile" title="MMLファイルを保存">
@@ -120,6 +123,9 @@
         </button>
         <button class="icon-btn secondary" id="btnMmlExportNsf" title="NSF出力">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v9"/><path d="M6.2 8.8 10 12.6l3.8-3.8"/><path d="M4 15.5h12"/></svg>
+        </button>
+        <button class="icon-btn secondary" id="btnMmlExportMusicXml" title="楽譜(MusicXML)出力">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5h14M3 8.5h14M3 11.5h14M3 14.5h14"/><path d="M12.5 3.5v9.2"/><ellipse cx="10.9" cy="13.4" rx="1.7" ry="1.2" fill="currentColor" stroke="none"/></svg>
         </button>
         <span class="icon-toolbar-sep"></span>
         <button class="icon-btn secondary metro-toggle" id="btnMetronome" title="メトロノームを鳴らす" aria-label="メトロノーム" aria-pressed="false">
@@ -213,6 +219,19 @@
     </div>
     <div class="float-window-body">
       <div id="envelopeEditor"></div>
+    </div>
+  </section>
+
+  <!-- 楽譜(本記譜): MMLのコンパイル結果 → 表記モデル(src/score/notation.js) → 記譜間隔で段組み
+       (src/score/engrave.js)。中身は src/ui/scoreView.js。再生位置は縦線カーソルで追従する -->
+  <section class="float-window" id="win-score"
+    data-default-left="160" data-default-top="100" data-default-width="980" data-default-height="640">
+    <div class="float-window-header">
+      <span>楽譜</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <div id="scoreView"></div>
     </div>
   </section>
 
@@ -528,6 +547,11 @@
   <script src="src/mml/defBlocks.js"></script>
   <script src="src/mml/n163Alloc.js"></script>
   <script src="src/mml/compiler.js"></script>
+  <script src="src/score/notation.js"></script>
+  <script src="src/score/musicxml.js"></script>
+  <script src="src/score/engrave.js"></script>
+  <script src="src/score/xmlLite.js"></script>
+  <script src="src/score/musicxmlImport.js"></script>
   <script src="src/mml/player.js"></script>
   <script src="src/mml/sampleMml.js"></script>
   <script src="src/mml/helpIndex.js"></script>
@@ -978,6 +1002,7 @@
   <script src="src/ui/editorKeys.js"></script>
   <script src="src/ui/fileSync.js"></script>
   <script src="src/ui/miniTransport.js"></script>
+  <script src="src/ui/scoreView.js"></script>
   <script src="src/main.js"></script>
 </body>
 </html>

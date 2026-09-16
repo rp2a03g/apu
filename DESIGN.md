@@ -201,6 +201,7 @@ structuredClone/JSON.stringifyがそのまま通ること)。
 | `src/archive/` | zip(セントラルディレクトリ/deflate-raw)・7z(ヘッダ解析+自前LZMA/LZMA2展開)・gzip の汎用リーダー。全形式共通の「曲リストの器」(SPC等の1ファイル1曲形式もアーカイブで曲送り) | コア |
 | `src/mml/` lexer/compiler/player | MMLコンパイル・直接レンダリング | コア |
 | `src/convert/` | フォーマット非依存の BPM検出・音長量子化・MML生成 | コア |
+| `src/score/` | 楽譜出力: compile() の noteList(音価付き音符列)→表記モデル(notation.js: 小節/タイ/連符/連桁/臨時記号/調。buildPianoNotation で右手/左手の和音2段にも畳む)→MusicXML(musicxml.js)/記譜間隔の段組みと canvas 描画(engrave.js、楽譜ウィンドウ src/ui/scoreView.js)。入力側は musicxmlImport.js(+xmlLite.js)が MusicXML/.mxl を MML にする。入口は MML の音価だけ(ロールのレジスタ由来データは使わない)。描画は自前(外部楽譜ライブラリ同梱禁止、ROADMAP「フェーズ外: 楽譜出力」) | コア |
 | `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` `src/gbs2mml/` `src/hes2mml/` `src/vgm2mml/` | 各形式→ノート抽出(vgm2mmlはチップファミリごとに他の*2mmlへ委譲。kss/gbs/hesは`convertCapture`でキャプチャと変換を分離済み) | コア |
 | `src/ir/` (新設) | Song IR 定義・検証・移行・MML⇔IR変換 | コア |
 | `src/input/` | メトロノーム(metronome.js)・入力レイテンシ/時間軸写像(latency.js)・演奏入力の合流点(noteSource.js: 全入力源 → TimedPitchEvent)・PC鍵盤の配列(keyMap.js)・tick格子への量子化と和音のまとめ(quantize.js)・Web MIDIアダプタ(midiInput.js)。今後 鼻歌(pitchDetect.js/micInput.js)を足す | コア(*) |

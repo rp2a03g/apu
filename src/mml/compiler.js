@@ -165,6 +165,11 @@
  *                    バンキング指示子。本ツールはROMバンク分割を前提にしないため認識のみ・無視
  *   #INCLUDE/#EFFECT-INCLUDE  外部ファイル読込。静的ホスティングのみで完結する設計上、
  *                    未対応(認識のみ・無視。INV-1参照)
+ *   ;@time <n>/<d>   楽譜用の拍子(例 ;@time 3/4)。ppmckcが無視するコメント行で指示する。
+ *                    再生には影響せず、戻り値の score.time と noteList(音価付き音符列)を
+ *                    楽譜出力(MusicXML/五線表示)だけが使う。無ければ楽譜側が4/4とみなす
+ *   ;@key <n>        楽譜用の調号。五度圏の数(♯の数が正、♭の数が負、-7〜7。例 ;@key -1 =
+ *                    ヘ長調/ニ短調)。無ければ楽譜側が自動推定する。;@timeと同じく再生には影響しない
  *   $<char> <mml>    マクロ定義。以降そのチャンネル本文中の<char>を<mml>に1回だけ展開する
  *                    (再帰展開はしない。o l v q t K n N S E M s @ & [ | ] { } > < 空白
  *                    数字 . + # - および音符文字 a-g r は既存コマンドと衝突するため
@@ -230,6 +235,40 @@
   const CPU_CLOCK_NTSC = 1789773;
   const FRAME_RATE_NTSC = 60.0988;
   Mml.FRAME_RATE_NTSC = FRAME_RATE_NTSC; // 変換側(src/convert/envelope.js applyNoteEnd)が元曲のフレームレートとの比を取る
+  // 楽譜出力用(noteList.ticks)の分解能。src/convert/duration.js の TPQN と同じ値だが、
+  // compiler.js は convert 層に依存しないためここで別に持つ(値を変えるときは両方)
+  const SCORE_TPQN = 480;
+  const SCORE_WHOLE_TICKS = SCORE_TPQN * 4;
+  Mml.SCORE_TPQN = SCORE_TPQN;
+
+  // ";@time <分子>/<分母>" ";@key <五度圏の数>" のコメント指示を原文から拾う(楽譜出力用、
+  // 段階1)。最初の1回だけ採用。不正な値は issues に日本語文言で積む(呼び出し側がwarningsへ)
+  function parseScoreDirectives(source) {
+    const out = { time: null, key: null, issues: [] };
+    const lines = String(source == null ? '' : source).split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].replace(/\r$/, '').trim();
+      let m;
+      if ((m = /^;@time\b\s*(.*)$/i.exec(line))) {
+        const v = /^(\d+)\s*\/\s*(\d+)$/.exec(m[1].trim());
+        const beats = v ? +v[1] : 0, beatType = v ? +v[2] : 0;
+        if (!v || beats < 1 || beats > 99 || beatType < 1 || beatType > 64 || (beatType & (beatType - 1)) !== 0) {
+          out.issues.push(T(';@time は 分子/分母 で指定してください(分母は1/2/4/8/16/32/64、例 ;@time 3/4): {v}', { v: m[1].trim() }));
+        } else if (out.time == null) {
+          out.time = { beats, beatType };
+        }
+      } else if ((m = /^;@key\b\s*(.*)$/i.exec(line))) {
+        const v = /^([+-]?\d+)$/.exec(m[1].trim());
+        const fifths = v ? +v[1] : NaN;
+        if (!v || fifths < -7 || fifths > 7) {
+          out.issues.push(T(';@key は五度圏の数(-7〜7、♯が正・♭が負)で指定してください: {v}', { v: m[1].trim() }));
+        } else if (out.key == null) {
+          out.key = { fifths };
+        }
+      }
+    }
+    return out;
+  }
 
   const NOTE_SEMITONES = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
 
@@ -571,6 +610,9 @@
               carry = target - frames;
             }
             nt.forcedFrames = frames;
+            // 楽譜出力用(noteList): 連符の音価そのものを残す(forcedFramesだけでは
+            // 「四分音符を3等分」という表記情報が消えるため)。len=連符全体の音価
+            nt.tuplet = { count, len: tupletLen, dots: endTok.dots || 0, index: k };
             assigned += frames;
           });
         }
@@ -650,6 +692,39 @@
     let lengthCarry = 0;
     let tempo = initialTempo;
     let elapsedFrames = 0;
+    // 楽譜出力用の音符列(ROADMAP「フェーズ外: 楽譜出力」段階1、2026-09-16)。
+    // segments はタイ(&)/w/k で1つに併合され音価(四分/付点/連符)がフレーム数に潰れるが、
+    // こちらは「書かれた音符トークン1つ=1要素」で音価を保持する。frames は segments と
+    // 同じ値なので、チャンネル内の合計は segments の合計(=totalFramesの材料)と一致する。
+    // 純粋な追加情報で、再生/書き出しの他の出力には一切影響しない。
+    //   kind:    'note'(音符/休符) | 'wait'(w、直前の音の延長) | 'keyOff'(k、直前の音の
+    //            リリース区間=譜面上は休符)
+    //   note:    ノート番号(compilerの規約。休符はnull)。len: {n, dots}(連符内は連符全体の音価)
+    //   tuplet:  {count, index} 連符内の音符(何等分の何番目)、それ以外はnull
+    //   ticks:   四分音符=SCORE_TPQN(480、src/convert/duration.jsのTPQNと同じ)での音価。
+    //            連符は割り切れないことがあるので小数を許す
+    //   joined:  直前の要素から &/w で繋がっている(同音程ならタイ、異音程ならレガート=スラー)
+    //   glide:   PSでこの音へグライドする(譜面上はスラー/グリッサンド相当)
+    //   tempo:   この音符時点のテンポ(t/@tの変化点を譜面に出すため)
+    //   spelled: 書かれた音名/臨時記号/オクターブ/移調(異名同音の手がかり。n<num>はnull)
+    //   srcStart/srcEnd: 原文の文字範囲(highlightRangesと同じ規約)
+    const notes = [];
+    function recordNote(kind, tok, frames, noteNumber, joined, glide) {
+      const tup = tok.tuplet || null;
+      const n = tup ? tup.len : (tok.length || state.defaultLength);
+      const dots = tup ? tup.dots : (tok.dots || 0);
+      let ticks = (SCORE_WHOLE_TICKS / n) * dotMultiplier(dots);
+      if (tup) ticks /= tup.count;
+      notes.push({
+        kind, startFrame: elapsedFrames, frames, note: noteNumber,
+        len: { n, dots }, tuplet: tup ? { count: tup.count, index: tup.index } : null, ticks,
+        joined: !!joined, glide: !!glide, tempo,
+        spelled: tok.type === 'note'
+          ? { name: tok.name, accidental: tok.accidental | 0, octave: state.octave, transpose: state.transpose }
+          : null,
+        srcStart: tok.srcStart, srcEnd: tok.srcEnd
+      });
+    }
     // L(ループ地点マーカー)が出現した時点でのelapsedFrames。複数回書かれた場合は
     // 最初の1回だけを採用する(2回目以降は無視)
     let loopFrame = null;
@@ -818,6 +893,10 @@
         case 'keyOff': {
           const lenResult = framesForLength(tok.length, tok.dots, state.defaultLength, tempo, lengthCarry);
           lengthCarry = lenResult.carryOut;
+          {
+            const prev = segments.length > 0 ? segments[segments.length - 1] : null;
+            recordNote(prev && prev.freq != null ? 'keyOff' : 'note', tok, lenResult.frames, null, false, false);
+          }
           pushKeyOff(lenResult.frames, tok.srcStart, tok.srcEnd);
           break;
         }
@@ -911,9 +990,12 @@
           const frames = lenResult.frames;
           lengthCarry = lenResult.carryOut;
           if (segments.length > 0) {
+            const prev = segments[segments.length - 1];
+            recordNote('wait', tok, frames, prev.freq != null ? prev.noteNumber : null, true, false);
             elapsedFrames += frames;
-            segments[segments.length - 1].durationFrames += frames;
+            prev.durationFrames += frames;
           } else {
+            recordNote('note', tok, frames, null, false, false);
             pushNote(frames, null, null, tok.srcStart, tok.srcEnd);
           }
           break;
@@ -982,6 +1064,9 @@
             noteNumber = state.octave * 12 + NOTE_SEMITONES[tok.name] + tok.accidental + state.transpose;
             freq = noteFrequency(noteNumber);
           }
+          recordNote('note', tok, frames, noteNumber,
+            segments.length > 0 && segments[segments.length - 1].tieNext,
+            freq != null && state.pendingPitchShift && caps.psAllowed);
           pushNote(frames, freq, noteNumber, tok.srcStart, tok.srcEnd);
           break;
         }
@@ -997,6 +1082,9 @@
           // n<num>: オクターブ2のCを0とした通し番号
           const noteNumber = tok.num + 24 + state.transpose;
           const freq = noteFrequency(noteNumber);
+          recordNote('note', tok, frames, noteNumber,
+            segments.length > 0 && segments[segments.length - 1].tieNext,
+            state.pendingPitchShift && caps.psAllowed);
           pushNote(frames, freq, noteNumber, tok.srcStart, tok.srcEnd);
           break;
         }
@@ -1006,7 +1094,7 @@
     }
 
     return {
-      segments, immediateWrites, loopFrame,
+      segments, notes, immediateWrites, loopFrame,
       startMarkerFrame, endMarkerFrame, startMarkerSrcRange, endMarkerSrcRange
     };
   }
@@ -2770,6 +2858,11 @@
     const channelLetters = ['A', 'B', 'C', 'D', ...expansionLetters];
     const segmentsByChannel = {};
     const immediateWritesByChannel = {};
+    const noteListByChannel = {};
+    // 楽譜用の拍子/調(段階1)。ppmck MMLに拍子/調の概念は無いので、ppmckcが無視するコメント行
+    // ";@time <分子>/<分母>" ";@key <五度圏の数>" で指示する。無ければnull(楽譜側が既定4/4・
+    // 調は自動推定)。不正な値は warnings に載せる(コンパイルは止めない)
+    const score = parseScoreDirectives(source);
     const loopFrameByChannel = {};
     const startMarkerFrameByChannel = {};
     const endMarkerFrameByChannel = {};
@@ -2807,7 +2900,7 @@
       tokens = expandLoops(tokens, errors);
       tokens = applyTuplets(tokens, tempo, errors);
       const {
-        segments, immediateWrites, loopFrame,
+        segments, notes, immediateWrites, loopFrame,
         startMarkerFrame, endMarkerFrame, startMarkerSrcRange, endMarkerSrcRange
       } = buildSegments(tokens, tempo, errors, settings, fme7Letters.has(ch) ? 1 : 0, {
         selfDelay: !noSelfDelayLetters.has(ch),
@@ -2822,6 +2915,7 @@
       });
       segmentsByChannel[ch] = segments;
       immediateWritesByChannel[ch] = immediateWrites;
+      noteListByChannel[ch] = notes;
       loopFrameByChannel[ch] = loopFrame;
       startMarkerFrameByChannel[ch] = startMarkerFrame;
       endMarkerFrameByChannel[ch] = endMarkerFrame;
@@ -2880,6 +2974,7 @@
     // その音だけ無音になる。警告はチャンネルごとに1件へまとめる(同じ低音が延々続く曲で
     // メッセージが溢れないように、件数だけ添える)。
     const warnings = [];
+    for (const message of score.issues) warnings.push({ message });
     {
       const chipOf = {};
       chipOf.A = chipOf.B = { kind: 'pulse', periodMax: 2047, label: '2A03 ' + T('パルス') };
@@ -3086,6 +3181,11 @@
       endMarkerChannel,
       endMarkerSrcRange,
       highlightRanges,
+      // noteList: 楽譜出力用の音符列(ch別、書かれた順、音価付き。buildSegmentsのnotes参照)。
+      // ループ地点(L)による末尾複製は行わない(譜面は「書かれたとおり」。tracks/highlightRangesとは違う)
+      noteList: noteListByChannel,
+      // score: ";@time" ";@key" コメント指示(parseScoreDirectives)。{ time: {beats, beatType}|null, key: {fifths}|null }
+      score: { time: score.time, key: score.key },
       errors,
       // warnings: コンパイルは成立するが意図どおり鳴らない箇所(音域外など)。
       // errorsと違い再生/書き出しは中止しない(UI側は表示のみ)

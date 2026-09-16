@@ -224,7 +224,8 @@
     try {
       const [h] = await global.showOpenFilePicker({
         multiple: false,
-        types: [{ description: 'MML', accept: { 'text/plain': ['.mml', '.txt'] } }],
+        types: [{ description: 'MML', accept: { 'text/plain': ['.mml', '.txt'] } },
+                { description: 'MusicXML', accept: { 'application/vnd.recordare.musicxml+xml': ['.musicxml', '.xml'], 'application/vnd.recordare.musicxml': ['.mxl'] } }],
       });
       return { handle: h };
     } catch (e) {

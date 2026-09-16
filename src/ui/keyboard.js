@@ -72,13 +72,19 @@
   //                  大波形は同じ帯(.kbd-below)に左右で並ぶ(ユーザー指示 2026-09-10)
   // 既定値は従来の見た目(縦・下・1列・まとめて)+ファイル情報は自動。localStorageに永続化する。
   const LAYOUT_STORAGE_KEY = 'mml_keyboardLayout_v1';
-  const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'bottom', listColumns: 'single', rollLanes: 'all', fileInfoPlacement: 'auto' });
+  // rollView:        'roll' = ピアノロール(鍵盤の音程軸に音符の棒)
+  //                  'score' = 楽譜(音程軸を五線に置き換え、時間軸はロールと同じ実時間比例。MMLの
+  //                            コンパイル結果から作る表記モデル(src/score/notation.js)を setScore() で
+  //                            受け取ったときだけ有効で、実ファイル再生中はロールに戻る。
+  //                            ROADMAP「フェーズ外: 楽譜出力」段階3、2026-09-16)
+  const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'bottom', listColumns: 'single', rollLanes: 'all', fileInfoPlacement: 'auto', rollView: 'roll' });
   const LAYOUT_CHOICES = Object.freeze({
     rollOrientation: ['vertical', 'horizontal'],
     rollPlacement: ['bottom', 'right', 'window'],
     listColumns: ['single', 'auto'],
     rollLanes: ['all', 'perChannel'],
     fileInfoPlacement: ['auto', 'top', 'bottom', 'left', 'right'],
+    rollView: ['roll', 'score'],
   });
   // チャンネルごとのレーン: そのchが曲全体で鳴らす音域(+使っているドラムレーン)だけを
   // 音程軸いっぱいに表示する(_updateLaneRanges)。音域はchごとに違うので拡大率もchごとに違い、
@@ -4497,6 +4503,10 @@
           ['all', T('全チャンネルを1つの鍵盤に')],
           ['perChannel', T('チャンネルごとに分割 (収まらない分はスクロール)')],
         ] },
+        { key: 'rollView', label: T('ピアノロールの表示'), options: [
+          ['roll', T('ピアノロール')],
+          ['score', T('楽譜 (五線、時間比例。MML再生のみ)')],
+        ] },
         { key: 'fileInfoPlacement', label: T('ファイル情報の置き場'), options: [
           ['auto', T('自動 (他の置き場に合わせる)')],
           ['top', T('チャンネル一覧の上')],
@@ -4562,6 +4572,10 @@
 
     setSource(result, chips) {
       this._chips = Array.isArray(chips) ? chips.filter(c => c && c !== 'none') : [];
+      // 楽譜モードの表記モデルは曲ごと(MML のコンパイル結果)なので、ソースが変わったら捨てる。
+      // MML 再生なら main.js が setMonitorSource() の直後に setScore() で入れ直す
+      this._score = null;
+      this._scoreCursor = {};
       // 基準ピッチ(#TUNING): MML再生(main.js setMonitorSource が compiled.settings.tuningCents を渡す)の
       // 鍵盤ハイライト/ロールを、ずらした基準で音名に丸める。実ファイル再生は未指定=0
       rollTuningCents = (result && result.tuningCents) ? +result.tuningCents : 0;
@@ -4665,6 +4679,23 @@
       this._rebuildDrumLanes();
       this._updateLaneRanges();
     }
+
+    // 楽譜モード(レイアウト設定 rollView='score')の材料。score = { notation(src/score/notation.js の
+    // 表記モデル), fps(コンパイラのフレームレート), loopPointFrame, totalFrames } | null。
+    // 表記モデルの各音符片は frameStart/frameEnd(コンパイラのフレーム)を持つので、fps で秒に直せば
+    // ロールと同じ「再生位置 pos からの相対秒」で描ける。null で楽譜なし(ロール表示に戻る)
+    setScore(score) {
+      this._score = score && score.notation ? score : null;
+      this._scoreCursor = {};
+      if (!this._score) return;
+      // 毎フレームの走査用に、パートごとの音符片を時間順に平らに並べておく(小節の入れ子を辿らない)
+      for (const part of this._score.notation.parts) {
+        const flat = [];
+        for (const m of part.measures) for (const it of m.items) flat.push(it);
+        part.flatItems = flat;
+      }
+    }
+    getScore() { return this._score; }
 
     // ドラム区画のレーン表を、タイムラインのノートに書き込まれた drumLane/drumKey から組み直す。
     // ★配列に生やしたプロパティ(result.drumLanes のような形)はWorkerからのpostMessageの
@@ -4780,6 +4811,11 @@
       if (!plan) return 'skip';
       const ent = plan.get(chId) || {};
       return ent.target || this._defaultTargetOf(chId) || 'skip';
+    }
+    /** MMLのチャンネル文字(part列)から表示色を引く(楽譜ウィンドウのパート色用) */
+    getChannelColorByLetter(letter) {
+      const el = this._rowEls.find(e => e.letter === letter);
+      return el ? el.color : null;
     }
     /** そのchの表示色(色の上書き込み) */
     getChannelColor(chId) {
@@ -6415,6 +6451,219 @@
       }
     }
 
+    // 時間軸: 曲内の絶対秒(0,1,2,3…)ごとに音程軸方向の線を引き、ノートと同じ式でスクロールさせる。
+    // 再生が進むにつれて線が鍵盤側へ流れ、新しい秒の線が先読みの果て(縦向き=上端、横向き=右端)
+    // から現れる(累積の経過時間)。ロールと楽譜モードで共通
+    _drawRollTimeGrid(ctx, g, pos) {
+      const H = g.H;
+      const winEnd = pos + g.windowSec;
+      ctx.strokeStyle = '#3d3d4a';
+      ctx.fillStyle = '#6b6b7a';
+      ctx.font = '9px ' + fontStack('sans');
+      const firstSec = Math.ceil(pos);
+      for (let s = firstSec; s < winEnd; s++) {
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        if (g.vertical) {
+          const y = Math.round(H - g.tPx(s - pos)) + 0.5;
+          ctx.moveTo(0, y);
+          ctx.lineTo(g.W, y);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(`${s}s`, 2, y - 1);
+        } else {
+          const x = Math.round(g.tPx(s - pos)) + 0.5;
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, H);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+          ctx.textBaseline = 'top';
+          ctx.fillText(`${s}s`, x + 2, 1);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // ── 楽譜モード(五線、時間比例。ROADMAP「フェーズ外: 楽譜出力」段階3) ──────────────
+    // ロールと同じ座標系(makeRollGeom: 時間軸 t=再生位置からの相対秒、音程軸 p)で、音程軸だけを
+    // 五線に置き換える。描くのは五線・小節線・符頭・加線・臨時記号・休符の目印・パート名まで
+    // (旗/連桁/音価の型は描かない=段階4の本記譜)。音符の長さは時間比例の棒で示す。
+    // 再生位置の「今」は鍵盤側の端(t=0)で、鳴っている音符の符頭は端に留まって光る。
+    // データは setScore() の表記モデル。frameStart/frameEnd(コンパイラのフレーム)を fps で秒にする。
+    _drawScoreCanvas(canvas, ctx, g, pos, onlyId, lane) {
+      const score = this._score;
+      const notation = score.notation;
+      const fps = score.fps || 60;
+      const H = g.H;
+      this._drawRollTimeGrid(ctx, g, pos);
+      // ループ地点(L)より後ろの末尾複製(compile() が tracks に足す区間)は譜面には無いので、
+      // その区間の再生位置はループ地点からの相対位置へ戻して描く
+      let posFrame = pos * fps;
+      if (score.loopPointFrame != null && score.totalFrames > 0) {
+        const natural = (score.totalFrames + score.loopPointFrame) / 2;
+        const loopLen = natural - score.loopPointFrame;
+        if (loopLen > 0 && posFrame >= natural) posFrame = score.loopPointFrame + ((posFrame - natural) % loopLen);
+      }
+      const posSec = posFrame / fps;
+      const windowSec = g.windowSec;
+      // 描くパート: チャンネルごとのレーン表示ならそのchの文字に対応するパートだけ
+      const rowByLetter = new Map();
+      for (const el of this._rowEls) if (el.letter) rowByLetter.set(el.letter, el);
+      let parts = notation.parts;
+      if (onlyId !== null) {
+        const row = this._rowEls.find(e => e.id === onlyId);
+        parts = parts.filter(p => row && p.letter === row.letter);
+      }
+      if (!parts.length) return;
+      const spotId = this._effectiveSpotlightId();
+      const n = parts.length;
+      const bandH = g.pitchLen / n;                      // 1パートの帯(音程軸方向のpx)
+      const sp = Math.max(1.5, Math.min(7, bandH / 11)); // 五線の間隔
+      const r = Math.max(1.5, sp * 0.55);                // 符頭の半径
+      const labelPx = Math.max(8, Math.min(11, sp * 1.8));
+      const LETTER_INDEX = { C: 0, D: 1, E: 2, F: 3, G: 4, A: 5, B: 6 };
+      const ACC_TEXT = { '-2': '♭♭', '-1': '♭', '0': '♮', '1': '♯', '2': '\u{1D12A}' };
+      // 音程軸の線を [pLo, pHi] × 時間 t で引く/時間軸の線を p で引く(向きの違いは g が吸収)
+      const lineT = (t, pLo, pHi) => { const a = g.point(pLo, t), b = g.point(pHi, t); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); };
+      const lineP = (p, tLo, tHi) => { const a = g.point(p, tLo), b = g.point(p, tHi); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); };
+
+      parts.forEach((part, pi) => {
+        // 先頭のパートを最高音側(縦向き=右、横向き=上)へ。帯の中央に五線を置く
+        const bandLo = g.pitchLen - (pi + 1) * bandH;
+        const pBase = bandLo + bandH / 2 - 2 * sp;       // 第1線(いちばん低い線)
+        const row = rowByLetter.get(part.letter);
+        const color = row ? row.color : '#9a9ab0';
+        const muted = row ? this._isTrackMuted(row.id) : false;
+        const dim = (muted || (spotId && row && row.id !== spotId)) ? SPOTLIGHT_DIM_ALPHA : 1;
+        // 音部記号ごとの第1線の音(全音階の段番号: オクターブ*7+文字)。ト音=E4、ヘ音=G2、打楽器=E4(unpitched の表示位置)
+        const ref = (part.clef && part.clef.sign === 'F') ? 2 * 7 + 4 : 4 * 7 + 2;
+        // 帯の境目(薄く)と五線
+        ctx.globalAlpha = 0.35;
+        ctx.strokeStyle = '#3d3d4a';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); lineP(Math.round(bandLo) + 0.5, 0, g.timeLen); ctx.stroke();
+        ctx.globalAlpha = 0.9 * dim;
+        ctx.strokeStyle = '#8a8aa0';
+        ctx.beginPath();
+        for (let i = 0; i < 5; i++) lineP(Math.round(pBase + i * sp) + 0.5, 0, g.timeLen);
+        ctx.stroke();
+        // 小節線と小節番号
+        ctx.fillStyle = '#9a9ab0';
+        ctx.font = `${labelPx}px ` + fontStack('sans');
+        for (const m of part.measures) {
+          const t = m.frameStart / fps - posSec;
+          if (t < 0 || t > windowSec) continue;
+          ctx.globalAlpha = 0.8 * dim;
+          ctx.strokeStyle = '#c0c0d0';
+          ctx.beginPath(); lineT(g.tPx(t), pBase, pBase + 4 * sp); ctx.stroke();
+          if (sp >= 3) {
+            const pt = g.point(pBase + 4 * sp + 2, g.tPx(t) + 2);
+            ctx.textBaseline = g.vertical ? 'bottom' : 'bottom';
+            ctx.textAlign = 'left';
+            ctx.fillText(String(m.number), pt.x, pt.y);
+          }
+        }
+        // 音符片(時間順)。鍵盤側へ流れ去った片は走査起点をキャッシュして飛ばす(ロールと同じ)
+        const flat = part.flatItems || [];
+        let idx = this._scoreCursor[part.letter] || 0;
+        if (idx > flat.length) idx = flat.length;
+        while (idx < flat.length && flat[idx].frameEnd / fps <= posSec) idx++;
+        this._scoreCursor[part.letter] = idx;
+        for (let i = idx; i < flat.length; i++) {
+          const it = flat[i];
+          const t0 = it.frameStart / fps - posSec;
+          if (t0 >= windowSec) break;
+          const t1 = Math.min(windowSec, it.frameEnd / fps - posSec);
+          const tA = Math.max(0, t0);
+          if (it.rest) {
+            // 休符: 第3線の上に薄い帯(小節休符はさらに薄く)
+            if (t1 <= tA) continue;
+            ctx.globalAlpha = (it.measureRest ? 0.10 : 0.22) * dim;
+            ctx.fillStyle = '#c0c0d0';
+            const rr = g.rect(pBase + 2 * sp - sp * 0.3, sp * 0.6, g.tPx(tA), g.tPx(t1), 1);
+            ctx.fillRect(rr.x, rr.y, rr.w, rr.h);
+            continue;
+          }
+          const sym = it.pitch || it.unpitched;
+          if (!sym) continue;
+          const sounding = t0 <= 0 && t1 > 0;
+          // 和音(ピアノ譜の表記モデル)は各音を同じ手順で描く
+          const syms = it.chord && it.chord.length > 1 ? it.chord.map(c => c.pitch) : [sym];
+          for (const sy of syms) {
+          const stepIdx = sy.octave * 7 + LETTER_INDEX[sy.step];
+          const d = stepIdx - ref;                       // 第1線からの半段数
+          const p = pBase + d * sp / 2;
+          if (p < bandLo - sp || p > bandLo + bandH + sp) continue; // 帯の外(極端な音域)は描かない
+          // 音長の棒(時間比例)。タイの続き片も棒だけは描く
+          ctx.globalAlpha = 0.45 * dim;
+          ctx.fillStyle = color;
+          const bar = g.rect(p - sp * 0.18, sp * 0.36, g.tPx(tA), g.tPx(t1), 2);
+          ctx.fillRect(bar.x, bar.y, bar.w, bar.h);
+          if (it.tieStop) continue;                      // タイで繋いだ続きの片: 符頭は打ち直さない
+          const tHead = g.tPx(tA) + r;                   // 符頭の中心(時間軸)。鳴っている間は端に留まる
+          // 加線(第1線より下/第5線より上の、線の位置に当たる半段ごと)
+          ctx.globalAlpha = 0.9 * dim;
+          ctx.strokeStyle = '#8a8aa0';
+          ctx.lineWidth = 1;
+          if (d < 0 || d > 8) {
+            ctx.beginPath();
+            const ks = d < 0 ? -2 : 10, ke = d, kd = d < 0 ? -2 : 2;
+            for (let k = ks; (kd < 0 ? k >= ke : k <= ke); k += kd) {
+              const a = g.point(pBase + k * sp / 2, tHead - r * 1.7), b = g.point(pBase + k * sp / 2, tHead + r * 1.7);
+              ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+            }
+            ctx.stroke();
+          }
+          // 符頭(打楽器は×)
+          const c = g.point(p, tHead);
+          ctx.globalAlpha = dim;
+          ctx.fillStyle = color;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = Math.max(1, r * 0.5);
+          if (part.percussion) {
+            ctx.beginPath();
+            ctx.moveTo(c.x - r, c.y - r); ctx.lineTo(c.x + r, c.y + r);
+            ctx.moveTo(c.x - r, c.y + r); ctx.lineTo(c.x + r, c.y - r);
+            ctx.stroke();
+          } else {
+            ctx.beginPath();
+            ctx.ellipse(c.x, c.y, g.vertical ? r * 1.15 : r * 1.3, g.vertical ? r * 1.3 : r * 1.15, 0, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          if (sounding) {
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, r * 1.9, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+          // 臨時記号(符頭の手前=鍵盤側)
+          if (it.accidental && sp >= 3) {
+            const acc = ACC_TEXT[String(sy.alter)] || '';
+            if (acc) {
+              ctx.font = `${Math.round(sp * 2.2)}px ` + fontStack('sans');
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillStyle = '#e6e6ef';
+              const ap = g.point(p, tHead - r * 2.6);
+              ctx.fillText(acc, ap.x, ap.y);
+            }
+          }
+          }
+        }
+        // パート名(帯の高音側の端、鍵盤側)
+        ctx.globalAlpha = 0.9 * dim;
+        ctx.fillStyle = color;
+        ctx.font = `${labelPx}px ` + fontStack('sans');
+        ctx.textAlign = 'left';
+        if (g.vertical) { ctx.textBaseline = 'bottom'; ctx.fillText(part.name, bandLo + 2, H - 2); }
+        else { ctx.textBaseline = 'top'; ctx.fillText(part.name, 2, H - (bandLo + bandH) + 2); }
+      });
+      ctx.globalAlpha = 1;
+      ctx.textAlign = 'left';
+    }
+
     // 1枚のロールcanvasを曲内秒posの状態で描く。onlyId!=nullならそのチャンネルのノートだけ描く
     // (チャンネルごとのレーン表示用。laneが渡されたら音程窓=そのchの音域[lane.offWhite,
     // +lane.visWhite)だけを音程軸いっぱいに描く。窓は_updateLaneRanges()が曲全体から決めた
@@ -6432,6 +6681,11 @@
       const { wk: wkW, bk: bkW, H } = g;
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, H);
+      // 楽譜モード: 表記モデルがあるとき(MML再生中)だけ五線で描く。無ければ従来のロール
+      if (this._layout.rollView === 'score' && this._score) {
+        this._drawScoreCanvas(canvas, ctx, g, pos, onlyId, lane);
+        return;
+      }
       const windowSec = g.windowSec;
       const winEnd = pos + windowSec;
       const offPx = lane ? (lane.offWhite || 0) * wkW : 0; // 音程窓の低音側端(px)。keyX()の結果から引く
@@ -6498,34 +6752,7 @@
         }
       }
 
-      // 時間軸: 曲内の絶対秒(0,1,2,3…)ごとに音程軸方向の線を引き、ノートと同じ式でスクロールさせる。
-      // 再生が進むにつれて線が鍵盤側へ流れ、新しい秒の線が先読みの果て(縦向き=上端、横向き=右端)
-      // から現れる(累積の経過時間)。
-      ctx.strokeStyle = '#3d3d4a';
-      ctx.fillStyle = '#6b6b7a';
-      ctx.font = '9px ' + fontStack('sans');
-      const firstSec = Math.ceil(pos);
-      for (let s = firstSec; s < winEnd; s++) {
-        ctx.globalAlpha = 0.5;
-        ctx.beginPath();
-        if (g.vertical) {
-          const y = Math.round(H - g.tPx(s - pos)) + 0.5;
-          ctx.moveTo(0, y);
-          ctx.lineTo(g.W, y);
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-          ctx.textBaseline = 'bottom';
-          ctx.fillText(`${s}s`, 2, y - 1);
-        } else {
-          const x = Math.round(g.tPx(s - pos)) + 0.5;
-          ctx.moveTo(x, 0);
-          ctx.lineTo(x, H);
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-          ctx.textBaseline = 'top';
-          ctx.fillText(`${s}s`, x + 2, 1);
-        }
-      }
+      this._drawRollTimeGrid(ctx, g, pos);
 
       if (!this._rollTimeline || !this._rollTimeline.length) return;
       const frameDur = this._rollTimeline.frameDur || (1 / 60);

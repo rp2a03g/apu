@@ -3451,3 +3451,16 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 .env-ch-main .env-ch-nums { font-weight: bold; }
 /* 同じ数字でも弾く音で別の和音になる、という実例 */
 .env-ch-example { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+
+/* ── 楽譜ウィンドウ(本記譜、src/ui/scoreView.js) ───────────────────── */
+#scoreView { flex: 1; min-height: 0; }
+.score-view { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.score-view-bar { display: flex; align-items: center; gap: 6px; flex: none; padding-bottom: 6px; font-size: 12px; }
+.score-view-bar button { min-width: 26px; padding: 2px 6px; }
+.score-zoom-val { min-width: 3.2em; text-align: center; color: var(--muted, #9a9ab0); }
+.score-follow-label { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
+.score-info { flex: 1; color: var(--muted, #9a9ab0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.score-view-scroll { flex: 1; min-height: 0; overflow: auto; position: relative; background: #1b1b22; border: 1px solid #3d3d4a; border-radius: 4px; }
+.score-view-canvas { display: block; }
+.score-view-empty { color: var(--muted, #9a9ab0); padding: 24px; text-align: center; }
+.score-view-cursor { position: absolute; width: 2px; background: rgba(255, 220, 80, 0.85); pointer-events: none; box-shadow: 0 0 6px rgba(255, 220, 80, 0.6); }

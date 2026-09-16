@@ -221,6 +221,9 @@
 
   // --- 鍵盤表示 ---
   const keyboardDisplay = new MML.UI.KeyboardDisplay(document.getElementById('keyboardDisplay'));
+  // 楽譜ウィンドウ(本記譜、src/ui/scoreView.js)。表記モデルは鍵盤表示の楽譜モードと同じ物を渡す
+  const scoreView = new MML.UI.ScoreView(document.getElementById('scoreView'));
+  scoreView.colorOf = (letter) => keyboardDisplay.getChannelColorByLetter(letter);
   MML._keyboardDisplay = keyboardDisplay; // 診断用(DevToolsから状態を見る。[[remote-console-diagnosis-technique]])
   // ── 無音自動送りとミュートの関係 ────────────────────────────────────────
   // ★ミュートは「聴き方」の設定であって曲の内容ではないので、無音判定に混ぜない。
@@ -1732,6 +1735,7 @@
 
   function setKbdSource(kind, name) {
     kbdSourceKind = kind || null;
+    if (kind !== 'mml') scoreView.setScore(null); // 楽譜は MML のコンパイル結果からしか作れない
     if (kind && kind !== 'mml') loadedSoundFormat = kind;
     keyboardDisplay.setSourceInfo(kind, name);
     updateKeyboardTransport();
@@ -2252,9 +2256,11 @@
       frameIndex = Math.max(0, Math.min(monitorState.totalFrames - 1, frameIndex));
       keyboardDisplay.update(pos);
       updateMmlPlaybackHighlight(frameIndex);
+      scoreView.setFrame(kbdSourceKind === 'mml' ? frameIndex : -1); // 楽譜ウィンドウのカーソル(MML再生のみ)
     } else {
       keyboardDisplay.update(0); // 停止中もピアノを常時描画
       updateMmlPlaybackHighlight(-1);
+      scoreView.setFrame(-1);
     }
     // SPCはmonitorState(regSnapshots前提)に乗らず専用のupdateSpcVoices()経由(80ms間隔)
     // でしか描画されないため、ロールの再描画だけここでも(rAF=約60fps)呼んで滑らかにする
@@ -3585,6 +3591,8 @@
   async function openMmlTextFile(file, handle) {
     if (!file) return false;
     if (!confirmDiscardMmlEdits()) return false;
+    // 楽譜(MusicXML/.mxl)なら MML に取り込む(src/score/musicxmlImport.js)。外部エディタ同期は付けない
+    if (/\.(musicxml|xml|mxl)$/i.test(file.name)) return openMusicXmlFile(file);
     let text;
     try {
       text = await file.text();
@@ -3606,6 +3614,38 @@
     if (handle) await FileSync.attach(handle, file, text); else FileSync.detach();
     mmlFileStatus(T('MMLファイルを読み込みました: {file} ({n}バイト)',
       { file: file.name, n: text.length }), 'ok');
+    return true;
+  }
+
+  // MusicXML(.musicxml/.xml/.mxl)を MML に取り込んでエディタへ。取り込みの要約と警告は MML 出力欄へ
+  async function openMusicXmlFile(file) {
+    let result;
+    try {
+      result = await MML.Score.importMusicXMLBytes(new Uint8Array(await file.arrayBuffer()), file.name, {});
+    } catch (e) {
+      mmlFileStatus(T('楽譜(MusicXML)の取り込みに失敗しました: {msg}', { msg: e.message }), 'error');
+      return false;
+    }
+    ensureMmlWindowOpen();
+    mmlSourceEl.value = result.mml;
+    mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新
+    markMmlTextSynced(file.name.replace(/\.(musicxml|xml|mxl)$/i, '.mml'));
+    FileSync.detach();
+    resetDpcmEditor();
+    rangeStartSec = 0;
+    rangeEndSec = null;
+    prepareMmlStream(true);
+    const info = result.info;
+    let msg = T('楽譜を取り込みました: {file} ({parts}パート / {lines}行 → {channels})', {
+      file: file.name, parts: info.parts.length, lines: info.lines, channels: info.channels.map(c => c.letter).join('') || '-' });
+    if (info.expansions.length) msg += ' ' + T('(拡張音源: {chips})', { chips: info.expansions.map(s => s.toUpperCase()).join(', ') });
+    mmlFileStatus(msg, 'ok');
+    if (result.warnings.length) {
+      const w = document.createElement('div');
+      w.className = 'warn';
+      w.textContent = T('取り込みの注意:') + '\n' + result.warnings.join('\n');
+      mmlOutputEl.appendChild(w);
+    }
     return true;
   }
 
@@ -3786,6 +3826,47 @@
     window.addEventListener('focus', () => { FileSync.checkNow({ auto: true }); });
   }
 
+  // 楽譜(MusicXML)出力(ROADMAP「フェーズ外: 楽譜出力」段階2): MML → compile() → 表記モデル
+  // (src/score/notation.js) → MusicXML 文字列(src/score/musicxml.js)。入口は MML の音価だけ
+  // (ロールのレジスタ由来データからは出さない)。;@time / ;@key のコメント指示で拍子と調を渡せる
+  // mode: 'all'(1chごとに1段、既定) | 'piano'(右手/左手の2段+打楽器、Score.buildPianoNotation。楽譜ウィンドウの選択)
+  function exportMmlMusicXml(mode) {
+    const piano = mode === 'piano';
+    const result = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
+    mmlOutputEl.innerHTML = '';
+    const msg = document.createElement('div');
+    if (result.errors.length > 0) {
+      msg.className = 'error';
+      msg.innerHTML = escapeHtml(T('MMLコンパイルエラーのため書き出せません:')) + '\n' + renderCompileErrors(result.errors);
+      mmlOutputEl.appendChild(msg);
+      return;
+    }
+    if (result.warnings && result.warnings.length) {
+      const w = document.createElement('div');
+      w.innerHTML = renderCompileWarnings(result.warnings);
+      mmlOutputEl.appendChild(w);
+    }
+    let built;
+    try {
+      built = MML.Score.compiledToMusicXML(result, { piano });
+    } catch (e) {
+      msg.className = 'error';
+      msg.textContent = T('楽譜の組み立てに失敗しました(内部エラー):') + '\n' + (e && e.message ? e.message : String(e));
+      mmlOutputEl.appendChild(msg);
+      return;
+    }
+    const meta = result.meta || {};
+    const filename = (meta.title || 'output') + (piano ? '-piano' : '') + '.musicxml';
+    downloadText(filename, built.xml);
+    const n = built.notation;
+    const measures = n.parts.length ? Math.max(...n.parts.map(p => p.measures.length)) : 0;
+    const key = n.key.estimated ? T('{n}(推定)', { n: n.key.fifths }) : String(n.key.fifths);
+    msg.className = 'ok';
+    msg.textContent = T('楽譜を書き出しました: {file}({parts}パート / {measures}小節 / 拍子 {time} / 調号 {key})',
+      { file: filename, parts: n.parts.length, measures, time: n.time.beats + '/' + n.time.beatType, key });
+    mmlOutputEl.appendChild(msg);
+  }
+
   function exportMmlNsf() {
     const result = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
 
@@ -3903,6 +3984,13 @@
         getTransportPosition,
         compiled.expansions
       );
+      // 楽譜モード(鍵盤表示のレイアウト設定「ピアノロールの表示: 楽譜」)用の表記モデル
+      // (src/score/notation.js)。失敗しても再生は続ける(ロール表示に戻るだけ)
+      try {
+        keyboardDisplay.setScore({ notation: MML.Score.buildNotation(compiled, {}), compiled, fps: compiled.frameRate,
+          loopPointFrame: compiled.loopPointFrame, totalFrames: compiled.totalFrames });
+      } catch (e) { console.warn('楽譜モデルの構築に失敗:', e); keyboardDisplay.setScore(null); }
+      scoreView.setScore(keyboardDisplay.getScore());
 
       // MmlStreamPlayer を生成してデータをロード
       const player = new MML.Audio.MmlStreamPlayer(audioCtx);
@@ -4768,6 +4856,8 @@
 
 
   document.getElementById('btnMmlExportNsf').addEventListener('click', exportMmlNsf);
+  document.getElementById('btnMmlExportMusicXml').addEventListener('click', () => exportMmlMusicXml('all'));
+  scoreView.onExport = (mode) => exportMmlMusicXml(mode);
   // MMLエディタのファイル操作(開く/保存)。開くのは.mml/.txtのみ
   (function initMmlFileButtons() {
     const openInput = document.getElementById('mmlOpenFile');
