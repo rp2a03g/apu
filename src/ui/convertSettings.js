@@ -368,7 +368,11 @@
     const emCb = document.createElement('input'); emCb.type = 'checkbox';
     emCb.addEventListener('change', () => setKey('ENV_MERGE', emCb.checked));
     wrSec.appendChild(line(emCb, T('似た@v表を統合(近似)'), T('長さ違いの表を1本にまとめる'), null, T('段の並びが同じで長さが±1違うだけの@v/@vr表を1本にまとめる(段の境目が最大1フレーム動く)')));
-    checks.GATE_APPROX = gaCb; checks.LEN_DP = ldCb; checks.DPCM_EXACT = deCb; checks.SHAPE_REST = srCb; checks.ENV_MERGE = emCb;
+    // 合成chの複製パートを省く(FOLD_DOUBLES、src/convert/poolDoubles.js。忠実=OFF / プレーン=ON)
+    const fdCb = document.createElement('input'); fdCb.type = 'checkbox';
+    fdCb.addEventListener('change', () => setKey('FOLD_DOUBLES', fdCb.checked));
+    wrSec.appendChild(line(fdCb, T('合成chの複製パートを省く(近似)'), T('デチューン二重化・エコーを1本にする'), null, T('PSFやMultiPCM等の合成chで、同じ旋律を別のボイスで重ねたデチューン二重化や数フレーム遅れのエコーを検出し、複製側の音符を変換から外します(何を省いたかはMMLのヘッダに書きます)。ppmckにはディレイもコーラスも無いので、複製の分だけチャンネルを節約できます。OFFでも、N163等の枠へ自動で載せるチャンネルを選ぶときは複製を後回しにします')));
+    checks.GATE_APPROX = gaCb; checks.LEN_DP = ldCb; checks.DPCM_EXACT = deCb; checks.SHAPE_REST = srCb; checks.ENV_MERGE = emCb; checks.FOLD_DOUBLES = fdCb;
     body.appendChild(wrSec);
 
     // ── 3b. 出力の書式(パートの並び / 1行の小節数 / 小節揃え) ──

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-14 06:23:59
+ * Built by tools/build-capture-workers.ps1 at 2026-09-16 18:14:36
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-14 06:23:59';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-16 18:14:36';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -3344,6 +3344,10 @@
  *                 近似(ハードウェア減衰表・exact 表は対象外)
  *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)。
  *                 伸ばした区間は最後の音量のまま鳴るので近似
+ *   FOLD_DOUBLES … 合成ch(プール式PCMの論理レーン。PSF/VGMのMultiPCM等)の複製パートを省く(2026-09-14、
+ *                 忠実再現=OFF / プレーン譜面=ON)。ドライバが同じ旋律を別ボイスで重ねたデチューン二重化や
+ *                 数フレーム遅れのエコーを src/convert/poolDoubles.js が検出し、複製側のノートを変換から外す
+ *                 (ヘッダに何を省いたか書く)。OFF でも、N163 等の枠へ自動で載せるレーンを選ぶときは複製を後回しにする
  *   (旧 SHAPE_QUANT「16分音符格子へ丸める」は 2026-09-07 に廃止。キーオン自体が格子から
  *    外れている曲にしか効かず、丸めれば必ずタイミングが崩れるため。保存済み設定に残って
  *    いても読み捨てる)
@@ -3415,7 +3419,7 @@
   MML.Convert = MML.Convert || {};
 
   const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
-  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE', 'GATE_APPROX'];
+  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE', 'GATE_APPROX', 'FOLD_DOUBLES'];
   // GATE_TOL: ゲートを揃える(GATE_APPROX)ときに許すキーオフ位置のずれ(フレーム、0〜8、既定2)
   const GATE_TOL_DEFAULT = 2, GATE_TOL_MAX = 8;
   MML.Convert.GATE_TOL_DEFAULT = GATE_TOL_DEFAULT;
@@ -3537,12 +3541,12 @@
   const PRESETS = {
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
+                SHAPE_REST: false, ENV_MERGE: false, FOLD_DOUBLES: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'fixed8',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, ENV_MERGE: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
+                SHAPE_REST: true, ENV_MERGE: false, FOLD_DOUBLES: true, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'fixed8',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
   };
@@ -5522,6 +5526,58 @@
     return tracks;
   };
 
+  // ── PSF(PlayStation SPU)────────────────────────────────────────────
+  // キャプチャ(psfPlayer.js capturePsfSongAsync / Worker の鏡像)の Int32Array スナップショットを
+  // Emu.snapshotPsx で C352 と同じ形のオブジェクトへ変換し、VGM の PCM チップと同じ抽出経路
+  // (keyboard.js extractChannels の 'psx' 行)でトラック化する。変換済みのフレームは state に
+  // 溜めて次回は続きだけ作る(ロールは曲が伸びるたびに何度も組み直すため)。
+  // opts.poolMode.psx === 'phys' なら実機ボイス、それ以外は合成ch(Emu.PoolChannelRegrouper)。
+  RollBuild.psfObjectSnapshots = function (cap, state) {
+    const Emu = MML.Emu;
+    if (!state.bank || state.bank.samples !== cap.samples) state.bank = new Emu.PsxSampleBank(cap.samples);
+    if (!state.data) state.data = { psx: { snapshots: [] } };
+    const out = state.data.psx.snapshots;
+    const n = cap.snapshots.length;
+    for (let i = out.length; i < n; i++) {
+      if (!cap.snapshots[i]) break; // Worker の鏡像は穴が空かない想定だが、念のため途中で止める
+      out.push(Emu.snapshotPsx(cap.snapshots[i], state.bank));
+    }
+    return state.data;
+  };
+  RollBuild.psf = function (cap, done, opts, state) {
+    const frameRate = cap.frameRate || 60;
+    const sr = 44100;
+    const data = RollBuild.psfObjectSnapshots(cap, state || {});
+    const poolMode = (opts && opts.poolMode) || {};
+    const snaps = RollBuild.psxFrames(data, poolMode.psx);
+    const n = Math.min(done, snaps.length);
+    const t = MML.UI.buildRollTracksFromRegSnapshots(snaps, [], n, sr / frameRate, sr, ['vgm', 'psx'], null, { psx: snaps });
+    return t || [];
+  };
+
+  // PSF の表示モード別のレーン列: 'phys'=実機ボイス / 'logical'=合成ch / 'track'(既定)=トラック×声部
+  RollBuild.psxFrames = function (data, mode) {
+    if (mode === 'phys') return data.psx.snapshots;
+    if (mode === 'logical') return RollBuild.poolLogical(data, 'psx') || data.psx.snapshots;
+    return RollBuild.psxTrackFrames(data) || data.psx.snapshots;
+  };
+
+  // ── PSF の「トラック」レーン(Emu.PsfTrackVoicer) ───────────────────────
+  // poolLogical と同じく snapshots が伸びた分だけ続きから足す(声部の割り当ては状態を持つので同じインスタンスで続ける)。
+  // d.__trackState.vc.lanes がレーン表(鍵盤の行名/変換のソース名)
+  RollBuild.psxTrackFrames = function (data) {
+    const d = data && data.psx;
+    const Emu = MML.Emu;
+    if (!d || !Array.isArray(d.snapshots) || !Emu.PsfTrackVoicer) return null;
+    let S = d.__trackState;
+    if (!S) {
+      Object.defineProperty(d, '__trackState', { value: { vc: new Emu.PsfTrackVoicer(), out: [] }, configurable: true, writable: true });
+      S = d.__trackState;
+    }
+    for (let i = S.out.length; i < d.snapshots.length; i++) S.out.push(S.vc.step(d.snapshots[i]));
+    return S.out;
+  };
+
   // ── プール式PCMチップの「合成ch」スナップショット ─────────────────────
   // logical は snapshots を Emu.PoolChannelRegrouper に先頭から順に通しただけの決定的なデータ。
   // キャプチャWorkerは通信量を減らすため logical を送らない(2026-09-13。c140 では progress の
@@ -5577,6 +5633,7 @@
   //   nsf: {regSnapshots, writeLog, n163Snapshots} / kss: {writeLog}
   //   gbs: {snapshots} / hes: {snapshots, dpcmTrace, controlTrace}
   //   spc: {frameLog} / vgm: captureVgmSongAsyncのdataそのもの
+  //   psf: capturePsfSongAsync の cap({snapshots, samples, frameRate})
   RollBuild.createRollJob = function (format, params) {
     params = params || {};
     if (format === 'nsf') {
@@ -5627,6 +5684,10 @@
         timeline: RollBuild.spc(data.frameLog.slice(0, done), params.frameRate, params.fineTune || null, params.drumKinds || null),
         info: {}
       }) };
+    }
+    if (format === 'psf') {
+      const state = {};
+      return { build: (data, done) => ({ timeline: RollBuild.psf(data, done, params, state), info: {} }) };
     }
     if (format === 'vgm') {
       // params.poolMode: プール式チップの表示モード(Worker実行時はopt.roll経由で届く)
@@ -5824,6 +5885,37 @@
     global.postMessage({ type: 'done', cancelled });
   }
 
+  // PSF専用。msg.info = MML.PSF.load() の結果(_lib 解決はメインスレッドで済ませてから渡す)。
+  // 差分: frameLog/snapshots はフレーム数、ramLog/samples は件数で切って送る。
+  async function _runPsf(msg) {
+    const sendRoll = makeRollSender('psf', msg);
+    let sentFrames = 0, sentRam = 0, sentSamples = 0;
+    let metaSent = false;
+    const onProgress = (done, total, cap) => {
+      const n = cap.frameLog.length;
+      const chunk = {
+        type: 'progress', done, total,
+        frameStart: sentFrames,
+        frameLog: cap.frameLog.slice(sentFrames, n),
+        snapshots: cap.snapshots.slice(sentFrames, n),
+        ramStart: sentRam, ramLog: cap.ramLog.slice(sentRam),
+        sampleStart: sentSamples, samples: cap.samples.slice(sentSamples),
+      };
+      sentFrames = n; sentRam = cap.ramLog.length; sentSamples = cap.samples.length;
+      if (!metaSent) { metaSent = true; chunk.meta = { frameRate: cap.frameRate, samplesPerFrame: cap.samplesPerFrame, totalFrames: cap.totalFrames }; }
+      global.postMessage(chunk);
+      if (sendRoll) sendRoll(cap, n, total);
+    };
+    const opt = Object.assign({}, msg.opt, {
+      regsOnly: true,
+      shouldCancel: () => cancelled,
+      yieldFn: macroYield,
+      sliceBudgetMs: WORKER_SLICE_MS
+    });
+    const cap = await Emu.capturePsfSongAsync(msg.info, opt, onProgress);
+    global.postMessage({ type: 'done', cancelled, bios: cap.bios });
+  }
+
   global.onmessage = async (e) => {
     const msg = e.data || {};
     if (msg.cmd === 'cancel') { cancelled = true; return; }
@@ -5836,6 +5928,17 @@
       }
       cancelled = false;
       try { await _runHes(msg); }
+      catch (err) { global.postMessage({ type: 'error', message: String((err && err.stack) || err) }); }
+      return;
+    }
+
+    if (msg.format === 'psf') {
+      if (typeof Emu.capturePsfSongAsync !== 'function') {
+        global.postMessage({ type: 'error', message: 'unsupported format in this bundle: psf' });
+        return;
+      }
+      cancelled = false;
+      try { await _runPsf(msg); }
       catch (err) { global.postMessage({ type: 'error', message: String((err && err.stack) || err) }); }
       return;
     }

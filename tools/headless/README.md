@@ -22,15 +22,25 @@ export PATH="$PATH:/path/to/nodejs"
 |---|---|
 | `load.js` | `index.html` の script を順に読み込む。単体実行で読み込みレポート |
 | `shim.js` | 最小のDOM/AudioContext/Workerシム。UIコードが読み込み時に落ちないための張りぼて |
-| `convert.js` | 変換API + CLI(NSF/SPC/KSS/GBS/HES/VGM、zip/7z/gzip内も可) |
+| `convert.js` | 変換API + CLI(NSF/SPC/KSS/GBS/HES/VGM/PSF、zip/7z/gzip内も可。PSFの `_lib` は同じzip/フォルダから引く) |
 | `regress.js` | コーパス一括変換のスナップショット回帰テスト |
 | `audio-check.js` | 実際に鳴らした音を数値で点検(クリップ/DC/無音/オクターブずれ/プチノイズ) |
 | `cpu-test.js` | CPU命令テストCLI(検証ロジックは `../cpu-test-core.js` をブラウザ版と共有) |
 | `help-lint.js` | MMLヘルプ(`;@help`タグ)の自己点検。書式・実演スニペットのコンパイル・コマンド網羅 |
+| `i18n-dupkeys.js` | `src/i18n/en.js` の重複キー検出(後勝ちで先の訳が黙って死ぬため) |
 | `notelist-check.js` | 楽譜出力用の音符列 `compile().noteList`(音価付き)の点検。フレーム合計/ticks逆算/タイ・連符・w・k・PS・`;@time``;@key` の固定ケース |
 | `score-check.js` | 楽譜の表記モデル(src/score/notation.js)と MusicXML 書き出しの点検。小節の合計/音価の厳密一致/タイ・連符・連桁の対応/XMLの整合。`--out DIR` で .musicxml を書く |
 | `score-midi-check.js` | MusicXML 書き出しの MuseScore 往復検証(MuseScore 4 の CLI が要る。`MUSESCORE_EXE` か既定パス)。.musicxml → MIDI にして開始tick/長さ/音高を表記モデルと突き合わせ、MuseScore のログに警告が無いことも見る。`--piano` でピアノ2段版 |
 | `musicxml-import-check.js` | MusicXML→MML 取り込み(src/score/musicxmlImport.js)の往復検証。自前の書き出し/MuseScore の書き直し/.mxl を取り込んで compile し、音高ごとの鳴っている区間が元と一致するか。引数に .musicxml を渡すと取り込み結果の MML を表示(`--out`) |
+| `r3000-test.js` / `r3000-disasm.js` | PSF用 MIPS R3000A の単体テスト(BigInt照合・LWL/LWR等) / 逆アセンブラ(デバッグ用) |
+| `psf-probe.js` | PSF容器と `_lib` 連鎖の読み込み確認(PC/SP/セグメント/タグ) |
+| `psf-wav.js` | PSF 1曲を44.1kHz WAVへ。停止理由・未実装BIOS呼び出し・キーオン・ピーク/RMSを報告 |
+| `psf-sweep.js` | PSFコーパス一括の動作確認(停止/無音/未実装BIOS/実時間比) |
+| `psf-idle-check.js` | PSFのアイドル省略が出力を変えないこと(on/offで波形・キーオン時刻が完全一致) |
+| `psf-replay-check.js` | PSFキャプチャ→SPU単独再生が元のエミュ出力とサンプル単位で一致すること |
+| `psf-loudness.js` | PSF再生ゲインの校正(SPC基準の生RMS比) |
+| `psf-convert-survey.js` | PSF→MML変換の品質調査(合成ch/実機スロット別のコンパイル可否・音程検証) |
+| `pool-regroup-score.js` | 合成ch(`Emu.PoolChannelRegrouper`)の採点。PSFドライバ内部のトラック構造体を正解にしてレーン純度/トラック集中度を出す |
 | `baseline-*.json` | 回帰テストのベースライン(曲ごとのSHA-256とメタ情報)。**gitignore済み** |
 
 ベースラインは手元のコーパスと1対1に対応する曲名一覧なので、リポジトリには入れていない。
@@ -38,7 +48,7 @@ export PATH="$PATH:/path/to/nodejs"
 
 コーパスの置き場所は環境変数 `MML_CORPUS_ROOT` で指定する。**既定値は持たない**ので、
 未指定のまま走らせると案内を出して終わる(exit 2)。中身は形式ごとのサブディレクトリ
-`nsf` `spc` `kss` `gbs` `hes` `vgm`。
+`nsf` `spc` `kss` `gbs` `hes` `vgm` `psf`。
 
 ```bash
 export MML_CORPUS_ROOT="D:/snd"      # D:/snd/nsf, D:/snd/vgm ... を見る
@@ -148,6 +158,18 @@ node tools/headless/cpu-test.js z80 --group ed --opcodes "ed b0,ed b8"
 
 検証ロジックは `tools/cpu-test-core.js` にあり、ブラウザ版 `tools/*-test.html` と共有している。
 同じ比較コードを2箇所に書くと片方だけ直して食い違っても気付けないため、必ずここを直すこと。
+
+### PSF(PlayStation)の点検
+
+```bash
+node tools/headless/r3000-test.js                                   # CPU(期待: 全件 passed)
+node tools/headless/psf-sweep.js "D:/snd/psf" --per 2 --sec 15      # 全zipの動作確認
+node tools/headless/psf-replay-check.js "D:/snd/psf/xxx.zip" "曲名の一部" 20
+node tools/headless/psf-idle-check.js "D:/snd/psf/xxx.zip" "曲名の一部" 10
+```
+
+CPU/SPU/HLE BIOS を触ったら sweep と replay-check/idle-check を回す。replay-check と idle-check は
+「一致しなければ壊れている」ので、ずれは1サンプルでも原因を追うこと(ブラウザ再生とアイドル省略の正しさの根拠)。
 
 ## シムについての注意
 

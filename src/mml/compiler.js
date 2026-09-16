@@ -359,9 +359,19 @@
     return 0x80 | (period << 4) | ((depth || 0) & 0x0F);
   }
 
+  // 2A03/MMC5 パルス: 周期11bit(2047)。o1a(A1≒55Hz)より下は出ない(本家 ppmck freqdata.h のコメントも同じ)
   function pulsePeriod(freq) {
     let p = Math.round(CPU_CLOCK_NTSC / (16 * freq)) - 1;
     return Math.max(0, Math.min(2047, p));
+  }
+
+  // VRC6 パルス: 式は2A03パルスと同じ CLOCK/(16*(period+1)) だが、周期は12bit(4095、$9002/$A002 の下位4bit)。
+  // o0a(A0≒27.5Hz)まで出る(本家 ppmck vrc6.h の vrc6_pls_frequency_table は psg_frequency_table の2倍=1オクターブ下が基準)。
+  // ★2026-09-14まで VRC6 パルスも pulsePeriod(11bitクランプ)で計算していたため、A1 より下の音が A1 に貼り付いていた
+  //   (音域判定 pitchRangeIssue は periodMax 4095 で「鳴らせる」と判定するので、警告も出ずに別の音程で鳴った)
+  function vrc6PulsePeriod(freq) {
+    let p = Math.round(CPU_CLOCK_NTSC / (16 * freq)) - 1;
+    return Math.max(0, Math.min(4095, p));
   }
 
   function trianglePeriod(freq) {
@@ -1997,7 +2007,7 @@
             // (nsf2mml/expansion/vrc6.js buildTimeline参照)、値が変わった時だけ書く
             // (2A03と同じ理由、DESIGN-PITCH.md Phase 1)。
             let lastHi = -1;
-            writePitchModulation(writeLog, startFrame, dur, seg, env, pulsePeriod, 0xFFF,
+            writePitchModulation(writeLog, startFrame, dur, seg, env, vrc6PulsePeriod, 0xFFF,
               (f, period, attack) => {
                 writeLog[f].push({ addr: base + 1, value: period & 0xFF });
                 const hi = 0x80 | ((period >> 8) & 0x0F);
@@ -2007,7 +2017,7 @@
                 }
               });
           } else {
-            const period = applyDetune(pulsePeriod(seg.freq), periodRegDetune(seg), 0xFFF);
+            const period = applyDetune(vrc6PulsePeriod(seg.freq), periodRegDetune(seg), 0xFFF);
             writeLog[startFrame].push({ addr: base + 1, value: period & 0xFF });
             writeLog[startFrame].push({ addr: base + 2, value: 0x80 | ((period >> 8) & 0x0F) });
           }
@@ -3054,7 +3064,8 @@
         //   ここを64固定にしていたため、6chしか使わない曲が本来収まるのに落ちていた
         const allocResult = MML.N163Alloc.allocate(letters, segmentsByChannel, envelopes.n, totalFrames,
           numN163Ch);
-        for (const c of allocResult.conflicts) errors.push({ message: c.message });
+        // kind: 変換側(vgm2mml convertData)が「N163 波形 RAM の空き不足」だけを文言に依らず見分けるための印
+        for (const c of allocResult.conflicts) errors.push({ message: c.message, kind: 'n163Ram', frame: c.frame, instrument: c.instrument });
         extra = { numN163Ch: numN163Ch, n163Occurrences: allocResult.occurrences };
       }
       letters.forEach((ch, index) => {
@@ -3207,7 +3218,7 @@
   // 同じバイトをバイトコードへ埋め込むため、ブラウザ再生と完全に同じ値になるよう共有する
   Mml.sweepRegisterByte = sweepRegisterByte;
   // 周波数→各チップの周期/周波数レジスタ値(割当プレビュー src/audio/assign-preview.js が同じ式で鳴らすために公開)
-  Mml.pitchRegs = { pulsePeriod, trianglePeriod, noisePeriodIndex, sawPeriod, fme7Period, fdsFreqToPeriod, n163FreqReg, vrc7FreqToFnumBlock };
+  Mml.pitchRegs = { pulsePeriod, vrc6PulsePeriod, trianglePeriod, noisePeriodIndex, sawPeriod, fme7Period, fdsFreqToPeriod, n163FreqReg, vrc7FreqToFnumBlock };
   Mml.CHANNEL_BASE = CHANNEL_BASE;
   Mml.CHIP_CHANNEL_COUNTS = CHIP_CHANNEL_COUNTS;
   Mml.EXPANSION_PRIORITY = EXPANSION_PRIORITY;

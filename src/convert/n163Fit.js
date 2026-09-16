@@ -111,9 +111,14 @@
    * @param {number} [numChOverride] 実効ch数(変換設定 N163_CH で決めた値。MML.Convert.n163NumChFor)。
    *   ★省略すると channels から数えるが、その数え方は疎配列(割り当ての飛び)を潰してしまうので
    *   呼び出し側が決めた値を渡すこと。枠(128-8*n)を多く見積もるとコンパイルで落ちる
+   * @param {number} [extraMargin] 常駐区間をさらに広げるフレーム数。書き出し後のコンパイルで RAM 不足が出たとき
+   *   に呼び出し側が広げてやり直す(音長量子化・テンポの丸めのずれは曲の後半ほど LEN_SNAP を超えるため。
+   *   src/vgm2mml/converter.js convertData)。省略時 0 = 従来どおり
+   * @param {Object<number,number>} [forceHalve] {@N番号: 半分にする回数}。コンパイルが「置けない」と報告した波形を
+   *   先に縮めてから詰める(同じバイト数でも、変換側の見積りとコンパイラの配置で断片化の仕方が違うことがあるため)
    * @returns {Array<string>} 縮めた波形の説明(0件なら何もしていない)
    */
-  F.apply = function (channels, waveReg, cmd, numChOverride) {
+  F.apply = function (channels, waveReg, cmd, numChOverride, extraMargin, forceHalve) {
     if (cmd && cmd.N163_WAVE === 'keep') return [];
     if (!waveReg || !waveReg.waves || !waveReg.waves.length) return [];
     const list = (channels || []).filter(ch => ch && ch.events);
@@ -161,10 +166,24 @@
     }
     // RAMのパスの報告はここからの差分だけにする(音域ぶんを二重に書かない)
     const beforeRam = waveReg.waves.map(w => w.length);
+    if (forceHalve) {
+      for (const k of Object.keys(forceHalve)) {
+        const idx = +k;
+        for (let t = 0; t < (forceHalve[k] | 0); t++) {
+          if (!waveReg.waves[idx] || waveReg.waves[idx].length <= MIN_LEN) break;
+          waveReg.waves[idx] = halve(waveReg.waves[idx]);
+        }
+        if (waveReg.waves[idx]) {
+          const newLen = waveReg.waves[idx].length;
+          for (const ch of list) for (const ev of ch.events) if (ev.instrument === idx) ev.rawLength = newLen;
+        }
+      }
+      list.forEach((ch, i) => { segmentsByChannel[letters[i]] = toSegments(ch); });
+    }
     // 音符の境界は MML へ書き出す量子化で ±LEN_SNAP フレームずれる(src/convert/duration.js)。
     // 変換元の区間どおりに判定すると「変換では収まったのにコンパイルで落ちる」ので、
     // その分だけ常駐区間を広げて判定する(実測: Dimahoo 01、chP の @N5 がフレーム315で置けない)
-    const margin = (MML.Convert.lenSnapOf ? MML.Convert.lenSnapOf(cmd) : 2) + 1;
+    const margin = (MML.Convert.lenSnapOf ? MML.Convert.lenSnapOf(cmd) : 2) + 1 + Math.max(0, extraMargin | 0);
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const nMap = {};
       waveReg.waves.forEach((w, i) => { nMap[i] = w; });

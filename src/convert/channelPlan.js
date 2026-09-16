@@ -205,6 +205,7 @@
     kss: { tone: true, volPct: false },
     gbs: { tone: true, volPct: false },
     hes: { tone: true, volPct: false },
+    psf: { tone: true, volPct: false }, // PSF は vgm2mml の PCM チップ経路で変換する(src/psf2mml/converter.js)
     // NSFはネイティブ変換で音色は元のまま(同じ音源内の移動しかできないため指定の余地が無い)
     nsf: { tone: false, volPct: false },
   };
@@ -320,6 +321,7 @@
     [/^QS(\d+)$/, function (m) { return ['pcm', 'qs:' + (+m[1] - 1)]; }],                   // QSound
     [/^OK([1-4])$/, function (m) { return ['pcm', 'oki:' + (+m[1] - 1)]; }],                // OKIM6295('OKI'=6258は不一致)
     [/^MP(\d+)$/, function (m) { return ['pcm', 'mp:' + (+m[1] - 1)]; }],                   // MultiPCM
+    [/^PX(\d+)$/, function (m) { return ['pcm', 'psx:' + (+m[1] - 1)]; }],                  // PSF(実機スロット=ボイス0-23 / 合成ch=32本 / トラック=レーン番号)
     [/^SN([1-6])$/, function (m) { return ['square', 'sn' + (+m[1] > 3 ? 1 : 0) + ':' + ((+m[1] - 1) % 3)]; }], // SN76489
     [/^SNN(2?)$/, function (m) { return ['noise', 'sn' + (m[1] ? 1 : 0) + ':noise']; }],
     [/^GB[12]$/, function () { return ['square', null]; }],                                 // GB パルス
@@ -340,7 +342,7 @@
 
   // 逆引き: 変換器のソースID(VGM) → 鍵盤表示の行ID。VGMの構成駆動の既定割当
   // (MML.VGM2MML.defaultPlan)を鍵盤の行へ移すのに使う。
-  const VGM_SRC_TO_CH = { ay: 'KP', scc: 'KS', opll: 'KF', opn: 'YM', opm: 'OM', opn3: 'OP', opna: 'OA', opnb: 'NF', opl: 'OL', pcma: 'NA', ga20: 'GA', spcm: 'SP', c140: 'CN', c352: 'CS', qs: 'QS', oki: 'OK', mp: 'MP' };
+  const VGM_SRC_TO_CH = { ay: 'KP', scc: 'KS', opll: 'KF', opn: 'YM', opm: 'OM', opn3: 'OP', opna: 'OA', opnb: 'NF', opl: 'OL', pcma: 'NA', ga20: 'GA', spcm: 'SP', c140: 'CN', c352: 'CS', qs: 'QS', oki: 'OK', mp: 'MP', psx: 'PX' };
   function chIdForVgmSource(srcId) {
     const m = /^([a-z0-9]+):(.+)$/.exec(srcId || '');
     if (!m) return null;
@@ -362,7 +364,7 @@
   }
 
   // 割当を変更できるフォーマット(変換器が options.channelMap を受けるもの)。全形式対応済み。
-  const EDITABLE = { spc: true, vgm: true, kss: true, gbs: true, hes: true, nsf: true };
+  const EDITABLE = { spc: true, vgm: true, kss: true, gbs: true, hes: true, nsf: true, psf: true };
   const NOT_EDITABLE_REASON = function () { return {}; };
 
   // NSFだけは「借用」ではなくネイティブ変換なので、選べるのは同じ音源ファミリの別チャンネル
@@ -445,6 +447,13 @@
     newFile: function (fmt, defaultsMap) {
       curFormat = fmt;
       entries.clear();
+      defaults.clear();
+      for (const k of Object.keys(defaultsMap || {})) defaults.set(k, defaultsMap[k]);
+      notify();
+    },
+    // 既定の割当だけを差し替える(ユーザーが変えた分は残す)。PSF のトラックモードのように、曲を最後まで
+    // 取り込んでから既定が決まる形式が使う(main.js psfRefreshTrackPlan)
+    setDefaults: function (defaultsMap) {
       defaults.clear();
       for (const k of Object.keys(defaultsMap || {})) defaults.set(k, defaultsMap[k]);
       notify();

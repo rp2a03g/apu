@@ -30,7 +30,7 @@ function ctx() {
   return _loaded.MML;
 }
 
-const SONG_EXTS = ['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz'];
+const SONG_EXTS = ['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf'];
 const ARCHIVE_EXTS = ['zip', '7z'];
 
 function extOf(name) { return path.extname(name).toLowerCase().replace('.', ''); }
@@ -40,6 +40,7 @@ function detectFormat(name) {
   const ext = extOf(name);
   if (ext === 'nsf' || ext === 'nsfe') return 'nsf';
   if (ext === 'vgz') return 'vgm';
+  if (ext === 'minipsf') return 'psf';
   if (SONG_EXTS.includes(ext)) return ext;
   throw new Error(`未知の拡張子: .${ext}`);
 }
@@ -61,7 +62,13 @@ async function expandInput(file) {
   const base = path.basename(file);
 
   if (!isArchive(base)) {
-    return [{ key: base, name: base, format: detectFormat(base), read: async () => readBytes(file) }];
+    // PSF の _lib(.psflib)は同じフォルダの兄弟ファイルから引く
+    const dir = path.dirname(file);
+    const resolveLib = async (name) => {
+      const p = path.join(dir, name);
+      return fs.existsSync(p) ? readBytes(p) : null;
+    };
+    return [{ key: base, name: base, format: detectFormat(base), read: async () => readBytes(file), resolveLib }];
   }
 
   const raw = readBytes(file);
@@ -74,6 +81,16 @@ async function expandInput(file) {
       name: e.name,
       format: detectFormat(e.name),
       read: async () => MML.Archive.readEntry(readBytes(file), e),
+      // PSF の _lib はアーカイブ内の兄弟エントリから引く(ブラウザの makeArchiveSiblingResolver と同じ照合順)
+      resolveLib: async (libName) => {
+        const want = libName.replace(/\\/g, '/').toLowerCase();
+        const dir = e.name.lastIndexOf('/') >= 0 ? e.name.slice(0, e.name.lastIndexOf('/') + 1).toLowerCase() : '';
+        const files = entries.filter(x => !x.isDir);
+        const hit = files.find(x => x.name.toLowerCase() === dir + want)
+          || files.find(x => x.name.toLowerCase() === want)
+          || files.find(x => MML.Archive.baseName(x.name).toLowerCase() === MML.Archive.baseName(want));
+        return hit ? MML.Archive.readEntry(readBytes(file), hit) : null;
+      },
     });
   }
   return out;  // ここで raw の参照が切れる(entries はオフセット情報だけを持つ)
@@ -92,6 +109,7 @@ async function probe(bytes, format) {
     gbs: () => MML.GBS.parseHeader(bytes),
     hes: () => MML.HES.parseHeader(bytes),
     vgm: () => MML.VGM.parseHeader(bytes),
+    psf: () => { const p = MML.PSF.parse(bytes); return Object.assign({ title: p.tags.title || '', gameName: p.tags.game || '' }, { tags: p.tags }); },
   }[format]();
   const songs = header.totalSongs || header.songCount || header.numSongs || 1;
   return { bytes, header, songs };
@@ -143,6 +161,10 @@ async function convertBytes(rawBytes, format, opt = {}) {
   } else if (format === 'vgm') {
     // channelMap を渡さないと defaultPlan + 全ch抽出になる(UI未操作時と同じ挙動)
     r = await MML.VGM2MML.fromVgm(bytes, seconds, { bpm, cmd });
+  } else if (format === 'psf') {
+    // _lib は opt.resolveLib(expandInput が付ける)で解決。yield 無しで一気に回す
+    const info = await MML.PSF.load(bytes, opt.resolveLib || null);
+    r = await MML.PSF2MML.fromPsf(info, seconds, { bpm, cmd, yieldFn: async () => {} });
   } else {
     throw new Error(`未対応フォーマット: ${format}`);
   }
@@ -187,7 +209,7 @@ async function convertFile(file, opt = {}) {
   const item = items[opt.entry || 0];
   if (!item) throw new Error(`エントリ番号が範囲外: ${opt.entry} (0..${items.length - 1})`);
   const bytes = item.read ? await item.read() : item.bytes;
-  const r = await convertBytes(bytes, item.format, opt);
+  const r = await convertBytes(bytes, item.format, Object.assign({ resolveLib: item.resolveLib }, opt));
   return Object.assign(r, { file, key: item.key, entries: items.length });
 }
 

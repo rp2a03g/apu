@@ -489,7 +489,8 @@
       const vol = Math.min(1, (c.playing ? egG : 0) * tlG);
       const p = c.seq ? chip.samplePitch('multipcm', c.physStart, c.physStart + c.smpLen, c.loopOff) : null;
       const pan = c.pan >= 8 ? c.pan - 16 : c.pan;
-      out.push({ active: c.playing && vol > 0.01 && rate > 0, vol, rawVol: Math.round(vol * 255), rawVolMax: 255,
+      // release: キーオフ済みで余韻だけ鳴っている(合成chが同じ音色の次のノートへレーンを譲る目印)
+      out.push({ active: c.playing && vol > 0.01 && rate > 0, release: c.egState === EG_RELEASE, vol, rawVol: Math.round(vol * 255), rawVolMax: 255,
         panL: pan > 0 ? Math.max(0, 15 - pan * 2) : 15, panR: pan < 0 ? Math.max(0, 15 + pan * 2) : 15,
         rate, seq: c.seq, loop: c.lenSecEst === Infinity, lenSec: c.lenSecEst,
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
@@ -513,27 +514,44 @@
   //
   // 使い方: フレームごとに step(physSnap) → 論理スナップショット(同じ形の配列)。
   // ライブ(rAF駆動)とキャプチャ(フレーム駆動)の両方から同じ実装を使う。
-  // 割当規則:
+  // 割当規則(2026-09-14 改訂。PSF babel14 のドライバ内部トラックを正解にした採点で
+  //  トラック集中度 18.7%→60% 前後。詳細は tools/headless/pool-regroup-score.js):
   //  1) 発音中のノート(スロットi×キーオン通番seq)は同じ論理レーンに固定
-  //  2) 新しいノートは「同じ音色のレーンのうち、空いていて音程が近く直近に使ったもの」
-  //  3) 無ければ未使用レーン、それも無ければ最も昔に使ったレーンを奪う
+  //  2) 新しいノートは同じ音色(サンプル)のレーンへ(snap.laneKey があればそれ。PSF はドライバ内部の
+  //     トラック番号 = psfPlayer.js Emu.probePsfTracksAsync)。空きレーンに加え、リリース中
+  //     (snap.release=キーオフ済みで余韻だけ鳴っている)のレーンも奪ってよい
+  //     (★これが本命。プール式ドライバは余韻を鳴らしたまま次の音を別ボイスで鳴らすので、
+  //     余韻を「発音中」と見ると同じ楽器が毎音別レーンへ散る。MMLは余韻の重なりを書けない)。
+  //     候補のうち直近に使ったもの・音程が近いものを優先
+  //  3) 同じ音色のレーンが無く、その音色が初登場なら、直近(30ステップ)に空いた音程の近い
+  //     レーンを「同じ楽器の別サンプル」とみなして引き継ぐ(音域ごとにサンプルを分ける楽器
+  //     =Outfoxiesのコーラス、PS1のVAB等)。引き継いだ音色はそのレーンの音色族に加える
+  //  4) 無ければ未使用レーン → 最も昔に空いた別音色のレーン → リリース中の別音色レーン
+  //  ★旧版は「空きが無ければ最も昔のレーンを音色に関係なく奪う」+「音色を無視した引き継ぎを
+  //   毎回許す」+「余韻も発音中」だったため、24本が埋まった時点で全レーンが音色混在になっていた
   // プール式PCMチップのスロット数(vgmPlayer.js が new Emu.PoolChannelRegrouper(n) に渡す値と同じ)。
   // 画面側で snapshots から logical を作り直すとき(roll-builders.js RollBuild.poolLogical)にも使う
-  Emu.POOL_CHIP_CHANNELS = { multipcm: 28, segapcm: 16, c140: 24, c352: 32, qsound: 16 };
+  // ★psx だけ実機ボイス(24)より多い32本: ドライバ内部のトラックで束ねると、トラック数+和音の分で24本を超える
+  //   (babel14 で30本。24本に押し込むと別トラックのレーンを使い回してレーン純度が100%→83%に落ちる)。
+  //   実機スロット表示のスナップショットは24要素のまま(鍵盤の行数はスナップショットの長さに従う)
+  Emu.POOL_CHIP_CHANNELS = { multipcm: 28, segapcm: 16, c140: 24, c352: 32, qsound: 16, psx: 32 };
 
   Emu.PoolChannelRegrouper = class {
     constructor(numCh) {
       this.numCh = numCh;
       this.lanes = [];
+      // fam: このレーンが受け持つ音色キーの集合(規則3で別サンプルを足す)。lastMidi: 最後のノートの音程(音程なしは null)
       for (let i = 0; i < numCh; i++) this.lanes.push({
-        instKey: null, boundSlot: -1, boundSeq: -1, lastStep: -1e9, lastMidi: 0, outSeq: 0 });
+        fam: null, boundSlot: -1, boundSeq: -1, lastSlot: -1, lastStep: -1e9, lastMidi: null, outSeq: 0 });
       this.stepCount = 0;
+      this.seenKeys = new Set();
+      this.dropped = new Map(); // スロット → seq(リリース中にレーンを譲ったノート。seq が変わるまで割り当て直さない)
       this._idle = { active: false, vol: 0, rawVol: 0, rawVolMax: 255, panL: 15, panR: 15,
         rate: 0, seq: 0, loop: false, lenSec: 0, pitchHz: 0, pitchConf: 0, pitchManual: false,
         waveData: null, sample: null };
     }
     step(snap) {
-      this.stepCount++;
+      const st = ++this.stepCount;
       const lanes = this.lanes;
       const out = new Array(this.numCh);
       const slotLane = new Array(snap.length).fill(-1);
@@ -545,58 +563,64 @@
         if (c && c.active && c.seq === L.boundSeq) {
           slotLane[L.boundSlot] = li;
         } else {
-          if (c && c.pitchHz > 0) L.lastMidi = 69 + 12 * Math.log2(c.pitchHz / 440);
-          L.lastStep = this.stepCount;
+          L.lastStep = st;
           L.boundSlot = -1; L.boundSeq = -1;
         }
       }
-      // 2) 新規ノートの割当
+      const releasing = (L) => L.boundSlot >= 0 && !!snap[L.boundSlot].release;
+      // 2) 新規ノートの割当(スロット順)
       for (let s = 0; s < snap.length; s++) {
         const c = snap[s];
         if (!c || !c.active || slotLane[s] >= 0) continue;
-        const instKey = c.sample ? (c.sample.start + ':' + c.sample.end) : 'x';
+        if (this.dropped.get(s) === c.seq) continue;
+        // laneKey: ドライバ内部のトラックが分かっているチップ(PSF)はトラック単位で束ねる(音色より確か)
+        const key = c.laneKey || (c.sample ? (c.sample.start + ':' + c.sample.end) : (c.noise ? 'noise' : 'x'));
         const midi = c.pitchHz > 0 ? 69 + 12 * Math.log2(c.pitchHz / 440) : null;
-        let best = -1, bestScore = -Infinity;
-        let firstUnused = -1, oldest = -1, oldestStep = Infinity;
+        let best = -1, bestCost = Infinity, joinFam = false;
         for (let li = 0; li < lanes.length; li++) {
           const L = lanes[li];
-          if (L.boundSlot >= 0) continue; // 発音中レーンは奪わない
-          if (L.instKey === null) { if (firstUnused < 0) firstUnused = li; continue; }
-          if (L.lastStep < oldestStep) { oldestStep = L.lastStep; oldest = li; }
-          if (L.instKey !== instKey) continue;
-          // 同音色: 直近使用ほど・音程が近いほど高得点(メロディの連続性を優先)
-          const recency = -(this.stepCount - L.lastStep) * 0.05;
-          const pitchDist = (midi !== null && L.lastMidi) ? -Math.abs(midi - L.lastMidi) : 0;
-          const score = recency + pitchDist;
-          if (score > bestScore) { bestScore = score; best = li; }
+          if (!L.fam || !L.fam.has(key)) continue;
+          const rel = releasing(L);
+          if (L.boundSlot >= 0 && !rel) continue; // 鳴っている最中のレーンは奪わない
+          // 直近に使ったほど・音程が近いほど低コスト。同じ物理ボイスの続きは優先(ボイス固定のドライバで
+          // パートが入れ替わらないように)。リリース中のレーンは空きレーンが1本も無いときだけ
+          // (★空きより先に奪うと、ボイス固定の曲で別パートの余韻を奪ってパートが混ざる。Capcom Generation で実測)
+          const age = L.boundSlot >= 0 ? 0 : st - L.lastStep;
+          const d = (midi !== null && L.lastMidi !== null) ? Math.abs(midi - L.lastMidi) : 0;
+          const cost = age * 0.2 + d * 0.1 + (L.lastSlot === s ? -2 : 0) + (rel ? 1e6 : 0);
+          if (cost < bestCost) { bestCost = cost; best = li; }
         }
-        // マルチサンプル楽器(音程ごとに別サンプル=Outfoxiesのコーラス等)対策:
-        // 同音色レーンが無くても、直近(30ステップ≒0.5秒)に空いたレーンで音程が近ければ
-        // 同じ楽器の続きとみなして引き継ぐ(音程なしノート=ドラムは対象外なので
-        // ドラムがメロディレーンへ混ざることはない)
-        if (best < 0 && midi !== null) {
-          let jScore = -Infinity;
-          for (let li2 = 0; li2 < lanes.length; li2++) {
-            const L2 = lanes[li2];
-            if (L2.boundSlot >= 0 || L2.instKey === null || !L2.lastMidi) continue;
-            const age = this.stepCount - L2.lastStep;
-            if (age > 30) continue;
-            const d = Math.abs(midi - L2.lastMidi);
-            if (d > 7) continue;
-            const sc = -age * 0.1 - d;
-            if (sc > jScore) { jScore = sc; best = li2; }
+        // 3) 初登場の音色は、直近に空いた音程の近いレーンの「別サンプル」とみなす
+        //    (音程なしノート=ドラムは対象外なので、ドラムがメロディレーンへ混ざることはない)
+        if (best < 0 && midi !== null && !c.laneKey && !this.seenKeys.has(key)) {
+          for (let li = 0; li < lanes.length; li++) {
+            const L = lanes[li];
+            if (L.boundSlot >= 0 || !L.fam || L.lastMidi === null) continue;
+            const age = st - L.lastStep, d = Math.abs(midi - L.lastMidi);
+            if (age > 30 || d > 7) continue;
+            const cost = age * 0.1 + d;
+            if (cost < bestCost) { bestCost = cost; best = li; joinFam = true; }
           }
         }
-        const li = best >= 0 ? best : (firstUnused >= 0 ? firstUnused : oldest);
-        if (li < 0) continue; // 全レーン発音中(スロット数=レーン数なので通常起きない)
-        const L = lanes[li];
-        L.instKey = instKey;
-        L.boundSlot = s; L.boundSeq = c.seq;
+        // 4) 未使用 → 最も昔に空いた別音色 → リリース中の別音色
+        if (best < 0) best = lanes.findIndex(L => !L.fam);
+        if (best < 0) {
+          let oldest = Infinity;
+          for (let li = 0; li < lanes.length; li++) if (lanes[li].boundSlot < 0 && lanes[li].lastStep < oldest) { oldest = lanes[li].lastStep; best = li; }
+        }
+        if (best < 0) best = lanes.findIndex(releasing);
+        this.seenKeys.add(key);
+        if (best < 0) continue; // 全レーンが鳴っている最中(次のフレームでまた探す)
+        const L = lanes[best];
+        if (L.boundSlot >= 0) { this.dropped.set(L.boundSlot, L.boundSeq); slotLane[L.boundSlot] = -1; }
+        if (joinFam) L.fam.add(key);
+        else if (!L.fam || !L.fam.has(key)) L.fam = new Set([key]);
+        L.boundSlot = s; L.boundSeq = c.seq; L.lastSlot = s;
         if (midi !== null) L.lastMidi = midi;
         L.outSeq++;
-        slotLane[s] = li;
+        slotLane[s] = best;
       }
-      // 3) 出力(論理seq=レーン内通番。ロールのリトリガー検出が正しく効くように)
+      // 出力(論理seq=レーン内通番。ロールのリトリガー検出が正しく効くように)
       for (let li = 0; li < lanes.length; li++) {
         const L = lanes[li];
         if (L.boundSlot >= 0) {

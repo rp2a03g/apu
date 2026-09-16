@@ -186,6 +186,37 @@
     global.postMessage({ type: 'done', cancelled });
   }
 
+  // PSF専用。msg.info = MML.PSF.load() の結果(_lib 解決はメインスレッドで済ませてから渡す)。
+  // 差分: frameLog/snapshots はフレーム数、ramLog/samples は件数で切って送る。
+  async function _runPsf(msg) {
+    const sendRoll = makeRollSender('psf', msg);
+    let sentFrames = 0, sentRam = 0, sentSamples = 0;
+    let metaSent = false;
+    const onProgress = (done, total, cap) => {
+      const n = cap.frameLog.length;
+      const chunk = {
+        type: 'progress', done, total,
+        frameStart: sentFrames,
+        frameLog: cap.frameLog.slice(sentFrames, n),
+        snapshots: cap.snapshots.slice(sentFrames, n),
+        ramStart: sentRam, ramLog: cap.ramLog.slice(sentRam),
+        sampleStart: sentSamples, samples: cap.samples.slice(sentSamples),
+      };
+      sentFrames = n; sentRam = cap.ramLog.length; sentSamples = cap.samples.length;
+      if (!metaSent) { metaSent = true; chunk.meta = { frameRate: cap.frameRate, samplesPerFrame: cap.samplesPerFrame, totalFrames: cap.totalFrames }; }
+      global.postMessage(chunk);
+      if (sendRoll) sendRoll(cap, n, total);
+    };
+    const opt = Object.assign({}, msg.opt, {
+      regsOnly: true,
+      shouldCancel: () => cancelled,
+      yieldFn: macroYield,
+      sliceBudgetMs: WORKER_SLICE_MS
+    });
+    const cap = await Emu.capturePsfSongAsync(msg.info, opt, onProgress);
+    global.postMessage({ type: 'done', cancelled, bios: cap.bios });
+  }
+
   global.onmessage = async (e) => {
     const msg = e.data || {};
     if (msg.cmd === 'cancel') { cancelled = true; return; }
@@ -198,6 +229,17 @@
       }
       cancelled = false;
       try { await _runHes(msg); }
+      catch (err) { global.postMessage({ type: 'error', message: String((err && err.stack) || err) }); }
+      return;
+    }
+
+    if (msg.format === 'psf') {
+      if (typeof Emu.capturePsfSongAsync !== 'function') {
+        global.postMessage({ type: 'error', message: 'unsupported format in this bundle: psf' });
+        return;
+      }
+      cancelled = false;
+      try { await _runPsf(msg); }
       catch (err) { global.postMessage({ type: 'error', message: String((err && err.stack) || err) }); }
       return;
     }

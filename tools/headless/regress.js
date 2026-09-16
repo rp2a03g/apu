@@ -27,7 +27,7 @@ const { ROOT } = require('./load');
 // コーパスの既定値は持たない。--corpus か、環境変数 MML_CORPUS_ROOT(check-all.js と
 // 同じ変数。その下の nsf/ を見る)のどちらかで必ず指定する。
 const ENV_CORPUS = process.env.MML_CORPUS_ROOT ? process.env.MML_CORPUS_ROOT + '/nsf' : null;
-const SUPPORTED = /\.(nsfe?|spc|kss|gbs|hes|vgm|vgz|zip|7z)$/i;
+const SUPPORTED = /\.(nsfe?|spc|kss|gbs|hes|vgm|vgz|psf|minipsf|zip|7z)$/i;
 
 function sha(s) { return crypto.createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 16); }
 
@@ -89,7 +89,7 @@ async function runOne(item, seconds, cmd) {
   if (item.openError) return { ok: false, error: item.openError };
   try {
     const bytes = item.read ? await item.read() : item.bytes;
-    const r = await convertBytes(bytes, item.format, { seconds, cmd });
+    const r = await convertBytes(bytes, item.format, { seconds, cmd, resolveLib: item.resolveLib });
     const compErr = compileError(r.mml);
     return {
       ok: true,

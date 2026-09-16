@@ -654,4 +654,104 @@
         opt: { durationSeconds: durationSec, roll: _cloneableRoll(roll) } });
     });
   };
+  // =========================================================================
+  // PSF (capture-worker-multi-impl.js の PSF 専用差分プロトコル)
+  // =========================================================================
+  // Emu.capturePsfSongAsync(info, opt, onProgress) と同一シグネチャ(regsOnly 用途専用)。
+  // info は MML.PSF.load() の結果(_lib 解決済み)。onProgress には「育っていく同じ cap 参照」
+  // ({frameLog, ramLog, snapshots, samples, frameRate, samplesPerFrame, totalFrames})を渡す。
+  // PsfReplayStreamPlayer はこの参照を共有して、埋まったフレームまで再生する。
+  Emu.capturePsfSongWorkerAsync = function (info, opt = {}, onProgress = null) {
+    if (!opt.regsOnly) return Emu.capturePsfSongAsync(info, opt, onProgress);
+    const probes = () => [
+      MML.PSF && MML.PSF.load, Emu.CPUR3000, Emu.SpuPsx, Emu.PsxBus, Emu.PsxBios, Emu.PsfPlayer,
+      Emu.capturePsfSongAsync, Emu.PsfReplay, Emu.PsxSampleBank, Emu.snapshotPsx,
+      Emu.SamplePitchUtil && Emu.SamplePitchUtil.detectCps, Emu.PoolChannelRegrouper,
+      MML.RollBuild && MML.RollBuild.psf,
+      MML.UI && MML.UI.buildRollTracksFromRegSnapshots
+    ].concat(_rollProbes());
+    const runFallback = () => {
+      const localRoll = _makeLocalRollDriver('psf', opt.roll);
+      if (!localRoll) return Emu.capturePsfSongAsync(info, opt, onProgress);
+      return Emu.capturePsfSongAsync(info, opt, (done, total, cap) => {
+        if (onProgress) onProgress(done, total, cap);
+        localRoll(cap.frameLog.length, total, cap);
+      });
+    };
+    const url = _prepareBundle('psfCapture', probes());
+    if (!url) return runFallback();
+
+    return new Promise((resolve) => {
+      let worker;
+      try {
+        worker = new Worker(url);
+      } catch (e) {
+        console.warn('[capture-worker] Worker起動失敗。メインスレッドへフォールバック:', e);
+        _markUnusable('psfCapture');
+        resolve(runFallback());
+        return;
+      }
+      const mirror = {
+        frameLog: [], ramLog: [], snapshots: [], samples: [],
+        frameRate: 60, samplesPerFrame: 735, totalFrames: 0, bios: null,
+      };
+      let settled = false;
+      let sawProgress = false;
+      let rescueRoll = null;
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        try { worker.terminate(); } catch (e) { /* ignore */ }
+        resolve(mirror);
+      };
+      const failover = (message) => {
+        if (settled) return;
+        if (!sawProgress) {
+          console.warn('[capture-worker] Workerエラー(psf)。メインスレッドへフォールバック:', message);
+          settled = true;
+          try { worker.terminate(); } catch (e) { /* ignore */ }
+          resolve(runFallback());
+        } else {
+          console.warn('[capture-worker] Workerが途中で失敗(psf)。取得済み範囲で打ち切ります:', message);
+          finish();
+        }
+      };
+
+      worker.onmessage = (e) => {
+        if (settled) return;
+        const m = e.data || {};
+        if (m.type === 'progress') {
+          sawProgress = true;
+          if (m.meta) Object.assign(mirror, m.meta);
+          for (let i = 0; i < m.frameLog.length; i++) {
+            mirror.frameLog[m.frameStart + i] = m.frameLog[i];
+            mirror.snapshots[m.frameStart + i] = m.snapshots[i];
+          }
+          for (let i = 0; i < m.ramLog.length; i++) mirror.ramLog[m.ramStart + i] = m.ramLog[i];
+          for (let i = 0; i < m.samples.length; i++) mirror.samples[m.sampleStart + i] = m.samples[i];
+          if (opt.shouldCancel && opt.shouldCancel()) { finish(); return; }
+          if (onProgress) onProgress(m.done, m.total, mirror);
+          if (rescueRoll) rescueRoll(mirror.frameLog.length, m.total, mirror);
+        } else if (m.type === 'roll') {
+          if (opt.roll && typeof opt.roll.onRoll === 'function' && !rescueRoll) {
+            if (opt.shouldCancel && opt.shouldCancel()) { finish(); return; }
+            opt.roll.onRoll(m.timeline, m.info || {});
+          }
+        } else if (m.type === 'rollError') {
+          console.warn('[capture-worker] Worker内ロール構築が失敗(psf)。メインスレッド構築へ切替:', m.message);
+          rescueRoll = _makeLocalRollDriver('psf', opt.roll);
+        } else if (m.type === 'done') {
+          mirror.bios = m.bios || null;
+          finish();
+        } else if (m.type === 'error') {
+          failover(m.message);
+        }
+      };
+      worker.onerror = (e) => failover(e.message || e);
+
+      worker.postMessage({ cmd: 'capture', format: 'psf', info,
+        opt: Object.assign(_cloneableOpt(opt), { roll: _cloneableRoll(opt.roll) }) });
+    });
+  };
 })(window);

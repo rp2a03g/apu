@@ -18,7 +18,7 @@ const { spawnSync } = require('child_process');
 // コーパスの置き場所は環境ごとに違うので、既定値は持たない。
 // 環境変数 MML_CORPUS_ROOT か --corpus-root で必ず指定する。
 const ENV_ROOT = process.env.MML_CORPUS_ROOT || null;
-const FORMATS = ['nsf', 'spc', 'kss', 'gbs', 'hes', 'vgm'];
+const FORMATS = ['nsf', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'psf'];
 
 function run(args) {
   const r = spawnSync(process.execPath, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });

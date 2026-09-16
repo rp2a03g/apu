@@ -180,6 +180,31 @@ $bundles = @(
             'src\audio\roll-builders.js',
             'src\audio\capture-worker-multi-impl.js'
         )
+    },
+    @{
+        # PSF (PlayStation). keyboard.js / ym2610.js (SamplePitchUtil) / multipcm.js (PoolChannelRegrouper)
+        # are needed by the roll build (RollBuild.psf -> Emu.snapshotPsx -> extractChannels 'psx' rows).
+        Key = 'psfCapture'
+        Out = 'src\audio\psf-capture-worker.js'
+        Files = @(
+            'src\psf\psfHeader.js',
+            'src\emulator\capture.js',
+            'src\emulator\cpuR3000.js',
+            'src\emulator\spuPsx.js',
+            'src\emulator\psxBus.js',
+            'src\emulator\psxBios.js',
+            'src\emulator\psfPlayer.js',
+            'src\emulator\expansion\ym2610.js',
+            'src\emulator\expansion\multipcm.js',
+            'src\emulator\psxSampleBank.js',
+            'src\ui\keyboard.js',
+            'src\convert\options.js',
+            'src\convert\pitch.js',
+            'src\convert\retrigger.js',
+            'src\convert\toneKey.js',
+            'src\audio\roll-builders.js',
+            'src\audio\capture-worker-multi-impl.js'
+        )
     }
 )
 

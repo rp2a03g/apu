@@ -300,6 +300,14 @@
     if (c.qsound) for (let i = 0; i < 16; i++) out.push({ id: `qs:${i}`, label: `QSound PCM${i + 1}`, kind: 'pcm', chip: 'qsound', chipIndex: 0, ch: i });
     if (c.okim6295) for (let i = 0; i < 4; i++) out.push({ id: `oki:${i}`, label: `OKIM6295 ADPCM${i + 1}`, kind: 'pcm', chip: 'okim6295', chipIndex: 0, ch: i });
     if (c.multipcm) for (let i = 0; i < 28; i++) out.push({ id: `mp:${i}`, label: `MultiPCM PCM${i + 1}`, kind: 'pcm', chip: 'multipcm', chipIndex: 0, ch: i });
+    // PSF(PlayStation SPU)。VGM には現れない仮想チップで、src/psf2mml/converter.js が header.chips.psx を立てて使う
+    // 合成chは実機の24ボイスより多い32本(Emu.POOL_CHIP_CHANNELS.psx)。実機スロットでは24以降は空。
+    // トラックモード(PSF2MML.captureData の poolMode 'track')はレーン数が曲で決まり、c.psx.lanes / c.psx.labels
+    // (レーン番号順。'T17-2' 等)を持つ
+    if (c.psx) {
+      const n = c.psx.lanes || 32;
+      for (let i = 0; i < n; i++) out.push({ id: `psx:${i}`, label: `SPU ${c.psx.labels ? c.psx.labels[i] : 'V' + i}`, kind: 'pcm', chip: 'psx', chipIndex: 0, ch: i });
+    }
     // ドラムパート: 音程が取れなかったサンプル発音(打楽器/効果音)を、チップごとに1本へ束ねた
     // 合成チャンネル(src/vgm2mml/expansion/opn.js drumChannelOf)。プール式チップは1組の
     // キットが何本ものスロットへ散るので、スロット単位ではなくここで1パートにする。
@@ -333,12 +341,22 @@
     { flag: 'qsound',   key: 'qs',   name: 'QSound',          n: 16, shape: 'pcm',    data: 'qsound' },
     { flag: 'okim6295', key: 'oki',  name: 'OKIM6295',        n: 4,  shape: 'pcm',    data: 'okim6295' },
     { flag: 'multipcm', key: 'mp',   name: 'MultiPCM',        n: 28, shape: 'pcm',    data: 'multipcm' },
+    { flag: 'psx',      key: 'psx',  name: 'SPU',             n: 32, shape: 'pcm',    data: 'psx' },
     { flag: 'ym2610',   key: 'pcma', name: 'YM2610 ADPCM-A',  n: 6,  shape: 'adpcmA', data: 'ym2610fm' },
     // YM2608内蔵リズム(BD/SD/TOP/HH/TOM/RIM)。リズムROM未読込時はキーオンだけで実サンプルが
     // 無い=samplePitchがnull → sample無しでドラム観測にも入らず、自然に何も出ない
     { flag: 'ym2608',   key: 'rhy',  name: 'YM2608 Rhythm',   n: 6,  shape: 'adpcmA', data: 'ym2608fm' },
   ];
   MML.VGM2MML.DRUM_CHIPS = DRUM_CHIPS;
+  // そのチップのスナップショットの横幅(ch数)。表の n が基本で、PSF のトラックモードのように曲でレーン数が決まるものは
+  // 実データの最大幅を使う(pcm 形だけ。adpcmA 等は配列の中の配列なので表の値のまま)
+  function drumChipWidth(d, data) {
+    if (d.shape !== 'pcm') return d.n;
+    const snaps = data[d.data] && data[d.data].snapshots;
+    let w = d.n;
+    if (Array.isArray(snaps)) for (const s of snaps) if (s && s.length > w) w = s.length;
+    return w;
+  }
 
   MML.VGM2MML.defaultPlan = function (h) {
     const plan = {};
@@ -510,15 +528,23 @@
         if (slots.length >= items.length) continue; // 全ch入るなら並べ替え不要
         if (!data[chipKey] || !MML.Vgm2MmlExpansion[chipKey]) continue;
         const r = MML.Vgm2MmlExpansion[chipKey](data[chipKey].snapshots, null, { envelope: false });
-        const counts = items.map(s => ({ s, notes: r.channels[s.ch].events.filter(ev => ev.note !== null).length }));
-        counts.sort((a, b) => b.notes - a.notes);
+        // 合成chの複製パート(convertData 冒頭)を省かずに残した場合も、複製の音符は数えない(元のパートを先に枠へ載せる)
+        const dbl = data[chipKey].doublesFolded ? null : data[chipKey].doubles;
+        // ★数えるのは音符の頭(発音/音程の変わり目)。以前はイベント数を数えていて、ビブラートや音量の揺れで
+        //   1音が数十イベントに割れるパッドが、キーオンの多いベースやアルペジオより上に来ていた
+        //   (PSF babel14: パッド87音=1534イベント、ベース301音=322イベントでベースが枠から漏れた)
+        const onsets = (evs) => { let n = 0, prev = null; for (const ev of evs) { if (ev.note !== null && (ev.retrigger || prev === null || prev !== ev.note)) n++; prev = ev.note; } return n; };
+        // rank(並べ順)だけ複製の音符を差し引く。枠に空きがあれば複製しか無いレーンも載せる(notes>0)
+        // ★差し引いた数で「載せるか」まで決めると、FF7 The Prelude で30フレーム遅れのエコーのレーンが空き枠があるのに落ちた
+        const counts = items.map(s => { const n = onsets(r.channels[s.ch].events); return { s, notes: n, rank: n - (dbl ? (dbl.copyCount.get(s.ch) || 0) : 0) }; });
+        counts.sort((a, b) => b.rank - a.rank || b.notes - a.notes);
         for (const it of items) plan[it.id] = 'skip';
         const picked = [];
         counts.slice(0, slots.length).forEach((cn, k) => {
           if (cn.notes > 0) { plan[cn.s.id] = slots[k]; picked.push(cn.s.label.match(/\d+$/)[0]); }
         });
         if (picked.length && counts.length > picked.length) {
-          const chipName = items[0].label.replace(/ PCM\d+$/, '');
+          const chipName = items[0].label.replace(/ (PCM|V)\d+$/, ''); // 'SPU V0' → 'SPU'
           notes.push(`${chipName} は${items.length}chのうち音符の多いch(${picked.join(',')})を既定割当に自動選択しました(鍵盤表示のチャンネル割当で変更できます)。`);
         }
       }
@@ -583,7 +609,7 @@
       const frameDur = 1 / frameRate;
       const obs = [];
       for (const d of drumChips) {
-        MML.Vgm2MmlExpansion.collectDrumObs(data[d.data].snapshots, d.n, frameDur, d.shape, obs);
+        MML.Vgm2MmlExpansion.collectDrumObs(data[d.data].snapshots, drumChipWidth(d, data), frameDur, d.shape, obs);
       }
       if (obs.length) drumMap = MML.Convert.DrumMap.build(obs);
     }
@@ -595,10 +621,11 @@
         if (!s || plan[s.id] === 'skip') continue;
         // DPCMへ載せたchはノイズ側のドラムパートから外す(二重発音の防止)
         const taken = dpcmChans[d.flag] || [];
-        const chans = Array.from({ length: d.n }, (_, i) => i).filter(i => taken.indexOf(i) < 0);
+        const width = drumChipWidth(d, data);
+        const chans = Array.from({ length: width }, (_, i) => i).filter(i => taken.indexOf(i) < 0);
         if (!chans.length) continue;
         extracted[s.id] = MML.Vgm2MmlExpansion.drumChannel(
-          data[d.data].snapshots, d.n, drumMap, d.shape, d.shape === 'adpcmA' ? attA : null, chans);
+          data[d.data].snapshots, width, drumMap, d.shape, d.shape === 'adpcmA' ? attA : null, chans);
       }
       // どのノート番号がどのサンプルかは音を聴いても分からないので、ヘッダのコメントに残す
       const labels = MML.Convert.DrumMap.labels(drumMap.lanes.map(l => l.key));
@@ -710,6 +737,10 @@
     if (data.multipcm && c.multipcm) {
       const pcmItems = src.filter(s => s.chip === 'multipcm' && s.ch >= 0 && wantExtract(s));
       extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.multipcm(data.multipcm.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
+    }
+    if (data.psx && c.psx) {
+      const pcmItems = src.filter(s => s.chip === 'psx' && s.ch >= 0 && wantExtract(s));
+      extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.psx(data.psx.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
     }
     if (data.ym2610fm && c.ym2610) {
       const nFm = c.ym2610.ym2610b ? 6 : 4;
@@ -880,7 +911,7 @@
     if (byFamily.n163) {
       const slots = [];
       for (const p of byFamily.n163) slots[TARGET_TYPES[p.type].index] = p.channel;
-      notes.push(...MML.Convert.N163Fit.apply(slots, n163WaveReg, cmd, n163NumCh));
+      notes.push(...MML.Convert.N163Fit.apply(slots, n163WaveReg, cmd, n163NumCh, options.n163ExtraMargin || 0, options.n163ForceHalve || null));
     }
     const expansions = [];
     for (const t of Object.keys(placed)) { const chip = TARGET_TYPES[t].chip; if (chip !== '2a03' && !expansions.includes(chip)) expansions.push(chip); }
@@ -971,7 +1002,7 @@
 
     const headerComment = [
       `; =========================================================`,
-      `; VGM → MML 変換 (${chipList})`,
+      `; ${options.sourceLabel || 'VGM'} → MML 変換 (${chipList})`, // sourceLabel: PSF 等、VGM 以外から convertData を使うとき
       `; 曲名     : ${label || '-'}`,
       `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
       `; 分解能   : 480 TPQN (MIDI準拠)`,
@@ -1024,7 +1055,7 @@
       bpm: Math.round(bpm),
       pitchCheck,
       scoreChannels,
-      chips: h.usedChips.filter(ch => ['ay8910', 'k051649', 'ym2413', 'sn76489', 'ym2612', 'ym2610', 'ym2151', 'ym2203', 'ym2608', 'ym3812', 'ym3526', 'y8950', 'ga20', 'segapcm', 'c140', 'c352', 'qsound', 'okim6295', 'multipcm'].includes(ch.id)).map(ch => ch.name + (ch.dual ? ' x2' : '')),
+      chips: h.usedChips.filter(ch => ['ay8910', 'k051649', 'ym2413', 'sn76489', 'ym2612', 'ym2610', 'ym2151', 'ym2203', 'ym2608', 'ym3812', 'ym3526', 'y8950', 'ga20', 'segapcm', 'c140', 'c352', 'qsound', 'okim6295', 'multipcm', 'psx'].includes(ch.id)).map(ch => ch.name + (ch.dual ? ' x2' : '')),
       expansions,
       assignments,
       plan,
@@ -1252,18 +1283,51 @@
     for (const key of Object.keys(POOL_CONVERT_DEFAULTS)) {
       const mode = pm[key] || POOL_CONVERT_DEFAULTS[key];
       if (mode === 'logical' && data[key] && data[key].logical) {
-        data = Object.assign({}, data, { [key]: Object.assign({}, data[key], { snapshots: data[key].logical }) });
+        // pooled: 合成chのレーン(convertData が複製パートを探す対象。src/convert/poolDoubles.js)
+        data = Object.assign({}, data, { [key]: Object.assign({}, data[key], { snapshots: data[key].logical, pooled: true }) });
       }
     }
+    return MML.VGM2MML.convertData(data, options);
+  };
+
+  /**
+   * キャプチャ済みデータ(captureVgmSongAsync の data と同じ形)を MML へ変換する。
+   * VGM 以外でも、同じ形のデータを作れば PCM チップ経路をそのまま使える(PSF: src/psf2mml/converter.js)。
+   * data: { frameRate, totalFrames, header:{chips, usedChips, gd3}, <chip>:{snapshots, samples?} }
+   */
+  MML.VGM2MML.convertData = function (data, options) {
+    options = options || {};
     const h = data.header;
+    // 合成chの複製パート(デチューン二重化/エコー。src/convert/poolDoubles.js)。FOLD_DOUBLES なら複製ノートを外し、
+    // そうでなくても検出結果(doubles)を持たせて、下の「音符の多いch上位への自動選択」で複製を後回しにする
+    const doubleNotes = [];
+    const PD = MML.Convert.PoolDoubles;
+    if (PD) {
+      const foldOn = MML.Convert.normalizeCmd(options.cmd).FOLD_DOUBLES;
+      let srcList = null;
+      for (const d of DRUM_CHIPS) {
+        const cd = data[d.data];
+        if (!cd || !cd.pooled || !Array.isArray(cd.snapshots) || d.shape !== 'pcm') continue;
+        const found = PD.find(cd.snapshots);
+        const next = Object.assign({}, cd, { doubles: found, doublesFolded: false });
+        if (foldOn && found.groups.length) {
+          next.snapshots = PD.fold(cd.snapshots, found);
+          next.doublesFolded = true;
+          srcList = srcList || MML.VGM2MML.sourceChannels(h);
+          const labelOf = (li) => { const s = srcList.find(x => x.chip === d.flag && x.ch === li); return s ? s.label : `${d.name} ${li}`; };
+          doubleNotes.push(`合成chの複製パートを省きました: ${PD.describe(found, labelOf).join('、')}。`);
+        }
+        data = Object.assign({}, data, { [d.data]: next });
+      }
+    }
     const title = gd3Field(h, 'trackEn', 'trackJa');
     const game = gd3Field(h, 'gameEn', 'gameJa');
     const author = gd3Field(h, 'authorEn', 'authorJa');
-    const label = [game, title].filter(Boolean).join(' - ') || 'VGM';
+    const label = [game, title].filter(Boolean).join(' - ') || options.sourceLabel || 'VGM';
 
     // 変換ファミリ: PSG系(AY/SCC/OPLL/SN、同居可) / NES / GB / HES。複数同居していれば先頭だけ。
     const families = [];
-    if (data.kss || data.sn || data.ym2612 || data.ym2610fm || data.ym2151 || data.ym2203fm || data.ym2608fm || data.ga20 || data.segapcm || data.c140 || data.c352 || data.qsound || data.okim6295 || data.multipcm) families.push('psg');
+    if (data.kss || data.sn || data.ym2612 || data.ym2610fm || data.ym2151 || data.ym2203fm || data.ym2608fm || data.ga20 || data.segapcm || data.c140 || data.c352 || data.qsound || data.okim6295 || data.multipcm || data.psx) families.push('psg');
     if (data.nes) families.push('nes');
     if (data.gb) families.push('gb');
     if (data.hes) families.push('hes');
@@ -1272,14 +1336,14 @@
       throw new Error(tr('MML変換に対応した音源がありません({chips})', { chips: names }));
     }
     const family = families[0];
-    const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', ym2610: 'psg', ym2612: 'psg', ym2151: 'psg', ym2203: 'psg', ym2608: 'psg', ym3812: 'psg', ym3526: 'psg', y8950: 'psg', ga20: 'psg', segapcm: 'psg', c140: 'psg', c352: 'psg', qsound: 'psg', okim6295: 'psg', multipcm: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };
+    const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', ym2610: 'psg', ym2612: 'psg', ym2151: 'psg', ym2203: 'psg', ym2608: 'psg', ym3812: 'psg', ym3526: 'psg', y8950: 'psg', ga20: 'psg', segapcm: 'psg', c140: 'psg', c352: 'psg', qsound: 'psg', okim6295: 'psg', multipcm: 'psg', psx: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };
     // ストリーミングDAC(YM2612 DAC / OKIM6258)は旋律の変換対象ではないが、main.js が
     // ログから打点を取って options.drumHits で渡してくると E(DPCM) へ焼かれる(2026-09-05)。
     // その場合は「無視した」と言わない(X68000曲は音源がYM2151+OKIM6258しか無いので目立つ)
     const dacDrumChip = { OKI: 'okim6258', YMDA: 'ym2612', PWL: 'pwm' };
     const dacDrumChips = new Set((options.drumHits || []).map(x => dacDrumChip[x.chId]).filter(Boolean));
     const ignoredChips = h.usedChips.filter(ch => (!ch.impl || famOf[ch.id] !== family) && !dacDrumChips.has(ch.id)).map(ch => ch.name);
-    const ignoredNotes = [];
+    const ignoredNotes = doubleNotes.slice();
     if (dacDrumChips.has('okim6258')) ignoredNotes.push('OKIM6258(ADPCM)の打点は E(DPCM) へ変換しています(DACストリームの開始アドレスでサンプルを同定)。');
     if (dacDrumChips.has('pwm')) ignoredNotes.push('32X PWM のストリームは無音の切れ目でクリップに分けて E(DPCM) へ変換しています(長いクリップは区間に分割)。');
     // 音程が取れなかったサンプルの行方は options.cmd.DRUM で変わる(休符 / ドラムパートへ)
@@ -1300,6 +1364,7 @@
     if (h.chips.qsound && family === 'psg') ignoredNotes.push(`QSound はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
     if (h.chips.okim6295 && family === 'psg') ignoredNotes.push(`OKIM6295 はフレーズのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
     if (h.chips.multipcm && family === 'psg') ignoredNotes.push(`MultiPCM はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
+    if (h.chips.psx && family === 'psg') ignoredNotes.push(`PlayStation SPU はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
     const ignoredNote = ignoredNotes.length ? ignoredNotes.join(' ') : null;
 
     let result;
@@ -1307,6 +1372,29 @@
       // 基準ピッチ(#TUNING)の自動検出(src/convert/options.js autoTune)。nes/gb/hes ファミリは
       // 委譲先(NSF2MML.convert 等)の入口が同じ仕組みで包んでいる
       result = MML.Convert.autoTune(options, (o) => composePsgLike(data, h, label, o, ignoredNote));
+      // ★N163 の波形 RAM: 変換時の見積り(N163Fit、LEN_SNAP 分の余裕つき)で収めても、書き出した MML の音長は
+      //   量子化とテンポの丸めで曲の後半ほど大きくずれ、コンパイルで「空き不足」になることがある(PSF の 30 秒変換で
+      //   Star Ixiom / Ogre Battle / Namco Anthology 2 が該当)。実際にコンパイルして不足が出たときだけ、
+      //   常駐区間の余裕を広げて変換し直す。コンパイルできる曲の出力は変わらない。
+      //   余裕を広げるだけでは足りない場合(同じバイト数でも断片化の仕方が見積りと違う)に備え、コンパイラが
+      //   置けなかった波形はやり直しのたびに1段ずつ縮める。変換設定 N163_WAVE='keep' のときは何もしない
+      const cmdN = MML.Convert.normalizeCmd(options.cmd);
+      if (cmdN.N163_WAVE !== 'keep' && MML.Mml && MML.Mml.compile && (result.expansions || []).indexOf('n163') >= 0) {
+        const ramErrors = (mml) => {
+          try { return (MML.Mml.compile(mml, {}).errors || []).filter(e => e.kind === 'n163Ram'); }
+          catch (e) { return []; }
+        };
+        const force = {};
+        let extra = 0;
+        for (let attempt = 0; attempt < 12; attempt++) {
+          const errs = ramErrors(result.mml);
+          if (!errs.length) break;
+          extra = extra ? Math.min(extra * 2, 128) : 8;
+          for (const er of errs) if (er.instrument != null) force[er.instrument] = (force[er.instrument] || 0) + 1;
+          result = MML.Convert.autoTune(Object.assign({}, options, { n163ExtraMargin: extra, n163ForceHalve: Object.assign({}, force) }),
+            (o) => composePsgLike(data, h, label, o, ignoredNote));
+        }
+      }
     } else if (family === 'nes') {
       const header = {
         extraChips: data.nes.fds ? MML.NSF.CHIP_FLAGS.FDS : 0,

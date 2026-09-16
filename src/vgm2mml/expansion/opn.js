@@ -323,6 +323,14 @@
   MML.Vgm2MmlExpansion.qsound = (snapshots, drumMap, opts) => pcmChannels(snapshots, 16, opts);
   MML.Vgm2MmlExpansion.okim6295 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 4, opts);
   MML.Vgm2MmlExpansion.multipcm = (snapshots, drumMap, opts) => pcmChannels(snapshots, 28, opts);
+  // PSF(PlayStation SPU、24ボイス)。スナップショットは Emu.snapshotPsx が C352 と同じ形で作る(src/psf2mml/converter.js)
+  // 合成chは32本(Emu.POOL_CHIP_CHANNELS.psx)。実機スロットのスナップショットは24要素なので残りは休符。
+  // トラックモード(Emu.PsfTrackVoicer)はレーン数が曲で決まり、キャプチャが進むほど増えるので最大幅まで取る
+  MML.Vgm2MmlExpansion.psx = (snapshots, drumMap, opts) => {
+    let n = 32;
+    for (const s of snapshots) if (s && s.length > n) n = s.length;
+    return pcmChannels(snapshots, n, opts);
+  };
 
   /** YM2610 ADPCM-A(6ch)/ADPCM-B: snapshots[f].adpcmA[i] / .adpcmB */
   MML.Vgm2MmlExpansion.adpcm = function (snapshots, drumMap, opts) {

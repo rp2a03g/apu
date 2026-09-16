@@ -253,7 +253,8 @@
          「ここの隠れたボタンを click() する」代理で、main.js も id で配線しているため。
          #xxxFileHeader / #xxxFileStatus だけはこの箱から鍵盤表示側へ付け替えて表示する -->
   <div id="soundFileControls" hidden>
-      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.zip,.7z,.mml,.txt" style="display:none" />
+      <!-- multiple: PSF の .minipsf と、_lib で参照する .psflib を一緒に選べるように(先頭の曲ファイルを開く) -->
+      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.psf,.minipsf,.psflib,.zip,.7z,.mml,.txt" multiple style="display:none" />
       <!-- 内部的にフォーマット別ロジックを呼び出すための非表示input（互換用） -->
       <input type="file" id="nsfFile" accept=".nsf,.nsfe" style="display:none" />
       <input type="file" id="spcFile" accept=".spc" style="display:none" />
@@ -261,6 +262,7 @@
       <input type="file" id="gbsFile" accept=".gbs" style="display:none" />
       <input type="file" id="hesFile" accept=".hes" style="display:none" />
       <input type="file" id="vgmFile" accept=".vgm,.vgz" style="display:none" />
+      <input type="file" id="psfFile" accept=".psf,.minipsf" style="display:none" />
 
       <!-- アーカイブ(zip/7z)のファイル名。開いた時だけ表示し、置き場は鍵盤表示のファイル情報
            ペインの一番上(main.js syncKeyboardFileInfo が #archiveBar ごと付け替える)。
@@ -279,7 +281,7 @@
         </label>
       </div>
       <div id="soundPanel-none" class="sound-format-panel">
-        <p style="color:#9999aa;">NSF/SPC/KSS/GBS/HES/VGM ファイル(または、それらを含む zip/7z)を開くと、ここに再生画面が表示されます。</p>
+        <p style="color:#9999aa;">NSF/SPC/KSS/GBS/HES/VGM/PSF ファイル(または、それらを含む zip/7z)を開くと、ここに再生画面が表示されます。</p>
       </div>
 
       <!-- NSFパネル -->
@@ -478,6 +480,37 @@
         </div>
         <div id="hesFileStatus" class="output"></div>
       </div>
+      <!-- PSFパネル(PlayStation。1ファイル1曲。曲送りはアーカイブ(zip/7z)バーが担う) -->
+      <div id="soundPanel-psf" class="sound-format-panel" style="display:none;">
+        <h3>ヘッダ情報 (PSF: PlayStation)</h3>
+        <div id="psfFileHeader" class="output"></div>
+        <div class="toolbar" style="margin-top:6px;">
+          <label style="display:flex;align-items:center;gap:4px;">再生時間(秒)
+            <input type="number" id="psfPlayDuration" value="180" min="1" max="3600" style="width:70px" />
+          </label>
+          <button id="btnPsfFilePlay" class="icon-btn-sm" title="再生">
+            <svg class="icon-play" viewBox="0 0 20 20" fill="currentColor"><path d="M6.5 4.2v11.6c0 .8.9 1.3 1.6.9l9-5.8c.6-.4.6-1.4 0-1.8l-9-5.8c-.7-.4-1.6.1-1.6.9Z"/></svg>
+            <svg class="icon-pause" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="4" width="3.4" height="12"/><rect x="11.6" y="4" width="3.4" height="12"/></svg>
+          </button>
+          <button id="btnPsfFileStop" class="icon-btn-sm secondary" title="停止">
+            <svg viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1.2"/></svg>
+          </button>
+          <button id="btnPsfExportWav" class="icon-btn-sm icon-btn-label secondary" title="WAVE書き出し">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v9"/><path d="M6.2 8.8 10 12.6l3.8-3.8"/><path d="M4 15.5h12"/></svg>
+            <span>WAVE</span>
+          </button>
+        </div>
+        <div class="toolbar">
+          <button id="btnPsf2Mml" class="secondary">to MML</button>
+          <button class="secondary convert-settings-btn" title="変換設定">⚙ 変換設定</button>
+          <label style="display:flex;align-items:center;gap:4px;">変換テンポ
+            <input type="number" id="psfTempoBpm" placeholder="自動" min="40" max="400" style="width:70px" />
+          </label>
+          <button id="btnPsfTempoTap" class="secondary">👆 タップ</button>
+          <button id="btnPsfTempoClear" class="secondary">自動</button>
+        </div>
+        <div id="psfFileStatus" class="output"></div>
+      </div>
       <!-- VGMパネル(1ファイル1曲。曲送りは下記アーカイブ(zip/7z)バーが担う) -->
       <div id="soundPanel-vgm" class="sound-format-panel" style="display:none;">
         <h3>ヘッダ情報 (VGM)</h3>
@@ -541,6 +574,7 @@
   <script src="src/audio/vgm-capture-worker.js"></script>
   <script src="src/audio/spc-capture-worker.js"></script>
   <script src="src/audio/hes-capture-worker.js"></script>
+  <script src="src/audio/psf-capture-worker.js"></script>
   <script src="src/audio/roll-builders.js"></script>
   <script src="src/audio/capture-worker-client.js"></script>
   <script src="src/mml/lexer.js"></script>
@@ -576,6 +610,7 @@
   <script src="src/convert/toneKey.js"></script>
   <script src="src/convert/toneSettings.js"></script>
   <script src="src/convert/channelPlan.js"></script>
+  <script src="src/convert/poolDoubles.js"></script>
   <script src="src/convert/borrow.js"></script>
   <script src="src/dpcm/dpcmConverter.js"></script>
   <script src="src/driver/ppmckDriver.js"></script>
@@ -929,6 +964,14 @@
   <script src="src/audio/assign-preview.js"></script>
   <script src="src/audio/live-monitor.js"></script>
   <script src="src/spc/spcHeader.js"></script>
+  <script src="src/psf/psfHeader.js"></script>
+  <script src="src/emulator/cpuR3000.js"></script>
+  <script src="src/emulator/spuPsx.js"></script>
+  <script src="src/emulator/psxBus.js"></script>
+  <script src="src/emulator/psxBios.js"></script>
+  <script src="src/emulator/psfPlayer.js"></script>
+  <script src="src/emulator/psxSampleBank.js"></script>
+  <script src="src/audio/psf-stream-player.js"></script>
   <script src="src/emulator/spc700.js"></script>
   <script src="src/emulator/spcDsp.js"></script>
   <script src="src/emulator/spcPlayer.js"></script>
@@ -995,6 +1038,7 @@
   <script src="src/vgm2mml/expansion/opn.js"></script>
   <script src="src/vgm2mml/expansion/dpcmDrums.js"></script>
   <script src="src/vgm2mml/converter.js"></script>
+  <script src="src/psf2mml/converter.js"></script>
   <!-- 全マークアップの後・main.js の前。ここで表示言語が確定する -->
   <script src="src/ui/i18nDom.js"></script>
   <script src="src/ui/editorSettings.js"></script>

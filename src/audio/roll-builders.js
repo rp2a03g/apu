@@ -407,6 +407,58 @@
     return tracks;
   };
 
+  // ── PSF(PlayStation SPU)────────────────────────────────────────────
+  // キャプチャ(psfPlayer.js capturePsfSongAsync / Worker の鏡像)の Int32Array スナップショットを
+  // Emu.snapshotPsx で C352 と同じ形のオブジェクトへ変換し、VGM の PCM チップと同じ抽出経路
+  // (keyboard.js extractChannels の 'psx' 行)でトラック化する。変換済みのフレームは state に
+  // 溜めて次回は続きだけ作る(ロールは曲が伸びるたびに何度も組み直すため)。
+  // opts.poolMode.psx === 'phys' なら実機ボイス、それ以外は合成ch(Emu.PoolChannelRegrouper)。
+  RollBuild.psfObjectSnapshots = function (cap, state) {
+    const Emu = MML.Emu;
+    if (!state.bank || state.bank.samples !== cap.samples) state.bank = new Emu.PsxSampleBank(cap.samples);
+    if (!state.data) state.data = { psx: { snapshots: [] } };
+    const out = state.data.psx.snapshots;
+    const n = cap.snapshots.length;
+    for (let i = out.length; i < n; i++) {
+      if (!cap.snapshots[i]) break; // Worker の鏡像は穴が空かない想定だが、念のため途中で止める
+      out.push(Emu.snapshotPsx(cap.snapshots[i], state.bank));
+    }
+    return state.data;
+  };
+  RollBuild.psf = function (cap, done, opts, state) {
+    const frameRate = cap.frameRate || 60;
+    const sr = 44100;
+    const data = RollBuild.psfObjectSnapshots(cap, state || {});
+    const poolMode = (opts && opts.poolMode) || {};
+    const snaps = RollBuild.psxFrames(data, poolMode.psx);
+    const n = Math.min(done, snaps.length);
+    const t = MML.UI.buildRollTracksFromRegSnapshots(snaps, [], n, sr / frameRate, sr, ['vgm', 'psx'], null, { psx: snaps });
+    return t || [];
+  };
+
+  // PSF の表示モード別のレーン列: 'phys'=実機ボイス / 'logical'=合成ch / 'track'(既定)=トラック×声部
+  RollBuild.psxFrames = function (data, mode) {
+    if (mode === 'phys') return data.psx.snapshots;
+    if (mode === 'logical') return RollBuild.poolLogical(data, 'psx') || data.psx.snapshots;
+    return RollBuild.psxTrackFrames(data) || data.psx.snapshots;
+  };
+
+  // ── PSF の「トラック」レーン(Emu.PsfTrackVoicer) ───────────────────────
+  // poolLogical と同じく snapshots が伸びた分だけ続きから足す(声部の割り当ては状態を持つので同じインスタンスで続ける)。
+  // d.__trackState.vc.lanes がレーン表(鍵盤の行名/変換のソース名)
+  RollBuild.psxTrackFrames = function (data) {
+    const d = data && data.psx;
+    const Emu = MML.Emu;
+    if (!d || !Array.isArray(d.snapshots) || !Emu.PsfTrackVoicer) return null;
+    let S = d.__trackState;
+    if (!S) {
+      Object.defineProperty(d, '__trackState', { value: { vc: new Emu.PsfTrackVoicer(), out: [] }, configurable: true, writable: true });
+      S = d.__trackState;
+    }
+    for (let i = S.out.length; i < d.snapshots.length; i++) S.out.push(S.vc.step(d.snapshots[i]));
+    return S.out;
+  };
+
   // ── プール式PCMチップの「合成ch」スナップショット ─────────────────────
   // logical は snapshots を Emu.PoolChannelRegrouper に先頭から順に通しただけの決定的なデータ。
   // キャプチャWorkerは通信量を減らすため logical を送らない(2026-09-13。c140 では progress の
@@ -462,6 +514,7 @@
   //   nsf: {regSnapshots, writeLog, n163Snapshots} / kss: {writeLog}
   //   gbs: {snapshots} / hes: {snapshots, dpcmTrace, controlTrace}
   //   spc: {frameLog} / vgm: captureVgmSongAsyncのdataそのもの
+  //   psf: capturePsfSongAsync の cap({snapshots, samples, frameRate})
   RollBuild.createRollJob = function (format, params) {
     params = params || {};
     if (format === 'nsf') {
@@ -512,6 +565,10 @@
         timeline: RollBuild.spc(data.frameLog.slice(0, done), params.frameRate, params.fineTune || null, params.drumKinds || null),
         info: {}
       }) };
+    }
+    if (format === 'psf') {
+      const state = {};
+      return { build: (data, done) => ({ timeline: RollBuild.psf(data, done, params, state), info: {} }) };
     }
     if (format === 'vgm') {
       // params.poolMode: プール式チップの表示モード(Worker実行時はopt.roll経由で届く)

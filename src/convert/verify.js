@@ -109,8 +109,13 @@
       // コンパイラはレターk(0始まり)を内部ch (8-numCh)+k に置くため、対応する行は
       // N{numCh-k}。numChは「音符を持つ最上位レター位置+1」(compiler.jsと同じ規則)
       const n163Letters = (compiled.expansionLetterMap && compiled.expansionLetterMap.n163) || [];
+      // ★#EX-N163 <n> の宣言があればそれが正典(compiler.js n163NumChOf と同じ規則)。音符から数えると、
+      //   宣言8・使用4ch(P-S)のMMLで行の対応が丸ごとずれ、全音符が「聞こえない」と誤判定される
+      //   (PSF の SaGa Frontier / R4 / 魔界島で発覚。変換側は N163_CH=fixed8 が既定なので他形式でも起きうる)
       let n163NumCh = 0;
-      n163Letters.forEach((L, k) => {
+      const declaredN163 = compiled.settings && compiled.settings.n163NumCh;
+      if (declaredN163) n163NumCh = Math.max(1, Math.min(8, declaredN163));
+      else n163Letters.forEach((L, k) => {
         if ((compiled.segmentsByChannel[L] || []).some((sg) => sg.freq != null)) n163NumCh = k + 1;
       });
       const trackFor = (letter) => {

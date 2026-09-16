@@ -1,10 +1,10 @@
 regsOnlyキャプチャ Worker バンドルについて
 ==========================================
 
-src/audio/{nsf,kss,gbs,vgm,spc,hes}-capture-worker.js は、各フォーマットのregsOnly
+src/audio/{nsf,kss,gbs,vgm,spc,hes,psf}-capture-worker.js は、各フォーマットのregsOnly
 バックグラウンドキャプチャ(captureSongAsync / captureKssSongAsync /
 captureGbsSongAsync / captureVgmSongAsync / SPC2MML.captureAsync /
-captureHesSongAsync)をWeb Workerで実行するための自己完結ビルド済みファイルです
+captureHesSongAsync / capturePsfSongAsync)をWeb Workerで実行するための自己完結ビルド済みファイルです
 (生成物なので直接編集しないこと)。
 
 仕組み(file://直開き対応):
@@ -23,9 +23,13 @@ captureHesSongAsync)をWeb Workerで実行するための自己完結ビルド�
     「バンドルに無い関数」を検出できない(2026-09-07: vgmバンドルに kssPackWrite が
     無く、AY/SSG/OPLを使うVGMのWorkerが途中で落ちてロールが空になっていた)
 
-  - ★src/convert/toneKey.js(音色キー)は全6バンドルに入れる(2026-09-09)。roll-builders.js の
+  - ★src/convert/toneKey.js(音色キー)は全バンドル(2026-09-14 から psf を含む7本)に入れる(2026-09-09)。roll-builders.js の
     RollBuild.toneOf と keyboard.js の buildNoteTimelineFromChannelFrames がノートに音色キーを
     載せる。無いとWorker経由のロールだけ音色一覧が空になる(プローブは _rollProbes の TK.ofEvent/ofLive)
+
+  - psfバンドル(2026-09-14)はPSF本体(CPU/SPU/HLE BIOS)に加え、ロール構築用に keyboard.js /
+    ym2610.js(Emu.SamplePitchUtil)/ multipcm.js(Emu.PoolChannelRegrouper)/ psxSampleBank.js を同梱する。
+    Workerへは bytes ではなく MML.PSF.load() 済みの info(_lib 解決済み)を渡す。
 
 ピアノロールのタイムライン構築もWorker内で行う(2026-08-21):
   - 構築ロジックは src/audio/roll-builders.js (MML.RollBuild、メインスレッドと共有)。

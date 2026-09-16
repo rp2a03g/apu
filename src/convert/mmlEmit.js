@@ -558,7 +558,9 @@
 
     const lines = [];
     if (opts.headerLines) lines.push(...opts.headerLines);
-    if (opts.tempoBpm != null) {
+    // ★チャンネルが1本も無い(音符が1つも取れなかった曲)ときはテンポ行を出さない。文字の無い " t120" は
+    //   コンパイルエラーになり、再生も書き出しもできないMMLになる(PSF の Gran Turismo arcade.psf で発覚)
+    if (opts.tempoBpm != null && channelsData.length) {
       const letters = channelsData.map(c => c.letter).join('');
       lines.push(`${letters} t${Math.round(opts.tempoBpm)}`);
     }

@@ -51,9 +51,9 @@
 ### INV-4: コアとUIの分離 — コアはDOMに触れない
 
 - **コア層** = `src/emulator/` `src/mml/`(lexer/compiler/player) `src/convert/`
-  `src/asm/` `src/nsf/` `src/spc/` `src/kss/` `src/gbs/` `src/hes/` `src/dpcm/` `src/driver/`
+  `src/asm/` `src/nsf/` `src/spc/` `src/kss/` `src/gbs/` `src/hes/` `src/psf/` `src/dpcm/` `src/driver/`
   `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` `src/gbs2mml/` `src/hes2mml/`
-  `src/vgm2mml/` `src/input/`、および将来の `src/ir/` `src/share/`。
+  `src/vgm2mml/` `src/psf2mml/` `src/input/`、および将来の `src/ir/` `src/share/`。
   これらは `document`/`window.document`/DOM API を一切参照しないピュアJSであること
   (Web Worker内でも動く必要があるため。`globalThis` 置換でバンドルされる)。
 - **UI層** = `src/main.js` `src/ui/` `index.html` `src/mml/syntaxHighlight.js`

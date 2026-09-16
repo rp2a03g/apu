@@ -138,6 +138,10 @@
   function pulsePeriod(freq) {
     return Math.max(0, Math.min(2047, Math.round(CPU_CLOCK_NTSC / (16 * freq)) - 1));
   }
+  // VRC6 パルスは同じ式で周期12bit(o0a まで出る)。compiler.js vrc6PulsePeriod と必ず一致させること
+  function vrc6PulsePeriod(freq) {
+    return Math.max(0, Math.min(4095, Math.round(CPU_CLOCK_NTSC / (16 * freq)) - 1));
+  }
   function trianglePeriod(freq) {
     return Math.max(0, Math.min(2047, Math.round(CPU_CLOCK_NTSC / (32 * freq)) - 1));
   }
@@ -1425,6 +1429,48 @@ PS_STEP_ADVANCE:
 
     if (usesVrc6) {
       extraTables.push(`SAW_TABLE:\n${wordsToDb(buildPeriodTable(sawPeriod))}`);
+      // VRC6 パルスの周期表。2A03 の PULSE_TABLE(11bit)と違うのは A1 未満で2047に貼り付いている低音側だけなので、
+      // その区間(VRC6P_LOW_TABLE)だけを持ち、残りは PULSE_TABLE を共有する(ROM 節約。#TUNING で区間の長さは変わる)。
+      // ★2026-09-14まで VRC6 パルスも PULSE_TABLE を引いていて、A1 より下が A1 に貼り付いていた
+      const pulseWords = buildPeriodTable(pulsePeriod), vrc6pWords = buildPeriodTable(vrc6PulsePeriod);
+      let vrc6pLow = 0;
+      while (vrc6pLow < NOTE_TABLE_SIZE && vrc6pWords[vrc6pLow] !== pulseWords[vrc6pLow]) vrc6pLow++;
+      // 念のため: 区間より上がすべて一致しなければ全音ぶんの表を持つ
+      if (vrc6pWords.some((w, i) => i >= vrc6pLow && w !== pulseWords[i])) vrc6pLow = NOTE_TABLE_SIZE;
+      const lookupVrc6p = vrc6pLow ? 'LOOKUP_VRC6P_PERIOD' : 'LOOKUP_PULSE_PERIOD';
+      if (vrc6pLow) {
+        extraTables.push(`VRC6P_LOW_TABLE:\n${wordsToDb(vrc6pWords.slice(0, vrc6pLow))}`);
+        extraHandlers.push(`
+; --- VRC6パルスの周期参照: ノート番号が ${vrc6pLow} 未満なら VRC6P_LOW_TABLE(12bit)、以上は PULSE_TABLE を共有 ---
+LOOKUP_VRC6P_PERIOD:
+    LDA ${hex(NOTE)},X
+${usesEn ? `    CLC
+    ADC ${hex(ENVAL)},X
+    BPL LVP_NONNEG
+    LDA #$00
+    JMP LVP_INDEX
+LVP_NONNEG:` : ''}
+    CMP #${hex(TABLE_MAX)}
+    BCC LVP_OK
+    LDA #${hex(TABLE_MAX)}
+LVP_OK:
+LVP_INDEX:
+    ASL A
+    TAY
+${vrc6pLow < NOTE_TABLE_SIZE ? `    CPY #${hex(vrc6pLow * 2)}
+    BCS LVP_SHARED
+` : ''}    LDA VRC6P_LOW_TABLE,Y
+    STA ${hex(PERLO)}
+    LDA VRC6P_LOW_TABLE+1,Y
+    STA ${hex(PERHI)}
+    RTS
+${vrc6pLow < NOTE_TABLE_SIZE ? `LVP_SHARED:
+    LDA PULSE_TABLE,Y
+    STA ${hex(PERLO)}
+    LDA PULSE_TABLE+1,Y
+    STA ${hex(PERHI)}
+    RTS` : ''}`);
+      }
       extraHandlers.push(`
 LOOKUP_SAW_PERIOD:
     LDA ${hex(NOTE)},X
@@ -1449,7 +1495,7 @@ LSP_INDEX:
 
 ; --- VRC6パルス1 ($9000)。デューティ(bit4-6)は@<n>命令のn%8(compiler.jsのsegmentsToWriteLogVrc6と同一式) ---
 WFV_T4:
-    JSR LOOKUP_PULSE_PERIOD
+    JSR ${lookupVrc6p}
     JSR APPLY_DETUNE
     LDA ${hex(PERLO)}
     STA $9001
@@ -1477,7 +1523,7 @@ SIL_T4:
 
 ; --- VRC6パルス2 ($A000) ---
 WFV_T5:
-    JSR LOOKUP_PULSE_PERIOD
+    JSR ${lookupVrc6p}
     JSR APPLY_DETUNE
     LDA ${hex(PERLO)}
     STA $A001
@@ -1525,7 +1571,7 @@ SIL_T6:
         extraHandlers.push(`
 ; --- VRC6パルス1/2・矩形波(サウ)のEP<n>/MP<n>継続フレーム専用(周期のみ再書込み) ---
 WFO_T4:
-    JSR LOOKUP_PULSE_PERIOD
+    JSR ${lookupVrc6p}
     JSR APPLY_DETUNE
     LDA ${hex(PERLO)}
     STA $9001
@@ -1538,7 +1584,7 @@ WFO_T4:
 WFO4_SKIPHI:
     RTS
 WFO_T5:
-    JSR LOOKUP_PULSE_PERIOD
+    JSR ${lookupVrc6p}
     JSR APPLY_DETUNE
     LDA ${hex(PERLO)}
     STA $A001

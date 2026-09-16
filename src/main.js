@@ -180,6 +180,10 @@
       hesActivePlayer.applyMute(getChannelMuteConfig());
       return;
     }
+    if (psfActivePlayer) {
+      psfActivePlayer.applyMute(getChannelMuteConfig());
+      return;
+    }
     if (vgmActivePlayer) {
       vgmActivePlayer.applyMute(getChannelMuteConfig());
       return;
@@ -212,6 +216,7 @@
     if (kssActivePlayer) { kssActivePlayer.applyVolume(getChannelVolumeConfig()); return; }
     if (gbsActivePlayer) { gbsActivePlayer.applyVolume(getChannelVolumeConfig()); return; }
     if (hesActivePlayer) { hesActivePlayer.applyVolume(getChannelVolumeConfig()); return; }
+    if (psfActivePlayer) { psfActivePlayer.applyVolume(getChannelVolumeConfig()); return; }
     if (vgmActivePlayer) { vgmActivePlayer.applyVolume(getChannelVolumeConfig()); return; }
   }
 
@@ -235,7 +240,7 @@
     //   その時点ではまだプレイヤーが無く何もする必要が無いので握りつぶしてよい
     try {
       const enabled = !(keyboardDisplay.hasAnyMute && keyboardDisplay.hasAnyMute());
-      for (const p of [activePlayer, vgmActivePlayer, kssActivePlayer, gbsActivePlayer, hesActivePlayer, spcActivePlayer]) {
+      for (const p of [activePlayer, vgmActivePlayer, kssActivePlayer, gbsActivePlayer, hesActivePlayer, spcActivePlayer, psfActivePlayer]) {
         if (p) p.silenceDetectEnabled = enabled;
       }
     } catch (e) { /* 初期化順の都合。再生開始時に必ず呼び直される */ }
@@ -375,7 +380,11 @@
   function afterSampleKindChange() {
     spcPitchSrcnCache = null;
     const fmt = (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.format()) || kbdSourceKind;
-    if (fmt === 'vgm' && vgmCaptureMirror && MML.RollBuild) {
+    if (fmt === 'psf' && psfCaptureMirror && MML.RollBuild) {
+      // PSF も VGM の PCM チップと同じく音程判定そのものが変わるので全再構築
+      rebuildPsfRoll();
+      updatePsfDrumSamples();
+    } else if (fmt === 'vgm' && vgmCaptureMirror && MML.RollBuild) {
       // VGMはサンプルの音程判定そのものが変わる(ドラム区画に出る音符の集合が変わる)ので全再構築
       try {
         const t = MML.RollBuild.vgm(vgmCaptureMirror.data, vgmCaptureMirror.done, { poolMode: vgmPoolModes });
@@ -400,6 +409,7 @@
   // sample.kind('c140'/'a'/'b'/'ga20'…) → 解析を持っているチップ本体。
   // onAdpcmCalibrate の分岐と同じ対応表(YM2610だけアダプタが .fm でチップを持つ)
   function sampleChipFor(kindStr) {
+    if (kindStr === 'psx') return psfSampleBank; // PSF(src/emulator/psxSampleBank.js)
     const p = vgmActivePlayer && vgmActivePlayer.player;
     if (!p || !p.adapterById) return null;
     if (kindStr === 'a' || kindStr === 'b') {
@@ -1006,7 +1016,8 @@
   function captureStillGrowing() {
     const fmt = (MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.format()) || kbdSourceKind;
     const f = { nsf: () => nsfBufferedFraction, spc: () => spcBufferedFraction, kss: () => kssBufferedFraction,
-                gbs: () => gbsBufferedFraction, hes: () => hesBufferedFraction, vgm: () => vgmBufferedFraction }[fmt];
+                gbs: () => gbsBufferedFraction, hes: () => hesBufferedFraction, vgm: () => vgmBufferedFraction,
+                psf: () => psfBufferedFraction }[fmt];
     return !!f && f() < 0.999;
   }
   /** ログから打点が取れる行(VGMのDAC)。分離レンダリングが要らないので待つ必要も無い */
@@ -1048,6 +1059,14 @@
     if (fmt === 'hes' && loadedHesBytes) {
       const r = await MML.Emu.captureHesSongAsync(loadedHesBytes, Object.assign({ track: parseInt(hesTrackIndexEl.value, 10) || 0, durationSeconds, sampleRate, mute: cfg.expansion.hes || {} }, slice), onProgress);
       return { audio: r.audio, sampleRate };
+    }
+    if (fmt === 'psf' && loadedPsfInfo) {
+      // PSF: CPU+SPU のフルエミュレーション(44.1kHz ステレオ)をモノラルへ
+      const r = await MML.Emu.capturePsfSongAsync(loadedPsfInfo, Object.assign({ durationSeconds, mute: (cfg.expansion && cfg.expansion.psx) || [] }, slice),
+        onProgress ? (done, total) => onProgress(done, total) : null);
+      const n = r.audioL.length, audio = new Float32Array(n);
+      for (let i = 0; i < n; i++) audio[i] = (r.audioL[i] + r.audioR[i]) * 0.5;
+      return { audio, sampleRate: 44100 };
     }
     if (fmt === 'vgm' && loadedVgmBytes) {
       // exportVgmWav と同じ描き方(コマンド消化+チップ合成)。ステレオをモノラルへ。
@@ -1596,7 +1615,9 @@
     const p = vgmActivePlayer && vgmActivePlayer.player;
     // kind 'a'/'b'=YM2610(fmラッパーが解析を持つ)、'ga20'/'segapcm'=各チップ本体。
     // いずれも samplePitch/setSampleTuning の同一インターフェース(内容ハッシュのlocalStorage共有)
-    const fm = smp.kind === 'ga20'
+    const fm = smp.kind === 'psx'
+      ? psfSampleBank
+      : smp.kind === 'ga20'
       ? (p && p.adapterById.ga20 && p.adapterById.ga20.chip)
       : smp.kind === 'segapcm'
       ? (p && p.adapterById.segapcm && p.adapterById.segapcm.chip)
@@ -1634,6 +1655,7 @@
       } else { window.alert(T('入力を解釈できませんでした: {s}', { s })); return; }
     }
     fm.setSampleTuning(smp.kind, smp.start, smp.end, cps);
+    if (smp.kind === 'psx') { rebuildPsfRoll(); updatePsfDrumSamples(); }
   };
   // 起動時から APU チャンネル行を表示（再生前でも空白にならないよう）
   keyboardDisplay.setSource({ regSnapshots: [{}], totalFrames: 1, samplesPerFrame: 735, sampleRate: 44100 }, []);
@@ -1669,19 +1691,19 @@
   // 拡張子(=フォーマット)→サウンドファイルパネル内の再生ボタンid。鍵盤表示側の▶からは
   // このボタンをclick()して再生する(playXxxStream()を直接呼ぶと、ボタン側が一緒に行う
   // 処理(SPCのstartVoiceMonitor()等)を通らないため。D&D再生と同じ理由・同じ流儀)。
-  const SOUND_FORMAT_PLAY_BTN = { nsf: 'btnNsfFilePlay', spc: 'btnSpcFilePlay', kss: 'btnKssFilePlay', gbs: 'btnGbsFilePlay', hes: 'btnHesFilePlay', vgm: 'btnVgmFilePlay' };
-  const SOUND_FORMAT_STOP_BTN = { nsf: 'btnNsfFileStop', spc: 'btnSpcFileStop', kss: 'btnKssFileStop', gbs: 'btnGbsFileStop', hes: 'btnHesFileStop', vgm: 'btnVgmFileStop' };
+  const SOUND_FORMAT_PLAY_BTN = { nsf: 'btnNsfFilePlay', spc: 'btnSpcFilePlay', kss: 'btnKssFilePlay', gbs: 'btnGbsFilePlay', hes: 'btnHesFilePlay', vgm: 'btnVgmFilePlay', psf: 'btnPsfFilePlay' };
+  const SOUND_FORMAT_STOP_BTN = { nsf: 'btnNsfFileStop', spc: 'btnSpcFileStop', kss: 'btnKssFileStop', gbs: 'btnGbsFileStop', hes: 'btnHesFileStop', vgm: 'btnVgmFileStop', psf: 'btnPsfFileStop' };
   // 曲番号(インデックス)を持つ形式 → その入力欄id。SPC/VGMは1ファイル1曲なので載らない
   // (単体で開いている限り戻り/送りの対象が無い。アーカイブを開いていればそちらの曲送りになる)。
   // 曲数はファイルごとに違うので、有効/無効の判定は入力欄のmin/maxから行う(下記
   // updateKeyboardTransport)。1曲だけのNSF等では ⏮⏭ もグレーアウトする。
   const SOUND_FORMAT_SONG_INPUT = { nsf: 'nsfSongIndex', kss: 'kssSongIndex', gbs: 'gbsSongIndex', hes: 'hesTrackIndex' };
   // 鍵盤表示ヘッダへ複製した「to MML」ボタンが押す実体(今表示している形式のもの)
-  const SOUND_FORMAT_TOMML_BTN = { nsf: 'btnNsf2Mml', spc: 'btnSpc2Mml', kss: 'btnKss2Mml', gbs: 'btnGbs2Mml', hes: 'btnHes2Mml', vgm: 'btnVgm2Mml' };
+  const SOUND_FORMAT_TOMML_BTN = { nsf: 'btnNsf2Mml', spc: 'btnSpc2Mml', kss: 'btnKss2Mml', gbs: 'btnGbs2Mml', hes: 'btnHes2Mml', vgm: 'btnVgm2Mml', psf: 'btnPsf2Mml' };
   // 演奏最大時間(秒)の入力欄と書き出しボタン。鍵盤表示のロール見出しに置いた
   // 「最大時間+出力形式+出力」(keyboard.js setExportControls)がこれらの代理になる
-  const SOUND_FORMAT_DUR_INPUT = { nsf: 'nsfPlayDuration', spc: 'spcPlayDuration', kss: 'kssPlayDuration', gbs: 'gbsPlayDuration', hes: 'hesPlayDuration', vgm: 'vgmPlayDuration' };
-  const SOUND_FORMAT_WAV_BTN = { nsf: 'btnNsfExportWav', spc: 'btnSpcExportWav', kss: 'btnKssExportWav', gbs: 'btnGbsExportWav', hes: 'btnHesExportWav', vgm: 'btnVgmExportWav' };
+  const SOUND_FORMAT_DUR_INPUT = { nsf: 'nsfPlayDuration', spc: 'spcPlayDuration', kss: 'kssPlayDuration', gbs: 'gbsPlayDuration', hes: 'hesPlayDuration', vgm: 'vgmPlayDuration', psf: 'psfPlayDuration' };
+  const SOUND_FORMAT_WAV_BTN = { nsf: 'btnNsfExportWav', spc: 'btnSpcExportWav', kss: 'btnKssExportWav', gbs: 'btnGbsExportWav', hes: 'btnHesExportWav', vgm: 'btnVgmExportWav', psf: 'btnPsfExportWav' };
   // 出力形式リスト。既定はWAV。レジスタログCSVはWAVと一緒に必ず出ていたのをやめ、
   // 選んだときだけ出す独立した形式にした(2026-09-09 ユーザー指示)
   // レジスタログを持つのは自前のCPUを回す形式(NSF/SPC/KSS)だけ。他は音声のみ
@@ -1783,6 +1805,10 @@
       vgmActivePlayer.setSpeed(factor);
       if (lastPlayMode === 'vgm') workletDuration = vgmActivePlayer.getDuration();
     }
+    if (psfActivePlayer && psfActivePlayer.setSpeed) {
+      psfActivePlayer.setSpeed(factor);
+      if (lastPlayMode === 'psf') workletDuration = psfActivePlayer.getDuration();
+    }
   };
 
   // --- マスター音量(0〜1、全フォーマット共通の最終段。src/audio/stream-player.js
@@ -1803,6 +1829,7 @@
   let gbsRollToken = 0;
   let hesRollToken = 0;
   let vgmRollToken = 0;
+  let psfRollToken = 0;
 
   // NSF/SPC/KSSの先読みキャプチャは再生を止めても最後まで走り続けようとするため、
   // 「別のフォーマットの再生/変換を始めたのに、前のフォーマットの先読みが
@@ -1816,6 +1843,7 @@
     if (keep !== 'gbs') gbsRollToken++;
     if (keep !== 'hes') hesRollToken++;
     if (keep !== 'vgm') vgmRollToken++;
+    if (keep !== 'psf') psfRollToken++;
   }
 
   // リアルタイム再生(ScriptProcessorNode・メインスレッドAPU)中の
@@ -2366,6 +2394,7 @@
   // regsOnlyキャプチャが先読みで埋めた範囲までシーク・再生できる。
   let hesBufferedFraction = 1;
   let vgmBufferedFraction = 1;
+  let psfBufferedFraction = 1;
   function currentBufferedFraction() {
     if (lastPlayMode === 'nsf') return nsfBufferedFraction;
     if (lastPlayMode === 'kss') return kssBufferedFraction;
@@ -2373,6 +2402,7 @@
     if (lastPlayMode === 'gbs') return gbsBufferedFraction;
     if (lastPlayMode === 'hes') return hesBufferedFraction;
     if (lastPlayMode === 'vgm') return vgmBufferedFraction;
+    if (lastPlayMode === 'psf') return psfBufferedFraction;
     return null;
   }
   function updateSeekBufferedUI() {
@@ -2441,7 +2471,7 @@
   // 1箇所で判定できるようにする(再生/一時停止/シーク操作は両者で同じインターフェース
   // を持つため、呼び出し側でフォーマットを区別する必要がない)。
   function currentTransportPlayer() {
-    return activePlayer || kssActivePlayer || spcActivePlayer || gbsActivePlayer || hesActivePlayer || vgmActivePlayer;
+    return activePlayer || kssActivePlayer || spcActivePlayer || gbsActivePlayer || hesActivePlayer || vgmActivePlayer || psfActivePlayer;
   }
 
   // NSF/KSS/SPC/GBS/HESそれぞれの再生ボタンの見た目を更新する。実在しないものは
@@ -2453,6 +2483,7 @@
     updateGbsPlayButton();
     updateHesPlayButton();
     updateVgmPlayButton();
+    updatePsfPlayButton();
   }
 
   /*
@@ -2600,7 +2631,7 @@
   // HES(HesReplayStreamPlayer)もGBS/KSSと同じくバックグラウンドキャプチャの
   // 先読み範囲内でseek()に対応する。
   function canSeek() {
-    if (currentTransportPlayer()) return lastPlayMode === 'capture-mml' || lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'spc' || lastPlayMode === 'gbs' || lastPlayMode === 'hes' || lastPlayMode === 'vgm';
+    if (currentTransportPlayer()) return lastPlayMode === 'capture-mml' || lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'spc' || lastPlayMode === 'gbs' || lastPlayMode === 'hes' || lastPlayMode === 'vgm' || lastPlayMode === 'psf';
     return !!capturedBuffer;
   }
 
@@ -2862,6 +2893,7 @@
     stopGbsPlayback();
     stopHesPlayback();
     stopVgmPlayback();
+    stopPsfPlayback();
   }
 
   // ウィンドウを閉じた時用: stopAllFormatPlayback()と違い、MML再生中(activePlayerを
@@ -2874,12 +2906,13 @@
     stopGbsPlayback();
     stopHesPlayback();
     stopVgmPlayback();
+    stopPsfPlayback();
   }
 
   // duration/再生範囲終了点への到達で自動的に次の曲/トラックへ進む対象かどうか
   // (SPCは1ファイル=1曲のため曲送りの概念が無く、対象外)
   function isSoundFileMode() {
-    return lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'gbs' || lastPlayMode === 'hes' || lastPlayMode === 'vgm';
+    return lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'gbs' || lastPlayMode === 'hes' || lastPlayMode === 'vgm' || lastPlayMode === 'psf';
   }
   function isFadeableSoundFileMode() {
     return isSoundFileMode() || lastPlayMode === 'spc';
@@ -2959,6 +2992,7 @@
     else if (mode === 'hes') { stopHesPlayback(); autoAdvanceHesTrack(); }
     else if (mode === 'spc') { stopSpcPlayback(); archiveAutoAdvanceOrStop(); }
     else if (mode === 'vgm') { stopVgmPlayback(); archiveAutoAdvanceOrStop(); }
+    else if (mode === 'psf') { stopPsfPlayback(); archiveAutoAdvanceOrStop(); }
     else { transportStop(); }
   }
 
@@ -3308,7 +3342,7 @@
     const p = currentTransportPlayer();
     if (p) {
       p.stop();
-      if (restoreTo > 0 && (lastPlayMode === 'capture-mml' || lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'spc' || lastPlayMode === 'gbs' || lastPlayMode === 'hes' || lastPlayMode === 'vgm')) {
+      if (restoreTo > 0 && (lastPlayMode === 'capture-mml' || lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'spc' || lastPlayMode === 'gbs' || lastPlayMode === 'hes' || lastPlayMode === 'vgm' || lastPlayMode === 'psf')) {
         p.seek(Math.round(restoreTo * audioCtx.sampleRate));
       }
       if (transportRaf) cancelAnimationFrame(transportRaf);
@@ -3326,7 +3360,7 @@
     mmlHighlightSuppressed = false;
     const p = currentTransportPlayer();
     if (p) {
-      if (lastPlayMode !== 'capture-mml' && lastPlayMode !== 'nsf' && lastPlayMode !== 'kss' && lastPlayMode !== 'spc' && lastPlayMode !== 'gbs' && lastPlayMode !== 'hes' && lastPlayMode !== 'vgm') return;
+      if (lastPlayMode !== 'capture-mml' && lastPlayMode !== 'nsf' && lastPlayMode !== 'kss' && lastPlayMode !== 'spc' && lastPlayMode !== 'gbs' && lastPlayMode !== 'hes' && lastPlayMode !== 'vgm' && lastPlayMode !== 'psf') return;
       const wasPlaying = p.isPlaying;
       p.pause();
       p.seek(Math.round(Math.max(0, Math.min(workletDuration, seconds)) * audioCtx.sampleRate));
@@ -3359,7 +3393,7 @@
   // シークできる状態でなければ何もせず null を返す。
   function seekToSeconds(seconds) {
     if (currentTransportPlayer()) {
-      if (lastPlayMode !== 'capture-mml' && lastPlayMode !== 'nsf' && lastPlayMode !== 'kss' && lastPlayMode !== 'spc' && lastPlayMode !== 'gbs' && lastPlayMode !== 'hes' && lastPlayMode !== 'vgm') return null;
+      if (lastPlayMode !== 'capture-mml' && lastPlayMode !== 'nsf' && lastPlayMode !== 'kss' && lastPlayMode !== 'spc' && lastPlayMode !== 'gbs' && lastPlayMode !== 'hes' && lastPlayMode !== 'vgm' && lastPlayMode !== 'psf') return null;
       let sec = Math.max(0, Math.min(workletDuration, seconds));
       // プレイヤー側の内部クランプ(NsfReplayStreamPlayer.seek()等)だけに任せると、ユーザーが
       // バッファより先へ動かした「つもり」のまま実際は手前へ戻っていて無音になり「シークすると
@@ -3557,6 +3591,21 @@
   function confirmDiscardMmlEdits() {
     if (lastSyncedMmlText === null || mmlSourceEl.value === lastSyncedMmlText) return true;
     return window.confirm(T('MMLエディタの内容が変更されています。保存せずに破棄して開きますか？'));
+  }
+
+  // *2MML変換でエディタの本文が別の曲に差し替わったときに、前の曲から引き継いではいけない
+  // ものをまとめて捨てる(ユーザー指摘 2026-09-16)。呼ぶのは各 run*2Mml の本文差し替え直前。
+  //  ・上のログ欄: 前の曲の読み込み/取り込みメッセージ(MusicXML取り込みの要約と注意など)が
+  //    残ると新しい曲の話に見えてしまう。下のcaptureOutputEl側は直後のprepareMmlStream()が
+  //    書き直すのでここでは触らない
+  //  ・ファイル名: 保存ダイアログの既定値。前の曲の名前のまま上書きさせない(空=song.mml)
+  //  ・外部エディタ同期: 変換結果は前のファイルの内容ではないので、黙って上書きしないよう切る
+  //    (MusicXML取り込みと同じ扱い)。lastSyncedMmlTextは前の曲のまま=未保存扱いにしておき、
+  //    次に「開く」でこの変換結果を捨てるときは確認を出す
+  function resetMmlForNewSong() {
+    mmlOutputEl.innerHTML = '';
+    currentMmlFileName = '';
+    FileSync.detach();
   }
 
   function mmlFileStatus(text, cls) {
@@ -4345,6 +4394,7 @@
   setupTempoControl('gbs');
   setupTempoControl('hes');
   setupTempoControl('vgm');
+  setupTempoControl('psf');
 
   // 変換テンポ入力欄の値 (空/不正なら null = 自動検出)
   function getManualBpm(prefix) {
@@ -4416,6 +4466,7 @@
     }
 
     // MML エディタに挿入
+    resetMmlForNewSong(); // 別の曲になるのでログ/ファイル名/外部同期は引き継がない
     mmlSourceEl.value = converted.mml;
     resetDpcmEditor();
     mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新
@@ -5577,6 +5628,7 @@
     updateSpcPlayButton();
 
     // MML エディタへ出力
+    resetMmlForNewSong(); // 別の曲になるのでログ/ファイル名/外部同期は引き継がない
     mmlSourceEl.value = result.mml;
     noteToneDemotions(result);
     resetDpcmEditor();
@@ -6250,6 +6302,7 @@
     kssIsRendering = false;
     updateKssPlayButton();
 
+    resetMmlForNewSong(); // 別の曲になるのでログ/ファイル名/外部同期は引き継がない
     mmlSourceEl.value = result.mml;
     noteToneDemotions(result);
     resetDpcmEditor();
@@ -6606,6 +6659,7 @@
     gbsIsRendering = false;
     updateGbsPlayButton();
 
+    resetMmlForNewSong(); // 別の曲になるのでログ/ファイル名/外部同期は引き継がない
     mmlSourceEl.value = result.mml;
     noteToneDemotions(result);
     resetDpcmEditor();
@@ -7092,6 +7146,7 @@
     hesIsRendering = false;
     updateHesPlayButton();
 
+    resetMmlForNewSong(); // 別の曲になるのでログ/ファイル名/外部同期は引き継がない
     mmlSourceEl.value = result.mml;
     noteToneDemotions(result);
     resetDpcmEditor();
@@ -7141,6 +7196,562 @@
   document.getElementById('btnHes2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'hes', onConvert: runHes2Mml }));
   document.getElementById('btnHesTrackPrev').addEventListener('click', () => changeHesTrack(-1));
   document.getElementById('btnHesTrackNext').addEventListener('click', () => changeHesTrack(1));
+
+  // ── PSF(PlayStation)ファイル読み込み・再生 ────────────────────────────
+  // ★PSF は「曲データ入りの PS-EXE」を MIPS CPU+HLE BIOS で走らせて SPU を鳴らす形式
+  //   (src/emulator/psfPlayer.js 冒頭)。再生は SPC と同じく「Worker でフルエミュレーションした
+  //   SPU 書き込みログを、メインスレッドの SPU 単独エミュへ流し直す」方式
+  //   (src/audio/psf-stream-player.js、速度1ではサンプル単位で一致)。
+  // ★鍵盤表示/ロール/ドラムパッド/基準音補正は VGM の PCM チップ(C352 等)と同じ経路を使う。
+  //   キャプチャのフレームスナップショットを Emu.snapshotPsx で C352 と同じ形に変換する
+  //   (src/emulator/psxSampleBank.js)。行 id は PX<n>。意味は表示モード(vgmPoolModes.psx)で変わる:
+  //   'track'(既定)=ドライバ内部トラック×声部のレーン(Emu.PsfTrackVoicer、行名 T17-2 等) / 'logical'=合成ch 32本 /
+  //   'phys'=SPU ボイス0-23。変換のソースID psx:<n-1> も同じレーンを指す。
+  // ★_lib(.psflib)は、zip ならアーカイブ内の兄弟ファイル、単体ならいっしょに選ばれた/ドロップ
+  //   されたファイルから名前で引く(psfSiblingResolver。initUnifiedSoundFileWindow が設定する)。
+  const psfFileEl       = document.getElementById('psfFile');
+  const psfFileHeaderEl = document.getElementById('psfFileHeader');
+  const psfPlayDurEl    = document.getElementById('psfPlayDuration');
+  const psfFileStatusEl = document.getElementById('psfFileStatus');
+
+  let loadedPsfInfo = null;      // MML.PSF.load() の結果(_lib 解決済み)
+  let loadedPsfName = '';
+  let psfIsRendering = false;
+  let psfActivePlayer = null;    // PsfReplayStreamPlayer
+  let psfCaptureMirror = null;   // { cap, done, token } 進行中/完了済みキャプチャ(ロール再構築・ドラム用)
+  let psfSampleBank = null;      // Emu.PsxSampleBank(サンプル解析。鍵盤/ロール/基準音補正で共有)
+  let psfSiblingResolver = null; // (name) => Promise<Uint8Array|null>
+  let psfLiveRegrouper = null;   // 合成ch表示のライブ用(Emu.PoolChannelRegrouper)
+  let psfRollState = {};         // RollBuild.psf の変換済みスナップショット
+  let psfCaptureComplete = false; // 表示用キャプチャが最後まで終わったか(トラックモードの既定割当はそこで決める)
+  let psfTrackPlanCache = null;  // トラックモードの既定割当 { plan(ソースID→借用先), lanes(レーン表) }(psfRefreshTrackPlan)
+
+  function psfTagLine(label, v) { return v ? `${label}${v}\n` : ''; }
+
+  function renderPsfHeader(info) {
+    const t = info.tags || {};
+    let out = '';
+    out += `PSF1  PC=${toHex(info.pc >>> 0, 8)}  SP=${toHex(info.sp >>> 0, 8)}  ${info.refresh}Hz\n`;
+    if (info.libs && info.libs.length) out += T('_lib        : {libs}', { libs: info.libs.join(', ') }) + '\n';
+    out += psfTagLine(T('曲名        : '), t.title);
+    out += psfTagLine(T('ゲーム      : '), t.game);
+    out += psfTagLine(T('アーティスト: '), t.artist);
+    out += psfTagLine(T('年          : '), t.year);
+    out += psfTagLine(T('著作権      : '), t.copyright);
+    out += psfTagLine(T('リッパー    : '), t.psfby || t.ripper);
+    if (info.lengthMs != null) out += T('長さ        : {len} 秒 + フェード {fade} 秒', { len: (info.lengthMs / 1000).toFixed(1), fade: ((info.fadeMs || 0) / 1000).toFixed(1) }) + '\n';
+    psfFileHeaderEl.innerHTML = '';
+    const pre = document.createElement('div');
+    pre.className = 'ok';
+    pre.textContent = out;
+    psfFileHeaderEl.appendChild(pre);
+  }
+
+  async function loadPsfFile() {
+    const file = psfFileEl.files[0];
+    if (!file) return;
+    stopAllFormatPlayback();
+    keyboardDisplay.reset();
+    psfSetPlanDefaults(); // 新ファイル: チャンネル割当をリセットして既定割当(先頭8ボイス→N163)を登録
+    setKbdSource('psf', file.name);
+    loadedPsfInfo = null; loadedPsfName = file.name;
+    psfCaptureMirror = null; psfSampleBank = null;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    try {
+      const info = await MML.PSF.load(bytes, psfSiblingResolver);
+      loadedPsfInfo = info;
+      renderPsfHeader(info);
+      // タグの長さ(+フェード)を再生時間欄へ。フェード分は再生側の FADE_SEC が別に足すので長さだけ入れる
+      if (info.lengthMs) {
+        const min = parseInt(psfPlayDurEl.min, 10) || 1;
+        const max = parseInt(psfPlayDurEl.max, 10) || 3600;
+        psfPlayDurEl.value = String(Math.max(min, Math.min(max, Math.ceil(info.lengthMs / 1000))));
+      }
+      psfFileStatusEl.innerHTML = '';
+      if (info.title) setKbdSource('psf', info.title);
+    } catch (e) {
+      psfFileHeaderEl.innerHTML = '<div class="error">' + T('読み込みエラー: {msg}', { msg: e.message }) + '</div>';
+    }
+  }
+
+  // ── PSF チャンネル割当 ──
+  // 変換器は vgm2mml の PCM チップ経路なので、割当の既定(PSF2MML.defaultPlan)と変換時のキー(ソースID 'psx:N')は
+  // VGM と同じ体系。鍵盤の行ID(PX1-24)との橋渡しは ChannelPlan.chIdForVgmSource(VGM_SRC_TO_CH の psx:'PX')。
+  function psfSetPlanDefaults() {
+    const Plan = MML.Convert.ChannelPlan;
+    const map = {};
+    psfTrackPlanCache = null;
+    // トラックモードのレーンは曲を取り込むまで決まらない(既定割当は psfRefreshTrackPlan で後から入れる)
+    if (MML.PSF2MML && MML.VGM2MML && vgmPoolModes.psx !== 'track') {
+      const plan = MML.PSF2MML.defaultPlan(null);
+      for (const srcId of Object.keys(plan)) {
+        const chId = Plan.chIdForVgmSource(srcId);
+        if (chId) map[chId] = plan[srcId];
+      }
+    }
+    Plan.newFile('psf', map);
+  }
+  // 変換用の割当・音色(ソースIDキー)。VGM の getVgmChannelMap/getVgmTone/getVgmVrc7Inst と同じ規則
+  function psfConvertMaps() {
+    const Plan = MML.Convert.ChannelPlan;
+    // トラックモード: 取り込み済みのレーン表で元chを並べ、既定はトラック単位の割当(PSF2MML.trackPlan)。
+    // まだ取り込みが終わっていなければ割当を渡さない(fromPsf がその場でトラック単位の既定割当を作る)
+    const trackMode = vgmPoolModes.psx === 'track';
+    if (trackMode && !psfTrackPlanCache) return { channelMap: null, tone: {}, vrc7Inst: {} };
+    const src = MML.PSF2MML.sourceChannels(null, trackMode ? psfTrackPlanCache.lanes : null);
+    const def = trackMode ? psfTrackPlanCache.plan : MML.PSF2MML.defaultPlan(null);
+    const channelMap = {}, tone = {}, vrc7Inst = {};
+    let changed = false;
+    for (const s of src) {
+      const chId = Plan.chIdForVgmSource(s.id);
+      const ent = (chId && Plan.get(chId)) || {};
+      channelMap[s.id] = ent.target || def[s.id] || 'skip';
+      if (channelMap[s.id] !== (def[s.id] || 'skip')) changed = true;
+      if (ent.tone !== undefined) tone[s.id] = ent.tone;
+      if (/^vrc7_/.test(channelMap[s.id])) vrc7Inst[s.id] = ent.tone !== undefined ? ent.tone : MML.VGM2MML.defaultVrc7Inst(s.kind);
+    }
+    // ドラムパート(合成ch)は鍵盤に行が無い。ノイズ枠が空いていればそこへ入れる(VGM と同じ)
+    if (!src.some(s => channelMap[s.id] === 'noise')) {
+      const drum = src.find(s => /:drum$/.test(s.id) && channelMap[s.id] === 'skip');
+      if (drum) { channelMap[drum.id] = 'noise'; changed = true; }
+    }
+    // トラックモードは常に渡す(渡さないと変換器の「音符の多いch上位を N163 の8枠へ」になりトラック単位が崩れる)
+    return { channelMap: (changed || trackMode) ? channelMap : null, tone, vrc7Inst };
+  }
+
+  // 保持中のキャプチャから、表示モードのレーン列(RollBuild.psxFrames)を取る。無ければ null
+  function psfModeData() {
+    if (!psfCaptureMirror || !MML.RollBuild || !MML.RollBuild.psfObjectSnapshots) return null;
+    return MML.RollBuild.psfObjectSnapshots(psfCaptureMirror.cap, psfRollState);
+  }
+  function psfLaneFrames(mode) {
+    const data = psfModeData();
+    return data ? MML.RollBuild.psxFrames(data, mode) : null;
+  }
+
+  // トラックモードの後始末(取り込み完了時・表示モード切替時・ロール再構築時):
+  //  - 複製レーン(デチューン二重化/エコー)に「≈T8」の印を付ける(鍵盤の行名)
+  //  - トラック単位の既定割当(PSF2MML.trackPlan)をチャンネル割当の既定へ入れる(ユーザーが変えた分は残る)
+  // 他のモードでは従来の既定(先頭から N163)に戻す
+  function psfRefreshTrackPlan() {
+    const Plan = MML.Convert.ChannelPlan;
+    const toChMap = (plan) => {
+      const map = {};
+      for (const srcId of Object.keys(plan)) { const chId = Plan.chIdForVgmSource(srcId); if (chId) map[chId] = plan[srcId]; }
+      return map;
+    };
+    if (vgmPoolModes.psx !== 'track') {
+      psfTrackPlanCache = null;
+      Plan.setDefaults(toChMap(MML.PSF2MML.defaultPlan(null)));
+      return;
+    }
+    if (!psfCaptureComplete) return;
+    const data = psfModeData();
+    const frames = data && MML.RollBuild.psxTrackFrames(data);
+    const st = data && data.psx.__trackState;
+    if (!frames || !st) return;
+    try {
+      const lanes = st.vc.laneTable();
+      const d = { psx: { snapshots: frames, lanes, doubles: MML.Convert.PoolDoubles ? MML.Convert.PoolDoubles.find(frames) : null } };
+      const labels = MML.PSF2MML.laneLabels(lanes);
+      const copyOf = MML.PSF2MML.copyLanes(d);
+      for (const l of st.vc.lanes) l.copyOf = copyOf.has(l.index) ? labels[copyOf.get(l.index)].replace(/-\d+$/, '') : undefined;
+      MML.Emu.PsfTrackVoicer.copyVersion++;
+      const plan = MML.PSF2MML.trackPlan(d);
+      psfTrackPlanCache = { plan, lanes };
+      // ロールの区画(トラック単位)と複製の点線表示へ、決まった印を反映する
+      const meta = {};
+      for (const l of st.vc.lanes) {
+        const base = MML.Emu.PsfTrackVoicer.laneName(l, 1);
+        meta['PX' + (l.index + 1)] = { laneGroup: l.copyOf || base, laneCopy: !!l.copyOf };
+      }
+      keyboardDisplay.setRollTrackLaneMeta(meta);
+      Plan.setDefaults(toChMap(plan));
+    } catch (e) { console.warn('PSF トラックの既定割当に失敗:', e); }
+  }
+
+  function stopPsfPlayback() {
+    if (psfActivePlayer) {
+      psfActivePlayer.destroy();
+      psfActivePlayer = null;
+    }
+    psfRollToken++; // 進行中の先読みキャプチャ結果を無効化
+    // ★停止ではロールを消さない(他形式と同じ。止めた状態でもロールとパッドを見られるように)
+    updatePsfPlayButton();
+  }
+
+  function updatePsfPlayButton() {
+    const btn = document.getElementById('btnPsfFilePlay');
+    if (!btn) return;
+    const playing = psfActivePlayer && psfActivePlayer.isPlaying;
+    btn.classList.toggle('is-playing', !!playing);
+    btn.title = playing ? T('一時停止') : T('再生');
+    btn.disabled = psfIsRendering;
+    updateKeyboardTransport();
+  }
+
+  // 鍵盤表示のライブ行: 再生位置のフレームのスナップショットを C352 と同じ形へ変換する
+  // (SPU 単独再生側はサンプル番号を持たないので、キャプチャのスナップショットを使う)
+  function livePsx() {
+    if (!psfActivePlayer || !psfCaptureMirror || !psfSampleBank) return null;
+    const snaps = psfCaptureMirror.cap.snapshots;
+    const f = Math.min(psfActivePlayer.getCurrentFrame(), snaps.length - 1);
+    if (f < 0 || !snaps[f]) return null;
+    if (vgmPoolModes.psx === 'track') {
+      // トラックモードは声部の割り当てが曲の頭からの状態を持つので、ライブで束ね直さず取り込み済みのレーン列を読む。
+      // 行が再生位置で増減しないよう、その時点で分かっている全レーンぶんに空きを足す
+      const data = psfModeData();
+      const frames = data && MML.RollBuild.psxTrackFrames(data);
+      const st = data && data.psx.__trackState;
+      if (frames && frames[f] && st) {
+        const fr = frames[f];
+        if (fr.length >= st.vc.lanes.length) return fr;
+        const out = fr.slice();
+        for (let li = fr.length; li < st.vc.lanes.length; li++) out.push(st.vc._idle[li]);
+        return out;
+      }
+    }
+    const obj = MML.Emu.snapshotPsx(snaps[f], psfSampleBank);
+    if (vgmPoolModes.psx !== 'logical') return obj;
+    if (!psfLiveRegrouper) psfLiveRegrouper = new MML.Emu.PoolChannelRegrouper(MML.Emu.POOL_CHIP_CHANNELS.psx);
+    return psfLiveRegrouper.step(obj);
+  }
+
+  // 保持中のキャプチャからロールを組み直す(表示モード切替・打楽器/音階指定・基準音補正のあと)
+  function rebuildPsfRoll() {
+    if (!psfCaptureMirror || !MML.RollBuild || !MML.RollBuild.psf) return;
+    psfLiveRegrouper = null;
+    psfRollState = {}; // 解析結果(サンプルの音程判定)が変わりうるので変換済みスナップショットも捨てる
+    if (psfSampleBank) psfSampleBank._pitchCache.clear();
+    // レーン列を作り直したので、複製の印と既定割当も付け直す(ロールの色が複製の印を読むので先に)
+    psfRefreshTrackPlan();
+    try {
+      const cap = psfCaptureMirror.cap;
+      const t = MML.RollBuild.psf(cap, cap.snapshots.length, { poolMode: vgmPoolModes }, psfRollState);
+      pushRollTimeline(t);
+    } catch (e) { console.warn('PSFのロール再構築に失敗:', e); }
+  }
+
+  // ドラムパッド台帳: VGM の updateVgmDrumSamples と同じ形('psx:<start>' → {pcm, rate, hash, chip, chans})
+  function updatePsfDrumSamples() {
+    if (!psfCaptureMirror || !psfSampleBank) return;
+    const cap = psfCaptureMirror.cap;
+    const S = MML.Emu.PSF_SNAP, F = S.VOICE_FIELDS;
+    const out = {};
+    const firstRate = {}, chansOf = {};
+    for (const snap of cap.snapshots) {
+      if (!snap) continue;
+      for (let v = 0; v < 24; v++) {
+        const id = snap[v * F + S.SAMPLE];
+        if (id < 0 || (snap[v * F + S.FLAGS] & 1)) continue;
+        if (firstRate[id] === undefined && snap[v * F + S.PHASE] !== 0) firstRate[id] = 44100 * Math.min(0x4000, snap[v * F + S.PITCH]) / 0x1000;
+        (chansOf[id] = chansOf[id] || new Set()).add(v);
+      }
+    }
+    for (const idStr of Object.keys(chansOf)) {
+      const id = +idStr;
+      const smp = cap.samples[id];
+      if (!smp) continue;
+      const key = 'psx:' + smp.addr;
+      if (out[key]) continue;
+      const p = psfSampleBank.samplePitch('psx', smp.addr, smp.addr + smp.blocks * 16, id);
+      out[key] = { pcm: psfSampleBank.samplePcm({ kind: 'psx', start: smp.addr, end: smp.addr + smp.blocks * 16, id }),
+                   rate: firstRate[id] || 44100, hash: p ? p.hash : null, chip: 'psx', chans: Array.from(chansOf[id]) };
+    }
+    setDrumSampleStore(out);
+    drumHitsProvider = psfDrumHitsProvider();
+  }
+
+  // PSF の打点プロバイダ。割当で借用先に 'dpcm' を選んだボイスの打点を集める
+  // (VGM の vgmDrumHitsProvider と同じ選び方。打点の取り出しは vgm2mml の collectDrumHits を共用)
+  function psfDrumHitsProvider() {
+    const dpcmVoices = () => {
+      const Plan = MML.Convert.ChannelPlan;
+      const out = { chans: [], rateIndex: null };
+      for (let v = 0; v < MML.Emu.POOL_CHIP_CHANNELS.psx; v++) { // 合成chは32本(実機スロットでは24以降は空)
+        const ent = Plan.get('PX' + (v + 1)) || {};
+        if (ent.target !== 'dpcm') continue;
+        out.chans.push(v);
+        const t = ent.tone;
+        if (out.rateIndex === null && t !== undefined && t !== null && t !== '' && t !== 'auto') {
+          const n = parseInt(t, 10);
+          if (Number.isFinite(n)) out.rateIndex = n;
+        }
+      }
+      return out;
+    };
+    return {
+      format: 'psf',
+      frameRate: 60,
+      get totalFrames() { return psfCaptureMirror ? psfCaptureMirror.cap.snapshots.length : 0; },
+      build() {
+        const { chans, rateIndex } = dpcmVoices();
+        if (!chans.length || !psfCaptureMirror || !MML.Vgm2MmlExpansion || !MML.Vgm2MmlExpansion.collectDrumHits) return null;
+        const cap = psfCaptureMirror.cap;
+        const data = MML.RollBuild.psfObjectSnapshots(cap, psfRollState);
+        // 行(PX<n>)の意味は表示モードで変わる(トラック/合成ch/実機スロット)。変換(PSF2MML.captureData)と同じ束ね方にそろえる
+        const snapsForPlan = MML.RollBuild.psxFrames(data, vgmPoolModes.psx);
+        const samples = {};
+        for (let id = 0; id < cap.samples.length; id++) {
+          const smp = cap.samples[id];
+          if (!smp) continue;
+          const key = 'psx:' + smp.addr + ':' + (smp.addr + smp.blocks * 16);
+          if (!samples[key]) samples[key] = psfSampleBank.samplePcm({ kind: 'psx', start: smp.addr, end: smp.addr + smp.blocks * 16, id });
+        }
+        const sources = [{ chip: 'psx', snapshots: snapsForPlan, chans, shape: 'pcm', samples }];
+        return { hits: MML.Vgm2MmlExpansion.collectDrumHits(sources, 60, snapsForPlan.length), rateIndex };
+      },
+      listedKeys() {
+        const { chans } = dpcmVoices();
+        return Object.keys(drumSampleStore).filter(k => {
+          const smp = drumSampleStore[k];
+          return smp && smp.chip === 'psx' && (smp.chans || []).some(v => chans.indexOf(v) >= 0);
+        });
+      },
+    };
+  }
+
+  // キャプチャ中に BIOS 模倣が止まった/未実装の呼び出しがあったことを知らせる(黙って無音にしない)
+  function psfBiosNotice(bios) {
+    if (!bios) return '';
+    const parts = [];
+    if (bios.halted) parts.push(T('エミュレーションが停止しました: {reason}', { reason: bios.haltReason || '?' }));
+    if (bios.unknownCalls && bios.unknownCalls.length) {
+      parts.push(T('未実装のBIOS呼び出し: {calls}', { calls: bios.unknownCalls.map(([k, n]) => `${k}×${n}`).join(' ') }));
+    }
+    return parts.length ? '<div class="error">' + parts.map(escapeHtmlPsf).join('<br>') + '</div>' : '';
+  }
+  function escapeHtmlPsf(str) {
+    return String(str).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
+  function playPsfStream() {
+    if (!loadedPsfInfo) {
+      psfFileStatusEl.innerHTML = '<div class="error">' + T('先にPSFファイルを読み込んでください。') + '</div>';
+      return;
+    }
+    if (psfActivePlayer && lastPlayMode === 'psf') {
+      if (psfActivePlayer.isPlaying) transportPause();
+      else transportPlay();
+      return;
+    }
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    transportStop();
+    stopAllFormatPlayback();
+    invalidateOtherRollPrefetch('psf');
+    lastPlayMode = 'psf';
+    setKbdSource('psf', loadedPsfInfo.title || loadedPsfName);
+    psfBufferedFraction = 0;
+    updateSeekBufferedUI();
+
+    const duration = parseInt(psfPlayDurEl.value, 10) || 180;
+    const captureDuration = duration + FADE_SEC;
+    const totalFrames = Math.ceil(captureDuration * 60);
+
+    const player = new MML.Audio.PsfReplayStreamPlayer(audioCtx);
+    player._baseGain = player.gainNode.gain.value;
+    attachAssignPreview(player);
+    endFadeActive = false;
+    player.onEnded = () => {
+      updatePsfPlayButton();
+      updateTransportUI();
+      setTimeout(() => { if (currentTransportPlayer() === player) finishSoundFilePlayback(); }, 0);
+    };
+    player.onSilenceTimeout = () => {
+      setTimeout(() => {
+        if (currentTransportPlayer() !== player) return;
+        stopPsfPlayback();
+        archiveAutoAdvanceOrStop();
+      }, 1000);
+    };
+    psfActivePlayer = player;
+    // 行単位のミュート/音量: トラック/合成chの行はレーンなので、そのフレームにレーンが使っているボイスへ写す
+    player.setLaneFrames((f) => {
+      if (vgmPoolModes.psx === 'phys') return null;
+      const frames = psfLaneFrames(vgmPoolModes.psx);
+      return frames && frames[f] ? frames[f] : null;
+    });
+    player.setSpeed(currentSpeedFactor);
+    workletDuration = captureDuration;
+
+    resetPlaybackRangeToFull(captureDuration);
+    setSeekBarValue(0);
+    setTimeDisplay(`00:00 / ${formatTime(captureDuration)}`);
+
+    psfFileStatusEl.innerHTML = '';
+    const pre = document.createElement('div');
+    pre.className = 'ok';
+    pre.textContent = T('再生中: {title}  (最大 {time})', { title: loadedPsfInfo.title || loadedPsfName, time: formatTime(duration) });
+    psfFileStatusEl.appendChild(pre);
+
+    setMonitorSource({
+      regSnapshots: [{}], totalFrames: 1,
+      samplesPerFrame: audioCtx.sampleRate / 60,
+      sampleRate: audioCtx.sampleRate,
+      writeLog: [], cpuSnapshots: null, memSnapshots: null,
+      getPsx: livePsx
+    }, () => psfActivePlayer ? psfActivePlayer.getPosition() : 0, ['vgm', 'psx']);
+
+    keyboardDisplay.setRollTimeline(null);
+    const myToken = ++psfRollToken;
+    psfCaptureMirror = null;
+    psfSampleBank = null;
+    psfLiveRegrouper = null;
+    psfRollState = {};
+    psfCaptureComplete = false;
+    drumSampleStore = {};
+    drumHitsProvider = null;
+    synthDrumReset();
+    keyboardDisplay.setDpcmCost(null);
+    let loaded = false;
+    const t0 = performance.now();
+
+    MML.Emu.capturePsfSongWorkerAsync(loadedPsfInfo, {
+      durationSeconds: captureDuration,
+      regsOnly: true,
+      shouldCancel: () => myToken !== psfRollToken,
+      roll: {
+        poolMode: Object.assign({}, vgmPoolModes),
+        onRoll: (timeline) => {
+          if (myToken !== psfRollToken) return;
+          pushRollTimeline(timeline);
+        }
+      }
+    }, (done, total, cap) => {
+      if (myToken !== psfRollToken) return;
+      if (!psfSampleBank || psfSampleBank.samples !== cap.samples) psfSampleBank = new MML.Emu.PsxSampleBank(cap.samples);
+      psfCaptureMirror = { cap, done, token: myToken };
+      if (!loaded && cap.frameLog.length > 0) {
+        loaded = true;
+        player.load(cap, total, getChannelMuteConfig());
+        player.applyVolume(getChannelVolumeConfig());
+        transportPlay();
+      }
+      psfBufferedFraction = total > 0 ? done / total : 0;
+      updateSeekBufferedUI();
+    }).then((cap) => {
+      if (myToken !== psfRollToken || !cap) return;
+      if (!psfSampleBank || psfSampleBank.samples !== cap.samples) psfSampleBank = new MML.Emu.PsxSampleBank(cap.samples);
+      psfCaptureMirror = { cap, done: cap.snapshots.length, token: myToken };
+      psfCaptureComplete = true;
+      psfBufferedFraction = 1;
+      updateSeekBufferedUI();
+      psfRefreshTrackPlan();
+      updatePsfDrumSamples();
+      synthDrumEnsure();
+      refreshDrumPanel();
+      scheduleDpcmCostUpdate();
+      const notice = psfBiosNotice(cap.bios);
+      if (notice) psfFileStatusEl.insertAdjacentHTML('beforeend', notice);
+      console.info(`[psf] キャプチャ完了 ${((performance.now() - t0) / 1000).toFixed(1)}s / 曲長 ${captureDuration}s, サンプル ${cap.samples.length}`);
+    }).catch((e) => {
+      console.error('PSF先読みキャプチャに失敗:', e);
+      psfFileStatusEl.insertAdjacentHTML('beforeend', '<div class="error">' + escapeHtmlPsf(T('キャプチャに失敗しました: {msg}', { msg: e.message })) + '</div>');
+    });
+  }
+
+  async function exportPsfWav() {
+    if (!loadedPsfInfo) {
+      psfFileStatusEl.innerHTML = '<div class="error">' + T('先にPSFファイルを読み込んでください。') + '</div>';
+      return;
+    }
+    if (psfIsRendering) return;
+    const duration = parseInt(psfPlayDurEl.value, 10) || 180;
+    psfIsRendering = true;
+    updatePsfPlayButton();
+    psfFileStatusEl.innerHTML = '<div>' + T('WAV書き出し用レンダリング中…') + '</div>';
+    await new Promise(resolve => setTimeout(resolve, 10));
+    let cap;
+    try {
+      // 44.1kHz(SPU の実レート)のまま書き出す。鍵盤のch別ミュートを反映(他形式と同じ)
+      const mute = getChannelMuteConfig(true);
+      cap = await MML.Emu.capturePsfSongAsync(loadedPsfInfo, {
+        durationSeconds: duration, mute: (mute.expansion && mute.expansion.psx) || [],
+      }, (done, total) => {
+        psfFileStatusEl.innerHTML = '<div>' + T('WAV書き出し用レンダリング中… {pct}%', { pct: Math.round(done * 100 / Math.max(1, total)) }) + '</div>';
+      });
+    } catch (e) {
+      psfIsRendering = false;
+      updatePsfPlayButton();
+      psfFileStatusEl.innerHTML = '<div class="error">' + T('レンダリングエラー: {msg}', { msg: e.message }) + '</div>';
+      return;
+    }
+    // ch別音量(0〜2)は SPU の vol へ入れたいが、キャプチャ本体は vol を持たないので書き出しでは未対応(ミュートのみ)
+    psfIsRendering = false;
+    updatePsfPlayButton();
+    const base = (loadedPsfName || 'psf').replace(/\.[^.]*$/, '');
+    const filename = await downloadExportAudio(base, [cap.audioL, cap.audioR], 44100, 1.0, psfFileStatusEl);
+    psfFileStatusEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file: filename }) + '</div>' + psfBiosNotice(cap.bios);
+  }
+
+  async function runPsf2Mml() {
+    if (!loadedPsfInfo) {
+      psfFileStatusEl.innerHTML = '<div class="error">' + T('先にPSFファイルを読み込んでください。') + '</div>';
+      return;
+    }
+    if (psfIsRendering) return;
+    const duration = parseInt(psfPlayDurEl.value, 10) || 60;
+    psfIsRendering = true;
+    updatePsfPlayButton();
+    psfFileStatusEl.innerHTML = '<div>' + T('MML変換用キャプチャ中… (数秒かかります)') + '</div>';
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const manualBpm = getManualBpm('psf');
+    let result;
+    try {
+      await synthDrumEnsure();
+      const planOpt = planConvertOptions();
+      const maps = psfConvertMaps();
+      result = await MML.PSF2MML.fromPsf(loadedPsfInfo, duration, {
+        bpm: manualBpm, cmd: MML.UI.ConvertSettings.get(), onProgress: makeCaptureProgress(psfFileStatusEl),
+        poolMode: vgmPoolModes.psx,
+        channelMap: maps.channelMap, tone: maps.tone, vrc7Inst: maps.vrc7Inst,
+        drumHits: planOpt.drumHits, toneSettings: planOpt.toneSettings,
+      });
+    } catch (e) {
+      psfIsRendering = false;
+      updatePsfPlayButton();
+      psfFileStatusEl.innerHTML = '<div class="error">' + T('変換エラー: {msg}', { msg: e.message }) + '</div>';
+      return;
+    }
+    psfIsRendering = false;
+    updatePsfPlayButton();
+
+    resetMmlForNewSong(); // 別の曲になるのでログ/ファイル名/外部同期は引き継がない
+    mmlSourceEl.value = result.mml;
+    noteToneDemotions(result);
+    resetDpcmEditor();
+    mmlSourceEl.dispatchEvent(new Event('input'));
+    if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
+    const dmc = result.dpcmFiles || result.dmcFiles || [];
+    for (const d of dmc) {
+      downloadBin(d.name, d.bytes);
+      setDpcmSampleBytes(d.name, d.bytes);
+    }
+    const ds = result.dpcmStats;
+    const dpcmMsg = ds ? '<div>' + T('DPCM: 定義 {clips} 件 / 打点 {segments} 個 / ROM {kb} KB',
+      { clips: ds.clips, segments: ds.segments, kb: (ds.bytes / 1024).toFixed(1) }) + '</div>' : '';
+    const borrowNote = T('(借用先: {assign})', { assign: (result.assignments || []).filter(a => !/\(skip\)$/.test(a)).join(', ') });
+    psfFileStatusEl.innerHTML =
+      '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力{borrow}{ignored}',
+        { mode: manualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: (result.chips || []).join(', '), borrow: borrowNote, ignored: '' }) + '</div>' +
+      dpcmMsg + psfBiosNotice(result.bios) + renderTuning(result.tuning) + renderPitchCheck(result.pitchCheck);
+    rangeStartSec = 0;
+    rangeEndSec = null;
+    prepareMmlStream(true);
+  }
+
+  psfFileEl.addEventListener('change', loadPsfFile);
+  document.getElementById('btnPsfFilePlay').addEventListener('click', () => {
+    playPsfStream();
+    keyboardDisplay.setMode('nsf');
+  });
+  document.getElementById('btnPsfFileStop').addEventListener('click', () => {
+    stopPsfPlayback();
+    keyboardDisplay.setMode('nsf');
+  });
+  document.getElementById('btnPsfExportWav').addEventListener('click', exportPsfWav);
+  document.getElementById('btnPsf2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'psf', onConvert: runPsf2Mml }));
 
   // ── VGM ファイル読み込み・再生 ────────────────────────────────────
   // ★VGMはCPUを持たないレジスタ書込みログ(src/emulator/vgmPlayer.js冒頭コメント)。
@@ -7351,13 +7962,24 @@
   // 既定: 完全プール式で劇的改善のMultiPCMのみ合成ch(既定8枠カバー率45%→100%)、
   // 他はペア交互でも音符ストリームはほぼ安定と実測されたため実機スロット既定
   // (Outfoxies等のマルチサンプル曲では合成が僅かに劣るケースもある。トグルで曲別に選ぶ)
-  const POOL_CHIP_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', c140: 'phys', segapcm: 'phys' };
+  // psx は 'track'(ドライバ内部トラック×声部、Emu.PsfTrackVoicer)/'logical'/'phys' の3段
+  const POOL_CHIP_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', c140: 'phys', segapcm: 'phys', psx: 'track' };
   const vgmPoolModes = (() => {
-    try { return Object.assign({}, POOL_CHIP_DEFAULTS, JSON.parse(localStorage.getItem(POOL_MODE_KEY) || '{}')); }
-    catch (e) { return Object.assign({}, POOL_CHIP_DEFAULTS); }
+    let modes;
+    try { modes = Object.assign({}, POOL_CHIP_DEFAULTS, JSON.parse(localStorage.getItem(POOL_MODE_KEY) || '{}')); }
+    catch (e) { modes = Object.assign({}, POOL_CHIP_DEFAULTS); }
+    // トラックモードの追加(2026-09-14)前に保存された psx の選択は一度だけトラックへ移す(以前は合成chが既定だった)
+    try {
+      if (!localStorage.getItem('psxTrackModeIntroduced')) {
+        modes.psx = 'track';
+        localStorage.setItem(POOL_MODE_KEY, JSON.stringify(modes));
+        localStorage.setItem('psxTrackModeIntroduced', '1');
+      }
+    } catch (e) { /* ignore */ }
+    return modes;
   })();
   // ライブスナップショットの合成ch変換(モードがlogicalのチップだけ通す)
-  const POOL_CHIP_CHANNELS = { multipcm: 28, c352: 32, qsound: 16, c140: 24, segapcm: 16 };
+  const POOL_CHIP_CHANNELS = MML.Emu.POOL_CHIP_CHANNELS; // psx は合成chだけ32本(multipcm.js 参照)
   function poolLive(token, snap) {
     if (!snap || vgmPoolModes[token] !== 'logical') return snap;
     if (!vgmLiveRegroupers[token]) vgmLiveRegroupers[token] = new MML.Emu.PoolChannelRegrouper(POOL_CHIP_CHANNELS[token]);
@@ -7377,6 +7999,8 @@
         pushRollTimeline(t);
       } catch (e) { console.warn('表示モード切替のロール再構築に失敗:', e); }
     }
+    if (token === 'psx' && lastPlayMode === 'psf') rebuildPsfRoll();
+    else if (token === 'psx') psfRefreshTrackPlan();
   };
 
   // VGM再生中のライブチップスナップショット(鍵盤表示用)。既存の各フォーマット向け
@@ -7810,6 +8434,7 @@
     vgmIsRendering = false;
     updateVgmPlayButton();
 
+    resetMmlForNewSong(); // 別の曲になるのでログ/ファイル名/外部同期は引き継がない
     mmlSourceEl.value = result.mml;
     noteToneDemotions(result);
     resetDpcmEditor();
@@ -7863,7 +8488,7 @@
   // ==========================================================================
   (function initUnifiedSoundFileWindow() {
     const soundFileEl = document.getElementById('soundFile');
-    const formatToInputId = { nsf: 'nsfFile', spc: 'spcFile', kss: 'kssFile', gbs: 'gbsFile', hes: 'hesFile', vgm: 'vgmFile' };
+    const formatToInputId = { nsf: 'nsfFile', spc: 'spcFile', kss: 'kssFile', gbs: 'gbsFile', hes: 'hesFile', vgm: 'vgmFile', psf: 'psfFile' };
     // ファイル情報ペインの見出し。翻訳は keyboard.js 側でT()を通すので原文のまま渡す
     const FORMAT_INFO_TITLE = {
       nsf: 'ヘッダ情報 (NSF/NSFe)',
@@ -7872,6 +8497,7 @@
       gbs: 'ヘッダ情報 (GBS: Game Boy)',
       hes: 'ヘッダ情報 (HES: PC Engine/TurboGrafx-16)',
       vgm: 'ヘッダ情報 (VGM)',
+      psf: 'ヘッダ情報 (PSF: PlayStation)',
     };
 
     // 開いているフォーマットのヘッダ情報とログ(#xxxFileHeader / #xxxFileStatus)を、
@@ -7891,7 +8517,7 @@
     }
 
     function showSoundPanel(format) {
-      ['none', 'nsf', 'spc', 'kss', 'gbs', 'hes', 'vgm'].forEach((f) => {
+      ['none', 'nsf', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'psf'].forEach((f) => {
         const panel = document.getElementById('soundPanel-' + f);
         if (panel) panel.style.display = f === format ? '' : 'none';
       });
@@ -7918,7 +8544,7 @@
     // ドラッグ&ドロップ側はイベント発火だと完了(非同期)を待てず再生開始のタイミングが
     // 取れないため、openSoundFile()からは直接awaitで呼ぶ(inputのfilesへは同じくセットする
     // ので、loadXxxFile()側から見た見え方はダイアログ経由と変わらない)。
-    const formatToLoadFn = { nsf: loadNsfFile, spc: loadSpcFile, kss: loadKssFile, gbs: loadGbsFile, hes: loadHesFile, vgm: loadVgmFile };
+    const formatToLoadFn = { nsf: loadNsfFile, spc: loadSpcFile, kss: loadKssFile, gbs: loadGbsFile, hes: loadHesFile, vgm: loadVgmFile, psf: loadPsfFile };
     // ドラッグ&ドロップは「開いてそのまま再生」までを1操作で行いたいというユーザー要望。
     // ファイル選択ダイアログ側は従来通りヘッダ確認後に手動で再生ボタンを押す2段階のまま
     // 変えない(呼び出し元のdropハンドラでだけ再生を始める、openSoundFile自体は再生しない)。
@@ -7939,7 +8565,8 @@
     // 解析/解凍は src/archive/archive.js(MML.Archive。7zは sevenzip.js + lzma.js)。
     // アーカイブ内エントリのフォーマットは拡張子で決めるが、gzip(.vgz)は各loadXxxFile側が
     // 中身で判別する。
-    const ARCHIVE_EXTS = ['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz'];
+    // .psflib は曲ではなく _lib で参照される共通部品なので曲リストには載せない(PSF.load が名前で引く)
+    const ARCHIVE_EXTS = ['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf'];
     const archiveBarEl = document.getElementById('archiveBar');
     const archiveTrackBarEl = document.getElementById('archiveTrackBar');
     const archiveNameEl = document.getElementById('archiveName');
@@ -8006,6 +8633,8 @@
         } else {
           const bytes = await MML.Archive.readEntry(archive.bytes, item.entry);
           const entryFile = new File([bytes], MML.Archive.baseName(item.entry.name));
+          // PSF の _lib(.psflib)はアーカイブ内の兄弟ファイルから引く(エントリと同じフォルダを優先)
+          psfSiblingResolver = makeArchiveSiblingResolver(archive, item.entry);
           renderArchiveBar();
           fmt = await openSoundFile(entryFile, { fromArchive: true });
           archive.loadedEntry = fmt ? item.entry : null;
@@ -8036,11 +8665,11 @@
         playlist = await MML.Archive.buildPlaylist(parsed.entries, ARCHIVE_EXTS, (m3u) => MML.Archive.readEntry(bytes, m3u));
       } catch (e) { alert(T('アーカイブを解析できませんでした: {msg}', { msg: e.message })); return false; }
       if (playlist.length === 0) {
-        alert(T('アーカイブ内に対応するサウンドファイル(NSF/NSFE/SPC/KSS/GBS/HES/VGM)がありません。'));
+        alert(T('アーカイブ内に対応するサウンドファイル(NSF/NSFE/SPC/KSS/GBS/HES/VGM/PSF)がありません。'));
         return false;
       }
       stopAllFormatPlayback();
-      archive = { name: file.name, bytes, playlist, index: 0, loadedEntry: null, loadedFormat: null };
+      archive = { name: file.name, bytes, playlist, index: 0, loadedEntry: null, loadedFormat: null, entries: parsed.entries };
       ensureKeyboardWindowOpen();
       renderArchiveBar();
       return loadArchiveIndex(0, false);
@@ -8063,7 +8692,7 @@
       //   以前はここで即returnしていたため、単体のSPC/VGMではリピートが効かなかった
       if (!archive || archive.playlist.length <= 1) {
         if (repeatMode() === 'one') {
-          const playFn = { spc: playSpcStream, vgm: playVgmStream }[lastPlayMode];
+          const playFn = { spc: playSpcStream, vgm: playVgmStream, psf: playPsfStream }[lastPlayMode];
           if (playFn) { playFn(); return; }
         }
         updateKeyboardTransport();
@@ -8101,6 +8730,35 @@
     // ファイル選択ダイアログ・ドラッグ&ドロップの両方から呼ばれる共通処理。拡張子で
     // 対応フォーマットを判定し、フォーマット別の隠しinputへfilesをセットしてloadXxxFile()の
     // 完了を待つ。戻り値は成功時のフォーマット文字列('nsf'等)、失敗時false。
+    // 複数ファイルが来たときに「開く曲」を選ぶ。PSF の .psflib は部品なので曲を優先する
+    function pickPrimarySoundFile(files) {
+      if (!files || !files.length) return null;
+      if (files.length === 1) return files[0];
+      const ext = (fl) => fl.name.split('.').pop().toLowerCase();
+      return files.find(fl => ext(fl) !== 'psflib') || files[0];
+    }
+    function makeFileListSiblingResolver(files) {
+      const list = Array.from(files || []);
+      if (!list.length) return null;
+      return async (name) => {
+        const want = MML.Archive.baseName(name).toLowerCase();
+        const hit = list.find(fl => fl.name.toLowerCase() === want);
+        return hit ? new Uint8Array(await hit.arrayBuffer()) : null;
+      };
+    }
+    function makeArchiveSiblingResolver(arc, entry) {
+      if (!arc || !arc.entries) return null;
+      const dir = entry.name.lastIndexOf('/') >= 0 ? entry.name.slice(0, entry.name.lastIndexOf('/') + 1) : '';
+      return async (name) => {
+        const lower = name.replace(/\\/g, '/').toLowerCase();
+        const files = arc.entries.filter(e => !e.isDir);
+        const hit = files.find(e => e.name.toLowerCase() === (dir + lower))
+          || files.find(e => e.name.toLowerCase() === lower)
+          || files.find(e => MML.Archive.baseName(e.name).toLowerCase() === MML.Archive.baseName(lower));
+        return hit ? MML.Archive.readEntry(arc.bytes, hit) : null;
+      };
+    }
+
     async function openSoundFile(file, opts) {
       if (!file) return false;
       let ext = file.name.split('.').pop().toLowerCase();
@@ -8110,6 +8768,13 @@
       if (!(opts && opts.fromArchive)) clearArchive(); // 単体ファイルを開いたらアーカイブ曲リストは閉じる
       if (ext === 'vgz') ext = 'vgm'; // gzip圧縮VGM(中身の判別はloadVgmFile側)
       if (ext === 'nsfe') ext = 'nsf'; // NSFe(チャンク形式のNSF拡張。素のNSFへの変換はloadNsfFile→MML.NSF.normalize)
+      if (ext === 'minipsf') ext = 'psf'; // _lib を参照する小さな PSF(中身の形式は同じ)
+      if (ext === 'psflib') {
+        alert(T('.psflib は曲ではなく共通部品です。.minipsf と一緒に選ぶか、zip のまま開いてください。'));
+        return false;
+      }
+      // 単体ファイルとして開いた PSF の _lib は、同時に選ばれた/ドロップされたファイルから引く
+      if (!(opts && opts.fromArchive)) psfSiblingResolver = makeFileListSiblingResolver(opts && opts.siblings);
       // MMLテキスト(.mml/.txt)はサウンドファイルではなくMMLエディタ側で開く。
       // 戻り値'mml'はformatToPlayFnに載っていないので、ドラッグ&ドロップでも
       // 読み込むだけで自動再生はしない(コンパイル準備まではopenMmlTextFileが行う)
@@ -8120,7 +8785,7 @@
       }
       const targetInputId = formatToInputId[ext];
       if (!targetInputId) {
-        alert(T('対応していないファイル形式です: .{ext}\n(対応形式: NSF/NSFE, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)', { ext }));
+        alert(T('対応していないファイル形式です: .{ext}\n(対応形式: NSF/NSFE, SPC, KSS, GBS, HES, VGM/VGZ, PSF/MINIPSF, ZIP, 7Z, MML, TXT)', { ext }));
         return false;
       }
       ensureKeyboardWindowOpen();
@@ -8141,9 +8806,10 @@
     // 「サウンドファイルなら鍵盤表示を開いて再生 / MMLファイルならMMLエディタを開いて何もしない」。
     //  鍵盤表示を開くのは openSoundFile、MMLエディタを開くのは openMmlTextFile が行う)
     soundFileEl.addEventListener('change', async () => {
-      const file = soundFileEl.files[0];
+      const files = Array.from(soundFileEl.files || []);
+      const file = pickPrimarySoundFile(files);
       if (!file) return;
-      const ok = await openSoundFile(file);
+      const ok = await openSoundFile(file, { siblings: files });
       if (!ok) { soundFileEl.value = ''; return; }
       const playFn = formatToPlayFn[ok];
       if (playFn) playFn();
@@ -8182,7 +8848,8 @@
       e.preventDefault();
       dragDepth = 0;
       if (dropOverlayEl) dropOverlayEl.classList.remove('visible');
-      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      const dropped = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+      const file = pickPrimarySoundFile(dropped);
       if (!file) return;
       // DataTransferItemはこのハンドラを抜けると無効になるので、ハンドルの取得だけは
       // ここで同期的に始める(awaitは後でよい)。.mmlをドロップしたときに外部エディタとの
@@ -8191,7 +8858,7 @@
       // ドラッグ&ドロップは開いた直後に自動再生まで行う(ファイル選択ダイアログとの
       // 唯一の挙動差。ensureKeyboardWindowOpen/showSoundPanel等の中身はopenSoundFile側で共通)。
       Promise.resolve(handlePromise).catch(() => null).then((handle) => {
-        return openSoundFile(file, { handle: (handle && handle.kind === 'file') ? handle : null });
+        return openSoundFile(file, { handle: (handle && handle.kind === 'file') ? handle : null, siblings: dropped });
       }).then((ext) => {
         const playFn = ext && formatToPlayFn[ext];
         if (playFn) playFn();

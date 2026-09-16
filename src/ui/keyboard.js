@@ -428,6 +428,9 @@
     // VGM: C352(CS1-32)。chip.mute[]はch 0-31
     const cs = id.match(/^CS(\d+)$/);
     if (cs) return { section: 'expansion', chip: 'c352', type: 'array', index: +cs[1] - 1 };
+    // PSF: PlayStation SPU(PX1-24 = ボイス0-23)。PsfReplayStreamPlayer.applyMute の配列 index
+    const px = id.match(/^PX(\d+)$/);
+    if (px) return { section: 'expansion', chip: 'psx', type: 'array', index: +px[1] - 1 };
     // VGM: OKIM6258(X68000 ADPCM、1ch)。chip.mute[]は1要素
     if (id === 'OKI') return { section: 'expansion', chip: 'okim6258', type: 'array', index: 0 };
     // VGM: QSound(QS1-16)。chip.mute[]はch 0-15
@@ -499,6 +502,9 @@
     { header: 'C140 (Namco System 2 / 21)', prefix: 'CN', name: (id) => 'PCM' + id.slice(2), pool: 'c140' },
     { header: 'C352 (Namco System 11 / 12 / 22)', prefix: 'CS', name: (id) => 'PCM' + id.slice(2), pool: 'c352' },
     { header: 'OKIM6258 (MSM6258 , Sharp X68000)', ids: { OKI: 'ADPCM' } },
+    // PSF(PS1): ボイス番号は実機どおり0始まりで表示(PX1=Voice0)。ドライバがボイスを動的に割り当てるので pool
+    // poolModes: 表示モード切替の段(既定は2段 logical/phys)。PSF はドライバ内部トラック単位の「トラック」を先頭に足す
+    { header: 'SPU (CXD2922 , PlayStation)', prefix: 'PX', name: (id) => 'V' + (+id.slice(2) - 1), pool: 'psx', poolModes: ['track', 'logical', 'phys'] },
     { header: 'QSound (DL-1425 , Capcom CPS2)', prefix: 'QS', name: (id) => 'PCM' + id.slice(2), pool: 'qsound' },
     // ★prefix 'OK' は 'OKI'(OKIM6258)にも前方一致するが、完全一致(ids)が全グループ横断で
     //   先に評価されるので衝突しない(getChannelDisplayの2段ループ参照)
@@ -518,7 +524,7 @@
       if (g.ids && g.ids[id]) return { header: g.header, name: g.ids[id], pool: g.pool };
     }
     for (const g of CHANNEL_DISPLAY_GROUPS) {
-      if (g.prefix && id.startsWith(g.prefix)) return { header: g.header, name: g.name(id), pool: g.pool };
+      if (g.prefix && id.startsWith(g.prefix)) return { header: g.header, name: g.name(id), pool: g.pool, poolModes: g.poolModes };
     }
     return { header: '', name: id };
   }
@@ -688,6 +694,43 @@
   //    (目安。ピッチベンド等の相対的な上下動は正しく追従する)。
   // 解析の信頼度しきい値(pitchConf、0-1: 窓ごとの検出周期が中央値±3%で一致した割合)
   const ADPCM_PITCH_CONF = 0.5;
+
+  // PSF トラックモードのレーン(Emu.PsfTrackVoicer の出力。各要素に lane={index, group, track, voice, groupIndex})の
+  // 並び順と行名。ロール構築は全フレームぶん呼ぶので、レーン数とレーン表(最後の lane の同一性)が同じなら使い回す。
+  // 並び: トラックの分かった順(トラック番号)→ トラック不明の疑似トラック(出現順)、同じトラック内は声部順
+  let psxTrackOrderCache = null;
+  function psxTrackOrder(s) {
+    const n = s.length, last = s[n - 1].lane;
+    // 複製の印(lane.copyOf)は後から付くので、付け替えのたびに上がる版数も鍵に入れる
+    // 言語を切り替えたら説明文(title)も作り直す
+    const copyKey = ((MML.Emu && MML.Emu.PsfTrackVoicer && MML.Emu.PsfTrackVoicer.copyVersion) || 0) + ':' + (MML.I18n ? MML.I18n.getLang() : '');
+    if (psxTrackOrderCache && psxTrackOrderCache.n === n && psxTrackOrderCache.last === last && psxTrackOrderCache.copyKey === copyKey) return psxTrackOrderCache;
+    const lanes = s.map(c => c.lane);
+    const voices = new Map();
+    for (const l of lanes) voices.set(l.group, (voices.get(l.group) || 0) + 1);
+    // 並び順: 元トラックの番号 → その声部 → その複製。複製は元トラック名(T8 等)から番号を引く
+    const numOf = (l) => {
+      if (l.copyOf) {
+        const num = parseInt(l.copyOf.slice(1), 10);
+        if (isFinite(num)) return (l.copyOf[0] === 'T' ? 0 : 100000) + num;
+      }
+      return l.track >= 0 ? l.track : 100000 + l.groupIndex;
+    };
+    const rank = (l) => numOf(l) * 1000 + (l.copyOf ? 500 : 0) + l.voice;
+    const hueNum = lanes.map(numOf);
+    const order = lanes.map((l, i) => i).sort((a, b) => rank(lanes[a]) - rank(lanes[b]));
+    const name = MML.Emu && MML.Emu.PsfTrackVoicer ? MML.Emu.PsfTrackVoicer.laneName : (l) => String(l.index);
+    // 行名の列は狭い(32px)ので、複製は「T9≈」とだけ出し、何の複製かは行名の説明(title)に出す
+    const label = lanes.map(l => name(l, voices.get(l.group)) + (l.copyOf ? '≈' : ''));
+    // ロールの区画(rollLanes='perChannel')は「ドライバのトラック1本=1区画」。和音の声部は同じ区画へ重ね、
+    // 複製(デチューン二重化/エコー)は元トラックの区画へ点線で重ねる
+    const group = lanes.map(l => l.copyOf || name(l, 1));
+    const copy = lanes.map(l => !!l.copyOf);
+    // (Worker のロール構築には翻訳辞書が無いので、そこでは説明を作らない)
+    const title = lanes.map(l => l.copyOf && MML.I18n ? T('{name} は {of} の複製(デチューン二重化/エコー)', { name: name(l, voices.get(l.group)), of: l.copyOf }) : '');
+    psxTrackOrderCache = { n, last, copyKey, order, label, title, group, copy, hueNum };
+    return psxTrackOrderCache;
+  }
 
   // サンプルPCM系チップ(GA20/SegaPCM/C140/C352/QSound/MultiPCM/OKIM6295/YM2610 ADPCM-A)の
   // 「ピッチ解析が信頼できなかった」行の共通形。音階演奏していない=打楽器/効果音なので、
@@ -1522,6 +1565,38 @@
       }
     }
 
+    if (chips.includes('psx')) {
+      // PSF(PlayStation SPU): 24ボイスのADPCMサンプル再生。C352/C140と同じ3段階表示
+      // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行=ドラム区画)。
+      // スナップショットは src/emulator/psxSampleBank.js Emu.snapshotPsx が C352 と同じ形で作る。
+      const live = extraSnaps && extraSnaps.psxLive;
+      const s = live ? live() : (extraSnaps && extraSnaps.psx ? extraSnaps.psx[frameIdx] : null);
+      const pxWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      // 行数はスナップショットの長さ(実機スロット=24ボイス、合成ch=32本。Emu.POOL_CHIP_CHANNELS.psx 参照)
+      // (トラックモードは曲頭でまだレーンが1本も無いフレームが空配列になる → 0行)
+      const nPx = s ? s.length : 24;
+      // トラックモード(要素に lane がある。Emu.PsfTrackVoicer): 行はトラック順・声部順に並べ、行名はトラック名、
+      // 色はトラックごと(声部は明るさ違い)。行ID PX<n> はレーン番号のまま(割当/変換のソースID psx:<n-1> と対応)
+      const pxOrder = (s && nPx && s[0] && s[0].lane) ? psxTrackOrder(s) : null;
+      for (let k = 0; k < nPx; k++) {
+        const ch = pxOrder ? pxOrder.order[k] : k;
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const lane = pxOrder ? s[ch].lane : null;
+        const hueNum = lane ? (lane.copyOf ? pxOrder.hueNum[ch] : (lane.track >= 0 ? lane.track : 40 + lane.groupIndex)) : 0;
+        const color = lane
+          // 複製は元トラックと同じ色相のまま彩度と明度を落とす(点線でも色で元が分かるように)
+          ? `hsl(${(200 + hueNum * 137.508) % 360},${lane.copyOf ? 55 : 75}%,${Math.min(80, (lane.copyOf ? 45 : 58) + lane.voice * 7)}%)`
+          : `hsl(${(200 + ch * 7) % 360},75%,62%)`;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `PX${ch + 1}`, color, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+          ...(lane ? { label: pxOrder.label[ch], labelTitle: pxOrder.title[ch], laneGroup: pxOrder.group[ch], laneCopy: pxOrder.copy[ch] } : {}),
+          wave: pxWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
     if (chips.includes('ym2610fm')) {
       // YM2610(VGM: Neo Geo): 4op FM×4ch(YM2612と同じFM波形表示)。内蔵SSGは 'kssPsg' の
       // KP1-3行として別途出す(main.js vgmKeyboardChips)。ライブ関数優先、無ければ先読み
@@ -1799,6 +1874,8 @@
         let track = tracks.get(ch.id);
         if (!track) { track = { id: ch.id, color: ch.color, notes: [], tones: {}, cur: null }; tracks.set(ch.id, track); }
         track.color = ch.color;
+        // laneGroup: ロールの区画キー(PSF のトラックモード)。laneCopy: 複製パート(点線で描く)
+        if (ch.laneGroup !== undefined) { track.laneGroup = ch.laneGroup; track.laneCopy = !!ch.laneCopy; }
         // ノイズch/DPCM(サンプル)chはch.freqが常に0(実波形の「音程」ではないため)なので、
         // 代わりに周期選択レジスタのindex(0-15)をそのまま16音へ1:1対応させた疑似ノート番号
         // (noisePeriodIndexToMidi/dmcRateIndexToMidi冒頭コメント参照)として使う。GBSのロール
@@ -3496,16 +3573,30 @@
       const rows = (this._mode === 'spc' ? this._spcRowEls : this._rowEls).filter(el => !el.isAllRow && el.waveCanvas);
       // チャンネルの顔ぶれが変わったら(=別の曲/別のフォーマット)、手で変えた大きさは捨てて既定へ戻す
       if (rows.map(r => r.id).join('\u0000') !== prevIds) this._laneSizes.clear();
+      // 区画の単位: 既定は1行1区画。laneGroup を持つ行(PSF のトラックモード)は同じトラックの声部と
+      // その複製をまとめて1区画にする(和音が声部ごとにバラバラの区画へ散らないように)
+      const groups = [];
+      const groupByKey = new Map();
       for (const rowEl of rows) {
+        const g = rowEl.laneGroup ? groupByKey.get(rowEl.laneGroup) : null;
+        if (g) { g.push(rowEl); continue; }
+        const fresh = [rowEl];
+        if (rowEl.laneGroup) groupByKey.set(rowEl.laneGroup, fresh);
+        groups.push(fresh);
+      }
+      for (const groupRows of groups) {
+        const rowEl = groupRows[0];
         if (this._lanes.length) lanesEl.appendChild(this._makeLaneSplitter(this._lanes.length - 1));
         const lane = document.createElement('div');
         lane.className = 'kbd-lane';
         const label = document.createElement('div');
         label.className = 'kbd-lane-label';
         const nameEl = rowEl.row.querySelector('.kbd-name');
+        const laneName = rowEl.laneGroup || (nameEl ? nameEl.textContent : rowEl.id);
+        const letters = groupRows.map(r => r.letter).filter(Boolean).join(' ');
         label.innerHTML = `<span class="kbd-lane-dot" style="background:${rowEl.color}"></span>` +
-          `<span class="kbd-lane-text">${rowEl.letter ? rowEl.letter + ' ' : ''}${nameEl ? nameEl.textContent : rowEl.id}</span>`;
-        label.title = rowEl.id;
+          `<span class="kbd-lane-text">${letters ? letters + ' ' : ''}${laneName}</span>`;
+        label.title = groupRows.map(r => r.id + (r.laneCopy ? ' ≈' : '')).join(', ');
         const rollCanvas = document.createElement('canvas');
         rollCanvas.className = 'kbd-roll';
         rollCanvas.height = ROLL_CANVAS_HEIGHT;
@@ -3527,7 +3618,7 @@
         this._sizeObserver.observe(pianoCanvas);
         // offWhite/visWhite(音程窓)は_updateLaneRanges()がタイムラインから決める。
         // それまでの初期値は鍵盤全体(まとめ表示と同じ見え方)
-        this._lanes.push({ id: rowEl.id, laneEl: lane, rollCanvas, pianoCanvas, offWhite: 0, visWhite: 0, rangeKnown: false });
+        this._lanes.push({ id: rowEl.id, ids: groupRows.map(r => r.id), laneEl: lane, rollCanvas, pianoCanvas, offWhite: 0, visWhite: 0, rangeKnown: false });
       }
       this._updateLaneRanges();
     }
@@ -3568,9 +3659,10 @@
       const drumUnits = (this._drumLanes || []).length * DRUM_LANE_WHITE;
       const total = TOTAL_WHITE + drumUnits;
       for (const lane of this._lanes) {
-        const track = this._rollTimeline && this._rollTimeline.find(t => t.id === lane.id);
+        const laneIds = lane.ids || [lane.id];
+        const tracks = (this._rollTimeline || []).filter(t => laneIds.indexOf(t.id) >= 0);
         let lo = Infinity, hi = -Infinity;
-        for (const note of (track ? track.notes : [])) {
+        for (const note of [].concat(...tracks.map(t => t.notes))) {
           let p0, p1;
           if (note.drumLane !== undefined) {
             // ドラムの打点はレーン番号が音程軸上の位置(1レーン=DRUM_LANE_WHITE白鍵ぶん)
@@ -3667,7 +3759,8 @@
       if (this._layout.rollLanes === 'perChannel' && this._lanes.length) {
         for (const l of this._lanes) {
           // 音程窓はロール側と共通(_updateLaneRanges が決めたそのchの音域)
-          drawPiano(l.pianoCanvas, allChannels.filter(c => c.id === l.id), this._layout.rollOrientation, l.visWhite || 0, l.offWhite || 0, this._drumsForPiano(), performNotes);
+          const laneIds = l.ids || [l.id];
+          drawPiano(l.pianoCanvas, allChannels.filter(c => laneIds.indexOf(c.id) >= 0), this._layout.rollOrientation, l.visWhite || 0, l.offWhite || 0, this._drumsForPiano(), performNotes);
           if (this._drumLanes && this._drumLanes.length) this._attachDrumAudition(l.pianoCanvas);
           this._attachPerformInput(l.pianoCanvas);
         }
@@ -4033,7 +4126,7 @@
       // 手前(描画順が後=最前面)から探したいので逆順に見る
       for (let ti = this._rollTimeline.length - 1; ti >= 0; ti--) {
         const track = this._rollTimeline[ti];
-        if (onlyId !== null && track.id !== onlyId) continue;
+        if (!this._inLane(onlyId, track.id)) continue;
         for (const note of track.notes) {
           if (note.startSec > sec || note.endSec <= sec) continue;
           let pLo, pSize;
@@ -4159,7 +4252,9 @@
       const nameEl = row.querySelector('.kbd-name');
       if (!nameEl) return;
       nameEl.classList.add('kbd-name--clickable');
-      nameEl.title = T('クリックでこのチャンネルに注目(他chを減光)。もう一度クリックで解除');
+      // 行名に説明が付いている行(PSF トラックモードの複製「T9≈」)はそれを先頭に残す
+      const spotHint = T('クリックでこのチャンネルに注目(他chを減光)。もう一度クリックで解除');
+      nameEl.title = nameEl.title && nameEl.title !== spotHint ? nameEl.title + '\n' + spotHint : spotHint;
       nameEl.addEventListener('click', () => this._toggleSpotlightPin(id));
     }
 
@@ -4585,7 +4680,7 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
@@ -4616,6 +4711,7 @@
       this._extraSnaps.segapcmLive = typeof result.getSegaPcm === 'function' ? result.getSegaPcm : null;
       this._extraSnaps.c140Live = typeof result.getC140 === 'function' ? result.getC140 : null;
       this._extraSnaps.c352Live = typeof result.getC352 === 'function' ? result.getC352 : null;
+      this._extraSnaps.psxLive = typeof result.getPsx === 'function' ? result.getPsx : null;
       this._extraSnaps.okim6258Live = typeof result.getOkim6258 === 'function' ? result.getOkim6258 : null;
       this._extraSnaps.qsoundLive = typeof result.getQsound === 'function' ? result.getQsound : null;
       this._extraSnaps.okim6295Live = typeof result.getOkim6295 === 'function' ? result.getOkim6295 : null;
@@ -4678,6 +4774,21 @@
       this._rollCursor = {};
       this._rebuildDrumLanes();
       this._updateLaneRanges();
+    }
+
+    // ロールのトラックの区画情報を後から更新する。metaById: 行ID → {laneGroup, laneCopy}。
+    // PSF のトラックモードは複製(デチューン二重化/エコー)の判定が曲を最後まで取り込んでから決まるので、
+    // 既に組んであるタイムラインへ印だけ足して描き直す(ロールを組み直すと重いため。main.js psfRefreshTrackPlan)
+    setRollTrackLaneMeta(metaById) {
+      if (!this._rollTimeline || !metaById) return;
+      for (const t of this._rollTimeline) {
+        const m = metaById[t.id];
+        if (!m) continue;
+        t.laneGroup = m.laneGroup;
+        t.laneCopy = !!m.laneCopy;
+      }
+      this._updateLaneRanges();
+      this._redrawRollForSpotlight();
     }
 
     // 楽譜モード(レイアウト設定 rollView='score')の材料。score = { notation(src/score/notation.js の
@@ -5803,22 +5914,37 @@
               sw.className = 'kbd-pool-toggle';
               sw.dataset.pool = disp.pool;
               sw.style.cssText = 'display:inline-flex;margin-left:8px;font-size:9px;border:1px solid #444;border-radius:8px;overflow:hidden;cursor:pointer;user-select:none;vertical-align:middle;';
-              sw.title = T('チャンネルプール式音源の表示モード: 実機スロット=ドライバの巡回割当そのまま / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す');
-              const mk = (label) => { const s = document.createElement('span'); s.textContent = label; s.style.cssText = 'padding:1px 6px;'; return s; };
-              const segL = mk(T('合成ch')), segP = mk(T('実機スロット'));
-              sw.appendChild(segL); sw.appendChild(segP);
+              const modes = disp.poolModes || ['logical', 'phys'];
+              sw.title = modes.indexOf('track') >= 0
+                ? T('表示モード: トラック=ドライバ内部のトラックごと(和音は声部ごとの行) / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す / 実機スロット=ドライバの割当そのまま')
+                : T('チャンネルプール式音源の表示モード: 実機スロット=ドライバの巡回割当そのまま / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す');
+              const MODE_LABEL = { track: T('トラック'), logical: T('合成ch'), phys: T('実機スロット') };
+              const segs = modes.map((m) => {
+                const s = document.createElement('span');
+                s.textContent = MODE_LABEL[m];
+                s.style.cssText = 'padding:1px 6px;';
+                s.dataset.mode = m;
+                sw.appendChild(s);
+                return s;
+              });
+              const current = () => this._poolModes[disp.pool] || modes[0];
               const paint = () => {
-                const logical = (this._poolModes[disp.pool] || 'logical') === 'logical';
-                segL.style.background = logical ? '#3a6ea5' : '#22242e';
-                segL.style.color = logical ? '#fff' : '#667';
-                segP.style.background = logical ? '#22242e' : '#3a6ea5';
-                segP.style.color = logical ? '#667' : '#fff';
+                const cur = current();
+                for (const s of segs) {
+                  const on = s.dataset.mode === cur;
+                  s.style.background = on ? '#3a6ea5' : '#22242e';
+                  s.style.color = on ? '#fff' : '#667';
+                }
               };
               sw._paint = paint; // setPoolModes()からの再描画用
               paint();
               sw.addEventListener('click', (e) => {
                 e.stopPropagation(); // 見出しクリック(折りたたみ)と二重に反応させない
-                const mode = (this._poolModes[disp.pool] || 'logical') === 'logical' ? 'phys' : 'logical';
+                // 押した段へ切り替える(段の外=枠線の上なら2段のときだけ従来どおり反転)
+                const seg = e.target && e.target.dataset && e.target.dataset.mode;
+                const cur = current();
+                const mode = seg || (modes.length === 2 ? modes[1 - modes.indexOf(cur)] : cur);
+                if (mode === cur) return;
                 this._poolModes[disp.pool] = mode;
                 paint();
                 if (this.onPoolModeChange) this.onPoolModeChange(disp.pool, mode);
@@ -5842,7 +5968,7 @@
           (ch.isAllRow
             ? `<span class="kbd-mute-ph"></span>`
             : `<input type="checkbox" class="kbd-mute"${muted ? '' : ' checked'} title="${T('{ch} ミュート', { ch: ch.id })}">`) +
-          `<span class="kbd-name">${disp.name}</span>` +
+          `<span class="kbd-name"${ch.labelTitle ? ` title="${ch.labelTitle}"` : ''}>${ch.label || disp.name}</span>` +
           assignCellHtml(ch) +
           `<span class="kbds-lr kbds-l"></span>` +
           `<span class="kbds-lr"></span>` +
@@ -5933,6 +6059,8 @@
           color: rowColor,
           defaultColor: ch.color,
           letter: ch.letter,
+          laneGroup: ch.laneGroup || null, // ロールの区画キー(PSF トラックモード。null=1行1区画)
+          laneCopy: !!ch.laneCopy,
           // チャンネル割当(案E): part列チップとセレクトの参照+この行の既定の借用先
           partEl: row.querySelector('.kbd-part'),
           targetSel: row.querySelector('.kbd-assign-target'),
@@ -6186,7 +6314,11 @@
       // 「今この行で鳴っているもの」を要する処理(ADPCM手動キャリブレーションのクリック等)はこちらを見る)
       this._lastChannels = channels;
 
-      if (channels.length !== this._rowEls.length) {
+      // 行数が同じでも並び/行名が変わったら組み直す(PSF のトラックモードは行名を持ち、表示モード切替や
+      // 複製の印で行の意味が変わる。行名を持たない形式は ID の並びだけを見る)
+      const rowSig = channels.some(c => c.label !== undefined) ? channels.map(c => c.id + '' + (c.label || '') + '' + (c.labelTitle || '')).join('') : null;
+      if (channels.length !== this._rowEls.length || rowSig !== this._rowSig) {
+        this._rowSig = rowSig;
         this._prevChannels = channels;
         this._rebuildRows(channels);
       }
@@ -6395,9 +6527,14 @@
     // _rollTimeline が無い間(先読みキャプチャ完了前など)は前回の描画内容をクリアするだけにする。
     // 描画先: 全チャンネルまとめ(rollLanes='all')なら_rollCanvas 1枚(フィルタ無し)、
     // チャンネルごと(rollLanes='perChannel')なら各レーンのcanvas(そのchのノートだけ)。
+    // onlyId: null=全ch / 文字列=その行だけ / 配列=その区画に属する行だけ(PSF トラックモードの和音の声部+複製)
+    _inLane(onlyId, id) {
+      if (onlyId === null || onlyId === undefined) return true;
+      return Array.isArray(onlyId) ? onlyId.indexOf(id) >= 0 : onlyId === id;
+    }
     _rollTargets() {
       if (this._layout.rollLanes === 'perChannel' && this._lanes && this._lanes.length) {
-        return this._lanes.map(l => ({ canvas: l.rollCanvas, onlyId: l.id, lane: l }));
+        return this._lanes.map(l => ({ canvas: l.rollCanvas, onlyId: l.ids || l.id, lane: l }));
       }
       return [{ canvas: this._rollCanvas, onlyId: null, lane: null }];
     }
@@ -6511,8 +6648,9 @@
       const rowByLetter = new Map();
       for (const el of this._rowEls) if (el.letter) rowByLetter.set(el.letter, el);
       let parts = notation.parts;
-      if (onlyId !== null) {
-        const row = this._rowEls.find(e => e.id === onlyId);
+      if (onlyId !== null && onlyId !== undefined) {
+        const firstId = Array.isArray(onlyId) ? onlyId[0] : onlyId;
+        const row = this._rowEls.find(e => e.id === firstId);
         parts = parts.filter(p => row && p.letter === row.letter);
       }
       if (!parts.length) return;
@@ -6768,12 +6906,15 @@
       // 他chに上書きされて「注目しているのに見えない」ことがある)。
       const spotId = this._effectiveSpotlightId();
       const spotActive = !!spotId && this._rollTimeline.some(t => t.id === spotId);
-      const drawOrder = spotActive
+      const liveColor = {};
+      for (const c of (this._lastChannels || [])) if (c && c.id) liveColor[c.id] = c.color;
+      const byCopy = (list) => list.filter(t => !t.laneCopy).concat(list.filter(t => t.laneCopy));
+      const drawOrder = byCopy(spotActive
         ? this._rollTimeline.filter(t => t.id !== spotId).concat(this._rollTimeline.filter(t => t.id === spotId))
-        : this._rollTimeline;
+        : this._rollTimeline);
 
       for (const track of drawOrder) {
-        if (onlyId !== null && track.id !== onlyId) continue; // レーン表示: このchのノートだけ
+        if (!this._inLane(onlyId, track.id)) continue; // レーン表示: この区画の行のノートだけ
         // ミュート中のchは「消す」のではなくスポットライトと同じ減光で描く。
         // 消してしまうと、そのchが元々何も鳴っていないのか消しているのか区別できない
         const muted = this._isTrackMuted(track.id);
@@ -6787,7 +6928,7 @@
           const note = notes[i];
           if (note.startSec >= winEnd) break; // 以降は全て未来のノート(startSec昇順のため打ち切れる)
           // 音量による濃淡はやめ、常にチャンネル本来の色をそのまま(不透明・フィルタ無し)で描く。
-          const noteColor = this._getColor(track.id, track.color);
+          const noteColor = this._getColor(track.id, liveColor[track.id] || track.color);
           const isDrum = note.drumLane !== undefined;
           let pLo, pSize;
           if (isDrum) {
@@ -6827,8 +6968,18 @@
             ctx.globalAlpha = 1;
             continue; // ドラムの打点にセント偏差オーバーレイは無い(音程を持たないため)
           }
-          ctx.fillStyle = noteColor;
-          ctx.fillRect(r.x, r.y, r.w, r.h);
+          if (track.laneCopy) {
+            // 複製パート(デチューン二重化/エコー。src/convert/poolDoubles.js)は元トラックと同じ区画へ
+            // 点線の枠だけで重ねる(元の音符と見分けが付き、かつ元を隠さない)
+            ctx.strokeStyle = noteColor;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 2]);
+            ctx.strokeRect(r.x + 0.5, r.y + 0.5, Math.max(1, r.w - 1), Math.max(1, r.h - 1));
+            ctx.setLineDash([]);
+          } else {
+            ctx.fillStyle = noteColor;
+            ctx.fillRect(r.x, r.y, r.w, r.h);
+          }
 
           // セント偏差オーバーレイ(DESIGN-PITCH.md Phase 0): freqSeq(ノート区間内フレーム毎の
           // 生周波数)を丸め後noteの理論周波数と比較し、音程軸方向のズレとして細線描画する。

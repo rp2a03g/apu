@@ -417,15 +417,15 @@
     'タップ1回目… 拍に合わせて続けてタップ': 'First tap... keep tapping on the beat',
     '{n}回タップ → {bpm} BPM': '{n} taps → {bpm} BPM',
     '自動検出に戻しました': 'Back to auto detection',
-    '対応していないファイル形式です: .{ext}\n(対応形式: NSF/NSFE, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)':
-      'Unsupported file type: .{ext}\n(Supported: NSF/NSFE, SPC, KSS, GBS, HES, VGM/VGZ, ZIP, 7Z, MML, TXT)',
+    '対応していないファイル形式です: .{ext}\n(対応形式: NSF/NSFE, SPC, KSS, GBS, HES, VGM/VGZ, PSF/MINIPSF, ZIP, 7Z, MML, TXT)':
+      'Unsupported file type: .{ext}\n(Supported: NSF/NSFE, SPC, KSS, GBS, HES, VGM/VGZ, PSF/MINIPSF, ZIP, 7Z, MML, TXT)',
     'NSF (ファミコン)': 'NSF (NES)',
     'SPC (スーパーファミコン)': 'SPC (SNES)',
     'KSS (MSX)': 'KSS (MSX)',
     'GBS (Game Boy)': 'GBS (Game Boy)',
     'HES (PC Engine)': 'HES (PC Engine)',
-    'NSF/SPC/KSS/GBS/HES/VGM ファイル(または、それらを含む zip/7z)を開くと、ここに再生画面が表示されます。':
-      'Open an NSF/SPC/KSS/GBS/HES/VGM file (or a zip/7z containing them) to show the player here.',
+    'NSF/SPC/KSS/GBS/HES/VGM/PSF ファイル(または、それらを含む zip/7z)を開くと、ここに再生画面が表示されます。':
+      'Open an NSF/SPC/KSS/GBS/HES/VGM/PSF file (or a zip/7z containing them) to show the player here.',
 
     // ---- NSFパネル ----
     'ヘッダ情報 (NSF/NSFe)': 'Header (NSF/NSFe)',
@@ -581,8 +581,8 @@
     '次の曲': 'Next track',
     'アーカイブ内のファイルを開けませんでした: {msg}': 'Could not open a file inside the archive: {msg}',
     'アーカイブを解析できませんでした: {msg}': 'Could not parse the archive: {msg}',
-    'アーカイブ内に対応するサウンドファイル(NSF/NSFE/SPC/KSS/GBS/HES/VGM)がありません。':
-      'The archive contains no supported sound files (NSF/NSFE/SPC/KSS/GBS/HES/VGM).',
+    'アーカイブ内に対応するサウンドファイル(NSF/NSFE/SPC/KSS/GBS/HES/VGM/PSF)がありません。':
+      'The archive contains no supported sound files (NSF/NSFE/SPC/KSS/GBS/HES/VGM/PSF).',
     'MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力{borrow}{ignored}':
       'Converted to MML ({mode} {bpm} BPM, chips: {chips}) → written to the MML editor{borrow}{ignored}',
     '(借用先: {assign})': ' (targets: {assign})',
@@ -878,6 +878,10 @@
     '({n}ch)': '({n} ch)',
     '合成ch': 'Merged ch',
     '実機スロット': 'HW slots',
+    'トラック': 'Tracks',
+    '{name} は {of} の複製(デチューン二重化/エコー)': '{name} duplicates {of} (detuned doubling / echo)',
+    '表示モード: トラック=ドライバ内部のトラックごと(和音は声部ごとの行) / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す / 実機スロット=ドライバの割当そのまま':
+      'Display mode: Tracks = one row per sound-driver track (chords get one row per voice) / Merged ch = regroup notes into stable channels by instrument and pitch continuity / HW slots = raw voice allocation',
     'チャンネルプール式音源の表示モード: 実機スロット=ドライバの巡回割当そのまま / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す':
       'Display mode for channel-pool chips: HW slots = raw round-robin voice allocation / Merged ch = regroup notes into stable channels by instrument and pitch continuity',
     '{ch} 音量(中央100%・ダブルクリックで100%)': '{ch} Volume (center = 100%, double-click resets to 100%)',
@@ -963,6 +967,9 @@
     '音符直後の1/32未満の休符を音符に繋げる(伸ばした区間は最後の音量のまま鳴る)': 'Join rests shorter than 1/32 right after a note to the note (the extended part keeps the last volume)',
     '似た@v表を統合(近似)': 'Merge similar @v tables (approximate)',
     '段の並びが同じで長さが±1違うだけの@v/@vr表を1本にまとめる(段の境目が最大1フレーム動く)': 'Merge @v/@vr tables with the same step sequence whose step lengths differ by at most 1 (step boundaries may move by up to 1 frame)',
+    '合成chの複製パートを省く(近似)': 'Drop duplicate parts in merged channels (approximate)',
+    'デチューン二重化・エコーを1本にする': 'Reduce detuned doubling / echo to one part',
+    'PSFやMultiPCM等の合成chで、同じ旋律を別のボイスで重ねたデチューン二重化や数フレーム遅れのエコーを検出し、複製側の音符を変換から外します(何を省いたかはMMLのヘッダに書きます)。ppmckにはディレイもコーラスも無いので、複製の分だけチャンネルを節約できます。OFFでも、N163等の枠へ自動で載せるチャンネルを選ぶときは複製を後回しにします': 'In merged channels (PSF, MultiPCM, etc.), detects detuned doubling (the same melody layered on another voice) and echoes delayed by a few frames, and leaves the duplicate notes out of the conversion (the MML header says what was dropped). ppmck has neither delay nor chorus, so this saves the channels the duplicates would use. Even when OFF, duplicates are chosen last when channels are picked automatically for N163 and other slots',
     '詳細設定': 'Advanced',
     'N163波形': 'N163 waves',
     'RAMと音域の両方に収まるように縮める(推奨)': 'Shrink to fit both RAM and range (recommended)',
@@ -1231,5 +1238,33 @@
       'A GBS header needs at least 0x70 bytes',
     'HESヘッダは最低0x20バイト必要です':
       'An HES header needs at least 0x20 bytes',
+
+    // ---- PSFパネル(PlayStation) ----
+    'ヘッダ情報 (PSF: PlayStation)': 'Header (PSF: PlayStation)',
+    '先にPSFファイルを読み込んでください。': 'Load a PSF file first.',
+    '_lib        : {libs}': '_lib        : {libs}',
+    '曲名        : ': 'Song        : ',
+    'ゲーム      : ': 'Game        : ',
+    'アーティスト: ': 'Artist      : ',
+    '年          : ': 'Year        : ',
+    '著作権      : ': 'Copyright   : ',
+    'リッパー    : ': 'Ripper      : ',
+    '長さ        : {len} 秒 + フェード {fade} 秒': 'Length      : {len} s + fade {fade} s',
+    'エミュレーションが停止しました: {reason}': 'Emulation stopped: {reason}',
+    '未実装のBIOS呼び出し: {calls}': 'Unimplemented BIOS calls: {calls}',
+    'キャプチャに失敗しました: {msg}': 'Capture failed: {msg}',
+    'WAV書き出し用レンダリング中… {pct}%': 'Rendering for WAV export... {pct}%',
+    '.psflib は曲ではなく共通部品です。.minipsf と一緒に選ぶか、zip のまま開いてください。':
+      'A .psflib is a shared library, not a song. Select it together with the .minipsf, or open the zip as is.',
+    'PSFファイルではありません(先頭が "PSF" ではない)': 'Not a PSF file (it does not start with "PSF")',
+    'PSFファイルが途中で切れています': 'The PSF file is truncated',
+    'PSFのCRCが一致しません(期待 {expected} / 実際 {actual})': 'PSF CRC mismatch (expected {expected} / actual {actual})',
+    'PS-EXEが短すぎます(ヘッダ0x800バイト未満)': 'The PS-EXE is too short (less than the 0x800-byte header)',
+    'PS-EXEのマジックが不正です: {magic}': 'Invalid PS-EXE magic: {magic}',
+    '_libの入れ子が深すぎます(循環参照?)': '_lib nesting is too deep (circular reference?)',
+    '{name} は未対応です(対応はPSF1のみ)': '{name} is not supported (only PSF1 is supported)',
+    '_lib "{name}" を解決できません(同じ場所に置いてください)': 'Cannot resolve _lib "{name}" (put it in the same place)',
+    '_lib "{name}" が見つかりません': '_lib "{name}" was not found',
+    'PSFに実行プログラムが含まれていません': 'The PSF contains no executable program',
   });
 })(typeof window !== 'undefined' ? window : globalThis);

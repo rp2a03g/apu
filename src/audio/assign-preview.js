@@ -348,7 +348,8 @@
       const base = r.index === 0 ? 0x9000 : 0xA000;
       const duty = this._duty8(r) << 4;
       if (!on) { if (st.active) this._w('vrc6', base + 0, duty); return; }
-      const period = clamp(R.pulsePeriod(freq), 0, 0xFFF);
+      // VRC6 パルスの周期は12bit(compiler.js vrc6PulsePeriod。2A03 の pulsePeriod は11bitで A1 に貼り付く)
+      const period = clamp((R.vrc6PulsePeriod || R.pulsePeriod)(freq), 0, 0xFFF);
       const hi = 0x80 | ((period >> 8) & 0x0F);
       if (period !== st.freqReg) { this._w('vrc6', base + 1, period & 0xFF); st.freqReg = period; }
       if (hi !== st.hi || keyOn) { this._w('vrc6', base + 2, hi); st.hi = hi; }
