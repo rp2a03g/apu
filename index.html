@@ -114,8 +114,8 @@
           <svg viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1.2"/></svg>
         </button>
         <span class="icon-toolbar-sep"></span>
-        <input type="file" id="mmlOpenFile" accept=".mml,.txt,.musicxml,.xml,.mxl" style="display:none" />
-        <button class="icon-btn secondary" id="btnMmlOpenFile" title="MMLファイルを開く(MusicXML/.mxl の楽譜も取り込める)">
+        <input type="file" id="mmlOpenFile" accept=".mml,.txt,.musicxml,.xml,.mxl,.dmc" multiple style="display:none" />
+        <button class="icon-btn secondary" id="btnMmlOpenFile" title="MMLファイルを開く(.dmc を一緒に選ぶと DPCM も読み込む。MusicXML/.mxl の楽譜も取り込める)">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.5c0-.83.67-1.5 1.5-1.5h3.4l1.4 1.6H16c.83 0 1.5.67 1.5 1.5v7c0 .83-.67 1.5-1.5 1.5H4c-.83 0-1.5-.67-1.5-1.5v-8.6Z"/></svg>
         </button>
         <button class="icon-btn secondary" id="btnMmlSaveFile" title="MMLファイルを保存">
@@ -254,7 +254,7 @@
          #xxxFileHeader / #xxxFileStatus だけはこの箱から鍵盤表示側へ付け替えて表示する -->
   <div id="soundFileControls" hidden>
       <!-- multiple: PSF の .minipsf と、_lib で参照する .psflib を一緒に選べるように(先頭の曲ファイルを開く) -->
-      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.psf,.minipsf,.psflib,.zip,.7z,.mml,.txt" multiple style="display:none" />
+      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.psf,.minipsf,.psflib,.zip,.7z,.mml,.txt,.dmc" multiple style="display:none" />
       <!-- 内部的にフォーマット別ロジックを呼び出すための非表示input（互換用） -->
       <input type="file" id="nsfFile" accept=".nsf,.nsfe" style="display:none" />
       <input type="file" id="spcFile" accept=".spc" style="display:none" />
@@ -1045,6 +1045,7 @@
   <script src="src/ui/convertSettings.js"></script>
   <script src="src/ui/editorKeys.js"></script>
   <script src="src/ui/fileSync.js"></script>
+  <script src="src/ui/dpcmStore.js"></script>
   <script src="src/ui/miniTransport.js"></script>
   <script src="src/ui/scoreView.js"></script>
   <script src="src/main.js"></script>

@@ -218,16 +218,20 @@
   }
 
   // ピッカーでファイルを選ぶ。file:// でも開けることは実測済み。
-  // 戻り値: { handle } / { aborted:true } / { unsupported:true } / { error }
+  // .mml と一緒に .dmc も選べる(複数選択)。handle は同期対象にする .mml/.txt/楽譜(最初の1つ)、
+  // handles は選んだ全部(呼び出し側が .dmc を台帳へ入れる。src/ui/dpcmStore.js)
+  // 戻り値: { handle, handles } / { aborted:true } / { unsupported:true } / { error }
   async function pickOpen() {
     if (typeof global.showOpenFilePicker !== 'function') return { unsupported: true };
     try {
-      const [h] = await global.showOpenFilePicker({
-        multiple: false,
+      const handles = await global.showOpenFilePicker({
+        multiple: true,
         types: [{ description: 'MML', accept: { 'text/plain': ['.mml', '.txt'] } },
-                { description: 'MusicXML', accept: { 'application/vnd.recordare.musicxml+xml': ['.musicxml', '.xml'], 'application/vnd.recordare.musicxml': ['.mxl'] } }],
+                { description: 'MusicXML', accept: { 'application/vnd.recordare.musicxml+xml': ['.musicxml', '.xml'], 'application/vnd.recordare.musicxml': ['.mxl'] } },
+                { description: 'DPCM', accept: { 'application/octet-stream': ['.dmc'] } }],
       });
-      return { handle: h };
+      const h = handles.find((x) => !/\.dmc$/i.test(x.name)) || null;
+      return { handle: h, handles };
     } catch (e) {
       if (e && e.name === 'AbortError') return { aborted: true };
       return { error: e };
@@ -321,5 +325,6 @@
     setWatchEnabled, isWatchEnabled: () => watchEnabled,
     isConnected: () => !!handle,
     fileName: () => (handle ? handle.name : ''),
+    currentHandle: () => handle, // 保存直後に .dmc を同じフォルダへ書くため(main.js afterMmlSaved)
   };
 })(window);

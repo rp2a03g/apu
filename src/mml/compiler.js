@@ -2985,6 +2985,12 @@
     // メッセージが溢れないように、件数だけ添える)。
     const warnings = [];
     for (const message of score.issues) warnings.push({ message });
+    // @DPCM<n> の .dmc が台帳(opt.dpcmSamples)に無い: 以前は黙って無音にしていた(2026-09-16)。
+    // kind は src/convert/verify.js が除外するための印(音程検証は意図的にサンプル無しでコンパイルする)
+    for (const idx of Object.keys(dpcmSamples)) {
+      if (dpcmSamples[idx].bytes && dpcmSamples[idx].bytes.length) continue;
+      warnings.push({ kind: 'dpcm-missing', message: T('@DPCM{n} の "{file}" が読み込まれていないため、この音は鳴りません(.dmc を MML と一緒に開くか、ウィンドウへドロップしてください)', { n: idx, file: dpcmSamples[idx].file }) });
+    }
     {
       const chipOf = {};
       chipOf.A = chipOf.B = { kind: 'pulse', periodMax: 2047, label: '2A03 ' + T('パルス') };

@@ -94,7 +94,9 @@
       }
       // 音域外など「鳴らない箇所」の警告(compiler.js warnings)。変換自体は成立するので
       // 検証は続行し、結果に添えて呼び出し元(変換ステータス)へ見せる
-      const warnings = (compiled.warnings || []).map((w) => w.message);
+      // @DPCM の .dmc 未読込(kind:'dpcm-missing')はここでは出さない: 検証は音程だけが対象で、
+      // 変換直後は台帳(main.js dpcmSampleCache)に入っているのに「無い」と言ってしまうため
+      const warnings = (compiled.warnings || []).filter((w) => w.kind !== 'dpcm-missing').map((w) => w.message);
       const { snapshots, writeLog } = buildSnapshots(compiled);
       const sampleRate = 44100;
       const chips = ['nes', ...(compiled.expansions || []).filter((e) => e !== 'dpcm')];

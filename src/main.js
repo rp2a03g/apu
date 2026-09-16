@@ -3452,16 +3452,123 @@
   const dpcmSampleCache = {};
   function setDpcmSampleBytes(name, bytes) {
     dpcmSampleCache[name] = bytes;
+    MML.UI.DpcmStore.put(name, bytes); // 開き直しても戻るように(src/ui/dpcmStore.js)
     if (MML.UI.DpcmEditor && MML.UI.DpcmEditor.refresh) MML.UI.DpcmEditor.refresh();
   }
   // MML本文を丸ごと差し替えたとき(ファイルを開く/変換結果)に呼ぶ。コンバータが持つ未反映の音は捨てる
   function resetDpcmEditor() {
     if (MML.UI.DpcmEditor && MML.UI.DpcmEditor.reset) MML.UI.DpcmEditor.reset();
   }
+
+  // ── @DPCM の .dmc を「開き直しても戻る」「保存したら隣に置く」(2026-09-16、src/ui/dpcmStore.js) ──
+  // 保存形式は変えない(.mml はテキストのみ、.dmc は隣 = ppmck 運用)。台帳の中身を IndexedDB に写し、
+  // .mml を開いたときに参照名で引き戻す。以前は *2mml 変換のたびに .dmc を Downloads へ落としていたが、
+  // .mml と別の場所に散らばって開き直すと E が無音になっていた。
+  const DpcmStore = MML.UI.DpcmStore;
+  function isDmcFile(f) { return !!f && /\.dmc$/i.test(f.name || ''); }
+
+  // *2mml 変換が出した .dmc を台帳へ(ダウンロードはしない。保存時に afterMmlSaved が同じフォルダへ書く)
+  function takeDpcmFiles(files) {
+    const list = files || [];
+    for (const f of list) setDpcmSampleBytes(f.name, f.bytes);
+    if (list.length) {
+      const d = document.createElement('div');
+      d.textContent = T('DPCM {n} 本を台帳に入れました(.dmc は MML を保存したときに同じフォルダへ書き出せます)', { n: list.length });
+      mmlOutputEl.appendChild(d);
+    }
+    return list.length;
+  }
+
+  // 開いた/ドロップした .dmc(File)を台帳へ。戻り値は入れた名前
+  async function loadDmcFiles(files) {
+    const names = [];
+    for (const f of (files || []).filter(isDmcFile)) {
+      try { setDpcmSampleBytes(f.name, new Uint8Array(await f.arrayBuffer())); names.push(f.name); }
+      catch (e) { /* 読めないものは飛ばす */ }
+    }
+    return names;
+  }
+
+  // 本文が参照する @DPCM のうち台帳に無いものを IndexedDB から戻す
+  async function restoreDpcmSamples(text) {
+    const names = DpcmStore.namesIn(text);
+    if (!names.some(n => !dpcmSampleCache[n])) return { restored: [], missing: [] };
+    const r = await DpcmStore.restore(names, dpcmSampleCache);
+    if (r.restored.length && MML.UI.DpcmEditor && MML.UI.DpcmEditor.refresh) MML.UI.DpcmEditor.refresh();
+    return r;
+  }
+
+  // .dmc だけを開いた/ドロップしたとき(MML本文はそのまま)
+  async function openDmcOnly(files) {
+    const names = await loadDmcFiles(files);
+    if (!names.length) return false;
+    ensureMmlWindowOpen();
+    const referenced = DpcmStore.namesIn(mmlSourceEl.value);
+    const used = names.filter(n => referenced.includes(n));
+    mmlFileStatus(T('DPCM を読み込みました: {files}', { files: names.join(', ') }) +
+      (used.length ? '' : ' ' + T('(今の MML はこのファイルを参照していません)')), 'ok');
+    // 参照している定義があれば「未読込」の警告を消すためにコンパイルし直す。再生中は止めない
+    if (used.length && mmlPlaybackStopped) prepareMmlStream(true);
+    return true;
+  }
+
+  // 本文が参照していて台帳にある .dmc → [{name, bytes}]
+  function referencedDpcmFiles(text) {
+    return DpcmStore.namesIn(text).filter(n => dpcmSampleCache[n]).map(n => ({ name: n, bytes: dpcmSampleCache[n] }));
+  }
+
+  // 開いた直後のステータスに DPCM の内訳を添える
+  function appendDpcmOpenInfo(loadedNames, r) {
+    const add = (text, cls) => { const d = document.createElement('div'); d.className = cls || ''; d.textContent = text; mmlOutputEl.appendChild(d); };
+    if (loadedNames && loadedNames.length) add(T('DPCM {n} 本を一緒に読み込みました', { n: loadedNames.length }));
+    if (r && r.restored.length) add(T('DPCM {n} 本を前回の内容から復元しました', { n: r.restored.length }));
+    if (r && r.missing.length) add(T('⚠ 見つからない .dmc: {files}(該当する音は鳴りません。.dmc を MML と一緒に開くか、ウィンドウへドロップしてください)', { files: r.missing.join(', ') }), 'error');
+  }
+
+  // MML を保存した直後: 参照している .dmc を同じフォルダへ。覚えているフォルダに今の .mml が居れば黙って書き、
+  // そうでなければ「フォルダを選んで書く」ボタンをステータス欄に出す(ピッカーは1クリックに1回しか開けないので、
+  // 保存ダイアログの直後に続けてフォルダ選択を出すことはできない)
+  async function afterMmlSaved(fileHandle, text) {
+    const files = referencedDpcmFiles(text);
+    const missing = DpcmStore.namesIn(text).filter(n => !dpcmSampleCache[n]);
+    if (!files.length && !missing.length) return;
+    let res = null;
+    if (fileHandle && files.length) res = await DpcmStore.writeBeside(fileHandle, files);
+    const box = document.createElement('div');
+    if (res && res.written.length) {
+      box.className = 'ok';
+      box.textContent = T('.dmc {n} 本を同じフォルダ({dir})へ書き出しました', { n: res.written.length, dir: res.dirName }) +
+        (res.failed.length ? ' ' + T('(書けなかったもの: {files})', { files: res.failed.join(', ') }) : '');
+    } else if (files.length) {
+      box.textContent = T('この MML は .dmc {n} 本を参照しています。', { n: files.length }) + ' ';
+      const btn = document.createElement('button');
+      btn.className = 'secondary';
+      if (DpcmStore.dirSupported()) {
+        btn.textContent = T('.dmc を MML と同じフォルダへ書き出す');
+        btn.addEventListener('click', async () => {
+          const r = await DpcmStore.pickAndWrite(fileHandle || undefined, files);
+          if (!r) { mmlFileStatus(T('.dmc を書き出せませんでした(フォルダが選ばれなかったか、書き込みが許可されませんでした)。'), 'error'); return; }
+          mmlFileStatus(T('.dmc {n} 本を {dir} へ書き出しました', { n: r.written.length, dir: r.dirName }) +
+            (r.failed.length ? ' ' + T('(書けなかったもの: {files})', { files: r.failed.join(', ') }) : ''), 'ok');
+        });
+      } else {
+        btn.textContent = T('.dmc をダウンロード');
+        btn.addEventListener('click', () => { for (const f of files) downloadBin(f.name, f.bytes); });
+      }
+      box.appendChild(btn);
+    }
+    if (missing.length) {
+      const m = document.createElement('div');
+      m.className = 'error';
+      m.textContent = T('⚠ 台帳に無い .dmc: {files}(この MML だけでは鳴りません。DPCMコンバータで読み込むか、.dmc をドロップしてください)', { files: missing.join(', ') });
+      box.appendChild(m);
+    }
+    mmlOutputEl.appendChild(box);
+  }
   if (MML.UI.DpcmEditor) {
     MML.UI.DpcmEditor.init(mmlSourceEl, {
       getSample: (name) => dpcmSampleCache[name] || null,
-      setSample: (name, bytes) => { dpcmSampleCache[name] = bytes; },
+      setSample: (name, bytes) => { dpcmSampleCache[name] = bytes; MML.UI.DpcmStore.put(name, bytes); },
       onApplied: () => { if (MML.UI.DrumPanel) MML.UI.DrumPanel.render(); },
     });
   }
@@ -3637,7 +3744,8 @@
   // ドラッグ&ドロップ・トップのファイルを開くアイコンの3経路から共通で呼ばれる
   // handle(FileSystemFileHandle)を渡すと、そのファイルを外部エディタと同期する対象として
   // 接続する(src/ui/fileSync.js)。渡されなければ同期は切る(=ただの読み込み)
-  async function openMmlTextFile(file, handle) {
+  // extraFiles: 一緒に選ばれた/ドロップされた File のうち .dmc を台帳へ入れる(src/ui/dpcmStore.js)
+  async function openMmlTextFile(file, handle, extraFiles) {
     if (!file) return false;
     if (!confirmDiscardMmlEdits()) return false;
     // 楽譜(MusicXML/.mxl)なら MML に取り込む(src/score/musicxmlImport.js)。外部エディタ同期は付けない
@@ -3654,6 +3762,8 @@
     mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新
     markMmlTextSynced(file.name);
     resetDpcmEditor();
+    const dmcLoaded = await loadDmcFiles(extraFiles);
+    const dpcmInfo = await restoreDpcmSamples(text);
 
     // 別の曲を読み込んだので、前の曲の再生範囲(青/赤ハンドル)は引き継がない
     // (NSF2MML等の変換直後と同じ扱い。[[mml-conversion-stale-playback-range-bug]])
@@ -3663,6 +3773,7 @@
     if (handle) await FileSync.attach(handle, file, text); else FileSync.detach();
     mmlFileStatus(T('MMLファイルを読み込みました: {file} ({n}バイト)',
       { file: file.name, n: text.length }), 'ok');
+    appendDpcmOpenInfo(dmcLoaded, dpcmInfo);
     return true;
   }
 
@@ -3714,6 +3825,7 @@
         markMmlTextSynced(FileSync.fileName());
         mmlFileStatus(T('MMLファイルを保存しました: {file} ({n}バイト)',
           { file: FileSync.fileName(), n: text.length }), 'ok');
+        await afterMmlSaved(FileSync.currentHandle(), text);
         return;
       }
       if (res.denied) {
@@ -3743,6 +3855,7 @@
           await FileSync.attach(handle, null, text);
           mmlFileStatus(T('MMLファイルを保存しました: {file} ({n}バイト)',
             { file: handle.name, n: text.length }), 'ok');
+          await afterMmlSaved(handle, text);
         } catch (e) {
           mmlFileStatus(T('MMLファイルの保存に失敗しました: {msg}', { msg: e.message }), 'error');
         }
@@ -3753,6 +3866,7 @@
     markMmlTextSynced(suggestedName);
     mmlFileStatus(T('MMLファイルを保存しました: {file} ({n}バイト)',
       { file: suggestedName, n: text.length }), 'ok');
+    await afterMmlSaved(null, text);
   }
 
   // --- 外部テキストエディタとの同期 (src/ui/fileSync.js) ---------------------
@@ -4072,7 +4186,9 @@
       const writes = compiled.tracks[ch].reduce((a, w) => a + w.length, 0);
       out += T('チャンネル{ch}: {n} 件', { ch, n: writes }) + '\n';
     }
-    captureOutputEl.innerHTML = '';
+    // 冒頭で出したコンパイル警告(音域外・DPCM未読込)は消さずに残す(以前は '' で消していたので
+    // 成功時は警告が一度も見えなかった。2026-09-16)
+    captureOutputEl.innerHTML = renderCompileWarnings(compiled.warnings);
     const pre = document.createElement('div');
     pre.className = 'ok';
     pre.textContent = out;
@@ -4476,13 +4592,9 @@
     if (converted.fdsWave && MML.WaveformEditor.fdsWave) MML.WaveformEditor.fdsWave.setData(converted.fdsWave);
     if (converted.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(converted.n163Wave);
 
-    // DPCM バイナリファイルをダウンロード(保存用)。同時にdpcmSampleCacheへ
-    // 直接投入し、生成されたMML中の@DPCM<n>定義をユーザーがファイル再選択
-    // しなくてもそのまま再生・NSF書き出しできるようにする
-    for (const f of converted.dpcmFiles) {
-      downloadBin(f.name, f.bytes);
-      setDpcmSampleBytes(f.name, f.bytes);
-    }
+    // .dmc は台帳(dpcmSampleCache + IndexedDB)へ。生成されたMML中の@DPCM<n>定義をファイル再選択なしで
+    // そのまま再生・NSF書き出しでき、MMLを保存すると同じフォルダへ書き出せる(takeDpcmFiles)
+    takeDpcmFiles(converted.dpcmFiles);
 
     const dpcmMsg = converted.dpcmFiles.length > 0
       ? T('、DPCM {n} ファイル出力', { n: converted.dpcmFiles.length }) : '';
@@ -4918,10 +5030,17 @@
     document.getElementById('btnMmlOpenFile').addEventListener('click', async () => {
       const res = await FileSync.pickOpen();
       if (res.aborted) return;
-      if (res.handle) {
+      if (res.handles && res.handles.length) {
         try {
-          const file = await res.handle.getFile();
-          await openMmlTextFile(file, res.handle);
+          // .dmc は台帳へ。.mml が無く .dmc だけなら本文はそのままで台帳だけ更新する
+          const dmcFiles = [];
+          for (const h of res.handles) if (isDmcFile(h)) dmcFiles.push(await h.getFile());
+          if (res.handle) {
+            const file = await res.handle.getFile();
+            await openMmlTextFile(file, res.handle, dmcFiles);
+          } else {
+            await openDmcOnly(dmcFiles);
+          }
         } catch (e) {
           mmlFileStatus(T('MMLファイルの読み込みに失敗しました: {msg}', { msg: e.message }), 'error');
         }
@@ -4930,11 +5049,19 @@
       openInput.click();
     });
     openInput.addEventListener('change', async () => {
-      const file = openInput.files[0];
-      if (file) await openMmlTextFile(file);
+      const files = Array.from(openInput.files || []);
+      const dmcFiles = files.filter(isDmcFile);
+      const primary = files.find(f => !isDmcFile(f));
+      if (primary) await openMmlTextFile(primary, null, dmcFiles);
+      else if (dmcFiles.length) await openDmcOnly(dmcFiles);
       openInput.value = ''; // 同じファイルを続けて開き直せるようにする
     });
     document.getElementById('btnMmlSaveFile').addEventListener('click', () => saveMmlFile());
+    let dpcmRestoreTimer = null;
+    mmlSourceEl.addEventListener('input', () => {
+      clearTimeout(dpcmRestoreTimer);
+      dpcmRestoreTimer = setTimeout(() => { restoreDpcmSamples(mmlSourceEl.value); }, 500);
+    });
     // 起動直後のサンプルMMLを「未編集」の基準にする(この状態なら確認なしで開ける)
     markMmlTextSynced('');
     initMmlFileSync();
@@ -5638,11 +5765,8 @@
     if (result.fdsWave && MML.WaveformEditor.fdsWave) MML.WaveformEditor.fdsWave.setData(result.fdsWave);
     if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
 
-    // DPCM ファイルをダウンロード(保存用)。同時にdpcmSampleCacheへ直接投入
-    for (const f of result.dmcFiles || []) {
-      downloadBin(f.name, f.bytes);
-      setDpcmSampleBytes(f.name, f.bytes);
-    }
+    // .dmc は台帳へ(保存時に同じフォルダへ書き出せる)
+    takeDpcmFiles(result.dmcFiles);
 
     const dmcMsg = (result.dmcFiles && result.dmcFiles.length > 0)
       ? T('、DPCM {n} ファイル出力', { n: result.dmcFiles.length }) : '';
@@ -6311,8 +6435,8 @@
     // 変換結果はNES拡張音源(FME-7/N163/VRC7)を借りて再生する設計。有効化はMML本文に
     // 埋め込まれた#EX-*ディレクティブで行われるため、波形エディタへの反映のみ行う
     if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
-    // 打楽器化したch(E=DPCM)の .dmc: 保存用にダウンロードしつつ dpcmSampleCache へ入れて即再生可能に
-    for (const f of (result.dpcmFiles || [])) { downloadBin(f.name, f.bytes); setDpcmSampleBytes(f.name, f.bytes); }
+    // 打楽器化したch(E=DPCM)の .dmc は台帳へ(即再生でき、保存時に同じフォルダへ書き出せる)
+    takeDpcmFiles(result.dpcmFiles);
 
     kssFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FME-7/N163/VRC7を借用して再生)',
@@ -6668,8 +6792,8 @@
     // 変換結果はNES拡張音源(FDS)を借りて再生する設計。有効化はMML本文に埋め込まれた
     // #EX-*ディレクティブで行われるため、波形エディタへの反映のみ行う
     if (result.fdsWave && MML.WaveformEditor.fdsWave) MML.WaveformEditor.fdsWave.setData(result.fdsWave);
-    // 打楽器化したch(E=DPCM)の .dmc: 保存用にダウンロードしつつ dpcmSampleCache へ入れて即再生可能に
-    for (const f of (result.dpcmFiles || [])) { downloadBin(f.name, f.bytes); setDpcmSampleBytes(f.name, f.bytes); }
+    // 打楽器化したch(E=DPCM)の .dmc は台帳へ(即再生でき、保存時に同じフォルダへ書き出せる)
+    takeDpcmFiles(result.dpcmFiles);
 
     gbsFileStatusEl.innerHTML =
       '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FDSを借用して再生)',
@@ -7154,13 +7278,8 @@
 
     if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
 
-    // DPCM(DDA/PCM抽出分)バイナリファイルをダウンロード(保存用)。同時にdpcmSampleCacheへ
-    // 直接投入し、生成されたMML中の@DPCM<n>定義をユーザーがファイル再選択しなくても
-    // そのまま再生・NSF書き出しできるようにする(nsf2mml/converter.jsと同じパターン)
-    for (const f of (result.dpcmFiles || [])) {
-      downloadBin(f.name, f.bytes);
-      setDpcmSampleBytes(f.name, f.bytes);
-    }
+    // DPCM(DDA/PCM抽出分)の .dmc は台帳へ(nsf2mml と同じ。保存時に同じフォルダへ書き出せる)
+    takeDpcmFiles(result.dpcmFiles);
     const dpcmMsg = (result.dpcmFiles && result.dpcmFiles.length > 0)
       ? T('、DPCM {n} ファイル出力', { n: result.dpcmFiles.length }) : '';
 
@@ -7724,10 +7843,7 @@
     mmlSourceEl.dispatchEvent(new Event('input'));
     if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
     const dmc = result.dpcmFiles || result.dmcFiles || [];
-    for (const d of dmc) {
-      downloadBin(d.name, d.bytes);
-      setDpcmSampleBytes(d.name, d.bytes);
-    }
+    takeDpcmFiles(dmc); // .dmc は台帳へ(保存時に同じフォルダへ書き出せる)
     const ds = result.dpcmStats;
     const dpcmMsg = ds ? '<div>' + T('DPCM: 定義 {clips} 件 / 打点 {segments} 個 / ROM {kb} KB',
       { clips: ds.clips, segments: ds.segments, kb: (ds.bytes / 1024).toFixed(1) }) + '</div>' : '';
@@ -8443,10 +8559,7 @@
     // 委譲先ファミリに応じた波形エディタ反映(nsf2mml: FDS/N163、kss2mml: SCC→N163、gbs2mml: GB波形→FDS)
     if (result.fdsWave && MML.WaveformEditor.fdsWave) MML.WaveformEditor.fdsWave.setData(result.fdsWave);
     if (result.n163Wave && MML.WaveformEditor.n163Wave) MML.WaveformEditor.n163Wave.setData(result.n163Wave);
-    for (const f of (result.dpcmFiles || [])) {
-      downloadBin(f.name, f.bytes);
-      setDpcmSampleBytes(f.name, f.bytes);
-    }
+    takeDpcmFiles(result.dpcmFiles); // .dmc は台帳へ(保存時に同じフォルダへ書き出せる)
 
     // 借用先の説明(ファミリごと)。ネイティブ変換(NES)は借用無し。
     // PSG系(AY/SCC/OPLL/SN)は構成から自動割当した借用先をそのまま出す(vgm2mml/converter.js composePsgLike)
@@ -8735,7 +8848,7 @@
       if (!files || !files.length) return null;
       if (files.length === 1) return files[0];
       const ext = (fl) => fl.name.split('.').pop().toLowerCase();
-      return files.find(fl => ext(fl) !== 'psflib') || files[0];
+      return files.find(fl => ext(fl) !== 'psflib' && ext(fl) !== 'dmc') || files[0];
     }
     function makeFileListSiblingResolver(files) {
       const list = Array.from(files || []);
@@ -8780,8 +8893,8 @@
       // 読み込むだけで自動再生はしない(コンパイル準備まではopenMmlTextFileが行う)
       if (ext === 'mml' || ext === 'txt') {
         // opts.handle: ドラッグ&ドロップから拾えたFileSystemFileHandle。あれば
-        // そのまま外部エディタとの同期対象になる(src/ui/fileSync.js)
-        return (await openMmlTextFile(file, opts && opts.handle)) ? 'mml' : false;
+        // そのまま外部エディタとの同期対象になる(src/ui/fileSync.js)。一緒に来た .dmc は台帳へ
+        return (await openMmlTextFile(file, opts && opts.handle, ((opts && opts.siblings) || []).filter(isDmcFile))) ? 'mml' : false;
       }
       const targetInputId = formatToInputId[ext];
       if (!targetInputId) {
@@ -8807,6 +8920,7 @@
     //  鍵盤表示を開くのは openSoundFile、MMLエディタを開くのは openMmlTextFile が行う)
     soundFileEl.addEventListener('change', async () => {
       const files = Array.from(soundFileEl.files || []);
+      if (files.length && files.every(isDmcFile)) { await openDmcOnly(files); soundFileEl.value = ''; return; }
       const file = pickPrimarySoundFile(files);
       if (!file) return;
       const ok = await openSoundFile(file, { siblings: files });
@@ -8849,6 +8963,7 @@
       dragDepth = 0;
       if (dropOverlayEl) dropOverlayEl.classList.remove('visible');
       const dropped = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+      if (dropped.length && dropped.every(isDmcFile)) { openDmcOnly(dropped); return; }
       const file = pickPrimarySoundFile(dropped);
       if (!file) return;
       // DataTransferItemはこのハンドラを抜けると無効になるので、ハンドルの取得だけは
