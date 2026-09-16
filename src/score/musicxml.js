@@ -51,11 +51,32 @@
     push('    </encoding>');
     push('  </identification>');
     const groups = groupParts(notation.parts);
+    // 打楽器パート: 使っている GM ドラム音ごとに score-instrument を作り、MIDI ch10 で鳴らす指定を付ける
+    // (楽譜ソフトがピアノで鳴らして雑音にならないように)。音符側は <instrument id> で参照する
+    const drumInstrOf = (gp) => {
+      const map = new Map(); // gm → id
+      for (const part of gp.staves) {
+        if (!part.percussion) continue;
+        for (const m of part.measures) for (const it of m.items) {
+          if (it.rest || !it.unpitched || it.unpitched.gm == null) continue;
+          if (!map.has(it.unpitched.gm)) map.set(it.unpitched.gm, { id: `${gp.id}-I${it.unpitched.gm}`, gm: it.unpitched.gm, name: it.unpitched.gmName });
+        }
+      }
+      return map;
+    };
+    const drumIds = new Map(); // gp.id → Map(gm → {id})
     push('  <part-list>');
     for (const gp of groups) {
       push(`    <score-part id="${esc(gp.id)}">`);
       push(`      <part-name>${esc(gp.name)}</part-name>`);
       push(`      <part-abbreviation>${esc(gp.abbrev)}</part-abbreviation>`);
+      const instrs = drumInstrOf(gp);
+      if (instrs.size) {
+        drumIds.set(gp.id, instrs);
+        for (const ins of instrs.values()) push(`      <score-instrument id="${esc(ins.id)}"><instrument-name>${esc(ins.name)}</instrument-name></score-instrument>`);
+        // midi-unpitched は 1 始まり(MIDI ノート番号 + 1)。midi-channel 10 = GM ドラム
+        for (const ins of instrs.values()) push(`      <midi-instrument id="${esc(ins.id)}"><midi-channel>10</midi-channel><midi-program>1</midi-program><midi-unpitched>${ins.gm + 1}</midi-unpitched></midi-instrument>`);
+      }
       push('    </score-part>');
     }
     push('  </part-list>');
@@ -82,6 +103,7 @@
         const tieStop = cn ? cn.tieStop : it.tieStop, tieStart = cn ? cn.tieStart : it.tieStart;
         if (tieStop) push('        <tie type="stop"/>');
         if (tieStart) push('        <tie type="start"/>');
+        if (it.unpitched && it.unpitched.gm != null && curDrums && curDrums.has(it.unpitched.gm)) push(`        <instrument id="${esc(curDrums.get(it.unpitched.gm).id)}"/>`);
         push(`        <voice>${voice}</voice>`);
         if (!it.measureRest) {
           push(`        <type>${TYPE_NAMES[it.noteType]}</type>`);
@@ -115,9 +137,11 @@
       push('      </direction>');
     };
 
+    let curDrums = null;
     for (const gp of groups) {
       const nStaves = gp.staves.length;
       const nMeasures = Math.max(...gp.staves.map(p => p.measures.length));
+      curDrums = drumIds.get(gp.id) || null;
       push(`  <part id="${esc(gp.id)}">`);
       for (let mi = 0; mi < nMeasures; mi++) {
         push(`    <measure number="${mi + 1}">`);

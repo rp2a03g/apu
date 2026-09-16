@@ -183,13 +183,23 @@
     return { '-2': 'flat-flat', '-1': 'flat', '0': 'natural', '1': 'sharp', '2': 'double-sharp' }[String(alter)] || null;
   }
 
-  // 打楽器(ノイズ/DPCM)の表示位置: ノート番号を五線の位置に散らすだけ(E4 から上へ)
-  function unpitchedOf(note) {
+  // 打楽器(ノイズ/DPCM)の表示位置と、楽譜ソフトで鳴らすときの GM ドラム音(MIDI ch10)。
+  // 表示位置はノート番号を五線の位置に散らすだけ(E4 から上へ)。
+  // gm: ノイズは周期が長い(低い、note%16 が小さい)ほうからキック(36)/スネア(38)/クローズドハイハット(42)、
+  //     DPCM はサンプル番号(note - 48)でキック/スネア/ハイハット/タム/クラッシュ/オープンハイハット/ロータム/ライドを回す。
+  //     楽譜ソフトがピアノで鳴らして雑音にならないためのもので、実機の音を表すものではない(2026-09-16)
+  const GM_DRUM_NAMES = { 36: 'Bass Drum', 38: 'Snare', 42: 'Closed Hi-Hat', 45: 'Low Tom', 49: 'Crash', 46: 'Open Hi-Hat', 41: 'Floor Tom', 51: 'Ride' };
+  const DPCM_DRUM_CYCLE = [36, 38, 42, 45, 49, 46, 41, 51];
+  function unpitchedOf(note, part) {
     const steps = ['E', 'F', 'G', 'A', 'B', 'C', 'D'];
     const pos = ((note % 16) + 16) % 16;
     const i = pos % 7, oct = 4 + Math.floor(pos / 7) + (i >= 5 ? 1 : 0);
-    return { step: steps[i], octave: oct };
+    let gm;
+    if (part && /DPCM/.test(part.name)) gm = DPCM_DRUM_CYCLE[((note - 48) % DPCM_DRUM_CYCLE.length + DPCM_DRUM_CYCLE.length) % DPCM_DRUM_CYCLE.length];
+    else gm = pos <= 5 ? 36 : (pos <= 10 ? 38 : 42);
+    return { step: steps[i], octave: oct, gm, gmName: GM_DRUM_NAMES[gm] || ('Drum ' + gm) };
   }
+  Score.unpitchedOf = unpitchedOf;
 
   // 調: 指示 > 推定(音程を持つ全chの音価重み)
   function resolveKey(compiled, opts) {
@@ -479,7 +489,7 @@
             frameEnd: pc.frameStart + ((at - pc.pos + s.units) / pc.units) * pc.frames
           };
           if (!pc.rest) {
-            if (part.percussion) item.unpitched = unpitchedOf(pc.note);
+            if (part.percussion) item.unpitched = unpitchedOf(pc.note, part);
             else item.pitch = spell(pc.note, key.fifths, pc.spelled);
             if (pc.chord) {
               item.chord = pc.chord.map(n => ({ note: n, pitch: spell(n, key.fifths, null), tieStart: false, tieStop: false, accidental: null }));

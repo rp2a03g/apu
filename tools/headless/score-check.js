@@ -39,7 +39,7 @@ function checkXmlWellFormed(xml) {
 
 // note 要素の子要素がスキーマ順か(pitch/unpitched/rest, duration, tie, voice, type, dot, accidental, time-modification, beam, notations)
 function checkNoteOrder(xml) {
-  const ORDER = ['chord', 'pitch', 'unpitched', 'rest', 'duration', 'tie', 'voice', 'type', 'dot', 'accidental', 'time-modification', 'staff', 'beam', 'notations'];
+  const ORDER = ['chord', 'pitch', 'unpitched', 'rest', 'duration', 'tie', 'instrument', 'voice', 'type', 'dot', 'accidental', 'time-modification', 'staff', 'beam', 'notations'];
   const problems = [];
   const re = /<note>([^]*?)<\/note>/g;
   let m, count = 0;
