@@ -490,8 +490,11 @@
       const p = c.seq ? chip.samplePitch('multipcm', c.physStart, c.physStart + c.smpLen, c.loopOff) : null;
       const pan = c.pan >= 8 ? c.pan - 16 : c.pan;
       // release: キーオフ済みで余韻だけ鳴っている(合成chが同じ音色の次のノートへレーンを譲る目印)
-      out.push({ active: c.playing && vol > 0.01 && rate > 0, release: c.egState === EG_RELEASE, vol, rawVol: Math.round(vol * 255), rawVolMax: 255,
-        panL: pan > 0 ? Math.max(0, 15 - pan * 2) : 15, panR: pan < 0 ? Math.max(0, 15 + pan * 2) : 15,
+      // ★表示規約(2026-09-17): 音量は**0が最大**のTL実レジスタ(0-127、0.375dB/段)、
+      //   パンは符号付きの実レジスタ(-8..+7、中央0。正=右)。バーは従来どおり0-100%。
+      out.push({ active: c.playing && vol > 0.01 && rate > 0, release: c.egState === EG_RELEASE, vol, volApparent: vol,
+        rawVol: c.tlDestIdx, rawVolMax: 127, volZeroMax: true,
+        panReg: pan, panCenter: 0, panDir: 1, panSigned: true,
         rate, seq: c.seq, loop: c.lenSecEst === Infinity, lenSec: c.lenSecEst,
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,

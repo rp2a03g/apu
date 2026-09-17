@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-17 11:38:56
+ * Built by tools/build-capture-workers.ps1 at 2026-09-17 13:21:10
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-17 11:38:56';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-17 13:21:10';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -1150,7 +1150,12 @@
       out.push({
         freq,
         vol: level / 31,
-        rawVol: Math.round(level / 2),
+        // ★数値は内部の32段(0-31)をそのまま出す(2026-09-17のユーザー合意)。
+        //   固定音量時は4bitレジスタを (nibble*2)+1 で32段空間の奇数へ写した値、
+        //   ハードエンベロープ中は5bitの実レベル。/2 して0-15へ潰すと、
+        //   **エンベロープ中だけある32段の分解能が表示で消える**。
+        //   「レジスタそのままではない」印は既存の黄色表示(envMode)が担う。
+        rawVol: level, rawVolMax: 31,
         // ★2026-08-22: 「トーン有効だが周期0で、ノイズだけで鳴らしている」打楽器chが
         // 消灯していた(Aleste Gaiden MSX2のch A=全曲period 0/ノイズのみ)。旧式は
         // toneOnを先に見てfreq>0を要求していたため、ノイズ発音中でもactive=falseになる。

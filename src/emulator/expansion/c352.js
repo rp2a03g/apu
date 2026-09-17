@@ -341,8 +341,11 @@
       const p = (c.seq && !noise) ? chip.samplePitch('c352', c.smpStart, c.smpEnd, c.smpLoop, c.smpPingPong) : null;
       const lenBytes = p ? p.lenBytes : Math.max(0, c.smpEnd - c.smpStart);
       const loop = !!(c.flags & FLG_LOOP); // ピンポン(REVLOOP)もbit1を含む
-      out.push({ active: !!(c.flags & FLG_BUSY) && vmax > 0 && rate > 0, vol: vmax / 255, rawVol: vmax, rawVolMax: 255,
-        panL: volL >> 4, panR: volR >> 4,
+      // ★表示規約(2026-09-17): C140 と同じく音量列は '—'。L/R は**4出力の実レジスタ**
+      //   (フロントL/R + リアL/R、各0-255)。表示側はフロントを主、リアを併記する。
+      out.push({ active: !!(c.flags & FLG_BUSY) && vmax > 0 && rate > 0, vol: vmax / 255, rawVol: vmax, rawVolMax: 255, volNone: true,
+        panL: (c.volF >> 8) & 0xFF, panR: c.volF & 0xFF,
+        rearL: (c.volR >> 8) & 0xFF, rearR: c.volR & 0xFF,
         rate, seq: c.seq, loop, lenSec: loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,

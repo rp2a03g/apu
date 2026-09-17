@@ -53,6 +53,11 @@
     '図のエンベロープの■をドラッグ / タグをクリック / FBのバーをクリックでも変えられます':
       'You can also drag the envelope handles, click the tags, or click the FB bar in the diagram',
     '音量 v': 'Volume v',
+    // 鍵盤のch一覧: 実レジスタをそのまま出す音量列の読み方(2026-09-17)
+    'この音源は音量値を持たず、L/Rの音量だけで決まります':
+      'This chip has no volume value; the level is set by the L/R volumes alone',
+    '実レジスタ値(0が最大、{max}が最小)': 'Raw register value (0 = loudest, {max} = quietest)',
+    '現在の振幅(符号付き、-{max}〜+{max})': 'Current amplitude (signed, -{max} to +{max})',
     '音程': 'Pitch',
     'ML 倍率': 'ML multiple',
     'TL 変調の深さ': 'TL mod depth',

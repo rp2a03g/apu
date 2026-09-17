@@ -408,8 +408,11 @@
       //   他の対数レジスタのチップ(HES/AY/FME7/VRC7)はバーに**レジスタ位置**を出しており、
       //   ここも合わせる: 1 - reg/0x40(= 1 - 減衰dB/36)。
       const barPos = Math.max(0, Math.min(1, 1 - chip.regs[b + 3] / 0x40));
-      out.push({ active: !!(active & (1 << i)) && vol > 0, vol, volApparent: barPos, rawVol: Math.round(vol * 255), rawVolMax: 255,
-        panL: Math.round(PANTAB[pan] * 15), panR: Math.round(PANTAB[0xE - pan] * 15),
+      // ★表示規約(2026-09-17): 音量は**0が最大**の減衰レジスタ(0x03、0-0x40)、
+      //   パンは実レジスタ(0x05、0x11-0x1f、中央0x18)。上の pan は 0-14 へ正規化済みなので戻す。
+      out.push({ active: !!(active & (1 << i)) && vol > 0, vol, volApparent: barPos,
+        rawVol: chip.regs[b + 3], rawVolMax: 0x40, volZeroMax: true,
+        panReg: 0x11 + pan, panCenter: 0x18, panDir: 1, panHex: true,
         rate, seq: c.seq, lenSec: rate > 0 ? lenSamples / rate : 0,
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
         sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,

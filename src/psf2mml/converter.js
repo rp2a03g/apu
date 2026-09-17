@@ -194,7 +194,8 @@
         for (const c of frame) {
           if (!c.vol) continue;
           c.vol = Math.min(1, c.vol * k);
-          c.rawVol = Math.round(c.vol * 255);
+          // ★rawVol(=ADSRの現在値そのもの)は触らない。ここはスナップショットを直接書き換えるので、
+          //   正規化した値を入れると鍵盤のADSR表示が実機のレジスタ値でなくなる(2026-09-17)
         }
       }
     }

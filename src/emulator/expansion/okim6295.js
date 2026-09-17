@@ -140,6 +140,7 @@
           c.sample = 0;
           c.count = 2 * (stop - start + 1);
           c.chVol = volume;
+          c.volReg = data & 0x0F; // 鍵盤表示用の実レジスタ(減衰表のindexではなく書かれた値)
           c.signal = -2; c.step = 0;
           c.phrase = phrase;
           c.seq++;
@@ -286,8 +287,10 @@
       const c = chip.ch[i];
       const p = c.seq ? chip.samplePitch('okim6295', c.smpStart, c.smpEnd) : null;
       const lenNib = c.count || (p ? p.lenNibbles : 0);
-      out.push({ active: c.playing && c.chVol > 0, vol: c.chVol / 0x20, rawVol: c.chVol, rawVolMax: 0x20,
-        panL: 15, panR: 15,
+      // ★表示規約(2026-09-17): 数値は**実レジスタ**(キーオンコマンドの下位ニブル、0が最大)。
+      //   従来は内部の減衰表のindex(0-0x20)を出していた。パン機能は無いので L/R は '—'。
+      out.push({ active: c.playing && c.chVol > 0, vol: c.chVol / 0x20, rawVol: c.volReg || 0, rawVolMax: 15, volZeroMax: true,
+        panNone: true,
         rate, seq: c.seq, loop: false, lenSec: rate > 0 ? lenNib / rate : 0,
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,

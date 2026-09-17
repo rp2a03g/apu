@@ -2141,6 +2141,11 @@ button.secondary {
 .kbd-left--spc .kbds-h-lr, .kbd-left--spc .kbds-lr,
 .kbd-left--hes .kbds-h-lr, .kbd-left--hes .kbds-lr,
 .kbd-left--gbs .kbds-h-lr, .kbd-left--gbs .kbds-lr { display: inline-block; }
+/* L/R列に16bitの実レジスタを出す音源(PSXのVOLL/VOLR=-32768..32767、QSoundのパン=0x110-0x130、
+   C352の前後併記)があるときは、桁が入るよう列ごと広げる(keyboard.js _rebuildRows が
+   一覧まるごとに .kbd-left--lrwide を付ける。2026-09-17のユーザー合意)。
+   列は縦に揃っていないと読めないので、行ごとではなく一覧単位で切り替える */
+.kbd-left--lrwide .kbds-h-lr, .kbd-left--lrwide .kbds-lr { width: 52px; }
 /* L/R は間を詰める(下記kbds-l)ため近接しがちなので、視認性を保つよう少し暗めにする。
    ★--text-secondary はダークモードでは #cfcfe0(ほぼ白)になり L/R が浮いて見づらい(ユーザー指摘、
    2026-08-19)ため、どの配色でも中間グレーになる --text-muted(既定 #6e7781 / ダーク #9999aa)にする */
@@ -2416,6 +2421,9 @@ button.secondary {
   flex: none;
   min-height: 0;
 }
+/* L/R列を広げた分(30px→52px が2列=44px)だけ一覧も広げる。widthを持たない幅いっぱい配置は対象外 */
+.kbd-left.kbd-left--lrwide:not(.kbd-left--flex) { width: 414px; }
+.kbd-left.kbd-left--assign.kbd-left--lrwide:not(.kbd-left--flex) { width: 650px; }
 /* HES/GBSのみL/R列(kbds-lr×2、各30px+gap6px分)を表示するため、その分だけ広げないと
    残りのflex:1であるfreq列が押し潰されて見切れる(NSF/KSSはL/R非表示のまま320px) */
 .kbd-left.kbd-left--hes,

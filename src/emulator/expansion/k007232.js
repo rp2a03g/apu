@@ -279,10 +279,9 @@
       const lenBytes = p ? p.lenBytes : Math.max(0, end - base);
       // 左右の音量レジスタ(0-255)。片側0でも鳴っているので大きい方を発音量とみなす
       const vol = Math.max(c.volL, c.volR) / 255;
-      // ★L/R列は0-15の整数が全チップ共通の表示規約(c140 と同じ volL>>4)。0..1の小数を入れると
-      //   「0.2」のような別スケールの値が並んで読めない
+      // ★L/R列は**実レジスタ(0-255)をそのまま**出す(2026-09-17のユーザー合意。>>4 をやめた)
       out.push({ active: c.play && vol > 0, vol, rawVol: Math.max(c.volL, c.volR), rawVolMax: 255,
-        panL: c.volL >> 4, panR: c.volR >> 4,
+        panL: c.volL, panR: c.volR,
         rate, seq: c.seq, lenSec: rate > 0 ? lenBytes / rate : 0,
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
         sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,

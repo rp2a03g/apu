@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-17 11:38:56
+ * Built by tools/build-capture-workers.ps1 at 2026-09-17 13:21:10
  *
  * regsOnly capture worker bundle (psfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.psfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.psfCaptureBuiltAt = '2026-09-17 11:38:56';
+  MML.WorkerBundles.psfCaptureBuiltAt = '2026-09-17 13:21:10';
   MML.WorkerBundles.psfCapture = function () {
 /*
  * PSF (Portable Sound Format) 容器 / PS-EXE 解析
@@ -4742,8 +4742,11 @@
       const p = c.seq ? chip.samplePitch('multipcm', c.physStart, c.physStart + c.smpLen, c.loopOff) : null;
       const pan = c.pan >= 8 ? c.pan - 16 : c.pan;
       // release: キーオフ済みで余韻だけ鳴っている(合成chが同じ音色の次のノートへレーンを譲る目印)
-      out.push({ active: c.playing && vol > 0.01 && rate > 0, release: c.egState === EG_RELEASE, vol, rawVol: Math.round(vol * 255), rawVolMax: 255,
-        panL: pan > 0 ? Math.max(0, 15 - pan * 2) : 15, panR: pan < 0 ? Math.max(0, 15 + pan * 2) : 15,
+      // ★表示規約(2026-09-17): 音量は**0が最大**のTL実レジスタ(0-127、0.375dB/段)、
+      //   パンは符号付きの実レジスタ(-8..+7、中央0。正=右)。バーは従来どおり0-100%。
+      out.push({ active: c.playing && vol > 0.01 && rate > 0, release: c.egState === EG_RELEASE, vol, volApparent: vol,
+        rawVol: c.tlDestIdx, rawVolMax: 127, volZeroMax: true,
+        panReg: pan, panCenter: 0, panDir: 1, panSigned: true,
         rate, seq: c.seq, loop: c.lenSecEst === Infinity, lenSec: c.lenSecEst,
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
@@ -5032,7 +5035,11 @@
       const phase = snap[o + S.PHASE];
       const level = snap[o + S.LEVEL];
       const pitch = Math.min(0x4000, snap[o + S.PITCH]);
-      const volL = Math.abs(snap[o + S.VOLL]) / 0x7FFF, volR = Math.abs(snap[o + S.VOLR]) / 0x7FFF;
+      // ★L/R列は VOLL/VOLR の**生レジスタ(16bit符号付き、-0x8000..0x7FFF)**をそのまま出す
+      //   (2026-09-17、ユーザー合意)。これはパンではなく「左右それぞれの音量」で、
+      //   0=その側が無音・負=逆相。abs()して0-15へ潰すと逆相が見えなくなる。
+      const volLReg = snap[o + S.VOLL], volRReg = snap[o + S.VOLR];
+      const volL = Math.abs(volLReg) / 0x7FFF, volR = Math.abs(volRReg) / 0x7FFF;
       const env = level / 0x7FFF;
       const vol = Math.min(1, env * Math.max(volL, volR));
       const rate = SPU_RATE * pitch / 0x1000;
@@ -5051,8 +5058,11 @@
         release: phase === 4,
         // 合成ch(Emu.PoolChannelRegrouper)がサンプルの代わりに束ねる鍵。トラックが分かればトラック単位
         track, laneKey: (track >= 0 && seq) ? 'trk:' + track : null,
-        vol, rawVol: Math.round(vol * 255), rawVolMax: 255,
-        panL: Math.round(Math.min(1, env * volL) * 15), panR: Math.round(Math.min(1, env * volR) * 15),
+        // vol は**変換が attDb へ戻す線形振幅**なので意味を変えない(borrow.js VOL_FROM_DB)。
+        // 表示は別立て: 数値(rawVol)= ADSR の現在値そのもの、バー(volApparent)= その比。
+        // L/R音量はL/R列に実値で出るので、バーには混ぜない(RF5C164 を ENV だけにしたのと同じ扱い)。
+        vol, rawVol: level, rawVolMax: 0x7FFF, volApparent: env,
+        panL: volLReg, panR: volRReg, lrWide: true,
         rate, seq, loop,
         lenSec: loop ? Infinity : (rate > 0 && s ? s.pcm.length / rate : 0),
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
@@ -5854,6 +5864,91 @@
     return (m >= MIDI_MIN && m <= MIDI_MAX) ? m : null;
   }
 
+  // ── パン/音量の表示規約(2026-09-17、ユーザー合意) ─────────────────────────
+  // 方針: **数値のセルには実レジスタ値を出す**(チップごとにスケールも向きも違ってよい)。
+  //       0-100% に揃えるのは音量バー(vol / volApparent)だけで、そこで音源差を吸収する。
+  //  ・パン機能を持たないチップ(OPL系/GA20/OKIM6295/MSM5205)は PAN_NONE
+  //  ・音量値を持たず L/R でしか音量が決まらないチップ(C140/C352/SegaPCM)は音量列が VOL_NONE
+  //  ・中央のあるパンレジスタ(K054539/QSound/MultiPCM)は L セルに生値、R セルに中央基準の位置
+  //  ・16bit の値を出すチップ(PSX/QSound)は行の L/R 列を広げる(ch.lrWide)
+  const PAN_NONE = '—';
+  const VOL_NONE = '—';
+  /**
+   * 中央のあるパンレジスタの「中央基準の位置」表示。
+   * v=中央 → 'C'、左寄り → 'L<n>'、右寄り → 'R<n>'(n は中央からの段数)。
+   * dir: +1 なら「値が大きいほど右」、-1 なら「値が大きいほど左」。
+   */
+  /**
+   * スナップショットの表示規約フィールド → 行オブジェクト(2026-09-17)。
+   * 個々の push に書き足すと必ずどれか漏れるので、panL/panR を渡す行は全部ここを通す
+   * ([[keyboard-live-getter-forwarding-list]] と同じ罠)。
+   *  c.panNone      パン機能なし → L/R は '—'
+   *  c.volNone      音量値を持たない(L/Rでしか決まらない) → 音量列は '—'
+   *  c.panReg       中央のあるパンレジスタ → L に生値、R に中央基準の位置(C/L3/R5)
+   *  c.rearL/rearR  C352 のリア出力 → L/R に「前+後」を併記
+   *  c.lrWide       16bit の値を出す行 → L/R 列を広げる
+   */
+  function panVolFields(c) {
+    const out = {};
+    // ★バーの値(volApparent)もここで渡す。個別の push に書くと必ず渡し忘れる
+    //   (K054539 で実際に踏んだ。数値だけ直ってバーが変わらない、という形で出る)
+    if (c.volApparent !== undefined) out.volApparent = c.volApparent;
+    // 音量の数値とスケールもスナップショット側が正典(行側のハードコードを上書きする)。
+    // ★この関数は push の**末尾**で展開されるので、行に書いてある rawVolMax より後勝ちになる
+    if (c.rawVolMax !== undefined) { out.rawVol = c.rawVol; out.rawVolMax = c.rawVolMax; }
+    if (c.volNone) out.volText = VOL_NONE;
+    if (c.volZeroMax) out.volZeroMax = true;
+    if (c.volSigned) out.volSigned = true;
+    if (c.panNone) { out.panLText = PAN_NONE; out.panRText = PAN_NONE; return out; }
+    if (c.panReg !== undefined) {
+      // 生値の書式はレジスタの読み方に合わせる(ユーザーが仕様書で見る形):
+      //  ・K054539(0x11-0x1f) / QSound(0x110-0x130) は16進
+      //  ・MultiPCM(-8..+7、中央0)は符号付き10進
+      out.panLText = c.panHex ? c.panReg.toString(16).toUpperCase()
+        : (c.panSigned && c.panReg > 0 ? '+' + c.panReg : String(c.panReg));
+      out.panRText = panPos(c.panReg, c.panCenter || 0, c.panDir || 1);
+      return out;
+    }
+    out.panL = c.panL; out.panR = c.panR;
+    if (c.rearL !== undefined) {
+      // フロントとリアを1セルに併記する(前+後)。4値を2列へ収める
+      out.panLText = c.panL + '+' + c.rearL;
+      out.panRText = c.panR + '+' + c.rearR;
+      out.lrWide = true;
+    }
+    if (c.lrWide) out.lrWide = true;
+    return out;
+  }
+  // FM の音量は音色のキャリアTL(=そのchの音量そのもの)。**0が最大**の実レジスタを出す
+  // (2026-09-17のユーザー合意。VRC7/OPLL が元から 0=最大 で出しているのと揃う)。
+  //  ・OPN系(YM2612/2151/2203/2608/2610): patch.AL のアルゴリズムでキャリアopが決まる。TLは0-127
+  //  ・OPL系(YM3812/3526/Y8950): patch.car.TL(0-63)。cnt=1(加算接続)は mod もキャリア
+  // vgm2mml の fmAttDb と同じ取り方(CARRIER_OPS)なので、表示とMMLの音量が同じ根拠になる。
+  const FM_CARRIER_OPS = [[3], [3], [3], [3], [1, 3], [1, 2, 3], [1, 2, 3], [0, 1, 2, 3]];
+  function carrierTl(patch) {
+    if (!patch) return null;
+    if (patch.ops && patch.AL !== undefined) {
+      let tl = 127;
+      for (const op of FM_CARRIER_OPS[patch.AL & 7]) tl = Math.min(tl, patch.ops[op].TL);
+      return { tl, max: 127 };
+    }
+    if (patch.car && patch.car.TL !== undefined) {
+      const tl = patch.cnt === 1 ? Math.min(patch.car.TL, patch.mod ? patch.mod.TL : 63) : patch.car.TL;
+      return { tl, max: 63 };
+    }
+    return null;
+  }
+  /** FM行の音量列(0=最大のキャリアTL)。patchが無ければ従来どおり0-15の派生値 */
+  function fmVolFields(patch, fallbackRaw) {
+    const c = carrierTl(patch);
+    return c ? { rawVol: c.tl, rawVolMax: c.max, volZeroMax: true }
+             : { rawVol: fallbackRaw, rawVolMax: 15 };
+  }
+  function panPos(v, center, dir) {
+    const d = (v - center) * (dir || 1);
+    if (d === 0) return 'C';
+    return (d > 0 ? 'R' : 'L') + Math.abs(d);
+  }
   // ノイズchの周期index(ch.noiseIndex、0〜15。NSF/GBSどちらも同じ2A03の16段階スケールへ
   // 揃えている)を、そのままC1(MIDI 24)〜D#2(MIDI 39)の16音に1:1対応させる(ユーザー指定)。
   function noisePeriodIndexToMidi(idx) {
@@ -6331,7 +6426,7 @@
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
           : { t: 'fm', nx: 256, ny: 256 };
         channels.push({ id: `VR${ch+1}`, color: COLS[ch], freq: c.freq, vol: c.vol,
-          rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: 15,
+          rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: 15, volZeroMax: true,
           wave, active: c.active, fmPatch: c.patch || null });
       }
     }
@@ -6370,7 +6465,8 @@
       for (let ch = 0; ch < 3; ch++) {
         const c = snaps ? snaps[ch] : { freq: 0, vol: 0, active: false };
         channels.push({ id: `FE${ch+1}`, color: COLS[ch], freq: c.freq, vol: c.vol,
-          rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: 15,
+          rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: c.rawVolMax !== undefined ? c.rawVolMax : 15,
+          envMode: !!c.envMode,
           // ノイズ有効chはノイズ波形、それ以外は50%矩形波
           wave: c.noise ? { t: 'noise', short: false, nx: 32767, ny: 2 } : { t: 'pulse', hi: 0.5, nx: 2, ny: 2 },
           active: c.active });
@@ -6415,8 +6511,12 @@
         // ★2026-08-22: ノイズ専用ch(トーン無効 or トーン周期0でノイズだけ鳴らす打楽器)は
         // SN76489/GBSのノイズ行と同じ扱いにして、note列に周期indexを出す。
         // 従来は波形アイコンだけノイズにしていたため、note列が空のままで何のchか読めなかった。
+        // ★音量は内部32段(0-31)の実レベル。スナップショットが rawVolMax を持つならそれに従う
+        //   (ライブAY=32段 / writeLog再生のFME7=4bitレジスタ0-15)。ハードエンベロープ中は
+        //   「レジスタそのままではない」印として黄色(envMode)にする。★行へ渡し忘れると効かない
         const noiseRow = { id: `KP${ch + 1}`, color: COLS[ch % 3], freq: c.freq, vol: c.vol,
-          rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: 15,
+          rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: c.rawVolMax !== undefined ? c.rawVolMax : 15,
+          envMode: !!c.envMode,
           wave: c.noise ? { t: 'noise', short: false, nx: 32767, ny: 2 } : { t: 'pulse', hi: 0.5, nx: 2, ny: 2 },
           active: c.active };
         if (c.noiseOnly) {
@@ -6464,7 +6564,7 @@
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
           : { t: 'fm', nx: 256, ny: 256 };
         channels.push({ id: `KF${ch + 1}`, color: MCOLS[ch % MCOLS.length], freq: c.freq, vol: c.vol,
-          rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: 15,
+          rawVol: c.rawVol !== undefined ? c.rawVol : null, rawVolMax: 15, volZeroMax: true,
           wave, active: c.active, fmPatch: c.patch || null });
       }
       if (opllRhythm && snap2 && snap2.rhythm) {
@@ -6518,7 +6618,7 @@
         channels.push({ id: g === 0 ? 'SNN' : 'SNN2', color: '#888888', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
           wave: { t: 'noise', short: !c.white, nx: c.white ? 65535 : 16, ny: 2 },
           active: c.active, noise: true, noiseIndex: gbNoiseFreqToIndex(c.noiseFreq), noiseFreq: c.noiseFreq, noiseShort: !c.white,
-          panL: c.panL, panR: c.panR });
+          ...panVolFields(c) });
       }
       }
     }
@@ -6534,8 +6634,8 @@
         const wave = (c.waveData && c.waveData.length && c.active)
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
           : { t: 'fm', nx: 256, ny: 256 };
-        channels.push({ id: `YM${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
+        channels.push({ id: `YM${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, ...fmVolFields(c.patch, c.rawVol),
+          wave, active: c.active, ...panVolFields(c), fmPatch: c.patch || null });
       }
       {
         const d = s ? s.dac : { enabled: false, level: 0, vol: 0, active: false };
@@ -6556,8 +6656,8 @@
         const wave = (c.waveData && c.waveData.length && c.active)
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
           : { t: 'fm', nx: 256, ny: 256 };
-        channels.push({ id: `OA${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
+        channels.push({ id: `OA${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, ...fmVolFields(c.patch, c.rawVol),
+          wave, active: c.active, ...panVolFields(c), fmPatch: c.patch || null });
       }
       // 内蔵リズム: NA行と同じデータ形状(ロール/ドラム区画/パッド流用)。ピッチ解析は
       // ドラム音なので通常conf<0.5=「サンプル」行のまま。リズムROM未読込でもキーオンは
@@ -6569,7 +6669,7 @@
         const hue = (20 + ch * 12) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: RIDS[ch], color: `hsl(${hue},80%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
-          wave: adpcmWave8(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: adpcmWave8(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6580,7 +6680,7 @@
         channels.push({ id: 'OAB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: adpcmWave8(c), active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
-          panL: c.panL, panR: c.panR });
+          ...panVolFields(c) });
       }
     }
 
@@ -6601,7 +6701,7 @@
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
           : { t: 'fm', nx: 256, ny: 256 };
         channels.push({ id: `OL${ch + 1}`, color: MCOLS[ch % MCOLS.length], freq: c.freq, vol: c.vol,
-          rawVol: c.rawVol, rawVolMax: 15,
+          ...fmVolFields(c.patch, c.rawVol),
           wave, active: c.active, fmPatch: c.patch || null });
       }
       if (oplRhythm) {
@@ -6648,8 +6748,8 @@
         const wave = (c.waveData && c.waveData.length && c.active)
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
           : { t: 'fm', nx: 256, ny: 256 };
-        channels.push({ id: `OP${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
+        channels.push({ id: `OP${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, ...fmVolFields(c.patch, c.rawVol),
+          wave, active: c.active, ...panVolFields(c), fmPatch: c.patch || null });
       }
     }
 
@@ -6664,8 +6764,8 @@
         const wave = (c.waveData && c.waveData.length && c.active)
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
           : { t: 'fm', nx: 256, ny: 256 };
-        channels.push({ id: `OM${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
+        channels.push({ id: `OM${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, ...fmVolFields(c.patch, c.rawVol),
+          wave, active: c.active, ...panVolFields(c), fmPatch: c.patch || null });
       }
     }
 
@@ -6683,7 +6783,7 @@
         const hue = (170 + ch * 14) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `GA${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
-          wave: gaWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: gaWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6703,7 +6803,7 @@
         const hue = (285 + ch * 20) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `K7${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
-          wave: kWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: kWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6727,7 +6827,7 @@
         // volApparent: 音量バー用の値(k054539.js を参照)。vol は変換が減衰dBに戻す線形振幅なので、
         //   対数レジスタのこのチップではバーが7〜13%しか動かない。★行へ渡し忘れるとバーに効かない
         channels.push({ id: `K5${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, volApparent: c.volApparent, rawVol: c.rawVol, rawVolMax: 255,
-          wave: kWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: kWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6741,9 +6841,9 @@
       const live = extraSnaps && extraSnaps.msm5205Live;
       const s = live ? live() : (extraSnaps && extraSnaps.msm5205 ? extraSnaps.msm5205[frameIdx] : null);
       const c = s ? s[0] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0 };
-      channels.push({ id: 'M5', color: '#ffbb55', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+      channels.push({ id: 'M5', color: '#ffbb55', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: c.rawVolMax !== undefined ? c.rawVolMax : 255,
         wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
-        panL: c.panL, panR: c.panR });
+        ...panVolFields(c) });
     }
 
     if (chips.includes('segapcm')) {
@@ -6759,7 +6859,7 @@
         const hue = (200 + ch * 9) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `SP${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 127,
-          wave: spWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: spWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6778,7 +6878,7 @@
         const hue = (330 + ch * 6) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `CN${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
-          wave: cnWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: cnWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6797,7 +6897,7 @@
         const hue = (30 + ch * 5) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `CS${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
-          wave: csWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: csWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6829,7 +6929,7 @@
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `PX${ch + 1}`, color, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           ...(lane ? { label: pxOrder.label[ch], labelTitle: pxOrder.title[ch], laneGroup: pxOrder.group[ch], laneCopy: pxOrder.copy[ch] } : {}),
-          wave: pxWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: pxWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6849,8 +6949,8 @@
         const wave = (c.waveData && c.waveData.length && c.active)
           ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 }
           : { t: 'fm', nx: 256, ny: 256 };
-        channels.push({ id: `NF${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          wave, active: c.active, panL: c.panL, panR: c.panR, fmPatch: c.patch || null });
+        channels.push({ id: `NF${ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, ...fmVolFields(c.patch, c.rawVol),
+          wave, active: c.active, ...panVolFields(c), fmPatch: c.patch || null });
       }
       // ADPCM-A(6ch)/ADPCM-B(1ch)の音程表示(3段階、adpcmPitchToMidi参照):
       //  (1) サンプルのピッチ解析(ym2610.js samplePitch: ROM上のサンプルを1回デコードして基本周期を
@@ -6871,7 +6971,7 @@
         const hue = (20 + ch * 12) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `NA${ch + 1}`, color: `hsl(${hue},80%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 31,
-          wave: adpcmWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: adpcmWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6882,7 +6982,7 @@
         channels.push({ id: 'NB', color: '#cc66ff', freq: exact ? c.pitchHz : (c.rate || 0), vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: adpcmWave(c), active: !!c.active, adpcmPitch: true, adpcmExact: exact, adpcmRefRate: c.refRate || 1, adpcmRate: c.rate || 0,
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto',
-          panL: c.panL, panR: c.panR });
+          ...panVolFields(c) });
       }
     }
 
@@ -6897,7 +6997,7 @@
         const hue = (260 + ch * 7) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `QS${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
-          wave: qsWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: qsWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6915,7 +7015,7 @@
         const hue = (190 + ch * 6) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `MP${ch + 1}`, color: `hsl(${hue},72%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
-          wave: mpWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: mpWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6934,7 +7034,7 @@
         const hue = (100 + ch * 15) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
         channels.push({ id: `OK${ch + 1}`, color: `hsl(${hue},70%,58%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0x20,
-          wave: okWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
+          wave: okWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
                     : pcmSampleRow(c)) });
@@ -6950,9 +7050,9 @@
       const s = live ? live() : (extraSnaps && extraSnaps.okim6258 ? extraSnaps.okim6258[frameIdx] : null);
       const c = s ? s[0] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, waveData: null };
       const okiWave = (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
-      channels.push({ id: 'OKI', color: '#ff9944', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+      channels.push({ id: 'OKI', color: '#ff9944', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: c.rawVolMax !== undefined ? c.rawVolMax : 255,
         wave: okiWave, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
-        panL: c.panL, panR: c.panR });
+        ...panVolFields(c) });
     }
 
     if (chips.includes('pwm')) {
@@ -6983,7 +7083,7 @@
         const hue = (200 + ch * 18) % 360;
         channels.push({ id: `${prefix}${ch + 1}`, color: `hsl(${hue},70%,60%)`, freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: c.rate || 0,
-          panL: c.panL, panR: c.panR });
+          ...panVolFields(c) });
       }
     }
 
@@ -9921,6 +10021,12 @@
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
       const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'k007232', 'k054539', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
+      // ★L/R列に16bitの実レジスタを出す音源は列ごと広げる(2026-09-17のユーザー合意)。
+      //   PSX=VOLL/VOLR(-32768..32767) / QSound=パン(0x110-0x130) / C352=前後4値の併記。
+      //   曲頭はスナップショットがまだ無く行データからは判定できないので、**チップ構成で決める**
+      //   (PAN_CHIPS と同じ考え方。列は縦に揃っていないと読めないので一覧まるごと切り替える)
+      const LR_WIDE_CHIPS = ['psx', 'qsound', 'c352'];
+      this._leftEl.classList.toggle('kbd-left--lrwide', LR_WIDE_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
       if (this._chips.includes('vrc7')) this._extraSnaps.vrc7 = buildVrc7Snapshots(wl);
@@ -11576,8 +11682,13 @@
         // L/R列(SPCのステレオパン表示と同じ考え方、色もSPCの.kbds-lrに合わせグレー固定)。
         // panL/panRを持つch(HES: ALL行の$0801, 各chの$0805。GBS: ALL行のNR50, 各chのNR51)
         // だけ値を出し、他フォーマットは空欄のまま。GBSのALL行はVIN有効時だけ黄色にする。
-        if (el.lEl) { el.lEl.textContent = ch.panL !== undefined ? String(ch.panL) : ''; el.lEl.style.color = ch.vinL ? '#ffcc44' : ''; }
-        if (el.rEl) { el.rEl.textContent = ch.panR !== undefined ? String(ch.panR) : ''; el.rEl.style.color = ch.vinR ? '#ffcc44' : ''; }
+        // ★panLText/panRText(文字列)があればそれを出す(2026-09-17のパン/音量表示改修)。
+        //   パン機能を持たないチップの '—'、中央基準の位置表示('C'/'L3'/'R5')、
+        //   C352 の前後4値のような「数値1つに収まらない表示」はこちらを使う。
+        const lTxt = ch.panLText !== undefined ? ch.panLText : (ch.panL !== undefined ? String(ch.panL) : '');
+        const rTxt = ch.panRText !== undefined ? ch.panRText : (ch.panR !== undefined ? String(ch.panR) : '');
+        if (el.lEl) { el.lEl.textContent = lTxt; el.lEl.style.color = ch.vinL ? '#ffcc44' : (lTxt === PAN_NONE ? '#555566' : ''); }
+        if (el.rEl) { el.rEl.textContent = rTxt; el.rEl.style.color = ch.vinR ? '#ffcc44' : (rTxt === PAN_NONE ? '#555566' : ''); }
 
         // ALL行(実チャンネルではない)はL/R以外に表示するものが無いので、以降のvol/wave/note/freq
         // 更新はスキップする(チェックボックスも無いためel.checkbox.checkedへのアクセスもできない)。
@@ -11610,10 +11721,12 @@
         // 減衰エンベロープ、DMC直接書き込み、または見かけ音量が下がっている(maskBy)時は
         // 音量数値を黄色にして「レジスタをそのまま読んだ値ではない/そのとおりには鳴っていない」を示す。
         const masked = showVol && !!ch.maskBy;
-        const rawStr = (showVol && ch.rawVol !== null && ch.rawVol !== undefined)
-          ? String(ch.rawVol) : '';
+        // volText: 音量数値の文字列指定(2026-09-17)。音量値そのものを持たず L/R でしか
+        //   音量が決まらないチップ(C140/C352/SegaPCM)は '—' を入れる。バーはそのまま出す。
+        const rawStr = ch.volText !== undefined ? (showVol || ch.volText === VOL_NONE ? ch.volText : '')
+          : ((showVol && ch.rawVol !== null && ch.rawVol !== undefined) ? String(ch.rawVol) : '');
         el.volNum.textContent = rawStr;
-        el.volNum.style.color = !rawStr ? '#555566'
+        el.volNum.style.color = (!rawStr || rawStr === VOL_NONE) ? '#555566'
           : ((ch.envMode === true || dmcWritten || masked) ? '#ffcc44' : '#e6e6ef');
         // 干渉で音量が下がっている行は音量バーの枠も黄色にして、バーの短さが
         // 「レジスタが小さい」ではなく「干渉で削られている」ことを示す。
@@ -11623,7 +11736,12 @@
         }
         // カーソルを合わせた時の説明。干渉源(ノイズ/三角波/DPCM)を名指しする。
         // 三角波は数値そのものが比率、ノイズは数値がレジスタ値なので言い回しを変える(maskTip)。
-        const tip = masked ? T(ch.maskTip || MASK_TIP_RATIO, { src: T(MASK_SRC[ch.maskBy] || '') }) : '';
+        // 実レジスタをそのまま出す列は、読み方(0が最大/符号付き/音量値を持たない)を説明で補う
+        const tip = masked ? T(ch.maskTip || MASK_TIP_RATIO, { src: T(MASK_SRC[ch.maskBy] || '') })
+          : ch.volText === VOL_NONE ? T('この音源は音量値を持たず、L/Rの音量だけで決まります')
+          : ch.volZeroMax ? T('実レジスタ値(0が最大、{max}が最小)', { max: ch.rawVolMax })
+          : ch.volSigned ? T('現在の振幅(符号付き、-{max}〜+{max})', { max: ch.rawVolMax })
+          : '';
         if (el.volTip !== tip) {
           el.volNum.title = tip;
           if (el.volWrap) el.volWrap.title = tip;

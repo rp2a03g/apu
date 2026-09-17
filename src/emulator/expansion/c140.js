@@ -315,8 +315,10 @@
       const p = c.seq ? chip.samplePitch('c140', c.smpStart, c.smpEnd) : null;
       const lenBytes = p ? p.lenBytes : Math.max(0, c.smpEnd - c.smpStart);
       const loop = !!(c.mode & 0x10);
-      out.push({ active: c.key && vmax > 0 && rate > 0, vol: vmax / 255, rawVol: vmax, rawVolMax: 255,
-        panL: volL >> 4, panR: volR >> 4,
+      // ★表示規約(2026-09-17): このチップは「音量値」を持たず L/R の音量レジスタだけなので、
+      //   音量列は '—'(volNone)、L/R列に 0-255 の実レジスタを出す。バーは従来どおり。
+      out.push({ active: c.key && vmax > 0 && rate > 0, vol: vmax / 255, rawVol: vmax, rawVolMax: 255, volNone: true,
+        panL: volL, panR: volR,
         rate, seq: c.seq, loop, lenSec: loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,

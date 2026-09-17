@@ -211,8 +211,14 @@
     return [{
       active,
       vol: active ? Math.max(0.3, amp) : 0,
-      rawVol: Math.round(amp * 255), rawVolMax: 255,
-      panL: (chip.pan & 0x02) ? 0 : 15, panR: (chip.pan & 0x01) ? 0 : 15,
+      // ★バー(volApparent)は下駄を履かせない実振幅。vol の下限0.3 は「キャプチャ時に振幅が
+      //   出ない経路でも行を点灯させる」ための都合で、0-100%表示としては嘘になる(2026-09-17)
+      volApparent: active ? amp : 0,
+      // ★表示規約(2026-09-17): 数値は**符号付き12bitの内部信号そのもの**(-2048..+2047)。
+      //   DPCM と同じ「振幅が音量」型だが、ADPCM は0中心の波形なので符号を残す(逆相/DCが見える)。
+      //   パンは実レジスタの2値(1=その側に出す)。バーは従来どおり0-100%。
+      rawVol: chip.signal, rawVolMax: 2047, volSigned: true,
+      panL: (chip.pan & 0x02) ? 0 : 1, panR: (chip.pan & 0x01) ? 0 : 1,
       rate: chip.playRate(), seq: chip.seq,
       waveData: info ? info.wave : null,
       sample: ss ? { kind: 'oki', start: ss.start, end: ss.start + ss.len } : null,

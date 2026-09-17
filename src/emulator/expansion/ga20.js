@@ -194,7 +194,8 @@
       const p = c.seq ? chip.samplePitch('ga20', c.start, c.end) : null;
       const lenBytes = p ? p.lenBytes : Math.max(0, c.end - c.start);
       const vol = c.volume / 246; // 音量カーブ適用後の振幅比(最大値246で正規化)
-      out.push({ active: c.play && vol > 0, vol, rawVol: c.rawVol, rawVolMax: 255, panL: 1, panR: 1,
+      // ★表示規約(2026-09-17): モノラルでパンレジスタを持たないので L/R は '—'(panNone)
+      out.push({ active: c.play && vol > 0, vol, rawVol: c.rawVol, rawVolMax: 255, panNone: true,
         rate, seq: c.seq, lenSec: rate > 0 ? lenBytes / rate : 0,
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,

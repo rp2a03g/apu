@@ -121,7 +121,10 @@
       const gain = (c.env / 255) * Math.max(panL, panR) / 15;
       const rate = c.step / 2048 * chip.sampleRate; // 再生サンプルレート(Hz)
       const active = chip.enable && c.enable && c.env > 0 && (panL | panR) !== 0 && c.step > 0;
-      out.push({ vol: gain, rawVol: c.env, active, panL, panR, rate, step: c.step, start: c.start, addr: c.addr >> 11 });
+      // ★表示規約(2026-09-17): バー(volApparent)は **ENV だけ**。gain にはパンが混ざっており、
+      //   中央定位だと最大でも約73%にしかならず「0-100%」の意味をなさなかった(ユーザー指摘)。
+      //   vol はそのまま(この値を見る経路があるため)、L/R は実レジスタの0-15。
+      out.push({ vol: gain, volApparent: c.env / 255, rawVol: c.env, rawVolMax: 255, active, panL, panR, rate, step: c.step, start: c.start, addr: c.addr >> 11 });
     }
     return out;
   };

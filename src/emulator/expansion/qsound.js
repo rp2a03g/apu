@@ -277,8 +277,10 @@
       const p = c.seq ? chip.samplePitch('qsound', c.smpStart, c.smpEnd, c.smpLoop) : null;
       const lenBytes = p ? p.lenBytes : Math.max(0, c.smpEnd - c.smpStart);
       const loop = c.loop > 0;
-      out.push({ active: c.key && vol > 0 && rate > 0, vol, rawVol: Math.min(255, c.chVol >> 4), rawVolMax: 255,
-        panL: Math.min(15, c.lvol >> 4), panR: Math.min(15, c.rvol >> 4),
+      // ★表示規約(2026-09-17): 音量は**16bitの実レジスタをそのまま**、パンも実レジスタ
+      //   (0x0110-0x0130、中央 0x0120)。桁が増えるので行の L/R 列は広げる(lrWide)。
+      out.push({ active: c.key && vol > 0 && rate > 0, vol, rawVol: c.chVol, rawVolMax: 0x1000, lrWide: true,
+        panReg: c.pan, panCenter: 0x120, panDir: 1, panHex: true,
         rate, seq: c.seq, loop, lenSec: loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,

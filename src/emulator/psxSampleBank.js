@@ -143,7 +143,11 @@
       const phase = snap[o + S.PHASE];
       const level = snap[o + S.LEVEL];
       const pitch = Math.min(0x4000, snap[o + S.PITCH]);
-      const volL = Math.abs(snap[o + S.VOLL]) / 0x7FFF, volR = Math.abs(snap[o + S.VOLR]) / 0x7FFF;
+      // ★L/R列は VOLL/VOLR の**生レジスタ(16bit符号付き、-0x8000..0x7FFF)**をそのまま出す
+      //   (2026-09-17、ユーザー合意)。これはパンではなく「左右それぞれの音量」で、
+      //   0=その側が無音・負=逆相。abs()して0-15へ潰すと逆相が見えなくなる。
+      const volLReg = snap[o + S.VOLL], volRReg = snap[o + S.VOLR];
+      const volL = Math.abs(volLReg) / 0x7FFF, volR = Math.abs(volRReg) / 0x7FFF;
       const env = level / 0x7FFF;
       const vol = Math.min(1, env * Math.max(volL, volR));
       const rate = SPU_RATE * pitch / 0x1000;
@@ -162,8 +166,11 @@
         release: phase === 4,
         // 合成ch(Emu.PoolChannelRegrouper)がサンプルの代わりに束ねる鍵。トラックが分かればトラック単位
         track, laneKey: (track >= 0 && seq) ? 'trk:' + track : null,
-        vol, rawVol: Math.round(vol * 255), rawVolMax: 255,
-        panL: Math.round(Math.min(1, env * volL) * 15), panR: Math.round(Math.min(1, env * volR) * 15),
+        // vol は**変換が attDb へ戻す線形振幅**なので意味を変えない(borrow.js VOL_FROM_DB)。
+        // 表示は別立て: 数値(rawVol)= ADSR の現在値そのもの、バー(volApparent)= その比。
+        // L/R音量はL/R列に実値で出るので、バーには混ぜない(RF5C164 を ENV だけにしたのと同じ扱い)。
+        vol, rawVol: level, rawVolMax: 0x7FFF, volApparent: env,
+        panL: volLReg, panR: volRReg, lrWide: true,
         rate, seq, loop,
         lenSec: loop ? Infinity : (rate > 0 && s ? s.pcm.length / rate : 0),
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
