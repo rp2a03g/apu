@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-17 13:21:10
+ * Built by tools/build-capture-workers.ps1 at 2026-09-17 17:16:48
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-17 13:21:10';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-17 17:16:48';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -4083,7 +4083,13 @@
       out.push({
         freq,
         vol: level / 31,
-        rawVol: Math.round(level / 2),             // 0-15 表示用
+        // ★数値は**実レジスタ値**(2026-09-17のユーザー合意)。スケールがモードで変わる:
+        //   ・固定音量 … 音量レジスタの4bit、**0-15**
+        //   ・ハードウェアエンベロープ中(YM2149系のこの機能) … 5bitレベル、**0-31**
+        //   内部は常に32段(channelLevel が固定音量時に (nibble*2)+1 で写す)ので、表示だけ切り替える。
+        //   0-31 のときは既存の黄色表示(envMode)が「レジスタそのままではない」印になる。
+        rawVol: envMode ? level : (chip.regs[8 + i] & 0x0F),
+        rawVolMax: envMode ? 31 : 15,
         active: (toneOn ? (level > 0 && freq > 0) : (noiseOn && level > 0)),
         noise: noiseOn,
         envMode
@@ -6287,7 +6293,7 @@
       for (let ch = 0; ch < 3; ch++) {
         const c = s ? s[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1 };
         channels.push({ id: `SN${g * 3 + ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          wave: { t: 'pulse', hi: 0.5, nx: 2, ny: 2 }, active: c.active, panL: c.panL, panR: c.panR });
+          wave: { t: 'pulse', hi: 0.5, nx: 2, ny: 2 }, active: c.active, ...panVolFields(c) });
       }
       {
         const c = s ? s[3] : { freq: 0, vol: 0, rawVol: 0, active: false, white: true, noiseFreq: 0, panL: 1, panR: 1 };

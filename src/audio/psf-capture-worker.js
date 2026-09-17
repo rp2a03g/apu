@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-17 13:21:10
+ * Built by tools/build-capture-workers.ps1 at 2026-09-17 17:16:48
  *
  * regsOnly capture worker bundle (psfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.psfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.psfCaptureBuiltAt = '2026-09-17 13:21:10';
+  MML.WorkerBundles.psfCaptureBuiltAt = '2026-09-17 17:16:48';
   MML.WorkerBundles.psfCapture = function () {
 /*
  * PSF (Portable Sound Format) 容器 / PS-EXE 解析
@@ -5107,7 +5107,11 @@
       list.push(li);
       this.lanes.push(lane);
       this._state.push({ slot: -1, seq: -1, outSeq: 0, lastMidi: null });
-      this._idle.push({ active: false, vol: 0, rawVol: 0, rawVolMax: 255, panL: 15, panR: 15, rate: 0, seq: 0,
+      // ★空きレーンも**鳴っているレーンと同じ表示規約**にそろえる(2026-09-17)。
+      //   rawVolMax=255 / panL=panR=15 は旧規約(0-15のパン)の名残で、L/R に VOLL/VOLR の
+      //   実レジスタを出すようにした今は「出力があるレーン」に見えてしまう。
+      this._idle.push({ active: false, vol: 0, volApparent: 0, rawVol: 0, rawVolMax: 0x7FFF,
+        panL: 0, panR: 0, lrWide: true, rate: 0, seq: 0,
         loop: false, lenSec: 0, pitchHz: 0, pitchConf: 0, pitchManual: false, waveData: null, sample: null, slot: -1, lane });
       return li;
     }
@@ -6609,7 +6613,7 @@
       for (let ch = 0; ch < 3; ch++) {
         const c = s ? s[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1 };
         channels.push({ id: `SN${g * 3 + ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          wave: { t: 'pulse', hi: 0.5, nx: 2, ny: 2 }, active: c.active, panL: c.panL, panR: c.panR });
+          wave: { t: 'pulse', hi: 0.5, nx: 2, ny: 2 }, active: c.active, ...panVolFields(c) });
       }
       {
         const c = s ? s[3] : { freq: 0, vol: 0, rawVol: 0, active: false, white: true, noiseFreq: 0, panL: 1, panR: 1 };

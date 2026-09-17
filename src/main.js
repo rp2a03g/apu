@@ -244,6 +244,12 @@
 
   // --- 鍵盤表示 ---
   const keyboardDisplay = new MML.UI.KeyboardDisplay(document.getElementById('keyboardDisplay'));
+  // ★検証用の口(2026-09-17)。ブラウザ上で ch一覧の表示を確かめるには update() を呼ぶ必要があるが、
+  //   実体は監視ループ(requestAnimationFrame)の中にしか無い。rAF はタブ/ペインが隠れていると
+  //   **一度も発火しない**ので、自動での画面確認ができなかった(実測: 45秒で0回)。
+  //   ここから直接 update(秒) を叩ければ、再生していなくても任意の位置の表示を検査できる。
+  //   実行時の挙動には一切影響しない(読み出し専用の参照を1つ生やすだけ)。
+  MML.UI.keyboardDisplay = keyboardDisplay;
   // 楽譜ウィンドウ(本記譜、src/ui/scoreView.js)。表記モデルは鍵盤表示の楽譜モードと同じ物を渡す
   const scoreView = new MML.UI.ScoreView(document.getElementById('scoreView'));
   scoreView.colorOf = (letter) => keyboardDisplay.getChannelColorByLetter(letter);

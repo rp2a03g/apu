@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-17 13:21:10
+ * Built by tools/build-capture-workers.ps1 at 2026-09-17 17:16:48
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-17 13:21:10';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-17 17:16:48';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -3207,12 +3207,14 @@
       out.push({
         freq,
         vol: level / 31,
-        // ★数値は内部の32段(0-31)をそのまま出す(2026-09-17のユーザー合意)。
-        //   固定音量時は4bitレジスタを (nibble*2)+1 で32段空間の奇数へ写した値、
-        //   ハードエンベロープ中は5bitの実レベル。/2 して0-15へ潰すと、
-        //   **エンベロープ中だけある32段の分解能が表示で消える**。
-        //   「レジスタそのままではない」印は既存の黄色表示(envMode)が担う。
-        rawVol: level, rawVolMax: 31,
+        // ★数値は**実レジスタ値**(2026-09-17のユーザー合意)。スケールがモードで変わる:
+        //   ・固定音量(AY-3-8910 も YM2149 も) … 音量レジスタの4bit、**0-15**
+        //   ・ハードウェアエンベロープ中(YM2149)  … エンベロープの5bitレベル、**0-31**
+        //   当実装は AY と YM2149 を区別せず内部は常に32段で回している(channelLevel が
+        //   固定音量時に (nibble*2)+1 で32段空間へ写す)。**表示だけ**をモードで切り替える。
+        //   0-31 のときは既存の黄色表示(envMode)が「レジスタそのままではない」印になる。
+        rawVol: envMode ? level : (chip.regs[8 + i] & 0x0F),
+        rawVolMax: envMode ? 31 : 15,
         // ★2026-08-22: 「トーン有効だが周期0で、ノイズだけで鳴らしている」打楽器chが
         // 消灯していた(Aleste Gaiden MSX2のch A=全曲period 0/ノイズのみ)。旧式は
         // toneOnを先に見てfreq>0を要求していたため、ノイズ発音中でもactive=falseになる。
@@ -5392,7 +5394,10 @@
       const vol = 15 - chip.att[i];
       const audible = p >= PSG_CUTOFF;
       const freq = audible && p > 0 ? clock / (32 * p) : 0;
-      out.push({ freq, vol: VOL_TABLE[chip.att[i]], rawVol: vol, active: vol > 0 && audible && freq > 0, period: p,
+      // ★音量バー(volApparent)は**レジスタ値の比**(2026-09-17のユーザー合意)。vol は VOL_TABLE の
+      //   実ゲイン(2dB/段)で、これは *2MML が attDb へ戻すための値。バーにそのまま出すと
+      //   「減衰1段で79%」と、レジスタ比を出している他チップと土俵が変わって読めない。
+      out.push({ freq, vol: VOL_TABLE[chip.att[i]], volApparent: vol / 15, rawVol: vol, active: vol > 0 && audible && freq > 0, period: p,
         panL: (chip.stereo >> (4 + i)) & 1, panR: (chip.stereo >> i) & 1 });
     }
     {
@@ -5400,7 +5405,7 @@
       const np = chip._noisePeriod();
       // LFSRシフトレート = clock / (32 * np)(np=0x10→clock/512)
       const shiftHz = np > 0 ? clock / (32 * np) : 0;
-      out.push({ freq: 0, vol: VOL_TABLE[chip.att[3]], rawVol: vol, active: vol > 0 && shiftHz > 0,
+      out.push({ freq: 0, vol: VOL_TABLE[chip.att[3]], volApparent: vol / 15, rawVol: vol, active: vol > 0 && shiftHz > 0,
         noise: true, white: (chip.noiseReg & 4) !== 0, noiseRate: chip.noiseReg & 3, noiseFreq: shiftHz,
         panL: (chip.stereo >> 7) & 1, panR: (chip.stereo >> 3) & 1 });
     }
@@ -15849,7 +15854,7 @@
       for (let ch = 0; ch < 3; ch++) {
         const c = s ? s[ch] : { freq: 0, vol: 0, rawVol: 0, active: false, panL: 1, panR: 1 };
         channels.push({ id: `SN${g * 3 + ch + 1}`, color: COLS[ch], freq: c.freq, vol: c.vol, rawVol: c.rawVol, rawVolMax: 15,
-          wave: { t: 'pulse', hi: 0.5, nx: 2, ny: 2 }, active: c.active, panL: c.panL, panR: c.panR });
+          wave: { t: 'pulse', hi: 0.5, nx: 2, ny: 2 }, active: c.active, ...panVolFields(c) });
       }
       {
         const c = s ? s[3] : { freq: 0, vol: 0, rawVol: 0, active: false, white: true, noiseFreq: 0, panL: 1, panR: 1 };

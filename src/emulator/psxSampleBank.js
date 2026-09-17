@@ -215,7 +215,11 @@
       list.push(li);
       this.lanes.push(lane);
       this._state.push({ slot: -1, seq: -1, outSeq: 0, lastMidi: null });
-      this._idle.push({ active: false, vol: 0, rawVol: 0, rawVolMax: 255, panL: 15, panR: 15, rate: 0, seq: 0,
+      // ★空きレーンも**鳴っているレーンと同じ表示規約**にそろえる(2026-09-17)。
+      //   rawVolMax=255 / panL=panR=15 は旧規約(0-15のパン)の名残で、L/R に VOLL/VOLR の
+      //   実レジスタを出すようにした今は「出力があるレーン」に見えてしまう。
+      this._idle.push({ active: false, vol: 0, volApparent: 0, rawVol: 0, rawVolMax: 0x7FFF,
+        panL: 0, panR: 0, lrWide: true, rate: 0, seq: 0,
         loop: false, lenSec: 0, pitchHz: 0, pitchConf: 0, pitchManual: false, waveData: null, sample: null, slot: -1, lane });
       return li;
     }

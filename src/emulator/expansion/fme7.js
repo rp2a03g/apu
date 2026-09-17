@@ -191,7 +191,13 @@
       out.push({
         freq,
         vol: level / 31,
-        rawVol: Math.round(level / 2),             // 0-15 表示用
+        // ★数値は**実レジスタ値**(2026-09-17のユーザー合意)。スケールがモードで変わる:
+        //   ・固定音量 … 音量レジスタの4bit、**0-15**
+        //   ・ハードウェアエンベロープ中(YM2149系のこの機能) … 5bitレベル、**0-31**
+        //   内部は常に32段(channelLevel が固定音量時に (nibble*2)+1 で写す)ので、表示だけ切り替える。
+        //   0-31 のときは既存の黄色表示(envMode)が「レジスタそのままではない」印になる。
+        rawVol: envMode ? level : (chip.regs[8 + i] & 0x0F),
+        rawVolMax: envMode ? 31 : 15,
         active: (toneOn ? (level > 0 && freq > 0) : (noiseOn && level > 0)),
         noise: noiseOn,
         envMode

@@ -192,7 +192,10 @@
       const vol = 15 - chip.att[i];
       const audible = p >= PSG_CUTOFF;
       const freq = audible && p > 0 ? clock / (32 * p) : 0;
-      out.push({ freq, vol: VOL_TABLE[chip.att[i]], rawVol: vol, active: vol > 0 && audible && freq > 0, period: p,
+      // ★音量バー(volApparent)は**レジスタ値の比**(2026-09-17のユーザー合意)。vol は VOL_TABLE の
+      //   実ゲイン(2dB/段)で、これは *2MML が attDb へ戻すための値。バーにそのまま出すと
+      //   「減衰1段で79%」と、レジスタ比を出している他チップと土俵が変わって読めない。
+      out.push({ freq, vol: VOL_TABLE[chip.att[i]], volApparent: vol / 15, rawVol: vol, active: vol > 0 && audible && freq > 0, period: p,
         panL: (chip.stereo >> (4 + i)) & 1, panR: (chip.stereo >> i) & 1 });
     }
     {
@@ -200,7 +203,7 @@
       const np = chip._noisePeriod();
       // LFSRシフトレート = clock / (32 * np)(np=0x10→clock/512)
       const shiftHz = np > 0 ? clock / (32 * np) : 0;
-      out.push({ freq: 0, vol: VOL_TABLE[chip.att[3]], rawVol: vol, active: vol > 0 && shiftHz > 0,
+      out.push({ freq: 0, vol: VOL_TABLE[chip.att[3]], volApparent: vol / 15, rawVol: vol, active: vol > 0 && shiftHz > 0,
         noise: true, white: (chip.noiseReg & 4) !== 0, noiseRate: chip.noiseReg & 3, noiseFreq: shiftHz,
         panL: (chip.stereo >> 7) & 1, panR: (chip.stereo >> 3) & 1 });
     }
