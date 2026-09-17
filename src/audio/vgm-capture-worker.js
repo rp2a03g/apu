@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-16 23:01:12
+ * Built by tools/build-capture-workers.ps1 at 2026-09-17 11:38:56
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-16 23:01:12';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-17 11:38:56';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -11506,18 +11506,30 @@
     for (let i = 0; i < NUM_CH; i++) {
       const c = chip.ch[i];
       const rate = chip.playRate(c);
-      const end = c.seq ? chip.sampleEnd(c.start) : c.start;
-      const p = c.seq ? chip.samplePitch('k007232', c.start, end) : null;
-      const lenBytes = p ? p.lenBytes : Math.max(0, end - c.start);
+      // ★サンプルの同定/復号は必ず「バンク込みのROM絶対アドレス」で行う(2026-09-17)。
+      //   開始アドレスレジスタ(0x02-0x04)は17bitしか無く、A17以上は外部バンク(VGMでは
+      //   レジスタ0x14/0x15、単位0x20000)で決まる。再生(_calcSample)は c.bank を足して
+      //   いるのに、ここだけ c.start のままだった。Haunted Castle はサンプルが全て
+      //   0x20000 以降にあるため、解析側はゼロ埋めの領域を読み:
+      //     ・終端マーカ(bit7)が見つからず 64KB まで走る
+      //     ・復号したPCMが全点 -1.0(バイト0x00)の直流になる
+      //   → ドラムパッドの原音も、そこから焼いた @DPCM も「直流=ほぼ無音」になっていた。
+      //   バンクは外部ピン相当で再生中に変わるので、再生と同じく現在値をそのまま使う。
+      const base = c.bank + c.start;
+      const end = c.seq ? chip.sampleEnd(base) : base;
+      const p = c.seq ? chip.samplePitch('k007232', base, end) : null;
+      const lenBytes = p ? p.lenBytes : Math.max(0, end - base);
       // 左右の音量レジスタ(0-255)。片側0でも鳴っているので大きい方を発音量とみなす
       const vol = Math.max(c.volL, c.volR) / 255;
+      // ★L/R列は0-15の整数が全チップ共通の表示規約(c140 と同じ volL>>4)。0..1の小数を入れると
+      //   「0.2」のような別スケールの値が並んで読めない
       out.push({ active: c.play && vol > 0, vol, rawVol: Math.max(c.volL, c.volR), rawVolMax: 255,
-        panL: c.volL / 255, panR: c.volR / 255,
+        panL: c.volL >> 4, panR: c.volR >> 4,
         rate, seq: c.seq, lenSec: rate > 0 ? lenBytes / rate : 0,
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
         sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
-        sample: c.seq ? { kind: 'k007232', start: c.start, end } : null });
+        sample: c.seq ? { kind: 'k007232', start: base, end } : null });
     }
     return out;
   };
@@ -11924,8 +11936,19 @@
       const vol = chip.chVol(i);
       let pan = chip.regs[b + 5];
       if (pan >= 0x81 && pan <= 0x8F) pan -= 0x81; else if (pan >= 0x11 && pan <= 0x1F) pan -= 0x11; else pan = 0x07;
-      out.push({ active: !!(active & (1 << i)) && vol > 0, vol, rawVol: 255 - chip.regs[b + 3], rawVolMax: 255,
-        panL: PANTAB[pan], panR: PANTAB[0xE - pan],
+      // ★L/R列は**0-15の整数**が全チップ共通の表示規約(segapcm=volL>>3、c140=volL>>4 等)。
+      //   定パワーのパン表(0..1の小数)をそのまま入れると「0.7071067811865475」と出てしまう。
+      // ★音量の数値(rawVol)も0-15と同じ理由でバー(vol)と 食い違わせない: レジスタ0x03は
+      //   「0=最大の減衰値」なので生値や 255-生値 を出すと、7%のバーの隣に213と並んで意味が読めない。
+      // ★音量バーは volApparent(表示専用)を使う。vol は**線形振幅**で、これは vgm2mml が
+      //   attDb = -20log10(vol) で減衰dBに戻すための値なので意味を変えられない。ところが
+      //   このチップのレジスタは**対数の減衰値**(0x40 = -36dB)で、実曲は 0x12-0x2A 付近しか
+      //   使わないため、振幅のままバーに出すと 7〜32% しか動かず読めない(ユーザー報告)。
+      //   他の対数レジスタのチップ(HES/AY/FME7/VRC7)はバーに**レジスタ位置**を出しており、
+      //   ここも合わせる: 1 - reg/0x40(= 1 - 減衰dB/36)。
+      const barPos = Math.max(0, Math.min(1, 1 - chip.regs[b + 3] / 0x40));
+      out.push({ active: !!(active & (1 << i)) && vol > 0, vol, volApparent: barPos, rawVol: Math.round(vol * 255), rawVolMax: 255,
+        panL: Math.round(PANTAB[pan] * 15), panR: Math.round(PANTAB[0xE - pan] * 15),
         rate, seq: c.seq, lenSec: rate > 0 ? lenSamples / rate : 0,
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
         sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
@@ -11935,6 +11958,19 @@
     return out;
   };
 
+  // デュアル(沙羅曼蛇2)の連結スナップショット。2個目のチャンネルは **kind を分ける**:
+  //  ・サンプル同定キー(DrumMap.key = kind + ':' + start)が2つのROMで衝突しない
+  //  ・原音の復号でどちらのROMから読むかを chip2 で選ぶ(vgmPlayer.js collectUsedSamples)
+  // ★キャプチャ(vgmPlayer.js)とライブ(main.js の鍵盤ゲッター)の**両方**がこれを通ること。
+  //   片方だけ素の snapshotK054539 を連結すると kind が食い違い、鍵盤のノート列が
+  //   ドラムのレーン名(ROMアドレス)へ解決できず 15(dmcRateIdx の固定値)に落ちる。
+  Emu.snapshotK054539Dual = function (chipA, chipB) {
+    const s1 = Emu.snapshotK054539(chipA);
+    if (!chipB) return s1;
+    const s2 = Emu.snapshotK054539(chipB);
+    for (const c of s2) if (c.sample) { c.sample.chip2 = true; c.sample.kind = 'k054539#2'; }
+    return s1.concat(s2);
+  };
   Emu.K054539Audio = K054539Audio;
 })(globalThis);
 
@@ -13974,15 +14010,9 @@
       if (data.msm5205) data.msm5205.snapshots.push(Emu.snapshotMSM5205(player.adapterById.msm5205.chip));
       if (data.k054539) {
         const a2 = player.adapterById.k054539_2;
-        const s1 = Emu.snapshotK054539(player.adapterById.k054539.chip);
         // デュアル(サラマンダー2)は2個目を連結して16要素にする。ロール/鍵盤/変換は幅で自動追随する。
-        // ★2個目のサンプルは2個目のROMから復号する必要があるので印を付ける(collectUsedSamples)
-        let s = s1;
-        if (a2) {
-          const s2 = Emu.snapshotK054539(a2.chip);
-          for (const c of s2) if (c.sample) c.sample.chip2 = true;
-          s = s1.concat(s2);
-        }
+        // 2個目の kind を分ける規則は snapshotK054539Dual に置いてある(ライブ側と共有)
+        const s = Emu.snapshotK054539Dual(player.adapterById.k054539.chip, a2 ? a2.chip : null);
         const st = k054539State;
         for (let i = 0; i < s.length; i++) {
           const c = s[i];
@@ -14236,8 +14266,8 @@
         if (!chans) continue;
         for (const c of chans) {
           if (!c || !c.sample) continue;
-          // デュアルチップの2個目はROMが別なので、キーにも印を付けて別サンプルとして持つ
-          const k = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end + (c.sample.chip2 ? ':2' : '');
+          // デュアルチップの2個目は kind が 'k054539#2' なのでキーは自然に分かれる(上記)
+          const k = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end;
           if (!seen.has(k)) seen.set(k, c.sample);
         }
       }
@@ -15908,7 +15938,9 @@
         const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (25 + ch * 16) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
-        channels.push({ id: `K5${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+        // volApparent: 音量バー用の値(k054539.js を参照)。vol は変換が減衰dBに戻す線形振幅なので、
+        //   対数レジスタのこのチップではバーが7〜13%しか動かない。★行へ渡し忘れるとバーに効かない
+        channels.push({ id: `K5${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, volApparent: c.volApparent, rawVol: c.rawVol, rawVolMax: 255,
           wave: kWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }

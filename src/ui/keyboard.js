@@ -1549,7 +1549,9 @@
         const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 1, panR: 1, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (25 + ch * 16) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
-        channels.push({ id: `K5${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+        // volApparent: 音量バー用の値(k054539.js を参照)。vol は変換が減衰dBに戻す線形振幅なので、
+        //   対数レジスタのこのチップではバーが7〜13%しか動かない。★行へ渡し忘れるとバーに効かない
+        channels.push({ id: `K5${ch + 1}`, color: `hsl(${hue},75%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, volApparent: c.volApparent, rawVol: c.rawVol, rawVolMax: 255,
           wave: kWave(c), active: !!c.active, panL: c.panL, panR: c.panR,
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }

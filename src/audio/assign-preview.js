@@ -98,11 +98,20 @@
     if (/^FE\d$/.test(id)) return { step: 3 };                           // FME-7(YM2149)
     return { linear: true };
   }
-  function attDbOf(spec, vol) {
+  // 行ID → キャプチャのチップキー。変換と同じ「曲・チップ単位の音量正規化」のオフセットを
+  // 引くために使う(setVolumeRefs で main.js から受け取る)。
+  // ★これが無いと、ヘッドルームを持つPCM(K054539など約10dB)でプレビューだけ小さく鳴り、
+  //   変換結果と食い違う。基準値は変換と同一の関数(Vgm2MmlExpansion.attRefOfSnapshots)で作る。
+  const ROW_CHIP = [[/^GAd$/, 'ga20'], [/^K7d$/, 'k007232'], [/^K5d+$/, 'k054539'],
+    [/^SPd+$/, 'segapcm'], [/^CNd+$/, 'c140'], [/^CSd+$/, 'c352'], [/^QSd+$/, 'qsound'],
+    [/^OKd$/, 'okim6295'], [/^MPd+$/, 'multipcm'], [/^PXd+$/, 'psx']];
+  function rowChipOf(id) { for (const [re, c] of ROW_CHIP) if (re.test(id)) return c; return null; }
+  function attDbOf(spec, vol, refs) {
     if (vol <= 0) return 96;
-    if (spec.linear) return -20 * Math.log10(Math.min(1, vol));
-    if (spec.att) return (1 - vol) * 15 * spec.att;
-    return (1 - vol) * 15 * spec.step;
+    const ref = (refs && spec.chipKey && refs[spec.chipKey]) || 0;
+    if (spec.linear) return Math.max(0, -20 * Math.log10(Math.min(1, vol)) - ref);
+    if (spec.att) return Math.max(0, (1 - vol) * 15 * spec.att - ref);
+    return Math.max(0, (1 - vol) * 15 * spec.step - ref);
   }
   // 減衰量[dB] → 借用先ファミリの音量レジスタ値(borrow.js VOL_FROM_DB / volTableFor と同じ)
   function targetVol(family, att) {
@@ -167,6 +176,13 @@
 
     // rows: [{ id, target, tone, kind, muted }]。スキップ/E(DPCM)は対象外(元の音のまま/無音は
     // 鍵盤表示側のミュートが担う)
+    /**
+     * 曲・チップ単位の音量正規化オフセット(dB)。変換(vgm2mml)と同じ基準を使うため、
+     * main.js が Vgm2MmlExpansion.attRefOfSnapshots で作った値をそのまま渡す。
+     * 渡さない/対象外のチップは 0(従来どおりの絶対値マッピング)。
+     */
+    setVolumeRefs(refs) { this._volRefs = refs || null; }
+
     setPlan(rows) {
       const P = plan();
       const next = [];
@@ -175,7 +191,8 @@
         const tt = P.targetInfo(r.target);
         if (!tt || !tt.chip) continue;
         next.push({ id: r.id, target: r.target, tone: r.tone, kind: r.kind || 'any', muted: !!r.muted,
-          chip: tt.chip, family: tt.family, index: tt.index, letter: tt.letter, volSpec: volSpecOf(r.id) });
+          chip: tt.chip, family: tt.family, index: tt.index, letter: tt.letter,
+          volSpec: Object.assign(volSpecOf(r.id), { chipKey: rowChipOf(r.id) }) });
       }
       const sig = next.map(r => r.id + '=' + r.target + '/' + r.tone).join(',');
       if (this._built && sig === this._planSig) {
@@ -283,7 +300,7 @@
         st.prevVol = 0; st.peak = 0; st.decayed = false;
       }
 
-      const att = attDbOf(r.volSpec, vol01);
+      const att = attDbOf(r.volSpec, vol01, this._volRefs);
       const vol = on ? targetVol(r.family, att) : 0;
       switch (r.family) {
         case 'pulse': this._pulse(r, st, ch, on, keyOn, freq, vol); break;

@@ -106,6 +106,52 @@
     return events;
   }
 
+  // ── 曲・チップ単位の音量正規化(2026-09-17、ユーザー指示の案A)────────────────
+  // attDb は「そのチップのフルスケールからの減衰量」。借用先へは振幅比で写す
+  // (borrow.js VOL_FROM_DB.linear = max * 10^(-att/20))ので、**元チップが自分の
+  // フルスケールまで振らないと借用先のレンジ上位が永久に使われない**。
+  // 実測(2026-09-17): K054539 は8ch合成のヘッドルームぶん常時10dB以上絞っており、
+  //   沙羅曼蛇2/リーサルエンフォーサーズとも減衰の最小が10.1dB・中央20dB前後。
+  //   絶対値のまま写すと v は 1-8 に張り付き、沙羅曼蛇2は24曲中13曲が v8 止まりだった。
+  //   比較: C140(ワルキューレ)は最小3.1dB→v1-10、QSoundは最小1.8dB→v1-12とレンジを
+  //   使えている。つまり式ではなく「絶対値で写す」設計がヘッドルームを持つチップに
+  //   合っていない。
+  // そこで**その曲・そのチップで一番小さい減衰を0dBへ寄せる**。曲内の強弱(相対値)は
+  // そのまま保たれる。★曲間の絶対的な音量差は失われるので、これは変換専用の処理
+  // (エミュレーション再生は borrow.js を参照しないので無関係)。
+  // ★基準は最小値そのものではなく**下位1%点**。一瞬だけフルスケール近くまで鳴る音が
+  //   1つあるだけで正規化が効かなくなるのを避ける。
+  // ★チャンネル単位ではなく**チップ単位**。ch毎に正規化すると各パートが均されて
+  //   曲としての音量バランス(主旋律と伴奏の差)が壊れる。
+  const VOL_NORM_PCT = 0.01;   // 基準に使う分位点(下位1%)
+  const VOL_NORM_MIN_DB = 0.5; // これ未満のシフトは誤差なので触らない
+  const VOL_NORM_MIN_N = 8;    // 標本がこれ未満なら触らない(単発の効果音など)
+  // ★基準は**イベントではなくスナップショットから**求める。音階側(pcmChannels)とドラム側
+  //   (drumChannelOf)は呼び出しが別なので、イベントから各々求めると基準がズレて両者の相対
+  //   バランスが崩れる。同じ snapshots を見れば必ず同じ値になる。
+  //   「割当先の音で聴く」プレビュー(assign-preview.js)も同じ関数を通すので、変換と食い違わない。
+  //   ADPCM-A のようにフレームが配列でない形(fr.adpcmA)は対象外=基準0(実測でも最小0.0dBで不要)。
+  const attRefCache = new WeakMap();
+  function attRefOfSnapshots(snapshots) {
+    if (!snapshots || !snapshots.length) return 0;
+    const hit = attRefCache.get(snapshots);
+    if (hit !== undefined) return hit;
+    const all = [];
+    for (const fr of snapshots) {
+      if (!fr || typeof fr.length !== 'number') continue;
+      for (const c of fr) if (c && c.active && c.vol > 0) all.push(Math.min(96, -20 * Math.log10(c.vol)));
+    }
+    let ref = 0;
+    if (all.length >= VOL_NORM_MIN_N) {
+      all.sort((a, b) => a - b);
+      const r = all[Math.floor(all.length * VOL_NORM_PCT)];
+      if (r > VOL_NORM_MIN_DB) ref = r;
+    }
+    attRefCache.set(snapshots, ref);
+    return ref;
+  }
+  MML.Vgm2MmlExpansion.attRefOfSnapshots = attRefOfSnapshots;
+
   function toCommon(ev) {
     const out = { start: ev.start, end: ev.end, note: ev.note, volume: vrc7Vol(ev.attDb), attDb: ev.attDb, retrigger: ev.retrigger };
     if (ev.note !== null && ev.rawFreq != null) out.rawFreq = ev.rawFreq;
@@ -221,12 +267,14 @@
    * attOf(c) は減衰量(dB)。省略時は振幅比 c.vol から求める。
    */
   const DRUM_PEAK_LOOKAHEAD = 3; // 打点の音量を決めるとき先読みするフレーム数
-  function drumChannelOf(total, numCh, drumMap, getCh, attOf) {
+  function drumChannelOf(total, numCh, drumMap, getCh, attOf, attRef) {
+    const ref = attRef || 0;
     const lastOn = new Array(numCh).fill(-1);   // ch → 最後にキーオンされたフレーム
     const prevSeq = new Array(numCh).fill(null);
     let prevPick = -1;
     let curAtt = 0;   // いま鳴っている打点の音量(打点の途中では変えない。下のコメント参照)
-    const attOfCh = attOf || ((ch) => (ch.vol > 0 ? Math.min(96, -20 * Math.log10(ch.vol)) : 96));
+    const attOfCh0 = attOf || ((ch) => (ch.vol > 0 ? Math.min(96, -20 * Math.log10(ch.vol)) : 96));
+    const attOfCh = (ch) => Math.max(0, attOfCh0(ch) - ref);
     const { events } = collect(total, (f) => {
       let bestCh = -1, bestOn = -1;
       for (let ch = 0; ch < numCh; ch++) {
@@ -260,6 +308,9 @@
       prevPick = bestCh;
       return st;
     });
+    // ドラムパートも音階側と同じ基準(attRefOfSnapshots)で正規化済み(上の attOfCh)。実測の減衰の
+    // 最小は沙羅曼蛇2=10.1dB / Haunted Castle=8.0dB / Lethal=11.3dB で、音階側と同じく
+    // 借用先のレンジ上位が使えていなかった(ドラム行にも v は出る: `D l16 v5 o1 e v7 ffe ...`)。
     return { events: events.map(toCommon), hasVolume: true };
   }
 
@@ -276,7 +327,7 @@
       if (!s) return null;
       return kind === 'adpcmA' ? (s.adpcmA && s.adpcmA[ch]) : s[ch];
     };
-    return drumChannelOf(snapshots.length, numCh, drumMap, getCh, attOf || null);
+    return drumChannelOf(snapshots.length, numCh, drumMap, getCh, attOf || null, attRefOfSnapshots(snapshots));
   };
 
   const waveCache = new WeakMap(); // waveData配列 → 32点(同じサンプルの再変換を避ける)
@@ -296,7 +347,8 @@
    */
   function pcmChannels(snapshots, numCh, opts) {
     const total = snapshots.length;
-    const channels = [];
+    const attRef = attRefOfSnapshots(snapshots); // 曲・チップ単位の基準(上のコメント参照)
+    const raws = [];
     for (let chIdx = 0; chIdx < numCh; chIdx++) {
       let prevSeq = null;
       const r = collect(total, (f) => {
@@ -308,12 +360,14 @@
         // 音程が取れなかったサンプル(ドラム/効果音)はここでは休符のまま。まとめて
         // 1本のドラムパートへ出す(drumChannelOf参照)ので、スロット側にも出すと二重になる
         if (!pitched) return { note: null, attDb: 0 };
-        const att = c.vol > 0 ? Math.min(96, -20 * Math.log10(c.vol)) : 96;
+        const att = c.vol > 0 ? Math.max(0, Math.min(96, -20 * Math.log10(c.vol)) - attRef) : 96;
         return { note: freqToNoteNumber(c.pitchHz), attDb: att, retrigger, rawFreq: c.pitchHz,
           n163Wave: n163WaveOf(c), sampleHash: c.sampleHash || undefined, key: String(c.sample ? c.sample.start : '') };
       }, opts);
-      channels.push({ events: withSeq(MML.Convert.mergeVibratoAndArpeggio(r.events).map(toCommon), r), hasVolume: true, hasInstrument: true });
+      raws.push(r);
     }
+    const channels = raws.map((r) =>
+      ({ events: withSeq(MML.Convert.mergeVibratoAndArpeggio(r.events).map(toCommon), r), hasVolume: true, hasInstrument: true }));
     return { channels };
   }
   MML.Vgm2MmlExpansion.ga20 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 4, opts);

@@ -1153,7 +1153,24 @@
       for (const ev of events) if (ev.note !== null && ev.instrument !== undefined && n163WaveReg.waves[ev.instrument]) ev.rawLength = n163WaveReg.waves[ev.instrument].length;
       return;
     }
-    if (nativeVrc7 || nativeFme7 || (fam === 'noise' && s.kind === 'noise')) return; // そのまま(旋律→ノイズは下で周期へ写す)
+    // ★ドラムパート(合成ch、ch:-1)は kind:'noise' を名乗るが実体は「音程の取れないサンプルを
+    //   1本にまとめたレーン」で、音量を attDb(減衰dB)で持つ。早期returnすると下の減衰dB換算に
+    //   届かず、toCommon の既定値(vrc7Vol = round(att/3) = **0が最大**のVRC7尺度)が
+    //   2A03ノイズ(15が最大)へそのまま出て **強弱が反転する**(2026-09-17発覚)。
+    //   ただし**音程は DrumMap のレーン番号**なので、下の pitchedToNoise(旋律→ノイズ周期)は
+    //   絶対に通してはいけない(通すとレーンが壊れてドラムが全滅する。修正の初手でやらかした)。
+    //   → ここでは音量だけ換算して return する。
+    if (nativeVrc7 || nativeFme7 || (fam === 'noise' && s.kind === 'noise')) {
+      if (fam === 'noise' && s.ch < 0) {
+        const convD = (att) => VOL_FROM_DB.linear(att, famVolMax(fam));
+        for (const ev of events) {
+          if (ev.note === null || (ev.attDb === undefined && ev.volume === undefined)) continue;
+          ev.volume = convD(sourceAttDb(s, ev));
+        }
+        for (const ev of events) { delete ev.attDb; delete ev.attSeq; }
+      }
+      return; // そのまま(旋律→ノイズは下で周期へ写す)
+    }
     const dutyOf = (max, def) => { const n = parseInt(tone, 10); return (isFinite(n) && n >= 0 && n <= max) ? n : def; };
     // AYのミキサー: ノイズ単独(mode 2)は矩形波系の借用先では鳴らせないので休符に、
     // トーン+ノイズ(mode 3)はトーンだけ残す。FME-7以外ではN<n>も出さない

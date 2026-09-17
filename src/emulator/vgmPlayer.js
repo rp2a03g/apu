@@ -1632,15 +1632,9 @@
       if (data.msm5205) data.msm5205.snapshots.push(Emu.snapshotMSM5205(player.adapterById.msm5205.chip));
       if (data.k054539) {
         const a2 = player.adapterById.k054539_2;
-        const s1 = Emu.snapshotK054539(player.adapterById.k054539.chip);
         // デュアル(サラマンダー2)は2個目を連結して16要素にする。ロール/鍵盤/変換は幅で自動追随する。
-        // ★2個目のサンプルは2個目のROMから復号する必要があるので印を付ける(collectUsedSamples)
-        let s = s1;
-        if (a2) {
-          const s2 = Emu.snapshotK054539(a2.chip);
-          for (const c of s2) if (c.sample) c.sample.chip2 = true;
-          s = s1.concat(s2);
-        }
+        // 2個目の kind を分ける規則は snapshotK054539Dual に置いてある(ライブ側と共有)
+        const s = Emu.snapshotK054539Dual(player.adapterById.k054539.chip, a2 ? a2.chip : null);
         const st = k054539State;
         for (let i = 0; i < s.length; i++) {
           const c = s[i];
@@ -1894,8 +1888,8 @@
         if (!chans) continue;
         for (const c of chans) {
           if (!c || !c.sample) continue;
-          // デュアルチップの2個目はROMが別なので、キーにも印を付けて別サンプルとして持つ
-          const k = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end + (c.sample.chip2 ? ':2' : '');
+          // デュアルチップの2個目は kind が 'k054539#2' なのでキーは自然に分かれる(上記)
+          const k = c.sample.kind + ':' + c.sample.start + ':' + c.sample.end;
           if (!seen.has(k)) seen.set(k, c.sample);
         }
       }

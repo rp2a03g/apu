@@ -397,8 +397,19 @@
       const vol = chip.chVol(i);
       let pan = chip.regs[b + 5];
       if (pan >= 0x81 && pan <= 0x8F) pan -= 0x81; else if (pan >= 0x11 && pan <= 0x1F) pan -= 0x11; else pan = 0x07;
-      out.push({ active: !!(active & (1 << i)) && vol > 0, vol, rawVol: 255 - chip.regs[b + 3], rawVolMax: 255,
-        panL: PANTAB[pan], panR: PANTAB[0xE - pan],
+      // ★L/R列は**0-15の整数**が全チップ共通の表示規約(segapcm=volL>>3、c140=volL>>4 等)。
+      //   定パワーのパン表(0..1の小数)をそのまま入れると「0.7071067811865475」と出てしまう。
+      // ★音量の数値(rawVol)も0-15と同じ理由でバー(vol)と 食い違わせない: レジスタ0x03は
+      //   「0=最大の減衰値」なので生値や 255-生値 を出すと、7%のバーの隣に213と並んで意味が読めない。
+      // ★音量バーは volApparent(表示専用)を使う。vol は**線形振幅**で、これは vgm2mml が
+      //   attDb = -20log10(vol) で減衰dBに戻すための値なので意味を変えられない。ところが
+      //   このチップのレジスタは**対数の減衰値**(0x40 = -36dB)で、実曲は 0x12-0x2A 付近しか
+      //   使わないため、振幅のままバーに出すと 7〜32% しか動かず読めない(ユーザー報告)。
+      //   他の対数レジスタのチップ(HES/AY/FME7/VRC7)はバーに**レジスタ位置**を出しており、
+      //   ここも合わせる: 1 - reg/0x40(= 1 - 減衰dB/36)。
+      const barPos = Math.max(0, Math.min(1, 1 - chip.regs[b + 3] / 0x40));
+      out.push({ active: !!(active & (1 << i)) && vol > 0, vol, volApparent: barPos, rawVol: Math.round(vol * 255), rawVolMax: 255,
+        panL: Math.round(PANTAB[pan] * 15), panR: Math.round(PANTAB[0xE - pan] * 15),
         rate, seq: c.seq, lenSec: rate > 0 ? lenSamples / rate : 0,
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
         sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
@@ -408,5 +419,18 @@
     return out;
   };
 
+  // デュアル(沙羅曼蛇2)の連結スナップショット。2個目のチャンネルは **kind を分ける**:
+  //  ・サンプル同定キー(DrumMap.key = kind + ':' + start)が2つのROMで衝突しない
+  //  ・原音の復号でどちらのROMから読むかを chip2 で選ぶ(vgmPlayer.js collectUsedSamples)
+  // ★キャプチャ(vgmPlayer.js)とライブ(main.js の鍵盤ゲッター)の**両方**がこれを通ること。
+  //   片方だけ素の snapshotK054539 を連結すると kind が食い違い、鍵盤のノート列が
+  //   ドラムのレーン名(ROMアドレス)へ解決できず 15(dmcRateIdx の固定値)に落ちる。
+  Emu.snapshotK054539Dual = function (chipA, chipB) {
+    const s1 = Emu.snapshotK054539(chipA);
+    if (!chipB) return s1;
+    const s2 = Emu.snapshotK054539(chipB);
+    for (const c of s2) if (c.sample) { c.sample.chip2 = true; c.sample.kind = 'k054539#2'; }
+    return s1.concat(s2);
+  };
   Emu.K054539Audio = K054539Audio;
 })(window);

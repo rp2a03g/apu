@@ -264,18 +264,30 @@
     for (let i = 0; i < NUM_CH; i++) {
       const c = chip.ch[i];
       const rate = chip.playRate(c);
-      const end = c.seq ? chip.sampleEnd(c.start) : c.start;
-      const p = c.seq ? chip.samplePitch('k007232', c.start, end) : null;
-      const lenBytes = p ? p.lenBytes : Math.max(0, end - c.start);
+      // ★サンプルの同定/復号は必ず「バンク込みのROM絶対アドレス」で行う(2026-09-17)。
+      //   開始アドレスレジスタ(0x02-0x04)は17bitしか無く、A17以上は外部バンク(VGMでは
+      //   レジスタ0x14/0x15、単位0x20000)で決まる。再生(_calcSample)は c.bank を足して
+      //   いるのに、ここだけ c.start のままだった。Haunted Castle はサンプルが全て
+      //   0x20000 以降にあるため、解析側はゼロ埋めの領域を読み:
+      //     ・終端マーカ(bit7)が見つからず 64KB まで走る
+      //     ・復号したPCMが全点 -1.0(バイト0x00)の直流になる
+      //   → ドラムパッドの原音も、そこから焼いた @DPCM も「直流=ほぼ無音」になっていた。
+      //   バンクは外部ピン相当で再生中に変わるので、再生と同じく現在値をそのまま使う。
+      const base = c.bank + c.start;
+      const end = c.seq ? chip.sampleEnd(base) : base;
+      const p = c.seq ? chip.samplePitch('k007232', base, end) : null;
+      const lenBytes = p ? p.lenBytes : Math.max(0, end - base);
       // 左右の音量レジスタ(0-255)。片側0でも鳴っているので大きい方を発音量とみなす
       const vol = Math.max(c.volL, c.volR) / 255;
+      // ★L/R列は0-15の整数が全チップ共通の表示規約(c140 と同じ volL>>4)。0..1の小数を入れると
+      //   「0.2」のような別スケールの値が並んで読めない
       out.push({ active: c.play && vol > 0, vol, rawVol: Math.max(c.volL, c.volR), rawVolMax: 255,
-        panL: c.volL / 255, panR: c.volR / 255,
+        panL: c.volL >> 4, panR: c.volR >> 4,
         rate, seq: c.seq, lenSec: rate > 0 ? lenBytes / rate : 0,
         pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual),
         sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
         waveData: p ? p.wave : null,
-        sample: c.seq ? { kind: 'k007232', start: c.start, end } : null });
+        sample: c.seq ? { kind: 'k007232', start: base, end } : null });
     }
     return out;
   };

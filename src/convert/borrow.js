@@ -143,6 +143,12 @@
     sn76489: { stepDb: 2 },
     // OPLL: 値そのものが減衰値(v0が最大、3dB/段)
     ym2413: { attDb: 3 },
+    // OPL(YM3812/YM3526/Y8950/MSX-AUDIO): 抽出器(kss2mml/expansion/opl.js)が
+    // キャリアTL(6bit×0.75dB)を TL>>2 に落として渡すので、OPLLと同じ 3dB/段の減衰値。
+    // ★VGM側のコピー(vgm2mml/converter.js sourceAttDb)は nativeFamily を持たないため、
+    //   ここに載せないと既定の「(15-v)×1.5dB」(=線形音源向きで**向きが逆**)に落ちる。
+    //   Haunted Castle の YM3812 を N163 へ載せると一番大きい音が v1/v2 になっていた(2026-09-17)。
+    opl: { attDb: 3 },
   };
 
   // 変換元の音量値 v(0..srcMax)の減衰量[dB]。チップ表(CHIP_VOL_LAW)が最優先。
@@ -264,6 +270,11 @@
     const vrc7ToneReg = ctx && ctx.vrc7ToneReg;
     const isAy = s.chip === 'ay8910';
     const nativeVrc7 = s.nativeFamily === 'vrc7' && fam === 'vrc7' && (tone === 'auto' || tone == null);
+    // ★ドラムパート(合成ch、ch:-1)は kind:'noise' を名乗るが実体は「音程の取れないサンプルを
+    //   1本にまとめたレーン」で音量を attDb で持つ。早期returnすると音量換算に届かず強弱が反転する。
+    //   ただし音程は DrumMap のレーン番号なので、下の pitchedToNoise は通さないこと。
+    //   ※現状 ch:-1 のドラムパートを持つのはVGMだけ(vgm2mml/converter.js の独自コピーが本番)。
+    //     ここは2つのコピーを揃えるための保険。
     if (fam === 'noise' && s.kind === 'noise') return; // ノイズ→ノイズは整形不要(旋律→ノイズは下で周期へ写す)
     if (nativeVrc7 || (fam === s.nativeFamily && fam !== 'vrc7' && (!tone || tone === 'copy'))) return;
     // VRC7自作音色の登録番号 → 音色キー(あぶれ報告用)

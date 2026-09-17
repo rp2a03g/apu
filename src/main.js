@@ -119,12 +119,30 @@
     assignPreview.reset();
     syncAssignPreview();
   }
+  // プレビュー用の音量正規化オフセット。キャプチャのスナップショット(変換が読むのと同じもの)から
+  // チップごとに求める。VGM以外の形式や、まだキャプチャが無いときは空(=従来どおり絶対値のまま)。
+  function previewVolumeRefs() {
+    const fn = MML.Vgm2MmlExpansion && MML.Vgm2MmlExpansion.attRefOfSnapshots;
+    const data = vgmCaptureMirror && vgmCaptureMirror.data;
+    if (!fn || !data) return null;
+    const refs = {};
+    for (const key of ['ga20', 'k007232', 'k054539', 'segapcm', 'c140', 'c352', 'qsound', 'okim6295', 'multipcm', 'psx']) {
+      const e = data[key];
+      if (e && Array.isArray(e.snapshots) && e.snapshots.length) refs[key] = fn(e.snapshots);
+    }
+    return refs;
+  }
   function syncAssignPreview() {
     if (!assignPreview) return;
     const plan = MML.Convert && MML.Convert.ChannelPlan;
     const on = keyboardDisplay.isPreviewMode() && !!plan && plan.editable();
     assignPreview.setPlan(on ? keyboardDisplay.getPreviewPlan() : []);
     assignPreview.setProvider((f) => keyboardDisplay.getLiveChannels(f));
+    // 変換と同じ「曲・チップ単位の音量正規化」をプレビューにも効かせる。プレビューは
+    // 現在フレームしか見えないので、曲全体から求めた基準をこちらから渡す。
+    // ★基準は変換とまったく同じ関数(Vgm2MmlExpansion.attRefOfSnapshots)で作る。別実装にすると
+    //   「プレビューでは小さいのに変換すると大きい」というズレが生まれる(K054539で約10dB)。
+    assignPreview.setVolumeRefs(previewVolumeRefs());
     assignPreview.enabled = on;
     // 元chのミュート(プレビュー分を含む)を再生中のプレイヤーへ貼り直す
     scheduleRerenderOnMute();
@@ -8224,9 +8242,11 @@
     getK007232: () => { const a = vgmAdapter('k007232'); return a ? MML.Emu.snapshotK007232(a.chip) : null; }
 ,
     // デュアル(サラマンダー2)は2個目を連結して16要素で返す(SN76489と同じ流儀。鍵盤は幅で追随)
+    // ★デュアル(沙羅曼蛇2)は必ず snapshotK054539Dual を通す。素の連結だと2個目の kind が
+    //   キャプチャ側('k054539#2')と食い違い、鍵盤のノート列がドラムのレーンを引けなくなる
     getK054539: () => { const a = vgmAdapter('k054539'); if (!a) return null;
-      const s = MML.Emu.snapshotK054539(a.chip); const b = vgmAdapter('k054539_2');
-      return b ? s.concat(MML.Emu.snapshotK054539(b.chip)) : s; }
+      const b = vgmAdapter('k054539_2');
+      return MML.Emu.snapshotK054539Dual(a.chip, b ? b.chip : null); }
 ,
     getMsm5205: () => { const a = vgmAdapter('msm5205'); return a ? MML.Emu.snapshotMSM5205(a.chip) : null; }
 ,
