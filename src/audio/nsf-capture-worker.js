@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-17 17:16:48
+ * Built by tools/build-capture-workers.ps1 at 2026-09-18 03:02:26
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-17 17:16:48';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-18 03:02:26';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -8753,7 +8753,7 @@
           }
         }
         this._redrawRollForSpotlight();
-        this._drawPianos(this._lastChannels || []);
+        this._drawPianos(this._lastPianoChannels || this._lastChannels || []);
       };
       if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
       else run();
@@ -8772,7 +8772,7 @@
     // 鍵盤だけ描き直す。停止中(rAFが回っていない)に演奏入力で押した鍵を点灯させるために、
     // src/ui/performInput.js が押鍵のたびに呼ぶ。ロールは触らないので安い
     refreshPianos() {
-      this._drawPianos(this._lastChannels || []);
+      this._drawPianos(this._lastPianoChannels || this._lastChannels || []);
     }
 
     // 鍵盤描画: 全チャンネルまとめ(1枚)か、レーンごと(そのchだけ)か
@@ -9983,7 +9983,7 @@
       }
       // 停止中でもその場で見た目を更新する(パッドの文字はロールと鍵盤の両方に出る)
       this._redrawRollForSpotlight();
-      this._drawPianos(this._lastChannels || []);
+      this._drawPianos(this._lastPianoChannels || this._lastChannels || []);
     }
 
     /** サンプルごとの打点数(ドラム(DPCM)パネルの「打点」列)。drumKey → 件数 */
@@ -11534,11 +11534,18 @@
       }
 
       // SPC ボイスを合流させてピアノに反映(色はユーザー上書きを解決してから渡す)
-      const allChannels = channels.map(c => ({ ...c, color: this._getColor(c.id, c.color) }))
-        .concat(this._spcVoices.map(v => ({
-          id: v.label, color: this._getColor(v.label, v.color), freq: v.freq, vol: v.vol,
-          active: v.active, rawVol: null, rawVolMax: null,
-        })));
+      const spcCh = this._spcVoices.map(v => ({
+        id: v.label, color: this._getColor(v.label, v.color), freq: v.freq, vol: v.vol,
+        active: v.active, rawVol: null, rawVolMax: null,
+      }));
+      // ★SPCボイスも _applyPadKeys を通す(2026-09-18)。ここは update() 冒頭の
+      //   _applyPadKeys(channels) より**後**で合流するので、通し忘れると drumKey が付かない。
+      //   drawPiano は drumKey が無いと音程鍵盤側を光らせるので、E(DPCM)指定したボイスが
+      //   「ロールのドラム区画のパッドは消えたまま、鍵盤だけ光る」という食い違いになっていた。
+      this._applyPadKeys(spcCh, posSeconds);
+      const allChannels = channels.map(c => ({ ...c, color: this._getColor(c.id, c.color) })).concat(spcCh);
+      // 演奏入力の押鍵で鍵盤だけ描き直す refreshPianos() も同じ一覧を使う(SPCボイスが消えないように)
+      this._lastPianoChannels = allChannels;
       this._drawPianos(allChannels);
 
       // ピアノロールはSPCモード中は updateSpcVoices() 側が描画するため、ここでは
@@ -12354,10 +12361,16 @@
         const nesChannels = (this._state
           ? extractChannels(snap, this._extraSnaps, 0, this._chips)
           : []).map(c => ({ ...c, color: this._getColor(c.id, c.color) }));
-        const allChannels = nesChannels.concat(this._spcVoices.map(v => ({
+        const spcCh = this._spcVoices.map(v => ({
           id: v.label, color: this._getColor(v.label, v.color), freq: v.freq, vol: v.vol,
           active: v.active, rawVol: null, rawVolMax: null,
-        })));
+        }));
+        // ★SPC再生中のピアノを描くのは update() ではなく**ここ**(上の分岐参照)。
+        //   _applyPadKeys を通さないと drumKey が付かず、E(DPCM)指定したボイスの打点が
+        //   ドラム区画のパッドではなく音程鍵盤側で光る(2026-09-18のユーザー報告)。
+        const allChannels = nesChannels.concat(spcCh);
+        this._applyPadKeys(allChannels, posSeconds || 0);
+        this._lastPianoChannels = allChannels;
         this._drawPianos(allChannels);
       }
 
