@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-18 13:20:08
+ * Built by tools/build-capture-workers.ps1 at 2026-09-18 13:29:45
  *
  * regsOnly capture worker bundle (psfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.psfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.psfCaptureBuiltAt = '2026-09-18 13:20:08';
+  MML.WorkerBundles.psfCaptureBuiltAt = '2026-09-18 13:29:45';
   MML.WorkerBundles.psfCapture = function () {
 /*
  * PSF (Portable Sound Format) 容器 / PS-EXE 解析
@@ -10831,7 +10831,7 @@
           // チップがアクセント色になるので区別はつく)。ポップオーバー側には付ける。
           // サンプルPCMでない行の E(DPCM) は「このchを打楽器として分離レンダリングしてDPCM化」
           // (main.js synthDrum)なので、そう読める語を添える
-          o.textContent = plan.targetLabel(t) + (((t === 'dpcm' || t === 'noise') && plan.isSynthDrumTarget && plan.isSynthDrumTarget(el.id, t)) ? T('(打楽器化)') : '');
+          o.textContent = plan.targetLabel(t) + (((t === 'dpcm' && plan.isSynthDrumTarget && plan.isSynthDrumTarget(el.id, t)) || (t === 'noise' && plan.channelKind(el.id) !== 'noise')) ? T('(打楽器化)') : '');
           // 音源ごとの色分けは「選ぶとき(=リストを開いたとき)」だけ、薄い背景色で出す。
           // ★文字色は塗らない(読みづらいというユーザー指摘)。行に閉じているセレクト本体も
           //   既定の見た目のままにして、色は候補一覧の中でのグルーピングだけに使う。
@@ -10846,7 +10846,8 @@
       el.targetSel.style.color = '';
       if (el.partEl) el.partEl.style.color = '';
 
-      if (el.drumBtn) el.drumBtn.style.display = (target === 'dpcm') ? '' : 'none';
+      // 「パッド」ボタン: E(DPCM)と、打楽器化されてパッドになる D(ノイズ。元がノイズ系の行は周期の写しだけでパッド無し)
+      if (el.drumBtn) el.drumBtn.style.display = (target === 'dpcm' || (target === 'noise' && srcKind !== 'noise')) ? '' : 'none';
       const toneKind = plan.toneKindFor(target, undefined, srcKind);
       // 音色ごとの指定(src/convert/toneSettings.js)を持つ音色の数。セレクト/ボタンの表示に添える
       const nTone = this.toneOverrideCount ? this.toneOverrideCount(el.id) : 0;
@@ -10854,7 +10855,8 @@
       // ★♪ボタンは「音色ごとの指定が使える行」には常に出す(2026-09-10)。以前は音色セレクトが
       //   隠れる行だけだったので、音色一覧で指定してもチャンネル一覧の見た目が変わらなかった
       //   (件数がセレクトの最終項目にしか出ず、開かないと見えない。ユーザー報告)
-      const perOk = plan.editable() && target !== 'skip' && target !== 'dpcm' && plan.format() !== 'nsf';
+      // ノイズ(D)も対象外(2026-09-18): 周期/音色はパッド側で決めるので音色ごとの指定は出さない
+      const perOk = plan.editable() && target !== 'skip' && target !== 'dpcm' && target !== 'noise' && plan.format() !== 'nsf';
       if (el.tonesBtn) {
         el.tonesBtn.style.display = perOk ? '' : 'none';
         el.tonesBtn.textContent = nTone ? `♪${nTone}` : '♪';
@@ -10965,7 +10967,7 @@
         const o = document.createElement('option');
         o.value = t;
         o.textContent = plan.targetLabel(t)
-          + (((t === 'dpcm' || t === 'noise') && plan.isSynthDrumTarget && plan.isSynthDrumTarget(chId, t)) ? T('(打楽器化)') : '')
+          + (((t === 'dpcm' && plan.isSynthDrumTarget && plan.isSynthDrumTarget(chId, t)) || (t === 'noise' && plan.channelKind(chId) !== 'noise')) ? T('(打楽器化)') : '')
           + (t === el.defaultTarget ? T('(既定)') : '');
         targetSel.appendChild(o);
       }

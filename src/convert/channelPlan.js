@@ -219,9 +219,11 @@
   function capsOf(fmt) { return CAPS[fmt || curFormat] || { tone: false, volPct: false }; }
 
   // 借用先タイプ → 音色指定の種別(形式に依らない対応。変換器と音色ごとの設定 toneSettings.js が使う)
-  //   'noisePeriod' は旋律chをノイズへ載せるときだけ(ノイズ→ノイズは周期がそのまま)
+  //   ノイズ(D)は音色選択を出さない(2026-09-18): 旋律chをノイズへ載せた分は打楽器化されてドラム(DPCM)パネルの
+  //   パッドになり、周期/音色はパッド側(音程から自動 or プリセット)で決めるため。'noisePeriod' の値自体は
+  //   変換器(borrow.js pitchedToNoise 等)が読めるまま残す(以前の音色ごとの保存値を壊さない)
   function toneKindOfTarget(type, srcKind) {
-    if (type === 'noise') return (srcKind && srcKind !== 'noise') ? 'noisePeriod' : null;
+    if (type === 'noise') return null;
     if (/^(pulse1|pulse2|mmc5pulse1|mmc5pulse2)$/.test(type)) return 'duty4';
     if (/^vrc6pulse/.test(type)) return 'duty8';
     if (type === 'fds' || /^n163_/.test(type)) return 'wave';
