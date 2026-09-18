@@ -492,7 +492,7 @@
           `<option value="">${T('割当どおり')}(${r.defaultTarget === 'noise' ? T('ノイズ') : 'DPCM'})</option>` +
           `<option value="dpcm">DPCM</option><option value="noise">${T('ノイズ')}</option></select></span>` +
         `<span class="dp-c-noise">` +
-          `<select class="dp-noise" title="${T('ノイズの音色(プリセット)。「このパッドだけ…」を選ぶか ✎ で個別に編集')}"></select>` +
+          `<select class="dp-noise" title="${T('ノイズの音色(プリセット)。「カスタマイズ…」を選ぶか ✎ で個別に編集')}"></select>` +
           `<button type="button" class="dp-noise-edit" title="${T('音色を編集/試聴(プリセットの更新・追加もここから)')}">✎</button>` +
         `</span>` +
         `<span class="dp-c-prio"><select class="dp-prio" title="${T('打点が重なった時の優先(ノイズは1本)。同時なら高い方、同じなら後から始まった方が勝つ')}">` +
@@ -542,15 +542,24 @@
           o.value = p.id; o.textContent = p.name + (p.modified ? ' *' : '');
           noiseSel.appendChild(o);
         }
+        // 「カスタマイズ…」はコマンド(選ぶとエディタが開く)。カスタム音色が既に効いている行では、選択中の表示用に
+        // 別の項目「カスタマイズ」を置く。同じ項目を選び直しても change は飛ばないので、コマンド側を常に
+        // 「今選ばれていない項目」にしておく(ユーザー報告 2026-09-18: 再調整しようと選んでもエディタが出ない)
+        const hasCustom = !!(st.noise && st.noise.custom);
+        if (hasCustom) {
+          const on = document.createElement('option');
+          on.value = '__custom_on'; on.textContent = T('カスタマイズ');
+          noiseSel.appendChild(on);
+        }
         const oc = document.createElement('option');
-        oc.value = '__custom'; oc.textContent = T('このパッドだけの音色…');
+        oc.value = '__custom'; oc.textContent = T('カスタマイズ…');
         noiseSel.appendChild(oc);
         const cur = isAutoTone(st, r) ? '__auto'
-          : (st.noise && st.noise.custom ? '__custom'
+          : (hasCustom ? '__custom_on'
             : (st.noise && st.noise.preset && NP().get(st.noise.preset) ? st.noise.preset : (NP().all()[0] || {}).id));
         if (cur) noiseSel.value = cur;
         noiseSel.addEventListener('change', () => {
-          if (noiseSel.value === '__custom') { openNoiseEditor(noiseEdit, r); noiseSel.value = st.noise && st.noise.custom ? '__custom' : cur; return; }
+          if (noiseSel.value === '__custom' || noiseSel.value === '__custom_on') { openNoiseEditor(noiseEdit, r); noiseSel.value = cur; return; }
           if (DS()) DS().set(r.hash, { noise: noiseSel.value === '__auto' ? { auto: true } : { preset: noiseSel.value } });
           render();
           if (hooks.onChange) hooks.onChange();
