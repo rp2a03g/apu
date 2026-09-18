@@ -1559,6 +1559,12 @@
     if (dpcmLetter) {
       scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents, hasInstrument: true });
     }
+    // ノイズパッド(2026-09-18): 載せ先=ノイズ(D)のパッド(BRRの打楽器サンプル/合成音ch)の打点を
+    // 2A03ノイズの音符列にして合流(既存の D=NONボイス と単音マージ。src/convert/drumHits.js applyNoise)
+    if (drumDpcm && drumDpcm.noiseHits && drumDpcm.noiseHits.length && MML.Convert.DrumHits.applyNoise) {
+      MML.Convert.DrumHits.applyNoise(scoreChannels, drumDpcm.noiseHits, FPS_SPC, {
+        totalFrames: FRAMES, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
+    }
 
     // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前。
     // SPC の音符は KOFF で終わり(KOFF 後のリリースは1フレーム未満で無音)、ADSR は KON 中の実測列

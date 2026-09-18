@@ -548,7 +548,10 @@
                hits: hits[k] || 0,
                // 扱い(自動/打楽器/音階)の現在値。実体はサンプル内容ハッシュ単位の上書き
                kind: (s && s.hash && kindMap) ? (kindMap[s.hash] || 'auto') : 'auto',
-               hash: s ? s.hash : null, pcm: s ? s.pcm : null, srcRate: s ? s.rate : 0 };
+               hash: s ? s.hash : null, pcm: s ? s.pcm : null, srcRate: s ? s.rate : 0,
+               // ノイズパッド: 割当どおりの載せ先(D で打楽器化=noise、他は dpcm)と元の音程(音程から自動の材料)
+               defaultTarget: (s && s.assignTarget === 'noise') ? 'noise' : 'dpcm',
+               srcMidi: (s && s.srcMidi != null) ? s.srcMidi : null };
     });
     // ★パッド名はロールのドラム区画と同期させる(ユーザー指示)。名前の実体はサンプルの
     //   ハッシュ側にあり、ロールのノートはハッシュを持たないのでここで橋渡しする
@@ -562,6 +565,15 @@
       // 名前を変えたらロールのパッドへ流し直す(ROMコストは名前では変わらないので再計算しない)
       onRename: () => { refreshDrumPanel(); },
       onPlay: (row, mode) => { if (keyboardDisplay.onDrumAudition) keyboardDisplay.onDrumAudition(row.key, mode); },
+      // ノイズパッドの音色の試聴(2026-09-18): 音色→1音のMML(noisePresets.js toneToMml)を本物のコンパイラ+
+      // 2A03エミュ(MML.Mml.render)で描画して鳴らす。変換結果と同じ音になる
+      onAuditionNoise: (tone) => {
+        try {
+          const src = MML.Convert.NoisePresets.toneToMml(tone);
+          const r = MML.Mml.render(src, { sampleRate: 44100 });
+          if (r && r.audio && r.audio.length) playFloatPcm(r.audio, 44100);
+        } catch (e) { console.error('ノイズ音色の試聴に失敗:', e); }
+      },
       // 扱い(自動/打楽器/音階)の手動上書き。鍵盤のnote列メニュー(VGMのPCM行)と同じ1点へ書く
       onKind: (row, kind) => setDrumSampleKind(row.hash, kind),
       onInclude: (row) => includeDrumSample(row),
@@ -1500,7 +1512,8 @@
       for (let i = 0; i < pcm.length; i++) u8[i] = Math.max(0, Math.min(255, Math.round(pcm[i] * 127 + 128)));
       const hash = (U && U.sampleHash) ? ('syn-' + U.sampleHash(u8, 0, u8.length)) : null;
       const label = chId + ' ' + (MML.UI.midiToNoteName ? MML.UI.midiToNoteName(n.srcMidi) : String(n.srcMidi));
-      samples[key] = { key, pcm, rate: sampleRate, hash, label, chip: 'synth', chans: [chId] };
+      // srcMidi: このパッドの元の音程(ノイズパッドの「音程から自動」が周期indexを決めるのに使う)
+      samples[key] = { key, pcm, rate: sampleRate, hash, label, chip: 'synth', chans: [chId], srcMidi: n.srcMidi };
     }
     let maxVol = 0;
     for (const n of notes) if (n.vol > maxVol) maxVol = n.vol;
@@ -1512,9 +1525,20 @@
       const st = Math.round(n.startSec * frameInfo.frameRate);
       hits.push({ key: n.drumKey, sampleKey: n.drumKey, hash: s.hash, pcm: s.pcm, rate: s.rate, label: s.label,
                   vol: n.vol / maxVol, startFrame: st, endFrame: Math.max(st + 1, Math.round(n.endSec * frameInfo.frameRate)),
-                  exactEnd: true, chId });
+                  exactEnd: true, chId, srcMidi: n.srcMidi });
     }
     return { hits, samples };
+  }
+  // 打点/パッドに「どの借用先で打楽器化したか」(assignTarget: E='dpcm' / D='noise')を刻む(2026-09-18)。
+  // パッドの載せ先の既定「割当どおり」がこれを見る(src/convert/drumHits.js effectiveTarget)。D で打楽器化した
+  // chの打点は、パッドが既定(音程から自動)のままなら従来の pitchedToNoise 出力そのまま、プリセットに
+  // 変えた分だけ差し替わる(drumHits.js noise() の overrides)
+  function stampSynthDrumAssign(id, ent) {
+    const Plan = MML.Convert.ChannelPlan;
+    const all = (Plan && Plan.effectiveTargets) ? Plan.effectiveTargets() : {};
+    const tgt = all[id] === 'noise' ? 'noise' : 'dpcm';
+    for (const h of (ent.hits || [])) h.assignTarget = tgt;
+    for (const k of Object.keys(ent.samples || {})) { const s = ent.samples[k]; if (s) s.assignTarget = tgt; if (drumSampleStore[k]) drumSampleStore[k].assignTarget = tgt; }
   }
   // 打楽器化されたchのレンダリングを揃える(未レンダリングのchを裏で回し、外れたchを台帳から外す)。
   // 変換の直前に await して打点を確定させる
@@ -1531,6 +1555,7 @@
     for (const id of ids) {
       // 済みでも、その後キャプチャが伸びていたら(先読み途中で打楽器化した場合)全長で取り直す
       const done = synthDrum.byCh.get(id);
+      if (done) stampSynthDrumAssign(id, done); // 割当が E↔D で変わっても打点/パッドの assignTarget を追従させる
       if (done && done.totalFrames >= info.totalFrames * 0.98) continue;
       // ★VGMのストリーミングDAC(YMDA)は必ずログ由来だけで決める(2026-09-04)。
       //   打点が無ければ「そのchはDACを使っていない」ということなので、何も作らずに終わる。
@@ -1541,6 +1566,7 @@
         const fromLog = vgmDacDrumFor(id, info);
         if (fromLog) {
           fromLog.totalFrames = info.totalFrames;
+          stampSynthDrumAssign(id, fromLog);
           synthDrum.byCh.set(id, fromLog);
           Object.assign(drumSampleStore, fromLog.samples);
           logDrumUpdated = true;
@@ -1565,6 +1591,7 @@
           if (token !== synthDrum.token || !r) return;
           const built = buildSynthHits(id, r.audio, r.sampleRate, info);
           built.totalFrames = info.totalFrames;
+          stampSynthDrumAssign(id, built);
           synthDrum.byCh.set(id, built);
           Object.assign(drumSampleStore, built.samples);
         } catch (e) {

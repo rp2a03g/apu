@@ -215,6 +215,11 @@
       if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
         const d = MML.Convert.DrumHits.dpcm(options.drumHits, frameRate, {
           totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'kss_drum', maxClipSec: 10 });
+        // ノイズパッド(2026-09-18): 載せ先=ノイズのパッドの打点を2A03ノイズ(D)へ(src/convert/drumHits.js applyNoise)
+        if (d.noiseHits && d.noiseHits.length && MML.Convert.DrumHits.applyNoise) {
+          MML.Convert.DrumHits.applyNoise(scoreChannels, d.noiseHits, frameRate, {
+            totalFrames, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
+        }
         if (d.defs.length) {
           for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
           dpcmFiles.push(...d.files);

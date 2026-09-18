@@ -43,6 +43,54 @@
 
   function DS() { return MML.Convert && MML.Convert.DrumSamples; }
   function CS() { return MML.UI.ConvertSettings || null; }
+  function NP() { return (MML.Convert && MML.Convert.NoisePresets) || null; }
+
+  // ── ノイズパッド(2026-09-18): パッドの現在の音色を解き、エディタ(src/ui/noisePadEditor.js)を開く ──
+  // 音色の出自は3通り: このパッドだけの音色(noise.custom) / プリセット(noise.preset) / 未指定(先頭プリセット)。
+  // エディタからは「このパッドだけに適用」「プリセットを更新」「新規プリセット」「削除/組み込みに戻す」「試聴」
+  // 「音程から自動」(音程を持つパッドの既定): 周期は元の音程から、音量は元のまま(drumHits.js noiseToneOf と同じ)
+  function isAutoTone(st, r) {
+    return !!((st.noise && st.noise.auto) || (!st.noise && r && r.srcMidi != null));
+  }
+  function noiseToneOfRow(st, r) {
+    const np = NP();
+    if (!np) return null;
+    if (isAutoTone(st, r)) {
+      const DH = MML.Convert.DrumHits;
+      const t = (DH && DH.noiseToneOf) ? DH.noiseToneOf(st, np.snapshot(), { srcMidi: r ? r.srcMidi : null, vol: 1 }).tone : np.sanitizeTone(np.DEFAULT_TONE);
+      return { tone: t, preset: null, auto: true };
+    }
+    if (st.noise && st.noise.custom) return { tone: np.sanitizeTone(st.noise.custom), preset: null };
+    const p = st.noise && st.noise.preset ? np.get(st.noise.preset) : null;
+    if (p) return { tone: p.tone, preset: p };
+    const first = np.all()[0] || null;
+    return { tone: first ? first.tone : np.sanitizeTone(np.DEFAULT_TONE), preset: first };
+  }
+  // 実効の載せ先(明示 > 割当どおり(行の defaultTarget) > dpcm)
+  function effectiveTargetOf(st, r) {
+    if (st.target === 'noise' || st.target === 'dpcm') return st.target;
+    return (r && r.defaultTarget === 'noise') ? 'noise' : 'dpcm';
+  }
+  function openNoiseEditor(anchor, r) {
+    const np = NP(), ed = MML.UI.NoisePadEditor;
+    if (!np || !ed || !DS() || !r.hash) return;
+    const st = DS().get(r.hash);
+    const cur = noiseToneOfRow(st, r);
+    const p = cur.preset;
+    ed.open(anchor, {
+      title: T('ノイズの音色: {name}', { name: st.name || r.label || r.key }),
+      tone: cur.tone, presetId: p ? p.id : null, presetName: p ? p.name : '', builtin: !!(p && p.builtin), modified: !!(p && p.modified),
+      onApplyPad: (tone) => { DS().set(r.hash, { noise: { custom: tone } }); render(); if (hooks.onChange) hooks.onChange(); },
+      onSavePreset: (id, name, tone) => {
+        const newId = np.set(id, name, tone);
+        DS().set(r.hash, { noise: { preset: newId } });
+        render(); if (hooks.onChange) hooks.onChange();
+      },
+      onDeletePreset: (id) => { np.remove(id); render(); if (hooks.onChange) hooks.onChange(); },
+      onResetPreset: (id) => { np.resetBuiltin(id); render(); if (hooks.onChange) hooks.onChange(); },
+      onAudition: (tone) => { if (hooks.onAuditionNoise) hooks.onAuditionNoise(tone); },
+    });
+  }
 
   /** 属性値へ入れる文字のエスケープ(名前はユーザーが自由に打てるので必須) */
   function esc(v) {
@@ -124,11 +172,17 @@
           `<span class="dp-c-hits">${T('打点')}</span>` +
           `<span class="dp-c-kind">${T('扱い')}</span>` +
           `<span class="dp-c-on">${T('変換')}</span>` +
+          `<span class="dp-c-target">${T('載せ先')}</span>` +
+          `<span class="dp-c-noise">${T('ノイズ音色')}</span>` +
+          `<span class="dp-c-prio">${T('優先')}</span>` +
           `<span class="dp-c-vol">${T('ボリューム')}</span>` +
           `<span class="dp-c-rate">${T('DMCレート')}</span>` +
           `<span class="dp-c-inc">${T('差し替え')}</span>` +
         `</div>` +
         `<div class="drum-panel-body"></div>` +
+        // 一覧と下段(分割ビュー)の境目。ドラッグで下段の高さを変える=一覧の見える範囲を広げられる
+        // (パッドが多いと一覧がスクロールになるため、ユーザー要望 2026-09-18)。高さは localStorage に保存
+        `<div class="drum-panel-divider" title="${T('ドラッグで一覧と下段の高さを変える(下まで下げると下段を畳む)')}"></div>` +
         `<div class="drum-panel-split"></div>` +
         `<div class="drum-panel-status" hidden></div>` +
         `<div class="drum-panel-foot"></div>` +
@@ -139,6 +193,7 @@
     statusEl = rootEl.querySelector('.drum-panel-status');
     optsEl = rootEl.querySelector('.drum-panel-opts');
     splitEl = rootEl.querySelector('.drum-panel-split');
+    initDivider(rootEl.querySelector('.drum-panel-divider'));
     if (MML.UI.DpcmSplitView) {
       splitView = MML.UI.DpcmSplitView.create(splitEl, {
         rateAuto: true, autoLabel: T('自動(行のレート)'),
@@ -163,7 +218,46 @@
     }
     renderOpts();
     if (CS() && CS().onChange) CS().onChange(syncOpts);
+    if (NP() && NP().onChange) NP().onChange(() => render()); // プリセットの追加/更新で行のセレクトを作り直す
     render();
+  }
+
+  // ── 一覧/下段の境目ドラッグ(2026-09-18) ────────────────────────────────────────
+  // 下段(.drum-panel-split)の高さを変える。一覧(.drum-panel-body)は flex:1 で残りを取るので、下段を
+  // 縮めるほど一覧が広がる。24px未満(ツールバー1本分)まで下げると下段を畳んだ扱い。
+  const DIVIDER_KEY = 'drumPanelSplitH';
+  function applySplitHeight(h) {
+    if (!splitEl) return;
+    if (h == null) { splitEl.style.height = ''; splitEl.style.overflow = ''; return; }
+    splitEl.style.height = Math.max(0, h) + 'px';
+    splitEl.style.overflow = 'hidden';
+  }
+  function initDivider(div) {
+    if (!div || !splitEl) return;
+    let saved = null;
+    try { const v = parseInt(global.localStorage.getItem(DIVIDER_KEY), 10); if (Number.isFinite(v)) saved = v; } catch (e) { /* ignore */ }
+    if (saved != null) applySplitHeight(saved);
+    let dragging = false, startY = 0, startH = 0;
+    div.addEventListener('mousedown', (e) => {
+      dragging = true; startY = e.clientY; startH = splitEl.offsetHeight;
+      div.classList.add('dragging'); e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      // 下へ引く=下段が縮む(=一覧が広がる)
+      const h = Math.max(0, startH + (startY - e.clientY));
+      applySplitHeight(h);
+    });
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false; div.classList.remove('dragging');
+      try { global.localStorage.setItem(DIVIDER_KEY, String(splitEl.offsetHeight)); } catch (e) { /* ignore */ }
+    });
+    // ダブルクリックで自動(内容なりの高さ)へ戻す
+    div.addEventListener('dblclick', () => {
+      applySplitHeight(null);
+      try { global.localStorage.removeItem(DIVIDER_KEY); } catch (e) { /* ignore */ }
+    });
   }
 
   function setRows(next) {
@@ -387,6 +481,17 @@
           `<option value="pitch">${T('音階')}</option>` +
         `</select></span>` +
         `<span class="dp-c-on"><input type="checkbox" class="dp-on"${st.enabled === false ? '' : ' checked'}></span>` +
+        // 載せ先(2026-09-18、ノイズパッド): DPCM=実サンプルを@DPCMへ / ノイズ=2A03ノイズ(D)の音符列へ。
+        // ノイズのときは音色(プリセット or このパッドだけの音色)と、重なった時の優先度を選ぶ
+        `<span class="dp-c-target"><select class="dp-target" title="${T('この打点をどこで鳴らすか。DPCM=実サンプルを焼く / ノイズ=2A03ノイズ(D)の音符にする(プリセットの音色で)。既定は鍵盤の割当どおり(E→DPCM、D→ノイズ)')}">` +
+          `<option value="">${T('割当どおり')}(${r.defaultTarget === 'noise' ? T('ノイズ') : 'DPCM'})</option>` +
+          `<option value="dpcm">DPCM</option><option value="noise">${T('ノイズ')}</option></select></span>` +
+        `<span class="dp-c-noise">` +
+          `<select class="dp-noise" title="${T('ノイズの音色(プリセット)。「このパッドだけ…」を選ぶか ✎ で個別に編集')}"></select>` +
+          `<button type="button" class="dp-noise-edit" title="${T('音色を編集/試聴(プリセットの更新・追加もここから)')}">✎</button>` +
+        `</span>` +
+        `<span class="dp-c-prio"><select class="dp-prio" title="${T('打点が重なった時の優先(ノイズは1本)。同時なら高い方、同じなら後から始まった方が勝つ')}">` +
+          `<option value="-1">${T('低')}</option><option value="0">${T('通常')}</option><option value="1">${T('高')}</option></select></span>` +
         `<span class="dp-c-vol">` +
           `<input type="range" class="dp-vol" min="1" max="100" step="1" value="${vol}">` +
           `<span class="dp-vol-num">${vol}%</span>` +
@@ -402,6 +507,56 @@
       kindSel.disabled = noHash;
       kindSel.addEventListener('change', () => {
         if (hooks.onKind) hooks.onKind(r, kindSel.value);
+      });
+
+      // ── 載せ先 / ノイズ音色 / 優先(ノイズパッド) ──
+      const isNoise = effectiveTargetOf(st, r) === 'noise';
+      if (isNoise) row.classList.add('drum-panel-row--noise');
+      const targetSel = row.querySelector('.dp-target');
+      targetSel.value = (st.target === 'noise' || st.target === 'dpcm') ? st.target : '';
+      targetSel.disabled = noHash || !NP();
+      targetSel.addEventListener('change', () => {
+        if (DS()) DS().set(r.hash, { target: targetSel.value === 'noise' ? 'noise' : (targetSel.value === 'dpcm' ? 'dpcm' : null) });
+        render();
+        if (hooks.onChange) hooks.onChange();
+      });
+      const noiseSel = row.querySelector('.dp-noise');
+      const noiseEdit = row.querySelector('.dp-noise-edit');
+      const prioSel = row.querySelector('.dp-prio');
+      if (NP()) {
+        // 音程を持つパッド(旋律chの打楽器化)は「音程から自動」が先頭かつ既定(従来の D 割当と同じ出力)
+        if (r.srcMidi != null) {
+          const oa = document.createElement('option');
+          oa.value = '__auto'; oa.textContent = T('音程から自動(元の音程・音量)');
+          noiseSel.appendChild(oa);
+        }
+        for (const p of NP().all()) {
+          const o = document.createElement('option');
+          o.value = p.id; o.textContent = p.name + (p.modified ? ' *' : '');
+          noiseSel.appendChild(o);
+        }
+        const oc = document.createElement('option');
+        oc.value = '__custom'; oc.textContent = T('このパッドだけの音色…');
+        noiseSel.appendChild(oc);
+        const cur = isAutoTone(st, r) ? '__auto'
+          : (st.noise && st.noise.custom ? '__custom'
+            : (st.noise && st.noise.preset && NP().get(st.noise.preset) ? st.noise.preset : (NP().all()[0] || {}).id));
+        if (cur) noiseSel.value = cur;
+        noiseSel.addEventListener('change', () => {
+          if (noiseSel.value === '__custom') { openNoiseEditor(noiseEdit, r); noiseSel.value = st.noise && st.noise.custom ? '__custom' : cur; return; }
+          if (DS()) DS().set(r.hash, { noise: noiseSel.value === '__auto' ? { auto: true } : { preset: noiseSel.value } });
+          render();
+          if (hooks.onChange) hooks.onChange();
+        });
+        noiseEdit.addEventListener('click', (e) => { e.stopPropagation(); openNoiseEditor(noiseEdit, r); });
+      }
+      noiseSel.disabled = !isNoise || noHash || !NP();
+      noiseEdit.disabled = !isNoise || noHash || !NP();
+      prioSel.value = String(st.priority | 0);
+      prioSel.disabled = !isNoise || noHash;
+      prioSel.addEventListener('change', () => {
+        if (DS()) DS().set(r.hash, { priority: parseInt(prioSel.value, 10) | 0 });
+        if (hooks.onChange) hooks.onChange();
       });
 
       const sel = row.querySelector('.dp-rate');

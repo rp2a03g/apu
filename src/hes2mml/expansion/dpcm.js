@@ -446,7 +446,7 @@
     const dda = MML.Hes2MmlExpansion.ddaHits(snapshots, dpcmTrace, controlTrace, frameRate);
     const channels = dda.channels;
     const hits = dda.hits.concat(extraHits || []);
-    const empty = { channel: -1, channels: [], defs: [], files: [], events: [], stats: null };
+    const empty = { channel: -1, channels: [], defs: [], files: [], events: [], stats: null, noiseHits: [] };
     if (!hits.length || !MML.Convert.DrumHits) return empty;
     const r = MML.Convert.DrumHits.dpcm(hits, frameRate, {
       totalFrames: snapshots.length,
@@ -457,6 +457,7 @@
       maxClipSec: 10, // DDAはCPUが書いた分しか無い(=有限)ので、VGMのROM歯止め1.5秒は外す
       volQuant: 2,    // $0804音量の微差(1dB未満)で定義を増やさない(実測: HC92056で5→6定義)
     });
-    return { channel: channels.length ? channels[0] : -1, channels, defs: r.defs, files: r.files, events: r.events, stats: r.stats };
+    // noiseHits: 載せ先=ノイズ(D)のパッドの打点(ノイズパッド、2026-09-18。converter.js が applyNoise へ渡す)
+    return { channel: channels.length ? channels[0] : -1, channels, defs: r.defs, files: r.files, events: r.events, stats: r.stats, noiseHits: r.noiseHits || [] };
   };
 })(window);

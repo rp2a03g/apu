@@ -110,6 +110,9 @@
     // ★同じサンプルでも打点ごとに rate が違う(SPCの音階演奏ドラム等)ので、resolve はキャッシュしない
     const st = DS.resolve(h.hash, h.pcm, h.rate);
     if (!st.enabled) return null;
+    // 載せ先がノイズ(D)のパッドは @DPCM へ焼かない(dpcm() が noiseHits として呼び出し元へ返し、
+    // noise()/applyNoise() が2A03ノイズの音符列にする)
+    if (effectiveTarget(h, st) === 'noise') return null;
     // 差し替え(インクルード)があれば pcm/レートごと入れ替わる。無ければ渡したものがそのまま返る
     // (dpcmDrums.js 時代と同じ意味論)
     const pcm = st.pcm, rate = st.srcRate;
@@ -142,7 +145,11 @@
     // 重複排除キーの音量量子化。HESのDDAは$0804の音量が打点ごとに27〜31/31程度で揺れる
     // (1dB未満)ので、細かく刻むと同じ太鼓が定義を増やす。形式側が段数を指定できる
     const volQuant = opt.volQuant > 0 ? opt.volQuant : VOL_QUANT;
-    const empty = { defs: [], files: [], events: [], stats: { clips: 0, bytes: 0, segments: 0, dropped: 0 } };
+    // noiseHits: applyNoise() へ渡す打点(2026-09-18、ノイズパッド) = 載せ先がノイズ(D)のパッドの打点
+    // (このDPCM経路では焼かない)+ D へ割り当てたchの打点全部(載せ先を DPCM に変えたパッドの音符を
+    // 元の D の音符列から外す必要があるため。noise() のコメント参照)
+    const noiseHits = (hits || []).filter(h => h && (isNoiseTargeted(h) || h.assignTarget === 'noise'));
+    const empty = { defs: [], files: [], events: [], stats: { clips: 0, bytes: 0, segments: 0, dropped: 0 }, noiseHits };
     if (!hits || !hits.length || !totalFrames || !frameRate) return empty;
 
     const live0 = [];
@@ -389,7 +396,215 @@
       events.push({ start: t0, end: Math.max(t0 + 1, t1), note: 48, instrument: index });
     }
     const bytes = files.reduce((a, f) => a + f.bytes.length, 0);
-    return { defs, files, events, stats: { clips: defs.length, bytes, segments: events.length, dropped, normGain, splitClips, pieceDefs } };
+    return { defs, files, events, stats: { clips: defs.length, bytes, segments: events.length, dropped, normGain, splitClips, pieceDefs }, noiseHits };
+  }
+
+  // ── ノイズパッド(2026-09-18): 打点 → 2A03ノイズ(D)の音符列 ─────────────────────────
+  // パッド(サンプル単位設定 drumSamples.js)で 載せ先='noise' にした打点を、プリセット
+  // (src/convert/noisePresets.js の音色 {idx, mode, vol, ep, en, detune})で鳴らす音符列にする。
+  //   ・ノイズchは1本なので単音。重なった打点は「後着が前を切る」、同時なら priority(パッド設定、
+  //     -1/0/1)の高い方。元曲が元々持っているノイズの音符(applyNoise が既存の D ch から受け取る)は
+  //     priority 0 で、同点ならパッドが勝つ(ユーザー決定)
+  //   ・音量はプリセットの v/@v が正で、打点の元音量(hit.vol)は使わない(まず単純に。ユーザー決定)
+  //   ・@v/@EP/@EN の表は曲側のレジストリ(regs)へ登録して既存の定義と番号を共有する。
+  //     同じ音色が8連打しても mmlEmit が状態差分だけ書くので @v が並ぶことはない
+  // パッドの実効の載せ先: 明示設定 > 打点の割当(assignTarget: E で打楽器化=dpcm / D で打楽器化=noise) > dpcm
+  function effectiveTarget(h, st) {
+    if (st && (st.target === 'noise' || st.target === 'dpcm')) return st.target;
+    return (h && h.assignTarget === 'noise') ? 'noise' : 'dpcm';
+  }
+  function isNoiseTargeted(h) {
+    const DS = MML.Convert.DrumSamples || null;
+    if (!DS || !h || !h.hash) return false;
+    const st = DS.get(h.hash);
+    return st.enabled !== false && effectiveTarget(h, st) === 'noise';
+  }
+
+  // 音程 → 周期index(割当で D を選んだときの「音程から自動」。ChannelPlan.noiseIndexForFreq と同じ式)
+  function autoNoiseIndex(freqHz) {
+    const Plan = MML.Convert.ChannelPlan;
+    if (Plan && Plan.noiseIndexFor) return Plan.noiseIndexFor('auto', freqHz, 1);
+    if (!(freqHz > 0)) return 15;
+    return Math.max(0, Math.min(15, 15 - Math.round(1.5 * Math.log2(freqHz / 440))));
+  }
+  const midiToHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+
+  /**
+   * パッド設定 → 音色(プリセット参照を解く)。presets: NoisePresets.snapshot() の形。
+   * 戻り値 { tone, auto }。auto=「音程から自動」(音程を持つ打点の既定。周期は打点の音程から、
+   * 音量は打点の音量(0..1→v0-15)をそのまま使う=従来の pitchedToNoise と同じ考え方)
+   */
+  function noiseToneOf(st, presets, h) {
+    const NP = MML.Convert.NoisePresets || null;
+    const n = st && st.noise;
+    const hasPitch = !!(h && h.srcMidi != null);
+    if ((n && n.auto) || (!n && hasPitch)) {
+      const idx = hasPitch ? autoNoiseIndex(midiToHz(h.srcMidi)) : 15;
+      const v = Math.max(1, Math.min(15, Math.round((h && h.vol != null ? h.vol : 1) * 15)));
+      return { tone: { idx, mode: 0, vol: { type: 'v', v }, ep: null, en: null, detune: 0 }, auto: true };
+    }
+    let tone = null;
+    if (n && n.custom) tone = n.custom;
+    else if (n && n.preset && presets && presets[n.preset]) tone = presets[n.preset].tone;
+    else if (presets) {
+      // 未指定(音程の無い打点)なら最初のプリセット(組み込み先頭=ハイハット(閉))
+      const first = Object.keys(presets)[0];
+      tone = first ? presets[first].tone : null;
+    }
+    return { tone: NP ? NP.sanitizeTone(tone || (NP.DEFAULT_TONE)) : tone, auto: false };
+  }
+
+  /**
+   * ノイズ行きの打点(+既存Dの音符)を単音にまとめて共通イベント形式で返す。
+   * @param {Array} hits  打点(hash 必須。載せ先が noise 以外のものは無視)
+   * @param {number} frameRate
+   * @param {object} opt { totalFrames, regs:{envReg,pitchReg,noteEnvReg}, presets, native:[既存Dのイベント] }
+   * @returns {{ events, used:boolean, flags:{hasDetune,hasPitchMod,hasNoteEnv} }}
+   */
+  function noise(hits, frameRate, opt) {
+    opt = opt || {};
+    const DS = MML.Convert.DrumSamples || null;
+    const NP = MML.Convert.NoisePresets || null;
+    const totalFrames = opt.totalFrames || 0;
+    const presets = opt.presets || (NP ? NP.snapshot() : null);
+    const regs = opt.regs || {};
+    const out = { events: [], used: false, flags: { hasDetune: false, hasPitchMod: false, hasNoteEnv: false } };
+    if (!DS || !totalFrames) return out;
+
+    // 打点 → {start,end,priority,tone} (実効の載せ先が noise のものだけ)。
+    // ★割当で D を選んだch(assignTarget='noise')の打点は、その音符列が既に元の D(borrow.js pitchedToNoise)
+    //   として scoreChannels に入っている。パッドが「音程から自動」(既定)のままなら何もしない(=従来の出力
+    //   そのまま)。プリセット/カスタムに変えた、または載せ先を DPCM に変えたパッドの打点だけ、元の D の
+    //   該当区間を消してから(overrides)差し替える
+    const items = [];
+    const overrides = []; // [start,end) 元のDから消す区間
+    for (const h of hits || []) {
+      if (!h || !h.hash || !(h.endFrame > h.startFrame)) continue;
+      const st = DS.get(h.hash);
+      if (st.enabled === false) {
+        if (h.assignTarget === 'noise') overrides.push([h.startFrame, Math.min(totalFrames, h.endFrame)]); // 変換しない=元のDからも消す
+        continue;
+      }
+      const eff = effectiveTarget(h, st);
+      if (eff !== 'noise') {
+        if (h.assignTarget === 'noise') overrides.push([h.startFrame, Math.min(totalFrames, h.endFrame)]); // DPCMへ回した分
+        continue;
+      }
+      const t = noiseToneOf(st, presets, h);
+      if (h.assignTarget === 'noise') {
+        if (t.auto) continue; // 従来どおり(元のDの音符をそのまま使う)
+        overrides.push([h.startFrame, Math.min(totalFrames, h.endFrame)]);
+      }
+      items.push({ start: h.startFrame, end: Math.min(totalFrames, h.endFrame), priority: (st.priority | 0), tone: t.tone, pad: true, seq: items.length });
+    }
+    if (!items.length && !overrides.length) return out;
+    out.used = true;
+    // 既存Dの音符は priority 0・pad=false(同点ではパッドが勝つ)。overrides に掛かる区間は削る
+    const clip = (s, e) => {
+      let pieces = [[s, e]];
+      for (const [os, oe] of overrides) {
+        const next = [];
+        for (const [a, b] of pieces) {
+          if (oe <= a || os >= b) { next.push([a, b]); continue; }
+          if (a < os) next.push([a, os]);
+          if (oe < b) next.push([oe, b]);
+        }
+        pieces = next;
+      }
+      return pieces;
+    };
+    for (const ev of opt.native || []) {
+      if (!ev || ev.note === null || ev.note === undefined || !(ev.end > ev.start)) continue;
+      for (const [a, b] of clip(ev.start, Math.min(totalFrames, ev.end))) {
+        if (b <= a) continue;
+        const nev = (a === ev.start) ? ev : Object.assign({}, ev, { start: a, continued: true });
+        items.push({ start: a, end: b, priority: 0, native: nev, pad: false, seq: items.length });
+      }
+    }
+    items.sort((a, b) => a.start - b.start || a.seq - b.seq);
+
+    // 音色 → イベント断片(表の登録は音色ごとに1回)
+    const toneCache = new Map();
+    const fieldsOf = (tone) => {
+      const key = NP ? NP.toneKey(tone) : JSON.stringify(tone);
+      let f = toneCache.get(key);
+      if (f) return f;
+      f = { note: MML.Convert.noiseIndexToNote(tone.idx), instrument: tone.mode ? 1 : 0 };
+      if (tone.vol.type === 'env') {
+        const idx = regs.envReg ? regs.envReg.registerShape({ values: tone.vol.values.slice(), loop: tone.vol.loop }, false) : null;
+        if (idx != null) f.envelopeV = idx; else f.volume = tone.vol.values[0];
+      } else f.volume = tone.vol.v;
+      if (tone.ep && regs.pitchReg && regs.pitchReg.registerTable) {
+        const idx = regs.pitchReg.registerTable(tone.ep);
+        if (idx != null) { f.pitchEp = idx; f.pitchEpDelay = 0; out.flags.hasPitchMod = true; }
+      }
+      if (tone.en && regs.noteEnvReg && regs.noteEnvReg.registerTable) {
+        const idx = regs.noteEnvReg.registerTable(tone.en);
+        if (idx != null) { f.noteEnv = idx; out.flags.hasNoteEnv = true; }
+      }
+      if (tone.detune) { f.detune = tone.detune; out.flags.hasDetune = true; }
+      toneCache.set(key, f);
+      return f;
+    };
+
+    // 単音化: フレームごとに「鳴っている候補のうち priority 最大、同点なら後着、さらに同点ならパッド」
+    const events = [];
+    let cur = null, pos = 0;
+    const active = [];
+    const better = (a, b) => (a.priority - b.priority) || (a.start - b.start) || ((a.pad ? 1 : 0) - (b.pad ? 1 : 0));
+    for (let f = 0; f < totalFrames; f++) {
+      while (pos < items.length && items[pos].start <= f) active.push(items[pos++]);
+      let pick = null;
+      for (let i = active.length - 1; i >= 0; i--) {
+        const it = active[i];
+        if (f >= it.end) { active.splice(i, 1); continue; }
+        if (!pick || better(it, pick) > 0) pick = it;
+      }
+      if (cur && pick === cur.item) continue;
+      if (cur) { cur.ev.end = f; if (cur.ev.end > cur.ev.start) events.push(cur.ev); cur = null; }
+      if (!pick) continue;
+      let ev;
+      if (pick.native) {
+        // 既存の音符を(切られた位置から)そのまま。先頭からなら元のイベントの複製、途中からなら続き。
+        // ★instrument が無い(長周期しか出さない抽出器)なら @0 を明示する: パッドの @1 の後に
+        //   来た元曲の音符が短周期のまま鳴ってしまう(mmlEmit は instrument 未定義なら @ を書かない)
+        ev = Object.assign({}, pick.native, { start: f, end: pick.end });
+        if (ev.instrument === undefined) ev.instrument = 0;
+        if (f > pick.native.start) ev.continued = true;
+      } else {
+        ev = Object.assign({ start: f, end: pick.end }, fieldsOf(pick.tone));
+      }
+      cur = { item: pick, ev };
+    }
+    if (cur) { cur.ev.end = Math.min(totalFrames, cur.item.end); if (cur.ev.end > cur.ev.start) events.push(cur.ev); }
+    out.events = events;
+    return out;
+  }
+
+  /**
+   * scoreChannels(各 *2mml の出力チャンネル配列)へノイズパッドの音符列を合流させる。
+   * 既存の D(2A03ノイズ)チャンネルがあればその音符と単音マージして差し替え、無ければ D を追加する。
+   * 何も無ければ配列を触らない。戻り値は noise() の結果(used で有無が分かる)。
+   * ★テンポ推定より前・applyNoteEnd より前に呼ぶ(@v表を登録するため)
+   */
+  function applyNoise(scoreChannels, hits, frameRate, opt) {
+    opt = opt || {};
+    const idx = scoreChannels.findIndex(ch => ch && ch.letter === 'D');
+    const existing = idx >= 0 ? scoreChannels[idx] : null;
+    const r = noise(hits, frameRate, Object.assign({}, opt, { native: existing ? existing.events : [] }));
+    if (!r.used) return r;
+    const ch = Object.assign({}, existing || { letter: 'D' }, {
+      events: r.events,
+      hasVolume: true, hasEnvelope: true, hasInstrument: true,
+      hasDetune: !!(existing && existing.hasDetune) || r.flags.hasDetune,
+      hasPitchMod: !!(existing && existing.hasPitchMod) || r.flags.hasPitchMod,
+      hasNoteEnv: !!(existing && existing.hasNoteEnv) || r.flags.hasNoteEnv,
+      // パッドの打点は「演奏された音符の長さ」ではないのでテンポ推定から外す(E と同じ扱い)
+      isDrum: existing ? !!existing.isDrum : true,
+    });
+    if (idx >= 0) scoreChannels[idx] = ch; else scoreChannels.push(ch);
+    if (MML.Convert.sortChannelsByLetter) MML.Convert.sortChannelsByLetter(scoreChannels);
+    return r;
   }
 
   /** 打点リスト → DrumMap.build 用の観測列 */
@@ -443,5 +658,5 @@
     };
   }
 
-  MML.Convert.DrumHits = { dpcm, obs, channel, MAX_CLIP_SEC };
+  MML.Convert.DrumHits = { dpcm, obs, channel, noise, applyNoise, isNoiseTargeted, effectiveTarget, noiseToneOf, MAX_CLIP_SEC };
 })(window);

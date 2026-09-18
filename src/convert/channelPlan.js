@@ -173,10 +173,17 @@
   //   借用先の音色選択 'noisePeriod' で自動/固定を選ぶ)。逆(ノイズ→旋律)は従来どおり不可。
   for (const k of ['square', 'wave', 'fm', 'fm4', 'pcm', 'any']) if (KIND_TARGETS[k].indexOf('noise') < 0) KIND_TARGETS[k].push('noise');
   const SAMPLE_KINDS = { pcm: true, brr: true };
+  // ★2026-09-18: 旋律chの D(2A03ノイズ)も打楽器化(分離レンダリング→1音高=1パッド)の対象にする。
+  //   入口を1つにするため(ユーザー指示「あれ?どっち?とならないように」): E と同じくパッドに並び、
+  //   パッドの載せ先は既定で「割当どおり(ノイズ)」、音色は既定「音程から自動」(=従来の pitchedToNoise と
+  //   同じ出力)で、パッドごとにプリセットへ差し替えたり DPCM へ回したりできる(src/convert/drumHits.js noise())。
+  //   元がノイズ系の行(GB CH4/AYノイズ等)は周期をそのまま写すだけなので対象外
   function isSynthDrumTarget(chId, target) {
-    if (target !== 'dpcm' || !chId) return false;
+    if ((target !== 'dpcm' && target !== 'noise') || !chId) return false;
     if (chId === 'DM') return false;
-    return !SAMPLE_KINDS[channelKind(chId)];
+    const kind = channelKind(chId);
+    if (target === 'noise' && kind === 'noise') return false;
+    return !SAMPLE_KINDS[kind];
   }
   // 借用先の並びはチャンネル文字のアルファベット順(A-Z → a,b)。ラベルが「P: N163 ch1」と
   // 文字始まりなので、そのまま読める順になる。localeCompareは環境によっては 'a' < 'B' と

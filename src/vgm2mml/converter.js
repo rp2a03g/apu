@@ -567,6 +567,7 @@
     // ★ここで拾ったchは、後段の「2A03ノイズへ疑似音程で出すドラムパート」から除外する
     //   (両方へ出すと同じ打点が二重に鳴る)。
     let dpcmResult = null;
+    let drumNoiseHits = []; // ノイズパッド(2026-09-18): 載せ先=ノイズ(D)のパッドの打点
     const dpcmChans = {}; // chipフラグ → [ch番号...]
     // ADPCMソース(sourceChannelsの chip は 'ym2610adpcm'/'ym2608adpcm' で DRUM_CHIPS のフラグと違う)。
     // ★以前はここで引けず、ADPCM-A/B を E(DPCM) に割り当てても何も焼かれていなかった。
@@ -605,6 +606,7 @@
       if (sources.length || extraHits.length) {
         dpcmResult = MML.Vgm2MmlExpansion.dpcmDrums(sources, frameRate, {
           totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, extraHits });
+        drumNoiseHits = dpcmResult.noiseHits || []; // 載せ先=ノイズ(D)のパッドの打点(下の applyNoise)
         if (!dpcmResult.defs.length) dpcmResult = null;
       }
     }
@@ -971,6 +973,12 @@
     //   サンプルのリトリガー間隔で決まるため(実測: 6フレーム等間隔で延々続く曲がある)、
     //   混ぜると推定が半分のテンポへ引っ張られ、ドラムを足しただけの曲の譜面全体が
     //   別のテンポで書き直されてしまう(実測3曲: 133→64 BPM等)。
+    // ノイズパッド(2026-09-18): 載せ先=ノイズのパッドの打点を2A03ノイズ(D)へ(既存の D と単音マージ、
+    // src/convert/drumHits.js applyNoise。isDrum を付けるのでテンポ推定からも外れる)
+    if (drumNoiseHits.length && MML.Convert.DrumHits && MML.Convert.DrumHits.applyNoise) {
+      MML.Convert.DrumHits.applyNoise(scoreChannels, drumNoiseHits, frameRate, {
+        totalFrames, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
+    }
     const noteDurations = [];
     for (const ch of scoreChannels) {
       if (ch.isDrum) continue;

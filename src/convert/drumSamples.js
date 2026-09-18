@@ -39,7 +39,16 @@
   //   rate=区間のDMCレート(null=行のレートに従う)、used=反映に含めるか。null なら共通層の自動分割
   //   (src/convert/drumHits.js が上限を超えるときだけフレーム整数で均等に切る)。
   //   最後の end より後ろ(決めたときより長いクリップの残り)は未使用扱い
-  const DEFAULTS = { enabled: true, rate: 'auto', vol: 100, include: null, name: null, split: null };
+  // target/noise/priority(2026-09-18、ノイズパッド):
+  //   target   … null(既定=割当どおり: 打点が持つ assignTarget、E なら 'dpcm'・D なら 'noise'。実サンプルは 'dpcm')
+  //              | 'dpcm'(実サンプルを@DPCMへ) | 'noise'(2A03ノイズ(D)の音符列へ。src/convert/drumHits.js noise())
+  //   noise    … 載せ先がノイズのときの音色。{ preset:'<id>' }(src/convert/noisePresets.js) /
+  //              { custom:{idx,mode,vol,ep,en,detune} }(このパッドだけの音色) / { auto:true }(音程から自動=元の
+  //              音程を最寄りの周期へ、音量は元のまま)。null=既定(音程を持つパッドは auto、無ければ先頭プリセット)
+  //   priority … ノイズchは1本なので重なった打点は「後着が前を切る」。同時なら優先度の高い方
+  //              (-1=低 / 0=通常 / 1=高)。元曲が持つノイズの音符は通常(0)扱いでパッドが同点で勝つ
+  const DEFAULTS = { enabled: true, rate: 'auto', vol: 100, include: null, name: null, split: null,
+                     target: null, noise: null, priority: 0 };
 
   // 差し替え用PCMの実体(セッション中のみ)。hash → { name, pcm: Float32Array, rate: Hz }
   const includePcm = new Map();
@@ -129,6 +138,9 @@
     const vol = clampVol(s.vol);
     return {
       enabled: s.enabled !== false,
+      target: s.target === 'noise' ? 'noise' : (s.target === 'dpcm' ? 'dpcm' : null), // null=割当どおり(打点の assignTarget)
+      noise: s.noise || null,
+      priority: (s.priority | 0),
       rate: s.rate,
       vol: vol,
       gain: vol / 100,

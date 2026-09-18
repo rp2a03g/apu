@@ -257,9 +257,11 @@
     // 実音のままNESへ渡る。定義があればEチャンネルは自動で有効(#EX宣言は不要)
     const dpcmDefLines = [], dpcmFiles = [];
     let drumNote = null;
+    let noiseHits = []; // 載せ先=ノイズ(D)のパッドの打点(ノイズパッド、下の applyNoise)
     if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
       const d = MML.Convert.DrumHits.dpcm(options.drumHits, frameRate, {
         totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'gb_drum', maxClipSec: 10 });
+      noiseHits = d.noiseHits || [];
       if (d.defs.length) {
         for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
         dpcmFiles.push(...d.files);
@@ -267,6 +269,12 @@
         MML.Convert.sortChannelsByLetter(scoreChannels);
         drumNote = `打楽器化したchを実音のままDPCM(E)へ変換しました: 定義${d.stats.clips}件 / 打点${d.stats.segments}個 / ROM ${(d.stats.bytes / 1024).toFixed(1)}KB`;
       }
+    }
+    // ノイズパッド(2026-09-18): 載せ先=ノイズのパッドの打点を2A03ノイズ(D)の音符列にして合流
+    // (既存の D=CH4 と単音マージ。src/convert/drumHits.js applyNoise)
+    if (noiseHits.length && MML.Convert.DrumHits.applyNoise) {
+      MML.Convert.DrumHits.applyNoise(scoreChannels, noiseHits, frameRate, {
+        totalFrames, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
     }
 
     const noteDurations = [];

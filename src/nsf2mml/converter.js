@@ -797,6 +797,10 @@
     let dmcTriggers = extractDmcTriggers(timeline, writeLog, header);
     const bankInfo    = computeBankInfo(nsfBytes, header || {}, options.dpcmRom);
     let dpcmFiles   = extractDpcmFiles(dmcTriggers, bankInfo);
+    // ノイズパッド(2026-09-18): 載せ先=ノイズ(D)にしたパッドの打点(実機DPCMサンプル分は下の
+    // DrumSamples ブロックで、合成音chの分は options.drumHits の DPCM経路から noiseHits で受け取る)
+    const nativeNoiseHits = [];
+    let noiseHits = [];
     // ドラム(DPCM)パネルのサンプル単位設定(src/convert/drumSamples.js)を反映する(2026-09-03):
     //   変換しない … そのサンプルのトリガーを落とす(その分は休符。音声サンプルを外してROMを減らす用途)
     //   名前       … .dmc のファイル名にする
@@ -807,13 +811,25 @@
       const DS = MML.Convert.DrumSamples;
       const U = (global.Emu && global.Emu.SamplePitchUtil) || (MML.Emu && MML.Emu.SamplePitchUtil) || null;
       const dropKeys = new Set();
+      const noiseHashByKey = new Map(); // 載せ先=ノイズ(D)のサンプル(ノイズパッド、2026-09-18): Eから外して打点にする
       for (const f of dpcmFiles) {
         const hash = (U && U.sampleHash) ? ('dmc-' + U.sampleHash(f.bytes, 0, f.bytes.length)) : null;
         if (!hash) continue;
         const st = DS.get(hash);
         if (st.enabled === false) { dropKeys.add(f.fileKey); continue; }
+        if (st.target === 'noise') { dropKeys.add(f.fileKey); noiseHashByKey.set(f.fileKey, hash); continue; }
         const nm = st.name ? DS.sanitizeName(st.name) : '';
         if (nm) f.name = nm + '.dmc';
+      }
+      if (noiseHashByKey.size) {
+        // 実機DPCMは音量指定が無いので vol=1。終わりは次のトリガー(=次の音符の頭)
+        for (let i = 0; i < dmcTriggers.length; i++) {
+          const t = dmcTriggers[i];
+          const hash = noiseHashByKey.get(dmcTriggerFileKey(t, bankInfo));
+          if (!hash) continue;
+          const end = i + 1 < dmcTriggers.length ? dmcTriggers[i + 1].start : timeline.length;
+          nativeNoiseHits.push({ key: 'dmc:' + t.sampleAddr + ':' + t.sampleLen, hash, vol: 1, startFrame: t.start, endFrame: Math.max(t.start + 1, end) });
+        }
       }
       if (dropKeys.size) {
         dmcTriggers = dmcTriggers.filter(t => !dropKeys.has(dmcTriggerFileKey(t, bankInfo)));
@@ -862,6 +878,7 @@
     if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
       const r = MML.Convert.DrumHits.dpcm(options.drumHits, FPS, {
         totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'nsf_drum', maxClipSec: 10 });
+      noiseHits = r.noiseHits || [];
       const base = dpcmDefs.length;
       for (const d of r.defs) {
         dpcmFiles.push({ name: d.file, bytes: r.files[d.index].bytes, fileKey: 'synth:' + d.file });
@@ -1123,6 +1140,13 @@
     // 放置するとMMLがコンパイルできず全パート無音になるので、ここでも通す
     // (衝突が無ければ何もしないので既定のNSFでは出力不変)
     const vrc7Notes = MML.Convert.Vrc7Tone.resolveForScore(scoreChannels, vrc7ToneReg);
+
+    // ノイズパッド(2026-09-18): 載せ先=ノイズのパッドの打点(実機DPCMサンプル+合成音ch)を
+    // 2A03ノイズ(D)の音符列にして、元曲の D と単音マージ(src/convert/drumHits.js applyNoise)
+    if (cmd.DRUM !== false && (noiseHits.length || nativeNoiseHits.length) && MML.Convert.DrumHits && MML.Convert.DrumHits.applyNoise) {
+      MML.Convert.DrumHits.applyNoise(scoreChannels, noiseHits.concat(nativeNoiseHits), FPS, {
+        totalFrames, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
+    }
 
     // @DPCM<n>定義行(実機ppmckcと同じ書式)。ヘッダー行として他の音色定義と同列に出す
     const dpcmDefLines = dpcmDefs.map(d =>

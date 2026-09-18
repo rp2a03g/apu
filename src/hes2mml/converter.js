@@ -228,6 +228,12 @@
     if (hasNoise) scoreChannels.push(Object.assign({}, noiseResult, { letter: 'D' }));
     if (hasDpcm) scoreChannels.push({ letter: dpcmLetter, events: dpcmResult.events, hasInstrument: true });
     }
+    // ノイズパッド(2026-09-18): 載せ先=ノイズのパッドの打点(DDA/合成音ch)を2A03ノイズ(D)へ
+    // (既存の D=PSGノイズ と単音マージ。src/convert/drumHits.js applyNoise)
+    if (dpcmResult.noiseHits && dpcmResult.noiseHits.length && MML.Convert.DrumHits && MML.Convert.DrumHits.applyNoise) {
+      MML.Convert.DrumHits.applyNoise(scoreChannels, dpcmResult.noiseHits, frameRate, {
+        totalFrames, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
+    }
 
     const noteDurations = [];
     for (const ch of scoreChannels) {

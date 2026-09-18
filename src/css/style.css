@@ -3472,3 +3472,43 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 .score-view-canvas { display: block; }
 .score-view-empty { color: var(--muted, #9a9ab0); padding: 24px; text-align: center; }
 .score-view-cursor { position: absolute; width: 2px; background: rgba(255, 220, 80, 0.85); pointer-events: none; box-shadow: 0 0 6px rgba(255, 220, 80, 0.6); }
+
+/* ノイズパッド(2026-09-18): ドラム(DPCM)パネルの 載せ先/ノイズ音色/優先 列と、音色エディタ(src/ui/noisePadEditor.js) */
+.dp-c-target { flex: none; width: 66px; }
+.dp-c-target select { width: 100%; font-size: 11px; }
+.dp-c-noise  { flex: none; width: 128px; display: flex; align-items: center; gap: 3px; }
+.dp-c-noise select { flex: 1; min-width: 0; font-size: 11px; }
+.dp-noise-edit { flex: none; padding: 0 5px; font-size: 12px; line-height: 1.3; cursor: pointer;
+  border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 4px; }
+.dp-noise-edit:hover:not(:disabled) { background: rgba(58, 110, 165, 0.18); color: var(--text); }
+.dp-noise-edit:disabled, .dp-c-noise select:disabled, .dp-c-prio select:disabled { opacity: 0.35; cursor: default; }
+.dp-c-prio   { flex: none; width: 52px; }
+.dp-c-prio select { width: 100%; font-size: 11px; }
+/* 載せ先がノイズの行では DPCM 専用の列(ボリューム/DMCレート/差し替え/DPCM試聴)を薄くする */
+.drum-panel-row--noise .dp-c-vol, .drum-panel-row--noise .dp-c-rate, .drum-panel-row--noise .dp-c-inc,
+.drum-panel-row--noise .dp-play[data-mode="dpcm"] { opacity: 0.35; }
+.npe {
+  position: fixed; z-index: 2147483647; width: 420px; max-width: calc(100vw - 16px); padding: 8px 10px 10px;
+  background: #2a2c36; color: var(--text); border: 1px solid #4a4d5a; border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 5px; font-size: 12px;
+}
+.npe-title { display: flex; align-items: center; justify-content: space-between; font-weight: 700; margin-bottom: 2px; }
+.npe-close { border: none; background: transparent; color: var(--text-secondary); font-size: 16px; cursor: pointer; padding: 0 4px; }
+.npe-row { display: grid; grid-template-columns: 4.5em 1fr; align-items: center; gap: 6px; }
+.npe-row > span { color: var(--text-muted); font-weight: 700; }
+.npe-row input[type="text"], .npe-row input[type="number"], .npe-row select {
+  width: 100%; box-sizing: border-box; font: inherit; font-family: var(--mono); font-size: 12px; padding: 2px 4px;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 3px;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+.npe-vol { grid-template-columns: 4.5em auto 3.2em auto 1fr; }
+.npe-vol label { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
+.npe-hint { display: block; grid-column: 2; color: var(--text-muted); font-size: 10px; font-style: normal; }
+.npe-err { color: #e08080; font-size: 11px; }
+.npe-btns { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.npe-btns button { font-size: 11px; padding: 2px 8px; cursor: pointer; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); }
+.npe-btns button:hover { background: rgba(58, 110, 165, 0.25); }
+.npe-btns .npe-play { font-weight: 700; }
+/* ドラム(DPCM)パネル: 一覧と下段の境目(ドラッグで下段の高さ=一覧の広さを変える、2026-09-18) */
+.drum-panel-divider { flex: none; height: 6px; cursor: row-resize; background: var(--border); opacity: 0.6; }
+.drum-panel-divider:hover, .drum-panel-divider.dragging { opacity: 1; background: var(--accent); }
