@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-18 03:02:26
+ * Built by tools/build-capture-workers.ps1 at 2026-09-18 10:56:39
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-18 03:02:26';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-18 10:56:39';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -15035,7 +15035,10 @@
   // 試聴ボタンの右に出す、割当表示ONの間だけのモード表示(ユーザー指示 2026-09-12)。
   // 置き場は借用先列(230px)の余白の中なので、列幅も行との縦揃えも変わらない
   function headerAssignModeHtml() {
-    return `<span class="kbd-h-assign-mode">${T('チャンネル別割り当てモード')}</span>`;
+    // 右横の「割り当てリセット」: ユーザーが既定から変えた割当を全部消す(ファイルごとの自動保存分も消える。
+    // src/convert/channelPlan.js clear。ユーザー指示 2026-09-18)
+    return `<span class="kbd-h-assign-mode">${T('チャンネル別割り当てモード')}</span>` +
+      `<button type="button" class="kbd-assign-reset-btn" title="${T('この曲の割り当てを全部既定に戻す(自動保存した分も消えます)')}">${T('割り当てリセット')}</button>`;
   }
   // 見出しの mute 列に置く一括ミュートボタン。全chミュートでなければ全ミュート、
   // 全ミュート済みなら全解除(トグル)。
@@ -17719,6 +17722,14 @@
       for (const b of this._previewBtns) {
         b.addEventListener('click', (e) => { e.stopPropagation(); this._setPreviewMode(!this._previewMode); });
       }
+      // 「割り当てリセット」(割当表示中だけ見える見出しのボタン)。ChannelPlan.clear() の onChange で行が描き直る
+      for (const b of Array.prototype.slice.call(left.querySelectorAll('.kbd-assign-reset-btn'))) {
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const plan = channelPlan();
+          if (plan && plan.isCustom()) plan.clear();
+        });
+      }
       this._renderPreviewToggle();
       this._muteAllBtns = Array.prototype.slice.call(left.querySelectorAll('.kbd-muteall-btn'));
       for (const b of this._muteAllBtns) {
@@ -20061,7 +20072,7 @@
           // チップがアクセント色になるので区別はつく)。ポップオーバー側には付ける。
           // サンプルPCMでない行の E(DPCM) は「このchを打楽器として分離レンダリングしてDPCM化」
           // (main.js synthDrum)なので、そう読める語を添える
-          o.textContent = plan.targetLabel(t) + ((t === 'dpcm' && plan.isSynthDrumTarget && plan.isSynthDrumTarget(el.id, t)) ? T('(打楽器化)') : '');
+          o.textContent = plan.targetLabel(t) + (((t === 'dpcm' || t === 'noise') && plan.isSynthDrumTarget && plan.isSynthDrumTarget(el.id, t)) ? T('(打楽器化)') : '');
           // 音源ごとの色分けは「選ぶとき(=リストを開いたとき)」だけ、薄い背景色で出す。
           // ★文字色は塗らない(読みづらいというユーザー指摘)。行に閉じているセレクト本体も
           //   既定の見た目のままにして、色は候補一覧の中でのグルーピングだけに使う。
@@ -20195,7 +20206,7 @@
         const o = document.createElement('option');
         o.value = t;
         o.textContent = plan.targetLabel(t)
-          + ((t === 'dpcm' && plan.isSynthDrumTarget && plan.isSynthDrumTarget(chId, t)) ? T('(打楽器化)') : '')
+          + (((t === 'dpcm' || t === 'noise') && plan.isSynthDrumTarget && plan.isSynthDrumTarget(chId, t)) ? T('(打楽器化)') : '')
           + (t === el.defaultTarget ? T('(既定)') : '');
         targetSel.appendChild(o);
       }
@@ -21893,6 +21904,12 @@
           el.noteEl.textContent = muted ? '(M)' : '—';
           el.noteEl.style.color = '#555566';
           el.freqEl.textContent = '';
+        } else if (v.srcn != null && this._drumLaneOf && this._drumLaneOf.has('brr:' + v.srcn)) {
+          // 打楽器パッド化したサンプル(ロールのドラム区画 drumKey='brr:<srcn>')は音階でなくサンプル番号を出す
+          // (ユーザー指示 2026-09-18。音程はサンプルの再生レートに過ぎず、音名で見せると誤解を招く)
+          el.noteEl.textContent = '#' + v.srcn;
+          el.noteEl.style.color = '#e6e6ef';
+          el.freqEl.textContent = v.freq > 0 ? v.freq.toFixed(1) + ' Hz' : '';
         } else {
           const midi = freqToMidi(v.freq);
           if (midi !== null) {
@@ -22843,6 +22860,22 @@
     return { index: idx, delay: pitchMod.delay };
   };
 
+  // 差分列 {values, loop} をそのまま @EP 表として登録する(ノイズパッドのプリセット、
+  // src/convert/drumHits.js noise()。値は既に本家準拠の累積差分なので変換しない)。
+  // 完全一致だけを共有し、registerShape の前方一致統合はしない(ユーザーが書いた表を変えない)
+  MML.Convert.PitchEnvelopeRegistry.prototype.registerTable = function (table) {
+    if (!table || !table.values || !table.values.length || !this.cmd.EP) return null;
+    const shape = { values: table.values.slice(), loop: table.loop == null ? null : table.loop };
+    const key = shapeKey(shape);
+    let idx = this.keyToIndex.get(key);
+    if (idx === undefined) {
+      idx = this.nextIndex++;
+      this.keyToIndex.set(key, idx);
+      this.tables.set(idx, shape);
+    }
+    return idx;
+  };
+
   // ── ポルタメントコマンド(DESIGN-PITCH.md 別プロジェクトC、2026-08-11) ──────
   // P-5「単調ランプ→ポルタメント(コマンドは将来)」の実装。検出側(classifyPitchMod)は
   // 無変更のまま、type:'ramp'の結果を後段(このファイル内)でさらに判定する:
@@ -23364,6 +23397,21 @@
       idx = this.nextIndex++;
       this.keyToIndex.set(key, idx);
       this.tables.set(idx, { values: deltas, loop: 0 });
+    }
+    return idx;
+  };
+
+  // 差分列 {values, loop} をそのまま @EN 表として登録する(ノイズパッドのプリセット用。
+  // registerShape は周期アルペジオ専用で loop=0 固定のため別口。完全一致だけ共有)
+  MML.Convert.NoteEnvelopeRegistry.prototype.registerTable = function (table) {
+    if (!table || !table.values || !table.values.length || !this.cmd.EN) return null;
+    const loop = table.loop == null ? null : table.loop;
+    const key = table.values.join(',') + '|' + (loop == null ? '-' : loop);
+    let idx = this.keyToIndex.get(key);
+    if (idx === undefined) {
+      idx = this.nextIndex++;
+      this.keyToIndex.set(key, idx);
+      this.tables.set(idx, { values: table.values.slice(), loop });
     }
     return idx;
   };
@@ -25056,10 +25104,11 @@
  * MML.Gbs2MmlExpansion.noise(snapshots) → { events }
  *
  * GBのノイズは(クロックシフト4bit×幅モード1bit×分周コード3bit)=256通りの設定を持つが、
- * 借用先の2A03ノイズは固定16周期しか持たない(src/mml/compiler.jsのnoisePeriodIndex、
- * ノート番号31-nでperiodIndex nを表す ppmck 準拠の固定対応)。このため実測周波数に
- * 一番近い2A03周期を探して割り当てる近似変換になる(音程は近似できるが、GBのLFSR幅
- * モード(7bit/15bit)によるノイズの質感の違いまでは2A03側で再現できない)。
+ * 借用先の2A03ノイズは固定16周期しか持たない(変換イベント空間ではノート番号31-nで
+ * periodIndex nを表す約束。MMLへは mmlEmit が n<idx> で書く、MML.Convert.noiseNoteToIndex参照)。
+ * このため実測周波数に一番近い2A03周期を探して割り当てる近似変換になる。GBのLFSR幅モード
+ * (7bit=127step/15bit)は2A03の短周期(93step)/長周期に対応させ、@1/@0 で出す(2026-09-18。
+ * 周期長は違うが「金属的な音程感のあるノイズ」という質感は同じ)。
  * ネイティブ変換(NSF→2A03自身)のノイズがそもそも音程補正(D<n>)を行っていないのと同じ
  * 理由(離散的な周期の入れ替えであり連続量の微調整という概念が無い)で、ここでも
  * detune補正は行わない。
@@ -25110,10 +25159,11 @@
       // 参照)。CH4はNR51上のch index=3。
       const on = c.enabled && vol > 0 && MML.Gbs2MmlExpansion._panAudible(snapshots[f].nr51, 3);
       const note = on ? gbNoiseFreqToNote(gbNoiseFreq(c.divisorCode, c.clockShift)) : null;
-      if (!cur) { cur = { note, start: f, end: f, volSeq: [vol] }; continue; }
-      if (triggered || note !== cur.note) {
+      const mode = c.widthMode ? 1 : 0; // NR43 bit3: 1=7bit幅(短周期) → 2A03の @1
+      if (!cur) { cur = { note, mode, start: f, end: f, volSeq: [vol] }; continue; }
+      if (triggered || note !== cur.note || (note !== null && mode !== cur.mode)) {
         flush(f);
-        cur = { note, start: f, end: f, volSeq: [vol] };
+        cur = { note, mode, start: f, end: f, volSeq: [vol] };
       } else {
         cur.volSeq.push(vol);
       }
@@ -25134,9 +25184,10 @@
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },
+      ev.note !== null ? { instrument: ev.mode } : {}, // @0=長周期/@1=短周期(borrow.js が hasInstrument を立てる)
       toVolumeFields(ev.volSeq)
     );
-    return { events: events.map(toCommon), hasVolume: true, hasEnvelope: true };
+    return { events: events.map(toCommon), hasVolume: true, hasEnvelope: true, hasInstrument: true };
   };
 })(globalThis);
 
@@ -26214,7 +26265,7 @@
     const dda = MML.Hes2MmlExpansion.ddaHits(snapshots, dpcmTrace, controlTrace, frameRate);
     const channels = dda.channels;
     const hits = dda.hits.concat(extraHits || []);
-    const empty = { channel: -1, channels: [], defs: [], files: [], events: [], stats: null };
+    const empty = { channel: -1, channels: [], defs: [], files: [], events: [], stats: null, noiseHits: [] };
     if (!hits.length || !MML.Convert.DrumHits) return empty;
     const r = MML.Convert.DrumHits.dpcm(hits, frameRate, {
       totalFrames: snapshots.length,
@@ -26225,7 +26276,8 @@
       maxClipSec: 10, // DDAはCPUが書いた分しか無い(=有限)ので、VGMのROM歯止め1.5秒は外す
       volQuant: 2,    // $0804音量の微差(1dB未満)で定義を増やさない(実測: HC92056で5→6定義)
     });
-    return { channel: channels.length ? channels[0] : -1, channels, defs: r.defs, files: r.files, events: r.events, stats: r.stats };
+    // noiseHits: 載せ先=ノイズ(D)のパッドの打点(ノイズパッド、2026-09-18。converter.js が applyNoise へ渡す)
+    return { channel: channels.length ? channels[0] : -1, channels, defs: r.defs, files: r.files, events: r.events, stats: r.stats, noiseHits: r.noiseHits || [] };
   };
 })(globalThis);
 

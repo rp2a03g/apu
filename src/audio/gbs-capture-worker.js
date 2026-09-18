@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-18 03:02:26
+ * Built by tools/build-capture-workers.ps1 at 2026-09-18 10:56:39
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-09-18 03:02:26';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-09-18 10:56:39';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -2620,6 +2620,22 @@
     return { index: idx, delay: pitchMod.delay };
   };
 
+  // 差分列 {values, loop} をそのまま @EP 表として登録する(ノイズパッドのプリセット、
+  // src/convert/drumHits.js noise()。値は既に本家準拠の累積差分なので変換しない)。
+  // 完全一致だけを共有し、registerShape の前方一致統合はしない(ユーザーが書いた表を変えない)
+  MML.Convert.PitchEnvelopeRegistry.prototype.registerTable = function (table) {
+    if (!table || !table.values || !table.values.length || !this.cmd.EP) return null;
+    const shape = { values: table.values.slice(), loop: table.loop == null ? null : table.loop };
+    const key = shapeKey(shape);
+    let idx = this.keyToIndex.get(key);
+    if (idx === undefined) {
+      idx = this.nextIndex++;
+      this.keyToIndex.set(key, idx);
+      this.tables.set(idx, shape);
+    }
+    return idx;
+  };
+
   // ── ポルタメントコマンド(DESIGN-PITCH.md 別プロジェクトC、2026-08-11) ──────
   // P-5「単調ランプ→ポルタメント(コマンドは将来)」の実装。検出側(classifyPitchMod)は
   // 無変更のまま、type:'ramp'の結果を後段(このファイル内)でさらに判定する:
@@ -3145,6 +3161,21 @@
     return idx;
   };
 
+  // 差分列 {values, loop} をそのまま @EN 表として登録する(ノイズパッドのプリセット用。
+  // registerShape は周期アルペジオ専用で loop=0 固定のため別口。完全一致だけ共有)
+  MML.Convert.NoteEnvelopeRegistry.prototype.registerTable = function (table) {
+    if (!table || !table.values || !table.values.length || !this.cmd.EN) return null;
+    const loop = table.loop == null ? null : table.loop;
+    const key = table.values.join(',') + '|' + (loop == null ? '-' : loop);
+    let idx = this.keyToIndex.get(key);
+    if (idx === undefined) {
+      idx = this.nextIndex++;
+      this.keyToIndex.set(key, idx);
+      this.tables.set(idx, { values: table.values.slice(), loop });
+    }
+    return idx;
+  };
+
   MML.Convert.NoteEnvelopeRegistry.prototype.defLines = function () {
     return Array.from(this.tables.keys()).sort((a, b) => a - b).map(i => {
       const t = this.tables.get(i);
@@ -3565,10 +3596,11 @@
  * MML.Gbs2MmlExpansion.noise(snapshots) → { events }
  *
  * GBのノイズは(クロックシフト4bit×幅モード1bit×分周コード3bit)=256通りの設定を持つが、
- * 借用先の2A03ノイズは固定16周期しか持たない(src/mml/compiler.jsのnoisePeriodIndex、
- * ノート番号31-nでperiodIndex nを表す ppmck 準拠の固定対応)。このため実測周波数に
- * 一番近い2A03周期を探して割り当てる近似変換になる(音程は近似できるが、GBのLFSR幅
- * モード(7bit/15bit)によるノイズの質感の違いまでは2A03側で再現できない)。
+ * 借用先の2A03ノイズは固定16周期しか持たない(変換イベント空間ではノート番号31-nで
+ * periodIndex nを表す約束。MMLへは mmlEmit が n<idx> で書く、MML.Convert.noiseNoteToIndex参照)。
+ * このため実測周波数に一番近い2A03周期を探して割り当てる近似変換になる。GBのLFSR幅モード
+ * (7bit=127step/15bit)は2A03の短周期(93step)/長周期に対応させ、@1/@0 で出す(2026-09-18。
+ * 周期長は違うが「金属的な音程感のあるノイズ」という質感は同じ)。
  * ネイティブ変換(NSF→2A03自身)のノイズがそもそも音程補正(D<n>)を行っていないのと同じ
  * 理由(離散的な周期の入れ替えであり連続量の微調整という概念が無い)で、ここでも
  * detune補正は行わない。
@@ -3619,10 +3651,11 @@
       // 参照)。CH4はNR51上のch index=3。
       const on = c.enabled && vol > 0 && MML.Gbs2MmlExpansion._panAudible(snapshots[f].nr51, 3);
       const note = on ? gbNoiseFreqToNote(gbNoiseFreq(c.divisorCode, c.clockShift)) : null;
-      if (!cur) { cur = { note, start: f, end: f, volSeq: [vol] }; continue; }
-      if (triggered || note !== cur.note) {
+      const mode = c.widthMode ? 1 : 0; // NR43 bit3: 1=7bit幅(短周期) → 2A03の @1
+      if (!cur) { cur = { note, mode, start: f, end: f, volSeq: [vol] }; continue; }
+      if (triggered || note !== cur.note || (note !== null && mode !== cur.mode)) {
         flush(f);
-        cur = { note, start: f, end: f, volSeq: [vol] };
+        cur = { note, mode, start: f, end: f, volSeq: [vol] };
       } else {
         cur.volSeq.push(vol);
       }
@@ -3643,9 +3676,10 @@
     }
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },
+      ev.note !== null ? { instrument: ev.mode } : {}, // @0=長周期/@1=短周期(borrow.js が hasInstrument を立てる)
       toVolumeFields(ev.volSeq)
     );
-    return { events: events.map(toCommon), hasVolume: true, hasEnvelope: true };
+    return { events: events.map(toCommon), hasVolume: true, hasEnvelope: true, hasInstrument: true };
   };
 })(globalThis);
 

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-18 03:02:26
+ * Built by tools/build-capture-workers.ps1 at 2026-09-18 10:56:39
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-18 03:02:26';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-18 10:56:39';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -5474,7 +5474,10 @@
   // 試聴ボタンの右に出す、割当表示ONの間だけのモード表示(ユーザー指示 2026-09-12)。
   // 置き場は借用先列(230px)の余白の中なので、列幅も行との縦揃えも変わらない
   function headerAssignModeHtml() {
-    return `<span class="kbd-h-assign-mode">${T('チャンネル別割り当てモード')}</span>`;
+    // 右横の「割り当てリセット」: ユーザーが既定から変えた割当を全部消す(ファイルごとの自動保存分も消える。
+    // src/convert/channelPlan.js clear。ユーザー指示 2026-09-18)
+    return `<span class="kbd-h-assign-mode">${T('チャンネル別割り当てモード')}</span>` +
+      `<button type="button" class="kbd-assign-reset-btn" title="${T('この曲の割り当てを全部既定に戻す(自動保存した分も消えます)')}">${T('割り当てリセット')}</button>`;
   }
   // 見出しの mute 列に置く一括ミュートボタン。全chミュートでなければ全ミュート、
   // 全ミュート済みなら全解除(トグル)。
@@ -8158,6 +8161,14 @@
       for (const b of this._previewBtns) {
         b.addEventListener('click', (e) => { e.stopPropagation(); this._setPreviewMode(!this._previewMode); });
       }
+      // 「割り当てリセット」(割当表示中だけ見える見出しのボタン)。ChannelPlan.clear() の onChange で行が描き直る
+      for (const b of Array.prototype.slice.call(left.querySelectorAll('.kbd-assign-reset-btn'))) {
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const plan = channelPlan();
+          if (plan && plan.isCustom()) plan.clear();
+        });
+      }
       this._renderPreviewToggle();
       this._muteAllBtns = Array.prototype.slice.call(left.querySelectorAll('.kbd-muteall-btn'));
       for (const b of this._muteAllBtns) {
@@ -10500,7 +10511,7 @@
           // チップがアクセント色になるので区別はつく)。ポップオーバー側には付ける。
           // サンプルPCMでない行の E(DPCM) は「このchを打楽器として分離レンダリングしてDPCM化」
           // (main.js synthDrum)なので、そう読める語を添える
-          o.textContent = plan.targetLabel(t) + ((t === 'dpcm' && plan.isSynthDrumTarget && plan.isSynthDrumTarget(el.id, t)) ? T('(打楽器化)') : '');
+          o.textContent = plan.targetLabel(t) + (((t === 'dpcm' || t === 'noise') && plan.isSynthDrumTarget && plan.isSynthDrumTarget(el.id, t)) ? T('(打楽器化)') : '');
           // 音源ごとの色分けは「選ぶとき(=リストを開いたとき)」だけ、薄い背景色で出す。
           // ★文字色は塗らない(読みづらいというユーザー指摘)。行に閉じているセレクト本体も
           //   既定の見た目のままにして、色は候補一覧の中でのグルーピングだけに使う。
@@ -10634,7 +10645,7 @@
         const o = document.createElement('option');
         o.value = t;
         o.textContent = plan.targetLabel(t)
-          + ((t === 'dpcm' && plan.isSynthDrumTarget && plan.isSynthDrumTarget(chId, t)) ? T('(打楽器化)') : '')
+          + (((t === 'dpcm' || t === 'noise') && plan.isSynthDrumTarget && plan.isSynthDrumTarget(chId, t)) ? T('(打楽器化)') : '')
           + (t === el.defaultTarget ? T('(既定)') : '');
         targetSel.appendChild(o);
       }
@@ -12332,6 +12343,12 @@
           el.noteEl.textContent = muted ? '(M)' : '—';
           el.noteEl.style.color = '#555566';
           el.freqEl.textContent = '';
+        } else if (v.srcn != null && this._drumLaneOf && this._drumLaneOf.has('brr:' + v.srcn)) {
+          // 打楽器パッド化したサンプル(ロールのドラム区画 drumKey='brr:<srcn>')は音階でなくサンプル番号を出す
+          // (ユーザー指示 2026-09-18。音程はサンプルの再生レートに過ぎず、音名で見せると誤解を招く)
+          el.noteEl.textContent = '#' + v.srcn;
+          el.noteEl.style.color = '#e6e6ef';
+          el.freqEl.textContent = v.freq > 0 ? v.freq.toFixed(1) + ' Hz' : '';
         } else {
           const midi = freqToMidi(v.freq);
           if (midi !== null) {

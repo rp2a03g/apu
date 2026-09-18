@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-18 03:02:26
+ * Built by tools/build-capture-workers.ps1 at 2026-09-18 10:56:39
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-18 03:02:26';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-18 10:56:39';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -1752,8 +1752,8 @@
   // ── SPCノイズ→2A03ノイズ周期idx変換 ─────────────────────────────────
   // SPCのノイズはFLG($6C)下位5bitのレートでLFSRを進める(spcDsp.js _updateNoise、
   // 更新周波数=32000/RATE_TABLE[rate])。2A03ノイズの16通りの周期(NTSC)のうち聴感上
-  // 最も近いものへ対数距離で丸め、nsf2mml converter.jsのnoisePeriodToNoteNumと同じ
-  // 規則(noteNumber = 31 - periodIdx)でノート番号にする。
+  // 最も近いものへ対数距離で丸め、変換イベント空間の約束(noteNumber = 31 - periodIdx、
+  // MML.Convert.noiseNoteToIndex。MMLへは mmlEmit が n<idx> で書く)でノート番号にする。
   const SPC_RATE_TABLE = [
     0,2048,1536,1280,1024,768,640,512,384,320,256,192,160,128,96,80,
     64,48,40,32,24,20,16,12,10,8,6,5,4,3,2,1,
@@ -3239,6 +3239,12 @@
     if (dpcmLetter) {
       scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents, hasInstrument: true });
     }
+    // ノイズパッド(2026-09-18): 載せ先=ノイズ(D)のパッド(BRRの打楽器サンプル/合成音ch)の打点を
+    // 2A03ノイズの音符列にして合流(既存の D=NONボイス と単音マージ。src/convert/drumHits.js applyNoise)
+    if (drumDpcm && drumDpcm.noiseHits && drumDpcm.noiseHits.length && MML.Convert.DrumHits.applyNoise) {
+      MML.Convert.DrumHits.applyNoise(scoreChannels, drumDpcm.noiseHits, FPS_SPC, {
+        totalFrames: FRAMES, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
+    }
 
     // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前。
     // SPC の音符は KOFF で終わり(KOFF 後のリリースは1フレーム未満で無音)、ADSR は KON 中の実測列
@@ -4100,6 +4106,22 @@
     return { index: idx, delay: pitchMod.delay };
   };
 
+  // 差分列 {values, loop} をそのまま @EP 表として登録する(ノイズパッドのプリセット、
+  // src/convert/drumHits.js noise()。値は既に本家準拠の累積差分なので変換しない)。
+  // 完全一致だけを共有し、registerShape の前方一致統合はしない(ユーザーが書いた表を変えない)
+  MML.Convert.PitchEnvelopeRegistry.prototype.registerTable = function (table) {
+    if (!table || !table.values || !table.values.length || !this.cmd.EP) return null;
+    const shape = { values: table.values.slice(), loop: table.loop == null ? null : table.loop };
+    const key = shapeKey(shape);
+    let idx = this.keyToIndex.get(key);
+    if (idx === undefined) {
+      idx = this.nextIndex++;
+      this.keyToIndex.set(key, idx);
+      this.tables.set(idx, shape);
+    }
+    return idx;
+  };
+
   // ── ポルタメントコマンド(DESIGN-PITCH.md 別プロジェクトC、2026-08-11) ──────
   // P-5「単調ランプ→ポルタメント(コマンドは将来)」の実装。検出側(classifyPitchMod)は
   // 無変更のまま、type:'ramp'の結果を後段(このファイル内)でさらに判定する:
@@ -4621,6 +4643,21 @@
       idx = this.nextIndex++;
       this.keyToIndex.set(key, idx);
       this.tables.set(idx, { values: deltas, loop: 0 });
+    }
+    return idx;
+  };
+
+  // 差分列 {values, loop} をそのまま @EN 表として登録する(ノイズパッドのプリセット用。
+  // registerShape は周期アルペジオ専用で loop=0 固定のため別口。完全一致だけ共有)
+  MML.Convert.NoteEnvelopeRegistry.prototype.registerTable = function (table) {
+    if (!table || !table.values || !table.values.length || !this.cmd.EN) return null;
+    const loop = table.loop == null ? null : table.loop;
+    const key = table.values.join(',') + '|' + (loop == null ? '-' : loop);
+    let idx = this.keyToIndex.get(key);
+    if (idx === undefined) {
+      idx = this.nextIndex++;
+      this.keyToIndex.set(key, idx);
+      this.tables.set(idx, { values: table.values.slice(), loop });
     }
     return idx;
   };

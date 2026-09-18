@@ -3025,11 +3025,15 @@
 
   // duration/再生範囲終了点への到達で自動的に次の曲/トラックへ進む対象かどうか
   // (SPCは1ファイル=1曲のため曲送りの概念が無く、対象外)
+  // ★2026-09-18: 'spc' も含める。以前は「SPCは曲送りの概念が無い」として外していたが、曲末(duration/再生範囲の
+  //   終了点)に到達した時の分岐 `isSoundFileMode() ? finishSoundFilePlayback() : transportStop()` がSPCだけ
+  //   transportStop() に落ち、「同じ曲を繰り返す」やアーカイブの次エントリ送り(archiveAutoAdvanceOrStop)が
+  //   効かずに止まっていた(単体SPC・リピート'one'で実測)。finishSoundFilePlayback 自体はSPCを扱える
   function isSoundFileMode() {
-    return lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'gbs' || lastPlayMode === 'hes' || lastPlayMode === 'vgm' || lastPlayMode === 'psf';
+    return lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'gbs' || lastPlayMode === 'hes' || lastPlayMode === 'vgm' || lastPlayMode === 'psf' || lastPlayMode === 'spc';
   }
   function isFadeableSoundFileMode() {
-    return isSoundFileMode() || lastPlayMode === 'spc';
+    return isSoundFileMode();
   }
 
   // 曲リストの最後まで達したら先頭(0/最小値)へ戻ってループする「自動送り」版。
@@ -4502,7 +4506,7 @@
     stopAllFormatPlayback();
     stopNsfFilePlayback();
     keyboardDisplay.reset();
-    MML.Convert.ChannelPlan.newFile("nsf", {}); // 新ファイル: チャンネル割当(案E)をリセット
+    MML.Convert.ChannelPlan.newFile("nsf", {}, file.name); // 新ファイル: チャンネル割当(案E)をリセット
     setKbdSource('nsf', file.name);
     loadedNsfBytes = null;
     loadedNsfHeader = null;
@@ -5367,7 +5371,7 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
-    MML.Convert.ChannelPlan.newFile("spc", SPC_DEFAULT_TARGETS); // 新ファイル: チャンネル割当(案E)をリセット
+    MML.Convert.ChannelPlan.newFile("spc", SPC_DEFAULT_TARGETS, file.name); // 新ファイル: チャンネル割当(案E)をリセット
     setKbdSource('spc', file.name);
     loadedSpcBytes = null; loadedSpcHeader = null;
     // SPCのボイスミュートはkeyboardDisplay._muteStateを経由しない専用機構(spcMutedVoices
@@ -6122,6 +6126,7 @@
       const wave = active ? buildSpcWaveLayers(v, dsp, pitch, ch, pmOn, voices) : null;
       spcVoices.push({
         label:  `V${ch}`,
+        srcn,   // 鳴らしているサンプル番号。打楽器パッド化したサンプル(ロールの drumKey 'brr:<srcn>')は鍵盤の note 列に音階でなくこれを出す
         freq:   active && !muted ? pitchToHz(pitch, spcTuneForSrcn(srcn)) : 0,
         vol:    active && !muted ? v.env / 0x7FF : 0,
         // rawVolは実機のENVXレジスタ($X8)が返す値と同じ0-127(内部11bit envの上位7bit)。
@@ -6243,7 +6248,7 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
-    MML.Convert.ChannelPlan.newFile("kss", {}); // 新ファイル: チャンネル割当(案E)をリセット
+    MML.Convert.ChannelPlan.newFile("kss", {}, file.name); // 新ファイル: チャンネル割当(案E)をリセット
     setKbdSource('kss', file.name);
     loadedKssBytes = null; loadedKssHeader = null;
 
@@ -6620,7 +6625,7 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
-    MML.Convert.ChannelPlan.newFile("gbs", {}); // 新ファイル: チャンネル割当(案E)をリセット
+    MML.Convert.ChannelPlan.newFile("gbs", {}, file.name); // 新ファイル: チャンネル割当(案E)をリセット
     setKbdSource('gbs', file.name);
     loadedGbsBytes = null; loadedGbsHeader = null;
 
@@ -6975,7 +6980,7 @@
     if (!file) return;
     stopAllFormatPlayback();
     keyboardDisplay.reset();
-    MML.Convert.ChannelPlan.newFile("hes", {}); // 新ファイル: チャンネル割当(案E)をリセット
+    MML.Convert.ChannelPlan.newFile("hes", {}, file.name); // 新ファイル: チャンネル割当(案E)をリセット
     setKbdSource('hes', file.name);
     loadedHesBytes = null; loadedHesHeader = null;
 
@@ -7522,7 +7527,7 @@
         if (chId) map[chId] = plan[srcId];
       }
     }
-    Plan.newFile('psf', map);
+    Plan.newFile("psf", map, loadedPsfName);
   }
   // 変換用の割当・音色(ソースIDキー)。VGM の getVgmChannelMap/getVgmTone/getVgmVrc7Inst と同じ規則
   function psfConvertMaps() {
@@ -7998,6 +8003,7 @@
   const vgmFileStatusEl = document.getElementById('vgmFileStatus');
 
   let loadedVgmBytes  = null; // 解凍済み(gzipは読み込み時に解く)
+  let loadedVgmName   = '';   // ファイル名(チャンネル割当の自動保存キー、ChannelPlan.newFile の fileKey)
   let loadedVgmHeader = null;
   let vgmIsRendering  = false;
   let vgmActivePlayer = null; // VgmStreamPlayer
@@ -8103,7 +8109,7 @@
     stopAllFormatPlayback();
     keyboardDisplay.reset();
     setKbdSource('vgm', file.name);
-    loadedVgmBytes = null; loadedVgmHeader = null;
+    loadedVgmBytes = null; loadedVgmHeader = null; loadedVgmName = file.name;
     vgmSetPlanDefaults(null);
 
     try {
@@ -8577,7 +8583,7 @@
   // (KP1/KS1/KF1/YM1/SN1…)へ移して既定として登録し、変換時にユーザー指定を読み戻す。
   function vgmSetPlanDefaults(h) {
     const Plan = MML.Convert.ChannelPlan;
-    if (!h) { Plan.newFile('vgm', {}); return; }
+    if (!h) { Plan.newFile('vgm', {}, loadedVgmName); return; }
     const plan = MML.VGM2MML.defaultPlan(h);
     const map = {};
     for (const srcId of Object.keys(plan)) {
@@ -8598,7 +8604,7 @@
     // 無い(DACストリームではない)。32X PWM と同じ「無音の切れ目でクリップに分ける」経路で
     // E(DPCM) へ載せる(vgmStreamDrumFor)。
     if (h.chips && h.chips.msm5205) map.M5 = 'dpcm';
-    Plan.newFile('vgm', map);
+    Plan.newFile('vgm', map, loadedVgmName);
   }
   // 現在の割当をVGM変換器のソースID体系で返す。既定と全く同じなら null(=構成から自動)
   function getVgmChannelMap() {

@@ -413,6 +413,42 @@
   const defaults = new Map(); // chId → target(既定。setDefaults()で外から与える)
   const listeners = [];
 
+  // ── ファイルごとの自動保存(2026-09-18、ユーザー指示「CH別割り当てモードの割り当て一覧は自動保存」) ──
+  // newFile() に渡された fileKey(形式+ファイル名)をキーに、ユーザーが既定から変えた分(entries)を
+  // localStorage へ保存し、同じファイルを開き直したときに読み戻す。既定(defaults)は保存しない
+  // (形式側が毎回計算する)。古いものから捨てて上限件数を守る
+  const SAVE_KEY = 'channelPlanByFile';
+  const SAVE_MAX = 300;
+  let curFileKey = null;
+  function loadSaved() {
+    try { return JSON.parse(global.localStorage.getItem(SAVE_KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function persist() {
+    if (!curFileKey) return;
+    const all = loadSaved();
+    if (entries.size) {
+      const o = {};
+      for (const kv of entries) o[kv[0]] = Object.assign({}, kv[1]);
+      all[curFileKey] = { t: Date.now(), entries: o };
+      const keys = Object.keys(all);
+      if (keys.length > SAVE_MAX) {
+        keys.sort((a, b) => (all[a].t || 0) - (all[b].t || 0));
+        for (const k of keys.slice(0, keys.length - SAVE_MAX)) delete all[k];
+      }
+    } else {
+      delete all[curFileKey];
+    }
+    try { global.localStorage.setItem(SAVE_KEY, JSON.stringify(all)); } catch (e) { /* ignore */ }
+  }
+  function restore(fileKey) {
+    const saved = fileKey ? loadSaved()[fileKey] : null;
+    if (!saved || !saved.entries) return;
+    for (const chId of Object.keys(saved.entries)) {
+      const ent = saved.entries[chId];
+      if (ent && typeof ent === 'object' && Object.keys(ent).length) entries.set(chId, Object.assign({}, ent));
+    }
+  }
+
   // info: set() からは { chId, patch }(どの行の何が変わったか)。newFile/clear 等の一括操作は undefined
   function notify(info) {
     // UI側の失敗で変換は止めないが、黙って握り潰すとバグが見えないのでログには出す
@@ -453,11 +489,15 @@
     // (前の曲の割当が次の曲へ持ち越されないように)。defaultsMap はフォーマット固有の
     // 既定割当(chId → target)で、SPCの固定既定やVGMの構成駆動既定
     // (MML.VGM2MML.defaultPlan)のようにパート文字から逆引きできないものを外から渡す。
-    newFile: function (fmt, defaultsMap) {
+    // fileKey(省略可): ファイルの同定(形式+ファイル名)。渡すと、そのファイル用に保存してある割当を読み戻し、
+    // 以後の変更をそのキーで自動保存する(上の SAVE_KEY 参照)
+    newFile: function (fmt, defaultsMap, fileKey) {
       curFormat = fmt;
       entries.clear();
       defaults.clear();
       for (const k of Object.keys(defaultsMap || {})) defaults.set(k, defaultsMap[k]);
+      curFileKey = fileKey ? (fmt + ':' + fileKey) : null;
+      restore(curFileKey);
       notify();
     },
     // 既定の割当だけを差し替える(ユーザーが変えた分は残す)。PSF のトラックモードのように、曲を最後まで
@@ -483,10 +523,13 @@
       const cur = Object.assign({}, entries.get(chId) || {}, patch);
       for (const k of Object.keys(cur)) if (cur[k] === null || cur[k] === undefined) delete cur[k];
       if (Object.keys(cur).length) entries.set(chId, cur); else entries.delete(chId);
+      persist();
       notify({ chId, patch });
     },
-    clearChannel: function (chId) { if (entries.delete(chId)) notify(); },
-    clear: function () { if (entries.size) { entries.clear(); notify(); } },
+    clearChannel: function (chId) { if (entries.delete(chId)) { persist(); notify(); } },
+    // 全部を既定へ戻す(鍵盤見出しの「割り当てリセット」ボタン)。保存分も消える
+    clear: function () { if (entries.size) { entries.clear(); persist(); notify(); } },
+    fileKey: function () { return curFileKey; },
     isCustom: function () { return entries.size > 0; },
     all: function () {
       const o = {};

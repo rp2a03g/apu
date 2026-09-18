@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-18 03:02:26
+ * Built by tools/build-capture-workers.ps1 at 2026-09-18 10:56:39
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-18 03:02:26';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-18 10:56:39';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -2457,6 +2457,22 @@
     return { index: idx, delay: pitchMod.delay };
   };
 
+  // 差分列 {values, loop} をそのまま @EP 表として登録する(ノイズパッドのプリセット、
+  // src/convert/drumHits.js noise()。値は既に本家準拠の累積差分なので変換しない)。
+  // 完全一致だけを共有し、registerShape の前方一致統合はしない(ユーザーが書いた表を変えない)
+  MML.Convert.PitchEnvelopeRegistry.prototype.registerTable = function (table) {
+    if (!table || !table.values || !table.values.length || !this.cmd.EP) return null;
+    const shape = { values: table.values.slice(), loop: table.loop == null ? null : table.loop };
+    const key = shapeKey(shape);
+    let idx = this.keyToIndex.get(key);
+    if (idx === undefined) {
+      idx = this.nextIndex++;
+      this.keyToIndex.set(key, idx);
+      this.tables.set(idx, shape);
+    }
+    return idx;
+  };
+
   // ── ポルタメントコマンド(DESIGN-PITCH.md 別プロジェクトC、2026-08-11) ──────
   // P-5「単調ランプ→ポルタメント(コマンドは将来)」の実装。検出側(classifyPitchMod)は
   // 無変更のまま、type:'ramp'の結果を後段(このファイル内)でさらに判定する:
@@ -2978,6 +2994,21 @@
       idx = this.nextIndex++;
       this.keyToIndex.set(key, idx);
       this.tables.set(idx, { values: deltas, loop: 0 });
+    }
+    return idx;
+  };
+
+  // 差分列 {values, loop} をそのまま @EN 表として登録する(ノイズパッドのプリセット用。
+  // registerShape は周期アルペジオ専用で loop=0 固定のため別口。完全一致だけ共有)
+  MML.Convert.NoteEnvelopeRegistry.prototype.registerTable = function (table) {
+    if (!table || !table.values || !table.values.length || !this.cmd.EN) return null;
+    const loop = table.loop == null ? null : table.loop;
+    const key = table.values.join(',') + '|' + (loop == null ? '-' : loop);
+    let idx = this.keyToIndex.get(key);
+    if (idx === undefined) {
+      idx = this.nextIndex++;
+      this.keyToIndex.set(key, idx);
+      this.tables.set(idx, { values: table.values.slice(), loop });
     }
     return idx;
   };
@@ -4577,7 +4608,7 @@
     const dda = MML.Hes2MmlExpansion.ddaHits(snapshots, dpcmTrace, controlTrace, frameRate);
     const channels = dda.channels;
     const hits = dda.hits.concat(extraHits || []);
-    const empty = { channel: -1, channels: [], defs: [], files: [], events: [], stats: null };
+    const empty = { channel: -1, channels: [], defs: [], files: [], events: [], stats: null, noiseHits: [] };
     if (!hits.length || !MML.Convert.DrumHits) return empty;
     const r = MML.Convert.DrumHits.dpcm(hits, frameRate, {
       totalFrames: snapshots.length,
@@ -4588,7 +4619,8 @@
       maxClipSec: 10, // DDAはCPUが書いた分しか無い(=有限)ので、VGMのROM歯止め1.5秒は外す
       volQuant: 2,    // $0804音量の微差(1dB未満)で定義を増やさない(実測: HC92056で5→6定義)
     });
-    return { channel: channels.length ? channels[0] : -1, channels, defs: r.defs, files: r.files, events: r.events, stats: r.stats };
+    // noiseHits: 載せ先=ノイズ(D)のパッドの打点(ノイズパッド、2026-09-18。converter.js が applyNoise へ渡す)
+    return { channel: channels.length ? channels[0] : -1, channels, defs: r.defs, files: r.files, events: r.events, stats: r.stats, noiseHits: r.noiseHits || [] };
   };
 })(globalThis);
 

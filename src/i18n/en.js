@@ -611,6 +611,8 @@
     // ---- チャンネル割当(鍵盤表示の行から借用先を決める。src/convert/channelPlan.js) ----
     '借用先': 'Target',
     '割当先の音で聴く': 'Hear as assigned',
+    '割り当てリセット': 'Reset assignments',
+    'この曲の割り当てを全部既定に戻す(自動保存した分も消えます)': 'Return every assignment of this song to the default (the auto-saved ones are cleared too)',
     'クリックで曲を選ぶ': 'Click to choose a track',
     '曲 {n}': 'Track {n}',
     'MML再生中はチャンネル割当と「割当先の音で聴く」は使えません(サウンドファイルの再生時だけ意味があります)': 'Channel assignment and "Hear as assigned" are unavailable while on the MML side (they only apply to sound-file playback)',

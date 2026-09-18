@@ -3512,3 +3512,10 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 /* ドラム(DPCM)パネル: 一覧と下段の境目(ドラッグで下段の高さ=一覧の広さを変える、2026-09-18) */
 .drum-panel-divider { flex: none; height: 6px; cursor: row-resize; background: var(--border); opacity: 0.6; }
 .drum-panel-divider:hover, .drum-panel-divider.dragging { opacity: 1; background: var(--accent); }
+/* 見出しの「割り当てリセット」(割当表示中だけ。チャンネル別割り当てモード表示の右横、2026-09-18) */
+.kbd-assign-reset-btn {
+  display: none; margin-left: 6px; padding: 0 6px; font-size: 10px; line-height: 1.4; cursor: pointer; vertical-align: middle;
+  border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 4px; white-space: nowrap;
+}
+.kbd-left--assign .kbd-assign-reset-btn { display: inline-block; }
+.kbd-assign-reset-btn:hover { background: rgba(58, 110, 165, 0.18); color: var(--text); }
