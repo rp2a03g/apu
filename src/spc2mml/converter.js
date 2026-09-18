@@ -361,10 +361,15 @@
   MML.SPC2MML.drumHits = function (voiceEvents, brrSamples, drumSrcns, chans, opt) {
     const hits = [], samples = {};
     const dpcmChans = (opt && opt.dpcmChans) || [];
+    // noiseChans(2026-09-18、ノイズパッド): 借用先に D(ノイズ)を選んだボイス。E と同じく全srcnがパッドになるが、
+    // 打点に assignTarget='noise' を刻む(パッドの載せ先の既定=割当どおり=ノイズ。src/convert/drumHits.js)。
+    // このボイスの音符列自体は従来どおり D への写し(下の noiseIndexFor)として残り、パッドで音色を変えた分だけ差し替わる
+    const noiseChans = (opt && opt.noiseChans) || [];
+    const padChans = dpcmChans.concat(noiseChans);
     const pitchSrcns = (opt && opt.pitchSrcns) || null;
-    const list = Array.from(new Set((chans || (dpcmChans.length ? [] : [0, 1, 2, 3, 4, 5, 6, 7])).concat(dpcmChans)));
-    const isDrumEvent = (ch, ev) => (dpcmChans.indexOf(ch) >= 0)
-      ? !(pitchSrcns && pitchSrcns.has(ev.srcn))   // Eボイス: 音階指定以外は全部パッド
+    const list = Array.from(new Set((chans || (padChans.length ? [] : [0, 1, 2, 3, 4, 5, 6, 7])).concat(padChans)));
+    const isDrumEvent = (ch, ev) => (padChans.indexOf(ch) >= 0)
+      ? !(pitchSrcns && pitchSrcns.has(ev.srcn))   // E/Dボイス: 音階指定以外は全部パッド
       : drumSrcns.has(ev.srcn);                    // それ以外: 自動判定に当たったsrcnだけ
     for (const ch of list) {
       for (const ev of (voiceEvents[ch] || [])) {
@@ -380,7 +385,14 @@
         }
         hits.push({ key, sampleKey: key, hash: s.hash, pcm: s.pcm, rate, label: s.label,
                     vol: Math.max(0, Math.min(1, (ev.vol || 0) / 127)),
-                    startFrame: ev.frame, endFrame: ev.frame + ev.len, ch });
+                    startFrame: ev.frame, endFrame: ev.frame + ev.len, ch,
+                    assignTarget: noiseChans.indexOf(ch) >= 0 ? 'noise' : 'dpcm',
+                    // 音程(MIDI。pitchSemi は o4a=57 のMML番号)。ノイズパッドの「音程から自動」が周期indexを決める材料
+                    srcMidi: ev.pitchSemi + 12,
+                    // D(ノイズ)ボイスの打点のうち、自動判定の打楽器srcnは旋律側から切り出される(下の meloChans の filter)
+                    // ので元の D の音符列に無い(inNative=false → 既定 auto でもパッド側が音程から自動で鳴らす)。
+                    // それ以外のsrcnは D への写しとして残る(inNative=true → 既定 auto では触らない)
+                    inNative: noiseChans.indexOf(ch) >= 0 ? !drumSrcns.has(ev.srcn) : undefined });
       }
     }
     hits.sort((a, b) => a.startFrame - b.startFrame);
@@ -1024,16 +1036,18 @@
       if (options.drumKinds[k] === 'pitch') pitchSrcnSet.add(parseInt(k, 10));
     }
     const dpcmChans = [];   // E(dpcm)を選んだボイス
+    const noiseChans = [];  // D(noise)を選んだボイス(ノイズパッド: 全srcnがパッド。音符列は従来どおりDへの写し)
     const meloChans = [];   // それ以外(skip以外)のボイス
     for (let ch = 0; ch < voiceEvents.length; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip') continue;
+      if (cfg.type === 'noise') noiseChans.push(ch);
       (cfg.type === 'dpcm' ? dpcmChans : meloChans).push(ch);
     }
     let drumHitsAll = [];
-    if (drumOn && (drumSrcnSet.size || dpcmChans.length)) {
-      const r = MML.SPC2MML.drumHits(voiceEvents, brrSamples, drumSrcnSet, meloChans,
-        { dpcmChans, pitchSrcns: pitchSrcnSet });
+    if (drumOn && (drumSrcnSet.size || dpcmChans.length || noiseChans.length)) {
+      const r = MML.SPC2MML.drumHits(voiceEvents, brrSamples, drumSrcnSet, meloChans.filter(ch => noiseChans.indexOf(ch) < 0),
+        { dpcmChans, noiseChans, pitchSrcns: pitchSrcnSet });
       drumHitsAll = r.hits;
       // 旋律側からは切り出す(Eボイスは元々旋律を出さないので meloChans だけでよい)
       for (const ch of meloChans) {
@@ -1063,7 +1077,8 @@
       if (!cfg || cfg.type === 'skip') continue;
       const sounding = voiceEvents[ch].filter(ev => ev.pitchSemi !== null)
         .map(ev => ({ frame: ev.frame, len: ev.len }))
-        .concat(drumHitsAll.filter(h => h.ch === ch).map(h => ({ frame: h.startFrame, len: h.endFrame - h.startFrame })))
+        // D(ノイズ)ボイスの打点は voiceEvents 側に音符として残っているので二重に数えない
+        .concat(drumHitsAll.filter(h => h.ch === ch && h.assignTarget !== 'noise').map(h => ({ frame: h.startFrame, len: h.endFrame - h.startFrame })))
         .sort((a, b) => a.frame - b.frame);
       noteDurations.push(...MML.Convert.tempoMaterial(sounding.map(ev => ev.frame), sounding.map(ev => ev.len)));
       tempoChannels.push({ events: sounding.map(ev => ({ start: ev.frame, end: ev.frame + ev.len, note: 60 })) });

@@ -3519,3 +3519,5 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 }
 .kbd-left--assign .kbd-assign-reset-btn { display: inline-block; }
 .kbd-assign-reset-btn:hover { background: rgba(58, 110, 165, 0.18); color: var(--text); }
+/* ドラム(DPCM)パネルの「変換後」試聴ボタンは載せ先を文字で示す(DPCM / ノイズ、2026-09-18) */
+.dp-play.dp-play--text { font-size: 10px; padding: 1px 0; line-height: 1.3; }

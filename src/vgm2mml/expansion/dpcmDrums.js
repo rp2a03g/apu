@@ -60,7 +60,9 @@
             if (pcm && pcm.length && c.rate > 0) {
               cur = { key: c.sample.kind + ':' + c.sample.start, sampleKey, hash: c.sampleHash || null,
                       pcm, rate: c.rate, vol: c.vol || 0, startFrame: f, endFrame: totalFrames,
-                      chip: src.chip, ch };
+                      chip: src.chip, ch,
+                      // 割当で D(ノイズ)を選んだchのサンプルはパッドになるが DPCM には焼かない(ノイズパッド、2026-09-18)
+                      assignTarget: (src.assignTarget === 'noise' || (src.noiseChans && src.noiseChans.indexOf(ch) >= 0)) ? 'noise' : 'dpcm' };
               hits.push(cur);
             }
           }

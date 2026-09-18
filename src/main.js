@@ -532,6 +532,15 @@
       }
     }
     const labels = MML.Convert.DrumMap ? MML.Convert.DrumMap.labels(keys) : keys;
+    // 打点プロバイダ(SPC/VGM)の打点が持つ assignTarget(D で打楽器化したボイス/chのサンプル→'noise')。
+    // 行の「割当どおり」の載せ先に使う。合成音chの分は台帳(drumSampleStore)側の assignTarget を見る
+    const provAssign = {};
+    if (drumHitsProvider && typeof drumHitsProvider.build === 'function') {
+      try {
+        const b = drumHitsProvider.build();
+        for (const h of (Array.isArray(b) ? b : ((b && b.hits) || []))) if (h && h.assignTarget === 'noise') provAssign[h.key] = 'noise';
+      } catch (e) { /* 一覧の既定表示だけの材料なので失敗しても続ける */ }
+    }
     const laneNames = {}; // drumKey → ユーザーが付けた名前(ロールのパッドへ流す)
     const rows = keys.map((k, i) => {
       const s = drumSampleStore[k], l = laneOf[k];
@@ -550,7 +559,7 @@
                kind: (s && s.hash && kindMap) ? (kindMap[s.hash] || 'auto') : 'auto',
                hash: s ? s.hash : null, pcm: s ? s.pcm : null, srcRate: s ? s.rate : 0,
                // ノイズパッド: 割当どおりの載せ先(D で打楽器化=noise、他は dpcm)と元の音程(音程から自動の材料)
-               defaultTarget: (s && s.assignTarget === 'noise') ? 'noise' : 'dpcm',
+               defaultTarget: ((s && s.assignTarget === 'noise') || provAssign[k] === 'noise') ? 'noise' : 'dpcm',
                srcMidi: (s && s.srcMidi != null) ? s.srcMidi : null };
     });
     // ★パッド名はロールのドラム区画と同期させる(ユーザー指示)。名前の実体はサンプルの
@@ -1649,9 +1658,11 @@
         if (s.kind !== 'pcm' || s.ch < 0) continue;
         const chId = Plan.chIdForVgmSource(s.id);
         const ent = (chId && Plan.get(chId)) || {};
-        if ((ent.target || def[s.id] || 'skip') !== 'dpcm') continue;
+        const tgt = ent.target || def[s.id] || 'skip';
+        if (tgt !== 'dpcm' && tgt !== 'noise') continue; // 'noise'=D で打楽器化(ノイズパッド、2026-09-18)。打点に assignTarget を刻む
         if (!out.byChip.has(s.chip)) out.byChip.set(s.chip, []);
         out.byChip.get(s.chip).push(s.ch);
+        if (tgt === 'noise') { if (!out.noiseByChip) out.noiseByChip = new Map(); if (!out.noiseByChip.has(s.chip)) out.noiseByChip.set(s.chip, []); out.noiseByChip.get(s.chip).push(s.ch); }
         const v = ent.tone;
         if (out.rateIndex === null && v !== undefined && v !== null && v !== '' && v !== 'auto') {
           const n = parseInt(v, 10);
@@ -1667,7 +1678,7 @@
       frameRate: MML.Emu.VGM_FRAME_RATE,
       get totalFrames() { return mirror && mirror.done ? mirror.done : 0; },
       build() {
-        const { byChip, rateIndex } = dpcmSources();
+        const { byChip, rateIndex, noiseByChip } = dpcmSources();
         const chips = MML.VGM2MML.DRUM_CHIPS || [];
         const sources = [];
         let totalFrames = 0;
@@ -1676,7 +1687,8 @@
           const e = d && mirror.data[d.data];
           if (!d || !e || !e.samples) continue;
           totalFrames = Math.max(totalFrames, e.snapshots.length);
-          sources.push({ chip: chipFlag, snapshots: e.snapshots, chans, shape: d.shape, samples: e.samples });
+          sources.push({ chip: chipFlag, snapshots: e.snapshots, chans, shape: d.shape, samples: e.samples,
+                         noiseChans: (noiseByChip && noiseByChip.get(chipFlag)) || [] });
         }
         if (!sources.length || !totalFrames || !MML.Vgm2MmlExpansion.collectDrumHits) return null;
         return { hits: MML.Vgm2MmlExpansion.collectDrumHits(sources, MML.Emu.VGM_FRAME_RATE, totalFrames), rateIndex };
@@ -7248,21 +7260,22 @@
     };
     // ボイスの借用先ごとの区分け(変換時 src/spc2mml/converter.js と同じ読み方)。
     //   melo = 自動判定に当たったsrcnだけ打点にするボイス / dpcm = 全srcnを打点にするボイス(E)
+    //   noise = D(ノイズ)を選んだボイス(ノイズパッド、2026-09-18): E と同じく全srcnがパッド。打点に assignTarget='noise'
     const voicePlanNow = () => {
       const Plan = MML.Convert.ChannelPlan;
-      const melo = [], dpcm = [];
+      const melo = [], dpcm = [], noise = [];
       for (let ch = 0; ch < 8; ch++) {
         const ent = Plan.get(`V${ch}`) || {};
         const type = ent.target || SPC_DEFAULT_TARGETS[`V${ch}`] || 'skip';
         if (type === 'skip') continue;
-        (type === 'dpcm' ? dpcm : melo).push(ch);
+        if (type === 'dpcm') dpcm.push(ch); else if (type === 'noise') noise.push(ch); else melo.push(ch);
       }
-      return { melo, dpcm };
+      return { melo, dpcm, noise };
     };
     const hitsNow = () => {
-      const { melo, dpcm } = voicePlanNow();
+      const { melo, dpcm, noise } = voicePlanNow();
       return MML.SPC2MML.drumHits(voiceEvents, brrSamples, drumSrcnsNow(), melo,
-        { dpcmChans: dpcm, pitchSrcns: spcPitchSrcnSet() });
+        { dpcmChans: dpcm, noiseChans: noise, pitchSrcns: spcPitchSrcnSet() });
     };
     // 台帳(パッド一覧/試聴)は「全ボイス・全srcn」で作っておき、一覧に出すキーだけを
     // listedKeys() で絞る。こうしておくとEを付け外ししてもPCMを取り直さずに済む

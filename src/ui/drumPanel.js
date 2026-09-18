@@ -49,8 +49,10 @@
   // 音色の出自は3通り: このパッドだけの音色(noise.custom) / プリセット(noise.preset) / 未指定(先頭プリセット)。
   // エディタからは「このパッドだけに適用」「プリセットを更新」「新規プリセット」「削除/組み込みに戻す」「試聴」
   // 「音程から自動」(音程を持つパッドの既定): 周期は元の音程から、音量は元のまま(drumHits.js noiseToneOf と同じ)
+  // 既定(未設定)は、音程を持つパッドと「割当どおりノイズ」(D で打楽器化した ch/ボイスのパッド)で auto。
+  // 後者の auto = 変換器の従来の写し(元の D の音符)のまま(drumHits.js noiseToneOf と同じ規則)
   function isAutoTone(st, r) {
-    return !!((st.noise && st.noise.auto) || (!st.noise && r && r.srcMidi != null));
+    return !!((st.noise && st.noise.auto) || (!st.noise && r && (r.srcMidi != null || r.defaultTarget === 'noise')));
   }
   function noiseToneOfRow(st, r) {
     const np = NP();
@@ -168,7 +170,7 @@
         `<div class="drum-panel-head">` +
           `<span class="dp-c-color"></span>` +
           `<span class="dp-c-label">${T('サンプル')}</span>` +
-          `<span class="dp-c-play"><i>${T('オリジナル')}</i><i>DPCM</i></span>` +
+          `<span class="dp-c-play"><i>${T('オリジナル')}</i><i>${T('変換後')}</i></span>` +
           `<span class="dp-c-hits">${T('打点')}</span>` +
           `<span class="dp-c-kind">${T('扱い')}</span>` +
           `<span class="dp-c-on">${T('変換')}</span>` +
@@ -453,6 +455,7 @@
       //   黙って無反応にせず理由を出して操作を止める
       const noHash = !r.hash;
       const vol = DS() ? DS().clampVol(st.vol) : 100;
+      const effNoise = effectiveTargetOf(st, r) === 'noise'; // 載せ先がノイズ(明示 or 割当どおり)
       const row = document.createElement('div');
       row.className = 'drum-panel-row' + (st.enabled === false ? ' drum-panel-row--off' : '')
         + (missing ? ' drum-panel-row--missing' : '') + (noHash ? ' drum-panel-row--nohash' : '')
@@ -470,7 +473,8 @@
         // 試聴はサンプルのすぐ右。押すところは音符マークにして、何を鳴らすかは列見出しで示す
         `<span class="dp-c-play">` +
           `<button type="button" class="dp-play" data-mode="raw" title="${T('原音を鳴らす')}">♪</button>` +
-          `<button type="button" class="dp-play" data-mode="dpcm" title="${T('DPCM変換後を鳴らす')}">♪</button>` +
+          // 変換後: 載せ先が DPCM なら DPCM 変換後、ノイズならセットしたノイズの音色を鳴らす(ボタンの文字で示す)
+          `<button type="button" class="dp-play dp-play--text" data-mode="dpcm" title="${effNoise ? T('セットしたノイズの音色(変換後)を鳴らす') : T('DPCM変換後を鳴らす')}">${effNoise ? T('ノイズ') : 'DPCM'}</button>` +
         `</span>` +
         `<span class="dp-c-hits">${r.hits != null ? r.hits : ''}</span>` +
         // 扱い: 打楽器(パッド)か音階付きサンプルか。自動判定を手で上書きする
@@ -525,9 +529,11 @@
       const prioSel = row.querySelector('.dp-prio');
       if (NP()) {
         // 音程を持つパッド(旋律chの打楽器化)は「音程から自動」が先頭かつ既定(従来の D 割当と同じ出力)
-        if (r.srcMidi != null) {
+        if (r.srcMidi != null || r.defaultTarget === 'noise') {
           const oa = document.createElement('option');
-          oa.value = '__auto'; oa.textContent = T('音程から自動(元の音程・音量)');
+          oa.value = '__auto';
+          // 音程を持つパッド: 音程→周期・音量は元のまま / D割当のサンプル(SPC BRR・VGM PCM): 変換器の写しのまま
+          oa.textContent = r.srcMidi != null ? T('音程から自動(元の音程・音量)') : T('自動(元の写しのまま)');
           noiseSel.appendChild(oa);
         }
         for (const p of NP().all()) {
@@ -614,7 +620,15 @@
         if (hooks.onChange) hooks.onChange();
       });
       for (const b of row.querySelectorAll('.dp-play')) {
-        b.addEventListener('click', () => { if (hooks.onPlay) hooks.onPlay(r, b.dataset.mode); });
+        b.addEventListener('click', () => {
+          if (b.dataset.mode === 'dpcm' && effNoise) {
+            // ノイズの変換後 = パッドにセットした音色を本物のコンパイラ+2A03で鳴らす(main.js onAuditionNoise)
+            const cur = noiseToneOfRow(st, r);
+            if (cur && hooks.onAuditionNoise) hooks.onAuditionNoise(cur.tone);
+            return;
+          }
+          if (hooks.onPlay) hooks.onPlay(r, b.dataset.mode);
+        });
       }
       const inc = row.querySelector('.dp-inc');
       if (inc) inc.addEventListener('click', (e) => { e.stopPropagation(); openIncludeMenu(inc, r); });

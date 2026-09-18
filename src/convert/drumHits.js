@@ -438,7 +438,9 @@
     const NP = MML.Convert.NoisePresets || null;
     const n = st && st.noise;
     const hasPitch = !!(h && h.srcMidi != null);
-    if ((n && n.auto) || (!n && hasPitch)) {
+    // 既定(noise未設定)は、音程を持つ打点と「割当で D にしたchの打点」(SPCのBRRボイス/VGMのサンプルPCMも含む)で
+    // auto。後者は applyNoise が「元の D の音符をそのまま」にする(=従来の写しと同じ出力)
+    if ((n && n.auto) || (!n && (hasPitch || (h && h.assignTarget === 'noise')))) {
       const idx = hasPitch ? autoNoiseIndex(midiToHz(h.srcMidi)) : 15;
       const v = Math.max(1, Math.min(15, Math.round((h && h.vol != null ? h.vol : 1) * 15)));
       return { tone: { idx, mode: 0, vol: { type: 'v', v }, ep: null, en: null, detune: 0 }, auto: true };
@@ -492,8 +494,10 @@
       }
       const t = noiseToneOf(st, presets, h);
       if (h.assignTarget === 'noise') {
-        if (t.auto) continue; // 従来どおり(元のDの音符をそのまま使う)
-        overrides.push([h.startFrame, Math.min(totalFrames, h.endFrame)]);
+        // 既定(auto)で、その打点の音符が元の D に残っている(inNative≠false)なら従来どおり触らない。
+        // 元の D に無い打点(SPCで旋律から切り出された打楽器srcn等、inNative=false)は auto でもここで鳴らす
+        if (t.auto && h.inNative !== false) continue;
+        if (h.inNative !== false) overrides.push([h.startFrame, Math.min(totalFrames, h.endFrame)]);
       }
       items.push({ start: h.startFrame, end: Math.min(totalFrames, h.endFrame), priority: (st.priority | 0), tone: t.tone, pad: true, seq: items.length });
     }

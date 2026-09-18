@@ -1299,6 +1299,8 @@
     '通常': 'Normal',
     'この打点をどこで鳴らすか。DPCM=実サンプルを焼く / ノイズ=2A03ノイズ(D)の音符にする(プリセットの音色で)。既定は鍵盤の割当どおり(E→DPCM、D→ノイズ)': 'Where this hit plays. DPCM = burn the real sample / Noise = write it as 2A03 noise (D) notes using a preset tone. Default follows the keyboard assignment (E→DPCM, D→Noise)',
     '割当どおり': 'As assigned',
+    'セットしたノイズの音色(変換後)を鳴らす': 'Play the noise tone set on this pad (as converted)',
+    '自動(元の写しのまま)': 'Auto (keep the converter\'s own mapping)',
     '音程から自動(元の音程・音量)': 'Auto from pitch (original pitch & volume)',
     'ドラッグで一覧と下段の高さを変える(下まで下げると下段を畳む)': 'Drag to resize the list vs. the lower pane (drag all the way down to collapse the lower pane)',
     'ノイズの音色(プリセット)。「このパッドだけ…」を選ぶか ✎ で個別に編集': 'Noise tone (preset). Pick "This pad only…" or press ✎ to edit it individually',

@@ -579,8 +579,11 @@
     };
     if (MML.Vgm2MmlExpansion.dpcmDrums && MML.Dpcm) {
       const bySrcChip = new Map();
+      // 'noise'(D)を選んだサンプルPCMのchも打点にする(ノイズパッド、2026-09-18): パッドに並び、載せ先の既定は
+      // 割当どおり=ノイズ。音符列は従来どおり(下の借用)で、パッドで音色を変えた分だけ applyNoise が差し替える。
+      // DPCM(E)側の合成(dpcmChans/taken)には入れない
       for (const s of src) {
-        if (s.kind !== 'pcm' || s.ch < 0 || plan[s.id] !== 'dpcm') continue;
+        if (s.kind !== 'pcm' || s.ch < 0 || (plan[s.id] !== 'dpcm' && plan[s.id] !== 'noise')) continue;
         const key = s.chip + (/^pcmb/.test(s.id) ? ':B' : '');
         if (!bySrcChip.has(key)) bySrcChip.set(key, []);
         bySrcChip.get(key).push(s);
@@ -595,10 +598,11 @@
         if (!entry || !entry.samples) continue;
         const shape = isB ? 'adpcmB' : (d ? d.shape : 'adpcmA');
         const chans = items.map(s => s.ch);
-        if (!isB) dpcmChans[d ? d.flag : ad.drumFlag] = chans;
+        const noiseChans = items.filter(s => plan[s.id] === 'noise').map(s => s.ch);
+        if (!isB) dpcmChans[d ? d.flag : ad.drumFlag] = chans.filter(ch => noiseChans.indexOf(ch) < 0);
         // ★DMCレート・変換する/しない・外部ファイルでの差し替えは、チャンネルではなく
         //   サンプル単位の設定(src/convert/drumSamples.js)。dpcmDrums が直接読む。
-        sources.push({ chip: chipFlag, snapshots: entry.snapshots, chans, shape, samples: entry.samples });
+        sources.push({ chip: chipFlag, snapshots: entry.snapshots, chans, shape, samples: entry.samples, noiseChans });
       }
       // options.drumHits: 合成音ch(FM/PSG/SN等)をE(DPCM)へ載せた分の打点(main.js synthDrum、
       // 他chミュートの分離レンダリング)。サンプルPCMの打点と一緒に焼く
