@@ -40,6 +40,7 @@
   let splitResetBtn = null;
   let selectedKey = null;
   let splitLocal = null;  // 表示中の L(dpcmSplitView.js 冒頭コメントの形)。hash/key/title を足してある
+  let splitNoise = false; // 選択行の載せ先がノイズ(分割ビューは DPCM 専用なので出さない。syncSplit 参照)
 
   function DS() { return MML.Convert && MML.Convert.DrumSamples; }
   function CS() { return MML.UI.ConvertSettings || null; }
@@ -202,7 +203,7 @@
         rateAuto: true, autoLabel: T('自動(行のレート)'),
         onChange: (L) => persistSplit(L),
         title: (L) => L.title || '',
-        emptyText: () => T('行を選ぶと、そのサンプルの波形と分割がここに出ます'),
+        emptyText: () => splitNoise ? T('分割は DPCM 専用です(このパッドの載せ先はノイズ)') : T('行を選ぶと、そのサンプルの波形と分割がここに出ます'),
       });
       // 「自動に戻す」: 手動の分割を消す(ビューのツールバーの末尾に足す)
       splitResetBtn = document.createElement('button');
@@ -407,6 +408,10 @@
     if (!splitView) return;
     const r = selectedKey != null ? rows.find(x => x.key === selectedKey) : null;
     if (!r) { selectedKey = null; splitLocal = null; splitView.setLocal(null); if (splitResetBtn) splitResetBtn.hidden = true; return; }
+    // 分割ビューは DPCM 専用(長いサンプルを DMC の上限で区間に切る)。載せ先がノイズの行では出さない
+    // (ユーザー指示 2026-09-18)。手動分割の保存値は残る(載せ先を DPCM へ戻せばまた効く)
+    splitNoise = DS() && effectiveTargetOf(DS().get(r.hash), r) === 'noise';
+    if (splitNoise) { splitLocal = null; splitView.setLocal(null); if (splitResetBtn) splitResetBtn.hidden = true; return; }
     splitLocal = buildLocal(r);
     if (splitLocal) splitLocal.title = titleOf(splitLocal);
     splitView.setLocal(splitLocal);

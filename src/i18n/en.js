@@ -644,6 +644,7 @@
     // ---- ドラム(DPCM)パネル下段の分割ビュー (src/ui/dpcmSplitView.js / drumPanel.js) ----
     '自動(行のレート)': 'Auto (row rate)',
     '行を選ぶと、そのサンプルの波形と分割がここに出ます': 'Select a row to see its waveform and split here',
+    '分割は DPCM 専用です(このパッドの載せ先はノイズ)': 'Splitting is DPCM only (this pad is routed to noise)',
     '分割 {n}区間(手動)': 'Split: {n} segments (manual)',
     '{n}区間に分割して変換します(自動)': 'Will be converted in {n} segments (automatic)',
     '{n}区間に分割して変換します(自動、先頭{sec}秒まで。境目を動かすと全長が使えます)': 'Will be converted in {n} segments (automatic, first {sec} s only; move a boundary to use the whole sample)',
