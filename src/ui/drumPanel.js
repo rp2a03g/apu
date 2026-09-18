@@ -281,7 +281,9 @@
     if (!costEl) return;
     if (!stats) { costEl.textContent = ''; return; }
     costEl.textContent = T('合計 定義 {clips} / 打点 {segments} / ROM {kb} KB',
-      { clips: stats.clips, segments: stats.segments, kb: (stats.bytes / 1024).toFixed(1) });
+      { clips: stats.clips, segments: stats.segments, kb: (stats.bytes / 1024).toFixed(1) })
+      // 定義は本家と同じ64本まで(drumHits.js capDefs)。溢れたぶんは使用回数の少ない定義から落ちる
+      + (stats.overflow ? T(' / 定義が64本を超えたため {n} 本を落とします', { n: stats.overflow }) : '');
     // 16KB(DMC領域1ページ=窓4-7)を超えると、ブラウザ再生もNSF書き出しも16KBごとの「ページ」に分けて
     // トリガー時にバンク切替する(2026-09-10、compiler.js layoutDpcmSamples / ppmckDriver.js DPCM_PAGE_TBL)。
     // 無音にはならないがROMがそのぶん大きくなるので、16KB超は黄色で「大きい」と知らせるだけにする

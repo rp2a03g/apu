@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-18 13:29:45
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 05:34:53
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-18 13:29:45';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-19 05:34:53';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -9871,7 +9871,8 @@
       const kb = (cost.bytes / 1024).toFixed(1);
       this._dpcmCostEl.innerHTML =
         `<span class="kbd-dpcm-cost-label">DPCM</span>` +
-        T('定義 {clips} / 打点 {segments} / ROM {kb} KB', { clips: cost.clips, segments: cost.segments, kb });
+        T('定義 {clips} / 打点 {segments} / ROM {kb} KB', { clips: cost.clips, segments: cost.segments, kb })
+        + (cost.overflow ? T(' / 定義が64本を超えたため {n} 本を落とします', { n: cost.overflow }) : ''); // drumHits.js capDefs
       // ROMが大きいときは色で知らせる。16KB(DMC領域1ページ)を超えると16KBごとのページに分けて
       // トリガー時にバンク切替する(2026-09-10、無音にはならない)ので、16KB超=黄色「大きい」だけ
       this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--warn', cost.bytes >= 16 * 1024);
@@ -11412,19 +11413,22 @@
         // vol はロールが使うレジスタどおりの値なので混ぜない。
         const volShown = ch.volApparent !== undefined ? ch.volApparent : ch.vol;
         const pct = showVol ? Math.round(volShown * 100) : 0;
-        el.volBar.style.width = pct + '%';
-        el.volBar.style.background = pct > 0 ? el.color : 'transparent';
-
-        // 減衰エンベロープ、DMC直接書き込み、または見かけ音量が下がっている(maskBy)時は
-        // 音量数値を黄色にして「レジスタをそのまま読んだ値ではない/そのとおりには鳴っていない」を示す。
+        // 黄色の使い分け(ユーザー指示 2026-09-19。以前は3つとも「数値が黄色」で見分けが付かなかった):
+        //   ・音量バーが黄色   … 干渉(maskBy)。三角波/ノイズ/DPCM($4011)が同じ非線形tndミキサーに乗っていて、
+        //                        レジスタ値どおりの大きさでは聞こえていない。バーの長さも干渉込みの見かけ音量
+        //   ・音量の数値が黄色 … ハードウェアの減衰エンベロープ(envMode)で鳴っている=数値はレジスタの音量では
+        //                        なくエンベロープの現在値。DMCの$4011直接書き込み(dmcWritten)も従来どおり数値側
         const masked = showVol && !!ch.maskBy;
+        el.volBar.style.width = pct + '%';
+        el.volBar.style.background = pct > 0 ? (masked ? '#ffcc44' : el.color) : 'transparent';
+
         // volText: 音量数値の文字列指定(2026-09-17)。音量値そのものを持たず L/R でしか
         //   音量が決まらないチップ(C140/C352/SegaPCM)は '—' を入れる。バーはそのまま出す。
         const rawStr = ch.volText !== undefined ? (showVol || ch.volText === VOL_NONE ? ch.volText : '')
           : ((showVol && ch.rawVol !== null && ch.rawVol !== undefined) ? String(ch.rawVol) : '');
         el.volNum.textContent = rawStr;
         el.volNum.style.color = (!rawStr || rawStr === VOL_NONE) ? '#555566'
-          : ((ch.envMode === true || dmcWritten || masked) ? '#ffcc44' : '#e6e6ef');
+          : ((ch.envMode === true || dmcWritten) ? '#ffcc44' : '#e6e6ef');
         // 干渉で音量が下がっている行は音量バーの枠も黄色にして、バーの短さが
         // 「レジスタが小さい」ではなく「干渉で削られている」ことを示す。
         if (el.volWrap && el.volMasked !== masked) {

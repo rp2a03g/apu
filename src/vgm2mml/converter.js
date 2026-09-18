@@ -964,11 +964,12 @@
     }
     // N163: 途中の空きレターも空チャンネルとして出す(numCh検出をcompiler.jsと揃えるため)
     // DPCM(Eパート)。実機ppmck同様レター体系上Eは固定なので letterMap を経由しない
-    // (hes2mml/converter.js と同じ扱い)。音符は常に o4c で @<n> だけがサンプルを選ぶ。
+    // (hes2mml/converter.js と同じ扱い)。音符 n<番号> が @DPCM<番号> を選ぶ(本家ppmck準拠 2026-09-19)。
     if (dpcmResult) {
-      scoreChannels.push({ letter: 'E', events: dpcmResult.events, hasInstrument: true });
+      scoreChannels.push({ letter: 'E', events: dpcmResult.events });
       const st = dpcmResult.stats;
-      notes.push(`打楽器のPCMを実サンプルのままDPCM(Eパート)へ変換しました: 定義${st.clips}件 / 打点${st.segments}個 / ROM ${(st.bytes / 1024).toFixed(1)}KB(同時発音区間はその瞬間の音をミックスした1サンプルとして焼いています)。`);
+      notes.push(`打楽器のPCMを実サンプルのままDPCM(Eパート)へ変換しました: 定義${st.clips}件 / 打点${st.segments}個 / ROM ${(st.bytes / 1024).toFixed(1)}KB(同時発音区間はその瞬間の音をミックスした1サンプルとして焼いています)。`
+        + (st.overflow ? `@DPCM 定義が64本(本家ppmckの上限)を超えたため、使用回数の少ない ${st.overflow} 本を落としました。` : ''));
     }
     MML.Convert.sortChannelsByLetter(scoreChannels);
 

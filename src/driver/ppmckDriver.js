@@ -2808,94 +2808,62 @@ ${toneLoadBlocks}`);
     }
 
     if (usesDpcm && dpcmIndices.length > 0) {
-      // @<n>(instrument)で選択した@DPCM<n>サンプルを、音符が来るたびにトリガーする
-      // (compiler.jsのsegmentsToWriteLogDpcmと同じロジック)。ノート音高(NOTE,X)は
-      // そのサンプルのfreq(基準レート)を起点にdpcmRateIndexForNoteで最も近いDMCレートへ
-      // 変換した値を108ノート分(NOTE_TABLE_SIZE)事前計算したテーブルを引く。
-      // サンプル本体のバイト列自体はここでは埋め込まない($C000-$FFFF固定バンク4-7に
-      // buildBankedNsfBytesが直接配置する。ここでは$4010-4013用のレジスタ値のみ埋め込む)
-      // 2026-08-16: 以前はサンプルごとにDPCM_TRIGGER_<i>ブロック(約48byte)を複製し
-      // `CMP #idx / BEQ DPCM_TRIGGER_<i>`で分岐していたが、サンプルが3個以上ある曲で
-      // BEQの分岐距離が±127byteを超えアセンブル失敗していた(悪魔城伝説1曲目で発覚)。
-      // 分岐トランポリン化ではなく、サンプルごとの差分(レート表・モードビット・DAC・
-      // アドレス・長さ)を全て,Y索引のテーブルに追い出した共用1本のルーチンに改める
-      // (N163/VRC7/FME7ハンドラ共用化と同じ方針。サンプル数に依らずコードは固定長、
-      // 分岐は全て短距離)。レート表(108byte)は基準freqが同じサンプル同士で共有する
-      const rateTableSlotByFreq = new Map();
-      const dpcmRateLabels = [];
-      const dpcmIdxBytes = [], dpcmModeBytes = [], dpcmDacBytes = [], dpcmAddrBytes = [], dpcmLenBytes = [], dpcmPageBytes = [];
-      dpcmIndices.forEach((idx) => {
+      // 本家ppmck準拠(2026-09-19、nes_include/ppmck/dpcm.h dpcm_set と同じ構造): 音符バイトが
+      // 「どの @DPCM<n> を鳴らすか」の番号で、その番号×4で DPCM_DATA(制御/DAC/アドレス/長さの4バイト×行)を
+      // 引く。レートは定義の freq で固定なので、以前の「@<n>で選んだスロットを DUTY,X から逆引きし、
+      // freq別108バイトのレート表を NOTE,X で引く」独自方式は廃止した。音符バイト(NOTE,X)は compiler.js の
+      // noteNumber = DPCM_NOTE_BASE(24) + 番号 のままなので、ハンドラ側で 24 を引く。
+      // 行は 0〜最大番号まで詰めて出す(本家 writeDPCM も max まで。未使用行は本家では 0,0,0,0 だが、
+      // ここでは制御バイトの bit7 を立てて「鳴らさない」印にし、compiler.js(未定義=無音)と揃える)。
+      // 同じファイルを共有する定義(layout.shared)は addr/len が同じ行になるだけ。
+      // サンプル本体はここでは埋め込まない($C000-$FFFF 窓4-7に buildBankedNsfBytes が直接配置する)
+      const dpcmMaxIdx = dpcmIndices[dpcmIndices.length - 1];
+      const dpcmDataBytes = [], dpcmPageBytes = [];
+      for (let idx = 0; idx <= dpcmMaxIdx; idx++) {
         const layout = dpcmLayout[idx];
-        const def = dpcmSamples[idx] || {};
-        const freq = (def.freq || 0) & 0x0F;
-        if (!rateTableSlotByFreq.has(freq)) {
-          const rateTable = new Array(NOTE_TABLE_SIZE);
-          for (let noteN = 0; noteN < NOTE_TABLE_SIZE; noteN++) {
-            rateTable[noteN] = MML.Mml.dpcmRateIndexForNote(freq, noteN) & 0x0F;
-          }
-          const label = `DPCM_RATE_TABLE_F${freq}`;
-          extraTables.push(`${label}:\n${bytesToDb(new Uint8Array(rateTable))}`);
-          rateTableSlotByFreq.set(freq, label);
-        }
-        dpcmRateLabels.push(rateTableSlotByFreq.get(freq));
-        dpcmIdxBytes.push(idx & 0xff);
-        dpcmModeBytes.push(def.mode ? 0x40 : 0x00);
-        // DAC=$FF(bit7)は「$4011を書かない」印(layout.dac===null、実機ppmck driverの
-        // dpcm.h skipラベル相当)。有効値は0-127なのでBMIで判別できる
-        dpcmDacBytes.push(layout.dac != null ? (layout.dac & 0x7F) : 0xFF);
-        dpcmAddrBytes.push(layout.addrReg & 0xff);
-        dpcmLenBytes.push(layout.lengthReg & 0xff);
+        const def = dpcmSamples[idx];
+        if (!layout || !def) { dpcmDataBytes.push(0x80, 0xFF, 0x00, 0x00); dpcmPageBytes.push(0); continue; }
+        // $4010 = (mode<<6)|freq(本家 writeDPCM の1バイト目 freq|(mode<<6)。bit7=IRQは落とす)
+        dpcmDataBytes.push((((def.mode | 0) & 3) << 6 | ((def.freq | 0) & 0x0F)) & 0x7F);
+        // DAC=$FF(bit7)は「$4011を書かない」印(layout.dac===null、本家 dpcm.h の .skip と同じ)
+        dpcmDataBytes.push(layout.dac != null ? (layout.dac & 0x7F) : 0xFF);
+        dpcmDataBytes.push(layout.addrReg & 0xff);
+        dpcmDataBytes.push(layout.lengthReg & 0xff);
         // ページの先頭バンク(ファイル上)。usesDpcmPaging のときだけテーブルに出す
         dpcmPageBytes.push((dpcmPageBank0 + (layout.page | 0) * DPCM_PAGE_BANKS) & 0xff);
-      });
+      }
       extraTables.push(
-        `DPCM_IDX_TBL:\n${bytesToDb(new Uint8Array(dpcmIdxBytes))}\n` +
-        `DPCM_MODE_TBL:\n${bytesToDb(new Uint8Array(dpcmModeBytes))}\n` +
-        `DPCM_DAC_TBL:\n${bytesToDb(new Uint8Array(dpcmDacBytes))}\n` +
-        `DPCM_ADDR_TBL:\n${bytesToDb(new Uint8Array(dpcmAddrBytes))}\n` +
-        `DPCM_LEN_TBL:\n${bytesToDb(new Uint8Array(dpcmLenBytes))}\n` +
-        (usesDpcmPaging ? `DPCM_PAGE_TBL:\n${bytesToDb(new Uint8Array(dpcmPageBytes))}\n` : '') +
-        `DPCM_RATE_LO:\n    .byte ${dpcmRateLabels.map(l => `<${l}`).join(',')}\n` +
-        `DPCM_RATE_HI:\n    .byte ${dpcmRateLabels.map(l => `>${l}`).join(',')}`);
+        `DPCM_DATA:\n${bytesToDb(new Uint8Array(dpcmDataBytes))}` +
+        (usesDpcmPaging ? `\nDPCM_PAGE_TBL:\n${bytesToDb(new Uint8Array(dpcmPageBytes))}` : ''));
       extraHandlers.push(`
 ; --- DPCM ($4010-4013、サンプル本体は窓4-7=$C000-$FFFFに直接配置。16KBを超える曲は
 ;     16KBごとの「ページ」に分け、トリガー時に DPCM_PAGE_TBL のページへ窓4-7を切り替える) ---
-; DUTY,X(@<n>で選択した@DPCM<n>番号)をDPCM_IDX_TBLから逆引きしてスロットYを得て、
-; 以降は全て,Yテーブル参照(サンプル数に依らずコード固定長)。X(チャンネル)は保存
+; NOTE,X(=24+@DPCM番号、compiler.js DPCM_NOTE_BASE)から番号を出し、番号×4で DPCM_DATA を引く
+; (本家 dpcm.h の asl/asl/tax と同じ)。制御バイトの bit7 が立つ行=未定義は何もしない。X(チャンネル)は保存
 WFV_T${TYPE_DPCM}:
-    LDA ${hex(DUTY)},X
-    LDY #${hex(dpcmIndices.length - 1)}
-DPCM_FIND:
-    CMP DPCM_IDX_TBL,Y
-    BEQ DPCM_FOUND
-    DEY
-    BPL DPCM_FIND
-    RTS     ; 対応するサンプルが無ければ何もしない(compiler.jsと同じ)
-DPCM_FOUND:
-    STY ${hex(PERLO2)}
-    LDA DPCM_RATE_LO,Y
-    STA ${hex(PTBLLO)}
-    LDA DPCM_RATE_HI,Y
-    STA ${hex(PTBLHI)}
     LDA ${hex(NOTE)},X
-    CMP #${hex(TABLE_MAX)}
-    BCC DPCM_OK
-    LDA #${hex(TABLE_MAX)}
-DPCM_OK:
+    SEC
+    SBC #${hex(MML.Mml.DPCM_NOTE_BASE)}
+    BCC DPCM_NONE
+    CMP #${hex(dpcmMaxIdx + 1)}
+    BCS DPCM_NONE
+    STA ${hex(PERLO2)}    ; 番号(ページ表の索引に使う)
+    ASL A
+    ASL A
     TAY
-    LDA (${hex(PTBLLO)}),Y
-    LDY ${hex(PERLO2)}
-    ORA DPCM_MODE_TBL,Y
+    LDA DPCM_DATA,Y     ; 制御($4010の値)。bit7=未定義
+    BMI DPCM_NONE
     STA ${hex(PERLO)}
     LDA #$0F
     STA $4015       ; DMC一旦停止(2A03他chは維持)
     LDA ${hex(PERLO)}
     STA $4010
-    LDA DPCM_DAC_TBL,Y
+    LDA DPCM_DATA+1,Y   ; DAC初期値($FF=書かない)
     BMI DPCM_NODAC
     STA $4011
 DPCM_NODAC:
-${usesDpcmPaging ? `    LDA DPCM_PAGE_TBL,Y ; そのサンプルのページ(ファイル上の先頭バンク番号)。窓4-7が別ページなら切り替える
+${usesDpcmPaging ? `    LDY ${hex(PERLO2)}
+    LDA DPCM_PAGE_TBL,Y ; そのサンプルのページ(ファイル上の先頭バンク番号)。窓4-7が別ページなら切り替える
     CMP ${hex(DPCMPAGE)}
     BEQ DPCM_PAGE_OK
     STA ${hex(DPCMPAGE)}
@@ -2907,19 +2875,23 @@ ${usesDpcmPaging ? `    LDA DPCM_PAGE_TBL,Y ; そのサンプルのページ(フ
     STA $5FFE
     ADC #$01
     STA $5FFF
-DPCM_PAGE_OK:` : ''}
-    LDA DPCM_ADDR_TBL,Y
+DPCM_PAGE_OK:
+    LDA ${hex(PERLO2)}
+    ASL A
+    ASL A
+    TAY` : ''}
+    LDA DPCM_DATA+2,Y
     STA $4012
-    LDA DPCM_LEN_TBL,Y
+    LDA DPCM_DATA+3,Y
     STA $4013
     LDA #$1F
     STA $4015       ; 再生開始
+DPCM_NONE:
     RTS
 SIL_T${TYPE_DPCM}:
     RTS             ; 休符/ゲートオフではDMCを止めない(サンプルは末尾まで鳴り切る)。
                     ; 実機ppmck(dpcm.h no_dpcm、DPCM_RESTSTOP無効の既定)およびcompiler.js
-                    ; segmentsToWriteLogDpcmと同じ。以前はここで$4015=$0Fを書いており、
-                    ; ブラウザ再生(休符で止めない)とNSFで食い違っていた(2026-08-16)`);
+                    ; segmentsToWriteLogDpcmと同じ`);
       wfvEntries[TYPE_DPCM] = `WFV_T${TYPE_DPCM}`;
       silEntries[TYPE_DPCM] = `SIL_T${TYPE_DPCM}`;
     }
@@ -4891,7 +4863,9 @@ SONG_LOOP_PTR_HI:
       // 音符内部のゲートオフ専用オペコードを使うか(@vrだけでなく@@rでも必要。
       // buildFixedSourceのusesGateOffVrと同じ条件にすること)
       vrIndexList.length > 0 || usesRelTone,
-      dutyIndexRemap));
+      dutyIndexRemap,
+      // E(DPCM)は音量/音色オペコードを出さない(本家ppmck準拠で v/@ が無く、ドライバも見ない)
+      { dpcm: (expansionLetterMap.dpcm || []).includes(ch) }));
     const chBytes = chSerialized.map(r => r.bytes);
 
     // 各チャンネルを順にバンク配置する。ループ地点(あれば)が最終的にどのバンク・
@@ -5044,6 +5018,7 @@ SONG_LOOP_PTR_HI:
     // 追加の6502コードは不要 — NSFロード時にNsfBus/実機側で$5FF8-$5FFFへ反映される)
     for (const idx of Object.keys(dpcmLayout)) {
       const layout = dpcmLayout[idx];
+      if (layout.shared) continue; // 同じファイルを共有する定義(compiler.js layoutDpcmSamples)。本体は共有元が焼く
       programBytes.set(layout.bytes, (dpcmFileBank + (layout.page | 0) * DPCM_PAGE_BANKS) * BANK_SIZE + (layout.addr - 0xC000));
     }
     for (const b of allDataBanks) {
@@ -5083,7 +5058,7 @@ SONG_LOOP_PTR_HI:
     // 内訳(UIの完了メッセージ用): ドライバ本体(バンク0の.resぶんを除いた実コード+テーブル)、
     // 曲データ(全チャンネルのバイトコード合計、バンクジャンプマーカー等は含まない)、DPCM
     let dpcmBytes = 0;
-    for (const idx of Object.keys(dpcmLayout)) dpcmBytes += dpcmLayout[idx].bytes.length;
+    for (const idx of Object.keys(dpcmLayout)) if (!dpcmLayout[idx].shared) dpcmBytes += dpcmLayout[idx].bytes.length;
     return {
       nsfBytes, asmErrors: [], bankCount: Math.ceil(programBytes.length / BANK_SIZE),
       unsupportedExpansions,

@@ -7,8 +7,8 @@
  *   A = Pulse 1, B = Pulse 2, C = Triangle, D = Noise
  *   DMCは実機ppmckc準拠(音符バイト=dpcm_dataテーブルの行選択)で実演奏化する。
  *   (sampleAddr,sampleLen,rate,dac,loop)の組が同じトリガーをまとめて@DPCM<n>定義
- *   にし、E以降の専用チャンネル(dpcmは常に最優先でEを占める)で常に基準ノート
- *   (o4c)により@<n>を選び直す形で再現する(buildDpcmDefs/buildDpcmEvents参照)。
+ *   にし、Eチャンネル(dpcmは常に最優先でEを占める)の音符 n<n> でその定義を選ぶ
+ *   (buildDpcmDefs/buildDpcmEvents参照。2026-09-19からコンパイラ側も本家と同じ「音符=番号」)。
  *   抽出したサンプル本体は引き続きdpcmFilesとして.dmcバイナリでも返す。
  */
 (function (global) {
@@ -353,6 +353,7 @@
     const events = [];
     let cur = null;
     let silenceAtFrame = Infinity; // このフレーム以降は線形/長さカウンタで自然消音済み(休符扱い)
+    let prevHalt = false;          // 直前フレームの $4008 bit7(継続フラグ)
 
     function flush(end) {
       if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; }
@@ -376,7 +377,19 @@
       if (t.attack.tr && !haltFlagNow) {
         const lengthCounterValue = LENGTH_TABLE[(r[3] >> 3) & 0x1F];
         silenceAtFrame = f + triangleAudibleFrames(haltFlagNow, linearReloadNow, lengthCounterValue);
+      } else if (prevHalt && !haltFlagNow) {
+        // ★継続フラグを落として止める書き方(2026-09-19、Batman (Prototype) 曲1 の終わりで発覚):
+        //   継続モード($4008=$FF)で鳴らしたまま、$400B を書かずに $4008=$00 だけを書く。
+        //   halt=1 の間は reload フラグが立ちっぱなしなので、次の四分フレームで線形カウンタは
+        //   「新しいリロード値」を読み込み、そこから halt=0 として減っていく(リロード値0なら即消音)。
+        //   長さカウンタも halt が外れた時点から減り始める。以前はアタック($400B)のときしか
+        //   自然消音を計算しておらず、この止め方だと曲の終わりまで鳴りっぱなしと判定していた
+        const lengthCounterValue = LENGTH_TABLE[(r[3] >> 3) & 0x1F];
+        silenceAtFrame = f + triangleAudibleFrames(false, linearReloadNow, lengthCounterValue);
+      } else if (haltFlagNow) {
+        silenceAtFrame = Infinity; // 継続モードへ戻った: 下の gated は halt 側の判定を使う
       }
+      prevHalt = haltFlagNow;
       const gated = haltFlagNow ? (linearReloadNow > 0) : (f < silenceAtFrame);
       const note = (active && freq > 0 && gated) ? freqToNote(freq) : null;
       const rawFreq = note !== null ? freq : null;
@@ -437,9 +450,19 @@
 
       if (!cur) { cur = { periodIdx, mode, vol, on, constVol, envKey, start: f, end: f, volSeq: [vol], keyOffAt: null }; continue; }
 
-      const releaseMark = !!t.attack.no && on && cur.on &&
+      // ★ノイズの「書き直し」(2026-09-19、キャプテン翼II=テクモのドライバで発覚): $400C-$400F の4本を
+      //   毎フレーム全部書き直すドライバがある。ノイズは位相を持たず、固定音量モードの $400F 書込みは
+      //   長さカウンタの再ロードとエンベロープ開始フラグを立てるだけなので、聞こえる変化が何も無い。
+      //   それを再アタックと数えると、ソフトウェア音量エンベロープ(v9→7→5→3→1)が1フレーム1音符に
+      //   刻まれ、@v にまとまらない(出力は v9 n1 v7 n1 v5 n1 … の96分音符の列になっていた)。
+      //   直前フレームもアタックで、周期/モード/固定音量が同じまま音量が上がっていなければ
+      //   「同じ音の書き直し」として音符を切らず volSeq に積む。音量が上がった瞬間(v1→v9)は
+      //   新しい打点なので従来どおり切る。アタックが毎フレームでないドライバは今までどおり
+      const rewrite = !!t.attack.no && f > 0 && !!timeline[f - 1].attack.no && on && cur.on &&
+        constVol && cur.constVol && periodIdx === cur.periodIdx && mode === cur.mode && vol <= cur.vol;
+      const releaseMark = !rewrite && !!t.attack.no && on && cur.on &&
         Inst.isReleaseRewrite(frameInfo, f, cur, periodIdx === cur.periodIdx && mode === cur.mode, constVol, vol);
-      if (t.attack.no && !releaseMark) {
+      if (t.attack.no && !releaseMark && !rewrite) {
         flush(f); cur = { periodIdx, mode, vol, on, constVol, envKey, start: f, end: f, volSeq: [vol], keyOffAt: null };
       } else if (!releaseMark && (periodIdx !== cur.periodIdx || mode !== cur.mode || on !== cur.on ||
                  constVol !== cur.constVol || (!constVol && envKey !== cur.envKey))) {
@@ -611,10 +634,8 @@
   // 行インデックス」で、各行が[$4010制御(レート+ループ),$4011初期DAC,$4012アドレス,
   // $4013長さ]を丸ごと持つ(音高からレートを動的計算する仕組みは実機には無い)。
   // これに忠実にするため、(sampleAddr,sampleLen,rate,dac,loop)の組が同じトリガーを
-  // 1つの@DPCM<n>定義にまとめ、Eチャンネルの音符は常に基準ノート(o4c=noteNumber48)
-  // で@<n>を選び直すだけにする。compiler.jsのdpcmRateIndexForNoteは基準ノートでは
-  // 必ず定義そのもののfreqを返す(量子化誤差ゼロ)ため、既存の音高quantizeロジックを
-  // 一切変更せずに実機同等の「行選択」方式を再現できる。
+  // 1つの@DPCM<n>定義にまとめ、Eチャンネルの音符をその番号(n<n>)にする。コンパイラ側も
+  // 2026-09-19から本家と同じ「音符=番号、レートは定義で固定」なので、そのまま行選択になる。
   function buildDpcmDefs(triggers, dpcmFiles, bankInfo) {
     const fileByKey = new Map();
     for (const f of dpcmFiles) fileByKey.set(f.fileKey, f.name);
@@ -647,7 +668,8 @@
       if (instrument === undefined) continue;
       const end = i + 1 < triggers.length ? triggers[i + 1].start : totalFrames;
       if (end <= trig.start) continue;
-      events.push({ start: trig.start, end, note: 48, instrument });
+      // E の音符 = @DPCM 番号(本家ppmck準拠 2026-09-19。src/convert/drumHits.js dpcmNote)
+      events.push({ start: trig.start, end, note: MML.Convert.DrumHits.dpcmNote(instrument) });
     }
     return events;
   }
@@ -885,7 +907,8 @@
         dpcmDefs.push({ index: base + d.index, file: d.file, freq: d.freq, size: d.size, dac: d.dac, mode: d.mode });
       }
       // exact: 分割したストリーム区間(drumHits.js)。出力側で音長を丸めない
-      for (const ev of r.events) dpcmEvents.push({ start: ev.start, end: ev.end, note: 48, instrument: base + ev.instrument, exact: !!ev.exact });
+      // 打点の note は 24+番号(drumHits.js dpcmNote)なので、定義番号を base ぶんずらす=note を base ぶんずらす
+      for (const ev of r.events) dpcmEvents.push({ start: ev.start, end: ev.end, note: ev.note + base, exact: !!ev.exact });
       dpcmEvents.sort((a, b) => a.start - b.start);
       // 打点が重なる区間は直近の打点が勝つ(DPCMは1本)。前のイベントの尻尾を次の頭で切る
       for (let i = 0; i + 1 < dpcmEvents.length; i++) if (dpcmEvents[i].end > dpcmEvents[i + 1].start) dpcmEvents[i].end = Math.max(dpcmEvents[i].start + 1, dpcmEvents[i + 1].start);
@@ -1079,7 +1102,8 @@
       { letter: 'B', events: chEventsB, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true, hasPitchMod: true, hasSweep: true },
       { letter: 'C', events: chEventsC, hasDetune: true, hasPitchMod: true },
       { letter: 'D', events: chEventsD, hasVolume: true, hasEnvelope: true, hasInstrument: true },
-      ...(dpcmLetter ? [{ letter: dpcmLetter, events: dpcmEvents, hasInstrument: true }] : []),
+      // E: 音符=@DPCM番号(本家ppmck準拠)。@/v は出さない(mmlEmit.js DPCM_FLAGS_OFF)
+      ...(dpcmLetter ? [{ letter: dpcmLetter, events: dpcmEvents }] : []),
     ];
 
     // FDS/N163の自作波形も曲全体で共有登録するレジストリ(@FM<n>/@N<n>としてMML本文の
@@ -1148,6 +1172,9 @@
         totalFrames, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
     }
 
+    // 定義は本家と同じ64本まで(実機DPCM+合成音パッドの合計)。溢れは使用回数の少ない定義から落とす
+    const dpcmCap = MML.Convert.DrumHits.capDefs(dpcmDefs, dpcmEvents, dpcmFiles);
+    if (dpcmCap.dropped) vrc7Notes.push(`@DPCM 定義が64本を超えたため、使用回数の少ない ${dpcmCap.dropped} 本(打点 ${dpcmCap.droppedEvents} 個)を落としました`);
     // @DPCM<n>定義行(実機ppmckcと同じ書式)。ヘッダー行として他の音色定義と同列に出す
     const dpcmDefLines = dpcmDefs.map(d =>
       `@DPCM${d.index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac}, ${d.mode} }`);
@@ -1286,5 +1313,10 @@
   // 鍵盤表示のチャンネル割当UIが「この形式で選べる借用先」を絞るために使う
   // (NSFは同じ音源内の移動と2A03パルス↔MMC5パルスだけ)
   MML.NSF2MML.sourceInfo = nsfSourceInfo;
+  // 検証用(tools からだけ使う): 三角波の発音区間を元曲のフレーム軸のまま返す。実音(三角波だけ鳴らした出力)との
+  // 突き合わせで線形/長さカウンタの自然消音の判定を採点する
+  MML.NSF2MML._triEvents = function (writeLog, initRegs) { return extractTriEvents(buildTimeline(writeLog, initRegs || null)); };
+  // 同じく検証用: パルスの抽出直後(統合前)のイベント列。chKey は p1 / p2
+  MML.NSF2MML._pulseEvents = function (writeLog, initRegs, chKey) { return extractPulseEvents(buildTimeline(writeLog, initRegs || null), chKey, chKey === "p1" ? 1 : 2); };
 
 })(window);

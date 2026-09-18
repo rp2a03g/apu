@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-18 13:29:45
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 05:34:53
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-18 13:29:45';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-19 05:34:53';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -2860,15 +2860,11 @@
     const expansion = usedExpansions[0] || 'none'; // 後方互換(result.expansion)用
 
     // ── DPCM 変換 (全ボイス中で DPCM 指定されたものの srcn を収集) ──
-    // SNESのBRRサンプルは元々ノートごとにピッチシフトして鳴らす前提の楽器なので、
-    // 実機ppmckc(音符バイト=dpcm_dataテーブルの行選択、ピッチの動的変換は無い)を
-    // そのまま真似るのではなく、このツール独自の連続ピッチ量子化
-    // (compiler.jsのdpcmRateIndexForNote)を使う設計にする。@DPCM<n>定義は
-    // 基準ピッチ(pitchSemi=60、SNESのPitch=0x1000=原音)での再生レートとして
-    // 固定レート15(最高音質)を使い、実際に弾かれた音は基準からの半音差で
-    // 最寄りのハードウェアレートへ量子化される(NSF側のような複数レート定義の
-    // 使い分けはしない。BRRサンプルにNES実機のような固定サンプルテーブルの
-    // 概念が無いため)。
+    // 本家ppmck準拠(2026-09-19): E の音符は「どの @DPCM<n> を鳴らすか」の番号で、レートは定義の freq で固定。
+    // SNESのBRRサンプルはノートごとにピッチシフトして鳴らす楽器なので、弾かれた音高ごとに最寄りの
+    // DMCレート(16段)を選び、(srcn, レート) の組ごとに @DPCM 定義を作る(本家流「レート違いの定義を並べる」)。
+    // ファイルは srcn ごとに1本(原音 pitch=0x1000 をレート15で符号化)で、同じファイルを指す定義は
+    // ROM を共有する(compiler.js layoutDpcmSamples / 本家ppmckc sortDPCM)。定義は全体で64本まで(capDefs)。
     // ★2026-09-04: Eボイスの発音は既定でパッド(打楽器)へ回るようになったので、ここに来るのは
     //   パッドで「音階として扱う」と指定したsrcnだけ(pitchSrcnSet)。打楽器化そのものを切って
     //   いる(cmd.DRUM=false)ときは従来どおり全srcnがこちら。
@@ -2882,20 +2878,44 @@
       }
     }
 
-    // srcn → DPCM インデックス (@N) の対応表
-    const srcnToDpcmIdx = {};
-    const dmcFiles = [];
-    let dpcmIdx = 0;
+    const dmcFiles = [];   // 実ファイル {name, bytes}(srcn ごとに1本+打楽器クリップ)
+    const dpcmDefs = [];   // @DPCM 定義 {index, file, freq, size, dac, mode}
+    const fileBySrcn = {};
     // 曲全体の音量正規化(+パッドのサンプル音量)。ドラム経路と同じ方針でここでも掛ける
     const pitchedGain = pitchedDpcmGains(brrSamples, dpcmSrcns);
     for (const srcn of dpcmSrcns) {
       const brr = brrSamples[srcn];
       if (!brr || brr.bytes.length === 0) continue;
       const result = brrToDpcm(brr.bytes, 15, pitchedGain.get(srcn));
-      srcnToDpcmIdx[srcn] = dpcmIdx;
-      dmcFiles.push({ name: `dpcm_srcn${String(srcn).padStart(3,'0')}.dmc`, bytes: result.bytes, rateIndex: result.rateIndex });
-      dpcmIdx++;
+      const name = `dpcm_srcn${String(srcn).padStart(3,'0')}.dmc`;
+      dmcFiles.push({ name, bytes: result.bytes });
+      fileBySrcn[srcn] = { name, size: result.bytes.length };
     }
+    // (srcn, レート) → 定義番号。音程付きDPCM(BRR全体)は dac=255(初期DAC書込み省略)
+    const defIdxByKey = new Map();
+    const pitchedDefFor = (srcn, rate) => {
+      const key = srcn + ':' + rate;
+      let i = defIdxByKey.get(key);
+      if (i === undefined) {
+        i = dpcmDefs.length;
+        const file = fileBySrcn[srcn];
+        dpcmDefs.push({ index: i, file: file.name, freq: rate, size: file.size, dac: 255, mode: 0 });
+        defIdxByKey.set(key, i);
+      }
+      return i;
+    };
+    // 基準ノート o4 c(=48、原音 pitch=0x1000=レート15)からの半音差に最も近い DMC レート(対数距離)。
+    // レート表は等間隔の音階ではないので最近傍への量子化になる(以前 compiler.js が再生時にやっていた計算)
+    const rateTable = MML.Dpcm.DMC_RATE_TABLE_NTSC;
+    const nearestRateIndex = (note) => {
+      const targetHz = rateTable[15] * Math.pow(2, (note - 48) / 12);
+      let best = 0, bestDiff = Infinity;
+      for (let i = 0; i < rateTable.length; i++) {
+        const diff = Math.abs(Math.log2(rateTable[i] / targetHz));
+        if (diff < bestDiff) { bestDiff = diff; best = i; }
+      }
+      return best;
+    };
 
     // DPCM(物理的に1系統しか無いDMCチャンネル)は全dpcm指定ボイスのノートを
     // 時系列で1本にまとめる。複数ボイスが同時にdpcmを使った場合、後から
@@ -2906,20 +2926,14 @@
       const cfg = channelMap[ch];
       if (!cfg || cfg.type !== 'dpcm') continue;
       for (const ev of voiceEvents[ch]) {
-        if (ev.pitchSemi === null || srcnToDpcmIdx[ev.srcn] === undefined) continue;
-        // DPCMはBRRサンプルそのものを再生レートを変えて鳴らす方式で、@DPCM定義は
-        // 原音(pitch=0x1000)をレート15で収録している。サンプルには実音程が既に焼き込まれて
-        // いるため、必要なのは原音レートからの相対比(pitch/0x1000)だけで、サンプル固有の
-        // 原音チューニング補正(tune)は加えてはならない(加えると二重補正になる)。そのため
-        // 音源発振型(パルス/FDS/N163等)で使う補正済み pitchSemi ではなく、生ピッチから
-        // 補正0で算出したノートを使う。基準ピッチ(pitch=0x1000)→60→DPCM_BASE_NOTE(48)へ-12。
+        if (ev.pitchSemi === null || !fileBySrcn[ev.srcn]) continue;
+        // サンプルには実音程が既に焼き込まれているため、必要なのは原音レートからの相対比(pitch/0x1000)
+        // だけで、サンプル固有の原音チューニング補正(tune)は加えてはならない(加えると二重補正になる)。
+        // 基準ピッチ(pitch=0x1000)→60→基準ノート48へ-12。
         const rawSemi = pitchToSemitone(ev.pitch, 0);
         if (rawSemi === null) continue;
-        dpcmNoteEvents.push({
-          start: ev.frame, end: ev.frame + ev.len,
-          note: Math.max(0, Math.min(95, rawSemi - 12)),
-          instrument: srcnToDpcmIdx[ev.srcn]
-        });
+        const rate = nearestRateIndex(Math.max(0, Math.min(95, rawSemi - 12)));
+        dpcmNoteEvents.push({ start: ev.frame, end: ev.frame + ev.len, note: MML.Convert.DrumHits.dpcmNote(pitchedDefFor(ev.srcn, rate)) });
       }
     }
     // ── 打楽器サンプルの打点 → @DPCM(共通コア)。定義は音程付きDPCMの後ろへ連番で足す ──
@@ -2929,14 +2943,17 @@
         totalFrames: FRAMES, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'spc_drum',
         maxClipSec: 10, // BRRは有限長。VGMのROM歯止め1.5秒は外す
       });
-      const base = dmcFiles.length;
+      const base = dpcmDefs.length;
       for (const d of drumDpcm.defs) {
-        dmcFiles.push({ name: d.file, bytes: drumDpcm.files[d.index].bytes, rateIndex: d.freq, dac: d.dac, mode: d.mode });
+        dmcFiles.push({ name: d.file, bytes: drumDpcm.files[d.index].bytes });
+        dpcmDefs.push({ index: base + d.index, file: d.file, freq: d.freq, size: d.size, dac: d.dac, mode: d.mode });
       }
-      // exact: 分割したストリーム区間(drumHits.js)。出力側で音長を丸めない
-      for (const ev of drumDpcm.events) dpcmNoteEvents.push({ start: ev.start, end: ev.end, note: 48, instrument: base + ev.instrument, exact: !!ev.exact });
+      // exact: 分割したストリーム区間(drumHits.js)。出力側で音長を丸めない。note は 24+番号なので base ぶんずらす
+      for (const ev of drumDpcm.events) dpcmNoteEvents.push({ start: ev.start, end: ev.end, note: ev.note + base, exact: !!ev.exact });
     }
     dpcmNoteEvents.sort((a, b) => a.start - b.start);
+    // 定義は本家と同じ64本まで(音程付き+打楽器の合計)。溢れは使用回数の少ない定義から落とす
+    const dpcmCap = MML.Convert.DrumHits.capDefs(dpcmDefs, dpcmNoteEvents, dmcFiles);
 
     // DPCM/拡張音源のチャンネル文字は、src/mml/compiler.jsのassignExpansionLettersを
     // そのまま再利用して決める(実機ppmck同様、各チップの文字範囲は他チップの有無に
@@ -3075,12 +3092,11 @@
         : `${MML.Mml.EX_CHIP_DIRECTIVE[exp]}\n`;
     }
 
-    // @DPCM<n>定義(実機ppmckcと同じ書式)。以後Eチャンネルの音符で@<n>により選択する
-    for (let i = 0; i < dmcFiles.length; i++) {
-      const f = dmcFiles[i];
-      // 音程付きDPCM(BRR全体)はdac=255(初期DAC書込み省略)、打楽器クリップは先頭値のdac
-      mml += `@DPCM${i} = { "${f.name}", ${f.rateIndex}, ${f.bytes.length}, ${f.dac != null ? f.dac : 255}, ${f.mode || 0} }\n`;
+    // @DPCM<n>定義(実機ppmckcと同じ書式)。E の音符 n<番号> がこの番号を選ぶ(本家ppmck準拠)
+    for (const d of dpcmDefs) {
+      mml += `@DPCM${d.index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac != null ? d.dac : 255}, ${d.mode || 0} }\n`;
     }
+    if (dpcmCap.dropped) mml += `; @DPCM 定義が64本を超えたため、使用回数の少ない ${dpcmCap.dropped} 本(打点 ${dpcmCap.droppedEvents} 個)を落としました\n`;
     if (drumDpcm) {
       const st = drumDpcm.stats;
       mml += `; 打楽器サンプル(srcn ${Array.from(drumSrcnSet).sort((a, b) => a - b).join(',')})を実サンプルのままDPCM(E)へ: `
@@ -3252,7 +3268,7 @@
     }).map(n => `; ※ ${n}`).concat(placeNotes.concat(splitNotes).map(n => `; ※ ${n}`));
 
     if (dpcmLetter) {
-      scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents, hasInstrument: true });
+      scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents }); // E: 音符=@DPCM番号。@/v は出さない(mmlEmit.js DPCM_FLAGS_OFF)
     }
     // ノイズパッド(2026-09-18): 載せ先=ノイズ(D)のパッド(BRRの打楽器サンプル/合成音ch)の打点を
     // 2A03ノイズの音符列にして合流(既存の D=NONボイス と単音マージ。src/convert/drumHits.js applyNoise)
@@ -3692,7 +3708,8 @@
   //     レジスタの整数丸めによる偏差は音符ごとに±どちらにも出るので大量に集めると打ち消し合い、
   //     ドライバ固有の全体ずれだけが残る。平均でなく中央値なのはベンド/ビブラート中の外れ値に
   //     引っ張られないため
-  //   - ノイズ(D)/DPCM(E)/ドラム/ノート番号が周期そのもののイベントは音程の意味が違うので除外
+  //   - ノイズ(D)/DPCM(E)/ドラム/ノート番号が周期そのもの(D)や@DPCM番号そのもの(E、本家ppmck準拠)の
+  //     イベントは音程の意味が違うので除外
   //   - 四分位範囲が広い(opts.maxIqr、既定30セント)=曲全体がピッチ操作だらけ、または区間/チップで
   //     基準が二極化していて「全体ずれ」とは言えない場合と、音符が少なすぎる場合(opts.minCount、
   //     既定8)は 0(適用しない)。実測: HES NC62001 は中央値-33で四分位範囲40、適用すると10セント超の
@@ -4750,15 +4767,49 @@
     // 統合しない。他形式のイベントにはこれらのキー自体が存在しないため素通りする。
     'srcn', 'adsr1', 'adsr2', 'gain'
   ];
-  function hysteresisCompatible(a, b) {
+  // prev: a の直前に吸収済みのイベント(省略可)。デューティだけは「音符の先頭同士」ではなく
+  // 「直前フレームとの連続性」で比べる(2026-09-19): 音符の途中でデューティが変わる曲(NSFのデューティ
+  // エンベロープ @@<n>。抽出器は区切らず dutySeq に積む)では、ビブラートの谷で割れた側の先頭デューティは
+  // 「その時点の値」になり、音符先頭(立ち上がりの音色)とは必ず食い違う。連続していれば音色の切替ではない
+  function hysteresisCompatible(a, b, prev) {
     for (const k of HYSTERESIS_HARD_KEYS) {
-      if ((k in a || k in b) && a[k] !== b[k]) return false;
+      if (!(k in a || k in b)) continue;
+      // envKey(NSF: $4000/$4004/$400C の下位6bit)は、固定音量モードでは下位4bitが「音量そのもの」。
+      // ソフトウェア音量エンベロープで音量が下がるたびに値が変わるので、固定音量同士では比べない
+      // (ハードウェアエンベロープ同士なら周期/ループの違い=別の音なので従来どおり比べる)。2026-09-19
+      // ★この緩和は prev を渡す呼び出し(=mergeAlternatingVibrato、隣接半音のビブラート統合)だけに効かせる。
+      //   mergeRapidArpeggio やスラー判定にまで効かせると、音量を変えながらオクターブ違いの2音を交互に鳴らす
+      //   パート(Crisis Force のパルス1)が1つのアルペジオ音符にまとめられ、タイミングと音量差が失われた
+      if (k === 'envKey' && prev && a.constVol === true && b.constVol === true) continue;
+      if (k === 'duty' && prev && prev.dutySeq && prev.dutySeq.length && a.dutySeq && a.dutySeq.length) {
+        if (a.dutySeq[0] !== prev.dutySeq[prev.dutySeq.length - 1]) return false;
+        continue;
+      }
+      if (a[k] !== b[k]) return false;
     }
     return true;
   }
   function concatField(list, key) {
     if (!list[0] || !list[0][key]) return undefined;
     return list.reduce((acc, e) => acc.concat(e[key] || []), []);
+  }
+
+  // 「後半が周期的」か: ディレイ付きで深さが育っていくビブラート(±2→±4→±6 と広がってから一定になる。
+  // コナミのドライバに多い)は、立ち上がり部分のせいで全体としては classifyPitchMod が 'literal' を返す。
+  // 先頭を少しずつ捨てた残りが 'periodic' になるなら「これはビブラート」と判断してよい。
+  // ★2026-09-19 Crisis Force(NSF)曲1のパルス2で発覚: 元の音が少し低め(D-1)で深さ±45セントの
+  //   ビブラートの谷の2フレームだけが半音下に丸まり、そこで音符が割れていた(c&c4&c <b48 >c. …)。
+  //   割れた b は基準周期(253)で鳴るので元の 246 と合わず、続く c は EP が頭からやり直しになって
+  //   ビブラートの中心がずれる=音痴に聞こえる。統合すれば1音符+EPで元の周期列がそのまま再現される
+  const PERIODIC_TAIL_MAX_SKIP = 64;  // 先頭から捨ててよい最大フレーム数(立ち上がりの長さの上限)
+  const PERIODIC_TAIL_MIN_LEN = 16;   // 残りがこれ未満なら周期性の裏付けとして弱いので見ない
+  function hasPeriodicTail(seq) {
+    const maxSkip = Math.min(PERIODIC_TAIL_MAX_SKIP, seq.length - PERIODIC_TAIL_MIN_LEN);
+    for (let k = 1; k <= maxSkip; k++) {
+      const c = MML.Convert.classifyPitchMod(seq.slice(k));
+      if (c && c.type === 'periodic') return true;
+    }
+    return false;
   }
 
   MML.Convert.mergeAlternatingVibrato = function (events, opts) {
@@ -4784,7 +4835,7 @@
             break; // 3値目が出たら対象外(こぶし・グリッサンド等はここで自然に除外される)
           }
         }
-        if (!hysteresisCompatible(seg, home)) break;
+        if (!hysteresisCompatible(seg, home, absorbed[absorbed.length - 1])) break;
         absorbed.push(seg);
         j++;
       }
@@ -4828,12 +4879,17 @@
         }
         const isTrill = spanCents >= TRILL_MIN_CENTS && middleFrac < TRILL_MIDDLE_FRAC_MAX;
         const spanOk = !(opts && opts.maxAbsorbCents != null && spanCents >= opts.maxAbsorbCents);
-        if (classified && classified.type === 'periodic' && !isTrill && spanOk) {
+        const periodic = !!classified && (classified.type === 'periodic' ||
+          (!isTrill && spanOk && hasPeriodicTail(candidateSeq)));
+        if (periodic && !isTrill && spanOk) {
           result.push(Object.assign({}, home, {
             end: last.end,
             volSeq: concatField(absorbed, 'volSeq'),
             // mergeRapidArpeggio側と同じ理由でフレーム毎の並びのまま繋ぐ
             hwEnvSeq: concatField(absorbed, 'hwEnvSeq'),
+            // デューティもフレーム毎の並びのまま繋ぐ(繋がないと dutySeq が home ぶんの長さしか無く、
+            // 後段のデューティエンベロープ抽出が音符の途中で切れる)
+            dutySeq: concatField(absorbed, 'dutySeq'),
             pitchSeq: candidateSeq
           }));
           i = j;

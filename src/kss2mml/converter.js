@@ -223,9 +223,10 @@
         if (d.defs.length) {
           for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
           dpcmFiles.push(...d.files);
-          scoreChannels.push({ letter: 'E', events: d.events, hasInstrument: true, isDrum: true });
+          scoreChannels.push({ letter: 'E', events: d.events, isDrum: true }); // E: 音符=@DPCM番号(本家ppmck準拠)
           MML.Convert.sortChannelsByLetter(scoreChannels);
-          drumNote = `打楽器化したchを実音のままDPCM(E)へ変換しました: 定義${d.stats.clips}件 / 打点${d.stats.segments}個 / ROM ${(d.stats.bytes / 1024).toFixed(1)}KB`;
+          drumNote = `打楽器化したchを実音のままDPCM(E)へ変換しました: 定義${d.stats.clips}件 / 打点${d.stats.segments}個 / ROM ${(d.stats.bytes / 1024).toFixed(1)}KB`
+            + (d.stats.overflow ? `(定義が64本を超えたため ${d.stats.overflow} 本を落としました)` : '');
         }
       }
       chanDesc = Object.keys(r.placed)

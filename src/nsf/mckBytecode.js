@@ -127,11 +127,11 @@
  *     実際の加算・負方向クランプを行う。実機6502エミュレータ上でのNSF書き出し往復
  *     検証済み(全対応チップで期待通りの周期差、高音+大きな負のデチューンでも
  *     0クランプでラップアラウンドしないことを確認)。
- *   - DPCM: フェーズ1.7でチャンネル文字の割当・NSF書き出し(TYPE_DPCM)まで実装済み
- *     (このコメントは実装前に書かれたまま更新されていなかった。DPCMチャンネルの
- *     セグメント列も他チップと同じくこのserialize()を通る。noteByteはdpcm_dataの
- *     インデックスではなく音符音高そのもので、レートインデックスへの変換は
- *     src/driver/ppmckDriver.jsのTYPE_DPCMハンドラが行う)。
+ *   - DPCM: DPCMチャンネル(E)のセグメント列も他チップと同じくこのserialize()を通る。
+ *     noteByte は compiler.js の noteNumber(= DPCM_NOTE_BASE 24 + @DPCM番号)そのもので、
+ *     6502側 TYPE_DPCM ハンドラ(ppmckDriver.js)が 24 を引いて番号×4で DPCM_DATA を引く
+ *     (本家ppmck準拠 2026-09-19)。E には v/@/@@r が無い(compiler.js がエラーにする)ので、
+ *     chanOpts.dpcm のチャンネルでは OP_VOL/OP_TONE/OP_REL_TONE を出さない(ドライバも見ない)。
  *   - FDSの`MH<n>`(曲中の変調再ロード)はVRC7の`OP<n>`(0xF0)と同じ音符に紐付かない
  *     即時コマンドとして0xF5オペコードで対応する(下記OP_FDS_MOD_RELOAD参照)。
  *   - L(ループ地点マーカー): 2026-08-09実装。serialize()はloopFrame引数を受け取り、
@@ -321,8 +321,9 @@
   // そのまま使う(255=off はremap対象外で常にそのまま)。remapが渡されているのに対応する
   // エントリが無い(未定義のEP<n>/MP<n>を参照)場合はオペコード自体を出力しない
   // (compiler.js側もそのセグメントは効果0として扱うため、無出力=無効果で整合する)
-  MckBytecode.serialize = function (segments, immediateWrites, envIndexRemap, loopFrame, pitchEnvIndexRemap, vibratoIndexRemap, noteEnvIndexRemap, vrIndexRemap, usesVr, dutyIndexRemap) {
+  MckBytecode.serialize = function (segments, immediateWrites, envIndexRemap, loopFrame, pitchEnvIndexRemap, vibratoIndexRemap, noteEnvIndexRemap, vrIndexRemap, usesVr, dutyIndexRemap, chanOpts) {
     const bytes = [];
+    const isDpcm = !!(chanOpts && chanOpts.dpcm); // E(DPCM): 音量/音色バイトを持たない(冒頭コメント参照)
     let loopByteOffset = null;
     let lastVolume = null;
     let lastVolMode = null; // 'plain' | 'env' | 'fme7env' (src/convert/mmlEmit.jsのcurVolModeと
@@ -468,6 +469,7 @@
       const gateFrames = MML.Mml.segmentGateFrames(seg, seg.durationFrames);
 
       if (seg.freq != null) {
+        if (!isDpcm) {
         // 音量の指定方法は3つ排他で、compiler.jsのsegmentsToWriteLogFme7と同じ優先順位
         // (FME7ハードウェアエンベロープ > ソフトウェア音量エンベロープ > 固定音量)。
         // ハードウェアエンベロープ中はVOL/VOL_ENVを出さない(6502側はこれらのオペコードで
@@ -538,6 +540,7 @@
             lastRelTone = relByte;
           }
         }
+        } // !isDpcm
         if (seg.noteEnv != null && seg.noteEnv !== lastNoteEnv) {
           // @v<n>/EP<n>と同じ「実際に使われているインデックスだけをコンパクトに詰める」方式
           // (2026-08-14実装)。255(ENOF)はそのまま素通し(remapテーブルには存在しない値)。
@@ -632,6 +635,16 @@
             bytes.push(OP_VR_ENV, vr & 0xff);
             lastEnvelopeVr = seg.envelopeVr;
           }
+        }
+        // @vr255(リリース解除)。★2026-09-19まで「255は出力しない」としていたため、一度 @vr<n> を選ぶと
+        //   NSFでは二度と解除できず、@vr0 と @vr255 を交互に切り替える曲(NSF→MML変換の出力に普通に出る。
+        //   キャプテン翼II 曲7のパルス2で発覚)で、ゲートオフ後の無音が「リリース表の音量で鳴り続ける」に
+        //   化けていた(ブラウザ再生=compiler.js は 255 で解除するので食い違う)。ドライバの VRSEL は
+        //    が未選択の番兵(RD_VRENV は読んだバイトをそのまま入れる)なので、 を出せば解除になる。
+        //   一度も @vr<n> を選んでいないチャンネルでは出さない(lastEnvelopeVr===255 のまま)
+        if ((seg.envelopeVr == null || seg.envelopeVr === 255) && lastEnvelopeVr !== 255) {
+          bytes.push(OP_VR_ENV, 0xff);
+          lastEnvelopeVr = 255;
         }
 
         const noteByte = Math.max(0, Math.min(NOTE_MAX, Math.round(seg.noteNumber)));

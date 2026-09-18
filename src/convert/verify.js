@@ -39,7 +39,7 @@
     X: 'FE1', Y: 'FE2', Z: 'FE3',
     a: 'M5P1', b: 'M5P2',
   };
-  // 音程比較の対象外(ノイズ=疑似ノート軸が別/DPCM=サンプル再生レート軸)
+  // 音程比較の対象外(ノイズ=周期index軸/DPCM=@DPCM番号の選択軸。どちらも音高ではない、本家ppmck準拠)
   const SKIP_LETTERS = new Set(['D', 'E']);
 
   const NOTE_NAMES = ['c', 'c+', 'd', 'd+', 'e', 'f', 'f+', 'g', 'g+', 'a', 'a+', 'b'];

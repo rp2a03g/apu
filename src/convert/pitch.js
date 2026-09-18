@@ -882,15 +882,49 @@
     // 統合しない。他形式のイベントにはこれらのキー自体が存在しないため素通りする。
     'srcn', 'adsr1', 'adsr2', 'gain'
   ];
-  function hysteresisCompatible(a, b) {
+  // prev: a の直前に吸収済みのイベント(省略可)。デューティだけは「音符の先頭同士」ではなく
+  // 「直前フレームとの連続性」で比べる(2026-09-19): 音符の途中でデューティが変わる曲(NSFのデューティ
+  // エンベロープ @@<n>。抽出器は区切らず dutySeq に積む)では、ビブラートの谷で割れた側の先頭デューティは
+  // 「その時点の値」になり、音符先頭(立ち上がりの音色)とは必ず食い違う。連続していれば音色の切替ではない
+  function hysteresisCompatible(a, b, prev) {
     for (const k of HYSTERESIS_HARD_KEYS) {
-      if ((k in a || k in b) && a[k] !== b[k]) return false;
+      if (!(k in a || k in b)) continue;
+      // envKey(NSF: $4000/$4004/$400C の下位6bit)は、固定音量モードでは下位4bitが「音量そのもの」。
+      // ソフトウェア音量エンベロープで音量が下がるたびに値が変わるので、固定音量同士では比べない
+      // (ハードウェアエンベロープ同士なら周期/ループの違い=別の音なので従来どおり比べる)。2026-09-19
+      // ★この緩和は prev を渡す呼び出し(=mergeAlternatingVibrato、隣接半音のビブラート統合)だけに効かせる。
+      //   mergeRapidArpeggio やスラー判定にまで効かせると、音量を変えながらオクターブ違いの2音を交互に鳴らす
+      //   パート(Crisis Force のパルス1)が1つのアルペジオ音符にまとめられ、タイミングと音量差が失われた
+      if (k === 'envKey' && prev && a.constVol === true && b.constVol === true) continue;
+      if (k === 'duty' && prev && prev.dutySeq && prev.dutySeq.length && a.dutySeq && a.dutySeq.length) {
+        if (a.dutySeq[0] !== prev.dutySeq[prev.dutySeq.length - 1]) return false;
+        continue;
+      }
+      if (a[k] !== b[k]) return false;
     }
     return true;
   }
   function concatField(list, key) {
     if (!list[0] || !list[0][key]) return undefined;
     return list.reduce((acc, e) => acc.concat(e[key] || []), []);
+  }
+
+  // 「後半が周期的」か: ディレイ付きで深さが育っていくビブラート(±2→±4→±6 と広がってから一定になる。
+  // コナミのドライバに多い)は、立ち上がり部分のせいで全体としては classifyPitchMod が 'literal' を返す。
+  // 先頭を少しずつ捨てた残りが 'periodic' になるなら「これはビブラート」と判断してよい。
+  // ★2026-09-19 Crisis Force(NSF)曲1のパルス2で発覚: 元の音が少し低め(D-1)で深さ±45セントの
+  //   ビブラートの谷の2フレームだけが半音下に丸まり、そこで音符が割れていた(c&c4&c <b48 >c. …)。
+  //   割れた b は基準周期(253)で鳴るので元の 246 と合わず、続く c は EP が頭からやり直しになって
+  //   ビブラートの中心がずれる=音痴に聞こえる。統合すれば1音符+EPで元の周期列がそのまま再現される
+  const PERIODIC_TAIL_MAX_SKIP = 64;  // 先頭から捨ててよい最大フレーム数(立ち上がりの長さの上限)
+  const PERIODIC_TAIL_MIN_LEN = 16;   // 残りがこれ未満なら周期性の裏付けとして弱いので見ない
+  function hasPeriodicTail(seq) {
+    const maxSkip = Math.min(PERIODIC_TAIL_MAX_SKIP, seq.length - PERIODIC_TAIL_MIN_LEN);
+    for (let k = 1; k <= maxSkip; k++) {
+      const c = MML.Convert.classifyPitchMod(seq.slice(k));
+      if (c && c.type === 'periodic') return true;
+    }
+    return false;
   }
 
   MML.Convert.mergeAlternatingVibrato = function (events, opts) {
@@ -916,7 +950,7 @@
             break; // 3値目が出たら対象外(こぶし・グリッサンド等はここで自然に除外される)
           }
         }
-        if (!hysteresisCompatible(seg, home)) break;
+        if (!hysteresisCompatible(seg, home, absorbed[absorbed.length - 1])) break;
         absorbed.push(seg);
         j++;
       }
@@ -960,12 +994,17 @@
         }
         const isTrill = spanCents >= TRILL_MIN_CENTS && middleFrac < TRILL_MIDDLE_FRAC_MAX;
         const spanOk = !(opts && opts.maxAbsorbCents != null && spanCents >= opts.maxAbsorbCents);
-        if (classified && classified.type === 'periodic' && !isTrill && spanOk) {
+        const periodic = !!classified && (classified.type === 'periodic' ||
+          (!isTrill && spanOk && hasPeriodicTail(candidateSeq)));
+        if (periodic && !isTrill && spanOk) {
           result.push(Object.assign({}, home, {
             end: last.end,
             volSeq: concatField(absorbed, 'volSeq'),
             // mergeRapidArpeggio側と同じ理由でフレーム毎の並びのまま繋ぐ
             hwEnvSeq: concatField(absorbed, 'hwEnvSeq'),
+            // デューティもフレーム毎の並びのまま繋ぐ(繋がないと dutySeq が home ぶんの長さしか無く、
+            // 後段のデューティエンベロープ抽出が音符の途中で切れる)
+            dutySeq: concatField(absorbed, 'dutySeq'),
             pitchSeq: candidateSeq
           }));
           i = j;

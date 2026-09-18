@@ -273,7 +273,7 @@
       render();
       const total = pieces.reduce((s, p) => s + p.bytes.length, 0);
       setStatus(used.length > 1
-        ? T('反映しました: @DPCM{a}〜 {n}本 / 合計{bytes}バイト。区間を続けて鳴らすには E @{a} c @{b} c … のように並べます', { a: indices[0], b: indices[1], n: used.length, bytes: total })
+        ? T('反映しました: @DPCM{a}〜 {n}本 / 合計{bytes}バイト。区間を続けて鳴らすには E n{a} n{b} … のように並べます(音符の番号=@DPCM番号)', { a: indices[0], b: indices[1], n: used.length, bytes: total })
         : T('反映しました: @DPCM{a} "{file}" {bytes}バイト', { a: index, file: files[0], bytes: total }), 'ok');
       if (hooks.onApplied) hooks.onApplied();
     }

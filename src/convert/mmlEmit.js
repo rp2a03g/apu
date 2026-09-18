@@ -61,6 +61,14 @@
   //   ため o1〜o2 の音符になっていた)。本家ppmckでは別の音になるので n<idx> へ切り替えた
   MML.Convert.noiseNoteToIndex = function (note) { return ((31 - Math.round(note)) % 16 + 16) % 16; };
   MML.Convert.noiseIndexToNote = function (idx) { return 31 - (((idx % 16) + 16) % 16); };
+  // DPCM(ch E): 音符は「どの @DPCM<n> を鳴らすか」の番号で音高ではない(本家ppmck準拠 2026-09-19)。
+  //   イベントの note は compiler.js と同じ noteNumber = DPCM_NOTE_BASE(24=o2 c) + 番号 で持ち、
+  //   出力は n<番号> の直値(本家ppmckcは音名だと「オクターブ×16+音名」の飛び番になるので使わない)。
+  //   E には v/@/@v/D/EP/EN/MP/K が無い(compiler.js がエラーにする)ので、出力フラグも全部落とす(DPCM_FLAGS_OFF)
+  MML.Convert.DPCM_NOTE_BASE = 24;
+  MML.Convert.dpcmNoteToIndex = function (note) { return Math.max(0, Math.round(note) - MML.Convert.DPCM_NOTE_BASE); };
+  MML.Convert.dpcmIndexToNote = function (idx) { return MML.Convert.DPCM_NOTE_BASE + Math.max(0, idx | 0); };
+  const DPCM_FLAGS_OFF = { hasVolume: false, hasInstrument: false, hasEnvelope: false, hasDetune: false, hasPitchMod: false, hasNoteEnv: false, hasSweep: false, dpcmIndexNotes: true };
 
   // ── ギャップ・末尾を休符イベントで補完してギャップレス化 ──────────────
   function fillGaps(events, totalFrames) {
@@ -404,6 +412,14 @@
         }
       }
 
+      if (flags.dpcmIndexNotes) {
+        // DPCM(ch E): @DPCM番号の直値 n<idx>[,<len>](本家ppmck準拠、DPCM_NOTE_BASE 冒頭コメント)。オクターブ・音色は出さない
+        const idx = MML.Convert.dpcmNoteToIndex(ev.note);
+        const nTok = (l) => { const s = omitDefaultLen(l, defaultLen); return `n${idx}` + (s ? (s[0] === '.' ? s : ',' + s) : ''); };
+        const tie = (ev.continued || ev.slurTie) ? '&' : '';
+        emit(tie + nTok(lengths[0]) + lengths.slice(1).map(l => '&' + nTok(l)).join(''), true);
+        continue;
+      }
       if (flags.noiseIndexNotes) {
         // 2A03ノイズ(ch D): 周期index の直値 n<idx>[,<len>] で出す(noiseNoteToIndex 冒頭コメント)。
         // オクターブは無意味なので o<n>/>/< は出さない。短/長周期は ev.instrument(@0/@1)で上に出ている
@@ -469,6 +485,7 @@
     // 変換設定(src/convert/options.js): コマンドマスク+譜面整形
     const maskedFlags = MML.Convert.maskEmitFlags(flags, opts.cmd);
     Object.assign(flags, maskedFlags);
+    if (letter === 'E') Object.assign(flags, DPCM_FLAGS_OFF); // DPCM: 音符=番号だけ(DPCM_NOTE_BASE 冒頭コメント)
     flags.lenSnap = MML.Convert.lenSnapOf(opts.cmd); // 音長を丸める(LEN_SNAP、duration.js framesToLengths)
     flags.dpcmExact = MML.Convert.dpcmExactOf(opts.cmd); // 分割DPCMの音長は丸めない(DPCM_EXACT)
 
@@ -620,6 +637,7 @@
         dpcmExact: MML.Convert.dpcmExactOf(opts.cmd), // 分割DPCMの音長は丸めない(DPCM_EXACT)
         plan // 音長をチャンネル全体で最適化(LEN_DP、buildLengthPlan)
       }, opts.cmd);
+      if (chan.letter === 'E') Object.assign(flags, DPCM_FLAGS_OFF); // DPCM: 音符=番号だけ(DPCM_NOTE_BASE 冒頭コメント)
       const state = newState();
       let first = true;
       return buckets.map(bucketEvents => {

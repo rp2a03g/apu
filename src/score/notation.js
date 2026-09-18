@@ -187,7 +187,8 @@
   // 表示位置はノート番号を五線の位置に散らすだけ(E4 から上へ)。
   // gm: ノイズは周期が長い(低い=周期index が大きい。ノイズchの note は index 0-15 の直値、本家ppmck準拠 2026-09-18)
   //     ほうからキック(36)/スネア(38)/クローズドハイハット(42)、
-  //     DPCM はサンプル番号(note - 48)でキック/スネア/ハイハット/タム/クラッシュ/オープンハイハット/ロータム/ライドを回す。
+  //     DPCM はサンプル番号(note - 24。Eの音符は @DPCM<n> の番号で、compiler.js DPCM_NOTE_BASE=24 を足した
+  //     noteNumber で来る。本家ppmck準拠 2026-09-19)でキック/スネア/ハイハット/タム/クラッシュ/オープンハイハット/ロータム/ライドを回す。
   //     楽譜ソフトがピアノで鳴らして雑音にならないためのもので、実機の音を表すものではない(2026-09-16)
   const GM_DRUM_NAMES = { 36: 'Bass Drum', 38: 'Snare', 42: 'Closed Hi-Hat', 45: 'Low Tom', 49: 'Crash', 46: 'Open Hi-Hat', 41: 'Floor Tom', 51: 'Ride' };
   const DPCM_DRUM_CYCLE = [36, 38, 42, 45, 49, 46, 41, 51];
@@ -196,7 +197,7 @@
     const pos = ((note % 16) + 16) % 16;
     const i = pos % 7, oct = 4 + Math.floor(pos / 7) + (i >= 5 ? 1 : 0);
     let gm;
-    if (part && /DPCM/.test(part.name)) gm = DPCM_DRUM_CYCLE[((note - 48) % DPCM_DRUM_CYCLE.length + DPCM_DRUM_CYCLE.length) % DPCM_DRUM_CYCLE.length];
+    if (part && /DPCM/.test(part.name)) gm = DPCM_DRUM_CYCLE[((note - 24) % DPCM_DRUM_CYCLE.length + DPCM_DRUM_CYCLE.length) % DPCM_DRUM_CYCLE.length];
     else gm = pos >= 10 ? 36 : (pos >= 5 ? 38 : 42);
     return { step: steps[i], octave: oct, gm, gmName: GM_DRUM_NAMES[gm] || ('Drum ' + gm) };
   }

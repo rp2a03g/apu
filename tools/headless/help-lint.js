@@ -52,6 +52,12 @@ const ROOT = path.join(__dirname, '..', '..');
     console.log('');
   }
 
+  // 組み込みサンプルは章を順番に鳴らす(tools/headless/sample-sequence.js)。章の中身を伸ばして
+  // 次の章と重なった/待ち行が古い/曲中に L を置いた、をここで落とす
+  if (!file) {
+    for (const message of require('./sample-sequence.js').check(MML)) issues.push({ level: 'error', lineNo: 0, message });
+  }
+
   const errors = issues.filter((i) => i.level === 'error');
   const warns = issues.filter((i) => i.level !== 'error');
   for (const i of errors) console.log(`ERROR [line ${i.lineNo}] ${i.message}`);

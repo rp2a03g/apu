@@ -155,7 +155,6 @@
     '閉じる': 'Close',
 
     // ---- MMLウィンドウ ----
-    'MML作曲 & 再生・シーク': 'MML Composer & Playback',
     'ドラッグでログ欄の高さを変更': 'Drag to resize the log area',
     '▶ MML再生': '▶ Play MML',
     '■ 停止': '■ Stop',
@@ -185,6 +184,11 @@
     '.dmc をダウンロード': 'Download the .dmc files',
     '⚠ 台帳に無い .dmc: {files}(この MML だけでは鳴りません。DPCMコンバータで読み込むか、.dmc をドロップしてください)': '⚠ .dmc not on hand: {files} (this MML alone will not play them. Load them in the DPCM converter or drop the .dmc files here)',
     '@DPCM{n} の "{file}" が読み込まれていないため、この音は鳴りません(.dmc を MML と一緒に開くか、ウィンドウへドロップしてください)': '@DPCM{n}: "{file}" is not loaded, so this sample will be silent (open the .dmc together with the MML, or drop it onto the window)',
+    // DPCMチャンネル(E)の本家ppmck準拠(2026-09-19、src/mml/compiler.js)
+    '{cmd} はDPCMチャンネル(E)では使用できません(本家ppmck準拠: 音符/n<num>が@DPCM番号、レートは定義のfreqで固定)': '{cmd} cannot be used on the DPCM channel (E) (as in ppmck: the note / n<num> is the @DPCM number and the rate is fixed by the definition)',
+    '@DPCM の番号は 0〜{max} です(@DPCM{n}。本家ppmckと同じ64本まで)': '@DPCM numbers must be 0-{max} (@DPCM{n}; at most 64 definitions, as in ppmck)',
+    '{ch} の n{n} に対応する @DPCM{n} が定義されていないため、この音は鳴りません': '@DPCM{n} referenced by n{n} on channel {ch} is not defined, so that note is silent',
+    ' / 定義が64本を超えたため {n} 本を落とします': ' / over 64 definitions, {n} dropped',
     // ---- ミニ操作窓 (src/ui/miniTransport.js) ----
     'ミニ操作窓（常に手前に出る小さな再生操作窓。外部エディタで作業しながら再生できます）':
       'Mini transport (a small always-on-top window, so you can play while working in another editor)',
@@ -364,8 +368,8 @@
     '使用する区間がありません(全区間が未使用)': 'No segment is in use (all are unused)',
     '区間{k}が{n}バイトで上限{max}を超えています。「限界で分割」か境目の移動、または未使用にしてください':
       'Segment {k} is {n} bytes, over the limit of {max}. Use "Cut at limit", move the boundaries, or mark it unused',
-    '反映しました: @DPCM{a}〜 {n}本 / 合計{bytes}バイト。区間を続けて鳴らすには E @{a} c @{b} c … のように並べます':
-      'Applied: @DPCM{a}… {n} samples / {bytes} bytes total. To play them back to back, write E @{a} c @{b} c …',
+    '反映しました: @DPCM{a}〜 {n}本 / 合計{bytes}バイト。区間を続けて鳴らすには E n{a} n{b} … のように並べます(音符の番号=@DPCM番号)':
+      'Applied: @DPCM{a}… {n} samples / {bytes} bytes total. To play them back to back, write E n{a} n{b} … (the note number is the @DPCM number)',
     'DMC 1本の上限({max}バイト)を超えています。「限界で分割」か、波形をダブルクリックして区切ってください':
       'Exceeds the per-sample limit ({max} bytes). Use "Cut at limit" or double-click the waveform to add boundaries',
     '{n}区間': '{n} segments',
@@ -972,6 +976,7 @@
     '「忠実再現」は元曲の演奏をそのまま、「プレーン譜面」は音階と音色だけ(編曲の出発点)。どれかを触ると「カスタム」になります':
       '"Faithful" keeps the original performance; "Plain score" keeps only pitches and instruments (a starting point for arranging). Changing anything makes it "Custom"',
     '出力コマンド': 'Commands to emit',
+    'テクニック': 'Techniques', // ヘルプのカテゴリ(sampleMml.js ;@help … :: テクニック)
     'OFFにしたコマンドは出力しません(説明は各項目にマウスを載せると出ます)': 'Commands turned off are not emitted (hover an item for its description)',
     '譜面の書き方': 'Score notation',
     '「次の音符まで」は音符をキーオン間隔まで伸ばし、無音を@v表の末尾0かゲートで表す(再生は変わらない)。「音量ゼロ」は元の細かい区切りのまま':

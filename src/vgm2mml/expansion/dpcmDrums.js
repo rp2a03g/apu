@@ -19,8 +19,8 @@
  *   chans は「DPCMへ載せるチャンネル」= ユーザーが割当UIで選んだもの。
  *
  * 出力は HES の @DPCM 抽出(src/hes2mml/expansion/dpcm.js)と同じ {defs, files, events} 形。
- *   events: { start, end, note:48, instrument: clipIndex }
- *   ★実機DMCと同じくノート音高はレートに影響しない。常に基準ノート o4c(=48)で @<n> だけを選ぶ。
+ *   events: { start, end, note: 24+clipIndex }(src/convert/drumHits.js dpcmNote)
+ *   ★本家ppmck準拠(2026-09-19): E の音符は @DPCM 番号そのもの(n<番号>)。レートは定義の freq で固定。
  */
 (function (global) {
   'use strict';

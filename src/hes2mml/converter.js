@@ -206,7 +206,7 @@
       chanDesc = Object.keys(r.placed)
         .map(t => `${MML.Convert.ChannelPlan.letterOfTarget(t)}=${r.placed[t].source.label}`).sort().join(' ');
       if (hasNoise) scoreChannels.push(Object.assign({}, noiseResult, { letter: 'D' }));
-      if (hasDpcm) scoreChannels.push({ letter: expansionLetterMap.dpcm[0], events: dpcmResult.events, hasInstrument: true });
+      if (hasDpcm) scoreChannels.push({ letter: expansionLetterMap.dpcm[0], events: dpcmResult.events }); // E: 音符=@DPCM番号(本家ppmck準拠)
       MML.Convert.sortChannelsByLetter(scoreChannels);
     } else {
     expansions = ['n163'];
@@ -226,7 +226,7 @@
     scoreChannels = allWave.filter(ch => ch.events.some(ev => ev.note !== null));
     if (!scoreChannels.length) scoreChannels = allWave.slice(0, 1);
     if (hasNoise) scoreChannels.push(Object.assign({}, noiseResult, { letter: 'D' }));
-    if (hasDpcm) scoreChannels.push({ letter: dpcmLetter, events: dpcmResult.events, hasInstrument: true });
+    if (hasDpcm) scoreChannels.push({ letter: dpcmLetter, events: dpcmResult.events }); // E: 音符=@DPCM番号(本家ppmck準拠)
     }
     // ノイズパッド(2026-09-18): 載せ先=ノイズのパッドの打点(DDA/合成音ch)を2A03ノイズ(D)へ
     // (既存の D=PSGノイズ と単音マージ。src/convert/drumHits.js applyNoise)

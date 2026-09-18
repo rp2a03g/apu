@@ -22,7 +22,9 @@
  * used.has()の判定と無関係に必ず進む、assignExpansionLetters参照): 例えばVRC6のみ
  * 使う曲でもチャンネル文字は常にM-Oになり、E-L(dpcm/fds/vrc7の枠)はそのまま空く。
  * 実機同様、mmc5だけ大文字を使い切った後の小文字a,bを使う(E-Zの22字+a,bの2字=24字):
- *   dpcm : DPCMサンプル再生 (1ch)。@DPCM<n>定義が1つでもあれば自動的に有効化される
+ *   dpcm : DPCMサンプル再生 (1ch)。@DPCM<n>定義が1つでもあれば自動的に有効化される。
+ *          ★本家ppmck準拠(2026-09-19): 音符/n<num> は「どの @DPCM<n> を鳴らすか」の番号で音高ではない。
+ *          再生レートは定義の freq で固定。@ v @v @vr D EP EN MP K SD はEでエラー(datamake.c の許可マスク)
  *   fds  : 波形メモリ音源 (1ch)
  *   vrc7 : FM音源 (6ch)
  *   vrc6 : パルス1 パルス2 矩形波(サウ) (3ch)
@@ -38,6 +40,9 @@
  *                  直値=本家ppmck準拠。n0が最も高い(速い)ノイズ、n15が最も低い。16以上は16で巡回し警告)
  *                  ノイズch(D)の音符 c〜b は半音番号0-11がそのまま周期index(オクターブ・Kは無視、
  *                  本家ppmckと同じ。12-15は n12〜n15 でのみ書ける)
+ *                  ★DPCMch(E)では @DPCM<num> の番号(0-63)の直値=本家ppmck準拠。音符 c〜b は本家ppmckcが
+ *                  Eトラックだけオクターブの-2補正をしないため「オクターブ×16+半音番号」(o0 c=0、o1 c=16、
+ *                  o2 c=32。12-15など飛び番は n<num> でのみ書ける)。未定義の番号は警告つきで無音
  *   o<n> > <       オクターブ指定 / 上げ / 下げ
  *   l<n>[.]        デフォルト音長
  *   v<n>           音量 (0-15、絶対指定。FDS/VRC6のこぎり波だけは本家ppmck同様0-63で、
@@ -690,7 +695,10 @@
   //   RD_PITCHSHIFT)が「グライドせず通常のアタック」へフォールバックする設計なので、
   //   ブラウザ再生側も同じく通常の音符として扱い両者を一致させる(2026-08-16)
   //   noise: 2A03ノイズch(D)。音符/n<num>を周期index(0-15)として解釈し、o/>/</Kを無視する
-  //   (本家ppmck準拠、noisePeriodIndex冒頭コメント参照)。warnings(任意): ここで見つけた
+  //   (本家ppmck準拠、noisePeriodIndex冒頭コメント参照)。
+  //   dpcm: DPCMch(E)。音符/n<num>を @DPCM<n> の番号として解釈し(DPCM_NOTE_BASE 参照)、
+  //   本家ppmckc(datamake.c)がDPCMトラックで許可しないコマンド(@ v v+ v- @v @vr D EP EN MP K PT PS s)を
+  //   エラーにする。warnings(任意): ここで見つけた
   //   「エラーではないが意図と違う可能性」を積む配列(呼び出し側のwarningsへ合流させる)
   function buildSegments(tokens, initialTempo, errors, settings, defaultInstrument, chanCaps) {
     const caps = chanCaps || { selfDelay: true, toneEnv: 'duty', psAllowed: false };
@@ -698,6 +706,13 @@
     // ノイズchで無視/丸めたコマンドの警告は1チャンネル1回だけ(打楽器パートは同じ書き方を
     // 何百回も繰り返すので、出現ごとに出すと警告欄が埋まる)
     const noiseWarned = { transpose: false, directNote: false, instrument: false };
+    // DPCMch(E)で使えないコマンド(本家ppmckcはエラー)。同じコマンドの再出現は1回にまとめる
+    const dpcmRejected = new Set();
+    const dpcmReject = (name) => {
+      if (dpcmRejected.has(name)) return;
+      dpcmRejected.add(name);
+      errors.push({ message: T('{cmd} はDPCMチャンネル(E)では使用できません(本家ppmck準拠: 音符/n<num>が@DPCM番号、レートは定義のfreqで固定)', { cmd: name }) });
+    };
     const cfg = settings || { octaveRev: 0, gateDenom: 8 };
     // volMax: v<n>の上限。本家ppmck(datamake.c _VOLUME)と同じくFDS/VRC6のこぎり波だけ63、
     // 他は15。volDefault: v<n>未指定時の音量(FDS=32=実効フルゲイン、VRC6サウ=63、他=15)
@@ -914,11 +929,14 @@
         // 上限超え(v16を2A03に書く等)は本家ppmck同様エラー(ABNORMAL_VOLUME_VALUE)。
         // 相対指定の範囲超えも本家同様エラー(VOLUME_RANGE_OVER/UNDER)だがこちらはクランプに留める
         case 'volume':
+          if (caps.dpcm) { dpcmReject('v'); break; }
           if (tok.value < 0 || tok.value > volMax) {
             errors.push({ message: T('v の値は 0〜{max} で指定してください ({v})', { max: volMax, v: tok.value }) });
           }
           state.volume = Math.max(0, Math.min(volMax, tok.value)); state.envelopeV = null; state.fme7EnvShape = null; break;
-        case 'volumeRel': state.volume = Math.max(0, Math.min(volMax, state.volume + tok.delta)); state.envelopeV = null; state.fme7EnvShape = null; break;
+        case 'volumeRel':
+          if (caps.dpcm) { dpcmReject('v+/v-'); break; }
+          state.volume = Math.max(0, Math.min(volMax, state.volume + tok.delta)); state.envelopeV = null; state.fme7EnvShape = null; break;
         // 実機ppmckcは rate が 0〜denom の範囲外、rate=0でadjust<=0、rate=denomでadjust>0 を
         // エラーにする。ここは範囲に丸めるだけに留める(rateの上限は #GATE-DENOM)
         case 'gate':
@@ -940,6 +958,7 @@
         }
         case 'tempo': tempo = tok.value; break;
         case 'transpose':
+          if (caps.dpcm) { dpcmReject('K'); break; }
           // ノイズch: 本家ppmckはKをノイズtrackでエラーにする(datamake.c ALLTRACK&~NOISETRACK)。
           // 周期indexは音程ではないので移調に意味が無く、無視して警告だけ出す
           if (caps.noise) {
@@ -949,11 +968,14 @@
           state.transpose = tok.value; break;
         // D255 は本家ppmckの「ディチューン解除」(datamake.c _DETUNE: 255だけ範囲外でも通す番兵。
         // wikiの作例 `D255 n0n1…` はこれ)。0と同じ意味に正規化する
-        case 'detune': state.detune = tok.value === 255 ? 0 : tok.value; break;
+        case 'detune':
+          if (caps.dpcm) { dpcmReject('D'); break; }
+          state.detune = tok.value === 255 ? 0 : tok.value; break;
         // @<n>: 固定の音色指定。実機同様デューティ(音色)エンベロープ@@<n>を解除する
         // (ppmck internal.h duty_select_part が effect_flag のデューティエンベ有効ビットを
         // 落とすのと同じ)。ノイズchでは @0=長周期/@1=短周期(本ツール独自拡張)
         case 'instrument':
+          if (caps.dpcm) { dpcmReject('@'); break; }
           if (caps.noise && tok.value !== 0 && tok.value !== 1 && !noiseWarned.instrument) {
             noiseWarned.instrument = true;
             warnings.push({ srcStart: tok.srcStart, message: T('ノイズchの @<n> は 0(長周期)か 1(短周期)です(@{v} は下位1bitで解釈します)', { v: tok.value }) });
@@ -999,15 +1021,16 @@
           state.releaseTone = tok.value;
           break;
         }
-        case 'envelopeV': state.envelopeV = tok.value; break;
-        case 'envelopeVr': state.envelopeVr = tok.value; break;
-        case 'vibrato': state.vibrato = tok.value; break;
-        case 'pitchEnv': state.pitchEnv = tok.value; state.pitchEnvDelay = tok.delay || 0; break;
+        case 'envelopeV': if (caps.dpcm) { dpcmReject('@v'); break; } state.envelopeV = tok.value; break;
+        case 'envelopeVr': if (caps.dpcm) { dpcmReject('@vr'); break; } state.envelopeVr = tok.value; break;
+        case 'vibrato': if (caps.dpcm) { dpcmReject('MP'); break; } state.vibrato = tok.value; break;
+        case 'pitchEnv': if (caps.dpcm) { dpcmReject('EP'); break; } state.pitchEnv = tok.value; state.pitchEnvDelay = tok.delay || 0; break;
         case 'portamento':
+          if (caps.dpcm) { dpcmReject('PT'); break; }
           state.portamento = tok.target == null ? null : { target: tok.target, duration: tok.duration, delay: tok.delay };
           break;
-        case 'noteEnv': state.noteEnv = tok.value; break;
-        case 'sweep': state.sweepSpeed = tok.speed; state.sweepDepth = tok.depth; break;
+        case 'noteEnv': if (caps.dpcm) { dpcmReject('EN'); break; } state.noteEnv = tok.value; break;
+        case 'sweep': if (caps.dpcm) { dpcmReject('s'); break; } state.sweepSpeed = tok.speed; state.sweepDepth = tok.depth; break;
         case 'fme7Noise': state.fme7Noise = tok.value; break;
         case 'fme7EnvShape': state.fme7EnvShape = tok.value; break;
         case 'fme7EnvPeriod': state.fme7EnvPeriod = tok.value; break;
@@ -1096,7 +1119,7 @@
           state.pitchSa = tok.value;
           break;
         }
-        case 'pitchShift': state.pendingPitchShift = true; break;
+        case 'pitchShift': if (caps.dpcm) { dpcmReject('PS'); break; } state.pendingPitchShift = true; break;
         case 'tie': {
           if (segments.length > 0) segments[segments.length - 1].tieNext = true;
           break;
@@ -1112,7 +1135,18 @@
           }
           let freq = null;
           let noteNumber = null;
-          if (tok.name !== 'r' && caps.noise) {
+          if (tok.name !== 'r' && caps.dpcm) {
+            // DPCMch: 本家ppmckcの音符バイトは (オクターブ<<4)+半音番号 で、DPCMトラックだけオクターブの
+            // -2補正が無い(datamake.c: TRACK0-2以外は octave=com のまま)。ドライバ(dpcm.h)はそのバイトを
+            // そのまま dpcm_data の番号にするので o0 c=0 … o0 b=11、o1 c=16、o2 c=32(実ppmckcの出力で確認、
+            // 2026-09-19)。c-/b+ のオクターブまたぎも本家と同じに繰り上げ/繰り下げる。
+            // 内部表現は n<num> と同じ「noteNumber = DPCM_NOTE_BASE + 番号」
+            let semi = NOTE_SEMITONES[tok.name] + tok.accidental, oct = state.octave;
+            while (semi < 0) { semi += 12; oct--; }
+            while (semi > 11) { semi -= 12; oct++; }
+            noteNumber = DPCM_NOTE_BASE + Math.max(0, oct * 16 + semi);
+            freq = noteFrequency(noteNumber); // 「音符がある」印。DPCMに音高は無い
+          } else if (tok.name !== 'r' && caps.noise) {
             // ノイズch: 半音番号(c=0…b=11、c-=11/b+=0で巡回)がそのまま周期index。オクターブ・Kは
             // 無視(本家ppmck frequency_set は音階データの下位4bitしか見ない)。12-15は n12〜n15
             noteNumber = noisePeriodIndex(NOTE_SEMITONES[tok.name] + tok.accidental);
@@ -1136,9 +1170,13 @@
             frames = lenResult.frames;
             lengthCarry = lenResult.carryOut;
           }
-          // n<num>: オクターブ2のCを0とした通し番号。ノイズchでは周期index 0-15 の直値(本家ppmck準拠)
+          // n<num>: オクターブ2のCを0とした通し番号。ノイズchでは周期index 0-15 の直値(本家ppmck準拠)、
+          // DPCMchでは @DPCM<num> の番号の直値(本家ppmck準拠。K は使えないので加算しない)
           let noteNumber, freq;
-          if (caps.noise) {
+          if (caps.dpcm) {
+            noteNumber = DPCM_NOTE_BASE + Math.max(0, tok.num);
+            freq = noteFrequency(noteNumber);
+          } else if (caps.noise) {
             if ((tok.num < 0 || tok.num > 15) && !noiseWarned.directNote) {
               noiseWarned.directNote = true;
               warnings.push({ srcStart: tok.srcStart, message: T('ノイズchの n<num> は周期index 0〜15 です(n{v} は 16 で巡回して n{w} として鳴らします)', { v: tok.num, w: noisePeriodIndex(tok.num) }) });
@@ -2751,9 +2789,18 @@
     const layout = {};
     let offset = 0; // ページ先頭($C000)からのオフセット(バイト)
     let page = 0;   // 16KBページ番号(0起点)
+    // 同じファイル名の定義は1本のデータを共有する(本家ppmckc sortDPCM「音色のダブりを削除」と同じ)。
+    // レート(freq)やDACだけ違う定義を並べてもROMは増えない。共有側は shared:true(bytes/addr は同じ)で、
+    // ROMへ焼く側(ppmckDriver.js)とサイズ集計は shared を飛ばす
+    const byFile = {};
     for (const idx of Object.keys(dpcmSamples)) {
       const def = dpcmSamples[idx];
       if (!def.bytes || def.bytes.length === 0) continue;
+      if (byFile[def.file]) {
+        const base = byFile[def.file];
+        layout[idx] = { ...base, dac: (def.dac == null || def.dac === 255) ? null : (def.dac & 0x7F), shared: true };
+        continue;
+      }
       const rawLen = def.bytes.length;
       const lengthReg = Math.min(255, Math.max(0, Math.ceil((rawLen - 1) / 16)));
       const playLen = lengthReg * 16 + 1;
@@ -2779,6 +2826,7 @@
         // (HESの長いDDA/PCM抽出で実測)。再生されない末尾は切り詰めて安全側に倒す。
         bytes: def.bytes.slice(0, playLen)
       };
+      byFile[def.file] = layout[idx];
       offset += playLen;
     }
     return layout;
@@ -2792,35 +2840,17 @@
     return n;
   }
 
-  // o4 c (noteNumber=48) を基準ノートとする。@DPCM<n>のfreq(0-15)は「基準ノートを
-  // 鳴らした時のレート」を表し、他の音高はDMC_RATE_TABLE_NTSC上で基準からの
-  // オクターブ比(2^(半音差/12))に最も近い(対数距離で比較)レートへ丸める
-  const DPCM_BASE_NOTE = 48;
+  // DPCMチャンネル(E)の音符は「@DPCM<番号>の選択」で音高ではない(本家ppmck準拠、2026-09-19。
+  // 以前は @<n> でサンプルを選び音符の音高でレートを変える独自方式だった)。内部の noteNumber は
+  // n<num> と同じ「オクターブ2のC=0」の通し番号で持つので、番号 = noteNumber - DPCM_NOTE_BASE。
+  // 定義番号は本家 _DPCM_MAX と同じ 0〜63
+  const DPCM_NOTE_BASE = 24;
+  const DPCM_DEF_MAX = 63;
 
-  // ノート音高(noteNumber)から、@DPCM<n>のfreq(基準レート)を起点に最も近い
-  // DMCレート(0-15)を選ぶ。実機のレート表は等間隔の音階ではない(実機自体の制約)ため、
-  // 半音単位の完全な音程は出せず最近傍への量子化になる
-  function dpcmRateIndexForNote(baseFreqIndex, noteNumber) {
-    const table = (MML.Dpcm && MML.Dpcm.DMC_RATE_TABLE_NTSC) || null;
-    if (!table) return baseFreqIndex & 0x0F;
-    const baseHz = table[baseFreqIndex & 0x0F] || table[8];
-    const targetHz = baseHz * Math.pow(2, (noteNumber - DPCM_BASE_NOTE) / 12);
-    let best = 0, bestDiff = Infinity;
-    for (let i = 0; i < table.length; i++) {
-      const diff = Math.abs(Math.log2(table[i] / targetHz));
-      if (diff < bestDiff) { bestDiff = diff; best = i; }
-    }
-    return best;
-  }
-
-  // @<n>(instrument)で選択した@DPCM<n>サンプルを、音符が来るたびにトリガーする。
-  // ノートの音高(noteNumber)は、そのサンプル定義のfreq(基準レート)を起点に
-  // dpcmRateIndexForNoteで最も近いDMCレートへ変換し、$4010の下位4bitとして使う
-  // (実機同様、疑似的な音階表現に対応。ただしDMCレート表自体が均等な音階ではないため
-  // 厳密な半音は出ない)。このツール独自の簡略化点: 実機ppmckはノートバイトの値が
-  // 直接dpcm_dataテーブルのインデックスになる(サンプル選択そのものがノート値)方式だが、
-  // 本実装では既存のFDS/N163と同じ「@<n>でサンプルを選び、ノートは音高+トリガー」
-  // 方式に統一した(サンプル選択と音高を分離できる分、MML表現としては柔軟)
+  // 音符の番号(noteNumber - DPCM_NOTE_BASE)が指す @DPCM<n> を、音符が来るたびに頭からトリガーする。
+  // $4010 = (mode<<6)|freq は定義の値そのもの(本家ppmckc writeDPCM の1バイト目 freq|(mode<<6) と同じ。
+  // bit7=IRQ は本家でも非推奨なので落とす)。未定義の番号は何も書かない(=無音。本家は dpcm_data の
+  // 空行 0,0,0,0 を鳴らすだけでエラーにしない)。警告は compile() 側で1番号1回出す
   function segmentsToWriteLogDpcm(segments, totalFrames, dpcmLayout, dpcmSamples) {
     const writeLog = newWriteLog(totalFrames);
     const pages = dpcmPageCount(dpcmLayout);
@@ -2830,11 +2860,11 @@
       const startFrame = frame;
       const dur = Math.min(seg.durationFrames, totalFrames - frame);
       if (seg.freq != null) {
-        const layout = dpcmLayout[seg.instrument];
-        const def = dpcmSamples[seg.instrument];
+        const idx = seg.noteNumber - DPCM_NOTE_BASE;
+        const layout = dpcmLayout[idx];
+        const def = dpcmSamples[idx];
         if (layout && def) {
-          const rateIndex = dpcmRateIndexForNote(def.freq, seg.noteNumber);
-          const control = ((def.mode ? 0x40 : 0) | (rateIndex & 0x0F)) & 0x7F;
+          const control = (((def.mode & 3) << 6) | (def.freq & 0x0F)) & 0x7F;
           writeLog[startFrame].push({ addr: 0x4015, value: 0x0F }); // DMC一旦停止(2A03他chは維持)
           if (pages > 1) {
             // ページ切替(2026-09-10): NSFと同じ $5FFC-$5FFF(窓4-7)へ「仮想バンク番号=ページ×4+k」を書く。
@@ -2905,13 +2935,16 @@
     const expansionLetterMap = assignExpansionLetters(expansions);
     const expansionLetters = expansions.flatMap(exp => expansionLetterMap[exp]);
 
-    // @DPCM<n>定義と opt.dpcmSamples[filename]=Uint8Array(UI層でファイル選択・変換済みの
-    // バイト列)を突き合わせる。フェーズA: ここではまだ実際の再生チャンネルへは配線しない
-    // (専用チャンネル文字の割当は別タスク。ROADMAP.mdフェーズ9参照)。bytesがnullの場合は
-    // 未読込(該当ファイルがopt.dpcmSamplesに渡されていない)ことを示す
+    // @DPCM<n>定義と opt.dpcmSamples[filename]=Uint8Array(台帳 main.js dpcmSampleCache の
+    // バイト列)を突き合わせる。bytesがnullの場合は未読込(下で dpcm-missing 警告)。
+    // 番号は本家 _DPCM_MAX と同じ 0〜63(dpcm_data は 64行×4バイト)
     const dpcmSamples = {};
     for (const idx of Object.keys(envelopes.dpcm)) {
       const def = envelopes.dpcm[idx];
+      if ((idx | 0) > DPCM_DEF_MAX) {
+        errors.push({ message: T('@DPCM の番号は 0〜{max} です(@DPCM{n}。本家ppmckと同じ64本まで)', { max: DPCM_DEF_MAX, n: idx }) });
+        continue;
+      }
       dpcmSamples[idx] = { ...def, bytes: (opt.dpcmSamples && opt.dpcmSamples[def.file]) || null };
     }
     const dpcmLayout = layoutDpcmSamples(dpcmSamples);
@@ -2980,6 +3013,7 @@
         n163: (expansionLetterMap.n163 || []).includes(ch),
         psAllowed: ch === 'A' || ch === 'B' || ch === 'C',
         noise: ch === 'D',
+        dpcm: (expansionLetterMap.dpcm || []).includes(ch),
         warnings: segmentWarnings,
         // 音量6bitチャンネル(本家ppmck FMTRACK|VRC6SAWTRACK相当)。FDSは$4080の実効ゲインが
         // 32で頭打ちなので既定音量32、VRC6サウは蓄積レートそのままなので63
@@ -3054,6 +3088,18 @@
       if (dpcmSamples[idx].bytes && dpcmSamples[idx].bytes.length) continue;
       warnings.push({ kind: 'dpcm-missing', message: T('@DPCM{n} の "{file}" が読み込まれていないため、この音は鳴りません(.dmc を MML と一緒に開くか、ウィンドウへドロップしてください)', { n: idx, file: dpcmSamples[idx].file }) });
     }
+    // E の音符が指す @DPCM 番号が未定義: 本家ppmckは dpcm_data の空行を鳴らすだけでエラーにしないので、
+    // ここも警告に留めて無音にする(segmentsToWriteLogDpcm は layout が無ければ何も書かない)。1番号1回
+    for (const ch of (expansionLetterMap.dpcm || [])) {
+      const seen = new Set();
+      for (const seg of segmentsByChannel[ch] || []) {
+        if (seg.freq == null) continue;
+        const idx = seg.noteNumber - DPCM_NOTE_BASE;
+        if (dpcmSamples[idx] || seen.has(idx)) continue;
+        seen.add(idx);
+        warnings.push({ kind: 'dpcm-undefined', srcStart: seg.srcStart, message: T('{ch} の n{n} に対応する @DPCM{n} が定義されていないため、この音は鳴りません', { ch, n: idx }) });
+      }
+    }
     {
       const chipOf = {};
       chipOf.A = chipOf.B = { kind: 'pulse', periodMax: 2047, label: '2A03 ' + T('パルス') };
@@ -3114,9 +3160,31 @@
       }
     }
 
+    // トラック終端の無音化(2026-09-19): 曲より先に終わるチャンネルは、最後の音符の直後で無音にする。
+    // NSF書き出しのドライバはトラック終端(0xFF)で SILENCE_CH を呼んで止める(ppmckDriver.js
+    // RD_ENDTRACK_STOP)のに、ここは何も書かず最後の音が曲の終わりまで鳴りっぱなしだった
+    // (音量の無い三角波で顕著。組み込みサンプルを章ごとに順番に鳴らすようにして発覚)。
+    // 書き込みログ生成に渡す列の末尾へ「残り全部の休符」を足すだけにして、各チップの休符処理に任せる。
+    // segmentsByChannel 自体は変えない(NSFのバイトコードに余計な休符を足さない。ドライバは自前で止める)。
+    // L(ループ地点)を持つチャンネルは止めない(下の複製で周回する)。DPCMは休符でも止まらない(本家準拠)
+    const segsForLog = (ch) => {
+      const segs = segmentsByChannel[ch] || [];
+      if (!segs.length || loopFrameByChannel[ch] != null) return segs;
+      const last = segs[segs.length - 1];
+      if (last.freq == null) return segs; // もう休符で終わっている
+      let len = 0;
+      for (const s of segs) len += s.durationFrames;
+      if (len >= totalFrames) return segs;
+      return segs.concat([Object.assign({}, last, {
+        durationFrames: totalFrames - len, freq: null, noteNumber: null,
+        srcStart: last.srcEnd, srcEnd: last.srcEnd,
+        keyOffAt: null, psGlide: null, pitchBreaks: null, tieNext: false
+      })]);
+    };
+
     const tracks = {};
     for (const ch of ['A', 'B', 'C', 'D']) {
-      tracks[ch] = segmentsToWriteLog2A03(ch, segmentsByChannel[ch], totalFrames, envelopes);
+      tracks[ch] = segmentsToWriteLog2A03(ch, segsForLog(ch), totalFrames, envelopes);
     }
 
     for (const exp of expansions) {
@@ -3138,7 +3206,7 @@
         extra = { numN163Ch: numN163Ch, n163Occurrences: allocResult.occurrences };
       }
       letters.forEach((ch, index) => {
-        tracks[ch] = buildExpansionWriteLog(exp, ch, index, segmentsByChannel[ch], totalFrames, envelopes, dpcmLayout, dpcmSamples, extra);
+        tracks[ch] = buildExpansionWriteLog(exp, ch, index, segsForLog(ch), totalFrames, envelopes, dpcmLayout, dpcmSamples, extra);
         // OP<n>(VRC7音色)/MH<n>(FDS変調)による曲中の動的切り替えをこのchへ差し込む
         if (exp === 'vrc7') {
           // 第6引数 true = 音符の書き込みより前へ(音色をロードしてからキーオンする。
@@ -3300,7 +3368,7 @@
   Mml.N163_CHANNEL_COUNT = N163_CHANNEL_COUNT;
   Mml.fdsDefaultWave = fdsDefaultWave;
   Mml.n163DefaultWave = n163DefaultWave;
-  Mml.dpcmRateIndexForNote = dpcmRateIndexForNote;
   Mml.dpcmPageCount = dpcmPageCount;
-  Mml.DPCM_BASE_NOTE = DPCM_BASE_NOTE;
+  Mml.DPCM_NOTE_BASE = DPCM_NOTE_BASE;
+  Mml.DPCM_DEF_MAX = DPCM_DEF_MAX;
 })(window);

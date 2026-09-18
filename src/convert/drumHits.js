@@ -369,7 +369,7 @@
           const idx = ensurePiece(cache, k);
           if (idx == null) { if (p.used) dropped++; continue; } // 未使用の区間は休符(定義も打点も無し)
           // 手動分割で1区間だけ(=上限内)なら普通の打点と同じ扱い(exact にしない)
-          events.push({ start: f, end: Math.min(f + p.frames, endF), note: 48, instrument: idx, exact: cache.plan.length > 1 });
+          events.push({ start: f, end: Math.min(f + p.frames, endF), note: dpcmNote(idx), exact: cache.plan.length > 1 });
         }
         continue;
       }
@@ -393,10 +393,51 @@
                     sampleCount: encoded.sampleCount, dac, mode: 0 });
         clipIndexByKey.set(clipKey, index);
       }
-      events.push({ start: t0, end: Math.max(t0 + 1, t1), note: 48, instrument: index });
+      events.push({ start: t0, end: Math.max(t0 + 1, t1), note: dpcmNote(index) });
     }
+    // 定義は本家と同じ64本まで。溢れたぶんは使用回数の少ない定義から落とす(capDefs)
+    const overflow = capDefs(defs, events, files).dropped;
     const bytes = files.reduce((a, f) => a + f.bytes.length, 0);
-    return { defs, files, events, stats: { clips: defs.length, bytes, segments: events.length, dropped, normGain, splitClips, pieceDefs }, noiseHits };
+    return { defs, files, events, stats: { clips: defs.length, bytes, segments: events.length, dropped, normGain, splitClips, pieceDefs, overflow }, noiseHits };
+  }
+
+  // ── E の音符 = @DPCM 番号(本家ppmck準拠 2026-09-19) ──
+  // イベントの note は compiler.js と同じ noteNumber = 24(o2 c) + 番号(src/convert/mmlEmit.js DPCM_NOTE_BASE)。
+  // 以前は note:48(o4 c)固定+instrument:番号 で「@<n>で選ぶ」方式だった
+  const DPCM_NOTE_BASE = 24;
+  function dpcmNote(idx) { return DPCM_NOTE_BASE + Math.max(0, idx | 0); }
+  function dpcmIndexOf(note) { return Math.round(note) - DPCM_NOTE_BASE; }
+  const DPCM_DEF_MAX = 64; // 本家 _DPCM_MAX(dpcm_data は 64 行)
+
+  /**
+   * @DPCM 定義を本家と同じ64本に収める(超えた曲は SPC/HES に実在する)。
+   * 使用回数(打点数)の少ない定義から落とし、残りを 0.. に詰め直して打点の note も付け替える。
+   * defs/events/files は配列をその場で書き換える(呼び出し側の const を保つため)。
+   * files は {name} を持つ配列(省略可)。戻り値 { dropped: 落とした定義数, droppedEvents }
+   */
+  function capDefs(defs, events, files, max) {
+    max = max || DPCM_DEF_MAX;
+    if (!defs || defs.length <= max) return { dropped: 0, droppedEvents: 0 };
+    const use = new Map();
+    for (const ev of events) { const i = dpcmIndexOf(ev.note); use.set(i, (use.get(i) || 0) + 1); }
+    const order = defs.map(d => d.index).sort((a, b) => (use.get(b) || 0) - (use.get(a) || 0) || a - b);
+    const keep = new Set(order.slice(0, max));
+    const remap = new Map();
+    let k = 0;
+    for (const d of defs) if (keep.has(d.index)) remap.set(d.index, k++);
+    const newDefs = defs.filter(d => keep.has(d.index)).map(d => Object.assign({}, d, { index: remap.get(d.index) }));
+    const before = events.length;
+    const newEvents = events.filter(ev => remap.has(dpcmIndexOf(ev.note)))
+      .map(ev => Object.assign({}, ev, { note: dpcmNote(remap.get(dpcmIndexOf(ev.note))) }));
+    const dropped = defs.length - newDefs.length;
+    defs.length = 0; defs.push(...newDefs);
+    events.length = 0; events.push(...newEvents);
+    if (files) {
+      const used = new Set(newDefs.map(d => d.file));
+      const newFiles = files.filter(f => used.has(f.name));
+      files.length = 0; files.push(...newFiles);
+    }
+    return { dropped, droppedEvents: before - newEvents.length };
   }
 
   // ── ノイズパッド(2026-09-18): 打点 → 2A03ノイズ(D)の音符列 ─────────────────────────
@@ -662,5 +703,6 @@
     };
   }
 
-  MML.Convert.DrumHits = { dpcm, obs, channel, noise, applyNoise, isNoiseTargeted, effectiveTarget, noiseToneOf, MAX_CLIP_SEC };
+  MML.Convert.DrumHits = { dpcm, obs, channel, noise, applyNoise, isNoiseTargeted, effectiveTarget, noiseToneOf, MAX_CLIP_SEC,
+    capDefs, dpcmNote, dpcmIndexOf, DPCM_NOTE_BASE, DPCM_DEF_MAX };
 })(window);

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-18 13:29:45
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 05:34:53
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-18 13:29:45';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-19 05:34:53';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -19432,7 +19432,8 @@
       const kb = (cost.bytes / 1024).toFixed(1);
       this._dpcmCostEl.innerHTML =
         `<span class="kbd-dpcm-cost-label">DPCM</span>` +
-        T('定義 {clips} / 打点 {segments} / ROM {kb} KB', { clips: cost.clips, segments: cost.segments, kb });
+        T('定義 {clips} / 打点 {segments} / ROM {kb} KB', { clips: cost.clips, segments: cost.segments, kb })
+        + (cost.overflow ? T(' / 定義が64本を超えたため {n} 本を落とします', { n: cost.overflow }) : ''); // drumHits.js capDefs
       // ROMが大きいときは色で知らせる。16KB(DMC領域1ページ)を超えると16KBごとのページに分けて
       // トリガー時にバンク切替する(2026-09-10、無音にはならない)ので、16KB超=黄色「大きい」だけ
       this._dpcmCostEl.classList.toggle('kbd-dpcm-cost--warn', cost.bytes >= 16 * 1024);
@@ -20973,19 +20974,22 @@
         // vol はロールが使うレジスタどおりの値なので混ぜない。
         const volShown = ch.volApparent !== undefined ? ch.volApparent : ch.vol;
         const pct = showVol ? Math.round(volShown * 100) : 0;
-        el.volBar.style.width = pct + '%';
-        el.volBar.style.background = pct > 0 ? el.color : 'transparent';
-
-        // 減衰エンベロープ、DMC直接書き込み、または見かけ音量が下がっている(maskBy)時は
-        // 音量数値を黄色にして「レジスタをそのまま読んだ値ではない/そのとおりには鳴っていない」を示す。
+        // 黄色の使い分け(ユーザー指示 2026-09-19。以前は3つとも「数値が黄色」で見分けが付かなかった):
+        //   ・音量バーが黄色   … 干渉(maskBy)。三角波/ノイズ/DPCM($4011)が同じ非線形tndミキサーに乗っていて、
+        //                        レジスタ値どおりの大きさでは聞こえていない。バーの長さも干渉込みの見かけ音量
+        //   ・音量の数値が黄色 … ハードウェアの減衰エンベロープ(envMode)で鳴っている=数値はレジスタの音量では
+        //                        なくエンベロープの現在値。DMCの$4011直接書き込み(dmcWritten)も従来どおり数値側
         const masked = showVol && !!ch.maskBy;
+        el.volBar.style.width = pct + '%';
+        el.volBar.style.background = pct > 0 ? (masked ? '#ffcc44' : el.color) : 'transparent';
+
         // volText: 音量数値の文字列指定(2026-09-17)。音量値そのものを持たず L/R でしか
         //   音量が決まらないチップ(C140/C352/SegaPCM)は '—' を入れる。バーはそのまま出す。
         const rawStr = ch.volText !== undefined ? (showVol || ch.volText === VOL_NONE ? ch.volText : '')
           : ((showVol && ch.rawVol !== null && ch.rawVol !== undefined) ? String(ch.rawVol) : '');
         el.volNum.textContent = rawStr;
         el.volNum.style.color = (!rawStr || rawStr === VOL_NONE) ? '#555566'
-          : ((ch.envMode === true || dmcWritten || masked) ? '#ffcc44' : '#e6e6ef');
+          : ((ch.envMode === true || dmcWritten) ? '#ffcc44' : '#e6e6ef');
         // 干渉で音量が下がっている行は音量バーの枠も黄色にして、バーの短さが
         // 「レジスタが小さい」ではなく「干渉で削られている」ことを示す。
         if (el.volWrap && el.volMasked !== masked) {
@@ -22433,7 +22437,8 @@
   //     レジスタの整数丸めによる偏差は音符ごとに±どちらにも出るので大量に集めると打ち消し合い、
   //     ドライバ固有の全体ずれだけが残る。平均でなく中央値なのはベンド/ビブラート中の外れ値に
   //     引っ張られないため
-  //   - ノイズ(D)/DPCM(E)/ドラム/ノート番号が周期そのもののイベントは音程の意味が違うので除外
+  //   - ノイズ(D)/DPCM(E)/ドラム/ノート番号が周期そのもの(D)や@DPCM番号そのもの(E、本家ppmck準拠)の
+  //     イベントは音程の意味が違うので除外
   //   - 四分位範囲が広い(opts.maxIqr、既定30セント)=曲全体がピッチ操作だらけ、または区間/チップで
   //     基準が二極化していて「全体ずれ」とは言えない場合と、音符が少なすぎる場合(opts.minCount、
   //     既定8)は 0(適用しない)。実測: HES NC62001 は中央値-33で四分位範囲40、適用すると10セント超の
@@ -23491,15 +23496,49 @@
     // 統合しない。他形式のイベントにはこれらのキー自体が存在しないため素通りする。
     'srcn', 'adsr1', 'adsr2', 'gain'
   ];
-  function hysteresisCompatible(a, b) {
+  // prev: a の直前に吸収済みのイベント(省略可)。デューティだけは「音符の先頭同士」ではなく
+  // 「直前フレームとの連続性」で比べる(2026-09-19): 音符の途中でデューティが変わる曲(NSFのデューティ
+  // エンベロープ @@<n>。抽出器は区切らず dutySeq に積む)では、ビブラートの谷で割れた側の先頭デューティは
+  // 「その時点の値」になり、音符先頭(立ち上がりの音色)とは必ず食い違う。連続していれば音色の切替ではない
+  function hysteresisCompatible(a, b, prev) {
     for (const k of HYSTERESIS_HARD_KEYS) {
-      if ((k in a || k in b) && a[k] !== b[k]) return false;
+      if (!(k in a || k in b)) continue;
+      // envKey(NSF: $4000/$4004/$400C の下位6bit)は、固定音量モードでは下位4bitが「音量そのもの」。
+      // ソフトウェア音量エンベロープで音量が下がるたびに値が変わるので、固定音量同士では比べない
+      // (ハードウェアエンベロープ同士なら周期/ループの違い=別の音なので従来どおり比べる)。2026-09-19
+      // ★この緩和は prev を渡す呼び出し(=mergeAlternatingVibrato、隣接半音のビブラート統合)だけに効かせる。
+      //   mergeRapidArpeggio やスラー判定にまで効かせると、音量を変えながらオクターブ違いの2音を交互に鳴らす
+      //   パート(Crisis Force のパルス1)が1つのアルペジオ音符にまとめられ、タイミングと音量差が失われた
+      if (k === 'envKey' && prev && a.constVol === true && b.constVol === true) continue;
+      if (k === 'duty' && prev && prev.dutySeq && prev.dutySeq.length && a.dutySeq && a.dutySeq.length) {
+        if (a.dutySeq[0] !== prev.dutySeq[prev.dutySeq.length - 1]) return false;
+        continue;
+      }
+      if (a[k] !== b[k]) return false;
     }
     return true;
   }
   function concatField(list, key) {
     if (!list[0] || !list[0][key]) return undefined;
     return list.reduce((acc, e) => acc.concat(e[key] || []), []);
+  }
+
+  // 「後半が周期的」か: ディレイ付きで深さが育っていくビブラート(±2→±4→±6 と広がってから一定になる。
+  // コナミのドライバに多い)は、立ち上がり部分のせいで全体としては classifyPitchMod が 'literal' を返す。
+  // 先頭を少しずつ捨てた残りが 'periodic' になるなら「これはビブラート」と判断してよい。
+  // ★2026-09-19 Crisis Force(NSF)曲1のパルス2で発覚: 元の音が少し低め(D-1)で深さ±45セントの
+  //   ビブラートの谷の2フレームだけが半音下に丸まり、そこで音符が割れていた(c&c4&c <b48 >c. …)。
+  //   割れた b は基準周期(253)で鳴るので元の 246 と合わず、続く c は EP が頭からやり直しになって
+  //   ビブラートの中心がずれる=音痴に聞こえる。統合すれば1音符+EPで元の周期列がそのまま再現される
+  const PERIODIC_TAIL_MAX_SKIP = 64;  // 先頭から捨ててよい最大フレーム数(立ち上がりの長さの上限)
+  const PERIODIC_TAIL_MIN_LEN = 16;   // 残りがこれ未満なら周期性の裏付けとして弱いので見ない
+  function hasPeriodicTail(seq) {
+    const maxSkip = Math.min(PERIODIC_TAIL_MAX_SKIP, seq.length - PERIODIC_TAIL_MIN_LEN);
+    for (let k = 1; k <= maxSkip; k++) {
+      const c = MML.Convert.classifyPitchMod(seq.slice(k));
+      if (c && c.type === 'periodic') return true;
+    }
+    return false;
   }
 
   MML.Convert.mergeAlternatingVibrato = function (events, opts) {
@@ -23525,7 +23564,7 @@
             break; // 3値目が出たら対象外(こぶし・グリッサンド等はここで自然に除外される)
           }
         }
-        if (!hysteresisCompatible(seg, home)) break;
+        if (!hysteresisCompatible(seg, home, absorbed[absorbed.length - 1])) break;
         absorbed.push(seg);
         j++;
       }
@@ -23569,12 +23608,17 @@
         }
         const isTrill = spanCents >= TRILL_MIN_CENTS && middleFrac < TRILL_MIDDLE_FRAC_MAX;
         const spanOk = !(opts && opts.maxAbsorbCents != null && spanCents >= opts.maxAbsorbCents);
-        if (classified && classified.type === 'periodic' && !isTrill && spanOk) {
+        const periodic = !!classified && (classified.type === 'periodic' ||
+          (!isTrill && spanOk && hasPeriodicTail(candidateSeq)));
+        if (periodic && !isTrill && spanOk) {
           result.push(Object.assign({}, home, {
             end: last.end,
             volSeq: concatField(absorbed, 'volSeq'),
             // mergeRapidArpeggio側と同じ理由でフレーム毎の並びのまま繋ぐ
             hwEnvSeq: concatField(absorbed, 'hwEnvSeq'),
+            // デューティもフレーム毎の並びのまま繋ぐ(繋がないと dutySeq が home ぶんの長さしか無く、
+            // 後段のデューティエンベロープ抽出が音符の途中で切れる)
+            dutySeq: concatField(absorbed, 'dutySeq'),
             pitchSeq: candidateSeq
           }));
           i = j;
