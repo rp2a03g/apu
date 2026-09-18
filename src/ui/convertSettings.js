@@ -440,6 +440,12 @@
     baCb.addEventListener('change', () => setKey('BAR_ALIGN', baCb.checked));
     lySec.appendChild(line(baCb, T('小節を揃える'), T('小節の頭を縦にそろえる'), null, T('小節の区切りを全パートで同じ桁に揃える(空白で埋める)。OFFならスペース1つで区切る')));
     checks.BAR_ALIGN = baCb;
+    // ループを自動検出(LOOP_DETECT、src/convert/mmlEmit.js detectLoop)。プリセット外(出力の書式と同じ扱い)
+    const ldLoopCb = document.createElement('input'); ldLoopCb.type = 'checkbox';
+    ldLoopCb.addEventListener('change', () => setKey('LOOP_DETECT', ldLoopCb.checked));
+    lySec.appendChild(line(ldLoopCb, T('ループを自動検出'), T('イントロ+1周だけ書き出して L を置く'), null,
+      T('元曲のループ周期を全チャンネルの音符列から検出し、イントロ+1周ぶんだけを書き出して各チャンネルのループ開始位置に L を置きます。長く変換しても曲データが1周ぶんで済むのでNSFが小さくなります。イントロとループ1周の長さは全チャンネルで一致させます(ずれると周回のたびにチャンネルがずれていくため)。一致させられない場合と、変換した長さが「イントロ+2周」に満たず確認できない場合は、通常どおり全部を書き出します')));
+    checks.LOOP_DETECT = ldLoopCb;
     body.appendChild(lySec);
 
     // ── 4. 詳細設定(折りたたみ) ──

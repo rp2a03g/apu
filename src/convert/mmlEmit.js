@@ -183,6 +183,12 @@
       const ev = events[evIdx];
       const dur = ev.end - ev.start;
       if (dur <= 0) continue;
+      // ループ自動検出(emitScore): ループ開始位置の最初のイベントの前に L を置き、状態を出し直させる
+      if (flags.loopStart != null && !state.loopEmitted && ev.start >= flags.loopStart) {
+        emit('L');
+        state.loopEmitted = true;
+        forceReemit(state, flags);
+      }
       state.durCarryBefore = state.durCarry;
       // 分割DPCMのチェーンの直前のイベント: 位置を厳密に(持ち越しをここで吸収し、丸めは 192 分の半分まで)。
       // チェーンの頭がフレーム整数からずれて入ると、区間の長さは厳密でも境界のフレーム丸めが
@@ -228,7 +234,15 @@
         if (relEnd != null && relEnd < ev.end) {
           const kFrames = relEnd - ev.start;
           const kq = MML.Convert.framesToLengths(kFrames, fpb, state.durCarryBefore, flags.lenSnap);
-          const rq = MML.Convert.framesToLengths(dur - kFrames, fpb, kq.carryOut, flags.lenSnap);
+          let rq = MML.Convert.framesToLengths(dur - kFrames, fpb, kq.carryOut, flags.lenSnap);
+          // ループ自動検出中は計画済みの音長(planned)の合計tickを必ず保つ(k と r に分けても、このイベントの
+          // 合計が変わるとループ開始/終端の位置がチャンネルごとにずれる)。r 側を「合計 − k」の厳密分解にする
+          if (planned && flags.loopStart != null) {
+            const rTicks = MML.Convert.lengthsTicks(planned) - MML.Convert.lengthsTicks(kq.lengths);
+            const exactR = rTicks >= MML.Convert.LENGTH_QUANTUM ? MML.Convert.ticksToLengthsExact(rTicks) : null;
+            if (exactR) rq = { lengths: exactR, carryOut: 0 };
+            else { emit(fmtLens('k', planned), true); state.prevRestWasK = true; state.prevEv = ev; continue; }
+          }
           state.durCarry = rq.carryOut;
           emit(fmtLens('k', kq.lengths), true);
           emit(fmtLens('r', rq.lengths), true);
@@ -460,8 +474,30 @@
       curVrc7Tone: -1, curFdsMod: 'off', curDetune: 0, curPitchSa: 0, curPitchEp: null, curPitchEpDelay: 0,
       curNoteEnv: null, curVibrato: null, curSweep: 's0', curGateQ: 'q8', curGateK: 0,
       curPortamentoTarget: null, curPortamentoDuration: 0, curPortamentoDelay: 0,
-      lastWasNote: false, hasEmitted: false
+      lastWasNote: false, hasEmitted: false,
+      loopEmitted: false // ループ自動検出: このチャンネルに L をもう出したか(renderEvents)
     };
+  }
+
+  // ── L(ループ地点)の直後で状態コマンドを出し直させる ──────────────────────────
+  // ループで L へ戻ったとき、チャンネルの状態(音量/音色/オクターブ/ゲート/EP/MP/EN/PT/D…)は「ループ末尾の
+  // 状態」のままなので、L の直後の音符は必要なコマンドを全部書き直していないと1周目と違う音になる。
+  // 出力は「前回との差分だけ出す」作りなので、L のところで「前回の状態」をどの値とも一致しない値にして
+  // 全部出し直させる。OFF 系(EPOF/MPOF/ENOF/PTOF/@vr255/D0/s0 …)も同じ仕組みで出る。
+  // ★そのチャンネルで一度も使わないコマンドは出し直さない: SA<n> は N163 以外、@@r<n> はノイズ等で
+  //   コンパイルエラーになる(使っていなければ状態は既定値のまま動かないので、出し直す必要も無い)
+  const UNKNOWN = '?';
+  function forceReemit(state, flags) {
+    state.curOct = -1; state.curVol = -1; state.curInst = -1; state.curEnvV = -1; state.curVolMode = null;
+    state.curEnvVr = UNKNOWN; state.curToneEnv = UNKNOWN;
+    if (flags.usesRelTone) state.curRelTone = UNKNOWN;
+    state.curFme7Shape = -1; state.curFme7Period = -1; state.curFme7Noise = -1;
+    state.curVrc7Tone = -1; state.curFdsMod = UNKNOWN; state.curDetune = UNKNOWN;
+    if (flags.usesSa) state.curPitchSa = UNKNOWN;
+    state.curPitchEp = UNKNOWN; state.curPitchEpDelay = UNKNOWN; state.curNoteEnv = UNKNOWN; state.curVibrato = UNKNOWN;
+    state.curSweep = UNKNOWN; state.curGateQ = UNKNOWN; state.curGateK = -1;
+    state.curPortamentoTarget = UNKNOWN; state.curPortamentoDuration = UNKNOWN; state.curPortamentoDelay = UNKNOWN;
+    state.durCarry = 0; state.exactCarry = 0;
   }
 
   // ── 1チャンネル分の連続テキスト (80桁折り返し) ──────────────────────
@@ -573,6 +609,186 @@
     return buckets;
   }
 
+  // ── ループ自動検出(変換設定 LOOP_DETECT、2026-09-19) ──────────────────────────
+  // 全チャンネルの音符列をフレームごとの署名(音程+その音符の頭か)にして、「T フレーム後ろへずらしても
+  // 一致する区間」が末尾から最も長く続く周期 T を探す。戻り値 { start, period, span } か null。
+  //   start  … 周期性が成り立ち始めるフレーム(=イントロの終わり)
+  //   period … ループ1周のフレーム数
+  //   span   … 一致を確認できた長さ(フレーム)。1周ぶん以上確認できたものだけ採用する
+  // ・キャプチャが「イントロ+2周」より短いと確認できないので検出しない(変換する長さを伸ばす)
+  // ・曲が終わって無音が続くだけの末尾は「どの T でも一致」するので、ループ区間に音符が無ければ捨てる
+  // ・T の倍数も候補になるが、確認できた長さ(span)が最大の T を選ぶので基本周期が勝つ
+  const LOOP_MIN_PERIOD = 240;        // 4秒未満の周期はリフの繰り返しと区別できないので見ない
+  const LOOP_MISMATCH_RATE = 0.003;   // 一致区間に許す食い違いの割合(キャプチャの1フレーム揺れを許す)
+  const LOOP_MIN_ONSETS = 8;          // ループ1周に最低これだけ音符の頭が無ければループと見なさない
+  MML.Convert.detectLoop = function (channelsData, totalFrames) {
+    const N = totalFrames | 0;
+    if (N < LOOP_MIN_PERIOD * 2) return null;
+    const sig = new Int32Array(N);
+    const busy = new Uint8Array(N);
+    const onset = new Uint8Array(N); // そのフレームでどれかのチャンネルの音符が始まる
+    for (const chan of channelsData || []) {
+      const lane = new Int32Array(N); // 0=休符
+      for (const ev of chan.events || []) {
+        if (ev.note == null) continue;
+        const a = Math.max(0, ev.start | 0), b = Math.min(N, ev.end | 0);
+        const v = (Math.round(ev.note) + 4) * 2;
+        for (let f = a; f < b; f++) { lane[f] = v + (f === a ? 1 : 0); busy[f] = 1; }
+        if (a < N) onset[a] = 1;
+      }
+      for (let f = 0; f < N; f++) sig[f] = (Math.imul(sig[f], 1000003) + lane[f] + 7) | 0;
+    }
+    let best = null;
+    for (let T = LOOP_MIN_PERIOD; T * 2 <= N; T++) {
+      // 早期棄却: 最後の1周ぶんを粗く見て、明らかに合わない T は飛ばす
+      let quick = 0;
+      const step = Math.max(1, (T / 48) | 0);
+      for (let f = N - T - 1, k = 0; k < 48 && f >= N - 2 * T; f -= step, k++) if (sig[f] !== sig[f + T]) quick++;
+      if (quick > 3) continue;
+      let mism = 0, start = N - T;
+      for (let f = N - T - 1; f >= 0; f--) {
+        if (sig[f] !== sig[f + T]) mism++;
+        const len = N - T - f;
+        if (mism > LOOP_MISMATCH_RATE * len + 8) break;
+        if (sig[f] === sig[f + T] && mism <= Math.max(2, LOOP_MISMATCH_RATE * len)) start = f;
+      }
+      const span = N - T - start;
+      if (span < T) continue; // 1周ぶん確認できていない
+      if (!best || span > best.span) best = { start, period: T, span };
+    }
+    if (!best) return null;
+    let sounding = 0, onsets = 0;
+    for (let f = best.start; f < best.start + best.period; f++) { sounding += busy[f]; onsets += onset[f]; }
+    if (sounding < best.period * 0.05) return null; // ほぼ無音の区間=曲が終わっているだけ
+    // 曲が終わったあと1音が鳴りっぱなし(または消え残り)の末尾も「どの T でも一致」する。ループ1周の中に
+    // 音符の頭がほとんど無ければ曲ではないので捨てる(Batman (Prototype) 曲1 の末尾で誤検出した)
+    if (onsets < LOOP_MIN_ONSETS) return null;
+    return best;
+  };
+
+  // frame(ループ開始位置)をまたぐイベントを必ず2つに割る。
+  // ・音符は後半をタイにしない(continued を付けない=打ち直す)。タイの途中には L を置けないため
+  //   (emitScore の L 位置選びのコメント参照)。休符は割るだけ
+  // ・またぎが tol フレーム以内の切れ端になるなら割らず、音符の端を frame へ寄せる(1〜2フレームの
+  //   切れ端を打ち直すと耳障りなうえ、192分音符の列になる。寄せ幅は音長の丸めの許容と同じ)
+  function splitAtFrame(events, frame, tol) {
+    const out = [];
+    tol = Math.max(0, tol | 0);
+    for (const ev of events) {
+      if (ev.start < frame && ev.end > frame) {
+        if (frame - ev.start <= tol) { out.push(Object.assign({}, ev, { start: frame })); continue; }
+        if (ev.end - frame <= tol) { out.push(Object.assign({}, ev, { end: frame })); continue; }
+        out.push(Object.assign({}, ev, { end: frame }));
+        const tail = Object.assign({}, ev, { start: frame });
+        if (ev.note === null) tail.continued = true; else { delete tail.continued; delete tail.slurTie; }
+        out.push(tail);
+      } else out.push(ev);
+    }
+    return out;
+  }
+
+  // LEN_DP が OFF のときの音長の計画(renderEvents が音符ごとに framesToLengths+持ち越しで決めるのと同じ結果を
+  // 先に作る)。ループ自動検出のピン留めは「イベントごとの音価トークン列」が手元に無いとできないため
+  function buildGreedyPlan(events, fpb, lenSnap, cmd) {
+    const map = new Map();
+    const exactOn = MML.Convert.dpcmExactOf(cmd);
+    let carry = 0;
+    for (const e of events) {
+      const dur = e.end - e.start;
+      if (!(dur > 0)) continue;
+      const q = MML.Convert.framesToLengths(dur, fpb, carry, (exactOn && e.exact) ? 0 : lenSnap);
+      carry = q.carryOut;
+      map.set(e, q.lengths);
+    }
+    return map;
+  }
+
+  // ── ピン留め: pins(フレーム位置)までに書いた音長の合計を、全チャンネル共通の tick 値に合わせる ──
+  // ★なぜ要るか(ユーザー指摘 2026-09-19): イントロの長さとループ1周の長さがチャンネルごとに1フレームでも違うと、
+  //   NSFは各チャンネルが自分の L へ独立に戻るので、周回のたびにチャンネル間がずれていく。
+  //   音長の量子化はチャンネルごとに独立(境界のずれは許容内)なので、何もしないと合計は一致しない。
+  // ・コンパイラは端数を持ち越して丸める(framesForLength の carry)ので、先頭からの tick の合計が同じなら
+  //   そこまでのフレーム数も同じになる。よって tick を一致させれば十分
+  // ・目標 tick は元のフレーム位置を 192分音符(10tick)の格子へ丸めた値。コンパイル後のフレーム位置が
+  //   丸めの境目(x.5)に近いと浮動小数の足し順で1フレーム転びうるので、境目から遠い格子点を選ぶ
+  // ・ピン直前のイベントの音長を差分だけ伸縮する。足りなければ手前のイベントからも借りる
+  // ピンの目標 tick = 元のフレーム位置を 192分音符(10tick)の格子へ丸めた値。
+  // (最初は「コンパイル後のフレーム位置が丸めの境目 x.5 に近い格子点を避ける」ために最大±30tick ずらして
+  //  いたが、フレーム基準のピン留め(pinPlan)にした今は不要。ずらしたぶん(最大1.5フレーム)がループ区間の
+  //  全音符に持ち越され、2〜6フレームの音符が続くパートで元曲との食い違いが目立った)
+  function pinTickFor(frame, fpb) {
+    const Q = MML.Convert.LENGTH_QUANTUM;
+    return Math.round(frame * (MML.Convert.TPQN / fpb) / Q) * Q;
+  }
+  // ★本当に一致させたいのは「コンパイル後のフレーム数」(NSFのバイトコードは音符ごとのフレーム数を焼き込むので、
+  //   イントロとループ1周のフレーム数がチャンネル間で同じなら何周しても揃ったまま)。tick の合計を揃えるのは
+  //   その手段だが、コンパイラは1トークンを最低1フレームにするので、192分音符(テンポ150で0.5フレーム)のような
+  //   極小トークンが境界の手前に並ぶチャンネルは、tick が同じでも1フレーム長くなる(Crisis Force のパルス1で実測)。
+  //   そこで tick で合わせたあと、コンパイラと同じ丸め(duration.js simulateCompiledFrames)で数え、
+  //   全チャンネル共通の目標フレーム数 round(pinTick × フレーム/tick) になるまで、境界直前のイベントの音長を
+  //   192分音符単位で伸縮する(足りなければ2つ3つ手前のイベントでも試す)
+  function pinPlan(events, plan, fpb, pins, tempoBpm) {
+    if (!(tempoBpm > 0)) return false; // テンポが分からないとフレーム数を数えられない=一致を保証できない
+    if (!pinPlanTicks(events, plan, fpb, pins, tempoBpm)) return false;
+    const Q = MML.Convert.LENGTH_QUANTUM;
+    const framesPerTick = (240 / Math.round(tempoBpm)) * 60.0988 / (MML.Convert.TPQN * 4);
+    const sim = (toks, carry) => MML.Convert.simulateCompiledFrames(toks, tempoBpm, carry);
+    const list = events.filter(e => e.end - e.start > 0);
+    const carryIn = [], cumIn = [];
+    let cum = 0, carry = 0, lastPinIdx = -1;
+    for (let i = 0; i < list.length; i++) {
+      carryIn[i] = carry; cumIn[i] = cum;
+      const r = sim(plan.get(list[i]), carry);
+      cum += r.frames; carry = r.carry;
+      if (pins.indexOf(list[i].end) < 0 || list[i].end === 0) continue;
+      const target = Math.round(pinTickFor(list[i].end, fpb, tempoBpm) * framesPerTick);
+      let ok = cum === target;
+      for (let j = i; !ok && j > lastPinIdx && j >= i - 3; j--) {
+        const curTicks = MML.Convert.lengthsTicks(plan.get(list[j]));
+        const saved = plan.get(list[j]);
+        for (const k of [1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 8, -8]) {
+          const nt = curTicks + k * Q;
+          if (nt < Q) continue;
+          const toks = MML.Convert.ticksToLengthsExact(nt);
+          if (!toks) continue;
+          plan.set(list[j], toks);
+          let c2 = carryIn[j], f2 = cumIn[j];
+          for (let m = j; m <= i; m++) { const rr = sim(plan.get(list[m]), c2); f2 += rr.frames; c2 = rr.carry; }
+          if (f2 === target) { ok = true; cum = f2; carry = c2; break; }
+          plan.set(list[j], saved);
+        }
+      }
+      if (!ok) return false;
+      lastPinIdx = i;
+    }
+    return lastPinIdx >= 0 || pins.every(p => p === 0);
+  }
+  function pinPlanTicks(events, plan, fpb, pins, tempoBpm) {
+    const Q = MML.Convert.LENGTH_QUANTUM;
+    let written = 0, lastPinIdx = -1;
+    const list = events.filter(e => e.end - e.start > 0);
+    for (let i = 0; i < list.length; i++) {
+      const toks = plan.get(list[i]);
+      if (!toks) return false;
+      written += MML.Convert.lengthsTicks(toks);
+      if (pins.indexOf(list[i].end) < 0) continue;
+      if (list[i].end === 0) continue;
+      let need = pinTickFor(list[i].end, fpb, tempoBpm) - written;
+      for (let j = i; need !== 0 && j > lastPinIdx; j--) {
+        const cur = MML.Convert.lengthsTicks(plan.get(list[j]));
+        let nt = cur + need;
+        if (nt < Q) { need = nt - Q; nt = Q; } else need = 0;
+        const exact = MML.Convert.ticksToLengthsExact(nt);
+        if (!exact) return false;
+        plan.set(list[j], exact);
+      }
+      if (need !== 0) return false;
+      written = pinTickFor(list[i].end, fpb, tempoBpm);
+      lastPinIdx = i;
+    }
+    return lastPinIdx >= 0 || pins.every(p => p === 0);
+  }
+
   // ── 全チャンネルを小節単位で縦に揃えたスコア形式 ────────────────────
   // channelsData: [{ letter, events, hasVolume?, hasInstrument?, hasEnvelope? }]
   // opts:
@@ -581,7 +797,7 @@
   //   headerLines(スコア全体の先頭に足す生テキスト行)
   MML.Convert.emitScore = function (channelsData, fpb, opts) {
     opts = opts || {};
-    const totalFrames     = opts.totalFrames || 0;
+    let totalFrames       = opts.totalFrames || 0;
     const beatsPerMeasure = opts.beatsPerMeasure || 4;
     // 出力の書式(変換設定 src/convert/options.js LAYOUT_DEFAULTS): 1行の小節数 / パートの並び / 小節揃え
     const layout = Object.assign({}, MML.Convert.LAYOUT_DEFAULTS || {}, opts.cmd || {});
@@ -592,6 +808,48 @@
     // 配列を作り直すので呼び元(各 *2mml の scoreChannels)の並びは変わらない
     channelsData = MML.Convert.orderChannels(channelsData, layout.CHANNEL_ORDER);
     const framesPerMeasure = fpb * beatsPerMeasure;
+
+    // ── ループ自動検出(変換設定 LOOP_DETECT、2026-09-19) ──────────────────────────
+    // 元曲のループ周期を検出し、イントロ+1周ぶん [0, loop.end) だけを書き出して L を置く。
+    // ループ開始は可能なら直後の小節線へ寄せる(周期性は loop.start 以降ずっと成り立つので、後ろへずらしても
+    // 同じ長さの1周が取れる。L が小節の頭に来て譜面が読みやすい)。
+    let loop = null;
+    if (layout.LOOP_DETECT && totalFrames > 0) {
+      const found = MML.Convert.detectLoop(channelsData, totalFrames);
+      if (found) {
+        // ★L は「どのチャンネルの音符もまたがない位置」に置く。タイで繋がった音符の途中には L を置けない
+        //   (コンパイラはタイを1つの音符にまとめるので L が音符の境界に来ず、NSFではそのチャンネルの
+        //   ループ先が登録されずに止まる。キャプテン翼II/Crisis Force で実測)。
+        //   候補は「検出した開始位置」と、そこから1周ぶんの間にある小節線。またぐ音符が最も少ない候補を選び、
+        //   同数なら小節線を優先、それでも同じなら早いほう。残ったまたぎは splitAtFrame が打ち直しにする
+        const tol = Math.max(1, MML.Convert.lenSnapOf(opts.cmd) | 0);
+        const crossings = (p) => channelsData.reduce((n, c) => n + ((c.events || []).some(ev =>
+          ev.note != null && p - ev.start > tol && ev.end - p > tol) ? 1 : 0), 0);
+        const cands = [{ p: found.start, bar: found.start === 0 }];
+        for (let k = Math.ceil(found.start / framesPerMeasure - 1e-9); ; k++) {
+          const p = Math.round(k * framesPerMeasure);
+          if (p >= found.start + found.period || p + found.period > totalFrames) break;
+          if (p > found.start) cands.push({ p, bar: true });
+        }
+        let pick = null;
+        for (const c of cands) {
+          c.x = crossings(c.p);
+          if (!pick || c.x < pick.x || (c.x === pick.x && c.bar && !pick.bar)) pick = c;
+        }
+        loop = { start: pick.p, end: pick.p + found.period, period: found.period, span: found.span, crossings: pick.x };
+      }
+    }
+    const fullFrames = totalFrames;
+    const savedEvents = channelsData.map(c => c.events); // ピン留めに失敗したら元へ戻して通常出力する(下)
+    if (loop) {
+      totalFrames = loop.end;
+      // ループ終端より先のイベントを捨てる(呼び出し側の scoreChannels も同じ配列を見ているので、あとの
+      // 音程検証 verifyPitch も書き出した範囲だけを比べるようになる)
+      for (const chan of channelsData) {
+        chan.events = (chan.events || []).filter(ev => ev.start < loop.end)
+          .map(ev => ev.end > loop.end ? Object.assign({}, ev, { end: loop.end }) : ev);
+      }
+    }
     const measureCount = Math.max(1, Math.ceil(totalFrames / framesPerMeasure));
 
     // 小節境界(整数フレームに丸める)
@@ -600,6 +858,10 @@
 
     const lines = [];
     if (opts.headerLines) lines.push(...opts.headerLines);
+    if (loop) {
+      lines.push(`; ループ自動検出: ${loop.start}フレーム目から ${loop.period}フレーム周期(元の ${fullFrames}フレームのうち ${loop.span}フレームで周期を確認)。` +
+        `イントロ+1周ぶんだけを書き出し、各チャンネルのループ開始位置に L を置いています`);
+    }
     // ★チャンネルが1本も無い(音符が1つも取れなかった曲)ときはテンポ行を出さない。文字の無い " t120" は
     //   コンパイルエラーになり、再生も書き出しもできないMMLになる(PSF の Gran Turismo arcade.psf で発覚)
     if (opts.tempoBpm != null && channelsData.length) {
@@ -608,13 +870,45 @@
     }
 
     // チャンネルごとに: ギャップ補完 → 小節境界で分割 → 小節バケツへ → テキスト化
+    let loopPinFailed = false;
+    let loopFrameCheck = null; // 最初のチャンネルの { L までのフレーム数, 全長 }。以降のチャンネルと突き合わせる
     const perChannelMeasureTexts = channelsData.map(chan => {
       // 変換設定(src/convert/options.js opts.cmd): 譜面整形(短い休符吸収)を
       // ギャップ補完の前に掛け、コマンドフラグは下でANDマスクする(割当層で止め切れ
       // なかった分の安全網)
       const filled  = fillGaps(MML.Convert.shapeEvents(chan.events, fpb, opts.cmd), totalFrames);
-      const split   = splitAtBoundaries(filled, boundaries, MML.Convert.lenSnapOf(opts.cmd));
-      const plan    = buildLengthPlan(split, fpb, MML.Convert.lenSnapOf(opts.cmd), opts.cmd);
+      let split     = splitAtBoundaries(filled, boundaries, MML.Convert.lenSnapOf(opts.cmd));
+      // ループ開始位置では必ず割る(L をイベントの頭に置くため)。端を寄せた結果できた隙間は休符で埋め直す
+      if (loop) split = fillGaps(splitAtFrame(split, loop.start, MML.Convert.lenSnapOf(opts.cmd)).filter(e => e.note !== null || e.end > e.start), totalFrames);
+      // L の直後の音符は必ず打ち直しにする: 小節線の分割(continued)やスラー(slurTie)で前の音符とタイに
+      // なっていると「タイの途中の L」になり、NSFでそのチャンネルのループ先が登録されない
+      if (loop) split = split.map(e => (e.start === loop.start && e.note !== null && (e.continued || e.slurTie))
+        ? Object.assign({}, e, { continued: false, slurTie: false }) : e);
+      let plan      = loop ? null : buildLengthPlan(split, fpb, MML.Convert.lenSnapOf(opts.cmd), opts.cmd);
+      if (loop) {
+        // 音長の計画はイントロ部分とループ部分で別々に立てる。通しで立てると、L の位置で音長を調整した
+        // ずれがループ区間の全音符へ持ち越される。ループ部分は L を起点に誤差ゼロから量子化し直す
+        const planFor = (evs) => buildLengthPlan(evs, fpb, MML.Convert.lenSnapOf(opts.cmd), opts.cmd) ||
+          buildGreedyPlan(evs, fpb, MML.Convert.lenSnapOf(opts.cmd), opts.cmd);
+        plan = new Map([...planFor(split.filter(e => e.end <= loop.start)), ...planFor(split.filter(e => e.start >= loop.start))]);
+        // ピン留め: ループ開始/終端までのフレーム数を、全チャンネル共通の値にぴったり合わせる
+        const ok = pinPlan(split, plan, fpb, [loop.start, loop.end], opts.tempoBpm);
+        if (!ok) loopPinFailed = true;
+        // 最終検査: コンパイラと同じ丸めで数えた「L までのフレーム数」と「全長」が、全チャンネルで同じか。
+        // tick の合計を揃えてあっても、最低1フレームの切り上げが境界の直前に残ると1フレームずれる
+        if (ok && opts.tempoBpm > 0) {
+          let carry = 0, frames = 0, atLoop = null;
+          for (const e of split) {
+            if (!(e.end - e.start > 0)) continue;
+            if (atLoop === null && e.start >= loop.start) atLoop = frames;
+            const r = MML.Convert.simulateCompiledFrames(plan.get(e), opts.tempoBpm, carry);
+            frames += r.frames; carry = r.carry;
+          }
+          if (atLoop === null) atLoop = frames;
+          if (loopFrameCheck === null) loopFrameCheck = { atLoop, frames };
+          else if (loopFrameCheck.atLoop !== atLoop || loopFrameCheck.frames !== frames) loopPinFailed = true;
+        }
+      }
       const buckets = bucketByMeasure(split, framesPerMeasure, measureCount);
       const flags = MML.Convert.maskEmitFlags({
         hasVolume: !!chan.hasVolume, hasInstrument: !!chan.hasInstrument,
@@ -638,6 +932,11 @@
         plan // 音長をチャンネル全体で最適化(LEN_DP、buildLengthPlan)
       }, opts.cmd);
       if (chan.letter === 'E') Object.assign(flags, DPCM_FLAGS_OFF); // DPCM: 音符=番号だけ(DPCM_NOTE_BASE 冒頭コメント)
+      if (loop) {
+        flags.loopStart = loop.start;
+        flags.usesSa = split.some(e => !!e.pitchSa);
+        flags.usesRelTone = split.some(e => e.releaseTone != null && e.releaseTone !== 255);
+      }
       const state = newState();
       let first = true;
       return buckets.map(bucketEvents => {
@@ -647,6 +946,15 @@
         return text;
       });
     });
+    // ピン留めできなかったチャンネルがある(極端に短いイベントしか無い等): イントロ/ループの長さを全チャンネルで
+    // 一致させられないので、ずれていくループを出すよりループ化そのものをやめて通常の出力へ戻す
+    if (loop && loopPinFailed) {
+      channelsData.forEach((c, i) => { c.events = savedEvents[i]; });
+      return MML.Convert.emitScore(channelsData, fpb, Object.assign({}, opts, {
+        cmd: Object.assign({}, opts.cmd, { LOOP_DETECT: false }),
+        headerLines: (opts.headerLines || []).concat(['; ループ自動検出: ループは見つかりましたが、全チャンネルの長さを一致させられなかったため通常の出力にしました'])
+      }));
+    }
 
     // 小節揃え(BAR_ALIGN): 小節ごとに全チャンネル中の最大幅で列を揃える。OFF ならスペース1つで区切る
     const colWidth = [];

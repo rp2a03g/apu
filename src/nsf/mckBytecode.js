@@ -368,6 +368,9 @@
     const chUsesDetune = segments.some(s => s.detune);
     const chUsesSmooth = segments.some(s => s.smooth);
     const chUsesRelTone = segments.some(s => s.releaseTone != null && s.releaseTone !== 255);
+    // @vr<n> をこのチャンネルで実際に選ぶか(再採番表に載っている番号だけ数える)。下の「@vr255=解除」の出力条件
+    const chUsesVr = segments.some(s => s.envelopeVr != null && s.envelopeVr !== 255 &&
+      (vrIndexRemap ? vrIndexRemap[s.envelopeVr] != null : true));
     const chUsesPortamento = segments.some(s => s.portamento != null);
     const chUsesNoteEnv = segments.some(s => s.noteEnv != null && s.noteEnv !== 255);
     const chUsesPitchEnv = segments.some(s => s.pitchEnv != null && s.pitchEnv !== 255);
@@ -640,9 +643,13 @@
         //   NSFでは二度と解除できず、@vr0 と @vr255 を交互に切り替える曲(NSF→MML変換の出力に普通に出る。
         //   キャプテン翼II 曲7のパルス2で発覚)で、ゲートオフ後の無音が「リリース表の音量で鳴り続ける」に
         //   化けていた(ブラウザ再生=compiler.js は 255 で解除するので食い違う)。ドライバの VRSEL は
-        //    が未選択の番兵(RD_VRENV は読んだバイトをそのまま入れる)なので、 を出せば解除になる。
+        //   0xFF が未選択の番兵(RD_VRENV は読んだバイトをそのまま入れる)なので、0xFF を出せば解除になる。
         //   一度も @vr<n> を選んでいないチャンネルでは出さない(lastEnvelopeVr===255 のまま)
-        if ((seg.envelopeVr == null || seg.envelopeVr === 255) && lastEnvelopeVr !== 255) {
+        // ★出すのはこのチャンネルが @vr<n> を実際に使う場合だけ(chUsesVr)。L の位置では resetDedupAtLoop が
+        //   lastEnvelopeVr を null(未定)へ戻すので、条件を付けないと @vr を一切使わない曲でも L の直後に
+        //   解除オペコードが出てしまう。そのハンドラはドライバに組み込まれていない(usesVr=false)ので、
+        //   以降のバイト列がずれて読まれ、L 以降が全部でたらめな音になった(同日のコミット 3816bbc で混入)
+        if (chUsesVr && (seg.envelopeVr == null || seg.envelopeVr === 255) && lastEnvelopeVr !== 255) {
           bytes.push(OP_VR_ENV, 0xff);
           lastEnvelopeVr = 255;
         }

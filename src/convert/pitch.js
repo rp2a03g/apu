@@ -943,12 +943,14 @@
         const prevNote = absorbed[absorbed.length - 1].note;
         if (seg.note === prevNote) break; // 直接連続する同ノート=ハード境界、跨がない
         if (seg.note !== home.note) {
-          if (altNote === null) {
-            if (Math.abs(seg.note - home.note) !== 1) break; // 隣接半音以外は対象外
-            altNote = seg.note;
-          } else if (seg.note !== altNote) {
-            break; // 3値目が出たら対象外(こぶし・グリッサンド等はここで自然に除外される)
-          }
+          // 隣接半音(home±1)だけが対象。★上下両隣をまたぐビブラートも統合する(2026-09-19、グラディウスII 曲1の
+          //   パルス2で発覚): 高い音では周期レジスタの±4が約±68セントに当たり、c+ を中心に c と d の両方へ
+          //   はみ出す。以前は「3値目が出たら対象外」で打ち切っていたので、c48 PT.. c+32 d48 PT.. と細切れのまま
+          //   出て音痴に聞こえた。ただし必ず home を経由して往復する形だけ(直前が home のときだけ隣へ出られる)。
+          //   c→c+→d のように home を挟まず3音を渡るのはグリッサンド/こぶしなので、従来どおりここで打ち切る
+          if (Math.abs(seg.note - home.note) !== 1) break;
+          if (prevNote !== home.note) break;
+          if (altNote === null) altNote = seg.note;
         }
         if (!hysteresisCompatible(seg, home, absorbed[absorbed.length - 1])) break;
         absorbed.push(seg);

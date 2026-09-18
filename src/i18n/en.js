@@ -1024,6 +1024,10 @@
     '最小偏差': 'min. offset',
     'セント': 'cents',
     '出力の書式': 'Output layout',
+    'ループを自動検出': 'Detect the loop',
+    'イントロ+1周だけ書き出して L を置く': 'Write only intro + one loop and place L',
+    '元曲のループ周期を全チャンネルの音符列から検出し、イントロ+1周ぶんだけを書き出して各チャンネルのループ開始位置に L を置きます。長く変換しても曲データが1周ぶんで済むのでNSFが小さくなります。イントロとループ1周の長さは全チャンネルで一致させます(ずれると周回のたびにチャンネルがずれていくため)。一致させられない場合と、変換した長さが「イントロ+2周」に満たず確認できない場合は、通常どおり全部を書き出します':
+      'Detects the loop period of the original song from the notes of all channels, writes only the intro plus one loop, and places L at the loop start of every channel. Song data stays one loop long however much you convert, so the NSF gets smaller. The intro and the loop are made exactly the same length in every channel (otherwise the channels drift apart on every repeat). If that is impossible, or the converted length is shorter than intro + two loops so the period cannot be confirmed, everything is written out as usual',
     'チャンネルの並び順': 'Channel order',
     'アルファベット順': 'Alphabetical',
     '変換元の割り当て順': 'Source assignment order',

@@ -4922,8 +4922,13 @@ SONG_LOOP_PTR_HI:
 
     // 1回目: サイズ測定専用のダミー割当(値そのものはアセンブル後のバイト数に影響しない)
     const dummyBank = channelLetters.map(() => 0);
+    // ★L(ループ地点)を使う曲は、計測にも同じ形のループ情報を渡す(2026-09-19)。以前は undefined を渡していたので
+    //   計測時だけループ用のコードと表(SONG_LOOP_*)が入らず、本番のほうが数十バイト大きくなった。ドライバが
+    //   バンク境界をまたぐ曲で「計測時と再アセンブル時でサイズが一致しません」の内部エラーになる
+    //   (Crisis Force をループ自動検出つきで変換したMMLで発覚: 4062 → 4115 バイト)
+    const probeLoop = { act: chSerialized.map(r => (r.loopByteOffset != null ? 1 : 0)), bank: dummyBank, lo: dummyBank, hi: dummyBank };
     const probeSrc = buildFixedSource(channelTypes, dummyBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList,
-      undefined, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite,
+      probeLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite,
       vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, undefined, usesSweep, usesPitchSa, 0);
     const probeAsm = MML.Asm.assemble(probeSrc, { origin: 0x8000 });
     if (probeAsm.errors.length > 0) {

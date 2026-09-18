@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 05:34:53
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 07:55:11
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-19 05:34:53';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-19 07:55:11';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -5579,7 +5579,11 @@
   const PART_ORDER_VALUES = ['block', 'part'];
   const CHANNEL_ORDER_VALUES = ['letter', 'source'];
   const BARS_PER_LINE_MAX = 16;
-  const LAYOUT_DEFAULTS = { PART_ORDER: 'block', BARS_PER_LINE: 4, BAR_ALIGN: false, CHANNEL_ORDER: 'letter' };
+  //   LOOP_DETECT   … ループを自動検出する(2026-09-19、既定 false。src/convert/mmlEmit.js detectLoop)。元曲の
+  //                   ループ周期を全チャンネルの音符列から検出し、イントロ+1周ぶんだけを書き出して各チャンネルの
+  //                   ループ開始位置へ L を置く。5分ぶん変換しても曲データが1周ぶんで済む(NSFが小さくなる)。
+  //                   イントロとループ区間の長さは全チャンネルで tick 単位に一致させる(ずれると周回ごとにずれる)
+  const LAYOUT_DEFAULTS = { PART_ORDER: 'block', BARS_PER_LINE: 4, BAR_ALIGN: false, CHANNEL_ORDER: 'letter', LOOP_DETECT: false };
   const LAYOUT_KEYS = Object.keys(LAYOUT_DEFAULTS);
   MML.Convert.LAYOUT_DEFAULTS = LAYOUT_DEFAULTS;
   MML.Convert.LAYOUT_KEYS = LAYOUT_KEYS;
@@ -5686,6 +5690,7 @@
         if (v >= 1 && v <= BARS_PER_LINE_MAX) out.BARS_PER_LINE = v;
       }
       if (cmd.BAR_ALIGN != null) out.BAR_ALIGN = !!cmd.BAR_ALIGN;
+      if (cmd.LOOP_DETECT != null) out.LOOP_DETECT = !!cmd.LOOP_DETECT;
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
       if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
       if (cmd.N163_WAVE != null && N163_WAVE_VALUES.indexOf(cmd.N163_WAVE) >= 0) out.N163_WAVE = cmd.N163_WAVE;
@@ -6895,12 +6900,14 @@
         const prevNote = absorbed[absorbed.length - 1].note;
         if (seg.note === prevNote) break; // 直接連続する同ノート=ハード境界、跨がない
         if (seg.note !== home.note) {
-          if (altNote === null) {
-            if (Math.abs(seg.note - home.note) !== 1) break; // 隣接半音以外は対象外
-            altNote = seg.note;
-          } else if (seg.note !== altNote) {
-            break; // 3値目が出たら対象外(こぶし・グリッサンド等はここで自然に除外される)
-          }
+          // 隣接半音(home±1)だけが対象。★上下両隣をまたぐビブラートも統合する(2026-09-19、グラディウスII 曲1の
+          //   パルス2で発覚): 高い音では周期レジスタの±4が約±68セントに当たり、c+ を中心に c と d の両方へ
+          //   はみ出す。以前は「3値目が出たら対象外」で打ち切っていたので、c48 PT.. c+32 d48 PT.. と細切れのまま
+          //   出て音痴に聞こえた。ただし必ず home を経由して往復する形だけ(直前が home のときだけ隣へ出られる)。
+          //   c→c+→d のように home を挟まず3音を渡るのはグリッサンド/こぶしなので、従来どおりここで打ち切る
+          if (Math.abs(seg.note - home.note) !== 1) break;
+          if (prevNote !== home.note) break;
+          if (altNote === null) altNote = seg.note;
         }
         if (!hysteresisCompatible(seg, home, absorbed[absorbed.length - 1])) break;
         absorbed.push(seg);

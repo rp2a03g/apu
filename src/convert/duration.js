@@ -142,6 +142,51 @@
   const TOKEN_COST = new Map(TABLE.map(([, n]) => [n, tokenCost(n)]));
   MML.Convert.lengthTokenCost = (name) => TOKEN_COST.has(name) ? TOKEN_COST.get(name) : 3;
 
+  // ── 音価トークン ⇔ tick の厳密な相互変換(ループ自動検出の「ピン留め」用、mmlEmit.js pinPlan) ──
+  // ループ開始/終端では、全チャンネルの「書いた音長の合計」を同じ tick 値にぴったり合わせる必要がある
+  // (合計が1tickでも違うと、コンパイラの丸め後に1フレームずれ、周回のたびにチャンネル間がずれていく)。
+  const TOKEN_TICKS = new Map(TABLE.map(([t, name]) => [name, t]));
+  MML.Convert.LENGTH_QUANTUM = QUANTUM;
+  MML.Convert.lengthTokenTicks = (name) => TOKEN_TICKS.get(name) || 0;
+  MML.Convert.lengthsTicks = (lengths) => (lengths || []).reduce((a, n) => a + (TOKEN_TICKS.get(n) || 0), 0);
+  // ticks(5の倍数、10以上)を音価トークンの列へ過不足なく分解する。10の倍数のトークンだけを大きい順に
+  // 取り、端数5は 192.(15tick)1個で吸収する。表の最小が10tickなので必ず割り切れる
+  const EVEN_TABLE = TABLE.filter(([t]) => t % QUANTUM === 0);
+  MML.Convert.ticksToLengthsExact = function (ticks) {
+    let rem = Math.round(ticks);
+    const out = [];
+    let tail = null;
+    if (rem % QUANTUM !== 0) {
+      if (rem % 5 !== 0 || rem < 15) return null;
+      tail = '192.'; rem -= 15;
+    }
+    for (const [t, name] of EVEN_TABLE) {
+      while (rem >= t) { out.push(name); rem -= t; }
+    }
+    if (tail) out.push(tail);
+    if (rem !== 0 || !out.length) return null;
+    // ★小さい音価を先に、大きい音価を最後に並べる。コンパイラ(framesForLength)は1トークンを最低1フレームに
+    //   するので、192分(テンポ150で0.5フレーム)のような極小トークンは切り上げられ、そのぶんは次のトークンの
+    //   持ち越しで吸収される。極小トークンが列の最後だと吸収されないままピン(ループ開始/終端)に達し、
+    //   そのチャンネルだけ1フレーム長くなる(Crisis Force で実測: 1825 と 1824 に割れた)
+    return out.reverse();
+  };
+
+  // コンパイラ(src/mml/compiler.js framesForLength)と同じ丸めで、音価トークン列が何フレームになるかを数える。
+  // carry は呼び出し側が持ち回す。戻り値 { frames, carry }
+  MML.Convert.simulateCompiledFrames = function (lengths, tempoBpm, carry) {
+    const framesPerWhole = (240 / Math.round(tempoBpm)) * 60.0988;
+    let frames = 0;
+    carry = carry || 0;
+    for (const name of lengths || []) {
+      const target = framesPerWhole * (TOKEN_TICKS.get(name) || 0) / WHOLE + carry;
+      const f = Math.max(1, Math.round(target));
+      frames += f;
+      carry = target - f;
+    }
+    return { frames, carry };
+  };
+
   // 1〜3トークンの和 → 最小コストのトークン列(タイは1個につき +0.2)。fpb に依存しないので1回だけ構築
   const SUMS = new Map();
   function putSum(s, c, toks) { const e = SUMS.get(s); if (!e || c < e.c) SUMS.set(s, { c, toks }); }
