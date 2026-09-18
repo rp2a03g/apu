@@ -44,7 +44,7 @@
       const diff = Math.abs(Math.log2(freqHz / NES_NOISE_FREQS[i]));
       if (diff < bestDiff) { bestDiff = diff; best = i; }
     }
-    return 31 - best; // ppmck準拠: ノート番号31-n = periodIndex n(src/mml/compiler.js noisePeriodIndex)
+    return 31 - best; // 変換イベント空間の約束: ノート番号31-n = periodIndex n(MML.Convert.noiseNoteToIndex、MMLへは n<idx>)
   }
 
   function extractToneEvents(snapshots, ch, clock) { // ch: スナップショット配列内の要素index(2個目チップは+4)
@@ -83,11 +83,12 @@
       const volume = c.rawVol;
       const on = volume > 0 && c.active && c.noiseFreq > 0;
       const note = on ? noiseFreqToNote(c.noiseFreq) : null;
-      if (!cur) { cur = { note, start: f, end: f, volSeq: [volume] }; continue; }
+      const mode = c.white === false ? 1 : 0; // 周期性ノイズ(white=false) → 2A03の短周期 @1(2026-09-18)
+      if (!cur) { cur = { note, mode, start: f, end: f, volSeq: [volume] }; continue; }
       const retrigger = note !== null && volume > cur.volSeq[cur.volSeq.length - 1];
-      if (retrigger || note !== cur.note) {
+      if (retrigger || note !== cur.note || (note !== null && mode !== cur.mode)) {
         flush(f);
-        cur = { note, start: f, end: f, volSeq: [volume] };
+        cur = { note, mode, start: f, end: f, volSeq: [volume] };
       } else {
         cur.volSeq.push(volume);
       }
@@ -125,6 +126,7 @@
     );
     const noiseToCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note },
+      ev.note !== null ? { instrument: ev.mode } : {}, // @0=長周期/@1=短周期(borrow.js が hasInstrument を立てる)
       toVolumeFields(ev.volSeq)
     );
     return {

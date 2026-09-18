@@ -275,7 +275,12 @@
     //   ただし音程は DrumMap のレーン番号なので、下の pitchedToNoise は通さないこと。
     //   ※現状 ch:-1 のドラムパートを持つのはVGMだけ(vgm2mml/converter.js の独自コピーが本番)。
     //     ここは2つのコピーを揃えるための保険。
-    if (fam === 'noise' && s.kind === 'noise') return; // ノイズ→ノイズは整形不要(旋律→ノイズは下で周期へ写す)
+    if (fam === 'noise' && s.kind === 'noise') {
+      // ノイズ→ノイズは整形不要(旋律→ノイズは下で周期へ写す)。抽出器が付けた短/長周期(instrument 0/1、
+      // GBの7bit幅・SN76489の周期性ノイズ→2A03の短周期 @1)だけは @<n> として出せるようフラグを立てる
+      ch.hasInstrument = events.some(ev => ev.instrument !== undefined);
+      return;
+    }
     if (nativeVrc7 || (fam === s.nativeFamily && fam !== 'vrc7' && (!tone || tone === 'copy'))) return;
     // VRC7自作音色の登録番号 → 音色キー(あぶれ報告用)
     const noteToneIdx = (ev, idx) => {

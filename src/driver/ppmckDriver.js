@@ -34,8 +34,8 @@
  * VRC6パルス1/2/矩形波(サウ)・FME7(LOOKUP_FME7_PERIOD)・FDS(WFV_T13/WFO_T13直書き)・
  * N163(WFV_Tn/WFO_Tnテンプレート、3byte/entryテーブルのためTABLE_MAX縮小版)・
  * VRC7(WFO_Tn新設、NOTE+ENVALからfnum/blockを再計算し$9010/$9030を再書込み)が対象。
- * ノイズも2026-09-14から対象(LOOKUP_NOISE_PERIOD: NOTE+ENVALを16で割った余りで周期index。本家ppmckも
- * ノイズ周期にEN/EPが効く)。SPCブラウザ側
+ * ノイズも2026-09-14から対象(LOOKUP_NOISE_PERIOD: NOTE=周期index直値、(NOTE+ENVAL)&15 に D/EP/MP/PT を
+ * 8bitで加減算し桁あふれの bit7=短周期、@<n>のbit0も bit7 へ OR。本家ppmck準拠、2026-09-18)。SPCブラウザ側
  * 抽出は対応済みだがSPCはNSF書き出し経路を持たないためこのドライバとは無関係。
  * FME7のノイズ(0xF1=N<n>)と@<n>によるミキサー制御(0=ミュート/1=トーン/2=ノイズ/
  * 3=トーン+ノイズ、@2はノート番号がノイズ周期)、およびハードウェアエンベロープ
@@ -46,7 +46,9 @@
  * 生オフセット加算」空間をAPPLY_DETUNE/APPLY_DETUNE_N163内で合算する。
  * D<n>/EP<n>/MP<n>いずれも2A03パルス/三角・VRC6・MMC5・FME7・FDS・N163に対応、
  * VRC7は対象外(compiler.js側のブラウザ再生と同じ対応範囲、DESIGN-PITCH.md §7)。ノイズは
- * 2026-09-14から対象: 周期index(0-15)へD/EP/MP/PTを加算して0-15にクランプ(compiler.jsのノイズ経路と同じ)。
+ * 2026-09-14から対象。2026-09-18からは本家ppmck準拠で周期index(0-15)へD/EP/MP/PTを8bit加減算し
+ * クランプしない(D16 n0 → $F0 のように桁あふれで bit7=短周期が立つ。compiler.jsのノイズ経路と同じ、
+ * 実ppmck09aのNSFと$400E列で一致確認)。
  *
  * --- データ埋め込みは実際に使うチップの分だけ ---
  * 各拡張チップの周波数テーブル・波形データ・レジスタ書き込みハンドラは、
@@ -4418,33 +4420,29 @@ SIL_T2:
     RTS
 
 ; --- 2A03ノイズ ($400C、1chのみなので固定アドレス) ---
-; 周期index = 15 - ((NOTE + ENVAL) mod 16) をPERLO/PERHI(16bit)に置き、D/EP/MP/PTをAPPLY_DETUNEで
-; 加算(負は0にクランプ済み)したのち上限15でクランプする(compiler.jsのノイズ経路
-; noisePeriodIndex(round(note+en)) → clamp(idx+offset, 0, 15) と同じ。2026-09-14、本家ppmckの
-; sound_pitch_enverope/frequency_set がノイズにも効くのに合わせた) ---
+; $400E = (((NOTE + ENVAL) & 15) − D − EP − MP − PT) & $FF | (@<n> bit0 << 7)
+; 本家ppmck準拠(2026-09-18): NOTEは周期index(0-15)の直値、D/EP/MP/PTは他chと同じ生加減算で
+; クランプしない → D16 n0 = 0−16 = $F0 のように桁あふれで bit7(短周期)が立つ(wikiの
+; 「短周期ノイズは D16〜D1」の技)。@1(本ツール独自の短周期指定)は bit7 を OR。
+; compiler.jsのノイズ経路(segmentsToWriteLog2A03 'D')と同じ式で、実ppmck09aのNSFと$400E列が一致 ---
 LOOKUP_NOISE_PERIOD:
-    LDA ${hex(NOTE)},X
+    LDA ${hex(NOTE)},X     ; NOTE=周期index(0-15)の直値(compiler.js noisePeriodIndex、本家ppmck準拠)
 ${usesEn ? `    CLC
-    ADC ${hex(ENVAL)},X
+    ADC ${hex(ENVAL)},X    ; EN(ノート空間)は index に足して16で巡回
 ` : ''}    AND #$0F
     STA ${hex(PERLO)}
-    LDA #$0F
-    SEC
-    SBC ${hex(PERLO)}      ; A = 15 - ((note+en) & 15)
-    STA ${hex(PERLO)}
-    LDA #$00
-    STA ${hex(PERHI)}
+    LDA #$40
+    STA ${hex(PERHI)}      ; ★上位を$40にしておく: APPLY_DETUNEは16bit結果が負なら0へクランプするが、
+                           ;   ノイズは下位バイトの桁あふれ(D16 n0 → $F0=bit7=短周期)が本家仕様なので
+                           ;   クランプに掛からない正の下駄を履かせ、下位8bit(PERLO)だけを$400Eへ書く
 ${usesAnyPitchOffset ? `    JSR APPLY_DETUNE
-    LDA ${hex(PERHI)}
-    BNE LNP_CLAMP15        ; 16以上(負はAPPLY_DETUNEで0にクランプ済み)
-    LDA ${hex(PERLO)}
-    CMP #$10
-    BCC LNP_OK
-LNP_CLAMP15:
-    LDA #$0F
+` : ''}    LDA ${hex(DUTY)},X     ; @<n>のbit0=短周期(本ツール独自拡張) → $400E bit7 へ(桁あふれとOR)
+    LSR A
+    LDA #$00
+    ROR A
+    ORA ${hex(PERLO)}
     STA ${hex(PERLO)}
-LNP_OK:
-` : ''}    RTS
+    RTS
 WFV_T3:
     JSR LOOKUP_NOISE_PERIOD
     LDA ${hex(PERLO)}

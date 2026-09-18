@@ -51,6 +51,17 @@
     return { oct: Math.floor(n / 12), name: NOTE_NAMES[((n % 12) + 12) % 12] };
   };
 
+  // ── 2A03ノイズ(ch D)の音程 ────────────────────────────────────────────
+  // 変換イベント空間ではノイズの「音程」を ev.note = 31 − 周期index で持つ(nsf2mml/gbs2mml/vgm2mml
+  // sn76489/spc2mml/borrow.js/drumMap.js が全てこの約束。周期index 0-15 ⇔ note 31-16、index が小さい
+  // ほど高い音なので note が大きいほど高い=他chの音程と同じ向き。ロール表示や音域判定はこの空間のまま)。
+  // MMLへ書く時だけここで周期index に戻し `n<idx>` で出す(本家ppmck準拠: ノイズchの n<num> は
+  // 周期index の直値、音符 c〜b は半音番号=index でオクターブ無視。compiler.js noisePeriodIndex)。
+  // ★2026-09-18まで音符+オクターブで書いていた(旧コンパイラは index=15−(note%16) と反転写像していた
+  //   ため o1〜o2 の音符になっていた)。本家ppmckでは別の音になるので n<idx> へ切り替えた
+  MML.Convert.noiseNoteToIndex = function (note) { return ((31 - Math.round(note)) % 16 + 16) % 16; };
+  MML.Convert.noiseIndexToNote = function (idx) { return 31 - (((idx % 16) + 16) % 16); };
+
   // ── ギャップ・末尾を休符イベントで補完してギャップレス化 ──────────────
   function fillGaps(events, totalFrames) {
     const filled = [];
@@ -153,6 +164,9 @@
       state.hasEmitted = true;
     }
     const defaultLen = flags.defaultLen || 4;
+    // ノイズchの @<n> は 0=長周期/1=短周期(コンパイラの既定は@0)。長周期だけの曲に @0 を出さずに済むよう、
+    // 初回だけ「@0 は既出」扱いで始める(短周期が出てきた時点で @1、戻る時に @0 が出る)
+    if (flags.noiseIndexNotes && state.curInst < 0) state.curInst = 0;
     const fmtLens = (name, lengths) =>
       name + omitDefaultLen(lengths[0], defaultLen) +
       lengths.slice(1).map(l => `&${name}${omitDefaultLen(l, defaultLen)}`).join('');
@@ -390,6 +404,16 @@
         }
       }
 
+      if (flags.noiseIndexNotes) {
+        // 2A03ノイズ(ch D): 周期index の直値 n<idx>[,<len>] で出す(noiseNoteToIndex 冒頭コメント)。
+        // オクターブは無意味なので o<n>/>/< は出さない。短/長周期は ev.instrument(@0/@1)で上に出ている
+        const idx = MML.Convert.noiseNoteToIndex(ev.note);
+        // 音長が付点だけ(既定音長の付点)なら `n11.`、数値があれば `n11,16.`(lexer.js 'n' は両方受ける)
+        const nTok = (l) => { const s = omitDefaultLen(l, defaultLen); return `n${idx}` + (s ? (s[0] === '.' ? s : ',' + s) : ''); };
+        const tie = (ev.continued || ev.slurTie) ? '&' : '';
+        emit(tie + nTok(lengths[0]) + lengths.slice(1).map(l => '&' + nTok(l)).join(''), true);
+        continue;
+      }
       const { oct, name } = MML.Convert.noteNumberToMmlParts(ev.note);
       // ★2026-08-12: 従来はここも!ev.continuedで無条件にガードしていた(継続音は常に
       // 同じ音程=オクターブも不変という前提)。ev.slurTie(タイで異なる音程へレガート)は
@@ -434,6 +458,7 @@
       hasEnvelope: !!opts.hasEnvelope, hasFme7Env: !!opts.hasFme7Env, hasVrc7Tone: !!opts.hasVrc7Tone,
       hasFdsMod: !!opts.hasFdsMod, hasFme7Noise: !!opts.hasFme7Noise, hasDetune: !!opts.hasDetune,
       hasSweep: !!opts.hasSweep,
+      noiseIndexNotes: letter === 'D', // 2A03ノイズ: 音符を n<周期index> で書く(noiseNoteToIndex参照)
       hasPitchMod: !!opts.hasPitchMod,
       // hasNoteEnvはhasPitchModと独立(VRC7はfnum/block対数空間のためD/EP/MPは使えないが
       // ENは使える、mergeRapidArpeggio冒頭コメント参照)。opts.hasNoteEnvが省略された場合は
@@ -579,6 +604,7 @@
         hasEnvelope: !!chan.hasEnvelope, hasFme7Env: !!chan.hasFme7Env, hasVrc7Tone: !!chan.hasVrc7Tone,
         hasFdsMod: !!chan.hasFdsMod, hasFme7Noise: !!chan.hasFme7Noise, hasDetune: !!chan.hasDetune,
         hasSweep: !!chan.hasSweep,
+        noiseIndexNotes: chan.letter === 'D', // 2A03ノイズ: 音符を n<周期index> で書く(noiseNoteToIndex参照)
         hasPitchMod: !!chan.hasPitchMod,
         // ★2026-08-14修正: emitChannelのflags構築(このファイル冒頭)と同じ
         // hasNoteEnvフォールバックが、emitScore側のこの独立したflags構築には

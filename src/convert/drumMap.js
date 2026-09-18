@@ -18,8 +18,8 @@
  *
  * ノート番号:
  *   レーン0を NOTE_BASE とし、レーン1つにつき半音1つ。★16 にしてあるのは ppmck の
- *   2A03ノイズchの音域に合わせるため: ノイズchはノート番号 n が周期index 31-n を選ぶので
- *   (src/mml/compiler.js noisePeriodIndex、vgm2mml/expansion/sn76489.js noiseFreqToNote)、
+ *   2A03ノイズchの音域に合わせるため: 変換イベント空間ではノイズのノート番号 n が周期index 31-n
+ *   (MML.Convert.noiseNoteToIndex、MMLへは n<idx> で書く。vgm2mml/expansion/sn76489.js noiseFreqToNote も同じ)なので、
  *   有効なノート番号は 16〜31 のちょうど16個。レーン上限16と1対1で対応する。
  *   ドラムパートの既定の借用先が2A03ノイズなので、この対応が取れていないと
  *   上限側のレーンが無効なノート番号になって落ちる。

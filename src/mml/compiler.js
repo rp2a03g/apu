@@ -34,7 +34,10 @@
  * 対応コマンド:
  *   c d e f g a b  音符 (+ / # でシャープ, - でフラット, 数値で音長, . で付点)
  *   r              休符
- *   n<num>[,<len>] 直接音程指定 (オクターブ2のCを0とした通し番号)
+ *   n<num>[,<len>] 直接音程指定 (オクターブ2のCを0とした通し番号。★ノイズch(D)では周期index 0-15 の
+ *                  直値=本家ppmck準拠。n0が最も高い(速い)ノイズ、n15が最も低い。16以上は16で巡回し警告)
+ *                  ノイズch(D)の音符 c〜b は半音番号0-11がそのまま周期index(オクターブ・Kは無視、
+ *                  本家ppmckと同じ。12-15は n12〜n15 でのみ書ける)
  *   o<n> > <       オクターブ指定 / 上げ / 下げ
  *   l<n>[.]        デフォルト音長
  *   v<n>           音量 (0-15、絶対指定。FDS/VRC6のこぎり波だけは本家ppmck同様0-63で、
@@ -64,11 +67,19 @@
  *                  持続適用。同じ音を別チャンネルでわずかにずらして鳴らすコーラス効果等に使う。
  *                  2A03パルス/三角/ノイズ(A/B/C/D)・VRC6・MMC5・FME7・FDS・N163対応(N163は
  *                  周波数レジスタが18bit相当のスケールのため同じ値でも変化量は小さくなる)。
+ *                  ノイズ(D)では周期index(0-15)への加減算を本家ppmckどおり8bitで桁あふれさせる:
+ *                  $400E = (index − D − EP − MP − PT) & $FF なので D16 n0〜n15 → $F0〜$FF(bit7=短周期)。
+ *                  wikiwiki.jp/mck の「短周期ノイズは D16〜D1、長周期は D0〜D-15」がそのまま鳴る
+ *                  (2026-09-18、実ppmck09aツールチェーンのNSFと$400E列を突き合わせて確認)。
  *                  VRC7はfnum/blockの対数的表現のため対象外。EP/MPと全く同じ「生レジスタへの
  *                  加算」空間の値(下記参照)なので、この3つは同時に足し合わされる
  *   @<n>           音色番号 (パルスのデューティ比 = n % 4 / VRC6パルスのデューティ比 = n % 8
  *                  (実機同様8段階) / VRC7の音色番号 = n % 16)。実機同様、@@<n>で有効化した
  *                  デューティエンベロープはこのコマンドで解除される
+ *                  ★ノイズch(D)では本ツール独自拡張: @0=長周期(既定、ホワイトノイズ)/@1=短周期
+ *                  (93ステップの周期性ノイズ=金属的な音程感。$400E bit7)。本家ppmckはノイズchの@を
+ *                  エラーにするので衝突しない。本家由来の「D16 n0〜n15 で短周期」(ディチューンの
+ *                  8bit桁あふれでbit7が立つ技、下記D<n>参照)もそのまま使える
  *   @<n>={...}     デューティ(音色)エンベロープ定義(値0-7、"|"でループ位置)。@v<n>の音色版で、
  *                  1フレーム1ステップでデューティ比が変化する(実機ppmckのgetTone/tone_tbl)
  *   @@<n>          デューティ(音色)エンベロープの選択(実機の音色バイトbit7=0=自作音色)。
@@ -379,9 +390,19 @@
     return Math.max(0, Math.min(2047, p));
   }
 
+  // 2A03ノイズ: NTSCの周期テーブル(CPUサイクル、apu2a03.jsのNOISE_PERIODと同じ)。
+  // ノイズchのセグメントは noteNumber=周期index(0-15、本家ppmck準拠で n0=最も速い)を持ち、
+  // freq にはLFSRのシフトレート(=聴感上の「高さ」の目安)を入れる。
+  // ★2026-09-18まで noteNumber は通常の音程番号で index=15-(note%16) と反転写像していた
+  //   (o4c=15=最低音、16半音で一周、オクターブが効く)。本家ppmck09aを実ビルドして$400E列を
+  //   読むと「音符の半音番号(c=0…b=11)がそのままindex、オクターブ無視、n<num>は直値」で、
+  //   同じMMLが別の音になっていたため本家準拠へ切り替えた(ppmck-noise-channel-spec)。
+  const NOISE_PERIOD_CPU = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068];
   function noisePeriodIndex(noteNumber) {
-    const idx = ((noteNumber % 16) + 16) % 16;
-    return 15 - idx;
+    return ((Math.round(noteNumber) % 16) + 16) % 16;
+  }
+  function noiseLfsrRate(periodIdx) {
+    return CPU_CLOCK_NTSC / NOISE_PERIOD_CPU[noisePeriodIndex(periodIdx)];
   }
 
   // VRC6 矩形波(サウ): freq = CLOCK / (14 * (period+1))
@@ -668,8 +689,15 @@
   //   (2A03パルスA/B・三角波)のみ。対象外チャンネルではNSF書き出し(ppmckDriver.jsの
   //   RD_PITCHSHIFT)が「グライドせず通常のアタック」へフォールバックする設計なので、
   //   ブラウザ再生側も同じく通常の音符として扱い両者を一致させる(2026-08-16)
+  //   noise: 2A03ノイズch(D)。音符/n<num>を周期index(0-15)として解釈し、o/>/</Kを無視する
+  //   (本家ppmck準拠、noisePeriodIndex冒頭コメント参照)。warnings(任意): ここで見つけた
+  //   「エラーではないが意図と違う可能性」を積む配列(呼び出し側のwarningsへ合流させる)
   function buildSegments(tokens, initialTempo, errors, settings, defaultInstrument, chanCaps) {
     const caps = chanCaps || { selfDelay: true, toneEnv: 'duty', psAllowed: false };
+    const warnings = caps.warnings || [];
+    // ノイズchで無視/丸めたコマンドの警告は1チャンネル1回だけ(打楽器パートは同じ書き方を
+    // 何百回も繰り返すので、出現ごとに出すと警告欄が埋まる)
+    const noiseWarned = { transpose: false, directNote: false, instrument: false };
     const cfg = settings || { octaveRev: 0, gateDenom: 8 };
     // volMax: v<n>の上限。本家ppmck(datamake.c _VOLUME)と同じくFDS/VRC6のこぎり波だけ63、
     // 他は15。volDefault: v<n>未指定時の音量(FDS=32=実効フルゲイン、VRC6サウ=63、他=15)
@@ -911,12 +939,26 @@
           break;
         }
         case 'tempo': tempo = tok.value; break;
-        case 'transpose': state.transpose = tok.value; break;
-        case 'detune': state.detune = tok.value; break;
+        case 'transpose':
+          // ノイズch: 本家ppmckはKをノイズtrackでエラーにする(datamake.c ALLTRACK&~NOISETRACK)。
+          // 周期indexは音程ではないので移調に意味が無く、無視して警告だけ出す
+          if (caps.noise) {
+            if (!noiseWarned.transpose) { noiseWarned.transpose = true; warnings.push({ srcStart: tok.srcStart, message: T('K(移調)はノイズchでは無効です(本家ppmck準拠、周期indexは移調できません)') }); }
+            break;
+          }
+          state.transpose = tok.value; break;
+        // D255 は本家ppmckの「ディチューン解除」(datamake.c _DETUNE: 255だけ範囲外でも通す番兵。
+        // wikiの作例 `D255 n0n1…` はこれ)。0と同じ意味に正規化する
+        case 'detune': state.detune = tok.value === 255 ? 0 : tok.value; break;
         // @<n>: 固定の音色指定。実機同様デューティ(音色)エンベロープ@@<n>を解除する
         // (ppmck internal.h duty_select_part が effect_flag のデューティエンベ有効ビットを
-        // 落とすのと同じ)
-        case 'instrument': state.instrument = tok.value; state.toneEnv = null; break;
+        // 落とすのと同じ)。ノイズchでは @0=長周期/@1=短周期(本ツール独自拡張)
+        case 'instrument':
+          if (caps.noise && tok.value !== 0 && tok.value !== 1 && !noiseWarned.instrument) {
+            noiseWarned.instrument = true;
+            warnings.push({ srcStart: tok.srcStart, message: T('ノイズchの @<n> は 0(長周期)か 1(短周期)です(@{v} は下位1bitで解釈します)', { v: tok.value }) });
+          }
+          state.instrument = tok.value; state.toneEnv = null; break;
         // @@<n>: 実機ppmckの音色バイトbit7=0(自作音色)。意味はチップによって変わる。
         //   ・デューティ比を持つチップ(2A03パルスA/B・VRC6パルス・MMC5パルス)
         //     → @<n>={...}で定義したデューティエンベロープの選択(caps.toneEnv==='duty')
@@ -1070,7 +1112,12 @@
           }
           let freq = null;
           let noteNumber = null;
-          if (tok.name !== 'r') {
+          if (tok.name !== 'r' && caps.noise) {
+            // ノイズch: 半音番号(c=0…b=11、c-=11/b+=0で巡回)がそのまま周期index。オクターブ・Kは
+            // 無視(本家ppmck frequency_set は音階データの下位4bitしか見ない)。12-15は n12〜n15
+            noteNumber = noisePeriodIndex(NOTE_SEMITONES[tok.name] + tok.accidental);
+            freq = noiseLfsrRate(noteNumber);
+          } else if (tok.name !== 'r') {
             noteNumber = state.octave * 12 + NOTE_SEMITONES[tok.name] + tok.accidental + state.transpose;
             freq = noteFrequency(noteNumber);
           }
@@ -1089,9 +1136,19 @@
             frames = lenResult.frames;
             lengthCarry = lenResult.carryOut;
           }
-          // n<num>: オクターブ2のCを0とした通し番号
-          const noteNumber = tok.num + 24 + state.transpose;
-          const freq = noteFrequency(noteNumber);
+          // n<num>: オクターブ2のCを0とした通し番号。ノイズchでは周期index 0-15 の直値(本家ppmck準拠)
+          let noteNumber, freq;
+          if (caps.noise) {
+            if ((tok.num < 0 || tok.num > 15) && !noiseWarned.directNote) {
+              noiseWarned.directNote = true;
+              warnings.push({ srcStart: tok.srcStart, message: T('ノイズchの n<num> は周期index 0〜15 です(n{v} は 16 で巡回して n{w} として鳴らします)', { v: tok.num, w: noisePeriodIndex(tok.num) }) });
+            }
+            noteNumber = noisePeriodIndex(tok.num);
+            freq = noiseLfsrRate(noteNumber);
+          } else {
+            noteNumber = tok.num + 24 + state.transpose;
+            freq = noteFrequency(noteNumber);
+          }
           recordNote('note', tok, frames, noteNumber,
             segments.length > 0 && segments[segments.length - 1].tieNext,
             state.pendingPitchShift && caps.psAllowed);
@@ -1930,38 +1987,40 @@
         }
       } else if (channel === 'D') {
         if (seg.freq != null) {
-          // ノイズは4bitインデックス(0-15)のみなので、周期/周波数レジスタの代わりに
-          // インデックスへ直接足し引きする。EN(ノート番号空間)でベースindexを求めた後、
-          // D/EP/MP(生オフセット空間、pitchRegisterOffset)を同じくindexへ加算しクランプする
+          // ノイズ(本家ppmck準拠、2026-09-18。noisePeriodIndex冒頭コメント/ppmck-noise-channel-spec):
+          //   $400E = ((周期index + EN) & 15 − D − EP − MP − PT) & $FF | (@1 なら $80)
+          // 本家ドライバはノイズにも他chと同じ freq_add_mcknumber で8bit加減算するだけなので、
+          // D16 n0 → 0−16 = $F0 のように桁あふれで bit7(短周期)が立つ。wikiwiki.jp/mck の
+          // 「短周期は D16〜D1、長周期は D0〜D-15」はこの挙動そのもので、そのまま鳴らす。
+          // @1(本ツール独自)は bit7 を OR するだけ(桁あふれと両立)。bit6-4 は実機が無視する。
+          // EN はノート空間なので index に足してから 16 で巡回(本家は12巡回で n12〜n15 が
+          // 壊れるが、16段全部を使えるようにする=ユーザー決定)。
+          // ★NSF書き出し側(ppmckDriver.js LOOKUP_NOISE_PERIOD/WFV_T3/WFO_T3)も同じ式。
+          const modeBit = (seg.instrument & 1) ? 0x80 : 0;
           if (hasPitchModulation(seg) || seg.detune) {
-            let lastIdx = -1;
+            let lastVal = -1;
             // ノイズchは周期/周波数レジスタではなく離散indexなのでperiodFnが無く、
-            // periodFnIncreasingによる方向自動判定ができない。direction=-1固定とする(下記)。
-            // ★NSF書き出し側(ppmckDriver.js LOOKUP_NOISE_PERIOD/WFO_T3、MP_DIR_TABLEのノイズ=+1)も
-            // 2026-09-14からこの経路と同じ計算(index+D/EP/MP/PT→0-15クランプ)で、6502との
-            // フレーム突き合わせで一致を確認済み。本家ppmckもノイズ周期にEP/ENが効く。
+            // periodFnIncreasingによる方向自動判定ができない。index は小さいほど高い音なので
+            // MP/D/EP/PT の向きは周期レジスタ系と同じ -1 固定(MML値は全音源「正=音程が上がる」、
+            // pitchRegDir参照。本家の freq_vector_table もノイズ=$00=周期系で同じ向き)
             const mpActive = seg.vibrato != null && seg.vibrato !== 255;
-            // ノイズの周期indexは小さいほど高い音なので、MP/D/EP/PTの向きは周期レジスタ系と同じ-1
-            // (MML値は全音源「正=音程が上がる」、pitchRegDir参照。2026-09-14)
             const vibSeq = mpActive ? vibratoSequence(env.mp[seg.vibrato], dur, -1) : null;
-            // ポルタメントはtarget自体が符号付きなのでMPのような方向判定は不要(ノイズchも
-            // 同様に対応できる)
+            // ポルタメントはtarget自体が符号付きなのでMPのような方向判定は不要
             const ptSeq = seg.portamento ? portamentoSequence(seg.portamento, dur) : null;
             for (let t = 0; t < dur; t++) {
               const { noteNumber: baseNoteNumber } = activePitchAt(seg, t);
               const enOffset = noteEnvelopeOffset(seg, env, t);
-              const baseIdx = noisePeriodIndex(Math.round(baseNoteNumber + enOffset));
+              const baseIdx = noisePeriodIndex(baseNoteNumber + enOffset);
               const regOffset = pitchRegisterOffset(seg, env, t, vibSeq, ptSeq, null, null, -1);
-              const idx = Math.max(0, Math.min(15, Math.round(baseIdx + regOffset)));
-              if (idx !== lastIdx) {
-                writeLog[startFrame + t].push({ addr: base + 2, value: idx & 0x0F });
+              const val = ((baseIdx + Math.round(regOffset)) & 0xFF) | modeBit;
+              if (val !== lastVal) {
+                writeLog[startFrame + t].push({ addr: base + 2, value: val });
                 writeLog[startFrame + t].push({ addr: base + 3, value: 0x00 });
-                lastIdx = idx;
+                lastVal = val;
               }
             }
           } else {
-            const periodIdx = noisePeriodIndex(seg.noteNumber);
-            writeLog[startFrame].push({ addr: base + 2, value: periodIdx & 0x0F });
+            writeLog[startFrame].push({ addr: base + 2, value: noisePeriodIndex(seg.noteNumber) | modeBit });
             writeLog[startFrame].push({ addr: base + 3, value: 0x00 });
           }
           if (vTable) {
@@ -2881,6 +2940,8 @@
     let totalFrames = 0;
 
     const fme7Letters = new Set(expansionLetterMap.fme7 || []);
+    // buildSegmentsが積む警告(ノイズchで無視したK等)。warningsの宣言が後なので一旦ここへ集める
+    const segmentWarnings = [];
     // SD(セルフディレイ)が使えないチャンネル。本家ppmckのコマンド表(datamake.c)で
     // SD/SDOF/SDQRの対応トラックが ALLTRACK & ~TRACK(2) & ~DPCMTRACK になっているため、
     // 三角波(C)とDPCMチャンネルを除外する(三角波は音量制御自体が無くリリース
@@ -2918,6 +2979,8 @@
         vrc7: vrc7Letters.has(ch),
         n163: (expansionLetterMap.n163 || []).includes(ch),
         psAllowed: ch === 'A' || ch === 'B' || ch === 'C',
+        noise: ch === 'D',
+        warnings: segmentWarnings,
         // 音量6bitチャンネル(本家ppmck FMTRACK|VRC6SAWTRACK相当)。FDSは$4080の実効ゲインが
         // 32で頭打ちなので既定音量32、VRC6サウは蓄積レートそのままなので63
         volMax: (fdsLetters.has(ch) || ch === vrc6SawLetter) ? 63 : 15,
@@ -2983,7 +3046,7 @@
     // seg.freq=null にすると以降のwriteLog生成では休符として扱われ、音程は変えずに
     // その音だけ無音になる。警告はチャンネルごとに1件へまとめる(同じ低音が延々続く曲で
     // メッセージが溢れないように、件数だけ添える)。
-    const warnings = [];
+    const warnings = [...segmentWarnings];
     for (const message of score.issues) warnings.push({ message });
     // @DPCM<n> の .dmc が台帳(opt.dpcmSamples)に無い: 以前は黙って無音にしていた(2026-09-16)。
     // kind は src/convert/verify.js が除外するための印(音程検証は意図的にサンプル無しでコンパイルする)
@@ -3100,10 +3163,13 @@
     }
 
     // y<adr>,<num>(レジスタ直接書き込み)。音源チップに関わらずどのチャンネルでも同じ
-    // 意味(生バイト書き込み)なので、2A03基本chと全拡張音源chへ一律に差し込む
+    // 意味(生バイト書き込み)なので、2A03基本chと全拡張音源chへ一律に差し込む。
+    // ★同じフレームの音符より前に置く(prepend、2026-09-18)。本家ppmckも本ツールのNSFドライバも
+    //   「コマンドを順に実行→音符のレジスタ書き込み」の順なので、`y$400E,$80 c4` の y は直後の
+    //   音符に上書きされる。以前は後置きだったためブラウザ再生だけ y が勝ち、NSFと音が違っていた
     for (const ch of channelLetters) {
       spliceImmediateWrites(tracks[ch], immediateWritesByChannel[ch], 'rawWrite', totalFrames,
-        iw => ({ writes: [{ addr: iw.addr, value: iw.value }] }));
+        iw => ({ writes: [{ addr: iw.addr, value: iw.value }] }), true);
     }
 
     // L(ループ地点)が使われている場合、このツール(ブラウザ再生・シークバー)での

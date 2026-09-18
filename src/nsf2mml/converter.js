@@ -125,11 +125,10 @@
     // 丸めは全形式共通(基準ピッチ #TUNING 込み。src/convert/options.js MML.Convert.freqToNote)
     return MML.Convert.freqToNote(freq);
   }
-  // ノイズ periodIdx (0-15) → MML noteNumber
-  // noisePeriodIndex(noteNumber) = 15 - (noteNumber % 16)
-  // → noteNumber = 15 - periodIdx  (+16 でオクターブ調整)
+  // ノイズ periodIdx (0-15) → 変換イベント空間のノート番号(31 − idx)。MMLへは mmlEmit が
+  // n<idx> に戻して書く(MML.Convert.noiseIndexToNote / noiseNoteToIndex 冒頭コメント)
   function noisePeriodToNoteNum(periodIdx) {
-    return (31 - periodIdx); // o2 g 〜 o1 e の範囲
+    return MML.Convert.noiseIndexToNote(periodIdx);
   }
 
   // ── タイムライン構築 ──────────────────────────────────────────
@@ -1024,8 +1023,11 @@
       ev.note !== null ? toPitchFields(ev) : {},
       ev.note !== null ? toNoteEnvFields(ev) : {}
     ));
+    // ノイズの mode($400E bit7、1=短周期)は @0/@1 として出す(2026-09-18。それまでは抽出だけして
+    // MMLに出しておらず、短周期を使う曲が無言で長周期に化けていた)
     const chEventsD = evD.map(ev => Object.assign(
       { start: ev.start, end: Inst.endOf(ev), note: ev.on ? noisePeriodToNoteNum(ev.periodIdx) : null },
+      ev.on ? { instrument: ev.mode ? 1 : 0 } : {},
       ev.on ? toVolumeFields(ev) : {}
     ));
     // スラー分割(2026-08-12): 純粋な音程変化のみで区切られ、両側とも十分な長さ+
@@ -1059,7 +1061,7 @@
       { letter: 'A', events: chEventsA, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true, hasPitchMod: true, hasSweep: true },
       { letter: 'B', events: chEventsB, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true, hasPitchMod: true, hasSweep: true },
       { letter: 'C', events: chEventsC, hasDetune: true, hasPitchMod: true },
-      { letter: 'D', events: chEventsD, hasVolume: true, hasEnvelope: true },
+      { letter: 'D', events: chEventsD, hasVolume: true, hasEnvelope: true, hasInstrument: true },
       ...(dpcmLetter ? [{ letter: dpcmLetter, events: dpcmEvents, hasInstrument: true }] : []),
     ];
 

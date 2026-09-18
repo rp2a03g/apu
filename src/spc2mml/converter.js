@@ -72,8 +72,8 @@
   // ── SPCノイズ→2A03ノイズ周期idx変換 ─────────────────────────────────
   // SPCのノイズはFLG($6C)下位5bitのレートでLFSRを進める(spcDsp.js _updateNoise、
   // 更新周波数=32000/RATE_TABLE[rate])。2A03ノイズの16通りの周期(NTSC)のうち聴感上
-  // 最も近いものへ対数距離で丸め、nsf2mml converter.jsのnoisePeriodToNoteNumと同じ
-  // 規則(noteNumber = 31 - periodIdx)でノート番号にする。
+  // 最も近いものへ対数距離で丸め、変換イベント空間の約束(noteNumber = 31 - periodIdx、
+  // MML.Convert.noiseNoteToIndex。MMLへは mmlEmit が n<idx> で書く)でノート番号にする。
   const SPC_RATE_TABLE = [
     0,2048,1536,1280,1024,768,640,512,384,320,256,192,160,128,96,80,
     64,48,40,32,24,20,16,12,10,8,6,5,4,3,2,1,
