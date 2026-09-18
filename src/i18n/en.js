@@ -735,7 +735,6 @@
     'DPCM: 定義 {clips} 件 / 打点 {segments} 個 / ROM {kb} KB': 'DPCM: {clips} definitions / {segments} hits / {kb} KB of ROM',
     '音符の抽出': 'Note extraction',
     '打楽器を音符にする': 'Turn percussion into notes',
-    'VGMのサンプルPCMで音程が取れなかった発音(ドラム/効果音)を1本のドラムパートにまとめ、サンプルごとに音程を割り当てる(OFFなら休符)': 'Collect VGM sample-PCM hits with no detectable pitch (drums / SFX) into a single drum part, assigning one pitch per sample (off = rests)',
     '{ch} のサンプルの基準音を補正します。\n現在: {cur}{manual}\n音名(例: C4)、またはセント補正(例: +20 / -15)を入力。空欄で補正解除。':
       'Calibrate the base pitch of the sample on {ch}.\nCurrent: {cur}{manual}\nEnter a note name (e.g. C4) or a cent offset (e.g. +20 / -15). Leave empty to clear.',
     '音程なし': 'no pitch',
@@ -966,12 +965,13 @@
     '2A03ハードウェアスイープ': '2A03 hardware sweep',
     '譜面整形(近似)': 'Score shaping (approximate)',
     // ---- 変換設定ダイアログ(2026-09-08 整理後の文言、src/ui/convertSettings.js) ----
-    'ドラム': 'Drums',
+    '打楽器パート': 'Drum part',
+    'ドラムパッド(DPCM(E)/ノイズ(D))へ載せた打楽器の打点を音符にして出す(OFFなら打楽器パートごと出さない)。MMLコマンドではなくパートのON/OFF': 'Emit the drum-pad hits (DPCM (E) / noise (D)) as notes (off = no drum part at all). Not an MML command but the on/off of the part itself',
     '次の音符まで(推奨)': 'Up to the next note (recommended)',
     '音量ゼロで区切る': 'Cut at zero volume',
     '「忠実再現」は元曲の演奏をそのまま、「プレーン譜面」は音階と音色だけ(編曲の出発点)。どれかを触ると「カスタム」になります':
       '"Faithful" keeps the original performance; "Plain score" keeps only pitches and instruments (a starting point for arranging). Changing anything makes it "Custom"',
-    '出すコマンド': 'Commands to emit',
+    '出力コマンド': 'Commands to emit',
     'OFFにしたコマンドは出力しません(説明は各項目にマウスを載せると出ます)': 'Commands turned off are not emitted (hover an item for its description)',
     '譜面の書き方': 'Score notation',
     '「次の音符まで」は音符をキーオン間隔まで伸ばし、無音を@v表の末尾0かゲートで表す(再生は変わらない)。「音量ゼロ」は元の細かい区切りのまま':
@@ -994,7 +994,7 @@
     '段の並びが同じで長さが±1違うだけの@v/@vr表を1本にまとめる(段の境目が最大1フレーム動く)': 'Merge @v/@vr tables with the same step sequence whose step lengths differ by at most 1 (step boundaries may move by up to 1 frame)',
     '合成chの複製パートを省く(近似)': 'Drop duplicate parts in merged channels (approximate)',
     'デチューン二重化・エコーを1本にする': 'Reduce detuned doubling / echo to one part',
-    'PSFやMultiPCM等の合成chで、同じ旋律を別のボイスで重ねたデチューン二重化や数フレーム遅れのエコーを検出し、複製側の音符を変換から外します(何を省いたかはMMLのヘッダに書きます)。ppmckにはディレイもコーラスも無いので、複製の分だけチャンネルを節約できます。OFFでも、N163等の枠へ自動で載せるチャンネルを選ぶときは複製を後回しにします': 'In merged channels (PSF, MultiPCM, etc.), detects detuned doubling (the same melody layered on another voice) and echoes delayed by a few frames, and leaves the duplicate notes out of the conversion (the MML header says what was dropped). ppmck has neither delay nor chorus, so this saves the channels the duplicates would use. Even when OFF, duplicates are chosen last when channels are picked automatically for N163 and other slots',
+    '合成ch(鍵盤表示・ロールの「合成ch」と同じ。PSF/C352/C140/QSound/MultiPCM/SegaPCM などプール式PCMの論理レーン)で、同じ旋律を別のボイスで重ねたデチューン二重化や数フレーム遅れのエコーを検出し、複製側の音符を変換から外します(何を省いたかはMMLのヘッダに書きます)。ppmckにはディレイもコーラスも無いので、複製の分だけチャンネルを節約できます。OFFでも、N163等の枠へ自動で載せるチャンネルを選ぶときは複製を後回しにします': 'In merged channels (the same "merged ch" as in the keyboard view and roll: the logical lanes of pool-type PCM such as PSF / C352 / C140 / QSound / MultiPCM / SegaPCM), detects detuned doubling (the same melody layered on another voice) and echoes delayed by a few frames, and leaves the duplicate notes out of the conversion (the MML header says what was dropped). ppmck has neither delay nor chorus, so this saves the channels the duplicates would use. Even when OFF, duplicates are chosen last when channels are picked automatically for N163 and other slots',
     '詳細設定': 'Advanced',
     'N163波形': 'N163 waves',
     'RAMと音域の両方に収まるように縮める(推奨)': 'Shrink to fit both RAM and range (recommended)',

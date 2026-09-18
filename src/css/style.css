@@ -2744,23 +2744,35 @@ button.secondary {
 }
 .kbd-dpcm-status-bar > i { display: block; height: 100%; width: 0; background: var(--accent); }
 
-/* 変換設定ダイアログ(2026-09-08 に整理): 1段組で上から プリセット/テンポ → 出すコマンド(チップ) →
-   譜面の書き方 → 詳細設定(折りたたみ)。説明は各行の薄い文かホバーの title に留めて1画面に収める */
-.cs-modal { width: min(720px, 94vw); max-width: 94vw; }
-.cs-modal .es-modal-body { display: block; }
+/* 変換設定ダイアログ(2026-09-18 に再整理): 上から プリセット|変換テンポ(横並び) → 変換ログ → 出力コマンド(チップ) →
+   譜面の書き方(折りたたみ) → 出力の書式(折りたたみ) → 詳細設定/N163(折りたたみ)。
+   説明は各行の薄い文かホバーの title に留め、行の余白を詰めて1画面に収める */
+.cs-modal { width: min(760px, 94vw); max-width: 94vw; }
+.cs-modal .es-modal-body { display: block; padding: 8px 12px; }
+/* プリセットと変換テンポを横並びにする(ユーザー指示 2026-09-18) */
+.cs-top { display: grid; grid-template-columns: auto 1fr; gap: 8px; margin-bottom: 8px; }
+.cs-top > .es-section { margin-bottom: 0; }
+/* グループの塗り分け(薄い色。枠線も同系で少し濃く)。ユーザー要望「グループをもっとわかりやすく」 */
+.cs-group--preset { background: rgba(111, 177, 255, 0.07); border-color: rgba(111, 177, 255, 0.35) !important; }
+.cs-group--log    { background: rgba(255, 255, 255, 0.03); }
+.cs-group--cmd    { background: rgba(116, 224, 142, 0.07); border-color: rgba(116, 224, 142, 0.35) !important; }
+.cs-group--score  { background: rgba(255, 196, 96, 0.07);  border-color: rgba(255, 196, 96, 0.35) !important; }
+.cs-group--layout { background: rgba(196, 150, 255, 0.07); border-color: rgba(196, 150, 255, 0.35) !important; }
+.cs-group--adv    { background: rgba(255, 255, 255, 0.02); }
 /* 項目の区切りが分かりにくい、というユーザー指摘(2026-09-09)への対応:
    セクションは枠で囲み、中の行は1本の区切り線で分ける。説明は短文だけを出し、
    長文は行の title(ホバー)へ回す(convertSettings.js line()) */
 .cs-modal .es-section {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 6px 10px 4px;
+  padding: 5px 10px 3px;
 }
 .cs-modal .es-section h3 {
-  margin: 0 0 4px;
-  padding-bottom: 3px;
+  margin: 0 0 3px;
+  padding-bottom: 2px;
   border-bottom: 1px solid var(--border);
+  opacity: 0.9;
 }
 .cs-line + .cs-line { border-top: 1px solid var(--border); }
 .cs-modal .es-section > .cs-desc { padding-top: 2px; }
@@ -2778,7 +2790,7 @@ button.secondary {
 /* 譜面の書き方 / 詳細設定: 1行=コントロール+名前+追加入力(許容フレーム等)+説明 */
 .cs-line {
   display: grid; grid-template-columns: 1.4em 11.5em auto 1fr; align-items: center; gap: 8px;
-  padding: 5px 2px; cursor: pointer;
+  padding: 3px 2px; cursor: pointer;
 }
 .cs-line:hover { background: var(--hover-bg); }
 .cs-line > .cs-key { font-weight: 600; }
@@ -2789,16 +2801,20 @@ button.secondary {
 .cs-num { width: 3.2em; font-size: 12px; padding: 2px 4px; text-align: right; }
 .cs-num:disabled { opacity: 0.5; }
 .cs-details {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 6px 10px 4px;
+  padding: 5px 10px 3px;
 }
+/* 折りたたみの見出しは開いている区画の h3 と同じ見た目(閉じているときは薄く) */
 .cs-details > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-muted); user-select: none; }
-.cs-details[open] > summary { margin-bottom: 4px; }
+.cs-details[open] > summary { margin-bottom: 3px; padding-bottom: 2px; border-bottom: 1px solid var(--border); color: var(--text); opacity: 0.9; }
 .cs-tempo { width: 76px; }
 .cs-tempo-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .cs-tempo-row .es-preset { flex: 0 0 auto; min-width: 0; padding: 4px 12px; }
+.cs-modal .es-preset-row { gap: 6px; }
+.cs-modal .es-preset-row .es-preset { padding: 4px 12px; }
+@media (max-width: 700px) { .cs-top { grid-template-columns: 1fr; } }
 /* コンバート開始は見出しの左端(ユーザー指示) */
 .cs-modal .es-modal-header { display: flex; align-items: center; gap: 10px; cursor: move; user-select: none; }
 /* 見出し行のドラッグで動かしたあと(convertSettings.js makeDraggable): 中央寄せをやめて指定位置に固定 */
@@ -2821,9 +2837,10 @@ button.secondary {
 /* 見出しは中身なりの幅、その右にボタン。× は右端へ寄せる */
 .cs-modal .es-modal-header > span { flex: none; }
 .cs-modal .es-modal-header > .es-modal-close { margin-left: auto; }
-/* 変換の進捗/結果ログ(実体は各パネルの #<fmt>FileStatus を写したもの) */
+/* 変換の進捗/結果ログ(実体は各パネルの #<fmt>FileStatus を写したもの)。高さは常に6行分(ユーザー指示 2026-09-18) */
 .cs-log {
-  min-height: 44px; max-height: 160px; overflow-y: auto;
+  --cs-log-lines: 6; line-height: 1.35;
+  height: calc(11px * 1.35 * var(--cs-log-lines) + 10px); /* +10 = 上下padding 8 + 枠線 2 */ overflow-y: auto;
   padding: 4px 6px; border-radius: 4px;
   background: var(--surface); border: 1px solid var(--border);
   font-family: var(--mono); font-size: 11px; color: var(--text-secondary);
@@ -2947,25 +2964,6 @@ button.secondary {
   outline: 2px solid var(--accent);
   outline-offset: 0;
 }
-
-/* --- 開発用: 現在アクティブなウィンドウのサイズ表示(右下固定) --- */
-.window-size-indicator {
-  position: fixed;
-  right: 10px;
-  bottom: 8px;
-  z-index: 2147483647;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-muted);
-  background: rgba(20, 20, 26, 0.7);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px 6px;
-  pointer-events: none;
-  user-select: none;
-  display: none;
-}
-.window-size-indicator.visible { display: block; }
 
 /* --- MMLコマンドヘルプ (src/ui/helpPanel.js) --- */
 .help-window-body {

@@ -9,8 +9,10 @@
  * 狙い: 熟練者が「ほぼ音階だけのプレーンな譜面」から編曲を始められるよう、セント単位の
  * 補正コマンド(D/EP/MP/PT/EN)や音量エンベロープ(@v)を出す/出さないを選べるようにする。
  * 6形式共通の1つの設定で、ダイアログの見た目はカラー設定(editorSettings.js の es-modal)を流用。
- * 画面構成は 2026-09-08 に整理(プリセット/テンポ → 出すコマンド(チップ) → 譜面の書き方 → 詳細設定(折りたたみ))。
- * 項目の説明はホバーの title か各行の薄い文で出し、1画面に収める。
+ * 画面構成は 2026-09-18 に再整理(プリセット|変換テンポ → 変換ログ → 出力コマンド(チップ) →
+ * 譜面の書き方(折りたたみ) → 出力の書式(折りたたみ) → 詳細設定/N163(折りたたみ)。折りたたみは全部閉が既定)。
+ * 項目の説明はホバーの title か各行の薄い文で出し、1画面に収める。グループは薄い色で塗り分ける(CSS .cs-group--*)。
+ * 折りたたみの開閉は localStorage に覚える(OPEN_KEY)。
  */
 (function (global) {
   'use strict';
@@ -21,14 +23,15 @@
   const btnId = (fmt, suffix) => 'btn' + fmt[0].toUpperCase() + fmt.slice(1) + suffix;
   const T = (key, params) => MML.I18n.t(key, params);
   const STORAGE_KEY = 'mml.convertCmd.v1';
+  const OPEN_KEY = 'mml.convertSettings.open.v1'; // 折りたたみ区画の開閉状態 { score, layout, advanced, n163 }
 
-  // ── 画面構成(2026-09-08 に整理。ユーザー要望「ややこしくなったのでスッキリ」) ──
-  //   1. プリセット + 変換テンポ
-  //   2. 出すコマンド … チェック付きのチップを1段に並べる(説明はホバーの title)
-  //   3. 譜面の書き方 … 音符の区切り / ゲートを揃える(近似)+許容 / 短い休符を吸収(近似) / 似た@v表を統合(近似)
+  // ── 画面構成(2026-09-18 に再整理。ユーザー要望「1画面に収める・グループを分かりやすく」) ──
+  //   1. プリセット | 変換テンポ(横並び)、その下に変換ログ
+  //   2. 出力コマンド … チェック付きのチップを1段に並べる(説明はホバーの title)
+  //   3. 譜面の書き方(折りたたみ) … 音符の区切り / ゲートを揃える(近似)+許容 / 短い休符を吸収(近似) / 似た@v表を統合(近似)
   //      「(近似)」が付くものは音が数フレーム変わりうる整形、付かないものは再生が変わらない厳密な変形
-  //   4. 詳細設定(折りたたみ) … ピッチ精度(SA) / N163波形 / 基準ピッチ+最小偏差
-  // 出すコマンド(キー, チップ表示, ホバー説明)
+  //   4. 出力の書式(折りたたみ) / 詳細設定(折りたたみ) / N163(折りたたみ)
+  // 出力コマンド(キー, チップ表示, ホバー説明)
   const CMD_CHIPS = () => [
     ['D',     'D',        T('チャンネル間デチューン(セント単位の音程補正)')],
     ['EP',    'EP',       T('ピッチエンベロープ(MP/PTで表せない揺れの受け皿)')],
@@ -39,7 +42,9 @@
     ['V',     'v',        T('音量そのもの(OFFなら v を一切出さない)')],
     ['INST',  '@ OP MH N', T('音色/デューティ/VRC7音色/FDS変調/FME7ノイズ周期')],
     ['SWEEP', 's',        T('2A03ハードウェアスイープ')],
-    ['DRUM',  T('ドラム'), T('VGMのサンプルPCMで音程が取れなかった発音(ドラム/効果音)を1本のドラムパートにまとめ、サンプルごとに音程を割り当てる(OFFなら休符)')],
+    // ★DRUM は MML コマンドではなく「打楽器パートを出すか」のスイッチ(全6形式の *2mml が cmd.DRUM !== false で見る)。
+    //   ドラムパッド(DPCM(E)/ノイズ(D))へ載せた打点を音符化する経路そのものの ON/OFF
+    ['DRUM',  T('打楽器パート'), T('ドラムパッド(DPCM(E)/ノイズ(D))へ載せた打楽器の打点を音符にして出す(OFFなら打楽器パートごと出さない)。MMLコマンドではなくパートのON/OFF')],
   ];
   // 音符の区切り(src/convert/options.js NOTE_END、src/convert/envelope.js applyNoteEnd)
   const NOTE_END_OPTIONS = () => [
@@ -172,10 +177,28 @@
     if (help) d.title = help;
     return d;
   }
-  function section(title) {
+  function section(title, group) {
     const sec = el('div', 'es-section');
+    if (group) sec.classList.add('cs-group--' + group);
     sec.appendChild(el('h3', null, title));
     return sec;
+  }
+  function loadOpen() {
+    try { return JSON.parse(localStorage.getItem(OPEN_KEY)) || {}; } catch (e) { return {}; }
+  }
+  // 折りたたみ区画(<details>)。開閉は id ごとに localStorage へ覚え、次に開いたときも同じ状態にする
+  function foldSection(id, title, defaultOpen, group) {
+    const det = document.createElement('details');
+    det.className = 'cs-details cs-span';
+    if (group) det.classList.add('cs-group--' + group);
+    const st = loadOpen();
+    det.open = (id in st) ? !!st[id] : !!defaultOpen;
+    det.appendChild(el('summary', null, title));
+    det.addEventListener('toggle', () => {
+      const s = loadOpen(); s[id] = det.open;
+      try { localStorage.setItem(OPEN_KEY, JSON.stringify(s)); } catch (e) { /* private browsing等は無視 */ }
+    });
+    return det;
   }
   function makeSelect(options, onchange) {
     const sel = document.createElement('select');
@@ -230,8 +253,9 @@
     const commit = () => { save(); syncAll(); refreshButtons(); };
     const setKey = (k, v) => { current = MML.Convert.normalizeCmd(Object.assign({}, current, { [k]: v })); commit(); };
 
-    // ── 1. プリセット(+カスタム表示) ──
-    const presetSec = section(T('プリセット'));
+    // ── 1. プリセット(+カスタム表示) | 変換テンポ … 横並び(CSS .cs-top)。その下に変換ログ ──
+    const top = el('div', 'cs-top');
+    const presetSec = section(T('プリセット'), 'preset');
     const presetRow = el('div', 'es-preset-row');
     const presetButtons = {};
     for (const [name, label] of Object.entries(PRESET_LABELS())) {
@@ -251,13 +275,13 @@
     presetRow.appendChild(customTag);
     presetSec.appendChild(presetRow);
     presetSec.appendChild(descLine(T('忠実再現=元曲の演奏そのまま / プレーン譜面=音階と音色だけ'), T('「忠実再現」は元曲の演奏をそのまま、「プレーン譜面」は音階と音色だけ(編曲の出発点)。どれかを触ると「カスタム」になります')));
-    body.appendChild(presetSec);
+    top.appendChild(presetSec);
 
-    // ── 変換テンポ(プリセットの直下)。実体は各フォーマットのパネルにある <prefix>TempoBpm 入力で、
+    // ── 変換テンポ(プリセットの右)。実体は各フォーマットのパネルにある <prefix>TempoBpm 入力で、
     // ここはその代理(どちらから変えても同じ値)。自動(空欄)と手動、手動タップの3通り。
     const tempoSrc = ctx.format ? document.getElementById(ctx.format + 'TempoBpm') : null;
     if (tempoSrc) {
-      const sec = section(T('変換テンポ'));
+      const sec = section(T('変換テンポ'), 'preset');
       const row = el('div', 'cs-tempo-row');
       const autoBtn = el('button', 'es-preset', T('自動(推定)'));
       autoBtn.type = 'button';
@@ -266,7 +290,7 @@
       tempoInput.min = '40'; tempoInput.max = '400'; tempoInput.step = '0.1';
       tempoInput.placeholder = T('自動');
       tempoInput.className = 'cs-tempo';
-      const tapBtn = el('button', 'es-preset cs-tap', T('タップ') + ' 👆'); // パネル側の「👆 タップ」と同じ絵文字(ユーザー指定)
+      const tapBtn = el('button', 'es-preset cs-tap', '👆 ' + T('タップ')); // パネル側の「👆 タップ」と同じ並び(絵文字が左)
       tapBtn.type = 'button';
       const tapOut = el('span', 'cs-desc');
       const syncTempo = () => {
@@ -292,12 +316,35 @@
       row.appendChild(autoBtn); row.appendChild(tempoInput); row.appendChild(tapBtn); row.appendChild(tapOut);
       sec.appendChild(row);
       sec.appendChild(descLine(T('BPM 40〜400。空欄で自動推定'), T('BPM(40〜400)。「自動」なら音符の長さから推定、「タップ」は曲に合わせて数回押すと決まります')));
-      body.appendChild(sec);
+      top.appendChild(sec);
       syncTempo();
     }
+    body.appendChild(top);
 
-    // ── 2. 出すコマンド(チップ) ──
-    const cmdSec = section(T('出すコマンド'));
+    // ── 変換の進捗と結果ログ(ユーザー指示 2026-09-09。位置はプリセット/テンポの直下 2026-09-18) ──
+    // 実体は各フォーマットのパネルにある #<fmt>FileStatus。キャプチャ進捗も完了メッセージも
+    // エラーもそこへ書かれるので、MutationObserver で写して1か所(このダイアログ)で読めるようにする
+    // (書き込み側6か所をいじらずに済み、新しいメッセージを足しても取りこぼさない)
+    if (ctx.format) {
+      const src = document.getElementById(ctx.format + 'FileStatus');
+      if (src) {
+        const logSec = section(T('変換ログ'), 'log');
+        logSec.classList.add('cs-span');
+        const log = el('div', 'cs-log');
+        log.innerHTML = src.innerHTML;
+        logSec.appendChild(log);
+        body.appendChild(logSec);
+        if (logObserver) logObserver.disconnect();
+        logObserver = new MutationObserver(() => {
+          log.innerHTML = src.innerHTML;
+          log.scrollTop = log.scrollHeight;
+        });
+        logObserver.observe(src, { childList: true, subtree: true, characterData: true });
+      }
+    }
+
+    // ── 2. 出力コマンド(チップ) ──
+    const cmdSec = section(T('出力コマンド'), 'cmd');
     cmdSec.classList.add('cs-span');
     const chips = el('div', 'cs-chips');
     const checks = {};
@@ -316,9 +363,8 @@
     cmdSec.appendChild(descLine(T('OFFにしたコマンドは出力しません'), T('OFFにしたコマンドは出力しません(説明は各項目にマウスを載せると出ます)')));
     body.appendChild(cmdSec);
 
-    // ── 3. 譜面の書き方 ──
-    const wrSec = section(T('譜面の書き方'));
-    wrSec.classList.add('cs-span');
+    // ── 3. 譜面の書き方(折りたたみ。既定は閉: 折りたたみ区画は全部閉じた状態が既定、ユーザー指示 2026-09-18) ──
+    const wrSec = foldSection('score', T('譜面の書き方'), false, 'score');
     // 1行 = [コントロール][名前][追加入力(許容フレーム等、無ければ空)][短い説明] の4列グリッド(CSS .cs-line)。
     // help(長い説明)は行の title へ回す: 長文を横へ並べると読みづらい、というユーザー指摘(2026-09-09)。
     // 行の間には区切り線を入れる(CSS .cs-line + .cs-line)
@@ -371,13 +417,12 @@
     // 合成chの複製パートを省く(FOLD_DOUBLES、src/convert/poolDoubles.js。忠実=OFF / プレーン=ON)
     const fdCb = document.createElement('input'); fdCb.type = 'checkbox';
     fdCb.addEventListener('change', () => setKey('FOLD_DOUBLES', fdCb.checked));
-    wrSec.appendChild(line(fdCb, T('合成chの複製パートを省く(近似)'), T('デチューン二重化・エコーを1本にする'), null, T('PSFやMultiPCM等の合成chで、同じ旋律を別のボイスで重ねたデチューン二重化や数フレーム遅れのエコーを検出し、複製側の音符を変換から外します(何を省いたかはMMLのヘッダに書きます)。ppmckにはディレイもコーラスも無いので、複製の分だけチャンネルを節約できます。OFFでも、N163等の枠へ自動で載せるチャンネルを選ぶときは複製を後回しにします')));
+    wrSec.appendChild(line(fdCb, T('合成chの複製パートを省く(近似)'), T('デチューン二重化・エコーを1本にする'), null, T('合成ch(鍵盤表示・ロールの「合成ch」と同じ。PSF/C352/C140/QSound/MultiPCM/SegaPCM などプール式PCMの論理レーン)で、同じ旋律を別のボイスで重ねたデチューン二重化や数フレーム遅れのエコーを検出し、複製側の音符を変換から外します(何を省いたかはMMLのヘッダに書きます)。ppmckにはディレイもコーラスも無いので、複製の分だけチャンネルを節約できます。OFFでも、N163等の枠へ自動で載せるチャンネルを選ぶときは複製を後回しにします')));
     checks.GATE_APPROX = gaCb; checks.LEN_DP = ldCb; checks.DPCM_EXACT = deCb; checks.SHAPE_REST = srCb; checks.ENV_MERGE = emCb; checks.FOLD_DOUBLES = fdCb;
     body.appendChild(wrSec);
 
-    // ── 3b. 出力の書式(パートの並び / 1行の小節数 / 小節揃え) ──
-    const lySec = section(T('出力の書式'));
-    lySec.classList.add('cs-span');
+    // ── 3b. 出力の書式(パートの並び / 1行の小節数 / 小節揃え)。折りたたみ、既定は閉 ──
+    const lySec = foldSection('layout', T('出力の書式'), false, 'layout');
     const coSel = makeSelect(CHANNEL_ORDER_OPTIONS(), () => setKey('CHANNEL_ORDER', coSel.value));
     lySec.appendChild(line(null, T('チャンネルの並び順'), T('A,B,C… 順か、元の音源のch順か'), coSel,
       T('「アルファベット順」はパート文字の順(A,B,C…)。「変換元の割り当て順」は元の音源のチャンネル順(FM1,FM2…PSG1… の並び)で、割り当て先の文字が飛んでいてもその順に出す')));
@@ -398,9 +443,7 @@
     body.appendChild(lySec);
 
     // ── 4. 詳細設定(折りたたみ) ──
-    const det = document.createElement('details');
-    det.className = 'cs-details cs-span';
-    det.appendChild(el('summary', null, T('詳細設定')));
+    const det = foldSection('advanced', T('詳細設定'), false, 'adv');
     const tnSel = makeSelect(TUNING_OPTIONS(), () => setKey('TUNING', tnSel.value));
     const tmIn = document.createElement('input');
     tmIn.type = 'number'; tmIn.min = '0'; tmIn.max = String(MML.Convert.TUNING_MIN_MAX); tmIn.step = '0.5'; tmIn.className = 'cs-num';
@@ -415,9 +458,7 @@
     body.appendChild(det);
 
     // ── N163(実効ch数・ピッチ精度・波形RAM)。1つの物理量で3つ同時に動くので1か所へ ──
-    const n163 = document.createElement('details');
-    n163.className = 'cs-details cs-span';
-    n163.appendChild(el('summary', null, T('N163 (ナムコ163)')));
+    const n163 = foldSection('n163', T('N163 (ナムコ163)'), false, 'adv');
     n163.appendChild(descLine(
       T('実効ch数を減らすと、波形を大きくでき、音量が出て、高い音まで出せます。代わりに音程の刻みが粗くなります。'),
       T('実機N163は8chを時間多重するため、有効ch数が1つ動くと3つ同時に動きます。波形RAM=128-8×ch数バイト(1ch=120 / 8ch=64)。音量=出力は有効ch数で平均されるので1chは5chの5倍。周波数レジスタ=ch数に比例し、少ないほど刻みが粗く、出せる最高音は上がる(32サンプル波形で8ch=1864Hz / 1ch=14915Hz)')));
@@ -447,28 +488,6 @@
     const nwSel = makeSelect(N163_WAVE_OPTIONS(), () => setKey('N163_WAVE', nwSel.value));
     n163.appendChild(line(null, T('波形RAM'), T('波形がRAMに入り切らないとき'), nwSel, T('N163が波形に使えるRAMは 128-8×実効ch数 バイトだけ。同時に鳴る波形が入り切らない曲で、はみ出したぶんの波形長を落とすかどうか。落とさないとコンパイルエラーで再生・書き出しができません')));
     body.appendChild(n163);
-
-    // ── 変換の進捗と結果ログ(ユーザー指示 2026-09-09) ──
-    // 実体は各フォーマットのパネルにある #<fmt>FileStatus。キャプチャ進捗も完了メッセージも
-    // エラーもそこへ書かれるので、MutationObserver で写して1か所(このダイアログ)で読めるようにする
-    // (書き込み側6か所をいじらずに済み、新しいメッセージを足しても取りこぼさない)
-    if (ctx.format) {
-      const src = document.getElementById(ctx.format + 'FileStatus');
-      if (src) {
-        const logSec = section(T('変換ログ'));
-        logSec.classList.add('cs-span');
-        const log = el('div', 'cs-log');
-        log.innerHTML = src.innerHTML;
-        logSec.appendChild(log);
-        body.appendChild(logSec);
-        if (logObserver) logObserver.disconnect();
-        logObserver = new MutationObserver(() => {
-          log.innerHTML = src.innerHTML;
-          log.scrollTop = log.scrollHeight;
-        });
-        logObserver.observe(src, { childList: true, subtree: true, characterData: true });
-      }
-    }
 
     function syncAll() {
       for (const [k, cb] of Object.entries(checks)) cb.checked = !!current[k];
