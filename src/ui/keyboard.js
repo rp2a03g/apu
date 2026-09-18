@@ -607,8 +607,8 @@
   function headerAssignModeHtml() {
     // 右横の「割り当てリセット」: ユーザーが既定から変えた割当を全部消す(ファイルごとの自動保存分も消える。
     // src/convert/channelPlan.js clear。ユーザー指示 2026-09-18)
-    return `<span class="kbd-h-assign-mode">${T('チャンネル別割り当てモード')}</span>` +
-      `<button type="button" class="kbd-assign-reset-btn" title="${T('この曲の割り当てを全部既定に戻す(自動保存した分も消えます)')}">${T('割り当てリセット')}</button>`;
+    return `<span class="kbd-h-assign-mode">${T('ch別割り当て')}</span>` +
+      `<button type="button" class="kbd-assign-reset-btn" title="${T('この曲の割り当てを全部既定に戻す(自動保存した分も消えます)')}">${T('リセット')}</button>`;
   }
   // 見出しの mute 列に置く一括ミュートボタン。全chミュートでなければ全ミュート、
   // 全ミュート済みなら全解除(トグル)。

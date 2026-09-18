@@ -91,6 +91,7 @@
       onDeletePreset: (id) => { np.remove(id); render(); if (hooks.onChange) hooks.onChange(); },
       onResetPreset: (id) => { np.resetBuiltin(id); render(); if (hooks.onChange) hooks.onChange(); },
       onAudition: (tone) => { if (hooks.onAuditionNoise) hooks.onAuditionNoise(tone); },
+      onAuditionRaw: () => { if (hooks.onPlay) hooks.onPlay(r, 'raw'); },
     });
   }
 

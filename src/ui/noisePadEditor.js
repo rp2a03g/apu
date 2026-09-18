@@ -63,7 +63,8 @@
       `<label class="npe-row"><span>D</span><input type="number" class="npe-d" min="-127" max="126" step="1"><i class="npe-hint">${T('ディチューン(0=なし。D16 n0 の桁あふれ技は長短の @1 で代用可)')}</i></label>` +
       `<div class="npe-err" hidden></div>` +
       `<div class="npe-btns">` +
-        `<button type="button" class="npe-play">♪ ${T('試聴')}</button>` +
+        (opt.onAuditionRaw ? `<button type="button" class="npe-play-raw">♪ ${T('オリジナル')}</button>` : '') +
+        `<button type="button" class="npe-play">♪ ${T('ノイズ')}</button>` +
         `<button type="button" class="npe-apply">${T('このパッドだけに適用')}</button>` +
         (presetId ? `<button type="button" class="npe-update">${T('プリセット「{name}」を更新', { name: opt.presetName || presetId })}</button>` : '') +
         `<button type="button" class="npe-saveas">${T('新しいプリセットとして保存')}</button>` +
@@ -114,6 +115,8 @@
 
     q('.npe-close').addEventListener('click', close);
     q('.npe-play').addEventListener('click', () => { const t = read(); if (t && opt.onAudition) opt.onAudition(t); });
+    const raw = q('.npe-play-raw'); // パッドの原音(元のサンプル)を並べて聴き比べる(ドラム(DPCM)パネルの「オリジナル」と同じ)
+    if (raw) raw.addEventListener('click', () => { if (opt.onAuditionRaw) opt.onAuditionRaw(); });
     q('.npe-apply').addEventListener('click', () => { const t = read(); if (t && opt.onApplyPad) { opt.onApplyPad(t); close(); } });
     const upd = q('.npe-update');
     if (upd) upd.addEventListener('click', () => { const t = read(); if (t && opt.onSavePreset) { opt.onSavePreset(presetId, nameOf() || opt.presetName, t); close(); } });

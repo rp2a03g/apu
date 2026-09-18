@@ -1,27 +1,27 @@
 :root {
   /*
-   * アプリ全体の配色。ここの値は「デフォルト」プリセット(src/ui/editorSettings.js PRESETS[0])
+   * アプリ全体の配色。ここの値は「ダークモード」プリセット(src/ui/editorSettings.js PRESETS[0]、2026-09-18からプリセットはこれ1つ)
    * と必ず一致させること(起動直後=何も保存されていない状態の見た目がこの値、
    * 「既定値に戻す」がPRESETS[0]、の2つが食い違わないようにするため)。
    * 全プリセットはこの変数群を丸ごと上書きする。style.css内でこれらの色を直書き
    * (#xxxxxx)してはいけない(ライト/ダーク切替で破綻するため。ピアノ鍵盤の白鍵/黒鍵、
    * ツールチップの黒地白文字のような「テーマに依らない意味を持つ色」だけは例外)。
    */
-  --bg: #f5f6f8;            /* ページ背景 */
-  --panel: #ffffff;         /* パネル/フローティングウィンドウ本体 */
-  --panel-raised: #eceff3;  /* ウィンドウ見出し行・ロール見出し等の一段浮いた面 */
-  --surface: #f0f2f5;       /* 入力欄/出力欄/キャンバス等の凹んだ面 */
-  --border: #d0d5dc;
-  --control-bg: #e4e8ee;    /* ボタン(secondary)/セレクト/トグルの地色 */
-  --text: #24292f;
-  --text-secondary: #3f4750;
-  --text-muted: #6e7781;
-  --text-faint: #9aa2ad;
-  --accent: #2563eb;
-  --on-accent: #ffffff;     /* アクセント地の上に乗せる文字 */
-  --error: #c62828;
-  --ok: #1a7f37;
-  --hover-bg: rgba(0, 0, 0, 0.06); /* アイコンボタン等のホバー面 */
+  --bg: #1e1e24;            /* ページ背景 */
+  --panel: #2a2a33;         /* パネル/フローティングウィンドウ本体 */
+  --panel-raised: #34343f;  /* ウィンドウ見出し行・ロール見出し等の一段浮いた面 */
+  --surface: #14141a;       /* 入力欄/出力欄/キャンバス等の凹んだ面 */
+  --border: #3d3d4a;
+  --control-bg: #3d3d4a;    /* ボタン(secondary)/セレクト/トグルの地色 */
+  --text: #e6e6ef;
+  --text-secondary: #cfcfe0;
+  --text-muted: #9999aa;
+  --text-faint: #6a6a80;
+  --accent: #6fb1ff;
+  --on-accent: #102030;     /* アクセント地の上に乗せる文字 */
+  --error: #ff6b6b;
+  --ok: #74e08e;
+  --hover-bg: rgba(255, 255, 255, 0.09); /* アイコンボタン等のホバー面 */
   /*
    * 日本語グリフを持つフォントを必ず明示すること。
    * 欧文フォント(Segoe UI/Consolas)だけだと、日本語フォント未導入の環境で豆腐(□)になり、
@@ -40,8 +40,8 @@
      記号など色分け対象外の文字と入力キャレットが--mml-editor-fgになる。
      エディタだけ紺地・周囲は明るいチュートリアル的な配色(NDP風プリセット)を
      成立させるために独立させている。src/ui/editorSettings.jsが上書きする) */
-  --mml-editor-bg: #ffffff;
-  --mml-editor-fg: #24292f;
+  --mml-editor-bg: #14141a;
+  --mml-editor-fg: #e6e6ef;
 
   /* MMLシンタックスハイライトの色分け12分類(src/ui/editorSettings.jsが上書きする)。
      色相の割り当ては全プリセット共通の約束事にしてある(プリセットを切り替えても
@@ -49,24 +49,24 @@
        トラック=金/黄(太字)  ヘッダー=紫  音階=基本文字色  休符=控えめ  コメント=最も薄い
        音長系=橙  音量系=緑  音程系=青  演奏制御系=赤  特殊=マゼンタ
        エンベロープ定義=シアン/ティール(太字)  音色定義=ライム/オリーブ(太字) */
-  --tok-header: #6f42c1;
-  --tok-track: #9a6700;
-  --tok-note: #24292f;
-  --tok-rest: #57606a;
-  --tok-cmd-length: #bc4c00;
-  --tok-cmd-volume: #1a7f37;
-  --tok-cmd-pitch: #0550ae;
-  --tok-cmd-perf: #cf222e;
-  --tok-cmd-special: #a626a4;
-  --tok-def-envelope: #0f766e;
-  --tok-def-tone: #667a00;
-  --tok-comment: #6a737d;
-  /* 再生中の現在位置ハイライト(白文字+黒縁取り。どの背景色でも読めるようプリセット間で共通) */
+  --tok-header: #c39cff;
+  --tok-track: #ffd479;
+  --tok-note: #e6e6ef;
+  --tok-rest: #9aa0ac;
+  --tok-cmd-length: #f5a06a;
+  --tok-cmd-volume: #7fd8a0;
+  --tok-cmd-pitch: #7fb8ff;
+  --tok-cmd-perf: #ff7a7a;
+  --tok-cmd-special: #f38ad4;
+  --tok-def-envelope: #66d9ef;
+  --tok-def-tone: #b8e05a;
+  --tok-comment: #7d828d;
+  /* 再生中の現在位置ハイライト(白文字+オレンジ縁取り、2026-09-18ユーザー指示) */
   --playing-fg: #ffffff;
-  --playing-outline: #000000;
-  /* 追尾チャンネル(mmlFollowChannel)のハイライト。白の再生位置と見分けるため黄 */
-  --follow-fg: #ffe14d;
-  --follow-outline: #000000;
+  --playing-outline: #ff8c00;
+  /* 追尾チャンネル(mmlFollowChannel)のハイライト。白文字+赤縁取りで再生位置(オレンジ)と見分ける */
+  --follow-fg: #ffffff;
+  --follow-outline: #e53935;
 }
 
 * { box-sizing: border-box; }
@@ -3485,8 +3485,7 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 .dp-c-prio   { flex: none; width: 52px; }
 .dp-c-prio select { width: 100%; font-size: 11px; }
 /* 載せ先がノイズの行では DPCM 専用の列(ボリューム/DMCレート/差し替え/DPCM試聴)を薄くする */
-.drum-panel-row--noise .dp-c-vol, .drum-panel-row--noise .dp-c-rate, .drum-panel-row--noise .dp-c-inc,
-.drum-panel-row--noise .dp-play[data-mode="dpcm"] { opacity: 0.35; }
+.drum-panel-row--noise .dp-c-vol, .drum-panel-row--noise .dp-c-rate, .drum-panel-row--noise .dp-c-inc { opacity: 0.35; }
 .npe {
   position: fixed; z-index: 2147483647; width: 420px; max-width: calc(100vw - 16px); padding: 8px 10px 10px;
   background: #2a2c36; color: var(--text); border: 1px solid #4a4d5a; border-radius: 6px;
@@ -3520,4 +3519,5 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 .kbd-left--assign .kbd-assign-reset-btn { display: inline-block; }
 .kbd-assign-reset-btn:hover { background: rgba(58, 110, 165, 0.18); color: var(--text); }
 /* ドラム(DPCM)パネルの「変換後」試聴ボタンは載せ先を文字で示す(DPCM / ノイズ、2026-09-18) */
-.dp-play.dp-play--text { font-size: 10px; padding: 1px 0; line-height: 1.3; }
+.dp-play.dp-play--text { font-size: 10px; padding: 1px 0; line-height: 1.3; color: var(--text); }
+.npe-btns .npe-play-raw { font-weight: 700; }
