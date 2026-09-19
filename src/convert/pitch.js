@@ -54,6 +54,8 @@
   // 非周期側は「同じ形が繰り返される」という裏付けが取れない(1回きりの観測)ため、
   // 周期判定のMIN_LOOP_RANGE(=2)よりやや厳しめにして丸め誤差ノイズの誤検出を避ける。
   const MIN_LITERAL_RANGE  = 3;
+  const HOLD_SHARE_MAX = 2;    // 保持がこれより長い非ループ表は前方一致で共有しない(registerShape)
+  const SETTLE_MIN_HOLD = 6;   // 「落ち着き」とみなす最低の保持フレーム数(classifyPitchMod 末尾)
   const MIN_LITERAL_FRAMES = 4; // MIN_PERIODと同じ考え方(3フレーム以下は打鍵ジッタと区別できない)
 
   const MIN_PERIOD       = 4;  // 3フレーム以下の「周期」は単発の打鍵ジッタと区別できないため除外
@@ -155,7 +157,21 @@
       if (litMax - litMin >= MIN_LITERAL_RANGE &&
           !rest.some(v => v < EP_VALUE_MIN || v > EP_VALUE_MAX) &&
           litDelay <= MAX_EP_DELAY) {
-        return { type: isMonotonic(rest) ? 'ramp' : 'literal', delay: litDelay, values: rest };
+        return { type: isMonotonic(rest) ? 'ramp' : 'literal', delay: litDelay, values: rest, hold: n - trimmed.length };
+      }
+    }
+    // ★落ち着き(settle、2026-09-19): 頭の数フレームだけ音程がずれていて、そのあと別の値で長く一定になる音符。
+    //   変化が MIN_LITERAL_FRAMES 未満なので上の literal には掛からず、以前は「変調なし」になっていた。すると
+    //   D<n> は音符の先頭フレームの音程で決まるので、音符のほぼ全体(とタイで繋がる後続の音符。タイの2音目以降は
+    //   自分の D を持てない)が先頭フレームのずれ分だけ外れて鳴る。HES NX91002 曲34 のQパートで発覚: ビブラートが
+    //   終わる最後の1フレーム(+33セント)から始まる音符が、そのまま +33〜40 セント高く1秒近く鳴り続けていた。
+    //   保持する値までの短い表にして「先頭は実測どおり、以降は落ち着いた音程」を再現する
+    if (rest.length >= 1 && rest.length < MIN_LITERAL_FRAMES) {
+      const held = rest[rest.length - 1];
+      const holdFrames = n - trimmed.length;
+      if (Math.abs(held) >= MIN_LITERAL_RANGE && holdFrames >= SETTLE_MIN_HOLD && holdFrames >= (n >> 1) &&
+          !rest.some(v => v < EP_VALUE_MIN || v > EP_VALUE_MAX) && litDelay <= MAX_EP_DELAY) {
+        return { type: 'literal', delay: litDelay, values: rest, hold: holdFrames };
       }
     }
     return null;
@@ -235,7 +251,15 @@
     const isPeriodic = pitchMod.type === 'periodic';
     const shape = toCumulativeDeltas(pitchMod.values, isPeriodic);
     if (!shape) return null;
+    // ★末尾の値を長く保持する形(hold)は前方一致で共有しない(2026-09-19): 前方一致の共有は「音符が表より
+    //   先に終わる」前提で、表の続きは鳴らないから成り立つ。保持する音符は表が終わったあとも鳴り続けるので、
+    //   続きのある長い表を当てると、止まるはずの音程がその続きどおりに動いてしまう(逆向き=あとから来た長い形で
+    //   表を差し替えるのも同じ)。完全一致だけを共有し、その表は差し替えの対象からも外す(sealed)
+    const holds = (pitchMod.hold || 0) > HOLD_SHARE_MAX;
+    if (!this.sealed) this.sealed = new Set();
     for (const [idx, existing] of this.tables) {
+      if (holds) break;
+      if (this.sealed.has(idx)) continue;
       if (existing.loop != null || shape.loop != null) continue;
       if (isPrefix(existing.values, shape.values)) {
         if (shape.values.length > existing.values.length) this.tables.set(idx, shape);
@@ -250,6 +274,7 @@
       this.keyToIndex.set(key, idx);
       this.tables.set(idx, shape);
     }
+    if (holds) this.sealed.add(idx);
     return { index: idx, delay: pitchMod.delay };
   };
 

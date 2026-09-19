@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 07:55:11
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 10:41:50
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-09-19 07:55:11';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-09-19 10:41:50';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -2427,6 +2427,8 @@
   // 非周期側は「同じ形が繰り返される」という裏付けが取れない(1回きりの観測)ため、
   // 周期判定のMIN_LOOP_RANGE(=2)よりやや厳しめにして丸め誤差ノイズの誤検出を避ける。
   const MIN_LITERAL_RANGE  = 3;
+  const HOLD_SHARE_MAX = 2;    // 保持がこれより長い非ループ表は前方一致で共有しない(registerShape)
+  const SETTLE_MIN_HOLD = 6;   // 「落ち着き」とみなす最低の保持フレーム数(classifyPitchMod 末尾)
   const MIN_LITERAL_FRAMES = 4; // MIN_PERIODと同じ考え方(3フレーム以下は打鍵ジッタと区別できない)
 
   const MIN_PERIOD       = 4;  // 3フレーム以下の「周期」は単発の打鍵ジッタと区別できないため除外
@@ -2528,7 +2530,21 @@
       if (litMax - litMin >= MIN_LITERAL_RANGE &&
           !rest.some(v => v < EP_VALUE_MIN || v > EP_VALUE_MAX) &&
           litDelay <= MAX_EP_DELAY) {
-        return { type: isMonotonic(rest) ? 'ramp' : 'literal', delay: litDelay, values: rest };
+        return { type: isMonotonic(rest) ? 'ramp' : 'literal', delay: litDelay, values: rest, hold: n - trimmed.length };
+      }
+    }
+    // ★落ち着き(settle、2026-09-19): 頭の数フレームだけ音程がずれていて、そのあと別の値で長く一定になる音符。
+    //   変化が MIN_LITERAL_FRAMES 未満なので上の literal には掛からず、以前は「変調なし」になっていた。すると
+    //   D<n> は音符の先頭フレームの音程で決まるので、音符のほぼ全体(とタイで繋がる後続の音符。タイの2音目以降は
+    //   自分の D を持てない)が先頭フレームのずれ分だけ外れて鳴る。HES NX91002 曲34 のQパートで発覚: ビブラートが
+    //   終わる最後の1フレーム(+33セント)から始まる音符が、そのまま +33〜40 セント高く1秒近く鳴り続けていた。
+    //   保持する値までの短い表にして「先頭は実測どおり、以降は落ち着いた音程」を再現する
+    if (rest.length >= 1 && rest.length < MIN_LITERAL_FRAMES) {
+      const held = rest[rest.length - 1];
+      const holdFrames = n - trimmed.length;
+      if (Math.abs(held) >= MIN_LITERAL_RANGE && holdFrames >= SETTLE_MIN_HOLD && holdFrames >= (n >> 1) &&
+          !rest.some(v => v < EP_VALUE_MIN || v > EP_VALUE_MAX) && litDelay <= MAX_EP_DELAY) {
+        return { type: 'literal', delay: litDelay, values: rest, hold: holdFrames };
       }
     }
     return null;
@@ -2608,7 +2624,15 @@
     const isPeriodic = pitchMod.type === 'periodic';
     const shape = toCumulativeDeltas(pitchMod.values, isPeriodic);
     if (!shape) return null;
+    // ★末尾の値を長く保持する形(hold)は前方一致で共有しない(2026-09-19): 前方一致の共有は「音符が表より
+    //   先に終わる」前提で、表の続きは鳴らないから成り立つ。保持する音符は表が終わったあとも鳴り続けるので、
+    //   続きのある長い表を当てると、止まるはずの音程がその続きどおりに動いてしまう(逆向き=あとから来た長い形で
+    //   表を差し替えるのも同じ)。完全一致だけを共有し、その表は差し替えの対象からも外す(sealed)
+    const holds = (pitchMod.hold || 0) > HOLD_SHARE_MAX;
+    if (!this.sealed) this.sealed = new Set();
     for (const [idx, existing] of this.tables) {
+      if (holds) break;
+      if (this.sealed.has(idx)) continue;
       if (existing.loop != null || shape.loop != null) continue;
       if (isPrefix(existing.values, shape.values)) {
         if (shape.values.length > existing.values.length) this.tables.set(idx, shape);
@@ -2623,6 +2647,7 @@
       this.keyToIndex.set(key, idx);
       this.tables.set(idx, shape);
     }
+    if (holds) this.sealed.add(idx);
     return { index: idx, delay: pitchMod.delay };
   };
 
@@ -3592,6 +3617,7 @@
       const c = snapshots[f][chKey];
       const triggered = lastTriggerSeq !== null && c.triggerSeq !== lastTriggerSeq;
       lastTriggerSeq = c.triggerSeq;
+      const prevInitVol = anchor ? anchor.initVol : null;
       anchor = updateAnchor(anchor, c, f, triggered);
       const vol = volumeAt(anchor, f, playFps);
       const freqHz = (c.enabled && vol > 0 && panAudible(snapshots[f].nr51, chIndex)) ? pulseFreq(c.freq) : 0;
@@ -3600,7 +3626,22 @@
         cur = { note, duty: c.duty, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol], pitchSeq: [c.freq], tieCandidate: false };
         continue;
       }
-      if (triggered || note !== cur.note || c.duty !== cur.duty) {
+      // ★音量を下げるためだけのトリガー(2026-09-19): GB は NRx2 を書き換えてもトリガーし直すまで音量が変わらない
+      //   ので、ドライバはソフトウェアの減衰を「同じ音程のまま音量を下げてトリガーし直す」で作る。パルスのトリガーは
+      //   デューティの位相を戻さないので音としては音量が変わるだけ。以前はこれを全部新しい音符にしていたので、
+      //   1音が「a+ v10 a+ v8 a+ v6 a+」のように割れ、借用先(2A03)では位相リセットとエンベロープの打ち直しが入って
+      //   元と違う音になっていた。同じ音程・同じデューティで音量が上がらないトリガーは区切らず volSeq に積む
+      //   (VRC6 の同値書き直しと同じ扱い、src/nsf2mml/expansion/vrc6.js)。音量が上がるトリガーは従来どおり新しい音符。
+      //   ★条件は「初期音量(NRx2 上位4bit)を前回のトリガーより下げた」こと。鳴っている音量と比べるだけだと、
+      //   小さい音量から膨らむエンベロープ(5→11)の同音連打まで「11→5 に下がった」と読んで1音に統合してしまう
+      //   (魔界塔士サガ: 音は同じでも e8. e8. が1音符になり、音符の頭が減ってテンポ推定が 112→149 に狂った)
+      const lastVol = cur.volSeq[cur.volSeq.length - 1];
+      const volumeStep = triggered && note !== null && note === cur.note && c.duty === cur.duty && vol <= lastVol &&
+        ((prevInitVol != null && c.envInitVol < prevInitVol) ||
+         // 始まって数フレームの音符へのトリガー(頭の1フレームだけ別の設定で鳴らしてからエンベロープを掛け直す書き方)。
+         // 数フレームで同じ音を弾き直すことは無いので同じ音符の続き
+         cur.volSeq.length < 4);
+      if ((triggered && !volumeStep) || note !== cur.note || c.duty !== cur.duty) {
         // トリガbit変化が無く、純粋に音程だけが変わった場合はスラー分割のタイ候補
         const pureNoteChange = !triggered && note !== cur.note && c.duty === cur.duty;
         flush(f);

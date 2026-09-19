@@ -715,6 +715,11 @@
     // 再アタックするドライバの書き方(Konami: 音符の頭だけデューティ2・音量6)。新しい音符として区切る
     function isRetrigger(cur, constVol, duty, vol) {
       const lastDuty = cur.dutySeq[cur.dutySeq.length - 1];
+      // ★始まったばかりの音符(DUTY_ATTACK_FRAMES 未満)では判定しない(2026-09-19): その「頭だけ別デューティ」の
+      //   次のフレームは、本体のデューティへ戻りつつ音量が上がる(頭 duty2/音量4 → 本体 duty1/音量5。魍魎戦記MADARA、
+      //   悪魔城伝説の VRC6 は頭 duty0/音量8 → duty4/音量7〜)。これも「デューティ変化+音量上昇」なので再トリガーと
+      //   誤判定され、1音が「96分音符+本体」に割れていた。頭の数フレームの変化は @v と @@ の立ち上がりで表せる
+      if (cur.dutySeq.length < DUTY_ATTACK_FRAMES) return false;
       return constVol && cur.constVol && duty !== lastDuty && vol > cur.vol;
     }
     // キーオフ位置(keyOffAt)の確定。抽出器が打ち直しで付けたものが無ければ、固定音量モードの音符で

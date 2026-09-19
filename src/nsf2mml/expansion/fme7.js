@@ -110,8 +110,14 @@
           (envUsed && (t.envShape !== cur.envShape || t.envPeriod !== cur.envPeriod));
       if (note !== cur.note || hardBoundary) {
         // 音色/エンベロープ/ミキサー由来の境界(hardBoundary)を伴わない純粋な音程変化のみ
-        // スラー分割のタイ候補とする
-        ev.tieCandidate = note !== cur.note && !hardBoundary;
+        // スラー分割のタイ候補とする。★この境界で音量が跳ね上がっていない(=打ち直しでない)ことも要る
+        // (2026-09-19。N163 と同じ穴: 5B もアタックレジスタが無く、打ち直しの手がかりは音量の跳ね上がり
+        // だけ。見ていなかったので、ギミック! 曲1 は音符ごとに 11 6 4 3… と打ち直しているのに全部タイで
+        // 繋がり、2音目以降の @v が消えて音量6のまま鳴り続けていた=音量の食い違いが全フレームの7割)
+        const prevVol = cur.volSeq[cur.volSeq.length - 1];
+        const reattack = !envUsed && !cur.envUsed && prevVol != null &&
+          (volume - prevVol) >= MML.Convert.RETRIGGER_JUMP_THRESHOLD;
+        ev.tieCandidate = note !== cur.note && !hardBoundary && !reattack;
         flush(f);
         begin(f, ev, period);
       } else {
@@ -120,7 +126,32 @@
       }
     }
     flush(timeline.length);
-    return events;
+
+    // パス2: 同じ音程が続くランの中の打ち直し(同音連打)を分ける(src/convert/retrigger.js、N163 と同じ)。
+    // ハードウェアエンベロープ使用中はチップが音量を作るので対象外。
+    // ★前の打ち直しの頭より 2 以上小さい音量への跳ね上がりは分けない: 音符の中のエコー
+    //   (ギミック! の 11 6 4 3 3 | 8 6 5 4 4…)で、分けても音は同じ(5B は位相リセットが無い)だが、
+    //   全音符が「本体+エコー」の2音符に割れて譜面が読めなくなる。1本の @v にしておく
+    const out = [];
+    for (const run of events) {
+      if (run.note == null || run.envUsed || run.volSeq.length < 2) { out.push(run); continue; }
+      const ranges = MML.Convert.splitRetriggers(run.volSeq);
+      const groups = [];
+      for (const r of ranges) {
+        const g = groups[groups.length - 1];
+        if (g && run.volSeq[r.start] <= run.volSeq[g.start] - 2) g.end = r.end;
+        else groups.push({ start: r.start, end: r.end });
+      }
+      if (groups.length <= 1) { out.push(run); continue; }
+      for (const g of groups) {
+        out.push(Object.assign({}, run, {
+          start: run.start + g.start, end: run.start + g.end,
+          volSeq: run.volSeq.slice(g.start, g.end), pitchSeq: run.pitchSeq.slice(g.start, g.end),
+          tieCandidate: g.start === 0 ? run.tieCandidate : false,
+        }));
+      }
+    }
+    return out;
   }
 
   MML.Nsf2MmlExpansion.fme7 = function (writeLog, totalFrames, envReg, waveReg, initRegs, initWrites, n163Snapshots, pitchReg, noteEnvReg) {

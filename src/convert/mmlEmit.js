@@ -850,6 +850,48 @@
           .map(ev => ev.end > loop.end ? Object.assign({}, ev, { end: loop.end }) : ev);
       }
     }
+    // 最後の音より後ろは書かない(2026-09-19、ユーザー指示): 曲が終わったあとの無音(ジングルを30秒ぶん
+    // キャプチャした残り等)を休符で埋めると、再生もNSFも「無音を最後まで演奏してから」終わる。全チャンネルで
+    // 最後に音が鳴り終わる位置を曲の終わりにし、各チャンネルの末尾の休符も落とす(下の trimTail)。
+    // ループ化するときは全チャンネルの全長を揃える必要があるので対象外
+    // ★DPCM(E)の音符は「次の一打まで」の長さで来る(サンプルの実際の長さではない)ので、最後の一打は
+    //   キャプチャの終わりまで伸びている。音の長さとしては数えず、TAIL フレームだけ鳴らして切る
+    // ★リリース(@vr)つきの音符は、音符の終わり(キーオフ)のあとも余韻が鳴る。その余韻を鳴らしているのは後ろの
+    //   休符(k)なので、余韻ぶんは「音が鳴っている」と数えて落とさない(落とすとトラックが終わって余韻が切れる。
+    //   魍魎戦記MADARA のパルスBが14フレーム早く切れて発覚)。余韻の長さは releaseEnd、無ければ RELEASE_TAIL まで
+    const DPCM_TAIL = 60, RELEASE_TAIL = 120;
+    const chanSoundEnd = (chan) => {
+      const isDpcm = chan.letter === 'E';
+      const evs = chan.events || [];
+      let end = 0;
+      for (let i = 0; i < evs.length; i++) {
+        const ev = evs[i];
+        if (ev.note == null) continue;
+        let e = isDpcm ? Math.min(ev.end || 0, (ev.start || 0) + DPCM_TAIL) : (ev.end || 0);
+        if (ev.releaseEnd != null) e = Math.max(e, ev.releaseEnd);
+        else if (ev.envelopeVr != null && ev.envelopeVr !== 255) {
+          let next = Infinity;
+          for (let j = i + 1; j < evs.length; j++) if (evs[j].note != null) { next = evs[j].start; break; }
+          e = Math.max(e, Math.min(next, (ev.end || 0) + RELEASE_TAIL));
+        }
+        if (e > end) end = e;
+      }
+      return end;
+    };
+    if (!loop) {
+      let songEnd = 0;
+      for (const chan of channelsData) songEnd = Math.max(songEnd, chanSoundEnd(chan));
+      songEnd = Math.min(songEnd, totalFrames);
+      if (songEnd > 0 && songEnd < totalFrames) {
+        totalFrames = songEnd;
+        for (const chan of channelsData) {
+          if (!(chan.events || []).some(ev => ev.end > songEnd)) continue;
+          chan.events = chan.events.filter(ev => ev.start < songEnd)
+            .map(ev => ev.end > songEnd ? Object.assign({}, ev, { end: songEnd }) : ev);
+        }
+      }
+    }
+    const trimTail = (evs, soundEnd) => { let n = evs.length; while (n > 0 && evs[n - 1].note == null && evs[n - 1].start >= soundEnd) n--; return n === evs.length ? evs : evs.slice(0, n); };
     const measureCount = Math.max(1, Math.ceil(totalFrames / framesPerMeasure));
 
     // 小節境界(整数フレームに丸める)
@@ -878,6 +920,7 @@
       // なかった分の安全網)
       const filled  = fillGaps(MML.Convert.shapeEvents(chan.events, fpb, opts.cmd), totalFrames);
       let split     = splitAtBoundaries(filled, boundaries, MML.Convert.lenSnapOf(opts.cmd));
+      if (!loop) split = trimTail(split, chanSoundEnd(chan));
       // ループ開始位置では必ず割る(L をイベントの頭に置くため)。端を寄せた結果できた隙間は休符で埋め直す
       if (loop) split = fillGaps(splitAtFrame(split, loop.start, MML.Convert.lenSnapOf(opts.cmd)).filter(e => e.note !== null || e.end > e.start), totalFrames);
       // L の直後の音符は必ず打ち直しにする: 小節線の分割(continued)やスラー(slurTie)で前の音符とタイに

@@ -52,6 +52,7 @@
       const c = snapshots[f][chKey];
       const triggered = lastTriggerSeq !== null && c.triggerSeq !== lastTriggerSeq;
       lastTriggerSeq = c.triggerSeq;
+      const prevInitVol = anchor ? anchor.initVol : null;
       anchor = updateAnchor(anchor, c, f, triggered);
       const vol = volumeAt(anchor, f, playFps);
       const freqHz = (c.enabled && vol > 0 && panAudible(snapshots[f].nr51, chIndex)) ? pulseFreq(c.freq) : 0;
@@ -60,7 +61,22 @@
         cur = { note, duty: c.duty, rawFreq: note !== null ? freqHz : null, start: f, end: f, volSeq: [vol], pitchSeq: [c.freq], tieCandidate: false };
         continue;
       }
-      if (triggered || note !== cur.note || c.duty !== cur.duty) {
+      // ★音量を下げるためだけのトリガー(2026-09-19): GB は NRx2 を書き換えてもトリガーし直すまで音量が変わらない
+      //   ので、ドライバはソフトウェアの減衰を「同じ音程のまま音量を下げてトリガーし直す」で作る。パルスのトリガーは
+      //   デューティの位相を戻さないので音としては音量が変わるだけ。以前はこれを全部新しい音符にしていたので、
+      //   1音が「a+ v10 a+ v8 a+ v6 a+」のように割れ、借用先(2A03)では位相リセットとエンベロープの打ち直しが入って
+      //   元と違う音になっていた。同じ音程・同じデューティで音量が上がらないトリガーは区切らず volSeq に積む
+      //   (VRC6 の同値書き直しと同じ扱い、src/nsf2mml/expansion/vrc6.js)。音量が上がるトリガーは従来どおり新しい音符。
+      //   ★条件は「初期音量(NRx2 上位4bit)を前回のトリガーより下げた」こと。鳴っている音量と比べるだけだと、
+      //   小さい音量から膨らむエンベロープ(5→11)の同音連打まで「11→5 に下がった」と読んで1音に統合してしまう
+      //   (魔界塔士サガ: 音は同じでも e8. e8. が1音符になり、音符の頭が減ってテンポ推定が 112→149 に狂った)
+      const lastVol = cur.volSeq[cur.volSeq.length - 1];
+      const volumeStep = triggered && note !== null && note === cur.note && c.duty === cur.duty && vol <= lastVol &&
+        ((prevInitVol != null && c.envInitVol < prevInitVol) ||
+         // 始まって数フレームの音符へのトリガー(頭の1フレームだけ別の設定で鳴らしてからエンベロープを掛け直す書き方)。
+         // 数フレームで同じ音を弾き直すことは無いので同じ音符の続き
+         cur.volSeq.length < 4);
+      if ((triggered && !volumeStep) || note !== cur.note || c.duty !== cur.duty) {
         // トリガbit変化が無く、純粋に音程だけが変わった場合はスラー分割のタイ候補
         const pureNoteChange = !triggered && note !== cur.note && c.duty === cur.duty;
         flush(f);
