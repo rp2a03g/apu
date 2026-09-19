@@ -17,8 +17,10 @@
  *               delayはEP<n>,<delay>のdelayフレーム数(0-255、2026-08-11 別プロジェクトA。
  *               ppmck本家仕様には無いこのツール独自の拡張。offでも固定長デコードのため
  *               2バイト目を読む、値は無視される)
- *   0xF9      : ポルタメント(PT)選択。次の4バイトが[target下位,target上位(符号付き16bit
- *               LE、D<n>と同じ),duration,delay]。offはduration=0を番兵とする
+ *   0xF9      : ポルタメント(PT)選択。次の5バイトが[増減量下位,増減量上位(符号付き16bit
+ *               LE),間隔,duration,delay]。増減量/間隔はcompiler.jsのportamentoStepParamsで
+ *               前計算した1ステップの値(2026-09-19、以前はtargetを置いて6502側でCEILDIVして
+ *               いた。ppmckDriver.js RD_PORTAMENTO参照)。offはduration=0を番兵とする
  *               (2026-08-11 別プロジェクトC。ppmck本家ドキュメント(doc/mck.txt)には
  *               専用のポルタメントコマンドが無く「ピッチエンベロープ(EP)で代用してください」
  *               と明記されているため、このツール独自の拡張。実機では0xF9は生ハードウェア
@@ -162,8 +164,8 @@
 
   const OP_NOTE_ENV = 0xf7;
   const OP_PITCH_ENV = 0xf8;
-  // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC)。次の4バイトが
-  // [target下位,target上位(符号付き16bit LE、D<n>と同じ),duration,delay]。offはduration=0を
+  // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC)。次の5バイトが
+  // [増減量下位,増減量上位(符号付き16bit LE),間隔,duration,delay](2026-09-19、冒頭コメント参照)。offはduration=0を
   // 番兵とする(実際のポルタメントはduration>=1が必須、src/convert/pitch.jsのfitPortamento
   // 参照)。★0xF9は実機ppmckでは生ハードウェアスイープ書込み用に予約された値だが、
   // 当時の本ツールのsweepはバイトコード化されておらず実質未使用だったため、このツール
@@ -604,8 +606,12 @@
           const ptDelay = pt ? (pt.delay || 0) : 0;
           if (ptTarget !== lastPortamentoTarget || ptDuration !== lastPortamentoDuration ||
               ptDelay !== lastPortamentoDelay) {
-            const t16 = (ptTarget || 0) & 0xffff;
-            bytes.push(OP_PORTAMENTO, t16 & 0xff, (t16 >> 8) & 0xff, ptDuration & 0xff, ptDelay & 0xff);
+            // 1ステップの増減量(符号付き16bit)と間隔はブラウザ再生と同じ関数で前計算して置く。
+            // 6502側は読んで足すだけ(|target|>255 や target=0 でも除算が要らない)。
+            // duration/delay は compiler.js 側で0〜255に収めてある
+            const sp = pt ? MML.Mml.portamentoStepParams(pt) : { step: 0, stepInterval: 1 };
+            const s16 = sp.step & 0xffff;
+            bytes.push(OP_PORTAMENTO, s16 & 0xff, (s16 >> 8) & 0xff, sp.stepInterval & 0xff, ptDuration & 0xff, ptDelay & 0xff);
             lastPortamentoTarget = ptTarget;
             lastPortamentoDuration = ptDuration;
             lastPortamentoDelay = ptDelay;
@@ -734,6 +740,23 @@
         }
         breakpoints.length = 0;
         breakpoints.push(...mergedBreakpoints);
+        // L がこのセグメントの途中にある(2026-09-19)。compiler.js は「f6 L k32」「c4 L w8」「c4 L &c4」の
+        // ように L の後ろの k/w/& を直前の音符へ併合するので、loopFrame がセグメント境界に乗らないことがある。
+        // 以前はループ入り口が見つからず(loopByteOffset=null)、NSF だけ2周目以降そのチャンネルが止まって
+        // いた(KSS→MML の Metal Gear 2 曲124、ループ自動検出の出力で発覚)。その位置で音長を区切り、
+        // 同じ位置にブレークポイントが無ければ OP_WAIT(音符をそのまま延ばす)を挟んでそこを入り口にする。
+        // ブラウザ再生は [L地点,曲末) の書込みを逐語複製するので、途中から入っても書込みは起きない=
+        // OP_WAIT(状態を触らない継続)が同じ意味になる
+        const segStart = elapsed - seg.durationFrames;
+        if (loopFrame != null && loopByteOffset == null && loopFrame > segStart && loopFrame < elapsed) {
+          const at = loopFrame - segStart;
+          const same = breakpoints.find(bp => bp.atFrame === at);
+          if (same) same.loopEntry = true;
+          else {
+            breakpoints.push({ atFrame: at, kind: 'wait', loopEntry: true });
+            breakpoints.sort((a, b) => a.atFrame - b.atFrame);
+          }
+        }
 
         // --- 音符本体+最初の区間長(sticky音長エンコード対応、2026-08-16) ---
         // 音符バイト直後の音長 = 最初のブレークポイントまでの長さ(無ければセグメント全長)。
@@ -768,7 +791,15 @@
           const spanLen = (bi + 1 < breakpoints.length ? breakpoints[bi + 1].atFrame : seg.durationFrames) - bp.atFrame;
           const nb = bp.noteNumber != null
             ? Math.max(0, Math.min(NOTE_MAX, Math.round(bp.noteNumber))) : 0;
-          if (bp.kind === 'restWithNote' && usesVr) {
+          if (bp.loopEntry) {
+            loopByteOffset = bytes.length;
+            resetDedupAtLoop();
+          }
+          if (bp.kind === 'wait') {
+            // L の入り口だけのための区切り(上のコメント参照)
+            bytes.push(OP_WAIT);
+            pushLength(bytes, spanLen);
+          } else if (bp.kind === 'restWithNote' && usesVr) {
             // SD(セルフディレイ): ゲートオフでリリースエンベロープへ入りつつ、同時に
             // <n>個前のノートへ音程を差し替えて打ち直す
             bytes.push(OP_GATE_OFF_VR_SD, nb);
@@ -794,13 +825,23 @@
       } else {
         // 独立した休符(r)。ゲートオフのOP_RESTと同じstickyRestLenを共有する
         // (6502側は同じRD_RESTハンドラ=同じRESTLEN,Xを使うため)
-        const dur = seg.durationFrames;
+        // L が休符の途中にあるなら、そこで OP_WAIT に区切って入り口にする(音符側の loopEntry と同じ理由)
+        const restStart = elapsed - seg.durationFrames;
+        const loopAt = (loopFrame != null && loopByteOffset == null && loopFrame > restStart && loopFrame < elapsed)
+          ? loopFrame - restStart : null;
+        const dur = loopAt != null ? loopAt : seg.durationFrames;
         if (dur >= 1 && dur <= 0xff && dur === stickyRestLen) {
           bytes.push(OP_REST_SAME);
         } else {
           bytes.push(OP_REST);
           pushLength(bytes, dur);
           stickyRestLen = Math.min(0xff, Math.max(0, Math.round(dur)));
+        }
+        if (loopAt != null) {
+          loopByteOffset = bytes.length;
+          resetDedupAtLoop();
+          bytes.push(OP_WAIT);
+          pushLength(bytes, seg.durationFrames - loopAt);
         }
       }
     }
@@ -888,10 +929,18 @@
       if (b === OP_NOTE_ENV) { noteEnv = bytes[i]; i++; continue; }
       if (b === OP_PITCH_ENV) { pitchEnv = bytes[i]; pitchEnvDelay = bytes[i + 1]; i += 2; continue; }
       if (b === OP_PORTAMENTO) {
-        const t16 = bytes[i] | (bytes[i + 1] << 8);
-        const target = t16 >= 0x8000 ? t16 - 0x10000 : t16;
-        const duration = bytes[i + 2], delay = bytes[i + 3];
-        i += 4;
+        // 0xF9 は前計算済みの[増減量,間隔,duration,delay](2026-09-19)。target そのものは残らないので、
+        // 同じ増減量/間隔になる target を1つ選んで復元する(portamentoStepParams の逆)
+        const s16 = bytes[i] | (bytes[i + 1] << 8);
+        const step = s16 >= 0x8000 ? s16 - 0x10000 : s16;
+        const interval = bytes[i + 2], duration = bytes[i + 3], delay = bytes[i + 4];
+        i += 5;
+        let target = step * duration;
+        if (step !== 0 && interval > 1) {
+          let a = 1;
+          while (a < duration - 1 && Math.ceil(duration / a) !== interval) a++;
+          target = step < 0 ? -a : a;
+        }
         portamento = duration === 0 ? null : { target, duration, delay };
         continue;
       }
@@ -1002,7 +1051,7 @@
       const b = bytes[i]; i++;
       if (b === OP_END) break;
       if (b === OP_FME7_HARDENV) { i += 3; continue; }
-      if (b === OP_PORTAMENTO) { i += 4; continue; }
+      if (b === OP_PORTAMENTO) { i += 5; continue; }
       // ★2026-08-12修正: OP_PITCH_ENV(EP<n>,<delay>、別プロジェクトA)は[インデックス,delay]の
       // 2バイトパラメータなのに、以前はここに特別扱いが無く後述の「1バイト」扱いへ
       // フォールスルーしていた(OP_PORTAMENTOも同様に4バイトなのに1バイト扱いだった)。

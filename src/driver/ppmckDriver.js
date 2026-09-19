@@ -316,10 +316,23 @@
         continue;
       }
       const limit = offset + spaceInBank - 4; // バンクジャンプ4バイト分を残す
-      let splitAt = offset + 1; // 保険(通常発生しない)
+      let splitAt = null;
       for (const b of boundaries) {
         if (b > offset && b <= limit) splitAt = b;
         else if (b > limit) break;
+      }
+      if (splitAt == null) {
+        // 残りにコマンドが1つも丸ごと入らない(2026-09-19)。以前は offset+1 で切っていたため、
+        // 直前チャンネルの続きがバンク末尾の数バイト(例: 残り5バイトに2バイトの休符)に当たると
+        // コマンドの途中でバンクジャンプが入り、ドライバがパラメータをオペコードとして読んで
+        // そのチャンネルが最後まで化けていた。バンクの途中から置き始めた場合は何も置かずに
+        // 次のバンクの先頭から仕切り直す(新しいバンクの先頭なら4092バイト入るので必ず境界がある)
+        if (posInBank > 0) {
+          bankNum = advanceBank(bankNum + 1);
+          posInBank = 0;
+          continue;
+        }
+        splitAt = offset + 1; // 保険(1コマンドが4KB近い、は起きない)
       }
       const chunk = bytes.slice(offset, splitAt);
       const nextBank = advanceBank(bankNum + 1);
@@ -337,7 +350,11 @@
       bankNum = nextBank;
       posInBank = 0;
     }
-    return { banks, startBank, startOffset: startOffset || 0, nextFreeBank: bankNum, nextFreeOffset: posInBank, markLocation };
+    // 開始位置は「実際に最初のチャンクを置いた場所」を返す(2026-09-19)。直前チャンネルの続きが
+    // バンク末尾の数バイト(ジャンプマーカーも入らない残り)に当たると上のループが次のバンクの先頭へ
+    // 仕切り直すので、引数の startBank/startOffset のままだと、ドライバはこのチャンネルを何も置いて
+    // いないバンク末尾から読み始めていた(KSS→MMLで N163 の1chだけが最後まで無音、$8FFF 開始で発覚)
+    return { banks, startBank: banks[0].bankNum, startOffset: banks[0].offset, nextFreeBank: bankNum, nextFreeOffset: posInBank, markLocation };
   }
 
   // channelLetters(['A','B','C','D',...拡張]) と expansions/expansionLetterMap から、
@@ -506,7 +523,13 @@
     const envActExtraSlots = envIndexList.length > 0 ? 3 : 0;
     const usesEp = epIndexList.length > 0;
     // EPDELAY/EPDELAYSET(2026-08-11 別プロジェクトA、EP<n>,<delay>): 5→7スロットに拡張
-    const epExtraSlots = usesEp ? 7 : 0;
+    // epWide(2026-09-19): 長さ(またはループ位置)が255を超える@EPを使う曲だけEPTICKHIを足して8スロット
+    // (EP_LOOKUP参照)。それ以外の曲はRAM配置もROMも従来と同じ
+    const epWide = usesEp && epIndexList.some(idx => {
+      const e = (envelopes.ep && envelopes.ep[idx]) || {};
+      return ((e.values || []).length > 0xff) || (e.loop != null && e.loop >= 0xff);
+    });
+    const epExtraSlots = usesEp ? (epWide ? 8 : 7) : 0;
     const usesMp = mpIndexList.length > 0;
     const mpExtraSlots = usesMp ? 11 : 0;
     // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC): 11byte/ch(MPと同数)
@@ -630,7 +653,7 @@
     const EPACT = chArrayBase + (11 + n163ExtraSlots + fme7ExtraSlots) * n,
       EPSEL = EPACT + n, EPTICK = EPACT + 2 * n,
       EPVALLO = EPACT + 3 * n, EPVALHI = EPACT + 4 * n,
-      EPDELAY = EPACT + 5 * n, EPDELAYSET = EPACT + 6 * n;
+      EPDELAY = EPACT + 5 * n, EPDELAYSET = EPACT + 6 * n, EPTICKHI = EPACT + 7 * n;
     // MP<n>(ソフトウェアビブラート)用チャンネルごとの状態。usesMpの時のみ実際に使う。
     // ppmck実機lfo_sub/warizan_startの状態機械をそのまま6502へ移植したもの
     // (compiler.jsのvibratoSequence/ceilDivPpmckが1音符分を事前計算するのに対し、
@@ -649,10 +672,13 @@
     // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC)用チャンネルごとの状態。
     // usesPortamentoの時のみ実際に使う。compiler.jsのportamentoSequenceと同じアルゴリズム
     // (MPのwarizan_start片道版、反転無し)を1フレームずつ状態遷移させる。
-    // PTACT=有効フラグ、PTDIR=方向(+1=$00/-1=$FF。targetの符号拡張バイトをそのまま
-    // 使う、MPと違い符号付きtarget自身が方向を持つのでCHTYPE方向テーブルは不要)、
+    // PTACT=有効フラグ、PTSTEPHI=1ステップの増減量(符号付き16bit)の上位バイト
+    // (2026-09-19まではtargetの符号拡張バイト=方向($00/$FF)だった。PTSTEPSZ参照)、
     // PTDURSET/PTDELAYSET=PT<n>選択時(RD_PORTAMENTO)に保存したduration/delayの生値、
-    // PTSTEPSZ/PTSTEPINT=RD_PORTAMENTOでCEILDIVにより確定した1ステップの増減量/間隔、
+    // PTSTEPSZ/PTSTEPINT=1ステップの増減量(符号付き16bitの下位バイト)/間隔。どちらも
+    // mckBytecode.js(serialize)が compiler.js portamentoSequence と同じ式で前計算した値を
+    // 0xF9のパラメータから読むだけ(以前は6502側でCEILDIVしていたが、|target|>255 や
+    // target=0 で除数0の無限ループになりドライバごと止まっていた。KSS→MMLの PT-512,4 で発覚)、
     // PTDELAY=delay残りカウントダウン、PTDUR=duration残りカウントダウン(0になったら
     // 以降は何もせずPTVALLO/HIを保持=最終値の永久ホールド)、PTSTEPCNT=次のステップまでの
     // カウンタ(MPのMPADCCNT相当)、PTVALLO/PTVALHI=累積オフセット(符号付き16bit、
@@ -660,7 +686,7 @@
     // PTVALLO/HIを再初期化する(EP_STEPと同じpost-increment単一ルーチン設計、off-by-one
     // バグの教訓を踏まえMP LFO_SUBのような初回/継続分離はしない)。
     const ptBase = mpBase + mpExtraSlots * n;
-    const PTACT = ptBase, PTDIR = ptBase + n, PTDURSET = ptBase + 2 * n,
+    const PTACT = ptBase, PTSTEPHI = ptBase + n, PTDURSET = ptBase + 2 * n,
       PTDELAYSET = ptBase + 3 * n, PTSTEPSZ = ptBase + 4 * n, PTSTEPINT = ptBase + 5 * n,
       PTDELAY = ptBase + 6 * n, PTDUR = ptBase + 7 * n, PTSTEPCNT = ptBase + 8 * n,
       PTVALLO = ptBase + 9 * n, PTVALHI = ptBase + 10 * n;
@@ -688,7 +714,7 @@
     // 確定したstepSz/stepIntごとに1歩ずつ進める」状態遷移だが、目標(0)に到達したら
     // PSACTを自らクリアして停止する点がPT(到達後も値を保持し続ける)と異なる
     // (RD_PITCHSHIFT/PS_STEP参照)。PSACT=有効フラグ、PSDIR=方向(0=加算/非0=減算、
-    // PTDIRと同じ規約)、PSSTEPSZ/PSSTEPINT=RD_PITCHSHIFTでCEILDIV16により確定した
+    // 旧PTDIR(2026-09-19廃止)と同じ規約)、PSSTEPSZ/PSSTEPINT=RD_PITCHSHIFTでCEILDIV16により確定した
     // 1ステップの増減量/間隔、PSSTEPCNT=次のステップまでのカウンタ、PSVALLO/PSVALHI=
     // 累積オフセット(符号付き16bit、APPLY_DETUNE/APPLY_DETUNE_N163が読む。グライド元との
     // 差分から0への収束値)
@@ -831,8 +857,10 @@ PLAY_CHLOOP:
     // ソフトウェア音量エンベロープ(@v<n>)のテーブル本体をROMへ埋め込む(実際に使われて
     // いる場合のみ)。envIndexList[i]がmckBytecode.jsのOP_VOL_ENVで参照する番号iに対応する。
     // ENV_LEN/ENV_LOOP はコンパクト番号→長さ/ループ位置($FF=ループ無し)の直接引き
-    // (.byte配列)、ENV_PTR はコンパクト番号→データ本体アドレスの直接引き(.word配列、
-    // WFV_JUMPTABLE等と同じくASL Aで2倍したオフセットでアクセスする)
+    // (.byte配列)、ENV_PTRLO/ENV_PTRHI はコンパクト番号→データ本体アドレスの下位/上位の直接引き
+    // (.byte配列2本。2026-09-19まではASL Aで2倍して引く.word配列だったため、テーブル数が128を
+    // 超えると番号が桁あふれして別のテーブルを読んでいた。KSS→MMLで@EPが177本の曲で発覚。
+    // VRENV/DUTYENV/EP/ENも同じ形)。引いたアドレスへはtickをYにして(ptr),Yで読む
     const envTableCount = envIndexList.length;
     // @vr<n>の実体テーブル。本家ppmckの@vr<n>は@v<n>定義そのものへの参照なので、
     // 本ツール独自の@vr<n>={...}定義が無ければ@v<n>の定義へフォールバックする
@@ -859,7 +887,8 @@ PLAY_CHLOOP:
       extraTables.push(
         `ENV_LEN:\n    .byte ${envLens.join(',')}\n` +
         `ENV_LOOP:\n    .byte ${envLoops.join(',')}\n` +
-        `ENV_PTR:\n    .word ${envPtrExprs.join(',')}\n` +
+        `ENV_PTRLO:\n    .byte ${envPtrExprs.map(e => '<' + e).join(',')}\n` +
+        `ENV_PTRHI:\n    .byte ${envPtrExprs.map(e => '>' + e).join(',')}\n` +
         envDataBlocks.join('\n')
       );
       // --- ソフトウェア音量エンベロープ: X=チャンネル番号のまま呼ぶ。ENVSEL[X]/ENVTICK[X]から
@@ -867,8 +896,7 @@ PLAY_CHLOOP:
       // (ENVTICKを1戻す。以降このtick値をcompareし続けるので次フレーム以降もずっと最終値を
       // 指し続ける)、結果をVOL[X]へ書く。PERLO/PERHI/PERLO2は他の場所で使用後の
       // 使い回しスクラッチ(このルーチンの直後にWRITE_FREQ_VOLが呼ばれるだけなので安全)。
-      // ASL Aで2倍するテーブル番号は他のジャンプテーブルと同じ理由でTYPE_COUNT程度の
-      // 範囲を前提にしている(曲中の実際のエンベロープ形状数が128を超えることは無い想定)。
+      // テーブル番号はそのままYで PTRLO/PTRHI を引く(255本まで。上のコメント参照)。
       extraHandlers.push(`
 ENV_LOOKUP:
     LDA ${hex(ENVSEL)},X
@@ -887,21 +915,11 @@ ENV_LOOKUP:
 ENVLK_DOLOOP:
     STA ${hex(ENVTICK)},X
 ENVLK_INBOUNDS:
-    TYA
-    ASL A
-    TAY
-    LDA ENV_PTR,Y
+    LDA ENV_PTRLO,Y
     STA ${hex(PERLO)}
-    LDA ENV_PTR+1,Y
+    LDA ENV_PTRHI,Y
     STA ${hex(PERHI)}
-    LDA ${hex(ENVTICK)},X
-    CLC
-    ADC ${hex(PERLO)}
-    STA ${hex(PERLO)}
-    BCC ENVLK_NOCARRY
-    INC ${hex(PERHI)}
-ENVLK_NOCARRY:
-    LDY #$00
+    LDY ${hex(ENVTICK)},X
     LDA (${hex(PERLO)}),Y
     STA ${hex(VOL)},X
     RTS`);
@@ -926,7 +944,8 @@ ENVLK_NOCARRY:
       extraTables.push(
         `VRENV_LEN:\n    .byte ${vrLens.join(',')}\n` +
         `VRENV_LOOP:\n    .byte ${vrLoops.join(',')}\n` +
-        `VRENV_PTR:\n    .word ${vrPtrExprs.join(',')}\n` +
+        `VRENV_PTRLO:\n    .byte ${vrPtrExprs.map(e => '<' + e).join(',')}\n` +
+        `VRENV_PTRHI:\n    .byte ${vrPtrExprs.map(e => '>' + e).join(',')}\n` +
         vrDataBlocks.join('\n')
       );
       // --- リリースエンベロープ: X=チャンネル番号のまま呼ぶ。VRSEL[X]/RELTICK[X]から
@@ -951,21 +970,11 @@ REL_LOOKUP:
 RELLK_DOLOOP:
     STA ${hex(RELTICK)},X
 RELLK_INBOUNDS:
-    TYA
-    ASL A
-    TAY
-    LDA VRENV_PTR,Y
+    LDA VRENV_PTRLO,Y
     STA ${hex(PERLO)}
-    LDA VRENV_PTR+1,Y
+    LDA VRENV_PTRHI,Y
     STA ${hex(PERHI)}
-    LDA ${hex(RELTICK)},X
-    CLC
-    ADC ${hex(PERLO)}
-    STA ${hex(PERLO)}
-    BCC RELLK_NOCARRY
-    INC ${hex(PERHI)}
-RELLK_NOCARRY:
-    LDY #$00
+    LDY ${hex(RELTICK)},X
     LDA (${hex(PERLO)}),Y
     STA ${hex(VOL)},X
     RTS`);
@@ -989,7 +998,8 @@ RELLK_NOCARRY:
       extraTables.push(
         `DUTYENV_LEN:\n    .byte ${dutyLens.join(',')}\n` +
         `DUTYENV_LOOP:\n    .byte ${dutyLoops.join(',')}\n` +
-        `DUTYENV_PTR:\n    .word ${dutyPtrExprs.join(',')}\n` +
+        `DUTYENV_PTRLO:\n    .byte ${dutyPtrExprs.map(e => '<' + e).join(',')}\n` +
+        `DUTYENV_PTRHI:\n    .byte ${dutyPtrExprs.map(e => '>' + e).join(',')}\n` +
         dutyDataBlocks.join('\n')
       );
       extraHandlers.push(`
@@ -1010,21 +1020,11 @@ DUTY_LOOKUP:
 DUTYLK_DOLOOP:
     STA ${hex(DUTYTICK)},X
 DUTYLK_INBOUNDS:
-    TYA
-    ASL A
-    TAY
-    LDA DUTYENV_PTR,Y
+    LDA DUTYENV_PTRLO,Y
     STA ${hex(PERLO)}
-    LDA DUTYENV_PTR+1,Y
+    LDA DUTYENV_PTRHI,Y
     STA ${hex(PERHI)}
-    LDA ${hex(DUTYTICK)},X
-    CLC
-    ADC ${hex(PERLO)}
-    STA ${hex(PERLO)}
-    BCC DUTYLK_NOCARRY
-    INC ${hex(PERHI)}
-DUTYLK_NOCARRY:
-    LDY #$00
+    LDY ${hex(DUTYTICK)},X
     LDA (${hex(PERLO)}),Y
     STA ${hex(DUTY)},X
     RTS`);
@@ -1067,10 +1067,18 @@ ${usesDutyEnv ? `APPLY_TONE_ENV:
         epIndexList, 'EP',
         idx => ((envelopes.ep[idx] || {}).values || []).map(v => Math.max(-128, Math.min(127, v | 0)) & 0xff)
       );
+      // epWide(長さ256以上の@EPがある曲だけ): 長さ/ループ位置を下位/上位の2本ずつにする
+      // (ループ無しは上位$FF。EP_LOOKUP参照)
+      const lo = a => a.map(v => v & 0xff).join(','), hi = a => a.map(v => (v >> 8) & 0xff).join(',');
+      const epLoopsW = epIndexList.map((idx, i) => (epLoops[i] === 0xff && (envelopes.ep[idx] || {}).loop == null) ? 0xffff : epLoops[i]);
       extraTables.push(
-        `EP_LEN:\n    .byte ${epLens.join(',')}\n` +
-        `EP_LOOP:\n    .byte ${epLoops.join(',')}\n` +
-        `EP_PTR:\n    .word ${epPtrExprs.join(',')}\n` +
+        (epWide
+          ? `EP_LEN:\n    .byte ${lo(epLens)}\nEP_LENHI:\n    .byte ${hi(epLens)}\n` +
+            `EP_LOOP:\n    .byte ${lo(epLoopsW)}\nEP_LOOPHI:\n    .byte ${hi(epLoopsW)}\n`
+          : `EP_LEN:\n    .byte ${epLens.join(',')}\n` +
+            `EP_LOOP:\n    .byte ${epLoops.join(',')}\n`) +
+        `EP_PTRLO:\n    .byte ${epPtrExprs.map(e => '<' + e).join(',')}\n` +
+        `EP_PTRHI:\n    .byte ${epPtrExprs.map(e => '>' + e).join(',')}\n` +
         epDataBlocks.join('\n')
       );
       // --- EP<n>: X=チャンネル番号のまま呼ぶ。ENV_LOOKUPと全く同じテーブル探索
@@ -1084,8 +1092,35 @@ ${usesDutyEnv ? `APPLY_TONE_ENV:
       // ループ点を差し込むのと同じ結果。末尾が0なら止まる)。累積値はRD_NOTEで0へ戻す。
       // ENVAL(EN_STEP)と同じ考え方だが、EPは16bit幅なので2バイトの符号付き加算になる。
       // PERLO/PERHI/PERLO2はENV_LOOKUPと同じ理由で使い回しスクラッチ(このルーチンの
-      // 呼び出し元は直後に周期テーブル参照でこれらを上書きするだけなので安全) ---
-      extraHandlers.push(`
+      // 呼び出し元は直後に周期テーブル参照でこれらを上書きするだけなので安全)。
+      // epWide(2026-09-19): 長さ256以上の@EPがある曲だけ、EPTICKを16bit(上位=EPTICKHI)にして
+      // EP_LEN/EP_LOOPも上位バイト表を持つ。本家ppmckはエンベロープを16bitポインタで進めるので
+      // 定義の長さに上限が無い(ppmckc datamake.c のテーブルは1024値)。以前は長さが8bitに
+      // 切り詰められ(372→116)、そこで末尾扱いになって音程の揺れが止まっていた ---
+      extraHandlers.push(`${epWide ? `
+EP_LOOKUP:
+    LDY ${hex(EPSEL)},X
+    LDA ${hex(EPTICK)},X
+    CMP EP_LEN,Y
+    LDA ${hex(EPTICKHI)},X
+    SBC EP_LENHI,Y
+    BCC EPLK_INBOUNDS
+    LDA EP_LOOPHI,Y
+    CMP #$FF
+    BNE EPLK_DOLOOP
+    LDA EP_LEN,Y
+    SEC
+    SBC #$01
+    STA ${hex(EPTICK)},X
+    LDA EP_LENHI,Y
+    SBC #$00
+    STA ${hex(EPTICKHI)},X
+    JMP EPLK_INBOUNDS
+EPLK_DOLOOP:
+    STA ${hex(EPTICKHI)},X
+    LDA EP_LOOP,Y
+    STA ${hex(EPTICK)},X
+EPLK_INBOUNDS:` : `
 EP_LOOKUP:
     LDA ${hex(EPSEL)},X
     TAY
@@ -1102,22 +1137,14 @@ EP_LOOKUP:
     JMP EPLK_INBOUNDS
 EPLK_DOLOOP:
     STA ${hex(EPTICK)},X
-EPLK_INBOUNDS:
-    TYA
-    ASL A
-    TAY
-    LDA EP_PTR,Y
+EPLK_INBOUNDS:`}
+    LDA EP_PTRLO,Y
     STA ${hex(PERLO)}
-    LDA EP_PTR+1,Y
-    STA ${hex(PERHI)}
-    LDA ${hex(EPTICK)},X
-    CLC
-    ADC ${hex(PERLO)}
-    STA ${hex(PERLO)}
-    BCC EPLK_NOCARRY
-    INC ${hex(PERHI)}
-EPLK_NOCARRY:
-    LDY #$00
+    LDA EP_PTRHI,Y
+${epWide ? `    CLC
+    ADC ${hex(EPTICKHI)},X
+` : ''}    STA ${hex(PERHI)}
+    LDY ${hex(EPTICK)},X
     LDA (${hex(PERLO)}),Y
     STA ${hex(PERLO)}         ; 今回の差分(符号付きbyte)。PERLOはこの後どうせ上書きされるスクラッチ
     BPL EPLK_POS
@@ -1158,7 +1185,10 @@ EP_STEP:
 EP_STEP_LOOKUP:
     JSR EP_LOOKUP
     INC ${hex(EPTICK)},X
-    RTS`);
+${epWide ? `    BNE EP_STEP_NOHI
+    INC ${hex(EPTICKHI)},X
+EP_STEP_NOHI:
+` : ''}    RTS`);
     }
 
     // --- EN<n>(ノートエンベロープ=高速アルペジオ、2026-08-14)。EPと同じ「使われている
@@ -1182,7 +1212,8 @@ EP_STEP_LOOKUP:
       extraTables.push(
         `EN_LEN:\n    .byte ${enLens.join(',')}\n` +
         `EN_LOOP:\n    .byte ${enLoops.join(',')}\n` +
-        `EN_PTR:\n    .word ${enDataLabels.join(',')}\n` +
+        `EN_PTRLO:\n    .byte ${enDataLabels.map(e => '<' + e).join(',')}\n` +
+        `EN_PTRHI:\n    .byte ${enDataLabels.map(e => '>' + e).join(',')}\n` +
         enDataBlocks.join('\n')
       );
       // --- EN<n>: X=チャンネル番号のまま呼ぶ。テーブル探索自体はEP_LOOKUPと同型
@@ -1206,21 +1237,11 @@ EN_STEP:
     BEQ EN_STEP_DONE
     STA ${hex(ENTICK)},X
 ENLK_ADD:
-    TYA
-    ASL A
-    TAY
-    LDA EN_PTR,Y
+    LDA EN_PTRLO,Y
     STA ${hex(PERLO)}
-    LDA EN_PTR+1,Y
+    LDA EN_PTRHI,Y
     STA ${hex(PERHI)}
-    LDA ${hex(ENTICK)},X
-    CLC
-    ADC ${hex(PERLO)}
-    STA ${hex(PERLO)}
-    BCC ENLK_NOCARRY
-    INC ${hex(PERHI)}
-ENLK_NOCARRY:
-    LDY #$00
+    LDY ${hex(ENTICK)},X
     LDA (${hex(PERLO)}),Y
     CLC
     ADC ${hex(ENVAL)},X
@@ -1241,9 +1262,9 @@ EN_STEP_DONE:
     // 再現(割り切れない場合はceil側に丸まる、実機トレース済みの仕様。compiler.js
     // ceilDivPpmckのコメント参照)。戻り値=A(0-255)。${hex(CDA)}は呼び出し後に破壊される。
     // チャンネル非依存の使い捨てスクラッチなのでXは使わない(呼び出し元でX退避不要)。
-    // MP(warizan_start)とポルタメント(RD_PORTAMENTO)の両方が共有するため、
-    // どちらか一方でも使われていれば1回だけ埋め込む(2026-08-11 別プロジェクトC)。
-    if (mpTableCount > 0 || usesPortamento) {
+    // MP(warizan_start)だけが使う(2026-09-19まではポルタメントのRD_PORTAMENTOも共有していたが、
+    // PTの増減量/間隔はmckBytecode.jsが前計算するようになった。RD_PORTAMENTO参照)。
+    if (mpTableCount > 0) {
       extraHandlers.push(`
 CEILDIV:
     LDA #$00
@@ -1342,9 +1363,9 @@ LFO_NOSTEP:
     // ドキュメント(doc/mck.txt)に専用コマンドが無く「ピッチエンベロープ(EP)で
     // 代用してください」と明記されているため、このツール独自の拡張。compiler.jsの
     // portamentoSequence(MPのwarizan_start片道版・反転無し)と同一アルゴリズムを
-    // フレームごとの状態遷移として移植する。target/duration/delayはバイトコード上に
-    // 直接の即値として乗る(EP/MPのようなROM共有テーブルは無い)ため、PT<n>選択時
-    // (0xF9処理)にCEILDIVでその場でPTSTEPSZ/PTSTEPINTを確定する ---
+    // フレームごとの状態遷移として移植する。1ステップの増減量(符号付き16bit)/間隔/
+    // duration/delayはバイトコード上に直接の即値として乗る(EP/MPのようなROM共有テーブルは
+    // 無い。増減量と間隔はmckBytecode.jsがportamentoSequenceと同じ式で前計算済み) ---
     if (usesPortamento) {
       extraHandlers.push(`
 ; --- PT_STEP: ポルタメントの1フレーム分の状態遷移。EP_STEPと同じpost-increment単一
@@ -1367,23 +1388,13 @@ PT_STEP_ACTIVE:
     BNE PT_STEP_ADVANCE
     LDA #$00
     STA ${hex(PTSTEPCNT)},X
-    LDA ${hex(PTDIR)},X
-    BEQ PT_STEP_ADD
-    LDA ${hex(PTVALLO)},X
-    SEC
-    SBC ${hex(PTSTEPSZ)},X
-    STA ${hex(PTVALLO)},X
-    LDA ${hex(PTVALHI)},X
-    SBC #$00
-    STA ${hex(PTVALHI)},X
-    JMP PT_STEP_ADVANCE
-PT_STEP_ADD:
+    ; 増減量は符号付き16bit(PTSTEPSZ=下位/PTSTEPHI=上位)なので方向で分岐せず足すだけ
     LDA ${hex(PTVALLO)},X
     CLC
     ADC ${hex(PTSTEPSZ)},X
     STA ${hex(PTVALLO)},X
     LDA ${hex(PTVALHI)},X
-    ADC #$00
+    ADC ${hex(PTSTEPHI)},X
     STA ${hex(PTVALHI)},X
 PT_STEP_ADVANCE:
     INC ${hex(PTSTEPCNT)},X
@@ -3568,7 +3579,8 @@ RD_PITCHENV_ON:
     STA ${hex(EPACT)},X
     LDA #$00
     STA ${hex(EPTICK)},X
-    JMP RD_LOOP` : ''}
+${epWide ? `    STA ${hex(EPTICKHI)},X
+` : ''}    JMP RD_LOOP` : ''}
 ${usesMp ? `
 ; --- MP<n>ビブラート選択(0xFB): 次バイトはROM上のコンパクトなテーブル番号($FF=MPOF、解除)。
 ; MP<n>選択の瞬間にwarizan(除算)を1回だけ行いMPSTEPSZ/MPSTEPINTを確定する(実機
@@ -3642,18 +3654,20 @@ MP_INIT:
     STA ${hex(MPDIR)},X
     RTS` : ''}
 ${usesPortamento ? `
-; --- PT<target>,<duration>[,<delay>]ポルタメント選択(0xF9): 次の4バイトが
-; [target下位,target上位,duration,delay]。duration=0を番兵としてoff(PTOF)を表す。
-; target上位バイトは|target|<=255前提の単なる符号拡張バイト($00/$FF)なので、そのまま
-; PTDIRとして使う(MPのような方向テーブルは不要、targetの符号自体が方向を持つ)。
-; |target|とdurationの大小比較+CEILDIVでPTSTEPSZ/PTSTEPINTを確定する(RD_VIBRATOと
-; 同型)。状態の初期化(delay/durationリセット・PT_STEP初回呼び出し)はRD_NOTE
-; (音符アタック時)で行う ---
+; --- PT<target>,<duration>[,<delay>]ポルタメント選択(0xF9): 次の5バイトが
+; [増減量下位,増減量上位,間隔,duration,delay]。duration=0を番兵としてoff(PTOF)を表す。
+; 増減量(符号付き16bit)と間隔はmckBytecode.jsがcompiler.jsのportamentoSequenceと同じ式
+; (|target|とdurationの大小比較+ceilDivPpmck)で前計算して置く(2026-09-19)。以前はここで
+; target(|target|<=255前提)からCEILDIVしていたため、PT-512,4(下位バイト0)やPT0,<n>で
+; 除数0の無限ループになり、そのフレームでドライバ全体が止まっていた。状態の初期化
+; (delay/durationリセット・PT_STEP初回呼び出し)はRD_NOTE(音符アタック時)で行う ---
 RD_PORTAMENTO:
     JSR READ_BYTE
-    STA ${hex(PERLO)}          ; target下位(このハンドラ内だけのスクラッチとして再利用)
+    STA ${hex(PTSTEPSZ)},X
     JSR READ_BYTE
-    STA ${hex(PTDIR)},X        ; target上位=$00(+)/$FF(-)をそのままdirとして使う
+    STA ${hex(PTSTEPHI)},X
+    JSR READ_BYTE
+    STA ${hex(PTSTEPINT)},X
     JSR READ_BYTE
     STA ${hex(PTDURSET)},X
     JSR READ_BYTE
@@ -3668,38 +3682,6 @@ RD_PORTAMENTO:
 RD_PORTAMENTO_ON:
     LDA #$01
     STA ${hex(PTACT)},X
-    LDA ${hex(PTDIR)},X
-    BEQ RD_PORTAMENTO_POS
-    LDA #$00
-    SEC
-    SBC ${hex(PERLO)}
-    JMP RD_PORTAMENTO_ABSDONE
-RD_PORTAMENTO_POS:
-    LDA ${hex(PERLO)}
-RD_PORTAMENTO_ABSDONE:
-    STA ${hex(CDB)}            ; |target|(候補b)
-    LDA ${hex(PTDURSET)},X
-    STA ${hex(CDA)}            ; duration(候補a)
-    CMP ${hex(CDB)}
-    BCC RD_PORTAMENTO_TARGETBIG
-    ; duration >= |target|: stepInterval=ceilDiv(duration,|target|), stepSize=1
-    JSR CEILDIV
-    STA ${hex(PTSTEPINT)},X
-    LDA #$01
-    STA ${hex(PTSTEPSZ)},X
-    JMP RDP_DONE
-RD_PORTAMENTO_TARGETBIG:
-    ; |target| > duration: stepSize=ceilDiv(|target|,duration), stepInterval=1
-    LDA ${hex(CDB)}
-    PHA
-    LDA ${hex(CDA)}
-    STA ${hex(CDB)}
-    PLA
-    STA ${hex(CDA)}
-    JSR CEILDIV
-    STA ${hex(PTSTEPSZ)},X
-    LDA #$01
-    STA ${hex(PTSTEPINT)},X
 RDP_DONE:
     ; 選択時点でPT状態も再初期化する(2026-08-16、RD_NOTEENV_ONのコメント参照。
     ; 通常の音符ではRD_NOTE_BODYが改めて同じPT_INITを呼ぶ)
@@ -3977,7 +3959,8 @@ ${usesEp ? `    ; EP<n>,<delay>も同じ理由(@v<n>のRD_NOTE_NOENVと同一の
     STA ${hex(EPDELAY)},X
     LDA #$00
     STA ${hex(EPTICK)},X
-    STA ${hex(EPVALLO)},X  ; ★累積値も0から(2026-09-13、累積方式化。実機のfrequency_setが
+${epWide ? `    STA ${hex(EPTICKHI)},X
+` : ''}    STA ${hex(EPVALLO)},X  ; ★累積値も0から(2026-09-13、累積方式化。実機のfrequency_setが
     STA ${hex(EPVALHI)},X  ;  ノートオンで基準値へ戻すのに対応。ENVALのRD_NOTEリセットと同じ)
     JSR EP_STEP
 RD_NOTE_NOEP:` : ''}

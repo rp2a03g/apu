@@ -14,8 +14,9 @@
   // MSXモード (bit1=0):
   //   bit0: FMPAC(FM-PAC/OPLL) or FMUNIT (bit1で判別、MSXモードなのでFMPAC)
   //   bit2: RAM使用
-  //   bit3: MSX-AUDIO使用
-  //   bit4: (MSX-AUDIO使用時) ステレオ
+  //   bit3-4: 0=なし / 1=MSX-AUDIO / 2(=0x10)=コナミ「牌の魔術師」の8bit D/A / 3=MSX-AUDIO ステレオ
+  //     (元の KSS 1.03 仕様は bit4-7 を予約としていた。2 の意味は libkss の kssxspec.md と
+  //      kss.c check_device の (flag & 0x18) == 0x10 に従う。NEZplug も同じ値で majutushimode)
   //   bit6: 0=NTSC, 1=PAL
   // SEGAモード (bit1=1):
   //   bit0: FMUNIT使用
@@ -48,6 +49,8 @@
       ramMode: !!(flag & 0x04),
       msxAudio,
       stereo: msxAudio ? !!(flag & 0x10) : false,
+      // 牌の魔術師のカートリッジ内 8bit D/A(メモリ 0x5000-0x5FFF への書込み。src/emulator/expansion/majutsushiDac.js)
+      majutsushiDac: (flag & 0x18) === 0x10,
       palMode
     };
   }
@@ -136,6 +139,7 @@
     } else {
       if (d.fmpac) list.push('FMPAC (OPLL/YM2413)');
       if (d.msxAudio) list.push('MSX-AUDIO (Y8950)');
+      if (d.majutsushiDac) list.push(T('8bit D/A (コナミ 牌の魔術師)'));
     }
     return list;
   };

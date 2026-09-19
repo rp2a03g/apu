@@ -218,23 +218,6 @@
       n163NumCh = r.n163NumCh;
       borrowNotes = r.notes;
       toneDemotions = r.demotions || [];
-      if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
-        const d = MML.Convert.DrumHits.dpcm(options.drumHits, frameRate, {
-          totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'kss_drum', maxClipSec: 10 });
-        // ノイズパッド(2026-09-18): 載せ先=ノイズのパッドの打点を2A03ノイズ(D)へ(src/convert/drumHits.js applyNoise)
-        if (d.noiseHits && d.noiseHits.length && MML.Convert.DrumHits.applyNoise) {
-          MML.Convert.DrumHits.applyNoise(scoreChannels, d.noiseHits, frameRate, {
-            totalFrames, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
-        }
-        if (d.defs.length) {
-          for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
-          dpcmFiles.push(...d.files);
-          scoreChannels.push({ letter: 'E', events: d.events, isDrum: true }); // E: 音符=@DPCM番号(本家ppmck準拠)
-          MML.Convert.sortChannelsByLetter(scoreChannels);
-          drumNote = `打楽器化したchを実音のままDPCM(E)へ変換しました: 定義${d.stats.clips}件 / 打点${d.stats.segments}個 / ROM ${(d.stats.bytes / 1024).toFixed(1)}KB`
-            + (d.stats.overflow ? `(定義が64本を超えたため ${d.stats.overflow} 本を落としました)` : '');
-        }
-      }
       chanDesc = Object.keys(r.placed)
         .map(t => `${MML.Convert.ChannelPlan.letterOfTarget(t)}=${r.placed[t].source.label}`)
         .sort().join(' ');
@@ -377,6 +360,26 @@
     }
     } // ← 既定割当の従来経路ここまで(customPlanのときは上のBorrow.compose()を使う)
 
+    // ★打楽器化(E/D)は既定割当の経路でも行う(2026-09-19)。牌の魔術師の D/A(KDA)は既定で E(DPCM)なので、
+    //   ユーザーが何も触っていない状態こそが普通のケース(vgm2mml の YMDA と同じ)
+    if (cmd.DRUM !== false && options.drumHits && options.drumHits.length && MML.Convert.DrumHits && MML.Dpcm) {
+      const d = MML.Convert.DrumHits.dpcm(options.drumHits, frameRate, {
+        totalFrames, dmcRate: cmd.DMC_RATE, rateMix: cmd.RATE_MIX, poly: cmd.DRUM_POLY, prefix: 'kss_drum', maxClipSec: 10 });
+      // ノイズパッド(2026-09-18): 載せ先=ノイズのパッドの打点を2A03ノイズ(D)へ(src/convert/drumHits.js applyNoise)
+      if (d.noiseHits && d.noiseHits.length && MML.Convert.DrumHits.applyNoise) {
+        MML.Convert.DrumHits.applyNoise(scoreChannels, d.noiseHits, frameRate, {
+          totalFrames, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
+      }
+      if (d.defs.length) {
+        for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
+        dpcmFiles.push(...d.files);
+        scoreChannels.push({ letter: 'E', events: d.events, isDrum: true }); // E: 音符=@DPCM番号(本家ppmck準拠)
+        MML.Convert.sortChannelsByLetter(scoreChannels);
+        drumNote = `打楽器化したchを実音のままDPCM(E)へ変換しました: 定義${d.stats.clips}件 / 打点${d.stats.segments}個 / ROM ${(d.stats.bytes / 1024).toFixed(1)}KB`
+          + (d.stats.overflow ? `(定義が64本を超えたため ${d.stats.overflow} 本を落としました)` : '');
+      }
+    }
+
     // チャンネル毎の発音開始間隔(IOI)を検出材料にする(MML.Convert.tempoMaterial、src/convert/bpm.js。
     // ゲートタイムで音符が短く切られてもIOIはグリッドに乗るため頑健)。
     const noteDurations = [];
@@ -457,7 +460,7 @@
       chips: ['PSG'].concat(hasScc ? ['SCC'] : []).concat(hasOpll ? ['FMPAC'] : []).concat(hasOpl ? ['MSX-AUDIO'] : []),
       expansions,
       n163Wave: sccResult.n163Wave,
-      dpcmFiles, // 打楽器化したchの @DPCM(ユーザー指定経路のみ。main.js が dpcmSampleCache へ)
+      dpcmFiles, // 打楽器化したchの @DPCM(既定経路でも出る: 牌の魔術師の D/A。main.js が dpcmSampleCache へ)
       toneDemotions // 音色一覧パネル用(VRC7自作音色→プリセットへ落ちた音色)
     };
   };

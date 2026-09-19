@@ -958,6 +958,9 @@
     for (let m = 1; m < measureCount; m++) boundaries.push(Math.round(m * framesPerMeasure));
 
     const lines = [];
+    // 定義行には「どのチャンネルで使っているか」のコメントを付けて並べ替える(annotateDefinitions)。
+    // 本文ができてからでないと使っているチャンネルが分からないので、ここでは位置だけ控えて後で差し替える
+    const headerAt = lines.length, headerCount = opts.headerLines ? opts.headerLines.length : 0;
     if (opts.headerLines) lines.push(...opts.headerLines);
     if (loop) {
       lines.push(`; ループ自動検出: ${loop.start}フレーム目から ${loop.period}フレーム周期(` +
@@ -1060,6 +1063,11 @@
       }));
     }
 
+    if (headerCount) {
+      const bodies = perChannelMeasureTexts.map(texts => texts.join(' '));
+      lines.splice(headerAt, headerCount, ...annotateDefinitions(opts.headerLines, channelsData.map(c => c.letter), bodies));
+    }
+
     // ── ループ位置で譜面を前後に分ける(2026-09-19、ユーザー指示「L が見落としやすい」) ──
     // renderEvents は L の代わりに目印 LOOP_MARK を出している。全チャンネルで目印が同じ小節にあれば、
     // その小節を目印の前後で割り、「イントロ | DXYZ L の1行 | ループ部分」の順に並べる
@@ -1137,6 +1145,98 @@
 
     return lines.join('\n');
   };
+  // ── 定義行の「使っているチャンネル」コメントとグループ分け(2026-09-19、ユーザー要望) ──
+  // ヘッダの定義行(@v/@vr/@EP/@EN/@MP/@@<n>={}/@N/@FM/@OP/@OT/@MH/@MW/@DPCM)ごとに、本文でその番号を
+  // 使っているチャンネルを数える。種類ごとの塊(各レジストリが続けて出す)の中で「同じチャンネルの組」の定義を
+  // 集め、組が変わる所にだけ「; ── A B X で使用 ──」を1行置く(組の中は番号順)。どこにも使われていない定義は
+  // 「未使用」の組。定義の直前のコメント行(N163 で縮めた波形の元の定義など)はその定義に付いて一緒に動く。
+  // 定義はMMLのどこに書いても同じ(番号で引く)ので、並べ替えても再生・NSFは変わらない
+  const DEF_RE = /^(@vr|@v|@EP|@EN|@MP|@OP|@OT|@N|@FM|@MW|@MH|@DPCM|@)(\d+)\s*=/;
+  function usageTokens(kind, n) {
+    switch (kind) {
+      case '@v': return [new RegExp(`@v${n}(?!\\d)`)];
+      case '@vr': return [new RegExp(`@vr${n}(?!\\d)`)];
+      case '@EP': return [new RegExp(`(^|[^@A-Z])EP${n}(?!\\d)`)];
+      case '@EN': return [new RegExp(`(^|[^@A-Z])EN${n}(?!\\d)`)];
+      case '@MP': return [new RegExp(`(^|[^@A-Z])MP${n}(?!\\d)`)];
+      case '@MH': return [new RegExp(`(^|[^@A-Z])MH${n}(?!\\d)`)];
+      case '@OP': case '@OT': return [new RegExp(`(^|[^@A-Z])OP${n}(?!\\d)`)];
+      case '@': return [new RegExp(`@@r?${n}(?!\\d)`)]; // @@<n>(音色エンベロープ)と @@r<n>(リリース音色)
+      default: return null;
+    }
+  }
+  function annotateDefinitions(headerLines, letters, bodies) {
+    const items = []; // { kind, n, lines: [付随コメント…, 定義行] } | { raw: 行 }
+    let pending = [];
+    for (const line of headerLines) {
+      const m = DEF_RE.exec(line);
+      if (m) { items.push({ kind: m[1], n: +m[2], line, lines: pending.concat([line]) }); pending = []; continue; }
+      if (/^;/.test(line) && !/^; ?(──|=)/.test(line)) { pending.push(line); continue; }
+      items.push(...pending.map(l => ({ raw: l }))); pending = [];
+      items.push({ raw: line });
+    }
+    items.push(...pending.map(l => ({ raw: l })));
+    // 使っているチャンネル
+    const usedBy = (kind, n) => {
+      if (kind === '@DPCM') return letters.filter(L => L === 'E');
+      if (kind === '@N' || kind === '@FM') {
+        const want = kind === '@N' ? /^[P-W]$/ : /^F$/;
+        const re = new RegExp(`(^|[^@\\w])@${n}(?!\\d)|@@r${n}(?!\\d)`); // @<n> と @@r<n>(リリース時の波形)
+        return letters.filter((L, i) => want.test(L) && re.test(bodies[i]));
+      }
+      const res = usageTokens(kind, n);
+      if (!res) return [];
+      return letters.filter((L, i) => res.some(re => re.test(bodies[i])));
+    };
+    for (const it of items) if (it.kind && it.kind !== '@MW') it.chs = usedBy(it.kind, it.n);
+    // @MW は @MH の4番目の値(波形番号)から引く
+    for (const it of items) {
+      if (it.kind !== '@MW') continue;
+      const set = new Set();
+      for (const h of items) {
+        if (h.kind !== '@MH') continue;
+        const p = /\{([^}]*)\}/.exec(h.line);
+        const w = p ? p[1].split(/[\s,]+/).filter(Boolean)[3] : null;
+        if (w != null && +w === it.n) for (const L of h.chs) set.add(L);
+      }
+      it.chs = letters.filter(L => set.has(L));
+    }
+    // 種類ごとの連続した塊の中で、チャンネルの組ごとにまとめる
+    const out = [];
+    for (let i = 0; i < items.length;) {
+      if (!items[i].kind) { out.push(items[i].raw); i++; continue; }
+      let j = i;
+      while (j < items.length && items[j].kind === items[i].kind) j++;
+      const block = items.slice(i, j);
+      if (!block.some(it => it.chs.length)) { i = j; continue; } // 全部未使用の種類は見出しごと出さない
+      // 種類ごとの見出し(前に空行)
+      if (out.length && out[out.length - 1] !== '') out.push('');
+      out.push(`; ==== ${items[i].kind === '@' ? '@<n>' : items[i].kind} ${DEF_TITLE[items[i].kind] || ''} ====`);
+      const keyOf = (it) => it.chs.length ? it.chs.join(' ') : '';
+      const order = (it) => it.chs.length ? letters.indexOf(it.chs[0]) : 1e9; // 未使用は最後
+      block.sort((a, b) => (order(a) - order(b)) || (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0) || (a.n - b.n));
+      let prev = null;
+      for (const it of block) {
+        // どのチャンネルも使っていない定義は出さない(2026-09-19、ユーザー指示)。付随コメントも一緒に落とす
+        if (!it.chs.length) continue;
+        const key = keyOf(it);
+        if (key !== prev) {
+          out.push(key ? `; ── ${key} で使用 ──` : '; ── 未使用 ──');
+          prev = key;
+        }
+        out.push(...it.lines);
+      }
+      i = j;
+    }
+    if (out.length && out[out.length - 1] !== '' && items.some(it => it.kind && it.chs && it.chs.length)) out.push('');
+    return out;
+  }
+  const DEF_TITLE = {
+    '@v': '音量エンベロープ', '@vr': 'リリースエンベロープ', '@EP': 'ピッチエンベロープ', '@EN': 'ノートエンベロープ',
+    '@MP': 'ビブラート', '@': 'デューティエンベロープ', '@N': 'N163波形', '@FM': 'FDS波形', '@MW': 'FDS変調テーブル',
+    '@MH': 'FDS変調', '@OP': 'VRC7音色', '@OT': 'VRC7音色', '@DPCM': 'DPCMサンプル',
+  };
+
   // L の位置の目印(renderEvents → emitScore)。MML に出てこない制御文字で挟む
   const LOOP_MARK = '\u0001L\u0001';
 

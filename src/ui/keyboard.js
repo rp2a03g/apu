@@ -469,6 +469,8 @@
     const rb = id.match(/^RB(\d)$/);
     if (rb) return { section: 'expansion', chip: 'rf5c68', type: 'array', index: +rb[1] - 1 };
     if (KF_RHYTHM_INDEX[id] !== undefined) return { section: 'expansion', chip: 'opll', type: 'array', index: KF_RHYTHM_INDEX[id] };
+    // KSS: 牌の魔術師の 8bit D/A(src/emulator/expansion/majutsushiDac.js、chip.mute[0])
+    if (id === 'KDA') return { section: 'expansion', chip: 'dac', type: 'array', index: 0 };
     return null;
   }
 
@@ -489,6 +491,8 @@
     { header: 'MMC5 (Memory Management Controller 5)', ids: { M5P1: 'P1', M5P2: 'P2', M5PC: 'PCM' } },
     { header: 'YM2149 (Software controlled Sound Generator)', ids: { KP1: 'P1', KP2: 'P2', KP3: 'P3', KP4: 'P1(2)', KP5: 'P2(2)', KP6: 'P3(2)' } },
     { header: 'SCC (Sound Creative Chip)', prefix: 'KS', name: (id) => 'W' + id.slice(2) },
+    // KDA: 牌の魔術師カートリッジ内蔵の 8bit D/A(メモリ 0x5000-0x5FFF、KSS device flag bit3-4=2)
+    { header: '8bit D/A (Konami Hai no Majutsushi)', ids: { KDA: 'DAC' } },
     { header: 'YM2413 (MSX-MUSIC , OPLL)', ids: { KFBD: 'BD', KFSD: 'SD', KFTOM: 'Tom', KFCYM: 'Cym', KFHH: 'HH' }, prefix: 'KF', name: (id) => 'FM' + id.slice(2) },
     { header: 'LR35902 (Game Boy)', ids: { GALL: 'ALL', GB1: 'P1', GB2: 'P2', GN: 'No', GW: 'Wave' } },
     { header: 'HuC6280(PC Engine / TurboGrafx-16)', ids: { HALL: 'ALL', PSG0: 'Ch0', PSG1: 'Ch1', PSG2: 'Ch2', PSG3: 'Ch3', PSG4: 'Ch4', PSG5: 'Ch5' } },
@@ -1427,6 +1431,16 @@
           channels.push(row);
         }
       }
+    }
+
+    if (chips.includes('kssDac')) {
+      // 牌の魔術師の 8bit D/A。YMDA(メガドライブの DAC)と同じ「サンプル」行: 音程を持たないので
+      // D#2(dmcRateIdx 15)の鍵に置く。ロールの KDA トラックも同じ鍵(roll-builders.js RollBuild.kss)。
+      // active は「書込みが続いているか」(D/A は最後の値を保持し続けるので値では判定できない)
+      const live = extraSnaps && extraSnaps.kssDacLive;
+      const d = (live ? live() : null) || { level: 0x80, vol: 0, active: false };
+      channels.push({ id: 'KDA', color: '#ff66aa', freq: 0, vol: d.vol, rawVol: d.level, rawVolMax: 255,
+        wave: { t: 'sample' }, active: !!d.active, sample: true, dmcReg: d.level, dmcRateIdx: 15, dmcFreq: 0 });
     }
 
     if (chips.includes('sn76489')) {
@@ -4887,6 +4901,7 @@
       this._extraSnaps.kssPsgLive = typeof result.getKssPsg === 'function' ? result.getKssPsg : null;
       this._extraSnaps.kssSccLive = typeof result.getKssScc === 'function' ? result.getKssScc : null;
       this._extraSnaps.kssOpllLive = typeof result.getKssOpll === 'function' ? result.getKssOpll : null;
+      this._extraSnaps.kssDacLive = typeof result.getKssDac === 'function' ? result.getKssDac : null;
       this._extraSnaps.gbsApuLive = typeof result.getGbsApu === 'function' ? result.getGbsApu : null;
       this._extraSnaps.hesApuLive = typeof result.getHesApu === 'function' ? result.getHesApu : null;
       this._extraSnaps.snLive = typeof result.getSn76489 === 'function' ? result.getSn76489 : null;

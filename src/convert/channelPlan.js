@@ -158,6 +158,9 @@
     pcm: ['fds'].concat(PCM_T),
     brr: ['fds', 'dpcm', 'noise'].concat(SQUARE_T),
     any: ['fds', 'dpcm'].concat(SQUARE_T),
+    // 音程を持たない D/A(KSS 牌の魔術師の KDA)。打楽器化(E=実音のまま DPCM / D=ノイズ)だけが意味を持つ。
+    // 打点は分離レンダリングでなく書込みログから取る(main.js kssDacDrumFor)
+    dac: ['dpcm', 'noise'],
   };
   // 「E(DPCM)へ載せた合成音ch」か(=他chをミュートして分離レンダリングし、打楽器化する対象)。
   // ★判定は「実サンプル表を持つ行か」であって kind の網羅ではない(2026-09-04修正)。
@@ -339,6 +342,7 @@
     [/^GW$/, function () { return ['wave', null]; }],                                       // GB 波形
     [/^GN$/, function () { return ['noise', null]; }],                                      // GB ノイズ
     [/^PSG[0-5]$/, function () { return ['wave', null]; }],                                 // HuC6280 PSG
+    [/^KDA$/, function () { return ['dac', null]; }],                                       // KSS 牌の魔術師の 8bit D/A
   ];
   function lookupCh(chId) {
     for (const pair of CH_KIND) { const m = pair[0].exec(chId); if (m) return pair[1](m); }

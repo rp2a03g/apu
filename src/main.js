@@ -1074,7 +1074,7 @@
     return !!f && f() < 0.999;
   }
   /** ログから打点が取れる行(VGMのDAC)。分離レンダリングが要らないので待つ必要も無い */
-  function isLogDrumRow(chId) { return !!DAC_ROW_CHIP[chId]; }
+  function isLogDrumRow(chId) { return !!DAC_ROW_CHIP[chId] || chId === 'KDA'; } // KDA: KSS 牌の魔術師の D/A(kssDacDrumFor)
   /**
    * 分離レンダリング(ドラムパッドの下ごしらえ)の進捗表示。chId=null で消す。
    * 出す先はドラム(DPCM)パネルの下段と、鍵盤表示のパッドの上(パネルを開いていなくても
@@ -1350,6 +1350,71 @@
     return { hits, samples, notes };
   }
 
+  // ── KSS: 牌の魔術師の 8bit D/A(KDA行)の打点を書込みログから引く(2026-09-19) ──────────
+  // D/A への書込み(メモリ 0x5000-0x5FFF の符号なし8bit)がそのまま波形なので、音から推測せず
+  // ログの値を並べれば原音になる(VGM の DAC と同じく「ログに答えがあるならログを読む」)。
+  // 区切りは「D/A へ1回も書かなかったフレーム」。ゲームは1回の PLAY の中で DI したまま
+  // 最後まで流し切り、鳴り終わると書込みが止まる(D/A は最後の値を保持するだけ)ので、
+  // 振幅のしきい値で切る 32X PWM 方式(vgmStreamDrumFor)より確実。
+  // レートはクリップの最初と最後の書込み時刻(writeLog の frac、1/64フレーム刻み)から出す
+  // (実測 約16.7kHz。M1ウェイト込み)。同じ内容のクリップは1つのパッドにまとめ、レートも最初の1回の値を使う
+  // (打点ごとの実測値を渡すと DrumHits.dpcm の重複排除キーがずれる。vgmDacDrumFor と同じ理由)
+  function kssDacDrumFor(chId, frameInfo) {
+    const wl = kssCaptureWriteLog;
+    if (!wl || !wl.length) return null;
+    const U = MML.Emu && MML.Emu.SamplePitchUtil;
+    const unpackFrac = MML.Emu.kssUnpackFrac;
+    const frameRate = frameInfo.frameRate;
+    const n = Math.min(wl.length, frameInfo.totalFrames);
+    const samples = {}, hits = [], notes = [];
+    let seq = 0, clipNo = 0;
+    let vals = null, t0 = 0, t1 = 0, f0 = 0, f1 = 0;
+    const flush = () => {
+      if (!vals || vals.length < 8) { vals = null; return; }
+      const u8 = Uint8Array.from(vals);
+      const hash = (U && U.sampleHash) ? U.sampleHash(u8, 0, u8.length) : String(u8.length) + ':' + f0;
+      const key = 'kda:' + hash;
+      if (!samples[key]) {
+        const pcm = new Float32Array(u8.length);
+        for (let i = 0; i < u8.length; i++) pcm[i] = (u8[i] - 128) / 128;
+        const span = (t1 - t0) / frameRate;
+        const rate = span > 0 ? (u8.length - 1) / span : u8.length * frameRate;
+        const hn = Math.min(u8.length, 8192); // 設定の保存キーは先頭8192サンプル固定(HES DDA / vgmStreamDrumFor と同じ)
+        clipNo++;
+        samples[key] = { key, pcm, rate, hash: (U && U.sampleHash) ? ('kda-' + U.sampleHash(u8, 0, hn)) : null,
+                         chip: 'kssdac', chans: [chId], label: 'dac' + clipNo };
+      }
+      const s = samples[key];
+      const st = Math.min(f0, frameInfo.totalFrames);
+      const en = Math.max(st + 1, Math.min(f1 + 1, frameInfo.totalFrames));
+      // label: .dmc のファイル名/パッド名(drumHits.js clipFileName)。無いとキーのハッシュを番地と読み違えて「6.dmc」になる
+      hits.push({ key, sampleKey: key, hash: s.hash, pcm: s.pcm, rate: s.rate, label: s.label, vol: 1,
+                  startFrame: st, endFrame: en, exactEnd: true, chId });
+      notes.push({ startSec: st / frameRate, endSec: en / frameRate, midi: null, drumKey: key, drumSeq: ++seq, vol: 1, freqSeq: [] });
+      vals = null;
+    };
+    for (let f = 0; f < n; f++) {
+      const w = wl[f];
+      let any = false;
+      if (w) {
+        for (const pw of w) {
+          if ((pw >> 24) & 1) continue;
+          const addr = pw & 0xFFFF;
+          if (addr < 0x5000 || addr > 0x5FFF) continue;
+          const t = f + unpackFrac(pw);
+          if (!vals) { vals = []; t0 = t; f0 = f; }
+          vals.push((pw >> 16) & 0xFF);
+          t1 = t; f1 = f;
+          any = true;
+        }
+      }
+      if (!any && vals) flush();
+    }
+    flush();
+    if (!hits.length) return null;
+    return { hits, samples, notes };
+  }
+
   // ── サンプル再生ch(ストリーミングDAC)の打点検出(2026-09-04) ──────────────
   // YM2612のDAC・32X PWM・RF5C164/68・OKIM6258はレジスタ上「1本の連続したPCMストリーム」で、
   // どこが1発の太鼓なのかがレジスタからは分からない(ロールのノート境界は音量段の変わり目)。
@@ -1580,7 +1645,7 @@
       //   **DACを使っていないメガドライブ曲でも毎回フル再エミュレーションが走る**
       //   (ユーザー報告「ローリングサンダー2はPCM無いのに重い」の原因)。
       if (isLogDrumRow(id)) {
-        const fromLog = vgmDacDrumFor(id, info);
+        const fromLog = id === 'KDA' ? kssDacDrumFor(id, info) : vgmDacDrumFor(id, info);
         if (fromLog) {
           fromLog.totalFrames = info.totalFrames;
           stampSynthDrumAssign(id, fromLog);
@@ -2071,6 +2136,11 @@
   function liveKssOpl() {
     if (!kssActivePlayer || !kssActivePlayer.player || !kssActivePlayer.player.opl) return null;
     return MML.Emu.snapshotOPL(kssActivePlayer.player.opl);
+  }
+  // 牌の魔術師の 8bit D/A(KDA行)。★スナップショットは呼ぶたびに「前回からの書込み有無」を消費する
+  function liveKssDac() {
+    if (!kssActivePlayer || !kssActivePlayer.player || !kssActivePlayer.player.dac) return null;
+    return MML.Emu.snapshotMajutsushiDac(kssActivePlayer.player.dac);
   }
 
   // GBS再生中のライブAPUスナップショット(鍵盤表示用)
@@ -6313,6 +6383,8 @@
 
   let loadedKssBytes  = null;
   let loadedKssHeader = null;
+  // 再生中の先読みキャプチャの writeLog(進行中の配列への参照)。牌の魔術師の D/A の打点(kssDacDrumFor)が読む
+  let kssCaptureWriteLog = null;
   let kssIsRendering  = false;
   let kssActivePlayer = null; // KssStreamPlayer
 
@@ -6330,6 +6402,7 @@
     if (sccUsed) chips.push('kssScc');
     if (header && header.device.mode === 'MSX' && header.device.fmpac) chips.push('kssOpll');
     if (header && header.device.mode === 'MSX' && header.device.msxAudio) chips.push('opl'); // MSX-AUDIO(Y8950)=OL行
+    if (header && header.device.mode === 'MSX' && header.device.majutsushiDac) chips.push('kssDac'); // 牌の魔術師 D/A=KDA行
     return chips;
   }
 
@@ -6369,6 +6442,8 @@
       }
       loadedKssBytes = bytes;
       loadedKssHeader = h;
+      // 牌の魔術師の D/A(KDA行)の既定は E(DPCM)。音程を持たず、他に行き場が無い(VGM の YMDA と同じ)
+      if (h.device.mode === 'MSX' && h.device.majutsushiDac) MML.Convert.ChannelPlan.setDefaults({ KDA: 'dpcm' });
       renderKssHeader(h);
       const first = h.hasSongRange ? h.firstSong : 0;
       const last = h.hasSongRange ? h.lastSong : 255;
@@ -6482,6 +6557,7 @@
         getKssPsg: liveKssPsg,
         getKssScc: liveKssScc,
         getKssOpll: liveKssOpll,
+        getKssDac: liveKssDac,
         getOpl: liveKssOpl
 }, () => kssActivePlayer ? kssActivePlayer.getPosition() : 0, kssMonitorChips(loadedKssHeader, sccUsed));
       // ★setMonitorSource()はsetSource()経由でロールのタイムラインを必ず捨てる
@@ -6514,6 +6590,7 @@
     drumSampleStore = {};
     drumHitsProvider = null;
     synthDrumReset();
+    kssCaptureWriteLog = null;
     keyboardDisplay.setDpcmCost(null);
     // SCCは「使われたと分かった時点で行を足す」単調な運用にする(出したり消したりすると
     // 再生中に行数が揺れて見づらいため)。判定はWorker側のロール構築ジョブが行う。
@@ -6545,6 +6622,7 @@
       }
     }, (done, total, writeLog) => {
       if (myKssRollToken !== kssRollToken) return; // 曲切替/停止で無効化済み
+      kssCaptureWriteLog = writeLog;
 
       if (!kssPlaybackLoaded) {
         kssPlaybackLoaded = true;

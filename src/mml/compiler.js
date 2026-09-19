@@ -1091,7 +1091,12 @@
         case 'pitchEnv': if (caps.dpcm) { dpcmReject('EP'); break; } state.pitchEnv = tok.value; state.pitchEnvDelay = tok.delay || 0; break;
         case 'portamento':
           if (caps.dpcm) { dpcmReject('PT'); break; }
-          state.portamento = tok.target == null ? null : { target: tok.target, duration: tok.duration, delay: tok.delay };
+          // duration/delay は NSF 書き出しのバイトコードでは1バイト(0xF9、duration=0 が PTOF の番兵)なので、
+          // ブラウザ再生も同じ値で鳴らす(2026-09-19。以前は PT<n>,0 や duration/delay>255 で両者が食い違った:
+          // duration 0 はこちらだけ1フレームのポルタメントとして効き、256以上はNSFだけ下位バイトに化けていた)
+          state.portamento = (tok.target == null || !(tok.duration > 0)) ? null : {
+            target: tok.target, duration: Math.min(255, tok.duration), delay: Math.min(255, Math.max(0, tok.delay | 0))
+          };
           break;
         case 'noteEnv': if (caps.dpcm) { dpcmReject('EN'); break; } state.noteEnv = tok.value; break;
         case 'sweep': if (caps.dpcm) { dpcmReject('s'); break; } state.sweepSpeed = tok.speed; state.sweepDepth = tok.depth; break;
@@ -1460,9 +1465,11 @@
   // simulatePortamento/fitPortamentoが可逆性を検査する時に使うのと同一実装。共有しない
   // 理由はP-3参照)。delay経過後、target(0からの目標オフセット)へdurationフレームで
   // 到達し、以降は最終値を永久ホールドする(vibratoSequenceの事前計算方式と同じ発想)。
-  function portamentoSequence(pt, dur) {
-    if (!pt || dur <= 0) return null;
-    const delay = Math.max(0, pt.delay || 0);
+  // 1ステップの増減量(符号付き、dir込み)と間隔。NSF書き出し(mckBytecode.js serialize)も
+  // この関数で前計算した値を0xF9のパラメータとして置き、6502側は足すだけにする(2026-09-19。
+  // 以前は6502側がtargetからCEILDIVしており、|target|>255 や target=0 で除数0の無限ループに
+  // なってドライバが止まっていた)ので、ブラウザ再生とNSFで式が食い違うことは無い
+  function portamentoStepParams(pt) {
     const duration = Math.max(1, pt.duration || 1);
     const target = pt.target || 0;
     const absTarget = Math.abs(target);
@@ -1472,13 +1479,22 @@
     else if (duration === absTarget) { stepSize = 1; stepInterval = 1; }
     else if (duration > absTarget) { stepInterval = ceilDivPpmck(duration, absTarget); stepSize = 1; }
     else { stepSize = ceilDivPpmck(absTarget, duration); stepInterval = 1; }
+    return { step: dir * stepSize, stepInterval };
+  }
+  Mml.portamentoStepParams = portamentoStepParams;
+
+  function portamentoSequence(pt, dur) {
+    if (!pt || dur <= 0) return null;
+    const delay = Math.max(0, pt.delay || 0);
+    const duration = Math.max(1, pt.duration || 1);
+    const { step, stepInterval } = portamentoStepParams(pt);
 
     const seq = new Array(dur);
     let value = 0, counter = stepInterval, remaining = duration;
     for (let t = 0; t < dur; t++) {
       if (t < delay) { seq[t] = 0; continue; }
       if (remaining > 0) {
-        if (counter === stepInterval) { counter = 0; value += dir * stepSize; }
+        if (counter === stepInterval) { counter = 0; value += step; }
         counter++;
         remaining--;
       }

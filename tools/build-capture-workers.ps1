@@ -49,6 +49,7 @@ $bundles = @(
             'src\emulator\cpuZ80.js',
             'src\emulator\expansion\ay8910Msx.js',
             'src\emulator\expansion\sccAudio.js',
+            'src\emulator\expansion\majutsushiDac.js',
             'src\emulator\expansion\opllNuked.js',
             'src\emulator\expansion\opllMsx.js',
             'src\emulator\expansion\ym2610.js',

@@ -870,6 +870,7 @@
       'Frame {frame}: cannot place @N{instrument} (ch{channel}) in N163 internal RAM ({bytes} bytes needed, not enough free; the waves in use at once exceed the {max} bytes = {maxLen} samples available for waves with {numCh} channels enabled)',
     'KSSヘッダは最低16バイト必要です': 'A KSS header needs at least 16 bytes',
     'SCC/SCC+ (Konami、使用時のみ)': 'SCC/SCC+ (Konami, only when used)',
+    '8bit D/A (コナミ 牌の魔術師)': '8-bit D/A (Konami Hai no Majutsushi)',
     'MSX-AUDIO (Y8950, 未対応)': 'MSX-AUDIO (Y8950, unsupported)',
 
     // ---- 鍵盤表示 / ピアノロール ----

@@ -44,7 +44,7 @@
       this.header = header;
       this.songData = songData;
       this.mem = new Uint8Array(0x10000);
-      this.chips = {}; // 'psg' | 'scc' | 'opll' | (将来)'opl'
+      this.chips = {}; // 'psg' | 'scc' | 'opll' | 'opl' | 'dac'(牌の魔術師 8bit D/A)
       this.onWrite = null; // (addr, value) => void
       this.onIoWrite = null; // (port, value) => void
 
@@ -158,6 +158,10 @@
       addr &= 0xFFFF;
       value &= 0xFF;
       if (this.onWrite) this.onWrite(addr, value);
+
+      // 牌の魔術師の 8bit D/A(ヘッダ device flag bit3-4=2 の時だけ登録される)。実機ではこの範囲は
+      // ROM なのでメモリには書かない(openMSX RomMajutsushi / NEZplug majutushimode と同じ)
+      if (this.chips.dac && addr >= 0x5000 && addr <= 0x5FFF) { this.chips.dac.write(value); return; }
 
       if (!this.sccDisable && this.chips.scc) this._sccWrite(addr, value);
 

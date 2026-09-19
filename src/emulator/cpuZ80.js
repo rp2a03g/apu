@@ -47,6 +47,10 @@
     constructor(bus) {
       this.bus = bus;
       this.traps = null; // {addr: (cpu)=>cycles} BIOSコールトラップ。resetでは消さない
+      // M1(命令フェッチ)1回ごとに足すウェイト数。素の Z80 は 0、MSX は 1(kssPlayer.js が設定)。
+      // M1 の回数は R レジスタの増分と同じ(プレフィックス DD/FD/CB/ED もそれぞれ 1 回、
+      // DD CB d op の d と op は M1 ではない)。resetでは消さない
+      this.m1Wait = 0;
       this.reset();
     }
 
@@ -380,18 +384,19 @@
       // 常に+4サイクルのM1フェッチになる。displacementを伴う(HL)->(IX+d)化された
       // 命令だけは execMain/execCB 側で「この+4を除いた残りコスト」を返す設計にしている。
       const extraPrefixCycles = prefixBytes * 4;
+      const m1 = this.m1Wait;
 
       if (opcode === 0xCB) {
         // 通常のCB xxは2バイトともM1フェッチでRが+2される。DD/FD CB d xxは
         // DD/FD+CBの時点で既に+2済みで、変位byteと最終opcodeバイトはRを増やさない。
         if (!idx) this.r = (this.r & 0x80) | ((this.r + 1) & 0x7F);
-        return extraPrefixCycles + this.execCB(idx);
+        return extraPrefixCycles + this.execCB(idx) + (m1 ? m1 * (prefixBytes + (idx ? 1 : 2)) : 0);
       }
       if (opcode === 0xED) {
         this.r = (this.r & 0x80) | ((this.r + 1) & 0x7F);
-        return extraPrefixCycles + this.execED();
+        return extraPrefixCycles + this.execED() + (m1 ? m1 * (prefixBytes + 2) : 0);
       }
-      return extraPrefixCycles + this.execMain(opcode, idx);
+      return extraPrefixCycles + this.execMain(opcode, idx) + (m1 ? m1 * (prefixBytes + 1) : 0);
     }
 
     // 実効アドレスを計算して this._eaddr にセットする(code===6のとき使用)。

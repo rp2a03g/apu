@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 19:48:10
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 21:29:27
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-19 19:48:10';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-19 21:29:27';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -27,8 +27,9 @@
   // MSXモード (bit1=0):
   //   bit0: FMPAC(FM-PAC/OPLL) or FMUNIT (bit1で判別、MSXモードなのでFMPAC)
   //   bit2: RAM使用
-  //   bit3: MSX-AUDIO使用
-  //   bit4: (MSX-AUDIO使用時) ステレオ
+  //   bit3-4: 0=なし / 1=MSX-AUDIO / 2(=0x10)=コナミ「牌の魔術師」の8bit D/A / 3=MSX-AUDIO ステレオ
+  //     (元の KSS 1.03 仕様は bit4-7 を予約としていた。2 の意味は libkss の kssxspec.md と
+  //      kss.c check_device の (flag & 0x18) == 0x10 に従う。NEZplug も同じ値で majutushimode)
   //   bit6: 0=NTSC, 1=PAL
   // SEGAモード (bit1=1):
   //   bit0: FMUNIT使用
@@ -61,6 +62,8 @@
       ramMode: !!(flag & 0x04),
       msxAudio,
       stereo: msxAudio ? !!(flag & 0x10) : false,
+      // 牌の魔術師のカートリッジ内 8bit D/A(メモリ 0x5000-0x5FFF への書込み。src/emulator/expansion/majutsushiDac.js)
+      majutsushiDac: (flag & 0x18) === 0x10,
       palMode
     };
   }
@@ -149,6 +152,7 @@
     } else {
       if (d.fmpac) list.push('FMPAC (OPLL/YM2413)');
       if (d.msxAudio) list.push('MSX-AUDIO (Y8950)');
+      if (d.majutsushiDac) list.push(T('8bit D/A (コナミ 牌の魔術師)'));
     }
     return list;
   };
@@ -208,6 +212,10 @@
     constructor(bus) {
       this.bus = bus;
       this.traps = null; // {addr: (cpu)=>cycles} BIOSコールトラップ。resetでは消さない
+      // M1(命令フェッチ)1回ごとに足すウェイト数。素の Z80 は 0、MSX は 1(kssPlayer.js が設定)。
+      // M1 の回数は R レジスタの増分と同じ(プレフィックス DD/FD/CB/ED もそれぞれ 1 回、
+      // DD CB d op の d と op は M1 ではない)。resetでは消さない
+      this.m1Wait = 0;
       this.reset();
     }
 
@@ -541,18 +549,19 @@
       // 常に+4サイクルのM1フェッチになる。displacementを伴う(HL)->(IX+d)化された
       // 命令だけは execMain/execCB 側で「この+4を除いた残りコスト」を返す設計にしている。
       const extraPrefixCycles = prefixBytes * 4;
+      const m1 = this.m1Wait;
 
       if (opcode === 0xCB) {
         // 通常のCB xxは2バイトともM1フェッチでRが+2される。DD/FD CB d xxは
         // DD/FD+CBの時点で既に+2済みで、変位byteと最終opcodeバイトはRを増やさない。
         if (!idx) this.r = (this.r & 0x80) | ((this.r + 1) & 0x7F);
-        return extraPrefixCycles + this.execCB(idx);
+        return extraPrefixCycles + this.execCB(idx) + (m1 ? m1 * (prefixBytes + (idx ? 1 : 2)) : 0);
       }
       if (opcode === 0xED) {
         this.r = (this.r & 0x80) | ((this.r + 1) & 0x7F);
-        return extraPrefixCycles + this.execED();
+        return extraPrefixCycles + this.execED() + (m1 ? m1 * (prefixBytes + 2) : 0);
       }
-      return extraPrefixCycles + this.execMain(opcode, idx);
+      return extraPrefixCycles + this.execMain(opcode, idx) + (m1 ? m1 * (prefixBytes + 1) : 0);
     }
 
     // 実効アドレスを計算して this._eaddr にセットする(code===6のとき使用)。
@@ -1366,6 +1375,70 @@
   };
 
   Emu.SCCAudio = SCCAudio;
+})(globalThis);
+
+/*
+ * コナミ「牌の魔術師」カートリッジ内蔵の 8bit D/A
+ * MML.Emu.MajutsushiDAC
+ *
+ * メモリ 0x5000-0x5FFF への書込み値(符号なし8bit、0x80=中点)がそのまま出力電圧になる。
+ * ゲームは PLAY の中で DI したまま 4bit 差分符号を展開し、DJNZ の空ループで間隔を取りながら
+ * LD (5000h),A を連打してしゃべる(割込みは使わない)。
+ *
+ * 資料(KSS の D/A はこの3つしか見当たらない):
+ *   - libkss kssxspec.md: device flag の bit3-4 = 2 が "Majutushi D/A"。iomap.md: 5000-5FFFH 8bit D/A port
+ *   - libkss vm.c memwrite: DA8 >>= 1; DA8 += (d - 0x80) << 3 を SCC の出力に足す
+ *     (定常値 16×(d-0x80) ≒ SCC 1ch の最大 15×127 と同程度)
+ *   - openMSX RomMajutsushi.cc: Konami マッパー+DAC、0x5000-0x5FFF の書込みは DAC へ(ROM には書かない)。
+ *     DACSound8U は value-0x80 をそのまま出す(零次ホールド)
+ * 出力は openMSX と同じ零次ホールド。libkss の「書込みごとに半分へ減衰」は書込み間隔で特性が
+ * 変わる近似なので真似しない。振幅は libkss の比率(SCC 1ch 最大と同程度)を sccAudio.js の
+ * スケール(1ch 最大 ≒ 0.186)へ写して 0.2/128 とした。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const GAIN = 0.2 / 128;
+
+  class MajutsushiDAC {
+    constructor() {
+      this.value = 0x80;
+      this.mute = [false];
+      this.vol = [1];
+      this.writes = 0;  // 書込み回数(鍵盤表示の「鳴っているか」判定用。snapshotMajutsushiDac 参照)
+      this.peak = 0;    // 前回スナップショット以降の最大振幅 |value-0x80|
+      this._snapWrites = 0;
+    }
+    reset() { this.value = 0x80; this.writes = 0; this.peak = 0; this._snapWrites = 0; }
+    write(value) {
+      this.value = value & 0xFF;
+      this.writes++;
+      const a = Math.abs(this.value - 0x80);
+      if (a > this.peak) this.peak = a;
+    }
+    clock() {}
+    mixSample() {
+      if (this.mute[0]) return 0;
+      return (this.value - 0x80) * GAIN * this.vol[0];
+    }
+  }
+
+  // DAC の書込みアドレスか(KssBus と再生側の振り分けで共用)
+  MajutsushiDAC.isDacAddr = (addr) => addr >= 0x5000 && addr <= 0x5FFF;
+
+  // 鍵盤表示用スナップショット(KDA行)。★呼ぶたびに「前回からの書込み有無」と最大振幅を消費する
+  // (鍵盤の描画ループから1フレーム1回だけ呼ぶ前提)。D/A は最後に書いた値を保持し続けるので、
+  // 値そのものでは鳴り終わりが分からない。書込みが続いている間だけ active にする
+  Emu.snapshotMajutsushiDac = function (chip) {
+    const active = chip.writes !== chip._snapWrites;
+    chip._snapWrites = chip.writes;
+    const peak = chip.peak;
+    chip.peak = 0;
+    return { level: chip.value, vol: active ? Math.min(1, peak / 128) : 0, active };
+  };
+
+  Emu.MajutsushiDAC = MajutsushiDAC;
 })(globalThis);
 
 /*
@@ -4591,7 +4664,7 @@
       this.header = header;
       this.songData = songData;
       this.mem = new Uint8Array(0x10000);
-      this.chips = {}; // 'psg' | 'scc' | 'opll' | (将来)'opl'
+      this.chips = {}; // 'psg' | 'scc' | 'opll' | 'opl' | 'dac'(牌の魔術師 8bit D/A)
       this.onWrite = null; // (addr, value) => void
       this.onIoWrite = null; // (port, value) => void
 
@@ -4705,6 +4778,10 @@
       addr &= 0xFFFF;
       value &= 0xFF;
       if (this.onWrite) this.onWrite(addr, value);
+
+      // 牌の魔術師の 8bit D/A(ヘッダ device flag bit3-4=2 の時だけ登録される)。実機ではこの範囲は
+      // ROM なのでメモリには書かない(openMSX RomMajutsushi / NEZplug majutushimode と同じ)
+      if (this.chips.dac && addr >= 0x5000 && addr <= 0x5FFF) { this.chips.dac.write(value); return; }
 
       if (!this.sccDisable && this.chips.scc) this._sccWrite(addr, value);
 
@@ -4828,7 +4905,18 @@
         this.bus.registerChip('opl', this.opl);
       }
 
+      // 牌の魔術師の 8bit D/A(メモリ 0x5000-0x5FFF、ヘッダ device flag bit3-4=2)
+      this.dac = null;
+      if (this.header.device.mode === 'MSX' && this.header.device.majutsushiDac && Emu.MajutsushiDAC) {
+        this.dac = new Emu.MajutsushiDAC();
+        this.bus.registerChip('dac', this.dac);
+      }
+
       this.cpu = new Emu.CPUZ80(this.bus);
+      // MSX は M1 サイクル(命令フェッチ)ごとに 1 ウェイトが入る。libkss(vm.c VM_reset)も
+      // NEZplug(m_kss.c)も kmz80 の M1CYCLE=2(素の Z80 は 1)で再現している。PLAY が 1 フレームで
+      // 終わる普通の曲には効かないが、空ループで間隔を取る PCM(牌の魔術師の D/A)は速さが変わる。
+      if (this.header.device.mode === 'MSX') this.cpu.m1Wait = 1;
 
       // 音源チップは常にMSX標準の3.58MHzで駆動する。一方Z80は、FMPAC/MSX-AUDIO搭載曲では
       // libkss(getclk)と同じく倍速(7.16MHz)で回す。FM系ドライバは1フレームの処理が重く、
@@ -4856,6 +4944,7 @@
       this.scc.reset();
       if (this.opll) this.opll.reset();
       if (this.opl) this.opl.reset();
+      if (this.dac) this.dac.reset();
       this.cpu.a = songIndex & 0xFF;
       this.cpu.iff1 = false;
       this.cpu.iff2 = false;
@@ -4888,7 +4977,7 @@
       const samplesThisFrame = Math.round(sampleRate / this.frameRate);
       const out = regsOnly ? null : new Float32Array(samplesThisFrame);
 
-      const cpu = this.cpu, psg = this.psg, scc = this.scc, opll = this.opll, opl = this.opl;
+      const cpu = this.cpu, psg = this.psg, scc = this.scc, opll = this.opll, opl = this.opl, dac = this.dac;
 
       if (!cpu.callActive) {
         this._playFrameAccum += this.speedFactor;
@@ -4923,6 +5012,7 @@
           if (opll) sample += opll.mixSample();
           // 0.7 = VGM側の較正比(CHIP_GAIN.opl 1.4 / ym2413 1.99)をKSSの素通しミックスへ写す
           if (opl) sample += opl.mixSample() * 0.7;
+          if (dac) sample += dac.mixSample();
           out[i] = sample;
         }
       }
@@ -4960,6 +5050,7 @@
       if (opt.mute.scc) Emu.applyMute(player.scc.mute, opt.mute.scc);
       if (opt.mute.opll && player.opll) Emu.applyMute(player.opll.mute, opt.mute.opll);
       if (opt.mute.opl && player.opl) Emu.applyMute(player.opl.mute, opt.mute.opl);
+      if (opt.mute.dac && player.dac) Emu.applyMute(player.dac.mute, opt.mute.dac); // 牌の魔術師 D/A(KDA行)
     }
     const sampleRate = opt.sampleRate || 44100;
     const regsOnly = !!opt.regsOnly;
@@ -8827,7 +8918,45 @@
       if (oplResult.adpcm) tracks.push({ id: 'OLB', color: '#cc66ff', notes: toNotes(oplResult.adpcm, true) });
     }
 
+    // 牌の魔術師の 8bit D/A(KDA行)。鍵盤の KDA 行(keyboard.js、D#2 固定のサンプル行)と同じ鍵に置く
+    if (header && header.device && header.device.mode === 'MSX' && header.device.majutsushiDac) {
+      tracks.push({ id: 'KDA', color: '#ff66aa', notes: toNotes(RollBuild.kssDacEvents(writeLog, totalFrames), false) });
+    }
+
     return tracks;
+  };
+
+  // 牌の魔術師の D/A 書込み(メモリ 0x5000-0x5FFF)を打点イベントにする。しゃべりは PLAY の中の
+  // 空ループで 1 フレームに数百回書かれるので、値が動いたフレームの連なり(間の空きは
+  // KDA_GAP フレームまで許す)を 1 音にする。音量はその間の最大振幅 |v-0x80| を 0-15 へ。
+  // D/A は最後の値を保持し続けるので「書いたか」ではなく「値が変わったか」で数える
+  // (無音レベルを書き続けるだけの区間を音にしない)。音程は持たないので疑似音程 index 15
+  // (=MIDI 39 = D#2、鍵盤のサンプル行 dmcRateIdx 15 と同じ鍵)
+  const KDA_GAP = 2;
+  RollBuild.kssDacEvents = function (writeLog, totalFrames) {
+    const events = [];
+    let cur = null, prev = -1, last = -1;
+    const n = Math.min(totalFrames, writeLog.length);
+    for (let f = 0; f < n; f++) {
+      const w = writeLog[f];
+      let peak = -1;
+      if (w) {
+        for (const pw of w) {
+          if ((pw >> 24) & 1) continue;
+          const addr = pw & 0xFFFF;
+          if (addr < 0x5000 || addr > 0x5FFF) continue;
+          const v = (pw >> 16) & 0xFF;
+          if (v !== prev) peak = Math.max(peak, Math.abs(v - 0x80));
+          prev = v;
+        }
+      }
+      if (peak < 0) continue;
+      const vol = Math.min(15, Math.round(peak / 128 * 15));
+      if (cur && f - last <= KDA_GAP + 1) { cur.end = f + 1; if (vol > cur.volume) cur.volume = vol; }
+      else { cur = { note: 15, noiseRollIndex: 15, volume: vol, start: f, end: f + 1, retrigger: true }; events.push(cur); }
+      last = f;
+    }
+    return events;
   };
 
   // ── GBS ──────────────────────────────────────────────────────────────

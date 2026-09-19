@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 19:48:10
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 21:29:27
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-19 19:48:10';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-19 21:29:27';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -5717,7 +5717,45 @@
       if (oplResult.adpcm) tracks.push({ id: 'OLB', color: '#cc66ff', notes: toNotes(oplResult.adpcm, true) });
     }
 
+    // 牌の魔術師の 8bit D/A(KDA行)。鍵盤の KDA 行(keyboard.js、D#2 固定のサンプル行)と同じ鍵に置く
+    if (header && header.device && header.device.mode === 'MSX' && header.device.majutsushiDac) {
+      tracks.push({ id: 'KDA', color: '#ff66aa', notes: toNotes(RollBuild.kssDacEvents(writeLog, totalFrames), false) });
+    }
+
     return tracks;
+  };
+
+  // 牌の魔術師の D/A 書込み(メモリ 0x5000-0x5FFF)を打点イベントにする。しゃべりは PLAY の中の
+  // 空ループで 1 フレームに数百回書かれるので、値が動いたフレームの連なり(間の空きは
+  // KDA_GAP フレームまで許す)を 1 音にする。音量はその間の最大振幅 |v-0x80| を 0-15 へ。
+  // D/A は最後の値を保持し続けるので「書いたか」ではなく「値が変わったか」で数える
+  // (無音レベルを書き続けるだけの区間を音にしない)。音程は持たないので疑似音程 index 15
+  // (=MIDI 39 = D#2、鍵盤のサンプル行 dmcRateIdx 15 と同じ鍵)
+  const KDA_GAP = 2;
+  RollBuild.kssDacEvents = function (writeLog, totalFrames) {
+    const events = [];
+    let cur = null, prev = -1, last = -1;
+    const n = Math.min(totalFrames, writeLog.length);
+    for (let f = 0; f < n; f++) {
+      const w = writeLog[f];
+      let peak = -1;
+      if (w) {
+        for (const pw of w) {
+          if ((pw >> 24) & 1) continue;
+          const addr = pw & 0xFFFF;
+          if (addr < 0x5000 || addr > 0x5FFF) continue;
+          const v = (pw >> 16) & 0xFF;
+          if (v !== prev) peak = Math.max(peak, Math.abs(v - 0x80));
+          prev = v;
+        }
+      }
+      if (peak < 0) continue;
+      const vol = Math.min(15, Math.round(peak / 128 * 15));
+      if (cur && f - last <= KDA_GAP + 1) { cur.end = f + 1; if (vol > cur.volume) cur.volume = vol; }
+      else { cur = { note: 15, noiseRollIndex: 15, volume: vol, start: f, end: f + 1, retrigger: true }; events.push(cur); }
+      last = f;
+    }
+    return events;
   };
 
   // ── GBS ──────────────────────────────────────────────────────────────

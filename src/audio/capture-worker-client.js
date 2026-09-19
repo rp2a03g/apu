@@ -393,7 +393,7 @@
     if (!opt.regsOnly) return Emu.captureKssSongAsync(kssBytes, opt, onProgress);
     return _runMultiCapture('kss', 'kssCapture',
       () => [MML.KSS && MML.KSS.parseHeader, Emu.CPUZ80, Emu.KssBus, Emu.KssPlayer,
-             Emu.AY8910Audio, Emu.SCCAudio, Emu.OPLLAudio, Emu.OPLLNuked, Emu.OPLAudio, Emu.captureKssSongAsync,
+             Emu.AY8910Audio, Emu.SCCAudio, Emu.MajutsushiDAC, Emu.OPLLAudio, Emu.OPLLNuked, Emu.OPLAudio, Emu.captureKssSongAsync,
              Emu.kssPackWrite, // writeLogの詰め方(capture.js)。無いバンドルは実行時に落ちる
              MML.RollBuild && MML.RollBuild.kss,
              MML.Kss2MmlExpansion && MML.Kss2MmlExpansion.ay,

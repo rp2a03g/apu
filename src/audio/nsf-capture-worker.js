@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 19:48:10
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 21:29:27
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-19 19:48:10';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-19 21:29:27';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -5344,6 +5344,8 @@
     const rb = id.match(/^RB(\d)$/);
     if (rb) return { section: 'expansion', chip: 'rf5c68', type: 'array', index: +rb[1] - 1 };
     if (KF_RHYTHM_INDEX[id] !== undefined) return { section: 'expansion', chip: 'opll', type: 'array', index: KF_RHYTHM_INDEX[id] };
+    // KSS: 牌の魔術師の 8bit D/A(src/emulator/expansion/majutsushiDac.js、chip.mute[0])
+    if (id === 'KDA') return { section: 'expansion', chip: 'dac', type: 'array', index: 0 };
     return null;
   }
 
@@ -5364,6 +5366,8 @@
     { header: 'MMC5 (Memory Management Controller 5)', ids: { M5P1: 'P1', M5P2: 'P2', M5PC: 'PCM' } },
     { header: 'YM2149 (Software controlled Sound Generator)', ids: { KP1: 'P1', KP2: 'P2', KP3: 'P3', KP4: 'P1(2)', KP5: 'P2(2)', KP6: 'P3(2)' } },
     { header: 'SCC (Sound Creative Chip)', prefix: 'KS', name: (id) => 'W' + id.slice(2) },
+    // KDA: 牌の魔術師カートリッジ内蔵の 8bit D/A(メモリ 0x5000-0x5FFF、KSS device flag bit3-4=2)
+    { header: '8bit D/A (Konami Hai no Majutsushi)', ids: { KDA: 'DAC' } },
     { header: 'YM2413 (MSX-MUSIC , OPLL)', ids: { KFBD: 'BD', KFSD: 'SD', KFTOM: 'Tom', KFCYM: 'Cym', KFHH: 'HH' }, prefix: 'KF', name: (id) => 'FM' + id.slice(2) },
     { header: 'LR35902 (Game Boy)', ids: { GALL: 'ALL', GB1: 'P1', GB2: 'P2', GN: 'No', GW: 'Wave' } },
     { header: 'HuC6280(PC Engine / TurboGrafx-16)', ids: { HALL: 'ALL', PSG0: 'Ch0', PSG1: 'Ch1', PSG2: 'Ch2', PSG3: 'Ch3', PSG4: 'Ch4', PSG5: 'Ch5' } },
@@ -6302,6 +6306,16 @@
           channels.push(row);
         }
       }
+    }
+
+    if (chips.includes('kssDac')) {
+      // 牌の魔術師の 8bit D/A。YMDA(メガドライブの DAC)と同じ「サンプル」行: 音程を持たないので
+      // D#2(dmcRateIdx 15)の鍵に置く。ロールの KDA トラックも同じ鍵(roll-builders.js RollBuild.kss)。
+      // active は「書込みが続いているか」(D/A は最後の値を保持し続けるので値では判定できない)
+      const live = extraSnaps && extraSnaps.kssDacLive;
+      const d = (live ? live() : null) || { level: 0x80, vol: 0, active: false };
+      channels.push({ id: 'KDA', color: '#ff66aa', freq: 0, vol: d.vol, rawVol: d.level, rawVolMax: 255,
+        wave: { t: 'sample' }, active: !!d.active, sample: true, dmcReg: d.level, dmcRateIdx: 15, dmcFreq: 0 });
     }
 
     if (chips.includes('sn76489')) {
@@ -9762,6 +9776,7 @@
       this._extraSnaps.kssPsgLive = typeof result.getKssPsg === 'function' ? result.getKssPsg : null;
       this._extraSnaps.kssSccLive = typeof result.getKssScc === 'function' ? result.getKssScc : null;
       this._extraSnaps.kssOpllLive = typeof result.getKssOpll === 'function' ? result.getKssOpll : null;
+      this._extraSnaps.kssDacLive = typeof result.getKssDac === 'function' ? result.getKssDac : null;
       this._extraSnaps.gbsApuLive = typeof result.getGbsApu === 'function' ? result.getGbsApu : null;
       this._extraSnaps.hesApuLive = typeof result.getHesApu === 'function' ? result.getHesApu : null;
       this._extraSnaps.snLive = typeof result.getSn76489 === 'function' ? result.getSn76489 : null;
@@ -13001,7 +13016,45 @@
       if (oplResult.adpcm) tracks.push({ id: 'OLB', color: '#cc66ff', notes: toNotes(oplResult.adpcm, true) });
     }
 
+    // 牌の魔術師の 8bit D/A(KDA行)。鍵盤の KDA 行(keyboard.js、D#2 固定のサンプル行)と同じ鍵に置く
+    if (header && header.device && header.device.mode === 'MSX' && header.device.majutsushiDac) {
+      tracks.push({ id: 'KDA', color: '#ff66aa', notes: toNotes(RollBuild.kssDacEvents(writeLog, totalFrames), false) });
+    }
+
     return tracks;
+  };
+
+  // 牌の魔術師の D/A 書込み(メモリ 0x5000-0x5FFF)を打点イベントにする。しゃべりは PLAY の中の
+  // 空ループで 1 フレームに数百回書かれるので、値が動いたフレームの連なり(間の空きは
+  // KDA_GAP フレームまで許す)を 1 音にする。音量はその間の最大振幅 |v-0x80| を 0-15 へ。
+  // D/A は最後の値を保持し続けるので「書いたか」ではなく「値が変わったか」で数える
+  // (無音レベルを書き続けるだけの区間を音にしない)。音程は持たないので疑似音程 index 15
+  // (=MIDI 39 = D#2、鍵盤のサンプル行 dmcRateIdx 15 と同じ鍵)
+  const KDA_GAP = 2;
+  RollBuild.kssDacEvents = function (writeLog, totalFrames) {
+    const events = [];
+    let cur = null, prev = -1, last = -1;
+    const n = Math.min(totalFrames, writeLog.length);
+    for (let f = 0; f < n; f++) {
+      const w = writeLog[f];
+      let peak = -1;
+      if (w) {
+        for (const pw of w) {
+          if ((pw >> 24) & 1) continue;
+          const addr = pw & 0xFFFF;
+          if (addr < 0x5000 || addr > 0x5FFF) continue;
+          const v = (pw >> 16) & 0xFF;
+          if (v !== prev) peak = Math.max(peak, Math.abs(v - 0x80));
+          prev = v;
+        }
+      }
+      if (peak < 0) continue;
+      const vol = Math.min(15, Math.round(peak / 128 * 15));
+      if (cur && f - last <= KDA_GAP + 1) { cur.end = f + 1; if (vol > cur.volume) cur.volume = vol; }
+      else { cur = { note: 15, noiseRollIndex: 15, volume: vol, start: f, end: f + 1, retrigger: true }; events.push(cur); }
+      last = f;
+    }
+    return events;
   };
 
   // ── GBS ──────────────────────────────────────────────────────────────

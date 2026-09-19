@@ -130,6 +130,7 @@
       if (exp.scc) MML.Emu.applyMute(this.player.scc.mute, exp.scc);
       if (exp.opll && this.player.opll) MML.Emu.applyMute(this.player.opll.mute, exp.opll);
       if (exp.opl && this.player.opl) MML.Emu.applyMute(this.player.opl.mute, exp.opl);
+      if (exp.dac && this.player.dac) MML.Emu.applyMute(this.player.dac.mute, exp.dac); // 牌の魔術師 D/A(KDA行)
     }
 
     getPosition() {
@@ -184,6 +185,9 @@
       this.scc              = null;
       this.opll             = null;
       this.opl              = null; // MSX-AUDIO(Y8950)
+      this.dac              = null; // 牌の魔術師 8bit D/A(src/emulator/expansion/majutsushiDac.js)
+      this._dacVals         = null; // 現在フレームの D/A 書込み値(書込み順)。_fill がフレーム内へ並べ直す
+      this._dacT0 = 0; this._dacT1 = 1;
       this._headerOpt       = null; // busOpt相当(header/songData)
       this.writeLog         = null; // captureKssSongAsyncが進行中に育てる配列への参照
       this.totalFrames      = 0;
@@ -253,6 +257,8 @@
       } else {
         this.opl = null;
       }
+      this.dac = MML.Audio.kssMakeDac(header, this.bus);
+      this._dacVals = null;
       if (this._lastMute) this.applyMute(this._lastMute);
       if (this._lastVolume) this.applyVolume(this._lastVolume);
     }
@@ -283,18 +289,42 @@
     }
 
     // 書込みは1整数へ詰めてある(src/emulator/kssPlayer.js packWrite): addr=bit0-15 / value=bit16-23 / io=bit24
-    _applyWrites(writes) {
+    _applyWrites(writes, dacSink) {
       if (!writes) return;
       for (const pw of writes) {
         const addr = pw & 0xFFFF, value = (pw >> 16) & 0xFF;
         if ((pw >> 24) & 1) this.bus.ioWrite(addr, value);
+        else if (dacSink && addr >= 0x5000 && addr <= 0x5FFF) dacSink.push(pw);
         else this.bus.write(addr, value);
       }
     }
 
+    // 牌の魔術師の D/A は PLAY 中の空ループで 1 フレームに数百回書かれる(約 15〜19kHz)。
+    // フレーム頭でまとめて当てると最後の 1 値しか残らないので、書込みを溜めておき、
+    // 最初と最後の書込み時刻(writeLog の frac、1/64 フレーム刻み)の間へ等間隔に並べ直して
+    // サンプルごとに当てる(hes-stream-player.js の DDA と同じ考え方。書込み間隔は空ループで
+    // 一定なので等間隔で十分。frac で範囲を絞るのは、しゃべり始め/終わりのフレームを間延びさせないため)
     _applyFrame(f) {
       this.currentFrame = f;
-      this._applyWrites(this.writeLog[f]);
+      const dac = this.dac;
+      if (!dac) { this._applyWrites(this.writeLog[f]); return; }
+      if (this._dacVals) dac.write(this._dacVals[this._dacVals.length - 1]); // 前フレームの最終値を確定
+      const sink = [];
+      this._applyWrites(this.writeLog[f], sink);
+      if (sink.length === 0) { this._dacVals = null; return; }
+      const unpack = MML.Emu.kssUnpackFrac;
+      this._dacVals = sink.map((pw) => (pw >> 16) & 0xFF);
+      this._dacT0 = unpack(sink[0]);
+      this._dacT1 = Math.min(1, unpack(sink[sink.length - 1]) + 1 / 64);
+      if (this._dacT1 <= this._dacT0) this._dacT1 = Math.min(1, this._dacT0 + 1 / 64);
+    }
+
+    _dacStep(frac) {
+      const vals = this._dacVals;
+      if (frac < this._dacT0) return;
+      let idx = Math.floor((frac - this._dacT0) / (this._dacT1 - this._dacT0) * vals.length);
+      if (idx >= vals.length) idx = vals.length - 1;
+      this.dac.write(vals[idx]);
     }
 
     // ===== 無音自動送り: 先読みスキャン(NsfReplayStreamPlayerと同じ設計) =====
@@ -320,6 +350,7 @@
       } else {
         this._scanOpl = null;
       }
+      this._scanDac = MML.Audio.kssMakeDac(header, this._scanBus);
       // ★ミュート/ch別音量はスキャンへ反映しない。これらは「聴き方」の設定であって曲の
       // 内容ではないため、全chミュートすると曲が終わったと誤判定して次の曲へ飛んでしまう
       // (ユーザー報告。以前は「実再生と無音判定基準を揃える」ため反映していた)。
@@ -329,6 +360,7 @@
         if (exp.scc) MML.Emu.applyVolume(this._scanScc.vol, exp.scc);
         if (exp.opll && this._scanOpll) MML.Emu.applyVolume(this._scanOpll.vol, exp.opll);
         if (exp.opl && this._scanOpl) MML.Emu.applyVolume(this._scanOpl.vol, exp.opl);
+        if (exp.dac && this._scanDac) MML.Emu.applyVolume(this._scanDac.vol, exp.dac);
       }
     }
 
@@ -388,6 +420,7 @@
         let raw = this._scanPsg.mixSample() + this._scanScc.mixSample();
         if (this._scanOpll) raw += this._scanOpll.mixSample();
         if (this._scanOpl) raw += this._scanOpl.mixSample() * 0.7;
+        if (this._scanDac) raw += this._scanDac.mixSample();
         const y = raw - this._scanDcPrevX + 0.999 * this._scanDcPrevY;
         this._scanDcPrevX = raw; this._scanDcPrevY = y;
 
@@ -425,6 +458,7 @@
         this._songFramePos = nextSongFramePos;
         const pv = this.preview && this.preview.enabled ? this.preview : null; // 割当プレビュー(src/audio/assign-preview.js)
         if (f !== this.currentFrame) { this._applyFrame(f); if (pv) pv.onFrame(f); }
+        if (this._dacVals) this._dacStep(this._songFramePos - f);
 
         this.cycleAccum += this.clockHz / sr;
         while (this.cycleAccum >= 1) {
@@ -437,6 +471,7 @@
         let raw = this.psg.mixSample() + this.scc.mixSample();
         if (this.opll) raw += this.opll.mixSample();
         if (this.opl) raw += this.opl.mixSample() * 0.7; // 0.7=VGM較正比(opl 1.4/ym2413 1.99)
+        if (this.dac) raw += this.dac.mixSample();
         const y = raw - this.dcPrevX + 0.999 * this.dcPrevY;
         this.dcPrevX = raw; this.dcPrevY = y;
         out[i] = pv ? y + pv.render() : y;
@@ -481,7 +516,7 @@
         songFramePos = targetFrame;
         samplePos = (songFramePos / this.frameRate / this.speedFactor) * sr;
       }
-      this._buildChips();
+      this._buildChips(); // _dacVals もここで空になる(シーク先フレームの D/A は最終値のまま)
       this.cycleAccum = 0;
       for (let f = 0; f <= targetFrame; f++) {
         const writes = wl[f];
@@ -506,6 +541,7 @@
       if (exp.scc) MML.Emu.applyMute(this.scc.mute, exp.scc);
       if (exp.opll && this.opll) MML.Emu.applyMute(this.opll.mute, exp.opll);
       if (exp.opl && this.opl) MML.Emu.applyMute(this.opl.mute, exp.opl);
+      if (exp.dac && this.dac) MML.Emu.applyMute(this.dac.mute, exp.dac); // 牌の魔術師 D/A(KDA行)
       // 再生中のミュート切替は無音判定の基準に影響するため先読みスキャンをやり直す
       if (this._headerOpt) this._resetScan(Math.max(0, this.currentFrame));
     }
@@ -520,6 +556,7 @@
       if (exp.scc) MML.Emu.applyVolume(this.scc.vol, exp.scc);
       if (exp.opll && this.opll) MML.Emu.applyVolume(this.opll.vol, exp.opll);
       if (exp.opl && this.opl) MML.Emu.applyVolume(this.opl.vol, exp.opl);
+      if (exp.dac && this.dac) MML.Emu.applyVolume(this.dac.vol, exp.dac);
       if (this._headerOpt) this._resetScan(Math.max(0, this.currentFrame));
     }
 
@@ -550,13 +587,24 @@
       this.psg      = null;
       this.scc      = null;
       this.opll     = null;
+      this.dac      = null;
+      this._dacVals = null;
       this._scanBus  = null;
+      this._scanDac  = null;
       this._scanPsg  = null;
       this._scanScc  = null;
       this._scanOpll = null;
       this.writeLog = null;
     }
   }
+
+  // ヘッダが牌の魔術師の D/A を宣言していれば作ってバスへ登録する(kssPlayer.js と同じ条件)
+  MML.Audio.kssMakeDac = function (header, bus) {
+    if (header.device.mode !== 'MSX' || !header.device.majutsushiDac || !MML.Emu.MajutsushiDAC) return null;
+    const dac = new MML.Emu.MajutsushiDAC();
+    bus.registerChip('dac', dac);
+    return dac;
+  };
 
   MML.Audio.KssStreamPlayer = KssStreamPlayer;
   MML.Audio.KssReplayStreamPlayer = KssReplayStreamPlayer;

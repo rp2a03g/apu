@@ -584,8 +584,11 @@ src/convert/pitch.js (新設・音源非依存・DOM禁止=INV-4のコア層)
   (README.md方言対応表・INV-2に明記済み)。
   **6502ドライバ実装で使ったopcode 0xF9は実機ppmckでは生ハードウェアスイープ書込み用の
   予約値だが、本ツールのsweepはソフトウェア近似でバイトコード化されておらず実質未使用
-  のため転用した**(mckBytecode.js冒頭コメントに明記)。CEILDIV(warizan相当の除算
-  ルーチン)はMPと共有(どちらか一方でも使われていれば1回だけ埋め込む)。
+  のため転用した**(mckBytecode.js冒頭コメントに明記)。当初はCEILDIV(warizan相当の除算
+  ルーチン)をMPと共有して6502側で1ステップの増減量/間隔を求めていたが、|target|>255 や
+  target=0 で除数0の無限ループになりドライバごと止まったため(2026-09-19、KSS→MMLの PT-512,4)、
+  0xF9のパラメータを[増減量(符号付き16bit),間隔,duration,delay]の5バイトに変え、
+  compiler.js の portamentoStepParams で前計算した値を置くようにした(6502側は足すだけ)。
   **★実装中に発見・修正した2つのバグ(EP/MPにも波及する既存バグだったと判明)**:
   ①EPOF/MPOF/PTOF実行時にEPVALLO/MPVALLO/PTVALLO(累積オフセット)が0にリセットされて
   おらず、以降EP/MP/PTを指定しない音符が続くと直前の値がAPPLY_DETUNEへ漏れ続ける

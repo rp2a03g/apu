@@ -49,7 +49,18 @@
         this.bus.registerChip('opl', this.opl);
       }
 
+      // 牌の魔術師の 8bit D/A(メモリ 0x5000-0x5FFF、ヘッダ device flag bit3-4=2)
+      this.dac = null;
+      if (this.header.device.mode === 'MSX' && this.header.device.majutsushiDac && Emu.MajutsushiDAC) {
+        this.dac = new Emu.MajutsushiDAC();
+        this.bus.registerChip('dac', this.dac);
+      }
+
       this.cpu = new Emu.CPUZ80(this.bus);
+      // MSX は M1 サイクル(命令フェッチ)ごとに 1 ウェイトが入る。libkss(vm.c VM_reset)も
+      // NEZplug(m_kss.c)も kmz80 の M1CYCLE=2(素の Z80 は 1)で再現している。PLAY が 1 フレームで
+      // 終わる普通の曲には効かないが、空ループで間隔を取る PCM(牌の魔術師の D/A)は速さが変わる。
+      if (this.header.device.mode === 'MSX') this.cpu.m1Wait = 1;
 
       // 音源チップは常にMSX標準の3.58MHzで駆動する。一方Z80は、FMPAC/MSX-AUDIO搭載曲では
       // libkss(getclk)と同じく倍速(7.16MHz)で回す。FM系ドライバは1フレームの処理が重く、
@@ -77,6 +88,7 @@
       this.scc.reset();
       if (this.opll) this.opll.reset();
       if (this.opl) this.opl.reset();
+      if (this.dac) this.dac.reset();
       this.cpu.a = songIndex & 0xFF;
       this.cpu.iff1 = false;
       this.cpu.iff2 = false;
@@ -109,7 +121,7 @@
       const samplesThisFrame = Math.round(sampleRate / this.frameRate);
       const out = regsOnly ? null : new Float32Array(samplesThisFrame);
 
-      const cpu = this.cpu, psg = this.psg, scc = this.scc, opll = this.opll, opl = this.opl;
+      const cpu = this.cpu, psg = this.psg, scc = this.scc, opll = this.opll, opl = this.opl, dac = this.dac;
 
       if (!cpu.callActive) {
         this._playFrameAccum += this.speedFactor;
@@ -144,6 +156,7 @@
           if (opll) sample += opll.mixSample();
           // 0.7 = VGM側の較正比(CHIP_GAIN.opl 1.4 / ym2413 1.99)をKSSの素通しミックスへ写す
           if (opl) sample += opl.mixSample() * 0.7;
+          if (dac) sample += dac.mixSample();
           out[i] = sample;
         }
       }
@@ -181,6 +194,7 @@
       if (opt.mute.scc) Emu.applyMute(player.scc.mute, opt.mute.scc);
       if (opt.mute.opll && player.opll) Emu.applyMute(player.opll.mute, opt.mute.opll);
       if (opt.mute.opl && player.opl) Emu.applyMute(player.opl.mute, opt.mute.opl);
+      if (opt.mute.dac && player.dac) Emu.applyMute(player.dac.mute, opt.mute.dac); // 牌の魔術師 D/A(KDA行)
     }
     const sampleRate = opt.sampleRate || 44100;
     const regsOnly = !!opt.regsOnly;
