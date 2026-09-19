@@ -166,7 +166,7 @@
       MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractToneEvents(timeline, index))));
 
     // パス1.5(2026-08-14): チャンネル横断の周期ヒント収集。FME7も専用アタックレジスタが
-    // 無く(N163と同じ穴、[[n163-retrigger-vs-tremolo]]参照)、疑似アタックのための一瞬の
+    // 無く(N163と同じ穴)、疑似アタックのための一瞬の
     // ピッチ変化でラン分割が千切れることがある。ハードウェアエンベロープ使用中(envUsed)は
     // チップが直接減衰を生成するため対象外(ソフトウェア音量エンベロープのみが対象)。
     const loopWitnesses = [];

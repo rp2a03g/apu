@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-20 06:42:23
+ * Built by tools/build-capture-workers.ps1 at 2026-09-20 08:07:17
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-20 06:42:23';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-20 08:07:17';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -19,7 +19,7 @@
  * CPUエミュレーションは不要で、ヘッダのチップクロック表(非ゼロ=使用中)と
  * コマンドストリームだけで再生できる。仕様: https://vgmrips.net/wiki/VGM_Specification
  *
- * ★実ファイル(emu sound/vgm)で確認済みの罠(ROADMAP.md VGM節):
+ * ★実ファイル(emu sound/vgm)で確認済みの罠(作業計画 VGM節):
  *  - v1.50未満は 0x34(データ開始オフセット)が0 → 0x40固定。
  *  - v1.10未満は 0x28/0x2A(SN76489ノイズfeedback/シフト幅)が0 → Sega既定(0x0009/16)。
  *  - NES APUクロック(0x84)のbit31=FDS併用。全チップ共通でbit30=デュアルチップ。
@@ -34,7 +34,7 @@
 
   // チップクロックのヘッダオフセット表。id はエミュレータ配線(vgmPlayer.js)・
   // 鍵盤表示のキーとして使う。impl は現時点で実装済み(再生できる)かどうか。
-  // 未実装チップはコマンドを読み飛ばすだけ(ROADMAP: 全チップ実装は不要)。
+  // 未実装チップはコマンドを読み飛ばすだけ(作業計画: 全チップ実装は不要)。
   VGM.CHIPS = [
     { id: 'sn76489',  name: 'SN76489',    offset: 0x0C, minVer: 0x100, impl: true },
     { id: 'ym2413',   name: 'YM2413',     offset: 0x10, minVer: 0x100, impl: true },
@@ -657,7 +657,7 @@
  * RP2A03 内蔵音源（APU）エミュレータ
  * MML.Emu.APU2A03
  *
- * パルス波x2, 三角波, ノイズ, DPCM(DMC) の4チャンネルを実装。
+ * パルス波x2, 三角波, ノイズ, DPCM(DMC) の5チャンネルを実装。
  * clock() を1 CPUサイクルごとに呼び出し、mixSample() で現在の合成出力(0.0〜1.0)を取得する。
  * レジスタ $4000-$4017 への書き込みは writeRegister() で受け付ける。
  */
@@ -1707,7 +1707,7 @@
       // 常に無評価)。ここでも重ねてlengthCounterを見ると、GbsReplayStreamPlayerのように
       // trigger()/clockLength()のライフサイクルを経由せずenabledだけをスナップショットから
       // 直接書き戻す再生経路で、初期値0のままのlengthCounterに引っかかり常時無音化する
-      // バグになっていた(ユーザー報告: パルス/ノイズが鳴らずwaveのみ鳴る)。
+      // バグになっていた(不具合報告: パルス/ノイズが鳴らずwaveのみ鳴る)。
       if (!this.enabled) return 0;
       if (DUTY_TABLE[this.duty][this.dutyStep] === 0) return 0;
       return this.envelope.volume;
@@ -1854,7 +1854,7 @@
       // 常に無評価)。ここでも重ねてlengthCounterを見ると、GbsReplayStreamPlayerのように
       // trigger()/clockLength()のライフサイクルを経由せずenabledだけをスナップショットから
       // 直接書き戻す再生経路で、初期値0のままのlengthCounterに引っかかり常時無音化する
-      // バグになっていた(ユーザー報告: パルス/ノイズが鳴らずwaveのみ鳴る)。
+      // バグになっていた(不具合報告: パルス/ノイズが鳴らずwaveのみ鳴る)。
       if (!this.enabled) return 0;
       return (this.lfsr & 1) === 0 ? this.envelope.volume : 0; // LFSR bit0=0で"高い"(実機の反転規約)
     }
@@ -2681,7 +2681,7 @@
      *   音符を書き換える頻度(テンポ)だけが変わり、実際に鳴っている音の周波数(音程)は
      *   変化しない。当初はCPU/PSG共通の1つのアキュムレータにspeedFactorを掛けていたため、
      *   速度を落とすとPSGの発振自体も遅くなり音程が下がってしまっていた
-     *   (ユーザー報告で発覚。GBS/NSF/KSSはPLAY呼び出し頻度だけをspeedFactorで変える設計
+     *   (実曲で発覚。GBS/NSF/KSSはPLAY呼び出し頻度だけをspeedFactorで変える設計
      *   のため元々この問題が無かった。HESはPLAYを明示的に呼ばずCPU/バスを連続実行する
      *   設計のため、CPU用とAPU用でアキュムレータを分離する必要があった)。
      * @param {number} sampleRate
@@ -2807,7 +2807,7 @@
    * CPUの通常実行だけで1フレームあたり数千件(ゼロページ/スタック書込み込み)、
    * DDA(PCM)を多用する曲では1フレームあたり数千〜1万件規模に達し、180秒の曲では
    * 総レコード数が2000万件を超えて未使用のまま保持され続け、V8のGCが著しく劣化して
-   * 「変換が事実上終わらない」不具合になっていた(ユーザー報告で発覚。フレームが進むに
+   * 「変換が事実上終わらない」不具合になっていた(実曲で発覚。フレームが進むに
    * つれ1フレームの処理時間が実測10ms→100ms超まで悪化する挙動から特定)。使われない
    * データを丸ごと削除することで直接解消する。
    * @param {Uint8Array} hesBytes
@@ -3450,7 +3450,7 @@
  *   VRC7 (NSF)      : ホスト=NES CPU 1.789773MHz = マスタ/2 → 2ホストサイクルで1内部サイクル
  *   FMPAC/VGM       : ホスト=3.579545MHz = マスタそのもの   → 4ホストサイクルで1内部サイクル
  * どちらも 18内部サイクル = 1サンプル で 49716Hz になる(36 / 72 ホストサイクル)。
- * ★この非対称は [[opll-fmpac-clock-divider-octave-bug]] と同じ理由。取り違えると1オクターブずれる。
+ * ★この非対称はFM-PACのクロック分周と同じ理由。取り違えると1オクターブずれる。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -4260,7 +4260,7 @@
         }
         // 実チップの時分割DACは無音時も基準レベル(OPLL_Channelのsign)を出し続けるため
         // 出力にDC成分が乗る。実機ではAC結合で落ちるぶんなので1次ハイパスで除去する。
-        // カットオフ約5Hz。[[hes-dda-gain-clipping-fix]]の教訓で立ち上がりのオーバー
+        // カットオフ約5Hz。HESのDDAで踏んだ教訓から、立ち上がりのオーバー
         // シュートを避けるため十分低く取っている。
         const x = this.sampleAccum;
         if (this.dcPrimed === 0) { this.dcX = x; this.dcPrimed = 1; } // 初回は段差を作らない
@@ -4406,7 +4406,7 @@
 
     /**
      * clock()を回さない経路(regsOnlyキャプチャ等)で溜まった書き込みを反映させる。
-     * [[capture-worker-plan]] のym2612Nuked.flushWrites()と同じ用途。
+     * ym2612Nuked.flushWrites() と同じ用途。
      */
     flushWrites() {
       let guard = 0;
@@ -4539,7 +4539,7 @@
   // 新コアの生の出力は「18サイクルぶんの時分割DAC出力の総和」。@1/@4/@8/@12/@15
   // を単音で鳴らしてRMSを旧コアと突き合わせ、平均比が1.0になるよう決めた(音色ごとの比は
   // 0.4〜1.2とばらつく。コアが違えばEG/出力段が違うので一致はしない)
-  // ([[emu-loudness-balance-and-master-volume]] のフォーマット間バランスを崩さないため)。
+  // (フォーマット間の音量バランスを崩さないため)。
   const OUTPUT_GAIN = 1 / 2000;
 
   // DC遮断フィルタ係数(1 - 2π*5Hz/49716)
@@ -4616,7 +4616,7 @@
   const CYCLES_PER_SAMPLE = 72; // ★2026-08-22: 36は誤り(1オクターブ高かった)。ファイル冒頭コメント参照
   const SAMPLE_RATE = 49716;
 
-  const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS; // emu2413本家に合わせて9→10bit化
+  const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS; // emu2413に合わせて9→10bit化
   const DP_BITS = 19, DP_WIDTH = 1 << DP_BITS, DP_BASE_BITS = DP_BITS - PG_BITS;
   const DB_STEP = 0.375, DB_BITS = 7, DB_MUTE = 1 << DB_BITS;
   const EG_STEP = 0.375, EG_BITS = 7;
@@ -4634,8 +4634,8 @@
   const SETTLE = 0, ATTACK = 1, DECAY = 2, SUSHOLD = 3, SUSTINE = 4, RELEASE = 5, FINISH = 6;
 
   // 音色ROM(YM2413本来の内蔵15音色)。
-  // ★2026-08-22: emu2413本家(2413tone.h)の値から、nukeykt/Nuked-OPLL の patch_ym2413 へ
-  // 差し替え。emu2413のROM値は本家Wikiが "Estimated ROM Instruments" と明記している通り
+  // ★2026-08-22: emu2413(2413tone.h)の値から、nukeykt/Nuked-OPLL の patch_ym2413 へ
+  // 差し替え。emu2413のROM値は原典のWikiが "Estimated ROM Instruments" と明記している通り
   // YM2413B実機録音からの耳コピ推定だが、Nuked-OPLL のものは decap/die shot
   // (siliconpr0n: digshadow, John McMaster)から読み出したROM内容そのもの。
   // 同じ経緯で vrc7.js の VRC7(DS1001)側テーブルも patch_ds1001 へ差し替え済み。
@@ -4873,7 +4873,7 @@
     }
   }
 
-  // emu2413本家 calc_slot_car: modOut = 2*(fm>>1) (fmのLSBを切り捨てるだけで倍化はしない)
+  // emu2413 calc_slot_car: modOut = 2*(fm>>1) (fmのLSBを切り捨てるだけで倍化はしない)
   function modToCarPhase(fm) { return 2 * (fm >> 1); }
 
   // emu2413.c の _PD マクロ: リズム位相定数は10bit(PG_BITS=10)テーブル基準の値。
@@ -4903,7 +4903,7 @@
       const pgout = s.calcPhase(lfo_pm);
       if (egout >= DB_MUTE - 1) s.output[0] = 0;
       else if (s.patch.FB !== 0) {
-        // emu2413本家: fm = (output[1]+output[0]) >> (9-FB)。s.feedbackは(output[1]+output[0])>>1で
+        // emu2413: fm = (output[1]+output[0]) >> (9-FB)。s.feedbackは(output[1]+output[0])>>1で
         // 既に1bitシフト済みのため、ここでのシフト量は(9-FB)-1 = (8-FB)。
         const fm = (s.feedback) >> (8 - s.patch.FB);
         s.output[0] = DB2LIN[s.sintbl[(pgout + fm) & (PG_WIDTH - 1)] + egout];
@@ -4911,7 +4911,7 @@
         s.output[0] = DB2LIN[s.sintbl[pgout] + egout];
       }
       // s.feedbackは自己変調(次回calcModulator呼び出し時のfm計算)専用。キャリアへ渡すのは
-      // emu2413本家同様、平均化前の生のoutput[0]。
+      // emu2413同様、平均化前の生のoutput[0]。
       s.feedback = (s.output[1] + s.output[0]) >> 1;
       return s.output[0];
     }
@@ -11979,7 +11979,7 @@
       // ★音量バーは volApparent(表示専用)を使う。vol は**線形振幅**で、これは vgm2mml が
       //   attDb = -20log10(vol) で減衰dBに戻すための値なので意味を変えられない。ところが
       //   このチップのレジスタは**対数の減衰値**(0x40 = -36dB)で、実曲は 0x12-0x2A 付近しか
-      //   使わないため、振幅のままバーに出すと 7〜32% しか動かず読めない(ユーザー報告)。
+      //   使わないため、振幅のままバーに出すと 7〜32% しか動かず読めない(不具合報告)。
       //   他の対数レジスタのチップ(HES/AY/FME7/VRC7)はバーに**レジスタ位置**を出しており、
       //   ここも合わせる: 1 - reg/0x40(= 1 - 減衰dB/36)。
       const barPos = Math.max(0, Math.min(1, 1 - chip.regs[b + 3] / 0x40));
@@ -12036,7 +12036,7 @@
  *
  * ★PC Engine CD の曲は DACストリーム(0x90-0x95)ではなく 0x32 の直書きで流れてくるので、
  * okim6258.js の streamSample のような「サンプルの同定キー」は存在しない。
- * ドラムパッドの原音取り出し([[vgm-dac-drums-from-log]] の方式)はこの経路には使えず、
+ * ドラムパッドの原音取り出し(DACログからの同定)はこの経路には使えず、
  * 鍵盤表示/ロールでは「鳴っている1レーン」として出す。
  */
 (function (global) {
@@ -12274,8 +12274,7 @@
   // 鍵盤表示用スナップショット: 左右のPCMレベル(0-1)と生値。
   // withWave=true のときだけ直近128点の波形を積む(ライブ再生の鍵盤表示用)。
   // 先読みキャプチャ側では付けない: 毎フレーム128点×2chの新しい配列を保持すると
-  // 3分の曲で10MB超になり、得られる物(数ms前の眺め)に見合わない
-  // ([[capture-memory-footprint]])
+  // 3分の曲で10MB超になり、得られる物(数ms前の眺め)に見合わない。
   Emu.snapshotPWM32X = function (chip, withWave) {
     return {
       cycle: chip.cycle,
@@ -12453,7 +12452,7 @@
  *   K007232(コナミ・アーケードPCM)=expansion/k007232.js(コマンド0x41、ROMはデータブロック0x94)、
  *   MSM5205/6585(PC Engine CD ADPCM等)=expansion/msm5205.js(コマンド0x32、ROM無し)
  * ヘッダのクロックが非ゼロでも未実装のチップは、コマンド長規則で読み飛ばすだけ
- * (ROADMAP.md VGM節: 全チップ実装は不要)。ただし **vgmHeader.js の VGM.CHIPS には必ず載せる**
+ * (作業計画 VGM節: 全チップ実装は不要)。ただし **vgmHeader.js の VGM.CHIPS には必ず載せる**
  * — 表に無いチップは usedChips に入らず「未対応・読み飛ばし」の表示すら出ず、
  * 「音が欠けているのに理由が分からない」状態になる(K007232 で実際に起きた)。
  *
@@ -13487,7 +13486,7 @@
     _dacHitStart(chip, bankType, start) {
       // 打点が異常に増える曲(壊れたログ)で無制限に伸びないよう歯止めを置く。
       // ★shift()で古いのを捨てるとO(n)が毎回走って主スレッドが焼き付く
-      //   ([[write-queue-needs-unclocked-path-guard]]と同じ罠)。上限に当たったら記録を止める
+      //   (書き込みキューで踏んだのと同じ罠)。上限に当たったら記録を止める
       if (this.dacHits.length >= DAC_HITS_MAX) { this._dacCur = null; return; }
       if (this._dacCur) this.dacHits.push(this._dacCur);
       this._dacCur = { chip, bankType, start, bytes: 0, startSample: this.samplePos, endSample: this.samplePos };
@@ -14508,15 +14507,15 @@
   //                  'top' / 'bottom' = チャンネル一覧の上 / 下
   //                  'left' / 'right' = チャンネル一覧の左 / 右
   //                  下配置のとき大波形も一覧の下にある(=一覧が多段)なら、ファイル情報と
-  //                  大波形は同じ帯(.kbd-below)に左右で並ぶ(ユーザー指示 2026-09-10)
+  //                  大波形は同じ帯(.kbd-below)に左右で並ぶ(方針 2026-09-10)
   // 既定値は従来の見た目(縦・下・1列・まとめて)+ファイル情報は自動。localStorageに永続化する。
   const LAYOUT_STORAGE_KEY = 'mml_keyboardLayout_v1';
   // rollView:        'roll' = ピアノロール(鍵盤の音程軸に音符の棒)
   //                  'score' = 楽譜(音程軸を五線に置き換え、時間軸はロールと同じ実時間比例。MMLの
   //                            コンパイル結果から作る表記モデル(src/score/notation.js)を setScore() で
   //                            受け取ったときだけ有効で、実ファイル再生中はロールに戻る。
-  //                            ROADMAP「フェーズ外: 楽譜出力」段階3、2026-09-16)
-  // 既定(2026-09-19 ユーザー指示で変更): ロール横向き・右置き・一覧多段・1つの鍵盤・ピアノロール・ファイル情報自動。
+  //                            作業計画「フェーズ外: 楽譜出力」段階3、2026-09-16)
+  // 既定(2026-09-19 方針変更で変更): ロール横向き・右置き・一覧多段・1つの鍵盤・ピアノロール・ファイル情報自動。
   // 保存済みの設定がある人はそちらが優先(loadLayoutSettings)
   const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'horizontal', rollPlacement: 'right', listColumns: 'auto', rollLanes: 'all', fileInfoPlacement: 'auto', rollView: 'roll' });
   const LAYOUT_CHOICES = Object.freeze({
@@ -14926,7 +14925,7 @@
     { header: 'VRC6 (Virtual Rom Controller 6)', ids: { V6P1: 'P1', V6P2: 'P2', V6SW: 'Saw' } },
     { header: 'VRC7 (Virtual Rom Controller 7)', prefix: 'VR', name: (id) => 'FM' + id.slice(2) },
     { header: 'N163 (Namco 163)', prefix: 'N', name: (id) => 'W' + id.slice(1) },
-    { header: 'SUNSOFT5B (FME-7 , YM2149)', ids: { FE1: 'P1', FE2: 'P2', FE3: 'P3' } },
+    { header: 'SUNSOFT 5B (FME-7 / YM2149)', ids: { FE1: 'P1', FE2: 'P2', FE3: 'P3' } },
     { header: 'MMC5 (Memory Management Controller 5)', ids: { M5P1: 'P1', M5P2: 'P2', M5PC: 'PCM' } },
     { header: 'YM2149 (Software controlled Sound Generator)', ids: { KP1: 'P1', KP2: 'P2', KP3: 'P3', KP4: 'P1(2)', KP5: 'P2(2)', KP6: 'P3(2)' } },
     { header: 'SCC (Sound Creative Chip)', prefix: 'KS', name: (id) => 'W' + id.slice(2) },
@@ -14988,7 +14987,7 @@
   // src/mml/compiler.jsのassignExpansionLettersで機種に関わらず完全固定。
   // GB1/GB2/GNは2A03コア(自チップ、拡張音源宣言不要)を借用するのでA/B/Dに固定
   // (src/gbs2mml/converter.js参照。GBのCH1/CH2/CH4はそのままNESパルス1/2/ノイズへ乗る)。
-  // SN76489(VGM)のノイズchも2A03ノイズ(D)へ借用する(vgm2mml、ROADMAP VGM節 段階3)。
+  // SN76489(VGM)のノイズchも2A03ノイズ(D)へ借用する(vgm2mml、作業計画 VGM節 段階3)。
   const APU_PART_LETTER = { P1: 'A', P2: 'B', TR: 'C', NO: 'D', DM: 'E', GB1: 'A', GB2: 'B', GN: 'D', SNN: 'D' };
 
   // chips(内部chip名の配列)をassignExpansionLettersが受け取る拡張音源名に変換する。
@@ -15047,11 +15046,11 @@
   function headerPreviewBtnHtml() {
     return `<button type="button" class="kbd-preview-btn" aria-label="${T('割当先の音で聴く')}">\u{1F3A7}</button>`;
   }
-  // 試聴ボタンの右に出す、割当表示ONの間だけのモード表示(ユーザー指示 2026-09-12)。
+  // 試聴ボタンの右に出す、割当表示ONの間だけのモード表示(方針 2026-09-12)。
   // 置き場は借用先列(230px)の余白の中なので、列幅も行との縦揃えも変わらない
   function headerAssignModeHtml() {
     // 右横の「割り当てリセット」: ユーザーが既定から変えた割当を全部消す(ファイルごとの自動保存分も消える。
-    // src/convert/channelPlan.js clear。ユーザー指示 2026-09-18)
+    // src/convert/channelPlan.js clear。方針 2026-09-18)
     return `<span class="kbd-h-assign-mode">${T('ch別割り当て')}</span>` +
       `<button type="button" class="kbd-assign-reset-btn" title="${T('この曲の割り当てを全部既定に戻す(自動保存した分も消えます)')}">${T('リセット')}</button>`;
   }
@@ -15158,7 +15157,7 @@
   /**
    * スナップショットの表示規約フィールド → 行オブジェクト(2026-09-17)。
    * 個々の push に書き足すと必ずどれか漏れるので、panL/panR を渡す行は全部ここを通す
-   * ([[keyboard-live-getter-forwarding-list]] と同じ罠)。
+   * (ライブ値の転送リストと同じ罠)。
    *  c.panNone      パン機能なし → L/R は '—'
    *  c.volNone      音量値を持たない(L/Rでしか決まらない) → 音量列は '—'
    *  c.panReg       中央のあるパンレジスタ → L に生値、R に中央基準の位置(C/L3/R5)
@@ -16348,7 +16347,7 @@
       const s = live ? live() : (extraSnaps && extraSnaps.pwm ? extraSnaps.pwm[frameIdx] : null);
       // wave列は直近に流れたサンプル128点(pwm32x.js waveOf)。32X側で合成済みの
       // 1本のストリームなので音色は読み取れないが、鳴っているかは一目で分かる
-      // (ユーザー要望 2026-09-09)。先読みキャプチャ側には波形が無いので従来の破線
+      // (方針 2026-09-09)。先読みキャプチャ側には波形が無いので従来の破線
       for (const [id, key, color] of [['PWL', 'l', '#66ddff'], ['PWR', 'r', '#ff8866']]) {
         const c = s ? s[key] : { level: 0, vol: 0, active: false };
         const w = (c.waveData && c.waveData.length)
@@ -17440,7 +17439,7 @@
       this.onVolumeChange = null;       // () => void  ch別音量バー操作時(getVolumeConfig()参照)
       this.onAdpcmCalibrate = null;     // (ch) => void  YM2610 ADPCM行のnote列クリック(手動ピッチ補正。ch.adpcmSample={kind,start,end})
       // ドラム区画のパッドクリック試聴。(sampleKey, mode:'raw'|'dpcm') => void
-      // ★PCM→DMCは必ず劣化するので、レートを耳で決められることが必須(ユーザー指示)。
+      // ★PCM→DMCは必ず劣化するので、レートを耳で決められることが必須(方針)。
       //   パッドは1枚=1サンプルなので「複数chが同時に鳴っていて何を聴いているか分からない」
       //   問題が原理的に起きない。
       this.onDrumAudition = null;
@@ -17639,14 +17638,14 @@
         headerEl.insertBefore(speedBar, closeBtn || null);
         headerEl.insertBefore(masterVolBar, speedBar);
         // ★ヘッダ左端は「鍵盤表示」という文字ではなく[ファイルを開く][レイアウト][to MML]。
-        //   タイトル文字はウィンドウの見出しとして自明なので置かない(ユーザー指示)
+        //   タイトル文字はウィンドウの見出しとして自明なので置かない(方針)
         const titleEl = headerEl.querySelector('span');
         if (titleEl && !titleEl.classList.contains('kbd-src-badge')) {
           titleEl.textContent = '';
           titleEl.style.display = 'none';
           this._titleEl = titleEl;
         }
-        // 並びは [ファイルを開く][to MML][レイアウト](ユーザー指示で to MML と レイアウトを入れ替え)
+        // 並びは [ファイルを開く][to MML][レイアウト](方針変更で to MML と レイアウトを入れ替え)
         headerEl.insertBefore(openBtn, titleEl || masterVolBar);
         headerEl.insertBefore(toMmlBtn, titleEl || masterVolBar);
         headerEl.insertBefore(layoutBtn, titleEl || masterVolBar);
@@ -17657,7 +17656,7 @@
           if (!this._transportState.canToggleSource) return;
           if (this.onSourceToggle) this.onSourceToggle();
         });
-        // 並びは [再生コントロール][MML/FILEバッジ][終了後の挙動][ファイル名/リスト名](ユーザー指示 2026-09-06)。
+        // 並びは [再生コントロール][MML/FILEバッジ][終了後の挙動][ファイル名/リスト名](方針 2026-09-06)。
         // バッジは「今どちらを表示しているか」だけを示し、名前は右の別ボタンに出す。名前のボタンは
         // 曲一覧(アーカイブのm3u/複数曲形式の曲番号)から選べるドロップダウンになる
         this._srcNameEl = document.createElement('button');
@@ -17698,13 +17697,13 @@
       this._headerEl = header;
       // DPCM(打楽器を実サンプルのまま焼く)の実コスト表示。借用先にDPCMを選んだ瞬間に
       // 「1本増やしたらROMが何KB増えるか」が見えないと選びようがないため、割当UIのすぐ下に出す
-      // (ユーザー要望。実機ROMの容量を意識する方針 [[nsf-export-size-consciousness]])
+      // (実機ROMの容量を意識する方針)
       this._dpcmCostEl = document.createElement('div');
       this._dpcmCostEl.className = 'kbd-dpcm-cost';
       this._dpcmCostEl.style.display = 'none';
       // ドラムパッドの下ごしらえ(分離レンダリング)の進捗。曲の長さぶん再エミュレーション
       // するので数十秒〜数分かかる。ドラム(DPCM)パネルを開いていないと何も起きていないように
-      // 見えてしまうため、パッドと同じ鍵盤表示の中にも出す(ユーザー要望 2026-09-09)
+      // 見えてしまうため、パッドと同じ鍵盤表示の中にも出す(方針 2026-09-09)
       this._dpcmStatusEl = document.createElement('div');
       this._dpcmStatusEl.className = 'kbd-dpcm-status';
       this._dpcmStatusEl.style.display = 'none';
@@ -17891,7 +17890,7 @@
 
       // ファイル情報ペイン(見出し=折りたたみトグル+タイトル / 本体=main.jsから預かる
       // #xxxFileHeader・#xxxFileStatus の置き場)。旧「サウンドファイルを開く」ウィンドウに
-      // 唯一残っていたヘッダ情報を鍵盤表示へ引き取ったもの(ユーザー指示 2026-09-10)。
+      // 唯一残っていたヘッダ情報を鍵盤表示へ引き取ったもの(方針 2026-09-10)。
       // 置き場(上/下/左/右/自動)はレイアウト設定で選ぶ → _mountPanes()
       const fi = document.createElement('div');
       fi.className = 'kbd-fileinfo';
@@ -17932,11 +17931,11 @@
         try { localStorage.setItem('mml_keyboardListWidth', String(this._listWidth)); } catch (e) { /* ignore */ }
       });
       // 一覧(音源ごとのCH表示)と大波形の間のスプリッター。大波形が一覧の下にあるとき(縦並び)
-      // はCH一覧の高さを、右にあるとき(横並び)は大波形の幅を変える。ユーザー要望で
+      // はCH一覧の高さを、右にあるとき(横並び)は大波形の幅を変える。方針で
       // 「各表示の境目でサイズを変えられる」ようにするためのもの
       // ★対象は「いま見えている一覧」(_activeRowsEl)。SPC再生中はボイス一覧が別要素
       //   (_spcSectionEl)で、隠れている _rowsEl の高さを変えても何も起きなかった
-      //   (ユーザー報告「SPC鳴らしてるときch枠が下に広げられない」2026-09-10)
+      //   (不具合報告「SPC鳴らしてるときch枠が下に広げられない」2026-09-10)
       this._waveSplitterEl = this._makeSplitter('horizontal', (delta, start) => {
         const h = Math.max(60, Math.round(start + delta));
         this._listRowsHeight = h;
@@ -18041,7 +18040,7 @@
         `<span class="kbd-roll-label">${T('ピアノロール')}</span>` +
         `<span class="kbd-roll-seek-slot"></span>` + // main.jsから渡されるシークバー(setRollSeekBar)の置き場
         // 演奏最大時間(秒)+出力。時間表示の「/ 総時間」だった場所を入力欄にして、
-        // その右に出力形式と出力ボタンを置く(ユーザー指示 2026-09-09)。
+        // その右に出力形式と出力ボタンを置く(方針 2026-09-09)。
         // 実体は各フォーマットのパネルにある再生時間欄/書き出しボタンで、ここはその代理
         `<span class="kbd-roll-export" style="display:none">` +
           `<span class="kbd-roll-export-sep">/</span>` +
@@ -18854,7 +18853,7 @@
     }
 
     // ★ホバーでのピックアップは「その行の小波形が大波形として選択されている」ときだけ効かせる
-    //   (ユーザー指示)。一覧の上をマウスが通るだけで次々ロールが切り替わるのを避け、
+    //   (方針)。一覧の上をマウスが通るだけで次々ロールが切り替わるのを避け、
     //   「注目したいchを波形で選んでから、その行を指す」という操作に揃える。
     _setSpotlightHover(id) {
       if (id !== null && id !== this._shownWaveId) id = null;
@@ -18936,7 +18935,7 @@
     }
     // ファイル情報ペインの実際の置き場。'auto' は他の置き場から自動で決める:
     //  ・大波形が一覧の下にあり、かつ一覧が幅いっぱい(多段/別ウィンドウ)
-    //      → 一覧の下(大波形と同じ帯に左右で並ぶ。ユーザー指示 2026-09-10)
+    //      → 一覧の下(大波形と同じ帯に左右で並ぶ。方針 2026-09-10)
     //  ・それ以外(一覧が固定幅で左右に余裕が無い)
     //      → 一覧の上(縦に足す方が場所を食わない)
     _effectiveFileInfoPlacement() {
@@ -19063,7 +19062,7 @@
       // ★flex:'none'(縮まない)まで指定すること。このペインは一覧の列(.kbd-left)の中で唯一
       //   flex-shrinkが効く箱なので、ch数の多い曲(VGMのNamco System 2で33行など)で
       //   一覧が縦に溢れると、見出し1行ぶんの高さごと0まで潰されて消えてしまう
-      //   (「畳むと畳むボタンの行まで消える」ユーザー報告 2026-09-12)
+      //   (「畳むと畳むボタンの行まで消える」不具合報告 2026-09-12)
       if (collapsed || !(this._fileInfoNodes || []).length) { fi.style.flex = 'none'; return; }
       // 左右に並ぶ置き場は幅を、上下に積む置き場は高さをスプリッターの値で固定する
       const sideways = place === 'left' || place === 'right' || (place === 'bottom' && this._bigWaveBelow());
@@ -19858,8 +19857,7 @@
     // N163は$F800(アドレスラッチ)+$4800(データ)の間接アドレッシングで、実機ドライバは
     // 位相バイトを「$4800の空読み」で読み飛ばす(読み出しもオートインクリメントを進める)ため、
     // writeLogの書き込みだけを再生するbuildN163Snapshots()はアドレスポインタがズレて
-    // 誤ったチャンネル/周波数/波形を復元してしまう(Rolling Thunder等で顕著、
-    // [[n163-capture-snapshot-and-numch]]参照)。ライブRAMスナップショットなら常に正しい。
+    // 誤ったチャンネル/周波数/波形を復元してしまう(Rolling Thunder等で顕著)。ライブRAMスナップショットなら常に正しい。
     setRollTimelineFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots) {
       this._rollCursor = {};
       this._rollTimeline = this.buildRollTracksFromRegSnapshots(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots);
@@ -20084,7 +20082,7 @@
 
     // 借用先を選び直す。既定と同じ値を選んだらユーザー指定を消して「自動」に戻す。
     // 借用先が他のchと重なったときの扱いは全形式「赤い重複警告を出すだけ」に統一(2026-09-09、
-    // ユーザー指示)。以前はNSF側の行(_rowEls)だけ「先に居たchを自動でスキップへ落とす」ラジオ動作で、
+    // 方針)。以前はNSF側の行(_rowEls)だけ「先に居たchを自動でスキップへ落とす」ラジオ動作で、
     // SPCの行(_spcRowEls)は警告だけ、と形式で挙動が違っていた。自動解除は選んだ側の意図を
     // 越えて他の行を書き換えてしまうので、どちらを鳴らすかはユーザーが赤い行を見て決める。
     // 変換器側は従来どおり先着優先(後のchは「変換対象外」の注記)。
@@ -20139,7 +20137,7 @@
       const perToneLabel = T('音色ごとに指定…') + (nTone ? ` (${nTone})` : '');
       // ★♪ボタンは「音色ごとの指定が使える行」には常に出す(2026-09-10)。以前は音色セレクトが
       //   隠れる行だけだったので、音色一覧で指定してもチャンネル一覧の見た目が変わらなかった
-      //   (件数がセレクトの最終項目にしか出ず、開かないと見えない。ユーザー報告)
+      //   (件数がセレクトの最終項目にしか出ず、開かないと見えない。不具合報告)
       // ノイズ(D)も対象外(2026-09-18): 周期/音色はパッド側で決めるので音色ごとの指定は出さない
       const perOk = plan.editable() && target !== 'skip' && target !== 'dpcm' && target !== 'noise' && plan.format() !== 'nsf';
       if (el.tonesBtn) {
@@ -20208,7 +20206,7 @@
         el.partEl.classList.toggle('kbd-part--custom', custom);
         // スキップ行の減光は「割当表示ON(=借用先を編集している最中)」の間だけ。割当表示を
         // 切ったら、割当が無い行も普通の明るさに戻す(減光したままだと、ただ曲を聴いている間も
-        // 半分の行が沈んで見える。ユーザー指示 2026-09-12)
+        // 半分の行が沈んで見える。方針 2026-09-12)
         el.row.classList.toggle('kbd-ch-row--skip', this._assignMode && editable && el.target === 'skip');
         // DPCMは複数chをまとめて載せる先なので重複扱いにしない(上の MULTI_SOURCE_TARGETS 参照)
         const dup = editable && el.target !== 'skip' && !MULTI_SOURCE_TARGETS.has(el.target) && count[el.target] > 1;
@@ -20478,7 +20476,7 @@
       }
       this._renderVolResetBtn();
     }
-    // 見出しの vol の文字色(2026-09-19、ユーザー要望): 表示中の音源のchに1つでも100%以外の音量があれば黄色。
+    // 見出しの vol の文字色(2026-09-19、方針): 表示中の音源のchに1つでも100%以外の音量があれば黄色。
     // 音量はファイルをまたいで残る(localStorage)ので、「前に下げたままで音がおかしい」に自分で気づけるように。
     // 全部100%なら元の色に戻す
     _renderVolResetBtn() {
@@ -20673,7 +20671,7 @@
             this._selectWave(chId);
             // ★選んだ直後はカーソルがその行の上にあるので、そのままピックアップさせる。
             //   ホバーはmouseenterでしか発火しないため、クリックで選んだだけでは
-            //   ロールが反応しなかった(ユーザー報告)
+            //   ロールが反応しなかった(不具合報告)
             this._setSpotlightHover(chId);
           });
         }
@@ -20928,8 +20926,7 @@
     // 違い_rowEls(現在表示中の行のDOM)ではなく永続化Map(_channelVolumes)から直接組み立てる
     // (getMuteInfo(id)はidの文字列だけから決まる純粋関数のため、行がまだ再構築されて
     // いない/別フォーマットの行のままでも正しく引ける。ミュートで「再生開始直後、行が
-    // まだ古いままの状態でgetMuteConfig()を呼ぶと的外れな設定を返す」問題が起きていた
-    // [[keyboard-mute-state-new-file-leak]]のと同じ穴を音量では踏まないための設計)。
+    // まだ古いままの状態でgetMuteConfig()を呼ぶと的外れな設定を返す」問題が起きていた。それと同じ穴を音量では踏まないための設計)。
     getVolumeConfig() {
       const config = { apu: {}, expansion: {} };
       for (const [id, vol] of this._channelVolumes) {
@@ -21036,7 +21033,7 @@
         // vol はロールが使うレジスタどおりの値なので混ぜない。
         const volShown = ch.volApparent !== undefined ? ch.volApparent : ch.vol;
         const pct = showVol ? Math.round(volShown * 100) : 0;
-        // 黄色の使い分け(ユーザー指示 2026-09-19。以前は3つとも「数値が黄色」で見分けが付かなかった):
+        // 黄色の使い分け(方針 2026-09-19。以前は3つとも「数値が黄色」で見分けが付かなかった):
         //   ・音量バーが黄色   … 干渉(maskBy)。三角波/ノイズ/DPCM($4011)が同じ非線形tndミキサーに乗っていて、
         //                        レジスタ値どおりの大きさでは聞こえていない。バーの長さも干渉込みの見かけ音量
         //   ・音量の数値が黄色 … ハードウェアの減衰エンベロープ(envMode)で鳴っている=数値はレジスタの音量では
@@ -21313,7 +21310,7 @@
       ctx.globalAlpha = 1;
     }
 
-    // ── 楽譜モード(五線、時間比例。ROADMAP「フェーズ外: 楽譜出力」段階3) ──────────────
+    // ── 楽譜モード(五線、時間比例。作業計画「フェーズ外: 楽譜出力」段階3) ──────────────
     // ロールと同じ座標系(makeRollGeom: 時間軸 t=再生位置からの相対秒、音程軸 p)で、音程軸だけを
     // 五線に置き換える。描くのは五線・小節線・符頭・加線・臨時記号・休符の目印・パート名まで
     // (旗/連桁/音価の型は描かない=段階4の本記譜)。音符の長さは時間比例の棒で示す。
@@ -21975,7 +21972,7 @@
           el.freqEl.textContent = '';
         } else if (v.srcn != null && this._drumLaneOf && this._drumLaneOf.has('brr:' + v.srcn)) {
           // 打楽器パッド化したサンプル(ロールのドラム区画 drumKey='brr:<srcn>')は音階でなくサンプル番号を出す
-          // (ユーザー指示 2026-09-18。音程はサンプルの再生レートに過ぎず、音名で見せると誤解を招く)
+          // (方針 2026-09-18。音程はサンプルの再生レートに過ぎず、音名で見せると誤解を招く)
           el.noteEl.textContent = '#' + v.srcn;
           el.noteEl.style.color = '#e6e6ef';
           el.freqEl.textContent = v.freq > 0 ? v.freq.toFixed(1) + ' Hz' : '';
@@ -22014,7 +22011,7 @@
         }));
         // ★SPC再生中のピアノを描くのは update() ではなく**ここ**(上の分岐参照)。
         //   _applyPadKeys を通さないと drumKey が付かず、E(DPCM)指定したボイスの打点が
-        //   ドラム区画のパッドではなく音程鍵盤側で光る(2026-09-18のユーザー報告)。
+        //   ドラム区画のパッドではなく音程鍵盤側で光る(2026-09-18の不具合報告)。
         const allChannels = nesChannels.concat(spcCh);
         this._applyPadKeys(allChannels, posSeconds || 0);
         this._lastPianoChannels = allChannels;
@@ -22027,7 +22024,7 @@
     // SPCはNSF/MML/KSSと違いupdate()(=rAFのmonitorLoopから毎フレーム呼ばれる)を経由せず、
     // updateSpcVoices()が専用の80ms setInterval(ボイス詳細UIの更新にはこれで十分)からしか
     // 呼ばれない設計のため、ロールの再描画までそれに引きずられて12.5fps相当になり、
-    // NSF/KSS(rAF=約60fps)と比べて明らかにカクカクして見えていた(2026-07-18、ユーザー報告)。
+    // NSF/KSS(rAF=約60fps)と比べて明らかにカクカクして見えていた(2026-07-18、不具合報告)。
     // ボイス詳細表示は変えずに、ロールの再描画だけ切り離してrAF頻度で呼べるようにする軽量メソッド。
     updateRollPosition(posSeconds) {
       this._renderRoll(posSeconds);
@@ -22123,7 +22120,7 @@
  * MML.Convert.applyNoteEnd(src/convert/envelope.js)を呼んで効かせる
  * (エンベロープ表の登録先が要るため emitScore 内では行えない)。
  *
- * cmd の各キー(全て boolean。省略時は true = 従来通り忠実再現):
+ * cmd の各キー(全て boolean。省略時は true = 従来通りプリセット「全コマンド」):
  *   D      … D<n>(チャンネル/チップ間デチューン、detune.js)
  *   EP     … EP<n>(ピッチエンベロープ。MP/PT の受け皿でもある)
  *   MP     … MP<n>(ビブラート)。falseで EP が true なら周期EPテーブルへ落ちる
@@ -22133,7 +22130,7 @@
  *            編曲の出発点としては1音の方が読みやすいため)
  *   ENV    … @v/@vr(ソフト/ハード音量エンベロープ)と FME7 の S/M。false時は各イベントの
  *            音量列のピーク値を v<n> として出す(MML.Convert.plainVolume)
- *   VRC7_ENV … VRC7 へ載せるチャンネルでも @v/@vr を使う(2026-09-20、既定 false = 忠実再現・プレーン譜面とも OFF)。
+ *   VRC7_ENV … VRC7 へ載せるチャンネルでも @v/@vr を使う(2026-09-20、既定 false = 全コマンド・プレーン譜面とも OFF)。
  *            VRC7 は音色自体が減衰を持つので、元曲の音量変化を @v にすると減衰が二重になりうる。OFF なら VRC7 の ch は
  *            音量の変わり目で音符を切って v<n> を並べる(従来の出力)。ON にするとプリセットと一致しなくなり「カスタム」表示。
  *            ENV が OFF のときは VRC7_ENV に関係なく @v を出さない(MML.Convert.vrc7EnvOn)
@@ -22159,7 +22156,7 @@
  *                 (src/convert/duration.js framesToLengths の slackFrames。持ち越しは ±許容に収め、一致は持ち越し込みで
  *                 許容の2倍以内の最も近い音価。小節線から許容以内の音符は小節線で割らない)。ドライバのテンポが小数で音符長が
  *                 ±1〜2 フレーム揺れる曲(ppmck の t71 等)の譜面を素直にする。境界のずれは最大このフレーム数
- *   LEN_DP      … 音長をチャンネル全体で最適化する(2026-09-09、忠実再現=ON / プレーン譜面=OFF)。音符ごとに
+ *   LEN_DP      … 音長をチャンネル全体で最適化する(2026-09-09、全コマンド=ON / プレーン譜面=OFF)。音符ごとに
  *                 直前の余りだけ見て最も近い音価を選ぶ greedy(framesToLengths)の代わりに、チャンネルの全イベント
  *                 列を見渡して「音価の書きにくさ+境界の位置ずれ(フレーム)²」の合計が最小の割り当てを動的計画法で
  *                 選ぶ(duration.js quantizeSeq)。速いテンポで 5,5,5,6 フレームと揺れる16分が `24..` に化ける、
@@ -22179,7 +22176,7 @@
  *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)。
  *                 伸ばした区間は最後の音量のまま鳴るので近似
  *   FOLD_DOUBLES … 合成ch(プール式PCMの論理レーン。PSF/VGMのMultiPCM等)の複製パートを省く(2026-09-14、
- *                 忠実再現=OFF / プレーン譜面=ON)。ドライバが同じ旋律を別ボイスで重ねたデチューン二重化や
+ *                 全コマンド=OFF / プレーン譜面=ON)。ドライバが同じ旋律を別ボイスで重ねたデチューン二重化や
  *                 数フレーム遅れのエコーを src/convert/poolDoubles.js が検出し、複製側のノートを変換から外す
  *                 (ヘッダに何を省いたか書く)。OFF でも、N163 等の枠へ自動で載せるレーンを選ぶときは複製を後回しにする
  *   (旧 SHAPE_QUANT「16分音符格子へ丸める」は 2026-09-07 に廃止。キーオン自体が格子から
@@ -22213,7 +22210,7 @@
  *                  出せる最高音は上がる(32サンプル波形で 8ch=1864Hz / 1ch=14915Hz)
  *     'fixed8' … 常に8ch。ch数で変わる値を固定で扱えるので、曲によって音量や音域が
  *       変わらない。波形RAMは64バイトに固定され、高い音は出しにくい。
- *     'used'(既定、2026-09-19 ユーザー指示で fixed8 から変更) … 割り当てたスロットのうち一番大きい番号を使う(ch1+ch8なら8、ch2+ch6なら6)。
+ *     'used'(既定、2026-09-19 方針変更で fixed8 から変更) … 割り当てたスロットのうち一番大きい番号を使う(ch1+ch8なら8、ch2+ch6なら6)。
  *       大きい波形を使いたい・音量を出したい・高い音を出したいときはこちら。
  *     ★nsf2mmlだけは対象外。元がN163のネイティブ変換で、実効ch数は元の曲が決めているため。
  *   N163_WAVE … 波形長を自動で縮めるかどうか。縮めると2つの制約が同時にゆるむ。
@@ -22224,7 +22221,7 @@
  *       実際に使っている @N」だけを対象にする(曲全体を一律に落とさない)。
  *     'fit' … (a)のRAMだけ見る(従来の既定)。音域外の音符はコンパイル時に警告付きで無音になる。
  *     'keep' … 何も縮めない。RAMに収まらない曲はコンパイルエラーで再生も書き出しもできないが、
- *       本家ppmckへ持って行って手で詰め直したい場合はこちら。
+ *       ppmckへ持って行って手で詰め直したい場合はこちら。
  *     ★どの場合も「あふれた瞬間に居る波形」を大きい順に必要な数だけ縮め、縮めたぶんは
  *       ヘッダコメントに明記する。同じ @N を他のチャンネルが使っていればそちらの音色も鈍くなる。
  *
@@ -22238,13 +22235,13 @@
  *       キー名を変えた)
  *   RATE_MIX  … 同時に鳴った打点のDMCレート指定が食い違うとき、'quality'=高い方 / 'size'=低い方
  *   DRUM_POLY … 打点が重なったとき 'mix'=その瞬間の音をミックスして1クリップ / 'mono'=直近1音
- *   これらはプリセット(忠実再現/プレーン譜面)の一致判定に含めない(パネル側の独立した設定)。
+ *   これらはプリセット(全コマンド/プレーン譜面)の一致判定に含めない(パネル側の独立した設定)。
  *   全形式のドラム(DPCM)経路(src/convert/drumHits.js)が見る。
  *
  * 基準ピッチ(全体オフセット、2026-09-07。下の MML.Convert.detectTuning 冒頭コメント参照):
  *   TUNING     … 'auto' = 曲全体の音程偏差の中央値を測り、その分ずらした基準で音符へ丸めて
  *                `#TUNING <cent>` をヘッダに出す / 'a440' = 従来どおり A4=440Hz の12平均律固定 /
- *                'note'(2026-09-19、既定。同日ユーザー指示で auto から変更) = 全体のずれを #TUNING に、そこから外れた音名だけを `#TUNING-NOTE f+ +21 …`
+ *                'note'(2026-09-19、既定。同日方針変更で auto から変更) = 全体のずれを #TUNING に、そこから外れた音名だけを `#TUNING-NOTE f+ +21 …`
  *                に出す(音程表が音名ごとに外れている曲用。MML.Convert.detectTuningNotes)
  *   TUNING_MIN … 'auto' のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5、0〜50)。
  *                閾値未満の曲の出力は 'a440' と完全に同じ
@@ -22266,7 +22263,7 @@
   MML.Convert.LEN_SNAP_MAX = LEN_SNAP_MAX;
   MML.Convert.lenSnapOf = (cmd) => (cmd && cmd.LEN_SNAP > 0) ? Math.min(LEN_SNAP_MAX, cmd.LEN_SNAP) : 0;
   // LEN_DP: 音長をチャンネル全体で最適化する(2026-09-09、src/convert/duration.js quantizeSeq)。
-  // 忠実再現プリセットは ON、プレーン譜面は OFF(格子に乗らない実曲では 3連系やタイが増えるため)
+  // プリセット「全コマンド」は ON、プレーン譜面は OFF(格子に乗らない実曲では 3連系やタイが増えるため)
   MML.Convert.lenDpOf = (cmd) => !!(cmd && cmd.LEN_DP);
   // DPCM_EXACT: 分割したDPCM(ストリーム再生の区間、src/convert/drumHits.js)の音長を LEN_SNAP/LEN_DP の
   // 丸めから外して厳密に書く(2026-09-09、既定ON。省略時もON=未指定の古い設定と互換)。
@@ -22311,7 +22308,7 @@
   const PART_ORDER_VALUES = ['block', 'part'];
   const CHANNEL_ORDER_VALUES = ['letter', 'source'];
   const BARS_PER_LINE_MAX = 16;
-  //   LOOP_DETECT   … ループを自動検出する(2026-09-19、既定 true(ユーザー指示で同日 false→true)。src/convert/mmlEmit.js detectLoop)。元曲の
+  //   LOOP_DETECT   … ループを自動検出する(2026-09-19、既定 true(方針変更で同日 false→true)。src/convert/mmlEmit.js detectLoop)。元曲の
   //                   ループ周期を全チャンネルの音符列から検出し、イントロ+1周ぶんだけを書き出して各チャンネルの
   //                   ループ開始位置へ L を置く。5分ぶん変換しても曲データが1周ぶんで済む(NSFが小さくなる)。
   //                   イントロとループ区間の長さは全チャンネルで tick 単位に一致させる(ずれると周回ごとにずれる)
@@ -22352,7 +22349,7 @@
   MML.Convert.DPCM_DEFAULTS = DPCM_DEFAULTS;
   // N163内蔵RAMに波形が収まらないときの扱い(冒頭コメント参照)
   // SN76489(SMS/GG/MD の PSG)の周期ノイズ(ノイズレジスタの FB=0。1/16デューティの細いパルス=音程のある音)を
-  // 2A03 ノイズのどちらへ写すか(2026-09-19、ユーザー指示で選択式に)。プリセット外(チップ固有の設定)
+  // 2A03 ノイズのどちらへ写すか(2026-09-19、方針変更で選択式に)。プリセット外(チップ固有の設定)
   //   'white'(既定) … 長周期(ホワイトノイズ)。音程の効果は失われるが、2A03 の短周期の金属的な音にならない
   //   'short'       … 短周期(@1、93ステップ)。基本周波数が合う周期を選ぶので音程は合うが、音色は金属的になる
   //                   (Power Strike II(GG) の曲8 など、周期ノイズの rate を切り替えてタム/キックを作る曲で差が出る)
@@ -22392,7 +22389,7 @@
   MML.Convert.PITCH_SA_VALUES = PITCH_SA_VALUES;
 
   const PRESETS = {
-    // 忠実再現(従来の既定)
+    // 全コマンド(従来の既定。旧名「忠実再現」。キー名 faithful はそのまま)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, VRC7_ENV: false, V: true, SWEEP: true, INST: true, DRUM: true,
                 SHAPE_REST: false, ENV_MERGE: false, FOLD_DOUBLES: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'used',
@@ -22566,7 +22563,7 @@
   //     レジスタの整数丸めによる偏差は音符ごとに±どちらにも出るので大量に集めると打ち消し合い、
   //     ドライバ固有の全体ずれだけが残る。平均でなく中央値なのはベンド/ビブラート中の外れ値に
   //     引っ張られないため
-  //   - ノイズ(D)/DPCM(E)/ドラム/ノート番号が周期そのもの(D)や@DPCM番号そのもの(E、本家ppmck準拠)の
+  //   - ノイズ(D)/DPCM(E)/ドラム/ノート番号が周期そのもの(D)や@DPCM番号そのもの(E、ppmck準拠)の
   //     イベントは音程の意味が違うので除外
   //   - 四分位範囲が広い(opts.maxIqr、既定30セント)=曲全体がピッチ操作だらけ、または区間/チップで
   //     基準が二極化していて「全体ずれ」とは言えない場合と、音符が少なすぎる場合(opts.minCount、
@@ -22903,7 +22900,7 @@
   }
 
   // 末尾の「同一値が続く足踏み区間」だけを1個残してtrimする
-  // ([[envelope-nonloop-tail-trim-fix]]と同じ考え方: 非ループの絶対オフセット列は末尾値を
+  // (非ループの絶対オフセット列は末尾値を
   // 保持し続ける意味なので、末尾の重複はテーブル長を縮めるだけで再生結果に影響しない。
   // 実際の@EPテーブルは registerShape で差分列+末尾0へ変換される)。
   function trimTrailingHold(diff) {
@@ -23035,9 +23032,9 @@
   // そのまま素通しで返す。テーブル自体にdelayの概念は無い=同じ形なら異なるdelay値の
   // 呼び出し同士でも同じテーブル番号を共有できる)。
   //
-  // ★@EPの値は本家ppmck準拠の「毎フレームの差分の累積」(2026-09-13修正、compiler.js
+  // ★@EPの値はppmck準拠の「毎フレームの差分の累積」(2026-09-13修正、compiler.js
   // pitchEnvelopeValue参照。以前は各フレームの絶対オフセットをそのまま書いており、当ツール内では
-  // 辻褄が合っていたが本家ppmckcでコンパイルすると別の動きになっていた)。classifyPitchModが
+  // 辻褄が合っていたがppmckcでコンパイルすると別の動きになっていた)。classifyPitchModが
   // 返すvaluesは「基準からの絶対オフセット列」なので、ここで差分列へ変換して登録する
   // (toCumulativeDeltas)。this.tables に持つのは差分列:
   //  ・periodic: [a0 | a1-a0, ..., a(P-1)-a(P-2), a0-a(P-1)] loop=1。1周ぶんの差分の合計は
@@ -23048,7 +23045,7 @@
   // 差分がbyte幅(EP_VALUE_MIN..MAX)を超える形は登録せずnullを返す(→基準音のみ)。
   // ★loop有り同士(片方でもloop!=null)は前方一致していても共有・置き換えを一切行わない
   // (envelope.js EnvelopeRegistry.registerShapeと同じ理由・同じガード。
-  // [[envelope-registry-loop-upgrade-bug]]参照。ループ有りのvaluesは「最小の繰り返し単位」に
+  // ループ有りのvaluesは「最小の繰り返し単位」に
   // 切り詰められており配列長が観測フレーム数を反映しないため、前方一致だけを根拠にした
   // 共有/差し替えは無関係な変調を混同する事故になる)。
   function toCumulativeDeltas(absValues, isPeriodic) {
@@ -23094,7 +23091,7 @@
   };
 
   // 差分列 {values, loop} をそのまま @EP 表として登録する(ノイズパッドのプリセット、
-  // src/convert/drumHits.js noise()。値は既に本家準拠の累積差分なので変換しない)。
+  // src/convert/drumHits.js noise()。値は既にppmck準拠の累積差分なので変換しない)。
   // 完全一致だけを共有し、registerShape の前方一致統合はしない(ユーザーが書いた表を変えない)
   MML.Convert.PitchEnvelopeRegistry.prototype.registerTable = function (table) {
     if (!table || !table.values || !table.values.length || !this.cmd.EP) return null;
@@ -23300,7 +23297,7 @@
   //              量子化ステップはセント換算0.85〜1.7で一定(オクターブ非依存)。既定。
   //   'note'   … 音符ごとに必要最小のsa(最高精度、テーブル共有は減る)
   //   'off'    … SAを使わない(従来互換。byte幅を超える変調は従来どおり割当失敗)
-  // どのモードもレンジに収まらない場合はsa+1のエスケープで引き上げる(上限8=本家仕様)。
+  // どのモードもレンジに収まらない場合はsa+1のエスケープで引き上げる(上限8=ppmck仕様)。
   MML.Convert.n163SaForBase = function (baseReg) {
     if (!(baseReg > 0)) return 0;
     return Math.max(0, Math.min(8, Math.floor(Math.log2(baseReg)) - 10));
@@ -23405,7 +23402,7 @@
           : undefined;
         const assigned = pitchReg.assign(rescaled, directionUp, saOpts);
         MML.Convert.applyPitchAssignment(ev, assigned);
-        // SAはD<n>にも効く(compiler.js pitchRegisterOffset、本家freq_add_mcknumber参照)ため、
+        // SAはD<n>にも効く(compiler.js pitchRegisterOffset、ppmckfreq_add_mcknumber参照)ため、
         // この音符のDも同じシフトで縮めて出力する(量子化2^sa単位≈1〜2セント)
         if (ev.pitchSa && ev.detune) ev.detune = Math.round(ev.detune / (1 << ev.pitchSa));
       }
@@ -23661,8 +23658,7 @@
 
   // 周期的アルペジオは常にloop=0(先頭からループ、buildNoteEnvelopeDeltasが1周期分の
   // 合計0の閉じた差分列を作るため)。EnvelopeRegistry/PitchEnvelopeRegistryと同じ
-  // 「loop有無が食い違うテーブルは前方一致でも共有しない」規約([[envelope-registry-loop-upgrade-bug]]
-  // 参照)は、EN側は現状ループ専用(非ループ生成経路が無い)ため該当しないが、将来
+  // 「loop有無が食い違うテーブルは前方一致でも共有しない」規約は、EN側は現状ループ専用(非ループ生成経路が無い)ため該当しないが、将来
   // 非ループEN生成を追加する場合はここも同じガードを入れること。
   MML.Convert.NoteEnvelopeRegistry.prototype.registerShape = function (deltas) {
     if (!deltas || deltas.length === 0 || !this.cmd.EN) return null;
@@ -24699,7 +24695,7 @@
   // 書き直す(=エンベロープの位相リセット、compiler.js segmentsToWriteLogFme7 / ppmckDriver.js。キーオン相当)ので、
   // 元は1回だけの減衰が音符の数だけ頭から打ち直され、打楽器が長く大きく鳴り、打点も増えて聞こえていた
   // (実測: Salamander 曲29 の X で元の打ち直し 160 回 → 変換後 355 回)。
-  // 異音程のタイ(&)は本家 ppmck に無い([[ppmck-ampersand-is-length-add]])ので、本家にある EN<n>(ノート番号の
+  // 異音程のタイ(&)はppmck に無いので、ppmckにある EN<n>(ノート番号の
   // 累積差分、ループ無し=最後の値で止まる)で1音にまとめる。半音未満のずれ(D)は捨てる(打楽器の下降なので近似で足りる)。
   // 対象は「同じ位相リセット(envKey)・同じ形状/周期・同じミキサー(トーン系)・隙間無し」で、最後以外の音符が
   // HW_SWEEP_STEP_MAX フレーム以下の連なりだけ(1つのエンベロープの上でゆっくり旋律を弾く曲を1音にしないため)
@@ -24724,8 +24720,8 @@
         if (k < run.length - 1) for (let f = run[k].start + 1; f < run[k].end; f++) values.push(0);
       }
       if (run.length < 2 || values.some(v => v < -127 || v > 126)) { out.push(head); continue; }
-      // 末尾に 0 を足す: 本家 ppmckc は「|」の無い表でも最後の1値の前へループ点を置く(datamake.c checkLoop)ので、
-      // 最後が -2 だと本家では毎フレーム -2 ずつ下がり続ける。0 で終われば本家でもそこで止まる(本ツールは元々止まる)
+      // 末尾に 0 を足す: ppmckc は「|」の無い表でも最後の1値の前へループ点を置く(datamake.c checkLoop)ので、
+      // 最後が -2 だとppmckでは毎フレーム -2 ずつ下がり続ける。0 で終わればppmckでもそこで止まる(本ツールは元々止まる)
       values.push(0);
       const last = run[run.length - 1];
       out.push(Object.assign({}, head, {
@@ -25892,7 +25888,7 @@
  * (聴感上は「音色が切り替わっている」のではなく「同じ波形がスライドして見える」)。
  * これを生の配列比較(完全一致)のまま音符分割・WaveRegistry登録に使うと、1サンプルでも
  * 巡回位置がずれるたびに別音符・別@N<n>として扱われ、音色定義と音符数が異常に
- * 膨れ上がる(ユーザー報告で発覚)。canonicalRotation()で「32通りの巡回シフトのうち
+ * 膨れ上がる(実曲で発覚)。canonicalRotation()で「32通りの巡回シフトのうち
  * 辞書順最小のもの」に正規化してから音符分割・登録の両方に使うことで、巡回シフトだけの
  * 違いを同一波形とみなす。定常音では巡回シフトしても倍音構成(聴感上の音色)は変わらない
  * ため、音楽的忠実度への影響は無視できる(1周期未満、最大でも数ミリ秒の位相ズレのみ)。
@@ -26755,7 +26751,7 @@
   // (1段≒1.5dB の対数、31で1.0)。
   // ★2026-09-19 以前は「$0804 ÷ 曲中のDDA最大音量」で、対数の段数を振幅として扱っていた
   //   (27/31=0.87=-1.2dB と読んでいたが実際は4段=-6dB)。$0805/$0801 も無視していたため、
-  //   バランスで音量を下げたDDAが全振幅扱いだった([[hes-balance-register-is-volume]])。
+  //   バランスで音量を下げたDDAが全振幅扱いだった。
   //   DPCM は drumHits.js の曲全体正規化(最大の打点を全振幅へ持ち上げる)を通るので、全打点が同じ音量の
   //   曲の @DPCM は変わらない。変わるのは打点どうしの音量比と、ノイズパッド「自動」の v。
   // bal/gbal を持たない旧形式トレースは $0804 だけで読む(バランスは最大扱い)
@@ -27407,7 +27403,7 @@
   // dpcmTrace/controlTrace(省略可): 渡されると DDA(PCM)の打点を drumKey 付きノートとして
   // 該当chのトラックへ足す(ロールのドラム区画/パッドに出る。VGMのサンプルPCMと同じ形)。
   // 打点の同定は hes2mml/expansion/dpcm.js ddaHits(MML変換と同じ登録簿)なので、
-  // ロールで見た太鼓と変換で出る @DPCM が一致する([[roll-as-mml-debugger]])。
+  // ロールで見た太鼓と変換で出る @DPCM が一致する。
   RollBuild.hes = function (snapshots, frameRate, dpcmTrace, controlTrace) {
     const frameDur = 1 / frameRate;
     // @EN(高速アルペジオ)統合済みイベントの展開はKSS側と同じ(RollBuild.expandNoteEnv参照)。

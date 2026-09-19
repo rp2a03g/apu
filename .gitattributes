@@ -1,0 +1,19 @@
+# 改行コードの扱いを固定する。
+# リポジトリには常に LF で格納し、作業ツリーの改行は各自の環境に任せる。
+# これが無いと、Windows(core.autocrlf=true)とそれ以外で「全行が差分」になることがある。
+* text=auto
+
+# Windows でしか使わないスクリプトは作業ツリーでも CRLF にする
+*.ps1 text eol=crlf
+
+# バイナリ(改行変換も差分表示もしない)
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.nsf binary
+*.nsfe binary
+*.dmc binary
+*.wav binary
+*.zip binary
+*.7z binary

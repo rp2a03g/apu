@@ -185,7 +185,7 @@
         `</div>` +
         `<div class="drum-panel-body"></div>` +
         // 一覧と下段(分割ビュー)の境目。ドラッグで下段の高さを変える=一覧の見える範囲を広げられる
-        // (パッドが多いと一覧がスクロールになるため、ユーザー要望 2026-09-18)。高さは localStorage に保存
+        // (パッドが多いと一覧がスクロールになるため、方針 2026-09-18)。高さは localStorage に保存
         `<div class="drum-panel-divider" title="${T('ドラッグで一覧と下段の高さを変える(下まで下げると下段を畳む)')}"></div>` +
         `<div class="drum-panel-split"></div>` +
         `<div class="drum-panel-status" hidden></div>` +
@@ -282,7 +282,7 @@
     if (!stats) { costEl.textContent = ''; return; }
     costEl.textContent = T('合計 定義 {clips} / 打点 {segments} / ROM {kb} KB',
       { clips: stats.clips, segments: stats.segments, kb: (stats.bytes / 1024).toFixed(1) })
-      // 定義は本家と同じ64本まで(drumHits.js capDefs)。溢れたぶんは使用回数の少ない定義から落ちる
+      // 定義はppmckと同じ64本まで(drumHits.js capDefs)。溢れたぶんは使用回数の少ない定義から落ちる
       + (stats.overflow ? T(' / 定義が64本を超えたため {n} 本を落とします', { n: stats.overflow }) : '');
     // 16KB(DMC領域1ページ=窓4-7)を超えると、ブラウザ再生もNSF書き出しも16KBごとの「ページ」に分けて
     // トリガー時にバンク切替する(2026-09-10、compiler.js layoutDpcmSamples / ppmckDriver.js DPCM_PAGE_TBL)。
@@ -292,7 +292,7 @@
   }
 
   // 差し替えの小メニュー。DPCMコンバータで開いている音をそのまま使えるようにして、
-  // 「コンバータ ⇄ ドラムパッド」を1操作で繋ぐ(ユーザー要望の融合)
+  // 「コンバータ ⇄ ドラムパッド」を1操作で繋ぐ(方針の融合)
   let menuEl = null;
   function closeIncludeMenu() {
     if (menuEl && menuEl.parentNode) menuEl.parentNode.removeChild(menuEl);
@@ -411,7 +411,7 @@
     const r = selectedKey != null ? rows.find(x => x.key === selectedKey) : null;
     if (!r) { selectedKey = null; splitLocal = null; splitView.setLocal(null); if (splitResetBtn) splitResetBtn.hidden = true; return; }
     // 分割ビューは DPCM 専用(長いサンプルを DMC の上限で区間に切る)。載せ先がノイズの行では出さない
-    // (ユーザー指示 2026-09-18)。手動分割の保存値は残る(載せ先を DPCM へ戻せばまた効く)
+    // (方針 2026-09-18)。手動分割の保存値は残る(載せ先を DPCM へ戻せばまた効く)
     splitNoise = DS() && effectiveTargetOf(DS().get(r.hash), r) === 'noise';
     if (splitNoise) { splitLocal = null; splitView.setLocal(null); if (splitResetBtn) splitResetBtn.hidden = true; return; }
     splitLocal = buildLocal(r);
@@ -551,7 +551,7 @@
         }
         // 「カスタマイズ…」はコマンド(選ぶとエディタが開く)。カスタム音色が既に効いている行では、選択中の表示用に
         // 別の項目「カスタマイズ」を置く。同じ項目を選び直しても change は飛ばないので、コマンド側を常に
-        // 「今選ばれていない項目」にしておく(ユーザー報告 2026-09-18: 再調整しようと選んでもエディタが出ない)
+        // 「今選ばれていない項目」にしておく(不具合報告 2026-09-18: 再調整しようと選んでもエディタが出ない)
         const hasCustom = !!(st.noise && st.noise.custom);
         if (hasCustom) {
           const on = document.createElement('option');

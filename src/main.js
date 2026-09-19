@@ -13,7 +13,7 @@
 
   const mmlSourceEl = document.getElementById('mmlSource');
   const mmlOutputEl = document.getElementById('mmlOutput');
-  mmlSourceEl.value = MML.Mml.SAMPLE_SOURCE;
+  mmlSourceEl.value = MML.Mml.sampleSource(); // 表示言語に合わせた組み込みサンプル(sampleMml.js / sampleMml.en.js)
 
   // フォント/配色設定の復元(エディタが色付きテキストを表示する前に反映する必要があるため
   // attachHighlighterより先に呼ぶ)
@@ -95,7 +95,7 @@
     if (addr === 0x9010 || addr === 0x9030) return 'VRC7';
     if (addr >= 0x5000 && addr <= 0x5015) return 'MMC5';
     if (addr === 0xF800 || addr === 0x4800) return 'N163';
-    if (addr === 0xC000 || addr === 0xE000) return 'FME7';
+    if (addr === 0xC000 || addr === 0xE000) return 'SUNSOFT 5B';
     return '';
   }
 
@@ -253,11 +253,11 @@
   // 楽譜ウィンドウ(本記譜、src/ui/scoreView.js)。表記モデルは鍵盤表示の楽譜モードと同じ物を渡す
   const scoreView = new MML.UI.ScoreView(document.getElementById('scoreView'));
   scoreView.colorOf = (letter) => keyboardDisplay.getChannelColorByLetter(letter);
-  MML._keyboardDisplay = keyboardDisplay; // 診断用(DevToolsから状態を見る。[[remote-console-diagnosis-technique]])
+  MML._keyboardDisplay = keyboardDisplay; // 診断用(DevToolsから状態を見る)
   // ── 無音自動送りとミュートの関係 ────────────────────────────────────────
   // ★ミュートは「聴き方」の設定であって曲の内容ではないので、無音判定に混ぜない。
   //   VGM/KSS/GBS/HESはライブ出力(=ミュート適用後)を見て10秒無音で次の曲へ進むため、
-  //   全chミュートすると必ず曲が飛んでしまっていた(ユーザー報告: ワルキューレの伝説3曲目)。
+  //   全chミュートすると必ず曲が飛んでしまっていた(不具合報告: ワルキューレの伝説3曲目)。
   //   1つでもミュートがある間は判定自体を止める(NSFの先読みスキャン側は別途ミュート非適用)。
   function syncSilenceDetect() {
     // ★プレイヤーの let 宣言はこの関数より後ろにあるので、初期化前(TDZ)に呼ばれることがある。
@@ -347,13 +347,13 @@
     // ★レート・差し替え・変換有無はサンプル単位の設定から引く(src/convert/drumSamples.js)
     const DS = MML.Convert.DrumSamples;
     const st = DS ? DS.resolve(s.hash, s.pcm, s.rate) : { pcm: s.pcm, srcRate: s.rate, rate: 'auto', gain: 1 };
-    // ★変換ボリュームは試聴にも同じ倍率で効かせる(ユーザー指示)。「原音」側にも掛けるのは、
+    // ★変換ボリュームは試聴にも同じ倍率で効かせる(方針)。「原音」側にも掛けるのは、
     //   このボタンが「元のPCM」ではなく「いまの設定で変換元として使われる音」の試聴だから
     //   (差し替えファイルもここから鳴る)。原音とDPCMの音量差で品質を誤判断しないためでもある
     const gain = st.gain != null ? st.gain : 1;
     if (mode !== 'dpcm') { playFloatPcm(applyGain(st.pcm, gain), st.srcRate); return; }
     // ★DPCM側は「簡易再生」ではなく、MML変換と同じ encode → decode を必ず通す
-    //   (そうしないと実際に鳴る音と試聴が食い違う。[[hes-dda-clip-boundary-frame-mixing]]の
+    //   (そうしないと実際に鳴る音と試聴が食い違う。HESのDDAの
     //    ネイティブ再生と同じ方針)
     const table = MML.Dpcm.DMC_RATE_TABLE_NTSC;
     // 'auto' は変換(drumHits.js)と同じくドラム(DPCM)パネル最下段の DMC_RATE(既定は最高レート)
@@ -512,7 +512,7 @@
 
     // ★一覧に出すサンプル = 「ロールのドラム区画に出ているもの」+「DPCMへ載せたchが鳴らすもの」。
     //   後者は音程が取れていてもDPCMへ変換されるので、パッドにも出す必要がある
-    //   (DPCMで音律を奏でることもある。ユーザー指示)。後者の判定は形式ごとに違うので
+    //   (DPCMで音律を奏でることもある。方針)。後者の判定は形式ごとに違うので
     //   打点プロバイダ(drumHitsProvider.listedKeys)に任せる
     const keys = [];
     for (const l of lanes) if (l.key && l.key !== '*') keys.push(l.key);
@@ -546,7 +546,7 @@
       const s = drumSampleStore[k], l = laneOf[k];
       const st = (DS && s && s.hash) ? DS.get(s.hash) : null;
       const name = st ? (st.name || null) : null;
-      // 差し替え(インクルード)したサンプルは、名前を付けていなければファイル名をパッドに出す(ユーザー指示)
+      // 差し替え(インクルード)したサンプルは、名前を付けていなければファイル名をパッドに出す(方針)
       const incName = (st && st.include && st.include.name) ? st.include.name.replace(/.[^.]*$/, '') : null;
       if (name || incName) laneNames[k] = name || incName;
       return { key: k,
@@ -562,7 +562,7 @@
                defaultTarget: ((s && s.assignTarget === 'noise') || provAssign[k] === 'noise') ? 'noise' : 'dpcm',
                srcMidi: (s && s.srcMidi != null) ? s.srcMidi : null };
     });
-    // ★パッド名はロールのドラム区画と同期させる(ユーザー指示)。名前の実体はサンプルの
+    // ★パッド名はロールのドラム区画と同期させる(方針)。名前の実体はサンプルの
     //   ハッシュ側にあり、ロールのノートはハッシュを持たないのでここで橋渡しする
     if (keyboardDisplay.setDrumLaneNames) keyboardDisplay.setDrumLaneNames(laneNames);
     P.setRows(rows);
@@ -695,7 +695,7 @@
   // ── 音色の試聴 ─────────────────────────────────────────────────────
   // 'raw' … 元の音: サンプルは実PCM、それ以外は音色の1周期波形(FMは定常波形)を鳴らす
   // 'mml' … 変換後: いまの載せ先/音色指定で1行のMMLを組み、変換と同じコンパイラ+NSF音源で鳴らす
-  //          (最終出力と同じ経路で鳴らすので別実装の乖離が無い。[[roll-as-mml-debugger]] と同じ考え)
+  //          (最終出力と同じ経路で鳴らすので別実装の乖離が無い)
   let toneAuditionPlayer = null;
   function stopToneAudition() {
     if (toneAuditionPlayer) { try { toneAuditionPlayer.stop(); } catch (e) { /* ignore */ } toneAuditionPlayer = null; }
@@ -817,7 +817,7 @@
     MML.UI.TonePanel.mount(document.getElementById('tonePanel'), {
       onChange: () => { if (keyboardDisplay.refreshAssignUi) keyboardDisplay.refreshAssignUi(); },
       onPlay: (row, mode, ctx) => toneAudition(row, mode, ctx),
-      // NSFはネイティブ変換で音色ごとの指定が効かない(一覧のみ。[[nsf-to-nsf-borrow-rearrange-todo]])
+      // NSFはネイティブ変換で音色ごとの指定が効かない(一覧のみ)
       editable: () => { const P = MML.Convert.ChannelPlan; return !!(P && P.editable() && P.format() !== 'nsf'); },
     });
     if (MML.Convert.ToneSettings && MML.Convert.ToneSettings.onChange) {
@@ -898,7 +898,7 @@
     token: 0,            // 曲/形式が変わるたび +1(古いレンダリング結果を捨てる)
     rawRoll: null,       // 打楽器化を適用する前のロールタイムライン(全形式共通形状)
   };
-  MML._synthDrum = synthDrum; // 診断用(DevToolsから状態を見る。[[remote-console-diagnosis-technique]])
+  MML._synthDrum = synthDrum; // 診断用(DevToolsから状態を見る)
   function synthDrumReset() {
     for (const ent of synthDrum.byCh.values()) for (const k of Object.keys(ent.samples)) delete drumSampleStore[k];
     synthDrum.byCh.clear(); synthDrum.pending.clear(); synthDrum.token++; synthDrum.rawRoll = null;
@@ -965,8 +965,7 @@
   // SPC: 借用先にE(DPCM)を選んだボイスは、そのボイスが鳴らした全BRRサンプルがパッドになる
   // (音階として扱う指定のsrcnは除く)。ロールでも同じ見え方にするため、音程ノートを
   // drumKey='brr:<srcn>' のドラム区画ノートへ置き換える。srcnはRollBuild.spcがノートに載せる。
-  // ★キーは変換側(MML.SPC2MML.drumHits)と同一なので、ロールのパッドとMMLの@DPCMが一致する
-  //   ([[roll-as-mml-debugger]])。
+  // ★キーは変換側(MML.SPC2MML.drumHits)と同一なので、ロールのパッドとMMLの@DPCMが一致する。
   function spcDpcmVoiceNotes(track) {
     const pitchSrcns = spcPitchSrcnSet();
     const out = [];
@@ -999,7 +998,7 @@
       //   HESのDDAはPSGの波形chと同じ行(PSG0-5)に載るので、DDAの行に E を選ぶとこの行が打楽器化の対象になり、
       //   以前は drumKey 付きノートまで捨てていた。分離レンダリングは音程ノートからしか打点を作らない
       //   (synthDrumNotes)ので、DDAだけの行は打点0個になり、ロールのドラム区画も鍵盤のパッドも消えていた
-      //   (ユーザー報告「HESで鍵盤にドラムパッドが出てこない」。割当はファイル別に自動保存されるので開き直しても戻らない)。
+      //   (不具合報告「HESで鍵盤にドラムパッドが出てこない」。割当はファイル別に自動保存されるので開き直しても戻らない)。
       //   分離レンダリング由来の打点は synth: キーで別物なので二重にはならない
       const realDrums = tr.notes.filter(n => n.midi == null && n.drumKey && !(ent && ent.samples && ent.samples[n.drumKey]));
       return Object.assign({}, tr, { notes: drumNotes.concat(realDrums, tr.notes.filter(n => n.midi == null && !n.drumKey))
@@ -1078,7 +1077,7 @@
   /**
    * 分離レンダリング(ドラムパッドの下ごしらえ)の進捗表示。chId=null で消す。
    * 出す先はドラム(DPCM)パネルの下段と、鍵盤表示のパッドの上(パネルを開いていなくても
-   * 進み具合が見えるように。2026-09-09 ユーザー要望)。
+   * 進み具合が見えるように。2026-09-09 方針)。
    */
   function setDrumRenderStatus(chId, frac) {
     const text = chId ? T('打楽器の分離レンダリング中: {ch}', { ch: chId })
@@ -1419,7 +1418,7 @@
   // YM2612のDAC・32X PWM・RF5C164/68・OKIM6258はレジスタ上「1本の連続したPCMストリーム」で、
   // どこが1発の太鼓なのかがレジスタからは分からない(ロールのノート境界は音量段の変わり目)。
   // そこで分離レンダリングした音そのものから立ち上がりを拾い、似た音を1パッドへ束ねる。
-  // メガドライブ曲のドラムはここに載っていることが多い(ユーザー報告「アウトランでE→パッド出ず」)。
+  // メガドライブ曲のドラムはここに載っていることが多い(不具合報告「アウトランでE→パッド出ず」)。
   const ONSET_HOP_SEC = 0.005;   // 包絡の刻み
   const ONSET_WIN = 8;           // 直前の平均を取る区間数(=40ms)
   const ONSET_RATIO = 1.8;       // 直前平均の何倍で「立ち上がり」とみなすか
@@ -1643,7 +1642,7 @@
       //   打点が無ければ「そのchはDACを使っていない」ということなので、何も作らずに終わる。
       //   ここで分離レンダリングへ落ちると、YMDAの既定がE(DPCM)である以上
       //   **DACを使っていないメガドライブ曲でも毎回フル再エミュレーションが走る**
-      //   (ユーザー報告「ローリングサンダー2はPCM無いのに重い」の原因)。
+      //   (不具合報告「ローリングサンダー2はPCM無いのに重い」の原因)。
       if (isLogDrumRow(id)) {
         const fromLog = id === 'KDA' ? kssDacDrumFor(id, info) : vgmDacDrumFor(id, info);
         if (fromLog) {
@@ -1782,7 +1781,7 @@
   // 鍵盤の行で借用先を変えたら、その行に出る音色の「載せ先」指定(音色一覧、localStorage)は解除する
   // (音色指定と名前は残す)。優先順位は「音色の設定 > チャンネル」のままなので、以前に音色一覧で
   // 指定した載せ先が残っていると、行で三角波を選んでも音色側のN163が勝って見た目と食い違う
-  // (ユーザー報告 2026-09-10: R-Type Leo FM7。音色一覧が壊れていた頃の指定が残っていた)。
+  // (不具合報告 2026-09-10: R-Type Leo FM7。音色一覧が壊れていた頃の指定が残っていた)。
   // あとから行で選んだ操作を勝たせる(ユーザー選択 2026-09-10)。同じ音色を鳴らす他の行にも効く
   function clearToneTargetsOnRow(chId) {
     const S = MML.Convert.ToneSettings;
@@ -1904,7 +1903,7 @@
   const SOUND_FORMAT_DUR_INPUT = { nsf: 'nsfPlayDuration', spc: 'spcPlayDuration', kss: 'kssPlayDuration', gbs: 'gbsPlayDuration', hes: 'hesPlayDuration', vgm: 'vgmPlayDuration', psf: 'psfPlayDuration' };
   const SOUND_FORMAT_WAV_BTN = { nsf: 'btnNsfExportWav', spc: 'btnSpcExportWav', kss: 'btnKssExportWav', gbs: 'btnGbsExportWav', hes: 'btnHesExportWav', vgm: 'btnVgmExportWav', psf: 'btnPsfExportWav' };
   // 出力形式リスト。既定はWAV。レジスタログCSVはWAVと一緒に必ず出ていたのをやめ、
-  // 選んだときだけ出す独立した形式にした(2026-09-09 ユーザー指示)
+  // 選んだときだけ出す独立した形式にした(2026-09-09 方針)
   // レジスタログを持つのは自前のCPUを回す形式(NSF/SPC/KSS)だけ。他は音声のみ
   const EXPORT_REGLOG_FORMATS = { nsf: true, spc: true, kss: true, mml: true };
   // AACはブラウザ内蔵のWebCodecsに任せるので、対応しているときだけ選択肢に出す
@@ -2160,7 +2159,7 @@
   // 抜けた後もsnap[ddaCh].waveが無条件に上書きされ続け、getDdaWave()のリングバッファに
   // 残った(現在とは無関係な、直近のDDAヒットの)過去データがそのまま鍵盤表示に出続けて
   // いた。DDAヒットが増えるたびリングバッファの中身が入れ替わるため、見た目上は本来の
-  // 波形chの表示が「毎回のDDA発音のたびに壊れていく」ように見える(ユーザー報告の
+  // 波形chの表示が「毎回のDDA発音のたびに壊れていく」ように見える(不具合報告の
   // 「波形が崩れていく」「変化の際ノイズ出てる」はこの現象)。現在フレームで実際に
   // dda中(snap[ddaCh].dda)の時だけ上書きするよう限定し、通常の波形ch表示に戻す。
   function liveHesApu() {
@@ -2546,7 +2545,7 @@
   function forEachSeekBar(fn) { for (const sb of seekBars) fn(sb); }
   function setSeekBarValue(v) { forEachSeekBar((sb) => { sb.barEl.value = String(v); }); }
   // 時間表示は "経過 / 総時間"。鍵盤表示(ロール見出し)側は総時間の位置を
-  // 「演奏最大時間の入力ボックス」に置き換えたので、経過だけを出す(2026-09-09 ユーザー指示)
+  // 「演奏最大時間の入力ボックス」に置き換えたので、経過だけを出す(2026-09-09 方針)
   function setTimeDisplay(text) {
     forEachSeekBar((sb) => {
       if (!sb.timeEl) return;
@@ -3002,7 +3001,7 @@
   }
 
   // シークバーの開始/終了ハンドルのドラッグ確定後、その位置を!!(開始)/!!!(終了)マーカーとして
-  // MML本文へ書き戻す(!/!!/!!! 特殊マーカー、ユーザー要望の「相互に更新できるように」)。
+  // MML本文へ書き戻す(!/!!/!!! 特殊マーカー、方針の「相互に更新できるように」)。
   // 既存マーカーがあれば同じチャンネルのその位置を置き換え、無ければ最初のチャンネルへ新規挿入する。
   // 書き込み対象チャンネルに音符が1つも無い場合は書き込めないので何もしない(無理に挿入しない)
   function writeMmlPlaybackMarker(which) {
@@ -3359,7 +3358,7 @@
   }
 
   // ロール見出しの「演奏最大時間(秒)+出力形式+出力」。サウンドファイルとMML再生の両方で出す
-  // (MML再生は 2026-09-19 ユーザー指示で追加。exportMmlAudio 参照)
+  // (MML再生は 2026-09-19 方針変更で追加。exportMmlAudio 参照)
   function keyboardDurationInput() {
     const id = SOUND_FORMAT_DUR_INPUT[kbdSourceKind];
     return id ? document.getElementById(id) : null;
@@ -3970,7 +3969,7 @@
 
   // MMLをコンパイルし、ppmck方式バイトコード(src/nsf/mckBytecode.js)+
   // 専用ドライバ(src/driver/ppmckDriver.js)経由でNSFファイルとして書き出す。
-  // 2A03(A-D)+DPCM+VRC6/MMC5/FME7/FDS/N163/VRC7に対応(ROADMAP.mdフェーズ1.6/1.7。
+  // 2A03(A-D)+DPCM+VRC6/MMC5/FME7/FDS/N163/VRC7に対応(作業計画フェーズ1.6/1.7。
   // 未対応の拡張音源が指定された場合はbuilt.unsupportedExpansionsで警告表示する)。
   // --- MMLテキストファイルの読み書き ---------------------------------------
   // 保存形式はプレーンテキスト(拡張子.mml)。ppmck等の外部ツールがそのまま読める
@@ -4018,7 +4017,7 @@
   // win-mmlはdata-always-visible="true"だがユーザーが閉じている場合がある。
   // トグルボタンのclick()経由にすると「閉じる」方向に働くことがあるため直接表示する
   // (initUnifiedSoundFileWindow内のensureKeyboardWindowOpenと同じ理由・同じ手口)。
-  // ★MMLファイルを開いたときの行き先はここ(ユーザー指示 2026-09-10:
+  // ★MMLファイルを開いたときの行き先はここ(方針 2026-09-10:
   //   「MMLファイルならMMLエディタを開いて何もしない」)
   function ensureMmlWindowOpen() {
     const win = document.getElementById('win-mml');
@@ -4058,7 +4057,7 @@
     const dpcmInfo = await restoreDpcmSamples(text);
 
     // 別の曲を読み込んだので、前の曲の再生範囲(青/赤ハンドル)は引き継がない
-    // (NSF2MML等の変換直後と同じ扱い。[[mml-conversion-stale-playback-range-bug]])
+    // (NSF2MML等の変換直後と同じ扱い)
     rangeStartSec = 0;
     rangeEndSec = null;
     prepareMmlStream(true);
@@ -4281,7 +4280,7 @@
     window.addEventListener('focus', () => { FileSync.checkNow({ auto: true }); });
   }
 
-  // 楽譜(MusicXML)出力(ROADMAP「フェーズ外: 楽譜出力」段階2): MML → compile() → 表記モデル
+  // 楽譜(MusicXML)出力(作業計画「フェーズ外: 楽譜出力」段階2): MML → compile() → 表記モデル
   // (src/score/notation.js) → MusicXML 文字列(src/score/musicxml.js)。入口は MML の音価だけ
   // (ロールのレジスタ由来データからは出さない)。;@time / ;@key のコメント指示で拍子と調を渡せる
   // mode: 'all'(1chごとに1段、既定) | 'piano'(右手/左手の2段+打楽器、Score.buildPianoNotation。楽譜ウィンドウの選択)
@@ -4378,7 +4377,7 @@
       { bytes: nsfBytes.length, banks: built.bankCount, driverBytes: built.driverBytes || 0,
         songBytes: built.songDataBytes || 0, dpcmBytes: built.dpcmBytes || 0 }) + '\n';
     if (built.unsupportedExpansions.length > 0) {
-      out += T('注意: 拡張音源({chips})は現状のNSF書き出しでは未対応のため、該当チャンネルは無音になります(VRC6/MMC5/FME7/FDS/N163/VRC7は対応済み)。',
+      out += T('注意: 拡張音源({chips})は現状のNSF書き出しでは未対応のため、該当チャンネルは無音になります(VRC6/MMC5/SUNSOFT 5B/FDS/N163/VRC7は対応済み)。',
         { chips: built.unsupportedExpansions.join(', ') }) + '\n';
     }
     msg.className = 'ok';
@@ -4582,7 +4581,7 @@
     ['FDS', MML.NSF.CHIP_FLAGS.FDS],
     ['MMC5', MML.NSF.CHIP_FLAGS.MMC5],
     ['N163', MML.NSF.CHIP_FLAGS.N163],
-    ['FME7', MML.NSF.CHIP_FLAGS.FME7]
+    ['SUNSOFT 5B', MML.NSF.CHIP_FLAGS.FME7]
   ];
 
   function describeChips(flags) {
@@ -4762,7 +4761,7 @@
     if (lastPlayMode === 'nsf') {
       nsfRollToken++; // 進行中の先読みキャプチャ結果を無効化
       // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
-      //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
+      //   ロールとドラムパッドを見られる・試聴できるようにするため(方針)
     }
     nsfPlaybackOffset = 0;
     updateNsfPlayButton();
@@ -5058,7 +5057,7 @@
     const songName = (loadedNsfHeader.songName || 'output').replace(/[^\w\-]/g, '_');
 
     // 出力形式は鍵盤表示の「出力形式」で選ぶ(既定WAV)。以前はWAVとレジスタログCSVが
-    // 必ず一緒に出ていたが、選んだ方だけを出すようにした(2026-09-09 ユーザー指示)
+    // 必ず一緒に出ていたが、選んだ方だけを出すようにした(2026-09-09 方針)
     let filename;
     if (exportMode === 'reglog') {
       // 全レジスタ書き込みログ（フレームごと・チップ名注記付き）
@@ -5305,7 +5304,7 @@
   document.getElementById('btnNsfFilePlay').addEventListener('click', playNsfStream);
   document.getElementById('btnNsfFileStop').addEventListener('click', stopNsfFilePlayback);
   document.getElementById('btnNsfExportWav').addEventListener('click', exportNsfWav);
-  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(方針)
   document.getElementById('btnNsf2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'nsf', onConvert: runNsf2Mml }));
   document.getElementById('btnNsfSongPrev').addEventListener('click', () => changeNsfSong(-1));
   document.getElementById('btnNsfSongNext').addEventListener('click', () => changeNsfSong(1));
@@ -5397,7 +5396,7 @@
   })();
 
   // --- メトロノーム(src/ui/metronomePanel.js / src/input/metronome.js) ---
-  // ROADMAPフェーズ3(MIDI録音)・フェーズ4(鼻歌入力)が乗る拍の時間軸を、まず単体で使える
+  // 作業計画フェーズ3(MIDI録音)・フェーズ4(鼻歌入力)が乗る拍の時間軸を、まず単体で使える
   // 道具として用意したもの。入力オフセットの較正値(MML.Input.Latency)も録音側がそのまま使う。
   MML.UI.MetronomePanel.init({
     toggleEl:    document.getElementById('btnMetronome'),
@@ -5479,7 +5478,7 @@
   //   1ピクセル動くごとに input を撃つので、素直に毎回シークすると重い曲で固まる。
   //   形式によってはシーク1回が数百ms(曲頭からコマンドを早送りするため。実測:
   //   バーチャレーシングデラックス「Replay」で1回543ms)で、ドラッグ中に数十回積もると
-  //   ブラウザが数秒〜数十秒止まる(ユーザー報告「シークするとものすごいガクつく」)。
+  //   ブラウザが数秒〜数十秒止まる(不具合報告「シークするとものすごいガクつく」)。
   //   時間表示とハンドルは即座に動かし、実シークだけを間引く(最後の位置へは必ず行く)。
   const SEEK_COALESCE_MS = 120;
   function setupSeekBarInput(inst) {
@@ -5598,7 +5597,7 @@
     }
     spcRollToken++; // 進行中の先読みキャプチャ結果を無効化
     // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
-    //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
+    //   ロールとドラムパッドを見られる・試聴できるようにするため(方針)
     updateSpcPlayButton();
   }
 
@@ -6379,7 +6378,7 @@
     keyboardDisplay.setMode('nsf');
   });
   document.getElementById('btnSpcExportWav').addEventListener('click', exportSpcWav);
-  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(方針)
   document.getElementById('btnSpc2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'spc', onConvert: runSpc2Mml }));
 
   // ── KSS ファイル読み込み・再生 ────────────────────────────────────
@@ -6474,7 +6473,7 @@
     }
     kssRollToken++; // 進行中の先読みキャプチャ結果を無効化
     // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
-    //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
+    //   ロールとドラムパッドを見られる・試聴できるようにするため(方針)
     updateKssPlayButton();
   }
 
@@ -6760,7 +6759,7 @@
     takeDpcmFiles(result.dpcmFiles);
 
     kssFileStatusEl.innerHTML =
-      '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FME-7/N163/VRC7を借用して再生)',
+      '<div class="ok">' + T('MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(SUNSOFT 5B/N163/VRC7を借用して再生)',
         { mode: kssManualBpm ? T('指定') : T('推定'), bpm: result.bpm, chips: result.chips.join(', ') }) + '</div>' +
       renderTuning(result.tuning) + renderPitchCheck(result.pitchCheck);
 
@@ -6783,7 +6782,7 @@
     keyboardDisplay.setMode('nsf');
   });
   document.getElementById('btnKssExportWav').addEventListener('click', exportKssWav);
-  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(方針)
   document.getElementById('btnKss2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'kss', onConvert: runKss2Mml }));
   document.getElementById('btnKssSongPrev').addEventListener('click', () => changeKssSong(-1));
   document.getElementById('btnKssSongNext').addEventListener('click', () => changeKssSong(1));
@@ -6861,7 +6860,7 @@
     }
     gbsRollToken++; // 進行中の先読みキャプチャ結果を無効化
     // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
-    //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
+    //   ロールとドラムパッドを見られる・試聴できるようにするため(方針)
     updateGbsPlayButton();
   }
 
@@ -7139,7 +7138,7 @@
     keyboardDisplay.setMode('nsf');
   });
   document.getElementById('btnGbsExportWav').addEventListener('click', exportGbsWav);
-  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(方針)
   document.getElementById('btnGbs2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'gbs', onConvert: runGbs2Mml }));
   document.getElementById('btnGbsSongPrev').addEventListener('click', () => changeGbsSong(-1));
   document.getElementById('btnGbsSongNext').addEventListener('click', () => changeGbsSong(1));
@@ -7212,7 +7211,7 @@
     }
     hesRollToken++; // 進行中の先読みキャプチャ結果を無効化
     // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
-    //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
+    //   ロールとドラムパッドを見られる・試聴できるようにするため(方針)
     updateHesPlayButton();
   }
 
@@ -7267,7 +7266,7 @@
     const totalFrames = Math.ceil(captureDuration * hesFrameRate);
 
     // ★2026-08 PCM(DDA)対応前の設計に戻した(GBS/KSSと同じHesReplayStreamPlayer、
-    // ユーザー要望)。CPU駆動のリアルタイム合成(HesStreamPlayer)や事前一括レンダリング
+    // 方針)。CPU駆動のリアルタイム合成(HesStreamPlayer)や事前一括レンダリング
     // (HesBufferedPlayer、いずれもsrc/audio/hes-stream-player.jsに定義は残したまま)は
     // DDA(PCM)の高頻度書込みを正確に再現するために順に試したが、いずれも「がくがく」
     // する・鍵盤表示が働かない等の副作用が解消しきれなかったため、まずは安定していた
@@ -7633,7 +7632,7 @@
     keyboardDisplay.setMode('nsf');
   });
   document.getElementById('btnHesExportWav').addEventListener('click', exportHesWav);
-  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(方針)
   document.getElementById('btnHes2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'hes', onConvert: runHes2Mml }));
   document.getElementById('btnHesTrackPrev').addEventListener('click', () => changeHesTrack(-1));
   document.getElementById('btnHesTrackNext').addEventListener('click', () => changeHesTrack(1));
@@ -8348,7 +8347,7 @@
     }
     vgmRollToken++;
     // ★停止ではロールを消さない(別の曲を再生し始めるときだけ消す)。止めた状態でも
-    //   ロールとドラムパッドを見られる・試聴できるようにするため(ユーザー要望)
+    //   ロールとドラムパッドを見られる・試聴できるようにするため(方針)
     updateVgmPlayButton();
   }
 
@@ -8793,11 +8792,11 @@
       const chId = Plan.chIdForVgmSource(srcId);
       if (chId) map[chId] = plan[srcId];
     }
-    // ストリーミングDACの既定は E(DPCM)(2026-09-04、ユーザー指示)。メガドライブの
+    // ストリーミングDACの既定は E(DPCM)(2026-09-04、方針)。メガドライブの
     // ドラムはYM2612のDACに載っていることがほとんどで、打点はVGMログの
     // シーク位置から正確に取れる(vgmDacDrumFor)。他に行き場が無い行でもある
     // (音程を持たないので旋律chへは載せられない)。
-    // X68000のADPCM(OKIM6258)も同じ(2026-09-05、ユーザー指示): ドラム/ボイスがここに載り、
+    // X68000のADPCM(OKIM6258)も同じ(2026-09-05、方針): ドラム/ボイスがここに載り、
     // 打点はDACストリームの開始アドレスから取れる(DAC_ROW_CHIP)。
     if (h.chips && h.chips.ym2612) map.YMDA = 'dpcm';
     if (h.chips && h.chips.okim6258) map.OKI = 'dpcm';
@@ -8916,7 +8915,7 @@
     const ignoredMsg = (result.ignoredChips && result.ignoredChips.length)
       ? T('。対象外の音源は無視: {chips}', { chips: result.ignoredChips.join(', ') }) : '';
     // DPCM(打楽器を実サンプルのまま焼いた分)の実測コスト。実機ROMの容量を意識できるよう
-    // 定義数とバイト数をその場に出す(ユーザー要望)
+    // 定義数とバイト数をその場に出す(方針)
     const ds = result.dpcmStats;
     const dpcmMsg = ds ? '<div>' + T('DPCM: 定義 {clips} 件 / 打点 {segments} 個 / ROM {kb} KB',
       { clips: ds.clips, segments: ds.segments, kb: (ds.bytes / 1024).toFixed(1) }) + '</div>' : '';
@@ -8940,7 +8939,7 @@
     keyboardDisplay.setMode('nsf');
   });
   document.getElementById('btnVgmExportWav').addEventListener('click', exportVgmWav);
-  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(ユーザー要望)
+  // 「to MML」は変換設定画面を開き、その中の「コンバート開始」で変換する(方針)
   document.getElementById('btnVgm2Mml').addEventListener('click', () => MML.UI.ConvertSettings.open({ format: 'vgm', onConvert: runVgm2Mml }));
 
   // ==========================================================================
@@ -9005,7 +9004,7 @@
     // 取れないため、openSoundFile()からは直接awaitで呼ぶ(inputのfilesへは同じくセットする
     // ので、loadXxxFile()側から見た見え方はダイアログ経由と変わらない)。
     const formatToLoadFn = { nsf: loadNsfFile, spc: loadSpcFile, kss: loadKssFile, gbs: loadGbsFile, hes: loadHesFile, vgm: loadVgmFile, psf: loadPsfFile };
-    // ドラッグ&ドロップは「開いてそのまま再生」までを1操作で行いたいというユーザー要望。
+    // ドラッグ&ドロップは「開いてそのまま再生」までを1操作で行いたいという方針。
     // ファイル選択ダイアログ側は従来通りヘッダ確認後に手動で再生ボタンを押す2段階のまま
     // 変えない(呼び出し元のdropハンドラでだけ再生を始める、openSoundFile自体は再生しない)。
     // ★再生は各フォーマットの再生ボタンのclickに委ねる: 以前はplayXxxStream()を直接呼んで
@@ -9260,9 +9259,9 @@
     }
 
     // ファイル選択ダイアログもドラッグ&ドロップと同じく「開いたらそのまま再生」する
-    // (2026-09-09 ユーザー指示「鍵盤表示でファイル開いたら即再生」。鍵盤表示の
+    // (2026-09-09 方針「鍵盤表示でファイル開いたら即再生」。鍵盤表示の
     //  「開く」ボタンもこの input を click() するので、ここ1か所で全経路が揃う)。
-    // MMLテキスト('mml')は formatToPlayFn に載っていないので読み込むだけ(ユーザー指示 2026-09-10:
+    // MMLテキスト('mml')は formatToPlayFn に載っていないので読み込むだけ(方針 2026-09-10:
     // 「サウンドファイルなら鍵盤表示を開いて再生 / MMLファイルならMMLエディタを開いて何もしない」。
     //  鍵盤表示を開くのは openSoundFile、MMLエディタを開くのは openMmlTextFile が行う)
     soundFileEl.addEventListener('change', async () => {

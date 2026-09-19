@@ -5,7 +5,7 @@
  *   node tools/headless/score-check.js song.mml        任意のMMLファイルも点検
  *   node tools/headless/score-check.js --out DIR       点検した曲の .musicxml を DIR に書く(MuseScore/ブラウザで開く用)
  *
- * 見るもの(ROADMAP「フェーズ外: 楽譜出力」段階2の受け入れ条件):
+ * 見るもの(作業計画「フェーズ外: 楽譜出力」段階2の受け入れ条件):
  *   1. 各小節の音価合計が拍子どおり(units)。全休符小節は1個の小節休符
  *   2. 音符ごとの合計 units が noteList の音価と厳密一致(見栄えで音を動かしていない)
  *   3. タイ/スラー/連符/連桁の start/stop が対になっている。タイは同じ音高同士

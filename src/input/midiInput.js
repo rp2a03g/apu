@@ -1,7 +1,7 @@
 /*
  * Web MIDI アダプタ (MML.Input.MidiInput) — 入力境界
  *
- * ROADMAPフェーズ3 段階4。MIDI機器の打鍵を「ノート番号 + ベロシティ + 時刻」まで
+ * 作業計画フェーズ3 段階4。MIDI機器の打鍵を「ノート番号 + ベロシティ + 時刻」まで
  * ほどいて src/ui/performInput.js へ渡すだけの薄い層。ここから先(モノフォニックの
  * 後着優先・TimedPitchEvent化・量子化)は入力源によらず共通の経路
  * (src/input/noteSource.js)が担うので、この層にロジックを増やしてはいけない。
@@ -120,7 +120,7 @@
     },
 
     /*
-     * 実機なしで受信経路を試すための注入口(ROADMAPの受け入れ条件はこれで満たせる)。
+     * 実機なしで受信経路を試すための注入口(作業計画の受け入れ条件はこれで満たせる)。
      * data は [status, data1, data2] のバイト列、timeStamp は performance.now() 系。
      */
     injectMessage(data, timeStamp) {

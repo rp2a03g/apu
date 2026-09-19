@@ -20,7 +20,7 @@
   const SAMPLE_RATE = 49716;
 
   // ---- 定数 (emu2413) ----
-  const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS;       // 1024点波形(emu2413本家に合わせて9→10bit化)
+  const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS;       // 1024点波形(emu2413に合わせて9→10bit化)
   const DP_BITS = 19, DP_WIDTH = 1 << DP_BITS, DP_BASE_BITS = DP_BITS - PG_BITS; // 9
   const DB_STEP = 0.375, DB_BITS = 7, DB_MUTE = 1 << DB_BITS;   // 128
   const EG_STEP = 0.375, EG_BITS = 7;
@@ -285,7 +285,7 @@
     }
   }
 
-  // emu2413本家 calc_slot_car: modOut = 2*(fm>>1) (fmのLSBを切り捨てるだけで倍化はしない)
+  // emu2413 calc_slot_car: modOut = 2*(fm>>1) (fmのLSBを切り捨てるだけで倍化はしない)
   function modToCarPhase(fm) { return 2 * (fm >> 1); }
 
   class Vrc7Channel {
@@ -304,7 +304,7 @@
       const pgout = s.calcPhase(lfo_pm);
       if (egout >= DB_MUTE - 1) s.output[0] = 0;
       else if (s.patch.FB !== 0) {
-        // emu2413本家: fm = (output[1]+output[0]) >> (9-FB)。s.feedbackは(output[1]+output[0])>>1で
+        // emu2413: fm = (output[1]+output[0]) >> (9-FB)。s.feedbackは(output[1]+output[0])>>1で
         // 既に1bitシフト済みのため、ここでのシフト量は(9-FB)-1 = (8-FB)。
         const fm = (s.feedback) >> (8 - s.patch.FB);
         s.output[0] = DB2LIN[s.sintbl[(pgout + fm) & (PG_WIDTH - 1)] + egout];
@@ -312,7 +312,7 @@
         s.output[0] = DB2LIN[s.sintbl[pgout] + egout];
       }
       // s.feedbackは自己変調(次回calcModulator呼び出し時のfm計算)専用。キャリアへ渡すのは
-      // emu2413本家同様、平均化前の生のoutput[0]。
+      // emu2413同様、平均化前の生のoutput[0]。
       s.feedback = (s.output[1] + s.output[0]) >> 1;
       return s.output[0];
     }

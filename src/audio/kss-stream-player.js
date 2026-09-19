@@ -353,7 +353,7 @@
       this._scanDac = MML.Audio.kssMakeDac(header, this._scanBus);
       // ★ミュート/ch別音量はスキャンへ反映しない。これらは「聴き方」の設定であって曲の
       // 内容ではないため、全chミュートすると曲が終わったと誤判定して次の曲へ飛んでしまう
-      // (ユーザー報告。以前は「実再生と無音判定基準を揃える」ため反映していた)。
+      // (不具合報告。以前は「実再生と無音判定基準を揃える」ため反映していた)。
       if (this._lastVolume) {
         const exp = this._lastVolume.expansion || this._lastVolume;
         if (exp.psg) MML.Emu.applyVolume(this._scanPsg.vol, exp.psg);

@@ -20,7 +20,7 @@
  *
  * 出力は HES の @DPCM 抽出(src/hes2mml/expansion/dpcm.js)と同じ {defs, files, events} 形。
  *   events: { start, end, note: 24+clipIndex }(src/convert/drumHits.js dpcmNote)
- *   ★本家ppmck準拠(2026-09-19): E の音符は @DPCM 番号そのもの(n<番号>)。レートは定義の freq で固定。
+ *   ★ppmck準拠(2026-09-19): E の音符は @DPCM 番号そのもの(n<番号>)。レートは定義の freq で固定。
  */
 (function (global) {
   'use strict';
@@ -33,7 +33,7 @@
    * 音量は打点の頭の値で固定する(打点の途中の減衰はサンプル自身が持っているため。
    * opn.js drumChannelOf と同じ理由)。
    * ★このチャンネルはユーザーが明示的にDPCMへ載せた先なので、音程が取れたサンプルも
-   *   変換対象にする(DPCMで音律を奏でることもある。ユーザー指示)。
+   *   変換対象にする(DPCMで音律を奏でることもある。方針)。
    * ★サンプル単位の設定(変換する/しない・レート・音量・差し替え)は打点に hash を載せておき、
    *   DrumHits.dpcm 側で反映する(src/convert/drumSamples.js)。
    */

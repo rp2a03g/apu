@@ -165,7 +165,7 @@
     // DMC(DPCM)チャンネルには音量指定が無く、焼いた波形の振幅がそのまま再生音量になる。
     // 素材の振幅は形式によって桁が違う: HESのDDAは5bit値を[-1,1]へ写すので常にほぼ全振幅、
     // SPCのBRRは実測でピーク中央値0.43、しかも vol はVOLレジスタ/127(中央値0.29)なので
-    // 積は0.13程度にしかならず、DPCMのドラムだけ約18dB小さく聞こえていた(ユーザー報告)。
+    // 積は0.13程度にしかならず、DPCMのドラムだけ約18dB小さく聞こえていた(不具合報告)。
     // 曲内で最も大きい打点が全振幅に届くよう、曲全体へ同じゲインを掛ける(打点ごとの
     // 強弱の比は保つ)。既に全振幅の形式はゲイン1のまま=出力不変。持ち上げのみ(1未満に
     // しない。過剰な持ち上げで無音付近のノイズを増幅しないよう上限あり)
@@ -395,22 +395,22 @@
       }
       events.push({ start: t0, end: Math.max(t0 + 1, t1), note: dpcmNote(index) });
     }
-    // 定義は本家と同じ64本まで。溢れたぶんは使用回数の少ない定義から落とす(capDefs)
+    // 定義はppmckと同じ64本まで。溢れたぶんは使用回数の少ない定義から落とす(capDefs)
     const overflow = capDefs(defs, events, files).dropped;
     const bytes = files.reduce((a, f) => a + f.bytes.length, 0);
     return { defs, files, events, stats: { clips: defs.length, bytes, segments: events.length, dropped, normGain, splitClips, pieceDefs, overflow }, noiseHits };
   }
 
-  // ── E の音符 = @DPCM 番号(本家ppmck準拠 2026-09-19) ──
+  // ── E の音符 = @DPCM 番号(ppmck準拠 2026-09-19) ──
   // イベントの note は compiler.js と同じ noteNumber = 24(o2 c) + 番号(src/convert/mmlEmit.js DPCM_NOTE_BASE)。
   // 以前は note:48(o4 c)固定+instrument:番号 で「@<n>で選ぶ」方式だった
   const DPCM_NOTE_BASE = 24;
   function dpcmNote(idx) { return DPCM_NOTE_BASE + Math.max(0, idx | 0); }
   function dpcmIndexOf(note) { return Math.round(note) - DPCM_NOTE_BASE; }
-  const DPCM_DEF_MAX = 64; // 本家 _DPCM_MAX(dpcm_data は 64 行)
+  const DPCM_DEF_MAX = 64; // ppmck _DPCM_MAX(dpcm_data は 64 行)
 
   /**
-   * @DPCM 定義を本家と同じ64本に収める(超えた曲は SPC/HES に実在する)。
+   * @DPCM 定義をppmckと同じ64本に収める(超えた曲は SPC/HES に実在する)。
    * 使用回数(打点数)の少ない定義から落とし、残りを 0.. に詰め直して打点の note も付け替える。
    * defs/events/files は配列をその場で書き換える(呼び出し側の const を保つため)。
    * files は {name} を持つ配列(省略可)。戻り値 { dropped: 落とした定義数, droppedEvents }

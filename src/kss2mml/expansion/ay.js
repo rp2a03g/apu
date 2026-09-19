@@ -265,7 +265,7 @@
   // 書き直す(=エンベロープの位相リセット、compiler.js segmentsToWriteLogFme7 / ppmckDriver.js。キーオン相当)ので、
   // 元は1回だけの減衰が音符の数だけ頭から打ち直され、打楽器が長く大きく鳴り、打点も増えて聞こえていた
   // (実測: Salamander 曲29 の X で元の打ち直し 160 回 → 変換後 355 回)。
-  // 異音程のタイ(&)は本家 ppmck に無い([[ppmck-ampersand-is-length-add]])ので、本家にある EN<n>(ノート番号の
+  // 異音程のタイ(&)はppmck に無いので、ppmckにある EN<n>(ノート番号の
   // 累積差分、ループ無し=最後の値で止まる)で1音にまとめる。半音未満のずれ(D)は捨てる(打楽器の下降なので近似で足りる)。
   // 対象は「同じ位相リセット(envKey)・同じ形状/周期・同じミキサー(トーン系)・隙間無し」で、最後以外の音符が
   // HW_SWEEP_STEP_MAX フレーム以下の連なりだけ(1つのエンベロープの上でゆっくり旋律を弾く曲を1音にしないため)
@@ -290,8 +290,8 @@
         if (k < run.length - 1) for (let f = run[k].start + 1; f < run[k].end; f++) values.push(0);
       }
       if (run.length < 2 || values.some(v => v < -127 || v > 126)) { out.push(head); continue; }
-      // 末尾に 0 を足す: 本家 ppmckc は「|」の無い表でも最後の1値の前へループ点を置く(datamake.c checkLoop)ので、
-      // 最後が -2 だと本家では毎フレーム -2 ずつ下がり続ける。0 で終われば本家でもそこで止まる(本ツールは元々止まる)
+      // 末尾に 0 を足す: ppmckc は「|」の無い表でも最後の1値の前へループ点を置く(datamake.c checkLoop)ので、
+      // 最後が -2 だとppmckでは毎フレーム -2 ずつ下がり続ける。0 で終わればppmckでもそこで止まる(本ツールは元々止まる)
       values.push(0);
       const last = run[run.length - 1];
       out.push(Object.assign({}, head, {

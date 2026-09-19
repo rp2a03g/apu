@@ -5,7 +5,7 @@
  *   node tools/headless/notelist-check.js song.mml   任意のMMLファイルも点検
  *   node tools/headless/notelist-check.js --dump     各chの先頭数音を表示
  *
- * 見るもの(ROADMAP「フェーズ外: 楽譜出力」段階1の受け入れ条件):
+ * 見るもの(作業計画「フェーズ外: 楽譜出力」段階1の受け入れ条件):
  *   1. 各chの noteList の frames 合計が、そのchのセグメント合計(=ループ複製前の曲長)と一致する
  *   2. テンポ一定のchでは ticks(480分解能の音価)から逆算したフレーム数が実フレームと±1以内
  *      (framesForLength の丸め+carry と同じ誤差範囲)

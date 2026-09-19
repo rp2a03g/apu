@@ -2,9 +2,12 @@
  * PSF 再生ゲインの校正(ヘッドレス)
  *   node tools/headless/psf-loudness.js
  *
- * [[emu-loudness-balance]] と同じ手法: gain 適用前の生出力 RMS を実ファイルで測り、
+ * 各形式の音量バランス調整と同じ手法: gain 適用前の生出力 RMS を実ファイルで測り、
  * 「生RMS × gain」が SPC(gain 2.0)の平均にそろう PSF の gain を出す。
- * 冒頭1秒は飛ばして10秒ぶん。SPC は emu sound/spc、PSF は emu sound/psf の各zip先頭曲。
+ * 冒頭1秒は飛ばして10秒ぶん。コーパス(MML_CORPUS_ROOT)の spc/ と psf/ の各zip先頭曲を使う。
+ *
+ *   MML_CORPUS_ROOT=D:/snd node tools/headless/psf-loudness.js
+ *   node tools/headless/psf-loudness.js --corpus-root D:/snd
  */
 'use strict';
 const fs = require('fs');
@@ -12,7 +15,13 @@ const path = require('path');
 const { load } = require('./load');
 const { MML } = load({ skip: [/main\.js$/, /src\/ui\//, /src\/audio\//, /capture-worker/] });
 
-const ROOT = 'C:/Users/user/Desktop/emu sound';
+const argv = process.argv.slice(2);
+const ROOT = (() => {
+  const i = argv.indexOf('--corpus-root');
+  const r = i >= 0 && argv[i + 1] ? argv[i + 1] : process.env.MML_CORPUS_ROOT;
+  if (!r) { console.error('コーパスの場所を --corpus-root か環境変数 MML_CORPUS_ROOT で指定してください(spc/ と psf/ を見ます)'); process.exit(2); }
+  return r;
+})();
 const rmsOf = (arrL, arrR) => { let s = 0; for (let i = 0; i < arrL.length; i++) s += arrL[i] * arrL[i] + arrR[i] * arrR[i]; return Math.sqrt(s / (arrL.length * 2)); };
 
 (async () => {

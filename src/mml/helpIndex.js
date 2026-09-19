@@ -274,7 +274,7 @@
     for (const ch of channelsOf(entry.snippet)) {
       const setup = HelpIndex.setupLineFor(source, ch, entry.lineNo);
       if (setup) out.push(setup);
-      // E(DPCM)は v/@ がエラー(本家ppmck準拠)なので音量を付けない。文字は本家同様に固定(E=DPCM)
+      // E(DPCM)は v/@ がエラー(ppmck準拠)なので音量を付けない。文字はppmck同様に固定(E=DPCM)
       else out.push(ch === 'E' ? `${ch} t150 l4` : `${ch} t150 l4 o4 v12`);
     }
     // 定義行はもう上でまとめて入れてあるので、スニペット側では飛ばす(二重定義を避ける)
@@ -388,7 +388,7 @@
     return String(token)
       .replace(/=\s*\{[^}]*\}?/g, '')      // "@FM<n>={64値}" → "@FM<n>"
       .replace(/<[^>]*>/g, '<>')           // <n> と <num> の違いを無視
-      .replace(/[(（][^)）]*[)）]/g, '')    // "@<n>(FME7)" の但し書きを落とす
+      .replace(/[(（][^)）]*[)）]/g, '')    // "@<n>(SUNSOFT 5B)" の但し書きを落とす
       .replace(/\s+/g, '')
       .toLowerCase();
   };

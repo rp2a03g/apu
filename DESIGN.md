@@ -2,7 +2,7 @@
 
 本書はこのプロジェクトの**恒久的な設計原則**を定める。すべての実装(人間・AIを問わず、
 またどのモデルで作業する場合でも)は、着手前に本書を読み、**不変条件(INV)に違反しない**
-ことを確認してから進めること。個々の機能の実装順序と受け入れ条件は [ROADMAP.md](ROADMAP.md) に定める。
+ことを確認してから進めること。個々の機能の実装順序と受け入れ条件は、手元の作業計画(ROADMAP.md。リポジトリには含めない)に定める。
 
 ## 0. ビジョン
 
@@ -85,7 +85,7 @@
   全文生成が許されるのは、原文MMLが存在しない場合(鼻歌からの新規作成、*2mml変換直後)のみ。
 - ソース位置(srcStart/srcEnd)自体はlexer.js/compiler.jsで既に音符トークンに記録されている
   (再生ハイライト機能用)。フェーズ1で残っているのは、これをsrc/ir/のSong IR srcRangeとして
-  正式に露出させる部分のみ(ROADMAP フェーズ1参照)。
+  正式に露出させる部分のみ(作業計画のフェーズ1参照)。
 
 ---
 
@@ -207,7 +207,7 @@ structuredClone/JSON.stringifyがそのまま通ること)。
 | `src/archive/` | zip(セントラルディレクトリ/deflate-raw)・7z(ヘッダ解析+自前LZMA/LZMA2展開)・gzip の汎用リーダー。全形式共通の「曲リストの器」(SPC等の1ファイル1曲形式もアーカイブで曲送り) | コア |
 | `src/mml/` lexer/compiler/player | MMLコンパイル・直接レンダリング | コア |
 | `src/convert/` | フォーマット非依存の BPM検出・音長量子化・MML生成 | コア |
-| `src/score/` | 楽譜出力: compile() の noteList(音価付き音符列)→表記モデル(notation.js: 小節/タイ/連符/連桁/臨時記号/調。buildPianoNotation で右手/左手の和音2段にも畳む)→MusicXML(musicxml.js)/記譜間隔の段組みと canvas 描画(engrave.js、楽譜ウィンドウ src/ui/scoreView.js)。入力側は musicxmlImport.js(+xmlLite.js)が MusicXML/.mxl を MML にする。入口は MML の音価だけ(ロールのレジスタ由来データは使わない)。描画は自前(外部楽譜ライブラリ同梱禁止、ROADMAP「フェーズ外: 楽譜出力」) | コア |
+| `src/score/` | 楽譜出力: compile() の noteList(音価付き音符列)→表記モデル(notation.js: 小節/タイ/連符/連桁/臨時記号/調。buildPianoNotation で右手/左手の和音2段にも畳む)→MusicXML(musicxml.js)/記譜間隔の段組みと canvas 描画(engrave.js、楽譜ウィンドウ src/ui/scoreView.js)。入力側は musicxmlImport.js(+xmlLite.js)が MusicXML/.mxl を MML にする。入口は MML の音価だけ(ロールのレジスタ由来データは使わない)。描画は自前(外部楽譜ライブラリ同梱禁止) | コア |
 | `src/nsf2mml/` `src/spc2mml/` `src/kss2mml/` `src/gbs2mml/` `src/hes2mml/` `src/vgm2mml/` | 各形式→ノート抽出(vgm2mmlはチップファミリごとに他の*2mmlへ委譲。kss/gbs/hesは`convertCapture`でキャプチャと変換を分離済み) | コア |
 | `src/ir/` (新設) | Song IR 定義・検証・移行・MML⇔IR変換 | コア |
 | `src/input/` | メトロノーム(metronome.js)・入力レイテンシ/時間軸写像(latency.js)・演奏入力の合流点(noteSource.js: 全入力源 → TimedPitchEvent)・PC鍵盤の配列(keyMap.js)・tick格子への量子化と和音のまとめ(quantize.js)・Web MIDIアダプタ(midiInput.js)。今後 鼻歌(pitchDetect.js/micInput.js)を足す | コア(*) |
@@ -342,7 +342,7 @@ structuredClone/JSON.stringifyがそのまま通ること)。
    (特に: サーバー前提にしていないか / MML以外を保存形式にしていないか /
    IRを迂回して入力と出力を直結していないか / コアからDOMを触っていないか /
    MML全文再生成で上書きしていないか)
-2. ROADMAP.md の現在フェーズの範囲内か? 範囲外の作業を混ぜていないか?
+2. 作業計画の現在フェーズの範囲内か? 範囲外の作業を混ぜていないか?
 3. バンドル対象ファイルを触るか? → 触るならキャプチャWorkerバンドル再ビルドまでが完了条件。
 4. **ユーザーに見える文言を追加/変更するか? → §5のi18n規約に従ったか?**
    新しいUI文言は「日本語の原文をキーにして `T()` を通し、同じ原文の訳を `src/i18n/en.js`
@@ -362,6 +362,6 @@ structuredClone/JSON.stringifyがそのまま通ること)。
    ハードウェアユニット(エンベロープ/LFO/変調等)があるか確認し、あれば抽出方式が
    ハードウェア・パススルーか解析的/サイクル精度の再計算のどちらかになっているか
    (駆動フレーム境界で値をそのまま読むだけの実装になっていないか)を確認する。
-6. 受け入れ条件(ROADMAPの該当フェーズに記載)をどう確認するか、着手前に決めたか?
+6. 受け入れ条件(作業計画の該当フェーズに記載)をどう確認するか、着手前に決めたか?
 7. 既存機能の回帰確認(最低限: 既存MMLのコンパイル→再生、実NSF/SPC/KSSの1曲再生)を
    完了条件に含めたか?

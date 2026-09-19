@@ -6,7 +6,7 @@
  *   node tools/headless/score-midi-check.js --keep DIR      中間ファイル(.musicxml/.mid/MuseScoreのログ)を DIR に残す
  *   node tools/headless/score-midi-check.js --piano         ピアノ2段(buildPianoNotation)で検証(和音は音ごとに照合)
  *
- * やること(ROADMAP「フェーズ外: 楽譜出力」段階2の受け入れ条件「MIDI 往復のフレーム突き合わせ」):
+ * やること(作業計画「フェーズ外: 楽譜出力」段階2の受け入れ条件「MIDI 往復のフレーム突き合わせ」):
  *   1. MML → compile() → 表記モデル → .musicxml を書く
  *   2. MuseScore4.exe -o x.mid x.musicxml で MIDI にする(MuseScore が読めた=構造が正しい)
  *   3. MIDI のノート(開始tick/長さ/音高)を、表記モデル(units)から求めた期待値と突き合わせる。

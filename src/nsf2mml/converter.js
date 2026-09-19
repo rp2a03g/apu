@@ -8,7 +8,7 @@
  *   DMCは実機ppmckc準拠(音符バイト=dpcm_dataテーブルの行選択)で実演奏化する。
  *   (sampleAddr,sampleLen,rate,dac,loop)の組が同じトリガーをまとめて@DPCM<n>定義
  *   にし、Eチャンネル(dpcmは常に最優先でEを占める)の音符 n<n> でその定義を選ぶ
- *   (buildDpcmDefs/buildDpcmEvents参照。2026-09-19からコンパイラ側も本家と同じ「音符=番号」)。
+ *   (buildDpcmDefs/buildDpcmEvents参照。2026-09-19からコンパイラ側もppmckと同じ「音符=番号」)。
  *   抽出したサンプル本体は引き続きdpcmFilesとして.dmcバイナリでも返す。
  */
 (function (global) {
@@ -42,7 +42,7 @@
   // レジスタ値そのものは変化しないため($4015のステータスビットも立ったまま)、
   // レジスタの値だけを見る抽出処理では検出できず、次の書込みまでずっと同じ音が
   // 連続音として鳴っているように見えてしまう(女神転生II 11曲目のバスドラム的三角波が
-  // 連続トーンになる、とユーザー報告)。ここでこの自然減衰をシミュレートし、実際に
+  // 連続トーンになる、と不具合報告)。ここでこの自然減衰をシミュレートし、実際に
   // 音が止まるフレームで休符へ切り替える。
   function triangleAudibleFrames(haltFlag, linearReload, lengthCounterValue) {
     if (haltFlag) return Infinity; // 継続モード: 自然減衰しない(次のイベントまで鳴り続ける)
@@ -635,7 +635,7 @@
   // $4013長さ]を丸ごと持つ(音高からレートを動的計算する仕組みは実機には無い)。
   // これに忠実にするため、(sampleAddr,sampleLen,rate,dac,loop)の組が同じトリガーを
   // 1つの@DPCM<n>定義にまとめ、Eチャンネルの音符をその番号(n<n>)にする。コンパイラ側も
-  // 2026-09-19から本家と同じ「音符=番号、レートは定義で固定」なので、そのまま行選択になる。
+  // 2026-09-19からppmckと同じ「音符=番号、レートは定義で固定」なので、そのまま行選択になる。
   function buildDpcmDefs(triggers, dpcmFiles, bankInfo) {
     const fileByKey = new Map();
     for (const f of dpcmFiles) fileByKey.set(f.fileKey, f.name);
@@ -668,7 +668,7 @@
       if (instrument === undefined) continue;
       const end = i + 1 < triggers.length ? triggers[i + 1].start : totalFrames;
       if (end <= trig.start) continue;
-      // E の音符 = @DPCM 番号(本家ppmck準拠 2026-09-19。src/convert/drumHits.js dpcmNote)
+      // E の音符 = @DPCM 番号(ppmck準拠 2026-09-19。src/convert/drumHits.js dpcmNote)
       events.push({ start: trig.start, end, note: MML.Convert.DrumHits.dpcmNote(instrument) });
     }
     return events;
@@ -892,7 +892,6 @@
     // MML本文に埋め込まれるテンポは整数(t<n>)に丸められる(mmlEmit.js)。音長量子化の
     // グリッド(fpb)も同じ丸め後の値で計算しないと、書き出し時と再生(コンパイル)時で
     // 基準テンポが食い違い、打ち直しの多いパートで誤差が蓄積してドリフトする
-    // ([[tempo-rounding-drift-future-issue]]参照)。
     const fpb = FPS * 60 / Math.round(bpm);
     const totalFrames = timeline.length;
 
@@ -1107,7 +1106,7 @@
       { letter: 'B', events: chEventsB, hasInstrument: true, hasVolume: true, hasEnvelope: true, hasDetune: true, hasPitchMod: true, hasSweep: true },
       { letter: 'C', events: chEventsC, hasDetune: true, hasPitchMod: true },
       { letter: 'D', events: chEventsD, hasVolume: true, hasEnvelope: true, hasInstrument: true },
-      // E: 音符=@DPCM番号(本家ppmck準拠)。@/v は出さない(mmlEmit.js DPCM_FLAGS_OFF)
+      // E: 音符=@DPCM番号(ppmck準拠)。@/v は出さない(mmlEmit.js DPCM_FLAGS_OFF)
       ...(dpcmLetter ? [{ letter: dpcmLetter, events: dpcmEvents }] : []),
     ];
 
@@ -1177,7 +1176,7 @@
         totalFrames, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
     }
 
-    // 定義は本家と同じ64本まで(実機DPCM+合成音パッドの合計)。溢れは使用回数の少ない定義から落とす
+    // 定義はppmckと同じ64本まで(実機DPCM+合成音パッドの合計)。溢れは使用回数の少ない定義から落とす
     const dpcmCap = MML.Convert.DrumHits.capDefs(dpcmDefs, dpcmEvents, dpcmFiles);
     if (dpcmCap.dropped) vrc7Notes.push(`@DPCM 定義が64本を超えたため、使用回数の少ない ${dpcmCap.dropped} 本(打点 ${dpcmCap.droppedEvents} 個)を落としました`);
     // @DPCM<n>定義行(実機ppmckcと同じ書式)。ヘッダー行として他の音色定義と同列に出す

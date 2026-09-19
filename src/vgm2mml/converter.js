@@ -4,7 +4,7 @@
  *   → Promise<{ mml, bpm, chips, expansions, family, assignments, ... }>
  *
  * VGMはCPU無しのレジスタ書込みログで、使うチップはヘッダで決まる(src/vgm/vgmHeader.js)。
- * 抽出器は既存の *2mml のものを流用する(抽出器を複製しない、ROADMAP.md VGM節):
+ * 抽出器は既存の *2mml のものを流用する(抽出器を複製しない、作業計画 VGM節):
  *   NES APU(+FDS)      → MML.NSF2MML.convert         (nsf2mml、ネイティブ変換。丸ごと委譲)
  *   GB DMG             → MML.GBS2MML.convertCapture   (gbs2mml、2A03/FDS借用。丸ごと委譲)
  *   HuC6280            → MML.HES2MML.convertCapture   (hes2mml、N163/2A03ノイズ借用。丸ごと委譲)
@@ -346,7 +346,7 @@
   };
 
   /**
-   * 構成駆動の既定割当(ROADMAP.md VGM節 段階3): 固定=AY→FME-7、YM2413→VRC7、SCC→N163。
+   * 構成駆動の既定割当(作業計画 VGM節 段階3): 固定=AY→FME-7、YM2413→VRC7、SCC→N163。
    * SN76489はFME-7の空き→N163の順にチップ単位で収め、ノイズは最初の1本だけ2A03ノイズ(D)。
    * @returns {Object<string,string>} sourceId → targetType
    */
@@ -417,7 +417,7 @@
       const noise = src.find(s => s.chip === 'sn76489' && s.chipIndex === k && s.kind === 'noise');
       if (noise) plan[noise.id] = used.noise < cap.noise ? (take('noise'), 'noise') : 'skip';
     }
-    // ★VRC7(6ch)からあふれたFMは、他を全部置いた後に残った N163 の空きへ(ユーザー報告 2026-09-10:
+    // ★VRC7(6ch)からあふれたFMは、他を全部置いた後に残った N163 の空きへ(不具合報告 2026-09-10:
     //   R-Type Leo 2曲目で YM2151 FM7 のバッキングが丸ごと消えていた)。YM2151は8chなので既定では
     //   必ず2本あふれる。N163を先に取りに行かないのは、SCC/PCM/SN76489 の従来の割当を1つも
     //   動かさないため(N163が埋まる C140/SegaPCM 構成では従来どおり skip のまま)
@@ -430,7 +430,7 @@
     return plan;
   };
 
-  // 表示用: "AY8910 → FME-7(X-Z)" のように割当をまとめる
+  // 表示用: "AY8910 → SUNSOFT 5B(X-Z)" のように割当をまとめる
   MML.VGM2MML.describePlan = function (h, plan) {
     const src = MML.VGM2MML.sourceChannels(h);
     const groups = new Map();
@@ -440,7 +440,7 @@
       // ドラムパート(合成ch)はラベルがそのまま1グループ("C140 Drums")
       const key = /:drum$/.test(s.id) ? s.label
         : s.label.replace(/ ch\d+$| noise$/, '').replace(/ (FM|ADPCM-A|PCM)\d+(\(2\))?$/, ' $1$2') + (s.kind === 'noise' ? ' noise' : '');
-      const dst = (t === 'skip' || !tt.chip) ? null : (tt.chip === '2a03' ? `2A03 ${tt.letter}` : tt.chip.toUpperCase().replace('FME7', 'FME-7'));
+      const dst = (t === 'skip' || !tt.chip) ? null : (tt.chip === '2a03' ? `2A03 ${tt.letter}` : tt.chip.toUpperCase().replace('FME7', 'SUNSOFT 5B'));
       if (!groups.has(key)) groups.set(key, new Set());
       if (dst) groups.get(key).add(dst);
     }
@@ -551,7 +551,7 @@
     // options.toneSettings … main.js が ToneSettings.snapshot() で作った素のオブジェクト(無ければ従来どおり)
     // ★抽出のskipゲート(wantExtract)より前で決めること。音色一覧の「載せ先」は抽出済みの
     //   イベントから音色キーを引いて効かせるので、ここが後ろにあると借用先skipのchは
-    //   そもそも抽出されず、音色一覧で載せ先を指定しても何も出なかった(ユーザー報告 2026-09-10)
+    //   そもそも抽出されず、音色一覧で載せ先を指定しても何も出なかった(不具合報告 2026-09-10)
     const TS = (MML.Convert.ToneSettings && options.toneSettings) ? MML.Convert.ToneSettings.lookup(options.toneSettings) : null;
     const TK = MML.Convert.ToneKey;
     const keyOf = (ev, s) => (TK ? TK.ofEvent(ev, s) : null);
@@ -986,7 +986,7 @@
     // 波形に使えるのは 128-8*有効ch数 バイトだけ。あふれるとコンパイルエラーで再生も
     // 書き出しもできないため、変換設定 N163_WAVE='fit'(既定)ならあふれたぶんの波形を
     // 半分ずつ縮める(src/convert/n163Fit.js)。★下の音程補正より前に呼ぶこと
-    // ★休符だけのN163チャンネルは出さない(ユーザー指示 2026-09-11)。実効ch数は
+    // ★休符だけのN163チャンネルは出さない(方針 2026-09-11)。実効ch数は
     //   #EX-N163 の数値で伝わるので、空チャンネルを並べて位置を示す必要がなくなった
     if (byFamily.n163) {
       const sounding = byFamily.n163.filter(p => p.channel.events.some(ev => ev.note !== null));
@@ -1033,12 +1033,12 @@
     }
     // N163: 途中の空きレターも空チャンネルとして出す(numCh検出をcompiler.jsと揃えるため)
     // DPCM(Eパート)。実機ppmck同様レター体系上Eは固定なので letterMap を経由しない
-    // (hes2mml/converter.js と同じ扱い)。音符 n<番号> が @DPCM<番号> を選ぶ(本家ppmck準拠 2026-09-19)。
+    // (hes2mml/converter.js と同じ扱い)。音符 n<番号> が @DPCM<番号> を選ぶ(ppmck準拠 2026-09-19)。
     if (dpcmResult) {
       scoreChannels.push({ letter: 'E', events: dpcmResult.events });
       const st = dpcmResult.stats;
       notes.push(`打楽器のPCMを実サンプルのままDPCM(Eパート)へ変換しました: 定義${st.clips}件 / 打点${st.segments}個 / ROM ${(st.bytes / 1024).toFixed(1)}KB(同時発音区間はその瞬間の音をミックスした1サンプルとして焼いています)。`
-        + (st.overflow ? `@DPCM 定義が64本(本家ppmckの上限)を超えたため、使用回数の少ない ${st.overflow} 本を落としました。` : ''));
+        + (st.overflow ? `@DPCM 定義が64本(ppmckの上限)を超えたため、使用回数の少ない ${st.overflow} 本を落としました。` : ''));
     }
     MML.Convert.sortChannelsByLetter(scoreChannels);
 
@@ -1063,7 +1063,7 @@
     const bpm = options.bpm
       ? MML.Convert.refineBpm(options.bpm, noteDurations, frameRate)
       : MML.Convert.chooseTempoOctave(MML.Convert.detectBpm(noteDurations, frameRate), scoreChannels, frameRate, { totalFrames, cmd });
-    const fpb = frameRate * 60 / Math.round(bpm); // t<n>整数丸めと揃える([[tempo-rounding-drift-future-issue]])
+    const fpb = frameRate * 60 / Math.round(bpm); // t<n>整数丸めと揃える
 
     const assignments = MML.VGM2MML.describePlan(h, plan);
     const chipList = h.usedChips.map(ch => ch.name + (ch.dual ? ' x2' : '')).join(', ');
@@ -1105,8 +1105,8 @@
       `; 変換     : Sound Emulation Foundry`,
       `; チャンネル: ${chanDesc}`,
       `; 借用先の割当(${isCustom ? 'ユーザー指定' : '構成から自動'}): ${assignments.join(', ') || '-'}`,
-      `; ※ このアプリのMMLプレイヤーはNES音源専用のため、AY8910→FME-7(互換)、YM2413→VRC7(同一)、`,
-      `;    SCC→N163(波形近似)、SN76489等の矩形波はFME-7の空き→N163(矩形波@N)の順に、ノイズは`,
+      `; ※ このアプリのMMLプレイヤーはNES音源専用のため、AY8910→SUNSOFT 5B(互換)、YM2413→VRC7(同一)、`,
+      `;    SCC→N163(波形近似)、SN76489等の矩形波はSUNSOFT 5Bの空き→N163(矩形波@N)の順に、ノイズは`,
       `;    2A03ノイズ(D)へ載せています(割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
       `;    YM2612/YM2610/YM2151/YM2203/YM2608のFMはVRC7へ(4op→2op自動変換で@0自作音色に。ただし実機の自作音色`,
       `;    スロットは$00-$07の1組を全chで共有するため、同時に鳴るぶんに収まらないchはいちばん近い内蔵音色へ)、`,
@@ -1125,7 +1125,7 @@
     const dpcmDefLines = dpcmResult ? dpcmResult.defs.map(d =>
       `@DPCM${d.index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac}, ${d.mode} }`) : [];
     // resolveConflicts でプリセットへ落としたぶんの @OP<n> 定義は誰も参照しなくなる。
-    // NSF書き出しで音色テーブル+分岐コードとしてROMを食う([[nsf-export-size-consciousness]])ので
+    // NSF書き出しで音色テーブル+分岐コードとしてROMを食うので
     // 捨てて番号を詰める(イベント側の vrc7Tone も同時に振り直される)
     MML.Convert.Vrc7Tone.compactRegistry(vrc7ToneReg, (byFamily.vrc7 || []).map(p => p.channel));
     // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前

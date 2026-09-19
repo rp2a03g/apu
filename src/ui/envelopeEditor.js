@@ -28,7 +28,7 @@
  *
  * ■ ピッチ/ノートレーンは保存形式が違う
  * @EN はMML上「前回値からの相対値」でその累積が音程になる(compiler.js
- * cumulativeEnvelopeValue)。@EP も本家ppmck準拠で同じ「差分の累積」(2026-09-13修正、
+ * cumulativeEnvelopeValue)。@EP もppmck準拠で同じ「差分の累積」(2026-09-13修正、
  * compiler.js pitchEnvelopeValue)。編集は「実際に鳴る音程/オフセットの階段」を描く方が
  * 分かりやすいので、ローカル状態は累積値で持ち、MMLへ書く直前に差分へ変換する(FDS変調テーブルの
  * computeModCurve/codesFromCurve と同じ考え方)。キャンバス上で1点を動かしても
@@ -56,7 +56,7 @@
   //   と同じ dpcm1=E / fds1=F / vrc7 6=G-L / vrc6 3=M-O / n163 8=P-W / fme7 3=X-Z / mmc5 2=a,b)
   // volMax: v<n>と@v<n>の最大値(compiler.js buildSegments の volMax と同じ)
   // volEff: 実機で実際に効く上限(これ以上は音が大きくならない)。エディタの目盛りの最大はこちら
-  //   (2026-09-14ユーザー指示「FDSとVRC6ノコギリ波は実質の上限値をMAXに」。MML上は63まで書けるが、
+  //   (2026-09-14方針「FDSとVRC6ノコギリ波は実質の上限値をMAXに」。MML上は63まで書けるが、
   //    効かない範囲を描かせても意味が無い。既存の表に上限超えの値があれば上限に張り付いて描かれる)
   // duty:   @<n>={...}(デューティエンベロープ)の段数。0=そのチャンネルには存在しない
   // pitch:  EP(ピッチエンベロープ)が使えるか。VRC7はfnum/blockの対数表現のため対象外
@@ -69,7 +69,7 @@
     { id: 'mmc5p', label: 'MMC5 パルス', letter: 'a', chip: 'mmc5', volMax: 15, duty: 4, pitch: true },
     { id: 'fds', label: 'FDS', letter: 'F', chip: 'fds', volMax: 63, volEff: 32, duty: 0, pitch: true },
     { id: 'n163', label: 'N163', letter: 'P', chip: 'n163', volMax: 15, duty: 0, pitch: true },
-    { id: 'fme7', label: 'FME7', letter: 'X', chip: 'fme7', volMax: 15, duty: 0, pitch: true },
+    { id: 'fme7', label: 'SUNSOFT 5B', letter: 'X', chip: 'fme7', volMax: 15, duty: 0, pitch: true },
     { id: 'vrc7', label: 'VRC7', letter: 'G', chip: 'vrc7', volMax: 15, duty: 0, pitch: false }
   ];
 
@@ -163,7 +163,7 @@
   const BLACK_PC = new Set([1, 3, 6, 8, 10]);
   const KB_LOW = -12;     // 鍵盤の範囲(基準の音からの半音)。1オクターブ下〜2オクターブ上
   const KB_HIGH = 24;
-  // 和音の種類。音の数ごとに分けて選べるようにする(ユーザー指示「和音の数と一緒に」)。
+  // 和音の種類。音の数ごとに分けて選べるようにする(方針「和音の数と一緒に」)。
   // 名前はコード表記そのもの(万国共通なので訳さない)。長三和音だけは表記が空なので label で出す
   const CHORD_GROUPS = [
     { count: 3, items: [
@@ -232,7 +232,7 @@
   // zones: [{ values, loop }] の1つか2つ。2つ目はリリース。
   // 縦は上から「目盛り帯(RULER_H)」「値の区画」。横は区画0 → 境目(SEP_W) → 区画1 → 余白(SLACK)。
   //
-  // 操作(2026-09-14ユーザー指示):
+  // 操作(2026-09-14方針):
   //   値の区画のドラッグ ………… 値を描く
   //   目盛り帯の終端つまみ ……… 左右ドラッグで長さを変える
   //   目盛り帯のループつまみ …… 左右ドラッグでループ位置を動かす
@@ -240,7 +240,7 @@
   // 値の区画でのダブルクリックは、その前の2回のmousedownで値を描いてしまっているので、
   // 1回目のmousedownの直前に取っておいた値へ戻してからループ位置を置く。
   //
-  // ピッチ/ノートの縦幅(2026-09-14ユーザー指示「範囲は縦にドラッグして延ばす。目盛り振っといて」):
+  // ピッチ/ノートの縦幅(2026-09-14方針「範囲は縦にドラッグして延ばす。目盛り振っといて」):
   //   値を描くドラッグで上端/下端より外へ出ると、はみ出した距離に応じて縦幅(±)が広がる。
   //   広がり方はドラッグ開始時の縦幅を基準にした一定の比率(広がった後の目盛りで測ると加速してしまうため)。
   //   左端の目盛り欄に数値を振り、目盛り帯の左端に今の縦幅(±n)を出す。目盛り欄のダブルクリックで
@@ -628,7 +628,7 @@
         return `<div class="env-lane" data-lane="${lane.key}">` +
           `<div class="toolbar env-lane-bar">` +
             `<label class="env-lane-on"><input type="checkbox" class="env-on" /><b>${lane.cmd}</b> ${T(lane.label)}</label>` +
-            // 反映はレーン名のすぐ右(2026-09-14ユーザー指示「右だと遠いので左に」)
+            // 反映はレーン名のすぐ右(2026-09-14方針「右だと遠いので左に」)
             `<button type="button" class="env-apply" title="${T('現在の内容をMMLへ反映')}">${T('反映')}</button>` +
             `<button type="button" class="secondary env-add" title="${T('新規定義を追加')}">＋</button>` +
             `<select class="env-index" title="${T('インデックス')}"></select>` +
@@ -776,7 +776,7 @@
         });
       }
 
-      // リリース側の既定番号。音量は本家ppmckの書き方(`@v1={...}` を定義して `@vr1` で呼ぶ)に
+      // リリース側の既定番号。音量はppmckの書き方(`@v1={...}` を定義して `@vr1` で呼ぶ)に
       // 倣って本体と同じ番号にする。音色のリリース(@@r<n>)は同じ @<n>={...} の別番号を指すので、
       // 本体と同じ番号では上書きになってしまう。空き番号を取る
       function defaultRelIndex(lane) {
@@ -938,7 +938,7 @@
       }
 
       // 和音 → レーンの表(累積値)。最後に最初の音へ戻る1フレームを足してループ位置を1にするので、
-      // ループ区間の相対値の合計が0になり何周しても音程がずれない(本家ppmckの @EN0={0 | 4 3 -7} と同じ形)
+      // ループ区間の相対値の合計が0になり何周しても音程がずれない(ppmckの @EN0={0 | 4 3 -7} と同じ形)
       function applyChord(lane, opt) {
         const s = state.get(lane.key);
         const c = s.chord;
@@ -1135,7 +1135,7 @@
           s.loop = main.loop;
         }
         if (lane.relTag != null) {
-          // @vr<n> の定義が無ければ本家ppmck同様 @v<n> を参照する(compiler.js resolveEnvTables)
+          // @vr<n> の定義が無ければppmck同様 @v<n> を参照する(compiler.js resolveEnvTables)
           let rel = readTable(src, lane.relTag, s.relIndex);
           if (!rel && lane.relTag === 'vr') rel = readTable(src, 'v', s.relIndex);
           if (rel) { s.relValues = rel.values.slice(); s.relLoop = rel.loop; }
@@ -1241,7 +1241,7 @@
         if (target.chip) {
           const directive = MML.Mml.EX_CHIP_DIRECTIVE[target.chip];
           const re = new RegExp('^\\s*' + directive.replace(/[-]/g, '\\-') + '\\b', 'im');
-          // N163は本家綴り(#EX-NAMCO106)でも通るのでどちらかがあれば足さない
+          // N163はppmck綴り(#EX-NAMCO106)でも通るのでどちらかがあれば足さない
           const already = target.chip === 'n163'
             ? /^\s*#EX-(N163|NAMCO106)\b/im.test(defText) : re.test(defText);
           if (!already) defText = directive + '\n' + defText;

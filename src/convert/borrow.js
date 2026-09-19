@@ -5,7 +5,7 @@
  * 元は src/vgm2mml/converter.js の composePsgLike 後半にだけ在った(VGMのPSG系合成専用)。
  * 鍵盤表示のチャンネル割当(案E、src/convert/channelPlan.js)を KSS/GBS/HES にも効かせるため、
  * 変換元に依らない部分をここへ移した。vgm2mml は引き続きこのモジュールを使う
- * (抽出器も借用ロジックも複製しない、というROADMAPの方針)。
+ * (抽出器も借用ロジックも複製しない、という作業計画の方針)。
  *
  * 使い方(各 *2mml の「ユーザーが割当を変えたとき」の経路):
  *   const r = MML.Convert.Borrow.compose({
@@ -93,7 +93,7 @@
   // @v表だけは vrc7EnvReg が登録時にMMLの向きへ直す)、FME-7は v15 最大の3dB/段、線形音源は振幅比。
   // ★linear の max は借用先ごと(FAMILY_VOL_MAX)。以前は 15 を直書きしており、0-63 を持つ
   //   FDS/VRC6のこぎり波でもレンジの上半分が一切使われず、実測で約6.6dB/約9dB小さく鳴っていた
-  //   (2026-09-11、ユーザー報告「YM2151→VRC6のこぎりの音量がおかしい」)。
+  //   (2026-09-11、不具合報告「YM2151→VRC6のこぎりの音量がおかしい」)。
   const VOL_FROM_DB = {
     vrc7: att => Math.max(0, Math.min(15, Math.round(att / 3))),
     fme7: att => Math.max(0, Math.min(15, 15 - Math.round(att / 3))),
@@ -234,7 +234,7 @@
   }
 
   // ── 旋律ch → 2A03ノイズ(D) ───────────────────────────────────
-  // FMやPSGで「ノイズっぽく」鳴らしているパートを2A03ノイズへ載せる(2026-09-05、ユーザー要望)。
+  // FMやPSGで「ノイズっぽく」鳴らしているパートを2A03ノイズへ載せる(2026-09-05、方針)。
   // 音程はノイズの周期index(0=最も明るい)へ写し、ノート番号は nsf2mml/gbs2mml のノイズと同じ
   // 31-idx 空間にする(compiler.js noisePeriodIndex = 15-(note%16))。周期は tone が '0'-'15' なら
   // 固定、'auto'/未指定なら基音(OPNはキャリアの倍率ML込み)から最寄りのシフトレートへ
@@ -616,7 +616,7 @@
           }
         });
       // プリセットへ落としたぶんの @OP<n> 定義は誰も参照しなくなる。NSF書き出しで
-      // 音色テーブル+分岐コードとしてROMを食う([[nsf-export-size-consciousness]])ので詰める
+      // 音色テーブル+分岐コードとしてROMを食うので詰める
       MML.Convert.Vrc7Tone.compactRegistry(regs.vrc7ToneReg, byFamily.vrc7.map(p => p.channel));
     }
 
@@ -625,7 +625,7 @@
     // 書き出しもできないため、変換設定 N163_WAVE='fit'(既定)ならあふれたぶんの波形を
     // 半分ずつ縮める(src/convert/n163Fit.js)。★下の音程補正より前に呼ぶこと:
     // N163の周波数式は波形長を含むので、縮めた後の長さで生レジスタ値を出す必要がある
-    // ★休符だけのN163チャンネルは出さない(ユーザー指示 2026-09-11)。実効ch数は
+    // ★休符だけのN163チャンネルは出さない(方針 2026-09-11)。実効ch数は
     //   #EX-N163 の数値で伝わるので、空チャンネルを並べて位置を示す必要がなくなった
     if (byFamily.n163) {
       const sounding = byFamily.n163.filter(p => p.channel.events.some(ev => ev.note !== null));
@@ -667,7 +667,7 @@
       const chans = list.map(p => p.channel);
       const fn = periodFnFor[fam];
       if (fn) {
-        // 音程補正の方針は変換元ごとに決まる([[kss2mml-pitch-detune-correction]]):
+        // 音程補正の方針は変換元ごとに決まる:
         //   'chorus'(既定、KSS/VGM) … 同時発音のコーラスだけD<n>で明示し単独音は理論値へ丸める
         //   'apply' (GBS/HES)       … 二重量子化の補正として常に実測周波数ベースで補正
         if (o.detuneMode === 'apply') {

@@ -124,7 +124,7 @@
         const mode = sourceEl.value;
         const out = [];
         if (mode === 'sample' || mode === 'both') {
-          out.push({ origin: 'sample', label: T('組み込みサンプル'), text: MML.Mml.SAMPLE_SOURCE });
+          out.push({ origin: 'sample', label: T('組み込みサンプル'), text: MML.Mml.sampleSource() });
         }
         if ((mode === 'editor' || mode === 'both') && mmlSourceEl) {
           out.push({ origin: 'editor', label: T('エディタ本文'), text: mmlSourceEl.value });

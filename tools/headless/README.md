@@ -5,7 +5,7 @@
 `src/` は全ファイルが `(function(global){...})(window)` の素朴なIIFEで、単一グローバル
 `MML` にぶら下がるだけの構造(file:// 直開きを守るため ESM を使っていない)。
 そのおかげで「`index.html` の `<script>` を書かれた順に eval するだけ」でブラウザと
-同じ状態を Node 上に再現できる。全169本が0.2秒ほどで読み込める。
+同じ状態を Node 上に再現できる。全194本が0.2秒ほどで読み込める。
 
 ## 前提
 
@@ -26,7 +26,7 @@ export PATH="$PATH:/path/to/nodejs"
 | `regress.js` | コーパス一括変換のスナップショット回帰テスト |
 | `audio-check.js` | 実際に鳴らした音を数値で点検(クリップ/DC/無音/オクターブずれ/プチノイズ) |
 | `cpu-test.js` | CPU命令テストCLI(検証ロジックは `../cpu-test-core.js` をブラウザ版と共有) |
-| `help-lint.js` | MMLヘルプ(`;@help`タグ)の自己点検。書式・実演スニペットのコンパイル・コマンド網羅 |
+| `help-lint.js` | MMLヘルプ(`;@help`タグ)の自己点検。書式・実演スニペットのコンパイル・コマンド網羅。組み込みサンプルの英語版(`src/mml/sampleMml.en.js`)も見て、コメントを除いたMML本文が日本語版と1行も違わないこと・同じ項目が同じ順で並んでいること・訳し忘れ(日本語の残り)を検査する |
 | `i18n-dupkeys.js` | `src/i18n/en.js` の重複キー検出(後勝ちで先の訳が黙って死ぬため) |
 | `notelist-check.js` | 楽譜出力用の音符列 `compile().noteList`(音価付き)の点検。フレーム合計/ticks逆算/タイ・連符・w・k・PS・`;@time``;@key` の固定ケース |
 | `score-check.js` | 楽譜の表記モデル(src/score/notation.js)と MusicXML 書き出しの点検。小節の合計/音価の厳密一致/タイ・連符・連桁の対応/XMLの整合。`--out DIR` で .musicxml を書く |
@@ -41,7 +41,7 @@ export PATH="$PATH:/path/to/nodejs"
 | `psf-loudness.js` | PSF再生ゲインの校正(SPC基準の生RMS比) |
 | `psf-convert-survey.js` | PSF→MML変換の品質調査(合成ch/実機スロット別のコンパイル可否・音程検証) |
 | `pool-regroup-score.js` | 合成ch(`Emu.PoolChannelRegrouper`)の採点。PSFドライバ内部のトラック構造体を正解にしてレーン純度/トラック集中度を出す |
-| `vgm-normalize-check.js` | VGMPlayの自動正規化(`NormalizeOverallVolume`)を再現し、自前の再生音量が何曲でVGMPlayと2倍/4倍ズレるかを数える。導入判断用(ROADMAP: K007232/MSM5205の節) |
+| `vgm-normalize-check.js` | VGMPlayの自動正規化(`NormalizeOverallVolume`)を再現し、自前の再生音量が何曲でVGMPlayと2倍/4倍ズレるかを数える。導入判断用(K007232/MSM5205) |
 | `baseline-*.json` | 回帰テストのベースライン(曲ごとのSHA-256とメタ情報)。**gitignore済み** |
 
 ベースラインは手元のコーパスと1対1に対応する曲名一覧なので、リポジトリには入れていない。
@@ -124,6 +124,9 @@ node tools/headless/help-lint.js --list
 
 サンプルMML(または引数で渡した.mml)の `;@help` タグを索引化して、
 書式エラー・本文/実演の欠落・コマンドの重複・各実演スニペットのコンパイル可否を見る。
+組み込みサンプルについては英語版(`src/mml/sampleMml.en.js`)も同じ観点で点検し、
+**コメントを除いたMML本文が日本語版と1行も違わないこと**・項目が同じ順で同じ数あること・
+訳し忘れ(コメントに残った日本語)を見る(片方だけ直して食い違ったまま公開する事故を防ぐ)。
 最後に `src/mml/compiler.js` 冒頭の「対応コマンド:」ブロックと突き合わせて
 **ヘルプ未掲載のコマンド**を列挙する(コマンドを実装したのに解説を書き忘れた、を検出する)。
 `check-all.js` からも自動で走る(`--no-help` で外せる)。

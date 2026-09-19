@@ -13,7 +13,7 @@
  * 書き直したもの。mck・ppmck ともに再利用・改変を制限しない配布条件。
  *
  * MML.NSF.MckBytecode が生成するバイトコードを再生する6502サウンドドライバ+
- * NSFバンク切り替え対応の書き出し一式。ROADMAP.mdフェーズ1.6タスク2/3/5/6。
+ * NSFバンク切り替え対応の書き出し一式。作業計画フェーズ1.6タスク2/3/5/6。
  * 実機ppmck(nes_include/ppmck/{sounddrv,internal}.h、https://github.com/munshkr/ppmck)の
  * 設計(状態を1フレームごとにカウンタで管理し、カウンタが0になったらデータを
  * 読み進める。バンク切り替えはチャンネルごとに「現在のバンク番号」を持ち、
@@ -35,7 +35,7 @@
  * N163(WFV_Tn/WFO_Tnテンプレート、3byte/entryテーブルのためTABLE_MAX縮小版)・
  * VRC7(WFO_Tn新設、NOTE+ENVALからfnum/blockを再計算し$9010/$9030を再書込み)が対象。
  * ノイズも2026-09-14から対象(LOOKUP_NOISE_PERIOD: NOTE=周期index直値、(NOTE+ENVAL)&15 に D/EP/MP/PT を
- * 8bitで加減算し桁あふれの bit7=短周期、@<n>のbit0も bit7 へ OR。本家ppmck準拠、2026-09-18)。SPCブラウザ側
+ * 8bitで加減算し桁あふれの bit7=短周期、@<n>のbit0も bit7 へ OR。ppmck準拠、2026-09-18)。SPCブラウザ側
  * 抽出は対応済みだがSPCはNSF書き出し経路を持たないためこのドライバとは無関係。
  * FME7のノイズ(0xF1=N<n>)と@<n>によるミキサー制御(0=ミュート/1=トーン/2=ノイズ/
  * 3=トーン+ノイズ、@2はノート番号がノイズ周期)、およびハードウェアエンベロープ
@@ -46,7 +46,7 @@
  * 生オフセット加算」空間をAPPLY_DETUNE/APPLY_DETUNE_N163内で合算する。
  * D<n>/EP<n>/MP<n>いずれも2A03パルス/三角・VRC6・MMC5・FME7・FDS・N163に対応、
  * VRC7は対象外(compiler.js側のブラウザ再生と同じ対応範囲、DESIGN-PITCH.md §7)。ノイズは
- * 2026-09-14から対象。2026-09-18からは本家ppmck準拠で周期index(0-15)へD/EP/MP/PTを8bit加減算し
+ * 2026-09-14から対象。2026-09-18からはppmck準拠で周期index(0-15)へD/EP/MP/PTを8bit加減算し
  * クランプしない(D16 n0 → $F0 のように桁あふれで bit7=短周期が立つ。compiler.jsのノイズ経路と同じ、
  * 実ppmck09aのNSFと$400E列で一致確認)。
  * @n<num>(直接周波数指定、0xE5)は2026-09-19実装(RD_DIRECT/LOOKUP_DIRECT/DIRACT参照)。使う曲にだけ埋め込む。
@@ -229,7 +229,7 @@
   // 確保せず、既存ブロックの途中(LABEL+offset)を指す式で済ませる(実行時のENV_LOOKUP等は
   // ENV_PTRが指すアドレスを読むだけなので、6502コード側・ENV_LEN/ENV_LOOPの意味は不変。
   // 各インデックスは従来通り自分専用のLEN/LOOPを持ち続けるため、値の解釈がすり替わる
-  // 心配は無い=[[envelope-registry-loop-upgrade-bug]]のようなノート間の意味論の取り違えとは
+  // 心配は無い=ノート間の意味論の取り違えとは
   // 別層の、確定済みバイト列同士の機械的な一致判定)。
   // indexList: envIndexList等(0始まりの連番)。valuesOf(origIdx)は対象のクランプ済みbyte配列。
   // 戻り値: { ptrExprs: indexList順のENV_PTR用アドレス式配列, dataBlocks: 実際に確保する.byteブロック配列 }
@@ -596,7 +596,7 @@
     // 保持する1byte/ch。2A03パルスA/B以外のチャンネルでは使わないが、,Xインデックスの
     // 配列として他の状態と同じ形で確保する(D<n>等と同じ扱い)
     const sweepExtraSlots = usesSweep ? 1 : 0;
-    // SA<num>(N163ピッチシフト量、2026-08-26、本家pitch_shift_amount相当): 1byte/ch。
+    // SA<num>(N163ピッチシフト量、2026-08-26、ppmckpitch_shift_amount相当): 1byte/ch。
     // usesPitchSaの時のみ実際に使う。APPLY_DETUNE_N163のSA_ADD16参照
     const saExtraSlots = usesPitchSa ? 1 : 0;
     // LASTVOL(音量書込みスキップ用の直近値、2026-08-26): 1byte/ch。音量のみ書込み経路
@@ -626,7 +626,7 @@
     // WRITE_VOL_ONLY がそのchの音量を書き戻し、最後の音がまた鳴り出していた(N163で曲末に音量5のまま鳴り続けた。
     // JS再生=compiler.js は曲より先に終わるchの末尾に休符を足して無音にする)。そこで終端に達したchは
     // 種別を TYPE_UNIMPLEMENTED(全ハンドラが何もしない)へ切り替え、以降レジスタへ一切書かせない
-    // (本家ppmckcはLの無いトラックの末尾に「r(255フレーム)へのループ」を置き、休符中はエフェクトを止める)。
+    // (ppmckcはLの無いトラックの末尾に「r(255フレーム)へのループ」を置き、休符中はエフェクトを止める)。
     // 書き戻しが起きうる曲(@vr/@@ を使う曲)だけ入れる。それ以外の曲は従来とバイト単位で同じ
     // ループ指定(mode=1)のDPCMがある曲は、全chが終端に達した(=曲が終わった)ところで DMC も止める
     // (JS再生は曲の終わりで全部止まる。E のデータが先に終わるだけなら止めない=休符と同じく鳴り切る/回り続ける)。
@@ -887,7 +887,7 @@ PLAY_CHLOOP:
     // 書き込み、音量レジスタは触らない)。WRITE_FREQ_ONLYのコメント参照。対象チップ
     // (2A03パルス/三角・VRC6・MMC5・FME7・FDS・N163、DESIGN-PITCH.md §7)のみエントリを
     // 持ち(VRC7はWFO_VRC7、2026-09-19からEN以外でも)、それ以外(未使用スロット)はWFO_NONE(何もしない)を指す。ノイズ(WFO_T3)は
-    // 2026-09-14から対象(本家ppmckもノイズ周期にEP/ENが効く。compiler.jsのノイズ経路と同じ)
+    // 2026-09-14から対象(ppmckもノイズ周期にEP/ENが効く。compiler.jsのノイズ経路と同じ)
     const wfoEntries = new Array(TYPE_COUNT).fill('WFO_NONE');
     if (usesFreqOnly) { wfoEntries[0] = 'WFO_T0'; wfoEntries[1] = 'WFO_T1'; wfoEntries[2] = 'WFO_T2'; wfoEntries[3] = 'WFO_T3'; }
 
@@ -979,7 +979,7 @@ ${mask ? `    AND ${mask},X
     RTS`;
     // 16bit tick の +1(INC tick,X の直後に置く。wide でなければ何も出さない)
     const incHi = (tickHi, wide, L) => wide ? `    BNE ${L}\n    INC ${hex(tickHi)},X\n${L}:\n` : '';
-    // @vr<n>の実体テーブル。本家ppmckの@vr<n>は@v<n>定義そのものへの参照なので、
+    // @vr<n>の実体テーブル。ppmckの@vr<n>は@v<n>定義そのものへの参照なので、
     // 本ツール独自の@vr<n>={...}定義が無ければ@v<n>の定義へフォールバックする
     // (compiler.jsのresolveEnvTablesと同じ規則)
     const vrTableOf = idx => (envelopes.vr && envelopes.vr[idx]) || (envelopes.v && envelopes.v[idx]) || {};
@@ -990,7 +990,7 @@ ${mask ? `    AND ${mask},X
     // 毎フレームの音量書き換えに使うため、どちらか一方でも使われていれば埋め込む
     const usesVolOnly = envTableCount > 0 || usesVr || usesDutyEnv;
     // volMask4(2026-09-20): 4bit音量のチャンネルが 16〜63 の値を含む @v/@vr 表を使う曲だけ、表から引いた
-    // 音量を下位4bitに切る(FDS/VRC6のこぎり波は6bitのまま)。本家ppmckは表の値をそのままレジスタの
+    // 音量を下位4bitに切る(FDS/VRC6のこぎり波は6bitのまま)。ppmckは表の値をそのままレジスタの
     // 上位ビットへ OR するので、2A03/MMC5 は下位4bit(bit4-5は$30で元々立っている)が音量になる。
     // 以前の本ドライバも 2A03/MMC5/N163 はそれと同じ結果だったが、VRC6パルスはデューティへ、FME7 は
     // エンベロープモードのビットへ漏れ、VRC7 は音量の反転計算が桁あふれしていた(ブラウザ再生は15で
@@ -1110,16 +1110,16 @@ ${dutyWide ? `    STA ${hex(DUTYTICKHI)},X\n` : ''}
       // (EPSEL[X]/EPTICK[X]からEP_LEN/EP_LOOPを引き、末尾ならループか末尾値の繰り返し)だが、
       // 結果を0-15にクランプするVOL[X]書込みではなく、符号付きbyteを16bitへ符号拡張して
       // ★累積値EPVALLO/EPVALHI[X]へ足し込む(APPLY_DETUNE/APPLY_DETUNE_N163が読む)。
-      // 2026-09-13修正: 本家ppmck(sounddrv.h sound_pitch_enverope→freq_add_mcknumber)は
+      // 2026-09-13修正: ppmck(sounddrv.h sound_pitch_enverope→freq_add_mcknumber)は
       // テーブル値を「現在のレジスタ値」へ毎フレーム加減算する累積方式(compiler.js
-      // pitchEnvelopeValue参照)。以前は@v同様に値を毎フレーム読み直す絶対方式で本家と違っていた。
+      // pitchEnvelopeValue参照)。以前は@v同様に値を毎フレーム読み直す絶対方式でppmckと違っていた。
       // 「|」無しのテーブルは末尾値を繰り返し足し続ける(ppmckc checkLoopが末尾1値の前に
       // ループ点を差し込むのと同じ結果。末尾が0なら止まる)。累積値はRD_NOTEで0へ戻す。
       // ENVAL(EN_STEP)と同じ考え方だが、EPは16bit幅なので2バイトの符号付き加算になる。
       // PERLO/PERHI/PERLO2はENV_LOOKUPと同じ理由で使い回しスクラッチ(このルーチンの
       // 呼び出し元は直後に周期テーブル参照でこれらを上書きするだけなので安全)。
       // epWide(2026-09-19): 長さ256以上の@EPがある曲だけ、EPTICKを16bit(上位=EPTICKHI)にして
-      // EP_LEN/EP_LOOPも上位バイト表を持つ。本家ppmckはエンベロープを16bitポインタで進めるので
+      // EP_LEN/EP_LOOPも上位バイト表を持つ。ppmckはエンベロープを16bitポインタで進めるので
       // 定義の長さに上限が無い(ppmckc datamake.c のテーブルは1024値)。以前は長さが8bitに
       // 切り詰められ(372→116)、そこで末尾扱いになって音程の揺れが止まっていた ---
       extraHandlers.push(`${epWide ? `
@@ -1241,9 +1241,9 @@ EP_STEP_NOHI:
       // --- EN<n>: X=チャンネル番号のまま呼ぶ。テーブル探索自体はEP_LOOKUPと同型
       // (ENSEL[X]/ENTICK[X]からEN_LEN/EN_LOOPを引く)だが、末尾に達し「ループ無し」なら
       // それ以上は何もせず現状の累積値を保持したまま抜ける(compiler.js側の「非ループは
-      // 最終累積値を永久ホールド」と同じ意味。★本家ppmckは末尾の差分を足し続ける
-      // (ppmckc checkLoop)ので、ENのこの頭打ちは本家と違う既知の差。EPは2026-09-13に
-      // 本家準拠(末尾値を足し続ける、EP_LOOKUP参照)へ直した)。ループ有りなら末尾を過ぎた分は
+      // 最終累積値を永久ホールド」と同じ意味。★ppmckは末尾の差分を足し続ける
+      // (ppmckc checkLoop)ので、ENのこの頭打ちはppmckと違う既知の差。EPは2026-09-13に
+      // ppmck準拠(末尾値を足し続ける、EP_LOOKUP参照)へ直した)。ループ有りなら末尾を過ぎた分は
       // ENTICKをループ開始位置へ巻き戻してから通常通り加算する ---
       // enWide(長さ256以上のENがある曲だけ): ENTICKを16bit(上位=ENTICKHI)で数える(EP_LOOKUPのepWideと同じ)
       extraHandlers.push(`
@@ -1404,7 +1404,7 @@ LFO_NOSTEP:
     RTS`);
     }
 
-    // --- PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC)。ppmck本家
+    // --- PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC)。ppmck
     // ドキュメント(doc/mck.txt)に専用コマンドが無く「ピッチエンベロープ(EP)で
     // 代用してください」と明記されているため、このツール独自の拡張。compiler.jsの
     // portamentoSequence(MPのwarizan_start片道版・反転無し)と同一アルゴリズムを
@@ -1678,7 +1678,7 @@ SIL_T5:
     STA $A000
     RTS
 
-; --- VRC6矩形波(サウ) ($B000)。音量(0-63)をそのまま蓄積レートへ(本家ppmck同様) ---
+; --- VRC6矩形波(サウ) ($B000)。音量(0-63)をそのまま蓄積レートへ(ppmck同様) ---
 WFV_T6:
     JSR LOOKUP_SAW_PERIOD
     JSR APPLY_DETUNE
@@ -2627,7 +2627,7 @@ ${usesDetune ? (usesPitchSa ? `    LDA ${hex(DETUNE_LO)},X
     STA ${hex(SAT0)}
     LDA ${hex(DETUNE_HI)},X
     STA ${hex(SAT1)}
-    JSR SA_ADD16           ; D<n>をSAAMT,X回左シフトして加算(SA<num>、本家仕様)
+    JSR SA_ADD16           ; D<n>をSAAMT,X回左シフトして加算(SA<num>、ppmck仕様)
 ` : `    CLC
     LDA ${hex(PERLO)}
     ADC ${hex(DETUNE_LO)},X
@@ -2728,7 +2728,7 @@ ADN163_DONE:
     RTS${usesPitchSa ? `
 
 ; --- SA<num>共用: SAT0/SAT1(符号付き16bit)をSAAMT,X回左シフト(符号拡張24bit)して
-; PERLO/PERHI/PERLO2へ加算する(本家sounddrv.h freq_add_mcknumber_with_aslの
+; PERLO/PERHI/PERLO2へ加算する(ppmcksounddrv.h freq_add_mcknumber_with_aslの
 ; asl t0/rol t1/rol t2ループと同じ考え方)。Yは破壊する(APPLY_DETUNE_N163の呼び出し元は
 ; JSR後にYを再利用しない、WFV_N163/WFO_N163参照)。SAAMT=0なら素の16bit加算と等価 ---
 SA_ADD16:
@@ -2824,7 +2824,7 @@ ${usesAnyPitchOffset ? `    JSR VRC7_PITCH
     ; ★キーオン(bit4)はYM2413実機同様0→1のエッジトリガ(src/emulator/expansion/vrc7.js
     ; slotOn)。前の音符がフルゲートで直前まで鳴っていた場合、単にbit4=1を書くだけでは
     ; エッジが起きず2音目以降が再アタックしない(compiler.js segmentsToWriteLogVrc7・
-    ; ppmck本家vrc7.h vrc7_oto_set→vrc7_key_offと同じく、必ずキーオフを1回挟んでから
+    ; ppmckvrc7.h vrc7_oto_set→vrc7_key_offと同じく、必ずキーオフを1回挟んでから
     ; キーオンを書く。2026-08-16、6502側だけこの修正が漏れていた=実機相当エミュで
     ; c4 d4 e4 のRMSが減衰し続けることを実測)。$9010のアドレスラッチは保持されるので
     ; 2回の$9030データ書込みの間で$9010を再選択する必要は無い
@@ -2848,7 +2848,7 @@ ${usesVolOnly ? 'WFV_VOL_VRC7:           ; @v/@vr の毎フレーム音量もこ
     RTS
 ; --- 休符/ゲートオフ/曲末のキーオフ(2026-09-20): $20+ch へ「直近の値(LASTHI)からキーオンのbitだけ落とした値」を書く。
 ; block/fnum は変えず、$30+ch(音色/音量)も書かない=余韻はその音の音色・音量・音程のまま減衰する
-; (本家ppmck vrc7.h vrc7_key_off と同じ。2026-09-20までは$20+ch/$30+chとも0を書いており、余韻の途中で
+; (ppmck vrc7.h vrc7_key_off と同じ。2026-09-20までは$20+ch/$30+chとも0を書いており、余韻の途中で
 ; block0・音色0・最大音量へ切り替わっていた)。既にキーオフ中なら書かない(compiler.js segmentsToWriteLogVrc7 の keyOff と同じ)。
 ; @@r<n> のゲートオフだけは先に音色(APPLY_REL_TONE で DUTY,X へ入った番号)と音量を$30+chへ書く(余韻をリリース音色で鳴らす)。
 ; RELTONE,X が有効な間は休符でも同じ値を書き直すが、レジスタの値は変わらない ---
@@ -2911,7 +2911,7 @@ VRC7P_OK:
         // でエッジを起こせず再アタックしないという二重の実バグだった(JS参照実装との
         // 毎フレームレジスタ突き合わせで発覚)。キー状態はLASTHI,X(他チップでは
         // 「位相リセット副作用のある上位バイトの直近書込値」、VRC7では$20+chの直近書込値=
-        // bit4がキー状態)で判定する。ppmck本家vrc7.hの vrc7_do_effect(rest_flagで全効果
+        // bit4がキー状態)で判定する。ppmckvrc7.hの vrc7_do_effect(rest_flagで全効果
         // スキップ)/sound_vrc7_write(vrc7_key_statをOR)と同じ設計・compiler.jsの
         // 「gateFrames以降はEN書込みをしない」と同じ結果になる。
         // usesFreqOnly ⇒ needsLastHi なのでLASTHIは必ず確保されている
@@ -3002,12 +3002,12 @@ ${toneLoadBlocks}`);
     }
 
     if (usesDpcm && dpcmIndices.length > 0) {
-      // 本家ppmck準拠(2026-09-19、nes_include/ppmck/dpcm.h dpcm_set と同じ構造): 音符バイトが
+      // ppmck準拠(2026-09-19、nes_include/ppmck/dpcm.h dpcm_set と同じ構造): 音符バイトが
       // 「どの @DPCM<n> を鳴らすか」の番号で、その番号×4で DPCM_DATA(制御/DAC/アドレス/長さの4バイト×行)を
       // 引く。レートは定義の freq で固定なので、以前の「@<n>で選んだスロットを DUTY,X から逆引きし、
       // freq別108バイトのレート表を NOTE,X で引く」独自方式は廃止した。音符バイト(NOTE,X)は compiler.js の
       // noteNumber = DPCM_NOTE_BASE(24) + 番号 のままなので、ハンドラ側で 24 を引く。
-      // 行は 0〜最大番号まで詰めて出す(本家 writeDPCM も max まで。未使用行は本家では 0,0,0,0 だが、
+      // 行は 0〜最大番号まで詰めて出す(ppmck writeDPCM も max まで。未使用行はppmckでは 0,0,0,0 だが、
       // ここでは制御バイトの bit7 を立てて「鳴らさない」印にし、compiler.js(未定義=無音)と揃える)。
       // 同じファイルを共有する定義(layout.shared)は addr/len が同じ行になるだけ。
       // サンプル本体はここでは埋め込まない($C000-$FFFF 窓4-7に buildBankedNsfBytes が直接配置する)
@@ -3017,9 +3017,9 @@ ${toneLoadBlocks}`);
         const layout = dpcmLayout[idx];
         const def = dpcmSamples[idx];
         if (!layout || !def) { dpcmDataBytes.push(0x80, 0xFF, 0x00, 0x00); dpcmPageBytes.push(0); continue; }
-        // $4010 = (mode<<6)|freq(本家 writeDPCM の1バイト目 freq|(mode<<6)。bit7=IRQは落とす)
+        // $4010 = (mode<<6)|freq(ppmck writeDPCM の1バイト目 freq|(mode<<6)。bit7=IRQは落とす)
         dpcmDataBytes.push((((def.mode | 0) & 3) << 6 | ((def.freq | 0) & 0x0F)) & 0x7F);
-        // DAC=$FF(bit7)は「$4011を書かない」印(layout.dac===null、本家 dpcm.h の .skip と同じ)
+        // DAC=$FF(bit7)は「$4011を書かない」印(layout.dac===null、ppmck dpcm.h の .skip と同じ)
         dpcmDataBytes.push(layout.dac != null ? (layout.dac & 0x7F) : 0xFF);
         dpcmDataBytes.push(layout.addrReg & 0xff);
         dpcmDataBytes.push(layout.lengthReg & 0xff);
@@ -3033,7 +3033,7 @@ ${toneLoadBlocks}`);
 ; --- DPCM ($4010-4013、サンプル本体は窓4-7=$C000-$FFFFに直接配置。16KBを超える曲は
 ;     16KBごとの「ページ」に分け、トリガー時に DPCM_PAGE_TBL のページへ窓4-7を切り替える) ---
 ; NOTE,X(=24+@DPCM番号、compiler.js DPCM_NOTE_BASE)から番号を出し、番号×4で DPCM_DATA を引く
-; (本家 dpcm.h の asl/asl/tax と同じ)。制御バイトの bit7 が立つ行=未定義は何もしない。X(チャンネル)は保存
+; (ppmck dpcm.h の asl/asl/tax と同じ)。制御バイトの bit7 が立つ行=未定義は何もしない。X(チャンネル)は保存
 WFV_T${TYPE_DPCM}:
     LDA ${hex(NOTE)},X
     SEC
@@ -3601,7 +3601,7 @@ RD_SWEEP:
     STA ${hex(SWEEPREG)},X
     JMP RD_LOOP` : ''}
 ${usesPitchSa ? `
-; --- SA<num>(N163ピッチシフト量、0xE4、2026-08-26、本家pitch_shift_amount相当):
+; --- SA<num>(N163ピッチシフト量、0xE4、2026-08-26、ppmckpitch_shift_amount相当):
 ; 直後1バイトがシフト量(0-8)。保持するだけで、実際の適用はAPPLY_DETUNE_N163の
 ; SA_ADD16(D/EP/MPの16bit値を左シフトしながら18bit周波数へ加算)が毎回行う ---
 RD_PITCHSA:
@@ -3609,7 +3609,7 @@ RD_PITCHSA:
     STA ${hex(SAAMT)},X
     JMP RD_LOOP` : ''}
 ${usesDirect ? `
-; --- @n<num>(直接周波数指定、0xE5、2026-09-19、本家ppmckのMCK_DIRECT_FREQ/direct_freq_sub相当):
+; --- @n<num>(直接周波数指定、0xE5、2026-09-19、ppmckのMCK_DIRECT_FREQ/direct_freq_sub相当):
 ; 直後2バイトが[周期/周波数の下位,上位]。値を控えて DIRACT=2 にし、続く音符(必ず直後に来る)の
 ; RD_NOTE_BODY が LSR で1にする=その音符だけ LOOKUP_*_PERIOD が音階テーブルの代わりにこの値を返す ---
 RD_DIRECT:
@@ -3838,7 +3838,7 @@ RD_REST:
 RD_REST_GO:
     STA ${hex(CNT)},X
 ${usesFreqOnly && usesVrc7 ? `    ; VRC7: 先にキーオフする(下の WRITE_FREQ_ONLY=WFO_VRC7 はキーオフ中は書かないので、余韻の音程は
-    ; 直前の音符の最後のフレームのまま。本家 vrc7_do_effect も休符のフレームは効果を書かない。compiler.js と同じ)。
+    ; 直前の音符の最後のフレームのまま。ppmck vrc7_do_effect も休符のフレームは効果を書かない。compiler.js と同じ)。
     ; 他のチップは下の SILENCE_CH がもう一度無音化するので結果は変わらない
     JSR SILENCE_CH
 ` : ''}${usesFreqOnly ? `    ; 読取りフレームぶんの周期側継続効果tick(SERVICE_CH冒頭コメント参照。休符中も
@@ -3885,7 +3885,7 @@ ${usesGateOffVr ? `
 ; ★2026-08-15: 以前はENVSEL(@v<n>選択中)も条件に入れていた(当時のcompiler.jsが
 ; 「vTable(@v)が有効な音符のゲートオフでのみ」vrTableへ切り替えていたため)が、
 ; 実機ppmck(ppmckc datamake.c putReleaseEffect)はリリース発動条件に@vの有無を見ない。
-; compiler.js側をresolveEnvTablesで本家準拠(v<n>固定音量でも@vrが効く)に直したので、
+; compiler.js側をresolveEnvTablesでppmck準拠(v<n>固定音量でも@vrが効く)に直したので、
 ; こちらもENVSELの判定を外して揃える。
 ; ★@@r<n>(リリース音色)もこの瞬間に適用する(実機putReleaseEffectがリリース
 ; エンベロープの切替と音色の切替を同じ場所で出力するのと同じ)。@vrを使わず
@@ -4157,7 +4157,7 @@ ${usesPitchShift ? `
 ; アタック(音量/デューティ再書込み)は行わず、WRITE_FREQ_ONLYで周期/周波数レジスタのみ
 ; このフレーム分反映する(compiler.jsのpitchShiftOffsetSequence/writePitchModulation
 ; のtick=0相当)。
-; ★PS音符はキーオンではない(ppmck本家pitchshift_setupがeffect_initを通らないのと同じ)
+; ★PS音符はキーオンではない(ppmckpitchshift_setupがeffect_initを通らないのと同じ)
 ; ので、@v/@vr/EP/MP/PT/ENは前の音からそのまま継続する(@@<n>デューティエンベロープは
 ; 対象外、compiler.jsのwritePsGlideVolume注記参照)。この読取りフレームはSERVICE_CHの
 ; 継続処理がスキップされるため、TICK_VOL_FX/TICK_PITCH_FXで1tickぶん肩代わりする
@@ -4655,17 +4655,17 @@ SIL_T2:
 
 ; --- 2A03ノイズ ($400C、1chのみなので固定アドレス) ---
 ; $400E = (((NOTE + ENVAL) & 15) − D − EP − MP − PT) & $FF | (@<n> bit0 << 7)
-; 本家ppmck準拠(2026-09-18): NOTEは周期index(0-15)の直値、D/EP/MP/PTは他chと同じ生加減算で
+; ppmck準拠(2026-09-18): NOTEは周期index(0-15)の直値、D/EP/MP/PTは他chと同じ生加減算で
 ; クランプしない → D16 n0 = 0−16 = $F0 のように桁あふれで bit7(短周期)が立つ(wikiの
 ; 「短周期ノイズは D16〜D1」の技)。@1(本ツール独自の短周期指定)は bit7 を OR。
 ; compiler.jsのノイズ経路(segmentsToWriteLog2A03 'D')と同じ式で、実ppmck09aのNSFと$400E列が一致 ---
 LOOKUP_NOISE_PERIOD:
-${usesDirect ? `    LDA ${hex(DIRACT)},X   ; @n: 指定値の下位バイトをそのまま使う(本家: $400E へ sound_freq_low。bit7=短周期)
+${usesDirect ? `    LDA ${hex(DIRACT)},X   ; @n: 指定値の下位バイトをそのまま使う(ppmck: $400E へ sound_freq_low。bit7=短周期)
     BEQ LNP_TBL
     LDA ${hex(DIRLO)},X
     JMP LNP_SET
 LNP_TBL:` : ''}
-    LDA ${hex(NOTE)},X     ; NOTE=周期index(0-15)の直値(compiler.js noisePeriodIndex、本家ppmck準拠)
+    LDA ${hex(NOTE)},X     ; NOTE=周期index(0-15)の直値(compiler.js noisePeriodIndex、ppmck準拠)
 ${usesEn ? `    CLC
     ADC ${hex(ENVAL)},X    ; EN(ノート空間)は index に足して16で巡回
 ` : ''}    AND #$0F
@@ -4673,7 +4673,7 @@ ${usesDirect ? 'LNP_SET:' : ''}
     STA ${hex(PERLO)}
     LDA #$40
     STA ${hex(PERHI)}      ; ★上位を$40にしておく: APPLY_DETUNEは16bit結果が負なら0へクランプするが、
-                           ;   ノイズは下位バイトの桁あふれ(D16 n0 → $F0=bit7=短周期)が本家仕様なので
+                           ;   ノイズは下位バイトの桁あふれ(D16 n0 → $F0=bit7=短周期)がppmck仕様なので
                            ;   クランプに掛からない正の下駄を履かせ、下位8bit(PERLO)だけを$400Eへ書く
 ${usesAnyPitchOffset ? `    JSR APPLY_DETUNE
 ` : ''}    LDA ${hex(DUTY)},X     ; @<n>のbit0=短周期(本ツール独自拡張) → $400E bit7 へ(桁あふれとOR)
@@ -4969,7 +4969,7 @@ SONG_LOOP_PTR_HI:
     // N163の有効チャンネル数($7Fに書く値、周波数テーブルの符号化、レジスタ配置の
     // (8-num)+chオフセットの全てに効く)をcompiler.js(n163NumChOf)と完全に同じ規則で決める。
     // ★2026-09-11: 規則は「#EX-N163 <n> の数値があればそれ、無ければ音符を持つ最上位レター+1」。
-    //   数値優先は本家ppmck(datamake.c _EX_NAMCO106)と同じで、変換設定 N163_CH の
+    //   数値優先はppmck(datamake.c _EX_NAMCO106)と同じで、変換設定 N163_CH の
     //   「8ch固定」を実際に効かせるために要る。以前は常に自動検出だった。以前は#EX-NAMCO106で
     // 宣言された8レター全部をチャンネルとして組み込み常に8ch扱いだったため、ブラウザ再生
     // (実使用ch数)とNSF書き出しで$7F・周波数値・レジスタ配置が全て食い違っていた
@@ -5085,7 +5085,7 @@ SONG_LOOP_PTR_HI:
     // インデックスだけをコンパクトに詰める」方式。
     // ★2026-08-15: 以前は「seg.envelopeV(@v)も有効な場合」に限ってカウントしていたが、
     // 実機ppmck(putReleaseEffect)は@vの有無をリリース発動条件にしない。compiler.jsの
-    // resolveEnvTablesを本家準拠に直したのに合わせ、@v無し(v<n>固定音量)の音符でも
+    // resolveEnvTablesをppmck準拠に直したのに合わせ、@v無し(v<n>固定音量)の音符でも
     // カウントする。テーブル実体は@vr<n>定義が無ければ@v<n>定義へフォールバックする
     // (buildFixedSourceのvrTableOfと同じ規則)。この変更でenvTableCount=0のまま
     // usesVr=trueになり得るため、WRITE_VOL_ONLY等の埋め込み条件はusesVolOnlyで判定する
@@ -5195,7 +5195,7 @@ SONG_LOOP_PTR_HI:
       if (usesDetune) break;
     }
 
-    // SA<num>(N163ピッチシフト量、2026-08-26、本家ppmckcのpitch_shift_amount相当)。
+    // SA<num>(N163ピッチシフト量、2026-08-26、ppmckcのpitch_shift_amount相当)。
     // D<n>と同じ真偽値のみの判定。0はSA未指定時の既定値なので対象外
     let usesPitchSa = false;
     for (const ch of channelLetters) {
@@ -5350,7 +5350,7 @@ SONG_LOOP_PTR_HI:
       // buildFixedSourceのusesGateOffVrと同じ条件にすること)
       vrIndexList.length > 0 || usesRelTone,
       dutyIndexRemap,
-      // E(DPCM)は音量/音色オペコードを出さない(本家ppmck準拠で v/@ が無く、ドライバも見ない)
+      // E(DPCM)は音量/音色オペコードを出さない(ppmck準拠で v/@ が無く、ドライバも見ない)
       { dpcm: (expansionLetterMap.dpcm || []).includes(ch), noteBase }));
     const chBytes = chSerialized.map(r => r.bytes);
 
@@ -5376,7 +5376,7 @@ SONG_LOOP_PTR_HI:
     // バンク0(窓0)はドライバが動的に読み替える場所そのもので、コードさえ置かなければ
     // チャンネルデータ用に自由に使える(READ_DATA参照)。ドライバ本体(+DPCM使用時は
     // その専用領域)が占有するバンク(reservedBank述語が真になる番号)だけを「穴」として
-    // 飛び越え、バンク0から真っ先に詰めていく(ユーザー指示: データ領域として使えるなら
+    // 飛び越え、バンク0から真っ先に詰めていく(方針: データ領域として使えるなら
     // 真っ先に埋める)
     function layoutAllChannels(reservedBank) {
       const songBank = [], songAddrLo = [], songAddrHi = [];

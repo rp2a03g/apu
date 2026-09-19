@@ -1,5 +1,5 @@
 /*
- * MusicXML 書き出し(ROADMAP「フェーズ外: 楽譜出力」段階2、2026-09-16。段階5で和音とピアノ2段を追加)
+ * MusicXML 書き出し(作業計画「フェーズ外: 楽譜出力」段階2、2026-09-16。段階5で和音とピアノ2段を追加)
  *
  * notation.js の表記モデル → MusicXML 4.0 (score-partwise) の文字列。
  * 1チャンネル=1パート=1段。ピアノ2段(buildPianoNotation の group='piano' な RH/LH)は1パート2段

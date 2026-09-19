@@ -10,7 +10,7 @@
  *                  バッファ番号)のためにある。
  *
  * N163の@N<n>定義は先頭にバッファ番号を1つ要求する(src/mml/lexer.js parseN163WaveDef)。
- * このツールでは読み捨てられるが、出力MMLを本家ppmckへ持って行った時のために
+ * このツールでは読み捨てられるが、出力MMLをppmckへ持って行った時のために
  * MML.Convert.n163WaveRegistry()が準互換の番号を振る(src/mml/n163Alloc.js参照)。
  */
 (function (global) {
@@ -38,8 +38,8 @@
   };
 
   // this.shrunk(N163Fit が波形を縮めたとき {定義番号: 縮める前の値}、src/convert/n163Fit.js)があれば、
-  // その定義行の上に「元の波形(コメント)」と「縮めた旨(コメント)」を置く(2026-09-19、ユーザー要望)。
-  // コメント行なので再生・NSF書き出し・本家ppmck には影響しない
+  // その定義行の上に「元の波形(コメント)」と「縮めた旨(コメント)」を置く(2026-09-19、方針)。
+  // コメント行なので再生・NSF書き出し・ppmck には影響しない
   MML.Convert.WaveRegistry.prototype.defLines = function () {
     const out = [];
     this.waves.forEach((values, i) => {
@@ -55,7 +55,7 @@
   };
 
   // N163(@N<n>)用のレジストリ。先頭のバッファ番号は書き出す時に、全波形の長さを見て
-  // 本家ppmckでなるべく踏み合わない値を割り当てる(このツールの再生・NSF書き出しは
+  // ppmckでなるべく踏み合わない値を割り当てる(このツールの再生・NSF書き出しは
   // この値を読まない。MML.N163Alloc.ppmckBufferNumbers参照)
   MML.Convert.n163WaveRegistry = function () {
     let buffers = null, computedFor = -1; // 1行ごとに全体を再計算しないためのメモ(波形は増える一方)

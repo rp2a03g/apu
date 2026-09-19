@@ -5,7 +5,7 @@
  * src/convert/mmlEmit.js がそのまま食える { start, end, note } の配列にする。
  *
  * ★格子はフレーム(60Hz)ではなく **480TPQNのtick**。
- *   ROADMAPの当初案は「フレーム格子に量子化」だったが、src/convert/duration.js は既に
+ *   作業計画の当初案は「フレーム格子に量子化」だったが、src/convert/duration.js は既に
  *   tickドメインで丸めており(4分=480tick、3連16分=80tick が全て整数)、
  *   60Hzフレームを一度挟むと、そこで排除したはずの「テンポ次第で意味が変わる丸め誤差」を
  *   入口で作り直すことになる。秒→tick は  sec * bpm/60 * 480  で一発。

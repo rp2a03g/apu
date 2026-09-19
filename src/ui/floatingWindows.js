@@ -176,7 +176,7 @@
 
       win.addEventListener('mousedown', () => bringToFront());
 
-      // --- 辺・角でのリサイズ(右下以外。2026-09-19 ユーザー要望「普通のウィンドウと同じように」) ---
+      // --- 辺・角でのリサイズ(右下以外。2026-09-19 方針「普通のウィンドウと同じように」) ---
       attachEdgeResize(win, bringToFront, persist);
 
       // --- リサイズ（CSS resize: both）の状態保存 ---

@@ -6,7 +6,7 @@
  * CPUエミュレーションは不要で、ヘッダのチップクロック表(非ゼロ=使用中)と
  * コマンドストリームだけで再生できる。仕様: https://vgmrips.net/wiki/VGM_Specification
  *
- * ★実ファイル(emu sound/vgm)で確認済みの罠(ROADMAP.md VGM節):
+ * ★実ファイル(emu sound/vgm)で確認済みの罠(作業計画 VGM節):
  *  - v1.50未満は 0x34(データ開始オフセット)が0 → 0x40固定。
  *  - v1.10未満は 0x28/0x2A(SN76489ノイズfeedback/シフト幅)が0 → Sega既定(0x0009/16)。
  *  - NES APUクロック(0x84)のbit31=FDS併用。全チップ共通でbit30=デュアルチップ。
@@ -21,7 +21,7 @@
 
   // チップクロックのヘッダオフセット表。id はエミュレータ配線(vgmPlayer.js)・
   // 鍵盤表示のキーとして使う。impl は現時点で実装済み(再生できる)かどうか。
-  // 未実装チップはコマンドを読み飛ばすだけ(ROADMAP: 全チップ実装は不要)。
+  // 未実装チップはコマンドを読み飛ばすだけ(作業計画: 全チップ実装は不要)。
   VGM.CHIPS = [
     { id: 'sn76489',  name: 'SN76489',    offset: 0x0C, minVer: 0x100, impl: true },
     { id: 'ym2413',   name: 'YM2413',     offset: 0x10, minVer: 0x100, impl: true },

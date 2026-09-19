@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-20 06:42:23
+ * Built by tools/build-capture-workers.ps1 at 2026-09-20 08:07:17
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-20 06:42:23';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-20 08:07:17';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -1466,7 +1466,7 @@
  *   VRC7 (NSF)      : ホスト=NES CPU 1.789773MHz = マスタ/2 → 2ホストサイクルで1内部サイクル
  *   FMPAC/VGM       : ホスト=3.579545MHz = マスタそのもの   → 4ホストサイクルで1内部サイクル
  * どちらも 18内部サイクル = 1サンプル で 49716Hz になる(36 / 72 ホストサイクル)。
- * ★この非対称は [[opll-fmpac-clock-divider-octave-bug]] と同じ理由。取り違えると1オクターブずれる。
+ * ★この非対称はFM-PACのクロック分周と同じ理由。取り違えると1オクターブずれる。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -2276,7 +2276,7 @@
         }
         // 実チップの時分割DACは無音時も基準レベル(OPLL_Channelのsign)を出し続けるため
         // 出力にDC成分が乗る。実機ではAC結合で落ちるぶんなので1次ハイパスで除去する。
-        // カットオフ約5Hz。[[hes-dda-gain-clipping-fix]]の教訓で立ち上がりのオーバー
+        // カットオフ約5Hz。HESのDDAで踏んだ教訓から、立ち上がりのオーバー
         // シュートを避けるため十分低く取っている。
         const x = this.sampleAccum;
         if (this.dcPrimed === 0) { this.dcX = x; this.dcPrimed = 1; } // 初回は段差を作らない
@@ -2422,7 +2422,7 @@
 
     /**
      * clock()を回さない経路(regsOnlyキャプチャ等)で溜まった書き込みを反映させる。
-     * [[capture-worker-plan]] のym2612Nuked.flushWrites()と同じ用途。
+     * ym2612Nuked.flushWrites() と同じ用途。
      */
     flushWrites() {
       let guard = 0;
@@ -2555,7 +2555,7 @@
   // 新コアの生の出力は「18サイクルぶんの時分割DAC出力の総和」。@1/@4/@8/@12/@15
   // を単音で鳴らしてRMSを旧コアと突き合わせ、平均比が1.0になるよう決めた(音色ごとの比は
   // 0.4〜1.2とばらつく。コアが違えばEG/出力段が違うので一致はしない)
-  // ([[emu-loudness-balance-and-master-volume]] のフォーマット間バランスを崩さないため)。
+  // (フォーマット間の音量バランスを崩さないため)。
   const OUTPUT_GAIN = 1 / 2000;
 
   // DC遮断フィルタ係数(1 - 2π*5Hz/49716)
@@ -2632,7 +2632,7 @@
   const CYCLES_PER_SAMPLE = 72; // ★2026-08-22: 36は誤り(1オクターブ高かった)。ファイル冒頭コメント参照
   const SAMPLE_RATE = 49716;
 
-  const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS; // emu2413本家に合わせて9→10bit化
+  const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS; // emu2413に合わせて9→10bit化
   const DP_BITS = 19, DP_WIDTH = 1 << DP_BITS, DP_BASE_BITS = DP_BITS - PG_BITS;
   const DB_STEP = 0.375, DB_BITS = 7, DB_MUTE = 1 << DB_BITS;
   const EG_STEP = 0.375, EG_BITS = 7;
@@ -2650,8 +2650,8 @@
   const SETTLE = 0, ATTACK = 1, DECAY = 2, SUSHOLD = 3, SUSTINE = 4, RELEASE = 5, FINISH = 6;
 
   // 音色ROM(YM2413本来の内蔵15音色)。
-  // ★2026-08-22: emu2413本家(2413tone.h)の値から、nukeykt/Nuked-OPLL の patch_ym2413 へ
-  // 差し替え。emu2413のROM値は本家Wikiが "Estimated ROM Instruments" と明記している通り
+  // ★2026-08-22: emu2413(2413tone.h)の値から、nukeykt/Nuked-OPLL の patch_ym2413 へ
+  // 差し替え。emu2413のROM値は原典のWikiが "Estimated ROM Instruments" と明記している通り
   // YM2413B実機録音からの耳コピ推定だが、Nuked-OPLL のものは decap/die shot
   // (siliconpr0n: digshadow, John McMaster)から読み出したROM内容そのもの。
   // 同じ経緯で vrc7.js の VRC7(DS1001)側テーブルも patch_ds1001 へ差し替え済み。
@@ -2889,7 +2889,7 @@
     }
   }
 
-  // emu2413本家 calc_slot_car: modOut = 2*(fm>>1) (fmのLSBを切り捨てるだけで倍化はしない)
+  // emu2413 calc_slot_car: modOut = 2*(fm>>1) (fmのLSBを切り捨てるだけで倍化はしない)
   function modToCarPhase(fm) { return 2 * (fm >> 1); }
 
   // emu2413.c の _PD マクロ: リズム位相定数は10bit(PG_BITS=10)テーブル基準の値。
@@ -2919,7 +2919,7 @@
       const pgout = s.calcPhase(lfo_pm);
       if (egout >= DB_MUTE - 1) s.output[0] = 0;
       else if (s.patch.FB !== 0) {
-        // emu2413本家: fm = (output[1]+output[0]) >> (9-FB)。s.feedbackは(output[1]+output[0])>>1で
+        // emu2413: fm = (output[1]+output[0]) >> (9-FB)。s.feedbackは(output[1]+output[0])>>1で
         // 既に1bitシフト済みのため、ここでのシフト量は(9-FB)-1 = (8-FB)。
         const fm = (s.feedback) >> (8 - s.patch.FB);
         s.output[0] = DB2LIN[s.sintbl[(pgout + fm) & (PG_WIDTH - 1)] + egout];
@@ -2927,7 +2927,7 @@
         s.output[0] = DB2LIN[s.sintbl[pgout] + egout];
       }
       // s.feedbackは自己変調(次回calcModulator呼び出し時のfm計算)専用。キャリアへ渡すのは
-      // emu2413本家同様、平均化前の生のoutput[0]。
+      // emu2413同様、平均化前の生のoutput[0]。
       s.feedback = (s.output[1] + s.output[0]) >> 1;
       return s.output[0];
     }
@@ -5494,7 +5494,7 @@
  * MML.Convert.applyNoteEnd(src/convert/envelope.js)を呼んで効かせる
  * (エンベロープ表の登録先が要るため emitScore 内では行えない)。
  *
- * cmd の各キー(全て boolean。省略時は true = 従来通り忠実再現):
+ * cmd の各キー(全て boolean。省略時は true = 従来通りプリセット「全コマンド」):
  *   D      … D<n>(チャンネル/チップ間デチューン、detune.js)
  *   EP     … EP<n>(ピッチエンベロープ。MP/PT の受け皿でもある)
  *   MP     … MP<n>(ビブラート)。falseで EP が true なら周期EPテーブルへ落ちる
@@ -5504,7 +5504,7 @@
  *            編曲の出発点としては1音の方が読みやすいため)
  *   ENV    … @v/@vr(ソフト/ハード音量エンベロープ)と FME7 の S/M。false時は各イベントの
  *            音量列のピーク値を v<n> として出す(MML.Convert.plainVolume)
- *   VRC7_ENV … VRC7 へ載せるチャンネルでも @v/@vr を使う(2026-09-20、既定 false = 忠実再現・プレーン譜面とも OFF)。
+ *   VRC7_ENV … VRC7 へ載せるチャンネルでも @v/@vr を使う(2026-09-20、既定 false = 全コマンド・プレーン譜面とも OFF)。
  *            VRC7 は音色自体が減衰を持つので、元曲の音量変化を @v にすると減衰が二重になりうる。OFF なら VRC7 の ch は
  *            音量の変わり目で音符を切って v<n> を並べる(従来の出力)。ON にするとプリセットと一致しなくなり「カスタム」表示。
  *            ENV が OFF のときは VRC7_ENV に関係なく @v を出さない(MML.Convert.vrc7EnvOn)
@@ -5530,7 +5530,7 @@
  *                 (src/convert/duration.js framesToLengths の slackFrames。持ち越しは ±許容に収め、一致は持ち越し込みで
  *                 許容の2倍以内の最も近い音価。小節線から許容以内の音符は小節線で割らない)。ドライバのテンポが小数で音符長が
  *                 ±1〜2 フレーム揺れる曲(ppmck の t71 等)の譜面を素直にする。境界のずれは最大このフレーム数
- *   LEN_DP      … 音長をチャンネル全体で最適化する(2026-09-09、忠実再現=ON / プレーン譜面=OFF)。音符ごとに
+ *   LEN_DP      … 音長をチャンネル全体で最適化する(2026-09-09、全コマンド=ON / プレーン譜面=OFF)。音符ごとに
  *                 直前の余りだけ見て最も近い音価を選ぶ greedy(framesToLengths)の代わりに、チャンネルの全イベント
  *                 列を見渡して「音価の書きにくさ+境界の位置ずれ(フレーム)²」の合計が最小の割り当てを動的計画法で
  *                 選ぶ(duration.js quantizeSeq)。速いテンポで 5,5,5,6 フレームと揺れる16分が `24..` に化ける、
@@ -5550,7 +5550,7 @@
  *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)。
  *                 伸ばした区間は最後の音量のまま鳴るので近似
  *   FOLD_DOUBLES … 合成ch(プール式PCMの論理レーン。PSF/VGMのMultiPCM等)の複製パートを省く(2026-09-14、
- *                 忠実再現=OFF / プレーン譜面=ON)。ドライバが同じ旋律を別ボイスで重ねたデチューン二重化や
+ *                 全コマンド=OFF / プレーン譜面=ON)。ドライバが同じ旋律を別ボイスで重ねたデチューン二重化や
  *                 数フレーム遅れのエコーを src/convert/poolDoubles.js が検出し、複製側のノートを変換から外す
  *                 (ヘッダに何を省いたか書く)。OFF でも、N163 等の枠へ自動で載せるレーンを選ぶときは複製を後回しにする
  *   (旧 SHAPE_QUANT「16分音符格子へ丸める」は 2026-09-07 に廃止。キーオン自体が格子から
@@ -5584,7 +5584,7 @@
  *                  出せる最高音は上がる(32サンプル波形で 8ch=1864Hz / 1ch=14915Hz)
  *     'fixed8' … 常に8ch。ch数で変わる値を固定で扱えるので、曲によって音量や音域が
  *       変わらない。波形RAMは64バイトに固定され、高い音は出しにくい。
- *     'used'(既定、2026-09-19 ユーザー指示で fixed8 から変更) … 割り当てたスロットのうち一番大きい番号を使う(ch1+ch8なら8、ch2+ch6なら6)。
+ *     'used'(既定、2026-09-19 方針変更で fixed8 から変更) … 割り当てたスロットのうち一番大きい番号を使う(ch1+ch8なら8、ch2+ch6なら6)。
  *       大きい波形を使いたい・音量を出したい・高い音を出したいときはこちら。
  *     ★nsf2mmlだけは対象外。元がN163のネイティブ変換で、実効ch数は元の曲が決めているため。
  *   N163_WAVE … 波形長を自動で縮めるかどうか。縮めると2つの制約が同時にゆるむ。
@@ -5595,7 +5595,7 @@
  *       実際に使っている @N」だけを対象にする(曲全体を一律に落とさない)。
  *     'fit' … (a)のRAMだけ見る(従来の既定)。音域外の音符はコンパイル時に警告付きで無音になる。
  *     'keep' … 何も縮めない。RAMに収まらない曲はコンパイルエラーで再生も書き出しもできないが、
- *       本家ppmckへ持って行って手で詰め直したい場合はこちら。
+ *       ppmckへ持って行って手で詰め直したい場合はこちら。
  *     ★どの場合も「あふれた瞬間に居る波形」を大きい順に必要な数だけ縮め、縮めたぶんは
  *       ヘッダコメントに明記する。同じ @N を他のチャンネルが使っていればそちらの音色も鈍くなる。
  *
@@ -5609,13 +5609,13 @@
  *       キー名を変えた)
  *   RATE_MIX  … 同時に鳴った打点のDMCレート指定が食い違うとき、'quality'=高い方 / 'size'=低い方
  *   DRUM_POLY … 打点が重なったとき 'mix'=その瞬間の音をミックスして1クリップ / 'mono'=直近1音
- *   これらはプリセット(忠実再現/プレーン譜面)の一致判定に含めない(パネル側の独立した設定)。
+ *   これらはプリセット(全コマンド/プレーン譜面)の一致判定に含めない(パネル側の独立した設定)。
  *   全形式のドラム(DPCM)経路(src/convert/drumHits.js)が見る。
  *
  * 基準ピッチ(全体オフセット、2026-09-07。下の MML.Convert.detectTuning 冒頭コメント参照):
  *   TUNING     … 'auto' = 曲全体の音程偏差の中央値を測り、その分ずらした基準で音符へ丸めて
  *                `#TUNING <cent>` をヘッダに出す / 'a440' = 従来どおり A4=440Hz の12平均律固定 /
- *                'note'(2026-09-19、既定。同日ユーザー指示で auto から変更) = 全体のずれを #TUNING に、そこから外れた音名だけを `#TUNING-NOTE f+ +21 …`
+ *                'note'(2026-09-19、既定。同日方針変更で auto から変更) = 全体のずれを #TUNING に、そこから外れた音名だけを `#TUNING-NOTE f+ +21 …`
  *                に出す(音程表が音名ごとに外れている曲用。MML.Convert.detectTuningNotes)
  *   TUNING_MIN … 'auto' のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5、0〜50)。
  *                閾値未満の曲の出力は 'a440' と完全に同じ
@@ -5637,7 +5637,7 @@
   MML.Convert.LEN_SNAP_MAX = LEN_SNAP_MAX;
   MML.Convert.lenSnapOf = (cmd) => (cmd && cmd.LEN_SNAP > 0) ? Math.min(LEN_SNAP_MAX, cmd.LEN_SNAP) : 0;
   // LEN_DP: 音長をチャンネル全体で最適化する(2026-09-09、src/convert/duration.js quantizeSeq)。
-  // 忠実再現プリセットは ON、プレーン譜面は OFF(格子に乗らない実曲では 3連系やタイが増えるため)
+  // プリセット「全コマンド」は ON、プレーン譜面は OFF(格子に乗らない実曲では 3連系やタイが増えるため)
   MML.Convert.lenDpOf = (cmd) => !!(cmd && cmd.LEN_DP);
   // DPCM_EXACT: 分割したDPCM(ストリーム再生の区間、src/convert/drumHits.js)の音長を LEN_SNAP/LEN_DP の
   // 丸めから外して厳密に書く(2026-09-09、既定ON。省略時もON=未指定の古い設定と互換)。
@@ -5682,7 +5682,7 @@
   const PART_ORDER_VALUES = ['block', 'part'];
   const CHANNEL_ORDER_VALUES = ['letter', 'source'];
   const BARS_PER_LINE_MAX = 16;
-  //   LOOP_DETECT   … ループを自動検出する(2026-09-19、既定 true(ユーザー指示で同日 false→true)。src/convert/mmlEmit.js detectLoop)。元曲の
+  //   LOOP_DETECT   … ループを自動検出する(2026-09-19、既定 true(方針変更で同日 false→true)。src/convert/mmlEmit.js detectLoop)。元曲の
   //                   ループ周期を全チャンネルの音符列から検出し、イントロ+1周ぶんだけを書き出して各チャンネルの
   //                   ループ開始位置へ L を置く。5分ぶん変換しても曲データが1周ぶんで済む(NSFが小さくなる)。
   //                   イントロとループ区間の長さは全チャンネルで tick 単位に一致させる(ずれると周回ごとにずれる)
@@ -5723,7 +5723,7 @@
   MML.Convert.DPCM_DEFAULTS = DPCM_DEFAULTS;
   // N163内蔵RAMに波形が収まらないときの扱い(冒頭コメント参照)
   // SN76489(SMS/GG/MD の PSG)の周期ノイズ(ノイズレジスタの FB=0。1/16デューティの細いパルス=音程のある音)を
-  // 2A03 ノイズのどちらへ写すか(2026-09-19、ユーザー指示で選択式に)。プリセット外(チップ固有の設定)
+  // 2A03 ノイズのどちらへ写すか(2026-09-19、方針変更で選択式に)。プリセット外(チップ固有の設定)
   //   'white'(既定) … 長周期(ホワイトノイズ)。音程の効果は失われるが、2A03 の短周期の金属的な音にならない
   //   'short'       … 短周期(@1、93ステップ)。基本周波数が合う周期を選ぶので音程は合うが、音色は金属的になる
   //                   (Power Strike II(GG) の曲8 など、周期ノイズの rate を切り替えてタム/キックを作る曲で差が出る)
@@ -5763,7 +5763,7 @@
   MML.Convert.PITCH_SA_VALUES = PITCH_SA_VALUES;
 
   const PRESETS = {
-    // 忠実再現(従来の既定)
+    // 全コマンド(従来の既定。旧名「忠実再現」。キー名 faithful はそのまま)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, VRC7_ENV: false, V: true, SWEEP: true, INST: true, DRUM: true,
                 SHAPE_REST: false, ENV_MERGE: false, FOLD_DOUBLES: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'used',
@@ -5937,7 +5937,7 @@
   //     レジスタの整数丸めによる偏差は音符ごとに±どちらにも出るので大量に集めると打ち消し合い、
   //     ドライバ固有の全体ずれだけが残る。平均でなく中央値なのはベンド/ビブラート中の外れ値に
   //     引っ張られないため
-  //   - ノイズ(D)/DPCM(E)/ドラム/ノート番号が周期そのもの(D)や@DPCM番号そのもの(E、本家ppmck準拠)の
+  //   - ノイズ(D)/DPCM(E)/ドラム/ノート番号が周期そのもの(D)や@DPCM番号そのもの(E、ppmck準拠)の
   //     イベントは音程の意味が違うので除外
   //   - 四分位範囲が広い(opts.maxIqr、既定30セント)=曲全体がピッチ操作だらけ、または区間/チップで
   //     基準が二極化していて「全体ずれ」とは言えない場合と、音符が少なすぎる場合(opts.minCount、
@@ -6274,7 +6274,7 @@
   }
 
   // 末尾の「同一値が続く足踏み区間」だけを1個残してtrimする
-  // ([[envelope-nonloop-tail-trim-fix]]と同じ考え方: 非ループの絶対オフセット列は末尾値を
+  // (非ループの絶対オフセット列は末尾値を
   // 保持し続ける意味なので、末尾の重複はテーブル長を縮めるだけで再生結果に影響しない。
   // 実際の@EPテーブルは registerShape で差分列+末尾0へ変換される)。
   function trimTrailingHold(diff) {
@@ -6406,9 +6406,9 @@
   // そのまま素通しで返す。テーブル自体にdelayの概念は無い=同じ形なら異なるdelay値の
   // 呼び出し同士でも同じテーブル番号を共有できる)。
   //
-  // ★@EPの値は本家ppmck準拠の「毎フレームの差分の累積」(2026-09-13修正、compiler.js
+  // ★@EPの値はppmck準拠の「毎フレームの差分の累積」(2026-09-13修正、compiler.js
   // pitchEnvelopeValue参照。以前は各フレームの絶対オフセットをそのまま書いており、当ツール内では
-  // 辻褄が合っていたが本家ppmckcでコンパイルすると別の動きになっていた)。classifyPitchModが
+  // 辻褄が合っていたがppmckcでコンパイルすると別の動きになっていた)。classifyPitchModが
   // 返すvaluesは「基準からの絶対オフセット列」なので、ここで差分列へ変換して登録する
   // (toCumulativeDeltas)。this.tables に持つのは差分列:
   //  ・periodic: [a0 | a1-a0, ..., a(P-1)-a(P-2), a0-a(P-1)] loop=1。1周ぶんの差分の合計は
@@ -6419,7 +6419,7 @@
   // 差分がbyte幅(EP_VALUE_MIN..MAX)を超える形は登録せずnullを返す(→基準音のみ)。
   // ★loop有り同士(片方でもloop!=null)は前方一致していても共有・置き換えを一切行わない
   // (envelope.js EnvelopeRegistry.registerShapeと同じ理由・同じガード。
-  // [[envelope-registry-loop-upgrade-bug]]参照。ループ有りのvaluesは「最小の繰り返し単位」に
+  // ループ有りのvaluesは「最小の繰り返し単位」に
   // 切り詰められており配列長が観測フレーム数を反映しないため、前方一致だけを根拠にした
   // 共有/差し替えは無関係な変調を混同する事故になる)。
   function toCumulativeDeltas(absValues, isPeriodic) {
@@ -6465,7 +6465,7 @@
   };
 
   // 差分列 {values, loop} をそのまま @EP 表として登録する(ノイズパッドのプリセット、
-  // src/convert/drumHits.js noise()。値は既に本家準拠の累積差分なので変換しない)。
+  // src/convert/drumHits.js noise()。値は既にppmck準拠の累積差分なので変換しない)。
   // 完全一致だけを共有し、registerShape の前方一致統合はしない(ユーザーが書いた表を変えない)
   MML.Convert.PitchEnvelopeRegistry.prototype.registerTable = function (table) {
     if (!table || !table.values || !table.values.length || !this.cmd.EP) return null;
@@ -6671,7 +6671,7 @@
   //              量子化ステップはセント換算0.85〜1.7で一定(オクターブ非依存)。既定。
   //   'note'   … 音符ごとに必要最小のsa(最高精度、テーブル共有は減る)
   //   'off'    … SAを使わない(従来互換。byte幅を超える変調は従来どおり割当失敗)
-  // どのモードもレンジに収まらない場合はsa+1のエスケープで引き上げる(上限8=本家仕様)。
+  // どのモードもレンジに収まらない場合はsa+1のエスケープで引き上げる(上限8=ppmck仕様)。
   MML.Convert.n163SaForBase = function (baseReg) {
     if (!(baseReg > 0)) return 0;
     return Math.max(0, Math.min(8, Math.floor(Math.log2(baseReg)) - 10));
@@ -6776,7 +6776,7 @@
           : undefined;
         const assigned = pitchReg.assign(rescaled, directionUp, saOpts);
         MML.Convert.applyPitchAssignment(ev, assigned);
-        // SAはD<n>にも効く(compiler.js pitchRegisterOffset、本家freq_add_mcknumber参照)ため、
+        // SAはD<n>にも効く(compiler.js pitchRegisterOffset、ppmckfreq_add_mcknumber参照)ため、
         // この音符のDも同じシフトで縮めて出力する(量子化2^sa単位≈1〜2セント)
         if (ev.pitchSa && ev.detune) ev.detune = Math.round(ev.detune / (1 << ev.pitchSa));
       }
@@ -7032,8 +7032,7 @@
 
   // 周期的アルペジオは常にloop=0(先頭からループ、buildNoteEnvelopeDeltasが1周期分の
   // 合計0の閉じた差分列を作るため)。EnvelopeRegistry/PitchEnvelopeRegistryと同じ
-  // 「loop有無が食い違うテーブルは前方一致でも共有しない」規約([[envelope-registry-loop-upgrade-bug]]
-  // 参照)は、EN側は現状ループ専用(非ループ生成経路が無い)ため該当しないが、将来
+  // 「loop有無が食い違うテーブルは前方一致でも共有しない」規約は、EN側は現状ループ専用(非ループ生成経路が無い)ため該当しないが、将来
   // 非ループEN生成を追加する場合はここも同じガードを入れること。
   MML.Convert.NoteEnvelopeRegistry.prototype.registerShape = function (deltas) {
     if (!deltas || deltas.length === 0 || !this.cmd.EN) return null;
@@ -7684,7 +7683,7 @@
   // 書き直す(=エンベロープの位相リセット、compiler.js segmentsToWriteLogFme7 / ppmckDriver.js。キーオン相当)ので、
   // 元は1回だけの減衰が音符の数だけ頭から打ち直され、打楽器が長く大きく鳴り、打点も増えて聞こえていた
   // (実測: Salamander 曲29 の X で元の打ち直し 160 回 → 変換後 355 回)。
-  // 異音程のタイ(&)は本家 ppmck に無い([[ppmck-ampersand-is-length-add]])ので、本家にある EN<n>(ノート番号の
+  // 異音程のタイ(&)はppmck に無いので、ppmckにある EN<n>(ノート番号の
   // 累積差分、ループ無し=最後の値で止まる)で1音にまとめる。半音未満のずれ(D)は捨てる(打楽器の下降なので近似で足りる)。
   // 対象は「同じ位相リセット(envKey)・同じ形状/周期・同じミキサー(トーン系)・隙間無し」で、最後以外の音符が
   // HW_SWEEP_STEP_MAX フレーム以下の連なりだけ(1つのエンベロープの上でゆっくり旋律を弾く曲を1音にしないため)
@@ -7709,8 +7708,8 @@
         if (k < run.length - 1) for (let f = run[k].start + 1; f < run[k].end; f++) values.push(0);
       }
       if (run.length < 2 || values.some(v => v < -127 || v > 126)) { out.push(head); continue; }
-      // 末尾に 0 を足す: 本家 ppmckc は「|」の無い表でも最後の1値の前へループ点を置く(datamake.c checkLoop)ので、
-      // 最後が -2 だと本家では毎フレーム -2 ずつ下がり続ける。0 で終われば本家でもそこで止まる(本ツールは元々止まる)
+      // 末尾に 0 を足す: ppmckc は「|」の無い表でも最後の1値の前へループ点を置く(datamake.c checkLoop)ので、
+      // 最後が -2 だとppmckでは毎フレーム -2 ずつ下がり続ける。0 で終わればppmckでもそこで止まる(本ツールは元々止まる)
       values.push(0);
       const last = run[run.length - 1];
       out.push(Object.assign({}, head, {
@@ -9025,7 +9024,7 @@
   // dpcmTrace/controlTrace(省略可): 渡されると DDA(PCM)の打点を drumKey 付きノートとして
   // 該当chのトラックへ足す(ロールのドラム区画/パッドに出る。VGMのサンプルPCMと同じ形)。
   // 打点の同定は hes2mml/expansion/dpcm.js ddaHits(MML変換と同じ登録簿)なので、
-  // ロールで見た太鼓と変換で出る @DPCM が一致する([[roll-as-mml-debugger]])。
+  // ロールで見た太鼓と変換で出る @DPCM が一致する。
   RollBuild.hes = function (snapshots, frameRate, dpcmTrace, controlTrace) {
     const frameDur = 1 / frameRate;
     // @EN(高速アルペジオ)統合済みイベントの展開はKSS側と同じ(RollBuild.expandNoteEnv参照)。

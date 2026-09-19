@@ -564,7 +564,7 @@
   // =========================================================================
   // SPC (capture-worker-multi-impl.js の done基準差分プロトコル)
   // =========================================================================
-  // MML.SPC2MML.captureAsync と同一シグネチャ。frameLogは本家と同じく全フレーム分を
+  // MML.SPC2MML.captureAsync と同一シグネチャ。frameLogはppmckと同じく全フレーム分を
   // 空配列で事前確保し(SpcReplayStreamPlayerが未キャプチャ添字を空配列として読む
   // 前提のため)、Workerから届いた完成フレームで順次上書きする。
   // 戻り値のbrrSamplesは空({}): 再生+ロール経路はframeLogしか使わず、brrSamplesが

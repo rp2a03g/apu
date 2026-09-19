@@ -47,7 +47,7 @@
 
   /**
    * キャプチャ済みデータからMMLへ変換する(fromGbsの後半)。VGM(src/vgm2mml)がGB DMG由来の
-   * VGMを同じ抽出・出力経路で変換するために分離した(抽出器を複製しない方針、ROADMAP.md
+   * VGMを同じ抽出・出力経路で変換するために分離した(抽出器を複製しない方針、作業計画
    * VGM節)。fromGbs経由の出力は分離前と完全に同一。
    * @param {object} cap - { snapshots(gbsPlayer.js snapshotApu形式のフレーム配列), frameRate,
    *   songLabel(コメント用), sourceLabel(コメント用、既定'GBS') }
@@ -164,7 +164,7 @@
     // MML本文に埋め込まれるテンポは整数(t<n>)に丸められる(mmlEmit.js)。音長量子化の
     // グリッド(fpb)も同じ丸め後の値で計算しないと、書き出し時と再生(コンパイル)時で
     // 基準テンポが食い違い、打ち直しの多いパート(ノイズ等)で誤差が蓄積してドリフトする
-    // (詳細は[[tempo-rounding-drift-future-issue]]参照、GBSノイズchで実測22フレーム/60秒の
+    // (GBSノイズchで実測22フレーム/60秒の
     // ドリフトを確認して修正)。
     const fpb = frameRate * 60 / Math.round(bpm);
 
@@ -231,7 +231,7 @@
       plan: Object.assign({}, MML.GBS2MML.defaultPlan(), customPlan),
       cmd,
       // GBSは借用変換(二重量子化の補正)なのでapplyPitchDetune方針を保つ
-      // ([[kss2mml-pitch-detune-correction]]、従来経路と同じ)
+      // (従来経路と同じ)
       detuneMode: 'apply',
       regs: { envReg, pitchReg, noteEnvReg, n163WaveReg, vrc7ToneReg },
       toneOf: (id) => (options.tone || {})[id],
@@ -265,7 +265,7 @@
       if (d.defs.length) {
         for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
         dpcmFiles.push(...d.files);
-        scoreChannels.push({ letter: 'E', events: d.events, isDrum: true }); // E: 音符=@DPCM番号(本家ppmck準拠)
+        scoreChannels.push({ letter: 'E', events: d.events, isDrum: true }); // E: 音符=@DPCM番号(ppmck準拠)
         MML.Convert.sortChannelsByLetter(scoreChannels);
         drumNote = `打楽器化したchを実音のままDPCM(E)へ変換しました: 定義${d.stats.clips}件 / 打点${d.stats.segments}個 / ROM ${(d.stats.bytes / 1024).toFixed(1)}KB`
           + (d.stats.overflow ? `(定義が64本を超えたため ${d.stats.overflow} 本を落としました)` : '');

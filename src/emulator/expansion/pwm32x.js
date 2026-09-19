@@ -74,8 +74,7 @@
   // 鍵盤表示用スナップショット: 左右のPCMレベル(0-1)と生値。
   // withWave=true のときだけ直近128点の波形を積む(ライブ再生の鍵盤表示用)。
   // 先読みキャプチャ側では付けない: 毎フレーム128点×2chの新しい配列を保持すると
-  // 3分の曲で10MB超になり、得られる物(数ms前の眺め)に見合わない
-  // ([[capture-memory-footprint]])
+  // 3分の曲で10MB超になり、得られる物(数ms前の眺め)に見合わない。
   Emu.snapshotPWM32X = function (chip, withWave) {
     return {
       cycle: chip.cycle,

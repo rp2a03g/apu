@@ -9,9 +9,9 @@
  *   idx    … 周期index 0-15(n0=最も速い/高いノイズ、n15=最も遅い/低い。compiler.js noisePeriodIndex)
  *   mode   … 0=長周期(ホワイトノイズ) / 1=短周期(93ステップの周期性ノイズ、@1)
  *   vol    … { type:'v', v:0-15 } 固定音量 | { type:'env', values:[0-15…], loop:null|n } @v表
- *   ep     … null | { values:[差分…], loop:null|n }  @EP表(本家準拠の累積差分。正=音程上=index−1)
+ *   ep     … null | { values:[差分…], loop:null|n }  @EP表(ppmck準拠の累積差分。正=音程上=index−1)
  *   en     … null | { values:[差分…], loop:null|n }  @EN表(ノート空間の累積差分。正=index+1=音程下、16で巡回)
- *   detune … D<n>(0=無し。D16 n0 のように桁あふれで短周期にする本家の技も書けるが、長短は mode で)
+ *   detune … D<n>(0=無し。D16 n0 のように桁あふれで短周期にするppmckの技も書けるが、長短は mode で)
  *
  * プリセット { id, name, tone, builtin }。組み込み(BUILTIN)は id 固定で、ユーザーが編集すると
  * 同じ id の上書きが localStorage に保存される(「組み込みに戻す」で消せる)。追加分は id 'u<連番>'。

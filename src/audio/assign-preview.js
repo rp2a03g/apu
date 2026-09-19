@@ -10,8 +10,7 @@
  *   重いのはCPUエミュレーション(Z80/SPC700等)で、NSF側のチップ単体は軽い。MML再生
  *   (src/audio/stream-player.js MmlStreamPlayer)がまさに「CPU無しでチップへ書いて鳴らす」
  *   構造で全チップ同時でも問題なく動く。同じチップを鳴らせば三角波の4bit段・ノイズのLFSR・
- *   VRC7のFMエンベロープまで変換後(MML→再生)と同じ音になり、別実装の乖離が生まれない
- *   ([[roll-as-mml-debugger]] と同じ考え方)。
+ *   VRC7のFMエンベロープまで変換後(MML→再生)と同じ音になり、別実装の乖離が生まれない。
  *
  * ■ 入力
  *   setPlan(rows)      rows = [{ id, target, tone, kind, muted }] 鍵盤表示 getPreviewPlan() の形

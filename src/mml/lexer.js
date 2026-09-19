@@ -148,7 +148,7 @@
   //  バイト4=DC,DM,FB、バイト5-8=AR,DR / SL,RR)に基づく。
   // 「DT」はページの説明("DC及びDMの略")から、各オペレータ行末のDTがその
   // オペレータ自身の波形選択ビット(モジュレータ行→DM、キャリア行→DC)を表すと解釈した
-  // (この解釈は未検証の近似。ROADMAP.mdフェーズ1.5参照)
+  // (この解釈は未検証の近似。作業計画フェーズ1.5参照)
   const VRC7_TONE_ALT_DEF_RE = /^@OT(\d+)\s*=\s*\{([^}]*)\}$/i;
 
   function parseVrc7ToneAltDef(trimmed) {
@@ -236,11 +236,11 @@
   // 実際のファイル読込・DPCM変換はブラウザのファイル選択が必要なためUI層の仕事であり、
   // Mml.compile() は opt.dpcmSamples[filename]=Uint8Array で変換済みバイト列を
   // 外から受け取れるようにするに留める(チャンネルへの実際の再生配線・専用チャンネル文字の
-  // 割当は別タスク。ROADMAP.mdフェーズ9参照)。
+  // 割当は別タスク。作業計画フェーズ9参照)。
   // freq=再生レート(DMCレート表インデックス0-15、実機$4010下位4bit。この定義はいつもこのレートで鳴る),
   // size=想定バイト数(本ツールは読み捨て), dac=初期DAC値(実機$4011相当、255=書かない),
-  // mode=再生モード(0=1回/1=ループ、実機$4010 bit6)。番号は 0-63(本家 _DPCM_MAX、compiler.js が検査)。
-  // ★Eチャンネルの音符/n<num> はこの番号を指す(本家ppmck準拠、compiler.js DPCM_NOTE_BASE 参照)
+  // mode=再生モード(0=1回/1=ループ、実機$4010 bit6)。番号は 0-63(ppmck _DPCM_MAX、compiler.js が検査)。
+  // ★Eチャンネルの音符/n<num> はこの番号を指す(ppmck準拠、compiler.js DPCM_NOTE_BASE 参照)
   const DPCM_DEF_RE = /^@DPCM(\d+)\s*=\s*\{\s*"([^"]*)"\s*,\s*([^}]*)\}$/i;
 
   function parseDpcmDef(trimmed) {
@@ -329,8 +329,8 @@
   }
 
   // #EX-*(拡張音源使用宣言)のチップ名対応表
-  // 受理する名前。N163は `#EX-N163` と本家ppmck綴りの `#EX-NAMCO106` の両方を通す
-  // (2026-09-10、ユーザー指示。古い綴りは互換のため残し、このツールが書き出すのは新しい方)
+  // 受理する名前。N163は `#EX-N163` とppmck綴りの `#EX-NAMCO106` の両方を通す
+  // (2026-09-10、方針。古い綴りは互換のため残し、このツールが書き出すのは新しい方)
   // FME-7も同じ扱い: 実チップ名の `#EX-SUNSOFT5B` を足し、`#EX-FME7` は互換で残す(2026-09-11)
   const EX_CHIP_MAP = {
     'EX-DISKFM': 'fds', 'EX-VRC7': 'vrc7', 'EX-VRC6': 'vrc6',
@@ -353,7 +353,7 @@
   /**
    * `#EX-NAMCO106 <n>` に書くチャンネル数 = 本文に出す n163 レターのうち最上位の位置+1。
    *
-   * ★この数値は「本家ppmckでは意味がある」(ppmckc/datamake.c `_EX_NAMCO106`: n106_track_num に
+   * ★この数値は「ppmckでは意味がある」(ppmckc/datamake.c `_EX_NAMCO106`: n106_track_num に
    *   入り、track_allow_flag へ先頭 n トラックぶんだけ許可を立てる)。少なく書くと本文に居る
    *   上位トラックが INVALID_TRACK_HEADER で弾かれ、多く書くとN163の有効ch数レジスタが変わって
    *   全chの音程がずれる。だから「音符を持つ最上位」ではなく「本文に出す最上位」で数える
@@ -486,8 +486,8 @@
             default: {
               if (EX_CHIP_MAP[directive.name]) {
                 detectedExpansions.push(EX_CHIP_MAP[directive.name]);
-                // N163だけは数値に意味がある(実効ch数。本家ppmck datamake.c の
-                // _EX_NAMCO106 と同じで n106_track_num になる)。0は本家同様1として扱う
+                // N163だけは数値に意味がある(実効ch数。ppmck datamake.c の
+                // _EX_NAMCO106 と同じで n106_track_num になる)。0はppmck同様1として扱う
                 if (EX_CHIP_MAP[directive.name] === 'n163') {
                   const n = parseInt(directive.args, 10);
                   if (isFinite(n)) settings.n163NumCh = Math.max(1, Math.min(8, n || 1));
@@ -836,9 +836,9 @@
             if (str[i] === ',') { i++; num = readNumber(); }
             tokens.push({ type: 'frameTempo', len: len == null ? 4 : len, dots, num: num == null ? 30 : num });
           } else if (str[i] === 'n') {
-            // @n<num>[,<len>] 直接周波数指定(本家ppmck _KEY、datamake.c setCommandBufN1)。音符の周期/周波数
-            // レジスタ値をテーブルを通さず直接書く。<num>は本家の Asc2Int と同じく10進/$16進/x16進/%2進を受ける。
-            // 音長は「,」の後にだけ書ける(省略時は l<n>)。本家どおり小文字 n のみ(大文字 @N は波形定義の書式)
+            // @n<num>[,<len>] 直接周波数指定(ppmck _KEY、datamake.c setCommandBufN1)。音符の周期/周波数
+            // レジスタ値をテーブルを通さず直接書く。<num>はppmckの Asc2Int と同じく10進/$16進/x16進/%2進を受ける。
+            // 音長は「,」の後にだけ書ける(省略時は l<n>)。ppmckどおり小文字 n のみ(大文字 @N は波形定義の書式)
             i++;
             let num = null;
             if (str[i] === '$' || str[i] === 'x') {
@@ -977,7 +977,7 @@
         // PT<target>,<duration>[,<delay>] ポルタメント(単調な直線グライド、DESIGN-PITCH.md
         // 別プロジェクトC)。PTOFで解除。target(符号付き)はD<n>/EP<n>と同じ「変換先チップの
         // 生レジスタオフセット」空間、durationはグライドに要するフレーム数、delayは省略可
-        // (既定0)。★ppmck本家ドキュメント(doc/mck.txt)には専用のポルタメントコマンドが
+        // (既定0)。★ppmckドキュメント(doc/mck.txt)には専用のポルタメントコマンドが
         // 無く「ピッチエンベロープ(EP)で代用してください」と明記されているため、これは
         // ppmck方言からの独自拡張(README.md方言対応表・INV-2参照)。
         case 'P': {
@@ -998,7 +998,7 @@
               });
             }
           } else if (str[i] === 'S' || str[i] === 's') {
-            // PS ポルタメント(ppmck本家、実機準拠の別実装。PTとは独立)。次に来る音符
+            // PS ポルタメント(ppmck、実機準拠の別実装。PTとは独立)。次に来る音符
             // そのものをグライド先として使うため引数を取らない(compiler.js buildSegments参照)
             i++;
             tokens.push({ type: 'pitchShift' });
@@ -1060,7 +1060,7 @@
         //                (ppmck公式リファレンス通り。トークン化自体をここで打ち切る)
         // !! (2個)     = タイムシフト。ここが「再生開始位置」になる(ppmck公式、ppmck9a ex7以降)。
         //                シークバーの開始ハンドル(青)と相互リンクする(main.js側)
-        // !!! (3個)    = 本ツール独自拡張(ユーザー要望、2026-08-13)。「再生終了位置」。
+        // !!! (3個)    = 本ツール独自拡張(方針、2026-08-13)。「再生終了位置」。
         //                シークバーの終了ハンドル(赤)と相互リンクする。省略時は曲の最後まで
         case '!': {
           i++;

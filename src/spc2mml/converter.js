@@ -1090,7 +1090,6 @@
     // MML本文に埋め込まれるテンポは整数(t<n>)に丸められる(mmlEmit.js)。音長量子化の
     // グリッド(fpb)も同じ丸め後の値で計算しないと、書き出し時と再生(コンパイル)時で
     // 基準テンポが食い違い、打ち直しの多いパートで誤差が蓄積してドリフトする
-    // ([[tempo-rounding-drift-future-issue]]参照)。
     const fpb = FPS_SPC * 60 / Math.round(bpm);
 
     // ── 実測エンベロープ → ppmck @v/@vr テーブル抽出 ──
@@ -1118,7 +1117,7 @@
       for (const ev of voiceEvents[ch]) songMaxVol = Math.max(songMaxVol, ev.vol || 0);
     }
     if (!songMaxVol) songMaxVol = 127;
-    // 借用先ごとの音量上限(2026-08-24): 本家ppmck同様、FDSは$4080ゲイン生値(実効32で
+    // 借用先ごとの音量上限(2026-08-24): ppmck同様、FDSは$4080ゲイン生値(実効32で
     // 頭打ち)、VRC6のこぎり波は$B000蓄積レート生値(実質42が最大。43以上は8bit桁溢れで
     // 音が崩れるだけ)。他は0-15。src/mml/compiler.js volMax(v<n>の上限63)のコメント参照。
     // 一律0-15にするとFDSは実効半分・のこぎりは1/3の音量しか出ず「音が小さい」となる。
@@ -1195,11 +1194,11 @@
     const expansion = usedExpansions[0] || 'none'; // 後方互換(result.expansion)用
 
     // ── DPCM 変換 (全ボイス中で DPCM 指定されたものの srcn を収集) ──
-    // 本家ppmck準拠(2026-09-19): E の音符は「どの @DPCM<n> を鳴らすか」の番号で、レートは定義の freq で固定。
+    // ppmck準拠(2026-09-19): E の音符は「どの @DPCM<n> を鳴らすか」の番号で、レートは定義の freq で固定。
     // SNESのBRRサンプルはノートごとにピッチシフトして鳴らす楽器なので、弾かれた音高ごとに最寄りの
-    // DMCレート(16段)を選び、(srcn, レート) の組ごとに @DPCM 定義を作る(本家流「レート違いの定義を並べる」)。
+    // DMCレート(16段)を選び、(srcn, レート) の組ごとに @DPCM 定義を作る(ppmck流「レート違いの定義を並べる」)。
     // ファイルは srcn ごとに1本(原音 pitch=0x1000 をレート15で符号化)で、同じファイルを指す定義は
-    // ROM を共有する(compiler.js layoutDpcmSamples / 本家ppmckc sortDPCM)。定義は全体で64本まで(capDefs)。
+    // ROM を共有する(compiler.js layoutDpcmSamples / ppmckc sortDPCM)。定義は全体で64本まで(capDefs)。
     // ★2026-09-04: Eボイスの発音は既定でパッド(打楽器)へ回るようになったので、ここに来るのは
     //   パッドで「音階として扱う」と指定したsrcnだけ(pitchSrcnSet)。打楽器化そのものを切って
     //   いる(cmd.DRUM=false)ときは従来どおり全srcnがこちら。
@@ -1287,7 +1286,7 @@
       for (const ev of drumDpcm.events) dpcmNoteEvents.push({ start: ev.start, end: ev.end, note: ev.note + base, exact: !!ev.exact });
     }
     dpcmNoteEvents.sort((a, b) => a.start - b.start);
-    // 定義は本家と同じ64本まで(音程付き+打楽器の合計)。溢れは使用回数の少ない定義から落とす
+    // 定義はppmckと同じ64本まで(音程付き+打楽器の合計)。溢れは使用回数の少ない定義から落とす
     const dpcmCap = MML.Convert.DrumHits.capDefs(dpcmDefs, dpcmNoteEvents, dmcFiles);
 
     // DPCM/拡張音源のチャンネル文字は、src/mml/compiler.jsのassignExpansionLettersを
@@ -1427,7 +1426,7 @@
         : `${MML.Mml.EX_CHIP_DIRECTIVE[exp]}\n`;
     }
 
-    // @DPCM<n>定義(実機ppmckcと同じ書式)。E の音符 n<番号> がこの番号を選ぶ(本家ppmck準拠)
+    // @DPCM<n>定義(実機ppmckcと同じ書式)。E の音符 n<番号> がこの番号を選ぶ(ppmck準拠)
     for (const d of dpcmDefs) {
       mml += `@DPCM${d.index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac != null ? d.dac : 255}, ${d.mode || 0} }\n`;
     }

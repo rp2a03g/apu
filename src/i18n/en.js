@@ -184,9 +184,9 @@
     '.dmc をダウンロード': 'Download the .dmc files',
     '⚠ 台帳に無い .dmc: {files}(この MML だけでは鳴りません。DPCMコンバータで読み込むか、.dmc をドロップしてください)': '⚠ .dmc not on hand: {files} (this MML alone will not play them. Load them in the DPCM converter or drop the .dmc files here)',
     '@DPCM{n} の "{file}" が読み込まれていないため、この音は鳴りません(.dmc を MML と一緒に開くか、ウィンドウへドロップしてください)': '@DPCM{n}: "{file}" is not loaded, so this sample will be silent (open the .dmc together with the MML, or drop it onto the window)',
-    // DPCMチャンネル(E)の本家ppmck準拠(2026-09-19、src/mml/compiler.js)
-    '{cmd} はDPCMチャンネル(E)では使用できません(本家ppmck準拠: 音符/n<num>が@DPCM番号、レートは定義のfreqで固定)': '{cmd} cannot be used on the DPCM channel (E) (as in ppmck: the note / n<num> is the @DPCM number and the rate is fixed by the definition)',
-    '@DPCM の番号は 0〜{max} です(@DPCM{n}。本家ppmckと同じ64本まで)': '@DPCM numbers must be 0-{max} (@DPCM{n}; at most 64 definitions, as in ppmck)',
+    // DPCMチャンネル(E)のppmck準拠(2026-09-19、src/mml/compiler.js)
+    '{cmd} はDPCMチャンネル(E)では使用できません(ppmck準拠: 音符/n<num>が@DPCM番号、レートは定義のfreqで固定)': '{cmd} cannot be used on the DPCM channel (E) (as in ppmck: the note / n<num> is the @DPCM number and the rate is fixed by the definition)',
+    '@DPCM の番号は 0〜{max} です(@DPCM{n}。ppmckと同じ64本まで)': '@DPCM numbers must be 0-{max} (@DPCM{n}; at most 64 definitions, as in ppmck)',
     '{ch} の n{n} に対応する @DPCM{n} が定義されていないため、この音は鳴りません': '@DPCM{n} referenced by n{n} on channel {ch} is not defined, so that note is silent',
     ' / 定義が64本を超えたため {n} 本を落とします': ' / over 64 definitions, {n} dropped',
     // ---- ミニ操作窓 (src/ui/miniTransport.js) ----
@@ -422,8 +422,8 @@
     '再生準備に失敗しました(内部エラー): {msg}': 'Failed to prepare playback (internal error): {msg}',
     'NSF書き出し完了: {bytes}バイト({banks}バンク: ドライバ {driverBytes}バイト / 曲データ {songBytes}バイト / DPCM {dpcmBytes}バイト)':
       'NSF exported: {bytes} bytes ({banks} banks: driver {driverBytes} B / song data {songBytes} B / DPCM {dpcmBytes} B)',
-    '注意: 拡張音源({chips})は現状のNSF書き出しでは未対応のため、該当チャンネルは無音になります(VRC6/MMC5/FME7/FDS/N163/VRC7は対応済み)。':
-      'Note: NSF export does not support {chips} yet, so those channels will be silent (VRC6/MMC5/FME7/FDS/N163/VRC7 are supported).',
+    '注意: 拡張音源({chips})は現状のNSF書き出しでは未対応のため、該当チャンネルは無音になります(VRC6/MMC5/SUNSOFT 5B/FDS/N163/VRC7は対応済み)。':
+      'Note: NSF export does not support {chips} yet, so those channels will be silent (VRC6/MMC5/SUNSOFT 5B/FDS/N163/VRC7 are supported).',
     '再生準備完了 (テンポ {tempo}, 拡張音源: {chips})': 'Ready to play (tempo {tempo}, expansion: {chips})',
     '総フレーム数: {n}': 'Total frames  : {n}',
     '総再生時間  : {time}': 'Total duration: {time}',
@@ -522,7 +522,7 @@
     'MML変換完了 ({mode} {bpm} BPM{exp}{dpcm}) → MMLエディタに出力':
       'Converted to MML ({mode} {bpm} BPM{exp}{dpcm}) → written to the MML editor',
     'スキップ': 'Skip',
-    'VRC7の音色プリセット': 'VRC7 instrument preset',
+    'VRC7の音色プリセット': 'VRC7 tone preset',
     '@0 自作音色(サンプルから変換)': '@0 custom tone (converted from the sample)',
     '音色': 'Tone',
     '変換音量(下げる方向のみ)': 'Conversion volume (reduce only)',
@@ -555,8 +555,8 @@
     '音源        : {chips}': 'Chips       : {chips}',
     '曲番号範囲  : {first} 〜 {last}': 'Track range : {first} - {last}',
     '再生中: 曲{song}  (最大 {time})': 'Playing: track {song}  (max {time})',
-    'MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(FME-7/N163/VRC7を借用して再生)':
-      'Converted to MML ({mode} {bpm} BPM, chips: {chips}) → written to the MML editor (played back via FME-7/N163/VRC7)',
+    'MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力(SUNSOFT 5B/N163/VRC7を借用して再生)':
+      'Converted to MML ({mode} {bpm} BPM, chips: {chips}) → written to the MML editor (played back via SUNSOFT 5B/N163/VRC7)',
     'KSSピアノロール先読みに失敗:': 'Failed to pre-render the KSS piano roll:',
 
     // ---- GBSパネル ----
@@ -701,8 +701,8 @@
     '(打楽器として)': ' (as drums)',
     '音源そのまま': 'Chip default',
     '音源そのまま({t})': 'Chip default ({t})',
-    'この借用先は音色が1つだけなので、音源の音色そのままで鳴ります': 'This target has a single timbre, so it plays the chip\u2019s own sound',
-    '{t} は音色が1つだけなので、音源の音色そのままで鳴ります': '{t} has a single timbre, so it plays the chip\u2019s own sound',
+    'この借用先は音色が1つだけなので、音源の音色そのままで鳴ります': 'This target has a single tone, so it plays the chip\u2019s own sound',
+    '{t} は音色が1つだけなので、音源の音色そのままで鳴ります': '{t} has a single tone, so it plays the chip\u2019s own sound',
     'ドラム(DPCM)パネルで設定': 'Set in the Drums (DPCM) panel',
     ' 他': ' etc.',
     'FDSは波形の書き換え中に音が止まるため、音色が切り替わる所でプチノイズが乗ることもあります': 'FDS stops while its wave is rewritten, so a click may be heard where the tone changes',
@@ -782,7 +782,7 @@
     '反映': 'Apply',
     '説明を表示/非表示': 'Show/hide help',
     '@FM<n>: FDS波形メモリ全64サンプル(各0-63)。1周期分の音色波形をそのまま記録します。':
-      '@FM<n>: all 64 samples of FDS wave memory (0-63 each). One full cycle of the timbre, stored verbatim.',
+      '@FM<n>: all 64 samples of FDS wave memory (0-63 each). One full cycle of the waveform, stored verbatim.',
     '@MW<n> 変調カーブ (32)': '@MW<n> modulation curve (32)',
     '実際に鳴るピッチオフセットの累積カーブ(-64〜63)を表示・編集します。 ハードウェアは1フレームあたり0/1/2/4/-1/-2/-4(とR=0へリセット)の8段階でしか 変化できないため、描いたカーブに最も近い形へ自動的に近似されます。 MML本文の@MW<n>にもこの8種類の値をそのまま書きます。':
       'Shows and edits the accumulated pitch-offset curve (-64 to 63) that is actually heard. Per frame the hardware can only step by 0/1/2/4/-1/-2/-4 (plus R = reset to 0), so the curve you draw is automatically approximated to the closest achievable shape. The @MW<n> definition in the MML uses these same eight values verbatim.',
@@ -977,7 +977,7 @@
     '音量エンベロープ(OFF時はピーク音量を v で出す)': 'Volume envelope (when off, the peak level is emitted as v)',
     '音量そのもの(OFFなら v を一切出さない)': 'Volume itself (when off, no v at all)',
     '音色コマンド': 'Timbre',
-    '音色/デューティ/VRC7音色/FDS変調/FME7ノイズ周期': 'Instrument / duty / VRC7 tone / FDS modulation / FME7 noise period',
+    '音色/デューティ/VRC7音色/FDS変調/SUNSOFT 5Bノイズ周期': 'Instrument / duty / VRC7 tone / FDS modulation / SUNSOFT 5B noise period',
     '2A03ハードウェアスイープ': '2A03 hardware sweep',
     '譜面整形(近似)': 'Score shaping (approximate)',
     // ---- 変換設定ダイアログ(2026-09-08 整理後の文言、src/ui/convertSettings.js) ----
@@ -1122,16 +1122,16 @@
     '低(SA不使用・従来)': 'Low (no SA, legacy)',
     'N163出力のSA<n>(D/EP/MPの倍率)の選び方。深いビブラートをテーブルのbyte幅を超えて表現する': 'How to pick SA<n> (D/EP/MP multiplier) for N163 output. Lets deep vibrato exceed the byte-wide table range',
     'SA はN163チャンネル専用です': 'SA is only available on N163 channels',
-    '{cmd}{n} の値 {v} は {ch} では下位4bitの {w} で鳴ります(音量が0〜15のチャンネル。本家ppmckと同じ)': 'The value {v} in {cmd}{n} plays as {w} (its low 4 bits) on {ch}, whose volume range is 0-15 (same as ppmck)',
-    'N<n>/S<n>/M<n> は FME7(サンソフト5B)のチャンネル専用なので無視します': 'N<n>/S<n>/M<n> are only for FME7 (Sunsoft 5B) channels and are ignored here',
+    '{cmd}{n} の値 {v} は {ch} では下位4bitの {w} で鳴ります(音量が0〜15のチャンネル。ppmckと同じ)': 'The value {v} in {cmd}{n} plays as {w} (its low 4 bits) on {ch}, whose volume range is 0-15 (same as ppmck)',
+    'N<n>/S<n>/M<n> は SUNSOFT 5B のチャンネル専用なので無視します': 'N<n>/S<n>/M<n> are only for SUNSOFT 5B channels and are ignored here',
     'L の直後の最初の音符には PS(ポルタメント)を付けられません(周回ごとにグライド元が変わるため)。通常の音符として鳴らします': 'PS (portamento) cannot be used on the first note after L (the note it glides from would differ on every pass). It is played as a normal note',
-    'K(移調)はノイズchでは無効です(本家ppmck準拠、周期indexは移調できません)': 'K (transpose) has no effect on the noise channel (as in ppmck; a period index cannot be transposed)',
+    'K(移調)はノイズchでは無効です(ppmck準拠、周期indexは移調できません)': 'K (transpose) has no effect on the noise channel (as in ppmck; a period index cannot be transposed)',
     'ノイズchの @<n> は 0(長周期)か 1(短周期)です(@{v} は下位1bitで解釈します)': 'On the noise channel @<n> is 0 (long period) or 1 (short period); @{v} is read by its lowest bit',
     'ノイズchの n<num> は周期index 0〜15 です(n{v} は 16 で巡回して n{w} として鳴らします)': 'On the noise channel n<num> is a period index 0-15; n{v} wraps modulo 16 and plays as n{w}',
     'SA の値は 0〜8 で指定してください ({v})': 'SA must be between 0 and 8 ({v})',
-    '@n(直接周波数指定)はこのチャンネルでは使えません(本家ppmck準拠: VRC7・N163・DPCMは不可)': '@n (direct frequency) cannot be used on this channel (as in ppmck: not on VRC7, N163 or DPCM)',
+    '@n(直接周波数指定)はこのチャンネルでは使えません(ppmck準拠: VRC7・N163・DPCMは不可)': '@n (direct frequency) cannot be used on this channel (as in ppmck: not on VRC7, N163 or DPCM)',
     '@n の後に周波数レジスタ値(数値)を書いてください(例: @n$1AB,4)': 'Write a frequency register value (a number) after @n (e.g. @n$1AB,4)',
-    '@n{v} は {chip} の周波数レジスタ({bits}bit)に収まらないので、下位{bits}bit({m})で鳴らします(本家ppmckと同じ)': '@n{v} does not fit the {chip} frequency register ({bits} bits); it plays with the low {bits} bits ({m}), as in ppmck',
+    '@n{v} は {chip} の周波数レジスタ({bits}bit)に収まらないので、下位{bits}bit({m})で鳴らします(ppmckと同じ)': '@n{v} does not fit the {chip} frequency register ({bits} bits); it plays with the low {bits} bits ({m}), as in ppmck',
     '@n(直接周波数指定)の音符には EN(ノートエンベロープ)は効きません(周期値を直接書くため。EP/MPは効きます)': 'EN (note envelope) has no effect on @n (direct frequency) notes, since the period is written directly (EP/MP still apply)',
     'プリセット': 'Presets',
     'カスタム': 'Custom',

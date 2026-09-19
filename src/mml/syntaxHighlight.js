@@ -102,7 +102,7 @@
     ['tok-cmd-pitch', 'K[+-]?\\d*'],         // K<n>(移調、大文字のみ)
     ['tok-cmd-pitch', 'P[Tt][Oo][Ff]'],      // PTOF(ポルタメント解除)
     ['tok-cmd-pitch', 'P[Tt][+-]?\\d*(?:,\\d+)?(?:,\\d+)?'], // PT<target>,<duration>,<delay>
-    ['tok-cmd-pitch', 'P[Ss]'],              // PS(ポルタメント、ppmck本家系)
+    ['tok-cmd-pitch', 'P[Ss]'],              // PS(ポルタメント、ppmck系)
     ['tok-cmd-pitch', 'n\\d*(?:,\\d+\\.*)?'],// n<num>,<length>(直接音程指定、小文字のみ)
     ['tok-cmd-pitch', 's\\d*(?:,\\d*)?'],    // s<speed>,<depth>(スイープ、小文字のみ)
     ['tok-cmd-pitch', 'S[Aa]'],              // SA(SD/SMに一致しなかった場合のフォールバック)

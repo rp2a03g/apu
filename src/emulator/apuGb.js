@@ -175,7 +175,7 @@
       // 常に無評価)。ここでも重ねてlengthCounterを見ると、GbsReplayStreamPlayerのように
       // trigger()/clockLength()のライフサイクルを経由せずenabledだけをスナップショットから
       // 直接書き戻す再生経路で、初期値0のままのlengthCounterに引っかかり常時無音化する
-      // バグになっていた(ユーザー報告: パルス/ノイズが鳴らずwaveのみ鳴る)。
+      // バグになっていた(不具合報告: パルス/ノイズが鳴らずwaveのみ鳴る)。
       if (!this.enabled) return 0;
       if (DUTY_TABLE[this.duty][this.dutyStep] === 0) return 0;
       return this.envelope.volume;
@@ -322,7 +322,7 @@
       // 常に無評価)。ここでも重ねてlengthCounterを見ると、GbsReplayStreamPlayerのように
       // trigger()/clockLength()のライフサイクルを経由せずenabledだけをスナップショットから
       // 直接書き戻す再生経路で、初期値0のままのlengthCounterに引っかかり常時無音化する
-      // バグになっていた(ユーザー報告: パルス/ノイズが鳴らずwaveのみ鳴る)。
+      // バグになっていた(不具合報告: パルス/ノイズが鳴らずwaveのみ鳴る)。
       if (!this.enabled) return 0;
       return (this.lfsr & 1) === 0 ? this.envelope.volume : 0; // LFSR bit0=0で"高い"(実機の反転規約)
     }

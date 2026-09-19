@@ -8,16 +8,15 @@
  *
  * ブラウザには音声のデコーダは載っているがエンコーダはほぼ無い(WebCodecsのAAC/Opusだけ)。
  * FLACは自分で書くしかないので、別プロジェクト(cdrip)の自前エンコーダを移植した。
- * Node依存(node:fs / node:crypto)は外し、MD5は下の md5Bytes() で自前計算している
- * ([[flac-encoder-from-scratch]] [[flac-lpc-implementation]])。
+ * Node依存(node:fs / node:crypto)は外し、MD5は下の md5Bytes() で自前計算している。
  *
  * 中身: 固定予測(次数0-4)+LPC(次数1-12)、ステレオ相関除去(L/R・L/S・R/S・M/S)、
  * 分割Riceコード。44.1kHzのstreamable subset(LPC次数<=12・係数精度15)に収まる。
  *
  * ★残差の右シフトは算術シフト(Math.floor)でなければならない。truncだと負の合計だけ
- *   静かに壊れて可逆でなくなる([[flac-lpc-implementation]])。
+ *   静かに壊れて可逆でなくなる。
  * ★検証は「WAVとFLACを decodeAudioData 経由で float 同士で比較」する。
- *   int16へ戻して比べると v/32767 の丸めで誤検知する([[flac-encoder-from-scratch]])。
+ *   int16へ戻して比べると v/32767 の丸めで誤検知する。
  */
 (function (global) {
   'use strict';

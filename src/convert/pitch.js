@@ -88,7 +88,7 @@
   }
 
   // 末尾の「同一値が続く足踏み区間」だけを1個残してtrimする
-  // ([[envelope-nonloop-tail-trim-fix]]と同じ考え方: 非ループの絶対オフセット列は末尾値を
+  // (非ループの絶対オフセット列は末尾値を
   // 保持し続ける意味なので、末尾の重複はテーブル長を縮めるだけで再生結果に影響しない。
   // 実際の@EPテーブルは registerShape で差分列+末尾0へ変換される)。
   function trimTrailingHold(diff) {
@@ -220,9 +220,9 @@
   // そのまま素通しで返す。テーブル自体にdelayの概念は無い=同じ形なら異なるdelay値の
   // 呼び出し同士でも同じテーブル番号を共有できる)。
   //
-  // ★@EPの値は本家ppmck準拠の「毎フレームの差分の累積」(2026-09-13修正、compiler.js
+  // ★@EPの値はppmck準拠の「毎フレームの差分の累積」(2026-09-13修正、compiler.js
   // pitchEnvelopeValue参照。以前は各フレームの絶対オフセットをそのまま書いており、当ツール内では
-  // 辻褄が合っていたが本家ppmckcでコンパイルすると別の動きになっていた)。classifyPitchModが
+  // 辻褄が合っていたがppmckcでコンパイルすると別の動きになっていた)。classifyPitchModが
   // 返すvaluesは「基準からの絶対オフセット列」なので、ここで差分列へ変換して登録する
   // (toCumulativeDeltas)。this.tables に持つのは差分列:
   //  ・periodic: [a0 | a1-a0, ..., a(P-1)-a(P-2), a0-a(P-1)] loop=1。1周ぶんの差分の合計は
@@ -233,7 +233,7 @@
   // 差分がbyte幅(EP_VALUE_MIN..MAX)を超える形は登録せずnullを返す(→基準音のみ)。
   // ★loop有り同士(片方でもloop!=null)は前方一致していても共有・置き換えを一切行わない
   // (envelope.js EnvelopeRegistry.registerShapeと同じ理由・同じガード。
-  // [[envelope-registry-loop-upgrade-bug]]参照。ループ有りのvaluesは「最小の繰り返し単位」に
+  // ループ有りのvaluesは「最小の繰り返し単位」に
   // 切り詰められており配列長が観測フレーム数を反映しないため、前方一致だけを根拠にした
   // 共有/差し替えは無関係な変調を混同する事故になる)。
   function toCumulativeDeltas(absValues, isPeriodic) {
@@ -279,7 +279,7 @@
   };
 
   // 差分列 {values, loop} をそのまま @EP 表として登録する(ノイズパッドのプリセット、
-  // src/convert/drumHits.js noise()。値は既に本家準拠の累積差分なので変換しない)。
+  // src/convert/drumHits.js noise()。値は既にppmck準拠の累積差分なので変換しない)。
   // 完全一致だけを共有し、registerShape の前方一致統合はしない(ユーザーが書いた表を変えない)
   MML.Convert.PitchEnvelopeRegistry.prototype.registerTable = function (table) {
     if (!table || !table.values || !table.values.length || !this.cmd.EP) return null;
@@ -485,7 +485,7 @@
   //              量子化ステップはセント換算0.85〜1.7で一定(オクターブ非依存)。既定。
   //   'note'   … 音符ごとに必要最小のsa(最高精度、テーブル共有は減る)
   //   'off'    … SAを使わない(従来互換。byte幅を超える変調は従来どおり割当失敗)
-  // どのモードもレンジに収まらない場合はsa+1のエスケープで引き上げる(上限8=本家仕様)。
+  // どのモードもレンジに収まらない場合はsa+1のエスケープで引き上げる(上限8=ppmck仕様)。
   MML.Convert.n163SaForBase = function (baseReg) {
     if (!(baseReg > 0)) return 0;
     return Math.max(0, Math.min(8, Math.floor(Math.log2(baseReg)) - 10));
@@ -590,7 +590,7 @@
           : undefined;
         const assigned = pitchReg.assign(rescaled, directionUp, saOpts);
         MML.Convert.applyPitchAssignment(ev, assigned);
-        // SAはD<n>にも効く(compiler.js pitchRegisterOffset、本家freq_add_mcknumber参照)ため、
+        // SAはD<n>にも効く(compiler.js pitchRegisterOffset、ppmckfreq_add_mcknumber参照)ため、
         // この音符のDも同じシフトで縮めて出力する(量子化2^sa単位≈1〜2セント)
         if (ev.pitchSa && ev.detune) ev.detune = Math.round(ev.detune / (1 << ev.pitchSa));
       }
@@ -846,8 +846,7 @@
 
   // 周期的アルペジオは常にloop=0(先頭からループ、buildNoteEnvelopeDeltasが1周期分の
   // 合計0の閉じた差分列を作るため)。EnvelopeRegistry/PitchEnvelopeRegistryと同じ
-  // 「loop有無が食い違うテーブルは前方一致でも共有しない」規約([[envelope-registry-loop-upgrade-bug]]
-  // 参照)は、EN側は現状ループ専用(非ループ生成経路が無い)ため該当しないが、将来
+  // 「loop有無が食い違うテーブルは前方一致でも共有しない」規約は、EN側は現状ループ専用(非ループ生成経路が無い)ため該当しないが、将来
   // 非ループEN生成を追加する場合はここも同じガードを入れること。
   MML.Convert.NoteEnvelopeRegistry.prototype.registerShape = function (deltas) {
     if (!deltas || deltas.length === 0 || !this.cmd.EN) return null;

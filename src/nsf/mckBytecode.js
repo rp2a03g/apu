@@ -1,7 +1,7 @@
 /*
  * ppmck方式のコンパクトなバイトコードでMMLの音符セグメント列をシリアライズする。
  * MML.Mml.compile()が返すフレーム単位レジスタ書き込みログ(tracks)は、そのまま
- * NSFへ書き出すには32KBを簡単に超えて非現実的なため採用しない(ROADMAP.mdフェーズ1.6)。
+ * NSFへ書き出すには32KBを簡単に超えて非現実的なため採用しない(作業計画フェーズ1.6)。
  * 代わりに、音符1個を基本2〜3バイトで表現できるコマンドバイト列形式を使う。
  *
  * オペコード(ppmck実機ソース https://github.com/munshkr/ppmck の
@@ -15,13 +15,13 @@
  *   0xF7      : ノートエンベロープ(EN)選択。次バイトはインデックス(255=off)
  *   0xF8      : ピッチエンベロープ(EP)選択。次の2バイトが[インデックス(255=off),delay]。
  *               delayはEP<n>,<delay>のdelayフレーム数(0-255、2026-08-11 別プロジェクトA。
- *               ppmck本家仕様には無いこのツール独自の拡張。offでも固定長デコードのため
+ *               ppmck仕様には無いこのツール独自の拡張。offでも固定長デコードのため
  *               2バイト目を読む、値は無視される)
  *   0xF9      : ポルタメント(PT)選択。次の5バイトが[増減量下位,増減量上位(符号付き16bit
  *               LE),間隔,duration,delay]。増減量/間隔はcompiler.jsのportamentoStepParamsで
  *               前計算した1ステップの値(2026-09-19、以前はtargetを置いて6502側でCEILDIVして
  *               いた。ppmckDriver.js RD_PORTAMENTO参照)。offはduration=0を番兵とする
- *               (2026-08-11 別プロジェクトC。ppmck本家ドキュメント(doc/mck.txt)には
+ *               (2026-08-11 別プロジェクトC。ppmckドキュメント(doc/mck.txt)には
  *               専用のポルタメントコマンドが無く「ピッチエンベロープ(EP)で代用してください」
  *               と明記されているため、このツール独自の拡張。実機では0xF9は生ハードウェア
  *               スイープ書込み用に予約された値だが、本ツールのsweepはソフトウェア近似で
@@ -109,7 +109,7 @@
  * (noteNumber・volume・instrument・各種インデックス)をそのまま記録する。
  * 実際のレジスタ値への変換は再生側=6502ドライバの仕事になる)。
  *
- * 未対応(ROADMAP.mdフェーズ1.6タスク1の続き、意図的に見送っている理由をそれぞれ記載):
+ * 未対応(作業計画フェーズ1.6タスク1の続き、意図的に見送っている理由をそれぞれ記載):
  *   - ループ([...]n → 0xA0/0xA1): 実機のループ命令はジャンプ先アドレス(バンク+
  *     オフセット)を埋め込む方式で、これは最終的なROM上のバイト配置が決まらないと
  *     生成できない(0xEEのバンク切り替えと同じ仕組みを流用しているため)。つまり
@@ -134,7 +134,7 @@
  *   - DPCM: DPCMチャンネル(E)のセグメント列も他チップと同じくこのserialize()を通る。
  *     noteByte は compiler.js の noteNumber(= DPCM_NOTE_BASE 24 + @DPCM番号)そのもので、
  *     6502側 TYPE_DPCM ハンドラ(ppmckDriver.js)が 24 を引いて番号×4で DPCM_DATA を引く
- *     (本家ppmck準拠 2026-09-19)。E には v/@/@@r が無い(compiler.js がエラーにする)ので、
+ *     (ppmck準拠 2026-09-19)。E には v/@/@@r が無い(compiler.js がエラーにする)ので、
  *     chanOpts.dpcm のチャンネルでは OP_VOL/OP_TONE/OP_REL_TONE を出さない(ドライバも見ない)。
  *   - FDSの`MH<n>`(曲中の変調再ロード)はVRC7の`OP<n>`(0xF0)と同じ音符に紐付かない
  *     即時コマンドとして0xF5オペコードで対応する(下記OP_FDS_MOD_RELOAD参照)。
@@ -172,14 +172,14 @@
   // 独自拡張のポルタメントに転用した(その後2026-08-20にsweepはOP_SWEEP=0xE3で実装)
   const OP_PORTAMENTO = 0xf9;
   const OP_DETUNE = 0xfa; // D<n>デチューン選択。次の2バイトが符号付き16bit値(下位,上位、リトルエンディアン)
-  // SA<num>(N163ピッチシフト量、2026-08-26、本家ppmckcのpitch_shift_amount相当)。
+  // SA<num>(N163ピッチシフト量、2026-08-26、ppmckcのpitch_shift_amount相当)。
   // 次バイトがシフト量(0-8)。空き領域0xE3-0xE6のうちOP_SWEEP(0xE3)の次を使う
   const OP_PITCH_SA = 0xe4;
-  // @n<num>(直接周波数指定、2026-09-19、本家ppmckのMCK_DIRECT_FREQ相当)。次の2バイトが
+  // @n<num>(直接周波数指定、2026-09-19、ppmckのMCK_DIRECT_FREQ相当)。次の2バイトが
   // [周期/周波数の下位,上位](compiler.jsがチップのレジスタ幅でマスク済み)。直後に必ず通常の音符
   // (2バイト形式か1バイト形式)が続き、その音符はノート番号の音階テーブルではなくこの値で鳴る。
   // 音符バイトのノート番号は周期からの逆算値(ロール表示用の代表値)で、音程には使われない。
-  // 本家は [$F6, 下位, 上位, 音長] の1命令だが、本ツールは sticky 音長を共有するため「前置き+音符」にした
+  // ppmckは [$F6, 下位, 上位, 音長] の1命令だが、本ツールは sticky 音長を共有するため「前置き+音符」にした
   const OP_DIRECT_FREQ = 0xe5;
   const OP_VIBRATO = 0xfb;
   const OP_WAIT = 0xf4;
@@ -536,7 +536,7 @@
           }
           lastVolMode = 'env';
         } else {
-          // FDS/VRC6のこぎり波は0-63(本家ppmck同様の6bit音量)、他はcompiler.js側で0-15に
+          // FDS/VRC6のこぎり波は0-63(ppmck同様の6bit音量)、他はcompiler.js側で0-15に
           // クランプ済み。デコーダは&0x7Fなのでバイト表現は変わらない
           const volume = Math.max(0, Math.min(63, seg.volume));
           if (volume !== lastVolume || lastVolMode !== 'plain') {

@@ -30,7 +30,7 @@
   // ── 借用先の一覧 ───────────────────────────────────────────────
   // 並びはチャンネル文字のアルファベット順(A-Z,ab)。文字は実機ppmck同様、他チップの
   // 有無に関わらず完全固定(assignExpansionLetters: dpcm=E, fds=F, vrc7=G-L, vrc6=M-O,
-  // n163=P-W, fme7=X-Z, mmc5=a-b。[[ppmck-fixed-channel-letters]])
+  // n163=P-W, fme7=X-Z, mmc5=a-b)
   const TARGET_LIST = [
     ['skip', null, null, null],
     ['pulse1', '2a03', 'A', 'pulse'],
@@ -57,7 +57,7 @@
   }
 
   // 借用先の表示名(パート文字は letterOfTarget() が動的に前置するのでここには含めない)
-  // ★借用先の名前は全部英語で統一する(ユーザー指示)。チップ名+チャンネル名なので
+  // ★借用先の名前は全部英語で統一する(方針)。チップ名+チャンネル名なので
   //   翻訳する意味が薄く、日英が混ざると一覧としてかえって読みにくいため。
   const TARGET_NAME = function () {
     return {
@@ -65,7 +65,7 @@
       pulse1: '2A03 Pulse1', pulse2: '2A03 Pulse2', triangle: '2A03 Triangle', noise: '2A03 Noise', dpcm: '2A03 DPCM',
       fds: 'FDS Wave',
       vrc6pulse1: 'VRC6 Pulse1', vrc6pulse2: 'VRC6 Pulse2', vrc6saw: 'VRC6 Saw',
-      fme7a: 'FME-7 A', fme7b: 'FME-7 B', fme7c: 'FME-7 C',
+      fme7a: 'SUNSOFT 5B A', fme7b: 'SUNSOFT 5B B', fme7c: 'SUNSOFT 5B C',
       mmc5pulse1: 'MMC5 Pulse1', mmc5pulse2: 'MMC5 Pulse2',
     };
   };
@@ -138,18 +138,18 @@
   // サンプルPCM(VGMのC140/C352/QSound/OKIM6295/SegaPCM/MultiPCM/GA20/ADPCM)。ピッチ解析で
   // 音階が取れた時点で「音程と音量を持つ普通の旋律ch」なので、載せ先は矩形波系も含めて brr(SPCボイス)
   // と同じ全部にする。★2026-09-10まで pulse1/pulse2/triangle だけに絞っており、VRC6・FME-7・MMC5が
-  //   選べなかった(ユーザー報告「QSoundのPCMでVRC6/FME7/MMC5が選べない」)。絞る理由はコメントにも
+  //   選べなかった(不具合報告「QSoundのPCMでVRC6/FME7/MMC5が選べない」)。絞る理由はコメントにも
   //   変換器側にも無く、実測でも QSound ch→VRC6 は音符1097個がそのまま出てコンパイルも通る。
   const PCM_T = ['dpcm'].concat(SQUARE_T);
   // ★FDSは波形メモリchなので、音程を持つ元chならどの種別からでも選べてよい。
   //   以前は 'wave'/'any' にしか入れておらず、FM/PCM/矩形波の行で F: が出なかった
-  //   (ユーザー報告「変換先にF:のFDSがない」)。ノイズだけは対象外。
+  //   (不具合報告「変換先にF:のFDSがない」)。ノイズだけは対象外。
   // ★'dpcm'(E)は全種別で選べる(2026-09-03、ドラムパッド全形式展開): サンプルPCM以外の行で
   //   E を選ぶと「このchは打楽器」の手動判定になり、他chをミュートして分離レンダリングした
   //   音がドラムパッド(1音高=1パッド)になって @DPCM へ焼かれる(main.js synthDrum参照)。
   //   GBのノイズやPSGのドラム音をDPCM化する道がこれ。
   // ★'brr'(SPCボイス)はサンプルを持つのでPCM系だが、ノイズ(NON)でも鳴るので 'noise'(D)も選べる
-  //   (2026-09-04。ユーザー報告「SPCのノイズパートに2A03のノイズが選べない」。spc2mml側は
+  //   (2026-09-04。不具合報告「SPCのノイズパートに2A03のノイズが選べない」。spc2mml側は
   //   type 'noise' + ev.non を既に処理できる: src/spc2mml/converter.js spcNoiseNoteNum)
   const KIND_TARGETS = {
     square: ['fds', 'dpcm'].concat(SQUARE_T), wave: ['dpcm'].concat(WAVE_T), noise: ['dpcm'].concat(NOISE_T),
@@ -169,15 +169,15 @@
   //     VGM  … YM2612 DAC(YMDA) / 32X PWM(PWL,PWR) / RF5C164・68(RC*,RB*) / OKIM6258(OKI)
   //     NSF  … MMC5 PCM(M5PC)
   //   メガドライブ曲のドラムはDAC(YMDA)に載っていることが多く、Eを選んでも何も起きなかった
-  //   (ユーザー報告「アウトランでDPCMを選んでもパッドに出てこない」)。
+  //   (不具合報告「アウトランでDPCMを選んでもパッドに出てこない」)。
   //   実サンプルを持つのは VGMのPCMチップ(kind 'pcm')/ SPCボイス(kind 'brr')/ NSFのDM行だけ。
-  // ★旋律ch(矩形波/波形/FM/PCM)も D(2A03ノイズ)へ載せられる(2026-09-05、ユーザー要望「FMでノイズを
+  // ★旋律ch(矩形波/波形/FM/PCM)も D(2A03ノイズ)へ載せられる(2026-09-05、方針「FMでノイズを
   //   鳴らしているパートに2A03ノイズを割り当てたい」)。音程はノイズ周期へ写す(noiseIndexFor、
   //   借用先の音色選択 'noisePeriod' で自動/固定を選ぶ)。逆(ノイズ→旋律)は従来どおり不可。
   for (const k of ['square', 'wave', 'fm', 'fm4', 'pcm', 'any']) if (KIND_TARGETS[k].indexOf('noise') < 0) KIND_TARGETS[k].push('noise');
   const SAMPLE_KINDS = { pcm: true, brr: true };
   // ★2026-09-18: 旋律chの D(2A03ノイズ)も打楽器化(分離レンダリング→1音高=1パッド)の対象にする。
-  //   入口を1つにするため(ユーザー指示「あれ?どっち?とならないように」): E と同じくパッドに並び、
+  //   入口を1つにするため(方針「あれ?どっち?とならないように」): E と同じくパッドに並び、
   //   パッドの載せ先は既定で「割当どおり(ノイズ)」、音色は既定「音程から自動」(=従来の pitchedToNoise と
   //   同じ出力)で、パッドごとにプリセットへ差し替えたり DPCM へ回したりできる(src/convert/drumHits.js noise())。
   //   元がノイズ系の行(GB CH4/AYノイズ等)は周期をそのまま写すだけなので対象外
@@ -419,7 +419,7 @@
   const defaults = new Map(); // chId → target(既定。setDefaults()で外から与える)
   const listeners = [];
 
-  // ── ファイルごとの自動保存(2026-09-18、ユーザー指示「CH別割り当てモードの割り当て一覧は自動保存」) ──
+  // ── ファイルごとの自動保存(2026-09-18、方針「CH別割り当てモードの割り当て一覧は自動保存」) ──
   // newFile() に渡された fileKey(形式+ファイル名)をキーに、ユーザーが既定から変えた分(entries)を
   // localStorage へ保存し、同じファイルを開き直したときに読み戻す。既定(defaults)は保存しない
   // (形式側が毎回計算する)。古いものから捨てて上限件数を守る

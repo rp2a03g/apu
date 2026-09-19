@@ -42,9 +42,9 @@
   // ★2026-08-02修正: numChは固定8ではなくcompiler.js側の実際の自動検出値(音符を持つ
   // 最上位レターの位置+1、下のcomputeActualN163ChannelCount参照)を渡すこと。以前は
   // ここだけ8固定にしていたが、#EX-NAMCO106の後ろの数値はcompiler.js側では一切パースされず
-  // (lexer.jsはディレクティブ名しか見ない。★ただし本家ppmckは読む —— ppmckc/datamake.c の
+  // (lexer.jsはディレクティブ名しか見ない。★ただしppmckは読む —— ppmckc/datamake.c の
   //  _EX_NAMCO106 が n106_track_num に入れて先頭nトラックだけ許可するので、書き出したMMLを
-  //  本家でコンパイルするなら本文に出すch数と一致していないと弾かれる。Mml.n163DeclaredCount 参照)、
+  //  ppmckでコンパイルするなら本文に出すch数と一致していないと弾かれる。Mml.n163DeclaredCount 参照)、
   // 実際に使われるnumN163Chは
   // 常にsegmentsByChannelから自動検出した値(このゲームでは5)になる。freqRegはnumChに
   // 比例するため、ここで8を使うとD<n>が実際に必要な量の8/5=1.6倍(例: 13.5セント→21.6セント)
@@ -92,7 +92,7 @@
   /**
    * キャプチャ済みデータからMMLへ変換する(fromKssの後半)。VGM(src/vgm2mml)がAY8910/SCC/
    * YM2413由来のVGMを同じ抽出・出力経路で変換するために分離した(抽出器を複製しない方針、
-   * ROADMAP.md VGM節)。fromKss経由の出力は分離前と完全に同一。
+   * 作業計画 VGM節)。fromKss経由の出力は分離前と完全に同一。
    * @param {object} cap - {
    *   writeLog: フレーム毎の{addr,value,io}配列(PSG=io 0xA0/0xA1, OPLL=io 0x7C/0x7D,
    *             SCC=mem 0x9800/0xB800台。kss2mml/expansion/*.jsが読む形),
@@ -295,7 +295,7 @@
       MML.Convert.assignNoteEnvelope(sccResult.channels, noteEnvReg);
       MML.Convert.assignPitchEnvelope(sccResult.channels, sccFreqReg, pitchReg,
         { saMode: cmd.PITCH_SA }); // 出力先N163: SA<num>自動選択(pitch.js n163SaForBase参照)
-      // ★休符だけのチャンネルは出さない(ユーザー指示 2026-09-11)。実効ch数は
+      // ★休符だけのチャンネルは出さない(方針 2026-09-11)。実効ch数は
       //   #EX-N163 の数値で伝わるので、空チャンネルで位置を示す必要がなくなった
       const n163Letters = expansionLetterMap.n163;
       for (let i = 0; i < n163Letters.length; i++) {
@@ -323,7 +323,7 @@
       // タイ分割の仕組み自体が無い)ため、ay/sccのような呼び出し順序の制約は無い。
       MML.Convert.assignNoteEnvelope(opllResult.channels, noteEnvReg);
       // ★2026-08-22: 抽出側がYM2413本来の9chを返すようになったが、出力先のVRC7は6ch固定
-      // (ppmckの拡張チャンネル文字は固定。[[ppmck-fixed-channel-letters]])。溢れるぶんは
+      // (ppmckの拡張チャンネル文字は固定)。溢れるぶんは
       // 落とすしかないので、7ch目以降に実音がある曲に限り「実際に鳴っているchだけを
       // 前詰め」して取りこぼしを減らす。6ch以内に収まる従来の曲は前詰めが起きないため
       // MML出力は完全に従来通りになる。
@@ -373,7 +373,7 @@
       if (d.defs.length) {
         for (const def of d.defs) dpcmDefLines.push(`@DPCM${def.index} = { "${def.file}", ${def.freq}, ${def.size}, ${def.dac}, ${def.mode} }`);
         dpcmFiles.push(...d.files);
-        scoreChannels.push({ letter: 'E', events: d.events, isDrum: true }); // E: 音符=@DPCM番号(本家ppmck準拠)
+        scoreChannels.push({ letter: 'E', events: d.events, isDrum: true }); // E: 音符=@DPCM番号(ppmck準拠)
         MML.Convert.sortChannelsByLetter(scoreChannels);
         drumNote = `打楽器化したchを実音のままDPCM(E)へ変換しました: 定義${d.stats.clips}件 / 打点${d.stats.segments}個 / ROM ${(d.stats.bytes / 1024).toFixed(1)}KB`
           + (d.stats.overflow ? `(定義が64本を超えたため ${d.stats.overflow} 本を落としました)` : '');
@@ -395,7 +395,6 @@
     // MML本文に埋め込まれるテンポは整数(t<n>)に丸められる(mmlEmit.js)。音長量子化の
     // グリッド(fpb)も同じ丸め後の値で計算しないと、書き出し時と再生(コンパイル)時で
     // 基準テンポが食い違い、打ち直しの多いパートで誤差が蓄積してドリフトする
-    // ([[tempo-rounding-drift-future-issue]]参照)。
     const fpb = frameRate * 60 / Math.round(bpm);
 
     // VRC7自作音色(@0)の同時使用を1系統へ(src/convert/vrc7Tone.js)。
@@ -414,13 +413,13 @@
       `; 変換     : Sound Emulation Foundry`,
       customPlan
         ? `; チャンネル: ${chanDesc || '-'} (借用先の割当: ユーザー指定)`
-        : `; チャンネル: A-D=未使用(2A03) X-Z=PSG(FME-7として再生)${hasScc ? ' P-W=SCC(N163として近似再生)' : ''}`,
+        : `; チャンネル: A-D=未使用(2A03) X-Z=PSG(SUNSOFT 5Bとして再生)${hasScc ? ' P-W=SCC(N163として近似再生)' : ''}`,
       (!customPlan && hasOpll && !preferOplForNote) ? `;             G-L=FMPAC(VRC7として再生)` : `;`,
       // MSX-AUDIO関連の2行は該当時のみ挿入(空の`;`行を足すと全KSSの出力が変わるため)
       ...((!customPlan && hasOpl && (!hasOpll || preferOplForNote)) ? [`;             G-L=MSX-AUDIO(Y8950、音色をOPLL/VRC7自作音色へ変換して再生。リズム/ADPCMは対象外)`] : []),
       ...((!customPlan && hasOpl && hasOpll && !preferOplForNote) ? [`; ※ MSX-AUDIOはVRC7の枠をFMPACが使用しているため変換対象外です(鍵盤表示のチャンネル割当で変更できます)。`] : []),
       `; ※ このアプリのMMLプレイヤーはNES音源専用のため、MSX音源はレジスタ互換/構造が`,
-      `;    近いNES拡張音源(PSG→FME-7, FMPAC→VRC7, SCC→N163)を借りて再生します`,
+      `;    近いNES拡張音源(PSG→SUNSOFT 5B, FMPAC→VRC7, SCC→N163)を借りて再生します`,
       `;    (割当は鍵盤表示のpart列/「借用先」列で変更できます)。`,
       hasScc ? `;    SCCの波形はN163形式(4bit,32点)に変換した近似のため音色は完全一致しません。` : `;`,
       ...borrowNotes.map(n => `; ※ ${n}`),

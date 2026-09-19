@@ -1,7 +1,7 @@
 /*
  * 演奏の録音とMML挿入 (MML.UI.RecordPanel) — UI層
  *
- * ROADMAPフェーズ3 段階2。演奏入力(src/ui/performInput.js)で弾いた音を録り、
+ * 作業計画フェーズ3 段階2。演奏入力(src/ui/performInput.js)で弾いた音を録り、
  * tick格子へ量子化して(src/input/quantize.js)MMLの断片にし、エディタへ挿入する。
  *
  * ■ 時間の基準はメトロノーム

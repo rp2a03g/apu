@@ -55,15 +55,15 @@
   // 変換イベント空間ではノイズの「音程」を ev.note = 31 − 周期index で持つ(nsf2mml/gbs2mml/vgm2mml
   // sn76489/spc2mml/borrow.js/drumMap.js が全てこの約束。周期index 0-15 ⇔ note 31-16、index が小さい
   // ほど高い音なので note が大きいほど高い=他chの音程と同じ向き。ロール表示や音域判定はこの空間のまま)。
-  // MMLへ書く時だけここで周期index に戻し `n<idx>` で出す(本家ppmck準拠: ノイズchの n<num> は
+  // MMLへ書く時だけここで周期index に戻し `n<idx>` で出す(ppmck準拠: ノイズchの n<num> は
   // 周期index の直値、音符 c〜b は半音番号=index でオクターブ無視。compiler.js noisePeriodIndex)。
   // ★2026-09-18まで音符+オクターブで書いていた(旧コンパイラは index=15−(note%16) と反転写像していた
-  //   ため o1〜o2 の音符になっていた)。本家ppmckでは別の音になるので n<idx> へ切り替えた
+  //   ため o1〜o2 の音符になっていた)。ppmckでは別の音になるので n<idx> へ切り替えた
   MML.Convert.noiseNoteToIndex = function (note) { return ((31 - Math.round(note)) % 16 + 16) % 16; };
   MML.Convert.noiseIndexToNote = function (idx) { return 31 - (((idx % 16) + 16) % 16); };
-  // DPCM(ch E): 音符は「どの @DPCM<n> を鳴らすか」の番号で音高ではない(本家ppmck準拠 2026-09-19)。
+  // DPCM(ch E): 音符は「どの @DPCM<n> を鳴らすか」の番号で音高ではない(ppmck準拠 2026-09-19)。
   //   イベントの note は compiler.js と同じ noteNumber = DPCM_NOTE_BASE(24=o2 c) + 番号 で持ち、
-  //   出力は n<番号> の直値(本家ppmckcは音名だと「オクターブ×16+音名」の飛び番になるので使わない)。
+  //   出力は n<番号> の直値(ppmckcは音名だと「オクターブ×16+音名」の飛び番になるので使わない)。
   //   E には v/@/@v/D/EP/EN/MP/K が無い(compiler.js がエラーにする)ので、出力フラグも全部落とす(DPCM_FLAGS_OFF)
   MML.Convert.DPCM_NOTE_BASE = 24;
   MML.Convert.dpcmNoteToIndex = function (note) { return Math.max(0, Math.round(note) - MML.Convert.DPCM_NOTE_BASE); };
@@ -446,7 +446,7 @@
       }
 
       if (flags.dpcmIndexNotes) {
-        // DPCM(ch E): @DPCM番号の直値 n<idx>[,<len>](本家ppmck準拠、DPCM_NOTE_BASE 冒頭コメント)。オクターブ・音色は出さない
+        // DPCM(ch E): @DPCM番号の直値 n<idx>[,<len>](ppmck準拠、DPCM_NOTE_BASE 冒頭コメント)。オクターブ・音色は出さない
         const idx = MML.Convert.dpcmNoteToIndex(ev.note);
         const nTok = (l) => { const s = omitDefaultLen(l, defaultLen); return `n${idx}` + (s ? (s[0] === '.' ? s : ',' + s) : ''); };
         const tie = (ev.continued || ev.slurTie) ? '&' : '';
@@ -919,7 +919,7 @@
           .map(ev => ev.end > loop.end ? Object.assign({}, ev, { end: loop.end }) : ev);
       }
     }
-    // 最後の音より後ろは書かない(2026-09-19、ユーザー指示): 曲が終わったあとの無音(ジングルを30秒ぶん
+    // 最後の音より後ろは書かない(2026-09-19、方針): 曲が終わったあとの無音(ジングルを30秒ぶん
     // キャプチャした残り等)を休符で埋めると、再生もNSFも「無音を最後まで演奏してから」終わる。全チャンネルで
     // 最後に音が鳴り終わる位置を曲の終わりにし、各チャンネルの末尾の休符も落とす(下の trimTail)。
     // ループ化するときは全チャンネルの全長を揃える必要があるので対象外
@@ -1079,7 +1079,7 @@
       lines.splice(headerAt, headerCount, ...annotateDefinitions(opts.headerLines, channelsData.map(c => c.letter), bodies));
     }
 
-    // ── ループ位置で譜面を前後に分ける(2026-09-19、ユーザー指示「L が見落としやすい」) ──
+    // ── ループ位置で譜面を前後に分ける(2026-09-19、方針「L が見落としやすい」) ──
     // renderEvents は L の代わりに目印 LOOP_MARK を出している。全チャンネルで目印が同じ小節にあれば、
     // その小節を目印の前後で割り、「イントロ | DXYZ L の1行 | ループ部分」の順に並べる
     // (ppmck はチャンネル行を順に連結するので、独立した「DXYZ L」行は各チャンネルのその位置の L と同じ)。
@@ -1156,7 +1156,7 @@
 
     return lines.join('\n');
   };
-  // ── 定義行の「使っているチャンネル」コメントとグループ分け(2026-09-19、ユーザー要望) ──
+  // ── 定義行の「使っているチャンネル」コメントとグループ分け(2026-09-19、方針) ──
   // ヘッダの定義行(@v/@vr/@EP/@EN/@MP/@@<n>={}/@N/@FM/@OP/@OT/@MH/@MW/@DPCM)ごとに、本文でその番号を
   // 使っているチャンネルを数える。種類ごとの塊(各レジストリが続けて出す)の中で「同じチャンネルの組」の定義を
   // 集め、組が変わる所にだけ「; ── A B X で使用 ──」を1行置く(組の中は番号順)。どこにも使われていない定義は
@@ -1228,7 +1228,7 @@
       block.sort((a, b) => (order(a) - order(b)) || (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0) || (a.n - b.n));
       let prev = null;
       for (const it of block) {
-        // どのチャンネルも使っていない定義は出さない(2026-09-19、ユーザー指示)。付随コメントも一緒に落とす
+        // どのチャンネルも使っていない定義は出さない(2026-09-19、方針)。付随コメントも一緒に落とす
         if (!it.chs.length) continue;
         const key = keyOf(it);
         if (key !== prev) {

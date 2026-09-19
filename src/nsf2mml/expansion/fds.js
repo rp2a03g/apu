@@ -214,7 +214,7 @@
       const t = timeline[f];
       const period    = t.freqLo | ((t.freqHiReg & 0x0F) << 8);
       const disabled  = !!(t.freqHiReg & 0x80);
-      // MMLのFDS音量は$4080ゲインの生値(0-63、本家ppmck同様)。以前は0-15へ半分に丸めて
+      // MMLのFDS音量は$4080ゲインの生値(0-63、ppmck同様)。以前は0-15へ半分に丸めて
       // いたためハードウェアエンベロープの分解能を半分捨てていた(2026-08-24)
       const volume    = Math.max(0, Math.min(63, t.gain));
       const freq = fdsFreq(period);

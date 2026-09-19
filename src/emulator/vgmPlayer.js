@@ -28,7 +28,7 @@
  *   K007232(コナミ・アーケードPCM)=expansion/k007232.js(コマンド0x41、ROMはデータブロック0x94)、
  *   MSM5205/6585(PC Engine CD ADPCM等)=expansion/msm5205.js(コマンド0x32、ROM無し)
  * ヘッダのクロックが非ゼロでも未実装のチップは、コマンド長規則で読み飛ばすだけ
- * (ROADMAP.md VGM節: 全チップ実装は不要)。ただし **vgmHeader.js の VGM.CHIPS には必ず載せる**
+ * (作業計画 VGM節: 全チップ実装は不要)。ただし **vgmHeader.js の VGM.CHIPS には必ず載せる**
  * — 表に無いチップは usedChips に入らず「未対応・読み飛ばし」の表示すら出ず、
  * 「音が欠けているのに理由が分からない」状態になる(K007232 で実際に起きた)。
  *
@@ -1062,7 +1062,7 @@
     _dacHitStart(chip, bankType, start) {
       // 打点が異常に増える曲(壊れたログ)で無制限に伸びないよう歯止めを置く。
       // ★shift()で古いのを捨てるとO(n)が毎回走って主スレッドが焼き付く
-      //   ([[write-queue-needs-unclocked-path-guard]]と同じ罠)。上限に当たったら記録を止める
+      //   (書き込みキューで踏んだのと同じ罠)。上限に当たったら記録を止める
       if (this.dacHits.length >= DAC_HITS_MAX) { this._dacCur = null; return; }
       if (this._dacCur) this.dacHits.push(this._dacCur);
       this._dacCur = { chip, bankType, start, bytes: 0, startSample: this.samplePos, endSample: this.samplePos };

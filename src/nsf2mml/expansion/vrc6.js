@@ -123,7 +123,7 @@
       const period    = r.lo | ((r.hi & 0x0F) << 8);
       const enabled   = !!(r.hi & 0x80);
       const accumRate = r.ctrl & 0x3F;
-      // MMLのVRC6のこぎり波音量は$B000蓄積レートの生値(0-63、本家ppmck同様。2026-08-24)
+      // MMLのVRC6のこぎり波音量は$B000蓄積レートの生値(0-63、ppmck同様。2026-08-24)
       const volume    = accumRate;
       const freq = sawFreq(period);
       const note = (enabled && accumRate > 0 && period >= 4) ? freqToNoteNumber(freq) : null;

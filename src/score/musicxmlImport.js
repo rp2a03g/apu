@@ -1,5 +1,5 @@
 /*
- * MusicXML → MML 取り込み(ROADMAP「フェーズ外: 楽譜出力」入力側、2026-09-16)
+ * MusicXML → MML 取り込み(作業計画「フェーズ外: 楽譜出力」入力側、2026-09-16)
  *
  * MuseScore 等で書いた楽譜(score-partwise、.musicxml/.xml、または .mxl=zip)を ppmck 系 MML にする。
  * 楽譜出力(notation.js/musicxml.js)の逆向きで、音符の位置と長さは楽譜のまま(量子化しない。

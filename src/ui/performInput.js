@@ -1,7 +1,7 @@
 /*
  * 演奏入力UI (MML.UI.PerformInput) — UI層
  *
- * ROADMAPフェーズ3 段階1。PC鍵盤と画面ピアノで音を出せるようにし、その打鍵を
+ * 作業計画フェーズ3 段階1。PC鍵盤と画面ピアノで音を出せるようにし、その打鍵を
  * すべて MML.Input.NoteSource へ集約する。段階2の録音は NoteSource の
  * onEvent(TimedPitchEvent) を受け取るだけでよく、入力源ごとの分岐は増えない。
  *

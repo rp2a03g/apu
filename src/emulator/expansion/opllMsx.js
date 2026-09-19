@@ -33,7 +33,7 @@
   const CYCLES_PER_SAMPLE = 72; // ★2026-08-22: 36は誤り(1オクターブ高かった)。ファイル冒頭コメント参照
   const SAMPLE_RATE = 49716;
 
-  const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS; // emu2413本家に合わせて9→10bit化
+  const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS; // emu2413に合わせて9→10bit化
   const DP_BITS = 19, DP_WIDTH = 1 << DP_BITS, DP_BASE_BITS = DP_BITS - PG_BITS;
   const DB_STEP = 0.375, DB_BITS = 7, DB_MUTE = 1 << DB_BITS;
   const EG_STEP = 0.375, EG_BITS = 7;
@@ -51,8 +51,8 @@
   const SETTLE = 0, ATTACK = 1, DECAY = 2, SUSHOLD = 3, SUSTINE = 4, RELEASE = 5, FINISH = 6;
 
   // 音色ROM(YM2413本来の内蔵15音色)。
-  // ★2026-08-22: emu2413本家(2413tone.h)の値から、nukeykt/Nuked-OPLL の patch_ym2413 へ
-  // 差し替え。emu2413のROM値は本家Wikiが "Estimated ROM Instruments" と明記している通り
+  // ★2026-08-22: emu2413(2413tone.h)の値から、nukeykt/Nuked-OPLL の patch_ym2413 へ
+  // 差し替え。emu2413のROM値は原典のWikiが "Estimated ROM Instruments" と明記している通り
   // YM2413B実機録音からの耳コピ推定だが、Nuked-OPLL のものは decap/die shot
   // (siliconpr0n: digshadow, John McMaster)から読み出したROM内容そのもの。
   // 同じ経緯で vrc7.js の VRC7(DS1001)側テーブルも patch_ds1001 へ差し替え済み。
@@ -290,7 +290,7 @@
     }
   }
 
-  // emu2413本家 calc_slot_car: modOut = 2*(fm>>1) (fmのLSBを切り捨てるだけで倍化はしない)
+  // emu2413 calc_slot_car: modOut = 2*(fm>>1) (fmのLSBを切り捨てるだけで倍化はしない)
   function modToCarPhase(fm) { return 2 * (fm >> 1); }
 
   // emu2413.c の _PD マクロ: リズム位相定数は10bit(PG_BITS=10)テーブル基準の値。
@@ -320,7 +320,7 @@
       const pgout = s.calcPhase(lfo_pm);
       if (egout >= DB_MUTE - 1) s.output[0] = 0;
       else if (s.patch.FB !== 0) {
-        // emu2413本家: fm = (output[1]+output[0]) >> (9-FB)。s.feedbackは(output[1]+output[0])>>1で
+        // emu2413: fm = (output[1]+output[0]) >> (9-FB)。s.feedbackは(output[1]+output[0])>>1で
         // 既に1bitシフト済みのため、ここでのシフト量は(9-FB)-1 = (8-FB)。
         const fm = (s.feedback) >> (8 - s.patch.FB);
         s.output[0] = DB2LIN[s.sintbl[(pgout + fm) & (PG_WIDTH - 1)] + egout];
@@ -328,7 +328,7 @@
         s.output[0] = DB2LIN[s.sintbl[pgout] + egout];
       }
       // s.feedbackは自己変調(次回calcModulator呼び出し時のfm計算)専用。キャリアへ渡すのは
-      // emu2413本家同様、平均化前の生のoutput[0]。
+      // emu2413同様、平均化前の生のoutput[0]。
       s.feedback = (s.output[1] + s.output[0]) >> 1;
       return s.output[0];
     }

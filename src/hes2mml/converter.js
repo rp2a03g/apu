@@ -117,7 +117,7 @@
 
   /**
    * キャプチャ済みデータからMMLへ変換する(fromHesの後半)。VGM(src/vgm2mml)がHuC6280由来の
-   * VGMを同じ抽出・出力経路で変換するために分離した(抽出器を複製しない方針、ROADMAP.md
+   * VGMを同じ抽出・出力経路で変換するために分離した(抽出器を複製しない方針、作業計画
    * VGM節)。fromHes経由の出力は分離前と完全に同一。
    * @param {object} cap - { snapshots(hesPlayer.js snapshotApu形式のフレーム配列),
    *   dpcmTrace, controlTrace(captureHesSongAsync由来。無ければ空配列でDDA(PCM)は抽出されない),
@@ -278,7 +278,7 @@
         .map(t => `${MML.Convert.ChannelPlan.letterOfTarget(t)}=${r.placed[t].source.label}`).sort().join(' ');
       // N163 を使わない割当ではノイズの補正をしない(noiseBalanceDb)
       if (hasNoise) scoreChannels.push(Object.assign({}, extractNoise(expansions.indexOf('n163') >= 0 ? n163NumCh : 0), { letter: 'D' }));
-      if (hasDpcm) scoreChannels.push({ letter: expansionLetterMap.dpcm[0], events: dpcmResult.events }); // E: 音符=@DPCM番号(本家ppmck準拠)
+      if (hasDpcm) scoreChannels.push({ letter: expansionLetterMap.dpcm[0], events: dpcmResult.events }); // E: 音符=@DPCM番号(ppmck準拠)
       MML.Convert.sortChannelsByLetter(scoreChannels);
     } else {
     expansions = ['n163'];
@@ -288,7 +288,7 @@
     const n163Letters = expansionLetterMap.n163;
     const dpcmLetter = hasDpcm ? expansionLetterMap.dpcm[0] : null;
 
-    // ★休符だけのチャンネルは出さない(ユーザー指示 2026-09-11)。実効ch数は
+    // ★休符だけのチャンネルは出さない(方針 2026-09-11)。実効ch数は
     //   #EX-N163 の数値で伝わるので、空チャンネルで位置を示す必要がなくなった。
     //   ただし全部休符の曲(15秒間まったく鳴らないHESが実測28曲)で全滅させると
     //   本文にチャンネル行が1つも無いMMLになり「 t120」だけが残ってコンパイルエラーになる。
@@ -298,7 +298,7 @@
     scoreChannels = allWave.filter(ch => ch.events.some(ev => ev.note !== null));
     if (!scoreChannels.length) scoreChannels = allWave.slice(0, 1);
     if (hasNoise) scoreChannels.push(Object.assign({}, extractNoise(n163NumCh), { letter: 'D' }));
-    if (hasDpcm) scoreChannels.push({ letter: dpcmLetter, events: dpcmResult.events }); // E: 音符=@DPCM番号(本家ppmck準拠)
+    if (hasDpcm) scoreChannels.push({ letter: dpcmLetter, events: dpcmResult.events }); // E: 音符=@DPCM番号(ppmck準拠)
     }
     // ノイズパッド(2026-09-18): 載せ先=ノイズのパッドの打点(DDA/合成音ch)を2A03ノイズ(D)へ
     // (既存の D=PSGノイズ と単音マージ。src/convert/drumHits.js applyNoise)

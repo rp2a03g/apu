@@ -23,7 +23,7 @@
  *   VRC7 (NSF)      : ホスト=NES CPU 1.789773MHz = マスタ/2 → 2ホストサイクルで1内部サイクル
  *   FMPAC/VGM       : ホスト=3.579545MHz = マスタそのもの   → 4ホストサイクルで1内部サイクル
  * どちらも 18内部サイクル = 1サンプル で 49716Hz になる(36 / 72 ホストサイクル)。
- * ★この非対称は [[opll-fmpac-clock-divider-octave-bug]] と同じ理由。取り違えると1オクターブずれる。
+ * ★この非対称はFM-PACのクロック分周と同じ理由。取り違えると1オクターブずれる。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -833,7 +833,7 @@
         }
         // 実チップの時分割DACは無音時も基準レベル(OPLL_Channelのsign)を出し続けるため
         // 出力にDC成分が乗る。実機ではAC結合で落ちるぶんなので1次ハイパスで除去する。
-        // カットオフ約5Hz。[[hes-dda-gain-clipping-fix]]の教訓で立ち上がりのオーバー
+        // カットオフ約5Hz。HESのDDAで踏んだ教訓から、立ち上がりのオーバー
         // シュートを避けるため十分低く取っている。
         const x = this.sampleAccum;
         if (this.dcPrimed === 0) { this.dcX = x; this.dcPrimed = 1; } // 初回は段差を作らない
@@ -979,7 +979,7 @@
 
     /**
      * clock()を回さない経路(regsOnlyキャプチャ等)で溜まった書き込みを反映させる。
-     * [[capture-worker-plan]] のym2612Nuked.flushWrites()と同じ用途。
+     * ym2612Nuked.flushWrites() と同じ用途。
      */
     flushWrites() {
       let guard = 0;
@@ -1112,7 +1112,7 @@
   // 新コアの生の出力は「18サイクルぶんの時分割DAC出力の総和」。@1/@4/@8/@12/@15
   // を単音で鳴らしてRMSを旧コアと突き合わせ、平均比が1.0になるよう決めた(音色ごとの比は
   // 0.4〜1.2とばらつく。コアが違えばEG/出力段が違うので一致はしない)
-  // ([[emu-loudness-balance-and-master-volume]] のフォーマット間バランスを崩さないため)。
+  // (フォーマット間の音量バランスを崩さないため)。
   const OUTPUT_GAIN = 1 / 2000;
 
   // DC遮断フィルタ係数(1 - 2π*5Hz/49716)
