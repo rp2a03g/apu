@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-20 04:40:22
+ * Built by tools/build-capture-workers.ps1 at 2026-09-20 05:40:23
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-20 04:40:22';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-20 05:40:23';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -25038,7 +25038,9 @@
 
 /*
  * FMPAC(OPLL/YM2413) → MML共通イベント形式 抽出
- * MML.Kss2MmlExpansion.opll(writeLog, totalFrames) → { channels: [...] }
+ * MML.Kss2MmlExpansion.opll(writeLog, totalFrames, toneReg, opts) → { channels: [...] }
+ * opts.envelope(2026-09-20、VGM→VRC7 用): 音量が変わっても音符を切らず、音符の中の音量を attSeq(減衰dB の列)で持つ
+ * (vgm2mml/expansion/opn.js の envelope と同じ。変換側が @v にする)。指定しなければ従来どおり音量の変わり目で切る
  *
  * ポート0x7C=アドレスラッチ, 0x7D=データ書込。
  *   0x10+ch=fnum下位, 0x20+ch=bit0=fnum上位,bits1-3=block,bit4=キーオン,
@@ -25106,7 +25108,7 @@
   // カスタム音色スロット)8バイトをtoneRegに登録してインデックスを付与する
   // (nsf2mml/expansion/vrc7.jsと同じ考え方。VRC7=OPLLなのでレジスタ配置も同一)。
   // toneRegが無い(呼び出し元が対応していない)場合はvrc7Toneを付けず従来通り。
-  function extractChannelEvents(timeline, ch, toneReg) {
+  function extractChannelEvents(timeline, ch, toneReg, keepSeq) {
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
@@ -25126,15 +25128,15 @@
         ? toneReg.assign(Array.from(regs.slice(0, 8))) : undefined;
       // srcTone: 自作音色の実体(音色の同定 src/convert/toneKey.js 用。toneReg 無しのロール構築でも載せる)
       const srcTone = (note !== null && instrument === 0) ? Array.from(regs.slice(0, 8)) : undefined;
-      if (!cur) { cur = { note, volume, instrument, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
-      if (attack[ch] || note !== cur.note || volume !== cur.volume || instrument !== cur.instrument ||
+      if (!cur) { cur = { note, volume, instrument, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false, volSeq: keepSeq ? [volume] : undefined }; continue; }
+      if (attack[ch] || note !== cur.note || (!keepSeq && volume !== cur.volume) || instrument !== cur.instrument ||
           vrc7Tone !== cur.vrc7Tone) {
         flush(f);
         // retrigger: このイベントが「キーオン(アタック)による打ち直し」で始まったか。
         // 音量エンベロープによる細切れ(1フレームごとの音量書換え)と区別するための印で、
         // ピアノロール側(src/main.js buildKssRollTimeline)が同音程の連結可否に使う。
-        cur = { note, volume, instrument, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
-      }
+        cur = { note, volume, instrument, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch], volSeq: keepSeq ? [volume] : undefined };
+      } else if (keepSeq) cur.volSeq.push(volume);
     }
     flush(timeline.length);
     return events;
@@ -25194,14 +25196,16 @@
     return events;
   }
 
-  MML.Kss2MmlExpansion.opll = function (writeLog, totalFrames, toneReg) {
+  MML.Kss2MmlExpansion.opll = function (writeLog, totalFrames, toneReg, opts) {
+    const keepSeq = !!(opts && opts.envelope);
     const { frames: timeline, rhythmUsed } = buildTimeline(writeLog);
     const toCommon = ev => Object.assign(
       { start: ev.start, end: ev.end, note: ev.note, volume: ev.volume, instrument: ev.instrument, retrigger: ev.retrigger },
       ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
       ev.vrc7Tone !== undefined ? { vrc7Tone: ev.vrc7Tone } : {},
       ev.srcTone ? { srcTone: ev.srcTone } : {},
-      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}
+      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
+      (ev.note !== null && ev.volSeq && ev.volSeq.some(v => v !== ev.volSeq[0])) ? { attSeq: ev.volSeq.map(v => v * 3) } : {}
     );
     // ★返すチャンネル本数は常に NUM_MELODY_MAX で固定する。
     // ピアノロールは再生しながら writeLog が伸びるたびに再構築される(進捗配信)ので、
@@ -25223,7 +25227,7 @@
         // 使える(src/mml/compiler.js segmentsToWriteLogVrc7参照)
         events: (rhythmUsed && ch >= NUM_MELODY_RHYTHM)
           ? []
-          : MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, ch, toneReg)).map(toCommon),
+          : MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, ch, toneReg, keepSeq)).map(toCommon),
         hasVolume: true,
         hasInstrument: true,
         hasVrc7Tone: !!toneReg
@@ -25347,7 +25351,7 @@
     ];
   }
 
-  function extractChannelEvents(timeline, ch, fs, toneReg) {
+  function extractChannelEvents(timeline, ch, fs, toneReg, keepSeq) {
     const events = [];
     const [, car] = slotOf(ch);
     let cur = null;
@@ -25362,11 +25366,11 @@
       const note = freqHz != null ? freqToNoteNumber(freqHz) : null;
       const srcTone = note !== null ? opllToneBytes(regs, ch) : undefined; // 音色の同定(src/convert/toneKey.js)
       const vrc7Tone = (toneReg && srcTone) ? toneReg.assign(srcTone) : undefined;
-      if (!cur) { cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
-      if (attack[ch] || note !== cur.note || volume !== cur.volume || vrc7Tone !== cur.vrc7Tone) {
+      if (!cur) { cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false, volSeq: keepSeq ? [volume] : undefined }; continue; }
+      if (attack[ch] || note !== cur.note || (!keepSeq && volume !== cur.volume) || vrc7Tone !== cur.vrc7Tone) {
         flush(f);
-        cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
-      }
+        cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch], volSeq: keepSeq ? [volume] : undefined };
+      } else if (keepSeq) cur.volSeq.push(volume);
     }
     flush(timeline.length);
     return events;
@@ -25430,7 +25434,9 @@
     return events;
   }
 
-  MML.Kss2MmlExpansion.opl = function (writeLog, totalFrames, clock, toneReg) {
+  // opts.envelope: opll.js と同じ(音量の変わり目で切らず attSeq で持つ。VGM→VRC7 用、2026-09-20)
+  MML.Kss2MmlExpansion.opl = function (writeLog, totalFrames, clock, toneReg, opts) {
+    const keepSeq = !!(opts && opts.envelope);
     const fs = (clock || 3579545) / 72;
     const { frames: timeline, rhythmUsed } = buildTimeline(writeLog);
     const toCommon = ev => Object.assign(
@@ -25438,7 +25444,8 @@
       ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
       ev.vrc7Tone !== undefined ? { vrc7Tone: ev.vrc7Tone } : {},
       ev.srcTone ? { srcTone: ev.srcTone } : {},
-      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}
+      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
+      (ev.note !== null && ev.volSeq && ev.volSeq.some(v => v !== ev.volSeq[0])) ? { attSeq: ev.volSeq.map(v => v * 3) } : {}
     );
     const rhythm = rhythmUsed
       ? RHYTHM_DEFS.reduce((acc, def) => { acc[def.key] = extractRhythmEvents(timeline, def, fs); return acc; }, {})
@@ -25451,7 +25458,7 @@
       channels: Array.from({ length: NUM_MELODY_MAX }, (_, ch) => ({
         events: (rhythmUsed && ch >= NUM_MELODY_RHYTHM)
           ? []
-          : MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, ch, fs, toneReg)).map(toCommon),
+          : MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, ch, fs, toneReg, keepSeq)).map(toCommon),
         hasVolume: true,
         hasInstrument: true,
         hasVrc7Tone: !!toneReg

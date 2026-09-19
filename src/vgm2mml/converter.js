@@ -460,6 +460,8 @@
     return t;
   }
   const VRC7_TABLE = { ay8910: logToVrc7Table(3), sn76489: logToVrc7Table(2) };
+  // 減衰値(0-15)→そのまま。VRC7の減衰値で持つ音量列を vrc7EnvReg に通して @v(MMLの向き)にするときに使う
+  const VRC7_IDENTITY = Array.from({ length: 16 }, (_, v) => v);
   // 4bit対数音量 → FME-7(5B)の音量(3dB/段、src/emulator/expansion/fme7.js: 5bit 1.5dB/段を 2V+1 で引く)。
   // SN76489(2dB/段)だけが対象。以前は SN→FME-7 を「そのまま載る」として生値を写していたため、
   // 強弱の差が1.5倍に広がっていた(Power Strike II(SMS) 曲8: ch1 と ch2/ch3 の音量差 +4.7/-6.0dB が
@@ -502,11 +504,11 @@
     // OPN系FM・ADPCM・サンプルPCMの抽出オプション(src/vgm2mml/expansion/opn.js collect)。
     // envelope:true で「音量が動いても音符を切らず、フレームごとの音量/音程を列で持つ」。
     // その列が @v(音量エンベロープ)と EP/MP/PT(ピッチ変調)の材料になる。
-    // ★VRC7へ載せるchは false にする。作った当時VRC7は@v非対応だった(2026-09-20からコンパイラで効くが、
-    //   出力を変えないため従来どおり)。列にまとめると音符の中の音量変化が1つの v<n> に潰れて消えるので、従来どおり
-    //   音量が変わったところでイベントを切り、v<n>を並べて出す。
-    //   変換設定でENVがOFFのときも同じ(列を作っても捨てるだけなので作らない)。
-    const envFamOk = (fam) => fam !== 'vrc7';
+    // VRC7へ載せるchも同じ(2026-09-20から。それまではコンパイラが VRC7 の @v を無視していたので false にして、
+    // 音量が変わったところでイベントを切り v<n> を並べていた)。VRC7 の @v は MML の向き(v15=最大)で登録する
+    // (adaptGroup / borrow.js vrc7EnvReg)。変換設定でENVがOFFのときは作らない(列を作っても捨てるだけ)。
+    // OPLL/OPL(抽出器が OPN と別)も VRC7 へ載せる ch だけ同じにする(extractEnvModes の呼び出し参照)
+    const envFamOk = () => true;
     const pitchReg = new MML.Convert.PitchEnvelopeRegistry(cmd);
     const noteEnvReg = new MML.Convert.NoteEnvelopeRegistry(cmd);
     const n163WaveReg = MML.Convert.n163WaveRegistry();
@@ -701,8 +703,8 @@
 
     // items(同じチップのソースch)を「@vを使える借用先か」で分け、必要なら2通り抽出する。
     // run(opts)が抽出結果、pick(r, s)がそのソースchのチャンネル
-    function extractEnvModes(items, run, pick) {
-      const modeOf = (s) => cmd.ENV !== false && envFamOk(familyOf(plan[s.id]));
+    function extractEnvModes(items, run, pick, modeFn) {
+      const modeOf = modeFn || ((s) => cmd.ENV !== false && envFamOk(familyOf(plan[s.id])));
       for (const m of [...new Set(items.map(modeOf))]) {
         const r = run({ envelope: m });
         for (const s of items) if (modeOf(s) === m) { const chn = pick(r, s); if (chn) extracted[s.id] = chn; }
@@ -739,14 +741,17 @@
         if (sccUsed) for (const s of items) if (familyOf(plan[s.id]) === fam) extracted[s.id] = r.channels[s.ch];
       }
     }
+    // OPLL/OPL: VRC7 へ載せる ch だけ音量を列(attSeq)で持つ抽出にする(2026-09-20。@v にする)。VRC7 以外の借用先は
+    // 従来どおり音量の変わり目で切る(出力を変えないため。OPN と違い、ここは借用先を問わず1回の抽出だった)
+    const opllEnvMode = (s) => cmd.ENV !== false && familyOf(plan[s.id]) === 'vrc7';
     if (data.kss && data.kss.opll && c.ym2413) {
-      const r = MML.Kss2MmlExpansion.opll(data.kss.writeLog, totalFrames, vrc7ToneReg);
       // リズムモード曲は r.channels が6本しか無いので、ch7-9は未定義のまま置かない
-      for (const s of src) if (s.chip === 'ym2413' && wantExtract(s) && r.channels[s.ch]) extracted[s.id] = r.channels[s.ch];
+      extractEnvModes(src.filter(s => s.chip === 'ym2413' && wantExtract(s)),
+        (o) => MML.Kss2MmlExpansion.opll(data.kss.writeLog, totalFrames, vrc7ToneReg, o), (r, s) => r.channels[s.ch], opllEnvMode);
     }
     if (data.kss && data.kss.opl && (c.ym3812 || c.ym3526 || c.y8950)) {
-      const r = MML.Kss2MmlExpansion.opl(data.kss.writeLog, totalFrames, data.kss.oplClock, vrc7ToneReg);
-      for (const s of src) if (s.chip === 'opl' && wantExtract(s) && r.channels[s.ch]) extracted[s.id] = r.channels[s.ch];
+      extractEnvModes(src.filter(s => s.chip === 'opl' && wantExtract(s)),
+        (o) => MML.Kss2MmlExpansion.opl(data.kss.writeLog, totalFrames, data.kss.oplClock, vrc7ToneReg, o), (r, s) => r.channels[s.ch], opllEnvMode);
     }
     // OPN系FM(YM2612/YM2610)と YM2610 ADPCM: イベントは借用先非依存(attDb)なので1回抽出して全部に使う
     if (data.ym2612 && c.ym2612) {
@@ -1240,6 +1245,23 @@
     // ※SN76489 のトーン→FME-7・ノイズ→2A03ノイズは、抽出時に借用先の尺度へ写像済み(FME7_TABLE / linTable、
     //   上の「SN76489」抽出ブロック)なので、ここで素通ししてよい
     if (nativeVrc7 || nativeFme7 || (fam === 'noise' && s.kind === 'noise')) {
+      // OPLL/OPL→VRC7: 音量は元のレジスタの減衰値のまま(0=最大)。音符の中で動いた音量(attSeq、抽出器の envelope)は
+      // @v 表(MMLの向き)にする。定数音量は vrc7EnvReg が減衰値へ戻して返す(下の非ネイティブ経路と同じ)
+      if (nativeVrc7) {
+        const vEnv = (ctx && ctx.envReg) ? MML.Convert.Borrow.vrc7EnvReg(ctx.envReg, VRC7_IDENTITY) : null;
+        for (const ev of events) {
+          if (vEnv && ev.note !== null && ev.attSeq && ev.attSeq.length >= 2) {
+            const fields = vEnv.volumeFieldsWithRelease(ev.attSeq.map(a => VOL_FROM_DB.vrc7(a)));
+            if (fields.envelopeV != null || fields.envelopeVr != null) {
+              delete ev.volume;
+              Object.assign(ev, fields);
+              delete ev._volMapped;
+              ch.hasEnvelope = true;
+            } else if (fields.volume != null) ev.volume = fields.volume;
+          }
+          delete ev.attSeq;
+        }
+      }
       if (fam === 'noise' && s.ch < 0) {
         const convD = (att) => VOL_FROM_DB.linear(att, famVolMax(fam));
         for (const ev of events) {
@@ -1276,9 +1298,10 @@
       const conv = fam === 'vrc7' ? VOL_FROM_DB.vrc7 : fam === 'fme7' ? VOL_FROM_DB.fme7
         : (att) => VOL_FROM_DB.linear(att, famVolMax(fam));
       // ev.attSeq(音符区間の減衰dB列、opn.js withSeq)を借用先の音量値へ写して @v にする。
-      // ★VRC7は@vを出さない(作った当時コンパイラが非対応だった。2026-09-20から効くが出力を変えないため。spc2mml envCapableType と同じ判断)ので
-      //   従来どおり定数音量のまま。写像は定数音量と同じ conv を通す=vと@vの尺度が必ず揃う
-      const envReg = (fam !== 'vrc7' && ctx) ? ctx.envReg : null;
+      // 写像は定数音量と同じ conv を通す=vと@vの尺度が必ず揃う。
+      // VRC7(2026-09-20から @v を出す): conv の値はレジスタの減衰値(0=最大)なので、表は vrc7EnvReg が MML の向き
+      // (v15=最大)へ直して登録し、定数音量は減衰値のまま返す(ev.volume は他の VRC7 イベントと同じ減衰値の約束)
+      const envReg = !ctx ? null : fam === 'vrc7' ? MML.Convert.Borrow.vrc7EnvReg(ctx.envReg, VRC7_IDENTITY) : ctx.envReg;
       for (const ev of events) {
         if (ev.note === null || (ev.attDb === undefined && ev.volume === undefined)) continue;
         ev.volume = conv(sourceAttDb(s, ev));
@@ -1287,6 +1310,7 @@
         if (fields.envelopeV != null || fields.envelopeVr != null) {
           delete ev.volume;
           Object.assign(ev, fields);
+          delete ev._volMapped;
           ch.hasEnvelope = true;
         } else if (fields.volume != null) ev.volume = fields.volume;
       }

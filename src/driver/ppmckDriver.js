@@ -564,7 +564,9 @@
     // なる(テーブル由来の周期は常に非負)ため、ルーチン本体も全ハンドラからのJSRも
     // 丸ごと省略する(2026-08-16 最適化。buildFixedSource末尾の行フィルタ参照)
     const usesAnyPitchOffset = usesDetune || usesEp || usesMp || usesPortamento || usesPitchShift;
-    const freqOnlyExtraSlots = needsLastHi ? 1 : 0;
+    // VRC7 は LASTHI を $20+ch のシャドウ(キー状態+block+fnum上位1bit)として常に使う(SIL_VRC7 のキーオフが
+    // block/fnum を保ったまま書くため。2026-09-20)
+    const freqOnlyExtraSlots = (needsLastHi || usesVrc7) ? 1 : 0;
     // SM/SMOF(2026-08-13、対応ABC): 音符ごとのON/OFF状態を持つ1byte/ch
     const smoothExtraSlots = usesSmooth ? 1 : 0;
     // PS(ポルタメント、実機準拠、2026-08-13、対応ABC): PSACT/PSDIR/PSSTEPSZ/PSSTEPINT/
@@ -2831,7 +2833,9 @@ ${usesAnyPitchOffset ? `    JSR VRC7_PITCH
     LDA ${hex(PERHI)}
     STA $9030
     ORA #$10
-${needsLastHi ? `    STA ${hex(LASTHI)},X   ; VRC7ではLASTHI=直近の$20+ch書込値(キー状態シャドウ、WFO_VRC7参照)\n` : ''}    STA $9030
+    STA ${hex(LASTHI)},X   ; VRC7ではLASTHI=直近の$20+ch書込値(キー状態シャドウ、WFO_VRC7/SIL_VRC7参照)
+    STA $9030
+${usesVolOnly ? 'WFV_VOL_VRC7:           ; @v/@vr の毎フレーム音量もここ(音色 DUTY,X と音量 VOL,X を$30+chへ)\n' : ''}VRC7_TONEVOL:
     LDA VRC7_SEL3,X
     STA $9010
     LDA ${hex(DUTY)},X
@@ -2842,33 +2846,31 @@ ${needsLastHi ? `    STA ${hex(LASTHI)},X   ; VRC7ではLASTHI=直近の$20+ch�
     ORA ${hex(VOL)},X
     STA $9030
     RTS
+; --- 休符/ゲートオフ/曲末のキーオフ(2026-09-20): $20+ch へ「直近の値(LASTHI)からキーオンのbitだけ落とした値」を書く。
+; block/fnum は変えず、$30+ch(音色/音量)も書かない=余韻はその音の音色・音量・音程のまま減衰する
+; (本家ppmck vrc7.h vrc7_key_off と同じ。2026-09-20までは$20+ch/$30+chとも0を書いており、余韻の途中で
+; block0・音色0・最大音量へ切り替わっていた)。既にキーオフ中なら書かない(compiler.js segmentsToWriteLogVrc7 の keyOff と同じ)。
+; @@r<n> のゲートオフだけは先に音色(APPLY_REL_TONE で DUTY,X へ入った番号)と音量を$30+chへ書く(余韻をリリース音色で鳴らす)。
+; RELTONE,X が有効な間は休符でも同じ値を書き直すが、レジスタの値は変わらない ---
 SIL_VRC7:
-    LDA VRC7_SEL2,X
-    STA $9010
-    LDA #$00
-${needsLastHi ? `    STA ${hex(LASTHI)},X   ; キーオフ(bit4=0)をシャドウにも反映\n` : ''}    STA $9030
-    LDA VRC7_SEL3,X
-    STA $9010
-    LDA #$00
+${usesToneState ? `    LDA ${hex(RELTONE)},X
+    CMP #$FF
+    BEQ SILVRC7_KOFF
+    JSR VRC7_TONEVOL
+SILVRC7_KOFF:
+` : ''}    LDA ${hex(LASTHI)},X
+    AND #$EF
+    CMP ${hex(LASTHI)},X
+    BEQ SILVRC7_END
+    STA ${hex(LASTHI)},X
+    LDY VRC7_SEL2,X
+    STY $9010
     STA $9030
+SILVRC7_END:
     RTS`);
-      if (usesVolOnly) {
-        // @v/@vr の毎フレーム音量(2026-09-20。それまでVRC7はWFV_VOL_NONEで、@vは音符頭の1値だけだった)。
-        // VOL,X は既にレジスタ値(減衰値。buildBankedNsfBytes の vrc7RegisterView が表ごと反転済み)なので
-        // そのまま音色(DUTY,X)と合わせて$30+chへ書く(compiler.js segmentsToWriteLogVrc7 の writeVolumeEnvelope と同じ)
-        vrc7Handlers.push(`
-WFV_VOL_VRC7:
-    LDA VRC7_SEL3,X
-    STA $9010
-    LDA ${hex(DUTY)},X
-    ASL A
-    ASL A
-    ASL A
-    ASL A
-    ORA ${hex(VOL)},X
-    STA $9030
-    RTS`);
-      }
+      // @v/@vr の毎フレーム音量(2026-09-20。それまでVRC7はWFV_VOL_NONEで、@vは音符頭の1値だけだった)は WFV_VRC7 末尾の
+      // WFV_VOL_VRC7 ラベル。VOL,X は既にレジスタ値(減衰値。buildBankedNsfBytes の vrc7RegisterView が表ごと反転済み)なので
+      // そのまま音色(DUTY,X)と合わせて$30+chへ書く(compiler.js segmentsToWriteLogVrc7 の writeVolumeEnvelope と同じ)
       if (usesAnyPitchOffset) {
         vrc7Handlers.push(`
 ; --- VRC7: D/EP/MP/PT(APPLY_DETUNE)をfnum(9bit)へ足す(2026-09-19)。blockは変えず、0〜511でクランプする
@@ -2901,7 +2903,7 @@ VRC7P_OK:
         // $20+ch書込みは常にkeyonビット(0x10)を立てたまま送ってエッジを再発生させない
         // (src/mml/compiler.js segmentsToWriteLogVrc7のEN継続ループと同じ理由)。
         // 2026-09-19まではVRC7はD/EP/MP/PT非対応でENのときだけこれを入れていた(今はfnumへ足す。VRC7_PITCH参照)。
-        // ★2026-08-16修正: 休符/ゲートオフ中(SIL_VRC7が$20+ch=0でキーオフ済み)は
+        // ★2026-08-16修正: 休符/ゲートオフ中(SIL_VRC7がキーオフ済み)は
         // 何も書かない。RD_RESTはENACTを維持する設計(EP/MP/PTと同じ、RD_RESTのコメント
         // 参照)のためSERVICE_CHは休符中もここを呼び続けるが、旧実装は無条件に
         // keyonビット付きで$20+chを書いていたため、キーオフ直後のフレームで0→1エッジが
@@ -2947,6 +2949,7 @@ ${usesAnyPitchOffset ? `    JSR VRC7_PITCH
     STA $9010
     LDA ${hex(PERHI)}
     ORA #$10
+    STA ${hex(LASTHI)},X   ; block/fnum上位もシャドウへ(SIL_VRC7 のキーオフがこの値を使う。2026-09-20)
     STA $9030
     RTS`);
       }
@@ -3147,7 +3150,7 @@ ${usesPortamento ? `    STA ${hex(PTACT)},X    ; PTACT=0(PT<n>未指定時の既
     STA ${hex(PTVALHI)},X` : ''}
 ${usesEn ? `    STA ${hex(ENACT)},X    ; ENACT=0(EN<n>未指定時の既定値、2026-08-16追加。同上の理由)
     STA ${hex(ENVAL)},X    ; ★ENVALも0初期化(LOOKUP_*_PERIOD/WFV_*がNOTEへ無条件加算するため)` : ''}
-${needsLastHi ? `    STA ${hex(LASTHI)},X   ; LASTHI=0(VRC7ではキー状態シャドウを兼ねる、WFO_VRC7参照。同上の理由)` : ''}
+${(needsLastHi || usesVrc7) ? `    STA ${hex(LASTHI)},X   ; LASTHI=0(VRC7ではキー状態シャドウを兼ねる、WFO_VRC7/SIL_VRC7参照。同上の理由)` : ''}
 ${usesSmooth ? `    STA ${hex(SMOOTHACT)},X  ; SMOOTHACT=0(SM未指定時の既定値、SMOF相当)` : ''}
 ${usesPitchSa ? `    STA ${hex(SAAMT)},X    ; SAAMT=0(SA未指定時の既定値=シフト無し)` : ''}
 ${usesDirect ? `    STA ${hex(DIRACT)},X   ; DIRACT=0(@n未使用の音符=音階テーブルで鳴らす)` : ''}
@@ -3834,7 +3837,11 @@ RD_REST:
     STA ${hex(RESTLEN)},X  ; sticky音長を更新(OP_REST_SAMEが再利用する)
 RD_REST_GO:
     STA ${hex(CNT)},X
-${usesFreqOnly ? `    ; 読取りフレームぶんの周期側継続効果tick(SERVICE_CH冒頭コメント参照。休符中も
+${usesFreqOnly && usesVrc7 ? `    ; VRC7: 先にキーオフする(下の WRITE_FREQ_ONLY=WFO_VRC7 はキーオフ中は書かないので、余韻の音程は
+    ; 直前の音符の最後のフレームのまま。本家 vrc7_do_effect も休符のフレームは効果を書かない。compiler.js と同じ)。
+    ; 他のチップは下の SILENCE_CH がもう一度無音化するので結果は変わらない
+    JSR SILENCE_CH
+` : ''}${usesFreqOnly ? `    ; 読取りフレームぶんの周期側継続効果tick(SERVICE_CH冒頭コメント参照。休符中も
     ; EP/MP/PT/ENは進み続けるので、この1フレームだけ止まらないようにする)。
     ; SILENCE_CH(キーオフ)より前に行い、キーオン状態を伴う周波数書込みを持つチップ
     ; でもキーオフが必ず後勝ちするようにする
@@ -3886,7 +3893,11 @@ ${usesGateOffVr ? `
 RD_GATEOFFVR:
     JSR READ_BYTE
     STA ${hex(CNT)},X
-${usesFreqOnly ? `    JSR TICK_PITCH_FX      ; 読取りフレームぶんの周期側継続効果tick(RD_RESTと同じ)
+${usesFreqOnly && usesVrc7 ? `${usesVr ? `    LDA ${hex(VRSEL)},X
+    CMP #$FF
+    BNE RGV_KEEPKEY
+` : ''}    JSR SILENCE_CH         ; VRC7: @vr の無いゲートオフは先にキーオフ(RD_REST と同じ理由。@vr ならキーオンのまま)
+${usesVr ? 'RGV_KEEPKEY:\n' : ''}` : ''}${usesFreqOnly ? `    JSR TICK_PITCH_FX      ; 読取りフレームぶんの周期側継続効果tick(RD_RESTと同じ)
     BEQ RGV_NOFREQ
     JSR WRITE_FREQ_ONLY
 RGV_NOFREQ:` : ''}

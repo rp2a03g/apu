@@ -2864,6 +2864,18 @@
     const writeLog = newWriteLog(totalFrames);
     const env = envelopes || { en: {} };
     const ch = index;
+    // 直近に書いた $20+ch の値(block<<1 | fnum上位1bit | キーオン0x10)。キーオフはこの値からキーオンのビットだけを
+    // 落として書く(本家ppmck vrc7.h vrc7_key_off と同じ。block/fnumを0にすると余韻の音程が変わり、$30+chを0に
+    // すると余韻の途中で音色0・最大音量へ切り替わってしまう)。NSF書き出しの6502ドライバ(ppmckDriver.js SIL_VRC7)も
+    // LASTHI,X から同じ値を書く(ドライバは既にキーオフ中なら書かないが、値は同じ)。
+    // ここでは既にキーオフ中でも書く: L の2周目は1周目の書込みの複製なので、休符で必ずキーオフを書いておかないと
+    // 「1周目は L の前が休符・2周目は曲末の音符が鳴ったまま」のときに余韻にならず鳴り続ける(値は fixVrc7LoopKeyOff が直す)
+    let lastHi = 0;
+    const keyOff = (f) => {
+      lastHi &= ~0x10;
+      writeLog[f].push({ addr: 0x9010, value: 0x20 + ch });
+      writeLog[f].push({ addr: 0x9030, value: lastHi });
+    };
 
     let frame = 0;
     for (const seg of segments) {
@@ -2908,6 +2920,7 @@
         writeLog[startFrame].push({ addr: 0x9030, value: (block << 1) | ((fnum >> 8) & 1) });
         writeLog[startFrame].push({ addr: 0x9010, value: 0x20 + ch });
         writeLog[startFrame].push({ addr: 0x9030, value: 0x10 | (block << 1) | ((fnum >> 8) & 1) });
+        lastHi = 0x10 | (block << 1) | ((fnum >> 8) & 1);
         writeLog[startFrame].push({ addr: 0x9010, value: 0x30 + ch });
         writeLog[startFrame].push({ addr: 0x9030, value: (instrument << 4) | vrc7VolReg(volAt0) });
         if (vTable) {
@@ -2940,6 +2953,7 @@
             writeLog[startFrame + t].push({ addr: 0x9010, value: 0x20 + ch });
             writeLog[startFrame + t].push({ addr: 0x9030, value: 0x10 | (b2 << 1) | ((f2 >> 8) & 1) });
             lastFnum = f2; lastBlock = b2;
+            lastHi = 0x10 | (b2 << 1) | ((f2 >> 8) & 1);
           }
         }
         if (gateFrames < dur && !vrTable) {
@@ -2952,19 +2966,50 @@
             writeLog[startFrame + gateFrames].push({ addr: 0x9010, value: 0x30 + ch });
             writeLog[startFrame + gateFrames].push({ addr: 0x9030, value: ((seg.releaseTone % 16) << 4) | vrc7VolReg(lastVol) });
           }
-          writeLog[startFrame + gateFrames].push({ addr: 0x9010, value: 0x20 + ch });
-          writeLog[startFrame + gateFrames].push({ addr: 0x9030, value: (block << 1) | ((fnum >> 8) & 1) });
+          // キーオフ。block/fnum は直近に書いた値のまま(EN/EP/MP/PT で動いた後ならその値。余韻もその音程で鳴る)
+          keyOff(startFrame + gateFrames);
         }
       } else {
-        writeLog[startFrame].push({ addr: 0x9010, value: 0x20 + ch });
-        writeLog[startFrame].push({ addr: 0x9030, value: 0 });
-        writeLog[startFrame].push({ addr: 0x9010, value: 0x30 + ch });
-        writeLog[startFrame].push({ addr: 0x9030, value: 0 });
+        // 休符: キーオフだけ(block/fnum・音色/音量はそのまま。余韻は直前の音符の音色・音量・音程で消えていく。
+        // 本家ppmck vrc7.h vrc7_rest_set→vrc7_key_off と同じ。2026-09-20まではJSは$20+ch/$30+chとも0を書き、
+        // 余韻の途中で音色0・最大音量・block0へ切り替わっていた)
+        keyOff(startFrame);
       }
       frame += dur;
     }
 
     return writeLog;
+  }
+
+  // L の2周目(1周目の [L, 曲末) を複製した区間、先頭は naturalEndFrame)の頭で、最初の音符のキーオンより前にある
+  // VRC7 のキーオフ($20+ch、休符の頭)の値を「1周目の終わりの $20+ch」から作り直す(2026-09-20)。
+  // キーオフは block/fnum を変えずに書く(segmentsToWriteLogVrc7 の keyOff)ので、複製のままだと L の直前の音の
+  // block が書かれ、曲末の音の余韻が別の高さ(オクターブ違い等)で鳴ってしまう。NSF のドライバは本物の状態から書く
+  function fixVrc7LoopKeyOff(track, index, naturalEndFrame) {
+    const reg = 0x20 + index;
+    let endHi = 0;
+    for (let f = 0; f < naturalEndFrame; f++) {
+      let sel = -1;
+      for (const w of track[f]) {
+        if (w.addr === 0x9010) sel = w.value;
+        else if (w.addr === 0x9030 && sel === reg) endHi = w.value;
+      }
+    }
+    for (let f = naturalEndFrame; f < track.length; f++) {
+      let sel = -1, keyOn = false, hit = false;
+      for (const w of track[f]) {
+        if (w.addr === 0x9010) sel = w.value;
+        else if (w.addr === 0x9030 && sel === reg) { if (w.value & 0x10) keyOn = true; else hit = true; }
+      }
+      if (keyOn) return; // 音符の頭から先は1周目と同じ(音符は block/fnum を書き直す)
+      if (!hit) continue;
+      // フレームの配列は1周目と共有しているので作り直す
+      sel = -1;
+      track[f] = track[f].map(w => {
+        if (w.addr === 0x9010) sel = w.value;
+        return (w.addr === 0x9030 && sel === reg) ? { addr: 0x9030, value: endHi & ~0x10 } : w;
+      });
+    }
   }
 
   // @OP<n>で定義した8バイトをVRC7のカスタム音色(パッチ0)レジスタ($00-$07)へロードする。
@@ -3611,6 +3656,10 @@
       for (const ch of Object.keys(tracks)) {
         tracks[ch] = tracks[ch].concat(tracks[ch].slice(loopPointFrame, naturalEndFrame));
       }
+      // VRC7 の休符のキーオフだけは直前の状態(block/fnum)を引き継ぐので、2周目の頭は1周目の終わりから作り直す
+      (expansionLetterMap.vrc7 || []).forEach((ch, index) => {
+        if (tracks[ch]) fixVrc7LoopKeyOff(tracks[ch], index, naturalEndFrame);
+      });
       for (const ch of Object.keys(highlightRanges)) {
         const extraRanges = [];
         for (const r of highlightRanges[ch]) {

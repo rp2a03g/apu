@@ -113,7 +113,7 @@
     ];
   }
 
-  function extractChannelEvents(timeline, ch, fs, toneReg) {
+  function extractChannelEvents(timeline, ch, fs, toneReg, keepSeq) {
     const events = [];
     const [, car] = slotOf(ch);
     let cur = null;
@@ -128,11 +128,11 @@
       const note = freqHz != null ? freqToNoteNumber(freqHz) : null;
       const srcTone = note !== null ? opllToneBytes(regs, ch) : undefined; // 音色の同定(src/convert/toneKey.js)
       const vrc7Tone = (toneReg && srcTone) ? toneReg.assign(srcTone) : undefined;
-      if (!cur) { cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false }; continue; }
-      if (attack[ch] || note !== cur.note || volume !== cur.volume || vrc7Tone !== cur.vrc7Tone) {
+      if (!cur) { cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: false, volSeq: keepSeq ? [volume] : undefined }; continue; }
+      if (attack[ch] || note !== cur.note || (!keepSeq && volume !== cur.volume) || vrc7Tone !== cur.vrc7Tone) {
         flush(f);
-        cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch] };
-      }
+        cur = { note, volume, instrument: 0, vrc7Tone, srcTone, freqHz: note !== null ? freqHz : null, start: f, end: f, retrigger: !!attack[ch], volSeq: keepSeq ? [volume] : undefined };
+      } else if (keepSeq) cur.volSeq.push(volume);
     }
     flush(timeline.length);
     return events;
@@ -196,7 +196,9 @@
     return events;
   }
 
-  MML.Kss2MmlExpansion.opl = function (writeLog, totalFrames, clock, toneReg) {
+  // opts.envelope: opll.js と同じ(音量の変わり目で切らず attSeq で持つ。VGM→VRC7 用、2026-09-20)
+  MML.Kss2MmlExpansion.opl = function (writeLog, totalFrames, clock, toneReg, opts) {
+    const keepSeq = !!(opts && opts.envelope);
     const fs = (clock || 3579545) / 72;
     const { frames: timeline, rhythmUsed } = buildTimeline(writeLog);
     const toCommon = ev => Object.assign(
@@ -204,7 +206,8 @@
       ev.note !== null && ev.freqHz != null ? { rawFreq: ev.freqHz } : {},
       ev.vrc7Tone !== undefined ? { vrc7Tone: ev.vrc7Tone } : {},
       ev.srcTone ? { srcTone: ev.srcTone } : {},
-      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}
+      ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
+      (ev.note !== null && ev.volSeq && ev.volSeq.some(v => v !== ev.volSeq[0])) ? { attSeq: ev.volSeq.map(v => v * 3) } : {}
     );
     const rhythm = rhythmUsed
       ? RHYTHM_DEFS.reduce((acc, def) => { acc[def.key] = extractRhythmEvents(timeline, def, fs); return acc; }, {})
@@ -217,7 +220,7 @@
       channels: Array.from({ length: NUM_MELODY_MAX }, (_, ch) => ({
         events: (rhythmUsed && ch >= NUM_MELODY_RHYTHM)
           ? []
-          : MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, ch, fs, toneReg)).map(toCommon),
+          : MML.Convert.mergeVibratoAndArpeggio(extractChannelEvents(timeline, ch, fs, toneReg, keepSeq)).map(toCommon),
         hasVolume: true,
         hasInstrument: true,
         hasVrc7Tone: !!toneReg

@@ -1101,8 +1101,11 @@
     // analyzeVolumeShape+共有EnvelopeRegistryで@v化する(NSF/KSS/GBS/HESと同じ方式)。
     // リリース(@vr0)は従来通り実機固定カーブのシミュレート値を使う。
     // 三角波(音量制御なし)とDPCMは対象外。
-    const envCapableType = (type) => type && type !== 'skip' && type !== 'dpcm' && type !== 'triangle' &&
-      !type.startsWith('vrc7'); // VRC7はv<n>で出す(@vは2026-09-20からコンパイラで効くが、出力を変えないよう従来どおり)
+    // VRC7も@vで出す(2026-09-20から。それまではコンパイラが VRC7 の @v を無視していたので v<n> を並べていた)。
+    // 表は MML の向き(v15=最大、3dB/段)で登録し、定数音量はレジスタの減衰値で持つ(下の volStepOf / 抽出ループ参照)
+    const envCapableType = (type) => type && type !== 'skip' && type !== 'dpcm' && type !== 'triangle';
+    // 音量の正規化基準(songMaxVol)に入れる借用先。VRC7 は従来どおり入れない(入れると VRC7 と同居する他chの音量が変わる)
+    const volNormType = (type) => envCapableType(type) && !type.startsWith('vrc7');
     // ボイス音量の正規化基準(2026-08-24): SPCのVOL L/Rは絶対値が小さい曲が多く(実測:
     // 最大37/127等)、0..127→0..15の絶対マッピングでは全chが v1〜2 に潰れて比率も丸めで
     // 消える。「音量制御を持つ借用先」に割り当てたボイス全体の最大値を15へ正規化し、
@@ -1111,7 +1114,7 @@
     let songMaxVol = 0;
     for (let ch = 0; ch < voiceEvents.length; ch++) {
       const cfg = channelMap[ch];
-      if (!cfg || !envCapableType(cfg.type)) continue;
+      if (!cfg || !volNormType(cfg.type)) continue;
       for (const ev of voiceEvents[ch]) songMaxVol = Math.max(songMaxVol, ev.vol || 0);
     }
     if (!songMaxVol) songMaxVol = 127;
@@ -1149,14 +1152,17 @@
       const chVolScale = MML.Convert.channelVolScale(cfg);
       const targetMax = TARGET_VOL_MAX[cfg.type] || 15;
       const k = chVolScale === 0 ? 0 : (targetMax * chVolScale) / songMaxVol;
+      const isVrc7 = cfg.type.startsWith('vrc7');
       for (const ev of voiceEvents[ch]) {
         if (ev.pitchSemi === null && !(cfg.type === 'noise' && ev.non)) continue;
         if (!ev.volSeq || ev.volSeq.length === 0) continue; // envLog無し(旧経路)はv<n>へ
-        const seq = ev.volSeq.map(v => Math.max(0, Math.min(targetMax, Math.round(v * k))));
+        // VRC7: 定数音量と同じ volStepOf で減衰値(3dB/段)にし、表は MML の向き(15-減衰値)で登録する
+        const seq = isVrc7 ? ev.volSeq.map(v => 15 - volStepOf(v * chVolScale, cfg.type))
+          : ev.volSeq.map(v => Math.max(0, Math.min(targetMax, Math.round(v * k))));
         const idx = envReg.assign(seq);
         if (idx == null) {
-          // フラット(エンベロープ不要)なノート: ピーク値をv<n>で出す
-          ev.plainVol = MML.Convert.plainVolume(seq);
+          // フラット(エンベロープ不要)なノート: ピーク値をv<n>で出す(VRC7は減衰値へ戻す)
+          ev.plainVol = isVrc7 ? 15 - MML.Convert.plainVolume(seq) : MML.Convert.plainVolume(seq);
         } else {
           ev.envelopeIdx = idx;
           usesReleaseTable = true;
@@ -1479,7 +1485,7 @@
       const isN163Target = targetType.startsWith('n163');
       const isVrc7Target = targetType.startsWith('vrc7');
       // 音量制御を持つ借用先は常にv<n>可(NSFのA/B同様、@vとv併用。フラットなノートはv、
-      // エンベロープのあるノートは@v)。VRC7は常にv<n>(値はレジスタの減衰値で持ち、mmlEmit が v=15-値 で書く)
+      // エンベロープのあるノートは@v)。VRC7のv<n>はレジスタの減衰値で持ち、mmlEmit が v=15-値 で書く
       const hasVolume = envCapableType(targetType) || isVrc7Target;
       // パルス系のデューティ選択(cfg.tone): 2A03/MMC5=@0-@3(既定@2=50%)、VRC6=@0-@7(既定@7=50%)
       const isPulseTarget = targetType === 'pulse1' || targetType === 'pulse2' ||
@@ -1528,7 +1534,7 @@
           rawFreq: ev.rawFreq,
           envelopeV: hasEnvelope && ev.envelopeIdx !== undefined ? ev.envelopeIdx : undefined,
           volume: !hasVolume ? undefined
-            : (cmd.ENV && envCapableType(targetType))
+            : (cmd.ENV && envCapableType(targetType) && (!isVrc7Target || ev.envelopeIdx !== undefined || ev.plainVol !== undefined))
               ? (ev.envelopeIdx !== undefined ? undefined : ev.plainVol)
               : (chVolScale === 0 ? (isVrc7Target ? 15 : 0) : volStepOf(ev.vol * chVolScale, targetType)),
           // volPct=0のチャンネルは無音なので音程検証(src/convert/verify.js)の対象外にする
