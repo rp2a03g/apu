@@ -832,7 +832,7 @@
           const nt = nfam === 'noise' ? logToLinearTableOffset(2, onFme7 ? SN_NOISE_BOOST_ON_FME7_DB : 0) : null;
           // FME-7 へ回したノイズは adaptGroup が減衰dB経由で換算するので生値のまま(regFor の FME-7 写像を重ねない)
           const reg = nt ? mappedEnvRegWithRelease(envReg, nt) : nfam === 'fme7' ? envReg : regFor('sn76489', nfam);
-          extracted[noiseSrc.id] = MML.Vgm2MmlExpansion.sn76489(data.sn.snapshots, data.sn.clock, reg, k, { shiftWidth: c.sn76489.shiftWidth }).noise;
+          extracted[noiseSrc.id] = MML.Vgm2MmlExpansion.sn76489(data.sn.snapshots, data.sn.clock, reg, k, { shiftWidth: c.sn76489.shiftWidth, periodic: cmd.SN_PERIODIC }).noise;
         }
       }
     }

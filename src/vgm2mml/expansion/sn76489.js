@@ -19,8 +19,8 @@
  *  - SMSのドライバは「周期<6でDC固定+音量書き換え」でPCM風の技法を使うことがあるが、
  *    snapshot側で active=false(音程なし)になるので自然に休符になる。
  *  - ノイズ: 2A03固定16周期のうち実測シフトレートに最も近い周期へ写像(gbs2mml/expansion/
- *    noise.jsと同じ近似)。周期性ノイズ(white=false)は2A03の短周期 @1 へ写し、周期は基本周波数が
- *    合うものを選ぶ(extractNoiseEvents 直前のコメント。2026-09-19)。
+ *    noise.jsと同じ近似)。周期性ノイズ(white=false)は変換設定 SN_PERIODIC で写し先を選ぶ: 'white'(既定)は
+ *    長周期のまま、'short' は2A03の短周期 @1 へ写し周期は基本周波数が合うものを選ぶ(extractNoiseEvents 直前のコメント)。
  *    ノイズレート3(トーンch2追従)はch2の周期変化のたびに周波数が変わるので、そのまま
  *    シフトHz→最寄り周期で追従させる(ドラム音程のスライドとして現れる)。
  */
@@ -81,7 +81,7 @@
   // (=シフトレート×93/幅 を長周期と同じ表で引く)。2A03 の周期表は16段しかないので、音程は最寄りの段どまり
   const NES_SHORT_NOISE_STEPS = 93;
 
-  function extractNoiseEvents(snapshots, idx, shiftWidth) {
+  function extractNoiseEvents(snapshots, idx, shiftWidth, periodicShort) {
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
@@ -89,7 +89,9 @@
       const c = snapshots[f][idx];
       const volume = c.rawVol;
       const on = volume > 0 && c.active && c.noiseFreq > 0;
-      const mode = c.white === false ? 1 : 0; // 周期性ノイズ(white=false) → 2A03の短周期 @1(2026-09-18)
+      // 周期性ノイズ(white=false) → 2A03の短周期 @1(2026-09-18)。変換設定 SN_PERIODIC='white'(既定)なら
+      // 長周期(ホワイト)のまま、周期もシフトレートどうしで合わせる(2026-09-19 選択式に)
+      const mode = (periodicShort && c.white === false) ? 1 : 0;
       const note = on ? noiseFreqToNote(mode === 1 ? c.noiseFreq * NES_SHORT_NOISE_STEPS / shiftWidth : c.noiseFreq) : null;
       if (!cur) { cur = { note, mode, start: f, end: f, volSeq: [volume] }; continue; }
       const retrigger = note !== null && volume > cur.volSeq[cur.volSeq.length - 1];
@@ -110,7 +112,8 @@
    * @param {object} [envReg] - MML.Convert.EnvelopeRegistry(音量エンベロープ@v<n>の共有登録)。
    *   assign(volSeq)を持つ任意のオブジェクト可(借用先に合わせた音量写像プロキシ等)
    * @param {number} [chip=0] - デュアルチップの何個目か(スナップショットは1個目[0-3]+2個目[4-7]の連結)
-   * @param {object} [opts] - { shiftWidth: ノイズのシフトレジスタ幅(VGMヘッダ。既定16=SMS/GG/MD) }
+   * @param {object} [opts] - { shiftWidth: ノイズのシフトレジスタ幅(VGMヘッダ。既定16=SMS/GG/MD),
+   *   periodic: 周期ノイズの写し先 'white'(既定)|'short'(変換設定 SN_PERIODIC) }
    */
   MML.Vgm2MmlExpansion.sn76489 = function (snapshots, clock, envReg, chip, opts) {
     const shiftWidth = (opts && opts.shiftWidth > 0) ? opts.shiftWidth : 16;
@@ -144,7 +147,7 @@
         events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractToneEvents(snapshots, base + ch, clock))).map(toneToCommon),
         hasVolume: true, hasEnvelope: true, hasInstrument: true, hasFme7Noise: true
       })),
-      noise: { events: extractNoiseEvents(snapshots, base + 3, shiftWidth).map(noiseToCommon), hasVolume: true, hasEnvelope: true }
+      noise: { events: extractNoiseEvents(snapshots, base + 3, shiftWidth, !!(opts && opts.periodic === 'short')).map(noiseToCommon), hasVolume: true, hasEnvelope: true }
     };
   };
 })(window);

@@ -185,7 +185,7 @@
       if (dur <= 0) continue;
       // ループ自動検出(emitScore): ループ開始位置の最初のイベントの前に L を置き、状態を出し直させる
       if (flags.loopStart != null && !state.loopEmitted && ev.start >= flags.loopStart) {
-        emit('L');
+        emit(flags.loopMark || 'L'); // emitScore は目印(LOOP_MARK)で受けて「DXYZ L」の独立した行にする
         state.loopEmitted = true;
         forceReemit(state, flags);
       }
@@ -1035,6 +1035,7 @@
       if (chan.letter === 'E') Object.assign(flags, DPCM_FLAGS_OFF); // DPCM: 音符=番号だけ(DPCM_NOTE_BASE 冒頭コメント)
       if (loop) {
         flags.loopStart = loop.start;
+        flags.loopMark = LOOP_MARK;
         flags.usesSa = split.some(e => !!e.pitchSa);
         flags.usesRelTone = split.some(e => e.releaseTone != null && e.releaseTone !== 255);
       }
@@ -1057,41 +1058,84 @@
       }));
     }
 
-    // 小節揃え(BAR_ALIGN): 小節ごとに全チャンネル中の最大幅で列を揃える。OFF ならスペース1つで区切る
-    const colWidth = [];
-    for (let m = 0; m < measureCount; m++) {
-      let w = 0;
-      if (barAlign) for (const texts of perChannelMeasureTexts) w = Math.max(w, texts[m].trimStart().length);
-      colWidth.push(w);
-    }
-    const lineOf = (ci, blockStart, blockEnd) => {
-      let line = `${channelsData[ci].letter} `;
-      for (let m = blockStart; m < blockEnd; m++) {
-        const t = perChannelMeasureTexts[ci][m].trimStart(); // 小節頭がコマンドだと先頭に区切り空白が付くので落とす
-        if (barAlign) line += t.padEnd(colWidth[m]) + ' ';
-        else if (t) line += t + ' '; // 空の小節(音符が続いているだけ)は詰める
+    // ── ループ位置で譜面を前後に分ける(2026-09-19、ユーザー指示「L が見落としやすい」) ──
+    // renderEvents は L の代わりに目印 LOOP_MARK を出している。全チャンネルで目印が同じ小節にあれば、
+    // その小節を目印の前後で割り、「イントロ | DXYZ L の1行 | ループ部分」の順に並べる
+    // (ppmck はチャンネル行を順に連結するので、独立した「DXYZ L」行は各チャンネルのその位置の L と同じ)。
+    // 小節がそろわない等で割れないときは、目印をその場の L に戻して従来どおり行の途中に置く
+    let segments = [perChannelMeasureTexts];
+    if (loop) {
+      const at = perChannelMeasureTexts.map(texts => texts.findIndex(t => t.indexOf(LOOP_MARK) >= 0));
+      if (at.every(m => m >= 0 && m === at[0])) {
+        const mi = at[0];
+        const pre = [], post = [];
+        perChannelMeasureTexts.forEach(texts => {
+          const k = texts[mi].indexOf(LOOP_MARK);
+          const a = texts[mi].slice(0, k), b = texts[mi].slice(k + LOOP_MARK.length);
+          pre.push(texts.slice(0, mi).concat(a.trim() ? [a] : []));
+          post.push([b].concat(texts.slice(mi + 1)));
+        });
+        segments = [pre, null, post]; // null = 「DXYZ L」の行
+      } else {
+        segments = [perChannelMeasureTexts.map(texts => texts.map(t => t.split(LOOP_MARK).join('L')))];
       }
-      return line.trimEnd();
+    }
+    const loopLineOf = (ciList) => `${ciList.map(ci => channelsData[ci].letter).join('')} L`;
+    const allCi = channelsData.map((c, i) => i);
+
+    // 小節揃え(BAR_ALIGN): 小節ごとに全チャンネル中の最大幅で列を揃える。OFF ならスペース1つで区切る
+    const layoutSegment = (segTexts) => {
+      const count = Math.max(0, ...segTexts.map(t => t.length));
+      const colWidth = [];
+      for (let m = 0; m < count; m++) {
+        let w = 0;
+        if (barAlign) for (const texts of segTexts) w = Math.max(w, (texts[m] || '').trimStart().length);
+        colWidth.push(w);
+      }
+      const lineOf = (ci, blockStart, blockEnd) => {
+        let line = `${channelsData[ci].letter} `;
+        for (let m = blockStart; m < blockEnd; m++) {
+          const t = (segTexts[ci][m] || '').trimStart(); // 小節頭がコマンドだと先頭に区切り空白が付くので落とす
+          if (barAlign) line += t.padEnd(colWidth[m]) + ' ';
+          else if (t) line += t + ' '; // 空の小節(音符が続いているだけ)は詰める
+        }
+        return line.trimEnd();
+      };
+      return { count, lineOf };
     };
+    const laid = segments.map(seg => (seg ? layoutSegment(seg) : null));
 
     if (partOrder === 'part') {
-      // パートごとにまとめる: A を最後まで出してから B へ(パートの間は空行)
+      // パートごとにまとめる: A を最後まで出してから B へ(パートの間は空行)。ループはパートごとに「A L」の行
       for (let ci = 0; ci < channelsData.length; ci++) {
         if (ci > 0) lines.push('');
-        for (let blockStart = 0; blockStart < measureCount; blockStart += measuresPerLine) {
-          lines.push(lineOf(ci, blockStart, Math.min(measureCount, blockStart + measuresPerLine)));
+        for (const seg of laid) {
+          if (!seg) { lines.push(loopLineOf([ci])); continue; }
+          for (let blockStart = 0; blockStart < seg.count; blockStart += measuresPerLine) {
+            const l = seg.lineOf(ci, blockStart, Math.min(seg.count, blockStart + measuresPerLine));
+            if (l !== channelsData[ci].letter) lines.push(l);
+          }
         }
       }
       return lines.join('\n');
     }
     // チャンネル順に小節ブロックで並べる(既定): 全パートを BARS_PER_LINE 小節ずつ縦に揃える
-    for (let blockStart = 0; blockStart < measureCount; blockStart += measuresPerLine) {
-      const blockEnd = Math.min(measureCount, blockStart + measuresPerLine);
-      for (let ci = 0; ci < channelsData.length; ci++) lines.push(lineOf(ci, blockStart, blockEnd));
-      if (blockEnd < measureCount) lines.push('');
-    }
+    laid.forEach((seg, si) => {
+      if (!seg) { if (lines.length && lines[lines.length - 1] !== '') lines.push(''); lines.push(loopLineOf(allCi), ''); return; }
+      for (let blockStart = 0; blockStart < seg.count; blockStart += measuresPerLine) {
+        const blockEnd = Math.min(seg.count, blockStart + measuresPerLine);
+        const block = allCi.map(ci => seg.lineOf(ci, blockStart, blockEnd));
+        if (block.every((l, ci) => l === channelsData[ci].letter)) continue; // 中身の無いブロック(ループ位置の直前など)
+        lines.push(...block);
+        if (blockEnd < seg.count) lines.push('');
+      }
+      if (si < laid.length - 1 && lines[lines.length - 1] !== '') lines.push('');
+    });
+    while (lines.length && lines[lines.length - 1] === '') lines.pop();
 
     return lines.join('\n');
   };
+  // L の位置の目印(renderEvents → emitScore)。MML に出てこない制御文字で挟む
+  const LOOP_MARK = '\u0001L\u0001';
 
 })(window);

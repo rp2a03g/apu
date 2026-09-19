@@ -3797,9 +3797,9 @@
       const perPc = (t.perPc || []).filter(p => p.count > 0)
         .map(p => `${names[p.pc]} ${fmt(p.median)} (${p.count})${t.notes && t.notes[p.pc] ? '*' : ''}`).join(' / ');
       const perPcHtml = perPc ? '<div class="cs-desc">' + T('音名ごとの中央値(* = 補正した音名)') + ': ' + perPc + '</div>' : '';
-      if (t.notes) {
-        const list = t.notes.map((c, pc) => (c ? `${names[pc]} ${fmt(c)}` : null)).filter(Boolean).join(', ');
-        return '<div>' + T('音名別チューニング: {list} cent のずれを検出し、#TUNING-NOTE で補正しました', { list }) + '</div>' + perPcHtml;
+      if (t.notes || t.cents) {
+        const list = (t.notes || []).map((c, pc) => (c ? `${names[pc]} ${fmt(c)}` : null)).filter(Boolean).join(', ') || '-';
+        return '<div>' + T('音名別チューニング: 全体 {cents} cent(#TUNING)、外れた音名 {list} cent(#TUNING-NOTE)で補正しました', { cents: fmt(t.cents || 0), list }) + '</div>' + perPcHtml;
       }
       return '<div>' + T('音名別チューニング: 補正が必要な音名はありません') + '</div>' + perPcHtml;
     }

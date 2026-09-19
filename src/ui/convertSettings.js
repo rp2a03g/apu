@@ -69,6 +69,11 @@
     ['fit',  T('RAMに収まるようにだけ縮める')],
     ['keep', T('元の長さのまま(その曲は再生できない)')],
   ];
+  // SN76489 の周期ノイズの写し先(src/convert/options.js SN_PERIODIC)
+  const SN_PERIODIC_OPTIONS = () => [
+    ['white', T('ホワイトノイズ(長周期)・推奨')],
+    ['short', T('短周期ノイズ(@1、音程を合わせる)')],
+  ];
   // 基準ピッチ(全体オフセット、src/convert/options.js TUNING/TUNING_MIN。detectTuning冒頭コメント参照)
   const TUNING_OPTIONS = () => [
     ['auto', T('自動検出(曲全体の偏差を測る・推奨)')],
@@ -471,6 +476,8 @@
     tmWrap.appendChild(tmIn);
     tmWrap.appendChild(el('span', null, T('セント')));
     det.appendChild(line(null, T('基準ピッチ'), T('曲の音程のずれを測って補正'), inline2(tnSel, tmWrap), T('「自動検出」は曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。「音名別に自動検出」は音名(c〜b)ごとにずれを測り、ずれている音名だけを #TUNING-NOTE でずらす(音程表が音名ごとに外れている曲用。例: F# だけ +33 セント)。どちらも音名は変わらず、再生とNSF書き出しの周波数テーブルがその分だけずれる')));
+    const snSel = makeSelect(SN_PERIODIC_OPTIONS(), () => setKey('SN_PERIODIC', snSel.value));
+    det.appendChild(line(null, T('SN76489の周期ノイズ'), T('SMS/GG/メガドライブのPSG'), snSel, T('SN76489 のノイズには、ホワイトノイズのほかに「周期ノイズ」(1/16デューティの細いパルスのような、音程のある音)がある。2A03に同じ音は無いので、ホワイトノイズ(長周期)にするか、2A03の短周期ノイズ(@1、93ステップの金属的な音)で音程を合わせるかを選ぶ。周期ノイズの高さを切り替えてタムやキックを作っている曲で差が出る')));
     body.appendChild(det);
 
     // ── N163(実効ch数・ピッチ精度・波形RAM)。1つの物理量で3つ同時に動くので1か所へ ──
@@ -520,7 +527,8 @@
       updateN163Range();
       tnSel.value = current.TUNING || 'auto';
       tmIn.value = String(current.TUNING_MIN != null ? current.TUNING_MIN : MML.Convert.TUNING_MIN_DEFAULT);
-      tmIn.disabled = current.TUNING !== 'auto';
+      tmIn.disabled = current.TUNING === 'a440'; // 最小偏差は「自動検出」「音名別」の両方で効く
+      snSel.value = current.SN_PERIODIC || 'white';
       const name = MML.Convert.cmdPresetName(current);
       for (const [n, b] of Object.entries(presetButtons)) b.classList.toggle('es-preset--active', n === name);
       customTag.style.display = name === 'custom' ? '' : 'none';

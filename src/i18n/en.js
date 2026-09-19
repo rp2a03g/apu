@@ -1072,13 +1072,19 @@
     '基準ピッチ': 'Reference pitch',
     '自動検出(曲全体の偏差を測る・推奨)': 'Auto-detect (measure the whole-song offset, recommended)',
     '12平均律固定(A4=440Hz・従来)': 'Fixed 12-TET (A4=440Hz, legacy)',
+    'ホワイトノイズ(長周期)・推奨': 'White noise (long mode), recommended',
+    '短周期ノイズ(@1、音程を合わせる)': 'Short-mode noise (@1, matches the pitch)',
+    'SN76489の周期ノイズ': 'SN76489 periodic noise',
+    'SMS/GG/メガドライブのPSG': 'PSG of SMS / Game Gear / Mega Drive',
+    'SN76489 のノイズには、ホワイトノイズのほかに「周期ノイズ」(1/16デューティの細いパルスのような、音程のある音)がある。2A03に同じ音は無いので、ホワイトノイズ(長周期)にするか、2A03の短周期ノイズ(@1、93ステップの金属的な音)で音程を合わせるかを選ぶ。周期ノイズの高さを切り替えてタムやキックを作っている曲で差が出る':
+      'Besides white noise, the SN76489 has "periodic noise" (a pitched sound like a thin 1/16-duty pulse). The 2A03 has no equivalent, so choose between white noise (long mode) and the 2A03 short-mode noise (@1, a metallic 93-step sound) that matches the pitch. It matters for songs that build toms or kicks by switching the pitch of the periodic noise',
     '音名別に自動検出(音名ごとの偏差を測る)': 'Auto-detect per note name (measure the offset of each note name)',
     '曲の音程のずれを測って補正': 'Measure and compensate the pitch offset of the song',
     '「自動検出」は曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。「音名別に自動検出」は音名(c〜b)ごとにずれを測り、ずれている音名だけを #TUNING-NOTE でずらす(音程表が音名ごとに外れている曲用。例: F# だけ +33 セント)。どちらも音名は変わらず、再生とNSF書き出しの周波数テーブルがその分だけずれる':
       '"Auto-detect" measures how many cents the whole song is offset from 12-TET (A4=440Hz), rounds notes against the shifted reference and writes #TUNING in the header. "Auto-detect per note name" measures the offset of each note name (C to B) and shifts only the offset note names with #TUNING-NOTE (for songs whose pitch table is off per note name, e.g. only F# at +33 cents). In both cases note names stay the same; the playback and NSF-export frequency tables shift by that amount',
     '自動検出のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5。0〜50)。小さくするほど僅かなずれでも #TUNING / #TUNING-NOTE が付く': 'In auto modes, do nothing when the measured offset is below this many cents (default 5, 0-50). Lower values write #TUNING / #TUNING-NOTE even for slight offsets',
     '音名ごとの中央値(* = 補正した音名)': 'Median per note name (* = compensated)',
-    '音名別チューニング: {list} cent のずれを検出し、#TUNING-NOTE で補正しました': 'Per-note tuning: detected offsets of {list} cents and compensated with #TUNING-NOTE',
+    '音名別チューニング: 全体 {cents} cent(#TUNING)、外れた音名 {list} cent(#TUNING-NOTE)で補正しました': 'Per-note tuning: compensated the whole song by {cents} cents (#TUNING) and the outlying note names by {list} cents (#TUNING-NOTE)',
     '音名別チューニング: 補正が必要な音名はありません': 'Per-note tuning: no note name needs compensation',
     '#TUNING-NOTE は「音名 セント」の組で書いてください(例: #TUNING-NOTE f+ +33 c+ +10)': '#TUNING-NOTE takes "note-name cents" pairs (e.g. #TUNING-NOTE f+ +33 c+ +10)',
     '曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。音名は変わらず(キーとは別)、再生とNSF書き出しの周波数テーブルが同じだけずれる。SPCは絶対音程がサンプル原音の推定に依存するため、15セント以上の安定した偏差に限って適用する':

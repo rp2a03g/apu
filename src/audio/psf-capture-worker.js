@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 15:00:49
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 16:30:25
  *
  * regsOnly capture worker bundle (psfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.psfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.psfCaptureBuiltAt = '2026-09-19 15:00:49';
+  MML.WorkerBundles.psfCaptureBuiltAt = '2026-09-19 16:30:25';
   MML.WorkerBundles.psfCapture = function () {
 /*
  * PSF (Portable Sound Format) 容器 / PS-EXE 解析
@@ -12951,8 +12951,8 @@
  * 基準ピッチ(全体オフセット、2026-09-07。下の MML.Convert.detectTuning 冒頭コメント参照):
  *   TUNING     … 'auto'(既定) = 曲全体の音程偏差の中央値を測り、その分ずらした基準で音符へ丸めて
  *                `#TUNING <cent>` をヘッダに出す / 'a440' = 従来どおり A4=440Hz の12平均律固定 /
- *                'note'(2026-09-19) = 音名(c..b)ごとに偏差の中央値を測り `#TUNING-NOTE f+ +33 …` を出す
- *                (音程表が音名ごとに外れている曲用。全体オフセットは使わない。MML.Convert.detectTuningNotes)
+ *                'note'(2026-09-19) = 全体のずれを #TUNING に、そこから外れた音名だけを `#TUNING-NOTE f+ +21 …`
+ *                に出す(音程表が音名ごとに外れている曲用。MML.Convert.detectTuningNotes)
  *   TUNING_MIN … 'auto' のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5、0〜50)。
  *                閾値未満の曲の出力は 'a440' と完全に同じ
  */
@@ -13058,6 +13058,14 @@
   MML.Convert.DPCM_KEYS = DPCM_KEYS;
   MML.Convert.DPCM_DEFAULTS = DPCM_DEFAULTS;
   // N163内蔵RAMに波形が収まらないときの扱い(冒頭コメント参照)
+  // SN76489(SMS/GG/MD の PSG)の周期ノイズ(ノイズレジスタの FB=0。1/16デューティの細いパルス=音程のある音)を
+  // 2A03 ノイズのどちらへ写すか(2026-09-19、ユーザー指示で選択式に)。プリセット外(チップ固有の設定)
+  //   'white'(既定) … 長周期(ホワイトノイズ)。音程の効果は失われるが、2A03 の短周期の金属的な音にならない
+  //   'short'       … 短周期(@1、93ステップ)。基本周波数が合う周期を選ぶので音程は合うが、音色は金属的になる
+  //                   (Power Strike II(GG) の曲8 など、周期ノイズの rate を切り替えてタム/キックを作る曲で差が出る)
+  const SN_PERIODIC_VALUES = ['white', 'short'];
+  MML.Convert.SN_PERIODIC_VALUES = SN_PERIODIC_VALUES;
+  const CHIP_DEFAULTS = { SN_PERIODIC: 'white' };
   const N163_WAVE_VALUES = ['both', 'fit', 'keep'];
   MML.Convert.N163_WAVE_VALUES = N163_WAVE_VALUES;
   // N163の実効チャンネル数の決め方(冒頭コメント参照)
@@ -13102,7 +13110,7 @@
   // options.cmd(部分指定可)を全キー揃った正規形にする。省略キーは faithful 既定
   // (DPCMキーは DPCM_DEFAULTS)。
   MML.Convert.normalizeCmd = function (cmd) {
-    const out = Object.assign({}, DPCM_DEFAULTS, LAYOUT_DEFAULTS, PRESETS.faithful);
+    const out = Object.assign({}, DPCM_DEFAULTS, LAYOUT_DEFAULTS, CHIP_DEFAULTS, PRESETS.faithful);
     if (cmd && typeof cmd === 'object') {
       for (const k of [...CMD_KEYS, ...SHAPE_KEYS]) if (cmd[k] != null) out[k] = !!cmd[k];
       // 数値は文字列でも受ける(localStorage/JSON経由やUIのselect値が'14'等になるため)
@@ -13133,6 +13141,7 @@
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
       if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
       if (cmd.N163_WAVE != null && N163_WAVE_VALUES.indexOf(cmd.N163_WAVE) >= 0) out.N163_WAVE = cmd.N163_WAVE;
+      if (cmd.SN_PERIODIC != null && SN_PERIODIC_VALUES.indexOf(cmd.SN_PERIODIC) >= 0) out.SN_PERIODIC = cmd.SN_PERIODIC;
       if (cmd.N163_CH != null && N163_CH_VALUES.indexOf(cmd.N163_CH) >= 0) out.N163_CH = cmd.N163_CH;
       if (cmd.TUNING != null && TUNING_VALUES.indexOf(cmd.TUNING) >= 0) out.TUNING = cmd.TUNING;
       if (cmd.TUNING_MIN != null) {
@@ -13239,8 +13248,8 @@
       const list = [];
       _tuning.notes.forEach((c, pc) => { if (c) list.push(`${PC_NAMES[pc]}=${fmtCents(c)}`); });
       return [
-        `; 音名別チューニング: ${list.join(' ')} cent (12平均律から。自動検出、音名ごとの偏差中央値${info && info.count ? `、音符${info.count}個` : ''})`,
-        `;   → #TUNING-NOTE で再生側/NSF書き出しの周波数テーブルのその音名だけがずれます(音名はそのまま)`,
+        `; 音名別チューニング: 全体 ${fmtCents(_tuning.cents)} cent、そこから外れた音名 ${list.join(' ')} cent (自動検出、音名ごとの偏差中央値${info && info.count ? `、音符${info.count}個` : ''})`,
+        `;   → #TUNING で全体を、#TUNING-NOTE でその音名だけをさらにずらします(足し算。音名はそのまま)`,
       ];
     }
     if (!_tuning.cents) return [];
@@ -13299,12 +13308,15 @@
     return s.length ? s[s.length - 1][0] : 0;
   }
 
-  // 音名別の推定(変換設定 TUNING='note'、#TUNING-NOTE)。音高クラス(c..b)ごとに偏差の重み付き中央値を採る。
-  //   - その音名の音符が opts.minCount(既定4)個未満、四分位範囲が opts.maxIqr(既定30)超、
-  //     |中央値| < opts.minCents の音名は 0(ずらさない)
-  //   - ±50 付近(opts.maxAbs、既定45 超)は丸めの向きが音符ごとに割れて中央値が当てにならないので 0
+  // 音名別の推定(変換設定 TUNING='note')。全体(#TUNING)+音名別の残り(#TUNING-NOTE)の併用で表す
+  // (2026-09-19 ユーザー合意): 全音符の偏差の中央値を全体オフセットにし、そこから外れた音名だけを
+  // #TUNING-NOTE に書く。データの少ない音名も全体のずれには乗る(音程表は曲全体で似たずれ方をするため)。
+  //   - 全体: 全音符の重み付き中央値。|値| < opts.minCents なら 0
+  //   - 音名: 音高クラス(c..b)ごとの重み付き中央値から全体を引いた残り。その音名の音符が opts.minCount
+  //     (既定4)個未満、四分位範囲が opts.maxIqr(既定30)超、|中央値| > opts.maxAbs(既定45。±50 付近は
+  //     丸めの向きが音符ごとに割れて当てにならない)、|残り| < opts.minCents の音名は 0(全体に従う)
   //   - 適用後の「±10セント以内に乗る音符の割合」が適用前より下がるなら全部 0(安全網、detectTuning と同じ)
-  // 戻り値 { notes: number[12] | null, count, perPc: [{ pc, median, iqr, count }], fitBefore, fitAfter, reason }
+  // 戻り値 { cents, notes: number[12] | null, count, perPc: [{ pc, median, iqr, count }], fitBefore, fitAfter, reason }
   MML.Convert.detectTuningNotes = function (channels, opts) {
     opts = opts || {};
     const minCents = opts.minCents != null ? +opts.minCents : TUNING_MIN_DEFAULT;
@@ -13314,12 +13326,16 @@
     const devs = collectDeviations(channels);
     const byPc = Array.from({ length: 12 }, () => []);
     for (const d of devs) byPc[d.pc].push([d.dev, d.w]);
+    const all = devs.map(d => [d.dev, d.w]);
+    const g = all.length ? wquantile(all, 0.5) : 0;
+    const cents = Math.abs(g) >= minCents ? Math.round(g * 10) / 10 : 0;
     const notes = new Array(12).fill(0);
     const perPc = byPc.map((arr, pc) => {
       if (!arr.length) return { pc, median: 0, iqr: 0, count: 0 };
       const median = wquantile(arr, 0.5), iqr = wquantile(arr, 0.75) - wquantile(arr, 0.25);
-      if (arr.length >= minCount && iqr <= maxIqr && Math.abs(median) >= minCents && Math.abs(median) <= maxAbs) {
-        notes[pc] = Math.round(median * 10) / 10;
+      const rest = median - cents;
+      if (arr.length >= minCount && iqr <= maxIqr && Math.abs(median) <= maxAbs && Math.abs(rest) >= minCents) {
+        notes[pc] = Math.round(rest * 10) / 10;
       }
       return { pc, median, iqr, count: arr.length };
     });
@@ -13328,12 +13344,13 @@
     for (const d of devs) {
       tot += d.w;
       if (Math.abs(d.dev) <= 10) before += d.w;
-      if (Math.abs(wrap(d.dev - notes[d.pc])) <= 10) after += d.w;
+      if (Math.abs(wrap(d.dev - cents - notes[d.pc])) <= 10) after += d.w;
     }
-    const out = { notes: null, count: devs.length, perPc, fitBefore: tot ? before / tot : 0, fitAfter: tot ? after / tot : 0, reason: null };
-    if (!notes.some(Boolean)) { out.reason = devs.length < minCount ? 'few' : 'below'; return out; }
+    const out = { cents: 0, notes: null, median: g, count: devs.length, perPc, fitBefore: tot ? before / tot : 0, fitAfter: tot ? after / tot : 0, reason: null };
+    if (!cents && !notes.some(Boolean)) { out.reason = devs.length < minCount ? 'few' : 'below'; return out; }
     if (out.fitAfter + 0.05 < out.fitBefore) { out.reason = 'fit'; return out; }
-    out.notes = notes;
+    out.cents = cents;
+    out.notes = notes.some(Boolean) ? notes : null;
     return out;
   };
 
@@ -13414,14 +13431,14 @@
     });
     det.minCents = minCents;
     if (cmd.TUNING === 'note') {
-      // 音名別(#TUNING-NOTE)。全体オフセットは使わず、音名ごとの値だけで再量子化する
+      // 音名別: 全体(#TUNING)+外れた音名だけの残り(#TUNING-NOTE)で再量子化する
       const dn = MML.Convert.detectTuningNotes(first && first.scoreChannels, {
         minCents, maxIqr: guard.maxIqr != null ? guard.maxIqr : undefined,
       });
-      det.cents = 0; det.mode = 'note'; det.notes = dn.notes; det.perPc = dn.perPc;
-      det.noteReason = dn.reason; det.count = dn.count;
-      if (!dn.notes) return finish(first, det);
-      return finish(MML.Convert.withTuning(0, () => run(options), det, dn.notes), det);
+      det.cents = dn.cents; det.mode = 'note'; det.notes = dn.notes; det.perPc = dn.perPc;
+      det.noteReason = dn.reason; det.count = dn.count; det.noteMedian = dn.median;
+      if (!dn.cents && !dn.notes) return finish(first, det);
+      return finish(MML.Convert.withTuning(dn.cents, () => run(options), det, dn.notes), det);
     }
     if (cmd.TUNING !== 'auto') { det.cents = 0; det.reason = 'fixed'; det.mode = 'a440'; return finish(first, det); }
     det.mode = 'auto';
