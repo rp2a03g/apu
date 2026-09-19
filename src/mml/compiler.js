@@ -53,7 +53,8 @@
  *   v<n>           音量 (0-15、絶対指定。FDS/VRC6のこぎり波だけは本家ppmck同様0-63で、
  *                  レジスタ生値=FDSの$4080ゲイン(実効32で頭打ち)/VRC6の$B000蓄積レート
  *                  (実質42が最大。43以上は実機の8bit桁溢れで鋸波が崩れるだけで音量は
- *                  上がらない)。@v/@vrのテーブル値も同じ範囲)
+ *                  上がらない)。@v/@vrのテーブル値も同じ範囲)。全音源とも大きいほど大きい音。
+ *                  VRC7も v15 が最大(実機の$30+chは減衰値なのでコンパイラが15-vにして書く。本家も同じ向き)
  *   v+<n> v-<n>    音量の相対増減 (省略時は±1)
  *   q<n>[,<m>]     ゲートタイム (0-8、8で音長いっぱい。<m>はフレーム数の加減、省略時0)。
  *                  ゲート長は実機ppmckc(datamake.c calcGateTime)と同じ
@@ -2852,6 +2853,13 @@
   }
 
   // --- VRC7 ---
+  // VRC7の音量(2026-09-20): MMLの v は他の音源と同じ向き(v15=最大・v0=最小)。実機の$30+ch下位4bitは
+  // 減衰値(0=最大)なので、反転(15-v)はコンパイラが吸収してレジスタ値を作る(NSF書き出しも同じ。
+  // ppmckDriver.js vrc7RegisterView がバイトコードと@v/@vr表を反転済みの値にし、6502側はそのまま書く)。
+  // 本家ppmckはドライバ側で反転している(vrc7.h: vrc7_volume を eor #$0f して $30+ch へ書く)ので、
+  // MMLの意味は本家と同じ。@v/@vrも本家どおり効く(vrc7.h sound_vrc7_softenve。表の値は下位4bit)
+  function vrc7VolReg(v) { return 15 - Math.max(0, Math.min(15, v | 0)); }
+
   function segmentsToWriteLogVrc7(index, segments, totalFrames, envelopes) {
     const writeLog = newWriteLog(totalFrames);
     const env = envelopes || { en: {} };
@@ -2882,6 +2890,12 @@
         };
         const { fnum, block } = fnumBlockAt(0);
         const instrument = seg.instrument % 16;
+        // @v/@vr(2026-09-20から有効。以前はブラウザ再生が無視し、NSFは表の先頭値だけを書いていた)。
+        // @vr(と@@r)だけの音符でも resolveEnvTables が v<n> の1要素表を合成する(他チップと同じ)
+        const { vTable, vrTable } = env.v ? resolveEnvTables(seg, env) : { vTable: null, vrTable: null };
+        // ゲートオフ後の音色: @@r<n> があればそれ(本家 putReleaseEffect の MCK_SET_TONE と同じ瞬間)
+        const toneAt = (t) => (t >= gateFrames && seg.releaseTone !== 255) ? (seg.releaseTone % 16) : instrument;
+        const volAt0 = vTable ? envVolume(stepEnvelope(vTable, 0), 15) : seg.volume;
         writeLog[startFrame].push({ addr: 0x9010, value: 0x10 + ch });
         writeLog[startFrame].push({ addr: 0x9030, value: fnum & 0xFF });
         // キーオン(bit4)はYM2413実機同様エッジトリガ(src/emulator/expansion/vrc7.js
@@ -2895,7 +2909,17 @@
         writeLog[startFrame].push({ addr: 0x9010, value: 0x20 + ch });
         writeLog[startFrame].push({ addr: 0x9030, value: 0x10 | (block << 1) | ((fnum >> 8) & 1) });
         writeLog[startFrame].push({ addr: 0x9010, value: 0x30 + ch });
-        writeLog[startFrame].push({ addr: 0x9030, value: (instrument << 4) | seg.volume });
+        writeLog[startFrame].push({ addr: 0x9030, value: (instrument << 4) | vrc7VolReg(volAt0) });
+        if (vTable) {
+          // 2フレーム目以降の@v/@vr(音量が変わったフレームだけ$30+chを書く。先頭フレームは上のキーオンで書き済み)。
+          // @vr の区間は本家同様キーオフせず、リリース表の音量で鳴らし続ける(下のゲートオフ処理を参照)
+          writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable, (f, vol) => {
+            // @vr が無いときのゲートオフ(音量0の1回書き)は書かない。キーオフで余韻になる(下で処理)
+            if (f === startFrame || (!vrTable && f - startFrame >= gateFrames)) return;
+            writeLog[f].push({ addr: 0x9010, value: 0x30 + ch });
+            writeLog[f].push({ addr: 0x9030, value: (toneAt(f - startFrame) << 4) | vrc7VolReg(vol) });
+          });
+        }
         // EN/EP/MP/PT/タイの異音程は、ゲートON区間の2フレーム目以降も毎フレームfnum/blockを計算し直し、
         // 変わったフレームだけ書く。キーオン後の再書き込みはkeyonビット(0x10)を立てたまま行い、エッジトリガを
         // 再発生させない(音符の頭でのみ発生させる、上の一連の書き込みと同じ理由)。
@@ -2903,9 +2927,12 @@
         // 戻ったフレームを「変化無し」と見なして飛ばすと、基準ノートへ戻す書込みが欠落する)
         const modulated = (seg.noteEnv != null && seg.noteEnv !== 255 && env.en && env.en[seg.noteEnv]) ||
           (seg.pitchEnv != null && seg.pitchEnv !== 255) || vibSeq || ptSeq || (seg.pitchBreaks && seg.pitchBreaks.length);
+        // @vr のリリース区間はキーオンのまま鳴り続けるので、音程の変化も音長の終わりまで続ける
+        // (NSFの WFO_VRC7 もキー状態を見て書き続ける)
+        const keyedFrames = vrTable ? dur : gateFrames;
         if (modulated) {
           let lastFnum = fnum, lastBlock = block;
-          for (let t = 1; t < gateFrames; t++) {
+          for (let t = 1; t < keyedFrames; t++) {
             const { fnum: f2, block: b2 } = fnumBlockAt(t);
             if (f2 === lastFnum && b2 === lastBlock) continue;
             writeLog[startFrame + t].push({ addr: 0x9010, value: 0x10 + ch });
@@ -2915,13 +2942,15 @@
             lastFnum = f2; lastBlock = b2;
           }
         }
-        if (gateFrames < dur) {
+        if (gateFrames < dur && !vrTable) {
           // @@r<n>(リリース音色): VRC7の音色は$30+chの上位ニブル。ゲートオフの瞬間に
-          // 差し替える(音量ニブルはそのまま。@v/@vrによる音量エンベロープ自体は
-          // VRC7では未対応のため、実際に聞こえるのはキーオフ後の余韻部分になる)
+          // 差し替える(音量ニブルはゲートオフ直前の値のまま。実際に聞こえるのはキーオフ後の余韻部分)。
+          // @vr があるときはキーオフせずリリース表の音量で鳴らす(上の writeVolumeEnvelope が音色ごと書く。
+          // 本家 putReleaseEffect は @vr/@@r の後を r でなく w(ウェイト)で埋める=キーオフしない)
           if (seg.releaseTone !== 255) {
+            const lastVol = vTable ? envVolume(stepEnvelope(vTable, Math.max(0, gateFrames - 1)), 15) : seg.volume;
             writeLog[startFrame + gateFrames].push({ addr: 0x9010, value: 0x30 + ch });
-            writeLog[startFrame + gateFrames].push({ addr: 0x9030, value: ((seg.releaseTone % 16) << 4) | seg.volume });
+            writeLog[startFrame + gateFrames].push({ addr: 0x9030, value: ((seg.releaseTone % 16) << 4) | vrc7VolReg(lastVol) });
           }
           writeLog[startFrame + gateFrames].push({ addr: 0x9010, value: 0x20 + ch });
           writeLog[startFrame + gateFrames].push({ addr: 0x9030, value: (block << 1) | ((fnum >> 8) & 1) });
@@ -3287,8 +3316,9 @@
       });
       segmentsByChannel[ch] = segments;
       // 4bit音量のチャンネルで 16 以上の値を含む @v/@vr 表を使ったら知らせる(envVolume 参照。本家ppmckと同じく
-      // 下位4bitで鳴るので、20 は音量4、16 は無音になる)。三角波(音量なし)・VRC7(@v は効かない)は対象外
-      if (!(fdsLetters.has(ch) || ch === vrc6SawLetter) && ch !== 'C' && !vrc7Letters.has(ch)) {
+      // 下位4bitで鳴るので、20 は音量4、16 は無音になる)。三角波(音量なし)は対象外。
+      // VRC7も2026-09-20から@vが効くので対象(下位4bitを v として反転する。本家 vrc7.h も下位4bitを eor #$0f)
+      if (!(fdsLetters.has(ch) || ch === vrc6SawLetter) && ch !== 'C') {
         for (const seg of segments) {
           const cands = [['@v', seg.envelopeV, seg.envelopeV != null ? envelopes.v[seg.envelopeV] : null],
             ['@vr', seg.envelopeVr, (seg.envelopeVr != null && seg.envelopeVr !== 255)

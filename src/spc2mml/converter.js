@@ -1102,7 +1102,7 @@
     // リリース(@vr0)は従来通り実機固定カーブのシミュレート値を使う。
     // 三角波(音量制御なし)とDPCMは対象外。
     const envCapableType = (type) => type && type !== 'skip' && type !== 'dpcm' && type !== 'triangle' &&
-      !type.startsWith('vrc7'); // VRC7は@v非対応(compiler segmentsToWriteLogVrc7はENのみ)。v<n>で出す
+      !type.startsWith('vrc7'); // VRC7はv<n>で出す(@vは2026-09-20からコンパイラで効くが、出力を変えないよう従来どおり)
     // ボイス音量の正規化基準(2026-08-24): SPCのVOL L/Rは絶対値が小さい曲が多く(実測:
     // 最大37/127等)、0..127→0..15の絶対マッピングでは全chが v1〜2 に潰れて比率も丸めで
     // 消える。「音量制御を持つ借用先」に割り当てたボイス全体の最大値を15へ正規化し、
@@ -1125,6 +1125,13 @@
     const FAM_VOL_MAX = (MML.Convert.Borrow && MML.Convert.Borrow.FAMILY_VOL_MAX) || {};
     const TARGET_VOL_MAX = { fds: FAM_VOL_MAX.fds || 32, vrc6saw: FAM_VOL_MAX.vrc6saw || 42 };
     const volStepOf = (vol, type) => {
+      // VRC7はレジスタの減衰値(3dB/段、0=最大)で持つ(MMLへは mmlEmit が v=15-値 で書く。vrc7MmlVolume 参照)。
+      // ★2026-09-20まで線形の 1〜15(15=最大)をそのまま入れており、コンパイラが減衰値として書くので
+      //   大きい音ほど小さく鳴っていた。さらに曲中最大を超える声部で 16 以上が出てコンパイルエラーになっていた
+      if (/^vrc7/.test(type)) {
+        const r = (vol || 0) / songMaxVol;
+        return r <= 0 ? 15 : Math.max(0, Math.min(15, Math.round(-20 * Math.log10(r) / 3)));
+      }
       const m = TARGET_VOL_MAX[type] || 15;
       return Math.max(1, Math.round((vol || 0) * m / songMaxVol)); // 0でも1(発音はしている)
     };
@@ -1472,7 +1479,7 @@
       const isN163Target = targetType.startsWith('n163');
       const isVrc7Target = targetType.startsWith('vrc7');
       // 音量制御を持つ借用先は常にv<n>可(NSFのA/B同様、@vとv併用。フラットなノートはv、
-      // エンベロープのあるノートは@v)。VRC7は@v非対応なので常にv<n>
+      // エンベロープのあるノートは@v)。VRC7は常にv<n>(値はレジスタの減衰値で持ち、mmlEmit が v=15-値 で書く)
       const hasVolume = envCapableType(targetType) || isVrc7Target;
       // パルス系のデューティ選択(cfg.tone): 2A03/MMC5=@0-@3(既定@2=50%)、VRC6=@0-@7(既定@7=50%)
       const isPulseTarget = targetType === 'pulse1' || targetType === 'pulse2' ||
@@ -1523,7 +1530,7 @@
           volume: !hasVolume ? undefined
             : (cmd.ENV && envCapableType(targetType))
               ? (ev.envelopeIdx !== undefined ? undefined : ev.plainVol)
-              : (chVolScale === 0 ? 0 : volStepOf(ev.vol * chVolScale, targetType)),
+              : (chVolScale === 0 ? (isVrc7Target ? 15 : 0) : volStepOf(ev.vol * chVolScale, targetType)),
           // volPct=0のチャンネルは無音なので音程検証(src/convert/verify.js)の対象外にする
           verifySkip: chVolScale === 0 || undefined,
           instrument: (hasInstrument && note !== null && cmd.INST)

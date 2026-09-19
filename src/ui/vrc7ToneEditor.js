@@ -1142,11 +1142,11 @@
         if (!/^\s*#EX-VRC7\b/im.test(defText)) defText = '#EX-VRC7\n' + defText;
         // 「反映」を押していなくても今の内容が鳴るよう、選択中インデックスの定義を上書きする
         const liveDef = formatDefText(currentIndex, patch, 'op');
-        const vol = (envelopeEl.value.trim() || '4');
+        const vol = (envelopeEl.value.trim() || '11');
         const phrase = sampleMmlEl.value.trim() || `G @0 OP${currentIndex} o4 l4 cdefgab>c`;
         // v は数値1つなら v<n>、"|"入りなら @v テーブルとして解釈する
         const volCmd = /[|,\s]/.test(vol) ? `@v98 = { ${vol} }\n` : '';
-        const volPrefix = volCmd ? '@v98' : `v${parseInt(vol, 10) || 4}`;
+        const volPrefix = volCmd ? '@v98' : `v${parseInt(vol, 10) || 11}`;
         // 音量はフレーズが使う全chへ先に流す(2ch以上のユニゾンでも同じ音量になるように)
         const chs = [...new Set(phrase.match(/^[G-L]/gm) || ['G'])].join('');
         const tempSource = `${defText}\n${liveDef}\n${volCmd}${chs} ${volPrefix}\n${phrase}\n`;

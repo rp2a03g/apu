@@ -452,7 +452,8 @@
   const triPeriodRaw = freq => CPU_CLOCK_NTSC / (32 * freq) - 1;     // 2A03三角波
   const vrc6PulsePeriodRaw = freq => CPU_CLOCK_NTSC / (16 * freq) - 1;
   const LIN_TABLE = { ay8910: logToLinearTable(3), sn76489: logToLinearTable(2) };
-  // 4bit対数音量 → VRC7の減衰値(v0=最大、3dB/段)。AY/SN の音量エンベロープ表(envReg経由)と定数音量の両方に使う
+  // 4bit対数音量 → VRC7のレジスタ減衰値(0=最大、3dB/段)。AY/SN の定数音量と、音量エンベロープ表(envReg経由。
+  // 表だけは borrow.js vrc7EnvReg がMMLの向き v=15-値 へ直して登録する)の両方に使う。定数音量は mmlEmit が v=15-値 で書く
   function logToVrc7Table(dbPerStep) {
     const t = new Array(16);
     for (let v = 0; v < 16; v++) t[v] = Math.max(0, Math.min(15, Math.round((15 - v) * dbPerStep / 3)));
@@ -501,8 +502,8 @@
     // OPN系FM・ADPCM・サンプルPCMの抽出オプション(src/vgm2mml/expansion/opn.js collect)。
     // envelope:true で「音量が動いても音符を切らず、フレームごとの音量/音程を列で持つ」。
     // その列が @v(音量エンベロープ)と EP/MP/PT(ピッチ変調)の材料になる。
-    // ★VRC7へ載せるchは false にする。VRC7は@v非対応(compiler.jsのVRC7経路はENのみ)なので、
-    //   列にまとめてしまうと音符の中の音量変化が1つの v<n> に潰れて消える。従来どおり
+    // ★VRC7へ載せるchは false にする。作った当時VRC7は@v非対応だった(2026-09-20からコンパイラで効くが、
+    //   出力を変えないため従来どおり)。列にまとめると音符の中の音量変化が1つの v<n> に潰れて消えるので、従来どおり
     //   音量が変わったところでイベントを切り、v<n>を並べて出す。
     //   変換設定でENVがOFFのときも同じ(列を作っても捨てるだけなので作らない)。
     const envFamOk = (fam) => fam !== 'vrc7';
@@ -538,7 +539,9 @@
       return noiseTableCache.get(chip);
     };
     const regFor = (chip, fam) => (needsLinear(fam) && envTable(chip, fam)) ? mappedEnvReg(envReg, envTable(chip, fam))
-      : (fam === 'vrc7' && VRC7_TABLE[chip]) ? mappedEnvReg(envReg, VRC7_TABLE[chip])
+      // VRC7: @v表はMMLの向き(v15=最大)、定数音量は減衰値のまま(borrow.js vrc7EnvReg。2026-09-20)。
+      // mappedEnvReg と同じく assign だけを渡す(@vr の切り出しまで変えると出力の構造が変わるため)
+      : (fam === 'vrc7' && VRC7_TABLE[chip]) ? { assign: MML.Convert.Borrow.vrc7EnvReg(envReg, VRC7_TABLE[chip]).assign }
         : (fam === 'fme7' && FME7_TABLE[chip]) ? mappedEnvRegWithRelease(envReg, FME7_TABLE[chip])
           : (fam === 'noise' && noiseTable(chip)) ? mappedEnvReg(envReg, noiseTable(chip)) : envReg;
 
@@ -1156,8 +1159,8 @@
     };
   }
 
-  // 音量の減衰量(dB)→借用先の音量値。VRC7は「v0が最大・v15が最小」(このコンパイラ/ppmckのVRC7は
-  // レジスタの減衰値をそのまま v に取る)、FME-7は v15 最大の3dB/段、線形音源は振幅比。
+  // 音量の減衰量(dB)→借用先の音量値。VRC7はレジスタの減衰値(0が最大・15が最小。MMLの v は他の音源と同じく
+  // v15が最大なので、書き出す瞬間に mmlEmit.js vrc7MmlVolume が v=15-値 に直す)、FME-7は v15 最大の3dB/段、線形音源は振幅比。
   // linear の max は借用先ごと(famVolMax)。borrow.js VOL_FROM_DB と同じ規約
   const VOL_FROM_DB = {
     vrc7: att => Math.max(0, Math.min(15, Math.round(att / 3))),
@@ -1273,7 +1276,7 @@
       const conv = fam === 'vrc7' ? VOL_FROM_DB.vrc7 : fam === 'fme7' ? VOL_FROM_DB.fme7
         : (att) => VOL_FROM_DB.linear(att, famVolMax(fam));
       // ev.attSeq(音符区間の減衰dB列、opn.js withSeq)を借用先の音量値へ写して @v にする。
-      // ★VRC7は@v非対応(compiler.js のVRC7経路はENのみ。spc2mml envCapableType と同じ判断)なので
+      // ★VRC7は@vを出さない(作った当時コンパイラが非対応だった。2026-09-20から効くが出力を変えないため。spc2mml envCapableType と同じ判断)ので
       //   従来どおり定数音量のまま。写像は定数音量と同じ conv を通す=vと@vの尺度が必ず揃う
       const envReg = (fam !== 'vrc7' && ctx) ? ctx.envReg : null;
       for (const ev of events) {

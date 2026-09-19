@@ -79,7 +79,7 @@
     for (let v = 0; v < 16; v++) t[v] = v === 0 ? 0 : Math.max(1, Math.min(m, Math.round(m * Math.pow(10, -dbPerStep * (15 - v) / 20))));
     return t;
   }
-  // 4bit対数音量 → VRC7の減衰値(v0=最大、3dB/段)
+  // 4bit対数音量 → VRC7のレジスタ減衰値(0=最大、3dB/段。MMLへは mmlEmit.js vrc7MmlVolume が v=15-値 で書く)
   function logToVrc7Table(dbPerStep) {
     const t = new Array(16);
     for (let v = 0; v < 16; v++) t[v] = Math.max(0, Math.min(15, Math.round((15 - v) * dbPerStep / 3)));
@@ -88,8 +88,9 @@
   const LIN_TABLE = { ay8910: logToLinearTable(3), sn76489: logToLinearTable(2) };
   const VRC7_TABLE = { ay8910: logToVrc7Table(3), sn76489: logToVrc7Table(2) };
 
-  // 音量の減衰量(dB)→借用先の音量値。VRC7は「v0が最大・v15が最小」(このコンパイラ/ppmckのVRC7は
-  // レジスタの減衰値をそのまま v に取る)、FME-7は v15 最大の3dB/段、線形音源は振幅比。
+  // 音量の減衰量(dB)→借用先の音量値。VRC7はレジスタの減衰値(0が最大・15が最小)で持つ(変換イベント空間の約束。
+  // MMLの v は全音源 v15 が最大なので、書き出す瞬間に mmlEmit.js vrc7MmlVolume が v=15-値 に直す。
+  // @v表だけは vrc7EnvReg が登録時にMMLの向きへ直す)、FME-7は v15 最大の3dB/段、線形音源は振幅比。
   // ★linear の max は借用先ごと(FAMILY_VOL_MAX)。以前は 15 を直書きしており、0-63 を持つ
   //   FDS/VRC6のこぎり波でもレンジの上半分が一切使われず、実測で約6.6dB/約9dB小さく鳴っていた
   //   (2026-09-11、ユーザー報告「YM2151→VRC6のこぎりの音量がおかしい」)。
@@ -150,7 +151,7 @@
     huc6280: { stepDb: 3 },
     // SN76489: 2dB/段(sn76489.js VOL_TABLE)
     sn76489: { stepDb: 2 },
-    // OPLL: 値そのものが減衰値(v0が最大、3dB/段)
+    // OPLL: レジスタ値そのものが減衰値(0が最大、3dB/段。変換元チップの生値の話で、MMLの v の向きとは別)
     ym2413: { attDb: 3 },
     // OPL(YM3812/YM3526/Y8950/MSX-AUDIO): 抽出器(kss2mml/expansion/opl.js)が
     // キャリアTL(6bit×0.75dB)を TL>>2 に落として渡すので、OPLLと同じ 3dB/段の減衰値。
@@ -196,7 +197,26 @@
   // (@vテーブルと定数音量 ev.volume の両方を同じ表で揃えるため、抽出のたびに family 別で呼ぶ)。
   function envRegFor(envReg, s, fam) {
     const table = fam ? volTableFor(s, fam) : null;
+    if (table && fam === 'vrc7') return vrc7EnvReg(envReg, table);
     return table ? mappedEnvReg(envReg, table) : envReg;
+  }
+  // VRC7へ載せる音量エンベロープ(2026-09-20)。表(@v/@vr)は MML の向き(v15=最大)で登録し、定数音量(volume)は
+  // 他の VRC7 イベントと同じレジスタの減衰値(0=最大)で返す(MMLへは mmlEmit.js vrc7MmlVolume が v=15-値 で書く)。
+  // ★2026-09-20まではコンパイラが VRC7 の @v を無視していたので、減衰値のままの表が出ていても実害が見えなかった
+  //   (ブラウザ再生は v 未指定の既定値=レジスタ15で小さく鳴り、NSFは表の先頭値だけ)。@vが効くようになったので向きを揃える
+  function vrc7EnvReg(envReg, attTable) {
+    const top = attTable.length - 1;
+    const map = seq => seq.map(v => 15 - attTable[Math.max(0, Math.min(top, v))]);
+    return {
+      assign: seq => envReg.assign(map(seq)),
+      volumeFieldsWithRelease: seq => {
+        const f = envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(map(seq))
+          : (() => { const idx = envReg.assign(map(seq)); return idx == null ? { volume: MML.Convert.plainVolume(map(seq)) } : { envelopeV: idx }; })();
+        const out = Object.assign({}, f, { _volMapped: true });
+        if (out.volume != null) out.volume = 15 - out.volume;
+        return out;
+      }
+    };
   }
 
   // ── OPN 4op音色 → OPLL/VRC7 2op音色 ────────────────────────────
@@ -685,6 +705,7 @@
     CHIP_VOL_LAW,   // チップごとの音量則(同上)
     volTableFor,
     mappedEnvReg,
+    vrc7EnvReg,     // VRC7へ載せる音量エンベロープ(表はMMLの向き・定数は減衰値。vgm2mml regFor も使う)
     mapConstVolumes,
     envRegFor,
     adaptEvents,

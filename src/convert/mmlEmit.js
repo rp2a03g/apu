@@ -68,6 +68,15 @@
   MML.Convert.DPCM_NOTE_BASE = 24;
   MML.Convert.dpcmNoteToIndex = function (note) { return Math.max(0, Math.round(note) - MML.Convert.DPCM_NOTE_BASE); };
   MML.Convert.dpcmIndexToNote = function (idx) { return MML.Convert.DPCM_NOTE_BASE + Math.max(0, idx | 0); };
+  // VRC7(ch G-L)の音量(2026-09-20): 変換イベント空間では VRC7 へ載せる ev.volume を
+  //   **レジスタの値($30+ch下位4bit=減衰値、0=最大・15=最小)** で持つ(nsf2mml expansion/vrc7.js・kss2mml opll/opl・
+  //   borrow.js VOL_FROM_DB.vrc7/volTableFor・vgm2mml adaptEvents・drumHits・spc2mml が全てこの約束)。
+  //   MML の v は全音源共通で v15 が最大(コンパイラが 15-v にしてレジスタへ書く。compiler.js vrc7VolReg)なので、
+  //   書く時だけここで反転する(ノイズの noiseNoteToIndex と同じ「出力の瞬間だけ直す」作り)。
+  //   @v 表は VRC7 へは出さない(各変換器が hasEnvelope を落としている)
+  const VRC7_LETTER = /^[G-L]$/;
+  function vrc7MmlVolume(att) { return 15 - Math.max(0, Math.min(15, Math.round(att))); }
+  MML.Convert.vrc7MmlVolume = vrc7MmlVolume;
   const DPCM_FLAGS_OFF = { hasVolume: false, hasInstrument: false, hasEnvelope: false, hasDetune: false, hasPitchMod: false, hasNoteEnv: false, hasSweep: false, dpcmIndexNotes: true };
 
   // ── ギャップ・末尾を休符イベントで補完してギャップレス化 ──────────────
@@ -430,7 +439,7 @@
           // 同様に、直前が@v<n>だった場合はコンパイラのstate.volumeが古いままなので、
           // 値が前回のv<n>と同じでも必ず出し直してエンベロープを解除する。
           if (ev.volume !== state.curVol || state.curVolMode !== 'plain') {
-            emit(`v${ev.volume}`); state.curVol = ev.volume;
+            emit(`v${flags.vrc7Vol ? vrc7MmlVolume(ev.volume) : ev.volume}`); state.curVol = ev.volume;
           }
           state.curVolMode = 'plain';
         }
@@ -521,6 +530,7 @@
       hasFdsMod: !!opts.hasFdsMod, hasFme7Noise: !!opts.hasFme7Noise, hasDetune: !!opts.hasDetune,
       hasSweep: !!opts.hasSweep,
       noiseIndexNotes: letter === 'D', // 2A03ノイズ: 音符を n<周期index> で書く(noiseNoteToIndex参照)
+      vrc7Vol: VRC7_LETTER.test(letter), // VRC7: 内部の音量(レジスタの減衰値)を v=15-値 で書く(vrc7MmlVolume参照)
       hasPitchMod: !!opts.hasPitchMod,
       // hasNoteEnvはhasPitchModと独立(VRC7はfnum/block対数空間のためD/EP/MPは使えないが
       // ENは使える、mergeRapidArpeggio冒頭コメント参照)。opts.hasNoteEnvが省略された場合は
@@ -1022,6 +1032,7 @@
         hasFdsMod: !!chan.hasFdsMod, hasFme7Noise: !!chan.hasFme7Noise, hasDetune: !!chan.hasDetune,
         hasSweep: !!chan.hasSweep,
         noiseIndexNotes: chan.letter === 'D', // 2A03ノイズ: 音符を n<周期index> で書く(noiseNoteToIndex参照)
+        vrc7Vol: VRC7_LETTER.test(chan.letter), // VRC7: 内部の音量(レジスタの減衰値)を v=15-値 で書く(vrc7MmlVolume参照)
         hasPitchMod: !!chan.hasPitchMod,
         // ★2026-08-14修正: emitChannelのflags構築(このファイル冒頭)と同じ
         // hasNoteEnvフォールバックが、emitScore側のこの独立したflags構築には

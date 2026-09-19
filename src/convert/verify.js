@@ -146,7 +146,8 @@
         for (const ev of ch.events || []) {
           if (ev.note == null) continue;
           // 音量0(volPct=0で意図的に消したチャンネル等)は音が鳴らず実音高が取れないため対象外
-          if (ev.verifySkip || ev.volume === 0) { skipped++; continue; }
+          // (VRC7=G-L の ev.volume はレジスタの減衰値で 0 が最大音量なので除外しない。mmlEmit.js vrc7MmlVolume 参照)
+          if (ev.verifySkip || (ev.volume === 0 && !/^[G-L]$/.test(ch.letter))) { skipped++; continue; }
           // 音程が意図的に動くコマンドは対象外(EN=アルペジオ、PT=ポルタメント)
           if (ev.noteEnv != null || ev.portamento) { skipped++; continue; }
           // FME7のノイズ単独ミキサー(@2)はノート番号=ノイズ周期なので対象外

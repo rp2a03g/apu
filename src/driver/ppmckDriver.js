@@ -2852,6 +2852,23 @@ ${needsLastHi ? `    STA ${hex(LASTHI)},X   ; キーオフ(bit4=0)をシャド�
     LDA #$00
     STA $9030
     RTS`);
+      if (usesVolOnly) {
+        // @v/@vr の毎フレーム音量(2026-09-20。それまでVRC7はWFV_VOL_NONEで、@vは音符頭の1値だけだった)。
+        // VOL,X は既にレジスタ値(減衰値。buildBankedNsfBytes の vrc7RegisterView が表ごと反転済み)なので
+        // そのまま音色(DUTY,X)と合わせて$30+chへ書く(compiler.js segmentsToWriteLogVrc7 の writeVolumeEnvelope と同じ)
+        vrc7Handlers.push(`
+WFV_VOL_VRC7:
+    LDA VRC7_SEL3,X
+    STA $9010
+    LDA ${hex(DUTY)},X
+    ASL A
+    ASL A
+    ASL A
+    ASL A
+    ORA ${hex(VOL)},X
+    STA $9030
+    RTS`);
+      }
       if (usesAnyPitchOffset) {
         vrc7Handlers.push(`
 ; --- VRC7: D/EP/MP/PT(APPLY_DETUNE)をfnum(9bit)へ足す(2026-09-19)。blockは変えず、0〜511でクランプする
@@ -2938,6 +2955,7 @@ ${usesAnyPitchOffset ? `    JSR VRC7_PITCH
         const t = TYPE_VRC7_BASE + ch;
         wfvEntries[t] = 'WFV_VRC7';
         silEntries[t] = 'SIL_VRC7';
+        if (usesVolOnly) wfvVolEntries[t] = 'WFV_VOL_VRC7';
         if (usesFreqOnly) wfoEntries[t] = 'WFO_VRC7';
       }
       extraHandlers.push(vrc7Handlers.join('\n'));
@@ -4885,6 +4903,44 @@ SONG_LOOP_PTR_HI:
     return errors;
   }
 
+  // VRC7の音量をレジスタ値(減衰値、0=最大)へ反転した見え方を作る(2026-09-20)。MMLの v/@v/@vr は
+  // 他の音源と同じ向き(15=最大)で、反転はコンパイラが吸収する約束(compiler.js vrc7VolReg と同じ)。
+  // 6502ドライバ(WFV_VRC7/WFV_VOL_VRC7)は VOL,X をそのまま$30+chへ書くので、ここで
+  //   ・VRC7チャンネルのセグメントの volume を 15-v に
+  //   ・VRC7チャンネルが使う @v/@vr の表を「下位4bitを反転した別の表」(番号 VRC7_ENV_BASE+n)に
+  // 差し替えてからバイトコードとROMの表を作る。同じ @v を他の音源でも使う曲では表が2本になる。
+  // VRC7を使わない曲は元の segmentsByChannel/envelopes をそのまま返す(NSFはバイト単位で従来と同じ)
+  const VRC7_ENV_BASE = 0x10000;
+  function vrc7RegisterView(segmentsByChannel, envelopes, vrc7Letters) {
+    const letters = (vrc7Letters || []).filter(ch => (segmentsByChannel[ch] || []).length);
+    if (!letters.length) return { segmentsByChannel, envelopes };
+    const inv = t => Object.assign({}, t, { values: ((t && t.values) || []).map(x => 15 - (Math.max(0, Math.min(63, x | 0)) & 15)) });
+    const v = Object.assign({}, envelopes.v || {});
+    const vr = Object.assign({}, envelopes.vr || {});
+    const segs = Object.assign({}, segmentsByChannel);
+    for (const ch of letters) {
+      segs[ch] = segmentsByChannel[ch].map(seg => {
+        const s = Object.assign({}, seg);
+        if (s.volume != null) s.volume = 15 - Math.max(0, Math.min(15, s.volume | 0));
+        if (s.envelopeV != null && envelopes.v && envelopes.v[s.envelopeV]) {
+          const k = VRC7_ENV_BASE + s.envelopeV;
+          if (!v[k]) v[k] = inv(envelopes.v[s.envelopeV]);
+          s.envelopeV = k;
+        }
+        if (s.envelopeVr != null && s.envelopeVr !== 255) {
+          const t = (envelopes.vr && envelopes.vr[s.envelopeVr]) || (envelopes.v && envelopes.v[s.envelopeVr]);
+          if (t) {
+            const k = VRC7_ENV_BASE + s.envelopeVr;
+            if (!vr[k]) vr[k] = inv(t);
+            s.envelopeVr = k;
+          }
+        }
+        return s;
+      });
+    }
+    return { segmentsByChannel: segs, envelopes: Object.assign({}, envelopes, { v, vr }) };
+  }
+
   // compileResult: MML.Mml.compile()の戻り値そのもの
   // (segmentsByChannel, channelLetters, expansions, expansionLetterMap を使う)。
   // headerOpt: NSF.buildHeaderと同じオプション。
@@ -4893,7 +4949,7 @@ SONG_LOOP_PTR_HI:
     let channelLetters = compileResult.channelLetters || ['A', 'B', 'C', 'D'];
     const expansions = compileResult.expansions || [];
     let expansionLetterMap = compileResult.expansionLetterMap || {};
-    const segmentsByChannel = compileResult.segmentsByChannel || {};
+    let segmentsByChannel = compileResult.segmentsByChannel || {};
     // #TUNING(基準ピッチ): 全チップの周波数テーブル(buildPeriodTable/N163/VRC7)を compiler.js と同じ比でずらす
     tuningRatio = Math.pow(2, ((compileResult.settings && compileResult.settings.tuningCents) || 0) / 1200);
     tuningNoteRatios = (compileResult.settings && compileResult.settings.tuningNotes)
@@ -4929,7 +4985,9 @@ SONG_LOOP_PTR_HI:
         channelLetters = channelLetters.filter(ch => !dropped.has(ch));
       }
     }
-    const envelopes = compileResult.envelopes || {};
+    let envelopes = compileResult.envelopes || {};
+    // VRC7の音量はここでレジスタ値へ反転する(vrc7RegisterView 参照)。以降の segmentsByChannel/envelopes は反転済み
+    ({ segmentsByChannel, envelopes } = vrc7RegisterView(segmentsByChannel, envelopes, expansionLetterMap.vrc7));
     const immediateWritesByChannel = compileResult.immediateWritesByChannel || {};
 
     const dpcmLayout = compileResult.dpcmLayout || {};

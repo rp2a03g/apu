@@ -14,8 +14,8 @@
  * イベントは借用先に依存しない形で出す:
  *   note     : 57+12*log2(f/440)(kss2mml/nsf2mml と同じノート番号体系)
  *   attDb    : 減衰量(dB、0=最大)。借用先ファミリごとの音量値への写像は vgm2mml/converter.js
- *              adaptEvents が行う(VRC7=3dB/段(v0が最大・反転)、FME-7=3dB/段(v15最大)、
- *              2A03/MMC5/VRC6/N163=線形)。volume には VRC7 向けの既定値(round(attDb/3))を入れておく
+ *              adaptEvents が行う(VRC7=3dB/段のレジスタ減衰値(0が最大。MMLへは mmlEmit が v=15-値 で書く)、
+ *              FME-7=3dB/段(v15最大)、2A03/MMC5/VRC6/N163=線形)。volume には VRC7 向けの既定値(round(attDb/3))を入れておく
  *   retrigger: FM=キーオンの立ち上がり、ADPCM=キーオン通番(seq)の変化
  *   rawFreq  : 音程補正(detectChorusDetune)用の生周波数
  *   n163Wave : (ADPCMのみ)サンプルの1周期波形を N163 用 32点4bit にしたもの(借用先がN163のとき音色に)

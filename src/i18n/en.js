@@ -1243,8 +1243,8 @@
       'VRC7 (OPLL) is a 2-operator FM chip. The modulator modulates the phase of the carrier, and the carrier output is what you hear. Deeper modulation adds harmonics and makes the sound brighter. The hardware has only one custom-tone slot for the whole chip, so only one custom tone can sound at a time (notes pick it with @0, and OP<n> swaps its contents). The carrier TL is controlled by the MML v<n> (volume), so it is not part of the tone.',
     'WAVE書き出し':
       'Export WAVE',
-    'v<n>(0が最大)。","や"|"を含めると@vテーブルとして解釈します':
-      'v<n> (0 is loudest). Include "," or "|" to have it read as an @v table',
+    'v<n>(15が最大)。","や"|"を含めると@vテーブルとして解釈します':
+      'v<n> (15 is loudest). Include "," or "|" to have it read as an @v table',
     'フォント':
       'Font',
     'フォントサイズ':
