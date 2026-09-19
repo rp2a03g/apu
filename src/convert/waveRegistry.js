@@ -37,9 +37,21 @@
     return idx;
   };
 
+  // this.shrunk(N163Fit が波形を縮めたとき {定義番号: 縮める前の値}、src/convert/n163Fit.js)があれば、
+  // その定義行の上に「元の波形(コメント)」と「縮めた旨(コメント)」を置く(2026-09-19、ユーザー要望)。
+  // コメント行なので再生・NSF書き出し・本家ppmck には影響しない
   MML.Convert.WaveRegistry.prototype.defLines = function () {
-    return this.waves.map((values, i) =>
-      `${this.prefix}${i} = { ${this.formatValues(values, i, this.waves).join(' ')} }`);
+    const out = [];
+    this.waves.forEach((values, i) => {
+      const line = `${this.prefix}${i} = { ${this.formatValues(values, i, this.waves).join(' ')} }`;
+      const orig = this.shrunk && this.shrunk[i];
+      if (orig) {
+        out.push(`; ${this.prefix}${i} = { ${this.formatValues(orig, i, this.waves).join(' ')} }`);
+        out.push(`; 上記音色設定を圧縮して下記音色設定に変更しました(${orig.length}→${values.length}サンプル。N163の波形RAM/音域に収めるため。変換設定「波形RAM」)`);
+      }
+      out.push(line);
+    });
+    return out;
   };
 
   // N163(@N<n>)用のレジストリ。先頭のバッファ番号は書き出す時に、全波形の長さを見て

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 16:30:25
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 19:48:10
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-19 16:30:25';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-19 19:48:10';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -1734,9 +1734,9 @@
  *       音量     … 出力は有効ch数で平均されるので、減らすほど同じ v が大きく鳴る(1chは5chの5倍)
  *       周波数   … freqReg ∝ ch数。減らすほどレジスタ値が小さくなり、音程の刻みは粗く、
  *                  出せる最高音は上がる(32サンプル波形で 8ch=1864Hz / 1ch=14915Hz)
- *     'fixed8'(既定) … 常に8ch。ch数で変わる値を固定で扱えるので、曲によって音量や音域が
+ *     'fixed8' … 常に8ch。ch数で変わる値を固定で扱えるので、曲によって音量や音域が
  *       変わらない。波形RAMは64バイトに固定され、高い音は出しにくい。
- *     'used' … 割り当てたスロットのうち一番大きい番号を使う(ch1+ch8なら8、ch2+ch6なら6)。
+ *     'used'(既定、2026-09-19 ユーザー指示で fixed8 から変更) … 割り当てたスロットのうち一番大きい番号を使う(ch1+ch8なら8、ch2+ch6なら6)。
  *       大きい波形を使いたい・音量を出したい・高い音を出したいときはこちら。
  *     ★nsf2mmlだけは対象外。元がN163のネイティブ変換で、実効ch数は元の曲が決めているため。
  *   N163_WAVE … 波形長を自動で縮めるかどうか。縮めると2つの制約が同時にゆるむ。
@@ -1765,9 +1765,9 @@
  *   全形式のドラム(DPCM)経路(src/convert/drumHits.js)が見る。
  *
  * 基準ピッチ(全体オフセット、2026-09-07。下の MML.Convert.detectTuning 冒頭コメント参照):
- *   TUNING     … 'auto'(既定) = 曲全体の音程偏差の中央値を測り、その分ずらした基準で音符へ丸めて
+ *   TUNING     … 'auto' = 曲全体の音程偏差の中央値を測り、その分ずらした基準で音符へ丸めて
  *                `#TUNING <cent>` をヘッダに出す / 'a440' = 従来どおり A4=440Hz の12平均律固定 /
- *                'note'(2026-09-19) = 全体のずれを #TUNING に、そこから外れた音名だけを `#TUNING-NOTE f+ +21 …`
+ *                'note'(2026-09-19、既定。同日ユーザー指示で auto から変更) = 全体のずれを #TUNING に、そこから外れた音名だけを `#TUNING-NOTE f+ +21 …`
  *                に出す(音程表が音名ごとに外れている曲用。MML.Convert.detectTuningNotes)
  *   TUNING_MIN … 'auto' のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5、0〜50)。
  *                閾値未満の曲の出力は 'a440' と完全に同じ
@@ -1913,8 +1913,8 @@
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
                 SHAPE_REST: false, ENV_MERGE: false, FOLD_DOUBLES: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
-                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'fixed8',
-                TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
+                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'used',
+                TUNING: 'note', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
                 SHAPE_REST: true, ENV_MERGE: false, FOLD_DOUBLES: true, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
@@ -4534,14 +4534,14 @@
         runStart = ev;
       } else if (runStart != null) {
         if (ev.frame > runStart.frame || (ev.seq !== undefined && ev.seq > runStart.seq)) {
-          runs.push({ start: runStart.frame, end: ev.frame, startSeq: runStart.seq, endSeq: ev.seq, startFrame: runStart.frame, endFrame: ev.frame, vol: runStart.vol });
+          runs.push({ start: runStart.frame, end: ev.frame, startSeq: runStart.seq, endSeq: ev.seq, startFrame: runStart.frame, endFrame: ev.frame, vol: runStart.vol, bal: runStart.bal, gbal: runStart.gbal });
         }
         runStart = null;
       }
       active = newActive;
     }
     if (runStart != null && totalFrames > runStart.frame) {
-      runs.push({ start: runStart.frame, end: totalFrames, startSeq: runStart.seq, endSeq: Infinity, startFrame: runStart.frame, endFrame: totalFrames, vol: runStart.vol });
+      runs.push({ start: runStart.frame, end: totalFrames, startSeq: runStart.seq, endSeq: Infinity, startFrame: runStart.frame, endFrame: totalFrames, vol: runStart.vol, bal: runStart.bal, gbal: runStart.gbal });
     }
     return runs;
   }
@@ -4744,7 +4744,7 @@
             ? (samples.length - 1) / ((last.t - first.t) / frameRate)
             : estimateRate(ws, 0, ws.length, run.endFrame - run.startFrame, frameRate);
           const clipIndex = reg.addByAddr(first.src, samples, rateHz);
-          events.push({ start: first.frame, end: last.frame + 1, clipIndex, vol: run.vol });
+          events.push({ start: first.frame, end: last.frame + 1, clipIndex, vol: run.vol, bal: run.bal, gbal: run.gbal });
         }
       } else {
         // バイト列一致モード: run全体を1クリップとして扱う(seq精密区切りにより
@@ -4752,7 +4752,7 @@
         const samples = ws.map((w) => w.value);
         const rateHz = estimateRate(ws, 0, ws.length, run.endFrame - run.startFrame, frameRate);
         const clipIndex = reg.addBySamples(samples, rateHz);
-        events.push({ start: ws[0].frame, end: ws[ws.length - 1].frame + 1, clipIndex, vol: run.vol });
+        events.push({ start: ws[0].frame, end: ws[ws.length - 1].frame + 1, clipIndex, vol: run.vol, bal: run.bal, gbal: run.gbal });
       }
     }
 
@@ -4791,7 +4791,7 @@
       const seconds = (run.end - run.start) / frameRate;
       const rateHz = seconds > 0 ? samples.length / seconds : MML.Dpcm.DMC_RATE_TABLE_NTSC[7];
       const clipIndex = reg.addBySamples(samples, rateHz);
-      events.push({ start: run.start, end: run.end, clipIndex, vol: run.vol });
+      events.push({ start: run.start, end: run.end, clipIndex, vol: run.vol, bal: run.bal, gbal: run.gbal });
     }
 
     return { channel, clips: reg.clips, events };
@@ -4835,14 +4835,30 @@
     return clip.addr != null ? ('dda:' + clip.addr) : ('ddab:' + index);
   }
 
+  // 打点の出力振幅(0..1、線形)。エミュレータ(src/emulator/apuHuC6280.js)と同じ式:
+  // 実効インデックス = $0804音量 と $0805(ch別バランス)・$0801(全体バランス)の合成(大きい方の側。
+  // wave.js effectiveVolIndex、トーンchの音量と同じ読み方)、振幅 = gainFromIndex = 2^((idx-31)/4)
+  // (1段≒1.5dB の対数、31で1.0)。
+  // ★2026-09-19 以前は「$0804 ÷ 曲中のDDA最大音量」で、対数の段数を振幅として扱っていた
+  //   (27/31=0.87=-1.2dB と読んでいたが実際は4段=-6dB)。$0805/$0801 も無視していたため、
+  //   バランスで音量を下げたDDAが全振幅扱いだった([[hes-balance-register-is-volume]])。
+  //   DPCM は drumHits.js の曲全体正規化(最大の打点を全振幅へ持ち上げる)を通るので、全打点が同じ音量の
+  //   曲の @DPCM は変わらない。変わるのは打点どうしの音量比と、ノイズパッド「自動」の v。
+  // bal/gbal を持たない旧形式トレースは $0804 だけで読む(バランスは最大扱い)
+  function ddaGain(ev) {
+    if (ev.vol == null) return 1;
+    const eff = MML.Hes2MmlExpansion._effectiveVolIndex;
+    const idx = (ev.bal !== undefined && eff) ? eff(ev.vol, ev.bal, ev.gbal !== undefined ? ev.gbal : 0xFF) : ev.vol;
+    return idx <= 0 ? 0 : Math.pow(2, (Math.min(31, idx) - 31) / 4);
+  }
+
   /**
    * DDAの打点リスト(src/convert/drumHits.js の hit 形)+サンプル表。
    * ロール/パッド/変換の3者がこれを共有する。
    *   hits:    [{ key, sampleKey, hash, pcm, rate, vol, startFrame, endFrame, ch }]
    *   samples: { key → { pcm, rate, hash } }  パッド台帳(main.js drumSampleStore)用
    *   channels: DDAを使ったch
-   * vol は「そのrunの$0804音量 ÷ 曲中のDDA最大音量」。単chで音量一定の曲は常に1.0
-   * (=旧実装と同じ振幅で焼く)。複数chの相対音量はミックス時に効く。
+   * vol はそのrunの出力振幅(0..1、ddaGain)。複数ch・音量違いの相対音量はミックス時に効く。
    */
   MML.Hes2MmlExpansion.ddaHits = function (snapshots, dpcmTrace, controlTrace, frameRate) {
     const all = MML.Hes2MmlExpansion.extractDdaClipsAll(snapshots, dpcmTrace, controlTrace, frameRate);
@@ -4870,17 +4886,16 @@
       samples[key] = s;
       return s;
     });
-    let maxVol = 0;
-    for (const ev of all.events) if (ev.vol > maxVol) maxVol = ev.vol;
-    if (!(maxVol > 0)) maxVol = 31;
     const hits = all.events.map((ev) => {
       const s = byIndex[ev.clipIndex];
       return { key: s.key, sampleKey: s.key, hash: s.hash, pcm: s.pcm, rate: s.rate, label: s.label,
-               vol: (ev.vol != null ? ev.vol : maxVol) / maxVol,
+               vol: ddaGain(ev),
                startFrame: ev.start, endFrame: ev.end, ch: ev.ch,
                // 鳴り止みはCPUの書込み範囲(end)そのもの。サンプル長÷推定レートで切らない
                exactEnd: true };
-    });
+    // バランス0等で実効インデックス0の打点は元でも無音なので落とす(旧実装は全振幅で鳴らしていた。
+    // 実測: KM92004 の11打点、TGX040052 の1打点が $0805=0)
+    }).filter(h => h.vol > 0);
     return { hits, samples, channels: all.channels };
   };
 
@@ -4907,7 +4922,7 @@
       poly: cmd && cmd.DRUM_POLY,
       prefix: 'hes_dpcm',
       maxClipSec: 10, // DDAはCPUが書いた分しか無い(=有限)ので、VGMのROM歯止め1.5秒は外す
-      volQuant: 2,    // $0804音量の微差(1dB未満)で定義を増やさない(実測: HC92056で5→6定義)
+      volQuant: 2,    // 音量の近い打点(振幅0.75以上/0.25〜0.75 の2段)で定義を増やさない(旧: HC92056で5→6定義)
     });
     // noiseHits: 載せ先=ノイズ(D)のパッドの打点(ノイズパッド、2026-09-18。converter.js が applyNoise へ渡す)
     return { channel: channels.length ? channels[0] : -1, channels, defs: r.defs, files: r.files, events: r.events, stats: r.stats, noiseHits: r.noiseHits || [] };

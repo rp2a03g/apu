@@ -835,6 +835,32 @@
             let num = null;
             if (str[i] === ',') { i++; num = readNumber(); }
             tokens.push({ type: 'frameTempo', len: len == null ? 4 : len, dots, num: num == null ? 30 : num });
+          } else if (str[i] === 'n') {
+            // @n<num>[,<len>] 直接周波数指定(本家ppmck _KEY、datamake.c setCommandBufN1)。音符の周期/周波数
+            // レジスタ値をテーブルを通さず直接書く。<num>は本家の Asc2Int と同じく10進/$16進/x16進/%2進を受ける。
+            // 音長は「,」の後にだけ書ける(省略時は l<n>)。本家どおり小文字 n のみ(大文字 @N は波形定義の書式)
+            i++;
+            let num = null;
+            if (str[i] === '$' || str[i] === 'x') {
+              i++;
+              let s = '';
+              while (i < n && /[0-9a-fA-F]/.test(str[i])) { s += str[i]; i++; }
+              num = s.length > 0 ? parseInt(s, 16) : null;
+            } else if (str[i] === '%') {
+              i++;
+              let s = '';
+              while (i < n && (str[i] === '0' || str[i] === '1')) { s += str[i]; i++; }
+              num = s.length > 0 ? parseInt(s, 2) : null;
+            } else {
+              num = readNumber();
+            }
+            let length = null, dots = 0;
+            if (str[i] === ',') {
+              i++;
+              length = readNumber();
+              while (i < n && str[i] === '.') { dots++; i++; }
+            }
+            tokens.push(tagSource({ type: 'directFreq', value: num, length, dots }, tokStart));
           } else {
             const v = readNumber();
             tokens.push({ type: 'instrument', value: v == null ? 0 : v });

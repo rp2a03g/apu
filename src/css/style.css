@@ -256,6 +256,16 @@ header h1.app-title .app-version:empty { display: none; }
 }
 
 /* --- フローティングウィンドウ --- */
+/* 上下左右の辺と左上/右上/左下の角のリサイズ枠(src/ui/floatingWindows.js attachEdgeResize)。
+   右下はブラウザ標準の resize: both のつまみをそのまま使う */
+.fw-edge { position: absolute; z-index: 50; }
+.fw-edge--n  { top: 0; left: 8px; right: 8px; height: 5px; cursor: ns-resize; }
+.fw-edge--s  { bottom: 0; left: 8px; right: 16px; height: 5px; cursor: ns-resize; }
+.fw-edge--w  { left: 0; top: 8px; bottom: 8px; width: 5px; cursor: ew-resize; }
+.fw-edge--e  { right: 0; top: 8px; bottom: 16px; width: 5px; cursor: ew-resize; }
+.fw-edge--nw { left: 0; top: 0; width: 8px; height: 8px; cursor: nwse-resize; }
+.fw-edge--ne { right: 0; top: 0; width: 8px; height: 8px; cursor: nesw-resize; }
+.fw-edge--sw { left: 0; bottom: 0; width: 8px; height: 8px; cursor: nesw-resize; }
 .float-window {
   position: fixed;
   display: flex;
@@ -1407,6 +1417,8 @@ button.secondary {
 .kbd-header button.kbd-h-mute-solo:hover,
 .kbd-header button.kbd-h-vol:hover { color: var(--accent); border-color: var(--border); background: var(--control-bg); }
 .kbd-header button.kbd-h-part:disabled { opacity: 0.35; cursor: default; }
+/* 100%以外の音量のchがあるときの vol(keyboard.js _renderVolResetBtn)。戻し忘れに気づけるように黄色 */
+.kbd-header button.kbd-h-vol.kbd-volreset-btn--changed { color: #f2c94c; font-weight: 700; }
 /* 全chミュート中は押し込み表示(もう一度押すと解除、が分かるように) */
 .kbd-muteall-btn--on { color: var(--accent); border-color: var(--border) !important; background: var(--control-bg) !important; }
 
@@ -1536,7 +1548,7 @@ button.secondary {
   flex: 1 1 auto;      /* 余った幅を名前に使い、狭いときは縮む(末尾を…にする) */
   min-width: 56px;
   width: auto;
-  max-width: 260px;
+  max-width: 416px;    /* 2026-09-19 ユーザー要望で 260px の1.6倍に */
   padding: 0 6px;
   text-align: left;
   font-size: 11px;

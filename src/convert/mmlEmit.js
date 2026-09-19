@@ -103,7 +103,9 @@
     const durs = events.map(e => e.end - e.start);
     // 分割DPCM(ストリーム)の区間は長さを厳密に(DPCM_EXACT、duration.js quantizeSeq の exactMask)
     const exact = MML.Convert.dpcmExactOf(cmd) ? events.map(e => !!e.exact) : null;
-    const plan = MML.Convert.quantizeSeq(durs, fpb, lenSnap, exact);
+    // 鳴っている音符(短い音符の長さの相対誤差にもコスト、duration.js quantizeSeq の soundMask)
+    const sound = events.map(e => e.note !== null && e.note !== undefined);
+    const plan = MML.Convert.quantizeSeq(durs, fpb, lenSnap, exact, sound);
     const map = new Map();
     events.forEach((e, i) => { if (durs[i] > 0) map.set(e, plan[i]); });
     return map;

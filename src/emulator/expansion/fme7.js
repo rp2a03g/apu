@@ -25,6 +25,12 @@
   for (let i = 0; i < 32; i++) AY_DAC[i] = i < 2 ? 0 : Math.pow(10, (i - 31) * 1.5 / 20);
 
   const NUM_CH = 3;
+  // ★超音波のトーン(2026-09-19): 周期 2 以下は CPU/32(f=1789773/(32*周期)) で 20kHz を超える。出力サンプルの瞬間値を拾うと
+  //   サンプリング周波数との差で折り返し、聞こえる高音(例: 48kHz で FME7 周期1=55.9kHz → 約7.9kHz)になる。
+  //   実機ではアナログ段で平均され、方形波の半分の高さの直流(音量を変えた瞬間の「カチッ」)にしかならないので、
+  //   その平均(0.5)で鳴らす。Konami の MSX ドライバはバスドラの頭を周期1+エンベロープで作る
+  //   (Metal Gear 2 曲153。元の AY は約15.8kHz、FME7 へ写すと約7.9kHz に折り返して金属音になっていた)
+  const ULTRA_TONE_PERIOD_MAX = 2;
 
   // トーン(矩形波)。period チャンネルクロックごとにレベル反転。
   class Fme7Tone {
@@ -166,9 +172,9 @@
         if (this.mute[i]) continue;
         const toneOn = ((mix >> i) & 1) === 0;
         const noiseOn = ((mix >> (i + 3)) & 1) === 0;
-        const t = toneOn ? this.tones[i].level : 1;
+        const t = toneOn ? (this.tones[i].period <= ULTRA_TONE_PERIOD_MAX ? 0.5 : this.tones[i].level) : 1;
         const n = noiseOn ? this.noise.out : 1;
-        if (t && n) sum += AY_DAC[this.channelLevel(i)] * this.vol[i];
+        if (t && n) sum += AY_DAC[this.channelLevel(i)] * this.vol[i] * t;
       }
       // 3ch分の対数振幅和。他チップとのバランスでゲイン調整。
       return sum * 0.35;

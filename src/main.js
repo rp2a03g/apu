@@ -1841,7 +1841,7 @@
   // 出力形式リスト。既定はWAV。レジスタログCSVはWAVと一緒に必ず出ていたのをやめ、
   // 選んだときだけ出す独立した形式にした(2026-09-09 ユーザー指示)
   // レジスタログを持つのは自前のCPUを回す形式(NSF/SPC/KSS)だけ。他は音声のみ
-  const EXPORT_REGLOG_FORMATS = { nsf: true, spc: true, kss: true };
+  const EXPORT_REGLOG_FORMATS = { nsf: true, spc: true, kss: true, mml: true };
   // AACはブラウザ内蔵のWebCodecsに任せるので、対応しているときだけ選択肢に出す
   // (src/audio/aacEncoder.js。Chromium系は通るが他は分からない)。判定は非同期なので
   // 起動時に1回だけ測ってここへ控える
@@ -1849,7 +1849,7 @@
   (async () => {
     try { aacExportAvailable = await MML.Audio.Aac.probe(44100, 2); } catch (e) { aacExportAvailable = false; }
   })();
-  function exportFormatsFor(fmt) {
+  function exportFormatsFor(fmt) { // fmt: 形式名 または 'mml'(MML再生。NSFとして鳴らすのでレジスタログも出せる)
     const list = [['wav', 'WAV'], ['flac', 'FLAC']];
     if (aacExportAvailable) list.push(['aac', 'AAC (.m4a)']);
     if (EXPORT_REGLOG_FORMATS[fmt]) list.push(['reglog', T('レジスタログ(CSV)')]);
@@ -3288,29 +3288,102 @@
     if (ms.playbackState !== want) ms.playbackState = want;
   }
 
-  // ロール見出しの「演奏最大時間(秒)+出力形式+出力」。サウンドファイルを表示している
-  // ときだけ出す(MML再生の総時間は曲の長さそのもので、指定するものではない)
+  // ロール見出しの「演奏最大時間(秒)+出力形式+出力」。サウンドファイルとMML再生の両方で出す
+  // (MML再生は 2026-09-19 ユーザー指示で追加。exportMmlAudio 参照)
   function keyboardDurationInput() {
     const id = SOUND_FORMAT_DUR_INPUT[kbdSourceKind];
     return id ? document.getElementById(id) : null;
   }
+  // MML再生の書き出し秒数。null = 曲の長さ(ループがあれば1周目の終わりまで)をそのまま使う。
+  // ユーザーが欄を書き換えたらその値を保つ(曲を変えても。サウンドファイルの「最大時間」と同じ扱い)
+  let mmlExportSeconds = null;
+  function mmlDefaultExportSeconds() {
+    const c = lastMmlCompiled;
+    return c && c.frameRate ? Math.max(1, Math.ceil(c.totalFrames / c.frameRate)) : 60;
+  }
   function updateKeyboardExportControls() {
+    if (kbdSourceKind === 'mml') {
+      keyboardDisplay.setExportControls({ visible: !!lastMmlCompiled,
+        seconds: mmlExportSeconds || mmlDefaultExportSeconds(), formats: exportFormatsFor('mml') });
+      return;
+    }
     const durEl = keyboardDurationInput();
     keyboardDisplay.setExportControls(durEl
       ? { visible: true, seconds: parseInt(durEl.value, 10) || 0, formats: exportFormatsFor(kbdSourceKind) }
       : { visible: false });
   }
   keyboardDisplay.onMaxSecondsChange = (sec) => {
+    if (kbdSourceKind === 'mml') { mmlExportSeconds = sec > 0 ? sec : null; return; }
     const durEl = keyboardDurationInput();
     if (durEl) durEl.value = String(sec);
   };
   keyboardDisplay.onExport = (fmtId, sec) => {
+    exportMode = ['wav', 'flac', 'aac', 'reglog'].indexOf(fmtId) >= 0 ? fmtId : 'wav';
+    if (kbdSourceKind === 'mml') {
+      if (sec > 0) mmlExportSeconds = sec;
+      exportMmlAudio(sec > 0 ? sec : mmlDefaultExportSeconds()).catch((e) => {
+        console.error(e);
+        captureOutputEl.innerHTML = '<div class="error">' + escapeHtml(T('書き出しに失敗しました: {msg}', { msg: e && e.message ? e.message : String(e) })) + '</div>';
+      });
+      return;
+    }
     const durEl = keyboardDurationInput();
     if (durEl) durEl.value = String(sec);
-    exportMode = ['wav', 'flac', 'aac', 'reglog'].indexOf(fmtId) >= 0 ? fmtId : 'wav';
     const btn = document.getElementById(SOUND_FORMAT_WAV_BTN[kbdSourceKind] || '');
     if (btn) btn.click(); // 実体は各形式パネルの書き出しボタン(隠してあるだけ)
   };
+
+  // MML再生の書き出し(WAV/FLAC/AAC/レジスタログ、2026-09-19)。MMLをNSFに書き出し、そのNSFを
+  // NSFファイルの書き出しと同じ経路(captureSongAsync)で鳴らす。書き出したNSFを再生したときと同じ音・同じ
+  // レジスタ書き込みになり、ループ(L)も指定の秒数まで回る。ミュート中のchは鳴らさない(ファイル再生と同じ)
+  let mmlExporting = false;
+  async function exportMmlAudio(seconds) {
+    if (mmlExporting) return;
+    const result = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
+    if (result.errors.length > 0) {
+      captureOutputEl.innerHTML = '<div class="error">' + escapeHtml(T('MMLコンパイルエラーのため書き出せません:')) + '\n' + renderCompileErrors(result.errors) + '</div>';
+      return;
+    }
+    const meta = result.meta || {};
+    const built = MML.Driver.buildBankedNsfBytes(result, {
+      songName: meta.title || '', artist: meta.composer || '', copyright: meta.maker || '', totalSongs: 1, startingSong: 1,
+    });
+    if (built.asmErrors.length > 0) {
+      captureOutputEl.innerHTML = '<div class="error">' + escapeHtml(T('ドライバのアセンブルに失敗しました(内部エラー):') + '\n' +
+        built.asmErrors.map(e => `[Line ${e.lineNo}] ${e.message}`).join('\n')) + '</div>';
+      return;
+    }
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const sampleRate = audioCtx.sampleRate;
+    const baseName = (meta.title || (currentMmlFileName || 'mml').replace(/\.[^.]*$/, '') || 'mml').replace(/[\\/:*?"<>|]/g, '_');
+    mmlExporting = true;
+    try {
+      captureOutputEl.innerHTML = '<div>' + T('WAV書き出し用レンダリング中…') + '</div>';
+      const cap = await MML.Emu.captureSongAsync(built.nsfBytes, {
+        songIndex: 0, durationSeconds: seconds, sampleRate, mute: getChannelMuteConfig(true),
+      }, (done, total) => {
+        captureOutputEl.innerHTML = '<div>' + T('WAV書き出し中… {pct}%', { pct: Math.round(done / total * 100) }) + '</div>';
+      });
+      let filename;
+      if (exportMode === 'reglog') {
+        // NSFファイルのレジスタログ(exportNsfWav)と同じ形式: frame,addr,value,chip
+        let csv = 'frame,addr,value,chip\n';
+        cap.writeLog.forEach((writes, f) => {
+          for (const w of writes) {
+            csv += `${f},0x${w.addr.toString(16).toUpperCase()},0x${w.value.toString(16).toUpperCase().padStart(2, '0')},${regChipName(w.addr)}\n`;
+          }
+        });
+        filename = baseName + '_regs.csv';
+        downloadText(filename, csv);
+      } else {
+        // NSFファイルの書き出し(exportNsfWav)と同じ gain 3.0
+        filename = await downloadExportAudio(baseName, [cap.audio], sampleRate, 3.0, captureOutputEl);
+      }
+      captureOutputEl.innerHTML = '<div class="ok">' + T('書き出し完了: {file}', { file: escapeHtml(filename) }) + '</div>';
+    } finally {
+      mmlExporting = false;
+    }
+  }
 
   // 鍵盤表示ヘッダへ移した「ファイルを開く」/「to MML」。実体は既存のボタンをそのまま押す。
   // 「開く」はトップのファイルを開くアイコンと同じく、隠し input のダイアログを直接出す
@@ -6537,8 +6610,17 @@
     let filename;
     if (exportMode === 'reglog') {
       let csv = 'frame,addr_or_port,io,value\n';
+      // ★KSS の writeLog は1件を1つの整数に詰めてある(src/emulator/capture.js Emu.kssPackWrite:
+      //   bit0-15=addr/port, bit16-23=value, bit24=io)。以前は {addr,value,io} のオブジェクトとして読んでいて
+      //   w.addr が undefined → 例外になり、レジスタログを選んで押しても何も起きなかった(2026-09-19 修正)
       result.writeLog.forEach((writes, f) => {
-        writes.forEach(w => { csv += `${f},0x${w.addr.toString(16).toUpperCase()},${w.io ? 1 : 0},0x${w.value.toString(16).toUpperCase().padStart(2,'0')}\n`; });
+        for (const w of writes) {
+          const packed = typeof w === 'number';
+          const addr = packed ? (w & 0xFFFF) : w.addr;
+          const value = packed ? ((w >>> 16) & 0xFF) : w.value;
+          const io = packed ? !!(w & 0x1000000) : !!w.io;
+          csv += `${f},0x${addr.toString(16).toUpperCase()},${io ? 1 : 0},0x${value.toString(16).toUpperCase().padStart(2,'0')}\n`;
+        }
       });
       filename = `kss_song${songNo}_regs.csv`;
       downloadText(filename, csv);

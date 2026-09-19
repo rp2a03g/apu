@@ -151,7 +151,7 @@
       const a = R.noteAnchorT(ev.start, [vt, pt]);
       // ハードウェアエンベロープの音符は volSeq をチップの減衰から作っている(レジスタの音量値ではない)
       if (vt.length && !ev.envUsed) ev.volSeq = R.resampleSeq(vt, ev.start, ev.end, ev.volSeq, a, off);
-      // 超音波を o9c へ寄せた音符(topClamp)は周期の実測を当て直さない(o9c 相当の一定値のまま。EP を作らせない)
+      // 超音波を o9b へ寄せた音符(topClamp)は周期の実測を当て直さない(o9b 相当の一定値のまま。EP を作らせない)
       if (pt.length && !ev.topClamp) ev.pitchSeq = R.resampleSeq(pt, ev.start, ev.end, ev.pitchSeq, a, off);
     }
   }
@@ -220,9 +220,14 @@
           //   方形波の直流の跳ね(=クリック)は周期に依らないので、o9c(108、8.4kHz。高さの成分だけは近似)で鳴らす(周期も o9c 相当にして
           //   EP を作らせない)。★o9b まで寄せないこと: NSF 書き出しの 6502 ドライバは o9 の音程表が崩れていて
           //   (o9c〜o9a は全部周期7、o9a+/o9b は桁あふれで低音になる。t1.mml で JS 再生と実測比較)、o9c だけが一致する
+          // ★2026-09-19 改: NSF の FME7 周期表を o9b まで広げた(ppmckDriver.js noteTableSize。o9 の音符を使う曲だけ FME7 の表を120音にする)ので o9b(119)に寄せ、
+          //   さらに FME7 で元と同じく超音波になる周期(AY周期の半分、最低1。FME7 は内部で /2 するため)を
+          //   fme7TopPeriod に控える。kss2mml/converter.js が D で o9b の周期からそこまで上げる(D が使えない
+          //   借用先・D=OFF のときは o9b=約14kHz のまま)。以前の o9c は FME7 で 7990Hz の聞こえる高音になり、
+          //   打楽器の頭に「キン」という金属音が乗っていた(Metal Gear 2 曲153 のバスドラ。元曲は AY 周期1=約112kHz)
           if (note === null && freqHz > 0 && MML.Convert.noteToFreq && freqHz > MML.Convert.noteToFreq(119)) {
-            const top = MML.Convert.noteToFreq(108);
-            freqHz = top; note = 108; seqPeriod = Math.max(1, Math.round(clock / (32 * top)));
+            const top = MML.Convert.noteToFreq(119);
+            freqHz = top; note = 119; seqPeriod = Math.max(1, Math.round(clock / (32 * top)));
           }
         }
       }
@@ -231,7 +236,8 @@
       // エンベロープ関連のフィールド。使わない音符は全部 undefined にしておく(pitch.js の統合キー
       // HYSTERESIS_HARD_KEYS に envUsed/envShape/envPeriod/envKey があり、値が違うと統合されない)
       const envFields = envUsed ? { envUsed: true, envShape: t.envShape, envPeriod: t.envPeriod, envKey } : {};
-      const mk = (tie) => Object.assign({ note, mode: mode_, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [seqPeriod], tieCandidate: tie }, envFields, seqPeriod !== period ? { topClamp: true } : {});
+      const mk = (tie) => Object.assign({ note, mode: mode_, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [seqPeriod], tieCandidate: tie }, envFields,
+        seqPeriod !== period ? { topClamp: true, fme7TopPeriod: Math.max(1, Math.round(period * 1789773 / (2 * clock))) } : {});
       if (!cur) { cur = mk(false); continue; }
       const envBoundary = envUsed !== !!cur.envUsed ||
         (envUsed && (envKey !== cur.envKey || t.envShape !== cur.envShape || t.envPeriod !== cur.envPeriod));
@@ -337,6 +343,8 @@
         ? { rawFreq: ev.freqHz, freqSeq: ev.pitchSeq.map(p => toneFreq(p, clock)) } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
       ev.noteEnvTable ? { noteEnvTable: ev.noteEnvTable } : {}, // mergeHwEnvSweeps(呼び出し元が @EN へ登録する)
+      // 超音波を o9b へ寄せた音符: FME7 で元と同じ超音波にする周期(kss2mml/converter.js が D で合わせる)
+      ev.fme7TopPeriod ? { fme7TopPeriod: ev.fme7TopPeriod } : {},
       ev.envUsed ? toHwEnvFields(ev) : toVolumeFields(ev.volSeq)
     );
     return {

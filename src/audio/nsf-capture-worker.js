@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 16:30:25
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 19:48:10
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-19 16:30:25';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-19 19:48:10';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -3917,6 +3917,12 @@
   for (let i = 0; i < 32; i++) AY_DAC[i] = i < 2 ? 0 : Math.pow(10, (i - 31) * 1.5 / 20);
 
   const NUM_CH = 3;
+  // ★超音波のトーン(2026-09-19): 周期 2 以下は CPU/32(f=1789773/(32*周期)) で 20kHz を超える。出力サンプルの瞬間値を拾うと
+  //   サンプリング周波数との差で折り返し、聞こえる高音(例: 48kHz で FME7 周期1=55.9kHz → 約7.9kHz)になる。
+  //   実機ではアナログ段で平均され、方形波の半分の高さの直流(音量を変えた瞬間の「カチッ」)にしかならないので、
+  //   その平均(0.5)で鳴らす。Konami の MSX ドライバはバスドラの頭を周期1+エンベロープで作る
+  //   (Metal Gear 2 曲153。元の AY は約15.8kHz、FME7 へ写すと約7.9kHz に折り返して金属音になっていた)
+  const ULTRA_TONE_PERIOD_MAX = 2;
 
   // トーン(矩形波)。period チャンネルクロックごとにレベル反転。
   class Fme7Tone {
@@ -4058,9 +4064,9 @@
         if (this.mute[i]) continue;
         const toneOn = ((mix >> i) & 1) === 0;
         const noiseOn = ((mix >> (i + 3)) & 1) === 0;
-        const t = toneOn ? this.tones[i].level : 1;
+        const t = toneOn ? (this.tones[i].period <= ULTRA_TONE_PERIOD_MAX ? 0.5 : this.tones[i].level) : 1;
         const n = noiseOn ? this.noise.out : 1;
-        if (t && n) sum += AY_DAC[this.channelLevel(i)] * this.vol[i];
+        if (t && n) sum += AY_DAC[this.channelLevel(i)] * this.vol[i] * t;
       }
       // 3ch分の対数振幅和。他チップとのバランスでゲイン調整。
       return sum * 0.35;
@@ -4946,7 +4952,9 @@
   //                            コンパイル結果から作る表記モデル(src/score/notation.js)を setScore() で
   //                            受け取ったときだけ有効で、実ファイル再生中はロールに戻る。
   //                            ROADMAP「フェーズ外: 楽譜出力」段階3、2026-09-16)
-  const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'bottom', listColumns: 'single', rollLanes: 'all', fileInfoPlacement: 'auto', rollView: 'roll' });
+  // 既定(2026-09-19 ユーザー指示で変更): ロール横向き・右置き・一覧多段・1つの鍵盤・ピアノロール・ファイル情報自動。
+  // 保存済みの設定がある人はそちらが優先(loadLayoutSettings)
+  const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'horizontal', rollPlacement: 'right', listColumns: 'auto', rollLanes: 'all', fileInfoPlacement: 'auto', rollView: 'roll' });
   const LAYOUT_CHOICES = Object.freeze({
     rollOrientation: ['vertical', 'horizontal'],
     rollPlacement: ['bottom', 'right', 'window'],
@@ -8188,7 +8196,8 @@
       for (const b of this._muteAllBtns) {
         b.addEventListener('click', (e) => { e.stopPropagation(); this._toggleAllMute(); });
       }
-      for (const b of left.querySelectorAll('.kbd-volreset-btn')) {
+      this._volResetBtns = Array.prototype.slice.call(left.querySelectorAll('.kbd-volreset-btn'));
+      for (const b of this._volResetBtns) {
         b.addEventListener('click', (e) => { e.stopPropagation(); this._resetAllVolumes(); });
       }
 
@@ -10367,6 +10376,7 @@
       this._rebuildLanes(); // チャンネルごとのレーン表示も表示中の一覧に合わせる
       this._refreshAssignUi(); // 借用先の重複判定は「表示中の一覧」が対象なので切替のたびに計算し直す
       this._renderMuteAllBtn(); // 一括ミュートの状態も表示中の一覧が対象
+      this._renderVolResetBtn(); // 音量を動かしたchがあるかも表示中の一覧が対象
 
       // ウィンドウが狭くて一覧の全列が収まらない場合だけ、収まる幅まで自動拡張する
       // (縮小はしない。ユーザーが既に手動でそれ以上広げていればそのまま尊重する)
@@ -10887,6 +10897,22 @@
         saveChannelVolumes(this._channelVolumes);
         if (this.onVolumeChange) this.onVolumeChange();
       }
+      this._renderVolResetBtn();
+    }
+    // 見出しの vol の文字色(2026-09-19、ユーザー要望): 表示中の音源のchに1つでも100%以外の音量があれば黄色。
+    // 音量はファイルをまたいで残る(localStorage)ので、「前に下げたままで音がおかしい」に自分で気づけるように。
+    // 全部100%なら元の色に戻す
+    _renderVolResetBtn() {
+      if (!this._volResetBtns) return;
+      const spc = this._mode === 'spc';
+      const off = (v) => v != null && Math.abs(v - 1) > 1e-6;
+      const changed = spc
+        ? this._spcRowEls.some((el, i) => off(this._spcVoiceVolumes[i]))
+        : this._rowEls.some(el => !el.isAllRow && off(this._channelVolumes.get(el.id)));
+      for (const btn of this._volResetBtns) {
+        btn.classList.toggle('kbd-volreset-btn--changed', changed);
+        btn.title = changed ? T('100%以外の音量のチャンネルがあります。押すと全チャンネルの音量を100%に戻す') : T('全チャンネルの音量を100%に戻す');
+      }
     }
 
     // ボタンの見た目: 全ミュート中は押し込み表示にして「もう一度押すと解除」だと分かるようにする
@@ -11142,6 +11168,7 @@
       }
       this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
       this._renderMuteAllBtn();
+      this._renderVolResetBtn();
       this._applySpotlightClasses(); // 固定中のスポットライトの目印を新しい行へ復元
     }
 
@@ -11171,6 +11198,7 @@
         this._channelVolumes.set(id, vol);
         saveChannelVolumes(this._channelVolumes);
         if (this.onVolumeChange) this.onVolumeChange();
+        this._renderVolResetBtn();
       });
       slider.addEventListener('dblclick', () => {
         slider.value = '100';
@@ -11200,6 +11228,7 @@
         this._spcVoiceVolumes[idx] = vol;
         saveSpcVoiceVolumes(this._spcVoiceVolumes);
         if (this.onSpcVolumeChange) this.onSpcVolumeChange(this._spcVoiceVolumes.slice());
+        this._renderVolResetBtn();
       });
       slider.addEventListener('dblclick', () => {
         slider.value = '100';
@@ -12275,6 +12304,7 @@
         });
         this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
         this._renderMuteAllBtn();
+        this._renderVolResetBtn();
         this._applySpotlightClasses(); // 固定中のスポットライトの目印を新しい行へ復元
       }
       // 大波形に表示するボイスを新しい一覧に合わせる(選択がSPCボイス以外ならV0を一時表示)。

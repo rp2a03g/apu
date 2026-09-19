@@ -509,6 +509,12 @@
       '{ch}: {note} (at {sec}s) is below the range of {chip}, so it will not sound{more}. Raise the octave.',
     '{ch}: {note} ({sec}秒) は {chip} の音域より高いため鳴りません{more}。オクターブを下げてください':
       '{ch}: {note} (at {sec}s) is above the range of {chip}, so it will not sound{more}. Lower the octave.',
+    '{ch}: {note} ({sec}秒) は o0c より低いため鳴りません{more}(音階は o0c〜o9b)。オクターブを上げてください':
+      '{ch}: {note} (at {sec}s) is below o0c, so it will not sound{more} (notes range from o0c to o9b). Raise the octave.',
+    '{ch}: {note} ({sec}秒) は o9b より高いため鳴りません{more}(音階は o0c〜o9b)。オクターブを下げてください':
+      '{ch}: {note} (at {sec}s) is above o9b, so it will not sound{more} (notes range from o0c to o9b). Lower the octave.',
+    '{ch}: タイ/SD/PS でつながる音程 {note} ({sec}秒) は o0c〜o9b の外なので、端の音で鳴らします{more}':
+      '{ch}: the pitch {note} reached by a tie/SD/PS (at {sec}s) is outside o0c to o9b, so the nearest end of the range is played instead{more}',
     '音程チェック: 一致 ({n} 音符を検証)': 'Pitch check: OK ({n} notes verified)',
     '…他 {n} 件': '... and {n} more',
     '⚠ 音程不一致 {n} 件 (元の高さと違う音で鳴ります。ロールの赤枠が該当箇所)':
@@ -625,6 +631,8 @@
     '割当先の音で聴く(元chをミュートし、借用先のNSF音源で鳴らす。スキップは無音、DPCMは元のまま)': 'Hear as assigned (mutes the source channels and plays them through the target NSF chips; skipped rows are silent, DPCM rows stay original)',
     '全チャンネルをミュート': 'Mute all channels',
     '全チャンネルのミュートを解除': 'Unmute all channels',
+    '100%以外の音量のチャンネルがあります。押すと全チャンネルの音量を100%に戻す': 'Some channels are not at 100% volume. Click to reset all channels to 100%',
+    '書き出しに失敗しました: {msg}': 'Export failed: {msg}',
     '全チャンネルの音量を100%に戻す': 'Reset all channel volumes to 100%',
     'チャンネル割当(変換元ch → NSF側のパート)を表示': 'Show channel mapping (source ch → NSF part)',
     'クリックで借用先(NSF側のパート)を選ぶ': 'Click to pick the target (NSF part)',
@@ -1010,8 +1018,8 @@
     'N163 (ナムコ163)': 'N163 (Namco 163)',
     '実効ch数': 'Active channels',
     '#EX-N163 に書く値': 'The number written in #EX-N163',
-    '8ch固定(推奨)': 'Always 8 (recommended)',
-    '使ったch数だけ': 'Only the channels used',
+    '8ch固定': 'Always 8',
+    '使ったch数だけ(推奨)': 'Only the channels used (recommended)',
     '波形RAM': 'Wave RAM',
     '実効ch数を減らすと、波形を大きくでき、音量が出て、高い音まで出せます。代わりに音程の刻みが粗くなります。': 'Fewer active channels means bigger waves, more volume and a higher top note, at the cost of coarser pitch steps.',
     '実機N163は8chを時間多重するため、有効ch数が1つ動くと3つ同時に動きます。波形RAM=128-8×ch数バイト(1ch=120 / 8ch=64)。音量=出力は有効ch数で平均されるので1chは5chの5倍。周波数レジスタ=ch数に比例し、少ないほど刻みが粗く、出せる最高音は上がる(32サンプル波形で8ch=1864Hz / 1ch=14915Hz)': 'The real N163 time-multiplexes 8 channels, so changing the active channel count moves three things at once. Wave RAM is 128-8*channels bytes (120 at 1ch, 64 at 8ch). Volume is averaged over the active channels, so one channel is 5 times as loud as it would be with five. The frequency register scales with the channel count, so fewer channels mean coarser pitch steps and a higher top note (1864 Hz at 8ch, 14915 Hz at 1ch, with 32-sample waves).',
@@ -1070,7 +1078,7 @@
     'ピッチ精度(SA)': 'Pitch precision (SA)',
     // ---- 基準ピッチ(全体オフセット、#TUNING) ----
     '基準ピッチ': 'Reference pitch',
-    '自動検出(曲全体の偏差を測る・推奨)': 'Auto-detect (measure the whole-song offset, recommended)',
+    '自動検出(曲全体の偏差だけを測る)': 'Auto-detect (measure the whole-song offset only)',
     '12平均律固定(A4=440Hz・従来)': 'Fixed 12-TET (A4=440Hz, legacy)',
     'ホワイトノイズ(長周期)・推奨': 'White noise (long mode), recommended',
     '短周期ノイズ(@1、音程を合わせる)': 'Short-mode noise (@1, matches the pitch)',
@@ -1078,7 +1086,7 @@
     'SMS/GG/メガドライブのPSG': 'PSG of SMS / Game Gear / Mega Drive',
     'SN76489 のノイズには、ホワイトノイズのほかに「周期ノイズ」(1/16デューティの細いパルスのような、音程のある音)がある。2A03に同じ音は無いので、ホワイトノイズ(長周期)にするか、2A03の短周期ノイズ(@1、93ステップの金属的な音)で音程を合わせるかを選ぶ。周期ノイズの高さを切り替えてタムやキックを作っている曲で差が出る':
       'Besides white noise, the SN76489 has "periodic noise" (a pitched sound like a thin 1/16-duty pulse). The 2A03 has no equivalent, so choose between white noise (long mode) and the 2A03 short-mode noise (@1, a metallic 93-step sound) that matches the pitch. It matters for songs that build toms or kicks by switching the pitch of the periodic noise',
-    '音名別に自動検出(音名ごとの偏差を測る)': 'Auto-detect per note name (measure the offset of each note name)',
+    '音名別に自動検出(全体+外れた音名・推奨)': 'Auto-detect per note name (whole song + outlying note names, recommended)',
     '曲の音程のずれを測って補正': 'Measure and compensate the pitch offset of the song',
     '「自動検出」は曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。「音名別に自動検出」は音名(c〜b)ごとにずれを測り、ずれている音名だけを #TUNING-NOTE でずらす(音程表が音名ごとに外れている曲用。例: F# だけ +33 セント)。どちらも音名は変わらず、再生とNSF書き出しの周波数テーブルがその分だけずれる':
       '"Auto-detect" measures how many cents the whole song is offset from 12-TET (A4=440Hz), rounds notes against the shifted reference and writes #TUNING in the header. "Auto-detect per note name" measures the offset of each note name (C to B) and shifts only the offset note names with #TUNING-NOTE (for songs whose pitch table is off per note name, e.g. only F# at +33 cents). In both cases note names stay the same; the playback and NSF-export frequency tables shift by that amount',
@@ -1114,6 +1122,10 @@
     'ノイズchの @<n> は 0(長周期)か 1(短周期)です(@{v} は下位1bitで解釈します)': 'On the noise channel @<n> is 0 (long period) or 1 (short period); @{v} is read by its lowest bit',
     'ノイズchの n<num> は周期index 0〜15 です(n{v} は 16 で巡回して n{w} として鳴らします)': 'On the noise channel n<num> is a period index 0-15; n{v} wraps modulo 16 and plays as n{w}',
     'SA の値は 0〜8 で指定してください ({v})': 'SA must be between 0 and 8 ({v})',
+    '@n(直接周波数指定)はこのチャンネルでは使えません(本家ppmck準拠: VRC7・N163・DPCMは不可)': '@n (direct frequency) cannot be used on this channel (as in ppmck: not on VRC7, N163 or DPCM)',
+    '@n の後に周波数レジスタ値(数値)を書いてください(例: @n$1AB,4)': 'Write a frequency register value (a number) after @n (e.g. @n$1AB,4)',
+    '@n{v} は {chip} の周波数レジスタ({bits}bit)に収まらないので、下位{bits}bit({m})で鳴らします(本家ppmckと同じ)': '@n{v} does not fit the {chip} frequency register ({bits} bits); it plays with the low {bits} bits ({m}), as in ppmck',
+    '@n(直接周波数指定)の音符には EN(ノートエンベロープ)は効きません(周期値を直接書くため。EP/MPは効きます)': 'EN (note envelope) has no effect on @n (direct frequency) notes, since the period is written directly (EP/MP still apply)',
     'プリセット': 'Presets',
     'カスタム': 'Custom',
     '全体の配色': 'General Colors',

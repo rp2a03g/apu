@@ -77,7 +77,9 @@
   //                            コンパイル結果から作る表記モデル(src/score/notation.js)を setScore() で
   //                            受け取ったときだけ有効で、実ファイル再生中はロールに戻る。
   //                            ROADMAP「フェーズ外: 楽譜出力」段階3、2026-09-16)
-  const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'bottom', listColumns: 'single', rollLanes: 'all', fileInfoPlacement: 'auto', rollView: 'roll' });
+  // 既定(2026-09-19 ユーザー指示で変更): ロール横向き・右置き・一覧多段・1つの鍵盤・ピアノロール・ファイル情報自動。
+  // 保存済みの設定がある人はそちらが優先(loadLayoutSettings)
+  const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'horizontal', rollPlacement: 'right', listColumns: 'auto', rollLanes: 'all', fileInfoPlacement: 'auto', rollView: 'roll' });
   const LAYOUT_CHOICES = Object.freeze({
     rollOrientation: ['vertical', 'horizontal'],
     rollPlacement: ['bottom', 'right', 'window'],
@@ -3319,7 +3321,8 @@
       for (const b of this._muteAllBtns) {
         b.addEventListener('click', (e) => { e.stopPropagation(); this._toggleAllMute(); });
       }
-      for (const b of left.querySelectorAll('.kbd-volreset-btn')) {
+      this._volResetBtns = Array.prototype.slice.call(left.querySelectorAll('.kbd-volreset-btn'));
+      for (const b of this._volResetBtns) {
         b.addEventListener('click', (e) => { e.stopPropagation(); this._resetAllVolumes(); });
       }
 
@@ -5498,6 +5501,7 @@
       this._rebuildLanes(); // チャンネルごとのレーン表示も表示中の一覧に合わせる
       this._refreshAssignUi(); // 借用先の重複判定は「表示中の一覧」が対象なので切替のたびに計算し直す
       this._renderMuteAllBtn(); // 一括ミュートの状態も表示中の一覧が対象
+      this._renderVolResetBtn(); // 音量を動かしたchがあるかも表示中の一覧が対象
 
       // ウィンドウが狭くて一覧の全列が収まらない場合だけ、収まる幅まで自動拡張する
       // (縮小はしない。ユーザーが既に手動でそれ以上広げていればそのまま尊重する)
@@ -6018,6 +6022,22 @@
         saveChannelVolumes(this._channelVolumes);
         if (this.onVolumeChange) this.onVolumeChange();
       }
+      this._renderVolResetBtn();
+    }
+    // 見出しの vol の文字色(2026-09-19、ユーザー要望): 表示中の音源のchに1つでも100%以外の音量があれば黄色。
+    // 音量はファイルをまたいで残る(localStorage)ので、「前に下げたままで音がおかしい」に自分で気づけるように。
+    // 全部100%なら元の色に戻す
+    _renderVolResetBtn() {
+      if (!this._volResetBtns) return;
+      const spc = this._mode === 'spc';
+      const off = (v) => v != null && Math.abs(v - 1) > 1e-6;
+      const changed = spc
+        ? this._spcRowEls.some((el, i) => off(this._spcVoiceVolumes[i]))
+        : this._rowEls.some(el => !el.isAllRow && off(this._channelVolumes.get(el.id)));
+      for (const btn of this._volResetBtns) {
+        btn.classList.toggle('kbd-volreset-btn--changed', changed);
+        btn.title = changed ? T('100%以外の音量のチャンネルがあります。押すと全チャンネルの音量を100%に戻す') : T('全チャンネルの音量を100%に戻す');
+      }
     }
 
     // ボタンの見た目: 全ミュート中は押し込み表示にして「もう一度押すと解除」だと分かるようにする
@@ -6273,6 +6293,7 @@
       }
       this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
       this._renderMuteAllBtn();
+      this._renderVolResetBtn();
       this._applySpotlightClasses(); // 固定中のスポットライトの目印を新しい行へ復元
     }
 
@@ -6302,6 +6323,7 @@
         this._channelVolumes.set(id, vol);
         saveChannelVolumes(this._channelVolumes);
         if (this.onVolumeChange) this.onVolumeChange();
+        this._renderVolResetBtn();
       });
       slider.addEventListener('dblclick', () => {
         slider.value = '100';
@@ -6331,6 +6353,7 @@
         this._spcVoiceVolumes[idx] = vol;
         saveSpcVoiceVolumes(this._spcVoiceVolumes);
         if (this.onSpcVolumeChange) this.onSpcVolumeChange(this._spcVoiceVolumes.slice());
+        this._renderVolResetBtn();
       });
       slider.addEventListener('dblclick', () => {
         slider.value = '100';
@@ -7406,6 +7429,7 @@
         });
         this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
         this._renderMuteAllBtn();
+        this._renderVolResetBtn();
         this._applySpotlightClasses(); // 固定中のスポットライトの目印を新しい行へ復元
       }
       // 大波形に表示するボイスを新しい一覧に合わせる(選択がSPCボイス以外ならV0を一時表示)。

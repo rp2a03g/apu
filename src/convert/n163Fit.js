@@ -122,6 +122,54 @@
    */
   F.apply = function (channels, waveReg, cmd, numChOverride, extraMargin, forceHalve) {
     if (cmd && cmd.N163_WAVE === 'keep') return [];
+    // 縮める前の波形を控えておき、最後に waveReg.shrunk へ残す(定義行の上に元の波形をコメントで出すため。
+    // WaveRegistry.defLines 参照)。apply が同じレジストリに2回呼ばれても「最初の元の形」を残す
+    const origWaves = (waveReg && waveReg.waves) ? waveReg.waves.map(w => w.slice()) : [];
+    try {
+      return applyInner(channels, waveReg, cmd, numChOverride, extraMargin, forceHalve);
+    } finally {
+      if (waveReg && waveReg.waves) {
+        waveReg.shrunk = waveReg.shrunk || {};
+        origWaves.forEach((w, i) => {
+          const now = waveReg.waves[i];
+          if (now && now.length !== w.length && !waveReg.shrunk[i]) waveReg.shrunk[i] = w;
+        });
+      }
+    }
+  };
+  /**
+   * 書き出したMMLを実際にコンパイルし、N163 の波形RAM不足(errors[].kind==='n163Ram')が出たときだけ、
+   * 常駐区間の余裕(options.n163ExtraMargin)を広げ、置けなかった波形を1段ずつ縮めて(options.n163ForceHalve)
+   * 変換し直す。変換時の見積り(apply)で収めても、書き出した音長は量子化とテンポの丸めで曲の後半ほどずれ、
+   * コンパイルで「空き不足」になることがあるため(元は src/vgm2mml/converter.js にあった処理を共通化、2026-09-19。
+   * KSS Metal Gear 2 $99 の8ch固定・180秒でフレーム8485に置けない波形が出て発覚)。
+   * コンパイルできる曲の出力は変わらない。変換設定 N163_WAVE='keep' のときは何もしない。
+   * @param {object} options 変換オプション(cmd を含む。n163ExtraMargin / n163ForceHalve を足して convert へ渡す)
+   * @param {object} result 1回目の変換結果({ mml, expansions })
+   * @param {function(object): object} convert options を受けて変換し直す関数(autoTune で包んだもの)
+   * @returns {object} 最終的な変換結果
+   */
+  F.retryOnRamError = function (options, result, convert) {
+    const cmdN = MML.Convert.normalizeCmd(options && options.cmd);
+    if (cmdN.N163_WAVE === 'keep' || !MML.Mml || !MML.Mml.compile) return result;
+    if (!result || (result.expansions || []).indexOf('n163') < 0) return result;
+    const ramErrors = (mml) => {
+      try { return (MML.Mml.compile(mml, {}).errors || []).filter(e => e.kind === 'n163Ram'); }
+      catch (e) { return []; }
+    };
+    const force = {};
+    let extra = 0;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const errs = ramErrors(result.mml);
+      if (!errs.length) break;
+      extra = extra ? Math.min(extra * 2, 128) : 8;
+      for (const er of errs) if (er.instrument != null) force[er.instrument] = (force[er.instrument] || 0) + 1;
+      result = convert(Object.assign({}, options, { n163ExtraMargin: extra, n163ForceHalve: Object.assign({}, force) }));
+    }
+    return result;
+  };
+
+  function applyInner(channels, waveReg, cmd, numChOverride, extraMargin, forceHalve) {
     if (!waveReg || !waveReg.waves || !waveReg.waves.length) return [];
     const list = (channels || []).filter(ch => ch && ch.events);
     if (!list.length) return [];
@@ -249,6 +297,6 @@
       `(=${(128 - 8 * numCh) * 2}サンプル)しかないため、あふれたぶんの波形を縮めました —— ${parts.join(' / ')}。` +
       `変換設定の「N163波形」を「元の長さのまま」にすれば縮めませんが、その曲は再生も書き出しもできません`);
     return out;
-  };
+  }
 
 })(window);

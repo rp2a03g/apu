@@ -128,8 +128,10 @@
 
   // 基準ピッチ(#TUNING)の自動検出: 変換本体(convertKssOnce)を必要なら2回走らせる
   // (src/convert/options.js MML.Convert.autoTune 参照。全 *2mml 共通の入口の作り)
+  // ★N163 の波形RAM: コンパイルで不足が出たら余裕を広げて変換し直す(src/convert/n163Fit.js retryOnRamError)
   MML.KSS2MML.convertCapture = function (cap, options) {
-    return MML.Convert.autoTune(options, (o) => convertKssOnce(cap, o));
+    const run = (opts) => MML.Convert.autoTune(opts, (o) => convertKssOnce(cap, o));
+    return MML.Convert.N163Fit.retryOnRamError(options || {}, run(options), run);
   };
   function convertKssOnce(cap, options) {
     options = options || {};
@@ -197,6 +199,7 @@
         toneOf: (id) => (options.tone || {})[id],
         toneSettings: options.toneSettings || null, // 音色ごとの設定(src/convert/toneSettings.js)
         n163WaveLen: MML.Kss2MmlExpansion.SCC_WAVE_LEN,
+        n163ExtraMargin: options.n163ExtraMargin || 0, n163ForceHalve: options.n163ForceHalve || null, // RAM不足のやり直し用
         extract: (chip, fam, reg) => {
           // 波形/音色レジストリは借用先がその音源のときだけ本物を渡す(他のファミリへ載せる
           // 抽出でも登録してしまうと、誰も参照しない@N/@OP定義がMML本文に残るため)
@@ -270,6 +273,17 @@
     // 空間へ変換してから分類・登録する(DESIGN-PITCH.md Phase 1、D<n>の直後に置くのは
     // 両方とも同じ「借用先レジスタ空間への変換」処理系列だから)。
     MML.Convert.assignPitchEnvelope(ayResult.channels, fme7PeriodRaw, pitchReg);
+    // 超音波のトーン(AY 周期1〜3。抽出器が o9b へ寄せた topClamp の音符)は、o9b の周期から D で FME7 の
+    // 超音波の周期(fme7TopPeriod、最低1)まで上げる。聞こえない直流の跳ね=「カチッ」だけを残す
+    // (src/kss2mml/expansion/ay.js extractToneEvents の topClamp の説明。D=OFF なら o9b のまま)
+    {
+      const baseTop = Math.round(fme7PeriodRaw(MML.Convert.noteToFreq(119)));
+      for (const ch of ayResult.channels) {
+        for (const ev of ch.events) {
+          if (ev.note === 119 && ev.fme7TopPeriod) ev.detune = Math.max(0, baseTop - ev.fme7TopPeriod);
+        }
+      }
+    }
     const fme7Letters = expansionLetterMap.fme7;
     ayResult.channels.forEach((ch, i) => scoreChannels.push(Object.assign({}, ch, { letter: fme7Letters[i], hasDetune: true, hasPitchMod: true })));
 
@@ -289,7 +303,8 @@
       //   再生も書き出しもできなかった(Metal Gear 2 $99: 「@N20(chT)をN163内蔵RAMに配置できません」)。
       //   音域(N163_WAVE='both')もここで詰める。縮めた波形の音符は ev.rawLength を持つので、
       //   周波数式は音符ごとの波形長で計算する(n163FreqRegRaw)。音程補正より前に呼ぶこと
-      borrowNotes.push(...MML.Convert.N163Fit.apply(sccResult.channels, n163WaveReg, cmd, n163ActualNumCh));
+      borrowNotes.push(...MML.Convert.N163Fit.apply(sccResult.channels, n163WaveReg, cmd, n163ActualNumCh,
+        options.n163ExtraMargin || 0, options.n163ForceHalve || null));
       const sccFreqReg = n163FreqRegRaw(MML.Kss2MmlExpansion.SCC_WAVE_LEN, n163ActualNumCh);
       MML.Convert.detectChorusDetune(sccResult.channels, sccFreqReg, { cmd });
       // 高速アルペジオ→EN統合(2026-08-14拡張)。ay.jsのブロックと同じ理由で

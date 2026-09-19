@@ -43,6 +43,11 @@
  *                  ★DPCMch(E)では @DPCM<num> の番号(0-63)の直値=本家ppmck準拠。音符 c〜b は本家ppmckcが
  *                  Eトラックだけオクターブの-2補正をしないため「オクターブ×16+半音番号」(o0 c=0、o1 c=16、
  *                  o2 c=32。12-15など飛び番は n<num> でのみ書ける)。未定義の番号は警告つきで無音
+ *   @n<num>[,<len>] 直接周波数指定(本家ppmck準拠)。<num>(10進/$16進/x16進/%2進)を音階テーブルを通さず
+ *                  周期/周波数レジスタへそのまま書く。2A03パルス/三角/ノイズ・MMC5は下位11bit、VRC6・FME7・FDSは
+ *                  12bit(FDSは周波数比例=大きいほど高い、他は周期=大きいほど低い)。ノイズは下位バイトが$400Eへ
+ *                  そのまま行く(bit7=短周期)。VRC7・N163・DPCMではエラー。D<n>は効かず(本家同様)、EP/MP/PTは効く。
+ *                  ENは効かない(警告)。&の先の音程は捨てて音長だけ足す(本家同様)。PSのグライド元/先にならない
  *   o<n> > <       オクターブ指定 / 上げ / 下げ
  *   l<n>[.]        デフォルト音長
  *   v<n>           音量 (0-15、絶対指定。FDS/VRC6のこぎり波だけは本家ppmck同様0-63で、
@@ -351,6 +356,20 @@
     return 440 * Math.pow(2, (noteNumber - 57) / 12) * tuningRatio * nr;
   }
 
+  // 音階の範囲(2026-09-19): NSF書き出しのドライバ(ppmckDriver.js)が周期表で引けるのは o0c〜o9b(ノート番号0〜119)。
+  // 音符そのものがこの外なら compile() が警告して鳴らさない(NSF でも休符になる)。
+  // ★o9 の段(108〜119)の表は、その音を実際に使う曲のそのチップにだけドライバが持つ(ppmckDriver.js noteTableSizes)
+  const NOTE_TABLE_TOP = 119;
+  // EN(ノートエンベロープ)でずらしたノート番号 → ドライバが実際に引く表の索引。6502側は
+  // NOTE+ENVAL を8bitで足し、bit7 が立てば(=負、または127超)0、表の上限を超えれば上限へクランプする
+  // (LOOKUP_*_PERIOD の BPL/CMP)。JS 再生も同じ索引で鳴らす(以前は範囲外でも実音程で鳴らしていた)。
+  // 上限は常に119でよい: ドライバが108音の表のままにするのは、108〜到達点の表の値が107番と同じ(=クランプしても
+  // 同じ周期)ときだけなので、ここで119まで引いた値と一致する
+  function enTableNote(n) {
+    const v = ((Math.round(n) % 256) + 256) % 256;
+    return v >= 128 ? 0 : Math.min(NOTE_TABLE_TOP, v);
+  }
+
   // D<n>(デチューン)。算出済みの周期/周波数レジスタ値へ生のオフセットを加算し、
   // レジスタ幅でクランプする。2A03パルス/三角・VRC6・MMC5・FME7・FDS(2047/4095幅)に加え
   // N163(freqReg、262143幅。18bitスケールなので同じ値でも変化量は小さい)、
@@ -433,6 +452,25 @@
   function fdsFreqToPeriod(freq) {
     let p = Math.round((freq * 65536 * 64) / CPU_CLOCK_NTSC);
     return Math.max(0, Math.min(4095, p));
+  }
+
+  // @n<num>(直接周波数指定)のレジスタ値 → 実際に鳴る周波数(Hz)。上の各 *Period の逆関数で、ロール・鍵盤・
+  // 音程検証の代表値に使う(レジスタへ書くのは seg.directPeriod そのもので、この値から周期を作り直しはしない)。
+  // kind は Mml.compile の directFreqCaps が決める(ノイズは周期indexなのでここへは来ない)
+  function directPeriodToHz(kind, p) {
+    switch (kind) {
+      case 'pulse': return CPU_CLOCK_NTSC / (16 * (p + 1));       // 2A03/MMC5/VRC6パルス
+      case 'triangle': return CPU_CLOCK_NTSC / (32 * (p + 1));
+      case 'saw': return CPU_CLOCK_NTSC / (14 * (p + 1));
+      case 'fme7': return CPU_CLOCK_NTSC / (32 * Math.max(1, p)); // 周期0は実機でも1と同じ
+      case 'fds': return (CPU_CLOCK_NTSC * p) / (65536 * 64);     // 周波数比例(大きいほど高い)
+      default: return 0;
+    }
+  }
+
+  // セグメントの変調前の周期/周波数レジスタ値。@n の音符は指定値そのもの、それ以外は周波数から計算する
+  function segBasePeriod(seg, periodFn) {
+    return seg.directPeriod != null ? seg.directPeriod : periodFn(seg.freq);
   }
 
   // N163: 実機の出力周波数は f = CLOCK * freqReg / (15 * 65536 * waveLen * numCh)。
@@ -635,7 +673,7 @@
         }
         const tupletLen = endTok.length != null ? endTok.length : defaultLength;
         const totalFrames = framesForLength(tupletLen, endTok.dots || 0, defaultLength, tempo, 0).frames;
-        const noteToks = inner.filter(t => t.type === 'note' || t.type === 'directNote');
+        const noteToks = inner.filter(t => t.type === 'note' || t.type === 'directNote' || t.type === 'directFreq');
         const count = noteToks.length;
         if (count > 0) {
           let carry = 0;
@@ -675,6 +713,9 @@
     for (let k = segments.length - 1; k >= 0; k--) {
       const s = segments[k];
       if (s.freq != null) {
+        // @n(直接周波数指定)の音符からはグライドしない(ノート番号を持たないので6502側のPSが
+        // グライド元の周期を引けない。本家もPSのグライド元は音階の音符だけ)
+        if (s.directPeriod != null) return null;
         if (s.pitchBreaks && s.pitchBreaks.length > 0) {
           const pb = s.pitchBreaks[s.pitchBreaks.length - 1];
           return { freq: pb.freq, noteNumber: pb.noteNumber };
@@ -710,6 +751,8 @@
     // ノイズchで無視/丸めたコマンドの警告は1チャンネル1回だけ(打楽器パートは同じ書き方を
     // 何百回も繰り返すので、出現ごとに出すと警告欄が埋まる)
     const noiseWarned = { transpose: false, directNote: false, instrument: false };
+    // @n(直接周波数指定)のエラー/警告も1チャンネル1回
+    const directFreqWarned = { error: false, range: false, en: false };
     // DPCMch(E)で使えないコマンド(本家ppmckcはエラー)。同じコマンドの再出現は1回にまとめる
     const dpcmRejected = new Set();
     const dpcmReject = (name) => {
@@ -796,10 +839,21 @@
 
     // srcStart/srcEnd: 元MMLソース上のこの音符/休符トークンの絶対文字範囲(再生ハイライト用、
     // lexer.tokenizeがoffsets付きで呼ばれた場合のみ付与される。無ければundefined)
-    function pushNote(frames, freq, noteNumber, srcStart, srcEnd) {
+    // directPeriod(省略可): @n<num>(直接周波数指定)の音符なら、チップの周期/周波数レジスタへそのまま書く値
+    // (レジスタ幅でマスク済み)。freq/noteNumber はロール・鍵盤・警告表示用にその値から逆算した代表値
+    function pushNote(frames, freq, noteNumber, srcStart, srcEnd, directPeriod) {
       elapsedFrames += frames;
       const prev = segments.length > 0 ? segments[segments.length - 1] : null;
-      if (prev && prev.tieNext) {
+      if (prev && prev.tieNext && (directPeriod != null || prev.directPeriod != null)) {
+        // @n が絡むタイ(&): 本家ppmckと同じく「次の要素の音長を足すだけ」で、次の音符の音程は捨てる
+        // (datamake.c getDeltaTime。本ツールの異音程レガート=pitchBreaks は @n の周期値を運べないうえ、
+        // 本家にも無い拡張なので @n には広げない)。SD用のノートオン履歴にも積まない(本家の last_note も
+        // @n では更新されない)
+        prev.durationFrames += frames;
+        prev.tieNext = false;
+        if (srcEnd != null) prev.srcEnd = srcEnd;
+        if (freq != null && directPeriod == null) noteHistory.push({ freq, noteNumber });
+      } else if (prev && prev.tieNext) {
         // タイ(&): 新しいセグメントを作らず前のセグメントを延長する(ゲート/エンベロープは
         // 継続、再アタックしない)。★2026-08-12修正: 以前は音程が前と異なる場合でも
         // freq/noteNumberを丸ごと捨てて単にdurationFramesを延長するだけだったため、
@@ -836,8 +890,10 @@
         // PS(ポルタメント、実機準拠新規実装): 直前のpitchShiftトークンをここで消費する。
         // グライド元は直近の実音(休符/未発音を飛ばした最後のfreq)。見つからなければ
         // 通常の音符として扱う(グライドしようがないため)
+        // @n(直接周波数指定)の音符はグライド先にもグライド元にもならない(通常のアタックで鳴らす。
+        // lastActivePitch が @n の音符で null を返す)
         let psGlide = null;
-        if (freq != null && state.pendingPitchShift && caps.psAllowed) {
+        if (freq != null && directPeriod == null && state.pendingPitchShift && caps.psAllowed) {
           const from = lastActivePitch(segments);
           if (from != null) psGlide = { fromFreq: from.freq, fromNoteNumber: from.noteNumber };
         }
@@ -848,7 +904,7 @@
         // 出力例を実測トレースして再現。noteHistoryは push 後の配列で
         // 「後ろからselfDelay+1番目」を引く)
         let pitchBreaks = null;
-        if (freq != null) noteHistory.push({ freq, noteNumber });
+        if (freq != null && directPeriod == null) noteHistory.push({ freq, noteNumber });
         if (freq != null && state.selfDelay != null && state.envelopeVr !== 255) {
           const idx = noteHistory.length - 1 - state.selfDelay;
           if (idx >= 0) {
@@ -884,7 +940,9 @@
           noteEnv: state.noteEnv,
           sweepSpeed: state.sweepSpeed,
           sweepDepth: state.sweepDepth,
-          detune: state.detune,
+          // @n の音符には D<n> が効かない(本家ppmck: direct_freq_sub は detune_write_sub を通らない。
+          // D を足すのは音階テーブルから周波数を作る frequency_set だけ)。EP/MP/PT は効く
+          detune: directPeriod != null ? 0 : state.detune,
           fme7Noise: state.fme7Noise,
           fme7EnvShape: state.fme7EnvShape,
           fme7EnvPeriod: state.fme7EnvPeriod,
@@ -897,7 +955,9 @@
           releaseToneDuty: caps.toneEnv === 'duty',
           psGlide,
           pitchBreaks,
-          tieNext: false
+          tieNext: false,
+          // @n<num>(直接周波数指定)の周期/周波数レジスタ値。通常の音符には付けない
+          ...(directPeriod != null ? { directPeriod } : {})
         });
       }
     }
@@ -1197,6 +1257,62 @@
           pushNote(frames, freq, noteNumber, tok.srcStart, tok.srcEnd);
           break;
         }
+        // @n<num>[,<len>] 直接周波数指定(本家ppmck _KEY)。音階テーブルを通さず、<num>を周期/周波数レジスタへ
+        // そのまま書く(2A03/MMC5/ノイズは下位11bit、VRC6/FME7/FDSは12bit。本家 datamake.c の MCK_DIRECT_FREQ と
+        // 同じマスク。FDSだけは本家が11bitで切っているが、FDSの周波数レジスタは12bitで本家ドキュメントの表も
+        // $800以上を載せているので12bitにする)。本家どおりVRC7・N163・DPCMでは使えない。
+        // 本家準拠の意味論: D<n>は効かない / EP・MP(・本ツールのPT)は効く / &の先の音程は捨てて音長だけ足す。
+        // ENは本ツールでは効かない(本家は@nの音をENのキーオン処理が直前の音階の音で上書きしてしまう不具合が
+        // あるが、それは再現しない。警告を出す)。PSのグライド元/先にもならない
+        case 'directFreq': {
+          let frames;
+          if (tok.forcedFrames != null) {
+            frames = tok.forcedFrames;
+          } else {
+            const lenResult = framesForLength(tok.length, tok.dots, state.defaultLength, tempo, lengthCarry);
+            frames = lenResult.frames;
+            lengthCarry = lenResult.carryOut;
+          }
+          const df = caps.directFreq || null;
+          let bad = null;
+          if (!df) bad = T('@n(直接周波数指定)はこのチャンネルでは使えません(本家ppmck準拠: VRC7・N163・DPCMは不可)');
+          else if (tok.value == null) bad = T('@n の後に周波数レジスタ値(数値)を書いてください(例: @n$1AB,4)');
+          if (bad) {
+            // 本家同様エラーにし、時間だけは消費する(以降のチャンネルのタイミングを崩さないため休符として扱う)
+            if (!directFreqWarned.error) { directFreqWarned.error = true; errors.push({ message: bad }); }
+            recordNote('note', tok, frames, null, false, false);
+            pushNote(frames, null, null, tok.srcStart, tok.srcEnd);
+            break;
+          }
+          const mask = (1 << df.bits) - 1;
+          if (tok.value > mask && !directFreqWarned.range) {
+            directFreqWarned.range = true;
+            warnings.push({ srcStart: tok.srcStart, message: T('@n{v} は {chip} の周波数レジスタ({bits}bit)に収まらないので、下位{bits}bit({m})で鳴らします(本家ppmckと同じ)',
+              { v: tok.value, chip: df.label, bits: df.bits, m: tok.value & mask }) });
+          }
+          if (state.noteEnv != null && state.noteEnv !== 255 && !directFreqWarned.en) {
+            directFreqWarned.en = true;
+            warnings.push({ srcStart: tok.srcStart, message: T('@n(直接周波数指定)の音符には EN(ノートエンベロープ)は効きません(周期値を直接書くため。EP/MPは効きます)') });
+          }
+          const period = tok.value & mask;
+          let freq, noteNumber;
+          if (df.kind === 'noise') {
+            // ノイズ: 下位バイトがそのまま$400Eへ行く(bit7=短周期、下位4bit=周期index)。表示用の番号は周期index
+            noteNumber = period & 0x0F;
+            freq = noiseLfsrRate(noteNumber);
+          } else {
+            freq = directPeriodToHz(df.kind, period);
+            // 表示用の代表ノート番号は o0c〜o9b(0〜119)に収める。NSFのバイトコードでもこの番号が音符バイトになり、
+            // 2バイト形式の音符は 0x77(=119)までしか書けない(基点 0x78 以上は1バイト形式と衝突する。118/119 を書く曲は
+            // ppmckDriver.js が基点を 0x78 にする。mckBytecode.js NOTE_BASE_DEFAULT 参照)。@n は音階表を引かないので、
+            // ここが o9 でもドライバの表は広げない
+            noteNumber = freq > 0 ? Math.max(0, Math.min(119, Math.round(57 + 12 * Math.log2(freq / 440)))) : 0;
+          }
+          recordNote('note', tok, frames, noteNumber,
+            segments.length > 0 && segments[segments.length - 1].tieNext, false);
+          pushNote(frames, freq, noteNumber, tok.srcStart, tok.srcEnd, period);
+          break;
+        }
         default:
           break;
       }
@@ -1432,17 +1548,20 @@
   // noteNumberを返す(アタック無しの音程切替。pushNoteのpitchBreaks参照)。
   // pitchBreaksが無ければセグメント本来のfreq/noteNumberをそのまま返す。
   function activePitchAt(seg, tick) {
+    // directPeriod: @n(直接周波数指定)の音符の周期値。ピッチブレーク(SDの差し替え)の後は音階の音なので消える
     if (!seg.pitchBreaks || seg.pitchBreaks.length === 0) {
-      return { freq: seg.freq, noteNumber: seg.noteNumber };
+      return { freq: seg.freq, noteNumber: seg.noteNumber, directPeriod: seg.directPeriod };
     }
     let freq = seg.freq;
     let noteNumber = seg.noteNumber;
+    let directPeriod = seg.directPeriod;
     for (const pb of seg.pitchBreaks) {
       if (pb.atFrame > tick) break;
       freq = pb.freq;
       noteNumber = pb.noteNumber;
+      directPeriod = undefined;
     }
-    return { freq, noteNumber };
+    return { freq, noteNumber, directPeriod };
   }
 
   // EN(ノートエンベロープ)は「発音ノート番号の値に加算」(ppmck公式リファレンス通り、
@@ -1548,9 +1667,9 @@
     if (seg.psGlide) {
       const en0 = noteEnvelopeOffset(seg, envelopes, fx.en);
       const fromFreq = (en0 !== 0 && seg.psGlide.fromNoteNumber != null)
-        ? noteFrequency(seg.psGlide.fromNoteNumber + en0) : seg.psGlide.fromFreq;
+        ? noteFrequency(enTableNote(seg.psGlide.fromNoteNumber + en0)) : seg.psGlide.fromFreq;
       const toFreq = (en0 !== 0 && seg.noteNumber != null)
-        ? noteFrequency(seg.noteNumber + en0) : seg.freq;
+        ? noteFrequency(enTableNote(seg.noteNumber + en0)) : seg.freq;
       const oldReg = applyDetune(periodFn(fromFreq), 0, max);
       const newReg = applyDetune(periodFn(toFreq), 0, max);
       // グライドに使う長さは音符全体ではなく最初の区切り(ゲートオフ/タイの音程切替)まで
@@ -1573,11 +1692,18 @@
       : null;
     let last = null;
     for (let t = 0; t < dur; t++) {
-      const { freq: baseFreq, noteNumber: baseNoteNumber } = activePitchAt(seg, t);
-      const enOffset = noteEnvelopeOffset(seg, envelopes, t + fx.en);
-      const freq = enOffset === 0 ? baseFreq : noteFrequency(baseNoteNumber + enOffset);
+      const { freq: baseFreq, noteNumber: baseNoteNumber, directPeriod } = activePitchAt(seg, t);
       const regOffset = pitchRegisterOffset(seg, envelopes, t, vibSeq, ptSeq, psSeq, fx, dir);
-      const value = applyDetune(periodFn(freq), regOffset, max);
+      let base;
+      if (directPeriod != null) {
+        // @n(直接周波数指定): 指定値にEP/MP/PTだけを足す(ENはノート番号空間の効果なので効かない。
+        // 6502側も LOOKUP_*_PERIOD が DIRACT のとき ENVAL を足さずに指定値を返す)
+        base = directPeriod;
+      } else {
+        const enOffset = noteEnvelopeOffset(seg, envelopes, t + fx.en);
+        base = periodFn(enOffset === 0 ? baseFreq : noteFrequency(enTableNote(baseNoteNumber + enOffset)));
+      }
+      const value = applyDetune(base, regOffset, max);
       const attack = attackFrames != null && attackFrames.has(t);
       if (value !== last || attack) {
         writeFn(startFrame + t, value, attack);
@@ -1960,7 +2086,7 @@
               }, fx);
             smoothLastHi = lastHi;
           } else {
-            const period = applyDetune(pulsePeriod(seg.freq), periodRegDetune(seg), 0x7FF);
+            const period = applyDetune(segBasePeriod(seg, pulsePeriod), periodRegDetune(seg), 0x7FF);
             writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
             const hi = (period >> 8) & 0x07;
             if (!seg.smooth || hi !== smoothLastHi) writeLog[startFrame].push({ addr: base + 3, value: hi });
@@ -2005,7 +2131,7 @@
               }, fx);
             smoothLastHi = lastHi;
           } else {
-            const period = applyDetune(trianglePeriod(seg.freq), periodRegDetune(seg), 0x7FF);
+            const period = applyDetune(segBasePeriod(seg, trianglePeriod), periodRegDetune(seg), 0x7FF);
             writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
             const hi = (period >> 8) & 0x07;
             if (!seg.smooth || hi !== smoothLastHi) writeLog[startFrame].push({ addr: base + 3, value: hi });
@@ -2050,9 +2176,11 @@
             // ポルタメントはtarget自体が符号付きなのでMPのような方向判定は不要
             const ptSeq = seg.portamento ? portamentoSequence(seg.portamento, dur) : null;
             for (let t = 0; t < dur; t++) {
-              const { noteNumber: baseNoteNumber } = activePitchAt(seg, t);
-              const enOffset = noteEnvelopeOffset(seg, env, t);
-              const baseIdx = noisePeriodIndex(baseNoteNumber + enOffset);
+              const { noteNumber: baseNoteNumber, directPeriod } = activePitchAt(seg, t);
+              // @n(直接周波数指定)は下位バイトをそのまま使う(本家: $400E へ sound_freq_low を書くだけ。
+              // bit7 が立っていれば短周期)。EN は効かない(writePitchModulation と同じ)
+              const baseIdx = directPeriod != null ? (directPeriod & 0xFF)
+                : noisePeriodIndex(baseNoteNumber + noteEnvelopeOffset(seg, env, t));
               const regOffset = pitchRegisterOffset(seg, env, t, vibSeq, ptSeq, null, null, -1);
               const val = ((baseIdx + Math.round(regOffset)) & 0xFF) | modeBit;
               if (val !== lastVal) {
@@ -2062,7 +2190,7 @@
               }
             }
           } else {
-            writeLog[startFrame].push({ addr: base + 2, value: noisePeriodIndex(seg.noteNumber) | modeBit });
+            writeLog[startFrame].push({ addr: base + 2, value: (seg.directPeriod != null ? (seg.directPeriod & 0xFF) : noisePeriodIndex(seg.noteNumber)) | modeBit });
             writeLog[startFrame].push({ addr: base + 3, value: 0x00 });
           }
           if (vTable) {
@@ -2118,7 +2246,7 @@
                 }
               });
           } else {
-            const period = applyDetune(vrc6PulsePeriod(seg.freq), periodRegDetune(seg), 0xFFF);
+            const period = applyDetune(segBasePeriod(seg, vrc6PulsePeriod), periodRegDetune(seg), 0xFFF);
             writeLog[startFrame].push({ addr: base + 1, value: period & 0xFF });
             writeLog[startFrame].push({ addr: base + 2, value: 0x80 | ((period >> 8) & 0x0F) });
           }
@@ -2156,7 +2284,7 @@
                 }
               });
           } else {
-            const period = applyDetune(sawPeriod(seg.freq), periodRegDetune(seg), 0xFFF);
+            const period = applyDetune(segBasePeriod(seg, sawPeriod), periodRegDetune(seg), 0xFFF);
             writeLog[startFrame].push({ addr: 0xB001, value: period & 0xFF });
             writeLog[startFrame].push({ addr: 0xB002, value: 0x80 | ((period >> 8) & 0x0F) });
           }
@@ -2208,7 +2336,7 @@
               }
             });
         } else {
-          const period = applyDetune(pulsePeriod(seg.freq), periodRegDetune(seg), 0x7FF);
+          const period = applyDetune(segBasePeriod(seg, pulsePeriod), periodRegDetune(seg), 0x7FF);
           writeLog[startFrame].push({ addr: base + 2, value: period & 0xFF });
           writeLog[startFrame].push({ addr: base + 3, value: (period >> 8) & 0x07 });
         }
@@ -2261,7 +2389,11 @@
           // @2(ノイズ)はppmck仕様で「ノート番号(n0=o0c〜n31=o2g)がそのままノイズ周期」に
           // なる。トーン周期は書かない(ミキサーでトーンを切っているため無意味)
           writeLog[startFrame].push({ addr: 0xC000, value: 6 });
-          writeLog[startFrame].push({ addr: 0xE000, value: Math.max(0, Math.min(31, Math.round(seg.noteNumber))) });
+          // @n の音符はノート番号が周期からの逆算値(0〜119)なので、NSF書き出し(FME7_PREP: NOTE,X AND #$1F)と
+          // 同じ値になるよう下位5bitを使う(@2 はトーンを鳴らさないので @n を書く意味は無いが、両者は揃える)
+          // ★2026-09-19: 通常の音符も下位5bit(以前は0〜31へクランプしていたが、NSF は NOTE AND #$1F で、
+          //   o2g+ 以上が JS では31、NSF では巡回した値になっていた。R6 は5bitレジスタなので実機もこちら)
+          writeLog[startFrame].push({ addr: 0xE000, value: Math.round(seg.noteNumber) & 0x1F });
         } else {
           if (hasPitchModulation(seg)) {
             writePitchModulation(writeLog, startFrame, dur, seg, env, fme7Period, 0xFFF,
@@ -2272,7 +2404,7 @@
                 writeLog[f].push({ addr: 0xE000, value: (period >> 8) & 0x0F });
               });
           } else {
-            const period = applyDetune(fme7Period(seg.freq), periodRegDetune(seg), 0xFFF);
+            const period = applyDetune(segBasePeriod(seg, fme7Period), periodRegDetune(seg), 0xFFF);
             writeLog[startFrame].push({ addr: 0xC000, value: periodRegLo });
             writeLog[startFrame].push({ addr: 0xE000, value: period & 0xFF });
             writeLog[startFrame].push({ addr: 0xC000, value: periodRegHi });
@@ -2416,9 +2548,9 @@
                 lastHi = hi;
               }
             });
-          if (period == null) period = applyDetune(fdsFreqToPeriod(seg.freq), seg.detune, 0xFFF);
+          if (period == null) period = applyDetune(segBasePeriod(seg, fdsFreqToPeriod), seg.detune, 0xFFF);
         } else {
-          period = applyDetune(fdsFreqToPeriod(seg.freq), seg.detune, 0xFFF);
+          period = applyDetune(segBasePeriod(seg, fdsFreqToPeriod), seg.detune, 0xFFF);
           writeLog[startFrame].push({ addr: 0x4082, value: period & 0xFF });
           writeLog[startFrame].push({ addr: 0x4083, value: (period >> 8) & 0x0F });
         }
@@ -2665,7 +2797,7 @@
               // 値のまま固まってしまう(実機6502ドライバとの往復比較で発覚、EN0={0 4 3 -7}の
               // ようなオフセット0を経由する周期パターンで実測)。「変化が無ければ書かない」
               // 判定は直後のf2===lastFnum&&b2===lastBlockチェックだけで十分かつ正しい。
-              const { fnum: f2, block: b2 } = vrc7FreqToFnumBlock(noteFrequency(seg.noteNumber + delta));
+              const { fnum: f2, block: b2 } = vrc7FreqToFnumBlock(noteFrequency(enTableNote(seg.noteNumber + delta)));
               if (f2 === lastFnum && b2 === lastBlock) continue;
               writeLog[startFrame + t].push({ addr: 0x9010, value: 0x10 + ch });
               writeLog[startFrame + t].push({ addr: 0x9030, value: f2 & 0xFF });
@@ -3003,6 +3135,23 @@
       ...(expansionLetterMap.n163 || []),
       ...vrc7Letters
     ]);
+    // @n<num>(直接周波数指定)を使えるチャンネルと、周期/周波数レジスタの幅・逆算式の種類。本家ppmck
+    // (datamake.c のコマンド表 ALLTRACK&~DPCMTRACK&~VRC7TRACK&~N106TRACK と MCK_DIRECT_FREQ の上位バイトの
+    // マスク: VRC6/SUN5B は4bit=12bit、他は3bit=11bit)に合わせる。FDSだけは12bit(buildSegments の directFreq 参照)。
+    // null のチャンネル(VRC7/N163/DPCM)では @n はエラー
+    const directFreqCaps = {
+      A: { kind: 'pulse', bits: 11, label: '2A03 ' + T('パルス') },
+      B: { kind: 'pulse', bits: 11, label: '2A03 ' + T('パルス') },
+      C: { kind: 'triangle', bits: 11, label: '2A03 ' + T('三角波') },
+      D: { kind: 'noise', bits: 11, label: '2A03 ' + T('ノイズ') }
+    };
+    vrc6Letters.forEach((L, i) => {
+      directFreqCaps[L] = i === 2 ? { kind: 'saw', bits: 12, label: 'VRC6 ' + T('ノコギリ波') }
+        : { kind: 'pulse', bits: 12, label: 'VRC6 ' + T('パルス') };
+    });
+    for (const L of (expansionLetterMap.mmc5 || [])) directFreqCaps[L] = { kind: 'pulse', bits: 11, label: 'MMC5 ' + T('パルス') };
+    for (const L of fme7Letters) directFreqCaps[L] = { kind: 'fme7', bits: 12, label: 'FME-7' };
+    for (const L of fdsLetters) directFreqCaps[L] = { kind: 'fds', bits: 12, label: 'FDS' };
     for (const ch of channelLetters) {
       const raw = channels[ch] || { text: '', offsets: [] };
       let tokens = Mml.tokenize(raw.text, raw.offsets);
@@ -3019,6 +3168,7 @@
         psAllowed: ch === 'A' || ch === 'B' || ch === 'C',
         noise: ch === 'D',
         dpcm: (expansionLetterMap.dpcm || []).includes(ch),
+        directFreq: directFreqCaps[ch] || null,
         warnings: segmentWarnings,
         // 音量6bitチャンネル(本家ppmck FMTRACK|VRC6SAWTRACK相当)。FDSは$4080の実効ゲインが
         // 32で頭打ちなので既定音量32、VRC6サウは蓄積レートそのままなので63
@@ -3138,8 +3288,29 @@
         const chip = chipOf[ch];
         if (!chip) continue;
         let frame = 0, count = 0, first = null;
+        let clampCount = 0, clampFirst = null;
+        // タイ(&)の異音程レガート・SD の差し替え先・PS のグライド元が o0c〜o9b の外: NSF のドライバは
+        // 表の端へクランプして鳴らす(音符バイトの 0 クランプ+LOOKUP の上限クランプ)ので、JS も同じ音へ
+        // 丸めて警告する(音符の途中の音程なので「鳴らさない」はできない)
+        const clampTableNote = (n, frameAt, srcStart) => {
+          if (n == null || (n >= 0 && n <= NOTE_TABLE_TOP)) return n;
+          if (!clampFirst) clampFirst = { frame: frameAt, note: n, srcStart };
+          clampCount++;
+          return Math.max(0, Math.min(NOTE_TABLE_TOP, Math.round(n)));
+        };
         for (const seg of segmentsByChannel[ch] || []) {
-          if (seg.freq != null) {
+          // 音階表(o0c〜o9b)の外の音符(2026-09-19): NSF のドライバは表を引けない(119超は1バイト形式の
+          // 音符と衝突して以降のバイト列が全部ずれ、負は o0c になっていた)ので、チップの音域と同じく鳴らさない。
+          // @n はノート番号を使わない(代表値は0〜119)ので対象外
+          if (seg.freq != null && seg.directPeriod == null &&
+              (seg.noteNumber > NOTE_TABLE_TOP || seg.noteNumber < 0)) {
+            const issue = seg.noteNumber < 0 ? 'table-low' : 'table-high';
+            if (!first) first = { issue, frame, note: seg.noteNumber, srcStart: seg.srcStart };
+            count++;
+            seg.freq = null;
+          }
+          // @n(直接周波数指定)は書いた値をそのままレジスタへ送る(本家同様、音域判定で消さない)
+          if (seg.freq != null && seg.directPeriod == null) {
             const opt = chip.kind === 'n163'
               ? { waveLen: (nWaves[seg.instrument] || []).length || N163_WAVE_LEN, numCh: Math.max(1, numN163) }
               : chip;
@@ -3148,6 +3319,19 @@
               if (!first) first = { issue, frame, note: seg.noteNumber, srcStart: seg.srcStart };
               count++;
               seg.freq = null; // 音程は変えず、その音だけ鳴らさない
+            }
+          }
+          // (音域外で鳴らさなくなった音符は数えない)
+          if (seg.freq != null) {
+            if (seg.pitchBreaks) {
+              for (const pb of seg.pitchBreaks) {
+                const n = clampTableNote(pb.noteNumber, frame + pb.atFrame, seg.srcStart);
+                if (n !== pb.noteNumber) { pb.noteNumber = n; pb.freq = noteFrequency(n); }
+              }
+            }
+            if (seg.psGlide && seg.psGlide.fromNoteNumber != null) {
+              const n = clampTableNote(seg.psGlide.fromNoteNumber, frame, seg.srcStart);
+              if (n !== seg.psGlide.fromNoteNumber) seg.psGlide = { fromFreq: noteFrequency(n), fromNoteNumber: n };
             }
           }
           frame += seg.durationFrames;
@@ -3160,7 +3344,18 @@
           };
           warnings.push({ srcStart: first.srcStart, message: first.issue === 'low'
             ? T('{ch}: {note} ({sec}秒) は {chip} の音域より低いため鳴りません{more}。オクターブを上げてください', params)
-            : T('{ch}: {note} ({sec}秒) は {chip} の音域より高いため鳴りません{more}。オクターブを下げてください', params) });
+            : first.issue === 'high'
+              ? T('{ch}: {note} ({sec}秒) は {chip} の音域より高いため鳴りません{more}。オクターブを下げてください', params)
+              : first.issue === 'table-low'
+                ? T('{ch}: {note} ({sec}秒) は o0c より低いため鳴りません{more}(音階は o0c〜o9b)。オクターブを上げてください', params)
+                : T('{ch}: {note} ({sec}秒) は o9b より高いため鳴りません{more}(音階は o0c〜o9b)。オクターブを下げてください', params) });
+        }
+        if (clampFirst) {
+          warnings.push({ srcStart: clampFirst.srcStart, message: T('{ch}: タイ/SD/PS でつながる音程 {note} ({sec}秒) は o0c〜o9b の外なので、端の音で鳴らします{more}', {
+            ch, note: noteNumberToName(clampFirst.note),
+            sec: (clampFirst.frame / FRAME_RATE_NTSC).toFixed(1),
+            more: clampCount > 1 ? T('(他 {n} 音)', { n: clampCount - 1 }) : ''
+          }) });
         }
       }
     }

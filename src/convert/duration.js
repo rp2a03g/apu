@@ -218,8 +218,15 @@
   //   フレームにトリガーが乗り、区間の音の長さ(=固定)と次のトリガーの間隔が一致して継ぎ目が消える。
   //   ★「長さ」で拘束してはいけない: 32フレーム=238.9tick に対して安い `8`(240tick)を選び続けると
   //     1.1tick/区間ずつ位置が流れ、5区間で0.7フレーム→1フレーム遅れる(Truxton II で実測)
+  // soundMask(任意、2026-09-19): true のイベント(鳴っている音符)のうち SHORT_NOTE_FRAMES 以下の短い音符は、
+  //   書いた長さの「相対誤差」にもコスト(SHORT_REL_COST × 相対誤差²)を掛ける。位置のずれだけを見ていると、
+  //   1フレームの打音が安い音価(48分=2フレーム)へ伸ばされる(位置のずれは1フレームで済むが、長さは2倍になる)。
+  //   実測: Metal Gear 2(KSS)曲153 のスネア(AY のトーン+ノイズ、音量 9→7 を各1フレーム)が「d+96 f48 r32」になり、
+  //   2フレームの打音が3フレーム鳴って、ノイズの尾が伸びた。長い音符の±1フレーム(5 と 6 など)は相対誤差が小さいので
+  //   ほぼ影響しない
   const ERR_COST = 0.5, MAX_STATES = 64;
-  MML.Convert.quantizeSeq = function (durs, fpb, slackFrames, exactMask) {
+  const SHORT_NOTE_FRAMES = 4, SHORT_REL_COST = 2;
+  MML.Convert.quantizeSeq = function (durs, fpb, slackFrames, exactMask, soundMask) {
     const tpf = TPQN / fpb;
     const tol = Math.max(SLACK, Math.max(1, slackFrames || 0) * tpf);
     const n = durs.length;
@@ -241,7 +248,11 @@
         for (let k = lowerBound(lo - w); k < SUM_KEYS.length && w + SUM_KEYS[k] <= hi; k++) {
           const S = SUM_KEYS[k], e = SUMS.get(S);
           const ef = (w + S - P[i + 1]) / tpf;
-          const c = st.cost + e.c + ERR_COST * ef * ef;
+          let c = st.cost + e.c + ERR_COST * ef * ef;
+          if (soundMask && soundMask[i] && durs[i] <= SHORT_NOTE_FRAMES) {
+            const rel = (S / tpf - durs[i]) / durs[i];
+            c += SHORT_REL_COST * rel * rel;
+          }
           const cur = next.get(w + S);
           if (!cur || c < cur.cost) next.set(w + S, { cost: c, prev: w, toks: e.toks });
           found = true;

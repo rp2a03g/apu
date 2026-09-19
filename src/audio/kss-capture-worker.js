@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 16:30:25
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 19:48:10
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-19 16:30:25';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-19 19:48:10';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -981,6 +981,12 @@
   for (let i = 0; i < 32; i++) AY_DAC[i] = i < 2 ? 0 : Math.pow(10, (i - 31) * 1.5 / 20);
 
   const NUM_CH = 3;
+  // ★超音波のトーン(2026-09-19): 周期 5 以下は Z80クロック/32(f=3579545/(32*周期)。VGM で別クロックのときも近い値) で 20kHz を超える。出力サンプルの瞬間値を拾うと
+  //   サンプリング周波数との差で折り返し、聞こえる高音(例: 48kHz で FME7 周期1=55.9kHz → 約7.9kHz)になる。
+  //   実機ではアナログ段で平均され、方形波の半分の高さの直流(音量を変えた瞬間の「カチッ」)にしかならないので、
+  //   その平均(0.5)で鳴らす。Konami の MSX ドライバはバスドラの頭を周期1+エンベロープで作る
+  //   (Metal Gear 2 曲153。元の AY は約15.8kHz、FME7 へ写すと約7.9kHz に折り返して金属音になっていた)
+  const ULTRA_TONE_PERIOD_MAX = 5;
 
   class AyTone {
     constructor() { this.period = 1; this.timer = 0; this.level = 0; }
@@ -1125,9 +1131,9 @@
         if (this.mute[i]) continue;
         const toneOn = ((mix >> i) & 1) === 0;
         const noiseOn = ((mix >> (i + 3)) & 1) === 0;
-        const t = toneOn ? this.tones[i].level : 1;
+        const t = toneOn ? (this.tones[i].period <= ULTRA_TONE_PERIOD_MAX ? 0.5 : this.tones[i].level) : 1;
         const n = noiseOn ? this.noise.out : 1;
-        if (t && n) sum += AY_DAC[this.channelLevel(i)] * this.vol[i];
+        if (t && n) sum += AY_DAC[this.channelLevel(i)] * this.vol[i] * t;
       }
       return sum * 0.35;
     }
@@ -5481,9 +5487,9 @@
  *       音量     … 出力は有効ch数で平均されるので、減らすほど同じ v が大きく鳴る(1chは5chの5倍)
  *       周波数   … freqReg ∝ ch数。減らすほどレジスタ値が小さくなり、音程の刻みは粗く、
  *                  出せる最高音は上がる(32サンプル波形で 8ch=1864Hz / 1ch=14915Hz)
- *     'fixed8'(既定) … 常に8ch。ch数で変わる値を固定で扱えるので、曲によって音量や音域が
+ *     'fixed8' … 常に8ch。ch数で変わる値を固定で扱えるので、曲によって音量や音域が
  *       変わらない。波形RAMは64バイトに固定され、高い音は出しにくい。
- *     'used' … 割り当てたスロットのうち一番大きい番号を使う(ch1+ch8なら8、ch2+ch6なら6)。
+ *     'used'(既定、2026-09-19 ユーザー指示で fixed8 から変更) … 割り当てたスロットのうち一番大きい番号を使う(ch1+ch8なら8、ch2+ch6なら6)。
  *       大きい波形を使いたい・音量を出したい・高い音を出したいときはこちら。
  *     ★nsf2mmlだけは対象外。元がN163のネイティブ変換で、実効ch数は元の曲が決めているため。
  *   N163_WAVE … 波形長を自動で縮めるかどうか。縮めると2つの制約が同時にゆるむ。
@@ -5512,9 +5518,9 @@
  *   全形式のドラム(DPCM)経路(src/convert/drumHits.js)が見る。
  *
  * 基準ピッチ(全体オフセット、2026-09-07。下の MML.Convert.detectTuning 冒頭コメント参照):
- *   TUNING     … 'auto'(既定) = 曲全体の音程偏差の中央値を測り、その分ずらした基準で音符へ丸めて
+ *   TUNING     … 'auto' = 曲全体の音程偏差の中央値を測り、その分ずらした基準で音符へ丸めて
  *                `#TUNING <cent>` をヘッダに出す / 'a440' = 従来どおり A4=440Hz の12平均律固定 /
- *                'note'(2026-09-19) = 全体のずれを #TUNING に、そこから外れた音名だけを `#TUNING-NOTE f+ +21 …`
+ *                'note'(2026-09-19、既定。同日ユーザー指示で auto から変更) = 全体のずれを #TUNING に、そこから外れた音名だけを `#TUNING-NOTE f+ +21 …`
  *                に出す(音程表が音名ごとに外れている曲用。MML.Convert.detectTuningNotes)
  *   TUNING_MIN … 'auto' のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5、0〜50)。
  *                閾値未満の曲の出力は 'a440' と完全に同じ
@@ -5660,8 +5666,8 @@
     // 忠実再現(従来の既定)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
                 SHAPE_REST: false, ENV_MERGE: false, FOLD_DOUBLES: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
-                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'fixed8',
-                TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
+                NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'used',
+                TUNING: 'note', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
                 SHAPE_REST: true, ENV_MERGE: false, FOLD_DOUBLES: true, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
@@ -7464,7 +7470,7 @@
       const a = R.noteAnchorT(ev.start, [vt, pt]);
       // ハードウェアエンベロープの音符は volSeq をチップの減衰から作っている(レジスタの音量値ではない)
       if (vt.length && !ev.envUsed) ev.volSeq = R.resampleSeq(vt, ev.start, ev.end, ev.volSeq, a, off);
-      // 超音波を o9c へ寄せた音符(topClamp)は周期の実測を当て直さない(o9c 相当の一定値のまま。EP を作らせない)
+      // 超音波を o9b へ寄せた音符(topClamp)は周期の実測を当て直さない(o9b 相当の一定値のまま。EP を作らせない)
       if (pt.length && !ev.topClamp) ev.pitchSeq = R.resampleSeq(pt, ev.start, ev.end, ev.pitchSeq, a, off);
     }
   }
@@ -7533,9 +7539,14 @@
           //   方形波の直流の跳ね(=クリック)は周期に依らないので、o9c(108、8.4kHz。高さの成分だけは近似)で鳴らす(周期も o9c 相当にして
           //   EP を作らせない)。★o9b まで寄せないこと: NSF 書き出しの 6502 ドライバは o9 の音程表が崩れていて
           //   (o9c〜o9a は全部周期7、o9a+/o9b は桁あふれで低音になる。t1.mml で JS 再生と実測比較)、o9c だけが一致する
+          // ★2026-09-19 改: NSF の FME7 周期表を o9b まで広げた(ppmckDriver.js noteTableSize。o9 の音符を使う曲だけ FME7 の表を120音にする)ので o9b(119)に寄せ、
+          //   さらに FME7 で元と同じく超音波になる周期(AY周期の半分、最低1。FME7 は内部で /2 するため)を
+          //   fme7TopPeriod に控える。kss2mml/converter.js が D で o9b の周期からそこまで上げる(D が使えない
+          //   借用先・D=OFF のときは o9b=約14kHz のまま)。以前の o9c は FME7 で 7990Hz の聞こえる高音になり、
+          //   打楽器の頭に「キン」という金属音が乗っていた(Metal Gear 2 曲153 のバスドラ。元曲は AY 周期1=約112kHz)
           if (note === null && freqHz > 0 && MML.Convert.noteToFreq && freqHz > MML.Convert.noteToFreq(119)) {
-            const top = MML.Convert.noteToFreq(108);
-            freqHz = top; note = 108; seqPeriod = Math.max(1, Math.round(clock / (32 * top)));
+            const top = MML.Convert.noteToFreq(119);
+            freqHz = top; note = 119; seqPeriod = Math.max(1, Math.round(clock / (32 * top)));
           }
         }
       }
@@ -7544,7 +7555,8 @@
       // エンベロープ関連のフィールド。使わない音符は全部 undefined にしておく(pitch.js の統合キー
       // HYSTERESIS_HARD_KEYS に envUsed/envShape/envPeriod/envKey があり、値が違うと統合されない)
       const envFields = envUsed ? { envUsed: true, envShape: t.envShape, envPeriod: t.envPeriod, envKey } : {};
-      const mk = (tie) => Object.assign({ note, mode: mode_, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [seqPeriod], tieCandidate: tie }, envFields, seqPeriod !== period ? { topClamp: true } : {});
+      const mk = (tie) => Object.assign({ note, mode: mode_, noise, freqHz, start: f, end: f, volSeq: [volume], pitchSeq: [seqPeriod], tieCandidate: tie }, envFields,
+        seqPeriod !== period ? { topClamp: true, fme7TopPeriod: Math.max(1, Math.round(period * 1789773 / (2 * clock))) } : {});
       if (!cur) { cur = mk(false); continue; }
       const envBoundary = envUsed !== !!cur.envUsed ||
         (envUsed && (envKey !== cur.envKey || t.envShape !== cur.envShape || t.envPeriod !== cur.envPeriod));
@@ -7650,6 +7662,8 @@
         ? { rawFreq: ev.freqHz, freqSeq: ev.pitchSeq.map(p => toneFreq(p, clock)) } : {},
       ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
       ev.noteEnvTable ? { noteEnvTable: ev.noteEnvTable } : {}, // mergeHwEnvSweeps(呼び出し元が @EN へ登録する)
+      // 超音波を o9b へ寄せた音符: FME7 で元と同じ超音波にする周期(kss2mml/converter.js が D で合わせる)
+      ev.fme7TopPeriod ? { fme7TopPeriod: ev.fme7TopPeriod } : {},
       ev.envUsed ? toHwEnvFields(ev) : toVolumeFields(ev.volSeq)
     );
     return {

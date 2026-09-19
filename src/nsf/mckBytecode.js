@@ -74,6 +74,8 @@
  *               複合オペコード。次の2バイトが[新ノート番号,フレーム数]
  *   0xE7      : @@r<n>(リリース音色、2026-08-15)。次バイトが音色バイト($FF=OFF)。
  *               ゲートオフの瞬間に音色を差し替える(0xFEの音色バイトと同じbit7規約)
+ *   0xE5      : @n<num>(直接周波数指定、2026-09-19)。次の2バイトが[周期/周波数の下位,上位]で、
+ *               直後の音符をこの値で鳴らす(音階テーブルを引かない。OP_DIRECT_FREQ参照)
  *
  * @t<len>,<num>(フレーム単位テンポ)・w<len>(ウェイト)は、コンパイル時点で既に
  * seg.durationFramesへ反映済みのため専用オペコードは不要(既存の音符長エンコードが
@@ -171,6 +173,12 @@
   // SA<num>(N163ピッチシフト量、2026-08-26、本家ppmckcのpitch_shift_amount相当)。
   // 次バイトがシフト量(0-8)。空き領域0xE3-0xE6のうちOP_SWEEP(0xE3)の次を使う
   const OP_PITCH_SA = 0xe4;
+  // @n<num>(直接周波数指定、2026-09-19、本家ppmckのMCK_DIRECT_FREQ相当)。次の2バイトが
+  // [周期/周波数の下位,上位](compiler.jsがチップのレジスタ幅でマスク済み)。直後に必ず通常の音符
+  // (2バイト形式か1バイト形式)が続き、その音符はノート番号の音階テーブルではなくこの値で鳴る。
+  // 音符バイトのノート番号は周期からの逆算値(ロール表示用の代表値)で、音程には使われない。
+  // 本家は [$F6, 下位, 上位, 音長] の1命令だが、本ツールは sticky 音長を共有するため「前置き+音符」にした
+  const OP_DIRECT_FREQ = 0xe5;
   const OP_VIBRATO = 0xfb;
   const OP_WAIT = 0xf4;
   const OP_REST = 0xfc;
@@ -192,7 +200,7 @@
   // @@r(リリース音色、OP_REL_TONE=0xE7)用に2つ確保するため0xE6まで下げた
   // (実際に使われるノート番号の範囲には遠く届かない安全な切り下げ)。2026-08-20、
   // ハードウェアスイープ(OP_SWEEP=0xE3)用に0xE2まで下げた(音長省略形式の音符が
-  // 0x76-0xE1、OP_REST_SAME=0xE2なので、コマンド領域として使えるのは0xE3以上)
+  // 基点(0x76/0x78)-0xE1、OP_REST_SAME=0xE2なので、コマンド領域として使えるのは0xE3以上)
   const NOTE_MAX = 0xe2;
 
   // FME7専用の追加オペコード(実機と非互換の独自拡張。ファイル冒頭コメント参照)
@@ -258,17 +266,24 @@
   // --- sticky音長エンコード(2026-08-16 ROM圧縮対応) ---
   // 実測でノート+休符がバイトコードの5-9割を占め、かつ「直前と同じ音長」率が高い
   // (変換由来の曲で音符9割・休符7割など)ため、音長バイトを省略できる1バイト形式を導入する。
-  //   0x00-0x6B: 音符+音長バイト(従来通り2バイト)。音長バイトは6502側NOTELEN,X(sticky)を更新
-  //   0x76-0xE1: 「ノート番号(値-0x76)+直前の音符と同じ音長」の1バイト形式
-  //   0xE2:      「直前の休符/ゲートオフと同じ長さの休符」の1バイト形式(OP_REST_SAME)
-  //   0x6C-0x75, 0xE3-0xE6: 未使用(将来の拡張用)
-  // 実ノート番号は最大107(0x6B、9オクターブテーブル)なので1バイト形式で全音域を表現でき、
-  // 音域の制限は一切無い。音長が直前と異なる音符は従来の2バイト形式のままなので、
-  // どんな曲でも旧形式よりサイズが悪化することは無い。
+  //   0x00-(基点-1): 音符+音長バイト(従来通り2バイト)。音長バイトは6502側NOTELEN,X(sticky)を更新
+  //   基点-0xE1:     「ノート番号(値-基点)+直前の音符と同じ音長」の1バイト形式
+  //   0xE2:          「直前の休符/ゲートオフと同じ長さの休符」の1バイト形式(OP_REST_SAME)
+  //   0xE3-0xE6:     コマンド(0xE3=OP_SWEEP / 0xE4=OP_PITCH_SA / 0xE5=OP_DIRECT_FREQ(@n) / 0xE6=未使用)
+  // 基点(1バイト形式の先頭)は曲ごとに決める(2026-09-19)。ドライバの RD_NOTE の CMP/SBC 即値と
+  // serialize/deserialize/commandBoundaries の noteBase 引数は、必ず同じ値にすること(ppmckDriver.js noteImplicitBase):
+  //   NOTE_BASE_DEFAULT(0x76): 従来どおり。2バイト形式は ノート番号0〜117(o9a)、1バイト形式は 0〜107(o8b)
+  //   NOTE_BASE_WIDE(0x78):    2バイト形式で書く音符に 118/119(o9a+/o9b)がある曲だけ。1バイト形式は 0〜105(o8a)
+  //   (0x76 のままだと 118/119 の音符バイトが1バイト形式の o0c/o0c+ と同じ値になり、以降の読みが全部ずれる)
+  // o8b 以下しか使わない曲は 0x76 のままなので、NSF は従来とバイト単位で同じ
   // ★Lループとの整合: serialize()はループ地点でsticky音長とdedup状態(lastVolume等)を
   // 全てリセットし、ループ本体の先頭で必ず明示形式を出し直す(下記resetDedupAtLoop参照)
-  const NOTE_IMPLICIT_BASE = 0x76;
-  const NOTE_IMPLICIT_MAX = 0x6b; // これ以下のノート番号のみ1バイト形式にできる(0x76+0x6B=0xE1)
+  const NOTE_BASE_DEFAULT = 0x76;
+  const NOTE_BASE_WIDE = 0x78;
+  MckBytecode.NOTE_BASE_DEFAULT = NOTE_BASE_DEFAULT;
+  MckBytecode.NOTE_BASE_WIDE = NOTE_BASE_WIDE;
+  // 1バイト形式の最後(0xE1)。これ以下が音符、OP_REST_SAME(0xE2)から上はコマンド
+  const NOTE_IMPLICIT_LAST = 0xe1;
   const OP_REST_SAME = 0xe2;
 
   // 音長(フレーム数)を、255ずつのチャンクに分割して書き込む。
@@ -324,6 +339,9 @@
   MckBytecode.serialize = function (segments, immediateWrites, envIndexRemap, loopFrame, pitchEnvIndexRemap, vibratoIndexRemap, noteEnvIndexRemap, vrIndexRemap, usesVr, dutyIndexRemap, chanOpts) {
     const bytes = [];
     const isDpcm = !!(chanOpts && chanOpts.dpcm); // E(DPCM): 音量/音色バイトを持たない(冒頭コメント参照)
+    // 1バイト形式の基点(曲ごと、NOTE_BASE_DEFAULT 参照)。2バイト形式の音符バイトは必ず基点未満に収める
+    const NOTE_IMPLICIT_BASE = (chanOpts && chanOpts.noteBase) || NOTE_BASE_DEFAULT;
+    const NOTE_IMPLICIT_MAX = NOTE_IMPLICIT_LAST - NOTE_IMPLICIT_BASE; // これ以下のノート番号のみ1バイト形式にできる
     let loopByteOffset = null;
     let lastVolume = null;
     let lastVolMode = null; // 'plain' | 'env' | 'fme7env' (src/convert/mmlEmit.jsのcurVolModeと
@@ -659,7 +677,13 @@
           lastEnvelopeVr = 255;
         }
 
-        const noteByte = Math.max(0, Math.min(NOTE_MAX, Math.round(seg.noteNumber)));
+        // 音符バイトは必ず基点未満(2バイト形式で書ける範囲)に収める。基点以上は1バイト形式の音符と衝突して
+        // 以降の読みが全部ずれる(2026-09-19まで NOTE_MAX=0xE2 までしか切っておらず、o9a+ 以上や
+        // 未定義の大きな @DPCM 番号で NSF が壊れていた)。compiler.js は音符を0〜119に収め(外は鳴らさない)、
+        // 118/119 を書く曲では ppmckDriver.js が基点を 0x78 にするので、実際に切られるのは
+        // DPCM の未定義番号(ドライバは何もしない。基点-1-24 は定義の上限63より大きいので未定義のまま)だけ。
+        // @n の音符のノート番号は表示用の代表値(音程には使わない)
+        const noteByte = Math.max(0, Math.min(NOTE_IMPLICIT_BASE - 1, Math.round(seg.noteNumber)));
         // タイ(&)で異音程へレガートしたセグメント(compiler.jsのpitchBreaks)は、
         // ゲートオフ(OP_REST)と同じく「このセグメント内の相対フレーム位置」の
         // マーカーとして扱う。両方を時系列でマージし、各区間の長さをpushLengthで
@@ -718,6 +742,11 @@
         // PSグライド(OP_PITCH_SHIFT_NOTE)は6502側がNOTELENを更新しない専用経路なので
         // 常に明示形式のまま(stickyも更新しない=6502側の挙動と厳密一致)
         const firstLen = breakpoints.length > 0 ? breakpoints[0].atFrame : seg.durationFrames;
+        // @n(直接周波数指定): 音符の直前に周期値を置く(OP_DIRECT_FREQ冒頭コメント参照)。
+        // compiler.js は @n の音符にPSグライドを付けないので、続くのは必ず通常の音符形式
+        if (seg.directPeriod != null) {
+          bytes.push(OP_DIRECT_FREQ, seg.directPeriod & 0xff, (seg.directPeriod >> 8) & 0xff);
+        }
         if (seg.psGlide) {
           bytes.push(OP_PITCH_SHIFT_NOTE, noteByte);
           pushLength(bytes, firstLen);
@@ -792,7 +821,10 @@
   // シリアライズ結果を読み戻し、イベント列にする(往復テスト用。実際の6502ドライバの
   // 代わりにJSで同じ解釈をする)。noteEnv/pitchEnv/vibrato/fme7*はその時点で選択中の
   // 値として各noteイベントに載せる
-  MckBytecode.deserialize = function (bytes) {
+  // noteBase: serialize の chanOpts.noteBase と同じ値(省略時 NOTE_BASE_DEFAULT)
+  MckBytecode.deserialize = function (bytes, noteBase) {
+    const NOTE_IMPLICIT_BASE = noteBase || NOTE_BASE_DEFAULT;
+    const NOTE_IMPLICIT_MAX = NOTE_IMPLICIT_LAST - NOTE_IMPLICIT_BASE;
     const rawEvents = [];
     let i = 0;
     let volume = null, tone = null;
@@ -808,6 +840,7 @@
     let envIdx = null; // OP_VOL_ENVで選択中のコンパクトなテーブル番号(nullならプレーン音量)
     // sticky音長(2026-08-16)。6502側NOTELEN,X/RESTLEN,Xと同じ解釈
     let stickyNoteLen = 0, stickyRestLen = 0;
+    let pendingDirect = null; // OP_DIRECT_FREQ(@n)で読んだ周期値。直後の音符イベントへ載せる
 
     while (i < bytes.length) {
       const b = bytes[i]; i++;
@@ -869,6 +902,8 @@
         continue;
       }
       if (b === OP_PITCH_SA) { pitchSa = bytes[i]; i++; continue; }
+      // @n(直接周波数指定): 次の音符イベントにだけ directPeriod を載せる
+      if (b === OP_DIRECT_FREQ) { pendingDirect = bytes[i] | (bytes[i + 1] << 8); i += 2; continue; }
       if (b === OP_VIBRATO) { vibrato = bytes[i]; i++; continue; }
       // s<speed>,<depth>(2026-08-20): 生の$4001/$4005バイトを保持するだけ
       // (このデコーダは音符イベントの再構成用で、スイープはレジスタ直書きなので値は使わない)
@@ -923,16 +958,20 @@
       if (b >= NOTE_IMPLICIT_BASE && b <= NOTE_IMPLICIT_BASE + NOTE_IMPLICIT_MAX) {
         rawEvents.push({
           type: 'note', noteNumber: b - NOTE_IMPLICIT_BASE, frames: stickyNoteLen, volume, tone, envIdx,
-          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, pitchSa, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty
+          noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, pitchSa, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty,
+          ...(pendingDirect != null ? { directPeriod: pendingDirect } : {})
         });
+        pendingDirect = null;
         continue;
       }
       const frames = bytes[i]; i++;
       stickyNoteLen = frames;
       rawEvents.push({
         type: 'note', noteNumber: b, frames, volume, tone, envIdx,
-        noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, pitchSa, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty
+        noteEnv, pitchEnv, pitchEnvDelay, portamento, vibrato, fme7Noise, fme7EnvShape, fme7EnvPeriod, detune, pitchSa, smooth, envelopeVr, toneEnv, releaseTone, releaseToneDuty,
+        ...(pendingDirect != null ? { directPeriod: pendingDirect } : {})
       });
+      pendingDirect = null;
     }
 
     // ウェイトは直前のイベントの音長に合算する(実機と同じ「カウンタ延長」の意味で、
@@ -951,7 +990,11 @@
   // 各コマンドの開始バイト位置を列挙する(トラック終端0xFFの位置も含む)。
   // NSFバンク切り替え(src/driver/ppmckDriver.js)で、4KBバンク境界をコマンドの
   // 途中で跨がないよう安全な分割点を選ぶために使う
-  MckBytecode.commandBoundaries = function (bytes) {
+  // noteBase: serialize の chanOpts.noteBase と同じ値(省略時 NOTE_BASE_DEFAULT)。
+  // 基点が違うと 0x76/0x77 を1バイト形式と2バイト形式のどちらで読むかが変わり、分割点がずれる
+  MckBytecode.commandBoundaries = function (bytes, noteBase) {
+    const NOTE_IMPLICIT_BASE = noteBase || NOTE_BASE_DEFAULT;
+    const NOTE_IMPLICIT_MAX = NOTE_IMPLICIT_LAST - NOTE_IMPLICIT_BASE;
     const offsets = [];
     let i = 0;
     while (i < bytes.length) {
@@ -972,9 +1015,12 @@
       if (b === OP_PITCH_ENV || b === OP_PITCH_BREAK || b === OP_PITCH_SHIFT_NOTE ||
           b === OP_GATE_OFF_VR_SD) { i += 2; continue; }
       if (b === OP_DETUNE) { i += 2; continue; }
+      // OP_DIRECT_FREQ(@n、2026-09-19)は[下位,上位]の2バイトパラメータ。続く音符とは別コマンドなので
+      // 間でバンクを分けてよい(6502側はDIRACT=2のまま次のバンクで音符を読む)
+      if (b === OP_DIRECT_FREQ) { i += 2; continue; }
       // OP_RAW_WRITE(y、2026-08-13)は[アドレス下位,アドレス上位,値]の3バイトパラメータ
       if (b === OP_RAW_WRITE) { i += 3; continue; }
-      // sticky音長の1バイト形式(2026-08-16): 音符(0x76-0xE1)とOP_REST_SAME(0xE2)は
+      // sticky音長の1バイト形式(2026-08-16): 音符(基点-0xE1)とOP_REST_SAME(0xE2)は
       // パラメータ無しの1バイトコマンド
       if (b === OP_REST_SAME ||
           (b >= NOTE_IMPLICIT_BASE && b <= NOTE_IMPLICIT_BASE + NOTE_IMPLICIT_MAX)) { continue; }

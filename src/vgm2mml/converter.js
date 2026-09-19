@@ -57,7 +57,10 @@
     return m == null ? 15 : m;
   }
   // 対数DACのチップ → 1段あたりのdB。LIN_TABLE/VRC7_TABLE と同じ顔ぶれ
-  const LIN_STEP = { ay8910: 1.5, sn76489: 2 };
+  // ★AY-3-8910 の音量レジスタ(4bit)は1段 3dB(共通の音量則 borrow.js CHIP_VOL_LAW と同じ。YM2149 の5bit DAC
+  //   1.5dB/段は4bitの値を奇数段へ写すので、レジスタ値としては3dB/段)。以前は 1.5 で、VGMの AY を
+  //   パルス/N163/FDS へ割り当て直したときだけ小さい音が持ち上がっていた(2026-09-19 修正)
+  const LIN_STEP = { ay8910: 3, sn76489: 2 };
   const linTableCache = new Map();
   // ★借用先ごとにレンジが違う(FDS=32/VRC6のこぎり=42)ので、表も借用先ごとに作る。
   //   以前は 0-15 の LIN_TABLE 固定で、@v(エンベロープ表)と v(定数音量)で尺度が食い違っていた
@@ -448,14 +451,14 @@
   const pulsePeriodRaw = freq => CPU_CLOCK_NTSC / (16 * freq) - 1;   // 2A03/MMC5パルス
   const triPeriodRaw = freq => CPU_CLOCK_NTSC / (32 * freq) - 1;     // 2A03三角波
   const vrc6PulsePeriodRaw = freq => CPU_CLOCK_NTSC / (16 * freq) - 1;
-  const LIN_TABLE = { ay8910: logToLinearTable(1.5), sn76489: logToLinearTable(2) };
+  const LIN_TABLE = { ay8910: logToLinearTable(3), sn76489: logToLinearTable(2) };
   // 4bit対数音量 → VRC7の減衰値(v0=最大、3dB/段)。AY/SN の音量エンベロープ表(envReg経由)と定数音量の両方に使う
   function logToVrc7Table(dbPerStep) {
     const t = new Array(16);
     for (let v = 0; v < 16; v++) t[v] = Math.max(0, Math.min(15, Math.round((15 - v) * dbPerStep / 3)));
     return t;
   }
-  const VRC7_TABLE = { ay8910: logToVrc7Table(1.5), sn76489: logToVrc7Table(2) };
+  const VRC7_TABLE = { ay8910: logToVrc7Table(3), sn76489: logToVrc7Table(2) };
   // 4bit対数音量 → FME-7(5B)の音量(3dB/段、src/emulator/expansion/fme7.js: 5bit 1.5dB/段を 2V+1 で引く)。
   // SN76489(2dB/段)だけが対象。以前は SN→FME-7 を「そのまま載る」として生値を写していたため、
   // 強弱の差が1.5倍に広がっていた(Power Strike II(SMS) 曲8: ch1 と ch2/ch3 の音量差 +4.7/-6.0dB が
@@ -521,9 +524,23 @@
     // ★vrc6saw/fds も線形音源(2026-09-11追加)。以前は外れていたため、これらへ載せると
     //   @v だけ元の対数値のまま素通りし、v(定数音量)と別の尺度になっていた
     const needsLinear = fam => fam === 'n163' || fam === 'pulse' || fam === 'vrc6pulse' || fam === 'vrc6saw' || fam === 'fds';
+    // ★旋律ch(AY/SN のトーン)→2A03ノイズ(2026-09-19): 定数音量は adaptGroup が減衰dB経由
+    //   (sourceAttDb → VOL_FROM_DB.linear)で線形へ換算するのに、@v は写像されず元の対数値のままだった
+    //   (Aleste 2 PSG の AY ch1 → D で v2 と @v{4..10} が同じ音符列に並んでいた)。定数音量と同じ式の表で @v を写す。
+    //   assign だけのプロキシなので抽出器の定数音量は生値のまま返り、adaptGroup の換算は1回で済む
+    const noiseTableCache = new Map();
+    const noiseTable = (chip) => {
+      if (!(chip in LIN_STEP)) return null;
+      if (!noiseTableCache.has(chip)) {
+        noiseTableCache.set(chip, Array.from({ length: 16 }, (_, v) => (v === 0 ? 0
+          : VOL_FROM_DB.linear(sourceAttDb({ chip }, { volume: v }), famVolMax('noise')))));
+      }
+      return noiseTableCache.get(chip);
+    };
     const regFor = (chip, fam) => (needsLinear(fam) && envTable(chip, fam)) ? mappedEnvReg(envReg, envTable(chip, fam))
       : (fam === 'vrc7' && VRC7_TABLE[chip]) ? mappedEnvReg(envReg, VRC7_TABLE[chip])
-        : (fam === 'fme7' && FME7_TABLE[chip]) ? mappedEnvRegWithRelease(envReg, FME7_TABLE[chip]) : envReg;
+        : (fam === 'fme7' && FME7_TABLE[chip]) ? mappedEnvRegWithRelease(envReg, FME7_TABLE[chip])
+          : (fam === 'noise' && noiseTable(chip)) ? mappedEnvReg(envReg, noiseTable(chip)) : envReg;
 
     // ── 音色ごとの設定(src/convert/toneSettings.js、2026-09-09) ─────────────────────
     // options.toneSettings … main.js が ToneSettings.snapshot() で作った素のオブジェクト(無ければ従来どおり)
@@ -1504,23 +1521,9 @@
       //   常駐区間の余裕を広げて変換し直す。コンパイルできる曲の出力は変わらない。
       //   余裕を広げるだけでは足りない場合(同じバイト数でも断片化の仕方が見積りと違う)に備え、コンパイラが
       //   置けなかった波形はやり直しのたびに1段ずつ縮める。変換設定 N163_WAVE='keep' のときは何もしない
-      const cmdN = MML.Convert.normalizeCmd(options.cmd);
-      if (cmdN.N163_WAVE !== 'keep' && MML.Mml && MML.Mml.compile && (result.expansions || []).indexOf('n163') >= 0) {
-        const ramErrors = (mml) => {
-          try { return (MML.Mml.compile(mml, {}).errors || []).filter(e => e.kind === 'n163Ram'); }
-          catch (e) { return []; }
-        };
-        const force = {};
-        let extra = 0;
-        for (let attempt = 0; attempt < 12; attempt++) {
-          const errs = ramErrors(result.mml);
-          if (!errs.length) break;
-          extra = extra ? Math.min(extra * 2, 128) : 8;
-          for (const er of errs) if (er.instrument != null) force[er.instrument] = (force[er.instrument] || 0) + 1;
-          result = MML.Convert.autoTune(Object.assign({}, options, { n163ExtraMargin: extra, n163ForceHalve: Object.assign({}, force) }),
-            (o) => composePsgLike(data, h, label, o, ignoredNote));
-        }
-      }
+      //   (処理本体は src/convert/n163Fit.js retryOnRamError。KSS も同じものを使う)
+      result = MML.Convert.N163Fit.retryOnRamError(options, result,
+        (o) => MML.Convert.autoTune(o, (oo) => composePsgLike(data, h, label, oo, ignoredNote)));
     } else if (family === 'nes') {
       const header = {
         extraChips: data.nes.fds ? MML.NSF.CHIP_FLAGS.FDS : 0,

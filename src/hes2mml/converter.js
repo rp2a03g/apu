@@ -35,6 +35,64 @@
     };
   }
 
+  // ── 音量: PSGの対数インデックス → N163/2A03ノイズの線形音量(2026-09-19) ──────────────
+  // 抽出器(wave.js/noise.js)の音量は実効インデックス effVol>>1(0-15、1段=3dB の対数。
+  // apuHuC6280.js gainFromIndex)。★以前はこれを N163 と 2A03ノイズ(どちらも音量値が振幅に比例する
+  // 線形4bit)へ生値のまま書いていたため、強弱の差が大きく縮んでいた(idx12=-9dB が v12=-1.9dB)。
+  // 小さいch・小さいノイズほど持ち上がるので、ノイズ(元はトーンより3〜6段小さい曲が多い)が
+  // 元のトーン:ノイズ比より平均 +8.4dB(N163 8ch)/ +4.4dB(使ったch数)大きく、減衰も緩かった
+  // (コーパス12曲の実測。ノイズだけ直すとトーン側の持ち上がりが残るので逆に平均 -4〜-5dB 小さくなる)。
+  // トーンch同士の音量差も元との食い違いが平均 3.0dB → 1.3dB(8曲38ch)に縮む。
+  // 借用層(borrow.js CHIP_VOL_LAW huc6280: 3dB/段)が2A03パルス等へ載せるときに使う換算と同じ考え方。
+  //
+  // 正規化: 曲全体で下位1%の減衰(=上位1%の大きさのインデックス)を v15 に寄せる
+  // (opn.js normalizeAtt と同じ「チップ単位」。ch単位にするとch間の差が壊れる)。
+  // 全体に小さく鳴らす曲(実効インデックスの平均が5〜7の曲がある)が v1-v2 に張り付かないようにするため
+  const PSG_DB_PER_STEP = 3;
+  function logToLinearTable(offsetDb) {
+    const t = new Array(16);
+    for (let v = 0; v < 16; v++) {
+      t[v] = v === 0 ? 0 : Math.max(1, Math.min(15, Math.round(15 * Math.pow(10, (offsetDb - PSG_DB_PER_STEP * (15 - v)) / 20))));
+    }
+    return t;
+  }
+  // 曲全体の正規化量[dB](トーン/ノイズの鳴っているフレームの実効インデックス上位1%を15へ)
+  function normalizeOffsetDb(snapshots) {
+    const hist = new Array(16).fill(0);
+    let n = 0;
+    for (const s of snapshots) {
+      for (let c = 0; c < 6; c++) {
+        const x = s[c];
+        if (!x || !x.on || x.dda) continue;
+        const idx = MML.Hes2MmlExpansion._effectiveVolIndex(x.vol, x.balance, s.globalBalance) >> 1;
+        if (idx > 0) { hist[Math.min(15, idx)]++; n++; }
+      }
+    }
+    if (!n) return 0;
+    let acc = 0;
+    for (let v = 15; v >= 1; v--) { acc += hist[v]; if (acc >= n * 0.01) return (15 - v) * PSG_DB_PER_STEP; }
+    return 0;
+  }
+  // 2A03ノイズを N163 のトーンに釣り合わせる補正[dB]。元の PSG ではノイズと全振幅の矩形波が
+  // 同じインデックスで同じ大きさ(apuHuC6280.js: どちらも 0/31 の2値。単独再生の実測 -15.8dB で一致)。
+  // 借用先では 2A03ノイズ v15 が -21.1dB(apu2a03.js tnd式、実測)、N163 の全振幅矩形波 v15 が
+  // -24.6dB + 20log10(8/numCh)(n163.js mixSample は有効ch数で割る)なので、その差だけノイズを動かす
+  // (8ch: -3.5dB / 6ch: -1.0dB / 5ch: +0.6dB)。N163 を使わない割当では補正しない
+  function noiseBalanceDb(n163NumCh) {
+    return n163NumCh > 0 ? -3.5 + 20 * Math.log10(8 / n163NumCh) : 0;
+  }
+  // envReg を写像テーブル経由にするプロキシ(抽出器が使う assign / volumeFieldsWithRelease の両方。
+  // 定数音量 ev.volume も volumeFieldsWithRelease が写像後の列から作るので別途の写像は要らない)
+  function mappedEnvReg(envReg, table) {
+    const map = seq => seq.map(v => table[Math.max(0, Math.min(15, v))]);
+    return {
+      assign: seq => envReg.assign(map(seq)),
+      volumeFieldsWithRelease: seq => (envReg.volumeFieldsWithRelease
+        ? envReg.volumeFieldsWithRelease(map(seq))
+        : (() => { const idx = envReg.assign(map(seq)); return idx == null ? { volume: MML.Convert.plainVolume(map(seq)) } : { envelopeV: idx }; })())
+    };
+  }
+
   MML.HES2MML.fromHes = async function (hesBytes, track, durationSeconds, options) {
     options = options || {};
     const header = MML.HES.parseHeader(hesBytes);
@@ -66,8 +124,9 @@
    *   frameRate, trackLabel(コメント用), sourceLabel(コメント用、既定'HES') }
    */
   // ── チャンネル割当(案E) ────────────────────────────────────────
-  // 変換元チャンネルのIDは鍵盤表示の行IDと同じ体系(PSG0-5)。音量は抽出時点で線形4bitなので
-  // linear:true(借用層の音量写像が対数の借用先=FME-7/VRC7へ換算する)。
+  // 変換元チャンネルのIDは鍵盤表示の行IDと同じ体系(PSG0-5)。音量は抽出時点では対数インデックス(0-15)で、
+  // N163(nativeFamily、借用層は素通し)へ載せる分は convertHesOnce が線形へ写像済み
+  // (logToLinearTable)。それ以外の借用先へは借用層が CHIP_VOL_LAW で換算する。
   // ノイズ(ch4/5のノイズモード)とDDA(PCM)は「chのモード」であって別チャンネルではないため、
   // 割当の対象にはせず従来どおりD/Eへ固定で出す。
   MML.HES2MML.sourceChannels = function () {
@@ -112,11 +171,20 @@
     // controlTrace($0804書込み列)はソフト音量エンベロープの位相エイリアシング対策の
     // リサンプルに使う(wave.js buildVolTimeline冒頭コメント参照)。VGM経由は空配列で
     // 従来のスナップショット列にフォールバックする。
-    const waveResult = MML.Hes2MmlExpansion.wave(snapshots, n163WaveReg, envReg, capture.controlTrace, capture.pitchTrace,
+    // 音量は対数インデックス → 線形(logToLinearTable 冒頭コメント)。N163へ載せるトーンはここで写像済みの
+    // レジストリで抽出する(借用層で N163 以外へ載せる分は下の extract が生のインデックスで取り直す)
+    const volNormDb = normalizeOffsetDb(snapshots);
+    const volNormSteps = Math.round(volNormDb / PSG_DB_PER_STEP);
+    const normShiftTable = Array.from({ length: 16 }, (_, v) => (v === 0 ? 0 : Math.min(15, v + volNormSteps)));
+    const waveResult = MML.Hes2MmlExpansion.wave(snapshots, n163WaveReg, mappedEnvReg(envReg, logToLinearTable(volNormDb)),
+      capture.controlTrace, capture.pitchTrace,
       // SA不使用設定のときだけ深い統合を止める(wave.js冒頭コメント参照)
       { maxAbsorbCents: cmd.PITCH_SA === 'off' ? 70 : null });
-    const noiseResult = MML.Hes2MmlExpansion.noise(snapshots, envReg, capture.controlTrace);
-    const hasNoise = noiseResult.events.some(ev => ev.note !== null);
+    // ノイズの音量は N163 の実効ch数で補正量が変わる(noiseBalanceDb)ので、ch数が決まってから抽出する。
+    // ここでは有無の判定だけ(レジストリを渡さないので @v は登録されない。音程/区切りは音量写像に依らない)
+    const hasNoise = MML.Hes2MmlExpansion.noise(snapshots, null, capture.controlTrace).events.some(ev => ev.note !== null);
+    const extractNoise = (n163NumCh) => MML.Hes2MmlExpansion.noise(snapshots,
+      mappedEnvReg(envReg, logToLinearTable(volNormDb + noiseBalanceDb(n163NumCh))), capture.controlTrace);
     // options.drumHits: 合成音ch(PSG波形ch)を打楽器化した打点(main.js synthDrum)。DDAと一緒にEへ
     const dpcmResult = MML.Hes2MmlExpansion.dpcm(snapshots, capture.dpcmTrace, capture.controlTrace, frameRate, cmd,
       cmd.DRUM !== false ? (options.drumHits || null) : null);
@@ -190,9 +258,12 @@
         toneOf: (id) => (options.tone || {})[id],
         toneSettings: options.toneSettings || null, // 音色ごとの設定(src/convert/toneSettings.js)
         // PSGの抽出は借用先ファミリに依らず1回でよい(既に上で済ませてある)。ただし音量尺度が
-        // 違うファミリ(FME-7/VRC7)へ載せる分は @v テーブルを写像した registry で取り直す
+        // 違うファミリ(FME-7/VRC7/2A03パルス等)へ載せる分は @v テーブルを写像した registry で取り直す。
+        // 借用層の写像(CHIP_VOL_LAW huc6280: 3dB/段)は生のインデックスを受けるので、曲全体の正規化
+        // (normalizeOffsetDb、3dBの整数倍)はインデックスを同じ段数だけ持ち上げて揃える
         extract: (chip, fam, reg) => (reg === envReg ? waveResult.channels
-          : MML.Hes2MmlExpansion.wave(snapshots, MML.Convert.n163WaveRegistry(), reg,
+          : MML.Hes2MmlExpansion.wave(snapshots, MML.Convert.n163WaveRegistry(),
+              volNormSteps ? mappedEnvReg(reg, normShiftTable) : reg,
               capture.controlTrace, capture.pitchTrace,
               { maxAbsorbCents: cmd.PITCH_SA === 'off' ? 70 : null }).channels),
       });
@@ -205,7 +276,8 @@
       toneDemotions = r.demotions || [];
       chanDesc = Object.keys(r.placed)
         .map(t => `${MML.Convert.ChannelPlan.letterOfTarget(t)}=${r.placed[t].source.label}`).sort().join(' ');
-      if (hasNoise) scoreChannels.push(Object.assign({}, noiseResult, { letter: 'D' }));
+      // N163 を使わない割当ではノイズの補正をしない(noiseBalanceDb)
+      if (hasNoise) scoreChannels.push(Object.assign({}, extractNoise(expansions.indexOf('n163') >= 0 ? n163NumCh : 0), { letter: 'D' }));
       if (hasDpcm) scoreChannels.push({ letter: expansionLetterMap.dpcm[0], events: dpcmResult.events }); // E: 音符=@DPCM番号(本家ppmck準拠)
       MML.Convert.sortChannelsByLetter(scoreChannels);
     } else {
@@ -225,13 +297,21 @@
       .map((ch, i) => Object.assign({}, ch, { letter: n163Letters[i], hasDetune: true, hasPitchMod: true }));
     scoreChannels = allWave.filter(ch => ch.events.some(ev => ev.note !== null));
     if (!scoreChannels.length) scoreChannels = allWave.slice(0, 1);
-    if (hasNoise) scoreChannels.push(Object.assign({}, noiseResult, { letter: 'D' }));
+    if (hasNoise) scoreChannels.push(Object.assign({}, extractNoise(n163NumCh), { letter: 'D' }));
     if (hasDpcm) scoreChannels.push({ letter: dpcmLetter, events: dpcmResult.events }); // E: 音符=@DPCM番号(本家ppmck準拠)
     }
     // ノイズパッド(2026-09-18): 載せ先=ノイズのパッドの打点(DDA/合成音ch)を2A03ノイズ(D)へ
     // (既存の D=PSGノイズ と単音マージ。src/convert/drumHits.js applyNoise)
     if (dpcmResult.noiseHits && dpcmResult.noiseHits.length && MML.Convert.DrumHits && MML.Convert.DrumHits.applyNoise) {
-      MML.Convert.DrumHits.applyNoise(scoreChannels, dpcmResult.noiseHits, frameRate, {
+      // DDAの打点の音量(dpcm.js ddaGain、エミュレータと同じ線形振幅)を、PSGノイズ→D と同じ尺度へ
+      // (曲全体の正規化 volNormDb+ノイズの釣り合い noiseBalanceDb。extractNoise と同じ)。
+      // パッドの「自動」はこの vol×15 を v にする(drumHits.js noiseToneOf)。合成音chの打点(extraHits)は
+      // 別の尺度なので触らない
+      const padNoiseDb = volNormDb + noiseBalanceDb(customPlan ? (expansions.indexOf('n163') >= 0 ? n163NumCh : 0) : n163NumCh);
+      const padGain = Math.pow(10, padNoiseDb / 20);
+      const noiseHits = dpcmResult.noiseHits.map(h => (/^dda/.test(h.key || '')
+        ? Object.assign({}, h, { vol: Math.min(1, (h.vol || 0) * padGain) }) : h));
+      MML.Convert.DrumHits.applyNoise(scoreChannels, noiseHits, frameRate, {
         totalFrames, regs: { envReg, pitchReg, noteEnvReg }, presets: options.noisePresets });
     }
 

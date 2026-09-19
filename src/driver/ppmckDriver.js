@@ -49,6 +49,7 @@
  * 2026-09-14から対象。2026-09-18からは本家ppmck準拠で周期index(0-15)へD/EP/MP/PTを8bit加減算し
  * クランプしない(D16 n0 → $F0 のように桁あふれで bit7=短周期が立つ。compiler.jsのノイズ経路と同じ、
  * 実ppmck09aのNSFと$400E列で一致確認)。
+ * @n<num>(直接周波数指定、0xE5)は2026-09-19実装(RD_DIRECT/LOOKUP_DIRECT/DIRACT参照)。使う曲にだけ埋め込む。
  *
  * --- データ埋め込みは実際に使うチップの分だけ ---
  * 各拡張チップの周波数テーブル・波形データ・レジスタ書き込みハンドラは、
@@ -99,6 +100,14 @@
   const CPU_CLOCK_NTSC = 1789773;
   const NOTE_TABLE_SIZE = 108; // 9オクターブ分(o0-o8相当)
   const TABLE_MAX = NOTE_TABLE_SIZE - 1;
+  // o9 の段(o9c〜o9b、ノート番号108〜119)まで持つ表の大きさ(2026-09-19)。曲の中でそのチップが o9 の音
+  // (EN・タイ・SD・PS で届く音も含む)を実際に使い、かつ o9 の値が o8b(107番)と違う表だけをこの大きさにする
+  // (buildFixedSource の noteTableSize、buildBankedNsfBytes の noteReach)。o8b までの曲は108音のままで、
+  // NSF は従来とバイト単位で同じ。例: AY/PSG の曲は 10kHz 前後のトーン+ノイズで打楽器を作ることがあり
+  // (Metal Gear 2 のスネア: AY周期10〜11 → FME7 の o9d+/o9f)、o8b で頭打ちにすると金属的に鳴っていた。
+  // index×2 は 238 で1バイト、N163 の index×3 も 357 で16bit加算の範囲に収まる。
+  // 120以上・負の音符は compiler.js が鳴らさない(NOTE_TABLE_TOP)ので、表はこれ以上要らない
+  const NOTE_TABLE_SIZE_WIDE = 120;
   const BANK_SIZE = 4096;
   const DATA_START_BANK = 8; // 曲データの開始バンク(0=未使用, 1-3=ドライバ本体固定, 4-7=DPCM専用)
   const DATA_DPCM_BANK = 4;  // DPCMサンプル領域の先頭窓($C000)。実機DMCの読出し範囲$C000-$FFFF
@@ -176,9 +185,9 @@
     return { fnum: 511, block: 7 };
   }
 
-  function buildPeriodTable(periodFn) {
+  function buildPeriodTable(periodFn, size) {
     const words = [];
-    for (let n = 0; n < NOTE_TABLE_SIZE; n++) words.push(periodFn(noteFrequency(n)));
+    for (let n = 0; n < (size || NOTE_TABLE_SIZE); n++) words.push(periodFn(noteFrequency(n)));
     return words;
   }
 
@@ -271,9 +280,10 @@
   // 自由に使えるため、「バンク0だけ先に使い切ってからドライバ領域を飛び越す」という
   // 配置に使う。戻り値のbanks[].offsetはそのバンク内での配置開始位置(0-4095、$8000からの
   // オフセット)。
-  function layoutChannelBanks(bytes, startBank, startOffset, markOffset, reserved) {
+  // noteBase: バイトコードの1バイト形式音符の基点(serialize に渡した chanOpts.noteBase と同じ値)
+  function layoutChannelBanks(bytes, startBank, startOffset, markOffset, reserved, noteBase) {
     const banks = [];
-    const boundaries = MML.NSF.MckBytecode.commandBoundaries(bytes);
+    const boundaries = MML.NSF.MckBytecode.commandBoundaries(bytes, noteBase);
     const MIN_CHUNK_WITH_JUMP = 5; // 実データ最低1byte + バンクジャンプマーカー4byte
     const isReserved = typeof reserved === 'function'
       ? reserved
@@ -377,8 +387,31 @@
   // 一意に決まり、窓→ファイル上バンク番号の対応はNSFヘッダのbankswitch初期値で吸収する
   // dpcmPageBank0(2026-09-10): DPCMページ0のファイル上バンク番号(=dpcmFileBank)。DPCM_PAGE_TBL の値
   // (ページk=dpcmPageBank0+4k)に使う。サイズ測定用の1回目アセンブルでは0でよい(テーブル長は変わらない)
-  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa, dpcmPageBank0) {
+  // usesDirect(2026-09-19): @n<num>(直接周波数指定、mckBytecode.js OP_DIRECT_FREQ=0xE5)が曲中で使われているか。
+  // 使う曲だけ DIRACT/DIRLO/DIRHI(3byte/ch)・RD_DIRECT・各 LOOKUP_*_PERIOD 冒頭の分岐を埋め込む
+  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa, dpcmPageBank0, usesDirect, noteReach, noteBase) {
     dpcmPageBank0 = dpcmPageBank0 | 0;
+    usesDirect = !!usesDirect;
+    // noteReach(2026-09-19): 表ごと(pulse/tri/saw/fme7/fds/n163/vrc7)に、曲が引く最大のノート索引
+    // (buildBankedNsfBytes の noteReach 参照)。noteBase: バイトコードの1バイト形式音符の基点
+    // (mckBytecode.js NOTE_BASE_DEFAULT/NOTE_BASE_WIDE。RD_NOTE の CMP/SBC 即値)
+    noteReach = noteReach || {};
+    noteBase = noteBase || MML.NSF.MckBytecode.NOTE_BASE_DEFAULT;
+    // 表の大きさ: o9 の索引(108〜)まで引く曲で、しかもその値が107番(o8b)と違うときだけ120音にする。
+    // 同じ値なら108音の表の上限クランプで同じ周期になるので広げない(FDS の o6a 以上=4095貼り付き、
+    // VRC7 の o8g 以上=fnum 511/block 7 など。compiler.js enTableNote のコメント参照)
+    // valueAt(n): ノート番号 n の表の値(比較できる数値/文字列)
+    const noteTableSize = (key, valueAt) => {
+      const r = noteReach[key];
+      if (!(r >= NOTE_TABLE_SIZE)) return NOTE_TABLE_SIZE;
+      const top = Math.min(r, NOTE_TABLE_SIZE_WIDE - 1);
+      const v107 = valueAt(NOTE_TABLE_SIZE - 1);
+      for (let n = NOTE_TABLE_SIZE; n <= top; n++) if (valueAt(n) !== v107) return NOTE_TABLE_SIZE_WIDE;
+      return NOTE_TABLE_SIZE;
+    };
+    // PULSE_TABLE は 2A03 パルス・MMC5・VRC6 パルス(VRC6P_LOW_TABLE より上)で共有するので1つの大きさ
+    const pulseTableSize = noteTableSize('pulse', n => pulsePeriod(noteFrequency(n)) + ',' + vrc6PulsePeriod(noteFrequency(n)));
+    const triTableSize = noteTableSize('tri', n => trianglePeriod(noteFrequency(n)));
     driverOrg = driverOrg || 0x9000;
     usesSweep = !!usesSweep;
     songAddrLo = songAddrLo || channelTypes.map(() => 0x00);
@@ -535,11 +568,14 @@
     // あるためここで同じ式を展開する(片方だけ変更しないこと)
     const usesVolSkip = envIndexList.length > 0 || usesVr || usesDutyEnv;
     const lastVolExtraSlots = usesVolSkip ? 1 : 0;
+    // @n(直接周波数指定、2026-09-19): DIRACT/DIRLO/DIRHI の3byte/ch(下の DIRACT 定義参照)
+    const directExtraSlots = usesDirect ? 3 : 0;
     // NOTELEN/RESTLEN(sticky音長、2026-08-16): 直前に読んだ音符/休符の音長バイト。
     // バイトコードの1バイト形式(音長省略)がこの値を再利用する(mckBytecode.js参照)
     const totalPerChanBlocks = 11 + n163ExtraSlots + fme7ExtraSlots + epExtraSlots + mpExtraSlots +
       ptExtraSlots + enExtraSlots + freqOnlyExtraSlots + smoothExtraSlots + psExtraSlots + vrExtraSlots +
-      dutyExtraSlots + detuneExtraSlots + sweepExtraSlots + envActExtraSlots + saExtraSlots + lastVolExtraSlots;
+      dutyExtraSlots + detuneExtraSlots + sweepExtraSlots + envActExtraSlots + saExtraSlots + lastVolExtraSlots +
+      directExtraSlots;
     // fixedBase以降(JMPLO,JMPHI,FME7専用グローバル,CEILDIVスクラッチ,PLAYIDX)の固定個数。
     // 下のchArrayBase判定に含める(このブロックも$0100-$01FFに掛かってはいけないため)。
     // PS(2026-08-13)使用時は16bit÷8bit版CEILDIV16のスクラッチ(CDA16LO/HI)+
@@ -696,12 +732,19 @@
     // $FF=無効(音量は0-63しか取らないので番兵として使える)。usesVolOnlyの時のみ確保する
     const lastVolBase = saBase + saExtraSlots * n;
     const LASTVOL = lastVolBase;
+    // @n(直接周波数指定、2026-09-19)。DIRLO/DIRHI=指定された周期/周波数レジスタ値、DIRACT=その値で鳴らす音符か。
+    // DIRACT は RD_DIRECT(0xE5)が2を入れ、続く音符の RD_NOTE_BODY が LSR で1にする(=この音符は指定値)。
+    // 次の通常の音符では同じ LSR で0に戻る(OP_DIRECT_FREQ は必ず音符の直前に置かれるので2のまま残らない)。
+    // LOOKUP_*_PERIOD は DIRACT≠0 なら音階テーブル(と EN の ENVAL)を使わず DIRLO/DIRHI を返す
+    // (D<n>は compiler.js が @n の音符で0にしてバイトコードへ出すので、APPLY_DETUNE はそのままでよい)
+    const directBase = lastVolBase + lastVolExtraSlots * n;
+    const DIRACT = directBase, DIRLO = directBase + n, DIRHI = directBase + 2 * n;
     // fixedBaseから先はチャンネル数nと無関係な固定個数のグローバルスクラッチ(,Xインデックス
     // なし)。JMPLOはJMP間接絶対(2バイトアドレスなので物理ゼロページ外でも正しく動く)、
     // FME7専用グローバル・CEILDIV用スクラッチも通常のLDA/STA(間接アドレッシングではない)
     // なので255番地を超えても問題ない(CURLO/PERLO/PTBLLO等の物理ゼロページ必須組は
     // 既に先頭0-7番地に固定済み、このコメント直前を参照)
-    const fixedBase = lastVolBase + lastVolExtraSlots * n;
+    const fixedBase = directBase + directExtraSlots * n;
     const JMPLO = fixedBase, JMPHI = fixedBase + 1,
       // FME7専用(usesFme7時のみ参照)。FMEMIX=ミキサ(R7)のシャドウ(チップから読み出せない
       // ため保持が必要)、FMEMODE=処理中chの@<n>(0-3)、FMETM/FMENM=そのchのトーン/ノイズ
@@ -1433,21 +1476,26 @@ PS_STEP_ADVANCE:
     }
 
     if (usesVrc6) {
-      extraTables.push(`SAW_TABLE:\n${wordsToDb(buildPeriodTable(sawPeriod))}`);
+      const sawTableSize = noteTableSize('saw', n => sawPeriod(noteFrequency(n)));
+      extraTables.push(`SAW_TABLE:\n${wordsToDb(buildPeriodTable(sawPeriod, sawTableSize))}`);
       // VRC6 パルスの周期表。2A03 の PULSE_TABLE(11bit)と違うのは A1 未満で2047に貼り付いている低音側だけなので、
       // その区間(VRC6P_LOW_TABLE)だけを持ち、残りは PULSE_TABLE を共有する(ROM 節約。#TUNING で区間の長さは変わる)。
       // ★2026-09-14まで VRC6 パルスも PULSE_TABLE を引いていて、A1 より下が A1 に貼り付いていた
-      const pulseWords = buildPeriodTable(pulsePeriod), vrc6pWords = buildPeriodTable(vrc6PulsePeriod);
+      const pulseWords = buildPeriodTable(pulsePeriod, pulseTableSize), vrc6pWords = buildPeriodTable(vrc6PulsePeriod, pulseTableSize);
       let vrc6pLow = 0;
-      while (vrc6pLow < NOTE_TABLE_SIZE && vrc6pWords[vrc6pLow] !== pulseWords[vrc6pLow]) vrc6pLow++;
+      while (vrc6pLow < pulseTableSize && vrc6pWords[vrc6pLow] !== pulseWords[vrc6pLow]) vrc6pLow++;
       // 念のため: 区間より上がすべて一致しなければ全音ぶんの表を持つ
-      if (vrc6pWords.some((w, i) => i >= vrc6pLow && w !== pulseWords[i])) vrc6pLow = NOTE_TABLE_SIZE;
+      if (vrc6pWords.some((w, i) => i >= vrc6pLow && w !== pulseWords[i])) vrc6pLow = pulseTableSize;
       const lookupVrc6p = vrc6pLow ? 'LOOKUP_VRC6P_PERIOD' : 'LOOKUP_PULSE_PERIOD';
       if (vrc6pLow) {
         extraTables.push(`VRC6P_LOW_TABLE:\n${wordsToDb(vrc6pWords.slice(0, vrc6pLow))}`);
         extraHandlers.push(`
 ; --- VRC6パルスの周期参照: ノート番号が ${vrc6pLow} 未満なら VRC6P_LOW_TABLE(12bit)、以上は PULSE_TABLE を共有 ---
 LOOKUP_VRC6P_PERIOD:
+${usesDirect ? `    LDA ${hex(DIRACT)},X
+    BEQ LVP_TBL
+    JMP LOOKUP_DIRECT
+LVP_TBL:` : ''}
     LDA ${hex(NOTE)},X
 ${usesEn ? `    CLC
     ADC ${hex(ENVAL)},X
@@ -1455,21 +1503,21 @@ ${usesEn ? `    CLC
     LDA #$00
     JMP LVP_INDEX
 LVP_NONNEG:` : ''}
-    CMP #${hex(TABLE_MAX)}
+    CMP #${hex(pulseTableSize - 1)}
     BCC LVP_OK
-    LDA #${hex(TABLE_MAX)}
+    LDA #${hex(pulseTableSize - 1)}
 LVP_OK:
 LVP_INDEX:
     ASL A
     TAY
-${vrc6pLow < NOTE_TABLE_SIZE ? `    CPY #${hex(vrc6pLow * 2)}
+${vrc6pLow < pulseTableSize ? `    CPY #${hex(vrc6pLow * 2)}
     BCS LVP_SHARED
 ` : ''}    LDA VRC6P_LOW_TABLE,Y
     STA ${hex(PERLO)}
     LDA VRC6P_LOW_TABLE+1,Y
     STA ${hex(PERHI)}
     RTS
-${vrc6pLow < NOTE_TABLE_SIZE ? `LVP_SHARED:
+${vrc6pLow < pulseTableSize ? `LVP_SHARED:
     LDA PULSE_TABLE,Y
     STA ${hex(PERLO)}
     LDA PULSE_TABLE+1,Y
@@ -1478,6 +1526,10 @@ ${vrc6pLow < NOTE_TABLE_SIZE ? `LVP_SHARED:
       }
       extraHandlers.push(`
 LOOKUP_SAW_PERIOD:
+${usesDirect ? `    LDA ${hex(DIRACT)},X
+    BEQ LSP_TBL
+    JMP LOOKUP_DIRECT
+LSP_TBL:` : ''}
     LDA ${hex(NOTE)},X
 ${usesEn ? `    CLC
     ADC ${hex(ENVAL)},X
@@ -1485,9 +1537,9 @@ ${usesEn ? `    CLC
     LDA #$00
     JMP LSP_INDEX
 LSP_NONNEG:` : ''}
-    CMP #${hex(TABLE_MAX)}
+    CMP #${hex(sawTableSize - 1)}
     BCC LSP_OK
-    LDA #${hex(TABLE_MAX)}
+    LDA #${hex(sawTableSize - 1)}
 LSP_OK:
 LSP_INDEX:
     ASL A
@@ -1757,9 +1809,14 @@ WFV_VOL_T8:
     }
 
     if (usesFme7) {
-      extraTables.push(`FME7_TABLE:\n${wordsToDb(buildPeriodTable(fme7Period))}`);
+      const fme7TableSize = noteTableSize('fme7', n => fme7Period(noteFrequency(n)));
+      extraTables.push(`FME7_TABLE:\n${wordsToDb(buildPeriodTable(fme7Period, fme7TableSize))}`);
       extraHandlers.push(`
 LOOKUP_FME7_PERIOD:
+${usesDirect ? `    LDA ${hex(DIRACT)},X
+    BEQ LFP_TBL
+    JMP LOOKUP_DIRECT
+LFP_TBL:` : ''}
     LDA ${hex(NOTE)},X
 ${usesEn ? `    CLC
     ADC ${hex(ENVAL)},X
@@ -1767,9 +1824,9 @@ ${usesEn ? `    CLC
     LDA #$00
     JMP LFP_INDEX
 LFP_NONNEG:` : ''}
-    CMP #${hex(TABLE_MAX)}
+    CMP #${hex(fme7TableSize - 1)}
     BCC LFP_OK
-    LDA #${hex(TABLE_MAX)}
+    LDA #${hex(fme7TableSize - 1)}
 LFP_OK:
 LFP_INDEX:
     ASL A
@@ -1951,7 +2008,8 @@ WFV_VOL_FME7:
     if (usesFds) {
       const wave = new Array(64);
       for (let i = 0; i < 64; i++) wave[i] = Math.round(31.5 + 31.5 * Math.sin((2 * Math.PI * i) / 64)) & 0x3f;
-      extraTables.push(`FDS_TABLE:\n${wordsToDb(buildPeriodTable(fdsPeriod))}\nFDS_WAVE_DATA:\n${bytesToDb(new Uint8Array(wave))}`);
+      const fdsTableSize = noteTableSize('fds', n => fdsPeriod(noteFrequency(n)));
+      extraTables.push(`FDS_TABLE:\n${wordsToDb(buildPeriodTable(fdsPeriod, fdsTableSize))}\nFDS_WAVE_DATA:\n${bytesToDb(new Uint8Array(wave))}`);
       // @FM<n>カスタム波形。FDSは波形メモリが1系統のみで全ch共有のため(実機の制約。
       // n163WaveLoadWritesと同様)、compiler.jsのfdsWaveLoadWritesと同じく「選択中の
       // 音色番号が前の音符から変わり、かつその番号に定義がある時だけ」再ロードする
@@ -2006,16 +2064,21 @@ WFV13_TONE_OK:
       extraHandlers.push(`
 ; --- FDS ($4082/4083=周期, $4080=ゲイン(音量0-63そのまま。実効32で頭打ち)) ---
 WFV_T13:
-${fdsReload}    LDA ${hex(NOTE)},X
+${fdsReload}${usesDirect ? `    LDA ${hex(DIRACT)},X   ; @n: 指定値(周波数レジスタ12bit)をそのまま使う
+    BEQ WFV13_TBL
+    JSR LOOKUP_DIRECT
+    JMP WFV13_DIRDONE
+WFV13_TBL:
+` : ''}    LDA ${hex(NOTE)},X
 ${usesEn ? `    CLC
     ADC ${hex(ENVAL)},X
     BPL WFV13_NONNEG
     LDA #$00
     JMP WFV13_INDEX
 WFV13_NONNEG:` : ''}
-    CMP #${hex(TABLE_MAX)}
+    CMP #${hex(fdsTableSize - 1)}
     BCC WFV13_OK
-    LDA #${hex(TABLE_MAX)}
+    LDA #${hex(fdsTableSize - 1)}
 WFV13_OK:
 WFV13_INDEX:
     ASL A
@@ -2024,6 +2087,7 @@ WFV13_INDEX:
     STA ${hex(PERLO)}
     LDA FDS_TABLE+1,Y
     STA ${hex(PERHI)}
+${usesDirect ? 'WFV13_DIRDONE:' : ''}
     JSR APPLY_DETUNE
     LDA ${hex(PERLO)}
     STA $4082
@@ -2044,16 +2108,21 @@ SIL_T13:
 ; --- FDSのEP<n>/MP<n>継続フレーム専用(周期のみ再書込み。波形再ロードは音符アタック時
 ; のみなのでここでは行わない) ---
 WFO_T13:
-    LDA ${hex(NOTE)},X
+${usesDirect ? `    LDA ${hex(DIRACT)},X   ; @n: WFV_T13と同じ
+    BEQ WFO13_TBL
+    JSR LOOKUP_DIRECT
+    JMP WFO13_DIRDONE
+WFO13_TBL:
+` : ''}    LDA ${hex(NOTE)},X
 ${usesEn ? `    CLC
     ADC ${hex(ENVAL)},X
     BPL WFO13_NONNEG
     LDA #$00
     JMP WFO13_INDEX
 WFO13_NONNEG:` : ''}
-    CMP #${hex(TABLE_MAX)}
+    CMP #${hex(fdsTableSize - 1)}
     BCC WFO13_OK
-    LDA #${hex(TABLE_MAX)}
+    LDA #${hex(fdsTableSize - 1)}
 WFO13_OK:
 WFO13_INDEX:
     ASL A
@@ -2062,6 +2131,7 @@ WFO13_INDEX:
     STA ${hex(PERLO)}
     LDA FDS_TABLE+1,Y
     STA ${hex(PERHI)}
+${usesDirect ? 'WFO13_DIRDONE:' : ''}
     JSR APPLY_DETUNE
     LDA ${hex(PERLO)}
     STA $4082
@@ -2184,9 +2254,11 @@ ${modBlocks}`);
         : [N163_WAVE_LEN];
 
       const n163TableLabel = L => usesN163CustomWaves ? `N163_TABLE_${L}` : 'N163_TABLE';
+      // 波形長ごとの表はクランプ(WFV_N163/WFO_N163)を共有するので、どれか1つでも o9 の値が違えば全部広げる
+      const n163TableSize = noteTableSize('n163', n => n163LengthsUsed.map(L => n163FreqReg(noteFrequency(n), L, numN163Ch)).join(','));
       const n163TableBlocks = n163LengthsUsed.map(L => {
         const words3 = [];
-        for (let noteN = 0; noteN < NOTE_TABLE_SIZE; noteN++) {
+        for (let noteN = 0; noteN < n163TableSize; noteN++) {
           // 実行時に $7F へ設定する有効ch数(numN163Ch)で符号化する(復号側と一致させる)
           const reg = n163FreqReg(noteFrequency(noteN), L, numN163Ch);
           const lenByte = MML.N163Alloc ? MML.N163Alloc.lengthByte(L) : (256 - L) & 0xFC;
@@ -2301,13 +2373,13 @@ N163_TONE_OK:
       // 差だけになるので、両方とも共用サブルーチンN163_TBL_LOOKUPで読む(A=ノート索引)
       const tableRead = `    JSR N163_TBL_LOOKUP`;
       const n163TableLookupRoutine = `
-; --- N163周波数テーブル読み出し(共用): A=ノート索引(0-${TABLE_MAX})、X=チャンネル番号。
+; --- N163周波数テーブル読み出し(共用): A=ノート索引(0-${n163TableSize - 1})、X=チャンネル番号。
 ; PERLO/PERHI/PERLO2 <- テーブル3バイト(freq lo / freq mid / lenByte|freq hi)。
 ; ポインタ=テーブル先頭+ノート×3(16bit)。Xは温存、Yは破壊 ---
 N163_TBL_LOOKUP:
     STA ${hex(PERLO)}
-    ASL A                   ; ノート×2(最大214、C=0)
-    ADC ${hex(PERLO)}       ; ノート×3(最大321、C=9bit目)
+    ASL A                   ; ノート×2(最大238、C=0)
+    ADC ${hex(PERLO)}       ; ノート×3(最大357、C=9bit目)
     STA ${hex(PERLO2)}
     LDA #$00
     ADC #$00
@@ -2391,9 +2463,9 @@ ${usesEn ? `    CLC
     LDA #$00
     JMP WFVN163_INDEX
 WFVN163_NONNEG:` : ''}
-    CMP #${hex(TABLE_MAX)}
+    CMP #${hex(n163TableSize - 1)}
     BCC WFVN163_OK
-    LDA #${hex(TABLE_MAX)}
+    LDA #${hex(n163TableSize - 1)}
 WFVN163_OK:
 WFVN163_INDEX:
     ; このルーチンはXを一切破壊しない(索引はY・(ptr),Yのみ)ため、旧複製版にあった
@@ -2427,9 +2499,9 @@ ${usesEn ? `    CLC
     LDA #$00
     JMP WFON163_INDEX
 WFON163_NONNEG:` : ''}
-    CMP #${hex(TABLE_MAX)}
+    CMP #${hex(n163TableSize - 1)}
     BCC WFON163_OK
-    LDA #${hex(TABLE_MAX)}
+    LDA #${hex(n163TableSize - 1)}
 WFON163_OK:
 WFON163_INDEX:
 ${tableRead}
@@ -2623,8 +2695,9 @@ SAADD_ADD:
       // VRC7: fnum(9bit)+block(3bit)。テーブルには
       // バイト1に「(block<<1)|(fnum上位1bit)」を事前計算して格納しておく
       // (実機レジスタ$20+chの下位ビットそのままの形)
+      const vrc7TableSize = noteTableSize('vrc7', n => { const { fnum, block } = vrc7FnumBlock(noteFrequency(n)); return fnum + ',' + block; });
       const words2 = [];
-      for (let noteN = 0; noteN < NOTE_TABLE_SIZE; noteN++) {
+      for (let noteN = 0; noteN < vrc7TableSize; noteN++) {
         const { fnum, block } = vrc7FnumBlock(noteFrequency(noteN));
         words2.push(fnum & 0xff, (block << 1) | ((fnum >> 8) & 1));
       }
@@ -2660,9 +2733,9 @@ ${usesEn ? `    CLC
     LDA #$00
     JMP WFVVRC7_INDEX
 WFVVRC7_NONNEG:` : ''}
-    CMP #${hex(TABLE_MAX)}
+    CMP #${hex(vrc7TableSize - 1)}
     BCC WFVVRC7_OK
-    LDA #${hex(TABLE_MAX)}
+    LDA #${hex(vrc7TableSize - 1)}
 WFVVRC7_OK:
 WFVVRC7_INDEX:
     ASL A
@@ -2741,9 +2814,9 @@ WFOVRC7_KEYED:
     LDA #$00
     JMP WFOVRC7_INDEX
 WFOVRC7_NONNEG:
-    CMP #${hex(TABLE_MAX)}
+    CMP #${hex(vrc7TableSize - 1)}
     BCC WFOVRC7_OK
-    LDA #${hex(TABLE_MAX)}
+    LDA #${hex(vrc7TableSize - 1)}
 WFOVRC7_OK:
 WFOVRC7_INDEX:
     ASL A
@@ -2962,6 +3035,7 @@ ${usesEn ? `    STA ${hex(ENACT)},X    ; ENACT=0(EN<n>未指定時の既定値�
 ${needsLastHi ? `    STA ${hex(LASTHI)},X   ; LASTHI=0(VRC7ではキー状態シャドウを兼ねる、WFO_VRC7参照。同上の理由)` : ''}
 ${usesSmooth ? `    STA ${hex(SMOOTHACT)},X  ; SMOOTHACT=0(SM未指定時の既定値、SMOF相当)` : ''}
 ${usesPitchSa ? `    STA ${hex(SAAMT)},X    ; SAAMT=0(SA未指定時の既定値=シフト無し)` : ''}
+${usesDirect ? `    STA ${hex(DIRACT)},X   ; DIRACT=0(@n未使用の音符=音階テーブルで鳴らす)` : ''}
 ${usesVolSkip ? `    LDA #$FF
     STA ${hex(LASTVOL)},X  ; LASTVOL=$FF(無効。初回は必ず書く)
     LDA #$00` : ''}
@@ -3155,8 +3229,8 @@ RD_LOOP:
     JSR READ_BYTE
 ; ノート早期判定(2026-08-16 最適化): ノートバイトは0x00-0xE2、コマンドは0xE3-0xFFと
 ; 完全分離済み(mckBytecode.jsのNOTE_MAX=0xE2はこの境界を保証するためのクランプ。
-; 2026-08-20にOP_SWEEP=0xE3を追加した際、境界を0xE7から0xE3へ下げた。0xE4-0xE6は
-; 引き続き未使用でここをすり抜けるが、末尾のJMP RD_NOTEへ落ちるだけで従来と同じ)。
+; 2026-08-20にOP_SWEEP=0xE3を追加した際、境界を0xE7から0xE3へ下げた。その後0xE4=SA、0xE5=@n
+; (2026-09-19)が埋まり、0xE6だけが未使用でここをすり抜けるが、末尾のJMP RD_NOTEへ落ちるだけで従来と同じ)。
 ; 最頻のノートを2命令で即ディスパッチする(以前は下のCMP/BEQ連鎖を全てすり抜けてから
 ; 末尾のJMP RD_NOTEに到達しており、機能の多い曲では1ノートあたり約80サイクル掛かっていた)
     CMP #$E3
@@ -3194,6 +3268,7 @@ ${usesGateOffVr ? '    CMP #$EC\n    BEQ RD_JMP_GATEOFFVR\n    CMP #$E8\n    BEQ
 ${usesToneState ? '    CMP #$E7\n    BEQ RD_JMP_RELTONE' : ''}
 ${usesSweep ? '    CMP #$E3\n    BEQ RD_JMP_SWEEP' : ''}
 ${usesPitchSa ? '    CMP #$E4\n    BEQ RD_JMP_PITCHSA' : ''}
+${usesDirect ? '    CMP #$E5\n    BEQ RD_JMP_DIRECT' : ''}
     JMP RD_NOTE
 
 ; ★トランポリンの並びは必ず上のCMP/BEQ連鎖と同じ順序に保つこと(2026-08-20)。
@@ -3236,6 +3311,7 @@ ${usesGateOffVr ? 'RD_JMP_GATEOFFVR:\n    JMP RD_GATEOFFVR\nRD_JMP_GATEOFFVRSD:\
 ${usesToneState ? 'RD_JMP_RELTONE:\n    JMP RD_RELTONE' : ''}
 ${usesSweep ? 'RD_JMP_SWEEP:\n    JMP RD_SWEEP' : ''}
 ${usesPitchSa ? 'RD_JMP_PITCHSA:\n    JMP RD_PITCHSA' : ''}
+${usesDirect ? 'RD_JMP_DIRECT:\n    JMP RD_DIRECT' : ''}
 
 ; 0xEEマーカーの残り3バイト(新バンク番号,新アドレス下位,新アドレス上位)は
 ; まだ「現在のバンク」の中に物理的に置かれているため、3バイト全て読み終えるまでは
@@ -3397,6 +3473,18 @@ ${usesPitchSa ? `
 RD_PITCHSA:
     JSR READ_BYTE
     STA ${hex(SAAMT)},X
+    JMP RD_LOOP` : ''}
+${usesDirect ? `
+; --- @n<num>(直接周波数指定、0xE5、2026-09-19、本家ppmckのMCK_DIRECT_FREQ/direct_freq_sub相当):
+; 直後2バイトが[周期/周波数の下位,上位]。値を控えて DIRACT=2 にし、続く音符(必ず直後に来る)の
+; RD_NOTE_BODY が LSR で1にする=その音符だけ LOOKUP_*_PERIOD が音階テーブルの代わりにこの値を返す ---
+RD_DIRECT:
+    JSR READ_BYTE
+    STA ${hex(DIRLO)},X
+    JSR READ_BYTE
+    STA ${hex(DIRHI)},X
+    LDA #$02
+    STA ${hex(DIRACT)},X
     JMP RD_LOOP` : ''}
 ${usesRawWrite ? `
 ; --- y<adr>,<num>(0xEB、2026-08-13): 直後3バイトが[アドレス下位,アドレス上位,値]。
@@ -3750,6 +3838,7 @@ APPLY_REL_TONE_END:
 RD_GATEOFFVRSD:
     JSR READ_BYTE
     STA ${hex(NOTE)},X
+${usesDirect ? `    LSR ${hex(DIRACT)},X   ; @n の音符のリリースでも差し替え先は音階の音(1→0)` : ''}
     JSR READ_BYTE
     STA ${hex(CNT)},X
 ${envTableCount > 0 ? `    LDA #$00\n    STA ${hex(ENVACT)},X` : ''}
@@ -3808,16 +3897,17 @@ ${usesVolOnly ? '    JSR TICK_VOL_FX' : ''}
 ` : ''}
 ; sticky音長エンコード対応(2026-08-16、mckBytecode.js参照):
 ;   A=$E2            … 直前と同じ長さの休符(OP_REST_SAME)
-;   A=$76-$E1        … ノート番号(A-$76)+直前と同じ音長の1バイト音符
-;   A=$00-$75        … 従来の[音符,音長]2バイト形式(音長はNOTELEN,Xへも控える)
+;   A=${hex(noteBase)}-$E1        … ノート番号(A-${hex(noteBase)})+直前と同じ音長の1バイト音符
+;   A=$00-${hex(noteBase - 1)}        … 従来の[音符,音長]2バイト形式(音長はNOTELEN,Xへも控える)
+;   (基点は曲ごと: 通常$76、2バイト形式で o9a+/o9b(118/119)を書く曲だけ$78。mckBytecode.js NOTE_BASE_DEFAULT 参照)
 RD_NOTE:
     CMP #$E2
     BNE RD_NOTE_CHK
     JMP RD_REST_SAME
 RD_NOTE_CHK:
-    CMP #$76
+    CMP #${hex(noteBase)}
     BCC RD_NOTE_EXPL
-    SBC #$76        ; BCC非成立=C=1なのでSEC不要
+    SBC #${hex(noteBase)}        ; BCC非成立=C=1なのでSEC不要
     STA ${hex(NOTE)},X
     LDA ${hex(NOTELEN)},X
     STA ${hex(CNT)},X
@@ -3831,6 +3921,7 @@ RD_NOTE_EXPL:
 ; PS(0xE9)が対象外チップに使われた場合(RD_PITCHSHIFT参照)、既にノート番号・音長を
 ; 読み終えているので、ここへ直接JMPして二重読みを避ける
 RD_NOTE_BODY:
+${usesDirect ? `    LSR ${hex(DIRACT)},X   ; @n: 直前がOP_DIRECT_FREQ(2)なら1=この音符は指定値、それ以外は0=音階テーブル` : ''}
 ${usesPitchShift ? `    ; PS(実機準拠)は通常のノートオンで必ず無効化される(実機ppmck keyon_setの
     ; 「ポルタメントを無効化する」処理と同じ、compiler.jsの新規セグメント生成が
     ; psGlideを持たない限りグライドしないのと対応)
@@ -4176,10 +4267,14 @@ WRITE_FREQ_ONLY:
 ; 加算してからテーブルを引く(compiler.jsのnoteFrequency(baseNoteNumber+enOffset)と
 ; 同じ「ノート番号空間で加算してから周波数化」の6502側実装。D<n>/EP<n>/MP<n>のような
 ; 生レジスタ空間への加算ではない点に注意)。加算結果が負に振れた場合は0へクランプする
-; (このアプリのfreqテーブルは0-107の108音分しか無いため)。上限側(TABLE_MAX超過)の
-; クランプは元からある。逆に極端に大きい正のオフセットで8bit符号付き加算がオーバーフロー
+; (このアプリのfreqテーブルは0-107の108音分、o9 を使う曲のチップだけ0-119の120音)。上限側(表の末尾超過)の
+; クランプは元からある。加算結果が127を超えた場合も bit7 で負と見なして0になる(compiler.js enTableNote が同じ規則)。逆に極端に大きい正のオフセットで8bit符号付き加算がオーバーフロー
 ; するケースは非対応(APPLY_DETUNEの上限側同様、通常の用途の値では発生しない)
 LOOKUP_PULSE_PERIOD:
+${usesDirect ? `    LDA ${hex(DIRACT)},X
+    BEQ LPP_TBL
+    JMP LOOKUP_DIRECT
+LPP_TBL:` : ''}
     LDA ${hex(NOTE)},X
 ${usesEn ? `    CLC
     ADC ${hex(ENVAL)},X
@@ -4187,9 +4282,9 @@ ${usesEn ? `    CLC
     LDA #$00
     JMP LPP_INDEX
 LPP_NONNEG:` : ''}
-    CMP #${hex(TABLE_MAX)}
+    CMP #${hex(pulseTableSize - 1)}
     BCC LPP_OK
-    LDA #${hex(TABLE_MAX)}
+    LDA #${hex(pulseTableSize - 1)}
 LPP_OK:
 LPP_INDEX:
     ASL A
@@ -4201,6 +4296,10 @@ LPP_INDEX:
     RTS
 
 LOOKUP_TRI_PERIOD:
+${usesDirect ? `    LDA ${hex(DIRACT)},X
+    BEQ LTP_TBL
+    JMP LOOKUP_DIRECT
+LTP_TBL:` : ''}
     LDA ${hex(NOTE)},X
 ${usesEn ? `    CLC
     ADC ${hex(ENVAL)},X
@@ -4208,9 +4307,9 @@ ${usesEn ? `    CLC
     LDA #$00
     JMP LTP_INDEX
 LTP_NONNEG:` : ''}
-    CMP #${hex(TABLE_MAX)}
+    CMP #${hex(triTableSize - 1)}
     BCC LTP_OK
-    LDA #${hex(TABLE_MAX)}
+    LDA #${hex(triTableSize - 1)}
 LTP_OK:
 LTP_INDEX:
     ASL A
@@ -4220,7 +4319,16 @@ LTP_INDEX:
     LDA TRI_TABLE+1,Y
     STA ${hex(PERHI)}
     RTS
-
+${usesDirect ? `
+; --- @n(直接周波数指定): 各 LOOKUP_*_PERIOD が DIRACT≠0 のとき JMP で来る(RTS は呼び出し元の JSR へ戻る)。
+; 指定値そのものを返す(EN の ENVAL は足さない。compiler.js writePitchModulation と同じ) ---
+LOOKUP_DIRECT:
+    LDA ${hex(DIRLO)},X
+    STA ${hex(PERLO)}
+    LDA ${hex(DIRHI)},X
+    STA ${hex(PERHI)}
+    RTS
+` : ''}
 ${usesAnyPitchOffset ? `; --- D<n>/EP<n>/MP<n>/PT<n>共通処理。呼出し前提: Xはチャンネル番号、PERLO/PERHIに
 ; テーブル参照済みの周期値が入っている状態で呼ぶ。DETUNE_LO/HI,X(符号付き16bit)を通常の
 ; 16bit ADCで加算し、続けてEP(EPVALLO/HI,X、有効時のみ)・MP(MPVALLO/HI,X、有効時のみ)・
@@ -4405,10 +4513,16 @@ SIL_T2:
 ; 「短周期ノイズは D16〜D1」の技)。@1(本ツール独自の短周期指定)は bit7 を OR。
 ; compiler.jsのノイズ経路(segmentsToWriteLog2A03 'D')と同じ式で、実ppmck09aのNSFと$400E列が一致 ---
 LOOKUP_NOISE_PERIOD:
+${usesDirect ? `    LDA ${hex(DIRACT)},X   ; @n: 指定値の下位バイトをそのまま使う(本家: $400E へ sound_freq_low。bit7=短周期)
+    BEQ LNP_TBL
+    LDA ${hex(DIRLO)},X
+    JMP LNP_SET
+LNP_TBL:` : ''}
     LDA ${hex(NOTE)},X     ; NOTE=周期index(0-15)の直値(compiler.js noisePeriodIndex、本家ppmck準拠)
 ${usesEn ? `    CLC
     ADC ${hex(ENVAL)},X    ; EN(ノート空間)は index に足して16で巡回
 ` : ''}    AND #$0F
+${usesDirect ? 'LNP_SET:' : ''}
     STA ${hex(PERLO)}
     LDA #$40
     STA ${hex(PERHI)}      ; ★上位を$40にしておく: APPLY_DETUNEは16bit結果が負なら0へクランプするが、
@@ -4532,10 +4646,10 @@ ${usesVolOnly ? `WFV_VOL_JUMPTABLE:\n    .word ${wfvVolEntries.join(',')}` : ''}
 ${usesFreqOnly ? `WFO_JUMPTABLE:\n    .word ${wfoEntries.join(',')}` : ''}
 
 PULSE_TABLE:
-${wordsToDb(buildPeriodTable(pulsePeriod))}
+${wordsToDb(buildPeriodTable(pulsePeriod, pulseTableSize))}
 
 TRI_TABLE:
-${wordsToDb(buildPeriodTable(trianglePeriod))}
+${wordsToDb(buildPeriodTable(trianglePeriod, triTableSize))}
 ${extraTables.join('\n\n')}
 
 ; チャンネルごとの種別(CH_TYPE_TABLE)と開始バンク番号(SONG_BANK)
@@ -4825,6 +4939,91 @@ SONG_LOOP_PTR_HI:
       if (usesSweep) break;
     }
 
+    // @n<num>(直接周波数指定、2026-09-19)。使う曲にだけ DIRACT/DIRLO/DIRHI・RD_DIRECT・LOOKUP の分岐を入れる
+    // (使わない曲のNSFは従来とバイト単位で同じ)
+    let usesDirect = false;
+    for (const ch of channelLetters) {
+      if ((segmentsByChannel[ch] || []).some(seg => seg.directPeriod != null && seg.freq != null)) { usesDirect = true; break; }
+    }
+
+    // o9 の段の表(2026-09-19、NOTE_TABLE_SIZE_WIDE 参照)。周期表ごとに「曲が実際に引く最大のノート索引」を求め、
+    // buildFixedSource がそれを見て 108音/120音を決める。索引は 6502 側と同じ規則で数える:
+    //  ・音符・タイの異音程(pitchBreaks)・SD の差し替え先・PS のグライド元のノート番号(compiler.js が0〜119に収めている)
+    //  ・EN 中はそれに累積オフセットを足した値(8bit加算で bit7 が立てば0、compiler.js enTableNote と同じ)
+    // EN は PS の音符で前の音符から続くので、直前のアタックからの経過フレームぶんまで見る(実際より広めに数えるのは
+    // 表が大きくなるだけで安全。狭く数えると JS 再生と食い違うので、迷うときは広い側に倒している)。
+    // @n の音符は表を引かない(DIRACT)。FME7 のトーン無し(@0/@2)の音符もトーン周期を鳴らさないので数えない
+    const noteTableKeyOf = { A: 'pulse', B: 'pulse', C: 'tri' };
+    (expansionLetterMap.vrc6 || []).forEach((L, k) => { noteTableKeyOf[L] = k === 2 ? 'saw' : 'pulse'; });
+    (expansionLetterMap.mmc5 || []).forEach(L => { noteTableKeyOf[L] = 'pulse'; });
+    (expansionLetterMap.fme7 || []).forEach(L => { noteTableKeyOf[L] = 'fme7'; });
+    (expansionLetterMap.fds || []).forEach(L => { noteTableKeyOf[L] = 'fds'; });
+    (expansionLetterMap.n163 || []).forEach(L => { noteTableKeyOf[L] = 'n163'; });
+    (expansionLetterMap.vrc7 || []).forEach(L => { noteTableKeyOf[L] = 'vrc7'; });
+    const tableTop = NOTE_TABLE_SIZE_WIDE - 1;
+    const plainIdx = n => Math.max(0, Math.min(tableTop, Math.round(n)));
+    const enIdx = n => { const v = ((Math.round(n) % 256) + 256) % 256; return v >= 128 ? 0 : Math.min(tableTop, v); };
+    // EN テーブルの累積値列(compiler.js cumulativeEnvelopeValue と同じ: ループがあれば周回して足し続け、
+    // 無ければ全体の合計で止まる)。必要な長さまで伸ばしながら使い回す
+    const enCumCache = new Map();
+    const enCumAt = (idx, table, t) => {
+      let c = enCumCache.get(idx);
+      if (!c) { c = { seq: [], sum: 0, pos: 0 }; enCumCache.set(idx, c); }
+      const values = table.values || [];
+      const loop = (table.loop != null && table.loop < values.length) ? table.loop : null;
+      while (c.seq.length <= t) {
+        if (c.pos < values.length) { c.sum += values[c.pos] | 0; c.pos++; }
+        else if (loop != null) { c.pos = loop; c.sum += values[c.pos] | 0; c.pos++; }
+        c.seq.push(c.sum);
+      }
+      return c.seq[t];
+    };
+    const noteReach = {};
+    for (const ch of channelLetters) {
+      const key = noteTableKeyOf[ch];
+      if (!key) continue;
+      let r = noteReach[key] != null ? noteReach[key] : -1;
+      let frame = 0, attackFrame = 0;
+      for (const seg of (segmentsByChannel[ch] || [])) {
+        const dur = seg.durationFrames;
+        if (seg.freq != null) {
+          if (!seg.psGlide) attackFrame = frame;
+          const fme7Tone = key !== 'fme7' || ((seg.instrument == null ? 1 : seg.instrument) & 1);
+          if (fme7Tone) {
+            const bases = [];
+            if (seg.directPeriod == null && seg.noteNumber != null) bases.push(seg.noteNumber);
+            for (const pb of (seg.pitchBreaks || [])) if (pb.noteNumber != null) bases.push(pb.noteNumber);
+            if (seg.psGlide && seg.psGlide.fromNoteNumber != null) bases.push(seg.psGlide.fromNoteNumber);
+            for (const b of bases) r = Math.max(r, plainIdx(b));
+            const enTable = (seg.noteEnv != null && seg.noteEnv !== 255 && envelopes.en) ? envelopes.en[seg.noteEnv] : null;
+            if (enTable && bases.length) {
+              const span = frame - attackFrame + dur;
+              for (let t = 0; t < span && r < tableTop; t++) {
+                const e = enCumAt(seg.noteEnv, enTable, t);
+                for (const b of bases) r = Math.max(r, enIdx(b + e));
+              }
+            }
+          }
+        }
+        frame += dur;
+      }
+      noteReach[key] = r;
+    }
+    // バイトコードの1バイト形式音符の基点(mckBytecode.js NOTE_BASE_DEFAULT 参照)。2バイト形式で書く音符バイトに
+    // 118/119(o9a+/o9b)がある曲だけ 0x78 にする(@n の代表値・PS のグライド先も音符バイトなので数える)。
+    // E(DPCM)の音符バイトは @DPCM 番号+24 で、0x76 以上は定義の上限(63)を超えた未定義番号しかない
+    // (serialize が基点未満へ切る。ドライバは未定義として何もしない)ので数えない
+    const dpcmLetterSet = new Set(expansionLetterMap.dpcm || []);
+    let noteBase = MML.NSF.MckBytecode.NOTE_BASE_DEFAULT;
+    for (const ch of channelLetters) {
+      if (dpcmLetterSet.has(ch)) continue;
+      if ((segmentsByChannel[ch] || []).some(seg => seg.freq != null && seg.noteNumber != null &&
+          Math.round(seg.noteNumber) >= MML.NSF.MckBytecode.NOTE_BASE_DEFAULT)) {
+        noteBase = MML.NSF.MckBytecode.NOTE_BASE_WIDE;
+        break;
+      }
+    }
+
     // SM/SMOF(スムース、2026-08-13、対応ABC=2A03パルスA/B/三角波)。PT/pitchBreakと
     // 同じく曲中で使われているかどうかの真偽値だけを判定する
     let usesSmooth = false;
@@ -4874,7 +5073,7 @@ SONG_LOOP_PTR_HI:
       vrIndexList.length > 0 || usesRelTone,
       dutyIndexRemap,
       // E(DPCM)は音量/音色オペコードを出さない(本家ppmck準拠で v/@ が無く、ドライバも見ない)
-      { dpcm: (expansionLetterMap.dpcm || []).includes(ch) }));
+      { dpcm: (expansionLetterMap.dpcm || []).includes(ch), noteBase }));
     const chBytes = chSerialized.map(r => r.bytes);
 
     // 各チャンネルを順にバンク配置する。ループ地点(あれば)が最終的にどのバンク・
@@ -4907,7 +5106,7 @@ SONG_LOOP_PTR_HI:
       const loopAct = [], loopBank = [], loopLo = [], loopHi = [];
       let bankNum = 0, offsetInBank = 0;
       for (let i = 0; i < channelLetters.length; i++) {
-        const layout = layoutChannelBanks(chBytes[i], bankNum, offsetInBank, chSerialized[i].loopByteOffset, reservedBank);
+        const layout = layoutChannelBanks(chBytes[i], bankNum, offsetInBank, chSerialized[i].loopByteOffset, reservedBank, noteBase);
         songBank.push(layout.startBank);
         songAddrLo.push((0x8000 + layout.startOffset) & 0xff);
         songAddrHi.push((0x8000 + layout.startOffset) >> 8);
@@ -4938,7 +5137,7 @@ SONG_LOOP_PTR_HI:
     const probeLoop = { act: chSerialized.map(r => (r.loopByteOffset != null ? 1 : 0)), bank: dummyBank, lo: dummyBank, hi: dummyBank };
     const probeSrc = buildFixedSource(channelTypes, dummyBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList,
       probeLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite,
-      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, undefined, usesSweep, usesPitchSa, 0);
+      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, undefined, usesSweep, usesPitchSa, 0, usesDirect, noteReach, noteBase);
     const probeAsm = MML.Asm.assemble(probeSrc, { origin: 0x8000 });
     if (probeAsm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: probeAsm.errors, bankCount: 0, unsupportedExpansions };
@@ -4995,7 +5194,7 @@ SONG_LOOP_PTR_HI:
     // orgの違いはゼロページ/絶対の選択や分岐距離に影響しないため)
     const { songBank, songAddrLo, songAddrHi, allDataBanks, songLoop } = layoutAllChannels(reservedBank);
 
-    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa, dpcmFileBank);
+    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa, dpcmFileBank, usesDirect, noteReach, noteBase);
     const asm = MML.Asm.assemble(src, { origin: 0x8000 });
     if (asm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: asm.errors, bankCount: 0, unsupportedExpansions };

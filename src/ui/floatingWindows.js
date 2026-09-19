@@ -41,6 +41,56 @@
   //   一度も触っていないウィンドウのzは相対的に低いまま)。
   const frontFns = new Map();
 
+  // ウィンドウの辺(上下左右)と角(左上/右上/左下)に細い枠を置き、ドラッグで大きさを変える。
+  // 左/上の辺は反対側(右/下の端)を固定したまま広げる。最小サイズは CSS の min-width/min-height を守る。
+  // 右下の角はブラウザ標準の resize: both のつまみ(従来どおり)
+  function attachEdgeResize(win, bringToFront, persist) {
+    const dirs = ['n', 's', 'e', 'w', 'nw', 'ne', 'sw'];
+    for (const d of dirs) {
+      const h = document.createElement('div');
+      h.className = 'fw-edge fw-edge--' + d;
+      h.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        bringToFront();
+        const cs = getComputedStyle(win);
+        const minW = parseFloat(cs.minWidth) || 120, minH = parseFloat(cs.minHeight) || 80;
+        const x0 = e.clientX, y0 = e.clientY;
+        const L0 = win.offsetLeft, T0 = win.offsetTop, W0 = win.offsetWidth, H0 = win.offsetHeight;
+        const move = (ev) => {
+          const dx = ev.clientX - x0, dy = ev.clientY - y0;
+          let L = L0, T = T0, W = W0, H = H0;
+          if (d.indexOf('e') >= 0) W = Math.max(minW, W0 + dx);
+          if (d.indexOf('s') >= 0) H = Math.max(minH, H0 + dy);
+          if (d.indexOf('w') >= 0) {
+            W = Math.max(minW, W0 - dx);
+            L = L0 + (W0 - W);
+            if (L < 0) { W += L; L = 0; } // 画面の左へはみ出さないように
+          }
+          if (d.indexOf('n') >= 0) {
+            H = Math.max(minH, H0 - dy);
+            T = T0 + (H0 - H);
+            if (T < 0) { H += T; T = 0; } // タイトル行が画面の上へ出ないように
+          }
+          win.style.left = L + 'px'; win.style.top = T + 'px';
+          win.style.width = W + 'px'; win.style.height = H + 'px';
+        };
+        const up = () => {
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', up);
+          window.removeEventListener('pointercancel', up);
+          persist();
+        };
+        // 枠の外まで速く動かしても追えるよう、動きと離しは window で受ける
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+        window.addEventListener('pointercancel', up);
+      });
+      win.appendChild(h);
+    }
+  }
+
   function init() {
     let zCounter = 100;
     const windows = Array.from(document.querySelectorAll('.float-window'));
@@ -125,6 +175,9 @@
       });
 
       win.addEventListener('mousedown', () => bringToFront());
+
+      // --- 辺・角でのリサイズ(右下以外。2026-09-19 ユーザー要望「普通のウィンドウと同じように」) ---
+      attachEdgeResize(win, bringToFront, persist);
 
       // --- リサイズ（CSS resize: both）の状態保存 ---
       if (typeof ResizeObserver !== 'undefined') {

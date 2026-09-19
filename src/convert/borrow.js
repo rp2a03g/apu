@@ -85,8 +85,8 @@
     for (let v = 0; v < 16; v++) t[v] = Math.max(0, Math.min(15, Math.round((15 - v) * dbPerStep / 3)));
     return t;
   }
-  const LIN_TABLE = { ay8910: logToLinearTable(1.5), sn76489: logToLinearTable(2) };
-  const VRC7_TABLE = { ay8910: logToVrc7Table(1.5), sn76489: logToVrc7Table(2) };
+  const LIN_TABLE = { ay8910: logToLinearTable(3), sn76489: logToLinearTable(2) };
+  const VRC7_TABLE = { ay8910: logToVrc7Table(3), sn76489: logToVrc7Table(2) };
 
   // 音量の減衰量(dB)→借用先の音量値。VRC7は「v0が最大・v15が最小」(このコンパイラ/ppmckのVRC7は
   // レジスタの減衰値をそのまま v に取る)、FME-7は v15 最大の3dB/段、線形音源は振幅比。
@@ -99,21 +99,28 @@
     linear: (att, max) => { const m = max == null ? 15 : max; return att >= 60 ? 0 : Math.max(1, Math.min(m, Math.round(m * Math.pow(10, -att / 20)))); }
   };
 
-  // envReg.assign(volSeq) を写像テーブル経由にするプロキシ(抽出器はassignしか使わない)
+  // envReg.assign(volSeq) を写像テーブル経由にするプロキシ
+  // ★volumeFieldsWithRelease が返す定数音量(volume)は **写像後の列** から作られる=写像済み。
+  //   印 _volMapped を付けて返し、adaptGroup の mapConstVolumes が同じ表を重ねて掛けないようにする
+  //   (2026-09-19。以前は二重に写像され、HuC6280→2A03パルスで元の音量14が v11 でなく v4 になっていた。
+  //   @v テーブルは1回だけなので、同じ音符列の中で v と @v の尺度が食い違っていた)。
+  //   印の無い定数音量(OPLL/OPL の抽出器や AY のハードウェアエンベロープ音符のように、レジストリを
+  //   通さず直接 volume を付けるもの)は生の値なので、従来どおり mapConstVolumes が1回写像する
   function mappedEnvReg(envReg, table) {
     const top = table.length - 1;
     const map = seq => seq.map(v => table[Math.max(0, Math.min(top, v))]);
     return {
       assign: seq => envReg.assign(map(seq)),
       // 楽器化(リリース切り出し、envelope.js volumeFieldsWithRelease)も写像経由で通す
-      volumeFieldsWithRelease: seq => envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(map(seq))
-        : (() => { const idx = envReg.assign(map(seq)); return idx == null ? { volume: MML.Convert.plainVolume(map(seq)) } : { envelopeV: idx }; })()
+      volumeFieldsWithRelease: seq => Object.assign(envReg.volumeFieldsWithRelease ? envReg.volumeFieldsWithRelease(map(seq))
+        : (() => { const idx = envReg.assign(map(seq)); return idx == null ? { volume: MML.Convert.plainVolume(map(seq)) } : { envelopeV: idx }; })(),
+      { _volMapped: true })
     };
   }
-  // 抽出器が定数音量として残した ev.volume も同じ表で写像する
+  // 抽出器が定数音量として残した ev.volume も同じ表で写像する(写像済みの印 _volMapped が付いたものは除く)
   function mapConstVolumes(events, table) {
     const top = table.length - 1;
-    for (const ev of events) if (ev.volume !== undefined) ev.volume = table[Math.max(0, Math.min(top, ev.volume))];
+    for (const ev of events) if (ev.volume !== undefined && !ev._volMapped) ev.volume = table[Math.max(0, Math.min(top, ev.volume))];
   }
 
   // 借用先ファミリの音量レンジ。★FDS=32/VRC6のこぎり=42 は「コンパイラが受け付ける上限」(v0-63、
@@ -541,6 +548,7 @@
         toneKeyOf: (ev) => keyOf(ev, s), toneIdxKey };
       if (useTone && toneKind) ctx.toneOfEvent = (ev) => TS.toneFor(keyOf(ev, s), toneKind);
       adaptEvents(ch, s, fam, ctx);
+      for (const ev of ch.events) delete ev._volMapped; // 写像済みの印(mappedEnvReg)は整形が済んだら要らない
       ch.toneIdxKey = toneIdxKey;
       // ★動かさないのはYM2413(OPLL)だけ。OPLLの自作音色はVRC7と同じく$00-$07の1組を
       //   全chで共有する設計なので、抽出結果は最初から1系統に収まっている(実機がそう鳴らしていた)。
@@ -605,7 +613,8 @@
       // スロット順(P-W)に並べ直してから渡す(有効ch数の判定が位置依存のため)
       const slots = [];
       for (const p of byFamily.n163) slots[Plan.targetInfo(p.type).index] = p.channel;
-      n163FitNotes = MML.Convert.N163Fit.apply(slots, regs.n163WaveReg, cmd, n163NumCh);
+      // o.n163ExtraMargin / o.n163ForceHalve: コンパイルで RAM 不足が出たときのやり直し用(N163Fit.retryOnRamError)
+      n163FitNotes = MML.Convert.N163Fit.apply(slots, regs.n163WaveReg, cmd, n163NumCh, o.n163ExtraMargin || 0, o.n163ForceHalve || null);
       notes.push(...n163FitNotes);
     }
     const expansions = [];
