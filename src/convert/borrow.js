@@ -31,8 +31,10 @@
 
   // ── 借用先ファミリごとの生周期換算(detune/EP用。丸めない: src/convert/detune.js冒頭) ──
   function fme7PeriodRaw(freq) { return CPU_CLOCK_NTSC / (32 * freq); }
+  // ★波形長は音符ごと(ev.rawLength、N163Fit が縮めた波形の音符に付く)。コンパイラはその長さで
+  //   freqReg を作るので、既定長のまま D/EP を出すと縮めた音符だけ2倍以上効く(2026-09-19)
   function n163FreqRegRaw(waveLen, numCh) {
-    return freq => freq * 15 * 65536 * waveLen * numCh / CPU_CLOCK_NTSC;
+    return (freq, ev) => freq * 15 * 65536 * ((ev && ev.rawLength) || waveLen) * numCh / CPU_CLOCK_NTSC;
   }
   // VRC7: freq = fnum * 2^block * 49716 / 2^19(compiler.js vrc7FreqToFnumBlock() の逆関数、丸めない
   // 生の連続値)。再生側は「理論値(音符)の block を固定し、fnum だけに D<n> を足す」ので、
@@ -290,10 +292,12 @@
     };
 
     // AYのミキサー: ノイズ単独(mode 2)は矩形波系の借用先では鳴らせないので休符に、
-    // トーン+ノイズ(mode 3)はトーンだけ残す。FME-7以外ではN<n>も出さない
+    // トーン+ノイズ(mode 3)はトーンだけ残す。FME-7以外ではN<n>も出さない。
+    // ハードウェアエンベロープ(S<n>/M<n>、kss2mml/expansion/ay.js 2026-09-19)も FME-7 専用なので落とし、
+    // 抽出器が付けた volume(減衰の最大値)で鳴らす
     if (isAy && fam !== 'fme7') {
-      for (const ev of events) { if (ev.instrument === 2) ev.note = null; delete ev.fme7Noise; }
-      ch.hasFme7Noise = false;
+      for (const ev of events) { if (ev.instrument === 2) ev.note = null; delete ev.fme7Noise; delete ev.fme7EnvShape; delete ev.fme7EnvPeriod; }
+      ch.hasFme7Noise = false; ch.hasFme7Env = false;
     }
 
     // 音量: 借用先の尺度へ(@vテーブルは envRegFor() 側で同じ表に写像済み)。

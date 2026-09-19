@@ -366,6 +366,18 @@
    * @param {Array} scoreChannels 出力するチャンネル({letter, events})
    * @param {string[]} n163Letters assignExpansionLetters(...).n163(P-W、常に8個)
    */
+  // 音名 → 音高クラス(c=0 … b=11)。#TUNING-NOTE の読み書きに使う。+ と # はシャープ、- はフラット
+  // (MML本文と同じ書き方。e+ = f のような異名同音も受ける)。読めなければ null
+  const PC_BASE = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
+  Mml.pitchClassOf = function (name) {
+    const m = /^([a-gA-G])([+#-]*)$/.exec(String(name || ''));
+    if (!m) return null;
+    let pc = PC_BASE[m[1].toLowerCase()];
+    for (const ch of m[2]) pc += (ch === '-') ? -1 : 1;
+    return ((pc % 12) + 12) % 12;
+  };
+  Mml.PITCH_CLASS_NAMES = ['c', 'c+', 'd', 'd+', 'e', 'f', 'f+', 'g', 'g+', 'a', 'a+', 'b'];
+
   Mml.n163DeclaredCount = function (scoreChannels, n163Letters) {
     const used = new Set((scoreChannels || []).map(c => c && c.letter));
     let n = 0;
@@ -420,7 +432,7 @@
     const meta = { title: null, composer: null, maker: null, programer: null };
     // n163NumCh: #EX-N163 / #EX-NAMCO106 の数値(実効チャンネル数)。
     // 未指定(数値なし)なら null で、compiler.js が本文から自動検出する
-    const settings = { octaveRev: 0, gateDenom: 8, tuningCents: 0, n163NumCh: null };
+    const settings = { octaveRev: 0, gateDenom: 8, tuningCents: 0, tuningNotes: null, n163NumCh: null };
     const detectedExpansions = [];
     const macros = {};
     const { rawLines, lineStarts } = splitLinesWithOffsets(source);
@@ -450,6 +462,25 @@
               // して出す(src/convert/options.js detectTuning)。±1200(1オクターブ)を超える値は意味が無い
               const c = parseFloat(directive.args);
               settings.tuningCents = isFinite(c) ? Math.max(-1200, Math.min(1200, c)) : 0;
+              break;
+            }
+            case 'TUNING-NOTE': {
+              // 音名別チューニング(2026-09-19)。「#TUNING-NOTE f+ +33.1 c+ +10」のように音名とセントを
+              // 組で並べる(区切りは空白/カンマ)。その音名の音符だけ、全オクターブで周波数をずらす
+              // (音程表そのものが音名ごとに12平均律から外れている曲の再現用。#TUNING と併用すると足し算)。
+              // settings.tuningNotes は c=0..b=11 の12要素(セント)。compiler.js / ppmckDriver.js の
+              // noteFrequency が使う
+              const toks = String(directive.args || '').split(/[\s,]+/).filter(Boolean);
+              const notes = settings.tuningNotes ? settings.tuningNotes.slice() : new Array(12).fill(0);
+              let bad = toks.length % 2 !== 0;
+              for (let i = 0; i + 1 < toks.length && !bad; i += 2) {
+                const pc = Mml.pitchClassOf(toks[i]);
+                const c = parseFloat(toks[i + 1]);
+                if (pc == null || !isFinite(c)) { bad = true; break; }
+                notes[pc] = Math.max(-1200, Math.min(1200, c));
+              }
+              if (bad) errors.push({ lineNo, message: T('#TUNING-NOTE は「音名 セント」の組で書いてください(例: #TUNING-NOTE f+ +33 c+ +10)') });
+              else settings.tuningNotes = notes;
               break;
             }
             default: {

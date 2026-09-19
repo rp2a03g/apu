@@ -24,10 +24,12 @@
  * 'keep' を選ぶと何もしない(元の波形長のまま。収まらない曲は従来どおりコンパイルエラー)。
  *
  * ■ 呼んでいる経路と、呼ばなくてよい経路
- *   呼ぶ: hes2mml(既定=PSG 6ch→N163)/ vgm2mml / borrow.js(全形式のユーザー割当)
+ *   呼ぶ: hes2mml(既定=PSG 6ch→N163)/ vgm2mml / borrow.js(全形式のユーザー割当)/
+ *         kss2mml既定(SCC 5ch。32サンプル×5=80byte は 5ch時の枠88byteには収まるが、
+ *         N163_CH='fixed8' の 8ch時は64byteしか無い。2026-09-19 まで呼んでおらず Metal Gear 2 が
+ *         コンパイルエラーになっていた)
  *   不要: spc2mml … pcmToN163Waveが常に16サンプルへ揃えるので 8ch×8byte=64byte で必ず収まる
  *                   (周波数式 n163FreqRegRawSpc も waveLen=16 固定。ここで縮めると音程がずれる)
- *         kss2mml既定 … SCCは5chまで。32サンプル×5=80byte ≦ 5ch時の枠88byte
  *         nsf2mml … 元がN163なので実機RAMに収まっていたものしか出てこない
  *
  * ★呼ぶ位置: 波形とev.instrument/ev.rawLengthが確定した直後、かつ音程補正

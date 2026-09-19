@@ -931,7 +931,10 @@
 
     _endOfData() {
       const h = this.header;
-      if (h.loopOffset && h.loopOffset > h.dataOffset && h.loopOffset < this.data.length) {
+      // ★ループ先が曲データの先頭(loopOffset === dataOffset)も正規のループ。「頭から全部ループ」の曲は
+      //   多くがこれ(Power Strike II(SMS)は15曲中11曲)。以前は > で比べていたため、ループせずに曲データが
+      //   終わり、再生は1周で止まり、キャプチャは最後の音程のまま鳴りっぱなしになっていた(2026-09-19修正)
+      if (h.loopOffset && h.loopOffset >= h.dataOffset && h.loopOffset < this.data.length) {
         // 待ちを1つも含まないループ(空ループ)は無限ループになるので、前回ループ時から
         // サンプル位置が進んでいなければ終了扱いにする
         if (this._lastLoopSample === this.samplePos) { this.ended = true; return; }

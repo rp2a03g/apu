@@ -19,8 +19,8 @@
  *  - SMSのドライバは「周期<6でDC固定+音量書き換え」でPCM風の技法を使うことがあるが、
  *    snapshot側で active=false(音程なし)になるので自然に休符になる。
  *  - ノイズ: 2A03固定16周期のうち実測シフトレートに最も近い周期へ写像(gbs2mml/expansion/
- *    noise.jsと同じ近似)。周期性ノイズ(white=false)は2A03の短周期モードに相当するが、
- *    ネイティブNSF変換でもノイズのモードビットは出力していないので周期選択のみ写像する。
+ *    noise.jsと同じ近似)。周期性ノイズ(white=false)は2A03の短周期 @1 へ写し、周期は基本周波数が
+ *    合うものを選ぶ(extractNoiseEvents 直前のコメント。2026-09-19)。
  *    ノイズレート3(トーンch2追従)はch2の周期変化のたびに周波数が変わるので、そのまま
  *    シフトHz→最寄り周期で追従させる(ドラム音程のスライドとして現れる)。
  */
@@ -74,7 +74,14 @@
     return events;
   }
 
-  function extractNoiseEvents(snapshots, idx) {
+  // 周期性ノイズの周期の選び方(2026-09-19): SN76489 の周期性ノイズは「シフトレジスタ幅(SMS/GG=16、
+  // 素のSN76489=15)に1ビットだけ立った列」を回すので、シフトレート÷幅 の周波数の細いパルス(=音程のある音)になる。
+  // 2A03 の短周期(93ステップ)の基本周波数は シフトレート÷93。以前はシフトレートどうしで最寄りを取っていたため、
+  // 基本周波数が 幅/93 ≒ 1/5.8(約2.5オクターブ)低い周期を選んでいた。基本周波数どうしが合う周期を選ぶ
+  // (=シフトレート×93/幅 を長周期と同じ表で引く)。2A03 の周期表は16段しかないので、音程は最寄りの段どまり
+  const NES_SHORT_NOISE_STEPS = 93;
+
+  function extractNoiseEvents(snapshots, idx, shiftWidth) {
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
@@ -82,8 +89,8 @@
       const c = snapshots[f][idx];
       const volume = c.rawVol;
       const on = volume > 0 && c.active && c.noiseFreq > 0;
-      const note = on ? noiseFreqToNote(c.noiseFreq) : null;
       const mode = c.white === false ? 1 : 0; // 周期性ノイズ(white=false) → 2A03の短周期 @1(2026-09-18)
+      const note = on ? noiseFreqToNote(mode === 1 ? c.noiseFreq * NES_SHORT_NOISE_STEPS / shiftWidth : c.noiseFreq) : null;
       if (!cur) { cur = { note, mode, start: f, end: f, volSeq: [volume] }; continue; }
       const retrigger = note !== null && volume > cur.volSeq[cur.volSeq.length - 1];
       if (retrigger || note !== cur.note || (note !== null && mode !== cur.mode)) {
@@ -103,8 +110,10 @@
    * @param {object} [envReg] - MML.Convert.EnvelopeRegistry(音量エンベロープ@v<n>の共有登録)。
    *   assign(volSeq)を持つ任意のオブジェクト可(借用先に合わせた音量写像プロキシ等)
    * @param {number} [chip=0] - デュアルチップの何個目か(スナップショットは1個目[0-3]+2個目[4-7]の連結)
+   * @param {object} [opts] - { shiftWidth: ノイズのシフトレジスタ幅(VGMヘッダ。既定16=SMS/GG/MD) }
    */
-  MML.Vgm2MmlExpansion.sn76489 = function (snapshots, clock, envReg, chip) {
+  MML.Vgm2MmlExpansion.sn76489 = function (snapshots, clock, envReg, chip, opts) {
+    const shiftWidth = (opts && opts.shiftWidth > 0) ? opts.shiftWidth : 16;
     const base = (chip || 0) * 4;
     if (base > 0 && !(snapshots.length && snapshots[0].length > base)) return { tones: [0, 1, 2].map(() => ({ events: [], hasVolume: true, hasEnvelope: true, hasInstrument: true, hasFme7Noise: true })), noise: { events: [], hasVolume: true, hasEnvelope: true } };
     // 楽器化(2026-09-08): 減衰の終わり(サステイン後の急な落ち)を印無しで切り出して @vr(リリース表)へ
@@ -135,7 +144,7 @@
         events: MML.Convert.mergeUnclearPitchRuns(MML.Convert.mergeVibratoAndArpeggio(extractToneEvents(snapshots, base + ch, clock))).map(toneToCommon),
         hasVolume: true, hasEnvelope: true, hasInstrument: true, hasFme7Noise: true
       })),
-      noise: { events: extractNoiseEvents(snapshots, base + 3).map(noiseToCommon), hasVolume: true, hasEnvelope: true }
+      noise: { events: extractNoiseEvents(snapshots, base + 3, shiftWidth).map(noiseToCommon), hasVolume: true, hasEnvelope: true }
     };
   };
 })(window);

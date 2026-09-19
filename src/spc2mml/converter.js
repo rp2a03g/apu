@@ -105,7 +105,7 @@
   function pitchToSemitone(pitch, tune = 0) {
     if (pitch <= 0) return null;
     // 基準ピッチ(#TUNING、MML.Convert.tuningCents)込み。他形式の freqToNote と同じ丸め基準
-    const semi = Math.round(12 * Math.log2(pitch / 0x1000) + tune - MML.Convert.tuningCents() / 100) + 60;
+    const semi = MML.Convert.roundTunedNote(12 * Math.log2(pitch / 0x1000) + tune + 60); // #TUNING/#TUNING-NOTE 込み
     return (semi >= 0 && semi <= 119) ? semi : null;
   }
 

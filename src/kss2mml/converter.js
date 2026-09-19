@@ -50,8 +50,11 @@
   // 比例するため、ここで8を使うとD<n>が実際に必要な量の8/5=1.6倍(例: 13.5セント→21.6セント)
   // で書き込まれ、原曲の音程ズレそのものより大きく音痴になるバグだった(Gofer no Yabou II
   // index4で実測)。
+  // ★波形長は音符ごと: N163Fit が縮めた波形の音符は ev.rawLength(16/8/4)を持ち、コンパイラも
+  //   その長さで freqReg を作る(compiler.js currentRoundedLen)。32 固定で D/EP を出すと縮めた音符だけ
+  //   D/EP が2倍(以上)効いてしまう(2026-09-19)
   function n163FreqRegRaw(waveLen, numCh) {
-    return freq => freq * 15 * 65536 * waveLen * numCh / CPU_CLOCK_NTSC;
+    return (freq, ev) => freq * 15 * 65536 * ((ev && ev.rawLength) || waveLen) * numCh / CPU_CLOCK_NTSC;
   }
 
   // compiler.js(1497行目付近)と全く同じロジック: n163Letters(P-W、常に8個)を先頭から見て
@@ -199,7 +202,7 @@
           // 抽出でも登録してしまうと、誰も参照しない@N/@OP定義がMML本文に残るため)
           const waveReg = fam === 'n163' ? n163WaveReg : MML.Convert.n163WaveRegistry();
           const toneReg = fam === 'vrc7' ? vrc7ToneReg : new MML.Convert.WaveRegistry('@OP');
-          if (chip === 'ay8910') return MML.Kss2MmlExpansion.ay(writeLog, totalFrames, clock, reg).channels;
+          if (chip === 'ay8910') return MML.Kss2MmlExpansion.ay(writeLog, totalFrames, clock, reg, { frameRate }).channels;
           if (chip === 'k051649') return MML.Kss2MmlExpansion.scc(writeLog, totalFrames, clock, waveReg, reg).channels;
           if (chip === 'ym2413') return MML.Kss2MmlExpansion.opll(writeLog, totalFrames, toneReg).channels;
           if (chip === 'opl') return MML.Kss2MmlExpansion.opl(writeLog, totalFrames, clock, toneReg).channels;
@@ -239,14 +242,15 @@
     scoreChannels = [];
 
     // PSG(3ch) → fme7 (AY-3-8910互換なのでそのまま正しく再生できる)
-    const ayResult = MML.Kss2MmlExpansion.ay(writeLog, totalFrames, clock, envReg);
+    const ayResult = MML.Kss2MmlExpansion.ay(writeLog, totalFrames, clock, envReg, { frameRate, hwEnvSweepEN: !!cmd.EN });
     // 音程補正: 複数chが同じ音程を同時に鳴らしている(コーラス)場合だけ実測周波数の
     // 差をD<n>で明示する(detectChorusDetune、src/convert/detune.js)。単独音は理論値
     // (12平均律)にそのまま丸める。★2026-08-02: 以前はapplyPitchDetune(単独音も含め常に
     // 実測値ベースで補正)を使っていたが、KSSのドライバのノートテーブル自体がA440/12平均律
     // から系統的に数十セントずれている曲があり(Gofer no Yabou II実測)、単独音まで
     // 大きくズラしてしまい聞くに堪えなかった。ユーザー確認の上detectChorusDetune方式を
-    // 正式採用。
+    // 正式採用。★音程表が音名ごとに外れている曲(Metal Gear 2 の F# +33 セント等)は D ではなく
+    // 変換設定 TUNING='note'(#TUNING-NOTE、音名別チューニング)で周波数テーブル側を合わせる(2026-09-19)。
     MML.Convert.detectChorusDetune(ayResult.channels, fme7PeriodRaw, { cmd });
     // 高速アルペジオ→EN統合(2026-08-14拡張)。★必ずassignPitchEnvelopeより先に呼ぶこと:
     // assignPitchEnvelopeは内部でmarkSlurTiesを呼び、qualifiesForSlurがev.noteEnvの
@@ -254,6 +258,14 @@
     // markSlurTiesが走ると、アルペジオ統合済みイベントが誤ってタイ候補と判定され、
     // mmlEmit側のEN再送出がスキップされる退行になる(SPC変換で実測発覚)。
     MML.Convert.assignNoteEnvelope(ayResult.channels, noteEnvReg);
+    // 1つのハードウェアエンベロープの上で音程だけ刻む打楽器(ay.js mergeHwEnvSweeps)は非ループの EN で1音に
+    // (FME-7 の S<n> は音符ごとにエンベロープを打ち直すので、音符を分けたままだと減衰が何度も頭から鳴る)
+    for (const ch of ayResult.channels) for (const ev of ch.events) {
+      if (!ev.noteEnvTable) continue;
+      const idx = noteEnvReg.registerTable(ev.noteEnvTable);
+      if (idx != null) ev.noteEnv = idx;
+      delete ev.noteEnvTable;
+    }
     // ピッチエンベロープ(厳密周期ビブラート)も同じfme7PeriodRawで借用先の生レジスタ
     // 空間へ変換してから分類・登録する(DESIGN-PITCH.md Phase 1、D<n>の直後に置くのは
     // 両方とも同じ「借用先レジスタ空間への変換」処理系列だから)。
@@ -271,13 +283,19 @@
       const n163ActualNumCh = MML.Convert.n163NumChFor(cmd,
         sccResult.channels.map((ch, i) => (ch.events.some(ev => ev.note !== null) ? i : -1)).filter(i => i >= 0));
       n163NumCh = n163ActualNumCh;
-      MML.Convert.detectChorusDetune(
-        sccResult.channels, n163FreqRegRaw(MML.Kss2MmlExpansion.SCC_WAVE_LEN, n163ActualNumCh), { cmd });
+      // ★N163内蔵RAMへ波形が収まる形へ(src/convert/n163Fit.js、2026-09-19)。SCC 5ch × 32サンプル
+      //   = 80byte は 5ch 時の枠(88byte)には収まるが、N163_CH='fixed8'(既定)の 8ch 時は 64byte しか無い。
+      //   以前はここで呼んでいなかったため、5種類の波形が同時に鳴る曲は fixed8 だとコンパイルエラーで
+      //   再生も書き出しもできなかった(Metal Gear 2 $99: 「@N20(chT)をN163内蔵RAMに配置できません」)。
+      //   音域(N163_WAVE='both')もここで詰める。縮めた波形の音符は ev.rawLength を持つので、
+      //   周波数式は音符ごとの波形長で計算する(n163FreqRegRaw)。音程補正より前に呼ぶこと
+      borrowNotes.push(...MML.Convert.N163Fit.apply(sccResult.channels, n163WaveReg, cmd, n163ActualNumCh));
+      const sccFreqReg = n163FreqRegRaw(MML.Kss2MmlExpansion.SCC_WAVE_LEN, n163ActualNumCh);
+      MML.Convert.detectChorusDetune(sccResult.channels, sccFreqReg, { cmd });
       // 高速アルペジオ→EN統合(2026-08-14拡張)。ay.jsのブロックと同じ理由で
       // assignPitchEnvelope(内部でmarkSlurTiesを呼ぶ)より必ず先に呼ぶこと。
       MML.Convert.assignNoteEnvelope(sccResult.channels, noteEnvReg);
-      MML.Convert.assignPitchEnvelope(
-        sccResult.channels, n163FreqRegRaw(MML.Kss2MmlExpansion.SCC_WAVE_LEN, n163ActualNumCh), pitchReg,
+      MML.Convert.assignPitchEnvelope(sccResult.channels, sccFreqReg, pitchReg,
         { saMode: cmd.PITCH_SA }); // 出力先N163: SA<num>自動選択(pitch.js n163SaForBase参照)
       // ★休符だけのチャンネルは出さない(ユーザー指示 2026-09-11)。実効ch数は
       //   #EX-N163 の数値で伝わるので、空チャンネルで位置を示す必要がなくなった

@@ -653,8 +653,10 @@
     // 基準ピッチ(#TUNING、src/convert/options.js MML.Convert.tuningCents)込み。抽出器の丸め
     // (freqToNote)と同じ基準で「半音に乗っているか」を判定しないと、全体ずれのある曲で
     // 綺麗なアルペジオまで「半音に乗っていない」と誤判定して EN 統合から漏れる
-    const cont = 57 + 12 * Math.log2(freq / 440) - MML.Convert.tuningCents() / 100;
-    return (cont - Math.round(cont)) * 100;
+    // 音名別(#TUNING-NOTE)も込み: 丸め先の音名のオフセットを引いた残りを返す
+    const cont = 57 + 12 * Math.log2(freq / 440);
+    const n = MML.Convert.roundTunedNote(cont);
+    return (cont - n - MML.Convert.noteOffsetCents(n) / 100) * 100;
   }
 
   // 実測周波数(Hz)を保持するフィールド名はフォーマットの抽出コードによって
@@ -709,6 +711,46 @@
     return { refNote, deltas };
   }
 
+  // EN<n> の1周に使う各ステップの長さ(フレーム)。統合した音符はこの1周を最後まで繰り返すので、
+  // 1周の長さが実際の周期と1フレームでも違うと、周回ごとに1フレームずつ位相がずれていく。
+  // ★1周目をそのまま使うとは限らない(2026-09-19、Power Strike II(SMS) 曲8の SN76489 ch2 で実測)。先頭のステップは音符の
+  //   頭で、ドライバのアルペジオ刻み(4〜5フレーム)と発音タイミングの端数を含むので他より長いことが多い
+  //   (実測: 1周目 5+4+4+5=18、2周目以降は全部 17)。以前は1周目の長さをそのまま使っていたため、137フレームの
+  //   音符で8フレーム遅れ、後半は和音の構成音が丸ごと入れ替わって鳴っていた(±5〜7半音の不一致が1周あたり数十フレーム)。
+  //   → 完全に入っている周それぞれの並びを候補にし、「その並びで音符の最初から最後まで繰り返したとき、元の音程と
+  //     食い違うフレーム数」が一番少ないものを採る。同数なら前の周(=1周目、従来と同じ)を採るので、
+  //     1周目で良かった曲の出力は変わらない。刻みが途中で 5,4,4,4 → 4,4,4,5 と入れ替わる曲もあり
+  //     (同曲で実測)、「平均の長さに近い周」だけで選ぶと位相が1フレームずれた並びを拾って逆に悪化した
+  function arpeggioCycleDurations(used, period) {
+    const K = Math.floor(used.length / period);
+    const cycles = [];
+    for (let k = 0; k < K; k++) cycles.push(used.slice(k * period, (k + 1) * period).map(e => e.end - e.start));
+    if (cycles.length < 2) return cycles[0];
+    // 元の音程(フレームごと)
+    const t0 = used[0].start;
+    const truth = [];
+    for (const e of used) for (let f = e.start; f < e.end; f++) truth[f - t0] = e.note;
+    const cycleNotes = used.slice(0, period).map(e => e.note);
+    const mismatch = (durs) => {
+      let bad = 0, step = 0, left = durs[0];
+      for (let f = 0; f < truth.length; f++) {
+        if (truth[f] != null && truth[f] !== cycleNotes[step]) bad++;
+        if (--left <= 0) { step = (step + 1) % period; left = durs[step]; }
+      }
+      return bad;
+    };
+    let best = cycles[0], bestBad = mismatch(cycles[0]);
+    const seen = new Set([cycles[0].join(',')]);
+    for (let k = 1; k < cycles.length; k++) {
+      const key = cycles[k].join(',');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const bad = mismatch(cycles[k]);
+      if (bad < bestBad) { best = cycles[k]; bestBad = bad; }
+    }
+    return best;
+  }
+
   // ★和音→アルペジオ(src/input/quantize.js)でも同じ符号化を使うので公開する。
   //   EN<n>の中身の作り方が2箇所に分かれると、片方だけ直して食い違う
   MML.Convert.buildNoteEnvelopeDeltas = buildNoteEnvelopeDeltas;
@@ -753,7 +795,7 @@
         const used = run.slice(0, found.matchLen);
         const cycle = used.slice(0, found.period);
         const cycleNotes = cycle.map(e => e.note);
-        const durations = cycle.map(e => e.end - e.start);
+        const durations = arpeggioCycleDurations(used, found.period);
         const { refNote, deltas } = buildNoteEnvelopeDeltas(cycleNotes, durations);
         if (!deltas.some(v => v < EN_VALUE_MIN || v > EN_VALUE_MAX)) {
           const last = used[used.length - 1];
@@ -952,6 +994,38 @@
     return false;
   }
 
+  // 「別々の音を順に鳴らしている」か(2026-09-19、魔界塔士サガ GBS のパルスで発覚)。トリル判別(TRILL_MIN_CENTS/
+  // 中間帯比率)は2値の方形しか拾えず、次の2つをビブラートとして1音符+EPへ統合していた:
+  //   ・g+ g g+ a g+ a(各5〜10フレーム)の回音。3値なので中間の g+ が「中間帯」に入り方形と見なされない
+  //   ・f+ g f+(各20フレーム)の遅いトリルで、各音に±1の浅いビブラートが乗っているもの。揺れが中間帯に入る
+  // どちらも「半音に乗った音が、しばらく平らに鳴っている」ことが区切りごとに成り立つ。ビブラートが半音境界を
+  // またいで割れた区切りは、(a)境界の外側に出た側が半音からずれている(最寄り半音から±25セント超)か、
+  // (b)区切りの中で音程が動き続けていて平らでない、か(c)数フレームしか無い、のどれかになる。
+  // ★全区切りが「DISCRETE_MIN_FRAMES 以上・先頭が半音±ARPEGGIO_CENTS_TOLERANCE 以内・区切り内の揺れが隣との
+  //   段差の半分以下」を満たすときだけ離散的とみなす(1つでも外れればこれまでどおり統合を試す=安全側)。
+  //   揺れと段差は pitchSeq の生値で比べる(比なので単位によらない。GB のように周期/周波数に比例しない値でも、
+  //   一次変換なので比は保たれる)
+  const DISCRETE_MIN_FRAMES = 4;
+  function isDiscreteSteps(absorbed) {
+    const med = absorbed.map(e => {
+      const s = e.pitchSeq.slice().sort((x, y) => x - y);
+      return s[s.length >> 1];
+    });
+    for (let k = 0; k < absorbed.length; k++) {
+      const e = absorbed[k];
+      if (e.pitchSeq.length < DISCRETE_MIN_FRAMES) return false;
+      if (!(Math.abs(centsFromNearestSemitone(eventFreq(e))) <= ARPEGGIO_CENTS_TOLERANCE)) return false;
+      let step = Infinity;
+      if (k > 0) step = Math.min(step, Math.abs(med[k] - med[k - 1]));
+      if (k + 1 < absorbed.length) step = Math.min(step, Math.abs(med[k] - med[k + 1]));
+      if (!(step > 0)) return false;
+      let mn = Infinity, mx = -Infinity;
+      for (const v of e.pitchSeq) { if (v < mn) mn = v; if (v > mx) mx = v; }
+      if ((mx - mn) * 2 > step) return false;
+    }
+    return true;
+  }
+
   MML.Convert.mergeAlternatingVibrato = function (events, opts) {
     const result = [];
     let i = 0;
@@ -1018,8 +1092,29 @@
             for (const v of candidateSeq) if (v > 0) { n++; if (v > lo && v < hi) mid++; }
             middleFrac = n > 0 ? mid / n : 0;
           }
+          // ★音程の幅は実周波数でも測り、大きい方を採る(2026-09-19、魔界塔士サガ GBS のパルスで発覚)。
+          //   上の log2(mx/mn) は「pitchSeq が周期か周波数に比例する」前提で、NSF/KSS/HES/N163 等はそれで正しい。
+          //   ところが GB の pitchSeq は NRx3/NRx4 の11bit値 x で、実周波数は 131072/(2048-x)(波形chは 65536/(2048-x))。
+          //   x は周期にも周波数にも比例しないので、x の比は実際の音程幅を大きく過小評価する
+          //   (o4c↔c+ の半音トリル 1547↔1575 が 31セントと出る。実際は 100セント)。そのため 11フレームずつの
+          //   c/c+ の交互(トリル)が TRILL_MIN_CENTS 未満=「浅いビブラート」と判定され、1音符+EP に統合されていた。
+          //   各イベントの実測周波数(先頭フレーム)の幅と比べて大きい方を採る。比例する形式では、先頭フレームの
+          //   周波数は pitchSeq の値のどれかなので上の値を超えない=結果は不変。中間帯比率(middleFrac)は
+          //   一次変換で変わらないので GB でもそのままでよい
+          let fmn = Infinity, fmx = 0;
+          for (const e of absorbed) { const fz = eventFreq(e); if (fz > 0) { if (fz < fmn) fmn = fz; if (fz > fmx) fmx = fz; } }
+          if (fmn < Infinity && fmx > fmn) spanCents = Math.max(spanCents, 1200 * Math.log2(fmx / fmn));
         }
-        const isTrill = spanCents >= TRILL_MIN_CENTS && middleFrac < TRILL_MIDDLE_FRAC_MAX;
+        // (3) 離散的な音の並び(isDiscreteSteps 冒頭コメント参照): どの区切りも半音に乗った平らな音なら
+        //     トリル/装飾音(3値以上の回音や、各音に浅いビブラートの乗ったトリルも含む)なので統合しない
+        //     ★方形判定は区切りの長さの中央値が2フレーム以上のときだけ(2026-09-19): 1フレームごとに半音を
+        //     行き来する揺れ(Metroid II GBS 曲0、82↔83 を1〜3フレームで往復)は奏法としてのトリルではなく音色的な
+        //     うなりで、音符に割ると 96分音符の連打になる。1音符+EP の方が元の周期列をそのまま再現できる
+        //     (以前は GB の幅の測り違いで偶然統合されていた。幅を正しく測るようにしたので明示的に残す)
+        const segLens = absorbed.map(e => e.end - e.start).sort((x, y) => x - y);
+        const medianSeg = segLens[segLens.length >> 1];
+        const isTrill = (spanCents >= TRILL_MIN_CENTS && middleFrac < TRILL_MIDDLE_FRAC_MAX && medianSeg >= 2) ||
+          isDiscreteSteps(absorbed);
         const spanOk = !(opts && opts.maxAbsorbCents != null && spanCents >= opts.maxAbsorbCents);
         const periodic = !!classified && (classified.type === 'periodic' ||
           (!isTrill && spanOk && hasPeriodicTail(candidateSeq)));

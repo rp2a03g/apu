@@ -133,9 +133,12 @@
   // #TUNING(基準ピッチ、セント)の周波数比。buildBankedNsfBytes が compileResult.settings.tuningCents から
   // 設定する。compiler.js の noteFrequency と同じ比にすることでブラウザ再生とNSF書き出しの音程が一致する
   // (周波数テーブルの数値が変わるだけで、6502側のドライバコードは一切変わらない)
+  // #TUNING-NOTE(音名別、compileResult.settings.tuningNotes)も compiler.js noteFrequency と同じ式で掛ける
   let tuningRatio = 1;
+  let tuningNoteRatios = null;
   function noteFrequency(noteNumber) {
-    return 440 * Math.pow(2, (noteNumber - 57) / 12) * tuningRatio;
+    const nr = tuningNoteRatios ? tuningNoteRatios[((Math.round(noteNumber) % 12) + 12) % 12] : 1;
+    return 440 * Math.pow(2, (noteNumber - 57) / 12) * tuningRatio * nr;
   }
   function pulsePeriod(freq) {
     return Math.max(0, Math.min(2047, Math.round(CPU_CLOCK_NTSC / (16 * freq)) - 1));
@@ -3300,7 +3303,11 @@ RD_FME7HENV:
     STA ${hex(FMEEPH)}
     LDA #$01
     STA ${hex(FMEEACT)},X
-    JMP RD_LOOP` : ''}
+${envTableCount > 0 ? `    LDA #$00
+    STA ${hex(ENVACT)},X   ; ★2026-09-19: ソフトウェア音量エンベロープ(@v)も解除する。compiler.js は
+    LDA #$FF                ; 「S<n> > @v > v」の優先順で S<n> の音符に @v を掛けないが、ここで残していたため
+    STA ${hex(ENVSEL)},X   ; @v の音符の後の S<n> の音符で @v が毎フレーム音量(bit4=0)を書き、エンベロープが消えていた
+` : ''}    JMP RD_LOOP` : ''}
 
 RD_VOL:
     JSR READ_BYTE
@@ -4585,6 +4592,8 @@ SONG_LOOP_PTR_HI:
     const segmentsByChannel = compileResult.segmentsByChannel || {};
     // #TUNING(基準ピッチ): 全チップの周波数テーブル(buildPeriodTable/N163/VRC7)を compiler.js と同じ比でずらす
     tuningRatio = Math.pow(2, ((compileResult.settings && compileResult.settings.tuningCents) || 0) / 1200);
+    tuningNoteRatios = (compileResult.settings && compileResult.settings.tuningNotes)
+      ? compileResult.settings.tuningNotes.map(c => Math.pow(2, (c || 0) / 1200)) : null;
 
     // N163の有効チャンネル数($7Fに書く値、周波数テーブルの符号化、レジスタ配置の
     // (8-num)+chオフセットの全てに効く)をcompiler.js(n163NumChOf)と完全に同じ規則で決める。

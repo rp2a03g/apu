@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 10:41:50
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 15:00:49
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-19 10:41:50';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-19 15:00:49';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -5545,9 +5545,23 @@
   // 基準ピッチ(#TUNING、セント)。MML再生(setSource の result.tuningCents)と変換結果の音程検証
   // (buildRollTracksFromRegSnapshotsPure の extra.tuningCents)が設定する。実ファイル再生は0
   let rollTuningCents = 0;
+  // 音名別チューニング(#TUNING-NOTE、c=0..b=11 のセント、null=無し)。rollTuningCents と同じ経路で設定する。
+  // 丸めは src/convert/options.js roundTunedNote と同じ規則(このファイルは options.js を含まない
+  // Workerバンドルにも入るので同じ式をここに置く)
+  let rollTuningNotes = null;
+  function roundTunedMidi(cont) {
+    const m0 = Math.round(cont - rollTuningCents / 100);
+    if (!rollTuningNotes) return m0;
+    let best = m0, bestD = Infinity;
+    for (let m = m0 - 1; m <= m0 + 1; m++) {
+      const d = Math.abs(cont - m - (rollTuningCents + (rollTuningNotes[((m % 12) + 12) % 12] || 0)) / 100);
+      if (d < bestD) { bestD = d; best = m; }
+    }
+    return best;
+  }
   function freqToMidi(f) {
     if (!f || f <= 0) return null;
-    const m = Math.round(69 + 12 * Math.log2(f / 440) - rollTuningCents / 100);
+    const m = roundTunedMidi(69 + 12 * Math.log2(f / 440));
     return (m >= MIDI_MIN && m <= MIDI_MAX) ? m : null;
   }
 
@@ -5766,7 +5780,7 @@
   // 「何の音か分からない」より音名(範囲外は色を落として区別)の方が読める(2026-09-07)
   function freqToMidiAny(f) {
     if (!f || f <= 0) return null;
-    const m = Math.round(69 + 12 * Math.log2(f / 440) - rollTuningCents / 100);
+    const m = roundTunedMidi(69 + 12 * Math.log2(f / 440));
     return (m >= 0 && m <= 127) ? m : null;
   }
 
@@ -9708,6 +9722,7 @@
       // 基準ピッチ(#TUNING): MML再生(main.js setMonitorSource が compiled.settings.tuningCents を渡す)の
       // 鍵盤ハイライト/ロールを、ずらした基準で音名に丸める。実ファイル再生は未指定=0
       rollTuningCents = (result && result.tuningCents) ? +result.tuningCents : 0;
+      rollTuningNotes = (result && result.tuningNotes) || null; // #TUNING-NOTE(音名別)
       // L/R(ステレオパン)列はHES/GBSのみ意味を持つため、他フォーマットでは非表示にする
       // (表示/パネル幅はCSS側の.kbd-left--hes/.kbd-left--gbsで切り替え、詳細はstyle.css参照)。
       this._leftEl.classList.toggle('kbd-left--hes', this._chips.includes('hes'));
@@ -12467,14 +12482,15 @@
     });
     // extra.tuningCents(#TUNING、verify.js): 構築の間だけ音名の丸め基準をずらす(呼び出し元は
     // 変換中のメインスレッドで、鍵盤が別ファイルを表示中かもしれないので必ず元へ戻す)
-    const prevTuning = rollTuningCents;
+    const prevTuning = rollTuningCents, prevTuningNotes = rollTuningNotes;
     if (extra && extra.tuningCents != null) rollTuningCents = +extra.tuningCents || 0;
+    if (extra && extra.tuningNotes !== undefined) rollTuningNotes = extra.tuningNotes || null;
     try {
       return buildNoteTimelineFromChannelFrames(
         (f) => extractChannels(regSnapshots[f] || {}, extraSnaps, f, chips),
         totalFrames, frameDur
       );
-    } finally { rollTuningCents = prevTuning; }
+    } finally { rollTuningCents = prevTuning; rollTuningNotes = prevTuningNotes; }
   }
 
   UI.KeyboardDisplay = KeyboardDisplay;

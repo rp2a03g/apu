@@ -293,6 +293,10 @@
           if (ev.toneEnv !== state.curToneEnv) { emit(`@@${ev.toneEnv}`); state.curToneEnv = ev.toneEnv; state.curInst = -1; }
         } else if (flags.hasInstrument && ev.instrument !== undefined && (ev.instrument !== state.curInst || state.curToneEnv != null)) {
           emit(`@${ev.instrument}`); state.curInst = ev.instrument; state.curToneEnv = null;
+          // FME-7: ノイズ周期 R6 は3ch共有で、@2 の音符(ノート番号=周期)が書き換える。NSFドライバは N<n> を
+          // 読んだ瞬間にしか R6 を書かないので、ミキサーを切り替えたら次の @3 で N<n> を出し直す
+          // (2026-09-19: 「@3 N0 … @2 e @3」で N0 を省いたため、NSF では @3 が @2 の周期のまま鳴っていた)
+          if (flags.hasFme7Noise) state.curFme7Noise = -1;
         }
         // ハードウェアスイープ(2A03パルスのみ)。D<n>等と同じく未指定イベントはOFF扱いに
         // して、前回との差分があるときだけ出す(直前の音符のスイープを引きずらないため)
@@ -413,6 +417,10 @@
           // 場合コンパイラ側のstate.envelopeVがnullにクリアされているため、値が前回の
           // @v<n>と同じ番号でも必ずトークンを出し直して再セットする(state.curVolMode参照)。
           if (ev.envelopeV !== state.curEnvV || state.curVolMode !== 'env') {
+            // ★FME-7 のハードウェアエンベロープ(S<n>)は @v では解除されない(コンパイラ/ドライバとも
+            //   「S<n> > @v > v」の優先順で、解除は v<n> だけ)。S<n> の音符の後に @v の音符が来ると
+            //   @v が効かずエンベロープのまま鳴るので、先に v で抜ける(2026-09-19、KSS の PSG ドラムで実測)
+            if (state.curVolMode === 'fme7env') { emit('v15'); state.curVol = 15; }
             emit(`@v${ev.envelopeV}`); state.curEnvV = ev.envelopeV;
           }
           state.curVolMode = 'env';
@@ -618,12 +626,26 @@
   // ・キャプチャが「イントロ+2周」より短いと確認できないので検出しない(変換する長さを伸ばす)
   // ・曲が終わって無音が続くだけの末尾は「どの T でも一致」するので、ループ区間に音符が無ければ捨てる
   // ・T の倍数も候補になるが、確認できた長さ(span)が最大の T を選ぶので基本周期が勝つ
+  // ・キャプチャの末尾 LOOP_TAIL_GUARD フレームの食い違いは数えない(下の tailGuard)
+  // opt(省略可):
+  //   hint … 元データが持つループ情報 { start, period }(フレーム、小数可)。VGMヘッダのループ位置/ループ長など、
+  //           再生側が実際にそこへ戻る「正解」。あれば音符列の探索より優先し、キャプチャは「イントロ+1周」で足りる
+  //   why  … 見つからなかったときの理由を why.reason に入れて返す('short' / 'none' / 'silent' / 'tail' /
+  //           'hintShort'=hint はあるがキャプチャが「イントロ+1周」に足りない。why.needFrames に必要な長さ)。
+  //           emitScore が MML のヘッダコメントに書く(黙って通常出力に戻ると、なぜループしないのか分からない)
   const LOOP_MIN_PERIOD = 240;        // 4秒未満の周期はリフの繰り返しと区別できないので見ない
   const LOOP_MISMATCH_RATE = 0.003;   // 一致区間に許す食い違いの割合(キャプチャの1フレーム揺れを許す)
   const LOOP_MIN_ONSETS = 8;          // ループ1周に最低これだけ音符の頭が無ければループと見なさない
-  MML.Convert.detectLoop = function (channelsData, totalFrames) {
+  // キャプチャ末尾の切れ端は信用しない: 減衰して消えた音符は「次の音符の頭まで」の長さで来るので、キャプチャの
+  // 終わりで次の音符が無いと1周目より短く切れる(Power Strike II(SMS)曲3のノイズ: 1周目 2278-2313 / 2周目 4538-4545。
+  // 末尾から数えて最初の9フレームで食い違いが上限 8 を超え、真の周期 2260 が即座に棄却されていた)
+  const LOOP_TAIL_GUARD = 120;
+  MML.Convert.detectLoop = function (channelsData, totalFrames, opt) {
+    opt = opt || {};
+    const why = opt.why || {};
     const N = totalFrames | 0;
-    if (N < LOOP_MIN_PERIOD * 2) return null;
+    const hint = opt.hint && opt.hint.period > 0 ? opt.hint : null;
+    if (N < LOOP_MIN_PERIOD * 2 && !hint) { why.reason = 'short'; return null; }
     const sig = new Int32Array(N);
     const busy = new Uint8Array(N);
     const onset = new Uint8Array(N); // そのフレームでどれかのチャンネルの音符が始まる
@@ -638,17 +660,44 @@
       }
       for (let f = 0; f < N; f++) sig[f] = (Math.imul(sig[f], 1000003) + lane[f] + 7) | 0;
     }
+    const soundCheck = (b, minOnsets) => {
+      let sounding = 0, onsets = 0;
+      for (let f = b.start; f < b.start + b.period && f < N; f++) { sounding += busy[f]; onsets += onset[f]; }
+      if (sounding < b.period * 0.05) { why.reason = 'silent'; return false; } // ほぼ無音の区間=曲が終わっているだけ
+      // 曲が終わったあと1音が鳴りっぱなし(または消え残り)の末尾も「どの T でも一致」する。ループ1周の中に
+      // 音符の頭がほとんど無ければ曲ではないので捨てる(Batman (Prototype) 曲1 の末尾で誤検出した)
+      if (onsets < minOnsets) { why.reason = 'tail'; return false; }
+      return true;
+    };
+    // 元データのループ情報(VGMヘッダ等)があればそれを使う。再生側がそこへ戻るのは確定しているので、
+    // 音符列での確認は要らない(キャプチャの揺れやノイズの減衰の違いで棄却されることもない)。
+    // ★周期はフレームへ丸める。ループ長がフレームの整数倍でない曲は、NSFでは1周ごとに端数ぶんずれる
+    //   (元のフレーム格子で取ったキャプチャに合わせる以上、避けられない)
+    if (hint) {
+      const T = Math.round(hint.period), s = Math.max(0, Math.round(hint.start || 0));
+      if (T >= 30 && s + T <= N) {
+        const b = { start: s, period: T, span: 0, hinted: true };
+        return soundCheck(b, 1) ? b : null;
+      }
+      // キャプチャが「イントロ+1周」に満たない: 下の探索にも回すが、見つからなければ理由は「長さ不足」
+      if (T >= 30 && s + T > N) why.needFrames = s + T;
+    }
     let best = null;
     for (let T = LOOP_MIN_PERIOD; T * 2 <= N; T++) {
+      // 末尾 tailGuard フレームの食い違いは数えない(LOOP_TAIL_GUARD のコメント)。その区間で最も手前の
+      // 食い違いの直前から照合を始める。確認できた長さ span には読み飛ばした末尾も含める
+      const tailGuard = Math.min(LOOP_TAIL_GUARD, T >> 2);
+      let f0 = N - T - 1;
+      for (let f = N - T - 1; f >= N - T - tailGuard && f >= 0; f--) if (sig[f] !== sig[f + T]) f0 = f - 1;
       // 早期棄却: 最後の1周ぶんを粗く見て、明らかに合わない T は飛ばす
       let quick = 0;
       const step = Math.max(1, (T / 48) | 0);
-      for (let f = N - T - 1, k = 0; k < 48 && f >= N - 2 * T; f -= step, k++) if (sig[f] !== sig[f + T]) quick++;
+      for (let f = f0, k = 0; k < 48 && f >= N - 2 * T; f -= step, k++) if (sig[f] !== sig[f + T]) quick++;
       if (quick > 3) continue;
       let mism = 0, start = N - T;
-      for (let f = N - T - 1; f >= 0; f--) {
+      for (let f = f0; f >= 0; f--) {
         if (sig[f] !== sig[f + T]) mism++;
-        const len = N - T - f;
+        const len = f0 + 1 - f;
         if (mism > LOOP_MISMATCH_RATE * len + 8) break;
         if (sig[f] === sig[f + T] && mism <= Math.max(2, LOOP_MISMATCH_RATE * len)) start = f;
       }
@@ -656,14 +705,15 @@
       if (span < T) continue; // 1周ぶん確認できていない
       if (!best || span > best.span) best = { start, period: T, span };
     }
-    if (!best) return null;
-    let sounding = 0, onsets = 0;
-    for (let f = best.start; f < best.start + best.period; f++) { sounding += busy[f]; onsets += onset[f]; }
-    if (sounding < best.period * 0.05) return null; // ほぼ無音の区間=曲が終わっているだけ
-    // 曲が終わったあと1音が鳴りっぱなし(または消え残り)の末尾も「どの T でも一致」する。ループ1周の中に
-    // 音符の頭がほとんど無ければ曲ではないので捨てる(Batman (Prototype) 曲1 の末尾で誤検出した)
-    if (onsets < LOOP_MIN_ONSETS) return null;
-    return best;
+    if (!best) { why.reason = why.needFrames ? 'hintShort' : N < LOOP_MIN_PERIOD * 2 ? 'short' : 'none'; return null; }
+    return soundCheck(best, LOOP_MIN_ONSETS) ? best : null;
+  };
+  // detectLoop の why.reason → MML ヘッダコメントの文(emitScore)
+  const LOOP_FAIL_TEXT = {
+    short: '変換した長さが短すぎて周期を確かめられませんでした',
+    none: '全チャンネルで一致する周期が見つかりませんでした(ループしない曲か、変換した長さが「イントロ+2周」に足りない)',
+    silent: '周期的なのは無音の末尾だけでした(ループしない曲と判断)',
+    tail: '周期的なのは音符の頭がほとんど無い末尾(鳴りっぱなし/消え残り)だけでした(ループしない曲と判断)'
   };
 
   // frame(ループ開始位置)をまたぐイベントを必ず2つに割る。
@@ -814,8 +864,15 @@
     // ループ開始は可能なら直後の小節線へ寄せる(周期性は loop.start 以降ずっと成り立つので、後ろへずらしても
     // 同じ長さの1周が取れる。L が小節の頭に来て譜面が読みやすい)。
     let loop = null;
+    let loopFailLine = null;
     if (layout.LOOP_DETECT && totalFrames > 0) {
-      const found = MML.Convert.detectLoop(channelsData, totalFrames);
+      const why = {};
+      const found = MML.Convert.detectLoop(channelsData, totalFrames, { hint: opts.loopHint, why });
+      if (!found) {
+        loopFailLine = why.reason === 'hintShort'
+          ? `; ループ自動検出: 元データのループ(イントロ+1周=${why.needFrames}フレーム)に対して変換した長さ ${totalFrames}フレームが足りないため、通常の出力にしました(変換する長さを伸ばしてください)`
+          : `; ループ自動検出: ${LOOP_FAIL_TEXT[why.reason] || 'ループは見つかりませんでした'}。変換した長さ ${totalFrames}フレーム。通常の出力にしました`;
+      }
       if (found) {
         // ★L は「どのチャンネルの音符もまたがない位置」に置く。タイで繋がった音符の途中には L を置けない
         //   (コンパイラはタイを1つの音符にまとめるので L が音符の境界に来ず、NSFではそのチャンネルの
@@ -836,7 +893,7 @@
           c.x = crossings(c.p);
           if (!pick || c.x < pick.x || (c.x === pick.x && c.bar && !pick.bar)) pick = c;
         }
-        loop = { start: pick.p, end: pick.p + found.period, period: found.period, span: found.span, crossings: pick.x };
+        loop = { start: pick.p, end: pick.p + found.period, period: found.period, span: found.span, crossings: pick.x, hinted: !!found.hinted };
       }
     }
     const fullFrames = totalFrames;
@@ -901,9 +958,10 @@
     const lines = [];
     if (opts.headerLines) lines.push(...opts.headerLines);
     if (loop) {
-      lines.push(`; ループ自動検出: ${loop.start}フレーム目から ${loop.period}フレーム周期(元の ${fullFrames}フレームのうち ${loop.span}フレームで周期を確認)。` +
+      lines.push(`; ループ自動検出: ${loop.start}フレーム目から ${loop.period}フレーム周期(` +
+        (loop.hinted ? `元データのループ情報による。変換した長さは ${fullFrames}フレーム` : `元の ${fullFrames}フレームのうち ${loop.span}フレームで周期を確認`) + `)。` +
         `イントロ+1周ぶんだけを書き出し、各チャンネルのループ開始位置に L を置いています`);
-    }
+    } else if (loopFailLine) lines.push(loopFailLine);
     // ★チャンネルが1本も無い(音符が1つも取れなかった曲)ときはテンポ行を出さない。文字の無い " t120" は
     //   コンパイルエラーになり、再生も書き出しもできないMMLになる(PSF の Gran Turismo arcade.psf で発覚)
     if (opts.tempoBpm != null && channelsData.length) {

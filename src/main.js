@@ -995,7 +995,15 @@
       // サンプル再生chの打点は分離レンダリング後に決まる(ent.notes)。それまでは何も出さない
       const ent = synthDrum.byCh.get(tr.id);
       const drumNotes = (ent && ent.notes && ent.notes.length) ? ent.notes : synthDrumNotes(tr);
-      return Object.assign({}, tr, { notes: drumNotes.concat(tr.notes.filter(n => n.midi == null && !n.drumKey)) });
+      // ★ロール構築の時点で実サンプルを同定済みの打点(drumKey付き・midi無し)はそのまま残す(2026-09-19)。
+      //   HESのDDAはPSGの波形chと同じ行(PSG0-5)に載るので、DDAの行に E を選ぶとこの行が打楽器化の対象になり、
+      //   以前は drumKey 付きノートまで捨てていた。分離レンダリングは音程ノートからしか打点を作らない
+      //   (synthDrumNotes)ので、DDAだけの行は打点0個になり、ロールのドラム区画も鍵盤のパッドも消えていた
+      //   (ユーザー報告「HESで鍵盤にドラムパッドが出てこない」。割当はファイル別に自動保存されるので開き直しても戻らない)。
+      //   分離レンダリング由来の打点は synth: キーで別物なので二重にはならない
+      const realDrums = tr.notes.filter(n => n.midi == null && n.drumKey && !(ent && ent.samples && ent.samples[n.drumKey]));
+      return Object.assign({}, tr, { notes: drumNotes.concat(realDrums, tr.notes.filter(n => n.midi == null && !n.drumKey))
+        .sort((a, b) => a.startSec - b.startSec) });
     });
   }
   // そのchだけ生かしたミュート設定(表示中の行から組む。形状は getMuteConfig と同じ)
@@ -3783,6 +3791,18 @@
     const detail = (t.count ? T('偏差の中央値 {median} cent、四分位範囲 {iqr}、音符 {n} 個', { median: fmt(t.median || 0), iqr: (t.iqr || 0).toFixed(1), n: t.count }) : T('音符が無いため測れません'));
     const groups = (t.byGroup || []).filter(g => g.count > 0).map(g => `${g.group} ${fmt(g.median)} (${g.count})`).join(' / ');
     const groupsHtml = groups ? '<div class="cs-desc">' + T('内訳(チャンネル群ごとの中央値)') + ': ' + groups + '</div>' : '';
+    // 音名別(変換設定 TUNING='note'、#TUNING-NOTE)。音名ごとの中央値(音符数)を並べ、採用した音名を示す
+    if (t.mode === 'note') {
+      const names = MML.Convert.PITCH_CLASS_NAMES;
+      const perPc = (t.perPc || []).filter(p => p.count > 0)
+        .map(p => `${names[p.pc]} ${fmt(p.median)} (${p.count})${t.notes && t.notes[p.pc] ? '*' : ''}`).join(' / ');
+      const perPcHtml = perPc ? '<div class="cs-desc">' + T('音名ごとの中央値(* = 補正した音名)') + ': ' + perPc + '</div>' : '';
+      if (t.notes) {
+        const list = t.notes.map((c, pc) => (c ? `${names[pc]} ${fmt(c)}` : null)).filter(Boolean).join(', ');
+        return '<div>' + T('音名別チューニング: {list} cent のずれを検出し、#TUNING-NOTE で補正しました', { list }) + '</div>' + perPcHtml;
+      }
+      return '<div>' + T('音名別チューニング: 補正が必要な音名はありません') + '</div>' + perPcHtml;
+    }
     if (t.cents) {
       const hz = (440 * Math.pow(2, t.cents / 1200)).toFixed(1);
       return '<div>' + T('基準ピッチ: 12平均律から {cents} cent (A4={hz}Hz) のずれを検出し、#TUNING で補正しました', { cents: fmt(t.cents), hz }) + ' (' + detail + ')</div>' + groupsHtml;
@@ -4272,6 +4292,7 @@
           sampleRate: audioCtx.sampleRate, samplesPerFrame,
           totalFrames: compiled.totalFrames,
           tuningCents: (compiled.settings && compiled.settings.tuningCents) || 0, // #TUNING(鍵盤/ロールの音名丸め)
+          tuningNotes: (compiled.settings && compiled.settings.tuningNotes) || null, // #TUNING-NOTE(音名別)
           getApuEnv: liveApuEnv, getN163: liveN163,
           getFME7: liveFME7, getMmc5: liveMMC5, getVRC7: liveVRC7 }, // 音量/拡張音源表示をライブ反映
         getTransportPosition,

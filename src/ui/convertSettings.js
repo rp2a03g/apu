@@ -23,6 +23,7 @@
   const btnId = (fmt, suffix) => 'btn' + fmt[0].toUpperCase() + fmt.slice(1) + suffix;
   const T = (key, params) => MML.I18n.t(key, params);
   const STORAGE_KEY = 'mml.convertCmd.v1';
+  const LOOP_ON_KEY = 'mml.convertCmd.loopDetectOn'; // LOOP_DETECT 既定 true 化の移行済み印(load 参照)
   const OPEN_KEY = 'mml.convertSettings.open.v1'; // 折りたたみ区画の開閉状態 { score, layout, advanced, n163 }
 
   // ── 画面構成(2026-09-18 に再整理。ユーザー要望「1画面に収める・グループを分かりやすく」) ──
@@ -71,6 +72,7 @@
   // 基準ピッチ(全体オフセット、src/convert/options.js TUNING/TUNING_MIN。detectTuning冒頭コメント参照)
   const TUNING_OPTIONS = () => [
     ['auto', T('自動検出(曲全体の偏差を測る・推奨)')],
+    ['note', T('音名別に自動検出(音名ごとの偏差を測る)')],
     ['a440', T('12平均律固定(A4=440Hz・従来)')],
   ];
   const PRESET_LABELS = () => ({ faithful: T('忠実再現'), plain: T('プレーン譜面') });
@@ -94,7 +96,15 @@
   function load() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      current = MML.Convert.normalizeCmd(raw ? JSON.parse(raw) : null);
+      const saved = raw ? JSON.parse(raw) : null;
+      // ループ自動検出の既定を false→true に変えた(2026-09-19)。それ以前に保存された設定は false を
+      // 「選んだ値」ではなく旧既定として持っているので、1回だけ true へ移す(LOOP_ON_KEY で1回限り)
+      if (saved && !localStorage.getItem(LOOP_ON_KEY)) {
+        saved.LOOP_DETECT = true;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+      }
+      try { localStorage.setItem(LOOP_ON_KEY, '1'); } catch (e) { /* 保存できなくても動作は同じ */ }
+      current = MML.Convert.normalizeCmd(saved);
     } catch (e) { current = MML.Convert.normalizeCmd(null); }
   }
   function save() {
@@ -456,11 +466,11 @@
     tmIn.addEventListener('change', () => setKey('TUNING_MIN', tmIn.value));
     tmIn.addEventListener('click', (e) => e.preventDefault());
     const tmWrap = el('span', 'cs-inline');
-    tmWrap.title = T('自動検出のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5。0〜50)。小さくするほど僅かなずれでも #TUNING が付く');
+    tmWrap.title = T('自動検出のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5。0〜50)。小さくするほど僅かなずれでも #TUNING / #TUNING-NOTE が付く');
     tmWrap.appendChild(el('span', null, T('最小偏差')));
     tmWrap.appendChild(tmIn);
     tmWrap.appendChild(el('span', null, T('セント')));
-    det.appendChild(line(null, T('基準ピッチ'), T('曲全体の音程のずれを測って補正'), inline2(tnSel, tmWrap), T('曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。音名は変わらず、再生とNSF書き出しの周波数テーブルが同じだけずれる')));
+    det.appendChild(line(null, T('基準ピッチ'), T('曲の音程のずれを測って補正'), inline2(tnSel, tmWrap), T('「自動検出」は曲全体の音程が12平均律(A4=440Hz)から何セントずれているかを測り、ずらした基準で音符に丸めて #TUNING をヘッダに出す。「音名別に自動検出」は音名(c〜b)ごとにずれを測り、ずれている音名だけを #TUNING-NOTE でずらす(音程表が音名ごとに外れている曲用。例: F# だけ +33 セント)。どちらも音名は変わらず、再生とNSF書き出しの周波数テーブルがその分だけずれる')));
     body.appendChild(det);
 
     // ── N163(実効ch数・ピッチ精度・波形RAM)。1つの物理量で3つ同時に動くので1か所へ ──

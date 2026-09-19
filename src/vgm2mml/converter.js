@@ -93,6 +93,17 @@
   function mappedEnvReg(envReg, table) {
     return { assign: seq => envReg.assign(seq.map(v => table[Math.max(0, Math.min(15, v))])) };
   }
+  // 同上、リリース表(@vr)の切り出し(volumeFieldsWithRelease)も写像後の列で行うプロキシ。
+  // 抽出器は volumeFieldsWithRelease があればそちらを使い、定数音量(volume)も写像後の値で返るので
+  // mapConstVolumes を重ねて掛けてはいけない。SN76489 → FME-7 / 2A03ノイズ専用(2026-09-19)。
+  // ★mappedEnvReg(assignだけ)を使うと、FME-7 で今まで出ていた @vr が出なくなる(出力の構造が変わる)ので分けた
+  function mappedEnvRegWithRelease(envReg, table) {
+    const map = seq => seq.map(v => table[Math.max(0, Math.min(15, v))]);
+    return {
+      assign: seq => envReg.assign(map(seq)),
+      volumeFieldsWithRelease: seq => envReg.volumeFieldsWithRelease(map(seq))
+    };
+  }
   // 抽出器が定数音量として残した ev.volume も同じ表で写像する
   function mapConstVolumes(events, table) {
     for (const ev of events) if (ev.volume !== undefined) ev.volume = table[Math.max(0, Math.min(15, ev.volume))];
@@ -445,6 +456,23 @@
     return t;
   }
   const VRC7_TABLE = { ay8910: logToVrc7Table(1.5), sn76489: logToVrc7Table(2) };
+  // 4bit対数音量 → FME-7(5B)の音量(3dB/段、src/emulator/expansion/fme7.js: 5bit 1.5dB/段を 2V+1 で引く)。
+  // SN76489(2dB/段)だけが対象。以前は SN→FME-7 を「そのまま載る」として生値を写していたため、
+  // 強弱の差が1.5倍に広がっていた(Power Strike II(SMS) 曲8: ch1 と ch2/ch3 の音量差 +4.7/-6.0dB が
+  // +6.9/-9.0dB。2026-09-19 実測)。0 は無音のまま、それ以外は最低1
+  function logToFme7Table(dbPerStep) {
+    const t = new Array(16);
+    for (let v = 0; v < 16; v++) t[v] = v === 0 ? 0 : Math.max(1, Math.min(15, 15 - Math.round((15 - v) * dbPerStep / 3)));
+    return t;
+  }
+  const FME7_TABLE = { sn76489: logToFme7Table(2) };
+  // 4bit対数音量 → 2A03ノイズ(線形0-15)。boostDb だけ持ち上げる(上限15)。SN76489 のノイズ用(抽出ブロック参照)
+  const SN_NOISE_BOOST_ON_FME7_DB = 6;
+  function logToLinearTableOffset(dbPerStep, boostDb) {
+    const t = new Array(16);
+    for (let v = 0; v < 16; v++) t[v] = v === 0 ? 0 : Math.max(1, Math.min(15, Math.round(15 * Math.pow(10, (boostDb - dbPerStep * (15 - v)) / 20))));
+    return t;
+  }
 
   // ---------------------------------------------------------------------------
   // PSG系(AY/SCC/OPLL/SN76489)の合成変換。plan(sourceId→targetType)は options.channelMap が
@@ -494,7 +522,8 @@
     //   @v だけ元の対数値のまま素通りし、v(定数音量)と別の尺度になっていた
     const needsLinear = fam => fam === 'n163' || fam === 'pulse' || fam === 'vrc6pulse' || fam === 'vrc6saw' || fam === 'fds';
     const regFor = (chip, fam) => (needsLinear(fam) && envTable(chip, fam)) ? mappedEnvReg(envReg, envTable(chip, fam))
-      : (fam === 'vrc7' && VRC7_TABLE[chip]) ? mappedEnvReg(envReg, VRC7_TABLE[chip]) : envReg;
+      : (fam === 'vrc7' && VRC7_TABLE[chip]) ? mappedEnvReg(envReg, VRC7_TABLE[chip])
+        : (fam === 'fme7' && FME7_TABLE[chip]) ? mappedEnvRegWithRelease(envReg, FME7_TABLE[chip]) : envReg;
 
     // ── 音色ごとの設定(src/convert/toneSettings.js、2026-09-09) ─────────────────────
     // options.toneSettings … main.js が ToneSettings.snapshot() で作った素のオブジェクト(無ければ従来どおり)
@@ -783,13 +812,27 @@
       for (let k = 0; k < nChips; k++) {
         const items = src.filter(s => s.chip === 'sn76489' && s.chipIndex === k && wantExtract(s));
         const fams = [...new Set(items.filter(s => s.kind !== 'noise').map(s => familyOf(plan[s.id])))];
-        let noiseDone = false;
-        for (const fam of fams.length ? fams : [null]) {
+        for (const fam of fams) {
           const r = MML.Vgm2MmlExpansion.sn76489(data.sn.snapshots, data.sn.clock, regFor('sn76489', fam), k);
-          for (const s of items) {
-            if (s.kind === 'noise') { if (!noiseDone) { extracted[s.id] = r.noise; noiseDone = true; } }
-            else if (familyOf(plan[s.id]) === fam) extracted[s.id] = r.tones[s.ch];
-          }
+          for (const s of items) if (s.kind !== 'noise' && familyOf(plan[s.id]) === fam) extracted[s.id] = r.tones[s.ch];
+        }
+        // ノイズは借用先(既定は2A03ノイズ=線形4bit)の尺度で抽出し直す。★以前はトーンの借用先(FME-7)向けに
+        // 抽出した結果を流用し、しかも adaptGroup は「ノイズ→ノイズは音量そのまま」で素通しするため、
+        // SN76489 の対数音量(2dB/段)が2A03ノイズの線形音量へ生値のまま載っていた(2026-09-19、
+        // Power Strike II(SMS) 曲8 実測: ch1 比の音量が元 -5.6dB → 変換後 +1.5dB。ハイハットが約7dB大きく減衰も緩い)。
+        // 旋律chへ回した場合(fam≠noise)は下の adaptGroup が従来どおり換算する
+        const noiseSrc = items.find(s => s.kind === 'noise');
+        if (noiseSrc) {
+          const nfam = familyOf(plan[noiseSrc.id]);
+          // トーンを FME-7 へ載せたときは、FME-7 の最大音量が2A03ノイズの最大より 6dB 大きい
+          // (fme7.js mixSample の ×0.35 と apu2a03.js の tnd 式 v15≒0.174 の比。Mml.render の単独再生でも
+          // FME-7 v15 -15.1dB / ノイズ v15 -21.2dB と実測)ぶんノイズを持ち上げて、元のトーンとノイズの釣り合いに揃える
+          // (持ち上げないと Power Strike II 曲8 で ch1 比 -11.3dB、元は -5.6dB)。上限の15で頭打ちになる
+          const onFme7 = items.some(s => s.kind !== 'noise' && familyOf(plan[s.id]) === 'fme7');
+          const nt = nfam === 'noise' ? logToLinearTableOffset(2, onFme7 ? SN_NOISE_BOOST_ON_FME7_DB : 0) : null;
+          // FME-7 へ回したノイズは adaptGroup が減衰dB経由で換算するので生値のまま(regFor の FME-7 写像を重ねない)
+          const reg = nt ? mappedEnvRegWithRelease(envReg, nt) : nfam === 'fme7' ? envReg : regFor('sn76489', nfam);
+          extracted[noiseSrc.id] = MML.Vgm2MmlExpansion.sn76489(data.sn.snapshots, data.sn.clock, reg, k, { shiftWidth: c.sn76489.shiftWidth }).noise;
         }
       }
     }
@@ -1063,6 +1106,7 @@
     MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, frameRate);
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
+      loopHint: MML.VGM2MML.loopFrames(h, frameRate), // ループ自動検出(LOOP_DETECT)にヘッダのループ位置を渡す
       headerLines: [
         ...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(expansions.includes('n163') ? n163WaveReg.defLines() : []),
@@ -1173,6 +1217,8 @@
     //   ただし**音程は DrumMap のレーン番号**なので、下の pitchedToNoise(旋律→ノイズ周期)は
     //   絶対に通してはいけない(通すとレーンが壊れてドラムが全滅する。修正の初手でやらかした)。
     //   → ここでは音量だけ換算して return する。
+    // ※SN76489 のトーン→FME-7・ノイズ→2A03ノイズは、抽出時に借用先の尺度へ写像済み(FME7_TABLE / linTable、
+    //   上の「SN76489」抽出ブロック)なので、ここで素通ししてよい
     if (nativeVrc7 || nativeFme7 || (fam === 'noise' && s.kind === 'noise')) {
       if (fam === 'noise' && s.ch < 0) {
         const convD = (att) => VOL_FROM_DB.linear(att, famVolMax(fam));
@@ -1182,16 +1228,23 @@
         }
         for (const ev of events) { delete ev.attDb; delete ev.attSeq; }
       }
+      // SN76489 の周期性ノイズ → 2A03 の短周期(@1)。抽出器が付けた instrument(0=長周期/1=短周期)を
+      // @<n> として出すにはフラグが要る(borrow.js adaptGroup と同じ。★VGM側のこのコピーには無く、
+      // 周期性ノイズも全部 @0 相当の長周期で鳴っていた。2026-09-19)。長周期しか使わない曲は
+      // 出力を変えないよう、短周期が1つでもあるときだけ立てる(そのときは @0/@1 の切り替えが全部出る)
+      if (fam === 'noise' && s.ch >= 0 && events.some(ev => ev.instrument === 1)) ch.hasInstrument = true;
       return; // そのまま(旋律→ノイズは下で周期へ写す)
     }
     const dutyOf = (max, def) => { const n = parseInt(tone, 10); return (isFinite(n) && n >= 0 && n <= max) ? n : def; };
     // AYのミキサー: ノイズ単独(mode 2)は矩形波系の借用先では鳴らせないので休符に、
-    // トーン+ノイズ(mode 3)はトーンだけ残す。FME-7以外ではN<n>も出さない
+    // トーン+ノイズ(mode 3)はトーンだけ残す。FME-7以外ではN<n>も出さない。
+    // ハードウェアエンベロープ(S<n>/M<n>、kss2mml/expansion/ay.js 2026-09-19)も FME-7 専用なので落とす
+    // (抽出器が付けた volume=減衰の最大値で鳴らす。src/convert/borrow.js adaptGroup と同じ)
     for (const ev of events) {
       if (isAy && ev.instrument === 2) { ev.note = null; }
-      delete ev.fme7Noise;
+      delete ev.fme7Noise; delete ev.fme7EnvShape; delete ev.fme7EnvPeriod;
     }
-    ch.hasFme7Noise = false;
+    ch.hasFme7Noise = false; ch.hasFme7Env = false;
     // 音量: 借用先の尺度へ。AY/SN→線形は従来どおり LIN_TABLE(エンベロープ表も同じ表で写像済み)、
     // それ以外(attDbを持つOPN/ADPCM、OPLL→非VRC7、AY/SN→VRC7/FME-7以外の対数)は減衰dB経由
     const linearFam = fam === 'n163' || fam === 'pulse' || fam === 'vrc6pulse' || fam === 'vrc6saw' || fam === 'fds';
@@ -1311,13 +1364,38 @@
   }
 
   /**
+   * VGMヘッダのループ情報をフレーム単位へ: { start(イントロの長さ), period(ループ1周) } か null(ループしない)。
+   * 判定は再生側(emulator/vgmPlayer.js _endOfData)と同じ: ループ先が曲データの中にあること。
+   * ループ先=曲データの先頭(loopOffset === dataOffset、「頭から全部ループ」)も正規のループ。
+   * PSF等 VGM 以外のヘッダ(ループ情報を持たない)は null。
+   */
+  MML.VGM2MML.loopFrames = function (h, frameRate) {
+    if (!h || !(h.loopSamples > 0) || !h.loopOffset || !(h.totalSamples > 0)) return null;
+    if (h.dataOffset && h.loopOffset < h.dataOffset) return null;
+    if (h.eofOffset && h.loopOffset >= h.eofOffset) return null;
+    const sr = (MML.VGM && MML.VGM.SAMPLE_RATE) || 44100;
+    const fr = frameRate || 60;
+    const intro = Math.max(0, h.totalSamples - h.loopSamples);
+    return { start: intro * fr / sr, period: h.loopSamples * fr / sr };
+  };
+
+  /**
    * @param {Uint8Array} vgmBytes - 解凍済みVGM
    * @param {number} durationSeconds
    * @param {object} [options] - { bpm }
    */
   MML.VGM2MML.fromVgm = async function (vgmBytes, durationSeconds, options) {
     options = options || {};
-    let data = await MML.Emu.captureVgmSongAsync(vgmBytes, { durationSeconds: durationSeconds || 60 }, options.onProgress || null);
+    durationSeconds = durationSeconds || 60;
+    // ループしないVGMは曲データの終わり(ヘッダの総サンプル数)より先をキャプチャしない。データが尽きたあとも
+    // チップは最後の状態のまま鳴り続ける(キャプチャはそれを音符として拾う)が、実際の再生(VGMPlay/この
+    // アプリの再生)はそこで止まる。止め忘れの音で終わるVGMを長めに変換すると、その音が変換した長さの
+    // 最後まで鳴りっぱなしのMMLになっていた(2026-09-19)
+    const hdr = MML.VGM && MML.VGM.parseHeader ? MML.VGM.parseHeader(vgmBytes) : null;
+    if (hdr && hdr.magicOk && hdr.totalSamples > 0 && !MML.VGM2MML.loopFrames(hdr, 60)) {
+      durationSeconds = Math.min(durationSeconds, Math.max(1, hdr.durationSeconds));
+    }
+    let data = await MML.Emu.captureVgmSongAsync(vgmBytes, { durationSeconds }, options.onProgress || null);
     // チャンネルプール/ペア交互割当チップの表示モード(鍵盤ヘッダの切替UIと同じ語彙)。
     // 'logical'=割当逆算(合成ch)で変換。既定はMultiPCMのみ合成(完全プール式で
     // 既定8枠カバー率45%→100%の劇的改善)、他は実機スロット(ペア交互でも音符

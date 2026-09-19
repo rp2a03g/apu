@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 10:41:50
+ * Built by tools/build-capture-workers.ps1 at 2026-09-19 15:00:49
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-19 10:41:50';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-19 15:00:49';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -1785,7 +1785,7 @@
   function pitchToSemitone(pitch, tune = 0) {
     if (pitch <= 0) return null;
     // 基準ピッチ(#TUNING、MML.Convert.tuningCents)込み。他形式の freqToNote と同じ丸め基準
-    const semi = Math.round(12 * Math.log2(pitch / 0x1000) + tune - MML.Convert.tuningCents() / 100) + 60;
+    const semi = MML.Convert.roundTunedNote(12 * Math.log2(pitch / 0x1000) + tune + 60); // #TUNING/#TUNING-NOTE 込み
     return (semi >= 0 && semi <= 119) ? semi : null;
   }
 
@@ -3446,7 +3446,9 @@
  *
  * 基準ピッチ(全体オフセット、2026-09-07。下の MML.Convert.detectTuning 冒頭コメント参照):
  *   TUNING     … 'auto'(既定) = 曲全体の音程偏差の中央値を測り、その分ずらした基準で音符へ丸めて
- *                `#TUNING <cent>` をヘッダに出す / 'a440' = 従来どおり A4=440Hz の12平均律固定
+ *                `#TUNING <cent>` をヘッダに出す / 'a440' = 従来どおり A4=440Hz の12平均律固定 /
+ *                'note'(2026-09-19) = 音名(c..b)ごとに偏差の中央値を測り `#TUNING-NOTE f+ +33 …` を出す
+ *                (音程表が音名ごとに外れている曲用。全体オフセットは使わない。MML.Convert.detectTuningNotes)
  *   TUNING_MIN … 'auto' のとき、測った偏差の絶対値がこのセント数未満なら何もしない(既定5、0〜50)。
  *                閾値未満の曲の出力は 'a440' と完全に同じ
  */
@@ -3512,11 +3514,11 @@
   const PART_ORDER_VALUES = ['block', 'part'];
   const CHANNEL_ORDER_VALUES = ['letter', 'source'];
   const BARS_PER_LINE_MAX = 16;
-  //   LOOP_DETECT   … ループを自動検出する(2026-09-19、既定 false。src/convert/mmlEmit.js detectLoop)。元曲の
+  //   LOOP_DETECT   … ループを自動検出する(2026-09-19、既定 true(ユーザー指示で同日 false→true)。src/convert/mmlEmit.js detectLoop)。元曲の
   //                   ループ周期を全チャンネルの音符列から検出し、イントロ+1周ぶんだけを書き出して各チャンネルの
   //                   ループ開始位置へ L を置く。5分ぶん変換しても曲データが1周ぶんで済む(NSFが小さくなる)。
   //                   イントロとループ区間の長さは全チャンネルで tick 単位に一致させる(ずれると周回ごとにずれる)
-  const LAYOUT_DEFAULTS = { PART_ORDER: 'block', BARS_PER_LINE: 4, BAR_ALIGN: false, CHANNEL_ORDER: 'letter', LOOP_DETECT: false };
+  const LAYOUT_DEFAULTS = { PART_ORDER: 'block', BARS_PER_LINE: 4, BAR_ALIGN: false, CHANNEL_ORDER: 'letter', LOOP_DETECT: true };
   const LAYOUT_KEYS = Object.keys(LAYOUT_DEFAULTS);
   MML.Convert.LAYOUT_DEFAULTS = LAYOUT_DEFAULTS;
   MML.Convert.LAYOUT_KEYS = LAYOUT_KEYS;
@@ -3542,7 +3544,7 @@
   const DRUM_POLY_VALUES = ['mix', 'mono'];
   MML.Convert.DRUM_POLY_VALUES = DRUM_POLY_VALUES;
   // 基準ピッチ(冒頭コメント参照)
-  const TUNING_VALUES = ['auto', 'a440'];
+  const TUNING_VALUES = ['auto', 'note', 'a440'];
   MML.Convert.TUNING_VALUES = TUNING_VALUES;
   const TUNING_MIN_DEFAULT = 5, TUNING_MIN_MAX = 50;
   MML.Convert.TUNING_MIN_DEFAULT = TUNING_MIN_DEFAULT;
@@ -3673,30 +3675,70 @@
   //
   // ★抽出器(kss2mml/expansion 等)はキャプチャWorkerのバンドルにも入る。Worker 側では
   //   withTuning が呼ばれないので常に0=従来どおりの丸め(ロール表示は元ファイルの音程のまま)。
-  let _tuning = { cents: 0, info: null };
+  // ── 音名別チューニング(#TUNING-NOTE、変換設定 TUNING='note'、2026-09-19) ──
+  //   _tuning.notes は c=0..b=11 の12要素(セント)または null。全体オフセット cents に足して使う。
+  //   音程表そのものが音名ごとに12平均律から外れている曲(Metal Gear 2 の F# が +33 セント等)を、
+  //   1つの値では揃えられない全体オフセットの代わりに音名ごとの値で再現する
+  //   tuningNotes()             … 現在有効な音名別オフセット(null=無し)
+  //   noteOffsetCents(note)     … その音符に効くオフセット合計(全体+音名別)
+  //   roundTunedNote(cont)      … 連続値の音番号(A440基準)を、オフセット込みで最寄りの音番号へ丸める。
+  //                               音名ごとに基準がずれるので「隣の音名の方が近い」ことがあり、±1 を比べる
+  let _tuning = { cents: 0, notes: null, info: null };
   MML.Convert.tuningCents = function () { return _tuning.cents; };
-  MML.Convert.withTuning = function (cents, fn, info) {
+  MML.Convert.tuningNotes = function () { return _tuning.notes; };
+  MML.Convert.withTuning = function (cents, fn, info, notes) {
     const prev = _tuning;
-    _tuning = { cents: +cents || 0, info: info || null };
+    _tuning = { cents: +cents || 0, notes: notes || null, info: info || null };
     try { return fn(); } finally { _tuning = prev; }
+  };
+  const pcOf = (n) => ((Math.round(n) % 12) + 12) % 12;
+  MML.Convert.noteOffsetCents = function (note) {
+    return _tuning.cents + (_tuning.notes ? (_tuning.notes[pcOf(note)] || 0) : 0);
+  };
+  MML.Convert.roundTunedNote = function (cont) {
+    const n0 = Math.round(cont - _tuning.cents / 100);
+    if (!_tuning.notes) return n0;
+    let best = n0, bestD = Infinity;
+    for (let n = n0 - 1; n <= n0 + 1; n++) {
+      const d = Math.abs(cont - n - MML.Convert.noteOffsetCents(n) / 100);
+      if (d < bestD) { bestD = d; best = n; }
+    }
+    return best;
   };
   MML.Convert.freqToNote = function (freq) {
     if (!(freq > 0)) return null;
-    const n = Math.round(57 + 12 * Math.log2(freq / 440) - _tuning.cents / 100);
+    const n = MML.Convert.roundTunedNote(57 + 12 * Math.log2(freq / 440));
     return (n >= 0 && n <= 119) ? n : null;
   };
   MML.Convert.noteToFreq = function (note) {
-    return 440 * Math.pow(2, (note - 57) / 12 + _tuning.cents / 1200);
+    return 440 * Math.pow(2, (note - 57) / 12 + MML.Convert.noteOffsetCents(note) / 1200);
   };
   function fmtCents(c) {
     const s = (Math.round(c * 10) / 10).toFixed(1).replace(/\.0$/, '');
     return (c > 0 ? '+' : '') + s;
   }
   MML.Convert.formatTuningCents = fmtCents;
+  const PC_NAMES = ['c', 'c+', 'd', 'd+', 'e', 'f', 'f+', 'g', 'g+', 'a', 'a+', 'b'];
+  MML.Convert.PITCH_CLASS_NAMES = PC_NAMES;
   MML.Convert.tuningHeaderLines = function () {
-    return _tuning.cents ? [`#TUNING ${fmtCents(_tuning.cents)}`] : [];
+    const out = _tuning.cents ? [`#TUNING ${fmtCents(_tuning.cents)}`] : [];
+    if (_tuning.notes) {
+      const pairs = [];
+      _tuning.notes.forEach((c, pc) => { if (c) pairs.push(`${PC_NAMES[pc]} ${fmtCents(c)}`); });
+      if (pairs.length) out.push(`#TUNING-NOTE ${pairs.join(' ')}`);
+    }
+    return out;
   };
   MML.Convert.tuningCommentLines = function () {
+    if (_tuning.notes) {
+      const info = _tuning.info;
+      const list = [];
+      _tuning.notes.forEach((c, pc) => { if (c) list.push(`${PC_NAMES[pc]}=${fmtCents(c)}`); });
+      return [
+        `; 音名別チューニング: ${list.join(' ')} cent (12平均律から。自動検出、音名ごとの偏差中央値${info && info.count ? `、音符${info.count}個` : ''})`,
+        `;   → #TUNING-NOTE で再生側/NSF書き出しの周波数テーブルのその音名だけがずれます(音名はそのまま)`,
+      ];
+    }
     if (!_tuning.cents) return [];
     const hz = (440 * Math.pow(2, _tuning.cents / 1200)).toFixed(1);
     const info = _tuning.info;
@@ -3726,6 +3768,71 @@
   //   cents は適用値(0=適用しない)。reason は不適用の理由 'few'|'iqr'|'fit'|'below'(適用時は null)。
   //   byGroup はチャンネル文字の群(A-C=2A03, G-L=VRC7, P-W=N163, X-Z=FME7 …)ごとの中央値/音符数で、
   //   「OPLL と PSG で基準が違う」ような二極化をユーザーが読み取るための内訳(main.js renderTuning)
+  // 音符ごとの「最寄り半音からのセント偏差」を集める(detectTuning / detectTuningNotes 共通)。
+  // 戻り値 [{ dev, w, pc, letter }]。除外規則は detectTuning 冒頭コメントのとおり
+  function collectDeviations(channels) {
+    const out = [];
+    for (const ch of channels || []) {
+      if (!ch || !ch.events) continue;
+      if (ch.letter === 'D' || ch.letter === 'E' || ch.noise || ch.isDrum || ch.drum) continue;
+      for (const ev of ch.events) {
+        if (ev.note == null || ev.verifySkip || ev.drum) continue;
+        if (ev.fme7Noise !== undefined && ev.instrument === 2) continue;
+        const freq = ev.rawFreq != null ? ev.rawFreq : ev.freqHz;
+        if (!(freq > 0)) continue;
+        let dev = (57 + 12 * Math.log2(freq / 440) - ev.note) * 100;
+        dev -= 100 * Math.round(dev / 100); // 最寄り半音からの偏差(-50..50)へ畳む
+        out.push({ dev, w: Math.max(1, (ev.end - ev.start) || 1), pc: ((ev.note % 12) + 12) % 12, letter: ch.letter });
+      }
+    }
+    return out;
+  }
+  // [値, 重み] の配列の重み付き分位点
+  function wquantile(arr, q) {
+    const s = arr.slice().sort((a, b) => a[0] - b[0]);
+    let tot = 0; for (const x of s) tot += x[1];
+    let acc = 0; for (const x of s) { acc += x[1]; if (acc >= tot * q) return x[0]; }
+    return s.length ? s[s.length - 1][0] : 0;
+  }
+
+  // 音名別の推定(変換設定 TUNING='note'、#TUNING-NOTE)。音高クラス(c..b)ごとに偏差の重み付き中央値を採る。
+  //   - その音名の音符が opts.minCount(既定4)個未満、四分位範囲が opts.maxIqr(既定30)超、
+  //     |中央値| < opts.minCents の音名は 0(ずらさない)
+  //   - ±50 付近(opts.maxAbs、既定45 超)は丸めの向きが音符ごとに割れて中央値が当てにならないので 0
+  //   - 適用後の「±10セント以内に乗る音符の割合」が適用前より下がるなら全部 0(安全網、detectTuning と同じ)
+  // 戻り値 { notes: number[12] | null, count, perPc: [{ pc, median, iqr, count }], fitBefore, fitAfter, reason }
+  MML.Convert.detectTuningNotes = function (channels, opts) {
+    opts = opts || {};
+    const minCents = opts.minCents != null ? +opts.minCents : TUNING_MIN_DEFAULT;
+    const maxIqr = opts.maxIqr != null ? opts.maxIqr : 30;
+    const minCount = opts.minCount != null ? opts.minCount : 4;
+    const maxAbs = opts.maxAbs != null ? opts.maxAbs : 45;
+    const devs = collectDeviations(channels);
+    const byPc = Array.from({ length: 12 }, () => []);
+    for (const d of devs) byPc[d.pc].push([d.dev, d.w]);
+    const notes = new Array(12).fill(0);
+    const perPc = byPc.map((arr, pc) => {
+      if (!arr.length) return { pc, median: 0, iqr: 0, count: 0 };
+      const median = wquantile(arr, 0.5), iqr = wquantile(arr, 0.75) - wquantile(arr, 0.25);
+      if (arr.length >= minCount && iqr <= maxIqr && Math.abs(median) >= minCents && Math.abs(median) <= maxAbs) {
+        notes[pc] = Math.round(median * 10) / 10;
+      }
+      return { pc, median, iqr, count: arr.length };
+    });
+    const wrap = (d) => d - 100 * Math.round(d / 100);
+    let tot = 0, before = 0, after = 0;
+    for (const d of devs) {
+      tot += d.w;
+      if (Math.abs(d.dev) <= 10) before += d.w;
+      if (Math.abs(wrap(d.dev - notes[d.pc])) <= 10) after += d.w;
+    }
+    const out = { notes: null, count: devs.length, perPc, fitBefore: tot ? before / tot : 0, fitAfter: tot ? after / tot : 0, reason: null };
+    if (!notes.some(Boolean)) { out.reason = devs.length < minCount ? 'few' : 'below'; return out; }
+    if (out.fitAfter + 0.05 < out.fitBefore) { out.reason = 'fit'; return out; }
+    out.notes = notes;
+    return out;
+  };
+
   MML.Convert.detectTuning = function (channels, opts) {
     opts = opts || {};
     const minCents = opts.minCents != null ? +opts.minCents : TUNING_MIN_DEFAULT;
@@ -3744,21 +3851,10 @@
       if (/^[ab]$/.test(L)) return 'a-b';
       return L;
     };
-    for (const ch of channels || []) {
-      if (!ch || !ch.events) continue;
-      if (ch.letter === 'D' || ch.letter === 'E' || ch.noise || ch.isDrum || ch.drum) continue;
-      const g = groupOf(ch.letter);
-      for (const ev of ch.events) {
-        if (ev.note == null || ev.verifySkip || ev.drum) continue;
-        if (ev.fme7Noise !== undefined && ev.instrument === 2) continue;
-        const freq = ev.rawFreq != null ? ev.rawFreq : ev.freqHz;
-        if (!(freq > 0)) continue;
-        let dev = (57 + 12 * Math.log2(freq / 440) - ev.note) * 100;
-        dev -= 100 * Math.round(dev / 100); // 最寄り半音からの偏差(-50..50)へ畳む
-        const w = Math.max(1, (ev.end - ev.start) || 1);
-        samples.push([dev, w]);
-        (groups[g] = groups[g] || []).push([dev, w]);
-      }
+    for (const d of collectDeviations(channels)) {
+      const g = groupOf(d.letter);
+      samples.push([d.dev, d.w]);
+      (groups[g] = groups[g] || []).push([d.dev, d.w]);
     }
     const wmedian = (arr) => {
       const s = arr.slice().sort((a, b) => a[0] - b[0]);
@@ -3813,6 +3909,16 @@
       minCents, maxIqr: guard.maxIqr != null ? guard.maxIqr : undefined,
     });
     det.minCents = minCents;
+    if (cmd.TUNING === 'note') {
+      // 音名別(#TUNING-NOTE)。全体オフセットは使わず、音名ごとの値だけで再量子化する
+      const dn = MML.Convert.detectTuningNotes(first && first.scoreChannels, {
+        minCents, maxIqr: guard.maxIqr != null ? guard.maxIqr : undefined,
+      });
+      det.cents = 0; det.mode = 'note'; det.notes = dn.notes; det.perPc = dn.perPc;
+      det.noteReason = dn.reason; det.count = dn.count;
+      if (!dn.notes) return finish(first, det);
+      return finish(MML.Convert.withTuning(0, () => run(options), det, dn.notes), det);
+    }
     if (cmd.TUNING !== 'auto') { det.cents = 0; det.reason = 'fixed'; det.mode = 'a440'; return finish(first, det); }
     det.mode = 'auto';
     if (!det.cents) return finish(first, det);
@@ -4543,8 +4649,10 @@
     // 基準ピッチ(#TUNING、src/convert/options.js MML.Convert.tuningCents)込み。抽出器の丸め
     // (freqToNote)と同じ基準で「半音に乗っているか」を判定しないと、全体ずれのある曲で
     // 綺麗なアルペジオまで「半音に乗っていない」と誤判定して EN 統合から漏れる
-    const cont = 57 + 12 * Math.log2(freq / 440) - MML.Convert.tuningCents() / 100;
-    return (cont - Math.round(cont)) * 100;
+    // 音名別(#TUNING-NOTE)も込み: 丸め先の音名のオフセットを引いた残りを返す
+    const cont = 57 + 12 * Math.log2(freq / 440);
+    const n = MML.Convert.roundTunedNote(cont);
+    return (cont - n - MML.Convert.noteOffsetCents(n) / 100) * 100;
   }
 
   // 実測周波数(Hz)を保持するフィールド名はフォーマットの抽出コードによって
@@ -4599,6 +4707,46 @@
     return { refNote, deltas };
   }
 
+  // EN<n> の1周に使う各ステップの長さ(フレーム)。統合した音符はこの1周を最後まで繰り返すので、
+  // 1周の長さが実際の周期と1フレームでも違うと、周回ごとに1フレームずつ位相がずれていく。
+  // ★1周目をそのまま使うとは限らない(2026-09-19、Power Strike II(SMS) 曲8の SN76489 ch2 で実測)。先頭のステップは音符の
+  //   頭で、ドライバのアルペジオ刻み(4〜5フレーム)と発音タイミングの端数を含むので他より長いことが多い
+  //   (実測: 1周目 5+4+4+5=18、2周目以降は全部 17)。以前は1周目の長さをそのまま使っていたため、137フレームの
+  //   音符で8フレーム遅れ、後半は和音の構成音が丸ごと入れ替わって鳴っていた(±5〜7半音の不一致が1周あたり数十フレーム)。
+  //   → 完全に入っている周それぞれの並びを候補にし、「その並びで音符の最初から最後まで繰り返したとき、元の音程と
+  //     食い違うフレーム数」が一番少ないものを採る。同数なら前の周(=1周目、従来と同じ)を採るので、
+  //     1周目で良かった曲の出力は変わらない。刻みが途中で 5,4,4,4 → 4,4,4,5 と入れ替わる曲もあり
+  //     (同曲で実測)、「平均の長さに近い周」だけで選ぶと位相が1フレームずれた並びを拾って逆に悪化した
+  function arpeggioCycleDurations(used, period) {
+    const K = Math.floor(used.length / period);
+    const cycles = [];
+    for (let k = 0; k < K; k++) cycles.push(used.slice(k * period, (k + 1) * period).map(e => e.end - e.start));
+    if (cycles.length < 2) return cycles[0];
+    // 元の音程(フレームごと)
+    const t0 = used[0].start;
+    const truth = [];
+    for (const e of used) for (let f = e.start; f < e.end; f++) truth[f - t0] = e.note;
+    const cycleNotes = used.slice(0, period).map(e => e.note);
+    const mismatch = (durs) => {
+      let bad = 0, step = 0, left = durs[0];
+      for (let f = 0; f < truth.length; f++) {
+        if (truth[f] != null && truth[f] !== cycleNotes[step]) bad++;
+        if (--left <= 0) { step = (step + 1) % period; left = durs[step]; }
+      }
+      return bad;
+    };
+    let best = cycles[0], bestBad = mismatch(cycles[0]);
+    const seen = new Set([cycles[0].join(',')]);
+    for (let k = 1; k < cycles.length; k++) {
+      const key = cycles[k].join(',');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const bad = mismatch(cycles[k]);
+      if (bad < bestBad) { best = cycles[k]; bestBad = bad; }
+    }
+    return best;
+  }
+
   // ★和音→アルペジオ(src/input/quantize.js)でも同じ符号化を使うので公開する。
   //   EN<n>の中身の作り方が2箇所に分かれると、片方だけ直して食い違う
   MML.Convert.buildNoteEnvelopeDeltas = buildNoteEnvelopeDeltas;
@@ -4643,7 +4791,7 @@
         const used = run.slice(0, found.matchLen);
         const cycle = used.slice(0, found.period);
         const cycleNotes = cycle.map(e => e.note);
-        const durations = cycle.map(e => e.end - e.start);
+        const durations = arpeggioCycleDurations(used, found.period);
         const { refNote, deltas } = buildNoteEnvelopeDeltas(cycleNotes, durations);
         if (!deltas.some(v => v < EN_VALUE_MIN || v > EN_VALUE_MAX)) {
           const last = used[used.length - 1];
@@ -4842,6 +4990,38 @@
     return false;
   }
 
+  // 「別々の音を順に鳴らしている」か(2026-09-19、魔界塔士サガ GBS のパルスで発覚)。トリル判別(TRILL_MIN_CENTS/
+  // 中間帯比率)は2値の方形しか拾えず、次の2つをビブラートとして1音符+EPへ統合していた:
+  //   ・g+ g g+ a g+ a(各5〜10フレーム)の回音。3値なので中間の g+ が「中間帯」に入り方形と見なされない
+  //   ・f+ g f+(各20フレーム)の遅いトリルで、各音に±1の浅いビブラートが乗っているもの。揺れが中間帯に入る
+  // どちらも「半音に乗った音が、しばらく平らに鳴っている」ことが区切りごとに成り立つ。ビブラートが半音境界を
+  // またいで割れた区切りは、(a)境界の外側に出た側が半音からずれている(最寄り半音から±25セント超)か、
+  // (b)区切りの中で音程が動き続けていて平らでない、か(c)数フレームしか無い、のどれかになる。
+  // ★全区切りが「DISCRETE_MIN_FRAMES 以上・先頭が半音±ARPEGGIO_CENTS_TOLERANCE 以内・区切り内の揺れが隣との
+  //   段差の半分以下」を満たすときだけ離散的とみなす(1つでも外れればこれまでどおり統合を試す=安全側)。
+  //   揺れと段差は pitchSeq の生値で比べる(比なので単位によらない。GB のように周期/周波数に比例しない値でも、
+  //   一次変換なので比は保たれる)
+  const DISCRETE_MIN_FRAMES = 4;
+  function isDiscreteSteps(absorbed) {
+    const med = absorbed.map(e => {
+      const s = e.pitchSeq.slice().sort((x, y) => x - y);
+      return s[s.length >> 1];
+    });
+    for (let k = 0; k < absorbed.length; k++) {
+      const e = absorbed[k];
+      if (e.pitchSeq.length < DISCRETE_MIN_FRAMES) return false;
+      if (!(Math.abs(centsFromNearestSemitone(eventFreq(e))) <= ARPEGGIO_CENTS_TOLERANCE)) return false;
+      let step = Infinity;
+      if (k > 0) step = Math.min(step, Math.abs(med[k] - med[k - 1]));
+      if (k + 1 < absorbed.length) step = Math.min(step, Math.abs(med[k] - med[k + 1]));
+      if (!(step > 0)) return false;
+      let mn = Infinity, mx = -Infinity;
+      for (const v of e.pitchSeq) { if (v < mn) mn = v; if (v > mx) mx = v; }
+      if ((mx - mn) * 2 > step) return false;
+    }
+    return true;
+  }
+
   MML.Convert.mergeAlternatingVibrato = function (events, opts) {
     const result = [];
     let i = 0;
@@ -4908,8 +5088,29 @@
             for (const v of candidateSeq) if (v > 0) { n++; if (v > lo && v < hi) mid++; }
             middleFrac = n > 0 ? mid / n : 0;
           }
+          // ★音程の幅は実周波数でも測り、大きい方を採る(2026-09-19、魔界塔士サガ GBS のパルスで発覚)。
+          //   上の log2(mx/mn) は「pitchSeq が周期か周波数に比例する」前提で、NSF/KSS/HES/N163 等はそれで正しい。
+          //   ところが GB の pitchSeq は NRx3/NRx4 の11bit値 x で、実周波数は 131072/(2048-x)(波形chは 65536/(2048-x))。
+          //   x は周期にも周波数にも比例しないので、x の比は実際の音程幅を大きく過小評価する
+          //   (o4c↔c+ の半音トリル 1547↔1575 が 31セントと出る。実際は 100セント)。そのため 11フレームずつの
+          //   c/c+ の交互(トリル)が TRILL_MIN_CENTS 未満=「浅いビブラート」と判定され、1音符+EP に統合されていた。
+          //   各イベントの実測周波数(先頭フレーム)の幅と比べて大きい方を採る。比例する形式では、先頭フレームの
+          //   周波数は pitchSeq の値のどれかなので上の値を超えない=結果は不変。中間帯比率(middleFrac)は
+          //   一次変換で変わらないので GB でもそのままでよい
+          let fmn = Infinity, fmx = 0;
+          for (const e of absorbed) { const fz = eventFreq(e); if (fz > 0) { if (fz < fmn) fmn = fz; if (fz > fmx) fmx = fz; } }
+          if (fmn < Infinity && fmx > fmn) spanCents = Math.max(spanCents, 1200 * Math.log2(fmx / fmn));
         }
-        const isTrill = spanCents >= TRILL_MIN_CENTS && middleFrac < TRILL_MIDDLE_FRAC_MAX;
+        // (3) 離散的な音の並び(isDiscreteSteps 冒頭コメント参照): どの区切りも半音に乗った平らな音なら
+        //     トリル/装飾音(3値以上の回音や、各音に浅いビブラートの乗ったトリルも含む)なので統合しない
+        //     ★方形判定は区切りの長さの中央値が2フレーム以上のときだけ(2026-09-19): 1フレームごとに半音を
+        //     行き来する揺れ(Metroid II GBS 曲0、82↔83 を1〜3フレームで往復)は奏法としてのトリルではなく音色的な
+        //     うなりで、音符に割ると 96分音符の連打になる。1音符+EP の方が元の周期列をそのまま再現できる
+        //     (以前は GB の幅の測り違いで偶然統合されていた。幅を正しく測るようにしたので明示的に残す)
+        const segLens = absorbed.map(e => e.end - e.start).sort((x, y) => x - y);
+        const medianSeg = segLens[segLens.length >> 1];
+        const isTrill = (spanCents >= TRILL_MIN_CENTS && middleFrac < TRILL_MIDDLE_FRAC_MAX && medianSeg >= 2) ||
+          isDiscreteSteps(absorbed);
         const spanOk = !(opts && opts.maxAbsorbCents != null && spanCents >= opts.maxAbsorbCents);
         const periodic = !!classified && (classified.type === 'periodic' ||
           (!isTrill && spanOk && hasPeriodicTail(candidateSeq)));

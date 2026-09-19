@@ -270,10 +270,12 @@
 
     const dpcmDefLines = dpcmResult.defs.map(d =>
       `@DPCM${d.index} = { "${d.file}", ${d.freq}, ${d.size}, ${d.dac}, ${d.mode} }`);
-    // #EX-*: 既定は常にN163(6ch宣言)。ユーザー指定のときは実際に使った拡張音源だけ宣言する
+    // #EX-*: 既定は常にN163。ユーザー指定のときは実際に使った拡張音源だけ宣言する。
+    // ★N163の数値はどちらの経路も n163NumCh(変換設定 N163_CH で決めた値。周波数式・波形RAM枠と同じ)。
+    //   以前はユーザー割当のとき本文から数え直していて、「8固定」でも使ったch数(5等)が出ていた(2026-09-19修正)
     const directiveLines = customPlan
       ? expansions.filter(chip => chip !== 'dpcm').map(chip => chip === 'n163'
-        ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${MML.Mml.n163DeclaredCount(scoreChannels, expansionLetterMap.n163)}`
+        ? `${MML.Mml.EX_CHIP_DIRECTIVE[chip]} ${n163NumCh}`
         : MML.Mml.EX_CHIP_DIRECTIVE[chip])
       : [`${MML.Mml.EX_CHIP_DIRECTIVE.n163} ${n163NumCh}`];
 

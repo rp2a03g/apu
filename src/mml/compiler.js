@@ -341,10 +341,14 @@
 
   // #TUNING(基準ピッチ、セント)の周波数比。Mml.compile() が曲ごとに設定する(lexer.js settings.tuningCents)。
   // ppmckDriver.js の noteFrequency も同じ比で周波数テーブルを作る(ブラウザ再生とNSF書き出しの一致)
+  // #TUNING-NOTE(音名別チューニング、settings.tuningNotes: c=0..b=11 のセント)は音名ごとの比を掛ける。
+  // ★ppmckDriver.js の noteFrequency と必ず同じ式にすること(ブラウザ再生とNSF書き出しの一致)
   let tuningRatio = 1;
+  let tuningNoteRatios = null; // 12要素の比、または null(#TUNING-NOTE 無し)
   function noteFrequency(noteNumber) {
+    const nr = tuningNoteRatios ? tuningNoteRatios[((Math.round(noteNumber) % 12) + 12) % 12] : 1;
     // noteNumber: o4 a (A4=440Hz) を基準(57)とした半音単位の値
-    return 440 * Math.pow(2, (noteNumber - 57) / 12) * tuningRatio;
+    return 440 * Math.pow(2, (noteNumber - 57) / 12) * tuningRatio * nr;
   }
 
   // D<n>(デチューン)。算出済みの周期/周波数レジスタ値へ生のオフセットを加算し、
@@ -2928,6 +2932,7 @@
     errors.push(...splitErrors);
     // #TUNING(基準ピッチ): 以降の noteFrequency() 全てに効く(compile は同期処理なので曲ごとに設定し直すだけでよい)
     tuningRatio = Math.pow(2, ((settings && settings.tuningCents) || 0) / 1200);
+    tuningNoteRatios = (settings && settings.tuningNotes) ? settings.tuningNotes.map(c => Math.pow(2, (c || 0) / 1200)) : null;
 
     // #EX-VRC6等でMML本文が宣言した拡張音源は、opt.expansions(UI選択)と統合する
     // (INV-2: MMLテキストが正典。UIの選択有無に関わらずMML側の宣言を尊重する)

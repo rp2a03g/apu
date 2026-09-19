@@ -619,7 +619,12 @@
             lastSweep = sw;
           }
         }
-        if (seg.fme7Noise != null && seg.fme7Noise !== lastFme7Noise) {
+        // FME-7 のノイズ周期 R6 は3ch共有で、@2 の音符(ノート番号=周期)や他chの N<n> が書き換える。
+        // 6502 側は OP_FME7_NOISE を読んだ瞬間にしか R6 を書かないので、変化時だけ出すと @3(トーン+ノイズ)
+        // の音符が他の周期のまま鳴る。compiler.js(ブラウザ再生)は音符ごとに R6 を書くので、@3 の音符では
+        // 毎回出して揃える(2026-09-19、KSS→MML の PSG ドラムで NSF だけノイズ周期がずれていたのを実測)
+        const fme7ToneNoise = seg.freq != null && seg.instrument != null && (seg.instrument & 3) === 3;
+        if (seg.fme7Noise != null && (seg.fme7Noise !== lastFme7Noise || fme7ToneNoise)) {
           bytes.push(OP_FME7_NOISE, seg.fme7Noise & 0x1f);
           lastFme7Noise = seg.fme7Noise;
         }

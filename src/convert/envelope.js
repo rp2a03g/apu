@@ -453,7 +453,13 @@
   }
   // 状態 s のまま、音長 A の音符を切らずに(音長いっぱいで)鳴らせるか。休符を残す音符・レガートの
   // 音符・曲末尾の音符はこれを満たす状態でなければならない(q8 のほか @k<n> は n>=A なら可)
-  const keepsFull = (s, A) => gateFramesOf(s, A) >= A;
+  // m(2026-09-19): 書き出す音長のずれの余裕(フレーム)。この関数は音長の量子化(LEN_SNAP/LEN_DP、
+  //   src/convert/duration.js)より前に呼ばれるので、実際にコンパイルされる音長は A から最大 2×LEN_SNAP
+  //   (両端の境界が逆向きにずれた場合)+1(コンパイラの丸め)長くなりうる。A だけで判定すると、1 フレームの
+  //   音符は q1〜q7 でも「切れない」(床関数でも最低1フレーム)ことになり、前の音符の q<n>/@q<n> がそのまま
+  //   残る。その音符が 2〜3 フレームに書かれると半分で切られ、音符の間に1フレームの無音が挟まる
+  //   (KSS→MML の PSG ドラムで実測: Metal Gear 2 曲153 の X で 30 秒に 40 箇所、Salamander 曲29 で 76 箇所)
+  const keepsFull = (s, A, m) => gateFramesOf(s, A + (m || 0)) >= A + (m || 0);
   // 連鎖(inter-onset D フレーム、可聴 A フレーム)を正確に表せるゲートコマンド。
   // ★コンパイル後の音長 D' はテンポの整数丸め由来の carry で D±1 フレームになり得る。q<n> は
   //   floor(D'×n/8) なので D' が 1 違うと可聴長も 1 動くことがある。D±1 でも無音が残り可聴長の
@@ -525,6 +531,7 @@
     // 音長トークン数の見積もり(休符/音符を何個の音価に分けて書くことになるか)
     const lenSnap = MML.Convert.lenSnapOf(c); // 音長の丸め(LEN_SNAP)込みで mmlEmit と同じ分割数にする
     const frags = (frames) => frames <= 0 ? 0 : MML.Convert.framesToLengths(frames, beat, 0, lenSnap).lengths.length;
+    const keepMargin = 2 * Math.max(1, lenSnap) + 1; // keepsFull の m(書き出す音長のずれの余裕、同所コメント)
 
     for (const ch of scoreChannels || []) {
       if (!ch || !ch.events) continue;
@@ -588,8 +595,8 @@
       const bias = (s) => !approx || s[0] !== '@' ? 0 : (s[1] === 'k' ? GATE_AT_BIAS * 2 : GATE_AT_BIAS);
       const REST = approx ? GATE_REST_COST_APPROX : 1;
       const costOf = (cn, s) => {
-        if (cn.kind === 'tight') return keepsFull(s, cn.Ac) ? { cost: frags(cn.A), absorbed: false } : null;
-        if (cn.kind === 'rest') return keepsFull(s, cn.Ac) ? { cost: frags(cn.A) + frags(cn.gap) * REST, absorbed: false } : null;
+        if (cn.kind === 'tight') return keepsFull(s, cn.Ac, keepMargin) ? { cost: frags(cn.A), absorbed: false } : null;
+        if (cn.kind === 'rest') return keepsFull(s, cn.Ac, keepMargin) ? { cost: frags(cn.A) + frags(cn.gap) * REST, absorbed: false } : null;
         if (cn.kind === 'env') {
           const g = gateFramesOf(s, cn.Dc);
           if (g >= cn.Ac) return { cost: frags(cn.D), absorbed: false };
@@ -598,7 +605,7 @@
         }
         const cand = cn.cands.find(x => x.s === s);
         if (cand) return { cost: frags(cn.D) + cand.dev * GATE_DEV_COST + bias(s), absorbed: true };
-        return keepsFull(s, cn.Ac) ? { cost: frags(cn.A) + frags(cn.gap) * REST, absorbed: false } : null;
+        return keepsFull(s, cn.Ac, keepMargin) ? { cost: frags(cn.A) + frags(cn.gap) * REST, absorbed: false } : null;
       };
       let prevRow = new Map([[GATE_FULL, { cost: 0, from: null, absorbed: false }]]);
       const rows = [];
