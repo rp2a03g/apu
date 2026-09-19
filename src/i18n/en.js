@@ -633,6 +633,7 @@
     '全チャンネルのミュートを解除': 'Unmute all channels',
     '100%以外の音量のチャンネルがあります。押すと全チャンネルの音量を100%に戻す': 'Some channels are not at 100% volume. Click to reset all channels to 100%',
     '書き出しに失敗しました: {msg}': 'Export failed: {msg}',
+    'NSFに書き出せません:': 'Cannot export to NSF:',
     '全チャンネルの音量を100%に戻す': 'Reset all channel volumes to 100%',
     'チャンネル割当(変換元ch → NSF側のパート)を表示': 'Show channel mapping (source ch → NSF part)',
     'クリックで借用先(NSF側のパート)を選ぶ': 'Click to pick the target (NSF part)',
@@ -1273,6 +1274,12 @@
       '[{src} line {line}] {msg}',
     'ドライバ本体が{size}バイトあり、割当領域(バンク0-3、{limit}バイト)を超えています。カスタム音色/波形の定義数を減らしてください(DPCM使用時はバンク4-7がサンプル専用のため、ドライバはバンク0-3に収める必要があります)':
       'The driver is {size} bytes, which exceeds its area (banks 0-3, {limit} bytes). Reduce the number of custom tone/waveform definitions (with DPCM, banks 4-7 are reserved for samples, so the driver has to fit in banks 0-3)',
+    'NSF書き出し: {kind} を{count}種類使っていますが、NSFのバイトコードで区別できるのは{max}種類までです(番号を1バイトで持つため)。使う種類を減らしてください':
+      'NSF export: {count} different {kind} are used, but the NSF bytecode can tell only {max} apart (the number is stored in one byte). Use fewer of them',
+    'NSF書き出し: {def} の値 {value} は、NSFのバイトコードで表せる {min}〜{max} の範囲外です(値を1バイトで持つため)':
+      'NSF export: the value {value} in {def} is outside {min} to {max}, the range the NSF bytecode can hold (the value is stored in one byte)',
+    'NSF書き出し: {ch} の {cmd}{value} は、NSFのバイトコードで表せる {max} を超えています(番号を1バイトで持つため)':
+      'NSF export: {cmd}{value} on channel {ch} is larger than {max}, the largest number the NSF bytecode can hold (the number is stored in one byte)',
     '内部エラー: ドライバ本体のサイズが計測時({a}バイト)と再アセンブル時({b}バイト)で一致しません':
       'Internal error: the driver size at measurement ({a} bytes) differs from the reassembled size ({b} bytes)',
     'MML変換に対応した音源がありません({chips})':

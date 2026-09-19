@@ -3419,8 +3419,7 @@
       songName: meta.title || '', artist: meta.composer || '', copyright: meta.maker || '', totalSongs: 1, startingSong: 1,
     });
     if (built.asmErrors.length > 0) {
-      captureOutputEl.innerHTML = '<div class="error">' + escapeHtml(T('ドライバのアセンブルに失敗しました(内部エラー):') + '\n' +
-        built.asmErrors.map(e => `[Line ${e.lineNo}] ${e.message}`).join('\n')) + '</div>';
+      captureOutputEl.innerHTML = '<div class="error">' + escapeHtml(nsfBuildErrorText(built.asmErrors)) + '</div>';
       return;
     }
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -4323,6 +4322,17 @@
     mmlOutputEl.appendChild(msg);
   }
 
+  // NSF書き出しのエラー文(buildBankedNsfBytes の asmErrors)。曲データの上限超え(kind:'bytecodeLimit'、
+  // @v を255種類より多く使う等。ppmckDriver.js checkBytecodeLimits)はMMLの側の問題なので「書き出せません」と
+  // 行番号なしで出し、それ以外(ドライバ自体のアセンブル失敗)は従来どおり内部エラーとして出す
+  function nsfBuildErrorText(errs) {
+    if (errs.length && errs.every(e => e.kind === 'bytecodeLimit')) {
+      return T('NSFに書き出せません:') + '\n' + errs.map(e => e.message).join('\n');
+    }
+    return T('ドライバのアセンブルに失敗しました(内部エラー):') + '\n' +
+      errs.map(e => `[Line ${e.lineNo}] ${e.message}`).join('\n');
+  }
+
   function exportMmlNsf() {
     const result = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
 
@@ -4354,8 +4364,7 @@
     const built = MML.Driver.buildBankedNsfBytes(result, headerOpt);
     if (built.asmErrors.length > 0) {
       msg.className = 'error';
-      msg.textContent = T('ドライバのアセンブルに失敗しました(内部エラー):') + '\n' +
-        built.asmErrors.map(e => `[Line ${e.lineNo}] ${e.message}`).join('\n');
+      msg.textContent = nsfBuildErrorText(built.asmErrors);
       mmlOutputEl.appendChild(msg);
       return;
     }

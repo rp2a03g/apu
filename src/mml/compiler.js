@@ -81,7 +81,8 @@
  *                  $400E = (index − D − EP − MP − PT) & $FF なので D16 n0〜n15 → $F0〜$FF(bit7=短周期)。
  *                  wikiwiki.jp/mck の「短周期ノイズは D16〜D1、長周期は D0〜D-15」がそのまま鳴る
  *                  (2026-09-18、実ppmck09aツールチェーンのNSFと$400E列を突き合わせて確認)。
- *                  VRC7はfnum/blockの対数的表現のため対象外。EP/MPと全く同じ「生レジスタへの
+ *                  VRC7はfnum(9bit)へ足しblockは変えない(0〜511でクランプ。2026-09-19からEP/MP/PTも)。
+ *                  EP/MPと全く同じ「生レジスタへの
  *                  加算」空間の値(下記参照)なので、この3つは同時に足し合わされる
  *   @<n>           音色番号 (パルスのデューティ比 = n % 4 / VRC6パルスのデューティ比 = n % 8
  *                  (実機同様8段階) / VRC7の音色番号 = n % 16)。実機同様、@@<n>で有効化した
@@ -125,7 +126,7 @@
  *                  末尾1値の前にループ点を差し込むため)ので、止めるには末尾を0にする。
  *                  以前は@v用のstepEnvelope(各フレームの絶対値)を流用しており本家と違っていた。
  *                  対応チャンネルはD<n>と同じ(2A03全4ch・VRC6・MMC5・FME7・FDS・N163、
- *                  VRC7は対象外)
+ *                  VRC7はfnumへ足しblockは変えない。2026-09-19まではVRC7は対象外だった)
  *   MP<n> / MPOF   ソフトウェアビブラート。@MP<n>={delay,speed,depth}で定義。depthはEP/Dと
  *                  同じ生レジスタ単位(実機ドライバのsound_lfoも同じfreq_add_mcknumberを
  *                  呼ぶため)。波形は実機のlfo_sub/warizan_start(nes_include/ppmck/
@@ -2772,13 +2773,23 @@
       const dur = Math.min(seg.durationFrames, totalFrames - frame);
       const gateFrames = computeGateFrames(seg, dur);
       if (seg.freq != null) {
-        const { fnum: baseFnum, block } = vrc7FreqToFnumBlock(seg.freq);
-        // fnumは同一block内では周波数に比例するため、他チップと同じ生レジスタへの単純加算
-        // オフセットでデチューンできる(0-511の9bit幅でクランプ、block自体は変えない)。
-        // block境界をまたぐ本来のデチューン量が必要な場合でも、この曲の狭い範囲の
-        // デチューン効果には影響しない程度の近似として十分(他チップのapplyDetuneも
-        // 同様に単純クランプのみでキャリー処理はしていない)。
-        const fnum = applyDetune(baseFnum, seg.detune, 511);
+        // D<n>/EP/MP/PT(2026-09-19、以前はDだけ): fnumは同一block内では周波数に比例するため、他チップと同じ
+        // 「生レジスタへの加算」(pitchRegisterOffset、向きは周波数レジスタ系=+1)をfnumへ足し、0-511の9bit幅で
+        // クランプする(block自体は変えない。block境界をまたぐ本来の量が必要な場合でも、狭い範囲の効果には
+        // 十分な近似。他チップのapplyDetuneも単純クランプのみでキャリー処理はしていない)。本家ppmckのVRC7も
+        // D/EP/MPを周波数の値へ足す(vrc7.h sound_vrc7_lfo/sound_vrc7_pitch_enve)。
+        // EN(ノート番号空間)とタイの異音程(pitchBreaks)はblockごと引き直す。NSF書き出しの6502ドライバ
+        // (ppmckDriver.js WFV_VRC7/WFO_VRC7/VRC7_PITCH)と同じ計算
+        const mpTable = (seg.vibrato != null && seg.vibrato !== 255 && env.mp) ? env.mp[seg.vibrato] : null;
+        const vibSeq = mpTable ? vibratoSequence(mpTable, dur, 1) : null;
+        const ptSeq = seg.portamento ? portamentoSequence(seg.portamento, dur) : null;
+        const fnumBlockAt = (t) => {
+          const { freq, noteNumber } = activePitchAt(seg, t);
+          const delta = noteEnvelopeOffset(seg, env, t);
+          const fb = vrc7FreqToFnumBlock(delta === 0 ? freq : noteFrequency(enTableNote(noteNumber + delta)));
+          return { fnum: applyDetune(fb.fnum, pitchRegisterOffset(seg, env, t, vibSeq, ptSeq, null, NO_FX_OFFSETS, 1), 511), block: fb.block };
+        };
+        const { fnum, block } = fnumBlockAt(0);
         const instrument = seg.instrument % 16;
         writeLog[startFrame].push({ addr: 0x9010, value: 0x10 + ch });
         writeLog[startFrame].push({ addr: 0x9030, value: fnum & 0xFF });
@@ -2794,33 +2805,23 @@
         writeLog[startFrame].push({ addr: 0x9030, value: 0x10 | (block << 1) | ((fnum >> 8) & 1) });
         writeLog[startFrame].push({ addr: 0x9010, value: 0x30 + ch });
         writeLog[startFrame].push({ addr: 0x9030, value: (instrument << 4) | seg.volume });
-        // EN(ノートエンベロープ)はノート番号空間なのでfnum/block両方に影響しうる
-        // (ここだけ他チップと違いvrc7FreqToFnumBlock()でblockごと再計算する)。
-        // D<n>/EP/MPはfnum/blockの対数的表現のため対象外(上のapplyDetuneのコメント通り、
-        // このチップだけ既存のD<n>実装から一貫して除外している)。
-        // キーオン後の再書き込みはkeyonビット(0x10)を立てたまま行い、エッジトリガを
-        // 再発生させない(音符の頭でのみ発生させる、上の一連の書き込みと同じ理由)
-        if (seg.noteEnv != null && seg.noteEnv !== 255) {
-          const table = env.en[seg.noteEnv];
-          if (table) {
-            let lastFnum = fnum, lastBlock = block;
-            for (let t = 1; t < gateFrames; t++) {
-              const delta = cumulativeEnvelopeValue(table, t);
-              // ★delta===0での早期skipは誤り(2026-08-14修正): 「累積オフセットが0」は
-              // 「基準ノートへ戻る」という意味であり「値を変えなくてよい」という意味ではない。
-              // 直前のtickで既に基準ノート以外(delta!=0)へ書き換わっていた場合、この行を
-              // 素通りしてしまうと基準ノートへ戻す書込みが丸ごと欠落し、レジスタが直前の
-              // 値のまま固まってしまう(実機6502ドライバとの往復比較で発覚、EN0={0 4 3 -7}の
-              // ようなオフセット0を経由する周期パターンで実測)。「変化が無ければ書かない」
-              // 判定は直後のf2===lastFnum&&b2===lastBlockチェックだけで十分かつ正しい。
-              const { fnum: f2, block: b2 } = vrc7FreqToFnumBlock(noteFrequency(enTableNote(seg.noteNumber + delta)));
-              if (f2 === lastFnum && b2 === lastBlock) continue;
-              writeLog[startFrame + t].push({ addr: 0x9010, value: 0x10 + ch });
-              writeLog[startFrame + t].push({ addr: 0x9030, value: f2 & 0xFF });
-              writeLog[startFrame + t].push({ addr: 0x9010, value: 0x20 + ch });
-              writeLog[startFrame + t].push({ addr: 0x9030, value: 0x10 | (b2 << 1) | ((f2 >> 8) & 1) });
-              lastFnum = f2; lastBlock = b2;
-            }
+        // EN/EP/MP/PT/タイの異音程は、ゲートON区間の2フレーム目以降も毎フレームfnum/blockを計算し直し、
+        // 変わったフレームだけ書く。キーオン後の再書き込みはkeyonビット(0x10)を立てたまま行い、エッジトリガを
+        // 再発生させない(音符の頭でのみ発生させる、上の一連の書き込みと同じ理由)。
+        // ★「変化が無ければ書かない」判定は値の比較だけで行う(2026-08-14修正の教訓: ENの累積オフセットが0に
+        // 戻ったフレームを「変化無し」と見なして飛ばすと、基準ノートへ戻す書込みが欠落する)
+        const modulated = (seg.noteEnv != null && seg.noteEnv !== 255 && env.en && env.en[seg.noteEnv]) ||
+          (seg.pitchEnv != null && seg.pitchEnv !== 255) || vibSeq || ptSeq || (seg.pitchBreaks && seg.pitchBreaks.length);
+        if (modulated) {
+          let lastFnum = fnum, lastBlock = block;
+          for (let t = 1; t < gateFrames; t++) {
+            const { fnum: f2, block: b2 } = fnumBlockAt(t);
+            if (f2 === lastFnum && b2 === lastBlock) continue;
+            writeLog[startFrame + t].push({ addr: 0x9010, value: 0x10 + ch });
+            writeLog[startFrame + t].push({ addr: 0x9030, value: f2 & 0xFF });
+            writeLog[startFrame + t].push({ addr: 0x9010, value: 0x20 + ch });
+            writeLog[startFrame + t].push({ addr: 0x9030, value: 0x10 | (b2 << 1) | ((f2 >> 8) & 1) });
+            lastFnum = f2; lastBlock = b2;
           }
         }
         if (gateFrames < dur) {
