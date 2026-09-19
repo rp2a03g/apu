@@ -634,6 +634,8 @@
     '100%以外の音量のチャンネルがあります。押すと全チャンネルの音量を100%に戻す': 'Some channels are not at 100% volume. Click to reset all channels to 100%',
     '書き出しに失敗しました: {msg}': 'Export failed: {msg}',
     'NSFに書き出せません:': 'Cannot export to NSF:',
+    'VRC7へ載せるチャンネルでも音量エンベロープ@v/@vrを使う。VRC7は音色自体が減衰するので、元曲の音量変化まで@vにすると減衰が二重になることがある。OFFなら音量の変わり目で音符を分けてvを並べる。@v/@vrがOFFのときは効かない':
+      'Use the volume envelopes @v/@vr on channels placed on VRC7 too. VRC7 instruments decay by themselves, so turning the source volume changes into @v can double the decay. When off, notes are split where the volume changes and written as v values. Has no effect while @v/@vr is off',
     '全チャンネルの音量を100%に戻す': 'Reset all channel volumes to 100%',
     'チャンネル割当(変換元ch → NSF側のパート)を表示': 'Show channel mapping (source ch → NSF part)',
     'クリックで借用先(NSF側のパート)を選ぶ': 'Click to pick the target (NSF part)',
@@ -961,7 +963,7 @@
     // ---- 変換設定 (src/ui/convertSettings.js) ----
     '⚙ 変換設定': '⚙ Convert Options',
     '変換設定': 'Convert Options',
-    '忠実再現': 'Faithful',
+    '全コマンド': 'All commands',
     'プレーン譜面': 'Plain score',
     'NSF/SPC/KSS/GBS/HES/VGM → MML 変換で出力するコマンドを選びます(全形式共通、次回の変換から有効)。':
       'Choose which commands the NSF/SPC/KSS/GBS/HES/VGM → MML conversion emits (shared by all formats, applies from the next conversion).',
@@ -983,8 +985,8 @@
     'ドラムパッド(DPCM(E)/ノイズ(D))へ載せた打楽器の打点を音符にして出す(OFFなら打楽器パートごと出さない)。MMLコマンドではなくパートのON/OFF': 'Emit the drum-pad hits (DPCM (E) / noise (D)) as notes (off = no drum part at all). Not an MML command but the on/off of the part itself',
     '次の音符まで(推奨)': 'Up to the next note (recommended)',
     '音量ゼロで区切る': 'Cut at zero volume',
-    '「忠実再現」は元曲の演奏をそのまま、「プレーン譜面」は音階と音色だけ(編曲の出発点)。どれかを触ると「カスタム」になります':
-      '"Faithful" keeps the original performance; "Plain score" keeps only pitches and instruments (a starting point for arranging). Changing anything makes it "Custom"',
+    '「全コマンド」はMMLのコマンド(D/EP/MP/PT/EN/@v…)を全部使って元曲の演奏に寄せます。「プレーン譜面」は音階と音色だけ(編曲の出発点)。どれかを触ると「カスタム」になります':
+      '"All commands" uses every MML command (D/EP/MP/PT/EN/@v…) to stay close to the original performance; "Plain score" keeps only pitches and instruments (a starting point for arranging). Changing anything makes it "Custom"',
     '出力コマンド': 'Commands to emit',
     'テクニック': 'Techniques', // ヘルプのカテゴリ(sampleMml.js ;@help … :: テクニック)
     'OFFにしたコマンドは出力しません(説明は各項目にマウスを載せると出ます)': 'Commands turned off are not emitted (hover an item for its description)',
@@ -1056,7 +1058,7 @@
     'N163のSA<n>の選び方': 'How SA<n> is chosen for N163',
     '波形がRAMに入り切らないとき': 'When waves do not fit in RAM',
     '曲全体の音程のずれを測って補正': 'Measure and correct the whole-song pitch offset',
-    '忠実再現=元曲の演奏そのまま / プレーン譜面=音階と音色だけ': 'Faithful = the original performance; Plain score = pitches and instruments only',
+    '全コマンド=元曲の演奏に寄せる / プレーン譜面=音階と音色だけ': 'All commands = stay close to the original performance; Plain score = pitches and instruments only',
     'BPM 40〜400。空欄で自動推定': 'BPM 40-400. Leave empty to estimate automatically',
     'OFFにしたコマンドは出力しません': 'Commands turned off are not emitted',
     'パートの並び': 'Part order',

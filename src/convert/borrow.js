@@ -195,18 +195,26 @@
 
   // 抽出時に使う音量エンベロープレジストリ。元と借用先の音量尺度が違うときだけ写像プロキシを返す
   // (@vテーブルと定数音量 ev.volume の両方を同じ表で揃えるため、抽出のたびに family 別で呼ぶ)。
-  function envRegFor(envReg, s, fam) {
+  function envRegFor(envReg, s, fam, cmd) {
     const table = fam ? volTableFor(s, fam) : null;
-    if (table && fam === 'vrc7') return vrc7EnvReg(envReg, table);
+    if (table && fam === 'vrc7') return vrc7EnvReg(envReg, table, MML.Convert.vrc7EnvOn(cmd));
     return table ? mappedEnvReg(envReg, table) : envReg;
   }
   // VRC7へ載せる音量エンベロープ(2026-09-20)。表(@v/@vr)は MML の向き(v15=最大)で登録し、定数音量(volume)は
   // 他の VRC7 イベントと同じレジスタの減衰値(0=最大)で返す(MMLへは mmlEmit.js vrc7MmlVolume が v=15-値 で書く)。
   // ★2026-09-20まではコンパイラが VRC7 の @v を無視していたので、減衰値のままの表が出ていても実害が見えなかった
   //   (ブラウザ再生は v 未指定の既定値=レジスタ15で小さく鳴り、NSFは表の先頭値だけ)。@vが効くようになったので向きを揃える
-  function vrc7EnvReg(envReg, attTable) {
+  // envOn=false(変換設定 VRC7_ENV が OFF、options.js MML.Convert.vrc7EnvOn): @v 表を作らず、音符のピーク音量を
+  // 定数の v で返す(ENV=OFF のときの他の音源と同じ扱い)。省略時は true(従来どおり @v)
+  function vrc7EnvReg(envReg, attTable, envOn) {
     const top = attTable.length - 1;
     const map = seq => seq.map(v => 15 - attTable[Math.max(0, Math.min(top, v))]);
+    if (envOn === false) {
+      return {
+        assign: () => null,
+        volumeFieldsWithRelease: seq => ({ volume: 15 - MML.Convert.plainVolume(map(seq)), _volMapped: true }),
+      };
+    }
     return {
       assign: seq => envReg.assign(map(seq)),
       volumeFieldsWithRelease: seq => {
@@ -479,7 +487,7 @@
       const byFam = extractedByFam[chip] = extractedByFam[chip] || {};
       if (byFam[fam] !== undefined) return byFam[fam];
       const sample = src.find(s => s.chip === chip);
-      const res = sample ? o.extract(chip, fam, envRegFor(regs.envReg, sample, fam)) : null;
+      const res = sample ? o.extract(chip, fam, envRegFor(regs.envReg, sample, fam, cmd)) : null;
       byFam[fam] = res || null;
       return byFam[fam];
     };

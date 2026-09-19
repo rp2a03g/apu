@@ -24,7 +24,7 @@
   const T = (key, params) => MML.I18n.t(key, params);
   const STORAGE_KEY = 'mml.convertCmd.v1';
   const LOOP_ON_KEY = 'mml.convertCmd.loopDetectOn'; // LOOP_DETECT 既定 true 化の移行済み印(load 参照)
-  const DEFAULTS_V2_KEY = 'mml.convertCmd.defaultsV2'; // 忠実再現の既定変更(音名別チューニング/N163使用chのみ)の移行済み印
+  const DEFAULTS_V2_KEY = 'mml.convertCmd.defaultsV2'; // 全コマンド(旧「忠実再現」)の既定変更(音名別チューニング/N163使用chのみ)の移行済み印
   const OPEN_KEY = 'mml.convertSettings.open.v1'; // 折りたたみ区画の開閉状態 { score, layout, advanced, n163 }
 
   // ── 画面構成(2026-09-18 に再整理。ユーザー要望「1画面に収める・グループを分かりやすく」) ──
@@ -41,6 +41,8 @@
     ['PT',    'PT',       T('ポルタメント')],
     ['EN',    'EN',       T('高速アルペジオ(OFF時は基音1音にまとめる)')],
     ['ENV',   '@v/@vr',   T('音量エンベロープ(OFF時はピーク音量を v で出す)')],
+    // VRC7_ENV: VRC7 へ載せる ch でも @v/@vr を使うか(src/convert/options.js。全コマンド・プレーン譜面とも既定 OFF)
+    ['VRC7_ENV', '@v(VRC7)', T('VRC7へ載せるチャンネルでも音量エンベロープ@v/@vrを使う。VRC7は音色自体が減衰するので、元曲の音量変化まで@vにすると減衰が二重になることがある。OFFなら音量の変わり目で音符を分けてvを並べる。@v/@vrがOFFのときは効かない')],
     ['V',     'v',        T('音量そのもの(OFFなら v を一切出さない)')],
     ['INST',  '@ OP MH N', T('音色/デューティ/VRC7音色/FDS変調/FME7ノイズ周期')],
     ['SWEEP', 's',        T('2A03ハードウェアスイープ')],
@@ -81,7 +83,9 @@
     ['auto', T('自動検出(曲全体の偏差だけを測る)')],
     ['a440', T('12平均律固定(A4=440Hz・従来)')],
   ];
-  const PRESET_LABELS = () => ({ faithful: T('忠実再現'), plain: T('プレーン譜面') });
+  // プリセット名(2026-09-20、ユーザー決定): 中身は「MMLのコマンドをどこまで使うか」なので「全コマンド」。
+  // 元が別の音源のときに「忠実再現」だと言い過ぎになるため("faithful" のキーはそのまま)
+  const PRESET_LABELS = () => ({ faithful: T('全コマンド'), plain: T('プレーン譜面') });
   // 出力の書式: チャンネルの並び順(src/convert/options.js CHANNEL_ORDER)
   const CHANNEL_ORDER_OPTIONS = () => [
     ['letter', T('アルファベット順')],
@@ -110,8 +114,8 @@
         localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
       }
       try { localStorage.setItem(LOOP_ON_KEY, '1'); } catch (e) { /* 保存できなくても動作は同じ */ }
-      // 忠実再現の既定を TUNING auto→note、N163_CH fixed8→used に変えた(2026-09-19)。旧既定のまま保存されている
-      // 設定は「選んだ値」ではないので1回だけ新しい既定へ移す(そうしないと忠実再現が「カスタム」表示になる)
+      // 全コマンド(旧「忠実再現」)の既定を TUNING auto→note、N163_CH fixed8→used に変えた(2026-09-19)。旧既定のまま保存されている
+      // 設定は「選んだ値」ではないので1回だけ新しい既定へ移す(そうしないと全コマンドが「カスタム」表示になる)
       if (saved && !localStorage.getItem(DEFAULTS_V2_KEY)) {
         if (saved.TUNING === 'auto' || saved.TUNING == null) saved.TUNING = 'note';
         if (saved.N163_CH === 'fixed8' || saved.N163_CH == null) saved.N163_CH = 'used';
@@ -298,7 +302,7 @@
     const customTag = el('span', 'es-preset--custom', T('カスタム'));
     presetRow.appendChild(customTag);
     presetSec.appendChild(presetRow);
-    presetSec.appendChild(descLine(T('忠実再現=元曲の演奏そのまま / プレーン譜面=音階と音色だけ'), T('「忠実再現」は元曲の演奏をそのまま、「プレーン譜面」は音階と音色だけ(編曲の出発点)。どれかを触ると「カスタム」になります')));
+    presetSec.appendChild(descLine(T('全コマンド=元曲の演奏に寄せる / プレーン譜面=音階と音色だけ'), T('「全コマンド」はMMLのコマンド(D/EP/MP/PT/EN/@v…)を全部使って元曲の演奏に寄せます。「プレーン譜面」は音階と音色だけ(編曲の出発点)。どれかを触ると「カスタム」になります')));
     top.appendChild(presetSec);
 
     // ── 変換テンポ(プリセットの右)。実体は各フォーマットのパネルにある <prefix>TempoBpm 入力で、

@@ -1146,6 +1146,8 @@
       const cfg = channelMap[ch];
       if (!cfg || !envCapableType(cfg.type)) continue;
       if (!cmd.ENV) continue; // 変換設定ENV=OFF: @v/@vrテーブルを作らずボイス音量のv<n>で代替
+      // VRC7 へ載せるボイスは変換設定 VRC7_ENV も ON のときだけ @v(options.js MML.Convert.vrc7EnvOn。OFF なら従来の v)
+      if (String(cfg.type).startsWith('vrc7') && !MML.Convert.vrc7EnvOn(cmd)) continue;
       // チャンネル別の変換音量(volPct、src/convert/options.js)。songMaxVolは縮小前の
       // 生値から計算済みなので、ここで乗算すれば「曲中最大=targetMax」の正規化基準に対する
       // 相対的な減衰になる(他chとのバランス指定がそのまま効く)
@@ -1479,7 +1481,7 @@
         return cfg.tone;
       };
 
-      const hasEnvelope = envCapableType(targetType) && cmd.ENV;
+      const hasEnvelope = envCapableType(targetType) && cmd.ENV && (!targetType.startsWith('vrc7') || MML.Convert.vrc7EnvOn(cmd));
       // FDS/N163はsrcnごとの自作波形を@<n>(instrument)で切り替える
       const isFdsTarget = targetType === 'fds';
       const isN163Target = targetType.startsWith('n163');

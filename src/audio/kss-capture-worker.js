@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-20 05:40:23
+ * Built by tools/build-capture-workers.ps1 at 2026-09-20 06:42:23
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-20 05:40:23';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-20 06:42:23';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -5504,6 +5504,10 @@
  *            編曲の出発点としては1音の方が読みやすいため)
  *   ENV    … @v/@vr(ソフト/ハード音量エンベロープ)と FME7 の S/M。false時は各イベントの
  *            音量列のピーク値を v<n> として出す(MML.Convert.plainVolume)
+ *   VRC7_ENV … VRC7 へ載せるチャンネルでも @v/@vr を使う(2026-09-20、既定 false = 忠実再現・プレーン譜面とも OFF)。
+ *            VRC7 は音色自体が減衰を持つので、元曲の音量変化を @v にすると減衰が二重になりうる。OFF なら VRC7 の ch は
+ *            音量の変わり目で音符を切って v<n> を並べる(従来の出力)。ON にするとプリセットと一致しなくなり「カスタム」表示。
+ *            ENV が OFF のときは VRC7_ENV に関係なく @v を出さない(MML.Convert.vrc7EnvOn)
  *   V      … v<n>(音量そのもの)。false なら v も出さず既定音量
  *   SWEEP  … s<speed>,<depth>(2A03ハードウェアスイープ)
  *   INST   … @<n>(音色/デューティ)、OP<n>(VRC7音色)、MH<n>(FDS変調)、N<n>(FME7ノイズ周期)
@@ -5621,7 +5625,7 @@
   const MML   = global.MML   = global.MML   || {};
   MML.Convert = MML.Convert || {};
 
-  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
+  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'VRC7_ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
   const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE', 'GATE_APPROX', 'FOLD_DOUBLES'];
   // GATE_TOL: ゲートを揃える(GATE_APPROX)ときに許すキーオフ位置のずれ(フレーム、0〜8、既定2)
   const GATE_TOL_DEFAULT = 2, GATE_TOL_MAX = 8;
@@ -5750,17 +5754,22 @@
   };
 
   MML.Convert.CMD_KEYS = CMD_KEYS;
+  // VRC7 へ載せるチャンネルで @v/@vr を出すか(冒頭コメント VRC7_ENV)。ENV と VRC7_ENV の両方が ON のときだけ
+  MML.Convert.vrc7EnvOn = function (cmd) {
+    const c = MML.Convert.normalizeCmd(cmd);
+    return !!(c.ENV && c.VRC7_ENV);
+  };
   MML.Convert.SHAPE_KEYS = SHAPE_KEYS;
   MML.Convert.PITCH_SA_VALUES = PITCH_SA_VALUES;
 
   const PRESETS = {
     // 忠実再現(従来の既定)
-    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
+    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, VRC7_ENV: false, V: true, SWEEP: true, INST: true, DRUM: true,
                 SHAPE_REST: false, ENV_MERGE: false, FOLD_DOUBLES: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'used',
                 TUNING: 'note', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
-    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
+    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, VRC7_ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
                 SHAPE_REST: true, ENV_MERGE: false, FOLD_DOUBLES: true, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'fixed8',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },

@@ -128,7 +128,7 @@ function defaultSong(format, header) {
  * @param {Uint8Array} rawBytes
  * @param {string} format
  * @param {object} opt {song(省略時はヘッダ既定), seconds, bpm, sampleRate,
- *                      cmd(変換設定 src/convert/options.js。省略時は忠実再現=従来通り)}
+ *                      cmd(変換設定 src/convert/options.js。省略時はプリセット「全コマンド」=従来通り)}
  */
 async function convertBytes(rawBytes, format, opt = {}) {
   const MML = ctx();
@@ -182,7 +182,7 @@ async function convertBytes(rawBytes, format, opt = {}) {
 /**
  * --preset / --cmd から変換設定(options.cmd)を組み立てる。
  * --preset plain|faithful を土台に、--cmd "D=0,EP=0,SHAPE_REST=1" で個別上書き。
- * どちらも無ければ undefined(=忠実再現、従来通り)。
+ * どちらも無ければ undefined(=プリセット「全コマンド」、従来通り)。
  */
 function parseCmdFlags(preset, cmdStr) {
   if (!preset && !cmdStr) return undefined;

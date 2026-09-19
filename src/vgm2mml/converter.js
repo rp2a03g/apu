@@ -543,7 +543,7 @@
     const regFor = (chip, fam) => (needsLinear(fam) && envTable(chip, fam)) ? mappedEnvReg(envReg, envTable(chip, fam))
       // VRC7: @v表はMMLの向き(v15=最大)、定数音量は減衰値のまま(borrow.js vrc7EnvReg。2026-09-20)。
       // mappedEnvReg と同じく assign だけを渡す(@vr の切り出しまで変えると出力の構造が変わるため)
-      : (fam === 'vrc7' && VRC7_TABLE[chip]) ? { assign: MML.Convert.Borrow.vrc7EnvReg(envReg, VRC7_TABLE[chip]).assign }
+      : (fam === 'vrc7' && VRC7_TABLE[chip]) ? { assign: MML.Convert.Borrow.vrc7EnvReg(envReg, VRC7_TABLE[chip], MML.Convert.vrc7EnvOn(cmd)).assign }
         : (fam === 'fme7' && FME7_TABLE[chip]) ? mappedEnvRegWithRelease(envReg, FME7_TABLE[chip])
           : (fam === 'noise' && noiseTable(chip)) ? mappedEnvReg(envReg, noiseTable(chip)) : envReg;
 
@@ -704,7 +704,8 @@
     // items(同じチップのソースch)を「@vを使える借用先か」で分け、必要なら2通り抽出する。
     // run(opts)が抽出結果、pick(r, s)がそのソースchのチャンネル
     function extractEnvModes(items, run, pick, modeFn) {
-      const modeOf = modeFn || ((s) => cmd.ENV !== false && envFamOk(familyOf(plan[s.id])));
+      // VRC7 へ載せる ch は変換設定 VRC7_ENV も ON のときだけ @v(options.js MML.Convert.vrc7EnvOn)
+      const modeOf = modeFn || ((s) => { const fam = familyOf(plan[s.id]); return cmd.ENV !== false && envFamOk(fam) && (fam !== 'vrc7' || MML.Convert.vrc7EnvOn(cmd)); });
       for (const m of [...new Set(items.map(modeOf))]) {
         const r = run({ envelope: m });
         for (const s of items) if (modeOf(s) === m) { const chn = pick(r, s); if (chn) extracted[s.id] = chn; }
@@ -743,7 +744,7 @@
     }
     // OPLL/OPL: VRC7 へ載せる ch だけ音量を列(attSeq)で持つ抽出にする(2026-09-20。@v にする)。VRC7 以外の借用先は
     // 従来どおり音量の変わり目で切る(出力を変えないため。OPN と違い、ここは借用先を問わず1回の抽出だった)
-    const opllEnvMode = (s) => cmd.ENV !== false && familyOf(plan[s.id]) === 'vrc7';
+    const opllEnvMode = (s) => familyOf(plan[s.id]) === 'vrc7' && MML.Convert.vrc7EnvOn(cmd);
     if (data.kss && data.kss.opll && c.ym2413) {
       // リズムモード曲は r.channels が6本しか無いので、ch7-9は未定義のまま置かない
       extractEnvModes(src.filter(s => s.chip === 'ym2413' && wantExtract(s)),

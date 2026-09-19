@@ -14,7 +14,7 @@
  * MML.Convert.applyNoteEnd(src/convert/envelope.js)を呼んで効かせる
  * (エンベロープ表の登録先が要るため emitScore 内では行えない)。
  *
- * cmd の各キー(全て boolean。省略時は true = 従来通り忠実再現):
+ * cmd の各キー(全て boolean。省略時は true = 従来通りプリセット「全コマンド」):
  *   D      … D<n>(チャンネル/チップ間デチューン、detune.js)
  *   EP     … EP<n>(ピッチエンベロープ。MP/PT の受け皿でもある)
  *   MP     … MP<n>(ビブラート)。falseで EP が true なら周期EPテーブルへ落ちる
@@ -24,6 +24,10 @@
  *            編曲の出発点としては1音の方が読みやすいため)
  *   ENV    … @v/@vr(ソフト/ハード音量エンベロープ)と FME7 の S/M。false時は各イベントの
  *            音量列のピーク値を v<n> として出す(MML.Convert.plainVolume)
+ *   VRC7_ENV … VRC7 へ載せるチャンネルでも @v/@vr を使う(2026-09-20、既定 false = 全コマンド・プレーン譜面とも OFF)。
+ *            VRC7 は音色自体が減衰を持つので、元曲の音量変化を @v にすると減衰が二重になりうる。OFF なら VRC7 の ch は
+ *            音量の変わり目で音符を切って v<n> を並べる(従来の出力)。ON にするとプリセットと一致しなくなり「カスタム」表示。
+ *            ENV が OFF のときは VRC7_ENV に関係なく @v を出さない(MML.Convert.vrc7EnvOn)
  *   V      … v<n>(音量そのもの)。false なら v も出さず既定音量
  *   SWEEP  … s<speed>,<depth>(2A03ハードウェアスイープ)
  *   INST   … @<n>(音色/デューティ)、OP<n>(VRC7音色)、MH<n>(FDS変調)、N<n>(FME7ノイズ周期)
@@ -46,7 +50,7 @@
  *                 (src/convert/duration.js framesToLengths の slackFrames。持ち越しは ±許容に収め、一致は持ち越し込みで
  *                 許容の2倍以内の最も近い音価。小節線から許容以内の音符は小節線で割らない)。ドライバのテンポが小数で音符長が
  *                 ±1〜2 フレーム揺れる曲(ppmck の t71 等)の譜面を素直にする。境界のずれは最大このフレーム数
- *   LEN_DP      … 音長をチャンネル全体で最適化する(2026-09-09、忠実再現=ON / プレーン譜面=OFF)。音符ごとに
+ *   LEN_DP      … 音長をチャンネル全体で最適化する(2026-09-09、全コマンド=ON / プレーン譜面=OFF)。音符ごとに
  *                 直前の余りだけ見て最も近い音価を選ぶ greedy(framesToLengths)の代わりに、チャンネルの全イベント
  *                 列を見渡して「音価の書きにくさ+境界の位置ずれ(フレーム)²」の合計が最小の割り当てを動的計画法で
  *                 選ぶ(duration.js quantizeSeq)。速いテンポで 5,5,5,6 フレームと揺れる16分が `24..` に化ける、
@@ -66,7 +70,7 @@
  *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)。
  *                 伸ばした区間は最後の音量のまま鳴るので近似
  *   FOLD_DOUBLES … 合成ch(プール式PCMの論理レーン。PSF/VGMのMultiPCM等)の複製パートを省く(2026-09-14、
- *                 忠実再現=OFF / プレーン譜面=ON)。ドライバが同じ旋律を別ボイスで重ねたデチューン二重化や
+ *                 全コマンド=OFF / プレーン譜面=ON)。ドライバが同じ旋律を別ボイスで重ねたデチューン二重化や
  *                 数フレーム遅れのエコーを src/convert/poolDoubles.js が検出し、複製側のノートを変換から外す
  *                 (ヘッダに何を省いたか書く)。OFF でも、N163 等の枠へ自動で載せるレーンを選ぶときは複製を後回しにする
  *   (旧 SHAPE_QUANT「16分音符格子へ丸める」は 2026-09-07 に廃止。キーオン自体が格子から
@@ -125,7 +129,7 @@
  *       キー名を変えた)
  *   RATE_MIX  … 同時に鳴った打点のDMCレート指定が食い違うとき、'quality'=高い方 / 'size'=低い方
  *   DRUM_POLY … 打点が重なったとき 'mix'=その瞬間の音をミックスして1クリップ / 'mono'=直近1音
- *   これらはプリセット(忠実再現/プレーン譜面)の一致判定に含めない(パネル側の独立した設定)。
+ *   これらはプリセット(全コマンド/プレーン譜面)の一致判定に含めない(パネル側の独立した設定)。
  *   全形式のドラム(DPCM)経路(src/convert/drumHits.js)が見る。
  *
  * 基準ピッチ(全体オフセット、2026-09-07。下の MML.Convert.detectTuning 冒頭コメント参照):
@@ -141,7 +145,7 @@
   const MML   = global.MML   = global.MML   || {};
   MML.Convert = MML.Convert || {};
 
-  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
+  const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'VRC7_ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
   const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE', 'GATE_APPROX', 'FOLD_DOUBLES'];
   // GATE_TOL: ゲートを揃える(GATE_APPROX)ときに許すキーオフ位置のずれ(フレーム、0〜8、既定2)
   const GATE_TOL_DEFAULT = 2, GATE_TOL_MAX = 8;
@@ -153,7 +157,7 @@
   MML.Convert.LEN_SNAP_MAX = LEN_SNAP_MAX;
   MML.Convert.lenSnapOf = (cmd) => (cmd && cmd.LEN_SNAP > 0) ? Math.min(LEN_SNAP_MAX, cmd.LEN_SNAP) : 0;
   // LEN_DP: 音長をチャンネル全体で最適化する(2026-09-09、src/convert/duration.js quantizeSeq)。
-  // 忠実再現プリセットは ON、プレーン譜面は OFF(格子に乗らない実曲では 3連系やタイが増えるため)
+  // プリセット「全コマンド」は ON、プレーン譜面は OFF(格子に乗らない実曲では 3連系やタイが増えるため)
   MML.Convert.lenDpOf = (cmd) => !!(cmd && cmd.LEN_DP);
   // DPCM_EXACT: 分割したDPCM(ストリーム再生の区間、src/convert/drumHits.js)の音長を LEN_SNAP/LEN_DP の
   // 丸めから外して厳密に書く(2026-09-09、既定ON。省略時もON=未指定の古い設定と互換)。
@@ -270,17 +274,22 @@
   };
 
   MML.Convert.CMD_KEYS = CMD_KEYS;
+  // VRC7 へ載せるチャンネルで @v/@vr を出すか(冒頭コメント VRC7_ENV)。ENV と VRC7_ENV の両方が ON のときだけ
+  MML.Convert.vrc7EnvOn = function (cmd) {
+    const c = MML.Convert.normalizeCmd(cmd);
+    return !!(c.ENV && c.VRC7_ENV);
+  };
   MML.Convert.SHAPE_KEYS = SHAPE_KEYS;
   MML.Convert.PITCH_SA_VALUES = PITCH_SA_VALUES;
 
   const PRESETS = {
-    // 忠実再現(従来の既定)
-    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, V: true, SWEEP: true, INST: true, DRUM: true,
+    // 全コマンド(従来の既定。旧名「忠実再現」。キー名 faithful はそのまま)
+    faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, VRC7_ENV: false, V: true, SWEEP: true, INST: true, DRUM: true,
                 SHAPE_REST: false, ENV_MERGE: false, FOLD_DOUBLES: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'used',
                 TUNING: 'note', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
-    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
+    plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, VRC7_ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
                 SHAPE_REST: true, ENV_MERGE: false, FOLD_DOUBLES: true, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'fixed8',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },

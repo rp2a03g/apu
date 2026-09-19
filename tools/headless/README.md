@@ -75,7 +75,7 @@ node tools/headless/convert.js "path/to/song.nsf" --sec 15
 `--song N` で曲番号(省略時はヘッダの宣言値)、`-o out.mml` でファイル出力、
 アーカイブなら `--list` で中身一覧・`--entry N` でエントリ選択。
 `--preset plain|faithful` / `--cmd D=0,EP=0,NOTE_END=zero` で変換設定(src/convert/options.js の cmd。
-省略時は忠実再現=UIの既定と同じ)。基準ピッチは `--cmd TUNING=a440`(12平均律固定)/
+省略時はプリセット「全コマンド」=UIの既定と同じ)。基準ピッチは `--cmd TUNING=a440`(12平均律固定)/
 `TUNING_MIN=3`(自動検出の最小偏差セント)。
 
 **`--song` の意味はフォーマットで違う。** nsf/gbs/kss は0始まりの曲インデックス、
