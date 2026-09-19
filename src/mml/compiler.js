@@ -754,6 +754,7 @@
     const noiseWarned = { transpose: false, directNote: false, instrument: false };
     // @n(直接周波数指定)のエラー/警告も1チャンネル1回
     const directFreqWarned = { error: false, range: false, en: false };
+    let fme7OnlyWarned = false;
     // DPCMch(E)で使えないコマンド(本家ppmckcはエラー)。同じコマンドの再出現は1回にまとめる
     const dpcmRejected = new Set();
     const dpcmReject = (name) => {
@@ -829,6 +830,8 @@
     // L(ループ地点マーカー)が出現した時点でのelapsedFrames。複数回書かれた場合は
     // 最初の1回だけを採用する(2回目以降は無視)
     let loopFrame = null;
+    // L の時点の segments.length(L の後で最初に鳴る音符を見分ける。PS の扱い参照)
+    let loopSegIndex = null;
     // !!(タイムシフト=再生開始位置)/!!!(本ツール独自拡張=再生終了位置)が出現した時点の
     // elapsedFrames。loopFrameと同じく最初の1回だけを採用する
     let startMarkerFrame = null;
@@ -896,7 +899,14 @@
         let psGlide = null;
         if (freq != null && directPeriod == null && state.pendingPitchShift && caps.psAllowed) {
           const from = lastActivePitch(segments);
-          if (from != null) psGlide = { fromFreq: from.freq, fromNoteNumber: from.noteNumber };
+          // L の後で最初に鳴る音符の PS は通常の音符にする(2026-09-20)。グライド元が1周目は L の前の音、
+          // 2周目以降はループ末尾の音になり、1周目のレジスタ書込みを複製するブラウザ再生では表せない。
+          // NSF も L の位置で音量/音色/EP 等を出し直す(mckBytecode.js resetDedupAtLoop)ので、
+          // 「前の音から継続」自体が成り立たない
+          const firstAfterLoop = loopSegIndex != null && !segments.slice(loopSegIndex).some(sg => sg.freq != null);
+          if (from != null && firstAfterLoop) {
+            warnings.push({ srcStart, message: T('L の直後の最初の音符には PS(ポルタメント)を付けられません(周回ごとにグライド元が変わるため)。通常の音符として鳴らします') });
+          } else if (from != null) psGlide = { fromFreq: from.freq, fromNoteNumber: from.noteNumber };
         }
         state.pendingPitchShift = false;
 
@@ -1101,10 +1111,23 @@
           break;
         case 'noteEnv': if (caps.dpcm) { dpcmReject('EN'); break; } state.noteEnv = tok.value; break;
         case 'sweep': if (caps.dpcm) { dpcmReject('s'); break; } state.sweepSpeed = tok.speed; state.sweepDepth = tok.depth; break;
-        case 'fme7Noise': state.fme7Noise = tok.value; break;
-        case 'fme7EnvShape': state.fme7EnvShape = tok.value; break;
-        case 'fme7EnvPeriod': state.fme7EnvPeriod = tok.value; break;
-        case 'loopPoint': if (loopFrame == null) loopFrame = elapsedFrames; break;
+        // N<n>/S<n>/M<n> は FME7 専用。他のチャンネルでは無視する(2026-09-20)。以前は状態だけ持っていたため、
+        // ブラウザ再生は無視する一方で NSF 書き出しは FME7 のオペコードを出してしまい、FME7 を使わない曲では
+        // ドライバがそのオペコードを持たないので以降のデータを読み違えていた(例: トラック内に @N0 と書くと
+        // @0 + N0 と読まれる)。S<n> は音量オペコードも抑止するので音量まで化けていた
+        case 'fme7Noise': case 'fme7EnvShape': case 'fme7EnvPeriod':
+          if (!caps.fme7) {
+            if (!fme7OnlyWarned) {
+              fme7OnlyWarned = true;
+              warnings.push({ srcStart: tok.srcStart, message: T('N<n>/S<n>/M<n> は FME7(サンソフト5B)のチャンネル専用なので無視します') });
+            }
+            break;
+          }
+          if (tok.type === 'fme7Noise') state.fme7Noise = tok.value;
+          else if (tok.type === 'fme7EnvShape') state.fme7EnvShape = tok.value;
+          else state.fme7EnvPeriod = tok.value;
+          break;
+        case 'loopPoint': if (loopFrame == null) { loopFrame = elapsedFrames; loopSegIndex = segments.length; } break;
         case 'timeShiftStart':
           if (startMarkerFrame == null) {
             startMarkerFrame = elapsedFrames;
@@ -1817,6 +1840,15 @@
   // volMax: 音量値の上限(省略時15)。FDS/VRC6のこぎり波だけは本家ppmck同様に音量が6bit
   // (0-63)なので63を渡す(datamake.cの_VOLUME範囲チェックがFMTRACK|VRC6SAWTRACKだけ0-63、
   // 他は0-15になっているのに合わせた。2026-08-24)
+  // @v/@vr の表の値→音量レジスタの値。表の値は 0〜63(本家ppmckの定義範囲、NSFの表も0〜63でクランプ)。
+  // 4bit音量のチップ(vMax=15)は下位4bitだけを使う(2026-09-20。以前は15で頭打ちにしていた)。
+  // 本家ppmckのドライバは表の値をそのまま $30|デューティ へ OR するので、2A03/MMC5 は下位4bitが音量になる
+  // (@v の 20 は音量4、16 は音量0)。NSF書き出しも同じ(ppmckDriver.js volMask4)
+  function envVolume(x, vMax) {
+    const v = Math.max(0, Math.min(63, x | 0));
+    return vMax === 15 ? (v & 15) : Math.min(vMax, v);
+  }
+
   function writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable, writeFn, seg, dutyOpt, volMax) {
     const vMax = volMax == null ? 15 : volMax;
     const dutyOf = dutyOpt
@@ -1826,7 +1858,7 @@
     let lastDuty;
     let dutyInit = false;
     for (let t = 0; t < gateFrames; t++) {
-      const vol = Math.max(0, Math.min(vMax, stepEnvelope(vTable, t)));
+      const vol = envVolume(stepEnvelope(vTable, t), vMax);
       const duty = dutyOf(t);
       if (vol !== lastVol || !dutyInit || duty !== lastDuty) {
         writeFn(startFrame + t, vol, duty);
@@ -1839,7 +1871,7 @@
       if (vrTable) {
         let lastRVol = -1;
         for (let t = gateFrames; t < dur; t++) {
-          const vol = Math.max(0, Math.min(vMax, stepEnvelope(vrTable, t - gateFrames)));
+          const vol = envVolume(stepEnvelope(vrTable, t - gateFrames), vMax);
           const duty = dutyOf(t);
           if (vol !== lastRVol || !dutyInit || duty !== lastDuty) {
             writeFn(startFrame + t, vol, duty);
@@ -1875,8 +1907,9 @@
   //      フレーム(origin)からの経過フレーム数をオフセットとして継続する。
   //  ・PS音符自身がq<n>でゲートオフする時は通常の音符と同じ(@v+@vrならリリース開始、
   //    それ以外は無音)。
-  //  ・@@<n>(デューティエンベロープ)はPS継続の対象外(意図的な既知の制限、下記
-  //    writePsGlideVolumeのdutyOpt注記参照)。
+  //  ・@@<n>(デューティエンベロープ)も同じ規則で継続する(2026-09-20、dutyPlan参照。
+  //    休符・@vr無しのゲートオフでは止まり、PS音符では再開しない=6502のDUTYSEL=$FF)。
+  //  ・L の後で最初に鳴る音符の PS は通常の音符として鳴らす(buildSegments の firstAfterLoop)。
   // 継続状態(psCarry)はチャンネルごとにセグメントループをまたいで保持する。
   function newPsCarry() {
     return {
@@ -1890,7 +1923,9 @@
       // 音量側の状態機械(6502ドライバのENVACT/ENVTICK/RELPLAY/RELTICKに対応):
       //  mode 'plain'=固定音量を保持中(ENVACT=0) / 'silent'=ゲートオフ・休符後の無音 /
       //  'env'=@vがtick中(tick=直前フレームで書いたtick番号) / 'rel'=@vrリリース再生中
-      vol: { mode: 'silent', tick: 0, table: null, relTick: 0, vrTable: null }
+      vol: { mode: 'silent', tick: 0, table: null, relTick: 0, vrTable: null },
+      // @@<n>(デューティエンベロープ)の状態(6502のDUTYSEL/DUTYTICK/DUTY,X。dutyPlan参照)
+      duty: { key: null, running: false, table: null, tick: 0, value: 0 }
     };
   }
 
@@ -1949,6 +1984,59 @@
   // (EP/MP/PT/ENは進み続けるのでoriginは触らない。prevNoteも音符専用なので不変)
   function psCarryAfterRest(carry) {
     carry.vol.mode = 'silent';
+    // 6502のRD_RESTはDUTYSEL=$FF(デューティエンベロープ停止、DUTY,Xは最後の値のまま)
+    carry.duty.running = false;
+  }
+
+  // ===== @@<n>(デューティエンベロープ)のPS継続(2026-09-20) =====
+  // 6502ドライバのDUTYSEL/DUTYTICK/DUTY,Xと1:1の状態機械(carry.duty):
+  //  ・通常の音符: RD_NOTE_BODYがTONEBASE(直前のOP_TONEバイト)を必ず選び直す=tick0から
+  //  ・PS音符: RD_PITCHSHIFTは選び直さない。音色バイトが直前の音符と同じ(OP_TONEが出ない)なら
+  //    TICK_VOL_FXでtickがそのまま進む。違えばRD_TONE→APPLY_TONEでこの音符の先頭からtick0
+  //    (@vの選択が変わった時と同じ規則)
+  //  ・ゲートオフ: @vr無し(RD_REST/RD_GATEOFFVR_NOVR)→停止(DUTYSEL=$FF)。値は最後のまま凍結。
+  //    @vrあり(RD_GATEOFFVR)→@@r<n>があればリリース音色へ切り替えてtick0、無ければ進み続ける
+  //  ・休符(r)→停止
+  // key: mckBytecode.jsが出す音色バイトの代わり(同じならOP_TONEが出ない)
+  function dutyToneKey(seg, dutyTable) {
+    return dutyTable ? 'e' + seg.toneEnv : 'f' + ((seg.instrument || 0) & 0x7f);
+  }
+  // この音符の区間でのデューティの進み方を決める。isPs=false(通常の音符)は必ずtick0から
+  function dutyPlan(carry, seg, dutyOpt, isPs) {
+    const { dutyTable, relDutyTable } = resolveDutyTables(seg, dutyOpt.env);
+    const key = dutyToneKey(seg, dutyTable);
+    const d = carry.duty;
+    if (!isPs || key !== d.key) {
+      return { key, relDutyTable, running: !!dutyTable, table: dutyTable, base: 0, frozen: dutyOpt.fixedDuty };
+    }
+    return { key, relDutyTable, running: d.running, table: d.table, base: d.tick + 1, frozen: d.value };
+  }
+  // relPath: ゲートオフで@vrのリリースへ入る音符か(vTable && vrTable)
+  function dutyPlanAt(p, t, gateFrames, relPath) {
+    if (relPath && p.relDutyTable && t >= gateFrames) return stepEnvelope(p.relDutyTable, t - gateFrames);
+    return p.running ? stepEnvelope(p.table, p.base + t) : p.frozen;
+  }
+  function dutyCarryAfter(carry, p, gateFrames, dur, relPath) {
+    const d = carry.duty;
+    d.key = p.key;
+    if (gateFrames >= dur) {
+      d.running = p.running; d.table = p.table; d.tick = p.base + dur - 1;
+      d.value = dutyPlanAt(p, dur - 1, gateFrames, relPath);
+    } else if (relPath && p.relDutyTable) {
+      d.running = true; d.table = p.relDutyTable; d.tick = dur - gateFrames - 1;
+      d.value = stepEnvelope(p.relDutyTable, d.tick);
+    } else if (relPath) {
+      d.running = p.running; d.table = p.table; d.tick = p.base + dur - 1;
+      d.value = dutyPlanAt(p, dur - 1, gateFrames, relPath);
+    } else {
+      // ゲートオフの読取りフレームではtickしない=ゲートON最後のフレームの値で凍結
+      d.value = dutyPlanAt(p, Math.max(0, gateFrames - 1), gateFrames, relPath);
+      d.running = false;
+    }
+  }
+  // 通常の音符(パルスA/B)の後の継続状態
+  function psDutyAfterNote(carry, seg, dutyOpt, gateFrames, dur, vTable, vrTable) {
+    dutyCarryAfter(carry, dutyPlan(carry, seg, dutyOpt, false), gateFrames, dur, !!(vTable && vrTable));
   }
 
   // PS音符の音量側(2A03パルスA/B用)。上記の規則どおり、直前の音符から継続している
@@ -1956,21 +2044,18 @@
   // アタックの音量書込みは行わない。継続中の先頭フレーム(t=0)は値が変わらなくても
   // 1回書く(デューティが@<n>で変わっている可能性があるため。6502側は毎フレーム
   // WRITE_VOL_ONLYで書き直しているので値は常に一致する)。
-  // ★dutyOpt(@@<n>デューティエンベロープ)は意図的にPS継続の対象外にしている: 実機は
-  // duty tickをDUTYSEL($FF=未選択の番兵)という@vとは独立した第3の状態機械で管理し、
-  // 休符で無効化された後は「実際のノートオン(RD_NOTE_BODYのTONEBASE再適用)」でしか
-  // 再開しない(RD_PITCHSHIFTは一切タッチしない)という@vよりもさらに複雑な凍結規則を
-  // 持つため、この修正のスコープ外として据え置く(PS音符のデューティは常にこの音符
-  // 自身のtick0から辿り直す、既存のdutyAtをそのまま使う)。@v/@vr/EP/MP/PT/ENのみが
-  // 継続対象(2026-08-16、既知の制限としてドキュメント化)
+  // dutyOpt(@@<n>デューティエンベロープ)も継続する(dutyPlan参照。2026-09-20まではPS音符の
+  // デューティだけ常にtick0から辿り直しており、NSFと2フレーム周期でずれていた=koe_test で実測)
   // writeFn(frame, vol, duty)は通常のwriteVolumeEnvelopeと同じ規約(dutyOptを渡した時のみ
   // duty引数が意味を持つ)
   function writePsGlideVolume(writeLog, startFrame, gateFrames, dur, seg, vTable, vrTable, carry, writeFn, dutyOpt) {
     const v = carry.vol;
     const envSelEvent = !!vTable && (seg.envelopeV !== carry.lastEnvIdx || carry.lastVolMode !== 'env');
-    const clampVol = (x) => Math.max(0, Math.min(15, x));
-    const dutyOf = dutyOpt
-      ? (t) => dutyAt(seg, dutyOpt.env, t, gateFrames, dutyOpt.fixedDuty)
+    const clampVol = (x) => envVolume(x, 15);
+    const relPath = !!(vTable && vrTable);
+    const dPlan = dutyOpt ? dutyPlan(carry, seg, dutyOpt, true) : null;
+    const dutyOf = dPlan
+      ? (t) => dutyPlanAt(dPlan, t, gateFrames, relPath)
       : () => undefined;
     let lastDuty;
     let dutyInit = false;
@@ -2025,6 +2110,7 @@
         v.mode = 'silent';
       }
     }
+    if (dPlan) dutyCarryAfter(carry, dPlan, gateFrames, dur, relPath);
     carry.prevNote = seg;
     if (vTable) { carry.lastEnvIdx = seg.envelopeV; carry.lastVolMode = 'env'; } else { carry.lastVolMode = 'plain'; }
   }
@@ -2090,8 +2176,11 @@
             // リセットを引き起こすため、値が変わっていなくても毎回書くと(EP/MPで周期が
             // 毎フレーム変わるたび)パルス波が意図せず打ち直され続けてしまう
             // (DESIGN-PITCH.md Phase 1で実測発覚)。上位バイトが実際に変わった時だけ書く。
-            // SM有効時はセグメントをまたいでも前回値を引き継ぐ(smoothLastHi)
-            let lastHi = seg.smooth ? smoothLastHi : -1;
+            // SM有効時はセグメントをまたいでも前回値を引き継ぐ(smoothLastHi)。
+            // PS音符(キーオン無しのグライド)も同じく引き継ぐ: グライド開始フレームで上位バイトが
+            // 前の音と同じなら書かない(6502のRD_PITCHSHIFT→WRITE_FREQ_ONLYがLASTHI,Xと比べるのと同じ。
+            // 本家 sound_high_speed_arpeggio の ARPEGGIO_RETRIG=0 と同じ「キーオン以外は変化時だけ」の作法)
+            let lastHi = (seg.smooth || isPs) ? smoothLastHi : -1;
             writePitchModulation(writeLog, startFrame, dur, seg, env, pulsePeriod, 0x7FF,
               (f, period, attack) => {
                 writeLog[f].push({ addr: base + 2, value: period & 0xFF });
@@ -2117,12 +2206,14 @@
             writeVolumeEnvelope(writeLog, startFrame, gateFrames, dur, vTable, vrTable, volWrite,
               seg, { env, fixedDuty: duty });
             psCarryAfterNote(psCarry, seg, startFrame, gateFrames, dur, vTable, vrTable, true);
+            psDutyAfterNote(psCarry, seg, { env, fixedDuty: duty }, gateFrames, dur, vTable, vrTable);
           } else {
             writeLog[startFrame].push({ addr: base + 0, value: (duty << 6) | 0x30 | seg.volume });
             if (gateFrames < dur) {
               writeLog[startFrame + gateFrames].push({ addr: base + 0, value: (duty << 6) | 0x30 | 0 });
             }
             psCarryAfterNote(psCarry, seg, startFrame, gateFrames, dur, vTable, vrTable, true);
+            psDutyAfterNote(psCarry, seg, { env, fixedDuty: duty }, gateFrames, dur, vTable, vrTable);
           }
         } else {
           writeLog[startFrame].push({ addr: base + 0, value: 0x30 });
@@ -2135,8 +2226,8 @@
             // 値が変わっていなくても毎回書くと(EP/MPで周期が毎フレーム変わるたび)三角波が
             // 意図せず打ち直され続けてしまう。上位バイトの値が実際に変わった時だけ書く
             // (下位バイト単体の書込みには副作用が無いため毎フレーム書いてよい)。
-            // SM有効時はセグメントをまたいでも前回値を引き継ぐ(smoothLastHi)
-            let lastHi = seg.smooth ? smoothLastHi : -1;
+            // SM有効時・PS音符はセグメントをまたいでも前回値を引き継ぐ(smoothLastHi、パルスと同じ)
+            let lastHi = (seg.smooth || isPs) ? smoothLastHi : -1;
             writePitchModulation(writeLog, startFrame, dur, seg, env, trianglePeriod, 0x7FF,
               (f, period, attack) => {
                 writeLog[f].push({ addr: base + 2, value: period & 0xFF });
@@ -3129,6 +3220,7 @@
     const fme7Letters = new Set(expansionLetterMap.fme7 || []);
     // buildSegmentsが積む警告(ノイズchで無視したK等)。warningsの宣言が後なので一旦ここへ集める
     const segmentWarnings = [];
+    const over15Warned = new Set();
     // SD(セルフディレイ)が使えないチャンネル。本家ppmckのコマンド表(datamake.c)で
     // SD/SDOF/SDQRの対応トラックが ALLTRACK & ~TRACK(2) & ~DPCMTRACK になっているため、
     // 三角波(C)とDPCMチャンネルを除外する(三角波は音量制御自体が無くリリース
@@ -3183,6 +3275,7 @@
         vrc7: vrc7Letters.has(ch),
         n163: (expansionLetterMap.n163 || []).includes(ch),
         psAllowed: ch === 'A' || ch === 'B' || ch === 'C',
+        fme7: fme7Letters.has(ch),
         noise: ch === 'D',
         dpcm: (expansionLetterMap.dpcm || []).includes(ch),
         directFreq: directFreqCaps[ch] || null,
@@ -3193,6 +3286,23 @@
         volDefault: fdsLetters.has(ch) ? 32 : (ch === vrc6SawLetter ? 63 : 15)
       });
       segmentsByChannel[ch] = segments;
+      // 4bit音量のチャンネルで 16 以上の値を含む @v/@vr 表を使ったら知らせる(envVolume 参照。本家ppmckと同じく
+      // 下位4bitで鳴るので、20 は音量4、16 は無音になる)。三角波(音量なし)・VRC7(@v は効かない)は対象外
+      if (!(fdsLetters.has(ch) || ch === vrc6SawLetter) && ch !== 'C' && !vrc7Letters.has(ch)) {
+        for (const seg of segments) {
+          const cands = [['@v', seg.envelopeV, seg.envelopeV != null ? envelopes.v[seg.envelopeV] : null],
+            ['@vr', seg.envelopeVr, (seg.envelopeVr != null && seg.envelopeVr !== 255)
+              ? ((envelopes.vr && envelopes.vr[seg.envelopeVr]) || envelopes.v[seg.envelopeVr]) : null]];
+          for (const [cmd, idx, table] of cands) {
+            if (!table || over15Warned.has(cmd + idx)) continue;
+            const big = (table.values || []).find(v => (v | 0) > 15);
+            if (big == null) continue;
+            over15Warned.add(cmd + idx);
+            segmentWarnings.push({ srcStart: seg.srcStart, message: T('{cmd}{n} の値 {v} は {ch} では下位4bitの {w} で鳴ります(音量が0〜15のチャンネル。本家ppmckと同じ)',
+              { cmd, n: idx, v: big, ch, w: Math.min(63, big | 0) & 15 }) });
+          }
+        }
+      }
       immediateWritesByChannel[ch] = immediateWrites;
       noteListByChannel[ch] = notes;
       loopFrameByChannel[ch] = loopFrame;

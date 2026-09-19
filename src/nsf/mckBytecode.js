@@ -395,6 +395,14 @@
     const chUsesNoteEnv = segments.some(s => s.noteEnv != null && s.noteEnv !== 255);
     const chUsesPitchEnv = segments.some(s => s.pitchEnv != null && s.pitchEnv !== 255);
     const chUsesVibrato = segments.some(s => s.vibrato != null && s.vibrato !== 255);
+    const chUsesPitchSa = segments.some(s => s.pitchSa);
+    // L 地点で EN/EP/MP の dedup を「未知」に戻した印(resetDedupAtLoop)。未指定(null)の音符でも OFF を出す
+    const LOOP_UNKNOWN = 'loop';
+    const offIfLoop = (v, last) => (v != null ? v : (last === LOOP_UNKNOWN ? 255 : null));
+    // ループの終わり(=2周目の頭の実行時状態)。最後に鳴る音符の選択がそのまま残る
+    const lastSounding = (() => { for (let k = segments.length - 1; k >= 0; k--) if (segments[k].freq != null) return segments[k]; return null; })();
+    const offAtEnd = key => !lastSounding || lastSounding[key] == null || lastSounding[key] === 255;
+    const endPitchSa = lastSounding ? (lastSounding.pitchSa || 0) : 0;
     const chUsesSweep = segments.some(s => s.sweepSpeed);
     function resetDedupAtLoop() {
       // 音量・音色は全音符が持つ状態なので常時リセット(OP_VOL/OP_TONEは常にディスパッチされる。
@@ -409,10 +417,18 @@
       if (chUsesDetune) lastDetune = null;
       if (chUsesSmooth) lastSmooth = null;
       if (chUsesPortamento) { lastPortamentoTarget = null; lastPortamentoDuration = null; lastPortamentoDelay = null; }
-      if (chUsesNoteEnv) lastNoteEnv = null;
-      if (chUsesPitchEnv) { lastPitchEnv = null; lastPitchEnvDelay = null; }
-      if (chUsesVibrato) lastVibrato = null;
+      // EN/EP/MP は「一度も指定していない(seg.x==null)」が OFF と同じ意味。null のままだと
+      // L の直後がまだ未指定の音符では何も出ず、2周目以降は1周目の終わりに選んでいた EN/EP/MP が
+      // 効いたまま鳴っていた(koe_test の B=EN22・A=MP20 で実測、2026-09-20)。ループの終わりで
+      // 効いたままなら LOOP_UNKNOWN にして、未指定の音符でも OFF(255)を明示的に出し直させる
+      // (終わりで OFF なら従来どおり null=出し直さない。バイト列も従来と同じ)
+      if (chUsesNoteEnv) lastNoteEnv = offAtEnd('noteEnv') ? null : LOOP_UNKNOWN;
+      if (chUsesPitchEnv) { lastPitchEnv = offAtEnd('pitchEnv') ? null : LOOP_UNKNOWN; lastPitchEnvDelay = null; }
+      if (chUsesVibrato) lastVibrato = offAtEnd('vibrato') ? null : LOOP_UNKNOWN;
       if (chUsesSweep) lastSweep = null;
+      // SA<num> も同じ(2026-09-20まで L でリセットしておらず、ループの終わりの SA が2周目の頭に残っていた)。
+      // 終わりの値が L の時点と同じなら2周目も同じなので出し直さない
+      if (chUsesPitchSa && endPitchSa !== lastPitchSa) lastPitchSa = null;
       stickyNoteLen = null; stickyRestLen = null;
     }
 
@@ -564,36 +580,39 @@
           }
         }
         } // !isDpcm
-        if (seg.noteEnv != null && seg.noteEnv !== lastNoteEnv) {
+        const segNoteEnv = offIfLoop(seg.noteEnv, lastNoteEnv);
+        if (segNoteEnv != null && segNoteEnv !== lastNoteEnv) {
           // @v<n>/EP<n>と同じ「実際に使われているインデックスだけをコンパクトに詰める」方式
           // (2026-08-14実装)。255(ENOF)はそのまま素通し(remapテーブルには存在しない値)。
-          const ne = seg.noteEnv === 255 ? 255
-            : (noteEnvIndexRemap ? noteEnvIndexRemap[seg.noteEnv] : seg.noteEnv);
+          const ne = segNoteEnv === 255 ? 255
+            : (noteEnvIndexRemap ? noteEnvIndexRemap[segNoteEnv] : segNoteEnv);
           if (ne != null) {
             bytes.push(OP_NOTE_ENV, ne & 0xff);
-            lastNoteEnv = seg.noteEnv;
+            lastNoteEnv = segNoteEnv;
           }
         }
         // EP<n>,<delay>(2026-08-11 別プロジェクトA): 番号だけでなくdelayも音符ごとの状態
         // なので、番号が前回と同じでもdelayが違えば出し直す(src/convert/mmlEmit.jsの
         // curPitchEp/curPitchEpDelay判定と同じ理由)。offはdelayの概念が無いので0固定で
         // 出す(6502側は常に2バイト固定長で読むためoff時も1バイト分空読みが必要)。
-        const pitchEnvDelay = seg.pitchEnv === 255 ? 0 : Math.max(0, Math.min(255, seg.pitchEnvDelay || 0));
-        if (seg.pitchEnv != null && (seg.pitchEnv !== lastPitchEnv || pitchEnvDelay !== lastPitchEnvDelay)) {
-          const pe = seg.pitchEnv === 255 ? 255
-            : (pitchEnvIndexRemap ? pitchEnvIndexRemap[seg.pitchEnv] : seg.pitchEnv);
+        const segPitchEnv = offIfLoop(seg.pitchEnv, lastPitchEnv);
+        const pitchEnvDelay = segPitchEnv === 255 ? 0 : Math.max(0, Math.min(255, seg.pitchEnvDelay || 0));
+        if (segPitchEnv != null && (segPitchEnv !== lastPitchEnv || pitchEnvDelay !== lastPitchEnvDelay)) {
+          const pe = segPitchEnv === 255 ? 255
+            : (pitchEnvIndexRemap ? pitchEnvIndexRemap[segPitchEnv] : segPitchEnv);
           if (pe != null) {
             bytes.push(OP_PITCH_ENV, pe & 0xff, pitchEnvDelay & 0xff);
-            lastPitchEnv = seg.pitchEnv;
+            lastPitchEnv = segPitchEnv;
             lastPitchEnvDelay = pitchEnvDelay;
           }
         }
-        if (seg.vibrato != null && seg.vibrato !== lastVibrato) {
-          const mp = seg.vibrato === 255 ? 255
-            : (vibratoIndexRemap ? vibratoIndexRemap[seg.vibrato] : seg.vibrato);
+        const segVibrato = offIfLoop(seg.vibrato, lastVibrato);
+        if (segVibrato != null && segVibrato !== lastVibrato) {
+          const mp = segVibrato === 255 ? 255
+            : (vibratoIndexRemap ? vibratoIndexRemap[segVibrato] : segVibrato);
           if (mp != null) {
             bytes.push(OP_VIBRATO, mp & 0xff);
-            lastVibrato = seg.vibrato;
+            lastVibrato = segVibrato;
           }
         }
         // PT<target>,<duration>[,<delay>](2026-08-11 別プロジェクトC): src/convert/mmlEmit.jsの
