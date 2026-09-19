@@ -516,6 +516,9 @@
   MML.Convert.applyNoteEnd = function (scoreChannels, envReg, cmd, fpb, srcFps) {
     const c = MML.Convert.normalizeCmd(cmd);
     const stats = { absorbed: 0, gated: 0 };
+    // タイの2音目以降が自分の D<n> を持てないぶん、先頭の D で鳴らすと 10 セント以上外れる音符はタイを切る
+    // (src/convert/detune.js splitSlurOnDetune)。スラー連鎖を使う以下の処理より前に行う
+    if (MML.Convert.splitSlurOnDetune && c.D !== false) MML.Convert.splitSlurOnDetune(scoreChannels);
     MML.Convert.applyReleaseSplits(scoreChannels); // 印無しリリース(volumeFieldsWithRelease)の終端反映。NOTE_END に関わらず行う
     MML.Convert.dropUnusedVolumeRefs(scoreChannels); // 出力に現れない @v/@vr 参照を落とす(compact/ENV_MERGE より前)
     MML.Convert.mergeSlurVolumes(scoreChannels, envReg); // スラー連鎖の音量列を1本の表へ(同上)
@@ -660,6 +663,7 @@
   // 波形chで 8→4→2 の減衰が 8 のまま鳴る)。連鎖の各音符が残した生の音量列(_volSeq、音符長ぶん)を
   // 繋いで1本の表として登録し直し、先頭に付ける。後続の音符の envelopeV は捨てる(出力されないので
   // compact で表も消える)。生の列が無い音符(ハードウェア減衰表、SPC)を含む連鎖は触らない
+  const LOOP_APPROX_MAX_MISS = 0.15; // mergeSlurVolumes: 長い列をループ表で近似してよい食い違いの割合
   MML.Convert.mergeSlurVolumes = function (scoreChannels, envReg) {
     if (!envReg) return;
     for (const ch of scoreChannels || []) {
@@ -681,7 +685,31 @@
           for (let k = 0; k < len; k++) concat.push(k < s.length ? s[k] : s[s.length - 1]);
         }
         if (concat.length === 0) continue;
-        const idx = envReg.assign(concat);
+        // ★ループにならず MAX_ENV_FRAMES(約3秒)より長くなる列は、先頭部分のループ表で近似できるならそうする
+        //   (2026-09-20、火の鳥 鳳凰編): 分散和音のレガートで音符ごとに同じ減衰をかけ直している連鎖は、長い音符が混ざると
+        //   周期の位相がずれてループにならず、360 値の表になって出力が 1597→2944 字に膨らんだ。先頭部分のループ表
+        //   {| 7 7 7 7 7 7 7 7 6 5 4 3 } を連鎖全体に当てると食い違いは 5〜12% なのでそれを使う(1684 字)
+        const exact = MML.Convert.analyzeVolumeShape(concat);
+        let shape = exact;
+        if (exact && exact.loop == null && concat.length > MAX_ENV_FRAMES) {
+          // 長い音符が混ざる所で周期が崩れるので、崩れる前までの先頭部分で周期を探す(最長のものを採る)
+          let pre = null;
+          for (const L of [MAX_ENV_FRAMES, 150, 120, 96, 72, 48, 36]) {
+            const p = L < concat.length ? MML.Convert.analyzeVolumeShape(concat.slice(0, L)) : null;
+            if (p && p.loop != null) { pre = p; break; }
+          }
+          // ループ表を連鎖全体に当てたときの食い違いが少ない時だけ使う。多い(音符ごとにアクセントの音量が違う等、
+          // TP04022.hes)なら従来どおり厳密な長い表でまとめる(音量の忠実さを大きさより優先)
+          if (pre) {
+            let miss = 0;
+            for (let k = 0; k < concat.length; k++) {
+              const v = k < pre.values.length ? pre.values[k] : pre.values[pre.loop + ((k - pre.loop) % (pre.values.length - pre.loop))];
+              if (v !== concat[k]) miss++;
+            }
+            if (miss <= concat.length * LOOP_APPROX_MAX_MISS) shape = pre;
+          }
+        }
+        const idx = shape === exact ? envReg.assign(concat) : envReg.registerShape(shape, false);
         if (idx == null) { delete head.envelopeV; head.volume = MML.Convert.plainVolume(concat); }
         else { head.envelopeV = idx; delete head.volume; }
         for (let k = 1; k < members.length; k++) delete members[k].envelopeV;

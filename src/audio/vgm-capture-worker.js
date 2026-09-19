@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-19 21:29:27
+ * Built by tools/build-capture-workers.ps1 at 2026-09-20 04:40:22
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-19 21:29:27';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-20 04:40:22';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析

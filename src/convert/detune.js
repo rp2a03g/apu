@@ -61,6 +61,12 @@
   // periodFnの増減方向で符号を付けてMML値にする(periodFnIncreasingと同じ2点比較)
   function mmlDetuneSign(pf, ev) { return pf(2000, ev) > pf(200, ev) ? 1 : -1; }
 
+  // D の1段が何セントか(その音符の音程での値)を音符に控える。splitSlurOnDetune がタイの2音目以降のずれを見積もるのに使う。
+  // 式は detectChorusDetune の unitCents と同じ(周期型も位相加算型も |T|→|T|+1 の比で近似)
+  function stampCentsPerD(ev, pf) {
+    const T = Math.round(pf(idealFreqOf(ev.note), ev));
+    ev._centsPerD = T !== 0 ? 1200 * Math.log2(1 + 1 / Math.abs(T)) : null;
+  }
   MML.Convert.applyPitchDetune = function (channels, periodForFreq, opts) {
     opts = opts || {};
     if (opts.cmd && MML.Convert.normalizeCmd(opts.cmd).D === false) return;
@@ -70,6 +76,7 @@
     for (const ch of channels) {
       for (const ev of ch.events) {
         if (ev.note == null || ev.rawFreq == null) continue;
+        stampCentsPerD(ev, periodForFreq);
         const ideal = idealFreqOf(ev.note);
         // 無補正のまま(理論値通りに)鳴らした時の聴感上のズレがminCents未満なら、
         // そもそも人間に聞き分けられないレベルなので補正しない(D<n>を付けない)。
@@ -162,6 +169,7 @@
       for (const ev of ch.events) {
         if (ev.note == null || ev.rawFreq == null) continue;
         entries.push({ ev, ci });
+        stampCentsPerD(ev, pfFor(ci));
       }
     });
 
@@ -219,5 +227,61 @@
         if (w.g.ev.pitchSa) w.g.ev.detune = Math.round(w.g.ev.detune / (1 << w.g.ev.pitchSa));
       }
     }
+  };
+
+  /*
+   * MML.Convert.splitSlurOnDetune(scoreChannels, opts) → 切ったタイの数
+   *
+   * タイ(&)で繋いだ2音目以降は自分の D<n> を持てない(本ツールのコンパイラは異音程のタイを
+   * 1セグメント内の音程切替 pitchBreaks として鳴らし、D は連鎖の先頭音符のものを使い続ける。
+   * compiler.js pushNote / pitchRegisterOffset)。そのため 2音目以降が先頭と違うずれ方をしていると、
+   * その音符は先頭の D で鳴って外れる(2026-09-19 実測: GBS で最大18段、HES でも数百音符)。
+   * 本家 ppmck の & は「次の要素の音長を足すだけ」で異音程のタイ自体が無いので、本家に合わせる
+   * 方法は無い(ユーザー決定: 本ツールの独自拡張として残し、変換側で対処する)。
+   *
+   * 対処: その音符を「先頭の D で鳴らしたときの実際のずれ」(元曲からのずれ込み)をセント数で見積もり、
+   * opts.minCents(既定10=単独音符に D を付けるかどうかの基準と同じ、applyPitchDetune)以上で、かつ自分の D で
+   * 鳴らすほうが SPLIT_GAIN_CENTS 以上ましなら、その音符の slurTie を外して打ち直しにする(=自分の D を出せる。
+   * 以後その音符が新しい連鎖の先頭)。それ以外は、聞き分けられない差のためにレガート(アタック無し)を失うほうが
+   * 損なのでタイのまま残す。1段あたりのセント数は applyPitchDetune/detectChorusDetune が音符に控えた
+   * _centsPerD(その音符の音程での値)を使う。
+   * mergeSlurVolumes(音量列を連鎖の先頭へ連結)より前に呼ぶこと(envelope.js applyNoteEnd の冒頭)。
+   */
+  const SPLIT_GAIN_CENTS = 3; // 自分の D で鳴らすほうがこれ以上ましな時だけ切る(splitSlurOnDetune)
+  MML.Convert.splitSlurOnDetune = function (scoreChannels, opts) {
+    opts = opts || {};
+    const minCents = opts.minCents != null ? opts.minCents : 10;
+    let split = 0;
+    const effD = (ev) => (ev.detune || 0) * (1 << (ev.pitchSa || 0));
+    const centsOf = (ev) => (ev.rawFreq != null && ev.note != null) ? 1200 * Math.log2(ev.rawFreq / idealFreqOf(ev.note)) : null;
+    for (const ch of scoreChannels || []) {
+      if (!ch || !ch.events || !ch.hasDetune) continue;
+      if (ch.letter === 'D' || ch.letter === 'E' || ch.noise || ch.isDrum || ch.drum) continue; // ノイズ/DPCM/ドラムは D の意味が違う
+      const evs = ch.events;
+      let head = null;
+      for (let i = 0; i < evs.length; i++) {
+        const ev = evs[i];
+        if (ev.note == null) { head = null; continue; }
+        const prev = evs[i - 1];
+        const tied = ev.slurTie && head && prev && prev.note != null && prev.end === ev.start;
+        if (!tied) { head = ev; continue; }
+        const dHead = effD(head), dMe = effD(ev);
+        if (dHead === dMe) continue;
+        // 1段あたりのセント数(この音符の音程での値、applyPitchDetune/detectChorusDetune が控えた _centsPerD)。
+        // ★「実測のずれ÷D」で求めると D の丸めで大きく狂う(ずれ 13 セントで D1 なら1段 13 セントと読んでしまう)
+        const perUnit = ev._centsPerD != null ? ev._centsPerD : null;
+        const cMe = centsOf(ev);
+        // 先頭の D で鳴らしたときの実際のずれ(元からのずれも含む)と、自分の D で鳴らしたときのずれ。
+        // ★「D の差」だけで判定すると、もともと少しずれている音符にさらに差を足してしまう(カービィのピンボール:
+        //   タイを切った音符が新しい連鎖の先頭になり、後続が +12 → +22 セントへ悪化した)。実際のずれで判定する
+        if (perUnit == null || cMe == null) { if (dHead !== dMe) { ev.slurTie = false; head = ev; split++; } continue; }
+        const errHead = Math.abs(cMe - dHead * perUnit), errOwn = Math.abs(cMe - dMe * perUnit);
+        if (errHead < minCents || errHead - errOwn < SPLIT_GAIN_CENTS) continue;
+        ev.slurTie = false; // 打ち直し。この音符が新しい連鎖の先頭になる
+        head = ev;
+        split++;
+      }
+    }
+    return split;
   };
 })(window);
