@@ -14,5 +14,5 @@
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
-  MML.VERSION = '2026.09.13';
+  MML.VERSION = '2026.09.20';
 })(typeof window !== 'undefined' ? window : globalThis);
