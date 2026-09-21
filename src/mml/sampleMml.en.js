@@ -284,7 +284,7 @@ A @q10 c4 c2 @q0 c4
 ; The tempo t can be changed anywhere in the song. K<n> transposes in semitones; D<n> detunes
 ; by a raw register difference (on every chip a positive value raises the pitch: this is the
 ; direction you get with ppmck's #PITCH-CORRECTION always applied, and NSF export converts it
-; to each chip's own register direction)
+; to each chip's own register direction). D255 means "cancel", the same as D0 (as in ppmck)
 A t120 K2 c4 K0 D8 c4 D0 t100
 ;@help @t<len>,<num> :: Tempo 2 (in frames) :: Basics
 ; @t<len>,<num>: works out the tempo at which a note of <len> is exactly <num> frames long.
@@ -583,7 +583,8 @@ F t100 l1 o5 v24 @0 c1 e1 g1
 ;@help @MW<n> @MH<n> MH<n> MHOF :: FDS pitch modulation :: Expansion chips
 ; --- The FDS pitch modulation table @MW<n> = { 32 relative increments } and its parameters
 ;     @MH<n> = { delay, freq, depth, waveform (the number of the @MW<n>) } ---
-;     The table holds the increments added to the modulation counter (-64 to 63) once per frame.
+;     The table holds the increments added to the modulation counter (-64 to 63, wrapping on
+;     overflow) once per table step (the hardware applies each entry twice).
 ;     Only eight values may be written - 0 (hold) / 1 / 2 / 4 / -1 / -2 / -4 / R (reset the
 ;     counter to 0) - and anything else is a compile error, because the hardware modulation
 ;     table can only express those eight steps.

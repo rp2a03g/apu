@@ -325,7 +325,12 @@
         // コーラス(デチューン)効果。未指定イベントは0扱い(直前の音符のデチューンを
         // 引きずらないよう、hasDetune指定チャンネルでは毎回0との差分を見て明示的に戻す)
         if (flags.hasDetune) {
-          const detuneVal = ev.detune || 0;
+          // D255 はコンパイラ/ppmckで「デチューン解除」(=0)の番兵(compiler.js 'detune'、本家 datamake.c は
+          // ±126 が上限なので衝突しない)。本ツールは N163 等でそれより大きい D を許すため、実値が
+          // ちょうど 255 になると解除に読まれて D が消える(King of Kings: N163 のコーラスが全音符 +255)。
+          // 1段ずらして 256 で書く(N163 の1段は約0.05セント、2A03 でも数セント未満)
+          let detuneVal = ev.detune || 0;
+          if (detuneVal === 255) detuneVal = 256;
           if (detuneVal !== state.curDetune) { emit(`D${detuneVal}`); state.curDetune = detuneVal; }
         }
         // ピッチエンベロープ(厳密周期ビブラート、DESIGN-PITCH.md Phase 1)。D<n>と同じく
