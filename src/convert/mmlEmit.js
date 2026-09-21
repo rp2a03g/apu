@@ -473,9 +473,13 @@
         // >/<(相対オクターブ移動)は直後の音符と一体で書く伝統的なMML表記(o<n>は
         // 独立した設定コマンドとして扱い空白を空ける)ため、note扱い(isNoteToken=true)
         // にして音符側との間の空白も詰める。
-        if      (state.curOct >= 0 && oct === state.curOct + 1) emit('>', true);
-        else if (state.curOct >= 0 && oct === state.curOct - 1) emit('<', true);
-        else                                                    emit(`o${oct}`);
+        // ★2026-09-21: 2オクターブ以上の跳躍も o<n> ではなく >> / << で出す。
+        // 絶対値の o<n> が途中に挟まると、音域外(コンパイル警告「鳴りません」)を避けるために
+        // 頭でオクターブを上げ下げしても、そこで元の高さへ引き戻されてしまうため。
+        // 絶対値が出るのはチャンネルの先頭と L の直後(forceReemit で curOct=-1)だけになり、
+        // その1個を書き換えればチャンネル全体が移調できる。
+        if (state.curOct < 0) emit(`o${oct}`);
+        else emit((oct > state.curOct ? '>' : '<').repeat(Math.abs(oct - state.curOct)), true);
         state.curOct = oct;
       }
 
