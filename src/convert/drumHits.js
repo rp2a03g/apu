@@ -44,6 +44,7 @@
   const PHASE_QUANT_SEC = 1 / 480; // 位相の量子化(重複排除用。1/8フレーム)
   const VOL_QUANT = 16;            // 音量の量子化段数(重複排除用)
   const LEN_QUANT_SEC = 1 / 480;   // 長さの量子化(重複排除用)
+  const TAIL_FRAMES = 2;           // 新しい打点の頭でこれ以内に鳴り止む古い打点はミックスしない(dpcm() 内のコメント参照)
 
   /** サンプル列を srcRate から dstRate へ線形補間でリサンプル(区間 [from, from+len) 秒ぶん) */
   function resampleInto(out, outOff, outLen, pcm, srcRate, dstRate, fromSec, gain) {
@@ -305,6 +306,20 @@
       const nextOnset = oi + 1 < onsets.length ? onsets[oi + 1] : totalFrames;
       let live = live0.filter(h => soundingAt(h, t0, frameRate));
       if (!live.length) continue;
+      // ── 鳴り終わりかけの「しっぽ」は混ぜない(2026-09-22) ──────────────────────────
+      // この頭より前から鳴っていて、あと TAIL_FRAMES フレーム以内に鳴り止む打点は、ここで始まる打点に
+      // 切られたことにする(実機DMCの打ち直しと同じ)。混ぜると「しっぽ1フレーム+新しい打点の全長」が
+      // 新しいミックス定義として丸ごと焼き直される。実測(R-Type Leo: GA20 の1.87秒のループ素材+FMの打点):
+      // FMの打点が次のループの頭より1フレーム長く残っただけで、ループ素材全体(2分割=7.7KB)が
+      // もう1組定義されていた。33ms のしっぽは新しい打点のアタックに隠れて聞こえない
+      if (live.length > 1) {
+        const stopsSoon = (h) => {
+          for (let f = t0 + 1; f <= t0 + TAIL_FRAMES; f++) if (!soundingAt(h, f, frameRate)) return true;
+          return false;
+        };
+        const kept = live.filter(h => h.startFrame === t0 || !stopsSoon(h));
+        if (kept.length) live = kept;
+      }
       // poly:'mono' = ミックスしない(直近に叩かれた打点だけを鳴らす。ノイズ疑似音程の
       // ドラムパートと同じ読み方)。定義がサンプル数までしか増えないので容量制御に使う
       // (実測: NCS91002 は2chのDDAが重なり、ミックスだと54定義36KB、単音なら7定義)

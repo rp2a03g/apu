@@ -434,6 +434,11 @@
       this.triangle = new TriangleChannel();
       this.noise = new NoiseChannel();
       this.dmc = new DmcChannel(bus || null);
+      // ★writeRegister の default($5FF8-$5FFF → bus.write、DPCMのページ切替)が this.bus を見る。
+      //   以前は DmcChannel にしか渡しておらず this.bus が undefined のままで、ブラウザ再生では
+      //   ページ切替が黙って捨てられていた(2ページ目以降の @DPCM が同じアドレスのページ0の音で鳴る。
+      //   2026-09-22 修正)。NsfBus は $4000-$4017 しか APU へ回さないので再帰はしない
+      this.bus = bus || null;
 
       this.frameCounter = 0;
       this.frameMode5Step = false;
