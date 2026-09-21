@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-21 13:53:42
+ * Built by tools/build-capture-workers.ps1 at 2026-09-22 08:03:13
  *
  * regsOnly capture worker bundle (psfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.psfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.psfCaptureBuiltAt = '2026-09-21 13:53:42';
+  MML.WorkerBundles.psfCaptureBuiltAt = '2026-09-22 08:03:13';
   MML.WorkerBundles.psfCapture = function () {
 /*
  * PSF (Portable Sound Format) 容器 / PS-EXE 解析
@@ -6403,7 +6403,15 @@
       // note(音名)は表示のちらつきを避けるため変調前のfreqのまま据え置き、freq列の
       // 数値表示だけをこちらに差し替える(モジュレーション無効時はfreqと同じ値になる)
       const modFreq = (fe && modActive && !disabled) ? fe.effectiveFreq * CPU_CLOCK / (64 * 65536) : freq;
+      // ロール構築時(buildRollTracksFromRegSnapshotsPure)だけ来る、変調ユニットのフレーム内統計
+      // (buildFdsModSnapshots)。pitchMean=フレーム内の平均実効周波数、pitchLo/pitchHi=最小/最大、
+      // pitchFast=変調が速すぎてフレーム単位の線では描けない(=耳には音程の揺れでなく音色として
+      // 聞こえるFM)。ライブの鍵盤表示には来ない(そちらは上の modFreq の数値表示だけ)
+      const fm = (extraSnaps && extraSnaps.fdsMod && !disabled && f12 > 0) ? extraSnaps.fdsMod[frameIdx] : null;
+      const toHz = v => v * CPU_CLOCK / (64 * 65536);
       channels.push({ id: 'FDS', color: '#ff88aa', freq, modFreq, vol, rawVol: gain, rawVolMax: gainMax,
+        pitchMean: fm ? toHz(fm.mean) : undefined, pitchLo: fm ? toHz(fm.min) : undefined,
+        pitchHi: fm ? toHz(fm.max) : undefined, pitchFast: fm ? fm.fast : false,
         envMode: fe ? fe.env : false, modActive,
         wave: { t: 'wave', data: fdsWave, nx: 64, ny: 64 },
         active: !disabled && vol > 0 && freq > 0 });
@@ -7234,6 +7242,8 @@
       const c = track.cur;
       const note = { startSec: c.startFrame * frameDur, endSec, midi: c.midi,
                      vol: c.volQ / ROLL_VOL_LEVELS, freqSeq: c.freqs };
+      // 速い変調(FM)の帯。1フレームでも帯があった音符にだけ載せる(無い音符は従来と同じ形)
+      if (c.bandLo) { note.freqLoSeq = c.bandLo; note.freqHiSeq = c.bandHi; }
       if (c.drumKey) note.drumKey = c.drumKey;
       if (c.tone) note.tone = c.tone;
       // sampleRow: サンプル再生ch(2A03 DMC/YM2612 DAC/32X PWM/RF5C…)のノート。midiは
@@ -7289,7 +7299,18 @@
           track.cur = { startFrame: f, midi, drumKey, drumSeq, volQ, freqs: [], tone,
                         sampleRow: !!ch.sample && !drumKey };
         }
-        if (track.cur) track.cur.freqs.push(pitchFreq);
+        if (track.cur) {
+          // ハードウェア変調つきのch(今はFDSだけ): 音名(midi)は搬送波のまま据え置き、
+          //  遅い変調 … セント偏差の線を「フレーム内の平均実効周波数」で描く(ビブラートが見える)
+          //  速い変調 … 線は搬送波のまま、フレーム内の最小〜最大を帯で描く(FM)
+          const c = track.cur;
+          const hasMod = ch.pitchMean !== undefined && midi !== null && !drumKey;
+          c.freqs.push(hasMod && !ch.pitchFast ? ch.pitchMean : pitchFreq);
+          if (hasMod && ch.pitchFast && ch.pitchHi > ch.pitchLo) {
+            if (!c.bandLo) { c.bandLo = new Array(c.freqs.length - 1).fill(0); c.bandHi = c.bandLo.slice(); }
+            c.bandLo.push(ch.pitchLo); c.bandHi.push(ch.pitchHi);
+          } else if (c.bandLo) { c.bandLo.push(0); c.bandHi.push(0); }
+        }
       }
     }
     const totalSec = totalFrames * frameDur;
@@ -7303,6 +7324,33 @@
   }
 
   // ── 間接アクセス音源の内部状態再構築 ─────────────────────────
+
+  // FDSの変調ユニット(ハードウェアのピッチ変調)が、各フレームの中でピッチをどれだけ動かしたかを
+  // writeLogから復元する。$4082/83(搬送波)しか見ないと、ビブラート(@MH)もFMも真っ平らに見える。
+  // 実エミュ(Emu.FDSAudio)に書込みを流し、表示専用の早送り advanceForDisplay で統計だけ取る
+  // (式をここへ写さないため。エミュ側を直せば表示も一緒に変わる)。
+  // fast: 変調テーブル1周が FAST_HZ より速い=フレーム単位(約60Hz)の線では描けない。
+  // 制限: 変調テーブルをINITでしか書かない曲はwriteLogに現れず、変調なしに見える。
+  const FDS_MOD_FAST_HZ = 15;
+  function buildFdsModSnapshots(writeLog, cyclesPerFrame) {
+    const Fds = MML.Emu && MML.Emu.FDSAudio;
+    if (!Fds || !Fds.prototype.advanceForDisplay) return null;
+    const fds = new Fds();
+    let acc = 0, done = 0, any = false;
+    const out = writeLog.map(writes => {
+      for (const w of writes) if (w.addr >= 0x4080 && w.addr <= 0x408A) fds.writeRegister(w.addr, w.value);
+      acc += cyclesPerFrame;
+      const n = Math.floor(acc) - done; done += n;
+      const st = fds.advanceForDisplay(n);
+      // 変調が効いていない(フレーム内ずっと搬送波のまま)なら無し。カウンタが一定値で止まっている
+      // フレームは max===min でも搬送波からずれているので、それは残す
+      if (!st || (st.max === st.min && st.max === fds.freq)) return null;
+      any = true;
+      st.fast = fds.modFreq * CPU_CLOCK / (65536 * 64) > FDS_MOD_FAST_HZ;
+      return st;
+    });
+    return any ? out : null;
+  }
 
   function buildVrc7Snapshots(writeLog) {
     const regs = new Uint8Array(64);
@@ -10151,7 +10199,9 @@
         // (setRollTimelineFromRegSnapshots()と同じ考え方)。
         const dmcTl = buildDmcTimeline(this._state.writeLog || [], this._state.totalFrames, frameDur);
         const rollExtraSnaps = Object.assign({}, this._extraSnaps,
-          { n163Live: null, fme7Live: null, vrc7Live: null, mmc5Live: null, dmcSeq: dmcTl.seq, dmcEnd: dmcTl.end });
+          { n163Live: null, fme7Live: null, vrc7Live: null, mmc5Live: null, dmcSeq: dmcTl.seq, dmcEnd: dmcTl.end,
+            // FDSのハードウェア変調(セント偏差の線/FMの帯)。buildRollTracksFromRegSnapshotsPure と同じ
+            fdsMod: this._chips.includes('fds') ? buildFdsModSnapshots(this._state.writeLog || [], frameDur * CPU_CLOCK) : null });
         this._rollTimeline = buildNoteTimelineFromChannelFrames(
           (f) => extractChannels(this._state.regSnapshots[f] || {}, rollExtraSnaps, f, this._chips),
           this._state.totalFrames, frameDur
@@ -12427,6 +12477,46 @@
           if (this._showCentsOverlay && note.freqSeq && note.freqSeq.length) {
             const idealFreq = midiToFreq(note.midi);
             const centerP = pLo + pSize / 2;
+            // 速いハードウェア変調(FDSのFM)の帯: フレーム内の最小〜最大を面で塗る。
+            // 0Hzまで振れる深いFMもあるので±1オクターブで頭打ちにする(それ以上は「広い」で十分)
+            if (note.freqLoSeq) {
+              const BAND_MAX = 1200;
+              const cOf = fq => Math.max(-BAND_MAX, Math.min(BAND_MAX, fq > 0 ? 1200 * Math.log2(fq / idealFreq) : -BAND_MAX));
+              let run = [];
+              const flush = () => {
+                if (!run.length) return;
+                ctx.beginPath();
+                run.forEach((s, i) => {
+                  const a = g.point(centerP + (s.hi / 100) * wkW, g.tPx(s.t0)), b = g.point(centerP + (s.hi / 100) * wkW, g.tPx(s.t1));
+                  if (i === 0) ctx.moveTo(a.x, a.y); else ctx.lineTo(a.x, a.y);
+                  ctx.lineTo(b.x, b.y);
+                });
+                for (let i = run.length - 1; i >= 0; i--) {
+                  const s = run[i];
+                  const b = g.point(centerP + (s.lo / 100) * wkW, g.tPx(s.t1)), a = g.point(centerP + (s.lo / 100) * wkW, g.tPx(s.t0));
+                  ctx.lineTo(b.x, b.y); ctx.lineTo(a.x, a.y);
+                }
+                ctx.closePath();
+                const keep = ctx.globalAlpha;
+                ctx.globalAlpha = keep * 0.3;
+                ctx.fillStyle = noteColor;
+                ctx.fill();
+                ctx.globalAlpha = keep;
+                const lab = g.point(centerP + (run[0].hi / 100) * wkW, g.tPx(run[0].t0));
+                ctx.fillStyle = noteColor;
+                ctx.font = 'bold 9px sans-serif';
+                ctx.textBaseline = 'bottom';
+                ctx.fillText('FM', lab.x + 2, lab.y - 1);
+                run = [];
+              };
+              for (let k = 0; k < note.freqLoSeq.length; k++) {
+                const tAbs = note.startSec + k * frameDur;
+                if (!note.freqHiSeq[k] || tAbs + frameDur < pos || tAbs > winEnd) { flush(); continue; }
+                run.push({ lo: cOf(note.freqLoSeq[k]), hi: cOf(note.freqHiSeq[k]),
+                           t0: Math.max(0, tAbs - pos), t1: Math.min(windowSec, tAbs + frameDur - pos) });
+              }
+              flush();
+            }
             ctx.beginPath();
             let started = false;
             for (let k = 0; k < note.freqSeq.length; k++) {
@@ -12837,6 +12927,7 @@
         ? (n163Snapshots && n163Snapshots.length ? buildN163SnapshotsFromLiveRam(n163Snapshots) : buildN163Snapshots(wl))
         : null,
       fme7: chips.includes('fme7') ? buildFme7Snapshots(wl) : null,
+      fdsMod: chips.includes('fds') ? buildFdsModSnapshots(wl, frameDur * CPU_CLOCK) : null,
     });
     // extra.tuningCents(#TUNING、verify.js): 構築の間だけ音名の丸め基準をずらす(呼び出し元は
     // 変換中のメインスレッドで、鍵盤が別ファイルを表示中かもしれないので必ず元へ戻す)

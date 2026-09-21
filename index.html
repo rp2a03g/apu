@@ -703,12 +703,15 @@
         <div id="fdsWaveMhHelpText" class="fds-help-text" style="display:none;">
           delay=発音から変調開始までのフレーム数 / freq=変調テーブルの再生速度 /
           depth=変調の深さ($4084ゲイン。0だと@MWがあっても無効) / waveform=使用する@MW&lt;n&gt;のインデックス
+          <div>envDir/envSpeed(省略可・独自拡張)=深さのハードウェアエンベロープ。envDir: 1=増加 / -1=減少 / 0=なし、envSpeed: 0-63(大きいほど遅い。63で約4フレームに1)。指定するとdepthは「開始の深さ」になり、増加は32・減少は0で止まります</div>
         </div>
         <div class="fields-row">
           <label>delay <input type="number" id="fdsWaveMhDelay" min="0" max="255" /></label>
           <label>freq <input type="number" id="fdsWaveMhFreq" min="0" max="4095" /></label>
           <label>depth <input type="number" id="fdsWaveMhDepth" min="0" max="63" /></label>
           <label>waveform <input type="number" id="fdsWaveMhWaveform" min="0" max="255" /></label>
+          <label>envDir <input type="number" id="fdsWaveMhEnvDir" min="-1" max="1" /></label>
+          <label>envSpeed <input type="number" id="fdsWaveMhEnvSpeed" min="0" max="63" /></label>
         </div>
       </div>
 

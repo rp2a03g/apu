@@ -593,6 +593,11 @@ F t100 l1 o5 v24 @0 c1 e1 g1
   R, -4, -2, -1, -1, -1, -2, -4, R, 4, 2, 1, 1, 1, 2, 4
 }
 @MH0 = { 0, 150, 15, 0 }
+; Extension: with six values, @MH<n> = { delay, freq, depth, waveform, envDir, envSpeed }, the depth
+;     is driven by the FDS hardware envelope. envDir is 1 = increase / -1 = decrease (0 or omitted =
+;     none) and envSpeed is 0-63 (larger is slower; 63 is about one step per 4 frames). depth becomes
+;     the starting depth; increase stops at 32 and decrease at 0.
+;     Example: @MH1 = { 0, 128, 1, 0, 1, 63 } ... starts at depth 1 and slowly deepens
 
 ; MH<n> / MHOF: turns pitch modulation on and off, using the table defined with @MW and @MH
 F MH0 c2 e2 MHOF c1

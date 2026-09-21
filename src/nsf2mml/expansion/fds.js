@@ -35,6 +35,13 @@
  * パラメータ用にそれぞれ曲全体で共有登録する。ゲイン/周波数どちらかが0、または
  * モジュレーション停止中はMHOF相当('off')として扱う。曲中一度もモジュレーションを
  * 使わない場合はfdsMod自体を出力せず(既存曲の出力に影響を与えない)。
+ *
+ * ★$4084のエンベロープモード(bit7=0)は @MH の第5・6引数(envDir, envSpeed)として抽出する
+ *   (2026-09-22。Famicom Golf US Course の3秒目: $4084=$7F で深さが4フレームに1ずつ育つFM音。
+ *   以前は無視していたため深さが前回値の1に固定されて出ていた)。bit7=0の書込みはゲイン値を
+ *   変えず、向き/速度/タイマーだけを設定するので、どこから育つかは直前までの履歴で決まる。
+ *   そこで音量と同じ2段カウンタでゲインを連続シミュレートし、エンベロープ開始時点の実ゲインを
+ *   depth(開始の深さ)にする。
  */
 (function (global) {
   'use strict';
@@ -88,6 +95,16 @@
                   ((ir[0x4087] !== undefined ? (ir[0x4087] & 0x0F) : 0) << 8);
     let modEnabled = ir[0x4087] !== undefined ? (ir[0x4087] & 0x80) === 0 : false;
     let modGain = (ir[0x4084] !== undefined && (ir[0x4084] & 0x80)) ? (ir[0x4084] & 0x3F) : 0;
+    // モジュレータゲインのハードウェアエンベロープ(FDSAudio._clockEnvelopeのmod側と同じ)。
+    // マスタ速度のクロックは実機では音量と共用だが、下のadvanceEnvelope(音量用)は
+    // 「音量が動かない間はクロックを進めない」省略をしているため、こちらは常時進む
+    // 専用のクロック(modRateClock)を持つ(音量側の既存の抽出結果を変えないため)。
+    let modEnvEnabled = false, modEnvIncrease = false, modEnvSpeed = 0, modEnvTimer = 0;
+    let modRateClock = 0;
+    if (ir[0x4084] !== undefined && !(ir[0x4084] & 0x80)) {
+      modEnvEnabled = true; modEnvIncrease = (ir[0x4084] & 0x40) !== 0;
+      modEnvSpeed = ir[0x4084] & 0x3F; modEnvTimer = modEnvSpeed + 1;
+    }
     const modTable = reconstructInitModTable(initWrites);
     let modWritePos = 0;
 
@@ -132,6 +149,23 @@
       }
     }
 
+    function advanceModEnvelope(elapsed) {
+      const envPeriod = (envRate + 1) * 8;
+      modRateClock += elapsed;
+      if (!modEnvEnabled || envHalt || (modEnvIncrease ? modGain >= 32 : modGain <= 0)) {
+        modRateClock %= envPeriod;
+        return;
+      }
+      while (modRateClock >= envPeriod) {
+        modRateClock -= envPeriod;
+        if (--modEnvTimer <= 0) {
+          modEnvTimer = modEnvSpeed + 1;
+          if (modEnvIncrease) { if (modGain < 32) modGain++; }
+          else if (modGain > 0) modGain--;
+        }
+      }
+    }
+
     return writeLog.map(writes => {
       // このフレームの書き込みを先に適用してから、その後でこのフレーム分のサイクルだけ
       // エンベロープを進める(2A03ハードウェアエンベロープ(simulateHwEnvelope)と同じ規約:
@@ -140,6 +174,7 @@
       let attack = false;
       let waveChanged = false;
       let envRestart = false; // このフレームで$4080がエンベロープモードとして書かれたか
+      let modEnvRestart = false; // 同、$4084
       for (const { addr, value } of writes) {
         if      (addr === 0x4082) freqLo = value;
         else if (addr === 0x4083) {
@@ -162,12 +197,20 @@
         } else if (addr === 0x408A) {
           envRate = value;
           envRateClock = 0;
+          modRateClock = 0;
         } else if (addr >= 0x4040 && addr <= 0x407F) {
           wave[addr - 0x4040] = value & 0x3F;
           waveChanged = true;
         } else if (addr === 0x4084) {
-          if (value & 0x80) modGain = value & 0x3F;
-          // エンベロープモード(bit7=0)のモジュレータゲインは抽出非対応(直接指定のみMH化)
+          if (value & 0x80) { modGain = value & 0x3F; modEnvEnabled = false; }
+          else {
+            // エンベロープモード(bit7=0): ゲイン値は変えず、向き/速度/タイマーだけ設定する
+            modEnvEnabled = true;
+            modEnvIncrease = (value & 0x40) !== 0;
+            modEnvSpeed = value & 0x3F;
+            modEnvTimer = modEnvSpeed + 1;
+            modEnvRestart = true;
+          }
         } else if (addr === 0x4086) {
           modFreq = (modFreq & 0x0F00) | value;
         } else if (addr === 0x4087) {
@@ -181,16 +224,28 @@
       let waveKey = lastWaveKey;
       if (waveChanged) { waveKey = wave.join(','); lastWaveKey = waveKey; }
       const modTableKey = modTable.join(',');
+      // 音符頭(このフレームの書込み直後・クロックを進める前)のゲイン=エンベロープの開始値
+      const modGainStart = modGain;
+      // @MHの速度は$408A=$E8(FDS BIOSの既定値、ドライバが固定する)が前提。元曲が別の値なら
+      // 1ステップの周期 8*($408A+1)*(speed+1) が同じになる速度へ換算する。0-63に収まらなければ
+      // エンベロープとしては出さない(固定の深さ=開始値に落とす)
+      let modEnvDir = 0, modEnvSpeedOut = 0;
+      if (modEnvEnabled && !envHalt) {
+        const sp = Math.round((envRate + 1) * (modEnvSpeed + 1) / 233) - 1;
+        if (sp >= 0 && sp <= 63) { modEnvDir = modEnvIncrease ? 1 : -1; modEnvSpeedOut = sp; }
+      }
 
       cycleAccum += CYCLES_PER_FRAME;
       const nowInt = Math.floor(cycleAccum);
+      advanceModEnvelope(nowInt - lastCyclesInt);
       advanceEnvelope(nowInt - lastCyclesInt);
       lastCyclesInt = nowInt;
 
       return {
         freqLo, freqHiReg, attack, wave: Array.from(wave), waveKey,
         envEnabled: volEnvEnabled, envRestart, gain: volGain,
-        modFreq, modGain, modEnabled, modTable: Array.from(modTable), modTableKey
+        modFreq, modGain: modGainStart, modEnabled, modTable: Array.from(modTable), modTableKey,
+        modEnvDir, modEnvSpeed: modEnvSpeedOut, modEnvRestart
       };
     });
   }
@@ -202,11 +257,19 @@
     const events = [];
     let cur = null;
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
-    function begin(f, note, volume, envEnabled, wave, waveKey, t, rawFreq, period, tieCandidate) {
+    // エンベロープ動作中はゲインが毎フレーム動くので、鍵にはゲインを入れず向き/速度を入れる
+    // (入れると育つたびに音符が割れる)。固定の深さのときは従来どおりゲインを入れる
+    const modKeyOf = t => `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modEnvDir ? 'E' + t.modEnvDir + ',' + t.modEnvSpeed : t.modGain}|${t.modTableKey}`;
+    // inheritGain: $4084が書き直されず鍵も同じまま次の音符へ続く場合は前の音符の開始値を
+    // 引き継ぐ(=同じ@MH番号になり、MH<n>が再発行されない。再発行すると$4085リセット+
+    // テーブル再ロードで、元曲には無い変調の位相リセットが入ってしまう)
+    function begin(f, note, volume, envEnabled, wave, waveKey, t, rawFreq, period, tieCandidate, inheritGain) {
       cur = {
         note, envEnabled, wave, waveKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period],
-        modFreq: t.modFreq, modGain: t.modGain, modEnabled: t.modEnabled, modTable: t.modTable,
-        modKey: `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modGain}|${t.modTableKey}`,
+        modFreq: t.modFreq, modGain: inheritGain != null ? inheritGain : t.modGain,
+        modEnabled: t.modEnabled, modTable: t.modTable,
+        modEnvDir: t.modEnvDir, modEnvSpeed: t.modEnvSpeed,
+        modKey: modKeyOf(t),
         tieCandidate: !!tieCandidate
       };
     }
@@ -220,16 +283,18 @@
       const freq = fdsFreq(period);
       const note = (!disabled && period > 0) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
-      const modKey = `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modGain}|${t.modTableKey}`;
+      const modKey = modKeyOf(t);
+      const modRestart = !!(t.modEnvDir && t.modEnvRestart);
 
       if (!cur) { begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq, period, false); continue; }
 
       if (t.attack || note !== cur.note || t.waveKey !== cur.waveKey ||
-          t.envEnabled !== cur.envEnabled || (t.envEnabled && t.envRestart) || modKey !== cur.modKey) {
+          t.envEnabled !== cur.envEnabled || (t.envEnabled && t.envRestart) || modKey !== cur.modKey || modRestart) {
         const pureNoteChange = !t.attack && note !== cur.note && t.waveKey === cur.waveKey &&
-          t.envEnabled === cur.envEnabled && !(t.envEnabled && t.envRestart) && modKey === cur.modKey;
+          t.envEnabled === cur.envEnabled && !(t.envEnabled && t.envRestart) && modKey === cur.modKey && !modRestart;
+        const inheritGain = (t.modEnvDir && !modRestart && modKey === cur.modKey) ? cur.modGain : null;
         flush(f);
-        begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq, period, pureNoteChange);
+        begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq, period, pureNoteChange, inheritGain);
       } else {
         cur.volSeq.push(volume);
         cur.pitchSeq.push(period);
@@ -246,18 +311,20 @@
     const list = [];
     const keyToIndex = new Map();
     return {
-      assign(freq, depth, waveform) {
-        const key = `${freq}|${depth}|${waveform}`;
+      assign(freq, depth, waveform, envDir, envSpeed) {
+        const key = `${freq}|${depth}|${waveform}|${envDir || 0}|${envDir ? envSpeed : 0}`;
         let idx = keyToIndex.get(key);
         if (idx === undefined) {
           idx = list.length;
           keyToIndex.set(key, idx);
-          list.push({ freq, depth, waveform });
+          list.push({ freq, depth, waveform, envDir: envDir || 0, envSpeed: envDir ? envSpeed : 0 });
         }
         return idx;
       },
       defLines() {
-        return list.map((p, i) => `@MH${i} = { 0, ${p.freq}, ${p.depth}, ${p.waveform} }`);
+        return list.map((p, i) => p.envDir
+          ? `@MH${i} = { 0, ${p.freq}, ${p.depth}, ${p.waveform}, ${p.envDir}, ${p.envSpeed} }`
+          : `@MH${i} = { 0, ${p.freq}, ${p.depth}, ${p.waveform} }`);
       }
     };
   }
@@ -274,12 +341,13 @@
     const modWaveReg = new MML.Convert.WaveRegistry('@MW',
       codes => codes.map(code => MML.Mml.fdsModCodeToToken(code)));
     const modParamReg = makeModParamRegistry();
-    const modUsed = events.some(ev =>
-      ev.note !== null && ev.modEnabled && ev.modGain > 0 && ev.modFreq > 0);
+    // 深さ0でも「0から増加するエンベロープ」なら変調あり
+    const modOn = ev => ev.modEnabled && ev.modFreq > 0 && (ev.modGain > 0 || ev.modEnvDir > 0);
+    const modUsed = events.some(ev => ev.note !== null && modOn(ev));
     function toModField(ev) {
-      if (!ev.modEnabled || ev.modGain <= 0 || ev.modFreq <= 0) return 'off';
+      if (!modOn(ev)) return 'off';
       const waveform = modWaveReg.assign(ev.modTable);
-      return modParamReg.assign(ev.modFreq, ev.modGain, waveform);
+      return modParamReg.assign(ev.modFreq, ev.modGain, waveform, ev.modEnvDir, ev.modEnvSpeed);
     }
 
     function toVolumeFields(ev) {

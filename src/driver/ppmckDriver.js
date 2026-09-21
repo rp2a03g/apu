@@ -860,6 +860,11 @@ PLAY_CHLOOP:
       for (let i = 0; i < 64; i++) wave[i] = Math.round(31.5 + 31.5 * Math.sin((2 * Math.PI * i) / 64)) & 0x3f;
       initExtra.push(`    LDA #$80\n    STA $4089       ; FDS波形メモリ書込み許可\n    LDX #$00\nINIT_FDS_WAVE:\n    LDA FDS_WAVE_DATA,X\n    STA $4040,X\n    INX\n    CPX #$40\n    BNE INIT_FDS_WAVE\n    LDA #$00\n    STA $4089       ; 書込み禁止・マスター音量フル`);
     }
+    // 深さエンベロープつきの@MHがある曲だけ$408A(エンベロープのマスタ速度)をFDS BIOSの
+    // 既定値$E8に固定する(compiler.jsのfdsUsesModEnvelopeと同じ条件)
+    if (usesFds && Object.keys(envelopes.mh || {}).some(k => envelopes.mh[k] && envelopes.mh[k].envDir)) {
+      initExtra.push('    LDA #$E8\n    STA $408A       ; FDSエンベロープのマスタ速度(@MHの深さエンベロープ用)');
+    }
     if (usesN163) {
       // 波形データの配置は共有バッファアロケータ(MML.N163Alloc、compiler.jsと同じ計算)が
       // 曲の実際の使用状況に応じて動的に行うため、ここではchごとの専用スロットへの
@@ -2244,6 +2249,12 @@ WFV_VOL_T13:
         const wave = envelopes.mw && envelopes.mw[mh.waveform];
         const freq = mh.freq || 0;
         const depth = mh.depth || 0;
+        // 深さのハードウェアエンベロープ(@MHの第5・6引数)。直前の直接指定が開始値になる
+        // (compiler.jsのresolveFdsModWriteと同じ順)。4引数の定義には1バイトも足さない
+        const envLoad = mh.envDir
+          ? `    LDA #${hex((mh.envDir > 0 ? 0x40 : 0) | ((mh.envSpeed || 0) & 0x3f))}
+    STA $4084       ; 深さエンベロープ開始(bit7=0)
+` : '';
         // Xはこのバイトコード読み出し処理全体を通して「現在処理中のチャンネル配列
         // index」を保持する共有レジスタなので、ここでの32byteコピーループ用カウンタと
         // して破壊する前に必ずCHIDXへ退避し、抜ける前に復元する(WFV13の波形ロードと
@@ -2274,7 +2285,7 @@ ${waveLoad}    LDA #${hex(freq & 0xff)}
     STA $4087       ; bit7=0で再開
     LDA #${hex(0x80 | (depth & 0x3f))}
     STA $4084
-    JMP RD_LOOP`;
+${envLoad}    JMP RD_LOOP`;
       }).join('\n');
       extraHandlers.push(`
 ; --- MH<n>/MHOF: FDSモジュレーション再ロード(音符に紐付かない即時コマンド、0xF5) ---

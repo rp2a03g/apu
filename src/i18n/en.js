@@ -789,6 +789,8 @@
     '@MH<n> 変調パラメータ': '@MH<n> modulation parameters',
     'delay=発音から変調開始までのフレーム数 / freq=変調テーブルの再生速度 / depth=変調の深さ($4084ゲイン。0だと@MWがあっても無効) / waveform=使用する@MW<n>のインデックス':
       'delay = frames from key-on until modulation starts / freq = playback speed of the modulation table / depth = modulation depth ($4084 gain; 0 disables it even if @MW is set) / waveform = index of the @MW<n> to use',
+    'envDir/envSpeed(省略可・独自拡張)=深さのハードウェアエンベロープ。envDir: 1=増加 / -1=減少 / 0=なし、envSpeed: 0-63(大きいほど遅い。63で約4フレームに1)。指定するとdepthは「開始の深さ」になり、増加は32・減少は0で止まります':
+      'envDir/envSpeed (optional, extension) = hardware envelope for the depth. envDir: 1 = increase / -1 = decrease / 0 = none; envSpeed: 0-63 (larger is slower; 63 is about one step per 4 frames). When given, depth becomes the starting depth; increase stops at 32, decrease at 0',
     '@N<n> 波形 (0-15)': '@N<n> wave (0-15)',
     '@N<n>: N163波形。要素数は作曲者が自由に決められます(4の倍数へ自動的に丸められます)。 同時に使用する波形の合計が内蔵RAM(128バイト中、波形用に使える64バイト)を超えると MML反映時にエラーになります。先頭のバッファ番号はこのツールでは使用しません(常に0で書き込みます)。':
       '@N<n>: N163 wave. You choose the length freely (it is rounded to a multiple of 4). If the waves in use at the same time exceed the internal RAM (64 of the 128 bytes are usable for waves), applying to the MML raises an error. The leading buffer number is unused by this tool (always written as 0).',

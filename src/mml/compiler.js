@@ -2705,7 +2705,16 @@
     return wave;
   }
 
-  function fdsInitWrites(customWave) {
+  // 深さエンベロープつきの@MH(第5引数envDir≠0)が1つでもあるか。ある曲だけ$408A
+  // (エンベロープのマスタ速度)をFDS BIOSの既定値$E8へ明示的に固定する。envSpeedの
+  // 時間的な意味は$408A込みで決まり、再生環境の初期値任せにできないため
+  // (ppmckDriver.jsのINITと同じ条件)
+  function fdsUsesModEnvelope(envelopes) {
+    const mh = (envelopes && envelopes.mh) || {};
+    return Object.keys(mh).some(k => mh[k] && mh[k].envDir);
+  }
+
+  function fdsInitWrites(customWave, envelopes) {
     const wave = (customWave && customWave.length === 64) ? customWave : fdsDefaultWave();
     const writes = [];
     writes.push({ addr: 0x4089, value: 0x80 }); // 波形メモリ書き込み許可
@@ -2713,6 +2722,7 @@
       writes.push({ addr: 0x4040 + i, value: wave[i] & 0x3F });
     }
     writes.push({ addr: 0x4089, value: 0x00 }); // 書き込み禁止・マスター音量フル
+    if (fdsUsesModEnvelope(envelopes)) writes.push({ addr: 0x408A, value: 0xE8 });
     return writes;
   }
 
@@ -3088,6 +3098,9 @@
     writes.push({ addr: 0x4086, value: (mh.freq || 0) & 0xFF });
     writes.push({ addr: 0x4087, value: ((mh.freq || 0) >> 8) & 0x0F }); // bit7=0で再開
     writes.push({ addr: 0x4084, value: 0x80 | ((mh.depth || 0) & 0x3F) });
+    // 深さのハードウェアエンベロープ(@MHの第5・6引数、独自拡張)。$4084はbit7=0で書いても
+    // ゲイン値を変えない(向き/速度/タイマーだけ)ので、直前の直接指定が開始値になる
+    if (mh.envDir) writes.push({ addr: 0x4084, value: (mh.envDir > 0 ? 0x40 : 0) | ((mh.envSpeed || 0) & 0x3F) });
     return { writes, frameOffset: mh.delay || 0 };
   }
 
@@ -3234,7 +3247,7 @@
     switch (expansion) {
       case 'mmc5': return mmc5InitWrites();
       case 'fme7': return fme7InitWrites();
-      case 'fds': return fdsInitWrites(opt && opt.fdsWave);
+      case 'fds': return fdsInitWrites(opt && opt.fdsWave, envelopes);
       case 'n163': return n163InitWrites(extra && extra.numN163Ch);
       default: return [];
     }

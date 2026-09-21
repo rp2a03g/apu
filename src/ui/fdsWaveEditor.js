@@ -3,7 +3,7 @@
  * MML.UI.FdsWaveEditor
  *
  * MML本文中の @FM<n>(波形メモリ64サンプル) / @MW<n>(変調テーブル32サンプル、増減量表記) /
- * @MH<n>(変調パラメータ delay,freq,depth,waveform) をキャンバス/数値入力で
+ * @MH<n>(変調パラメータ delay,freq,depth,waveform[,envDir,envSpeed]) をキャンバス/数値入力で
  * グラフィカルに編集する。MMLテキストが正典(DESIGN.md INV-2)。
  *
  * MMLへの書き込みタイミング: ドラッグ中のキャンバス編集・MH数値欄の入力・
@@ -69,7 +69,8 @@
     if (tag === 'MW') {
       return Defs.format('MW', index, values.map(c => MML.Mml.fdsModCodeToToken(c)), { perLine: 16, sep: ', ' });
     }
-    return Defs.format('MH', index, values);
+    // envDir(第5引数)が0なら本家ppmck互換の4引数で書く(envSpeedは意味を持たないので落とす)
+    return Defs.format('MH', index, values[4] ? values.slice(0, 6) : values.slice(0, 4));
   }
 
   function sineDefault(length, maxValue) {
@@ -270,7 +271,9 @@
         delay: document.getElementById('fdsWaveMhDelay'),
         freq: document.getElementById('fdsWaveMhFreq'),
         depth: document.getElementById('fdsWaveMhDepth'),
-        waveform: document.getElementById('fdsWaveMhWaveform')
+        waveform: document.getElementById('fdsWaveMhWaveform'),
+        envDir: document.getElementById('fdsWaveMhEnvDir'),
+        envSpeed: document.getElementById('fdsWaveMhEnvSpeed')
       };
 
       const fmSection = {
@@ -314,17 +317,19 @@
       function getLocalData(tag) {
         if (tag === 'FM') return fmSection.canvas.data.slice();
         if (tag === 'MW') return mwSection.canvas.data.slice();
-        return [mhInputs.delay, mhInputs.freq, mhInputs.depth, mhInputs.waveform]
+        return [mhInputs.delay, mhInputs.freq, mhInputs.depth, mhInputs.waveform, mhInputs.envDir, mhInputs.envSpeed]
           .map(el => parseInt(el.value, 10) || 0);
       }
       function setLocalData(tag, values) {
         if (tag === 'FM') { fmSection.canvas.setData(values); return; }
         if (tag === 'MW') { mwSection.canvas.setData(values); return; }
-        const [delay = 0, freq = 0, depth = 0, waveform = 0] = values;
+        const [delay = 0, freq = 0, depth = 0, waveform = 0, envDir = 0, envSpeed = 0] = values;
         mhInputs.delay.value = String(delay);
         mhInputs.freq.value = String(freq);
         mhInputs.depth.value = String(depth);
         mhInputs.waveform.value = String(waveform);
+        mhInputs.envDir.value = String(envDir > 0 ? 1 : envDir < 0 ? -1 : 0);
+        mhInputs.envSpeed.value = String(envSpeed);
         setDirty('MH', true); // 読み込み/貼り付け由来。MMLからの読み直しは loadFromMml が直後に戻す
       }
 
@@ -452,7 +457,7 @@
         });
         document.getElementById(`fdsWave${ID_TAG[tag]}Load`).addEventListener('click', () => {
           pickFileAsValues((values) => {
-            if (tag === 'MH') { setLocalData(tag, values.slice(0, 4)); return; }
+            if (tag === 'MH') { setLocalData(tag, values.slice(0, 6)); return; }
             const range = tag === 'FM' ? [64, 0, 63] : [32, -64, 63];
             const resampled = UI.WaveClipboard ? UI.WaveClipboard.resample(values, range[0], range[1], range[2]) : values;
             setLocalData(tag, resampled);

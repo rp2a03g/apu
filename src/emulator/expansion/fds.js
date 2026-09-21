@@ -269,6 +269,51 @@
       if (this.phaseAcc >= cycleLen) this.phaseAcc -= cycleLen;
     }
 
+    /**
+     * 表示専用の早送り: 変調ユニットとエンベロープだけを cycles CPUサイクル分進め、その間の
+     * 実効周波数(effectiveFreqと同じ内部単位)の平均/最小/最大を返す。音は作らない。
+     * ピアノロール構築(src/ui/keyboard.js buildFdsModSnapshots)が writeLog から
+     * 「フレーム内でピッチがどれだけ動いたか」を復元するのに使う。1フレーム=約29780サイクルを
+     * clock()で1サイクルずつ回すと1曲で数億回になるため、STEP サイクル刻みの粗い歩進にしてある
+     * (変調テーブルの歩進は最速でも32サイクルに1回なので、表示用には十分)。
+     * ★clock() の変調/エンベロープ部分と同じ式。clock() を直したらここも必ず合わせること
+     *   (tools不要の確認: 同じ書込みを与えて clock() 実測の平均/最小/最大と突き合わせる)。
+     * @returns {{mean:number,min:number,max:number}|null} 発音していない/変調が効いていない間は null
+     */
+    advanceForDisplay(cycles) {
+      const STEP = 16;
+      const envPeriod = (this.envRate + 1) * 8;
+      let sum = 0, n = 0, min = Infinity, max = -Infinity;
+      for (let c = 0; c < cycles; c += STEP) {
+        this.envRateClock += STEP;
+        while (this.envRateClock >= envPeriod) { this.envRateClock -= envPeriod; this._clockEnvelope(); }
+        if (this.modEnabled && this.modFreq > 0) {
+          this.modPhaseAcc += this.modFreq * STEP;
+          while (this.modPhaseAcc >= 131072) {
+            this.modPhaseAcc -= 131072;
+            const raw = this.modTable[this.modTablePos];
+            this.modTablePos = (this.modTablePos + 1) & 0x1F;
+            if (raw === 4) this.modCounter = 0;
+            else {
+              this.modCounter += MOD_TABLE_DELTA[raw];
+              if (this.modCounter > 63) this.modCounter = 63;
+              if (this.modCounter < -64) this.modCounter = -64;
+            }
+          }
+        }
+        if (this.disabled || this.freq === 0 || !this.modEnabled) continue;
+        let eff = this.freq;
+        const temp = this.modCounter * this.modGain;
+        let delta = temp >> 4;
+        if ((temp & 0x0F) !== 0 && delta >= 0) delta += 1;
+        if (delta !== 0) eff = Math.max(0, this.freq + Math.round((delta * this.freq) / 64));
+        sum += eff; n++;
+        if (eff < min) min = eff;
+        if (eff > max) max = eff;
+      }
+      return n > 0 ? { mean: sum / n, min, max } : null;
+    }
+
     mixSample() {
       if (this.disabled || this.mute.wave) return 0;
       const index = Math.floor(this.phaseAcc / 65536) % 64;

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-20 08:07:17
+ * Built by tools/build-capture-workers.ps1 at 2026-09-22 08:03:13
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-20 08:07:17';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-22 08:03:13';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析

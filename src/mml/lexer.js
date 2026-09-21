@@ -217,7 +217,11 @@
     return { index, values, invalid };
   }
 
-  // @MH<n> = { delay, freq, depth, waveform(@MW<n>のインデックス) } (FDSモジュレータ設定)
+  // @MH<n> = { delay, freq, depth, waveform(@MW<n>のインデックス) [, envDir, envSpeed] } (FDSモジュレータ設定)
+  // envDir/envSpeed(省略可、独自拡張): $4084のハードウェアエンベロープ。envDir=1で増加/-1で減少
+  // (0または省略=エンベロープ無し=本家ppmckと同じ固定の深さ)、envSpeed=0-63($4084の下位6bit
+  // そのもの、大きいほど遅い)。指定時のdepthは「開始の深さ」で、そこからハードが32(増加)/0(減少)
+  // まで1ずつ動かす。
   const FDS_MOD_PARAM_DEF_RE = /^@MH(\d+)\s*=\s*\{([^}]*)\}$/i;
 
   function parseFdsModParamDef(trimmed) {
@@ -227,7 +231,11 @@
     const parts = m[2].trim().split(/[\s,]+/).filter(s => s.length > 0).map(parseMmlNumber);
     return {
       index,
-      params: { delay: parts[0] || 0, freq: parts[1] || 0, depth: parts[2] || 0, waveform: parts[3] || 0 }
+      params: {
+        delay: parts[0] || 0, freq: parts[1] || 0, depth: parts[2] || 0, waveform: parts[3] || 0,
+        envDir: (parts[4] || 0) > 0 ? 1 : (parts[4] || 0) < 0 ? -1 : 0,
+        envSpeed: Math.max(0, Math.min(63, parts[5] || 0))
+      }
     };
   }
 
