@@ -13,6 +13,15 @@ ppmck / ppmckc に合わせてあることを指す。ppmck そのものの移�
 (どのコマンドが ppmck 由来でどれが独自拡張かは、MMLコマンドヘルプと
 [src/mml/compiler.js](src/mml/compiler.js) の冒頭に全部書いてある)。
 
+![MMLエディタとエンベロープエディタ](docs/screenshot-editor.png)
+
+MMLを書きながら、音量・音色・ピッチ・ノートの4種類のエンベロープを1画面で編集する。
+
+![再生中の鍵盤表示とピアノロール](docs/screenshot-playing.png)
+
+鳴らすと、チャンネルごとの音程・音量・波形とピアノロールが演奏に同期して動く
+(曲は2A03だけで書いたオリジナル「星間航路」)。
+
 ## できること
 
 - **MMLで作曲して `.nsf` を書き出す** — ppmck方言のMML。2A03の5ch(パルス×2・三角波・ノイズ・DPCM)に加えて
