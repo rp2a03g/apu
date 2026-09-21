@@ -359,16 +359,32 @@
       if (!used.length) return;
       const base = sanitize(L.base) || ('dpcm' + index);
       if (used.length === 1 && L.segs.length === 1) { await saveBytes(base + '.dmc', ensurePiece(L, 0).bytes, true); return; }
-      // 複数ファイルはダイアログを連続で出せない(ユーザー操作1回につき1回)のでダウンロードで落とす
-      for (const k of used) saveBytes(`${base}_${k + 1}.dmc`, ensurePiece(L, k).bytes, false);
+      // 複数ファイルは名前を付ける保存ダイアログを連続で出せない(ユーザー操作1回につき1回)ので、
+      // フォルダを1回だけ選んでそこへまとめて書く(.mml の隣に置くのが ppmck の運用。src/ui/dpcmStore.js)。
+      // 以前はここで素のダウンロードに落としていたため .dmc だけダウンロードフォルダへ散っていた
+      const files = used.map(k => ({ name: `${base}_${k + 1}.dmc`, bytes: ensurePiece(L, k).bytes }));
+      const Store = MML.UI.DpcmStore;
+      if (Store && Store.dirSupported()) {
+        const r = await Store.pickAndWrite((await Store.rememberedDir()) || undefined, files);
+        if (!r) { setStatus(T('.dmcを書き出せませんでした(フォルダが選ばれなかったか、書き込みが許可されませんでした)'), 'error'); return; }
+        setStatus(T('{n}個の.dmcを {dir} へ書き出しました', { n: r.written.length, dir: r.dirName }), 'ok');
+        return;
+      }
+      for (const f of files) saveBytes(f.name, f.bytes, false);
       setStatus(T('{n}個の.dmcをダウンロードしました', { n: used.length }), 'ok');
     }
     async function saveBytes(name, bytes, dialog) {
       if (dialog && window.showSaveFilePicker) {
         let handle = null;
+        // 既定の保存先は dpcmStore が覚えている「.mml の隣」のフォルダ。何も指定しないと
+        // Chrome の既定(ダウンロードフォルダ)が開き、.dmc だけ MML と別の場所に散らばる
+        const Store = MML.UI.DpcmStore;
+        const startIn = (Store && Store.rememberedDir) ? await Store.rememberedDir() : null;
+        const opts = { suggestedName: name, id: 'mml-dmc',
+          types: [{ description: 'DMC', accept: { 'application/octet-stream': ['.dmc'] } }] };
+        if (startIn) opts.startIn = startIn;
         try {
-          handle = await window.showSaveFilePicker({ suggestedName: name,
-            types: [{ description: 'DMC', accept: { 'application/octet-stream': ['.dmc'] } }] });
+          handle = await window.showSaveFilePicker(opts);
         } catch (e) {
           if (e && e.name === 'AbortError') return;
           handle = null;

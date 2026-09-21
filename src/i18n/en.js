@@ -174,11 +174,21 @@
     '(今の MML はこのファイルを参照していません)': '(the current MML does not reference this file)',
     'DPCM {n} 本を一緒に読み込みました': 'Loaded {n} DPCM sample(s) with it',
     'DPCM {n} 本を前回の内容から復元しました': 'Restored {n} DPCM sample(s) from the last session',
-    '⚠ 見つからない .dmc: {files}(該当する音は鳴りません。.dmc を MML と一緒に開くか、ウィンドウへドロップしてください)': '⚠ Missing .dmc: {files} (those notes will be silent. Open the .dmc files together with the MML, or drop them onto the window)',
     '.dmc {n} 本を同じフォルダ({dir})へ書き出しました': 'Wrote {n} .dmc file(s) to the same folder ({dir})',
     '(書けなかったもの: {files})': '(could not write: {files})',
-    'この MML は .dmc {n} 本を参照しています。': 'This MML references {n} .dmc file(s).',
+    '⚠ .dmc {n} 本はまだ書き出されていません(MML本文だけでは DPCM は鳴りません)。': '⚠ {n} .dmc file(s) have not been written to disk yet (the MML text alone will not play the DPCM).',
     '.dmc を MML と同じフォルダへ書き出す': 'Write the .dmc files next to the MML',
+    // 見出し行の .dmc 状態チップ (#mmlDmcLink)
+    '.dmc 未読込 {n}': '{n} .dmc missing',
+    '{files} が台帳にありません(この音は鳴りません)': '{files} are not on hand (those notes will be silent)',
+    '.dmc 未保存 {n}': '{n} .dmc unsaved',
+    '参照している .dmc はまだディスクに書かれていません': 'The referenced .dmc files have not been written to disk yet',
+    '書き出す': 'Write',
+    // フォルダから .dmc を読み戻す
+    'フォルダから読み込む': 'Load from folder',
+    '.dmc {n} 本を {dir} から読み込みました': 'Loaded {n} .dmc file(s) from {dir}',
+    '(そのフォルダに無いもの: {files})': '(not in that folder: {files})',
+    '.dmc を読み込めませんでした(フォルダが選ばれなかったか、そのフォルダに {files} がありません)。': 'Could not load the .dmc files (no folder was chosen, or {files} are not in that folder).',
     '.dmc を書き出せませんでした(フォルダが選ばれなかったか、書き込みが許可されませんでした)。': 'Could not write the .dmc files (no folder was chosen, or writing was not allowed).',
     '.dmc {n} 本を {dir} へ書き出しました': 'Wrote {n} .dmc file(s) to {dir}',
     '.dmc をダウンロード': 'Download the .dmc files',
@@ -412,6 +422,8 @@
     '読み込みました: {name} {rate}Hz {n}サンプル → DMC {hz}Hz {m}サンプル({bytes}バイト)':
       'Loaded: {name} {rate} Hz, {n} samples → DMC {hz} Hz, {m} samples ({bytes} bytes)',
     '{n}個の.dmcをダウンロードしました': 'Downloaded {n} .dmc files',
+    '{n}個の.dmcを {dir} へ書き出しました': 'Wrote {n} .dmc files to {dir}',
+    '.dmcを書き出せませんでした(フォルダが選ばれなかったか、書き込みが許可されませんでした)': 'Could not write the .dmc files (no folder was chosen, or writing was not allowed)',
     '保存しました: {file} ({n}バイト)': 'Saved: {file} ({n} bytes)',
     '保存に失敗しました: {msg}': 'Failed to save: {msg}',
 

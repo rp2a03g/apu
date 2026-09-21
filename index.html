@@ -69,6 +69,13 @@
         <button class="mml-file-link-btn" id="mmlFileLinkAction" hidden></button>
         <button class="mml-file-link-btn mml-file-link-detach" id="mmlFileLinkDetach" title="外部ファイルとの同期をやめる（戻すには「開く」かドロップでファイルを指定し直す。一時的に止めたいだけなら左の⟳）">×</button>
       </span>
+      <!-- 参照している .dmc の状態(src/ui/dpcmStore.js、main.js updateDpcmLink)。
+           手が要るとき(台帳に無い=鳴らない / まだディスクへ書き出していない)だけ出す。
+           下のログ欄は2行ぶんしか見えず、保存直後のボタンを見落とすのでここにも常設する -->
+      <span class="mml-file-link" id="mmlDmcLink" hidden>
+        <span class="mml-file-link-name" id="mmlDmcLinkName"></span>
+        <button class="mml-file-link-btn" id="mmlDmcLinkAction" hidden></button>
+      </span>
       <div class="fw-header-extra fw-header-extra--right">
         <button class="icon-btn icon-btn-title toggle-btn" data-target="win-fdswave" title="FDS波形エディタ" aria-label="FDS波形エディタ">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 10c1.4-5 3.4-5 5 0s3.6 5 5 0 3.6-5 5 0"/></svg>

@@ -3733,10 +3733,12 @@
     dpcmSampleCache[name] = bytes;
     MML.UI.DpcmStore.put(name, bytes); // 開き直しても戻るように(src/ui/dpcmStore.js)
     if (MML.UI.DpcmEditor && MML.UI.DpcmEditor.refresh) MML.UI.DpcmEditor.refresh();
+    updateDpcmLink(); // 「未読込」が解消された / 中身が変わったので見出し行のチップを描き直す
   }
   // MML本文を丸ごと差し替えたとき(ファイルを開く/変換結果)に呼ぶ。コンバータが持つ未反映の音は捨てる
   function resetDpcmEditor() {
     if (MML.UI.DpcmEditor && MML.UI.DpcmEditor.reset) MML.UI.DpcmEditor.reset();
+    setDpcmUnsaved(false); // 別の曲になったので「前回の保存で書き出していない」は持ち越さない
   }
 
   // ── @DPCM の .dmc を「開き直しても戻る」「保存したら隣に置く」(2026-09-16、src/ui/dpcmStore.js) ──
@@ -3801,7 +3803,24 @@
     const add = (text, cls) => { const d = document.createElement('div'); d.className = cls || ''; d.textContent = text; mmlOutputEl.appendChild(d); };
     if (loadedNames && loadedNames.length) add(T('DPCM {n} 本を一緒に読み込みました', { n: loadedNames.length }));
     if (r && r.restored.length) add(T('DPCM {n} 本を前回の内容から復元しました', { n: r.restored.length }));
-    if (r && r.missing.length) add(T('⚠ 見つからない .dmc: {files}(該当する音は鳴りません。.dmc を MML と一緒に開くか、ウィンドウへドロップしてください)', { files: r.missing.join(', ') }), 'error');
+    if (r && r.missing.length) mmlOutputEl.appendChild(dpcmMissingBox(r.missing));
+    updateDpcmLink();
+  }
+
+  // 「台帳に無い .dmc」の一行。台帳は中身のコピーであってディスク上の .dmc への参照ではないので、
+  // 別PC・サイトデータを消したあと・別オリジンでは空になる。そのときフォルダから読み直すボタンを添える
+  function dpcmMissingBox(missing) {
+    const m = document.createElement('div');
+    m.className = 'error';
+    m.textContent = T('⚠ 台帳に無い .dmc: {files}(この MML だけでは鳴りません。DPCMコンバータで読み込むか、.dmc をドロップしてください)', { files: missing.join(', ') }) + ' ';
+    if (DpcmStore.dirSupported()) {
+      const b = document.createElement('button');
+      b.className = 'secondary';
+      b.textContent = T('フォルダから読み込む');
+      b.addEventListener('click', () => loadMissingDpcmFromFolder(missing));
+      m.appendChild(b);
+    }
+    return m;
   }
 
   // MML を保存した直後: 参照している .dmc を同じフォルダへ。覚えているフォルダに今の .mml が居れば黙って書き、
@@ -3810,39 +3829,104 @@
   async function afterMmlSaved(fileHandle, text) {
     const files = referencedDpcmFiles(text);
     const missing = DpcmStore.namesIn(text).filter(n => !dpcmSampleCache[n]);
-    if (!files.length && !missing.length) return;
+    if (!files.length && !missing.length) { setDpcmUnsaved(false); return; }
     let res = null;
     if (fileHandle && files.length) res = await DpcmStore.writeBeside(fileHandle, files);
+    // 初回の保存では必ずここへ来る: showSaveFilePicker が返すのはファイルのハンドルだけで、
+    // その親フォルダのハンドルは取れないため、showDirectoryPicker で一度もらうまで書き先が無い
+    setDpcmUnsaved(files.length > 0 && !(res && res.written.length === files.length));
     const box = document.createElement('div');
     if (res && res.written.length) {
       box.className = 'ok';
       box.textContent = T('.dmc {n} 本を同じフォルダ({dir})へ書き出しました', { n: res.written.length, dir: res.dirName }) +
         (res.failed.length ? ' ' + T('(書けなかったもの: {files})', { files: res.failed.join(', ') }) : '');
     } else if (files.length) {
-      box.textContent = T('この MML は .dmc {n} 本を参照しています。', { n: files.length }) + ' ';
+      box.className = 'warn';
+      box.textContent = T('⚠ .dmc {n} 本はまだ書き出されていません(MML本文だけでは DPCM は鳴りません)。', { n: files.length }) + ' ';
       const btn = document.createElement('button');
       btn.className = 'secondary';
       if (DpcmStore.dirSupported()) {
         btn.textContent = T('.dmc を MML と同じフォルダへ書き出す');
-        btn.addEventListener('click', async () => {
-          const r = await DpcmStore.pickAndWrite(fileHandle || undefined, files);
-          if (!r) { mmlFileStatus(T('.dmc を書き出せませんでした(フォルダが選ばれなかったか、書き込みが許可されませんでした)。'), 'error'); return; }
-          mmlFileStatus(T('.dmc {n} 本を {dir} へ書き出しました', { n: r.written.length, dir: r.dirName }) +
-            (r.failed.length ? ' ' + T('(書けなかったもの: {files})', { files: r.failed.join(', ') }) : ''), 'ok');
-        });
+        btn.addEventListener('click', () => writeDpcmBeside(files));
       } else {
         btn.textContent = T('.dmc をダウンロード');
         btn.addEventListener('click', () => { for (const f of files) downloadBin(f.name, f.bytes); });
       }
       box.appendChild(btn);
     }
-    if (missing.length) {
-      const m = document.createElement('div');
-      m.className = 'error';
-      m.textContent = T('⚠ 台帳に無い .dmc: {files}(この MML だけでは鳴りません。DPCMコンバータで読み込むか、.dmc をドロップしてください)', { files: missing.join(', ') });
-      box.appendChild(m);
-    }
+    if (missing.length) box.appendChild(dpcmMissingBox(missing));
     mmlOutputEl.appendChild(box);
+    mmlOutputEl.scrollTop = mmlOutputEl.scrollHeight; // ログ欄は2行ぶんしか見えないので出したものを見せる
+  }
+
+  // ── 参照している .dmc の状態チップ(見出し行の #mmlDmcLink、2026-09-21)──────────
+  // ログ欄(mmlOutput)は2行ぶんの高さしかなく、保存直後に出る「書き出す」ボタンが
+  // スクロールの外へ隠れて「MMLと同じ場所に置かれたはず」と思ったまま .dmc がどこにも
+  // 無い、ということが起きていた。手が要るあいだ(未読込 / まだ書き出していない)だけ
+  // 見出し行に常設し、ログを見ていなくても同じ操作ができるようにする。
+  let dpcmUnsaved = false; // 直近の保存で .dmc をディスクへ書けていない
+  function setDpcmUnsaved(v) { dpcmUnsaved = !!v; updateDpcmLink(); }
+
+  function updateDpcmLink() {
+    const el = document.getElementById('mmlDmcLink');
+    if (!el) return;
+    const nameEl = document.getElementById('mmlDmcLinkName');
+    const actionEl = document.getElementById('mmlDmcLinkAction');
+    const names = DpcmStore.namesIn(mmlSourceEl.value);
+    // 起動直後のサンプルMML(リファレンス兼デモ)は kick/snare/bass.dmc を参照しているが、
+    // それは手元に無くて当たり前なので、手を付けていないあいだは「未読込」を出さない
+    // (confirmDiscardMmlEditsと同じ「未編集」の基準。開く/保存すれば名前が付いて出るようになる)
+    const untouchedSample = !currentMmlFileName && mmlSourceEl.value === lastSyncedMmlText;
+    const missing = untouchedSample ? [] : names.filter(n => !dpcmSampleCache[n]);
+    if (!missing.length && !(dpcmUnsaved && names.length)) { el.hidden = true; return; }
+    el.hidden = false;
+    el.classList.toggle('is-stale', missing.length > 0);   // 鳴らない = 赤
+    el.classList.toggle('is-warn', missing.length === 0);  // 鳴るが未保存 = 橙
+    if (missing.length) {
+      nameEl.textContent = T('.dmc 未読込 {n}', { n: missing.length });
+      el.title = T('{files} が台帳にありません(この音は鳴りません)', { files: missing.join(', ') });
+      actionEl.textContent = T('フォルダから読み込む');
+    } else {
+      nameEl.textContent = T('.dmc 未保存 {n}', { n: names.length });
+      el.title = T('参照している .dmc はまだディスクに書かれていません');
+      actionEl.textContent = T('書き出す');
+    }
+    actionEl.hidden = false;
+  }
+
+  // 参照している .dmc をフォルダへ書く(★クリック内)。覚えているフォルダに今の .mml が
+  // 居ればそこへ黙って、そうでなければフォルダを選ばせて書く
+  async function writeDpcmBeside(files) {
+    if (!files || !files.length) return;
+    const handle = FileSync.currentHandle();
+    let r = handle ? await DpcmStore.writeBeside(handle, files) : null;
+    if (!r) r = await DpcmStore.pickAndWrite(handle || undefined, files);
+    if (!r) {
+      mmlFileStatus(T('.dmc を書き出せませんでした(フォルダが選ばれなかったか、書き込みが許可されませんでした)。'), 'error');
+      return;
+    }
+    mmlFileStatus(T('.dmc {n} 本を {dir} へ書き出しました', { n: r.written.length, dir: r.dirName }) +
+      (r.failed.length ? ' ' + T('(書けなかったもの: {files})', { files: r.failed.join(', ') }) : ''), 'ok');
+    setDpcmUnsaved(r.failed.length > 0);
+  }
+
+  // 台帳に無い .dmc を、覚えているフォルダ(無ければ選ばせて)から読み直す(★クリック内)。
+  // 開いた瞬間に黙って読めないのは、再読込で権限が 'prompt' に戻るため(fileSync.js の「再接続」と同じ)
+  async function loadMissingDpcmFromFolder(names) {
+    if (!names || !names.length) return;
+    let r = await DpcmStore.readBeside(names);
+    if (!r) r = await DpcmStore.pickAndRead(FileSync.currentHandle() || undefined, names);
+    if (!r || !r.loaded.length) {
+      mmlFileStatus(T('.dmc を読み込めませんでした(フォルダが選ばれなかったか、そのフォルダに {files} がありません)。',
+        { files: names.join(', ') }), 'error');
+      return;
+    }
+    for (const f of r.loaded) setDpcmSampleBytes(f.name, f.bytes);
+    mmlFileStatus(T('.dmc {n} 本を {dir} から読み込みました', { n: r.loaded.length, dir: r.dirName }) +
+      (r.missing.length ? ' ' + T('(そのフォルダに無いもの: {files})', { files: r.missing.join(', ') }) : ''), 'ok');
+    // 参照している定義が戻ったので「未読込」の警告を消すためにコンパイルし直す。再生中は止めない
+    if (mmlPlaybackStopped) prepareMmlStream(true);
+    updateDpcmLink();
   }
   if (MML.UI.DpcmEditor) {
     MML.UI.DpcmEditor.init(mmlSourceEl, {
@@ -5362,10 +5446,25 @@
     let dpcmRestoreTimer = null;
     mmlSourceEl.addEventListener('input', () => {
       clearTimeout(dpcmRestoreTimer);
-      dpcmRestoreTimer = setTimeout(() => { restoreDpcmSamples(mmlSourceEl.value); }, 500);
+      dpcmRestoreTimer = setTimeout(async () => {
+        await restoreDpcmSamples(mmlSourceEl.value);
+        updateDpcmLink(); // @DPCM定義を書き足した/消したぶんを見出し行のチップへ
+      }, 500);
     });
+    // 参照している .dmc の状態チップ(#mmlDmcLink)。状態によって押したときの仕事が変わる
+    const dmcActionEl = document.getElementById('mmlDmcLinkAction');
+    if (dmcActionEl) {
+      dmcActionEl.addEventListener('click', async () => {
+        const missing = DpcmStore.namesIn(mmlSourceEl.value).filter(n => !dpcmSampleCache[n]);
+        if (missing.length) await loadMissingDpcmFromFolder(missing);
+        else await writeDpcmBeside(referencedDpcmFiles(mmlSourceEl.value));
+      });
+    }
+    // チップの文言はJSで入れているので言語を切り替えたら描き直す(keyboard.js等と同じ MML.I18n.onChange の規約)
+    if (MML.I18n && MML.I18n.onChange) MML.I18n.onChange(() => updateDpcmLink());
     // 起動直後のサンプルMMLを「未編集」の基準にする(この状態なら確認なしで開ける)
     markMmlTextSynced('');
+    updateDpcmLink(); // ★markMmlTextSyncedの後(「未編集のサンプル」の判定に lastSyncedMmlText を使う)
     initMmlFileSync();
   })();
   document.getElementById('btnMmlCapture').addEventListener('click', async () => {

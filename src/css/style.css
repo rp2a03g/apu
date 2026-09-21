@@ -440,6 +440,9 @@ header h1.app-title .app-version:empty { display: none; }
   color: var(--text-muted);
   cursor: default;
 }
+/* display を持つ規則は UA の [hidden]{display:none} に勝ってしまうので明示的に消す。
+   これが無いと未接続の #mmlFileLink(⟳だけの空チップ)が見出し行に残る(2026-09-21) */
+.mml-file-link[hidden] { display: none !important; }
 .mml-file-link-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -447,6 +450,8 @@ header h1.app-title .app-version:empty { display: none; }
 }
 .mml-file-link.is-live { border-color: var(--ok); }
 .mml-file-link.is-stale { border-color: var(--error); color: var(--error); }
+/* 参照している .dmc の状態チップ(#mmlDmcLink): 未読込=赤(is-stale) / 未保存=橙 */
+.mml-file-link.is-warn { border-color: #c98a00; color: #c98a00; }
 /* 自動取り込みのON/OFF。ONのあいだだけ押し込んだ見た目にする */
 .mml-file-link-watch[aria-pressed="true"] {
   background: var(--ok);
@@ -612,6 +617,8 @@ button.secondary {
 
 .error { color: var(--error); }
 .ok { color: var(--ok); }
+/* main.js が使う3段階のログ。.warn だけ規則が無く本文と同じ色のままだった(2026-09-21) */
+.warn { color: #c98a00; }
 
 .fields {
   display: grid;

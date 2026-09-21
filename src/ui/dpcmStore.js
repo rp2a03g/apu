@@ -17,6 +17,13 @@
  *     「覚えているフォルダ」に今保存した .mml が本当に居るか(isSameEntry)を確かめてから書く。
  *     別のフォルダへ保存し直したときに、古いフォルダへ .dmc を撒かないため。
  *
+ * ■ 逆向き: フォルダから読み戻す (readBeside/pickAndRead、2026-09-21)
+ *   台帳は「ファイル名→バイト列」のコピーであって、ディスク上の .dmc への参照ではない。
+ *   別のPC・サイトデータを消したあと・別オリジン(file:// と公開URLは別のIndexedDB)では
+ *   台帳が空なので、`.mml` の隣に置いた `.dmc` を読み直せる経路をこちら側にも用意する。
+ *   開いた瞬間に黙って読むことはできない(再読込で権限が 'prompt' に戻る)ので、
+ *   呼び出し側は必ずクリックの中から呼ぶ(fileSync.js の「再接続」ボタンと同じ事情)。
+ *
  * ■ file:// でも動く
  *   IndexedDB / showDirectoryPicker / createWritable は file:// でも使える(fileSync.js の実測と同じ)。
  *   showDirectoryPicker が無いブラウザ(Firefox 等)では、呼び出し側がダウンロードに落とす。
@@ -203,10 +210,51 @@
     return writeAll(h, files);
   }
 
+  // ---- フォルダから .dmc を読み戻す ------------------------------------------
+  async function readAll(dir, names) {
+    const loaded = [];
+    const missing = [];
+    for (const name of names || []) {
+      try {
+        const fh = await dir.getFileHandle(name);
+        const f = await fh.getFile();
+        loaded.push({ name, bytes: new Uint8Array(await f.arrayBuffer()) });
+      } catch (e) {
+        missing.push(name); // そのフォルダに無い / 読めない
+      }
+    }
+    return { loaded, missing, dirName: dir.name };
+  }
+
+  // 覚えているフォルダから読む(★クリック内)。覚えていない・権限が下りない・1本も無い → null
+  // (呼び出し側は null のとき pickAndRead でフォルダを選ばせる)
+  async function readBeside(names) {
+    if (!names || !names.length) return null;
+    await loadDir();
+    if (!dirHandle) return null;
+    if (await ensurePermission(dirHandle, 'readwrite') !== 'granted') return null;
+    const r = await readAll(dirHandle, names);
+    return r.loaded.length ? r : null;
+  }
+
+  // ボタンから: フォルダを選んで(★クリック内)読む
+  async function pickAndRead(startIn, names) {
+    const h = await pickDir(startIn);
+    if (!h) return null;
+    return readAll(h, names);
+  }
+
+  // 保存ダイアログの初期位置に使う(src/ui/dpcmEditor.js の 💾)。まだ選んでいなければ null
+  async function rememberedDir() {
+    await loadDir();
+    return dirHandle;
+  }
+
   MML.UI.DpcmStore = {
     supported: hasIdb,
     dirSupported,
     put, get, namesIn, restore,
     writeBeside, pickAndWrite,
+    readBeside, pickAndRead, rememberedDir,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
