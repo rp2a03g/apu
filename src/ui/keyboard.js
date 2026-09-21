@@ -3596,7 +3596,8 @@
       rollHeader.className = 'kbd-roll-header';
       let rollCollapsed = false;
       try { rollCollapsed = localStorage.getItem('mml_pianoRollCollapsed') === '1'; } catch (e) { /* ignore */ }
-      try { this._showCentsOverlay = localStorage.getItem('mml_pianoRollCentsOverlay') === '1'; } catch (e) { this._showCentsOverlay = false; }
+      // セント偏差オーバーレイは既定ON。保存が無い(初回)なら表示し、明示的に外したとき('0')だけ隠す
+      try { this._showCentsOverlay = localStorage.getItem('mml_pianoRollCentsOverlay') !== '0'; } catch (e) { this._showCentsOverlay = true; }
       rollHeader.innerHTML =
         `<span class="kbd-roll-toggle">${rollCollapsed ? '▶' : '▼'}</span>` +
         `<span class="kbd-roll-label">${T('ピアノロール')}</span>` +
