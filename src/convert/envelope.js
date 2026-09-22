@@ -76,6 +76,16 @@
       const maxPeriod = Math.min(MAX_LOOP_PERIOD, Math.floor(remain / MIN_LOOP_REPEATS));
       for (let period = MIN_LOOP_PERIOD; period <= maxPeriod; period++) {
         if (isPeriodicFrom(seq, start, period)) {
+          // ★ループ区間が1つの値だけ(減衰しきって保持しているだけの音符が period=2 の自明なループとして
+          //   見つかる)なら、ループでなく「末尾保持」の非ループ表にする(2026-09-22)。stepEnvelope も
+          //   ppmck も非ループ表は最後の値を保持するので鳴りは同じ。ループ表のままだと、同じ楽器でも
+          //   保持区間が6フレーム未満の短い音符だけ下の非ループ経路に落ち、registerShape がループ有りと
+          //   無しを決して共有しない規則のため { …2 2 | 1 1 } と { …2 2 1 } の2本に割れて音符ごとに
+          //   @v が入れ替わっていた(ローリングサンダー 曲1 の N163 ベース @v14/@v15)。
+          //   values は保持値を1点だけ残す(下の非ループ経路の末尾切り詰めと同じ形)。
+          let constant = true;
+          for (let i = start + 1; i < start + period; i++) if (seq[i] !== seq[start]) { constant = false; break; }
+          if (constant) return { values: seq.slice(0, start + 1), loop: null, holdLen: n - (start + 1) };
           return { values: seq.slice(0, start + period), loop: start };
         }
       }
@@ -159,11 +169,21 @@
   }
   // 短い表 shortShape(values の後を holdLen フレーム末尾保持)を長い値列 longValues で置き換えても、
   // 保持していた区間の値が変わらないか
+  // ★HOLD_MARGIN(2026-09-22): 短い方の観測が終わった「少し先」で長い方の表が音量を上げていないことも要る。
+  //   MML の音符長はフレーム格子への丸め(LEN_SNAP 等)で観測より数フレーム伸びることがあり、長い方の表が
+  //   観測の直後に打ち直し(エコー)を持っていると、伸びたぶんで2音目の頭が鳴ってしまう
+  //   (ごえもん外伝2: {6 5 4 3 3 1}(1を2フレーム保持)が {6 5 4 3 3 1 1 1 6 5 4 3 3 1} に相乗りし、
+  //    3フレーム後の 6 5 4 が聞こえる)。減衰の続き(4 4 3)や保持(1 1 1)は同じ楽器の自然な続きなので通す
+  //   (ローリングサンダー 曲1: 6フレームの音符 {5 6 6 6 5 4} は {5 6 6 6 5 4 4 4 3 2 2 1} を共有してよい)
+  const HOLD_MARGIN = 3;
   function holdCompatible(longValues, shortShape) {
     const L = shortShape.values.length;
     const hv = shortShape.values[L - 1];
-    const upto = Math.min(longValues.length, L + (shortShape.holdLen || 0));
-    for (let i = L; i < upto; i++) if (longValues[i] !== hv) return false;
+    const holdEnd = Math.min(longValues.length, L + (shortShape.holdLen || 0));
+    for (let i = L; i < holdEnd; i++) if (longValues[i] !== hv) return false;
+    let prev = hv;
+    const marginEnd = Math.min(longValues.length, holdEnd + HOLD_MARGIN);
+    for (let i = holdEnd; i < marginEnd; i++) { if (longValues[i] > prev) return false; prev = longValues[i]; }
     return true;
   }
 
@@ -201,8 +221,9 @@
     // 6でループし続ける長いノートに、たまたま同じ内容で終わる短いノート(実際は6の後も
     // ゆっくり減衰する)が紛れ込んだ)。
     // 理由(2) ループ有り同士でも危険: analyzeVolumeShapeは「同一値がMIN_LOOP_REPEATS*period
-    // 分以上続く」だけでもloopと判定する(例: 減衰後ずっと一定音量を保持するだけの音符も
-    // period=2の自明なループとして検出される)。この「単に保持しているだけ」のループと、
+    // 分以上続く」だけでもloopと判定していた(例: 減衰後ずっと一定音量を保持するだけの音符も
+    // period=2の自明なループとして検出される。★2026-09-22 からはこの自明なループを末尾保持の
+    // 非ループ表に正規化するので、以下の事故は「本当に周期的なループ」同士の話になる)。この「単に保持しているだけ」のループと、
     // 本当に音量が周期的に上下する(トレモロ・リアタック含む)別楽器のループが、たまたま
     // 前半の数値が一致するだけで前方一致と判定されることがある。ループ再生はloop位置以降を
     // 無限に繰り返す仕様のため、短い方のノートがloop開始位置に到達する前に長い方の
@@ -227,6 +248,12 @@
         if (shape.values.length > existing.values.length) {
           const observed = Math.max(existing.values.length + (existing.holdLen || 0), shape.values.length + (shape.holdLen || 0));
           this.tables.set(idx, Object.assign({}, shape, { holdLen: observed - shape.values.length }));
+          // ★キー表も差し替える(2026-09-22): 古い値列のキーが同じ番号を指したままだと、後から来る
+          //   「値列は古い表と同じだが保持が長い(=上の holdCompatible で弾かれる)」音符が下の完全一致
+          //   経路でこの番号に落ち、差し替え後の長い表(保持区間の先に別の値がある)で鳴ってしまう
+          //   (ごえもん外伝2: 3 を11フレーム保持する音符が、3 の直後に 1 へ落ちる表で鳴っていた)
+          this.swKeyToIndex.delete(shapeKey(existing));
+          if (!this.swKeyToIndex.has(shapeKey(shape))) this.swKeyToIndex.set(shapeKey(shape), idx);
         } else {
           existing.holdLen = Math.max(existing.holdLen || 0, shape.holdLen || 0);
         }

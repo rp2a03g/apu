@@ -200,6 +200,14 @@
     }
     flush(timeline.length);
 
+    // タイ候補の見直し: 前の音符と同じ音量列で頭から鳴り直していれば打ち直し
+    // (src/convert/retrigger.js isEnvelopeRestart。跳ね上がり量だけでは拾えない、頭が最大音量でない
+    //  エンベロープの打ち直し。ローリングサンダー 曲1 の N163 ベースで実測)
+    for (let i = 1; i < runs.length; i++) {
+      if (runs[i].tieCandidate && runs[i - 1].note != null &&
+          MML.Convert.isEnvelopeRestart(runs[i - 1].volSeq, runs[i].volSeq)) runs[i].tieCandidate = false;
+    }
+
     // パス2: 各ラン(同ピッチ・同波形の区間)ごとに、打ち直し境界が無いか判定して分割する。
     // 休符(note===null)は対象外。
     const events = [];

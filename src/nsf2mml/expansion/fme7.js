@@ -127,6 +127,13 @@
     }
     flush(timeline.length);
 
+    // タイ候補の見直し: 前の音符と同じ音量列で頭から鳴り直していれば打ち直し(N163 と同じ、
+    // src/convert/retrigger.js isEnvelopeRestart。ハードウェアエンベロープ中は音量列が無いので対象外)
+    for (let i = 1; i < events.length; i++) {
+      if (events[i].tieCandidate && !events[i].envUsed && events[i - 1].note != null && !events[i - 1].envUsed &&
+          MML.Convert.isEnvelopeRestart(events[i - 1].volSeq, events[i].volSeq)) events[i].tieCandidate = false;
+    }
+
     // パス2: 同じ音程が続くランの中の打ち直し(同音連打)を分ける(src/convert/retrigger.js、N163 と同じ)。
     // ハードウェアエンベロープ使用中はチップが音量を作るので対象外。
     // ★前の打ち直しの頭より 2 以上小さい音量への跳ね上がりは分けない: 音符の中のエコー
