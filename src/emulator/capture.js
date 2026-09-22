@@ -340,7 +340,15 @@
         if (!ctx.player.cpu.callActive) ctx.player.cpu.beginCall(ctx.player.header.playAddr);
         const regsOnlyExpansion = Object.values(ctx.player.bus.expansion);
         regsOnlyCycleAccum += CYCLES_PER_FRAME;
+        // フレーム内の時刻(0〜1)を renderFrame と同様に player.frameFrac へ出す。onWrite が
+        // writeLog の各書き込みに t として添え、NsfReplayStreamPlayer が $4011 直書きPCMを
+        // フレーム内の正しい位置で再生する。★ここを忘れると t が全部0になり、ブラウザ再生
+        // (Worker の regsOnly キャプチャ)でだけ水戸黄門の音声が潰れる(2026-09-22に実際に踏んだ)
+        let regsOnlyFrac = 0;
+        const regsOnlyFracStep = 1 / CYCLES_PER_FRAME;
         while (regsOnlyCycleAccum >= 1) {
+          ctx.player.frameFrac = regsOnlyFrac;
+          regsOnlyFrac += regsOnlyFracStep;
           if (regsOnlyCpuDebt <= 0) {
             if (ctx.player.cpu.callActive) regsOnlyCpuDebt += ctx.player.cpu.stepCall();
             else regsOnlyCpuDebt = 1;

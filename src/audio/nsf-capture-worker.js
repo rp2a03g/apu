@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-22 11:01:06
+ * Built by tools/build-capture-workers.ps1 at 2026-09-22 11:41:18
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-22 11:01:06';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-22 11:41:18';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -4881,7 +4881,15 @@
         if (!ctx.player.cpu.callActive) ctx.player.cpu.beginCall(ctx.player.header.playAddr);
         const regsOnlyExpansion = Object.values(ctx.player.bus.expansion);
         regsOnlyCycleAccum += CYCLES_PER_FRAME;
+        // フレーム内の時刻(0〜1)を renderFrame と同様に player.frameFrac へ出す。onWrite が
+        // writeLog の各書き込みに t として添え、NsfReplayStreamPlayer が $4011 直書きPCMを
+        // フレーム内の正しい位置で再生する。★ここを忘れると t が全部0になり、ブラウザ再生
+        // (Worker の regsOnly キャプチャ)でだけ水戸黄門の音声が潰れる(2026-09-22に実際に踏んだ)
+        let regsOnlyFrac = 0;
+        const regsOnlyFracStep = 1 / CYCLES_PER_FRAME;
         while (regsOnlyCycleAccum >= 1) {
+          ctx.player.frameFrac = regsOnlyFrac;
+          regsOnlyFrac += regsOnlyFracStep;
           if (regsOnlyCpuDebt <= 0) {
             if (ctx.player.cpu.callActive) regsOnlyCpuDebt += ctx.player.cpu.stepCall();
             else regsOnlyCpuDebt = 1;
