@@ -4,6 +4,7 @@
  *   node tools/headless/nsf-batch.js "D:/snd/nsf/foo.nsf"            # 1曲
  *   node tools/headless/nsf-batch.js "D:/snd/spc" --out _out         # フォルダごと
  *   node tools/headless/nsf-batch.js "pack.zip" --songs all --sec 60 # zip内全部・曲番号も全部
+ *   node tools/headless/nsf-batch.js "D:/snd/nsf" --per-game        # 元ファイルごとにフォルダを分ける
  *
  * 出力先(既定 _out/)に、曲ごとに
  *   <名前>.mml   変換結果(ブラウザでそのまま開ける)
@@ -97,7 +98,15 @@ function writeWav(file, a, sr) {
  */
 async function makeOne(item, bytes, song, opt) {
   const MML = ctx();
-  const stem = safeName(path.basename(item.name, path.extname(item.name)) + (opt.songSuffix ? `_s${song}` : ''));
+  // 同名の元ファイルが別フォルダにあると出力先がぶつかる(コーパスに1件あった:
+  // 素の .nsf と、同名を収めたサブフォルダ)。先に書いた曲を黙って上書きしないよう連番で逃がす
+  let stem = safeName(path.basename(item.name, path.extname(item.name)) + (opt.songSuffix ? `_s${song}` : ''));
+  if (opt.seen) {
+    const key = () => path.join(opt.out, stem).toLowerCase();  // Windowsは大小同一視
+    const base = stem;
+    for (let k = 2; opt.seen.has(key()); k++) stem = `${base}_${k}`;
+    opt.seen.add(key());
+  }
   const mmlPath = path.join(opt.out, stem + '.mml');
   const nsfPath = path.join(opt.out, stem + '.nsf');
 
@@ -168,7 +177,7 @@ async function main() {
   const inputs = argv.filter((a, i) => !a.startsWith('-') && !(i > 0 && VALUE_FLAGS.includes(argv[i - 1])));
   if (!inputs.length) {
     console.error('usage: node tools/headless/nsf-batch.js <ファイル|フォルダ...> [--out DIR] [--sec 30] [--songs all|0,2,5] [--max N]');
-    console.error('                                       [--preset plain|faithful] [--cmd D=0,EP=0,...] [--wav] [--sr 48000] [--skip-existing]');
+    console.error('                                       [--preset plain|faithful] [--cmd D=0,EP=0,...] [--wav] [--sr 48000] [--skip-existing] [--per-game]');
     process.exit(2);
   }
 
@@ -178,6 +187,7 @@ async function main() {
     sr: parseInt(flag('--sr', '48000'), 10),
     wav: argv.includes('--wav'),
     max: parseInt(flag('--max', '0'), 10) || 0,
+    perGame: argv.includes('--per-game'),
     skipExisting: argv.includes('--skip-existing'),
     cmd: parseCmdFlags(flag('--preset', null), flag('--cmd', null)),
   };
@@ -204,9 +214,14 @@ async function main() {
   console.error(`入力 ${files.length} ファイル / ${jobs.length} エントリ → ${opt.out}(各 ${opt.seconds} 秒)\n`);
 
   const lines = [];
+  const seen = new Set();   // 出力先(フォルダ+名前)の重複を見張る
   let done = 0, ng = 0, i = 0;
-  for (const { item } of jobs) {
+  for (const { file, item } of jobs) {
     i++;
+    // --per-game: 出力先を「元ファイル1本=1フォルダ」に分ける。アーカイブは中身が
+    // 同じゲームの曲なのでアーカイブ名でまとめる(曲ごとではない)
+    const outDir = opt.perGame ? path.join(opt.out, safeName(path.basename(file, path.extname(file)))) : opt.out;
+    if (outDir !== opt.out) fs.mkdirSync(outDir, { recursive: true });
     let bytes, songs;
     try {
       bytes = await item.read();
@@ -218,7 +233,7 @@ async function main() {
     }
     for (const song of songs) {
       try {
-        const r = await makeOne(item, bytes, song, Object.assign({ songSuffix: songs.length > 1 }, opt));
+        const r = await makeOne(item, bytes, song, Object.assign({ songSuffix: songs.length > 1 }, opt, { out: outDir, seen }));
         if (r.ok) done++; else ng++;
         console.log(`[${i}/${jobs.length}] ${r.line}`);
         lines.push(r.line);

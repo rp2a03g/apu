@@ -17,6 +17,7 @@ param(
     [string]$Cmd,
     [switch]$Wav,
     [switch]$SkipExisting,
+    [switch]$PerGame,
     [switch]$NoOpen
 )
 
@@ -25,7 +26,7 @@ $repo = (Resolve-Path "$PSScriptRoot\..").Path
 
 if (-not $Path -or $Path.Count -eq 0) {
     Write-Host "usage: .\tools\make-nsf.ps1 <file|folder ...> [-Out DIR] [-Sec 30] [-Songs all|0,2,5]"
-    Write-Host "                            [-Preset plain|faithful] [-Cmd D=0,EP=0,...] [-Wav] [-SkipExisting] [-NoOpen]"
+    Write-Host "                            [-Preset plain|faithful] [-Cmd D=0,EP=0,...] [-Wav] [-SkipExisting] [-PerGame] [-NoOpen]"
     exit 2
 }
 
@@ -59,6 +60,7 @@ if ($Preset) { $argsList.Add('--preset'); $argsList.Add($Preset) }
 if ($Cmd)    { $argsList.Add('--cmd');    $argsList.Add($Cmd) }
 if ($Wav)    { $argsList.Add('--wav') }
 if ($SkipExisting) { $argsList.Add('--skip-existing') }
+if ($PerGame) { $argsList.Add('--per-game') }
 
 & $node $argsList.ToArray()
 $code = $LASTEXITCODE
