@@ -135,6 +135,26 @@
   // N163固有の話ではなく(FME7等アタックレジスタを持たないチップ全般に言える)ため、
   // src/convert/retrigger.js に音源非依存の判定として切り出し、パス2でランごとに適用する
   // (詳細な判定方針はそちらのコメント参照)。
+  // prev+cur を並べた列が、prev の長さ以下の周期 p で(prev の途中から末尾まで、cur は全部)
+  // 繰り返しているか。p は「境界をまたぐ値が一致する」ものだけ試す(計算量の節約)。
+  const CONT_MAX_LEN = 1024;
+  function isPeriodicContinuation(pv, cv) {
+    const n = Math.min(pv.length, CONT_MAX_LEN);
+    if (n < 2 || cv.length < 1) return false;
+    const all = pv.slice(pv.length - n).concat(cv.slice(0, CONT_MAX_LEN));
+    // 平坦な列(v7 のまま)は続きの証拠にならない。書き直し=鳴り直しとして切る(33曲目の a>c を保つ)
+    let flat = true;
+    for (let k = 1; k < all.length; k++) if (all[k] !== all[0]) { flat = false; break; }
+    if (flat) return false;
+    for (let p = 2; p <= n; p++) {
+      if (all[n] !== all[n - p]) continue;
+      let ok = true;
+      for (let k = p; k < all.length; k++) if (all[k] !== all[k - p]) { ok = false; break; }
+      if (ok) return true;
+    }
+    return false;
+  }
+
   function extractChannelEvents(timeline, base) {
     // ★ノートオン信号(2026-08-26): 「そのフレームで音量レジスタ(+7)が書かれたか」。
     // N163にはキーオンが無く、ドライバは音符の頭で周波数と一緒に音量を書き直す。値が
@@ -189,12 +209,23 @@
         // (実測: 女神転生II 12曲目のQ/Rパート、境界で9→11=+2の跳ね上がり)。
         // 休符→音符(prevVol=0からの立ち上がり)もこの判定で自然にタイ候補から外れる。
         const prevVol = cur.volSeq[cur.volSeq.length - 1];
-        const reattack = useVolWriteSignal
-          ? !!(timeline[f].wrote && timeline[f].wrote.has(base + 7))
-          : (prevVol != null && (volume - prevVol) >= MML.Convert.RETRIGGER_JUMP_THRESHOLD);
+        // ★音量の書き直しだけでは打ち直しとみなさない(2026-09-22)。同じ値を書き直す音符の頭で、
+        //   全chに共通の遅いトレモロ(女神転生II 21曲目 P/Q/R: 1→8→1 を320フレームで往復する
+        //   LFO)が続いている曲では、書き直し=打ち直しにすると音程が変わるたびに @v が頭から
+        //   鳴り直され、LFOの位相が3パートでばらばらになる(「エンベロープが逆に動く」)。
+        //   ここでは「音量が上がった(書き直しつきなら+1でも、書き直し無しなら跳ね上がり)」だけを
+        //   打ち直しにし、同じ値の書き直しはタイ候補のまま次のパス(isEnvelopeRestart、
+        //   音量列の頭が前の音符と同じ形で始まっているか)に委ねる。頭が平坦で判定できない
+        //   ときはタイでも打ち直しでも音は同じ(2026-08-26 の 33曲目の件はこの経路で保たれる)
+        const wroteVol = !!(timeline[f].wrote && timeline[f].wrote.has(base + 7));
+        const rise = prevVol != null ? volume - prevVol : 0;
+        const reattack = rise >= MML.Convert.RETRIGGER_JUMP_THRESHOLD ||
+          (useVolWriteSignal && wroteVol && rise >= 1);
         const pureNoteChange = !reattack && note !== cur.note && waveKey === cur.waveKey;
         flush(f);
-        cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume], pitchSeq: [freqReg], tieCandidate: pureNoteChange };
+        cur = { note, wave, waveKey, rawFreq, rawNumCh: numCh, start: f, end: f, volSeq: [volume], pitchSeq: [freqReg], tieCandidate: pureNoteChange,
+                // 同じ音量を書き直した境界(打ち直しか、続いているLFOかは音量列が出揃ってから決める)
+                volRewrite: useVolWriteSignal && wroteVol && rise <= 0 };
       } else {
         cur.volSeq.push(volume);
         cur.pitchSeq.push(freqReg);
@@ -208,6 +239,19 @@
     for (let i = 1; i < runs.length; i++) {
       if (runs[i].tieCandidate && runs[i - 1].note != null &&
           MML.Convert.isEnvelopeRestart(runs[i - 1].volSeq, runs[i].volSeq)) runs[i].tieCandidate = false;
+    }
+    // 同じ音量を書き直した音程変化(volRewrite)の見直し(2026-09-22): タイは @v を再指定できないので、
+    // 新しい音符の音量列が「前の音符の音量列の周期的な続き」(前+新を並べたとき、前の長さ以下の周期で
+    // 全体が繰り返している)であるときだけタイのまま残し、そうでなければ打ち直しにする。
+    //   ・全chに共通の遅いトレモロ(女神転生II 21曲目 P/Q/R: 1→8→1 を320フレームで往復するLFO)は
+    //     音符ごとの音量列が同じ1周期なので続きと判定され、@v が頭から鳴り直されない
+    //   ・平坦な v7 の音の次に @v の減衰音が来る(同33曲目 P: 音量7を書き直して鳴り直す)のは
+    //     周期的でないので切れる(2026-08-26 の判定を保つ)
+    // 音量列の頭だけ(4フレーム)を見る案は、減衰の始まりが頭より後ろにある 33曲目で続きと誤判定した
+    for (let i = 1; i < runs.length; i++) {
+      const a = runs[i - 1], b = runs[i];
+      if (!b.tieCandidate || !b.volRewrite || a.note == null) continue;
+      if (!isPeriodicContinuation(a.volSeq, b.volSeq)) b.tieCandidate = false;
     }
 
     // パス2: 各ラン(同ピッチ・同波形の区間)ごとに、打ち直し境界が無いか判定して分割する。
