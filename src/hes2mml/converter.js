@@ -362,8 +362,10 @@
     // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
     MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, frameRate);
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
-      totalFrames, tempoBpm: bpm, cmd,
-      headerLines: [...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
+      // envReg: L で割られた音符の音量表を位相を合わせて続けるため(mmlEmit.js retargetEnvelope)。
+      // headerLines は本文の途中で音量表が増えるので関数で渡す(defLines() を後で評価)
+      totalFrames, tempoBpm: bpm, cmd, envReg,
+      headerLines: () => [...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(!customPlan || expansions.indexOf('n163') >= 0 ? n163WaveReg.defLines() : [])]
     });
     const mml = [headerComment, scoreText].join('\n');

@@ -1617,8 +1617,9 @@
     MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, FPS_SPC);
     if (scoreChannels.length > 0) {
       mml += MML.Convert.emitScore(scoreChannels, fpb,
-        { totalFrames: FRAMES, tempoBpm: bpm, cmd,
-          headerLines: [...MML.Convert.tuningHeaderLines(), ...vrc7Notes, ...envReg.defLines(), ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
+        // envReg: L で割られた音符の音量表を位相を合わせて続ける(mmlEmit.js retargetEnvelope)。headerLines は関数で
+        { totalFrames: FRAMES, tempoBpm: bpm, cmd, envReg,
+          headerLines: () => [...MML.Convert.tuningHeaderLines(), ...vrc7Notes, ...envReg.defLines(), ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
             ...pitchReg.defLines(), ...noteEnvReg.defLines()] }) + '\n';
     } else {
       for (const line of envReg.defLines()) mml += line + '\n';

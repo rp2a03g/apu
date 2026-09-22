@@ -1133,7 +1133,10 @@
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
       totalFrames, tempoBpm: bpm, cmd,
       loopHint: MML.VGM2MML.loopFrames(h, frameRate), // ループ自動検出(LOOP_DETECT)にヘッダのループ位置を渡す
-      headerLines: [
+      // envReg: L で割られた音符の音量表を位相を合わせて続けるため(mmlEmit.js retargetEnvelope)。
+      // headerLines は本文の途中で音量表が増えるので関数で渡す(defLines() を後で評価)
+      envReg,
+      headerLines: () => [
         ...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...(expansions.includes('n163') ? n163WaveReg.defLines() : []),
         ...(expansions.includes('fds') ? fdsWaveReg.defLines() : []),
