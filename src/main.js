@@ -9402,19 +9402,17 @@
       dragDepth = Math.max(0, dragDepth - 1);
       if (dragDepth === 0 && dropOverlayEl) dropOverlayEl.classList.remove('visible');
     });
-    document.addEventListener('drop', (e) => {
-      if (!isFileDrag(e)) return;
-      e.preventDefault();
-      dragDepth = 0;
-      if (dropOverlayEl) dropOverlayEl.classList.remove('visible');
-      const dropped = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    // ドロップされたファイルを開いて再生する本体。ミニ操作窓(別文書なのでここの
+    // document宛のハンドラが届かない)からも同じ入口へ入れるよう関数にしてある。
+    // ★item は呼び出し元の drop ハンドラを抜けると無効になるので、この関数の同期部分で使い切る
+    function openDroppedFiles(dropped, item) {
       if (dropped.length && dropped.every(isDmcFile)) { openDmcOnly(dropped); return; }
       const file = pickPrimarySoundFile(dropped);
       if (!file) return;
-      // DataTransferItemはこのハンドラを抜けると無効になるので、ハンドルの取得だけは
-      // ここで同期的に始める(awaitは後でよい)。.mmlをドロップしたときに外部エディタとの
-      // 同期対象にするために使う(src/ui/fileSync.js)。取れなければ従来どおり読むだけ
-      const handlePromise = MML.UI.FileSync.handleFromDropItem(e.dataTransfer.items && e.dataTransfer.items[0]);
+      // ハンドルの取得だけはここで同期的に始める(awaitは後でよい)。.mmlをドロップした
+      // ときに外部エディタとの同期対象にするために使う(src/ui/fileSync.js)。
+      // 取れなければ従来どおり読むだけ
+      const handlePromise = MML.UI.FileSync.handleFromDropItem(item);
       // ドラッグ&ドロップは開いた直後に自動再生まで行う(ファイル選択ダイアログとの
       // 唯一の挙動差。ensureKeyboardWindowOpen/showSoundPanel等の中身はopenSoundFile側で共通)。
       Promise.resolve(handlePromise).catch(() => null).then((handle) => {
@@ -9423,7 +9421,19 @@
         const playFn = ext && formatToPlayFn[ext];
         if (playFn) playFn();
       });
+    }
+    document.addEventListener('drop', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      dragDepth = 0;
+      if (dropOverlayEl) dropOverlayEl.classList.remove('visible');
+      const dropped = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+      openDroppedFiles(dropped, e.dataTransfer.items && e.dataTransfer.items[0]);
     });
+    // ミニ操作窓(Document Picture-in-Picture)は別文書なので、上の document 宛の
+    // ハンドラでは拾えない。配線しないとブラウザ既定動作でファイルがダウンロード/
+    // 別タブ表示になってアプリの外へ出てしまうため、小窓側にも同じ経路をつなぐ
+    MiniTransport.setDropHandler(openDroppedFiles);
 
     // 鍵盤表示を閉じたらサウンドファイルの再生を止め、先読みキャプチャ(writeLog/snapshots等)も
     // 破棄する(floatingWindows.jsの汎用closeハンドラは表示/非表示の切替のみで、鳴りっぱなし・

@@ -56,6 +56,8 @@
   let hooks = {};
   let btns = {};
   let titleEl = null, badgeEl = null, repeatEl = null, mutesEl = null, mutesHeadEl = null;
+  let dropHintEl = null;  // ファイルをドラッグ中だけ小窓に重ねる案内
+  let onDropFiles = null; // main.js の「開いて再生」(setDropHandler で受け取る)
   let mutesOpen = false;  // 既定は畳む(拡張音源を積むと30行近くになるため)
   let state = { playing: false, canPlay: false, canStop: false, canPrevNext: false, canToggleSource: false, kind: 'mml' };
   let channels = [];
@@ -159,6 +161,13 @@
     mutesEl.className = 'mini-tp-row mini-tp-mutes';
     root.appendChild(mutesEl);
 
+    // ドラッグ中だけ出す案内。小窓は狭いので中身に重ねる(pointer-events:none なので
+    // 下のボタンの邪魔はしない)。文言は本体ページのドロップ案内と同じものを使い回す
+    dropHintEl = document.createElement('div');
+    dropHintEl.className = 'mini-tp-drop';
+    dropHintEl.hidden = true;
+    root.appendChild(dropHintEl);
+
     document.body.appendChild(root);
     render();
     renderMutes(); // まだチャンネルが無いので、この時点では見出しごと隠れる
@@ -200,6 +209,43 @@
     }
   }
 
+  // ファイルのドラッグ&ドロップ。小窓は本体ページとは別の文書なので、main.js が
+  // document へ付けているドロップの配線が一切届かない。何もしないとブラウザ既定動作で
+  // 落としたファイルがそのまま開かれる(ダウンロード扱いになる)ため、この文書にも
+  // 同じ配線をして本体と同じ「開いて再生」(setDropHandler で渡される)へ入れる。
+  // dragenter/dragleave は子要素の出入りでも飛ぶので、本体側と同じく深度で数える
+  function wireDrop(doc) {
+    let depth = 0;
+    const isFileDrag = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+    const hint = (on) => { if (dropHintEl) dropHintEl.hidden = !on; };
+    doc.addEventListener('dragenter', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      depth++;
+      hint(true);
+    });
+    doc.addEventListener('dragover', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); // ★これが無いと drop 自体が飛ばない
+    });
+    doc.addEventListener('dragleave', (e) => {
+      if (!isFileDrag(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (!depth) hint(false);
+    });
+    doc.addEventListener('drop', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); // ★これが無いとファイルがダウンロードされてしまう
+      depth = 0;
+      hint(false);
+      const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+      if (!files.length || !onDropFiles) return;
+      // DataTransferItem はこのハンドラを抜けると無効になるので、そのまま渡して
+      // 受け手(main.js)の同期部分で使い切ってもらう(.mml の外部エディタ同期用)
+      onDropFiles(files, e.dataTransfer.items && e.dataTransfer.items[0]);
+    });
+  }
+
   // ★クリックハンドラの中から呼ぶこと(user activation 必須)
   async function open() {
     if (!supported()) return { ok: false, unsupported: true };
@@ -217,6 +263,7 @@
     applyVars(doc);
     styleFor(doc);
     doc.body.className = 'mini-tp-body';
+    wireDrop(doc); // 小窓へファイルを落としても本体と同じように開いて鳴る
     root.hidden = false;
     doc.body.appendChild(root); // 本体文書から小窓へ移す(adoptNodeは自動、ハンドラは維持される)
     // ユーザーが小窓を閉じたとき(×やOSの閉じる)に中身を本体へ戻す。
@@ -277,6 +324,7 @@
       : T('切り替える相手のファイルがありません');
     if (state.repeatSvg) repeatEl.innerHTML = state.repeatSvg;
     if (state.repeatLabel) repeatEl.title = state.repeatLabel;
+    if (dropHintEl) dropHintEl.textContent = T('ここにドロップしてサウンド/MMLファイルを開く');
     titleEl.textContent = state.title || '';
     titleEl.title = state.title || '';
   }
@@ -330,6 +378,10 @@
     }
   }
 
+  // main.js のドロップ処理を受け取る。小窓は別文書なので本体側の配線が届かず、
+  // ここで受けた関数を小窓の drop から呼ぶ(引数は本体の drop ハンドラと同じ)
+  function setDropHandler(fn) { onDropFiles = typeof fn === 'function' ? fn : null; }
+
   function init(opts) {
     hooks = opts || {};
     try { mutesOpen = localStorage.getItem(MUTES_KEY) === '1'; } catch (e) { mutesOpen = false; }
@@ -337,7 +389,7 @@
   }
 
   MML.UI.MiniTransport = {
-    init, open, close, setState, setChannels, render, setMutesOpen,
+    init, open, close, setState, setChannels, render, setMutesOpen, setDropHandler,
     supported, isOpen,
   };
 })(window);

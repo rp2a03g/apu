@@ -332,6 +332,7 @@ header h1.app-title .app-version:empty { display: none; }
   flex-direction: column;
   gap: 4px;
   padding: 6px 8px;
+  position: relative; /* ドロップ案内(.mini-tp-drop)を重ねるため */
   background: var(--panel);
   color: var(--text);
   font-size: 12px;
@@ -341,6 +342,29 @@ header h1.app-title .app-version:empty { display: none; }
    強いので、hidden を付けても消えない。畳んだ行と、本体側へ戻してある小窓の中身を
    本当に消すためにこの2行が要る(小窓を閉じているあいだ中身は本体の文書に居る) */
 .mini-tp[hidden] { display: none !important; }
+/* 小窓へファイルをドラッグしているあいだだけ重なる案内。本体ページの .drop-overlay と
+   同じ役目だが、小窓は狭いので中身の上に重ねるだけにしてある。
+   ★小窓の文書へは style.css から「.mini-tp / .seek- で始まる規則」だけを写しているので
+     (miniTransport.js の styleFor)、クラス名の頭は .mini-tp のままにすること */
+.mini-tp-drop {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  background: var(--panel);
+  border: 2px dashed var(--accent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none; /* 下のボタンのドロップ判定を邪魔しない */
+}
+/* display:flex は [hidden] のUA既定に勝ってしまうので明示的に消す */
+.mini-tp-drop[hidden] { display: none !important; }
 .mini-tp [hidden] { display: none !important; }
 .mini-tp-main { gap: 2px; }
 .mini-tp-btn {
