@@ -28,3 +28,6 @@ tools/headless/dump*/
 tools/headless/baseline-*.json
 # 手元の作業計画(実装ログ兼用。公開しない。公開向けの実装メモは IMPLEMENTATION.md)
 ROADMAP.md
+
+# 耳で確かめる用の一括変換出力(nsf-batch.js / make-nsf.ps1 の既定の出力先)
+_out/

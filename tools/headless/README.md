@@ -23,6 +23,7 @@ export PATH="$PATH:/path/to/nodejs"
 | `load.js` | `index.html` の script を順に読み込む。単体実行で読み込みレポート |
 | `shim.js` | 最小のDOM/AudioContext/Workerシム。UIコードが読み込み時に落ちないための張りぼて |
 | `convert.js` | 変換API + CLI(NSF/SPC/KSS/GBS/HES/VGM/PSF、zip/7z/gzip内も可。PSFの `_lib` は同じzip/フォルダから引く) |
+| `nsf-batch.js` | 変換 → コンパイル → NSF書き出しを一括で(耳で確かめる用。`.mml`/`.nsf`/`.dmc` を出力先へ並べる) |
 | `regress.js` | コーパス一括変換のスナップショット回帰テスト |
 | `audio-check.js` | 実際に鳴らした音を数値で点検(クリップ/DC/無音/オクターブずれ/プチノイズ) |
 | `cpu-test.js` | CPU命令テストCLI(検証ロジックは `../cpu-test-core.js` をブラウザ版と共有) |
@@ -82,6 +83,31 @@ node tools/headless/convert.js "path/to/song.nsf" --sec 15
 hes は「トラック番号そのもの」(HESの `firstTrack` は0/1始まりの規約が無く、
 ゲームがINIT時のAレジスタとして直接解釈する任意の8bit値)。省略時は
 `startingSong` / `firstSong` / `firstTrack` を使うので、基本は省略が正しい。
+
+### 聴いて確かめる用の一括書き出し
+
+```bash
+node tools/headless/nsf-batch.js "path/to/songs" --out _out --sec 60
+```
+
+ファイル・フォルダ(再帰)・zip/7z を渡すと、曲ごとに **変換結果の `.mml` と、それを
+コンパイルして ppmck ドライバに載せた `.nsf`** を出力先(既定 `_out/`)へ並べる。
+NSFPlay なり実機なりで順に聴けば、変換の出来をそのまま耳で確かめられる。
+`@DPCM` が出た曲は `.dmc` も同じフォルダへ置くので、`.mml` をブラウザで開き直せる
+(曲をまたいで同名の `.dmc` が中身違いでぶつかるときは曲名を頭に付けて別ファイルにし、
+本文の参照も差し替える)。
+
+オプションは `--songs all|0,2,5`(曲番号。意味は `--song` と同じ)、`--max N`(1つの
+アーカイブから先頭N曲だけ)、`--wav`(ブラウザ再生と同じ描画のWAVも書く)、
+`--skip-existing`(`.nsf` が既にある曲を飛ばす)、`--preset`/`--cmd`(convert.js と同じ)。
+一覧は `_report.txt` にも残る。コンパイルエラーやドライバのアセンブル失敗はその曲だけ
+❌ で飛ばし、最後に件数を出す(失敗があれば exit 1)。
+
+Windows なら PowerShell のラッパーもある(終わると出力フォルダを開く):
+
+```powershell
+.\tools\make-nsf.ps1 "path\to\songs" -Sec 60
+```
 
 ### 一括回帰テスト
 
