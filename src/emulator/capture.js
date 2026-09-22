@@ -147,15 +147,17 @@
     // RAMを直接採取して nsf2mml抽出/ピアノロールへ渡す(この不一致がN163変換崩れの根因)。
     const n163Snapshots = new Array(totalFrames);
 
+    // t: フレーム内の書込み時刻(0〜1、NsfPlayer.renderFrameが更新)。NsfReplayStreamPlayerが
+    // 書き込みをフレーム内の正しい位置で再適用するのに使う。ロール/nsf2mmlは見ない
     let pendingWrites = [];
-    player.bus.onWrite = (addr, value) => pendingWrites.push({ addr, value });
+    player.bus.onWrite = (addr, value) => pendingWrites.push({ addr, value, t: player.frameFrac || 0 });
 
     // INIT後・PLAY前の初期レジスタ状態をスナップショット
     const initRegs = Object.assign({}, runningRegs);
 
     return { player, sampleRate, frameRate, totalFrames, samplesPerFrame, totalSamples,
              raw, writeLog, regSnapshots, cpuSnapshots, memSnapshots, apuEnvSnapshots, n163Snapshots, runningRegs, initRegs, initWrites,
-             pendingWritesRef: { get current() { return pendingWrites; }, set(v) { pendingWrites = v; player.bus.onWrite = (a, val) => pendingWrites.push({ addr: a, value: val }); } } };
+             pendingWritesRef: { get current() { return pendingWrites; }, set(v) { pendingWrites = v; player.bus.onWrite = (a, val) => pendingWrites.push({ addr: a, value: val, t: player.frameFrac || 0 }); } } };
   }
 
   /**

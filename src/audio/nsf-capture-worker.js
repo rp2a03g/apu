@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-22 10:35:29
+ * Built by tools/build-capture-workers.ps1 at 2026-09-22 11:01:06
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-22 10:35:29';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-22 11:01:06';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -4510,6 +4510,11 @@
       // ($4011直書きPCM等)を正しく反映する。cpuDebt(CPUが先行実行したサイクル)は
       // フレーム境界を跨いで持ち越す。
       for (let i = 0; i < samplesThisFrame; i++) {
+        // フレーム内の現在時刻(0〜1)。bus.onWrite(キャプチャのwriteLog)が各書き込みに
+        // 時刻を添えるのに使う($4011直書きPCMのように1フレームに十数回書く曲を、
+        // 書き込みログから再生するNsfReplayStreamPlayerがフレーム内の正しい位置で
+        // 再現するため。以前はフレーム頭で一括適用され、水戸黄門の音声が潰れていた)
+        this.frameFrac = i / samplesThisFrame;
         this.cycleAccum += cyclesPerSample;
         while (this.cycleAccum >= 1) {
           if (this.cpuDebt <= 0) {
@@ -4683,15 +4688,17 @@
     // RAMを直接採取して nsf2mml抽出/ピアノロールへ渡す(この不一致がN163変換崩れの根因)。
     const n163Snapshots = new Array(totalFrames);
 
+    // t: フレーム内の書込み時刻(0〜1、NsfPlayer.renderFrameが更新)。NsfReplayStreamPlayerが
+    // 書き込みをフレーム内の正しい位置で再適用するのに使う。ロール/nsf2mmlは見ない
     let pendingWrites = [];
-    player.bus.onWrite = (addr, value) => pendingWrites.push({ addr, value });
+    player.bus.onWrite = (addr, value) => pendingWrites.push({ addr, value, t: player.frameFrac || 0 });
 
     // INIT後・PLAY前の初期レジスタ状態をスナップショット
     const initRegs = Object.assign({}, runningRegs);
 
     return { player, sampleRate, frameRate, totalFrames, samplesPerFrame, totalSamples,
              raw, writeLog, regSnapshots, cpuSnapshots, memSnapshots, apuEnvSnapshots, n163Snapshots, runningRegs, initRegs, initWrites,
-             pendingWritesRef: { get current() { return pendingWrites; }, set(v) { pendingWrites = v; player.bus.onWrite = (a, val) => pendingWrites.push({ addr: a, value: val }); } } };
+             pendingWritesRef: { get current() { return pendingWrites; }, set(v) { pendingWrites = v; player.bus.onWrite = (a, val) => pendingWrites.push({ addr: a, value: val, t: player.frameFrac || 0 }); } } };
   }
 
   /**

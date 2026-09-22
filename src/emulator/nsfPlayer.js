@@ -98,6 +98,11 @@
       // ($4011直書きPCM等)を正しく反映する。cpuDebt(CPUが先行実行したサイクル)は
       // フレーム境界を跨いで持ち越す。
       for (let i = 0; i < samplesThisFrame; i++) {
+        // フレーム内の現在時刻(0〜1)。bus.onWrite(キャプチャのwriteLog)が各書き込みに
+        // 時刻を添えるのに使う($4011直書きPCMのように1フレームに十数回書く曲を、
+        // 書き込みログから再生するNsfReplayStreamPlayerがフレーム内の正しい位置で
+        // 再現するため。以前はフレーム頭で一括適用され、水戸黄門の音声が潰れていた)
+        this.frameFrac = i / samplesThisFrame;
         this.cycleAccum += cyclesPerSample;
         while (this.cycleAccum >= 1) {
           if (this.cpuDebt <= 0) {

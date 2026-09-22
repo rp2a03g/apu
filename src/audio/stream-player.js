@@ -640,6 +640,7 @@
       this.bus = new MML.Emu.NsfBus(this.busOpt);
       this.apu = new MML.Emu.APU2A03(this.bus);
       this.bus.setApu(this.apu);
+      this._dacWrites = null; this._dacIdx = 0; // 未適用のDAC書き込み(_applyDacWrites)は作り直しで捨てる
       for (const w of this.initWrites) this.bus.write(w.addr, w.value);
       // seek()等でbusが作り直されてもライブ鍵盤モニタ用フックが失われないよう保持しておく
       if (this._onWriteHook) this.bus.onWrite = this._onWriteHook;
@@ -689,10 +690,24 @@
       return !!(this.writeLog && this.writeLog[f]);
     }
 
+    // DAC直書き($4011=2A03 DMC、$5011=MMC5 PCM)だけはフレーム頭で一括適用せず、書き込みログの
+    // 時刻 t(0〜1、captureSongが付ける)に従ってフレーム内の正しい位置で適用する(_applyDacWrites)。
+    // ソフトウェアPCM(水戸黄門の音声など1フレームに十数回書く)を一括にすると最後の1値しか
+    // 残らず音が潰れる。他のレジスタは従来どおり頭で一括(タイミング差は聴感上出ない)。
+    _isDacWrite(addr) { return addr === 0x4011 || addr === 0x5011; }
+
     _applyFrame(f) {
       this.currentFrame = f;
+      // 前フレームの未適用DAC書き込みが残っていれば(シーク等でフレームを飛ばした)先に流す
+      this._applyDacWrites(1);
       const writes = this.writeLog[f];
-      if (writes) for (const w of writes) this.bus.write(w.addr, w.value);
+      this._dacWrites = null; this._dacIdx = 0;
+      if (writes) {
+        for (const w of writes) {
+          if (this._isDacWrite(w.addr) && w.t !== undefined) { (this._dacWrites || (this._dacWrites = [])).push(w); }
+          else this.bus.write(w.addr, w.value);
+        }
+      }
       // N163は書き込み再生だけだとポインタドリフトで破壊されるため、ライブRAM
       // スナップショットで(位相バイトを除き)上書きして正しい状態に補正する
       if (this.n163Snapshots && this.bus.expansion.n163) {
@@ -721,6 +736,16 @@
       if (this.n163Snapshots && this._scanBus.expansion.n163) {
         applyN163RamSnapshot(this._scanBus.expansion.n163, this.n163Snapshots[f]);
       }
+    }
+
+    // 現フレームのDAC書き込みのうち、時刻がfrac(フレーム内位置0〜1)以前のものを適用する
+    _applyDacWrites(frac) {
+      const ws = this._dacWrites;
+      if (!ws) return;
+      let i = this._dacIdx;
+      while (i < ws.length && ws[i].t <= frac) { this.bus.write(ws[i].addr, ws[i].value); i++; }
+      this._dacIdx = i;
+      if (i >= ws.length) this._dacWrites = null;
     }
 
     // fromFrame(実再生の現在地に相当)からスキャンをやり直す。load/stop/seekから呼ぶ。
@@ -808,6 +833,7 @@
         this._songFramePos = nextSongFramePos;
         const pv = this.preview && this.preview.enabled ? this.preview : null; // 割当プレビュー(src/audio/assign-preview.js)
         if (f !== this.currentFrame) { this._applyFrame(f); if (pv) pv.onFrame(f); }
+        this._applyDacWrites(nextSongFramePos - f);
 
         this.cycleAccum += CPU_CLOCK_NTSC / sr;
         while (this.cycleAccum >= 1) {
