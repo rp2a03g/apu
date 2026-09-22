@@ -189,6 +189,18 @@ function main() {
     if (code !== 0) bad++;
   }
 
+  // 再生エンジン(書き込みログの再適用)がCPU直接合成と同じ音か(tools/headless/replay-check.js)。
+  // 変換の回帰は captureSong しか通らないので、ブラウザ再生だけが壊れる種類の不具合
+  // ($4011音声がフレーム頭に潰れる等)はこれでしか捕まえられない
+  if (!argv.includes('--no-replay')) {
+    process.stderr.write('\n=== replay ===\n');
+    const { code, out } = run([path.join(__dirname, 'replay-check.js'), '--corpus-root', root]);
+    process.stderr.write(out.trim() + '\n');
+    const m = out.match(/replay: OK (\d+) \/ NG (\d+) \/ skip (\d+)/);
+    rows.push(['replay', m ? String(+m[1] + +m[2]) : '?', m ? m[1] : '-', m ? m[2] : 'NG', '-', m ? m[3] + ' skip' : '-']);
+    if (code !== 0) bad++;
+  }
+
   if (!argv.includes('--no-i18n')) {
     // 辞書の重複キー検査。en.js は素のオブジェクトリテラルなので同じキーを2回書くと
     // 後勝ちで前の訳が黙って消える。i18n.js の missing() は未訳しか見ず、これまで
