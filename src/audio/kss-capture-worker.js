@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-22 11:41:18
+ * Built by tools/build-capture-workers.ps1 at 2026-09-22 12:12:57
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-22 11:41:18';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-09-22 12:12:57';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -5211,8 +5211,12 @@
     runningRegs[0x4017] = 0x40; initWrites.push({ addr: 0x4017, value: 0x40 });
     runningRegs[0x4015] = 0x0F; initWrites.push({ addr: 0x4015, value: 0x0F });
     player.bus.onWrite = (a, val) => { runningRegs[a] = val; initWrites.push({ addr: a, value: val }); };
+    // 読み出しに副作用があるポート(N163 $4800)の読み出しも順序どおり記録する(read:true、value は0)。
+    // 再生側はこれを bus.read として再現し、書き込み先ポインタのずれを防ぐ(nsfBus.js onRead参照)
+    player.bus.onRead = (a) => initWrites.push({ addr: a, value: 0, read: true });
     player.initSong(songIndex, !!opt.pal);
     player.bus.onWrite = null;
+    player.bus.onRead = null;
 
     if (opt.mute) {
       if (opt.mute.apu) Emu.applyMute(player.apu.mute, opt.mute.apu);
@@ -5247,13 +5251,14 @@
     // 書き込みをフレーム内の正しい位置で再適用するのに使う。ロール/nsf2mmlは見ない
     let pendingWrites = [];
     player.bus.onWrite = (addr, value) => pendingWrites.push({ addr, value, t: player.frameFrac || 0 });
+    player.bus.onRead = (addr) => pendingWrites.push({ addr, value: 0, read: true, t: player.frameFrac || 0 });
 
     // INIT後・PLAY前の初期レジスタ状態をスナップショット
     const initRegs = Object.assign({}, runningRegs);
 
     return { player, sampleRate, frameRate, totalFrames, samplesPerFrame, totalSamples,
              raw, writeLog, regSnapshots, cpuSnapshots, memSnapshots, apuEnvSnapshots, n163Snapshots, runningRegs, initRegs, initWrites,
-             pendingWritesRef: { get current() { return pendingWrites; }, set(v) { pendingWrites = v; player.bus.onWrite = (a, val) => pendingWrites.push({ addr: a, value: val, t: player.frameFrac || 0 }); } } };
+             pendingWritesRef: { get current() { return pendingWrites; }, set(v) { pendingWrites = v; player.bus.onWrite = (a, val) => pendingWrites.push({ addr: a, value: val, t: player.frameFrac || 0 }); player.bus.onRead = (a) => pendingWrites.push({ addr: a, value: 0, read: true, t: player.frameFrac || 0 }); } } };
   }
 
   /**
@@ -5331,7 +5336,7 @@
     pendingWritesRef.set([]);
     const frame = player.renderFrame(sampleRate);
     writeLog[f] = pendingWritesRef.current;
-    for (const w of pendingWritesRef.current) runningRegs[w.addr] = w.value;
+    for (const w of pendingWritesRef.current) if (!w.read) runningRegs[w.addr] = w.value;
     // 書き込みが1件も無かったフレームは前フレームとスナップショットが同一なので、
     // オブジェクトを共有してアロケーション(=GC圧)を減らす。消費側(ピアノロール/
     // モニタ/nsf2mml)はいずれも読み取り専用アクセスのため共有しても安全。
@@ -5455,7 +5460,7 @@
           regsOnlyCycleAccum -= 1;
         }
         ctx.writeLog[f] = ctx.pendingWritesRef.current;
-        for (const w of ctx.pendingWritesRef.current) ctx.runningRegs[w.addr] = w.value;
+        for (const w of ctx.pendingWritesRef.current) if (!w.read) ctx.runningRegs[w.addr] = w.value;
         // 書き込み無しフレームは前フレームとスナップショット同一なのでオブジェクトを共有
         // (_processFrame側の同名コメント参照)
         ctx.regSnapshots[f] = (f > 0 && ctx.pendingWritesRef.current.length === 0)

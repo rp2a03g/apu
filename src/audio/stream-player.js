@@ -551,6 +551,13 @@
     }
     return s;
   })();
+  // 書き込みログ1件をチップへ再現する。read:true の項目(N163 $4800 の読み出し、capture.js)は
+  // bus.read でオートインクリメントだけ進める(値は捨てる)
+  function applyLogEntry(bus, w) {
+    if (w.read) bus.read(w.addr);
+    else bus.write(w.addr, w.value);
+  }
+
   function applyN163RamSnapshot(n163, snapshotRam) {
     if (!n163 || !snapshotRam) return;
     const dst = n163.ram;
@@ -640,8 +647,8 @@
       this.bus = new MML.Emu.NsfBus(this.busOpt);
       this.apu = new MML.Emu.APU2A03(this.bus);
       this.bus.setApu(this.apu);
-      this._dacWrites = null; this._dacIdx = 0; // 未適用のDAC書き込み(_applyDacWrites)は作り直しで捨てる
-      for (const w of this.initWrites) this.bus.write(w.addr, w.value);
+      this._timedWrites = null; this._timedIdx = 0; // 未適用の時刻付き書き込み(_applyTimedWrites)は作り直しで捨てる
+      for (const w of this.initWrites) applyLogEntry(this.bus, w);
       // seek()等でbusが作り直されてもライブ鍵盤モニタ用フックが失われないよう保持しておく
       if (this._onWriteHook) this.bus.onWrite = this._onWriteHook;
       // 同様にミュート設定もbus/apu/拡張音源を作り直すたびに失われる(新しいチップ
@@ -690,28 +697,31 @@
       return !!(this.writeLog && this.writeLog[f]);
     }
 
-    // DAC直書き($4011=2A03 DMC、$5011=MMC5 PCM)だけはフレーム頭で一括適用せず、書き込みログの
-    // 時刻 t(0〜1、captureSongが付ける)に従ってフレーム内の正しい位置で適用する(_applyDacWrites)。
-    // ソフトウェアPCM(水戸黄門の音声など1フレームに十数回書く)を一括にすると最後の1値しか
-    // 残らず音が潰れる。他のレジスタは従来どおり頭で一括(タイミング差は聴感上出ない)。
-    _isDacWrite(addr) { return addr === 0x4011 || addr === 0x5011; }
-
+    // 書き込みログはフレーム頭で一括適用せず、各項目の時刻 t(0〜1、captureSongが付ける)に従って
+    // フレーム内の正しい位置で適用する(_applyTimedWrites)。一括にすると
+    //   ・ソフトウェアPCM(水戸黄門の $4011 音声、1フレームに百回以上)が最後の1値に潰れる
+    //   ・N163のデチューン重ね(女神転生II)で、真値ではPLAY内で数百サイクルずつずれて始まる各chの
+    //     キーオンが同時になり、相対位相が変わって高次倍音の干渉パターンが別物になる(類似度0.92)
+    // t の無い古いログはフレーム頭で適用する(従来どおり)。
     _applyFrame(f) {
       this.currentFrame = f;
-      // 前フレームの未適用DAC書き込みが残っていれば(シーク等でフレームを飛ばした)先に流す
-      this._applyDacWrites(1);
+      // 前フレームの未適用分が残っていれば(シーク等でフレームを飛ばした)先に流す
+      this._applyTimedWrites(1);
+      // N163: フレーム頭の状態を「前フレーム末のライブRAMスナップショット」で補正する
+      // (位相バイトを除く)。読み出し(read:true)もログにあるので通常はログ再生だけで一致するが、
+      // ログに無い経路でRAMが変わった場合の保険。スナップショット[f]はフレームfの末尾の状態
+      // なので、頭で当てると1フレーム早くなる(以前はそうしていた)
+      const n163 = this.bus.expansion.n163;
+      if (this.n163Snapshots && n163 && f > 0 && this.n163Snapshots[f - 1]) {
+        applyN163RamSnapshot(n163, this.n163Snapshots[f - 1]);
+      }
       const writes = this.writeLog[f];
-      this._dacWrites = null; this._dacIdx = 0;
+      this._timedWrites = null; this._timedIdx = 0;
       if (writes) {
         for (const w of writes) {
-          if (this._isDacWrite(w.addr) && w.t !== undefined) { (this._dacWrites || (this._dacWrites = [])).push(w); }
-          else this.bus.write(w.addr, w.value);
+          if (w.t !== undefined) { (this._timedWrites || (this._timedWrites = [])).push(w); }
+          else applyLogEntry(this.bus, w);
         }
-      }
-      // N163は書き込み再生だけだとポインタドリフトで破壊されるため、ライブRAM
-      // スナップショットで(位相バイトを除き)上書きして正しい状態に補正する
-      if (this.n163Snapshots && this.bus.expansion.n163) {
-        applyN163RamSnapshot(this.bus.expansion.n163, this.n163Snapshots[f]);
       }
     }
 
@@ -723,7 +733,7 @@
       this._scanBus = new MML.Emu.NsfBus(this.busOpt);
       this._scanApu = new MML.Emu.APU2A03(this._scanBus);
       this._scanBus.setApu(this._scanApu);
-      for (const w of this.initWrites) this._scanBus.write(w.addr, w.value);
+      for (const w of this.initWrites) applyLogEntry(this._scanBus, w);
       // ★ミュート/ch別音量はスキャンへ反映しない。これらは「聴き方」の設定であって曲の
       // 内容ではないため、全chミュートすると曲が終わったと誤判定して次の曲へ飛んでしまう
       // (不具合報告。以前は「実再生と無音判定基準を揃える」ため反映していた)。
@@ -732,20 +742,20 @@
     _scanApplyFrame(f) {
       this._scanFrame = f;
       const writes = this.writeLog[f];
-      if (writes) for (const w of writes) this._scanBus.write(w.addr, w.value);
+      if (writes) for (const w of writes) applyLogEntry(this._scanBus, w);
       if (this.n163Snapshots && this._scanBus.expansion.n163) {
         applyN163RamSnapshot(this._scanBus.expansion.n163, this.n163Snapshots[f]);
       }
     }
 
-    // 現フレームのDAC書き込みのうち、時刻がfrac(フレーム内位置0〜1)以前のものを適用する
-    _applyDacWrites(frac) {
-      const ws = this._dacWrites;
+    // 現フレームの時刻付き書き込みのうち、時刻がfrac(フレーム内位置0〜1)以前のものを適用する
+    _applyTimedWrites(frac) {
+      const ws = this._timedWrites;
       if (!ws) return;
-      let i = this._dacIdx;
-      while (i < ws.length && ws[i].t <= frac) { this.bus.write(ws[i].addr, ws[i].value); i++; }
-      this._dacIdx = i;
-      if (i >= ws.length) this._dacWrites = null;
+      let i = this._timedIdx;
+      while (i < ws.length && ws[i].t <= frac) { applyLogEntry(this.bus, ws[i]); i++; }
+      this._timedIdx = i;
+      if (i >= ws.length) this._timedWrites = null;
     }
 
     // fromFrame(実再生の現在地に相当)からスキャンをやり直す。load/stop/seekから呼ぶ。
@@ -833,7 +843,7 @@
         this._songFramePos = nextSongFramePos;
         const pv = this.preview && this.preview.enabled ? this.preview : null; // 割当プレビュー(src/audio/assign-preview.js)
         if (f !== this.currentFrame) { this._applyFrame(f); if (pv) pv.onFrame(f); }
-        this._applyDacWrites(nextSongFramePos - f);
+        this._applyTimedWrites(nextSongFramePos - f);
 
         this.cycleAccum += CPU_CLOCK_NTSC / sr;
         while (this.cycleAccum >= 1) {
@@ -897,7 +907,7 @@
       for (let f = 0; f <= targetFrame; f++) {
         const writes = wl[f];
         if (!writes) break;
-        for (const w of writes) this.bus.write(w.addr, w.value);
+        for (const w of writes) applyLogEntry(this.bus, w);
       }
       // N163はポインタドリフトの影響を受けるため、シーク先フレームのライブRAM
       // スナップショットで(位相バイトを除き)最終的に上書きして補正する

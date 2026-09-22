@@ -22,6 +22,11 @@
       this.mem = new Uint8Array(0x10000);
       this.apu = null; // setApu() で後から設定
       this.onWrite = null; // (addr, value) => void のフック（レジスタ書き込みログ用）
+      // (addr) => void のフック。読み出しに副作用があるポート(N163 $4800=オートインクリメント)
+      // だけで呼ぶ。書き込みログの再生(NsfReplayStreamPlayer)がポインタの動きまで再現するため
+      // (ドライバは位相バイトを LDA $4800 で読み飛ばす。読み出しを再現しないと以降の書き込みが
+      // 1つずつずれて位相バイトへ落ち、音程が同じでも位相がでたらめになる。2026-09-22)
+      this.onRead = null;
 
       // 拡張音源 (NSF.CHIP_FLAGS の組み合わせ)
       this.expansion = {};
@@ -162,6 +167,7 @@
       }
       // N163 内部RAM読み出し ($4800)。ドライバが register の read-modify-write に使う。
       if (this.expansion.n163 && addr === 0x4800) {
+        if (this.onRead) this.onRead(addr);
         return this.expansion.n163.readData();
       }
       // MMC5乗算器: $5205=積の下位バイト, $5206=積の上位バイト

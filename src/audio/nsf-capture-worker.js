@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-22 11:41:18
+ * Built by tools/build-capture-workers.ps1 at 2026-09-22 12:12:57
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-22 11:41:18';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-22 12:12:57';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -4176,6 +4176,11 @@
       this.mem = new Uint8Array(0x10000);
       this.apu = null; // setApu() で後から設定
       this.onWrite = null; // (addr, value) => void のフック（レジスタ書き込みログ用）
+      // (addr) => void のフック。読み出しに副作用があるポート(N163 $4800=オートインクリメント)
+      // だけで呼ぶ。書き込みログの再生(NsfReplayStreamPlayer)がポインタの動きまで再現するため
+      // (ドライバは位相バイトを LDA $4800 で読み飛ばす。読み出しを再現しないと以降の書き込みが
+      // 1つずつずれて位相バイトへ落ち、音程が同じでも位相がでたらめになる。2026-09-22)
+      this.onRead = null;
 
       // 拡張音源 (NSF.CHIP_FLAGS の組み合わせ)
       this.expansion = {};
@@ -4316,6 +4321,7 @@
       }
       // N163 内部RAM読み出し ($4800)。ドライバが register の read-modify-write に使う。
       if (this.expansion.n163 && addr === 0x4800) {
+        if (this.onRead) this.onRead(addr);
         return this.expansion.n163.readData();
       }
       // MMC5乗算器: $5205=積の下位バイト, $5206=積の上位バイト
@@ -4656,8 +4662,12 @@
     runningRegs[0x4017] = 0x40; initWrites.push({ addr: 0x4017, value: 0x40 });
     runningRegs[0x4015] = 0x0F; initWrites.push({ addr: 0x4015, value: 0x0F });
     player.bus.onWrite = (a, val) => { runningRegs[a] = val; initWrites.push({ addr: a, value: val }); };
+    // 読み出しに副作用があるポート(N163 $4800)の読み出しも順序どおり記録する(read:true、value は0)。
+    // 再生側はこれを bus.read として再現し、書き込み先ポインタのずれを防ぐ(nsfBus.js onRead参照)
+    player.bus.onRead = (a) => initWrites.push({ addr: a, value: 0, read: true });
     player.initSong(songIndex, !!opt.pal);
     player.bus.onWrite = null;
+    player.bus.onRead = null;
 
     if (opt.mute) {
       if (opt.mute.apu) Emu.applyMute(player.apu.mute, opt.mute.apu);
@@ -4692,13 +4702,14 @@
     // 書き込みをフレーム内の正しい位置で再適用するのに使う。ロール/nsf2mmlは見ない
     let pendingWrites = [];
     player.bus.onWrite = (addr, value) => pendingWrites.push({ addr, value, t: player.frameFrac || 0 });
+    player.bus.onRead = (addr) => pendingWrites.push({ addr, value: 0, read: true, t: player.frameFrac || 0 });
 
     // INIT後・PLAY前の初期レジスタ状態をスナップショット
     const initRegs = Object.assign({}, runningRegs);
 
     return { player, sampleRate, frameRate, totalFrames, samplesPerFrame, totalSamples,
              raw, writeLog, regSnapshots, cpuSnapshots, memSnapshots, apuEnvSnapshots, n163Snapshots, runningRegs, initRegs, initWrites,
-             pendingWritesRef: { get current() { return pendingWrites; }, set(v) { pendingWrites = v; player.bus.onWrite = (a, val) => pendingWrites.push({ addr: a, value: val, t: player.frameFrac || 0 }); } } };
+             pendingWritesRef: { get current() { return pendingWrites; }, set(v) { pendingWrites = v; player.bus.onWrite = (a, val) => pendingWrites.push({ addr: a, value: val, t: player.frameFrac || 0 }); player.bus.onRead = (a) => pendingWrites.push({ addr: a, value: 0, read: true, t: player.frameFrac || 0 }); } } };
   }
 
   /**
@@ -4776,7 +4787,7 @@
     pendingWritesRef.set([]);
     const frame = player.renderFrame(sampleRate);
     writeLog[f] = pendingWritesRef.current;
-    for (const w of pendingWritesRef.current) runningRegs[w.addr] = w.value;
+    for (const w of pendingWritesRef.current) if (!w.read) runningRegs[w.addr] = w.value;
     // 書き込みが1件も無かったフレームは前フレームとスナップショットが同一なので、
     // オブジェクトを共有してアロケーション(=GC圧)を減らす。消費側(ピアノロール/
     // モニタ/nsf2mml)はいずれも読み取り専用アクセスのため共有しても安全。
@@ -4900,7 +4911,7 @@
           regsOnlyCycleAccum -= 1;
         }
         ctx.writeLog[f] = ctx.pendingWritesRef.current;
-        for (const w of ctx.pendingWritesRef.current) ctx.runningRegs[w.addr] = w.value;
+        for (const w of ctx.pendingWritesRef.current) if (!w.read) ctx.runningRegs[w.addr] = w.value;
         // 書き込み無しフレームは前フレームとスナップショット同一なのでオブジェクトを共有
         // (_processFrame側の同名コメント参照)
         ctx.regSnapshots[f] = (f > 0 && ctx.pendingWritesRef.current.length === 0)
@@ -7131,7 +7142,7 @@
     const frames = writeLog.map(writes => {
       for (const w of writes) {
         if (w.addr === 0xF800) { latch = w.value & 0x7F; autoInc = !!(w.value & 0x80); }
-        else if (w.addr === 0x4800) { ram[latch] = w.value; if (autoInc) latch = (latch + 1) & 0x7F; }
+        else if (w.addr === 0x4800) { if (!w.read) ram[latch] = w.value; if (autoInc) latch = (latch + 1) & 0x7F; } // read:true=読み飛ばし(ポインタだけ進む)
       }
       const snap = MML.Emu.snapshotN163(ram);
       if (snap.numCh > maxNumCh) maxNumCh = snap.numCh;

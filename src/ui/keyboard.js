@@ -2196,7 +2196,7 @@
     const frames = writeLog.map(writes => {
       for (const w of writes) {
         if (w.addr === 0xF800) { latch = w.value & 0x7F; autoInc = !!(w.value & 0x80); }
-        else if (w.addr === 0x4800) { ram[latch] = w.value; if (autoInc) latch = (latch + 1) & 0x7F; }
+        else if (w.addr === 0x4800) { if (!w.read) ram[latch] = w.value; if (autoInc) latch = (latch + 1) & 0x7F; } // read:true=読み飛ばし(ポインタだけ進む)
       }
       const snap = MML.Emu.snapshotN163(ram);
       if (snap.numCh > maxNumCh) maxNumCh = snap.numCh;

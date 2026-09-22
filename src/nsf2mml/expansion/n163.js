@@ -85,6 +85,8 @@
   // 同じ値での書き直し(=エンベロープの頭へ戻す打ち直し)を検出できない。
   // $F800のアドレスラッチとオートインクリメントはフレームをまたいで保持されるため、
   // スナップショットの有無にかかわらずwriteLogを一本のループで走査して作る。
+  // read:true の項目は $4800 の読み出し(capture.js が記録、ドライバの位相バイト読み飛ばし)。
+  // ポインタだけ進めて「書いた」には数えない
   function buildWroteSets(writeLog, initWrites) {
     let addr = 0, autoInc = false;
     for (const { addr: a, value } of (initWrites || [])) {
@@ -93,9 +95,9 @@
     }
     return writeLog.map(writes => {
       const set = new Set();
-      for (const { addr: a, value } of writes) {
+      for (const { addr: a, value, read } of writes) {
         if      (a === 0xF800) { addr = value & 0x7F; autoInc = !!(value & 0x80); }
-        else if (a === 0x4800) { set.add(addr); if (autoInc) addr = (addr + 1) & 0x7F; }
+        else if (a === 0x4800) { if (!read) set.add(addr); if (autoInc) addr = (addr + 1) & 0x7F; }
       }
       return set;
     });
@@ -112,13 +114,13 @@
     }
     const ram = new Uint8Array(128);
     let addr = 0, autoInc = false;
-    function applyWrite(a, value) {
+    function applyWrite(a, value, read) {
       if      (a === 0xF800) { addr = value & 0x7F; autoInc = !!(value & 0x80); }
-      else if (a === 0x4800) { ram[addr] = value; if (autoInc) addr = (addr + 1) & 0x7F; }
+      else if (a === 0x4800) { if (!read) ram[addr] = value; if (autoInc) addr = (addr + 1) & 0x7F; }
     }
-    for (const { addr: a, value } of (initWrites || [])) applyWrite(a, value);
+    for (const { addr: a, value, read } of (initWrites || [])) applyWrite(a, value, read);
     return writeLog.map((writes, i) => {
-      for (const { addr: a, value } of writes) applyWrite(a, value);
+      for (const { addr: a, value, read } of writes) applyWrite(a, value, read);
       return { ram: ram.slice(), numCh: ((ram[0x7F] >> 4) & 0x07) + 1, wrote: wroteSets[i] || EMPTY_WROTE };
     });
   }

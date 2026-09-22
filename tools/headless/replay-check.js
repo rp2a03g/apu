@@ -35,10 +35,10 @@ const SR = 44100;
 const SENTINELS = [
   ['水戸黄門#0 $4011音声', 'nsf', 'Tenka no Goikenban - Mito Koumon (1987-08-11)(-)(Sunsoft).nsf', 0, 1.5],
   ['Golf US #0 FDS変調', 'nsf', 'Famicom Golf - US Course (FDS)(1987-06-14)(HAL Laboratory)(Nintendo).nsf', 0, 4],
+  // N163: ドライバが位相バイトを LDA $4800 で読み飛ばすので、読み出しをログに残さないと
+  // 書き込みが位相バイトへずれ落ちて(音程は同じまま)3chデチューンのうなりが別物になる(0.907)
+  ['女神転生II #0 N163', 'nsf', 'Megami Tensei II - Digital Devil Story (1990-04-06)(Atlus)(Namco).nsf', 0, 4],
 ];
-// 番兵に入れていないもの: N163(女神転生II #0)は再生エンジンが平均0.907/lag 200サンプルで
-// 真値とずれる(2026-09-22時点の既知の差。フレーム頭一括の書き込みとRAMスナップショット上書きが
-// 位相に効いていると推定、未調査)。直したら番兵へ追加する。
 
 const N = 4096;
 function fft(re, im) {
