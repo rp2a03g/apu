@@ -1767,8 +1767,11 @@ button.secondary {
 }
 .kbd-assign-target:disabled, .kbd-assign-tone:disabled { opacity: 0.5; }
 /* SPC一覧はpart列を足しても ch↔L の間隔を従来どおり(-3px)に保つ(メイン一覧の-16pxが
-   セレクタの詳細度で勝ってしまうため明示的に上書きする) */
+   セレクタの詳細度で勝ってしまうため明示的に上書きする)。
+   ★ALL行はミュートのチェックボックスの代わりに .kbd-mute-ph を置くので、そちらも同じく
+     上書きしないとALL行だけ-16pxのままになり、L/R列が13px左へずれて縦に揃わない */
 .kbd-left--spc .kbd-part + .kbd-mute + .kbd-name,
+.kbd-left--spc .kbd-part + .kbd-mute-ph + .kbd-name,
 .kbd-left--spc .kbd-h-mute-solo + .kbd-h-name { margin-right: -3px; }
 
 /* part列チップから開く1行ぶんの割当ポップオーバー(レイアウトに依らず使える編集経路) */
