@@ -116,11 +116,26 @@
   // 音長(end-start)はドライバのゲートタイム(音符を短く切って発音)で
   // グリッドから外れるが、発音開始の間隔は必ずグリッドに乗るため、
   // 検出材料として音長より頑健。呼び出し側で音長と混ぜて渡す。
+  // ★1フレーム後に続く発音開始は同じ打点の一部としてひとかたまりに扱い、間隔は「かたまりの
+  // 末尾」どうしで測る(2026-09-22)。三角波ドラムの「1フレームの高い音→本体」やコナミの
+  // 「本体の1フレーム前の前打ち」があると、素の隣接差では「本体→次の打点」が 5/11/23
+  // フレーム(本当は 6/12/24)として材料に入り、拍がわずかに短いテンポ(女神転生II 3曲目: 真150
+  // に対し158)へ引きずられ、16分が16分と3連の交互に化ける。かたまりの形は曲内で揃っている
+  // ので末尾どうし(先頭どうしでも同じ)で測れば正しい間隔になる。2フレーム以上離れた短い
+  // 発音(速いテンポの32分、アルペジオ)はまとめない(t175の32分=2.6フレームをまとめると
+  // 2音分が1つの音価に見え半分のテンポに転ぶ)。MIN_IOI 未満の間隔を捨てるのは従来どおり(ioiItems)
+  const JOIN_GAP = 1;
   MML.Convert.onsetIntervals = function (startFrames) {
     const out = [];
+    if (!startFrames.length) return out;
+    let prevEnd = null, end = startFrames[0];
     for (let i = 1; i < startFrames.length; i++) {
-      out.push(startFrames[i] - startFrames[i - 1]);
+      const t = startFrames[i];
+      if (t - end <= JOIN_GAP) { end = t; continue; } // 同じかたまり
+      if (prevEnd !== null) out.push(end - prevEnd);
+      prevEnd = end; end = t;
     }
+    if (prevEnd !== null) out.push(end - prevEnd);
     return out;
   };
 

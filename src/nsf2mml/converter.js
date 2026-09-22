@@ -871,28 +871,6 @@
       }
     }
 
-    // テンポ推定: チャンネル毎の発音開始間隔(IOI)から(MML.Convert.tempoMaterial、src/convert/bpm.js)。
-    // IOIはゲートタイム(音符を短く切る発音)の影響を受けないため音長より頑健。
-    const timingChannels = [
-      evA.filter(e => e.note !== null),
-      evB.filter(e => e.note !== null),
-      evC.filter(e => e.note !== null),
-      evD.filter(e => e.on),
-    ];
-    const noteDurations = [];
-    for (const chEvents of timingChannels) {
-      noteDurations.push(...MML.Convert.tempoMaterial(chEvents.map(e => e.start), chEvents.map(e => e.end - e.start)));
-    }
-
-    // 2倍/半分の決着は「実際に音価を書いてみて素直な方」(MML.Convert.chooseTempoOctave、src/convert/mmlEmit.js)
-    const bpm = options.bpm
-      ? MML.Convert.refineBpm(options.bpm, noteDurations, FPS)
-      : MML.Convert.chooseTempoOctave(MML.Convert.detectBpm(noteDurations, FPS),
-          timingChannels.map(events => ({ events })), FPS, { totalFrames: timeline.length, cmd });
-    // MML本文に埋め込まれるテンポは整数(t<n>)に丸められる(mmlEmit.js)。音長量子化の
-    // グリッド(fpb)も同じ丸め後の値で計算しないと、書き出し時と再生(コンパイル)時で
-    // 基準テンポが食い違い、打ち直しの多いパートで誤差が蓄積してドリフトする
-    const fpb = FPS * 60 / Math.round(bpm);
     const totalFrames = timeline.length;
 
     // DPCM: ppmckc準拠(音符=テーブル行選択)で@DPCM<n>定義+実際のノートイベントを作る
@@ -943,31 +921,6 @@
     const expansionLetterMap = MML.Mml.assignExpansionLetters(letterExpansions);
     const dpcmLetter = dpcmDefs.length > 0 ? expansionLetterMap.dpcm[0] : null;
 
-    const headerComment = [
-      `; =========================================================`,
-      `; NSF → MML 変換 (2A03 内蔵音源)`,
-      `; Title    : ${title}`,
-      `; Artist   : ${artist}`,
-      `; Copyright: ${copy}`,
-      `; Song     : ${songNo} / ${totalS}`,
-      // NSFe の曲ラベル(tlbl)があれば添える(NSFヘッダには曲ごとの名前が無い)
-      ...(MML.NSF.trackLabel && MML.NSF.trackLabel(header, songIndex) ? [`; Track    : ${MML.NSF.trackLabel(header, songIndex)}`] : []),
-      `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
-      `; 分解能   : 480 TPQN (MIDI準拠)`,
-      `; 変換     : Sound Emulation Foundry`,
-      `; チャンネル: A=Pulse1 B=Pulse2 C=Triangle D=Noise` + (dpcmLetter ? ` ${dpcmLetter}=DPCM` : ''),
-      ...(expansions.length > 0 ? [`; 拡張音源  : ${expansions.join(', ')}`] : []),
-      `; =========================================================`,
-      `; ※ 自動変換のため手動での調整が必要な場合があります。`,
-      `; ※ ノイズ周期はピッチ値でエンコードされています (o2g=period0(高) 〜 o1e=period15(低))。`,
-      ...(dpcmDefs.length > 0 ? [
-        `; ※ DPCMは抽出済み.dmcファイルを「MML作曲」パネルのDPCMサンプル欄で選択する`,
-        `;   か、そのまま再コンパイルすると自動でキャッシュされたバイト列が使われます。`
-      ] : []),
-      ...MML.Convert.tuningCommentLines(),
-      `; =========================================================`,
-      ``
-    ].join('\n');
 
     // 音量変化を曲全体で共有登録するレジストリ。固定音量モード(constVol)でvolSeqが
     // 全フレーム同一値(フラット)ならvolumeを、変化があれば実測形状のenvelopeV(0番台)を、
@@ -1123,6 +1076,10 @@
     // 振り直す。実機ppmck同様、各チップの文字範囲は他の拡張音源の有無に関わらず
     // 完全固定(例: VRC6のみでも常にM-O。E-Lは未使用のまま空く。詰め直しはしない)。
     // (expansionLetterMapはヘッダーコメント生成時にdpcmを含めて計算済みのものを再利用する)
+    // 拡張音源チャンネルの発音開始もテンポ推定の材料に入れる(2026-09-22)。2A03だけだと
+    // ドラム用の三角波/ノイズしか材料が無い曲(女神転生II 3曲目: N163のベースが6/12フレーム刻み)で
+    // 拍の手がかりが乏しい。テンポ推定とヘッダコメントはこのループの後(下)へ移してある
+    const expansionTimingChannels = [];
     let fdsWave = null, n163Wave = null, fdsModDefLines = [], n163ChannelCount = 0;
     for (const chip of expansions) {
       const extractor = MML.Nsf2MmlExpansion && MML.Nsf2MmlExpansion[chip];
@@ -1138,12 +1095,63 @@
       result.channels.forEach((ch, index) => {
         scoreChannels.push(Object.assign({}, ch, { letter: letters[index], hasDetune: true, hasPitchMod: hasPitchModForChip, hasNoteEnv: true }));
         detuneEntries.push({ events: ch.events, periodFn: expansionPeriodFn(chip, index) });
+        expansionTimingChannels.push(ch.events.filter(e => e.note !== null));
       });
       if (result.fdsWave)  fdsWave  = result.fdsWave;
       if (result.n163Wave) n163Wave = result.n163Wave;
       if (result.fdsModDefLines) fdsModDefLines = result.fdsModDefLines;
       if (chip === 'n163') n163ChannelCount = result.channels.length;
     }
+
+    // テンポ推定: チャンネル毎の発音開始間隔(IOI)から(MML.Convert.tempoMaterial、src/convert/bpm.js)。
+    // IOIはゲートタイム(音符を短く切る発音)の影響を受けないため音長より頑健。
+    const timingChannels = [
+      evA.filter(e => e.note !== null),
+      evB.filter(e => e.note !== null),
+      evC.filter(e => e.note !== null),
+      evD.filter(e => e.on),
+      ...expansionTimingChannels,
+    ];
+    const noteDurations = [];
+    for (const chEvents of timingChannels) {
+      noteDurations.push(...MML.Convert.tempoMaterial(chEvents.map(e => e.start), chEvents.map(e => e.end - e.start)));
+    }
+
+    // 2倍/半分の決着は「実際に音価を書いてみて素直な方」(MML.Convert.chooseTempoOctave、src/convert/mmlEmit.js)
+    const bpm = options.bpm
+      ? MML.Convert.refineBpm(options.bpm, noteDurations, FPS)
+      : MML.Convert.chooseTempoOctave(MML.Convert.detectBpm(noteDurations, FPS),
+          timingChannels.map(events => ({ events })), FPS, { totalFrames: timeline.length, cmd });
+    // MML本文に埋め込まれるテンポは整数(t<n>)に丸められる(mmlEmit.js)。音長量子化の
+    // グリッド(fpb)も同じ丸め後の値で計算しないと、書き出し時と再生(コンパイル)時で
+    // 基準テンポが食い違い、打ち直しの多いパートで誤差が蓄積してドリフトする
+    const fpb = FPS * 60 / Math.round(bpm);
+
+    const headerComment = [
+      `; =========================================================`,
+      `; NSF → MML 変換 (2A03 内蔵音源)`,
+      `; Title    : ${title}`,
+      `; Artist   : ${artist}`,
+      `; Copyright: ${copy}`,
+      `; Song     : ${songNo} / ${totalS}`,
+      // NSFe の曲ラベル(tlbl)があれば添える(NSFヘッダには曲ごとの名前が無い)
+      ...(MML.NSF.trackLabel && MML.NSF.trackLabel(header, songIndex) ? [`; Track    : ${MML.NSF.trackLabel(header, songIndex)}`] : []),
+      `; Tempo    : ${Math.round(bpm)} BPM (${options.bpm ? '指定' : '推定'})`,
+      `; 分解能   : 480 TPQN (MIDI準拠)`,
+      `; 変換     : Sound Emulation Foundry`,
+      `; チャンネル: A=Pulse1 B=Pulse2 C=Triangle D=Noise` + (dpcmLetter ? ` ${dpcmLetter}=DPCM` : ''),
+      ...(expansions.length > 0 ? [`; 拡張音源  : ${expansions.join(', ')}`] : []),
+      `; =========================================================`,
+      `; ※ 自動変換のため手動での調整が必要な場合があります。`,
+      `; ※ ノイズ周期はピッチ値でエンコードされています (o2g=period0(高) 〜 o1e=period15(低))。`,
+      ...(dpcmDefs.length > 0 ? [
+        `; ※ DPCMは抽出済み.dmcファイルを「MML作曲」パネルのDPCMサンプル欄で選択する`,
+        `;   か、そのまま再コンパイルすると自動でキャッシュされたバイト列が使われます。`
+      ] : []),
+      ...MML.Convert.tuningCommentLines(),
+      `; =========================================================`,
+      ``
+    ].join('\n');
 
     // 2A03本体+全拡張音源を横断してコーラス検知+D<n>補正(上のdetuneEntries参照)
     MML.Convert.detectChorusDetune(detuneEntries, detuneEntries.map(e => e.periodFn), { cmd });
