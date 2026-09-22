@@ -23,6 +23,16 @@
  * モード中に$4080へ再度書き込まれた時(実機はどんな値でもタイマーをリセットするため)だけ
  * 区切る。
  *
+ * ★$4089 bits0-1 のマスター音量(0=100% 1=2/3 2=1/2 3=2/5)は音量列に畳み込む(2026-09-22)。
+ *   MMLにマスター音量は無く、compiler.jsもppmckドライバも常に$4089=0(フル)で鳴らすので、
+ *   畳み込まないと段落ごとに音量を落とす曲が最大2.5倍で出る(愛戦士ニコル: f0=1/2 →
+ *   f336=フル → f1008=2/3。FDSチャンネルが元曲の約2倍で鳴っていた)。畳み込む前に32で
+ *   頭打ちさせること(実機の有効ゲインは32止まり)。フル音量の区間は従来どおり生値。
+ * ★音符の頭1〜3フレームだけ$4080のモードが変わる/書き直されるドライバがある(コナミの
+ *   FDSドライバ)。ここで区切ると本体側が打ち直しになり、FDSは打ち直しで波形の位相が
+ *   リセットされるので元曲に無い全振幅の段差(プチノイズ)が入る。頭のぶんは@vの先頭へ
+ *   畳み込んで1音のまま続ける(HEAD_FOLD_FRAMES、2026-09-22)。
+ *
  * ピッチ変調(モジュレーションユニット): $4084=ゲイン(bit7=1で直接指定、bits0-5)、
  * $4085=カウンタ直接設定(下の「固定ベンド」)、$4086/$4087=周波数(bit7=1で停止/
  * テーブル書込み許可)、$4088=モジュレータテーブル(停止中のみ1エントリ3bitずつ
@@ -128,6 +138,10 @@
     let volEnvSpeed = 0;
     let envHalt = (freqHiReg & 0x40) !== 0;
     let envRate = ir[0x408A] !== undefined ? ir[0x408A] : 0xE8; // 実機電源ON時のデフォルト
+    // $4089 bits0-1 = マスター音量(0=100% 1=2/3 2=1/2 3=2/5)。MML/ppmckドライバ側は
+    // 常に$4089=0(フル)で鳴らすので、ここで音量に畳み込まないと曲全体が最大2.5倍で出る。
+    // 曲の途中で段落ごとに切り替えるドライバがある(愛戦士ニコル: f0=1/2 → f336=フル → f1008=2/3)
+    let masterVol = ir[0x4089] !== undefined ? (ir[0x4089] & 3) : 0;
     let envRateClock = 0;
     let volEnvTimer = 0;
     if (ir[0x4080] !== undefined) {
@@ -206,6 +220,8 @@
             volEnvTimer = volEnvSpeed + 1;
             envRestart = true;
           }
+        } else if (addr === 0x4089) {
+          masterVol = value & 3;
         } else if (addr === 0x408A) {
           envRate = value;
           envRateClock = 0;
@@ -268,12 +284,19 @@
 
       return {
         freqLo, freqHiReg, attack, wave: Array.from(wave), waveKey,
-        envEnabled: volEnvEnabled, envRestart, gain: volGain,
+        envEnabled: volEnvEnabled, envRestart, gain: volGain, masterVol,
         modFreq, modGain: modGainStart, modEnabled, modTable: Array.from(modTable), modTableKey,
         modEnvDir, modEnvSpeed: modEnvSpeedOut, modEnvRestart, modStatic, period: effPeriod
       };
     });
   }
+
+  // $4089 bits0-1 のマスター音量比(src/emulator/expansion/fds.js MASTER_VOLUME_SCALE と同じ値)
+  const MASTER_RATIO = [1.0, 2 / 3, 2 / 4, 2 / 5];
+
+  // 音符の頭で音量の出どころ($4080のモード)が切り替わるとき、この長さまでは
+  // 音符を割らずに @v の先頭へ畳み込む(下の volModeOnly を参照)
+  const HEAD_FOLD_FRAMES = 3;
 
   // ピッチ/波形/モードが同じ間は音量変化だけでは区切らずvolSeqに積む
   // (ソフトウェア音量エンベロープ抽出用。src/nsf2mml/converter.jsのパルス抽出と同じ考え方)。
@@ -304,7 +327,15 @@
       const disabled  = !!(t.freqHiReg & 0x80);
       // MMLのFDS音量は$4080ゲインの生値(0-63、ppmck同様)。以前は0-15へ半分に丸めて
       // いたためハードウェアエンベロープの分解能を半分捨てていた(2026-08-24)
-      const volume    = Math.max(0, Math.min(63, t.gain));
+      // マスター音量($4089)を畳み込んだ実効ゲイン。MML側にマスター音量は無い(ppmckも
+      // ドライバが$4089=0で固定)ので、音量列に入れておかないと元曲より大きく鳴る。
+      // ★畳み込む前に32で頭打ちさせる: 実機の有効ゲインは32止まり(33-63を書いても32相当、
+      //   src/emulator/expansion/fds.js mixSample)なので、生値のまま比を掛けると
+      //   v40→20(正しくは32→16)のように大きくなりすぎる。フル音量のときは従来どおり
+      //   生値をそのまま出す(再生側も32で頭打ちするので鳴りは同じ・既存の出力を変えない)
+      const volume    = t.masterVol
+        ? Math.max(0, Math.round(Math.min(32, t.gain) * MASTER_RATIO[t.masterVol]))
+        : Math.max(0, Math.min(63, t.gain));
       const freq = fdsFreq(period);
       const note = (!disabled && period > 0) ? freqToNoteNumber(freq) : null;
       const rawFreq = note !== null ? freq : null;
@@ -312,6 +343,23 @@
       const modRestart = !!(t.modEnvDir && t.modEnvRestart);
 
       if (!cur) { begin(f, note, volume, t.envEnabled, t.wave, t.waveKey, t, rawFreq, period, false); continue; }
+
+      // 音符の頭だけ$4080のモードが変わる(または書き直される)ドライバがある。コナミのFDS
+      // ドライバ(愛戦士ニコル)は頭1〜2フレームを直接指定モードの固定ゲインで置いてから
+      // エンベロープモードへ渡すので、ここで音符を割ると本体側が打ち直しになる。
+      // ★FDSは打ち直しで波形の位相がリセットされる(実機で位相を戻すのは$4083 bit7の1→0だけで、
+      //   $4080の書き込みでは戻らない)。割ると元曲に無い全振幅の段差=プチノイズが入る。
+      //   頭のぶんは音量列に積んで @v の先頭に畳み込み、1音のまま続ける
+      //   (704音中269音がこの形だった。他のFDS曲では0件なのでドライバ固有の書き方)
+      const volModeOnly = !t.attack && note === cur.note && t.waveKey === cur.waveKey &&
+        modKey === cur.modKey && !modRestart &&
+        (t.envEnabled !== cur.envEnabled || (t.envEnabled && t.envRestart));
+      if (volModeOnly && f - cur.start <= HEAD_FOLD_FRAMES) {
+        cur.envEnabled = t.envEnabled;   // 音量の出どころは後から来た方(本体)に合わせる
+        cur.volSeq.push(volume);
+        cur.pitchSeq.push(period);
+        continue;
+      }
 
       if (t.attack || note !== cur.note || t.waveKey !== cur.waveKey ||
           t.envEnabled !== cur.envEnabled || (t.envEnabled && t.envRestart) || modKey !== cur.modKey || modRestart) {
