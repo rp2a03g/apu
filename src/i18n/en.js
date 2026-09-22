@@ -626,6 +626,21 @@
     'アーカイブを解析できませんでした: {msg}': 'Could not parse the archive: {msg}',
     'アーカイブ内に対応するサウンドファイル(NSF/NSFE/SPC/KSS/GBS/HES/VGM/PSF)がありません。':
       'The archive contains no supported sound files (NSF/NSFE/SPC/KSS/GBS/HES/VGM/PSF).',
+    // ---- URLパラメータで開く (?nsf=<address>&song=<n>。src/ui/urlLoad.js) ----
+    'このページを file:// で開いているため、URLでのファイル指定は使えません(ブラウザがfetchを許可しないため)。公開URLから開いてください。':
+      'This page was opened over file://, so loading a file by URL is unavailable (the browser does not allow fetch there). Open the page from a web address instead.',
+    'URLの書式が正しくありません: {url}': 'That is not a valid URL: {url}',
+    'URLで指定できるのは https:// のアドレスか、このページからの相対パスだけです: {url}':
+      'Only an https:// address or a path relative to this page can be given in the URL: {url}',
+    'ファイルを取得できませんでした (HTTP {status}): {url}': 'Could not download the file (HTTP {status}): {url}',
+    'ファイルを取りに行けませんでした: {url}\n配布元がCORS(Access-Control-Allow-Origin)を許可していないか、アドレスが間違っている可能性があります。':
+      'Could not reach the file: {url}\nThe host may not allow CORS (Access-Control-Allow-Origin), or the address may be wrong.',
+    '取得したファイルの中身が空でした: {url}': 'The downloaded file was empty: {url}',
+    'ファイルの形式が分かりませんでした: {url}': 'Could not tell what format the file is: {url}',
+    'ファイルを開けませんでした: {url}': 'Could not open the file: {url}',
+    'このアドレスから読み込みました: {url}': 'Loaded from this address: {url}',
+    '再生ボタン(▶)を押すと再生します。ブラウザの制限で自動再生はできません。':
+      'Press play (▶) to start. Browsers do not allow playback to begin on its own.',
     'MML変換完了 ({mode} {bpm} BPM、音源: {chips}) → MMLエディタに出力{borrow}{ignored}':
       'Converted to MML ({mode} {bpm} BPM, chips: {chips}) → written to the MML editor{borrow}{ignored}',
     '(借用先: {assign})': ' (targets: {assign})',

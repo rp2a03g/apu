@@ -9433,6 +9433,58 @@
     if (kbdWinCloseBtn) {
       kbdWinCloseBtn.addEventListener('click', () => stopSoundFileWindowPlayback());
     }
+
+    // ==== URLパラメータで開く: ?nsf=<アドレス>&song=<n> (src/ui/urlLoad.js、2026-09-22) ====
+    // 「アプリのURL+曲のありか」を1本のリンクにまとめて共有するための入口。ファイルの実体は
+    // こちらでは持たず、リンクを踏んだ人のブラウザが毎回そのアドレスから取ってくる。
+    // 読み込み経路は他と同じ openSoundFile() なので、対応形式も挙動もダイアログ/D&Dと揃う。
+    //
+    // ★自動再生はしない: ブラウザの自動再生制限でユーザー操作なしにAudioContextを鳴らせず、
+    //   「鳴らない」ではなく「無音のまま曲が進む」になってしまうため、読み込んで再生待ちで止める。
+    //   曲番号も change を発火させずに入力欄へ入れるだけにする(changeハンドラが
+    //   playNsfStream()等を直接呼ぶので、発火させると同じ制限に引っかかる)。
+    (async function openFromUrlParam() {
+      const req = MML.UI.UrlLoad.parse(location.search);
+      if (!req) return;
+      // urlLoad.js が投げる code → 文言。原因(特にCORS)は利用者側から推測しようが無いので明示する
+      const ERROR_MSG = {
+        'file-origin': 'このページを file:// で開いているため、URLでのファイル指定は使えません(ブラウザがfetchを許可しないため)。公開URLから開いてください。',
+        'bad-url': 'URLの書式が正しくありません: {url}',
+        'bad-scheme': 'URLで指定できるのは https:// のアドレスか、このページからの相対パスだけです: {url}',
+        'http-status': 'ファイルを取得できませんでした (HTTP {status}): {url}',
+        'fetch-failed': 'ファイルを取りに行けませんでした: {url}\n配布元がCORS(Access-Control-Allow-Origin)を許可していないか、アドレスが間違っている可能性があります。',
+        'empty': '取得したファイルの中身が空でした: {url}',
+        'unknown-format': 'ファイルの形式が分かりませんでした: {url}',
+      };
+      let got;
+      try {
+        got = await MML.UI.UrlLoad.fetchFile(req.raw);
+      } catch (e) {
+        const key = ERROR_MSG[e.code] || 'ファイルを開けませんでした: {url}';
+        alert(T(key, Object.assign({ url: req.raw }, e.params || {})));
+        return;
+      }
+      const ext = await openSoundFile(got.file);
+      if (!ext || ext === 'mml') return; // 非対応形式の文言は openSoundFile 側が出す
+      // 曲番号: zip/7zを開いたときだけ「アーカイブ内の何曲目か」(1始まり)として扱う
+      if (req.song !== null) {
+        if (archive) await loadArchiveIndex(req.song - 1, false);
+        else applyArchiveSong(ext, req.song);
+      }
+      // どこから読み込んだのかと、自動再生しない理由をファイル情報ペインに残す。
+      // URLはクエリ文字列由来なのでHTMLとして組み立てない(textContentで入れる)
+      const statusEl = document.getElementById(ext + 'FileStatus');
+      if (statusEl) {
+        const okEl = document.createElement('div');
+        okEl.className = 'ok';
+        okEl.textContent = T('このアドレスから読み込みました: {url}', { url: got.url });
+        const hintEl = document.createElement('div');
+        hintEl.textContent = T('再生ボタン(▶)を押すと再生します。ブラウザの制限で自動再生はできません。');
+        statusEl.innerHTML = '';
+        statusEl.appendChild(okEl);
+        statusEl.appendChild(hintEl);
+      }
+    })();
   })();
 
   // 鍵盤表示タイトル行の再生コントロールの初期状態(起動直後=まだ何も再生していない=MML扱い)。

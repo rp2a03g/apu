@@ -70,6 +70,11 @@ path or from any static server.
 - **Play it in.** A PC-keyboard and on-screen piano with a metronome; record what you play
   straight into MML.
 - **Export audio** as WAV / FLAC / AAC, and **sheet music** as MusicXML.
+- **Link to a song.** Opening the app with `?nsf=<file address>&song=<n>` loads that file,
+  so an app URL plus a file address makes one shareable link. Nothing is hosted here: the
+  visitor's browser fetches the address directly, which means the host has to allow CORS
+  (GitHub raw and Gist both do). Playback still needs one press of ▶, because browsers do
+  not let it start on its own.
 
 The interface, the bundled sample MML and the in-app MML command reference are all available
 in Japanese and English. The documentation in this repository is Japanese only.
@@ -104,6 +109,30 @@ original music and program.
 PSF(PlayStation)は `.psf` と、共通部品 `.psflib` を参照する `.minipsf` の両方を開ける。
 `.minipsf` は zip のまま開くか、`.psflib` と一緒に選ぶ(ドラッグ&ドロップも複数まとめて落とせる)。
 PS2 の PSF2 には対応していない。
+
+#### URLで曲を指すリンクを作る
+
+`?nsf=<ファイルのアドレス>` を付けて開くと、そのアドレスからファイルを取ってきた状態で立ち上がる。
+「アプリのURL＋曲のありか」を1本のリンクにして渡せる。曲番号は `?song=<n>`
+(形式ごとのネイティブ表記。NSF/GBSは1始まり、KSS/HESは0始まり。zip/7zを指したときは
+アーカイブ内の何曲目か)。パラメータ名は `?url=` でも同じ。
+
+```
+https://rp2a03g.github.io/apu/?nsf=https%3A%2F%2Fraw.githubusercontent.com%2F<user>%2F<repo>%2Fmain%2Fsong.nsf&song=3
+```
+
+対応形式は 📂 で開けるものと同じ(NSF/NSFe・SPC・KSS・GBS・HES・VGM・PSF・zip・7z)で、
+アドレスに拡張子が無くてもファイルの先頭(マジック)から判別する。
+
+このツールはファイルを一切預からない。リンクを踏んだ人のブラウザが毎回そのアドレスから
+直接取ってくるだけで、置き場も権利関係もファイルを上げた人のところに残る。
+
+- 取りに行けるのは `https://` のアドレスか、このページからの相対パス(`?nsf=songs/foo.nsf`)だけ。
+- 別のサイトに置いたファイルは、**配布元がCORS(`Access-Control-Allow-Origin`)を許可していないと読めない**。
+  ブラウザの制限なのでこちら側では外せない。GitHubのリポジトリ(`raw.githubusercontent.com`)と
+  Gist(`gist.githubusercontent.com`)はどちらも `*` を返すので、そこに置いたファイルはそのまま読める。
+- `file://` で開いたページでは使えない(`fetch` が許可されないため)。
+- 読み込むところまでで、再生は始まらない。ブラウザが自動再生を許可しないので ▶ を1回押す。
 
 ### MMLを書く・鳴らす・NSFにする
 
