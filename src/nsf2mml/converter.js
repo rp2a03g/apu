@@ -1205,9 +1205,11 @@
 
     // 音符の区切り(NOTE_END、src/convert/envelope.js)。@v表を書き換えるので defLines() より前
     MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, FPS);
+    // headerLines は関数で渡す: emitScore が L で割った音符の後半に音量表を追加登録することがあり、
+    // envReg.defLines() は本文ができてから評価しないと新しい表が定義に載らない(mmlEmit.js splitAtFrame)
     const scoreText = MML.Convert.emitScore(scoreChannels, fpb, {
-      totalFrames, tempoBpm: bpm, cmd,
-      headerLines: [...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...dutyReg.defLines(),
+      totalFrames, tempoBpm: bpm, cmd, envReg,
+      headerLines: () => [...MML.Convert.tuningHeaderLines(), ...directiveLines, ...dpcmDefLines, ...envReg.defLines(), ...dutyReg.defLines(),
         ...pitchReg.defLines(), ...noteEnvReg.defLines(),
         ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(), ...fdsModDefLines]
     });

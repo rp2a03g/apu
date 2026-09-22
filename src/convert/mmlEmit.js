@@ -555,7 +555,7 @@
     flags.dpcmExact = MML.Convert.dpcmExactOf(opts.cmd); // 分割DPCMの音長は丸めない(DPCM_EXACT)
 
     const lines = [];
-    if (opts.headerLines) lines.push(...opts.headerLines);
+    lines.push(...headerLinesOf(opts));
 
     const filled = fillGaps(MML.Convert.shapeEvents(events, fpb, opts.cmd), totalFrames);
 
@@ -742,7 +742,24 @@
   //   (emitScore の L 位置選びのコメント参照)。休符は割るだけ
   // ・またぎが tol フレーム以内の切れ端になるなら割らず、音符の端を frame へ寄せる(1〜2フレームの
   //   切れ端を打ち直すと耳障りなうえ、192分音符の列になる。寄せ幅は音長の丸めの許容と同じ)
-  function splitAtFrame(events, frame, tol) {
+  // 音量表(@v)を d フレーム進めた位置から始まる表にする(L で割られた音符の後半用)。
+  // ループ表は d がループ区間に入っていれば回転し、非ループ表は d 以降(尽きていれば最後の値の保持)
+  function rotateEnvelopeShape(shape, d) {
+    const values = shape.values || [];
+    if (!values.length || d <= 0) return shape;
+    if (shape.loop != null && shape.loop < values.length) {
+      const loop = shape.loop, period = values.length - loop;
+      if (d < loop) return { values: values.slice(d), loop: loop - d };
+      const off = (d - loop) % period;
+      return { values: values.slice(loop + off).concat(values.slice(loop, loop + off)), loop: 0 };
+    }
+    return d < values.length ? { values: values.slice(d), loop: null } : { values: [values[values.length - 1]], loop: null };
+  }
+
+  // envReg(省略可): 割られた音符の後半に「d フレーム進めた音量表」を新しく登録して割り当てる(2026-09-22)。
+  // 無いと後半は同じ @v を頭から鳴らし直し、全chで共有する遅いトレモロ(女神転生II 21曲目、320フレーム周期)が
+  // L の位置(13秒)でいきなり頭に戻って途切れる(3パートで位相もずれる)
+  function splitAtFrame(events, frame, tol, envReg) {
     const out = [];
     tol = Math.max(0, tol | 0);
     for (const ev of events) {
@@ -752,10 +769,44 @@
         out.push(Object.assign({}, ev, { end: frame }));
         const tail = Object.assign({}, ev, { start: frame });
         if (ev.note === null) tail.continued = true; else { delete tail.continued; delete tail.slurTie; }
+        if (ev.note !== null) retargetEnvelope(tail, frame, envReg);
         out.push(tail);
       } else out.push(ev);
     }
     return out;
+  }
+
+  // 音符の頭(onset: 小節線やスラーで分かれる前の本当の発音開始)から frame まで進んだ位相の音量表を
+  // ev に割り当て直す(ev は書き換えてよいコピー)。envReg が無い/表が無ければ何もしない
+  function retargetEnvelope(ev, frame, envReg) {
+    if (!envReg || ev.envelopeV == null || !envReg.tables) return;
+    const shape = envReg.tables.get(ev.envelopeV);
+    if (!shape) return;
+    const onset = ev.onset != null ? ev.onset : ev.start;
+    const rotated = rotateEnvelopeShape(shape, frame - onset);
+    if (rotated === shape) return;
+    const idx = envReg.registerShape(rotated, ev.envelopeV >= 100);
+    if (idx != null) ev.envelopeV = idx;
+  }
+
+  // 各イベントに onset(本当の発音開始フレーム)を付ける。スラー(slurTie)で前の音符から続く音符は
+  // 前の音符の onset を引き継ぐ(音量表はスラーの頭から走り続けているため)。小節線の分割はこの後で
+  // 行われ Object.assign で引き継がれる
+  function markOnsets(events) {
+    let onset = null;
+    for (const e of events) {
+      if (e.note == null) { onset = null; continue; }
+      e.onset = (e.slurTie && onset != null) ? onset : e.start;
+      onset = e.onset;
+    }
+    return events;
+  }
+
+  // opts.headerLines は配列か、呼んだ時点の定義行を返す関数(L で割った音符の音量表のように、本文を
+  // 作っている途中で定義が増えるものがあるため、関数なら本文ができてから評価する)
+  function headerLinesOf(opts) {
+    const h = opts && opts.headerLines;
+    return typeof h === 'function' ? (h() || []) : (h || []);
   }
 
   // LEN_DP が OFF のときの音長の計画(renderEvents が音符ごとに framesToLengths+持ち越しで決めるのと同じ結果を
@@ -979,8 +1030,8 @@
     const lines = [];
     // 定義行には「どのチャンネルで使っているか」のコメントを付けて並べ替える(annotateDefinitions)。
     // 本文ができてからでないと使っているチャンネルが分からないので、ここでは位置だけ控えて後で差し替える
-    const headerAt = lines.length, headerCount = opts.headerLines ? opts.headerLines.length : 0;
-    if (opts.headerLines) lines.push(...opts.headerLines);
+    // 定義行は本文ができてから(下で)ここへ差し込む。本文の途中で定義が増えうるため(splitAtFrame の音量表)
+    const headerAt = lines.length;
     if (loop) {
       lines.push(`; ループ自動検出: ${loop.start}フレーム目から ${loop.period}フレーム周期(` +
         (loop.hinted ? `元データのループ情報による。変換した長さは ${fullFrames}フレーム` : `元の ${fullFrames}フレームのうち ${loop.span}フレームで周期を確認`) + `)。` +
@@ -1000,15 +1051,21 @@
       // 変換設定(src/convert/options.js opts.cmd): 譜面整形(短い休符吸収)を
       // ギャップ補完の前に掛け、コマンドフラグは下でANDマスクする(割当層で止め切れ
       // なかった分の安全網)
-      const filled  = fillGaps(MML.Convert.shapeEvents(chan.events, fpb, opts.cmd), totalFrames);
+      const filled  = markOnsets(fillGaps(MML.Convert.shapeEvents(chan.events, fpb, opts.cmd), totalFrames));
       let split     = splitAtBoundaries(filled, boundaries, MML.Convert.lenSnapOf(opts.cmd));
       if (!loop) split = trimTail(split, chanSoundEnd(chan));
       // ループ開始位置では必ず割る(L をイベントの頭に置くため)。端を寄せた結果できた隙間は休符で埋め直す
-      if (loop) split = fillGaps(splitAtFrame(split, loop.start, MML.Convert.lenSnapOf(opts.cmd)).filter(e => e.note !== null || e.end > e.start), totalFrames);
+      if (loop) split = fillGaps(splitAtFrame(split, loop.start, MML.Convert.lenSnapOf(opts.cmd), opts.envReg).filter(e => e.note !== null || e.end > e.start), totalFrames);
       // L の直後の音符は必ず打ち直しにする: 小節線の分割(continued)やスラー(slurTie)で前の音符とタイに
       // なっていると「タイの途中の L」になり、NSFでそのチャンネルのループ先が登録されない
-      if (loop) split = split.map(e => (e.start === loop.start && e.note !== null && (e.continued || e.slurTie))
-        ? Object.assign({}, e, { continued: false, slurTie: false }) : e);
+      // ★打ち直しにした音符の音量表は、本当の頭(onset)からここまで進んだ位相の表に差し替える(retargetEnvelope)。
+      //   差し替えないと全chで共有する遅いトレモロ(女神転生II 21曲目)が L で頭に戻って途切れる
+      if (loop) split = split.map(e => {
+        if (!(e.start === loop.start && e.note !== null && (e.continued || e.slurTie))) return e;
+        const re = Object.assign({}, e, { continued: false, slurTie: false });
+        retargetEnvelope(re, loop.start, opts.envReg);
+        return re;
+      });
       let plan      = loop ? null : buildLengthPlan(split, fpb, MML.Convert.lenSnapOf(opts.cmd), opts.cmd);
       if (loop) {
         // 音長の計画はイントロ部分とループ部分で別々に立てる。通しで立てると、L の位置で音長を調整した
@@ -1079,13 +1136,16 @@
       channelsData.forEach((c, i) => { c.events = savedEvents[i]; });
       return MML.Convert.emitScore(channelsData, fpb, Object.assign({}, opts, {
         cmd: Object.assign({}, opts.cmd, { LOOP_DETECT: false }),
-        headerLines: (opts.headerLines || []).concat(['; ループ自動検出: ループは見つかりましたが、全チャンネルの長さを一致させられなかったため通常の出力にしました'])
+        headerLines: () => headerLinesOf(opts).concat(['; ループ自動検出: ループは見つかりましたが、全チャンネルの長さを一致させられなかったため通常の出力にしました'])
       }));
     }
 
-    if (headerCount) {
-      const bodies = perChannelMeasureTexts.map(texts => texts.join(' '));
-      lines.splice(headerAt, headerCount, ...annotateDefinitions(opts.headerLines, channelsData.map(c => c.letter), bodies));
+    {
+      const headerLines = headerLinesOf(opts);
+      if (headerLines.length) {
+        const bodies = perChannelMeasureTexts.map(texts => texts.join(' '));
+        lines.splice(headerAt, 0, ...annotateDefinitions(headerLines, channelsData.map(c => c.letter), bodies));
+      }
     }
 
     // ── ループ位置で譜面を前後に分ける(2026-09-19、方針「L が見落としやすい」) ──
