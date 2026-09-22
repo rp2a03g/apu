@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-22 08:32:53
+ * Built by tools/build-capture-workers.ps1 at 2026-09-22 10:35:29
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-22 08:32:53';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-22 10:35:29';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -1507,19 +1507,26 @@
 
     // 変調適用後の周波数(内部単位)。NSFPlay nes_fds.cpp の "complex mod calculation" と同じ式。
     // $4087 で停止中でも効く(カウンタは止まったまま = $4085 直書きの固定ベンド)
-    _modulatedFreq() {
-      if (this.modGain === 0) return this.freq;
-      let temp = this.modCounter * this.modGain;
+    _modulatedFreq() { return FDSAudio.modulatedFreq(this.freq, this.modCounter, this.modGain); }
+
+    /**
+     * 変調式そのもの(純関数)。freq=$4082/83 の12bit周期値、counter=モジュレータカウンタ(-64..63)、
+     * gain=$4084 のゲイン。戻り値は変調後の周期値(内部単位、freq と同じ)。
+     * nsf2mml($4085 直書きの固定ベンドを音符/Dへ落とす)からも使う。
+     */
+    static modulatedFreq(freq, counter, gain) {
+      if (gain === 0 || counter === 0) return freq;
+      let temp = counter * gain;
       const rem = temp & 0x0F;
       temp >>= 4; // 算術シフト(符号保持)
-      if (rem > 0 && (temp & 0x80) === 0) temp += (this.modCounter < 0) ? -1 : 2;
+      if (rem > 0 && (temp & 0x80) === 0) temp += (counter < 0) ? -1 : 2;
       while (temp >= 192) temp -= 256; // 8bitの折り返し(-64..191)
       while (temp < -64) temp += 256;
-      temp = this.freq * temp;
+      temp = freq * temp;
       const r2 = temp & 0x3F;
       temp >>= 6;
       if (r2 >= 32) temp += 1;
-      return this.freq + temp; // temp >= -freq なので負にならない
+      return freq + temp; // temp >= -freq なので負にならない
     }
 
     /**
@@ -16633,7 +16640,9 @@
       // フレームは max===min でも搬送波からずれているので、それは残す
       if (!st || (st.max === st.min && st.max === fds.freq)) return null;
       any = true;
-      st.fast = fds.modFreq * CPU_CLOCK / (65536 * 64) > FDS_MOD_FAST_HZ;
+      // 速い/遅いはテーブルが回っているときだけ意味を持つ。停止中($4087 bit7)や周波数0で
+      // カウンタが止まったままの偏り($4085 直書きのベンド)は、modFreq が大きくても線で描く
+      st.fast = fds.modEnabled && fds.modFreq > 0 && fds.modFreq * CPU_CLOCK / (65536 * 64) > FDS_MOD_FAST_HZ;
       return st;
     });
     return any ? out : null;
@@ -24284,6 +24293,29 @@
     ranges.push({ start: offset + segStart, end: offset + seq.length });
     return ranges;
   }
+
+  // 音程が変わる境界での「エンベロープの頭からの打ち直し」判定(2026-09-22)。
+  // 前の音符(prevVolSeq)の頭 HEAD_LEN フレームと、新しい音符(curVolSeq)の頭が同じ音量列で
+  // 始まっていれば、ドライバは同じ音量エンベロープを頭から鳴らし直している=タイ(&)ではなく
+  // 打ち直し。跳ね上がり量(RETRIGGER_JUMP_THRESHOLD)だけでは、頭が最大音量でないエンベロープ
+  // (ローリングサンダー 曲1 の N163 ベース { 5 6 6 6 5 4 4 4 3 2 2 1 1 }: 減衰しきった 1 から
+  // 次の音符が 5 6 6… と鳴り直すのに、直前の 4 からは +1 しか跳ねない)を見落とし、タイで繋いで
+  // @v が再指定されないまま音量 1 で鳴り続けていた(元曲との音量の食い違いが有音フレームの半分)。
+  // 前の音符の頭が「減衰しきった値の続き」と区別できない平坦な列のときは判定しない
+  // (どちらに倒しても音は同じで、タイのままにしておくほうが譜面が崩れない)。
+  const RESTART_HEAD_LEN = 4;
+  MML.Convert.isEnvelopeRestart = function (prevVolSeq, curVolSeq) {
+    if (!prevVolSeq || !curVolSeq) return false;
+    const k = Math.min(prevVolSeq.length, curVolSeq.length, RESTART_HEAD_LEN);
+    if (k < 2) return false;
+    const prevLast = prevVolSeq[prevVolSeq.length - 1];
+    let headIsFlat = true;
+    for (let i = 0; i < k; i++) {
+      if (prevVolSeq[i] !== curVolSeq[i]) return false;
+      if (prevVolSeq[i] !== prevLast) headIsFlat = false;
+    }
+    return !headIsFlat;
+  };
 
   MML.Convert.splitRetriggers = function (volSeq, opts) {
     opts = opts || {};

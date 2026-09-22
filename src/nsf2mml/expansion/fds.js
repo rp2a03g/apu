@@ -24,7 +24,7 @@
  * 区切る。
  *
  * ピッチ変調(モジュレーションユニット): $4084=ゲイン(bit7=1で直接指定、bits0-5)、
- * $4085=カウンタ直接設定(未使用・抽出対象外)、$4086/$4087=周波数(bit7=1で停止/
+ * $4085=カウンタ直接設定(下の「固定ベンド」)、$4086/$4087=周波数(bit7=1で停止/
  * テーブル書込み許可)、$4088=モジュレータテーブル(停止中のみ1エントリ3bitずつ
  * 書き込み、位置は$4087書込みで0にリセット)。$4088は同一アドレスへ32回書き込まれる
  * ため、initRegs(最終値スナップショット)では最後の1エントリしか復元できず、
@@ -42,6 +42,12 @@
  *   変えず、向き/速度/タイマーだけを設定するので、どこから育つかは直前までの履歴で決まる。
  *   そこで音量と同じ2段カウンタでゲインを連続シミュレートし、エンベロープ開始時点の実ゲインを
  *   depth(開始の深さ)にする。
+ * ★$4085 直書きの固定ベンド(2026-09-22): 変調式は $4087 で停止中(や周波数0、テーブルが全0)でも
+ *   効き続けるので、その状態でカウンタ≠0・ゲイン>0 なら搬送波は一定の比率で偏る(スライドに
+ *   使える)。テーブルが回っていない=MHでは表せないので、偏った後の実効周期を音符側の周期
+ *   (note/pitchSeq)にして、既存の D/EP/PT 抽出に落とす(新しいMMLコマンドは足さない)。
+ *   カウンタは実エミュ(MML.Emu.FDSAudio)に $4084-$4088 の書込みを流して追う(停止した瞬間の
+ *   凍結値まで再現するため)。テーブルが回っている間は従来どおり搬送波+MH。
  */
 (function (global) {
   'use strict';
@@ -107,6 +113,12 @@
     }
     const modTable = reconstructInitModTable(initWrites);
     let modWritePos = 0;
+    // カウンタ追跡用の実エミュ(無ければ $4085 の直書き値だけを追う)
+    const Fds = MML.Emu && MML.Emu.FDSAudio;
+    const fdsSim = (Fds && Fds.prototype.advanceForDisplay) ? new Fds() : null;
+    let modCounter = 0;
+    if (fdsSim) { for (const { addr, value } of (initWrites || [])) if (addr >= 0x4084 && addr <= 0x4088) fdsSim.writeRegister(addr, value); }
+    else if (ir[0x4085] !== undefined) { const v = ir[0x4085] & 0x7F; modCounter = v >= 64 ? v - 128 : v; }
 
     // ボリュームエンベロープの連続シミュレーション状態
     // (src/emulator/expansion/fds.js FDSAudioのフィールドと同じ意味・同じ初期値)
@@ -201,6 +213,8 @@
         } else if (addr >= 0x4040 && addr <= 0x407F) {
           wave[addr - 0x4040] = value & 0x3F;
           waveChanged = true;
+        } else if (addr === 0x4085) {
+          const v = value & 0x7F; modCounter = v >= 64 ? v - 128 : v;
         } else if (addr === 0x4084) {
           if (value & 0x80) { modGain = value & 0x3F; modEnvEnabled = false; }
           else {
@@ -239,13 +253,24 @@
       const nowInt = Math.floor(cycleAccum);
       advanceModEnvelope(nowInt - lastCyclesInt);
       advanceEnvelope(nowInt - lastCyclesInt);
+      if (fdsSim) {
+        for (const { addr, value } of writes) if (addr >= 0x4084 && addr <= 0x4088) fdsSim.writeRegister(addr, value);
+        fdsSim.advanceForDisplay(nowInt - lastCyclesInt);
+        modCounter = fdsSim.modCounter;
+      }
       lastCyclesInt = nowInt;
+      // テーブルが回っていない(停止/周波数0/全0)ならカウンタは止まったまま=固定ベンド。
+      // 回っているときの実効周期は毎サイクル動くので搬送波のまま(MH側で表す)
+      const modStatic = !modEnabled || modFreq === 0 || modTable.every(c => c === 0);
+      const period = freqLo | ((freqHiReg & 0x0F) << 8);
+      const effPeriod = (modStatic && modGainStart > 0 && modCounter !== 0 && Fds && Fds.modulatedFreq)
+        ? Fds.modulatedFreq(period, modCounter, modGainStart) : period;
 
       return {
         freqLo, freqHiReg, attack, wave: Array.from(wave), waveKey,
         envEnabled: volEnvEnabled, envRestart, gain: volGain,
         modFreq, modGain: modGainStart, modEnabled, modTable: Array.from(modTable), modTableKey,
-        modEnvDir, modEnvSpeed: modEnvSpeedOut, modEnvRestart
+        modEnvDir, modEnvSpeed: modEnvSpeedOut, modEnvRestart, modStatic, period: effPeriod
       };
     });
   }
@@ -259,7 +284,7 @@
     function flush(end) { if (cur) { cur.end = end; if (cur.end > cur.start) events.push(cur); cur = null; } }
     // エンベロープ動作中はゲインが毎フレーム動くので、鍵にはゲインを入れず向き/速度を入れる
     // (入れると育つたびに音符が割れる)。固定の深さのときは従来どおりゲインを入れる
-    const modKeyOf = t => `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modEnvDir ? 'E' + t.modEnvDir + ',' + t.modEnvSpeed : t.modGain}|${t.modTableKey}`;
+    const modKeyOf = t => t.modStatic ? 'static' : `${t.modEnabled ? 1 : 0}|${t.modFreq}|${t.modEnvDir ? 'E' + t.modEnvDir + ',' + t.modEnvSpeed : t.modGain}|${t.modTableKey}`;
     // inheritGain: $4084が書き直されず鍵も同じまま次の音符へ続く場合は前の音符の開始値を
     // 引き継ぐ(=同じ@MH番号になり、MH<n>が再発行されない。再発行すると$4085リセット+
     // テーブル再ロードで、元曲には無い変調の位相リセットが入ってしまう)
@@ -267,7 +292,7 @@
       cur = {
         note, envEnabled, wave, waveKey, rawFreq, start: f, end: f, volSeq: [volume], pitchSeq: [period],
         modFreq: t.modFreq, modGain: inheritGain != null ? inheritGain : t.modGain,
-        modEnabled: t.modEnabled, modTable: t.modTable,
+        modEnabled: t.modEnabled, modTable: t.modTable, modStatic: t.modStatic,
         modEnvDir: t.modEnvDir, modEnvSpeed: t.modEnvSpeed,
         modKey: modKeyOf(t),
         tieCandidate: !!tieCandidate
@@ -275,7 +300,7 @@
     }
     for (let f = 0; f < timeline.length; f++) {
       const t = timeline[f];
-      const period    = t.freqLo | ((t.freqHiReg & 0x0F) << 8);
+      const period    = t.period; // 固定ベンド込みの実効周期(buildTimeline)
       const disabled  = !!(t.freqHiReg & 0x80);
       // MMLのFDS音量は$4080ゲインの生値(0-63、ppmck同様)。以前は0-15へ半分に丸めて
       // いたためハードウェアエンベロープの分解能を半分捨てていた(2026-08-24)
@@ -342,7 +367,8 @@
       codes => codes.map(code => MML.Mml.fdsModCodeToToken(code)));
     const modParamReg = makeModParamRegistry();
     // 深さ0でも「0から増加するエンベロープ」なら変調あり
-    const modOn = ev => ev.modEnabled && ev.modFreq > 0 && (ev.modGain > 0 || ev.modEnvDir > 0);
+    // テーブルが回っていない(modStatic)間の偏りは周期側に入れてあるので MH は off
+    const modOn = ev => !ev.modStatic && ev.modEnabled && ev.modFreq > 0 && (ev.modGain > 0 || ev.modEnvDir > 0);
     const modUsed = events.some(ev => ev.note !== null && modOn(ev));
     function toModField(ev) {
       if (!modOn(ev)) return 'off';

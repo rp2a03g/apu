@@ -2157,7 +2157,9 @@
       // フレームは max===min でも搬送波からずれているので、それは残す
       if (!st || (st.max === st.min && st.max === fds.freq)) return null;
       any = true;
-      st.fast = fds.modFreq * CPU_CLOCK / (65536 * 64) > FDS_MOD_FAST_HZ;
+      // 速い/遅いはテーブルが回っているときだけ意味を持つ。停止中($4087 bit7)や周波数0で
+      // カウンタが止まったままの偏り($4085 直書きのベンド)は、modFreq が大きくても線で描く
+      st.fast = fds.modEnabled && fds.modFreq > 0 && fds.modFreq * CPU_CLOCK / (65536 * 64) > FDS_MOD_FAST_HZ;
       return st;
     });
     return any ? out : null;
