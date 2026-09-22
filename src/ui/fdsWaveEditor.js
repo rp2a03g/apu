@@ -85,6 +85,8 @@
   const MOD_TABLE_DELTA = [0, 1, 2, 4, 0, -4, -2, -1];
   const MOD_CANDIDATE_CODES = [0, 1, 2, 3, 5, 6, 7]; // 4(リセット)は候補に別途含める
 
+  // 実機の変調カウンタの動き(src/emulator/expansion/fds.js _stepMod)に合わせる: 各項目は
+  // 2ステップ分(2回)適用され、カウンタは7bitで折り返す(63+1=-64)。クランプではない
   function computeModCurve(codes) {
     let acc = 0;
     const curve = [];
@@ -92,8 +94,9 @@
       if (raw === 4) {
         acc = 0;
       } else {
-        acc += MOD_TABLE_DELTA[raw & 7] || 0;
-        acc = Math.max(-64, Math.min(63, acc));
+        acc += 2 * (MOD_TABLE_DELTA[raw & 7] || 0);
+        while (acc > 63) acc -= 128;
+        while (acc < -64) acc += 128;
       }
       curve.push(acc);
     }

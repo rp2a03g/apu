@@ -12,7 +12,19 @@
  *   $4085       : モジュレータカウンタ直接設定 (7bit符号付き)
  *   $4086       : モジュレータ周波数下位8bit
  *   $4087       : bits0-3=モジュレータ周波数上位4bit, bit7=1で停止
- *   $4088       : モジュレータテーブル書き込み (停止中のみ有効, 下位3bit)
+ *   $4088       : モジュレータテーブル書き込み (停止中のみ有効, 下位3bit)。再生位置に書いて2ステップ進む
+ *
+ * 変調ユニットは NSFPlay 2.6 nes_fds.cpp(rainwarrior、実機検証済み)に合わせてある(2026-09-22)。
+ * リファレンスWAV(NSFPlay、FDSのみ・LPF無し)との0.1秒窓スペクトル類似度で採点した。要点:
+ *   - テーブルは32項目だが位置は64ステップ(1項目を2回ずつ)。16bitの端数アキュムレータ
+ *   - カウンタは7bitで折り返す(63+1=-64)。クランプではない
+ *   - 変調量 = counter×gain を >>4(端数があり結果のbit7が0なら 負:-1/正:+2 の丸め)、
+ *     -64..191 へ8bit折り返し、×freq/64(四捨五入)。折り返しは実機の挙動で、深いFMでは
+ *     周波数が搬送波の最大4倍まで跳ねる(Golf US Course 3秒目で実際に鳴っている音)
+ *   - 変調式は $4087 で停止中も常に効く($4085 直書きのベンド)。停止はテーブルの歩進を
+ *     止めて端数を0にするだけで、位置は保つ。$4088 は再生位置へ書く
+ * 以前は「1項目1回・クランプ・折り返し無し(Math.max(0))・停止中は無効」で、深さが半分、
+ * 深いFMで別の音になっていた。
  *   $4089       : bit7=波形メモリ書き込み許可, bits0-1=マスターボリューム
  *   $408A       : エンベロープ速度マスタ (0=最速, 値が大きいほど遅い)
  */
@@ -26,6 +38,8 @@
   // モジュレータテーブルの3bitエントリをカウンタ増分に変換
   // 0=+0, 1=+1, 2=+2, 3=+4, 4=リセット(0), 5=-4, 6=-2, 7=-1
   const MOD_TABLE_DELTA = [0, 1, 2, 4, 0, -4, -2, -1];
+  const MOD_STEPS = 64;                  // 変調テーブルの位置は64ステップ(32項目×2)
+  const MOD_STEP_CYCLES = 65536;         // 1ステップ = 65536/modFreq CPUサイクル
 
   class FDSAudio {
     constructor() {
@@ -57,11 +71,10 @@
       // モジュレータ
       this.modFreq = 0;
       this.modEnabled = false; // bit7=0 のとき有効
-      this.modPhaseAcc = 0;
-      this.modTable = new Uint8Array(32); // 生3bit値 (0-7)
-      this.modWritePos = 0;
-      this.modTablePos = 0;   // 再生位置
-      this.modCounter = 0;    // 現在のモジュレータ出力値 (-64..63)
+      this.modPhaseAcc = 0;               // 位置の端数(0..65535)
+      this.modTable = new Uint8Array(MOD_STEPS); // 生3bit値 (0-7)。$4088 1回で2項目埋まる
+      this.modTablePos = 0;   // 再生位置(0..63)。$4088 の書き込み位置も兼ねる
+      this.modCounter = 0;    // 現在のモジュレータ出力値 (-64..63、7bit折り返し)
 
       // エンベロープマスタ速度レジスタ ($408A)
       // FDS 電源ON時デフォルト = $E8 = 232 (実機ハードウェア仕様)
@@ -95,8 +108,7 @@
       this.modFreq = 0;
       this.modEnabled = false;
       this.modPhaseAcc = 0;
-      this.modTable = new Uint8Array(32);
-      this.modWritePos = 0;
+      this.modTable = new Uint8Array(MOD_STEPS);
       this.modTablePos = 0;
       this.modCounter = 0;
       this.envRate = 0xE8; // FDS 電源ON時デフォルト
@@ -127,6 +139,7 @@
         this.envHalt = (value & 0x40) !== 0;
         this.disabled = (value & 0x80) !== 0;
         if (this.disabled) this.phaseAcc = 0;
+        if (this.envHalt) { this.volEnvTimer = this.volEnvSpeed + 1; this.modEnvTimer = this.modEnvSpeed + 1; }
       } else if (addr === 0x4084) {
         if (value & 0x80) {
           this.modEnvEnabled = false;
@@ -146,17 +159,15 @@
       } else if (addr === 0x4087) {
         this.modFreq = (this.modFreq & 0x00FF) | ((value & 0x0F) << 8);
         this.modEnabled = (value & 0x80) === 0;
-        if (!this.modEnabled) {
-          // 停止時: 書き込み位置・再生位置・位相をリセット
-          this.modPhaseAcc = 0;
-          this.modWritePos = 0;
-          this.modTablePos = 0;
-        }
+        // 停止時は位置の端数だけ0にする(再生位置は保つ。変調式は停止中も効き続ける)
+        if (!this.modEnabled) this.modPhaseAcc = 0;
       } else if (addr === 0x4088) {
-        // モジュレータ停止中にテーブルを書き込む (1エントリ = 3bit)
+        // モジュレータ停止中に、現在の再生位置へ1項目(=2ステップ分)書いて進める
         if (!this.modEnabled) {
-          this.modTable[this.modWritePos] = value & 0x07;
-          this.modWritePos = (this.modWritePos + 1) & 0x1F;
+          this.modTable[this.modTablePos] = value & 0x07;
+          this.modTablePos = (this.modTablePos + 1) & (MOD_STEPS - 1);
+          this.modTable[this.modTablePos] = value & 0x07;
+          this.modTablePos = (this.modTablePos + 1) & (MOD_STEPS - 1);
         }
       } else if (addr === 0x4089) {
         this.waveWriteEnable = (value & 0x80) !== 0;
@@ -176,6 +187,7 @@
 
     // エンベロープを1ティック進める (エンベロープマスタ速度に応じて呼ばれる)
     _clockEnvelope() {
+      if (this.disabled) return; // $4083 bit7=1 の間はどちらのエンベロープも進まない
       // ボリュームエンベロープ
       if (this.volEnvEnabled && !this.envHalt) {
         this.volEnvTimer--;
@@ -214,59 +226,52 @@
         this._clockEnvelope();
       }
 
-      // モジュレータ: APUクロック(CPU/2)相当、オーバーフロー閾値 = 2 × 65536 = 131072
-      // レジスタログ実測: modFreq=16 で 6.83 Hz ビブラート → 16×1789773/(32×131072)=6.83Hz ✓
-      if (this.modEnabled && this.modFreq > 0) {
-        this.modPhaseAcc += this.modFreq;
-        while (this.modPhaseAcc >= 131072) {
-          this.modPhaseAcc -= 131072;
-          const raw = this.modTable[this.modTablePos];
-          this.modTablePos = (this.modTablePos + 1) & 0x1F;
-          if (raw === 4) {
-            // リセット: カウンタを0に
-            this.modCounter = 0;
-          } else {
-            this.modCounter += MOD_TABLE_DELTA[raw];
-            // クランプ (-64..63)
-            if (this.modCounter > 63) this.modCounter = 63;
-            if (this.modCounter < -64) this.modCounter = -64;
-          }
-        }
-      }
+      // モジュレータテーブルの歩進(1ステップ = 65536/modFreq サイクル、64ステップで1周。
+      // レジスタログ実測: modFreq=16 で 6.83 Hz ビブラート → 16×1789773/(64×65536)=6.83Hz ✓)
+      this._stepMod(1);
 
       // メインチャンネル
       if (this.disabled || this.freq === 0) return;
-
-      // ピッチ変調: NESdev FDS audio 準拠の実機アルゴリズム
-      //   1. temp = modCounter × modGain          （gain=$4084。gain=0なら変調ゼロ）
-      //   2. 4bit右シフト(符号保持)、下位4bitに端数があり結果が非負なら+1(切り上げ)
-      //   3. effectiveFreq = freq + freq × delta / 64
-      // ★注意: 以前は「+0x400してから8bitマスク、-64」という手順で(2)(3)を行って
-      // いたが、これは|temp|(=|modCounter×modGain|)が0x400(1024)未満の範囲でしか
-      // 正しく機能しない近似で、modGainが大きくmodCounterが強く負に振れる(絶対値の
-      // 積が1024を超える)と8bitマスクで符号が反転し、逆方向の桁違いなピッチになる
-      // 深刻なバグだった(実測: modGain=32,modCounter=-64で本来delta=-128のところ
-      // +128を返す)。Almana no Kiseki(FDS)2曲目でモジュレーション有効時に音痴に
-      // なる不具合の原因。旧実装の校正根拠だったmodGain=16のケースはtemp>>4の結果が
-      // ±64に収まるため両実装で一致し、回帰は無い。
-      let effectiveFreq = this.freq;
-      if (this.modEnabled) {
-        const temp = this.modCounter * this.modGain;
-        const rem = temp & 0x0F;
-        let delta = temp >> 4; // 算術シフト(符号保持)。|temp|<=64*63なので32bit範囲内で安全
-        if (rem !== 0 && delta >= 0) delta += 1;
-        if (delta !== 0) {
-          const bias = Math.round((delta * this.freq) / 64);
-          effectiveFreq = Math.max(0, this.freq + bias);
-        }
-      }
       // 鍵盤表示等の外部参照用(実際に揺れているピッチをHz換算する際、$4082/4083の
       // 生の周期値ではなくこちらを使う。単位はthis.freqと同じ内部単位)
+      const effectiveFreq = this._modulatedFreq();
       this.effectiveFreq = effectiveFreq;
+      this.phaseAcc = (this.phaseAcc + effectiveFreq) & 0x3FFFFF; // 64サンプル × 16bit端数
+    }
 
-      this.phaseAcc += effectiveFreq;
-      const cycleLen = 64 * 65536;
-      if (this.phaseAcc >= cycleLen) this.phaseAcc -= cycleLen;
+    // 変調テーブルを cycles サイクル分歩進させる(停止中は進まない)
+    _stepMod(cycles) {
+      if (!this.modEnabled || this.modFreq === 0) return;
+      this.modPhaseAcc += this.modFreq * cycles;
+      while (this.modPhaseAcc >= MOD_STEP_CYCLES) {
+        this.modPhaseAcc -= MOD_STEP_CYCLES;
+        const raw = this.modTable[this.modTablePos];
+        this.modTablePos = (this.modTablePos + 1) & (MOD_STEPS - 1);
+        if (raw === 4) {
+          this.modCounter = 0; // リセット
+        } else {
+          let c = this.modCounter + MOD_TABLE_DELTA[raw];
+          if (c > 63) c -= 128; else if (c < -64) c += 128; // 7bit折り返し
+          this.modCounter = c;
+        }
+      }
+    }
+
+    // 変調適用後の周波数(内部単位)。NSFPlay nes_fds.cpp の "complex mod calculation" と同じ式。
+    // $4087 で停止中でも効く(カウンタは止まったまま = $4085 直書きの固定ベンド)
+    _modulatedFreq() {
+      if (this.modGain === 0) return this.freq;
+      let temp = this.modCounter * this.modGain;
+      const rem = temp & 0x0F;
+      temp >>= 4; // 算術シフト(符号保持)
+      if (rem > 0 && (temp & 0x80) === 0) temp += (this.modCounter < 0) ? -1 : 2;
+      while (temp >= 192) temp -= 256; // 8bitの折り返し(-64..191)
+      while (temp < -64) temp += 256;
+      temp = this.freq * temp;
+      const r2 = temp & 0x3F;
+      temp >>= 6;
+      if (r2 >= 32) temp += 1;
+      return this.freq + temp; // temp >= -freq なので負にならない
     }
 
     /**
@@ -275,9 +280,8 @@
      * ピアノロール構築(src/ui/keyboard.js buildFdsModSnapshots)が writeLog から
      * 「フレーム内でピッチがどれだけ動いたか」を復元するのに使う。1フレーム=約29780サイクルを
      * clock()で1サイクルずつ回すと1曲で数億回になるため、STEP サイクル刻みの粗い歩進にしてある
-     * (変調テーブルの歩進は最速でも32サイクルに1回なので、表示用には十分)。
-     * ★clock() の変調/エンベロープ部分と同じ式。clock() を直したらここも必ず合わせること
-     *   (tools不要の確認: 同じ書込みを与えて clock() 実測の平均/最小/最大と突き合わせる)。
+     * (変調テーブルの歩進は最速でも16サイクルに1回なので、表示用には十分)。
+     * 歩進と変調式は clock() と同じ _stepMod / _modulatedFreq を使う(式の二重管理はしない)。
      * @returns {{mean:number,min:number,max:number}|null} 発音していない/変調が効いていない間は null
      */
     advanceForDisplay(cycles) {
@@ -285,28 +289,12 @@
       const envPeriod = (this.envRate + 1) * 8;
       let sum = 0, n = 0, min = Infinity, max = -Infinity;
       for (let c = 0; c < cycles; c += STEP) {
-        this.envRateClock += STEP;
+        const step = Math.min(STEP, cycles - c); // 端数を切り上げない(切り上げると clock() と位置がずれていく)
+        this.envRateClock += step;
         while (this.envRateClock >= envPeriod) { this.envRateClock -= envPeriod; this._clockEnvelope(); }
-        if (this.modEnabled && this.modFreq > 0) {
-          this.modPhaseAcc += this.modFreq * STEP;
-          while (this.modPhaseAcc >= 131072) {
-            this.modPhaseAcc -= 131072;
-            const raw = this.modTable[this.modTablePos];
-            this.modTablePos = (this.modTablePos + 1) & 0x1F;
-            if (raw === 4) this.modCounter = 0;
-            else {
-              this.modCounter += MOD_TABLE_DELTA[raw];
-              if (this.modCounter > 63) this.modCounter = 63;
-              if (this.modCounter < -64) this.modCounter = -64;
-            }
-          }
-        }
-        if (this.disabled || this.freq === 0 || !this.modEnabled) continue;
-        let eff = this.freq;
-        const temp = this.modCounter * this.modGain;
-        let delta = temp >> 4;
-        if ((temp & 0x0F) !== 0 && delta >= 0) delta += 1;
-        if (delta !== 0) eff = Math.max(0, this.freq + Math.round((delta * this.freq) / 64));
+        this._stepMod(step);
+        if (this.disabled || this.freq === 0) continue;
+        const eff = this._modulatedFreq();
         sum += eff; n++;
         if (eff < min) min = eff;
         if (eff > max) max = eff;
