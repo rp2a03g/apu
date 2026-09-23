@@ -236,7 +236,36 @@
     splitEl.style.height = Math.max(0, h) + 'px';
     splitEl.style.overflow = 'hidden';
   }
+  // スマホ画面(2026-09-24): 境目は「一覧の高さ」を変える。下段(波形/分割)と設定値は一覧の下に
+  // 続けて並び、パネル全体を縦スクロールする(下段だけが縮んで見づらくならないように)
+  const LIST_H_KEY_MOBILE = 'drumPanelListH_mobile';
+  function isMobileUi() { return !!(MML.Device && MML.Device.uiMode && MML.Device.uiMode() === 'mobile'); }
+  function initDividerMobile(div) {
+    if (!div || !bodyEl) return;
+    const apply = (h) => { if (h == null) bodyEl.style.height = ''; else bodyEl.style.height = Math.max(60, h) + 'px'; };
+    try { const v = parseInt(global.localStorage.getItem(LIST_H_KEY_MOBILE), 10); if (Number.isFinite(v)) apply(v); } catch (e) { /* ignore */ }
+    let dragging = false, startY = 0, startH = 0;
+    div.addEventListener('pointerdown', (e) => {
+      if (e.button != null && e.button !== 0) return;
+      dragging = true; startY = e.clientY; startH = bodyEl.offsetHeight;
+      div.classList.add('dragging'); e.preventDefault();
+      try { div.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    });
+    div.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      apply(startH + (e.clientY - startY)); // 下へ引く=一覧が広がる(下の段はそのぶん下へずれる)
+    });
+    const end = () => {
+      if (!dragging) return;
+      dragging = false; div.classList.remove('dragging');
+      try { global.localStorage.setItem(LIST_H_KEY_MOBILE, String(bodyEl.offsetHeight)); } catch (e) { /* ignore */ }
+    };
+    div.addEventListener('pointerup', end);
+    div.addEventListener('pointercancel', end);
+    div.addEventListener('dblclick', () => { apply(null); try { global.localStorage.removeItem(LIST_H_KEY_MOBILE); } catch (e) { /* ignore */ } });
+  }
   function initDivider(div) {
+    if (isMobileUi()) { initDividerMobile(div); return; }
     if (!div || !splitEl) return;
     let saved = null;
     try { const v = parseInt(global.localStorage.getItem(DIVIDER_KEY), 10); if (Number.isFinite(v)) saved = v; } catch (e) { /* ignore */ }

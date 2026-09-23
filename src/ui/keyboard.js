@@ -181,6 +181,22 @@
     try { localStorage.setItem(layoutStorageKey(), JSON.stringify(s)); } catch (e) { /* ignore */ }
   }
 
+  // ロールの時間軸の拡大率(2本指ピンチ、2026-09-24)。1 = ROLL_PX_PER_SEC(80px/秒)。
+  // スマホ画面と PC で別に覚える(タッチ対応の PC でつまんでもスマホの設定は変わらない)
+  const ROLL_TIME_ZOOM_MIN = 0.25, ROLL_TIME_ZOOM_MAX = 4;
+  const ROLL_PITCH_ZOOM_MAX = 6;
+  function rollZoomKey(kind) { return 'mml_roll' + kind + 'Zoom' + (isMobileUi() ? '_mobile' : ''); }
+  function loadRollZoom(kind, lo, hi) {
+    try { const v = parseFloat(localStorage.getItem(rollZoomKey(kind))); if (Number.isFinite(v)) return Math.max(lo, Math.min(hi, v)); } catch (e) { /* ignore */ }
+    return 1;
+  }
+  function saveRollZoom(kind, v) { try { localStorage.setItem(rollZoomKey(kind), v.toFixed(3)); } catch (e) { /* ignore */ } }
+  let rollTimeZoom = null; // 初回参照時に読む(MML.Device が確実に居るタイミングで)
+  function rollPxPerSec() {
+    if (rollTimeZoom === null) rollTimeZoom = loadRollZoom('Time', ROLL_TIME_ZOOM_MIN, ROLL_TIME_ZOOM_MAX);
+    return ROLL_PX_PER_SEC * rollTimeZoom;
+  }
+
   // ── ロール/鍵盤の座標系 ───────────────────────────────────────
   // ロールと鍵盤は「音程軸(p)」と「時間軸(t)」の2軸で描き、向き(orientation)に応じて
   // canvasのx/yへ写像する。描画ルーチン側は向きを意識せずp/tだけで書けるようにするための抽象。
@@ -202,7 +218,7 @@
     const wk = pitchLen / (visibleWhite || (TOTAL_WHITE + drumUnits));
     const bk = Math.max(3, wk * 0.60);
     // 先読み時間幅(秒)と、秒→時間軸pxの変換。時間軸320pxのとき従来通り4秒/80px/秒になる
-    const windowSec = timeLen / ROLL_PX_PER_SEC;
+    const windowSec = timeLen / rollPxPerSec();
     const tPx = (sec) => (sec / windowSec) * timeLen;
     return {
       vertical, W, H, pitchLen, timeLen, wk, bk, windowSec, tPx,
@@ -3778,6 +3794,9 @@
       body.appendChild(this._rollCanvas);
       body.appendChild(pianoWrap);
       this._rollBodyEl = body;
+      // 音程軸の拡大率(スマホ画面だけ。CSS 変数 --m-pz でロールと鍵盤の幅を広げ、本体を横スクロールさせる)
+      this._rollPitchZoom = isMobileUi() ? loadRollZoom('Pitch', 1, ROLL_PITCH_ZOOM_MAX) : 1;
+      if (isMobileUi()) body.style.setProperty('--m-pz', String(this._rollPitchZoom));
 
       // チャンネルごとのレーン表示(rollLanes='perChannel')用のコンテナ。中身(各レーンの
       // ロール+鍵盤canvas)は_rebuildLanes()が使用チャンネルに合わせて作り直す。
@@ -4375,7 +4394,7 @@
       const t = g.vertical ? (g.H - cy) : cx;
       if (t < 0 || t > g.timeLen) return null;
       const pos = this._rollLastDrawnPos || 0;
-      const sec = pos + t / ROLL_PX_PER_SEC;
+      const sec = pos + t / rollPxPerSec();
       const wkW = g.wk, bkW = g.bk;
       const offPx = lane ? (lane.offWhite || 0) * wkW : 0;
       const pitchOff = g.drumOff - offPx;
@@ -4420,38 +4439,101 @@
         const got = this.onRollSeek(songSec * denom);
         if (typeof got === 'number' && Number.isFinite(got)) this._rollDrag.pos = got / denom;
       };
+      // ── 指の操作(2026-09-24) ──
+      //  ・2本指ピンチ: 指の間隔の「時間軸方向」の変化で時間の拡大率、「音程軸方向」の変化で音程の拡大率
+      //    (音程はスマホ画面のまとめ表示だけ。ロールと鍵盤を広げて本体を横/縦スクロールさせる)
+      //  ・1本指: 最初に動いた向きで決める。時間軸方向=従来どおりドラッグでシーク、
+      //    音程軸方向(音程を拡大しているとき)=音程のスクロール
+      //  ・指で音符を「タップ」したら(動かさずに離したら)そのchを大波形へ。マウスは従来どおり押した瞬間
+      const pointers = new Map();
+      let pinch = null;
+      const vertical = () => this._layout.rollOrientation !== 'horizontal';
+      const pitchZoomable = () => isMobileUi() && !canvas._rollLane && this._rollBodyEl && this._rollBodyEl.contains(canvas);
+      const endDrag = (seekFinal) => {
+        const d = this._rollDrag;
+        if (!d) return;
+        canvas.classList.remove('dragging');
+        if (seekFinal && d.moved && d.mode === 'seek') applySeek(d.pos, true);
+        this._rollDrag = null;
+        // 次の実測位置から補間を組み直す(シーク後の位置に即座に揃える)
+        this._rollLastRawPos = null;
+        this._rollCursor = {};
+      };
       canvas.addEventListener('pointerdown', (e) => {
-        if (e.button !== 0 || !this._rollTimeline) return;
-        // ノートの上で押した場合はシークせず、そのchを大波形へフォーカスする
-        const hit = this._trackAtRollPoint(canvas, e.clientX, e.clientY, canvas._rollOnlyId != null ? canvas._rollOnlyId : null, canvas._rollLane || null);
-        if (hit) { this._selectWave(hit); e.preventDefault(); return; }
-        this._rollDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, startPos: this._rollLastDrawnPos || 0, pos: this._rollLastDrawnPos || 0, moved: false };
+        const touch = e.pointerType === 'touch';
+        if (!touch && e.button !== 0) return;
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
         try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* キャプチャ不可でも要素上のmoveで追従する */ }
+        if (touch && pointers.size === 2) {
+          endDrag(true);
+          const [a, b] = Array.from(pointers.values());
+          pinch = { sx: Math.abs(a.x - b.x), sy: Math.abs(a.y - b.y), tz: rollTimeZoom === null ? (rollPxPerSec(), rollTimeZoom) : rollTimeZoom, pz: this._rollPitchZoom || 1 };
+          e.preventDefault();
+          return;
+        }
+        if (pointers.size > 1 || !this._rollTimeline) return;
+        // ノートの上で押した場合はシークせず、そのchを大波形へフォーカスする(指はタップで判定)
+        const hit = this._trackAtRollPoint(canvas, e.clientX, e.clientY, canvas._rollOnlyId != null ? canvas._rollOnlyId : null, canvas._rollLane || null);
+        if (hit && !touch) { this._selectWave(hit); e.preventDefault(); return; }
+        const body = this._rollBodyEl;
+        this._rollDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, startPos: this._rollLastDrawnPos || 0, pos: this._rollLastDrawnPos || 0,
+          moved: false, mode: null, hit: hit || null,
+          scroll0: body ? (vertical() ? body.scrollLeft : body.scrollTop) : 0 };
         canvas.classList.add('dragging');
         e.preventDefault();
       });
       canvas.addEventListener('pointermove', (e) => {
+        const pt = pointers.get(e.pointerId);
+        if (pt) { pt.x = e.clientX; pt.y = e.clientY; }
+        if (pinch) {
+          if (pointers.size < 2) return;
+          const [a, b] = Array.from(pointers.values());
+          const sx = Math.abs(a.x - b.x), sy = Math.abs(a.y - b.y);
+          const v = vertical();
+          const t0 = v ? pinch.sy : pinch.sx, t1 = v ? sy : sx;
+          const p0 = v ? pinch.sx : pinch.sy, p1 = v ? sx : sy;
+          if (t0 > 40) rollTimeZoom = Math.max(ROLL_TIME_ZOOM_MIN, Math.min(ROLL_TIME_ZOOM_MAX, pinch.tz * t1 / t0));
+          if (p0 > 40 && pitchZoomable()) this._setRollPitchZoom(pinch.pz * p1 / p0, (a.x + b.x) / 2, (a.y + b.y) / 2);
+          else this._rollZoomRedraw();
+          return;
+        }
         const d = this._rollDrag;
         if (!d || e.pointerId !== d.id) return;
         const dx = e.clientX - d.x, dy = e.clientY - d.y;
-        if (!d.moved && Math.abs(dx) < 2 && Math.abs(dy) < 2) return; // クリック程度の揺れでは動かさない
-        d.moved = true;
-        const vertical = this._layout.rollOrientation !== 'horizontal';
-        const deltaSec = (vertical ? dy : -dx) / ROLL_PX_PER_SEC;
+        if (!d.moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return; // タップ程度の揺れでは動かさない
+        const v = vertical();
+        if (!d.moved) {
+          d.moved = true;
+          const alongPitch = Math.abs(v ? dx : dy) > Math.abs(v ? dy : dx);
+          d.mode = (alongPitch && pitchZoomable() && (this._rollPitchZoom || 1) > 1.01) ? 'pan' : 'seek';
+        }
+        if (d.mode === 'pan') {
+          const body = this._rollBodyEl;
+          if (v) body.scrollLeft = d.scroll0 - dx; else body.scrollTop = d.scroll0 - dy;
+          return;
+        }
+        const deltaSec = (v ? dy : -dx) / rollPxPerSec();
         d.pos = Math.max(0, d.startPos + deltaSec);
         applySeek(d.pos, false);
         this._renderRoll(this._rollLastRawPosForDrag()); // 即座に追従して描く
       });
       const finish = (e) => {
+        pointers.delete(e.pointerId);
+        try { canvas.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        if (pinch) {
+          if (pointers.size < 2) {
+            pinch = null;
+            saveRollZoom('Time', rollTimeZoom || 1);
+            if (pitchZoomable()) saveRollZoom('Pitch', this._rollPitchZoom || 1);
+            pointers.clear(); // 残った1本は新しいドラッグを始めない(離して押し直してもらう)
+          }
+          return;
+        }
         const d = this._rollDrag;
         if (!d || e.pointerId !== d.id) return;
-        try { canvas.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-        canvas.classList.remove('dragging');
-        if (d.moved) applySeek(d.pos, true);
-        this._rollDrag = null;
-        // 次の実測位置から補間を組み直す(シーク後の位置に即座に揃える)
-        this._rollLastRawPos = null;
-        this._rollCursor = {};
+        const tapHit = !d.moved && d.hit;
+        endDrag(e.type === 'pointerup');
+        if (tapHit) this._selectWave(tapHit);
       };
       canvas.addEventListener('pointerup', finish);
       canvas.addEventListener('pointercancel', finish);
@@ -4459,6 +4541,41 @@
     // ドラッグ中に_renderRoll()を即時呼びするための「直前の実測位置」(無ければ0)。
     // _renderRoll()はドラッグ中は表示位置に_rollDrag.posを使うので値自体は補間の帳尻用
     _rollLastRawPosForDrag() { return this._rollLastRawPos == null ? 0 : this._rollLastRawPos; }
+
+    // 音程軸の拡大率を変える(スマホ画面のまとめ表示)。指の中心(clientX/Y)の下にある音程が動かないように
+    // スクロール位置を合わせる
+    _setRollPitchZoom(z, clientX, clientY) {
+      const body = this._rollBodyEl;
+      if (!body) return;
+      z = Math.max(1, Math.min(ROLL_PITCH_ZOOM_MAX, z));
+      const old = this._rollPitchZoom || 1;
+      const v = this._layout.rollOrientation !== 'horizontal';
+      const r = body.getBoundingClientRect();
+      const off = v ? clientX - r.left : clientY - r.top;
+      const content = (v ? body.scrollLeft : body.scrollTop) + off;
+      this._rollPitchZoom = z;
+      body.style.setProperty('--m-pz', String(z));
+      const ns = Math.max(0, content * z / old - off);
+      if (v) body.scrollLeft = ns; else body.scrollTop = ns;
+      this._rollZoomRedraw();
+    }
+    // 拡大率を変えた直後の描き直し(停止中は rAF が回っていないので自分で描く。サイズはレイアウト確定後に読む)
+    _rollZoomRedraw() {
+      if (this._rollZoomPending) return;
+      this._rollZoomPending = true;
+      const run = () => {
+        this._rollZoomPending = false;
+        for (const c of [this._rollCanvas, this._canvas]) {
+          if (!c) continue;
+          const w = c.clientWidth, h = c.clientHeight;
+          if (w) c._cachedWidth = w;
+          if (h) c._cachedHeight = h;
+        }
+        this._redrawRollForSpotlight();
+        this._drawPianos(this._lastPianoChannels || this._lastChannels || []);
+      };
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run); else run();
+    }
 
     // ── スポットライト(案D) ────────────────────────────────────────
     // チャンネル一覧の行にホバー(一時)/ch名クリック(固定)で「注目ch」を決め、ロール描画で
