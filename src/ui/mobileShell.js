@@ -131,6 +131,7 @@
     player.id = 'mobilePlayer';
     if (header && header.parentNode) header.parentNode.insertBefore(player, header.nextSibling);
     else document.body.insertBefore(player, document.body.firstChild);
+    // ch ミュートの一覧は畳んだまま(鍵盤表示の ch 一覧にもミュートがあり、開くと画面の大半を食う)
     if (MML.UI.MiniTransport && MML.UI.MiniTransport.dock) MML.UI.MiniTransport.dock(player);
 
     buildTabs();

@@ -3675,3 +3675,62 @@ html.ui-mobile .m-tab {
   white-space: nowrap;
 }
 html.ui-mobile .m-tab.is-active { background: var(--control-bg); color: var(--accent); border-color: var(--border); }
+
+/* ---- 鍵盤表示(スマホ): 上の再生操作と重複するボタンを隠し、一覧とロールを縦に積み、行を指で扱える大きさに ---- */
+html.ui-mobile #win-keyboard .kbd-transport,
+html.ui-mobile #win-keyboard .kbd-repeat-btn { display: none !important; }
+html.ui-mobile #win-keyboard .float-window-header { gap: 6px 8px; padding: 6px 8px; }
+html.ui-mobile #win-keyboard .kbd-hdr-btn,
+html.ui-mobile #win-keyboard .kbd-layout-btn { width: 36px; height: 34px; }
+html.ui-mobile #win-keyboard .kbd-hdr-btn svg,
+html.ui-mobile #win-keyboard .kbd-layout-btn svg { width: 20px; height: 20px; }
+html.ui-mobile #win-keyboard .kbd-tomml-btn { width: auto; padding: 0 10px; }
+html.ui-mobile #win-keyboard .kbd-tomml-text { font-size: 12px; }
+html.ui-mobile #win-keyboard .kbd-src-badge { font-size: 12px; padding: 4px 8px; }
+html.ui-mobile #win-keyboard .kbd-hdr-btn.kbd-src-name { flex: 1 1 0; min-width: 56px; width: auto; max-width: 100%; font-size: 13px; }
+/* 音量/速度: 半分ずつで1行に並べる。つまみは指で持てる高さに */
+html.ui-mobile #win-keyboard .kbd-mastervol--header,
+html.ui-mobile #win-keyboard .kbd-speed--header { flex: 1 1 40%; min-width: 140px; font-size: 13px; }
+html.ui-mobile #win-keyboard .kbd-mastervol--header .kbd-mastervol-range,
+html.ui-mobile #win-keyboard .kbd-speed--header .kbd-speed-range { flex: 1 1 auto; width: auto; min-width: 0; height: 28px; }
+html.ui-mobile #win-keyboard .kbd-mastervol-value,
+html.ui-mobile #win-keyboard .kbd-speed-value { width: 44px; text-align: right; }
+/* 一覧(上)とロール(下)を縦に積む。設定が「一覧の右」でもここでは縦にする(横幅が無い) */
+html.ui-mobile #win-keyboard .kbd-main { flex-direction: column; }
+html.ui-mobile #win-keyboard .kbd-left { width: auto !important; flex: 0 1 auto; max-height: 55%; }
+html.ui-mobile #win-keyboard .kbd-main > .kbd-splitter { display: none; }
+html.ui-mobile #win-keyboard .kbd-main--roll-right > .kbd-roll-wrap { border-left: none; border-top: 1px solid var(--border); }
+html.ui-mobile #win-keyboard .kbd-main > .kbd-roll-wrap { flex: 1 1 auto; min-height: 120px; width: auto !important; }
+/* ロール見出しの書き出し(WAV/秒/出力)とシークバーは、上の再生操作と重複するので隠す */
+html.ui-mobile #win-keyboard .kbd-roll-export,
+html.ui-mobile #win-keyboard .kbd-roll-seek-slot { display: none !important; }
+/* ch 行: 見出しの列幅と行の列幅を同じ値で大きくする(並びの根拠はデスクトップの .kbd-h-* / .kbd-* と同じ) */
+html.ui-mobile #win-keyboard .kbd-header { font-size: 12px; gap: 6px; padding: 4px 6px 3px; }
+html.ui-mobile #win-keyboard .kbd-ch-row { height: 30px; font-size: 13px; gap: 6px; }
+html.ui-mobile #win-keyboard .kbd-h-part { width: 22px; }
+html.ui-mobile #win-keyboard .kbd-dot { width: 12px; height: 12px; }
+html.ui-mobile #win-keyboard .kbd-part { font-size: 12px; }
+html.ui-mobile #win-keyboard .kbd-h-mute-solo { width: 22px; }
+html.ui-mobile #win-keyboard .kbd-mute { width: 22px; height: 22px; }
+html.ui-mobile #win-keyboard .kbd-h-name,
+html.ui-mobile #win-keyboard .kbd-name { width: 44px; font-size: 13px; }
+html.ui-mobile #win-keyboard .kbd-h-vol { width: calc(28px + 6px + 70px); padding-left: calc(28px + 6px); }
+html.ui-mobile #win-keyboard .kbd-vol-num { width: 28px; font-size: 12px; }
+html.ui-mobile #win-keyboard .kbd-vol-wrap { width: 70px; height: 18px; }
+html.ui-mobile #win-keyboard .kbd-vol-slider { opacity: 0.35; }
+html.ui-mobile #win-keyboard .kbd-vol-slider::-webkit-slider-thumb { width: 10px; height: 26px; margin-top: -4px; }
+html.ui-mobile #win-keyboard .kbd-vol-slider::-moz-range-thumb { width: 10px; height: 26px; }
+html.ui-mobile #win-keyboard .kbd-h-wave,
+html.ui-mobile #win-keyboard .kbd-wave { width: 48px; }
+html.ui-mobile #win-keyboard .kbd-wave { height: 20px; }
+html.ui-mobile #win-keyboard .kbd-h-note,
+html.ui-mobile #win-keyboard .kbd-note { width: 44px; font-size: 13px; }
+html.ui-mobile #win-keyboard .kbd-freq { font-size: 11px; }
+html.ui-mobile #win-keyboard .kbd-header button.kbd-h-part svg { width: 18px; height: 18px; }
+/* ファイル情報/大波形の帯は畳んだ見出しだけ大きめに */
+html.ui-mobile #win-keyboard .kbd-fileinfo-header,
+html.ui-mobile #win-keyboard .kbd-bigwave-header { min-height: 30px; font-size: 13px; }
+/* 再生操作のシークバー: つまみを指で持てる大きさに */
+html.ui-mobile #mobilePlayer .seek-bar-wrap { min-height: 30px; }
+html.ui-mobile #mobilePlayer .seek-handle { width: 12px; height: 30px; }
+html.ui-mobile #mobilePlayer input[type="range"] { height: 30px; }
