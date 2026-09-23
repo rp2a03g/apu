@@ -3678,16 +3678,52 @@ html.ui-mobile .m-tab.is-active { background: var(--control-bg); color: var(--ac
 
 /* ---- 鍵盤表示(スマホ): 上の再生操作と重複するボタンを隠し、一覧とロールを縦に積み、行を指で扱える大きさに ---- */
 html.ui-mobile #win-keyboard .kbd-transport,
-html.ui-mobile #win-keyboard .kbd-repeat-btn { display: none !important; }
-html.ui-mobile #win-keyboard .float-window-header { gap: 6px 8px; padding: 6px 8px; }
+html.ui-mobile #win-keyboard .kbd-repeat-btn,
+html.ui-mobile #win-keyboard .kbd-open-btn,
+html.ui-mobile #win-keyboard .kbd-src-badge,
+html.ui-mobile #win-keyboard .kbd-hdr-btn.kbd-src-name { display: none !important; }
+html.ui-mobile #win-keyboard .float-window-header { gap: 6px; padding: 6px 8px; align-items: center; }
+/* 見出し行: [チャンネル|ピアノロール] [to MML] [レイアウト] [⋯]。上の再生操作のボタンと同じ高さ・角丸に揃える */
+html.ui-mobile .m-seg { display: inline-flex; flex: none; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+html.ui-mobile .m-seg-btn {
+  min-height: 36px;
+  padding: 0 9px;
+  border: none;
+  background: var(--control-bg);
+  color: var(--text-secondary);
+  font-size: 13px;
+  white-space: nowrap;
+}
+html.ui-mobile .m-seg-btn + .m-seg-btn { border-left: 1px solid var(--border); }
+html.ui-mobile .m-seg-btn.is-active { background: var(--accent); color: var(--on-accent); }
+html.ui-mobile .m-extras-btn {
+  flex: none;
+  width: 38px;
+  min-height: 36px;
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--control-bg);
+  color: var(--text);
+  font-size: 18px;
+}
+html.ui-mobile .m-extras-btn.is-active { color: var(--accent); }
+/* 音量/速度は「⋯」を押したときだけ出す */
+html.ui-mobile #win-keyboard:not(.m-extras) .kbd-mastervol--header,
+html.ui-mobile #win-keyboard:not(.m-extras) .kbd-speed--header { display: none !important; }
+/* 一覧とロールは片方ずつ(m-view-list / m-view-roll)。ロールは「一覧の右」配置(fill)を前提にする */
+html.ui-mobile #win-keyboard.m-view-roll .kbd-main > .kbd-left,
+html.ui-mobile #win-keyboard.m-view-roll .kbd-below,
+html.ui-mobile #win-keyboard.m-view-roll .kbd-main:not(.kbd-main--roll-right) { display: none !important; }
+html.ui-mobile #win-keyboard.m-view-list .kbd-roll-wrap,
+html.ui-mobile #win-keyboard.m-view-list .kbd-lanes,
+html.ui-mobile #win-keyboard.m-view-list .kbd-splitter { display: none !important; }
 html.ui-mobile #win-keyboard .kbd-hdr-btn,
-html.ui-mobile #win-keyboard .kbd-layout-btn { width: 36px; height: 34px; }
+html.ui-mobile #win-keyboard .kbd-layout-btn { width: 38px; height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--control-bg); color: var(--text); }
 html.ui-mobile #win-keyboard .kbd-hdr-btn svg,
 html.ui-mobile #win-keyboard .kbd-layout-btn svg { width: 20px; height: 20px; }
-html.ui-mobile #win-keyboard .kbd-tomml-btn { width: auto; padding: 0 10px; }
-html.ui-mobile #win-keyboard .kbd-tomml-text { font-size: 12px; }
-html.ui-mobile #win-keyboard .kbd-src-badge { font-size: 12px; padding: 4px 8px; }
-html.ui-mobile #win-keyboard .kbd-hdr-btn.kbd-src-name { flex: 1 1 0; min-width: 56px; width: auto; max-width: 100%; font-size: 13px; }
+html.ui-mobile #win-keyboard .kbd-tomml-btn { width: auto; padding: 0 9px; }
+html.ui-mobile #win-keyboard .kbd-tomml-text { font-size: 13px; }
 /* 音量/速度: 半分ずつで1行に並べる。つまみは指で持てる高さに */
 html.ui-mobile #win-keyboard .kbd-mastervol--header,
 html.ui-mobile #win-keyboard .kbd-speed--header { flex: 1 1 40%; min-width: 140px; font-size: 13px; }
@@ -3697,7 +3733,7 @@ html.ui-mobile #win-keyboard .kbd-mastervol-value,
 html.ui-mobile #win-keyboard .kbd-speed-value { width: 44px; text-align: right; }
 /* 一覧(上)とロール(下)を縦に積む。設定が「一覧の右」でもここでは縦にする(横幅が無い) */
 html.ui-mobile #win-keyboard .kbd-main { flex-direction: column; }
-html.ui-mobile #win-keyboard .kbd-left { width: auto !important; flex: 0 1 auto; max-height: 55%; }
+html.ui-mobile #win-keyboard .kbd-left { width: auto !important; flex: 1 1 auto; }
 html.ui-mobile #win-keyboard .kbd-main > .kbd-splitter { display: none; }
 html.ui-mobile #win-keyboard .kbd-main--roll-right > .kbd-roll-wrap { border-left: none; border-top: 1px solid var(--border); }
 html.ui-mobile #win-keyboard .kbd-main > .kbd-roll-wrap { flex: 1 1 auto; min-height: 120px; width: auto !important; }

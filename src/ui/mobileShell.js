@@ -134,11 +134,58 @@
     // ch ミュートの一覧は畳んだまま(鍵盤表示の ch 一覧にもミュートがあり、開くと画面の大半を食う)
     if (MML.UI.MiniTransport && MML.UI.MiniTransport.dock) MML.UI.MiniTransport.dock(player);
 
+    initKeyboardViews();
     buildTabs();
     watchWindowOpens();
     // 最初は鍵盤表示(プレイヤー)。無ければ最初のウィンドウ
     const first = document.getElementById(DEFAULT_WINDOW) || windows()[0];
     if (first) activate(first.id);
+  }
+
+  // 鍵盤表示: 一覧とロールは狭い画面では同時に出さず、見出し行の切替で片方ずつ見せる。
+  // 見出し行の左端(ファイルを開く/バッジ/曲名は上の再生操作と重複するので CSS で隠す)に
+  // [チャンネル | ピアノロール] を置き、音量/速度は「⋯」で出し入れする
+  const KBD_VIEW_KEY = 'mml_mobileKbdView';
+  function initKeyboardViews() {
+    const win = document.getElementById('win-keyboard');
+    const header = win && win.querySelector('.float-window-header');
+    if (!header) return;
+    let view = 'roll';
+    try { const v = localStorage.getItem(KBD_VIEW_KEY); if (v === 'list' || v === 'roll') view = v; } catch (e) { /* ignore */ }
+    const seg = document.createElement('div');
+    seg.className = 'm-seg';
+    const btns = {};
+    for (const [id, label] of [['list', 'チャンネル'], ['roll', 'ピアノロール']]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'm-seg-btn';
+      b.textContent = label;
+      b.addEventListener('click', () => setView(id));
+      seg.appendChild(b);
+      btns[id] = b;
+    }
+    const extras = document.createElement('button');
+    extras.type = 'button';
+    extras.className = 'm-extras-btn';
+    extras.textContent = '\u22EF'; // ⋯
+    extras.title = '音量と速度';
+    extras.setAttribute('aria-label', '音量と速度');
+    extras.addEventListener('click', () => {
+      const on = !win.classList.contains('m-extras');
+      win.classList.toggle('m-extras', on);
+      extras.classList.toggle('is-active', on);
+    });
+    function setView(id) {
+      view = id;
+      win.classList.toggle('m-view-list', id === 'list');
+      win.classList.toggle('m-view-roll', id === 'roll');
+      for (const k of Object.keys(btns)) btns[k].classList.toggle('is-active', k === id);
+      try { localStorage.setItem(KBD_VIEW_KEY, id); } catch (e) { /* ignore */ }
+      try { global.dispatchEvent(new Event('resize')); } catch (e) { /* ignore */ }
+    }
+    header.insertBefore(seg, header.firstChild);
+    header.appendChild(extras);
+    setView(view);
   }
 
   function initDesktopOnTouch() {

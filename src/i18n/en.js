@@ -169,6 +169,7 @@
     'MMLファイルの読み込みに失敗しました: {msg}': 'Failed to open the MML file: {msg}',
     'MMLファイルではありません(バイナリ): {file}': 'Not an MML file (binary data): {file}',
     'PC表示': 'Desktop layout',
+    '音量と速度': 'Volume and speed',
     'スマホ表示': 'Mobile layout',
     'PC向けの画面に切り替える': 'Switch to the desktop layout',
     'スマホ向けの画面に切り替える': 'Switch to the mobile layout',

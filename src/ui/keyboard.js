@@ -80,6 +80,15 @@
   // 既定(2026-09-19 方針変更で変更): ロール横向き・右置き・一覧多段・1つの鍵盤・ピアノロール・ファイル情報自動。
   // 保存済みの設定がある人はそちらが優先(loadLayoutSettings)
   const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'horizontal', rollPlacement: 'right', listColumns: 'auto', rollLanes: 'all', fileInfoPlacement: 'auto', rollView: 'roll' });
+  // スマホ向けの画面(src/ui/mobileShell.js、html.ui-mobile)では既定と保存先を分ける(2026-09-23)。
+  // 既定はロール縦向き(Synthesia式。狭い画面では音符が上から降ってくる向きのほうが見やすい)・
+  // 「一覧の右」(=親いっぱいに広がる fill 配置。スマホ側の CSS が一覧とロールを切り替えて見せる)・1列。
+  // 保存先も別キーなので、スマホで変えても PC の設定は変わらない
+  const LAYOUT_STORAGE_KEY_MOBILE = 'mml_keyboardLayout_mobile_v1';
+  const LAYOUT_DEFAULTS_MOBILE = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'right', listColumns: 'single', rollLanes: 'all', fileInfoPlacement: 'top', rollView: 'roll' });
+  function isMobileUi() { return !!(MML.Device && MML.Device.uiMode && MML.Device.uiMode() === 'mobile'); }
+  function layoutDefaults() { return isMobileUi() ? LAYOUT_DEFAULTS_MOBILE : LAYOUT_DEFAULTS; }
+  function layoutStorageKey() { return isMobileUi() ? LAYOUT_STORAGE_KEY_MOBILE : LAYOUT_STORAGE_KEY; }
   const LAYOUT_CHOICES = Object.freeze({
     rollOrientation: ['vertical', 'horizontal'],
     rollPlacement: ['bottom', 'right', 'window'],
@@ -157,9 +166,9 @@
       svg: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="10" height="10" rx="1.5"/></svg>' },
   };
   function loadLayoutSettings() {
-    const out = Object.assign({}, LAYOUT_DEFAULTS);
+    const out = Object.assign({}, layoutDefaults());
     try {
-      const raw = JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY) || 'null');
+      const raw = JSON.parse(localStorage.getItem(layoutStorageKey()) || 'null');
       if (raw && typeof raw === 'object') {
         for (const k of Object.keys(LAYOUT_DEFAULTS)) {
           if (LAYOUT_CHOICES[k].includes(raw[k])) out[k] = raw[k];
@@ -169,7 +178,7 @@
     return out;
   }
   function saveLayoutSettings(s) {
-    try { localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(s)); } catch (e) { /* ignore */ }
+    try { localStorage.setItem(layoutStorageKey(), JSON.stringify(s)); } catch (e) { /* ignore */ }
   }
 
   // ── ロール/鍵盤の座標系 ───────────────────────────────────────
