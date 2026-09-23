@@ -4153,8 +4153,15 @@
   // handle(FileSystemFileHandle)を渡すと、そのファイルを外部エディタと同期する対象として
   // 接続する(src/ui/fileSync.js)。渡されなければ同期は切る(=ただの読み込み)
   // extraFiles: 一緒に選ばれた/ドロップされた File のうち .dmc を台帳へ入れる(src/ui/dpcmStore.js)
+  // MMLエディタの「開く」にサウンドファイルが来たら、トップの「ファイルを開く」と同じ経路へ回す
+  // (2026-09-23: スマホでは accept の絞り込みが無いので .nsf を選べてしまい、バイナリがそのまま
+  //  エディタに流し込まれていた)。実体は initUnifiedSoundFileWindow 内で設定する
+  let openSoundFileAndPlay = null;
+  const SOUND_FILE_EXTS = new Set(['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf', 'psflib', 'zip', '7z']);
   async function openMmlTextFile(file, handle, extraFiles) {
     if (!file) return false;
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (SOUND_FILE_EXTS.has(ext) && openSoundFileAndPlay) return openSoundFileAndPlay(file, extraFiles);
     if (!confirmDiscardMmlEdits()) return false;
     // 楽譜(MusicXML/.mxl)なら MML に取り込む(src/score/musicxmlImport.js)。外部エディタ同期は付けない
     if (/\.(musicxml|xml|mxl)$/i.test(file.name)) return openMusicXmlFile(file);
@@ -4163,6 +4170,11 @@
       text = await file.text();
     } catch (e) {
       mmlFileStatus(T('MMLファイルの読み込みに失敗しました: {msg}', { msg: e.message }), 'error');
+      return false;
+    }
+    // バイナリ(NUL入り)はMMLではない。拡張子で判別できなかったファイルの最後の砦
+    if (text.indexOf('\u0000') >= 0) {
+      mmlFileStatus(T('MMLファイルではありません(バイナリ): {file}', { file: file.name }), 'error');
       return false;
     }
     ensureMmlWindowOpen();
@@ -9396,6 +9408,14 @@
     // MMLテキスト('mml')は formatToPlayFn に載っていないので読み込むだけ(方針 2026-09-10:
     // 「サウンドファイルなら鍵盤表示を開いて再生 / MMLファイルならMMLエディタを開いて何もしない」。
     //  鍵盤表示を開くのは openSoundFile、MMLエディタを開くのは openMmlTextFile が行う)
+    // MMLエディタの「開く」から回ってきたサウンドファイル(openMmlTextFile 参照)。ダイアログと同じく再生まで行う
+    openSoundFileAndPlay = async (file, siblings) => {
+      const ok = await openSoundFile(file, { siblings: siblings || [] });
+      if (!ok) return false;
+      const playFn = formatToPlayFn[ok];
+      if (playFn) playFn();
+      return true;
+    };
     soundFileEl.addEventListener('change', async () => {
       const files = Array.from(soundFileEl.files || []);
       if (files.length && files.every(isDmcFile)) { await openDmcOnly(files); soundFileEl.value = ''; return; }
