@@ -3358,7 +3358,8 @@
   let lastMediaTitle = '';
   let lastPositionStateAt = 0;
   function currentPositionSeconds() {
-    try { return monitorState && monitorState.getPosition ? monitorState.getPosition() : null; } catch (e) { return null; }
+    // シークバーと同じ位置(getTransportPosition)。プレイヤーが無ければ null
+    try { return currentTransportPlayer() || capturedBuffer ? getTransportPosition() : null; } catch (e) { return null; }
   }
   function bindMediaSessionActions() {
     if (mediaSessionBound || !('mediaSession' in navigator)) return;
