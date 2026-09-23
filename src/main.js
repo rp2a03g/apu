@@ -2525,6 +2525,29 @@
   // --- 音声デコード/試聴用のAudioContext(ドラムパネルの差し替え読み込み・パッド試聴で共用) ---
   let audioCtx = null;
 
+  // タッチ端末: 最初のタップで AudioContext を作って動かし、音の出口(<audio>)も鳴らし始めておく。
+  // iOS はファイル選択ダイアログの change をユーザー操作と見なさないので、ファイルを選んだ直後の
+  // 自動再生で AudioContext.resume() と <audio>.play() が拒否され、無音のまま「再生中」表示になる
+  // (iPadOS 26.6.2 で実測)。「ファイルを開く」を押した瞬間は正真正銘のタップなので、そこで先に
+  // 動かしておけば、その後の自動再生は操作無しで鳴る。動き出すまでは毎タップ試す
+  if (MML.Device && MML.Device.isTouch()) {
+    const warmAudio = () => {
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        // 出口の <audio> を作る(作った瞬間に play() する)。iOS だけ: Android は選択直後の自動再生が
+        // そのまま通るし、無音要素を先に鳴らすと曲を選ぶ前からメディア通知が出てしまう
+        if (MML.Device.isIOS()) MML.Audio.getMasterGain(audioCtx);
+      } catch (e) { /* 失敗しても次のタップで再度 */ }
+      if (audioCtx && audioCtx.state === 'running') {
+        document.removeEventListener('touchend', warmAudio, true);
+        document.removeEventListener('click', warmAudio, true);
+      }
+    };
+    document.addEventListener('touchend', warmAudio, true);
+    document.addEventListener('click', warmAudio, true);
+  }
+
   // --- Phase 3: 一括キャプチャ & シーク/早送り/巻き戻し再生 ---
   const captureOutputEl = document.getElementById('captureOutput');
   const seekBarWrapEl = document.getElementById('seekBarWrap');
@@ -3387,7 +3410,11 @@
       }
     }
     const want = playing ? 'playing' : 'paused';
-    if (ms.playbackState !== want) ms.playbackState = want;
+    if (ms.playbackState !== want) {
+      ms.playbackState = want;
+      // Android の無音要素は止めているあいだ休ませる(通知を「再生中」のまま残さない)
+      if (MML.Audio.setOutputSinkActive) MML.Audio.setOutputSinkActive(playing);
+    }
   }
 
   // ロール見出しの「演奏最大時間(秒)+出力形式+出力」。サウンドファイルとMML再生の両方で出す

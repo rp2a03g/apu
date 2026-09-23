@@ -90,9 +90,12 @@
   const outputSinks = new WeakMap(); // audioCtx -> { el, dest, kind }
   const outputSinkList = []; // 生きている sink 全部(unlockOutputSinks 用)
   let sinkUnlockBound = false;
+  let sinkActive = false; // 曲を再生中か(setOutputSinkActive)。無音要素はこれが立っているときだけ鳴らす
   function unlockOutputSinks() {
-    // 生きている全 sink の <audio> を、止まっていれば鳴らし直す(ユーザー操作のたびに呼ぶ)
+    // 生きている全 sink の <audio> を、止まっていれば鳴らし直す(ユーザー操作のたびに呼ぶ)。
+    // 無音要素(Android)は再生中でなければ鳴らさない(曲を選ぶ前からメディア通知を出さない)
     for (const s of outputSinkList) {
+      if (s.kind === 'silent' && !sinkActive) continue;
       if (s.el.paused) { const p = s.el.play(); if (p && p.catch) p.catch(() => { /* 操作外なら次の操作で */ }); }
     }
   }
@@ -136,6 +139,18 @@
     }
     return s.dest || audioCtx.destination;
   }
+  // 再生中かどうかを出口へ知らせる。無音要素(Android)は止めているあいだ pause しておく
+  // (Chrome は要素が pause すると通知を「一時停止」にし、しばらくすると消す)。MediaStream の
+  // 要素(iOS)は pause すると音が止まるので触らない。play() は一度ユーザー操作で鳴らした要素なら
+  // 操作外でも通る(Chrome のメディア要素の user activation は要素に残る)
+  MML.Audio.setOutputSinkActive = (active) => {
+    sinkActive = !!active;
+    for (const s of outputSinkList) {
+      if (s.kind !== 'silent') continue;
+      if (active) { if (s.el.paused) { const p = s.el.play(); if (p && p.catch) p.catch(() => {}); } }
+      else if (!s.el.paused) s.el.pause();
+    }
+  };
   MML.Audio.getOutputSinkInfo = (audioCtx) => {
     const s = audioCtx ? outputSinks.get(audioCtx) : (outputSinkList[0] || null);
     return { mode: audioSinkMode(), touch: isTouchDevice(), ios: isIOSDevice(),
