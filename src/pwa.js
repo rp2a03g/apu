@@ -25,10 +25,32 @@
 
   global.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); });
 
+  // ?debug=ms の表示(main.js)や console から見られる状態。{cached,total,missing} は SW の返事
+  const MML = global.MML = global.MML || {};
+  const PWA = MML.PWA = { status: 'unsupported', precache: null };
+  function setStatus(s, extra) {
+    PWA.status = s;
+    if (extra) PWA.precache = extra;
+    try { global.dispatchEvent(new CustomEvent('mml-pwa-status', { detail: { status: s, precache: PWA.precache } })); } catch (e) { /* ignore */ }
+  }
+
   if ('serviceWorker' in navigator) {
+    PWA.status = 'registering';
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      const d = e.data;
+      if (d && d.type === 'precache-done') setStatus(d.missing && d.missing.length ? 'incomplete' : 'ready', d);
+    });
     global.addEventListener('load', () => {
-      navigator.serviceWorker.register('sw.js', { scope: './' }).catch((e) => {
+      navigator.serviceWorker.register('sw.js', { scope: './' }).then(async (reg) => {
+        setStatus('registered');
+        // 登録(初回は install の先読み)が終わったら、欠けている分を補うよう頼む。
+        // 初回訪問はページが SW に握られていないので、ここで頼まないと歯抜けが残り得る
+        await navigator.serviceWorker.ready;
+        const sw = navigator.serviceWorker.controller || reg.active;
+        if (sw) { setStatus('precaching'); sw.postMessage({ type: 'precache' }); }
+      }).catch((e) => {
         // localhost 以外の平文 http などで登録できないだけ。オンラインの動作には影響しない
+        setStatus('failed');
         console.warn('Service Worker を登録できませんでした:', e && e.message ? e.message : e);
       });
     });

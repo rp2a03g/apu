@@ -3376,6 +3376,13 @@
     if (ls.length > 30) msDebugEl.textContent = ls.slice(-30).join('\n');
   }
   if (msDebugOn) {
+    // オフライン起動の準備状況(src/pwa.js → sw.js)。cached/total と欠けたファイルを出す
+    window.addEventListener('mml-pwa-status', (e) => {
+      const d = e.detail || {};
+      const p = d.precache;
+      msDebug('pwa ' + d.status + (p ? ' cached=' + p.cached + '/' + p.total + (p.missing && p.missing.length ? ' missing=' + p.missing.slice(0, 5).join(',') : '') + (p.error ? ' error=' + p.error : '') : ''));
+    });
+    if (MML.PWA) msDebug('pwa ' + MML.PWA.status + ' controller=' + !!(navigator.serviceWorker && navigator.serviceWorker.controller));
     window.addEventListener('error', (e) => msDebug('ERROR ' + (e.message || e)));
     window.addEventListener('unhandledrejection', (e) => msDebug('REJECT ' + (e.reason && e.reason.message || e.reason)));
     document.addEventListener('visibilitychange', () => msDebug('visibility=' + document.visibilityState));

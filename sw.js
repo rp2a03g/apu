@@ -8,11 +8,17 @@
  *   という版の混在を避けるため(ファイル名にハッシュを付けていないので混在すると壊れる)。
  *   取れた応答は毎回キャッシュへ入れ直すので、一度オンラインで開けば以後はその版でオフライン起動できる。
  *
- * ■ 先読み(install 時)
+ * ■ 先読み(install 時 + ページからの依頼)
  *   index.html を取り、その中の <script src> と <link href> を全部キャッシュする。
  *   ROADMAP の「キャッシュリストは index.html の script タグ群と同期させること」を、
  *   リストを手で持たずに index.html 自身から作ることで満たす。1本でも取れなければ
  *   install を失敗させず(次の起動で取り直す)、取れた分だけ入れる。
+ *   ★初回訪問はまだ SW がページを握っていないので、この先読みだけが頼り。スマホで途中で
+ *     切られると歯抜けのまま残り「起動はするがボタンが効かない」になる(2026-09-23 実機)。
+ *     対策: (1) 先読みはブラウザの HTTP キャッシュを使う(ページが今読んだばかりのファイルなので
+ *     一瞬で済む)。(2) ページ側(src/pwa.js)が登録後に {type:'precache'} を送り、欠けている分だけ
+ *     補う(毎回の訪問で歯抜けを埋める)。返事 {type:'precache-done', cached, total, missing} を
+ *     ページが受け取って ?debug=ms の表示に出す。
  *
  * ■ 対象外
  *   GET 以外、別オリジン(?nsf= で外部から曲を取る urlLoad.js の fetch を含む)、
@@ -42,33 +48,65 @@ function assetsFromHtml(html) {
   return Array.from(out);
 }
 
-async function cacheOne(cache, url) {
+async function cacheOne(cache, url, onlyIfMissing) {
   try {
-    const res = await fetch(new Request(url, { cache: 'no-cache' }));
-    if (res && res.ok) await cache.put(url, res);
+    if (onlyIfMissing && await cache.match(url)) return true;
+    // HTTP キャッシュを使う(no-cache にしない)。ページが直前に読んだファイルなら通信無しで済む
+    const res = await fetch(new Request(url));
+    if (res && res.ok) { await cache.put(url, res); return true; }
   } catch (e) { /* 取れなかった分は次の機会に */ }
+  return false;
+}
+
+// index.html と、その中で参照している資産を全部キャッシュへ。戻り値は {cached, total, missing}
+async function precache(onlyIfMissing) {
+  const cache = await caches.open(CACHE);
+  let list = CORE.slice();
+  try {
+    const res = await fetch(new Request(INDEX, { cache: 'no-cache' }));
+    if (res && res.ok) {
+      const html = await res.clone().text();
+      await cache.put(INDEX, res);
+      list = list.concat(assetsFromHtml(html));
+    }
+  } catch (e) {
+    // index が取れない(オフライン)ならキャッシュ済みの index から一覧を作る
+    const hit = await cache.match(INDEX);
+    if (hit) list = list.concat(assetsFromHtml(await hit.text()));
+  }
+  list = Array.from(new Set(list));
+  const missing = [];
+  // 同時接続を増やしすぎない(11MB 前後・約120本)
+  const queue = list.filter((u) => u !== INDEX);
+  const workers = [];
+  for (let i = 0; i < 6; i++) {
+    workers.push((async () => {
+      while (queue.length) { const u = queue.shift(); if (!(await cacheOne(cache, u, onlyIfMissing))) missing.push(u); }
+    })());
+  }
+  await Promise.all(workers);
+  return { cached: list.length - missing.length, total: list.length, missing };
 }
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
-    const cache = await caches.open(CACHE);
-    let list = CORE.slice();
-    try {
-      const res = await fetch(new Request(INDEX, { cache: 'no-cache' }));
-      if (res && res.ok) {
-        const html = await res.clone().text();
-        await cache.put(INDEX, res);
-        list = list.concat(assetsFromHtml(html));
-      }
-    } catch (e) { /* index が取れなければ CORE だけ */ }
-    // 同時接続を増やしすぎない(11MB 前後・約120本)
-    const queue = list.filter((u) => u !== INDEX);
-    const workers = [];
-    for (let i = 0; i < 6; i++) {
-      workers.push((async () => { while (queue.length) await cacheOne(cache, queue.shift()); })());
-    }
-    await Promise.all(workers);
+    await precache(false);
     await self.skipWaiting();
+  })());
+});
+
+// ページからの依頼: 欠けている分を補って結果を返す(src/pwa.js)
+self.addEventListener('message', (event) => {
+  const d = event.data;
+  if (!d || d.type !== 'precache') return;
+  event.waitUntil((async () => {
+    let result;
+    try { result = await precache(true); } catch (e) { result = { cached: 0, total: 0, missing: [], error: String(e && e.message || e) }; }
+    result.type = 'precache-done';
+    try {
+      if (event.source && event.source.postMessage) event.source.postMessage(result);
+      else { const cs = await self.clients.matchAll(); for (const c of cs) c.postMessage(result); }
+    } catch (e) { /* ignore */ }
   })());
 });
 
