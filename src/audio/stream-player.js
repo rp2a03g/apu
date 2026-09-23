@@ -33,33 +33,61 @@
     return 1;
   }
   // ---- 出口(マスター音量ノードの接続先) ----
-  // 既定は audioCtx.destination に直結。iOS/iPadOS の Safari は Web Audio だけの音を、他アプリへの
-  // 切替や画面ロックで止める(2026-09-23 iPadOS 26.6.2 で実測: 直結は止まり、
-  // MediaStreamAudioDestinationNode → <audio> 要素で鳴らすと「メディア再生」扱いになって
-  // ScriptProcessorNode のままで裏画面/ロック画面とも鳴り続けた)。Android(13/17)は直結でも
-  // 止まらなかったが、ロック画面のメディア操作(Media Session)は <audio> があるほうが確実なので、
-  // スマホ/タブレットでは一律に <audio> 経由にする。PC は直結のまま(経路を増やして遅延を足さない。
-  // 演奏入力のモニタは512サンプルで組んであり、鍵盤ハイライトも samplePos 基準なので出口の遅延は
-  // そのまま見た目のずれになる)。
+  // 既定は audioCtx.destination に直結。端末ごとに次を足す(2026-09-23 実機):
+  //  iOS/iPadOS(Safari): Web Audio だけの音は他アプリへの切替や画面ロックで止まる(iPadOS 26.6.2 で実測)。
+  //    MediaStreamAudioDestinationNode → <audio> 要素で鳴らすと「メディア再生」扱いになって、
+  //    ScriptProcessorNode のままで裏画面/ロック画面とも鳴り続けた。ロック画面の操作も出る。
+  //  Android(Chrome 13/17): 直結でも裏画面/ロック画面で止まらない。ただしロック画面のメディア操作
+  //    (Media Session)は「メディア要素の再生」が無いと出ず、MediaStream を流す <audio> でも出なかった
+  //    (Chrome は MediaStream の再生を通話扱いにして通知を出さない、と推定)。そこで音は直結のまま、
+  //    無音の WAV(data: URL、6秒ループ)を鳴らす <audio> を添えて Media Session の器にする
+  //    (Chrome の通知は音声付きで5秒以上の要素が条件、と推定。実機で確認する)。
+  //  PC: 直結のまま(経路を増やして遅延を足さない。演奏入力のモニタは512サンプルで組んであり、
+  //    鍵盤ハイライトも samplePos 基準なので出口の遅延はそのまま見た目のずれになる)。
   // ★<audio>.play() はユーザー操作の中でしか呼べない。AudioContext.resume() を呼ぶ場所が
   //   main.js/各エディタに20箇所以上あるので個別には触らず、document のキャプチャ段で
-  //   click/touchend/keydown を拾って「止まっていたら play()」する(操作が起きるたびに確認)。
-  // 上書き: localStorage 'mml_audioSink' = 'element' | 'direct'(未設定=端末で自動)。
+  //   click/touchend/keydown/pointerup を拾って「止まっていたら play()」する(操作が起きるたびに確認)。
+  // 上書き: localStorage 'mml_audioSink' = 'element'(MediaStream→<audio>) | 'silent'(直結+無音<audio>)
+  //         | 'direct'(未設定=端末で自動)。
   const AUDIO_SINK_STORAGE_KEY = 'mml_audioSink';
+  const SINK_MODES = ['element', 'silent', 'direct'];
   function isTouchDevice() {
-    // 判定の本体は src/device.js(MML.Device.isTouch)。ファイル選択の accept と同じ基準を使う
+    // 判定の本体は src/device.js(MML.Device)。ファイル選択の accept と同じ基準を使う
     if (MML.Device && MML.Device.isTouch) return MML.Device.isTouch();
     const ua = navigator.userAgent || '';
     if (/iPhone|iPad|iPod|Android/i.test(ua)) return true;
     return navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1;
   }
+  function isIOSDevice() {
+    if (MML.Device && MML.Device.isIOS) return MML.Device.isIOS();
+    return isTouchDevice() && !/Android/i.test(navigator.userAgent || '');
+  }
   function audioSinkMode() {
     let pref = null;
     try { pref = localStorage.getItem(AUDIO_SINK_STORAGE_KEY); } catch (e) { /* ignore */ }
-    if (pref === 'element' || pref === 'direct') return pref;
-    return isTouchDevice() ? 'element' : 'direct';
+    if (SINK_MODES.indexOf(pref) >= 0) return pref;
+    if (isIOSDevice()) return 'element';
+    return isTouchDevice() ? 'silent' : 'direct';
   }
-  const outputSinks = new WeakMap(); // audioCtx -> { el, dest }
+  // 無音の WAV(8kHz/8bit/モノラル)。fetch を使わず data: URL で持つ(file:// でも動く)
+  let silentWavUrl = null;
+  function getSilentWavUrl(seconds) {
+    if (silentWavUrl) return silentWavUrl;
+    const sr = 8000, n = sr * seconds;
+    const buf = new Uint8Array(44 + n);
+    const dv = new DataView(buf.buffer);
+    const str = (off, txt) => { for (let i = 0; i < txt.length; i++) buf[off + i] = txt.charCodeAt(i); };
+    str(0, 'RIFF'); dv.setUint32(4, 36 + n, true); str(8, 'WAVE');
+    str(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+    dv.setUint32(24, sr, true); dv.setUint32(28, sr, true); dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
+    str(36, 'data'); dv.setUint32(40, n, true);
+    buf.fill(0x80, 44); // 8bit PCM の無音は 0x80
+    let bin = '';
+    for (let i = 0; i < buf.length; i += 8192) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 8192));
+    silentWavUrl = 'data:audio/wav;base64,' + btoa(bin);
+    return silentWavUrl;
+  }
+  const outputSinks = new WeakMap(); // audioCtx -> { el, dest, kind }
   const outputSinkList = []; // 生きている sink 全部(unlockOutputSinks 用)
   let sinkUnlockBound = false;
   function unlockOutputSinks() {
@@ -68,22 +96,33 @@
       if (s.el.paused) { const p = s.el.play(); if (p && p.catch) p.catch(() => { /* 操作外なら次の操作で */ }); }
     }
   }
+  function makeSinkElement() {
+    const el = document.createElement('audio');
+    el.setAttribute('playsinline', '');
+    el.setAttribute('aria-hidden', 'true');
+    el.style.display = 'none';
+    return el;
+  }
   function getOutputSink(audioCtx) {
+    const mode = audioSinkMode();
     // OfflineAudioContext には createMediaStreamDestination が無い(書き出し用途) → 直結
-    if (audioSinkMode() !== 'element' || typeof audioCtx.createMediaStreamDestination !== 'function'
-        || typeof document === 'undefined') {
+    if (mode === 'direct' || typeof document === 'undefined'
+        || (mode === 'element' && typeof audioCtx.createMediaStreamDestination !== 'function')) {
       return audioCtx.destination;
     }
     let s = outputSinks.get(audioCtx);
     if (!s) {
-      const dest = audioCtx.createMediaStreamDestination();
-      const el = document.createElement('audio');
-      el.setAttribute('playsinline', '');
-      el.setAttribute('aria-hidden', 'true');
-      el.style.display = 'none';
-      el.srcObject = dest.stream;
+      const el = makeSinkElement();
+      if (mode === 'element') {
+        const dest = audioCtx.createMediaStreamDestination();
+        el.srcObject = dest.stream;
+        s = { el, dest, kind: 'element' };
+      } else {
+        el.src = getSilentWavUrl(6);
+        el.loop = true;
+        s = { el, dest: null, kind: 'silent' };
+      }
       document.body.appendChild(el);
-      s = { el, dest };
       outputSinks.set(audioCtx, s);
       outputSinkList.push(s);
       if (!sinkUnlockBound) {
@@ -95,11 +134,12 @@
       // 初回はたいてい再生ボタンのクリック中に来る(プレイヤー生成→getMasterGain)ので、その場で鳴らす
       unlockOutputSinks();
     }
-    return s.dest;
+    return s.dest || audioCtx.destination;
   }
   MML.Audio.getOutputSinkInfo = (audioCtx) => {
-    const s = audioCtx ? outputSinks.get(audioCtx) : null;
-    return { mode: audioSinkMode(), touch: isTouchDevice(), element: s ? { paused: s.el.paused, readyState: s.el.readyState } : null };
+    const s = audioCtx ? outputSinks.get(audioCtx) : (outputSinkList[0] || null);
+    return { mode: audioSinkMode(), touch: isTouchDevice(), ios: isIOSDevice(),
+      element: s ? { kind: s.kind, paused: s.el.paused, readyState: s.el.readyState } : null };
   };
 
   const masterGainNodes = new WeakMap();

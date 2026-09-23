@@ -3325,23 +3325,44 @@
   }
 
   // ── OSのメディアコントロール(Media Session) ──────────────────────────
-  // Windowsのメディアパネルとメディアキーからの操作を、小窓と同じ入口へ流す。
-  // 曲名もそこへ出す。file:// でも動くことは実測済み(2026-09-12)
+  // Windowsのメディアパネル/メディアキー、iOS・Androidのロック画面と通知からの操作を、
+  // 小窓と同じ入口へ流す。曲名もそこへ出す。file:// でも動くことは実測済み(2026-09-12)。
+  // ★ハンドラは起動時に登録する(2026-09-23)。iOS は <audio> 要素の再生開始時点で登録済みの
+  //   操作からロック画面のボタンを決めるので、初回の状態更新まで待つと「10秒送り」だけが出て
+  //   曲送りが出ない(iPadOS 26.6.2 で実測)。10秒送り/戻しと位置指定も受ける(受けないと
+  //   iOS は <audio> 要素自身をシークしようとし、MediaStream には効かないので何も起きない)。
   let mediaSessionBound = false;
   let lastMediaTitle = '';
+  let lastPositionStateAt = 0;
+  function currentPositionSeconds() {
+    try { return monitorState && monitorState.getPosition ? monitorState.getPosition() : null; } catch (e) { return null; }
+  }
+  function bindMediaSessionActions() {
+    if (mediaSessionBound || !('mediaSession' in navigator)) return;
+    mediaSessionBound = true;
+    const ms = navigator.mediaSession;
+    const bind = (act, fn) => { try { ms.setActionHandler(act, fn); } catch (e) { /* 未対応のアクションは無視 */ } };
+    // 再生と一時停止は同じトグル(各形式の再生ボタンが元々トグルなので合わせる)
+    bind('play', () => keyboardDisplay.onTransport('play'));
+    bind('pause', () => keyboardDisplay.onTransport('play'));
+    bind('stop', () => keyboardDisplay.onTransport('stop'));
+    bind('previoustrack', () => keyboardDisplay.onTransport('prev'));
+    bind('nexttrack', () => keyboardDisplay.onTransport('next'));
+    const seekBy = (d, sign) => {
+      const pos = currentPositionSeconds();
+      if (pos === null || !Number.isFinite(pos)) return;
+      const off = (d && Number.isFinite(d.seekOffset) && d.seekOffset > 0) ? d.seekOffset : 10;
+      seekToSeconds(pos + sign * off);
+    };
+    bind('seekbackward', (d) => seekBy(d, -1));
+    bind('seekforward', (d) => seekBy(d, +1));
+    bind('seekto', (d) => { if (d && Number.isFinite(d.seekTime)) seekToSeconds(d.seekTime); });
+  }
+  bindMediaSessionActions();
   function updateMediaSession(playing) {
     if (!('mediaSession' in navigator)) return;
     const ms = navigator.mediaSession;
-    if (!mediaSessionBound) {
-      mediaSessionBound = true;
-      const bind = (act, fn) => { try { ms.setActionHandler(act, fn); } catch (e) { /* 未対応のアクションは無視 */ } };
-      // 再生と一時停止は同じトグル(各形式の再生ボタンが元々トグルなので合わせる)
-      bind('play', () => keyboardDisplay.onTransport('play'));
-      bind('pause', () => keyboardDisplay.onTransport('play'));
-      bind('stop', () => keyboardDisplay.onTransport('stop'));
-      bind('previoustrack', () => keyboardDisplay.onTransport('prev'));
-      bind('nexttrack', () => keyboardDisplay.onTransport('next'));
-    }
+    bindMediaSessionActions();
     const title = currentPlaybackTitle();
     if (title && title !== lastMediaTitle) {
       lastMediaTitle = title;
@@ -3352,6 +3373,18 @@
           album: kbdSourceKind && kbdSourceKind !== 'mml' ? String(kbdSourceKind).toUpperCase() : 'MML',
         });
       } catch (e) { /* MediaMetadata が無い環境では曲名を出さないだけ */ }
+    }
+    // 再生位置(ロック画面/通知のシークバーと残り時間)。毎フレーム呼ばれるので1秒に1回に間引く
+    if (playing && typeof ms.setPositionState === 'function') {
+      const now = performance.now();
+      if (now - lastPositionStateAt >= 1000) {
+        lastPositionStateAt = now;
+        const pos = currentPositionSeconds();
+        const dur = workletDuration;
+        if (pos !== null && Number.isFinite(pos) && Number.isFinite(dur) && dur > 0) {
+          try { ms.setPositionState({ duration: dur, position: Math.max(0, Math.min(dur, pos)), playbackRate: 1 }); } catch (e) { /* 値が不正なら出さないだけ */ }
+        }
+      }
     }
     const want = playing ? 'playing' : 'paused';
     if (ms.playbackState !== want) ms.playbackState = want;

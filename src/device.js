@@ -22,15 +22,22 @@
   'use strict';
   const MML = global.MML = global.MML || {};
 
-  let cached = null;
-  function isTouch() {
-    if (cached !== null) return cached;
+  let cachedIos = null, cachedAndroid = null;
+  function isIOS() {
+    if (cachedIos !== null) return cachedIos;
     const nav = global.navigator || {};
     const ua = nav.userAgent || '';
-    cached = /iPhone|iPad|iPod|Android/i.test(ua)
+    cachedIos = /iPhone|iPad|iPod/i.test(ua)
       || (nav.platform === 'MacIntel' && (nav.maxTouchPoints || 0) > 1);
-    return cached;
+    return cachedIos;
   }
+  function isAndroid() {
+    if (cachedAndroid !== null) return cachedAndroid;
+    const nav = global.navigator || {};
+    cachedAndroid = /Android/i.test(nav.userAgent || '');
+    return cachedAndroid;
+  }
+  function isTouch() { return isIOS() || isAndroid(); }
 
   function setFileAccept(el, accept) {
     if (!el) return;
@@ -43,7 +50,7 @@
     document.querySelectorAll('input[type="file"][accept]').forEach((el) => el.removeAttribute('accept'));
   }
 
-  MML.Device = { isTouch, setFileAccept };
+  MML.Device = { isTouch, isIOS, isAndroid, setFileAccept };
 
   if (typeof document !== 'undefined') {
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', stripStaticAccepts);
