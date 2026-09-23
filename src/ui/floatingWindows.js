@@ -229,6 +229,9 @@
   }
 
   function initSplitters() {
+    // 上側ペインの高さを変える方式では、動かすまでは CSS の既定(flex で余りを取る)のまま。
+    // 動かしたら高さを固定し(flex:none)、下のペインは高さそのままで下へずれる(2026-09-24、MMLエディタ)。
+    // ダブルクリックで既定へ戻す
     document.querySelectorAll('.pane-splitter').forEach(splitter => {
       const id = splitter.id;
       // 既定は「直前の兄弟=上側ペイン」の高さを変える。data-resize="next" を付けると
@@ -239,8 +242,18 @@
       if (!pane) return;
       const minH = next ? 40 : 80;
 
+      const setH = (h) => {
+        if (h == null) { pane.style.height = ''; if (!next) pane.style.flex = ''; return; }
+        pane.style.height = h + 'px';
+        if (!next) pane.style.flex = 'none';
+      };
       const saved = loadSplitterHeights()[id];
-      if (saved != null) pane.style.height = saved + 'px';
+      if (saved != null) setH(saved);
+      splitter.addEventListener('dblclick', () => {
+        setH(null);
+        const d = loadSplitterHeights(); delete d[id];
+        try { localStorage.setItem(SPLITTER_KEY, JSON.stringify(d)); } catch (e) { /* ignore */ }
+      });
 
       let dragging = false;
       let startY = 0, startH = 0;
@@ -260,7 +273,7 @@
         if (!dragging) return;
         // 下側ペインを変える場合はドラッグ方向が逆(下へ引く=下側が縮む)
         const delta = next ? (startY - e.clientY) : (e.clientY - startY);
-        pane.style.height = Math.max(minH, startH + delta) + 'px';
+        setH(Math.max(minH, startH + delta));
       });
 
       const end = () => {

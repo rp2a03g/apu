@@ -1265,6 +1265,20 @@
           if (k !== harmHover) { harmHover = k; drawHarm(); }
         });
         harmCv.addEventListener('mouseleave', () => { if (harmHover !== -1) { harmHover = -1; drawHarm(); } });
+        // 指(2026-09-24): バーの上で触れたらスクロールを止めてなぞった高さを入れる
+        const tp = (e) => ({ clientX: e.touches[0].clientX, clientY: e.touches[0].clientY });
+        harmCv.addEventListener('touchstart', (e) => {
+          if (e.touches.length !== 1) return;
+          if (harmIndexAt(harmPos(tp(e))) < 0 || !ensureTarget()) return;
+          e.preventDefault(); harmDrag = true; applyHarm(tp(e));
+        }, { passive: false });
+        harmCv.addEventListener('touchmove', (e) => {
+          if (!harmDrag || e.touches.length !== 1) return;
+          e.preventDefault(); applyHarm(tp(e));
+        }, { passive: false });
+        const harmTouchEnd = () => { harmDrag = false; };
+        harmCv.addEventListener('touchend', harmTouchEnd);
+        harmCv.addEventListener('touchcancel', harmTouchEnd);
       }
       // 出力波形キャンバスへの手描き
       let outDrag = false;
@@ -1294,6 +1308,27 @@
           if (h !== outHover) { outHover = h; drawOut(); }
         });
         outCv.addEventListener('mouseleave', () => { if (outHover) { outHover = false; drawOut(); } });
+        // 指(2026-09-24): 波形の枠の中で触れたらスクロールを止めて手描きする。離したら倍音を取り直す
+        const tp = (e) => ({ clientX: e.touches[0].clientX, clientY: e.touches[0].clientY });
+        outCv.addEventListener('touchstart', (e) => {
+          if (e.touches.length !== 1) return;
+          const pos = outPos(tp(e));
+          if (!inPlot(pos) || !ensureTarget()) return;
+          e.preventDefault(); outDrag = true; drawLast = null;
+          drawTargetAt(pos); drawOut();
+        }, { passive: false });
+        outCv.addEventListener('touchmove', (e) => {
+          if (!outDrag || e.touches.length !== 1) return;
+          e.preventDefault(); drawTargetAt(outPos(tp(e))); drawOut();
+        }, { passive: false });
+        const outTouchEnd = () => {
+          if (!outDrag) return;
+          outDrag = false; drawLast = null;
+          setTargetFromWave(target.wave);
+          drawDiagram();
+        };
+        outCv.addEventListener('touchend', outTouchEnd);
+        outCv.addEventListener('touchcancel', outTouchEnd);
       }
       let solveCandidates = [];
       let solving = false;

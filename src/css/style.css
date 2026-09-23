@@ -672,7 +672,9 @@ button.secondary {
 /* --- MMLウィンドウ: エディタ + 再生ペイン --- */
 .mml-window-body {
   padding: 0 !important;
-  overflow: hidden !important;
+  /* エディタの高さを境目で固定したとき、ログ欄がはみ出た分は縦スクロール(2026-09-24) */
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
 }
 
 /* エディタが余りを全部取り、下のログ欄はスプリッターで決めた高さに固定する
@@ -3823,3 +3825,11 @@ html.ui-mobile .vrc7-tone-editor .vrc7-left canvas { width: 100%; height: auto; 
 html.ui-mobile .vrc7-tone-editor .vrc7-op-col label { font-size: 13px; min-height: 32px; }
 html.ui-mobile .vrc7-tone-editor .vrc7-op-col input[type="number"] { min-height: 30px; font-size: 14px; width: 56px; }
 html.ui-mobile .vrc7-tone-editor .toolbar { flex-wrap: wrap; }
+
+/* チャンネル一覧の大きさ(スマホ、⋯ で出す。チャンネル表示のときだけ) */
+.m-listzoom { display: none; }
+html.ui-mobile #win-keyboard.m-extras.m-view-list .m-listzoom {
+  order: 13; flex: 1 1 100%; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 400; color: var(--text);
+}
+html.ui-mobile #win-keyboard .m-listzoom input { flex: 1 1 auto; min-width: 0; height: 28px; accent-color: var(--accent); }
+html.ui-mobile #win-keyboard .m-listzoom-value { width: 44px; text-align: right; }

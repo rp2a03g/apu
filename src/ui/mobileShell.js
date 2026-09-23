@@ -172,11 +172,31 @@
     if (!win) return;
     let zoom = 1;
     try { const v = parseFloat(localStorage.getItem(LIST_ZOOM_KEY)); if (Number.isFinite(v)) zoom = v; } catch (e) { /* ignore */ }
-    const apply = (z) => { zoom = Math.max(0.6, Math.min(2, z)); win.style.setProperty('--m-lz', zoom.toFixed(3)); };
+    const inList = (el) => win.classList.contains('m-view-list') && el && el.closest && el.closest('.kbd-left');
+    // ⋯ を押すと出る「一覧の大きさ」スライダー(チャンネル表示のときだけ。ピンチと同じ値を動かす)
+    const bar = document.createElement('div');
+    bar.className = 'm-listzoom';
+    bar.innerHTML = '<span class="m-listzoom-label"></span><input type="range" min="60" max="200" step="5"><span class="m-listzoom-value"></span>';
+    bar.querySelector('.m-listzoom-label').textContent = T('一覧の大きさ');
+    const range = bar.querySelector('input');
+    const valueEl = bar.querySelector('.m-listzoom-value');
+    const header = win.querySelector('.float-window-header');
+    if (header) header.appendChild(bar);
+    const save = () => { try { localStorage.setItem(LIST_ZOOM_KEY, zoom.toFixed(3)); } catch (e) { /* ignore */ } };
+    const apply = (z) => {
+      zoom = Math.max(0.6, Math.min(2, z));
+      win.style.setProperty('--m-lz', zoom.toFixed(3));
+      range.value = String(Math.round(zoom * 100));
+      valueEl.textContent = Math.round(zoom * 100) + '%';
+    };
+    range.addEventListener('input', () => apply(parseInt(range.value, 10) / 100));
+    range.addEventListener('change', save);
     apply(zoom);
+    // iOS の Safari は2本指の拡大を gesture* イベントで先に処理するので、一覧の上ではそれも止める
+    win.addEventListener('gesturestart', (e) => { if (inList(e.target)) e.preventDefault(); });
+    win.addEventListener('gesturechange', (e) => { if (inList(e.target)) e.preventDefault(); });
     let start = null;
     const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
-    const inList = (el) => win.classList.contains('m-view-list') && el && el.closest && el.closest('.kbd-left');
     win.addEventListener('touchstart', (e) => {
       if (e.touches.length === 2 && inList(e.target)) start = { d: dist(e.touches), z: zoom };
     }, { passive: true });
@@ -189,7 +209,7 @@
     const end = (e) => {
       if (!start || e.touches.length >= 2) return;
       start = null;
-      try { localStorage.setItem(LIST_ZOOM_KEY, zoom.toFixed(3)); } catch (err) { /* ignore */ }
+      save();
     };
     win.addEventListener('touchend', end);
     win.addEventListener('touchcancel', end);

@@ -9534,7 +9534,32 @@
     // トップのツールバーの「ファイルを開く」アイコン。かつては「サウンドファイルを開く」
     // ウィンドウのトグルだったが、そのウィンドウを廃止したので今はダイアログを出すだけ
     const openBtn = document.getElementById('btnOpenFile');
-    if (openBtn) openBtn.addEventListener('click', () => soundFileEl.click());
+    // PC は File System Access のピッカーで開く(2026-09-24)。<input type=file> ではファイルのハンドルが
+    // 取れず、ここから開いた .mml が外部エディタ同期(src/ui/fileSync.js)につながらなかった。
+    // 開いた後の流れは下の soundFileEl の change と同じ(サウンドファイルは再生、.mml はエディタへ)。
+    // スマホ/タブレットとピッカーの無いブラウザは従来どおり <input type=file>
+    if (openBtn) openBtn.addEventListener('click', async () => {
+      const usePicker = typeof window.showOpenFilePicker === 'function' && !(MML.Device && MML.Device.isTouch());
+      if (!usePicker) { soundFileEl.click(); return; }
+      let handles;
+      try {
+        handles = await window.showOpenFilePicker({ multiple: true, id: 'sef-open' });
+      } catch (e) {
+        if (e && e.name === 'AbortError') return;
+        soundFileEl.click(); // ピッカーが使えない状況(セキュリティ制限等)は従来の経路へ
+        return;
+      }
+      if (!handles || !handles.length) return;
+      const files = await Promise.all(handles.map((h) => h.getFile()));
+      if (files.every(isDmcFile)) { await openDmcOnly(files); return; }
+      const file = pickPrimarySoundFile(files);
+      if (!file) return;
+      const handle = handles[files.indexOf(file)] || null;
+      const ok = await openSoundFile(file, { siblings: files, handle });
+      if (!ok) return;
+      const playFn = formatToPlayFn[ok];
+      if (playFn) playFn();
+    });
 
     // ドラッグ&ドロップでも同じ経路(openSoundFile)で開けるようにする。ウィンドウが
     // 閉じていてもページ上のどこにドロップしても拾う(ヘッダーの開くボタンと同じ
