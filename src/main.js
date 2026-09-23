@@ -3380,6 +3380,10 @@
     window.addEventListener('unhandledrejection', (e) => msDebug('REJECT ' + (e.reason && e.reason.message || e.reason)));
     document.addEventListener('visibilitychange', () => msDebug('visibility=' + document.visibilityState));
   }
+  function isAppPlaying() {
+    const p = currentTransportPlayer();
+    return p ? !!p.isPlaying : !!transportPlaying;
+  }
   function currentPositionSeconds() {
     // シークバーと同じ位置(getTransportPosition)。プレイヤーが無ければ null
     try { return currentTransportPlayer() || capturedBuffer ? getTransportPosition() : null; } catch (e) { return null; }
@@ -3387,8 +3391,10 @@
   function msSeekBy(d, sign) {
     const pos = currentPositionSeconds();
     const off = (d && Number.isFinite(d.seekOffset) && d.seekOffset > 0) ? d.seekOffset : 10;
+    const bf = currentBufferedFraction();
     msDebug('seek' + (sign > 0 ? 'forward' : 'backward') + ' off=' + off + ' pos=' + (pos === null ? 'null' : pos.toFixed(1))
-      + ' mode=' + lastPlayMode + ' player=' + !!currentTransportPlayer() + ' dur=' + workletDuration.toFixed(1));
+      + ' mode=' + lastPlayMode + ' player=' + !!currentTransportPlayer() + ' dur=' + workletDuration.toFixed(1)
+      + ' buffered=' + (bf === null ? 'null' : (bf * 100).toFixed(0) + '%'));
     if (pos === null || !Number.isFinite(pos)) return;
     let got = null;
     try { got = seekToSeconds(pos + sign * off); } catch (e) { msDebug('seek threw ' + e.message); return; }
@@ -3413,7 +3419,10 @@
     // 位置指定(ロック画面のシークバー)は前後の曲と共存できるので常に受ける
     // (iOS が10秒送りと前後の曲のどちらを出すかは seekbackward/seekforward の有無で決まる)
     bind('seekto', (d) => {
-      msDebug('seekto time=' + (d && d.seekTime) + ' mode=' + lastPlayMode + ' player=' + !!currentTransportPlayer());
+      const bf = currentBufferedFraction();
+      msDebug('seekto time=' + (d && d.seekTime) + ' mode=' + lastPlayMode + ' player=' + !!currentTransportPlayer()
+        + ' pos=' + (currentPositionSeconds() || 0).toFixed(1) + ' dur=' + workletDuration.toFixed(1)
+        + ' buffered=' + (bf === null ? 'null' : (bf * 100).toFixed(0) + '%'));
       if (d && Number.isFinite(d.seekTime)) { let got = null; try { got = seekToSeconds(d.seekTime); } catch (e) { msDebug('seekto threw ' + e.message); return; } msDebug(' -> got=' + got); }
     });
     msDebug('actions=' + want);
@@ -3425,9 +3434,10 @@
     mediaSessionBound = true;
     const ms = navigator.mediaSession;
     const bind = (act, fn) => { try { ms.setActionHandler(act, fn); } catch (e) { /* 未対応のアクションは無視 */ } };
-    // 再生と一時停止は同じトグル(各形式の再生ボタンが元々トグルなので合わせる)
-    bind('play', () => { msDebug('play'); keyboardDisplay.onTransport('play'); });
-    bind('pause', () => { msDebug('pause'); keyboardDisplay.onTransport('play'); });
+    // play/pause は「今の状態と違うときだけ」トグルを押す。OS 側が持つ再生中/停止中の認識が
+    // アプリとずれることがあり(iOS は <audio> 要素の状態を見る)、無条件トグルだと逆に動く
+    bind('play', () => { msDebug('play (app playing=' + isAppPlaying() + ')'); if (!isAppPlaying()) keyboardDisplay.onTransport('play'); });
+    bind('pause', () => { msDebug('pause (app playing=' + isAppPlaying() + ')'); if (isAppPlaying()) keyboardDisplay.onTransport('play'); });
     bind('stop', () => { msDebug('stop'); keyboardDisplay.onTransport('stop'); });
     applyMediaSessionActionSet(false);
   }
