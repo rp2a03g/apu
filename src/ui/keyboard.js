@@ -89,6 +89,8 @@
   function isMobileUi() { return !!(MML.Device && MML.Device.uiMode && MML.Device.uiMode() === 'mobile'); }
   function layoutDefaults() { return isMobileUi() ? LAYOUT_DEFAULTS_MOBILE : LAYOUT_DEFAULTS; }
   function layoutStorageKey() { return isMobileUi() ? LAYOUT_STORAGE_KEY_MOBILE : LAYOUT_STORAGE_KEY; }
+  // チャンネル一覧の高さ(一覧と下の帯の境目)もスマホと PC で別に覚える
+  function rowsHeightKey() { return isMobileUi() ? 'mml_keyboardRowsHeight_mobile' : 'mml_keyboardRowsHeight'; }
   const LAYOUT_CHOICES = Object.freeze({
     rollOrientation: ['vertical', 'horizontal'],
     rollPlacement: ['bottom', 'right', 'window'],
@@ -3117,7 +3119,7 @@
       this._listRowsHeight = 0;
       this._bigWaveWidth = 0;
       try {
-        const rh = parseInt(localStorage.getItem('mml_keyboardRowsHeight'), 10);
+        const rh = parseInt(localStorage.getItem(rowsHeightKey()), 10);
         if (Number.isFinite(rh) && rh >= 60) this._listRowsHeight = rh;
         const ww = parseInt(localStorage.getItem('mml_keyboardWaveWidth'), 10);
         if (Number.isFinite(ww) && ww >= 120) this._bigWaveWidth = ww;
@@ -3580,7 +3582,7 @@
         el.style.flex = 'none';
         el.style.height = h + 'px';
       }, () => this._activeRowsEl().offsetHeight, () => {
-        try { localStorage.setItem('mml_keyboardRowsHeight', String(this._listRowsHeight)); } catch (e) { /* ignore */ }
+        try { localStorage.setItem(rowsHeightKey(), String(this._listRowsHeight)); } catch (e) { /* ignore */ }
       });
       this._waveSplitterVEl = this._makeSplitter('vertical', (delta, start) => {
         const w = Math.max(120, Math.round(start - delta)); // 左へドラッグ=大波形が広くなる
@@ -3633,7 +3635,7 @@
         active = true;
         startPos = orientation === 'vertical' ? e.clientX : e.clientY;
         startSize = getStart();
-        el.setPointerCapture(e.pointerId);
+        try { el.setPointerCapture(e.pointerId); } catch (err) { /* キャプチャできなくても要素上の move で追う */ }
         el.classList.add('dragging');
         e.preventDefault();
       });

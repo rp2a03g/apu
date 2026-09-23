@@ -175,8 +175,8 @@
         </div>
       </div>
       <!-- 縦スプリッター -->
-      <!-- エディタの高さを変える(ログ欄は高さそのままで下へずれ、はみ出た分はウィンドウが縦スクロール) -->
-      <div class="pane-splitter" id="mmlEditorSplitter" title="ドラッグでエディタの高さを変更(ダブルクリックで元に戻す)"></div>
+      <!-- エディタの高さを変える。PC はウィンドウごと伸び縮みし(ログ欄は下端に付いてくる)、スマホはログ欄が下へずれて縦スクロール -->
+      <div class="pane-splitter" id="mmlEditorSplitter" data-resize="window" title="ドラッグでエディタの高さを変更"></div>
       <!-- 下ペイン: コントロール + 出力 -->
       <div class="mml-bottom-pane">
         <div id="mmlOutput" class="output mml-log-area"></div>

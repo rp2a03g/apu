@@ -2907,9 +2907,9 @@ button.secondary {
 /* ウィンドウ本体(.float-window-body=縦flex)いっぱいに伸ばす。伸ばさないと最下段の共通設定が
    一覧の直下に来て「一番下」にならない(#drumPanel は素の div なので flex:1 が要る) */
 #drumPanel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-/* 一覧(.drum-panel-body)は境目のドラッグで決まる固定の高さ、下段と設定値はその下に中身なりの高さで続き、
-   はみ出した分はウィンドウ本体が縦スクロールする(drumPanel.js initDivider、2026-09-24) */
-.drum-panel { display: flex; flex-direction: column; flex: none; min-height: 0; font-size: 11px; overflow-x: auto; }
+/* 一覧(.drum-panel-body)が余りを取り、下段と設定値はその下に中身なりの高さで続く。PC は境目を動かすと
+   ウィンドウごと伸び縮みする(drumPanel.js initDivider、2026-09-24)。スマホは末尾の html.ui-mobile 節 */
+.drum-panel { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; font-size: 11px; overflow-x: auto; }
 .drum-panel-head, .drum-panel-row {
   display: flex; align-items: center; gap: 6px; padding: 3px 6px; white-space: nowrap;
 }
@@ -2922,7 +2922,7 @@ button.secondary {
 /* 同定情報(ハッシュ)が届いていない行。設定を保存できないので操作を止めて理由を出す */
 .drum-panel-row--nohash { background: rgba(209, 72, 58, 0.10); }
 .drum-panel-row--nohash .dp-c-label::after { content: ' ⚠'; color: #d1483a; }
-.drum-panel-body { flex: none; height: 180px; overflow-y: auto; min-height: 60px; }
+.drum-panel-body { flex: 1 1 auto; overflow-y: auto; min-height: 60px; }
 .drum-panel-row--sel { background: rgba(58, 110, 165, 0.18); }
 .drum-panel-row--sel:hover { background: rgba(58, 110, 165, 0.24); }
 .dp-c-label { display: flex; align-items: center; gap: 2px; }
@@ -3739,7 +3739,7 @@ html.ui-mobile #win-keyboard.m-view-roll .kbd-below,
 html.ui-mobile #win-keyboard.m-view-roll .kbd-main:not(.kbd-main--roll-right) { display: none !important; }
 html.ui-mobile #win-keyboard.m-view-list .kbd-roll-wrap,
 html.ui-mobile #win-keyboard.m-view-list .kbd-lanes,
-html.ui-mobile #win-keyboard.m-view-list .kbd-splitter { display: none !important; }
+html.ui-mobile #win-keyboard.m-view-list .kbd-splitter:not(.m-rows-splitter) { display: none !important; }
 html.ui-mobile #win-keyboard .kbd-hdr-btn,
 html.ui-mobile #win-keyboard .kbd-layout-btn { width: 38px; height: 38px; border: 1px solid var(--border); border-radius: 8px; background: var(--control-bg); color: var(--text); }
 html.ui-mobile #win-keyboard .kbd-hdr-btn.kbd-src-name { background: transparent; border-color: transparent; }
@@ -3807,15 +3807,21 @@ html.ui-mobile #win-keyboard .kbd-roll-wrap--horizontal .kbd-roll-body > .kbd-ro
 html.ui-mobile #win-keyboard .kbd-roll-wrap--horizontal .kbd-roll-body > .kbd-piano-wrap { height: calc(var(--m-pz, 1) * 100%); min-height: calc(var(--m-pz, 1) * 100%); flex: none; }
 html.ui-mobile #win-keyboard .kbd-roll-body::-webkit-scrollbar { display: none; }
 
-/* DPCM/ノイズ(スマホ): 一覧の既定の高さ(PC の規則は .drum-panel の節) */
-html.ui-mobile #win-drums .drum-panel-body { height: 200px; }
+/* DPCM/ノイズ(スマホ): 一覧は固定の高さ(境目で変える)、下段と設定値は続けて並べてパネルごと縦スクロール */
+html.ui-mobile #win-drums .drum-panel { flex: none; }
+html.ui-mobile #win-drums .drum-panel-body { flex: none; height: 200px; }
 /* 鍵盤表示のチャンネル一覧(スマホ): ファイル情報は中身なりの高さで全部出し、ファイル情報+一覧を1枚で縦スクロール
    (PC の既定の高さ120pxのままだと、大きい文字で1行しか見えなかった) */
 html.ui-mobile #win-keyboard.m-view-list .kbd-left { overflow-y: auto; }
 html.ui-mobile #win-keyboard.m-view-list .kbd-fileinfo { height: auto !important; }
 html.ui-mobile #win-keyboard.m-view-list .kbd-fileinfo-body { overflow: visible; }
-html.ui-mobile #win-keyboard.m-view-list .kbd-rows { flex: none; overflow-y: visible; }
-html.ui-mobile #win-keyboard.m-view-list .kbd-left > .kbd-splitter { display: none; }
+/* 一覧の高さは一覧と下の帯(波形)の境目で変える(ドラムパッドと同じ。keyboard.js _waveSplitterEl)。
+   下の帯は高さそのままで下へずれ、ファイル情報+一覧+帯を1枚で縦スクロールする */
+html.ui-mobile #win-keyboard.m-view-list .kbd-rows { flex: none; height: 320px; overflow-y: auto; }
+html.ui-mobile #win-keyboard.m-view-list .kbd-below { flex: none; }
+/* 一覧と下の帯の境目だけ出す(ファイル情報の境目は隠したまま。ファイル情報は中身なりの高さ) */
+html.ui-mobile #win-keyboard.m-view-list .kbd-left > .kbd-splitter--horizontal:has(+ .kbd-below) { display: block !important; height: 14px; flex: none; touch-action: none; background: var(--border); cursor: row-resize; }
+html.ui-mobile #win-keyboard.m-view-list .kbd-left > .kbd-splitter--horizontal:has(+ .kbd-below)::after { display: none; }
 
 /* VRC7音色エディタ: 構成図 → モジュレータ → キャリア → 逆算の列、を縦に並べて縦スクロール */
 html.ui-mobile .vrc7-tone-editor .vrc7-main { flex-direction: column; align-items: stretch; }

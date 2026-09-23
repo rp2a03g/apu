@@ -231,9 +231,22 @@
   function initSplitters() {
     // 上側ペインの高さを変える方式では、動かすまでは CSS の既定(flex で余りを取る)のまま。
     // 動かしたら高さを固定し(flex:none)、下のペインは高さそのままで下へずれる(2026-09-24、MMLエディタ)。
-    // ダブルクリックで既定へ戻す
+    // ダブルクリックで既定へ戻す。
+    // data-resize="window"(PC): 境目を動かした分だけウィンドウ自体の高さを変える。上側ペインは flex で
+    // 余りを取ったまま(=境目と同じだけ伸び縮みする)、下のペインは高さそのままでウィンドウの下端に付いてくる。
+    // ウィンドウの縁で大きさを変えても上側ペインが追随する。スマホ画面はウィンドウが画面いっぱいで
+    // 高さを変えられないので、上の「上側ペインを固定して下をずらす」方式になる
+    try { // 古い方式で保存した高さは使わない(同じ id でも意味が違う)
+      const d = loadSplitterHeights();
+      if (d.mmlLogSplitter != null || d.mmlEditorSplitter != null) {
+        delete d.mmlLogSplitter; delete d.mmlEditorSplitter;
+        localStorage.setItem(SPLITTER_KEY, JSON.stringify(d));
+      }
+    } catch (e) { /* ignore */ }
+    const mobile = document.documentElement.classList.contains('ui-mobile');
     document.querySelectorAll('.pane-splitter').forEach(splitter => {
-      const id = splitter.id;
+      if (splitter.dataset.resize === 'window' && !mobile) { initWindowSplitter(splitter); return; }
+      const id = splitter.id + (splitter.dataset.resize === 'window' ? '_mobile' : '');
       // 既定は「直前の兄弟=上側ペイン」の高さを変える。data-resize="next" を付けると
       // 「直後の兄弟=下側ペイン」を変える(上側がflexで伸び縮みする作りのとき。
       //  MMLエディタは下のログ欄を content 高さに固定し、エディタ側が余りを取る)
@@ -285,6 +298,36 @@
       splitter.addEventListener('pointerup', end);
       splitter.addEventListener('pointercancel', end);
     });
+  }
+
+  // data-resize="window" の境目(PC)。上側ペインの最小の高さを守りつつウィンドウの高さを変える
+  function initWindowSplitter(splitter) {
+    const pane = splitter.previousElementSibling;
+    const win = splitter.closest('.float-window');
+    if (!pane || !win) return;
+    const MIN_PANE = 80;
+    let dragging = false, startY = 0, startWinH = 0, startPaneH = 0;
+    splitter.addEventListener('pointerdown', e => {
+      if (e.button != null && e.button !== 0) return;
+      // はみ出し(縦スクロール中)があれば、その分を先にウィンドウへ足してから動かす(境目と上側ペインの伸びを揃える)
+      const fb = splitter.closest('.float-window-body');
+      const overflow = fb ? Math.max(0, fb.scrollHeight - fb.clientHeight) : 0;
+      dragging = true; startY = e.clientY; startWinH = win.offsetHeight + overflow; startPaneH = pane.offsetHeight;
+      splitter.classList.add('dragging'); e.preventDefault();
+      try { splitter.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    });
+    splitter.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      const delta = Math.max(MIN_PANE - startPaneH, e.clientY - startY);
+      win.style.height = Math.round(startWinH + delta) + 'px';
+    });
+    const end = () => {
+      if (!dragging) return;
+      dragging = false; splitter.classList.remove('dragging');
+      if (win._famimmlWindow) win._famimmlWindow.persist();
+    };
+    splitter.addEventListener('pointerup', end);
+    splitter.addEventListener('pointercancel', end);
   }
 
   window.MML = window.MML || {};

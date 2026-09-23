@@ -186,7 +186,7 @@
         `<div class="drum-panel-body"></div>` +
         // 一覧と下段(分割ビュー)の境目。ドラッグで下段の高さを変える=一覧の見える範囲を広げられる
         // (パッドが多いと一覧がスクロールになるため、方針 2026-09-18)。高さは localStorage に保存
-        `<div class="drum-panel-divider" title="${T('ドラッグで一覧の高さを変える(ダブルクリックで既定の高さ)')}"></div>` +
+        `<div class="drum-panel-divider" title="${T('ドラッグで一覧の高さを変える')}"></div>` +
         `<div class="drum-panel-split"></div>` +
         `<div class="drum-panel-status" hidden></div>` +
         `<div class="drum-panel-foot"></div>` +
@@ -227,36 +227,52 @@
   }
 
   // ── 一覧/下段の境目ドラッグ(2026-09-18、2026-09-24 に「一覧の高さを変える」へ変更) ────────────
-  // 境目は一覧(.drum-panel-body)の高さを変える。下段(波形/分割)と設定値は一覧の下に続けて並び、
-  // 一覧を広げるとそのぶん下へずれてパネル全体が縦スクロールする(下段だけが縮んで見づらくならないように)。
-  // スマホ画面と PC は画面の大きさが違うので高さは別に覚える。ダブルクリック/ダブルタップで既定の高さへ
-  const LIST_H_KEY = 'drumPanelListH', LIST_H_KEY_MOBILE = 'drumPanelListH_mobile';
+  // 境目は一覧(.drum-panel-body)の高さを変える。下段(波形/分割)と設定値は一覧の下に高さそのままで続く。
+  //  ・PC: 境目を動かした分だけウィンドウの高さを変える(一覧は flex で余りを取るので境目と同じだけ伸びる。
+  //        ウィンドウの縁で大きさを変えても一覧が追随する。高さの記憶はウィンドウの位置/大きさと一緒)
+  //  ・スマホ: ウィンドウは画面いっぱいで変えられないので一覧の高さを固定し、下はずれてパネルごと縦スクロール
+  //    (高さは drumPanelListH_mobile に覚える。ダブルタップで既定の高さへ)
+  const LIST_H_KEY_MOBILE = 'drumPanelListH_mobile';
+  const MIN_LIST_H = 60;
   function isMobileUi() { return !!(MML.Device && MML.Device.uiMode && MML.Device.uiMode() === 'mobile'); }
   function initDivider(div) {
     if (!div || !bodyEl) return;
-    const key = isMobileUi() ? LIST_H_KEY_MOBILE : LIST_H_KEY;
-    const apply = (h) => { if (h == null) bodyEl.style.height = ''; else bodyEl.style.height = Math.max(60, h) + 'px'; };
-    try { const v = parseInt(global.localStorage.getItem(key), 10); if (Number.isFinite(v)) apply(v); } catch (e) { /* ignore */ }
-    let dragging = false, startY = 0, startH = 0;
+    const mobile = isMobileUi();
+    const win = div.closest('.float-window');
+    const apply = (h) => { if (h == null) bodyEl.style.height = ''; else bodyEl.style.height = Math.max(MIN_LIST_H, h) + 'px'; };
+    if (mobile) {
+      try { const v = parseInt(global.localStorage.getItem(LIST_H_KEY_MOBILE), 10); if (Number.isFinite(v)) apply(v); } catch (e) { /* ignore */ }
+    }
+    let dragging = false, startY = 0, startH = 0, startWinH = 0;
+    // 中身がウィンドウからはみ出している(縦スクロール中)ときは、掴んだ時点でその分ウィンドウを伸ばしてから
+    // 動かす。そうしないと、はみ出し分を吸収するまで一覧が伸びず、境目の動きと一覧の伸びがずれる
+    const overflowOf = () => { // .drum-panel 自身(overflow-x:auto で縦もスクロール容器になる)とウィンドウ本体の両方を見る
+      let o = 0;
+      for (const el of [rootEl && rootEl.querySelector('.drum-panel'), div.closest('.float-window-body')]) if (el) o += Math.max(0, el.scrollHeight - el.clientHeight);
+      return o;
+    };
     // pointer イベント(マウスと指の両方)
     div.addEventListener('pointerdown', (e) => {
       if (e.button != null && e.button !== 0) return;
-      dragging = true; startY = e.clientY; startH = bodyEl.offsetHeight;
+      dragging = true; startY = e.clientY; startH = bodyEl.offsetHeight; startWinH = win ? win.offsetHeight + (mobile ? 0 : overflowOf()) : 0;
       div.classList.add('dragging'); e.preventDefault();
       try { div.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
     });
     div.addEventListener('pointermove', (e) => {
       if (!dragging) return;
-      apply(startH + (e.clientY - startY)); // 下へ引く=一覧が広がる(下の段はそのぶん下へずれる)
+      const delta = Math.max(MIN_LIST_H - startH, e.clientY - startY); // 下へ引く=一覧が広がる
+      if (mobile || !win) apply(startH + delta);
+      else win.style.height = Math.round(startWinH + delta) + 'px';
     });
     const end = () => {
       if (!dragging) return;
       dragging = false; div.classList.remove('dragging');
-      try { global.localStorage.setItem(key, String(bodyEl.offsetHeight)); } catch (e) { /* ignore */ }
+      if (mobile) { try { global.localStorage.setItem(LIST_H_KEY_MOBILE, String(bodyEl.offsetHeight)); } catch (e) { /* ignore */ } }
+      else if (win && win._famimmlWindow) win._famimmlWindow.persist();
     };
     div.addEventListener('pointerup', end);
     div.addEventListener('pointercancel', end);
-    div.addEventListener('dblclick', () => { apply(null); try { global.localStorage.removeItem(key); } catch (e) { /* ignore */ } });
+    if (mobile) div.addEventListener('dblclick', () => { apply(null); try { global.localStorage.removeItem(LIST_H_KEY_MOBILE); } catch (e) { /* ignore */ } });
   }
 
   function setRows(next) {
