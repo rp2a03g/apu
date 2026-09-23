@@ -3677,16 +3677,34 @@ html.ui-mobile .m-tab {
 html.ui-mobile .m-tab.is-active { background: var(--control-bg); color: var(--accent); border-color: var(--border); }
 
 /* ---- 鍵盤表示(スマホ): 上の再生操作と重複するボタンを隠し、一覧とロールを縦に積み、行を指で扱える大きさに ---- */
-html.ui-mobile #win-keyboard .kbd-transport,
-html.ui-mobile #win-keyboard .kbd-repeat-btn,
-html.ui-mobile #win-keyboard .kbd-open-btn,
-html.ui-mobile #win-keyboard .kbd-src-badge,
-html.ui-mobile #win-keyboard .kbd-hdr-btn.kbd-src-name { display: none !important; }
-html.ui-mobile #win-keyboard .float-window-header { gap: 6px; padding: 6px 8px; align-items: center; }
-/* 見出し行: [チャンネル|ピアノロール] [to MML] [レイアウト] [⋯]。上の再生操作のボタンと同じ高さ・角丸に揃える */
+/* 見出し行(3行): 1行目 [開く][⏮▶■⏭][終了後][バッジ][曲名] / 2行目 シークバー / 3行目 [チャンネル|ロール][to MML][⚙][⋯]
+   並びは order で決める(DOM の順は PC と共通のまま)。音量/速度(4行目)は ⋯ で出す */
+html.ui-mobile #win-keyboard .float-window-header { gap: 5px 4px; padding: 6px 8px; align-items: center; }
+html.ui-mobile #win-keyboard .kbd-open-btn { order: 1; }
+html.ui-mobile #win-keyboard .kbd-transport { order: 2; gap: 4px; }
+html.ui-mobile #win-keyboard .kbd-repeat-btn { order: 3; }
+html.ui-mobile #win-keyboard .kbd-src-badge { order: 4; font-size: 11px; padding: 4px 7px; border-radius: 10px; }
+html.ui-mobile #win-keyboard .kbd-hdr-btn.kbd-src-name { order: 5; flex: 1 1 0; min-width: 40px; width: auto; max-width: 100%; font-size: 13px; height: 38px; }
+html.ui-mobile #win-keyboard .m-seek-row { order: 6; flex: 1 1 100%; display: flex; align-items: center; gap: 8px; min-height: 30px; }
+html.ui-mobile #win-keyboard .m-seek-row .seek-bar-wrap { flex: 1 1 auto; min-height: 30px; }
+html.ui-mobile #win-keyboard .m-seek-row .seek-time { flex: none; font-family: var(--mono); font-size: 13px; color: var(--text-muted); }
+html.ui-mobile #win-keyboard .m-seek-row .seek-handle { width: 12px; height: 30px; }
+html.ui-mobile #win-keyboard .m-seek-row input[type="range"] { height: 30px; }
+html.ui-mobile #win-keyboard .m-seg { order: 7; }
+html.ui-mobile #win-keyboard .kbd-tomml-btn { order: 8; }
+html.ui-mobile #win-keyboard .kbd-layout-btn { order: 9; }
+html.ui-mobile #win-keyboard .m-extras-btn { order: 10; }
+html.ui-mobile #win-keyboard .kbd-mastervol--header { order: 11; }
+html.ui-mobile #win-keyboard .kbd-speed--header { order: 12; }
+/* 再生ボタン群: 指で押せる大きさ。▶ は塗りで目立たせる */
+html.ui-mobile #win-keyboard .kbd-tp-btn { width: 38px; height: 38px; border: 1px solid var(--border); border-radius: 8px; background: var(--control-bg); color: var(--text); }
+html.ui-mobile #win-keyboard .kbd-tp-btn svg { width: 20px; height: 20px; }
+html.ui-mobile #win-keyboard .kbd-tp-btn.kbd-tp-btn--play:not(:disabled) { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+html.ui-mobile #win-keyboard .kbd-tp-btn:disabled { opacity: 0.35; }
+/* 見出し行の切替とボタンは再生ボタンと同じ高さ・角丸に揃える */
 html.ui-mobile .m-seg { display: inline-flex; flex: none; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 html.ui-mobile .m-seg-btn {
-  min-height: 36px;
+  min-height: 38px;
   padding: 0 9px;
   border: none;
   background: var(--control-bg);
@@ -3699,7 +3717,7 @@ html.ui-mobile .m-seg-btn.is-active { background: var(--accent); color: var(--on
 html.ui-mobile .m-extras-btn {
   flex: none;
   width: 38px;
-  min-height: 36px;
+  min-height: 38px;
   margin-left: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -3719,7 +3737,8 @@ html.ui-mobile #win-keyboard.m-view-list .kbd-roll-wrap,
 html.ui-mobile #win-keyboard.m-view-list .kbd-lanes,
 html.ui-mobile #win-keyboard.m-view-list .kbd-splitter { display: none !important; }
 html.ui-mobile #win-keyboard .kbd-hdr-btn,
-html.ui-mobile #win-keyboard .kbd-layout-btn { width: 38px; height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--control-bg); color: var(--text); }
+html.ui-mobile #win-keyboard .kbd-layout-btn { width: 38px; height: 38px; border: 1px solid var(--border); border-radius: 8px; background: var(--control-bg); color: var(--text); }
+html.ui-mobile #win-keyboard .kbd-hdr-btn.kbd-src-name { background: transparent; border-color: transparent; }
 html.ui-mobile #win-keyboard .kbd-hdr-btn svg,
 html.ui-mobile #win-keyboard .kbd-layout-btn svg { width: 20px; height: 20px; }
 html.ui-mobile #win-keyboard .kbd-tomml-btn { width: auto; padding: 0 9px; }
@@ -3766,7 +3785,7 @@ html.ui-mobile #win-keyboard .kbd-header button.kbd-h-part svg { width: 18px; he
 /* ファイル情報/大波形の帯は畳んだ見出しだけ大きめに */
 html.ui-mobile #win-keyboard .kbd-fileinfo-header,
 html.ui-mobile #win-keyboard .kbd-bigwave-header { min-height: 30px; font-size: 13px; }
-/* 再生操作のシークバー: つまみを指で持てる大きさに */
-html.ui-mobile #mobilePlayer .seek-bar-wrap { min-height: 30px; }
-html.ui-mobile #mobilePlayer .seek-handle { width: 12px; height: 30px; }
-html.ui-mobile #mobilePlayer input[type="range"] { height: 30px; }
+/* ペインの境目(ドラッグで高さを変える)は指でつかめる太さに */
+html.ui-mobile .pane-splitter,
+html.ui-mobile .drum-panel-divider { height: 14px; touch-action: none; }
+.pane-splitter, .drum-panel-divider { touch-action: none; }

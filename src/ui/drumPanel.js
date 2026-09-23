@@ -242,21 +242,26 @@
     try { const v = parseInt(global.localStorage.getItem(DIVIDER_KEY), 10); if (Number.isFinite(v)) saved = v; } catch (e) { /* ignore */ }
     if (saved != null) applySplitHeight(saved);
     let dragging = false, startY = 0, startH = 0;
-    div.addEventListener('mousedown', (e) => {
+    // pointer イベント(マウスと指の両方。2026-09-23: mouse 系だけだとスマホで動かせなかった)
+    div.addEventListener('pointerdown', (e) => {
+      if (e.button != null && e.button !== 0) return;
       dragging = true; startY = e.clientY; startH = splitEl.offsetHeight;
       div.classList.add('dragging'); e.preventDefault();
+      try { div.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
     });
-    window.addEventListener('mousemove', (e) => {
+    div.addEventListener('pointermove', (e) => {
       if (!dragging) return;
       // 下へ引く=下段が縮む(=一覧が広がる)
       const h = Math.max(0, startH + (startY - e.clientY));
       applySplitHeight(h);
     });
-    window.addEventListener('mouseup', () => {
+    const end = () => {
       if (!dragging) return;
       dragging = false; div.classList.remove('dragging');
       try { global.localStorage.setItem(DIVIDER_KEY, String(splitEl.offsetHeight)); } catch (e) { /* ignore */ }
-    });
+    };
+    div.addEventListener('pointerup', end);
+    div.addEventListener('pointercancel', end);
     // ダブルクリックで自動(内容なりの高さ)へ戻す
     div.addEventListener('dblclick', () => {
       applySplitHeight(null);

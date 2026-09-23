@@ -126,14 +126,9 @@
       bar.appendChild(switchButton('desktop'));
       header.appendChild(bar);
     }
-    // 再生操作(ミニ操作窓の中身)を header の直後に常設
-    const player = document.createElement('div');
-    player.id = 'mobilePlayer';
-    if (header && header.parentNode) header.parentNode.insertBefore(player, header.nextSibling);
-    else document.body.insertBefore(player, document.body.firstChild);
-    // ch ミュートの一覧は畳んだまま(鍵盤表示の ch 一覧にもミュートがあり、開くと画面の大半を食う)
-    if (MML.UI.MiniTransport && MML.UI.MiniTransport.dock) MML.UI.MiniTransport.dock(player);
-
+    // 再生操作は鍵盤表示の見出し行のボタン(ファイルを開く/⏮▶■⏭/終了後の挙動/バッジ/曲名)をそのまま
+    // 大きくして使う(2026-09-23 ユーザー指示: 全タブ共通の再生操作の帯は場所を食うので置かない)。
+    // シークバーだけは見出し行に無いので、ミニ操作窓のシークバー行を借りて見出し行へ置く
     initKeyboardViews();
     buildTabs();
     watchWindowOpens();
@@ -183,8 +178,12 @@
       try { localStorage.setItem(KBD_VIEW_KEY, id); } catch (e) { /* ignore */ }
       try { global.dispatchEvent(new Event('resize')); } catch (e) { /* ignore */ }
     }
-    header.insertBefore(seg, header.firstChild);
+    header.appendChild(seg);
     header.appendChild(extras);
+    if (MML.UI.MiniTransport && MML.UI.MiniTransport.dockSeekRow) {
+      const row = MML.UI.MiniTransport.dockSeekRow(header);
+      if (row) row.classList.add('m-seek-row');
+    }
     setView(view);
   }
 

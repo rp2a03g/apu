@@ -79,6 +79,15 @@
     renderMutes();
   }
   function isDocked() { return docked; }
+  // シークバーの行だけを別の場所に置く(スマホの鍵盤表示の見出し行。2026-09-23)。
+  // 本体のシークバー副インスタンスはそのまま main.js の seekBars に登録されているので、置き場が
+  // どこでも表示は更新され続ける。残りの中身(ボタン/ミュート)は使わない
+  function dockSeekRow(container) {
+    build();
+    const row = root.querySelector('.mini-tp-seek');
+    if (row) container.appendChild(row);
+    return row;
+  }
 
   // ── 大きさの記憶 ──────────────────────────────────────────
   // requestWindow() は開いた後から大きさを変えられないので、閉じるまでの実寸を控えて
@@ -406,6 +415,6 @@
 
   MML.UI.MiniTransport = {
     init, open, close, setState, setChannels, render, setMutesOpen, setDropHandler,
-    supported, isOpen, dock, isDocked,
+    supported, isOpen, dock, isDocked, dockSeekRow,
   };
 })(window);

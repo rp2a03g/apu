@@ -245,27 +245,32 @@
       let dragging = false;
       let startY = 0, startH = 0;
 
-      splitter.addEventListener('mousedown', e => {
+      // pointer イベント(マウスと指の両方。2026-09-23: mouse 系だけだとスマホで動かせなかった)
+      splitter.addEventListener('pointerdown', e => {
+        if (e.button != null && e.button !== 0) return;
         dragging = true;
         startY = e.clientY;
         startH = pane.offsetHeight;
         splitter.classList.add('dragging');
         e.preventDefault();
+        try { splitter.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
       });
 
-      window.addEventListener('mousemove', e => {
+      splitter.addEventListener('pointermove', e => {
         if (!dragging) return;
         // 下側ペインを変える場合はドラッグ方向が逆(下へ引く=下側が縮む)
         const delta = next ? (startY - e.clientY) : (e.clientY - startY);
         pane.style.height = Math.max(minH, startH + delta) + 'px';
       });
 
-      window.addEventListener('mouseup', () => {
+      const end = () => {
         if (!dragging) return;
         dragging = false;
         splitter.classList.remove('dragging');
         if (id) saveSplitterHeight(id, pane.offsetHeight);
-      });
+      };
+      splitter.addEventListener('pointerup', end);
+      splitter.addEventListener('pointercancel', end);
     });
   }
 
