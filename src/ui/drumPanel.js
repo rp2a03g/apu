@@ -186,7 +186,7 @@
         `<div class="drum-panel-body"></div>` +
         // 一覧と下段(分割ビュー)の境目。ドラッグで下段の高さを変える=一覧の見える範囲を広げられる
         // (パッドが多いと一覧がスクロールになるため、方針 2026-09-18)。高さは localStorage に保存
-        `<div class="drum-panel-divider" title="${T('ドラッグで一覧と下段の高さを変える(下まで下げると下段を畳む)')}"></div>` +
+        `<div class="drum-panel-divider" title="${T('ドラッグで一覧の高さを変える(ダブルクリックで既定の高さ)')}"></div>` +
         `<div class="drum-panel-split"></div>` +
         `<div class="drum-panel-status" hidden></div>` +
         `<div class="drum-panel-foot"></div>` +
@@ -226,25 +226,19 @@
     render();
   }
 
-  // ── 一覧/下段の境目ドラッグ(2026-09-18) ────────────────────────────────────────
-  // 下段(.drum-panel-split)の高さを変える。一覧(.drum-panel-body)は flex:1 で残りを取るので、下段を
-  // 縮めるほど一覧が広がる。24px未満(ツールバー1本分)まで下げると下段を畳んだ扱い。
-  const DIVIDER_KEY = 'drumPanelSplitH';
-  function applySplitHeight(h) {
-    if (!splitEl) return;
-    if (h == null) { splitEl.style.height = ''; splitEl.style.overflow = ''; return; }
-    splitEl.style.height = Math.max(0, h) + 'px';
-    splitEl.style.overflow = 'hidden';
-  }
-  // スマホ画面(2026-09-24): 境目は「一覧の高さ」を変える。下段(波形/分割)と設定値は一覧の下に
-  // 続けて並び、パネル全体を縦スクロールする(下段だけが縮んで見づらくならないように)
-  const LIST_H_KEY_MOBILE = 'drumPanelListH_mobile';
+  // ── 一覧/下段の境目ドラッグ(2026-09-18、2026-09-24 に「一覧の高さを変える」へ変更) ────────────
+  // 境目は一覧(.drum-panel-body)の高さを変える。下段(波形/分割)と設定値は一覧の下に続けて並び、
+  // 一覧を広げるとそのぶん下へずれてパネル全体が縦スクロールする(下段だけが縮んで見づらくならないように)。
+  // スマホ画面と PC は画面の大きさが違うので高さは別に覚える。ダブルクリック/ダブルタップで既定の高さへ
+  const LIST_H_KEY = 'drumPanelListH', LIST_H_KEY_MOBILE = 'drumPanelListH_mobile';
   function isMobileUi() { return !!(MML.Device && MML.Device.uiMode && MML.Device.uiMode() === 'mobile'); }
-  function initDividerMobile(div) {
+  function initDivider(div) {
     if (!div || !bodyEl) return;
+    const key = isMobileUi() ? LIST_H_KEY_MOBILE : LIST_H_KEY;
     const apply = (h) => { if (h == null) bodyEl.style.height = ''; else bodyEl.style.height = Math.max(60, h) + 'px'; };
-    try { const v = parseInt(global.localStorage.getItem(LIST_H_KEY_MOBILE), 10); if (Number.isFinite(v)) apply(v); } catch (e) { /* ignore */ }
+    try { const v = parseInt(global.localStorage.getItem(key), 10); if (Number.isFinite(v)) apply(v); } catch (e) { /* ignore */ }
     let dragging = false, startY = 0, startH = 0;
+    // pointer イベント(マウスと指の両方)
     div.addEventListener('pointerdown', (e) => {
       if (e.button != null && e.button !== 0) return;
       dragging = true; startY = e.clientY; startH = bodyEl.offsetHeight;
@@ -258,44 +252,11 @@
     const end = () => {
       if (!dragging) return;
       dragging = false; div.classList.remove('dragging');
-      try { global.localStorage.setItem(LIST_H_KEY_MOBILE, String(bodyEl.offsetHeight)); } catch (e) { /* ignore */ }
+      try { global.localStorage.setItem(key, String(bodyEl.offsetHeight)); } catch (e) { /* ignore */ }
     };
     div.addEventListener('pointerup', end);
     div.addEventListener('pointercancel', end);
-    div.addEventListener('dblclick', () => { apply(null); try { global.localStorage.removeItem(LIST_H_KEY_MOBILE); } catch (e) { /* ignore */ } });
-  }
-  function initDivider(div) {
-    if (isMobileUi()) { initDividerMobile(div); return; }
-    if (!div || !splitEl) return;
-    let saved = null;
-    try { const v = parseInt(global.localStorage.getItem(DIVIDER_KEY), 10); if (Number.isFinite(v)) saved = v; } catch (e) { /* ignore */ }
-    if (saved != null) applySplitHeight(saved);
-    let dragging = false, startY = 0, startH = 0;
-    // pointer イベント(マウスと指の両方。2026-09-23: mouse 系だけだとスマホで動かせなかった)
-    div.addEventListener('pointerdown', (e) => {
-      if (e.button != null && e.button !== 0) return;
-      dragging = true; startY = e.clientY; startH = splitEl.offsetHeight;
-      div.classList.add('dragging'); e.preventDefault();
-      try { div.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-    });
-    div.addEventListener('pointermove', (e) => {
-      if (!dragging) return;
-      // 下へ引く=下段が縮む(=一覧が広がる)
-      const h = Math.max(0, startH + (startY - e.clientY));
-      applySplitHeight(h);
-    });
-    const end = () => {
-      if (!dragging) return;
-      dragging = false; div.classList.remove('dragging');
-      try { global.localStorage.setItem(DIVIDER_KEY, String(splitEl.offsetHeight)); } catch (e) { /* ignore */ }
-    };
-    div.addEventListener('pointerup', end);
-    div.addEventListener('pointercancel', end);
-    // ダブルクリックで自動(内容なりの高さ)へ戻す
-    div.addEventListener('dblclick', () => {
-      applySplitHeight(null);
-      try { global.localStorage.removeItem(DIVIDER_KEY); } catch (e) { /* ignore */ }
-    });
+    div.addEventListener('dblclick', () => { apply(null); try { global.localStorage.removeItem(key); } catch (e) { /* ignore */ } });
   }
 
   function setRows(next) {

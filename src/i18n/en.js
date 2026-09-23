@@ -170,6 +170,7 @@
     'MMLファイルではありません(バイナリ): {file}': 'Not an MML file (binary data): {file}',
     'PC表示': 'Desktop layout',
     '音量と速度': 'Volume and speed',
+    'ドラッグで一覧の高さを変える(ダブルクリックで既定の高さ)': 'Drag to change the list height (double-click for the default height)',
     'スマホ表示': 'Mobile layout',
     'PC向けの画面に切り替える': 'Switch to the desktop layout',
     'スマホ向けの画面に切り替える': 'Switch to the mobile layout',

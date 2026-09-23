@@ -285,8 +285,16 @@
       const COL_GRAB = '#ff6b9d';   // 操作できる部品(ドラッグ/クリック)の共通色
       const COL_HOVER = '#ffd0e2';  // マウスが乗っている部品の強調色
       const CELL_W = 260, CELL_H = 160, CELL_Y = 44;
-      const MOD_X = 8, CAR_X = MOD_X + CELL_W + 30;
+      // 構成図の並べ方(2026-09-24): PC は左→右(変調波 → 搬送波 → 出力)、スマホ画面は上→下の縦長。
+      // セルの中身(drawCell)は位置に依存しないので、セルを置く座標と、セルどうしをつなぐ矢印だけが違う
+      const VERTICAL = !!(MML.Device && MML.Device.uiMode && MML.Device.uiMode() === 'mobile');
+      const GAP_V = 40;                                   // 縦並びのセル間(矢印と「位相を変調」の文字)
+      const MOD_X = 8, MOD_Y = CELL_Y;
+      const CAR_X = VERTICAL ? MOD_X : MOD_X + CELL_W + 30;
+      const CAR_Y = VERTICAL ? MOD_Y + CELL_H + GAP_V : CELL_Y;
       const OUT_X = CAR_X + CELL_W + 30;
+      const OUT_Y = CAR_Y + CELL_H + GAP_V;               // 縦並びの「出力」の位置
+      if (VERTICAL) { diagram.width = MOD_X + CELL_W + 30; diagram.height = OUT_Y + 8; }
       // セル内のサブブロック(マニュアルのユニットセルの並び)
       const PG_X = 7, PG_Y = 20, PG_W = 88, PG_H = 40;
       const WV_X = 111, WV_Y = 20, WV_W = 58, WV_H = 40;
@@ -324,18 +332,41 @@
         ctx.fillStyle = '#14141a'; ctx.fillRect(0, 0, W, H);
 
         drawFeedback(ctx);
-        drawCell(ctx, MOD_X, CELL_Y, 'mod');
-        drawCell(ctx, CAR_X, CELL_Y, 'car');
+        drawCell(ctx, MOD_X, MOD_Y, 'mod');
+        drawCell(ctx, CAR_X, CAR_Y, 'car');
 
-        // 変調波の出力 → 搬送波の位相へ
-        const midY = CELL_Y + MUL_Y;
-        arrow(ctx, MOD_X + CELL_W, midY, CAR_X + PG_X, midY, COL_LINE);
-        ctx.fillStyle = '#9a9aa8'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText(T('位相を変調'), (MOD_X + CELL_W + CAR_X) / 2, CELL_Y - 6);
-        // 搬送波の出力 → 音
-        arrow(ctx, CAR_X + CELL_W, midY, OUT_X, midY, COL_LINE);
-        ctx.fillStyle = '#c8c8d4';
-        ctx.fillText(T('出力'), (CAR_X + CELL_W + OUT_X) / 2, CELL_Y - 6);
+        if (VERTICAL) {
+          // 縦並び: セルの右端から出た線を右の余白で下へ回し、次の段へ上から下へ入れる
+          const railX = MOD_X + CELL_W + 14;
+          const pgMidX = CAR_X + PG_X + PG_W / 2;
+          ctx.strokeStyle = COL_LINE; ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.moveTo(MOD_X + CELL_W, MOD_Y + MUL_Y); ctx.lineTo(railX, MOD_Y + MUL_Y);
+          ctx.lineTo(railX, CAR_Y - GAP_V / 2); ctx.lineTo(pgMidX, CAR_Y - GAP_V / 2);
+          ctx.stroke();
+          arrow(ctx, pgMidX, CAR_Y - GAP_V / 2, pgMidX, CAR_Y, COL_LINE);
+          ctx.fillStyle = '#9a9aa8'; ctx.font = '9px sans-serif'; ctx.textAlign = 'left';
+          ctx.fillText(T('位相を変調'), pgMidX + 8, CAR_Y - GAP_V / 2 + 12);
+          // 搬送波の出力 → 音
+          ctx.strokeStyle = COL_LINE;
+          ctx.beginPath();
+          ctx.moveTo(CAR_X + CELL_W, CAR_Y + MUL_Y); ctx.lineTo(railX, CAR_Y + MUL_Y);
+          ctx.lineTo(railX, OUT_Y - 18);
+          ctx.stroke();
+          arrow(ctx, railX, OUT_Y - 18, railX, OUT_Y - 4, COL_LINE);
+          ctx.fillStyle = '#c8c8d4'; ctx.textAlign = 'right';
+          ctx.fillText(T('出力'), railX - 6, OUT_Y - 6);
+        } else {
+          // 変調波の出力 → 搬送波の位相へ
+          const midY = CELL_Y + MUL_Y;
+          arrow(ctx, MOD_X + CELL_W, midY, CAR_X + PG_X, midY, COL_LINE);
+          ctx.fillStyle = '#9a9aa8'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+          ctx.fillText(T('位相を変調'), (MOD_X + CELL_W + CAR_X) / 2, CELL_Y - 6);
+          // 搬送波の出力 → 音
+          arrow(ctx, CAR_X + CELL_W, midY, OUT_X, midY, COL_LINE);
+          ctx.fillStyle = '#c8c8d4';
+          ctx.fillText(T('出力'), (CAR_X + CELL_W + OUT_X) / 2, CELL_Y - 6);
+        }
 
         drawOut();
         drawEnvOut();
@@ -345,7 +376,7 @@
       // 自己帰還(FB): 変調波が自分自身の位相へ回り込む。0-7の目盛りバーで直接設定できる
       function drawFeedback(ctx) {
         const on = patch.fb > 0;
-        const topY = CELL_Y, arcY = CELL_Y - 30;
+        const topY = MOD_Y, arcY = MOD_Y - 30;
         const lx = MOD_X + PG_X + 14, rx = MOD_X + MUL_X;
         ctx.strokeStyle = on ? COL_MOD : COL_DIM;
         ctx.lineWidth = on ? 1.6 : 1;
@@ -376,11 +407,16 @@
         hitAreas.push({ kind: 'fb', x: bx - 2, y: by - 3, w: bw * 8 + 4, h: bh + 6, bx, bw });
       }
 
+      // 矢印(向きは任意。先端は(x2,y2))。左→右の水平矢印は従来と同じ形になる
       function arrow(ctx, x1, y1, x2, y2, color) {
+        const a = Math.atan2(y2 - y1, x2 - x1), ca = Math.cos(a), sa = Math.sin(a);
         ctx.strokeStyle = color; ctx.lineWidth = 1.4;
-        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2 - 7, y2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2 - 7 * ca, y2 - 7 * sa); ctx.stroke();
         ctx.fillStyle = color;
-        ctx.beginPath(); ctx.moveTo(x2, y2); ctx.lineTo(x2 - 8, y2 - 4.5); ctx.lineTo(x2 - 8, y2 + 4.5); ctx.closePath(); ctx.fill();
+        const bx = x2 - 8 * ca, by = y2 - 8 * sa;
+        ctx.beginPath(); ctx.moveTo(x2, y2);
+        ctx.lineTo(bx + 4.5 * sa, by - 4.5 * ca); ctx.lineTo(bx - 4.5 * sa, by + 4.5 * ca);
+        ctx.closePath(); ctx.fill();
       }
       // ドラッグできる点。操作できることが一目で分かるよう専用色(COL_GRAB)+白フチにする。
       // マウスが乗っている間は一回り大きく明るくする
@@ -767,13 +803,17 @@
           y: (e.clientY - rect.top) * (diagram.height / rect.height)
         };
       }
-      function hitTest(pos) {
-        // ハンドルが最優先(タグ/FBバーと重なっても掴めるように)
+      function hitTest(pos, tol) {
+        // ハンドルが最優先(タグ/FBバーと重なっても掴めるように)。指は tol を広げて呼ぶ
+        const r = tol || 7;
+        let best = null, bestD = Infinity;
         for (const a of hitAreas) {
           if (a.kind === 'peak' || a.kind === 'knee' || a.kind === 'rel') {
-            if (Math.abs(pos.x - a.x) <= 7 && Math.abs(pos.y - a.y) <= 7) return a;
+            const d = Math.max(Math.abs(pos.x - a.x), Math.abs(pos.y - a.y));
+            if (d <= r && d < bestD) { best = a; bestD = d; }
           }
         }
+        if (best) return best;
         for (const a of hitAreas) {
           if (a.w && pos.x >= a.x && pos.x <= a.x + a.w && pos.y >= a.y && pos.y <= a.y + a.h) return a;
         }
@@ -825,6 +865,35 @@
         syncInputsFromPatch(); redraw(false);
       });
       window.addEventListener('mouseup', () => { dragArea = null; });
+      // 指(2026-09-24): 部品の上で触れたときだけページのスクロールを止めて操作する。
+      // 部品の無いところはそのまま縦スクロールできる(touch-action を殺さないので touch イベントで横取りする)
+      const touchPos = (t) => canvasPos({ clientX: t.clientX, clientY: t.clientY });
+      const TOUCH_TOL = 16;
+      diagram.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 1) return;
+        const pos = touchPos(e.touches[0]);
+        const area = hitTest(pos, TOUCH_TOL);
+        if (!area) return;
+        e.preventDefault(); // スクロールと、後から来る擬似マウスイベントを止める
+        if (area.kind === 'tag') {
+          patch[area.op][area.key] = patch[area.op][area.key] ? 0 : 1;
+          syncInputsFromPatch(); redraw(false);
+          return;
+        }
+        dragArea = area;
+        hoverArea = area;
+        applyDrag(area, pos);
+        syncInputsFromPatch(); redraw(false);
+      }, { passive: false });
+      diagram.addEventListener('touchmove', (e) => {
+        if (!dragArea) return;
+        e.preventDefault();
+        applyDrag(dragArea, touchPos(e.touches[0]));
+        syncInputsFromPatch(); redraw(false);
+      }, { passive: false });
+      const touchEnd = () => { if (dragArea) { dragArea = null; hoverArea = null; drawDiagram(); } };
+      diagram.addEventListener('touchend', touchEnd);
+      diagram.addEventListener('touchcancel', touchEnd);
       // 掴めるところではカーソルを変える
       // 押せる部品ごとの説明(ツールチップ)。キャンバス1枚なので要素のtitleは使えず、
       // 乗っている部品に合わせて canvas の title を差し替える
