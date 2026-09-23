@@ -7,6 +7,8 @@
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
   <link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <!-- manifest と Service Worker は http(s) のときだけ src/pwa.js が付ける(file:// では CORS エラーになるため静的に書かない) -->
+  <meta name="theme-color" content="#2a2a33" />
   <link rel="stylesheet" href="src/css/style.css" />
 </head>
 <body>
@@ -553,6 +555,8 @@
   <script src="src/version.js"></script>
   <!-- 端末の種類(スマホ/タブレット判定。ファイル選択の accept を PC 限定にする) -->
   <script src="src/device.js"></script>
+  <!-- PWA: manifest の取り付けと Service Worker(オフライン起動)の登録。http(s) のときだけ動く -->
+  <script src="src/pwa.js"></script>
   <!-- 多言語表示: 辞書はコア層(DOM非依存)。言語を増やすときはここに1行追加する -->
   <script src="src/i18n/i18n.js"></script>
   <script src="src/i18n/en.js"></script>
