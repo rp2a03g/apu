@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Sound Emulation Foundry</title>
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
   <link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192" />
@@ -1063,5 +1063,7 @@
   <script src="src/ui/scoreView.js"></script>
   <script src="src/ui/urlLoad.js"></script>
   <script src="src/main.js"></script>
+  <!-- スマホ/タブレット向けの並べ方(端末判定は src/device.js。PC では何もしない) -->
+  <script src="src/ui/mobileShell.js"></script>
 </body>
 </html>

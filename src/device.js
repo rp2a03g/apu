@@ -50,7 +50,31 @@
     document.querySelectorAll('input[type="file"][accept]').forEach((el) => el.removeAttribute('accept'));
   }
 
-  MML.Device = { isTouch, isIOS, isAndroid, setFileAccept };
+  // 画面の並べ方: 'mobile'(スマホ/タブレット向け、src/ui/mobileShell.js) | 'desktop'。
+  // ?ui=mobile / ?ui=desktop で上書きでき(覚える)、無ければ localStorage、無ければタッチ端末かどうか
+  const UI_MODE_KEY = 'mml_ui';
+  let cachedMode = null;
+  function uiMode() {
+    if (cachedMode) return cachedMode;
+    let m = null;
+    try {
+      const q = new URLSearchParams(global.location ? global.location.search : '').get('ui');
+      if (q === 'mobile' || q === 'desktop') { m = q; setUiMode(q); }
+    } catch (e) { /* ignore */ }
+    if (!m) { try { m = localStorage.getItem(UI_MODE_KEY); } catch (e) { /* ignore */ } }
+    if (m !== 'mobile' && m !== 'desktop') m = isTouch() ? 'mobile' : 'desktop';
+    cachedMode = m;
+    return m;
+  }
+  function setUiMode(m) {
+    try { localStorage.setItem(UI_MODE_KEY, m); } catch (e) { /* ignore */ }
+  }
+
+  MML.Device = { isTouch, isIOS, isAndroid, setFileAccept, uiMode, setUiMode };
+  // CSS の切替はできるだけ早く(ウィンドウの初期配置より前に)クラスを付けて済ませる
+  if (typeof document !== 'undefined' && document.documentElement && uiMode() === 'mobile') {
+    document.documentElement.classList.add('ui-mobile');
+  }
 
   if (typeof document !== 'undefined') {
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', stripStaticAccepts);

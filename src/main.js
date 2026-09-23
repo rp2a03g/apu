@@ -3284,7 +3284,7 @@
       repeatSvg: icon.svg, repeatLabel: icon.label,
     });
     // チャンネル一覧は小窓を開いているときだけ作る(毎フレーム呼ばれるため)
-    if (MiniTransport.isOpen()) MiniTransport.setChannels(keyboardDisplay.getMuteRows());
+    if (MiniTransport.isOpen() || (MiniTransport.isDocked && MiniTransport.isDocked())) MiniTransport.setChannels(keyboardDisplay.getMuteRows());
     updateMediaSession(s.playing, s.canPrevNext);
   }
 

@@ -65,6 +65,21 @@
   function supported() { return 'documentPictureInPicture' in global; }
   function isOpen() { return !!pipWin && !pipWin.closed; }
 
+  // スマホ向けの画面(src/ui/mobileShell.js)では小窓を開かず、中身をページ上部に置いて常設する。
+  // 小窓へ移すのと同じ「本体の要素をそのまま置き直す」だけで、ハンドラもシークバーの登録も生きたまま
+  let docked = false;
+  function dock(container) {
+    build();
+    if (isOpen()) close();
+    docked = true;
+    root.hidden = false;
+    root.classList.add('mini-tp--docked');
+    container.appendChild(root);
+    render();
+    renderMutes();
+  }
+  function isDocked() { return docked; }
+
   // ── 大きさの記憶 ──────────────────────────────────────────
   // requestWindow() は開いた後から大きさを変えられないので、閉じるまでの実寸を控えて
   // 次に開くときの初期値にする。極端な値で開いて画面外に出ないよう範囲を縛る
@@ -248,6 +263,7 @@
 
   // ★クリックハンドラの中から呼ぶこと(user activation 必須)
   async function open() {
+    if (docked) return { ok: false, docked: true }; // 常設中は小窓にしない
     if (!supported()) return { ok: false, unsupported: true };
     if (isOpen()) { try { pipWin.focus(); } catch (e) {} return { ok: true }; }
     build();
@@ -390,6 +406,6 @@
 
   MML.UI.MiniTransport = {
     init, open, close, setState, setChannels, render, setMutesOpen, setDropHandler,
-    supported, isOpen,
+    supported, isOpen, dock, isDocked,
   };
 })(window);

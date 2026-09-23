@@ -168,6 +168,10 @@
     'MMLファイルを保存しました: {file} ({n}バイト)': 'Saved MML file: {file} ({n} bytes)',
     'MMLファイルの読み込みに失敗しました: {msg}': 'Failed to open the MML file: {msg}',
     'MMLファイルではありません(バイナリ): {file}': 'Not an MML file (binary data): {file}',
+    'PC表示': 'Desktop layout',
+    'スマホ表示': 'Mobile layout',
+    'PC向けの画面に切り替える': 'Switch to the desktop layout',
+    'スマホ向けの画面に切り替える': 'Switch to the mobile layout',
     'MMLファイルの保存に失敗しました: {msg}': 'Failed to save the MML file: {msg}',
     // ---- @DPCM の .dmc の台帳と同フォルダ書き出し (src/ui/dpcmStore.js, main.js) ----
     'DPCM {n} 本を台帳に入れました(.dmc は MML を保存したときに同じフォルダへ書き出せます)': 'Kept {n} DPCM sample(s) (the .dmc files can be written next to the MML when you save it)',
