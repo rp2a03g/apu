@@ -3285,7 +3285,7 @@
     });
     // チャンネル一覧は小窓を開いているときだけ作る(毎フレーム呼ばれるため)
     if (MiniTransport.isOpen()) MiniTransport.setChannels(keyboardDisplay.getMuteRows());
-    updateMediaSession(s.playing);
+    updateMediaSession(s.playing, s.canPrevNext);
   }
 
   function initMiniTransport() {
@@ -3351,15 +3351,72 @@
   // Windowsのメディアパネル/メディアキー、iOS・Androidのロック画面と通知からの操作を、
   // 小窓と同じ入口へ流す。曲名もそこへ出す。file:// でも動くことは実測済み(2026-09-12)。
   // ★ハンドラは起動時に登録する(2026-09-23)。iOS は <audio> 要素の再生開始時点で登録済みの
-  //   操作からロック画面のボタンを決めるので、初回の状態更新まで待つと「10秒送り」だけが出て
-  //   曲送りが出ない(iPadOS 26.6.2 で実測)。10秒送り/戻しと位置指定も受ける(受けないと
-  //   iOS は <audio> 要素自身をシークしようとし、MediaStream には効かないので何も起きない)。
+  //   操作からロック画面のボタンを決める(iPadOS 26.6.2 で実測)。
+  // ★iOS のロック画面は「前後の曲」と「10秒送り/戻し」のどちらか一組しか出さず、両方を登録すると
+  //   10秒送りが優先される(同日実測)。曲送りできる曲(複数曲NSF/アーカイブ)のあいだは前後の曲、
+  //   それ以外は10秒送り+位置指定、と登録を切り替える。PC/Android は全部登録したままでよい。
+  // ★デバッグ: URL に ?debug=ms を付けると、届いた操作とシークの結果を画面右下に出す
+  //   (iPad は Mac 無しではコンソールが見られないため)。
   let mediaSessionBound = false;
   let lastMediaTitle = '';
   let lastPositionStateAt = 0;
+  let mediaSessionActionSet = null; // 'all' | 'tracks' | 'seek'
+  const msDebugOn = /[?&]debug=ms(&|$)/.test(location.search);
+  let msDebugEl = null;
+  function msDebug(msg) {
+    if (!msDebugOn) return;
+    if (!msDebugEl) {
+      msDebugEl = document.createElement('pre');
+      msDebugEl.style.cssText = 'position:fixed;right:4px;bottom:4px;z-index:99999;max-width:90vw;max-height:40vh;overflow:auto;margin:0;padding:6px 8px;font:11px/1.35 monospace;background:rgba(0,0,0,.85);color:#9f9;border:1px solid #6c6;border-radius:4px;white-space:pre-wrap;pointer-events:none';
+      document.body.appendChild(msDebugEl);
+    }
+    const t = (performance.now() / 1000).toFixed(1);
+    msDebugEl.textContent += t + ' ' + msg + '\n';
+    const ls = msDebugEl.textContent.split('\n');
+    if (ls.length > 30) msDebugEl.textContent = ls.slice(-30).join('\n');
+  }
+  if (msDebugOn) {
+    window.addEventListener('error', (e) => msDebug('ERROR ' + (e.message || e)));
+    window.addEventListener('unhandledrejection', (e) => msDebug('REJECT ' + (e.reason && e.reason.message || e.reason)));
+    document.addEventListener('visibilitychange', () => msDebug('visibility=' + document.visibilityState));
+  }
   function currentPositionSeconds() {
     // シークバーと同じ位置(getTransportPosition)。プレイヤーが無ければ null
     try { return currentTransportPlayer() || capturedBuffer ? getTransportPosition() : null; } catch (e) { return null; }
+  }
+  function msSeekBy(d, sign) {
+    const pos = currentPositionSeconds();
+    const off = (d && Number.isFinite(d.seekOffset) && d.seekOffset > 0) ? d.seekOffset : 10;
+    msDebug('seek' + (sign > 0 ? 'forward' : 'backward') + ' off=' + off + ' pos=' + (pos === null ? 'null' : pos.toFixed(1))
+      + ' mode=' + lastPlayMode + ' player=' + !!currentTransportPlayer() + ' dur=' + workletDuration.toFixed(1));
+    if (pos === null || !Number.isFinite(pos)) return;
+    let got = null;
+    try { got = seekToSeconds(pos + sign * off); } catch (e) { msDebug('seek threw ' + e.message); return; }
+    msDebug(' -> got=' + (got === null ? 'null' : got.toFixed(1)) + ' now=' + (currentPositionSeconds() || 0).toFixed(1));
+  }
+  function applyMediaSessionActionSet(canPrevNext) {
+    if (!('mediaSession' in navigator)) return;
+    const ios = !!(MML.Device && MML.Device.isIOS && MML.Device.isIOS());
+    const want = ios ? (canPrevNext ? 'tracks' : 'seek') : 'all';
+    if (want === mediaSessionActionSet) return;
+    mediaSessionActionSet = want;
+    const ms = navigator.mediaSession;
+    const bind = (act, fn) => { try { ms.setActionHandler(act, fn); } catch (e) { /* 未対応のアクションは無視 */ } };
+    if (want !== 'seek') {
+      bind('previoustrack', () => { msDebug('previoustrack'); keyboardDisplay.onTransport('prev'); });
+      bind('nexttrack', () => { msDebug('nexttrack'); keyboardDisplay.onTransport('next'); });
+    } else { bind('previoustrack', null); bind('nexttrack', null); }
+    if (want !== 'tracks') {
+      bind('seekbackward', (d) => msSeekBy(d, -1));
+      bind('seekforward', (d) => msSeekBy(d, +1));
+      bind('seekto', (d) => {
+        msDebug('seekto time=' + (d && d.seekTime) + ' mode=' + lastPlayMode + ' player=' + !!currentTransportPlayer());
+        if (d && Number.isFinite(d.seekTime)) { let got = null; try { got = seekToSeconds(d.seekTime); } catch (e) { msDebug('seekto threw ' + e.message); return; } msDebug(' -> got=' + got); }
+      });
+    } else { bind('seekbackward', null); bind('seekforward', null); bind('seekto', null); }
+    msDebug('actions=' + want);
+    // iOS に登録の変更を拾わせる(Now Playing の情報は metadata の更新で作り直される、と推定)
+    lastMediaTitle = '';
   }
   function bindMediaSessionActions() {
     if (mediaSessionBound || !('mediaSession' in navigator)) return;
@@ -3367,26 +3424,26 @@
     const ms = navigator.mediaSession;
     const bind = (act, fn) => { try { ms.setActionHandler(act, fn); } catch (e) { /* 未対応のアクションは無視 */ } };
     // 再生と一時停止は同じトグル(各形式の再生ボタンが元々トグルなので合わせる)
-    bind('play', () => keyboardDisplay.onTransport('play'));
-    bind('pause', () => keyboardDisplay.onTransport('play'));
-    bind('stop', () => keyboardDisplay.onTransport('stop'));
-    bind('previoustrack', () => keyboardDisplay.onTransport('prev'));
-    bind('nexttrack', () => keyboardDisplay.onTransport('next'));
-    const seekBy = (d, sign) => {
-      const pos = currentPositionSeconds();
-      if (pos === null || !Number.isFinite(pos)) return;
-      const off = (d && Number.isFinite(d.seekOffset) && d.seekOffset > 0) ? d.seekOffset : 10;
-      seekToSeconds(pos + sign * off);
-    };
-    bind('seekbackward', (d) => seekBy(d, -1));
-    bind('seekforward', (d) => seekBy(d, +1));
-    bind('seekto', (d) => { if (d && Number.isFinite(d.seekTime)) seekToSeconds(d.seekTime); });
+    bind('play', () => { msDebug('play'); keyboardDisplay.onTransport('play'); });
+    bind('pause', () => { msDebug('pause'); keyboardDisplay.onTransport('play'); });
+    bind('stop', () => { msDebug('stop'); keyboardDisplay.onTransport('stop'); });
+    applyMediaSessionActionSet(false);
   }
   bindMediaSessionActions();
-  function updateMediaSession(playing) {
+  // ページの終了(iOS でホーム画面アプリを上スワイプで終了したときも unload だけは飛ぶ。2026-09-23 実測)。
+  // iOS はメディア再生中のページのプロセスを残すので、ここで止めないと終了後も鳴り続ける。
+  // 裏画面に回るだけでは unload は飛ばない(visibilitychange だけ)ので裏画面再生は妨げない
+  window.addEventListener('unload', () => {
+    try { transportStop(); } catch (e) { /* ignore */ }
+    try { stopAllFormatPlayback(); } catch (e) { /* ignore */ }
+    try { if (MML.Audio.shutdownOutputSinks) MML.Audio.shutdownOutputSinks(); } catch (e) { /* ignore */ }
+    try { if (audioCtx) audioCtx.suspend(); } catch (e) { /* ignore */ }
+  });
+  function updateMediaSession(playing, canPrevNext) {
     if (!('mediaSession' in navigator)) return;
     const ms = navigator.mediaSession;
     bindMediaSessionActions();
+    applyMediaSessionActionSet(!!canPrevNext);
     const title = currentPlaybackTitle();
     if (title && title !== lastMediaTitle) {
       lastMediaTitle = title;

@@ -151,6 +151,13 @@
       else if (!s.el.paused) s.el.pause();
     }
   };
+  // ページ終了時: 出口の <audio> を止めて外す(iOS は MediaStream の要素が鳴っているあいだプロセスを残す)
+  MML.Audio.shutdownOutputSinks = () => {
+    sinkActive = false;
+    for (const s of outputSinkList) {
+      try { s.el.pause(); s.el.srcObject = null; s.el.removeAttribute('src'); s.el.load(); } catch (e) { /* ignore */ }
+    }
+  };
   MML.Audio.getOutputSinkInfo = (audioCtx) => {
     const s = audioCtx ? outputSinks.get(audioCtx) : (outputSinkList[0] || null);
     return { mode: audioSinkMode(), touch: isTouchDevice(), ios: isIOSDevice(),
