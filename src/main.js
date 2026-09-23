@@ -471,7 +471,7 @@
     if (!drumIncludeInput) {
       drumIncludeInput = document.createElement('input');
       drumIncludeInput.type = 'file';
-      drumIncludeInput.accept = 'audio/*';
+      MML.Device.setFileAccept(drumIncludeInput, 'audio/*');
       drumIncludeInput.style.display = 'none';
       document.body.appendChild(drumIncludeInput);
     }
@@ -8374,7 +8374,7 @@
     btn.addEventListener('click', () => {
       const input = document.createElement('input');
       input.type = 'file';
-      input.accept = '.bin,.rom';
+      MML.Device.setFileAccept(input, '.bin,.rom');
       input.onchange = async () => {
         const f = input.files[0];
         if (!f) return;

@@ -281,7 +281,7 @@
     // ── ファイル読み込み ───────────────────────────────────────────────────
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
-    fileInput.accept = 'audio/*,.dmc';
+    MML.Device.setFileAccept(fileInput, 'audio/*,.dmc');
     fileInput.style.display = 'none';
     fileInput.className = 'dpcm-ed-file-input';
     document.body.appendChild(fileInput);

@@ -47,9 +47,10 @@
   // 上書き: localStorage 'mml_audioSink' = 'element' | 'direct'(未設定=端末で自動)。
   const AUDIO_SINK_STORAGE_KEY = 'mml_audioSink';
   function isTouchDevice() {
+    // 判定の本体は src/device.js(MML.Device.isTouch)。ファイル選択の accept と同じ基準を使う
+    if (MML.Device && MML.Device.isTouch) return MML.Device.isTouch();
     const ua = navigator.userAgent || '';
     if (/iPhone|iPad|iPod|Android/i.test(ua)) return true;
-    // iPadOS 13 以降の Safari は Mac を名乗る(UA では見分けられない)。タッチ点の数で判定
     return navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1;
   }
   function audioSinkMode() {

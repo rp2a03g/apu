@@ -288,7 +288,7 @@
       document.getElementById('n163WaveLoad').addEventListener('click', () => {
         const input = document.createElement('input');
         input.type = 'file';
-        input.accept = '.txt,.json,text/plain';
+        MML.Device.setFileAccept(input, '.txt,.json,text/plain');
         input.addEventListener('change', () => {
           const file = input.files[0];
           if (!file) return;
