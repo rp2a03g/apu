@@ -119,6 +119,24 @@
       if (mode === 'element') {
         const dest = audioCtx.createMediaStreamDestination();
         el.srcObject = dest.stream;
+        // ★出口に無音の発生源を常時つないでおく(iPadOS 26.6.2 で実測、2026-09-23)。
+        //   停止でプレイヤーの出力ノードを切り離すと、入力の無くなった MediaStream の出口が
+        //   最後のバッファを繰り返し出し続けて「直前の音が高速に鳴りやまない」状態になる
+        //   (一時停止はノードを残してゼロを流すので起きない)。常に何かがつながっていれば
+        //   新しいゼロのバッファが流れ続ける
+        try {
+          const keep = audioCtx.createConstantSource();
+          keep.offset.value = 0;
+          keep.connect(dest);
+          keep.start();
+        } catch (e) {
+          // ConstantSourceNode が無い古い環境: 無音バッファのループで代用
+          try {
+            const buf = audioCtx.createBuffer(1, 1024, audioCtx.sampleRate);
+            const src = audioCtx.createBufferSource();
+            src.buffer = buf; src.loop = true; src.connect(dest); src.start();
+          } catch (e2) { /* ここまで無ければ諦める */ }
+        }
         s = { el, dest, kind: 'element' };
       } else {
         el.src = getSilentWavUrl(6);

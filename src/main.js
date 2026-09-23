@@ -3409,11 +3409,13 @@
     if (want !== 'tracks') {
       bind('seekbackward', (d) => msSeekBy(d, -1));
       bind('seekforward', (d) => msSeekBy(d, +1));
-      bind('seekto', (d) => {
-        msDebug('seekto time=' + (d && d.seekTime) + ' mode=' + lastPlayMode + ' player=' + !!currentTransportPlayer());
-        if (d && Number.isFinite(d.seekTime)) { let got = null; try { got = seekToSeconds(d.seekTime); } catch (e) { msDebug('seekto threw ' + e.message); return; } msDebug(' -> got=' + got); }
-      });
-    } else { bind('seekbackward', null); bind('seekforward', null); bind('seekto', null); }
+    } else { bind('seekbackward', null); bind('seekforward', null); }
+    // 位置指定(ロック画面のシークバー)は前後の曲と共存できるので常に受ける
+    // (iOS が10秒送りと前後の曲のどちらを出すかは seekbackward/seekforward の有無で決まる)
+    bind('seekto', (d) => {
+      msDebug('seekto time=' + (d && d.seekTime) + ' mode=' + lastPlayMode + ' player=' + !!currentTransportPlayer());
+      if (d && Number.isFinite(d.seekTime)) { let got = null; try { got = seekToSeconds(d.seekTime); } catch (e) { msDebug('seekto threw ' + e.message); return; } msDebug(' -> got=' + got); }
+    });
     msDebug('actions=' + want);
     // iOS に登録の変更を拾わせる(Now Playing の情報は metadata の更新で作り直される、と推定)
     lastMediaTitle = '';
