@@ -32,13 +32,82 @@
     } catch (e) { /* ignore */ }
     return 1;
   }
+  // ---- 出口(マスター音量ノードの接続先) ----
+  // 既定は audioCtx.destination に直結。iOS/iPadOS の Safari は Web Audio だけの音を、他アプリへの
+  // 切替や画面ロックで止める(2026-09-23 iPadOS 26.6.2 で実測: 直結は止まり、
+  // MediaStreamAudioDestinationNode → <audio> 要素で鳴らすと「メディア再生」扱いになって
+  // ScriptProcessorNode のままで裏画面/ロック画面とも鳴り続けた)。Android(13/17)は直結でも
+  // 止まらなかったが、ロック画面のメディア操作(Media Session)は <audio> があるほうが確実なので、
+  // スマホ/タブレットでは一律に <audio> 経由にする。PC は直結のまま(経路を増やして遅延を足さない。
+  // 演奏入力のモニタは512サンプルで組んであり、鍵盤ハイライトも samplePos 基準なので出口の遅延は
+  // そのまま見た目のずれになる)。
+  // ★<audio>.play() はユーザー操作の中でしか呼べない。AudioContext.resume() を呼ぶ場所が
+  //   main.js/各エディタに20箇所以上あるので個別には触らず、document のキャプチャ段で
+  //   click/touchend/keydown を拾って「止まっていたら play()」する(操作が起きるたびに確認)。
+  // 上書き: localStorage 'mml_audioSink' = 'element' | 'direct'(未設定=端末で自動)。
+  const AUDIO_SINK_STORAGE_KEY = 'mml_audioSink';
+  function isTouchDevice() {
+    const ua = navigator.userAgent || '';
+    if (/iPhone|iPad|iPod|Android/i.test(ua)) return true;
+    // iPadOS 13 以降の Safari は Mac を名乗る(UA では見分けられない)。タッチ点の数で判定
+    return navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1;
+  }
+  function audioSinkMode() {
+    let pref = null;
+    try { pref = localStorage.getItem(AUDIO_SINK_STORAGE_KEY); } catch (e) { /* ignore */ }
+    if (pref === 'element' || pref === 'direct') return pref;
+    return isTouchDevice() ? 'element' : 'direct';
+  }
+  const outputSinks = new WeakMap(); // audioCtx -> { el, dest }
+  const outputSinkList = []; // 生きている sink 全部(unlockOutputSinks 用)
+  let sinkUnlockBound = false;
+  function unlockOutputSinks() {
+    // 生きている全 sink の <audio> を、止まっていれば鳴らし直す(ユーザー操作のたびに呼ぶ)
+    for (const s of outputSinkList) {
+      if (s.el.paused) { const p = s.el.play(); if (p && p.catch) p.catch(() => { /* 操作外なら次の操作で */ }); }
+    }
+  }
+  function getOutputSink(audioCtx) {
+    // OfflineAudioContext には createMediaStreamDestination が無い(書き出し用途) → 直結
+    if (audioSinkMode() !== 'element' || typeof audioCtx.createMediaStreamDestination !== 'function'
+        || typeof document === 'undefined') {
+      return audioCtx.destination;
+    }
+    let s = outputSinks.get(audioCtx);
+    if (!s) {
+      const dest = audioCtx.createMediaStreamDestination();
+      const el = document.createElement('audio');
+      el.setAttribute('playsinline', '');
+      el.setAttribute('aria-hidden', 'true');
+      el.style.display = 'none';
+      el.srcObject = dest.stream;
+      document.body.appendChild(el);
+      s = { el, dest };
+      outputSinks.set(audioCtx, s);
+      outputSinkList.push(s);
+      if (!sinkUnlockBound) {
+        sinkUnlockBound = true;
+        for (const ev of ['click', 'touchend', 'keydown', 'pointerup']) {
+          document.addEventListener(ev, unlockOutputSinks, true);
+        }
+      }
+      // 初回はたいてい再生ボタンのクリック中に来る(プレイヤー生成→getMasterGain)ので、その場で鳴らす
+      unlockOutputSinks();
+    }
+    return s.dest;
+  }
+  MML.Audio.getOutputSinkInfo = (audioCtx) => {
+    const s = audioCtx ? outputSinks.get(audioCtx) : null;
+    return { mode: audioSinkMode(), touch: isTouchDevice(), element: s ? { paused: s.el.paused, readyState: s.el.readyState } : null };
+  };
+
   const masterGainNodes = new WeakMap();
   function getMasterGain(audioCtx) {
     let node = masterGainNodes.get(audioCtx);
     if (!node) {
       node = audioCtx.createGain();
       node.gain.value = loadMasterVolume();
-      node.connect(audioCtx.destination);
+      node.connect(getOutputSink(audioCtx));
       masterGainNodes.set(audioCtx, node);
     }
     return node;
