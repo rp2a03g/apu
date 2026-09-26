@@ -2659,6 +2659,12 @@
   // 明示的に全体へ戻したい時だけ resetPlaybackRangeToFull() を使う(「範囲をリセット」ボタン)。
   let rangeStartSec = 0;
   let rangeEndSec = null;     // null = まだ曲がロードされていない
+  // 上の範囲を決めたときの曲の長さ(秒)。rangeEndSec がこれと同じなら「曲末まで」という意味の
+  // 全体範囲なので、次の曲の長さが変わっても終端のまま引き継ぐ(preservePlaybackRange)。
+  // 以前は秒の数値だけを引き継いでいたため、短い曲の後に長い曲を貼り付けて▶を押すと
+  // 赤ハンドルが前の曲の長さの位置に残り、新しい曲の !! がその後ろにあると範囲が潰れて
+  // マーカーが黙って無視されていた(2026-09-27)
+  let rangeDurationSec = null;
   // MML内の!!(開始)/!!!(終了)マーカーとの連動用。「前回コンパイル時のフレーム位置」を
   // 覚えておき、そこから変化した(=ユーザーがMML側のマーカーを動かした/追加/削除した)
   // 時だけ再生範囲へ反映する。値が変わっていなければ、ユーザーがハンドルを手動でドラッグして
@@ -2679,6 +2685,7 @@
   let activePlayer    = null;  // MmlStreamPlayer or NsfStreamPlayer
   let workletDuration = 0;    // 総再生時間（秒）
   let lastMmlCompiled = null;  // モニタ用にコンパイル結果を保持
+  let lastMmlCompiledText = null; // lastMmlCompiled を作った本文(ヘルプ実演ならnull)。マーカー書き戻し前の鮮度確認用
 
   // 「MML再生」ボタンの3状態を区別するフラグ。■停止(または曲の自然終了)で true に戻り、
   // そのときだけボタンは「▶ MML再生」(押すと再コンパイルして最初から再生)を表示する。
@@ -2925,10 +2932,20 @@
   function resetPlaybackRangeToFull(duration) {
     rangeStartSec = 0;
     rangeEndSec = duration || 0;
+    rangeDurationSec = duration || 0;
     rangeEndArmed = true;
     updateRangeMarkersUI(duration);
     updateSeekTicksUI(duration);
     updateMmlRangeHighlight();
+  }
+
+  // 「範囲をリセット」ボタン。ハンドルを全体に戻すだけでなく、MML本文の !!/!!! も取り除く
+  // (ドラッグがマーカーを書き込むのと対称)。以前は本文にマーカーが残ったままだったので、次の▶で
+  // applyMmlPlaybackMarkers が「前回と同じ位置=変更なし」と見なしてマーカーを無視し、本文には
+  // !! があるのに頭から鳴るという食い違いが起きていた(2026-09-27)
+  function resetPlaybackRangeAndMarkers() {
+    if (lastPlayMode === 'capture-mml' && !mmlExternalSourceLabel) clearMmlPlaybackMarkers();
+    resetPlaybackRangeToFull(currentDuration());
   }
 
   // MML作曲中は「▶ MML再生」を押すたびに再コンパイル→再生し直すのが主な使い方であり、
@@ -2941,6 +2958,7 @@
     if (!mmlExternalSavedRange) return;
     rangeStartSec = mmlExternalSavedRange.start;
     rangeEndSec = mmlExternalSavedRange.end;
+    rangeDurationSec = mmlExternalSavedRange.duration;
     mmlExternalSavedRange = null;
     rangeEndArmed = true;
     const duration = currentDuration();
@@ -2955,13 +2973,16 @@
       rangeStartSec = 0;
       rangeEndSec = duration;
     } else {
+      // 終端が「前の曲の曲末」だったなら、秒数ではなく「曲末まで」という意味を引き継ぐ
+      const wasFullEnd = rangeDurationSec != null && rangeEndSec >= rangeDurationSec - 0.001;
       rangeStartSec = Math.max(0, Math.min(rangeStartSec, duration));
-      rangeEndSec = Math.max(0, Math.min(rangeEndSec, duration));
+      rangeEndSec = wasFullEnd ? duration : Math.max(0, Math.min(rangeEndSec, duration));
       if (rangeEndSec <= rangeStartSec) {
         rangeStartSec = 0;
         rangeEndSec = duration;
       }
     }
+    rangeDurationSec = duration;
     rangeEndArmed = true;
     updateRangeMarkersUI(duration);
     updateSeekTicksUI(duration);
@@ -2988,10 +3009,38 @@
     rangeStartSec = Math.max(0, Math.min(rangeStartSec, duration));
     rangeEndSec = Math.max(0, Math.min(rangeEndSec, duration));
     if (rangeEndSec <= rangeStartSec) { rangeStartSec = 0; rangeEndSec = duration; }
+    rangeDurationSec = duration;
     rangeEndArmed = true;
     updateRangeMarkersUI(duration);
     updateSeekTicksUI(duration);
     updateMmlRangeHighlight();
+  }
+
+  // 本文の !!/!!! マーカーをすべて取り除く(「範囲をリセット」用)。本文は最後のコンパイル以後に
+  // 変わっているかもしれないので、文字位置は必ずいまの本文を compile し直して取る。
+  // 複数チャンネルに書かれていることもあるので、見つからなくなるまで繰り返す(上限つき)
+  function clearMmlPlaybackMarkers() {
+    let text = mmlSourceEl.value;
+    let changed = false;
+    for (let i = 0; i < 16; i++) {
+      const c = MML.Mml.compile(text, getMmlOpt());
+      const ranges = [c.startMarkerSrcRange, c.endMarkerSrcRange].filter(Boolean)
+        .sort((a, b) => b.start - a.start); // 後ろから消せば前の文字位置がずれない
+      if (ranges.length === 0) break;
+      for (const r of ranges) text = text.slice(0, r.start) + text.slice(r.end);
+      changed = true;
+    }
+    if (!changed) return;
+    const selStart = mmlSourceEl.selectionStart, selEnd = mmlSourceEl.selectionEnd, scrollTop = mmlSourceEl.scrollTop;
+    mmlSourceEl.value = text;
+    mmlSourceEl.dispatchEvent(new Event('input')); // シンタックスハイライト更新
+    mmlSourceEl.setSelectionRange(Math.min(selStart, text.length), Math.min(selEnd, text.length));
+    mmlSourceEl.scrollTop = scrollTop;
+    const recompiled = MML.Mml.compile(text, getMmlOpt());
+    lastMmlCompiled = recompiled;
+    lastMmlCompiledText = text;
+    lastStartMarkerFrame = recompiled.startMarkerFrame;
+    lastEndMarkerFrame = recompiled.endMarkerFrame;
   }
 
   // 指定フレームをchチャンネルの原文MML上のどこに挿入すべきか([[startFrame]]がtargetFrame以上
@@ -3028,13 +3077,26 @@
   // 既存マーカーがあれば同じチャンネルのその位置を置き換え、無ければ最初のチャンネルへ新規挿入する。
   // 書き込み対象チャンネルに音符が1つも無い場合は書き込めないので何もしない(無理に挿入しない)
   function writeMmlPlaybackMarker(which) {
-    const compiled = lastMmlCompiled;
+    let compiled = lastMmlCompiled;
     if (!compiled) return;
+    // 本文が最後のコンパイル以後に変わっている(別のMMLを貼り付けて▶を押す前にドラッグした等)なら、
+    // 古い文字位置で新しい本文に書き込んでしまうので、いまの本文で compile し直してから使う。
+    // コンパイルできない本文には書き込まない(2026-09-27)
+    if (mmlSourceEl.value !== lastMmlCompiledText) {
+      compiled = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
+      if (compiled.errors.length > 0) return;
+      lastMmlCompiled = compiled;
+      lastMmlCompiledText = mmlSourceEl.value;
+    }
     const isStart = which === 'start';
     const markerText = isStart ? '!!' : '!!!';
     const existingCh = isStart ? compiled.startMarkerChannel : compiled.endMarkerChannel;
     const existingRange = isStart ? compiled.startMarkerSrcRange : compiled.endMarkerSrcRange;
-    const targetCh = existingCh || (compiled.channelLetters && compiled.channelLetters[0]);
+    // 既存マーカーが無ければ「音符を持つ最初のチャンネル」へ書く。channelLetters[0](=A)固定だと、
+    // A を使わない曲(拡張音源だけの曲など)ではAに音符が無くて挿入位置が求まらず、ドラッグしても
+    // 本文に何も書かれなかった(2026-09-27)
+    const hasNotes = (ch) => compiled.highlightRanges && compiled.highlightRanges[ch] && compiled.highlightRanges[ch].length > 0;
+    const targetCh = existingCh || (compiled.channelLetters || []).find(hasNotes);
     if (!targetCh) return;
     const targetFrame = Math.round((isStart ? rangeStartSec : rangeEndSec) * compiled.frameRate);
     const insertPos = findMmlInsertPosForFrame(compiled, targetCh, targetFrame);
@@ -3049,8 +3111,20 @@
     // lastEndMarkerFrame追跡だけを軽量に同期する
     const recompiled = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
     lastMmlCompiled = recompiled;
+    lastMmlCompiledText = mmlSourceEl.value;
     lastStartMarkerFrame = recompiled.startMarkerFrame;
     lastEndMarkerFrame = recompiled.endMarkerFrame;
+    // マーカーは「目標フレーム以降の最初の音符の頭」に入るので、ハンドルもその位置へ寄せる。
+    // 寄せないと本文(音符頭)とハンドル(生のドラッグ位置)が以後ずっと食い違う(2026-09-27)
+    const markerFrame = isStart ? recompiled.startMarkerFrame : recompiled.endMarkerFrame;
+    if (markerFrame != null && recompiled.frameRate) {
+      const sec = markerFrame / recompiled.frameRate;
+      const duration = currentDuration();
+      if (isStart) { if (sec < rangeEndSec) rangeStartSec = Math.max(0, sec); }
+      else if (sec > rangeStartSec) rangeEndSec = Math.min(duration || sec, sec);
+      updateRangeMarkersUI(duration);
+      updateMmlRangeHighlight();
+    }
   }
 
   // 開始点/終了点ハンドルのドラッグ操作。ドラッグ中は左右反転しないよう互いにクランプする。
@@ -3079,6 +3153,7 @@
         } else {
           rangeEndSec = Math.min(duration, Math.max(sec, rangeStartSec + minGap));
         }
+        rangeDurationSec = duration;
         rangeEndArmed = getTransportPosition() < rangeEndSec;
         updateRangeMarkersUI(duration);
         updateMmlRangeHighlight();
@@ -4662,6 +4737,7 @@
       capturedBuffer = null;
 
       lastMmlCompiled = compiled;
+      lastMmlCompiledText = externalSource != null ? null : mmlSourceEl.value;
       lastPlayMode    = 'capture-mml';
       populateFollowChannelSelect(compiled.channelLetters);
       setKbdSource('mml', mmlExternalSourceLabel || (compiled.meta && compiled.meta.title ? compiled.meta.title : '')); // タイトル行のバッジ「MML · 曲名」
@@ -4733,7 +4809,7 @@
       // ヘルプの実演は必ずスニペット全体を鳴らす。ユーザーが設定していた再生範囲を
       // そのまま使うと、範囲が短いときに実演が最初の一音で打ち切られてしまう
       // (updateTransportUIの rangeEndSec 到達判定)。範囲は退避して停止時に戻す
-      if (!mmlExternalSavedRange) mmlExternalSavedRange = { start: rangeStartSec, end: rangeEndSec };
+      if (!mmlExternalSavedRange) mmlExternalSavedRange = { start: rangeStartSec, end: rangeEndSec, duration: rangeDurationSec };
       resetPlaybackRangeToFull(duration);
     } else {
       mmlExternalSavedRange = null;
@@ -5627,7 +5703,7 @@
     else runMmlStream(); // 停止中: 再コンパイルして最初(または再生範囲開始点)から再生
   });
   document.getElementById('btnTransportStop').addEventListener('click', transportStop);
-  document.getElementById('btnRangeReset').addEventListener('click', () => resetPlaybackRangeToFull(currentDuration()));
+  document.getElementById('btnRangeReset').addEventListener('click', resetPlaybackRangeAndMarkers);
   (function initLoopButton() {
     const btn = document.getElementById('btnLoopRange');
     const sync = () => {

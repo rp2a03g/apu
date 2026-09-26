@@ -791,7 +791,11 @@ button.secondary {
 /* MMLシンタックスハイライトの12分類(色は:rootの--tok-*カスタムプロパティ、
    src/ui/editorSettings.jsのプリセット/個別カスタマイズで上書きされる) */
 .tok-header { color: var(--tok-header); }
-.tok-track { color: var(--tok-track); font-weight: 700; }
+/* ★オーバーレイには font-weight(太字)を使わない: Consolas 等では太字でも字幅が同じだが、
+   MSゴシック(太字で1文字+1px)や游ゴシック/Meiryo では字幅が広がり、下の textarea(非太字)と
+   字送りがずれてカーソルが文字の途中に見える(チャンネル文字6個で6px≒1文字分)。
+   強調は -webkit-text-stroke(paintのみ・字幅不変)で疑似太字にする(2026-09-27) */
+.tok-track { color: var(--tok-track); -webkit-text-stroke: 0.4px currentColor; }
 .tok-note { color: var(--tok-note); }
 .tok-rest { color: var(--tok-rest); }
 .tok-cmd-length { color: var(--tok-cmd-length); }
@@ -799,8 +803,8 @@ button.secondary {
 .tok-cmd-pitch { color: var(--tok-cmd-pitch); }
 .tok-cmd-perf { color: var(--tok-cmd-perf); }
 .tok-cmd-special { color: var(--tok-cmd-special); }
-.tok-def-envelope { color: var(--tok-def-envelope); font-weight: 700; }
-.tok-def-tone { color: var(--tok-def-tone); font-weight: 700; }
+.tok-def-envelope { color: var(--tok-def-envelope); -webkit-text-stroke: 0.4px currentColor; }
+.tok-def-tone { color: var(--tok-def-tone); -webkit-text-stroke: 0.4px currentColor; }
 .tok-comment { color: var(--tok-comment); }
 
 /* オーバーレイの各行を独立したブロックにして再レイアウトを行内に閉じ込める
@@ -839,9 +843,14 @@ button.secondary {
 }
 .mml-editor--linenum .mml-highlight { counter-reset: mml-line; }
 .mml-editor--linenum .mml-line { counter-increment: mml-line; }
+/* ★float にする(inline-block にしない): inline-block の番号と本文の間には改行機会があるため、
+   行頭の塊(空白を含まない長い音符列など)が幅に収まらないと Chrome は番号の直後で折り返し、
+   番号だけの空行が1行できて textarea(番号が無い)とその行以降のカーソル位置が1行ずれていた。
+   float は改行機会を作らず、負のマージンでガター帯へ追い出せば本文の字送りにも幅にも影響しない
+   (2026-09-27。行番号ONのときだけ・長い塊のある行だけ起きるので「時々ずれる」に見えていた) */
 .mml-editor--linenum .mml-line::before {
   content: counter(mml-line);
-  display: inline-block;
+  float: left;
   box-sizing: border-box;
   width: var(--mml-gutter-w);
   margin-left: calc(-1 * var(--mml-gutter-w) - 8px);
@@ -851,16 +860,17 @@ button.secondary {
   color: var(--tok-comment);
   user-select: none;
 }
-/* カーソルのある行の番号は本文色+太字で強調(番号の幅は固定なので本文の字送りは動かない) */
+/* カーソルのある行の番号は本文色+疑似太字で強調。font-weight にすると ch 単位(番号箱の幅)が
+   太字の字幅で解決されて箱だけ広がるフォント(MSゴシック等)があるので text-stroke にする */
 .mml-editor--linenum .mml-line--cursor::before {
   color: var(--mml-editor-fg);
-  font-weight: 700;
+  -webkit-text-stroke: 0.4px currentColor;
 }
 /* 追尾チャンネル(mmlFollowChannel)が今鳴っている行の番号(src/ui/editorLineInfo.js
    setPlayingLineEl)。カーソル行より目立たせたいので本文と同じ追尾色で塗る */
 .mml-editor--linenum .mml-line--playing::before {
   color: var(--follow-fg);
-  font-weight: 700;
+  -webkit-text-stroke: 0.4px currentColor;
 }
 /* 行番号OFFのとき右下に出す「行 N, 列 M」。スクロールバーと被らないよう右に余白を取る */
 .mml-cursor-pos {
