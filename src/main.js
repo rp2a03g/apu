@@ -2810,6 +2810,7 @@
     }
     if (playing) {
       if (pos >= duration) {
+        msDebug('STOP 曲末 pos=' + pos.toFixed(2) + ' dur=' + duration.toFixed(2));
         if (isSoundFileMode()) finishSoundFilePlayback(); else transportStop();
       } else if (rangeEndSec !== null && pos >= rangeEndSec) {
         if (loopRange && canSeek()) {
@@ -2819,6 +2820,7 @@
           scheduleTransportUi();
         } else if (rangeEndArmed) {
           rangeEndArmed = false;
+          msDebug('STOP 再生範囲の終点 pos=' + pos.toFixed(2) + ' end=' + rangeEndSec.toFixed(2));
           if (isSoundFileMode()) finishSoundFilePlayback(); else transportStop();
         } else {
           scheduleTransportUi();
@@ -3289,6 +3291,7 @@
   // 一時停止扱いになり、次のplayXxxStream()呼び出しが「一時停止解除」に化けてしまうため)。
   // SPCは曲送りの概念が無いので停止するだけ。
   function finishSoundFilePlayback() {
+    msDebug('finishSoundFilePlayback mode=' + lastPlayMode);
     endFadeActive = false;
     const mode = lastPlayMode;
     if (mode === 'nsf') { stopNsfFilePlayback(); autoAdvanceNsfSong(); }
@@ -3436,8 +3439,9 @@
   let lastMediaTitle = '';
   let lastPositionStateAt = 0;
   let mediaSessionActionSet = null; // 'all' | 'tracks' | 'seek'
-  const msDebugOn = /[?&]debug=ms(&|$)/.test(location.search);
-  let msDebugEl = null;
+  // var: 起動の途中(この行より前)に msDebug() が呼ばれても TDZ で落ちないように
+  var msDebugOn = /[?&]debug=ms(&|$)/.test(location.search);
+  var msDebugEl = null;
   function msDebug(msg) {
     if (!msDebugOn) return;
     if (!msDebugEl) {
@@ -3458,6 +3462,23 @@
       msDebug('pwa ' + d.status + (p ? ' cached=' + p.cached + '/' + p.total + (p.missing && p.missing.length ? ' missing=' + p.missing.slice(0, 5).join(',') : '') + (p.error ? ' error=' + p.error : '') : ''));
     });
     if (MML.PWA) msDebug('pwa ' + MML.PWA.status + ' controller=' + !!(navigator.serviceWorker && navigator.serviceWorker.controller));
+    // 再生が勝手に止まる件の切り分け(2026-09-27): 出口の <audio>/AudioContext の状態変化と、
+    // 再生中は1秒ごとに「曲の位置 / 音声の時計 / 出口の状態」を出す。位置が進まず時計だけ進むなら
+    // 音を作る側が止まっている、時計も止まるなら iOS が音声を止めている
+    window.addEventListener('mml-sink-event', (e) => msDebug('sink ' + e.detail));
+    let hbLastPos = null;
+    setInterval(() => {
+      const p = currentTransportPlayer();
+      const playing = p ? !!p.isPlaying : !!transportPlaying;
+      if (!playing) { hbLastPos = null; return; }
+      let pos = null; try { pos = getTransportPosition(); } catch (err) { /* ignore */ }
+      const info = MML.Audio.getOutputSinkInfo ? MML.Audio.getOutputSinkInfo(audioCtx) : null;
+      msDebug('hb pos=' + (pos == null ? '?' : pos.toFixed(2)) + (hbLastPos != null && pos != null ? ' d=' + (pos - hbLastPos).toFixed(2) : '')
+        + ' ctx=' + (audioCtx ? audioCtx.state + '@' + audioCtx.currentTime.toFixed(1) : '-')
+        + ' el=' + (info && info.element ? (info.element.paused ? 'paused' : 'playing') : 'none')
+        + ' dur=' + (workletDuration || 0).toFixed(1) + ' range=' + (rangeEndSec == null ? '-' : rangeEndSec.toFixed(1)));
+      hbLastPos = pos;
+    }, 1000);
     window.addEventListener('error', (e) => msDebug('ERROR ' + (e.message || e)));
     window.addEventListener('unhandledrejection', (e) => msDebug('REJECT ' + (e.reason && e.reason.message || e.reason)));
     document.addEventListener('visibilitychange', () => msDebug('visibility=' + document.visibilityState));
@@ -3819,6 +3840,7 @@
   }
 
   function transportStop() {
+    msDebug('transportStop');
     mmlHighlightSuppressed = true;
     clearMmlPlaybackHighlight();
     if (mmlExternalSourceOnEnded) { const fn = mmlExternalSourceOnEnded; mmlExternalSourceOnEnded = null; try { fn(); } catch (e) { console.error(e); } }
@@ -5488,6 +5510,7 @@
     // 進む(既に無音のためフェードは不要)。setTimeout発火時点でこのplayerがまだ
     // アクティブか確認し、その間にユーザーが手動で操作していたら何もしない。
     player.onSilenceTimeout = () => {
+      msDebug('STOP 無音が続いた(NSF)');
       setTimeout(() => {
         if (currentTransportPlayer() !== player) return;
         stopNsfFilePlayback();

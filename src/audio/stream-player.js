@@ -152,6 +152,12 @@
         s = { el, dest: null, kind: 'silent' };
       }
       document.body.appendChild(el);
+      // 診断用(?debug=ms、main.js): 出口の <audio> と AudioContext の状態変化を知らせる
+      const tell = (what) => { try { global.dispatchEvent(new CustomEvent('mml-sink-event', { detail: what })); } catch (e) { /* ignore */ } };
+      for (const ev of ['play', 'playing', 'pause', 'waiting', 'stalled', 'suspend', 'emptied', 'ended', 'error']) {
+        el.addEventListener(ev, () => tell('el.' + ev + ' paused=' + el.paused));
+      }
+      try { audioCtx.addEventListener('statechange', () => tell('ctx.' + audioCtx.state)); } catch (e) { /* ignore */ }
       outputSinks.set(audioCtx, s);
       outputSinkList.push(s);
       if (!sinkUnlockBound) {
