@@ -6073,6 +6073,9 @@
         player.applyVolume(keyboardDisplay.getSpcVolumeConfig());
         transportPlay();
       }
+      // 再生器に「どこまで取り込み済みか」を知らせる(追い越したら待たせる。spc-stream-player.js
+      // setCapturedFrames のコメント参照。これが無いと CPU が混んだ時に曲頭の音色指定を取りこぼす)
+      player.setCapturedFrames(frame);
 
       spcBufferedFraction = frames > 0 ? frame / frames : 0;
       updateSeekBufferedUI();
@@ -6084,6 +6087,9 @@
         pushRollTimeline(timeline);
       }
     }).then((res) => {
+      // 取り込み終了(途中で打ち切られた場合も): 残りは空フレームとして最後まで鳴らし切る
+      // (待たせたままにすると曲末へ届かず止まらない)
+      player.setCapturedFrames(null);
       // キャプチャ完了: 打楽器サンプルの打点/PCMをドラムパッド台帳と打点プロバイダへ
       // (HES/VGMと同じ役割。判定と打点はMML変換と同じ MML.SPC2MML.drumSrcns/drumHits)
       if (myRollToken !== spcRollToken || !res || !res.log) return;
@@ -6093,6 +6099,7 @@
       scheduleDpcmCostUpdate();
     }).catch((e) => {
       // 先読み失敗時はピアノロールなしで続行するが、原因を追えるようログには残す
+      player.setCapturedFrames(null); // 取り込み済みの所まで鳴らしたら後は空フレームで流す(止まり続けない)
       console.error('SPC先読みキャプチャに失敗:', e);
     });
   }

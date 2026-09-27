@@ -256,11 +256,23 @@
       this._dspFrac      = 0;
       this._songFramePos = 0;
       this._lastL = this._lastR = 0;
+      this._capturedFrames = null;
       if (mute !== undefined && mute !== null) this.applyMute(mute);
     }
 
+    // キャプチャが何フレーム目まで済んだか(onProgress の frame をそのまま渡す)。
+    // ★SPC の frameLog は全フレーム分を空配列 [] で事前確保してある(capture-worker-client.js /
+    //   converter.js captureAsync)ので、「writeLog[f] が在るか」では未キャプチャと区別できない。
+    //   以前はそれで判定していたため、キャプチャが再生に追いつかないと空のフレームをそのまま
+    //   鳴らし進め、後から届いた書き込みを取りこぼしていた。曲頭で1回しか書かれない SRCN
+    //   (音色)を落とすと、そのボイスは曲の最後まで別のサンプルで鳴る=「FILE に切り替えたら
+    //   音痴、停止→再生で直る、一時停止では直らない」(2026-09-28 実測)。
+    //   CPU が混んでいる時(MML 変換の直後など)だけ起きるので再現が気まぐれだった。
+    setCapturedFrames(n) { this._capturedFrames = n; }
+
     _isFrameReady(f) {
-      return !!(this.writeLog && this.writeLog[f]);
+      if (!this.writeLog || !this.writeLog[f]) return false;
+      return this._capturedFrames === null || this._capturedFrames === undefined || f < this._capturedFrames;
     }
 
     // 現在のフレームの書き込みを「フレーム内サンプル位置(w.off)がposInFrameに達した分まで」
@@ -320,6 +332,9 @@
             // (NsfReplayStreamPlayerと同じ理由: samplePosを進めるとgetPosition()が
             // 実際には再生していないのにdurationに到達したと誤認し自動停止してしまう)。
             stalled = true;
+            // 待っている間は DSP の進みも止める。端数を溜めたままだと、届いた瞬間に待った分を
+            // 1出力サンプルで一気に進めてしまい(早送り)、その区間の音がまるごと飛ぶ
+            this._dspFrac -= step;
             break;
           }
           this._dspFrac -= 1.0;
@@ -364,11 +379,12 @@
       let songFramePos = (samplePos / outRate) * SPC_FRAME_RATE * this.speedFactor;
       let targetFrame = Math.min(Math.floor(songFramePos), this.totalFrames - 1);
       const wl = this.writeLog || [];
-      if (targetFrame >= 0 && !wl[targetFrame]) {
+      if (targetFrame >= 0 && !this._isFrameReady(targetFrame)) {
         // 未キャプチャ範囲へのシーク: バッファ済み末尾にクランプする。samplePos/
         // songFramePosも合わせて再計算する(そうしないとgetPosition()が矛盾した
         // 位置を報告し続け、_isFrameReady(f)==falseのスタール状態に陥る)。
-        while (targetFrame > 0 && !wl[targetFrame]) targetFrame--;
+        // 判定は writeLog[f] の有無ではなく _isFrameReady(空配列で事前確保されているため)
+        while (targetFrame > 0 && !this._isFrameReady(targetFrame)) targetFrame--;
         songFramePos = targetFrame;
         samplePos = (songFramePos / SPC_FRAME_RATE / this.speedFactor) * outRate;
       }
