@@ -261,7 +261,7 @@
          #xxxFileHeader / #xxxFileStatus だけはこの箱から鍵盤表示側へ付け替えて表示する -->
   <div id="soundFileControls" hidden>
       <!-- multiple: PSF の .minipsf と、_lib で参照する .psflib を一緒に選べるように(先頭の曲ファイルを開く) -->
-      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.psf,.minipsf,.psflib,.zip,.7z,.mml,.txt,.dmc" multiple style="display:none" />
+      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.psf,.minipsf,.psflib,.zip,.7z,.rar,.rsn,.mml,.txt,.dmc" multiple style="display:none" />
       <!-- 内部的にフォーマット別ロジックを呼び出すための非表示input（互換用） -->
       <input type="file" id="nsfFile" accept=".nsf,.nsfe" style="display:none" />
       <input type="file" id="spcFile" accept=".spc" style="display:none" />
@@ -271,7 +271,7 @@
       <input type="file" id="vgmFile" accept=".vgm,.vgz" style="display:none" />
       <input type="file" id="psfFile" accept=".psf,.minipsf" style="display:none" />
 
-      <!-- アーカイブ(zip/7z)のファイル名。開いた時だけ表示し、置き場は鍵盤表示のファイル情報
+      <!-- アーカイブ(zip/7z/rar)のファイル名。開いた時だけ表示し、置き場は鍵盤表示のファイル情報
            ペインの一番上(main.js syncKeyboardFileInfo が #archiveBar ごと付け替える)。
            曲リスト(#archiveTrackBar)は鍵盤表示タイトル行のファイル名ボタン(曲一覧)と ⏮⏭ が
            担うので表示しない。選択状態の同期のためだけに残してある -->
@@ -288,7 +288,7 @@
         </label>
       </div>
       <div id="soundPanel-none" class="sound-format-panel">
-        <p style="color:#9999aa;">NSF/SPC/KSS/GBS/HES/VGM/PSF ファイル(または、それらを含む zip/7z)を開くと、ここに再生画面が表示されます。</p>
+        <p style="color:#9999aa;">NSF/SPC/KSS/GBS/HES/VGM/PSF ファイル(または、それらを含む zip/7z/rar)を開くと、ここに再生画面が表示されます。</p>
       </div>
 
       <!-- NSFパネル -->
@@ -1029,6 +1029,8 @@
   <script src="src/hes2mml/converter.js"></script>
   <script src="src/archive/lzma.js"></script>
   <script src="src/archive/sevenzip.js"></script>
+  <script src="src/archive/rarppm.js"></script>
+  <script src="src/archive/rar.js"></script>
   <script src="src/archive/archive.js"></script>
   <script src="src/vgm/vgmHeader.js"></script>
   <script src="src/emulator/expansion/sn76489.js"></script>

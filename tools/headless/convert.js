@@ -31,7 +31,7 @@ function ctx() {
 }
 
 const SONG_EXTS = ['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf'];
-const ARCHIVE_EXTS = ['zip', '7z'];
+const ARCHIVE_EXTS = ['zip', '7z', 'rar', 'rsn'];
 
 function extOf(name) { return path.extname(name).toLowerCase().replace('.', ''); }
 

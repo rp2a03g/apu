@@ -4487,7 +4487,7 @@
   // (2026-09-23: スマホでは accept の絞り込みが無いので .nsf を選べてしまい、バイナリがそのまま
   //  エディタに流し込まれていた)。実体は initUnifiedSoundFileWindow 内で設定する
   let openSoundFileAndPlay = null;
-  const SOUND_FILE_EXTS = new Set(['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf', 'psflib', 'zip', '7z']);
+  const SOUND_FILE_EXTS = new Set(['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn']);
   async function openMmlTextFile(file, handle, extraFiles) {
     if (!file) return false;
     const ext = file.name.split('.').pop().toLowerCase();
@@ -9512,7 +9512,8 @@
     // 全フォーマット共通の「曲リストの器」として扱う。SPC/VGMのように単体では曲番号の
     // 概念が無い形式でも、アーカイブを開けば他形式と同じ曲送りが成立する(NSF等の複数曲
     // 形式は「アーカイブ内のファイル送り」と「ファイル内の曲送り」の2段になる)。
-    // 解析/解凍は src/archive/archive.js(MML.Archive。7zは sevenzip.js + lzma.js)。
+    // 解析/解凍は src/archive/archive.js(MML.Archive。7zは sevenzip.js + lzma.js、RARは rar.js + rarppm.js)。
+    // .rsn は SNESmusic.org の SPC 曲集で、中身はただの RAR3。
     // アーカイブ内エントリのフォーマットは拡張子で決めるが、gzip(.vgz)は各loadXxxFile側が
     // 中身で判別する。
     // .psflib は曲ではなく _lib で参照される共通部品なので曲リストには載せない(PSF.load が名前で引く)
@@ -9712,9 +9713,9 @@
     async function openSoundFile(file, opts) {
       if (!file) return false;
       let ext = file.name.split('.').pop().toLowerCase();
-      // zip/7z: 中のサウンドファイルを曲リストとして開く(上記アーカイブ節)。アーカイブ内から
+      // zip/7z/rar(.rsn): 中のサウンドファイルを曲リストとして開く(上記アーカイブ節)。アーカイブ内から
       // 再帰的に呼ばれた場合(opts.fromArchive)は通常のファイルとして扱う。
-      if ((ext === 'zip' || ext === '7z') && !(opts && opts.fromArchive)) return openArchive(file);
+      if ((ext === 'zip' || ext === '7z' || ext === 'rar' || ext === 'rsn') && !(opts && opts.fromArchive)) return openArchive(file);
       if (!(opts && opts.fromArchive)) clearArchive(); // 単体ファイルを開いたらアーカイブ曲リストは閉じる
       if (ext === 'vgz') ext = 'vgm'; // gzip圧縮VGM(中身の判別はloadVgmFile側)
       if (ext === 'nsfe') ext = 'nsf'; // NSFe(チャンク形式のNSF拡張。素のNSFへの変換はloadNsfFile→MML.NSF.normalize)

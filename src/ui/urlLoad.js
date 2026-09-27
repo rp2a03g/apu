@@ -46,13 +46,13 @@
 
   // openSoundFile() が知っている拡張子。URL末尾の綴りがこの中に無ければマジックで判定する
   const KNOWN_EXTS = ['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz',
-                      'psf', 'minipsf', 'psflib', 'zip', '7z', 'mml', 'txt'];
+                      'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn', 'mml', 'txt'];
 
   /**
    * クエリ文字列を読む。無指定なら null。
    *   ?nsf= / ?url=  … ファイルのアドレス(どちらでも同じ。nsf以外の形式も開ける)
    *   ?song=         … 曲番号。形式ごとのネイティブ表記(NSF/GBS=1始まり、KSS/HES=0始まり)を
-   *                    そのまま書く(拡張m3uと同じ流儀)。zip/7zを開いた場合だけは
+   *                    そのまま書く(拡張m3uと同じ流儀)。zip/7z/rarを開いた場合だけは
    *                    アーカイブ内の何曲目か(1始まり)として扱う
    */
   function parse(search) {
@@ -97,6 +97,7 @@
     if (b[0] === 0x1f && b[1] === 0x8b) return 'vgz'; // gzip。VGZとして渡せば loadVgmFile が中身を見る
     if (b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04) return 'zip';
     if (b[0] === 0x37 && b[1] === 0x7a && b[2] === 0xbc && b[3] === 0xaf) return '7z';
+    if (str(0, 4) === 'Rar!') return 'rar'; // .rsn(SNESmusic.org の SPC 曲集)も中身は RAR
     return null;
   }
 

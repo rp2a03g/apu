@@ -470,8 +470,8 @@
     'KSS (MSX)': 'KSS (MSX)',
     'GBS (Game Boy)': 'GBS (Game Boy)',
     'HES (PC Engine)': 'HES (PC Engine)',
-    'NSF/SPC/KSS/GBS/HES/VGM/PSF ファイル(または、それらを含む zip/7z)を開くと、ここに再生画面が表示されます。':
-      'Open an NSF/SPC/KSS/GBS/HES/VGM/PSF file (or a zip/7z containing them) to show the player here.',
+    'NSF/SPC/KSS/GBS/HES/VGM/PSF ファイル(または、それらを含む zip/7z/rar)を開くと、ここに再生画面が表示されます。':
+      'Open an NSF/SPC/KSS/GBS/HES/VGM/PSF file (or a zip/7z/rar containing them) to show the player here.',
 
     // ---- NSFパネル ----
     'ヘッダ情報 (NSF/NSFe)': 'Header (NSF/NSFe)',

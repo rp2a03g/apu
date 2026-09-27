@@ -28,7 +28,7 @@ MMLを書きながら、音量・音色・ピッチ・ノートの4種類のエ�
   VRC6 / VRC7 / MMC5 / N163 / SUNSOFT 5B / FDS に対応する。エンベロープ(`@v` `@vr` `@@`)、
   ピッチ系(`EP` `MP` `PT` `PS` `s`)、ノートエンベロープ(`EN`)などのppmck拡張コマンドも
   ブラウザ再生とNSF書き出しの両方で動く。バンク切り替え対応なので4KBを超えるチャンネルも書ける
-- **実機の曲を読んで聴く** — NSF / NSFe / SPC / KSS / GBS / HES / VGM / PSF(PlayStation、PSF1)。zip・7z・gzipの中身も開ける。
+- **実機の曲を読んで聴く** — NSF / NSFe / SPC / KSS / GBS / HES / VGM / PSF(PlayStation、PSF1)。zip・7z・RAR(SPC曲集の .rsn を含む)・gzipの中身も開ける。
   CPUと音源をエミュレートして鳴らすので、曲送り・シーク・早送り・ch単位のミュートと音量調整ができる
 - **鳴っている音を見る** — 鍵盤表示とピアノロールが、チャンネルごとの音程・音量・音色・
   波形・使用中のPCMサンプルを演奏に同期して描く
@@ -58,7 +58,7 @@ path or from any static server.
   (`@v` `@vr` `@@` `EP` `MP` `PT` `PS` `s` `EN` ...) working both in browser playback and
   in the exported NSF. Bank switching is supported, so a channel may exceed 4 KB.
 - **Play chiptune files.** NSF / NSFe / SPC / KSS / GBS / HES / VGM / PSF (PSF1), including
-  files inside zip / 7z / gzip. The CPU and the sound chips are emulated, so you get track
+  files inside zip / 7z / RAR (including .rsn SPC sets) / gzip. The CPU and the sound chips are emulated, so you get track
   select, seeking, fast-forward, and per-channel mute and volume.
 - **See what is playing.** A keyboard view and a piano roll draw pitch, volume, timbre,
   waveform and the PCM sample in use for every channel, in sync with playback.
@@ -99,7 +99,7 @@ original music and program.
 
 ### 実機の曲を聴く・MMLにする
 
-📂 でサウンドファイル（NSF/NSFe・SPC・KSS・GBS・HES・VGM・PSF。zip・7z・gzipの中身も開ける）を読むと、
+📂 でサウンドファイル（NSF/NSFe・SPC・KSS・GBS・HES・VGM・PSF。zip・7z・RAR・gzipの中身も開ける）を読むと、
 鍵盤表示にヘッダ情報とチャンネル一覧が出て再生が始まる。タイトル行の ⏮ ▶ ⏹ ⏭ が曲送りと再生で、
 その右で曲が終わったときの挙動を選ぶ。チャンネルごとにミュートと音量スライダーがあり、
 行の色は鍵盤・ピアノロールの色と連動する。
@@ -114,14 +114,14 @@ PS2 の PSF2 には対応していない。
 
 `?nsf=<ファイルのアドレス>` を付けて開くと、そのアドレスからファイルを取ってきた状態で立ち上がる。
 「アプリのURL＋曲のありか」を1本のリンクにして渡せる。曲番号は `?song=<n>`
-(形式ごとのネイティブ表記。NSF/GBSは1始まり、KSS/HESは0始まり。zip/7zを指したときは
+(形式ごとのネイティブ表記。NSF/GBSは1始まり、KSS/HESは0始まり。zip/7z/rarを指したときは
 アーカイブ内の何曲目か)。パラメータ名は `?url=` でも同じ。
 
 ```
 https://rp2a03g.github.io/apu/?nsf=https%3A%2F%2Fraw.githubusercontent.com%2F<user>%2F<repo>%2Fmain%2Fsong.nsf&song=3
 ```
 
-対応形式は 📂 で開けるものと同じ(NSF/NSFe・SPC・KSS・GBS・HES・VGM・PSF・zip・7z)で、
+対応形式は 📂 で開けるものと同じ(NSF/NSFe・SPC・KSS・GBS・HES・VGM・PSF・zip・7z・rar)で、
 アドレスに拡張子が無くてもファイルの先頭(マジック)から判別する。
 
 このツールはファイルを一切預からない。リンクを踏んだ人のブラウザが毎回そのアドレスから

@@ -10,7 +10,8 @@
  * 外部ライブラリは使わない(INV-1)。zip/gzipの解凍はブラウザ標準の DecompressionStream
  * ('deflate-raw' / 'gzip')。DOM非依存(INV-4)。
  * 7zは同じ器に載せるが、ヘッダ解析と LZMA/LZMA2 展開が別物なので src/archive/sevenzip.js
- * (+ src/archive/lzma.js)に分けてある。入口は Archive.parse() / Archive.readEntry()。
+ * (+ src/archive/lzma.js)に分けてある。RAR(1.5〜4.x 形式。SNESmusic.org の .rsn も中身は RAR3)も
+ * 同じ器で、src/archive/rar.js(+ PPMd の src/archive/rarppm.js)。入口は Archive.parse() / Archive.readEntry()。
  *
  * - zip: セントラルディレクトリを末尾のEOCDから辿る。対応する圧縮方式は
  *   store(0)とdeflate(8)のみ。それ以外は readEntry() が明示エラーを投げる。
@@ -47,20 +48,22 @@
     return bytes && bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
   };
 
-  /** 中身の署名からアーカイブ種別を返す('zip' / '7z' / null)。拡張子は当てにしない。 */
+  /** 中身の署名からアーカイブ種別を返す('zip' / '7z' / 'rar' / null)。拡張子は当てにしない。 */
   Archive.detect = function (bytes) {
     if (Archive.isZip(bytes)) return 'zip';
     if (Archive.is7z && Archive.is7z(bytes)) return '7z';
+    if (Archive.isRar && Archive.isRar(bytes)) return 'rar';
     return null;
   };
 
   /**
-   * zip / 7z を種別に応じて解析してエントリ一覧を返す(呼び出し側は種別を意識しなくてよい)。
+   * zip / 7z / rar を種別に応じて解析してエントリ一覧を返す(呼び出し側は種別を意識しなくてよい)。
    * エントリの形は両者で揃えてあるので buildPlaylist / readEntry はそのまま共用できる。
    * @returns {Promise<{type:string, entries:Array}>}
    */
   Archive.parse = async function (bytes) {
     if (Archive.is7z && Archive.is7z(bytes)) return Archive.parse7z(bytes); // src/archive/sevenzip.js
+    if (Archive.isRar && Archive.isRar(bytes)) return Archive.parseRar(bytes); // src/archive/rar.js
     return { type: 'zip', entries: Archive.parseZip(bytes).entries };
   };
 
@@ -149,6 +152,7 @@
    */
   Archive.readEntry = async function (bytes, entry) {
     if (entry.sevenZip) return Archive.read7zEntry(entry); // 7zはブロック単位(src/archive/sevenzip.js)
+    if (entry.rar) return Archive.readRarEntry(entry);     // RARはソリッドの鎖単位(src/archive/rar.js)
     const p = entry.localOffset;
     if (u32(bytes, p) !== SIG_LOCAL) throw new Error('zip: bad local header');
     if (entry.encrypted) throw new Error('zip: encrypted entry');

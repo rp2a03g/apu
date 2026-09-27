@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>アーカイブ(zip/7z)展開テスト</title>
+<title>アーカイブ(zip/7z/rar)展開テスト</title>
 <style>
   body{font:14px/1.5 system-ui,sans-serif;margin:1.5rem;max-width:1000px}
   h1{font-size:18px}
@@ -21,22 +21,24 @@
 </style>
 </head>
 <body>
-<h1>アーカイブ(zip/7z)展開テスト</h1>
+<h1>アーカイブ(zip/7z/rar)展開テスト</h1>
 <p class="muted">
-  <code>MML.Archive</code>(src/archive/archive.js + sevenzip.js + lzma.js)の展開結果を検証する。
+  <code>MML.Archive</code>(src/archive/archive.js + sevenzip.js + lzma.js + rar.js + rarppm.js)の展開結果を検証する。
   7zはヘッダに各ファイルのCRC32が入っているので、<b>展開したデータのCRC32とヘッダの値を照合</b>すれば
   LZMA/LZMA2デコーダの正しさをファイル単位で機械判定できる(zipも同様にローカルヘッダ/セントラル
   ディレクトリのCRCと照合する)。<br>
   ファイルをドロップするか選択すると、全エントリを展開して照合し、続けて曲リスト
   (<code>Archive.buildPlaylist</code>: .m3uの並び順やNEZplug拡張行の曲番号)も表示する。
 </p>
-<p><input type="file" id="file" accept=".zip,.7z" multiple></p>
-<div id="drop">ここに .zip / .7z をドロップ(複数可)</div>
+<p><input type="file" id="file" accept=".zip,.7z,.rar,.rsn" multiple></p>
+<div id="drop">ここに .zip / .7z / .rar / .rsn をドロップ(複数可)</div>
 <div id="sum"></div>
 <div id="out"></div>
 
 <script src="../src/archive/lzma.js"></script>
 <script src="../src/archive/sevenzip.js"></script>
+<script src="../src/archive/rarppm.js"></script>
+<script src="../src/archive/rar.js"></script>
 <script src="../src/archive/archive.js"></script>
 <script>
 'use strict';

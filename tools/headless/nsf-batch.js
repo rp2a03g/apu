@@ -24,7 +24,7 @@ const fs = require('fs');
 const path = require('path');
 const { expandInput, convertBytes, probe, defaultSong, parseCmdFlags, ctx, SONG_EXTS } = require('./convert');
 
-const ARCHIVE_EXTS = ['zip', '7z'];
+const ARCHIVE_EXTS = ['zip', '7z', 'rar', 'rsn'];
 const ALL_EXTS = SONG_EXTS.concat(ARCHIVE_EXTS);
 
 function extOf(name) { return path.extname(name).toLowerCase().replace('.', ''); }
