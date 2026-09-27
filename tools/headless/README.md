@@ -43,6 +43,9 @@ export PATH="$PATH:/path/to/nodejs"
 | `psf-convert-survey.js` | PSF→MML変換の品質調査(合成ch/実機スロット別のコンパイル可否・音程検証) |
 | `pool-regroup-score.js` | 合成ch(`Emu.PoolChannelRegrouper`)の採点。PSFドライバ内部のトラック構造体を正解にしてレーン純度/トラック集中度を出す |
 | `vgm-normalize-check.js` | VGMPlayの自動正規化(`NormalizeOverallVolume`)を再現し、自前の再生音量が何曲でVGMPlayと2倍/4倍ズレるかを数える。導入判断用(K007232/MSM5205) |
+| `bughunt/run-all.js` | 不具合探しをまとめて回して報告(Markdown)を書く。下の2本を別プロセスで走らせ `_tmp_test/bughunt-report.md` へ(曲名が入るのでリポジトリには入れない) |
+| `bughunt/playback-check.js` | 再生器の差分検査。各形式の再生器(`*-stream-player.js`)を偽の AudioContext で直接回し、CPU+チップをまるごと回した正解と比べる。さらに「取り込みが再生より遅い」「一時停止」「停止→再生」「load 2回」「シーク」「1/2倍速」「全chミュート」「曲末」を掛けて、同じ音になるはずの経路が同じかを不変条件として採点する(耳は要らない) |
+| `bughunt/io-check.js` | 入出力・変換の通し検査。MML→NSF書き出し→6502実行 と JS 再生の一致、NSF→MML の往復、MusicXML の往復、書庫(zip/7z/rar)の全展開と CRC、先頭バイトの形式判定、壊れたファイル/壊れた MML での「変な例外・固まり」検出(子プロセスで時間制限)、FLAC の容器、既存の自己点検一式 |
 | `baseline-*.json` | 回帰テストのベースライン(曲ごとのSHA-256とメタ情報)。**gitignore済み** |
 
 ベースラインは手元のコーパスと1対1に対応する曲名一覧なので、リポジトリには入れていない。
