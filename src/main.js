@@ -3440,10 +3440,15 @@
   let lastPositionStateAt = 0;
   let mediaSessionActionSet = null; // 'all' | 'tracks' | 'seek'
   // var: 起動の途中(この行より前)に msDebug() が呼ばれても TDZ で落ちないように
-  var msDebugOn = /[?&]debug=ms(&|$)/.test(location.search);
+  // ?debug=audio: ms の表示に加えて、音の出口の台帳(重なり検出)と SPC 再生の中身を出す(下の audioDebug 節)。
+  //   同じ内容を console にも出す(PC なら DevTools からコピーできる)
+  var audioDebugOn = /[?&]debug=audio(&|$)/.test(location.search);
+  var msDebugOn = audioDebugOn || /[?&]debug=ms(&|$)/.test(location.search);
   var msDebugEl = null;
+  if (audioDebugOn && MML.AudioDebug) MML.AudioDebug.install(); // AudioContext を作る前に差し替える
   function msDebug(msg) {
     if (!msDebugOn) return;
+    if (audioDebugOn) console.log('[audio-debug] ' + (performance.now() / 1000).toFixed(1) + ' ' + msg);
     if (!msDebugEl) {
       msDebugEl = document.createElement('pre');
       msDebugEl.style.cssText = 'position:fixed;right:4px;bottom:4px;z-index:99999;max-width:90vw;max-height:40vh;overflow:auto;margin:0;padding:6px 8px;font:11px/1.35 monospace;background:rgba(0,0,0,.85);color:#9f9;border:1px solid #6c6;border-radius:4px;white-space:pre-wrap;pointer-events:none';
@@ -3482,6 +3487,129 @@
     window.addEventListener('error', (e) => msDebug('ERROR ' + (e.message || e)));
     window.addEventListener('unhandledrejection', (e) => msDebug('REJECT ' + (e.reason && e.reason.message || e.reason)));
     document.addEventListener('visibilitychange', () => msDebug('visibility=' + document.visibilityState));
+  }
+  // ==== ?debug=audio: 「FILE に切り替えたら音痴」の切り分け(2026-09-28) ====
+  // 1秒ごと: 実際に音を出しているノード(src/audio/audio-debug.js の台帳)。2つ以上なら重なっている。
+  //          SPC 再生中はフレーム位置と、鳴っているボイスの SRCN/ピッチ。
+  // 操作時: MML/FILE の切替、SPC の再生開始(どのバイト列で、どの設定か)。
+  // 任意の時点: DevTools で mmlAudioDump() → 全プレイヤーの状態、SPC の RAM(サンプル)の破損有無、
+  //          再生に使っている書き込みログがその曲を今メインスレッドで取り直したものと一致するか。
+  var audioDebugSpcReport = null; // (player, lines[]) => void。?debug=audio の時だけ下で中身を入れる
+  function audioDebugPlayers() {
+    const list = [['activePlayer', activePlayer], ['kss', kssActivePlayer], ['spc', spcActivePlayer], ['gbs', gbsActivePlayer],
+      ['hes', hesActivePlayer], ['vgm', vgmActivePlayer], ['psf', psfActivePlayer]];
+    const out = list.filter(([, p]) => p).map(([k, p]) => k + ':' + (p.constructor && p.constructor.name) + (p.isPlaying ? '(再生中)' : '(停止)'));
+    if (transportSource) out.push('transportSource(capturedBuffer)');
+    return out.join(' ') || '(なし)';
+  }
+  function audioDebugAudible() {
+    const A = MML.AudioDebug;
+    if (!A) return '';
+    const aud = A.audible();
+    return 'aud=' + aud.length + (aud.length >= 2 ? '★重なり' : '') + ' ' + aud.map(e => A.describe(e)).join(' | ');
+  }
+  function audioDebugSpcVoices(p) {
+    if (!p || !p.dsp) return '';
+    const d = p.dsp, parts = [];
+    for (let v = 0; v < 8; v++) {
+      const vo = d.voices[v];
+      if (!vo || vo.env <= 0) continue;
+      parts.push('v' + v + ':s' + d.regs[v * 16 + 4] + '/p' + ((d.regs[v * 16 + 3] << 8) | d.regs[v * 16 + 2]).toString(16));
+    }
+    return 'f=' + p.currentFrame + '/' + p.totalFrames + ' cap=' + (p._capturedFrames == null ? '全部' : p._capturedFrames)
+      + ' dir=' + d.regs[0x5D].toString(16) + ' ' + parts.join(' ');
+  }
+  function audioDebugSourceLine(tag) {
+    const ai = archiveInfo();
+    return tag + ' src=' + kbdSourceKind + ' mode=' + lastPlayMode
+      + ' preview=' + keyboardDisplay.isPreviewMode() + ' speed=' + currentSpeedFactor
+      + ' ctx=' + (audioCtx ? audioCtx.state + '/' + audioCtx.sampleRate : '-')
+      + (ai ? ' arc=' + ai.name + '#' + (ai.index + 1) + '(' + (ai.titles[ai.index] || '') + ')' : '')
+      + ' players=' + audioDebugPlayers();
+  }
+  if (audioDebugOn) {
+    let lastAudCount = 0;
+    setInterval(() => {
+      const A = MML.AudioDebug;
+      const n = A ? A.audible().length : 0;
+      // 無音の間は黙る(鳴り止んだ瞬間だけ1行出す)
+      if (!n && !lastAudCount) return;
+      lastAudCount = n;
+      let line = audioDebugAudible();
+      if (spcActivePlayer && spcActivePlayer.isPlaying) line += ' / spc ' + audioDebugSpcVoices(spcActivePlayer);
+      msDebug(line);
+    }, 1000);
+
+    // BRR サンプル1本の範囲(開始アドレスから終端フラグのブロックまで)
+    const brrRange = (ram, addr) => {
+      let a = addr;
+      for (let n = 0; n < 7282 && a + 9 <= 0x10000; n++, a += 9) if (ram[a] & 1) return [addr, a + 9];
+      return [addr, Math.min(a, 0x10000)];
+    };
+    window.mmlAudioDump = function () {
+      const A = MML.AudioDebug;
+      const L = [];
+      L.push(audioDebugSourceLine('dump'));
+      const tp = currentTransportPlayer();
+      L.push('transport=' + (tp ? tp.constructor.name : '-'));
+      if (A) {
+        L.push('-- 音を出しているノード: ' + audioDebugAudible());
+        L.push('-- 動いているノード: ' + A.running().map(e => A.describe(e)).join(' | '));
+        L.push('-- 台帳(全部): ' + A.entries().map(e => A.describe(e) + (e.kind === 'SP' ? ' calls=' + e.calls : (e.ended ? ' ended' : e.started ? ' started' : ''))).join(' | '));
+      }
+      audioDebugSpcReport(spcActivePlayer, L);
+      const text = L.join('\n');
+      console.log(text);
+      msDebug('mmlAudioDump() を console に出力(クリップボードにも写した)');
+      try { navigator.clipboard.writeText(text).catch(() => {}); } catch (e) { /* 手でコピー */ }
+      return text;
+    };
+    // SPC 再生器の中身。停止すると dsp が捨てられるので、stopSpcPlayback からも止める直前に呼ぶ
+    audioDebugSpcReport = function (p, L) {
+      const A = MML.AudioDebug;
+      if (p && p.dsp) {
+        const d = p.dsp;
+        L.push('-- SPC: loadedSpcBytes crc=' + (A && A.crc32(loadedSpcBytes)) + ' player.spcBytes crc=' + (A && A.crc32(p.spcBytes)) + ' sameRef=' + (p.spcBytes === loadedSpcBytes));
+        let filled = 0;
+        for (let f = 0; f < (p.writeLog || []).length; f++) if (p.writeLog[f] && p.writeLog[f].length) filled++;
+        L.push('   frame=' + p.currentFrame + '/' + p.totalFrames + ' logFramesWithWrites=' + filled + ' speed=' + p.speedFactor + ' muted=' + d.mutedVoices.toString(2));
+        L.push('   DIR=' + d.regs[0x5D].toString(16) + ' FLG=' + d.regs[0x6C].toString(16) + ' ESA=' + d.regs[0x6D].toString(16) + ' EDL=' + d.regs[0x7D]
+          + ' EON=' + d.regs[0x4D].toString(2) + ' PMON=' + d.regs[0x2D].toString(2) + ' NON=' + d.regs[0x3D].toString(2));
+        // RAM(サンプル)の破損: 再生側 DSP の RAM と元のバイト列の RAM を、使っているサンプルの範囲で比べる
+        const orig = MML.SPC.getRam(p.spcBytes);
+        const dirBase = d.regs[0x5D] << 8;
+        for (let v = 0; v < 8; v++) {
+          const vo = d.voices[v];
+          const srcn = d.regs[v * 16 + 4];
+          const ent = (dirBase + srcn * 4) & 0xffff;
+          const start = d.ram[ent] | (d.ram[ent + 1] << 8), loop = d.ram[ent + 2] | (d.ram[ent + 3] << 8);
+          const oStart = orig[ent] | (orig[ent + 1] << 8);
+          const r = brrRange(d.ram, start);
+          let diff = 0;
+          for (let i = r[0]; i < r[1]; i++) if (d.ram[i] !== orig[i]) diff++;
+          L.push('   v' + v + ' env=' + vo.env + ' srcn=' + srcn + ' pitch=' + ((d.regs[v * 16 + 3] << 8) | d.regs[v * 16 + 2]).toString(16)
+            + ' start=' + start.toString(16) + (oStart !== start ? '(元RAM=' + oStart.toString(16) + ' ★DIR表が違う)' : '')
+            + ' loop=' + loop.toString(16) + ' len=' + (r[1] - r[0]) + (diff ? ' ★サンプル' + diff + 'バイトが元と違う' : ''));
+        }
+        // 再生に使っている書き込みログを、同じバイト列をメインスレッドで取り直したものと比べる(先頭最大10秒)
+        try {
+          const upto = Math.max(1, Math.min(p.currentFrame + 1, 600));
+          const truth = MML.SPC2MML.capture(p.spcBytes, upto / MML.SPC2MML.FRAME_RATE + 0.05).log;
+          let bad = -1, why = '';
+          for (let f = 0; f < upto && bad < 0; f++) {
+            const x = truth[f] || [], y = (p.writeLog && p.writeLog[f]) || [];
+            if (x.length !== y.length) { bad = f; why = 'len ' + y.length + '≠' + x.length; break; }
+            for (let i = 0; i < x.length; i++) {
+              if (x[i].reg !== y[i].reg || x[i].val !== y[i].val) {
+                bad = f; why = '#' + i + ' reg' + y[i].reg.toString(16) + '=' + y[i].val + ' 正=' + x[i].reg.toString(16) + '=' + x[i].val;
+                break;
+              }
+            }
+          }
+          L.push('   書き込みログ照合(先頭' + upto + 'フレーム): ' + (bad < 0 ? '一致' : '★不一致 frame=' + bad + ' ' + why));
+        } catch (e) { L.push('   書き込みログ照合: 失敗 ' + e.message); }
+      }
+    };
   }
   function isAppPlaying() {
     const p = currentTransportPlayer();
@@ -3780,6 +3908,7 @@
   };
   keyboardDisplay.onSourceToggle = () => {
     if (!loadedSoundFormat) return;
+    if (audioDebugOn) msDebug(audioDebugSourceLine('toggle→' + (!kbdSourceKind || kbdSourceKind === 'mml' ? 'FILE' : 'MML')) + ' ' + audioDebugAudible());
     if (!kbdSourceKind || kbdSourceKind === 'mml') {
       const btn = document.getElementById(SOUND_FORMAT_PLAY_BTN[loadedSoundFormat]);
       if (btn) btn.click();
@@ -5938,6 +6067,11 @@
   }
 
   function stopSpcPlayback() {
+    if (spcActivePlayer && audioDebugSpcReport && spcActivePlayer.dsp) {
+      const L = ['spc stop(止める直前の中身) pos=' + (spcActivePlayer.getPosition ? spcActivePlayer.getPosition().toFixed(2) : '?') + 's'];
+      try { audioDebugSpcReport(spcActivePlayer, L); } catch (e) { L.push('report failed ' + e.message); }
+      console.log('[audio-debug] ' + L.join('\n'));
+    }
     if (spcActivePlayer) {
       spcActivePlayer.destroy();
       spcActivePlayer = null;
@@ -6005,6 +6139,8 @@
     // regsOnly相当の軽量ショートカットが存在せず(MML.SPC2MML.captureAsyncは元から
     // CPU+DSPフル駆動の実コスト計算)、今回の統合の主眼は「軽量化」ではなく「ライブ
     // 再生用と先読み用の2本を同時に走らせてCPUを食い合っていたのを1本にまとめる」こと。
+    const dbgCaptureBytes = loadedSpcBytes;
+    if (audioDebugOn) msDebug(audioDebugSourceLine('spc play') + ' crc=' + MML.AudioDebug.crc32(loadedSpcBytes) + ' ' + audioDebugAudible());
     const player = new MML.Audio.SpcReplayStreamPlayer(audioCtx);
     player._baseGain = player.gainNode.gain.value;
     attachAssignPreview(player);
@@ -6069,6 +6205,7 @@
 
       if (!spcPlaybackLoaded) {
         spcPlaybackLoaded = true;
+        if (audioDebugOn) msDebug('spc load frames=' + frames + ' sameBytes=' + (dbgCaptureBytes === loadedSpcBytes) + ' crc=' + MML.AudioDebug.crc32(loadedSpcBytes) + ' mute=' + effectiveSpcMute() + ' players=' + audioDebugPlayers());
         player.load(loadedSpcBytes, frames, frameLog, effectiveSpcMute());
         player.applyVolume(keyboardDisplay.getSpcVolumeConfig());
         transportPlay();
