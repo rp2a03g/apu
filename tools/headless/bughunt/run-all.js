@@ -79,7 +79,7 @@ for (const s of sections) {
     L.push('');
     if (rows.length) {
       L.push('| 形式 | 曲 | 検査 | 判定 | 内容 |'); L.push('|---|---|---|---|---|');
-      for (const r of rows) L.push(`| ${r.join(' | ').replace(/\|/g, '\\|')} |`);
+      for (const r of rows) L.push(`| ${r.map(c => String(c).replace(/\|/g, '\\|')).join(' | ')} |`);
     } else L.push('指摘なし。');
     L.push('');
   } else {
