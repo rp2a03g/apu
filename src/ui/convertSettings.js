@@ -448,11 +448,15 @@
     const emCb = document.createElement('input'); emCb.type = 'checkbox';
     emCb.addEventListener('change', () => setKey('ENV_MERGE', emCb.checked));
     wrSec.appendChild(line(emCb, T('似た@v表を統合(近似)'), T('長さ違いの表を1本にまとめる'), null, T('段の並びが同じで長さが±1違うだけの@v/@vr表を1本にまとめる(段の境目が最大1フレーム動く)')));
+    // @v/@vr 表を NSF の上限に収める(ENV_FIT、src/convert/envelope.js fitToLimit。両プリセット ON)
+    const efCb = document.createElement('input'); efCb.type = 'checkbox';
+    efCb.addEventListener('change', () => setKey('ENV_FIT', efCb.checked));
+    wrSec.appendChild(line(efCb, T('@v表をNSFの上限に収める(近似)'), T('255種類を超えた曲だけ似た表へまとめる'), null, T('NSFは@v/@vr表を1曲で各255種類までしか持てません。超えた曲だけ、聞こえの差が小さい表から順に似た表へまとめて255種類に収めます(上限以下の曲は何も変わりません)。まとめた曲はMMLのヘッダに注記します。OFFなら超えたまま出します(ブラウザでは鳴りますがNSF書き出しはエラーになります)')));
     // 合成chの複製パートを省く(FOLD_DOUBLES、src/convert/poolDoubles.js。忠実=OFF / プレーン=ON)
     const fdCb = document.createElement('input'); fdCb.type = 'checkbox';
     fdCb.addEventListener('change', () => setKey('FOLD_DOUBLES', fdCb.checked));
     wrSec.appendChild(line(fdCb, T('合成chの複製パートを省く(近似)'), T('デチューン二重化・エコーを1本にする'), null, T('合成ch(鍵盤表示・ロールの「合成ch」と同じ。PSF/C352/C140/QSound/MultiPCM/SegaPCM などプール式PCMの論理レーン)で、同じ旋律を別のボイスで重ねたデチューン二重化や数フレーム遅れのエコーを検出し、複製側の音符を変換から外します(何を省いたかはMMLのヘッダに書きます)。ppmckにはディレイもコーラスも無いので、複製の分だけチャンネルを節約できます。OFFでも、N163等の枠へ自動で載せるチャンネルを選ぶときは複製を後回しにします')));
-    checks.GATE_APPROX = gaCb; checks.LEN_DP = ldCb; checks.DPCM_EXACT = deCb; checks.SHAPE_REST = srCb; checks.ENV_MERGE = emCb; checks.FOLD_DOUBLES = fdCb;
+    checks.GATE_APPROX = gaCb; checks.LEN_DP = ldCb; checks.DPCM_EXACT = deCb; checks.SHAPE_REST = srCb; checks.ENV_MERGE = emCb; checks.ENV_FIT = efCb; checks.FOLD_DOUBLES = fdCb;
     body.appendChild(wrSec);
 
     // ── 3b. 出力の書式(パートの並び / 1行の小節数 / 小節揃え)。折りたたみ、既定は閉 ──

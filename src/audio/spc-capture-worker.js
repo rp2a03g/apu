@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-22 12:12:57
+ * Built by tools/build-capture-workers.ps1 at 2026-09-30 07:49:08
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-22 12:12:57';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-30 07:49:08';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -2066,6 +2066,7 @@
         hits.push({ key, sampleKey: key, hash: s.hash, pcm: s.pcm, rate, label: s.label,
                     vol: Math.max(0, Math.min(1, (ev.vol || 0) / 127)),
                     startFrame: ev.frame, endFrame: ev.frame + ev.len, ch,
+                    tempoStartFrame: tempoStartOf(ev), tempoEndFrame: tempoEndOf(ev), // テンポ推定用の丸め前の時刻(tempoStartOf 参照)
                     assignTarget: noiseChans.indexOf(ch) >= 0 ? 'noise' : 'dpcm',
                     // 音程(MIDI。pitchSemi は o4a=57 のMML番号)。ノイズパッドの「音程から自動」が周期indexを決める材料
                     srcMidi: ev.pitchSemi + 12,
@@ -2458,6 +2459,55 @@
   // (境界判定そのものは変えず、統合だけを共有ロジックに委ねるINV-3の原則)。
   // 分割直後の配列はmergeSpcVoiceEvents()で後処理する。
 
+  // キーオフのフレームが「鳴っている」とみなせるか(2026-09-29、extractVoiceEvents の KOFF 参照)。
+  // ko: フレーム内のキーオフ位置(サンプル)、env7: キーオフ直前のエンベロープ(0..127 = ENVX>>4)。
+  // フレームの平均音量(キーオフまでは直前の値、以後は DSP のリリース)が直前の値の半分以上なら true。
+  // リリースの式は src/emulator/spcDsp.js(envMode 'release')と同じ。変える時は両方そろえる
+  function koffFrameSounds(ko, env7) {
+    const e0 = (env7 | 0) << 4;
+    if (e0 <= 0) return false;
+    let e = e0, sum = 0;
+    for (let n = ko; n < SAMPLES_PER_FRAME; n++) {
+      e -= ((e - 1) >> 8) + 1;
+      if (e <= 0) break;
+      sum += e;
+    }
+    return (ko * e0 + sum) * 2 >= SAMPLES_PER_FRAME * e0;
+  }
+  // テンポ推定に渡す音符の頭/終わり(2026-09-29)。上のキーオン/キーオフの丸めは音符の時刻を実音に近づけるが、
+  // テンポ推定(bpm.js、2倍/半分の選択 chooseTempoOctave を含む)は丸める前の時刻で調整してあり、丸めた時刻を
+  // 渡すと音は同じなのにテンポが倍化する曲が出た(実測 88→176 BPM)。丸めた音符は丸め前/後の時刻を組で持ち、
+  // 音符の時刻がまだ丸め後のままなら丸め前を返す。統合(ビブラート等)で頭/終わりが変わった音符は今の値を使う
+  function tempoStartOf(ev) { return ev._tsOrig != null && ev._tsRound === ev.frame ? ev._tsOrig : ev.frame; }
+  function tempoEndOf(ev) { return ev._teOrig != null && ev._teRound === ev.frame + ev.len ? ev._teOrig : ev.frame + ev.len; }
+  // 遅い KON の丸め(2026-09-29): KON がフレームの後半で、最初のフレームの音量が次より小さい(立ち上がりの途中を
+  // フレーム末尾で拾った)音符は、鳴り始めを次のフレームへ寄せる。最初のフレームの半端な値({0 10 10 …})が
+  // 表を量産するのを防ぐ。直前の音符がこの KON で切られていたら、その音符を1フレーム伸ばして隙間を埋める
+  // (KON までは前の音が鳴っている)。最初のフレームがすでに平らな値なら(速いアタック)鳴り始めは動かさない
+  function roundLateKeyOns(evs) {
+    for (let i = 0; i < evs.length; i++) {
+      const ev = evs[i];
+      const o = ev._konOff;
+      if (o == null || o < 0 || o * 2 < SAMPLES_PER_FRAME) continue;
+      const vs = ev.volSeq;
+      if (!vs || vs.length < 2 || ev.len < 2 || !(vs[0] < vs[1])) continue;
+      ev._tsOrig = ev.frame; ev._tsRound = ev.frame + 1;
+      ev.frame++; ev.len--;
+      vs.shift(); // 終端(frame+len)は動かないので _teOrig/_teRound はそのまま
+      if (ev.pitchSeq && ev.pitchSeq.length > 1) ev.pitchSeq.shift();
+      ev.vol = vs.reduce((mx, v) => (v > mx ? v : mx), 0);
+      const prev = evs[i - 1];
+      if (prev && prev._closedByKon && prev.frame + prev.len === ev.frame - 1) {
+        if (prev._teOrig == null) prev._teOrig = prev.frame + prev.len;
+        prev.len++;
+        prev._teRound = prev.frame + prev.len;
+        if (prev.volSeq && prev.volSeq.length) prev.volSeq.push(prev.volSeq[prev.volSeq.length - 1]);
+        if (prev.pitchSeq && prev.pitchSeq.length) prev.pitchSeq.push(prev.pitchSeq[prev.pitchSeq.length - 1]);
+      }
+    }
+    for (const ev of evs) { delete ev._konOff; delete ev._closedByKon; }
+  }
+
   MML.SPC2MML.extractVoiceEvents = function (log, options = {}) {
     const FRAMES = log.length;
     // envLog(capture()/captureAsync()が採取): フレーム毎の実エンベロープ値(0..127)。
@@ -2473,11 +2523,20 @@
     const konLatched  = new Uint8Array(FRAMES);
     const koffLatched = new Uint8Array(FRAMES);
 
+    // KON/KOFF がフレーム内のどのサンプル位置で書かれたか(ボイスごとに最初の1回、-1=無し/不明)。
+    // capture()/captureAsync() の書き込みは off(0..SAMPLES_PER_FRAME)を持つ。先頭フレームの疑似書き込み
+    // (_seedInitialFrame)と off の無いログは -1 のまま(=従来どおりフレーム頭で区切る)
+    const konOff  = new Int16Array(FRAMES * 8).fill(-1);
+    const koffOff = new Int16Array(FRAMES * 8).fill(-1);
     for (let f = 0; f < FRAMES; f++) {
-      for (const { reg, val } of log[f]) {
+      for (const { reg, val, off } of log[f]) {
         dspState[reg] = val;
         if (reg === 0x4C) konLatched[f]  |= val;
         if (reg === 0x5C) koffLatched[f] |= val;
+        if ((reg === 0x4C || reg === 0x5C) && off != null) {
+          const tbl = reg === 0x4C ? konOff : koffOff;
+          for (let i = 0; i < 8; i++) if (((val >> i) & 1) && tbl[f * 8 + i] < 0) tbl[f * 8 + i] = off;
+        }
       }
     }
 
@@ -2504,6 +2563,7 @@
       // 「純粋な音程変化のみ」による区切りで始まったか(=スラー分割のタイ候補か)を
       // 一時保持する。KON(本物のアタック)/KOFF後の再開時はfalseにリセットする。
       let pendingTieCandidate = false;
+      let activeKonOff = -1; // この音符を始めた KON のフレーム内位置(音程変化で始まった音符は -1)
 
       for (let f = 0; f < FRAMES; f++) {
         for (const { reg, val } of log[f]) {
@@ -2526,8 +2586,9 @@
 
         if (konLatched[f] & (1 << ch)) {
           if (activeStart >= 0) {
-            voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
+            voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate, _konOff: activeKonOff, _closedByKon: true });
           }
+          activeKonOff = konOff[f * 8 + ch];
           activePitch = curPitch;
           activeSrcn  = voiceDsp[0x04];
           activeAdsr1 = voiceDsp[0x05];
@@ -2548,7 +2609,8 @@
           // このelse if節の中でactiveStart=fに更新される)をスラー分割のタイ候補とする
           // (pendingTieCandidateに立てておき、そのイベントが実際にpushされる時に読む。
           // 別プロジェクトE、2026-08-12)
-          voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
+          voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate, _konOff: activeKonOff });
+          activeKonOff = -1;
           activePitch = curPitch;
           activeSrcn  = voiceDsp[0x04];
           activeAdsr1 = voiceDsp[0x05];
@@ -2574,7 +2636,28 @@
         // されてしまう不具合があった(実SPCのV5パートで確認、ノート脱落の原因)。
         if ((koffLatched[f] & (1 << ch)) && !(konLatched[f] & (1 << ch))) {
           if (activeStart >= 0) {
-            voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, f - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
+            // ★キーオフのフレームの丸め(2026-09-29): 音量列は各フレーム末尾の一点で採っているので、キーオフの
+            //   フレームの値は「キーオフ後の減衰の途中」をたまたま拾った半端な値になる(キーオフ位置しだいで 0〜直前の値)。
+            //   音符はこのフレームの頭で閉じているのに列にはこの値が1つ余分に入り、平らな音量の音符まで
+            //   「最後の1フレームだけ違う @v 表」になって表が音符ごとに量産されていた(NSF の上限 255 種を超える)。
+            //   キーオフの位置と減衰から、このフレームの平均音量が直前の半分以上なら「鳴っている」として音符を
+            //   1フレーム伸ばして直前の値で埋め、半分未満なら半端な値を捨てる(音符はフレームの頭で終わる)
+            let len = Math.max(1, f - activeStart);
+            const lenFloor = len;
+            const ko = koffOff[f * 8 + ch];
+            if (ko >= 0 && activeStart < f && activeVolSeq.length === f - activeStart + 1) {
+              const envBefore = envLog && envLog[f - 1] ? envLog[f - 1][ch] : 127;
+              if (koffFrameSounds(ko, envBefore)) {
+                len = f - activeStart + 1;
+                activeVolSeq[activeVolSeq.length - 1] = activeVolSeq[activeVolSeq.length - 2];
+              } else {
+                activeVolSeq.pop();
+                if (activePitchSeq.length > 1) activePitchSeq.pop();
+              }
+            }
+            const tempoEnd = len !== lenFloor ? { _teOrig: activeStart + lenFloor, _teRound: activeStart + len } : null;
+            voiceEvents[ch].push({ frame: activeStart, len, pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate, _konOff: activeKonOff });
+            if (tempoEnd) Object.assign(voiceEvents[ch][voiceEvents[ch].length - 1], tempoEnd);
             activeStart = -1;
             activePitchSeq = [];
             pendingTieCandidate = false; // KOFF後、次に始まるノートは新規アタックなのでタイ候補ではない
@@ -2587,6 +2670,7 @@
       // rawFreq(高速アルペジオ→EN統合のセント判定用、2026-08-14拡張): mergeSpcVoiceEvents
       // (外側のIIFEスコープの関数でtuneOfへ直接アクセスできない)へ渡す前にここで計算して
       // 各イベントへ付与しておく(DESIGN-PITCH.md Phase 1のpitchRegToFreqHzを流用)。
+      roundLateKeyOns(voiceEvents[ch]);
       for (const ev of voiceEvents[ch]) ev.rawFreq = pitchRegToFreqHz(ev.pitch, tuneOf(ev.srcn));
       voiceEvents[ch] = mergeSpcVoiceEvents(voiceEvents[ch]);
     }
@@ -2606,13 +2690,18 @@
       if (i > 0) {
         const prevEnd = events[i - 1].frame + events[i - 1].len;
         if (ev.frame !== prevEnd) mapped.push({ start: prevEnd, end: ev.frame, note: null });
+        // キーオフのフレームの丸め(extractVoiceEvents)で音符が1フレーム伸び、元はあった休符が消えて次の音符と
+        // 接した所には、長さ0の区切りを入れる。区切りが無いと、キーオフで打ち直していた速い音の並びが
+        // ビブラート/アルペジオとして1音にまとめられてしまう(丸め前と同じ所で区切る)
+        else if (tempoEndOf(events[i - 1]) < tempoStartOf(ev)) mapped.push({ start: prevEnd, end: prevEnd, note: null });
       }
       mapped.push({
         start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi, pitch: ev.pitch,
         rawFreq: ev.rawFreq,
         pitchSeq: ev.pitchSeq, srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain, vol: ev.vol,
         volSeq: ev.volSeq, non: ev.non, noiseRate: ev.noiseRate,
-        tieCandidate: ev.tieCandidate
+        tieCandidate: ev.tieCandidate,
+        _tsOrig: ev._tsOrig, _tsRound: ev._tsRound, _teOrig: ev._teOrig, _teRound: ev._teRound
       });
     }
     // 高速アルペジオ→EN統合(2026-08-14拡張)。登録(noteEnvReg.registerShape)は
@@ -2626,7 +2715,10 @@
         srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain, vol: ev.vol, pitchSeq: ev.pitchSeq,
         volSeq: ev.volSeq, rawFreq: ev.rawFreq, non: ev.non, noiseRate: ev.noiseRate,
         tieCandidate: ev.tieCandidate
-      }, ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}));
+      }, ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
+      // 丸め前の時刻(tempoStartOf/tempoEndOf)。統合で start/end が変わった音符では照合が外れて使われない
+      ev._tsOrig != null ? { _tsOrig: ev._tsOrig, _tsRound: ev._tsRound } : {},
+      ev._teOrig != null ? { _teOrig: ev._teOrig, _teRound: ev._teRound } : {}));
   }
 
   // ── MML 生成 ─────────────────────────────────────────────────────────
@@ -2655,6 +2747,58 @@
     const voiceEvents = MML.SPC2MML.extractVoiceEvents(log, { srcnFineTune, envLog: options.envLog });
     const tuneOf = (srcn) => srcnFineTune ? (srcnFineTune[srcn] || 0) : 0;
 
+    // ── 「まとめる」と「複製」(src/convert/channelMerge.js / channelCopy.js、2026-09-29) ────────────
+    // 順序は まとめる → 複製 → まとめる。複製は「まとめた結果」を写す(V0/V1 をまとめた曲で V0 を複製しても V1 を複製しても
+    // まとめたパートの複製になる、2026-09-29 ユーザー指摘)。2回目のまとめるは、複製行に印を付けた組のため
+    const voiceLabel = (ch) => (channelMap[ch] && channelMap[ch].label) || 'V' + ch;
+    const mergeNotes = [];
+    // channelMap[ch].merge が付き、かつ同じ借用先を選んだボイスどうしを1本の音符列へ畳む。以降の段(音色ごとの分割・
+    // 打楽器の切り出し・配置)は先頭ボイスに畳んだ1本しか見ない。残りのボイスは skip(mergedInto=先頭)にして注記を出す。
+    // E(DPCM)は元々複数ボイスをミックスする先なので対象外
+    const mergeVoices = () => {
+      if (!MML.Convert.ChannelMerge) return;
+      const groups = new Map(); // 借用先 → [ch]
+      channelMap.forEach((cfg, ch) => {
+        if (!cfg || !cfg.merge || cfg.type === 'skip' || cfg.type === 'dpcm' || ch >= voiceEvents.length) return;
+        if (!groups.has(cfg.type)) groups.set(cfg.type, []);
+        groups.get(cfg.type).push(ch);
+      });
+      for (const [type, chs] of groups) {
+        if (chs.length < 2) continue;
+        const members = chs.map(ch => ({ id: voiceLabel(ch), events: voiceEvents[ch].map(ev => Object.assign({}, ev, { start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi })) }));
+        const r = MML.Convert.ChannelMerge.merge(members);
+        const first = chs[0];
+        voiceEvents[first] = r.events.filter(ev => ev.note !== null).map(ev => {
+          const o = Object.assign({}, ev, { frame: ev.start, len: ev.end - ev.start });
+          delete o.start; delete o.end; delete o.note;
+          return o;
+        });
+        const label = chs.map(voiceLabel).join('+');
+        for (const ch of chs.slice(1)) { voiceEvents[ch] = []; channelMap[ch] = Object.assign({}, channelMap[ch], { type: 'skip', mergedInto: first }); }
+        channelMap[first] = Object.assign({}, channelMap[first], { mergedFrom: chs.slice(), label });
+        mergeNotes.push(MML.Convert.ChannelMerge.describe(label, type, r.stats));
+      }
+    };
+    mergeVoices();
+    // 複製: channelMap[8以降] の { copyOf: 元ボイス番号, transpose, detune, delay }。元ボイスのイベント列(まとめ済みなら
+    // まとめた先頭ボイスのもの)を写して仮想ボイスにする。音色ごとの載せ先分割だけは複製に効かせない
+    // (複製は「同じ音をもう1本」なので音色で散らさない)
+    const copyNotes = [];
+    for (let i = 0; i < channelMap.length; i++) {
+      const cfg = channelMap[i];
+      if (!cfg || cfg.copyOf === undefined || cfg.copyOf === null) continue;
+      let base = cfg.copyOf;
+      while (channelMap[base] && channelMap[base].mergedInto !== undefined) base = channelMap[base].mergedInto;
+      const srcEv = voiceEvents[base] || [];
+      const CC = MML.Convert.ChannelCopy;
+      voiceEvents[i] = CC ? CC.transform(srcEv, { transpose: cfg.transpose, detune: cfg.detune, delay: cfg.delay, totalFrames: FRAMES }, CC.SPC)
+        : srcEv.map(ev => Object.assign({}, ev));
+      cfg.copyOf = base; // 遅延複製の帳尻合わせ(copyDelay)もまとめた先頭ボイスを元にする
+      cfg.label = cfg.label || (CC ? CC.label(voiceLabel(base), cfg.copyId || ('V' + base + '#' + i)) : voiceLabel(base) + '#');
+      if (cfg.type !== 'skip') copyNotes.push(CC ? CC.describe(cfg.label, voiceLabel(base), cfg.type, cfg) : `${cfg.label} は ${voiceLabel(base)} の複製です。`);
+    }
+    mergeVoices(); // 複製行に「まとめる」印が付いた組
+
     // ── 音色(BRRサンプル)ごとの設定(src/convert/toneSettings.js、2026-09-09) ────────────
     // options.toneSettings … main.js が ToneSettings.snapshot() で作った素のオブジェクト(無ければ従来どおり)。
     // キーは 'brr:<hash>'(src/convert/toneKey.js、ロールのノート srcn からも同じキーが引ける)
@@ -2676,7 +2820,7 @@
       const nBase = voiceEvents.length;
       for (let ch = 0; ch < nBase; ch++) {
         const cfg = channelMap[ch];
-        if (!cfg || cfg.type === 'skip') continue;
+        if (!cfg || cfg.type === 'skip' || cfg.copyOf !== undefined) continue; // 複製には音色ごとの載せ先を効かせない
         const byTarget = new Map(); // 上書き載せ先 → Set(srcn)
         for (const ev of voiceEvents[ch]) {
           if (ev.pitchSemi === null || ev.non) continue;
@@ -2756,9 +2900,9 @@
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip') continue;
       const sounding = voiceEvents[ch].filter(ev => ev.pitchSemi !== null)
-        .map(ev => ({ frame: ev.frame, len: ev.len }))
+        .map(ev => { const t0 = tempoStartOf(ev); return { frame: t0, len: tempoEndOf(ev) - t0 }; }) // 丸め前の時刻(tempoStartOf 参照)
         // D(ノイズ)ボイスの打点は voiceEvents 側に音符として残っているので二重に数えない
-        .concat(drumHitsAll.filter(h => h.ch === ch && h.assignTarget !== 'noise').map(h => ({ frame: h.startFrame, len: h.endFrame - h.startFrame })))
+        .concat(drumHitsAll.filter(h => h.ch === ch && h.assignTarget !== 'noise').map(h => { const t0 = h.tempoStartFrame != null ? h.tempoStartFrame : h.startFrame; return { frame: t0, len: (h.tempoEndFrame != null ? h.tempoEndFrame : h.endFrame) - t0 }; }))
         .sort((a, b) => a.frame - b.frame);
       noteDurations.push(...MML.Convert.tempoMaterial(sounding.map(ev => ev.frame), sounding.map(ev => ev.len)));
       tempoChannels.push({ events: sounding.map(ev => ({ start: ev.frame, end: ev.frame + ev.len, note: 60 })) });
@@ -3133,6 +3277,7 @@
     const detuneEntries = [];
     const placedTypes = {}; // 借用先の取り合い(音色分割の仮想ボイスが既存ボイスと同じ先を選んだ等)。先着優先
     const placeNotes = [];
+    const letterOfVoice = {}; // ボイス番号 → パート文字(遅延複製の共通行 copyDelay の解決用)
     for (let ch = 0; ch < voiceEvents.length; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip') continue;
@@ -3150,6 +3295,7 @@
       if (!targetLetter) continue;
       if (placedTypes[targetType] !== undefined) { placeNotes.push(`V${cfg.splitFrom !== undefined ? cfg.splitFrom : ch} → ${targetType} は既に V${placedTypes[targetType]} に使われているため変換対象外です。`); continue; }
       placedTypes[targetType] = cfg.splitFrom !== undefined ? cfg.splitFrom : ch;
+      letterOfVoice[ch] = targetLetter;
       // 音色(srcn)ごとの音色指定(toneSettings[key].tone[種別])。ボイスの指定 cfg.tone を音色単位で上書きする
       const toneKind = MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.toneKindOfTarget ? MML.Convert.ChannelPlan.toneKindOfTarget(targetType, 'brr') : null;
       const toneOfEv = (ev) => {
@@ -3260,7 +3406,14 @@
       if (detuneFn) detuneEntries.push({ events: chEvents, periodFn: detuneFn });
       scoreChannels.push({ letter: targetLetter, events: chEvents, hasEnvelope, hasVolume,
         hasInstrument, hasVrc7Tone: anyVrc7Custom, hasDetune: !!detuneFn, hasPitchMod: !!periodFn,
-        hasNoteEnv: !!periodFn || isVrc7Target });
+        hasNoteEnv: !!periodFn || isVrc7Target,
+        // 遅延だけの複製: 共通行(SHARE_LINES)の帳尻合わせ用(mmlEmit.js shareDelayPairs)。元のパート文字は下で解決
+        copyDelay: (cfg.copyOf !== undefined && cfg.delay > 0 && !cfg.transpose && !cfg.detune) ? { ofVoice: cfg.copyOf, frames: cfg.delay } : undefined });
+    }
+    for (const sc of scoreChannels) {
+      if (!sc.copyDelay) continue;
+      const of = letterOfVoice[sc.copyDelay.ofVoice];
+      if (of) sc.copyDelay = { of, frames: sc.copyDelay.frames }; else delete sc.copyDelay;
     }
     // 全チャンネル横断でコーラス検知+D<n>補正(nsf2mmlと同じ「1回だけまとめて」方式)
     MML.Convert.detectChorusDetune(detuneEntries, detuneEntries.map(e => e.periodFn), { cmd });
@@ -3279,7 +3432,7 @@
           if (key) toneDemotions.push({ key, preset: presetByTone[idx], label: ch.letter || '' });
         }
       }
-    }).map(n => `; ※ ${n}`).concat(placeNotes.concat(splitNotes).map(n => `; ※ ${n}`));
+    }).map(n => `; ※ ${n}`).concat(copyNotes.concat(mergeNotes, placeNotes, splitNotes).map(n => `; ※ ${n}`));
 
     if (dpcmLetter) {
       scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents }); // E: 音符=@DPCM番号。@/v は出さない(mmlEmit.js DPCM_FLAGS_OFF)
@@ -3297,8 +3450,9 @@
     MML.Convert.applyNoteEnd(scoreChannels, envReg, cmd, fpb, FPS_SPC);
     if (scoreChannels.length > 0) {
       mml += MML.Convert.emitScore(scoreChannels, fpb,
-        { totalFrames: FRAMES, tempoBpm: bpm, cmd,
-          headerLines: [...MML.Convert.tuningHeaderLines(), ...vrc7Notes, ...envReg.defLines(), ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
+        // envReg: L で割られた音符の音量表を位相を合わせて続ける(mmlEmit.js retargetEnvelope)。headerLines は関数で
+        { totalFrames: FRAMES, tempoBpm: bpm, cmd, envReg,
+          headerLines: () => [...MML.Convert.tuningHeaderLines(), ...vrc7Notes, ...envReg.defLines(), ...fdsWaveReg.defLines(), ...n163WaveReg.defLines(), ...vrc7ToneReg.defLines(),
             ...pitchReg.defLines(), ...noteEnvReg.defLines()] }) + '\n';
     } else {
       for (const line of envReg.defLines()) mml += line + '\n';
@@ -3397,6 +3551,12 @@
  *                 開始位相ごとに違い、同じ楽器でも 3,2,2 / 2,3,2 / 2,2,3 の変種が量産される。ppmck の
  *                 @v はフレーム毎の絶対値なので正確に1本にはできず、これは段の境目が最大1フレーム動く
  *                 近似(ハードウェア減衰表・exact 表は対象外)
+ *   ENV_FIT     … @v/@vr 表を NSF の上限に収める(2026-09-29、既定 true = 全コマンド・プレーン譜面とも ON)。
+ *                 NSF は表の番号を1バイトで持つので1曲で各255種類まで。使われている表がそれを超えた曲だけ、
+ *                 聞こえの差(音量の0.6乗の差の合計)×使う音符の数が小さい組から、片方の表を使う音符をもう片方へ
+ *                 付け替えて255種類まで減らす(EnvelopeRegistry.fitToLimit)。上限以下の曲の出力は変わらない。
+ *                 付け替えた曲は MML ヘッダに注記を書く。false なら上限を超えたまま出す(ブラウザ再生はできるが
+ *                 NSF 書き出しはエラーになる)
  *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)。
  *                 伸ばした区間は最後の音量のまま鳴るので近似
  *   FOLD_DOUBLES … 合成ch(プール式PCMの論理レーン。PSF/VGMのMultiPCM等)の複製パートを省く(2026-09-14、
@@ -3476,7 +3636,7 @@
   MML.Convert = MML.Convert || {};
 
   const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'VRC7_ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
-  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE', 'GATE_APPROX', 'FOLD_DOUBLES'];
+  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE', 'ENV_FIT', 'GATE_APPROX', 'FOLD_DOUBLES'];
   // GATE_TOL: ゲートを揃える(GATE_APPROX)ときに許すキーオフ位置のずれ(フレーム、0〜8、既定2)
   const GATE_TOL_DEFAULT = 2, GATE_TOL_MAX = 8;
   MML.Convert.GATE_TOL_DEFAULT = GATE_TOL_DEFAULT;
@@ -3536,13 +3696,24 @@
   //                   ループ周期を全チャンネルの音符列から検出し、イントロ+1周ぶんだけを書き出して各チャンネルの
   //                   ループ開始位置へ L を置く。5分ぶん変換しても曲データが1周ぶんで済む(NSFが小さくなる)。
   //                   イントロとループ区間の長さは全チャンネルで tick 単位に一致させる(ずれると周回ごとにずれる)
-  const LAYOUT_DEFAULTS = { PART_ORDER: 'block', BARS_PER_LINE: 4, BAR_ALIGN: false, CHANNEL_ORDER: 'letter', LOOP_DETECT: true };
+  //   SHARE_LINES   … 同じ音符列のチャンネルを「AB c4」の共通行で書く(2026-09-29、src/convert/mmlEmit.js shareLinesPlan)。
+  //                   'off'(既定)/'auto'(SHARE_SPLIT_MAX・SHARE_MIN_BARS の条件を満たす組だけ)/'always'。
+  //                   チャンネルごとに違う命令は音符の直前に「A v12」の行で分けるので、@v/D を出す設定では細切れになる
+  //                   (プレーン譜面の方が読みやすい)
+  //   SHARE_SPLIT_MAX … 'auto' の上限: 命令違いで挟む行数 ÷ 共通行の音符数(0〜1、既定 0.25)
+  //   SHARE_MIN_BARS  … 'auto' の下限: 共通行が連続する小節数(1〜16、既定 2)
+  const SHARE_LINES_VALUES = ['off', 'auto', 'always'];
+  const SHARE_MIN_BARS_MAX = 16;
+  const LAYOUT_DEFAULTS = { PART_ORDER: 'block', BARS_PER_LINE: 4, BAR_ALIGN: false, CHANNEL_ORDER: 'letter', LOOP_DETECT: true,
+    SHARE_LINES: 'off', SHARE_SPLIT_MAX: 0.25, SHARE_MIN_BARS: 2 };
   const LAYOUT_KEYS = Object.keys(LAYOUT_DEFAULTS);
   MML.Convert.LAYOUT_DEFAULTS = LAYOUT_DEFAULTS;
   MML.Convert.LAYOUT_KEYS = LAYOUT_KEYS;
   MML.Convert.PART_ORDER_VALUES = PART_ORDER_VALUES;
   MML.Convert.CHANNEL_ORDER_VALUES = CHANNEL_ORDER_VALUES;
   MML.Convert.BARS_PER_LINE_MAX = BARS_PER_LINE_MAX;
+  MML.Convert.SHARE_LINES_VALUES = SHARE_LINES_VALUES;
+  MML.Convert.SHARE_MIN_BARS_MAX = SHARE_MIN_BARS_MAX;
   // 音符の区切り(冒頭コメント NOTE_END)
   const NOTE_END_VALUES = ['next', 'zero'];
   MML.Convert.NOTE_END_VALUES = NOTE_END_VALUES;
@@ -3615,12 +3786,12 @@
   const PRESETS = {
     // 全コマンド(従来の既定。旧名「忠実再現」。キー名 faithful はそのまま)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, VRC7_ENV: false, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, ENV_MERGE: false, FOLD_DOUBLES: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
+                SHAPE_REST: false, ENV_MERGE: false, ENV_FIT: true, FOLD_DOUBLES: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'used',
                 TUNING: 'note', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, VRC7_ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, ENV_MERGE: false, FOLD_DOUBLES: true, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
+                SHAPE_REST: true, ENV_MERGE: false, ENV_FIT: true, FOLD_DOUBLES: true, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'fixed8',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
   };
@@ -3657,6 +3828,15 @@
       }
       if (cmd.BAR_ALIGN != null) out.BAR_ALIGN = !!cmd.BAR_ALIGN;
       if (cmd.LOOP_DETECT != null) out.LOOP_DETECT = !!cmd.LOOP_DETECT;
+      if (cmd.SHARE_LINES != null && SHARE_LINES_VALUES.indexOf(cmd.SHARE_LINES) >= 0) out.SHARE_LINES = cmd.SHARE_LINES;
+      if (cmd.SHARE_SPLIT_MAX != null) {
+        const v = parseFloat(cmd.SHARE_SPLIT_MAX);
+        if (v >= 0 && v <= 1) out.SHARE_SPLIT_MAX = v;
+      }
+      if (cmd.SHARE_MIN_BARS != null) {
+        const v = parseInt(cmd.SHARE_MIN_BARS, 10);
+        if (v >= 1 && v <= SHARE_MIN_BARS_MAX) out.SHARE_MIN_BARS = v;
+      }
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
       if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
       if (cmd.N163_WAVE != null && N163_WAVE_VALUES.indexOf(cmd.N163_WAVE) >= 0) out.N163_WAVE = cmd.N163_WAVE;

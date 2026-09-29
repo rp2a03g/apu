@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-22 12:12:57
+ * Built by tools/build-capture-workers.ps1 at 2026-09-30 07:49:08
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-22 12:12:57';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-09-30 07:49:08';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -5026,6 +5026,17 @@
   // 既定(2026-09-19 方針変更で変更): ロール横向き・右置き・一覧多段・1つの鍵盤・ピアノロール・ファイル情報自動。
   // 保存済みの設定がある人はそちらが優先(loadLayoutSettings)
   const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'horizontal', rollPlacement: 'right', listColumns: 'auto', rollLanes: 'all', fileInfoPlacement: 'auto', rollView: 'roll' });
+  // スマホ向けの画面(src/ui/mobileShell.js、html.ui-mobile)では既定と保存先を分ける(2026-09-23)。
+  // 既定はロール縦向き(Synthesia式。狭い画面では音符が上から降ってくる向きのほうが見やすい)・
+  // 「一覧の右」(=親いっぱいに広がる fill 配置。スマホ側の CSS が一覧とロールを切り替えて見せる)・1列。
+  // 保存先も別キーなので、スマホで変えても PC の設定は変わらない
+  const LAYOUT_STORAGE_KEY_MOBILE = 'mml_keyboardLayout_mobile_v1';
+  const LAYOUT_DEFAULTS_MOBILE = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'right', listColumns: 'single', rollLanes: 'all', fileInfoPlacement: 'top', rollView: 'roll' });
+  function isMobileUi() { return !!(MML.Device && MML.Device.uiMode && MML.Device.uiMode() === 'mobile'); }
+  function layoutDefaults() { return isMobileUi() ? LAYOUT_DEFAULTS_MOBILE : LAYOUT_DEFAULTS; }
+  function layoutStorageKey() { return isMobileUi() ? LAYOUT_STORAGE_KEY_MOBILE : LAYOUT_STORAGE_KEY; }
+  // チャンネル一覧の高さ(一覧と下の帯の境目)もスマホと PC で別に覚える
+  function rowsHeightKey() { return isMobileUi() ? 'mml_keyboardRowsHeight_mobile' : 'mml_keyboardRowsHeight'; }
   const LAYOUT_CHOICES = Object.freeze({
     rollOrientation: ['vertical', 'horizontal'],
     rollPlacement: ['bottom', 'right', 'window'],
@@ -5103,9 +5114,9 @@
       svg: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="10" height="10" rx="1.5"/></svg>' },
   };
   function loadLayoutSettings() {
-    const out = Object.assign({}, LAYOUT_DEFAULTS);
+    const out = Object.assign({}, layoutDefaults());
     try {
-      const raw = JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY) || 'null');
+      const raw = JSON.parse(localStorage.getItem(layoutStorageKey()) || 'null');
       if (raw && typeof raw === 'object') {
         for (const k of Object.keys(LAYOUT_DEFAULTS)) {
           if (LAYOUT_CHOICES[k].includes(raw[k])) out[k] = raw[k];
@@ -5115,7 +5126,23 @@
     return out;
   }
   function saveLayoutSettings(s) {
-    try { localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(s)); } catch (e) { /* ignore */ }
+    try { localStorage.setItem(layoutStorageKey(), JSON.stringify(s)); } catch (e) { /* ignore */ }
+  }
+
+  // ロールの時間軸の拡大率(2本指ピンチ、2026-09-24)。1 = ROLL_PX_PER_SEC(80px/秒)。
+  // スマホ画面と PC で別に覚える(タッチ対応の PC でつまんでもスマホの設定は変わらない)
+  const ROLL_TIME_ZOOM_MIN = 0.25, ROLL_TIME_ZOOM_MAX = 4;
+  const ROLL_PITCH_ZOOM_MAX = 6;
+  function rollZoomKey(kind) { return 'mml_roll' + kind + 'Zoom' + (isMobileUi() ? '_mobile' : ''); }
+  function loadRollZoom(kind, lo, hi) {
+    try { const v = parseFloat(localStorage.getItem(rollZoomKey(kind))); if (Number.isFinite(v)) return Math.max(lo, Math.min(hi, v)); } catch (e) { /* ignore */ }
+    return 1;
+  }
+  function saveRollZoom(kind, v) { try { localStorage.setItem(rollZoomKey(kind), v.toFixed(3)); } catch (e) { /* ignore */ } }
+  let rollTimeZoom = null; // 初回参照時に読む(MML.Device が確実に居るタイミングで)
+  function rollPxPerSec() {
+    if (rollTimeZoom === null) rollTimeZoom = loadRollZoom('Time', ROLL_TIME_ZOOM_MIN, ROLL_TIME_ZOOM_MAX);
+    return ROLL_PX_PER_SEC * rollTimeZoom;
   }
 
   // ── ロール/鍵盤の座標系 ───────────────────────────────────────
@@ -5139,7 +5166,7 @@
     const wk = pitchLen / (visibleWhite || (TOTAL_WHITE + drumUnits));
     const bk = Math.max(3, wk * 0.60);
     // 先読み時間幅(秒)と、秒→時間軸pxの変換。時間軸320pxのとき従来通り4秒/80px/秒になる
-    const windowSec = timeLen / ROLL_PX_PER_SEC;
+    const windowSec = timeLen / rollPxPerSec();
     const tPx = (sec) => (sec / windowSec) * timeLen;
     return {
       vertical, W, H, pitchLen, timeLen, wk, bk, windowSec, tPx,
@@ -5582,6 +5609,11 @@
       // 借用先にDPCMを選んだ行だけ出す「パッド」ボタン(ドラム(DPCM)パネルを開く)。
       // ツールバーではなくここに置く: DPCMを選んだ流れでそのまま詰められるため
       `<button type="button" class="kbd-assign-drum" style="display:none">${T('パッド')}</button>` +
+      // 借用先が他の行と重なった行だけに出す「まとめる」ボタン(案B、2026-09-29)。押すと同じ借用先の全行に印が付き
+      // 「まとめ中」表示に変わる(もう一度押すと解除)。文言・表示は _syncAssignSelects が決める
+      `<button type="button" class="kbd-assign-merge" style="display:none"></button>` +
+      // 複製行だけに出す「×」(この複製行を消す。src/convert/channelCopy.js)
+      `<button type="button" class="kbd-assign-copy-del" style="display:none" title="${T('この複製行を消す')}">×</button>` +
       // 音色が1つしかない借用先(三角波/のこぎり波/FME-7)に出す注記。空欄だと「未設定」に見えるため
       `<i class="kbd-assign-plain" style="display:none"></i>` +
       // 音色一覧(音色ごとの載せ先/音色)を開くボタン。指定がある行は件数を出す(_syncAssignSelects)
@@ -8038,7 +8070,7 @@
       this._listRowsHeight = 0;
       this._bigWaveWidth = 0;
       try {
-        const rh = parseInt(localStorage.getItem('mml_keyboardRowsHeight'), 10);
+        const rh = parseInt(localStorage.getItem(rowsHeightKey()), 10);
         if (Number.isFinite(rh) && rh >= 60) this._listRowsHeight = rh;
         const ww = parseInt(localStorage.getItem('mml_keyboardWaveWidth'), 10);
         if (Number.isFinite(ww) && ww >= 120) this._bigWaveWidth = ww;
@@ -8501,7 +8533,7 @@
         el.style.flex = 'none';
         el.style.height = h + 'px';
       }, () => this._activeRowsEl().offsetHeight, () => {
-        try { localStorage.setItem('mml_keyboardRowsHeight', String(this._listRowsHeight)); } catch (e) { /* ignore */ }
+        try { localStorage.setItem(rowsHeightKey(), String(this._listRowsHeight)); } catch (e) { /* ignore */ }
       });
       this._waveSplitterVEl = this._makeSplitter('vertical', (delta, start) => {
         const w = Math.max(120, Math.round(start - delta)); // 左へドラッグ=大波形が広くなる
@@ -8536,7 +8568,11 @@
       const plan = channelPlan();
       if (plan && !this._planHooked) {
         this._planHooked = true;
-        plan.onChange(() => this._refreshAssignUi());
+        plan.onChange((info) => {
+          // 複製行の追加(patch.copyOf)・削除(clearChannel は info 無し)・newFile/clear は行を組み直す
+          if (!info || (info.patch && info.patch.copyOf !== undefined)) this._rebuildCopyRows();
+          this._refreshAssignUi();
+        });
       }
       this._renderAssignToggle();
     }
@@ -8554,7 +8590,7 @@
         active = true;
         startPos = orientation === 'vertical' ? e.clientX : e.clientY;
         startSize = getStart();
-        el.setPointerCapture(e.pointerId);
+        try { el.setPointerCapture(e.pointerId); } catch (err) { /* キャプチャできなくても要素上の move で追う */ }
         el.classList.add('dragging');
         e.preventDefault();
       });
@@ -8715,6 +8751,9 @@
       body.appendChild(this._rollCanvas);
       body.appendChild(pianoWrap);
       this._rollBodyEl = body;
+      // 音程軸の拡大率(スマホ画面だけ。CSS 変数 --m-pz でロールと鍵盤の幅を広げ、本体を横スクロールさせる)
+      this._rollPitchZoom = isMobileUi() ? loadRollZoom('Pitch', 1, ROLL_PITCH_ZOOM_MAX) : 1;
+      if (isMobileUi()) body.style.setProperty('--m-pz', String(this._rollPitchZoom));
 
       // チャンネルごとのレーン表示(rollLanes='perChannel')用のコンテナ。中身(各レーンの
       // ロール+鍵盤canvas)は_rebuildLanes()が使用チャンネルに合わせて作り直す。
@@ -9312,7 +9351,7 @@
       const t = g.vertical ? (g.H - cy) : cx;
       if (t < 0 || t > g.timeLen) return null;
       const pos = this._rollLastDrawnPos || 0;
-      const sec = pos + t / ROLL_PX_PER_SEC;
+      const sec = pos + t / rollPxPerSec();
       const wkW = g.wk, bkW = g.bk;
       const offPx = lane ? (lane.offWhite || 0) * wkW : 0;
       const pitchOff = g.drumOff - offPx;
@@ -9357,38 +9396,101 @@
         const got = this.onRollSeek(songSec * denom);
         if (typeof got === 'number' && Number.isFinite(got)) this._rollDrag.pos = got / denom;
       };
+      // ── 指の操作(2026-09-24) ──
+      //  ・2本指ピンチ: 指の間隔の「時間軸方向」の変化で時間の拡大率、「音程軸方向」の変化で音程の拡大率
+      //    (音程はスマホ画面のまとめ表示だけ。ロールと鍵盤を広げて本体を横/縦スクロールさせる)
+      //  ・1本指: 最初に動いた向きで決める。時間軸方向=従来どおりドラッグでシーク、
+      //    音程軸方向(音程を拡大しているとき)=音程のスクロール
+      //  ・指で音符を「タップ」したら(動かさずに離したら)そのchを大波形へ。マウスは従来どおり押した瞬間
+      const pointers = new Map();
+      let pinch = null;
+      const vertical = () => this._layout.rollOrientation !== 'horizontal';
+      const pitchZoomable = () => isMobileUi() && !canvas._rollLane && this._rollBodyEl && this._rollBodyEl.contains(canvas);
+      const endDrag = (seekFinal) => {
+        const d = this._rollDrag;
+        if (!d) return;
+        canvas.classList.remove('dragging');
+        if (seekFinal && d.moved && d.mode === 'seek') applySeek(d.pos, true);
+        this._rollDrag = null;
+        // 次の実測位置から補間を組み直す(シーク後の位置に即座に揃える)
+        this._rollLastRawPos = null;
+        this._rollCursor = {};
+      };
       canvas.addEventListener('pointerdown', (e) => {
-        if (e.button !== 0 || !this._rollTimeline) return;
-        // ノートの上で押した場合はシークせず、そのchを大波形へフォーカスする
-        const hit = this._trackAtRollPoint(canvas, e.clientX, e.clientY, canvas._rollOnlyId != null ? canvas._rollOnlyId : null, canvas._rollLane || null);
-        if (hit) { this._selectWave(hit); e.preventDefault(); return; }
-        this._rollDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, startPos: this._rollLastDrawnPos || 0, pos: this._rollLastDrawnPos || 0, moved: false };
+        const touch = e.pointerType === 'touch';
+        if (!touch && e.button !== 0) return;
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
         try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* キャプチャ不可でも要素上のmoveで追従する */ }
+        if (touch && pointers.size === 2) {
+          endDrag(true);
+          const [a, b] = Array.from(pointers.values());
+          pinch = { sx: Math.abs(a.x - b.x), sy: Math.abs(a.y - b.y), tz: rollTimeZoom === null ? (rollPxPerSec(), rollTimeZoom) : rollTimeZoom, pz: this._rollPitchZoom || 1 };
+          e.preventDefault();
+          return;
+        }
+        if (pointers.size > 1 || !this._rollTimeline) return;
+        // ノートの上で押した場合はシークせず、そのchを大波形へフォーカスする(指はタップで判定)
+        const hit = this._trackAtRollPoint(canvas, e.clientX, e.clientY, canvas._rollOnlyId != null ? canvas._rollOnlyId : null, canvas._rollLane || null);
+        if (hit && !touch) { this._selectWave(hit); e.preventDefault(); return; }
+        const body = this._rollBodyEl;
+        this._rollDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, startPos: this._rollLastDrawnPos || 0, pos: this._rollLastDrawnPos || 0,
+          moved: false, mode: null, hit: hit || null,
+          scroll0: body ? (vertical() ? body.scrollLeft : body.scrollTop) : 0 };
         canvas.classList.add('dragging');
         e.preventDefault();
       });
       canvas.addEventListener('pointermove', (e) => {
+        const pt = pointers.get(e.pointerId);
+        if (pt) { pt.x = e.clientX; pt.y = e.clientY; }
+        if (pinch) {
+          if (pointers.size < 2) return;
+          const [a, b] = Array.from(pointers.values());
+          const sx = Math.abs(a.x - b.x), sy = Math.abs(a.y - b.y);
+          const v = vertical();
+          const t0 = v ? pinch.sy : pinch.sx, t1 = v ? sy : sx;
+          const p0 = v ? pinch.sx : pinch.sy, p1 = v ? sx : sy;
+          if (t0 > 40) rollTimeZoom = Math.max(ROLL_TIME_ZOOM_MIN, Math.min(ROLL_TIME_ZOOM_MAX, pinch.tz * t1 / t0));
+          if (p0 > 40 && pitchZoomable()) this._setRollPitchZoom(pinch.pz * p1 / p0, (a.x + b.x) / 2, (a.y + b.y) / 2);
+          else this._rollZoomRedraw();
+          return;
+        }
         const d = this._rollDrag;
         if (!d || e.pointerId !== d.id) return;
         const dx = e.clientX - d.x, dy = e.clientY - d.y;
-        if (!d.moved && Math.abs(dx) < 2 && Math.abs(dy) < 2) return; // クリック程度の揺れでは動かさない
-        d.moved = true;
-        const vertical = this._layout.rollOrientation !== 'horizontal';
-        const deltaSec = (vertical ? dy : -dx) / ROLL_PX_PER_SEC;
+        if (!d.moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return; // タップ程度の揺れでは動かさない
+        const v = vertical();
+        if (!d.moved) {
+          d.moved = true;
+          const alongPitch = Math.abs(v ? dx : dy) > Math.abs(v ? dy : dx);
+          d.mode = (alongPitch && pitchZoomable() && (this._rollPitchZoom || 1) > 1.01) ? 'pan' : 'seek';
+        }
+        if (d.mode === 'pan') {
+          const body = this._rollBodyEl;
+          if (v) body.scrollLeft = d.scroll0 - dx; else body.scrollTop = d.scroll0 - dy;
+          return;
+        }
+        const deltaSec = (v ? dy : -dx) / rollPxPerSec();
         d.pos = Math.max(0, d.startPos + deltaSec);
         applySeek(d.pos, false);
         this._renderRoll(this._rollLastRawPosForDrag()); // 即座に追従して描く
       });
       const finish = (e) => {
+        pointers.delete(e.pointerId);
+        try { canvas.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        if (pinch) {
+          if (pointers.size < 2) {
+            pinch = null;
+            saveRollZoom('Time', rollTimeZoom || 1);
+            if (pitchZoomable()) saveRollZoom('Pitch', this._rollPitchZoom || 1);
+            pointers.clear(); // 残った1本は新しいドラッグを始めない(離して押し直してもらう)
+          }
+          return;
+        }
         const d = this._rollDrag;
         if (!d || e.pointerId !== d.id) return;
-        try { canvas.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-        canvas.classList.remove('dragging');
-        if (d.moved) applySeek(d.pos, true);
-        this._rollDrag = null;
-        // 次の実測位置から補間を組み直す(シーク後の位置に即座に揃える)
-        this._rollLastRawPos = null;
-        this._rollCursor = {};
+        const tapHit = !d.moved && d.hit;
+        endDrag(e.type === 'pointerup');
+        if (tapHit) this._selectWave(tapHit);
       };
       canvas.addEventListener('pointerup', finish);
       canvas.addEventListener('pointercancel', finish);
@@ -9396,6 +9498,41 @@
     // ドラッグ中に_renderRoll()を即時呼びするための「直前の実測位置」(無ければ0)。
     // _renderRoll()はドラッグ中は表示位置に_rollDrag.posを使うので値自体は補間の帳尻用
     _rollLastRawPosForDrag() { return this._rollLastRawPos == null ? 0 : this._rollLastRawPos; }
+
+    // 音程軸の拡大率を変える(スマホ画面のまとめ表示)。指の中心(clientX/Y)の下にある音程が動かないように
+    // スクロール位置を合わせる
+    _setRollPitchZoom(z, clientX, clientY) {
+      const body = this._rollBodyEl;
+      if (!body) return;
+      z = Math.max(1, Math.min(ROLL_PITCH_ZOOM_MAX, z));
+      const old = this._rollPitchZoom || 1;
+      const v = this._layout.rollOrientation !== 'horizontal';
+      const r = body.getBoundingClientRect();
+      const off = v ? clientX - r.left : clientY - r.top;
+      const content = (v ? body.scrollLeft : body.scrollTop) + off;
+      this._rollPitchZoom = z;
+      body.style.setProperty('--m-pz', String(z));
+      const ns = Math.max(0, content * z / old - off);
+      if (v) body.scrollLeft = ns; else body.scrollTop = ns;
+      this._rollZoomRedraw();
+    }
+    // 拡大率を変えた直後の描き直し(停止中は rAF が回っていないので自分で描く。サイズはレイアウト確定後に読む)
+    _rollZoomRedraw() {
+      if (this._rollZoomPending) return;
+      this._rollZoomPending = true;
+      const run = () => {
+        this._rollZoomPending = false;
+        for (const c of [this._rollCanvas, this._canvas]) {
+          if (!c) continue;
+          const w = c.clientWidth, h = c.clientHeight;
+          if (w) c._cachedWidth = w;
+          if (h) c._cachedHeight = h;
+        }
+        this._redrawRollForSpotlight();
+        this._drawPianos(this._lastPianoChannels || this._lastChannels || []);
+      };
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run); else run();
+    }
 
     // ── スポットライト(案D) ────────────────────────────────────────
     // チャンネル一覧の行にホバー(一時)/ch名クリック(固定)で「注目ch」を決め、ロール描画で
@@ -10137,7 +10274,7 @@
     }
     /** そのchの表示色(色の上書き込み) */
     getChannelColor(chId) {
-      const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+      const el = this._allRowEls().find(e => e.id === chId);
       return el ? el.color : null;
     }
     /** 割当UI(part列/セレクト/重複警告)の再描画を外から促す(音色ごとの指定の件数表示など) */
@@ -10554,8 +10691,8 @@
       else this._colorOverrides.delete(id);
       saveColorOverrides(this._colorOverrides);
 
-      for (const el of this._rowEls.concat(this._spcRowEls)) {
-        if (el.id !== id) continue;
+      for (const el of this._allRowEls()) {
+        if (el.id !== id && el.copyOf !== id) continue; // 複製行は元の行の色に追随する
         const newColor = this._getColor(id, el.defaultColor || el.color);
         el.color = newColor;
         const dot = el.row.querySelector('.kbd-dot');
@@ -10601,7 +10738,7 @@
       toneSel.addEventListener('change', () => {
         // 「音色ごとに指定…」: 値ではなく音色一覧(src/ui/tonePanel.js)をこのchで開く操作
         if (toneSel.value === plan.TONE_PER_INSTRUMENT) {
-          const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+          const el = this._allRowEls().find(e => e.id === chId);
           if (el) this._syncAssignSelects(el);
           if (this.onOpenTonePanel) this.onOpenTonePanel(chId);
           return;
@@ -10613,6 +10750,8 @@
       });
       // クリックが行の他の操作(大波形選択・色ピッカー)に伝播しないようにする
       for (const el of [targetSel, toneSel]) el.addEventListener('click', (e) => e.stopPropagation());
+      const mergeBtn = row.querySelector('.kbd-assign-merge');
+      if (mergeBtn) mergeBtn.addEventListener('click', (e) => { e.stopPropagation(); this._toggleMergeGroup(chId); });
       const drumBtn = row.querySelector('.kbd-assign-drum');
       if (drumBtn) drumBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -10637,7 +10776,7 @@
     _defaultTargetOf(chId) {
       const plan = channelPlan();
       if (!plan) return 'skip';
-      const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+      const el = this._allRowEls().find(e => e.id === chId);
       return (el && el.defaultTarget) || plan.defaultTarget(chId, 'skip');
     }
 
@@ -10647,11 +10786,146 @@
     // SPCの行(_spcRowEls)は警告だけ、と形式で挙動が違っていた。自動解除は選んだ側の意図を
     // 越えて他の行を書き換えてしまうので、どちらを鳴らすかはユーザーが赤い行を見て決める。
     // 変換器側は従来どおり先着優先(後のchは「変換対象外」の注記)。
+    // value は借用先タイプ、または '<借用先>+merge'(セレクトの「(V0 とまとめる)」項目。案A)
     _setAssignTarget(chId, value) {
       const plan = channelPlan();
       if (!plan) return;
       const def = this._defaultTargetOf(chId);
-      plan.set(chId, { target: value === def ? null : value, tone: null });
+      const m = /^(.+)\+merge$/.exec(value);
+      const target = m ? m[1] : value;
+      const cur = plan.get(chId) || {};
+      const curTarget = cur.target || def || 'skip';
+      // この行がまとめから抜けるとき、相手が1行だけならその行の印だけが残るので一緒に外す
+      if (cur.merge && !(m && target === curTarget)) this._releaseMergePeers(chId, curTarget);
+      const patch = { target: target === def ? null : target, merge: m ? true : null };
+      if (target !== curTarget) patch.tone = null; // 借用先を変えたら音色の指定は既定へ(従来どおり)
+      plan.set(chId, patch);
+      if (m) for (const e of this._mergePeers(chId, target)) plan.set(e.id, { merge: true });
+    }
+
+    // ── 「まとめる」の相手(同じ一覧で同じ借用先を選んでいる他の行)──
+    _assignRows() {
+      const mode = this._mode === 'spc' ? 'spc' : 'nsf';
+      return (this._mode === 'spc' ? this._spcRowEls : this._rowEls).filter(e => !e.isAllRow && e.partEl)
+        .concat((this._copyRowEls || []).filter(e => e.mode === mode));
+    }
+    // NSF側・SPC側・複製行の全部(行IDで引くとき用)
+    _allRowEls() {
+      return this._rowEls.concat(this._spcRowEls, this._copyRowEls || []);
+    }
+
+    // ── 複製行(src/convert/channelCopy.js、2026-09-29) ──
+    // 元chの直下に '<元ch>#<n>' の行を置く。生値の列(音量/波形/音程)は元の行を見れば足りるので空け、
+    // ch名・part文字・割当セル(借用先/音色/まとめる/×)だけを持つ。行数の一致に頼る更新ループ
+    // (update()/updateSpcVoices は channels[i] ↔ rows[i])を壊さないよう、_rowEls/_spcRowEls には入れず
+    // _copyRowEls に別で持つ(割当UIの一覧 _assignRows() には入る)
+    _buildCopyRow(srcEl, copyId, mode) {
+      const plan = channelPlan();
+      const row = document.createElement('div');
+      row.className = 'kbd-ch-row kbd-ch-row--copy';
+      const ent = (plan && plan.get(copyId)) || {};
+      const target = ent.target || 'skip';
+      const letter = plan ? plan.letterOfTarget(target) : '';
+      const srcName = this._rowName(srcEl);
+      const name = MML.Convert.ChannelCopy ? MML.Convert.ChannelCopy.label(srcName, copyId) : copyId;
+      row.innerHTML =
+        `<span class="kbd-dot" style="background:${srcEl.color || ''}"></span>` +
+        partChipHtml({ id: copyId, letter, target }) +
+        `<span class="kbd-mute-ph"></span>` +
+        `<span class="kbd-name kbd-name--copy" title="${T('この行は {ch} の複製です。借用先・音色・まとめるを別に選べます', { ch: srcName })}">${name}</span>` +
+        assignCellHtml({ id: copyId }) +
+        `<span class="kbd-copy-of">${T('{ch} と同じ音', { ch: srcName })}</span>`;
+      const delBtn = row.querySelector('.kbd-assign-copy-del');
+      if (delBtn) {
+        delBtn.style.display = '';
+        delBtn.addEventListener('click', (e) => { e.stopPropagation(); if (plan) plan.clearChannel(copyId); });
+      }
+      this._wireAssign(row, { id: copyId, target });
+      return {
+        id: copyId, row, isCopy: true, copyOf: srcEl.id, mode, chip: srcEl.chip || '', collapsed: false,
+        partEl: row.querySelector('.kbd-part'),
+        targetSel: row.querySelector('.kbd-assign-target'),
+        toneSel: row.querySelector('.kbd-assign-tone'),
+        drumBtn: row.querySelector('.kbd-assign-drum'),
+        mergeBtn: row.querySelector('.kbd-assign-merge'),
+        tonesBtn: row.querySelector('.kbd-assign-tones'),
+        plainEl: row.querySelector('.kbd-assign-plain'),
+        delBtn,
+        defaultTarget: 'skip', target, letter, color: srcEl.color,
+      };
+    }
+    // mode('nsf'|'spc'、省略時は両方)の複製行を捨てて、割当(copiesOf)から作り直す
+    _rebuildCopyRows(mode) {
+      const plan = channelPlan();
+      const modes = mode ? [mode] : ['nsf', 'spc'];
+      this._copyRowEls = (this._copyRowEls || []).filter(e => {
+        if (modes.indexOf(e.mode) < 0) return true;
+        e.row.remove();
+        return false;
+      });
+      if (!plan || !plan.copiesOf) return;
+      for (const m of modes) {
+        const base = (m === 'spc' ? this._spcRowEls : this._rowEls).filter(e => !e.isAllRow && e.partEl);
+        for (const srcEl of base) {
+          let after = srcEl.row;
+          for (const copyId of plan.copiesOf(srcEl.id)) {
+            const el = this._buildCopyRow(srcEl, copyId, m);
+            after.insertAdjacentElement('afterend', el.row);
+            after = el.row;
+            this._copyRowEls.push(el);
+          }
+        }
+      }
+    }
+    _effectiveTargetOf(el) {
+      const plan = channelPlan();
+      return ((plan && plan.get(el.id)) || {}).target || el.defaultTarget || 'skip';
+    }
+    _mergePeers(chId, target) {
+      if (!target || target === 'skip' || MULTI_SOURCE_TARGETS.has(target)) return [];
+      return this._assignRows().filter(e => e.id !== chId && this._effectiveTargetOf(e) === target);
+    }
+    // この行を含む同じ借用先の全行に印を付ける/外す(ポップオーバーのチェック・行のボタン・セレクト項目の共通処理)
+    _setMergeGroup(chId, on) {
+      const plan = channelPlan();
+      if (!plan) return;
+      const el = this._assignRows().find(e => e.id === chId);
+      if (!el) return;
+      const target = this._effectiveTargetOf(el);
+      for (const e of this._mergePeers(chId, target).concat([el])) plan.set(e.id, { merge: on ? true : null });
+    }
+    _toggleMergeGroup(chId) {
+      const plan = channelPlan();
+      if (!plan) return;
+      const el = this._assignRows().find(e => e.id === chId);
+      if (!el) return;
+      const target = this._effectiveTargetOf(el);
+      const on = !!(plan.get(chId) || {}).merge && this._mergePeers(chId, target).some(e => !!(plan.get(e.id) || {}).merge);
+      this._setMergeGroup(chId, !on);
+    }
+    // まとめから抜ける行の相手が1行だけなら、その行の印も外す(印が1行だけ残っても意味が無い)
+    _releaseMergePeers(chId, target) {
+      const plan = channelPlan();
+      const flagged = this._mergePeers(chId, target).filter(e => !!(plan.get(e.id) || {}).merge);
+      if (flagged.length === 1) plan.set(flagged[0].id, { merge: null });
+    }
+    // セレクトに足す「(V0 とまとめる)」項目(案A): 候補 list のうち他の行が既に使っている借用先ごとに1つ。
+    // 戻り値 [{ value: '<借用先>+merge', target, chs }]
+    _mergeTargetOptions(chId, list) {
+      const out = [];
+      for (const t of list) {
+        const peers = this._mergePeers(chId, t);
+        if (peers.length) out.push({ value: t + '+merge', target: t, chs: peers.map(e => this._rowName(e)).join(', ') });
+      }
+      return out;
+    }
+    // 今この行が「まとめ中」か(印があり、同じ借用先の相手にも印がある)
+    _isMergedRow(chId) {
+      const plan = channelPlan();
+      if (!plan) return false;
+      const el = this._assignRows().find(e => e.id === chId);
+      if (!el || !(plan.get(chId) || {}).merge) return false;
+      return this._mergePeers(chId, this._effectiveTargetOf(el)).some(e => !!(plan.get(e.id) || {}).merge);
     }
 
     // セレクトの中身を現在の割当に合わせて作り直す(借用先を変えると音色の選択肢も変わる)
@@ -10664,7 +10938,10 @@
       const opts = plan.targetsForChannel(el.id, el.defaultTarget, this._availTargets());
       // 既定の借用先が候補に無い(種別判定と既定がずれている)場合も選べるように足す
       const list = opts.indexOf(target) >= 0 ? opts : opts.concat([target]);
-      const sig = list.join(',') + '|' + target;
+      // 案A: 他の行が使っている借用先には「A: 2A03 Pulse1 +V0」(=V0 とまとめる)の項目も出す
+      const mergeOpts = this._mergeTargetOptions(el.id, list);
+      const mergedNow = this._isMergedRow(el.id);
+      const sig = list.join(',') + '|' + target + '|' + mergeOpts.map(o => o.value + ':' + o.chs).join(',');
       if (el.targetSig !== sig) {
         el.targetSig = sig;
         el.targetSel.innerHTML = '';
@@ -10682,9 +10959,32 @@
           const c = plan.colorOfTarget ? plan.colorOfTarget(t) : '';
           if (c) o.style.backgroundColor = tintOf(c);
           el.targetSel.appendChild(o);
+          // 同じ借用先の「まとめる」項目はその直下に(幅が狭いので短く「+V0」)
+          const mo = mergeOpts.find(x => x.target === t);
+          if (mo) {
+            const o2 = document.createElement('option');
+            o2.value = mo.value;
+            o2.textContent = plan.targetLabel(t) + ' +' + mo.chs;
+            o2.title = T('同じ借用先の {chs} と1パートにまとめる', { chs: mo.chs });
+            if (c) o2.style.backgroundColor = tintOf(c);
+            el.targetSel.appendChild(o2);
+          }
         }
       }
-      el.targetSel.value = target;
+      el.targetSel.value = mergedNow ? target + '+merge' : target;
+      // 案B: 借用先が他の行と重なった行だけに「まとめる」ボタン。まとめ中は「まとめ中」(押すと解除)
+      if (el.mergeBtn) {
+        const show = !!(el.dup || el.merged);
+        el.mergeBtn.style.display = show ? '' : 'none';
+        if (show) {
+          const chs = this._mergePeers(el.id, target).map(e => this._rowName(e)).join(', ');
+          el.mergeBtn.textContent = el.merged ? T('まとめ中') : T('まとめる');
+          el.mergeBtn.title = el.merged
+            ? T('{chs} と1パートにまとめて {target} へ変換する', { chs, target: plan.targetLabel(target) }) + ' ' + T('(クリックで解除)')
+            : T('同じ借用先の {chs} と1パートにまとめる', { chs });
+          el.mergeBtn.classList.toggle('kbd-assign-merge--on', !!el.merged);
+        }
+      }
       // 以前は借用先の色をセレクト本文とpart列の文字色に塗っていた。もう塗らないので、
       // 行を作り直さずに切り替わったときのために明示的に消しておく
       el.targetSel.style.color = '';
@@ -10742,20 +11042,33 @@
       el.toneSel.value = ent.tone !== undefined ? ent.tone : to.def;
     }
 
+    // 行の表示名(ch名の列。V0 / OM1 等)
+    _rowName(el) {
+      const nameEl = el.row && el.row.querySelector('.kbd-name');
+      return (nameEl && nameEl.textContent) || el.id;
+    }
+    // 同じ借用先で「まとめる」印の付いた他の行の名前(まとめ表示のツールチップ用)
+    _mergePeerNames(rows, el) {
+      return rows.filter(e => e !== el && e.target === el.target && e.merge).map(e => this._rowName(e)).join(', ');
+    }
+
     // 割当が変わったとき(plan.onChange)に呼ぶ。part列の文字・スキップの減光・
-    // 借用先の重複(赤)を表示中の全行へ反映する。
+    // 借用先の重複(赤)/まとめる(破線)を表示中の全行へ反映する。
     _refreshAssignUi() {
       const plan = channelPlan();
       if (!plan) return;
       // ★対象は「今表示中の一覧」だけ。両方(_rowEls+_spcRowEls)を混ぜると、SPC表示中に
       //   隠れているNSF側の行(A/B/C/D…)まで数えてしまい、全行が重複警告になる
-      const rows = (this._mode === 'spc' ? this._spcRowEls : this._rowEls)
-        .filter(el => !el.isAllRow && el.partEl);
-      const count = {};
+      const rows = this._assignRows();
+      const count = {}, mergeCount = {};
       for (const el of rows) {
         const ent = plan.get(el.id) || {};
         el.target = ent.target || el.defaultTarget || 'skip';
-        if (el.target !== 'skip') count[el.target] = (count[el.target] || 0) + 1;
+        el.merge = !!ent.merge;
+        if (el.target !== 'skip') {
+          count[el.target] = (count[el.target] || 0) + 1;
+          if (el.merge) mergeCount[el.target] = (mergeCount[el.target] || 0) + 1;
+        }
       }
       // スキップの減光と重複警告は「割当が意味を持つ形式」だけに出す。NSFのようにMMLパート文字を
       // 持たない行(MMC5の$5011直接PCM等)まで一律に減光すると、従来の見た目を壊してしまう
@@ -10770,10 +11083,18 @@
         // 半分の行が沈んで見える。方針 2026-09-12)
         el.row.classList.toggle('kbd-ch-row--skip', this._assignMode && editable && el.target === 'skip');
         // DPCMは複数chをまとめて載せる先なので重複扱いにしない(上の MULTI_SOURCE_TARGETS 参照)
-        const dup = editable && el.target !== 'skip' && !MULTI_SOURCE_TARGETS.has(el.target) && count[el.target] > 1;
+        const shared = editable && el.target !== 'skip' && !MULTI_SOURCE_TARGETS.has(el.target) && count[el.target] > 1;
+        // 「まとめる」(2026-09-29): 同じ借用先を選んだ行のうち、まとめる印が2行以上に付いていればそれらは
+        // 1パートとして変換される(src/convert/channelMerge.js)。赤い重複ではなく破線で示す。
+        // 印の無い行は従来どおり重複(先着優先)
+        const merged = shared && el.merge && mergeCount[el.target] > 1;
+        const dup = shared && !merged;
+        el.dup = dup; el.merged = merged; // 行の「まとめる」ボタン(案B、_syncAssignSelects)用
         el.row.classList.toggle('kbd-ch-row--conflict', dup);
+        el.row.classList.toggle('kbd-ch-row--merged', merged);
         if (el.partEl) {
-          el.partEl.title = dup ? T('この借用先は他のチャンネルと重複しています')
+          el.partEl.title = merged ? T('{chs} と1パートにまとめて {target} へ変換する', { chs: this._mergePeerNames(rows, el), target: plan.targetLabel(el.target) })
+            : dup ? T('この借用先は他のチャンネルと重複しています')
             : plan.editable() ? T('クリックで借用先(NSF側のパート)を選ぶ') : (plan.lockReason() || '');
         }
         this._syncAssignSelects(el);
@@ -10789,7 +11110,7 @@
       const plan = channelPlan();
       if (!plan || !plan.editable()) return;
       this._closeAssignPopover();
-      const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+      const el = this._allRowEls().find(e => e.id === chId);
       if (!el) return;
       const pop = document.createElement('div');
       pop.className = 'kbd-assign-pop';
@@ -10814,10 +11135,40 @@
           + (((t === 'dpcm' && plan.isSynthDrumTarget && plan.isSynthDrumTarget(chId, t)) || (t === 'noise' && plan.channelKind(chId) !== 'noise')) ? T('(打楽器化)') : '')
           + (t === el.defaultTarget ? T('(既定)') : '');
         targetSel.appendChild(o);
+        // 案A: 他の行が使っている借用先には「A: 2A03 Pulse1 (V0 とまとめる)」も並べる
+        const mo = this._mergeTargetOptions(chId, [t])[0];
+        if (mo) {
+          const o2 = document.createElement('option');
+          o2.value = mo.value;
+          o2.textContent = plan.targetLabel(t) + ' (' + T('{chs} とまとめる', { chs: mo.chs }) + ')';
+          targetSel.appendChild(o2);
+        }
       }
-      targetSel.value = target;
+      targetSel.value = this._isMergedRow(chId) ? target + '+merge' : target;
       targetSel.addEventListener('change', () => { this._setAssignTarget(chId, targetSel.value); this._openAssignPopover(anchorEl, chId); });
       pop.appendChild(rowOf(T('借用先'), targetSel));
+
+      // 「まとめる」(2026-09-29): 同じ借用先を選んだ行が他にもあるときだけ出す。ONで同じ借用先の全行に
+      // 印を付け(片側だけ付いた中途半端な状態を作らない)、変換器はそれらを1本の音符列(次の音が始まったら
+      // 前の音を切る)にして載せる(src/convert/channelMerge.js)。E(DPCM)は元々複数chをまとめる先なので出さない
+      const rowsNow = this._assignRows();
+      const peers = (target !== 'skip' && !MULTI_SOURCE_TARGETS.has(target))
+        ? rowsNow.filter(e => e.id !== chId && ((plan.get(e.id) || {}).target || e.defaultTarget || 'skip') === target) : [];
+      if (peers.length) {
+        const mergeWrap = document.createElement('span');
+        mergeWrap.className = 'kbd-assign-pop-merge';
+        const chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.checked = !!ent.merge && peers.some(e => !!(plan.get(e.id) || {}).merge);
+        chk.addEventListener('change', () => {
+          this._setMergeGroup(chId, chk.checked);
+          this._openAssignPopover(anchorEl, chId);
+        });
+        mergeWrap.appendChild(chk);
+        mergeWrap.appendChild(document.createTextNode(T('同じ借用先の {chs} と1パートにまとめる', { chs: peers.map(e => this._rowName(e)).join(', ') })));
+        mergeWrap.title = T('複数のチャンネルで交互に鳴らしている1つのパートを、1本の音符列にして変換する(次の音が始まった時点で前の音を切る)');
+        pop.appendChild(rowOf(T('まとめる'), mergeWrap));
+      }
 
       const toneKind = plan.toneKindFor(target, undefined, srcKind);
       if (toneKind) {
@@ -10855,6 +11206,42 @@
         vol.addEventListener('change', () => plan.set(chId, { volPct: vol.value === '100' ? null : parseInt(vol.value, 10) }));
         volWrap.appendChild(vol); volWrap.appendChild(volNum);
         pop.appendChild(rowOf(T('変換音量'), volWrap));
+      }
+      // 複製(src/convert/channelCopy.js): 元の行には「複製を追加」、複製行には見出し+加工(移調/デチューン/遅延)+削除
+      if (el.isCopy) {
+        const srcEl = this._allRowEls().find(e => e.id === el.copyOf);
+        const title = document.createElement('div');
+        title.className = 'kbd-assign-pop-title';
+        title.textContent = T('{ch} の複製', { ch: srcEl ? this._rowName(srcEl) : el.copyOf });
+        pop.insertBefore(title, pop.firstChild);
+        const numRow = (labelText, key, min, max, hint) => {
+          const inp = document.createElement('input');
+          inp.type = 'number'; inp.min = String(min); inp.max = String(max); inp.step = '1';
+          inp.className = 'kbd-assign-pop-num';
+          inp.value = String(ent[key] || 0);
+          inp.title = hint;
+          inp.addEventListener('change', () => {
+            const v = Math.max(min, Math.min(max, Math.round(parseFloat(inp.value) || 0)));
+            inp.value = String(v);
+            plan.set(chId, { [key]: v !== 0 ? v : null });
+          });
+          pop.appendChild(rowOf(labelText, inp));
+        };
+        numRow(T('移調(半音)'), 'transpose', -36, 36, T('複製の音を半音単位で上下する(+12=1オクターブ上)。ビブラート/デチューンの抽出も同じ比で追従する'));
+        numRow(T('デチューン(セント)'), 'detune', -100, 100, T('複製の音程を少しずらしてコーラスにする(D<n> として書き出される)'));
+        numRow(T('遅延(フレーム)'), 'delay', 0, 600, T('複製をこのフレーム数だけ遅らせてエコーにする(60フレーム=1秒。曲末を越えた分は切る)'));
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.textContent = T('この複製を削除');
+        delBtn.addEventListener('click', () => { this._closeAssignPopover(); plan.clearChannel(chId); });
+        pop.appendChild(rowOf(T('複製'), delBtn));
+      } else if (plan.addCopy && plan.format() !== 'nsf') {
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.textContent = T('複製を追加');
+        addBtn.title = T('この ch の音をもう1本、別の借用先へも載せる(直下に複製行ができる。移調・デチューン・遅延も複製ごとに付けられる)');
+        addBtn.addEventListener('click', () => { this._closeAssignPopover(); plan.addCopy(chId); });
+        pop.appendChild(rowOf(T('複製'), addBtn));
       }
       const foot = document.createElement('div');
       foot.className = 'kbd-assign-pop-foot';
@@ -11087,7 +11474,7 @@
         const tog = group.querySelector('.kbd-chip-toggle');
         if (tog) tog.textContent = collapsed ? '▶' : '▼';
         const count = group.querySelector('.kbd-chip-count');
-        if (count) count.textContent = T('({n}ch)', { n: group.querySelectorAll('.kbd-ch-row').length });
+        if (count) count.textContent = T('({n}ch)', { n: group.querySelectorAll('.kbd-ch-row:not(.kbd-ch-row--copy)').length });
       }
       for (const el of this._rowEls) {
         const collapsed = !!el.chip && this._chipCollapsed.has(el.chip);
@@ -11291,6 +11678,7 @@
           targetSel: row.querySelector('.kbd-assign-target'),
           toneSel: row.querySelector('.kbd-assign-tone'),
           drumBtn: row.querySelector('.kbd-assign-drum'),
+          mergeBtn: row.querySelector('.kbd-assign-merge'), // 案B: 重複/まとめ中の行だけに出す「まとめる」ボタン(_syncAssignSelects)
           tonesBtn: row.querySelector('.kbd-assign-tones'),
           plainEl: row.querySelector('.kbd-assign-plain'),
           defaultTarget: ch.defaultTarget,
@@ -11304,6 +11692,7 @@
         this._syncShownWave(this._rowEls);
         this._rebuildLanes(); // チャンネルごとのレーン表示も一覧に合わせる
       }
+      this._rebuildCopyRows('nsf'); // 複製行(割当の copyOf)を元の行の直下へ作り直す
       this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
       this._renderMuteAllBtn();
       this._renderVolResetBtn();
@@ -12398,6 +12787,7 @@
         // ★「パッド」ボタン(_syncAssignSelects が target===dpcm のとき表示する)。NSF側の行(_rowEls)には
         //   あったがSPCボイス行では参照を持っておらず、Eを選んでもボタンが出なかった(2026-09-07修正)
         drumBtn: row.querySelector('.kbd-assign-drum'),
+        mergeBtn: row.querySelector('.kbd-assign-merge'), // 案B: 重複/まとめ中の行だけに出す「まとめる」ボタン(_syncAssignSelects)
         tonesBtn: row.querySelector('.kbd-assign-tones'),
         plainEl: row.querySelector('.kbd-assign-plain'),
         defaultTarget,
@@ -12479,6 +12869,7 @@
           this._spcSectionEl.appendChild(el.row);
           return el;
         });
+        this._rebuildCopyRows('spc'); // 複製行(割当の copyOf)を元の行の直下へ作り直す
         this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
         this._renderMuteAllBtn();
         this._renderVolResetBtn();

@@ -208,6 +208,17 @@ function main() {
     if (code !== 0) bad++;
   }
 
+  // @v 表の番号(src/convert/envelope.js EnvelopeRegistry)の単体テスト(tools/headless/envreg-index-test.js)。
+  // ソフト表が100種類を超えてもハードウェア減衰表と番号が重ならないこと
+  if (!argv.includes('--no-envreg')) {
+    process.stderr.write('\n=== envreg ===\n');
+    const { code, out } = run([path.join(__dirname, 'envreg-index-test.js')]);
+    process.stderr.write(out.trim() + '\n');
+    const m = out.match(/envreg-index: ok (\d+) \/ NG (\d+)/);
+    rows.push(['envreg', m ? String(+m[1] + +m[2]) : '?', m ? m[1] : '-', m ? m[2] : 'NG', '-', '-']);
+    if (code !== 0) bad++;
+  }
+
   if (!argv.includes('--no-help')) {
     process.stderr.write('\n=== help ===\n');
     const { code, out } = run([path.join(__dirname, 'help-lint.js')]);

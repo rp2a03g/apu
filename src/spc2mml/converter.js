@@ -386,6 +386,7 @@
         hits.push({ key, sampleKey: key, hash: s.hash, pcm: s.pcm, rate, label: s.label,
                     vol: Math.max(0, Math.min(1, (ev.vol || 0) / 127)),
                     startFrame: ev.frame, endFrame: ev.frame + ev.len, ch,
+                    tempoStartFrame: tempoStartOf(ev), tempoEndFrame: tempoEndOf(ev), // テンポ推定用の丸め前の時刻(tempoStartOf 参照)
                     assignTarget: noiseChans.indexOf(ch) >= 0 ? 'noise' : 'dpcm',
                     // 音程(MIDI。pitchSemi は o4a=57 のMML番号)。ノイズパッドの「音程から自動」が周期indexを決める材料
                     srcMidi: ev.pitchSemi + 12,
@@ -778,6 +779,55 @@
   // (境界判定そのものは変えず、統合だけを共有ロジックに委ねるINV-3の原則)。
   // 分割直後の配列はmergeSpcVoiceEvents()で後処理する。
 
+  // キーオフのフレームが「鳴っている」とみなせるか(2026-09-29、extractVoiceEvents の KOFF 参照)。
+  // ko: フレーム内のキーオフ位置(サンプル)、env7: キーオフ直前のエンベロープ(0..127 = ENVX>>4)。
+  // フレームの平均音量(キーオフまでは直前の値、以後は DSP のリリース)が直前の値の半分以上なら true。
+  // リリースの式は src/emulator/spcDsp.js(envMode 'release')と同じ。変える時は両方そろえる
+  function koffFrameSounds(ko, env7) {
+    const e0 = (env7 | 0) << 4;
+    if (e0 <= 0) return false;
+    let e = e0, sum = 0;
+    for (let n = ko; n < SAMPLES_PER_FRAME; n++) {
+      e -= ((e - 1) >> 8) + 1;
+      if (e <= 0) break;
+      sum += e;
+    }
+    return (ko * e0 + sum) * 2 >= SAMPLES_PER_FRAME * e0;
+  }
+  // テンポ推定に渡す音符の頭/終わり(2026-09-29)。上のキーオン/キーオフの丸めは音符の時刻を実音に近づけるが、
+  // テンポ推定(bpm.js、2倍/半分の選択 chooseTempoOctave を含む)は丸める前の時刻で調整してあり、丸めた時刻を
+  // 渡すと音は同じなのにテンポが倍化する曲が出た(実測 88→176 BPM)。丸めた音符は丸め前/後の時刻を組で持ち、
+  // 音符の時刻がまだ丸め後のままなら丸め前を返す。統合(ビブラート等)で頭/終わりが変わった音符は今の値を使う
+  function tempoStartOf(ev) { return ev._tsOrig != null && ev._tsRound === ev.frame ? ev._tsOrig : ev.frame; }
+  function tempoEndOf(ev) { return ev._teOrig != null && ev._teRound === ev.frame + ev.len ? ev._teOrig : ev.frame + ev.len; }
+  // 遅い KON の丸め(2026-09-29): KON がフレームの後半で、最初のフレームの音量が次より小さい(立ち上がりの途中を
+  // フレーム末尾で拾った)音符は、鳴り始めを次のフレームへ寄せる。最初のフレームの半端な値({0 10 10 …})が
+  // 表を量産するのを防ぐ。直前の音符がこの KON で切られていたら、その音符を1フレーム伸ばして隙間を埋める
+  // (KON までは前の音が鳴っている)。最初のフレームがすでに平らな値なら(速いアタック)鳴り始めは動かさない
+  function roundLateKeyOns(evs) {
+    for (let i = 0; i < evs.length; i++) {
+      const ev = evs[i];
+      const o = ev._konOff;
+      if (o == null || o < 0 || o * 2 < SAMPLES_PER_FRAME) continue;
+      const vs = ev.volSeq;
+      if (!vs || vs.length < 2 || ev.len < 2 || !(vs[0] < vs[1])) continue;
+      ev._tsOrig = ev.frame; ev._tsRound = ev.frame + 1;
+      ev.frame++; ev.len--;
+      vs.shift(); // 終端(frame+len)は動かないので _teOrig/_teRound はそのまま
+      if (ev.pitchSeq && ev.pitchSeq.length > 1) ev.pitchSeq.shift();
+      ev.vol = vs.reduce((mx, v) => (v > mx ? v : mx), 0);
+      const prev = evs[i - 1];
+      if (prev && prev._closedByKon && prev.frame + prev.len === ev.frame - 1) {
+        if (prev._teOrig == null) prev._teOrig = prev.frame + prev.len;
+        prev.len++;
+        prev._teRound = prev.frame + prev.len;
+        if (prev.volSeq && prev.volSeq.length) prev.volSeq.push(prev.volSeq[prev.volSeq.length - 1]);
+        if (prev.pitchSeq && prev.pitchSeq.length) prev.pitchSeq.push(prev.pitchSeq[prev.pitchSeq.length - 1]);
+      }
+    }
+    for (const ev of evs) { delete ev._konOff; delete ev._closedByKon; }
+  }
+
   MML.SPC2MML.extractVoiceEvents = function (log, options = {}) {
     const FRAMES = log.length;
     // envLog(capture()/captureAsync()が採取): フレーム毎の実エンベロープ値(0..127)。
@@ -793,11 +843,20 @@
     const konLatched  = new Uint8Array(FRAMES);
     const koffLatched = new Uint8Array(FRAMES);
 
+    // KON/KOFF がフレーム内のどのサンプル位置で書かれたか(ボイスごとに最初の1回、-1=無し/不明)。
+    // capture()/captureAsync() の書き込みは off(0..SAMPLES_PER_FRAME)を持つ。先頭フレームの疑似書き込み
+    // (_seedInitialFrame)と off の無いログは -1 のまま(=従来どおりフレーム頭で区切る)
+    const konOff  = new Int16Array(FRAMES * 8).fill(-1);
+    const koffOff = new Int16Array(FRAMES * 8).fill(-1);
     for (let f = 0; f < FRAMES; f++) {
-      for (const { reg, val } of log[f]) {
+      for (const { reg, val, off } of log[f]) {
         dspState[reg] = val;
         if (reg === 0x4C) konLatched[f]  |= val;
         if (reg === 0x5C) koffLatched[f] |= val;
+        if ((reg === 0x4C || reg === 0x5C) && off != null) {
+          const tbl = reg === 0x4C ? konOff : koffOff;
+          for (let i = 0; i < 8; i++) if (((val >> i) & 1) && tbl[f * 8 + i] < 0) tbl[f * 8 + i] = off;
+        }
       }
     }
 
@@ -824,6 +883,7 @@
       // 「純粋な音程変化のみ」による区切りで始まったか(=スラー分割のタイ候補か)を
       // 一時保持する。KON(本物のアタック)/KOFF後の再開時はfalseにリセットする。
       let pendingTieCandidate = false;
+      let activeKonOff = -1; // この音符を始めた KON のフレーム内位置(音程変化で始まった音符は -1)
 
       for (let f = 0; f < FRAMES; f++) {
         for (const { reg, val } of log[f]) {
@@ -846,8 +906,9 @@
 
         if (konLatched[f] & (1 << ch)) {
           if (activeStart >= 0) {
-            voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
+            voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate, _konOff: activeKonOff, _closedByKon: true });
           }
+          activeKonOff = konOff[f * 8 + ch];
           activePitch = curPitch;
           activeSrcn  = voiceDsp[0x04];
           activeAdsr1 = voiceDsp[0x05];
@@ -868,7 +929,8 @@
           // このelse if節の中でactiveStart=fに更新される)をスラー分割のタイ候補とする
           // (pendingTieCandidateに立てておき、そのイベントが実際にpushされる時に読む。
           // 別プロジェクトE、2026-08-12)
-          voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
+          voiceEvents[ch].push({ frame: activeStart, len: f - activeStart, pitch: activePitch, pitchSemi: activePitchSemi, srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate, _konOff: activeKonOff });
+          activeKonOff = -1;
           activePitch = curPitch;
           activeSrcn  = voiceDsp[0x04];
           activeAdsr1 = voiceDsp[0x05];
@@ -894,7 +956,28 @@
         // されてしまう不具合があった(実SPCのV5パートで確認、ノート脱落の原因)。
         if ((koffLatched[f] & (1 << ch)) && !(konLatched[f] & (1 << ch))) {
           if (activeStart >= 0) {
-            voiceEvents[ch].push({ frame: activeStart, len: Math.max(1, f - activeStart), pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate });
+            // ★キーオフのフレームの丸め(2026-09-29): 音量列は各フレーム末尾の一点で採っているので、キーオフの
+            //   フレームの値は「キーオフ後の減衰の途中」をたまたま拾った半端な値になる(キーオフ位置しだいで 0〜直前の値)。
+            //   音符はこのフレームの頭で閉じているのに列にはこの値が1つ余分に入り、平らな音量の音符まで
+            //   「最後の1フレームだけ違う @v 表」になって表が音符ごとに量産されていた(NSF の上限 255 種を超える)。
+            //   キーオフの位置と減衰から、このフレームの平均音量が直前の半分以上なら「鳴っている」として音符を
+            //   1フレーム伸ばして直前の値で埋め、半分未満なら半端な値を捨てる(音符はフレームの頭で終わる)
+            let len = Math.max(1, f - activeStart);
+            const lenFloor = len;
+            const ko = koffOff[f * 8 + ch];
+            if (ko >= 0 && activeStart < f && activeVolSeq.length === f - activeStart + 1) {
+              const envBefore = envLog && envLog[f - 1] ? envLog[f - 1][ch] : 127;
+              if (koffFrameSounds(ko, envBefore)) {
+                len = f - activeStart + 1;
+                activeVolSeq[activeVolSeq.length - 1] = activeVolSeq[activeVolSeq.length - 2];
+              } else {
+                activeVolSeq.pop();
+                if (activePitchSeq.length > 1) activePitchSeq.pop();
+              }
+            }
+            const tempoEnd = len !== lenFloor ? { _teOrig: activeStart + lenFloor, _teRound: activeStart + len } : null;
+            voiceEvents[ch].push({ frame: activeStart, len, pitch: activePitch, pitchSemi: pitchToSemitone(activePitch, tuneOf(activeSrcn)), srcn: activeSrcn, adsr1: activeAdsr1, adsr2: activeAdsr2, gain: activeGain, vol: activeVolSeq.length ? activeVolSeq.reduce((mx, v) => (v > mx ? v : mx), 0) : activeVol, volSeq: activeVolSeq, non: activeNon, noiseRate: activeNoiseRate, pitchSeq: activePitchSeq, tieCandidate: pendingTieCandidate, _konOff: activeKonOff });
+            if (tempoEnd) Object.assign(voiceEvents[ch][voiceEvents[ch].length - 1], tempoEnd);
             activeStart = -1;
             activePitchSeq = [];
             pendingTieCandidate = false; // KOFF後、次に始まるノートは新規アタックなのでタイ候補ではない
@@ -907,6 +990,7 @@
       // rawFreq(高速アルペジオ→EN統合のセント判定用、2026-08-14拡張): mergeSpcVoiceEvents
       // (外側のIIFEスコープの関数でtuneOfへ直接アクセスできない)へ渡す前にここで計算して
       // 各イベントへ付与しておく(DESIGN-PITCH.md Phase 1のpitchRegToFreqHzを流用)。
+      roundLateKeyOns(voiceEvents[ch]);
       for (const ev of voiceEvents[ch]) ev.rawFreq = pitchRegToFreqHz(ev.pitch, tuneOf(ev.srcn));
       voiceEvents[ch] = mergeSpcVoiceEvents(voiceEvents[ch]);
     }
@@ -926,13 +1010,18 @@
       if (i > 0) {
         const prevEnd = events[i - 1].frame + events[i - 1].len;
         if (ev.frame !== prevEnd) mapped.push({ start: prevEnd, end: ev.frame, note: null });
+        // キーオフのフレームの丸め(extractVoiceEvents)で音符が1フレーム伸び、元はあった休符が消えて次の音符と
+        // 接した所には、長さ0の区切りを入れる。区切りが無いと、キーオフで打ち直していた速い音の並びが
+        // ビブラート/アルペジオとして1音にまとめられてしまう(丸め前と同じ所で区切る)
+        else if (tempoEndOf(events[i - 1]) < tempoStartOf(ev)) mapped.push({ start: prevEnd, end: prevEnd, note: null });
       }
       mapped.push({
         start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi, pitch: ev.pitch,
         rawFreq: ev.rawFreq,
         pitchSeq: ev.pitchSeq, srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain, vol: ev.vol,
         volSeq: ev.volSeq, non: ev.non, noiseRate: ev.noiseRate,
-        tieCandidate: ev.tieCandidate
+        tieCandidate: ev.tieCandidate,
+        _tsOrig: ev._tsOrig, _tsRound: ev._tsRound, _teOrig: ev._teOrig, _teRound: ev._teRound
       });
     }
     // 高速アルペジオ→EN統合(2026-08-14拡張)。登録(noteEnvReg.registerShape)は
@@ -946,7 +1035,10 @@
         srcn: ev.srcn, adsr1: ev.adsr1, adsr2: ev.adsr2, gain: ev.gain, vol: ev.vol, pitchSeq: ev.pitchSeq,
         volSeq: ev.volSeq, rawFreq: ev.rawFreq, non: ev.non, noiseRate: ev.noiseRate,
         tieCandidate: ev.tieCandidate
-      }, ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {}));
+      }, ev.noteEnvOffsets ? { noteEnvOffsets: ev.noteEnvOffsets } : {},
+      // 丸め前の時刻(tempoStartOf/tempoEndOf)。統合で start/end が変わった音符では照合が外れて使われない
+      ev._tsOrig != null ? { _tsOrig: ev._tsOrig, _tsRound: ev._tsRound } : {},
+      ev._teOrig != null ? { _teOrig: ev._teOrig, _teRound: ev._teRound } : {}));
   }
 
   // ── MML 生成 ─────────────────────────────────────────────────────────
@@ -1128,9 +1220,9 @@
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip') continue;
       const sounding = voiceEvents[ch].filter(ev => ev.pitchSemi !== null)
-        .map(ev => ({ frame: ev.frame, len: ev.len }))
+        .map(ev => { const t0 = tempoStartOf(ev); return { frame: t0, len: tempoEndOf(ev) - t0 }; }) // 丸め前の時刻(tempoStartOf 参照)
         // D(ノイズ)ボイスの打点は voiceEvents 側に音符として残っているので二重に数えない
-        .concat(drumHitsAll.filter(h => h.ch === ch && h.assignTarget !== 'noise').map(h => ({ frame: h.startFrame, len: h.endFrame - h.startFrame })))
+        .concat(drumHitsAll.filter(h => h.ch === ch && h.assignTarget !== 'noise').map(h => { const t0 = h.tempoStartFrame != null ? h.tempoStartFrame : h.startFrame; return { frame: t0, len: (h.tempoEndFrame != null ? h.tempoEndFrame : h.endFrame) - t0 }; }))
         .sort((a, b) => a.frame - b.frame);
       noteDurations.push(...MML.Convert.tempoMaterial(sounding.map(ev => ev.frame), sounding.map(ev => ev.len)));
       tempoChannels.push({ events: sounding.map(ev => ({ start: ev.frame, end: ev.frame + ev.len, note: 60 })) });

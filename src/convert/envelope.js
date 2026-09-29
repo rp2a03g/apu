@@ -154,6 +154,16 @@
     this.nextHwIndex = HARDWARE_INDEX_BASE;
   };
 
+  // 採番(2026-09-29): ソフトウェア表は0番から、ハードウェア減衰表は HARDWARE_INDEX_BASE から数えるが、
+  // どちらも上限が無いので、ソフトウェア表が100種類を超えるとハードウェア表の番号に届く。空いていない番号は
+  // 飛ばす(以前は確かめずに this.tables.set していたため、100番のハード表をソフト表で上書きしえた)。
+  // 重ならない曲では番号は従来と同じ。ソフト/ハードの見分けは番号でなく表の hw 印で行う
+  function allocIndex(reg, hardware) {
+    const k = hardware ? 'nextHwIndex' : 'nextSwIndex';
+    while (reg.tables.has(reg[k])) reg[k]++;
+    return reg[k]++;
+  }
+
   function shapeKey(shape) {
     return shape.values.join(',') + '|' + (shape.loop == null ? '-' : shape.loop);
   }
@@ -195,9 +205,9 @@
       const key = shapeKey(shape);
       let idx = this.hwKeyToIndex.get(key);
       if (idx === undefined) {
-        idx = this.nextHwIndex++;
+        idx = allocIndex(this, true);
         this.hwKeyToIndex.set(key, idx);
-        this.tables.set(idx, shape);
+        this.tables.set(idx, Object.assign({}, shape, { hw: true })); // hw: ハードウェア減衰表の印(fitToLimit が番号でなくこれで見分ける)
       }
       return idx;
     }
@@ -236,7 +246,7 @@
     // 一つでも絡む組み合わせは常に「別ノート」として扱い、それぞれ独立に登録する
     // (ループ同士の重複排除は下のshapeKeyによる完全一致のみで行う)。
     for (const [idx, existing] of this.tables) {
-      if (idx >= HARDWARE_INDEX_BASE) continue;
+      if (existing.hw) continue; // ハードウェア減衰表とは共有しない(番号で見分けない: ソフト表も100番を越えうる)
       if (existing.exact) continue; // applyNoteEnd が作った表は共有も置き換えもしない(registerExact参照)
       if (existing.loop != null || shape.loop != null) continue;
       // ★末尾保持の整合(2026-09-08): analyzeVolumeShape は末尾の同一値を1点に切り詰めるので、
@@ -268,7 +278,7 @@
     const key = shapeKey(shape);
     let idx = this.swKeyToIndex.get(key);
     if (idx === undefined) {
-      idx = this.nextSwIndex++;
+      idx = allocIndex(this, false);
       this.swKeyToIndex.set(key, idx);
       this.tables.set(idx, shape);
     }
@@ -327,7 +337,7 @@
     const key = shapeKey(shape);
     let idx = this.swKeyToIndex.get(key);
     if (idx === undefined) {
-      idx = this.nextSwIndex++;
+      idx = allocIndex(this, false);
       this.swKeyToIndex.set(key, idx);
       this.tables.set(idx, { values: shape.values.slice(), loop: shape.loop == null ? null : shape.loop });
     }
@@ -379,8 +389,8 @@
     return this.registerExact({ values: headOf(durC).concat([0]), loop: null });
   };
 
-  // 参照されなくなった表を捨てて番号を詰める(ソフトウェア0番台/ハードウェア100番台の区別は
-  // 保つ)。イベント側の envelopeV も振り直す。applyNoteEnd 専用(吸収で置き換え
+  // 参照されなくなった表を捨てて番号を詰める(100番未満は0から、100番以上は100から番号順に詰める。
+  // ソフト/ハードの区別は番号でなく表の hw 印が持つ)。イベント側の envelopeV も振り直す。applyNoteEnd 専用(吸収で置き換え
   // られた元の表が誰からも参照されなくなるため。NOTE_END='zero' では呼ばれず番号は従来のまま)
   MML.Convert.EnvelopeRegistry.prototype.compact = function (scoreChannels) {
     const used = new Set();
@@ -398,8 +408,10 @@
     this.tables = tables;
     this.swKeyToIndex = new Map();
     this.hwKeyToIndex = new Map();
-    for (const [idx, t] of tables) (idx >= HARDWARE_INDEX_BASE ? this.hwKeyToIndex : this.swKeyToIndex).set(shapeKey(t), idx);
-    this.nextSwIndex = sw;
+    // 番号の付け方は従来どおり(100未満/以上で詰める。重ならない)。形→番号の索引は hw 印で振り分ける
+    // (番号で振り分けると、100番以降のソフト表がハード表の索引に入り、同じ形のハード表と取り違える)
+    for (const [idx, t] of tables) (t.hw ? this.hwKeyToIndex : this.swKeyToIndex).set(shapeKey(t), idx);
+    this.nextSwIndex = sw;   // 以後の採番は allocIndex が空き番号を探す
     this.nextHwIndex = hw;
     for (const ch of scoreChannels || []) {
       for (const ev of (ch && ch.events) || []) if (ev.envelopeV != null) ev.envelopeV = remap.get(ev.envelopeV);
@@ -550,7 +562,7 @@
     MML.Convert.dropUnusedVolumeRefs(scoreChannels); // 出力に現れない @v/@vr 参照を落とす(compact/ENV_MERGE より前)
     MML.Convert.mergeSlurVolumes(scoreChannels, envReg); // スラー連鎖の音量列を1本の表へ(同上)
     if (c.ENV_MERGE && envReg) { envReg.mergeSimilar(scoreChannels); if (envReg._release) envReg._release.mergeSimilar(scoreChannels, 'envelopeVr'); } // 近似統合(譜面整形(近似))
-    if (c.NOTE_END !== 'next') { if (envReg) envReg.compact(scoreChannels); return stats; }
+    if (c.NOTE_END !== 'next') { if (envReg) { envReg.compact(scoreChannels); fitEnvelopeTables(scoreChannels, envReg, c); } return stats; }
     const beat = fpb > 0 ? fpb : 60;
     const maxGap = beat * 2;
     const approx = !!c.GATE_APPROX;
@@ -679,9 +691,16 @@
         ch.events.push(...out);
       }
     }
-    if (envReg) envReg.compact(scoreChannels);
+    if (envReg) { envReg.compact(scoreChannels); fitEnvelopeTables(scoreChannels, envReg, c); }
     return stats;
   };
+  // @v/@vr を NSF の上限に収める(ENV_FIT、下の fitToLimit)。compact の後(使われている表だけを数える)
+  function fitEnvelopeTables(scoreChannels, envReg, c) {
+    if (!c.ENV_FIT) return;
+    const limit = MML.Convert.NSF_ENV_TABLE_MAX;
+    if (envReg.fitToLimit(scoreChannels, 'envelopeV', limit)) envReg.compact(scoreChannels);
+    if (envReg._release) envReg._release.fitToLimit(scoreChannels, 'envelopeVr', limit);
+  }
 
   // ── スラー連鎖の音量列連結(2026-09-08) ─────────────────────────────────────
   // タイ(&)で繋いだ連鎖はコンパイラで1セグメントになり、音量は連鎖の先頭の @v/v だけが使われる
@@ -746,7 +765,7 @@
 
   // ── 似た表の近似統合(ENV_MERGE、2026-09-08。src/convert/options.js 参照) ──────────────
   // 値の並び(連続する同値を1段にまとめた段の値列)とループ位置が同じで、各段の長さが±1・全体長も
-  // ±1以内の表を1つにまとめる。残す変種は参照する音符が最も多いもの。ハードウェア減衰表(100番台)と
+  // ±1以内の表を1つにまとめる。残す変種は参照する音符が最も多いもの。ハードウェア減衰表(hw 印)と
   // exact 表(applyNoteEnd の末尾0)は対象外。field: 音符側の参照フィールド名('envelopeV' | 'envelopeVr')
   function runsOf(values) {
     const runs = [];
@@ -760,7 +779,7 @@
     // グループ化: 段の値列 + ループが始まる段番号
     const groups = new Map();
     for (const [idx, t] of this.tables) {
-      if (idx >= HARDWARE_INDEX_BASE || t.exact) continue;
+      if (t.hw || t.exact) continue; // ハードウェア減衰表(hw 印)と exact 表は対象外
       const runs = runsOf(t.values);
       let loopRun = '-';
       if (t.loop != null) {
@@ -794,6 +813,98 @@
     return remap.size;
   };
 
+  // ── 表の数を NSF の上限に収める(ENV_FIT、2026-09-29。src/convert/options.js 参照) ─────────────────
+  // NSF のバイトコードは @v/@vr の番号を1バイトで持ち $FF を解除の印に使うので、1曲で使える種類は各255まで
+  // (src/driver/ppmckDriver.js checkBytecodeLimits)。超えると NSF 書き出しがエラーで止まる。
+  // 使われている表がそれを超えたときだけ、「聞こえの差 × その表を使う音符の数」が最も小さい組から順に、
+  // 片方の表を使う音符をもう片方の表へ付け替えて上限まで減らす。上限以下の曲では何もしない(出力は不変)。
+  //   聞こえの差: フレームごとの音量の差を、音の大きさの感じ方(音量の0.6乗、スティーブンスのべき法則)で測って
+  //     足したもの。15と14の差は小さく、0と1(鳴るか鳴らないか)の差は大きく数える。比べる長さは、その表を
+  //     使う音符のうち最も長いものの長さ(表より長い部分は末尾保持/ループで延ばした値で比べる)
+  //   付け替え先は、値の上限が元の表を使うチャンネルで出せる範囲に収まるものだけ(15以下か、元の表の最大値以下。
+  //     FDS/VRC6のこぎり波の大きい値を 2A03 の表へ持ち込まない)。ハードウェア減衰表(registerShape の hw 印)は動かさない
+  // 戻り値: 付け替えた表の数。this.fitNote に MML ヘッダの注記を残す(defLines が出す)
+  MML.Convert.NSF_ENV_TABLE_MAX = 255;
+  const FIT_H_MAX = 512;
+  const loudOf = (v) => Math.pow(v > 0 ? v : 0, 0.6);
+  function tableValueAt(t, i) {
+    const v = t.values, n = v.length;
+    if (i < n) return v[i];
+    if (t.loop == null || t.loop >= n) return v[n - 1];
+    return v[t.loop + ((i - n) % (n - t.loop))];
+  }
+  MML.Convert.EnvelopeRegistry.prototype.fitToLimit = function (scoreChannels, field, limit) {
+    field = field || 'envelopeV';
+    const uses = new Map(), horizon = new Map();
+    for (const ch of scoreChannels || []) for (const ev of (ch && ch.events) || []) {
+      const idx = ev[field];
+      if (idx == null || !this.tables.has(idx)) continue;
+      uses.set(idx, (uses.get(idx) || 0) + 1);
+      // @v は音符の頭から終わりまで読まれる。audibleEnd(聞こえる区間の終わり)でなく end で比べる: NOTE_END で
+      // 伸ばした音符は表の末尾0で黙っているので、その先まで比べないと末尾0の表を0の無い表へ付け替えて鳴らしてしまう。
+      // @vr(キーオフ後)は表の長さで比べる
+      const dur = field === 'envelopeV' && ev.end != null && ev.start != null ? Math.round(ev.end - ev.start) : 0;
+      horizon.set(idx, Math.max(horizon.get(idx) || 0, dur));
+    }
+    const used = Array.from(uses.keys());
+    // ハードウェア減衰表は動かさない。番号(100番台)では見分けない: ソフトウェア表が100種類を超えると番号が100を越える
+    const cand = used.filter(i => !this.tables.get(i).hw);
+    const budget = limit - (used.length - cand.length);
+    if (cand.length <= budget || budget < 1) return 0;
+    const info = new Map();
+    for (const i of cand) {
+      const t = this.tables.get(i);
+      const H = Math.max(1, Math.min(FIT_H_MAX, Math.max(horizon.get(i) || 0, t.values.length)));
+      const max = t.values.reduce((m, v) => (v > m ? v : m), 0);
+      info.set(i, { H, max, cap: Math.max(max, 15), loud: null, uses: uses.get(i) }); // cap: この表を使う音符が出せる値の上限
+    }
+    const Hall = Math.max(...Array.from(info.values()).map(x => x.H));
+    for (const [i, x] of info) {
+      const t = this.tables.get(i), a = new Float32Array(Hall);
+      for (let k = 0; k < Hall; k++) a[k] = loudOf(tableValueAt(t, k));
+      x.loud = a;
+    }
+    const alive = new Set(cand);
+    const cost = (a, b) => {
+      const A = info.get(a), B = info.get(b);
+      if (B.max > A.cap) return Infinity;
+      let d = 0;
+      for (let k = 0; k < A.H; k++) d += Math.abs(A.loud[k] - B.loud[k]);
+      return d * A.uses;
+    };
+    const best = new Map();
+    const findBest = (a) => {
+      let to = null, c = Infinity;
+      for (const b of alive) { if (b === a) continue; const x = cost(a, b); if (x < c) { c = x; to = b; } }
+      best.set(a, { to, c });
+    };
+    for (const a of alive) findBest(a);
+    const remap = new Map();
+    while (alive.size > budget) {
+      let pick = null;
+      for (const a of alive) { const b = best.get(a); if (b.to != null && (!pick || b.c < best.get(pick).c)) pick = a; }
+      if (pick == null) break; // どこへも付け替えられない(値の範囲が合わない)
+      const to = best.get(pick).to;
+      remap.set(pick, to);
+      alive.delete(pick); best.delete(pick);
+      const T = info.get(to), P = info.get(pick);
+      T.uses += P.uses; T.H = Math.max(T.H, P.H); T.cap = Math.min(T.cap, P.cap);
+      findBest(to);
+      for (const a of alive) if (a !== to && best.get(a).to === pick) findBest(a);
+    }
+    if (remap.size === 0) return 0;
+    const resolve = (i) => { let j = i; while (remap.has(j)) j = remap.get(j); return j; };
+    for (const from of remap.keys()) {
+      const t = this.tables.get(resolve(from)), f = this.tables.get(from);
+      t.holdLen = Math.max(t.holdLen || 0, f.holdLen || 0);
+      this.tables.delete(from);
+      for (const m of [this.swKeyToIndex, this.hwKeyToIndex]) for (const [k, v] of m) if (v === from) m.delete(k);
+    }
+    for (const ch of scoreChannels || []) for (const ev of (ch && ch.events) || []) if (ev[field] != null && remap.has(ev[field])) ev[field] = resolve(ev[field]);
+    this.fitNote = `; == 近似: ${this.prefix} 表が ${used.length} 種類あり NSF の上限 ${limit} を超えたため、聞こえの差が小さいものから ${remap.size} 種類を似た表へまとめました(変換設定「${this.prefix}表をNSFの上限に収める」)`;
+    return remap.size;
+  };
+
   MML.Convert.EnvelopeRegistry.prototype.defLines = function () {
     const lines = Array.from(this.tables.keys()).sort((a, b) => a - b).map(i => {
       const t = this.tables.get(i);
@@ -801,6 +912,7 @@
       if (t.loop != null) parts.splice(t.loop, 0, '|');
       return `${this.prefix}${i} = { ${parts.join(' ')} }`;
     });
+    if (this.fitNote) lines.unshift(this.fitNote); // 上限に収めた注記(fitToLimit)。「; ==」始まりは定義に付かず、そのまま出る
     // 自分が持つリリース表(@vr、release 参照)も続けて出す(呼び出し側の headerLines を変えずに済む)
     if (this._release) lines.push(...this._release.defLines());
     return lines;

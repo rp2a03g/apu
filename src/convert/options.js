@@ -67,6 +67,12 @@
  *                 開始位相ごとに違い、同じ楽器でも 3,2,2 / 2,3,2 / 2,2,3 の変種が量産される。ppmck の
  *                 @v はフレーム毎の絶対値なので正確に1本にはできず、これは段の境目が最大1フレーム動く
  *                 近似(ハードウェア減衰表・exact 表は対象外)
+ *   ENV_FIT     … @v/@vr 表を NSF の上限に収める(2026-09-29、既定 true = 全コマンド・プレーン譜面とも ON)。
+ *                 NSF は表の番号を1バイトで持つので1曲で各255種類まで。使われている表がそれを超えた曲だけ、
+ *                 聞こえの差(音量の0.6乗の差の合計)×使う音符の数が小さい組から、片方の表を使う音符をもう片方へ
+ *                 付け替えて255種類まで減らす(EnvelopeRegistry.fitToLimit)。上限以下の曲の出力は変わらない。
+ *                 付け替えた曲は MML ヘッダに注記を書く。false なら上限を超えたまま出す(ブラウザ再生はできるが
+ *                 NSF 書き出しはエラーになる)
  *   SHAPE_REST  … 音符の直後の短い休符(1/32未満)を音符に吸収(ゲートタイムの隙間除去)。
  *                 伸ばした区間は最後の音量のまま鳴るので近似
  *   FOLD_DOUBLES … 合成ch(プール式PCMの論理レーン。PSF/VGMのMultiPCM等)の複製パートを省く(2026-09-14、
@@ -146,7 +152,7 @@
   MML.Convert = MML.Convert || {};
 
   const CMD_KEYS = ['D', 'EP', 'MP', 'PT', 'EN', 'ENV', 'VRC7_ENV', 'V', 'SWEEP', 'INST', 'DRUM'];
-  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE', 'GATE_APPROX', 'FOLD_DOUBLES'];
+  const SHAPE_KEYS = ['SHAPE_REST', 'ENV_MERGE', 'ENV_FIT', 'GATE_APPROX', 'FOLD_DOUBLES'];
   // GATE_TOL: ゲートを揃える(GATE_APPROX)ときに許すキーオフ位置のずれ(フレーム、0〜8、既定2)
   const GATE_TOL_DEFAULT = 2, GATE_TOL_MAX = 8;
   MML.Convert.GATE_TOL_DEFAULT = GATE_TOL_DEFAULT;
@@ -296,12 +302,12 @@
   const PRESETS = {
     // 全コマンド(従来の既定。旧名「忠実再現」。キー名 faithful はそのまま)
     faithful: { D: true, EP: true, MP: true, PT: true, EN: true, ENV: true, VRC7_ENV: false, V: true, SWEEP: true, INST: true, DRUM: true,
-                SHAPE_REST: false, ENV_MERGE: false, FOLD_DOUBLES: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
+                SHAPE_REST: false, ENV_MERGE: false, ENV_FIT: true, FOLD_DOUBLES: false, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: true, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'used',
                 TUNING: 'note', TUNING_MIN: TUNING_MIN_DEFAULT },
     // プレーン譜面: 音階+音色だけ。編曲の出発点用
     plain:    { D: false, EP: false, MP: false, PT: false, EN: false, ENV: false, VRC7_ENV: false, V: false, SWEEP: false, INST: true, DRUM: true,
-                SHAPE_REST: true, ENV_MERGE: false, FOLD_DOUBLES: true, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
+                SHAPE_REST: true, ENV_MERGE: false, ENV_FIT: true, FOLD_DOUBLES: true, GATE_APPROX: true, GATE_TOL: GATE_TOL_DEFAULT, LEN_SNAP: LEN_SNAP_DEFAULT, LEN_DP: false, DPCM_EXACT: true,
                 NOTE_END: 'next', PITCH_SA: 'octave', N163_WAVE: 'both', N163_CH: 'fixed8',
                 TUNING: 'auto', TUNING_MIN: TUNING_MIN_DEFAULT },
   };
