@@ -238,6 +238,8 @@
       regs: { envReg, pitchReg, noteEnvReg, n163WaveReg, vrc7ToneReg },
       toneOf: (id) => (options.tone || {})[id],
       toneSettings: options.toneSettings || null, // 音色ごとの設定(src/convert/toneSettings.js)
+      merge: options.merge || null, // 複数の元chを1パートにまとめる印 { chId: true }(src/convert/channelMerge.js)
+      copies: options.copies || null, // 複製 { copyId: { of, transpose, detune, delay } }(src/convert/channelCopy.js)
       extract: (chip, fam, reg) => {
         // FDS波形は借用先がFDSのときだけ本物のレジストリへ登録する(他のファミリへ載せる
         // 抽出でも登録すると、誰も参照しない@FM定義がMML本文に残るため)

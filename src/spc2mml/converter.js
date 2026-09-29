@@ -975,6 +975,58 @@
     const voiceEvents = MML.SPC2MML.extractVoiceEvents(log, { srcnFineTune, envLog: options.envLog });
     const tuneOf = (srcn) => srcnFineTune ? (srcnFineTune[srcn] || 0) : 0;
 
+    // ── 「まとめる」と「複製」(src/convert/channelMerge.js / channelCopy.js、2026-09-29) ────────────
+    // 順序は まとめる → 複製 → まとめる。複製は「まとめた結果」を写す(V0/V1 をまとめた曲で V0 を複製しても V1 を複製しても
+    // まとめたパートの複製になる、2026-09-29 ユーザー指摘)。2回目のまとめるは、複製行に印を付けた組のため
+    const voiceLabel = (ch) => (channelMap[ch] && channelMap[ch].label) || 'V' + ch;
+    const mergeNotes = [];
+    // channelMap[ch].merge が付き、かつ同じ借用先を選んだボイスどうしを1本の音符列へ畳む。以降の段(音色ごとの分割・
+    // 打楽器の切り出し・配置)は先頭ボイスに畳んだ1本しか見ない。残りのボイスは skip(mergedInto=先頭)にして注記を出す。
+    // E(DPCM)は元々複数ボイスをミックスする先なので対象外
+    const mergeVoices = () => {
+      if (!MML.Convert.ChannelMerge) return;
+      const groups = new Map(); // 借用先 → [ch]
+      channelMap.forEach((cfg, ch) => {
+        if (!cfg || !cfg.merge || cfg.type === 'skip' || cfg.type === 'dpcm' || ch >= voiceEvents.length) return;
+        if (!groups.has(cfg.type)) groups.set(cfg.type, []);
+        groups.get(cfg.type).push(ch);
+      });
+      for (const [type, chs] of groups) {
+        if (chs.length < 2) continue;
+        const members = chs.map(ch => ({ id: voiceLabel(ch), events: voiceEvents[ch].map(ev => Object.assign({}, ev, { start: ev.frame, end: ev.frame + ev.len, note: ev.pitchSemi })) }));
+        const r = MML.Convert.ChannelMerge.merge(members);
+        const first = chs[0];
+        voiceEvents[first] = r.events.filter(ev => ev.note !== null).map(ev => {
+          const o = Object.assign({}, ev, { frame: ev.start, len: ev.end - ev.start });
+          delete o.start; delete o.end; delete o.note;
+          return o;
+        });
+        const label = chs.map(voiceLabel).join('+');
+        for (const ch of chs.slice(1)) { voiceEvents[ch] = []; channelMap[ch] = Object.assign({}, channelMap[ch], { type: 'skip', mergedInto: first }); }
+        channelMap[first] = Object.assign({}, channelMap[first], { mergedFrom: chs.slice(), label });
+        mergeNotes.push(MML.Convert.ChannelMerge.describe(label, type, r.stats));
+      }
+    };
+    mergeVoices();
+    // 複製: channelMap[8以降] の { copyOf: 元ボイス番号, transpose, detune, delay }。元ボイスのイベント列(まとめ済みなら
+    // まとめた先頭ボイスのもの)を写して仮想ボイスにする。音色ごとの載せ先分割だけは複製に効かせない
+    // (複製は「同じ音をもう1本」なので音色で散らさない)
+    const copyNotes = [];
+    for (let i = 0; i < channelMap.length; i++) {
+      const cfg = channelMap[i];
+      if (!cfg || cfg.copyOf === undefined || cfg.copyOf === null) continue;
+      let base = cfg.copyOf;
+      while (channelMap[base] && channelMap[base].mergedInto !== undefined) base = channelMap[base].mergedInto;
+      const srcEv = voiceEvents[base] || [];
+      const CC = MML.Convert.ChannelCopy;
+      voiceEvents[i] = CC ? CC.transform(srcEv, { transpose: cfg.transpose, detune: cfg.detune, delay: cfg.delay, totalFrames: FRAMES }, CC.SPC)
+        : srcEv.map(ev => Object.assign({}, ev));
+      cfg.copyOf = base; // 遅延複製の帳尻合わせ(copyDelay)もまとめた先頭ボイスを元にする
+      cfg.label = cfg.label || (CC ? CC.label(voiceLabel(base), cfg.copyId || ('V' + base + '#' + i)) : voiceLabel(base) + '#');
+      if (cfg.type !== 'skip') copyNotes.push(CC ? CC.describe(cfg.label, voiceLabel(base), cfg.type, cfg) : `${cfg.label} は ${voiceLabel(base)} の複製です。`);
+    }
+    mergeVoices(); // 複製行に「まとめる」印が付いた組
+
     // ── 音色(BRRサンプル)ごとの設定(src/convert/toneSettings.js、2026-09-09) ────────────
     // options.toneSettings … main.js が ToneSettings.snapshot() で作った素のオブジェクト(無ければ従来どおり)。
     // キーは 'brr:<hash>'(src/convert/toneKey.js、ロールのノート srcn からも同じキーが引ける)
@@ -996,7 +1048,7 @@
       const nBase = voiceEvents.length;
       for (let ch = 0; ch < nBase; ch++) {
         const cfg = channelMap[ch];
-        if (!cfg || cfg.type === 'skip') continue;
+        if (!cfg || cfg.type === 'skip' || cfg.copyOf !== undefined) continue; // 複製には音色ごとの載せ先を効かせない
         const byTarget = new Map(); // 上書き載せ先 → Set(srcn)
         for (const ev of voiceEvents[ch]) {
           if (ev.pitchSemi === null || ev.non) continue;
@@ -1453,6 +1505,7 @@
     const detuneEntries = [];
     const placedTypes = {}; // 借用先の取り合い(音色分割の仮想ボイスが既存ボイスと同じ先を選んだ等)。先着優先
     const placeNotes = [];
+    const letterOfVoice = {}; // ボイス番号 → パート文字(遅延複製の共通行 copyDelay の解決用)
     for (let ch = 0; ch < voiceEvents.length; ch++) {
       const cfg = channelMap[ch];
       if (!cfg || cfg.type === 'skip') continue;
@@ -1470,6 +1523,7 @@
       if (!targetLetter) continue;
       if (placedTypes[targetType] !== undefined) { placeNotes.push(`V${cfg.splitFrom !== undefined ? cfg.splitFrom : ch} → ${targetType} は既に V${placedTypes[targetType]} に使われているため変換対象外です。`); continue; }
       placedTypes[targetType] = cfg.splitFrom !== undefined ? cfg.splitFrom : ch;
+      letterOfVoice[ch] = targetLetter;
       // 音色(srcn)ごとの音色指定(toneSettings[key].tone[種別])。ボイスの指定 cfg.tone を音色単位で上書きする
       const toneKind = MML.Convert.ChannelPlan && MML.Convert.ChannelPlan.toneKindOfTarget ? MML.Convert.ChannelPlan.toneKindOfTarget(targetType, 'brr') : null;
       const toneOfEv = (ev) => {
@@ -1580,7 +1634,14 @@
       if (detuneFn) detuneEntries.push({ events: chEvents, periodFn: detuneFn });
       scoreChannels.push({ letter: targetLetter, events: chEvents, hasEnvelope, hasVolume,
         hasInstrument, hasVrc7Tone: anyVrc7Custom, hasDetune: !!detuneFn, hasPitchMod: !!periodFn,
-        hasNoteEnv: !!periodFn || isVrc7Target });
+        hasNoteEnv: !!periodFn || isVrc7Target,
+        // 遅延だけの複製: 共通行(SHARE_LINES)の帳尻合わせ用(mmlEmit.js shareDelayPairs)。元のパート文字は下で解決
+        copyDelay: (cfg.copyOf !== undefined && cfg.delay > 0 && !cfg.transpose && !cfg.detune) ? { ofVoice: cfg.copyOf, frames: cfg.delay } : undefined });
+    }
+    for (const sc of scoreChannels) {
+      if (!sc.copyDelay) continue;
+      const of = letterOfVoice[sc.copyDelay.ofVoice];
+      if (of) sc.copyDelay = { of, frames: sc.copyDelay.frames }; else delete sc.copyDelay;
     }
     // 全チャンネル横断でコーラス検知+D<n>補正(nsf2mmlと同じ「1回だけまとめて」方式)
     MML.Convert.detectChorusDetune(detuneEntries, detuneEntries.map(e => e.periodFn), { cmd });
@@ -1599,7 +1660,7 @@
           if (key) toneDemotions.push({ key, preset: presetByTone[idx], label: ch.letter || '' });
         }
       }
-    }).map(n => `; ※ ${n}`).concat(placeNotes.concat(splitNotes).map(n => `; ※ ${n}`));
+    }).map(n => `; ※ ${n}`).concat(copyNotes.concat(mergeNotes, placeNotes, splitNotes).map(n => `; ※ ${n}`));
 
     if (dpcmLetter) {
       scoreChannels.push({ letter: dpcmLetter, events: dpcmNoteEvents }); // E: 音符=@DPCM番号。@/v は出さない(mmlEmit.js DPCM_FLAGS_OFF)

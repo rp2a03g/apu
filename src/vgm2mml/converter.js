@@ -863,11 +863,60 @@
       }
     }
 
+    // ── 「まとめる」と「複製」の順序: まとめる → 複製(まとめた結果を写す) → まとめる(複製行に印を付けた組) ──
+    // まとめる(options.merge = { sourceId: true }、src/convert/channelMerge.js): borrow.js compose と同じ。印が付き同じ借用先を
+    // 選んだ元chを先頭の元chへ1本の音符列として畳み、残りは skip
+    const mergedMembers = {}; // 先頭 sourceId → [member source]
+    const mergedOrig = {};    // まとめる前の抽出結果(音色ごとの分割で別ファミリの抽出し直しが要るとき用)
+    const mergedInto = {};    // メンバー sourceId → 先頭 sourceId
+    const mergeSources = () => {
+      if (!options.merge || !MML.Convert.ChannelMerge) return;
+      const groups = new Map();
+      for (const s of src) {
+        const t = plan[s.id];
+        if (!options.merge[s.id] || !t || t === 'skip' || t === 'dpcm' || !extracted[s.id]) continue;
+        if (!groups.has(t)) groups.set(t, []);
+        groups.get(t).push(s);
+      }
+      for (const [t, members] of groups) {
+        if (members.length < 2) continue;
+        const r = MML.Convert.ChannelMerge.merge(members.map(s => ({ id: s.id, events: extracted[s.id].events })));
+        const first = members[0];
+        for (const s of members) if (!mergedOrig[s.id]) mergedOrig[s.id] = extracted[s.id];
+        extracted[first.id] = Object.assign({}, extracted[first.id], { events: r.events });
+        mergedMembers[first.id] = members.slice();
+        first.label = members.map(s => s.label).join('+');
+        for (const s of members.slice(1)) { plan[s.id] = 'skip'; delete extracted[s.id]; mergedInto[s.id] = first.id; }
+        notes.push(MML.Convert.ChannelMerge.describe(first.label, t, r.stats));
+      }
+    };
+    mergeSources();
+    // 複製(options.copies = { copyId: { of, transpose, detune, delay } }、src/convert/channelCopy.js): 元ch(まとめられていれば
+    // まとめた先頭)の抽出結果を写した仮想ソースを足し、移調/デチューン/遅延を施す。以降は普通のソース(借用先は plan[copyId])
+    if (options.copies && MML.Convert.ChannelCopy) {
+      const CC = MML.Convert.ChannelCopy;
+      for (const id of Object.keys(options.copies)) {
+        const c = options.copies[id];
+        let baseId = c.of;
+        while (mergedInto[baseId]) baseId = mergedInto[baseId];
+        const orig = src.find(s => s.id === baseId);
+        const t = plan[id];
+        if (!orig || !extracted[orig.id] || !t || t === 'skip' || t === 'dpcm') continue;
+        const cs = Object.assign({}, orig, { id, label: CC.label(orig.label, id), copyOf: orig.id, copyOpt: c });
+        src.push(cs);
+        const evs = extracted[orig.id].events || [];
+        const total = evs.length ? evs[evs.length - 1].end : 0;
+        extracted[id] = Object.assign({}, extracted[orig.id], { events: CC.transform(evs, Object.assign({ totalFrames: total }, c), CC.GENERIC) });
+        notes.push(CC.describe(cs.label, orig.label, t, c));
+      }
+    }
+    mergeSources(); // 複製行に「まとめる」印が付いた組
+
     // ── 音色ごとの設定(src/convert/toneSettings.js、2026-09-09) ─────────────────────
     const demotions = []; // VRC7自作音色があぶれてプリセットへ落ちた音色 [{key, preset, label}]
     // 音色ごとの載せ先で1本の元chを分割する(borrow.js compose と同じ考え方。仮想ソース id 'opn:2@triangle')。
     // 別ファミリでの抽出し直しが要るのは音量写像が抽出時に効く AY/SN だけ(他は attDb で借用先非依存)
-    const extractForFam = (s, fam, base) => {
+    const extractForFam0 = (s, fam, base) => {
       if (s.chip === 'ay8910' && data.kss) {
         const wl = (s.chipIndex || 0) === 1 ? (data.kss2 && data.kss2.writeLog) : data.kss.writeLog;
         const clk = (s.chipIndex || 0) === 1 ? ((data.kss2 && data.kss2.clock) || kssClock) : kssClock;
@@ -875,6 +924,14 @@
       }
       if (s.chip === 'sn76489' && data.sn) return MML.Vgm2MmlExpansion.sn76489(data.sn.snapshots, data.sn.clock, regFor('sn76489', fam), s.chipIndex || 0).tones[s.ch];
       return base || extracted[s.id];
+    };
+    // まとめた元chは各メンバーを取り直して畳み直す(AY/SN は借用先ファミリで音量写像が変わるため)
+    const extractForFam = (s, fam, base) => {
+      const mf = mergedMembers[s.id];
+      if (!mf) return extractForFam0(s, fam, base);
+      const parts = mf.map(m => extractForFam0(m, fam, mergedOrig[m.id])).filter(Boolean);
+      if (parts.length < 2) return parts[0] || null;
+      return Object.assign({}, parts[0], { events: MML.Convert.ChannelMerge.merge(parts.map(c => ({ events: c.events }))).events });
     };
     const restOf = (ev) => ({ start: ev.start, end: ev.end, note: null });
     const splitSources = [];
@@ -884,7 +941,7 @@
         const base = extracted[s.id];
         // t === 'skip' でも通す: 音色一覧で載せ先を指定した音色だけ仮想ソースへ分けて載せる
         // (チャンネル自体は skip のまま。指定の無い音色はどこにも出ない)
-        if (!base || !t || t === 'dpcm' || s.ch < 0) continue;
+        if (!base || !t || t === 'dpcm' || s.ch < 0 || s.copyOf) continue; // 複製には音色ごとの載せ先を効かせない
         const overrides = new Map();
         for (const ev of base.events) {
           if (ev.note === null) continue;
@@ -932,6 +989,7 @@
       //   同じ SCC を KSS 経由(src/convert/borrow.js compose、ガードは noise だけ)で変換すると通るのに
       //   VGM 経由だけ「変換対象外」で無音になっていた。UI(channelPlan.js WAVE_T)も矩形波系を出している。
       const ch = Object.assign({}, extracted[s.id], { events: extracted[s.id].events.map(ev => Object.assign({}, ev)) });
+      if (s.copyOpt && s.copyOpt.delay > 0 && !s.copyOpt.transpose && !s.copyOpt.detune) ch.copyDelay = { ofSource: s.copyOf, frames: s.copyOpt.delay }; // 共通行の帳尻合わせ用
       if (s.ch < 0) ch.isDrum = true; // 合成chのドラムパート(テンポ推定から外す。下記コメント参照)
       // 音色ごとの音色指定(toneSettings[key].tone[種別])。チャンネルの指定を音色単位で上書きする
       const baseS = s.splitFrom ? (src.find(x => x.id === s.splitFrom) || s) : s;
@@ -1040,6 +1098,7 @@
       notes.push(`打楽器のPCMを実サンプルのままDPCM(Eパート)へ変換しました: 定義${st.clips}件 / 打点${st.segments}個 / ROM ${(st.bytes / 1024).toFixed(1)}KB(同時発音区間はその瞬間の音をミックスした1サンプルとして焼いています)。`
         + (st.overflow ? `@DPCM 定義が64本(ppmckの上限)を超えたため、使用回数の少ない ${st.overflow} 本を落としました。` : ''));
     }
+    if (MML.Convert.Borrow.resolveCopyDelay) MML.Convert.Borrow.resolveCopyDelay(scoreChannels, placed);
     MML.Convert.sortChannelsByLetter(scoreChannels);
 
     // ── テンポ・出力 ──

@@ -178,7 +178,7 @@
   function renderEvents(events, fpb, flags, state, appendToken) {
     function emit(tok, isNoteToken) {
       const needsSpace = state.hasEmitted && !(isNoteToken && state.lastWasNote);
-      appendToken(needsSpace ? ' ' + tok : tok);
+      appendToken(needsSpace ? ' ' + tok : tok, !!isNoteToken, tok); // 第2・3引数は共通行(emitScore の shareLinesPlan)用: 音符系か・素の文字列
       state.lastWasNote = !!isNoteToken;
       state.hasEmitted = true;
     }
@@ -1044,15 +1044,23 @@
       lines.push(`${letters} t${Math.round(opts.tempoBpm)}`);
     }
 
+    // ── 遅延複製の共通行(SHARE_LINES、帳尻合わせ。ユーザー案「B r16 / AB c4 d8. / A &d16」) ──
+    // B が A の遅延だけの複製(chan.copyDelay = { of: 'A', frames })なら、B の本文を A のトークンで書き、頭に「B r<遅延>」を
+    // 置く。ループしない曲では B は曲末で切れているので、A の最後の音符を T-遅延 で割り、残り(&d16)を A だけの行にする。
+    // 影(shadow)= B を A のイベント(T-遅延 まで)で描き直したトークン列。組の判定と共通行の描画はこれを B の代わりに使う。
+    // 共通行にならなかった B は従来どおり自分のイベントで書く(全ブロック共通行になるときだけ影を使う=all-or-nothing)
+    const delayPairs = shareDelayPairs(channelsData, layout, loop, totalFrames, opts);
     // チャンネルごとに: ギャップ補完 → 小節境界で分割 → 小節バケツへ → テキスト化
     let loopPinFailed = false;
     let loopFrameCheck = null; // 最初のチャンネルの { L までのフレーム数, 全長 }。以降のチャンネルと突き合わせる
-    const perChannelMeasureTexts = channelsData.map(chan => {
+    const renderChannelMeasures = (chan) => {
       // 変換設定(src/convert/options.js opts.cmd): 譜面整形(短い休符吸収)を
       // ギャップ補完の前に掛け、コマンドフラグは下でANDマスクする(割当層で止め切れ
       // なかった分の安全網)
       const filled  = markOnsets(fillGaps(MML.Convert.shapeEvents(chan.events, fpb, opts.cmd), totalFrames));
       let split     = splitAtBoundaries(filled, boundaries, MML.Convert.lenSnapOf(opts.cmd));
+      // 遅延複製の帳尻(shareDelayPairs が T-遅延 で割った残り)はタイで続ける(splitAtBoundaries は continued を付け直すのでここで)
+      split = split.map(e => (e.delayTail ? Object.assign({}, e, { continued: true }) : e));
       if (!loop) split = trimTail(split, chanSoundEnd(chan));
       // ループ開始位置では必ず割る(L をイベントの頭に置くため)。端を寄せた結果できた隙間は休符で埋め直す
       if (loop) split = fillGaps(splitAtFrame(split, loop.start, MML.Convert.lenSnapOf(opts.cmd), opts.envReg).filter(e => e.note !== null || e.end > e.start), totalFrames);
@@ -1125,11 +1133,18 @@
       let first = true;
       return buckets.map(bucketEvents => {
         let text = '';
-        if (first) { text += `l${flags.defaultLen}`; state.hasEmitted = true; first = false; }
-        renderEvents(bucketEvents, fpb, flags, state, tok => { text += tok; });
-        return text;
+        const toks = []; // 共通行(SHARE_LINES)用: { t: 素のトークン, note: 音符/休符/相対オクターブ(>/<)か }
+        if (first) { text += `l${flags.defaultLen}`; toks.push({ t: `l${flags.defaultLen}`, note: false }); state.hasEmitted = true; first = false; }
+        renderEvents(bucketEvents, fpb, flags, state, (tok, isNote, raw) => { text += tok; toks.push({ t: raw, note: !!isNote }); });
+        return { text, toks };
       });
-    });
+    };
+    const perChannelMeasureTexts = channelsData.map(chan => renderChannelMeasures(chan));
+    // 遅延複製の影(B を A のイベントで描いたもの)。{ ci, toks: 小節ごとのトークン列 }
+    const shadowMeasures = delayPairs.map(p => ({ ci: p.b, toks: renderChannelMeasures(Object.assign({}, channelsData[p.b], { events: p.altEvents })).map(m => m.toks) }));
+    // 小節ごとの文字列(従来どおり)と、共通行のためのトークン列を分ける
+    const perChannelMeasureToks = perChannelMeasureTexts.map(ms => ms.map(m => m.toks));
+    for (let ci = 0; ci < perChannelMeasureTexts.length; ci++) perChannelMeasureTexts[ci] = perChannelMeasureTexts[ci].map(m => m.text);
     // ピン留めできなかったチャンネルがある(極端に短いイベントしか無い等): イントロ/ループの長さを全チャンネルで
     // 一致させられないので、ずれていくループを出すよりループ化そのものをやめて通常の出力へ戻す
     if (loop && loopPinFailed) {
@@ -1154,21 +1169,47 @@
     // (ppmck はチャンネル行を順に連結するので、独立した「DXYZ L」行は各チャンネルのその位置の L と同じ)。
     // 小節がそろわない等で割れないときは、目印をその場の L に戻して従来どおり行の途中に置く
     let segments = [perChannelMeasureTexts];
+    let tokSegments = [perChannelMeasureToks]; // segments と同じ形のトークン列(共通行用)
+    let shadowSegments = [shadowMeasures]; // 遅延複製の影(segments と同じ区切り)
     if (loop) {
       const at = perChannelMeasureTexts.map(texts => texts.findIndex(t => t.indexOf(LOOP_MARK) >= 0));
       if (at.every(m => m >= 0 && m === at[0])) {
         const mi = at[0];
-        const pre = [], post = [];
-        perChannelMeasureTexts.forEach(texts => {
+        const pre = [], post = [], preT = [], postT = [];
+        perChannelMeasureTexts.forEach((texts, ci) => {
           const k = texts[mi].indexOf(LOOP_MARK);
           const a = texts[mi].slice(0, k), b = texts[mi].slice(k + LOOP_MARK.length);
           pre.push(texts.slice(0, mi).concat(a.trim() ? [a] : []));
           post.push([b].concat(texts.slice(mi + 1)));
+          const toks = perChannelMeasureToks[ci];
+          const ti = toks[mi].findIndex(x => x.t === LOOP_MARK);
+          const ta = toks[mi].slice(0, Math.max(0, ti)), tb = toks[mi].slice(ti + 1);
+          preT.push(toks.slice(0, mi).concat(a.trim() ? [ta] : []));
+          postT.push([tb].concat(toks.slice(mi + 1)));
         });
         segments = [pre, null, post]; // null = 「DXYZ L」の行
+        tokSegments = [preT, null, postT];
+        shadowSegments = [[], null, []];
+        for (const sh of shadowMeasures) {
+          const ti = sh.toks[mi] ? sh.toks[mi].findIndex(x => x.t === LOOP_MARK) : -1;
+          const ta = ti >= 0 ? sh.toks[mi].slice(0, ti) : (sh.toks[mi] || []), tb = ti >= 0 ? sh.toks[mi].slice(ti + 1) : [];
+          shadowSegments[0].push({ ci: sh.ci, toks: sh.toks.slice(0, mi).concat(preT[sh.ci].length > mi ? [ta] : []) });
+          shadowSegments[2].push({ ci: sh.ci, toks: [tb].concat(sh.toks.slice(mi + 1)) });
+        }
       } else {
         segments = [perChannelMeasureTexts.map(texts => texts.map(t => t.split(LOOP_MARK).join('L')))];
+        tokSegments = [perChannelMeasureToks.map(toks => toks.map(ms => ms.map(x => (x.t === LOOP_MARK ? { t: 'L', note: false } : x))))];
+        shadowSegments = [shadowMeasures.map(sh => ({ ci: sh.ci, toks: sh.toks.map(ms => ms.map(x => (x.t === LOOP_MARK ? { t: 'L', note: false } : x))) }))];
       }
+    }
+    // ── 共通行(SHARE_LINES、2026-09-29): 音符列が同じチャンネルの組を `AB c4` の1行にまとめる(下の shareLinesPlan) ──
+    const share = shareLinesPlan(channelsData, tokSegments, layout, measuresPerLine, shadowSegments, delayPairs, fpb);
+    if (share && share.some(s => s && s.any)) {
+      const ti = lines.findIndex(l => /^[A-Za-z]+ t\d+$/.test(l));
+      lines.splice(ti >= 0 ? ti : lines.length, 0,
+        '; 共通行: 音符列が同じチャンネルは「AB c4」のように1行にまとめて書いています(変換設定「同じ音符列は共通行で書く」)。',
+        ';   チャンネルごとに違う命令(v/@v/D 等)は、その音符の直前に「A v12」「B v11」の行で分けています。',
+        ';   @v や D を出す設定では違いが毎音出て細切れになるので、プレーン譜面(コマンド無し)の方が読みやすくなります');
     }
     const loopLineOf = (ciList) => `${ciList.map(ci => channelsData[ci].letter).join('')} L`;
     const allCi = channelsData.map((c, i) => i);
@@ -1195,17 +1236,35 @@
     };
     const laid = segments.map(seg => (seg ? layoutSegment(seg) : null));
 
+    // ブロック(小節 blockStart〜blockEnd)の中で ci が共通行の組に入っていればその組、無ければ null
+    const groupOf = (si, blockStart, ci) => {
+      const s = share && share[si];
+      if (!s) return null;
+      return s.groupsAt(blockStart).find(g => g.members.indexOf(ci) >= 0) || null;
+    };
+    // ci のブロックの行: 組の先頭なら共通行(複数行)、組の2本目以降なら空(先頭で書いた)、組に無ければ従来どおり1行
+    const linesOfCi = (si, seg, ci, blockStart, blockEnd) => {
+      const g = groupOf(si, blockStart, ci);
+      if (!g) return [seg.lineOf(ci, blockStart, blockEnd)];
+      if (g.members[0] !== ci) return [];
+      const s = share[si];
+      const out = [];
+      // 遅延複製の頭の休符「B r16」は最初のブロックの前に(影が採用されたメンバーだけ)
+      if (si === 0 && blockStart === 0) for (const m of g.members) if (s.preLine[m]) out.push(s.preLine[m]);
+      return out.concat(renderSharedBlock(channelsData, s.toksOf, g.members, blockStart, blockEnd));
+    };
+    const isEmptyLine = (l) => !/\s/.test(l); // パート文字だけの行(中身が無い)
     if (partOrder === 'part') {
-      // パートごとにまとめる: A を最後まで出してから B へ(パートの間は空行)。ループはパートごとに「A L」の行
+      // パートごとにまとめる: A を最後まで出してから B へ(パートの間は空行)。ループはパートごとに「A L」の行。
+      // 共通行の組は先頭のパートの位置に「AB …」で出し、2本目以降のパートではそのブロックを飛ばす
       for (let ci = 0; ci < channelsData.length; ci++) {
         if (ci > 0) lines.push('');
-        for (const seg of laid) {
-          if (!seg) { lines.push(loopLineOf([ci])); continue; }
+        laid.forEach((seg, si) => {
+          if (!seg) { lines.push(loopLineOf([ci])); return; }
           for (let blockStart = 0; blockStart < seg.count; blockStart += measuresPerLine) {
-            const l = seg.lineOf(ci, blockStart, Math.min(seg.count, blockStart + measuresPerLine));
-            if (l !== channelsData[ci].letter) lines.push(l);
+            for (const l of linesOfCi(si, seg, ci, blockStart, Math.min(seg.count, blockStart + measuresPerLine))) if (!isEmptyLine(l)) lines.push(l);
           }
-        }
+        });
       }
       return lines.join('\n');
     }
@@ -1214,8 +1273,9 @@
       if (!seg) { if (lines.length && lines[lines.length - 1] !== '') lines.push(''); lines.push(loopLineOf(allCi), ''); return; }
       for (let blockStart = 0; blockStart < seg.count; blockStart += measuresPerLine) {
         const blockEnd = Math.min(seg.count, blockStart + measuresPerLine);
-        const block = allCi.map(ci => seg.lineOf(ci, blockStart, blockEnd));
-        if (block.every((l, ci) => l === channelsData[ci].letter)) continue; // 中身の無いブロック(ループ位置の直前など)
+        const block = [];
+        for (const ci of allCi) block.push(...linesOfCi(si, seg, ci, blockStart, blockEnd));
+        if (block.every(isEmptyLine)) continue; // 中身の無いブロック(ループ位置の直前など)
         lines.push(...block);
         if (blockEnd < seg.count) lines.push('');
       }
@@ -1225,6 +1285,233 @@
 
     return lines.join('\n');
   };
+  // ── 共通行(SHARE_LINES、2026-09-29、ユーザー案「ABC c4 / A v12 / B v11 / C D-1 / ABC c4」) ──────────────
+  // 音符列(音名・音長・休符・タイ・相対オクターブ)が完全に一致するチャンネルの組を、ブロック(1行の小節数)ごとに
+  // 探して「AB c4 d8」の1行にまとめる。チャンネルごとに違う命令(v/@v/D/o<n> 等)は、その音符の直前に
+  // 「A v12」「B v11」の行で分けて書く(命令が全員同じならその共通行に)。ppmck の行頭は複数のパート文字を
+  // 取れる(テンポ行 `ABMXYZa t187` と同じ)。オクターブは各チャンネルの最初の `o<n>` だけ絶対で、以降は >/< の
+  // 相対なので、オクターブ違いの組(複製の +12 等)も音符列が一致する。半音単位の移調は音名が変わるので対象外。
+  //   SHARE_LINES     … 'off'(既定、従来どおり) / 'auto'(下の2条件を満たす組だけ) / 'always'(音符列が一致すれば常に)
+  //   SHARE_SPLIT_MAX … 'auto' の条件1: ブロック内で「命令の違いで行を挟んだ回数 ÷ 共通行の音符数」の上限(既定 0.25=4音に1回)
+  //   SHARE_MIN_BARS  … 'auto' の条件2: 相手ごとに、共通行にできる小節が(音のある小節の)半分以上、かつ連続この小節数以上
+  //   判定はブロック単位なので、同じ組でも揃うブロックは共通行・揃わないブロックは別行と混在する(トラックの状態は
+  //   どちらの書き方でも同じ文字列を通るので壊れない)。BAR_ALIGN の桁揃えは共通行には掛けない。
+  //   ★遅延複製の帳尻合わせ(B r16 / AB … / A &d16)は未実装(ROADMAP)。
+  function shareSplitItems(toks) {
+    // 音符ごとに「直前の命令」を束ねる。tail は最後の音符より後ろの命令
+    const notes = [];
+    let cmds = [];
+    for (const x of toks) {
+      if (x.note) { notes.push({ cmds, note: x }); cmds = []; } else cmds.push(x);
+    }
+    return { notes, tail: cmds };
+  }
+  function shareJoinToks(toks) {
+    // renderEvents の emit と同じ区切り規則: 音符系どうしは詰め、それ以外は空白1つ。小節の境目(bar)は空白
+    let s = '', lastNote = false, started = false;
+    for (const x of toks) {
+      if (x.bar) { lastNote = false; continue; }
+      const needsSpace = started && !(x.note && lastNote);
+      s += (needsSpace ? ' ' : '') + x.t;
+      lastNote = !!x.note; started = true;
+    }
+    return s;
+  }
+  // 各メンバーの命令列 lists の「先頭からの共通部分」の長さと、残り(チャンネルごとの行にする分)があるか
+  function shareCommonPrefix(lists) {
+    let p = 0;
+    const minLen = Math.min(...lists.map(l => l.length));
+    while (p < minLen && lists.every(l => l[p].t === lists[0][p].t)) p++;
+    return { p, own: lists.some(l => l.length > p) };
+  }
+  function shareDensity(toksOf, members, bs, be) {
+    let splits = 0, notes = 0;
+    for (let m = bs; m < be; m++) {
+      const items = members.map(ci => shareSplitItems(toksOf(ci, m)));
+      const k = Math.min(...items.map(it => it.notes.length));
+      for (let i = 0; i < k; i++) {
+        if (shareCommonPrefix(items.map(it => it.notes[i].cmds)).own) splits++;
+        notes++;
+      }
+      if (shareCommonPrefix(items.map(it => it.tail)).own) splits++;
+    }
+    return { splits, notes };
+  }
+  // 遅延だけの複製(chan.copyDelay)の組 [{ a, b, frames, altEvents }]。SHARE_LINES が off なら空(A のイベントも触らない)。
+  // ループしない曲では A の最後の音符を T-遅延 で割って残りをタイ(&)にし、B の影は A の T-遅延 までのイベントにする
+  function shareDelayPairs(channelsData, layout, loop, totalFrames, opts) {
+    const mode = layout.SHARE_LINES;
+    if (mode !== 'auto' && mode !== 'always') return [];
+    const pairs = [];
+    for (let b = 0; b < channelsData.length; b++) {
+      const cd = channelsData[b].copyDelay;
+      if (!cd || !(cd.frames > 0)) continue;
+      const a = channelsData.findIndex(c => c.letter === cd.of);
+      if (a < 0 || a === b) continue;
+      const d = Math.round(cd.frames);
+      if (d >= totalFrames) continue;
+      let altEvents;
+      if (loop) altEvents = channelsData[a].events;
+      else {
+        const cut = totalFrames - d;
+        const A = channelsData[a];
+        const evs = [];
+        for (const ev of (A.events || [])) {
+          if (ev.start < cut && ev.end > cut) {
+            evs.push(Object.assign({}, ev, { end: cut }));
+            const tail = Object.assign({}, ev, { start: cut, continued: true, delayTail: true });
+            evs.push(tail);
+          } else evs.push(ev);
+        }
+        A.events = evs;
+        altEvents = evs.filter(ev => ev.start < cut);
+      }
+      pairs.push({ a, b, frames: d, altEvents });
+    }
+    return pairs;
+  }
+  function shareLinesPlan(channelsData, tokSegments, layout, measuresPerLine, shadowSegments, delayPairs, fpb) {
+    const mode = layout.SHARE_LINES;
+    if (mode !== 'auto' && mode !== 'always') return null;
+    const splitMax = Math.max(0, Math.min(1, +layout.SHARE_SPLIT_MAX || 0));
+    const minBars = Math.max(1, layout.SHARE_MIN_BARS | 0);
+    const noteSig = (toks) => toks.filter(x => x.note).map(x => x.t).join('\u0001');
+    const lSig = (toks) => toks.filter(x => !x.note && /^l\d/.test(x.t)).map(x => x.t).join(',');
+    const pairOf = (b) => (delayPairs || []).find(p => p.b === b) || null;
+    const plans = tokSegments.map((segToks, si) => {
+      if (!segToks) return null;
+      const n = segToks.length;
+      const shadows = {};
+      for (const sh of ((shadowSegments && shadowSegments[si]) || [])) shadows[sh.ci] = sh.toks;
+      // 遅延複製 B は影(A のイベントで描いたトークン)で判定・描画する
+      const toksOf = (ci, m) => ((shadows[ci] || segToks[ci] || [])[m]) || [];
+      const count = Math.max(0, ...segToks.map(t => t.length), ...Object.values(shadows).map(t => t.length));
+      // 小節ごとの署名(音符列+l<n>。l が違うと省略した音長の意味が変わるので一致を要求する)。
+      // 遅延複製の影は、最後の小節で A の末尾(帳尻の &tail)だけ足りないことがあるので、A の署名の先頭一致なら同じとみなす
+      const sig = Array.from({ length: n }, (_, ci) => Array.from({ length: count }, (_, m) => noteSig(toksOf(ci, m)) + '|' + lSig(toksOf(ci, m))));
+      for (let b = 0; b < n; b++) {
+        const p = shadows[b] ? pairOf(b) : null;
+        if (!p) continue;
+        for (let m = 0; m < count; m++) {
+          const sa = noteSig(toksOf(p.a, m)), sb = noteSig(toksOf(b, m));
+          if (sa !== sb && sa.startsWith(sb) && lSig(toksOf(p.a, m)) === lSig(toksOf(b, m))) sig[b][m] = sig[p.a][m];
+        }
+      }
+      const hasNote = Array.from({ length: n }, (_, ci) => Array.from({ length: count }, (_, m) => toksOf(ci, m).some(x => x.note)));
+      const blocks = [];
+      for (let bs = 0; bs < count; bs += measuresPerLine) {
+        const be = Math.min(count, bs + measuresPerLine);
+        const byKey = new Map();
+        for (let ci = 0; ci < n; ci++) {
+          let any = false;
+          const parts = [];
+          for (let m = bs; m < be; m++) { parts.push(sig[ci][m]); if (hasNote[ci][m]) any = true; }
+          if (!any) continue;
+          const key = parts.join('\u0002');
+          if (!byKey.has(key)) byKey.set(key, []);
+          byKey.get(key).push(ci);
+        }
+        const groups = [];
+        for (const members of byKey.values()) {
+          if (members.length < 2) continue;
+          if (mode === 'auto') {
+            const d = shareDensity(toksOf, members, bs, be);
+            if (d.notes > 0 && d.splits / d.notes > splitMax) continue;
+          }
+          groups.push({ members, bs, be });
+        }
+        blocks.push({ bs, be, groups });
+      }
+      // 遅延複製は all-or-nothing: A のいる組に全ブロックで入れなければ影を捨て、B は自分のイベントで書く
+      // (途中から自分のトークンに戻ると、遅延ぶんが二重になるため)
+      const preLine = {};
+      for (let b = 0; b < n; b++) {
+        const p = shadows[b] ? pairOf(b) : null;
+        if (!p) continue;
+        const all = blocks.every(blk => {
+          const active = Array.from({ length: blk.be - blk.bs }, (_, i) => blk.bs + i).some(m => hasNote[p.a][m] || hasNote[b][m]);
+          return !active || blk.groups.some(g => g.members.indexOf(p.a) >= 0 && g.members.indexOf(b) >= 0);
+        });
+        if (all && blocks.some(blk => blk.groups.some(g => g.members.indexOf(b) >= 0))) {
+          // 頭の休符「B r<遅延>」(音長は明示。丸めの端数は無視する)
+          const q = MML.Convert.framesToLengths(p.frames, fpb, 0, 0);
+          preLine[b] = channelsData[b].letter + ' r' + q.lengths.join('&r');
+        } else {
+          delete shadows[b];
+          for (const blk of blocks) blk.groups = blk.groups.map(g => Object.assign({}, g, { members: g.members.filter(ci => ci !== b) })).filter(g => g.members.length >= 2);
+        }
+      }
+      if (mode === 'auto') {
+        // 条件2: 相手ごとに「共通行にできる小節が音のある小節の半分以上」かつ「連続 minBars 小節以上」
+        const ok = (a, b) => {
+          let shared = 0, active = 0, run = 0, maxRun = 0;
+          for (const blk of blocks) {
+            const g = blk.groups.find(x => x.members.indexOf(a) >= 0 && x.members.indexOf(b) >= 0);
+            for (let m = blk.bs; m < blk.be; m++) {
+              if (hasNote[a][m] || hasNote[b][m]) active++;
+              if (g) { shared++; run++; if (run > maxRun) maxRun = run; } else run = 0;
+            }
+          }
+          return active > 0 && shared * 2 >= active && maxRun >= minBars;
+        };
+        for (const blk of blocks) {
+          const out = [];
+          for (const g of blk.groups) {
+            const lead = g.members[0];
+            const members = g.members.filter(ci => ci === lead || ok(lead, ci));
+            if (members.length >= 2) out.push(Object.assign({}, g, { members }));
+          }
+          blk.groups = out;
+        }
+      }
+      const byStart = new Map(blocks.map(b => [b.bs, b.groups]));
+      return { any: blocks.some(b => b.groups.length > 0), groupsAt: (bs) => byStart.get(bs) || [], toksOf, preLine };
+    });
+    return plans;
+  }
+  // 組 members のブロック(小節 bs〜be)を共通行で書く。命令が違う音符の直前にチャンネルごとの行を挟む
+  function renderSharedBlock(channelsData, toksOf, members, bs, be) {
+    const prefix = members.map(ci => channelsData[ci].letter).join('');
+    const lines = [];
+    let cur = [];
+    const flush = () => { if (cur.some(x => !x.bar)) lines.push(prefix + ' ' + shareJoinToks(cur)); cur = []; };
+    for (let m = bs; m < be; m++) {
+      const items = members.map(ci => shareSplitItems(toksOf(ci, m)));
+      const k = Math.min(...items.map(it => it.notes.length));
+      for (let i = 0; i < k; i++) {
+        const lists = items.map(it => it.notes[i].cmds);
+        const cp = shareCommonPrefix(lists);
+        cur.push(...lists[0].slice(0, cp.p)); // 共通部分は共通行に
+        if (cp.own) {
+          flush();
+          members.forEach((ci, j) => { const rest = lists[j].slice(cp.p); if (rest.length) lines.push(channelsData[ci].letter + ' ' + rest.map(x => x.t).join(' ')); });
+        }
+        cur.push(items[0].notes[i].note);
+      }
+      if (items.some(it => it.notes.length > k)) {
+        // 音符の数が多いメンバーの残り(遅延複製の帳尻 A &d16 など)は、末尾の命令ごとそのメンバーだけの行に
+        flush();
+        items.forEach((it, j) => {
+          const rest = [];
+          for (let i = k; i < it.notes.length; i++) { rest.push(...it.notes[i].cmds, it.notes[i].note); }
+          rest.push(...it.tail);
+          if (rest.length) lines.push(channelsData[members[j]].letter + ' ' + shareJoinToks(rest));
+        });
+      } else {
+        // 末尾の命令(最後の音符より後ろ): 共通部分は共通行に、残りはメンバーごとの行に
+        const cp = shareCommonPrefix(items.map(it => it.tail));
+        cur.push(...items[0].tail.slice(0, cp.p));
+        if (cp.own) {
+          flush();
+          items.forEach((it, j) => { const rest = it.tail.slice(cp.p); if (rest.length) lines.push(channelsData[members[j]].letter + ' ' + rest.map(x => x.t).join(' ')); });
+        }
+      }
+      if (m + 1 < be) cur.push({ t: '', bar: true });
+    }
+    flush();
+    return lines.length ? lines : [prefix];
+  }
+
   // ── 定義行の「使っているチャンネル」コメントとグループ分け(2026-09-19、方針) ──
   // ヘッダの定義行(@v/@vr/@EP/@EN/@MP/@@<n>={}/@N/@FM/@OP/@OT/@MH/@MW/@DPCM)ごとに、本文でその番号を
   // 使っているチャンネルを数える。種類ごとの塊(各レジストリが続けて出す)の中で「同じチャンネルの組」の定義を

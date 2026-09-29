@@ -344,8 +344,13 @@
     [/^PSG[0-5]$/, function () { return ['wave', null]; }],                                 // HuC6280 PSG
     [/^KDA$/, function () { return ['dac', null]; }],                                       // KSS 牌の魔術師の 8bit D/A
   ];
+  // 複製行のID '<元ch>#<n>'(src/convert/channelCopy.js)。種別・VGMソースIDは元chのものを引く
+  const COPY_RE = /^(.+)#(\d+)$/;
+  function copySource(chId) { const m = COPY_RE.exec(chId || ''); return m ? m[1] : null; }
+  function copySuffix(chId) { const m = COPY_RE.exec(chId || ''); return m ? '#' + m[2] : ''; }
   function lookupCh(chId) {
-    for (const pair of CH_KIND) { const m = pair[0].exec(chId); if (m) return pair[1](m); }
+    const base = copySource(chId) || chId;
+    for (const pair of CH_KIND) { const m = pair[0].exec(base); if (m) return pair[1](m); }
     return ['any', null];
   }
   function channelKind(chId) { return lookupCh(chId)[0]; }
@@ -353,12 +358,15 @@
   // 割当プレビュー(「割当先の音で聴く」)ではスキップ扱いにせず元の音のまま鳴らす
   const UNASSIGNABLE_RE = /^(KF(BD|SD|TOM|CYM|HH)|OL(BD|SD|TM|CY|HH|B)|OA(BD|SD|CY|HH|TM|RM))$/;
   function isUnassignable(chId) { return UNASSIGNABLE_RE.test(chId || ''); }
-  function vgmSourceId(chId) { return lookupCh(chId)[1]; }
+  function vgmSourceId(chId) { const s = lookupCh(chId)[1]; return s ? s + copySuffix(chId) : s; }
 
   // 逆引き: 変換器のソースID(VGM) → 鍵盤表示の行ID。VGMの構成駆動の既定割当
   // (MML.VGM2MML.defaultPlan)を鍵盤の行へ移すのに使う。
   const VGM_SRC_TO_CH = { ay: 'KP', scc: 'KS', opll: 'KF', opn: 'YM', opm: 'OM', opn3: 'OP', opna: 'OA', opnb: 'NF', opl: 'OL', pcma: 'NA', ga20: 'GA', k7: 'K7', k5: 'K5', spcm: 'SP', c140: 'CN', c352: 'CS', qs: 'QS', oki: 'OK', mp: 'MP', psx: 'PX' };
   function chIdForVgmSource(srcId) {
+    // 複製('opm:0#1')は元のIDを引いて番号を付け直す
+    const cm = COPY_RE.exec(srcId || '');
+    if (cm) { const base = chIdForVgmSource(cm[1]); return base ? base + '#' + cm[2] : null; }
     const m = /^([a-z0-9]+):(.+)$/.exec(srcId || '');
     if (!m) return null;
     const kind = m[1], rest = m[2];
@@ -553,6 +561,35 @@
     },
     // fn(info): info は set() 経由なら { chId, patch }、一括操作(newFile/clear)なら undefined
     onChange: function (fn) { listeners.push(fn); },
+
+    // ── 複製行(2026-09-29、src/convert/channelCopy.js) ──
+    // 元ch 1本を別の借用先へも載せる。行IDは '<元ch>#<n>'、項目は { copyOf, target?, tone?, volPct?, merge?,
+    // transpose?(半音), detune?(セント), delay?(フレーム) }。copyOf が常に入るので項目は空にならず、
+    // ファイル別の自動保存にもそのまま乗る(開き直すと鍵盤側が copiesOf() で複製行を作り直す)
+    isCopy: function (chId) { return COPY_RE.test(chId || ''); },
+    copySource: copySource,
+    copiesOf: function (srcId) {
+      const out = [];
+      for (const kv of entries) if (kv[1].copyOf === srcId) out.push(kv[0]);
+      return out.sort((a, b) => (+COPY_RE.exec(a)[2]) - (+COPY_RE.exec(b)[2]));
+    },
+    addCopy: function (srcId) {
+      let n = 0;
+      for (const kv of entries) if (kv[1].copyOf === srcId) n = Math.max(n, +COPY_RE.exec(kv[0])[2]);
+      const id = srcId + '#' + (n + 1);
+      Plan.set(id, { copyOf: srcId });
+      return id;
+    },
+    // 変換器へ渡す複製の表 { copyId: { of, transpose, detune, delay } }。無ければ null
+    copies: function () {
+      const o = {};
+      for (const kv of entries) {
+        const e = kv[1];
+        if (!e.copyOf) continue;
+        o[kv[0]] = { of: e.copyOf, transpose: e.transpose || 0, detune: e.detune || 0, delay: e.delay || 0 };
+      }
+      return Object.keys(o).length ? o : null;
+    },
   };
 
   MML.Convert.ChannelPlan = Plan;

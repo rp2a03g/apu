@@ -178,6 +178,36 @@ function main() {
     if (code !== 0) bad++;
   }
 
+  // 「まとめる」(src/convert/channelMerge.js)の単体テスト(tools/headless/channel-merge-test.js)
+  if (!argv.includes('--no-merge')) {
+    process.stderr.write('\n=== merge ===\n');
+    const { code, out } = run([path.join(__dirname, 'channel-merge-test.js')]);
+    process.stderr.write(out.trim() + '\n');
+    const m = out.match(/channel-merge: ok (\d+) \/ NG (\d+)/);
+    rows.push(['merge', m ? String(+m[1] + +m[2]) : '?', m ? m[1] : '-', m ? m[2] : 'NG', '-', '-']);
+    if (code !== 0) bad++;
+  }
+
+  // 「複製」(src/convert/channelCopy.js)の単体テスト(tools/headless/channel-copy-test.js)
+  if (!argv.includes('--no-copy')) {
+    process.stderr.write('\n=== copy ===\n');
+    const { code, out } = run([path.join(__dirname, 'channel-copy-test.js')]);
+    process.stderr.write(out.trim() + '\n');
+    const m = out.match(/channel-copy: ok (\d+) \/ NG (\d+)/);
+    rows.push(['copy', m ? String(+m[1] + +m[2]) : '?', m ? m[1] : '-', m ? m[2] : 'NG', '-', '-']);
+    if (code !== 0) bad++;
+  }
+
+  // 共通行(src/convert/mmlEmit.js shareLinesPlan)の単体テスト(tools/headless/share-lines-test.js)
+  if (!argv.includes('--no-share')) {
+    process.stderr.write('\n=== share ===\n');
+    const { code, out } = run([path.join(__dirname, 'share-lines-test.js')]);
+    process.stderr.write(out.trim() + '\n');
+    const m = out.match(/share-lines: ok (\d+) \/ NG (\d+)/);
+    rows.push(['share', m ? String(+m[1] + +m[2]) : '?', m ? m[1] : '-', m ? m[2] : 'NG', '-', '-']);
+    if (code !== 0) bad++;
+  }
+
   if (!argv.includes('--no-help')) {
     process.stderr.write('\n=== help ===\n');
     const { code, out } = run([path.join(__dirname, 'help-lint.js')]);

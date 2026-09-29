@@ -1745,6 +1745,10 @@ button.secondary {
 /* 借用先が他chと重複している行(先に置かれた方が勝ち、後は変換対象外になる) */
 .kbd-ch-row--conflict .kbd-part { color: var(--error); border-color: var(--error); }
 .kbd-ch-row--conflict .kbd-assign-target { border-color: var(--error); }
+/* 「まとめる」行(同じ借用先の複数chを1パートに畳んで変換する)。重複の赤ではなく破線のアクセントで示す */
+.kbd-ch-row--merged .kbd-part { color: var(--accent); border-color: var(--accent); border-style: dashed; }
+.kbd-ch-row--merged .kbd-assign-target { border-color: var(--accent); border-style: dashed; }
+.kbd-assign-pop-merge { display: inline-flex; align-items: center; gap: 4px; }
 
 /* 「借用先/音色」列。割当表示ON(.kbd-left--assign)のときだけ現れる。
    ヘッダ(.kbd-h-assign)と行(.kbd-assign)は同じ幅にして列を揃える */
@@ -1767,6 +1771,26 @@ button.secondary {
   border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 4px;
 }
 .kbd-assign-drum:hover { background: rgba(58, 110, 165, 0.18); color: var(--text); }
+/* 「まとめる」ボタン(借用先が他の行と重なった行だけに出る。案B)。まとめ中は破線のアクセント */
+.kbd-assign-merge {
+  flex: none; padding: 1px 7px; font-size: 10px; cursor: pointer;
+  border: 1px solid var(--error); background: transparent; color: var(--text-secondary); border-radius: 4px;
+}
+.kbd-assign-merge:hover { background: rgba(58, 110, 165, 0.18); color: var(--text); }
+.kbd-assign-merge--on { border-color: var(--accent); border-style: dashed; color: var(--accent); }
+/* 複製行(元chの直下。ch名・part・割当セルだけを持ち、生値の列は空ける。src/convert/channelCopy.js) */
+.kbd-ch-row--copy .kbd-name--copy { color: var(--text-secondary); font-style: italic; }
+.kbd-copy-of { flex: 1; min-width: 0; font-size: 10px; color: var(--text-secondary); opacity: 0.6; padding-left: 6px; white-space: nowrap; overflow: hidden; }
+.kbd-assign-copy-del {
+  flex: none; padding: 1px 5px; font-size: 10px; line-height: 12px; cursor: pointer;
+  border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 4px;
+}
+.kbd-assign-copy-del:hover { border-color: var(--error); color: var(--error); }
+.kbd-assign-pop-title { font-weight: 600; font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+.kbd-assign-pop-num {
+  width: 60px; height: 18px; padding: 0 4px; font-size: 11px; font-family: var(--mono);
+  background: var(--control-bg); color: var(--text); border: 1px solid var(--border); border-radius: 3px;
+}
 .kbd-assign-target, .kbd-assign-tone {
   height: 16px;
   padding: 0 2px;

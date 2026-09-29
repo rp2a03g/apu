@@ -4,6 +4,10 @@
  *   node tools/headless/convert.js "song.nsf" --song 0 --sec 30 -o out.mml
  *   node tools/headless/convert.js "pack.zip" --entry 3 --sec 60
  *   node tools/headless/convert.js "pack.7z"  --list
+ *   node tools/headless/convert.js "song.spc" --plan V0=pulse1,V1=pulse1,V2=triangle --merge V0+V1
+ *   node tools/headless/convert.js "song.spc" --plan V0=pulse1,V0#1=n163_0 --copy V0#1/t=12/c=-5/d=30
+ *     (--plan の '<行>#<n>' は複製行。--copy で 移調t(半音)/デチューンc(セント)/遅延d(フレーム))
+ *     (--plan は行ID=借用先。--merge は同じ借用先の行を1パートにまとめる印。SPC/KSS/GBS/HES は鍵盤の行ID、VGM/PSF は変換器のソースID)
  *
  * ブラウザの main.js と同じ手順(parseHeader → fromXxx / captureSong+convert)を
  * DOM抜きでなぞる。NSF の captureSong(同期版)は captureSongAsync と _processFrame を
@@ -115,6 +119,66 @@ async function probe(bytes, format) {
   return { bytes, header, songs };
 }
 
+/** --plan(行ID→借用先)/--merge(行ID→true)を各変換器の options に。どちらも無ければ空(既定経路のまま) */
+function planOpts(opt) {
+  const o = {};
+  if (opt.plan) o.channelMap = opt.plan;
+  if (opt.merge) o.merge = opt.merge;
+  const copies = copiesOf(opt);
+  if (copies) o.copies = copies;
+  return o;
+}
+/** --plan の '<元ch>#<n>' キーと --copy の加工から複製の表 { copyId: { of, transpose, detune, delay } } を作る */
+function copiesOf(opt) {
+  const o = {};
+  for (const id of Object.keys(opt.plan || {})) {
+    const m = /^(.+)#(\d+)$/.exec(id);
+    if (m) o[id] = Object.assign({ of: m[1], transpose: 0, detune: 0, delay: 0 }, (opt.copy || {})[id] || {});
+  }
+  return Object.keys(o).length ? o : null;
+}
+/** SPC は channelMap が8要素の配列(既定 V0-3→A-D、V4-7 skip)。--plan/--merge が無ければ undefined(既定経路) */
+function spcChannelMap(plan, merge, copy) {
+  if (!plan && !merge) return undefined;
+  const DEF = ['pulse1', 'pulse2', 'triangle', 'noise', 'skip', 'skip', 'skip', 'skip'];
+  const map = DEF.map((t, ch) => { const id = 'V' + ch; return { type: (plan && plan[id]) || t, merge: !!(merge && merge[id]) }; });
+  // 複製('V0#1' 等)は 8 以降(main.js と同じ形)
+  const copies = copiesOf({ plan, copy }) || {};
+  for (const id of Object.keys(copies)) {
+    const m = /^V(\d)$/.exec(copies[id].of);
+    if (m) map.push({ type: plan[id], merge: !!(merge && merge[id]), copyOf: +m[1], copyId: id, transpose: copies[id].transpose, detune: copies[id].detune, delay: copies[id].delay });
+  }
+  return map;
+}
+/** "V0#1/t=12/c=-5/d=30" → { 'V0#1': { transpose: 12, detune: -5, delay: 30 } }(区切りは / 。VGM のソースID 'opm:0' が : を含むため) */
+function parseCopyFlag(s) {
+  if (!s) return null;
+  const o = {};
+  for (const item of s.split(',')) {
+    const parts = item.trim().split('/');
+    const id = parts.shift();
+    if (!id) continue;
+    const c = {};
+    for (const p of parts) { const m = /^([tcd])=(-?\d+)$/.exec(p); if (m) c[{ t: 'transpose', c: 'detune', d: 'delay' }[m[1]]] = +m[2]; }
+    o[id] = c;
+  }
+  return Object.keys(o).length ? o : null;
+}
+/** "V0=pulse1,V1=pulse1" → { V0: 'pulse1', V1: 'pulse1' } */
+function parsePlanFlag(s) {
+  if (!s) return null;
+  const o = {};
+  for (const kv of s.split(',')) { const m = /^([^=]+)=(.+)$/.exec(kv.trim()); if (m) o[m[1]] = m[2]; }
+  return Object.keys(o).length ? o : null;
+}
+/** "V0+V1,V2+V3" → { V0: true, V1: true, V2: true, V3: true } */
+function parseMergeFlag(s) {
+  if (!s) return null;
+  const o = {};
+  for (const g of s.split(',')) for (const id of g.split('+')) if (id.trim()) o[id.trim()] = true;
+  return Object.keys(o).length ? o : null;
+}
+
 /** ヘッダが宣言する既定の曲番号(--song 省略時に使う) */
 function defaultSong(format, header) {
   if (format === 'nsf') return Math.max(0, (header.startingSong || 1) - 1);
@@ -151,16 +215,16 @@ async function convertBytes(rawBytes, format, opt = {}) {
       { bpm, cmd, n163Snapshots: cap.n163Snapshots });
     r.capture = cap;
   } else if (format === 'spc') {
-    r = MML.SPC2MML.fromSpc(bytes, seconds, { bpm, cmd });
+    r = MML.SPC2MML.fromSpc(bytes, seconds, { bpm, cmd, channelMap: spcChannelMap(opt.plan, opt.merge, opt.copy) });
   } else if (format === 'kss') {
-    r = await MML.KSS2MML.fromKss(bytes, song, seconds, { bpm, cmd });
+    r = await MML.KSS2MML.fromKss(bytes, song, seconds, Object.assign({ bpm, cmd }, planOpts(opt)));
   } else if (format === 'gbs') {
-    r = await MML.GBS2MML.fromGbs(bytes, song, seconds, { bpm, cmd });
+    r = await MML.GBS2MML.fromGbs(bytes, song, seconds, Object.assign({ bpm, cmd }, planOpts(opt)));
   } else if (format === 'hes') {
-    r = await MML.HES2MML.fromHes(bytes, song, seconds, { bpm, cmd });
+    r = await MML.HES2MML.fromHes(bytes, song, seconds, Object.assign({ bpm, cmd }, planOpts(opt)));
   } else if (format === 'vgm') {
     // channelMap を渡さないと defaultPlan + 全ch抽出になる(UI未操作時と同じ挙動)
-    r = await MML.VGM2MML.fromVgm(bytes, seconds, { bpm, cmd });
+    r = await MML.VGM2MML.fromVgm(bytes, seconds, Object.assign({ bpm, cmd }, planOpts(opt)));
   } else if (format === 'psf') {
     // _lib は opt.resolveLib(expandInput が付ける)で解決。yield 無しで一気に回す
     const info = await MML.PSF.load(bytes, opt.resolveLib || null);
@@ -195,7 +259,7 @@ function parseCmdFlags(preset, cmdStr) {
     const raw = v === undefined ? '1' : v.trim();
     // 真偽値っぽい語はboolean、それ以外は文字列/数値のまま(DMC_RATE=14, DRUM_POLY=mono, PITCH_SA=off 等の
     // 列挙値設定に対応。'off' は PITCH_SA の値でもあるので、キーが列挙値設定のときは文字列で渡す)
-    const enumKey = ['DMC_RATE', 'PITCH_SA', 'RATE_MIX', 'DRUM_POLY', 'N163_WAVE', 'N163_CH', 'TUNING', 'TUNING_MIN', 'NOTE_END', 'GATE_TOL', 'LEN_SNAP', 'PART_ORDER', 'BARS_PER_LINE', 'CHANNEL_ORDER', 'SN_PERIODIC'].indexOf(k.trim()) >= 0;
+    const enumKey = ['DMC_RATE', 'PITCH_SA', 'RATE_MIX', 'DRUM_POLY', 'N163_WAVE', 'N163_CH', 'TUNING', 'TUNING_MIN', 'NOTE_END', 'GATE_TOL', 'LEN_SNAP', 'PART_ORDER', 'BARS_PER_LINE', 'CHANNEL_ORDER', 'SN_PERIODIC', 'SHARE_LINES', 'SHARE_SPLIT_MAX', 'SHARE_MIN_BARS'].indexOf(k.trim()) >= 0;
     if (enumKey) out[k.trim()] = isNaN(Number(raw)) ? raw : Number(raw);
     else out[k.trim()] = !(raw === '0' || raw === 'false' || raw === 'off');
   }
@@ -213,7 +277,7 @@ async function convertFile(file, opt = {}) {
   return Object.assign(r, { file, key: item.key, entries: items.length });
 }
 
-module.exports = { convertFile, convertBytes, expandInput, probe, defaultSong, detectFormat, isArchive, SONG_EXTS, ctx, parseCmdFlags };
+module.exports = { convertFile, convertBytes, expandInput, probe, defaultSong, detectFormat, isArchive, SONG_EXTS, ctx, parseCmdFlags, parsePlanFlag, parseMergeFlag, parseCopyFlag };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
@@ -223,7 +287,7 @@ if (require.main === module) {
     return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : def;
   };
   if (!file) {
-    console.error('usage: node tools/headless/convert.js <file> [--song N] [--entry N] [--sec S] [-o out.mml] [--list] [--preset plain|faithful] [--cmd D=0,EP=0,NOTE_END=zero,...]');
+    console.error('usage: node tools/headless/convert.js <file> [--song N] [--entry N] [--sec S] [-o out.mml] [--list] [--preset plain|faithful] [--cmd D=0,EP=0,NOTE_END=zero,...] [--plan V0=pulse1,V1=pulse1] [--merge V0+V1] [--copy V0#1/t=12/c=-5/d=30]');
     process.exit(2);
   }
 
@@ -239,6 +303,9 @@ if (require.main === module) {
       entry: parseInt(flag('--entry', '0'), 10),
       seconds: parseInt(flag('--sec', '30'), 10),
       cmd: parseCmdFlags(flag('--preset', null), flag('--cmd', null)),
+      plan: parsePlanFlag(flag('--plan', null)),
+      merge: parseMergeFlag(flag('--merge', null)),
+      copy: parseCopyFlag(flag('--copy', null)),
     });
     const out = flag('-o', null);
     const title = r.header.songName || r.header.title || r.header.gameName || '(no title)';

@@ -198,6 +198,8 @@
         regs: { envReg, pitchReg, noteEnvReg, n163WaveReg, vrc7ToneReg },
         toneOf: (id) => (options.tone || {})[id],
         toneSettings: options.toneSettings || null, // 音色ごとの設定(src/convert/toneSettings.js)
+        merge: options.merge || null, // 複数の元chを1パートにまとめる印 { chId: true }(src/convert/channelMerge.js)
+        copies: options.copies || null, // 複製 { copyId: { of, transpose, detune, delay } }(src/convert/channelCopy.js)
         n163WaveLen: MML.Kss2MmlExpansion.SCC_WAVE_LEN,
         n163ExtraMargin: options.n163ExtraMargin || 0, n163ForceHalve: options.n163ForceHalve || null, // RAM不足のやり直し用
         extract: (chip, fam, reg) => {

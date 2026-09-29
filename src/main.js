@@ -1945,12 +1945,16 @@
     const all = Plan.all();
     const channelMap = {};
     const tone = {};
+    const merge = {}; // 「まとめる」印(同じ借用先を選んだ行どうしを1パートに畳む。src/convert/channelMerge.js)
     for (const id of Object.keys(all)) {
       if (all[id].target) channelMap[id] = all[id].target;
       if (all[id].tone !== undefined) tone[id] = all[id].tone;
+      if (all[id].merge) merge[id] = true;
     }
+    // copies: 複製行 { copyId: { of, transpose, detune, delay } }(src/convert/channelCopy.js)
     // drumHits: E(DPCM)へ載せた合成音chの打点(分離レンダリング済み。synthDrumEnsure を await してから呼ぶ)
-    return { channelMap, tone, drumHits: synthDrumHitsAll(), toneSettings: toneCustom ? toneSettings : null };
+    return { channelMap, tone, merge: Object.keys(merge).length ? merge : null, copies: Plan.copies ? Plan.copies() : null,
+      drumHits: synthDrumHitsAll(), toneSettings: toneCustom ? toneSettings : null };
   }
 
   function setKbdSource(kind, name) {
@@ -6525,8 +6529,22 @@
       const tone = toneKind
         ? (ent.tone !== undefined ? ent.tone : Plan.toneOptionsFor(toneKind, 'any').def)
         : undefined;
-      return { type, tone, volPct: ent.volPct !== undefined ? ent.volPct : 100 };
+      return { type, tone, volPct: ent.volPct !== undefined ? ent.volPct : 100, merge: !!ent.merge };
     });
+    // 複製行(V0#1 等)は 8 以降に足す(src/convert/channelCopy.js。converter は copyOf のボイスのイベント列を写す)
+    const copies = Plan.copies ? Plan.copies() : null;
+    if (copies) {
+      for (const id of Object.keys(copies)) {
+        const m = /^V(\d)$/.exec(copies[id].of);
+        const ent = Plan.get(id) || {};
+        if (!m) continue;
+        const type = ent.target || 'skip';
+        const toneKind = Plan.toneKindFor(type);
+        const tone = toneKind ? (ent.tone !== undefined ? ent.tone : Plan.toneOptionsFor(toneKind, 'any').def) : undefined;
+        channelMap.push({ type, tone, volPct: ent.volPct !== undefined ? ent.volPct : 100, merge: !!ent.merge,
+          copyOf: +m[1], copyId: id, transpose: copies[id].transpose, detune: copies[id].detune, delay: copies[id].delay });
+      }
+    }
 
     const spcManualBpm = getManualBpm('spc');
     let result;
@@ -8231,15 +8249,25 @@
     if (trackMode && !psfTrackPlanCache) return { channelMap: null, tone: {}, vrc7Inst: {} };
     const src = MML.PSF2MML.sourceChannels(null, trackMode ? psfTrackPlanCache.lanes : null);
     const def = trackMode ? psfTrackPlanCache.plan : MML.PSF2MML.defaultPlan(null);
-    const channelMap = {}, tone = {}, vrc7Inst = {};
+    const channelMap = {}, tone = {}, vrc7Inst = {}, merge = {};
     let changed = false;
     for (const s of src) {
       const chId = Plan.chIdForVgmSource(s.id);
       const ent = (chId && Plan.get(chId)) || {};
       channelMap[s.id] = ent.target || def[s.id] || 'skip';
       if (channelMap[s.id] !== (def[s.id] || 'skip')) changed = true;
+      if (ent.merge) { merge[s.id] = true; changed = true; } // 「まとめる」印(src/convert/channelMerge.js)
       if (ent.tone !== undefined) tone[s.id] = ent.tone;
       if (/^vrc7_/.test(channelMap[s.id])) vrc7Inst[s.id] = ent.tone !== undefined ? ent.tone : MML.VGM2MML.defaultVrc7Inst(s.kind);
+    }
+    // 複製行(PX3#1 等 → 'psx:2#1')。src/convert/channelCopy.js
+    const copies = {};
+    for (const c of vgmCopyRows()) {
+      channelMap[c.srcId] = c.ent.target || 'skip';
+      if (c.ent.merge) merge[c.srcId] = true;
+      if (c.ent.tone !== undefined) tone[c.srcId] = c.ent.tone;
+      copies[c.srcId] = { of: c.ofSrcId, transpose: c.opt.transpose, detune: c.opt.detune, delay: c.opt.delay };
+      changed = true;
     }
     // ドラムパート(合成ch)は鍵盤に行が無い。ノイズ枠が空いていればそこへ入れる(VGM と同じ)
     if (!src.some(s => channelMap[s.id] === 'noise')) {
@@ -8247,7 +8275,7 @@
       if (drum) { channelMap[drum.id] = 'noise'; changed = true; }
     }
     // トラックモードは常に渡す(渡さないと変換器の「音符の多いch上位を N163 の8枠へ」になりトラック単位が崩れる)
-    return { channelMap: (changed || trackMode) ? channelMap : null, tone, vrc7Inst };
+    return { channelMap: (changed || trackMode) ? channelMap : null, tone, vrc7Inst, merge: Object.keys(merge).length ? merge : null, copies: Object.keys(copies).length ? copies : null };
   }
 
   // 保持中のキャプチャから、表示モードのレーン列(RollBuild.psxFrames)を取る。無ければ null
@@ -8636,7 +8664,7 @@
       result = await MML.PSF2MML.fromPsf(loadedPsfInfo, duration, {
         bpm: manualBpm, cmd: MML.UI.ConvertSettings.get(), onProgress: makeCaptureProgress(psfFileStatusEl),
         poolMode: vgmPoolModes.psx,
-        channelMap: maps.channelMap, tone: maps.tone, vrc7Inst: maps.vrc7Inst,
+        channelMap: maps.channelMap, tone: maps.tone, vrc7Inst: maps.vrc7Inst, merge: maps.merge || null, copies: maps.copies || null,
         drumHits: planOpt.drumHits, toneSettings: planOpt.toneSettings,
       });
     } catch (e) {
@@ -9315,7 +9343,10 @@
       const ent = (chId && Plan.get(chId)) || {};
       map[s.id] = ent.target || def[s.id] || 'skip';
       if (map[s.id] !== (def[s.id] || 'skip')) changed = true;
+      if (ent.merge) changed = true; // 「まとめる」印だけでもユーザー指定経路(channelMap あり)を通す
     }
+    // 複製行(OM1#1 等 → 'opm:0#1')。src/convert/channelCopy.js
+    for (const c of vgmCopyRows()) { map[c.srcId] = c.ent.target || 'skip'; changed = true; }
     // ★ドラムパート(合成ch)は鍵盤に行が無いので割当UIから直接触れない。既定では
     //   SN76489のノイズが2A03ノイズ(1枠しかない)を先に取り、ドラムは'skip'になる。
     //   ユーザーがSNノイズをスキップにして枠を空けたら、ドラムがそこへ入れるようにする
@@ -9326,6 +9357,44 @@
       if (drum) { map[drum.id] = 'noise'; changed = true; }
     }
     return changed ? map : null;
+  }
+  // 「まとめる」印(鍵盤の行 → VGM変換器のソースID)。同じ借用先を選んだ元chどうしを1パートに畳む
+  // (src/convert/channelMerge.js)。1つも無ければ null
+  function getVgmMerge() {
+    if (!loadedVgmHeader) return null;
+    const Plan = MML.Convert.ChannelPlan;
+    const src = MML.VGM2MML.sourceChannels(loadedVgmHeader);
+    if (!src.length) return planConvertOptions().merge; // NES/GB/HuC6280 のVGMは行IDのまま委譲先の変換器へ
+    const merge = {};
+    for (const s of src) {
+      const chId = Plan.chIdForVgmSource(s.id);
+      if (chId && (Plan.get(chId) || {}).merge) merge[s.id] = true;
+    }
+    for (const c of vgmCopyRows()) if (c.ent.merge) merge[c.srcId] = true;
+    return Object.keys(merge).length ? merge : null;
+  }
+  // 複製行(鍵盤の行ID 'OM1#1' 等)を VGM 変換器のソースID('opm:0#1')に写したもの [{ chId, srcId, ofSrcId, ent }]
+  function vgmCopyRows() {
+    const Plan = MML.Convert.ChannelPlan;
+    const out = [];
+    if (!Plan || !Plan.copies) return out;
+    const copies = Plan.copies() || {};
+    for (const chId of Object.keys(copies)) {
+      const srcId = Plan.vgmSourceId(chId);
+      const ofSrcId = Plan.vgmSourceId(copies[chId].of);
+      if (!srcId || !ofSrcId) continue;
+      out.push({ chId, srcId, ofSrcId, ent: Plan.get(chId) || {}, opt: copies[chId] });
+    }
+    return out;
+  }
+  // 複製の表(VGM 変換器のソースIDキー)。src/convert/channelCopy.js
+  function getVgmCopies() {
+    if (!loadedVgmHeader) return null;
+    const src = MML.VGM2MML.sourceChannels(loadedVgmHeader);
+    if (!src.length) return planConvertOptions().copies; // NES/GB/HuC6280 のVGMは行IDのまま委譲先の変換器へ
+    const o = {};
+    for (const c of vgmCopyRows()) o[c.srcId] = { of: c.ofSrcId, transpose: c.opt.transpose, detune: c.opt.detune, delay: c.opt.delay };
+    return Object.keys(o).length ? o : null;
   }
   // VRC7を借用先に選んだchの音色プリセット(sourceId → 'auto'|'0'..'15')。
   // 鍵盤側の「音色」セレクト(tone)がそのままこの値になる。
@@ -9377,7 +9446,7 @@
       //   planConvertOptions() の tone しか取っていなかったため、YM2612のDACなどを
       //   打楽器化してもMMLのEパートに出なかった(2026-09-04修正)
       const planOpt = planConvertOptions();
-      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), vrc7Inst: getVgmVrc7Inst(), tone: getVgmTone(), drumHits: planOpt.drumHits, toneSettings: planOpt.toneSettings, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
+      result = await MML.VGM2MML.fromVgm(loadedVgmBytes, duration, { bpm: vgmManualBpm, channelMap: getVgmChannelMap(), merge: getVgmMerge(), copies: getVgmCopies(), vrc7Inst: getVgmVrc7Inst(), tone: getVgmTone(), drumHits: planOpt.drumHits, toneSettings: planOpt.toneSettings, cmd: MML.UI.ConvertSettings.get(), poolMode: Object.assign({}, vgmPoolModes), onProgress: makeCaptureProgress(vgmFileStatusEl) });
     } catch (e) {
       vgmIsRendering = false;
       updateVgmPlayButton();

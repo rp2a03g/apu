@@ -247,6 +247,17 @@
     for (const i of OPN_CARRIERS[p.AL & 7]) if (p.ops[i]) m = Math.max(m, p.ops[i].ML || 0);
     return m || 0.5; // ML=0 は実機で×0.5
   }
+  // 遅延複製の copyDelay.ofSource(元のソースID)を元のパート文字に置き換える(元が載っていなければ外す)
+  function resolveCopyDelay(scoreChannels, placed) {
+    const Plan = MML.Convert.ChannelPlan;
+    const letterOfSource = {};
+    for (const t of Object.keys(placed)) letterOfSource[placed[t].source.id] = Plan.letterOfTarget(t);
+    for (const sc of scoreChannels) {
+      if (!sc.copyDelay) continue;
+      const of = letterOfSource[sc.copyDelay.ofSource];
+      if (of) sc.copyDelay = { of, frames: sc.copyDelay.frames }; else delete sc.copyDelay;
+    }
+  }
   function pitchedToNoise(ch, tone, events) {
     const Plan = MML.Convert.ChannelPlan;
     for (const ev of (events || ch.events)) {
@@ -457,8 +468,21 @@
    */
   function compose(o) {
     const Plan = MML.Convert.ChannelPlan;
-    const src = o.sources || [];
-    const plan = o.plan || {};
+    // 複製(o.copies = { copyId: { of, transpose, detune, delay } }、src/convert/channelCopy.js): 元chと同じ
+    // chip/ch を持つ仮想ソースを足す(抽出は元chと同じ経路を通り、その後イベント列だけ写して加工する)
+    const src = (o.sources || []).slice();
+    const copySources = [];
+    if (o.copies && MML.Convert.ChannelCopy) {
+      for (const id of Object.keys(o.copies)) {
+        const c = o.copies[id];
+        const orig = src.find(s => s.id === c.of);
+        if (!orig) continue;
+        const cs = Object.assign({}, orig, { id, label: MML.Convert.ChannelCopy.label(orig.label, id), copyOf: orig.id, copyOpt: c });
+        src.push(cs);
+        copySources.push(cs);
+      }
+    }
+    const plan = Object.assign({}, o.plan || {}); // まとめるで skip へ書き換えるので呼び出し側の表は汚さない
     const regs = o.regs || {};
     const cmd = o.cmd;
     const toneOf = o.toneOf || (() => undefined);
@@ -506,6 +530,61 @@
       }
     }
 
+    // ── 「まとめる」と「複製」の順序: まとめる → 複製(まとめた結果を写す) → まとめる(複製行に印を付けた組) ──
+    // まとめる(o.merge = { sourceId: true }、src/convert/channelMerge.js): 印が付き同じ借用先を選んだ元chどうしを、先頭の元chへ
+    // 1本の音符列として畳む。残りは skip にして注記を出す(以降の段は先頭の1本しか見ない)。E(DPCM)は対象外。
+    // 1回目は複製(まだ生の写し)を除いて畳む
+    const mergedMembers = {}; // 先頭 sourceId → [member source]
+    const mergedInto = {};    // メンバー sourceId → 先頭 sourceId
+    const mergeSources = (withCopies) => {
+      if (!o.merge || !MML.Convert.ChannelMerge) return;
+      const groups = new Map();
+      for (const s of src) {
+        const t = plan[s.id] || 'skip';
+        if (!o.merge[s.id] || t === 'skip' || isDpcm(t) || !extracted[s.id] || (!withCopies && s.copyOf)) continue;
+        if (!groups.has(t)) groups.set(t, []);
+        groups.get(t).push(s);
+      }
+      for (const [t, members] of groups) {
+        if (members.length < 2) continue;
+        const r = MML.Convert.ChannelMerge.merge(members.map(s => ({ id: s.id, events: extracted[s.id].events })));
+        const first = members[0];
+        extracted[first.id] = Object.assign({}, extracted[first.id], { events: r.events });
+        mergedMembers[first.id] = members.slice();
+        first.label = members.map(s => s.label).join('+');
+        for (const s of members.slice(1)) { plan[s.id] = 'skip'; delete extracted[s.id]; mergedInto[s.id] = first.id; }
+        notes.push(MML.Convert.ChannelMerge.describe(first.label, Plan.targetLabel(t), r.stats));
+      }
+    };
+    mergeSources(false);
+    // 複製のイベント列を写して加工する(移調/デチューン/遅延)。元がまとめられていればまとめた先頭のイベントを写す
+    for (const cs of copySources) {
+      const t = plan[cs.id] || 'skip';
+      if (t === 'skip' || isDpcm(t)) continue;
+      let baseId = cs.copyOf;
+      while (mergedInto[baseId]) baseId = mergedInto[baseId];
+      const base = extracted[baseId];
+      if (!base) { delete extracted[cs.id]; continue; }
+      const orig = src.find(s => s.id === baseId) || {};
+      const evs = base.events || [];
+      const total = evs.length ? evs[evs.length - 1].end : 0;
+      cs.copyOf = baseId; // 遅延複製の帳尻合わせ(copyDelay)もまとめた先頭を元にする
+      cs.label = MML.Convert.ChannelCopy.label(orig.label || baseId, cs.id);
+      extracted[cs.id] = Object.assign({}, base, { events: MML.Convert.ChannelCopy.transform(evs, Object.assign({ totalFrames: total }, cs.copyOpt), MML.Convert.ChannelCopy.GENERIC) });
+      notes.push(MML.Convert.ChannelCopy.describe(cs.label, orig.label || baseId, Plan.targetLabel(t), cs.copyOpt));
+    }
+    mergeSources(true); // 複製行に「まとめる」印が付いた組
+    // 元ch s を借用先ファミリ fam で抽出し直した結果(まとめた元chは各メンバーを取り直して畳み直す)
+    const chFamOf = (s, fam) => {
+      const res = extractFor(s.chip, fam);
+      if (!res) return null;
+      const mf = mergedMembers[s.id];
+      if (!mf) return res[s.ch];
+      const parts = mf.map(m => res[m.ch]).filter(Boolean);
+      if (parts.length < 2) return parts[0] || null;
+      return Object.assign({}, parts[0], { events: MML.Convert.ChannelMerge.merge(parts.map(c => ({ events: c.events }))).events });
+    };
+
     // ── 音色ごとの載せ先(toneSettings[key].target)で1本の元chを分割する ─────────────
     // 「V2のベース音色だけ三角波へ」のように、チャンネルの中の特定の音色だけ別の借用先へ載せる。
     // 元chは単音なので分割後の各パートに重なりは無い。分割先は仮想ソース(id 'V2@triangle')として
@@ -518,7 +597,7 @@
       for (const s of src) {
         const t = plan[s.id] || 'skip';
         const base = extracted[s.id];
-        if (!base || t === 'skip' || isDpcm(t)) continue;
+        if (!base || t === 'skip' || isDpcm(t) || s.copyOf) continue; // 複製には音色ごとの載せ先を効かせない
         // この元chに現れる音色キー → 上書き載せ先
         const overrides = new Map();
         for (const ev of base.events) {
@@ -539,8 +618,7 @@
           if (tt === 'skip') { notes.push(`${s.label} の音色 ${names.join(', ')} はスキップ指定のため変換対象外です。`); continue; }
           if (isDpcm(tt)) { notes.push(`${s.label} の音色 ${names.join(', ')} → E(DPCM) は音色単位の打楽器化に未対応のため変換対象外です(チャンネル単位でEを選ぶか、サンプルの「扱い」で打楽器にしてください)。`); continue; }
           const fam = familyOf(tt);
-          const res = extractFor(s.chip, fam);
-          const chFam = res && res[s.ch];
+          const chFam = chFamOf(s, fam);
           if (!chFam) continue;
           const keySet = new Set(keys);
           const vs = Object.assign({}, s, { id: `${s.id}@${tt}`, label: `${s.label}[${names.join(',')}]`, splitFrom: s.id, splitKeys: keySet });
@@ -568,6 +646,8 @@
         continue;
       }
       const ch = Object.assign({}, extracted[s.id], { events: extracted[s.id].events.map(ev => Object.assign({}, ev)) });
+      // 遅延だけの複製: 共通行(SHARE_LINES)の帳尻合わせ用(mmlEmit.js shareDelayPairs)。元のパート文字は scoreChannels を作るときに解決
+      if (s.copyOpt && s.copyOpt.delay > 0 && !s.copyOpt.transpose && !s.copyOpt.detune) ch.copyDelay = { ofSource: s.copyOf, frames: s.copyOpt.delay };
       // 音色ごとの音色指定(toneSettings[key].tone[種別])。チャンネルの指定 toneOf() を音色単位で上書きする
       const chTone = toneOf(s.splitFrom || s.id);
       const toneKind = Plan.toneKindOfTarget ? Plan.toneKindOfTarget(t, s.kind) : null;
@@ -687,6 +767,7 @@
         scoreChannels.push(Object.assign({}, p.channel, { letter }, flags));
       }
     }
+    resolveCopyDelay(scoreChannels, placed);
     MML.Convert.sortChannelsByLetter(scoreChannels);
 
     return { scoreChannels, expansions, letterMap, n163NumCh, notes, placed, demotions };
@@ -718,6 +799,7 @@
     envRegFor,
     adaptEvents,
     pitchedToNoise,
+    resolveCopyDelay,
     toneWave,
     compose,
   };

@@ -206,13 +206,24 @@
   //                   ループ周期を全チャンネルの音符列から検出し、イントロ+1周ぶんだけを書き出して各チャンネルの
   //                   ループ開始位置へ L を置く。5分ぶん変換しても曲データが1周ぶんで済む(NSFが小さくなる)。
   //                   イントロとループ区間の長さは全チャンネルで tick 単位に一致させる(ずれると周回ごとにずれる)
-  const LAYOUT_DEFAULTS = { PART_ORDER: 'block', BARS_PER_LINE: 4, BAR_ALIGN: false, CHANNEL_ORDER: 'letter', LOOP_DETECT: true };
+  //   SHARE_LINES   … 同じ音符列のチャンネルを「AB c4」の共通行で書く(2026-09-29、src/convert/mmlEmit.js shareLinesPlan)。
+  //                   'off'(既定)/'auto'(SHARE_SPLIT_MAX・SHARE_MIN_BARS の条件を満たす組だけ)/'always'。
+  //                   チャンネルごとに違う命令は音符の直前に「A v12」の行で分けるので、@v/D を出す設定では細切れになる
+  //                   (プレーン譜面の方が読みやすい)
+  //   SHARE_SPLIT_MAX … 'auto' の上限: 命令違いで挟む行数 ÷ 共通行の音符数(0〜1、既定 0.25)
+  //   SHARE_MIN_BARS  … 'auto' の下限: 共通行が連続する小節数(1〜16、既定 2)
+  const SHARE_LINES_VALUES = ['off', 'auto', 'always'];
+  const SHARE_MIN_BARS_MAX = 16;
+  const LAYOUT_DEFAULTS = { PART_ORDER: 'block', BARS_PER_LINE: 4, BAR_ALIGN: false, CHANNEL_ORDER: 'letter', LOOP_DETECT: true,
+    SHARE_LINES: 'off', SHARE_SPLIT_MAX: 0.25, SHARE_MIN_BARS: 2 };
   const LAYOUT_KEYS = Object.keys(LAYOUT_DEFAULTS);
   MML.Convert.LAYOUT_DEFAULTS = LAYOUT_DEFAULTS;
   MML.Convert.LAYOUT_KEYS = LAYOUT_KEYS;
   MML.Convert.PART_ORDER_VALUES = PART_ORDER_VALUES;
   MML.Convert.CHANNEL_ORDER_VALUES = CHANNEL_ORDER_VALUES;
   MML.Convert.BARS_PER_LINE_MAX = BARS_PER_LINE_MAX;
+  MML.Convert.SHARE_LINES_VALUES = SHARE_LINES_VALUES;
+  MML.Convert.SHARE_MIN_BARS_MAX = SHARE_MIN_BARS_MAX;
   // 音符の区切り(冒頭コメント NOTE_END)
   const NOTE_END_VALUES = ['next', 'zero'];
   MML.Convert.NOTE_END_VALUES = NOTE_END_VALUES;
@@ -327,6 +338,15 @@
       }
       if (cmd.BAR_ALIGN != null) out.BAR_ALIGN = !!cmd.BAR_ALIGN;
       if (cmd.LOOP_DETECT != null) out.LOOP_DETECT = !!cmd.LOOP_DETECT;
+      if (cmd.SHARE_LINES != null && SHARE_LINES_VALUES.indexOf(cmd.SHARE_LINES) >= 0) out.SHARE_LINES = cmd.SHARE_LINES;
+      if (cmd.SHARE_SPLIT_MAX != null) {
+        const v = parseFloat(cmd.SHARE_SPLIT_MAX);
+        if (v >= 0 && v <= 1) out.SHARE_SPLIT_MAX = v;
+      }
+      if (cmd.SHARE_MIN_BARS != null) {
+        const v = parseInt(cmd.SHARE_MIN_BARS, 10);
+        if (v >= 1 && v <= SHARE_MIN_BARS_MAX) out.SHARE_MIN_BARS = v;
+      }
       if (cmd.RATE_MIX != null && RATE_MIX_VALUES.indexOf(cmd.RATE_MIX) >= 0) out.RATE_MIX = cmd.RATE_MIX;
       if (cmd.DRUM_POLY != null && DRUM_POLY_VALUES.indexOf(cmd.DRUM_POLY) >= 0) out.DRUM_POLY = cmd.DRUM_POLY;
       if (cmd.N163_WAVE != null && N163_WAVE_VALUES.indexOf(cmd.N163_WAVE) >= 0) out.N163_WAVE = cmd.N163_WAVE;

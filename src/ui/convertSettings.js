@@ -96,6 +96,12 @@
     ['block', T('チャンネル順に小節ブロック')],
     ['part',  T('パートごとにまとめる')],
   ];
+  // 出力の書式: 同じ音符列は共通行で書く(src/convert/options.js SHARE_LINES、mmlEmit.js shareLinesPlan)
+  const SHARE_LINES_OPTIONS = () => [
+    ['off',    T('しない')],
+    ['auto',   T('自動(条件を満たす組だけ)')],
+    ['always', T('常に')],
+  ];
   let modalPos = null; // ドラッグで動かした位置(次に開いたときも同じ場所に)
 
   let current = null; // 正規化済み cmd
@@ -468,6 +474,26 @@
     baCb.addEventListener('change', () => setKey('BAR_ALIGN', baCb.checked));
     lySec.appendChild(line(baCb, T('小節を揃える'), T('小節の頭を縦にそろえる'), null, T('小節の区切りを全パートで同じ桁に揃える(空白で埋める)。OFFならスペース1つで区切る')));
     checks.BAR_ALIGN = baCb;
+    // 同じ音符列は共通行で書く(SHARE_LINES)。ユーザー案(2026-09-29)「ABC c4 / A v12 / B v11 / C D-1 / ABC c4」
+    const shSel = makeSelect(SHARE_LINES_OPTIONS(), () => setKey('SHARE_LINES', shSel.value));
+    lySec.appendChild(line(null, T('同じ音符列は共通行で書く'), T('複製や重ねパートを「AB c4」の1行に。プレーン譜面の方が見やすい'), shSel,
+      T('音符列(音名・音長・休符・タイ)が同じ複数のチャンネル(複製や重ねパート)を、「AB c4 d8」のように行頭に複数のパート文字を付けた1行にまとめて書きます。チャンネルごとに違う命令(v/@v/D など)は、その音符の直前に「A v12」「B v11」の行で分けます。オクターブ違い(複製の+12など)は最初の o<n> だけ分けて書けば揃います。※ @v や D を出す設定では違いが毎音出て細切れになるので、プレーン譜面(コマンド無し)の方が読みやすくなります。「自動」は下の2つの条件を満たす組だけ、「常に」は音符列が一致すれば細切れでもまとめます')));
+    const ssIn = document.createElement('input');
+    ssIn.type = 'number'; ssIn.min = '0'; ssIn.max = '1'; ssIn.step = '0.05'; ssIn.className = 'cs-num';
+    ssIn.style.width = '4.5em'; // 0.25 のような小数が欠けずに見える幅(cs-num は2桁向け)
+    ssIn.addEventListener('change', () => setKey('SHARE_SPLIT_MAX', ssIn.value));
+    ssIn.addEventListener('click', (e) => e.preventDefault());
+    lySec.appendChild(line(null, T('共通行: 分ける行の上限'), T('音符1つあたり、命令違いで挟む行の割合'), ssIn,
+      T('「自動」の条件1。1行の小節数のブロックごとに「命令の違いで挟んだ行数 ÷ 共通行の音符数」を数え、これを超えるブロックは従来どおり別行にします(0.25=4音に1回まで)')));
+    const smIn = document.createElement('input');
+    smIn.type = 'number'; smIn.min = '1'; smIn.max = String(MML.Convert.SHARE_MIN_BARS_MAX); smIn.step = '1'; smIn.className = 'cs-num';
+    smIn.addEventListener('change', () => setKey('SHARE_MIN_BARS', smIn.value));
+    smIn.addEventListener('click', (e) => e.preventDefault());
+    const smWrap = el('span', 'cs-inline');
+    smWrap.appendChild(smIn);
+    smWrap.appendChild(el('span', null, T('小節')));
+    lySec.appendChild(line(null, T('共通行: 最低の長さ'), T('共通行が続く小節数の下限'), smWrap,
+      T('「自動」の条件2。相手ごとに、共通行にできる小節が(音のある小節の)半分以上あり、かつこの小節数以上続く組だけをまとめます。所々だけ共通行になるとかえって読みにくいため')));
     // ループを自動検出(LOOP_DETECT、src/convert/mmlEmit.js detectLoop)。プリセット外(出力の書式と同じ扱い)
     const ldLoopCb = document.createElement('input'); ldLoopCb.type = 'checkbox';
     ldLoopCb.addEventListener('change', () => setKey('LOOP_DETECT', ldLoopCb.checked));
@@ -534,6 +560,10 @@
       coSel.value = current.CHANNEL_ORDER || 'letter';
       poSel.value = current.PART_ORDER || 'block';
       bpIn.value = String(current.BARS_PER_LINE || 4);
+      shSel.value = current.SHARE_LINES || 'off';
+      ssIn.value = String(current.SHARE_SPLIT_MAX != null ? current.SHARE_SPLIT_MAX : 0.25);
+      smIn.value = String(current.SHARE_MIN_BARS || 2);
+      ssIn.disabled = smIn.disabled = (current.SHARE_LINES || 'off') !== 'auto';
       ncSel.value = current.N163_CH || 'used';
       saSel.value = current.PITCH_SA || 'octave';
       nwSel.value = current.N163_WAVE || 'both';

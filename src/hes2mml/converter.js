@@ -257,6 +257,8 @@
         },
         toneOf: (id) => (options.tone || {})[id],
         toneSettings: options.toneSettings || null, // 音色ごとの設定(src/convert/toneSettings.js)
+        merge: options.merge || null, // 複数の元chを1パートにまとめる印 { chId: true }(src/convert/channelMerge.js)
+        copies: options.copies || null, // 複製 { copyId: { of, transpose, detune, delay } }(src/convert/channelCopy.js)
         // PSGの抽出は借用先ファミリに依らず1回でよい(既に上で済ませてある)。ただし音量尺度が
         // 違うファミリ(FME-7/VRC7/2A03パルス等)へ載せる分は @v テーブルを写像した registry で取り直す。
         // 借用層の写像(CHIP_VOL_LAW huc6280: 3dB/段)は生のインデックスを受けるので、曲全体の正規化

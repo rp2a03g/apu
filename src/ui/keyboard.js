@@ -663,6 +663,11 @@
       // 借用先にDPCMを選んだ行だけ出す「パッド」ボタン(ドラム(DPCM)パネルを開く)。
       // ツールバーではなくここに置く: DPCMを選んだ流れでそのまま詰められるため
       `<button type="button" class="kbd-assign-drum" style="display:none">${T('パッド')}</button>` +
+      // 借用先が他の行と重なった行だけに出す「まとめる」ボタン(案B、2026-09-29)。押すと同じ借用先の全行に印が付き
+      // 「まとめ中」表示に変わる(もう一度押すと解除)。文言・表示は _syncAssignSelects が決める
+      `<button type="button" class="kbd-assign-merge" style="display:none"></button>` +
+      // 複製行だけに出す「×」(この複製行を消す。src/convert/channelCopy.js)
+      `<button type="button" class="kbd-assign-copy-del" style="display:none" title="${T('この複製行を消す')}">×</button>` +
       // 音色が1つしかない借用先(三角波/のこぎり波/FME-7)に出す注記。空欄だと「未設定」に見えるため
       `<i class="kbd-assign-plain" style="display:none"></i>` +
       // 音色一覧(音色ごとの載せ先/音色)を開くボタン。指定がある行は件数を出す(_syncAssignSelects)
@@ -3617,7 +3622,11 @@
       const plan = channelPlan();
       if (plan && !this._planHooked) {
         this._planHooked = true;
-        plan.onChange(() => this._refreshAssignUi());
+        plan.onChange((info) => {
+          // 複製行の追加(patch.copyOf)・削除(clearChannel は info 無し)・newFile/clear は行を組み直す
+          if (!info || (info.patch && info.patch.copyOf !== undefined)) this._rebuildCopyRows();
+          this._refreshAssignUi();
+        });
       }
       this._renderAssignToggle();
     }
@@ -5319,7 +5328,7 @@
     }
     /** そのchの表示色(色の上書き込み) */
     getChannelColor(chId) {
-      const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+      const el = this._allRowEls().find(e => e.id === chId);
       return el ? el.color : null;
     }
     /** 割当UI(part列/セレクト/重複警告)の再描画を外から促す(音色ごとの指定の件数表示など) */
@@ -5736,8 +5745,8 @@
       else this._colorOverrides.delete(id);
       saveColorOverrides(this._colorOverrides);
 
-      for (const el of this._rowEls.concat(this._spcRowEls)) {
-        if (el.id !== id) continue;
+      for (const el of this._allRowEls()) {
+        if (el.id !== id && el.copyOf !== id) continue; // 複製行は元の行の色に追随する
         const newColor = this._getColor(id, el.defaultColor || el.color);
         el.color = newColor;
         const dot = el.row.querySelector('.kbd-dot');
@@ -5783,7 +5792,7 @@
       toneSel.addEventListener('change', () => {
         // 「音色ごとに指定…」: 値ではなく音色一覧(src/ui/tonePanel.js)をこのchで開く操作
         if (toneSel.value === plan.TONE_PER_INSTRUMENT) {
-          const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+          const el = this._allRowEls().find(e => e.id === chId);
           if (el) this._syncAssignSelects(el);
           if (this.onOpenTonePanel) this.onOpenTonePanel(chId);
           return;
@@ -5795,6 +5804,8 @@
       });
       // クリックが行の他の操作(大波形選択・色ピッカー)に伝播しないようにする
       for (const el of [targetSel, toneSel]) el.addEventListener('click', (e) => e.stopPropagation());
+      const mergeBtn = row.querySelector('.kbd-assign-merge');
+      if (mergeBtn) mergeBtn.addEventListener('click', (e) => { e.stopPropagation(); this._toggleMergeGroup(chId); });
       const drumBtn = row.querySelector('.kbd-assign-drum');
       if (drumBtn) drumBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -5819,7 +5830,7 @@
     _defaultTargetOf(chId) {
       const plan = channelPlan();
       if (!plan) return 'skip';
-      const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+      const el = this._allRowEls().find(e => e.id === chId);
       return (el && el.defaultTarget) || plan.defaultTarget(chId, 'skip');
     }
 
@@ -5829,11 +5840,146 @@
     // SPCの行(_spcRowEls)は警告だけ、と形式で挙動が違っていた。自動解除は選んだ側の意図を
     // 越えて他の行を書き換えてしまうので、どちらを鳴らすかはユーザーが赤い行を見て決める。
     // 変換器側は従来どおり先着優先(後のchは「変換対象外」の注記)。
+    // value は借用先タイプ、または '<借用先>+merge'(セレクトの「(V0 とまとめる)」項目。案A)
     _setAssignTarget(chId, value) {
       const plan = channelPlan();
       if (!plan) return;
       const def = this._defaultTargetOf(chId);
-      plan.set(chId, { target: value === def ? null : value, tone: null });
+      const m = /^(.+)\+merge$/.exec(value);
+      const target = m ? m[1] : value;
+      const cur = plan.get(chId) || {};
+      const curTarget = cur.target || def || 'skip';
+      // この行がまとめから抜けるとき、相手が1行だけならその行の印だけが残るので一緒に外す
+      if (cur.merge && !(m && target === curTarget)) this._releaseMergePeers(chId, curTarget);
+      const patch = { target: target === def ? null : target, merge: m ? true : null };
+      if (target !== curTarget) patch.tone = null; // 借用先を変えたら音色の指定は既定へ(従来どおり)
+      plan.set(chId, patch);
+      if (m) for (const e of this._mergePeers(chId, target)) plan.set(e.id, { merge: true });
+    }
+
+    // ── 「まとめる」の相手(同じ一覧で同じ借用先を選んでいる他の行)──
+    _assignRows() {
+      const mode = this._mode === 'spc' ? 'spc' : 'nsf';
+      return (this._mode === 'spc' ? this._spcRowEls : this._rowEls).filter(e => !e.isAllRow && e.partEl)
+        .concat((this._copyRowEls || []).filter(e => e.mode === mode));
+    }
+    // NSF側・SPC側・複製行の全部(行IDで引くとき用)
+    _allRowEls() {
+      return this._rowEls.concat(this._spcRowEls, this._copyRowEls || []);
+    }
+
+    // ── 複製行(src/convert/channelCopy.js、2026-09-29) ──
+    // 元chの直下に '<元ch>#<n>' の行を置く。生値の列(音量/波形/音程)は元の行を見れば足りるので空け、
+    // ch名・part文字・割当セル(借用先/音色/まとめる/×)だけを持つ。行数の一致に頼る更新ループ
+    // (update()/updateSpcVoices は channels[i] ↔ rows[i])を壊さないよう、_rowEls/_spcRowEls には入れず
+    // _copyRowEls に別で持つ(割当UIの一覧 _assignRows() には入る)
+    _buildCopyRow(srcEl, copyId, mode) {
+      const plan = channelPlan();
+      const row = document.createElement('div');
+      row.className = 'kbd-ch-row kbd-ch-row--copy';
+      const ent = (plan && plan.get(copyId)) || {};
+      const target = ent.target || 'skip';
+      const letter = plan ? plan.letterOfTarget(target) : '';
+      const srcName = this._rowName(srcEl);
+      const name = MML.Convert.ChannelCopy ? MML.Convert.ChannelCopy.label(srcName, copyId) : copyId;
+      row.innerHTML =
+        `<span class="kbd-dot" style="background:${srcEl.color || ''}"></span>` +
+        partChipHtml({ id: copyId, letter, target }) +
+        `<span class="kbd-mute-ph"></span>` +
+        `<span class="kbd-name kbd-name--copy" title="${T('この行は {ch} の複製です。借用先・音色・まとめるを別に選べます', { ch: srcName })}">${name}</span>` +
+        assignCellHtml({ id: copyId }) +
+        `<span class="kbd-copy-of">${T('{ch} と同じ音', { ch: srcName })}</span>`;
+      const delBtn = row.querySelector('.kbd-assign-copy-del');
+      if (delBtn) {
+        delBtn.style.display = '';
+        delBtn.addEventListener('click', (e) => { e.stopPropagation(); if (plan) plan.clearChannel(copyId); });
+      }
+      this._wireAssign(row, { id: copyId, target });
+      return {
+        id: copyId, row, isCopy: true, copyOf: srcEl.id, mode, chip: srcEl.chip || '', collapsed: false,
+        partEl: row.querySelector('.kbd-part'),
+        targetSel: row.querySelector('.kbd-assign-target'),
+        toneSel: row.querySelector('.kbd-assign-tone'),
+        drumBtn: row.querySelector('.kbd-assign-drum'),
+        mergeBtn: row.querySelector('.kbd-assign-merge'),
+        tonesBtn: row.querySelector('.kbd-assign-tones'),
+        plainEl: row.querySelector('.kbd-assign-plain'),
+        delBtn,
+        defaultTarget: 'skip', target, letter, color: srcEl.color,
+      };
+    }
+    // mode('nsf'|'spc'、省略時は両方)の複製行を捨てて、割当(copiesOf)から作り直す
+    _rebuildCopyRows(mode) {
+      const plan = channelPlan();
+      const modes = mode ? [mode] : ['nsf', 'spc'];
+      this._copyRowEls = (this._copyRowEls || []).filter(e => {
+        if (modes.indexOf(e.mode) < 0) return true;
+        e.row.remove();
+        return false;
+      });
+      if (!plan || !plan.copiesOf) return;
+      for (const m of modes) {
+        const base = (m === 'spc' ? this._spcRowEls : this._rowEls).filter(e => !e.isAllRow && e.partEl);
+        for (const srcEl of base) {
+          let after = srcEl.row;
+          for (const copyId of plan.copiesOf(srcEl.id)) {
+            const el = this._buildCopyRow(srcEl, copyId, m);
+            after.insertAdjacentElement('afterend', el.row);
+            after = el.row;
+            this._copyRowEls.push(el);
+          }
+        }
+      }
+    }
+    _effectiveTargetOf(el) {
+      const plan = channelPlan();
+      return ((plan && plan.get(el.id)) || {}).target || el.defaultTarget || 'skip';
+    }
+    _mergePeers(chId, target) {
+      if (!target || target === 'skip' || MULTI_SOURCE_TARGETS.has(target)) return [];
+      return this._assignRows().filter(e => e.id !== chId && this._effectiveTargetOf(e) === target);
+    }
+    // この行を含む同じ借用先の全行に印を付ける/外す(ポップオーバーのチェック・行のボタン・セレクト項目の共通処理)
+    _setMergeGroup(chId, on) {
+      const plan = channelPlan();
+      if (!plan) return;
+      const el = this._assignRows().find(e => e.id === chId);
+      if (!el) return;
+      const target = this._effectiveTargetOf(el);
+      for (const e of this._mergePeers(chId, target).concat([el])) plan.set(e.id, { merge: on ? true : null });
+    }
+    _toggleMergeGroup(chId) {
+      const plan = channelPlan();
+      if (!plan) return;
+      const el = this._assignRows().find(e => e.id === chId);
+      if (!el) return;
+      const target = this._effectiveTargetOf(el);
+      const on = !!(plan.get(chId) || {}).merge && this._mergePeers(chId, target).some(e => !!(plan.get(e.id) || {}).merge);
+      this._setMergeGroup(chId, !on);
+    }
+    // まとめから抜ける行の相手が1行だけなら、その行の印も外す(印が1行だけ残っても意味が無い)
+    _releaseMergePeers(chId, target) {
+      const plan = channelPlan();
+      const flagged = this._mergePeers(chId, target).filter(e => !!(plan.get(e.id) || {}).merge);
+      if (flagged.length === 1) plan.set(flagged[0].id, { merge: null });
+    }
+    // セレクトに足す「(V0 とまとめる)」項目(案A): 候補 list のうち他の行が既に使っている借用先ごとに1つ。
+    // 戻り値 [{ value: '<借用先>+merge', target, chs }]
+    _mergeTargetOptions(chId, list) {
+      const out = [];
+      for (const t of list) {
+        const peers = this._mergePeers(chId, t);
+        if (peers.length) out.push({ value: t + '+merge', target: t, chs: peers.map(e => this._rowName(e)).join(', ') });
+      }
+      return out;
+    }
+    // 今この行が「まとめ中」か(印があり、同じ借用先の相手にも印がある)
+    _isMergedRow(chId) {
+      const plan = channelPlan();
+      if (!plan) return false;
+      const el = this._assignRows().find(e => e.id === chId);
+      if (!el || !(plan.get(chId) || {}).merge) return false;
+      return this._mergePeers(chId, this._effectiveTargetOf(el)).some(e => !!(plan.get(e.id) || {}).merge);
     }
 
     // セレクトの中身を現在の割当に合わせて作り直す(借用先を変えると音色の選択肢も変わる)
@@ -5846,7 +5992,10 @@
       const opts = plan.targetsForChannel(el.id, el.defaultTarget, this._availTargets());
       // 既定の借用先が候補に無い(種別判定と既定がずれている)場合も選べるように足す
       const list = opts.indexOf(target) >= 0 ? opts : opts.concat([target]);
-      const sig = list.join(',') + '|' + target;
+      // 案A: 他の行が使っている借用先には「A: 2A03 Pulse1 +V0」(=V0 とまとめる)の項目も出す
+      const mergeOpts = this._mergeTargetOptions(el.id, list);
+      const mergedNow = this._isMergedRow(el.id);
+      const sig = list.join(',') + '|' + target + '|' + mergeOpts.map(o => o.value + ':' + o.chs).join(',');
       if (el.targetSig !== sig) {
         el.targetSig = sig;
         el.targetSel.innerHTML = '';
@@ -5864,9 +6013,32 @@
           const c = plan.colorOfTarget ? plan.colorOfTarget(t) : '';
           if (c) o.style.backgroundColor = tintOf(c);
           el.targetSel.appendChild(o);
+          // 同じ借用先の「まとめる」項目はその直下に(幅が狭いので短く「+V0」)
+          const mo = mergeOpts.find(x => x.target === t);
+          if (mo) {
+            const o2 = document.createElement('option');
+            o2.value = mo.value;
+            o2.textContent = plan.targetLabel(t) + ' +' + mo.chs;
+            o2.title = T('同じ借用先の {chs} と1パートにまとめる', { chs: mo.chs });
+            if (c) o2.style.backgroundColor = tintOf(c);
+            el.targetSel.appendChild(o2);
+          }
         }
       }
-      el.targetSel.value = target;
+      el.targetSel.value = mergedNow ? target + '+merge' : target;
+      // 案B: 借用先が他の行と重なった行だけに「まとめる」ボタン。まとめ中は「まとめ中」(押すと解除)
+      if (el.mergeBtn) {
+        const show = !!(el.dup || el.merged);
+        el.mergeBtn.style.display = show ? '' : 'none';
+        if (show) {
+          const chs = this._mergePeers(el.id, target).map(e => this._rowName(e)).join(', ');
+          el.mergeBtn.textContent = el.merged ? T('まとめ中') : T('まとめる');
+          el.mergeBtn.title = el.merged
+            ? T('{chs} と1パートにまとめて {target} へ変換する', { chs, target: plan.targetLabel(target) }) + ' ' + T('(クリックで解除)')
+            : T('同じ借用先の {chs} と1パートにまとめる', { chs });
+          el.mergeBtn.classList.toggle('kbd-assign-merge--on', !!el.merged);
+        }
+      }
       // 以前は借用先の色をセレクト本文とpart列の文字色に塗っていた。もう塗らないので、
       // 行を作り直さずに切り替わったときのために明示的に消しておく
       el.targetSel.style.color = '';
@@ -5924,20 +6096,33 @@
       el.toneSel.value = ent.tone !== undefined ? ent.tone : to.def;
     }
 
+    // 行の表示名(ch名の列。V0 / OM1 等)
+    _rowName(el) {
+      const nameEl = el.row && el.row.querySelector('.kbd-name');
+      return (nameEl && nameEl.textContent) || el.id;
+    }
+    // 同じ借用先で「まとめる」印の付いた他の行の名前(まとめ表示のツールチップ用)
+    _mergePeerNames(rows, el) {
+      return rows.filter(e => e !== el && e.target === el.target && e.merge).map(e => this._rowName(e)).join(', ');
+    }
+
     // 割当が変わったとき(plan.onChange)に呼ぶ。part列の文字・スキップの減光・
-    // 借用先の重複(赤)を表示中の全行へ反映する。
+    // 借用先の重複(赤)/まとめる(破線)を表示中の全行へ反映する。
     _refreshAssignUi() {
       const plan = channelPlan();
       if (!plan) return;
       // ★対象は「今表示中の一覧」だけ。両方(_rowEls+_spcRowEls)を混ぜると、SPC表示中に
       //   隠れているNSF側の行(A/B/C/D…)まで数えてしまい、全行が重複警告になる
-      const rows = (this._mode === 'spc' ? this._spcRowEls : this._rowEls)
-        .filter(el => !el.isAllRow && el.partEl);
-      const count = {};
+      const rows = this._assignRows();
+      const count = {}, mergeCount = {};
       for (const el of rows) {
         const ent = plan.get(el.id) || {};
         el.target = ent.target || el.defaultTarget || 'skip';
-        if (el.target !== 'skip') count[el.target] = (count[el.target] || 0) + 1;
+        el.merge = !!ent.merge;
+        if (el.target !== 'skip') {
+          count[el.target] = (count[el.target] || 0) + 1;
+          if (el.merge) mergeCount[el.target] = (mergeCount[el.target] || 0) + 1;
+        }
       }
       // スキップの減光と重複警告は「割当が意味を持つ形式」だけに出す。NSFのようにMMLパート文字を
       // 持たない行(MMC5の$5011直接PCM等)まで一律に減光すると、従来の見た目を壊してしまう
@@ -5952,10 +6137,18 @@
         // 半分の行が沈んで見える。方針 2026-09-12)
         el.row.classList.toggle('kbd-ch-row--skip', this._assignMode && editable && el.target === 'skip');
         // DPCMは複数chをまとめて載せる先なので重複扱いにしない(上の MULTI_SOURCE_TARGETS 参照)
-        const dup = editable && el.target !== 'skip' && !MULTI_SOURCE_TARGETS.has(el.target) && count[el.target] > 1;
+        const shared = editable && el.target !== 'skip' && !MULTI_SOURCE_TARGETS.has(el.target) && count[el.target] > 1;
+        // 「まとめる」(2026-09-29): 同じ借用先を選んだ行のうち、まとめる印が2行以上に付いていればそれらは
+        // 1パートとして変換される(src/convert/channelMerge.js)。赤い重複ではなく破線で示す。
+        // 印の無い行は従来どおり重複(先着優先)
+        const merged = shared && el.merge && mergeCount[el.target] > 1;
+        const dup = shared && !merged;
+        el.dup = dup; el.merged = merged; // 行の「まとめる」ボタン(案B、_syncAssignSelects)用
         el.row.classList.toggle('kbd-ch-row--conflict', dup);
+        el.row.classList.toggle('kbd-ch-row--merged', merged);
         if (el.partEl) {
-          el.partEl.title = dup ? T('この借用先は他のチャンネルと重複しています')
+          el.partEl.title = merged ? T('{chs} と1パートにまとめて {target} へ変換する', { chs: this._mergePeerNames(rows, el), target: plan.targetLabel(el.target) })
+            : dup ? T('この借用先は他のチャンネルと重複しています')
             : plan.editable() ? T('クリックで借用先(NSF側のパート)を選ぶ') : (plan.lockReason() || '');
         }
         this._syncAssignSelects(el);
@@ -5971,7 +6164,7 @@
       const plan = channelPlan();
       if (!plan || !plan.editable()) return;
       this._closeAssignPopover();
-      const el = this._rowEls.concat(this._spcRowEls).find(e => e.id === chId);
+      const el = this._allRowEls().find(e => e.id === chId);
       if (!el) return;
       const pop = document.createElement('div');
       pop.className = 'kbd-assign-pop';
@@ -5996,10 +6189,40 @@
           + (((t === 'dpcm' && plan.isSynthDrumTarget && plan.isSynthDrumTarget(chId, t)) || (t === 'noise' && plan.channelKind(chId) !== 'noise')) ? T('(打楽器化)') : '')
           + (t === el.defaultTarget ? T('(既定)') : '');
         targetSel.appendChild(o);
+        // 案A: 他の行が使っている借用先には「A: 2A03 Pulse1 (V0 とまとめる)」も並べる
+        const mo = this._mergeTargetOptions(chId, [t])[0];
+        if (mo) {
+          const o2 = document.createElement('option');
+          o2.value = mo.value;
+          o2.textContent = plan.targetLabel(t) + ' (' + T('{chs} とまとめる', { chs: mo.chs }) + ')';
+          targetSel.appendChild(o2);
+        }
       }
-      targetSel.value = target;
+      targetSel.value = this._isMergedRow(chId) ? target + '+merge' : target;
       targetSel.addEventListener('change', () => { this._setAssignTarget(chId, targetSel.value); this._openAssignPopover(anchorEl, chId); });
       pop.appendChild(rowOf(T('借用先'), targetSel));
+
+      // 「まとめる」(2026-09-29): 同じ借用先を選んだ行が他にもあるときだけ出す。ONで同じ借用先の全行に
+      // 印を付け(片側だけ付いた中途半端な状態を作らない)、変換器はそれらを1本の音符列(次の音が始まったら
+      // 前の音を切る)にして載せる(src/convert/channelMerge.js)。E(DPCM)は元々複数chをまとめる先なので出さない
+      const rowsNow = this._assignRows();
+      const peers = (target !== 'skip' && !MULTI_SOURCE_TARGETS.has(target))
+        ? rowsNow.filter(e => e.id !== chId && ((plan.get(e.id) || {}).target || e.defaultTarget || 'skip') === target) : [];
+      if (peers.length) {
+        const mergeWrap = document.createElement('span');
+        mergeWrap.className = 'kbd-assign-pop-merge';
+        const chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.checked = !!ent.merge && peers.some(e => !!(plan.get(e.id) || {}).merge);
+        chk.addEventListener('change', () => {
+          this._setMergeGroup(chId, chk.checked);
+          this._openAssignPopover(anchorEl, chId);
+        });
+        mergeWrap.appendChild(chk);
+        mergeWrap.appendChild(document.createTextNode(T('同じ借用先の {chs} と1パートにまとめる', { chs: peers.map(e => this._rowName(e)).join(', ') })));
+        mergeWrap.title = T('複数のチャンネルで交互に鳴らしている1つのパートを、1本の音符列にして変換する(次の音が始まった時点で前の音を切る)');
+        pop.appendChild(rowOf(T('まとめる'), mergeWrap));
+      }
 
       const toneKind = plan.toneKindFor(target, undefined, srcKind);
       if (toneKind) {
@@ -6037,6 +6260,42 @@
         vol.addEventListener('change', () => plan.set(chId, { volPct: vol.value === '100' ? null : parseInt(vol.value, 10) }));
         volWrap.appendChild(vol); volWrap.appendChild(volNum);
         pop.appendChild(rowOf(T('変換音量'), volWrap));
+      }
+      // 複製(src/convert/channelCopy.js): 元の行には「複製を追加」、複製行には見出し+加工(移調/デチューン/遅延)+削除
+      if (el.isCopy) {
+        const srcEl = this._allRowEls().find(e => e.id === el.copyOf);
+        const title = document.createElement('div');
+        title.className = 'kbd-assign-pop-title';
+        title.textContent = T('{ch} の複製', { ch: srcEl ? this._rowName(srcEl) : el.copyOf });
+        pop.insertBefore(title, pop.firstChild);
+        const numRow = (labelText, key, min, max, hint) => {
+          const inp = document.createElement('input');
+          inp.type = 'number'; inp.min = String(min); inp.max = String(max); inp.step = '1';
+          inp.className = 'kbd-assign-pop-num';
+          inp.value = String(ent[key] || 0);
+          inp.title = hint;
+          inp.addEventListener('change', () => {
+            const v = Math.max(min, Math.min(max, Math.round(parseFloat(inp.value) || 0)));
+            inp.value = String(v);
+            plan.set(chId, { [key]: v !== 0 ? v : null });
+          });
+          pop.appendChild(rowOf(labelText, inp));
+        };
+        numRow(T('移調(半音)'), 'transpose', -36, 36, T('複製の音を半音単位で上下する(+12=1オクターブ上)。ビブラート/デチューンの抽出も同じ比で追従する'));
+        numRow(T('デチューン(セント)'), 'detune', -100, 100, T('複製の音程を少しずらしてコーラスにする(D<n> として書き出される)'));
+        numRow(T('遅延(フレーム)'), 'delay', 0, 600, T('複製をこのフレーム数だけ遅らせてエコーにする(60フレーム=1秒。曲末を越えた分は切る)'));
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.textContent = T('この複製を削除');
+        delBtn.addEventListener('click', () => { this._closeAssignPopover(); plan.clearChannel(chId); });
+        pop.appendChild(rowOf(T('複製'), delBtn));
+      } else if (plan.addCopy && plan.format() !== 'nsf') {
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.textContent = T('複製を追加');
+        addBtn.title = T('この ch の音をもう1本、別の借用先へも載せる(直下に複製行ができる。移調・デチューン・遅延も複製ごとに付けられる)');
+        addBtn.addEventListener('click', () => { this._closeAssignPopover(); plan.addCopy(chId); });
+        pop.appendChild(rowOf(T('複製'), addBtn));
       }
       const foot = document.createElement('div');
       foot.className = 'kbd-assign-pop-foot';
@@ -6269,7 +6528,7 @@
         const tog = group.querySelector('.kbd-chip-toggle');
         if (tog) tog.textContent = collapsed ? '▶' : '▼';
         const count = group.querySelector('.kbd-chip-count');
-        if (count) count.textContent = T('({n}ch)', { n: group.querySelectorAll('.kbd-ch-row').length });
+        if (count) count.textContent = T('({n}ch)', { n: group.querySelectorAll('.kbd-ch-row:not(.kbd-ch-row--copy)').length });
       }
       for (const el of this._rowEls) {
         const collapsed = !!el.chip && this._chipCollapsed.has(el.chip);
@@ -6473,6 +6732,7 @@
           targetSel: row.querySelector('.kbd-assign-target'),
           toneSel: row.querySelector('.kbd-assign-tone'),
           drumBtn: row.querySelector('.kbd-assign-drum'),
+          mergeBtn: row.querySelector('.kbd-assign-merge'), // 案B: 重複/まとめ中の行だけに出す「まとめる」ボタン(_syncAssignSelects)
           tonesBtn: row.querySelector('.kbd-assign-tones'),
           plainEl: row.querySelector('.kbd-assign-plain'),
           defaultTarget: ch.defaultTarget,
@@ -6486,6 +6746,7 @@
         this._syncShownWave(this._rowEls);
         this._rebuildLanes(); // チャンネルごとのレーン表示も一覧に合わせる
       }
+      this._rebuildCopyRows('nsf'); // 複製行(割当の copyOf)を元の行の直下へ作り直す
       this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
       this._renderMuteAllBtn();
       this._renderVolResetBtn();
@@ -7580,6 +7841,7 @@
         // ★「パッド」ボタン(_syncAssignSelects が target===dpcm のとき表示する)。NSF側の行(_rowEls)には
         //   あったがSPCボイス行では参照を持っておらず、Eを選んでもボタンが出なかった(2026-09-07修正)
         drumBtn: row.querySelector('.kbd-assign-drum'),
+        mergeBtn: row.querySelector('.kbd-assign-merge'), // 案B: 重複/まとめ中の行だけに出す「まとめる」ボタン(_syncAssignSelects)
         tonesBtn: row.querySelector('.kbd-assign-tones'),
         plainEl: row.querySelector('.kbd-assign-plain'),
         defaultTarget,
@@ -7661,6 +7923,7 @@
           this._spcSectionEl.appendChild(el.row);
           return el;
         });
+        this._rebuildCopyRows('spc'); // 複製行(割当の copyOf)を元の行の直下へ作り直す
         this._refreshAssignUi(); // part列の文字・スキップ減光・重複警告を新しい行へ反映
         this._renderMuteAllBtn();
         this._renderVolResetBtn();
