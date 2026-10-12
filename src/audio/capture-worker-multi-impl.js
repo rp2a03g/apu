@@ -139,9 +139,13 @@
   async function _runSpc(msg) {
     const sendRoll = makeRollSender('spc', msg);
     let lastSent = 0;
-    const onProgress = (done, total, frameLog) => {
+    const onProgress = (done, total, frameLog, stateLog) => {
       if (done <= lastSent) return;
-      global.postMessage({ type: 'progress', done, total, start: lastSent, frames: frameLog.slice(lastSent, done) });
+      // stateLog(フレーム末尾のDSP状態の写し、converter.js captureAsync)も同じ差分で送る
+      const stride = MML.SPC2MML.STATE_STRIDE;
+      const state = stateLog ? stateLog.slice(lastSent * stride, done * stride) : null;
+      global.postMessage({ type: 'progress', done, total, start: lastSent, frames: frameLog.slice(lastSent, done), state },
+        state ? [state.buffer] : []);
       lastSent = done;
       if (sendRoll) sendRoll({ frameLog }, done, total);
     };

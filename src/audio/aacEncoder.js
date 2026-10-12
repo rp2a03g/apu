@@ -214,6 +214,16 @@
    * opt = { gain, bitrate, onProgress(0..1) }
    */
   async function encode(chans, sampleRate, opt) {
+    const raw = await encodeRaw(chans, sampleRate, opt);
+    return buildM4a(raw);
+  }
+
+  /**
+   * 符号化だけ行い、容れ物に詰める前の材料を返す(動画書き出し src/video/mp4Mux.js が
+   * 映像トラックと一緒に1つのMP4へ詰めるために使う)。
+   * 戻り値 { sizes, data, sampleRate, channels, asc, avgBitrate, durationSamples }
+   */
+  async function encodeRaw(chans, sampleRate, opt) {
     opt = opt || {};
     if (!isSupported()) throw new Error('このブラウザはAACの書き出しに対応していません');
     const gain = opt.gain === undefined ? 1 : opt.gain;
@@ -280,8 +290,10 @@
     let o = 0;
     for (const c of chunks) { data.set(c, o); o += c.length; }
 
-    return buildM4a({ sizes, data, sampleRate, channels, asc, avgBitrate: bitrate, durationSamples: total });
+    return { sizes, data, sampleRate, channels, asc, avgBitrate: bitrate, durationSamples: total };
   }
 
-  Audio.Aac = { isSupported, probe, encode, buildM4a, CODEC };
+  Audio.Aac = { isSupported, probe, encode, encodeRaw, buildM4a, CODEC, FRAME_SAMPLES,
+    // MP4ボックスの部品。動画書き出し(src/video/mp4Mux.js)が同じ書き方で映像+音声のMP4を組む
+    mp4: { box, bytes, u32, u16, enc4, mp4aBox } };
 })(window);

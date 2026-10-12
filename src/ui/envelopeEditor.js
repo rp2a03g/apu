@@ -264,6 +264,90 @@
     return cands[cands.length - 1];
   }
 
+  // ── 音長の目安(2026-09-30ユーザー要望「t160なら11個目あたりが8分音符」) ──────
+  // 本文のテンポで各音価が何フレームになるかを、本体区画に縦の点線(音長線)で引く。4レーン共通の
+  // 時間軸なので線は全レーンに引き、音符の形のラベルは一番上に見えているレーンの「音長帯」にだけ出す。
+  // リリース区画には引かない(ゲートオフから数えるので、音符の頭から測った音長とは意味が合わない)。
+  // フレーム数はコンパイラ(compiler.js framesForLength)と同じ 240/t*60.0988/n。実際の音符は
+  // 端数を次の音符へ繰り越すので、11.27なら11と12が混ざる。
+  // ラベルはUnicodeの音符記号(U+1D15D〜)を使わず自前で描く。小さい字では旗の本数が潰れて読めず、
+  // フォントに入っているかも環境しだいのため(2026-09-30にキャンバスで描いて確認)。
+  const NOTE_BAND_H = 16;
+  const NOTE_VALUES = [1, 2, 4, 8, 16, 32];
+  const NOTE_MARK_MIN_PX = 20;   // 音長線どうし(と表の頭)がこれより詰まる音価は出さない
+  const NOTE_NUM_MIN_PX = 38;    // 次の線までこれだけ空いていれば、音符の横にフレーム数も書く
+  const NOTE_LINE_COLOR = 'rgba(150, 190, 230, 0.55)';
+  const NOTE_ICON_COLOR = '#b8cce0';
+  const DEFAULT_TEMPO = 120;     // compiler.js と同じ(t が無い曲)
+
+  const framesPerNote = (tempo, n) => (240 / tempo) * MML.Mml.FRAME_RATE_NTSC / n;
+  const fmtFrames = (f) => (Math.abs(f - Math.round(f)) < 0.05 ? String(Math.round(f)) : f.toFixed(1));
+  const fmtTempo = (t) => (Math.abs(t - Math.round(t)) < 0.005 ? String(Math.round(t)) : t.toFixed(2));
+
+  // 音符の形。(x, base)=玉の左下あたり、高さは約13px。全音符=白玉、2分=白玉+棒、4分以下=黒玉+棒+旗
+  function drawNoteIcon(ctx, n, x, base, color) {
+    const hx = x + 3, hy = base - 2.2;
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    ctx.ellipse(hx, hy, n === 1 ? 3.2 : 2.8, 2, -0.35, 0, Math.PI * 2);
+    if (n <= 2) ctx.stroke(); else ctx.fill();
+    if (n >= 2) {
+      const sx = hx + 2.4, top = base - 13;
+      ctx.beginPath();
+      ctx.moveTo(sx, hy - 0.5); ctx.lineTo(sx, top);
+      ctx.stroke();
+      const flags = n >= 8 ? Math.log2(n) - 2 : 0;
+      for (let k = 0; k < flags; k++) {
+        const y = top + k * 3;
+        ctx.beginPath();
+        ctx.moveTo(sx, y);
+        ctx.quadraticCurveTo(sx + 4, y + 2, sx + 3.5, y + 5);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  // ヘッダの一覧に並べる用の小さな画像(キャンバスと同じ描き方を使い回す)
+  const noteIconUrlCache = new Map();
+  function noteIconUrl(n) {
+    if (noteIconUrlCache.has(n)) return noteIconUrlCache.get(n);
+    const c = document.createElement('canvas');
+    c.width = 12; c.height = 15;
+    const ctx = c.getContext && c.getContext('2d');
+    let url = '';
+    if (ctx && ctx.ellipse && c.toDataURL) {
+      drawNoteIcon(ctx, n, 1, 14, NOTE_ICON_COLOR);
+      url = c.toDataURL();
+    }
+    noteIconUrlCache.set(n, url);
+    return url;
+  }
+
+  // 本文に出てくるテンポを出てきた順に(重複なし)。先頭がコンパイラの使う曲のテンポ
+  // (compiler.js: チャンネル順で最初の t<n>)。@t<len>,<num> は同じ式で等価なtに直す
+  function sourceTempos(source) {
+    const out = [];
+    try {
+      const { channels } = MML.Mml.splitChannels(source);
+      for (const ch of Object.keys(channels)) {
+        for (const tok of MML.Mml.tokenize(channels[ch].text)) {
+          let t = null;
+          if (tok.type === 'tempo') t = tok.value;
+          else if (tok.type === 'frameTempo') {
+            const mult = 2 - Math.pow(0.5, tok.dots || 0); // 付点の倍率(compiler.js dotMultiplier)
+            t = (240 * MML.Mml.FRAME_RATE_NTSC * mult) / ((tok.num || 30) * (tok.len || 4));
+          }
+          if (t > 0 && !out.some((v) => Math.abs(v - t) < 0.005)) out.push(t);
+        }
+      }
+    } catch (e) { /* 書きかけの本文で字句解析が落ちても目安が出ないだけにする */ }
+    return out;
+  }
+
   class LaneCanvas {
     constructor(canvas, lane, cb) {
       this.canvas = canvas;
@@ -271,6 +355,9 @@
       this.cb = cb;
       this.zones = [];
       this.range = { min: 0, max: 15, rows: 0 };
+      // 音長の目安。marks=[{n, frames}]、band=音符ラベルの帯をこのキャンバスの上に足すか
+      this.guide = { marks: [], band: false, label: '' };
+      this.bandH = 0;
       this.drag = null;          // { kind:'paint'|'loop'|'end', zone }
       this.snapshot = null;      // 値を描く前の各区画のコピー(ダブルクリックで戻す)
       this.lastDownAt = 0;
@@ -298,22 +385,25 @@
       return out;
     }
 
-    setZones(zones, range) {
+    setZones(zones, range, guide) {
       this.zones = zones;
       this.range = range;
+      if (guide) this.guide = guide;
+      this.bandH = this.guide.band ? NOTE_BAND_H : 0;
       const ox = this.origins();
       const last = zones.length - 1;
       const contentW = last >= 0 ? ox[last] + zones[last].values.length * CELL_W : CELL_W;
       this.canvas.width = contentW + SLACK * CELL_W;
-      this.canvas.height = RULER_H + this.valueH();
+      this.canvas.height = this.bandH + RULER_H + this.valueH();
       this.draw();
     }
 
+    // yは音長帯の下端を0とする(帯の中は負)。帯より下の座標はすべて帯が無いときと同じ
     local(e) {
       const rect = this.canvas.getBoundingClientRect();
       return {
         x: (e.clientX - rect.left) * (this.canvas.width / (rect.width || 1)),
-        y: (e.clientY - rect.top) * (this.canvas.height / (rect.height || 1))
+        y: (e.clientY - rect.top) * (this.canvas.height / (rect.height || 1)) - this.bandH
       };
     }
 
@@ -354,7 +444,9 @@
     updateCursor(e) {
       const p = this.local(e);
       let cursor = 'crosshair';
-      if (p.y < RULER_H) {
+      if (p.y < 0) {
+        cursor = 'default'; // 音長帯は見るだけ
+      } else if (p.y < RULER_H) {
         const hd = this.handleAt(p.x);
         cursor = hd ? 'ew-resize' : 'default';
       } else if (p.x < GUTTER) {
@@ -366,6 +458,7 @@
     down(e) {
       if (e.button !== 0 || !this.zones.length) return;
       const p = this.local(e);
+      if (p.y < 0) return; // 音長帯は見るだけ
       if (p.y >= RULER_H && p.x < GUTTER) return; // 目盛り欄はダブルクリック(縦幅を表に合わせる)専用
       if (p.y < RULER_H) {
         const hd = this.handleAt(p.x);
@@ -442,6 +535,7 @@
     dblclick(e) {
       if (!this.zones.length) return;
       const p = this.local(e);
+      if (p.y < 0) return;
       if (p.y >= RULER_H && p.x < GUTTER) { this.cb.fitRange(); return; }
       // 値の区画なら、ダブルクリックの2回のmousedownで描いてしまった値を元に戻す
       if (p.y >= RULER_H && this.snapshot) this.cb.restore(this.snapshot);
@@ -455,9 +549,76 @@
       }
     }
 
+    // 音長線を引く音価。本体区画(区画0)の中だけで、詰まりすぎるものは長い音価を優先して間引く。
+    // 返すxは区画0の左端からの画素ではなくキャンバス上の座標
+    visibleMarks() {
+      if (!this.zones.length) return [];
+      const x0 = this.origins()[0];
+      const xMax = this.zones.length > 1 ? x0 + this.zones[0].values.length * CELL_W : this.canvas.width;
+      const kept = [];
+      for (const m of this.guide.marks) {                 // 全音符から順(長い方が優先)
+        const px = m.frames * CELL_W;
+        if (px < NOTE_MARK_MIN_PX) continue;
+        if (kept.length && kept[kept.length - 1].px - px < NOTE_MARK_MIN_PX) continue;
+        if (x0 + px > xMax) continue;
+        kept.push({ n: m.n, frames: m.frames, px, x: x0 + px });
+      }
+      return kept.reverse();                               // 左から順
+    }
+
     draw() {
       const ctx = this.canvas.getContext('2d');
-      const w = this.canvas.width, h = this.canvas.height;
+      const bh = this.bandH;
+      const w = this.canvas.width, h = this.canvas.height - bh;
+      ctx.clearRect(0, 0, w, this.canvas.height);
+      const marks = this.visibleMarks();
+      ctx.save();
+      ctx.translate(0, bh);
+      this.drawLane(ctx, w, h);
+      this.drawNoteLines(ctx, marks, 0, h);
+      ctx.restore();
+      if (bh) this.drawNoteBand(ctx, marks, w, bh);
+    }
+
+    drawNoteLines(ctx, marks, y0, y1) {
+      if (!marks.length) return;
+      ctx.save();
+      ctx.strokeStyle = NOTE_LINE_COLOR;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      for (const m of marks) {
+        const x = Math.round(m.x) + 0.5;
+        ctx.moveTo(x, y0); ctx.lineTo(x, y1);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 音長帯: 左端の目盛り欄にテンポ、各音長線の右に音符の形(余裕があればフレーム数も)
+    drawNoteBand(ctx, marks, w, bh) {
+      ctx.fillStyle = '#1a1a22';
+      ctx.fillRect(0, 0, w, bh);
+      ctx.fillStyle = '#2a2a34';
+      ctx.fillRect(0, bh - 1, w, 1);
+      ctx.save();
+      ctx.font = '8px monospace';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#8a8a98';
+      ctx.fillText(this.guide.label, 2, bh / 2);
+      this.drawNoteLines(ctx, marks, 0, bh);
+      marks.forEach((m, i) => {
+        drawNoteIcon(ctx, m.n, m.x + 2, bh - 2, NOTE_ICON_COLOR);
+        const room = (i + 1 < marks.length ? marks[i + 1].x : w) - m.x;
+        if (room >= NOTE_NUM_MIN_PX) {
+          ctx.fillStyle = '#8a9ab0';
+          ctx.fillText(fmtFrames(m.frames), m.x + 12, bh / 2 + 1);
+        }
+      });
+      ctx.restore();
+    }
+
+    drawLane(ctx, w, h) {
       const vh = this.valueH();
       const top = RULER_H;
       ctx.clearRect(0, 0, w, h);
@@ -613,6 +774,10 @@
       let phraseDirty = false;
       let phraseText = '';
       let gate = 6;
+      // 音長の目安に使うテンポ。ウィンドウを開いたとき本文の最初のテンポを読む。手で変えても
+      // エディタの中だけの値で、MMLには書かない(対象音源と同じく目盛りだけを決める)
+      let tempo = DEFAULT_TEMPO;
+      let tempoList = [];
 
       // 要素参照(buildShellで持ち直す)
       let els = {};
@@ -650,10 +815,15 @@
               TARGETS.map((t) => `<option value="${t.id}">${T(t.label)}</option>`).join('') +
             `</select></label>` +
             `<span class="env-scale"></span>` +
+            `<label title="${T('音長の目安(縦の点線)に使うテンポ。ウィンドウを開いたとき本文の最初の t / @t を読みます。ここで変えてもMMLには書き込まれません')}">${T('テンポ')} t` +
+              `<input type="number" class="env-tempo" min="1" max="999" step="any" list="env-tempo-list" style="width:66px" /></label>` +
+            `<datalist id="env-tempo-list"></datalist>` +
+            `<span class="env-notelens" title="${T('各音符が何フレームになるか。実際の音符は端数を次の音符へ繰り越すので、11.3なら11と12フレームが混ざります')}"></span>` +
             `<button type="button" class="secondary env-help-btn" title="${T('説明を表示/非表示')}">❓</button>` +
           `</div>` +
           `<div class="fds-help-text env-help" style="display:none;">` +
             T('4つのエンベロープを同じ時間軸(横1マス=1フレーム)で編集します。テーブル定義はチャンネルに紐づかないので、目盛り・音色の段数・試聴先は「対象音源」だけで決まります(表の中身は音源を変えても書き換えません)。キャンバスはドラッグで値を描きます。ダブルクリックでその位置にループ位置(MMLの"|")を置き、ループ線をダブルクリックすると消えます。上端の目盛り帯では、ループのつまみ(▼)を左右にドラッグして動かし、表の終端のつまみをドラッグして長さを変えます。音量と音色は赤い縦線から右がリリースの表(@vr/@@r)で、区画ごとに自分の表と1対1に対応します。ノート(@EN)とピッチ(@EP)はMML上は前回値からの相対値ですが、ここでは実際に鳴る音程/オフセットの階段を描き、反映のときに差分へ変換します。ピッチとノートの縦幅は、値を描きながら上端や下端より外へドラッグすると広がり、左端の目盛りをダブルクリックすると表の値に合わせて縮みます。ノートは和音からも作れます。和音を選ぶか鍵盤をクリックすると、その場で表が作り直されます。表に入るのは弾いた音からの半音の数字だけで、どの音で鳴るかは本文で弾く音しだいです。「弾く音の例」は鍵盤と和音名を見やすくするための仮の音で、MMLには書き込まれません。編集はこのウィンドウの中だけで、「反映」を押すまでMML本文は変わりません。') +
+            ' ' + T('縦の点線は音長の目安です。上端の帯の音符が、ヘッダのテンポでその音価が終わるフレームを示します(音符の頭=表の0フレーム目から数えます。リリースの区画には引きません)。') +
           `</div>` +
           `<div class="env-lanes">` + LANES.map(laneHtml).join('') + `</div>` +
           `<h3>${T('試聴')}</h3>` +
@@ -674,6 +844,7 @@
         rootEl.innerHTML = shellHtml();
         els = {
           target: q('.env-target'), scale: q('.env-scale'),
+          tempo: q('.env-tempo'), tempoList: q('#env-tempo-list'), noteLens: q('.env-notelens'),
           help: q('.env-help'), helpBtn: q('.env-help-btn'),
           gate: q('.env-gate'), play: q('.env-play'), stop: q('.env-stop'),
           phrase: q('.env-phrase'), status: q('.env-status'),
@@ -756,6 +927,12 @@
           target = TARGETS.find((t) => t.id === els.target.value) || TARGETS[0];
           refreshAll();
           regeneratePhrase();
+        });
+        els.tempo.addEventListener('change', () => {
+          const v = parseFloat(els.tempo.value);
+          if (v > 0 && v < 1000) tempo = v;
+          refreshTempo();
+          for (const lane of LANES) renderLane(lane);
         });
         els.helpBtn.addEventListener('click', () => {
           helpOpen = els.help.style.display === 'none';
@@ -1057,7 +1234,7 @@
 
         const zones = [{ values: s.values, loop: s.loop }];
         if (lane.relTag != null && s.relOn) zones.push({ values: s.relValues, loop: s.relLoop });
-        canvases.get(lane.key).setZones(zones, rangeOf(lane));
+        canvases.get(lane.key).setZones(zones, rangeOf(lane), noteGuide(lane));
 
         e.len.value = String(s.values.length);
         e.loop.value = s.loop == null ? '' : String(s.loop);
@@ -1148,7 +1325,37 @@
         renderLane(lane);
       }
 
+      // ── 音長の目安 ────────────────────────────────────────────────
+      function noteMarks() {
+        return NOTE_VALUES.map((n) => ({ n, frames: framesPerNote(tempo, n) }));
+      }
+
+      // 音符の帯は、見えているレーンのうち一番上のものにだけ付ける(三角波では音量レーンが隠れる)
+      function noteGuide(lane) {
+        const firstShown = LANES.find((l) => !laneAvailability(l));
+        return { marks: noteMarks(), band: firstShown === lane, label: 't' + fmtTempo(tempo) };
+      }
+
+      function readTempo() {
+        tempoList = sourceTempos(mmlSourceEl.value);
+        tempo = tempoList.length ? tempoList[0] : DEFAULT_TEMPO;
+      }
+
+      // ヘッダ: テンポ欄・本文にあるテンポの候補・音価ごとのフレーム数の一覧
+      function refreshTempo() {
+        if (!els.tempo) return;
+        els.tempo.value = fmtTempo(tempo);
+        els.tempoList.innerHTML = tempoList.map((t) => `<option value="${fmtTempo(t)}"></option>`).join('');
+        els.noteLens.innerHTML = noteMarks().map((m) => {
+          const url = noteIconUrl(m.n);
+          const icon = url ? `<img src="${url}" alt="1/${m.n}" />` : `l${m.n}`;
+          const f = fmtFrames(m.frames);
+          return `<span class="env-notelen">${icon}${Math.abs(m.frames - Math.round(m.frames)) < 1e-9 ? '' : '≈'}${f}</span>`;
+        }).join('') + ` <span class="env-notelen-unit">${T('フレーム')}</span>`;
+      }
+
       function refreshAll() {
+        refreshTempo();
         els.scale.textContent = scaleText();
         for (const lane of LANES) {
           refreshIndexSelect(lane);
@@ -1276,6 +1483,8 @@
 
       // ── ウィンドウを開いた時 / 定義のダブルクリック ──────────────
       function reloadAll() {
+        readTempo();
+        refreshTempo();
         for (const lane of LANES) { refreshIndexSelect(lane); loadLane(lane); }
         els.scale.textContent = scaleText();
         regeneratePhrase();

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-30 07:49:08
+ * Built by tools/build-capture-workers.ps1 at 2026-10-13 07:02:07
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-09-30 07:49:08';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-10-13 07:02:07';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -19864,6 +19864,151 @@
       return { lanes: this._drumLanes, laneOf: this._drumLaneOf };
     }
 
+    // ── 動画書き出し(src/video/videoExport.js)用の描画入口 ──────────────────
+    // 画面のロール/鍵盤とは別の canvas へ、任意の曲内時刻 t の1枚を描く。
+    // 描画コード(_drawRollCanvas / drawPiano)はインスタンスの状態(タイムライン、走査起点
+    // キャッシュ、ドラムレーン表、向き…)を読むので、描く間だけ書き出し用の状態に差し替えて
+    // 終わったら戻す(描画は同期なので monitorLoop と交互に走ることはない)。
+    //
+    // prepareExport(cap, chips, extra): cap は captureSongAsync の結果(regSnapshots/writeLog/
+    //   totalFrames/samplesPerFrame/sampleRate と、あれば apuEnvSnapshots/n163Snapshots)か、
+    //   main.js が MML のコンパイル結果から即席で作る同じ形。Live系(再生中のチップを直接読む関数)は
+    //   使わない(buildExtraSnapsPure)。extra = { tuningCents, tuningNotes }(#TUNING)
+    prepareExport(cap, chips, extra) {
+      const ch = (chips || []).filter(c => c && c !== 'none');
+      const frameDur = cap.samplesPerFrame / cap.sampleRate;
+      const wl = cap.writeLog || [];
+      const merged = Object.assign({ apuEnv: cap.apuEnvSnapshots || null }, extra || {});
+      const extraSnaps = buildExtraSnapsPure(wl, cap.totalFrames, frameDur, ch, cap.n163Snapshots, merged);
+      const timeline = buildRollTracksFromRegSnapshotsPure(cap.regSnapshots, wl, cap.totalFrames,
+        cap.samplesPerFrame, cap.sampleRate, ch, cap.n163Snapshots, merged) || [];
+      const ex = {
+        regSnapshots: cap.regSnapshots, extraSnaps, chips: ch, frameDur, totalFrames: cap.totalFrames,
+        timeline, tuningCents: (extra && extra.tuningCents) || 0, tuningNotes: (extra && extra.tuningNotes) || null,
+        rollCursor: {}, scoreCursor: {}, drumLanes: [], drumLaneOf: new Map(), drumNotesByTrack: null,
+        orientation: 'vertical', lastChannels: null,
+      };
+      // ドラム区画のレーン表はタイムラインのノートに drumLane を書き戻す処理なので、書き出し用の
+      // タイムラインを一度インスタンスに差し込んで作らせ、結果だけ持ち帰る
+      this._withExportState(ex, () => {
+        this._rebuildDrumLanes();
+        ex.drumLanes = this._drumLanes; ex.drumLaneOf = this._drumLaneOf; ex.drumNotesByTrack = this._drumNotesByTrack;
+      });
+      return ex;
+    }
+
+    _withExportState(ex, fn) {
+      const saved = {
+        tl: this._rollTimeline, cur: this._rollCursor, scur: this._scoreCursor, last: this._lastChannels,
+        lastPos: this._rollLastDrawnPos, drag: this._rollDrag, ori: this._layout.rollOrientation, view: this._layout.rollView,
+        lanes: this._drumLanes, laneOf: this._drumLaneOf, dnbt: this._drumNotesByTrack,
+        tc: rollTuningCents, tn: rollTuningNotes,
+      };
+      this._rollTimeline = ex.timeline; this._rollCursor = ex.rollCursor; this._scoreCursor = ex.scoreCursor;
+      this._lastChannels = ex.lastChannels; this._rollDrag = null;
+      this._layout.rollOrientation = ex.orientation; this._layout.rollView = 'roll';
+      this._drumLanes = ex.drumLanes; this._drumLaneOf = ex.drumLaneOf; this._drumNotesByTrack = ex.drumNotesByTrack;
+      rollTuningCents = ex.tuningCents; rollTuningNotes = ex.tuningNotes;
+      try { return fn(); } finally {
+        this._rollTimeline = saved.tl; this._rollCursor = saved.cur; this._scoreCursor = saved.scur;
+        this._lastChannels = saved.last; this._rollLastDrawnPos = saved.lastPos; this._rollDrag = saved.drag;
+        this._layout.rollOrientation = saved.ori; this._layout.rollView = saved.view;
+        this._drumLanes = saved.lanes; this._drumLaneOf = saved.laneOf; this._drumNotesByTrack = saved.dnbt;
+        rollTuningCents = saved.tc; rollTuningNotes = saved.tn;
+      }
+    }
+
+    // SPC: 時刻 t のボイス一覧を返す関数(main.js spcVoicesAt。先読みキャプチャの写しから引く)。
+    // 再生中の点灯は updateSpcVoices(ライブDSP)のままで、こちらは時刻指定が要る場面(動画書き出し)用
+    setSpcVoiceProvider(fn) { this._spcVoicesAt = typeof fn === 'function' ? fn : null; }
+
+    // ファイル再生(NSF/KSS/GBS/HES/VGM/PSF/SPC)の動画書き出し用: 今表示している曲の材料
+    // (先読みキャプチャ済みのタイムラインとレジスタ写し)から ex を組む。MML は prepareExport(cap)。
+    // 時間の原点はどちらも曲頭(フレーム0)なので、同じ曲を頭からキャプチャした音声と揃う。
+    // 描ける長さは先読みの範囲まで(ex.seconds)
+    exportFromCurrent() {
+      const st = this._state;
+      const spc = this._mode === 'spc';
+      if (!this._rollTimeline || !this._rollTimeline.length) return null;
+      // 全曲ぶんのレジスタ写しを持っているか(MML 再生/事前キャプチャ経路)。ファイルのライブ再生は
+      // _state がライブ追跡のみ(totalFrames=1)で、全曲の材料はロールのタイムラインだけなので、
+      // その場合は鍵盤の点灯もタイムラインの音符から起こす(renderExportFrame の channelsFromTimeline)
+      const hasSnaps = !spc && !!(st && st.regSnapshots && st.totalFrames > 1 && st.regSnapshots.length >= st.totalFrames);
+      let tlEnd = 0;
+      for (const tr of this._rollTimeline) for (const n of tr.notes) if (n.endSec > tlEnd) tlEnd = n.endSec;
+      const ex = {
+        timeline: this._rollTimeline, chips: this._chips.slice(), tuningCents: rollTuningCents, tuningNotes: rollTuningNotes,
+        rollCursor: {}, scoreCursor: {}, drumLanes: this._drumLanes, drumLaneOf: this._drumLaneOf, drumNotesByTrack: this._drumNotesByTrack,
+        orientation: this._layout.rollOrientation, lastChannels: null, regSnapshots: null, extraSnaps: null,
+        frameDur: 0, totalFrames: 0, spcVoicesAt: null, seconds: 0,
+      };
+      if (spc) {
+        ex.spcVoicesAt = this._spcVoicesAt;
+        ex.seconds = tlEnd;
+      } else if (!hasSnaps) {
+        ex.seconds = tlEnd; // 鍵盤はタイムラインから(channelsFromTimeline)
+      } else {
+        ex.regSnapshots = st.regSnapshots;
+        // Live系(再生中のチップを直接読む関数)は時刻と無関係な値を返すので外し、履歴配列へ落とす
+        ex.extraSnaps = Object.assign({}, this._extraSnaps, { apuEnvLive: null, n163Live: null, fme7Live: null, mmc5Live: null, vrc7Live: null,
+          kssPsgLive: null, kssSccLive: null, kssOpllLive: null, kssDacLive: null, gbsApuLive: null, hesApuLive: null, snLive: null });
+        ex.frameDur = st.samplesPerFrame / st.sampleRate;
+        ex.totalFrames = st.totalFrames;
+        ex.seconds = st.totalFrames * ex.frameDur;
+      }
+      return ex;
+    }
+
+    // ex(prepareExport / exportFromCurrent の戻り値)の曲内時刻 t(秒)を rollCanvas / pianoCanvas(どちらも省略可)へ描く。
+    // canvas の内部解像度は呼び出し側が _cachedWidth/_cachedHeight で指定する(DOM に付いていなくてよい)。
+    // t は単調に増やして呼ぶ(走査起点キャッシュ ex.rollCursor が前進専用。巻き戻すなら {} に戻す)
+    renderExportFrame(ex, t, rollCanvas, pianoCanvas, orientation) {
+      ex.orientation = orientation || ex.orientation || 'vertical';
+      this._withExportState(ex, () => {
+        let channels = [];
+        if (ex.regSnapshots) {
+          const fi = Math.max(0, Math.min(ex.totalFrames - 1, Math.floor(t / ex.frameDur)));
+          channels = extractChannels(ex.regSnapshots[fi] || {}, ex.extraSnaps, fi, ex.chips);
+        } else if (!ex.spcVoicesAt && ex.timeline) {
+          // レジスタ写しが無い(ファイルのライブ再生): 時刻 t に鳴っている音符から鍵盤の点灯を起こす。
+          // ロールの音符が置かれる鍵(midi。ノイズ/DPCM は疑似 midi)と同じ鍵が光る
+          if (!ex.tlCursor) ex.tlCursor = {};
+          for (const tr of ex.timeline) {
+            if (tr.laneCopy) continue;
+            const notes = tr.notes;
+            let i = ex.tlCursor[tr.id] || 0;
+            if (i > notes.length) i = notes.length;
+            if (i > 0 && notes[i - 1] && notes[i - 1].startSec > t) i = 0; // 巻き戻し
+            while (i < notes.length && notes[i].endSec <= t) i++;
+            ex.tlCursor[tr.id] = i;
+            let hit = null;
+            for (let k = i; k < notes.length && notes[k].startSec <= t; k++) { if (notes[k].endSec > t) { hit = notes[k]; break; } }
+            channels.push({ id: tr.id, color: tr.color, active: !!hit, freq: hit ? midiToFreq(hit.midi) : 0,
+              vol: hit ? (hit.vol == null ? 1 : hit.vol) : 0, drumKey: hit ? hit.drumKey : undefined });
+          }
+        }
+        this._rollLastDrawnPos = t;
+        this._applyPadKeys(channels, t);
+        this._lastChannels = channels; // _drawRollCanvas の liveColor(行の色)に使う
+        ex.lastChannels = channels;
+        // SPC: 写しから引いたボイス一覧を update() と同じ形で合流させる
+        let spcCh = [];
+        if (ex.spcVoicesAt) {
+          const r = ex.spcVoicesAt(t);
+          spcCh = ((r && r.spcVoices) || []).map(v => ({
+            id: v.label, color: this._getColor(v.label, v.color), freq: v.freq, vol: v.vol,
+            active: v.active, rawVol: null, rawVolMax: null,
+          }));
+          this._applyPadKeys(spcCh, t);
+        }
+        if (pianoCanvas) {
+          const all = channels.map(c => ({ ...c, color: this._getColor(c.id, c.color) })).concat(spcCh);
+          drawPiano(pianoCanvas, all, ex.orientation, 0, 0, this._drumsForPiano(), null);
+        }
+        if (rollCanvas) this._drawRollCanvas(rollCanvas, t, null, null);
+      });
+    }
+
     // 鍵盤canvasのクリック位置 → ドラム区画のレーン番号(区画の外なら-1)。
     // 座標系は drawPiano と同じ(音程軸は縦向き=x、横向き=下から上へのy)
     _drumLaneAtPoint(canvas, clientX, clientY) {
@@ -22617,12 +22762,11 @@
     return { seq, end };
   }
 
-  function buildRollTracksFromRegSnapshotsPure(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots, extra) {
-    if (!regSnapshots || totalFrames <= 0) return null;
-    const wl = writeLog || [];
-    const frameDur = samplesPerFrame / sampleRate;
+  // writeLog 由来の履歴配列(vrc7/n163/fme7/fdsMod/dmc)を組む。Live系(再生中のチップを直接読む関数)は
+  // 一切含まないので、任意フレームの extractChannels に使える(Worker のロール構築と動画書き出しが共用)
+  function buildExtraSnapsPure(wl, totalFrames, frameDur, chips, n163Snapshots, extra) {
     const dmcTl = buildDmcTimeline(wl, totalFrames, frameDur);
-    const extraSnaps = Object.assign({}, extra || {}, {
+    return Object.assign({}, extra || {}, {
       dmcSeq: dmcTl.seq, dmcEnd: dmcTl.end,
       vrc7: chips.includes('vrc7') ? buildVrc7Snapshots(wl) : null,
       n163: chips.includes('n163')
@@ -22631,6 +22775,13 @@
       fme7: chips.includes('fme7') ? buildFme7Snapshots(wl) : null,
       fdsMod: chips.includes('fds') ? buildFdsModSnapshots(wl, frameDur * CPU_CLOCK) : null,
     });
+  }
+
+  function buildRollTracksFromRegSnapshotsPure(regSnapshots, writeLog, totalFrames, samplesPerFrame, sampleRate, chips, n163Snapshots, extra) {
+    if (!regSnapshots || totalFrames <= 0) return null;
+    const wl = writeLog || [];
+    const frameDur = samplesPerFrame / sampleRate;
+    const extraSnaps = buildExtraSnapsPure(wl, totalFrames, frameDur, chips, n163Snapshots, extra);
     // extra.tuningCents(#TUNING、verify.js): 構築の間だけ音名の丸め基準をずらす(呼び出し元は
     // 変換中のメインスレッドで、鍵盤が別ファイルを表示中かもしれないので必ず元へ戻す)
     const prevTuning = rollTuningCents, prevTuningNotes = rollTuningNotes;
@@ -22645,6 +22796,7 @@
   }
 
   UI.KeyboardDisplay = KeyboardDisplay;
+  UI.PIANO_KEY_LEN = PIANO_KEY_LEN; // 動画書き出し(src/video/videoExport.js)の鍵盤の厚み
   UI.buildRollTracksFromRegSnapshots = buildRollTracksFromRegSnapshotsPure; // roll-builders.js(Worker)用
   UI.midiToNoteName = midiToName; // main.js(ADPCM手動キャリブレーションのプロンプト表示)用
 })(globalThis);
@@ -28423,9 +28575,13 @@
   async function _runSpc(msg) {
     const sendRoll = makeRollSender('spc', msg);
     let lastSent = 0;
-    const onProgress = (done, total, frameLog) => {
+    const onProgress = (done, total, frameLog, stateLog) => {
       if (done <= lastSent) return;
-      global.postMessage({ type: 'progress', done, total, start: lastSent, frames: frameLog.slice(lastSent, done) });
+      // stateLog(フレーム末尾のDSP状態の写し、converter.js captureAsync)も同じ差分で送る
+      const stride = MML.SPC2MML.STATE_STRIDE;
+      const state = stateLog ? stateLog.slice(lastSent * stride, done * stride) : null;
+      global.postMessage({ type: 'progress', done, total, start: lastSent, frames: frameLog.slice(lastSent, done), state },
+        state ? [state.buffer] : []);
       lastSent = done;
       if (sendRoll) sendRoll({ frameLog }, done, total);
     };

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-30 07:49:08
+ * Built by tools/build-capture-workers.ps1 at 2026-10-13 07:02:07
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-09-30 07:49:08';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-10-13 07:02:07';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -5976,9 +5976,13 @@
   async function _runSpc(msg) {
     const sendRoll = makeRollSender('spc', msg);
     let lastSent = 0;
-    const onProgress = (done, total, frameLog) => {
+    const onProgress = (done, total, frameLog, stateLog) => {
       if (done <= lastSent) return;
-      global.postMessage({ type: 'progress', done, total, start: lastSent, frames: frameLog.slice(lastSent, done) });
+      // stateLog(フレーム末尾のDSP状態の写し、converter.js captureAsync)も同じ差分で送る
+      const stride = MML.SPC2MML.STATE_STRIDE;
+      const state = stateLog ? stateLog.slice(lastSent * stride, done * stride) : null;
+      global.postMessage({ type: 'progress', done, total, start: lastSent, frames: frameLog.slice(lastSent, done), state },
+        state ? [state.buffer] : []);
       lastSent = done;
       if (sendRoll) sendRoll({ frameLog }, done, total);
     };

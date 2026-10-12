@@ -78,6 +78,10 @@ path or from any static server.
 - **Play it in.** A PC-keyboard and on-screen piano with a metronome; record what you play
   straight into MML.
 - **Export audio** as WAV / FLAC / AAC, and **sheet music** as MusicXML.
+- **Export video** as MP4 (H.264 + AAC) with the piano roll, keyboard and the highlighted MML
+  editor on screen, ready to post on X. Layout, resolution and orientation are selectable
+  File playback (NSF/SPC/KSS/GBS/HES/VGM/PSF) exports with the roll and keyboard
+  (Chromium-based browsers).
 - **Link to a song.** Opening the app with `?nsf=<file address>&song=<n>` loads that file,
   so an app URL plus a file address makes one shareable link. Nothing is hosted here: the
   visitor's browser fetches the address directly, which means the host has to allow CORS

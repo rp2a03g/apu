@@ -580,8 +580,8 @@
     const runFallback = () => {
       const localRoll = _makeLocalRollDriver('spc', roll);
       if (!localRoll) return MML.SPC2MML.captureAsync(spcBytes, durationSec, onProgress, shouldCancel);
-      return MML.SPC2MML.captureAsync(spcBytes, durationSec, (frame, frames, frameLog) => {
-        if (onProgress) onProgress(frame, frames, frameLog);
+      return MML.SPC2MML.captureAsync(spcBytes, durationSec, (frame, frames, frameLog, stateLog) => {
+        if (onProgress) onProgress(frame, frames, frameLog, stateLog);
         localRoll(frame, frames, { frameLog });
       }, shouldCancel);
     };
@@ -600,6 +600,7 @@
       }
 
       let log = null;
+      let stateLog = null; // フレーム末尾のDSP状態の写し(Uint8Array、STATE_STRIDE バイト/フレーム)
       let settled = false;
       let sawProgress = false;
       let rescueRoll = null; // Worker内ロール構築失敗時の救済(_runMultiCaptureと同じ)
@@ -608,7 +609,7 @@
         if (settled) return;
         settled = true;
         try { worker.terminate(); } catch (e) { /* ignore */ }
-        resolve({ log: log || [], brrSamples: {}, frameRate: MML.SPC2MML.FRAME_RATE });
+        resolve({ log: log || [], brrSamples: {}, stateLog, frameRate: MML.SPC2MML.FRAME_RATE });
       };
 
       const failover = (message) => {
@@ -631,8 +632,13 @@
           sawProgress = true;
           if (!log) log = Array.from({ length: m.total }, () => []);
           for (let i = 0; i < m.frames.length; i++) log[m.start + i] = m.frames[i];
+          if (m.state) {
+            const stride = MML.SPC2MML.STATE_STRIDE;
+            if (!stateLog) stateLog = new Uint8Array(m.total * stride);
+            stateLog.set(m.state, m.start * stride);
+          }
           if (shouldCancel && shouldCancel()) { finish(); return; }
-          if (onProgress) onProgress(m.done, m.total, log);
+          if (onProgress) onProgress(m.done, m.total, log, stateLog);
           if (rescueRoll) rescueRoll(m.done, m.total, { frameLog: log });
         } else if (m.type === 'roll') {
           if (roll && typeof roll.onRoll === 'function' && !rescueRoll) {

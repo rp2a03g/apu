@@ -248,7 +248,7 @@
           let rq = MML.Convert.framesToLengths(dur - kFrames, fpb, kq.carryOut, flags.lenSnap);
           // ループ自動検出中は計画済みの音長(planned)の合計tickを必ず保つ(k と r に分けても、このイベントの
           // 合計が変わるとループ開始/終端の位置がチャンネルごとにずれる)。r 側を「合計 − k」の厳密分解にする
-          if (planned && flags.loopStart != null) {
+          if (planned && (flags.loopStart != null || flags.tickBars)) {
             const rTicks = MML.Convert.lengthsTicks(planned) - MML.Convert.lengthsTicks(kq.lengths);
             const exactR = rTicks >= MML.Convert.LENGTH_QUANTUM ? MML.Convert.ticksToLengthsExact(rTicks) : null;
             if (exactR) rq = { lengths: exactR, carryOut: 0 };
@@ -608,7 +608,7 @@
   // いなければそこでは割らない。小数テンポの曲は音符が小節線から少しずつずれるので、2tick 手前で始まる
   // 4分音符が a192&a8..&a64. のように小節線で千切れていた。割らない側の小節には音符が無いままになる
   // (縦の並びは小節番号で揃うので、その小節は空欄)
-  function splitAtBoundaries(events, boundaries, tol) {
+  function splitAtBoundaries(events, boundaries, tol, tagPieces) {
     const result = [];
     let bi = 0;
     tol = tol || 0;
@@ -618,22 +618,123 @@
       let continued = false;
       while (bi < boundaries.length && boundaries[bi] < ev.end) {
         if (boundaries[bi] - segStart > tol && ev.end - boundaries[bi] > tol) { // 小節線は整数に丸めてあるので tol ちょうども切れ端扱い
-          result.push(Object.assign({}, ev, { start: segStart, end: boundaries[bi], continued }));
+          result.push(Object.assign({}, ev, { start: segStart, end: boundaries[bi], continued }, tagPieces ? { barSrc: ev } : null));
           segStart = boundaries[bi];
           continued = true;
         }
         bi++;
       }
-      result.push(Object.assign({}, ev, { start: segStart, end: ev.end, continued }));
+      result.push(Object.assign({}, ev, { start: segStart, end: ev.end, continued }, tagPieces && continued ? { barSrc: ev } : null));
     }
     return result;
   }
 
-  function bucketByMeasure(events, framesPerMeasure, measureCount) {
+  // 小節への振り分けは splitAtBoundaries と同じ「整数に丸めた小節線」で数える(2026-09-30)。
+  // ★以前は floor(start / 1小節の実数フレーム) で数えていたため、小節線が切り下げで丸まる小節(t150 なら
+  //   96.16→96)では、ちょうど小節線 96 で始まる音符が前の小節へ入り、1小節に 11 個・次に 5 個のような
+  //   でたらめな区切りになっていた(音長・再生は正しく、改行位置と BAR_ALIGN/共通行の小節だけが狂う)。
+  // tol(LEN_SNAP): 小節線の tol フレーム以内手前で始まる音符は splitAtBoundaries が割らないので、その音符は
+  //   「小節線で始まる音符」として次の小節に入れる(前の小節に入れると、前の小節が1音ぶん長く・次が短く見える)
+  function bucketByMeasure(events, boundaries, measureCount, tol) {
     const buckets = Array.from({ length: measureCount }, () => []);
+    tol = tol || 0;
+    const past = (ev, b) => ev.start >= b || ev.start > b - tol;
+    let m = 0;
     for (const ev of events) {
-      const m = Math.max(0, Math.min(measureCount - 1, Math.floor(ev.start / framesPerMeasure)));
+      while (m > 0 && !past(ev, boundaries[m - 1])) m--; // 並びは時刻順のはずだが、念のため戻れるように
+      while (m < boundaries.length && past(ev, boundaries[m])) m++;
+      buckets[Math.min(measureCount - 1, m)].push(ev);
+    }
+    return buckets;
+  }
+
+  function splitAtBarTicks(events, plan, barTicks) {
+    const out = [];
+    let t = 0;
+    for (const ev of events) {
+      const toks = plan.get(ev);
+      if (!toks) { out.push(ev); continue; }
+      const T = MML.Convert.lengthsTicks(toks);
+      const s = t, e = t + T;
+      // 割る位置(小節線)。192分付点(15tick)のせいで 5tick の切れ端になる位置は割らない
+      const cuts = [];
+      for (let B = (Math.floor(s / barTicks) + 1) * barTicks; B < e; B += barTicks) {
+        const prev = cuts.length ? cuts[cuts.length - 1] : s;
+        if (MML.Convert.ticksToLengthsExact(B - prev) && MML.Convert.ticksToLengthsExact(e - B)) cuts.push(B);
+      }
+      if (!cuts.length) { out.push(ev); t = e; continue; }
+      let segTick = s, segFrame = ev.start, first = true;
+      const dur = ev.end - ev.start;
+      for (const B of cuts) {
+        const fr = ev.start + dur * (B - s) / T;
+        const p = Object.assign({}, ev, { start: segFrame, end: fr, continued: first ? ev.continued : true });
+        plan.set(p, MML.Convert.ticksToLengthsExact(B - segTick));
+        out.push(p);
+        segTick = B; segFrame = fr; first = false;
+      }
+      const p = Object.assign({}, ev, { start: segFrame, end: ev.end, continued: true });
+      plan.set(p, MML.Convert.ticksToLengthsExact(e - segTick));
+      out.push(p);
+      t = e;
+    }
+    return out;
+  }
+  // 小節線(フレーム)で割った断片(barSrc が同じで続き)を1つに戻し、音長は断片の tick の合計にする。
+  // 量子化(quantizeSeq)は1音を1〜3トークンで書くので長い音は先に割っておく必要があるが、小節は tick で割り直す
+  // 小節線(フレーム)で終わるイベントまでの音長の合計を、ちょうど k 小節(k×barTicks)に合わせる。
+  // 量子化の丸めで小節の合計が 1900tick のようにずれると、以降の全小節の頭が音符の途中になるため
+  function pinBarTicks(events, plan, boundaries, barTicks) {
+    const Q = MML.Convert.LENGTH_QUANTUM;
+    const bIndex = new Map(boundaries.map((b, i) => [b, i + 1]));
+    let written = 0, lastPin = -1;
+    const list = events.filter(e => plan.get(e));
+    for (let i = 0; i < list.length; i++) {
+      written += MML.Convert.lengthsTicks(plan.get(list[i]));
+      const k = bIndex.get(list[i].end);
+      if (!k) continue;
+      let need = k * barTicks - written;
+      const saved = [];
+      for (let j = i; need !== 0 && j > lastPin; j--) {
+        const cur = MML.Convert.lengthsTicks(plan.get(list[j]));
+        let nt = cur + need;
+        if (nt < Q) { need = nt - Q; nt = Q; } else need = 0;
+        const exact = MML.Convert.ticksToLengthsExact(nt);
+        if (!exact) { need = 1; break; }
+        saved.push([list[j], plan.get(list[j])]);
+        plan.set(list[j], exact);
+      }
+      if (need !== 0) { for (const [e, t] of saved) plan.set(e, t); continue; } // 合わせられない小節線は飛ばす
+      written = k * barTicks;
+      lastPin = i;
+    }
+  }
+  function joinBarPieces(events, plan, keepAt) {
+    const out = [];
+    for (const ev of events) {
+      const last = out[out.length - 1];
+      if (last && ev.barSrc && last.barSrc === ev.barSrc && ev.continued && last.end === ev.start && ev.start !== keepAt &&
+          plan.get(last) && plan.get(ev)) {
+        const toks = MML.Convert.ticksToLengthsExact(MML.Convert.lengthsTicks(plan.get(last)) + MML.Convert.lengthsTicks(plan.get(ev)));
+        if (toks) {
+          const merged = Object.assign({}, last, { end: ev.end });
+          plan.set(merged, toks);
+          out[out.length - 1] = merged;
+          continue;
+        }
+      }
+      out.push(ev);
+    }
+    return out;
+  }
+  function bucketByTicks(events, plan, barTicks, measureCount) {
+    const buckets = Array.from({ length: measureCount }, () => []);
+    let t = 0;
+    for (const ev of events) {
+      const m = Math.floor(t / barTicks);
+      while (buckets.length <= m) buckets.push([]);
       buckets[m].push(ev);
+      const toks = plan.get(ev);
+      if (toks) t += MML.Convert.lengthsTicks(toks);
     }
     return buckets;
   }
@@ -929,7 +1030,15 @@
     // チャンネルの並び順(CHANNEL_ORDER): アルファベット順(既定)/変換元の割り当て順。
     // 配列を作り直すので呼び元(各 *2mml の scoreChannels)の並びは変わらない
     channelsData = MML.Convert.orderChannels(channelsData, layout.CHANNEL_ORDER);
-    const framesPerMeasure = fpb * beatsPerMeasure;
+    // 小節線(改行・BAR_ALIGN・共通行・ループ位置の候補)は元曲の本当のテンポ(丸める前の tempoBpm)で引く(2026-09-30)。
+    // fpb は t<n> に合わせて整数BPMで丸めた1拍(音長の量子化用、各 *2mml の fpb)。元曲が t150.25 相当(コナミの
+    // 1拍24フレーム)なら fpb=24.04 で、小節線を fpb で引くと1小節 0.16 フレームずつ曲より遅れ、十数小節で
+    // 小節頭の音符が前の小節へこぼれて「1小節に8分が9個・次が7個」になる。音長は1拍24フレームを4分と書く
+    // (LEN_SNAP の丸め)ので、読む人が数える小節は元曲のテンポの小節と一致する
+    const barFpb = opts.tempoBpm > 0 && Math.round(opts.tempoBpm) > 0 ? fpb * Math.round(opts.tempoBpm) / opts.tempoBpm : fpb;
+    const framesPerMeasure = barFpb * beatsPerMeasure;
+    const tickBars = MML.Convert.BAR_MODE === 'ticks';
+    const barTicks = MML.Convert.TPQN * beatsPerMeasure;
 
     // ── ループ自動検出(変換設定 LOOP_DETECT、2026-09-19) ──────────────────────────
     // 元曲のループ周期を検出し、イントロ+1周ぶん [0, loop.end) だけを書き出して L を置く。
@@ -954,11 +1063,14 @@
         const tol = Math.max(1, MML.Convert.lenSnapOf(opts.cmd) | 0);
         const crossings = (p) => channelsData.reduce((n, c) => n + ((c.events || []).some(ev =>
           ev.note != null && p - ev.start > tol && ev.end - p > tol) ? 1 : 0), 0);
+        // 小節線は下の boundaries と同じく整数に丸めた位置(丸めが切り下げだと found.start ちょうどが小節線でも
+        // found.start / 1小節 が 1 未満になるので、1つ手前の k から調べる)
         const cands = [{ p: found.start, bar: found.start === 0 }];
-        for (let k = Math.ceil(found.start / framesPerMeasure - 1e-9); ; k++) {
+        for (let k = Math.max(1, Math.floor(found.start / framesPerMeasure)); ; k++) {
           const p = Math.round(k * framesPerMeasure);
           if (p >= found.start + found.period || p + found.period > totalFrames) break;
-          if (p > found.start) cands.push({ p, bar: true });
+          if (p === found.start) cands[0].bar = true;
+          else if (p > found.start) cands.push({ p, bar: true });
         }
         let pick = null;
         for (const c of cands) {
@@ -1058,7 +1170,7 @@
       // ギャップ補完の前に掛け、コマンドフラグは下でANDマスクする(割当層で止め切れ
       // なかった分の安全網)
       const filled  = markOnsets(fillGaps(MML.Convert.shapeEvents(chan.events, fpb, opts.cmd), totalFrames));
-      let split     = splitAtBoundaries(filled, boundaries, MML.Convert.lenSnapOf(opts.cmd));
+      let split     = splitAtBoundaries(filled, boundaries, MML.Convert.lenSnapOf(opts.cmd), tickBars);
       // 遅延複製の帳尻(shareDelayPairs が T-遅延 で割った残り)はタイで続ける(splitAtBoundaries は continued を付け直すのでここで)
       split = split.map(e => (e.delayTail ? Object.assign({}, e, { continued: true }) : e));
       if (!loop) split = trimTail(split, chanSoundEnd(chan));
@@ -1074,7 +1186,8 @@
         retargetEnvelope(re, loop.start, opts.envReg);
         return re;
       });
-      let plan      = loop ? null : buildLengthPlan(split, fpb, MML.Convert.lenSnapOf(opts.cmd), opts.cmd);
+      let plan      = loop ? null : (buildLengthPlan(split, fpb, MML.Convert.lenSnapOf(opts.cmd), opts.cmd) ||
+        (tickBars ? buildGreedyPlan(split, fpb, MML.Convert.lenSnapOf(opts.cmd), opts.cmd) : null));
       if (loop) {
         // 音長の計画はイントロ部分とループ部分で別々に立てる。通しで立てると、L の位置で音長を調整した
         // ずれがループ区間の全音符へ持ち越される。ループ部分は L を起点に誤差ゼロから量子化し直す
@@ -1084,6 +1197,7 @@
         // ピン留め: ループ開始/終端までのフレーム数を、全チャンネル共通の値にぴったり合わせる
         const ok = pinPlan(split, plan, fpb, [loop.start, loop.end], opts.tempoBpm);
         if (!ok) loopPinFailed = true;
+        if (ok && tickBars) split = splitAtBarTicks(joinBarPieces(split, plan, loop.start), plan, barTicks);
         // 最終検査: コンパイラと同じ丸めで数えた「L までのフレーム数」と「全長」が、全チャンネルで同じか。
         // tick の合計を揃えてあっても、最低1フレームの切り上げが境界の直前に残ると1フレームずれる
         if (ok && opts.tempoBpm > 0) {
@@ -1099,7 +1213,10 @@
           else if (loopFrameCheck.atLoop !== atLoop || loopFrameCheck.frames !== frames) loopPinFailed = true;
         }
       }
-      const buckets = bucketByMeasure(split, framesPerMeasure, measureCount);
+      if (!loop && tickBars && MML.Convert.BAR_PIN) pinBarTicks(split, plan, boundaries, barTicks);
+      if (!loop && tickBars) split = splitAtBarTicks(joinBarPieces(split, plan, null), plan, barTicks);
+      const buckets = tickBars ? bucketByTicks(split, plan, barTicks, measureCount)
+        : bucketByMeasure(split, boundaries, measureCount, MML.Convert.lenSnapOf(opts.cmd));
       const flags = MML.Convert.maskEmitFlags({
         hasVolume: !!chan.hasVolume, hasInstrument: !!chan.hasInstrument,
         hasEnvelope: !!chan.hasEnvelope, hasFme7Env: !!chan.hasFme7Env, hasVrc7Tone: !!chan.hasVrc7Tone,
@@ -1120,7 +1237,8 @@
         defaultLen: MML.Convert.detectDefaultLength(plan ? split : filled, fpb, MML.Convert.lenSnapOf(opts.cmd), plan),
         lenSnap: MML.Convert.lenSnapOf(opts.cmd), // 音長を丸める(LEN_SNAP、duration.js framesToLengths)
         dpcmExact: MML.Convert.dpcmExactOf(opts.cmd), // 分割DPCMの音長は丸めない(DPCM_EXACT)
-        plan // 音長をチャンネル全体で最適化(LEN_DP、buildLengthPlan)
+        plan, // 音長をチャンネル全体で最適化(LEN_DP、buildLengthPlan)
+        tickBars
       }, opts.cmd);
       if (chan.letter === 'E') Object.assign(flags, DPCM_FLAGS_OFF); // DPCM: 音符=番号だけ(DPCM_NOTE_BASE 冒頭コメント)
       if (loop) {

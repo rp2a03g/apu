@@ -135,14 +135,22 @@
   // @<n> = {...}(デューティ=音色エンベロープ定義、@@<n>で選択する)も同じ扱いにする
   const TONE_DEF_PREFIX_RE = /^(\s*)(@(?:OP|OT|FM|MW|MH|N|DPCM)?\d+)(\s*=\s*\{)/i;
 
-  // 行内(コメントを除いた部分)をトークンに分割
-  function highlightBody(body, bodyStart) {
-    let out = '';
+  // ── トークン列 ──────────────────────────────────────────────
+  // 1行を { cls, text, s, e, pos } の列にする。cls=null は無着色のプレーンテキスト。
+  // pos=true のトークンだけ HTML で data-s/data-e を持つ(トラック本体の部分。再生ハイライトが
+  // 文字位置→要素を引くのに使う)。HTML(Mml.highlight)と動画書き出しの canvas 描画
+  // (src/video/videoExport.js の Mml.highlightTokens)が同じ列から作られるので、色分けが食い違わない。
+  function tok(cls, text, s, pos) {
+    return { cls, text, s, e: s + text.length, pos: !!pos };
+  }
+
+  // 行内(コメントを除いた部分)をトークンに分割。bodyStart はこの部分の絶対文字位置
+  // (null なら位置なし=data-s を付けない)
+  function bodyTokens(body, bodyStart, out) {
     let m;
     BODY_TOKEN_RE.lastIndex = 0;
     while ((m = BODY_TOKEN_RE.exec(body)) !== null) {
       const text = m[0];
-      const esc = escapeHtml(text);
       let cls = null;
       for (let g = 0; g < ORDERED_TOKENS.length; g++) {
         if (m[g + 1] !== undefined) { cls = ORDERED_TOKENS[g][0]; break; }
@@ -151,18 +159,19 @@
       // 再生範囲の背景ハイライト(main.jsのmml-range-selected)がスペース部分も
       // 途切れず塗れるようにするため)
       if (!cls && m[SPACE_GROUP] !== undefined) cls = 'tok-space';
+      out.push(tok(cls, text, (bodyStart != null ? bodyStart : 0) + m.index, cls && bodyStart != null));
+    }
+    return out;
+  }
 
-      if (cls) {
-        if (bodyStart != null) {
-          const s = bodyStart + m.index;
-          const e = s + text.length;
-          out += `<span class="${cls}" data-s="${s}" data-e="${e}">${esc}</span>`;
-        } else {
-          out += `<span class="${cls}">${esc}</span>`;
-        }
-      } else {
-        out += esc;
-      }
+  // トークン列 → HTML(旧 highlightBody/highlightLine と同じ出力)
+  function tokensToHtml(tokens) {
+    let out = '';
+    for (const t of tokens) {
+      const esc = escapeHtml(t.text);
+      if (!t.cls) out += esc;
+      else if (t.pos) out += `<span class="${t.cls}" data-s="${t.s}" data-e="${t.e}">${esc}</span>`;
+      else out += `<span class="${t.cls}">${esc}</span>`;
     }
     return out;
   }
@@ -179,24 +188,30 @@
   }
 
   // insideDef: この行が定義ブロック({...})の内側から始まるか。
-  // 返り値は { html, insideDef }(insideDefはこの行を処理した後の状態)
-  function highlightLine(line, lineStart, insideDef) {
+  // 返り値は { tokens, insideDef }(insideDefはこの行を処理した後の状態)。
+  // lineStart はこの行の絶対文字位置(トークンの s/e の基準)
+  function lineTokens(line, lineStart, insideDef) {
+    const base = lineStart != null ? lineStart : 0;
+    const out = [];
+    const plain = (text, s) => { if (text) out.push(tok(null, text, s, false)); };
     // #で始まる行(ヘッダー/ディレクティブ)は行全体を1色で扱う(コメント分離やコマンド分割はしない)
     if (!insideDef && /^\s*#/.test(line)) {
-      return { html: `<span class="tok-header">${escapeHtml(line)}</span>`, insideDef: false };
+      out.push(tok('tok-header', line, base, false));
+      return { tokens: out, insideDef: false };
     }
 
     const commentIdx = line.indexOf(';');
     const body = commentIdx >= 0 ? line.slice(0, commentIdx) : line;
     const comment = commentIdx >= 0 ? line.slice(commentIdx) : '';
+    const commentTok = () => { if (comment) out.push(tok('tok-comment', comment, base + body.length, false)); };
     const nextInsideDef = insideDef ? braceDelta(body) >= 0 : false;
 
     // 定義ブロックの2行目以降: 中身は着色せずそのまま出す(1行目の"= { ... }"と同じ扱い。
     // ここを音符扱いで着色すると、@MW<n>の"R"(リセット)や"-1"等が休符・音符の色になってしまう)
     if (insideDef) {
-      let out = escapeHtml(body);
-      if (comment) out += `<span class="tok-comment">${escapeHtml(comment)}</span>`;
-      return { html: out, insideDef: nextInsideDef };
+      plain(body, base);
+      commentTok();
+      return { tokens: out, insideDef: nextInsideDef };
     }
 
     // エンベロープ/音色データ定義行: 先頭の"@キーワード<n>"部分だけ定義色で着色し、
@@ -206,28 +221,50 @@
     const def = envDef || toneDef;
     if (def) {
       const cls = envDef ? 'tok-def-envelope' : 'tok-def-tone';
-      let out = escapeHtml(def[1]);
-      out += `<span class="${cls}">${escapeHtml(def[2])}</span>`;
-      out += escapeHtml(body.slice(def[1].length + def[2].length));
-      if (comment) out += `<span class="tok-comment">${escapeHtml(comment)}</span>`;
-      return { html: out, insideDef: braceDelta(body) > 0 };
+      plain(def[1], base);
+      out.push(tok(cls, def[2], base + def[1].length, false));
+      plain(body.slice(def[1].length + def[2].length), base + def[1].length + def[2].length);
+      commentTok();
+      return { tokens: out, insideDef: braceDelta(body) > 0 };
     }
 
     const chanMatch = body.match(/^(\s*)([A-Za-z]+)(\s+|$)/);
-    let out = '';
     let rest = body;
     let restStart = lineStart;
     if (chanMatch) {
-      out += escapeHtml(chanMatch[1]);
-      out += `<span class="tok-track">${escapeHtml(chanMatch[2])}</span>`;
-      out += escapeHtml(chanMatch[3]);
+      plain(chanMatch[1], base);
+      out.push(tok('tok-track', chanMatch[2], base + chanMatch[1].length, false));
+      plain(chanMatch[3], base + chanMatch[1].length + chanMatch[2].length);
       rest = body.slice(chanMatch[0].length);
       if (restStart != null) restStart += chanMatch[0].length;
     }
-    out += highlightBody(rest, restStart);
-    if (comment) out += `<span class="tok-comment">${escapeHtml(comment)}</span>`;
-    return { html: out, insideDef: false };
+    bodyTokens(rest, restStart, out);
+    commentTok();
+    return { tokens: out, insideDef: false };
   }
+
+  function highlightLine(line, lineStart, insideDef) {
+    const r = lineTokens(line, lineStart, insideDef);
+    return { html: tokensToHtml(r.tokens), insideDef: r.insideDef };
+  }
+
+  // 全行のトークン列 [[{cls,text,s,e}...] ...](行ごと)。cls は tok-* のクラス名か null。
+  // 動画書き出し(canvas への描画)用。色分け・data-s の付け方は Mml.highlight と完全に同じ
+  Mml.highlightTokens = function (source) {
+    const re = /\r\n|\r|\n/g;
+    let last = 0;
+    let m;
+    const lines = [];
+    let insideDef = false;
+    while ((m = re.exec(source)) !== null) {
+      const r = lineTokens(source.slice(last, m.index), last, insideDef);
+      insideDef = r.insideDef;
+      lines.push(r.tokens);
+      last = m.index + m[0].length;
+    }
+    lines.push(lineTokens(source.slice(last), last, insideDef).tokens);
+    return lines;
+  };
 
   // 各行を display:block の <span class="mml-line"> で包む。
   // ★性能上の要点(2026-07-25): これをやらず全行を1つの<pre>(単一のインライン整形

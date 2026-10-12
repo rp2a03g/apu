@@ -216,6 +216,19 @@
     </div>
   </section>
 
+  <!-- 動画書き出し: MML再生をロール+鍵盤+エディタの絵つきで MP4(H.264+AAC)にする(X などへの貼り付け用)。
+       中身は src/ui/videoExportPanel.js、描画と符号化は src/video/。鍵盤表示の出力形式「動画 (MP4)」から開く -->
+  <section class="float-window" id="win-video"
+    data-default-left="160" data-default-top="160" data-default-width="720" data-default-height="560">
+    <div class="float-window-header">
+      <span>動画書き出し</span>
+      <button class="float-window-close" aria-label="閉じる">×</button>
+    </div>
+    <div class="float-window-body">
+      <div id="videoExportPanel" class="vx-panel"></div>
+    </div>
+  </section>
+
   <!-- DPCMコンバータ: @DPCM<n>定義のエディタ(1定義=1行、ローカル編集→「反映」でMMLへ)。
        中身は src/ui/dpcmEditor.js が組み立てる。定義のダブルクリックでも開く -->
   <!-- エンベロープエディタ: @v/@vr(音量) @<n>/@@r(音色) @EP(ピッチ) @EN(ノート) を
@@ -984,6 +997,9 @@
   <script src="src/nsf2mml/converter.js"></script>
   <script src="src/audio/flacEncoder.js"></script>
   <script src="src/audio/aacEncoder.js"></script>
+  <script src="src/video/mp4Mux.js"></script>
+  <script src="src/video/videoExport.js"></script>
+  <script src="src/ui/videoExportPanel.js"></script>
   <script src="src/audio/audio-debug.js"></script>
   <script src="src/audio/stream-player.js"></script>
   <script src="src/audio/assign-preview.js"></script>

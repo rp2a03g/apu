@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-09-30 07:49:08
+ * Built by tools/build-capture-workers.ps1 at 2026-10-13 07:02:07
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-09-30 07:49:08';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-10-13 07:02:07';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -1703,6 +1703,11 @@
   const SAMPLES_PER_FRAME = Math.round(DSP_RATE / 60);
   const FPS_SPC          = DSP_RATE / SAMPLES_PER_FRAME; // 実効フレームレート
   MML.SPC2MML.FRAME_RATE = FPS_SPC; // capture()完了を待たずにフレームレートだけ知りたい呼び出し元向け
+  // captureAsync の stateLog(フレーム末尾のDSP状態の写し)の1フレームのバイト数と envMode の符号
+  const STATE_STRIDE  = 128 + 8 * 3;
+  const ENV_MODE_CODE = { off: 0, attack: 1, decay: 2, sustain: 3, release: 4 };
+  MML.SPC2MML.STATE_STRIDE = STATE_STRIDE;
+  MML.SPC2MML.ENV_MODE_NAMES = ['off', 'attack', 'decay', 'sustain', 'release', 'unknown'];
 
   // ── type → 2A03固定チャンネル文字(拡張音源分はassignExpansionLettersで決定) ──
   const TYPE_TO_LETTER = {
@@ -2395,6 +2400,21 @@
     // envLog: capture()と同じ実測エンベロープ採取(コメントはそちらを参照)
     const envLog = Array.from({ length: frames }, () => null);
     const snapEnv = () => { const e = new Uint8Array(8); for (let c = 0; c < 8; c++) e[c] = player.dsp.voices[c].env >> 4; return e; };
+    // stateLog: フレーム末尾のDSP状態の写し(2026-09-29)。鍵盤表示の点灯/ch一覧は再生中のDSPを
+    // 直接読んでいるが、動画書き出しやシーク中のように「時刻 t の状態」が要る場面では
+    // これを引く(2A03側の apuEnvSnapshots/n163Snapshots と同じ「ライブ or 写し」の二本立て)。
+    // 1フレーム = regs 128B + ボイス8×(env u16 LE + envMode u8) = STATE_STRIDE バイト
+    const stateLog = new Uint8Array(frames * STATE_STRIDE);
+    const snapState = (f) => {
+      const o = f * STATE_STRIDE;
+      stateLog.set(player.dsp.regs.subarray ? player.dsp.regs.subarray(0, 128) : player.dsp.regs.slice(0, 128), o);
+      for (let c = 0; c < 8; c++) {
+        const v = player.dsp.voices[c];
+        const p = o + 128 + c * 3;
+        stateLog[p] = v.env & 0xFF; stateLog[p + 1] = (v.env >> 8) & 0xFF;
+        stateLog[p + 2] = ENV_MODE_CODE[v.envMode] !== undefined ? ENV_MODE_CODE[v.envMode] : 5;
+      }
+    };
     let frame = 0, samplesInFrame = 0;
     // off: そのフレーム内での書き込みサンプル位置(0..SAMPLES_PER_FRAME-1)。
     // ★2026-08-25: 再生(SpcReplayStreamPlayer)がフレーム先頭で全書き込みを一括適用して
@@ -2418,25 +2438,25 @@
       samplesInFrame++;
       player.renderSample();
       if (samplesInFrame >= SAMPLES_PER_FRAME) {
-        if (frame < frames) envLog[frame] = snapEnv();
+        if (frame < frames) { envLog[frame] = snapEnv(); snapState(frame); }
         samplesInFrame = 0;
         frame++;
         if (frame === 1 || performance.now() - sliceStart >= sliceBudgetMs) {
-          if (onProgress) onProgress(frame, frames, frameLog);
+          if (onProgress) onProgress(frame, frames, frameLog, stateLog);
           await yieldFn();
           // 曲切替/停止の連打で先読みキャプチャが何本も積み上がりCPUを食い合うのを防ぐため、
           // 呼び出し元から「もう不要」と言われたらここでループ自体を打ち切る(onProgress側だけ
           // 無視してもエミュレーション自体は最後まで回り続けてしまうため不十分だった)。
           if (shouldCancel && shouldCancel()) {
-            return { log: frameLog, brrSamples: _collectBrrSamples(player), envLog, frameRate: FPS_SPC };
+            return { log: frameLog, brrSamples: _collectBrrSamples(player), envLog, stateLog, frameRate: FPS_SPC };
           }
           sliceStart = performance.now();
         }
       }
     }
-    if (onProgress) onProgress(frames, frames, frameLog);
+    if (onProgress) onProgress(frames, frames, frameLog, stateLog);
 
-    return { log: frameLog, brrSamples: _collectBrrSamples(player), envLog, frameRate: FPS_SPC };
+    return { log: frameLog, brrSamples: _collectBrrSamples(player), envLog, stateLog, frameRate: FPS_SPC };
   };
 
   // ── DSPログ(フレーム単位のreg/val書き込み列)からボイスごとのノートイベントを抽出 ──
@@ -6436,9 +6456,13 @@
   async function _runSpc(msg) {
     const sendRoll = makeRollSender('spc', msg);
     let lastSent = 0;
-    const onProgress = (done, total, frameLog) => {
+    const onProgress = (done, total, frameLog, stateLog) => {
       if (done <= lastSent) return;
-      global.postMessage({ type: 'progress', done, total, start: lastSent, frames: frameLog.slice(lastSent, done) });
+      // stateLog(フレーム末尾のDSP状態の写し、converter.js captureAsync)も同じ差分で送る
+      const stride = MML.SPC2MML.STATE_STRIDE;
+      const state = stateLog ? stateLog.slice(lastSent * stride, done * stride) : null;
+      global.postMessage({ type: 'progress', done, total, start: lastSent, frames: frameLog.slice(lastSent, done), state },
+        state ? [state.buffer] : []);
       lastSent = done;
       if (sendRoll) sendRoll({ frameLog }, done, total);
     };

@@ -3461,6 +3461,23 @@ button.apply-btn--dirty {
 button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align: 1px; }
 
 /* ── 音色一覧パネル(src/ui/tonePanel.js) ─────────────────────────────── */
+/* --- 動画書き出しパネル(src/ui/videoExportPanel.js、#win-video) --- */
+.vx-panel { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; font-size: 12px; }
+.vx-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 4px 14px; }
+.vx-form label { display: flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--text-muted); }
+.vx-form label > select, .vx-form label > input[type="number"] { margin-left: auto; }
+.vx-form label > input[type="number"] { width: 60px; }
+.vx-form label > input[type="range"] { flex: 1 1 auto; min-width: 60px; margin-left: auto; accent-color: var(--accent); }
+.vx-split-val { width: 34px; text-align: right; }
+.vx-preview-wrap { display: flex; flex-direction: column; gap: 4px; flex: 1; min-height: 120px; }
+.vx-preview { width: 100%; height: auto; max-height: 100%; object-fit: contain; background: #000; border: 1px solid var(--border); border-radius: 4px; }
+.vx-preview-ctl { display: flex; align-items: center; gap: 8px; }
+.vx-preview-ctl input[type="range"] { flex: 1; accent-color: var(--accent); }
+.vx-time-val { width: 52px; text-align: right; color: var(--text-muted); }
+.vx-actions { display: flex; align-items: center; gap: 8px; }
+.vx-status { color: var(--text-muted); }
+.vx-note { color: var(--text-muted); font-size: 11px; }
+
 .tone-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; font-size: 11px; overflow-x: auto; }
 .tone-panel-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 8px; border-bottom: 1px solid var(--border); color: var(--text-muted); }
 .tone-panel-bar .tp-sort select { font-size: 11px; }
@@ -3515,6 +3532,11 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 .env-ed-top { align-items: center; gap: 8px; }
 .env-ed-top label { display: flex; align-items: center; gap: 4px; }
 .env-scale { color: var(--text-muted); font-size: 10px; }
+/* 音長の目安の一覧(音符の形+フレーム数)。音符の絵はキャンバスと同じ描き方の画像 */
+.env-notelens { display: inline-flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 10px; font-family: var(--mono); }
+.env-notelen { display: inline-flex; align-items: flex-end; gap: 1px; }
+.env-notelen img { width: 12px; height: 15px; }
+.env-notelen-unit { font-family: inherit; }
 .env-note { color: var(--text-muted); font-size: 10px; }
 
 .env-lanes { display: flex; flex-direction: column; gap: 4px; }

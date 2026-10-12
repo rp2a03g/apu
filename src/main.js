@@ -1910,13 +1910,17 @@
   // (src/audio/aacEncoder.js。Chromium系は通るが他は分からない)。判定は非同期なので
   // 起動時に1回だけ測ってここへ控える
   let aacExportAvailable = false;
+  // 動画(MP4=H.264+AAC)も同じくブラウザ内蔵の符号化器しだい(src/video/videoExport.js)。MML再生のみ
+  let videoExportAvailable = false;
   (async () => {
     try { aacExportAvailable = await MML.Audio.Aac.probe(44100, 2); } catch (e) { aacExportAvailable = false; }
+    try { videoExportAvailable = !!(MML.Video && await MML.Video.probe()); } catch (e) { videoExportAvailable = false; }
   })();
   function exportFormatsFor(fmt) { // fmt: 形式名 または 'mml'(MML再生。NSFとして鳴らすのでレジスタログも出せる)
     const list = [['wav', 'WAV'], ['flac', 'FLAC']];
     if (aacExportAvailable) list.push(['aac', 'AAC (.m4a)']);
     if (EXPORT_REGLOG_FORMATS[fmt]) list.push(['reglog', T('レジスタログ(CSV)')]);
+    if (videoExportAvailable) list.push(['mp4', T('動画 (MP4)…')]);
     return list;
   }
   // 直前に選ばれた出力形式('wav' | 'reglog')。各 exportXxxWav() がこれを見て出し分ける
@@ -1957,8 +1961,10 @@
       drumHits: synthDrumHitsAll(), toneSettings: toneCustom ? toneSettings : null };
   }
 
+  let kbdSourceName = ''; // 鍵盤表示のタイトル行に出している曲名(動画書き出しのタイトル帯にも使う)
   function setKbdSource(kind, name) {
     kbdSourceKind = kind || null;
+    kbdSourceName = name || '';
     if (kind !== 'mml') scoreView.setScore(null); // 楽譜は MML のコンパイル結果からしか作れない
     if (kind && kind !== 'mml') loadedSoundFormat = kind;
     keyboardDisplay.setSourceInfo(kind, name);
@@ -3752,6 +3758,18 @@
     if (durEl) durEl.value = String(sec);
   };
   keyboardDisplay.onExport = (fmtId, sec) => {
+    // 動画は設定(画面構成・解像度…)とプレビューが要るので、書き出しパネルを開くだけにする
+    if (fmtId === 'mp4') {
+      if (kbdSourceKind === 'mml') {
+        if (sec > 0) mmlExportSeconds = sec;
+        MML.UI.VideoExportPanel.open({ seconds: sec > 0 ? sec : mmlDefaultExportSeconds() });
+      } else {
+        const durEl = keyboardDurationInput();
+        if (durEl && sec > 0) durEl.value = String(sec);
+        MML.UI.VideoExportPanel.open({ seconds: sec > 0 ? sec : (durEl ? parseInt(durEl.value, 10) || 30 : 30) });
+      }
+      return;
+    }
     exportMode = ['wav', 'flac', 'aac', 'reglog'].indexOf(fmtId) >= 0 ? fmtId : 'wav';
     if (kbdSourceKind === 'mml') {
       if (sec > 0) mmlExportSeconds = sec;
@@ -3771,32 +3789,41 @@
   // NSFファイルの書き出しと同じ経路(captureSongAsync)で鳴らす。書き出したNSFを再生したときと同じ音・同じ
   // レジスタ書き込みになり、ループ(L)も指定の秒数まで回る。ミュート中のchは鳴らさない(ファイル再生と同じ)
   let mmlExporting = false;
-  async function exportMmlAudio(seconds) {
-    if (mmlExporting) return;
+  // 今のエディタの MML をコンパイル→NSF→captureSongAsync まで(音声・レジスタログ・動画の書き出しで共通)。
+  // 失敗(コンパイルエラー等)は showError(html) に出して null を返す
+  async function renderMmlCapture(seconds, showError, onProgress) {
     const result = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
     if (result.errors.length > 0) {
-      captureOutputEl.innerHTML = '<div class="error">' + escapeHtml(T('MMLコンパイルエラーのため書き出せません:')) + '\n' + renderCompileErrors(result.errors) + '</div>';
-      return;
+      showError('<div class="error">' + escapeHtml(T('MMLコンパイルエラーのため書き出せません:')) + '\n' + renderCompileErrors(result.errors) + '</div>');
+      return null;
     }
     const meta = result.meta || {};
     const built = MML.Driver.buildBankedNsfBytes(result, {
       songName: meta.title || '', artist: meta.composer || '', copyright: meta.maker || '', totalSongs: 1, startingSong: 1,
     });
     if (built.asmErrors.length > 0) {
-      captureOutputEl.innerHTML = '<div class="error">' + escapeHtml(nsfBuildErrorText(built.asmErrors)) + '</div>';
-      return;
+      showError('<div class="error">' + escapeHtml(nsfBuildErrorText(built.asmErrors)) + '</div>');
+      return null;
     }
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const sampleRate = audioCtx.sampleRate;
     const baseName = (meta.title || (currentMmlFileName || 'mml').replace(/\.[^.]*$/, '') || 'mml').replace(/[\\/:*?"<>|]/g, '_');
+    const cap = await MML.Emu.captureSongAsync(built.nsfBytes, {
+      songIndex: 0, durationSeconds: seconds, sampleRate, mute: getChannelMuteConfig(true),
+    }, onProgress);
+    return { cap, result, meta, baseName, sampleRate };
+  }
+
+  async function exportMmlAudio(seconds) {
+    if (mmlExporting) return;
     mmlExporting = true;
     try {
       captureOutputEl.innerHTML = '<div>' + T('WAV書き出し用レンダリング中…') + '</div>';
-      const cap = await MML.Emu.captureSongAsync(built.nsfBytes, {
-        songIndex: 0, durationSeconds: seconds, sampleRate, mute: getChannelMuteConfig(true),
-      }, (done, total) => {
+      const r = await renderMmlCapture(seconds, (html) => { captureOutputEl.innerHTML = html; }, (done, total) => {
         captureOutputEl.innerHTML = '<div>' + T('WAV書き出し中… {pct}%', { pct: Math.round(done / total * 100) }) + '</div>';
       });
+      if (!r) return;
+      const { cap, baseName, sampleRate } = r;
       let filename;
       if (exportMode === 'reglog') {
         // NSFファイルのレジスタログ(exportNsfWav)と同じ形式: frame,addr,value,chip
@@ -3816,6 +3843,202 @@
     } finally {
       mmlExporting = false;
     }
+  }
+
+  // ── 動画書き出し(MML再生 → MP4、src/video/videoExport.js + src/ui/videoExportPanel.js) ──
+  // 音は exportMmlAudio と同じ経路(NSF→captureSongAsync、gain 3.0)。絵はその cap の regSnapshots から
+  // 鍵盤表示の描画コードで1枚ずつ描くので、ロール/鍵盤/エディタのハイライトが音と同期する。
+  // プレビュー(パネルのつまみ)は音声なしの即席スナップショット(再生時の setMonitorSource と同じ材料)で描く
+  function videoSourceForPreview() {
+    const compiled = MML.Mml.compile(mmlSourceEl.value, getMmlOpt());
+    if (compiled.errors.length > 0) return null;
+    const sampleRate = audioCtx ? audioCtx.sampleRate : 44100;
+    const cap = {
+      regSnapshots: buildRegSnapshotsFromTracks(compiled), writeLog: buildWriteLogFromTracks(compiled),
+      totalFrames: compiled.totalFrames, samplesPerFrame: sampleRate / compiled.frameRate, sampleRate,
+    };
+    return Object.assign(videoSourceCommon(compiled), { cap });
+  }
+  function videoSourceCommon(compiled) {
+    const meta = compiled.meta || {};
+    return {
+      compiled, source: mmlSourceEl.value, chips: compiled.expansions,
+      tuning: { tuningCents: (compiled.settings && compiled.settings.tuningCents) || 0, tuningNotes: (compiled.settings && compiled.settings.tuningNotes) || null },
+      title: meta.title || (currentMmlFileName || '').replace(/\.[^.]*$/, ''), subtitle: meta.composer || '',
+      followCh: mmlFollowChannelEl.value || '',
+    };
+  }
+  async function exportMmlVideo(vopt, onStatus, signal) {
+    if (mmlExporting) throw new Error(T('別の書き出しが進行中です'));
+    mmlExporting = true;
+    try {
+      const seconds = vopt.durationSeconds;
+      onStatus(T('レンダリング中…'));
+      const r = await renderMmlCapture(seconds, (html) => { captureOutputEl.innerHTML = html; throw new Error(T('MMLコンパイルエラーのため書き出せません:')); },
+        (done, total) => onStatus(T('レンダリング中… {pct}%', { pct: Math.round(done / total * 100) })));
+      if (!r) throw new Error(T('MMLコンパイルエラーのため書き出せません:'));
+      const { cap, result, baseName } = r;
+      const STAGE = { video: T('映像を符号化中… {pct}%'), audio: T('音声を符号化中… {pct}%'), mux: T('MP4 に詰めています…') };
+      const blob = await MML.Video.render(Object.assign({}, vopt, videoSourceCommon(result), {
+        cap, keyboardDisplay, isChannelMuted: (ch) => keyboardDisplay.isChannelMuted(ch),
+        gain: 3.0, durationSeconds: seconds, signal,
+        onProgress: (stage, f) => onStatus(T(STAGE[stage] || stage, { pct: Math.round(f * 100) })),
+      }));
+      const filename = baseName + '.mp4';
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+      return filename;
+    } finally {
+      mmlExporting = false;
+    }
+  }
+  // ── ファイル再生(NSF/KSS/GBS/HES/VGM/PSF/SPC)の動画書き出し ──
+  // 絵は鍵盤表示が先読みキャプチャ済みのタイムライン/レジスタ写し(keyboardDisplay.exportFromCurrent)、
+  // 音は各形式の WAV 書き出しと同じ作り方(renderFileAudio)。どちらも曲頭が原点なので揃う。
+  // MMLエディタの区画は無いので、エディタを含む画面構成はロールのみに落ちる(videoExport.js)
+  function videoSourceForFile() {
+    const kind = kbdSourceKind;
+    if (!kind || kind === 'mml') return null;
+    const ex = keyboardDisplay.exportFromCurrent();
+    if (!ex) return null;
+    const meta = fileMetaForVideo(kind);
+    return { ex, source: null, compiled: null, chips: ex.chips, title: meta.title, subtitle: meta.subtitle, maxSeconds: ex.seconds };
+  }
+  function fileMetaForVideo(kind) {
+    // 既定は鍵盤表示のタイトル(ファイル名のことが多いので拡張子は落とす)。ヘッダに曲名があればそちら
+    const m = { title: (kbdSourceName || '').replace(/\.(nsfe?|spc|kss|gbs|hes|vg[mz]|psf|minipsf)$/i, ''), subtitle: '' };
+    if (kind === 'nsf' && loadedNsfHeader) { m.title = loadedNsfHeader.songName || m.title; m.subtitle = loadedNsfHeader.artist || ''; }
+    else if (kind === 'spc' && loadedSpcHeader && loadedSpcHeader.id666) { const id = loadedSpcHeader.id666; m.title = id.songTitle || m.title; m.subtitle = id.gameTitle || ''; }
+    else if (kind === 'gbs' && loadedGbsHeader) { m.title = loadedGbsHeader.title || m.title; m.subtitle = loadedGbsHeader.author || ''; }
+    else if (kind === 'hes' && loadedHesHeader) { m.title = loadedHesHeader.title || m.title; m.subtitle = loadedHesHeader.author || ''; }
+    else if (kind === 'vgm' && loadedVgmHeader) { m.title = MML.VGM.displayTitle(loadedVgmHeader) || m.title; }
+    else if (kind === 'psf') { m.title = (loadedPsfName || '').replace(/\.[^.]*$/, '') || m.title; }
+    return m;
+  }
+  // 各形式の音声PCM(exportXxxWav の「音を作る」部分と同じ。ミュート/音量・gain・サンプルレートも同じ)。
+  // ★exportXxxWav 側を直したらここも合わせること(SPC のログ採取が絡んで関数を共有できていない)
+  async function renderFileAudio(kind, seconds, onProgress) {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const sampleRate = audioCtx.sampleRate;
+    const prog = (done, total) => onProgress(done / Math.max(1, total));
+    const tick = () => new Promise((r) => setTimeout(r, 0));
+    if (kind === 'nsf') {
+      const songNo = Math.max(1, Math.min(Math.max(1, loadedNsfHeader.totalSongs), parseInt(nsfSongIndexEl.value, 10) || 1));
+      const r = await MML.Emu.captureSongAsync(loadedNsfBytes, { songIndex: songNo - 1, durationSeconds: seconds, sampleRate, mute: getChannelMuteConfig(true) }, prog);
+      // NSF は同じキャプチャが全曲のレジスタ写し(regSnapshots/apuEnv/n163)も返すので、絵もこれから組む
+      // (MML 再生と同じ prepareExport 経路。ハードエンベロープの実出力まで鍵盤に出る)
+      return { chans: [r.audio, r.audio], sampleRate, gain: 3.0, cap: r };
+    }
+    if (kind === 'kss') {
+      const songNo = parseInt(kssSongIndexEl.value, 10) || 0;
+      const r = await MML.Emu.captureKssSongAsync(loadedKssBytes, { songIndex: songNo, durationSeconds: seconds, sampleRate, mute: getChannelMuteConfig(true).expansion }, prog);
+      return { chans: [r.audio, r.audio], sampleRate, gain: 2.5 };
+    }
+    if (kind === 'psf') {
+      const mute = getChannelMuteConfig(true);
+      const cap = await MML.Emu.capturePsfSongAsync(loadedPsfInfo, { durationSeconds: seconds, mute: (mute.expansion && mute.expansion.psx) || [] }, prog);
+      return { chans: [cap.audioL, cap.audioR], sampleRate: 44100, gain: 1.0 };
+    }
+    if (kind === 'gbs' || kind === 'hes' || kind === 'vgm') {
+      let player;
+      if (kind === 'gbs') {
+        player = new MML.Emu.GbsPlayer(loadedGbsBytes);
+        player.initSong(Math.max(0, (parseInt(gbsSongIndexEl.value, 10) || loadedGbsHeader.firstSong) - loadedGbsHeader.firstSong));
+        applyChannelSettingsToApu(player.apu, 'gb');
+      } else if (kind === 'hes') {
+        player = new MML.Emu.HesPlayer(loadedHesBytes);
+        player.initSong(parseInt(hesTrackIndexEl.value, 10) || 0);
+        applyChannelSettingsToApu(player.apu, 'hes');
+      } else {
+        player = new MML.Emu.VgmPlayer(loadedVgmBytes);
+        player.applyMute(getChannelMuteConfig(true));
+        player.applyVolume(getChannelVolumeConfig());
+      }
+      const totalFrames = Math.ceil(seconds * player.frameRate);
+      const totalSamples = Math.round(totalFrames * sampleRate / player.frameRate);
+      const audioL = new Float32Array(totalSamples), audioR = new Float32Array(totalSamples);
+      let pos = 0;
+      for (let f = 0; f < totalFrames && pos < totalSamples && !player.ended; f++) {
+        const chunk = kind === 'hes' ? player.renderFrame(sampleRate, false, null, true) : player.renderFrame(sampleRate, false, true);
+        const n = Math.min(chunk.left.length, totalSamples - pos);
+        audioL.set(chunk.left.subarray(0, n), pos); audioR.set(chunk.right.subarray(0, n), pos);
+        pos += n;
+        if (f % 120 === 0) { onProgress(f / totalFrames); await tick(); }
+      }
+      if (kind === 'gbs') {
+        const lim = await applyGbsLimiterOffline(audioL, audioR, sampleRate); // ライブ再生と同じ gain 2.5+リミッタ
+        return { chans: [lim.left, lim.right], sampleRate, gain: 1.0 };
+      }
+      return { chans: [audioL.subarray(0, pos), audioR.subarray(0, pos)], sampleRate, gain: kind === 'hes' ? 4.0 : 1.0 };
+    }
+    if (kind === 'spc') {
+      // exportSpcWav と同じ: 32kHz を保持方式で出力レートへ、ハルトしたら頭から再起動。ログ採取は無し
+      const DSP_RATE = 32000;
+      let player = new MML.Emu.SpcPlayer(loadedSpcBytes);
+      player.dsp.mutedVoices = spcMutedVoices;
+      const totalDsp = seconds * DSP_RATE, totalOut = Math.round(seconds * sampleRate);
+      const audioL = new Float32Array(totalOut), audioR = new Float32Array(totalOut);
+      let dspFrac = 0, lastL = 0, lastR = 0, outPos = 0, dspDone = 0;
+      while (dspDone < totalDsp && outPos < totalOut) {
+        const chunkEnd = Math.min(dspDone + DSP_RATE, totalDsp);
+        while (dspDone < chunkEnd && outPos < totalOut) {
+          dspFrac += DSP_RATE / sampleRate;
+          while (dspFrac >= 1.0) {
+            if (player.isHalted) { player = new MML.Emu.SpcPlayer(loadedSpcBytes); player.dsp.mutedVoices = spcMutedVoices; }
+            const s = player.renderSample();
+            lastL = s.L; lastR = s.R;
+            dspFrac -= 1.0; dspDone++;
+          }
+          audioL[outPos] = lastL; audioR[outPos] = lastR; outPos++;
+        }
+        onProgress(dspDone / totalDsp);
+        await tick();
+      }
+      return { chans: [audioL, audioR], sampleRate, gain: 2.0 };
+    }
+    throw new Error(T('この形式は動画に書き出せません'));
+  }
+  async function exportFileVideo(vopt, onStatus, signal) {
+    if (mmlExporting) throw new Error(T('別の書き出しが進行中です'));
+    const kind = kbdSourceKind;
+    const src = videoSourceForFile();
+    if (!src) throw new Error(T('曲の先読みがまだ終わっていません。少し待ってからもう一度押してください'));
+    mmlExporting = true;
+    try {
+      // 絵は先読み済みの範囲までしか描けないので、そこで切る
+      const seconds = Math.max(1, Math.min(vopt.durationSeconds, Math.floor(src.maxSeconds)));
+      onStatus(T('レンダリング中…'));
+      const audio = await renderFileAudio(kind, seconds, (f) => onStatus(T('レンダリング中… {pct}%', { pct: Math.round(f * 100) })));
+      const STAGE = { video: T('映像を符号化中… {pct}%'), audio: T('音声を符号化中… {pct}%'), mux: T('MP4 に詰めています…') };
+      const blob = await MML.Video.render(Object.assign({}, vopt, src, {
+        // 全曲のレジスタ写しが取れる形式(NSF)は cap から組む。他は先読み済みの ex(タイムライン)
+        ex: audio.cap ? null : src.ex, cap: audio.cap || null, tuning: null,
+        audio, keyboardDisplay, isChannelMuted: () => false, durationSeconds: seconds, signal,
+        onProgress: (stage, f) => onStatus(T(STAGE[stage] || stage, { pct: Math.round(f * 100) })),
+      }));
+      const filename = ((src.title || kind).replace(/[\\/:*?"<>|]/g, '_') || kind) + '.mp4';
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+      return filename;
+    } finally {
+      mmlExporting = false;
+    }
+  }
+  keyboardDisplay.setSpcVoiceProvider(spcVoicesAt); // SPC の時刻指定ボイス一覧(先読みの写しから)
+  if (MML.UI.VideoExportPanel) {
+    MML.UI.VideoExportPanel.init(document.getElementById('videoExportPanel'), {
+      getSource: () => {
+        try { return kbdSourceKind === 'mml' ? videoSourceForPreview() : videoSourceForFile(); }
+        catch (e) { console.warn(e); return null; }
+      },
+      runExport: (vopt, onStatus, signal) => (kbdSourceKind === 'mml' ? exportMmlVideo : exportFileVideo)(vopt, onStatus, signal),
+      isChannelMuted: (ch) => keyboardDisplay.isChannelMuted(ch),
+      keyboardDisplay,
+    });
   }
 
   // 鍵盤表示ヘッダへ移した「ファイルを開く」/「to MML」。実体は既存のボタンをそのまま押す。
@@ -6221,8 +6444,12 @@
     // (NSF/KSS/GBS/VGMと同じ仕組み、src/audio/capture-worker-client.js。Worker不可時は
     // メインスレッド版captureAsyncへ自動フォールバック)。SPCはフレームレンダリングが
     // 特に重く(CPU+DSPフル駆動)、Worker化の体感効果が最も大きいフォーマット。
-    MML.Emu.captureSpcSongWorkerAsync(loadedSpcBytes, captureDuration, (frame, frames, frameLog) => {
+    spcStateLog = null;
+    MML.Emu.captureSpcSongWorkerAsync(loadedSpcBytes, captureDuration, (frame, frames, frameLog, stateLog) => {
       if (myRollToken !== spcRollToken) return; // 曲切替/停止で無効化済み
+      // フレーム末尾のDSP状態の写し(spcVoicesAt 用)。配列は伸びていく同一参照なので控えるだけ
+      if (stateLog && !spcStateLog) spcStateLog = { buf: stateLog, frames, stride: MML.SPC2MML.STATE_STRIDE, frameRate: MML.SPC2MML.FRAME_RATE };
+      if (spcStateLog) spcStateLog.captured = frame;
 
       if (!spcPlaybackLoaded) {
         spcPlaybackLoaded = true;
@@ -6815,25 +7042,37 @@
       updateMuteButton(ch, spcMutedVoices); // dsp側はプレビューの消し込みを含むので、表示はユーザー指定のマスクで
     }
 
-    // 鍵盤表示に SPC ボイス状態を同期
+    // 鍵盤表示に SPC ボイス状態を同期(ライブDSPから。時刻指定の写しは spcVoicesAt)
+    const { spcVoices, master } = buildSpcVoices(regs, (ch) => voices[ch], spcMutedVoices,
+      (v, pitch, ch, pmOn) => buildSpcWaveLayers(v, dsp, pitch, ch, pmOn, voices));
+    const spcPos = spcActivePlayer ? spcActivePlayer.getPosition() : 0;
+    keyboardDisplay.updateSpcVoices(spcVoices, master, spcPos);
+  }
+
+  // DSPレジスタ128個+ボイスの実エンベロープ → 鍵盤表示の SPC ボイス一覧(updateSpcVoices の入力)。
+  // 入力源は2つ: 再生中の DSP(updateVoiceMonitor)と、先読みキャプチャが残すフレームごとの写し
+  // (spcVoicesAt。動画書き出し/時刻指定の表示用)。両方とも必ずここを通し、同じ形にする。
+  //   voiceOf(ch) → { env(0..2047), envMode('off'|'attack'|…) }
+  //   waveFn(v, pitch, ch, pmOn) → 大波形の層(DSP実体が要るのでライブのみ。写しは null)
+  function buildSpcVoices(regs, voiceOf, mutedMask, waveFn) {
     const pmonReg = regs[0x2D], nonReg = regs[0x3D], eonReg = regs[0x4D];
     // $7D(EDL) bit0-3: エコーディレイ時間 = EDL × 16ms (0=0ms, 1=16ms, … 15=240ms)
     const echoDelayMs = (regs[0x7D] & 0x0F) * 16;
     const spcVoices = [];
     for (let ch = 0; ch < 8; ch++) {
-      const v     = voices[ch];
+      const v     = voiceOf(ch);
       const base  = ch << 4;
       const pitch = regs[base+2] | ((regs[base+3] & 0x3F) << 8);
       const srcn  = regs[base+4];
       const active = v.envMode !== 'off' && v.env > 0;
-      const muted  = !!(spcMutedVoices & (1 << ch));
+      const muted  = !!(mutedMask & (1 << ch));
       const volL = (regs[base+0] << 24) >> 24;
       const volR = (regs[base+1] << 24) >> 24;
       const env  = decodeSpcEnv(regs[base+5], regs[base+6], regs[base+7]);
       const pmOn = !!(pmonReg & (1 << ch));
       const noiseOn = !!(nonReg & (1 << ch));
       const echoOn = !!(eonReg & (1 << ch));
-      const wave = active ? buildSpcWaveLayers(v, dsp, pitch, ch, pmOn, voices) : null;
+      const wave = (active && waveFn) ? waveFn(v, pitch, ch, pmOn) : null;
       spcVoices.push({
         label:  `V${ch}`,
         srcn,   // 鳴らしているサンプル番号。打楽器パッド化したサンプル(ロールの drumKey 'brr:<srcn>')は鍵盤の note 列に音階でなくこれを出す
@@ -6859,8 +7098,24 @@
       echoR: (regs[0x3C] << 24) >> 24,
       fir: [0, 1, 2, 3, 4, 5, 6, 7].map(i => (regs[i * 0x10 + 0x0F] << 24) >> 24),
     };
-    const spcPos = spcActivePlayer ? spcActivePlayer.getPosition() : 0;
-    keyboardDisplay.updateSpcVoices(spcVoices, master, spcPos);
+    return { spcVoices, master };
+  }
+
+  // 先読みキャプチャが残した「フレーム末尾のDSP状態の写し」(SPC2MML.captureAsync の stateLog)。
+  // 時刻 t のボイス一覧を DSP を動かさずに引く(動画書き出し src/video/videoExport.js が使う)
+  let spcStateLog = null; // { buf: Uint8Array, frames, stride, frameRate }
+  function spcVoicesAt(t) {
+    const s = spcStateLog;
+    if (!s || !s.buf) return null;
+    const f = Math.max(0, Math.min(s.frames - 1, Math.floor(t * s.frameRate)));
+    const o = f * s.stride;
+    const regs = s.buf.subarray(o, o + 128);
+    const names = MML.SPC2MML.ENV_MODE_NAMES;
+    const voiceOf = (ch) => {
+      const p = o + 128 + ch * 3;
+      return { env: s.buf[p] | (s.buf[p + 1] << 8), envMode: names[s.buf[p + 2]] || 'unknown' };
+    };
+    return buildSpcVoices(regs, voiceOf, spcMutedVoices, null);
   }
 
   function startVoiceMonitor() {

@@ -109,6 +109,11 @@
   // 120以上・負の音符は compiler.js が鳴らさない(NOTE_TABLE_TOP)ので、表はこれ以上要らない
   const NOTE_TABLE_SIZE_WIDE = 120;
   const BANK_SIZE = 4096;
+  // ゲームROMへの組み込み(Driver.buildBankedNsfBytes の第3引数 embed、2026-09-29)。NSF 書き出しでは null のままで、
+  // その時の出力は従来とバイト単位で同じ。embed の中身は buildBankedNsfBytes の説明を参照
+  let EMBED = null;
+  const dataBankSize = () => (EMBED ? EMBED.dataBankSize : BANK_SIZE);
+  const bankEmit = (n) => (EMBED ? EMBED.bankBase + n : n) & 0xff;
   const DATA_START_BANK = 8; // 曲データの開始バンク(0=未使用, 1-3=ドライバ本体固定, 4-7=DPCM専用)
   const DATA_DPCM_BANK = 4;  // DPCMサンプル領域の先頭窓($C000)。実機DMCの読出し範囲$C000-$FFFF
   const DPCM_PAGE_BANKS = 4; // 1ページ=16KB=4バンク(窓4-7をまとめて切り替える単位)
@@ -297,9 +302,9 @@
     let posInBank = startOffset || 0;
     let markLocation = null;
     for (;;) {
-      if (posInBank >= BANK_SIZE) { bankNum = advanceBank(bankNum + 1); posInBank = 0; }
+      if (posInBank >= dataBankSize()) { bankNum = advanceBank(bankNum + 1); posInBank = 0; }
       const remaining = bytes.length - offset;
-      const spaceInBank = BANK_SIZE - posInBank;
+      const spaceInBank = dataBankSize() - posInBank;
       if (remaining <= spaceInBank) {
         banks.push({ bankNum, data: bytes.slice(offset), offset: posInBank });
         if (markOffset != null && markLocation == null && markOffset >= offset && markOffset < bytes.length) {
@@ -339,7 +344,7 @@
       const data = new Uint8Array(chunk.length + 4);
       data.set(chunk, 0);
       data[chunk.length] = 0xee;
-      data[chunk.length + 1] = nextBank & 0xff;
+      data[chunk.length + 1] = bankEmit(nextBank);
       data[chunk.length + 2] = 0x00;
       data[chunk.length + 3] = 0x80;
       banks.push({ bankNum, data, offset: posInBank });
@@ -510,9 +515,13 @@
     // (CNT以降)はその後ろに置く(255番地を超えても、,X直接インデックスは絶対,Xアドレッシング
     // へ自動的にフォールバックするだけで6502的に正しく動作するため問題ない。JMPLO/JMPHIも
     // JMP間接絶対なので同様に無問題)。
-    const CURLO = 0, CURHI = 1, CHIDX = 2, PERLO = 3, PERHI = 4, PERLO2 = 5,
+    // ゲーム組み込み時は embed.zpBase から(ゲーム側の変数と重ならないように)
+    const ZPB = EMBED ? EMBED.zpBase : 0;
+    // 曲データ窓のバンク切り替えレジスタ(NSF: 窓0 = $5FF8、組み込み: embed.bankReg)
+    const BANKREG = EMBED ? hex(EMBED.bankReg) : '$5FF8';
+    const CURLO = ZPB + 0, CURHI = ZPB + 1, CHIDX = ZPB + 2, PERLO = ZPB + 3, PERHI = ZPB + 4, PERLO2 = ZPB + 5,
       // WFV_T側でTBLLO/TBLHI,Xを一時的にコピーしてind,Yアドレッシングするための共有ポインタ
-      PTBLLO = 6, PTBLHI = 7;
+      PTBLLO = ZPB + 6, PTBLHI = ZPB + 7;
     const PTR_FIXED_SIZE = 8;
 
     // 各チャンネル配列のブロック数を先に確定する(usesEp/usesMp判定・EP/MP用ブロック数
@@ -646,7 +655,11 @@
     // 使える)。収まらない場合は$0100-$01FF全体を素通りして$0200から確保する(絶対,X
     // アドレッシングになるだけで6502的に正しく動く。CURLO/PERLO/PTBLLO等の物理ゼロページ
     // 必須組は既に先頭0-7番地に固定済みなので、ここが$0200に移っても影響しない)
-    const chArrayBase = (PTR_FIXED_SIZE + totalPerChanBlocks * n + TRAILING_FIXED_SIZE <= 0x100) ? PTR_FIXED_SIZE : 0x0200;
+    const chArrayBase = (ZPB + PTR_FIXED_SIZE + totalPerChanBlocks * n + TRAILING_FIXED_SIZE <= 0x100) ? ZPB + PTR_FIXED_SIZE : (EMBED ? EMBED.ramBase : 0x0200);
+    // 組み込み時は、ゲームが INIT 前に 0 で埋める範囲を返す(NSF プレイヤーは RAM を 0 にしてから INIT を呼ぶ)
+    if (EMBED) EMBED.ramUsed = chArrayBase === ZPB + PTR_FIXED_SIZE
+      ? { zp: [ZPB, ZPB + PTR_FIXED_SIZE + totalPerChanBlocks * n + TRAILING_FIXED_SIZE], ram: null }
+      : { zp: [ZPB, ZPB + PTR_FIXED_SIZE], ram: [chArrayBase, chArrayBase + totalPerChanBlocks * n + TRAILING_FIXED_SIZE] };
 
     // LASTINSはFDS/N163/VRC7のカスタム波形・音色の「直近ロードした音色番号」を覚えておく
     // ためのチャンネルごとのスクラッチ(音符ごとのinstrumentがこれと変わった時だけ
@@ -3105,9 +3118,9 @@ SIL_T${TYPE_DPCM}:
 ; Sound Emulation Foundry - ppmck方式バイトコード再生ドライバ(バンク切り替え+拡張音源対応)
 ; チャンネル数: ${n} / 使用拡張音源: ${expansions.length ? expansions.join(',') : 'なし'}
 ; ==========================================
-    .org $8000
+${EMBED ? '' : `    .org $8000
     .res ${driverOrg - 0x8000}       ; 窓0(バンク0)〜ドライバ本体開始位置までのダミー(曲データ用に後で上書きされる)
-
+`}
     .org ${hex(driverOrg)}
 
 INIT:
@@ -3346,7 +3359,7 @@ RB_DONE:
 ; データ読み出し前に必ずこのチャンネルの現在バンクを窓0($5FF8)へ反映する
 READ_DATA:
     LDA ${hex(BANK)},X
-    STA $5FF8
+    STA ${BANKREG}
     LDA ${hex(PTRLO)},X
     STA ${hex(CURLO)}
     LDA ${hex(PTRHI)},X
@@ -3456,7 +3469,7 @@ RD_BANKJUMP:
     JSR READ_BYTE
     STA ${hex(PERHI)}      ; 新アドレス上位を一時保存
     LDA ${hex(BANK)},X
-    STA $5FF8       ; ここで新バンクを反映
+    STA ${BANKREG}       ; ここで新バンクを反映
     LDA ${hex(PERLO)}
     STA ${hex(CURLO)}      ; ここでようやくCURPTRを新アドレスへ更新
     LDA ${hex(PERHI)}
@@ -4316,7 +4329,7 @@ ${usesLoop ? `    LDA SONG_LOOP_ACT,X
     BEQ RD_ENDTRACK_STOP
     LDA SONG_LOOP_BANK,X
     STA ${hex(BANK)},X
-    STA $5FF8
+    STA ${BANKREG}
     LDA SONG_LOOP_PTR_LO,X
     STA ${hex(CURLO)}
     STA ${hex(PTRLO)},X
@@ -4967,7 +4980,18 @@ SONG_LOOP_PTR_HI:
   // (segmentsByChannel, channelLetters, expansions, expansionLetterMap を使う)。
   // headerOpt: NSF.buildHeaderと同じオプション。
   // 戻り値: { nsfBytes, asmErrors, bankCount, unsupportedExpansions }
-  Driver.buildBankedNsfBytes = function (compileResult, headerOpt) {
+  // embed(省略可、2026-09-29): NSF ではなく「ゲームの ROM に組み込む」形で出す。
+  //   { org: ドライバ本体を置く番地(例 $A000。本体はこの1窓に収める), codeLimit: その窓の大きさ(例 $2000),
+  //     dataBankSize: 曲データ窓の大きさ(例 $2000。窓は $8000 から), bankReg: 曲データ窓の切り替えレジスタ(例 $E000),
+  //     bankBase: 曲データの先頭バンク番号(ROM 上の番号。bankReg へはこれ+相対番号を書く),
+  //     zpBase: ゼロページ変数の先頭, ramBase: ゼロページに収まらない時の配列の先頭 }
+  //   戻り値の embed = { driver(Uint8Array, org から), init, play, dataBanks[Uint8Array(dataBankSize)], ramUsed }。
+  //   DPCM は未対応(実機 DMC の読める範囲 $C000- にゲーム本体があるため)。NSF 書き出しの結果は embed 無しの時と変わらない
+  Driver.buildBankedNsfBytes = function (compileResult, headerOpt, embed) {
+    EMBED = embed ? Object.assign({}, embed) : null;
+    try { return buildBankedNsfBytesImpl(compileResult, headerOpt); } finally { EMBED = null; }
+  };
+  function buildBankedNsfBytesImpl(compileResult, headerOpt) {
     let channelLetters = compileResult.channelLetters || ['A', 'B', 'C', 'D'];
     const expansions = compileResult.expansions || [];
     let expansionLetterMap = compileResult.expansionLetterMap || {};
@@ -5396,7 +5420,7 @@ SONG_LOOP_PTR_HI:
       let bankNum = 0, offsetInBank = 0;
       for (let i = 0; i < channelLetters.length; i++) {
         const layout = layoutChannelBanks(chBytes[i], bankNum, offsetInBank, chSerialized[i].loopByteOffset, reservedBank, noteBase);
-        songBank.push(layout.startBank);
+        songBank.push(bankEmit(layout.startBank));
         songAddrLo.push((0x8000 + layout.startOffset) & 0xff);
         songAddrHi.push((0x8000 + layout.startOffset) >> 8);
         allDataBanks.push(...layout.banks);
@@ -5404,7 +5428,7 @@ SONG_LOOP_PTR_HI:
         offsetInBank = layout.nextFreeOffset;
         if (layout.markLocation) {
           loopAct.push(1);
-          loopBank.push(layout.markLocation.bank);
+          loopBank.push(bankEmit(layout.markLocation.bank));
           loopLo.push(layout.markLocation.addr & 0xff);
           loopHi.push((layout.markLocation.addr >> 8) & 0xff);
         } else {
@@ -5426,10 +5450,16 @@ SONG_LOOP_PTR_HI:
     const probeLoop = { act: chSerialized.map(r => (r.loopByteOffset != null ? 1 : 0)), bank: dummyBank, lo: dummyBank, hi: dummyBank };
     const probeSrc = buildFixedSource(channelTypes, dummyBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList,
       probeLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite,
-      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, undefined, usesSweep, usesPitchSa, 0, usesDirect, noteReach, noteBase, volMask4);
-    const probeAsm = MML.Asm.assemble(probeSrc, { origin: 0x8000 });
+      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, EMBED ? EMBED.org : undefined, usesSweep, usesPitchSa, 0, usesDirect, noteReach, noteBase, volMask4);
+    const probeAsm = MML.Asm.assemble(probeSrc, { origin: EMBED ? EMBED.org : 0x8000 });
     if (probeAsm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: probeAsm.errors, bankCount: 0, unsupportedExpansions };
+    }
+    if (EMBED && dpcmUsed) {
+      return { nsfBytes: null, asmErrors: [{ lineNo: 0, message: 'ゲームへの組み込みでは DPCM は使えません' }], bankCount: 0, unsupportedExpansions };
+    }
+    if (EMBED && probeAsm.bytes.length > EMBED.codeLimit) {
+      return { nsfBytes: null, asmErrors: [{ lineNo: 0, message: `ドライバ本体が${probeAsm.bytes.length}バイトあり、組み込み先の窓(${EMBED.codeLimit}バイト)に収まりません` }], bankCount: 0, unsupportedExpansions };
     }
     // ドライバ本体(コード+テーブル)のバンク数(窓0=バンク0のダミー4KBは含まない)
     const driverCodeBanks = Math.max(1, Math.ceil((probeAsm.bytes.length - BANK_SIZE) / BANK_SIZE));
@@ -5476,7 +5506,9 @@ SONG_LOOP_PTR_HI:
     }
     const fixedEndBank = driverFileBank + driverCodeBanks + dpcmBanks; // これ未満(1以上)がデータ禁止
     const channelStartBank = fixedEndBank;
-    const reservedBank = n => (n >= 1 && n < fixedEndBank);
+    // 組み込み時はドライバ本体が曲データ窓の外(embed.org)にあるので、データの穴は無い
+    const reservedBank = EMBED ? (() => false) : (n => (n >= 1 && n < fixedEndBank));
+    if (EMBED) driverOrg = EMBED.org;
 
     // 2回目: 実際のチャンネルデータ配置(詰め込み込み)を確定し、それを使ってドライバ本体を
     // 再アセンブルする(songBank等の値とorgが変わるだけでバイト数は1回目と一致するはず。
@@ -5484,9 +5516,23 @@ SONG_LOOP_PTR_HI:
     const { songBank, songAddrLo, songAddrHi, allDataBanks, songLoop } = layoutAllChannels(reservedBank);
 
     const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa, dpcmFileBank, usesDirect, noteReach, noteBase, volMask4);
-    const asm = MML.Asm.assemble(src, { origin: 0x8000 });
+    const asm = MML.Asm.assemble(src, { origin: EMBED ? EMBED.org : 0x8000 });
     if (asm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: asm.errors, bankCount: 0, unsupportedExpansions };
+    }
+    if (EMBED) {
+      if (asm.bytes.length > EMBED.codeLimit) {
+        return { nsfBytes: null, asmErrors: [{ lineNo: 0, message: `ドライバ本体が${asm.bytes.length}バイトあり、組み込み先の窓(${EMBED.codeLimit}バイト)に収まりません` }], bankCount: 0, unsupportedExpansions };
+      }
+      const nData = allDataBanks.reduce((m, b) => Math.max(m, b.bankNum + 1), 0);
+      const dataBanks = [];
+      for (let i = 0; i < nData; i++) dataBanks.push(new Uint8Array(EMBED.dataBankSize).fill(0xff));
+      for (const b of allDataBanks) dataBanks[b.bankNum].set(b.data, b.offset);
+      return {
+        nsfBytes: null, asmErrors: [], bankCount: 0, unsupportedExpansions,
+        embed: { driver: asm.bytes, org: EMBED.org, init: asm.symbols.INIT, play: asm.symbols.PLAY, dataBanks, ramUsed: EMBED.ramUsed },
+        driverBytes: asm.bytes.length, songDataBytes: chBytes.reduce((s, b) => s + b.length, 0), dpcmBytes: 0
+      };
     }
     const driverBytes = asm.bytes.slice(driverOrg - 0x8000);
     if (driverBytes.length > driverCodeBanks * BANK_SIZE) {
@@ -5568,5 +5614,5 @@ SONG_LOOP_PTR_HI:
       songDataBytes: chBytes.reduce((s, b) => s + b.length, 0),
       dpcmBytes
     };
-  };
+  }
 })(window);
