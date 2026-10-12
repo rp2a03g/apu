@@ -3342,6 +3342,30 @@ button.secondary {
 }
 .es-modal-footer .rec-insert { border-color: var(--accent); color: var(--accent); font-weight: 600; }
 
+/* ---- 聴音(src/ui/dictationPanel.js) ---- */
+.dict-toggle.is-recording { color: var(--error); animation: rec-blink 1s steps(2, start) infinite; }
+.dict-pop { width: 320px; }
+.dict-pop .rec-note { margin: 4px 0 0; }
+.dict-stack { flex-direction: column; align-items: flex-start; gap: 4px; }
+.dict-meter { height: 6px; margin: 6px 0 4px; border-radius: 3px; background: var(--control-bg); overflow: hidden; }
+.dict-meter-bar { height: 100%; width: 0; background: var(--accent); transition: width 60ms linear; }
+.dict-pitch { font-family: var(--mono); font-size: 13px; min-height: 1.3em; color: var(--text); }
+.dict-rec-row { justify-content: flex-start; gap: 10px; margin: 6px 0; }
+.dict-rec { padding: 6px 14px; font-weight: 600; border-radius: 4px; }
+.dict-rec.is-recording { color: var(--error); border-color: var(--error); animation: rec-blink 1s steps(2, start) infinite; }
+.dict-small { font-size: 11px; padding: 2px 8px; }
+.dict-modal { width: min(760px, 96vw); }
+.dict-body { overflow-y: auto; }
+.dict-cols { display: flex; gap: 16px; flex-wrap: wrap; }
+.dict-col { flex: 1 1 300px; min-width: 0; }
+.dict-sec { margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.dict-sec-title { font-size: 11px; font-weight: 600; color: var(--text-secondary); margin: 4px 0; }
+.dict-sec .rec-label { width: 92px; }
+.dict-sec .rec-unit { width: 52px; }
+.dict-sec .rec-unit.dict-wide { width: auto; flex: 1; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dict-num { width: 64px; font-size: 12px; }
+.dict-notes { font-family: var(--mono); font-size: 10px; line-height: 1.5; color: var(--text-muted); max-height: 5.5em; overflow-y: auto; margin: 4px 0; word-break: break-all; }
+
 .rec-warn { margin: 0 0 8px; padding: 6px 8px; font-size: 11px; line-height: 1.4; color: var(--error); border: 1px solid var(--error); border-radius: 4px; }
 
 /* ループ再生(main.js btnLoopRange)。ONのときだけアクセント色 */

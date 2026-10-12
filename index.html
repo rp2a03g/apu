@@ -149,6 +149,9 @@
         <button class="icon-btn secondary record-toggle" id="btnRecordPerformance" title="演奏を録音してMMLにする" aria-label="演奏を録音" aria-pressed="false">
           <svg viewBox="0 0 20 20" fill="currentColor"><circle cx="10" cy="10" r="5.5"/></svg>
         </button>
+        <button class="icon-btn secondary dict-toggle" id="btnDictation" title="聴音: 鼻歌や楽器の単音を録ってMMLにする" aria-label="聴音" aria-pressed="false">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="7.5" y="2.5" width="5" height="9" rx="2.5"/><path d="M5 9.5a5 5 0 0 0 10 0"/><path d="M10 14.5v3M7.5 17.5h5"/></svg>
+        </button>
         <span class="icon-toolbar-sep"></span>
         <button class="icon-btn secondary loop-toggle" id="btnLoopRange" title="再生範囲をくり返す" aria-label="ループ再生" aria-pressed="false">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 6.5h9a3 3 0 0 1 0 6H5.5a3 3 0 0 1 0-6Z"/><path d="M7.6 4.6 5.4 6.5l2.2 1.9"/><path d="M12.4 10.6l2.2 1.9-2.2 1.9"/></svg>
@@ -964,9 +967,14 @@
   <script src="src/input/keyMap.js"></script>
   <script src="src/input/quantize.js"></script>
   <script src="src/input/midiInput.js"></script>
+  <!-- 聴音(作業計画フェーズ4): 鼻歌・楽器の単音 → 音符列 → quantize → MML -->
+  <script src="src/input/pitchDetect.js"></script>
+  <script src="src/input/noteSegment.js"></script>
+  <script src="src/input/micInput.js"></script>
   <script src="src/ui/metronomePanel.js"></script>
   <script src="src/ui/performInput.js"></script>
   <script src="src/ui/recordPanel.js"></script>
+  <script src="src/ui/dictationPanel.js"></script>
   <script src="src/nsf2mml/expansion/vrc6.js"></script>
   <script src="src/nsf2mml/expansion/mmc5.js"></script>
   <script src="src/nsf2mml/expansion/fme7.js"></script>
