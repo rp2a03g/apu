@@ -44,7 +44,7 @@
 
   // 先頭に置くバッファ番号は本ツールでは常に0(n163Alloc.jsが実際の配置を決めるため無視される)
   function formatDefText(index, values) {
-    return Defs.format('N', index, values, { perLine: 32, sep: ' ', prefix: '0, ' });
+    return Defs.format('N', index, values, { perLine: 32, sep: ' ', prefix: '0 ' });
   }
 
   function defaultWave(length) {

@@ -133,7 +133,7 @@
 
   function formatDefText(index, patch, kind) {
     if (kind === 'op') {
-      return `@OP${index} = { ` + patchToBytes(patch).map(b => '$' + b.toString(16).toUpperCase().padStart(2, '0')).join(', ') + ' }';
+      return `@OP${index} = { ` + patchToBytes(patch).map(b => '$' + b.toString(16).toUpperCase().padStart(2, '0')).join(' ') + ' }';
     }
     const v = patchToOtValues(patch);
     return `@OT${index} = {\n; TL FB\n  ${v[0]}, ${v[1]},\n` +

@@ -43,7 +43,7 @@
     ['tok-cmd-perf', 'S[Dd][Oo][Ff]'],       // SDOF
     ['tok-cmd-perf', 'S[Dd]\\d*'],           // SD<n>
     ['tok-cmd-perf', 'L'],                   // ループ地点マーカー(大文字のみ、小文字lは音長系)
-    ['tok-cmd-perf', '\\|:'],                // |: ~ \ ~ :| (独自拡張表記、参考として着色のみ)
+    ['tok-cmd-perf', '\\|:'],                // |: ~ \ ~ :| (ppmck のリピート2。2026-10-25からコンパイラも展開して鳴らす)
     ['tok-cmd-perf', ':\\|'],
     ['tok-cmd-perf', '\\\\'],
     ['tok-cmd-perf', '\\['],                 // ループ開始

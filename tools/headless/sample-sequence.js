@@ -78,11 +78,15 @@ function blocksOf(chapters) {
 
 function stripWaits(lines) { return lines.filter(l => !WAIT_RE.test(l)); }
 
+// ファイル上の本文はテンプレートリテラルの中身なので、\\ \` \$ がエスケープされたまま。コンパイルに渡すときだけ
+// 実行時の文字列(MML.Mml.SAMPLE_SOURCE と同じ)へ戻す(リピート2の "\" で発覚、2026-10-25)
+function unescapeTemplate(text) { return text.replace(/\\([\\`$])/g, '$1'); }
+
 /** 待ち行を計算して入れた本文を返す */
 function sequence(MML, body) {
   const nl = body.indexOf('\r\n') >= 0 ? '\r\n' : '\n';
   const lines = stripWaits(body.split(nl));
-  const compiled = MML.Mml.compile(lines.join('\n'), {});
+  const compiled = MML.Mml.compile(unescapeTemplate(lines.join('\n')), {});
   if (compiled.errors.length) throw new Error('サンプルMMLがコンパイルできません: ' + compiled.errors[0].message);
   const whole = (240 / compiled.tempo) * MML.Mml.FRAME_RATE_NTSC; // 全音符のフレーム数(待ち行は曲頭のテンポで数える)
   const durOf = (ch) => (compiled.segmentsByChannel[ch] || []).reduce((a, s) => a + s.durationFrames, 0);
@@ -104,7 +108,7 @@ function sequence(MML, body) {
 /** まとまりどうしの発音区間が重なっていないか(コンパイル結果で確かめる) */
 function overlaps(MML, body) {
   const lines = body.split(/\r?\n/);
-  const compiled = MML.Mml.compile(lines.join('\n'), {});
+  const compiled = MML.Mml.compile(unescapeTemplate(lines.join('\n')), {});
   const issues = [];
   if (compiled.errors.length) return [`サンプルMMLがコンパイルできません: ${compiled.errors[0].message}`];
   const rangeOf = (ch) => {

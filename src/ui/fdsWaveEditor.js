@@ -67,7 +67,7 @@
   function formatDefText(tag, index, values) {
     if (tag === 'FM') return Defs.format('FM', index, values, { perLine: 32, sep: ' ' });
     if (tag === 'MW') {
-      return Defs.format('MW', index, values.map(c => MML.Mml.fdsModCodeToToken(c)), { perLine: 16, sep: ', ' });
+      return Defs.format('MW', index, values.map(c => MML.Mml.fdsModCodeToToken(c)), { perLine: 16, sep: ' ' });
     }
     // envDir(第5引数)が0なら本家ppmck互換の4引数で書く(envSpeedは意味を持たないので落とす)
     return Defs.format('MH', index, values[4] ? values.slice(0, 6) : values.slice(0, 4));

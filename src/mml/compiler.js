@@ -574,7 +574,7 @@
     return { fnum: 511, block: 7 };
   }
 
-  // ループ([...]n / [...|...]n)をフラットなトークン列に展開する。
+  // ループ([...]n / [...|...]n / リピート2 |:......:|n)をフラットなトークン列に展開する。
   // "|" がある場合、そこから "]" までは最後の周回では演奏しない
   // (ppmck仕様: "|があるときは最後の繰り返しのときに|から]までの演奏をしません")
   function expandLoops(tokens, errors) {
@@ -604,8 +604,39 @@
             seq.push(...before);
             if (after) seq.push(...after);
           }
+        } else if (tok.type === 'repeat2Start') {
+          // リピート2(ppmck の |: 〜  〜 :|<num>、2026-10-25)。本家は中身を展開せずドライバで繰り返すが、
+          // ここではリピート1と同じく展開する(再生も NSF 書き出しも展開後の列を使う)。本家どおりネストは不可
+          i++;
+          if (r2Depth > 0) { errors.push({ message: T('リピート2 "|: 〜 :|" はネストできません(ppmck準拠。入れ子にするなら [ 〜 ] を使ってください)') }); }
+          r2Depth++;
+          const before = parseUntil(R2_BREAK_OR_END);
+          let after = null;
+          if (i < tokens.length && tokens[i].type === 'repeat2Break') {
+            i++;
+            after = parseUntil(R2_END_ONLY);
+          }
+          r2Depth--;
+          if (i < tokens.length && tokens[i].type === 'repeat2End') {
+            const count = tokens[i].count == null ? 2 : tokens[i].count;
+            i++;
+            for (let r = 0; r < count; r++) {
+              seq.push(...before);
+              if (after && r < count - 1) seq.push(...after);
+            }
+          } else {
+            errors.push({ message: T('リピート2の終端 ":|" が見つかりません') });
+            seq.push(...before);
+            if (after) seq.push(...after);
+          }
         } else if (stopSet.has(tok.type)) {
           return seq;
+        } else if (tok.type === 'repeat2Break' || tok.type === 'repeat2End') {
+          // 対応する "|:" の外にある "\" / ":|"
+          errors.push({ message: tok.type === 'repeat2Break'
+            ? T('"\\" はリピート2 "|: 〜 :|" の中でだけ使えます')
+            : T('":|" に対応するリピート2の開始 "|:" がありません') });
+          i++;
         } else {
           seq.push(tok);
           i++;
@@ -616,6 +647,9 @@
 
     const LOOP_BREAK_OR_END = new Set(['loopBreak', 'loopEnd']);
     const LOOP_END_ONLY = new Set(['loopEnd']);
+    const R2_BREAK_OR_END = new Set(['repeat2Break', 'repeat2End']);
+    const R2_END_ONLY = new Set(['repeat2End']);
+    let r2Depth = 0;
     return parseUntil(new Set());
   }
 
@@ -3255,7 +3289,7 @@
 
   Mml.compile = function (source, opt = {}) {
     const errors = [];
-    const { channels, errors: splitErrors, envelopes, meta, settings, detectedExpansions } = Mml.splitChannels(source);
+    const { channels, errors: splitErrors, warnings: splitWarnings, envelopes, meta, settings, detectedExpansions } = Mml.splitChannels(source);
     errors.push(...splitErrors);
     // #TUNING(基準ピッチ): 以降の noteFrequency() 全てに効く(compile は同期処理なので曲ごとに設定し直すだけでよい)
     tuningRatio = Math.pow(2, ((settings && settings.tuningCents) || 0) / 1200);
@@ -3450,7 +3484,7 @@
     // seg.freq=null にすると以降のwriteLog生成では休符として扱われ、音程は変えずに
     // その音だけ無音になる。警告はチャンネルごとに1件へまとめる(同じ低音が延々続く曲で
     // メッセージが溢れないように、件数だけ添える)。
-    const warnings = [...segmentWarnings];
+    const warnings = [...splitWarnings, ...segmentWarnings];
     for (const message of score.issues) warnings.push({ message });
     // @DPCM<n> の .dmc が台帳(opt.dpcmSamples)に無い: 以前は黙って無音にしていた(2026-09-16)。
     // kind は src/convert/verify.js が除外するための印(音程検証は意図的にサンプル無しでコンパイルする)

@@ -5171,9 +5171,24 @@
       { tempo: compiled.tempo, chips: expansionsLabel }) + '\n\n';
     out += T('総フレーム数: {n}', { n: compiled.totalFrames }) + '\n';
     out += T('総再生時間  : {time}', { time: formatTime(duration) }) + '\n';
+    // ch別の総フレーム数(音符・休符の長さの合計)。chどうしの長さの食い違い=ループ2周目からのずれを
+    // 数値で確かめられるよう、小節数(曲頭のテンポで4/4換算)・L の位置・最長chとの差も並べる(2026-10-25)
+    const chFrames = {};
+    for (const ch of compiled.channelLetters) {
+      chFrames[ch] = ((compiled.segmentsByChannel && compiled.segmentsByChannel[ch]) || []).reduce((a, s) => a + s.durationFrames, 0);
+    }
+    const longest = Math.max(0, ...Object.values(chFrames));
+    const wholeFrames = (240 / compiled.tempo) * compiled.frameRate;
+    const frameWidth = String(longest).length;
     for (const ch of compiled.channelLetters) {
       const writes = compiled.tracks[ch].reduce((a, w) => a + w.length, 0);
-      out += T('チャンネル{ch}: {n} 件', { ch, n: writes }) + '\n';
+      const f = chFrames[ch];
+      const loopF = compiled.loopFrameByChannel ? compiled.loopFrameByChannel[ch] : null;
+      let line = T('チャンネル{ch}: {f} フレーム({bars} 小節) / 書き込み {n} 件',
+        { ch, f: String(f).padStart(frameWidth), bars: (f / wholeFrames).toFixed(2), n: writes });
+      if (loopF != null) line += T(' / L {f}f', { f: loopF });
+      if (f > 0 && f !== longest) line += T(' / 最長より {d}f 短い', { d: longest - f });
+      out += line + '\n';
     }
     // 冒頭で出したコンパイル警告(音域外・DPCM未読込)は消さずに残す(以前は '' で消していたので
     // 成功時は警告が一度も見えなかった。2026-09-16)

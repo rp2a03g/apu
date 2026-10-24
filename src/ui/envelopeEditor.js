@@ -120,14 +120,15 @@
 
   // Defs.format は「区切り1種類で並べるだけ」なのでここでは使わない。ループ記号"|"は
   // 値ではなく区切りなので、"12, |, 11" ではなく手書きと同じ "12 | 11" の形で書きたい
-  // (コンパイラはどちらも読めるが、人が書いた既存MMLと見た目を揃える)
+  // (コンパイラはどちらも読めるが、人が書いた既存MMLと見た目を揃える)。値の区切りは空白で、
+  // *2MML変換の書き出し(src/convert/envelope.js / pitch.js)と同じ(2026-10-25。ppmckc もカンマは省略可)
   function formatTable(tag, index, values, loop) {
     const rows = [];
     let row = '';
     for (let i = 0; i < values.length; i++) {
       if (i > 0 && i % 16 === 0) { rows.push(row); row = ''; }
       if (loop === i) row += row ? ' | ' : '| ';
-      else if (row) row += ', ';
+      else if (row) row += ' ';
       row += String(values[i]);
     }
     rows.push(row);

@@ -527,7 +527,9 @@
     '再生準備完了 (テンポ {tempo}, 拡張音源: {chips})': 'Ready to play (tempo {tempo}, expansion: {chips})',
     '総フレーム数: {n}': 'Total frames  : {n}',
     '総再生時間  : {time}': 'Total duration: {time}',
-    'チャンネル{ch}: {n} 件': 'Channel {ch}: {n} write(s)',
+    'チャンネル{ch}: {f} フレーム({bars} 小節) / 書き込み {n} 件': 'Channel {ch}: {f} frames ({bars} bars) / {n} write(s)',
+    ' / L {f}f': ' / L {f}f',
+    ' / 最長より {d}f 短い': ' / {d}f shorter than the longest',
     'なし (2A03のみ)': 'None (2A03 only)',
 
     // ---- サウンドファイルウィンドウ (共通) ----
@@ -946,6 +948,10 @@
 
     // ---- コア層のエラー文言 ----
     'ループ終端 "]" が見つかりません': 'Missing loop end "]"',
+    'リピート2 "|: 〜 :|" はネストできません(ppmck準拠。入れ子にするなら [ 〜 ] を使ってください)': 'Repeat 2 "|: ... :|" cannot be nested (as in ppmck; use [ ... ] for nesting)',
+    'リピート2の終端 ":|" が見つかりません': 'Missing repeat 2 end ":|"',
+    '"\\" はリピート2 "|: 〜 :|" の中でだけ使えます': '"\\" can only be used inside repeat 2 "|: ... :|"',
+    '":|" に対応するリピート2の開始 "|:" がありません': '":|" has no matching repeat 2 start "|:"',
     'SD/SDOF/SDQR は三角波・DPCMチャンネルでは使用できません':
       'SD/SDOF/SDQR cannot be used on the triangle or DPCM channels',
     'SD の値は 0〜{max} で指定してください ({v})': 'SD takes a value from 0 to {max} ({v})',
@@ -1582,5 +1588,6 @@
     'この形式は動画に書き出せません': 'This format cannot be exported as video',
     '曲の先読みがまだ終わっていません。少し待ってからもう一度押してください': 'The song is still being pre-captured. Wait a moment and try again',
     'ファイル再生: MMLエディタの区画は無いのでロールのみで描きます。長さは先読み済みの {sec} 秒まで': 'File playback: there is no MML editor pane, so only the roll is drawn. Length is limited to the pre-captured {sec} s',
+    '{name}{index} が {first} 行目と {line} 行目で二重に定義されています(後の {line} 行目の定義が使われます)': '{name}{index} is defined twice, on lines {first} and {line} (the later definition on line {line} is used)',
   });
 })(typeof window !== 'undefined' ? window : globalThis);

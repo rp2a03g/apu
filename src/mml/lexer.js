@@ -436,7 +436,19 @@
   Mml.splitChannels = function (source) {
     const channels = {};
     const errors = [];
+    const warnings = [];
     const envelopes = { v: {}, vr: {}, ep: {}, en: {}, mp: {}, op: {}, fm: {}, n: {}, mw: {}, mh: {}, dpcm: {}, duty: {} };
+    // 同じ番号の定義が2回以上書かれていないか(後の定義が黙って勝つので、書き手は気づけない。2026-10-25)。
+    // envelopes の種別ごとに「番号 → 最初に定義した行」を覚えておく
+    const defLines = {};
+    const DEF_NAMES = { v: '@v', vr: '@vr', ep: '@EP', en: '@EN', mp: '@MP', op: '@OP', fm: '@FM', n: '@N', mw: '@MW', mh: '@MH', dpcm: '@DPCM', duty: '@' };
+    function noteDef(kind, index, lineNo, srcStart, name) {
+      const seen = defLines[kind] || (defLines[kind] = {}); // @OP と @OT は同じ番号空間(envelopes.op)
+      if (seen[index] != null) {
+        warnings.push({ kind: 'duplicate-def', srcStart, message: T('{name}{index} が {first} 行目と {line} 行目で二重に定義されています(後の {line} 行目の定義が使われます)',
+          { name: name || DEF_NAMES[kind], index, first: seen[index], line: lineNo }) });
+      } else seen[index] = lineNo;
+    }
     const meta = { title: null, composer: null, maker: null, programer: null };
     // n163NumCh: #EX-N163 / #EX-NAMCO106 の数値(実効チャンネル数)。
     // 未指定(数値なし)なら null で、compiler.js が本文から自動検出する
@@ -453,6 +465,7 @@
       // オフセット計算(下のchans/body分岐)でのみ使う
       const leadStrip = text.length - text.trimStart().length;
       const trimmedOffsets = offsets.slice(leadStrip, leadStrip + trimmed.length);
+      const defStart = trimmedOffsets.length ? trimmedOffsets[0] : undefined; // 定義行の先頭(重複定義の警告位置)
 
       if (trimmed[0] === '#') {
         const directive = parseHeaderDirective(trimmed);
@@ -521,29 +534,34 @@
       const envDef = parseEnvelopeDef(trimmed);
       if (envDef) {
         (envDef.isRelease ? envelopes.vr : envelopes.v)[envDef.index] = envDef.table;
+        noteDef(envDef.isRelease ? 'vr' : 'v', envDef.index, lineNo, defStart);
         continue;
       }
 
       const pitchNoteEnvDef = parsePitchNoteEnvelopeDef(trimmed);
       if (pitchNoteEnvDef) {
         envelopes[pitchNoteEnvDef.kind][pitchNoteEnvDef.index] = pitchNoteEnvDef.table;
+        noteDef(pitchNoteEnvDef.kind, pitchNoteEnvDef.index, lineNo, defStart);
         continue;
       }
 
       const vibratoDef = parseVibratoDef(trimmed);
       if (vibratoDef) {
         envelopes.mp[vibratoDef.index] = vibratoDef.params;
+        noteDef('mp', vibratoDef.index, lineNo, defStart);
         continue;
       }
 
       const vrc7ToneDef = parseVrc7ToneDef(trimmed);
       if (vrc7ToneDef) {
         envelopes.op[vrc7ToneDef.index] = vrc7ToneDef.bytes;
+        noteDef('op', vrc7ToneDef.index, lineNo, defStart);
         continue;
       }
 
       const vrc7ToneAltDef = parseVrc7ToneAltDef(trimmed);
       if (vrc7ToneAltDef) {
+        if (vrc7ToneAltDef.bytes) noteDef('op', vrc7ToneAltDef.index, lineNo, defStart, '@OT');
         if (vrc7ToneAltDef.bytes) envelopes.op[vrc7ToneAltDef.index] = vrc7ToneAltDef.bytes;
         else errors.push({ lineNo, message: T('@OT{index} の値の数が不足しています(24個必要)', { index: vrc7ToneAltDef.index }) });
         continue;
@@ -552,12 +570,14 @@
       const fdsWaveDef = parseFdsWaveDef(trimmed);
       if (fdsWaveDef) {
         envelopes.fm[fdsWaveDef.index] = fdsWaveDef.values;
+        noteDef('fm', fdsWaveDef.index, lineNo, defStart);
         continue;
       }
 
       const n163WaveDef = parseN163WaveDef(trimmed);
       if (n163WaveDef) {
         envelopes.n[n163WaveDef.index] = n163WaveDef.values;
+        noteDef('n', n163WaveDef.index, lineNo, defStart);
         continue;
       }
 
@@ -574,18 +594,21 @@
           });
         }
         envelopes.mw[fdsModWaveDef.index] = fdsModWaveDef.values;
+        noteDef('mw', fdsModWaveDef.index, lineNo, defStart);
         continue;
       }
 
       const fdsModParamDef = parseFdsModParamDef(trimmed);
       if (fdsModParamDef) {
         envelopes.mh[fdsModParamDef.index] = fdsModParamDef.params;
+        noteDef('mh', fdsModParamDef.index, lineNo, defStart);
         continue;
       }
 
       const dpcmDef = parseDpcmDef(trimmed);
       if (dpcmDef) {
         envelopes.dpcm[dpcmDef.index] = dpcmDef.sample;
+        noteDef('dpcm', dpcmDef.index, lineNo, defStart);
         continue;
       }
 
@@ -594,6 +617,7 @@
       const toneEnvDef = parseToneEnvelopeDef(trimmed);
       if (toneEnvDef) {
         envelopes.duty[toneEnvDef.index] = toneEnvDef.table;
+        noteDef('duty', toneEnvDef.index, lineNo, defStart);
         continue;
       }
 
@@ -633,7 +657,7 @@
       detectedExpansions.push('dpcm');
     }
 
-    return { channels, errors, envelopes, meta, settings, detectedExpansions };
+    return { channels, errors, warnings, envelopes, meta, settings, detectedExpansions };
   };
 
   // コマンド文字列 -> トークン列。
@@ -1015,7 +1039,19 @@
         }
         case '&': i++; tokens.push({ type: 'tie' }); break;
         case '[': i++; tokens.push({ type: 'loopStart' }); break;
-        case '|': i++; tokens.push({ type: 'loopBreak' }); break;
+        case '|':
+          // "|:" はリピート2の開始(ppmck の |: 〜  〜 :|<num>)。それ以外の "|" はリピート1の分岐
+          if (str[i + 1] === ':') { i += 2; tokens.push({ type: 'repeat2Start' }); }
+          else { i++; tokens.push({ type: 'loopBreak' }); }
+          break;
+        case ':': {
+          // ":|<num>" はリピート2の終端。":" 単独は従来どおり無視
+          if (str[i + 1] !== '|') { i++; break; }
+          i += 2;
+          tokens.push({ type: 'repeat2End', count: readNumber() });
+          break;
+        }
+        case '\\': i++; tokens.push({ type: 'repeat2Break' }); break;
         case ']': {
           i++;
           const v = readNumber();

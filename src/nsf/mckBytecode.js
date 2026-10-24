@@ -868,11 +868,11 @@
     flushModReloadsUpTo(elapsed);
     flushN163ReloadsUpTo(elapsed);
     flushRawWritesUpTo(elapsed);
-    // Lが曲(このチャンネル)の末尾ちょうどに置かれていた場合(末尾に音符が続かない)のための
-    // 保険。この場合ループ先はOP_END自身になり、以降は無音のまま無限ループする
-    if (loopFrame != null && loopByteOffset == null && elapsed === loopFrame) {
-      loopByteOffset = bytes.length;
-    }
+    // L の後ろに時間の進むものが何も無い(音符の無いchに L だけ/L が末尾ちょうど)場合はループにしない。
+    // ループ先が OP_END(か待ち時間0の命令だけ)になり、ドライバの RD_ENDTRACK→RD_LOOP が同じフレームの中で
+    // 永久に回って PLAY が戻らず、他のchも含めて曲全体が最初のフレームで固まっていた(2026-10-25)。
+    // ループを付けなければ、従来どおり OP_END で無音化して止まる
+    if (loopFrame != null && loopFrame >= elapsed) loopByteOffset = null;
 
     bytes.push(OP_END);
     return { bytes: new Uint8Array(bytes), loopByteOffset };
