@@ -713,7 +713,7 @@ button.secondary {
 .mml-bottom-pane {
   flex: none;
   height: 96px; /* JS(スプリッター)で上書きされる */
-  min-height: 40px;
+  min-height: 88px; /* ログ2枚がそれぞれ1行は読める高さ(floatingWindows.js initSplitters の minH と同じ) */
   overflow: hidden;
   padding: 6px 12px 10px;
   display: flex;

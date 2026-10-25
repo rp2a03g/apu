@@ -4554,7 +4554,9 @@
   // 空のままだと「何も出ない枠」がエディタの下に居座って場所を食うため(ユーザー指摘 2026-09-11)。
   // 両方とも空ならスプリッターごと下ペインを畳み、エディタが高さを全部使う。
   // 畳むのは [hidden] 属性 + style.css の .mml-log-area[hidden] 等(下ペインのdisplay:flexに勝たせる)
-  const mmlLogSplitterEl = document.getElementById('mmlLogSplitter');
+  // ログ欄の上のつまみ(index.html の id は mmlEditorSplitter。以前の id のまま探していて見つからず、
+  // ログが空で欄を畳んでもつまみだけが残っていた)
+  const mmlLogSplitterEl = document.getElementById('mmlEditorSplitter');
   const mmlBottomPaneEl = document.querySelector('.mml-bottom-pane');
   function syncMmlLogVisibility() {
     let anyContent = false;

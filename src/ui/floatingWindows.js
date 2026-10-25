@@ -257,7 +257,8 @@
       const next = kind === 'next' || (kind === 'log' && !mobile);
       const pane = next ? splitter.nextElementSibling : splitter.previousElementSibling;
       if (!pane) return;
-      const minH = next ? 40 : 80;
+      // 下側(MMLエディタのログ欄)の最小は、ログ2枚がそれぞれ1行は読める高さ(40pxだと各18pxで消えたように見えた)
+      const minH = next ? 88 : 80;
       // 下側を広げるとき、反対側(上側ペイン)は CSS の min-height までしか縮めない
       const other = next ? splitter.previousElementSibling : null;
       const otherMin = other ? (parseFloat(getComputedStyle(other).minHeight) || 80) : 0;
@@ -269,7 +270,7 @@
         if (!next) pane.style.flex = 'none';
       };
       const saved = loadSplitterHeights()[id];
-      if (saved != null) setH(saved);
+      if (saved != null) setH(Math.max(minH, saved));
       splitter.addEventListener('dblclick', () => {
         setH(null);
         const d = loadSplitterHeights(); delete d[id];
