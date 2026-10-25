@@ -186,6 +186,20 @@
   };
 
   // ── 描画 ──────────────────────────────────────────────────────────
+  // 楽譜の色づかい(楽譜ウィンドウ src/ui/scoreView.js と動画書き出し src/video/videoExport.js で共通、2026-10-25)。
+  //   'color' … 暗い地にパートごとの色(colorOf はパートの色。鍵盤表示と同じ)
+  //   'mono'  … 白地に黒(紙の楽譜と同じ見た目)。カーソルだけは見失わないよう赤
+  // 戻り値の bg は drawScore が塗らないので、呼び出し側が先に塗る
+  Score.inkFor = function (style, colorOf) {
+    if (style === 'mono') {
+      return { bg: '#ffffff', staffColor: '#000000', textColor: '#000000', colorOf: () => '#000000', cursor: 'rgba(220, 40, 40, 0.85)' };
+    }
+    return {
+      bg: '#1b1b22', staffColor: '#8a8aa0', textColor: '#e6e6ef',
+      colorOf: (letter) => (colorOf && colorOf(letter)) || '#e6e6ef', cursor: 'rgba(255, 220, 80, 0.85)'
+    };
+  };
+
   const TYPE_FLAGS = { 8: 1, 16: 2, 32: 3, 64: 4, 128: 5, 256: 6 };
 
   Score.drawScore = function (ctx, layout, opts) {

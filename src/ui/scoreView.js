@@ -10,6 +10,7 @@
  *   view.setScore(score|null)   score = { notation, fps, loopPointFrame, totalFrames }(鍵盤表示の setScore と同じ物)
  *   view.setFrame(frame)        再生位置(コンパイラのフレーム。-1=停止)
  *   view.colorOf = (letter) => 色   パート(チャンネル文字)の色。省略時は白
+ *   view.getStyle()             'color'(パートごとの色) | 'mono'(白地に黒)。動画書き出しの既定に使う
  *   view.onExport = () => {}     「MusicXML」ボタン
  */
 (function (global) {
@@ -21,6 +22,7 @@
 
   const SP_KEY = 'mml_scoreView_sp';
   const MODE_KEY = 'mml_scoreView_mode';
+  const STYLE_KEY = 'mml_scoreView_style';
   const SP_MIN = 4, SP_MAX = 14, SP_DEFAULT = 7;
   const MAX_CANVAS_PX = 30000; // ブラウザの canvas 高さ上限(32767)の手前
 
@@ -48,6 +50,10 @@
           `<select class="score-mode" title="${T('楽譜の形')}">` +
             `<option value="all">${T('全パート(1chごとに1段)')}</option>` +
             `<option value="piano">${T('ピアノ2段(+打楽器)')}</option>` +
+          `</select>` +
+          `<select class="score-style" title="${T('楽譜の色')}">` +
+            `<option value="color">${T('カラー')}</option>` +
+            `<option value="mono">${T('モノクロ(白地に黒)')}</option>` +
           `</select>` +
           `<label class="score-follow-label"><input type="checkbox" class="score-follow" checked>${T('再生に追従')}</label>` +
           `<span class="score-info"></span>` +
@@ -79,6 +85,18 @@
         this._lastSystem = -1;
         this._relayout();
       });
+      // 楽譜の色: 'color'(パートごとの色) | 'mono'(白地に黒)。localStorage に残す(2026-10-25)
+      this._styleEl = container.querySelector('.score-style');
+      this._style = 'color';
+      try { if (localStorage.getItem(STYLE_KEY) === 'mono') this._style = 'mono'; } catch (e) { /* ignore */ }
+      this._styleEl.value = this._style;
+      container.classList.toggle('score-view--mono', this._style === 'mono');
+      this._styleEl.addEventListener('change', () => {
+        this._style = this._styleEl.value === 'mono' ? 'mono' : 'color';
+        try { localStorage.setItem(STYLE_KEY, this._style); } catch (e) { /* ignore */ }
+        container.classList.toggle('score-view--mono', this._style === 'mono');
+        this._relayout();
+      });
       container.querySelector('.score-export').addEventListener('click', () => { if (this.onExport) this.onExport(this._mode); });
       // 幅が変わったら段組みし直す(表示中だけ。非表示のときは次に見えたときに描く)
       this._lastWidth = 0;
@@ -105,6 +123,7 @@
       this._relayout();
     }
     getMode() { return this._mode; }
+    getStyle() { return this._style; }
     // 今の形の表記モデル(ピアノ2段は初回だけ組み立ててキャッシュ)
     _currentNotation() {
       const sc = this._score;
@@ -154,8 +173,9 @@
       canvas.style.height = height + 'px';
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, width, height);
-      const colorOf = (letter) => (this.colorOf && this.colorOf(letter)) || '#e6e6ef';
-      MML.Score.drawScore(ctx, layout, { colorOf, staffColor: '#8a8aa0', textColor: '#e6e6ef' });
+      const ink = MML.Score.inkFor(this._style, this.colorOf);
+      if (this._style === 'mono') { ctx.fillStyle = ink.bg; ctx.fillRect(0, 0, width, height); }
+      MML.Score.drawScore(ctx, layout, ink);
       const n = notation;
       const measures = n.parts.length ? n.parts[0].measures.length : 0;
       let info = T('{parts}パート / {measures}小節 / 拍子 {time} / 調号 {key}', {

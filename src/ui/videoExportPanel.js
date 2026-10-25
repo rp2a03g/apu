@@ -23,6 +23,9 @@
   const DEFAULTS = {
     resolution: '1280x720', fps: 30, layout: 'roll-editor-v', rollOrientation: 'vertical', split: 60,
     scale: 1, editorFontPx: 18, showTitle: true, quality: 'normal',
+    // 「エディタ」の区画に出すもの(2026-10-25): 'editor'(MMLエディタ) | 'score'(楽譜)。楽譜の形と色は
+    // 楽譜ウィンドウと同じ選択肢(既定は楽譜ウィンドウで選んでいるもの。loadで決める)
+    pane2: 'editor', scoreMode: null, scoreStyle: null,
   };
   // ビットレート(bps)。X は最大 25Mbps あたりまで受け付けるはず(推定)。720p30 で 6M は十分きれい
   function bitrateFor(width, height, fps, quality) {
@@ -36,7 +39,14 @@
   let exporting = null; // { controller }
 
   function load() {
-    try { return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')); } catch (e) { return Object.assign({}, DEFAULTS); }
+    let s;
+    try { s = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')); } catch (e) { s = Object.assign({}, DEFAULTS); }
+    // 楽譜の形・色をまだ選んでいなければ、楽譜ウィンドウで選んでいるものから始める
+    const sv = document.getElementById('scoreView');
+    const view = sv && sv._scoreView;
+    if (!s.scoreMode) s.scoreMode = (view && view.getMode && view.getMode()) || 'all';
+    if (!s.scoreStyle) s.scoreStyle = (view && view.getStyle && view.getStyle()) || 'color';
+    return s;
   }
   function save() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ } }
 
@@ -54,6 +64,9 @@
         `<label>${T('ロールの向き')}<select data-k="rollOrientation">${optionsHtml([['vertical', '縦(音符が降る・鍵盤が下)'], ['horizontal', '横(音符が流れる・鍵盤が左)']], s.rollOrientation)}</select></label>` +
         `<label>${T('ロールの割合')}<input type="range" data-k="split" min="20" max="80" step="5" value="${s.split}"><span class="vx-split-val">${s.split}%</span></label>` +
         `<label>${T('ロールの描画倍率')}<select data-k="scale">${optionsHtml([[1, '1×'], [1.5, '1.5×'], [2, '2×']], s.scale)}</select></label>` +
+        `<label>${T('エディタの区画に出すもの')}<select data-k="pane2">${optionsHtml([['editor', 'MMLエディタ'], ['score', '楽譜']], s.pane2)}</select></label>` +
+        `<label>${T('楽譜の形')}<select data-k="scoreMode">${optionsHtml([['all', '全パート(1chごとに1段)'], ['piano', 'ピアノ2段(+打楽器)']], s.scoreMode)}</select></label>` +
+        `<label>${T('楽譜の色')}<select data-k="scoreStyle">${optionsHtml([['color', 'カラー'], ['mono', 'モノクロ(白地に黒)']], s.scoreStyle)}</select></label>` +
         `<label>${T('エディタの文字サイズ')}<input type="number" data-k="editorFontPx" min="8" max="64" step="1" value="${s.editorFontPx}"><span>px</span></label>` +
         `<label>${T('画質')}<select data-k="quality">${optionsHtml([['normal', '標準'], ['high', '高画質']], s.quality)}</select></label>` +
         `<label><input type="checkbox" data-k="showTitle"${s.showTitle ? ' checked' : ''}>${T('タイトルと時間を上に出す')}</label>` +
@@ -103,6 +116,7 @@
     return {
       width: w, height: h, fps: settings.fps, layout: settings.layout, rollOrientation: settings.rollOrientation,
       split: settings.split / 100, scale: settings.scale, editorFontPx: settings.editorFontPx, showTitle: settings.showTitle,
+      pane2: settings.pane2, scoreMode: settings.scoreMode, scoreStyle: settings.scoreStyle,
       bitrate: bitrateFor(w, h, settings.fps, settings.quality), durationSeconds: settings.seconds || 60,
     };
   }

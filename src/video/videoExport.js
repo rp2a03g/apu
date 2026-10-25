@@ -24,6 +24,8 @@
  *   split                         … 2区画のときロール側の割合(0.3〜0.8)
  *   scale                         … ロール/鍵盤の描画倍率(1/1.5/2。線幅・文字が固定pxなので高解像度では上げる)
  *   editorFontPx, showTitle, title, subtitle, followCh, bitrate
+ *   pane2                         … 'editor'(MMLエディタ、既定) | 'score'(楽譜)。「エディタ」の区画に出すもの
+ *   scoreMode, scoreStyle         … 楽譜のとき: 'all' | 'piano'(楽譜の形)、'color' | 'mono'(白地に黒)
  *   source, compiled              … MML 原文とコンパイル結果(highlightRanges / channelLetters / frameRate / loopPointFrame)
  *   cap                           … captureSongAsync の結果(regSnapshots/writeLog/audio…)。プレビューは即席の同形でよい
  *   keyboardDisplay, chips, tuning… 鍵盤表示のインスタンスとチップ構成、{tuningCents,tuningNotes}
@@ -234,6 +236,67 @@
     return { draw };
   }
 
+  // ── 楽譜区画(エディタ区画の代わりに出せる、2026-10-25) ─────────────────
+  // 楽譜ウィンドウ(src/ui/scoreView.js)と同じ段組み・同じ描画コード(src/score/engrave.js)。区画の幅で
+  // 段組みし、再生位置の段が区画の上寄りに来るよう滑らかにスクロールする。
+  //   opt.scoreMode  'all'(1chごとに1段) | 'piano'(右手/左手の2段+打楽器)
+  //   opt.scoreStyle 'color'(パートごとの色) | 'mono'(白地に黒)
+  function makeScore(opt, colors) {
+    const Score = MML.Score;
+    const compiled = opt.compiled;
+    if (!compiled || !Score) return null;
+    let notation;
+    try {
+      notation = opt.scoreMode === 'piano' ? Score.buildPianoNotation(compiled, {}) : Score.buildNotation(compiled, {});
+    } catch (e) { console.warn('動画の楽譜の組み立てに失敗:', e); return null; }
+    const kd = opt.keyboardDisplay;
+    const ink = Score.inkFor(opt.scoreStyle === 'mono' ? 'mono' : 'color',
+      kd && kd.getChannelColorByLetter ? (l) => kd.getChannelColorByLetter(l) : null);
+    const fps = compiled.frameRate || 60;
+    const totalFrames = compiled.totalFrames || 0;
+    const loopPoint = compiled.loopPointFrame != null ? compiled.loopPointFrame : null;
+    const loopLen = loopPoint != null ? Math.round((totalFrames - loopPoint) / 2) : 0;
+    const wrapFrame = (f) => {
+      if (loopPoint == null || loopLen <= 0) return f;
+      const natural = loopPoint + loopLen;
+      return f < natural ? f : loopPoint + ((f - natural) % loopLen);
+    };
+    // 五線の間隔: エディタの文字サイズに合わせる(18px → 8)
+    const sp = Math.max(4, Math.round((opt.editorFontPx || 18) * 0.45));
+    let layout = null, layoutW = 0, scrollPx = null;
+
+    function draw(ctx, rect, t, dt) {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(rect.x, rect.y, rect.w, rect.h); ctx.clip();
+      ctx.fillStyle = opt.scoreStyle === 'mono' ? ink.bg : colors.editorBg;
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      const pad = Math.round(sp * 1.5);
+      const width = Math.max(120, rect.w - pad * 2);
+      if (!layout || layoutW !== width) {
+        const measureText = (s, px) => { ctx.font = `${px}px ${colors.sans}`; return ctx.measureText(s).width; };
+        try { layout = Score.layoutScore(notation, { sp, width, measureText }); } catch (e) { console.warn('動画の楽譜の段組みに失敗:', e); layout = null; }
+        layoutW = width; scrollPx = null;
+      }
+      if (!layout) { ctx.restore(); return; }
+      const c = Score.cursorAtFrame(layout, wrapFrame(Math.floor(t * fps)));
+      // 追随: カーソルの段を区画の上から1/4あたりへ。段が変わるときは滑らかに寄せる
+      const maxScroll = Math.max(0, layout.height - (rect.h - pad));
+      if (c) {
+        const target = Math.min(maxScroll, Math.max(0, c.y0 - rect.h * 0.25));
+        if (scrollPx === null) scrollPx = target;
+        else scrollPx += (target - scrollPx) * (1 - Math.exp(-(dt || 0) * 6));
+      } else if (scrollPx === null) scrollPx = 0;
+      ctx.translate(rect.x + pad, rect.y + pad / 2 - scrollPx);
+      Score.drawScore(ctx, layout, ink);
+      if (c) {
+        ctx.fillStyle = ink.cursor;
+        ctx.fillRect(Math.round(c.x) - 1, c.y0, Math.max(2, Math.round(sp / 4)), c.y1 - c.y0);
+      }
+      ctx.restore();
+    }
+    return { draw };
+  }
+
   // ── シーン(1枚を描く) ───────────────────────────────────────────
   function createScene(opt) {
     const colors = readColors();
@@ -268,7 +331,8 @@
       };
       rollC = mk(rollDst); pianoC = mk(pianoDst);
     }
-    const editor = rects.editor ? makeEditor(opt, colors) : null;
+    // 「エディタ」の区画には MMLエディタか楽譜のどちらかを出す(opt.pane2)
+    const editor = rects.editor ? (opt.pane2 === 'score' ? makeScore(opt, colors) : makeEditor(opt, colors)) : null;
     const total = opt.durationSeconds || 0;
     const fmtTime = (s) => { s = Math.max(0, Math.floor(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
     let lastT = null;

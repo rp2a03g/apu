@@ -3600,6 +3600,9 @@ button.apply-btn--dirty::after { content: ' ●'; font-size: 9px; vertical-align
 .score-view-canvas { display: block; }
 .score-view-empty { color: var(--muted, #9a9ab0); padding: 24px; text-align: center; }
 .score-view-cursor { position: absolute; width: 2px; background: rgba(255, 220, 80, 0.85); pointer-events: none; box-shadow: 0 0 6px rgba(255, 220, 80, 0.6); }
+/* モノクロ(白地に黒、2026-10-25): 地を白にし、黄色だと見えないカーソルを赤にする(engrave.js Score.inkFor と同じ色) */
+.score-view--mono .score-view-scroll { background: #ffffff; }
+.score-view--mono .score-view-cursor { background: rgba(220, 40, 40, 0.85); box-shadow: 0 0 6px rgba(220, 40, 40, 0.5); }
 
 /* ノイズパッド(2026-09-18): ドラム(DPCM)パネルの 載せ先/ノイズ音色/優先 列と、音色エディタ(src/ui/noisePadEditor.js) */
 .dp-c-target { flex: none; width: 66px; }

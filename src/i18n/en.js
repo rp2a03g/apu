@@ -1595,5 +1595,9 @@
     '#DPCM-DAC-RAMP: DPCMの音符が無いので、曲頭の持ち上げはしません': '#DPCM-DAC-RAMP: there are no DPCM notes, so the DAC is not raised at the start',
     '#DPCM-DAC-RAMP: 最初に鳴る@DPCMのdac値が255(書き込まない)なので、曲頭の持ち上げはしません': '#DPCM-DAC-RAMP: the first @DPCM to play has dac 255 (no write), so the DAC is not raised at the start',
     'DA: ループ再生(mode 1)のDPCMが鳴り続けているため、DACを動かせません': 'DA: a looping DPCM sample (mode 1) is still playing, so the DAC cannot be moved',
+    '楽譜の色': 'Score colours',
+    'カラー': 'Colour',
+    'モノクロ(白地に黒)': 'Monochrome (black on white)',
+    'エディタの区画に出すもの': 'Show in the editor pane',
   });
 })(typeof window !== 'undefined' ? window : globalThis);
