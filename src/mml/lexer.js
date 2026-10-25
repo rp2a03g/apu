@@ -477,6 +477,15 @@
             case 'PROGRAMER': meta.programer = directive.args; break;
             case 'OCTAVE-REV': settings.octaveRev = parseInt(directive.args, 10) || 0; break;
             case 'GATE-DENOM': settings.gateDenom = parseInt(directive.args, 10) || 8; break;
+            case 'DPCM-DAC-RAMP': {
+              // 曲頭のプチノイズ対策(本ツール独自拡張、2026-10-25)。曲を始める前にこのフレーム数をかけて
+              // DPCMのDAC($4011)を0から最初の@DPCMのdac値まで上げる。数値省略時は32フレーム
+              const a = String(directive.args || '').trim();
+              const f = a === '' ? 32 : parseInt(a, 10);
+              if (!(f >= 1 && f <= 255)) errors.push({ lineNo, message: T('#DPCM-DAC-RAMP のフレーム数は 1〜255 で指定してください') });
+              else settings.dacRampFrames = f;
+              break;
+            }
             case 'TUNING': {
               // 基準ピッチ(セント、小数可)。全音符の周波数を12平均律(A4=440Hz)からこのぶんずらす。
               // 音名は変わらない(キー/トランスポーズではない)。*2mml が曲全体の音程偏差を自動検出
@@ -910,6 +919,20 @@
         // 鳴らすコーラス/デチューン効果に使う
         case 'D': {
           i++;
+          // DA<値>[,<音長>] DPCMのDAC($4011)を<音長>かけて<値>へ動かす(本ツール独自拡張、2026-10-25)。
+          // D<n>(デチューン)は直後が数字/符号なので、2文字目が A なら DA とみなしてよい
+          if (str[i] === 'A') {
+            i++;
+            const value = readNumber();
+            let length = null, dots = 0;
+            if (str[i] === ',') {
+              i++;
+              length = readNumber();
+              while (i < n && str[i] === '.') { dots++; i++; }
+            }
+            tokens.push(tagSource({ type: 'dacRamp', value, length, dots }, tokStart));
+            break;
+          }
           const v = readSignedNumber();
           tokens.push({ type: 'detune', value: v == null ? 0 : v });
           break;

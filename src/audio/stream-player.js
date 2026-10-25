@@ -395,6 +395,9 @@
         }
         let raw = this.apu.mixSample();
         for (const name in this.expansionMap) raw += this.expansionMap[name].mixSample();
+        // #DPCM-DAC-RAMP の曲は再生開始/シーク直後の最初のサンプルを「前の値」とみなし、DCブロッカーを
+        // 落ち着いた状態から始める(DACぶんの段差を出さない。player.js dcBlockFor と同じ)
+        if (this._dcPrime) { this.dcPrevX = raw; this._dcPrime = false; }
         const y = raw - this.dcPrevX + 0.999 * this.dcPrevY;
         this.dcPrevX = raw; this.dcPrevY = y;
         out[i] = y;
@@ -418,6 +421,7 @@
       this.totalFrames    = compiled.totalFrames;
       this.frameRate      = compiled.frameRate;
       this.samplesPerFrame = this.audioCtx.sampleRate / compiled.frameRate;
+      this._dacPreroll    = !!(compiled.settings && compiled.settings.dacPreroll);
       this._resetApu();
       if (mute) this.applyMute(mute);
     }
@@ -432,6 +436,7 @@
       this.cycleAccum   = 0;
       this._songFramePos = 0;
       this.dcPrevX = this.dcPrevY = 0;
+      this._dcPrime = !!this._dacPreroll;
     }
 
     play()  { this.isPlaying = true; }
@@ -474,6 +479,7 @@
       this._anchorCtxTime = null;   // 次のバッファで取り直す
       this.cycleAccum    = 0;
       this.dcPrevX = this.dcPrevY = 0;
+      this._dcPrime = !!this._dacPreroll;
     }
 
     applyMute(mute) {

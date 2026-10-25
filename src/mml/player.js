@@ -87,6 +87,20 @@
     };
   }
 
+  // #DPCM-DAC-RAMP(曲頭のDAC持ち上げ)のある曲は、frame 0 でDACが目標値になっている(compiler.js applyDacRamps)。
+  // 持ち上げは曲の時間の外で済んだ扱いなので、DCブロッカーも落ち着いた状態(最初のサンプルを前の値とみなす)
+  // から始める。そうしないと先頭でDACぶんの段差=プチノイズが出る(stream-player.js の _dcPrime と同じ)
+  function dcBlockFor(compiled, raw) {
+    if (!(compiled.settings && compiled.settings.dacPreroll) || raw.length === 0) return MML.Emu.dcBlock(raw);
+    const out = new Float32Array(raw.length);
+    let prevX = raw[0], prevY = 0;
+    for (let i = 0; i < raw.length; i++) {
+      const y = raw[i] - prevX + 0.999 * prevY;
+      out[i] = y; prevX = raw[i]; prevY = y;
+    }
+    return out;
+  }
+
   Mml.render = function (source, opt = {}) {
     const compiled = MML.Mml.compile(source, opt);
     const sampleRate = opt.sampleRate || 44100;
@@ -149,7 +163,7 @@
     }
 
     return {
-      audio: MML.Emu.dcBlock(raw),
+      audio: dcBlockFor(compiled, raw),
       sampleRate,
       totalFrames: compiled.totalFrames,
       samplesPerFrame,
@@ -235,7 +249,7 @@
 
     if (onProgress) onProgress(compiled.totalFrames, compiled.totalFrames);
     return {
-      audio: MML.Emu.dcBlock(raw),
+      audio: dcBlockFor(compiled, raw),
       sampleRate,
       totalFrames: compiled.totalFrames,
       samplesPerFrame,

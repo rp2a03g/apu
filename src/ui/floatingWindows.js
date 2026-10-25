@@ -245,15 +245,23 @@
     } catch (e) { /* ignore */ }
     const mobile = document.documentElement.classList.contains('ui-mobile');
     document.querySelectorAll('.pane-splitter').forEach(splitter => {
-      if (splitter.dataset.resize === 'window' && !mobile) { initWindowSplitter(splitter); return; }
-      const id = splitter.id + (splitter.dataset.resize === 'window' ? '_mobile' : '');
+      const kind = splitter.dataset.resize;
+      if (kind === 'window' && !mobile) { initWindowSplitter(splitter); return; }
+      // data-resize="log"(MMLエディタ、2026-10-25): PC は下側(ログ欄)の高さを変え、ウィンドウの大きさは変えない
+      // (エディタとログの比率。全体の大きさはウィンドウ下端の枠で変える)。スマホは "window" と同じく上側を固定する。
+      // 保存キーは方式ごとに分ける(上の古い方式の掃除は mmlEditorSplitter そのものを消すため)
+      const id = splitter.id + ((kind === 'window' || kind === 'log') && mobile ? '_mobile' : (kind === 'log' ? '_log' : ''));
       // 既定は「直前の兄弟=上側ペイン」の高さを変える。data-resize="next" を付けると
       // 「直後の兄弟=下側ペイン」を変える(上側がflexで伸び縮みする作りのとき。
       //  MMLエディタは下のログ欄を content 高さに固定し、エディタ側が余りを取る)
-      const next = splitter.dataset.resize === 'next';
+      const next = kind === 'next' || (kind === 'log' && !mobile);
       const pane = next ? splitter.nextElementSibling : splitter.previousElementSibling;
       if (!pane) return;
       const minH = next ? 40 : 80;
+      // 下側を広げるとき、反対側(上側ペイン)は CSS の min-height までしか縮めない
+      const other = next ? splitter.previousElementSibling : null;
+      const otherMin = other ? (parseFloat(getComputedStyle(other).minHeight) || 80) : 0;
+      let maxH = Infinity;
 
       const setH = (h) => {
         if (h == null) { pane.style.height = ''; if (!next) pane.style.flex = ''; return; }
@@ -277,6 +285,7 @@
         dragging = true;
         startY = e.clientY;
         startH = pane.offsetHeight;
+        maxH = other ? startH + Math.max(0, other.offsetHeight - otherMin) : Infinity;
         splitter.classList.add('dragging');
         e.preventDefault();
         try { splitter.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
@@ -286,7 +295,7 @@
         if (!dragging) return;
         // 下側ペインを変える場合はドラッグ方向が逆(下へ引く=下側が縮む)
         const delta = next ? (startY - e.clientY) : (e.clientY - startY);
-        setH(Math.max(minH, startH + delta));
+        setH(Math.max(minH, Math.min(maxH, startH + delta)));
       });
 
       const end = () => {

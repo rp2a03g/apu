@@ -178,6 +178,9 @@
  *   #TITLE/#COMPOSER/#MAKER/#PROGRAMER <str>  メタ情報(戻り値のmetaに格納。再生には影響しない)
  *   #OCTAVE-REV <n>  0以外で`>``<`(オクターブ上げ/下げ)の意味を反転
  *   #GATE-DENOM <n>  q<n>のゲート分母を8から変更(既定8)
+ *   #DPCM-DAC-RAMP <n>  曲頭のDPCMプチノイズ対策(本ツール独自拡張)。曲を始める前に<n>フレーム(省略時32)
+ *                    かけてDPCMのDAC($4011)を0から最初の@DPCMのdac値まで上げる。NSFはそのぶん曲の頭が遅れ、
+ *                    ブラウザ再生は曲の時間の外で済んだ扱い(applyDacRamps)
  *   #TUNING <cent>   基準ピッチ。全音符の周波数を12平均律(A4=440Hz)からこのセント数だけずらす(小数可、±1200)。
  *                    音名は変わらない(キー/トランスポーズではない)。*2mml変換が曲全体の音程偏差を
  *                    自動検出して出す(src/convert/options.js detectTuning)。NSF書き出しも同じ値を使う
@@ -201,6 +204,8 @@
  *                    非整数tempoを逆算する(t<n>の整数BPM丸めによる端数化を避ける実機コマンド)
  *   w<len>           ウェイト。直前のコマンド(音符/休符/w自身)を<len>音長ぶんそのまま
  *                    延長する(タイと同じ「直前セグメントのdurationFramesを伸ばすだけ」)
+ *   DA<n>[,<len>]    DPCMのDAC($4011)を<len>(省略時l<n>)かけて<n>(0-127)へ動かす(本ツール独自拡張、Eのみ)。
+ *                    曲の途中のDPCMプチノイズ対策。時間は進めない。DMCが鳴っている間は待ち、DPCMを鳴らすと止まる
  *   y<adr>,<num>     レジスタ(メモリ)直接書き込み。$接頭辞の16進数対応。ブラウザ再生でも
  *                    そのままそのアドレスへ生バイトを書き込む(チップ非依存)
  *   x<param0>,<param1> データストリームへのバイト直接埋め込み。NSF書き出し(6502バイト
@@ -790,6 +795,7 @@
     // @n(直接周波数指定)のエラー/警告も1チャンネル1回
     const directFreqWarned = { error: false, range: false, en: false };
     let fme7OnlyWarned = false;
+    let dacRampWarned = false;
     // DPCMch(E)で使えないコマンド(ppmckcはエラー)。同じコマンドの再出現は1回にまとめる
     const dpcmRejected = new Set();
     const dpcmReject = (name) => {
@@ -1206,6 +1212,24 @@
         // y<adr>,<num> レジスタ直接書き込み。音符に紐付かない即時イベントとして記録し、
         // compile()側でチャンネル非依存にwriteLogへ差し込む(spliceImmediateWrites参照)
         case 'rawWrite': immediateWrites.push({ kind: 'rawWrite', frame: elapsedFrames, addr: tok.addr, value: tok.value }); break;
+        // DA<値>[,<音長>] DPCMのDACを<音長>かけて<値>へ動かす(本ツール独自拡張)。時間は進めない(PTと同じく裏で動く)。
+        // 動かし始めの値・刻みはDPCMの発音を全部見てから決まるので、ここでは記録だけ(applyDacRamps参照)
+        case 'dacRamp': {
+          if (!caps.dpcm) {
+            if (!dacRampWarned) {
+              dacRampWarned = true;
+              warnings.push({ srcStart: tok.srcStart, message: T('DA はDPCMチャンネル(E)でだけ使えます(このチャンネルでは無視します)') });
+            }
+            break;
+          }
+          if (tok.value == null || tok.value < 0 || tok.value > 127) {
+            errors.push({ srcStart: tok.srcStart, message: T('DA の値は 0〜127 で指定してください') });
+            break;
+          }
+          const lr = framesForLength(tok.length, tok.dots, state.defaultLength, tempo, 0);
+          immediateWrites.push({ kind: 'dacRamp', frame: elapsedFrames, target: tok.value, frames: Math.max(1, lr.frames), srcStart: tok.srcStart });
+          break;
+        }
         // x<param0>,<param1> はNSF書き出し(6502バイトコード)専用のコマンドで、ブラウザ再生
         // (レジスタログ方式)には対応する概念が無いため意図的に無視する(NSF書き出し実装は別タスク)
         case 'directBytes': break;
@@ -3146,7 +3170,7 @@
   // そのページへ切り替える(NSFはドライバ、ブラウザ再生は buildDpcmBus の疑似書込み)。
   // 注意: 実機の$4013(サンプル長)は「(値×16)+1」バイトという奇妙な単位のため、
   // 元データの長さそのままでは割り切れないことが多い。ここでは元データ全体が
-  // 必ず収まるよう切り上げて(元データより最大15バイト多く、末尾はゼロパディング)
+  // 必ず収まるよう切り上げて(元データより最大15バイト多く、末尾は$FFで埋める。NSFのROMと同じ)
   // レジスタ値を決める(データが途中で切れることはない)。
   // ブラウザ内プレビュー(player.js)用の仮想メモリ配置であり、実際のNSF書き出し時の
   // ROM配置(フェーズ1.7タスク4、$5FFC-$5FFFの専用バンク)とは別
@@ -3189,7 +3213,17 @@
         // 書き込まれ、64KB仮想メモリ(src/audio/stream-player.js buildDpcmBus)の
         // 境界超過(RangeError)やNSF書き出し側(ppmckDriver.js)の固定領域破壊を招く
         // (HESの長いDDA/PCM抽出で実測)。再生されない末尾は切り詰めて安全側に倒す。
-        bytes: def.bytes.slice(0, playLen)
+        // ★元データが playLen に足りないぶん(最大15バイト)は $FF で埋める(2026-10-25)。DMCはここも読むので、
+        //   埋め草の値で鳴り終わりのDAC値が変わる($FF=1バイトごとに+16)。NSF書き出しはROMを$FFで埋めてから
+        //   サンプルを置く(ppmckDriver.js programBytes.fill(0xff))のに、ブラウザ再生のメモリ(buildDpcmBus)は0で、
+        //   鳴り終わりがNSFでは上へ、ブラウザでは下へずれていた。ここで$FFまで含めて持てば両方が同じになる
+        // dataLen: 元データのぶん(NSF書き出しがROMへ焼く長さ。埋め草はROMの$FFがそのまま使われる)
+        dataLen: Math.min(rawLen, playLen),
+        bytes: (() => {
+          const b = new Uint8Array(playLen).fill(0xFF);
+          b.set(def.bytes.subarray ? def.bytes.subarray(0, playLen) : def.bytes.slice(0, playLen));
+          return b;
+        })()
       };
       byFile[def.file] = layout[idx];
       offset += playLen;
@@ -3216,6 +3250,138 @@
   // $4010 = (mode<<6)|freq は定義の値そのもの(ppmckc writeDPCM の1バイト目 freq|(mode<<6) と同じ。
   // bit7=IRQ はppmckでも非推奨なので落とす)。未定義の番号は何も書かない(=無音。ppmckは dpcm_data の
   // 空行 0,0,0,0 を鳴らすだけでエラーにしない)。警告は compile() 側で1番号1回出す
+  // --- DPCMのDAC($4011)をゆっくり動かす: DA<値>,<音長> と #DPCM-DAC-RAMP(2026-10-25) ---
+  // DACが一気に跳ぶとプチノイズになる(電源投入時0のDACへ最初の@DPCMのdac値64を書く、など)。
+  // NSFドライバ(ppmckDriver.js DAC_TICK)は「DACINTフレームごとにDACSTEPずつ目標へ動かす、DMCが鳴っている
+  // 間は待つ、DPCMを鳴らしたら止める」。DACは読み出せないので開始値はここで計算して渡す。ブラウザ再生も
+  // 同じ手順でwriteLogへ書き込みを足す(NSFと同じ音になるように)
+  const DMC_RATE_CYCLES = [428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54];
+  const CPU_CYCLES_PER_FRAME = 1789773 / FRAME_RATE_NTSC;
+  // <動かす量>を<フレーム数>で割った刻み。1回に動かす量 step と、何フレームごとか interval
+  function dacRampParams(start, target, frames) {
+    const d = Math.abs(target - start);
+    if (d === 0) return null;
+    const step = Math.min(127, Math.ceil(d / Math.max(1, frames)));
+    const interval = Math.max(1, Math.min(255, Math.round(frames * step / d)));
+    return { step, interval };
+  }
+  // DAC_TICK と同じ丸めで目標へ1歩(行き過ぎたら目標ちょうど)
+  function dacStepToward(cur, tgt, step) {
+    if (cur < tgt) { const r = cur + step; return r < tgt ? r : tgt; }
+    const r = cur - step; return r > tgt ? r : tgt;
+  }
+  // サンプルが実際に読まれるビット列(長さは$4013の(値×16)+1バイト。元データより長いぶんは
+  // layoutDpcmSamples の64バイト境界の隙間=0を読む)
+  function dpcmBitsOf(layout) {
+    const bits = new Uint8Array(layout.playLen * 8);
+    for (let b = 0; b < layout.bytes.length && b < layout.playLen; b++) {
+      for (let k = 0; k < 8; k++) bits[b * 8 + k] = (layout.bytes[b] >> k) & 1;
+    }
+    return bits;
+  }
+  function dpcmLevelAfter(startLevel, bits, n) {
+    let l = startLevel;
+    for (let i = 0; i < n; i++) {
+      if (bits[i]) { if (l <= 125) l += 2; } else if (l >= 2) l -= 2;
+    }
+    return l;
+  }
+  // settings.dacRampFrames(#DPCM-DAC-RAMP): 曲頭の持ち上げ。settings.dacPreroll にNSFドライバ用の値を置き、
+  // ブラウザ再生は frame 0 で目標値にしておく(持ち上げは曲の時間の外。プレイヤー側はDCブロッカーを
+  // 落ち着いた状態から始めるので段差が出ない。player.js / stream-player.js)。
+  // DA の immediateWrite には start/step/interval(と動かす量0なら skip)を書き込む(mckBytecode.js が使う)
+  function applyDacRamps(eLetter, segs, immediateWritesByChannel, channelLetters, dpcmLayout, dpcmSamples,
+    settings, track, totalFrames, warnings) {
+    const ramps = (immediateWritesByChannel[eLetter] || []).filter(iw => iw.kind === 'dacRamp')
+      .sort((a, b) => a.frame - b.frame);
+    const keys = [];
+    let fr = 0;
+    for (const seg of segs) {
+      if (fr >= totalFrames) break;
+      if (seg.freq != null) {
+        const idx = seg.noteNumber - DPCM_NOTE_BASE;
+        if (dpcmLayout[idx] && dpcmSamples[idx]) keys.push({ frame: fr, layout: dpcmLayout[idx], def: dpcmSamples[idx] });
+      }
+      fr += seg.durationFrames;
+    }
+    let level = 0;
+    if (settings.dacRampFrames) {
+      const first = keys[0];
+      if (!first) {
+        warnings.push({ message: T('#DPCM-DAC-RAMP: DPCMの音符が無いので、曲頭の持ち上げはしません') });
+      } else if (first.layout.dac == null) {
+        warnings.push({ message: T('#DPCM-DAC-RAMP: 最初に鳴る@DPCMのdac値が255(書き込まない)なので、曲頭の持ち上げはしません') });
+      } else {
+        const target = first.layout.dac;
+        const p = dacRampParams(0, target, settings.dacRampFrames);
+        if (p) {
+          settings.dacPreroll = { frames: settings.dacRampFrames, target, step: p.step, interval: p.interval };
+          track[0] = [{ addr: 0x4011, value: target }, ...track[0]];
+          level = target;
+        }
+      }
+    }
+    if (ramps.length === 0) return;
+
+    const dacWrites = [];
+    for (const ch of channelLetters) {
+      for (const iw of immediateWritesByChannel[ch] || []) {
+        if (iw.kind === 'rawWrite' && iw.addr === 0x4011) dacWrites.push({ frame: iw.frame, value: iw.value & 0x7F });
+      }
+    }
+    const bitsCache = new Map();
+    const bitsFor = (layout) => {
+      if (!bitsCache.has(layout)) bitsCache.set(layout, dpcmBitsOf(layout));
+      return bitsCache.get(layout);
+    };
+    // dmc: いま(最後に)鳴らしたサンプル。{ frame, startLevel, bits, period, loop }
+    let dmc = null, ramp = null, loopWarned = false;
+    const bitsElapsed = (d, f) => Math.floor((f - d.frame) * CPU_CYCLES_PER_FRAME / d.period);
+    // ドライバは$4015 bit4(残りバイトあり)で判定する。最後の1バイトを読み込んだ時点で0になる
+    const dmcActive = (f) => !!dmc && (dmc.loop || bitsElapsed(dmc, f) < dmc.bits.length - 8);
+    const levelNow = (f) => dmc ? dpcmLevelAfter(dmc.startLevel, dmc.bits, Math.min(dmc.bits.length, bitsElapsed(dmc, f))) : level;
+    let ri = 0, ki = 0, wi = 0;
+    dacWrites.sort((a, b) => a.frame - b.frame);
+    for (let f = 0; f < totalFrames; f++) {
+      if (ramp && !dmcActive(f) && --ramp.cnt === 0) {
+        ramp.cnt = ramp.interval;
+        ramp.cur = dacStepToward(ramp.cur, ramp.tgt, ramp.step);
+        track[f] = [{ addr: 0x4011, value: ramp.cur }, ...track[f]];
+        level = ramp.cur; dmc = null;
+        if (ramp.cur === ramp.tgt) ramp = null;
+      }
+      for (; wi < dacWrites.length && dacWrites[wi].frame <= f; wi++) {
+        const v = dacWrites[wi].value;
+        if (dmcActive(f)) {
+          const n = bitsElapsed(dmc, f);
+          dmc = Object.assign({}, dmc, { frame: f, startLevel: v, bits: dmc.bits.subarray(Math.min(n, dmc.bits.length)) });
+        } else { level = v; dmc = null; }
+      }
+      for (; ri < ramps.length && ramps[ri].frame <= f; ri++) {
+        const iw = ramps[ri];
+        iw.skip = true;
+        if (dmc && dmc.loop) {
+          if (!loopWarned) {
+            loopWarned = true;
+            warnings.push({ srcStart: iw.srcStart, message: T('DA: ループ再生(mode 1)のDPCMが鳴り続けているため、DACを動かせません') });
+          }
+          continue;
+        }
+        const start = dmc ? dpcmLevelAfter(dmc.startLevel, dmc.bits, dmc.bits.length) : level;
+        const p = dacRampParams(start, iw.target, iw.frames);
+        if (!p) { ramp = null; continue; }
+        Object.assign(iw, { start, step: p.step, interval: p.interval, skip: false });
+        ramp = { cur: start, tgt: iw.target, step: p.step, interval: p.interval, cnt: p.interval };
+      }
+      for (; ki < keys.length && keys[ki].frame <= f; ki++) {
+        const k = keys[ki];
+        ramp = null; // DPCMを鳴らしたらDAの途中でも止める(ドライバのDPCM_NODAC直後と同じ)
+        const startLevel = k.layout.dac != null ? k.layout.dac : levelNow(f);
+        dmc = { frame: f, startLevel, bits: bitsFor(k.layout), period: DMC_RATE_CYCLES[k.def.freq & 0x0F], loop: ((k.def.mode | 0) & 1) === 1 };
+      }
+    }
+  }
+
   function segmentsToWriteLogDpcm(segments, totalFrames, dpcmLayout, dpcmSamples) {
     const writeLog = newWriteLog(totalFrames);
     const pages = dpcmPageCount(dpcmLayout);
@@ -3687,6 +3853,16 @@
     for (const ch of channelLetters) {
       spliceImmediateWrites(tracks[ch], immediateWritesByChannel[ch], 'rawWrite', totalFrames,
         iw => ({ writes: [{ addr: iw.addr, value: iw.value }] }), true);
+    }
+
+    // DA<値>,<音長> と #DPCM-DAC-RAMP(DPCMのDACをゆっくり動かすプチノイズ対策)。y の書き込みより後
+    // (y$4011 もDACの値を変えるので、その結果を見て開始値を決める)・Lの複製より前に行う
+    const dpcmLetter = (expansionLetterMap.dpcm || [])[0];
+    if (dpcmLetter && tracks[dpcmLetter]) {
+      applyDacRamps(dpcmLetter, segsForLog(dpcmLetter), immediateWritesByChannel, channelLetters, dpcmLayout,
+        dpcmSamples, settings, tracks[dpcmLetter], totalFrames, warnings);
+    } else if (settings.dacRampFrames) {
+      warnings.push({ message: T('#DPCM-DAC-RAMP: DPCMの音符が無いので、曲頭の持ち上げはしません') });
     }
 
     // L(ループ地点)が使われている場合、このツール(ブラウザ再生・シークバー)での

@@ -66,6 +66,9 @@
  *               [アドレス下位,アドレス上位,値]。音符に紐付かない即時イベントとして
  *               どのチャンネルのwriteLogへも差し込める(チップ非依存)
  *   0xEA      : SM/SMOF(スムース、2026-08-13、対応ABC)。次バイトが0(SMOF)/1(SM)
+ *   0xE6      : DA<値>,<音長>(DPCMのDACを動かす、2026-10-25、対応E)。次の4バイトが
+ *               [開始値,目標値,1回に動かす量,何フレームごとか]。音符に紐付かない即時イベント。
+ *               開始値・刻みは compiler.js applyDacRamps が決める(ドライバの DAC_TICK が動かす)
  *   0xE9      : PS(ポルタメント、実機準拠、2026-08-13、対応ABC)。通常の音符バイトの
  *               代わりに使う特殊な音符オペコードで、次の2バイトが[目標ノート番号,音長]
  *               (以降は通常の音符と同じくpushLength継続・OP_REST/OP_PITCH_BREAK区切りに
@@ -225,6 +228,9 @@
   // 記録し(kind:'rawWrite')、チップ非依存にどのチャンネルのwriteLogへも差し込める。
   // 次の3バイトが[アドレス下位,アドレス上位,値]
   const OP_RAW_WRITE = 0xeb;
+  // DA<値>,<音長>(DPCMのDACを動かす、2026-10-25)。空いていた0xE6を使う。次の4バイトが
+  // [開始値,目標値,1回に動かす量,何フレームごとか](compiler.js applyDacRamps が immediateWrite に書いた値)
+  const OP_DAC_RAMP = 0xe6;
   // SM/SMOF(スムース、2026-08-13、対応ABC)。次バイトが0(SMOF)/1(SM)
   const OP_SMOOTH = 0xea;
   // PS(ポルタメント、実機準拠、2026-08-13、対応ABC)。次の2バイトが[目標ノート番号,音長]。
@@ -435,14 +441,15 @@
     // y<adr>,<num>(レジスタ直接書き込み、2026-08-13)。音符に紐付かない即時イベントとして
     // 記録された(kind:'rawWrite')ものを、対応するフレーム位置のセグメント直前へ差し込む
     const rawwrites = (immediateWrites || [])
-      .filter(iw => iw.kind === 'rawWrite')
+      .filter(iw => iw.kind === 'rawWrite' || (iw.kind === 'dacRamp' && !iw.skip))
       .slice()
       .sort((a, b) => a.frame - b.frame);
     let rawwriteIdx = 0;
     const flushRawWritesUpTo = (frame) => {
       while (rawwriteIdx < rawwrites.length && rawwrites[rawwriteIdx].frame <= frame) {
         const iw = rawwrites[rawwriteIdx];
-        bytes.push(OP_RAW_WRITE, iw.addr & 0xff, (iw.addr >> 8) & 0xff, iw.value & 0xff);
+        if (iw.kind === 'dacRamp') bytes.push(OP_DAC_RAMP, iw.start & 0x7f, iw.target & 0x7f, iw.step & 0x7f, iw.interval & 0xff);
+        else bytes.push(OP_RAW_WRITE, iw.addr & 0xff, (iw.addr >> 8) & 0xff, iw.value & 0xff);
         rawwriteIdx++;
       }
     };
@@ -943,6 +950,11 @@
         rawEvents.push({ type: 'rawWrite', addr, value });
         continue;
       }
+      if (b === OP_DAC_RAMP) {
+        rawEvents.push({ type: 'dacRamp', start: bytes[i], target: bytes[i + 1], step: bytes[i + 2], interval: bytes[i + 3] });
+        i += 4;
+        continue;
+      }
       if (b === OP_SMOOTH) { smooth = bytes[i] !== 0; i++; continue; }
       if (b === OP_VR_ENV) { envelopeVr = bytes[i]; i++; continue; }
       if (b === OP_NOTE_ENV) { noteEnv = bytes[i]; i++; continue; }
@@ -1088,6 +1100,8 @@
       if (b === OP_DIRECT_FREQ) { i += 2; continue; }
       // OP_RAW_WRITE(y、2026-08-13)は[アドレス下位,アドレス上位,値]の3バイトパラメータ
       if (b === OP_RAW_WRITE) { i += 3; continue; }
+      // OP_DAC_RAMP(DA、2026-10-25)は[開始値,目標値,刻み,間隔]の4バイトパラメータ
+      if (b === OP_DAC_RAMP) { i += 4; continue; }
       // sticky音長の1バイト形式(2026-08-16): 音符(基点-0xE1)とOP_REST_SAME(0xE2)は
       // パラメータ無しの1バイトコマンド
       if (b === OP_REST_SAME ||

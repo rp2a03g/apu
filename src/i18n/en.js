@@ -171,7 +171,7 @@
     'PC表示': 'Desktop layout',
     '音量と速度': 'Volume and speed',
     '一覧の大きさ': 'List size',
-    'ドラッグでエディタの高さを変更': 'Drag to change the editor height',
+    'ドラッグでエディタとログ欄の比率を変更(ダブルクリックで元に戻す)': 'Drag to change the split between the editor and the log (double-click to reset)',
     'ドラッグで一覧の高さを変える': 'Drag to change the list height',
     'スマホ表示': 'Mobile layout',
     'PC向けの画面に切り替える': 'Switch to the desktop layout',
@@ -1589,5 +1589,11 @@
     '曲の先読みがまだ終わっていません。少し待ってからもう一度押してください': 'The song is still being pre-captured. Wait a moment and try again',
     'ファイル再生: MMLエディタの区画は無いのでロールのみで描きます。長さは先読み済みの {sec} 秒まで': 'File playback: there is no MML editor pane, so only the roll is drawn. Length is limited to the pre-captured {sec} s',
     '{name}{index} が {first} 行目と {line} 行目で二重に定義されています(後の {line} 行目の定義が使われます)': '{name}{index} is defined twice, on lines {first} and {line} (the later definition on line {line} is used)',
+    '#DPCM-DAC-RAMP のフレーム数は 1〜255 で指定してください': '#DPCM-DAC-RAMP takes a frame count from 1 to 255',
+    'DA はDPCMチャンネル(E)でだけ使えます(このチャンネルでは無視します)': 'DA works only on the DPCM channel (E); it is ignored on this channel',
+    'DA の値は 0〜127 で指定してください': 'The DA value must be 0-127',
+    '#DPCM-DAC-RAMP: DPCMの音符が無いので、曲頭の持ち上げはしません': '#DPCM-DAC-RAMP: there are no DPCM notes, so the DAC is not raised at the start',
+    '#DPCM-DAC-RAMP: 最初に鳴る@DPCMのdac値が255(書き込まない)なので、曲頭の持ち上げはしません': '#DPCM-DAC-RAMP: the first @DPCM to play has dac 255 (no write), so the DAC is not raised at the start',
+    'DA: ループ再生(mode 1)のDPCMが鳴り続けているため、DACを動かせません': 'DA: a looping DPCM sample (mode 1) is still playing, so the DAC cannot be moved',
   });
 })(typeof window !== 'undefined' ? window : globalThis);

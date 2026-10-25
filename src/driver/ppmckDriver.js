@@ -411,7 +411,7 @@
   // (ページk=dpcmPageBank0+4k)に使う。サイズ測定用の1回目アセンブルでは0でよい(テーブル長は変わらない)
   // usesDirect(2026-09-19): @n<num>(直接周波数指定、mckBytecode.js OP_DIRECT_FREQ=0xE5)が曲中で使われているか。
   // 使う曲だけ DIRACT/DIRLO/DIRHI(3byte/ch)・RD_DIRECT・各 LOOKUP_*_PERIOD 冒頭の分岐を埋め込む
-  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa, dpcmPageBank0, usesDirect, noteReach, noteBase, volMask4) {
+  function buildFixedSource(channelTypes, songBank, expansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa, dpcmPageBank0, usesDirect, noteReach, noteBase, volMask4, dacOpt) {
     dpcmPageBank0 = dpcmPageBank0 | 0;
     usesDirect = !!usesDirect;
     // noteReach(2026-09-19): 表ごと(pulse/tri/saw/fme7/fds/n163/vrc7)に、曲が引く最大のノート索引
@@ -452,6 +452,11 @@
     usesSmooth = !!usesSmooth;
     usesPitchShift = !!usesPitchShift;
     usesRawWrite = !!usesRawWrite;
+    // DA<値>,<音長>(0xE6)と #DPCM-DAC-RAMP(曲頭の持ち上げ)。どちらもDAC($4011)を毎フレーム少しずつ
+    // 動かす同じ仕組み(DAC_TICK)を使う。プチノイズ対策(2026-10-25、compiler.js applyDacRamps 参照)
+    const usesDacRamp = !!(dacOpt && dacOpt.usesDacRamp);
+    const dacPreroll = (dacOpt && dacOpt.preroll) || null;
+    const usesDacTick = usesDacRamp || !!dacPreroll;
     const usesVr = vrIndexList.length > 0;
     // @@<n>(デューティ=音色エンベロープ)が曲中で使われているか。@vと同じく、使われて
     // いない曲にはテーブルもハンドラも一切埋め込まない。usesRelTone(@@r<n>)は
@@ -644,7 +649,7 @@
     const anyChannelEnds = channelTypes.some((t, i) => t !== TYPE_UNIMPLEMENTED && loopAct[i] !== 1);
     const dpcmLoopStop = anyChannelEnds && usesDpcm && dpcmIndices.some(idx => (((dpcmSamples[idx] || {}).mode | 0) & 1) === 1);
     const endMute = anyChannelEnds && (usesVr || usesDutyEnv || dpcmLoopStop);
-    const TRAILING_FIXED_SIZE = 14 + (usesPitchShift ? 5 : 0) + (usesPitchSa ? 3 : 0) + (usesDpcmPaging ? 1 : 0) + (dpcmLoopStop ? 1 : 0);
+    const TRAILING_FIXED_SIZE = 14 + (usesPitchShift ? 5 : 0) + (usesPitchSa ? 3 : 0) + (usesDpcmPaging ? 1 : 0) + (dpcmLoopStop ? 1 : 0) + (usesDacTick ? 6 : 0) + (dacPreroll ? 1 : 0);
     // CNT以降のチャンネル配列群の開始番地。$0100-$01FFは6502のハードウェアスタック
     // (JSR/RTS/PHA/PLAが暗黙に使う)なので、,X直接インデックスの配列であっても
     // 絶対に踏んではいけない(踏むとJSRの戻り先が化けて実機で不定動作/暴走する。
@@ -849,6 +854,11 @@
     const DPCMPAGE = PLAYIDX + 1 + (usesPitchSa ? 3 : 0);
     // ENDCNT: まだトラック終端に達していないchの数(dpcmLoopStop時のみ確保・参照。上の endMute 参照)
     const ENDCNT = DPCMPAGE + (usesDpcmPaging ? 1 : 0);
+    // DAC_TICK の状態(usesDacTick時のみ確保・参照)。DACCUR=いまのDAC値、DACTGT=目標、DACSTEP=1回に動かす量、
+    // DACINT=何フレームごとに動かすか、DACCNT=次に動かすまでの残りフレーム、DACON=動作中(0=停止)。
+    // DACPRE=曲頭の持ち上げの残りフレーム(#DPCM-DAC-RAMP時のみ。0になるまで曲を進めない)
+    const DACCUR = ENDCNT + (dpcmLoopStop ? 1 : 0), DACTGT = DACCUR + 1, DACSTEP = DACCUR + 2,
+      DACINT = DACCUR + 3, DACCNT = DACCUR + 4, DACON = DACCUR + 5, DACPRE = DACCUR + 6;
     const liveChCount = channelTypes.filter(t => t !== TYPE_UNIMPLEMENTED).length;
 
     const playLines = [];
@@ -864,6 +874,22 @@ PLAY_CHLOOP:
     const initExtra = [];
     if (dpcmLoopStop) initExtra.push(`    LDA #${hex(liveChCount)}\n    STA ${hex(ENDCNT)}       ; まだ終わっていないch数(RD_ENDTRACK_STOP参照)`);
     if (usesDpcmPaging) initExtra.push(`    LDA #$FF\n    STA ${hex(DPCMPAGE)}       ; DPCMページ未確定(最初のトリガーで窓4-7を必ず切り替える)`);
+    if (usesDacTick) {
+      if (dacPreroll) {
+        // 曲頭の持ち上げ: DACを0から目標まで DACSTEP ずつ DACINT フレームごとに上げ、DACPRE フレーム後に曲を始める
+        // (NSFの仕様でINIT前に$4011は0なので、0から上げればよい)
+        initExtra.push([
+          '    LDA #$00', `    STA ${hex(DACCUR)}`,
+          `    LDA #${hex(dacPreroll.target)}`, `    STA ${hex(DACTGT)}`,
+          `    LDA #${hex(dacPreroll.step)}`, `    STA ${hex(DACSTEP)}`,
+          `    LDA #${hex(dacPreroll.interval)}`, `    STA ${hex(DACINT)}`, `    STA ${hex(DACCNT)}`,
+          '    LDA #$01', `    STA ${hex(DACON)}`,
+          `    LDA #${hex(dacPreroll.frames)}`, `    STA ${hex(DACPRE)}       ; 曲頭のDAC持ち上げ(#DPCM-DAC-RAMP)`
+        ].join('\n'));
+      } else {
+        initExtra.push(`    LDA #$00\n    STA ${hex(DACON)}       ; DAC_TICK停止(DA<値>で動き出す)`);
+      }
+    }
     if (usesMmc5) initExtra.push('    LDA #$03\n    STA $5015       ; MMC5パルス1/2有効化');
     // FME7のミキサ(R7)は音符ごとの@<n>で組み立てる(FME7_PREP)。初期値は全ch無音にし、
     // シャドウ変数(FMEMIX)も同じ値に合わせておく
@@ -3080,7 +3106,9 @@ WFV_T${TYPE_DPCM}:
     BMI DPCM_NODAC
     STA $4011
 DPCM_NODAC:
-${usesDpcmPaging ? `    LDY ${hex(PERLO2)}
+${usesDacRamp ? `    LDA #$00
+    STA ${hex(DACON)}     ; DPCMを鳴らしたらDAの途中でも止める(以後はサンプルがDACを動かす)
+` : ''}${usesDpcmPaging ? `    LDY ${hex(PERLO2)}
     LDA DPCM_PAGE_TBL,Y ; そのサンプルのページ(ファイル上の先頭バンク番号)。窓4-7が別ページなら切り替える
     CMP ${hex(DPCMPAGE)}
     BEQ DPCM_PAGE_OK
@@ -3204,8 +3232,59 @@ INIT_DONE:
     RTS
 
 PLAY:
+${dacPreroll ? `    LDA ${hex(DACPRE)}
+    BEQ PLAY_NOPRE
+    DEC ${hex(DACPRE)}
+    BEQ PLAY_PREEND
+    JMP DAC_TICK      ; 持ち上げ中は曲を進めない(RTSはDAC_TICKのもの)
+PLAY_PREEND:
+    LDA ${hex(DACTGT)}      ; 持ち上げの最後のフレームは目標値ちょうどに揃える
+    STA ${hex(DACCUR)}
+    STA $4011
+    LDA #$00
+    STA ${hex(DACON)}
+    RTS
+PLAY_NOPRE:` : ''}
+${usesDacRamp ? '    JSR DAC_TICK' : ''}
 ${playLines.join('\n')}
     RTS
+${usesDacTick ? `
+; --- DAC_TICK: DPCMのDAC($4011)を目標へ1歩動かす(DA<値>,<音長> と #DPCM-DAC-RAMP)。DMCが鳴っている間は
+; 待つ(鳴っているサンプルとDACを取り合わない)。DACINTフレームごとにDACSTEPずつ動かし、目標に届いたら止める。
+; compiler.js applyDacRamps(ブラウザ再生側)と同じ手順・同じ丸め ---
+DAC_TICK:
+    LDA ${hex(DACON)}
+    BEQ DAC_TICK_END
+    LDA $4015
+    AND #$10
+    BNE DAC_TICK_END
+    DEC ${hex(DACCNT)}
+    BNE DAC_TICK_END
+    LDA ${hex(DACINT)}
+    STA ${hex(DACCNT)}
+    LDA ${hex(DACCUR)}
+    CMP ${hex(DACTGT)}
+    BCS DAC_DOWN
+    ADC ${hex(DACSTEP)}      ; C=0(上のBCSを通らなかった)
+    CMP ${hex(DACTGT)}
+    BCC DAC_SET
+    BCS DAC_HIT
+DAC_DOWN:
+    SBC ${hex(DACSTEP)}      ; C=1
+    BCC DAC_HIT
+    CMP ${hex(DACTGT)}
+    BEQ DAC_HIT
+    BCS DAC_SET
+DAC_HIT:
+    LDA #$00
+    STA ${hex(DACON)}
+    LDA ${hex(DACTGT)}
+DAC_SET:
+    STA ${hex(DACCUR)}
+    STA $4011
+DAC_TICK_END:
+    RTS
+` : ''}
 
 ; --- チャンネルX(0-N-1)を1フレーム分処理する ---
 ; 音符継続中(カウンタがまだ尽きていない)は、継続効果のtick(TICK_VOL_FX=音量+デューティ側、
@@ -3411,6 +3490,7 @@ ${usesToneState ? '    CMP #$E7\n    BEQ RD_JMP_RELTONE' : ''}
 ${usesSweep ? '    CMP #$E3\n    BEQ RD_JMP_SWEEP' : ''}
 ${usesPitchSa ? '    CMP #$E4\n    BEQ RD_JMP_PITCHSA' : ''}
 ${usesDirect ? '    CMP #$E5\n    BEQ RD_JMP_DIRECT' : ''}
+${usesDacRamp ? '    CMP #$E6\n    BEQ RD_JMP_DACRAMP' : ''}
     JMP RD_NOTE
 
 ; ★トランポリンの並びは必ず上のCMP/BEQ連鎖と同じ順序に保つこと(2026-08-20)。
@@ -3454,6 +3534,7 @@ ${usesToneState ? 'RD_JMP_RELTONE:\n    JMP RD_RELTONE' : ''}
 ${usesSweep ? 'RD_JMP_SWEEP:\n    JMP RD_SWEEP' : ''}
 ${usesPitchSa ? 'RD_JMP_PITCHSA:\n    JMP RD_PITCHSA' : ''}
 ${usesDirect ? 'RD_JMP_DIRECT:\n    JMP RD_DIRECT' : ''}
+${usesDacRamp ? 'RD_JMP_DACRAMP:\n    JMP RD_DACRAMP' : ''}
 
 ; 0xEEマーカーの残り3バイト(新バンク番号,新アドレス下位,新アドレス上位)は
 ; まだ「現在のバンク」の中に物理的に置かれているため、3バイト全て読み終えるまでは
@@ -3659,6 +3740,22 @@ RD_RAWWRITE:
     LDY #$00
     PLA
     STA (${hex(PERLO)}),Y
+    JMP RD_LOOP` : ''}
+${usesDacRamp ? `
+; --- DA<値>,<音長>(0xE6、2026-10-25): 直後4バイトが[開始値,目標値,1回に動かす量,何フレームごとか]。
+; 開始値はコンパイラがDPCMの鳴り終わりから計算した値(DACは読み出せないため)。実際に動かすのはDAC_TICK ---
+RD_DACRAMP:
+    JSR READ_BYTE
+    STA ${hex(DACCUR)}
+    JSR READ_BYTE
+    STA ${hex(DACTGT)}
+    JSR READ_BYTE
+    STA ${hex(DACSTEP)}
+    JSR READ_BYTE
+    STA ${hex(DACINT)}
+    STA ${hex(DACCNT)}
+    LDA #$01
+    STA ${hex(DACON)}
     JMP RD_LOOP` : ''}
 ${usesSmooth ? `
 ; --- SM/SMOF(0xEA、2026-08-13、対応ABC): 直後1バイトが0(SMOF)/1(SM)。
@@ -5362,6 +5459,13 @@ SONG_LOOP_PTR_HI:
     for (const ch of channelLetters) {
       if ((immediateWritesByChannel[ch] || []).some(iw => iw.kind === 'rawWrite')) { usesRawWrite = true; break; }
     }
+    // DA<値>,<音長>(DPCMのDACを動かす、2026-10-25)と #DPCM-DAC-RAMP(曲頭の持ち上げ)。
+    // 開始値・刻みは compiler.js applyDacRamps が決めて immediateWrite に書き込み済み(skip=動かす量0)
+    const isDacRamp = iw => iw.kind === 'dacRamp' && !iw.skip;
+    const dacOpt = {
+      usesDacRamp: channelLetters.some(ch => (immediateWritesByChannel[ch] || []).some(isDacRamp)),
+      preroll: (compileResult.settings && compileResult.settings.dacPreroll) || null
+    };
 
     // L(ループ地点マーカー)。compiler.jsのbuildSegments()がチャンネルごとに記録した値
     // (このツールのブラウザ再生・シークバー向けの「song全体で1つに揃えたloopPointFrame」
@@ -5373,7 +5477,8 @@ SONG_LOOP_PTR_HI:
       [
         ...((vrc7Letters.has(ch) || fdsLetters.has(ch)) ? (immediateWritesByChannel[ch] || []) : []),
         ...(n163Letters.has(ch) ? (n163RelocsByChannel[ch] || []) : []),
-        ...(usesRawWrite ? (immediateWritesByChannel[ch] || []).filter(iw => iw.kind === 'rawWrite') : [])
+        ...(usesRawWrite ? (immediateWritesByChannel[ch] || []).filter(iw => iw.kind === 'rawWrite') : []),
+        ...(immediateWritesByChannel[ch] || []).filter(isDacRamp)
       ],
       envIndexRemap,
       loopFrameByChannel[ch],
@@ -5450,7 +5555,7 @@ SONG_LOOP_PTR_HI:
     const probeLoop = { act: chSerialized.map(r => (r.loopByteOffset != null ? 1 : 0)), bank: dummyBank, lo: dummyBank, hi: dummyBank };
     const probeSrc = buildFixedSource(channelTypes, dummyBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList,
       probeLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite,
-      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, EMBED ? EMBED.org : undefined, usesSweep, usesPitchSa, 0, usesDirect, noteReach, noteBase, volMask4);
+      vrIndexList, enIndexList, dutyIndexList, usesRelTone, dummyBank, dummyBank, usesDetune, EMBED ? EMBED.org : undefined, usesSweep, usesPitchSa, 0, usesDirect, noteReach, noteBase, volMask4, dacOpt);
     const probeAsm = MML.Asm.assemble(probeSrc, { origin: EMBED ? EMBED.org : 0x8000 });
     if (probeAsm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: probeAsm.errors, bankCount: 0, unsupportedExpansions };
@@ -5497,7 +5602,7 @@ SONG_LOOP_PTR_HI:
       for (const idx of Object.keys(dpcmLayout)) {
         const layout = dpcmLayout[idx];
         const pg = layout.page | 0;
-        endByPage[pg] = Math.max(endByPage[pg] || 0, layout.addr - 0xC000 + layout.bytes.length);
+        endByPage[pg] = Math.max(endByPage[pg] || 0, layout.addr - 0xC000 + (layout.dataLen != null ? layout.dataLen : layout.bytes.length));
       }
       const lastPage = endByPage.length - 1;
       dpcmBanks = lastPage * DPCM_PAGE_BANKS + Math.max(1, Math.ceil((endByPage[lastPage] || 0) / BANK_SIZE));
@@ -5515,7 +5620,7 @@ SONG_LOOP_PTR_HI:
     // orgの違いはゼロページ/絶対の選択や分岐距離に影響しないため)
     const { songBank, songAddrLo, songAddrHi, allDataBanks, songLoop } = layoutAllChannels(reservedBank);
 
-    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa, dpcmFileBank, usesDirect, noteReach, noteBase, volMask4);
+    const src = buildFixedSource(channelTypes, songBank, usedExpansions, envelopes, dpcmLayout, dpcmSamples, envIndexList, songLoop, epIndexList, mpIndexList, usesPortamento, usesPitchBreak, usesSmooth, usesPitchShift, usesRawWrite, vrIndexList, enIndexList, dutyIndexList, usesRelTone, songAddrLo, songAddrHi, usesDetune, driverOrg, usesSweep, usesPitchSa, dpcmFileBank, usesDirect, noteReach, noteBase, volMask4, dacOpt);
     const asm = MML.Asm.assemble(src, { origin: EMBED ? EMBED.org : 0x8000 });
     if (asm.errors.length > 0) {
       return { nsfBytes: null, asmErrors: asm.errors, bankCount: 0, unsupportedExpansions };
@@ -5567,7 +5672,8 @@ SONG_LOOP_PTR_HI:
     for (const idx of Object.keys(dpcmLayout)) {
       const layout = dpcmLayout[idx];
       if (layout.shared) continue; // 同じファイルを共有する定義(compiler.js layoutDpcmSamples)。本体は共有元が焼く
-      programBytes.set(layout.bytes, (dpcmFileBank + (layout.page | 0) * DPCM_PAGE_BANKS) * BANK_SIZE + (layout.addr - 0xC000));
+      // 焼くのは元データのぶんだけ(末尾の$FF埋めはROMの$FFがそのまま読まれる。compiler.js layoutDpcmSamples)
+      programBytes.set(layout.dataLen != null ? layout.bytes.subarray(0, layout.dataLen) : layout.bytes, (dpcmFileBank + (layout.page | 0) * DPCM_PAGE_BANKS) * BANK_SIZE + (layout.addr - 0xC000));
     }
     for (const b of allDataBanks) {
       programBytes.set(b.data, b.bankNum * BANK_SIZE + b.offset);
@@ -5606,7 +5712,7 @@ SONG_LOOP_PTR_HI:
     // 内訳(UIの完了メッセージ用): ドライバ本体(バンク0の.resぶんを除いた実コード+テーブル)、
     // 曲データ(全チャンネルのバイトコード合計、バンクジャンプマーカー等は含まない)、DPCM
     let dpcmBytes = 0;
-    for (const idx of Object.keys(dpcmLayout)) if (!dpcmLayout[idx].shared) dpcmBytes += dpcmLayout[idx].bytes.length;
+    for (const idx of Object.keys(dpcmLayout)) if (!dpcmLayout[idx].shared) dpcmBytes += (dpcmLayout[idx].dataLen != null ? dpcmLayout[idx].dataLen : dpcmLayout[idx].bytes.length);
     return {
       nsfBytes, asmErrors: [], bankCount: Math.ceil(programBytes.length / BANK_SIZE),
       unsupportedExpansions,

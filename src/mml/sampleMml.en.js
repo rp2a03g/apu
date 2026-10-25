@@ -571,6 +571,34 @@ E l4 n2 y$4015,$0f r n3 y$4015,$0f r o0 c8 c+8 c8 c+8
 ; this tool switches pages through $5FFC-$5FFF on every hit (the equivalent of ppmck's automatic
 ; bank switching). It maps straight onto the size of a real ROM, so lower the rate, trim the
 ; length, or reuse the same sound
+;@help #DPCM-DAC-RAMP :: Stopping the DPCM pop at the start of a song :: Header :: nodemo
+; Use this if a pop at the very start of the song bothers you.
+; Why it happens: the DPCM output (the DAC, $4011) is 0 at power-on, and the first note writes the
+;   dac value of its @DPCM (often 64). The jump from 0 to 64 in one go is heard as a "pop" (a step in
+;   the DC level; it has nothing to do with the sample itself).
+; #DPCM-DAC-RAMP [<frames>] ... before the song starts, raise the DAC step by step from 0 to the dac
+;   value of the first @DPCM that plays, over <frames> (32 = about half a second if omitted). Timing
+;   inside the song does not change.
+;   In an NSF export the song starts that much later (nothing plays while the DAC is raised).
+;   Browser playback and WAV export treat the raise as done before time zero, so they start at 0s
+;   with no step.
+;   If the first @DPCM has dac 255 (no write), nothing happens. For steps in the middle of a song,
+;   use DA<value>,<length>
+;   (e.g. #DPCM-DAC-RAMP / #DPCM-DAC-RAMP 60). An extension of this tool (ppmckc does not know it)
+;@help DA<n>[,<len>] :: Stopping DPCM pops mid-song (moving the DAC slowly) :: Expansion chips :: nodemo
+; Use this if a pop in the middle of a song bothers you.
+; Why it happens: every DPCM note writes the dac value of its @DPCM to $4011. If that differs from
+;   where the DAC was left when the previous sample finished (decided by the sample data), the DAC
+;   jumps there in one go and you hear a "pop". It tends to happen when switching between definitions
+;   with different dac values, or after changing the DAC with y$4011.
+; DA<n>[,<len>] ... E channel only. Moves the DAC step by step to <n> (0-127) over <len> (written like
+;   any note length; the l length if omitted; dots allowed). It does not advance time (write it next
+;   to rests and notes), so put it in the rest before the next DPCM note and set <n> to the dac value
+;   of the @DPCM you play next:
+;     @DPCM1 = { "snare.dmc", 15, 0, 100, 0 }   ...  E n0 r2 DA100,4 r4 n1
+;   While DPCM is playing it waits, and starts moving once the sample has finished. Playing a DPCM
+;   note stops it there. The compiler works out the starting value from the sample data (the DAC
+;   cannot be read back). An extension of this tool
 ; ================================================================
 ;  F: FDS (custom waveform + pitch modulation)
 ; ================================================================
