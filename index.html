@@ -159,6 +159,12 @@
         <button class="icon-btn secondary" id="btnRangeReset" title="開始点・終了点を曲の最初と最後にリセット" aria-label="再生範囲をリセット">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 10a5.5 5.5 0 1 1 1.6 3.9"/><path d="M4.5 13.6v-3.6h3.6"/></svg>
         </button>
+        <!-- L(ループ地点)を何周鳴らすか(2〜100回 / 時間指定 / 無限)。中身とツールチップは main.js initMmlLoopSelect が入れる。
+             L の無い曲ではグレーアウト。時間指定のときだけ秒の欄を出す(ロール見出しの演奏最大時間と同じ値) -->
+        <label class="mml-loop-count">ループ
+          <select id="mmlLoopCount"></select>
+          <input type="number" id="mmlLoopSeconds" min="1" max="3600" step="1" style="display:none" title="再生時間(秒)。この後5秒かけてフェードアウトします" />
+        </label>
         <div class="seek-bar-wrap" id="seekBarWrap">
           <input type="range" id="seekBar" min="0" max="1000" value="0" step="1" />
           <div class="seek-buffered-fill" id="seekBufferedFill"></div>

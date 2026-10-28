@@ -2668,6 +2668,55 @@
   // （そうしないと、終了点で止まった直後に▶を押した瞬間また即座に止まってしまう）
   let rangeEndArmed = true;
 
+  // --- MMLの L(ループ地点)を何周鳴らすか(mml-top-toolbar の「ループ」選択、2026-10-28) ---
+  // '2'〜'100'(回数) | 'time'(時間指定: ロール見出しの演奏最大時間と同じ秒数) | 'infinite'(無限)。既定2回。
+  // コンパイル結果は1周ぶんで、何周目でも MmlStreamPlayer が Mml.LoopPlan で [L, 曲末) へ折り返す。
+  //   回数: イントロ+N周鳴らし、N周終わって L へ戻った瞬間から FADE_SEC 秒フェード
+  //   時間: 指定秒鳴らして FADE_SEC 秒フェード(サウンドファイル再生と同じ)
+  //   無限: 終端なし。シークバーは「イントロ+1周」固定で、位置は周回ごとに L へ跳ね戻る。時間表示に周回カウンタ
+  // L の無い曲は従来どおり1回で止まる(選択はグレーアウト)
+  const MML_LOOP_KEY = 'mml.loopCount';
+  let mmlLoopChoice = (function () {
+    try {
+      const v = localStorage.getItem(MML_LOOP_KEY);
+      if (v === 'time' || v === 'infinite') return v;
+      const n = parseInt(v, 10);
+      if (n >= 2 && n <= 100) return String(n);
+    } catch (e) { /* ignore */ }
+    return '2';
+  })();
+  function mmlNaturalSeconds(compiled) {
+    const c = compiled || lastMmlCompiled;
+    return c && c.frameRate ? Math.max(1, Math.ceil(c.naturalEndFrame / c.frameRate)) : 60;
+  }
+  // Mml.LoopPlan.playFrames に渡す設定
+  function mmlLoopSetting(compiled) {
+    if (mmlLoopChoice === 'infinite') return { mode: 'infinite' };
+    if (mmlLoopChoice === 'time') return { mode: 'time', seconds: mmlExportSeconds || mmlNaturalSeconds(compiled) };
+    return { mode: 'count', count: parseInt(mmlLoopChoice, 10) || 2 };
+  }
+  // 曲の秒 → ログ(1周ぶん)上の秒。ロール/鍵盤/楽譜は1周ぶんの材料しか持たないので、折り返した後の位置はこれで写す
+  function mmlLogSeconds(sec) {
+    const c = lastMmlCompiled;
+    if (lastPlayMode !== 'capture-mml' || !c || !MML.Mml.LoopPlan.hasLoop(c)) return sec;
+    return MML.Mml.LoopPlan.mapSeconds(c, sec);
+  }
+  function isEndlessMmlPlayer(p) {
+    return !!(p && p === activePlayer && lastPlayMode === 'capture-mml' && p.endless && lastMmlCompiled);
+  }
+  // 無限ループ中のシーク: バーは「イントロ+1周」固定なので、L より後ろの位置は今の周回の中へ写す
+  function mmlSeekTarget(p, sec) {
+    if (!isEndlessMmlPlayer(p)) return sec;
+    const c = lastMmlCompiled, lap = p.getLap();
+    const loopSec = c.loopPointFrame / c.frameRate, lenSec = c.loopLen / c.frameRate;
+    if (lap <= 1 || sec < loopSec) return sec;
+    return sec + (lap - 1) * lenSec;
+  }
+  // 再生の長さ(シークバーの全長)。無限は「イントロ+1周」
+  function mmlPlayerDuration(p, compiled) {
+    return p.endless ? compiled.naturalEndFrame / compiled.frameRate : p.getDuration();
+  }
+
   // --- ストリーミング再生（ScriptProcessorNode） ---
   let activePlayer    = null;  // MmlStreamPlayer or NsfStreamPlayer
   let workletDuration = 0;    // 総再生時間（秒）
@@ -2765,6 +2814,8 @@
   function getTransportPosition() {
     const p = currentTransportPlayer();
     if (p) {
+      // 無限ループのMML再生は位置が伸び続けるので、バー(イントロ+1周)の中へ折り返す
+      if (isEndlessMmlPlayer(p)) return Math.max(0, MML.Mml.LoopPlan.mapSeconds(lastMmlCompiled, p.getPosition()));
       return Math.max(0, Math.min(workletDuration, p.getPosition()));
     }
     if (!capturedBuffer) return 0;
@@ -2791,8 +2842,12 @@
     // (同期要求が無ければ何もしない)
     if (MML.UI.MetronomePanel) MML.UI.MetronomePanel.tickPlaybackSync();
     setSeekBarValue(Math.round((pos / duration) * SEEK_RESOLUTION));
-    setTimeDisplay(`${formatTime(pos)} / ${formatTime(duration)}`);
-    if (playing && isFadeableSoundFileMode() && p && p.gainNode && audioCtx) {
+    // 無限ループのMML再生は「何周目か」を時間の後ろに出す(ミニ操作窓は '/' の前だけ写すので影響しない)
+    const lapText = isEndlessMmlPlayer(p) ? ' · ' + T('{n}周目', { n: p.getLap() }) : '';
+    setTimeDisplay(`${formatTime(pos)} / ${formatTime(duration)}${lapText}`);
+    // 終端フェード: サウンドファイル再生と、L のあるMML再生の回数/時間指定(fadeAtEnd。無限と L 無しは掛けない)
+    const mmlFade = lastPlayMode === 'capture-mml' && p && p.fadeAtEnd;
+    if (playing && (isFadeableSoundFileMode() || mmlFade) && p && p.gainNode && audioCtx) {
       updateEndFadeGain(p, pos, duration);
     }
     if (playing) {
@@ -3715,9 +3770,15 @@
   // MML再生の書き出し秒数。null = 曲の長さ(ループがあれば1周目の終わりまで)をそのまま使う。
   // ユーザーが欄を書き換えたらその値を保つ(曲を変えても。サウンドファイルの「最大時間」と同じ扱い)
   let mmlExportSeconds = null;
+  // 「ループ」選択に従う(回数: イントロ+N周 / 時間指定: その秒数 / 無限: 2回に落とす)。書き出しはフェードを掛けないので
+  // フェードぶんは足さない。L の無い曲は曲の長さ
   function mmlDefaultExportSeconds() {
     const c = lastMmlCompiled;
-    return c && c.frameRate ? Math.max(1, Math.ceil(c.totalFrames / c.frameRate)) : 60;
+    if (!c || !c.frameRate) return 60;
+    let setting = mmlLoopSetting(c);
+    if (setting.mode === 'infinite') setting = { mode: 'count', count: 2 };
+    if (setting.mode === 'time') return Math.max(1, Math.round(setting.seconds));
+    return Math.max(1, Math.ceil(MML.Mml.LoopPlan.playFrames(c, setting, 0) / c.frameRate));
   }
   function updateKeyboardExportControls() {
     if (kbdSourceKind === 'mml') {
@@ -3731,7 +3792,12 @@
       : { visible: false });
   }
   keyboardDisplay.onMaxSecondsChange = (sec) => {
-    if (kbdSourceKind === 'mml') { mmlExportSeconds = sec > 0 ? sec : null; return; }
+    if (kbdSourceKind === 'mml') {
+      mmlExportSeconds = sec > 0 ? sec : null;
+      syncMmlLoopSelect(null);     // 「ループ」の時間指定の欄は同じ値
+      if (mmlLoopChoice === 'time') applyMmlLoopChoice();
+      return;
+    }
     const durEl = keyboardDurationInput();
     if (durEl) durEl.value = String(sec);
   };
@@ -4210,7 +4276,7 @@
       if (lastPlayMode !== 'capture-mml' && lastPlayMode !== 'nsf' && lastPlayMode !== 'kss' && lastPlayMode !== 'spc' && lastPlayMode !== 'gbs' && lastPlayMode !== 'hes' && lastPlayMode !== 'vgm' && lastPlayMode !== 'psf') return;
       const wasPlaying = p.isPlaying;
       p.pause();
-      p.seekSong(Math.max(0, Math.min(workletDuration, seconds)));
+      p.seekSong(mmlSeekTarget(p, Math.max(0, Math.min(workletDuration, seconds))));
       if (wasPlaying) {
         p.play();
         // 曲の位置が飛んだので、メトロノームは新しい拍へ合わせ直す
@@ -5105,6 +5171,8 @@
       const regSnapshots    = buildRegSnapshotsFromTracks(compiled);
       const writeLog        = buildWriteLogFromTracks(compiled);
       const samplesPerFrame = audioCtx.sampleRate / compiled.frameRate;
+      // ロール/鍵盤の材料は1周ぶん(regSnapshots は totalFrames=曲末まで)。L で折り返した後の再生位置は
+      // mmlLogSeconds で [L, 曲末) の中へ写して渡す(無限のときは getTransportPosition が既に折り返している)
       setMonitorSource(
         { regSnapshots, writeLog, cpuSnapshots: null, memSnapshots: null,
           sampleRate: audioCtx.sampleRate, samplesPerFrame,
@@ -5113,7 +5181,7 @@
           tuningNotes: (compiled.settings && compiled.settings.tuningNotes) || null, // #TUNING-NOTE(音名別)
           getApuEnv: liveApuEnv, getN163: liveN163,
           getFME7: liveFME7, getMmc5: liveMMC5, getVRC7: liveVRC7 }, // 音量/拡張音源表示をライブ反映
-        getTransportPosition,
+        () => mmlLogSeconds(getTransportPosition()),
         compiled.expansions
       );
       // 楽譜モード(鍵盤表示のレイアウト設定「ピアノロールの表示: 楽譜」)用の表記モデル
@@ -5137,7 +5205,11 @@
 
       activePlayer    = player;
       player.setSpeed(currentSpeedFactor);
-      workletDuration = player.getDuration();
+      // 何周鳴らすか(「ループ」選択)。L の無い曲は設定に関係なく1回。フェードは updateTransportUI の updateEndFadeGain
+      player.setLoopPlan(mmlLoopSetting(compiled), FADE_SEC);
+      endFadeActive = false;
+      syncMmlLoopSelect(compiled);
+      workletDuration = mmlPlayerDuration(player, compiled);
     } catch (e) {
       captureOutputEl.innerHTML = `<div class="error">${T('再生準備に失敗しました(内部エラー): {msg}', { msg: e.message })}</div>`;
       btnMmlCapture.disabled = false;
@@ -5150,7 +5222,9 @@
     let out = T('再生準備完了 (テンポ {tempo}, 拡張音源: {chips})',
       { tempo: compiled.tempo, chips: expansionsLabel }) + '\n\n';
     out += T('総フレーム数: {n}', { n: compiled.totalFrames }) + '\n';
-    out += T('総再生時間  : {time}', { time: formatTime(duration) }) + '\n';
+    if (activePlayer && activePlayer.endless) out += T('総再生時間  : 無限 (L から戻り続ける。バーはイントロ+1周ぶん)') + '\n';
+    else if (MML.Mml.LoopPlan.hasLoop(compiled) && mmlLoopChoice !== 'time') out += T('総再生時間  : {time} (L から {n}周)', { time: formatTime(duration), n: parseInt(mmlLoopChoice, 10) || 2 }) + '\n';
+    else out += T('総再生時間  : {time}', { time: formatTime(duration) }) + '\n';
     // ch別の総フレーム数(音符・休符の長さの合計)。chどうしの長さの食い違い=ループ2周目からのずれを
     // 数値で確かめられるよう、小節数(曲頭のテンポで4/4換算)・L の位置・最長chとの差も並べる(2026-10-25)
     const chFrames = {};
@@ -6078,6 +6152,62 @@
   });
   document.getElementById('btnTransportStop').addEventListener('click', transportStop);
   document.getElementById('btnRangeReset').addEventListener('click', resetPlaybackRangeAndMarkers);
+  // 「ループ」選択(L を何周鳴らすか)。mmlLoopChoice 参照
+  const mmlLoopCountEl = document.getElementById('mmlLoopCount');
+  const mmlLoopSecondsEl = document.getElementById('mmlLoopSeconds');
+  function syncMmlLoopSelect(compiled) {
+    const c = compiled || lastMmlCompiled;
+    const has = !!(c && MML.Mml.LoopPlan.hasLoop(c));
+    mmlLoopCountEl.disabled = !!c && !has;
+    mmlLoopCountEl.title = (c && !has)
+      ? T('この曲には L(ループ地点)が無いので1回鳴って止まります')
+      : T('ループ地点(L)から何周鳴らすか。N回: イントロ+N周の後、5秒かけてフェードアウト / 時間指定: 指定秒の後、5秒フェード / 無限: 止まらない(バーはイントロ+1周ぶん)');
+    mmlLoopSecondsEl.style.display = mmlLoopChoice === 'time' ? '' : 'none';
+    if (document.activeElement !== mmlLoopSecondsEl) mmlLoopSecondsEl.value = String(mmlExportSeconds || mmlNaturalSeconds(c));
+  }
+  // 再生準備済み/再生中のMMLへ選択を即反映する(位置はそのまま、終端とバーの長さだけ変わる)
+  function applyMmlLoopChoice() {
+    const p = activePlayer;
+    if (!p || lastPlayMode !== 'capture-mml' || typeof p.setLoopPlan !== 'function' || !lastMmlCompiled) return;
+    p.setLoopPlan(mmlLoopSetting(lastMmlCompiled), FADE_SEC);
+    workletDuration = mmlPlayerDuration(p, lastMmlCompiled);
+    preservePlaybackRange(workletDuration);
+    updateTransportUI();
+  }
+  (function initMmlLoopSelect() {
+    const build = () => {
+      mmlLoopCountEl.innerHTML = '';
+      for (let n = 2; n <= 100; n++) {
+        const o = document.createElement('option');
+        o.value = String(n); o.textContent = T('{n}回', { n });
+        mmlLoopCountEl.appendChild(o);
+      }
+      for (const [value, label] of [['time', T('時間指定')], ['infinite', T('無限')]]) {
+        const o = document.createElement('option');
+        o.value = value; o.textContent = label;
+        mmlLoopCountEl.appendChild(o);
+      }
+      mmlLoopCountEl.value = mmlLoopChoice;
+      syncMmlLoopSelect(null);
+    };
+    build();
+    if (MML.I18n && MML.I18n.onChange) MML.I18n.onChange(build);
+    mmlLoopCountEl.addEventListener('change', () => {
+      mmlLoopChoice = mmlLoopCountEl.value;
+      try { localStorage.setItem(MML_LOOP_KEY, mmlLoopChoice); } catch (e) { /* ignore */ }
+      syncMmlLoopSelect(null);
+      applyMmlLoopChoice();
+      updateKeyboardExportControls();
+    });
+    mmlLoopSecondsEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') mmlLoopSecondsEl.blur(); });
+    mmlLoopSecondsEl.addEventListener('change', () => {
+      const v = Math.max(1, Math.min(3600, parseInt(mmlLoopSecondsEl.value, 10) || 0));
+      mmlLoopSecondsEl.value = String(v);
+      mmlExportSeconds = v; // ロール見出しの演奏最大時間と同じ値(時間指定の長さ)
+      applyMmlLoopChoice();
+      updateKeyboardExportControls();
+    });
+  })();
   (function initLoopButton() {
     const btn = document.getElementById('btnLoopRange');
     const sync = () => {

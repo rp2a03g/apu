@@ -409,6 +409,17 @@
     // ---- 演奏の録音 (index.html / src/ui/recordPanel.js) ----
     'ループ再生': 'Loop playback',
     '再生範囲をくり返す': 'Repeat the playback range',
+    // ---- MMLのループ回数(mml-top-toolbar の「ループ」選択、main.js initMmlLoopSelect) ----
+    '{n}回': '{n} times',
+    '時間指定': 'By time',
+    '無限': 'Endless',
+    '{n}周目': 'lap {n}',
+    'ループ地点(L)から何周鳴らすか。N回: イントロ+N周の後、5秒かけてフェードアウト / 時間指定: 指定秒の後、5秒フェード / 無限: 止まらない(バーはイントロ+1周ぶん)':
+      'How many times to play from the loop point (L). N times: intro + N laps, then a 5-second fade / By time: the given seconds, then a 5-second fade / Endless: never stops (the bar shows intro + 1 lap)',
+    'この曲には L(ループ地点)が無いので1回鳴って止まります': 'This song has no loop point (L), so it plays once and stops',
+    '再生時間(秒)。この後5秒かけてフェードアウトします': 'Length (sec). A 5-second fade-out follows',
+    '総再生時間  : {time} (L から {n}周)': 'Total duration: {time} (L x{n})',
+    '総再生時間  : 無限 (L から戻り続ける。バーはイントロ+1周ぶん)': 'Total duration: endless (keeps returning to L; the bar shows intro + 1 lap)',
     '再生範囲のくり返しをやめる': 'Stop repeating the playback range',
     '演奏を録音': 'Record performance',
     '演奏を録音してMMLにする': 'Record a performance and turn it into MML',

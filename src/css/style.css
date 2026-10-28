@@ -247,6 +247,19 @@ header h1.app-title .app-version:empty { display: none; }
   white-space: nowrap;
 }
 
+/* ループ回数の選択(L のある曲だけ有効) */
+.mml-top-toolbar .mml-loop-count {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.mml-top-toolbar .mml-loop-count select { max-width: 7em; }
+.mml-top-toolbar .mml-loop-count input { width: 60px; }
+.mml-top-toolbar .mml-loop-count select:disabled { opacity: 0.5; }
+
 .mml-top-toolbar .seek-bar-wrap {
   /* flex-basis と min-width を 200px にしてあるのは、幅が足りないときに
      「シークバーを潰す」のではなく「次の行へ送る」ようにするため(上の flex-wrap 参照) */
