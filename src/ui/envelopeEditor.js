@@ -100,7 +100,9 @@
   const SEP_W = 3;        // 本体とリリースの境目(キーオフの赤線)の幅
   const SLACK = 3;        // 区画の右に空けておくマス数。終端つまみを掴んで右へ伸ばす余地
   // 左端の目盛り欄(縦の値の数字)。4レーンとも同じ幅にして、同じフレームが縦に揃うようにする
-  const GUTTER = 26;
+  // 左寄りに全体の上下/読み込み直しのボタン(.env-shift、幅SHIFT_W)を重ねるので、そのぶん広い
+  const GUTTER = 40;
+  const SHIFT_W = 14;
   const RANGE_MAX = 127;  // ピッチ/ノートの縦幅(±)の上限
 
   // ── MML定義 ⇄ {values, loop} ────────────────────────────────────────
@@ -803,7 +805,13 @@
             rel +
           `</div>` +
           (lane.key === 'en' ? chordPanelHtml() : '') +
-          `<div class="env-lane-canvas-wrap"><canvas class="env-lane-canvas"></canvas></div>` +
+          `<div class="env-lane-canvas-wrap"><canvas class="env-lane-canvas"></canvas>` +
+            // 目盛り欄の左、縦幅の数字の下。キャンバスと一緒に横スクロールする
+            `<div class="env-shift" style="width:${SHIFT_W}px">` +
+              `<button type="button" class="secondary env-shift-up" title="${T('全体を1上げる')}">▲</button>` +
+              `<button type="button" class="secondary env-shift-down" title="${T('全体を1下げる')}">▼</button>` +
+              `<button type="button" class="secondary env-shift-reset" title="${T('MMLから読み込み直す(反映していない編集は捨てます)')}">↺</button>` +
+            `</div></div>` +
           `<div class="fds-values-text env-lane-values"></div>` +
           `<div class="env-lane-disabled" style="display:none;"></div>` +
         `</div>`;
@@ -865,7 +873,9 @@
             relLen: q('.env-rel-len', root), relLoop: q('.env-rel-loop', root),
             canvas: q('.env-lane-canvas', root), values: q('.env-lane-values', root),
             disabled: q('.env-lane-disabled', root),
-            chordPanel: q('.env-chord', root)
+            chordPanel: q('.env-chord', root),
+            shift: q('.env-shift', root), shiftUp: q('.env-shift-up', root),
+            shiftDown: q('.env-shift-down', root), shiftReset: q('.env-shift-reset', root)
           };
           els.lanes.set(lane.key, e);
           canvases.set(lane.key, new LaneCanvas(e.canvas, lane, {
@@ -901,6 +911,9 @@
         });
         e.apply.addEventListener('click', () => applyLane(lane));
         e.add.addEventListener('click', () => addDef(lane, false));
+        e.shiftUp.addEventListener('click', () => shiftValues(lane, 1));
+        e.shiftDown.addEventListener('click', () => shiftValues(lane, -1));
+        e.shiftReset.addEventListener('click', () => { loadLane(lane); regeneratePhrase(); });
         if (e.relOn) {
           e.relOn.addEventListener('change', () => {
             s.relOn = e.relOn.checked;
@@ -1002,6 +1015,25 @@
         // 後ろは動かない。MMLへ書く直前のtableDeltasが、そのフレームと次のフレームの相対値を
         // 自動的に辻褄の合う値へ作り直す
         arr[frame] = value;
+        markDirty(lane);
+        renderLane(lane);
+      }
+
+      // 全体を d だけ上下する(本体とリリースの両方)。端に着いた値はそこで止まる。形が潰れたら
+      // 読み込み直し(↺)で戻す。音量の上限は volEff でなく volMax(実効上限より上に書かれた既存の
+      // 値を、上下しただけで削らないため)。ピッチ/ノートは縦幅をはみ出したら広げる
+      function shiftValues(lane, d) {
+        const s = state.get(lane.key);
+        let lo = -RANGE_MAX, hi = RANGE_MAX;
+        if (lane.key === 'v') { lo = 0; hi = Math.max(1, target.volMax); }
+        else if (lane.key === 'duty') { lo = 0; hi = Math.max(1, target.duty - 1); }
+        const shift = (arr) => arr.map((v) => clamp(v + d, lo, hi));
+        s.values = shift(s.values);
+        if (lane.relTag != null && s.relOn) s.relValues = shift(s.relValues);
+        if (isCenteredKind(lane.kind)) {
+          const peak = Math.max(...s.values.map((v) => Math.abs(v)), 0);
+          s.range = clamp(Math.max(s.range, peak), 1, RANGE_MAX);
+        }
         markDirty(lane);
         renderLane(lane);
       }
@@ -1235,7 +1267,9 @@
 
         const zones = [{ values: s.values, loop: s.loop }];
         if (lane.relTag != null && s.relOn) zones.push({ values: s.relValues, loop: s.relLoop });
-        canvases.get(lane.key).setZones(zones, rangeOf(lane), noteGuide(lane));
+        const cv = canvases.get(lane.key);
+        cv.setZones(zones, rangeOf(lane), noteGuide(lane));
+        e.shift.style.top = (1 + cv.bandH + RULER_H + 1) + 'px'; // 1=キャンバスの枠線
 
         e.len.value = String(s.values.length);
         e.loop.value = s.loop == null ? '' : String(s.loop);
