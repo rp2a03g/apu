@@ -3103,6 +3103,8 @@
       this.onOpenFile = null;         // ヘッダの「ファイルを開く」
       this.onToMml = null;            // ヘッダの「to MML」
       this.onMaxSecondsChange = null; // ロール見出しの演奏最大時間(秒)が変わったとき (sec) => void
+      this.onLoopChoiceChange = null; // ロール見出しのループ回数('2'〜'100'|'time'|'infinite')が変わったとき (value) => void
+      this._loopSig = null;
       this.onExport = null;           // ロール見出しの「出力」 (formatId, seconds) => void
       this._exportOpt = null;         // setExportControls() の最後の内容(見出し再構築時に戻す)
       this._exportFmtSig = null;      // 出力形式リストの中身(変わった時だけ作り直す)
@@ -3701,6 +3703,9 @@
         // その右に出力形式と出力ボタンを置く(方針 2026-09-09)。
         // 実体は各フォーマットのパネルにある再生時間欄/書き出しボタンで、ここはその代理
         `<span class="kbd-roll-export" style="display:none">` +
+          // ループ回数(2〜100回/時間指定/無限)。MML再生とVGM(ヘッダにループ位置がある形式)だけ main.js が
+          // setExportControls({loop}) で出す。実体はMMLエディタ/VGMパネルの「ループ」選択で、ここはその代理
+          `<label class="kbd-loop-count" style="display:none"><span>${T('ループ')}</span><select class="kbd-loop-sel"></select></label>` +
           `<span class="kbd-roll-export-sep">/</span>` +
           `<input type="number" class="kbd-max-sec" min="1" max="3600" step="1" title="${T('演奏最大時間(秒)')}">` +
           `<span class="kbd-roll-export-unit">${T('秒')}</span>` +
@@ -3722,6 +3727,11 @@
       this._mountRollSeekBar(seekSlot);
       // 演奏最大時間+出力(setExportControls で main.js から中身と表示可否をもらう)
       this._exportEl = rollHeader.querySelector('.kbd-roll-export');
+      this._loopEl = rollHeader.querySelector('.kbd-loop-count');
+      this._loopSelEl = rollHeader.querySelector('.kbd-loop-sel');
+      this._loopSelEl.addEventListener('change', () => {
+        if (this.onLoopChoiceChange) this.onLoopChoiceChange(this._loopSelEl.value);
+      });
       this._maxSecEl = rollHeader.querySelector('.kbd-max-sec');
       this._exportFmtEl = rollHeader.querySelector('.kbd-export-fmt');
       const exportBtn = rollHeader.querySelector('.kbd-export-btn');
@@ -3742,6 +3752,7 @@
       });
       // 言語切替で見出しを作り直した後も状態を戻す(selectは新品なので必ず作り直させる)
       this._exportFmtSig = null;
+      this._loopSig = null;
       this.setExportControls(this._exportOpt);
       // オーバーレイのON/OFFはロール見出しクリック(折りたたみ)とは独立させるため、
       // クリックイベントの伝播をここで止める(bubbling先のrollHeaderハンドラを発火させない)。
@@ -4352,9 +4363,11 @@
     }
 
     /**
-     * ロール見出しの「演奏最大時間+出力」を更新する(main.jsが唯一の呼び出し元)。
-     * opt = { visible, seconds, formats:[[value,label], ...] }
-     * サウンドファイル再生中だけ出す(MML再生の総時間は曲の長さそのもので、指定する物ではない)。
+     * ロール見出しの「ループ回数+演奏最大時間+出力」を更新する(main.jsが唯一の呼び出し元)。
+     * opt = { visible, seconds, secondsReadOnly, formats:[[value,label], ...],
+     *         loop: { options:[[value,label],...], value, disabled, title, sig } | null }
+     * loop はループ回数を選べる再生元(MML / VGM)のときだけ。sig は選択肢の中身(言語)の識別子で、
+     * 変わったときだけ <option> を作り直す。secondsReadOnly は秒がループ回数から決まる(VGMの回数モード)とき
      */
     setExportControls(opt) {
       this._exportOpt = opt || null;
@@ -4362,6 +4375,23 @@
       const on = !!(opt && opt.visible);
       this._exportEl.style.display = on ? '' : 'none';
       if (!on) return;
+      const loop = opt.loop || null;
+      this._loopEl.style.display = loop ? '' : 'none';
+      if (loop) {
+        if (this._loopSig !== loop.sig) {
+          this._loopSig = loop.sig;
+          this._loopSelEl.innerHTML = '';
+          for (const [value, label] of loop.options) {
+            const o = document.createElement('option');
+            o.value = value; o.textContent = label;
+            this._loopSelEl.appendChild(o);
+          }
+        }
+        if (this._loopSelEl.value !== loop.value) this._loopSelEl.value = loop.value;
+        this._loopSelEl.disabled = !!loop.disabled;
+        if (this._loopEl.title !== (loop.title || '')) this._loopEl.title = loop.title || '';
+      }
+      this._maxSecEl.readOnly = !!opt.secondsReadOnly;
       // 中身が変わったときだけ作り直す(毎フレーム呼ばれるので、選択中の値を消さないため)
       const sig = opt.formats ? opt.formats.map((f) => f[0]).join(',') : '';
       if (opt.formats && this._exportFmtSig !== sig) {

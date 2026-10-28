@@ -2686,15 +2686,24 @@
     } catch (e) { /* ignore */ }
     return '2';
   }
-  // 選択リストの中身(2〜100回 / 時間指定 / 無限)を作り直して value を戻す。言語切替でも呼ぶ
+  // 選択肢 [[value,label],...](2〜100回 / 時間指定 / 無限)。言語が変わるまで使い回す
+  let loopChoiceOptionsCache = null;
+  function loopChoiceOptions() {
+    if (loopChoiceOptionsCache) return loopChoiceOptionsCache;
+    const out = [];
+    for (let n = 2; n <= 100; n++) out.push([String(n), T('{n}回', { n })]);
+    out.push(['time', T('時間指定')], ['infinite', T('無限')]);
+    return (loopChoiceOptionsCache = out);
+  }
+  if (MML.I18n && MML.I18n.onChange) MML.I18n.onChange(() => { loopChoiceOptionsCache = null; });
+  // 鍵盤表示の見出し(setExportControls の loop)へ渡す形。sig は選択肢の中身(言語)の識別子
+  function loopControlFor(value, state) {
+    return { options: loopChoiceOptions(), value, disabled: state.disabled, title: state.title, sig: T('{n}回', { n: 2 }) + T('無限') };
+  }
+  // 選択リストの中身を作り直して value を戻す。言語切替でも呼ぶ
   function buildLoopChoiceOptions(sel, value) {
     sel.innerHTML = '';
-    for (let n = 2; n <= 100; n++) {
-      const o = document.createElement('option');
-      o.value = String(n); o.textContent = T('{n}回', { n });
-      sel.appendChild(o);
-    }
-    for (const [v, label] of [['time', T('時間指定')], ['infinite', T('無限')]]) {
+    for (const [v, label] of loopChoiceOptions()) {
       const o = document.createElement('option');
       o.value = v; o.textContent = label;
       sel.appendChild(o);
@@ -3818,12 +3827,18 @@
   function updateKeyboardExportControls() {
     if (kbdSourceKind === 'mml') {
       keyboardDisplay.setExportControls({ visible: !!lastMmlCompiled,
-        seconds: mmlExportSeconds || mmlDefaultExportSeconds(), formats: exportFormatsFor('mml') });
+        seconds: mmlExportSeconds || mmlDefaultExportSeconds(), formats: exportFormatsFor('mml'),
+        loop: loopControlFor(mmlLoopChoice, mmlLoopState(null)) }); // MMLエディタの「ループ」の写し
       return;
     }
     const durEl = keyboardDurationInput();
+    // VGMはヘッダにループ位置があるので「ループ」を出す(VGMパネルの選択の写し。旧「サウンドファイルを開く」
+    // ウィンドウは廃止済みで、パネルの再生時間欄や選択リストは画面に無い)。回数モードでは秒は計算値
+    const vgm = kbdSourceKind === 'vgm' && !!loadedVgmHeader;
     keyboardDisplay.setExportControls(durEl
-      ? { visible: true, seconds: parseInt(durEl.value, 10) || 0, formats: exportFormatsFor(kbdSourceKind) }
+      ? { visible: true, seconds: parseInt(durEl.value, 10) || 0, formats: exportFormatsFor(kbdSourceKind),
+          loop: vgm ? loopControlFor(vgmLoopChoice, vgmLoopState()) : null,
+          secondsReadOnly: vgm && !!durEl.readOnly }
       : { visible: false });
   }
   keyboardDisplay.onMaxSecondsChange = (sec) => {
@@ -3836,12 +3851,12 @@
     const durEl = keyboardDurationInput();
     if (durEl) durEl.value = String(sec);
     // VGMの回数モードでは再生時間欄は計算値なので、手で秒を入れたら時間指定へ切り替える
-    if (kbdSourceKind === 'vgm' && vgmLoopChoice !== 'time' && vgmHasLoop(loadedVgmHeader)) {
-      vgmLoopChoice = 'time';
-      try { localStorage.setItem(VGM_LOOP_KEY, vgmLoopChoice); } catch (e) { /* ignore */ }
-      vgmLoopCountEl.value = vgmLoopChoice;
-      syncVgmLoopSelect();
-    }
+    if (kbdSourceKind === 'vgm' && vgmLoopChoice !== 'time' && vgmHasLoop(loadedVgmHeader)) setVgmLoopChoice('time');
+  };
+  // 鍵盤表示の見出しのループ回数(MML再生 / VGM のときだけ出る。updateKeyboardExportControls 参照)
+  keyboardDisplay.onLoopChoiceChange = (v) => {
+    if (kbdSourceKind === 'mml') setMmlLoopChoice(v);
+    else if (kbdSourceKind === 'vgm') setVgmLoopChoice(v);
   };
   keyboardDisplay.onExport = (fmtId, sec) => {
     // 動画は設定(画面構成・解像度…)とプレビューが要るので、書き出しパネルを開くだけにする
@@ -6197,15 +6212,32 @@
   // 「ループ」選択(L を何周鳴らすか)。mmlLoopChoice 参照
   const mmlLoopCountEl = document.getElementById('mmlLoopCount');
   const mmlLoopSecondsEl = document.getElementById('mmlLoopSeconds');
-  function syncMmlLoopSelect(compiled) {
+  // 選択の有効/無効とツールチップ(MMLエディタの選択と鍵盤表示の見出しの両方で使う)
+  function mmlLoopState(compiled) {
     const c = compiled || lastMmlCompiled;
     const has = !!(c && MML.Mml.LoopPlan.hasLoop(c));
-    mmlLoopCountEl.disabled = !!c && !has;
-    mmlLoopCountEl.title = (c && !has)
-      ? T('この曲には L(ループ地点)が無いので1回鳴って止まります')
-      : T('ループ地点(L)から何周鳴らすか。N回: イントロ+N周の後、5秒かけてフェードアウト / 時間指定: 指定秒の後、5秒フェード / 無限: 止まらない(バーはイントロ+1周ぶん)');
+    return {
+      disabled: !!c && !has,
+      title: (c && !has)
+        ? T('この曲には L(ループ地点)が無いので1回鳴って止まります')
+        : T('ループ地点(L)から何周鳴らすか。N回: イントロ+N周の後、5秒かけてフェードアウト / 時間指定: 指定秒の後、5秒フェード / 無限: 止まらない(バーはイントロ+1周ぶん)')
+    };
+  }
+  function syncMmlLoopSelect(compiled) {
+    const st = mmlLoopState(compiled);
+    mmlLoopCountEl.disabled = st.disabled;
+    mmlLoopCountEl.title = st.title;
+    mmlLoopCountEl.value = mmlLoopChoice;
     mmlLoopSecondsEl.style.display = mmlLoopChoice === 'time' ? '' : 'none';
-    if (document.activeElement !== mmlLoopSecondsEl) mmlLoopSecondsEl.value = String(mmlExportSeconds || mmlNaturalSeconds(c));
+    if (document.activeElement !== mmlLoopSecondsEl) mmlLoopSecondsEl.value = String(mmlExportSeconds || mmlNaturalSeconds(compiled));
+  }
+  // 選択を変える共通入口(MMLエディタの選択リスト / 鍵盤表示の見出し)
+  function setMmlLoopChoice(v) {
+    mmlLoopChoice = v;
+    try { localStorage.setItem(MML_LOOP_KEY, mmlLoopChoice); } catch (e) { /* ignore */ }
+    syncMmlLoopSelect(null);
+    applyMmlLoopChoice();
+    updateKeyboardExportControls();
   }
   // 再生準備済み/再生中のMMLへ選択を即反映する(位置はそのまま、終端とバーの長さだけ変わる)
   function applyMmlLoopChoice() {
@@ -6223,13 +6255,7 @@
     };
     build();
     if (MML.I18n && MML.I18n.onChange) MML.I18n.onChange(build);
-    mmlLoopCountEl.addEventListener('change', () => {
-      mmlLoopChoice = mmlLoopCountEl.value;
-      try { localStorage.setItem(MML_LOOP_KEY, mmlLoopChoice); } catch (e) { /* ignore */ }
-      syncMmlLoopSelect(null);
-      applyMmlLoopChoice();
-      updateKeyboardExportControls();
-    });
+    mmlLoopCountEl.addEventListener('change', () => setMmlLoopChoice(mmlLoopCountEl.value));
     mmlLoopSecondsEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') mmlLoopSecondsEl.blur(); });
     mmlLoopSecondsEl.addEventListener('change', () => {
       const v = Math.max(1, Math.min(3600, parseInt(mmlLoopSecondsEl.value, 10) || 0));
@@ -9184,29 +9210,41 @@
   function vgmLoopPlaySeconds(h, n) { return Math.max(0, h.durationSeconds - h.loopSeconds) + n * h.loopSeconds; }
   function vgmLoopCount() { return mmlLoopChoiceCount(vgmLoopChoice); }
   function mmlLoopChoiceCount(choice) { return choice === 'infinite' ? 2 : (parseInt(choice, 10) || 2); }
+  // 選択の有効/無効とツールチップ(VGMパネルの選択と鍵盤表示の見出しの両方で使う)
+  function vgmLoopState() {
+    const h = loadedVgmHeader;
+    const has = vgmHasLoop(h);
+    return {
+      disabled: !!h && !has,
+      title: (h && !has)
+        ? T('このVGMにはループ情報が無いので、再生時間欄の秒数だけ鳴らします')
+        : T('VGMヘッダのループ位置から何周鳴らすか。N回: イントロ+N周の後、5秒かけてフェードアウト(再生時間欄にその長さが入る) / 時間指定: 再生時間欄の秒の後、5秒フェード / 無限: 止まらない(バーはイントロ+1周ぶん)')
+    };
+  }
   function syncVgmLoopSelect() {
     if (!vgmLoopCountEl) return;
     const h = loadedVgmHeader;
-    const has = vgmHasLoop(h);
-    vgmLoopCountEl.disabled = !!h && !has;
-    vgmLoopCountEl.title = (h && !has)
-      ? T('このVGMにはループ情報が無いので、再生時間欄の秒数だけ鳴らします')
-      : T('VGMヘッダのループ位置から何周鳴らすか。N回: イントロ+N周の後、5秒かけてフェードアウト(再生時間欄にその長さが入る) / 時間指定: 再生時間欄の秒の後、5秒フェード / 無限: 止まらない(バーはイントロ+1周ぶん)');
-    const computed = has && vgmLoopChoice !== 'time';
+    const st = vgmLoopState();
+    vgmLoopCountEl.disabled = st.disabled;
+    vgmLoopCountEl.title = st.title;
+    vgmLoopCountEl.value = vgmLoopChoice;
+    const computed = vgmHasLoop(h) && vgmLoopChoice !== 'time';
     vgmPlayDurEl.readOnly = computed;
     if (computed) vgmPlayDurEl.value = String(Math.max(1, Math.min(3600, Math.ceil(vgmLoopPlaySeconds(h, vgmLoopCount())))));
+  }
+  // 選択を変える共通入口(VGMパネルの選択リスト / 鍵盤表示の見出し)
+  function setVgmLoopChoice(v) {
+    vgmLoopChoice = v;
+    try { localStorage.setItem(VGM_LOOP_KEY, vgmLoopChoice); } catch (e) { /* ignore */ }
+    syncVgmLoopSelect();
+    updateKeyboardExportControls();
   }
   (function initVgmLoopSelect() {
     if (!vgmLoopCountEl) return;
     const build = () => { buildLoopChoiceOptions(vgmLoopCountEl, vgmLoopChoice); syncVgmLoopSelect(); };
     build();
     if (MML.I18n && MML.I18n.onChange) MML.I18n.onChange(build);
-    vgmLoopCountEl.addEventListener('change', () => {
-      vgmLoopChoice = vgmLoopCountEl.value;
-      try { localStorage.setItem(VGM_LOOP_KEY, vgmLoopChoice); } catch (e) { /* ignore */ }
-      syncVgmLoopSelect();
-      updateKeyboardExportControls();
-    });
+    vgmLoopCountEl.addEventListener('change', () => setVgmLoopChoice(vgmLoopCountEl.value));
     // 再生時間欄を手で書き換えたら時間指定へ(回数モードでは読み取り専用なので届かない)
     vgmPlayDurEl.addEventListener('change', () => { if (!vgmPlayDurEl.readOnly) syncVgmLoopSelect(); });
   })();

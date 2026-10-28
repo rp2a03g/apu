@@ -1006,6 +1006,20 @@ button.secondary {
   font-family: var(--mono);
   text-align: right;
 }
+.kbd-roll-export .kbd-loop-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  cursor: default;
+}
+.kbd-roll-export .kbd-loop-sel {
+  height: 17px;
+  padding: 0 2px;
+  font-size: 10px;
+  max-width: 84px;
+}
+.kbd-roll-export .kbd-loop-sel:disabled { opacity: 0.5; }
+.kbd-roll-export .kbd-max-sec[readonly] { opacity: 0.6; }
 .kbd-roll-export .kbd-export-fmt {
   height: 17px;
   padding: 0 2px;
