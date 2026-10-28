@@ -197,13 +197,13 @@
       const layout = this._layout;
       const el = this._cursorEl;
       if (!layout || this._frame < 0) { el.style.display = 'none'; this._lastSystem = -1; return; }
-      // ループ地点(L)より後ろの末尾複製区間は、ループ地点からの相対位置へ戻す(鍵盤表示の楽譜モードと同じ)
+      // ループ地点(L)で折り返した後(曲末=totalFrames より先)は [L, 曲末) の中の位置へ戻す(鍵盤表示の楽譜モードと同じ)
       let frame = this._frame;
       const sc = this._score;
       if (sc.loopPointFrame != null && sc.totalFrames > 0) {
-        const natural = (sc.totalFrames + sc.loopPointFrame) / 2;
+        const natural = sc.totalFrames;
         const loopLen = natural - sc.loopPointFrame;
-        if (loopLen > 0 && frame >= natural) frame = sc.loopPointFrame + ((frame - natural) % loopLen);
+        if (loopLen > 0 && frame >= natural) frame = sc.loopPointFrame + ((frame - sc.loopPointFrame) % loopLen);
       }
       const c = MML.Score.cursorAtFrame(layout, frame);
       if (!c) { el.style.display = 'none'; return; }

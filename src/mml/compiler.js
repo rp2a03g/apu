@@ -105,9 +105,10 @@
  *   L              ループ地点マーカー(パラメータなし)。このチャンネルの再生が末尾まで
  *                  達したとき、Lの位置まで戻って演奏を続ける(実機ppmck同様、曲全体を
  *                  無限ループさせるための地点指定。[ ... ]nの小節単位の繰り返しとは別物)。
- *                  ブラウザ再生・シークバーの「曲の長さ」は、Lへ2回戻る(=イントロ1回+
- *                  ループ区間2回)までとして扱う。NSF書き出し(src/driver/ppmckDriver.js)は
- *                  このチャンネルを実際に無限ループさせる
+ *                  コンパイル結果は1周ぶん(曲頭〜曲末=naturalEndFrame)だけを持ち、ブラウザ再生は
+ *                  再生フレームを Mml.LoopPlan.mapFrame で [L, 曲末) へ折り返して何周でも鳴らす
+ *                  (回数/時間/無限はMMLエディタの「ループ」選択)。NSF書き出し
+ *                  (src/driver/ppmckDriver.js)はこのチャンネルを実際に無限ループさせる
  *   [ ... ]n       繰り返し (n回)
  *   [ ... | ... ]n 繰り返し (最後の周回だけ | から ] までを演奏しない)
  *   { ... }<len>   連符 (中の音符列を<len>の音長で等分)
@@ -3049,11 +3050,12 @@
     return writeLog;
   }
 
-  // L の2周目(1周目の [L, 曲末) を複製した区間、先頭は naturalEndFrame)の頭で、最初の音符のキーオンより前にある
-  // VRC7 のキーオフ($20+ch、休符の頭)の値を「1周目の終わりの $20+ch」から作り直す(2026-09-20)。
-  // キーオフは block/fnum を変えずに書く(segmentsToWriteLogVrc7 の keyOff)ので、複製のままだと L の直前の音の
-  // block が書かれ、曲末の音の余韻が別の高さ(オクターブ違い等)で鳴ってしまう。NSF のドライバは本物の状態から書く
-  function fixVrc7LoopKeyOff(track, index, naturalEndFrame) {
+  // L へ折り返した直後(2周目以降の [L, 最初の音符のキーオン) )にある VRC7 のキーオフ($20+ch、休符の頭)の
+  // 書き込みを「1周目の終わりの $20+ch」から作り直した差し替え表 { ログのフレーム: writes } を返す(2026-09-20、
+  // 2026-10-28 に複製方式から折り返し方式へ)。キーオフは block/fnum を変えずに書く(segmentsToWriteLogVrc7 の
+  // keyOff)ので、1周目と同じ書き込みを流すと L の直前の音の block が書かれ、曲末の音の余韻が別の高さ
+  // (オクターブ違い等)で鳴ってしまう。NSF のドライバは本物の状態から書くので関係ない。差し替えが無ければ null
+  function vrc7LoopHeadOverrides(track, index, loopPointFrame, naturalEndFrame) {
     const reg = 0x20 + index;
     let endHi = 0;
     for (let f = 0; f < naturalEndFrame; f++) {
@@ -3063,21 +3065,24 @@
         else if (w.addr === 0x9030 && sel === reg) endHi = w.value;
       }
     }
-    for (let f = naturalEndFrame; f < track.length; f++) {
+    const overrides = {};
+    let any = false;
+    for (let f = loopPointFrame; f < naturalEndFrame; f++) {
       let sel = -1, keyOn = false, hit = false;
       for (const w of track[f]) {
         if (w.addr === 0x9010) sel = w.value;
         else if (w.addr === 0x9030 && sel === reg) { if (w.value & 0x10) keyOn = true; else hit = true; }
       }
-      if (keyOn) return; // 音符の頭から先は1周目と同じ(音符は block/fnum を書き直す)
+      if (keyOn) break; // 音符の頭から先は1周目と同じ(音符は block/fnum を書き直す)
       if (!hit) continue;
-      // フレームの配列は1周目と共有しているので作り直す
       sel = -1;
-      track[f] = track[f].map(w => {
+      overrides[f] = track[f].map(w => {
         if (w.addr === 0x9010) sel = w.value;
         return (w.addr === 0x9030 && sel === reg) ? { addr: 0x9030, value: endHi & ~0x10 } : w;
       });
+      any = true;
     }
+    return any ? overrides : null;
   }
 
   // @OP<n>で定義した8バイトをVRC7のカスタム音色(パッチ0)レジスタ($00-$07)へロードする。
@@ -3865,38 +3870,25 @@
       warnings.push({ message: T('#DPCM-DAC-RAMP: DPCMの音符が無いので、曲頭の持ち上げはしません') });
     }
 
-    // L(ループ地点)が使われている場合、このツール(ブラウザ再生・シークバー)での
-    // 「曲の長さ」は "曲頭からLへ2回戻るまで"(=イントロ1回 + ループ区間を2回)とする。
-    // 各セグメント生成関数(segmentsToWriteLogXxx)は音符ごとに周波数・音量・音色を
-    // 必ずフルに書き直す設計(未書込のまま前フレームの値を引き継ぐ書き方をしていない)
-    // ため、書き込みログの[loopPointFrame, naturalEndFrame)を単純に複製して末尾へ
-    // 追加するだけで「実際にそこへ戻って演奏した場合」と同じ結果になる。
+    // L(ループ地点)が使われている場合も、tracks/highlightRanges/totalFrames は1周ぶん(曲頭〜曲末)のまま
+    // にする(2026-10-28。それまでは [L, 曲末) を末尾へ複製して「イントロ+2周」を曲の長さにしていた)。
+    // 何周鳴らすかはプレイヤー/UI側の選択(回数/時間/無限)で、再生フレーム f は Mml.LoopPlan.mapFrame で
+    // f < naturalEndFrame ? f : L + (f - L) % loopLen のログ位置へ写す。各セグメント生成関数
+    // (segmentsToWriteLogXxx)は音符ごとに周波数・音量・音色を必ずフルに書き直す設計のため、同じ書き込みを
+    // 流し直すだけで「実際にそこへ戻って演奏した場合」と同じ結果になる。唯一の例外が VRC7 の休符のキーオフ
+    // (直前の block/fnum を引き継ぐ)で、折り返し直後のぶんだけ loopHeadOverrides で差し替える。
     // NSF書き出し側(src/driver/ppmckDriver.js)はこれとは別に、loopFrameByChannelを使って
-    // 実機同様の(このツールの都合による打ち切りが無い)本当の無限ループを行う
-    if (loopPointFrame != null && loopPointFrame < totalFrames) {
-      const naturalEndFrame = totalFrames;
-      const loopLen = naturalEndFrame - loopPointFrame;
-      for (const ch of Object.keys(tracks)) {
-        tracks[ch] = tracks[ch].concat(tracks[ch].slice(loopPointFrame, naturalEndFrame));
-      }
-      // VRC7 の休符のキーオフだけは直前の状態(block/fnum)を引き継ぐので、2周目の頭は1周目の終わりから作り直す
+    // 実機同様の本当の無限ループを行う
+    const naturalEndFrame = totalFrames;
+    let loopLen = null;
+    const loopHeadOverrides = {};
+    if (loopPointFrame != null && loopPointFrame < naturalEndFrame) {
+      loopLen = naturalEndFrame - loopPointFrame;
       (expansionLetterMap.vrc7 || []).forEach((ch, index) => {
-        if (tracks[ch]) fixVrc7LoopKeyOff(tracks[ch], index, naturalEndFrame);
+        if (!tracks[ch]) return;
+        const o = vrc7LoopHeadOverrides(tracks[ch], index, loopPointFrame, naturalEndFrame);
+        if (o) loopHeadOverrides[ch] = o;
       });
-      for (const ch of Object.keys(highlightRanges)) {
-        const extraRanges = [];
-        for (const r of highlightRanges[ch]) {
-          if (r.endFrame <= loopPointFrame) continue;
-          extraRanges.push({
-            startFrame: Math.max(r.startFrame, loopPointFrame) + loopLen,
-            endFrame: r.endFrame + loopLen,
-            srcStart: r.srcStart,
-            srcEnd: r.srcEnd
-          });
-        }
-        highlightRanges[ch] = highlightRanges[ch].concat(extraRanges);
-      }
-      totalFrames = naturalEndFrame + loopLen;
     }
 
     // ── VRC7自作音色(@0)の同時使用チェック ─────────────────────────────
@@ -3954,6 +3946,12 @@
       channelLetters,
       loopFrameByChannel,
       loopPointFrame,
+      // naturalEndFrame: 曲末(=totalFrames、1周ぶん)。loopLen: Lから曲末までのフレーム数(Lが無い/戻る区間が
+      // 無ければ null)。loopHeadOverrides: { ch: { ログのフレーム: writes } } 折り返し直後だけ差し替える書き込み
+      // (VRC7 のキーオフ)。再生側は Mml.LoopPlan を通して使う
+      naturalEndFrame,
+      loopLen,
+      loopHeadOverrides,
       startMarkerFrame,
       startMarkerChannel,
       startMarkerSrcRange,
@@ -3986,6 +3984,54 @@
   // s<speed>,<depth> → $4001/$4005の生バイト。NSF書き出し(src/nsf/mckBytecode.js)も
   // 同じバイトをバイトコードへ埋め込むため、ブラウザ再生と完全に同じ値になるよう共有する
   Mml.sweepRegisterByte = sweepRegisterByte;
+
+  // ── ループ(L)の折り返し(2026-10-28) ─────────────────────────────────────
+  // compile() の結果は1周ぶん(0〜naturalEndFrame)。何周鳴らすかは再生側の選択 setting で決める:
+  //   { mode: 'count', count: N }  … イントロ + N周 + フェード(fadeSec)。N周終わって L へ戻った瞬間からフェード
+  //   { mode: 'time', seconds: S } … S秒 + フェード(他形式のサウンドファイル再生と同じ)
+  //   { mode: 'infinite' }         … 終端なし
+  // L の無い曲(hasLoop=false)は setting に関係なく1回で止まる。
+  // ブラウザ再生(src/audio/stream-player.js)・オフライン描画(src/mml/player.js)・ロール/ハイライト/楽譜/動画
+  // (src/main.js, src/ui/keyboard.js, src/ui/scoreView.js, src/video/videoExport.js)が全て同じ写像を使う
+  const LoopPlan = {
+    hasLoop(c) { return !!(c && c.loopPointFrame != null && c.loopLen > 0); },
+    // 再生フレーム f → ログ(tracks/highlightRanges/regSnapshots)のフレーム
+    mapFrame(c, f) {
+      if (!LoopPlan.hasLoop(c)) return Math.min(f, c.totalFrames - 1);
+      return f < c.naturalEndFrame ? f : c.loopPointFrame + ((f - c.loopPointFrame) % c.loopLen);
+    },
+    // 同じ写像を秒で(ロールの再生位置用)。frameRate は c.frameRate
+    mapSeconds(c, sec) {
+      if (!LoopPlan.hasLoop(c)) return sec;
+      const nat = c.naturalEndFrame / c.frameRate, loop = c.loopPointFrame / c.frameRate, len = c.loopLen / c.frameRate;
+      return sec < nat ? sec : loop + ((sec - loop) % len);
+    },
+    // 何周目か(1始まり。イントロと1周目が 1、L へ戻るごとに +1)
+    lapOf(c, f) {
+      if (!LoopPlan.hasLoop(c) || f < c.naturalEndFrame) return 1;
+      return 2 + Math.floor((f - c.naturalEndFrame) / c.loopLen);
+    },
+    // 再生する総フレーム数(無限は Infinity)。fadeSec はフェード時間(秒、再生長に足す。0 なら足さない)
+    playFrames(c, setting, fadeSec) {
+      const fade = (fadeSec || 0) * c.frameRate;
+      if (!LoopPlan.hasLoop(c)) return c.totalFrames;
+      const mode = setting && setting.mode;
+      if (mode === 'infinite') return Infinity;
+      if (mode === 'time') return Math.max(1, (setting.seconds || 0) * c.frameRate) + fade;
+      const n = Math.max(1, Math.floor((setting && setting.count) || 2));
+      return c.naturalEndFrame + (n - 1) * c.loopLen + fade;
+    },
+    // 再生フレーム f のチャンネル ch の書き込み列(折り返し直後の差し替え込み)
+    writesAt(c, ch, f) {
+      const lf = LoopPlan.mapFrame(c, f);
+      if (f >= c.naturalEndFrame && c.loopHeadOverrides && c.loopHeadOverrides[ch]) {
+        const o = c.loopHeadOverrides[ch][lf];
+        if (o) return o;
+      }
+      return c.tracks[ch][lf];
+    }
+  };
+  Mml.LoopPlan = LoopPlan;
   // 周波数→各チップの周期/周波数レジスタ値(割当プレビュー src/audio/assign-preview.js が同じ式で鳴らすために公開)
   Mml.pitchRegs = { pulsePeriod, vrc6PulsePeriod, trianglePeriod, noisePeriodIndex, sawPeriod, fme7Period, fdsFreqToPeriod, n163FreqReg, vrc7FreqToFnumBlock };
   Mml.CHANNEL_BASE = CHANNEL_BASE;

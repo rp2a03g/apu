@@ -314,7 +314,10 @@
       this.expansionMap   = {};
       this.tracks         = null;
       this.channelLetters = [];
-      this.totalFrames    = 0;
+      this.totalFrames    = 0;        // ログ(1周ぶん)のフレーム数 = compiled.totalFrames
+      this.playFrames     = 0;        // 実際に鳴らす総フレーム数(L の折り返し込み。無限は Infinity)
+      this.fadeAtEnd      = false;    // 終端の手前で main.js のフェード(FADE_SEC)を掛けるか
+      this.compiled       = null;
       this.frameRate      = 60.0988;
       this.expansions     = [];
       this.statusAddr     = 0x4015;
@@ -343,6 +346,7 @@
       // 使っており、聴感上も同じ音量であるべき。NsfReplayStreamPlayer冒頭コメント参照の
       // 実測RMS校正結果をそのまま流用する。旧値3.0は単一拡張音源チャンネル基準の値)。
       this.gainNode.gain.value = 1.56;
+      this._baseGain = 1.56; // 終端フェード(main.js updateEndFadeGain)が戻す値
       this.limiter = createLimiter(this.audioCtx);
       this.gainNode.connect(this.limiter);
       this.limiter.connect(getMasterGain(this.audioCtx));
@@ -370,7 +374,7 @@
       for (let i = 0; i < out.length; i++) {
         this._songFramePos += (this.frameRate / sr) * this.speedFactor;
         const f = Math.floor(this._songFramePos);
-        if (f >= this.totalFrames) {
+        if (f >= this.playFrames) {
           for (let j = i; j < out.length; j++) out[j] = 0;
           this.isPlaying = false;
           if (this.onEnded) this.onEnded();
@@ -378,16 +382,7 @@
         }
         if (f !== this.currentFrame) {
           this.currentFrame = f;
-          for (const ch of this.channelLetters) {
-            for (const w of this.tracks[ch][f]) {
-              const target = findExpansionForAddr(this.expansionMap, w.addr);
-              if (target) {
-                target.writeRegister(w.addr, w.value);
-              } else {
-                this.apu.writeRegister(w.addr, w.value);
-              }
-            }
-          }
+          this._applyFrame(f);
         }
         this.cycleAccum += CPU_CLOCK_NTSC / sr;
         while (this.cycleAccum >= 1) {
@@ -407,6 +402,22 @@
       }
     }
 
+    // 再生フレーム f の全チャンネルの書き込みを APU/拡張音源へ流す。L があれば
+    // Mml.LoopPlan が [L, 曲末) へ折り返したログ位置(と折り返し直後の差し替え)を返す
+    _applyFrame(f) {
+      const LP = MML.Mml.LoopPlan;
+      for (const ch of this.channelLetters) {
+        for (const w of LP.writesAt(this.compiled, ch, f)) {
+          const target = findExpansionForAddr(this.expansionMap, w.addr);
+          if (target) {
+            target.writeRegister(w.addr, w.value);
+          } else {
+            this.apu.writeRegister(w.addr, w.value);
+          }
+        }
+      }
+    }
+
     load(compiled, mute) {
       this.stop();
       const Emu = MML.Emu;
@@ -418,9 +429,12 @@
       this.expansions     = compiled.expansions || [];
       this.expansionMap   = createExpansionMap(this.expansions);
       this.statusAddr     = compiled.statusAddr;
+      this.compiled       = compiled;
       this.tracks         = compiled.tracks;
       this.channelLetters = compiled.channelLetters;
       this.totalFrames    = compiled.totalFrames;
+      this.playFrames     = compiled.totalFrames; // setLoopPlan() を呼ぶまでは1周(L が無い曲と同じ)
+      this.fadeAtEnd      = false;
       this.frameRate      = compiled.frameRate;
       this.samplesPerFrame = this.audioCtx.sampleRate / compiled.frameRate;
       this._dacPreroll    = !!(compiled.settings && compiled.settings.dacPreroll);
@@ -441,6 +455,18 @@
       this._dcPrime = !!this._dacPreroll;
     }
 
+    // 何周鳴らすか(Mml.LoopPlan.playFrames の setting: {mode:'count',count}|{mode:'time',seconds}|{mode:'infinite'})。
+    // fadeSec は終端の手前に足すフェード時間(秒)。L の無い曲は設定に関係なく1回で止まり、フェードもしない。
+    // 再生中に呼んでも位置はそのまま(終端だけが動く)
+    setLoopPlan(setting, fadeSec) {
+      const LP = MML.Mml.LoopPlan;
+      if (!this.compiled) return;
+      const hasLoop = LP.hasLoop(this.compiled);
+      this.playFrames = LP.playFrames(this.compiled, setting, hasLoop ? fadeSec : 0);
+      this.fadeAtEnd = hasLoop && this.playFrames !== Infinity && (fadeSec || 0) > 0;
+    }
+    get endless() { return this.playFrames === Infinity; }
+
     play()  { this.isPlaying = true; }
     pause() { this.isPlaying = false; this._anchorCtxTime = null; }
 
@@ -459,22 +485,21 @@
     // songSec: 曲の位置(秒)。再生速度に関係しない(getPosition()と同じ単位)
     seekSong(songSec) {
       const songFramePos = Math.max(0, songSec) * this.frameRate;
-      const targetFrame = Math.min(Math.floor(songFramePos), this.totalFrames - 1);
+      const limit = this.playFrames === Infinity ? Infinity : this.playFrames - 1;
+      const targetFrame = Math.max(0, Math.min(Math.floor(songFramePos), limit));
       if (this.apu) { this.apu.reset(); this.apu.writeRegister(this.statusAddr, 0x0F); }
       for (const name in this.expansionMap) {
         if (this.expansionMap[name].reset) this.expansionMap[name].reset();
       }
-      for (let f = 0; f <= targetFrame; f++) {
-        for (const ch of this.channelLetters) {
-          for (const w of this.tracks[ch][f]) {
-            const target = findExpansionForAddr(this.expansionMap, w.addr);
-            if (target) {
-              target.writeRegister(w.addr, w.value);
-            } else {
-              this.apu.writeRegister(w.addr, w.value);
-            }
-          }
-        }
+      // 状態を作り直す: 1周目を頭から曲末(または目標)まで流し、目標が折り返した先なら
+      // さらに L から目標まで1周ぶんだけ流す(音符ごとに全レジスタを書き直すので何周目でも同じ状態になる)
+      const natural = this.compiled ? this.compiled.naturalEndFrame : this.totalFrames;
+      const firstEnd = Math.min(targetFrame, natural - 1);
+      for (let f = 0; f <= firstEnd; f++) this._applyFrame(f);
+      if (targetFrame >= natural) {
+        const lf = MML.Mml.LoopPlan.mapFrame(this.compiled, targetFrame);
+        const base = targetFrame - (lf - this.compiled.loopPointFrame); // 今の周回で L を通った再生フレーム
+        for (let f = base; f <= targetFrame; f++) this._applyFrame(f);
       }
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
@@ -516,12 +541,20 @@
       return this._songFramePos / this.frameRate;
     }
 
+    // 再生長(秒)。L の折り返し込み(setLoopPlan)。無限なら Infinity
     getDuration() {
-      return this.totalFrames / this.frameRate;
+      return this.playFrames / this.frameRate;
     }
 
+    // いま適用しているログ(1周ぶん)のフレーム。L で折り返した後は [L, 曲末) の中の位置
     getCurrentFrame() {
-      return Math.max(0, this.currentFrame);
+      const f = Math.max(0, this.currentFrame);
+      return this.compiled ? MML.Mml.LoopPlan.mapFrame(this.compiled, f) : f;
+    }
+
+    // いま何周目か(1始まり)
+    getLap() {
+      return this.compiled ? MML.Mml.LoopPlan.lapOf(this.compiled, Math.max(0, this.currentFrame)) : 1;
     }
 
     /*
@@ -556,6 +589,7 @@
       if (this.gainNode) { this.gainNode.disconnect(); this.gainNode = null; }
       if (this.limiter)  { this.limiter.disconnect();  this.limiter = null; }
       this.tracks = null;
+      this.compiled = null;
     }
   }
 

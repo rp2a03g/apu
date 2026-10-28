@@ -5197,7 +5197,7 @@
     }
 
     // 楽譜モード(レイアウト設定 rollView='score')の材料。score = { notation(src/score/notation.js の
-    // 表記モデル), fps(コンパイラのフレームレート), loopPointFrame, totalFrames } | null。
+    // 表記モデル), fps(コンパイラのフレームレート), loopPointFrame, totalFrames(=曲末、1周ぶん) } | null。
     // 表記モデルの各音符片は frameStart/frameEnd(コンパイラのフレーム)を持つので、fps で秒に直せば
     // ロールと同じ「再生位置 pos からの相対秒」で描ける。null で楽譜なし(ロール表示に戻る)
     setScore(score) {
@@ -7478,13 +7478,13 @@
       const fps = score.fps || 60;
       const H = g.H;
       this._drawRollTimeGrid(ctx, g, pos);
-      // ループ地点(L)より後ろの末尾複製(compile() が tracks に足す区間)は譜面には無いので、
-      // その区間の再生位置はループ地点からの相対位置へ戻して描く
+      // ループ地点(L)で折り返した後(曲末=totalFrames より先)の再生位置は、[L, 曲末) の中の位置へ戻して描く
+      // (Mml.LoopPlan.mapFrame と同じ写像。再生側は折り返し済みの位置を渡してくるので通常は素通り)
       let posFrame = pos * fps;
       if (score.loopPointFrame != null && score.totalFrames > 0) {
-        const natural = (score.totalFrames + score.loopPointFrame) / 2;
+        const natural = score.totalFrames;
         const loopLen = natural - score.loopPointFrame;
-        if (loopLen > 0 && posFrame >= natural) posFrame = score.loopPointFrame + ((posFrame - natural) % loopLen);
+        if (loopLen > 0 && posFrame >= natural) posFrame = score.loopPointFrame + ((posFrame - score.loopPointFrame) % loopLen);
       }
       const posSec = posFrame / fps;
       const windowSec = g.windowSec;

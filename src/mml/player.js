@@ -117,10 +117,13 @@
     }
 
     const samplesPerFrame = sampleRate / frameRate;
-    const totalSamples = Math.ceil(compiled.totalFrames * samplesPerFrame);
+    // L があれば opt.loopCount 周(既定2=イントロ+ループ2回、以前の末尾複製と同じ長さ)ぶん描く。
+    // tracks は1周ぶんなので再生フレームは Mml.LoopPlan で折り返す
+    const renderFrames = Math.ceil(MML.Mml.LoopPlan.playFrames(compiled, { mode: 'count', count: opt.loopCount || 2 }, 0));
+    const totalSamples = Math.ceil(renderFrames * samplesPerFrame);
     const raw = new Float32Array(totalSamples);
-    const writeLog = new Array(compiled.totalFrames);
-    const regSnapshots = new Array(compiled.totalFrames);
+    const writeLog = new Array(renderFrames);
+    const regSnapshots = new Array(renderFrames);
 
     let cycleAccum = 0;
     let pos = 0;
@@ -130,10 +133,10 @@
 
     const runningRegs = { [compiled.statusAddr]: 0x0F };
 
-    for (let f = 0; f < compiled.totalFrames; f++) {
+    for (let f = 0; f < renderFrames; f++) {
       const frameWrites = [];
       for (const ch of compiled.channelLetters) {
-        const writes = compiled.tracks[ch][f];
+        const writes = MML.Mml.LoopPlan.writesAt(compiled, ch, f);
         for (const w of writes) {
           const target = findExpansionForAddr(expansionMap, w.addr);
           if (target) {
@@ -165,7 +168,7 @@
     return {
       audio: dcBlockFor(compiled, raw),
       sampleRate,
-      totalFrames: compiled.totalFrames,
+      totalFrames: renderFrames,
       samplesPerFrame,
       writeLog,
       regSnapshots,
@@ -200,20 +203,23 @@
     }
 
     const samplesPerFrame = sampleRate / frameRate;
-    const totalSamples = Math.ceil(compiled.totalFrames * samplesPerFrame);
+    // L があれば opt.loopCount 周(既定2=イントロ+ループ2回、以前の末尾複製と同じ長さ)ぶん描く。
+    // tracks は1周ぶんなので再生フレームは Mml.LoopPlan で折り返す
+    const renderFrames = Math.ceil(MML.Mml.LoopPlan.playFrames(compiled, { mode: 'count', count: opt.loopCount || 2 }, 0));
+    const totalSamples = Math.ceil(renderFrames * samplesPerFrame);
     const raw = new Float32Array(totalSamples);
-    const writeLog = new Array(compiled.totalFrames);
-    const regSnapshots = new Array(compiled.totalFrames);
+    const writeLog = new Array(renderFrames);
+    const regSnapshots = new Array(renderFrames);
     const runningRegs = { [compiled.statusAddr]: 0x0F };
     let cycleAccum = 0;
     let pos = 0;
 
     apu.writeRegister(compiled.statusAddr, 0x0F);
 
-    for (let f = 0; f < compiled.totalFrames; f++) {
+    for (let f = 0; f < renderFrames; f++) {
       const frameWrites = [];
       for (const ch of compiled.channelLetters) {
-        const writes = compiled.tracks[ch][f];
+        const writes = MML.Mml.LoopPlan.writesAt(compiled, ch, f);
         for (const w of writes) {
           const target = findExpansionForAddr(expansionMap, w.addr);
           if (target) {
@@ -242,16 +248,16 @@
       }
 
       if ((f + 1) % CHUNK_FRAMES === 0) {
-        if (onProgress) onProgress(f + 1, compiled.totalFrames);
+        if (onProgress) onProgress(f + 1, renderFrames);
         await new Promise(r => setTimeout(r, 0));
       }
     }
 
-    if (onProgress) onProgress(compiled.totalFrames, compiled.totalFrames);
+    if (onProgress) onProgress(renderFrames, renderFrames);
     return {
       audio: dcBlockFor(compiled, raw),
       sampleRate,
-      totalFrames: compiled.totalFrames,
+      totalFrames: renderFrames,
       samplesPerFrame,
       writeLog,
       regSnapshots,

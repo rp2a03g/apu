@@ -22,10 +22,9 @@ const { load } = require('./load.js');
 const FPS = 60.0988;
 
 function preLoopLength(r) {
-  // compile() の totalFrames はループ地点(L)がある場合に [L, end) を末尾へ複製した後の値。
-  // noteList は複製しないので、複製前の長さに戻して比べる
-  if (r.loopPointFrame == null) return r.totalFrames;
-  return (r.totalFrames + r.loopPointFrame) / 2;
+  // compile() の totalFrames は1周ぶん(曲頭〜曲末)。L があっても末尾複製はしない(2026-10-28、
+  // 再生側が Mml.LoopPlan で折り返す)ので noteList の合計と直接比べられる
+  return r.totalFrames;
 }
 
 function checkSong(label, source, MML, opts) {
@@ -128,7 +127,8 @@ function fixedCases(MML) {
   // ループ展開: 書かれたとおり複製される。L(ループ地点)では複製しない
   r = MML.Mml.compile('A o4 [c4 d4]2 L e4', {});
   eq('loop expand', r.noteList.A.map(n => n.note), [48, 50, 48, 50, 52]);
-  eq('L not duplicated', r.noteList.A.reduce((a, n) => a + n.frames, 0), (r.totalFrames + r.loopPointFrame) / 2);
+  eq('L not duplicated', r.noteList.A.reduce((a, n) => a + n.frames, 0), r.totalFrames);
+  eq('L loopLen', r.loopLen, r.totalFrames - r.loopPointFrame);
 
   // テンポ変化の記録
   r = MML.Mml.compile('A t120 o4 c4 t90 d4', {});

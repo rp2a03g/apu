@@ -26,7 +26,7 @@
  *   editorFontPx, showTitle, title, subtitle, followCh, bitrate
  *   pane2                         … 'editor'(MMLエディタ、既定) | 'score'(楽譜)。「エディタ」の区画に出すもの
  *   scoreMode, scoreStyle         … 楽譜のとき: 'all' | 'piano'(楽譜の形)、'color' | 'mono'(白地に黒)
- *   source, compiled              … MML 原文とコンパイル結果(highlightRanges / channelLetters / frameRate / loopPointFrame)
+ *   source, compiled              … MML 原文とコンパイル結果(highlightRanges / channelLetters / frameRate / loopPointFrame / loopLen)
  *   cap                           … captureSongAsync の結果(regSnapshots/writeLog/audio…)。プレビューは即席の同形でよい
  *   keyboardDisplay, chips, tuning… 鍵盤表示のインスタンスとチップ構成、{tuningCents,tuningNotes}
  *   isChannelMuted(ch)            … ミュート中の ch はハイライトしない(音も鳴っていない)
@@ -147,9 +147,9 @@
     const fps = (compiled && compiled.frameRate) || 60;
     const totalFrames = (compiled && compiled.totalFrames) || 0;
     const loopPoint = compiled && compiled.loopPointFrame != null ? compiled.loopPointFrame : null;
-    // コンパイル結果は「イントロ+ループ1周」までの範囲(totalFrames = naturalEnd + loopLen、
-    // loopLen = naturalEnd - loopPoint)。それより先は同じ周回を繰り返すので折り返す
-    const loopLen = loopPoint != null ? Math.round((totalFrames - loopPoint) / 2) : 0;
+    // コンパイル結果は1周ぶん(曲頭〜曲末=totalFrames)。それより先は [L, 曲末) を繰り返すので折り返す
+    // (Mml.LoopPlan.mapFrame と同じ写像。音の cap は NSF を実際に回した全長ぶんある)
+    const loopLen = (loopPoint != null && compiled.loopLen > 0) ? compiled.loopLen : 0;
     const wrapFrame = (f) => {
       if (f < totalFrames || loopLen <= 0) return Math.min(f, Math.max(0, totalFrames - 1));
       return loopPoint + ((f - loopPoint) % loopLen);
@@ -255,11 +255,10 @@
     const fps = compiled.frameRate || 60;
     const totalFrames = compiled.totalFrames || 0;
     const loopPoint = compiled.loopPointFrame != null ? compiled.loopPointFrame : null;
-    const loopLen = loopPoint != null ? Math.round((totalFrames - loopPoint) / 2) : 0;
+    const loopLen = (loopPoint != null && compiled.loopLen > 0) ? compiled.loopLen : 0;
     const wrapFrame = (f) => {
       if (loopPoint == null || loopLen <= 0) return f;
-      const natural = loopPoint + loopLen;
-      return f < natural ? f : loopPoint + ((f - natural) % loopLen);
+      return f < totalFrames ? f : loopPoint + ((f - loopPoint) % loopLen);
     };
     // 五線の間隔: エディタの文字サイズに合わせる(18px → 8)
     const sp = Math.max(4, Math.round((opt.editorFontPx || 18) * 0.45));
