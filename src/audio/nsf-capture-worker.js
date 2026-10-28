@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-10-13 07:02:07
+ * Built by tools/build-capture-workers.ps1 at 2026-10-28 10:46:30
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-10-13 07:02:07';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-10-28 10:46:30';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -6061,8 +6061,17 @@
     // ★干渉源になるのは「実際に音が出ているノイズ」だけ。$4015で無効、または長さカウンタが0の
     //   ノイズはレベル値がレジスタに残っていても出力0で、三角波は一切減衰しない
     //   (APUを回した実測でも減衰0。以前はレジスタ値だけを見て無音のノイズでも減衰表示していた)
+    // ★APUの実状態(apuEnv)が無い経路(MML再生/NSF・VGMのロール構築)では、長さカウンタと線形カウンタを
+    //   レジスタ値から推し量る。レジスタ値だけだと次の2つを「鳴っている」と見誤っていた(2026-10-28):
+    //   ・ノイズ: $400F を一度も書いていなければ長さカウンタは0のまま(MMLで D を使わない曲が、
+    //     $400C/$400E 未書込み=0 → エンベロープモード・周期0 と読まれ C1 に曲の最後まで出っぱなし)
+    //   ・三角波: $4008 の下位7bit(線形カウンタの再ロード値)が0なら無音。ppmck の休符は $4008=$80
+    //     だけを書き、周期と $4015 は残すので、休符の間も直前の音高が続いて見えていた
+    //   実状態があるときはそちらが優先(下の判定はどちらも apuEnv が無いときだけ効く)
+    const noiseLenLoaded = snap[0x400F] !== undefined;
+    const triLinearOn = snap[0x400B] !== undefined && ((snap[0x4008] || 0) & 0x7F) !== 0;
     const noiseAudiblePre = !!(status & 8) && noiseLevelPre > 0 &&
-      (!eNoisePre || eNoisePre.len === undefined || eNoisePre.len > 0);
+      (eNoisePre ? (eNoisePre.len === undefined || eNoisePre.len > 0) : noiseLenLoaded);
     const noiseMaskPre = noiseAudiblePre ? noiseLevelPre : 0;
     // 三角波は消音中も最後のシーケンサ値をDCとして保持し、そのDCもtndミキサーに効く
     const triSeqPre = (apuEnv && apuEnv.triangle && apuEnv.triangle.seq !== undefined)
@@ -6090,7 +6099,7 @@
         // 三角波は長さカウンタ/線形カウンタのどちらかが0になると消音する(レジスタ値は
         // 変わらないためライブ状態が無いと判定できない。nsf2mml側のtriangleAudibleFrames相当)
         active: !!(status & 4) && freq > 0 &&
-          (!apuEnv || !apuEnv.triangle || (apuEnv.triangle.len > 0 && apuEnv.triangle.linear > 0)) });
+          ((apuEnv && apuEnv.triangle) ? (apuEnv.triangle.len > 0 && apuEnv.triangle.linear > 0) : triLinearOn) });
     }
 
     // APU Noise
@@ -6103,7 +6112,7 @@
       const rv = noiseLevelPre;
       const noiseFreq = CPU_CLOCK / NOISE_PERIOD[noiseIndex]; // LFSRシフトレート
       const triAudible = !!(status & 4) &&
-        (!apuEnv || !apuEnv.triangle || (apuEnv.triangle.len > 0 && apuEnv.triangle.linear > 0));
+        ((apuEnv && apuEnv.triangle) ? (apuEnv.triangle.len > 0 && apuEnv.triangle.linear > 0) : triLinearOn);
       // ★三角波は鳴っている間 0〜15 を往復する。1フレームの瞬間値をそのまま使うと
       //   フレームごとに 0〜15 へばらつき、ノイズのバーが毎フレーム暴れる。鳴っている間は
       //   「0〜15の平均」で代表させ(null)、消音して値が固定されている時だけ保持値を使う。
@@ -6120,7 +6129,7 @@
         volApparent: noiseRatio, rawVol: rv, rawVolMax: 15,
         envMode: e ? e.env : false, maskBy: noiseMaskBy, maskTip: MASK_TIP_REG,
         wave: { t: 'noise', short: noiseShort, nx: noiseShort ? 93 : 32767, ny: 2 },
-        active: !!(status & 8) && pulseActive(noiseRegPre) && (!e || e.len === undefined || e.len > 0),
+        active: !!(status & 8) && pulseActive(noiseRegPre) && (e ? (e.len === undefined || e.len > 0) : noiseLenLoaded),
         noise: true, noiseShort, noiseIndex, noiseFreq });
     }
     // APU DMC
@@ -9390,11 +9399,9 @@
         if (!force && nowMs - lastSeekMs < SEEK_THROTTLE_MS) return;
         lastSeekMs = nowMs;
         if (!this.onRollSeek) return;
-        // ロールの位置は曲内の絶対秒。プレイヤー/シークバーの秒は「現在の再生速度での実時間」
-        // なので速度分母を掛けて渡す(逆変換は _renderRoll のrawPos*speedFactor参照)
-        const denom = this._speedDenom || 1;
-        const got = this.onRollSeek(songSec * denom);
-        if (typeof got === 'number' && Number.isFinite(got)) this._rollDrag.pos = got / denom;
+        // ロールの位置もプレイヤー/シークバーの秒も「曲の秒」(再生速度に関係しない)なのでそのまま渡す
+        const got = this.onRollSeek(songSec);
+        if (typeof got === 'number' && Number.isFinite(got)) this._rollDrag.pos = got;
       };
       // ── 指の操作(2026-09-24) ──
       //  ・2本指ピンチ: 指の間隔の「時間軸方向」の変化で時間の拡大率、「音程軸方向」の変化で音程の拡大率
@@ -10095,7 +10102,8 @@
         // (setRollTimelineFromRegSnapshots()と同じ考え方)。
         const dmcTl = buildDmcTimeline(this._state.writeLog || [], this._state.totalFrames, frameDur);
         const rollExtraSnaps = Object.assign({}, this._extraSnaps,
-          { n163Live: null, fme7Live: null, vrc7Live: null, mmc5Live: null, dmcSeq: dmcTl.seq, dmcEnd: dmcTl.end,
+          // apuEnvLive も同じ理由で外す(ロールを組む瞬間にプレイヤーが鳴っていると全フレームがその瞬間の状態になる)
+          { apuEnvLive: null, n163Live: null, fme7Live: null, vrc7Live: null, mmc5Live: null, dmcSeq: dmcTl.seq, dmcEnd: dmcTl.end,
             // FDSのハードウェア変調(セント偏差の線/FMの帯)。buildRollTracksFromRegSnapshotsPure と同じ
             fdsMod: this._chips.includes('fds') ? buildFdsModSnapshots(this._state.writeLog || [], frameDur * CPU_CLOCK) : null });
         this._rollTimeline = buildNoteTimelineFromChannelFrames(
@@ -12342,19 +12350,18 @@
       const rawPos = posSeconds || 0;
       const speedFactor = 1 / (this._speedDenom || 1);
       if (this._rollLastRawPos === null || rawPos < this._rollLastRawPos - 0.001) {
-        // 新規再生開始(rawPos=0)またはシークによる巻き戻り。rawPosは「現在の速度で
-        // 曲頭から目標地点まで再生した場合の実時間」(stream-player.jsのseek()参照)
-        // なので、rawPos*speedFactorが常に正しい曲内絶対秒になる(新規再生開始時は
-        // rawPos=0なので特別扱い不要で0と一致する)。
-        this._rollSongTimeBase = rawPos * speedFactor;
+        // 新規再生開始(rawPos=0)またはシークによる巻き戻り。rawPos(プレイヤーのgetPosition())は
+        // 曲の秒なのでそのまま基準にする。
+        this._rollSongTimeBase = rawPos;
         this._rollBaseWallMs = nowMs;
         this._rollCursor = {}; // 巻き戻り時は各trackの走査起点キャッシュも巻き戻す
       } else if (rawPos > this._rollLastRawPos + 1e-6) {
-        this._rollSongTimeBase += (rawPos - this._rollLastRawPos) * speedFactor; // 実測位置が更新された
+        this._rollSongTimeBase += rawPos - this._rollLastRawPos; // 実測位置が更新された
         this._rollBaseWallMs = nowMs;
       }
       this._rollLastRawPos = rawPos;
       const elapsedSinceBaseMs = Math.min(ROLL_INTERP_CAP_MS, Math.max(0, nowMs - (this._rollBaseWallMs || nowMs)));
+      // 補間は壁時計(実時間)の経過なので、曲の秒へは速度を掛けて写す
       let pos = this._rollSongTimeBase + (elapsedSinceBaseMs / 1000) * speedFactor;
       // ロールをドラッグしてシーク中は、実測位置でなくドラッグ位置を表示する(_attachRollSeekDrag参照)。
       // 巻き戻し方向にも動くので走査起点キャッシュは使わない
