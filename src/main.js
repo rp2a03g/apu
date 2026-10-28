@@ -1986,37 +1986,17 @@
   // --- 再生速度(1/1〜1/8。音程を保ったままテンポだけ落とす) ---
   // 現在アクティブなプレイヤー(MML/NSF/SPCのいずれか)に速度を適用し、
   // 曲を読み込み直した時にも直前の設定を引き継げるよう値を保持しておく。
+  // ★位置・長さ・再生範囲・シークはすべて「曲の秒」で、速度に関係しない(プレイヤーの
+  //   getPosition()/getDuration()/seekSong())。速度を変えても workletDuration や範囲は換算し直さない。
+  //   実時間が要る所(終点前のフェード・メトロノーム・ロック画面の再生速度)だけがその場で速度を使う
   let currentSpeedFactor = 1;
   keyboardDisplay.onSpeedChange = (factor) => {
     currentSpeedFactor = factor;
-    if (activePlayer && activePlayer.setSpeed) {
-      activePlayer.setSpeed(factor);
-      if (lastPlayMode === 'capture-mml' || lastPlayMode === 'nsf') workletDuration = activePlayer.getDuration();
+    for (const p of [activePlayer, spcActivePlayer, kssActivePlayer, gbsActivePlayer, hesActivePlayer, vgmActivePlayer, psfActivePlayer]) {
+      if (p && p.setSpeed) p.setSpeed(factor);
     }
-    if (spcActivePlayer && spcActivePlayer.setSpeed) {
-      spcActivePlayer.setSpeed(factor);
-      if (lastPlayMode === 'spc') workletDuration = spcActivePlayer.getDuration();
-    }
-    if (kssActivePlayer && kssActivePlayer.setSpeed) {
-      kssActivePlayer.setSpeed(factor);
-      if (lastPlayMode === 'kss') workletDuration = kssActivePlayer.getDuration();
-    }
-    if (gbsActivePlayer && gbsActivePlayer.setSpeed) {
-      gbsActivePlayer.setSpeed(factor);
-      if (lastPlayMode === 'gbs') workletDuration = gbsActivePlayer.getDuration();
-    }
-    if (hesActivePlayer && hesActivePlayer.setSpeed) {
-      hesActivePlayer.setSpeed(factor);
-      if (lastPlayMode === 'hes') workletDuration = hesActivePlayer.getDuration();
-    }
-    if (vgmActivePlayer && vgmActivePlayer.setSpeed) {
-      vgmActivePlayer.setSpeed(factor);
-      if (lastPlayMode === 'vgm') workletDuration = vgmActivePlayer.getDuration();
-    }
-    if (psfActivePlayer && psfActivePlayer.setSpeed) {
-      psfActivePlayer.setSpeed(factor);
-      if (lastPlayMode === 'psf') workletDuration = psfActivePlayer.getDuration();
-    }
+    // メトロノームが曲に合わせて鳴っていれば、新しい速度で拍を合わせ直す
+    if (MML.UI.MetronomePanel) MML.UI.MetronomePanel.requestPlaybackSync();
   };
 
   // --- マスター音量(0〜1、全フォーマット共通の最終段。src/audio/stream-player.js
@@ -2486,11 +2466,8 @@
     if (monitorState && monitorState.getPosition) {
       const frameDuration = monitorState.samplesPerFrame / monitorState.sampleRate;
       const pos = monitorState.getPosition();
-      // MML再生(MmlStreamPlayer)はgetCurrentFrame()が speedFactor込みで既に正確な
-      // 曲フレーム位置を返す。pos(実時間)/frameDurationは等速(speedFactor=1)前提の
-      // 換算式なので、再生速度を等速以外にするとハイライト/レジスタモニタが
-      // 実際の再生と食い違っていた(pos基準のframeDuration換算をそのまま使うのは
-      // getCurrentFrame()を持たない他フォーマットへのフォールバックのみ)。
+      // getCurrentFrame()はプレイヤーが実際に適用したフレーム(端数の丸めまで一致)。
+      // pos は曲の秒なので pos/frameDuration でも同じ位置になるが、こちらはフォールバック。
       let frameIndex = (activePlayer && typeof activePlayer.getCurrentFrame === 'function')
         ? activePlayer.getCurrentFrame()
         : Math.floor(pos / frameDuration);
@@ -2859,7 +2836,8 @@
           const now = audioCtx.currentTime;
           g.cancelScheduledValues(now);
           g.setValueAtTime(g.value, now);
-          g.linearRampToValueAtTime(0.0001, now + Math.max(0, remain));
+          // remain は曲の秒。ランプは実時間で引くので速度で割る(低速再生でも終点ちょうどで無音になる)
+          g.linearRampToValueAtTime(0.0001, now + Math.max(0, remain) / (currentSpeedFactor || 1));
         } catch (e) { /* ignore */ }
       }
     } else if (endFadeActive) {
@@ -3716,7 +3694,7 @@
         const pos = currentPositionSeconds();
         const dur = workletDuration;
         if (pos !== null && Number.isFinite(pos) && Number.isFinite(dur) && dur > 0) {
-          try { ms.setPositionState({ duration: dur, position: Math.max(0, Math.min(dur, pos)), playbackRate: 1 }); } catch (e) { /* 値が不正なら出さないだけ */ }
+          try { ms.setPositionState({ duration: dur, position: Math.max(0, Math.min(dur, pos)), playbackRate: currentSpeedFactor || 1 }); } catch (e) { /* 値が不正なら出さないだけ */ }
         }
       }
     }
@@ -4212,7 +4190,7 @@
     if (p) {
       p.stop();
       if (restoreTo > 0 && (lastPlayMode === 'capture-mml' || lastPlayMode === 'nsf' || lastPlayMode === 'kss' || lastPlayMode === 'spc' || lastPlayMode === 'gbs' || lastPlayMode === 'hes' || lastPlayMode === 'vgm' || lastPlayMode === 'psf')) {
-        p.seek(Math.round(restoreTo * audioCtx.sampleRate));
+        p.seekSong(restoreTo);
       }
       if (transportRaf) cancelAnimationFrame(transportRaf);
       updateFormatPlayButtons();
@@ -4232,7 +4210,7 @@
       if (lastPlayMode !== 'capture-mml' && lastPlayMode !== 'nsf' && lastPlayMode !== 'kss' && lastPlayMode !== 'spc' && lastPlayMode !== 'gbs' && lastPlayMode !== 'hes' && lastPlayMode !== 'vgm' && lastPlayMode !== 'psf') return;
       const wasPlaying = p.isPlaying;
       p.pause();
-      p.seek(Math.round(Math.max(0, Math.min(workletDuration, seconds)) * audioCtx.sampleRate));
+      p.seekSong(Math.max(0, Math.min(workletDuration, seconds)));
       if (wasPlaying) {
         p.play();
         // 曲の位置が飛んだので、メトロノームは新しい拍へ合わせ直す
@@ -4255,7 +4233,7 @@
     else updateTransportUI();
   }
 
-  // 秒(現在の再生速度での実時間。シークバー/transportSeek()と同じ単位)へシークする共通入口。
+  // 曲の秒(再生速度に関係しない。シークバー/transportSeek()と同じ単位)へシークする共通入口。
   // シークバーの入力と鍵盤表示のピアノロールをドラッグしてのシーク(keyboardDisplay.onRollSeek)の
   // 両方から呼ぶ。範囲(0〜再生時間)と、NSF/KSS/SPC等の実ファイル再生ではバックグラウンド
   // キャプチャが追いついた範囲(currentBufferedFraction)にクランプし、実際にシークした秒を返す。
@@ -6126,7 +6104,8 @@
       return audioCtx;
     },
     getMmlTempo: currentMmlTempo,
-    getPlaybackClock
+    getPlaybackClock,
+    getSpeed: () => currentSpeedFactor
   });
 
   // --- 演奏入力(src/ui/performInput.js) ---

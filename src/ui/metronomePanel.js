@@ -42,6 +42,7 @@
   let getAudioCtx = null;
   let getMmlTempo = null;
   let getPlaybackClock = null;  // () => { songSec, ctxTime } | null (再生中のみ)
+  let getSpeed = null;          // () => number 再生速度(1=等速、1/2=半分の速さ)
   let needSync = false;         // 次に対応表が取れたら再生へ合わせ直す
 
   let popEl = null, popCloseHandler = null, popTempoTimer = null;
@@ -84,12 +85,19 @@
    * MMLの t<n> に追従する設定なら、そちらを優先する。MMLが未入力/テンポ未指定の
    * ときは手動値へ落ちる(「追従」を選んだ瞬間に無音や極端なテンポにならないように)。
    */
+  // 実際にクリックを鳴らすテンポ(実時間のBPM)。MMLに追従するときは再生速度を掛ける
+  // (速度1/2で再生しているなら曲の拍も実時間では半分の速さで来る)。手動テンポには掛けない
   function effectiveBpm() {
     if (state.followMml && getMmlTempo) {
       const t = getMmlTempo();
-      if (Number.isFinite(t) && t > 0) return t;
+      if (Number.isFinite(t) && t > 0) return t * currentSpeed();
     }
     return state.bpm;
+  }
+
+  function currentSpeed() {
+    const s = getSpeed ? getSpeed() : 1;
+    return (Number.isFinite(s) && s > 0) ? s : 1;
   }
 
   function ensureMetro() {
@@ -122,15 +130,20 @@
    *   (ScriptProcessorNodeは1バッファ先を埋めるので約93msずれる)。
    *   src/audio/stream-player.js の songTimeAt()/ctxTimeAt() が持つ対応表を使う。
    * ★曲頭からテンポ一定であることを前提にした換算(曲の途中に t<n> があるとずれる)。
+   * ★songSec は曲の秒、クリックの間隔(tickDurSec)は実時間。曲の秒での拍の間隔は
+   *   実時間の間隔×速度(MML追従なら effectiveBpm が速度を掛けてあるので元の拍に戻る)。
    */
   function syncToPlayback(songSec, ctxOfSongSec) {
     const m = ensureMetro();
     if (!m) return false;
+    m.setTempo(effectiveBpm()); // 速度を変えた直後でも、合わせ直す拍は新しいテンポで数える
     const tickDur = m.tickDurSec();
     if (!(tickDur > 0)) return false;
+    const speed = currentSpeed();
+    const songTick = tickDur * speed;
     // 直後の拍から鳴らす。ほぼ拍の上にいるときに1つ前を鳴らさないよう少しだけ進める
-    const idx = Math.ceil((songSec + 1e-4) / tickDur);
-    const at = ctxOfSongSec + (idx * tickDur - songSec);
+    const idx = Math.ceil((songSec + 1e-4) / songTick);
+    const at = ctxOfSongSec + (idx * songTick - songSec) / speed;
     const ctx = getAudioCtx ? getAudioCtx() : null;
     if (!ctx || at < ctx.currentTime + 0.02) return false;  // 間に合わない
     m.start({ at, startIndex: idx, countInBars: 0 });
@@ -534,6 +547,7 @@
      * opts.toggleEl / opts.settingsEl: ツールバーの2つのボタン
      * opts.getAudioCtx: () => AudioContext (必要なら生成して返す)
      * opts.getMmlTempo: () => number|null  現在のMMLのテンポ(BPM)
+     * opts.getSpeed: () => number  再生速度(MML追従のテンポに掛ける)
      */
     init(opts) {
       toggleEl    = opts.toggleEl;
@@ -541,6 +555,7 @@
       getAudioCtx = opts.getAudioCtx;
       getMmlTempo = opts.getMmlTempo;
       getPlaybackClock = opts.getPlaybackClock || null;
+      getSpeed = opts.getSpeed || null;
       loadState();
       if (toggleEl)   toggleEl.addEventListener('click', toggle);
       if (settingsEl) settingsEl.addEventListener('click', openPopover);

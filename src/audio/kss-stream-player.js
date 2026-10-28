@@ -503,18 +503,17 @@
 
     // targetFrameの直前まで(0..targetFrame、キャプチャが追いついていなければその手前まで)の
     // 書き込みをbus/チップへ再適用してシークする(NsfReplayStreamPlayer.seek()と同じ考え方)。
-    seek(samplePos) {
-      const sr = this.audioCtx.sampleRate;
-      let songFramePos = (samplePos / sr) * this.frameRate * this.speedFactor;
+    // songSec: 曲の位置(秒)。再生速度に関係しない(getPosition()と同じ単位)
+    seekSong(songSec) {
+      let songFramePos = Math.max(0, songSec) * this.frameRate;
       let targetFrame = Math.min(Math.floor(songFramePos), this.totalFrames - 1);
       const wl = this.writeLog || [];
       if (targetFrame >= 0 && !wl[targetFrame]) {
-        // 未キャプチャ範囲へのシーク: バッファ済み末尾にクランプし、samplePos/
-        // songFramePosも合わせて再計算する(そうしないとgetPosition()が矛盾した
-        // 位置を報告し続け、_isFrameReady(f)==falseのスタール状態に陥る)。
+        // 未キャプチャ範囲へのシーク: バッファ済み末尾にクランプし、songFramePosも
+        // 合わせて寄せる(そうしないとgetPosition()が矛盾した位置を報告し続け、
+        // _isFrameReady(f)==falseのスタール状態に陥る)。
         while (targetFrame > 0 && !wl[targetFrame]) targetFrame--;
         songFramePos = targetFrame;
-        samplePos = (songFramePos / this.frameRate / this.speedFactor) * sr;
       }
       this._buildChips(); // _dacVals もここで空になる(シーク先フレームの D/A は最終値のまま)
       this.cycleAccum = 0;
@@ -523,7 +522,6 @@
         if (!writes) break;
         this._applyWrites(writes);
       }
-      this.samplePos     = samplePos;
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevX = this.dcPrevY = 0;
@@ -560,12 +558,13 @@
       if (this._headerOpt) this._resetScan(Math.max(0, this.currentFrame));
     }
 
+    // 曲の秒(stream-player.js MmlStreamPlayer.getPosition()参照)
     getPosition() {
-      return this.samplePos / this.audioCtx.sampleRate;
+      return this._songFramePos / this.frameRate;
     }
 
     getDuration() {
-      return this.totalFrames / this.frameRate / this.speedFactor;
+      return this.totalFrames / this.frameRate;
     }
 
     getCurrentFrame() {

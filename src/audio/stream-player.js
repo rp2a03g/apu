@@ -331,7 +331,8 @@
       this.isPlaying      = false;
       this.onEnded        = null;
       this._anchorCtxTime   = null; // 直近のバッファが鳴り始める contextTime
-      this._anchorSamplePos = 0;    // そのバッファ先頭の samplePos
+      this._anchorSongSec   = 0;    // そのバッファ先頭の曲の位置(秒)
+      this._anchorSpeed     = 1;    // そのバッファを埋めたときの速度
       this._createNode();
     }
 
@@ -358,7 +359,8 @@
         //   currentTimeと突き合わせると1バッファぶん(4096sample≒93ms)先走る。
         //   メトロノームの同期と重ね録りの時刻合わせはこの対応表を使うこと。
         this._anchorCtxTime = e.playbackTime;
-        this._anchorSamplePos = this.samplePos;
+        this._anchorSongSec = this.getPosition();
+        this._anchorSpeed = this.speedFactor;
         this._fill(out);
       };
     }
@@ -454,8 +456,9 @@
       this.speedFactor = factor;
     }
 
-    seek(samplePos) {
-      const songFramePos = (samplePos / this.audioCtx.sampleRate) * this.frameRate * this.speedFactor;
+    // songSec: 曲の位置(秒)。再生速度に関係しない(getPosition()と同じ単位)
+    seekSong(songSec) {
+      const songFramePos = Math.max(0, songSec) * this.frameRate;
       const targetFrame = Math.min(Math.floor(songFramePos), this.totalFrames - 1);
       if (this.apu) { this.apu.reset(); this.apu.writeRegister(this.statusAddr, 0x0F); }
       for (const name in this.expansionMap) {
@@ -473,7 +476,6 @@
           }
         }
       }
-      this.samplePos     = samplePos;
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this._anchorCtxTime = null;   // 次のバッファで取り直す
@@ -508,38 +510,36 @@
       }
     }
 
+    // ★位置・長さ・シークは全形式とも「曲の秒」(再生速度に関係しない)。速度は曲の秒が
+    //   実時間1秒あたりどれだけ進むかだけを表す。範囲(!!/!!!)やシークバーはこの単位で持つ
     getPosition() {
-      return this.samplePos / this.audioCtx.sampleRate;
+      return this._songFramePos / this.frameRate;
     }
 
     getDuration() {
-      return this.totalFrames / this.frameRate / this.speedFactor;
+      return this.totalFrames / this.frameRate;
     }
 
-    // 現在の曲フレーム位置(_songFramePosをオーディオサンプル単位で毎サンプル進めた
-    // 結果、speedFactor込みで既に正確)。getPosition()(実時間)をframeDurationで
-    // 単純に割ると再生速度が等速でない場合に曲の進行と食い違うため、frameIndexが
-    // 必要な箇所(MML再生ハイライト・CPU/サウンドレジスタモニタ)はこちらを使うこと。
     getCurrentFrame() {
       return Math.max(0, this.currentFrame);
     }
 
     /*
      * 曲の位置(秒、getPosition()と同じ単位) ⇔ AudioContextの時刻 の相互変換。
-     * 1サンプル=1/sampleRate秒で等速に進むので、直近のバッファの対応点1つあれば
-     * 前後どちらへも外挿できる(傾きは常に1)。再生していなければ null。
+     * 実時間1秒で曲は速度ぶん進むので、直近のバッファの対応点1つとそのときの速度があれば
+     * 前後どちらへも外挿できる。再生していなければ null。
      *
      * 用途: メトロノームを曲の拍へ合わせる / 重ね録りで打鍵の時刻を曲の位置へ写す。
      * ★getPosition()とcurrentTimeを直接突き合わせてはいけない(1バッファぶんずれる)。
      */
     songTimeAt(ctxTime) {
       if (!this.isPlaying || this._anchorCtxTime == null) return null;
-      return this._anchorSamplePos / this.audioCtx.sampleRate + (ctxTime - this._anchorCtxTime);
+      return this._anchorSongSec + (ctxTime - this._anchorCtxTime) * this._anchorSpeed;
     }
 
     ctxTimeAt(songSec) {
       if (!this.isPlaying || this._anchorCtxTime == null) return null;
-      return this._anchorCtxTime + (songSec - this._anchorSamplePos / this.audioCtx.sampleRate);
+      return this._anchorCtxTime + (songSec - this._anchorSongSec) / this._anchorSpeed;
     }
 
     destroy() {
@@ -1062,19 +1062,18 @@
     // targetFrameの直前まで(0..targetFrame、キャプチャが追いついていなければその手前まで)の
     // 書き込みをbus/apuへ再適用してシークする(MmlStreamPlayer.seek()と同じ考え方)。
     // エンベロープ/スイープの内部クロック位相までは復元されない(同じ既知の割り切り)。
-    seek(samplePos) {
-      const sr = this.audioCtx.sampleRate;
-      let songFramePos = (samplePos / sr) * this.frameRate * this.speedFactor;
+    // songSec: 曲の位置(秒)。再生速度に関係しない(getPosition()と同じ単位)
+    seekSong(songSec) {
+      let songFramePos = Math.max(0, songSec) * this.frameRate;
       let targetFrame = Math.min(Math.floor(songFramePos), this.totalFrames - 1);
       const wl = this.writeLog || [];
       if (targetFrame >= 0 && !wl[targetFrame]) {
-        // 未キャプチャ範囲へのシーク: バッファ済み末尾にクランプする。samplePos/
-        // songFramePosも合わせて再計算しないと、getPosition()が「要求された(まだ
-        // 存在しない)位置」を報告し続け、次の_fill()でcurrentFrameとsongFramePosが
-        // 食い違ってしまう(_isFrameReady(f)==falseのスタール状態に陥る)。
+        // 未キャプチャ範囲へのシーク: バッファ済み末尾にクランプする。songFramePosも
+        // 合わせて寄せないと、getPosition()が「要求された(まだ存在しない)位置」を報告し続け、
+        // 次の_fill()でcurrentFrameとsongFramePosが食い違ってしまう
+        // (_isFrameReady(f)==falseのスタール状態に陥る)。
         while (targetFrame > 0 && !wl[targetFrame]) targetFrame--;
         songFramePos = targetFrame;
-        samplePos = (songFramePos / this.frameRate / this.speedFactor) * sr;
       }
       this._buildChips();
       this.cycleAccum = 0;
@@ -1088,7 +1087,6 @@
       if (this.n163Snapshots && this.bus.expansion.n163) {
         applyN163RamSnapshot(this.bus.expansion.n163, this.n163Snapshots[targetFrame]);
       }
-      this.samplePos     = samplePos;
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevX = this.dcPrevY = 0;
@@ -1125,12 +1123,13 @@
       if (this.busOpt) this._resetScan(Math.max(0, this.currentFrame));
     }
 
+    // 曲の秒(MmlStreamPlayer.getPosition()参照)
     getPosition() {
-      return this.samplePos / this.audioCtx.sampleRate;
+      return this._songFramePos / this.frameRate;
     }
 
     getDuration() {
-      return this.totalFrames / this.frameRate / this.speedFactor;
+      return this.totalFrames / this.frameRate;
     }
 
     getCurrentFrame() {

@@ -573,15 +573,14 @@
 
     setSpeed(factor) { this.speedFactor = factor; }
 
-    seek(samplePos) {
-      const sr = this.audioCtx.sampleRate;
-      let songFramePos = (samplePos / sr) * this.frameRate * this.speedFactor;
+    // songSec: 曲の位置(秒)。再生速度に関係しない(getPosition()と同じ単位)
+    seekSong(songSec) {
+      let songFramePos = Math.max(0, songSec) * this.frameRate;
       let targetFrame = Math.min(Math.floor(songFramePos), this.totalFrames - 1);
       const snaps = this.snapshots || [];
       if (targetFrame >= 0 && !snaps[targetFrame]) {
         while (targetFrame > 0 && !snaps[targetFrame]) targetFrame--;
         songFramePos = targetFrame;
-        samplePos = (songFramePos / this.frameRate / this.speedFactor) * sr;
       }
       this._buildApu();
       this.cycleAccum = 0;
@@ -594,7 +593,6 @@
         while (this._ddaTracePos < this.ddaTrace.length && this.ddaTrace.frame[this._ddaTracePos] < targetFrame) this._ddaTracePos++;
       }
       if (targetFrame >= 0 && snaps[targetFrame]) this._applyFrame(targetFrame);
-      this.samplePos     = samplePos;
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
@@ -621,8 +619,9 @@
       if (this.header) this._resetScan(Math.max(0, this.currentFrame));
     }
 
-    getPosition() { return this.samplePos / this.audioCtx.sampleRate; }
-    getDuration() { return this.totalFrames / this.frameRate / this.speedFactor; }
+    // 曲の秒(stream-player.js MmlStreamPlayer.getPosition()参照)
+    getPosition() { return this._songFramePos / this.frameRate; }
+    getDuration() { return this.totalFrames / this.frameRate; }
     getCurrentFrame() { return Math.max(0, this.currentFrame); }
 
     destroy() {

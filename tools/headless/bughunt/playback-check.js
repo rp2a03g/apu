@@ -19,6 +19,7 @@
  *   pause    一時停止中は位置が進まず、再開後は続きが一致
  *   seek     シーク後の音 = 通常再生のその位置以降 … 類似度 平均≥0.9(位相の割り切りは許す)、位置の報告が合う
  *   speed    速度 1/2 でも音程は同じ            … 遅い出力の窓 ↔ 正解の半分の時刻の窓 類似度≥0.9
+ *   speedpos 速度 1/2 でも位置・長さ・シークは曲の秒 … シーク先を報告し、実時間2秒で曲が1秒進み、曲末まで鳴る
  *   mute     全chミュートで無音、解除で復帰      … RMS<1e-3 / 解除後は通常と一致
  *   end      曲末で onEnded が1回だけ呼ばれ、位置が長さを超えない
  *
@@ -121,10 +122,13 @@ function pump(p, nbuf) {
   for (let k = 0; k < nbuf; k++) {
     L.fill(0); R.fill(0);
     ev.playbackTime = p.audioCtx.currentTime;
-    const before = Math.round(p.getPosition() * SR);
+    // advanced = このバッファで実際に鳴らしたサンプル数(待ちの無音を除く)。getPosition() は曲の秒で、
+    // SPC(32kHz)/PSF の内部刻みの端数で ±1 サンプル揺れるので、出力を数える samplePos を優先する
+    const produced = () => (typeof p.samplePos === 'number' ? p.samplePos : typeof p._samplePos === 'number' ? p._samplePos : Math.round(p.getPosition() * SR));
+    const before = produced();
     p.node.onaudioprocess(ev);
     p.audioCtx.currentTime += BUF / SR;
-    const after = Math.round(p.getPosition() * SR);
+    const after = produced();
     out.push({ L: L.slice(), R: R.slice(), advanced: after - before });
   }
   return out;
@@ -541,7 +545,7 @@ async function checkSong(MML, fmt, ad, it, sec) {
     const p = fresh();
     pump(p, Math.floor(nb / 6));
     const target = Math.min(sec * 0.5, 2.5);
-    p.seek(Math.round(target * SR));
+    p.seekSong(target);
     const posAfter = p.getPosition();
     const got = mono(pump(p, nbufFor(sec - target)), false);
     const from = Math.round(target * SR);
@@ -560,6 +564,31 @@ async function checkSong(MML, fmt, ad, it, sec) {
     const s = similarity(slow, ref, sec, { ratio: 0.5, searchLag: true });
     const dur = p.getDuration ? p.getDuration() : null;
     rec('speed', s.mean >= 0.9, `1/2倍速の窓 ↔ 正解の半分の時刻: 類似度 平均 ${s.mean.toFixed(3)} 最低 ${s.min.toFixed(3)} / getDuration=${dur === null ? '-' : dur.toFixed(1)}`, { mean: s.mean });
+  }
+
+  // speedpos: 位置・長さ・シークは再生速度に関係なく曲の秒(途中再生の指定と速度がかみ合う)
+  {
+    const p = fresh();
+    p.setSpeed(0.5);
+    const dur = p.getDuration ? p.getDuration() : totalFrames / 60;
+    const target = Math.min(sec * 0.4, 2);
+    p.seekSong(target);
+    const posAfter = p.getPosition();
+    pump(p, nbufFor(2));
+    const pos2 = p.getPosition();
+    // 曲末の手前へ飛び、実時間で残りの2倍+αを回すと曲末で終わる(速度で曲の途中に終わらない)。
+    // 曲データが取り込み長さより先に終わる曲(短いVGM等)は、等速で終わった位置が曲末
+    const songEnd = endedEarly !== null ? endedEarly : dur;
+    const q = fresh();
+    q.setSpeed(0.5);
+    let ended = 0; q.onEnded = () => ended++;
+    const back = Math.min(1, songEnd * 0.2);
+    q.seekSong(songEnd - back);
+    pump(q, nbufFor(back * 2 + 1));
+    const posEnd = q.getPosition();
+    const ok = Math.abs(posAfter - target) < 0.05 && Math.abs(pos2 - (posAfter + 1)) < 0.06 &&
+      Math.abs(dur - fresh().getDuration()) < 1e-6 && ended === 1 && posEnd >= songEnd - back * 0.5;
+    rec('speedpos', ok, `1/2倍速: ${target.toFixed(2)}s へシーク→報告 ${posAfter.toFixed(3)} / 実時間2秒後 ${pos2.toFixed(3)} / 長さ ${dur.toFixed(2)} / 曲末 onEnded ${ended} 回 位置 ${posEnd.toFixed(2)}`);
   }
 
   // mute: 全chミュートで無音、解除で復帰

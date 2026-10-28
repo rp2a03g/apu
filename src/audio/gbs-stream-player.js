@@ -432,21 +432,19 @@
 
     // 対象フレームのスナップショットを直接適用するだけで済む(writeLog再生と違い
     // フレーム0からの再生ループが不要。KssReplayStreamPlayer.seek()より単純)。
-    seek(samplePos) {
-      const sr = this.audioCtx.sampleRate;
-      let songFramePos = (samplePos / sr) * this.frameRate * this.speedFactor;
+    // songSec: 曲の位置(秒)。再生速度に関係しない(getPosition()と同じ単位)
+    seekSong(songSec) {
+      let songFramePos = Math.max(0, songSec) * this.frameRate;
       let targetFrame = Math.min(Math.floor(songFramePos), this.totalFrames - 1);
       const snaps = this.snapshots || [];
       if (targetFrame >= 0 && !snaps[targetFrame]) {
         // 未キャプチャ範囲へのシーク: バッファ済み末尾にクランプする(NsfReplayStreamPlayerと同じ考え方)
         while (targetFrame > 0 && !snaps[targetFrame]) targetFrame--;
         songFramePos = targetFrame;
-        samplePos = (songFramePos / this.frameRate / this.speedFactor) * sr;
       }
       this._buildApu();
       this.cycleAccum = 0;
       if (targetFrame >= 0 && snaps[targetFrame]) this._applyFrame(targetFrame);
-      this.samplePos     = samplePos;
       this.currentFrame  = targetFrame;
       this._songFramePos = songFramePos;
       this.dcPrevXL = this.dcPrevYL = this.dcPrevXR = this.dcPrevYR = 0;
@@ -474,12 +472,13 @@
       if (this.header) this._resetScan(Math.max(0, this.currentFrame));
     }
 
+    // 曲の秒(stream-player.js MmlStreamPlayer.getPosition()参照)
     getPosition() {
-      return this.samplePos / this.audioCtx.sampleRate;
+      return this._songFramePos / this.frameRate;
     }
 
     getDuration() {
-      return this.totalFrames / this.frameRate / this.speedFactor;
+      return this.totalFrames / this.frameRate;
     }
 
     getCurrentFrame() {

@@ -44,7 +44,7 @@
       this.frameBuffer = null; // {left,right}
       this.frameOffset = 0;
       this.totalFrames = 0;
-      this.currentFrame = 0;   // 出力済みフレーム数(VgmPlayer.renderFrame呼出し回数)
+      this.currentFrame = 0;   // 曲のフレーム位置(VGM時間。_songFrame()を毎フレーム写す)
       this.frameRate = MML.Emu.VGM_FRAME_RATE || 60;
       this.speedFactor = 1;
       this._samplePos = 0;
@@ -82,7 +82,9 @@
       let outPos = 0;
       while (outPos < outL.length) {
         if (!this.frameBuffer || this.frameOffset >= this.frameBuffer.left.length) {
-          if ((this.totalFrames > 0 && this.currentFrame >= this.totalFrames) || this.player.ended) {
+          // 曲末は曲の時間(VGM時間)で判定する。出力したフレーム数(実時間)で数えると
+          // 低速再生で曲の途中に終わってしまう(速度1/2なら半分)
+          if ((this.totalFrames > 0 && this._songFrame() >= this.totalFrames) || this.player.ended) {
             outL.fill(0, outPos); outR.fill(0, outPos);
             this.isPlaying = false;
             if (this.onEnded) this.onEnded();
@@ -90,7 +92,7 @@
           }
           this.frameBuffer = this.player.renderFrame(sr, false, true);
           this.frameOffset = 0;
-          this.currentFrame++;
+          this.currentFrame = this._songFrame();
           // 割当プレビュー(src/audio/assign-preview.js): このフレームの元ch状態でNSF側チップを鳴らし、フレーム全体へ足す
           if (this.preview && this.preview.enabled) {
             const pv = this.preview, fb = this.frameBuffer;
@@ -110,8 +112,9 @@
           outL[outPos + i] = yL; outR[outPos + i] = yR;
           // ★ミュート中は無音を数えない(ミュートは聴き方の設定であって曲の内容ではない。
           // main.js syncSilenceDetect が silenceDetectEnabled を落とす)
+          // 無音の長さは曲の時間で数える(実時間だと低速再生で曲中の休みを曲末と誤認する)
           if (this.silenceDetectEnabled === false) { this._silentRun = 0; } else if (Math.abs(yL) < SILENCE_EPS && Math.abs(yR) < SILENCE_EPS) {
-            this._silentRun++;
+            this._silentRun += this.speedFactor;
             if (!this._silenceFired && this._silentRun >= sr * SILENCE_SEC) {
               this._silenceFired = true;
               if (this.onSilenceTimeout) this.onSilenceTimeout();
@@ -171,11 +174,10 @@
       if (this.player) this.player.speedFactor = factor;
     }
 
-    // 実時間(出力サンプル)位置へのシーク。VGM時間 = 実時間 × speedFactor。
-    seek(samplePos) {
+    // songSec: 曲の位置(秒、VGM時間)。再生速度に関係しない(getPosition()と同じ単位)
+    seekSong(songSec) {
       if (!this.player) return;
-      const sr = this.audioCtx.sampleRate;
-      const targetVgmSample = Math.max(0, Math.floor((samplePos / sr) * this.speedFactor * VGM_RATE));
+      const targetVgmSample = Math.max(0, Math.floor(songSec * VGM_RATE));
       // seekTo は控えてあるチェックポイント(5秒間隔)の手前から再開する。
       // 無い/対応外のチップがある曲では中で reset()+頭から流す(VgmPlayer.seekTo参照)
       this.player.seekTo(targetVgmSample);
@@ -183,8 +185,7 @@
       if (this._lastMute) this.player.applyMute(this._lastMute);
       if (this._lastVolume) this.player.applyVolume(this._lastVolume);
       this._resetState();
-      this._samplePos = samplePos;
-      this.currentFrame = Math.floor(targetVgmSample / (VGM_RATE / this.frameRate));
+      this.currentFrame = this._songFrame();
     }
 
     applyMute(mute) {
@@ -199,11 +200,20 @@
       if (this.player) this.player.applyVolume(volume);
     }
 
-    getPosition() { return this._samplePos / this.audioCtx.sampleRate; }
-    getDuration() { return this.totalFrames / this.frameRate / this.speedFactor; }
-    getCurrentFrame() {
-      return this.player ? Math.floor(this.player.samplePos / (VGM_RATE / this.frameRate)) : 0;
+    // 曲の秒(stream-player.js MmlStreamPlayer.getPosition()参照)。VgmPlayer.samplePos が曲のサンプル位置。
+    // ★レンダリングはフレーム単位(約735サンプル)なので、出力済みバッファの未再生ぶんだけ先へ進んでいる。
+    //   その分を差し引いて「いま鳴っている位置」にする
+    getPosition() {
+      if (!this.player) return 0;
+      const ahead = this.frameBuffer ? (this.frameBuffer.left.length - this.frameOffset) : 0;
+      const sec = this.player.samplePos / VGM_RATE - ahead / this.audioCtx.sampleRate * this.speedFactor;
+      return Math.max(0, sec);
     }
+    getDuration() { return this.totalFrames / this.frameRate; }
+    getCurrentFrame() {
+      return this.player ? this._songFrame() : 0;
+    }
+    _songFrame() { return Math.floor(this.player.samplePos / (VGM_RATE / this.frameRate)); }
 
     destroy() {
       this.isPlaying = false;

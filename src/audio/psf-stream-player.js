@@ -57,6 +57,7 @@
       this._frac = 0;             // 出力1サンプルあたりの SPU サンプル端数
       this._prevL = 0; this._prevR = 0; this._curL = 0; this._curR = 0;
       this._silentSamples = 0;
+      this._silenceFired = false;
       this._previewFrame = -1;
       this._createNode();
     }
@@ -163,8 +164,13 @@
         }
         outL[i] = l; outR[i] = r;
         this.samplePos++;
+        // 無音の長さは曲の時間で数える(実時間で数えると低速再生で曲中の休みを曲末と誤認する)
         if (Math.abs(l) < SILENCE_EPS && Math.abs(r) < SILENCE_EPS) {
-          if (++this._silentSamples === Math.round(SILENCE_SEC * this.audioCtx.sampleRate) && this.onSilenceTimeout) this.onSilenceTimeout();
+          this._silentSamples += this.speedFactor;
+          if (!this._silenceFired && this._silentSamples >= SILENCE_SEC * this.audioCtx.sampleRate) {
+            this._silenceFired = true;
+            if (this.onSilenceTimeout) this.onSilenceTimeout();
+          }
         } else {
           this._silentSamples = 0;
         }
@@ -181,6 +187,7 @@
       this._frac = 0;
       this._prevL = this._prevR = this._curL = this._curR = 0;
       this._silentSamples = 0;
+      this._silenceFired = false;
       this._previewFrame = -1;
     }
 
@@ -189,24 +196,22 @@
       if (this.replay) this.replay.speed = factor;
     }
 
-    /** samplePos: 出力レートでの位置(速度込みの実時間) */
-    seek(samplePos) {
+    /** songSec: 曲の位置(秒)。再生速度に関係しない(getPosition()と同じ単位) */
+    seekSong(songSec) {
       if (!this.replay) return;
-      const outRate = this.audioCtx.sampleRate;
-      let frame = Math.floor((samplePos / outRate) * 60 * this.speedFactor);
+      let frame = Math.floor(Math.max(0, songSec) * 60);
       const avail = this.cap.frameLog.length;
       if (frame >= avail) {
         // 未キャプチャ範囲へのシーク: 記録済みの末尾へ寄せる(SpcReplayStreamPlayer と同じ理由)
         frame = Math.max(0, avail - 1);
-        samplePos = (frame / 60 / this.speedFactor) * outRate;
       }
       frame = Math.min(frame, this.totalFrames - 1);
       this.replay.seekFrame(frame);
       this._applyChannelSettings();
-      this.samplePos = samplePos;
       this._frac = 0;
       this._prevL = this._prevR = this._curL = this._curR = 0;
       this._silentSamples = 0;
+      this._silenceFired = false;
       this._previewFrame = -1;
     }
 
@@ -226,8 +231,9 @@
       this._applyChannelSettings();
     }
 
-    getPosition() { return this.samplePos / this.audioCtx.sampleRate; }
-    getDuration() { return this.totalFrames / 60 / this.speedFactor; }
+    // 曲の秒(stream-player.js MmlStreamPlayer.getPosition()参照)。replay.pos は曲のサンプル位置(SPU_RATE)
+    getPosition() { return this.replay ? this.replay.pos / SPU_RATE : 0; }
+    getDuration() { return this.totalFrames / 60; }
     getCurrentFrame() { return this.replay ? Math.min(this.replay.frame, Math.max(0, this.totalFrames - 1)) : 0; }
 
     destroy() {

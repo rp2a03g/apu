@@ -374,19 +374,18 @@
     // targetFrameの直前まで(0..targetFrame、キャプチャが追いついていなければその手前まで)の
     // 書き込みをdspへ再適用してシークする(NsfReplayStreamPlayer.seek()と同じ考え方。
     // エンベロープ/BRR再生位置の内部クロック位相までは復元されない既知の割り切り)。
-    seek(samplePos) {
-      const outRate = this.audioCtx.sampleRate;
-      let songFramePos = (samplePos / outRate) * SPC_FRAME_RATE * this.speedFactor;
+    // songSec: 曲の位置(秒)。再生速度に関係しない(getPosition()と同じ単位)
+    seekSong(songSec) {
+      let songFramePos = Math.max(0, songSec) * SPC_FRAME_RATE;
       let targetFrame = Math.min(Math.floor(songFramePos), this.totalFrames - 1);
       const wl = this.writeLog || [];
       if (targetFrame >= 0 && !this._isFrameReady(targetFrame)) {
-        // 未キャプチャ範囲へのシーク: バッファ済み末尾にクランプする。samplePos/
-        // songFramePosも合わせて再計算する(そうしないとgetPosition()が矛盾した
-        // 位置を報告し続け、_isFrameReady(f)==falseのスタール状態に陥る)。
+        // 未キャプチャ範囲へのシーク: バッファ済み末尾にクランプする。songFramePosも
+        // 合わせて寄せる(そうしないとgetPosition()が矛盾した位置を報告し続け、
+        // _isFrameReady(f)==falseのスタール状態に陥る)。
         // 判定は writeLog[f] の有無ではなく _isFrameReady(空配列で事前確保されているため)
         while (targetFrame > 0 && !this._isFrameReady(targetFrame)) targetFrame--;
         songFramePos = targetFrame;
-        samplePos = (songFramePos / SPC_FRAME_RATE / this.speedFactor) * outRate;
       }
       this._buildChips();
       this._dspFrac = 0;
@@ -398,7 +397,6 @@
         const start = (f === 0) ? SEEDED_FRAME0_LEN : 0;
         for (let i = start; i < writes.length; i++) this.dsp.writeReg(writes[i].reg, writes[i].val);
       }
-      this.samplePos     = samplePos;
       this.currentFrame  = targetFrame;
       // targetFrameは上で全部流し切っているので、次の_stepDsp()で二重適用しないよう末尾へ
       this._writeIdx     = ((wl[targetFrame] || []).length) || 0;
@@ -422,12 +420,13 @@
       if (this.dsp) this.dsp.voiceVol = volume.slice();
     }
 
+    // 曲の秒(stream-player.js MmlStreamPlayer.getPosition()参照)
     getPosition() {
-      return this.samplePos / this.audioCtx.sampleRate;
+      return this._songFramePos / SPC_FRAME_RATE;
     }
 
     getDuration() {
-      return this.totalFrames / SPC_FRAME_RATE / this.speedFactor;
+      return this.totalFrames / SPC_FRAME_RATE;
     }
 
     getCurrentFrame() {

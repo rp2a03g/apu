@@ -4444,11 +4444,9 @@
         if (!force && nowMs - lastSeekMs < SEEK_THROTTLE_MS) return;
         lastSeekMs = nowMs;
         if (!this.onRollSeek) return;
-        // ロールの位置は曲内の絶対秒。プレイヤー/シークバーの秒は「現在の再生速度での実時間」
-        // なので速度分母を掛けて渡す(逆変換は _renderRoll のrawPos*speedFactor参照)
-        const denom = this._speedDenom || 1;
-        const got = this.onRollSeek(songSec * denom);
-        if (typeof got === 'number' && Number.isFinite(got)) this._rollDrag.pos = got / denom;
+        // ロールの位置もプレイヤー/シークバーの秒も「曲の秒」(再生速度に関係しない)なのでそのまま渡す
+        const got = this.onRollSeek(songSec);
+        if (typeof got === 'number' && Number.isFinite(got)) this._rollDrag.pos = got;
       };
       // ── 指の操作(2026-09-24) ──
       //  ・2本指ピンチ: 指の間隔の「時間軸方向」の変化で時間の拡大率、「音程軸方向」の変化で音程の拡大率
@@ -7396,19 +7394,18 @@
       const rawPos = posSeconds || 0;
       const speedFactor = 1 / (this._speedDenom || 1);
       if (this._rollLastRawPos === null || rawPos < this._rollLastRawPos - 0.001) {
-        // 新規再生開始(rawPos=0)またはシークによる巻き戻り。rawPosは「現在の速度で
-        // 曲頭から目標地点まで再生した場合の実時間」(stream-player.jsのseek()参照)
-        // なので、rawPos*speedFactorが常に正しい曲内絶対秒になる(新規再生開始時は
-        // rawPos=0なので特別扱い不要で0と一致する)。
-        this._rollSongTimeBase = rawPos * speedFactor;
+        // 新規再生開始(rawPos=0)またはシークによる巻き戻り。rawPos(プレイヤーのgetPosition())は
+        // 曲の秒なのでそのまま基準にする。
+        this._rollSongTimeBase = rawPos;
         this._rollBaseWallMs = nowMs;
         this._rollCursor = {}; // 巻き戻り時は各trackの走査起点キャッシュも巻き戻す
       } else if (rawPos > this._rollLastRawPos + 1e-6) {
-        this._rollSongTimeBase += (rawPos - this._rollLastRawPos) * speedFactor; // 実測位置が更新された
+        this._rollSongTimeBase += rawPos - this._rollLastRawPos; // 実測位置が更新された
         this._rollBaseWallMs = nowMs;
       }
       this._rollLastRawPos = rawPos;
       const elapsedSinceBaseMs = Math.min(ROLL_INTERP_CAP_MS, Math.max(0, nowMs - (this._rollBaseWallMs || nowMs)));
+      // 補間は壁時計(実時間)の経過なので、曲の秒へは速度を掛けて写す
       let pos = this._rollSongTimeBase + (elapsedSinceBaseMs / 1000) * speedFactor;
       // ロールをドラッグしてシーク中は、実測位置でなくドラッグ位置を表示する(_attachRollSeekDrag参照)。
       // 巻き戻し方向にも動くので走査起点キャッシュは使わない
