@@ -2676,15 +2676,32 @@
   //   無限: 終端なし。シークバーは「イントロ+1周」固定で、位置は周回ごとに L へ跳ね戻る。時間表示に周回カウンタ
   // L の無い曲は従来どおり1回で止まる(選択はグレーアウト)
   const MML_LOOP_KEY = 'mml.loopCount';
-  let mmlLoopChoice = (function () {
+  // localStorage の選択('2'〜'100' | 'time' | 'infinite')を読む。無効値は既定の2回。MML/VGMで共通
+  function loadLoopChoice(key) {
     try {
-      const v = localStorage.getItem(MML_LOOP_KEY);
+      const v = localStorage.getItem(key);
       if (v === 'time' || v === 'infinite') return v;
       const n = parseInt(v, 10);
       if (n >= 2 && n <= 100) return String(n);
     } catch (e) { /* ignore */ }
     return '2';
-  })();
+  }
+  // 選択リストの中身(2〜100回 / 時間指定 / 無限)を作り直して value を戻す。言語切替でも呼ぶ
+  function buildLoopChoiceOptions(sel, value) {
+    sel.innerHTML = '';
+    for (let n = 2; n <= 100; n++) {
+      const o = document.createElement('option');
+      o.value = String(n); o.textContent = T('{n}回', { n });
+      sel.appendChild(o);
+    }
+    for (const [v, label] of [['time', T('時間指定')], ['infinite', T('無限')]]) {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = label;
+      sel.appendChild(o);
+    }
+    sel.value = value;
+  }
+  let mmlLoopChoice = loadLoopChoice(MML_LOOP_KEY);
   function mmlNaturalSeconds(compiled) {
     const c = compiled || lastMmlCompiled;
     return c && c.frameRate ? Math.max(1, Math.ceil(c.naturalEndFrame / c.frameRate)) : 60;
@@ -2701,16 +2718,32 @@
     if (lastPlayMode !== 'capture-mml' || !c || !MML.Mml.LoopPlan.hasLoop(c)) return sec;
     return MML.Mml.LoopPlan.mapSeconds(c, sec);
   }
-  function isEndlessMmlPlayer(p) {
-    return !!(p && p === activePlayer && lastPlayMode === 'capture-mml' && p.endless && lastMmlCompiled);
+  // 無限ループ再生中のプレイヤー(MML: L の折り返し / VGM: ヘッダのループ位置)の { natural: イントロ+1周の秒, loop: 1周の秒 }。
+  // 無限でなければ null。位置は伸び続けるので、シークバー(イントロ+1周ぶん固定)へは wrapEndless で写し、
+  // 周回は lapEndless、バー上のシークは seekTargetEndless で今の周回の中へ
+  function endlessInfo(p) {
+    if (!p || p !== currentTransportPlayer() || !p.endless) return null;
+    if (lastPlayMode === 'capture-mml' && lastMmlCompiled) {
+      const c = lastMmlCompiled;
+      return { natural: c.naturalEndFrame / c.frameRate, loop: c.loopLen / c.frameRate };
+    }
+    if (p.loopInfo && p.loopInfo.loop > 0) return p.loopInfo;
+    return null;
   }
-  // 無限ループ中のシーク: バーは「イントロ+1周」固定なので、L より後ろの位置は今の周回の中へ写す
-  function mmlSeekTarget(p, sec) {
-    if (!isEndlessMmlPlayer(p)) return sec;
-    const c = lastMmlCompiled, lap = p.getLap();
-    const loopSec = c.loopPointFrame / c.frameRate, lenSec = c.loopLen / c.frameRate;
-    if (lap <= 1 || sec < loopSec) return sec;
-    return sec + (lap - 1) * lenSec;
+  function wrapEndless(info, sec) {
+    const start = info.natural - info.loop;
+    return sec < info.natural ? sec : start + ((sec - start) % info.loop);
+  }
+  function lapEndless(info, sec) {
+    return sec < info.natural ? 1 : 2 + Math.floor((sec - info.natural) / info.loop);
+  }
+  function seekTargetEndless(p, sec) {
+    const info = endlessInfo(p);
+    if (!info) return sec;
+    const lap = lapEndless(info, p.getPosition());
+    const start = info.natural - info.loop;
+    if (lap <= 1 || sec < start) return sec;
+    return sec + (lap - 1) * info.loop;
   }
   // 再生の長さ(シークバーの全長)。無限は「イントロ+1周」
   function mmlPlayerDuration(p, compiled) {
@@ -2814,8 +2847,9 @@
   function getTransportPosition() {
     const p = currentTransportPlayer();
     if (p) {
-      // 無限ループのMML再生は位置が伸び続けるので、バー(イントロ+1周)の中へ折り返す
-      if (isEndlessMmlPlayer(p)) return Math.max(0, MML.Mml.LoopPlan.mapSeconds(lastMmlCompiled, p.getPosition()));
+      // 無限ループ再生(MML/VGM)は位置が伸び続けるので、バー(イントロ+1周)の中へ折り返す
+      const info = endlessInfo(p);
+      if (info) return Math.max(0, wrapEndless(info, p.getPosition()));
       return Math.max(0, Math.min(workletDuration, p.getPosition()));
     }
     if (!capturedBuffer) return 0;
@@ -2842,12 +2876,13 @@
     // (同期要求が無ければ何もしない)
     if (MML.UI.MetronomePanel) MML.UI.MetronomePanel.tickPlaybackSync();
     setSeekBarValue(Math.round((pos / duration) * SEEK_RESOLUTION));
-    // 無限ループのMML再生は「何周目か」を時間の後ろに出す(ミニ操作窓は '/' の前だけ写すので影響しない)
-    const lapText = isEndlessMmlPlayer(p) ? ' · ' + T('{n}周目', { n: p.getLap() }) : '';
+    // 無限ループ再生(MML/VGM)は「何周目か」を時間の後ろに出す(ミニ操作窓は '/' の前だけ写すので影響しない)
+    const endless = endlessInfo(p);
+    const lapText = endless ? ' · ' + T('{n}周目', { n: lapEndless(endless, p.getPosition()) }) : '';
     setTimeDisplay(`${formatTime(pos)} / ${formatTime(duration)}${lapText}`);
-    // 終端フェード: サウンドファイル再生と、L のあるMML再生の回数/時間指定(fadeAtEnd。無限と L 無しは掛けない)
+    // 終端フェード: サウンドファイル再生と、L のあるMML再生の回数/時間指定(fadeAtEnd)。無限ループ中は掛けない
     const mmlFade = lastPlayMode === 'capture-mml' && p && p.fadeAtEnd;
-    if (playing && (isFadeableSoundFileMode() || mmlFade) && p && p.gainNode && audioCtx) {
+    if (playing && !endless && (isFadeableSoundFileMode() || mmlFade) && p && p.gainNode && audioCtx) {
       updateEndFadeGain(p, pos, duration);
     }
     if (playing) {
@@ -3800,6 +3835,13 @@
     }
     const durEl = keyboardDurationInput();
     if (durEl) durEl.value = String(sec);
+    // VGMの回数モードでは再生時間欄は計算値なので、手で秒を入れたら時間指定へ切り替える
+    if (kbdSourceKind === 'vgm' && vgmLoopChoice !== 'time' && vgmHasLoop(loadedVgmHeader)) {
+      vgmLoopChoice = 'time';
+      try { localStorage.setItem(VGM_LOOP_KEY, vgmLoopChoice); } catch (e) { /* ignore */ }
+      vgmLoopCountEl.value = vgmLoopChoice;
+      syncVgmLoopSelect();
+    }
   };
   keyboardDisplay.onExport = (fmtId, sec) => {
     // 動画は設定(画面構成・解像度…)とプレビューが要るので、書き出しパネルを開くだけにする
@@ -4276,7 +4318,7 @@
       if (lastPlayMode !== 'capture-mml' && lastPlayMode !== 'nsf' && lastPlayMode !== 'kss' && lastPlayMode !== 'spc' && lastPlayMode !== 'gbs' && lastPlayMode !== 'hes' && lastPlayMode !== 'vgm' && lastPlayMode !== 'psf') return;
       const wasPlaying = p.isPlaying;
       p.pause();
-      p.seekSong(mmlSeekTarget(p, Math.max(0, Math.min(workletDuration, seconds))));
+      p.seekSong(seekTargetEndless(p, Math.max(0, Math.min(workletDuration, seconds))));
       if (wasPlaying) {
         p.play();
         // 曲の位置が飛んだので、メトロノームは新しい拍へ合わせ直す
@@ -6176,18 +6218,7 @@
   }
   (function initMmlLoopSelect() {
     const build = () => {
-      mmlLoopCountEl.innerHTML = '';
-      for (let n = 2; n <= 100; n++) {
-        const o = document.createElement('option');
-        o.value = String(n); o.textContent = T('{n}回', { n });
-        mmlLoopCountEl.appendChild(o);
-      }
-      for (const [value, label] of [['time', T('時間指定')], ['infinite', T('無限')]]) {
-        const o = document.createElement('option');
-        o.value = value; o.textContent = label;
-        mmlLoopCountEl.appendChild(o);
-      }
-      mmlLoopCountEl.value = mmlLoopChoice;
+      buildLoopChoiceOptions(mmlLoopCountEl, mmlLoopChoice);
       syncMmlLoopSelect(null);
     };
     build();
@@ -9136,6 +9167,50 @@
     return Math.max(1, Math.min(3600, Math.ceil(sec)));
   }
 
+  // ── VGMの「ループ」選択(2〜100回 / 時間指定 / 無限、既定2回。MMLエディタの「ループ」と同じ、2026-10-28) ──
+  // VGMはヘッダに loopOffset/loopSamples を持つ唯一の形式なので「イントロ+N周」が計算できる
+  // (durationSeconds = イントロ+1周、loopSeconds = 1周)。
+  //   回数: イントロ+N周鳴らし、N周終わってループ位置へ戻った瞬間から FADE_SEC 秒フェード。再生時間欄には
+  //         その長さ(切り上げ)を入れて読み取り専用にするので、WAV/動画の書き出しとMML変換もこの長さになる
+  //   時間指定: 再生時間欄の秒+FADE_SEC 秒フェード(従来どおり)
+  //   無限: 終端なし。ロールの先読みはイントロ+1周ぶんで、位置は周回ごとにループ位置へ戻る(MMLの無限と同じ)。
+  //         再生時間欄は2回ぶんにしておく(書き出し/変換のフォールバック)
+  // ループ情報の無いVGMは選択をグレーアウトし、再生時間欄の秒数どおり(従来どおり)
+  const VGM_LOOP_KEY = 'vgm.loopCount';
+  let vgmLoopChoice = loadLoopChoice(VGM_LOOP_KEY);
+  const vgmLoopCountEl = document.getElementById('vgmLoopCount');
+  function vgmHasLoop(h) { return !!(h && h.loopOffset && h.loopSamples > 0 && h.durationSeconds > 0); }
+  // 回数 n のときの再生秒(フェード抜き、小数のまま)。イントロ = 全体 - 1周
+  function vgmLoopPlaySeconds(h, n) { return Math.max(0, h.durationSeconds - h.loopSeconds) + n * h.loopSeconds; }
+  function vgmLoopCount() { return mmlLoopChoiceCount(vgmLoopChoice); }
+  function mmlLoopChoiceCount(choice) { return choice === 'infinite' ? 2 : (parseInt(choice, 10) || 2); }
+  function syncVgmLoopSelect() {
+    if (!vgmLoopCountEl) return;
+    const h = loadedVgmHeader;
+    const has = vgmHasLoop(h);
+    vgmLoopCountEl.disabled = !!h && !has;
+    vgmLoopCountEl.title = (h && !has)
+      ? T('このVGMにはループ情報が無いので、再生時間欄の秒数だけ鳴らします')
+      : T('VGMヘッダのループ位置から何周鳴らすか。N回: イントロ+N周の後、5秒かけてフェードアウト(再生時間欄にその長さが入る) / 時間指定: 再生時間欄の秒の後、5秒フェード / 無限: 止まらない(バーはイントロ+1周ぶん)');
+    const computed = has && vgmLoopChoice !== 'time';
+    vgmPlayDurEl.readOnly = computed;
+    if (computed) vgmPlayDurEl.value = String(Math.max(1, Math.min(3600, Math.ceil(vgmLoopPlaySeconds(h, vgmLoopCount())))));
+  }
+  (function initVgmLoopSelect() {
+    if (!vgmLoopCountEl) return;
+    const build = () => { buildLoopChoiceOptions(vgmLoopCountEl, vgmLoopChoice); syncVgmLoopSelect(); };
+    build();
+    if (MML.I18n && MML.I18n.onChange) MML.I18n.onChange(build);
+    vgmLoopCountEl.addEventListener('change', () => {
+      vgmLoopChoice = vgmLoopCountEl.value;
+      try { localStorage.setItem(VGM_LOOP_KEY, vgmLoopChoice); } catch (e) { /* ignore */ }
+      syncVgmLoopSelect();
+      updateKeyboardExportControls();
+    });
+    // 再生時間欄を手で書き換えたら時間指定へ(回数モードでは読み取り専用なので届かない)
+    vgmPlayDurEl.addEventListener('change', () => { if (!vgmPlayDurEl.readOnly) syncVgmLoopSelect(); });
+  })();
+
   function renderVgmHeader(h) {
     let out = '';
     out += T('Magic       : {magic} ({ok})', { magic: 'Vgm ', ok: h.magicOk ? 'OK' : T('不正') }) + '\n';
@@ -9246,6 +9321,7 @@
       updateYm2608RomNotice(h);
       vgmSetPlanDefaults(h);
       vgmPlayDurEl.value = String(vgmDefaultDuration(h));
+      syncVgmLoopSelect(); // 「ループ」が回数なら再生時間欄をイントロ+N周に
       vgmFileStatusEl.innerHTML = '';
       const title = MML.VGM.displayTitle(h);
       if (title) setKbdSource('vgm', title);
@@ -9470,14 +9546,22 @@
     vgmBufferedFraction = 0;
     updateSeekBufferedUI();
 
-    const duration = parseInt(vgmPlayDurEl.value, 10) || vgmDefaultDuration(loadedVgmHeader);
-    const captureDuration = duration + FADE_SEC;
+    // 「ループ」選択(syncVgmLoopSelect 参照)。回数は小数のままの長さを使い、N周終わった瞬間にフェードが始まるようにする
+    const h = loadedVgmHeader;
+    const hasLoop = vgmHasLoop(h);
+    const endless = hasLoop && vgmLoopChoice === 'infinite';
+    const duration = endless ? h.durationSeconds
+      : (hasLoop && vgmLoopChoice !== 'time') ? vgmLoopPlaySeconds(h, vgmLoopCount())
+      : (parseInt(vgmPlayDurEl.value, 10) || vgmDefaultDuration(h));
+    // 無限: ロールの先読みはイントロ+1周ぶん、フェード無し、再生に終端なし
+    const captureDuration = endless ? duration : duration + FADE_SEC;
     const frameRate = MML.Emu.VGM_FRAME_RATE;
-    const totalFrames = Math.ceil(captureDuration * frameRate);
+    const totalFrames = endless ? Infinity : Math.ceil(captureDuration * frameRate);
     const chips = vgmKeyboardChips(loadedVgmHeader);
 
     const player = new MML.Audio.VgmStreamPlayer(audioCtx);
     player._baseGain = player.gainNode.gain.value;
+    player.loopInfo = endless ? { natural: h.durationSeconds, loop: h.loopSeconds } : null; // endlessInfo() 用
     attachAssignPreview(player);
     endFadeActive = false;
     player.onEnded = () => {
@@ -9503,7 +9587,9 @@
     vgmFileStatusEl.innerHTML = '';
     const pre = document.createElement('div');
     pre.className = 'ok';
-    pre.textContent = T('再生中 (最大 {time})', { time: formatTime(duration) });
+    pre.textContent = endless ? T('再生中 (無限ループ、イントロ+1周 {time})', { time: formatTime(duration) })
+      : (hasLoop && vgmLoopChoice !== 'time') ? T('再生中 (イントロ+{n}周 {time} + フェード)', { n: vgmLoopCount(), time: formatTime(duration) })
+      : T('再生中 (最大 {time})', { time: formatTime(duration) });
     vgmFileStatusEl.appendChild(pre);
 
     player.load(loadedVgmBytes, totalFrames, getChannelMuteConfig());
@@ -9549,7 +9635,7 @@
       getPwm: liveVgm.getPwm,
       getRf5c164: liveVgm.getRf5c164,
       getRf5c68: liveVgm.getRf5c68
-    }, () => vgmActivePlayer ? vgmActivePlayer.getPosition() : 0, chips);
+    }, () => vgmActivePlayer ? getTransportPosition() : 0, chips); // 無限ループ中はイントロ+1周の中へ折り返した位置
     transportPlay();
 
     // ピアノロール用の先読み(コマンド消化のみ・高速)。ロールのタイムライン構築は

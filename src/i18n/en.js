@@ -420,6 +420,12 @@
     '再生時間(秒)。この後5秒かけてフェードアウトします': 'Length (sec). A 5-second fade-out follows',
     '総再生時間  : {time} (L から {n}周)': 'Total duration: {time} (L x{n})',
     '総再生時間  : 無限 (L から戻り続ける。バーはイントロ+1周ぶん)': 'Total duration: endless (keeps returning to L; the bar shows intro + 1 lap)',
+    // ---- VGMのループ回数(VGMパネルの「ループ」選択、main.js initVgmLoopSelect) ----
+    'VGMヘッダのループ位置から何周鳴らすか。N回: イントロ+N周の後、5秒かけてフェードアウト(再生時間欄にその長さが入る) / 時間指定: 再生時間欄の秒の後、5秒フェード / 無限: 止まらない(バーはイントロ+1周ぶん)':
+      'How many times to play from the loop point in the VGM header. N times: intro + N laps, then a 5-second fade (the length is written to the Length field) / By time: the Length field seconds, then a 5-second fade / Endless: never stops (the bar shows intro + 1 lap)',
+    'このVGMにはループ情報が無いので、再生時間欄の秒数だけ鳴らします': 'This VGM has no loop information, so it plays for the seconds in the Length field',
+    '再生中 (無限ループ、イントロ+1周 {time})': 'Playing (endless, intro + 1 lap {time})',
+    '再生中 (イントロ+{n}周 {time} + フェード)': 'Playing (intro + {n} laps {time} + fade)',
     '再生範囲のくり返しをやめる': 'Stop repeating the playback range',
     '演奏を録音': 'Record performance',
     '演奏を録音してMMLにする': 'Record a performance and turn it into MML',

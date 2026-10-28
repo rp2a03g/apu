@@ -131,7 +131,8 @@
 
     /**
      * @param {Uint8Array} vgmBytes - 解凍済みVGM
-     * @param {number} totalFrames - 再生する最大フレーム数(1/60秒単位、VGM時間)
+     * @param {number} totalFrames - 再生する最大フレーム数(1/60秒単位、VGM時間)。Infinity で終端なし
+     *                               (ループのあるVGMを無限に回す。main.js の「ループ」選択=無限)
      * @param {object} [mute] - keyboardDisplay.getMuteConfig()形式
      */
     load(vgmBytes, totalFrames, mute) {
@@ -210,6 +211,8 @@
       return Math.max(0, sec);
     }
     getDuration() { return this.totalFrames / this.frameRate; }
+    // 終端なし(totalFrames=Infinity)。main.js endlessInfo() が loopInfo {natural, loop} と合わせて位置を折り返す
+    get endless() { return this.totalFrames === Infinity; }
     getCurrentFrame() {
       return this.player ? this._songFrame() : 0;
     }

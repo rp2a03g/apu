@@ -259,6 +259,9 @@ header h1.app-title .app-version:empty { display: none; }
 .mml-top-toolbar .mml-loop-count select { max-width: 7em; }
 .mml-top-toolbar .mml-loop-count input { width: 60px; }
 .mml-top-toolbar .mml-loop-count select:disabled { opacity: 0.5; }
+/* VGMパネルの「ループ」選択。回数モードでは再生時間欄が計算値(読み取り専用)になる */
+#vgmLoopCount:disabled { opacity: 0.5; }
+#vgmPlayDuration[readonly] { opacity: 0.6; }
 
 .mml-top-toolbar .seek-bar-wrap {
   /* flex-basis と min-width を 200px にしてあるのは、幅が足りないときに

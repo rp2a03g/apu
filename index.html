@@ -546,6 +546,11 @@
         <h3>ヘッダ情報 (VGM)</h3>
         <div id="vgmFileHeader" class="output"></div>
         <div class="toolbar" style="margin-top:6px;">
+          <!-- VGMヘッダのループ位置から何周鳴らすか(2〜100回 / 時間指定 / 無限)。MMLエディタの「ループ」と同じ選択肢。
+               回数のときは再生時間欄に「イントロ+N周」の秒数を入れて読み取り専用にする(WAV/動画/MML変換もその長さ)。main.js initVgmLoopSelect -->
+          <label style="display:flex;align-items:center;gap:4px;">ループ
+            <select id="vgmLoopCount"></select>
+          </label>
           <label style="display:flex;align-items:center;gap:4px;">再生時間(秒)
             <input type="number" id="vgmPlayDuration" value="180" min="1" max="3600" style="width:70px" />
           </label>
