@@ -410,7 +410,8 @@
     'ループ再生': 'Loop playback',
     '再生範囲をくり返す': 'Repeat the playback range',
     // ---- MMLのループ回数(mml-top-toolbar の「ループ」選択、main.js initMmlLoopSelect) ----
-    '{n}回': '{n} times',
+    '回数指定': 'Count',
+    'ループの回数(1〜100)。イントロ+この回数ぶん鳴らしてからフェードアウトします': 'Loop count (1-100). Plays the intro plus this many laps, then fades out',
     '時間指定': 'By time',
     '無限': 'Endless',
     '{n}周目': 'lap {n}',

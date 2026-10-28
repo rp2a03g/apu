@@ -3103,7 +3103,8 @@
       this.onOpenFile = null;         // ヘッダの「ファイルを開く」
       this.onToMml = null;            // ヘッダの「to MML」
       this.onMaxSecondsChange = null; // ロール見出しの演奏最大時間(秒)が変わったとき (sec) => void
-      this.onLoopChoiceChange = null; // ロール見出しのループ回数('2'〜'100'|'time'|'infinite')が変わったとき (value) => void
+      this.onLoopChoiceChange = null; // ロール見出しのループの種類('time'|'infinite'|'count')が変わったとき (value) => void
+      this.onLoopCountChange = null;  // ロール見出しのループ回数(1〜100、種類が count のとき)が変わったとき (n) => void
       this._loopSig = null;
       this.onExport = null;           // ロール見出しの「出力」 (formatId, seconds) => void
       this._exportOpt = null;         // setExportControls() の最後の内容(見出し再構築時に戻す)
@@ -3705,7 +3706,8 @@
         `<span class="kbd-roll-export" style="display:none">` +
           // ループ回数(2〜100回/時間指定/無限)。MML再生とVGM(ヘッダにループ位置がある形式)だけ main.js が
           // setExportControls({loop}) で出す。実体はMMLエディタ/VGMパネルの「ループ」選択で、ここはその代理
-          `<label class="kbd-loop-count" style="display:none"><span>${T('ループ')}</span><select class="kbd-loop-sel"></select></label>` +
+          `<label class="kbd-loop-count" style="display:none"><span>${T('ループ')}</span><select class="kbd-loop-sel"></select>` +
+            `<input type="number" class="kbd-loop-n" min="1" max="100" step="1" style="display:none" title="${T('ループの回数(1〜100)。イントロ+この回数ぶん鳴らしてからフェードアウトします')}"></label>` +
           `<span class="kbd-roll-export-sep">/</span>` +
           `<input type="number" class="kbd-max-sec" min="1" max="3600" step="1" title="${T('演奏最大時間(秒)')}">` +
           `<span class="kbd-roll-export-unit">${T('秒')}</span>` +
@@ -3731,6 +3733,13 @@
       this._loopSelEl = rollHeader.querySelector('.kbd-loop-sel');
       this._loopSelEl.addEventListener('change', () => {
         if (this.onLoopChoiceChange) this.onLoopChoiceChange(this._loopSelEl.value);
+      });
+      this._loopNEl = rollHeader.querySelector('.kbd-loop-n');
+      this._loopNEl.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') this._loopNEl.blur(); });
+      this._loopNEl.addEventListener('change', () => {
+        const n = Math.max(1, Math.min(100, parseInt(this._loopNEl.value, 10) || 1));
+        this._loopNEl.value = String(n);
+        if (this.onLoopCountChange) this.onLoopCountChange(n);
       });
       this._maxSecEl = rollHeader.querySelector('.kbd-max-sec');
       this._exportFmtEl = rollHeader.querySelector('.kbd-export-fmt');
@@ -4365,9 +4374,10 @@
     /**
      * ロール見出しの「ループ回数+演奏最大時間+出力」を更新する(main.jsが唯一の呼び出し元)。
      * opt = { visible, seconds, secondsReadOnly, formats:[[value,label], ...],
-     *         loop: { options:[[value,label],...], value, disabled, title, sig } | null }
-     * loop はループ回数を選べる再生元(MML / VGM)のときだけ。sig は選択肢の中身(言語)の識別子で、
-     * 変わったときだけ <option> を作り直す。secondsReadOnly は秒がループ回数から決まる(VGMの回数モード)とき
+     *         loop: { options:[[value,label],...], value:'time'|'infinite'|'count', count, disabled, title, sig } | null }
+     * loop はループ回数を選べる再生元(MML / VGM)のときだけ。value が 'count' のとき回数欄(count)を出す。
+     * sig は選択肢の中身(言語)の識別子で、変わったときだけ <option> を作り直す。
+     * secondsReadOnly は秒がループ回数から決まる(VGMの回数モード)とき
      */
     setExportControls(opt) {
       this._exportOpt = opt || null;
@@ -4389,6 +4399,13 @@
         }
         if (this._loopSelEl.value !== loop.value) this._loopSelEl.value = loop.value;
         this._loopSelEl.disabled = !!loop.disabled;
+        const showN = loop.value === 'count' && !loop.disabled;
+        this._loopNEl.style.display = showN ? '' : 'none';
+        // 入力中(フォーカス中)は書き換えない(演奏最大時間と同じ)
+        if (showN && document.activeElement !== this._loopNEl && loop.count != null) {
+          const v = String(loop.count);
+          if (this._loopNEl.value !== v) this._loopNEl.value = v;
+        }
         if (this._loopEl.title !== (loop.title || '')) this._loopEl.title = loop.title || '';
       }
       this._maxSecEl.readOnly = !!opt.secondsReadOnly;

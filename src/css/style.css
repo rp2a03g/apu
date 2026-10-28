@@ -258,6 +258,7 @@ header h1.app-title .app-version:empty { display: none; }
 }
 .mml-top-toolbar .mml-loop-count select { max-width: 7em; }
 .mml-top-toolbar .mml-loop-count input { width: 60px; }
+.mml-top-toolbar .mml-loop-count #mmlLoopTimes { width: 48px; }
 .mml-top-toolbar .mml-loop-count select:disabled { opacity: 0.5; }
 /* VGMパネルの「ループ」選択。回数モードでは再生時間欄が計算値(読み取り専用)になる */
 #vgmLoopCount:disabled { opacity: 0.5; }
@@ -1019,6 +1020,14 @@ button.secondary {
   max-width: 84px;
 }
 .kbd-roll-export .kbd-loop-sel:disabled { opacity: 0.5; }
+.kbd-roll-export .kbd-loop-n {
+  width: 34px;
+  height: 16px;
+  padding: 0 2px;
+  font-size: 10px;
+  font-family: var(--mono);
+  text-align: right;
+}
 .kbd-roll-export .kbd-max-sec[readonly] { opacity: 0.6; }
 .kbd-roll-export .kbd-export-fmt {
   height: 17px;
