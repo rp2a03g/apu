@@ -2,7 +2,7 @@
 
 このツールがどの順番で何を作ってきたかの記録。フェーズごとに、追加したファイルと
 そのとき決めたことを残してある。使い方は [README.md](README.md)、設計上の不変条件は
-[DESIGN.md](DESIGN.md)、音程まわりの詳細は [DESIGN-PITCH.md](DESIGN-PITCH.md) を参照。
+[DESIGN.md](DESIGN.md)、音程まわりの詳細は [DESIGN-PITCH.md](DESIGN-PITCH.md)、ゲームプレイ録音は [DESIGN-CAPTURE.md](DESIGN-CAPTURE.md) を参照。
 
 読むためのものなので、ここに書いてある日付や経緯は当時のもの。現在の仕様は
 コードとMMLコマンドヘルプが正本。

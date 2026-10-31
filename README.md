@@ -194,6 +194,7 @@ Chrome / Edge（Chromium系）で開発・確認している。次の機能はCh
 
 - [DESIGN.md](DESIGN.md) — 恒久的な設計原則（不変条件 INV-1〜6、Song IR仕様、層の分離ルール）。手を入れる前に読む
 - [DESIGN-PITCH.md](DESIGN-PITCH.md) — 音程・デチューン・ビブラートまわりの設計と実測の記録
+- [DESIGN-CAPTURE.md](DESIGN-CAPTURE.md) — ゲームプレイ録音(エミュレータ → VGM → MML)と他機種・自前エミュレータへの展開の設計
 - [IMPLEMENTATION.md](IMPLEMENTATION.md) — どの順に何を作ってきたかの記録（フェーズ別の実装メモ）
 
 ### ヘッドレス実行ハーネス
