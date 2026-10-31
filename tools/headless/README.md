@@ -23,7 +23,7 @@ export PATH="$PATH:/path/to/nodejs"
 | `load.js` | `index.html` の script を順に読み込む。単体実行で読み込みレポート |
 | `shim.js` | 最小のDOM/AudioContext/Workerシム。UIコードが読み込み時に落ちないための張りぼて |
 | `convert.js` | 変換API + CLI(NSF/SPC/KSS/GBS/HES/VGM/PSF、zip/7z/gzip内も可。PSFの `_lib` は同じzip/フォルダから引く) |
-| `nsf2vgm.js` | NSF → VGM(NES APU)書き出し。Mesen 用録音スクリプト(`tools/mesen/`)と同じ符号化(735サンプル=1フレーム固定、DPCM はデータブロック 0xC2)。VGM 経路の変換が NSF 直接変換と一致するかの A/B 用 |
+| `nsf2vgm.js` | NSF → VGM(NES APU)書き出し。Mesen 用録音スクリプト(`tools/mesen/`)と同じ符号化(735サンプル=1フレーム固定、DPCM はデータブロック 0xC2)。拡張音源(VRC6/VRC7/MMC5/N163/SUNSOFT 5B)は規格外の NESX ブロック(`src/vgm/vgmHeader.js` VGM.NESX)で運ぶ。VGM 経路の変換が NSF 直接変換と一致するかの A/B 用 |
 | `nsf-batch.js` | 変換 → コンパイル → NSF書き出しを一括で(耳で確かめる用。`.mml`/`.nsf`/`.dmc` を出力先へ並べる) |
 | `regress.js` | コーパス一括変換のスナップショット回帰テスト |
 | `audio-check.js` | 実際に鳴らした音を数値で点検(クリップ/DC/無音/オクターブずれ/プチノイズ) |

@@ -1615,8 +1615,11 @@
       result = MML.Convert.N163Fit.retryOnRamError(options, result,
         (o) => MML.Convert.autoTune(o, (oo) => composePsgLike(data, h, label, oo, ignoredNote)));
     } else if (family === 'nes') {
+      // 拡張音源: FDS は標準 VGM(bit31)、VRC6/VRC7/MMC5/N163/SUNSOFT 5B は規格外の NESX ブロック
+      // (vgmPlayer.js makeNesExpansionAdapter)。どちらも NSF ヘッダと同じビットで nsf2mml へ渡す
+      const extraChips = (data.nes.fds ? MML.NSF.CHIP_FLAGS.FDS : 0) | (data.nes.extraChips || 0);
       const header = {
-        extraChips: data.nes.fds ? MML.NSF.CHIP_FLAGS.FDS : 0,
+        extraChips,
         songName: label, artist: author, copyright: '', totalSongs: 1
       };
       // $4015を一度も書かないVGMでもチャンネルが有効扱いになるよう既定値を補う
@@ -1625,9 +1628,12 @@
       // (0x67 type=0xC2)でエミュレータのメモリへ書き込まれた$C000-$FFFF(vgmPlayer.jsが
       // キャプチャ末尾で切り出したdata.nes.dpcmRom)から解決する
       const nesOptions = Object.assign({}, options,
-        data.nes.dpcmRom ? { dpcmRom: { bytes: data.nes.dpcmRom, loadAddr: 0xC000 } } : {});
+        data.nes.dpcmRom ? { dpcmRom: { bytes: data.nes.dpcmRom, loadAddr: 0xC000 } } : {},
+        data.nes.n163Snapshots ? { n163Snapshots: data.nes.n163Snapshots } : {});
       result = MML.NSF2MML.convert(data.nes.writeLog, null, header, 0, initRegs, null, nesOptions);
-      result.chips = ['2A03'].concat(data.nes.fds ? ['FDS'] : []);
+      const F = MML.NSF.CHIP_FLAGS;
+      result.chips = ['2A03'].concat([['FDS', F.FDS], ['VRC6', F.VRC6], ['VRC7', F.VRC7], ['MMC5', F.MMC5], ['N163', F.N163], ['SUNSOFT 5B', F.FME7]]
+        .filter(([, bit]) => extraChips & bit).map(([name]) => name));
     } else if (family === 'gb') {
       result = MML.GBS2MML.convertCapture({
         snapshots: data.gb.snapshots, frameRate: data.frameRate, songLabel: label, sourceLabel: 'VGM'

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-10-28 10:46:30
+ * Built by tools/build-capture-workers.ps1 at 2026-10-31 23:34:01
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-10-28 10:46:30';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-10-31 23:34:01';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -9141,8 +9141,12 @@
     const buildTracks = MML.UI.buildRollTracksFromRegSnapshots;
     let tracks = [];
     if (data.nes) {
-      const nesChips = ['nes'].concat(data.nes.fds ? ['fds'] : []);
-      const t = buildTracks(data.nes.regSnapshots, data.nes.writeLog, done, sr / frameRate, sr, nesChips, null);
+      // 拡張音源(規格外 NESX ブロック、vgmPlayer.js)は NSF と同じトークンで同じ抽出経路へ
+      const F = MML.NSF && MML.NSF.CHIP_FLAGS;
+      const x = data.nes.extraChips || 0;
+      const nesChips = ['nes'].concat(data.nes.fds ? ['fds'] : [],
+        F ? [['vrc6', F.VRC6], ['vrc7', F.VRC7], ['mmc5', F.MMC5], ['n163', F.N163], ['fme7', F.FME7]].filter(([, b]) => x & b).map(([n]) => n) : []);
+      const t = buildTracks(data.nes.regSnapshots, data.nes.writeLog, done, sr / frameRate, sr, nesChips, data.nes.n163Snapshots || null);
       if (t) tracks = tracks.concat(t);
     }
     if (data.gb) tracks = tracks.concat(RollBuild.gbs(data.gb.snapshots.slice(0, done), frameRate));

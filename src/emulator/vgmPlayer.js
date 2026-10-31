@@ -99,7 +99,43 @@
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
   // ---------------------------------------------------------------------------
 
+  // NES 拡張音源つき(VGM の規格外ブロック NESX、DESIGN-CAPTURE.md §3.3)。NSF と同じ NsfBus を
+  // プログラム無しで組み、2A03/FDS/拡張音源への書き込みを全部 bus.write に通す(DMC は bus.mem を読む。
+  // 0xC2 ブロックの DPCM サンプルはそこへ流し込む)。鍵盤/ロール/変換は NSF と同じ経路で拡張音源を扱える
+  function makeNesExpansionAdapter(info, extraChips) {
+    const bus = new Emu.NsfBus({ program: new Uint8Array(0), loadAddr: 0x8000, bankswitch: [0, 0, 0, 0, 0, 0, 0, 0], extraChips });
+    const apu = new Emu.APU2A03(bus);
+    apu.reset();
+    bus.setApu(apu);
+    const ram = bus.mem;
+    const fds = bus.expansion.fds || null;
+    const expansion = Object.values(bus.expansion);
+    const regs = {};
+    const toAddr = (aa) => aa < 0x20 ? 0x4000 + aa : aa < 0x3F ? 0x4080 + (aa - 0x20) : aa === 0x3F ? 0x4023 : 0x4040 + (aa - 0x40);
+    return {
+      id: 'nes', clockHz: info.clock, accum: 0, apu, fds, ram, bus, regs, gain: CHIP_GAIN.nes, extraChips,
+      write(aa, dd) { const addr = toAddr(aa); regs[addr] = dd; bus.write(addr, dd); return addr; },
+      // NESX 書き込み列(CPU アドレス直指定。read=true は N163 $4800 のような副作用つき読み出し)
+      extWrite(addr, value, read) { if (read) { bus.read(addr); return; } regs[addr] = value; bus.write(addr, value); },
+      ramLoaded: false,
+      ramWrite(start, data) { this.ramLoaded = true; for (let i = 0; i < data.length && start + i < 0x10000; i++) ram[start + i] = data[i]; },
+      clock() { apu.clock(); for (let e = 0; e < expansion.length; e++) expansion[e].clock(); },
+      mix(out) { let s = apu.mixSample(); for (let e = 0; e < expansion.length; e++) s += expansion[e].mixSample(); out[0] += s * this.gain; out[1] += s * this.gain; },
+      applyMute(m) {
+        if (m.apu) Emu.applyMute(apu.mute, m.apu);
+        if (m.expansion) for (const [name, chip] of Object.entries(bus.expansion)) if (m.expansion[name]) Emu.applyMute(chip.mute, m.expansion[name]);
+      },
+      applyVolume(v) {
+        if (v.apu) Emu.applyVolume(apu.vol, v.apu);
+        if (v.expansion) for (const [name, chip] of Object.entries(bus.expansion)) if (v.expansion[name]) Emu.applyVolume(chip.vol, v.expansion[name]);
+      }
+    };
+  }
+
   function makeNesAdapter(info) {
+    const FLAGS = MML.NSF && MML.NSF.CHIP_FLAGS;
+    const extBits = FLAGS ? ((info.extraChips || 0) & ~FLAGS.FDS) : 0;
+    if (extBits && Emu.NsfBus) return makeNesExpansionAdapter(info, extBits | (info.fds ? FLAGS.FDS : 0));
     const ram = new Uint8Array(0x10000);
     const bus = { read: (addr) => ram[addr & 0xFFFF] };
     const apu = new Emu.APU2A03(bus);
@@ -967,6 +1003,19 @@
         const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
+      // NES 拡張音源の書き込み列(規格外 NESX、vgmHeader.js VGM.NESX 参照)。ヘッダ種別は parseHeader が先読み済み
+      if (MML.VGM && MML.VGM.isNesxBlock(type, block)) {
+        const nes = ad('nes');
+        if (nes && nes.extWrite && block[5] === MML.VGM.NESX.KIND_WRITES) {
+          for (let p = 6; p + 4 <= block.length; p += 4) {
+            const addr = block[p] | (block[p + 1] << 8), value = block[p + 2], meta = block[p + 3];
+            const read = (meta & 0x80) !== 0;
+            nes.extWrite(addr, value, read);
+            if (this.onWrite) this.onWrite('nesx', addr, value, read, (meta & 0x7F) / 128);
+          }
+        }
+        return;
+      }
       if (type === 0xC0 || type === 0xC1) { // RF5C68(0xC0)/RF5C164(0xC1) 波形RAM書込み: 先頭2バイト=絶対アドレス
         const rf = ad(type === 0xC0 ? 'rf5c68' : 'rf5c164');
         if (rf && block.length >= 2) rf.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
@@ -1357,7 +1406,10 @@
     const has = (id) => !!player.adapterById[id];
     const data = {
       frameRate: FRAME_RATE, header: h, totalFrames,
-      nes: has('nes') ? { regSnapshots: [], writeLog: [], fds: !!player.adapterById.nes.fds } : null,
+      nes: has('nes') ? { regSnapshots: [], writeLog: [], fds: !!player.adapterById.nes.fds,
+                          // NESX 拡張音源(規格外ブロック): NSF ヘッダと同じビット。N163 があればライブ RAM も採る
+                          extraChips: player.adapterById.nes.extraChips || 0,
+                          n163Snapshots: player.adapterById.nes.bus && player.adapterById.nes.bus.expansion && player.adapterById.nes.bus.expansion.n163 ? [] : null } : null,
       gb: has('gb') ? { snapshots: [] } : null,
       // hes: ctlTrace/pitchTrace は hesPlayer.js の controlTrace/pitchTrace と同じ内容だが、
       // Worker差分プロトコル(capture-worker-multi-impl.js diffPayload: 1段ネスト配列まで)に
@@ -1542,6 +1594,8 @@
     player.onWrite = (id, a, b, c, d) => {
       switch (id) {
         case 'nes': nesFrameWrites.push({ addr: c, value: b }); nesRegs[c] = b; break;
+        // NESX(拡張音源): (addr, value, read, frac)。NSF の writeLog と同じ形(読み出しは read:true、t=フレーム内時刻)
+        case 'nesx': nesFrameWrites.push(c ? { addr: a, value: 0, read: true, t: d } : { addr: a, value: b, t: d }); if (!c) nesRegs[a] = b; break;
         case 'pwm': if (pwmRec) pwmRecWrite(a, b); break; // (reg, 12bit値)
         case 'msm5205': if (msmRec) msmRecWrite(a, b); break; // (reg, 4bit値)
         case 'ay8910': kssFrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
@@ -1579,6 +1633,8 @@
         // 「全ch有効」を既定にしておく(NSFのliveSnap[0x4015]=0x0F補完と同じ)。
         if (nesRegs[0x4015] === undefined) nesRegs[0x4015] = 0x0F;
         data.nes.regSnapshots.push(Object.assign({}, nesRegs));
+        // N163 は $4800 の読み飛ばしでポインタが進むため、ログ再生だけでは RAM を復元できない(capture.js と同じ)
+        if (data.nes.n163Snapshots) data.nes.n163Snapshots.push(player.adapterById.nes.bus.expansion.n163.ram.slice());
         nesFrameWrites = [];
       }
       if (data.gb) data.gb.snapshots.push(Emu.snapshotGbApuForCapture(player.adapterById.gb.apu));

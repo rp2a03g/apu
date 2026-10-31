@@ -94,6 +94,14 @@ $bundles = @(
         Out = 'src\audio\vgm-capture-worker.js'
         Files = @(
             'src\vgm\vgmHeader.js',
+            # NESX(規格外ブロック)の NES 拡張音源: vgmPlayer.js makeNesExpansionAdapter が NsfBus で組む(opllNuked.js は既に下にある)
+            'src\nsf\nsfHeader.js',
+            'src\emulator\expansion\vrc6.js',
+            'src\emulator\expansion\vrc7.js',
+            'src\emulator\expansion\mmc5.js',
+            'src\emulator\expansion\n163.js',
+            'src\emulator\expansion\fme7.js',
+            'src\emulator\nsfBus.js',
             'src\emulator\capture.js',
             'src\emulator\apu2a03.js',
             'src\emulator\expansion\fds.js',

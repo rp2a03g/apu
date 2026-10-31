@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-10-28 10:46:30
+ * Built by tools/build-capture-workers.ps1 at 2026-10-31 23:34:01
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-10-28 10:46:30';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-10-31 23:34:01';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -31,6 +31,27 @@
   const VGM = MML.VGM = MML.VGM || {};
 
   VGM.SAMPLE_RATE = 44100;
+
+  // NES 拡張音源ブロック(規格外。標準プレイヤーは未知の型として読み飛ばす。VGMPlay 0.52 と本体で確認済み 2026-10-31)
+  //   0x67 0x66 TYPE size(4) "NESX" ver(1) kind(1) payload
+  //   kind 0 = ヘッダ: payload[0] = NSF の拡張音源ビット
+  //   kind 1 = 書き込み列: 4 バイト×n = addr16(LE) value8 meta8(bit7=読み出し、bit0-6=フレーム内時刻×1/128)
+  VGM.NESX = { TYPE: 0xBF, MAGIC: [0x4E, 0x45, 0x53, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_WRITES: 1 };
+  VGM.isNesxBlock = function (type, block) {
+    const m = VGM.NESX.MAGIC;
+    return type === VGM.NESX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
+  };
+  VGM.scanNesExtension = function (bytes, dataOffset) {
+    let p = dataOffset;
+    while (p + 7 <= bytes.length && bytes[p] === 0x67 && bytes[p + 1] === 0x66) {
+      const type = bytes[p + 2];
+      const size = (bytes[p + 3] | (bytes[p + 4] << 8) | (bytes[p + 5] << 16) | (bytes[p + 6] << 24)) & 0x7FFFFFFF;
+      const block = bytes.subarray(p + 7, p + 7 + size);
+      if (VGM.isNesxBlock(type, block) && block[5] === VGM.NESX.KIND_HEADER && block.length >= 7) return block[6];
+      p += 7 + size;
+    }
+    return 0;
+  };
 
   // チップクロックのヘッダオフセット表。id はエミュレータ配線(vgmPlayer.js)・
   // 鍵盤表示のキーとして使う。impl は現時点で実装済み(再生できる)かどうか。
@@ -238,6 +259,12 @@
       }
     }
 
+    // NES 拡張音源ブロック(本ツール専用の規格外拡張、DESIGN-CAPTURE.md §3.3)。
+    // ストリーム先頭に並ぶデータブロック(0x67)のうち type=NESX.TYPE で先頭が "NESX"、
+    // 種別 0(ヘッダ)の 1 バイトが NSF ヘッダと同じ拡張音源ビット(VRC6/VRC7/FDS/MMC5/N163/SUNSOFT 5B)。
+    // 最初の待ち/書き込みコマンドより前にあるものだけ見る(ここで分かればアダプタ生成と鍵盤の行構成に使える)
+    if (chips.nes) chips.nes.extraChips = VGM.scanNesExtension(bytes, dataOffset);
+
     const gd3Offset = gd3Rel ? 0x14 + gd3Rel : 0;
     const gd3 = gd3Offset ? parseGd3(bytes, gd3Offset) : null;
 
@@ -267,6 +294,1829 @@
     if (!h || !h.gd3) return '';
     return h.gd3.trackEn || h.gd3.trackJa || '';
   };
+})(globalThis);
+
+/*
+ * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
+ * 参考: NESdev Wiki "NSF" フォーマット仕様
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const NSF = MML.NSF = MML.NSF || {};
+  // 表示文言の翻訳 (src/i18n/i18n.js)。キャプチャWorker内など MML.I18n が無い環境では素通し
+  const tr = (key, params) => (MML.I18n
+    ? MML.I18n.t(key, params)
+    : String(key).replace(/\{(\w+)\}/g, (m, n) => (params && params[n] !== undefined ? params[n] : m)));
+
+  // 拡張音源フラグ (オフセット 0x7A / 122)
+  NSF.CHIP_FLAGS = {
+    VRC6: 0x01,
+    VRC7: 0x02,
+    FDS: 0x04,
+    MMC5: 0x08,
+    N163: 0x10,
+    FME7: 0x20
+  };
+
+  function writeAsciiPadded(view, offset, text, length) {
+    const bytes = new Uint8Array(length); // 0 埋め
+    const enc = (text || '').slice(0, length);
+    for (let i = 0; i < enc.length; i++) {
+      bytes[i] = enc.charCodeAt(i) & 0xFF;
+    }
+    for (let i = 0; i < length; i++) view.setUint8(offset + i, bytes[i]);
+  }
+
+  /**
+   * 128バイトのNSFヘッダを生成する
+   * @param {object} opt
+   * @param {number} [opt.totalSongs=1]
+   * @param {number} [opt.startingSong=1]
+   * @param {number} [opt.loadAddr=0x8000]
+   * @param {number} [opt.initAddr=0x8000]
+   * @param {number} [opt.playAddr=0x8003]
+   * @param {string} [opt.songName='']
+   * @param {string} [opt.artist='']
+   * @param {string} [opt.copyright='']
+   * @param {number} [opt.ntscSpeed=16639]  - 1/1000000秒単位 (NTSC ≒ 60.0988Hz)
+   * @param {number} [opt.palSpeed=19997]   - 1/1000000秒単位 (PAL ≒ 50.0070Hz)
+   * @param {Uint8Array|number[]} [opt.bankswitch] - 8バイトのバンクスイッチ初期値
+   * @param {number} [opt.palNtscBit=0]     - bit0: 0=NTSC,1=PAL / bit1: dual mode
+   * @param {number} [opt.extraChips=0]     - NSF.CHIP_FLAGS の OR
+   * @returns {Uint8Array} 128バイトのヘッダ
+   */
+  NSF.buildHeader = function (opt = {}) {
+    const buf = new ArrayBuffer(128);
+    const view = new DataView(buf);
+
+    // 0-4: マジック "NESM" + 0x1A
+    const magic = [0x4E, 0x45, 0x53, 0x4D, 0x1A];
+    magic.forEach((b, i) => view.setUint8(i, b));
+
+    // 5: バージョン番号
+    view.setUint8(5, 1);
+
+    // 6: トータルソング数
+    view.setUint8(6, opt.totalSongs !== undefined ? opt.totalSongs : 1);
+    // 7: 開始曲番号 (1始まり)
+    view.setUint8(7, opt.startingSong !== undefined ? opt.startingSong : 1);
+
+    // 8-9 / 10-11 / 12-13: Load / Init / Play アドレス (LE)
+    view.setUint16(8, (opt.loadAddr !== undefined ? opt.loadAddr : 0x8000) & 0xFFFF, true);
+    view.setUint16(10, (opt.initAddr !== undefined ? opt.initAddr : 0x8000) & 0xFFFF, true);
+    view.setUint16(12, (opt.playAddr !== undefined ? opt.playAddr : 0x8003) & 0xFFFF, true);
+
+    // 14-45-77: 曲名 / アーティスト / 著作権 (各32バイト、ASCII、0終端/0埋め)
+    writeAsciiPadded(view, 14, opt.songName, 32);
+    writeAsciiPadded(view, 46, opt.artist, 32);
+    writeAsciiPadded(view, 78, opt.copyright, 32);
+
+    // 110-111: NTSC再生スピード (1/1000000秒)
+    view.setUint16(110, opt.ntscSpeed !== undefined ? opt.ntscSpeed : 16639, true);
+
+    // 112-119: バンクスイッチ初期値 (8バイト)
+    const bs = opt.bankswitch || [0, 0, 0, 0, 0, 0, 0, 0];
+    for (let i = 0; i < 8; i++) view.setUint8(112 + i, bs[i] || 0);
+
+    // 120-121: PAL再生スピード
+    view.setUint16(120, opt.palSpeed !== undefined ? opt.palSpeed : 19997, true);
+
+    // 122: PAL/NTSC ビット
+    view.setUint8(122, opt.palNtscBit !== undefined ? opt.palNtscBit : 0);
+
+    // 123: 拡張音源フラグ
+    view.setUint8(123, opt.extraChips !== undefined ? opt.extraChips : 0);
+
+    // 124-127: NSF2/予約領域 (0埋め)
+    view.setUint32(124, 0, true);
+
+    return new Uint8Array(buf);
+  };
+
+  /*
+   * 旧ppmckドライバ(Famicompo mini / FCM3〜4 時代、2004〜2005年頃)の N106 判定。
+   *
+   * 当時の N106(N163) 仕様理解は VirtuaNES 0.97 / VirtuaNSF 1.0.x 系の実装
+   * (波形長レジスタ +4 は bit2-4 の3bit、length = 0x20 - (+4 & 0x1C) = 最大32サンプル)
+   * に基づいており、ドライバは波形設定で `ORA #$80` を書いていた。実機/現行仕様では
+   * +4 の bit2-7 が波形長(length = 256 - (+4 & 0xFC))なので、同じ値が実機では
+   * 128 - 4n サンプル(4倍長)と解釈され、音程が2オクターブ落ち、波形メモリの他領域
+   * (他の波形・レジスタ)まで読んで音色も崩れる。現行ppmckは同じ箇所で `ORA #$E0`
+   * (= 256 - 32 + 4n の現行エンコード)を書く。
+   *
+   * 判定はその波形設定ルーチンの機械語列で行う(変数アドレスはビルドごとに違うので
+   * ワイルドカード):
+   *   ORA #$80 / STA abs,X / STA $4800 / LSR abs / LDA #$10 / SEC / SBC abs
+   *   (n106_7c,x に保存 → $4800 へ波形長 → temporary を半分にして 16 - n = 転送バイト数)
+   * `emu sound/famicompo` の実ファイル25本がこの列に一致し、現行ppmck生成物(ORA #$E0)
+   * は22本とも不一致(2026-09-07 実測)。
+   *
+   * @param {Uint8Array} program - ヘッダ(128バイト)を除いたプログラムイメージ
+   * @returns {boolean}
+   */
+  const LEGACY_N106_SIG = [0x09, 0x80, 0x9D, null, null, 0x8D, 0x00, 0x48, 0x4E, null, null, 0xA9, 0x10, 0x38, 0xED];
+  NSF.detectLegacyN163Driver = function (program) {
+    if (!program || program.length < LEGACY_N106_SIG.length) return false;
+    const sig = LEGACY_N106_SIG;
+    outer: for (let i = 0, n = program.length - sig.length; i <= n; i++) {
+      for (let j = 0; j < sig.length; j++) {
+        if (sig[j] !== null && program[i + j] !== sig[j]) continue outer;
+      }
+      return true;
+    }
+    return false;
+  };
+
+  /**
+   * 128バイトのNSFヘッダを解析してオブジェクトに変換する
+   * @param {Uint8Array} bytes
+   * @returns {object}
+   */
+  NSF.parseHeader = function (bytes) {
+    if (bytes.length < 128) throw new Error(tr('NSFヘッダは128バイト必要です'));
+    const view = new DataView(bytes.buffer, bytes.byteOffset, 128);
+    const magicOk = bytes[0] === 0x4E && bytes[1] === 0x45 && bytes[2] === 0x53 && bytes[3] === 0x4D && bytes[4] === 0x1A;
+    const readAscii = (offset, len) => {
+      let s = '';
+      for (let i = 0; i < len; i++) {
+        const c = view.getUint8(offset + i);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+    return {
+      magicOk,
+      version: view.getUint8(5),
+      totalSongs: view.getUint8(6),
+      startingSong: view.getUint8(7),
+      loadAddr: view.getUint16(8, true),
+      initAddr: view.getUint16(10, true),
+      playAddr: view.getUint16(12, true),
+      songName: readAscii(14, 32),
+      artist: readAscii(46, 32),
+      copyright: readAscii(78, 32),
+      ntscSpeed: view.getUint16(110, true),
+      bankswitch: Array.from(bytes.slice(112, 120)),
+      palSpeed: view.getUint16(120, true),
+      palNtscBit: view.getUint8(122),
+      extraChips: view.getUint8(123)
+    };
+  };
+  // =========================================================================
+  // NSFe (拡張NSF、チャンク形式)
+  // 参考: NESdev Wiki "NSFe" / Disch の原仕様(2003)
+  //
+  //   "NSFE" (4バイト) の後に { size:u32LE, id:4文字ASCII, data[size] } のチャンクが並ぶ。
+  //   idの先頭が大文字のチャンクは必須(理解できなければ再生不可)、小文字は任意(無視可)。
+  //     INFO  load/init/play(各u16LE)、PAL/NTSCビット、拡張音源フラグ、曲数、開始曲(0始まり)
+  //     DATA  プログラムイメージ(NSFの128バイト以降と同じもの)
+  //     BANK  バンクスイッチ初期値(最大8バイト、不足分は0)
+  //     RATE  NTSC/PAL/Dendy再生速度(各u16LE、1/1000000秒。NSFの$6E/$78と同じ単位)
+  //     NSF2  NSF2機能フラグ(1バイト、NSFヘッダ$7Cと同じ)
+  //     plst  再生順(曲番号の列、0始まり)   time/fade  曲ごとの演奏時間/フェード(i32LE、ms、-1=既定)
+  //     tlbl/taut  曲ごとのラベル/作者(0終端文字列の列)   auth  タイトル/アーティスト/著作権/リッパー
+  //     text  自由文   regn  地域対応ビット+推奨地域   mixe  ミックスレベル   VRC7  VRC7/YM2413種別+パッチ
+  //     NEND  終端
+  //
+  //   このツールでは、NSFe を「128バイトのNSFヘッダ + DATA」の素のNSFバイト列へ変換して
+  //   既存の再生/キャプチャ/変換経路(全てNSFバイト列を受け取る)へそのまま流し、曲ラベルや
+  //   演奏時間などNSFヘッダに載らない情報は header.nsfe に別枠で持たせる(UI側で表示/利用)。
+  //   曲番号は内部では0始まり(NSFeのINFO/plst/time等の番号と同じ)、NSFヘッダの開始曲は
+  //   1始まりなので +1 して詰める。
+  // =========================================================================
+
+  NSF.isNsfe = function (bytes) {
+    return !!bytes && bytes.length >= 4 &&
+      bytes[0] === 0x4E && bytes[1] === 0x53 && bytes[2] === 0x46 && bytes[3] === 0x45; // "NSFE"
+  };
+
+  // 0終端文字列の列をデコードする。仕様上はUTF-8だが2003年頃(Famicompo)のファイルは
+  // Shift-JIS/Latin-1で書かれているものがあるので、UTF-8として不正ならShift-JIS→Latin-1の順に落とす
+  let _utf8 = null, _sjis = null;
+  function decodeText(u8) {
+    if (typeof TextDecoder === 'undefined') return String.fromCharCode.apply(null, u8);
+    if (!_utf8) {
+      try { _utf8 = new TextDecoder('utf-8', { fatal: true }); } catch (e) { _utf8 = null; }
+      try { _sjis = new TextDecoder('shift_jis'); } catch (e) { _sjis = null; }
+    }
+    if (_utf8) { try { return _utf8.decode(u8); } catch (e) { /* not UTF-8 */ } }
+    let ascii = true;
+    for (let i = 0; i < u8.length; i++) if (u8[i] >= 0x80) { ascii = false; break; }
+    if (ascii) return String.fromCharCode.apply(null, u8);
+    if (_sjis) { try { return _sjis.decode(u8); } catch (e) { /* fallthrough */ } }
+    let s = '';
+    for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+    return s;
+  }
+  // 0終端文字列の列 → 文字列配列。末尾の空白は落とす(Famicompo 2003の一部はNSFヘッダ流用の31文字空白詰め)
+  function splitZStrings(u8) {
+    const out = [];
+    let start = 0;
+    for (let i = 0; i < u8.length; i++) {
+      if (u8[i] === 0) { out.push(decodeText(u8.subarray(start, i)).replace(/\s+$/, '')); start = i + 1; }
+    }
+    if (start < u8.length) out.push(decodeText(u8.subarray(start)).replace(/\s+$/, '')); // 0終端が無い最後の文字列
+    return out;
+  }
+
+  /**
+   * NSFeを解析し、素のNSFバイト列とメタ情報に変換する。
+   * @param {Uint8Array} bytes - "NSFE"で始まるファイル全体
+   * @returns {{bytes:Uint8Array, header:object}}
+   *   bytes  … 128バイトNSFヘッダ + DATA(既存のNSF経路へそのまま渡せる)
+   *   header … parseHeader() と同じ形 + 以下
+   *     songName/artist/copyright … authチャンクの全文(NSFヘッダの31文字制限を受けない)
+   *     nsfe … { ripper, text, trackLabels[], trackAuthors[], times[](ms or null), fades[](ms or null),
+   *              playlist[](0始まりの曲番号 or null), dendySpeed, nsf2Flags, regn, vrc7, mixe, chunks[] }
+   * @throws 必須チャンクの欠落/未知の必須チャンク/壊れたチャンク
+   */
+  NSF.parseNsfe = function (bytes) {
+    if (!NSF.isNsfe(bytes)) throw new Error(tr('NSFeのマジックナンバーが不正です'));
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let info = null, data = null, bank = null, rate = null;
+    const meta = {
+      ripper: '', text: '', trackLabels: null, trackAuthors: null, times: null, fades: null,
+      playlist: null, dendySpeed: null, nsf2Flags: 0, regn: null, vrc7: null, mixe: null, chunks: []
+    };
+    let auth = null;
+    let p = 4;
+    let ended = false;
+    while (p + 8 <= bytes.length && !ended) {
+      const size = view.getUint32(p, true);
+      const id = String.fromCharCode(bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7]);
+      if (p + 8 + size > bytes.length) throw new Error(tr('NSFeのチャンクがファイル末尾を越えています: {id}', { id }));
+      const body = bytes.subarray(p + 8, p + 8 + size);
+      meta.chunks.push(id);
+      const bv = new DataView(bytes.buffer, bytes.byteOffset + p + 8, size);
+      switch (id) {
+        case 'INFO':
+          if (size < 8) throw new Error(tr('NSFeのINFOチャンクが短すぎます'));
+          info = {
+            loadAddr: bv.getUint16(0, true), initAddr: bv.getUint16(2, true), playAddr: bv.getUint16(4, true),
+            palNtscBit: body[6], extraChips: body[7],
+            totalSongs: size >= 9 ? (body[8] || 1) : 1,
+            startingSong: size >= 10 ? body[9] : 0 // 0始まり
+          };
+          break;
+        case 'DATA': data = body; break;
+        case 'BANK': bank = Array.from(body.subarray(0, 8)); while (bank.length < 8) bank.push(0); break;
+        case 'RATE':
+          rate = {};
+          if (size >= 2) rate.ntsc = bv.getUint16(0, true);
+          if (size >= 4) rate.pal = bv.getUint16(2, true);
+          if (size >= 6) rate.dendy = bv.getUint16(4, true);
+          break;
+        case 'NSF2': if (size >= 1) meta.nsf2Flags = body[0]; break;
+        case 'plst': meta.playlist = Array.from(body); break;
+        case 'time': case 'fade': {
+          const arr = [];
+          for (let i = 0; i + 4 <= size; i += 4) { const v = bv.getInt32(i, true); arr.push(v < 0 ? null : v); }
+          meta[id === 'time' ? 'times' : 'fades'] = arr;
+          break;
+        }
+        case 'tlbl': meta.trackLabels = splitZStrings(body); break;
+        case 'taut': meta.trackAuthors = splitZStrings(body); break;
+        case 'auth': auth = splitZStrings(body); break;
+        case 'text': meta.text = decodeText(body).replace(/\0+$/, ''); break;
+        case 'regn': meta.regn = { support: body[0] || 0, preferred: size >= 2 ? body[1] : null }; break;
+        case 'mixe': meta.mixe = Array.from(body); break;
+        case 'VRC7': meta.vrc7 = { variant: body[0] || 0, patches: size > 1 ? Array.from(body.subarray(1)) : null }; break;
+        case 'NEND': ended = true; break;
+        default:
+          // 大文字始まり=必須チャンク。理解できないものがあれば正しく鳴らせないので中断する
+          if (id.charCodeAt(0) >= 0x41 && id.charCodeAt(0) <= 0x5A) throw new Error(tr('未対応の必須NSFeチャンクです: {id}', { id }));
+          break;
+      }
+      p += 8 + size;
+    }
+    if (!info) throw new Error(tr('NSFeにINFOチャンクがありません'));
+    if (!data) throw new Error(tr('NSFeにDATAチャンクがありません'));
+
+    const songName = auth && auth[0] ? auth[0] : '';
+    const artist = auth && auth[1] ? auth[1] : '';
+    const copyright = auth && auth[2] ? auth[2] : '';
+    meta.ripper = auth && auth[3] ? auth[3] : '';
+    const toAscii = s => s.replace(/[^\x20-\x7E]/g, '?').slice(0, 31); // NSFヘッダは0終端込み32バイトASCII
+
+    const hdr = NSF.buildHeader({
+      totalSongs: Math.min(255, info.totalSongs),
+      startingSong: info.startingSong + 1,
+      loadAddr: info.loadAddr, initAddr: info.initAddr, playAddr: info.playAddr,
+      songName: toAscii(songName), artist: toAscii(artist), copyright: toAscii(copyright),
+      ntscSpeed: rate && rate.ntsc !== undefined ? rate.ntsc : 16639,
+      palSpeed: rate && rate.pal !== undefined ? rate.pal : 19997,
+      bankswitch: bank || [0, 0, 0, 0, 0, 0, 0, 0],
+      palNtscBit: info.palNtscBit,
+      extraChips: info.extraChips
+    });
+    if (meta.nsf2Flags) {
+      // NSF2機能フラグを持つならNSF2ヘッダとして詰める($05=2、$7C=フラグ、$7D-$7F=データ長)
+      hdr[5] = 2;
+      hdr[0x7C] = meta.nsf2Flags;
+      hdr[0x7D] = data.length & 0xFF; hdr[0x7E] = (data.length >> 8) & 0xFF; hdr[0x7F] = (data.length >> 16) & 0xFF;
+    }
+    if (rate && rate.dendy !== undefined) meta.dendySpeed = rate.dendy;
+
+    const out = new Uint8Array(128 + data.length);
+    out.set(hdr, 0);
+    out.set(data, 128);
+    const header = NSF.parseHeader(out);
+    header.isNsfe = true;
+    header.songName = songName;
+    header.artist = artist;
+    header.copyright = copyright;
+    header.nsfe = meta;
+    return { bytes: out, header };
+  };
+
+  /**
+   * NSF/NSFe どちらでも受け取り、素のNSFバイト列とヘッダを返す(読み込み口はこれを使う)。
+   * NSFのときは bytes をそのまま返す(header.isNsfe = false, header.nsfe = null)。
+   * @param {Uint8Array} bytes
+   * @returns {{bytes:Uint8Array, header:object, isNsfe:boolean}}
+   */
+  NSF.normalize = function (bytes) {
+    if (NSF.isNsfe(bytes)) {
+      const r = NSF.parseNsfe(bytes);
+      return { bytes: r.bytes, header: r.header, isNsfe: true };
+    }
+    if (bytes.length < 128) throw new Error(tr('NSFヘッダは128バイト必要です'));
+    const header = NSF.parseHeader(bytes);
+    header.isNsfe = false;
+    header.nsfe = null;
+    return { bytes, header, isNsfe: false };
+  };
+
+  /** NSFeの曲ラベル(無ければnull)。songIndexは0始まり */
+  NSF.trackLabel = function (header, songIndex) {
+    const m = header && header.nsfe;
+    if (!m || !m.trackLabels) return null;
+    const s = m.trackLabels[songIndex];
+    return s ? s : null;
+  };
+
+  /** NSFeの演奏時間(ms、無ければnull)。songIndexは0始まり */
+  NSF.trackTimeMs = function (header, songIndex) {
+    const m = header && header.nsfe;
+    if (!m || !m.times) return null;
+    const v = m.times[songIndex];
+    return (v === undefined || v === null) ? null : v;
+  };
+})(globalThis);
+
+/*
+ * VRC6 拡張音源エミュレータ
+ * MML.Emu.VRC6Audio
+ *
+ * パルス x2 ($9000-$9002 / $A000-$A002) + 矩形波(サウ) ($B000-$B002)
+ * パルスはデューティ比1/16刻みで指定可能(0=幅1/16 ... 15=幅16/16)。
+ * サウ(sawtooth)はNESdev準拠の14ステップアキュムレータ実装(Vrc6Saw.clock()参照)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  class Vrc6Pulse {
+    constructor() {
+      this.duty = 0;
+      this.volume = 0;
+      this.digitized = false;
+      this.enabled = false;
+      this.period = 0;
+      this.timer = 0;
+      this.step = 15; // dutyカウンタは 15→0 のダウンカウント。先頭=15
+    }
+    writeCtrl(value) {
+      this.duty = (value >> 4) & 0x07;
+      this.volume = value & 0x0F;
+      this.digitized = (value & 0x80) !== 0;
+    }
+    writePeriodLo(value) {
+      this.period = (this.period & 0x0F00) | value;
+    }
+    writePeriodHi(value) {
+      this.period = (this.period & 0x00FF) | ((value & 0x0F) << 8);
+      this.enabled = (value & 0x80) !== 0;
+      // NESdev: E=0 で duty カウンタを即リセット＋停止（再有効化で先頭から）
+      if (!this.enabled) { this.step = 15; this.timer = 0; }
+    }
+    clock() {
+      if (!this.enabled) return; // 無効時は停止（カウンタを進めない）
+      if (this.timer === 0) {
+        this.timer = this.period;
+        this.step = (this.step - 1) & 0x0F; // 15→0 ダウンカウント
+      } else {
+        this.timer--;
+      }
+    }
+    output() {
+      if (!this.enabled) return 0;
+      if (this.digitized) return this.volume;
+      return (this.step <= this.duty) ? this.volume : 0;
+    }
+  }
+
+  class Vrc6Saw {
+    constructor() {
+      this.accumRate = 0;
+      this.accum = 0;
+      this.enabled = false;
+      this.period = 0;
+      this.timer = 0;
+      this.step = 0; // 14ステップ周期のカウンタ (0-13)
+    }
+    writeCtrl(value) {
+      this.accumRate = value & 0x3F;
+    }
+    writePeriodLo(value) {
+      this.period = (this.period & 0x0F00) | value;
+    }
+    writePeriodHi(value) {
+      this.period = (this.period & 0x00FF) | ((value & 0x0F) << 8);
+      this.enabled = (value & 0x80) !== 0;
+    }
+    // NESdev準拠: タイマは1 CPUサイクルごと。14ステップ周期で、偶数ステップに accumRate を
+    // 6回加算し、14ステップ目で加算せずアキュムレータを0リセット（＝7段のこぎり波、f=CPU/(14*(t+1))）。
+    clock() {
+      if (!this.enabled) { this.accum = 0; return; } // E=0 でアキュムレータ0固定
+      if (this.timer === 0) {
+        this.timer = this.period;
+        this.step++;
+        if (this.step >= 14) {
+          this.step = 0;
+          this.accum = 0;                 // 7回目の作用クロック = リセット
+        } else if ((this.step & 1) === 0) {
+          this.accum = (this.accum + this.accumRate) & 0xFF; // 偶数ステップで加算(計6回)
+        }
+      } else {
+        this.timer--;
+      }
+    }
+    output() {
+      if (!this.enabled) return 0;
+      return (this.accum >> 3) & 0x1F; // 上位5bit (0-31)
+    }
+  }
+
+  class VRC6Audio {
+    constructor() {
+      this.pulse1 = new Vrc6Pulse();
+      this.pulse2 = new Vrc6Pulse();
+      this.saw = new Vrc6Saw();
+      this.mute = { pulse1: false, pulse2: false, saw: false };
+      this.vol = { pulse1: 1, pulse2: 1, saw: 1 };
+    }
+
+    reset() {
+      this.pulse1 = new Vrc6Pulse();
+      this.pulse2 = new Vrc6Pulse();
+      this.saw = new Vrc6Saw();
+    }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      switch (addr) {
+        case 0x9000: this.pulse1.writeCtrl(value); break;
+        case 0x9001: this.pulse1.writePeriodLo(value); break;
+        case 0x9002: this.pulse1.writePeriodHi(value); break;
+        case 0xA000: this.pulse2.writeCtrl(value); break;
+        case 0xA001: this.pulse2.writePeriodLo(value); break;
+        case 0xA002: this.pulse2.writePeriodHi(value); break;
+        case 0xB000: this.saw.writeCtrl(value); break;
+        case 0xB001: this.saw.writePeriodLo(value); break;
+        case 0xB002: this.saw.writePeriodHi(value); break;
+      }
+    }
+
+    clock() {
+      this.pulse1.clock();
+      this.pulse2.clock();
+      this.saw.clock();
+    }
+
+    // 0.0 ~ 約0.65 (2A03と同程度のレベル感)
+    mixSample() {
+      const p1 = this.mute.pulse1 ? 0 : (this.pulse1.output() / 15) * this.vol.pulse1;   // 0-1
+      const p2 = this.mute.pulse2 ? 0 : (this.pulse2.output() / 15) * this.vol.pulse2;   // 0-1
+      const sw = this.mute.saw ? 0 : (this.saw.output() / 31) * this.vol.saw;         // 0-1
+      return (p1 + p2 + sw) * 0.2;
+    }
+  }
+
+  Emu.VRC6Audio = VRC6Audio;
+})(globalThis);
+
+/*
+ * VRC7 拡張音源エミュレータ (OPLL / YM2413)
+ * MML.Emu.VRC7Audio
+ *
+ * ★2026-08-22: 既定の再生コアは opllNuked.js (Nuked-OPLL移植) に移行した。このファイルの
+ * 実装は MML.Emu.OPLL_CORE = 'emu2413' を指定したときのA/B比較用として残してある。
+ *
+ * Mitsutaka Okazaki の emu2413 (VirtuaNES同梱版) を忠実に移植した2オペレータFM。
+ * 6メロディチャンネル。DB単位系(0.375dB/step)・1024点対数sin・DB2LIN・正確なEG状態機械。
+ * 音色ROMは nukeykt/Nuked-OPLL (GPLv2) の patch_ds1001 = VRC7実チップの die shot 読み出し値。
+ *   $9010 : アドレスポート  $9030 : データポート
+ * 出力49716Hz (VRC7マスタ3.58MHz/72 = CPUクロック/36)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const NUM_CH = 6;
+  const CYCLES_PER_SAMPLE = 36;
+  const SAMPLE_RATE = 49716;
+
+  // ---- 定数 (emu2413) ----
+  const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS;       // 1024点波形(emu2413に合わせて9→10bit化)
+  const DP_BITS = 19, DP_WIDTH = 1 << DP_BITS, DP_BASE_BITS = DP_BITS - PG_BITS; // 9
+  const DB_STEP = 0.375, DB_BITS = 7, DB_MUTE = 1 << DB_BITS;   // 128
+  const EG_STEP = 0.375, EG_BITS = 7;
+  const EG2DB = 1;                                    // EG_STEP/DB_STEP
+  const TL2EG = 2;                                    // TL_STEP/EG_STEP (0.75/0.375)
+  const DB2LIN_AMP_BITS = 10, SLOT_AMP_BITS = DB2LIN_AMP_BITS;
+  const EG_DP_BITS = 22, EG_DP_WIDTH = 1 << EG_DP_BITS;
+  const PM_PG_BITS = 8, PM_PG_WIDTH = 1 << PM_PG_BITS;
+  const PM_DP_BITS = 16, PM_DP_WIDTH = 1 << PM_DP_BITS;
+  const AM_PG_BITS = 8, AM_PG_WIDTH = 1 << AM_PG_BITS;
+  const AM_DP_BITS = 16, AM_DP_WIDTH = 1 << AM_DP_BITS;
+  const PM_AMP_BITS = 8, PM_AMP = 1 << PM_AMP_BITS;
+  const PM_SPEED = 6.4, PM_DEPTH = 13.75, AM_SPEED = 3.7, AM_DEPTH = 4.8;
+
+  // EGモード
+  const SETTLE = 0, ATTACK = 1, DECAY = 2, SUSHOLD = 3, SUSTINE = 4, RELEASE = 5, FINISH = 6;
+
+  // ---- 音色ROM (実チップ内蔵ROM。各8バイト=$00-$07) ----
+  // ★2026-08-22: 従来の VirtuaNES vrc7tone.h は実測値ではなく耳コピ推定で、実体は
+  // YM2413用テーブルの微改変だった(@2 Guitar が opllMsx.js の YM2413 値と1バイト違い)。
+  // nukeykt/Nuked-OPLL の patch_ds1001 は VRC7(Konami DS1001)を decap/die shot
+  // (siliconpr0n: digshadow, John McMaster)から読み出した本物のROM内容なので差し替え。
+  // NESdev Wiki "VRC7 audio" の音色表と全15音色一致を確認済み。音色名はNESdev Wiki準拠。
+  const VRC7_INST = [
+    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // 0: ユーザー音色枠($00-$07で可変)
+    [0x03,0x21,0x05,0x06,0xe8,0x81,0x42,0x27], // 1: Buzzy Bell
+    [0x13,0x41,0x14,0x0d,0xd8,0xf6,0x23,0x12], // 2: Guitar
+    [0x11,0x11,0x08,0x08,0xfa,0xb2,0x20,0x12], // 3: Wurly
+    [0x31,0x61,0x0c,0x07,0xa8,0x64,0x61,0x27], // 4: Flute
+    [0x32,0x21,0x1e,0x06,0xe1,0x76,0x01,0x28], // 5: Clarinet
+    [0x02,0x01,0x06,0x00,0xa3,0xe2,0xf4,0xf4], // 6: Synth
+    [0x21,0x61,0x1d,0x07,0x82,0x81,0x11,0x07], // 7: Trumpet
+    [0x23,0x21,0x22,0x17,0xa2,0x72,0x01,0x17], // 8: Organ
+    [0x35,0x11,0x25,0x00,0x40,0x73,0x72,0x01], // 9: Bells
+    [0xb5,0x01,0x0f,0x0f,0xa8,0xa5,0x51,0x02], // 10: Vibes
+    [0x17,0xc1,0x24,0x07,0xf8,0xf8,0x22,0x12], // 11: Vibraphone
+    [0x71,0x23,0x11,0x06,0x65,0x74,0x18,0x16], // 12: Tutti
+    [0x01,0x02,0xd3,0x05,0xc9,0x95,0x03,0x02], // 13: Fretless
+    [0x61,0x63,0x0c,0x00,0x94,0xc0,0x33,0xf6], // 14: Synth Bass
+    [0x21,0x72,0x0d,0x00,0xc1,0xd5,0x56,0x06]  // 15: Sweep
+  ];
+
+  // dump(8byte) → {mod,car} パッチ (emu2413 dump2patch)
+  function dump2patch(d) {
+    return {
+      mod: { AM:(d[0]>>7)&1, PM:(d[0]>>6)&1, EG:(d[0]>>5)&1, KR:(d[0]>>4)&1, ML:d[0]&15,
+             KL:(d[2]>>6)&3, TL:d[2]&63, FB:d[3]&7, WF:(d[3]>>3)&1,
+             AR:(d[4]>>4)&15, DR:d[4]&15, SL:(d[6]>>4)&15, RR:d[6]&15 },
+      car: { AM:(d[1]>>7)&1, PM:(d[1]>>6)&1, EG:(d[1]>>5)&1, KR:(d[1]>>4)&1, ML:d[1]&15,
+             KL:(d[3]>>6)&3, TL:0, FB:0, WF:(d[3]>>4)&1,
+             AR:(d[5]>>4)&15, DR:d[5]&15, SL:(d[7]>>4)&15, RR:d[7]&15 }
+    };
+  }
+  const PATCH = VRC7_INST.map(dump2patch); // [16] {mod,car}
+  // 変換側(src/convert/vrc7Tone.js の「近いプリセット探し」)にも同じ表が要る。あちらは
+  // Workerバンドルにエミュレータを同梱できない都合で自前の写しを持っているので、
+  // tools/headless/check-all.js がこの export と突き合わせて食い違いを検出する。
+  Emu.VRC7_INST = VRC7_INST;
+
+  // ---- テーブル ----
+  function Min(a, b) { return a < b ? a : b; }
+
+  // AR用 線形→対数
+  const AR_ADJUST = new Uint32Array(1 << EG_BITS);
+  AR_ADJUST[0] = 1 << EG_BITS;
+  for (let i = 1; i < 128; i++)
+    AR_ADJUST[i] = ((1 << EG_BITS) - 1 - (1 << EG_BITS) * Math.log(i) / Math.log(128)) | 0;
+
+  // DB2LIN
+  const DB2LIN = new Int32Array((DB_MUTE + DB_MUTE) * 2);
+  for (let i = 0; i < DB_MUTE + DB_MUTE; i++) {
+    let v = (((1 << DB2LIN_AMP_BITS) - 1) * Math.pow(10, -i * DB_STEP / 20)) | 0;
+    if (i >= DB_MUTE) v = 0;
+    DB2LIN[i] = v;
+    DB2LIN[i + DB_MUTE + DB_MUTE] = -v;
+  }
+
+  function lin2db(d) {
+    if (d === 0) return DB_MUTE - 1;
+    return Min(-(((20.0 * Math.log10(d)) / DB_STEP) | 0), DB_MUTE - 1);
+  }
+
+  // sinテーブル (0=full, 1=half)
+  const fullsin = new Uint32Array(PG_WIDTH);
+  const halfsin = new Uint32Array(PG_WIDTH);
+  for (let i = 0; i < PG_WIDTH / 4; i++) fullsin[i] = lin2db(Math.sin(2.0 * Math.PI * i / PG_WIDTH));
+  for (let i = 0; i < PG_WIDTH / 4; i++) fullsin[PG_WIDTH / 2 - 1 - i] = fullsin[i];
+  for (let i = 0; i < PG_WIDTH / 2; i++) fullsin[PG_WIDTH / 2 + i] = DB_MUTE + DB_MUTE + fullsin[i];
+  for (let i = 0; i < PG_WIDTH / 2; i++) halfsin[i] = fullsin[i];
+  for (let i = PG_WIDTH / 2; i < PG_WIDTH; i++) halfsin[i] = fullsin[0];
+  const WAVEFORM = [fullsin, halfsin];
+
+  // LFO
+  const pmtable = new Int32Array(PM_PG_WIDTH);
+  for (let i = 0; i < PM_PG_WIDTH; i++)
+    pmtable[i] = (PM_AMP * Math.pow(2, PM_DEPTH * Math.sin(2.0 * Math.PI * i / PM_PG_WIDTH) / 1200)) | 0;
+  const amtable = new Int32Array(AM_PG_WIDTH);
+  for (let i = 0; i < AM_PG_WIDTH; i++)
+    amtable[i] = (AM_DEPTH / 2 / DB_STEP * (1.0 + Math.sin(2.0 * Math.PI * i / PM_PG_WIDTH))) | 0;
+
+  // clk/rate はネイティブ(49716Hz)固定なので rate_adjust=恒等。
+  // dphaseTable[fnum][block][ML]
+  const MLT = [1, 1*2, 2*2, 3*2, 4*2, 5*2, 6*2, 7*2, 8*2, 9*2, 10*2, 10*2, 12*2, 12*2, 15*2, 15*2];
+  const dphaseTable = [];
+  for (let fnum = 0; fnum < 512; fnum++) {
+    const a = []; dphaseTable.push(a);
+    for (let block = 0; block < 8; block++) {
+      const b = new Uint32Array(16); a.push(b);
+      for (let ML = 0; ML < 16; ML++)
+        b[ML] = (((fnum * MLT[ML]) << block) >> (20 - DP_BITS)) >>> 0;
+    }
+  }
+
+  // tllTable[fnum4][block][TL][KL]
+  const KL_DB2 = [0.000,9.000,12.000,13.875,15.000,16.125,16.875,17.625,18.000,18.750,19.125,19.500,19.875,20.250,20.625,21.000].map(x => (x * 2) | 0);
+  const tllTable = [];
+  for (let fnum = 0; fnum < 16; fnum++) {
+    const a = []; tllTable.push(a);
+    for (let block = 0; block < 8; block++) {
+      const b = []; a.push(b);
+      for (let TL = 0; TL < 64; TL++) {
+        const c = new Uint32Array(4); b.push(c);
+        for (let KL = 0; KL < 4; KL++) {
+          if (KL === 0) c[KL] = (TL2EG * TL) >>> 0;
+          else {
+            const tmp = KL_DB2[fnum] - (3 * 2) * (7 - block);
+            if (tmp <= 0) c[KL] = (TL2EG * TL) >>> 0;
+            else c[KL] = (((tmp >> (3 - KL)) / EG_STEP) | 0) + TL2EG * TL;
+          }
+        }
+      }
+    }
+  }
+
+  // rksTable[fnum8][block][KR]
+  const rksTable = [];
+  for (let f8 = 0; f8 < 2; f8++) {
+    const a = []; rksTable.push(a);
+    for (let block = 0; block < 8; block++) {
+      const b = new Int32Array(2); a.push(b);
+      b[0] = block >> 1;
+      b[1] = (block << 1) + f8;
+    }
+  }
+
+  // dphaseARTable[AR][Rks], dphaseDRTable[DR][Rks]
+  const dphaseARTable = [], dphaseDRTable = [];
+  for (let AR = 0; AR < 16; AR++) {
+    const a = new Uint32Array(16); dphaseARTable.push(a);
+    for (let Rks = 0; Rks < 16; Rks++) {
+      let RM = AR + (Rks >> 2); if (RM > 15) RM = 15; const RL = Rks & 3;
+      if (AR === 0) a[Rks] = 0;
+      else if (AR === 15) a[Rks] = EG_DP_WIDTH;
+      else a[Rks] = ((3 * (RL + 4)) << (RM + 1)) >>> 0;
+    }
+  }
+  for (let DR = 0; DR < 16; DR++) {
+    const a = new Uint32Array(16); dphaseDRTable.push(a);
+    for (let Rks = 0; Rks < 16; Rks++) {
+      let RM = DR + (Rks >> 2); if (RM > 15) RM = 15; const RL = Rks & 3;
+      if (DR === 0) a[Rks] = 0;
+      else a[Rks] = ((RL + 4) << (RM - 1)) >>> 0;
+    }
+  }
+
+  // SL[16] (eg_phase単位)
+  const SL_DB = [0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,48];
+  const SL = new Uint32Array(16);
+  for (let i = 0; i < 16; i++) SL[i] = ((((SL_DB[i] / 3.0) * 8) | 0) << (EG_DP_BITS - EG_BITS)) >>> 0;
+
+  const pm_dphase = ((PM_SPEED * PM_DP_WIDTH / (SAMPLE_RATE)) + 0.5) | 0;
+  const am_dphase = ((AM_SPEED * AM_DP_WIDTH / (SAMPLE_RATE)) + 0.5) | 0;
+
+  // ---- スロット ----
+  class Slot {
+    constructor(type) {
+      this.type = type; // 0=mod 1=car
+      this.patch = PATCH[0].mod;
+      this.reset();
+    }
+    reset() {
+      this.sintbl = WAVEFORM[0];
+      this.phase = 0; this.dphase = 0; this.pgout = 0;
+      this.output = [0, 0]; this.feedback = 0;
+      this.eg_mode = SETTLE; this.eg_phase = EG_DP_WIDTH; this.eg_dphase = 0; this.egout = 0;
+      this.fnum = 0; this.block = 0; this.volume = 0; this.sustine = 0;
+      this.tll = 0; this.rks = 0;
+    }
+    calcEgDphase() {
+      const p = this.patch;
+      switch (this.eg_mode) {
+        case ATTACK: return dphaseARTable[p.AR][this.rks];
+        case DECAY: return dphaseDRTable[p.DR][this.rks];
+        case SUSHOLD: return 0;
+        case SUSTINE: return dphaseDRTable[p.RR][this.rks];
+        case RELEASE:
+          if (this.sustine) return dphaseDRTable[5][this.rks];
+          else if (p.EG) return dphaseDRTable[p.RR][this.rks];
+          else return dphaseDRTable[7][this.rks];
+        default: return 0;
+      }
+    }
+    updatePG() { this.dphase = dphaseTable[this.fnum][this.block][this.patch.ML]; }
+    updateTLL() {
+      this.tll = (this.type === 0)
+        ? tllTable[this.fnum >> 5][this.block][this.patch.TL][this.patch.KL]
+        : tllTable[this.fnum >> 5][this.block][this.volume][this.patch.KL];
+    }
+    updateRKS() { this.rks = rksTable[this.fnum >> 8][this.block][this.patch.KR]; }
+    updateWF() { this.sintbl = WAVEFORM[this.patch.WF]; }
+    updateEG() { this.eg_dphase = this.calcEgDphase(); }
+    updateAll() { this.updatePG(); this.updateTLL(); this.updateRKS(); this.updateWF(); this.updateEG(); }
+    slotOn() { this.eg_mode = ATTACK; this.phase = 0; this.eg_phase = 0; }
+    slotOff() {
+      if (this.eg_mode === ATTACK)
+        this.eg_phase = (AR_ADJUST[(this.eg_phase >>> (EG_DP_BITS - EG_BITS)) & 0x7F] << (EG_DP_BITS - EG_BITS)) >>> 0;
+      this.eg_mode = RELEASE;
+    }
+    calcPhase(lfo_pm) {
+      if (this.patch.PM) this.phase = (this.phase + (((this.dphase * lfo_pm) >> PM_AMP_BITS) >>> 0)) >>> 0;
+      else this.phase = (this.phase + this.dphase) >>> 0;
+      this.phase &= (DP_WIDTH - 1);
+      this.pgout = this.phase >>> DP_BASE_BITS;
+      return this.pgout;
+    }
+    calcEnvelope(lfo_am) {
+      let egout;
+      switch (this.eg_mode) {
+        case ATTACK:
+          this.eg_phase = (this.eg_phase + this.eg_dphase) >>> 0;
+          if (this.eg_phase & EG_DP_WIDTH) { egout = 0; this.eg_phase = 0; this.eg_mode = DECAY; this.updateEG(); }
+          else egout = AR_ADJUST[(this.eg_phase >>> (EG_DP_BITS - EG_BITS)) & 0x7F];
+          break;
+        case DECAY:
+          this.eg_phase = (this.eg_phase + this.eg_dphase) >>> 0;
+          egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          if (this.eg_phase >= SL[this.patch.SL]) {
+            this.eg_phase = SL[this.patch.SL];
+            this.eg_mode = this.patch.EG ? SUSHOLD : SUSTINE;
+            this.updateEG();
+            egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          }
+          break;
+        case SUSHOLD:
+          egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          if (this.patch.EG === 0) { this.eg_mode = SUSTINE; this.updateEG(); }
+          break;
+        case SUSTINE:
+        case RELEASE:
+          this.eg_phase = (this.eg_phase + this.eg_dphase) >>> 0;
+          egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          if (egout >= (1 << EG_BITS)) { this.eg_mode = FINISH; egout = (1 << EG_BITS) - 1; }
+          break;
+        case FINISH: default:
+          egout = (1 << EG_BITS) - 1;
+          break;
+      }
+      egout = this.patch.AM ? (EG2DB * (egout + this.tll) + lfo_am) : (EG2DB * (egout + this.tll));
+      if (egout >= DB_MUTE) egout = DB_MUTE - 1;
+      this.egout = egout;
+      return egout;
+    }
+  }
+
+  // emu2413 calc_slot_car: modOut = 2*(fm>>1) (fmのLSBを切り捨てるだけで倍化はしない)
+  function modToCarPhase(fm) { return 2 * (fm >> 1); }
+
+  class Vrc7Channel {
+    constructor() {
+      this.mod = new Slot(0);
+      this.car = new Slot(1);
+      this.patchNumber = 0;
+      this.keyStatus = 0;
+    }
+    reset() { this.mod.reset(); this.car.reset(); this.keyStatus = 0; }
+
+    calcModulator(lfo_am, lfo_pm) {
+      const s = this.mod;
+      s.output[1] = s.output[0];
+      const egout = s.calcEnvelope(lfo_am);
+      const pgout = s.calcPhase(lfo_pm);
+      if (egout >= DB_MUTE - 1) s.output[0] = 0;
+      else if (s.patch.FB !== 0) {
+        // emu2413: fm = (output[1]+output[0]) >> (9-FB)。s.feedbackは(output[1]+output[0])>>1で
+        // 既に1bitシフト済みのため、ここでのシフト量は(9-FB)-1 = (8-FB)。
+        const fm = (s.feedback) >> (8 - s.patch.FB);
+        s.output[0] = DB2LIN[s.sintbl[(pgout + fm) & (PG_WIDTH - 1)] + egout];
+      } else {
+        s.output[0] = DB2LIN[s.sintbl[pgout] + egout];
+      }
+      // s.feedbackは自己変調(次回calcModulator呼び出し時のfm計算)専用。キャリアへ渡すのは
+      // emu2413同様、平均化前の生のoutput[0]。
+      s.feedback = (s.output[1] + s.output[0]) >> 1;
+      return s.output[0];
+    }
+    calcCarrier(fm, lfo_am, lfo_pm) {
+      const s = this.car;
+      const egout = s.calcEnvelope(lfo_am);
+      const pgout = s.calcPhase(lfo_pm);
+      if (egout >= DB_MUTE - 1) return 0;
+      return DB2LIN[s.sintbl[(pgout + modToCarPhase(fm)) & (PG_WIDTH - 1)] + egout];
+    }
+  }
+
+  class VRC7Audio {
+    constructor() { 
+      // ★2026-08-22: 既定ではNuked-OPLLコア(opllNuked.js)へ委譲する。
+      // MML.Emu.OPLL_CORE = 'emu2413' を指定するとこの下の旧コア(emu2413 0.6x系移植)に戻る。
+      if (Emu.OPLL_CORE !== 'emu2413' && Emu.OPLLNuked) return new Emu.OPLLNuked({ chipType: 'ds1001' });
+      this._init(); this.mute = new Array(NUM_CH).fill(false); this.vol = new Array(NUM_CH).fill(1); }
+    _init() {
+      this.addr = 0;
+      this.reg = new Uint8Array(0x40);
+      this.patches = [];               // [16] {mod,car} (音色0はカスタム, 可変)
+      for (let i = 0; i < 16; i++) this.patches.push({ mod: Object.assign({}, PATCH[i].mod), car: Object.assign({}, PATCH[i].car) });
+      this.channels = [];
+      for (let i = 0; i < NUM_CH; i++) { const c = new Vrc7Channel(); this.channels.push(c); this._setPatch(i, 0); }
+      this.pm_phase = 0; this.am_phase = 0; this.lfo_pm = 0; this.lfo_am = 0;
+      this.cyc = 0; this.lastSample = 0;
+    }
+    reset() { this._init(); }
+
+    _setPatch(i, num) {
+      const c = this.channels[i];
+      c.patchNumber = num;
+      c.mod.patch = this.patches[num].mod;
+      c.car.patch = this.patches[num].car;
+    }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      if (addr === 0x9010) this.addr = value & 0x3F;
+      else if (addr === 0x9030) this.writeReg(this.addr, value);
+    }
+
+    writeReg(reg, data) {
+      reg &= 0x3F; data &= 0xFF;
+      const cust = this.patches[0];
+      if (reg <= 0x07) {
+        // カスタム音色
+        switch (reg) {
+          case 0x00: cust.mod.AM=(data>>7)&1; cust.mod.PM=(data>>6)&1; cust.mod.EG=(data>>5)&1; cust.mod.KR=(data>>4)&1; cust.mod.ML=data&15; break;
+          case 0x01: cust.car.AM=(data>>7)&1; cust.car.PM=(data>>6)&1; cust.car.EG=(data>>5)&1; cust.car.KR=(data>>4)&1; cust.car.ML=data&15; break;
+          case 0x02: cust.mod.KL=(data>>6)&3; cust.mod.TL=data&63; break;
+          case 0x03: cust.car.KL=(data>>6)&3; cust.car.WF=(data>>4)&1; cust.mod.WF=(data>>3)&1; cust.mod.FB=data&7; break;
+          case 0x04: cust.mod.AR=(data>>4)&15; cust.mod.DR=data&15; break;
+          case 0x05: cust.car.AR=(data>>4)&15; cust.car.DR=data&15; break;
+          case 0x06: cust.mod.SL=(data>>4)&15; cust.mod.RR=data&15; break;
+          case 0x07: cust.car.SL=(data>>4)&15; cust.car.RR=data&15; break;
+        }
+        for (let i = 0; i < NUM_CH; i++) if (this.channels[i].patchNumber === 0) { this.channels[i].mod.updateAll(); this.channels[i].car.updateAll(); }
+      } else if (reg >= 0x10 && reg <= 0x15) {
+        const ch = reg - 0x10, c = this.channels[ch];
+        const fnum = data + ((this.reg[0x20 + ch] & 1) << 8);
+        c.mod.fnum = c.car.fnum = fnum;
+        c.mod.updateAll(); c.car.updateAll();
+      } else if (reg >= 0x20 && reg <= 0x25) {
+        const ch = reg - 0x20, c = this.channels[ch];
+        const fnum = ((data & 1) << 8) + this.reg[0x10 + ch];
+        const block = (data >> 1) & 7;
+        c.mod.fnum = c.car.fnum = fnum; c.mod.block = c.car.block = block;
+        // sustine
+        if ((this.reg[reg] ^ data) & 0x20) { c.car.sustine = (data >> 5) & 1; }
+        // key on/off
+        const key = (data & 0x10) !== 0;
+        if (key) { if (!c.keyStatus) { c.mod.slotOn(); c.car.slotOn(); } c.keyStatus = 1; }
+        else { if (c.keyStatus) c.car.slotOff(); c.keyStatus = 0; }
+        c.mod.updateAll(); c.car.updateAll();
+      } else if (reg >= 0x30 && reg <= 0x35) {
+        const ch = reg - 0x30, c = this.channels[ch];
+        this._setPatch(ch, (data >> 4) & 15);
+        c.car.volume = (data & 15) << 2; // 6bit
+        c.mod.updateAll(); c.car.updateAll();
+      }
+      this.reg[reg] = data;
+    }
+
+    _updateAMPM() {
+      this.pm_phase = (this.pm_phase + pm_dphase) & (PM_DP_WIDTH - 1);
+      this.am_phase = (this.am_phase + am_dphase) & (AM_DP_WIDTH - 1);
+      this.lfo_am = amtable[this.am_phase >>> (AM_DP_BITS - AM_PG_BITS)];
+      this.lfo_pm = pmtable[this.pm_phase >>> (PM_DP_BITS - PM_PG_BITS)];
+    }
+
+    _calc() {
+      this._updateAMPM();
+      let inst = 0;
+      for (let i = 0; i < NUM_CH; i++) {
+        const c = this.channels[i];
+        if (c.car.eg_mode === FINISH) continue;
+        const fm = c.calcModulator(this.lfo_am, this.lfo_pm);
+        const out = c.calcCarrier(fm, this.lfo_am, this.lfo_pm);
+        if (!this.mute[i]) inst += out * this.vol[i];
+      }
+      return inst; // ±(1023*6)
+    }
+
+    clock() {
+      if (++this.cyc < CYCLES_PER_SAMPLE) return;
+      this.cyc = 0;
+      this.lastSample = this._calc();
+    }
+
+    mixSample() {
+      // emu2413: out16 = clamp(inst*8). ここでは -1..1 に正規化しゲイン調整。
+      return (this.lastSample / 4096) * 0.5;
+    }
+  }
+
+  // ---- 鍵盤表示用スナップショット ----
+  Emu.snapshotVRC7 = function (chip) {
+    if (typeof chip.snapshot === 'function') return chip.snapshot(); // Nukedコア
+    const out = [];
+    const N = 128; // FM連続波形なので線形補間前提で高めの解像度
+    for (let i = 0; i < NUM_CH; i++) {
+      const c = chip.channels[i];
+      const mod = c.mod, car = c.car;
+      const freq = (c.keyStatus && car.fnum > 0) ? SAMPLE_RATE * car.fnum / Math.pow(2, 19 - car.block) : 0;
+      const active = c.keyStatus && car.eg_mode !== FINISH && car.eg_mode !== SETTLE;
+      // 現在のオペレータ状態で1周期のFM波形を合成
+      const modEg = mod.egout, carEg = car.egout;
+      const ratio = car.dphase > 0 ? mod.dphase / car.dphase : 1;
+      const wave = new Array(N);
+      let mx = 1e-6;
+      for (let k = 0; k < N; k++) {
+        const cp = Math.round((k / N) * PG_WIDTH) & (PG_WIDTH - 1);
+        const mp = Math.round((k / N) * ratio * PG_WIDTH) & (PG_WIDTH - 1);
+        const mo = DB2LIN[mod.sintbl[mp] + Math.min(DB_MUTE - 1, modEg)];
+        const co = (carEg >= DB_MUTE - 1) ? 0 : DB2LIN[car.sintbl[(cp + (mo << 1)) & (PG_WIDTH - 1)] + carEg];
+        wave[k] = co;
+        if (Math.abs(co) > mx) mx = Math.abs(co);
+      }
+      for (let k = 0; k < N; k++) wave[k] /= mx;
+      // patch: 鍵盤の大波形表示の下に音色データ(@OT形式)を出すためのパラメータ
+      // (chip.patches[n] の {mod,car}。emu2413のpatch構造体そのまま: AM/PM/EG/KR/ML/KL/TL/FB/WF/AR/DR/SL/RR)
+      const pt = chip.patches[c.patchNumber];
+      out.push({
+        freq,
+        vol: (15 - (c.car.volume >> 2)) / 15,
+        rawVol: c.car.volume >> 2,
+        instrument: c.patchNumber,
+        active,
+        waveData: active ? wave : new Array(N).fill(0),
+        patch: pt ? { type: 'opll', inst: c.patchNumber, mod: pt.mod, car: pt.car } : null
+      });
+    }
+    return out;
+  };
+
+  Emu.VRC7Audio = VRC7Audio;
+})(globalThis);
+
+/*
+ * MMC5 拡張音源エミュレータ
+ * MML.Emu.MMC5Audio
+ *
+ * パルス x2 ($5000-$5003 / $5004-$5007, 有効化は $5015)。
+ * レジスタ形式は2A03のパルスチャンネルと同様だが、スイープユニットを持たない。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const DUTY_TABLE = [
+    [0, 1, 0, 0, 0, 0, 0, 0],
+    [0, 1, 1, 0, 0, 0, 0, 0],
+    [0, 1, 1, 1, 1, 0, 0, 0],
+    [1, 0, 0, 1, 1, 1, 1, 1]
+  ];
+  const LENGTH_TABLE = [
+    10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
+    12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
+  ];
+
+  class Mmc5Pulse {
+    constructor() {
+      this.enabled = false;
+      this.duty = 0;
+      this.lengthCounterHalt = false; // = エンベロープループフラグ
+      this.constantVolume = true;
+      this.volume = 0;                // 固定音量 or エンベロープ周期
+      this.timerPeriod = 0;
+      this.timer = 0;
+      this.dutyStep = 0;
+      this.lengthCounter = 0;
+      // エンベロープ(2A03パルスと同形式)
+      this.envStart = false;
+      this.envDivider = 0;
+      this.envDecay = 0;
+    }
+    writeReg(index, value) {
+      switch (index) {
+        case 0: // $5000/$5004
+          this.duty = (value >> 6) & 0x03;
+          this.lengthCounterHalt = (value & 0x20) !== 0;
+          this.constantVolume = (value & 0x10) !== 0;
+          this.volume = value & 0x0F;
+          break;
+        case 2: // $5002/$5006
+          this.timerPeriod = (this.timerPeriod & 0x700) | value;
+          break;
+        case 3: // $5003/$5007
+          this.timerPeriod = (this.timerPeriod & 0xFF) | ((value & 0x07) << 8);
+          if (this.enabled) this.lengthCounter = LENGTH_TABLE[(value >> 3) & 0x1F];
+          this.dutyStep = 0;
+          this.envStart = true; // 書き込みでエンベロープ再スタート
+          break;
+      }
+    }
+    setEnabled(on) {
+      this.enabled = on;
+      if (!on) this.lengthCounter = 0;
+    }
+    clock() {
+      if (this.timer === 0) {
+        this.timer = this.timerPeriod;
+        this.dutyStep = (this.dutyStep + 1) & 7;
+      } else {
+        this.timer--;
+      }
+    }
+    // エンベロープ更新(240Hzでクロック)。2A03パルスと同一ロジック。
+    clockEnvelope() {
+      if (this.envStart) {
+        this.envStart = false;
+        this.envDecay = 15;
+        this.envDivider = this.volume;
+      } else if (this.envDivider === 0) {
+        this.envDivider = this.volume;
+        if (this.envDecay > 0) this.envDecay--;
+        else if (this.lengthCounterHalt) this.envDecay = 15; // ループ
+      } else {
+        this.envDivider--;
+      }
+    }
+    clockHalfFrame() {
+      if (!this.lengthCounterHalt && this.lengthCounter > 0) this.lengthCounter--;
+    }
+    output() {
+      // MMC5はスイープを持たないため 2A03 の「period<8で消音」は無い(超音波域も出力)。
+      if (!this.enabled || this.lengthCounter === 0) return 0;
+      if (DUTY_TABLE[this.duty][this.dutyStep] === 0) return 0;
+      return this.constantVolume ? this.volume : this.envDecay;
+    }
+  }
+
+  class MMC5Audio {
+    constructor() {
+      this.pulse1 = new Mmc5Pulse();
+      this.pulse2 = new Mmc5Pulse();
+      this.frameCounter = 0;
+      this.cycleParity = 0;
+      this.pcmLevel = 0;   // $5011 8bit 生PCM DAC 出力
+      this.pcmReadMode = false; // $5010 bit0
+      this.mute = { pulse1: false, pulse2: false, pcm: false };
+      this.vol = { pulse1: 1, pulse2: 1, pcm: 1 };
+    }
+
+    reset() {
+      this.pulse1 = new Mmc5Pulse();
+      this.pulse2 = new Mmc5Pulse();
+      this.frameCounter = 0;
+      this.cycleParity = 0;
+      this.pcmLevel = 0;
+      this.pcmReadMode = false;
+    }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      if (addr >= 0x5000 && addr <= 0x5003) {
+        this.pulse1.writeReg(addr - 0x5000, value);
+      } else if (addr >= 0x5004 && addr <= 0x5007) {
+        this.pulse2.writeReg(addr - 0x5004, value);
+      } else if (addr === 0x5010) {
+        this.pcmReadMode = (value & 0x01) !== 0; // bit0: 0=writeモード, 1=readモード
+      } else if (addr === 0x5011) {
+        // 8bit 生PCM。writeモードのみ出力を更新($4011相当だが8bit)。
+        if (!this.pcmReadMode) this.pcmLevel = value;
+      } else if (addr === 0x5015) {
+        this.pulse1.setEnabled((value & 0x01) !== 0);
+        this.pulse2.setEnabled((value & 0x02) !== 0);
+      }
+    }
+
+    clock() {
+      // パルスタイマは 2A03 と同じくAPUサイクル(2 CPUサイクル)ごとに進める。
+      // f = CPU/(16*(period+1))。毎CPUサイクルで進めると1オクターブ高くなる。
+      this.cycleParity ^= 1;
+      if (this.cycleParity === 0) {
+        this.pulse1.clock();
+        this.pulse2.clock();
+      }
+      // MMC5はエンベロープ・長さカウンタとも 240Hz 固定(APU長さカウンタの2倍速)。
+      // 7457 CPUサイクル(≒240Hz)ごとに両方クロックする。
+      this.frameCounter++;
+      if (this.frameCounter >= 7457) {
+        this.frameCounter = 0;
+        this.pulse1.clockEnvelope();
+        this.pulse2.clockEnvelope();
+        this.pulse1.clockHalfFrame();
+        this.pulse2.clockHalfFrame();
+      }
+    }
+
+    mixSample() {
+      const p1 = this.mute.pulse1 ? 0 : (this.pulse1.output() / 15) * this.vol.pulse1;
+      const p2 = this.mute.pulse2 ? 0 : (this.pulse2.output() / 15) * this.vol.pulse2;
+      const pcm = this.mute.pcm ? 0 : (this.pcmLevel / 255) * this.vol.pcm;
+      return (p1 + p2) * 0.25 + pcm * 0.30;
+    }
+  }
+
+  // 鍵盤表示用: ライブチップから pulse1/pulse2/pcm のスナップショットを作る。
+  // 音量はエンベロープ実出力(constantVolume=false時はenvDecay)を反映。
+  Emu.snapshotMMC5 = function (chip) {
+    const CPU = 1789773;
+    const pulse = (p) => {
+      const eff = p.constantVolume ? p.volume : p.envDecay; // 実効音量
+      const freq = (p.timerPeriod >= 8) ? CPU / (16 * (p.timerPeriod + 1)) : 0;
+      return {
+        freq,
+        vol: eff / 15,
+        rawVol: eff,
+        duty: p.duty,
+        active: p.enabled && p.lengthCounter > 0 && eff > 0 && freq > 0
+      };
+    };
+    return {
+      pulse1: pulse(chip.pulse1),
+      pulse2: pulse(chip.pulse2),
+      pcm: { level: chip.pcmLevel, vol: chip.pcmLevel / 255, active: chip.pcmLevel > 0 }
+    };
+  };
+
+  Emu.MMC5Audio = MMC5Audio;
+})(globalThis);
+
+/*
+ * N163 (Namco 163) 拡張音源エミュレータ
+ * MML.Emu.N163Audio
+ *
+ * 128バイト内部RAMにチャンネルレジスタ($40-$7F)と波形データを保持する
+ * ウェーブテーブル音源(最大8チャンネル)。
+ *
+ *   $F800 : 内部RAMアドレス設定 (bit7=1で$4800書き込み毎にオートインクリメント)
+ *   $4800 : 現在のアドレスへデータ書き込み
+ *
+ * チャンネル ch(0-7) のレジスタは RAM (0x40 + ch*8) の8バイト (インターリーブ配置):
+ *   +0 周波数 Low   +2 周波数 Mid   +4 周波数 High(bit0-1) | 波形長(bit2-7)
+ *   +1 位相 Low     +3 位相 Mid     +5 位相 High   (24bit位相アキュムレータ, RAMに格納)
+ *   +6 波形アドレス(4bitサンプル単位)
+ *   +7 音量(bit0-3) | 有効ch数(bit4-6, $7Fのみ)
+ * 周波数=18bit, 波形長 length = 256 - (+4 & 0xFC) サンプル(4-256)。
+ * 波形は4bitサンプルを1バイトに2つ(リトルエンディアン)格納。
+ * 有効チャンネルは上位 (($7F>>4)&7)+1 個で、15 CPUサイクルごとに1chずつ巡回更新される。
+ * 出力周波数 f = CPU * freq / (15 * 65536 * length * numChannels)。
+ *
+ * 注: 実機は freq/phase をインターリーブ配置。ドライバは freq を +0/+2/+4 に書き、
+ *     間の位相バイト +1/+3/+5 を LDA $4800 で「読み飛ばし」て保存する(読み出しも
+ *     オートインクリメントするのを利用)。Rolling Thunder のCPUトレースで確定。
+ *
+ * 注2: 波形長は NESdev Wiki 準拠で bit2-7 の6bit(4-256サンプル, length=256-(+4&0xFC))。
+ *     これが標準の N163 挙動(NSFPlay/Mesen/VirtuaNSF既定と同じ)。ただし「古いドライバ」で
+ *     作られた一部NSF(例: Famicompo mini vol.3 entry023)は波形長を最大32サンプル前提で
+ *     使っており、256版だと音程・波形テーブルが崩れる。VirtuaNSFはこれ用に「N163を32サンプル
+ *     に制限するモード」を別途用意している(readme 1.0.7.1)。
+ *     → legacyWaveLen=true で対応(2026-09-07)。旧ドライバは +4 に (n<<2)|$80 を書く
+ *     (VirtuaNES 0.97 の APU_N106: tonelen = 0x20-(data&0x1C))。VirtuaNESの周波数式は
+ *     実機式と同じ f = CPU*freq/(15*65536*length*numCh) なので、違いは波形長の解釈だけ。
+ *     そこで「+4 への書き込み値を現行エンコードへ書き換えて RAM に置く」方式にした:
+ *       (v & 0x1F) | 0xE0   … 256-(0xE0|(n<<2)) = 32-4n = 0x20-(v&0x1C) と同じ長さ
+ *     RAM 自体が現行仕様の値になるため、音声合成・鍵盤/ロール(snapshotN163)・
+ *     nsf2mml の波形抽出・n163Snapshots 経由の再生(NsfReplayStreamPlayer)が全て
+ *     無変更で正しくなる。判定は MML.NSF.detectLegacyN163Driver(nsfBus.js から設定)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const NUM_CHANNELS = 8;
+  const UPDATE_CYCLES = 15; // 1チャンネル更新に要するCPUサイクル
+
+  class N163Audio {
+    constructor() {
+      this.ram = new Uint8Array(128);
+      this.addr = 0;
+      this.autoInc = false;
+      this.updateCounter = 0; // 15CPUサイクルごとに1ch更新
+      this.rrIndex = 0;       // 有効ch内の巡回位置
+      this.mute = new Array(NUM_CHANNELS).fill(false);
+      this.vol = new Array(NUM_CHANNELS).fill(1);
+      // 旧ppmckドライバ(波形長32サンプル形式)互換。true のとき +4 レジスタへの書き込みを
+      // 現行エンコードへ変換して格納する(ファイル冒頭コメント 注2 参照)。
+      this.legacyWaveLen = false;
+    }
+
+    reset() {
+      this.ram = new Uint8Array(128);
+      this.addr = 0;
+      this.autoInc = false;
+      this.updateCounter = 0;
+      this.rrIndex = 0;
+    }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      if (addr === 0xF800) {
+        this.addr = value & 0x7F;
+        this.autoInc = (value & 0x80) !== 0;
+      } else if (addr === 0x4800) {
+        // 旧ドライバ互換: チャンネルレジスタ +4(波形長|周波数上位)への書き込みは
+        // bit2-4 の3bit波形長(0x20-(v&0x1C))を現行の6bit形式(0xE0|(v&0x1C))へ変換する。
+        // 周波数上位2bit(bit0-1)はそのまま。
+        if (this.legacyWaveLen && this.addr >= 0x40 && (this.addr & 7) === 4) {
+          value = (value & 0x1F) | 0xE0;
+        }
+        this.ram[this.addr] = value;
+        if (this.autoInc) this.addr = (this.addr + 1) & 0x7F;
+      }
+    }
+
+    // $4800 読み出し: 現在のアドレスの内部RAMを返し、オートインクリメント時はアドレスも進める。
+    // (書き込みとアドレス/オートインクリメントを共有。実機同様、読み出しでもインクリメント。
+    //  ※ ストア命令の空読みはCPU側で抑止済み。ここに来るのは真の LDA $4800 のみ)
+    readData() {
+      const v = this.ram[this.addr];
+      if (this.autoInc) this.addr = (this.addr + 1) & 0x7F;
+      return v;
+    }
+
+    numChannels() {
+      return ((this.ram[0x7F] >> 4) & 0x07) + 1;
+    }
+
+    // ch(0-7, 7=$78が最上位)を1回更新: 位相を進めてRAM(+1/+3/+5)へ書き戻す
+    _updateChannel(ch) {
+      const base = 0x40 + ch * 8;
+      const ram = this.ram;
+      const freq = ram[base] | (ram[base + 2] << 8) | ((ram[base + 4] & 0x03) << 16);
+      const length = 256 - (ram[base + 4] & 0xFC); // 4-256 サンプル
+      let phase = ram[base + 1] | (ram[base + 3] << 8) | (ram[base + 5] << 16);
+      phase = (phase + freq) % (length * 0x10000);
+      ram[base + 1] = phase & 0xFF;
+      ram[base + 3] = (phase >> 8) & 0xFF;
+      ram[base + 5] = (phase >> 16) & 0xFF;
+    }
+
+    // ch の現在の出力サンプル(0-15)。位相上位8bitで波形を索引。
+    _sample(ch) {
+      const base = 0x40 + ch * 8;
+      const ram = this.ram;
+      const length = 256 - (ram[base + 4] & 0xFC);
+      const phase = ram[base + 1] | (ram[base + 3] << 8) | (ram[base + 5] << 16);
+      const sampleIndex = (phase >> 16) % length;
+      const nibbleAddr = (ram[base + 6] + sampleIndex) & 0xFF; // 波形アドレスは4bitサンプル単位
+      const byte = ram[(nibbleAddr >> 1) & 0x7F];
+      return (nibbleAddr & 1) ? ((byte >> 4) & 0x0F) : (byte & 0x0F);
+    }
+
+    clock() {
+      // 実機は15 CPUサイクルで1チャンネルを更新・出力し、有効ch(上位num個)を巡回する。
+      if (++this.updateCounter < UPDATE_CYCLES) return;
+      this.updateCounter = 0;
+      const num = this.numChannels();
+      this.rrIndex = (this.rrIndex + 1) % num;
+      this._updateChannel((NUM_CHANNELS - num) + this.rrIndex);
+    }
+
+    mixSample() {
+      const num = this.numChannels();
+      let sum = 0;
+      for (let ch = NUM_CHANNELS - num; ch < NUM_CHANNELS; ch++) {
+        if (this.mute[ch]) continue;
+        const volume = this.ram[0x40 + ch * 8 + 7] & 0x0F;
+        sum += (this._sample(ch) - 8) * volume * this.vol[ch]; // -120..105
+      }
+      // 時間多重出力の可聴成分は有効ch平均。120で正規化してゲイン。
+      // ゲインは他チップとのバランスで調整(0.8→0.3で全体を半分以下に下げた)。
+      return (sum / num / 120) * 0.5;
+    }
+  }
+
+  // 鍵盤表示用: 128バイトRAMから各チャンネルの freq/vol/波形 スナップショットを作る。
+  // 表示スロット i(0..7) → ハードウェアch (7-i)。有効なのは上位 numCh 個($78が常にN1)。
+  // 事前キャプチャ(writeLogから復元したRAM)・リアルタイム(ライブチップのRAM)双方から使う。
+  Emu.snapshotN163 = function (ram) {
+    const CPU = 1789773;
+    const sampleAt = (a) => (ram[(a >> 1) & 0x7F] >> ((a & 1) * 4)) & 0x0F;
+    const numCh = ((ram[0x7F] >> 4) & 7) + 1;
+    const channels = [];
+    for (let i = 0; i < NUM_CHANNELS; i++) {
+      const ch = 7 - i;
+      const base = 0x40 + ch * 8;
+      const f18 = ram[base] | (ram[base + 2] << 8) | ((ram[base + 4] & 0x03) << 16);
+      const length = 256 - (ram[base + 4] & 0xFC);
+      const rawVol = ram[base + 7] & 0x0F;
+      const vol = rawVol / 15;
+      const freq = f18 > 0 ? f18 * CPU / (15 * 65536 * length * numCh) : 0;
+      const waveData = new Array(length);
+      for (let k = 0; k < length; k++) waveData[k] = (sampleAt((ram[base + 6] + k) & 0xFF) - 8) / 8;
+      channels.push({ freq, vol, rawVol, active: (i < numCh) && vol > 0 && freq > 0, waveData });
+    }
+    return { channels, numCh };
+  };
+
+  Emu.N163Audio = N163Audio;
+})(globalThis);
+
+/*
+ * FME-7 (Sunsoft 5B) 拡張音源エミュレータ
+ * MML.Emu.FME7Audio
+ *
+ * AY-3-8910/YM2149 系。矩形波(50%)x3 + ノイズ + ハードウェアエンベロープ。
+ * アドレスラッチ $C000 でレジスタ番号(0-15)を選択し、$E000 で書き込む。
+ *   $00/$01,$02/$03,$04/$05 : 各chの12bitトーン周期(下位8bit/上位4bit)
+ *   $06                     : ノイズ周期(5bit)
+ *   $07                     : ミキサー。bit0-2=トーン有効(0で有効), bit3-5=ノイズ有効(0で有効)
+ *   $08/$09/$0A             : 各chの音量。bit0-3=固定音量, bit4=1でエンベロープ制御
+ *   $0B/$0C                 : 16bitエンベロープ周期
+ *   $0D                     : エンベロープ形状 (bit0=Hold,bit1=Alternate,bit2=Attack,bit3=Continue)
+ *
+ * トーン: f = CPU/(32*period) (period=0は1扱い、+1しない)。
+ * ノイズ: 17bit LFSR(タップ bit0^bit3)、f = CPU/(32*period)。
+ * エンベロープ: 5bit(0-31)、1ステップ = CPU/(16*period)。
+ * 音量DAC: 5bit対数(1.5dB/step、level0-1=無音)。固定音量Vは 5bit=2V+1。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  // 5B/AY 32段対数DAC。1.5dB/step、最大(31)=1.0、level0-1は無音。
+  const AY_DAC = new Float32Array(32);
+  for (let i = 0; i < 32; i++) AY_DAC[i] = i < 2 ? 0 : Math.pow(10, (i - 31) * 1.5 / 20);
+
+  const NUM_CH = 3;
+  // ★超音波のトーン(2026-09-19): 周期 2 以下は CPU/32(f=1789773/(32*周期)) で 20kHz を超える。出力サンプルの瞬間値を拾うと
+  //   サンプリング周波数との差で折り返し、聞こえる高音(例: 48kHz で FME7 周期1=55.9kHz → 約7.9kHz)になる。
+  //   実機ではアナログ段で平均され、方形波の半分の高さの直流(音量を変えた瞬間の「カチッ」)にしかならないので、
+  //   その平均(0.5)で鳴らす。Konami の MSX ドライバはバスドラの頭を周期1+エンベロープで作る
+  //   (Metal Gear 2 曲153。元の AY は約15.8kHz、FME7 へ写すと約7.9kHz に折り返して金属音になっていた)
+  const ULTRA_TONE_PERIOD_MAX = 2;
+
+  // トーン(矩形波)。period チャンネルクロックごとにレベル反転。
+  class Fme7Tone {
+    constructor() { this.period = 1; this.timer = 0; this.level = 0; }
+    reset() { this.period = 1; this.timer = 0; this.level = 0; }
+    clock() {
+      if (this.timer === 0) {
+        this.timer = Math.max(1, this.period) - 1; // period クロックごとに反転
+        this.level ^= 1;
+      } else {
+        this.timer--;
+      }
+    }
+  }
+
+  // ノイズ。17bit LFSR。period チャンネルクロックごとに flip をトグルし、
+  // flip立ち上がりでシフト(=2*period チャンネルクロック=32*period CPUクロックごと)。
+  class Fme7Noise {
+    constructor() { this.period = 1; this.timer = 0; this.lfsr = 1; this.flip = 0; this.out = 0; }
+    reset() { this.period = 1; this.timer = 0; this.lfsr = 1; this.flip = 0; this.out = 0; }
+    clock() {
+      if (this.timer === 0) {
+        this.timer = Math.max(1, this.period) - 1;
+        this.flip ^= 1;
+        if (this.flip) {
+          const fb = (this.lfsr ^ (this.lfsr >> 3)) & 1; // タップ bit0 ^ bit3
+          this.lfsr = ((this.lfsr >> 1) | (fb << 16)) & 0x1FFFF;
+        }
+        this.out = this.lfsr & 1;
+      } else {
+        this.timer--;
+      }
+    }
+  }
+
+  // ハードウェアエンベロープ。5bit(0-31)出力。
+  class Fme7Envelope {
+    constructor() { this.period = 1; this.timer = 0; this.step = 0; this.att = false; this.cont = false; this.alt = false; this.hold = false; this.holding = false; this.level = 0; }
+    reset() { this.period = 1; this.timer = 0; this.step = 0; this.att = false; this.holding = false; this.level = 0; }
+    writeShape(s) {
+      this.hold = (s & 1) !== 0;
+      this.alt = (s & 2) !== 0;
+      this.att = (s & 4) !== 0;
+      this.cont = (s & 8) !== 0;
+      this.step = 0;
+      this.holding = false;
+      this.timer = 0;
+      this.level = this.att ? 0 : 31; // Attack=上昇なら0から、下降なら31から
+    }
+    clock() {
+      if (this.timer === 0) {
+        this.timer = Math.max(1, this.period) - 1;
+        this._step();
+      } else {
+        this.timer--;
+      }
+    }
+    _step() {
+      if (this.holding) return;
+      this.step++;
+      if (this.step > 31) {
+        this.step = 0;
+        if (!this.cont) { this.holding = true; this.level = 0; return; }          // 一発(減衰/上昇後に無音)
+        if (this.hold) { this.holding = true; this.level = this.alt ? (this.att ? 0 : 31) : (this.att ? 31 : 0); return; }
+        if (this.alt) this.att = !this.att; // 交互(三角)なら方向反転
+      }
+      this.level = this.att ? this.step : (31 - this.step);
+    }
+  }
+
+  class FME7Audio {
+    constructor() {
+      this.addr = 0;
+      this.regs = new Uint8Array(16);
+      this.regs[7] = 0x38; // 既定: トーンON・ノイズOFF
+      this.tones = [new Fme7Tone(), new Fme7Tone(), new Fme7Tone()];
+      this.noise = new Fme7Noise();
+      this.env = new Fme7Envelope();
+      this._div = 0;
+      this.mute = [false, false, false];
+      this.vol = [1, 1, 1];
+    }
+
+    reset() {
+      this.addr = 0;
+      this.regs = new Uint8Array(16);
+      this.regs[7] = 0x38;
+      for (const t of this.tones) t.reset();
+      this.noise.reset();
+      this.env.reset();
+      this._div = 0;
+    }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      if (addr === 0xC000) {
+        this.addr = value & 0x0F;
+      } else if (addr === 0xE000) {
+        this.writeInternal(this.addr, value);
+      }
+    }
+
+    writeInternal(reg, value) {
+      this.regs[reg] = value;
+      switch (reg) {
+        case 0: case 1: this.tones[0].period = this.regs[0] | ((this.regs[1] & 0x0F) << 8); break;
+        case 2: case 3: this.tones[1].period = this.regs[2] | ((this.regs[3] & 0x0F) << 8); break;
+        case 4: case 5: this.tones[2].period = this.regs[4] | ((this.regs[5] & 0x0F) << 8); break;
+        case 6: this.noise.period = value & 0x1F; break;
+        case 11: case 12: this.env.period = this.regs[11] | (this.regs[12] << 8); break;
+        case 13: this.env.writeShape(value); break;
+        // 7=ミキサー, 8-10=音量 は出力時に参照
+      }
+    }
+
+    clock() {
+      // 内部クロックはCPUクロックの1/16
+      if (++this._div >= 16) {
+        this._div = 0;
+        this.tones[0].clock();
+        this.tones[1].clock();
+        this.tones[2].clock();
+        this.noise.clock();
+        this.env.clock();
+      }
+    }
+
+    // ch(0-2)の5bit音量レベル(0-31)。bit4でエンベロープ、固定音量Vは 2V+1。
+    channelLevel(ch) {
+      const volReg = this.regs[8 + ch];
+      if (volReg & 0x10) return this.env.level;
+      return ((volReg & 0x0F) * 2) + 1; // V=0→1(DAC上無音), V=15→31
+    }
+
+    mixSample() {
+      const mix = this.regs[7];
+      let sum = 0;
+      for (let i = 0; i < NUM_CH; i++) {
+        if (this.mute[i]) continue;
+        const toneOn = ((mix >> i) & 1) === 0;
+        const noiseOn = ((mix >> (i + 3)) & 1) === 0;
+        const t = toneOn ? (this.tones[i].period <= ULTRA_TONE_PERIOD_MAX ? 0.5 : this.tones[i].level) : 1;
+        const n = noiseOn ? this.noise.out : 1;
+        if (t && n) sum += AY_DAC[this.channelLevel(i)] * this.vol[i] * t;
+      }
+      // 3ch分の対数振幅和。他チップとのバランスでゲイン調整。
+      return sum * 0.35;
+    }
+  }
+
+  // 鍵盤表示用: ライブチップから3ch分の {freq,vol,rawVol,active,noise,envMode} を作る。
+  // freq=CPU/(32*period)(修正後), vol/rawVolはエンベロープ含む実効5bitレベル由来。
+  Emu.snapshotFME7 = function (chip) {
+    const CPU = 1789773;
+    const mix = chip.regs[7];
+    const out = [];
+    for (let i = 0; i < NUM_CH; i++) {
+      const period = chip.tones[i].period;
+      const toneOn = ((mix >> i) & 1) === 0;
+      const noiseOn = ((mix >> (i + 3)) & 1) === 0;
+      const level = chip.channelLevel(i);          // 0-31
+      const envMode = (chip.regs[8 + i] & 0x10) !== 0;
+      const freq = (toneOn && period > 0) ? CPU / (32 * period) : 0;
+      out.push({
+        freq,
+        vol: level / 31,
+        // ★数値は**実レジスタ値**(2026-09-17のユーザー合意)。スケールがモードで変わる:
+        //   ・固定音量 … 音量レジスタの4bit、**0-15**
+        //   ・ハードウェアエンベロープ中(YM2149系のこの機能) … 5bitレベル、**0-31**
+        //   内部は常に32段(channelLevel が固定音量時に (nibble*2)+1 で写す)ので、表示だけ切り替える。
+        //   0-31 のときは既存の黄色表示(envMode)が「レジスタそのままではない」印になる。
+        rawVol: envMode ? level : (chip.regs[8 + i] & 0x0F),
+        rawVolMax: envMode ? 31 : 15,
+        active: (toneOn ? (level > 0 && freq > 0) : (noiseOn && level > 0)),
+        noise: noiseOn,
+        envMode
+      });
+    }
+    return out;
+  };
+
+  Emu.FME7Audio = FME7Audio;
+})(globalThis);
+
+/*
+ * NSF実行用メモリバス
+ * MML.Emu.NsfBus
+ *
+ * 64KBのフラットメモリ空間を提供し、$4000-$4017 へのアクセスをAPUにルーティングする。
+ * $5FF8-$5FFF へのバンクスイッチ書き込みにも対応（NSFバンクスイッチング方式）。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const BANK_SIZE = 0x1000; // 4KB
+
+  class NsfBus {
+    /**
+     * @param {object} opt
+     * @param {Uint8Array} opt.program - ロードするプログラムイメージ（ヘッダを除いたバイナリ）
+     * @param {number} opt.loadAddr - プログラムのロード先アドレス
+     * @param {Uint8Array} [opt.bankswitch] - ヘッダのバンクスイッチ初期値8バイト（全て0ならバンクスイッチ無効）
+     */
+    constructor(opt) {
+      this.mem = new Uint8Array(0x10000);
+      this.apu = null; // setApu() で後から設定
+      this.onWrite = null; // (addr, value) => void のフック（レジスタ書き込みログ用）
+      // (addr) => void のフック。読み出しに副作用があるポート(N163 $4800=オートインクリメント)
+      // だけで呼ぶ。書き込みログの再生(NsfReplayStreamPlayer)がポインタの動きまで再現するため
+      // (ドライバは位相バイトを LDA $4800 で読み飛ばす。読み出しを再現しないと以降の書き込みが
+      // 1つずつずれて位相バイトへ落ち、音程が同じでも位相がでたらめになる。2026-09-22)
+      this.onRead = null;
+
+      // 拡張音源 (NSF.CHIP_FLAGS の組み合わせ)
+      this.expansion = {};
+      const extraChips = opt.extraChips || 0;
+      const FLAGS = MML.NSF.CHIP_FLAGS;
+      if (extraChips & FLAGS.VRC6) this.expansion.vrc6 = new Emu.VRC6Audio();
+      if (extraChips & FLAGS.VRC7) this.expansion.vrc7 = new Emu.VRC7Audio();
+      if (extraChips & FLAGS.FDS) this.expansion.fds = new Emu.FDSAudio();
+      if (extraChips & FLAGS.MMC5) this.expansion.mmc5 = new Emu.MMC5Audio();
+      if (extraChips & FLAGS.N163) this.expansion.n163 = new Emu.N163Audio();
+      if (extraChips & FLAGS.FME7) this.expansion.fme7 = new Emu.FME7Audio();
+      // 旧ppmckドライバ(Famicompo mini 時代、N106波形長を32サンプル形式で書く)の判定。
+      // opt.n163Legacy で明示指定がなければプログラム本体の機械語列から自動判定する
+      // (NsfPlayer/NsfReplayStreamPlayer/キャプチャWorker/ヘッドレスの全経路がここを通る)。
+      // 詳細は nsfHeader.js detectLegacyN163Driver と n163.js 冒頭コメント 注2。
+      if (this.expansion.n163) {
+        this.n163Legacy = opt.n163Legacy !== undefined
+          ? !!opt.n163Legacy
+          : !!(MML.NSF.detectLegacyN163Driver && MML.NSF.detectLegacyN163Driver(opt.program));
+        this.expansion.n163.legacyWaveLen = this.n163Legacy;
+      }
+
+      this.loadAddr = opt.loadAddr;
+      this.useBankswitch = (opt.bankswitch || []).some(b => b !== 0);
+
+      if (this.useBankswitch) {
+        // バンクスイッチ時: ロードアドレス下位12bit分だけ先頭をゼロパディングした
+        // ROMイメージを作り、4KBバンク単位で $8000-$FFFF にマッピングする。
+        // (NSF仕様: padding = loadAddr & 0x0FFF。これが無いとINIT/PLAYが別バイトを指す)
+        const pad = this.loadAddr & 0x0FFF;
+        this.romImage = new Uint8Array(pad + opt.program.length);
+        this.romImage.set(opt.program, pad);
+        this.bankCount = Math.max(1, Math.ceil(this.romImage.length / BANK_SIZE));
+        this.banks = new Array(8).fill(0).map((_, i) => (opt.bankswitch[i] || 0) % this.bankCount);
+        for (let slot = 0; slot < 8; slot++) this.mapBank(0x8000 + slot * BANK_SIZE, this.banks[slot]);
+        // FDS NSF: バイト0x76/0x77 は $E000/$F000 に加え $6000/$7000 も初期化する
+        if (this.expansion.fds) {
+          this.mapBank(0x6000, this.banks[6]);
+          this.mapBank(0x7000, this.banks[7]);
+        }
+      } else {
+        // 通常: loadAddr から program をそのまま配置
+        for (let i = 0; i < opt.program.length; i++) {
+          const addr = (this.loadAddr + i) & 0xFFFF;
+          this.mem[addr] = opt.program[i];
+        }
+      }
+
+      // MMC5実機のPRGバンクレジスタ($5100=モード, $5113-$5117=8KBウィンドウ選択)。
+      // NSF仕様の$5FF8-$5FFFバンクスイッチとは別に、実機ROMからそのまま抜き出した
+      // ドライバはこちらの本物のMMC5レジスタで$8000-$FFFFを切り替えることがある
+      // (Just Breed等)。これを無視すると初期バンクのまま固定され、曲の途中で
+      // ドライバが本来別バンクにあるはずのデータ(0埋め)を読んで無限ループに陥る。
+      if (this.expansion.mmc5) {
+        if (!this.romImage) {
+          const pad = this.loadAddr & 0x0FFF;
+          this.romImage = new Uint8Array(pad + opt.program.length);
+          this.romImage.set(opt.program, pad);
+        }
+        this.mmc5PrgMode = 3; // 実機の電源投入直後の挙動に合わせた既定値(最も細かい8KB×4分割)
+        this.mmc5PrgReg = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF]; // $5113,5114,5115,5116,5117の生値
+        // $5205/$5206: 実機の8bit×8bit=16bit符号なし乗算器。書き込みは被乗数/乗数だが
+        // 読み出しは積の下位/上位バイトを返す(実機の二重機能レジスタ)。これが無いと
+        // 読み出し側は直前に書き込んだ生値をそのまま読み返してしまい、乗算結果を使う
+        // ポインタ計算(音楽データテーブルの索引など)が壊れる(Just Breed等)。
+        this.mmc5MultOperand = [0, 0];
+        this.mmc5MultProduct = 0;
+      }
+    }
+
+    setApu(apu) { this.apu = apu; }
+
+    // MMC5実機のPRGバンクレジスタ書き込みを $8000-$FFFF に反映する。
+    // regIndex: 1=$5114 2=$5115 3=$5116 4=$5117 (書き込まれたレジスタのみ)、
+    // regIndex省略時は$5100(モード)変更に伴う全ウィンドウ再計算。
+    // NSFはドライバ本体の起動処理を経ずINIT/PLAYだけを叩くため、触れられていない
+    // レジスタは実機のリセット直後値ではなくヘッダのバンクスイッチで既に正しく
+    // 割り当て済みの内容を持っている。よって「書き込まれたレジスタが担当する
+    // ウィンドウだけ」を差し替え、他のウィンドウは既存の内容(ヘッダ由来 or
+    // 以前のMMC5書き込みの結果)をそのまま保持する。
+    mmc5RemapPrg(regIndex) {
+      const rom = this.romImage;
+      const bankCount8k = Math.max(1, Math.floor(rom.length / 0x2000));
+      const romBankNum = (regVal) => (regVal & 0x7F) % bankCount8k;
+      const copyWindow = (dst, bank8k) => {
+        const src = (((bank8k % bankCount8k) + bankCount8k) % bankCount8k) * 0x2000;
+        for (let i = 0; i < 0x2000; i++) {
+          this.mem[dst + i] = rom[src + i] !== undefined ? rom[src + i] : 0;
+        }
+      };
+      const r = this.mmc5PrgReg; // [5113, 5114, 5115, 5116, 5117]
+      const mode = this.mmc5PrgMode;
+
+      const remap5114 = () => { if (mode === 3) copyWindow(0x8000, romBankNum(r[1])); };
+      const remap5115 = () => {
+        if (mode === 3) copyWindow(0xA000, romBankNum(r[2]));
+        else if (mode === 1 || mode === 2) {
+          const lo16 = ((r[2] & 0x7F) >> 1) * 2;
+          copyWindow(0x8000, lo16);
+          copyWindow(0xA000, lo16 + 1);
+        }
+      };
+      const remap5116 = () => { if (mode === 2 || mode === 3) copyWindow(0xC000, romBankNum(r[3])); };
+      const remap5117 = () => {
+        if (mode === 0) {
+          const base8k = ((r[4] & 0x7F) >> 2) * 4;
+          for (let w = 0; w < 4; w++) copyWindow(0x8000 + w * 0x2000, base8k + w);
+        } else if (mode === 1) {
+          const hi16 = ((r[4] & 0x7F) >> 1) * 2;
+          copyWindow(0xC000, hi16);
+          copyWindow(0xE000, hi16 + 1);
+        } else {
+          copyWindow(0xE000, romBankNum(r[4]));
+        }
+      };
+
+      if (regIndex === 1) remap5114();
+      else if (regIndex === 2) remap5115();
+      else if (regIndex === 3) remap5116();
+      else if (regIndex === 4) remap5117();
+      else { remap5114(); remap5115(); remap5116(); remap5117(); } // $5100モード変更時: 全ウィンドウ再計算
+    }
+
+    // ROMイメージの bankIndex 番目の4KBバンクを dstBase に配置する
+    mapBank(dstBase, bankIndex) {
+      const src = (bankIndex % this.bankCount) * BANK_SIZE;
+      for (let i = 0; i < BANK_SIZE; i++) {
+        this.mem[dstBase + i] = this.romImage[src + i] !== undefined ? this.romImage[src + i] : 0;
+      }
+    }
+
+    read(addr) {
+      addr &= 0xFFFF;
+      if (addr === 0x4015 && this.apu) return this.apu.readStatus();
+      // FDS レジスタ読み出し ($4090=ボリューム出力, $4092=モジュレータ出力)
+      if (this.expansion.fds && (addr === 0x4090 || addr === 0x4092)) {
+        return this.expansion.fds.readRegister(addr);
+      }
+      // N163 内部RAM読み出し ($4800)。ドライバが register の read-modify-write に使う。
+      if (this.expansion.n163 && addr === 0x4800) {
+        if (this.onRead) this.onRead(addr);
+        return this.expansion.n163.readData();
+      }
+      // MMC5乗算器: $5205=積の下位バイト, $5206=積の上位バイト
+      if (this.expansion.mmc5 && addr === 0x5205) return this.mmc5MultProduct & 0xFF;
+      if (this.expansion.mmc5 && addr === 0x5206) return (this.mmc5MultProduct >> 8) & 0xFF;
+      return this.mem[addr];
+    }
+
+    write(addr, value) {
+      addr &= 0xFFFF;
+      value &= 0xFF;
+
+      if (addr >= 0x4000 && addr <= 0x4017) {
+        if (this.apu) this.apu.writeRegister(addr, value);
+        if (this.onWrite) this.onWrite(addr, value);
+        return;
+      }
+
+      const exp = this.expansion;
+      if (exp.vrc6 && ((addr >= 0x9000 && addr <= 0x9002) || (addr >= 0xA000 && addr <= 0xA002) || (addr >= 0xB000 && addr <= 0xB002))) {
+        exp.vrc6.writeRegister(addr, value);
+        if (this.onWrite) this.onWrite(addr, value);
+        return;
+      }
+      if (exp.vrc7 && (addr === 0x9010 || addr === 0x9030)) {
+        exp.vrc7.writeRegister(addr, value);
+        if (this.onWrite) this.onWrite(addr, value);
+        return;
+      }
+      if (exp.fds && (addr === 0x4023 || (addr >= 0x4040 && addr <= 0x408A))) {
+        exp.fds.writeRegister(addr, value);
+        if (this.onWrite) this.onWrite(addr, value);
+        return;
+      }
+      if (exp.mmc5 && addr >= 0x5000 && addr <= 0x5015) {
+        exp.mmc5.writeRegister(addr, value);
+        if (this.onWrite) this.onWrite(addr, value);
+        return;
+      }
+      if (exp.mmc5 && addr === 0x5100) {
+        this.mmc5PrgMode = value & 0x03;
+        this.mmc5RemapPrg();
+        if (this.onWrite) this.onWrite(addr, value);
+        return;
+      }
+      if (exp.mmc5 && addr >= 0x5113 && addr <= 0x5117) {
+        const regIndex = addr - 0x5113;
+        this.mmc5PrgReg[regIndex] = value;
+        if (regIndex > 0) this.mmc5RemapPrg(regIndex); // $5113($6000-7FFF RAM)は非対応・素通し
+        if (this.onWrite) this.onWrite(addr, value);
+        return;
+      }
+      if (exp.mmc5 && (addr === 0x5205 || addr === 0x5206)) {
+        this.mmc5MultOperand[addr - 0x5205] = value;
+        this.mmc5MultProduct = this.mmc5MultOperand[0] * this.mmc5MultOperand[1];
+        if (this.onWrite) this.onWrite(addr, value);
+        return;
+      }
+      if (exp.n163 && (addr === 0xF800 || addr === 0x4800)) {
+        exp.n163.writeRegister(addr, value);
+        if (this.onWrite) this.onWrite(addr, value);
+        return;
+      }
+      if (exp.fme7 && (addr === 0xC000 || addr === 0xE000)) {
+        exp.fme7.writeRegister(addr, value);
+        if (this.onWrite) this.onWrite(addr, value);
+        return;
+      }
+
+      if (this.useBankswitch && addr >= 0x5FF8 && addr <= 0x5FFF) {
+        const slot = addr - 0x5FF8;
+        this.banks[slot] = value % this.bankCount;
+        this.mapBank(0x8000 + slot * BANK_SIZE, this.banks[slot]);
+        // バンクスイッチ書き込みもwriteLogに記録する。$4000-$4017の音源レジスタと
+        // 違い元々onWriteを呼んでいなかったため、nsf2mml側でDPCMサンプルの実バイト列を
+        // 再現する際に「その時点でどのバンクが$C000-$FFFF等にマップされていたか」を
+        // 再現できなかった(常に初期状態のまま=最初のバンク切替以降がズレる)
+        if (this.onWrite) this.onWrite(addr, value);
+        return;
+      }
+
+      // FDS NSF 専用: $5FF6/$5FF7 は $6000/$7000 へのバンクスイッチ
+      if (this.useBankswitch && this.expansion.fds && (addr === 0x5FF6 || addr === 0x5FF7)) {
+        this.mapBank(0x6000 + (addr - 0x5FF6) * BANK_SIZE, value % this.bankCount);
+        return;
+      }
+
+      this.mem[addr] = value;
+    }
+  }
+
+  Emu.NsfBus = NsfBus;
 })(globalThis);
 
 /*
@@ -12583,7 +14433,43 @@
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
   // ---------------------------------------------------------------------------
 
+  // NES 拡張音源つき(VGM の規格外ブロック NESX、DESIGN-CAPTURE.md §3.3)。NSF と同じ NsfBus を
+  // プログラム無しで組み、2A03/FDS/拡張音源への書き込みを全部 bus.write に通す(DMC は bus.mem を読む。
+  // 0xC2 ブロックの DPCM サンプルはそこへ流し込む)。鍵盤/ロール/変換は NSF と同じ経路で拡張音源を扱える
+  function makeNesExpansionAdapter(info, extraChips) {
+    const bus = new Emu.NsfBus({ program: new Uint8Array(0), loadAddr: 0x8000, bankswitch: [0, 0, 0, 0, 0, 0, 0, 0], extraChips });
+    const apu = new Emu.APU2A03(bus);
+    apu.reset();
+    bus.setApu(apu);
+    const ram = bus.mem;
+    const fds = bus.expansion.fds || null;
+    const expansion = Object.values(bus.expansion);
+    const regs = {};
+    const toAddr = (aa) => aa < 0x20 ? 0x4000 + aa : aa < 0x3F ? 0x4080 + (aa - 0x20) : aa === 0x3F ? 0x4023 : 0x4040 + (aa - 0x40);
+    return {
+      id: 'nes', clockHz: info.clock, accum: 0, apu, fds, ram, bus, regs, gain: CHIP_GAIN.nes, extraChips,
+      write(aa, dd) { const addr = toAddr(aa); regs[addr] = dd; bus.write(addr, dd); return addr; },
+      // NESX 書き込み列(CPU アドレス直指定。read=true は N163 $4800 のような副作用つき読み出し)
+      extWrite(addr, value, read) { if (read) { bus.read(addr); return; } regs[addr] = value; bus.write(addr, value); },
+      ramLoaded: false,
+      ramWrite(start, data) { this.ramLoaded = true; for (let i = 0; i < data.length && start + i < 0x10000; i++) ram[start + i] = data[i]; },
+      clock() { apu.clock(); for (let e = 0; e < expansion.length; e++) expansion[e].clock(); },
+      mix(out) { let s = apu.mixSample(); for (let e = 0; e < expansion.length; e++) s += expansion[e].mixSample(); out[0] += s * this.gain; out[1] += s * this.gain; },
+      applyMute(m) {
+        if (m.apu) Emu.applyMute(apu.mute, m.apu);
+        if (m.expansion) for (const [name, chip] of Object.entries(bus.expansion)) if (m.expansion[name]) Emu.applyMute(chip.mute, m.expansion[name]);
+      },
+      applyVolume(v) {
+        if (v.apu) Emu.applyVolume(apu.vol, v.apu);
+        if (v.expansion) for (const [name, chip] of Object.entries(bus.expansion)) if (v.expansion[name]) Emu.applyVolume(chip.vol, v.expansion[name]);
+      }
+    };
+  }
+
   function makeNesAdapter(info) {
+    const FLAGS = MML.NSF && MML.NSF.CHIP_FLAGS;
+    const extBits = FLAGS ? ((info.extraChips || 0) & ~FLAGS.FDS) : 0;
+    if (extBits && Emu.NsfBus) return makeNesExpansionAdapter(info, extBits | (info.fds ? FLAGS.FDS : 0));
     const ram = new Uint8Array(0x10000);
     const bus = { read: (addr) => ram[addr & 0xFFFF] };
     const apu = new Emu.APU2A03(bus);
@@ -13451,6 +15337,19 @@
         const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
+      // NES 拡張音源の書き込み列(規格外 NESX、vgmHeader.js VGM.NESX 参照)。ヘッダ種別は parseHeader が先読み済み
+      if (MML.VGM && MML.VGM.isNesxBlock(type, block)) {
+        const nes = ad('nes');
+        if (nes && nes.extWrite && block[5] === MML.VGM.NESX.KIND_WRITES) {
+          for (let p = 6; p + 4 <= block.length; p += 4) {
+            const addr = block[p] | (block[p + 1] << 8), value = block[p + 2], meta = block[p + 3];
+            const read = (meta & 0x80) !== 0;
+            nes.extWrite(addr, value, read);
+            if (this.onWrite) this.onWrite('nesx', addr, value, read, (meta & 0x7F) / 128);
+          }
+        }
+        return;
+      }
       if (type === 0xC0 || type === 0xC1) { // RF5C68(0xC0)/RF5C164(0xC1) 波形RAM書込み: 先頭2バイト=絶対アドレス
         const rf = ad(type === 0xC0 ? 'rf5c68' : 'rf5c164');
         if (rf && block.length >= 2) rf.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
@@ -13841,7 +15740,10 @@
     const has = (id) => !!player.adapterById[id];
     const data = {
       frameRate: FRAME_RATE, header: h, totalFrames,
-      nes: has('nes') ? { regSnapshots: [], writeLog: [], fds: !!player.adapterById.nes.fds } : null,
+      nes: has('nes') ? { regSnapshots: [], writeLog: [], fds: !!player.adapterById.nes.fds,
+                          // NESX 拡張音源(規格外ブロック): NSF ヘッダと同じビット。N163 があればライブ RAM も採る
+                          extraChips: player.adapterById.nes.extraChips || 0,
+                          n163Snapshots: player.adapterById.nes.bus && player.adapterById.nes.bus.expansion && player.adapterById.nes.bus.expansion.n163 ? [] : null } : null,
       gb: has('gb') ? { snapshots: [] } : null,
       // hes: ctlTrace/pitchTrace は hesPlayer.js の controlTrace/pitchTrace と同じ内容だが、
       // Worker差分プロトコル(capture-worker-multi-impl.js diffPayload: 1段ネスト配列まで)に
@@ -14026,6 +15928,8 @@
     player.onWrite = (id, a, b, c, d) => {
       switch (id) {
         case 'nes': nesFrameWrites.push({ addr: c, value: b }); nesRegs[c] = b; break;
+        // NESX(拡張音源): (addr, value, read, frac)。NSF の writeLog と同じ形(読み出しは read:true、t=フレーム内時刻)
+        case 'nesx': nesFrameWrites.push(c ? { addr: a, value: 0, read: true, t: d } : { addr: a, value: b, t: d }); if (!c) nesRegs[a] = b; break;
         case 'pwm': if (pwmRec) pwmRecWrite(a, b); break; // (reg, 12bit値)
         case 'msm5205': if (msmRec) msmRecWrite(a, b); break; // (reg, 4bit値)
         case 'ay8910': kssFrameWrites.push(kpk(0xA0, a & 0x0F, 1), kpk(0xA1, b, 1)); break;
@@ -14063,6 +15967,8 @@
         // 「全ch有効」を既定にしておく(NSFのliveSnap[0x4015]=0x0F補完と同じ)。
         if (nesRegs[0x4015] === undefined) nesRegs[0x4015] = 0x0F;
         data.nes.regSnapshots.push(Object.assign({}, nesRegs));
+        // N163 は $4800 の読み飛ばしでポインタが進むため、ログ再生だけでは RAM を復元できない(capture.js と同じ)
+        if (data.nes.n163Snapshots) data.nes.n163Snapshots.push(player.adapterById.nes.bus.expansion.n163.ram.slice());
         nesFrameWrites = [];
       }
       if (data.gb) data.gb.snapshots.push(Emu.snapshotGbApuForCapture(player.adapterById.gb.apu));
@@ -17601,6 +19507,9 @@
       this.onOpenFile = null;         // ヘッダの「ファイルを開く」
       this.onToMml = null;            // ヘッダの「to MML」
       this.onMaxSecondsChange = null; // ロール見出しの演奏最大時間(秒)が変わったとき (sec) => void
+      this.onLoopChoiceChange = null; // ロール見出しのループの種類('time'|'infinite'|'count')が変わったとき (value) => void
+      this.onLoopCountChange = null;  // ロール見出しのループ回数(1〜100、種類が count のとき)が変わったとき (n) => void
+      this._loopSig = null;
       this.onExport = null;           // ロール見出しの「出力」 (formatId, seconds) => void
       this._exportOpt = null;         // setExportControls() の最後の内容(見出し再構築時に戻す)
       this._exportFmtSig = null;      // 出力形式リストの中身(変わった時だけ作り直す)
@@ -18199,6 +20108,10 @@
         // その右に出力形式と出力ボタンを置く(方針 2026-09-09)。
         // 実体は各フォーマットのパネルにある再生時間欄/書き出しボタンで、ここはその代理
         `<span class="kbd-roll-export" style="display:none">` +
+          // ループ回数(2〜100回/時間指定/無限)。MML再生とVGM(ヘッダにループ位置がある形式)だけ main.js が
+          // setExportControls({loop}) で出す。実体はMMLエディタ/VGMパネルの「ループ」選択で、ここはその代理
+          `<label class="kbd-loop-count" style="display:none"><span>${T('ループ')}</span><select class="kbd-loop-sel"></select>` +
+            `<input type="number" class="kbd-loop-n" min="1" max="100" step="1" style="display:none" title="${T('ループの回数(1〜100)。イントロ+この回数ぶん鳴らしてからフェードアウトします')}"></label>` +
           `<span class="kbd-roll-export-sep">/</span>` +
           `<input type="number" class="kbd-max-sec" min="1" max="3600" step="1" title="${T('演奏最大時間(秒)')}">` +
           `<span class="kbd-roll-export-unit">${T('秒')}</span>` +
@@ -18220,6 +20133,18 @@
       this._mountRollSeekBar(seekSlot);
       // 演奏最大時間+出力(setExportControls で main.js から中身と表示可否をもらう)
       this._exportEl = rollHeader.querySelector('.kbd-roll-export');
+      this._loopEl = rollHeader.querySelector('.kbd-loop-count');
+      this._loopSelEl = rollHeader.querySelector('.kbd-loop-sel');
+      this._loopSelEl.addEventListener('change', () => {
+        if (this.onLoopChoiceChange) this.onLoopChoiceChange(this._loopSelEl.value);
+      });
+      this._loopNEl = rollHeader.querySelector('.kbd-loop-n');
+      this._loopNEl.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') this._loopNEl.blur(); });
+      this._loopNEl.addEventListener('change', () => {
+        const n = Math.max(1, Math.min(100, parseInt(this._loopNEl.value, 10) || 1));
+        this._loopNEl.value = String(n);
+        if (this.onLoopCountChange) this.onLoopCountChange(n);
+      });
       this._maxSecEl = rollHeader.querySelector('.kbd-max-sec');
       this._exportFmtEl = rollHeader.querySelector('.kbd-export-fmt');
       const exportBtn = rollHeader.querySelector('.kbd-export-btn');
@@ -18240,6 +20165,7 @@
       });
       // 言語切替で見出しを作り直した後も状態を戻す(selectは新品なので必ず作り直させる)
       this._exportFmtSig = null;
+      this._loopSig = null;
       this.setExportControls(this._exportOpt);
       // オーバーレイのON/OFFはロール見出しクリック(折りたたみ)とは独立させるため、
       // クリックイベントの伝播をここで止める(bubbling先のrollHeaderハンドラを発火させない)。
@@ -18850,9 +20776,12 @@
     }
 
     /**
-     * ロール見出しの「演奏最大時間+出力」を更新する(main.jsが唯一の呼び出し元)。
-     * opt = { visible, seconds, formats:[[value,label], ...] }
-     * サウンドファイル再生中だけ出す(MML再生の総時間は曲の長さそのもので、指定する物ではない)。
+     * ロール見出しの「ループ回数+演奏最大時間+出力」を更新する(main.jsが唯一の呼び出し元)。
+     * opt = { visible, seconds, secondsReadOnly, formats:[[value,label], ...],
+     *         loop: { options:[[value,label],...], value:'time'|'infinite'|'count', count, disabled, title, sig } | null }
+     * loop はループ回数を選べる再生元(MML / VGM)のときだけ。value が 'count' のとき回数欄(count)を出す。
+     * sig は選択肢の中身(言語)の識別子で、変わったときだけ <option> を作り直す。
+     * secondsReadOnly は秒がループ回数から決まる(VGMの回数モード)とき
      */
     setExportControls(opt) {
       this._exportOpt = opt || null;
@@ -18860,6 +20789,30 @@
       const on = !!(opt && opt.visible);
       this._exportEl.style.display = on ? '' : 'none';
       if (!on) return;
+      const loop = opt.loop || null;
+      this._loopEl.style.display = loop ? '' : 'none';
+      if (loop) {
+        if (this._loopSig !== loop.sig) {
+          this._loopSig = loop.sig;
+          this._loopSelEl.innerHTML = '';
+          for (const [value, label] of loop.options) {
+            const o = document.createElement('option');
+            o.value = value; o.textContent = label;
+            this._loopSelEl.appendChild(o);
+          }
+        }
+        if (this._loopSelEl.value !== loop.value) this._loopSelEl.value = loop.value;
+        this._loopSelEl.disabled = !!loop.disabled;
+        const showN = loop.value === 'count' && !loop.disabled;
+        this._loopNEl.style.display = showN ? '' : 'none';
+        // 入力中(フォーカス中)は書き換えない(演奏最大時間と同じ)
+        if (showN && document.activeElement !== this._loopNEl && loop.count != null) {
+          const v = String(loop.count);
+          if (this._loopNEl.value !== v) this._loopNEl.value = v;
+        }
+        if (this._loopEl.title !== (loop.title || '')) this._loopEl.title = loop.title || '';
+      }
+      this._maxSecEl.readOnly = !!opt.secondsReadOnly;
       // 中身が変わったときだけ作り直す(毎フレーム呼ばれるので、選択中の値を消さないため)
       const sig = opt.formats ? opt.formats.map((f) => f[0]).join(',') : '';
       if (opt.formats && this._exportFmtSig !== sig) {
@@ -19318,7 +21271,9 @@
       //   flex-shrinkが効く箱なので、ch数の多い曲(VGMのNamco System 2で33行など)で
       //   一覧が縦に溢れると、見出し1行ぶんの高さごと0まで潰されて消えてしまう
       //   (「畳むと畳むボタンの行まで消える」不具合報告 2026-09-12)
-      if (collapsed || !(this._fileInfoNodes || []).length) { fi.style.flex = 'none'; return; }
+      // data-kbd-fi-auto の要素だけ(MMLの版履歴だけ、src/ui/mmlHistory.js)のときも同じく中身なり
+      const fiNodes = (this._fileInfoNodes || []).filter(n => n);
+      if (collapsed || !fiNodes.length || fiNodes.every(n => n.hasAttribute && n.hasAttribute('data-kbd-fi-auto'))) { fi.style.flex = 'none'; return; }
       // 左右に並ぶ置き場は幅を、上下に積む置き場は高さをスプリッターの値で固定する
       const sideways = place === 'left' || place === 'right' || (place === 'bottom' && this._bigWaveBelow());
       fi.style.flex = 'none';
@@ -19695,7 +21650,7 @@
     }
 
     // 楽譜モード(レイアウト設定 rollView='score')の材料。score = { notation(src/score/notation.js の
-    // 表記モデル), fps(コンパイラのフレームレート), loopPointFrame, totalFrames } | null。
+    // 表記モデル), fps(コンパイラのフレームレート), loopPointFrame, totalFrames(=曲末、1周ぶん) } | null。
     // 表記モデルの各音符片は frameStart/frameEnd(コンパイラのフレーム)を持つので、fps で秒に直せば
     // ロールと同じ「再生位置 pos からの相対秒」で描ける。null で楽譜なし(ロール表示に戻る)
     setScore(score) {
@@ -21976,13 +23931,13 @@
       const fps = score.fps || 60;
       const H = g.H;
       this._drawRollTimeGrid(ctx, g, pos);
-      // ループ地点(L)より後ろの末尾複製(compile() が tracks に足す区間)は譜面には無いので、
-      // その区間の再生位置はループ地点からの相対位置へ戻して描く
+      // ループ地点(L)で折り返した後(曲末=totalFrames より先)の再生位置は、[L, 曲末) の中の位置へ戻して描く
+      // (Mml.LoopPlan.mapFrame と同じ写像。再生側は折り返し済みの位置を渡してくるので通常は素通り)
       let posFrame = pos * fps;
       if (score.loopPointFrame != null && score.totalFrames > 0) {
-        const natural = (score.totalFrames + score.loopPointFrame) / 2;
+        const natural = score.totalFrames;
         const loopLen = natural - score.loopPointFrame;
-        if (loopLen > 0 && posFrame >= natural) posFrame = score.loopPointFrame + ((posFrame - natural) % loopLen);
+        if (loopLen > 0 && posFrame >= natural) posFrame = score.loopPointFrame + ((posFrame - score.loopPointFrame) % loopLen);
       }
       const posSec = posFrame / fps;
       const windowSec = g.windowSec;
@@ -28232,8 +30187,12 @@
     const buildTracks = MML.UI.buildRollTracksFromRegSnapshots;
     let tracks = [];
     if (data.nes) {
-      const nesChips = ['nes'].concat(data.nes.fds ? ['fds'] : []);
-      const t = buildTracks(data.nes.regSnapshots, data.nes.writeLog, done, sr / frameRate, sr, nesChips, null);
+      // 拡張音源(規格外 NESX ブロック、vgmPlayer.js)は NSF と同じトークンで同じ抽出経路へ
+      const F = MML.NSF && MML.NSF.CHIP_FLAGS;
+      const x = data.nes.extraChips || 0;
+      const nesChips = ['nes'].concat(data.nes.fds ? ['fds'] : [],
+        F ? [['vrc6', F.VRC6], ['vrc7', F.VRC7], ['mmc5', F.MMC5], ['n163', F.N163], ['fme7', F.FME7]].filter(([, b]) => x & b).map(([n]) => n) : []);
+      const t = buildTracks(data.nes.regSnapshots, data.nes.writeLog, done, sr / frameRate, sr, nesChips, data.nes.n163Snapshots || null);
       if (t) tracks = tracks.concat(t);
     }
     if (data.gb) tracks = tracks.concat(RollBuild.gbs(data.gb.snapshots.slice(0, done), frameRate));

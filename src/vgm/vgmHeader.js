@@ -19,6 +19,27 @@
 
   VGM.SAMPLE_RATE = 44100;
 
+  // NES 拡張音源ブロック(規格外。標準プレイヤーは未知の型として読み飛ばす。VGMPlay 0.52 と本体で確認済み 2026-10-31)
+  //   0x67 0x66 TYPE size(4) "NESX" ver(1) kind(1) payload
+  //   kind 0 = ヘッダ: payload[0] = NSF の拡張音源ビット
+  //   kind 1 = 書き込み列: 4 バイト×n = addr16(LE) value8 meta8(bit7=読み出し、bit0-6=フレーム内時刻×1/128)
+  VGM.NESX = { TYPE: 0xBF, MAGIC: [0x4E, 0x45, 0x53, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_WRITES: 1 };
+  VGM.isNesxBlock = function (type, block) {
+    const m = VGM.NESX.MAGIC;
+    return type === VGM.NESX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
+  };
+  VGM.scanNesExtension = function (bytes, dataOffset) {
+    let p = dataOffset;
+    while (p + 7 <= bytes.length && bytes[p] === 0x67 && bytes[p + 1] === 0x66) {
+      const type = bytes[p + 2];
+      const size = (bytes[p + 3] | (bytes[p + 4] << 8) | (bytes[p + 5] << 16) | (bytes[p + 6] << 24)) & 0x7FFFFFFF;
+      const block = bytes.subarray(p + 7, p + 7 + size);
+      if (VGM.isNesxBlock(type, block) && block[5] === VGM.NESX.KIND_HEADER && block.length >= 7) return block[6];
+      p += 7 + size;
+    }
+    return 0;
+  };
+
   // チップクロックのヘッダオフセット表。id はエミュレータ配線(vgmPlayer.js)・
   // 鍵盤表示のキーとして使う。impl は現時点で実装済み(再生できる)かどうか。
   // 未実装チップはコマンドを読み飛ばすだけ(作業計画: 全チップ実装は不要)。
@@ -224,6 +245,12 @@
         }
       }
     }
+
+    // NES 拡張音源ブロック(本ツール専用の規格外拡張、DESIGN-CAPTURE.md §3.3)。
+    // ストリーム先頭に並ぶデータブロック(0x67)のうち type=NESX.TYPE で先頭が "NESX"、
+    // 種別 0(ヘッダ)の 1 バイトが NSF ヘッダと同じ拡張音源ビット(VRC6/VRC7/FDS/MMC5/N163/SUNSOFT 5B)。
+    // 最初の待ち/書き込みコマンドより前にあるものだけ見る(ここで分かればアダプタ生成と鍵盤の行構成に使える)
+    if (chips.nes) chips.nes.extraChips = VGM.scanNesExtension(bytes, dataOffset);
 
     const gd3Offset = gd3Rel ? 0x14 + gd3Rel : 0;
     const gd3 = gd3Offset ? parseGd3(bytes, gd3Offset) : null;

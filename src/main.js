@@ -9347,7 +9347,7 @@
       if (author) out += T('作者        : {author}', { author: author + (g.authorJa && g.authorEn && g.authorJa !== g.authorEn ? ` / ${g.authorJa}` : '') }) + '\n';
       if (g.date) out += T('日付        : {date}', { date: g.date }) + '\n';
     }
-    const chipNames = h.usedChips.map(c => `${c.name}${c.dual ? ' x2' : ''}${c.id === 'nes' && c.fds ? '+FDS' : ''}${c.id === 'k051649' && c.sccPlus ? '+' : ''} (${c.clock} Hz)${c.impl ? '' : ' ' + T('[未対応・読み飛ばし]')}`);
+    const chipNames = h.usedChips.map(c => `${c.name}${c.dual ? ' x2' : ''}${c.id === 'nes' && c.fds ? '+FDS' : ''}${c.id === 'nes' && c.extraChips ? '+' + chipsFromExtraFlags(c.extraChips).map(n => n === 'fme7' ? 'SUNSOFT 5B' : n.toUpperCase()).join('+') : ''}${c.id === 'k051649' && c.sccPlus ? '+' : ''} (${c.clock} Hz)${c.impl ? '' : ' ' + T('[未対応・読み飛ばし]')}`);
     out += T('音源        : {chips}', { chips: chipNames.join(', ') || '-' }) + '\n';
     out += T('長さ        : {time}{loop}', {
       time: formatTime(h.durationSeconds),
@@ -9481,7 +9481,12 @@
   // 'vgm'は「NES APUを含まないVGMでは2A03行を出さない」判定用の印(keyboard.js isVgmNoNes)。
   function vgmKeyboardChips(h) {
     const chips = ['vgm'];
-    if (h.chips.nes) { chips.push('nes'); if (h.chips.nes.fds) chips.push('fds'); }
+    if (h.chips.nes) {
+      chips.push('nes'); if (h.chips.nes.fds) chips.push('fds');
+      // 規格外 NESX ブロックの拡張音源(vgmHeader.js scanNesExtension)。NSF と同じトークンで行を出す
+      const F = MML.NSF.CHIP_FLAGS, x = h.chips.nes.extraChips || 0;
+      for (const [name, bit] of [['vrc6', F.VRC6], ['vrc7', F.VRC7], ['mmc5', F.MMC5], ['n163', F.N163], ['fme7', F.FME7]]) if (x & bit) chips.push(name);
+    }
     if (h.chips.gb) chips.push('gbs');
     if (h.chips.huc6280) chips.push('hes');
     if (h.chips.ay8910) chips.push('kssPsg');
@@ -9568,6 +9573,11 @@
   }
   const liveVgm = {
     getApuEnv: () => { const a = vgmAdapter('nes'); return a ? MML.Emu.snapshotApuEnv(a.apu, a.fds, a.bus) : null; },
+    // NES 拡張音源(NESX、vgmPlayer.js makeNesExpansionAdapter の bus.expansion)。NSF の liveN163 等と同じ形
+    getN163: () => { const a = vgmAdapter('nes'); const n = a && a.bus && a.bus.expansion && a.bus.expansion.n163; if (!n) return null; const snap = MML.Emu.snapshotN163(n.ram); if (snap.numCh > n163MaxCh) n163MaxCh = snap.numCh; snap.maxNumCh = n163MaxCh; return snap; },
+    getFME7: () => { const a = vgmAdapter('nes'); const f = a && a.bus && a.bus.expansion && a.bus.expansion.fme7; return f && MML.Emu.snapshotFME7 ? MML.Emu.snapshotFME7(f) : null; },
+    getMmc5: () => { const a = vgmAdapter('nes'); const m = a && a.bus && a.bus.expansion && a.bus.expansion.mmc5; return m && MML.Emu.snapshotMMC5 ? MML.Emu.snapshotMMC5(m) : null; },
+    getVRC7: () => { const a = vgmAdapter('nes'); const v = a && a.bus && a.bus.expansion && a.bus.expansion.vrc7; return v && MML.Emu.snapshotVRC7 ? MML.Emu.snapshotVRC7(v) : null; },
     getGbsApu: () => { const a = vgmAdapter('gb'); return a ? MML.Emu.snapshotGbApu(a.apu) : null; },
     getHesApu: () => { const a = vgmAdapter('huc6280'); return a ? MML.Emu.snapshotHuC6280Apu(a.apu) : null; },
     // デュアルチップ(2個目)があれば連結して返す(鍵盤はKP4-6/SN4-6+SNN2行として出す)。
@@ -9729,6 +9739,7 @@
       sampleRate: audioCtx.sampleRate,
       writeLog: [], cpuSnapshots: null, memSnapshots: null,
       getApuEnv: liveVgm.getApuEnv,
+      getN163: liveVgm.getN163, getFME7: liveVgm.getFME7, getMmc5: liveVgm.getMmc5, getVRC7: liveVgm.getVRC7, // NESX 拡張音源
       getGbsApu: liveVgm.getGbsApu,
       getHesApu: liveVgm.getHesApu,
       getKssPsg: liveVgm.getKssPsg,

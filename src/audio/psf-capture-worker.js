@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-10-28 10:46:30
+ * Built by tools/build-capture-workers.ps1 at 2026-10-31 23:34:01
  *
  * regsOnly capture worker bundle (psfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.psfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.psfCaptureBuiltAt = '2026-10-28 10:46:30';
+  MML.WorkerBundles.psfCaptureBuiltAt = '2026-10-31 23:34:01';
   MML.WorkerBundles.psfCapture = function () {
 /*
  * PSF (Portable Sound Format) 容器 / PS-EXE 解析
@@ -8307,6 +8307,9 @@
       this.onOpenFile = null;         // ヘッダの「ファイルを開く」
       this.onToMml = null;            // ヘッダの「to MML」
       this.onMaxSecondsChange = null; // ロール見出しの演奏最大時間(秒)が変わったとき (sec) => void
+      this.onLoopChoiceChange = null; // ロール見出しのループの種類('time'|'infinite'|'count')が変わったとき (value) => void
+      this.onLoopCountChange = null;  // ロール見出しのループ回数(1〜100、種類が count のとき)が変わったとき (n) => void
+      this._loopSig = null;
       this.onExport = null;           // ロール見出しの「出力」 (formatId, seconds) => void
       this._exportOpt = null;         // setExportControls() の最後の内容(見出し再構築時に戻す)
       this._exportFmtSig = null;      // 出力形式リストの中身(変わった時だけ作り直す)
@@ -8905,6 +8908,10 @@
         // その右に出力形式と出力ボタンを置く(方針 2026-09-09)。
         // 実体は各フォーマットのパネルにある再生時間欄/書き出しボタンで、ここはその代理
         `<span class="kbd-roll-export" style="display:none">` +
+          // ループ回数(2〜100回/時間指定/無限)。MML再生とVGM(ヘッダにループ位置がある形式)だけ main.js が
+          // setExportControls({loop}) で出す。実体はMMLエディタ/VGMパネルの「ループ」選択で、ここはその代理
+          `<label class="kbd-loop-count" style="display:none"><span>${T('ループ')}</span><select class="kbd-loop-sel"></select>` +
+            `<input type="number" class="kbd-loop-n" min="1" max="100" step="1" style="display:none" title="${T('ループの回数(1〜100)。イントロ+この回数ぶん鳴らしてからフェードアウトします')}"></label>` +
           `<span class="kbd-roll-export-sep">/</span>` +
           `<input type="number" class="kbd-max-sec" min="1" max="3600" step="1" title="${T('演奏最大時間(秒)')}">` +
           `<span class="kbd-roll-export-unit">${T('秒')}</span>` +
@@ -8926,6 +8933,18 @@
       this._mountRollSeekBar(seekSlot);
       // 演奏最大時間+出力(setExportControls で main.js から中身と表示可否をもらう)
       this._exportEl = rollHeader.querySelector('.kbd-roll-export');
+      this._loopEl = rollHeader.querySelector('.kbd-loop-count');
+      this._loopSelEl = rollHeader.querySelector('.kbd-loop-sel');
+      this._loopSelEl.addEventListener('change', () => {
+        if (this.onLoopChoiceChange) this.onLoopChoiceChange(this._loopSelEl.value);
+      });
+      this._loopNEl = rollHeader.querySelector('.kbd-loop-n');
+      this._loopNEl.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') this._loopNEl.blur(); });
+      this._loopNEl.addEventListener('change', () => {
+        const n = Math.max(1, Math.min(100, parseInt(this._loopNEl.value, 10) || 1));
+        this._loopNEl.value = String(n);
+        if (this.onLoopCountChange) this.onLoopCountChange(n);
+      });
       this._maxSecEl = rollHeader.querySelector('.kbd-max-sec');
       this._exportFmtEl = rollHeader.querySelector('.kbd-export-fmt');
       const exportBtn = rollHeader.querySelector('.kbd-export-btn');
@@ -8946,6 +8965,7 @@
       });
       // 言語切替で見出しを作り直した後も状態を戻す(selectは新品なので必ず作り直させる)
       this._exportFmtSig = null;
+      this._loopSig = null;
       this.setExportControls(this._exportOpt);
       // オーバーレイのON/OFFはロール見出しクリック(折りたたみ)とは独立させるため、
       // クリックイベントの伝播をここで止める(bubbling先のrollHeaderハンドラを発火させない)。
@@ -9556,9 +9576,12 @@
     }
 
     /**
-     * ロール見出しの「演奏最大時間+出力」を更新する(main.jsが唯一の呼び出し元)。
-     * opt = { visible, seconds, formats:[[value,label], ...] }
-     * サウンドファイル再生中だけ出す(MML再生の総時間は曲の長さそのもので、指定する物ではない)。
+     * ロール見出しの「ループ回数+演奏最大時間+出力」を更新する(main.jsが唯一の呼び出し元)。
+     * opt = { visible, seconds, secondsReadOnly, formats:[[value,label], ...],
+     *         loop: { options:[[value,label],...], value:'time'|'infinite'|'count', count, disabled, title, sig } | null }
+     * loop はループ回数を選べる再生元(MML / VGM)のときだけ。value が 'count' のとき回数欄(count)を出す。
+     * sig は選択肢の中身(言語)の識別子で、変わったときだけ <option> を作り直す。
+     * secondsReadOnly は秒がループ回数から決まる(VGMの回数モード)とき
      */
     setExportControls(opt) {
       this._exportOpt = opt || null;
@@ -9566,6 +9589,30 @@
       const on = !!(opt && opt.visible);
       this._exportEl.style.display = on ? '' : 'none';
       if (!on) return;
+      const loop = opt.loop || null;
+      this._loopEl.style.display = loop ? '' : 'none';
+      if (loop) {
+        if (this._loopSig !== loop.sig) {
+          this._loopSig = loop.sig;
+          this._loopSelEl.innerHTML = '';
+          for (const [value, label] of loop.options) {
+            const o = document.createElement('option');
+            o.value = value; o.textContent = label;
+            this._loopSelEl.appendChild(o);
+          }
+        }
+        if (this._loopSelEl.value !== loop.value) this._loopSelEl.value = loop.value;
+        this._loopSelEl.disabled = !!loop.disabled;
+        const showN = loop.value === 'count' && !loop.disabled;
+        this._loopNEl.style.display = showN ? '' : 'none';
+        // 入力中(フォーカス中)は書き換えない(演奏最大時間と同じ)
+        if (showN && document.activeElement !== this._loopNEl && loop.count != null) {
+          const v = String(loop.count);
+          if (this._loopNEl.value !== v) this._loopNEl.value = v;
+        }
+        if (this._loopEl.title !== (loop.title || '')) this._loopEl.title = loop.title || '';
+      }
+      this._maxSecEl.readOnly = !!opt.secondsReadOnly;
       // 中身が変わったときだけ作り直す(毎フレーム呼ばれるので、選択中の値を消さないため)
       const sig = opt.formats ? opt.formats.map((f) => f[0]).join(',') : '';
       if (opt.formats && this._exportFmtSig !== sig) {
@@ -10024,7 +10071,9 @@
       //   flex-shrinkが効く箱なので、ch数の多い曲(VGMのNamco System 2で33行など)で
       //   一覧が縦に溢れると、見出し1行ぶんの高さごと0まで潰されて消えてしまう
       //   (「畳むと畳むボタンの行まで消える」不具合報告 2026-09-12)
-      if (collapsed || !(this._fileInfoNodes || []).length) { fi.style.flex = 'none'; return; }
+      // data-kbd-fi-auto の要素だけ(MMLの版履歴だけ、src/ui/mmlHistory.js)のときも同じく中身なり
+      const fiNodes = (this._fileInfoNodes || []).filter(n => n);
+      if (collapsed || !fiNodes.length || fiNodes.every(n => n.hasAttribute && n.hasAttribute('data-kbd-fi-auto'))) { fi.style.flex = 'none'; return; }
       // 左右に並ぶ置き場は幅を、上下に積む置き場は高さをスプリッターの値で固定する
       const sideways = place === 'left' || place === 'right' || (place === 'bottom' && this._bigWaveBelow());
       fi.style.flex = 'none';
@@ -10401,7 +10450,7 @@
     }
 
     // 楽譜モード(レイアウト設定 rollView='score')の材料。score = { notation(src/score/notation.js の
-    // 表記モデル), fps(コンパイラのフレームレート), loopPointFrame, totalFrames } | null。
+    // 表記モデル), fps(コンパイラのフレームレート), loopPointFrame, totalFrames(=曲末、1周ぶん) } | null。
     // 表記モデルの各音符片は frameStart/frameEnd(コンパイラのフレーム)を持つので、fps で秒に直せば
     // ロールと同じ「再生位置 pos からの相対秒」で描ける。null で楽譜なし(ロール表示に戻る)
     setScore(score) {
@@ -12682,13 +12731,13 @@
       const fps = score.fps || 60;
       const H = g.H;
       this._drawRollTimeGrid(ctx, g, pos);
-      // ループ地点(L)より後ろの末尾複製(compile() が tracks に足す区間)は譜面には無いので、
-      // その区間の再生位置はループ地点からの相対位置へ戻して描く
+      // ループ地点(L)で折り返した後(曲末=totalFrames より先)の再生位置は、[L, 曲末) の中の位置へ戻して描く
+      // (Mml.LoopPlan.mapFrame と同じ写像。再生側は折り返し済みの位置を渡してくるので通常は素通り)
       let posFrame = pos * fps;
       if (score.loopPointFrame != null && score.totalFrames > 0) {
-        const natural = (score.totalFrames + score.loopPointFrame) / 2;
+        const natural = score.totalFrames;
         const loopLen = natural - score.loopPointFrame;
-        if (loopLen > 0 && posFrame >= natural) posFrame = score.loopPointFrame + ((posFrame - natural) % loopLen);
+        if (loopLen > 0 && posFrame >= natural) posFrame = score.loopPointFrame + ((posFrame - score.loopPointFrame) % loopLen);
       }
       const posSec = posFrame / fps;
       const windowSec = g.windowSec;
@@ -16291,8 +16340,12 @@
     const buildTracks = MML.UI.buildRollTracksFromRegSnapshots;
     let tracks = [];
     if (data.nes) {
-      const nesChips = ['nes'].concat(data.nes.fds ? ['fds'] : []);
-      const t = buildTracks(data.nes.regSnapshots, data.nes.writeLog, done, sr / frameRate, sr, nesChips, null);
+      // 拡張音源(規格外 NESX ブロック、vgmPlayer.js)は NSF と同じトークンで同じ抽出経路へ
+      const F = MML.NSF && MML.NSF.CHIP_FLAGS;
+      const x = data.nes.extraChips || 0;
+      const nesChips = ['nes'].concat(data.nes.fds ? ['fds'] : [],
+        F ? [['vrc6', F.VRC6], ['vrc7', F.VRC7], ['mmc5', F.MMC5], ['n163', F.N163], ['fme7', F.FME7]].filter(([, b]) => x & b).map(([n]) => n) : []);
+      const t = buildTracks(data.nes.regSnapshots, data.nes.writeLog, done, sr / frameRate, sr, nesChips, data.nes.n163Snapshots || null);
       if (t) tracks = tracks.concat(t);
     }
     if (data.gb) tracks = tracks.concat(RollBuild.gbs(data.gb.snapshots.slice(0, done), frameRate));

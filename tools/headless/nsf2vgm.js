@@ -74,6 +74,34 @@ function nsfToVgm(nsfBytes, opt = {}) {
   };
 
   const player = new MML.Emu.NsfPlayer(nsfBytes);
+  // NES 拡張音源(VRC6/VRC7/MMC5/N163/SUNSOFT 5B)は VGM に載らないので規格外の NESX ブロックで運ぶ
+  // (src/vgm/vgmHeader.js VGM.NESX、DESIGN-CAPTURE.md §3.3)。FDS は標準部分(bit31)なので含めない
+  const NESX = MML.VGM.NESX;
+  const extBits = (header.extraChips || 0) & ~MML.NSF.CHIP_FLAGS.FDS;
+  const nesxBlock = (kind, payload) => {
+    const body = [].concat(NESX.MAGIC, [NESX.VERSION, kind], payload);
+    return [0x67, 0x66, NESX.TYPE, ...u32(body.length), ...body];
+  };
+  if (extBits) body.push(...nesxBlock(NESX.KIND_HEADER, [extBits]));
+  // 同じ時刻の拡張音源書き込みは 1 ブロックにまとめる(順序は保つ)。時刻が変わるか標準書き込みが来たら流す
+  let ext = null; // { t, entries: number[] }
+  const flushExt = () => {
+    if (!ext) return;
+    flushWait(ext.t);
+    body.push(...nesxBlock(NESX.KIND_WRITES, ext.entries));
+    ext = null;
+  };
+  const extWrite = (a, v, read, t) => {
+    if (ext && ext.t !== t) flushExt();
+    if (!ext) ext = { t, entries: [] };
+    const frac = Math.min(127, Math.round((t - Math.floor(t / SAMPLES_PER_FRAME) * SAMPLES_PER_FRAME) / SAMPLES_PER_FRAME * 128));
+    ext.entries.push(a & 0xFF, (a >> 8) & 0xFF, read ? 0 : (v & 0xFF), (read ? 0x80 : 0) | frac);
+  };
+  const isExt = (a) => (a >= 0x9000 && a <= 0x9002) || (a >= 0xA000 && a <= 0xA002) || (a >= 0xB000 && a <= 0xB002) || // VRC6
+    a === 0x9010 || a === 0x9030 || // VRC7
+    (a >= 0x5000 && a <= 0x5015) || // MMC5
+    a === 0x4800 || a === 0xF800 || // N163
+    a === 0xC000 || a === 0xE000;   // SUNSOFT 5B
   const emitDpcm = (t) => {
     const addr = 0xC000 + (shadow[0x4012] || 0) * 64;
     const len = (shadow[0x4013] || 0) * 16 + 1;
@@ -90,25 +118,35 @@ function nsfToVgm(nsfBytes, opt = {}) {
     flushWait(t);
     body.push(0x67, 0x66, 0xC2, ...u32(len + 2), ...u16(addr), ...data);
   };
+  const curT = () => frameSample + (precise ? Math.min(SAMPLES_PER_FRAME - 1, Math.floor((player.frameFrac || 0) * SAMPLES_PER_FRAME)) : 0);
   const onWrite = (a, v) => {
     shadow[a] = v;
     const aa = mapAddr(a);
-    if (aa < 0) { if (a >= 0x4000 && a <= 0xFFFF && a !== 0x4014 && a !== 0x4016) dropped++; return; }
+    if (aa < 0) {
+      if (extBits && isExt(a)) extWrite(a, v, false, curT());
+      else if (a >= 0x4000 && a <= 0xFFFF && a !== 0x4014 && a !== 0x4016) dropped++;
+      return;
+    }
     if (a === 0x4023 || (a >= 0x4040 && a <= 0x409E)) fds = true;
-    const t = frameSample + (precise ? Math.min(SAMPLES_PER_FRAME - 1, Math.floor((player.frameFrac || 0) * SAMPLES_PER_FRAME)) : 0);
+    const t = curT();
+    flushExt();
     if (a === 0x4015 && (v & 0x10)) emitDpcm(t);
     flushWait(t);
     body.push(0xB4, aa, v & 0xFF);
   };
+  // N163 $4800 の読み出し(ポインタが進む副作用)も記録する。NsfBus は副作用つきポートだけ onRead を呼ぶ
+  const onRead = (a) => { if (extBits) extWrite(a, 0, true, curT()); };
 
   // capture.js _setupCapture と同じ: initSong() が直接書く $4017/$4015 を先に出す
   onWrite(0x4017, 0x40); onWrite(0x4015, 0x0F);
   player.bus.onWrite = onWrite;
+  player.bus.onRead = onRead;
   player.initSong(song, false);
   for (let f = 0; f < totalFrames; f++) {
     player.renderFrame(sampleRate);
     frameSample = (f + 1) * SAMPLES_PER_FRAME;
   }
+  flushExt();
   flushWait(frameSample);
   body.push(0x66);
 
