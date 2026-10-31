@@ -1473,6 +1473,28 @@
       rf5c68: has('rf5c68') ? { snapshots: [] } : null
     };
     let nesFrameWrites = [];
+    // DPCM サンプルのトリガー時点解決(DESIGN-CAPTURE.md P-5): 0xC2 ブロックで $8000-$FFFF の中身が変わるたびに
+    // 像の「版」を積み、同じフレームの書き込み列に擬似バンク書き込み $5FF8+s = 版*8+s を入れる。nsf2mml の
+    // extractDmcTriggers は NSF のバンクスイッチと同じ経路でこれを追跡し、computeBankInfo(dpcmRom.versions)が
+    // 版 v の 4KB 窓 s をバンク番号 v*8+s として解決する。版 0 = 初期状態(全0)
+    const dpcmVersions = [];
+    if (data.nes) {
+      const nesAd = player.adapterById.nes;
+      dpcmVersions.push(nesAd.ram.slice(0x8000, 0x10000));
+      const origRamWrite = nesAd.ramWrite;
+      nesAd.ramWrite = function (start, bytes) {
+        let changed = false;
+        for (let i = 0; i < bytes.length && start + i < 0x10000; i++) {
+          const a = start + i;
+          if (a >= 0x8000 && this.ram[a] !== bytes[i]) { changed = true; break; }
+        }
+        origRamWrite.call(this, start, bytes);
+        if (!changed) return;
+        const v = dpcmVersions.length;
+        dpcmVersions.push(this.ram.slice(0x8000, 0x10000));
+        for (let s = 0; s < 8; s++) { nesFrameWrites.push({ addr: 0x5FF8 + s, value: v * 8 + s }); nesRegs[0x5FF8 + s] = v * 8 + s; }
+      };
+    }
     // YM2610 ADPCM のロール用発音区間推定の状態(上のループ内コメント参照)
     const adpcmState = { aSeq: new Array(6).fill(0), aEnd: new Array(6).fill(-1), bSeq: 0, bEnd: -1 };
     // YM2608 リズム/ADPCM-B も同じ推定(スナップショット形状がYM2610と同一)
@@ -1852,7 +1874,9 @@
     // 渡す(vgm2mml/converter.js → nsf2mml/converter.jsのoptions.dpcmRom。ブロックの
     // 読み込みは通常曲の先頭付近で1回きりなので最終スナップショットで足りる)
     if (data.nes && player.adapterById.nes.ramLoaded) {
-      data.nes.dpcmRom = player.adapterById.nes.ram.slice(0xC000, 0x10000);
+      // bytes=最終状態(従来)。versions=中身が変わるたびに積んだ $8000-$FFFF の像(nsf2mml computeBankInfo が
+      // 擬似バンクとして解決し、トリガー時点の中身で .dmc を切り出す。DESIGN-CAPTURE.md P-5)
+      data.nes.dpcmRom = { bytes: player.adapterById.nes.ram.slice(0xC000, 0x10000), loadAddr: 0xC000, versions: dpcmVersions };
     }
     collectUsedSamples(data, player);
     collectDacHits(data, player, FRAME_RATE);

@@ -521,6 +521,16 @@
   // アドレス空間のイメージ(VGMはデータブロック0x67 type=0xC2でエミュレータのメモリへ
   // 書き込まれた$C000-$FFFFの16KB)。バンクスイッチの概念が無いので常に単純な線形解決
   function computeBankInfo(nsfBytes, header, dpcmRom) {
+    // dpcmRom.versions(VGM 録音、DESIGN-CAPTURE.md P-5): $8000-$FFFF の 32KB 像を「中身が変わるたび」に積んだ配列。
+    // 版 v の 4KB 窓 s はバンク番号 v*8+s。vgmPlayer.js のキャプチャが版が進むたびに $5FF8-$5FFF へ擬似書き込み
+    // (値=v*8+s)を writeLog に積むので、NSF のバンクスイッチ追跡(bankState)がそのまま「トリガー時点の版」になる。
+    // byContent: ファイルの同一性はバンク番号でなく中身で決める(版が進んでも変わらないサンプルを重複させない)
+    if (dpcmRom && dpcmRom.versions && dpcmRom.versions.length) {
+      const n = dpcmRom.versions.length;
+      const romImage = new Uint8Array(n * 0x8000);
+      for (let v = 0; v < n; v++) romImage.set(dpcmRom.versions[v].subarray(0, 0x8000), v * 0x8000);
+      return { useBankswitch: true, romImage, bankCount: n * 8, loadAddr: 0x8000, byContent: true };
+    }
     if (dpcmRom && dpcmRom.bytes && dpcmRom.bytes.length) {
       return { useBankswitch: false, program: dpcmRom.bytes, loadAddr: dpcmRom.loadAddr || 0xC000 };
     }
@@ -564,6 +574,13 @@
   // 商用NSFで実際に必要だったことを確認済み)。
   function dmcTriggerFileKey(trig, bankInfo) {
     if (!bankInfo.useBankswitch) return `${trig.sampleAddr}:${trig.sampleLen}`;
+    if (bankInfo.byContent) {
+      // 版つき(VGM 録音): 中身のハッシュで同一性を決める(FNV-1a 32bit)
+      const bytes = resolveDmcBytes(bankInfo, trig.bankState, trig.sampleAddr, trig.sampleLen);
+      let h = 0x811C9DC5;
+      if (bytes) for (let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 0x01000193) >>> 0; }
+      return `${trig.sampleAddr}:${trig.sampleLen}:h${h.toString(16)}`;
+    }
     const slot = (trig.sampleAddr - 0x8000) >> 12;
     const bankState = trig.bankState || [0, 0, 0, 0, 0, 0, 0, 0];
     const bankIndex = (slot >= 0 && slot <= 7) ? (bankState[slot] % bankInfo.bankCount) : 0;

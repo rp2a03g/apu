@@ -1618,9 +1618,12 @@
       // 拡張音源: FDS は標準 VGM(bit31)、VRC6/VRC7/MMC5/N163/SUNSOFT 5B は規格外の NESX ブロック
       // (vgmPlayer.js makeNesExpansionAdapter)。どちらも NSF ヘッダと同じビットで nsf2mml へ渡す
       const extraChips = (data.nes.fds ? MML.NSF.CHIP_FLAGS.FDS : 0) | (data.nes.extraChips || 0);
+      const dpcmRom = data.nes.dpcmRom || null;
       const header = {
         extraChips,
-        songName: label, artist: author, copyright: '', totalSongs: 1
+        songName: label, artist: author, copyright: '', totalSongs: 1,
+        // DPCM の版(vgmPlayer.js dpcmVersions)を擬似バンクで追跡するときの初期バンク状態(版 0 の 8 窓)
+        bankswitch: dpcmRom && dpcmRom.versions ? [0, 1, 2, 3, 4, 5, 6, 7] : undefined
       };
       // $4015を一度も書かないVGMでもチャンネルが有効扱いになるよう既定値を補う
       const initRegs = { 0x4015: 0x0F };
@@ -1628,7 +1631,7 @@
       // (0x67 type=0xC2)でエミュレータのメモリへ書き込まれた$C000-$FFFF(vgmPlayer.jsが
       // キャプチャ末尾で切り出したdata.nes.dpcmRom)から解決する
       const nesOptions = Object.assign({}, options,
-        data.nes.dpcmRom ? { dpcmRom: { bytes: data.nes.dpcmRom, loadAddr: 0xC000 } } : {},
+        dpcmRom ? { dpcmRom: dpcmRom.versions ? dpcmRom : { bytes: dpcmRom.bytes || dpcmRom, loadAddr: 0xC000 } } : {},
         data.nes.n163Snapshots ? { n163Snapshots: data.nes.n163Snapshots } : {});
       result = MML.NSF2MML.convert(data.nes.writeLog, null, header, 0, initRegs, null, nesOptions);
       const F = MML.NSF.CHIP_FLAGS;
