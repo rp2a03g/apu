@@ -4910,6 +4910,18 @@
     // 「上書き保存」と同じ挙動)。保存先を選び直したいときは opts.saveAs で下のピッカーへ回す。
     // Chromeの書き込み権限ダイアログはこのファイルへの初回保存時に1度だけ出る
     if (!(opts && opts.saveAs) && FileSync.isConnected()) {
+      // 黙って上書きする前の最後の歯止め: 接続先の最終保存本文と共通する行が少なければ、
+      // 別の曲を貼ったまま保存しようとしている可能性が高いので確認する
+      // (2026-10-31、貼り付けた別の曲で requiem.mml を上書きした事故から)
+      const overlap = FileSync.overlapWithBase(text);
+      if (overlap !== null && overlap < 0.3) {
+        const ok = window.confirm(T('接続中の {file} とは中身が大きく違います（共通する行は {pct}%）。この内容で {file} を上書き保存しますか？',
+          { file: FileSync.fileName(), pct: Math.round(overlap * 100) }));
+        if (!ok) {
+          mmlFileStatus(T('上書き保存をやめました。別の名前で保存するには Ctrl+Shift+S（名前を付けて保存）か、×で同期を切ってから保存してください。'), '');
+          return;
+        }
+      }
       const res = await FileSync.write(text);
       if (res.ok) {
         markMmlTextSynced(FileSync.fileName());
@@ -6183,8 +6195,30 @@
       openInput.value = ''; // 同じファイルを続けて開き直せるようにする
     });
     document.getElementById('btnMmlSaveFile').addEventListener('click', () => saveMmlFile());
+    // 貼り付けで本文が丸ごと入れ替わったら(Ctrl+A→Ctrl+V)、「開く」や変換と同じく別の曲とみなして
+    // 外部ファイルとの同期を切る。切らないと次の「保存」が前の曲のファイルへ黙って上書きする
+    // (2026-10-31の事故)。beforeinput で貼り付け前の選択範囲を控え、input で判定する
+    let pasteBefore = null;
+    mmlSourceEl.addEventListener('beforeinput', (ev) => {
+      pasteBefore = ev.inputType === 'insertFromPaste'
+        ? { len: mmlSourceEl.value.length, sel: mmlSourceEl.selectionEnd - mmlSourceEl.selectionStart }
+        : null;
+    });
     let dpcmRestoreTimer = null;
-    mmlSourceEl.addEventListener('input', () => {
+    mmlSourceEl.addEventListener('input', (ev) => {
+      if (ev.inputType === 'insertFromPaste' && pasteBefore && FileSync.isConnected()) {
+        const after = mmlSourceEl.value.length;
+        const pasted = after - (pasteBefore.len - pasteBefore.sel);
+        // 選択範囲が本文のほぼ全部だった、または(全消去のあとで)残っていた本文が貼った量に比べて無視できる
+        const replacedAll = pasteBefore.len > 0 && pasteBefore.sel >= pasteBefore.len * 0.9;
+        const intoEmpty = pasted > 0 && (pasteBefore.len - pasteBefore.sel) <= pasted * 0.1;
+        if (replacedAll || intoEmpty) {
+          const name = FileSync.fileName();
+          resetMmlForNewSong();
+          mmlFileStatus(T('貼り付けで本文が丸ごと入れ替わったので、{file} との同期をやめました。次の「保存」は名前を付けて保存になります。', { file: name }), '');
+        }
+      }
+      pasteBefore = null;
       clearTimeout(dpcmRestoreTimer);
       dpcmRestoreTimer = setTimeout(async () => {
         await restoreDpcmSamples(mmlSourceEl.value);

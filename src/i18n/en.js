@@ -246,6 +246,12 @@
     '外部ファイルとの同期をやめました。もう一度同期するには「開く」でファイルを選ぶか、MMLファイルをウィンドウへドロップしてください。':
       'Stopped following the file. To start again, pick it with Open or drop an MML file onto this window.',
     '書き込みが許可されなかったため保存できませんでした。': 'Could not save because write permission was denied.',
+    '接続中の {file} とは中身が大きく違います（共通する行は {pct}%）。この内容で {file} を上書き保存しますか？':
+      'This text differs a lot from the file you are following, {file} (only {pct}% of the lines match). Overwrite {file} with it?',
+    '上書き保存をやめました。別の名前で保存するには Ctrl+Shift+S（名前を付けて保存）か、×で同期を切ってから保存してください。':
+      'Save cancelled. To save under another name, press Ctrl+Shift+S (Save as), or stop following the file with × and then save.',
+    '貼り付けで本文が丸ごと入れ替わったので、{file} との同期をやめました。次の「保存」は名前を付けて保存になります。':
+      'The pasted text replaced the whole editor, so {file} is no longer being followed. The next Save will ask for a file name.',
     '開始点・終了点を曲の最初と最後にリセット': 'Reset start/end points to the whole song',
     '↺ 再生範囲をリセット': '↺ Reset range',
     '行番号': 'Line numbers',

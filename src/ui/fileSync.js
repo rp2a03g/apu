@@ -317,8 +317,23 @@
     notify();
   }
 
+  // 上書き保存の前の「別の曲ではないか」の判定材料: text の空でない行のうち、接続先の最終保存本文
+  // (baseText)にも同じ行があるものの割合(0〜1)。1曲を直し続ける限りほぼ1、別の曲を貼ると0近く。
+  // baseText が無い/短すぎる(10行未満)ときは null を返し、呼び出し側は判定しない
+  function overlapWithBase(text) {
+    if (baseText == null) return null;
+    const lines = (s) => s.split(/\r?\n/).map(l => l.trim()).filter(l => l !== '');
+    const base = new Set(lines(baseText));
+    if (base.size < 10) return null;
+    const cur = lines(text);
+    if (cur.length === 0) return 0;
+    let hit = 0;
+    for (const l of cur) if (base.has(l)) hit++;
+    return hit / cur.length;
+  }
+
   MML.UI.FileSync = {
-    init, supported, state,
+    init, supported, state, overlapWithBase,
     pickOpen, handleFromDropItem, attach, detach, reconnect,
     checkNow, acceptPending, discardPending,
     write, markSaved,
