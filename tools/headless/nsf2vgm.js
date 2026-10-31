@@ -3,7 +3,7 @@
  *
  *   node tools/headless/nsf2vgm.js "song.nsf" --song 0 --sec 30 -o out.vgm [--precise]
  *
- * Mesen 用の録音スクリプト(tools/mesen/nes-apu-vgm-recorder.lua)と同じ符号化で VGM を作る。
+ * Mesen 用の録音スクリプト(tools/mesen/vgm-recorder.lua)と同じ符号化で VGM を作る。
  * 目的は 2 つ:
  *   1. その符号化(735 サンプル=1 フレーム固定、DPCM はデータブロック 0xC2、FDS は bit31)で作った
  *      VGM が、本ツールの VGM 経路(vgmPlayer → vgm2mml → nsf2mml)で NSF 直接変換と同じ結果に
