@@ -1210,6 +1210,16 @@
     'イントロ+1周だけ書き出して L を置く': 'Write only intro + one loop and place L',
     '元曲のループ周期を全チャンネルの音符列から検出し、イントロ+1周ぶんだけを書き出して各チャンネルのループ開始位置に L を置きます。長く変換しても曲データが1周ぶんで済むのでNSFが小さくなります。イントロとループ1周の長さは全チャンネルで一致させます(ずれると周回のたびにチャンネルがずれていくため)。一致させられない場合と、変換した長さが「イントロ+2周」に満たず確認できない場合は、通常どおり全部を書き出します':
       'Detects the loop period of the original song from the notes of all channels, writes only the intro plus one loop, and places L at the loop start of every channel. Song data stays one loop long however much you convert, so the NSF gets smaller. The intro and the loop are made exactly the same length in every channel (otherwise the channels drift apart on every repeat). If that is impossible, or the converted length is shorter than intro + two loops so the period cannot be confirmed, everything is written out as usual',
+    // ---- 録音の補正(src/ui/convertSettings.js、src/vgm/vgmClean.js) ----
+    '録音の補正(ゲームプレイ録音のVGM)': 'Recording cleanup (gameplay VGM)',
+    '効果音を除く': 'Remove sound effects',
+    '周回の多数決で曲だけ残す': 'Keep only the music by majority vote across loops',
+    'ゲームを遊びながら録ったVGM向け。曲が2周以上入った録音を周期で重ね、周回ごとに違うフレームの書き込みを多数決で置き換えます(効果音で上書きされた曲の書き込みも復元)。周期性が始まる前(イントロ)は手を付けません。周回が2つだけだとどちらが曲か決められないので3周以上を推奨。VGM以外の形式には効きません':
+      'For VGMs recorded while playing a game. Overlays a recording that contains two or more loops of the song by its period and replaces the writes of frames that differ between loops by majority vote (music writes overwritten by an effect are restored too). Frames before the periodic part (the intro) are left alone. With only two loops nothing can decide which one is the music, so three or more loops are recommended. Has no effect on formats other than VGM',
+    '処理落ちを詰める': 'Remove lag frames',
+    '音楽の書き込みが止まったフレームを詰める': 'Drop frames where the music stopped writing',
+    'ゲームを遊びながら録ったVGM向け。毎フレーム書かれるレジスタ(音楽の定期書き込み)が1つも無いフレームを処理落ちとみなして詰めます(そのフレームにあった効果音の書き込みは次のフレームへ移す)。1秒より長い無書き込み(ポーズ・曲の終わり)と録音の先頭・末尾は詰めません。変化したときだけ書くドライバでは判定できず何もしません。VGM以外の形式には効きません':
+      'For VGMs recorded while playing a game. A frame with none of the registers that the music writes every frame is treated as lag and dropped (any sound-effect writes in it move to the next frame). Gaps longer than one second (pause, end of the song) and the start and end of the recording are kept. Drivers that write only on change cannot be judged, so nothing happens. Has no effect on formats other than VGM',
     'チャンネルの並び順': 'Channel order',
     'アルファベット順': 'Alphabetical',
     '変換元の割り当て順': 'Source assignment order',

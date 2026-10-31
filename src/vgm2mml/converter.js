@@ -515,6 +515,8 @@
     const fdsWaveReg = new MML.Convert.WaveRegistry('@FM'); // FDSへ載せた矩形波系ソースの波形(@FM<n>)
     const vrc7ToneReg = new MML.Convert.WaveRegistry('@OP');
     const notes = ignoredNote ? [ignoredNote] : [];
+    // 録音の補正(fromVgm が VGM を組み直したときの報告。src/vgm/vgmClean.js describeClean)
+    if (options.captureClean && MML.VGM && MML.VGM.describeClean) notes.push(...MML.VGM.describeClean(options.captureClean));
     if (c.ay8910 && c.ay8910.dual) notes.push('2個目のAY8910(デュアルチップ)は変換対象外のため無視しました。');
     // 既定割当が借用先不足でskipにしたFMチャンネル(YM2151 8ch > VRC7 6ch 等)はその旨を注記する
     // (ユーザーが明示的にskipへ変えたものは対象外)
@@ -1494,6 +1496,17 @@
   MML.VGM2MML.fromVgm = async function (vgmBytes, durationSeconds, options) {
     options = options || {};
     durationSeconds = durationSeconds || 60;
+    // 録音の補正(変換設定 SFX_REMOVE / LAG_FIX、既定 OFF。src/vgm/vgmClean.js)。ゲームプレイ録音の VGM から
+    // 効果音・処理落ちを取り除く選択肢。VGM のバイト列を組み直してから従来どおりキャプチャするので、
+    // OFF のときはここを素通りし(bytes は入力そのもの)従来の結果と変わらない
+    {
+      const cc = MML.Convert.normalizeCmd(options.cmd);
+      if ((cc.SFX_REMOVE || cc.LAG_FIX) && MML.VGM && MML.VGM.cleanCapture) {
+        const r = MML.VGM.cleanCapture(vgmBytes, { sfx: !!cc.SFX_REMOVE, lag: !!cc.LAG_FIX });
+        vgmBytes = r.bytes;
+        options = Object.assign({}, options, { captureClean: r.report });
+      }
+    }
     // ループしないVGMは曲データの終わり(ヘッダの総サンプル数)より先をキャプチャしない。データが尽きたあとも
     // チップは最後の状態のまま鳴り続ける(キャプチャはそれを音符として拾う)が、実際の再生(VGMPlay/この
     // アプリの再生)はそこで止まる。止め忘れの音で終わるVGMを長めに変換すると、その音が変換した長さの

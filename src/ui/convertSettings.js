@@ -298,7 +298,7 @@
       b.addEventListener('click', () => {
         // DPCMキー(ドラム(DPCM)パネル側の設定)と出力の書式はプリセットに含まれないので今の値を残す
         const keep = {};
-        for (const k of [...(MML.Convert.DPCM_KEYS || []), ...(MML.Convert.LAYOUT_KEYS || [])]) keep[k] = current[k];
+        for (const k of [...(MML.Convert.DPCM_KEYS || []), ...(MML.Convert.LAYOUT_KEYS || []), ...(MML.Convert.CAPTURE_KEYS || [])]) keep[k] = current[k];
         current = MML.Convert.normalizeCmd(Object.assign({}, keep, MML.Convert.CMD_PRESETS[name]));
         commit();
       });
@@ -505,6 +505,20 @@
       T('元曲のループ周期を全チャンネルの音符列から検出し、イントロ+1周ぶんだけを書き出して各チャンネルのループ開始位置に L を置きます。長く変換しても曲データが1周ぶんで済むのでNSFが小さくなります。イントロとループ1周の長さは全チャンネルで一致させます(ずれると周回のたびにチャンネルがずれていくため)。一致させられない場合と、変換した長さが「イントロ+2周」に満たず確認できない場合は、通常どおり全部を書き出します')));
     checks.LOOP_DETECT = ldLoopCb;
     body.appendChild(lySec);
+
+    // ── 3b. 録音の補正(SFX_REMOVE / LAG_FIX、src/vgm/vgmClean.js)。VGM 経路だけで効く。プリセット外 ──
+    const rcSec = foldSection('capture', T('録音の補正(ゲームプレイ録音のVGM)'), false, 'capture');
+    const sfxCb = document.createElement('input'); sfxCb.type = 'checkbox';
+    sfxCb.addEventListener('change', () => setKey('SFX_REMOVE', sfxCb.checked));
+    rcSec.appendChild(line(sfxCb, T('効果音を除く'), T('周回の多数決で曲だけ残す'), null,
+      T('ゲームを遊びながら録ったVGM向け。曲が2周以上入った録音を周期で重ね、周回ごとに違うフレームの書き込みを多数決で置き換えます(効果音で上書きされた曲の書き込みも復元)。周期性が始まる前(イントロ)は手を付けません。周回が2つだけだとどちらが曲か決められないので3周以上を推奨。VGM以外の形式には効きません')));
+    checks.SFX_REMOVE = sfxCb;
+    const lagCb = document.createElement('input'); lagCb.type = 'checkbox';
+    lagCb.addEventListener('change', () => setKey('LAG_FIX', lagCb.checked));
+    rcSec.appendChild(line(lagCb, T('処理落ちを詰める'), T('音楽の書き込みが止まったフレームを詰める'), null,
+      T('ゲームを遊びながら録ったVGM向け。毎フレーム書かれるレジスタ(音楽の定期書き込み)が1つも無いフレームを処理落ちとみなして詰めます(そのフレームにあった効果音の書き込みは次のフレームへ移す)。1秒より長い無書き込み(ポーズ・曲の終わり)と録音の先頭・末尾は詰めません。変化したときだけ書くドライバでは判定できず何もしません。VGM以外の形式には効きません')));
+    checks.LAG_FIX = lagCb;
+    body.appendChild(rcSec);
 
     // ── 4. 詳細設定(折りたたみ) ──
     const det = foldSection('advanced', T('詳細設定'), false, 'adv');

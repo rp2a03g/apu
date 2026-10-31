@@ -19,6 +19,29 @@
 
   VGM.SAMPLE_RATE = 44100;
 
+  // コマンド長(オペコードの後に続くバイト数)。可変長(0x67)と特別扱い(0x64等)は呼ぶ側の switch で。
+  // 再生(vgmPlayer.js)と録音補正(vgmClean.js)が同じ表を使う
+  VGM.operandLength = function (op) {
+    if (op >= 0x30 && op <= 0x3F) return 1;
+    if (op >= 0x40 && op <= 0x4E) return 2;
+    if (op === 0x4F || op === 0x50) return 1;
+    if (op >= 0x51 && op <= 0x5F) return 2;
+    if (op === 0x61) return 2;
+    if (op === 0x62 || op === 0x63 || op === 0x66) return 0;
+    if (op === 0x64) return 3;
+    if (op === 0x68) return 11;
+    if (op >= 0x70 && op <= 0x8F) return 0;
+    if (op === 0x90 || op === 0x91) return 4;
+    if (op === 0x92) return 5;
+    if (op === 0x93) return 10;
+    if (op === 0x94) return 1;
+    if (op === 0x95) return 4;
+    if (op >= 0xA0 && op <= 0xBF) return 2;
+    if (op >= 0xC0 && op <= 0xDF) return 3;
+    if (op >= 0xE0 && op <= 0xFF) return 4;
+    return -1; // 0x00-0x2F, 0x60, 0x65, 0x69-0x6F, 0x96-0x9F: 未定義
+  };
+
   // NES 拡張音源ブロック(規格外。標準プレイヤーは未知の型として読み飛ばす。VGMPlay 0.52 と本体で確認済み 2026-10-31)
   //   0x67 0x66 TYPE size(4) "NESX" ver(1) kind(1) payload
   //   kind 0 = ヘッダ: payload[0] = NSF の拡張音源ビット
@@ -271,6 +294,7 @@
       volumeFactor: Math.pow(2, volumeModifier / 0x20), // 全体音量倍率(0x7C、v1.60+。0=等倍)
       extra,
       gd3,
+      gd3Offset,      // GD3 タグの絶対位置(0=無し)。録音補正(vgmClean.js)が書き直すときにタグを写す
       durationSeconds: totalSamples / VGM.SAMPLE_RATE,
       loopSeconds: loopSamples / VGM.SAMPLE_RATE
     };

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-10-31 23:53:46
+ * Built by tools/build-capture-workers.ps1 at 2026-11-01 07:57:06
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-10-31 23:53:46';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-01 07:57:06';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -31,6 +31,29 @@
   const VGM = MML.VGM = MML.VGM || {};
 
   VGM.SAMPLE_RATE = 44100;
+
+  // コマンド長(オペコードの後に続くバイト数)。可変長(0x67)と特別扱い(0x64等)は呼ぶ側の switch で。
+  // 再生(vgmPlayer.js)と録音補正(vgmClean.js)が同じ表を使う
+  VGM.operandLength = function (op) {
+    if (op >= 0x30 && op <= 0x3F) return 1;
+    if (op >= 0x40 && op <= 0x4E) return 2;
+    if (op === 0x4F || op === 0x50) return 1;
+    if (op >= 0x51 && op <= 0x5F) return 2;
+    if (op === 0x61) return 2;
+    if (op === 0x62 || op === 0x63 || op === 0x66) return 0;
+    if (op === 0x64) return 3;
+    if (op === 0x68) return 11;
+    if (op >= 0x70 && op <= 0x8F) return 0;
+    if (op === 0x90 || op === 0x91) return 4;
+    if (op === 0x92) return 5;
+    if (op === 0x93) return 10;
+    if (op === 0x94) return 1;
+    if (op === 0x95) return 4;
+    if (op >= 0xA0 && op <= 0xBF) return 2;
+    if (op >= 0xC0 && op <= 0xDF) return 3;
+    if (op >= 0xE0 && op <= 0xFF) return 4;
+    return -1; // 0x00-0x2F, 0x60, 0x65, 0x69-0x6F, 0x96-0x9F: 未定義
+  };
 
   // NES 拡張音源ブロック(規格外。標準プレイヤーは未知の型として読み飛ばす。VGMPlay 0.52 と本体で確認済み 2026-10-31)
   //   0x67 0x66 TYPE size(4) "NESX" ver(1) kind(1) payload
@@ -284,6 +307,7 @@
       volumeFactor: Math.pow(2, volumeModifier / 0x20), // 全体音量倍率(0x7C、v1.60+。0=等倍)
       extra,
       gd3,
+      gd3Offset,      // GD3 タグの絶対位置(0=無し)。録音補正(vgmClean.js)が書き直すときにタグを写す
       durationSeconds: totalSamples / VGM.SAMPLE_RATE,
       loopSeconds: loopSamples / VGM.SAMPLE_RATE
     };
@@ -14988,27 +15012,9 @@
 
   // ---------------------------------------------------------------------------
   // コマンド長(オペコードの後に続くバイト数)。可変長(0x67)と特別扱い(0x64等)は switch 側。
+  // 表の実体は src/vgm/vgmHeader.js VGM.operandLength(録音補正 vgmClean.js と共用)
   // ---------------------------------------------------------------------------
-  function operandLength(op) {
-    if (op >= 0x30 && op <= 0x3F) return 1;
-    if (op >= 0x40 && op <= 0x4E) return 2;
-    if (op === 0x4F || op === 0x50) return 1;
-    if (op >= 0x51 && op <= 0x5F) return 2;
-    if (op === 0x61) return 2;
-    if (op === 0x62 || op === 0x63 || op === 0x66) return 0;
-    if (op === 0x64) return 3;
-    if (op === 0x68) return 11;
-    if (op >= 0x70 && op <= 0x8F) return 0;
-    if (op === 0x90 || op === 0x91) return 4;
-    if (op === 0x92) return 5;
-    if (op === 0x93) return 10;
-    if (op === 0x94) return 1;
-    if (op === 0x95) return 4;
-    if (op >= 0xA0 && op <= 0xBF) return 2;
-    if (op >= 0xC0 && op <= 0xDF) return 3;
-    if (op >= 0xE0 && op <= 0xFF) return 4;
-    return -1; // 0x00-0x2F, 0x60, 0x65, 0x69-0x6F, 0x96-0x9F: 未定義
-  }
+  function operandLength(op) { return MML.VGM.operandLength(op); }
 
   class VgmPlayer {
     /**
@@ -25014,6 +25020,15 @@
   const LAYOUT_KEYS = Object.keys(LAYOUT_DEFAULTS);
   MML.Convert.LAYOUT_DEFAULTS = LAYOUT_DEFAULTS;
   MML.Convert.LAYOUT_KEYS = LAYOUT_KEYS;
+  // 録音の補正(2026-11-01、src/vgm/vgmClean.js)。ゲームを遊びながら録った VGM 向けで、VGM 経路だけで効く。
+  // プリセットには含めない(出力の書式と同じ扱い)。既定はどちらも OFF: 効果音・処理落ちは録音の本体
+  // (DESIGN-CAPTURE.md P-6)。OFF のときは VGM のバイト列に触らないので従来の変換結果と 1 行も変わらない
+  //   SFX_REMOVE … 効果音を除く。2 周以上の録音を周期で重ね、周回ごとに違うフレームを多数決で置き換える
+  //   LAG_FIX    … 処理落ちを詰める。音楽の定期書き込みが止まったフレームを詰める(書き込みは次のフレームへ)
+  const CAPTURE_DEFAULTS = { SFX_REMOVE: false, LAG_FIX: false };
+  const CAPTURE_KEYS = Object.keys(CAPTURE_DEFAULTS);
+  MML.Convert.CAPTURE_DEFAULTS = CAPTURE_DEFAULTS;
+  MML.Convert.CAPTURE_KEYS = CAPTURE_KEYS;
   MML.Convert.PART_ORDER_VALUES = PART_ORDER_VALUES;
   MML.Convert.CHANNEL_ORDER_VALUES = CHANNEL_ORDER_VALUES;
   MML.Convert.BARS_PER_LINE_MAX = BARS_PER_LINE_MAX;
@@ -25105,9 +25120,9 @@
   // options.cmd(部分指定可)を全キー揃った正規形にする。省略キーは faithful 既定
   // (DPCMキーは DPCM_DEFAULTS)。
   MML.Convert.normalizeCmd = function (cmd) {
-    const out = Object.assign({}, DPCM_DEFAULTS, LAYOUT_DEFAULTS, CHIP_DEFAULTS, PRESETS.faithful);
+    const out = Object.assign({}, DPCM_DEFAULTS, LAYOUT_DEFAULTS, CAPTURE_DEFAULTS, CHIP_DEFAULTS, PRESETS.faithful);
     if (cmd && typeof cmd === 'object') {
-      for (const k of [...CMD_KEYS, ...SHAPE_KEYS]) if (cmd[k] != null) out[k] = !!cmd[k];
+      for (const k of [...CMD_KEYS, ...SHAPE_KEYS, ...CAPTURE_KEYS]) if (cmd[k] != null) out[k] = !!cmd[k];
       // 数値は文字列でも受ける(localStorage/JSON経由やUIのselect値が'14'等になるため)
       if (cmd.DMC_RATE != null) {
         const v = parseInt(cmd.DMC_RATE, 10);

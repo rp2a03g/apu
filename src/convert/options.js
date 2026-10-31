@@ -225,6 +225,15 @@
   const LAYOUT_KEYS = Object.keys(LAYOUT_DEFAULTS);
   MML.Convert.LAYOUT_DEFAULTS = LAYOUT_DEFAULTS;
   MML.Convert.LAYOUT_KEYS = LAYOUT_KEYS;
+  // 録音の補正(2026-11-01、src/vgm/vgmClean.js)。ゲームを遊びながら録った VGM 向けで、VGM 経路だけで効く。
+  // プリセットには含めない(出力の書式と同じ扱い)。既定はどちらも OFF: 効果音・処理落ちは録音の本体
+  // (DESIGN-CAPTURE.md P-6)。OFF のときは VGM のバイト列に触らないので従来の変換結果と 1 行も変わらない
+  //   SFX_REMOVE … 効果音を除く。2 周以上の録音を周期で重ね、周回ごとに違うフレームを多数決で置き換える
+  //   LAG_FIX    … 処理落ちを詰める。音楽の定期書き込みが止まったフレームを詰める(書き込みは次のフレームへ)
+  const CAPTURE_DEFAULTS = { SFX_REMOVE: false, LAG_FIX: false };
+  const CAPTURE_KEYS = Object.keys(CAPTURE_DEFAULTS);
+  MML.Convert.CAPTURE_DEFAULTS = CAPTURE_DEFAULTS;
+  MML.Convert.CAPTURE_KEYS = CAPTURE_KEYS;
   MML.Convert.PART_ORDER_VALUES = PART_ORDER_VALUES;
   MML.Convert.CHANNEL_ORDER_VALUES = CHANNEL_ORDER_VALUES;
   MML.Convert.BARS_PER_LINE_MAX = BARS_PER_LINE_MAX;
@@ -316,9 +325,9 @@
   // options.cmd(部分指定可)を全キー揃った正規形にする。省略キーは faithful 既定
   // (DPCMキーは DPCM_DEFAULTS)。
   MML.Convert.normalizeCmd = function (cmd) {
-    const out = Object.assign({}, DPCM_DEFAULTS, LAYOUT_DEFAULTS, CHIP_DEFAULTS, PRESETS.faithful);
+    const out = Object.assign({}, DPCM_DEFAULTS, LAYOUT_DEFAULTS, CAPTURE_DEFAULTS, CHIP_DEFAULTS, PRESETS.faithful);
     if (cmd && typeof cmd === 'object') {
-      for (const k of [...CMD_KEYS, ...SHAPE_KEYS]) if (cmd[k] != null) out[k] = !!cmd[k];
+      for (const k of [...CMD_KEYS, ...SHAPE_KEYS, ...CAPTURE_KEYS]) if (cmd[k] != null) out[k] = !!cmd[k];
       // 数値は文字列でも受ける(localStorage/JSON経由やUIのselect値が'14'等になるため)
       if (cmd.DMC_RATE != null) {
         const v = parseInt(cmd.DMC_RATE, 10);

@@ -654,27 +654,9 @@
 
   // ---------------------------------------------------------------------------
   // コマンド長(オペコードの後に続くバイト数)。可変長(0x67)と特別扱い(0x64等)は switch 側。
+  // 表の実体は src/vgm/vgmHeader.js VGM.operandLength(録音補正 vgmClean.js と共用)
   // ---------------------------------------------------------------------------
-  function operandLength(op) {
-    if (op >= 0x30 && op <= 0x3F) return 1;
-    if (op >= 0x40 && op <= 0x4E) return 2;
-    if (op === 0x4F || op === 0x50) return 1;
-    if (op >= 0x51 && op <= 0x5F) return 2;
-    if (op === 0x61) return 2;
-    if (op === 0x62 || op === 0x63 || op === 0x66) return 0;
-    if (op === 0x64) return 3;
-    if (op === 0x68) return 11;
-    if (op >= 0x70 && op <= 0x8F) return 0;
-    if (op === 0x90 || op === 0x91) return 4;
-    if (op === 0x92) return 5;
-    if (op === 0x93) return 10;
-    if (op === 0x94) return 1;
-    if (op === 0x95) return 4;
-    if (op >= 0xA0 && op <= 0xBF) return 2;
-    if (op >= 0xC0 && op <= 0xDF) return 3;
-    if (op >= 0xE0 && op <= 0xFF) return 4;
-    return -1; // 0x00-0x2F, 0x60, 0x65, 0x69-0x6F, 0x96-0x9F: 未定義
-  }
+  function operandLength(op) { return MML.VGM.operandLength(op); }
 
   class VgmPlayer {
     /**
