@@ -4949,6 +4949,8 @@
       }
       if (handle) {
         try {
+          // 既存ファイルを選んだなら、その中身を版履歴へ残してから上書きする(新規作成なら空で何も残らない)
+          if (MML.UI.MmlHistory) await MML.UI.MmlHistory.beforeOverwrite(handle, null);
           const writable = await handle.createWritable();
           await writable.write(new Blob([text], { type: 'text/plain;charset=utf-8' }));
           await writable.close();
@@ -5064,6 +5066,24 @@
       onStateChange: render,
       // エディタ側に未保存の変更があるか。openMmlTextFile/saveMmlFileと同じ基準を使う
       isDirty: () => lastSyncedMmlText !== null && mmlSourceEl.value !== lastSyncedMmlText,
+    });
+
+    // 版履歴(src/ui/mmlHistory.js): 上書き前の版と編集中の下書きをブラウザ側に控え、鍵盤表示の
+    // ファイル情報ペインから戻せる。戻した本文はディスクと一致しないので同期は切る(黙って上書きしない)
+    MML.UI.MmlHistory.init({
+      getText: () => mmlSourceEl.value,
+      getName: () => FileSync.fileName() || currentMmlFileName,
+      isSynced: () => lastSyncedMmlText !== null && mmlSourceEl.value === lastSyncedMmlText,
+      onRestore: (text, entry) => {
+        const name = FileSync.fileName();
+        if (name) FileSync.detach();
+        mmlSourceEl.value = text;
+        mmlSourceEl.dispatchEvent(new Event('input'));
+        prepareMmlStream(true);
+        mmlFileStatus(T('履歴の版をエディタへ戻しました ({time}, {n}バイト)。まだ保存はしていません。',
+          { time: new Date(entry.time).toLocaleString(), n: entry.bytes }) +
+          (name ? '\n' + T('{file} との同期はやめました。次の「保存」は名前を付けて保存になります。', { file: name }) : ''), 'ok');
+      },
     });
 
     if (watchEl) {
@@ -6219,6 +6239,7 @@
         }
       }
       pasteBefore = null;
+      MML.UI.MmlHistory.touch(); // 入力が止まって30秒後に下書きを版履歴へ
       clearTimeout(dpcmRestoreTimer);
       dpcmRestoreTimer = setTimeout(async () => {
         await restoreDpcmSamples(mmlSourceEl.value);
@@ -10112,11 +10133,13 @@
     function syncKeyboardFileInfo(format) {
       if (!keyboardDisplay.setFileInfo) return;
       const title = FORMAT_INFO_TITLE[format];
-      if (!title) { keyboardDisplay.setFileInfo('', []); return; }
+      const history = MML.UI.MmlHistory.element(); // MMLの版履歴(常に一番下。サウンドファイルを開いていなくても出す)
+      if (!title) { keyboardDisplay.setFileInfo('ファイル情報', [history]); return; }
       const nodes = [
         archiveBarEl,                                        // zip/7zのファイル名(開いている時だけ表示)
         document.getElementById(format + 'FileHeader'),
         document.getElementById(format + 'FileStatus'),
+        history,
       ];
       keyboardDisplay.setFileInfo(title, nodes);
     }
@@ -10128,6 +10151,7 @@
       });
       syncKeyboardFileInfo(format);
     }
+    syncKeyboardFileInfo('none'); // 起動直後: サウンドファイルは無いがMMLの版履歴は出す
 
     // サウンドファイルを開いたら鍵盤表示を出す(旧「サウンドファイルを開く」ウィンドウの
     // 代わり。ヘッダ情報も再生もここに集まっている)。トグルボタンのclick()を使わない理由は

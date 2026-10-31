@@ -246,6 +246,26 @@
     '外部ファイルとの同期をやめました。もう一度同期するには「開く」でファイルを選ぶか、MMLファイルをウィンドウへドロップしてください。':
       'Stopped following the file. To start again, pick it with Open or drop an MML file onto this window.',
     '書き込みが許可されなかったため保存できませんでした。': 'Could not save because write permission was denied.',
+    // ---- MMLの版履歴 (src/ui/mmlHistory.js) ----
+    '前の版': 'Previous versions',
+    '上書き保存の前にあった本文と、編集中の下書きをブラウザが控えたもの。ディスク上のファイルには何も足しません':
+      'Copies the browser keeps of what the file held before each overwrite, plus drafts while you edit. Nothing is added to the file on disk',
+    '(名前なし)': '(untitled)',
+    '(今のファイル)': '(current file)',
+    'まだ版がありません。上書き保存の直前の本文と、入力が止まって30秒後の下書きがここに溜まります。':
+      'No versions yet. The text a save overwrites, and a draft taken 30 s after you stop typing, will pile up here.',
+    '保存前の版': 'Before save',
+    '戻す前の本文': 'Before restore',
+    '下書き': 'Draft',
+    '{n}バイト': '{n} bytes',
+    'エディタへ戻す': 'Restore to editor',
+    'この版をエディタへ入れます。今の本文も「戻す前の本文」として履歴に残り、外部ファイルとの同期は切れます(黙って上書きしないため)':
+      'Puts this version into the editor. The current text is kept as "Before restore", and the file is no longer followed (so nothing is overwritten silently)',
+    'この版を履歴から消す': 'Delete this version from the history',
+    '履歴の版をエディタへ戻しました ({time}, {n}バイト)。まだ保存はしていません。':
+      'Restored a version from the history ({time}, {n} bytes). It is not saved yet.',
+    '{file} との同期はやめました。次の「保存」は名前を付けて保存になります。':
+      '{file} is no longer being followed. The next Save will ask for a file name.',
     '接続中の {file} とは中身が大きく違います（共通する行は {pct}%）。この内容で {file} を上書き保存しますか？':
       'This text differs a lot from the file you are following, {file} (only {pct}% of the lines match). Overwrite {file} with it?',
     '上書き保存をやめました。別の名前で保存するには Ctrl+Shift+S（名前を付けて保存）か、×で同期を切ってから保存してください。':

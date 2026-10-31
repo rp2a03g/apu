@@ -2781,6 +2781,29 @@ button.secondary {
   color: var(--text-secondary);
   padding: 2px 0;
 }
+/* MMLの版履歴(src/ui/mmlHistory.js)。ファイル情報ペインの一番下に常駐 */
+.mml-history { font-size: 11px; padding: 2px 0; }
+.mml-history-head { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.mml-history-title { color: var(--text-secondary); white-space: nowrap; }
+.mml-history-select { font-size: 11px; max-width: 60%; min-width: 0; }
+.mml-history-list { max-height: 160px; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
+.mml-history-empty { color: var(--text-secondary); padding: 2px 0; }
+.mml-history-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-raised);
+}
+.mml-history-row--saved { border-left: 3px solid var(--accent); }
+.mml-history-meta { white-space: nowrap; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.mml-history-headline { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, monospace); }
+.mml-history-restore, .mml-history-delete { font-size: 11px; padding: 1px 6px; }
+.mml-history-delete { padding: 1px 4px; color: var(--text-secondary); }
+
 /* ヘッダ情報とログ(.output)。ウィンドウ時代の大きな最小高さ/余白は帯には合わないので詰める */
 .kbd-fileinfo .output {
   flex: none;

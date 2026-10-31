@@ -4867,7 +4867,9 @@
       //   flex-shrinkが効く箱なので、ch数の多い曲(VGMのNamco System 2で33行など)で
       //   一覧が縦に溢れると、見出し1行ぶんの高さごと0まで潰されて消えてしまう
       //   (「畳むと畳むボタンの行まで消える」不具合報告 2026-09-12)
-      if (collapsed || !(this._fileInfoNodes || []).length) { fi.style.flex = 'none'; return; }
+      // data-kbd-fi-auto の要素だけ(MMLの版履歴だけ、src/ui/mmlHistory.js)のときも同じく中身なり
+      const fiNodes = (this._fileInfoNodes || []).filter(n => n);
+      if (collapsed || !fiNodes.length || fiNodes.every(n => n.hasAttribute && n.hasAttribute('data-kbd-fi-auto'))) { fi.style.flex = 'none'; return; }
       // 左右に並ぶ置き場は幅を、上下に積む置き場は高さをスプリッターの値で固定する
       const sideways = place === 'left' || place === 'right' || (place === 'bottom' && this._bigWaveBelow());
       fi.style.flex = 'none';

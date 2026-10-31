@@ -278,6 +278,8 @@
     if (!handle) return { ok: false };
     try {
       if (await ensurePermission(handle, 'readwrite') !== 'granted') return { ok: false, denied: true };
+      // 上書き前にディスクにあった本文を版履歴へ(src/ui/mmlHistory.js。戻せるようにする側の対策)
+      if (MML.UI.MmlHistory) await MML.UI.MmlHistory.beforeOverwrite(handle, baseText);
       const writable = await handle.createWritable();
       await writable.write(new Blob([text], { type: 'text/plain;charset=utf-8' }));
       await writable.close();
