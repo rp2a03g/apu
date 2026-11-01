@@ -1656,5 +1656,22 @@
     'カラー': 'Colour',
     'モノクロ(白地に黒)': 'Monochrome (black on white)',
     'エディタの区画に出すもの': 'Show in the editor pane',
+    // ライブ表示(ロール追記モード、src/ui/liveRoll.js / keyboard.js)
+    'ピアノロールの時間': 'Piano roll time axis',
+    '先読み (再生位置の先の音符が鍵盤へ流れてくる)': 'Look-ahead (upcoming notes flow toward the keyboard)',
+    '追記 (鳴った音符が鍵盤の縁から生えて遠ざかる)': 'Append (played notes grow from the keyboard edge and drift away)',
+    'ライブ入力 (外のエミュレータの書き込みをロールへ追記)': 'Live input (append an external emulator\'s register writes to the roll)',
+    'ライブ入力: 受信中': 'Live input: receiving',
+    'ライブ入力: 切断されました': 'Live input: disconnected',
+    'ライブ入力: 終了({frames} フレーム)': 'Live input: ended ({frames} frames)',
+    'ライブ入力: 接続できません({url})': 'Live input: cannot connect ({url})',
+    'ライブ入力: 接続中 {url}': 'Live input: connecting to {url}',
+    'ライブ入力: 接続しました。hello を待っています': 'Live input: connected, waiting for hello',
+    '写し再生': 'Replay',
+    '1行1メッセージのJSON: {"t":"hello","chips":[...],"fps":60.0988} のあと毎フレーム {"t":"f","w":[addr,val,...]}。未来は無いので、鳴った音符が鍵盤の縁から生えて遠ざかる表示になります': 'One JSON message per line: {"t":"hello","chips":[...],"fps":60.0988}, then {"t":"f","w":[addr,val,...]} every frame. There is no future, so played notes grow from the keyboard edge and drift away',
+    '試験': 'Test',
+    '再生中の曲の書き込みをその場で流す': 'Feed the playing song\'s writes live',
+    '先読み済みの writeLog を再生位置に合わせて1フレームずつ追記する(ライブ入力の無い環境で表示と速さを確かめる用)': 'Append the pre-captured writeLog frame by frame in step with the playback position (to check the display and its speed without a live source)',
+    '切断': 'Disconnect',
   });
 })(typeof window !== 'undefined' ? window : globalThis);

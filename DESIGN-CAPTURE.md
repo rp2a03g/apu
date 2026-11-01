@@ -204,6 +204,27 @@ VGM の NES APU に無いチップの書き込みを運ぶ。**標準部分は�
 - 自前エミュを待たずに試す道: Mesen の Lua はネットワーク許可があればローカルソケットへ書き込みを
   流せる(ライブラリの有無は未確認)。本ツールは file:// でも `ws://localhost` へ繋げるので、
   小さな中継を挟めばロールだけ先に動く。
+- 実装(2026-11-01、段階 5):
+  - 追記モード: 鍵盤表示のレイアウト設定「ピアノロールの時間」= 先読み / 追記。追記は時間軸を過去向きに
+    する(`makeRollGeom(..., past)` の span/tOf/absOf が向きを吸収し、音符・秒の線・セント偏差・ヒットテスト・
+    ドラッグシークが同じ式で動く)。ライブ入力中は設定に関わらず追記で描く。楽譜モードは先読みのまま。
+  - 逐次構築: `NoteTimelineBuilder`(src/ui/keyboard.js)。先読みの `buildNoteTimelineFromChannelFrames` は
+    これを全フレーム回すだけなので出力は従来と同じ(6 曲のタイムラインのハッシュが HEAD と一致)。live では
+    鳴り始めた瞬間に endSec=Infinity の音符を積み、鳴り終わりで確定する。VRC7/N163/FME-7 の履歴は
+    「1 フレーム進める関数」(stepper)に分け、曲全体の構築とライブ追記で同じ式を使う。
+  - 入力: `KeyboardDisplay.liveRollBegin({initRegs, initWrites}) → liveAppendFrame(writes)×n → liveRollEnd()`。
+    initWrites(INIT 時の書き込み列)は N163 の波形 RAM/ch 数のようにレジスタ像では運べない物を間接アクセス音源へ
+    流すため(無いと N163 の ch が出ない)。無いもの: APU エンベロープ実出力(音量はレジスタ値)、DPCM の打楽器同定。
+  - 入口(src/ui/liveRoll.js、鍵盤表示ヘッダの [LIVE]): WebSocket 受信(JSON テキスト。`{"t":"hello",chips,fps,init,initw}`
+    → 毎フレーム `{"t":"f","w":[addr,val,...],"r":[addr,...]}` → `{"t":"end"}`)と、試験用の写し再生
+    (再生中の NSF の先読み writeLog を再生位置に合わせて 1 フレームずつ追記)。中継の見本は
+    `tools/live/vgm-ws-relay.js`(NES の VGM を実時間で流す。最小の RFC 6455 サーバ入り)。
+  - 速さ: 追記 1 フレーム(書き込みの反映+抽出+音符の更新)は 10〜30µs、最大でも数 ms(ヘッドレス実測)。
+    ブラウザで追記+鍵盤/ロールの描画 1 回は中央値 0.4ms、最大 2.8ms(8 トラック・約 6000 音符、過去向き)。
+    WebSocket の中継からは 60 フレーム/秒で届く。
+  - 罠: ライブ表示の位置関数(monitorState.getPosition)は切断後も毎フレーム呼ばれる。切断で null に戻す
+    オブジェクトを参照すると monitorLoop の例外で全描画が永久停止する。鍵盤表示の setSource は渡した state を
+    複製するので、呼び出し側の state.totalFrames は増えない(フレーム数は `liveFrameCount()` で聞く)。
 
 ---
 
@@ -246,4 +267,4 @@ capture.js の writeLog、NsfReplayStreamPlayer。
 - 決めたこと: 器は VGM(P-1)、735 固定(P-2)、writeLog 一本(P-3)、除去は選択肢(P-6)、
   拡張は 0x67 ブロック(§3.3)、他機種は Mesen Lua + 既存 VGM 出力(§4)、自前エミュは後段(§7)。
 - 決めていないこと: 拡張ブロックの型番号の最終値(段階 1 で主要プレイヤーの読み飛ばしを確認して確定)、
-  ライブ表示の中継(ソケット)の要否、自前エミュの着手時期。
+  Mesen の Lua から直接ソケットへ流せるか(中継の形式は §6 で決めた)、自前エミュの着手時期。

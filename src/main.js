@@ -959,6 +959,7 @@
   // ロールタイムラインの受け口(全形式共通)。打楽器化したchのノートをドラム区画のノートへ置き換える
   function pushRollTimeline(timeline) {
     synthDrum.rawRoll = timeline;
+    if (liveRoll) return; // ライブ表示(追記)中は先読みのロールで上書きしない(liveRollBeginSession)
     keyboardDisplay.setRollTimeline(applySynthDrumToRoll(timeline));
     scheduleToneInventory(); // 音色一覧(使われている音色の目録)も同じ材料から組み直す
   }
@@ -2166,6 +2167,7 @@
 
   // chips: string[] 例 ['vrc6'] / [] = APUのみ
   function setMonitorSource(result, getPositionSeconds, chips) {
+    if (liveRoll && result !== liveRoll.state) liveRollEndSession('source'); // 別のソースが来たらライブ表示(追記)は終わり
     const addrSet = new Set();
     (result.regSnapshots || []).forEach((snap) => {
       Object.keys(snap).forEach((k) => addrSet.add(Number(k)));
@@ -2182,6 +2184,69 @@
     };
     keyboardDisplay.setSource(result, chips || []);
   }
+
+  // --- ライブ表示(ロール追記モード。DESIGN-CAPTURE.md §6、src/ui/liveRoll.js) ---
+  // 外のエミュレータ(Mesen 等)の書き込みを 1 フレームずつ受けて、鍵盤表示のロールへ追記する。
+  // 音はここでは出さない。鍵盤表示のソースを「伸びる writeLog」(liveRoll.state)に差し替え、
+  // 位置は積んだフレーム数×フレーム長(曲の秒)。先読みのロール(pushRollTimeline)は受けない。
+  let liveRoll = null;    // { state, chips, frameDur } 受信中/写し再生中だけ非null
+  let nsfLiveCap = null;  // 再生中の NSF の先読みキャプチャ {writeLog, initRegs, chips}(「試験: 写し再生」の材料)
+  const liveRollSession = new MML.UI.LiveRoll.LiveRollSession({
+    onBegin: (info) => liveRollBeginSession(info),
+    onFrame: (writes) => liveRollFrame(writes),
+    onEnd: (reason) => liveRollEndSession(reason),
+    onStatus: (text) => { liveRollApi.lastStatus = text; if (liveRollApi.onStatusChange) liveRollApi.onStatusChange(); },
+  });
+  function liveRollBeginSession(info) {
+    if (liveRoll) liveRollEndSession('restart');
+    const chips = (info.chips || []).filter(c => typeof c === 'string');
+    const fps = info.fps > 0 ? info.fps : MML.Emu.FRAME_RATE_NTSC;
+    const sampleRate = audioCtx ? audioCtx.sampleRate : 44100;
+    const samplesPerFrame = sampleRate / fps;
+    const state = { regSnapshots: [], writeLog: [], totalFrames: 0, samplesPerFrame, sampleRate, initRegs: info.initRegs || {} };
+    const frameDur = samplesPerFrame / sampleRate;
+    liveRoll = { state, chips, frameDur };
+    // ★getPosition は liveRoll が null に戻った後(切断後)も monitorLoop から毎フレーム呼ばれる。
+    //   liveRoll.frameDur を参照すると TypeError → monitorLoop の例外で全描画が永久停止する(実測で踏んだ)。
+    //   フレーム数は鍵盤表示が数える(setSource は state を複製するので state.totalFrames は増えない。これも実測で踏んだ)
+    setMonitorSource(state, () => keyboardDisplay.liveFrameCount() * frameDur, chips);
+    keyboardDisplay.liveRollBegin({ initRegs: info.initRegs || {}, initWrites: info.initWrites || null });
+    keyboardDisplay.setSourceInfo('live', info.name || 'LIVE');
+  }
+  function liveRollFrame(writes) {
+    if (!liveRoll) return;
+    keyboardDisplay.liveAppendFrame(writes);
+    if (monitorState && monitorState.regSnapshots === liveRoll.state.regSnapshots) monitorState.totalFrames = keyboardDisplay.liveFrameCount();
+  }
+  function liveRollEndSession(reason) {
+    if (!liveRoll) return;
+    console.debug('[liveRoll] end:', reason, keyboardDisplay.liveFrameCount(), 'frames');
+    liveRoll = null;
+    keyboardDisplay.liveRollEnd(); // タイムラインは残る(向きも次のソースまで追記のまま)
+    if (liveRollSession.active) liveRollSession.end(reason);
+  }
+  // 鍵盤表示ヘッダの LIVE ボタンのポップオーバーが使う操作
+  const liveRollApi = {
+    session: liveRollSession,
+    lastStatus: '',
+    onStatusChange: null,
+    connect: (url) => { MML.UI.LiveRoll.connectWs(url, liveRollSession); },
+    disconnect: () => { liveRollSession.end('end'); },
+    // 試験: 再生中の NSF の先読みキャプチャ(writeLog)を再生位置に合わせて1フレームずつ追記する
+    canReplay: () => !!(nsfLiveCap && activePlayer && activePlayer.isPlaying && typeof activePlayer.getPosition === 'function'),
+    replay: () => {
+      if (!liveRollApi.canReplay()) return;
+      const p = activePlayer, cap = nsfLiveCap;
+      MML.UI.LiveRoll.replay({
+        writeLog: cap.writeLog, initRegs: cap.initRegs, initWrites: cap.initWrites, chips: cap.chips, fps: MML.Emu.FRAME_RATE_NTSC, name: kbdSourceName || 'NSF',
+        clock: () => {
+          if (p !== activePlayer) { console.debug('[liveRoll] replay: player changed'); return null; }
+          if (!p.isPlaying) { console.debug('[liveRoll] replay: player stopped'); return null; } // 止めたら終わり
+          return Math.floor(p.getPosition() * MML.Emu.FRAME_RATE_NTSC); // 位置=曲の秒
+        },
+      }, liveRollSession);
+    },
+  };
 
   // --- MML再生連動ハイライト・追随スクロール ---
   // 「今光っている要素だけclassList付け外し」方式。以前は毎フレーム(60fps)ソース全文を
@@ -4171,6 +4236,8 @@
     refreshDrumPanel();
   };
 
+  keyboardDisplay.onLiveRoll = (anchorEl) => MML.UI.LiveRoll.togglePopover(anchorEl, liveRollApi);
+
   keyboardDisplay.onToMml = () => {
     // 今表示している形式の「MMLへ変換」ボタンを押す
     const id = SOUND_FORMAT_TOMML_BTN[kbdSourceKind];
@@ -6091,6 +6158,7 @@
     }, (done, total, regSnapshots, writeLog, n163Snapshots, initRegs, initWrites) => {
       if (myNsfRollToken !== nsfRollToken) return; // 曲切替/停止で無効化済み
       nsfLatestCap = { writeLog, initRegs, songNo }; // 完了時のドラムパッド台帳更新用
+      nsfLiveCap = { writeLog, initRegs, initWrites, chips: captureChips }; // ライブ表示の「試験: 写し再生」の材料
 
       if (!nsfPlaybackLoaded) {
         nsfPlaybackLoaded = true;

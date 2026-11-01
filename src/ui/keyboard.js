@@ -72,6 +72,7 @@
   //                  大波形は同じ帯(.kbd-below)に左右で並ぶ(方針 2026-09-10)
   // 既定値は従来の見た目(縦・下・1列・まとめて)+ファイル情報は自動。localStorageに永続化する。
   const LAYOUT_STORAGE_KEY = 'mml_keyboardLayout_v1';
+  // rollTimeDir:     'future' = 先読み(再生位置の先を描く) / 'past' = 追記(鳴った音符が縁から生えて遠ざかる)
   // rollView:        'roll' = ピアノロール(鍵盤の音程軸に音符の棒)
   //                  'score' = 楽譜(音程軸を五線に置き換え、時間軸はロールと同じ実時間比例。MMLの
   //                            コンパイル結果から作る表記モデル(src/score/notation.js)を setScore() で
@@ -79,13 +80,13 @@
   //                            作業計画「フェーズ外: 楽譜出力」段階3、2026-09-16)
   // 既定(2026-09-19 方針変更で変更): ロール横向き・右置き・一覧多段・1つの鍵盤・ピアノロール・ファイル情報自動。
   // 保存済みの設定がある人はそちらが優先(loadLayoutSettings)
-  const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'horizontal', rollPlacement: 'right', listColumns: 'auto', rollLanes: 'all', fileInfoPlacement: 'auto', rollView: 'roll' });
+  const LAYOUT_DEFAULTS = Object.freeze({ rollOrientation: 'horizontal', rollPlacement: 'right', listColumns: 'auto', rollLanes: 'all', fileInfoPlacement: 'auto', rollView: 'roll', rollTimeDir: 'future' });
   // スマホ向けの画面(src/ui/mobileShell.js、html.ui-mobile)では既定と保存先を分ける(2026-09-23)。
   // 既定はロール縦向き(Synthesia式。狭い画面では音符が上から降ってくる向きのほうが見やすい)・
   // 「一覧の右」(=親いっぱいに広がる fill 配置。スマホ側の CSS が一覧とロールを切り替えて見せる)・1列。
   // 保存先も別キーなので、スマホで変えても PC の設定は変わらない
   const LAYOUT_STORAGE_KEY_MOBILE = 'mml_keyboardLayout_mobile_v1';
-  const LAYOUT_DEFAULTS_MOBILE = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'right', listColumns: 'single', rollLanes: 'all', fileInfoPlacement: 'top', rollView: 'roll' });
+  const LAYOUT_DEFAULTS_MOBILE = Object.freeze({ rollOrientation: 'vertical', rollPlacement: 'right', listColumns: 'single', rollLanes: 'all', fileInfoPlacement: 'top', rollView: 'roll', rollTimeDir: 'future' });
   function isMobileUi() { return !!(MML.Device && MML.Device.uiMode && MML.Device.uiMode() === 'mobile'); }
   function layoutDefaults() { return isMobileUi() ? LAYOUT_DEFAULTS_MOBILE : LAYOUT_DEFAULTS; }
   function layoutStorageKey() { return isMobileUi() ? LAYOUT_STORAGE_KEY_MOBILE : LAYOUT_STORAGE_KEY; }
@@ -98,6 +99,10 @@
     rollLanes: ['all', 'perChannel'],
     fileInfoPlacement: ['auto', 'top', 'bottom', 'left', 'right'],
     rollView: ['roll', 'score'],
+    // 時間の向き: 'future' = 従来(再生位置の先の音符が鍵盤へ向かって流れてくる)
+    //            'past'   = 追記(鳴った音符が鍵盤の縁から生えて遠ざかる。未来は描かない)。
+    //            ライブ表示(liveRollBegin)は未来を持たないので設定に関わらず 'past' で描く
+    rollTimeDir: ['future', 'past'],
   });
   // チャンネルごとのレーン: そのchが曲全体で鳴らす音域(+使っているドラムレーン)だけを
   // 音程軸いっぱいに表示する(_updateLaneRanges)。音域はchごとに違うので拡大率もchごとに違い、
@@ -120,6 +125,9 @@
   // とは別軸の「注目だけ」の仕組みで、PCM多chがドラムを叩いていて音符が重なるときに
   // 「今どの行を見ているか」を切り分けるために使う。
   const SPOTLIGHT_DIM_ALPHA = 0.16;
+  // ライブ表示(追記モード): チャンネルごとのレーン表示の音域を更新する最短間隔(ms)。
+  // _updateLaneRanges は全音符を走査するので、新しい音符が始まるたびには呼ばない
+  const LIVE_RANGE_MS = 500;
   // ── ドラム区画(音程ロールと同じcanvasの低音側に置く) ─────────────
   // 打楽器として鳴っているサンプルPCM(pcmSampleRow の drumKey)は音程軸に載せられないので、
   // 音程鍵盤(MIDI_MIN=C1)より低音側に「1レーン=1サンプル」の区画を作ってそこへ置く。
@@ -212,8 +220,11 @@
   // nDrum: ドラム区画のレーン数(0=区画なし)。音程軸は [ドラム区画][音程鍵盤] の並びで、
   // 全体の長さは (nDrum * DRUM_LANE_WHITE + TOTAL_WHITE) 白鍵ぶん。keyX()が返す音程側の
   // 座標には drumOff(区画の幅px)を足して使う。
-  function makeRollGeom(orientation, W, H, visibleWhite, nDrum) {
+  // past: 時間軸の向き。false=従来(t=再生位置からの未来方向の秒)、true=追記モード(t=再生位置からの
+  //   過去方向の秒)。描画側は span()/tOf() を通せば向きを意識せずに済む。
+  function makeRollGeom(orientation, W, H, visibleWhite, nDrum, past) {
     const vertical = orientation !== 'horizontal';
+    past = !!past;
     const pitchLen = vertical ? W : H;
     const timeLen = vertical ? H : W;
     const drumUnits = (nDrum || 0) * DRUM_LANE_WHITE;
@@ -223,8 +234,22 @@
     const windowSec = timeLen / rollPxPerSec();
     const tPx = (sec) => (sec / windowSec) * timeLen;
     return {
-      vertical, W, H, pitchLen, timeLen, wk, bk, windowSec, tPx,
+      vertical, W, H, pitchLen, timeLen, wk, bk, windowSec, tPx, past,
       nDrum: nDrum || 0, drumOff: drumUnits * wk, drumLaneW: DRUM_LANE_WHITE * wk,
+      // 曲の絶対秒 → 時間軸の相対秒(窓の中の位置。向きを吸収)
+      tOf(absSec, pos) { return past ? pos - absSec : absSec - pos; },
+      // 時間軸の相対秒 → 曲の絶対秒(ヒットテスト/ドラッグシークの逆変換)
+      absOf(t, pos) { return past ? pos - t : pos + t; },
+      // 区間 [absStart, absEnd) が窓に掛かる部分を時間軸の相対秒 {t0 <= t1} で返す(掛からなければ null)。
+      // 終端が未定(ライブの発音中=endSec が Infinity)でも扱える
+      span(absStart, absEnd, pos) {
+        if (past) {
+          if (absStart >= pos || absEnd <= pos - windowSec) return null;
+          return { t0: Math.max(0, pos - absEnd), t1: Math.min(windowSec, pos - absStart) };
+        }
+        if (absEnd <= pos || absStart >= pos + windowSec) return null;
+        return { t0: Math.max(0, absStart - pos), t1: Math.min(windowSec, absEnd - pos) };
+      },
       // 音程軸[pLo, pLo+pSize) × 時間軸[tLo, tHi) の矩形をcanvas座標{x,y,w,h}へ。
       // minT: 時間軸方向の最小サイズ(px)。短い音符も見えるように下限を設ける用途
       rect(pLo, pSize, tLo, tHi, minT) {
@@ -2082,17 +2107,34 @@
   // freqSeq: DESIGN-PITCH.md Phase 0のセント偏差オーバーレイ用。ノート区間内フレーム毎の
   // 生周波数(Hz)をvolSeqと同じ「区切らず積む」考え方で保持する(丸め後のmidiは一定のまま、
   // 実際の周波数だけがビブラート等で揺れている様子を後で細線描画するため)。
-  function buildNoteTimelineFromChannelFrames(getChannelsAtFrame, totalFrames, frameDur) {
-    const tracks = new Map(); // id → { id, color, notes:[], cur:{startFrame,midi,drumKey,volQ,freqs}|null }
-    // ドラム区画のレーン割当はここではやらない。RollBuild.vgm はチップごとに
-    // この関数を別々に呼んでタイムラインを連結するので、ここで割り当てると
-    // 2つのサンプルチップを積んだVGMで両方が「レーン0」から番号を振ってしまう。
-    // noteにはdrumKeyだけ載せ、曲全体が揃った受け取り側で一括して割り当てる
-    // (KeyboardDisplay._rebuildDrumLanes → MML.Convert.DrumMap.build)。
-    const TK = MML.Convert && MML.Convert.ToneKey; // 音色キー(音色一覧パネル用。roll-builders.js toneOf と同じ役割)
-    const pushNote = (track, endSec) => {
+  // 1フレームずつ feed() してタイムラインを育てる構築器。buildNoteTimelineFromChannelFrames は
+  // これを全フレームぶん回して finish() するだけ(出力は分離前と同じ形)。
+  // live=true(追記モード、ライブ表示): タイムライン配列を最初から持ち、発音が始まった瞬間に
+  //   endSec=Infinity・open=true の音符を積む(鳴り終わったら endSec を確定して open を外す)。
+  //   描画は timeline() が返す配列をそのまま読み続けられる(配列は差し替えない)。
+  //   ★live では音符の freqSeq は構築器の作業配列そのもの(毎フレーム伸びる)を指す。
+  class NoteTimelineBuilder {
+    constructor(frameDur, opts) {
+      this.frameDur = frameDur;
+      this.live = !!(opts && opts.live);
+      this.tracks = new Map(); // id → { id, color, notes:[], tones:{}, cur:{startFrame,midi,drumKey,volQ,freqs}|null }
+      this.TK = MML.Convert && MML.Convert.ToneKey; // 音色キー(音色一覧パネル用。roll-builders.js toneOf と同じ役割)
+      this.lastFrame = -1;
+      this.noteOpened = 0; // live: 始まった音符の数(呼び出し側がレーン音域の更新時期を決めるのに使う)
+      if (this.live) { this._live = []; this._live.frameDur = frameDur; }
+    }
+    // 発音の終端。live では開いていた音符の endSec を確定する
+    _closeNote(track, endSec) {
       const c = track.cur;
-      const note = { startSec: c.startFrame * frameDur, endSec, midi: c.midi,
+      if (this.live && c.note) {
+        const note = c.note;
+        note.endSec = endSec;
+        delete note.open;
+        if (c.bandLo) { note.freqLoSeq = c.bandLo; note.freqHiSeq = c.bandHi; }
+        track.cur = null;
+        return;
+      }
+      const note = { startSec: c.startFrame * this.frameDur, endSec, midi: c.midi,
                      vol: c.volQ / ROLL_VOL_LEVELS, freqSeq: c.freqs };
       // 速い変調(FM)の帯。1フレームでも帯があった音符にだけ載せる(無い音符は従来と同じ形)
       if (c.bandLo) { note.freqLoSeq = c.bandLo; note.freqHiSeq = c.bandHi; }
@@ -2105,12 +2147,18 @@
       if (c.sampleRow) note.sampleRow = true;
       track.notes.push(note);
       track.cur = null;
-    };
-    for (let f = 0; f < totalFrames; f++) {
-      const channels = getChannelsAtFrame(f) || [];
-      for (const ch of channels) {
+    }
+    // フレーム f のチャンネル一覧(extractChannels の形)を1枚積む
+    feed(channels, f) {
+      const TK = this.TK, tracks = this.tracks, frameDur = this.frameDur;
+      this.lastFrame = f;
+      for (const ch of (channels || [])) {
         let track = tracks.get(ch.id);
-        if (!track) { track = { id: ch.id, color: ch.color, notes: [], tones: {}, cur: null }; tracks.set(ch.id, track); }
+        if (!track) {
+          track = { id: ch.id, color: ch.color, notes: [], tones: {}, cur: null };
+          tracks.set(ch.id, track);
+          if (this.live) this._live.push(track);
+        }
         track.color = ch.color;
         // laneGroup: ロールの区画キー(PSF のトラックモード)。laneCopy: 複製パート(点線で描く)
         if (ch.laneGroup !== undefined) { track.laneGroup = ch.laneGroup; track.laneCopy = !!ch.laneCopy; }
@@ -2139,7 +2187,7 @@
         //   サンプルPCMも減衰はサンプル自身が持つので、割ると1打点が数十の細切れになり
         //   パッドの打点数も実トリガー数と食い違う(実測: Super C 126トリガー→1707ノート)
         if (cur && (!sounding || midi !== cur.midi || drumKey !== cur.drumKey || drumSeq !== cur.drumSeq || (!drumKey && volQ !== cur.volQ))) {
-          pushNote(track, f * frameDur);
+          this._closeNote(track, f * frameDur);
         }
         if (sounding && !track.cur) {
           // 音色キーは発音開始の瞬間だけ引く(毎フレーム引くと重い。ノート途中の音色変化は次のノートで拾う)
@@ -2150,6 +2198,17 @@
           }
           track.cur = { startFrame: f, midi, drumKey, drumSeq, volQ, freqs: [], tone,
                         sampleRow: !!ch.sample && !drumKey };
+          if (this.live) {
+            // 追記: 鳴り始めた瞬間に「終端未定」の音符を積む(描画は endSec=Infinity を窓の端まで伸ばす)
+            const note = { startSec: f * frameDur, endSec: Infinity, open: true, midi,
+                           vol: volQ / ROLL_VOL_LEVELS, freqSeq: track.cur.freqs };
+            if (drumKey) note.drumKey = drumKey;
+            if (tone) note.tone = tone;
+            if (track.cur.sampleRow) note.sampleRow = true;
+            track.cur.note = note;
+            track.notes.push(note);
+            this.noteOpened++;
+          }
         }
         if (track.cur) {
           // ハードウェア変調つきのch(今はFDSだけ): 音名(midi)は搬送波のまま据え置き、
@@ -2165,14 +2224,31 @@
         }
       }
     }
-    const totalSec = totalFrames * frameDur;
-    const result = [];
-    for (const track of tracks.values()) {
-      if (track.cur) pushNote(track, totalSec);
-      result.push({ id: track.id, color: track.color, notes: track.notes, tones: track.tones });
+    // live: 育てている配列(差し替えない)
+    timeline() { return this._live; }
+    // 開いている音符を totalFrames の時点で閉じ、完成したタイムラインを返す
+    finish(totalFrames) {
+      const totalSec = totalFrames * this.frameDur;
+      for (const track of this.tracks.values()) if (track.cur) this._closeNote(track, totalSec);
+      if (this.live) return this._live;
+      const result = [];
+      for (const track of this.tracks.values()) {
+        result.push({ id: track.id, color: track.color, notes: track.notes, tones: track.tones });
+      }
+      result.frameDur = this.frameDur; // セント偏差オーバーレイ描画時にfreqSeqのフレーム間隔を復元するため
+      return result;
     }
-    result.frameDur = frameDur; // セント偏差オーバーレイ描画時にfreqSeqのフレーム間隔を復元するため
-    return result;
+  }
+
+  function buildNoteTimelineFromChannelFrames(getChannelsAtFrame, totalFrames, frameDur) {
+    // ドラム区画のレーン割当はここではやらない。RollBuild.vgm はチップごとに
+    // この関数を別々に呼んでタイムラインを連結するので、ここで割り当てると
+    // 2つのサンプルチップを積んだVGMで両方が「レーン0」から番号を振ってしまう。
+    // noteにはdrumKeyだけ載せ、曲全体が揃った受け取り側で一括して割り当てる
+    // (KeyboardDisplay._rebuildDrumLanes → MML.Convert.DrumMap.build)。
+    const b = new NoteTimelineBuilder(frameDur);
+    for (let f = 0; f < totalFrames; f++) b.feed(getChannelsAtFrame(f) || [], f);
+    return b.finish(totalFrames);
   }
 
   // ── 間接アクセス音源の内部状態再構築 ─────────────────────────
@@ -2206,10 +2282,13 @@
     return any ? out : null;
   }
 
-  function buildVrc7Snapshots(writeLog) {
+  // ラッチ式の間接アクセス音源(VRC7/N163/FME-7)は writeLog を頭から順に流さないと状態が出ないので、
+  // 「書き込み列を1フレームぶん流してそのフレームのスナップショットを返す」関数(stepper)に分け、
+  // 曲全体の構築(writeLog.map)とライブ追記(liveAppendFrame: 伸びる writeLog の末尾1枚)の両方で同じ式を使う
+  function makeVrc7Stepper() {
     const regs = new Uint8Array(64);
     let latch = 0;
-    return writeLog.map(writes => {
+    return (writes => {
       for (const w of writes) {
         if (w.addr === 0x9010) latch = w.value & 0x3F;
         else if (w.addr === 0x9030) regs[latch] = w.value;
@@ -2227,19 +2306,26 @@
       });
     });
   }
+  function buildVrc7Snapshots(writeLog) { return writeLog.map(makeVrc7Stepper()); }
 
   // 事前キャプチャ経路: writeLog($F800/$4800)から128バイトRAMを復元し、
   // フレームごとに Emu.snapshotN163() でスナップショット化する。
-  function buildN163Snapshots(writeLog) {
+  function makeN163Stepper() {
     const ram = new Uint8Array(128);
     let latch = 0, autoInc = false;
-    let maxNumCh = 1;
-    const frames = writeLog.map(writes => {
+    return (writes) => {
       for (const w of writes) {
         if (w.addr === 0xF800) { latch = w.value & 0x7F; autoInc = !!(w.value & 0x80); }
         else if (w.addr === 0x4800) { if (!w.read) ram[latch] = w.value; if (autoInc) latch = (latch + 1) & 0x7F; } // read:true=読み飛ばし(ポインタだけ進む)
       }
-      const snap = MML.Emu.snapshotN163(ram);
+      return MML.Emu.snapshotN163(ram);
+    };
+  }
+  function buildN163Snapshots(writeLog) {
+    const step = makeN163Stepper();
+    let maxNumCh = 1;
+    const frames = writeLog.map(writes => {
+      const snap = step(writes);
       if (snap.numCh > maxNumCh) maxNumCh = snap.numCh;
       return snap;
     });
@@ -2261,11 +2347,11 @@
     return frames;
   }
 
-  function buildFme7Snapshots(writeLog) {
+  function makeFme7Stepper() {
     const regs = new Uint8Array(16);
     let latch = 0;
     regs[7] = 0x38;
-    return writeLog.map(writes => {
+    return (writes) => {
       for (const w of writes) {
         if (w.addr === 0xC000) latch = w.value & 0xF;
         else if (w.addr === 0xE000) regs[latch] = w.value;
@@ -2282,8 +2368,9 @@
         return { freq, vol, rawVol, noise: noiseOn,
                  active: toneOn ? (vol > 0 && freq > 0) : (noiseOn && vol > 0) };
       });
-    });
+    };
   }
+  function buildFme7Snapshots(writeLog) { return writeLog.map(makeFme7Stepper()); }
 
   // ── 鍵盤描画 ────────────────────────────────────────────────
 
@@ -3084,6 +3171,8 @@
       this.onSourceListRequest = null;  // () => { name, listName?, items:[string]|null, index } | null  表示名(アーカイブなら曲名)と曲一覧(main.js)
       this.onSourceSelect = null;       // (index) => void  ファイル名の一覧から曲を選んだとき
       this._rollLastDrawnPos = 0;       // _renderRoll()が最後に描いた曲内秒(ドラッグ開始位置の基準)
+      this._liveRoll = null;            // ライブ表示(追記モード)の構築器一式(liveRollBegin)。非nullの間は過去向きで描く
+      this._rollPastKeep = false;       // ライブ表示が終わった後も次のソースまで過去向きのままにする
       this._pendingSelectionReset = false; // reset()が立てるフラグ。次に実データでチャンネル一覧が
                                             // 判明した時(setSource()/updateSpcVoices())、大波形の選択
                                             // (_selectedId)がそこにも存在すれば維持・無ければ一番若い
@@ -3275,6 +3364,10 @@
       const openBtn = this._buildProxyBtn('kbd-open-btn', T('ファイルを開く'),
         '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.5c0-.83.67-1.5 1.5-1.5h3.4l1.4 1.6H16c.83 0 1.5.67 1.5 1.5v7c0 .83-.67 1.5-1.5 1.5H4c-.83 0-1.5-.67-1.5-1.5v-8.6Z"/></svg>',
         () => { if (this.onOpenFile) this.onOpenFile(); });
+      // ライブ入力(外のエミュレータの書き込みをロールへ追記。src/ui/liveRoll.js のポップオーバー)
+      const liveBtn = this._buildProxyBtn('kbd-live-btn', T('ライブ入力 (外のエミュレータの書き込みをロールへ追記)'),
+        '<span class="kbd-tomml-text">LIVE</span>',
+        () => { if (this.onLiveRoll) this.onLiveRoll(liveBtn); });
       const toMmlBtn = this._buildProxyBtn('kbd-tomml-btn', T('MMLへ変換'),
         '<span class="kbd-tomml-text">to MML</span>',
         () => { if (this.onToMml) this.onToMml(); });
@@ -3286,7 +3379,7 @@
           const old = headerEl.querySelector(sel);
           if (old) old.remove();
         }
-        for (const sel of ['.kbd-open-btn', '.kbd-tomml-btn', '.kbd-repeat-btn', '.kbd-src-name']) {
+        for (const sel of ['.kbd-open-btn', '.kbd-tomml-btn', '.kbd-live-btn', '.kbd-repeat-btn', '.kbd-src-name']) {
           const old = headerEl.querySelector(sel);
           if (old) old.remove();
         }
@@ -3304,6 +3397,7 @@
         // 並びは [ファイルを開く][to MML][レイアウト](方針変更で to MML と レイアウトを入れ替え)
         headerEl.insertBefore(openBtn, titleEl || masterVolBar);
         headerEl.insertBefore(toMmlBtn, titleEl || masterVolBar);
+        headerEl.insertBefore(liveBtn, titleEl || masterVolBar);
         headerEl.insertBefore(layoutBtn, titleEl || masterVolBar);
         this._srcBadgeEl = document.createElement('span');
         this._srcBadgeEl.className = 'kbd-src-badge';
@@ -4452,7 +4546,7 @@
       const r = canvas.getBoundingClientRect();
       if (!r.width || !r.height) return null;
       const nDrum = (this._drumLanes || []).length;
-      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? (lane.visWhite || 0) : 0, nDrum);
+      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? (lane.visWhite || 0) : 0, nDrum, this._rollPast());
       // CSS表示サイズ → canvas内部解像度
       const cx = (clientX - r.left) * (canvas.width / r.width);
       const cy = (clientY - r.top) * (canvas.height / r.height);
@@ -4461,7 +4555,7 @@
       const t = g.vertical ? (g.H - cy) : cx;
       if (t < 0 || t > g.timeLen) return null;
       const pos = this._rollLastDrawnPos || 0;
-      const sec = pos + t / rollPxPerSec();
+      const sec = g.absOf(t / rollPxPerSec(), pos);
       const wkW = g.wk, bkW = g.bk;
       const offPx = lane ? (lane.offWhite || 0) * wkW : 0;
       const pitchOff = g.drumOff - offPx;
@@ -4577,7 +4671,7 @@
           if (v) body.scrollLeft = d.scroll0 - dx; else body.scrollTop = d.scroll0 - dy;
           return;
         }
-        const deltaSec = (v ? dy : -dx) / rollPxPerSec();
+        const deltaSec = (this._rollPast() ? -1 : 1) * (v ? dy : -dx) / rollPxPerSec();
         d.pos = Math.max(0, d.startPos + deltaSec);
         applySeek(d.pos, false);
         this._renderRoll(this._rollLastRawPosForDrag()); // 即座に追従して描く
@@ -5042,6 +5136,10 @@
           ['roll', T('ピアノロール')],
           ['score', T('楽譜 (五線、時間比例。MML再生のみ)')],
         ] },
+        { key: 'rollTimeDir', label: T('ピアノロールの時間'), options: [
+          ['future', T('先読み (再生位置の先の音符が鍵盤へ流れてくる)')],
+          ['past', T('追記 (鳴った音符が鍵盤の縁から生えて遠ざかる)')],
+        ] },
         { key: 'fileInfoPlacement', label: T('ファイル情報の置き場'), options: [
           ['auto', T('自動 (他の置き場に合わせる)')],
           ['top', T('チャンネル一覧の上')],
@@ -5171,6 +5269,7 @@
       this._extraSnaps.rf5c164Live = typeof result.getRf5c164 === 'function' ? result.getRf5c164 : null;
       this._extraSnaps.rf5c68Live = typeof result.getRf5c68 === 'function' ? result.getRf5c68 : null;
       this._lastDmc4011 = null; // 曲切替時にDMC書き込み検出をリセット
+      this._liveRoll = null; this._rollPastKeep = false; // ライブ表示(追記)はソースが変わったら終わり
       this._rollSongTimeBase = 0; // 曲切替時にピアノロールの経過時間もリセット
       this._rollLastRawPos = null;
       this._rollBaseWallMs = null;
@@ -5229,6 +5328,92 @@
       this._rebuildDrumLanes();
       this._updateLaneRanges();
     }
+
+    // ── ライブ表示(追記モード。DESIGN-CAPTURE.md §6) ──────────────────────────
+    // 入力は「伸びる writeLog」: 1フレームぶんの書き込み列 [{addr,value,read?}] を liveAppendFrame() で
+    // 末尾へ積むと、レジスタ像(regSnapshots)・間接アクセス音源の履歴(vrc7/n163/fme7)・ロールの
+    // タイムラインがその場で1フレームぶん伸びる。先読みも曲頭の重い解析も無い。
+    // 使い方: setSource({ regSnapshots: [], writeLog: [], totalFrames: 0, samplesPerFrame, sampleRate }, chips)
+    //   → liveRollBegin({ initRegs, initWrites }) → 毎フレーム liveAppendFrame(writes) → liveRollEnd()。
+    //   initWrites: 録音開始前(NSF の INIT 等)の書き込み列。N163 の波形 RAM/ch 数や FME-7 のラッチは
+    //   レジスタ像(initRegs)では運べない(最後の値しか残らない)ので、列のまま間接アクセス音源へ流す。
+    // 位置は呼び出し側が「積んだフレーム数×フレーム長」を update(posSeconds) で渡す(鍵盤の現在値は
+    // regSnapshots[floor(pos/frameDur)] から出る)。描画は未来を持たないので過去向き(追記)で描く。
+    // 無いもの: DPCM の打楽器同定(dmcSeq。サンプル内容が無い)と APU エンベロープ実出力(apuEnv。
+    // 音量はレジスタ値)。ドラム区画は作らない。
+    _rollPast() { return !!this._liveRoll || this._rollPastKeep || this._layout.rollTimeDir === 'past'; }
+
+    liveRollBegin(opts) {
+      const st = this._state;
+      if (!st) return;
+      const frameDur = st.samplesPerFrame / st.sampleRate;
+      const builder = new NoteTimelineBuilder(frameDur, { live: true });
+      const steppers = {};
+      const ex = this._extraSnaps;
+      if (this._chips.includes('vrc7')) { steppers.vrc7 = makeVrc7Stepper(); ex.vrc7 = []; }
+      if (this._chips.includes('n163')) { steppers.n163 = makeN163Stepper(); ex.n163 = []; ex.n163.maxNumCh = 1; }
+      if (this._chips.includes('fme7')) { steppers.fme7 = makeFme7Stepper(); ex.fme7 = []; }
+      // Live系(再生中のチップを直接読む関数)はライブ表示には無い(あっても全フレームが同じ値になる)
+      for (const k of Object.keys(ex)) if (/Live$/.test(k)) ex[k] = null;
+      ex.apuEnv = null;
+      const initWrites = (opts && opts.initWrites) || null;
+      if (initWrites && initWrites.length) for (const k of Object.keys(steppers)) steppers[k](initWrites); // 状態だけ進める(フレームは積まない)
+      const regs = Object.assign({}, (opts && opts.initRegs) || {});
+      if (initWrites) for (const w of initWrites) if (!w.read && regs[w.addr] === undefined) regs[w.addr] = w.value;
+      if (regs[0x4015] === undefined) regs[0x4015] = 0x0F; // 書かれない曲もあるので「全ch有効」を既定に(VGM 経路と同じ)
+      this._liveRoll = { builder, steppers, regs, lastRangeOpened: 0, lastRangeMs: 0 };
+      this._rollPastKeep = false;
+      this._rollTimeline = builder.timeline();
+      this._rollCursor = {};
+      this._rollLastRawPos = null;
+      this._rebuildDrumLanes();
+      this._updateLaneRanges();
+    }
+
+    // 1フレームぶんの書き込みを末尾へ積む。戻り値はそのフレームのチャンネル一覧(extractChannels の形)
+    liveAppendFrame(writes) {
+      const lr = this._liveRoll, st = this._state;
+      if (!lr || !st) return null;
+      writes = writes || [];
+      const f = st.totalFrames;
+      for (const w of writes) if (!w.read) lr.regs[w.addr] = w.value;
+      st.writeLog[f] = writes;
+      // capture.js と同じ: 書き込みの無いフレームは前のスナップショットを共有する(メモリ)
+      st.regSnapshots[f] = (f > 0 && writes.length === 0) ? st.regSnapshots[f - 1] : Object.assign({}, lr.regs);
+      st.totalFrames = f + 1;
+      const ex = this._extraSnaps;
+      if (lr.steppers.vrc7) ex.vrc7[f] = lr.steppers.vrc7(writes);
+      if (lr.steppers.n163) { const sn = lr.steppers.n163(writes); ex.n163[f] = sn; if (sn.numCh > ex.n163.maxNumCh) ex.n163.maxNumCh = sn.numCh; }
+      if (lr.steppers.fme7) ex.fme7[f] = lr.steppers.fme7(writes);
+      const channels = extractChannels(st.regSnapshots[f], ex, f, this._chips);
+      lr.builder.feed(channels, f);
+      // チャンネルごとのレーン表示の音域は曲全体から決める作りなので、新しい音符が始まったときに
+      // 間引いて(最短 LIVE_RANGE_MS ごと)更新する。まとめ表示では何もしない
+      if (this._layout.rollLanes === 'perChannel' && lr.builder.noteOpened !== lr.lastRangeOpened) {
+        const now = performance.now();
+        if (now - lr.lastRangeMs > LIVE_RANGE_MS) {
+          lr.lastRangeMs = now;
+          lr.lastRangeOpened = lr.builder.noteOpened;
+          this._updateLaneRanges();
+        }
+      }
+      return channels;
+    }
+
+    // ライブ表示を終える。タイムラインはそのまま残り(鳴っていた音符は終端を確定)、向きも次のソースまで過去のまま
+    liveRollEnd() {
+      const lr = this._liveRoll;
+      if (!lr) return;
+      lr.builder.finish(this._state ? this._state.totalFrames : 0);
+      this._liveRoll = null;
+      this._rollPastKeep = true;
+      if (this._layout.rollLanes === 'perChannel') this._updateLaneRanges();
+    }
+
+    isLiveRoll() { return !!this._liveRoll; }
+    // 積んだフレーム数(ライブ表示の位置=これ×フレーム長。setSource は渡された state を複製するので、
+    // 呼び出し側が自分の state.totalFrames を見ても増えない)
+    liveFrameCount() { return this._state ? this._state.totalFrames : 0; }
 
     // ロールのトラックの区画情報を後から更新する。metaById: 行ID → {laneGroup, laneCopy}。
     // PSF のトラックモードは複製(デチューン二重化/エコー)の判定が曲を最後まで取り込んでから決まるので、
@@ -7484,18 +7669,22 @@
     // 時間軸: 曲内の絶対秒(0,1,2,3…)ごとに音程軸方向の線を引き、ノートと同じ式でスクロールさせる。
     // 再生が進むにつれて線が鍵盤側へ流れ、新しい秒の線が先読みの果て(縦向き=上端、横向き=右端)
     // から現れる(累積の経過時間)。ロールと楽譜モードで共通
+    // 追記モード(g.past)では窓が再生位置から過去へ伸びるので、秒の線は再生位置から数えて遠ざかる
     _drawRollTimeGrid(ctx, g, pos) {
       const H = g.H;
       const winEnd = pos + g.windowSec;
       ctx.strokeStyle = '#3d3d4a';
       ctx.fillStyle = '#6b6b7a';
       ctx.font = '9px ' + fontStack('sans');
-      const firstSec = Math.ceil(pos);
-      for (let s = firstSec; s < winEnd; s++) {
+      const secs = [];
+      if (g.past) { for (let s = Math.floor(pos); s > pos - g.windowSec && s >= 0; s--) secs.push(s); }
+      else { for (let s = Math.ceil(pos); s < winEnd; s++) secs.push(s); }
+      for (const s of secs) {
+        const t = g.tPx(g.tOf(s, pos));
         ctx.globalAlpha = 0.5;
         ctx.beginPath();
         if (g.vertical) {
-          const y = Math.round(H - g.tPx(s - pos)) + 0.5;
+          const y = Math.round(H - t) + 0.5;
           ctx.moveTo(0, y);
           ctx.lineTo(g.W, y);
           ctx.stroke();
@@ -7503,7 +7692,7 @@
           ctx.textBaseline = 'bottom';
           ctx.fillText(`${s}s`, 2, y - 1);
         } else {
-          const x = Math.round(g.tPx(s - pos)) + 0.5;
+          const x = Math.round(t) + 0.5;
           ctx.moveTo(x, 0);
           ctx.lineTo(x, H);
           ctx.stroke();
@@ -7708,13 +7897,15 @@
       if (canvas.width !== newW) canvas.width = newW;
       if (canvas.height !== newH) canvas.height = newH;
       const nDrum = (this._drumLanes || []).length;
-      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? (lane.visWhite || 0) : 0, nDrum);
+      const past = this._rollPast();
+      const g = makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? (lane.visWhite || 0) : 0, nDrum, past);
       const { wk: wkW, bk: bkW, H } = g;
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, H);
-      // 楽譜モード: 表記モデルがあるとき(MML再生中)だけ五線で描く。無ければ従来のロール
+      // 楽譜モード: 表記モデルがあるとき(MML再生中)だけ五線で描く。無ければ従来のロール。
+      // 楽譜は未来向きだけ(追記モードの楽譜は無い)
       if (this._layout.rollView === 'score' && this._score) {
-        this._drawScoreCanvas(canvas, ctx, g, pos, onlyId, lane);
+        this._drawScoreCanvas(canvas, ctx, past ? makeRollGeom(this._layout.rollOrientation, canvas.width, canvas.height, lane ? (lane.visWhite || 0) : 0, nDrum, false) : g, pos, onlyId, lane);
         return;
       }
       const windowSec = g.windowSec;
@@ -7815,11 +8006,15 @@
         const notes = track.notes;
         let idx = this._rollCursor[track.id] || 0;
         if (idx > notes.length) idx = notes.length;
-        while (idx < notes.length && notes[idx].endSec <= pos) idx++;
+        // 窓の手前側(未来向き=再生位置、過去向き(追記)=窓の後端)より前に終わった音符は読み飛ばす。
+        // ライブの鳴っている音符(endSec=Infinity)はここで止まる
+        const winLo = g.past ? pos - windowSec : pos;
+        while (idx < notes.length && notes[idx].endSec <= winLo) idx++;
         this._rollCursor[track.id] = idx;
+        const winHi = g.past ? pos : winEnd;
         for (let i = idx; i < notes.length; i++) {
           const note = notes[i];
-          if (note.startSec >= winEnd) break; // 以降は全て未来のノート(startSec昇順のため打ち切れる)
+          if (note.startSec >= winHi) break; // 以降は全て窓の先のノート(startSec昇順のため打ち切れる)
           // 音量による濃淡はやめ、常にチャンネル本来の色をそのまま(不透明・フィルタ無し)で描く。
           const noteColor = this._getColor(track.id, liveColor[track.id] || track.color);
           const isDrum = note.drumLane !== undefined;
@@ -7841,10 +8036,10 @@
             pLo = keyPos.isBlack ? keyPos.x - bkW / 2 : keyPos.x + 0.5;
             pSize = keyPos.isBlack ? bkW : (wkW - 1);
           }
-          const relEnd = Math.min(windowSec, note.endSec - pos);
-          const relStart = Math.max(0, note.startSec - pos);
+          const sp = g.span(note.startSec, note.endSec, pos);
+          if (!sp) continue;
           // 時間軸: 最低2pxは見えるようにする
-          const r = g.rect(pLo, pSize, g.tPx(relStart), g.tPx(relEnd), 2);
+          const r = g.rect(pLo, pSize, g.tPx(sp.t0), g.tPx(sp.t1), 2);
           ctx.globalAlpha = dimAlpha;
           if (isDrum) {
             // 塗り=サンプル(どの太鼓か) / 枠線=チャンネル(どのスロットが鳴らしたか)の二重符号化。
@@ -7914,9 +8109,9 @@
               };
               for (let k = 0; k < note.freqLoSeq.length; k++) {
                 const tAbs = note.startSec + k * frameDur;
-                if (!note.freqHiSeq[k] || tAbs + frameDur < pos || tAbs > winEnd) { flush(); continue; }
-                run.push({ lo: cOf(note.freqLoSeq[k]), hi: cOf(note.freqHiSeq[k]),
-                           t0: Math.max(0, tAbs - pos), t1: Math.min(windowSec, tAbs + frameDur - pos) });
+                const sp2 = note.freqHiSeq[k] ? g.span(tAbs, tAbs + frameDur, pos) : null;
+                if (!sp2) { flush(); continue; }
+                run.push({ lo: cOf(note.freqLoSeq[k]), hi: cOf(note.freqHiSeq[k]), t0: sp2.t0, t1: sp2.t1 });
               }
               flush();
             }
@@ -7925,10 +8120,10 @@
             for (let k = 0; k < note.freqSeq.length; k++) {
               const freq = note.freqSeq[k];
               if (!freq || freq <= 0) continue;
-              const tAbs = note.startSec + k * frameDur;
-              if (tAbs < pos || tAbs > winEnd) continue;
+              const tRel = g.tOf(note.startSec + k * frameDur, pos);
+              if (tRel < 0 || tRel > windowSec) continue;
               const cents = 1200 * Math.log2(freq / idealFreq);
-              const pt = g.point(centerP + (cents / 100) * wkW, g.tPx(tAbs - pos));
+              const pt = g.point(centerP + (cents / 100) * wkW, g.tPx(tRel));
               if (!started) { ctx.moveTo(pt.x, pt.y); started = true; } else { ctx.lineTo(pt.x, pt.y); }
             }
             if (started) {
@@ -7946,9 +8141,9 @@
       // 時間軸はソースの秒(ロールと同じ)なのでそのまま描ける。
       if (this._conversionDiffs && onlyId === null) {
         for (const d of this._conversionDiffs) {
-          if (d.endSec <= pos || d.sec >= winEnd) continue;
-          const relStart = Math.max(0, d.sec - pos);
-          const relEnd = Math.min(windowSec, d.endSec - pos);
+          const sp = g.span(d.sec, d.endSec, pos);
+          if (!sp) continue;
+          const relStart = sp.t0, relEnd = sp.t1;
           for (const [midi, fill] of [[d.gotMidi, true], [d.expectedMidi, false]]) {
             const keyPos = keyX(midi, wkW);
             if (!keyPos) continue;
@@ -8356,5 +8551,10 @@
   UI.KeyboardDisplay = KeyboardDisplay;
   UI.PIANO_KEY_LEN = PIANO_KEY_LEN; // 動画書き出し(src/video/videoExport.js)の鍵盤の厚み
   UI.buildRollTracksFromRegSnapshots = buildRollTracksFromRegSnapshotsPure; // roll-builders.js(Worker)用
+  UI.NoteTimelineBuilder = NoteTimelineBuilder; // ライブ表示(追記)の検証(tools/headless/live-roll-test.js)用
+  UI.buildNoteTimelineFromChannelFrames = buildNoteTimelineFromChannelFrames;
+  UI.extractChannels = extractChannels;
+  UI.makeRollGeom = makeRollGeom; // 過去向き(追記)の座標系の検証用
+  UI.liveSnapshotSteppers = { vrc7: makeVrc7Stepper, n163: makeN163Stepper, fme7: makeFme7Stepper }; // 同上(ライブ追記と同じ材料の基準を作る)
   UI.midiToNoteName = midiToName; // main.js(ADPCM手動キャリブレーションのプロンプト表示)用
 })(window);

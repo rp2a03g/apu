@@ -1909,6 +1909,14 @@ button.secondary {
   white-space: nowrap;
 }
 .kbd-layout-opt input { margin: 0; accent-color: var(--accent); cursor: pointer; }
+/* ライブ入力(src/ui/liveRoll.js)のポップオーバー。枠は .kbd-layout-pop と共通 */
+.live-roll-pop { max-width: 360px; }
+.live-roll-row { display: flex; gap: 6px; align-items: center; margin: 2px 0 4px; }
+.live-roll-row input { flex: 1 1 auto; min-width: 0; font-size: 12px; padding: 3px 6px; }
+.live-roll-btn { flex: none; font-size: 12px; padding: 3px 10px; cursor: pointer; }
+.live-roll-btn:disabled { opacity: 0.5; cursor: default; }
+.live-roll-status { font-size: 11px; color: var(--text-secondary); min-height: 14px; margin-bottom: 4px; }
+.live-roll-help { font-size: 10.5px; color: var(--text-muted); line-height: 1.4; white-space: normal; }
 
 /* --- カラー設定モーダル (src/ui/editorSettings.js) --- */
 .es-backdrop {
@@ -2855,7 +2863,7 @@ button.secondary {
 }
 .kbd-hdr-btn:hover { background: rgba(58, 110, 165, 0.18); border-color: rgba(58, 110, 165, 0.5); color: var(--text); }
 .kbd-hdr-btn svg { width: 16px; height: 16px; }
-.kbd-tomml-btn { width: auto; padding: 0 6px; }
+.kbd-tomml-btn, .kbd-live-btn { width: auto; padding: 0 6px; }
 .kbd-tomml-text { font-size: 10px; font-weight: 700; white-space: nowrap; }
 .kbd-repeat-btn--stop { color: var(--text-muted); }
 
@@ -3844,6 +3852,7 @@ html.ui-mobile #win-keyboard .m-seek-row .seek-time { flex: none; font-family: v
 html.ui-mobile #win-keyboard .m-seek-row .seek-handle { width: 12px; height: 30px; }
 html.ui-mobile #win-keyboard .m-seek-row input[type="range"] { height: 30px; }
 html.ui-mobile #win-keyboard .kbd-tomml-btn { order: 7; }
+html.ui-mobile #win-keyboard .kbd-live-btn { order: 8; }
 html.ui-mobile #win-keyboard .kbd-layout-btn { display: none !important; }
 html.ui-mobile #win-keyboard .m-extras-btn { order: 8; margin-left: 0; }
 html.ui-mobile #win-keyboard .kbd-mastervol--header { order: 11; }
