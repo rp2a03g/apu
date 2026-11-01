@@ -29,9 +29,17 @@
   const AUDIO_RING = 1 << 14;
 
   class NesConsole {
-    constructor(romBytes) {
-      this.rom = Emu.INES.parse(romBytes);
-      this.mapper = Emu.NesMappers.create(this.rom);
+    // opts.bios: FDS の BIOS(disksys.rom、8K)。.fds を開くときだけ要る
+    constructor(romBytes, opts) {
+      opts = opts || {};
+      if (!(romBytes instanceof Uint8Array)) romBytes = new Uint8Array(romBytes);
+      if (Emu.FdsDisk && Emu.FdsDisk.isFds(romBytes)) {
+        this.rom = Emu.FdsDisk.parse(romBytes);
+        this.mapper = new Emu.FdsDisk.Mapper(this.rom, opts.bios);
+      } else {
+        this.rom = Emu.INES.parse(romBytes);
+        this.mapper = Emu.NesMappers.create(this.rom);
+      }
       this.ppu = new Emu.PPU(this.mapper);
       this.apu = new Emu.APU2A03(this);
       this.cpu = new Emu.CPU6502(this);
@@ -68,6 +76,11 @@
 
     setSampleRate(sr) { this.sampleRate = sr; this.cycleAccum = 0; this.ringHead = 0; this.ringLen = 0; }
     setController(port, bits) { this.pad[port & 1] = bits & 0xFF; }
+    // FDS のディスク(面)。.fds 以外では 0 面
+    get diskCount() { return this.mapper.sides ? this.mapper.sides.length : 0; }
+    get diskNumber() { return this.mapper.sides ? this.mapper.diskNumber : -1; }
+    insertDisk(n) { if (this.mapper.insertDisk) this.mapper.insertDisk(n); }
+    ejectDisk() { if (this.mapper.ejectDisk) this.mapper.ejectDisk(); }
     // NSF ヘッダと同じ拡張音源ビット(録音の NESX ヘッダ用)
     extBits() { return this.mapper.audio ? (this.mapper.extBits || 0) : 0; }
     // フレーム内の時刻(0〜1)。PPU の位置から出す(書き込みの t と録音の精度はこれ)

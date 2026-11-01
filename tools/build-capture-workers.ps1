@@ -206,8 +206,10 @@ $bundles = @(
             'src\emulator\expansion\mmc5.js',
             'src\emulator\expansion\n163.js',
             'src\emulator\expansion\fme7.js',
+            'src\emulator\expansion\fds.js',
             'src\emulator\nes\ines.js',
             'src\emulator\nes\mappers.js',
+            'src\emulator\nes\fds.js',
             'src\emulator\nes\ppu.js',
             'src\emulator\nes\nesConsole.js',
             'src\audio\nes-worklet-impl.js'

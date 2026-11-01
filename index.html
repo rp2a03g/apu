@@ -31,7 +31,7 @@
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="12" rx="1"/><path d="M6.5 4v7.5M9.5 4v7.5M12.5 4v7.5" /><rect x="4.6" y="4" width="1.8" height="6.5" fill="currentColor" stroke="none"/><rect x="8" y="4" width="1.8" height="6.5" fill="currentColor" stroke="none"/><rect x="11.6" y="4" width="1.8" height="6.5" fill="currentColor" stroke="none"/></svg>
       </button>
       <!-- NES 画面: 自前 NES エミュレータ(src/emulator/nes/、src/ui/nesScreen.js)。.nes を開くと表示される -->
-      <button class="icon-btn icon-btn-text toggle-btn" data-target="win-nes" title="NES 画面 (.nes を開いて遊ぶ)" aria-label="NES 画面">
+      <button class="icon-btn icon-btn-text toggle-btn" data-target="win-nes" title="NES 画面 (.nes/.fds を開いて遊ぶ)" aria-label="NES 画面">
         <span>NES</span>
       </button>
       <!-- ピアノロール別ウィンドウ(鍵盤表示のレイアウト設定で「別ウィンドウ」を選んだときだけ表示。main.js参照) -->
@@ -299,7 +299,7 @@
          #xxxFileHeader / #xxxFileStatus だけはこの箱から鍵盤表示側へ付け替えて表示する -->
   <div id="soundFileControls" hidden>
       <!-- multiple: PSF の .minipsf と、_lib で参照する .psflib を一緒に選べるように(先頭の曲ファイルを開く) -->
-      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.psf,.minipsf,.psflib,.zip,.7z,.rar,.rsn,.mml,.txt,.dmc,.nes" multiple style="display:none" />
+      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.psf,.minipsf,.psflib,.zip,.7z,.rar,.rsn,.mml,.txt,.dmc,.nes,.fds" multiple style="display:none" />
       <!-- 内部的にフォーマット別ロジックを呼び出すための非表示input（互換用） -->
       <input type="file" id="nsfFile" accept=".nsf,.nsfe" style="display:none" />
       <input type="file" id="spcFile" accept=".spc" style="display:none" />
@@ -623,6 +623,7 @@
   <!-- 自前 NES エミュレータ(DESIGN-CAPTURE.md §7。ヘッダ/マッパー/PPU/本体。音源と 6502 は上の物を共用) -->
   <script src="src/emulator/nes/ines.js"></script>
   <script src="src/emulator/nes/mappers.js"></script>
+  <script src="src/emulator/nes/fds.js"></script>
   <script src="src/emulator/nes/ppu.js"></script>
   <script src="src/emulator/nes/nesConsole.js"></script>
   <script src="src/emulator/nsfPlayer.js"></script>

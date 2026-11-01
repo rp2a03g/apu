@@ -127,6 +127,7 @@ node tools/headless/nes-run.js "game.nes" --frames 1301 --press "start:700-710,r
 (本体の録音ボタンと同じ経路。2A03 の ROM で 900/900 フレーム一致、N163 の ROM で初期像の 1 フレームを除いて一致)。
 `preciseTiming=true` にするとフレーム内の時刻まで比べられる(時刻の原点はフレームの区切りと同じ endFrame=vblank の頭。
 VRC6/VRC7/MMC5/SUNSOFT 5B の合成 ROM で IRQ の書き込みが ±1/128 フレーム以内に揃う)。
+FDS を比べるときは Mesen 側にも BIOS が要る(Mesen のデータフォルダの `Firmware/disksys.rom`)。
 
 ## headless テスト(GUI 無し・最高速)
 

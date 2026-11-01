@@ -39,6 +39,38 @@
   let gpRaf = 0;
   // 録音
   let recording = false, recFrames = null, recStartMs = 0, recVgm = null, recExtBits = 0;
+  // FDS(段階 6d): BIOS は利用者が用意する(disksys.rom、8K)。localStorage に base64 で控える
+  const BIOS_KEY = 'nes.fdsBios';
+  let fdsBios = null, biosBtn = null, biosInput = null, sideBtn = null, fdsSides = 0, fdsSide = 0, pendingFds = null, sideTimer = 0;
+
+  function loadBios() {
+    if (fdsBios) return fdsBios;
+    try {
+      const s = localStorage.getItem(BIOS_KEY);
+      if (s) { const bin = atob(s); const b = new Uint8Array(bin.length); for (let i = 0; i < b.length; i++) b[i] = bin.charCodeAt(i); fdsBios = b; }
+    } catch (e) { /* localStorage 不可 */ }
+    return fdsBios;
+  }
+  function storeBios(bytes) {
+    fdsBios = bytes;
+    try { let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); localStorage.setItem(BIOS_KEY, btoa(s)); } catch (e) { /* 控えられなくても今回は使える */ }
+  }
+  function sideLabel() { return T('ディスク {side} 面', { side: String.fromCharCode(65 + (fdsSide % 26)) }); }
+  function updateDiskUi() {
+    if (!sideBtn) return;
+    sideBtn.hidden = fdsSides < 2;
+    sideBtn.textContent = sideLabel() + ' ▸';
+    sideBtn.title = T('クリックで次の面に入れ替える(取り出してから入れる)');
+  }
+  // 面の入れ替え: 取り出し → 少し待って次の面を入れる(ゲームの BIOS が「ディスクなし」を見てから入れ直す)
+  function switchSide(next) {
+    fdsSide = ((next % fdsSides) + fdsSides) % fdsSides;
+    const send = (side) => { if (node) node.port.postMessage({ type: 'disk', side }); else if (nes) { if (side < 0) nes.ejectDisk(); else nes.insertDisk(side); } };
+    send(-1);
+    if (sideTimer) clearTimeout(sideTimer);
+    sideTimer = setTimeout(() => { sideTimer = 0; send(fdsSide); updateDiskUi(); }, 1500);
+    sideBtn.textContent = T('入れ替え中…');
+  }
 
   function ensureDom() {
     if (win) return true;
@@ -61,7 +93,21 @@
     recBtn = document.createElement('button'); recBtn.type = 'button'; recBtn.className = 'nes-btn nes-rec';
     recBtn.addEventListener('click', () => { toggleRecord(); canvas.focus(); });
     statusEl = document.createElement('span'); statusEl.className = 'nes-status';
-    bar.appendChild(nameEl); bar.appendChild(pauseBtn); bar.appendChild(resetBtn); bar.appendChild(recBtn); bar.appendChild(statusEl);
+    sideBtn = document.createElement('button'); sideBtn.type = 'button'; sideBtn.className = 'nes-btn'; sideBtn.hidden = true;
+    sideBtn.addEventListener('click', () => { if (fdsSides > 1 && !sideTimer) switchSide(fdsSide + 1); canvas.focus(); });
+    biosBtn = document.createElement('button'); biosBtn.type = 'button'; biosBtn.className = 'nes-btn'; biosBtn.textContent = T('FDS BIOS…'); biosBtn.hidden = true;
+    biosBtn.title = T('ディスクシステムの BIOS(disksys.rom、8KB)を選ぶ。このブラウザに控えて次回も使います');
+    biosInput = document.createElement('input'); biosInput.type = 'file'; biosInput.accept = '.rom,.bin,.nes'; biosInput.style.display = 'none';
+    biosBtn.addEventListener('click', () => biosInput.click());
+    biosInput.addEventListener('change', async () => {
+      const f = biosInput.files && biosInput.files[0]; biosInput.value = '';
+      if (!f) return;
+      const b = new Uint8Array(await f.arrayBuffer());
+      if (b.length < 0x2000) { alert(T('BIOS は 8KB 以上のファイルです: {name}', { name: f.name })); return; }
+      storeBios(b.length === 0x2000 ? b : b.subarray(b.length - 0x2000));
+      if (pendingFds) { const p = pendingFds; pendingFds = null; NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); }); }
+    });
+    bar.appendChild(nameEl); bar.appendChild(pauseBtn); bar.appendChild(resetBtn); bar.appendChild(recBtn); bar.appendChild(sideBtn); bar.appendChild(biosBtn); bar.appendChild(biosInput); bar.appendChild(statusEl);
     const bar2 = document.createElement('div'); bar2.className = 'nes-bar';
     recInfoEl = document.createElement('span'); recInfoEl.className = 'nes-name';
     saveBtn = document.createElement('button'); saveBtn.type = 'button'; saveBtn.className = 'nes-btn'; saveBtn.textContent = T('VGM を保存'); saveBtn.hidden = true;
@@ -121,6 +167,7 @@
     if (!statusEl) return;
     const mode = node ? T('音: AudioWorklet') : T('音なし(主スレッド)');
     statusEl.textContent = `${fps} fps · ${mode}` + (underruns ? ' · ' + T('音切れ {n} 回', { n: underruns }) : '');
+    if (pendingFds) return; // BIOS 待ちの案内を消さない
     const chips = ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
     statusEl.title = (chips ? chips + ' ' : '') + (workletState === 'failed' ? T('AudioWorklet が使えないので主スレッドで実行しています(音は出ません)') : '');
   }
@@ -131,7 +178,7 @@
     if (typeof fn !== 'function') return null;
     const src = fn.toString();
     // 再ビルド忘れの検出(capture-worker-client.js と同じ考え方): 主スレッドの現行ソースがバンドルに含まれているか
-    const probes = [MML.Emu.NesConsole, MML.Emu.PPU, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC3, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC5, MML.Emu.NesMappers && MML.Emu.NesMappers.VRC7];
+    const probes = [MML.Emu.NesConsole, MML.Emu.PPU, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC3, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC5, MML.Emu.NesMappers && MML.Emu.NesMappers.VRC7, MML.Emu.FdsDisk && MML.Emu.FdsDisk.Mapper];
     for (const p of probes) {
       if (typeof p !== 'function' || src.indexOf(p.toString()) < 0) {
         console.warn('[nes] nes-worklet.js がソースより古い(再ビルド忘れ)ため使いません。tools/build-capture-workers.ps1 で再ビルドしてください');
@@ -162,7 +209,8 @@
       node.connect(gain); gain.connect(limiter);
       limiter.connect(MML.Audio && MML.Audio.getMasterGain ? MML.Audio.getMasterGain(actx) : actx.destination);
       const rom = bytes.slice().buffer;
-      node.port.postMessage({ type: 'load', rom }, [rom]);
+      const bios = fdsBios ? fdsBios.slice().buffer : null;
+      node.port.postMessage({ type: 'load', rom, bios }, bios ? [rom, bios] : [rom]);
       resumeAudio();
       lastPad = -1; pushPad();
       if (!gpRaf) gpRaf = requestAnimationFrame(gpLoop);
@@ -189,7 +237,7 @@
         tickFps(performance.now());
         break;
       }
-      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; updateStatus(); break;
+      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; fdsSides = m.disks || 0; fdsSide = 0; updateDiskUi(); updateStatus(); break;
       case 'recordEnd': for (const fr of (m.frames || [])) recFrames.push(fr); finishRecording(); break;
       case 'error': console.error('[nes worklet]', m.message); statusEl.textContent = T('エラー: {msg}', { msg: String(m.message).split('\n')[0] }); break;
     }
@@ -239,7 +287,7 @@
   }
 
   // ── 録音 ──
-  function recFileName() { return (romName || 'nes').replace(/\.nes$/i, '') + '-rec.vgm'; }
+  function recFileName() { return (romName || 'nes').replace(/\.(nes|fds)$/i, '') + '-rec.vgm'; }
   function toggleRecord() {
     if (recording) {
       recording = false;
@@ -285,12 +333,25 @@
     // ROM(iNES のバイト列)を読み込んで表示・開始する。失敗は例外(マッパー未対応など)
     async open(bytes, name) {
       if (!ensureDom()) throw new Error('win-nes がありません');
+      const isFds = !!(MML.Emu.FdsDisk && MML.Emu.FdsDisk.isFds(bytes));
+      biosBtn.hidden = !isFds;
+      if (isFds && !loadBios()) {
+        // BIOS が無い: 窓を開いて選ばせ、選ばれたら開き直す
+        pendingFds = { bytes, name };
+        romName = name || ''; nameEl.textContent = romName; nameEl.title = '';
+        win.style.display = 'flex';
+        if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
+        statusEl.textContent = T('FDS の BIOS(disksys.rom)を [FDS BIOS…] で指定してください');
+        return null;
+      }
+      pendingFds = null;
       // ヘッダとマッパーの検査は主スレッドで先に(未対応なら例外で知らせる)
-      const probe = new MML.Emu.NesConsole(bytes);
+      const probe = new MML.Emu.NesConsole(bytes, { bios: isFds ? fdsBios : null });
       romBytes = bytes; romName = name || '';
       nameEl.textContent = romName;
       nameEl.title = MML.Emu.INES.describe(probe.rom);
       recExtBits = probe.extBits();
+      fdsSides = probe.diskCount; fdsSide = 0; if (sideTimer) { clearTimeout(sideTimer); sideTimer = 0; } updateDiskUi();
       stopMain(); nes = null;
       if (recording) { recording = false; recFrames = null; }
       recVgm = null; updateRecUi();

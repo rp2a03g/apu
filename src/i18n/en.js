@@ -1691,6 +1691,13 @@
     '音切れ {n} 回': '{n} dropouts',
     'この ROM は開けません: {msg}': 'Cannot open this ROM: {msg}',
     'NES 画面': 'NES screen',
-    'NES 画面 (.nes を開いて遊ぶ)': 'NES screen (open a .nes and play)',
+    'NES 画面 (.nes/.fds を開いて遊ぶ)': 'NES screen (open a .nes or .fds and play)',
+    'FDS BIOS…': 'FDS BIOS…',
+    'ディスクシステムの BIOS(disksys.rom、8KB)を選ぶ。このブラウザに控えて次回も使います': 'Choose the Disk System BIOS (disksys.rom, 8 KB). It is kept in this browser for next time',
+    'BIOS は 8KB 以上のファイルです: {name}': 'The BIOS must be an 8 KB (or larger) file: {name}',
+    'FDS の BIOS(disksys.rom)を [FDS BIOS…] で指定してください': 'Choose the FDS BIOS (disksys.rom) with [FDS BIOS…]',
+    'ディスク {side} 面': 'Disk side {side}',
+    'クリックで次の面に入れ替える(取り出してから入れる)': 'Click to switch to the next side (ejects, then inserts)',
+    '入れ替え中…': 'Switching…',
   });
 })(typeof window !== 'undefined' ? window : globalThis);

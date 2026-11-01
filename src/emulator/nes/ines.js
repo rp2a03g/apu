@@ -54,6 +54,7 @@
   };
 
   INES.describe = function (rom) {
+    if (rom.fds && Emu.FdsDisk) return Emu.FdsDisk.describe(rom);
     return `mapper ${rom.mapper}${rom.submapper ? '.' + rom.submapper : ''}, PRG ${rom.prg.length >> 10}K, CHR ${rom.chr ? (rom.chr.length >> 10) + 'K' : 'RAM ' + (rom.chrRamSize >> 10) + 'K'}, ` +
       `mirror ${rom.mirroring}${rom.battery ? ', battery' : ''}${rom.nes2 ? ', NES2.0' : ''}`;
   };

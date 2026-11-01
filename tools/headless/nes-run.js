@@ -4,7 +4,8 @@
  *
  * 使い方: node tools/headless/nes-run.js "game.nes" [--frames N] [--png out.png] [--png-every M]
  *                                          [--press "start:120-130,a:300-305,right:400-600"] [--audio out.wav]
- *                                          [--vgm out.vgm] [--rec-from F]
+ *                                          [--vgm out.vgm] [--rec-from F] [--bios disksys.rom] [--disk "1:900"]
+ *   --bios   : .fds を開くときの BIOS(環境変数 FDS_BIOS でも可)。--disk side:frame でそのフレームに面を入れ替える
  *   --press  : ボタン名:開始フレーム-終了フレーム をカンマ区切り(a b select start up down left right)
  *   --png-every M : M フレームごとに out_<frame>.png も書く(動きの確認用)
  *   --audio  : 音も計算して WAV(44.1kHz mono 16bit)に書く
@@ -26,6 +27,14 @@ const pngEvery = parseInt(arg('--png-every', '0'), 10);
 const audioOut = arg('--audio', null);
 const vgmOut = arg('--vgm', null);
 const recFrom = parseInt(arg('--rec-from', '0'), 10);
+const biosPath = arg('--bios', process.env.FDS_BIOS || null); // .fds 用の BIOS(disksys.rom)
+// --disk "side:frame[,side:frame]" : そのフレームで取り出し、90 フレーム後にその面を入れる(FDS)
+const diskOps = [];
+for (const item of (arg('--disk', '') || '').split(',').map(s => s.trim()).filter(Boolean)) {
+  const m = /^(\d+):(\d+)$/.exec(item);
+  if (!m) { console.error('disk の書式: side:frame  例 1:900'); process.exit(2); }
+  diskOps.push({ side: +m[1], eject: +m[2], insert: +m[2] + 90 });
+}
 
 const BTN = { a: 1, b: 2, select: 4, start: 8, up: 16, down: 32, left: 64, right: 128 };
 const presses = [];
@@ -72,7 +81,7 @@ function writeWav(file, samples, sr) {
 
 const { MML } = load({ strict: true });
 const bytes = readBytes(file);
-const nes = new MML.Emu.NesConsole(bytes);
+const nes = new MML.Emu.NesConsole(bytes, { bios: biosPath ? readBytes(biosPath) : null });
 console.log(`${path.basename(file)}: ${MML.Emu.INES.describe(nes.rom)}, reset=$${nes.cpu.PC.toString(16)}`);
 const SR = 44100;
 const audio = [];
@@ -81,6 +90,7 @@ const t0 = process.hrtime.bigint();
 for (let f = 0; f < frames; f++) {
   if (vgmOut && f === recFrom) nes.startRecording();
   nes.setController(0, padAt(f));
+  for (const d of diskOps) { if (f === d.eject) nes.ejectDisk(); else if (f === d.insert) nes.insertDisk(d.side); }
   const a = nes.runFrame();
   if (audioOut && a) audio.push(Float32Array.from(a));
   if (pngEvery && pngOut && f > 0 && f % pngEvery === 0) writePng(pngOut.replace(/\.png$/i, '') + '_' + f + '.png', nes.frame, 256, 240);

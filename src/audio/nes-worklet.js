@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-02 00:10:07
+ * Built by tools/build-capture-workers.ps1 at 2026-11-02 00:26:26
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-02 00:10:07';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-02 00:26:26';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -3472,6 +3472,335 @@
 })(globalThis);
 
 /*
+ * FDS (ディスクシステム) 拡張音源エミュレータ
+ * MML.Emu.FDSAudio
+ *
+ * 64サンプル(6bit)のウェーブテーブル波形メモリ音源 + ボリュームエンベロープ + ピッチモジュレータ。
+ *
+ *   $4040-$407F : 波形メモリ(6bit, $4089 bit7=1 の間のみ書き込み可)
+ *   $4080       : ボリュームエンベロープ (bit7=1:直接指定, bit6=方向, bits0-5=速度/ゲイン)
+ *   $4082       : 周波数下位8bit
+ *   $4083       : bits0-3=周波数上位4bit, bit6=エンベロープ停止, bit7=1で消音/波形リセット
+ *   $4084       : モジュレータゲイン/エンベロープ (同形式)。ゲインはピッチ変調の深さを決める(0=変調なし)
+ *   $4085       : モジュレータカウンタ直接設定 (7bit符号付き)
+ *   $4086       : モジュレータ周波数下位8bit
+ *   $4087       : bits0-3=モジュレータ周波数上位4bit, bit7=1で停止
+ *   $4088       : モジュレータテーブル書き込み (停止中のみ有効, 下位3bit)。再生位置に書いて2ステップ進む
+ *
+ * 変調ユニットは NSFPlay 2.6 nes_fds.cpp(rainwarrior、実機検証済み)に合わせてある(2026-09-22)。
+ * リファレンスWAV(NSFPlay、FDSのみ・LPF無し)との0.1秒窓スペクトル類似度で採点した。要点:
+ *   - テーブルは32項目だが位置は64ステップ(1項目を2回ずつ)。16bitの端数アキュムレータ
+ *   - カウンタは7bitで折り返す(63+1=-64)。クランプではない
+ *   - 変調量 = counter×gain を >>4(端数があり結果のbit7が0なら 負:-1/正:+2 の丸め)、
+ *     -64..191 へ8bit折り返し、×freq/64(四捨五入)。折り返しは実機の挙動で、深いFMでは
+ *     周波数が搬送波の最大4倍まで跳ねる(Golf US Course 3秒目で実際に鳴っている音)
+ *   - 変調式は $4087 で停止中も常に効く($4085 直書きのベンド)。停止はテーブルの歩進を
+ *     止めて端数を0にするだけで、位置は保つ。$4088 は再生位置へ書く
+ * 以前は「1項目1回・クランプ・折り返し無し(Math.max(0))・停止中は無効」で、深さが半分、
+ * 深いFMで別の音になっていた。
+ *   $4089       : bit7=波形メモリ書き込み許可, bits0-1=マスターボリューム
+ *   $408A       : エンベロープ速度マスタ (0=最速, 値が大きいほど遅い)
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  // NESdev 準拠: マスターボリューム 0=全量, 1=2/3, 2=2/4, 3=2/5
+  const MASTER_VOLUME_SCALE = [1.0, 2 / 3, 2 / 4, 2 / 5];
+
+  // モジュレータテーブルの3bitエントリをカウンタ増分に変換
+  // 0=+0, 1=+1, 2=+2, 3=+4, 4=リセット(0), 5=-4, 6=-2, 7=-1
+  const MOD_TABLE_DELTA = [0, 1, 2, 4, 0, -4, -2, -1];
+  const MOD_STEPS = 64;                  // 変調テーブルの位置は64ステップ(32項目×2)
+  const MOD_STEP_CYCLES = 65536;         // 1ステップ = 65536/modFreq CPUサイクル
+
+  class FDSAudio {
+    constructor() {
+      this.wave = new Uint8Array(64);
+      this.waveWriteEnable = false;
+      this.masterVolume = 0;
+
+      // ボリュームエンベロープ
+      this.volEnvEnabled = false; // bit7=0 のとき有効
+      this.volEnvIncrease = false; // bit6
+      this.volEnvSpeed = 0;        // bits0-5 (リロード値)
+      this.volGain = 32;           // 実際の出力ゲイン (0-32)
+      this.volEnvTimer = 0;
+
+      // メインチャンネル
+      this.freq = 0;
+      this.disabled = true;
+      this.envHalt = false; // $4083 bit6
+      this.phaseAcc = 0;
+      this.effectiveFreq = 0; // モジュレーション適用後の実ピッチ(内部単位、鍵盤表示用)
+
+      // モジュレータエンベロープ
+      this.modEnvEnabled = false;
+      this.modEnvIncrease = false;
+      this.modEnvSpeed = 0;
+      this.modGain = 32;
+      this.modEnvTimer = 0;
+
+      // モジュレータ
+      this.modFreq = 0;
+      this.modEnabled = false; // bit7=0 のとき有効
+      this.modPhaseAcc = 0;               // 位置の端数(0..65535)
+      this.modTable = new Uint8Array(MOD_STEPS); // 生3bit値 (0-7)。$4088 1回で2項目埋まる
+      this.modTablePos = 0;   // 再生位置(0..63)。$4088 の書き込み位置も兼ねる
+      this.modCounter = 0;    // 現在のモジュレータ出力値 (-64..63、7bit折り返し)
+
+      // エンベロープマスタ速度レジスタ ($408A)
+      // FDS 電源ON時デフォルト = $E8 = 232 (実機ハードウェア仕様)
+      // ゲームが $408A を書かない場合もこの値が使われる
+      this.envRate = 0xE8;
+      this.envRateClock = 0;
+
+      this.mute = { wave: false };
+      this.vol = { wave: 1 };
+    }
+
+    reset() {
+      this.wave = new Uint8Array(64);
+      this.waveWriteEnable = false;
+      this.masterVolume = 0;
+      this.volEnvEnabled = false;
+      this.volEnvIncrease = false;
+      this.volEnvSpeed = 0;
+      this.volGain = 32;
+      this.volEnvTimer = 0;
+      this.freq = 0;
+      this.disabled = true;
+      this.envHalt = false;
+      this.phaseAcc = 0;
+      this.effectiveFreq = 0;
+      this.modEnvEnabled = false;
+      this.modEnvIncrease = false;
+      this.modEnvSpeed = 0;
+      this.modGain = 32;
+      this.modEnvTimer = 0;
+      this.modFreq = 0;
+      this.modEnabled = false;
+      this.modPhaseAcc = 0;
+      this.modTable = new Uint8Array(MOD_STEPS);
+      this.modTablePos = 0;
+      this.modCounter = 0;
+      this.envRate = 0xE8; // FDS 電源ON時デフォルト
+      this.envRateClock = 0;
+    }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      if (addr >= 0x4040 && addr <= 0x407F) {
+        if (this.waveWriteEnable) this.wave[addr - 0x4040] = value & 0x3F;
+      } else if (addr === 0x4080) {
+        if (value & 0x80) {
+          // 直接指定モード: bits0-5 をゲインとして即時反映(6bit生値を保持。出力段で32に
+          // 頭打ちするのはmixSample側。エンベロープ減衰は書かれた値から数え始めるため)
+          this.volEnvEnabled = false;
+          this.volGain = value & 0x3F;
+        } else {
+          // エンベロープモード
+          this.volEnvEnabled = true;
+          this.volEnvIncrease = (value & 0x40) !== 0;
+          this.volEnvSpeed = value & 0x3F;
+          this.volEnvTimer = this.volEnvSpeed + 1;
+        }
+      } else if (addr === 0x4082) {
+        this.freq = (this.freq & 0x0F00) | value;
+      } else if (addr === 0x4083) {
+        this.freq = (this.freq & 0x00FF) | ((value & 0x0F) << 8);
+        this.envHalt = (value & 0x40) !== 0;
+        this.disabled = (value & 0x80) !== 0;
+        if (this.disabled) this.phaseAcc = 0;
+        if (this.envHalt) { this.volEnvTimer = this.volEnvSpeed + 1; this.modEnvTimer = this.modEnvSpeed + 1; }
+      } else if (addr === 0x4084) {
+        if (value & 0x80) {
+          this.modEnvEnabled = false;
+          this.modGain = value & 0x3F;
+        } else {
+          this.modEnvEnabled = true;
+          this.modEnvIncrease = (value & 0x40) !== 0;
+          this.modEnvSpeed = value & 0x3F;
+          this.modEnvTimer = this.modEnvSpeed + 1;
+        }
+      } else if (addr === 0x4085) {
+        // モジュレータカウンタを直接設定 (7bit符号付き)
+        const v = value & 0x7F;
+        this.modCounter = (v >= 64) ? (v - 128) : v;
+      } else if (addr === 0x4086) {
+        this.modFreq = (this.modFreq & 0x0F00) | value;
+      } else if (addr === 0x4087) {
+        this.modFreq = (this.modFreq & 0x00FF) | ((value & 0x0F) << 8);
+        this.modEnabled = (value & 0x80) === 0;
+        // 停止時は位置の端数だけ0にする(再生位置は保つ。変調式は停止中も効き続ける)
+        if (!this.modEnabled) this.modPhaseAcc = 0;
+      } else if (addr === 0x4088) {
+        // モジュレータ停止中に、現在の再生位置へ1項目(=2ステップ分)書いて進める
+        if (!this.modEnabled) {
+          this.modTable[this.modTablePos] = value & 0x07;
+          this.modTablePos = (this.modTablePos + 1) & (MOD_STEPS - 1);
+          this.modTable[this.modTablePos] = value & 0x07;
+          this.modTablePos = (this.modTablePos + 1) & (MOD_STEPS - 1);
+        }
+      } else if (addr === 0x4089) {
+        this.waveWriteEnable = (value & 0x80) !== 0;
+        this.masterVolume = value & 0x03;
+      } else if (addr === 0x408A) {
+        this.envRate = value;
+        this.envRateClock = 0;
+      }
+    }
+
+    // バス読み出し ($4090 = ボリュームエンベロープ出力, $4092 = モジュレータエンベロープ出力)
+    readRegister(addr) {
+      if (addr === 0x4090) return this.volGain & 0x3F;
+      if (addr === 0x4092) return this.modGain & 0x3F;
+      return 0;
+    }
+
+    // エンベロープを1ティック進める (エンベロープマスタ速度に応じて呼ばれる)
+    _clockEnvelope() {
+      if (this.disabled) return; // $4083 bit7=1 の間はどちらのエンベロープも進まない
+      // ボリュームエンベロープ
+      if (this.volEnvEnabled && !this.envHalt) {
+        this.volEnvTimer--;
+        if (this.volEnvTimer <= 0) {
+          this.volEnvTimer = this.volEnvSpeed + 1;
+          if (this.volEnvIncrease) {
+            if (this.volGain < 32) this.volGain++;
+          } else {
+            if (this.volGain > 0) this.volGain--;
+          }
+        }
+      }
+      // モジュレータエンベロープ
+      if (this.modEnvEnabled && !this.envHalt) {
+        this.modEnvTimer--;
+        if (this.modEnvTimer <= 0) {
+          this.modEnvTimer = this.modEnvSpeed + 1;
+          if (this.modEnvIncrease) {
+            if (this.modGain < 32) this.modGain++;
+          } else {
+            if (this.modGain > 0) this.modGain--;
+          }
+        }
+      }
+    }
+
+    clock() {
+      // エンベロープクロック: NESdev "c = 8 * (e+1) * (m+1)" のm(マスタ速度)部分。
+      // period = 8 * (envRate + 1) CPU サイクルに1回(envRate=0→8, envRate=$E8=232→1864 cycles)。
+      // 旧実装は envRate×8 (envRate=0のみ特別扱い)で、envRate>0全域で周期が短すぎた
+      // (envRate=1で本来16のところ8になる等、小さい値ほど相対誤差が大きいバグ)
+      this.envRateClock++;
+      const envPeriod = (this.envRate + 1) * 8;
+      if (this.envRateClock >= envPeriod) {
+        this.envRateClock = 0;
+        this._clockEnvelope();
+      }
+
+      // モジュレータテーブルの歩進(1ステップ = 65536/modFreq サイクル、64ステップで1周。
+      // レジスタログ実測: modFreq=16 で 6.83 Hz ビブラート → 16×1789773/(64×65536)=6.83Hz ✓)
+      this._stepMod(1);
+
+      // メインチャンネル
+      if (this.disabled || this.freq === 0) return;
+      // 鍵盤表示等の外部参照用(実際に揺れているピッチをHz換算する際、$4082/4083の
+      // 生の周期値ではなくこちらを使う。単位はthis.freqと同じ内部単位)
+      const effectiveFreq = this._modulatedFreq();
+      this.effectiveFreq = effectiveFreq;
+      this.phaseAcc = (this.phaseAcc + effectiveFreq) & 0x3FFFFF; // 64サンプル × 16bit端数
+    }
+
+    // 変調テーブルを cycles サイクル分歩進させる(停止中は進まない)
+    _stepMod(cycles) {
+      if (!this.modEnabled || this.modFreq === 0) return;
+      this.modPhaseAcc += this.modFreq * cycles;
+      while (this.modPhaseAcc >= MOD_STEP_CYCLES) {
+        this.modPhaseAcc -= MOD_STEP_CYCLES;
+        const raw = this.modTable[this.modTablePos];
+        this.modTablePos = (this.modTablePos + 1) & (MOD_STEPS - 1);
+        if (raw === 4) {
+          this.modCounter = 0; // リセット
+        } else {
+          let c = this.modCounter + MOD_TABLE_DELTA[raw];
+          if (c > 63) c -= 128; else if (c < -64) c += 128; // 7bit折り返し
+          this.modCounter = c;
+        }
+      }
+    }
+
+    // 変調適用後の周波数(内部単位)。NSFPlay nes_fds.cpp の "complex mod calculation" と同じ式。
+    // $4087 で停止中でも効く(カウンタは止まったまま = $4085 直書きの固定ベンド)
+    _modulatedFreq() { return FDSAudio.modulatedFreq(this.freq, this.modCounter, this.modGain); }
+
+    /**
+     * 変調式そのもの(純関数)。freq=$4082/83 の12bit周期値、counter=モジュレータカウンタ(-64..63)、
+     * gain=$4084 のゲイン。戻り値は変調後の周期値(内部単位、freq と同じ)。
+     * nsf2mml($4085 直書きの固定ベンドを音符/Dへ落とす)からも使う。
+     */
+    static modulatedFreq(freq, counter, gain) {
+      if (gain === 0 || counter === 0) return freq;
+      let temp = counter * gain;
+      const rem = temp & 0x0F;
+      temp >>= 4; // 算術シフト(符号保持)
+      if (rem > 0 && (temp & 0x80) === 0) temp += (counter < 0) ? -1 : 2;
+      while (temp >= 192) temp -= 256; // 8bitの折り返し(-64..191)
+      while (temp < -64) temp += 256;
+      temp = freq * temp;
+      const r2 = temp & 0x3F;
+      temp >>= 6;
+      if (r2 >= 32) temp += 1;
+      return freq + temp; // temp >= -freq なので負にならない
+    }
+
+    /**
+     * 表示専用の早送り: 変調ユニットとエンベロープだけを cycles CPUサイクル分進め、その間の
+     * 実効周波数(effectiveFreqと同じ内部単位)の平均/最小/最大を返す。音は作らない。
+     * ピアノロール構築(src/ui/keyboard.js buildFdsModSnapshots)が writeLog から
+     * 「フレーム内でピッチがどれだけ動いたか」を復元するのに使う。1フレーム=約29780サイクルを
+     * clock()で1サイクルずつ回すと1曲で数億回になるため、STEP サイクル刻みの粗い歩進にしてある
+     * (変調テーブルの歩進は最速でも16サイクルに1回なので、表示用には十分)。
+     * 歩進と変調式は clock() と同じ _stepMod / _modulatedFreq を使う(式の二重管理はしない)。
+     * @returns {{mean:number,min:number,max:number}|null} 発音していない/変調が効いていない間は null
+     */
+    advanceForDisplay(cycles) {
+      const STEP = 16;
+      const envPeriod = (this.envRate + 1) * 8;
+      let sum = 0, n = 0, min = Infinity, max = -Infinity;
+      for (let c = 0; c < cycles; c += STEP) {
+        const step = Math.min(STEP, cycles - c); // 端数を切り上げない(切り上げると clock() と位置がずれていく)
+        this.envRateClock += step;
+        while (this.envRateClock >= envPeriod) { this.envRateClock -= envPeriod; this._clockEnvelope(); }
+        this._stepMod(step);
+        if (this.disabled || this.freq === 0) continue;
+        const eff = this._modulatedFreq();
+        sum += eff; n++;
+        if (eff < min) min = eff;
+        if (eff > max) max = eff;
+      }
+      return n > 0 ? { mean: sum / n, min, max } : null;
+    }
+
+    mixSample() {
+      if (this.disabled || this.mute.wave) return 0;
+      const index = Math.floor(this.phaseAcc / 65536) % 64;
+      const sample = this.wave[index] & 0x3F; // 0-63
+      const centered = sample - 32; // -32..31
+      // 実機の有効ゲインは32で頭打ち(33-63を書いても32相当。以前はクランプ漏れで最大約2倍
+      // 大きく鳴っていた、2026-08-24)
+      const volScale = Math.min(32, this.volGain) / 32;
+      const masterScale = MASTER_VOLUME_SCALE[this.masterVolume & 0x03];
+      // FDS 混合係数: NES 実機の抵抗網 (FDS=47Ω直列, 2A03=100Ω直列, 負荷=39Ω) から
+      // FDS 出力は 2A03 の約 39% 程度に相当。係数 0.20 は実機バランスに合わせた値。
+      return (centered / 32) * volScale * masterScale * 0.20 * this.vol.wave;
+    }
+  }
+
+  Emu.FDSAudio = FDSAudio;
+})(globalThis);
+
+/*
  * iNES / NES 2.0 ヘッダ (MML.Emu.INES) — 自前 NES エミュレータ(DESIGN-CAPTURE.md §7)の入口
  *
  * 読むのは「遊べる」のに要る項目だけ: PRG/CHR の大きさ、マッパー番号(NES 2.0 なら 12bit)、
@@ -3527,6 +3856,7 @@
   };
 
   INES.describe = function (rom) {
+    if (rom.fds && Emu.FdsDisk) return Emu.FdsDisk.describe(rom);
     return `mapper ${rom.mapper}${rom.submapper ? '.' + rom.submapper : ''}, PRG ${rom.prg.length >> 10}K, CHR ${rom.chr ? (rom.chr.length >> 10) + 'K' : 'RAM ' + (rom.chrRamSize >> 10) + 'K'}, ` +
       `mirror ${rom.mirroring}${rom.battery ? ', battery' : ''}${rom.nes2 ? ', NES2.0' : ''}`;
   };
@@ -4151,6 +4481,238 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
+ * Famicom Disk System (MML.Emu.FdsDisk) — 自前 NES エミュレータの FDS 対応(DESIGN-CAPTURE.md §7、段階 6d)
+ *
+ * ■ ディスク画像
+ *   .fds(先頭 16 バイトの "FDS\x1a" ヘッダは任意、1 面 65500 バイト)をブロック列として読み、ドライブが読む
+ *   「ギャップつきの面」に展開する: 先頭に 28300 ビットのギャップ(0)、各ブロックは $80(ブロック開始マーク)+本体+
+ *   CRC 2 バイト+976 ビットのギャップ。CRC は Mesen と同じ固定値($4D $62)を置く(ドライブ側で CRC エラーを
+ *   報告しないので値は何でもよい。再生側が同じ並びになる)。
+ * ■ ドライブ(RP2C33)
+ *   Mesen の模型に揃える(録音をフレーム単位で比べる基準): モーター停止/ディスク無しで「ヘッド終端」、ヘッド終端
+ *   から 50000 サイクル待って先頭へ、以後 149 サイクルごとに 1 バイト。読みは「ready(bit6)が立ってから最初の
+ *   非 0 バイト($80)でギャップ終わり(このバイトは IRQ を出さない)」、以後は毎バイト転送フラグ+IRQ(bit7)。
+ *   $4030 の CRC エラービットは .fds では常に 0(Mesen 同様)。面の終わりでモーター停止。
+ * ■ メモリ
+ *   $6000-$DFFF 32K RAM、$E000-$FFFF BIOS(8K、利用者が用意する disksys.rom)、CHR RAM 8K、ミラーリングは $4025 bit3。
+ *   タイマ IRQ($4020-$4022)、音源 $4040-$408A は NSF 用の Emu.FDSAudio。
+ * ■ 録音
+ *   FDS の音源レジスタは VGM の標準部分($4023/$4040-$408A → 0xB4)。extBits は 0x04。
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const SIDE_SIZE = 65500;
+  const NO_DISK = -1;
+
+  function isFds(bytes) {
+    if (!bytes || bytes.length < 16) return false;
+    if (bytes[0] === 0x46 && bytes[1] === 0x44 && bytes[2] === 0x53 && bytes[3] === 0x1A) return true;
+    if (bytes[0] !== 0x01) return false;
+    const s = '*NINTENDO-HVC*';
+    for (let i = 0; i < s.length; i++) if (bytes[1 + i] !== s.charCodeAt(i)) return false;
+    return true;
+  }
+
+  // 1 面(65500 バイトのブロック列)→ ギャップつきの面(65500 バイト)
+  function buildSide(raw) {
+    const out = [];
+    for (let i = 0; i < 28300 / 8; i++) out.push(0);
+    let i = 0;
+    while (i < raw.length) {
+      const type = raw[i];
+      let len = 1;
+      switch (type) {
+        case 1: len = 56; break;
+        case 2: len = 2; break;
+        case 3: len = 16; break;
+        case 4: len = 1 + raw[i - 3] + raw[i - 2] * 0x100; break;
+        default: len = 0;
+      }
+      if (!len) break;
+      out.push(0x80);
+      for (let k = 0; k < len; k++) out.push(raw[i + k] || 0);
+      out.push(0x4D, 0x62);
+      for (let k = 0; k < 976 / 8; k++) out.push(0);
+      i += len;
+    }
+    const side = new Uint8Array(Math.max(SIDE_SIZE, out.length));
+    side.set(out);
+    return side;
+  }
+
+  function parse(bytes) {
+    if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
+    if (!isFds(bytes)) throw new Error('FDS ディスク画像ではありません');
+    let off = 0, n;
+    if (bytes[0] === 0x46) { n = bytes[4] || Math.floor((bytes.length - 16) / SIDE_SIZE); off = 16; }
+    else n = Math.max(1, Math.floor(bytes.length / SIDE_SIZE));
+    const raw = [], sides = [], headers = [];
+    for (let s = 0; s < n; s++) {
+      const r = new Uint8Array(SIDE_SIZE);
+      r.set(bytes.subarray(off + s * SIDE_SIZE, Math.min(bytes.length, off + (s + 1) * SIDE_SIZE)));
+      raw.push(r); sides.push(buildSide(r)); headers.push(r.slice(1, 57));
+    }
+    return { fds: true, mapper: 20, sides, raw, headers, prg: new Uint8Array(0), chr: null, chrRamSize: 0x2000, prgRamSize: 0x8000, mirroring: 'H', fourScreen: false, battery: false, nes2: false, submapper: 0, trainer: false };
+  }
+
+  function describe(rom) {
+    const h = rom.headers[0] || new Uint8Array(56);
+    const name = String.fromCharCode(h[0x0F], h[0x10], h[0x11]).replace(/[^\x20-\x7E]/g, '?');
+    return `FDS ${rom.sides.length} 面, ${name}, mirror ${rom.mirroring}`;
+  }
+
+  class FdsMapper extends Emu.NesMappers.Mapper {
+    constructor(rom, bios) {
+      if (!bios || bios.length < 0x2000) throw new Error('FDS BIOS (disksys.rom、8K) が必要です');
+      super(rom);
+      this.bios = bios instanceof Uint8Array ? bios.subarray(bios.length - 0x2000) : new Uint8Array(bios).subarray(bios.length - 0x2000);
+      this.ram = new Uint8Array(0x8000);
+      this.audio = Emu.FDSAudio ? new Emu.FDSAudio() : null;
+      this.extBits = 0x04;
+      this.sides = rom.sides;
+      this.diskNumber = rom.sides.length ? 0 : NO_DISK;
+      // タイマ
+      this.irqReload = 0; this.irqCounter = 0; this.irqEnable = false; this.irqRepeat = false; this.timerIrq = false;
+      this.diskRegEnabled = true; this.soundRegEnabled = true;
+      // ドライブ
+      this.writeDataReg = 0; this.readDataReg = 0; this.extCon = 0;
+      this.motorOn = false; this.resetTransfer = false; this.readMode = false; this.crcControl = false; this.diskReady = false; this.diskIrqEnabled = false;
+      this.endOfHead = false; this.scanningDisk = false; this.gapEnded = true; this.transferComplete = false; this.diskIrq = false;
+      this.diskPosition = 0; this.delay = 0; this.crcAcc = 0; this.prevCrcControl = false;
+      this.audioShadow = new Int16Array(0xA0).fill(-1); // $4000-$409F の影($4023, $4040-$409E)
+    }
+    // ── 録音 ──
+    audioAddr(addr) { return (addr === 0x4023 || (addr >= 0x4040 && addr <= 0x409E)) ? addr : -1; }
+    audioImage() {
+      const out = [], sh = this.audioShadow;
+      let any = false;
+      for (let a = 0x4040; a <= 0x409E; a++) if (sh[a - 0x4000] >= 0) { any = true; break; }
+      if (!any) return out;
+      out.push({ addr: 0x4023, value: sh[0x23] >= 0 ? sh[0x23] : 0x83 });
+      out.push({ addr: 0x4089, value: 0x80 }); // 波形 RAM 書き込み許可
+      for (let a = 0x4040; a <= 0x407F; a++) if (sh[a - 0x4000] >= 0) out.push({ addr: a, value: sh[a - 0x4000] });
+      for (let a = 0x4080; a <= 0x408A; a++) if (a !== 0x4088 && sh[a - 0x4000] >= 0) out.push({ addr: a, value: sh[a - 0x4000] }); // $4088(変調 FIFO)は復元できない。$4089 は本来の値で書き戻す
+      return out;
+    }
+    // ── ディスク ──
+    get diskCount() { return this.sides.length; }
+    insertDisk(n) { if (this.diskNumber === NO_DISK && this.sides.length) this.diskNumber = ((n % this.sides.length) + this.sides.length) % this.sides.length; }
+    ejectDisk() { this.diskNumber = NO_DISK; }
+    // ── CPU ──
+    cpuRead(addr) {
+      if (addr >= 0xE000) return this.bios[addr - 0xE000];
+      if (addr >= 0x6000) return this.ram[addr - 0x6000];
+      switch (addr) {
+        case 0x4030: {
+          let v = 0; // open bus のビット(2,5)は本体が足す
+          if (this.timerIrq) v |= 0x01;
+          if (this.transferComplete) v |= 0x02;
+          if (this.ntMap[1] === 0) v |= 0x08; // 水平ミラー(ntMap が [0,0,1,1])
+          this.transferComplete = false; this.timerIrq = false; this.diskIrq = false;
+          return v;
+        }
+        case 0x4031: this.transferComplete = false; this.diskIrq = false; return this.readDataReg;
+        case 0x4032: {
+          let v = 0;
+          if (this.diskNumber === NO_DISK) v |= 0x07;
+          else if (!this.scanningDisk) v |= 0x02;
+          return v;
+        }
+        case 0x4033: return this.extCon;
+        case 0x4090: case 0x4092: return this.audio ? this.audio.readRegister(addr) : 0;
+      }
+      return -1;
+    }
+    cpuWrite(addr, v) {
+      if (addr >= 0xE000) return;
+      if (addr >= 0x6000) { this.ram[addr - 0x6000] = v; return; }
+      if (addr >= 0x4040) {
+        if (addr <= 0x409E) this.audioShadow[addr - 0x4000] = v;
+        if (this.soundRegEnabled && this.audio) this.audio.writeRegister(addr, v);
+        return;
+      }
+      if (!this.diskRegEnabled && addr >= 0x4024 && addr <= 0x4026) return;
+      switch (addr) {
+        case 0x4020: this.irqReload = (this.irqReload & 0xFF00) | v; break;
+        case 0x4021: this.irqReload = (this.irqReload & 0x00FF) | (v << 8); break;
+        case 0x4022:
+          this.irqRepeat = (v & 1) !== 0;
+          this.irqEnable = (v & 2) !== 0 && this.diskRegEnabled;
+          if (this.irqEnable) this.irqCounter = this.irqReload; else this.timerIrq = false;
+          break;
+        case 0x4023:
+          this.audioShadow[0x23] = v;
+          this.diskRegEnabled = (v & 1) !== 0; this.soundRegEnabled = (v & 2) !== 0;
+          if (!this.diskRegEnabled) { this.irqEnable = false; this.timerIrq = false; this.diskIrq = false; }
+          if (this.audio) this.audio.writeRegister(0x4023, v);
+          break;
+        case 0x4024: this.writeDataReg = v; this.transferComplete = false; this.diskIrq = false; break;
+        case 0x4025:
+          this.motorOn = (v & 0x01) !== 0; this.resetTransfer = (v & 0x02) !== 0; this.readMode = (v & 0x04) !== 0;
+          this.setMirroring((v & 0x08) ? 'H' : 'V');
+          this.crcControl = (v & 0x10) !== 0; this.diskReady = (v & 0x40) !== 0; this.diskIrqEnabled = (v & 0x80) !== 0;
+          this.diskIrq = false;
+          break;
+        case 0x4026: this.extCon = v; break;
+      }
+    }
+    irqPending() { return this.timerIrq || this.diskIrq; }
+    cpuClock(cycles) {
+      for (let c = 0; c < cycles; c++) {
+        if (this.irqEnable) {
+          if (this.irqCounter === 0) { this.timerIrq = true; this.irqCounter = this.irqReload; if (!this.irqRepeat) this.irqEnable = false; }
+          else this.irqCounter--;
+        }
+        this._driveClock();
+      }
+    }
+    _crc(value) {
+      let acc = this.crcAcc;
+      for (let n = 0x01; n <= 0x80; n <<= 1) {
+        const carry = acc & 1;
+        acc >>= 1;
+        if (carry) acc ^= 0x8408;
+        if (value & n) acc ^= 0x8000;
+      }
+      this.crcAcc = acc;
+    }
+    _driveClock() {
+      if (this.diskNumber === NO_DISK || !this.motorOn) { this.endOfHead = true; this.scanningDisk = false; return; }
+      if (this.resetTransfer && !this.scanningDisk) return;
+      if (this.endOfHead) { this.delay = 50000; this.endOfHead = false; this.diskPosition = 0; this.gapEnded = false; return; }
+      if (this.delay > 0) { this.delay--; return; }
+      this.scanningDisk = true;
+      const side = this.sides[this.diskNumber];
+      let needIrq = this.diskIrqEnabled;
+      let data = 0;
+      if (this.readMode) {
+        data = side[this.diskPosition];
+        if (!this.prevCrcControl) this._crc(data);
+        if (!this.diskReady) { this.gapEnded = false; this.crcAcc = 0; }
+        else if (data && !this.gapEnded) { this.gapEnded = true; needIrq = false; }
+        if (this.gapEnded) { this.transferComplete = true; this.readDataReg = data; if (needIrq) this.diskIrq = true; }
+      } else {
+        if (!this.crcControl) { this.transferComplete = true; data = this.writeDataReg; if (needIrq) this.diskIrq = true; }
+        if (!this.diskReady) { data = 0; this.crcAcc = 0; }
+        if (!this.crcControl) this._crc(data);
+        else { data = this.crcAcc & 0xFF; this.crcAcc >>= 8; }
+        side[this.diskPosition] = data;
+        this.gapEnded = false;
+      }
+      this.prevCrcControl = this.crcControl;
+      this.diskPosition++;
+      if (this.diskPosition >= side.length) { this.motorOn = false; if (this.diskIrqEnabled) this.diskIrq = true; }
+      else this.delay = 149;
+    }
+  }
+
+  Emu.FdsDisk = { isFds, parse, buildSide, describe, Mapper: FdsMapper, SIDE_SIZE };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
  * 2C02 PPU (MML.Emu.PPU) — 自前 NES エミュレータ(DESIGN-CAPTURE.md §7)
  *
  * ドット単位で動く(1 CPU サイクル = 3 ドット、1 行 341 ドット、262 行)。「遊べる」に要る物を実装する:
@@ -4465,9 +5027,17 @@
   const AUDIO_RING = 1 << 14;
 
   class NesConsole {
-    constructor(romBytes) {
-      this.rom = Emu.INES.parse(romBytes);
-      this.mapper = Emu.NesMappers.create(this.rom);
+    // opts.bios: FDS の BIOS(disksys.rom、8K)。.fds を開くときだけ要る
+    constructor(romBytes, opts) {
+      opts = opts || {};
+      if (!(romBytes instanceof Uint8Array)) romBytes = new Uint8Array(romBytes);
+      if (Emu.FdsDisk && Emu.FdsDisk.isFds(romBytes)) {
+        this.rom = Emu.FdsDisk.parse(romBytes);
+        this.mapper = new Emu.FdsDisk.Mapper(this.rom, opts.bios);
+      } else {
+        this.rom = Emu.INES.parse(romBytes);
+        this.mapper = Emu.NesMappers.create(this.rom);
+      }
       this.ppu = new Emu.PPU(this.mapper);
       this.apu = new Emu.APU2A03(this);
       this.cpu = new Emu.CPU6502(this);
@@ -4504,6 +5074,11 @@
 
     setSampleRate(sr) { this.sampleRate = sr; this.cycleAccum = 0; this.ringHead = 0; this.ringLen = 0; }
     setController(port, bits) { this.pad[port & 1] = bits & 0xFF; }
+    // FDS のディスク(面)。.fds 以外では 0 面
+    get diskCount() { return this.mapper.sides ? this.mapper.sides.length : 0; }
+    get diskNumber() { return this.mapper.sides ? this.mapper.diskNumber : -1; }
+    insertDisk(n) { if (this.mapper.insertDisk) this.mapper.insertDisk(n); }
+    ejectDisk() { if (this.mapper.ejectDisk) this.mapper.ejectDisk(); }
     // NSF ヘッダと同じ拡張音源ビット(録音の NESX ヘッダ用)
     extBits() { return this.mapper.audio ? (this.mapper.extBits || 0) : 0; }
     // フレーム内の時刻(0〜1)。PPU の位置から出す(書き込みの t と録音の精度はこれ)
@@ -4737,14 +5312,18 @@
       try {
         switch (m.type) {
           case 'load': {
-            const nes = new MML.Emu.NesConsole(new Uint8Array(m.rom));
+            const nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });
             nes.setSampleRate(sampleRate);
             nes.onFrame = () => this.onFrame();
             this.nes = nes;
             this.dcX = 0; this.dcY = 0;
-            this.port.postMessage({ type: 'loaded', info: MML.Emu.INES.describe(nes.rom), extBits: nes.extBits(), sampleRate });
+            this.port.postMessage({ type: 'loaded', info: MML.Emu.INES.describe(nes.rom), extBits: nes.extBits(), sampleRate, disks: nes.diskCount });
             break;
           }
+          case 'disk': // FDS: side < 0 で取り出し、0 以上でその面を入れる
+            if (!this.nes) break;
+            if (m.side < 0) this.nes.ejectDisk(); else this.nes.insertDisk(m.side | 0);
+            break;
           case 'pad': if (this.nes) this.nes.setController(m.port | 0, m.bits | 0); break;
           case 'reset': if (this.nes) this.nes.reset(); break;
           case 'pause': this.paused = !!m.on; break;

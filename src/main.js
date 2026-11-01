@@ -4906,7 +4906,7 @@
   // (2026-09-23: スマホでは accept の絞り込みが無いので .nsf を選べてしまい、バイナリがそのまま
   //  エディタに流し込まれていた)。実体は initUnifiedSoundFileWindow 内で設定する
   let openSoundFileAndPlay = null;
-  const SOUND_FILE_EXTS = new Set(['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn', 'nes']);
+  const SOUND_FILE_EXTS = new Set(['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn', 'nes', 'fds']);
   async function openMmlTextFile(file, handle, extraFiles) {
     if (!file) return false;
     const ext = file.name.split('.').pop().toLowerCase();
@@ -10494,8 +10494,8 @@
         alert(T('.psflib は曲ではなく共通部品です。.minipsf と一緒に選ぶか、zip のまま開いてください。'));
         return false;
       }
-      // .nes(iNES ROM)は自前 NES エミュレータの画面へ(DESIGN-CAPTURE.md §7 段階 6a。再生系には載らない)
-      if (ext === 'nes') {
+      // .nes(iNES ROM)/.fds(ディスク画像)は自前 NES エミュレータの画面へ(DESIGN-CAPTURE.md §7 段階 6a/6d。再生系には載らない)
+      if (ext === 'nes' || ext === 'fds') {
         try {
           MML.UI.NesScreen.open(new Uint8Array(await file.arrayBuffer()), file.name);
         } catch (e) {

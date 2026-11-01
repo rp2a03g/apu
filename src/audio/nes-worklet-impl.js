@@ -30,14 +30,18 @@
       try {
         switch (m.type) {
           case 'load': {
-            const nes = new MML.Emu.NesConsole(new Uint8Array(m.rom));
+            const nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });
             nes.setSampleRate(sampleRate);
             nes.onFrame = () => this.onFrame();
             this.nes = nes;
             this.dcX = 0; this.dcY = 0;
-            this.port.postMessage({ type: 'loaded', info: MML.Emu.INES.describe(nes.rom), extBits: nes.extBits(), sampleRate });
+            this.port.postMessage({ type: 'loaded', info: MML.Emu.INES.describe(nes.rom), extBits: nes.extBits(), sampleRate, disks: nes.diskCount });
             break;
           }
+          case 'disk': // FDS: side < 0 で取り出し、0 以上でその面を入れる
+            if (!this.nes) break;
+            if (m.side < 0) this.nes.ejectDisk(); else this.nes.insertDisk(m.side | 0);
+            break;
           case 'pad': if (this.nes) this.nes.setController(m.port | 0, m.bits | 0); break;
           case 'reset': if (this.nes) this.nes.reset(); break;
           case 'pause': this.paused = !!m.on; break;

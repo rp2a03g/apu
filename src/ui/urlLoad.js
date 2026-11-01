@@ -46,7 +46,7 @@
 
   // openSoundFile() が知っている拡張子。URL末尾の綴りがこの中に無ければマジックで判定する
   const KNOWN_EXTS = ['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz',
-                      'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn', 'mml', 'txt', 'nes'];
+                      'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn', 'mml', 'txt', 'nes', 'fds'];
 
   /**
    * クエリ文字列を読む。無指定なら null。
@@ -88,6 +88,7 @@
     const head4 = str(0, 4);
     if (head4 === 'NESM' && b[4] === 0x1a) return 'nsf';
     if (str(0, 3) === 'NES' && b[3] === 0x1a) return 'nes'; // iNES ROM(自前 NES エミュレータ、src/ui/nesScreen.js)
+    if ((str(0, 3) === 'FDS' && b[3] === 0x1a) || (b[0] === 0x01 && str(1, 15) === '*NINTENDO-HVC*')) return 'fds'; // FDS ディスク画像(同上)
     if (head4 === 'NSFE') return 'nsfe';
     if (head4 === 'KSCC' || head4 === 'KSSX') return 'kss';
     if (head4 === 'HESM') return 'hes';
