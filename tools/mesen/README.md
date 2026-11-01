@@ -109,6 +109,19 @@ NSF と違って曲を切り出す必要がなく、ROM さえあればよい。
 node tools/live/vgm-ws-relay.js rec.vgm --loop
 ```
 
+## 自前 NES エミュレータの基準画面(ref-screenshot.lua)
+
+`ref-screenshot.lua` は「決まったフレームにボタンを押し、決まったフレームで画面を PNG に保存」する
+(冒頭の CFG を書き換える)。`tools/headless/nes-run.js` の `--press` と同じ指定で同じフレームの画面を
+作り、自前エミュレータ(src/emulator/nes/)の画面と見比べる:
+
+```
+Mesen.exe --testRunner "game.nes" "tools/mesen/ref-screenshot.lua" --timeout=120
+node tools/headless/nes-run.js "game.nes" --frames 1301 --press "start:700-710,right:900-1300" --png mine.png
+```
+
+パレットは Mesen と本ツール(nesdev の 2C02 表)で違うので、色ではなく形で比べる。
+
 ## headless テスト(GUI 無し・最高速)
 
 ```

@@ -1673,5 +1673,12 @@
     '再生中の曲の書き込みをその場で流す': 'Feed the playing song\'s writes live',
     '先読み済みの writeLog を再生位置に合わせて1フレームずつ追記する(ライブ入力の無い環境で表示と速さを確かめる用)': 'Append the pre-captured writeLog frame by frame in step with the playback position (to check the display and its speed without a live source)',
     '切断': 'Disconnect',
+    // NES 画面(src/ui/nesScreen.js)
+    '再開': 'Resume',
+    'クリックしてキー入力(十字=矢印、A=X、B=Z、Start=Enter、Select=Shift)': 'Click to send keys (D-pad=arrows, A=X, B=Z, Start=Enter, Select=Shift)',
+    '十字=矢印キー、A=X、B=Z、Start=Enter、Select=Shift(画面をクリックしてから)。ゲームパッドも使えます。音は未対応(段階 6b)': 'D-pad=arrow keys, A=X, B=Z, Start=Enter, Select=Shift (click the screen first). Gamepads work too. No sound yet (stage 6b)',
+    'この ROM は開けません: {msg}': 'Cannot open this ROM: {msg}',
+    'NES 画面': 'NES screen',
+    'NES 画面 (.nes を開いて遊ぶ)': 'NES screen (open a .nes and play)',
   });
 })(typeof window !== 'undefined' ? window : globalThis);

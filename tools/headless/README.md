@@ -23,6 +23,7 @@ export PATH="$PATH:/path/to/nodejs"
 | `load.js` | `index.html` の script を順に読み込む。単体実行で読み込みレポート |
 | `shim.js` | 最小のDOM/AudioContext/Workerシム。UIコードが読み込み時に落ちないための張りぼて |
 | `convert.js` | 変換API + CLI(NSF/SPC/KSS/GBS/HES/VGM/PSF、zip/7z/gzip内も可。PSFの `_lib` は同じzip/フォルダから引く) |
+| `nes-run.js` | 自前 NES エミュレータ(`src/emulator/nes/`)をヘッドレスで回して画面を PNG に書く。`--press "start:400-410,right:500-900"` でボタン、`--png-every` で途中の画面、`--audio` で WAV。Mesen の `tools/mesen/ref-screenshot.lua` と同じフレームの画面を比べる |
 | `live-roll-test.js` | ライブ表示(ロール追記モード)の点検。先読みのタイムラインのハッシュ(HEAD の worktree と比べる)、追記(`liveAppendFrame`)が同じ材料の一括構築と一致すること、1 フレームの追記時間、過去向きの座標系の自己検査 |
 | `vgm-clean-test.js` | 録音の補正(変換設定 SFX_REMOVE / LAG_FIX、`src/vgm/vgmClean.js`)の点検。NSF→VGM に効果音と空フレームを人工的に混ぜ、OFF の不変性と「効果音が残らない・フレーム数が戻る」を見る。`--vgm` で実ファイルの OFF 不変性も |
 | `nsf2vgm.js` | NSF → VGM(NES APU)書き出し。Mesen 用録音スクリプト(`tools/mesen/`)と同じ符号化(735サンプル=1フレーム固定、DPCM はデータブロック 0xC2)。拡張音源(VRC6/VRC7/MMC5/N163/SUNSOFT 5B)は規格外の NESX ブロック(`src/vgm/vgmHeader.js` VGM.NESX)で運ぶ。VGM 経路の変換が NSF 直接変換と一致するかの A/B 用 |

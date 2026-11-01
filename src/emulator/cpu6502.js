@@ -46,6 +46,23 @@
       this.callActive = false;
     }
 
+    // --- 割り込み(NES 本体 src/emulator/nes/nesConsole.js 用。NSF 再生は使わない) ---
+    // 現在の PC と P(B クリア・U セット)を積み、I を立ててベクタへ飛ぶ。戻り値は消費サイクル(7)
+    interrupt(vector) {
+      this.push((this.PC >> 8) & 0xFF);
+      this.push(this.PC & 0xFF);
+      this.push((this.P | F_U) & ~F_B);
+      this.setFlag(F_I, true);
+      this.PC = this.read16(vector);
+      return 7;
+    }
+    // 次に実行する命令の基本サイクル数(ページ跨ぎ等の追加分を含まない)。NES 本体が「最後の 1 サイクルで
+    // メモリアクセスが起きる」近似のため、命令の実行前に周辺を進める量を決めるのに使う。未定義命令は 2
+    peekCycles() { const def = OPS[this.bus.read(this.PC) & 0xFF]; return def ? def.cycles : 2; }
+    nmi() { return this.interrupt(0xFFFA); }
+    irq() { return this.interrupt(0xFFFE); }
+    irqInhibited() { return (this.P & F_I) !== 0; }
+
     // --- メモリアクセス ---
     read(addr) { return this.bus.read(addr & 0xFFFF) & 0xFF; }
     write(addr, value) { this.bus.write(addr & 0xFFFF, value & 0xFF); }
