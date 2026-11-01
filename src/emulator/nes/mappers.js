@@ -1,8 +1,15 @@
 /*
  * NES マッパー (MML.Emu.NesMappers) — 自前 NES エミュレータのバンク機構
  *
- * 対応: 0 NROM / 1 MMC1 / 2 UxROM / 3 CNROM / 4 MMC3 / 7 AxROM / 19 Namco 163 / 206 Namco 108(DxROM)。
- * 拡張音源つきのうち 19 は NSF 用の音源(Emu.N163Audio)をそのまま挿す。他(VRC6/VRC7/MMC5/5B)は 6c。
+ * 対応: 0 NROM / 1 MMC1 / 2 UxROM / 3 CNROM / 4 MMC3 / 5 MMC5 / 7 AxROM / 19 Namco 163 / 24,26 VRC6 /
+ *       69 Sunsoft FME-7・5B / 85 VRC7 / 206 Namco 108(DxROM)。
+ * 拡張音源つきの基板(5/19/24/26/69/85)は NSF 用の音源(Emu.VRC6Audio/VRC7Audio/MMC5Audio/N163Audio/FME7Audio)を
+ * そのまま this.audio に挿し、extBits(NSF ヘッダと同じビット。録音の NESX ヘッダ用)を立てる。
+ *   audioAddr(addr): CPU の書き込み番地を音源レジスタの正規の番地(NSF/VGM の慣例)に直す。音源でなければ -1。
+ *     VRC6b(26)は A0/A1 を入れ替えて VRC6a の番地に、VRC7 は未使用のアドレス線を無視、5B は $C000/$E000 に畳む
+ *     (tools/mesen/vgm-recorder.lua と同じ規則。録音のフレーム比較が同じ番地で揃う)。
+ *   audioReadAddr(addr): 副作用のある読み出し(N163 $4800)。
+ *   audioImage(): 録音開始時に先頭へ置く「今の音源の状態」を書き込み列で返す(影レジスタから。Mesen の録音と同じ順)。
  *
  * 作り: PRG は 8K×4 スロット、CHR は 1K×8 スロットの対応表(prgMap/chrMap)で、マッパーはレジスタ書き込みで
  * 表を書き換えるだけ。ネームテーブルも CIRAM(2K、4 画面なら 4K)の 1K ページ表(ntMap)で、ミラーリングは
@@ -37,6 +44,8 @@
       this.chrMap = new Int32Array(8);
       this.ntMap = [0, 0, 1, 1];
       this.audio = null;      // 拡張音源(Emu.N163Audio など)。clock()/mixSample() を持つ
+      this.extBits = 0;
+      this.ppu = null;        // PPU が自分を入れる(MMC5 が描画の位相を見る)
       this.irqFlag = false;
       this.setMirroring(rom.fourScreen ? '4' : rom.mirroring);
       this.setPrg32(0);
@@ -71,6 +80,29 @@
     ppuA12() {}
     cpuClock() {}
     irqPending() { return this.irqFlag; }
+    audioAddr() { return -1; }
+    audioReadAddr() { return -1; }
+    audioImage() { return []; }
+  }
+
+  // VRC4/VRC6/VRC7 共通の IRQ カウンタ(スキャンライン モード=341/3 サイクルごと、サイクル モード=毎サイクル)
+  class VrcIrq {
+    constructor() { this.latch = 0; this.counter = 0; this.enable = false; this.enableAfterAck = false; this.cycleMode = false; this.prescaler = 341; this.flag = false; }
+    writeLatch(v) { this.latch = v; }
+    writeControl(v) {
+      this.enableAfterAck = (v & 1) !== 0; this.enable = (v & 2) !== 0; this.cycleMode = (v & 4) !== 0;
+      this.flag = false;
+      if (this.enable) { this.counter = this.latch; this.prescaler = 341; }
+    }
+    ack() { this.flag = false; this.enable = this.enableAfterAck; }
+    clock(cycles) {
+      if (!this.enable) return;
+      for (let c = 0; c < cycles; c++) {
+        if (!this.cycleMode) { this.prescaler -= 3; if (this.prescaler > 0) continue; this.prescaler += 341; }
+        if (this.counter === 0xFF) { this.counter = this.latch; this.flag = true; }
+        else this.counter++;
+      }
+    }
   }
 
   // 0: NROM
@@ -193,14 +225,24 @@
       for (let i = 0; i < 4; i++) this.chrSlots[8 + i] = -1 - nt[i];
       this.setPrg8(3, this.prgBanks8 - 1);
     }
+    audioAddr(addr) { return (addr & 0xF800) === 0x4800 ? 0x4800 : (addr & 0xF800) === 0xF800 ? 0xF800 : -1; }
+    audioReadAddr(addr) { return (addr & 0xF800) === 0x4800 ? 0x4800 : -1; }
+    audioImage() {
+      const au = this.audio, out = [];
+      if (!au || !au.ram || au.ram.length !== 128) return out;
+      out.push({ addr: 0xF800, value: 0x80 });
+      for (let i = 0; i < 128; i++) out.push({ addr: 0x4800, value: au.ram[i] });
+      out.push({ addr: 0xF800, value: (au.autoInc ? 0x80 : 0) | (au.addr & 0x7F) });
+      return out;
+    }
     cpuRead(addr) {
-      if (addr === 0x4800 && this.audio) return this.audio.readData();
+      if ((addr & 0xF800) === 0x4800 && this.audio) return this.audio.readData();
       if (addr === 0x5000) return this.irqCounter & 0xFF;
       if (addr === 0x5800) return ((this.irqCounter >> 8) & 0x7F) | (this.irqEnable ? 0x80 : 0);
       return super.cpuRead(addr);
     }
     cpuWrite(addr, v) {
-      if (addr === 0x4800) { if (this.audio) this.audio.writeRegister(0x4800, v); return; }
+      if ((addr & 0xF800) === 0x4800) { if (this.audio) this.audio.writeRegister(0x4800, v); return; }
       if (addr === 0x5000) { this.irqCounter = (this.irqCounter & 0x7F00) | v; this.irqFlag = false; return; }
       if (addr === 0x5800) { this.irqCounter = (this.irqCounter & 0x00FF) | ((v & 0x7F) << 8); this.irqEnable = (v & 0x80) !== 0; this.irqFlag = false; return; }
       super.cpuWrite(addr, v);
@@ -238,7 +280,327 @@
     }
   }
 
-  const TABLE = { 0: NROM, 1: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 7: AxROM, 19: Namco163, 206: Namco108 };
+  // 24/26: Konami VRC6(PRG 16K+8K 切替、CHR 1K×8、IRQ、音源。26 は A0/A1 が入れ替わった配線)
+  //   未対応: $B003 の CHR モード(bit0-1,4-6。ほぼ全てのソフトがモード 0=1K×8)、PRG RAM 保護
+  class VRC6 extends Mapper {
+    constructor(rom) {
+      super(rom);
+      this.swapA0A1 = rom.mapper === 26;
+      this.audio = Emu.VRC6Audio ? new Emu.VRC6Audio() : null;
+      this.extBits = 0x01;
+      this.irq = new VrcIrq();
+      this.shadow = new Int16Array(0x10).fill(-1); // 音源 9 レジスタの影(index = (hi-9)*4+lo)
+      this.setPrg16(0, 0); this.setPrg8(2, -2); this.setPrg8(3, -1);
+    }
+    _canon(addr) { return this.swapA0A1 ? (addr & 0xFFFC) | ((addr & 1) << 1) | ((addr >> 1) & 1) : addr; }
+    audioAddr(addr) {
+      addr = this._canon(addr);
+      const hi = addr & 0xF000, lo = addr & 0x0FFF;
+      return (hi === 0x9000 || hi === 0xA000 || hi === 0xB000) && lo <= 2 ? addr : -1;
+    }
+    audioImage() {
+      const out = [];
+      for (let i = 0; i < 12; i++) { const v = this.shadow[i]; if (v >= 0) out.push({ addr: 0x9000 + ((i >> 2) << 12) + (i & 3), value: v }); }
+      return out;
+    }
+    writeReg(addr, v) {
+      addr = this._canon(addr);
+      const hi = addr & 0xF000, lo = addr & 3;
+      switch (hi) {
+        case 0x8000: this.setPrg16(0, v & 0x0F); break;
+        case 0x9000: case 0xA000:
+          if (lo <= 2) { this.shadow[((hi - 0x9000) >> 12) * 4 + lo] = v; if (this.audio) this.audio.writeRegister(hi + lo, v); }
+          break; // $9003(周波数制御)は未対応
+        case 0xB000:
+          if (lo <= 2) { this.shadow[8 + lo] = v; if (this.audio) this.audio.writeRegister(hi + lo, v); }
+          else this.setMirroring(['V', 'H', '1A', '1B'][(v >> 2) & 3]);
+          break;
+        case 0xC000: this.setPrg8(2, v & 0x1F); break;
+        case 0xD000: this.setChr1(lo, v); break;
+        case 0xE000: this.setChr1(4 + lo, v); break;
+        case 0xF000:
+          if (lo === 0) this.irq.writeLatch(v);
+          else if (lo === 1) this.irq.writeControl(v);
+          else if (lo === 2) this.irq.ack();
+          break;
+      }
+    }
+    cpuClock(cycles) { this.irq.clock(cycles); }
+    irqPending() { return this.irq.flag; }
+  }
+
+  // 85: Konami VRC7(PRG 8K×3 切替、CHR 1K×8、IRQ、FM 音源 $9010/$9030)。
+  //   レジスタの第 2 ビットは A3($x008、VRC7b)でも A4($x010、VRC7a)でも受ける。未対応: PRG RAM 保護
+  class VRC7 extends Mapper {
+    constructor(rom) {
+      super(rom);
+      this.audio = Emu.VRC7Audio ? new Emu.VRC7Audio() : null;
+      this.extBits = 0x02;
+      this.irq = new VrcIrq();
+      this.fmAddr = 0;
+      this.fmShadow = new Int16Array(0x40).fill(-1);
+      this.setPrg8(0, 0); this.setPrg8(1, 1); this.setPrg8(2, 2); this.setPrg8(3, -1);
+    }
+    audioAddr(addr) { const m = addr & 0xF030; return m === 0x9010 ? 0x9010 : m === 0x9030 ? 0x9030 : -1; }
+    audioImage() {
+      const out = [];
+      for (let r = 0; r < 0x40; r++) if (this.fmShadow[r] >= 0) { out.push({ addr: 0x9010, value: r }); out.push({ addr: 0x9030, value: this.fmShadow[r] }); }
+      return out;
+    }
+    writeReg(addr, v) {
+      const hi = addr & 0xF000, second = (addr & 0x18) !== 0;
+      if (hi === 0x9000) {
+        const m = addr & 0x30;
+        if (m === 0x10) { this.fmAddr = v & 0x3F; if (this.audio) this.audio.writeRegister(0x9010, v); return; }
+        if (m === 0x30) { this.fmShadow[this.fmAddr] = v; if (this.audio) this.audio.writeRegister(0x9030, v); return; }
+        if (!second) this.setPrg8(2, v & 0x3F);
+        return;
+      }
+      switch (hi) {
+        case 0x8000: this.setPrg8(second ? 1 : 0, v & 0x3F); break;
+        case 0xA000: case 0xB000: case 0xC000: case 0xD000:
+          this.setChr1(((hi - 0xA000) >> 12) * 2 + (second ? 1 : 0), v); break;
+        case 0xE000:
+          if (!second) {
+            this.setMirroring(['V', 'H', '1A', '1B'][v & 3]);
+            if ((v & 0x40) && this.audio) this.audio.reset(); // bit6: 音源を黙らせる(リセット)
+          } else this.irq.writeLatch(v);
+          break;
+        case 0xF000: if (!second) this.irq.writeControl(v); else this.irq.ack(); break;
+      }
+    }
+    cpuClock(cycles) { this.irq.clock(cycles); }
+    irqPending() { return this.irq.flag; }
+  }
+
+  // 69: Sunsoft FME-7 / 5B(PRG 8K×3 切替 + $6000 は ROM か RAM、CHR 1K×8、16bit サイクル IRQ、5B は AY 系音源
+  //   $C000/$E000)。FME-7(音源無し)のソフトもマッパー番号は同じなので、音源は常に挿す(書かれなければ鳴らない)
+  class Sunsoft5B extends Mapper {
+    constructor(rom) {
+      super(rom);
+      this.audio = Emu.FME7Audio ? new Emu.FME7Audio() : null;
+      this.extBits = 0x20;
+      this.cmd = 0;
+      this.ramAt6000 = false; this.ramEnabled = false; this.rom6000 = 0;
+      this.irqEnable = false; this.counterEnable = false; this.counter = 0xFFFF;
+      this.ayAddr = 0; this.ayShadow = new Int16Array(16).fill(-1);
+      this.setPrg8(0, 0); this.setPrg8(1, 1); this.setPrg8(2, 2); this.setPrg8(3, -1);
+    }
+    audioAddr(addr) { const m = addr & 0xE000; return m === 0xC000 ? 0xC000 : m === 0xE000 ? 0xE000 : -1; }
+    audioImage() {
+      const out = [];
+      for (let r = 0; r < 16; r++) if (this.ayShadow[r] >= 0) { out.push({ addr: 0xC000, value: r }); out.push({ addr: 0xE000, value: this.ayShadow[r] }); }
+      out.push({ addr: 0xC000, value: this.ayAddr });
+      return out;
+    }
+    cpuRead(addr) {
+      if (addr >= 0x6000 && addr < 0x8000) {
+        if (this.ramAt6000) return this.ramEnabled ? this.prgRam[(addr - 0x6000) % this.prgRam.length] : -1;
+        return this.prg[((this.rom6000 % this.prgBanks8) << 13) + (addr & 0x1FFF)];
+      }
+      return super.cpuRead(addr);
+    }
+    cpuWrite(addr, v) {
+      if (addr >= 0x6000 && addr < 0x8000) { if (this.ramAt6000 && this.ramEnabled) this.prgRam[(addr - 0x6000) % this.prgRam.length] = v; return; }
+      super.cpuWrite(addr, v);
+    }
+    writeReg(addr, v) {
+      switch (addr & 0xE000) {
+        case 0x8000: this.cmd = v & 0x0F; break;
+        case 0xA000: this.param(this.cmd, v); break;
+        case 0xC000: this.ayAddr = v & 0x0F; if (this.audio) this.audio.writeRegister(0xC000, v); break;
+        case 0xE000: this.ayShadow[this.ayAddr] = v; if (this.audio) this.audio.writeRegister(0xE000, v); break;
+      }
+    }
+    param(cmd, v) {
+      if (cmd < 8) { this.setChr1(cmd, v); return; }
+      switch (cmd) {
+        case 8: this.ramAt6000 = (v & 0x40) !== 0; this.ramEnabled = (v & 0x80) !== 0; this.rom6000 = v & 0x3F; break;
+        case 9: case 10: case 11: this.setPrg8(cmd - 9, v & 0x3F); break;
+        case 12: this.setMirroring(['V', 'H', '1A', '1B'][v & 3]); break;
+        case 13: this.irqEnable = (v & 1) !== 0; this.counterEnable = (v & 0x80) !== 0; this.irqFlag = false; break;
+        case 14: this.counter = (this.counter & 0xFF00) | v; break;
+        case 15: this.counter = (this.counter & 0x00FF) | (v << 8); break;
+      }
+    }
+    cpuClock(cycles) {
+      if (!this.counterEnable) return;
+      for (let c = 0; c < cycles; c++) {
+        if (this.counter === 0) { this.counter = 0xFFFF; if (this.irqEnable) this.irqFlag = true; }
+        else this.counter--;
+      }
+    }
+  }
+
+  // 5: Nintendo MMC5(ExROM)。PRG モード 0-3($5100)、PRG RAM 64K($5113-$5117 の bit7 で ROM/RAM)、CHR モード 0-3
+  //   ($5101)と 8×16 スプライト時の A/B 2 組、ネームテーブル割当($5105: CIRAM/ExRAM/塗りつぶし)、ExRAM の
+  //   4 モード($5104。モード 1=拡張属性: タイルごとの 4K CHR バンクとパレット)、スキャンライン IRQ($5203/$5204。
+  //   実機と同じく「同じネームテーブル番地の連続 3 回読み」で行を数える)、乗算器($5205/$5206)、音源($5000-$5015)。
+  //   未対応: 縦分割($5200-$5202)、PRG RAM 書き込み保護($5102/$5103)、$5015 の読み出し(音源の状態)
+  class MMC5 extends Mapper {
+    constructor(rom) {
+      super(rom);
+      this.audio = Emu.MMC5Audio ? new Emu.MMC5Audio() : null;
+      this.extBits = 0x08;
+      this.prgRam = new Uint8Array(0x10000);
+      this.exram = new Uint8Array(0x400);
+      this.prgMode = 3; this.chrMode = 3; this.exMode = 0;
+      this.prgRegs = new Uint8Array([0, 0, 0, 0, 0xFF]); // $5113-$5117
+      this.chrRegs = new Uint16Array(12);                 // $5120-$512B
+      this.chrUpper = 0;                                  // $5130
+      this.ntMode = 0; this.fillTile = 0; this.fillAttr = 0;
+      this.lastChrSet = 0;                                // 0=A($5120-27) 1=B($5128-2B)。8×8 スプライト時はこれ
+      this.chrA = new Int32Array(8); this.chrB = new Int32Array(8);
+      this.slotIsRam = [false, false, false, false]; this.slotOff = new Int32Array(4);
+      this.irqCompare = 0; this.irqEnable = false; this.irqPend = false; this.inFrame = false;
+      this.scanline = 0; this.ntLast = -1; this.ntSame = 0; this.idleDots = 0;
+      this.mulA = 0xFF; this.mulB = 0xFF;
+      this.exTile = 0;                                    // 拡張属性モードで最後に読んだネームテーブルの ExRAM バイト
+      this.audioShadow = new Int16Array(0x16).fill(-1);
+      this.applyPrg(); this.applyChr();
+    }
+    audioAddr(addr) { return addr >= 0x5000 && addr <= 0x5015 ? addr : -1; }
+    audioImage() {
+      const out = [];
+      for (const a of [0x5000, 0x5001, 0x5002, 0x5003, 0x5004, 0x5005, 0x5006, 0x5007, 0x5010, 0x5011, 0x5015]) {
+        const v = this.audioShadow[a - 0x5000]; if (v >= 0) out.push({ addr: a, value: v });
+      }
+      return out;
+    }
+    // ── CPU ──
+    cpuRead(addr) {
+      if (addr >= 0x8000) {
+        const s = (addr - 0x8000) >> 13, o = this.slotOff[s] + (addr & 0x1FFF);
+        return this.slotIsRam[s] ? this.prgRam[o % this.prgRam.length] : this.prg[o];
+      }
+      if (addr >= 0x6000) return this.prgRam[(((this.prgRegs[0] & 7) << 13) + (addr & 0x1FFF)) % this.prgRam.length];
+      if (addr >= 0x5C00) return (this.exMode >= 2) ? this.exram[addr & 0x3FF] : -1;
+      switch (addr) {
+        case 0x5204: { const v = (this.irqPend ? 0x80 : 0) | (this.inFrame ? 0x40 : 0); this.irqPend = false; return v; }
+        case 0x5205: return (this.mulA * this.mulB) & 0xFF;
+        case 0x5206: return ((this.mulA * this.mulB) >> 8) & 0xFF;
+      }
+      return -1;
+    }
+    cpuWrite(addr, v) {
+      if (addr >= 0x8000) {
+        const s = (addr - 0x8000) >> 13;
+        if (this.slotIsRam[s]) this.prgRam[(this.slotOff[s] + (addr & 0x1FFF)) % this.prgRam.length] = v;
+        return;
+      }
+      if (addr >= 0x6000) { this.prgRam[(((this.prgRegs[0] & 7) << 13) + (addr & 0x1FFF)) % this.prgRam.length] = v; return; }
+      if (addr >= 0x5C00) { if (this.exMode < 3) this.exram[addr & 0x3FF] = v; return; }
+      if (addr >= 0x5000 && addr <= 0x5015) { this.audioShadow[addr - 0x5000] = v; if (this.audio) this.audio.writeRegister(addr, v); return; }
+      if (addr >= 0x5120 && addr <= 0x512B) {
+        this.chrRegs[addr - 0x5120] = v | (this.chrUpper << 8);
+        this.lastChrSet = addr >= 0x5128 ? 1 : 0;
+        this.applyChr();
+        return;
+      }
+      if (addr >= 0x5113 && addr <= 0x5117) { this.prgRegs[addr - 0x5113] = v; this.applyPrg(); return; }
+      switch (addr) {
+        case 0x5100: this.prgMode = v & 3; this.applyPrg(); break;
+        case 0x5101: this.chrMode = v & 3; this.applyChr(); break;
+        case 0x5104: this.exMode = v & 3; break;
+        case 0x5105: this.ntMode = v; break;
+        case 0x5106: this.fillTile = v; break;
+        case 0x5107: this.fillAttr = (v & 3) * 0x55; break;
+        case 0x5130: this.chrUpper = v & 3; break;
+        case 0x5203: this.irqCompare = v; break;
+        case 0x5204: this.irqEnable = (v & 0x80) !== 0; break;
+        case 0x5205: this.mulA = v; break;
+        case 0x5206: this.mulB = v; break;
+      }
+    }
+    applyPrg() {
+      const r = this.prgRegs, set = (s, reg, bank) => {
+        const isRam = reg < 4 && !(r[reg] & 0x80);
+        this.slotIsRam[s] = isRam;
+        const n = isRam ? 8 : this.prgBanks8;
+        this.slotOff[s] = ((bank % n) + n) % n << 13;
+      };
+      switch (this.prgMode) {
+        case 0: { const b = (r[4] & 0x7C); set(0, 4, b); set(1, 4, b + 1); set(2, 4, b + 2); set(3, 4, b + 3); break; }
+        case 1: { const a = r[2] & 0x7E, b = r[4] & 0x7E; set(0, 2, a); set(1, 2, a + 1); set(2, 4, b); set(3, 4, b + 1); break; }
+        case 2: { const a = r[2] & 0x7E; set(0, 2, a); set(1, 2, a + 1); set(2, 3, r[3] & 0x7F); set(3, 4, r[4] & 0x7F); break; }
+        default: set(0, 1, r[1] & 0x7F); set(1, 2, r[2] & 0x7F); set(2, 3, r[3] & 0x7F); set(3, 4, r[4] & 0x7F);
+      }
+    }
+    applyChr() {
+      const c = this.chrRegs, n = this.chrBanks1, A = this.chrA, B = this.chrB;
+      const put = (map, slot, bank) => { map[slot] = (((bank % n) + n) % n) << 10; };
+      switch (this.chrMode) {
+        case 0: for (let i = 0; i < 8; i++) { put(A, i, c[7] * 8 + i); put(B, i, c[11] * 8 + i); } break;
+        case 1: for (let i = 0; i < 4; i++) { put(A, i, c[3] * 4 + i); put(A, 4 + i, c[7] * 4 + i); put(B, i, c[11] * 4 + i); put(B, 4 + i, c[11] * 4 + i); } break;
+        case 2: for (let i = 0; i < 2; i++) { put(A, i, c[1] * 2 + i); put(A, 2 + i, c[3] * 2 + i); put(A, 4 + i, c[5] * 2 + i); put(A, 6 + i, c[7] * 2 + i);
+          put(B, i, c[9] * 2 + i); put(B, 2 + i, c[11] * 2 + i); put(B, 4 + i, c[9] * 2 + i); put(B, 6 + i, c[11] * 2 + i); } break;
+        default: for (let i = 0; i < 8; i++) { put(A, i, c[i]); put(B, i, c[8 + (i & 3)]); }
+      }
+    }
+    // ── PPU ──
+    _bgFetching() { // 背景の取得中か(8×16 スプライト時の A/B 選択と拡張属性モード用)
+      const p = this.ppu;
+      if (!p || !(p.mask & 0x18)) return false;
+      if (p.scanline >= 240 && p.scanline !== 261) return false;
+      const d = p.dot;
+      return (d >= 1 && d <= 256) || (d >= 321 && d <= 340);
+    }
+    _spriteFetching() { const p = this.ppu; return p && (p.mask & 0x18) && p.dot >= 257 && p.dot <= 320 && (p.scanline < 240 || p.scanline === 261); }
+    _chrMap() {
+      const p = this.ppu;
+      if (p && (p.ctrl & 0x20)) { // 8×16: 背景は B、スプライトは A。描画外は最後に書いた組
+        if (this._spriteFetching()) return this.chrA;
+        if (this._bgFetching()) return this.chrB;
+      }
+      return this.lastChrSet ? this.chrB : this.chrA;
+    }
+    _nt(addr) { return (this.ntMode >> (((addr >> 10) & 3) * 2)) & 3; }
+    ppuRead(addr) {
+      if (addr < 0x2000) {
+        if (this.exMode === 1 && this._bgFetching()) {
+          const bank = ((this.exTile & 0x3F) | (this.chrUpper << 6)) % Math.max(1, this.chrBanks1 >> 2);
+          return this.chr[(bank << 12) + (addr & 0xFFF)];
+        }
+        return this.chr[this._chrMap()[addr >> 10] + (addr & 0x3FF)];
+      }
+      // ネームテーブル。スキャンライン検出: 同じ番地の連続 3 回読み(337・339 ドット目のダミー読みと次の行の 1 ドット目)
+      if (this._bgFetching()) {
+        if (addr === this.ntLast) { if (++this.ntSame === 3) this._scanlineTick(); }
+        else { this.ntLast = addr; this.ntSame = 1; }
+      }
+      const mode = this._nt(addr), lo = addr & 0x3FF, isAttr = lo >= 0x3C0;
+      if (this.exMode === 1 && this._bgFetching()) {
+        if (isAttr) return ((this.exTile >> 6) & 3) * 0x55;
+        this.exTile = this.exram[lo];
+      }
+      switch (mode) {
+        case 0: return this.ciram[lo];
+        case 1: return this.ciram[0x400 | lo];
+        case 2: return this.exMode < 2 ? this.exram[lo] : 0;
+        default: return isAttr ? this.fillAttr : this.fillTile;
+      }
+    }
+    ppuWrite(addr, v) {
+      if (addr < 0x2000) { if (this.chrIsRam) this.chr[this._chrMap()[addr >> 10] + (addr & 0x3FF)] = v; return; }
+      const mode = this._nt(addr), lo = addr & 0x3FF;
+      if (mode === 0) this.ciram[lo] = v;
+      else if (mode === 1) this.ciram[0x400 | lo] = v;
+      else if (mode === 2 && this.exMode < 2) this.exram[lo] = v;
+    }
+    _scanlineTick() {
+      if (!this.inFrame) { this.inFrame = true; this.scanline = 0; this.irqPend = false; }
+      else { this.scanline++; if (this.scanline === this.irqCompare && this.irqCompare !== 0) this.irqPend = true; }
+      this.idleDots = 0;
+    }
+    cpuClock(cycles) {
+      // 描画が止まった(vblank/描画 OFF)ら「フレーム内」を下ろす。実機は NT 読みが 3 行ぶん無いと下りる
+      const p = this.ppu;
+      if (this.inFrame && p && (!(p.mask & 0x18) || (p.scanline >= 240 && p.scanline !== 261))) { this.inFrame = false; this.ntSame = 0; this.ntLast = -1; }
+    }
+    irqPending() { return this.irqPend && this.irqEnable; }
+  }
+
+  const TABLE = { 0: NROM, 1: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 5: MMC5, 7: AxROM, 19: Namco163, 24: VRC6, 26: VRC6, 69: Sunsoft5B, 85: VRC7, 206: Namco108 };
 
   const NesMappers = {
     supported(mapper) { return Object.prototype.hasOwnProperty.call(TABLE, mapper); },
@@ -247,7 +609,7 @@
       if (!C) throw new Error(`マッパー ${rom.mapper} は未対応です(対応: ${Object.keys(TABLE).join(', ')})`);
       return new C(rom);
     },
-    Mapper, MMC3,
+    Mapper, NROM, MMC1, UxROM, CNROM, MMC3, MMC5, AxROM, Namco163, VRC6, Sunsoft5B, VRC7, Namco108,
   };
   Emu.NesMappers = NesMappers;
 })(typeof window !== 'undefined' ? window : globalThis);

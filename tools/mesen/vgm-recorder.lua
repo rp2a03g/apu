@@ -78,7 +78,7 @@ local frameSample = 0        -- 録音開始からの仮想時刻(サンプル)�
 local emittedSamples = 0     -- ここまでに wait として書き出した合計
 local recFrames = 0
 local keyWasDown = false
-local frameStartClock = 0    -- preciseTiming 用: このフレーム頭の CPU サイクル
+local frameStartClock = 0    -- preciseTiming 用: このフレームの原点(endFrame=vblank の頭)の CPU サイクル
 local cyclesPerFrame = 0     -- 直前のフレームの実測(機種に依らない)
 local romName = "rom"
 local romExt = ""
@@ -597,16 +597,18 @@ do
 end
 
 -- ---------------------------------------------------------------- フック(共通)
-local function onStartFrame()
+local function onStartFrame() end
+
+local function onEndFrame()
+  -- preciseTiming 用のフレーム内時刻の原点は endFrame(vblank の頭)。録音のフレーム分けも endFrame なので、
+  -- startFrame(0 行目)を原点にすると NMI の書き込み(vblank 直後)がフレームの末尾 92% に置かれ、
+  -- 同じフレームの後の書き込みより遅い時刻になって順序が崩れる(本体の録音とフレーム内時刻を比べて判明)
   if CFG.preciseTiming then
     local st = emu.getState()
     local c = st.masterClock or 0
     if frameStartClock > 0 and c > frameStartClock then cyclesPerFrame = c - frameStartClock end
     frameStartClock = c
   end
-end
-
-local function onEndFrame()
   -- 録音のトグル(キーの押下エッジ)
   if CFG.toggleKey then
     -- headless(--testRunner)ではキー名を解決できず例外になる。例外が出たらキー監視をやめる

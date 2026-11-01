@@ -125,6 +125,8 @@ node tools/headless/nes-run.js "game.nes" --frames 1301 --press "start:700-710,r
 録音の比較は、このスクリプトの CFG を `autoStart=true, stopAfterFrames=900` にしたコピーで録り、
 `node tools/headless/nes-run.js "game.nes" --frames 900 --vgm mine.vgm` の出力とフレームごとの書き込み列で比べる
 (本体の録音ボタンと同じ経路。2A03 の ROM で 900/900 フレーム一致、N163 の ROM で初期像の 1 フレームを除いて一致)。
+`preciseTiming=true` にするとフレーム内の時刻まで比べられる(時刻の原点はフレームの区切りと同じ endFrame=vblank の頭。
+VRC6/VRC7/MMC5/SUNSOFT 5B の合成 ROM で IRQ の書き込みが ±1/128 フレーム以内に揃う)。
 
 ## headless テスト(GUI 無し・最高速)
 

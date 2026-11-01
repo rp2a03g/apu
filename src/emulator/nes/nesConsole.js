@@ -8,7 +8,7 @@
  *   読みの瞬間とフラグが立つ瞬間の前後関係で結果が変わるため(命令をまるごと先に実行すると NMI ハンドラが
  *   先にフラグを消す側に必ず負けて永久に待つ。実測で踏んだ)。
  * - NMI は PPU の線(vblank フラグ ∧ $2000 bit7)の立ち上がりを命令境界で拾う。IRQ は APU のフレーム/DMC と
- *   マッパー(MMC3/N163)の線の論理和を、I フラグが下りていれば命令境界で受ける。
+ *   マッパー(MMC3/MMC5/N163/VRC6/VRC7/5B)の線の論理和を、I フラグが下りていれば命令境界で受ける。
  * - $4014 OAM DMA は 256 バイトを即座に写し、513/514 サイクルを次の命令に乗せる。
  * - 音: setSampleRate(sr) を呼ぶと周辺を進める中で APU(+拡張音源)の混合をリングバッファへ標本化する。
  *   runFrame() は 1 フレームぶんを返し、runSamples(out) は out.length サンプルぶんだけ進める(AudioWorklet 用)。
@@ -16,7 +16,7 @@
  * - 録音(段階 6b): startRecording() → 以後、音源レジスタの書き込み(2A03/FDS/拡張音源)・N163 $4800 の読み飛ばし・
  *   DPCM の起動(サンプル本体つき)を rec.cur に積み、フレームが終わるたび rec.frames へ移す。書き込みの形は
  *   src/vgm/vgmRecord.js の encodeNesRecording が受ける物({addr,value,t,read?} / {dmc:{addr,data}})。
- *   開始時には今のレジスタ像(2A03 の影 $4000-$4017、N163 の内部 RAM)を書き込みとして先頭に置く
+ *   開始時には今のレジスタ像(2A03 の影 $4000-$4017、拡張音源はマッパーの audioImage())を書き込みとして先頭に置く
  *   (録音は曲の途中から始まるので、鳴っている音の状態が無いと再生側で復元できない)。
  */
 (function (global) {
@@ -90,7 +90,7 @@
         v = this.mapper.cpuRead(addr);
         if (v < 0) v = this.openBus;
         // N163 $4800 の読み出しは内部ポインタを進める副作用がある(録音には読み飛ばしとして載せる)
-        else if (addr === 0x4800 && this.mapper.audio && this.rec) this.rec.cur.push({ addr: 0x4800, value: 0, read: true, t: this._t() });
+        else if (this.rec && addr >= 0x4800) { const ra = this.mapper.audioReadAddr(addr); if (ra >= 0) this.rec.cur.push({ addr: ra, value: 0, read: true, t: this._t() }); }
       }
       this.openBus = v;
       return v;
@@ -121,7 +121,7 @@
         return;
       }
       this.mapper.cpuWrite(addr, v);
-      if (this.mapper.audio && (addr === 0x4800 || addr === 0xF800)) this._logWrite(addr, v);
+      if (this.mapper.audio) { const aa = this.mapper.audioAddr(addr); if (aa >= 0) this._logWrite(aa, v); } // 正規の番地で記録(VRC6b の A0/A1 入れ替えなど)
     }
     _t() { return Math.min(SAMPLES_PER_FRAME - 1, Math.floor(this.frameFrac() * SAMPLES_PER_FRAME)); }
     _logWrite(addr, v) {
@@ -150,12 +150,8 @@
       if (this.apuShadow[0x15] & 0x10) cur.push({ dmc: this.dmcSample() });
       cur.push({ addr: 0x4015, value: this.apuShadow[0x15], t: 0 });
       cur.push({ addr: 0x4017, value: this.apuShadow[0x17], t: 0 });
-      const au = this.mapper.audio;
-      if (au && au.ram && au.ram.length === 128) { // N163: 内部 RAM 128 バイトとアドレスラッチ
-        cur.push({ addr: 0xF800, value: 0x80, t: 0 });
-        for (let i = 0; i < 128; i++) cur.push({ addr: 0x4800, value: au.ram[i], t: 0 });
-        cur.push({ addr: 0xF800, value: (au.autoInc ? 0x80 : 0) | (au.addr & 0x7F), t: 0 });
-      }
+      // 拡張音源の像(マッパーが影レジスタから作る。N163 は内部 RAM 128 バイト、VRC7/5B はレジスタ番号と値の対)
+      if (this.mapper.audio) for (const w of this.mapper.audioImage()) cur.push({ addr: w.addr, value: w.value, t: 0 });
       this.rec = { frames: [], cur };
     }
     // 録音を終えて、フレームごとの書き込み列を返す(最後の途中フレームも含む)

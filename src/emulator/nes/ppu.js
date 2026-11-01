@@ -34,6 +34,7 @@
   class PPU {
     constructor(mapper) {
       this.mapper = mapper;
+      mapper.ppu = this; // MMC5 が描画の位相(ドット・行・$2000/$2001)を見る
       this.palette = new Uint8Array(32);
       this.oam = new Uint8Array(256);
       this.frame = new Uint32Array(256 * 240);

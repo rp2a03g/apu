@@ -200,7 +200,12 @@ $bundles = @(
         Files = @(
             'src\emulator\cpu6502.js',
             'src\emulator\apu2a03.js',
+            'src\emulator\expansion\vrc6.js',
+            'src\emulator\expansion\opllNuked.js',
+            'src\emulator\expansion\vrc7.js',
+            'src\emulator\expansion\mmc5.js',
             'src\emulator\expansion\n163.js',
+            'src\emulator\expansion\fme7.js',
             'src\emulator\nes\ines.js',
             'src\emulator\nes\mappers.js',
             'src\emulator\nes\ppu.js',

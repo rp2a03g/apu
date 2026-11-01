@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-01 12:28:12
+ * Built by tools/build-capture-workers.ps1 at 2026-11-02 00:10:07
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-01 12:28:12';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-02 00:10:07';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -1126,6 +1126,1964 @@
 })(globalThis);
 
 /*
+ * VRC6 拡張音源エミュレータ
+ * MML.Emu.VRC6Audio
+ *
+ * パルス x2 ($9000-$9002 / $A000-$A002) + 矩形波(サウ) ($B000-$B002)
+ * パルスはデューティ比1/16刻みで指定可能(0=幅1/16 ... 15=幅16/16)。
+ * サウ(sawtooth)はNESdev準拠の14ステップアキュムレータ実装(Vrc6Saw.clock()参照)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  class Vrc6Pulse {
+    constructor() {
+      this.duty = 0;
+      this.volume = 0;
+      this.digitized = false;
+      this.enabled = false;
+      this.period = 0;
+      this.timer = 0;
+      this.step = 15; // dutyカウンタは 15→0 のダウンカウント。先頭=15
+    }
+    writeCtrl(value) {
+      this.duty = (value >> 4) & 0x07;
+      this.volume = value & 0x0F;
+      this.digitized = (value & 0x80) !== 0;
+    }
+    writePeriodLo(value) {
+      this.period = (this.period & 0x0F00) | value;
+    }
+    writePeriodHi(value) {
+      this.period = (this.period & 0x00FF) | ((value & 0x0F) << 8);
+      this.enabled = (value & 0x80) !== 0;
+      // NESdev: E=0 で duty カウンタを即リセット＋停止（再有効化で先頭から）
+      if (!this.enabled) { this.step = 15; this.timer = 0; }
+    }
+    clock() {
+      if (!this.enabled) return; // 無効時は停止（カウンタを進めない）
+      if (this.timer === 0) {
+        this.timer = this.period;
+        this.step = (this.step - 1) & 0x0F; // 15→0 ダウンカウント
+      } else {
+        this.timer--;
+      }
+    }
+    output() {
+      if (!this.enabled) return 0;
+      if (this.digitized) return this.volume;
+      return (this.step <= this.duty) ? this.volume : 0;
+    }
+  }
+
+  class Vrc6Saw {
+    constructor() {
+      this.accumRate = 0;
+      this.accum = 0;
+      this.enabled = false;
+      this.period = 0;
+      this.timer = 0;
+      this.step = 0; // 14ステップ周期のカウンタ (0-13)
+    }
+    writeCtrl(value) {
+      this.accumRate = value & 0x3F;
+    }
+    writePeriodLo(value) {
+      this.period = (this.period & 0x0F00) | value;
+    }
+    writePeriodHi(value) {
+      this.period = (this.period & 0x00FF) | ((value & 0x0F) << 8);
+      this.enabled = (value & 0x80) !== 0;
+    }
+    // NESdev準拠: タイマは1 CPUサイクルごと。14ステップ周期で、偶数ステップに accumRate を
+    // 6回加算し、14ステップ目で加算せずアキュムレータを0リセット（＝7段のこぎり波、f=CPU/(14*(t+1))）。
+    clock() {
+      if (!this.enabled) { this.accum = 0; return; } // E=0 でアキュムレータ0固定
+      if (this.timer === 0) {
+        this.timer = this.period;
+        this.step++;
+        if (this.step >= 14) {
+          this.step = 0;
+          this.accum = 0;                 // 7回目の作用クロック = リセット
+        } else if ((this.step & 1) === 0) {
+          this.accum = (this.accum + this.accumRate) & 0xFF; // 偶数ステップで加算(計6回)
+        }
+      } else {
+        this.timer--;
+      }
+    }
+    output() {
+      if (!this.enabled) return 0;
+      return (this.accum >> 3) & 0x1F; // 上位5bit (0-31)
+    }
+  }
+
+  class VRC6Audio {
+    constructor() {
+      this.pulse1 = new Vrc6Pulse();
+      this.pulse2 = new Vrc6Pulse();
+      this.saw = new Vrc6Saw();
+      this.mute = { pulse1: false, pulse2: false, saw: false };
+      this.vol = { pulse1: 1, pulse2: 1, saw: 1 };
+    }
+
+    reset() {
+      this.pulse1 = new Vrc6Pulse();
+      this.pulse2 = new Vrc6Pulse();
+      this.saw = new Vrc6Saw();
+    }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      switch (addr) {
+        case 0x9000: this.pulse1.writeCtrl(value); break;
+        case 0x9001: this.pulse1.writePeriodLo(value); break;
+        case 0x9002: this.pulse1.writePeriodHi(value); break;
+        case 0xA000: this.pulse2.writeCtrl(value); break;
+        case 0xA001: this.pulse2.writePeriodLo(value); break;
+        case 0xA002: this.pulse2.writePeriodHi(value); break;
+        case 0xB000: this.saw.writeCtrl(value); break;
+        case 0xB001: this.saw.writePeriodLo(value); break;
+        case 0xB002: this.saw.writePeriodHi(value); break;
+      }
+    }
+
+    clock() {
+      this.pulse1.clock();
+      this.pulse2.clock();
+      this.saw.clock();
+    }
+
+    // 0.0 ~ 約0.65 (2A03と同程度のレベル感)
+    mixSample() {
+      const p1 = this.mute.pulse1 ? 0 : (this.pulse1.output() / 15) * this.vol.pulse1;   // 0-1
+      const p2 = this.mute.pulse2 ? 0 : (this.pulse2.output() / 15) * this.vol.pulse2;   // 0-1
+      const sw = this.mute.saw ? 0 : (this.saw.output() / 31) * this.vol.saw;         // 0-1
+      return (p1 + p2 + sw) * 0.2;
+    }
+  }
+
+  Emu.VRC6Audio = VRC6Audio;
+})(globalThis);
+
+/*
+ * OPLL (Yamaha YM2413 / Konami VRC VII = DS1001) サイクルアキュレート・エミュレータ
+ * MML.Emu.OPLLNuked
+ *
+ * nukeykt/Nuked-OPLL (opll.c v1.0.2, GPLv2, Copyright (C) 2019-2023 Nuke.YKT) の移植。
+ * 音色ROM・アルゴリズムとも siliconpr0n (digshadow, John McMaster) による
+ * VRC VII decap / die shot 由来。本リポジトリもGPLv2なのでライセンス上の問題は無い。
+ *
+ * 従来の emu2413 0.6x系移植(vrc7.js / opllMsx.js)との違い:
+ *   - 演算器が1個しか無い実チップの18スロット時分割パイプラインをそのまま再現する。
+ *     1サンプル = 18サイクル、各サイクルが1スロットぶんの演算と1chぶんのDAC出力を担う。
+ *   - EGは位相蓄積(dphaseARTable等の近似)ではなく、実機のeg_timer + シフト量テーブル方式。
+ *     キーオン時のDAMP(rate12まで一旦落としてからアタック)も含む。
+ *   - AM/PM LFOがfloat sin近似ではなく実機の整数カウンタ/テーブル。
+ *   - 出力は9bit相当の時分割DACをそのまま合算するため、実機特有の量子化感が出る。
+ *
+ * チップ種別 (constructor の opts.chipType):
+ *   'ds1001'(VRC7): 6メロディch、リズムモード無し(rhythm常時0x20)、音色ROM=patch_ds1001。
+ *   'ym2413'(FMPAC/VGM、既定): 9メロディch、リズムモード有り、音色ROM=patch_ym2413。
+ *
+ * クロック: clock() は「呼び出し側のホストクロック1サイクル」ごとに呼ぶ。OPLLの1内部
+ * サイクルは実チップのマスタクロック4個ぶんなので、
+ *   VRC7 (NSF)      : ホスト=NES CPU 1.789773MHz = マスタ/2 → 2ホストサイクルで1内部サイクル
+ *   FMPAC/VGM       : ホスト=3.579545MHz = マスタそのもの   → 4ホストサイクルで1内部サイクル
+ * どちらも 18内部サイクル = 1サンプル で 49716Hz になる(36 / 72 ホストサイクル)。
+ * ★この非対称はFM-PACのクロック分周と同じ理由。取り違えると1オクターブずれる。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  // ---- EG状態 ----
+  const EG_ATTACK = 0, EG_DECAY = 1, EG_SUSTAIN = 2, EG_RELEASE = 3;
+  // ---- リズムスロット選択 ----
+  const RM_BD0 = 0, RM_HH = 1, RM_TOM = 2, RM_BD1 = 3, RM_SD = 4, RM_TC = 5;
+  const PATCH_DRUM_0 = 15; // patchrom内のドラム音色開始index
+
+  const SAMPLE_RATE = 49716;
+  const CYCLES_PER_SAMPLE = 18; // OPLL内部サイクル/サンプル
+
+  const LOGSIN = new Uint16Array([
+    0x859,0x6c3,0x607,0x58b,0x52e,0x4e4,0x4a6,0x471,0x443,0x41a,0x3f5,0x3d3,0x3b5,0x398,0x37e,
+    0x365,0x34e,0x339,0x324,0x311,0x2ff,0x2ed,0x2dc,0x2cd,0x2bd,0x2af,0x2a0,0x293,0x286,0x279,
+    0x26d,0x261,0x256,0x24b,0x240,0x236,0x22c,0x222,0x218,0x20f,0x206,0x1fd,0x1f5,0x1ec,0x1e4,
+    0x1dc,0x1d4,0x1cd,0x1c5,0x1be,0x1b7,0x1b0,0x1a9,0x1a2,0x19b,0x195,0x18f,0x188,0x182,0x17c,
+    0x177,0x171,0x16b,0x166,0x160,0x15b,0x155,0x150,0x14b,0x146,0x141,0x13c,0x137,0x133,0x12e,
+    0x129,0x125,0x121,0x11c,0x118,0x114,0x10f,0x10b,0x107,0x103,0x0ff,0x0fb,0x0f8,0x0f4,0x0f0,
+    0x0ec,0x0e9,0x0e5,0x0e2,0x0de,0x0db,0x0d7,0x0d4,0x0d1,0x0cd,0x0ca,0x0c7,0x0c4,0x0c1,0x0be,
+    0x0bb,0x0b8,0x0b5,0x0b2,0x0af,0x0ac,0x0a9,0x0a7,0x0a4,0x0a1,0x09f,0x09c,0x099,0x097,0x094,
+    0x092,0x08f,0x08d,0x08a,0x088,0x086,0x083,0x081,0x07f,0x07d,0x07a,0x078,0x076,0x074,0x072,
+    0x070,0x06e,0x06c,0x06a,0x068,0x066,0x064,0x062,0x060,0x05e,0x05c,0x05b,0x059,0x057,0x055,
+    0x053,0x052,0x050,0x04e,0x04d,0x04b,0x04a,0x048,0x046,0x045,0x043,0x042,0x040,0x03f,0x03e,
+    0x03c,0x03b,0x039,0x038,0x037,0x035,0x034,0x033,0x031,0x030,0x02f,0x02e,0x02d,0x02b,0x02a,
+    0x029,0x028,0x027,0x026,0x025,0x024,0x023,0x022,0x021,0x020,0x01f,0x01e,0x01d,0x01c,0x01b,
+    0x01a,0x019,0x018,0x017,0x017,0x016,0x015,0x014,0x014,0x013,0x012,0x011,0x011,0x010,0x00f,
+    0x00f,0x00e,0x00d,0x00d,0x00c,0x00c,0x00b,0x00a,0x00a,0x009,0x009,0x008,0x008,0x007,0x007,
+    0x007,0x006,0x006,0x005,0x005,0x005,0x004,0x004,0x004,0x003,0x003,0x003,0x002,0x002,0x002,
+    0x002,0x001,0x001,0x001,0x001,0x001,0x001,0x001,0x000,0x000,0x000,0x000,0x000,0x000,0x000,
+    0x000
+  ]);
+
+  const EXPROM = new Uint16Array([
+    0x7fa,0x7f5,0x7ef,0x7ea,0x7e4,0x7df,0x7da,0x7d4,0x7cf,0x7c9,0x7c4,0x7bf,0x7b9,0x7b4,0x7ae,
+    0x7a9,0x7a4,0x79f,0x799,0x794,0x78f,0x78a,0x784,0x77f,0x77a,0x775,0x770,0x76a,0x765,0x760,
+    0x75b,0x756,0x751,0x74c,0x747,0x742,0x73d,0x738,0x733,0x72e,0x729,0x724,0x71f,0x71a,0x715,
+    0x710,0x70b,0x706,0x702,0x6fd,0x6f8,0x6f3,0x6ee,0x6e9,0x6e5,0x6e0,0x6db,0x6d6,0x6d2,0x6cd,
+    0x6c8,0x6c4,0x6bf,0x6ba,0x6b5,0x6b1,0x6ac,0x6a8,0x6a3,0x69e,0x69a,0x695,0x691,0x68c,0x688,
+    0x683,0x67f,0x67a,0x676,0x671,0x66d,0x668,0x664,0x65f,0x65b,0x657,0x652,0x64e,0x649,0x645,
+    0x641,0x63c,0x638,0x634,0x630,0x62b,0x627,0x623,0x61e,0x61a,0x616,0x612,0x60e,0x609,0x605,
+    0x601,0x5fd,0x5f9,0x5f5,0x5f0,0x5ec,0x5e8,0x5e4,0x5e0,0x5dc,0x5d8,0x5d4,0x5d0,0x5cc,0x5c8,
+    0x5c4,0x5c0,0x5bc,0x5b8,0x5b4,0x5b0,0x5ac,0x5a8,0x5a4,0x5a0,0x59c,0x599,0x595,0x591,0x58d,
+    0x589,0x585,0x581,0x57e,0x57a,0x576,0x572,0x56f,0x56b,0x567,0x563,0x560,0x55c,0x558,0x554,
+    0x551,0x54d,0x549,0x546,0x542,0x53e,0x53b,0x537,0x534,0x530,0x52c,0x529,0x525,0x522,0x51e,
+    0x51b,0x517,0x514,0x510,0x50c,0x509,0x506,0x502,0x4ff,0x4fb,0x4f8,0x4f4,0x4f1,0x4ed,0x4ea,
+    0x4e7,0x4e3,0x4e0,0x4dc,0x4d9,0x4d6,0x4d2,0x4cf,0x4cc,0x4c8,0x4c5,0x4c2,0x4be,0x4bb,0x4b8,
+    0x4b5,0x4b1,0x4ae,0x4ab,0x4a8,0x4a4,0x4a1,0x49e,0x49b,0x498,0x494,0x491,0x48e,0x48b,0x488,
+    0x485,0x482,0x47e,0x47b,0x478,0x475,0x472,0x46f,0x46c,0x469,0x466,0x463,0x460,0x45d,0x45a,
+    0x457,0x454,0x451,0x44e,0x44b,0x448,0x445,0x442,0x43f,0x43c,0x439,0x436,0x433,0x430,0x42d,
+    0x42a,0x428,0x425,0x422,0x41f,0x41c,0x419,0x416,0x414,0x411,0x40e,0x40b,0x408,0x406,0x403,
+    0x400
+  ]);
+
+  const CH_OFFSET = new Uint8Array([1, 2, 0, 1, 2, 3, 4, 5, 3, 4, 5, 6, 7, 8, 6, 7, 8, 0]);
+  const PG_MULTI = new Uint8Array([1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 20, 24, 24, 30, 30]);
+  const EG_STEPHI = [
+    new Uint8Array([0, 0, 0, 0]),
+    new Uint8Array([1, 0, 0, 0]),
+    new Uint8Array([1, 0, 1, 0]),
+    new Uint8Array([1, 1, 1, 0])
+  ];
+  const EG_KSLTABLE = new Uint8Array([0, 32, 40, 45, 48, 51, 53, 55, 56, 58, 59, 60, 61, 62, 63, 64]);
+
+  // PATCH_DS1001
+  const PATCH_DS1001 = [
+    { tl: 5, dc:0, dm:0, fb:6, am:[0,0], vib:[0,0], et:[0,1], ksr:[0,0], multi:[ 3, 1], ksl:[0,0], ar:[14, 8], dr:[ 8, 1], sl:[ 4, 2], rr:[ 2, 7] }, // @1
+    { tl:20, dc:0, dm:1, fb:5, am:[0,0], vib:[0,1], et:[0,0], ksr:[1,0], multi:[ 3, 1], ksl:[0,0], ar:[13,15], dr:[ 8, 6], sl:[ 2, 1], rr:[ 3, 2] }, // @2
+    { tl: 8, dc:0, dm:1, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[1,1], multi:[ 1, 1], ksl:[0,0], ar:[15,11], dr:[10, 2], sl:[ 2, 1], rr:[ 0, 2] }, // @3
+    { tl:12, dc:0, dm:0, fb:7, am:[0,0], vib:[0,1], et:[1,1], ksr:[1,0], multi:[ 1, 1], ksl:[0,0], ar:[10, 6], dr:[ 8, 4], sl:[ 6, 2], rr:[ 1, 7] }, // @4
+    { tl:30, dc:0, dm:0, fb:6, am:[0,0], vib:[0,0], et:[1,1], ksr:[1,0], multi:[ 2, 1], ksl:[0,0], ar:[14, 7], dr:[ 1, 6], sl:[ 0, 2], rr:[ 1, 8] }, // @5
+    { tl: 6, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 2, 1], ksl:[0,0], ar:[10,14], dr:[ 3, 2], sl:[15,15], rr:[ 4, 4] }, // @6
+    { tl:29, dc:0, dm:0, fb:7, am:[0,0], vib:[0,1], et:[1,1], ksr:[0,0], multi:[ 1, 1], ksl:[0,0], ar:[ 8, 8], dr:[ 2, 1], sl:[ 1, 0], rr:[ 1, 7] }, // @7
+    { tl:34, dc:1, dm:0, fb:7, am:[0,0], vib:[0,0], et:[1,1], ksr:[0,0], multi:[ 3, 1], ksl:[0,0], ar:[10, 7], dr:[ 2, 2], sl:[ 0, 1], rr:[ 1, 7] }, // @8
+    { tl:37, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[1,0], ksr:[1,1], multi:[ 5, 1], ksl:[0,0], ar:[ 4, 7], dr:[ 0, 3], sl:[ 7, 0], rr:[ 2, 1] }, // @9
+    { tl:15, dc:0, dm:1, fb:7, am:[1,0], vib:[0,0], et:[1,0], ksr:[1,0], multi:[ 5, 1], ksl:[0,0], ar:[10,10], dr:[ 8, 5], sl:[ 5, 0], rr:[ 1, 2] }, // @10
+    { tl:36, dc:0, dm:0, fb:7, am:[0,1], vib:[0,1], et:[0,0], ksr:[1,0], multi:[ 7, 1], ksl:[0,0], ar:[15,15], dr:[ 8, 8], sl:[ 2, 1], rr:[ 2, 2] }, // @11
+    { tl:17, dc:0, dm:0, fb:6, am:[0,0], vib:[1,0], et:[1,1], ksr:[1,0], multi:[ 1, 3], ksl:[0,0], ar:[ 6, 7], dr:[ 5, 4], sl:[ 1, 1], rr:[ 8, 6] }, // @12
+    { tl:19, dc:0, dm:0, fb:5, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 1, 2], ksl:[3,0], ar:[12, 9], dr:[ 9, 5], sl:[ 0, 0], rr:[ 3, 2] }, // @13
+    { tl:12, dc:0, dm:0, fb:0, am:[0,0], vib:[1,1], et:[1,1], ksr:[0,0], multi:[ 1, 3], ksl:[0,0], ar:[ 9,12], dr:[ 4, 0], sl:[ 3,15], rr:[ 3, 6] }, // @14
+    { tl:13, dc:0, dm:0, fb:0, am:[0,0], vib:[0,1], et:[1,1], ksr:[0,1], multi:[ 1, 2], ksl:[0,0], ar:[12,13], dr:[ 1, 5], sl:[ 5, 0], rr:[ 6, 6] }, // @15
+    { tl:24, dc:0, dm:1, fb:7, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 1, 0], ksl:[0,0], ar:[13, 0], dr:[15, 0], sl:[ 6, 0], rr:[10, 0] }, // drum_0
+    { tl: 0, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 1, 0], ksl:[0,0], ar:[12, 0], dr:[ 8, 0], sl:[10, 0], rr:[ 7, 0] }, // drum_1
+    { tl: 0, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 5, 0], ksl:[0,0], ar:[15, 0], dr:[ 8, 0], sl:[ 5, 0], rr:[ 9, 0] }, // drum_2
+    { tl: 0, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 0, 1], ksl:[0,0], ar:[ 0,15], dr:[ 0, 8], sl:[ 0, 6], rr:[ 0,13] }, // drum_3
+    { tl: 0, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 0, 1], ksl:[0,0], ar:[ 0,13], dr:[ 0, 8], sl:[ 0, 4], rr:[ 0, 8] }, // drum_4
+    { tl: 0, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 0, 1], ksl:[0,0], ar:[ 0,10], dr:[ 0,10], sl:[ 0, 5], rr:[ 0, 5] }, // drum_5
+  ];
+
+  // PATCH_YM2413
+  const PATCH_YM2413 = [
+    { tl:30, dc:1, dm:0, fb:7, am:[0,0], vib:[1,1], et:[1,1], ksr:[1,0], multi:[ 1, 1], ksl:[0,0], ar:[13, 7], dr:[ 0, 8], sl:[ 0, 1], rr:[ 0, 7] }, // @1
+    { tl:26, dc:0, dm:1, fb:5, am:[0,0], vib:[0,1], et:[0,0], ksr:[1,0], multi:[ 3, 1], ksl:[0,0], ar:[13,15], dr:[ 8, 7], sl:[ 2, 1], rr:[ 3, 3] }, // @2
+    { tl:25, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[1,0], multi:[ 3, 1], ksl:[2,0], ar:[15,12], dr:[ 2, 4], sl:[ 1, 2], rr:[ 1, 3] }, // @3
+    { tl:14, dc:0, dm:0, fb:7, am:[0,0], vib:[0,1], et:[1,1], ksr:[1,0], multi:[ 1, 1], ksl:[0,0], ar:[10, 6], dr:[ 8, 4], sl:[ 7, 2], rr:[ 0, 7] }, // @4
+    { tl:30, dc:0, dm:0, fb:6, am:[0,0], vib:[0,0], et:[1,1], ksr:[1,0], multi:[ 2, 1], ksl:[0,0], ar:[14, 7], dr:[ 0, 6], sl:[ 0, 2], rr:[ 0, 8] }, // @5
+    { tl:22, dc:0, dm:0, fb:5, am:[0,0], vib:[0,0], et:[1,1], ksr:[1,0], multi:[ 1, 2], ksl:[0,0], ar:[14, 7], dr:[ 0, 1], sl:[ 0, 1], rr:[ 0, 8] }, // @6
+    { tl:29, dc:0, dm:0, fb:7, am:[0,0], vib:[0,1], et:[1,1], ksr:[0,0], multi:[ 1, 1], ksl:[0,0], ar:[ 8, 8], dr:[ 2, 1], sl:[ 1, 0], rr:[ 0, 7] }, // @7
+    { tl:45, dc:1, dm:0, fb:4, am:[0,0], vib:[0,0], et:[1,1], ksr:[0,0], multi:[ 3, 1], ksl:[0,0], ar:[10, 7], dr:[ 2, 2], sl:[ 0, 0], rr:[ 0, 7] }, // @8
+    { tl:27, dc:0, dm:0, fb:6, am:[0,0], vib:[1,1], et:[1,1], ksr:[0,0], multi:[ 1, 1], ksl:[0,0], ar:[ 6, 6], dr:[ 4, 5], sl:[ 1, 1], rr:[ 0, 7] }, // @9
+    { tl:11, dc:1, dm:1, fb:0, am:[0,0], vib:[1,1], et:[0,1], ksr:[0,0], multi:[ 1, 1], ksl:[0,0], ar:[ 8,15], dr:[ 5, 7], sl:[ 7, 0], rr:[ 1, 7] }, // @10
+    { tl: 3, dc:1, dm:0, fb:1, am:[0,0], vib:[0,0], et:[0,0], ksr:[1,0], multi:[ 3, 1], ksl:[2,0], ar:[15,14], dr:[10, 4], sl:[ 1, 0], rr:[ 0, 4] }, // @11
+    { tl:36, dc:0, dm:0, fb:7, am:[0,1], vib:[0,1], et:[0,0], ksr:[1,0], multi:[ 7, 1], ksl:[0,0], ar:[15,15], dr:[ 8, 8], sl:[ 2, 1], rr:[ 2, 2] }, // @12
+    { tl:12, dc:0, dm:0, fb:5, am:[0,0], vib:[1,1], et:[1,0], ksr:[0,1], multi:[ 1, 0], ksl:[0,0], ar:[12,15], dr:[ 2, 5], sl:[ 2, 4], rr:[ 0, 2] }, // @13
+    { tl:21, dc:0, dm:0, fb:3, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 1, 1], ksl:[1,0], ar:[12, 9], dr:[ 9, 5], sl:[ 0, 0], rr:[ 3, 2] }, // @14
+    { tl: 9, dc:0, dm:0, fb:3, am:[0,0], vib:[1,1], et:[1,0], ksr:[0,0], multi:[ 1, 1], ksl:[2,0], ar:[15,14], dr:[ 1, 4], sl:[ 4, 1], rr:[ 0, 3] }, // @15
+    { tl:24, dc:0, dm:1, fb:7, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 1, 0], ksl:[0,0], ar:[13, 0], dr:[15, 0], sl:[ 6, 0], rr:[10, 0] }, // drum_0
+    { tl: 0, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 1, 0], ksl:[0,0], ar:[12, 0], dr:[ 8, 0], sl:[10, 0], rr:[ 7, 0] }, // drum_1
+    { tl: 0, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 5, 0], ksl:[0,0], ar:[15, 0], dr:[ 8, 0], sl:[ 5, 0], rr:[ 9, 0] }, // drum_2
+    { tl: 0, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 0, 1], ksl:[0,0], ar:[ 0,15], dr:[ 0, 8], sl:[ 0, 6], rr:[ 0,13] }, // drum_3
+    { tl: 0, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 0, 1], ksl:[0,0], ar:[ 0,13], dr:[ 0, 8], sl:[ 0, 4], rr:[ 0, 8] }, // drum_4
+    { tl: 0, dc:0, dm:0, fb:0, am:[0,0], vib:[0,0], et:[0,0], ksr:[0,0], multi:[ 0, 1], ksl:[0,0], ar:[ 0,10], dr:[ 0,10], sl:[ 0, 5], rr:[ 0, 5] }, // drum_5
+  ];
+
+  // ---- サイクル→チャンネル対応表 ----
+  // output_m は ismod=(cycles/3)&1 が0のサイクルだけ「そのchのキャリア出力」を運ぶ。
+  // 担当chは CH_OFFSET を演算パイプラインの段数ぶん遡った位置。段数は解析で出すより
+  // 実測が確実なので、1chずつ鳴らして output_m が立つサイクルを調べた結果 11 と判明
+  // (cycle 0,1,2→ch6,7,8 / 6,7,8→ch0,1,2 / 12,13,14→ch3,4,5)。
+  const PIPELINE_DELAY = 11;
+  const CARRIER_CH = new Int8Array(18).fill(-1);
+  for (let c = 0; c < 18; c++) {
+    if (((c / 3) | 0) & 1) continue;          // モジュレータ側のサイクルは出力しない
+    CARRIER_CH[c] = CH_OFFSET[(c + PIPELINE_DELAY) % 18];
+  }
+  // output_r(リズム)も同様に実測(太鼓を1種ずつ鳴らして output_r が立つサイクルを特定)。
+  // 各太鼓は1巡で2回ぶん出力される(実機の時分割DACがリズムchを2回読むため。旧コアには
+  // 無かった挙動で、リズムがメロディに対して相対的に大きく出るのはこれが理由)。
+  //   BD:cycle 0,5 / SD:1,9 / CYM:2,10 / HH:3,16 / TOM:4,17
+  // 鍵盤のミュート枠は旧コア(opllMsx.js)と同じく BD=ch6 / HH,SD=ch7 / TOM,CYM=ch8。
+  // ★2026-08-22: 打楽器のミュート/音量は実チャンネル(6-8)ではなく専用の添字9-13を使う。
+  // SDとHHは実機では同じch7、TOMとCYMは同じch8だが、鍵盤には5行が別々に出るため
+  // 実ch単位だと2行が同じ添字を共有し、getMuteConfig()の書き込み順で片方が無視される。
+  // ここは出力サイクルで打楽器を識別できるので5種を独立させられる(keyboard.js KF_RHYTHM_INDEX)。
+  const MUTE_BD = 9, MUTE_SD = 10, MUTE_TOM = 11, MUTE_CYM = 12, MUTE_HH = 13;
+  const NUM_MUTE_SLOTS = 14; // 0-8=メロディch / 9-13=BD,SD,TOM,CYM,HH
+  const RHYTHM_CH = new Int8Array(18).fill(-1);
+  RHYTHM_CH[0] = MUTE_BD;  RHYTHM_CH[5] = MUTE_BD;       // BD
+  RHYTHM_CH[1] = MUTE_SD;  RHYTHM_CH[9] = MUTE_SD;       // SD
+  RHYTHM_CH[3] = MUTE_HH;  RHYTHM_CH[16] = MUTE_HH;      // HH
+  RHYTHM_CH[4] = MUTE_TOM; RHYTHM_CH[17] = MUTE_TOM;     // TOM
+  RHYTHM_CH[2] = MUTE_CYM; RHYTHM_CH[10] = MUTE_CYM;     // CYM
+
+  // ---- eg_level[] のスロット番号 ↔ (ch, mod/car) 対応 ----
+  // eg_level は「サイクル番号=スロット番号」で索かれ、そのスロットの担当は
+  // ch=CH_OFFSET[c] / mcsel=((c+1)/3)&1 (1がキャリア)。鍵盤スナップショット用に逆引きを作る。
+  const SLOT_MOD = new Int8Array(9).fill(-1);
+  const SLOT_CAR = new Int8Array(9).fill(-1);
+  for (let c = 0; c < 18; c++) {
+    const ch = CH_OFFSET[c];
+    if (((((c + 1) / 3) | 0) & 1) === 1) SLOT_CAR[ch] = c; else SLOT_MOD[ch] = c;
+  }
+
+  // 打楽器5種が使う eg_level のスロット番号(bd,sd,tom,cym,hh)。実測で確認済み
+  // (1種ずつ鳴らして下がるスロットを特定: BD=11と14, SD=15, TOM=13, CYM=16, HH=12)。
+  const RHYTHM_SLOT = [SLOT_CAR[6], SLOT_CAR[7], SLOT_MOD[8], SLOT_CAR[8], SLOT_MOD[7]];
+
+  const s8 = (v) => (v << 24) >> 24; // int8_t への切り詰め(rm_enableの算術右シフト用)
+
+  function newPatch() {
+    return {
+      tl: 0, dc: 0, dm: 0, fb: 0,
+      am: [0, 0], vib: [0, 0], et: [0, 0], ksr: [0, 0],
+      multi: [0, 0], ksl: [0, 0], ar: [0, 0], dr: [0, 0], sl: [0, 0], rr: [0, 0]
+    };
+  }
+
+  class OPLLNuked {
+    constructor(opts) {
+      opts = opts || {};
+      this.chipType = (opts.chipType === 'ds1001') ? 'ds1001' : 'ym2413';
+      this.isDs1001 = this.chipType === 'ds1001';
+      this.patchrom = this.isDs1001 ? PATCH_DS1001 : PATCH_YM2413;
+      this.numCh = this.isDs1001 ? 6 : 9;
+      // ホストクロック→内部サイクルの分周(冒頭コメント参照)
+      this.hostPerOpll = opts.hostCyclesPerOpllCycle || (this.isDs1001 ? 2 : 4);
+      // 0-8=メロディch / 9-13=リズム(BD,SD,TOM,CYM,HH)。RHYTHM_CH のコメント参照
+      this.mute = new Array(NUM_MUTE_SLOTS).fill(false);
+      this.vol = new Array(NUM_MUTE_SLOTS).fill(1);
+      this._alloc();
+      this.reset();
+    }
+
+    _alloc() {
+      this.eg_state = new Uint8Array(18);
+      this.eg_level = new Uint8Array(18);
+      this.pg_phase = new Uint32Array(18);
+      this.op_fb1 = new Int16Array(9);
+      this.op_fb2 = new Int16Array(9);
+      this.fnum = new Uint16Array(9);
+      this.block = new Uint8Array(9);
+      this.kon = new Uint8Array(9);
+      this.son = new Uint8Array(9);
+      this.regVol = new Uint8Array(9);
+      this.inst = new Uint8Array(9);
+      this.patch = newPatch();
+      this.regShadow = new Uint8Array(0x40); // $00-$3F の素の値(スナップショット/デバッグ用)
+      this._rhythmPeak = new Uint8Array(5); // 打楽器のピークホールド(_rhythmSlotInfo参照)
+      this.writebuf = [];
+      this.writeHead = 0; // shift()を使わないための取り出し位置
+    }
+
+    reset() {
+      this.cycles = 0; this.slot = 0;
+      this.write_data = 0; this.write_a = 0; this.write_d = 0;
+      this.write_a_en = 0; this.write_d_en = 0;
+      this.write_fm_address = 0; this.write_fm_data = 0; this.write_mode_address = 0;
+      this.address = 0; this.data = 0;
+
+      this.eg_counter_state = 0; this.eg_counter_state_prev = 0;
+      this.eg_timer = 0; this.eg_timer_low_lock = 0; this.eg_timer_carry = 0;
+      this.eg_timer_shift = 0; this.eg_timer_shift_lock = 0; this.eg_timer_shift_stop = 0;
+      this.eg_kon = 0; this.eg_dokon = 0; this.eg_off = 0;
+      this.eg_rate = 0; this.eg_maxrate = 0; this.eg_zerorate = 0;
+      this.eg_inc_lo = 0; this.eg_inc_hi = 0; this.eg_rate_hi = 0;
+      this.eg_sl = 0; this.eg_ksltl = 0; this.eg_out = 0x7f; this.eg_silent = 0;
+
+      this.pg_fnum = 0; this.pg_block = 0; this.pg_out = 0; this.pg_inc = 0; this.pg_phase_next = 0;
+
+      this.op_fbsum = 0; this.op_mod = 0; this.op_neg = 0;
+      this.op_logsin = 0; this.op_exp_m = 0; this.op_exp_s = 0;
+
+      this.ch_out = 0; this.ch_out_hh = 0; this.ch_out_tm = 0;
+      this.ch_out_bd = 0; this.ch_out_sd = 0; this.ch_out_tc = 0;
+
+      this.lfo_counter = 0; this.lfo_vib_counter = 0; this.lfo_am_counter = 0;
+      this.lfo_am_step = 0; this.lfo_am_dir = 0; this.lfo_am_car = 0; this.lfo_am_out = 0;
+
+      this.rhythm = 0; this.testmode = 0;
+      this.c_instr = 0; this.c_op = 0; this.c_tl = 0; this.c_dc = 0; this.c_dm = 0; this.c_fb = 0;
+      this.c_am = 0; this.c_vib = 0; this.c_et = 0; this.c_ksr = 0;
+      this.c_ksr_freq = 0; this.c_ksl_freq = 0; this.c_ksl_block = 0;
+      this.c_multi = 0; this.c_ksl = 0;
+      this.c_adrr = [0, 0, 0];
+      this.c_sl = 0; this.c_fnum = 0; this.c_block = 0;
+
+      this.rm_enable = 0; this.rm_noise = 0; this.rm_select = RM_TC + 1;
+      this.rm_hh_bit2 = 0; this.rm_hh_bit3 = 0; this.rm_hh_bit7 = 0; this.rm_hh_bit8 = 0;
+      this.rm_tc_bit3 = 0; this.rm_tc_bit5 = 0;
+
+      this.output_m = 0; this.output_r = 0;
+
+      this.eg_state.fill(EG_RELEASE);
+      this.eg_level.fill(0x7f);
+      this._rhythmPeak.fill(0x7f);
+      this.pg_phase.fill(0);
+      this.op_fb1.fill(0); this.op_fb2.fill(0);
+      this.fnum.fill(0); this.block.fill(0); this.kon.fill(0); this.son.fill(0);
+      this.regVol.fill(0); this.inst.fill(0);
+      this.regShadow.fill(0);
+      const p = this.patch;
+      p.tl = p.dc = p.dm = p.fb = 0;
+      for (let i = 0; i < 2; i++) {
+        p.am[i] = p.vib[i] = p.et[i] = p.ksr[i] = 0;
+        p.multi[i] = p.ksl[i] = p.ar[i] = p.dr[i] = p.sl[i] = p.rr[i] = 0;
+      }
+      this.writebuf.length = 0;
+      this.writeHead = 0;
+      this.writeDelay = 0;
+      this._addrLatch = 0;
+      this._writePhase = 0;
+
+      if (this.isDs1001) { // VRC7はリズムモードが常時ON扱い
+        this.rhythm = 0x20;
+        this.rm_enable = s8(0x80);
+      }
+
+      this.hostAccum = 0;
+      this.sampleAccum = 0;
+      this.sampleCycles = 0;
+      this.lastSample = 0;
+      this.dcX = 0; this.dcY = 0; this.dcPrimed = 0;
+    }
+
+    // ────────── OPLL_DoIO ──────────
+    _doIO() {
+      this.write_a_en = ((this.write_a & 0x03) === 0x01) ? 1 : 0;
+      this.write_d_en = ((this.write_d & 0x03) === 0x01) ? 1 : 0;
+      this.write_a = (this.write_a << 1) & 0xff;
+      this.write_d = (this.write_d << 1) & 0xff;
+    }
+
+    // ────────── OPLL_DoModeWrite ──────────
+    _doModeWrite() {
+      if (!((this.write_mode_address & 0x10) && this.write_d_en)) return;
+      const slot = this.write_mode_address & 0x01;
+      const d = this.write_data;
+      const p = this.patch;
+      switch (this.write_mode_address & 0x0f) {
+        case 0x00: case 0x01:
+          p.multi[slot] = d & 0x0f;
+          p.ksr[slot] = (d >> 4) & 0x01;
+          p.et[slot] = (d >> 5) & 0x01;
+          p.vib[slot] = (d >> 6) & 0x01;
+          p.am[slot] = (d >> 7) & 0x01;
+          break;
+        case 0x02: p.ksl[0] = (d >> 6) & 0x03; p.tl = d & 0x3f; break;
+        case 0x03:
+          p.ksl[1] = (d >> 6) & 0x03;
+          p.dc = (d >> 4) & 0x01; p.dm = (d >> 3) & 0x01; p.fb = d & 0x07;
+          break;
+        case 0x04: case 0x05: p.dr[slot] = d & 0x0f; p.ar[slot] = (d >> 4) & 0x0f; break;
+        case 0x06: case 0x07: p.rr[slot] = d & 0x0f; p.sl[slot] = (d >> 4) & 0x0f; break;
+        case 0x0e:
+          this.rhythm = d & 0x3f;
+          if (this.isDs1001) this.rhythm |= 0x20;
+          this.rm_enable = s8((this.rm_enable & 0x7f) | ((this.rhythm << 2) & 0x80));
+          break;
+        case 0x0f: this.testmode = d & 0x0f; break;
+      }
+    }
+
+    // ────────── OPLL_DoRegWrite ──────────
+    _doRegWrite() {
+      if (this.write_a_en) {
+        if ((this.write_data & 0xc0) === 0x00) {
+          this.write_fm_address = 1;
+          this.address = this.write_data;
+        } else {
+          this.write_fm_address = 0;
+        }
+      }
+      if (this.write_fm_address && this.write_d_en) this.data = this.write_data;
+
+      if (this.write_fm_data && !this.write_a_en) {
+        if ((this.address & 0x0f) === this.cycles && this.cycles < 16) {
+          const channel = this.cycles % 9;
+          switch (this.address & 0xf0) {
+            case 0x10:
+              this.fnum[channel] = (this.fnum[channel] & 0x100) | this.data;
+              break;
+            case 0x20:
+              this.fnum[channel] = (this.fnum[channel] & 0xff) | ((this.data & 0x01) << 8);
+              this.block[channel] = (this.data >> 1) & 0x07;
+              this.kon[channel] = (this.data >> 4) & 0x01;
+              this.son[channel] = (this.data >> 5) & 0x01;
+              break;
+            case 0x30:
+              this.regVol[channel] = this.data & 0x0f;
+              this.inst[channel] = (this.data >> 4) & 0x0f;
+              break;
+          }
+        }
+      }
+
+      if (this.write_a_en) this.write_fm_data = 0;
+      if (this.write_fm_address && this.write_d_en) this.write_fm_data = 1;
+      if (this.write_a_en) {
+        this.write_mode_address = ((this.write_data & 0xf0) === 0x00)
+          ? (0x10 | (this.write_data & 0x0f)) : 0x00;
+      }
+    }
+
+    // ────────── OPLL_PreparePatch1 / 2 ──────────
+    _selectPatch(mcsel) {
+      const ch = CH_OFFSET[this.cycles];
+      const instr = this.inst[ch];
+      if (this.rm_select <= RM_TC) return this.patchrom[PATCH_DRUM_0 + this.rm_select];
+      if (instr > 0) return this.patchrom[instr - 1];
+      return this.patch;
+    }
+
+    _preparePatch1() {
+      const mcsel = (((this.cycles + 1) / 3) | 0) & 0x01;
+      const ch = CH_OFFSET[this.cycles];
+      const patch = this._selectPatch(mcsel);
+
+      if (this.rm_select === RM_HH || this.rm_select === RM_TOM) this.c_tl = this.inst[ch] << 2;
+      else if (mcsel === 1) this.c_tl = this.regVol[ch] << 2;
+      else this.c_tl = patch.tl;
+
+      this.c_adrr[0] = patch.ar[mcsel];
+      this.c_adrr[1] = patch.dr[mcsel];
+      this.c_adrr[2] = patch.rr[mcsel];
+      this.c_et = patch.et[mcsel];
+      this.c_ksr = patch.ksr[mcsel];
+      this.c_ksl = patch.ksl[mcsel];
+      this.c_ksr_freq = (this.block[ch] << 1) | (this.fnum[ch] >> 8);
+      this.c_ksl_freq = this.fnum[ch] >> 5;
+      this.c_ksl_block = this.block[ch];
+    }
+
+    _preparePatch2() {
+      const mcsel = (((this.cycles + 1) / 3) | 0) & 0x01;
+      const ch = CH_OFFSET[this.cycles];
+      const patch = this._selectPatch(mcsel);
+
+      this.c_fnum = this.fnum[ch];
+      this.c_block = this.block[ch];
+      this.c_multi = patch.multi[mcsel];
+      this.c_sl = patch.sl[mcsel];
+      this.c_fb = patch.fb;
+      this.c_vib = patch.vib[mcsel];
+      this.c_am = patch.am[mcsel];
+      this.c_dc = ((this.c_dc << 1) | patch.dc) & 0xff;
+      this.c_dm = ((this.c_dm << 1) | patch.dm) & 0xff;
+    }
+
+    // ────────── OPLL_PhaseGenerate ──────────
+    _phaseGenerate() {
+      this.pg_phase[(this.cycles + 17) % 18] = (this.pg_phase_next + this.pg_inc) >>> 0;
+
+      let ismod;
+      if ((this.rm_enable & 0x40) && (this.cycles === 13 || this.cycles === 14)) ismod = 0;
+      else ismod = (((this.cycles + 3) / 3) | 0) & 1;
+
+      const phase = this.pg_phase[this.cycles];
+      if ((this.testmode & 0x04)
+        || (ismod && (this.eg_dokon & 0x8000)) || (!ismod && (this.eg_dokon & 0x01))) {
+        this.pg_phase_next = 0;
+      } else {
+        this.pg_phase_next = phase;
+      }
+
+      if (this.cycles === 13) {
+        this.rm_hh_bit2 = (phase >>> (2 + 9)) & 1;
+        this.rm_hh_bit3 = (phase >>> (3 + 9)) & 1;
+        this.rm_hh_bit7 = (phase >>> (7 + 9)) & 1;
+        this.rm_hh_bit8 = (phase >>> (8 + 9)) & 1;
+      } else if (this.cycles === 17 && (this.rm_enable & 0x80)) {
+        this.rm_tc_bit3 = (phase >>> (3 + 9)) & 1;
+        this.rm_tc_bit5 = (phase >>> (5 + 9)) & 1;
+      }
+
+      let pg_out;
+      if (this.rm_enable & 0x80) {
+        let rm_bit;
+        switch (this.cycles) {
+          case 13: // HH
+            rm_bit = (this.rm_hh_bit2 ^ this.rm_hh_bit7)
+                   | (this.rm_hh_bit3 ^ this.rm_tc_bit5)
+                   | (this.rm_tc_bit3 ^ this.rm_tc_bit5);
+            pg_out = rm_bit << 9;
+            pg_out |= (rm_bit ^ (this.rm_noise & 1)) ? 0xd0 : 0x34;
+            break;
+          case 16: // SD
+            pg_out = (this.rm_hh_bit8 << 9)
+                   | ((this.rm_hh_bit8 ^ (this.rm_noise & 1)) << 8);
+            break;
+          case 17: // TC
+            rm_bit = (this.rm_hh_bit2 ^ this.rm_hh_bit7)
+                   | (this.rm_hh_bit3 ^ this.rm_tc_bit5)
+                   | (this.rm_tc_bit3 ^ this.rm_tc_bit5);
+            pg_out = (rm_bit << 9) | 0x100;
+            break;
+          default:
+            pg_out = phase >>> 9;
+        }
+      } else {
+        pg_out = phase >>> 9;
+      }
+      this.pg_out = pg_out & 0xffff;
+    }
+
+    // ────────── OPLL_PhaseCalcIncrement ──────────
+    _phaseCalcIncrement() {
+      let freq = this.c_fnum << 1;
+      const block = this.c_block;
+      if (this.c_vib) {
+        switch (this.lfo_vib_counter) {
+          case 0: case 4: break;
+          case 1: case 3: freq += freq >> 8; break;
+          case 2: freq += freq >> 7; break;
+          case 5: case 7: freq -= freq >> 8; break;
+          case 6: freq -= freq >> 7; break;
+        }
+      }
+      freq = (freq << block) >> 1;
+      this.pg_inc = (freq * PG_MULTI[this.c_multi]) >>> 1;
+    }
+
+    // ────────── OPLL_EnvelopeKSLTL ──────────
+    _envelopeKSLTL() {
+      let ksl = EG_KSLTABLE[this.c_ksl_freq] - ((8 - this.c_ksl_block) << 3);
+      if (ksl < 0) ksl = 0;
+      ksl <<= 1;
+      ksl = this.c_ksl ? (ksl >> (3 - this.c_ksl)) : 0;
+      this.eg_ksltl = ksl + (this.c_tl << 1);
+    }
+
+    // ────────── OPLL_EnvelopeOutput ──────────
+    _envelopeOutput() {
+      let level = this.eg_level[(this.cycles + 17) % 18];
+      level += this.eg_ksltl;
+      if (this.c_am) level += this.lfo_am_out;
+      if (level >= 128) level = 127;
+      if (this.testmode & 0x01) level = 0;
+      this.eg_out = level;
+    }
+
+    // ────────── OPLL_EnvelopeGenerate ──────────
+    _envelopeGenerate() {
+      const mcsel = (((this.cycles + 1) / 3) | 0) & 0x01;
+
+      // --- EGタイマ ---
+      let timer_inc;
+      if ((this.eg_counter_state & 3) !== 3) timer_inc = 0;
+      else if (this.cycles === 0) timer_inc = 1;
+      else timer_inc = this.eg_timer_carry;
+
+      const timer_low = this.eg_timer & 3;
+      let timer_bit = (this.eg_timer & 1) + timer_inc;
+      this.eg_timer_carry = timer_bit >> 1;
+      this.eg_timer = (((timer_bit & 1) << 17) | (this.eg_timer >>> 1)) >>> 0;
+      if (this.testmode & 0x08) {
+        this.eg_timer &= 0x2ffff;
+        this.eg_timer |= (this.write_data << (16 - 2)) & 0x10000;
+      }
+      if (!this.eg_timer_shift_stop && ((this.eg_timer >>> 16) & 1)) {
+        this.eg_timer_shift = this.cycles;
+      }
+      if (this.cycles === 0 && (this.eg_counter_state_prev & 1) === 1) {
+        this.eg_timer_low_lock = timer_low;
+        this.eg_timer_shift_lock = this.eg_timer_shift;
+        if (this.eg_timer_shift_lock > 13) this.eg_timer_shift_lock = 0;
+        this.eg_timer_shift = 0;
+      }
+      this.eg_timer_shift_stop |= (this.eg_timer >>> 16) & 1;
+      if (this.cycles === 0) this.eg_timer_shift_stop = 0;
+      this.eg_counter_state_prev = this.eg_counter_state;
+      if (this.cycles === 17) this.eg_counter_state = (this.eg_counter_state + 1) & 0xff;
+
+      // --- レベル更新 ---
+      const idx = (this.cycles + 16) % 18;
+      const level = this.eg_level[idx];
+      let next_level = level;
+      const zero = (level === 0);
+      this.eg_silent = (level === 0x7f) ? 1 : 0;
+
+      if (this.eg_state[idx] !== EG_ATTACK && (this.eg_off & 2) && !(this.eg_dokon & 2)) {
+        next_level = 0x7f;
+      }
+      if (this.eg_maxrate && (this.eg_dokon & 2)) next_level = 0x00;
+
+      const state = this.eg_state[idx];
+      let next_state = EG_ATTACK;
+      let step = 0;
+      const sl = this.eg_sl;
+
+      switch (state) {
+        case EG_ATTACK:
+          if (!this.eg_maxrate && (this.eg_kon & 2) && !zero) {
+            const shift = (this.eg_rate_hi < 12) ? this.eg_inc_lo : (this.eg_rate_hi - 11 + this.eg_inc_hi);
+            if (shift > 0) step = (~level) >> (5 - shift);
+          }
+          next_state = zero ? EG_DECAY : EG_ATTACK;
+          break;
+        case EG_DECAY:
+          if (!(this.eg_off & 2) && !(this.eg_dokon & 2) && (level >> 3) !== sl) {
+            step = this._egStep();
+          }
+          next_state = ((level >> 3) === sl) ? EG_SUSTAIN : EG_DECAY;
+          break;
+        case EG_SUSTAIN:
+        case EG_RELEASE:
+          if (!(this.eg_off & 2) && !(this.eg_dokon & 2)) step = this._egStep();
+          next_state = state;
+          break;
+      }
+
+      if (!(this.eg_kon & 2)) next_state = EG_RELEASE;
+      if (this.eg_dokon & 2) next_state = EG_ATTACK;
+
+      this.eg_level[idx] = (next_level + step) & 0xff;
+      this.eg_state[idx] = next_state;
+
+      // --- 次サイクルぶんのレート計算 ---
+      const rate_hi = this.eg_rate >> 2;
+      const rate_lo = this.eg_rate & 3;
+      this.eg_inc_hi = EG_STEPHI[rate_lo][this.eg_timer_low_lock];
+      const sum = (this.eg_timer_shift_lock + rate_hi) & 0x0f;
+      this.eg_inc_lo = 0;
+      if (rate_hi < 12 && !this.eg_zerorate) {
+        switch (sum) {
+          case 12: this.eg_inc_lo = 1; break;
+          case 13: this.eg_inc_lo = (rate_lo >> 1) & 1; break;
+          case 14: this.eg_inc_lo = rate_lo & 1; break;
+        }
+      }
+      this.eg_maxrate = (rate_hi === 0x0f) ? 1 : 0;
+      this.eg_rate_hi = rate_hi;
+
+      this.eg_kon = ((this.eg_kon << 1) | this.kon[CH_OFFSET[this.cycles]]) & 0xff;
+      this.eg_off = ((this.eg_off << 1) | (((this.eg_level[this.cycles] >> 2) === 0x1f) ? 1 : 0)) & 0xff;
+
+      switch (this.rm_select) {
+        case RM_BD0: case RM_BD1: this.eg_kon |= (this.rhythm >> 4) & 1; break;
+        case RM_SD:  this.eg_kon |= (this.rhythm >> 3) & 1; break;
+        case RM_TOM: this.eg_kon |= (this.rhythm >> 2) & 1; break;
+        case RM_TC:  this.eg_kon |= (this.rhythm >> 1) & 1; break;
+        case RM_HH:  this.eg_kon |= this.rhythm & 1; break;
+      }
+
+      let rate = 0;
+      this.eg_dokon = (this.eg_dokon << 1) & 0xffff;
+      let state_rate = this.eg_state[this.cycles];
+      if (state_rate === EG_RELEASE && (this.eg_kon & 1) && (this.eg_off & 1)) {
+        state_rate = EG_ATTACK;
+        this.eg_dokon |= 1;
+      }
+      switch (state_rate) {
+        case EG_ATTACK: rate = this.c_adrr[0]; break;
+        case EG_DECAY: rate = this.c_adrr[1]; break;
+        case EG_SUSTAIN: if (!this.c_et) rate = this.c_adrr[2]; break;
+        case EG_RELEASE: rate = this.son[CH_OFFSET[this.cycles]] ? 5 : this.c_adrr[2]; break;
+      }
+      if (!(this.eg_kon & 1) && !mcsel && this.rm_select !== RM_TOM && this.rm_select !== RM_HH) rate = 0;
+      if ((this.eg_kon & 1) && this.eg_state[this.cycles] === EG_RELEASE && !(this.eg_off & 1)) rate = 12;
+      if (!(this.eg_kon & 1) && !this.son[CH_OFFSET[this.cycles]] && mcsel === 1 && !this.c_et) rate = 7;
+
+      this.eg_zerorate = (rate === 0) ? 1 : 0;
+      let ksr = this.c_ksr_freq;
+      if (!this.c_ksr) ksr >>= 2;
+      this.eg_rate = (rate << 2) + ksr;
+      if (this.eg_rate & 0x40) this.eg_rate = 0x3c | (ksr & 3);
+      this.eg_sl = this.c_sl;
+    }
+
+    // DECAY/SUSTAIN/RELEASE共通の増分(opll.cで同じ式が2箇所に展開されているもの)
+    _egStep() {
+      const rh = this.eg_rate_hi, ih = this.eg_inc_hi, il = this.eg_inc_lo;
+      const cs = this.eg_counter_state_prev;
+      const i0 = (rh === 15 || (rh === 14 && ih)) ? 1 : 0;
+      const i1 = ((rh === 14 && !ih) || (rh === 13 && ih)
+        || (rh === 13 && !ih && (cs & 1))
+        || (rh === 12 && ih && (cs & 1))
+        || (rh === 12 && !ih && ((cs & 3) === 3))
+        || (il && ((cs & 3) === 3))) ? 1 : 0;
+      return (i0 << 1) | i1;
+    }
+
+    // ────────── OPLL_Channel ──────────
+    _channel() {
+      let ch_out = this.ch_out;
+      const ismod = ((this.cycles / 3) | 0) & 1;
+      const mute_m = ismod || ((this.rm_enable & 0x40) && (this.cycles + 15) % 18 >= 12);
+
+      if (this.isDs1001) {
+        this.output_m = ch_out;
+        if (this.output_m >= 0) this.output_m++;
+        if (mute_m) this.output_m = 0;
+        this.output_r = 0;
+      } else {
+        let mute_r = 1;
+        if (this.rm_enable & 0x40) {
+          switch (this.cycles) {
+            case 16: case 17: case 0: case 1: case 2:
+            case 3: case 4: case 5: case 9: case 10:
+              mute_r = 0; break;
+          }
+        }
+        const sign0 = ch_out >> 8;
+        let sign = sign0;
+        if (ch_out >= 0) { ch_out++; sign++; }
+        this.output_m = mute_m ? sign : ch_out;
+        this.output_r = mute_r ? sign : ch_out;
+      }
+
+      // ── ch別ミュート/音量(実機には無い機能) ──
+      // output_m / output_r は最終DAC出力なので、ここで倍率を掛けても合成には一切影響しない。
+      const cm = CARRIER_CH[this.cycles];
+      if (cm >= 0) {
+        if (this.mute[cm]) this.output_m = 0;
+        else if (this.vol[cm] !== 1) this.output_m = this.output_m * this.vol[cm];
+      }
+      const cr = RHYTHM_CH[this.cycles];
+      if (cr >= 0 && this.output_r !== 0) {
+        if (this.mute[cr]) this.output_r = 0;
+        else if (this.vol[cr] !== 1) this.output_r = this.output_r * this.vol[cr];
+      }
+    }
+
+    // ────────── OPLL_Operator ──────────
+    _operator() {
+      let ismod1, ismod2, ismod3;
+      if ((this.rm_enable & 0x80) && (this.cycles === 15 || this.cycles === 16)) ismod1 = 0;
+      else ismod1 = (((this.cycles + 1) / 3) | 0) & 1;
+      if ((this.rm_enable & 0x40) && (this.cycles === 13 || this.cycles === 14)) ismod2 = 0;
+      else ismod2 = (((this.cycles + 3) / 3) | 0) & 1;
+      if ((this.rm_enable & 0x40) && (this.cycles === 16 || this.cycles === 17)) ismod3 = 0;
+      else ismod3 = ((this.cycles / 3) | 0) & 1;
+
+      let op_mod = 0;
+      if (ismod3) op_mod |= this.op_mod << 1;
+      if (ismod2 && this.c_fb) op_mod |= this.op_fbsum >> (7 - this.c_fb);
+
+      let exp_shift = this.op_exp_s;
+      if (this.eg_silent || ((this.op_neg & 2) && (ismod1 ? (this.c_dm & 4) : (this.c_dc & 4)))) {
+        exp_shift |= 12;
+      }
+
+      let output = this.op_exp_m >> exp_shift;
+      if (!this.eg_silent && (this.op_neg & 2)) output = ~output;
+
+      let level = this.op_logsin + (this.eg_out << 4);
+      if (level >= 4096) level = 4095;
+      this.op_exp_m = EXPROM[level & 0xff];
+      this.op_exp_s = level >> 8;
+
+      let phase = (op_mod + this.pg_out) & 0x3ff;
+      if (phase & 0x100) phase ^= 0xff;
+      this.op_logsin = LOGSIN[phase & 0xff];
+      this.op_neg = ((this.op_neg << 1) | (phase >> 9)) & 0xff;
+      this.op_fbsum = (this.op_fb1[(this.cycles + 3) % 9] + this.op_fb2[(this.cycles + 3) % 9]) >> 1;
+
+      if (ismod1) {
+        this.op_fb2[this.cycles % 9] = this.op_fb1[this.cycles % 9];
+        this.op_fb1[this.cycles % 9] = output;
+      }
+      this.op_mod = output & 0x1ff;
+
+      let routput = 0;
+      if (!this.isDs1001) {
+        switch (this.cycles) {
+          case 2: routput = this.ch_out_hh; break;
+          case 3: routput = this.ch_out_tm; break;
+          case 4: routput = this.ch_out_bd; break;
+          case 8: routput = this.ch_out_sd; break;
+          case 9: routput = this.ch_out_tc; break;
+        }
+        switch (this.cycles) {
+          case 15: this.ch_out_hh = output >> 3; break;
+          case 16: this.ch_out_tm = output >> 3; break;
+          case 17: this.ch_out_bd = output >> 3; break;
+          case 0: this.ch_out_sd = output >> 3; break;
+          case 1: this.ch_out_tc = output >> 3; break;
+        }
+      }
+      if (!(this.rm_enable & 0x80)) routput = 0;
+
+      this.ch_out = ismod1 ? routput : (output >> 3);
+    }
+
+    // ────────── OPLL_DoRhythm / OPLL_DoLFO ──────────
+    _doRhythm() {
+      let nbit = (this.rm_noise ^ (this.rm_noise >>> 14)) & 0x01;
+      nbit |= ((this.rm_noise === 0x00) ? 1 : 0) | ((this.testmode >> 1) & 0x01);
+      this.rm_noise = ((nbit << 22) | (this.rm_noise >>> 1)) >>> 0;
+    }
+
+    _doLFO() {
+      let am_inc = 0;
+      if (this.cycles === 17) {
+        let vib_step = (((this.lfo_counter & 0x3ff) + 1) >> 10);
+        this.lfo_am_step = ((this.lfo_counter & 0x3f) + 1) >> 6;
+        vib_step |= (this.testmode >> 3) & 0x01;
+        this.lfo_vib_counter = (this.lfo_vib_counter + vib_step) & 0x07;
+        this.lfo_counter = (this.lfo_counter + 1) & 0xffff;
+      }
+      if ((this.lfo_am_step || (this.testmode & 0x08)) && this.cycles < 9) {
+        am_inc = this.lfo_am_dir | ((this.cycles === 0) ? 1 : 0);
+      }
+      if (this.cycles >= 9) this.lfo_am_car = 0;
+      if (this.cycles === 0) {
+        if (this.lfo_am_dir && (this.lfo_am_counter & 0x7f) === 0) this.lfo_am_dir = 0;
+        else if (!this.lfo_am_dir && (this.lfo_am_counter & 0x69) === 0x69) this.lfo_am_dir = 1;
+      }
+      let am_bit = (this.lfo_am_counter & 0x01) + am_inc + this.lfo_am_car;
+      this.lfo_am_car = am_bit >> 1;
+      am_bit &= 0x01;
+      this.lfo_am_counter = ((am_bit << 8) | (this.lfo_am_counter >>> 1)) & 0x1ff;
+
+      if (this.testmode & 0x02) {
+        this.lfo_vib_counter = 0;
+        this.lfo_counter = 0;
+        this.lfo_am_dir = 0;
+        this.lfo_am_counter &= 0xff;
+      }
+    }
+
+    // ────────── OPLL_Clock 1回ぶん ──────────
+    _stepOpll() {
+      // buffer[0]/[1] 相当。前サイクルの OPLL_Channel が確定させた値を取り込む
+      this.sampleAccum += this.output_m + this.output_r;
+
+      if (this.cycles === 0) this.lfo_am_out = (this.lfo_am_counter >> 3) & 0x0f;
+      this.rm_enable = s8(this.rm_enable) >> 1;
+      this._doModeWrite();
+      this.rm_select++;
+      if (this.rm_select > RM_TC) this.rm_select = RM_TC + 1;
+      if (this.cycles === 11 && (this.rm_enable & 0x80) === 0x80) this.rm_select = RM_BD0;
+
+      this._preparePatch1();
+      this._channel();
+      this._phaseGenerate();
+      this._operator();
+      this._phaseCalcIncrement();
+      this._envelopeOutput();
+      this._envelopeKSLTL();
+      this._envelopeGenerate();
+      this._doLFO();
+      this._doRhythm();
+      this._preparePatch2();
+      this._doRegWrite();
+      this._doIO();
+
+      this.cycles = (this.cycles + 1) % 18;
+
+      if (++this.sampleCycles >= CYCLES_PER_SAMPLE) {
+        this.sampleCycles = 0;
+        // 打楽器のピークホールド更新(1サンプルごとで十分。減衰は最短でも数千サンプル続く)
+        for (let i = 0; i < 5; i++) {
+          const lv = this.eg_level[RHYTHM_SLOT[i]];
+          if (lv < this._rhythmPeak[i]) this._rhythmPeak[i] = lv;
+        }
+        // 実チップの時分割DACは無音時も基準レベル(OPLL_Channelのsign)を出し続けるため
+        // 出力にDC成分が乗る。実機ではAC結合で落ちるぶんなので1次ハイパスで除去する。
+        // カットオフ約5Hz。HESのDDAで踏んだ教訓から、立ち上がりのオーバー
+        // シュートを避けるため十分低く取っている。
+        const x = this.sampleAccum;
+        if (this.dcPrimed === 0) { this.dcX = x; this.dcPrimed = 1; } // 初回は段差を作らない
+        this.dcY = x - this.dcX + DC_BLOCK_R * this.dcY;
+        this.dcX = x;
+        this.lastSample = this.dcY;
+        this.sampleAccum = 0;
+      }
+    }
+
+    // ────────── 書き込み ──────────
+    // アドレス/データは実機同様「別々のタイミング」で入らないと取りこぼす(write_dataが共用の
+    // 1バイトラッチのため)。バス経由(nsfBus/kssBus)は元々CPUサイクルが空くので問題ないが、
+    // writeReg()のような即時2連書きのために最小間隔を空けるキューを通す。
+    // ★キューの単位は「レジスタ書き込み1件(アドレス+データの対)」。エントリ形式は
+    // reg | (data << 8)。実チップは2フェーズ(アドレスポート→データポート)だが、
+    // **キュー上で対を分割してはいけない**。
+    // 以前はアドレスとデータを別エントリにしていたため、「アドレスだけ先に取り出されて
+    // パイプラインへ入り、データがまだキューに居るときに溢れて _drainDirect() が走る」と
+    // 宙に浮いたアドレスが捨てられ、直後のデータが**アドレス無しのデータ書き込み**として
+    // パイプラインに入り、そのレジスタ書き込みが丸ごと消えていた。
+    // (Illusion City KSS 1曲目で実測: カスタム音色の $00 が一度も適用されず multi[0] が
+    //  0 のままになり、@0 を多用する FM2/FM4 の音色が変わっていた。VGMは書き込み密度が
+    //  低くて溢れないため無傷で、同じ曲なのに KSS と VGM で聞こえ方が違う原因だった)
+    _pushWrite(reg, data) {
+      this.writebuf.push((reg & 0x3f) | ((data & 0xff) << 8));
+      // ★clock()を呼ばずに書き込みだけ流し込む経路(無音先読みスキャンの早送り
+      // stream-player.js/_resetScan、kss-stream-player.js/_resetScan など)への保険。
+      // 実チップ相当のウェイト間隔でしか掃けないキューに数十万件積まれると、
+      // shift()がO(n)化して主スレッドごと焼き付く。上限を超えたらパイプラインを
+      // 介さずレジスタへ直接反映する(そもそもclock()が無い=時間が進まない経路なので
+      // サイクル精度に意味が無く、旧コアの「即時反映」と同じ挙動になる)。
+      if (this.writebuf.length - this.writeHead > WRITE_QUEUE_MAX) this._drainDirect();
+    }
+
+    /** 溜まった書き込みをパイプラインを介さずレジスタへ直接反映してキューを空にする */
+    _drainDirect() {
+      for (let i = this.writeHead; i < this.writebuf.length; i++) {
+        const w = this.writebuf[i];
+        this._applyRegDirect(w & 0x3f, (w >> 8) & 0xff);
+      }
+      this.writebuf.length = 0;
+      this.writeHead = 0;
+      this.writeDelay = 0;
+      // 対の途中(アドレスだけ出した状態)なら先頭から出し直す。宙に浮いたアドレスは
+      // 次の対が自分のアドレスを出し直すので害が無い。
+      this._writePhase = 0;
+    }
+
+    /** レジスタ1本を即時反映(_doModeWrite / _doRegWrite と同じデコード) */
+    _applyRegDirect(reg, d) {
+      reg &= 0x3f; d &= 0xff;
+      const p = this.patch;
+      if (reg <= 0x07) {
+        const slot = reg & 0x01;
+        switch (reg) {
+          case 0x00: case 0x01:
+            p.multi[slot] = d & 0x0f; p.ksr[slot] = (d >> 4) & 1;
+            p.et[slot] = (d >> 5) & 1; p.vib[slot] = (d >> 6) & 1; p.am[slot] = (d >> 7) & 1;
+            break;
+          case 0x02: p.ksl[0] = (d >> 6) & 3; p.tl = d & 0x3f; break;
+          case 0x03: p.ksl[1] = (d >> 6) & 3; p.dc = (d >> 4) & 1; p.dm = (d >> 3) & 1; p.fb = d & 7; break;
+          case 0x04: case 0x05: p.dr[slot] = d & 0x0f; p.ar[slot] = (d >> 4) & 0x0f; break;
+          case 0x06: case 0x07: p.rr[slot] = d & 0x0f; p.sl[slot] = (d >> 4) & 0x0f; break;
+        }
+        return;
+      }
+      if (reg === 0x0e) {
+        this.rhythm = d & 0x3f;
+        if (this.isDs1001) this.rhythm |= 0x20;
+        this.rm_enable = s8((this.rm_enable & 0x7f) | ((this.rhythm << 2) & 0x80));
+        return;
+      }
+      if (reg === 0x0f) { this.testmode = d & 0x0f; return; }
+      const ch = reg & 0x0f;
+      if (ch > 8) return;
+      switch (reg & 0xf0) {
+        case 0x10: this.fnum[ch] = (this.fnum[ch] & 0x100) | d; break;
+        case 0x20:
+          this.fnum[ch] = (this.fnum[ch] & 0xff) | ((d & 1) << 8);
+          this.block[ch] = (d >> 1) & 7;
+          this.kon[ch] = (d >> 4) & 1;
+          this.son[ch] = (d >> 5) & 1;
+          break;
+        case 0x30: this.regVol[ch] = d & 0x0f; this.inst[ch] = (d >> 4) & 0x0f; break;
+      }
+    }
+
+    // 先頭の1件を実チップと同じ2フェーズ(アドレス→データ)へ展開して流す。
+    // _writePhase が対の途中を表すので、キューから取り出すのはデータを出す時だけ。
+    _pumpWrites() {
+      if (this.writeHead >= this.writebuf.length) return;
+      if (this.writeDelay > 0) { this.writeDelay--; return; }
+      const w = this.writebuf[this.writeHead];
+      if (this._writePhase === 0) {
+        this.write_data = w & 0x3f;   // アドレスフェーズ
+        this.write_a |= 1;
+        this._writePhase = 1;
+        this.writeDelay = WRITE_GAP_ADDR;
+      } else {
+        this.write_data = (w >> 8) & 0xff; // データフェーズ
+        this.write_d |= 1;
+        this._writePhase = 0;
+        this.writeHead++;
+        if (this.writeHead > 1024 && this.writeHead * 2 > this.writebuf.length) {
+          this.writebuf = this.writebuf.slice(this.writeHead); this.writeHead = 0; // たまに詰める
+        }
+        this.writeDelay = WRITE_GAP_DATA;
+      }
+    }
+
+    /** レジスタ番号を直接指定して書く(VGM / テスト用) */
+    writeReg(reg, data) {
+      reg &= 0x3f; data &= 0xff;
+      this.regShadow[reg] = data;
+      this._addrLatch = reg;
+      this._pushWrite(reg, data);
+    }
+
+    /** VRC7のNSFバス: $9010=アドレス, $9030=データ */
+    writeRegister(addr, value) {
+      value &= 0xff;
+      // アドレスポートはラッチするだけ。実際にキューへ積むのはデータが来た時(対で1件)。
+      if (addr === 0x9010) { this._addrLatch = value & 0x3f; }
+      else if (addr === 0x9030) { this.regShadow[this._addrLatch | 0] = value; this._pushWrite(this._addrLatch | 0, value); }
+    }
+
+    /** FMPACのMSX I/Oポート: 0x7C=アドレス, 0x7D=データ */
+    ioWrite(port, value) {
+      value &= 0xff;
+      // アドレスポートはラッチするだけ。実際にキューへ積むのはデータが来た時(対で1件)。
+      if (port === 0x7C) { this._addrLatch = value & 0x3f; }
+      else if (port === 0x7D) { this.regShadow[this._addrLatch | 0] = value; this._pushWrite(this._addrLatch | 0, value); }
+    }
+
+    /** ホストクロック1サイクル。hostPerOpll個で内部1サイクル進む */
+    clock() {
+      if (++this.hostAccum < this.hostPerOpll) return;
+      this.hostAccum = 0;
+      this._pumpWrites();
+      this._stepOpll();
+    }
+
+    /**
+     * clock()を回さない経路(regsOnlyキャプチャ等)で溜まった書き込みを反映させる。
+     * ym2612Nuked.flushWrites() と同じ用途。
+     */
+    flushWrites() {
+      let guard = 0;
+      while (this.writeHead < this.writebuf.length && guard++ < 1000000) this.clock();
+      for (let i = 0; i < this.hostPerOpll * CYCLES_PER_SAMPLE * 2; i++) this.clock();
+    }
+
+    mixSample() { return this.lastSample * OUTPUT_GAIN; }
+
+    get rhythmMode() { return !this.isDs1001 && !!(this.rhythm & 0x20); }
+
+    // ────────── 鍵盤表示用スナップショット ──────────
+    // 実機のレジスタ影から音色パラメータを取り出し、波形は「今のパラメータでの概形」を
+    // 再合成する(時分割パイプラインは模擬しない)。ym2612Nuked.js の nukedSynthWave と同方針。
+    _patchOf(ch) {
+      const instr = this.inst[ch];
+      return instr > 0 ? this.patchrom[instr - 1] : this.patch;
+    }
+
+    _dumpPatch(ch) {
+      const p = this._patchOf(ch);
+      return {
+        type: 'opll', inst: this.inst[ch],
+        mod: { AM: p.am[0], PM: p.vib[0], EG: p.et[0], KR: p.ksr[0], ML: p.multi[0],
+               KL: p.ksl[0], TL: p.tl, FB: p.fb, WF: p.dm,
+               AR: p.ar[0], DR: p.dr[0], SL: p.sl[0], RR: p.rr[0] },
+        car: { AM: p.am[1], PM: p.vib[1], EG: p.et[1], KR: p.ksr[1], ML: p.multi[1],
+               KL: p.ksl[1], TL: 0, FB: 0, WF: p.dc,
+               AR: p.ar[1], DR: p.dr[1], SL: p.sl[1], RR: p.rr[1] }
+      };
+    }
+
+    /** 1周期ぶんのFM波形(-1..1, N点)。egは現在値を使う */
+    _synthWave(ch, N) {
+      const p = this._patchOf(ch);
+      const modEg = this.eg_level[SLOT_MOD[ch]] + (p.tl << 1);
+      const carEg = this.eg_level[SLOT_CAR[ch]] + (this.regVol[ch] << 3);
+      const ratio = PG_MULTI[p.multi[0]] / (PG_MULTI[p.multi[1]] || 1);
+      const wave = new Array(N);
+      let mx = 1e-6;
+      for (let k = 0; k < N; k++) {
+        const mp = Math.round((k / N) * ratio * 1024) & 0x3ff;
+        const mo = opOut(mp, modEg, p.dm);
+        const cp = (Math.round((k / N) * 1024) + (mo >> 0)) & 0x3ff;
+        const co = opOut(cp, carEg, p.dc);
+        wave[k] = co;
+        if (Math.abs(co) > mx) mx = Math.abs(co);
+      }
+      for (let k = 0; k < N; k++) wave[k] /= mx;
+      return wave;
+    }
+
+    _melodySnapshot(ch, N) {
+      const fnum = this.fnum[ch], block = this.block[ch];
+      const carLevel = this.eg_level[SLOT_CAR[ch]];
+      const active = !!this.kon[ch] && carLevel < 0x7f;
+      return {
+        freq: (this.kon[ch] && fnum > 0) ? SAMPLE_RATE * fnum / Math.pow(2, 19 - block) : 0,
+        vol: (15 - this.regVol[ch]) / 15,
+        rawVol: this.regVol[ch],
+        instrument: this.inst[ch],
+        active,
+        waveData: active ? this._synthWave(ch, N) : new Array(N).fill(0),
+        patch: this._dumpPatch(ch)
+      };
+    }
+
+    // ★2026-08-22: 打楽器はピークホールドで返す。
+    // 鍵盤表示はrAF(約16ms間隔)でスナップショットを読むが、チップはオーディオバッファ単位
+    // (ScriptProcessorNodeで50〜90ms)にまとめて進むため、瞬時値だけ見ると短い打楽器の
+    // 減衰がサンプリングの隙間に丸ごと落ちる。実測: Aleste Gaiden 7曲目のBDは約50msで
+    // 減衰しきり(eg_level 16→33→96→127)、鍵盤のBD行が一度も点灯しなかった
+    // (SDは減衰が緩いので見えていた)。前回読んだ時点以降の最小レベル(=最大音量)を保持する。
+    _rhythmSlotInfo(peakIdx, slotIdx, freq) {
+      const now = this.eg_level[slotIdx];
+      const level = Math.min(this._rhythmPeak[peakIdx], now);
+      this._rhythmPeak[peakIdx] = now; // 次の窓は現在値から測り直す
+      return { freq, active: level < 0x7f, vol: (0x7f - level) / 0x7f };
+    }
+
+    snapshot() {
+      const N = 128;
+      if (this.isDs1001) {
+        const out = [];
+        for (let i = 0; i < 6; i++) out.push(this._melodySnapshot(i, N));
+        return out;
+      }
+      // ★2026-08-22: melody は常に9本、rhythm も常に付けて返す。
+      // リズムモードのビット($0E bit5)を「打つ瞬間だけ立てて即降ろす」ドライバが実在し
+      // (SMS版After Burnerは毎秒10〜16回トグル)、返す形をビットに追随させると鍵盤の
+      // 行構成が激しく入れ替わって読めなくなる。どちらを表示するかは表示側(keyboard.js)が
+      // 「一度リズムを見たら以後保持」する単調な運用で決める。
+      const rhythmMode = this.rhythmMode;
+      const melody = [];
+      for (let i = 0; i < 9; i++) melody.push(this._melodySnapshot(i, N));
+
+      const f = (ch) => this.fnum[ch] > 0 ? SAMPLE_RATE * this.fnum[ch] / Math.pow(2, 19 - this.block[ch]) : 0;
+      return {
+        rhythmMode,
+        melody,
+        rhythm: {
+          bd:  this._rhythmSlotInfo(0, RHYTHM_SLOT[0], f(6)),
+          sd:  this._rhythmSlotInfo(1, RHYTHM_SLOT[1], 0),
+          tom: this._rhythmSlotInfo(2, RHYTHM_SLOT[2], f(8)),
+          cym: this._rhythmSlotInfo(3, RHYTHM_SLOT[3], 0),
+          hh:  this._rhythmSlotInfo(4, RHYTHM_SLOT[4], 0)
+        }
+      };
+    }
+  }
+
+  // 書き込みキューの最小間隔(内部サイクル)。実チップのウェイト仕様に対応する。
+  //  - アドレス書き込み後: write_dataラッチを取り合わないよう数サイクル空ければよい。
+  //  - データ書き込み後  : ★18以上必須。FMレジスタ($10/$20/$30系)は _doRegWrite が
+  //    「(address&0x0f) == cycles」の1サイクルでしか反映しないため、次のアドレス書き込みが
+  //    write_fm_data を落とす前に18サイクル(全cycles値)を一巡させないと書き込みが消える。
+  //    実機YM2413のデータ書き込み後ウェイト84マスタサイクル(=21内部サイクル)とも符合する。
+  // キュー上限。超えたら直接反映へ切り替える(_pushWrite のコメント参照)
+  // ★キュー上限は「実ドライバの通常の書き込みバーストでは絶対に届かない」値にすること。
+  // 32では実測でIllusion City(KSS)の通常再生中に80フレームで95回も直接反映が発動し、
+  // 実チップのウェイトを踏んだ書き込みタイミングが壊れてFM2の音が変わっていた
+  // (直接反映を止めるとVGM経路と完全一致した)。KSSのOPLL書き込みは最大74件/フレーム。
+  // 取り出しは writeHead 方式(shift不使用)なので、キューが長くても取り出しコストは一定。
+  // ここが効くのは clock() が呼ばれない早送り経路だけで、そこは数万〜数十万件積まれる。
+  const WRITE_QUEUE_MAX = 4096;
+  const WRITE_GAP_ADDR = 4;
+  const WRITE_GAP_DATA = 20;
+
+  // 出力ゲイン。旧コア(emu2413移植)とラウドネスを揃えるための実測較正値。
+  // 新コアの生の出力は「18サイクルぶんの時分割DAC出力の総和」。@1/@4/@8/@12/@15
+  // を単音で鳴らしてRMSを旧コアと突き合わせ、平均比が1.0になるよう決めた(音色ごとの比は
+  // 0.4〜1.2とばらつく。コアが違えばEG/出力段が違うので一致はしない)
+  // (フォーマット間の音量バランスを崩さないため)。
+  const OUTPUT_GAIN = 1 / 2000;
+
+  // DC遮断フィルタ係数(1 - 2π*5Hz/49716)
+  const DC_BLOCK_R = 0.99937;
+
+  // 波形プレビュー用の1オペレータ出力(実機と同じ対数sin→exp経路)
+  function opOut(phase10, egLevel, halfWave) {
+    let phase = phase10 & 0x3ff;
+    const neg = (phase >> 9) & 1;
+    if (phase & 0x100) phase ^= 0xff;
+    let level = LOGSIN[phase & 0xff] + (Math.min(127, egLevel) << 4);
+    if (level >= 4096) level = 4095;
+    const out = EXPROM[level & 0xff] >> (level >> 8);
+    if (halfWave && neg) return 0;
+    return neg ? ~out : out;
+  }
+
+  // 音色エディタの逆算(src/ui/vrc7ToneSolver.js)が定常状態の1周期を実機と同じ演算で
+  // 作るために使う。LOGSIN/EXPROM表そのものは外へ出さない(表を持ち出すと写しがずれる)
+  OPLLNuked.opOut = opOut;
+
+  // 内蔵音色ROMをレジスタ$00-$07と同じ8バイト並びで返す(type: 'ym2413' | 'ds1001'(VRC7)、inst 1-15)。
+  // 変換側(src/convert/toneDerive.js)が「YM2413のプリセット音色の波形」をN163等へ写すときに使う。
+  // ★VRC7(ds1001)側の写しは src/convert/vrc7Tone.js PRESETS にもある(Workerバンドル都合の複製)
+  OPLLNuked.presetBytes = function (type, inst) {
+    const rom = type === 'ds1001' ? PATCH_DS1001 : PATCH_YM2413;
+    const p = rom[(inst | 0) - 1];
+    if (!p) return null;
+    const b20 = (i) => (p.am[i] << 7) | (p.vib[i] << 6) | (p.et[i] << 5) | (p.ksr[i] << 4) | (p.multi[i] & 15);
+    return [
+      b20(0), b20(1),
+      ((p.ksl[0] & 3) << 6) | (p.tl & 63),
+      ((p.ksl[1] & 3) << 6) | ((p.dc & 1) << 4) | ((p.dm & 1) << 3) | (p.fb & 7),
+      (p.ar[0] << 4) | p.dr[0], (p.ar[1] << 4) | p.dr[1],
+      (p.sl[0] << 4) | p.rr[0], (p.sl[1] << 4) | p.rr[1]
+    ];
+  };
+
+  Emu.OPLLNuked = OPLLNuked;
+})(globalThis);
+
+/*
+ * VRC7 拡張音源エミュレータ (OPLL / YM2413)
+ * MML.Emu.VRC7Audio
+ *
+ * ★2026-08-22: 既定の再生コアは opllNuked.js (Nuked-OPLL移植) に移行した。このファイルの
+ * 実装は MML.Emu.OPLL_CORE = 'emu2413' を指定したときのA/B比較用として残してある。
+ *
+ * Mitsutaka Okazaki の emu2413 (VirtuaNES同梱版) を忠実に移植した2オペレータFM。
+ * 6メロディチャンネル。DB単位系(0.375dB/step)・1024点対数sin・DB2LIN・正確なEG状態機械。
+ * 音色ROMは nukeykt/Nuked-OPLL (GPLv2) の patch_ds1001 = VRC7実チップの die shot 読み出し値。
+ *   $9010 : アドレスポート  $9030 : データポート
+ * 出力49716Hz (VRC7マスタ3.58MHz/72 = CPUクロック/36)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const NUM_CH = 6;
+  const CYCLES_PER_SAMPLE = 36;
+  const SAMPLE_RATE = 49716;
+
+  // ---- 定数 (emu2413) ----
+  const PG_BITS = 10, PG_WIDTH = 1 << PG_BITS;       // 1024点波形(emu2413に合わせて9→10bit化)
+  const DP_BITS = 19, DP_WIDTH = 1 << DP_BITS, DP_BASE_BITS = DP_BITS - PG_BITS; // 9
+  const DB_STEP = 0.375, DB_BITS = 7, DB_MUTE = 1 << DB_BITS;   // 128
+  const EG_STEP = 0.375, EG_BITS = 7;
+  const EG2DB = 1;                                    // EG_STEP/DB_STEP
+  const TL2EG = 2;                                    // TL_STEP/EG_STEP (0.75/0.375)
+  const DB2LIN_AMP_BITS = 10, SLOT_AMP_BITS = DB2LIN_AMP_BITS;
+  const EG_DP_BITS = 22, EG_DP_WIDTH = 1 << EG_DP_BITS;
+  const PM_PG_BITS = 8, PM_PG_WIDTH = 1 << PM_PG_BITS;
+  const PM_DP_BITS = 16, PM_DP_WIDTH = 1 << PM_DP_BITS;
+  const AM_PG_BITS = 8, AM_PG_WIDTH = 1 << AM_PG_BITS;
+  const AM_DP_BITS = 16, AM_DP_WIDTH = 1 << AM_DP_BITS;
+  const PM_AMP_BITS = 8, PM_AMP = 1 << PM_AMP_BITS;
+  const PM_SPEED = 6.4, PM_DEPTH = 13.75, AM_SPEED = 3.7, AM_DEPTH = 4.8;
+
+  // EGモード
+  const SETTLE = 0, ATTACK = 1, DECAY = 2, SUSHOLD = 3, SUSTINE = 4, RELEASE = 5, FINISH = 6;
+
+  // ---- 音色ROM (実チップ内蔵ROM。各8バイト=$00-$07) ----
+  // ★2026-08-22: 従来の VirtuaNES vrc7tone.h は実測値ではなく耳コピ推定で、実体は
+  // YM2413用テーブルの微改変だった(@2 Guitar が opllMsx.js の YM2413 値と1バイト違い)。
+  // nukeykt/Nuked-OPLL の patch_ds1001 は VRC7(Konami DS1001)を decap/die shot
+  // (siliconpr0n: digshadow, John McMaster)から読み出した本物のROM内容なので差し替え。
+  // NESdev Wiki "VRC7 audio" の音色表と全15音色一致を確認済み。音色名はNESdev Wiki準拠。
+  const VRC7_INST = [
+    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // 0: ユーザー音色枠($00-$07で可変)
+    [0x03,0x21,0x05,0x06,0xe8,0x81,0x42,0x27], // 1: Buzzy Bell
+    [0x13,0x41,0x14,0x0d,0xd8,0xf6,0x23,0x12], // 2: Guitar
+    [0x11,0x11,0x08,0x08,0xfa,0xb2,0x20,0x12], // 3: Wurly
+    [0x31,0x61,0x0c,0x07,0xa8,0x64,0x61,0x27], // 4: Flute
+    [0x32,0x21,0x1e,0x06,0xe1,0x76,0x01,0x28], // 5: Clarinet
+    [0x02,0x01,0x06,0x00,0xa3,0xe2,0xf4,0xf4], // 6: Synth
+    [0x21,0x61,0x1d,0x07,0x82,0x81,0x11,0x07], // 7: Trumpet
+    [0x23,0x21,0x22,0x17,0xa2,0x72,0x01,0x17], // 8: Organ
+    [0x35,0x11,0x25,0x00,0x40,0x73,0x72,0x01], // 9: Bells
+    [0xb5,0x01,0x0f,0x0f,0xa8,0xa5,0x51,0x02], // 10: Vibes
+    [0x17,0xc1,0x24,0x07,0xf8,0xf8,0x22,0x12], // 11: Vibraphone
+    [0x71,0x23,0x11,0x06,0x65,0x74,0x18,0x16], // 12: Tutti
+    [0x01,0x02,0xd3,0x05,0xc9,0x95,0x03,0x02], // 13: Fretless
+    [0x61,0x63,0x0c,0x00,0x94,0xc0,0x33,0xf6], // 14: Synth Bass
+    [0x21,0x72,0x0d,0x00,0xc1,0xd5,0x56,0x06]  // 15: Sweep
+  ];
+
+  // dump(8byte) → {mod,car} パッチ (emu2413 dump2patch)
+  function dump2patch(d) {
+    return {
+      mod: { AM:(d[0]>>7)&1, PM:(d[0]>>6)&1, EG:(d[0]>>5)&1, KR:(d[0]>>4)&1, ML:d[0]&15,
+             KL:(d[2]>>6)&3, TL:d[2]&63, FB:d[3]&7, WF:(d[3]>>3)&1,
+             AR:(d[4]>>4)&15, DR:d[4]&15, SL:(d[6]>>4)&15, RR:d[6]&15 },
+      car: { AM:(d[1]>>7)&1, PM:(d[1]>>6)&1, EG:(d[1]>>5)&1, KR:(d[1]>>4)&1, ML:d[1]&15,
+             KL:(d[3]>>6)&3, TL:0, FB:0, WF:(d[3]>>4)&1,
+             AR:(d[5]>>4)&15, DR:d[5]&15, SL:(d[7]>>4)&15, RR:d[7]&15 }
+    };
+  }
+  const PATCH = VRC7_INST.map(dump2patch); // [16] {mod,car}
+  // 変換側(src/convert/vrc7Tone.js の「近いプリセット探し」)にも同じ表が要る。あちらは
+  // Workerバンドルにエミュレータを同梱できない都合で自前の写しを持っているので、
+  // tools/headless/check-all.js がこの export と突き合わせて食い違いを検出する。
+  Emu.VRC7_INST = VRC7_INST;
+
+  // ---- テーブル ----
+  function Min(a, b) { return a < b ? a : b; }
+
+  // AR用 線形→対数
+  const AR_ADJUST = new Uint32Array(1 << EG_BITS);
+  AR_ADJUST[0] = 1 << EG_BITS;
+  for (let i = 1; i < 128; i++)
+    AR_ADJUST[i] = ((1 << EG_BITS) - 1 - (1 << EG_BITS) * Math.log(i) / Math.log(128)) | 0;
+
+  // DB2LIN
+  const DB2LIN = new Int32Array((DB_MUTE + DB_MUTE) * 2);
+  for (let i = 0; i < DB_MUTE + DB_MUTE; i++) {
+    let v = (((1 << DB2LIN_AMP_BITS) - 1) * Math.pow(10, -i * DB_STEP / 20)) | 0;
+    if (i >= DB_MUTE) v = 0;
+    DB2LIN[i] = v;
+    DB2LIN[i + DB_MUTE + DB_MUTE] = -v;
+  }
+
+  function lin2db(d) {
+    if (d === 0) return DB_MUTE - 1;
+    return Min(-(((20.0 * Math.log10(d)) / DB_STEP) | 0), DB_MUTE - 1);
+  }
+
+  // sinテーブル (0=full, 1=half)
+  const fullsin = new Uint32Array(PG_WIDTH);
+  const halfsin = new Uint32Array(PG_WIDTH);
+  for (let i = 0; i < PG_WIDTH / 4; i++) fullsin[i] = lin2db(Math.sin(2.0 * Math.PI * i / PG_WIDTH));
+  for (let i = 0; i < PG_WIDTH / 4; i++) fullsin[PG_WIDTH / 2 - 1 - i] = fullsin[i];
+  for (let i = 0; i < PG_WIDTH / 2; i++) fullsin[PG_WIDTH / 2 + i] = DB_MUTE + DB_MUTE + fullsin[i];
+  for (let i = 0; i < PG_WIDTH / 2; i++) halfsin[i] = fullsin[i];
+  for (let i = PG_WIDTH / 2; i < PG_WIDTH; i++) halfsin[i] = fullsin[0];
+  const WAVEFORM = [fullsin, halfsin];
+
+  // LFO
+  const pmtable = new Int32Array(PM_PG_WIDTH);
+  for (let i = 0; i < PM_PG_WIDTH; i++)
+    pmtable[i] = (PM_AMP * Math.pow(2, PM_DEPTH * Math.sin(2.0 * Math.PI * i / PM_PG_WIDTH) / 1200)) | 0;
+  const amtable = new Int32Array(AM_PG_WIDTH);
+  for (let i = 0; i < AM_PG_WIDTH; i++)
+    amtable[i] = (AM_DEPTH / 2 / DB_STEP * (1.0 + Math.sin(2.0 * Math.PI * i / PM_PG_WIDTH))) | 0;
+
+  // clk/rate はネイティブ(49716Hz)固定なので rate_adjust=恒等。
+  // dphaseTable[fnum][block][ML]
+  const MLT = [1, 1*2, 2*2, 3*2, 4*2, 5*2, 6*2, 7*2, 8*2, 9*2, 10*2, 10*2, 12*2, 12*2, 15*2, 15*2];
+  const dphaseTable = [];
+  for (let fnum = 0; fnum < 512; fnum++) {
+    const a = []; dphaseTable.push(a);
+    for (let block = 0; block < 8; block++) {
+      const b = new Uint32Array(16); a.push(b);
+      for (let ML = 0; ML < 16; ML++)
+        b[ML] = (((fnum * MLT[ML]) << block) >> (20 - DP_BITS)) >>> 0;
+    }
+  }
+
+  // tllTable[fnum4][block][TL][KL]
+  const KL_DB2 = [0.000,9.000,12.000,13.875,15.000,16.125,16.875,17.625,18.000,18.750,19.125,19.500,19.875,20.250,20.625,21.000].map(x => (x * 2) | 0);
+  const tllTable = [];
+  for (let fnum = 0; fnum < 16; fnum++) {
+    const a = []; tllTable.push(a);
+    for (let block = 0; block < 8; block++) {
+      const b = []; a.push(b);
+      for (let TL = 0; TL < 64; TL++) {
+        const c = new Uint32Array(4); b.push(c);
+        for (let KL = 0; KL < 4; KL++) {
+          if (KL === 0) c[KL] = (TL2EG * TL) >>> 0;
+          else {
+            const tmp = KL_DB2[fnum] - (3 * 2) * (7 - block);
+            if (tmp <= 0) c[KL] = (TL2EG * TL) >>> 0;
+            else c[KL] = (((tmp >> (3 - KL)) / EG_STEP) | 0) + TL2EG * TL;
+          }
+        }
+      }
+    }
+  }
+
+  // rksTable[fnum8][block][KR]
+  const rksTable = [];
+  for (let f8 = 0; f8 < 2; f8++) {
+    const a = []; rksTable.push(a);
+    for (let block = 0; block < 8; block++) {
+      const b = new Int32Array(2); a.push(b);
+      b[0] = block >> 1;
+      b[1] = (block << 1) + f8;
+    }
+  }
+
+  // dphaseARTable[AR][Rks], dphaseDRTable[DR][Rks]
+  const dphaseARTable = [], dphaseDRTable = [];
+  for (let AR = 0; AR < 16; AR++) {
+    const a = new Uint32Array(16); dphaseARTable.push(a);
+    for (let Rks = 0; Rks < 16; Rks++) {
+      let RM = AR + (Rks >> 2); if (RM > 15) RM = 15; const RL = Rks & 3;
+      if (AR === 0) a[Rks] = 0;
+      else if (AR === 15) a[Rks] = EG_DP_WIDTH;
+      else a[Rks] = ((3 * (RL + 4)) << (RM + 1)) >>> 0;
+    }
+  }
+  for (let DR = 0; DR < 16; DR++) {
+    const a = new Uint32Array(16); dphaseDRTable.push(a);
+    for (let Rks = 0; Rks < 16; Rks++) {
+      let RM = DR + (Rks >> 2); if (RM > 15) RM = 15; const RL = Rks & 3;
+      if (DR === 0) a[Rks] = 0;
+      else a[Rks] = ((RL + 4) << (RM - 1)) >>> 0;
+    }
+  }
+
+  // SL[16] (eg_phase単位)
+  const SL_DB = [0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,48];
+  const SL = new Uint32Array(16);
+  for (let i = 0; i < 16; i++) SL[i] = ((((SL_DB[i] / 3.0) * 8) | 0) << (EG_DP_BITS - EG_BITS)) >>> 0;
+
+  const pm_dphase = ((PM_SPEED * PM_DP_WIDTH / (SAMPLE_RATE)) + 0.5) | 0;
+  const am_dphase = ((AM_SPEED * AM_DP_WIDTH / (SAMPLE_RATE)) + 0.5) | 0;
+
+  // ---- スロット ----
+  class Slot {
+    constructor(type) {
+      this.type = type; // 0=mod 1=car
+      this.patch = PATCH[0].mod;
+      this.reset();
+    }
+    reset() {
+      this.sintbl = WAVEFORM[0];
+      this.phase = 0; this.dphase = 0; this.pgout = 0;
+      this.output = [0, 0]; this.feedback = 0;
+      this.eg_mode = SETTLE; this.eg_phase = EG_DP_WIDTH; this.eg_dphase = 0; this.egout = 0;
+      this.fnum = 0; this.block = 0; this.volume = 0; this.sustine = 0;
+      this.tll = 0; this.rks = 0;
+    }
+    calcEgDphase() {
+      const p = this.patch;
+      switch (this.eg_mode) {
+        case ATTACK: return dphaseARTable[p.AR][this.rks];
+        case DECAY: return dphaseDRTable[p.DR][this.rks];
+        case SUSHOLD: return 0;
+        case SUSTINE: return dphaseDRTable[p.RR][this.rks];
+        case RELEASE:
+          if (this.sustine) return dphaseDRTable[5][this.rks];
+          else if (p.EG) return dphaseDRTable[p.RR][this.rks];
+          else return dphaseDRTable[7][this.rks];
+        default: return 0;
+      }
+    }
+    updatePG() { this.dphase = dphaseTable[this.fnum][this.block][this.patch.ML]; }
+    updateTLL() {
+      this.tll = (this.type === 0)
+        ? tllTable[this.fnum >> 5][this.block][this.patch.TL][this.patch.KL]
+        : tllTable[this.fnum >> 5][this.block][this.volume][this.patch.KL];
+    }
+    updateRKS() { this.rks = rksTable[this.fnum >> 8][this.block][this.patch.KR]; }
+    updateWF() { this.sintbl = WAVEFORM[this.patch.WF]; }
+    updateEG() { this.eg_dphase = this.calcEgDphase(); }
+    updateAll() { this.updatePG(); this.updateTLL(); this.updateRKS(); this.updateWF(); this.updateEG(); }
+    slotOn() { this.eg_mode = ATTACK; this.phase = 0; this.eg_phase = 0; }
+    slotOff() {
+      if (this.eg_mode === ATTACK)
+        this.eg_phase = (AR_ADJUST[(this.eg_phase >>> (EG_DP_BITS - EG_BITS)) & 0x7F] << (EG_DP_BITS - EG_BITS)) >>> 0;
+      this.eg_mode = RELEASE;
+    }
+    calcPhase(lfo_pm) {
+      if (this.patch.PM) this.phase = (this.phase + (((this.dphase * lfo_pm) >> PM_AMP_BITS) >>> 0)) >>> 0;
+      else this.phase = (this.phase + this.dphase) >>> 0;
+      this.phase &= (DP_WIDTH - 1);
+      this.pgout = this.phase >>> DP_BASE_BITS;
+      return this.pgout;
+    }
+    calcEnvelope(lfo_am) {
+      let egout;
+      switch (this.eg_mode) {
+        case ATTACK:
+          this.eg_phase = (this.eg_phase + this.eg_dphase) >>> 0;
+          if (this.eg_phase & EG_DP_WIDTH) { egout = 0; this.eg_phase = 0; this.eg_mode = DECAY; this.updateEG(); }
+          else egout = AR_ADJUST[(this.eg_phase >>> (EG_DP_BITS - EG_BITS)) & 0x7F];
+          break;
+        case DECAY:
+          this.eg_phase = (this.eg_phase + this.eg_dphase) >>> 0;
+          egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          if (this.eg_phase >= SL[this.patch.SL]) {
+            this.eg_phase = SL[this.patch.SL];
+            this.eg_mode = this.patch.EG ? SUSHOLD : SUSTINE;
+            this.updateEG();
+            egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          }
+          break;
+        case SUSHOLD:
+          egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          if (this.patch.EG === 0) { this.eg_mode = SUSTINE; this.updateEG(); }
+          break;
+        case SUSTINE:
+        case RELEASE:
+          this.eg_phase = (this.eg_phase + this.eg_dphase) >>> 0;
+          egout = this.eg_phase >>> (EG_DP_BITS - EG_BITS);
+          if (egout >= (1 << EG_BITS)) { this.eg_mode = FINISH; egout = (1 << EG_BITS) - 1; }
+          break;
+        case FINISH: default:
+          egout = (1 << EG_BITS) - 1;
+          break;
+      }
+      egout = this.patch.AM ? (EG2DB * (egout + this.tll) + lfo_am) : (EG2DB * (egout + this.tll));
+      if (egout >= DB_MUTE) egout = DB_MUTE - 1;
+      this.egout = egout;
+      return egout;
+    }
+  }
+
+  // emu2413 calc_slot_car: modOut = 2*(fm>>1) (fmのLSBを切り捨てるだけで倍化はしない)
+  function modToCarPhase(fm) { return 2 * (fm >> 1); }
+
+  class Vrc7Channel {
+    constructor() {
+      this.mod = new Slot(0);
+      this.car = new Slot(1);
+      this.patchNumber = 0;
+      this.keyStatus = 0;
+    }
+    reset() { this.mod.reset(); this.car.reset(); this.keyStatus = 0; }
+
+    calcModulator(lfo_am, lfo_pm) {
+      const s = this.mod;
+      s.output[1] = s.output[0];
+      const egout = s.calcEnvelope(lfo_am);
+      const pgout = s.calcPhase(lfo_pm);
+      if (egout >= DB_MUTE - 1) s.output[0] = 0;
+      else if (s.patch.FB !== 0) {
+        // emu2413: fm = (output[1]+output[0]) >> (9-FB)。s.feedbackは(output[1]+output[0])>>1で
+        // 既に1bitシフト済みのため、ここでのシフト量は(9-FB)-1 = (8-FB)。
+        const fm = (s.feedback) >> (8 - s.patch.FB);
+        s.output[0] = DB2LIN[s.sintbl[(pgout + fm) & (PG_WIDTH - 1)] + egout];
+      } else {
+        s.output[0] = DB2LIN[s.sintbl[pgout] + egout];
+      }
+      // s.feedbackは自己変調(次回calcModulator呼び出し時のfm計算)専用。キャリアへ渡すのは
+      // emu2413同様、平均化前の生のoutput[0]。
+      s.feedback = (s.output[1] + s.output[0]) >> 1;
+      return s.output[0];
+    }
+    calcCarrier(fm, lfo_am, lfo_pm) {
+      const s = this.car;
+      const egout = s.calcEnvelope(lfo_am);
+      const pgout = s.calcPhase(lfo_pm);
+      if (egout >= DB_MUTE - 1) return 0;
+      return DB2LIN[s.sintbl[(pgout + modToCarPhase(fm)) & (PG_WIDTH - 1)] + egout];
+    }
+  }
+
+  class VRC7Audio {
+    constructor() { 
+      // ★2026-08-22: 既定ではNuked-OPLLコア(opllNuked.js)へ委譲する。
+      // MML.Emu.OPLL_CORE = 'emu2413' を指定するとこの下の旧コア(emu2413 0.6x系移植)に戻る。
+      if (Emu.OPLL_CORE !== 'emu2413' && Emu.OPLLNuked) return new Emu.OPLLNuked({ chipType: 'ds1001' });
+      this._init(); this.mute = new Array(NUM_CH).fill(false); this.vol = new Array(NUM_CH).fill(1); }
+    _init() {
+      this.addr = 0;
+      this.reg = new Uint8Array(0x40);
+      this.patches = [];               // [16] {mod,car} (音色0はカスタム, 可変)
+      for (let i = 0; i < 16; i++) this.patches.push({ mod: Object.assign({}, PATCH[i].mod), car: Object.assign({}, PATCH[i].car) });
+      this.channels = [];
+      for (let i = 0; i < NUM_CH; i++) { const c = new Vrc7Channel(); this.channels.push(c); this._setPatch(i, 0); }
+      this.pm_phase = 0; this.am_phase = 0; this.lfo_pm = 0; this.lfo_am = 0;
+      this.cyc = 0; this.lastSample = 0;
+    }
+    reset() { this._init(); }
+
+    _setPatch(i, num) {
+      const c = this.channels[i];
+      c.patchNumber = num;
+      c.mod.patch = this.patches[num].mod;
+      c.car.patch = this.patches[num].car;
+    }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      if (addr === 0x9010) this.addr = value & 0x3F;
+      else if (addr === 0x9030) this.writeReg(this.addr, value);
+    }
+
+    writeReg(reg, data) {
+      reg &= 0x3F; data &= 0xFF;
+      const cust = this.patches[0];
+      if (reg <= 0x07) {
+        // カスタム音色
+        switch (reg) {
+          case 0x00: cust.mod.AM=(data>>7)&1; cust.mod.PM=(data>>6)&1; cust.mod.EG=(data>>5)&1; cust.mod.KR=(data>>4)&1; cust.mod.ML=data&15; break;
+          case 0x01: cust.car.AM=(data>>7)&1; cust.car.PM=(data>>6)&1; cust.car.EG=(data>>5)&1; cust.car.KR=(data>>4)&1; cust.car.ML=data&15; break;
+          case 0x02: cust.mod.KL=(data>>6)&3; cust.mod.TL=data&63; break;
+          case 0x03: cust.car.KL=(data>>6)&3; cust.car.WF=(data>>4)&1; cust.mod.WF=(data>>3)&1; cust.mod.FB=data&7; break;
+          case 0x04: cust.mod.AR=(data>>4)&15; cust.mod.DR=data&15; break;
+          case 0x05: cust.car.AR=(data>>4)&15; cust.car.DR=data&15; break;
+          case 0x06: cust.mod.SL=(data>>4)&15; cust.mod.RR=data&15; break;
+          case 0x07: cust.car.SL=(data>>4)&15; cust.car.RR=data&15; break;
+        }
+        for (let i = 0; i < NUM_CH; i++) if (this.channels[i].patchNumber === 0) { this.channels[i].mod.updateAll(); this.channels[i].car.updateAll(); }
+      } else if (reg >= 0x10 && reg <= 0x15) {
+        const ch = reg - 0x10, c = this.channels[ch];
+        const fnum = data + ((this.reg[0x20 + ch] & 1) << 8);
+        c.mod.fnum = c.car.fnum = fnum;
+        c.mod.updateAll(); c.car.updateAll();
+      } else if (reg >= 0x20 && reg <= 0x25) {
+        const ch = reg - 0x20, c = this.channels[ch];
+        const fnum = ((data & 1) << 8) + this.reg[0x10 + ch];
+        const block = (data >> 1) & 7;
+        c.mod.fnum = c.car.fnum = fnum; c.mod.block = c.car.block = block;
+        // sustine
+        if ((this.reg[reg] ^ data) & 0x20) { c.car.sustine = (data >> 5) & 1; }
+        // key on/off
+        const key = (data & 0x10) !== 0;
+        if (key) { if (!c.keyStatus) { c.mod.slotOn(); c.car.slotOn(); } c.keyStatus = 1; }
+        else { if (c.keyStatus) c.car.slotOff(); c.keyStatus = 0; }
+        c.mod.updateAll(); c.car.updateAll();
+      } else if (reg >= 0x30 && reg <= 0x35) {
+        const ch = reg - 0x30, c = this.channels[ch];
+        this._setPatch(ch, (data >> 4) & 15);
+        c.car.volume = (data & 15) << 2; // 6bit
+        c.mod.updateAll(); c.car.updateAll();
+      }
+      this.reg[reg] = data;
+    }
+
+    _updateAMPM() {
+      this.pm_phase = (this.pm_phase + pm_dphase) & (PM_DP_WIDTH - 1);
+      this.am_phase = (this.am_phase + am_dphase) & (AM_DP_WIDTH - 1);
+      this.lfo_am = amtable[this.am_phase >>> (AM_DP_BITS - AM_PG_BITS)];
+      this.lfo_pm = pmtable[this.pm_phase >>> (PM_DP_BITS - PM_PG_BITS)];
+    }
+
+    _calc() {
+      this._updateAMPM();
+      let inst = 0;
+      for (let i = 0; i < NUM_CH; i++) {
+        const c = this.channels[i];
+        if (c.car.eg_mode === FINISH) continue;
+        const fm = c.calcModulator(this.lfo_am, this.lfo_pm);
+        const out = c.calcCarrier(fm, this.lfo_am, this.lfo_pm);
+        if (!this.mute[i]) inst += out * this.vol[i];
+      }
+      return inst; // ±(1023*6)
+    }
+
+    clock() {
+      if (++this.cyc < CYCLES_PER_SAMPLE) return;
+      this.cyc = 0;
+      this.lastSample = this._calc();
+    }
+
+    mixSample() {
+      // emu2413: out16 = clamp(inst*8). ここでは -1..1 に正規化しゲイン調整。
+      return (this.lastSample / 4096) * 0.5;
+    }
+  }
+
+  // ---- 鍵盤表示用スナップショット ----
+  Emu.snapshotVRC7 = function (chip) {
+    if (typeof chip.snapshot === 'function') return chip.snapshot(); // Nukedコア
+    const out = [];
+    const N = 128; // FM連続波形なので線形補間前提で高めの解像度
+    for (let i = 0; i < NUM_CH; i++) {
+      const c = chip.channels[i];
+      const mod = c.mod, car = c.car;
+      const freq = (c.keyStatus && car.fnum > 0) ? SAMPLE_RATE * car.fnum / Math.pow(2, 19 - car.block) : 0;
+      const active = c.keyStatus && car.eg_mode !== FINISH && car.eg_mode !== SETTLE;
+      // 現在のオペレータ状態で1周期のFM波形を合成
+      const modEg = mod.egout, carEg = car.egout;
+      const ratio = car.dphase > 0 ? mod.dphase / car.dphase : 1;
+      const wave = new Array(N);
+      let mx = 1e-6;
+      for (let k = 0; k < N; k++) {
+        const cp = Math.round((k / N) * PG_WIDTH) & (PG_WIDTH - 1);
+        const mp = Math.round((k / N) * ratio * PG_WIDTH) & (PG_WIDTH - 1);
+        const mo = DB2LIN[mod.sintbl[mp] + Math.min(DB_MUTE - 1, modEg)];
+        const co = (carEg >= DB_MUTE - 1) ? 0 : DB2LIN[car.sintbl[(cp + (mo << 1)) & (PG_WIDTH - 1)] + carEg];
+        wave[k] = co;
+        if (Math.abs(co) > mx) mx = Math.abs(co);
+      }
+      for (let k = 0; k < N; k++) wave[k] /= mx;
+      // patch: 鍵盤の大波形表示の下に音色データ(@OT形式)を出すためのパラメータ
+      // (chip.patches[n] の {mod,car}。emu2413のpatch構造体そのまま: AM/PM/EG/KR/ML/KL/TL/FB/WF/AR/DR/SL/RR)
+      const pt = chip.patches[c.patchNumber];
+      out.push({
+        freq,
+        vol: (15 - (c.car.volume >> 2)) / 15,
+        rawVol: c.car.volume >> 2,
+        instrument: c.patchNumber,
+        active,
+        waveData: active ? wave : new Array(N).fill(0),
+        patch: pt ? { type: 'opll', inst: c.patchNumber, mod: pt.mod, car: pt.car } : null
+      });
+    }
+    return out;
+  };
+
+  Emu.VRC7Audio = VRC7Audio;
+})(globalThis);
+
+/*
+ * MMC5 拡張音源エミュレータ
+ * MML.Emu.MMC5Audio
+ *
+ * パルス x2 ($5000-$5003 / $5004-$5007, 有効化は $5015)。
+ * レジスタ形式は2A03のパルスチャンネルと同様だが、スイープユニットを持たない。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const DUTY_TABLE = [
+    [0, 1, 0, 0, 0, 0, 0, 0],
+    [0, 1, 1, 0, 0, 0, 0, 0],
+    [0, 1, 1, 1, 1, 0, 0, 0],
+    [1, 0, 0, 1, 1, 1, 1, 1]
+  ];
+  const LENGTH_TABLE = [
+    10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
+    12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
+  ];
+
+  class Mmc5Pulse {
+    constructor() {
+      this.enabled = false;
+      this.duty = 0;
+      this.lengthCounterHalt = false; // = エンベロープループフラグ
+      this.constantVolume = true;
+      this.volume = 0;                // 固定音量 or エンベロープ周期
+      this.timerPeriod = 0;
+      this.timer = 0;
+      this.dutyStep = 0;
+      this.lengthCounter = 0;
+      // エンベロープ(2A03パルスと同形式)
+      this.envStart = false;
+      this.envDivider = 0;
+      this.envDecay = 0;
+    }
+    writeReg(index, value) {
+      switch (index) {
+        case 0: // $5000/$5004
+          this.duty = (value >> 6) & 0x03;
+          this.lengthCounterHalt = (value & 0x20) !== 0;
+          this.constantVolume = (value & 0x10) !== 0;
+          this.volume = value & 0x0F;
+          break;
+        case 2: // $5002/$5006
+          this.timerPeriod = (this.timerPeriod & 0x700) | value;
+          break;
+        case 3: // $5003/$5007
+          this.timerPeriod = (this.timerPeriod & 0xFF) | ((value & 0x07) << 8);
+          if (this.enabled) this.lengthCounter = LENGTH_TABLE[(value >> 3) & 0x1F];
+          this.dutyStep = 0;
+          this.envStart = true; // 書き込みでエンベロープ再スタート
+          break;
+      }
+    }
+    setEnabled(on) {
+      this.enabled = on;
+      if (!on) this.lengthCounter = 0;
+    }
+    clock() {
+      if (this.timer === 0) {
+        this.timer = this.timerPeriod;
+        this.dutyStep = (this.dutyStep + 1) & 7;
+      } else {
+        this.timer--;
+      }
+    }
+    // エンベロープ更新(240Hzでクロック)。2A03パルスと同一ロジック。
+    clockEnvelope() {
+      if (this.envStart) {
+        this.envStart = false;
+        this.envDecay = 15;
+        this.envDivider = this.volume;
+      } else if (this.envDivider === 0) {
+        this.envDivider = this.volume;
+        if (this.envDecay > 0) this.envDecay--;
+        else if (this.lengthCounterHalt) this.envDecay = 15; // ループ
+      } else {
+        this.envDivider--;
+      }
+    }
+    clockHalfFrame() {
+      if (!this.lengthCounterHalt && this.lengthCounter > 0) this.lengthCounter--;
+    }
+    output() {
+      // MMC5はスイープを持たないため 2A03 の「period<8で消音」は無い(超音波域も出力)。
+      if (!this.enabled || this.lengthCounter === 0) return 0;
+      if (DUTY_TABLE[this.duty][this.dutyStep] === 0) return 0;
+      return this.constantVolume ? this.volume : this.envDecay;
+    }
+  }
+
+  class MMC5Audio {
+    constructor() {
+      this.pulse1 = new Mmc5Pulse();
+      this.pulse2 = new Mmc5Pulse();
+      this.frameCounter = 0;
+      this.cycleParity = 0;
+      this.pcmLevel = 0;   // $5011 8bit 生PCM DAC 出力
+      this.pcmReadMode = false; // $5010 bit0
+      this.mute = { pulse1: false, pulse2: false, pcm: false };
+      this.vol = { pulse1: 1, pulse2: 1, pcm: 1 };
+    }
+
+    reset() {
+      this.pulse1 = new Mmc5Pulse();
+      this.pulse2 = new Mmc5Pulse();
+      this.frameCounter = 0;
+      this.cycleParity = 0;
+      this.pcmLevel = 0;
+      this.pcmReadMode = false;
+    }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      if (addr >= 0x5000 && addr <= 0x5003) {
+        this.pulse1.writeReg(addr - 0x5000, value);
+      } else if (addr >= 0x5004 && addr <= 0x5007) {
+        this.pulse2.writeReg(addr - 0x5004, value);
+      } else if (addr === 0x5010) {
+        this.pcmReadMode = (value & 0x01) !== 0; // bit0: 0=writeモード, 1=readモード
+      } else if (addr === 0x5011) {
+        // 8bit 生PCM。writeモードのみ出力を更新($4011相当だが8bit)。
+        if (!this.pcmReadMode) this.pcmLevel = value;
+      } else if (addr === 0x5015) {
+        this.pulse1.setEnabled((value & 0x01) !== 0);
+        this.pulse2.setEnabled((value & 0x02) !== 0);
+      }
+    }
+
+    clock() {
+      // パルスタイマは 2A03 と同じくAPUサイクル(2 CPUサイクル)ごとに進める。
+      // f = CPU/(16*(period+1))。毎CPUサイクルで進めると1オクターブ高くなる。
+      this.cycleParity ^= 1;
+      if (this.cycleParity === 0) {
+        this.pulse1.clock();
+        this.pulse2.clock();
+      }
+      // MMC5はエンベロープ・長さカウンタとも 240Hz 固定(APU長さカウンタの2倍速)。
+      // 7457 CPUサイクル(≒240Hz)ごとに両方クロックする。
+      this.frameCounter++;
+      if (this.frameCounter >= 7457) {
+        this.frameCounter = 0;
+        this.pulse1.clockEnvelope();
+        this.pulse2.clockEnvelope();
+        this.pulse1.clockHalfFrame();
+        this.pulse2.clockHalfFrame();
+      }
+    }
+
+    mixSample() {
+      const p1 = this.mute.pulse1 ? 0 : (this.pulse1.output() / 15) * this.vol.pulse1;
+      const p2 = this.mute.pulse2 ? 0 : (this.pulse2.output() / 15) * this.vol.pulse2;
+      const pcm = this.mute.pcm ? 0 : (this.pcmLevel / 255) * this.vol.pcm;
+      return (p1 + p2) * 0.25 + pcm * 0.30;
+    }
+  }
+
+  // 鍵盤表示用: ライブチップから pulse1/pulse2/pcm のスナップショットを作る。
+  // 音量はエンベロープ実出力(constantVolume=false時はenvDecay)を反映。
+  Emu.snapshotMMC5 = function (chip) {
+    const CPU = 1789773;
+    const pulse = (p) => {
+      const eff = p.constantVolume ? p.volume : p.envDecay; // 実効音量
+      const freq = (p.timerPeriod >= 8) ? CPU / (16 * (p.timerPeriod + 1)) : 0;
+      return {
+        freq,
+        vol: eff / 15,
+        rawVol: eff,
+        duty: p.duty,
+        active: p.enabled && p.lengthCounter > 0 && eff > 0 && freq > 0
+      };
+    };
+    return {
+      pulse1: pulse(chip.pulse1),
+      pulse2: pulse(chip.pulse2),
+      pcm: { level: chip.pcmLevel, vol: chip.pcmLevel / 255, active: chip.pcmLevel > 0 }
+    };
+  };
+
+  Emu.MMC5Audio = MMC5Audio;
+})(globalThis);
+
+/*
  * N163 (Namco 163) 拡張音源エミュレータ
  * MML.Emu.N163Audio
  *
@@ -1297,6 +3255,223 @@
 })(globalThis);
 
 /*
+ * FME-7 (Sunsoft 5B) 拡張音源エミュレータ
+ * MML.Emu.FME7Audio
+ *
+ * AY-3-8910/YM2149 系。矩形波(50%)x3 + ノイズ + ハードウェアエンベロープ。
+ * アドレスラッチ $C000 でレジスタ番号(0-15)を選択し、$E000 で書き込む。
+ *   $00/$01,$02/$03,$04/$05 : 各chの12bitトーン周期(下位8bit/上位4bit)
+ *   $06                     : ノイズ周期(5bit)
+ *   $07                     : ミキサー。bit0-2=トーン有効(0で有効), bit3-5=ノイズ有効(0で有効)
+ *   $08/$09/$0A             : 各chの音量。bit0-3=固定音量, bit4=1でエンベロープ制御
+ *   $0B/$0C                 : 16bitエンベロープ周期
+ *   $0D                     : エンベロープ形状 (bit0=Hold,bit1=Alternate,bit2=Attack,bit3=Continue)
+ *
+ * トーン: f = CPU/(32*period) (period=0は1扱い、+1しない)。
+ * ノイズ: 17bit LFSR(タップ bit0^bit3)、f = CPU/(32*period)。
+ * エンベロープ: 5bit(0-31)、1ステップ = CPU/(16*period)。
+ * 音量DAC: 5bit対数(1.5dB/step、level0-1=無音)。固定音量Vは 5bit=2V+1。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  // 5B/AY 32段対数DAC。1.5dB/step、最大(31)=1.0、level0-1は無音。
+  const AY_DAC = new Float32Array(32);
+  for (let i = 0; i < 32; i++) AY_DAC[i] = i < 2 ? 0 : Math.pow(10, (i - 31) * 1.5 / 20);
+
+  const NUM_CH = 3;
+  // ★超音波のトーン(2026-09-19): 周期 2 以下は CPU/32(f=1789773/(32*周期)) で 20kHz を超える。出力サンプルの瞬間値を拾うと
+  //   サンプリング周波数との差で折り返し、聞こえる高音(例: 48kHz で FME7 周期1=55.9kHz → 約7.9kHz)になる。
+  //   実機ではアナログ段で平均され、方形波の半分の高さの直流(音量を変えた瞬間の「カチッ」)にしかならないので、
+  //   その平均(0.5)で鳴らす。Konami の MSX ドライバはバスドラの頭を周期1+エンベロープで作る
+  //   (Metal Gear 2 曲153。元の AY は約15.8kHz、FME7 へ写すと約7.9kHz に折り返して金属音になっていた)
+  const ULTRA_TONE_PERIOD_MAX = 2;
+
+  // トーン(矩形波)。period チャンネルクロックごとにレベル反転。
+  class Fme7Tone {
+    constructor() { this.period = 1; this.timer = 0; this.level = 0; }
+    reset() { this.period = 1; this.timer = 0; this.level = 0; }
+    clock() {
+      if (this.timer === 0) {
+        this.timer = Math.max(1, this.period) - 1; // period クロックごとに反転
+        this.level ^= 1;
+      } else {
+        this.timer--;
+      }
+    }
+  }
+
+  // ノイズ。17bit LFSR。period チャンネルクロックごとに flip をトグルし、
+  // flip立ち上がりでシフト(=2*period チャンネルクロック=32*period CPUクロックごと)。
+  class Fme7Noise {
+    constructor() { this.period = 1; this.timer = 0; this.lfsr = 1; this.flip = 0; this.out = 0; }
+    reset() { this.period = 1; this.timer = 0; this.lfsr = 1; this.flip = 0; this.out = 0; }
+    clock() {
+      if (this.timer === 0) {
+        this.timer = Math.max(1, this.period) - 1;
+        this.flip ^= 1;
+        if (this.flip) {
+          const fb = (this.lfsr ^ (this.lfsr >> 3)) & 1; // タップ bit0 ^ bit3
+          this.lfsr = ((this.lfsr >> 1) | (fb << 16)) & 0x1FFFF;
+        }
+        this.out = this.lfsr & 1;
+      } else {
+        this.timer--;
+      }
+    }
+  }
+
+  // ハードウェアエンベロープ。5bit(0-31)出力。
+  class Fme7Envelope {
+    constructor() { this.period = 1; this.timer = 0; this.step = 0; this.att = false; this.cont = false; this.alt = false; this.hold = false; this.holding = false; this.level = 0; }
+    reset() { this.period = 1; this.timer = 0; this.step = 0; this.att = false; this.holding = false; this.level = 0; }
+    writeShape(s) {
+      this.hold = (s & 1) !== 0;
+      this.alt = (s & 2) !== 0;
+      this.att = (s & 4) !== 0;
+      this.cont = (s & 8) !== 0;
+      this.step = 0;
+      this.holding = false;
+      this.timer = 0;
+      this.level = this.att ? 0 : 31; // Attack=上昇なら0から、下降なら31から
+    }
+    clock() {
+      if (this.timer === 0) {
+        this.timer = Math.max(1, this.period) - 1;
+        this._step();
+      } else {
+        this.timer--;
+      }
+    }
+    _step() {
+      if (this.holding) return;
+      this.step++;
+      if (this.step > 31) {
+        this.step = 0;
+        if (!this.cont) { this.holding = true; this.level = 0; return; }          // 一発(減衰/上昇後に無音)
+        if (this.hold) { this.holding = true; this.level = this.alt ? (this.att ? 0 : 31) : (this.att ? 31 : 0); return; }
+        if (this.alt) this.att = !this.att; // 交互(三角)なら方向反転
+      }
+      this.level = this.att ? this.step : (31 - this.step);
+    }
+  }
+
+  class FME7Audio {
+    constructor() {
+      this.addr = 0;
+      this.regs = new Uint8Array(16);
+      this.regs[7] = 0x38; // 既定: トーンON・ノイズOFF
+      this.tones = [new Fme7Tone(), new Fme7Tone(), new Fme7Tone()];
+      this.noise = new Fme7Noise();
+      this.env = new Fme7Envelope();
+      this._div = 0;
+      this.mute = [false, false, false];
+      this.vol = [1, 1, 1];
+    }
+
+    reset() {
+      this.addr = 0;
+      this.regs = new Uint8Array(16);
+      this.regs[7] = 0x38;
+      for (const t of this.tones) t.reset();
+      this.noise.reset();
+      this.env.reset();
+      this._div = 0;
+    }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      if (addr === 0xC000) {
+        this.addr = value & 0x0F;
+      } else if (addr === 0xE000) {
+        this.writeInternal(this.addr, value);
+      }
+    }
+
+    writeInternal(reg, value) {
+      this.regs[reg] = value;
+      switch (reg) {
+        case 0: case 1: this.tones[0].period = this.regs[0] | ((this.regs[1] & 0x0F) << 8); break;
+        case 2: case 3: this.tones[1].period = this.regs[2] | ((this.regs[3] & 0x0F) << 8); break;
+        case 4: case 5: this.tones[2].period = this.regs[4] | ((this.regs[5] & 0x0F) << 8); break;
+        case 6: this.noise.period = value & 0x1F; break;
+        case 11: case 12: this.env.period = this.regs[11] | (this.regs[12] << 8); break;
+        case 13: this.env.writeShape(value); break;
+        // 7=ミキサー, 8-10=音量 は出力時に参照
+      }
+    }
+
+    clock() {
+      // 内部クロックはCPUクロックの1/16
+      if (++this._div >= 16) {
+        this._div = 0;
+        this.tones[0].clock();
+        this.tones[1].clock();
+        this.tones[2].clock();
+        this.noise.clock();
+        this.env.clock();
+      }
+    }
+
+    // ch(0-2)の5bit音量レベル(0-31)。bit4でエンベロープ、固定音量Vは 2V+1。
+    channelLevel(ch) {
+      const volReg = this.regs[8 + ch];
+      if (volReg & 0x10) return this.env.level;
+      return ((volReg & 0x0F) * 2) + 1; // V=0→1(DAC上無音), V=15→31
+    }
+
+    mixSample() {
+      const mix = this.regs[7];
+      let sum = 0;
+      for (let i = 0; i < NUM_CH; i++) {
+        if (this.mute[i]) continue;
+        const toneOn = ((mix >> i) & 1) === 0;
+        const noiseOn = ((mix >> (i + 3)) & 1) === 0;
+        const t = toneOn ? (this.tones[i].period <= ULTRA_TONE_PERIOD_MAX ? 0.5 : this.tones[i].level) : 1;
+        const n = noiseOn ? this.noise.out : 1;
+        if (t && n) sum += AY_DAC[this.channelLevel(i)] * this.vol[i] * t;
+      }
+      // 3ch分の対数振幅和。他チップとのバランスでゲイン調整。
+      return sum * 0.35;
+    }
+  }
+
+  // 鍵盤表示用: ライブチップから3ch分の {freq,vol,rawVol,active,noise,envMode} を作る。
+  // freq=CPU/(32*period)(修正後), vol/rawVolはエンベロープ含む実効5bitレベル由来。
+  Emu.snapshotFME7 = function (chip) {
+    const CPU = 1789773;
+    const mix = chip.regs[7];
+    const out = [];
+    for (let i = 0; i < NUM_CH; i++) {
+      const period = chip.tones[i].period;
+      const toneOn = ((mix >> i) & 1) === 0;
+      const noiseOn = ((mix >> (i + 3)) & 1) === 0;
+      const level = chip.channelLevel(i);          // 0-31
+      const envMode = (chip.regs[8 + i] & 0x10) !== 0;
+      const freq = (toneOn && period > 0) ? CPU / (32 * period) : 0;
+      out.push({
+        freq,
+        vol: level / 31,
+        // ★数値は**実レジスタ値**(2026-09-17のユーザー合意)。スケールがモードで変わる:
+        //   ・固定音量 … 音量レジスタの4bit、**0-15**
+        //   ・ハードウェアエンベロープ中(YM2149系のこの機能) … 5bitレベル、**0-31**
+        //   内部は常に32段(channelLevel が固定音量時に (nibble*2)+1 で写す)ので、表示だけ切り替える。
+        //   0-31 のときは既存の黄色表示(envMode)が「レジスタそのままではない」印になる。
+        rawVol: envMode ? level : (chip.regs[8 + i] & 0x0F),
+        rawVolMax: envMode ? 31 : 15,
+        active: (toneOn ? (level > 0 && freq > 0) : (noiseOn && level > 0)),
+        noise: noiseOn,
+        envMode
+      });
+    }
+    return out;
+  };
+
+  Emu.FME7Audio = FME7Audio;
+})(globalThis);
+
+/*
  * iNES / NES 2.0 ヘッダ (MML.Emu.INES) — 自前 NES エミュレータ(DESIGN-CAPTURE.md §7)の入口
  *
  * 読むのは「遊べる」のに要る項目だけ: PRG/CHR の大きさ、マッパー番号(NES 2.0 なら 12bit)、
@@ -1362,8 +3537,15 @@
 /*
  * NES マッパー (MML.Emu.NesMappers) — 自前 NES エミュレータのバンク機構
  *
- * 対応: 0 NROM / 1 MMC1 / 2 UxROM / 3 CNROM / 4 MMC3 / 7 AxROM / 19 Namco 163 / 206 Namco 108(DxROM)。
- * 拡張音源つきのうち 19 は NSF 用の音源(Emu.N163Audio)をそのまま挿す。他(VRC6/VRC7/MMC5/5B)は 6c。
+ * 対応: 0 NROM / 1 MMC1 / 2 UxROM / 3 CNROM / 4 MMC3 / 5 MMC5 / 7 AxROM / 19 Namco 163 / 24,26 VRC6 /
+ *       69 Sunsoft FME-7・5B / 85 VRC7 / 206 Namco 108(DxROM)。
+ * 拡張音源つきの基板(5/19/24/26/69/85)は NSF 用の音源(Emu.VRC6Audio/VRC7Audio/MMC5Audio/N163Audio/FME7Audio)を
+ * そのまま this.audio に挿し、extBits(NSF ヘッダと同じビット。録音の NESX ヘッダ用)を立てる。
+ *   audioAddr(addr): CPU の書き込み番地を音源レジスタの正規の番地(NSF/VGM の慣例)に直す。音源でなければ -1。
+ *     VRC6b(26)は A0/A1 を入れ替えて VRC6a の番地に、VRC7 は未使用のアドレス線を無視、5B は $C000/$E000 に畳む
+ *     (tools/mesen/vgm-recorder.lua と同じ規則。録音のフレーム比較が同じ番地で揃う)。
+ *   audioReadAddr(addr): 副作用のある読み出し(N163 $4800)。
+ *   audioImage(): 録音開始時に先頭へ置く「今の音源の状態」を書き込み列で返す(影レジスタから。Mesen の録音と同じ順)。
  *
  * 作り: PRG は 8K×4 スロット、CHR は 1K×8 スロットの対応表(prgMap/chrMap)で、マッパーはレジスタ書き込みで
  * 表を書き換えるだけ。ネームテーブルも CIRAM(2K、4 画面なら 4K)の 1K ページ表(ntMap)で、ミラーリングは
@@ -1398,6 +3580,8 @@
       this.chrMap = new Int32Array(8);
       this.ntMap = [0, 0, 1, 1];
       this.audio = null;      // 拡張音源(Emu.N163Audio など)。clock()/mixSample() を持つ
+      this.extBits = 0;
+      this.ppu = null;        // PPU が自分を入れる(MMC5 が描画の位相を見る)
       this.irqFlag = false;
       this.setMirroring(rom.fourScreen ? '4' : rom.mirroring);
       this.setPrg32(0);
@@ -1432,6 +3616,29 @@
     ppuA12() {}
     cpuClock() {}
     irqPending() { return this.irqFlag; }
+    audioAddr() { return -1; }
+    audioReadAddr() { return -1; }
+    audioImage() { return []; }
+  }
+
+  // VRC4/VRC6/VRC7 共通の IRQ カウンタ(スキャンライン モード=341/3 サイクルごと、サイクル モード=毎サイクル)
+  class VrcIrq {
+    constructor() { this.latch = 0; this.counter = 0; this.enable = false; this.enableAfterAck = false; this.cycleMode = false; this.prescaler = 341; this.flag = false; }
+    writeLatch(v) { this.latch = v; }
+    writeControl(v) {
+      this.enableAfterAck = (v & 1) !== 0; this.enable = (v & 2) !== 0; this.cycleMode = (v & 4) !== 0;
+      this.flag = false;
+      if (this.enable) { this.counter = this.latch; this.prescaler = 341; }
+    }
+    ack() { this.flag = false; this.enable = this.enableAfterAck; }
+    clock(cycles) {
+      if (!this.enable) return;
+      for (let c = 0; c < cycles; c++) {
+        if (!this.cycleMode) { this.prescaler -= 3; if (this.prescaler > 0) continue; this.prescaler += 341; }
+        if (this.counter === 0xFF) { this.counter = this.latch; this.flag = true; }
+        else this.counter++;
+      }
+    }
   }
 
   // 0: NROM
@@ -1554,14 +3761,24 @@
       for (let i = 0; i < 4; i++) this.chrSlots[8 + i] = -1 - nt[i];
       this.setPrg8(3, this.prgBanks8 - 1);
     }
+    audioAddr(addr) { return (addr & 0xF800) === 0x4800 ? 0x4800 : (addr & 0xF800) === 0xF800 ? 0xF800 : -1; }
+    audioReadAddr(addr) { return (addr & 0xF800) === 0x4800 ? 0x4800 : -1; }
+    audioImage() {
+      const au = this.audio, out = [];
+      if (!au || !au.ram || au.ram.length !== 128) return out;
+      out.push({ addr: 0xF800, value: 0x80 });
+      for (let i = 0; i < 128; i++) out.push({ addr: 0x4800, value: au.ram[i] });
+      out.push({ addr: 0xF800, value: (au.autoInc ? 0x80 : 0) | (au.addr & 0x7F) });
+      return out;
+    }
     cpuRead(addr) {
-      if (addr === 0x4800 && this.audio) return this.audio.readData();
+      if ((addr & 0xF800) === 0x4800 && this.audio) return this.audio.readData();
       if (addr === 0x5000) return this.irqCounter & 0xFF;
       if (addr === 0x5800) return ((this.irqCounter >> 8) & 0x7F) | (this.irqEnable ? 0x80 : 0);
       return super.cpuRead(addr);
     }
     cpuWrite(addr, v) {
-      if (addr === 0x4800) { if (this.audio) this.audio.writeRegister(0x4800, v); return; }
+      if ((addr & 0xF800) === 0x4800) { if (this.audio) this.audio.writeRegister(0x4800, v); return; }
       if (addr === 0x5000) { this.irqCounter = (this.irqCounter & 0x7F00) | v; this.irqFlag = false; return; }
       if (addr === 0x5800) { this.irqCounter = (this.irqCounter & 0x00FF) | ((v & 0x7F) << 8); this.irqEnable = (v & 0x80) !== 0; this.irqFlag = false; return; }
       super.cpuWrite(addr, v);
@@ -1599,7 +3816,327 @@
     }
   }
 
-  const TABLE = { 0: NROM, 1: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 7: AxROM, 19: Namco163, 206: Namco108 };
+  // 24/26: Konami VRC6(PRG 16K+8K 切替、CHR 1K×8、IRQ、音源。26 は A0/A1 が入れ替わった配線)
+  //   未対応: $B003 の CHR モード(bit0-1,4-6。ほぼ全てのソフトがモード 0=1K×8)、PRG RAM 保護
+  class VRC6 extends Mapper {
+    constructor(rom) {
+      super(rom);
+      this.swapA0A1 = rom.mapper === 26;
+      this.audio = Emu.VRC6Audio ? new Emu.VRC6Audio() : null;
+      this.extBits = 0x01;
+      this.irq = new VrcIrq();
+      this.shadow = new Int16Array(0x10).fill(-1); // 音源 9 レジスタの影(index = (hi-9)*4+lo)
+      this.setPrg16(0, 0); this.setPrg8(2, -2); this.setPrg8(3, -1);
+    }
+    _canon(addr) { return this.swapA0A1 ? (addr & 0xFFFC) | ((addr & 1) << 1) | ((addr >> 1) & 1) : addr; }
+    audioAddr(addr) {
+      addr = this._canon(addr);
+      const hi = addr & 0xF000, lo = addr & 0x0FFF;
+      return (hi === 0x9000 || hi === 0xA000 || hi === 0xB000) && lo <= 2 ? addr : -1;
+    }
+    audioImage() {
+      const out = [];
+      for (let i = 0; i < 12; i++) { const v = this.shadow[i]; if (v >= 0) out.push({ addr: 0x9000 + ((i >> 2) << 12) + (i & 3), value: v }); }
+      return out;
+    }
+    writeReg(addr, v) {
+      addr = this._canon(addr);
+      const hi = addr & 0xF000, lo = addr & 3;
+      switch (hi) {
+        case 0x8000: this.setPrg16(0, v & 0x0F); break;
+        case 0x9000: case 0xA000:
+          if (lo <= 2) { this.shadow[((hi - 0x9000) >> 12) * 4 + lo] = v; if (this.audio) this.audio.writeRegister(hi + lo, v); }
+          break; // $9003(周波数制御)は未対応
+        case 0xB000:
+          if (lo <= 2) { this.shadow[8 + lo] = v; if (this.audio) this.audio.writeRegister(hi + lo, v); }
+          else this.setMirroring(['V', 'H', '1A', '1B'][(v >> 2) & 3]);
+          break;
+        case 0xC000: this.setPrg8(2, v & 0x1F); break;
+        case 0xD000: this.setChr1(lo, v); break;
+        case 0xE000: this.setChr1(4 + lo, v); break;
+        case 0xF000:
+          if (lo === 0) this.irq.writeLatch(v);
+          else if (lo === 1) this.irq.writeControl(v);
+          else if (lo === 2) this.irq.ack();
+          break;
+      }
+    }
+    cpuClock(cycles) { this.irq.clock(cycles); }
+    irqPending() { return this.irq.flag; }
+  }
+
+  // 85: Konami VRC7(PRG 8K×3 切替、CHR 1K×8、IRQ、FM 音源 $9010/$9030)。
+  //   レジスタの第 2 ビットは A3($x008、VRC7b)でも A4($x010、VRC7a)でも受ける。未対応: PRG RAM 保護
+  class VRC7 extends Mapper {
+    constructor(rom) {
+      super(rom);
+      this.audio = Emu.VRC7Audio ? new Emu.VRC7Audio() : null;
+      this.extBits = 0x02;
+      this.irq = new VrcIrq();
+      this.fmAddr = 0;
+      this.fmShadow = new Int16Array(0x40).fill(-1);
+      this.setPrg8(0, 0); this.setPrg8(1, 1); this.setPrg8(2, 2); this.setPrg8(3, -1);
+    }
+    audioAddr(addr) { const m = addr & 0xF030; return m === 0x9010 ? 0x9010 : m === 0x9030 ? 0x9030 : -1; }
+    audioImage() {
+      const out = [];
+      for (let r = 0; r < 0x40; r++) if (this.fmShadow[r] >= 0) { out.push({ addr: 0x9010, value: r }); out.push({ addr: 0x9030, value: this.fmShadow[r] }); }
+      return out;
+    }
+    writeReg(addr, v) {
+      const hi = addr & 0xF000, second = (addr & 0x18) !== 0;
+      if (hi === 0x9000) {
+        const m = addr & 0x30;
+        if (m === 0x10) { this.fmAddr = v & 0x3F; if (this.audio) this.audio.writeRegister(0x9010, v); return; }
+        if (m === 0x30) { this.fmShadow[this.fmAddr] = v; if (this.audio) this.audio.writeRegister(0x9030, v); return; }
+        if (!second) this.setPrg8(2, v & 0x3F);
+        return;
+      }
+      switch (hi) {
+        case 0x8000: this.setPrg8(second ? 1 : 0, v & 0x3F); break;
+        case 0xA000: case 0xB000: case 0xC000: case 0xD000:
+          this.setChr1(((hi - 0xA000) >> 12) * 2 + (second ? 1 : 0), v); break;
+        case 0xE000:
+          if (!second) {
+            this.setMirroring(['V', 'H', '1A', '1B'][v & 3]);
+            if ((v & 0x40) && this.audio) this.audio.reset(); // bit6: 音源を黙らせる(リセット)
+          } else this.irq.writeLatch(v);
+          break;
+        case 0xF000: if (!second) this.irq.writeControl(v); else this.irq.ack(); break;
+      }
+    }
+    cpuClock(cycles) { this.irq.clock(cycles); }
+    irqPending() { return this.irq.flag; }
+  }
+
+  // 69: Sunsoft FME-7 / 5B(PRG 8K×3 切替 + $6000 は ROM か RAM、CHR 1K×8、16bit サイクル IRQ、5B は AY 系音源
+  //   $C000/$E000)。FME-7(音源無し)のソフトもマッパー番号は同じなので、音源は常に挿す(書かれなければ鳴らない)
+  class Sunsoft5B extends Mapper {
+    constructor(rom) {
+      super(rom);
+      this.audio = Emu.FME7Audio ? new Emu.FME7Audio() : null;
+      this.extBits = 0x20;
+      this.cmd = 0;
+      this.ramAt6000 = false; this.ramEnabled = false; this.rom6000 = 0;
+      this.irqEnable = false; this.counterEnable = false; this.counter = 0xFFFF;
+      this.ayAddr = 0; this.ayShadow = new Int16Array(16).fill(-1);
+      this.setPrg8(0, 0); this.setPrg8(1, 1); this.setPrg8(2, 2); this.setPrg8(3, -1);
+    }
+    audioAddr(addr) { const m = addr & 0xE000; return m === 0xC000 ? 0xC000 : m === 0xE000 ? 0xE000 : -1; }
+    audioImage() {
+      const out = [];
+      for (let r = 0; r < 16; r++) if (this.ayShadow[r] >= 0) { out.push({ addr: 0xC000, value: r }); out.push({ addr: 0xE000, value: this.ayShadow[r] }); }
+      out.push({ addr: 0xC000, value: this.ayAddr });
+      return out;
+    }
+    cpuRead(addr) {
+      if (addr >= 0x6000 && addr < 0x8000) {
+        if (this.ramAt6000) return this.ramEnabled ? this.prgRam[(addr - 0x6000) % this.prgRam.length] : -1;
+        return this.prg[((this.rom6000 % this.prgBanks8) << 13) + (addr & 0x1FFF)];
+      }
+      return super.cpuRead(addr);
+    }
+    cpuWrite(addr, v) {
+      if (addr >= 0x6000 && addr < 0x8000) { if (this.ramAt6000 && this.ramEnabled) this.prgRam[(addr - 0x6000) % this.prgRam.length] = v; return; }
+      super.cpuWrite(addr, v);
+    }
+    writeReg(addr, v) {
+      switch (addr & 0xE000) {
+        case 0x8000: this.cmd = v & 0x0F; break;
+        case 0xA000: this.param(this.cmd, v); break;
+        case 0xC000: this.ayAddr = v & 0x0F; if (this.audio) this.audio.writeRegister(0xC000, v); break;
+        case 0xE000: this.ayShadow[this.ayAddr] = v; if (this.audio) this.audio.writeRegister(0xE000, v); break;
+      }
+    }
+    param(cmd, v) {
+      if (cmd < 8) { this.setChr1(cmd, v); return; }
+      switch (cmd) {
+        case 8: this.ramAt6000 = (v & 0x40) !== 0; this.ramEnabled = (v & 0x80) !== 0; this.rom6000 = v & 0x3F; break;
+        case 9: case 10: case 11: this.setPrg8(cmd - 9, v & 0x3F); break;
+        case 12: this.setMirroring(['V', 'H', '1A', '1B'][v & 3]); break;
+        case 13: this.irqEnable = (v & 1) !== 0; this.counterEnable = (v & 0x80) !== 0; this.irqFlag = false; break;
+        case 14: this.counter = (this.counter & 0xFF00) | v; break;
+        case 15: this.counter = (this.counter & 0x00FF) | (v << 8); break;
+      }
+    }
+    cpuClock(cycles) {
+      if (!this.counterEnable) return;
+      for (let c = 0; c < cycles; c++) {
+        if (this.counter === 0) { this.counter = 0xFFFF; if (this.irqEnable) this.irqFlag = true; }
+        else this.counter--;
+      }
+    }
+  }
+
+  // 5: Nintendo MMC5(ExROM)。PRG モード 0-3($5100)、PRG RAM 64K($5113-$5117 の bit7 で ROM/RAM)、CHR モード 0-3
+  //   ($5101)と 8×16 スプライト時の A/B 2 組、ネームテーブル割当($5105: CIRAM/ExRAM/塗りつぶし)、ExRAM の
+  //   4 モード($5104。モード 1=拡張属性: タイルごとの 4K CHR バンクとパレット)、スキャンライン IRQ($5203/$5204。
+  //   実機と同じく「同じネームテーブル番地の連続 3 回読み」で行を数える)、乗算器($5205/$5206)、音源($5000-$5015)。
+  //   未対応: 縦分割($5200-$5202)、PRG RAM 書き込み保護($5102/$5103)、$5015 の読み出し(音源の状態)
+  class MMC5 extends Mapper {
+    constructor(rom) {
+      super(rom);
+      this.audio = Emu.MMC5Audio ? new Emu.MMC5Audio() : null;
+      this.extBits = 0x08;
+      this.prgRam = new Uint8Array(0x10000);
+      this.exram = new Uint8Array(0x400);
+      this.prgMode = 3; this.chrMode = 3; this.exMode = 0;
+      this.prgRegs = new Uint8Array([0, 0, 0, 0, 0xFF]); // $5113-$5117
+      this.chrRegs = new Uint16Array(12);                 // $5120-$512B
+      this.chrUpper = 0;                                  // $5130
+      this.ntMode = 0; this.fillTile = 0; this.fillAttr = 0;
+      this.lastChrSet = 0;                                // 0=A($5120-27) 1=B($5128-2B)。8×8 スプライト時はこれ
+      this.chrA = new Int32Array(8); this.chrB = new Int32Array(8);
+      this.slotIsRam = [false, false, false, false]; this.slotOff = new Int32Array(4);
+      this.irqCompare = 0; this.irqEnable = false; this.irqPend = false; this.inFrame = false;
+      this.scanline = 0; this.ntLast = -1; this.ntSame = 0; this.idleDots = 0;
+      this.mulA = 0xFF; this.mulB = 0xFF;
+      this.exTile = 0;                                    // 拡張属性モードで最後に読んだネームテーブルの ExRAM バイト
+      this.audioShadow = new Int16Array(0x16).fill(-1);
+      this.applyPrg(); this.applyChr();
+    }
+    audioAddr(addr) { return addr >= 0x5000 && addr <= 0x5015 ? addr : -1; }
+    audioImage() {
+      const out = [];
+      for (const a of [0x5000, 0x5001, 0x5002, 0x5003, 0x5004, 0x5005, 0x5006, 0x5007, 0x5010, 0x5011, 0x5015]) {
+        const v = this.audioShadow[a - 0x5000]; if (v >= 0) out.push({ addr: a, value: v });
+      }
+      return out;
+    }
+    // ── CPU ──
+    cpuRead(addr) {
+      if (addr >= 0x8000) {
+        const s = (addr - 0x8000) >> 13, o = this.slotOff[s] + (addr & 0x1FFF);
+        return this.slotIsRam[s] ? this.prgRam[o % this.prgRam.length] : this.prg[o];
+      }
+      if (addr >= 0x6000) return this.prgRam[(((this.prgRegs[0] & 7) << 13) + (addr & 0x1FFF)) % this.prgRam.length];
+      if (addr >= 0x5C00) return (this.exMode >= 2) ? this.exram[addr & 0x3FF] : -1;
+      switch (addr) {
+        case 0x5204: { const v = (this.irqPend ? 0x80 : 0) | (this.inFrame ? 0x40 : 0); this.irqPend = false; return v; }
+        case 0x5205: return (this.mulA * this.mulB) & 0xFF;
+        case 0x5206: return ((this.mulA * this.mulB) >> 8) & 0xFF;
+      }
+      return -1;
+    }
+    cpuWrite(addr, v) {
+      if (addr >= 0x8000) {
+        const s = (addr - 0x8000) >> 13;
+        if (this.slotIsRam[s]) this.prgRam[(this.slotOff[s] + (addr & 0x1FFF)) % this.prgRam.length] = v;
+        return;
+      }
+      if (addr >= 0x6000) { this.prgRam[(((this.prgRegs[0] & 7) << 13) + (addr & 0x1FFF)) % this.prgRam.length] = v; return; }
+      if (addr >= 0x5C00) { if (this.exMode < 3) this.exram[addr & 0x3FF] = v; return; }
+      if (addr >= 0x5000 && addr <= 0x5015) { this.audioShadow[addr - 0x5000] = v; if (this.audio) this.audio.writeRegister(addr, v); return; }
+      if (addr >= 0x5120 && addr <= 0x512B) {
+        this.chrRegs[addr - 0x5120] = v | (this.chrUpper << 8);
+        this.lastChrSet = addr >= 0x5128 ? 1 : 0;
+        this.applyChr();
+        return;
+      }
+      if (addr >= 0x5113 && addr <= 0x5117) { this.prgRegs[addr - 0x5113] = v; this.applyPrg(); return; }
+      switch (addr) {
+        case 0x5100: this.prgMode = v & 3; this.applyPrg(); break;
+        case 0x5101: this.chrMode = v & 3; this.applyChr(); break;
+        case 0x5104: this.exMode = v & 3; break;
+        case 0x5105: this.ntMode = v; break;
+        case 0x5106: this.fillTile = v; break;
+        case 0x5107: this.fillAttr = (v & 3) * 0x55; break;
+        case 0x5130: this.chrUpper = v & 3; break;
+        case 0x5203: this.irqCompare = v; break;
+        case 0x5204: this.irqEnable = (v & 0x80) !== 0; break;
+        case 0x5205: this.mulA = v; break;
+        case 0x5206: this.mulB = v; break;
+      }
+    }
+    applyPrg() {
+      const r = this.prgRegs, set = (s, reg, bank) => {
+        const isRam = reg < 4 && !(r[reg] & 0x80);
+        this.slotIsRam[s] = isRam;
+        const n = isRam ? 8 : this.prgBanks8;
+        this.slotOff[s] = ((bank % n) + n) % n << 13;
+      };
+      switch (this.prgMode) {
+        case 0: { const b = (r[4] & 0x7C); set(0, 4, b); set(1, 4, b + 1); set(2, 4, b + 2); set(3, 4, b + 3); break; }
+        case 1: { const a = r[2] & 0x7E, b = r[4] & 0x7E; set(0, 2, a); set(1, 2, a + 1); set(2, 4, b); set(3, 4, b + 1); break; }
+        case 2: { const a = r[2] & 0x7E; set(0, 2, a); set(1, 2, a + 1); set(2, 3, r[3] & 0x7F); set(3, 4, r[4] & 0x7F); break; }
+        default: set(0, 1, r[1] & 0x7F); set(1, 2, r[2] & 0x7F); set(2, 3, r[3] & 0x7F); set(3, 4, r[4] & 0x7F);
+      }
+    }
+    applyChr() {
+      const c = this.chrRegs, n = this.chrBanks1, A = this.chrA, B = this.chrB;
+      const put = (map, slot, bank) => { map[slot] = (((bank % n) + n) % n) << 10; };
+      switch (this.chrMode) {
+        case 0: for (let i = 0; i < 8; i++) { put(A, i, c[7] * 8 + i); put(B, i, c[11] * 8 + i); } break;
+        case 1: for (let i = 0; i < 4; i++) { put(A, i, c[3] * 4 + i); put(A, 4 + i, c[7] * 4 + i); put(B, i, c[11] * 4 + i); put(B, 4 + i, c[11] * 4 + i); } break;
+        case 2: for (let i = 0; i < 2; i++) { put(A, i, c[1] * 2 + i); put(A, 2 + i, c[3] * 2 + i); put(A, 4 + i, c[5] * 2 + i); put(A, 6 + i, c[7] * 2 + i);
+          put(B, i, c[9] * 2 + i); put(B, 2 + i, c[11] * 2 + i); put(B, 4 + i, c[9] * 2 + i); put(B, 6 + i, c[11] * 2 + i); } break;
+        default: for (let i = 0; i < 8; i++) { put(A, i, c[i]); put(B, i, c[8 + (i & 3)]); }
+      }
+    }
+    // ── PPU ──
+    _bgFetching() { // 背景の取得中か(8×16 スプライト時の A/B 選択と拡張属性モード用)
+      const p = this.ppu;
+      if (!p || !(p.mask & 0x18)) return false;
+      if (p.scanline >= 240 && p.scanline !== 261) return false;
+      const d = p.dot;
+      return (d >= 1 && d <= 256) || (d >= 321 && d <= 340);
+    }
+    _spriteFetching() { const p = this.ppu; return p && (p.mask & 0x18) && p.dot >= 257 && p.dot <= 320 && (p.scanline < 240 || p.scanline === 261); }
+    _chrMap() {
+      const p = this.ppu;
+      if (p && (p.ctrl & 0x20)) { // 8×16: 背景は B、スプライトは A。描画外は最後に書いた組
+        if (this._spriteFetching()) return this.chrA;
+        if (this._bgFetching()) return this.chrB;
+      }
+      return this.lastChrSet ? this.chrB : this.chrA;
+    }
+    _nt(addr) { return (this.ntMode >> (((addr >> 10) & 3) * 2)) & 3; }
+    ppuRead(addr) {
+      if (addr < 0x2000) {
+        if (this.exMode === 1 && this._bgFetching()) {
+          const bank = ((this.exTile & 0x3F) | (this.chrUpper << 6)) % Math.max(1, this.chrBanks1 >> 2);
+          return this.chr[(bank << 12) + (addr & 0xFFF)];
+        }
+        return this.chr[this._chrMap()[addr >> 10] + (addr & 0x3FF)];
+      }
+      // ネームテーブル。スキャンライン検出: 同じ番地の連続 3 回読み(337・339 ドット目のダミー読みと次の行の 1 ドット目)
+      if (this._bgFetching()) {
+        if (addr === this.ntLast) { if (++this.ntSame === 3) this._scanlineTick(); }
+        else { this.ntLast = addr; this.ntSame = 1; }
+      }
+      const mode = this._nt(addr), lo = addr & 0x3FF, isAttr = lo >= 0x3C0;
+      if (this.exMode === 1 && this._bgFetching()) {
+        if (isAttr) return ((this.exTile >> 6) & 3) * 0x55;
+        this.exTile = this.exram[lo];
+      }
+      switch (mode) {
+        case 0: return this.ciram[lo];
+        case 1: return this.ciram[0x400 | lo];
+        case 2: return this.exMode < 2 ? this.exram[lo] : 0;
+        default: return isAttr ? this.fillAttr : this.fillTile;
+      }
+    }
+    ppuWrite(addr, v) {
+      if (addr < 0x2000) { if (this.chrIsRam) this.chr[this._chrMap()[addr >> 10] + (addr & 0x3FF)] = v; return; }
+      const mode = this._nt(addr), lo = addr & 0x3FF;
+      if (mode === 0) this.ciram[lo] = v;
+      else if (mode === 1) this.ciram[0x400 | lo] = v;
+      else if (mode === 2 && this.exMode < 2) this.exram[lo] = v;
+    }
+    _scanlineTick() {
+      if (!this.inFrame) { this.inFrame = true; this.scanline = 0; this.irqPend = false; }
+      else { this.scanline++; if (this.scanline === this.irqCompare && this.irqCompare !== 0) this.irqPend = true; }
+      this.idleDots = 0;
+    }
+    cpuClock(cycles) {
+      // 描画が止まった(vblank/描画 OFF)ら「フレーム内」を下ろす。実機は NT 読みが 3 行ぶん無いと下りる
+      const p = this.ppu;
+      if (this.inFrame && p && (!(p.mask & 0x18) || (p.scanline >= 240 && p.scanline !== 261))) { this.inFrame = false; this.ntSame = 0; this.ntLast = -1; }
+    }
+    irqPending() { return this.irqPend && this.irqEnable; }
+  }
+
+  const TABLE = { 0: NROM, 1: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 5: MMC5, 7: AxROM, 19: Namco163, 24: VRC6, 26: VRC6, 69: Sunsoft5B, 85: VRC7, 206: Namco108 };
 
   const NesMappers = {
     supported(mapper) { return Object.prototype.hasOwnProperty.call(TABLE, mapper); },
@@ -1608,7 +4145,7 @@
       if (!C) throw new Error(`マッパー ${rom.mapper} は未対応です(対応: ${Object.keys(TABLE).join(', ')})`);
       return new C(rom);
     },
-    Mapper, MMC3,
+    Mapper, NROM, MMC1, UxROM, CNROM, MMC3, MMC5, AxROM, Namco163, VRC6, Sunsoft5B, VRC7, Namco108,
   };
   Emu.NesMappers = NesMappers;
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -1649,6 +4186,7 @@
   class PPU {
     constructor(mapper) {
       this.mapper = mapper;
+      mapper.ppu = this; // MMC5 が描画の位相(ドット・行・$2000/$2001)を見る
       this.palette = new Uint8Array(32);
       this.oam = new Uint8Array(256);
       this.frame = new Uint32Array(256 * 240);
@@ -1906,7 +4444,7 @@
  *   読みの瞬間とフラグが立つ瞬間の前後関係で結果が変わるため(命令をまるごと先に実行すると NMI ハンドラが
  *   先にフラグを消す側に必ず負けて永久に待つ。実測で踏んだ)。
  * - NMI は PPU の線(vblank フラグ ∧ $2000 bit7)の立ち上がりを命令境界で拾う。IRQ は APU のフレーム/DMC と
- *   マッパー(MMC3/N163)の線の論理和を、I フラグが下りていれば命令境界で受ける。
+ *   マッパー(MMC3/MMC5/N163/VRC6/VRC7/5B)の線の論理和を、I フラグが下りていれば命令境界で受ける。
  * - $4014 OAM DMA は 256 バイトを即座に写し、513/514 サイクルを次の命令に乗せる。
  * - 音: setSampleRate(sr) を呼ぶと周辺を進める中で APU(+拡張音源)の混合をリングバッファへ標本化する。
  *   runFrame() は 1 フレームぶんを返し、runSamples(out) は out.length サンプルぶんだけ進める(AudioWorklet 用)。
@@ -1914,7 +4452,7 @@
  * - 録音(段階 6b): startRecording() → 以後、音源レジスタの書き込み(2A03/FDS/拡張音源)・N163 $4800 の読み飛ばし・
  *   DPCM の起動(サンプル本体つき)を rec.cur に積み、フレームが終わるたび rec.frames へ移す。書き込みの形は
  *   src/vgm/vgmRecord.js の encodeNesRecording が受ける物({addr,value,t,read?} / {dmc:{addr,data}})。
- *   開始時には今のレジスタ像(2A03 の影 $4000-$4017、N163 の内部 RAM)を書き込みとして先頭に置く
+ *   開始時には今のレジスタ像(2A03 の影 $4000-$4017、拡張音源はマッパーの audioImage())を書き込みとして先頭に置く
  *   (録音は曲の途中から始まるので、鳴っている音の状態が無いと再生側で復元できない)。
  */
 (function (global) {
@@ -1988,7 +4526,7 @@
         v = this.mapper.cpuRead(addr);
         if (v < 0) v = this.openBus;
         // N163 $4800 の読み出しは内部ポインタを進める副作用がある(録音には読み飛ばしとして載せる)
-        else if (addr === 0x4800 && this.mapper.audio && this.rec) this.rec.cur.push({ addr: 0x4800, value: 0, read: true, t: this._t() });
+        else if (this.rec && addr >= 0x4800) { const ra = this.mapper.audioReadAddr(addr); if (ra >= 0) this.rec.cur.push({ addr: ra, value: 0, read: true, t: this._t() }); }
       }
       this.openBus = v;
       return v;
@@ -2019,7 +4557,7 @@
         return;
       }
       this.mapper.cpuWrite(addr, v);
-      if (this.mapper.audio && (addr === 0x4800 || addr === 0xF800)) this._logWrite(addr, v);
+      if (this.mapper.audio) { const aa = this.mapper.audioAddr(addr); if (aa >= 0) this._logWrite(aa, v); } // 正規の番地で記録(VRC6b の A0/A1 入れ替えなど)
     }
     _t() { return Math.min(SAMPLES_PER_FRAME - 1, Math.floor(this.frameFrac() * SAMPLES_PER_FRAME)); }
     _logWrite(addr, v) {
@@ -2048,12 +4586,8 @@
       if (this.apuShadow[0x15] & 0x10) cur.push({ dmc: this.dmcSample() });
       cur.push({ addr: 0x4015, value: this.apuShadow[0x15], t: 0 });
       cur.push({ addr: 0x4017, value: this.apuShadow[0x17], t: 0 });
-      const au = this.mapper.audio;
-      if (au && au.ram && au.ram.length === 128) { // N163: 内部 RAM 128 バイトとアドレスラッチ
-        cur.push({ addr: 0xF800, value: 0x80, t: 0 });
-        for (let i = 0; i < 128; i++) cur.push({ addr: 0x4800, value: au.ram[i], t: 0 });
-        cur.push({ addr: 0xF800, value: (au.autoInc ? 0x80 : 0) | (au.addr & 0x7F), t: 0 });
-      }
+      // 拡張音源の像(マッパーが影レジスタから作る。N163 は内部 RAM 128 バイト、VRC7/5B はレジスタ番号と値の対)
+      if (this.mapper.audio) for (const w of this.mapper.audioImage()) cur.push({ addr: w.addr, value: w.value, t: 0 });
       this.rec = { frames: [], cur };
     }
     // 録音を終えて、フレームごとの書き込み列を返す(最後の途中フレームも含む)
