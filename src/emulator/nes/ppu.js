@@ -51,6 +51,7 @@
       this.scanline = 261; this.dot = 0; this.odd = false; this.frameCount = 0; this.frameDone = false;
       this.time = 0; // マッパーの A12 フィルタ用の単調なドット時刻
       this.nmiOccurred = false; this.nmiOutput = false;
+      this.vblankStarted = false; // 241 行目 1 ドット目で立つ(本体がフレームの区切り=録音/画面送出の時刻に使う)
       this.ntByte = 0; this.atByte = 0; this.ptLo = 0; this.ptHi = 0;
       this.bgLo = 0; this.bgHi = 0; this.atLo = 0; this.atHi = 0;
       this.sprCount = 0; this.evalCount = 0;
@@ -259,7 +260,7 @@
         }
         if (rendering && visible && dot >= 1 && dot <= 256) this.renderPixel(dot - 1, line);
       }
-      if (line === 241 && dot === 1) { this.status |= 0x80; this.nmiOccurred = true; }
+      if (line === 241 && dot === 1) { this.status |= 0x80; this.nmiOccurred = true; this.vblankStarted = true; }
 
       // 次のドットへ(奇数フレームは描画中なら 261 行目の最後の 1 ドットを飛ばす)
       this.time++;

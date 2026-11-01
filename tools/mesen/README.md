@@ -122,6 +122,10 @@ node tools/headless/nes-run.js "game.nes" --frames 1301 --press "start:700-710,r
 
 パレットは Mesen と本ツール(nesdev の 2C02 表)で違うので、色ではなく形で比べる。
 
+録音の比較は、このスクリプトの CFG を `autoStart=true, stopAfterFrames=900` にしたコピーで録り、
+`node tools/headless/nes-run.js "game.nes" --frames 900 --vgm mine.vgm` の出力とフレームごとの書き込み列で比べる
+(本体の録音ボタンと同じ経路。2A03 の ROM で 900/900 フレーム一致、N163 の ROM で初期像の 1 フレームを除いて一致)。
+
 ## headless テスト(GUI 無し・最高速)
 
 ```

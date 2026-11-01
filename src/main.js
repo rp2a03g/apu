@@ -4238,6 +4238,18 @@
 
   keyboardDisplay.onLiveRoll = (anchorEl) => MML.UI.LiveRoll.togglePopover(anchorEl, liveRollApi);
 
+  // NES 画面(src/ui/nesScreen.js): AudioContext は本体と共用(マスター音量に乗る)。録音した VGM は
+  // 他のサウンドファイルと同じ入口(openSoundFileAndPlay)で開く=鍵盤表示→MML 変換の経路に載る
+  if (MML.UI.NesScreen) {
+    MML.UI.NesScreen.getAudioContext = () => {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      return audioCtx;
+    };
+    MML.UI.NesScreen.onOpenRecording = (bytes, name) => {
+      if (openSoundFileAndPlay) openSoundFileAndPlay(new File([bytes], name, { type: 'application/octet-stream' }), []);
+    };
+  }
+
   keyboardDisplay.onToMml = () => {
     // 今表示している形式の「MMLへ変換」ボタンを押す
     const id = SOUND_FORMAT_TOMML_BTN[kbdSourceKind];

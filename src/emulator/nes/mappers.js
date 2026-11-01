@@ -184,6 +184,7 @@
     constructor(rom) {
       super(rom);
       this.audio = Emu.N163Audio ? new Emu.N163Audio() : null;
+      this.extBits = 0x10; // NSF ヘッダと同じ N163 のビット(録音の NESX ヘッダ用)
       this.irqCounter = 0; this.irqEnable = false;
       this.chrSlots = new Int32Array(12); // 1K スロット 0-7 = $0000-$1FFF、8-11 = ネームテーブル。負数 = CIRAM ページ(-1-page)
       this.ntRamOk = [true, true];        // $E800 bit6/7(0=有効): CHR $0000-$0FFF / $1000-$1FFF で $E0 以上を CIRAM にする

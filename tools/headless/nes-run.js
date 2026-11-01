@@ -4,9 +4,11 @@
  *
  * 使い方: node tools/headless/nes-run.js "game.nes" [--frames N] [--png out.png] [--png-every M]
  *                                          [--press "start:120-130,a:300-305,right:400-600"] [--audio out.wav]
+ *                                          [--vgm out.vgm] [--rec-from F]
  *   --press  : ボタン名:開始フレーム-終了フレーム をカンマ区切り(a b select start up down left right)
  *   --png-every M : M フレームごとに out_<frame>.png も書く(動きの確認用)
  *   --audio  : 音も計算して WAV(44.1kHz mono 16bit)に書く
+ *   --vgm    : 音源レジスタの書き込みを録音して VGM に書く(本体の録音ボタンと同じ経路。--rec-from で開始フレーム)
  * 終わりに実行時間と「画面に何色あるか」を出す(真っ黒のままなら何かが動いていない)。
  */
 'use strict';
@@ -22,6 +24,8 @@ const frames = parseInt(arg('--frames', '300'), 10);
 const pngOut = arg('--png', null);
 const pngEvery = parseInt(arg('--png-every', '0'), 10);
 const audioOut = arg('--audio', null);
+const vgmOut = arg('--vgm', null);
+const recFrom = parseInt(arg('--rec-from', '0'), 10);
 
 const BTN = { a: 1, b: 2, select: 4, start: 8, up: 16, down: 32, left: 64, right: 128 };
 const presses = [];
@@ -75,6 +79,7 @@ const audio = [];
 if (audioOut) nes.setSampleRate(SR);
 const t0 = process.hrtime.bigint();
 for (let f = 0; f < frames; f++) {
+  if (vgmOut && f === recFrom) nes.startRecording();
   nes.setController(0, padAt(f));
   const a = nes.runFrame();
   if (audioOut && a) audio.push(Float32Array.from(a));
@@ -84,4 +89,10 @@ const ms = Number(process.hrtime.bigint() - t0) / 1e6;
 const colors = new Set(nes.frame).size;
 console.log(`${frames} frames in ${ms.toFixed(0)}ms (${(ms / frames).toFixed(2)} ms/frame), 画面の色数 ${colors}, PPU frame ${nes.ppu.frameCount}, CPU cycles ${nes.cpuCycles}, ctrl=$${nes.ppu.ctrl.toString(16)} mask=$${nes.ppu.mask.toString(16)}`);
 if (pngOut) { writePng(pngOut, nes.frame, 256, 240); console.log('wrote', pngOut); }
+if (vgmOut) {
+  const rec = nes.stopRecording();
+  const r = MML.VGM.encodeNesRecording({ frames: rec, extBits: nes.extBits(), name: path.basename(file), creator: 'nes-run.js' });
+  fs.writeFileSync(vgmOut, r.vgm);
+  console.log('wrote', vgmOut, r.vgm.length, 'bytes,', r.frames, 'frames' + (r.dropped ? ', dropped ' + r.dropped : ''));
+}
 if (audioOut) { const total = audio.reduce((n, a) => n + a.length, 0); const all = new Float32Array(total); let o = 0; for (const a of audio) { all.set(a, o); o += a.length; } writeWav(audioOut, all, SR); console.log('wrote', audioOut, total, 'samples'); }

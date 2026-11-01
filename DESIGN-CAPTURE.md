@@ -266,6 +266,25 @@ capture.js の writeLog、NsfReplayStreamPlayer。
     形の一致 99.2〜99.97%(色はパレット表の違い)。
   - 未検証: MMC1/UxROM/CNROM/AxROM(手元に ROM が無い)、スプライト 0 ヒットで分割する画面、MMC3 の IRQ を使う
     画面(手元の MMC3 ROM は IRQ を使わない)。blargg のテスト ROM は未入手。
+- 実装(2026-11-01、段階 6b 実時間ループ・音・録音):
+  - 実行の置き場: AudioWorklet(`src/audio/nes-worklet-impl.js` + エミュ本体を `tools/build-capture-workers.ps1` が
+    `nes-worklet.js` に束ね、`src/ui/nesScreen.js` が data: URL で addModule。file:// 直開きでも動く)。process() が
+    128 サンプル求めるたびに `NesConsole.runSamples` でその分だけ CPU/PPU/APU を進め、画面(ArrayBuffer 転送)と
+    録音中の書き込み列をフレームごとに主スレッドへ送る。主スレッドは描くだけ。音は DC ブロッカー(stream-player.js と
+    同じ係数)→ NSF_GAIN → リミッタ → マスター音量。AudioWorklet が無い/バンドルが古いときは主スレッドの rAF(音なし)。
+    バンドルの鮮度は capture-worker-client.js と同じ方法(現行ソースの toString がバンドルに含まれるか)で見る。
+  - 録音: `NesConsole.startRecording()` が音源レジスタの書き込み(2A03/FDS/N163)・N163 $4800 の読み飛ばし・DPCM の
+    起動(その瞬間の $4012/$4013 が指す本体つき)を積み、開始時に今のレジスタ像(2A03 の影、N163 の内部 RAM)を
+    先頭に置く(曲の途中からでも再生側が復元できる)。符号化は `src/vgm/vgmRecord.js`(MML.VGM.encodeNesRecording。
+    nsf2vgm.js と Mesen の録音スクリプトと同じ形。nsf2vgm.js はこれを呼ぶ形に寄せ、出力はバイト一致)。
+    フレームの区切りは vblank の頭(241 行目)= Mesen の endFrame と揃える(NMI で書くドライバの書き込みが同じフレームに入る)。
+  - 検証: `tools/headless/nes-run.js --vgm`(本体と同じ録音経路)で 900 フレーム録り、Mesen の vgm-recorder.lua
+    (autoStart・stopAfterFrames)の録音とフレームごとの書き込み列で比較。2A03 の ROM は 900/900 フレーム一致、
+    N163 の ROM は初期像の 1 フレームを除いて一致。ブラウザでは Worklet で 60fps、録音→[変換へ] で鍵盤表示に載る。
+  - 踏んだ罠: 6502 の NMI は「命令の最後のサイクルで縁が立つと次の命令の後」。これが無いと `LDA $2002 / BPL` の
+    vblank 待ちが NMI ハンドラに負けて 1 フレーム待ち直し、Mesen より 3〜5 フレーム遅れた(録音の書き込み列が
+    ずれて見えた)。命令の基本サイクル数ぶん先に周辺を進めてから実行し(読みは実機の φ2 より最大 1 ドット遅いだけ)、
+    最後のサイクルの縁は 1 命令遅らせる。
 
 ---
 

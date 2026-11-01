@@ -194,6 +194,21 @@ $bundles = @(
         )
     },
     @{
+        # NES console inside an AudioWorklet (src/ui/nesScreen.js loads it as a data: URL module).
+        Key = 'nesWorklet'
+        Out = 'src\audio\nes-worklet.js'
+        Files = @(
+            'src\emulator\cpu6502.js',
+            'src\emulator\apu2a03.js',
+            'src\emulator\expansion\n163.js',
+            'src\emulator\nes\ines.js',
+            'src\emulator\nes\mappers.js',
+            'src\emulator\nes\ppu.js',
+            'src\emulator\nes\nesConsole.js',
+            'src\audio\nes-worklet-impl.js'
+        )
+    },
+    @{
         # PSF (PlayStation). keyboard.js / ym2610.js (SamplePitchUtil) / multipcm.js (PoolChannelRegrouper)
         # are needed by the roll build (RollBuild.psf -> Emu.snapshotPsx -> extractChannels 'psx' rows).
         Key = 'psfCapture'
