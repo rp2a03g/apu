@@ -1920,6 +1920,8 @@ button.secondary {
 .nes-ff { color: #ffd05a; border-color: #ffd05a; }
 .nes-status { color: var(--text-muted); white-space: nowrap; }
 .nes-recinfo { color: var(--text-secondary); white-space: nowrap; }
+.nes-rec-opt { font-size: 11px; white-space: nowrap; color: var(--text-secondary); }
+.nes-rec-opt[hidden] { display: none !important; } /* .nes-cfg-check の display:flex に hidden が負けないように */
 .nes-bar { flex-wrap: wrap; row-gap: 2px; }
 /* 見出し(タイトル行)はアイコンのボタン列。.fw-header-extra が太字/アクセント色を打ち消す */
 #win-nes .float-window-header { flex-wrap: nowrap; padding: 4px 8px; } /* × は右端。ボタンは .nes-hdr の中で折り返す */

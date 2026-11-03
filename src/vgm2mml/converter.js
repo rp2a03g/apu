@@ -1502,8 +1502,12 @@
     {
       const cc = MML.Convert.normalizeCmd(options.cmd);
       if ((cc.SFX_REMOVE || cc.LAG_FIX) && MML.VGM && MML.VGM.cleanCapture) {
-        const r = MML.VGM.cleanCapture(vgmBytes, { sfx: !!cc.SFX_REMOVE, lag: !!cc.LAG_FIX });
+        // 録音側(NES 画面)で補正済みの VGM(GD3 の notes に "cleaned: sfx lag")には同じ補正を重ねない
+        const pre = MML.VGM.cleanedFlags ? MML.VGM.cleanedFlags(MML.VGM.parseHeader(vgmBytes)) : { sfx: false, lag: false };
+        const sfx = !!cc.SFX_REMOVE && !pre.sfx, lag = !!cc.LAG_FIX && !pre.lag;
+        const r = (sfx || lag) ? MML.VGM.cleanCapture(vgmBytes, { sfx, lag }) : { bytes: vgmBytes, report: {} };
         vgmBytes = r.bytes;
+        if (pre.sfx || pre.lag) r.report.pre = pre;
         options = Object.assign({}, options, { captureClean: r.report });
       }
     }

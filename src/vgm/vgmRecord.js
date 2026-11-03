@@ -120,7 +120,7 @@
     // GD3: track, game, system, artist, date, creator(英語欄のみ。日本語欄は空)
     const fields = [].concat(utf16(rec.name || ''), utf16(''), utf16(rec.game || ''), utf16(''),
       utf16(rec.system || 'Nintendo Famicom / NES'), utf16(''), utf16(rec.artist || ''), utf16(''), utf16(''),
-      utf16(rec.creator || 'Sound Emulation Foundry'), utf16(''));
+      utf16(rec.creator || 'Sound Emulation Foundry'), utf16(rec.notes || ''));
     const gd3 = [].concat([0x47, 0x64, 0x33, 0x20], u32(0x100), u32(fields.length), fields);
 
     const hdr = new Uint8Array(HEADER_SIZE);

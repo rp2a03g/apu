@@ -1233,10 +1233,13 @@
 
     // チャンネル割当をユーザーが変えたときだけ、実際の並びと適用できなかった指定を書き添える
     // (上のヘッダコメントは既定の並び前提の固定文なので、そこは触らず追記する)
+    const cleanNotes = options.captureClean && MML.VGM && MML.VGM.describeClean ? MML.VGM.describeClean(options.captureClean) : [];
     const planComment = (options.channelMap
       ? [`; チャンネル割当: ユーザー指定 (${scoreChannels.map(c => c.letter).join('')})`,
         ...planNotes.map(n => `; ※ ${n}`), ``]
-      : []).concat(vrc7Notes.length ? [...vrc7Notes.map(n => `; ※ ${n}`), ``] : []).join('\n');
+      : []).concat(vrc7Notes.length ? [...vrc7Notes.map(n => `; ※ ${n}`), ``] : [])
+      // 録音の補正の報告(VGM 経由のゲームプレイ録音。vgm2mml fromVgm が options.captureClean に載せる。src/vgm/vgmClean.js)
+      .concat(cleanNotes.length ? [...cleanNotes.map(n => `; ※ ${n}`), ``] : []).join('\n');
     const mml = [headerComment + planComment, scoreText].join('\n');
 
     // 変換結果の音程検証(src/convert/verify.js): 最終MMLを実コンパイルして

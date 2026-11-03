@@ -551,9 +551,41 @@
   };
 
   // MML ヘッダコメント用の説明(vgm2mml/converter.js が「; ※ 」に続けて書く)
+  // 補正済みの印: GD3 の notes 欄に "cleaned: sfx lag"(録音側で補正した VGM。変換側は同じ補正を重ねない)
+  VGM.CLEAN_NOTE = 'cleaned:';
+  VGM.cleanNoteOf = function (flags) { return VGM.CLEAN_NOTE + (flags.sfx ? ' sfx' : '') + (flags.lag ? ' lag' : ''); };
+  VGM.cleanedFlags = function (hdr) {
+    const n = hdr && hdr.gd3 && hdr.gd3.notes ? String(hdr.gd3.notes) : '';
+    const i = n.indexOf(VGM.CLEAN_NOTE);
+    if (i < 0) return { sfx: false, lag: false };
+    const w = n.slice(i + VGM.CLEAN_NOTE.length).split(/[^a-z]+/);
+    return { sfx: w.includes('sfx'), lag: w.includes('lag') };
+  };
+  // GD3 の notes 欄を書き換える(他の欄はそのまま)。GD3 は末尾にある前提(無ければ足す)
+  VGM.setGd3Notes = function (bytes, notes) {
+    const hdr = VGM.parseHeader(bytes);
+    if (!hdr || !hdr.magicOk) return bytes;
+    const g = hdr.gd3 || {};
+    const utf16 = (s) => { const o = []; for (const ch of String(s || '')) { const c = ch.codePointAt(0); if (c < 0x10000) o.push(c & 0xFF, c >> 8); else o.push(0x3F, 0); } o.push(0, 0); return o; };
+    const fields = [].concat(utf16(g.trackEn), utf16(g.trackJa), utf16(g.gameEn), utf16(g.gameJa), utf16(g.systemEn), utf16(g.systemJa),
+      utf16(g.authorEn), utf16(g.authorJa), utf16(g.date), utf16(g.dumper), utf16(notes));
+    const u32 = (n) => [n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >>> 24) & 0xFF];
+    const gd3 = [].concat([0x47, 0x64, 0x33, 0x20], u32(0x100), u32(fields.length), fields);
+    const cut = hdr.gd3Offset && hdr.gd3Offset > hdr.dataOffset ? hdr.gd3Offset : bytes.length;
+    const out = new Uint8Array(cut + gd3.length);
+    out.set(bytes.subarray(0, cut), 0); out.set(gd3, cut);
+    const w32 = (off, n) => { out[off] = n & 0xFF; out[off + 1] = (n >> 8) & 0xFF; out[off + 2] = (n >> 16) & 0xFF; out[off + 3] = (n >>> 24) & 0xFF; };
+    w32(0x04, out.length - 4);
+    w32(0x14, cut - 0x14);
+    return out;
+  };
+
   VGM.describeClean = function (report) {
     if (!report) return [];
     const out = [];
+    if (report.pre && (report.pre.sfx || report.pre.lag)) {
+      out.push('録音の補正: ' + [report.pre.sfx ? '効果音除去' : '', report.pre.lag ? '処理落ち補正' : ''].filter(Boolean).join('と') + 'は録音時に適用済みの VGM なので、変換ではその補正を重ねていません。');
+    }
     if (report.error) {
       out.push(`録音の補正: VGM を解釈できなかったため何もしませんでした(${report.error})。`);
       return out;

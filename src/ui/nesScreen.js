@@ -15,6 +15,8 @@
  *   本体(NesConsole.startRecording)が音源レジスタの書き込みを積み、フレームごとに届く。止めると
  *   MML.VGM.encodeNesRecording で VGM(2A03 は標準、拡張音源 VRC6/VRC7/MMC5/N163/5B は NESX ブロック、DPCM は本体つき)にし、
  *   [VGM を保存](ダウンロード)と [変換へ](本体の VGM 経路で開いて鍵盤表示/MML 変換へ)を出す。
+ *   録音の補正(効果音除去/処理落ち補正、src/vgm/vgmClean.js)はその横のチェックで、生の録音から掛け直す(保存にも変換にも効く)。
+ *   初期値は設定の「録音の補正」。補正済み VGM は GD3 の notes に印("cleaned: sfx lag")を持ち、変換側は同じ補正を重ねない。
  * ■ ライブ表示(鍵盤表示のロールへ流す)
  *   同じ録音(書き込み列)を毎フレーム onLiveFrame で main.js へ渡し、main.js が鍵盤表示の追記モード
  *   (LiveRollSession → KeyboardDisplay.liveRollBegin/liveAppendFrame)につなぐ。VGM 録音とライブ表示は本体の録音を共有し、
@@ -60,6 +62,8 @@
     turboRate: 2,
     rewindSpeed: 2,
     liveRoll: true,
+    sfxRemove: false, // 録音の補正の初期値(録音ごとに保存/変換への横のチェックで変えられる)
+    lagFix: false,
   };
   function loadCfg() {
     let c = null;
@@ -71,6 +75,8 @@
       turboRate: TURBO_RATES.includes(c.turboRate) ? c.turboRate : DEFAULT_CFG.turboRate,
       rewindSpeed: REWIND_SPEEDS.includes(c.rewindSpeed) ? c.rewindSpeed : DEFAULT_CFG.rewindSpeed,
       liveRoll: typeof c.liveRoll === 'boolean' ? c.liveRoll : DEFAULT_CFG.liveRoll,
+      sfxRemove: typeof c.sfxRemove === 'boolean' ? c.sfxRemove : DEFAULT_CFG.sfxRemove,
+      lagFix: typeof c.lagFix === 'boolean' ? c.lagFix : DEFAULT_CFG.lagFix,
     };
   }
   function saveCfg() { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { /* ignore */ } }
@@ -105,6 +111,7 @@
   let gpRaf = 0;
   // 録音
   let recording = false, recFrames = null, recStartMs = 0, recVgm = null, recExtBits = 0, recBase = null;
+  let recRaw = null, recSfxChk = null, recLagChk = null; // 生の録音(補正はここから掛け直す)と、保存/変換への横のチェック
   // FDS(段階 6d): BIOS は利用者が用意する(disksys.rom、8K)。localStorage に base64 で控える
   const BIOS_KEY = 'nes.fdsBios';
   let fdsBios = null, biosBtn = null, biosInput = null, sideBtn = null, fdsSides = 0, fdsSide = 0, pendingFds = null, sideTimer = 0;
@@ -322,9 +329,21 @@
     nameEl = document.createElement('span'); nameEl.className = 'nes-name';
     statusEl = document.createElement('span'); statusEl.className = 'nes-status';
     recInfoEl = document.createElement('span'); recInfoEl.className = 'nes-recinfo';
+    const recOpt = (key) => {
+      const lbl = document.createElement('label'); lbl.className = 'nes-cfg-check nes-rec-opt';
+      const c = document.createElement('input'); c.type = 'checkbox';
+      c.addEventListener('change', () => { applyRecClean(); if (canvas) canvas.focus(); });
+      lbl.appendChild(c); lbl.appendChild(document.createTextNode(' ' + T(key === 'sfx' ? '効果音を除く' : '処理落ちを詰める')));
+      lbl.title = T(key === 'sfx' ? '曲が 3 周以上入った録音を周期で重ね、周回ごとに違う書き込みを多数決で置き換えます(保存にも変換にも効く)' : '音楽の定期書き込みが無いフレームを処理落ちとみなして詰めます(保存にも変換にも効く)');
+      lbl.hidden = true;
+      return { lbl, c };
+    };
+    const so = recOpt('sfx'), lo = recOpt('lag');
+    recSfxChk = so.c; recLagChk = lo.c;
     saveBtn = mkBtn(T('VGM を保存'), '', saveRecording); saveBtn.hidden = true;
     convBtn = mkBtn(T('変換へ'), '', () => { if (recVgm && NesScreen.onOpenRecording) { setPaused(true); NesScreen.onOpenRecording(recVgm, recFileName()); } }); convBtn.hidden = true;
-    bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(recInfoEl); bar.appendChild(saveBtn); bar.appendChild(convBtn);
+    bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn);
+    statusEl.textContent = T('[開く] か .nes/.fds のドロップで始まります');
     wrap.appendChild(bar); wrap.appendChild(canvas);
     if (MML.Device && MML.Device.isTouch && MML.Device.isTouch()) wrap.appendChild(buildTouchPad());
     body.appendChild(wrap);
@@ -487,6 +506,17 @@
     sel2.addEventListener('change', () => { cfg.rewindSpeed = +sel2.value; saveCfg(); if (node && rwActive) node.port.postMessage({ type: 'rewindSpeed', speed: cfg.rewindSpeed }); });
     row2.appendChild(rl2); row2.appendChild(sel2); s1b.appendChild(row2);
     note(s1b, T('押している間、直前 2 分の映像を逆再生で戻ります(音は止まります)。離した所からゲームが続きます'));
+    // 録音の補正(効果音除去/処理落ち補正)の初期値。録音ごとの実際の ON/OFF は保存/変換への横のチェック
+    const s1c = sec(T('録音の補正'));
+    const cfgCheck = (parent, key, label) => {
+      const l = document.createElement('label'); l.className = 'nes-cfg-check';
+      const c = document.createElement('input'); c.type = 'checkbox'; c.checked = !!cfg[key];
+      c.addEventListener('change', () => { cfg[key] = c.checked; saveCfg(); });
+      l.appendChild(c); l.appendChild(document.createTextNode(' ' + label)); parent.appendChild(l); return c;
+    };
+    const sfxChk = cfgCheck(s1c, 'sfxRemove', T('効果音を除く'));
+    const lagChk = cfgCheck(s1c, 'lagFix', T('処理落ちを詰める'));
+    note(s1c, T('録音が終わった時の初期値です。録音ごとの ON/OFF は [VGM を保存][変換へ] の横のチェックで変えられ、保存する VGM と変換に進む VGM の両方に効きます。効果音除去は曲が 3 周以上入った録音を周期で重ねて周回ごとに違う書き込みを多数決で置き換え、処理落ち補正は音楽の定期書き込みが無いフレームを詰めます。補正した VGM には印が付き、MML 変換設定の同じ補正は重ねて掛かりません'));
     // キー割り当て
     const s2 = sec(T('キーボード(1P)'));
     const tbl = document.createElement('table'); tbl.className = 'nes-cfg-table';
@@ -520,7 +550,7 @@
     note(s3, T('十字は 12-15 番のボタンと左スティック(固定)。つながっている順に 1P、2P。早送り/巻き戻しは押している間、一時停止/状態保存/読込は押した時'));
     const s4 = sec('');
     const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'nes-btn'; reset.textContent = T('既定に戻す');
-    reset.addEventListener('click', () => { cfg = loadCfgDefaults(); saveCfg(); pushTurboRate(); sel.value = String(cfg.turboRate); sel2.value = String(cfg.rewindSpeed); chk.checked = cfg.liveRoll; refresh(); });
+    reset.addEventListener('click', () => { cfg = loadCfgDefaults(); saveCfg(); pushTurboRate(); sel.value = String(cfg.turboRate); sel2.value = String(cfg.rewindSpeed); chk.checked = cfg.liveRoll; sfxChk.checked = cfg.sfxRemove; lagChk.checked = cfg.lagFix; refresh(); });
     s4.appendChild(reset);
     const refresh = () => {
       for (const a of KEY_ACTIONS) keyBtns[a].textContent = keyLabel(cfg.keys[a]);
@@ -594,7 +624,7 @@
     document.addEventListener('mousedown', popClose, true);
     document.addEventListener('keydown', popClose, true);
   }
-  function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll }; }
+  function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll, sfxRemove: DEFAULT_CFG.sfxRemove, lagFix: DEFAULT_CFG.lagFix }; }
 
   // ── 入力 ──
   // ゲームパッド: つながっている順に 1P(キーボードと合成)、2P。戻り値は [[1P のビット, 連射ビット, 操作の集合], [2P ...]]
@@ -963,7 +993,7 @@
       recording = false;
       sendRecord(false, { keep: liveActive });
     } else {
-      recording = true; recFrames = []; recBase = null; recVgm = null; recStartMs = performance.now();
+      recording = true; recFrames = []; recBase = null; recVgm = null; recRaw = null; recStartMs = performance.now();
       sendRecord(true);
     }
     updateRecUi();
@@ -972,9 +1002,31 @@
     const frames = recFrames || [];
     recFrames = null; recBase = null;
     const r = MML.VGM.encodeNesRecording({ frames, extBits: recExtBits, name: (romName || 'NES').replace(/\.nes$/i, ''), creator: 'Sound Emulation Foundry (NES)' });
-    recVgm = r.vgm;
-    recInfoEl.textContent = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (frames.length / FPS).toFixed(1), frames: frames.length, kb: (r.vgm.length / 1024).toFixed(1) });
+    recRaw = r.vgm; recVgm = r.vgm;
+    recSfxChk.checked = !!cfg.sfxRemove; recLagChk.checked = !!cfg.lagFix;
+    applyRecClean();
     updateRecUi();
+  }
+  // 録音の補正: 生の録音に [効果音を除く][処理落ちを詰める] のチェックどおりの補正を掛け直す(保存と変換への両方がこの recVgm を使う)。
+  // 補正した VGM には GD3 の notes に印を付け、MML 変換設定の同じ補正が重ねて掛からないようにする
+  function applyRecClean() {
+    if (!recRaw) return;
+    const flags = { sfx: !!(recSfxChk && recSfxChk.checked), lag: !!(recLagChk && recLagChk.checked) };
+    const frames = Math.round(MML.VGM.parseHeader(recRaw).totalSamples / 735);
+    let text = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (frames / FPS).toFixed(1), frames, kb: (recRaw.length / 1024).toFixed(1) });
+    let title = '';
+    if ((flags.sfx || flags.lag) && MML.VGM.cleanCapture) {
+      const marked = MML.VGM.setGd3Notes(recRaw, MML.VGM.cleanNoteOf(flags));
+      const r = MML.VGM.cleanCapture(marked, flags);
+      recVgm = r.bytes;
+      const S = r.report.sfx, L = r.report.lag, parts = [];
+      if (flags.sfx) parts.push(S && S.applied ? T('効果音 {n} フレーム置換', { n: S.replaced }) : T('効果音: 周期が見つからず何もせず'));
+      if (flags.lag) parts.push(L && L.applied ? T('処理落ち {n} フレーム', { n: (L.removedRegular || 0) + (L.removedAlign || 0) }) : T('処理落ち: なし'));
+      if (r.report.error) parts.push(T('補正できませんでした({msg})', { msg: r.report.error }));
+      text += ' · ' + parts.join('、');
+      title = MML.VGM.describeClean ? MML.VGM.describeClean(r.report).join('\n') : '';
+    } else recVgm = recRaw;
+    recInfoEl.textContent = text; recInfoEl.title = title;
   }
   function saveRecording() {
     if (!recVgm) return;
@@ -989,7 +1041,7 @@
     setIcon(recBtn, recording ? 'stop' : 'rec');
     recBtn.title = recording ? T('録音を止める(VGM にする)') : T('録音(音源レジスタの書き込みを VGM に)'); recBtn.setAttribute('aria-label', recBtn.title);
     recBtn.classList.toggle('nes-rec--on', recording);
-    saveBtn.hidden = convBtn.hidden = !recVgm;
+    saveBtn.hidden = convBtn.hidden = recSfxChk.parentNode.hidden = recLagChk.parentNode.hidden = !recVgm;
     if (recording) recInfoEl.textContent = T('録音中…');
     if (!recording && !recVgm) recInfoEl.textContent = '';
     if (recording && !recTimer) recTimer = setInterval(() => { if (!recording) { clearInterval(recTimer); recTimer = 0; return; } recInfoEl.textContent = T('録音中: {sec} 秒', { sec: ((performance.now() - recStartMs) / 1000).toFixed(0) }); }, 500);
@@ -1006,6 +1058,8 @@
     liveStopped,             // 鍵盤表示側から「終わった」と知らせる
     rewindTo,                // (曲の秒) ロールのドラッグシークから。戻せる秒を返す(ライブ表示中でなければ null)
     applyMix,                // (muteConfig, volumeConfig) 鍵盤表示のミュート/音量
+    // ROM を開く前でも窓の中身(開くアイコン等のヘッダ、案内)を組んでおく(main.js が起動時に呼ぶ)。ヘッドレス(main.js を読む)には canvas が無いので何もしない
+    mount: () => (typeof ImageData === 'function' ? ensureDom() : false),
     // ROM(iNES のバイト列)を読み込んで表示・開始する。失敗は例外(マッパー未対応など)
     async open(bytes, name) {
       if (!ensureDom()) throw new Error('win-nes がありません');
@@ -1037,7 +1091,7 @@
       fdsSides = probe.diskCount; fdsSide = 0; if (sideTimer) { clearTimeout(sideTimer); sideTimer = 0; } updateDiskUi();
       stopMain(); nes = null; rewindBuf = null;
       if (recording) { recording = false; recFrames = null; recBase = null; }
-      recVgm = null; updateRecUi();
+      recVgm = null; recRaw = null; updateRecUi();
       paused = false; setIcon(pauseBtn, 'pause'); pauseBtn.classList.remove('nes-paused'); acc = 0; fpsCount = 0; fpsMs = 0; frameSeq = 0;
       win.style.display = 'flex';
       if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
