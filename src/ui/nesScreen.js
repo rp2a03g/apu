@@ -243,8 +243,8 @@
   const ICON = {
     open: '<path d="M2.5 5.5h5l1.5 1.5H17.5v8.5h-15z"/>',
     reset: '<path d="M4.6 10a5.6 5.6 0 1 0 1.7-4"/><path d="M4.2 3.6v3.4h3.4"/>',
-    ff: '<path d="M3 5.5v9l6-4.5zM10.5 5.5v9l6-4.5z" fill="currentColor" stroke="none"/>',
-    rewind: '<path d="M17 5.5v9l-6-4.5zM9.5 5.5v9l-6-4.5z" fill="currentColor" stroke="none"/>',
+    ff: '<path d="M17 5.5v9l-6-4.5zM9.5 5.5v9l-6-4.5z" fill="currentColor" stroke="none"/>', // 向きは 2026-11-04 に入れ替え
+    rewind: '<path d="M3 5.5v9l6-4.5zM10.5 5.5v9l6-4.5z" fill="currentColor" stroke="none"/>',
     saveState: '<path d="M10 3v9M6.5 8.5 10 12l3.5-3.5"/><path d="M3.5 13.5v3h13v-3"/>',
     loadState: '<path d="M10 12V3M6.5 6.5 10 3l3.5 3.5"/><path d="M3.5 13.5v3h13v-3"/>',
     gear: '<circle cx="10" cy="10" r="2.6"/><path d="M10 2.6v2.1M10 15.3v2.1M17.4 10h-2.1M4.7 10H2.6M15.1 4.9l-1.5 1.5M6.4 13.6l-1.5 1.5M15.1 15.1l-1.5-1.5M6.4 6.4 4.9 4.9"/>',
