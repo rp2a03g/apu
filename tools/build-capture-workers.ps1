@@ -213,6 +213,7 @@ $bundles = @(
             'src\emulator\nes\ppu.js',
             'src\emulator\nes\nesConsole.js',
             'src\emulator\nes\nesState.js',
+            'src\emulator\nes\nesRewind.js',
             'src\audio\nes-worklet-impl.js'
         )
     },

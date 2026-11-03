@@ -28,7 +28,8 @@ const seconds = parseFloat(arg('--sec', '30'));
 function canon(v) {
   if (v === Infinity) return 'inf';
   if (Array.isArray(v)) return v.map(canon);
-  if (v && typeof v === 'object') { const o = {}; for (const k of Object.keys(v).sort()) o[k] = canon(v[k]); return o; }
+  // ドラム区画のレーン割当(drumLane/drumSub/drumSubN)は追記側がその場で作る物なので比べない(一括側は受け取り側が後から付ける)
+  if (v && typeof v === 'object') { const o = {}; for (const k of Object.keys(v).sort()) if (!/^drum(Lane|Sub|SubN)$/.test(k)) o[k] = canon(v[k]); return o; }
   return v;
 }
 function tlJson(tl) {
@@ -101,8 +102,10 @@ function chipsOf(MML, header) {
     for (const w of (cap.initWrites || [])) if (!w.read && regs[w.addr] === undefined) regs[w.addr] = w.value;
     if (regs[0x4015] === undefined) regs[0x4015] = 0x0F;
     const snaps = new Array(N);
+    const dmcStep = st.dmc(); ex.dmcSeq = new Array(N); ex.dmcEnd = new Array(N); // DPCM の通番/終了(追記と同じ)
     for (let f = 0; f < N; f++) {
       for (const w of cap.writeLog[f]) if (!w.read) regs[w.addr] = w.value;
+      { const d = dmcStep(cap.writeLog[f], f, regs); ex.dmcSeq[f] = d.seq; ex.dmcEnd[f] = d.end; }
       snaps[f] = (f > 0 && cap.writeLog[f].length === 0) ? snaps[f - 1] : Object.assign({}, regs);
     }
     const ref = UI.buildNoteTimelineFromChannelFrames(f => UI.extractChannels(snaps[f], ex, f, chips), N, frameDur);

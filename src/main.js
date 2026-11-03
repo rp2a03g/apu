@@ -273,10 +273,11 @@
   keyboardDisplay.onMuteChange = () => {
     syncSilenceDetect();
     scheduleRerenderOnMute();
+    if (MML.UI.NesScreen && MML.UI.NesScreen.live) MML.UI.NesScreen.applyMix(getChannelMuteConfig(), null); // ゲームの音にも
     mmlHighlightLastFrame = -1; // ミュート変更を即座にハイライト表示へ反映させる
     updateMmlRangeHighlight();
   };
-  keyboardDisplay.onVolumeChange = () => { scheduleRerenderOnVolume(); };
+  keyboardDisplay.onVolumeChange = () => { scheduleRerenderOnVolume(); if (MML.UI.NesScreen && MML.UI.NesScreen.live) MML.UI.NesScreen.applyMix(null, getChannelVolumeConfig()); };
   keyboardDisplay.onPreviewChange = () => syncAssignPreview();
   keyboardDisplay.spcLiveRows = spcPreviewRows;
   // ── ドラムサンプル台帳(全形式共用、2026-09-03) ──────────────────────────
@@ -4256,6 +4257,10 @@
     };
     MML.UI.NesScreen.onLiveFrame = (writes) => liveRollSession.pushFrame(writes);
     MML.UI.NesScreen.onLiveEnd = (reason) => { if (liveRollSession.active) { liveRollSession.closer = null; liveRollSession.end(reason || 'end'); } };
+    // 巻き戻し: ロールをそのフレーム数に切り詰める(戻った先の像は NES 画面が録音を取り直して流す)
+    MML.UI.NesScreen.onLiveTruncate = (frames) => { if (liveRoll) { keyboardDisplay.liveRollTruncate(frames); liveRollSession.frames = keyboardDisplay.liveFrameCount(); if (monitorState && monitorState.regSnapshots === liveRoll.state.regSnapshots) monitorState.totalFrames = keyboardDisplay.liveFrameCount(); } };
+    // 鍵盤表示のミュート/ch 別音量はゲームの音にも効く(ライブ表示中)
+    MML.UI.NesScreen.applyMix(getChannelMuteConfig(), getChannelVolumeConfig());
   }
 
   keyboardDisplay.onToMml = () => {
@@ -4459,6 +4464,8 @@
   // キャプチャが追いついた範囲(currentBufferedFraction)にクランプし、実際にシークした秒を返す。
   // シークできる状態でなければ何もせず null を返す。
   function seekToSeconds(seconds) {
+    // ライブ表示(NES 画面がロールへ流している)中は、ロールのドラッグでゲームをそこまで巻き戻す
+    if (liveRoll && MML.UI.NesScreen && MML.UI.NesScreen.live) return MML.UI.NesScreen.rewindTo(seconds);
     if (currentTransportPlayer()) {
       if (lastPlayMode !== 'capture-mml' && lastPlayMode !== 'nsf' && lastPlayMode !== 'kss' && lastPlayMode !== 'spc' && lastPlayMode !== 'gbs' && lastPlayMode !== 'hes' && lastPlayMode !== 'vgm' && lastPlayMode !== 'psf') return null;
       let sec = Math.max(0, Math.min(workletDuration, seconds));

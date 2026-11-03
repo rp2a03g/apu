@@ -36,6 +36,7 @@
             nes.onFrame = () => this.onFrame();
             if (m.battery) nes.setBattery(new Uint8Array(m.battery)); // 前回のセーブ(主スレッドが IndexedDB から)
             this.nes = nes;
+            this.rewind = MML.Emu.NesRewind ? new MML.Emu.NesRewind(nes) : null;
             this.dcX = 0; this.dcY = 0;
             this.port.postMessage({ type: 'loaded', info: MML.Emu.INES.describe(nes.rom), extBits: nes.extBits(), sampleRate, disks: nes.diskCount, battery: nes.hasBattery });
             break;
@@ -46,17 +47,41 @@
           case 'disk': // FDS: side < 0 で取り出し、0 以上でその面を入れる
             if (!this.nes) break;
             if (m.side < 0) this.nes.ejectDisk(); else this.nes.insertDisk(m.side | 0);
+            if (this.rewind) this.rewind.clear();
             break;
           case 'pad': if (this.nes) this.nes.setController(m.port | 0, m.bits | 0, m.turbo | 0); break;
           case 'turboRate': if (this.nes) this.nes.setTurboRate(m.frames | 0); break;
-          case 'reset': if (this.nes) this.nes.reset(); break;
+          case 'reset': if (this.nes) { this.nes.reset(); if (this.rewind) this.rewind.clear(); } break;
+          case 'mix': { // 鍵盤表示のミュート/音量(2A03 は apu.mute/vol、拡張音源はマッパーの audio.mute/vol)。capture.js の applyMute/applyVolume と同じ流儀(バンドルに無いので自前)
+            if (!this.nes) break;
+            const put = (target, source, conv) => {
+              if (!target || !source) return;
+              if (Array.isArray(target)) { for (let i = 0; i < target.length; i++) if (source[i] !== undefined) target[i] = conv(source[i]); }
+              else for (const k of Object.keys(target)) if (source[k] !== undefined) target[k] = conv(source[k]);
+            };
+            const a = this.nes.mapper.audio;
+            if (m.mute) { put(this.nes.apu.mute, m.mute.apu, (v) => !!v); if (a) put(a.mute, m.mute.ext, (v) => !!v); }
+            if (m.volume) { put(this.nes.apu.vol, m.volume.apu, (v) => Math.max(0, Math.min(2, +v || 0))); if (a) put(a.vol, m.volume.ext, (v) => Math.max(0, Math.min(2, +v || 0))); }
+            break;
+          }
+          case 'rewind': { // frame(本体の frameCount)の終わりへ戻る。録音中なら像から取り直す。戻った所の画面と frameCount を返す
+            if (!this.nes || !this.rewind) break;
+            const wasRec = !!this.nes.rec;
+            this.nes.rec = null;
+            const got = this.rewind.rewindTo(m.frame | 0);
+            if (wasRec) this.nes.startRecording();
+            this.frameSeq = got;
+            const frame = this.nes.frame.slice();
+            this.port.postMessage({ type: 'rewound', frame: frame.buffer, seq: got, oldest: this.rewind.oldest }, [frame.buffer]);
+            break;
+          }
           case 'pause': this.paused = !!m.on; break;
           case 'speed': this.speed = Math.max(1, Math.min(8, m.n | 0)); break; // 早送り: 1 回の process で speed 回ぶん進める(音は最後の 1 回ぶんだけ出す)
           case 'saveState': // ステート保存: 木を写して主スレッドへ(構造化複製。IndexedDB に置くのは主スレッド)
             if (this.nes) this.port.postMessage({ type: 'state', state: MML.Emu.NesState.save(this.nes), slot: m.slot });
             break;
           case 'loadState':
-            if (this.nes) this.port.postMessage({ type: 'stateLoaded', ok: MML.Emu.NesState.load(this.nes, m.state) });
+            if (this.nes) { const ok = MML.Emu.NesState.load(this.nes, m.state); if (ok) { if (this.rewind) this.rewind.clear(); this.frameSeq = this.nes.frameCount; } this.port.postMessage({ type: 'stateLoaded', ok }); }
             break;
           case 'record':
             // 録音は VGM(主スレッドが溜める)とライブ表示(ロールへ流す)の 2 つが使う。
@@ -79,7 +104,8 @@
     }
     onFrame() {
       const nes = this.nes;
-      ++this.frameSeq;
+      if (this.rewind) { if (this.rewind.replaying) return; this.rewind.onFrame(); } // 巻き戻しの再生中は送らない
+      this.frameSeq = nes.frameCount; // 主スレッドのフレーム番号 = 本体の frameCount(巻き戻しで戻る)
       if (this.speed > 1 && (++this.ffSkip % this.speed) !== 0) { if ((this.frameSeq % 60) === 0) this.postBattery(false); return; } // 早送り中は speed 枚に 1 枚だけ送る(録音の書き込み列は次に送る時まで溜まる)
       const frame = nes.frame.slice();
       const msg = { type: 'frame', seq: this.frameSeq, frame: frame.buffer, underruns: nes.underruns };

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-03 15:27:44
+ * Built by tools/build-capture-workers.ps1 at 2026-11-03 19:26:59
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-11-03 15:27:44';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-11-03 19:26:59';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -7172,7 +7172,30 @@
       this.TK = MML.Convert && MML.Convert.ToneKey; // 音色キー(音色一覧パネル用。roll-builders.js toneOf と同じ役割)
       this.lastFrame = -1;
       this.noteOpened = 0; // live: 始まった音符の数(呼び出し側がレーン音域の更新時期を決めるのに使う)
+      this.drumOpened = 0; // live: 始まった打点(drumKey つき)の数(呼び出し側がドラム区画の作り直し時期を決める)
       if (this.live) { this._live = []; this._live.frameDur = frameDur; }
+    }
+    // live: フレーム f より後を捨てる(巻き戻し)。f より前に始まりまだ鳴っていた音符は開き直す
+    truncate(f) {
+      if (!this.live) return;
+      const frameDur = this.frameDur, t = f * frameDur;
+      for (const track of this.tracks.values()) {
+        const notes = track.notes;
+        while (notes.length && notes[notes.length - 1].startSec >= t - 1e-9) notes.pop();
+        track.cur = null;
+        const last = notes.length ? notes[notes.length - 1] : null;
+        if (last && (last.open || last.endSec > t + 1e-9)) {
+          const startFrame = Math.round(last.startSec / frameDur);
+          last.endSec = Infinity; last.open = true;
+          const freqs = last.freqSeq || [];
+          freqs.length = Math.max(0, f - startFrame);
+          const cur = { startFrame, midi: last.midi === undefined ? null : last.midi, drumKey: last.drumKey || null, drumSeq: track.curDrumSeq || 0,
+                        volQ: Math.round(last.vol * ROLL_VOL_LEVELS), freqs, tone: last.tone, sampleRow: !!last.sampleRow, note: last };
+          if (last.freqLoSeq) { last.freqLoSeq.length = freqs.length; last.freqHiSeq.length = freqs.length; cur.bandLo = last.freqLoSeq; cur.bandHi = last.freqHiSeq; }
+          track.cur = cur;
+        }
+      }
+      this.lastFrame = f - 1;
     }
     // 発音の終端。live では開いていた音符の endSec を確定する
     _closeNote(track, endSec) {
@@ -7257,8 +7280,10 @@
             if (tone) note.tone = tone;
             if (track.cur.sampleRow) note.sampleRow = true;
             track.cur.note = note;
+            track.curDrumSeq = drumSeq; // truncate で開き直すときに要る(音符には載せない)
             track.notes.push(note);
             this.noteOpened++;
+            if (drumKey) this.drumOpened++;
           }
         }
         if (track.cur) {
@@ -7398,6 +7423,22 @@
     return frames;
   }
 
+  // DPCM: $4015 bit4 の書き込みを数えて打点の通番(drumSeq)にし、$4010/$4013 から鳴り終わるフレームを出す。
+  // 履歴経路(buildDmcTimeline)が writeLog 全体から作る dmcSeq/dmcEnd をライブ(追記)でその場で作る物
+  function makeDmcStepper() {
+    let seq = 0, end = 0;
+    return (writes, f, regs) => {
+      regs = regs || {}; f = f | 0; // liveRollBegin が initWrites で状態だけ進めるときは regs 無し(通番が進むだけ)
+      for (const w of writes) {
+        if (w.read || w.addr !== 0x4015 || !(w.value & 0x10)) continue;
+        seq++;
+        const r = regs[0x4010] || 0;
+        const bits = ((regs[0x4013] || 0) * 16 + 1) * 8;
+        end = (r & 0x40) ? Infinity : f + Math.ceil(bits * DMC_RATE[r & 15] / 29780.5);
+      }
+      return { seq, end };
+    };
+  }
   function makeFme7Stepper() {
     const regs = new Uint8Array(16);
     let latch = 0;
@@ -10407,12 +10448,13 @@
       // Live系(再生中のチップを直接読む関数)はライブ表示には無い(あっても全フレームが同じ値になる)
       for (const k of Object.keys(ex)) if (/Live$/.test(k)) ex[k] = null;
       ex.apuEnv = null;
+      ex.dmcSeq = []; ex.dmcEnd = []; steppers.dmc = makeDmcStepper();
       const initWrites = (opts && opts.initWrites) || null;
       if (initWrites && initWrites.length) for (const k of Object.keys(steppers)) steppers[k](initWrites); // 状態だけ進める(フレームは積まない)
       const regs = Object.assign({}, (opts && opts.initRegs) || {});
       if (initWrites) for (const w of initWrites) if (!w.read && regs[w.addr] === undefined) regs[w.addr] = w.value;
       if (regs[0x4015] === undefined) regs[0x4015] = 0x0F; // 書かれない曲もあるので「全ch有効」を既定に(VGM 経路と同じ)
-      this._liveRoll = { builder, steppers, regs, lastRangeOpened: 0, lastRangeMs: 0 };
+      this._liveRoll = { builder, steppers, regs, lastRangeOpened: 0, lastRangeMs: 0, lastDrumOpened: 0 };
       this._rollPastKeep = false;
       this._rollTimeline = builder.timeline();
       this._rollCursor = {};
@@ -10428,6 +10470,8 @@
       writes = writes || [];
       const f = st.totalFrames;
       for (const w of writes) if (!w.read) lr.regs[w.addr] = w.value;
+      // DPCM の通番/終了は $4015 を書いた時点のレジスタで決まるので、書き込みをもう一度なぞる(像の順序は $4010-13 → $4015)
+      { const d = lr.steppers.dmc(writes, f, lr.regs); this._extraSnaps.dmcSeq[f] = d.seq; this._extraSnaps.dmcEnd[f] = d.end; }
       st.writeLog[f] = writes;
       // capture.js と同じ: 書き込みの無いフレームは前のスナップショットを共有する(メモリ)
       st.regSnapshots[f] = (f > 0 && writes.length === 0) ? st.regSnapshots[f - 1] : Object.assign({}, lr.regs);
@@ -10438,6 +10482,9 @@
       if (lr.steppers.fme7) ex.fme7[f] = lr.steppers.fme7(writes);
       const channels = extractChannels(st.regSnapshots[f], ex, f, this._chips);
       lr.builder.feed(channels, f);
+      // 打点(DPCM 等の drumKey つき)が新しく始まったらドラム区画を組み直す(区画が無いと打点は描かれない。
+      // 一括構築は曲全体の打点からレーンを決めるので、追記では打点の出た時にその場で作り直す)
+      if (lr.builder.drumOpened !== lr.lastDrumOpened) { lr.lastDrumOpened = lr.builder.drumOpened; this._rebuildDrumLanes(); }
       // チャンネルごとのレーン表示の音域は曲全体から決める作りなので、新しい音符が始まったときに
       // 間引いて(最短 LIVE_RANGE_MS ごと)更新する。まとめ表示では何もしない
       if (this._layout.rollLanes === 'perChannel' && lr.builder.noteOpened !== lr.lastRangeOpened) {
@@ -10459,6 +10506,29 @@
       this._liveRoll = null;
       this._rollPastKeep = true;
       if (this._layout.rollLanes === 'perChannel') this._updateLaneRanges();
+    }
+
+    // 巻き戻し: フレーム f より後を捨てる(ロール・レジスタ像・履歴)。戻った先の状態は次に届く像(書き込み)から組み直るので、
+    // 間接アクセス音源の状態は作り直しておく
+    liveRollTruncate(f) {
+      const lr = this._liveRoll, st = this._state;
+      if (!lr || !st) return;
+      f = Math.max(0, Math.min(f | 0, st.totalFrames));
+      if (f === st.totalFrames) return;
+      st.writeLog.length = f; st.regSnapshots.length = f; st.totalFrames = f;
+      const ex = this._extraSnaps;
+      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd']) if (ex[k]) ex[k].length = f;
+      if (lr.steppers.vrc7) lr.steppers.vrc7 = makeVrc7Stepper();
+      if (lr.steppers.n163) lr.steppers.n163 = makeN163Stepper();
+      if (lr.steppers.fme7) lr.steppers.fme7 = makeFme7Stepper();
+      lr.steppers.dmc = makeDmcStepper();
+      lr.regs = Object.assign({}, f > 0 ? st.regSnapshots[f - 1] : {});
+      if (lr.regs[0x4015] === undefined) lr.regs[0x4015] = 0x0F;
+      lr.builder.truncate(f);
+      this._rollCursor = {};
+      this._rollLastRawPos = null;
+      this._rebuildDrumLanes();
+      this._updateLaneRanges();
     }
 
     isLiveRoll() { return !!this._liveRoll; }
@@ -13606,7 +13676,7 @@
   UI.buildNoteTimelineFromChannelFrames = buildNoteTimelineFromChannelFrames;
   UI.extractChannels = extractChannels;
   UI.makeRollGeom = makeRollGeom; // 過去向き(追記)の座標系の検証用
-  UI.liveSnapshotSteppers = { vrc7: makeVrc7Stepper, n163: makeN163Stepper, fme7: makeFme7Stepper }; // 同上(ライブ追記と同じ材料の基準を作る)
+  UI.liveSnapshotSteppers = { vrc7: makeVrc7Stepper, n163: makeN163Stepper, fme7: makeFme7Stepper, dmc: makeDmcStepper }; // 同上(ライブ追記と同じ材料の基準を作る)
   UI.midiToNoteName = midiToName; // main.js(ADPCM手動キャリブレーションのプロンプト表示)用
 })(globalThis);
 
