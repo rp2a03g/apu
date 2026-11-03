@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-04 00:17:05
+ * Built by tools/build-capture-workers.ps1 at 2026-11-04 01:41:02
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-04 00:17:05';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-04 01:41:02';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -56,6 +56,7 @@
       this.PC = 0;
       this.cycles = 0;
       this.halted = false;
+      this.rmwDummy = false;
       this.irqPolledI = F_I; // IRQ 判定に使う I フラグ(前の命令の最後のサイクルで見た値。CLI/SEI/PLP は 1 命令遅れて効く)
       this.callActive = false;
     }
@@ -194,6 +195,16 @@
       if (mode === 'acc') this.A = value & 0xFF;
       else this.write(addr, value);
     }
+    // RMW 命令(ASL/LSR/ROL/ROR/INC/DEC と非公式の SLO/RLA/SRE/RRA/DCP/ISC)の書き戻し: 実機は読んだ古い値をいったん
+    // 書いてから(ダミー書き)新しい値を書く(2 サイクル連続)。マッパーのレジスタに INC すると、MMC1 はダミー書き(古い値、bit7 が
+    // 立っていればリセット)だけを受けて続く本物の書きを無視する(連続サイクルの書きは無視)ので、両方を再現する。
+    // rmwDummy はダミー書きの間だけ true(NesConsole がマッパーへ伝える)
+    writeRmw(mode, addr, old, value) {
+      if (mode === 'acc') { this.A = value & 0xFF; return; }
+      this.rmwDummy = true;
+      try { this.write(addr, old); } finally { this.rmwDummy = false; }
+      this.write(addr, value);
+    }
 
     // --- 命令実行（1命令）---
     // 戻り値: 消費サイクル数
@@ -293,7 +304,7 @@
     cpu.setFlag(F_C, (op.value & 0x80) !== 0);
     const result = (op.value << 1) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -302,7 +313,7 @@
     cpu.setFlag(F_C, (op.value & 0x01) !== 0);
     const result = (op.value >> 1) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -312,7 +323,7 @@
     cpu.setFlag(F_C, (op.value & 0x80) !== 0);
     const result = ((op.value << 1) | c) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -322,7 +333,7 @@
     cpu.setFlag(F_C, (op.value & 0x01) !== 0);
     const result = ((op.value >> 1) | (c << 7)) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -330,7 +341,7 @@
     const op = cpu.fetchOperand(mode);
     const result = (op.value + 1) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -338,7 +349,7 @@
     const op = cpu.fetchOperand(mode);
     const result = (op.value - 1) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -458,12 +469,12 @@
   //   JAM は PC を進めず止まる(本体は回り続ける)。XAA/LAX #imm の定数は $EE(実機でもばらつく)
   function LAX(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A = cpu.X = op.value; cpu.setZN(op.value); return op.pageCrossed ? 1 : 0; }
   function SAX(cpu, mode) { const op = cpu.fetchOperand(mode, true); cpu.write(op.addr, cpu.A & cpu.X); return 0; }
-  function DCP(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value - 1) & 0xFF; cpu.write(op.addr, r); compare(cpu, cpu.A, r); return 0; }
-  function ISC(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value + 1) & 0xFF; cpu.write(op.addr, r); adcValue(cpu, r ^ 0xFF); return 0; }
-  function SLO(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = (op.value << 1) & 0xFF; cpu.write(op.addr, r); cpu.A |= r; cpu.setZN(cpu.A); return 0; }
-  function RLA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = ((op.value << 1) | c) & 0xFF; cpu.write(op.addr, r); cpu.A &= r; cpu.setZN(cpu.A); return 0; }
-  function SRE(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 1) !== 0); const r = op.value >> 1; cpu.write(op.addr, r); cpu.A ^= r; cpu.setZN(cpu.A); return 0; }
-  function RRA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 1) !== 0); const r = (op.value >> 1) | (c << 7); cpu.write(op.addr, r); adcValue(cpu, r); return 0; }
+  function DCP(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value - 1) & 0xFF; cpu.writeRmw(mode, op.addr, op.value, r); compare(cpu, cpu.A, r); return 0; }
+  function ISC(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value + 1) & 0xFF; cpu.writeRmw(mode, op.addr, op.value, r); adcValue(cpu, r ^ 0xFF); return 0; }
+  function SLO(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = (op.value << 1) & 0xFF; cpu.writeRmw(mode, op.addr, op.value, r); cpu.A |= r; cpu.setZN(cpu.A); return 0; }
+  function RLA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = ((op.value << 1) | c) & 0xFF; cpu.writeRmw(mode, op.addr, op.value, r); cpu.A &= r; cpu.setZN(cpu.A); return 0; }
+  function SRE(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 1) !== 0); const r = op.value >> 1; cpu.writeRmw(mode, op.addr, op.value, r); cpu.A ^= r; cpu.setZN(cpu.A); return 0; }
+  function RRA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 1) !== 0); const r = (op.value >> 1) | (c << 7); cpu.writeRmw(mode, op.addr, op.value, r); adcValue(cpu, r); return 0; }
   function ANC(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A &= op.value; cpu.setZN(cpu.A); cpu.setFlag(F_C, (cpu.A & 0x80) !== 0); return 0; }
   function ALR(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A &= op.value; cpu.setFlag(F_C, (cpu.A & 1) !== 0); cpu.A >>= 1; cpu.setZN(cpu.A); return 0; }
   function ARR(cpu, mode) {
@@ -3983,9 +3994,12 @@
  *
  * PPU との約束:
  *   ppuRead(addr)/ppuWrite(addr, v): $0000-$2FFF(パレットは PPU 側)。
- *   ppuA12(addr, time): PPU がパターン表を読むたびに呼ぶ(time = フレーム内で単調なドット番号)。
- *     MMC3 の IRQ カウンタは A12 の立ち上がりで進む。連続する読みは 2 ドット間隔なので、
- *     「A12 が最後に高かった時刻から 10 ドット以上たって再び高くなったら 1 回」と数える
+ *   ppuA12(addr, time): PPU がパターン表/NT/属性を読むたびに呼ぶ(time = 単調なドット番号)。
+ *     MMC3 の IRQ カウンタは A12 の立ち上がりで進む。実機は M2 のフィルタで「A12 が約 3 CPU サイクル(≒10 ドット)以上
+ *     低かった後の立ち上がり」だけ数えるので、「A12 の低い読みが最初にあった時刻から 10 ドット以上たって高い読みが来たら
+ *     1 回」と数える(BG が $1000・スプライトが $0000 なら行ごとにスプライト取得の窓で 1 回。行末 337 ドットの NT 読みから
+ *     次の行の 5 ドットまでは 9 ドットなので数えない。以前は「最後に高かった時刻から 10 ドット」で数えていて、A12 が
+ *     低くならなくても行末の隙間で 1 回余計に進み、IRQ が 2 倍の速さで来るゲームがあった)
  *     (実機のフィルタ=約 3 CPU サイクル低く続いてからの立ち上がりだけを数える、の近似)。
  *   cpuClock(cycles): CPU サイクル駆動の IRQ カウンタ(N163)用。irqPending(): IRQ 線。
  */
@@ -4079,11 +4093,12 @@
   //   大容量基板(Mesen と同じ扱い): PRG 512K(SUROM)は CHR レジスタの bit4 が PRG の 256K 側を選ぶ。PRG RAM が 32K(SXROM)なら
   //   CHR レジスタの bit2-3 が 8K バンク、16K(SOROM)なら bit3。CHR 4K モードで最後に書いたのが $C000 ならそちらのレジスタを使う。
   //   サブマッパー 5(SEROM/SHROM)は PRG 32K 固定。155(MMC1A)も同じ(PRG RAM の無効ビットはどちらでも見ない)。
-  //   未対応: 連続サイクルの二重書き無視(本体 CPU は RMW 命令でも 1 回しか書かないので実害は無い)
+  //   連続サイクルの二重書き: RMW 命令(INC $FFFF など)は古い値のダミー書きの次のサイクルに本物を書く。MMC1 は 2 つ目を無視する
+  //   (NesConsole が cpuWrite の第 3 引数でダミー書きを知らせる)。リセット用の INC $FFFx で bit7 の古い値が効き、本物の 0 は捨てる
   class MMC1 extends Mapper {
     constructor(rom) {
       super(rom);
-      this.shift = 0x10; this.control = 0x0C; this.chr0 = 0; this.chr1 = 0; this.prgReg = 0; this.lastChr = 0;
+      this.shift = 0x10; this.control = 0x0C; this.chr0 = 0; this.chr1 = 0; this.prgReg = 0; this.lastChr = 0; this.skipWrite = false;
       this.fixed32 = (rom.submapper | 0) === 5;
       this.ramBanks = this.prgRam.length >> 13; // 1/2/4
       this.ramBank = 0;
@@ -4093,9 +4108,12 @@
       if (addr >= 0x6000 && addr < 0x8000) return this.prgRam[(this.ramBank << 13) | (addr & 0x1FFF)];
       return super.cpuRead(addr);
     }
-    cpuWrite(addr, v) {
-      if (addr >= 0x8000) this.writeReg(addr, v);
-      else if (addr >= 0x6000) this.prgRam[(this.ramBank << 13) | (addr & 0x1FFF)] = v;
+    cpuWrite(addr, v, rmwDummy) {
+      if (addr >= 0x8000) {
+        if (this.skipWrite) { this.skipWrite = false; return; } // ダミー書きの直後(同じ命令の本物の書き)は無視
+        this.skipWrite = !!rmwDummy;
+        this.writeReg(addr, v);
+      } else if (addr >= 0x6000) this.prgRam[(this.ramBank << 13) | (addr & 0x1FFF)] = v;
     }
     writeReg(addr, v) {
       if (v & 0x80) { this.shift = 0x10; this.control |= 0x0C; this.apply(); return; }
@@ -4152,7 +4170,7 @@
       super(rom);
       this.regs = new Uint8Array(8); this.bankSelect = 0;
       this.irqLatch = 0; this.irqCounter = 0; this.irqReload = false; this.irqEnable = false;
-      this.lastA12High = -1000;
+      this.a12Low = -1; // A12 が低い読みが最初にあった時刻(高い読みで -1 に戻す)
       this.regs[6] = 0; this.regs[7] = 1;
       this.apply();
     }
@@ -4178,9 +4196,10 @@
       else { this.setPrg8(0, r[6]); this.setPrg8(1, r[7]); this.setPrg8(2, last - 1); this.setPrg8(3, last); }
     }
     ppuA12(addr, time) {
-      if (!(addr & 0x1000)) return;
-      if (time - this.lastA12High >= 10) this.clockIrq();
-      this.lastA12High = time;
+      if (addr & 0x1000) {
+        if (this.a12Low >= 0 && time - this.a12Low >= 10) this.clockIrq();
+        this.a12Low = -1;
+      } else if (this.a12Low < 0) this.a12Low = time;
     }
     clockIrq() {
       if (this.irqCounter === 0 || this.irqReload) { this.irqCounter = this.irqLatch; this.irqReload = false; }
@@ -4791,26 +4810,19 @@
   }
 
   // 33: Taito TC0190($8000 PRG 8K+bit6 ミラーリング(1=H)、$8001 PRG 8K、$8002/$8003 CHR 2K、$A000-$A003 CHR 1K)
-  class TaitoTC0190 extends Mapper {
-    constructor(rom) { super(rom); this.setPrg8(2, -2); this.setPrg8(3, -1); }
-    writeReg(addr, v) {
-      switch (addr & 0xA003) {
-        case 0x8000: this.setPrg8(0, v & 0x3F); this.setMirroring((v & 0x40) ? 'H' : 'V'); break;
-        case 0x8001: this.setPrg8(1, v & 0x3F); break;
-        case 0x8002: this.setChr2(0, v); break;
-        case 0x8003: this.setChr2(1, v); break;
-        case 0xA000: case 0xA001: case 0xA002: case 0xA003: this.setChr1(4 + (addr & 3), v); break;
-      }
-    }
-  }
-
+  //   iNES のヘッダは TC0690(48、IRQ つき)の基板も 33 と書いている物が多いので、33 も TC0690 として動かし、$C000-$C003/$E000
+  //   (TC0190 には無いレジスタ)に書いた時点で 48 の流儀に切り替える(それまでは $8000 bit6 がミラーリング、IRQ 無し)
   // 48: Taito TC0690(TC0190 + MMC3 風の A12 IRQ: $C000 ラッチ(値の反転、サブマッパー 1 は +1)、$C001 リロード、
   //   $C002 有効、$C003 無効。IRQ は A12 の数え上げから数サイクル遅れる(Mesen と同じ 22、サブマッパー 1 は 6)。
   //   ミラーリングは $E000 bit6)
   class TaitoTC0690 extends MMC3 {
-    constructor(rom) { super(rom); this.irqDelay = 0; this.setPrg8(2, -2); this.setPrg8(3, -1); }
+    constructor(rom) { super(rom); this.irqDelay = 0; this.tc0190 = rom.mapper === 33; this.setPrg8(2, -2); this.setPrg8(3, -1); }
     apply() {}
     writeReg(addr, v) {
+      if (this.tc0190) {
+        if ((addr & 0xE000) === 0xC000 || (addr & 0xE003) === 0xE000) this.tc0190 = false; // 48 の基板だった
+        else if ((addr & 0xA003) === 0x8000) this.setMirroring((v & 0x40) ? 'H' : 'V');
+      }
       switch (addr & 0xE003) {
         case 0x8000: this.setPrg8(0, v & 0x3F); break;
         case 0x8001: this.setPrg8(1, v & 0x3F); break;
@@ -4825,6 +4837,7 @@
       }
     }
     clockIrq() {
+      if (this.tc0190) return;
       if (this.irqCounter === 0 || this.irqReload) { this.irqCounter = this.irqLatch; this.irqReload = false; }
       else this.irqCounter--;
       if (this.irqCounter === 0 && this.irqEnable) this.irqDelay = (this.rom.submapper | 0) === 1 ? 6 : 22;
@@ -5429,7 +5442,7 @@
 
   const TABLE = {
     0: NROM, 1: MMC1, 155: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 5: MMC5, 7: AxROM, 9: MMC2, 10: MMC2, 16: BandaiFCG, 157: BandaiFCG, 18: JalecoSS88006, 19: Namco163,
-    21: VRC24, 22: VRC24, 23: VRC24, 24: VRC6, 25: VRC24, 26: VRC6, 32: IremG101, 33: TaitoTC0190, 34: BNROM, 48: TaitoTC0690,
+    21: VRC24, 22: VRC24, 23: VRC24, 24: VRC6, 25: VRC24, 26: VRC6, 32: IremG101, 33: TaitoTC0690, 34: BNROM, 48: TaitoTC0690,
     65: IremH3001, 66: GxROM, 67: Sunsoft3, 68: Sunsoft4, 69: Sunsoft5B, 70: Bandai74161, 72: JalecoJF17, 73: VRC3, 75: VRC1,
     76: Namco108Variants, 77: IremLROG017, 78: JalecoJF16, 80: TaitoX1005, 82: TaitoX1017, 85: VRC7, 86: JalecoJF13, 87: JalecoJF13,
     88: Namco108Variants, 89: Sunsoft2, 92: JalecoJF17, 93: Sunsoft2, 94: UxROMVariants, 95: Namco108Variants, 97: UxROMVariants,
@@ -5445,7 +5458,7 @@
       return new C(rom);
     },
     Mapper, NROM, MMC1, UxROM, CNROM, MMC3, MMC5, AxROM, Namco163, VRC24, VRC1, VRC6, Sunsoft5B, VRC7, Namco108,
-    MMC2, BandaiFCG, JalecoSS88006, IremG101, IremH3001, TaitoTC0190, TaitoTC0690, TaitoX1005, TaitoX1017, Sunsoft1, Sunsoft2, Sunsoft3, Sunsoft4,
+    MMC2, BandaiFCG, JalecoSS88006, IremG101, IremH3001, TaitoTC0690, TaitoX1005, TaitoX1017, Sunsoft1, Sunsoft2, Sunsoft3, Sunsoft4,
     Namco175, GxROM, BNROM, Bandai74161, JalecoJF17, JalecoJF13, VRC3, JalecoJF16, IremLROG017, UxROMVariants, CNROMProtect, Namco108Variants,
   };
   Emu.NesMappers = NesMappers;
@@ -5691,7 +5704,7 @@
  *   背景(loopy の v/t/x/w、2 本の 16bit シフトレジスタ)、スプライト(8×8 / 8×16、優先順位、行 8 枚、
  *   溢れフラグ)、スプライト 0 ヒット、NMI(241 行目 1 ドット目)、奇数フレームのドット飛ばし、
  *   $2007 の読み出しバッファ、パレット RAM のミラー、グレースケール、左 8 ドットのクリップ。
- * パターン表の読み出しはマッパーの ppuA12(addr, time) にも流す(MMC3 の IRQ カウンタ)。
+ * パターン表の読み出しと NT/属性の読み出しはマッパーの ppuA12(addr, time) にも流す(MMC3 の IRQ カウンタ。NT 読みは A12 が低い印)。
  * 空スロットのスプライト取得も実機どおり行う(スプライトを $1000 に置く曲で A12 が毎行上がるのは
  * これのため。行に 1 枚もスプライトが無くても MMC3 のカウンタは進む)。
  *
@@ -5763,6 +5776,11 @@
       this.mapper.ppuA12(addr, this.time);
       return this.mapper.ppuRead(addr & 0x1FFF);
     }
+    // レンダリングの NT/属性読み(A12 が低い読みとしてマッパーへ。MMC3 は「低い読みが続いた後の高い読み」で数える)
+    fetchNt(addr) {
+      this.mapper.ppuA12(addr, this.time);
+      return this.mapper.ppuRead(addr);
+    }
 
     // ── CPU からのレジスタ ──
     readReg(reg) {
@@ -5780,6 +5798,7 @@
           if (addr >= 0x3F00) { out = this.palette[this.paletteIndex(addr)]; this.readBuf = this.mapper.ppuRead(addr & 0x2FFF); }
           else { out = this.readBuf; this.readBuf = this.mapper.ppuRead(addr); }
           this.v = (this.v + ((this.ctrl & 0x04) ? 32 : 1)) & 0x7FFF;
+          this.mapper.ppuA12(this.v & 0x3FFF, this.time); // CPU 側の VRAM アクセスも A12 を動かす(MMC3 の IRQ カウンタ。Mesen と同じく増やした後の番地)
           return this.openBus = out;
         }
         default: return this.openBus;
@@ -5803,11 +5822,12 @@
           break;
         case 6:
           if (this.w === 0) { this.t = (this.t & 0x00FF) | ((v & 0x3F) << 8); this.w = 1; }
-          else { this.t = (this.t & 0x7F00) | v; this.v = this.t; this.w = 0; }
+          else { this.t = (this.t & 0x7F00) | v; this.v = this.t; this.w = 0; this.mapper.ppuA12(this.v & 0x3FFF, this.time); } // 2 回目の書きで v が出る(A12 をマッパーへ)
           break;
         case 7:
           this.vramWrite(this.v, v);
           this.v = (this.v + ((this.ctrl & 0x04) ? 32 : 1)) & 0x7FFF;
+          this.mapper.ppuA12(this.v & 0x3FFF, this.time);
           break;
       }
     }
@@ -5919,9 +5939,9 @@
           }
           if ((dot >= 1 && dot <= 256) || (dot >= 321 && dot <= 336)) {
             switch (dot & 7) {
-              case 1: this.ntByte = this.mapper.ppuRead(0x2000 | (this.v & 0x0FFF)); break;
+              case 1: this.ntByte = this.fetchNt(0x2000 | (this.v & 0x0FFF)); break;
               case 3: {
-                const at = this.mapper.ppuRead(0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07));
+                const at = this.fetchNt(0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07));
                 const shift = ((this.v >> 4) & 4) | (this.v & 2);
                 this.atByte = (at >> shift) & 3;
                 break;
@@ -5931,17 +5951,17 @@
               case 0: this.incX(); if (dot === 256) this.incY(); break;
             }
           }
-          if (dot === 257) { this.copyX(); this.evaluateSprites(visible ? line + 1 : 0); }
+          if (dot === 257) { this.copyX(); this.evaluateSprites(visible ? line : -1); }
           if (dot >= 257 && dot <= 320) {
             this.oamAddr = 0;
             const k = (dot - 257) & 7;
-            if (k === 1) this.mapper.ppuRead(0x2000 | (this.v & 0x0FFF)); // ゴミの NT 読み(実機どおり。MMC5 はこれもタイル列として数える)
-            else if (k === 3) this.mapper.ppuRead(0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07)); // ゴミの属性読み
+            if (k === 1) this.fetchNt(0x2000 | (this.v & 0x0FFF)); // ゴミの NT 読み(実機どおり。MMC5 はこれもタイル列として数える)
+            else if (k === 3) this.fetchNt(0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07)); // ゴミの属性読み
             else if (k === 5) this.fetchSpriteSlot((dot - 257) >> 3, 0);
             else if (k === 7) this.fetchSpriteSlot((dot - 257) >> 3, 1);
           }
           if (line === 261 && dot >= 280 && dot <= 304) this.copyY();
-          if (dot === 337 || dot === 339) this.mapper.ppuRead(0x2000 | (this.v & 0x0FFF)); // ダミーの NT 読み
+          if (dot === 337 || dot === 339) this.fetchNt(0x2000 | (this.v & 0x0FFF)); // ダミーの NT 読み
         } else if (visible && dot >= 1 && dot <= 256) {
           // 描画オフ: 背景色(v がパレットを指していればその色)
           const addr = this.v & 0x3FFF;
@@ -6142,7 +6162,7 @@
         this._logWrite(addr, v);
         return;
       }
-      this.mapper.cpuWrite(addr, v);
+      this.mapper.cpuWrite(addr, v, this.cpu.rmwDummy); // 第 3 引数: RMW 命令のダミー書き(MMC1 が次の書きを無視する印)
       if (addr >= 0x6000 && addr < 0x8000) this._batDirty = true; // PRG RAM(セーブ)への書き込み
       if (this.mapper.audio) { const aa = this.mapper.audioAddr(addr); if (aa >= 0) this._logWrite(aa, v); } // 正規の番地で記録(VRC6b の A0/A1 入れ替えなど)
     }

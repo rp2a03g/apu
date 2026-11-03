@@ -21,9 +21,12 @@
  *
  * PPU との約束:
  *   ppuRead(addr)/ppuWrite(addr, v): $0000-$2FFF(パレットは PPU 側)。
- *   ppuA12(addr, time): PPU がパターン表を読むたびに呼ぶ(time = フレーム内で単調なドット番号)。
- *     MMC3 の IRQ カウンタは A12 の立ち上がりで進む。連続する読みは 2 ドット間隔なので、
- *     「A12 が最後に高かった時刻から 10 ドット以上たって再び高くなったら 1 回」と数える
+ *   ppuA12(addr, time): PPU がパターン表/NT/属性を読むたびに呼ぶ(time = 単調なドット番号)。
+ *     MMC3 の IRQ カウンタは A12 の立ち上がりで進む。実機は M2 のフィルタで「A12 が約 3 CPU サイクル(≒10 ドット)以上
+ *     低かった後の立ち上がり」だけ数えるので、「A12 の低い読みが最初にあった時刻から 10 ドット以上たって高い読みが来たら
+ *     1 回」と数える(BG が $1000・スプライトが $0000 なら行ごとにスプライト取得の窓で 1 回。行末 337 ドットの NT 読みから
+ *     次の行の 5 ドットまでは 9 ドットなので数えない。以前は「最後に高かった時刻から 10 ドット」で数えていて、A12 が
+ *     低くならなくても行末の隙間で 1 回余計に進み、IRQ が 2 倍の速さで来るゲームがあった)
  *     (実機のフィルタ=約 3 CPU サイクル低く続いてからの立ち上がりだけを数える、の近似)。
  *   cpuClock(cycles): CPU サイクル駆動の IRQ カウンタ(N163)用。irqPending(): IRQ 線。
  */
@@ -117,11 +120,12 @@
   //   大容量基板(Mesen と同じ扱い): PRG 512K(SUROM)は CHR レジスタの bit4 が PRG の 256K 側を選ぶ。PRG RAM が 32K(SXROM)なら
   //   CHR レジスタの bit2-3 が 8K バンク、16K(SOROM)なら bit3。CHR 4K モードで最後に書いたのが $C000 ならそちらのレジスタを使う。
   //   サブマッパー 5(SEROM/SHROM)は PRG 32K 固定。155(MMC1A)も同じ(PRG RAM の無効ビットはどちらでも見ない)。
-  //   未対応: 連続サイクルの二重書き無視(本体 CPU は RMW 命令でも 1 回しか書かないので実害は無い)
+  //   連続サイクルの二重書き: RMW 命令(INC $FFFF など)は古い値のダミー書きの次のサイクルに本物を書く。MMC1 は 2 つ目を無視する
+  //   (NesConsole が cpuWrite の第 3 引数でダミー書きを知らせる)。リセット用の INC $FFFx で bit7 の古い値が効き、本物の 0 は捨てる
   class MMC1 extends Mapper {
     constructor(rom) {
       super(rom);
-      this.shift = 0x10; this.control = 0x0C; this.chr0 = 0; this.chr1 = 0; this.prgReg = 0; this.lastChr = 0;
+      this.shift = 0x10; this.control = 0x0C; this.chr0 = 0; this.chr1 = 0; this.prgReg = 0; this.lastChr = 0; this.skipWrite = false;
       this.fixed32 = (rom.submapper | 0) === 5;
       this.ramBanks = this.prgRam.length >> 13; // 1/2/4
       this.ramBank = 0;
@@ -131,9 +135,12 @@
       if (addr >= 0x6000 && addr < 0x8000) return this.prgRam[(this.ramBank << 13) | (addr & 0x1FFF)];
       return super.cpuRead(addr);
     }
-    cpuWrite(addr, v) {
-      if (addr >= 0x8000) this.writeReg(addr, v);
-      else if (addr >= 0x6000) this.prgRam[(this.ramBank << 13) | (addr & 0x1FFF)] = v;
+    cpuWrite(addr, v, rmwDummy) {
+      if (addr >= 0x8000) {
+        if (this.skipWrite) { this.skipWrite = false; return; } // ダミー書きの直後(同じ命令の本物の書き)は無視
+        this.skipWrite = !!rmwDummy;
+        this.writeReg(addr, v);
+      } else if (addr >= 0x6000) this.prgRam[(this.ramBank << 13) | (addr & 0x1FFF)] = v;
     }
     writeReg(addr, v) {
       if (v & 0x80) { this.shift = 0x10; this.control |= 0x0C; this.apply(); return; }
@@ -190,7 +197,7 @@
       super(rom);
       this.regs = new Uint8Array(8); this.bankSelect = 0;
       this.irqLatch = 0; this.irqCounter = 0; this.irqReload = false; this.irqEnable = false;
-      this.lastA12High = -1000;
+      this.a12Low = -1; // A12 が低い読みが最初にあった時刻(高い読みで -1 に戻す)
       this.regs[6] = 0; this.regs[7] = 1;
       this.apply();
     }
@@ -216,9 +223,10 @@
       else { this.setPrg8(0, r[6]); this.setPrg8(1, r[7]); this.setPrg8(2, last - 1); this.setPrg8(3, last); }
     }
     ppuA12(addr, time) {
-      if (!(addr & 0x1000)) return;
-      if (time - this.lastA12High >= 10) this.clockIrq();
-      this.lastA12High = time;
+      if (addr & 0x1000) {
+        if (this.a12Low >= 0 && time - this.a12Low >= 10) this.clockIrq();
+        this.a12Low = -1;
+      } else if (this.a12Low < 0) this.a12Low = time;
     }
     clockIrq() {
       if (this.irqCounter === 0 || this.irqReload) { this.irqCounter = this.irqLatch; this.irqReload = false; }
@@ -829,26 +837,19 @@
   }
 
   // 33: Taito TC0190($8000 PRG 8K+bit6 ミラーリング(1=H)、$8001 PRG 8K、$8002/$8003 CHR 2K、$A000-$A003 CHR 1K)
-  class TaitoTC0190 extends Mapper {
-    constructor(rom) { super(rom); this.setPrg8(2, -2); this.setPrg8(3, -1); }
-    writeReg(addr, v) {
-      switch (addr & 0xA003) {
-        case 0x8000: this.setPrg8(0, v & 0x3F); this.setMirroring((v & 0x40) ? 'H' : 'V'); break;
-        case 0x8001: this.setPrg8(1, v & 0x3F); break;
-        case 0x8002: this.setChr2(0, v); break;
-        case 0x8003: this.setChr2(1, v); break;
-        case 0xA000: case 0xA001: case 0xA002: case 0xA003: this.setChr1(4 + (addr & 3), v); break;
-      }
-    }
-  }
-
+  //   iNES のヘッダは TC0690(48、IRQ つき)の基板も 33 と書いている物が多いので、33 も TC0690 として動かし、$C000-$C003/$E000
+  //   (TC0190 には無いレジスタ)に書いた時点で 48 の流儀に切り替える(それまでは $8000 bit6 がミラーリング、IRQ 無し)
   // 48: Taito TC0690(TC0190 + MMC3 風の A12 IRQ: $C000 ラッチ(値の反転、サブマッパー 1 は +1)、$C001 リロード、
   //   $C002 有効、$C003 無効。IRQ は A12 の数え上げから数サイクル遅れる(Mesen と同じ 22、サブマッパー 1 は 6)。
   //   ミラーリングは $E000 bit6)
   class TaitoTC0690 extends MMC3 {
-    constructor(rom) { super(rom); this.irqDelay = 0; this.setPrg8(2, -2); this.setPrg8(3, -1); }
+    constructor(rom) { super(rom); this.irqDelay = 0; this.tc0190 = rom.mapper === 33; this.setPrg8(2, -2); this.setPrg8(3, -1); }
     apply() {}
     writeReg(addr, v) {
+      if (this.tc0190) {
+        if ((addr & 0xE000) === 0xC000 || (addr & 0xE003) === 0xE000) this.tc0190 = false; // 48 の基板だった
+        else if ((addr & 0xA003) === 0x8000) this.setMirroring((v & 0x40) ? 'H' : 'V');
+      }
       switch (addr & 0xE003) {
         case 0x8000: this.setPrg8(0, v & 0x3F); break;
         case 0x8001: this.setPrg8(1, v & 0x3F); break;
@@ -863,6 +864,7 @@
       }
     }
     clockIrq() {
+      if (this.tc0190) return;
       if (this.irqCounter === 0 || this.irqReload) { this.irqCounter = this.irqLatch; this.irqReload = false; }
       else this.irqCounter--;
       if (this.irqCounter === 0 && this.irqEnable) this.irqDelay = (this.rom.submapper | 0) === 1 ? 6 : 22;
@@ -1467,7 +1469,7 @@
 
   const TABLE = {
     0: NROM, 1: MMC1, 155: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 5: MMC5, 7: AxROM, 9: MMC2, 10: MMC2, 16: BandaiFCG, 157: BandaiFCG, 18: JalecoSS88006, 19: Namco163,
-    21: VRC24, 22: VRC24, 23: VRC24, 24: VRC6, 25: VRC24, 26: VRC6, 32: IremG101, 33: TaitoTC0190, 34: BNROM, 48: TaitoTC0690,
+    21: VRC24, 22: VRC24, 23: VRC24, 24: VRC6, 25: VRC24, 26: VRC6, 32: IremG101, 33: TaitoTC0690, 34: BNROM, 48: TaitoTC0690,
     65: IremH3001, 66: GxROM, 67: Sunsoft3, 68: Sunsoft4, 69: Sunsoft5B, 70: Bandai74161, 72: JalecoJF17, 73: VRC3, 75: VRC1,
     76: Namco108Variants, 77: IremLROG017, 78: JalecoJF16, 80: TaitoX1005, 82: TaitoX1017, 85: VRC7, 86: JalecoJF13, 87: JalecoJF13,
     88: Namco108Variants, 89: Sunsoft2, 92: JalecoJF17, 93: Sunsoft2, 94: UxROMVariants, 95: Namco108Variants, 97: UxROMVariants,
@@ -1483,7 +1485,7 @@
       return new C(rom);
     },
     Mapper, NROM, MMC1, UxROM, CNROM, MMC3, MMC5, AxROM, Namco163, VRC24, VRC1, VRC6, Sunsoft5B, VRC7, Namco108,
-    MMC2, BandaiFCG, JalecoSS88006, IremG101, IremH3001, TaitoTC0190, TaitoTC0690, TaitoX1005, TaitoX1017, Sunsoft1, Sunsoft2, Sunsoft3, Sunsoft4,
+    MMC2, BandaiFCG, JalecoSS88006, IremG101, IremH3001, TaitoTC0690, TaitoX1005, TaitoX1017, Sunsoft1, Sunsoft2, Sunsoft3, Sunsoft4,
     Namco175, GxROM, BNROM, Bandai74161, JalecoJF17, JalecoJF13, VRC3, JalecoJF16, IremLROG017, UxROMVariants, CNROMProtect, Namco108Variants,
   };
   Emu.NesMappers = NesMappers;

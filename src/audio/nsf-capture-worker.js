@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-04 00:17:05
+ * Built by tools/build-capture-workers.ps1 at 2026-11-04 01:41:02
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-11-04 00:17:05';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-11-04 01:41:02';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -425,6 +425,7 @@
       this.PC = 0;
       this.cycles = 0;
       this.halted = false;
+      this.rmwDummy = false;
       this.irqPolledI = F_I; // IRQ 判定に使う I フラグ(前の命令の最後のサイクルで見た値。CLI/SEI/PLP は 1 命令遅れて効く)
       this.callActive = false;
     }
@@ -563,6 +564,16 @@
       if (mode === 'acc') this.A = value & 0xFF;
       else this.write(addr, value);
     }
+    // RMW 命令(ASL/LSR/ROL/ROR/INC/DEC と非公式の SLO/RLA/SRE/RRA/DCP/ISC)の書き戻し: 実機は読んだ古い値をいったん
+    // 書いてから(ダミー書き)新しい値を書く(2 サイクル連続)。マッパーのレジスタに INC すると、MMC1 はダミー書き(古い値、bit7 が
+    // 立っていればリセット)だけを受けて続く本物の書きを無視する(連続サイクルの書きは無視)ので、両方を再現する。
+    // rmwDummy はダミー書きの間だけ true(NesConsole がマッパーへ伝える)
+    writeRmw(mode, addr, old, value) {
+      if (mode === 'acc') { this.A = value & 0xFF; return; }
+      this.rmwDummy = true;
+      try { this.write(addr, old); } finally { this.rmwDummy = false; }
+      this.write(addr, value);
+    }
 
     // --- 命令実行（1命令）---
     // 戻り値: 消費サイクル数
@@ -662,7 +673,7 @@
     cpu.setFlag(F_C, (op.value & 0x80) !== 0);
     const result = (op.value << 1) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -671,7 +682,7 @@
     cpu.setFlag(F_C, (op.value & 0x01) !== 0);
     const result = (op.value >> 1) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -681,7 +692,7 @@
     cpu.setFlag(F_C, (op.value & 0x80) !== 0);
     const result = ((op.value << 1) | c) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -691,7 +702,7 @@
     cpu.setFlag(F_C, (op.value & 0x01) !== 0);
     const result = ((op.value >> 1) | (c << 7)) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -699,7 +710,7 @@
     const op = cpu.fetchOperand(mode);
     const result = (op.value + 1) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -707,7 +718,7 @@
     const op = cpu.fetchOperand(mode);
     const result = (op.value - 1) & 0xFF;
     cpu.setZN(result);
-    cpu.writeOperand(mode, op.addr, result);
+    cpu.writeRmw(mode, op.addr, op.value, result);
     return 0;
   }
 
@@ -827,12 +838,12 @@
   //   JAM は PC を進めず止まる(本体は回り続ける)。XAA/LAX #imm の定数は $EE(実機でもばらつく)
   function LAX(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A = cpu.X = op.value; cpu.setZN(op.value); return op.pageCrossed ? 1 : 0; }
   function SAX(cpu, mode) { const op = cpu.fetchOperand(mode, true); cpu.write(op.addr, cpu.A & cpu.X); return 0; }
-  function DCP(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value - 1) & 0xFF; cpu.write(op.addr, r); compare(cpu, cpu.A, r); return 0; }
-  function ISC(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value + 1) & 0xFF; cpu.write(op.addr, r); adcValue(cpu, r ^ 0xFF); return 0; }
-  function SLO(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = (op.value << 1) & 0xFF; cpu.write(op.addr, r); cpu.A |= r; cpu.setZN(cpu.A); return 0; }
-  function RLA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = ((op.value << 1) | c) & 0xFF; cpu.write(op.addr, r); cpu.A &= r; cpu.setZN(cpu.A); return 0; }
-  function SRE(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 1) !== 0); const r = op.value >> 1; cpu.write(op.addr, r); cpu.A ^= r; cpu.setZN(cpu.A); return 0; }
-  function RRA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 1) !== 0); const r = (op.value >> 1) | (c << 7); cpu.write(op.addr, r); adcValue(cpu, r); return 0; }
+  function DCP(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value - 1) & 0xFF; cpu.writeRmw(mode, op.addr, op.value, r); compare(cpu, cpu.A, r); return 0; }
+  function ISC(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value + 1) & 0xFF; cpu.writeRmw(mode, op.addr, op.value, r); adcValue(cpu, r ^ 0xFF); return 0; }
+  function SLO(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = (op.value << 1) & 0xFF; cpu.writeRmw(mode, op.addr, op.value, r); cpu.A |= r; cpu.setZN(cpu.A); return 0; }
+  function RLA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = ((op.value << 1) | c) & 0xFF; cpu.writeRmw(mode, op.addr, op.value, r); cpu.A &= r; cpu.setZN(cpu.A); return 0; }
+  function SRE(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 1) !== 0); const r = op.value >> 1; cpu.writeRmw(mode, op.addr, op.value, r); cpu.A ^= r; cpu.setZN(cpu.A); return 0; }
+  function RRA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 1) !== 0); const r = (op.value >> 1) | (c << 7); cpu.writeRmw(mode, op.addr, op.value, r); adcValue(cpu, r); return 0; }
   function ANC(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A &= op.value; cpu.setZN(cpu.A); cpu.setFlag(F_C, (cpu.A & 0x80) !== 0); return 0; }
   function ALR(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A &= op.value; cpu.setFlag(F_C, (cpu.A & 1) !== 0); cpu.A >>= 1; cpu.setZN(cpu.A); return 0; }
   function ARR(cpu, mode) {

@@ -166,7 +166,7 @@
         this._logWrite(addr, v);
         return;
       }
-      this.mapper.cpuWrite(addr, v);
+      this.mapper.cpuWrite(addr, v, this.cpu.rmwDummy); // 第 3 引数: RMW 命令のダミー書き(MMC1 が次の書きを無視する印)
       if (addr >= 0x6000 && addr < 0x8000) this._batDirty = true; // PRG RAM(セーブ)への書き込み
       if (this.mapper.audio) { const aa = this.mapper.audioAddr(addr); if (aa >= 0) this._logWrite(aa, v); } // 正規の番地で記録(VRC6b の A0/A1 入れ替えなど)
     }

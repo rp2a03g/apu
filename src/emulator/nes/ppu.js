@@ -5,7 +5,7 @@
  *   背景(loopy の v/t/x/w、2 本の 16bit シフトレジスタ)、スプライト(8×8 / 8×16、優先順位、行 8 枚、
  *   溢れフラグ)、スプライト 0 ヒット、NMI(241 行目 1 ドット目)、奇数フレームのドット飛ばし、
  *   $2007 の読み出しバッファ、パレット RAM のミラー、グレースケール、左 8 ドットのクリップ。
- * パターン表の読み出しはマッパーの ppuA12(addr, time) にも流す(MMC3 の IRQ カウンタ)。
+ * パターン表の読み出しと NT/属性の読み出しはマッパーの ppuA12(addr, time) にも流す(MMC3 の IRQ カウンタ。NT 読みは A12 が低い印)。
  * 空スロットのスプライト取得も実機どおり行う(スプライトを $1000 に置く曲で A12 が毎行上がるのは
  * これのため。行に 1 枚もスプライトが無くても MMC3 のカウンタは進む)。
  *
@@ -77,6 +77,11 @@
       this.mapper.ppuA12(addr, this.time);
       return this.mapper.ppuRead(addr & 0x1FFF);
     }
+    // レンダリングの NT/属性読み(A12 が低い読みとしてマッパーへ。MMC3 は「低い読みが続いた後の高い読み」で数える)
+    fetchNt(addr) {
+      this.mapper.ppuA12(addr, this.time);
+      return this.mapper.ppuRead(addr);
+    }
 
     // ── CPU からのレジスタ ──
     readReg(reg) {
@@ -94,6 +99,7 @@
           if (addr >= 0x3F00) { out = this.palette[this.paletteIndex(addr)]; this.readBuf = this.mapper.ppuRead(addr & 0x2FFF); }
           else { out = this.readBuf; this.readBuf = this.mapper.ppuRead(addr); }
           this.v = (this.v + ((this.ctrl & 0x04) ? 32 : 1)) & 0x7FFF;
+          this.mapper.ppuA12(this.v & 0x3FFF, this.time); // CPU 側の VRAM アクセスも A12 を動かす(MMC3 の IRQ カウンタ。Mesen と同じく増やした後の番地)
           return this.openBus = out;
         }
         default: return this.openBus;
@@ -117,11 +123,12 @@
           break;
         case 6:
           if (this.w === 0) { this.t = (this.t & 0x00FF) | ((v & 0x3F) << 8); this.w = 1; }
-          else { this.t = (this.t & 0x7F00) | v; this.v = this.t; this.w = 0; }
+          else { this.t = (this.t & 0x7F00) | v; this.v = this.t; this.w = 0; this.mapper.ppuA12(this.v & 0x3FFF, this.time); } // 2 回目の書きで v が出る(A12 をマッパーへ)
           break;
         case 7:
           this.vramWrite(this.v, v);
           this.v = (this.v + ((this.ctrl & 0x04) ? 32 : 1)) & 0x7FFF;
+          this.mapper.ppuA12(this.v & 0x3FFF, this.time);
           break;
       }
     }
@@ -233,9 +240,9 @@
           }
           if ((dot >= 1 && dot <= 256) || (dot >= 321 && dot <= 336)) {
             switch (dot & 7) {
-              case 1: this.ntByte = this.mapper.ppuRead(0x2000 | (this.v & 0x0FFF)); break;
+              case 1: this.ntByte = this.fetchNt(0x2000 | (this.v & 0x0FFF)); break;
               case 3: {
-                const at = this.mapper.ppuRead(0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07));
+                const at = this.fetchNt(0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07));
                 const shift = ((this.v >> 4) & 4) | (this.v & 2);
                 this.atByte = (at >> shift) & 3;
                 break;
@@ -245,17 +252,17 @@
               case 0: this.incX(); if (dot === 256) this.incY(); break;
             }
           }
-          if (dot === 257) { this.copyX(); this.evaluateSprites(visible ? line + 1 : 0); }
+          if (dot === 257) { this.copyX(); this.evaluateSprites(visible ? line : -1); }
           if (dot >= 257 && dot <= 320) {
             this.oamAddr = 0;
             const k = (dot - 257) & 7;
-            if (k === 1) this.mapper.ppuRead(0x2000 | (this.v & 0x0FFF)); // ゴミの NT 読み(実機どおり。MMC5 はこれもタイル列として数える)
-            else if (k === 3) this.mapper.ppuRead(0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07)); // ゴミの属性読み
+            if (k === 1) this.fetchNt(0x2000 | (this.v & 0x0FFF)); // ゴミの NT 読み(実機どおり。MMC5 はこれもタイル列として数える)
+            else if (k === 3) this.fetchNt(0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07)); // ゴミの属性読み
             else if (k === 5) this.fetchSpriteSlot((dot - 257) >> 3, 0);
             else if (k === 7) this.fetchSpriteSlot((dot - 257) >> 3, 1);
           }
           if (line === 261 && dot >= 280 && dot <= 304) this.copyY();
-          if (dot === 337 || dot === 339) this.mapper.ppuRead(0x2000 | (this.v & 0x0FFF)); // ダミーの NT 読み
+          if (dot === 337 || dot === 339) this.fetchNt(0x2000 | (this.v & 0x0FFF)); // ダミーの NT 読み
         } else if (visible && dot >= 1 && dot <= 256) {
           // 描画オフ: 背景色(v がパレットを指していればその色)
           const addr = this.v & 0x3FFF;

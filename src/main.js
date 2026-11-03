@@ -273,7 +273,7 @@
   keyboardDisplay.onMuteChange = () => {
     syncSilenceDetect();
     scheduleRerenderOnMute();
-    if (MML.UI.NesScreen && MML.UI.NesScreen.live) MML.UI.NesScreen.applyMix(getChannelMuteConfig(), null); // ゲームの音にも
+    if (MML.UI.NesScreen && MML.UI.NesScreen.live) MML.UI.NesScreen.applyMix(getChannelMuteConfig(true), null); // ゲームの音にも(割当プレビューの元ch消し込みは含めない)
     mmlHighlightLastFrame = -1; // ミュート変更を即座にハイライト表示へ反映させる
     updateMmlRangeHighlight();
   };
@@ -4260,7 +4260,7 @@
     // 巻き戻し: ロールをそのフレーム数に切り詰める(戻った先の像は NES 画面が録音を取り直して流す)
     MML.UI.NesScreen.onLiveTruncate = (frames) => { if (liveRoll) { keyboardDisplay.liveRollTruncate(frames); liveRollSession.frames = keyboardDisplay.liveFrameCount(); if (monitorState && monitorState.regSnapshots === liveRoll.state.regSnapshots) monitorState.totalFrames = keyboardDisplay.liveFrameCount(); } };
     // 鍵盤表示のミュート/ch 別音量はゲームの音にも効く(ライブ表示中)
-    MML.UI.NesScreen.applyMix(getChannelMuteConfig(), getChannelVolumeConfig());
+    MML.UI.NesScreen.applyMix(getChannelMuteConfig(true), getChannelVolumeConfig()); // 割当プレビューの消し込みは含めない(ゲームの ch が消える)
   }
 
   keyboardDisplay.onToMml = () => {
