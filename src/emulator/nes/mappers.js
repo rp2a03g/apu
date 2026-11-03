@@ -373,6 +373,103 @@
     irqPending() { return this.irq.flag; }
   }
 
+  // 21/22/23/25: Konami VRC2 / VRC4(PRG 8K×2 切替、CHR 1K×8 を下位 4bit と上位 5bit の 2 レジスタで、ミラーリング、
+  //   VRC4 は PRG スワップ($9002 bit1)と IRQ)。4 つのマッパー番号はレジスタ選択に使うアドレス線が違うだけ:
+  //     21: VRC4a=A1,A2 / VRC4c=A6,A7     22: VRC2a=A1,A0(CHR は 1bit 右シフト)
+  //     23: VRC2b=A0,A1 / VRC4e=A2,A3 / VRC4f=A0,A1     25: VRC2c=A1,A0 / VRC4b=A1,A0 / VRC4d=A3,A2
+  //   NES 2.0 のサブマッパー(21: 1=a 2=c、23: 1=f 2=e 3=2b、25: 1=b 2=d 3=2c)があればその配線、無ければ Mesen と同じく
+  //   その番号の候補の線を OR して受ける(市販ソフトはどちらかの線しか使わないので両方効かせて困らない)。
+  //   VRC2 と確定している時(22、または 23/25 のサブマッパー 3)だけミラーリングを 1bit、IRQ 無し、$9002 もミラーリングにする。
+  //   サブマッパー無しの 23/25 は VRC4 の意味論(Mesen は 23 を VRC2b 扱いにするが、VRC2 のソフトは $9002 に書かず
+  //   IRQ も使わないので VRC4 側に倒しておく方が両方動く)。$6000-$6FFF は VRC2 の 1bit ラッチの代わりに PRG RAM を
+  //   そのまま置く(読み返した bit0 はラッチと同じ値になる)。未対応: PRG RAM 保護。
+  class VRC24 extends Mapper {
+    constructor(rom) {
+      super(rom);
+      const m = rom.mapper, sub = rom.submapper | 0;
+      // 線の取り方: [A0 になるビット列, A1 になるビット列](ビット番号の配列。複数なら OR)
+      let lines, vrc2 = false;
+      if (m === 22) { lines = [[1], [0]]; vrc2 = true; }
+      else if (m === 21) lines = sub === 1 ? [[1], [2]] : sub === 2 ? [[6], [7]] : [[1, 6], [2, 7]];
+      else if (m === 23) { lines = sub === 2 ? [[2], [3]] : sub === 1 || sub === 3 ? [[0], [1]] : [[0, 2], [1, 3]]; vrc2 = sub === 3; }
+      else { lines = sub === 2 ? [[3], [2]] : sub === 1 || sub === 3 ? [[1], [0]] : [[1, 3], [0, 2]]; vrc2 = sub === 3; }
+      this.lines = lines; this.vrc2 = vrc2; this.chrShift = m === 22 ? 1 : 0;
+      this.irq = vrc2 ? null : new VrcIrq();
+      this.prgReg = [0, 0]; this.prgMode = 0;
+      this.chrLo = new Uint8Array(8); this.chrHi = new Uint8Array(8);
+      this.apply();
+    }
+    _canon(addr) {
+      let a0 = 0, a1 = 0;
+      for (const b of this.lines[0]) a0 |= (addr >> b) & 1;
+      for (const b of this.lines[1]) a1 |= (addr >> b) & 1;
+      return (addr & 0xF000) | (a1 << 1) | a0;
+    }
+    writeReg(addr, v) {
+      addr = this._canon(addr);
+      const hi = addr & 0xF000, lo = addr & 3;
+      switch (hi) {
+        case 0x8000: this.prgReg[0] = v & 0x1F; break;
+        case 0x9000:
+          if (this.vrc2) this.setMirroring(['V', 'H'][v & 1]);
+          else if (lo <= 1) this.setMirroring(['V', 'H', '1A', '1B'][v & 3]);
+          else this.prgMode = (v >> 1) & 1;
+          break;
+        case 0xA000: this.prgReg[1] = v & 0x1F; break;
+        case 0xB000: case 0xC000: case 0xD000: case 0xE000: {
+          const reg = ((hi - 0xB000) >> 12) * 2 + (lo >> 1);
+          if (lo & 1) this.chrHi[reg] = v & 0x1F; else this.chrLo[reg] = v & 0x0F;
+          break;
+        }
+        case 0xF000:
+          if (!this.irq) break;
+          if (lo === 0) this.irq.writeLatch((this.irq.latch & 0xF0) | (v & 0x0F));
+          else if (lo === 1) this.irq.writeLatch((this.irq.latch & 0x0F) | ((v & 0x0F) << 4));
+          else if (lo === 2) this.irq.writeControl(v);
+          else this.irq.ack();
+          break;
+      }
+      this.apply();
+    }
+    apply() {
+      for (let i = 0; i < 8; i++) this.setChr1(i, (this.chrLo[i] | (this.chrHi[i] << 4)) >> this.chrShift);
+      if (this.prgMode === 0) { this.setPrg8(0, this.prgReg[0]); this.setPrg8(2, -2); }
+      else { this.setPrg8(0, -2); this.setPrg8(2, this.prgReg[0]); }
+      this.setPrg8(1, this.prgReg[1]); this.setPrg8(3, -1);
+    }
+    cpuClock(cycles) { if (this.irq) this.irq.clock(cycles); }
+    irqPending() { return this.irq ? this.irq.flag : false; }
+  }
+
+  // 75: Konami VRC1(PRG 8K×3 切替、CHR 4K×2(下位 4bit は $E000/$F000、bit4 は $9000 の bit1/bit2)、
+  //   $9000 bit0 でミラーリング(0=V 1=H)。IRQ 無し)
+  class VRC1 extends Mapper {
+    constructor(rom) {
+      super(rom);
+      this.chrBank = [0, 0];
+      this.setPrg8(3, -1);
+      this.apply();
+    }
+    writeReg(addr, v) {
+      switch (addr & 0xF000) {
+        case 0x8000: this.setPrg8(0, v & 0x0F); break;
+        case 0xA000: this.setPrg8(1, v & 0x0F); break;
+        case 0xC000: this.setPrg8(2, v & 0x0F); break;
+        case 0x9000:
+          if (!this.rom.fourScreen) this.setMirroring((v & 1) ? 'H' : 'V');
+          this.chrBank[0] = (this.chrBank[0] & 0x0F) | ((v & 0x02) << 3);
+          this.chrBank[1] = (this.chrBank[1] & 0x0F) | ((v & 0x04) << 2);
+          this.apply();
+          break;
+        case 0xE000: this.chrBank[0] = (this.chrBank[0] & 0x10) | (v & 0x0F); this.apply(); break;
+        case 0xF000: this.chrBank[1] = (this.chrBank[1] & 0x10) | (v & 0x0F); this.apply(); break;
+      }
+    }
+    apply() {
+      for (let h = 0; h < 2; h++) for (let i = 0; i < 4; i++) this.setChr1(h * 4 + i, this.chrBank[h] * 4 + i);
+    }
+  }
+
   // 69: Sunsoft FME-7 / 5B(PRG 8K×3 切替 + $6000 は ROM か RAM、CHR 1K×8、16bit サイクル IRQ、5B は AY 系音源
   //   $C000/$E000)。FME-7(音源無し)のソフトもマッパー番号は同じなので、音源は常に挿す(書かれなければ鳴らない)
   class Sunsoft5B extends Mapper {
@@ -600,7 +697,7 @@
     irqPending() { return this.irqPend && this.irqEnable; }
   }
 
-  const TABLE = { 0: NROM, 1: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 5: MMC5, 7: AxROM, 19: Namco163, 24: VRC6, 26: VRC6, 69: Sunsoft5B, 85: VRC7, 206: Namco108 };
+  const TABLE = { 0: NROM, 1: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 5: MMC5, 7: AxROM, 19: Namco163, 21: VRC24, 22: VRC24, 23: VRC24, 24: VRC6, 25: VRC24, 26: VRC6, 69: Sunsoft5B, 75: VRC1, 85: VRC7, 206: Namco108 };
 
   const NesMappers = {
     supported(mapper) { return Object.prototype.hasOwnProperty.call(TABLE, mapper); },
@@ -609,7 +706,7 @@
       if (!C) throw new Error(`マッパー ${rom.mapper} は未対応です(対応: ${Object.keys(TABLE).join(', ')})`);
       return new C(rom);
     },
-    Mapper, NROM, MMC1, UxROM, CNROM, MMC3, MMC5, AxROM, Namco163, VRC6, Sunsoft5B, VRC7, Namco108,
+    Mapper, NROM, MMC1, UxROM, CNROM, MMC3, MMC5, AxROM, Namco163, VRC24, VRC1, VRC6, Sunsoft5B, VRC7, Namco108,
   };
   Emu.NesMappers = NesMappers;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -120,7 +120,8 @@ Mesen.exe --testRunner "game.nes" "tools/mesen/ref-screenshot.lua" --timeout=120
 node tools/headless/nes-run.js "game.nes" --frames 1301 --press "start:700-710,right:900-1300" --png mine.png
 ```
 
-パレットは Mesen と本ツール(nesdev の 2C02 表)で違うので、色ではなく形で比べる。
+パレットは Mesen と本ツール(nesdev の 2C02 表)で違うので、色ではなく形で比べる(合成 ROM なら白($30)と黒($0F)だけを使い、
+輝度で 2 値にして全ピクセルを比べられる。VRC2/VRC4/VRC1 の検証はこの方法)。
 
 録音の比較は、このスクリプトの CFG を `autoStart=true, stopAfterFrames=900` にしたコピーで録り、
 `node tools/headless/nes-run.js "game.nes" --frames 900 --vgm mine.vgm` の出力とフレームごとの書き込み列で比べる
