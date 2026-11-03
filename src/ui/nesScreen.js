@@ -43,8 +43,8 @@
   const FPS = 60.0988;
   const FRAME_MS = 1000 / FPS;
   const NSF_GAIN = 1.56; // stream-player.js と同じ実測 RMS 校正値
-  const REWIND_STEP = 60;      // 巻き戻しボタン/キー/パッド 1 回で戻るフレーム数(1 秒)
-  const REWIND_REPEAT_MS = 250; // 押している間の繰り返し(1 秒を 0.25 秒ごと = 4 倍速で戻る)
+  const REWIND_SPEEDS = [1, 2, 4]; // 巻き戻し(逆再生)の速さ(1 秒に何秒ぶん戻るか)
+  const REWIND_ROLL_EVERY = 6;     // 逆再生中、ロールを何フレームごとに切り詰めるか(毎フレームは重い)
 
   // ── 設定(localStorage nes.cfg)──
   const CFG_KEY = 'nes.cfg';
@@ -58,6 +58,7 @@
       FF: 'KeyF', Rewind: 'KeyR', Pause: 'KeyP', SaveState: 'F5', LoadState: 'F7' },
     pad: { A: 0, B: 1, TurboA: 3, TurboB: 2, Select: 8, Start: 9, FF: 5, Rewind: 4, Pause: -1, SaveState: -1, LoadState: -1 },
     turboRate: 2,
+    rewindSpeed: 2,
     liveRoll: true,
   };
   function loadCfg() {
@@ -68,6 +69,7 @@
       keys: Object.assign({}, DEFAULT_CFG.keys, c.keys && typeof c.keys === 'object' ? c.keys : null),
       pad: Object.assign({}, DEFAULT_CFG.pad, c.pad && typeof c.pad === 'object' ? c.pad : null),
       turboRate: TURBO_RATES.includes(c.turboRate) ? c.turboRate : DEFAULT_CFG.turboRate,
+      rewindSpeed: REWIND_SPEEDS.includes(c.rewindSpeed) ? c.rewindSpeed : DEFAULT_CFG.rewindSpeed,
       liveRoll: typeof c.liveRoll === 'boolean' ? c.liveRoll : DEFAULT_CFG.liveRoll,
     };
   }
@@ -384,7 +386,7 @@
     speedBtn.title = T('早送り。クリックで ×1→×2→×4→×8。{key} キーを押している間は ×4', { key: k('FF') });
     stateBtnS.title = T('今の状態をこのブラウザに保存(ROM ごとに 1 つ。{key})', { key: k('SaveState') });
     stateBtnL.title = T('保存した状態に戻す({key})', { key: k('LoadState') });
-    rewindBtn.title = T('巻き戻し(押している間 1 秒ずつ戻る。{key} キー。鍵盤表示のロールをドラッグしても戻れます)', { key: k('Rewind') });
+    rewindBtn.title = T('巻き戻し(押している間 逆再生で戻る。{key} キー。鍵盤表示のロールをドラッグしても戻れます)', { key: k('Rewind') });
     for (const b of [speedBtn, stateBtnS, stateBtnL, rewindBtn]) b.setAttribute('aria-label', b.title);
   }
 
@@ -475,6 +477,16 @@
     sel.value = String(cfg.turboRate);
     sel.addEventListener('change', () => { cfg.turboRate = +sel.value; saveCfg(); pushTurboRate(); });
     row.appendChild(rl); row.appendChild(sel); s1.appendChild(row);
+    // 巻き戻しの速さ
+    const s1b = sec(T('巻き戻し'));
+    const row2 = document.createElement('div'); row2.className = 'nes-cfg-row';
+    const rl2 = document.createElement('span'); rl2.textContent = T('速さ');
+    const sel2 = document.createElement('select');
+    for (const r of REWIND_SPEEDS) { const o = document.createElement('option'); o.value = String(r); o.textContent = '×' + r; sel2.appendChild(o); }
+    sel2.value = String(cfg.rewindSpeed);
+    sel2.addEventListener('change', () => { cfg.rewindSpeed = +sel2.value; saveCfg(); if (node && rwActive) node.port.postMessage({ type: 'rewindSpeed', speed: cfg.rewindSpeed }); });
+    row2.appendChild(rl2); row2.appendChild(sel2); s1b.appendChild(row2);
+    note(s1b, T('押している間、直前 2 分の映像を逆再生で戻ります(音は止まります)。離した所からゲームが続きます'));
     // キー割り当て
     const s2 = sec(T('キーボード(1P)'));
     const tbl = document.createElement('table'); tbl.className = 'nes-cfg-table';
@@ -508,7 +520,7 @@
     note(s3, T('十字は 12-15 番のボタンと左スティック(固定)。つながっている順に 1P、2P。早送り/巻き戻しは押している間、一時停止/状態保存/読込は押した時'));
     const s4 = sec('');
     const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'nes-btn'; reset.textContent = T('既定に戻す');
-    reset.addEventListener('click', () => { cfg = loadCfgDefaults(); saveCfg(); pushTurboRate(); sel.value = String(cfg.turboRate); chk.checked = cfg.liveRoll; refresh(); });
+    reset.addEventListener('click', () => { cfg = loadCfgDefaults(); saveCfg(); pushTurboRate(); sel.value = String(cfg.turboRate); sel2.value = String(cfg.rewindSpeed); chk.checked = cfg.liveRoll; refresh(); });
     s4.appendChild(reset);
     const refresh = () => {
       for (const a of KEY_ACTIONS) keyBtns[a].textContent = keyLabel(cfg.keys[a]);
@@ -582,7 +594,7 @@
     document.addEventListener('mousedown', popClose, true);
     document.addEventListener('keydown', popClose, true);
   }
-  function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, liveRoll: cfg.liveRoll }; }
+  function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll }; }
 
   // ── 入力 ──
   // ゲームパッド: つながっている順に 1P(キーボードと合成)、2P。戻り値は [[1P のビット, 連射ビット, 操作の集合], [2P ...]]
@@ -642,6 +654,13 @@
     imageBuf.set(new Uint8ClampedArray(u32.buffer, u32.byteOffset, u32.byteLength));
     ctx2d.putImageData(image, 0, 0);
     fpsCount++;
+  }
+  let idxScratch = null;
+  function blitIndex(u8) { // 逆再生の画面(パレット番号 8bit) → RGBA
+    const pal = MML.Emu.PPU.PALETTE;
+    if (!idxScratch) idxScratch = new Uint32Array(256 * 240);
+    for (let i = 0; i < idxScratch.length; i++) idxScratch[i] = pal[u8[i]];
+    blitFrame(idxScratch);
   }
   function tickFps(now) {
     if (now - fpsMs >= 1000) { fps = fpsCount; fpsCount = 0; fpsMs = now; updateStatus(); }
@@ -725,6 +744,7 @@
       }
       case 'writes': takeFrames(m.frames || [], frameSeq); break; // record on で像を取り直す前に溜まっていた分(最後は今の途中フレーム)
       case 'rewound': blitFrame(new Uint32Array(m.frame)); onRewound(m.seq); break;
+      case 'rwframe': blitIndex(new Uint8Array(m.idx)); onReverseFrame(m.seq); break;
       case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
       case 'battery': onBatteryMessage(m); break;
       case 'state': saveStateRecord(m.state); break;
@@ -744,7 +764,16 @@
   // ── 主スレッド実行(音なし) ──
   function tick(now) {
     raf = 0;
-    if (!nes || paused) return;
+    if (!nes) return;
+    if (rwActive && rewindBuf) { // 逆再生(主スレッド実行): 再生成を少し進め、速さぶん戻す
+      rewindBuf.regenStep(3);
+      let last = null, seq = 0;
+      for (let n = 0; n < cfg.rewindSpeed; n++) { const r = rewindBuf.reverseStep(); if (!r) break; last = r; seq = rewindBuf.rv.cur; }
+      if (last) { blitIndex(last); onReverseFrame(seq); }
+      raf = requestAnimationFrame(tick);
+      return;
+    }
+    if (paused) return;
     if (!lastMs) lastMs = now;
     acc += Math.min(100, now - lastMs);
     lastMs = now;
@@ -792,7 +821,7 @@
   }
 
   // ── 巻き戻し ──
-  let rewindTimer = 0, rewindPending = 0, rewindDebounce = 0;
+  let rewindPending = 0, rewindDebounce = 0;
   function sendRewind(absFrame) {
     if (node) node.port.postMessage({ type: 'rewind', frame: absFrame });
     else if (nes && rewindBuf) {
@@ -818,22 +847,33 @@
       else { recFrames.length = 0; recBase = null; }
     }
   }
-  function rewindStep() { if (!(node || nes)) return; sendRewind(Math.max(0, frameSeq - REWIND_STEP)); }
+  // 押している間: 逆再生(Worklet は rewindStart/rewindEnd、主スレッド実行は tick が回す)。離したらそのフレームへ本当に戻る
+  let rwActive = false, rwCount = 0;
   function rewindHoldStart() {
-    if (rewindTimer) return;
+    if (rwActive || !(node || nes)) return;
+    rwActive = true; rwCount = 0;
     rewindBtn.classList.add('nes-rewinding');
-    rewindStep();
-    rewindTimer = setInterval(rewindStep, REWIND_REPEAT_MS);
+    if (node) node.port.postMessage({ type: 'rewindStart', speed: cfg.rewindSpeed });
+    else if (rewindBuf) { if (!rewindBuf.beginReverse()) { rwActive = false; rewindBtn.classList.remove('nes-rewinding'); return; } lastMs = 0; startMain(); }
   }
   function rewindHoldEnd() {
-    if (!rewindTimer) return;
-    clearInterval(rewindTimer); rewindTimer = 0;
+    if (!rwActive) return;
+    rwActive = false;
     rewindBtn.classList.remove('nes-rewinding');
+    if (node) node.port.postMessage({ type: 'rewindEnd' });
+    else if (nes && rewindBuf) { const got = rewindBuf.endReverse(); blitFrame(nes.frame); onRewound(got); lastMs = 0; if (paused) stopMain(); }
+  }
+  // 逆再生中の 1 枚: ロールは数フレームごとに切り詰めて追わせる(最後に rewound で正確に切り詰める)
+  function onReverseFrame(seq) {
+    if (!liveActive || liveBase === null || !NesScreen.onLiveTruncate) return;
+    if ((++rwCount % REWIND_ROLL_EVERY) !== 0) return;
+    const keep = seq - liveBase + 1;
+    if (keep >= 0) NesScreen.onLiveTruncate(keep);
   }
   // ロールのドラッグシーク(曲の秒 = ライブ表示のフレーム×フレーム長)から。戻せる範囲に丸めた秒を返す。
   // ドラッグ中は間引いて何度も来るので、少し待って最後の 1 回だけ戻す(戻るたびに状態の読込+再生が要るため)
   function rewindTo(sec) {
-    if (!liveActive || liveBase === null || !(node || nes)) return null;
+    if (!liveActive || liveBase === null || !(node || nes) || rwActive) return null;
     const cur = frameSeq - liveBase + 1; // 今のライブ表示のフレーム数
     const target = Math.max(0, Math.min(cur, Math.floor(sec * FPS)));
     rewindPending = liveBase + target - 1; // 「ライブ表示のフレーム target まで残す」= seq がこの値まで

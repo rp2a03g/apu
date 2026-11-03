@@ -16,7 +16,7 @@
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
 
-  const SKIP_KEYS = new Set(['rom', 'rec', 'ring', 'frame', 'onFrame', 'onWrite', 'bus']);
+  const SKIP_KEYS = new Set(['rom', 'rec', 'ring', 'frame', 'frameIdx', 'onFrame', 'onWrite', 'bus']);
   const REF = '__ref';
 
   function isTyped(v) { return ArrayBuffer.isView(v) && !(v instanceof DataView); }

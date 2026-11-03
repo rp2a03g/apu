@@ -38,6 +38,7 @@
       this.palette = new Uint8Array(32);
       this.oam = new Uint8Array(256);
       this.frame = new Uint32Array(256 * 240);
+      this.frameIdx = new Uint8Array(256 * 240); // 同じ画面のパレット番号(6bit)。巻き戻しの映像の輪(nesRewind.js)が 8bit で控える
       // 次の行のスプライト(評価済み)と、今の行のスプライト(取得済み)
       this.evalY = new Uint8Array(8); this.evalTile = new Uint8Array(8); this.evalAttr = new Uint8Array(8); this.evalX = new Uint8Array(8);
       this.evalCount = 0; this.evalHasZero = false;
@@ -215,6 +216,7 @@
       else idx = this.palette[(bgPal << 2) | bgPix];
       if (mask & 1) idx &= 0x30;
       this.frame[line * 256 + x] = PALETTE[idx & 0x3F];
+      this.frameIdx[line * 256 + x] = idx & 0x3F;
     }
 
     // 1 ドット進める
@@ -260,6 +262,7 @@
           let idx = (addr >= 0x3F00) ? this.palette[this.paletteIndex(addr)] : this.palette[0];
           if (this.mask & 1) idx &= 0x30;
           this.frame[line * 256 + dot - 1] = PALETTE[idx & 0x3F];
+          this.frameIdx[line * 256 + dot - 1] = idx & 0x3F;
         }
         if (rendering && visible && dot >= 1 && dot <= 256) this.renderPixel(dot - 1, line);
       }
@@ -281,5 +284,6 @@
   }
 
   PPU.PALETTE = PALETTE;
+  PPU.PALETTE = PALETTE; // パレット番号 → RGBA(主スレッドが巻き戻しの 8bit 画面を描くのに使う)
   Emu.PPU = PPU;
 })(typeof window !== 'undefined' ? window : globalThis);

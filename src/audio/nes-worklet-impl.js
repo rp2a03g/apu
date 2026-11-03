@@ -4,7 +4,9 @@
  * 音の時刻を基準にフレームを刻む: process() が 128 サンプルを求めるたびに、その分だけ CPU/PPU/APU を進める
  * (NesConsole.runSamples)。画面が 1 枚できるたびに主スレッドへ frame(Uint32Array の ArrayBuffer、転送)と、
  * 録音中ならそのフレームの書き込み列を送る。主スレッドは描くだけ。
- * 主スレッドからは load(ROM)/pad(入力)/reset/pause/record を受ける。
+ * 主スレッドからは load(ROM)/pad(入力)/reset/pause/record/rewind(飛ぶ)/rewindStart・rewindSpeed・rewindEnd(逆再生)を受ける。
+ * 逆再生(押している間の巻き戻し)の間は本体を止め、無音を出しながら NesRewind の映像の輪から古い画面を rwframe
+ * (8bit パレット番号)で送る。離したら rewindEnd でそのフレームへ本当に戻り、rewound を返す。
  *
  * 出力は APU の混合(0〜1.16 程度、片側)を DC ブロッカー(stream-player.js と同じ係数)に通した物。
  * 音量(NSF_GAIN)とリミッタは主スレッド側の GainNode/DynamicsCompressor(src/ui/nesScreen.js)。
@@ -25,6 +27,7 @@
       this.speed = 1; this.ffTmp = null; this.ffSkip = 0;
       this.dcX = 0; this.dcY = 0;
       this.frameSeq = 0;
+      this.rw = null; // 逆再生中 { speed, acc }
       this.port.onmessage = (e) => this.onMessage(e.data || {});
     }
     onMessage(m) {
@@ -64,8 +67,22 @@
             if (m.volume) { put(this.nes.apu.vol, m.volume.apu, (v) => Math.max(0, Math.min(2, +v || 0))); if (a) put(a.vol, m.volume.ext, (v) => Math.max(0, Math.min(2, +v || 0))); }
             break;
           }
+          case 'rewindStart': // 逆再生を始める(押している間)。speed は 1 秒に何秒ぶん戻るか
+            if (!this.nes || !this.rewind || this.rw) break;
+            if (this.rewind.beginReverse()) this.rw = { speed: Math.max(1, Math.min(8, m.speed | 0) || 1), acc: 0, pending: null, pendingSeq: 0, lastPost: 0 };
+            break;
+          case 'rewindSpeed': if (this.rw) this.rw.speed = Math.max(1, Math.min(8, m.speed | 0) || 1); break;
+          case 'rewindEnd': { // 離した: 表示していたフレームへ本当に戻る
+            if (!this.nes || !this.rewind || !this.rw) break;
+            this.rw = null;
+            const got = this.rewind.endReverse();
+            this.frameSeq = got;
+            const frame = this.nes.frame.slice();
+            this.port.postMessage({ type: 'rewound', frame: frame.buffer, seq: got, oldest: this.rewind.oldest }, [frame.buffer]);
+            break;
+          }
           case 'rewind': { // frame(本体の frameCount)の終わりへ戻る。録音中なら像から取り直す。戻った所の画面と frameCount を返す
-            if (!this.nes || !this.rewind) break;
+            if (!this.nes || !this.rewind || this.rw) break;
             const wasRec = !!this.nes.rec;
             this.nes.rec = null;
             const got = this.rewind.rewindTo(m.frame | 0);
@@ -122,9 +139,31 @@
       nes.clearBatteryDirty();
       this.port.postMessage({ type: 'battery', final: !!final, data: data.buffer }, [data.buffer]);
     }
+    // 逆再生の 1 回(process ごと): 再生成を 1 フレーム進め、速さに応じて戻し、画面は 60 枚/秒まで(それ以上送ると主スレッドが詰まる)
+    reverseTick() {
+      const rw = this.rw, rewind = this.rewind;
+      rewind.regenStep(1);
+      rw.acc += rw.speed * 128 / (sampleRate / 60.0988);
+      for (let n = 0; rw.acc >= 1 && n < 8; n++) {
+        const r = rewind.reverseStep();
+        if (r === null) { rw.acc = Math.min(rw.acc, 1); break; } // まだ作っていない: 待つ(溜めない)
+        if (r === false) { rw.acc = 0; break; }                   // これ以上戻れない
+        rw.acc -= 1; rw.pending = r; rw.pendingSeq = rewind.rv.cur;
+      }
+      if (rw.pending && currentTime - rw.lastPost >= 1 / 61) {
+        rw.lastPost = currentTime;
+        const idx = rw.pending.slice(); rw.pending = null;
+        this.port.postMessage({ type: 'rwframe', seq: rw.pendingSeq, idx: idx.buffer, oldest: rewind.oldest }, [idx.buffer]);
+      }
+    }
     process(inputs, outputs) {
       const out = outputs[0] && outputs[0][0];
       if (!out) return true;
+      if (this.nes && this.rw) {
+        out.fill(0); for (let c = 1; c < outputs[0].length; c++) outputs[0][c].set(out);
+        try { this.reverseTick(); } catch (e) { this.port.postMessage({ type: 'error', message: String((e && e.stack) || e) }); this.rw = null; }
+        return true;
+      }
       if (!this.nes || this.paused) { out.fill(0); return true; }
       try {
         if (this.speed > 1) {

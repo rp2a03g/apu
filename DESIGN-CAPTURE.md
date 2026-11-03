@@ -467,6 +467,23 @@ capture.js の writeLog、NsfReplayStreamPlayer。
     4=巻き戻し、他は無し)。キーボードも R=巻き戻し、P=一時停止。
   - タッチ端末(MML.Device.isTouch)は画面の下に十字/A/B/連射 A/B/Select/Start を出す。pointerId ごとに押しているキーを持ち、
     指を滑らせると下のキーへ移る(複数指対応)。
+- 実装(2026-11-03、段階 6h: 逆再生の滑らかな巻き戻し):
+  - 押している間は「1 秒ずつ飛ぶ」のをやめ、映像を 1 枚ずつ逆向きに表示する(設定の巻き戻しの速さ ×1/×2/×4、既定 ×2。
+    音は無音)。離した所へ本当に戻る(スナップショット読込+再生。これまでの rewind と同じ)ので、ロールの切り詰め
+    (liveRollTruncate)と録音の取り直しはそのまま。逆再生中もロールは 6 枚ごとに切り詰めて追わせる。
+  - 映像の輪(`nesRewind.js`): PPU に RGB の面と並べてパレット番号の面(ppu.frameIdx、6bit)を足し、毎フレーム 61KB を
+    600 枚(10 秒、37MB)の輪に控える(NesState の写しからは除く)。reverseStep() は 1 枚戻って輪の画面を返す。輪に無い
+    (10 秒より前、または戻った直後で輪が未来の画面で埋まっている)ときは、その手前のスナップショットを読んで記録した
+    パッドで進め直しながら輪を埋める(regenStep。Worklet は process() 1 回に 1 フレーム=最大 344 枚/秒、主スレッド実行は
+    rAF 1 回に 3 枚。表示は 60×速さ 枚/秒なので ×4 でも追いつく)。rewindTo の進め直しでも輪へ控える。
+  - Worklet: rewindStart{speed}/rewindSpeed/rewindEnd。逆再生中の process() は無音を出し、音の時刻で枚数を刻む
+    (acc += speed × 128 / (sampleRate/60.0988))。画面(rwframe、8bit)は 60 枚/秒まで(×4 で 240 枚/秒送ると主スレッドの
+    タイマーが数秒止まり、音の時刻も遅れた)。rewindEnd で endReverse → rewound(RGB)。主スレッドは PPU.PALETTE で色にする。
+  - 実測(ブラウザ): ×1/×2/×4 で 60/120/240 枚/秒、10ms タイマーの遅れ最大 26ms、離してから次のフレームまで 1 フレーム。
+    ヘッドレス(scratchpad の reverse-test): 1000 フレーム進めて 700 枚戻し(輪 600 を超えて再生成 130 枚)、全枚が前進時の
+    画面と一致、endReverse 後の状態と次のフレームも一致。
+  - 点検道具(`tools/headless/nes-sweep.js` / `nes-sweep-report.js` / `nes-state-cost.js`): フォルダの .nes を総当たりで回し
+    (並列)、起動・音・Start の効き・固まり・速さを JSON Lines に出して分類する。スナップショットの時間も ROM ごとに測れる。
 
 ---
 
