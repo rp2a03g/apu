@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-03 15:10:26
+ * Built by tools/build-capture-workers.ps1 at 2026-11-03 15:27:44
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-03 15:10:26';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-03 15:27:44';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -247,30 +247,17 @@
 
   // --- 命令ハンドラ ---
 
-  function ADC(cpu, mode) {
-    const op = cpu.fetchOperand(mode);
+  function adcValue(cpu, value) {
     const c = cpu.getFlag(F_C) ? 1 : 0;
-    const sum = cpu.A + op.value + c;
-    const result = sum & 0xFF;
-    cpu.setFlag(F_V, ((cpu.A ^ result) & (op.value ^ result) & 0x80) !== 0);
-    cpu.setFlag(F_C, sum > 0xFF);
-    cpu.A = result;
-    cpu.setZN(cpu.A);
-    return op.pageCrossed ? 1 : 0;
-  }
-
-  function SBC(cpu, mode) {
-    const op = cpu.fetchOperand(mode);
-    const c = cpu.getFlag(F_C) ? 1 : 0;
-    const value = op.value ^ 0xFF;
     const sum = cpu.A + value + c;
     const result = sum & 0xFF;
     cpu.setFlag(F_V, ((cpu.A ^ result) & (value ^ result) & 0x80) !== 0);
     cpu.setFlag(F_C, sum > 0xFF);
     cpu.A = result;
     cpu.setZN(cpu.A);
-    return op.pageCrossed ? 1 : 0;
   }
+  function ADC(cpu, mode) { const op = cpu.fetchOperand(mode); adcValue(cpu, op.value); return op.pageCrossed ? 1 : 0; }
+  function SBC(cpu, mode) { const op = cpu.fetchOperand(mode); adcValue(cpu, op.value ^ 0xFF); return op.pageCrossed ? 1 : 0; }
 
   function AND(cpu, mode) {
     const op = cpu.fetchOperand(mode);
@@ -456,9 +443,110 @@
     if (mode !== 'impl') cpu.fetchOperand(mode); // オペランド読み飛ばし(通常未使用)
     return 0;
   }
+  function NOPX(cpu, mode) { const op = cpu.fetchOperand(mode); return op.pageCrossed ? 1 : 0; } // 非公式 NOP abs,X はページ跨ぎで +1
+
+  // --- 非公式(未定義)命令。NESdev Wiki「CPU unofficial opcodes」の安定な物と、不安定な物は一般的な解釈 ---
+  //   読み書き複合(SLO/RLA/SRE/RRA/DCP/ISC)は「RMW してから A と演算」。SH*/TAS はページ跨ぎで番地の上位が値になる癖まで。
+  //   JAM は PC を進めず止まる(本体は回り続ける)。XAA/LAX #imm の定数は $EE(実機でもばらつく)
+  function LAX(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A = cpu.X = op.value; cpu.setZN(op.value); return op.pageCrossed ? 1 : 0; }
+  function SAX(cpu, mode) { const op = cpu.fetchOperand(mode, true); cpu.write(op.addr, cpu.A & cpu.X); return 0; }
+  function DCP(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value - 1) & 0xFF; cpu.write(op.addr, r); compare(cpu, cpu.A, r); return 0; }
+  function ISC(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value + 1) & 0xFF; cpu.write(op.addr, r); adcValue(cpu, r ^ 0xFF); return 0; }
+  function SLO(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = (op.value << 1) & 0xFF; cpu.write(op.addr, r); cpu.A |= r; cpu.setZN(cpu.A); return 0; }
+  function RLA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = ((op.value << 1) | c) & 0xFF; cpu.write(op.addr, r); cpu.A &= r; cpu.setZN(cpu.A); return 0; }
+  function SRE(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 1) !== 0); const r = op.value >> 1; cpu.write(op.addr, r); cpu.A ^= r; cpu.setZN(cpu.A); return 0; }
+  function RRA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 1) !== 0); const r = (op.value >> 1) | (c << 7); cpu.write(op.addr, r); adcValue(cpu, r); return 0; }
+  function ANC(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A &= op.value; cpu.setZN(cpu.A); cpu.setFlag(F_C, (cpu.A & 0x80) !== 0); return 0; }
+  function ALR(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A &= op.value; cpu.setFlag(F_C, (cpu.A & 1) !== 0); cpu.A >>= 1; cpu.setZN(cpu.A); return 0; }
+  function ARR(cpu, mode) {
+    const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0;
+    cpu.A = (((cpu.A & op.value) >> 1) | (c << 7)) & 0xFF; cpu.setZN(cpu.A);
+    cpu.setFlag(F_C, (cpu.A & 0x40) !== 0); cpu.setFlag(F_V, (((cpu.A >> 6) ^ (cpu.A >> 5)) & 1) !== 0); return 0;
+  }
+  function SBX(cpu, mode) { const op = cpu.fetchOperand(mode); const t = (cpu.A & cpu.X) - op.value; cpu.setFlag(F_C, t >= 0); cpu.X = t & 0xFF; cpu.setZN(cpu.X); return 0; }
+  function XAA(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A = (cpu.A | 0xEE) & cpu.X & op.value; cpu.setZN(cpu.A); return 0; }
+  function LAXimm(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A = cpu.X = (cpu.A | 0xEE) & op.value; cpu.setZN(cpu.A); return 0; }
+  function LAS(cpu, mode) { const op = cpu.fetchOperand(mode); const v = op.value & cpu.S; cpu.A = cpu.X = cpu.S = v; cpu.setZN(v); return op.pageCrossed ? 1 : 0; }
+  // SHY/SHX/SHA/TAS: 値 = レジスタ & (ベース番地の上位+1)。ページを跨いだ時は書き込み先の上位バイトがその値になる
+  function storeHigh(cpu, mode, reg) {
+    const op = cpu.fetchOperand(mode, true);
+    const idx = mode === 'absx' ? cpu.X : cpu.Y;
+    const base = (op.addr - idx) & 0xFFFF;
+    const v = reg & (((base >> 8) + 1) & 0xFF);
+    const addr = op.pageCrossed ? ((v << 8) | (op.addr & 0xFF)) : op.addr;
+    cpu.write(addr, v);
+    return 0;
+  }
+  function SHY(cpu, mode) { return storeHigh(cpu, mode, cpu.Y); }
+  function SHX(cpu, mode) { return storeHigh(cpu, mode, cpu.X); }
+  function SHA(cpu, mode) { return storeHigh(cpu, mode, cpu.A & cpu.X); }
+  function TAS(cpu, mode) { cpu.S = cpu.A & cpu.X; return storeHigh(cpu, mode, cpu.S); }
+  function JAM(cpu) { cpu.halted = true; cpu.PC = (cpu.PC - 1) & 0xFFFF; return 0; }
 
   // mnemonic -> {mode: [opcodeByte, cycles]}
   const TABLE = {
+    // 非公式(安定)
+    LAX: { fn: LAX, modes: { zp: [0xA7, 3], zpy: [0xB7, 4], abs: [0xAF, 4], absy: [0xBF, 4], indx: [0xA3, 6], indy: [0xB3, 5] } },
+    SAX: { fn: SAX, modes: { zp: [0x87, 3], zpy: [0x97, 4], abs: [0x8F, 4], indx: [0x83, 6] } },
+    DCP: { fn: DCP, modes: { zp: [0xC7, 5], zpx: [0xD7, 6], abs: [0xCF, 6], absx: [0xDF, 7], absy: [0xDB, 7], indx: [0xC3, 8], indy: [0xD3, 8] } },
+    ISC: { fn: ISC, modes: { zp: [0xE7, 5], zpx: [0xF7, 6], abs: [0xEF, 6], absx: [0xFF, 7], absy: [0xFB, 7], indx: [0xE3, 8], indy: [0xF3, 8] } },
+    SLO: { fn: SLO, modes: { zp: [0x07, 5], zpx: [0x17, 6], abs: [0x0F, 6], absx: [0x1F, 7], absy: [0x1B, 7], indx: [0x03, 8], indy: [0x13, 8] } },
+    RLA: { fn: RLA, modes: { zp: [0x27, 5], zpx: [0x37, 6], abs: [0x2F, 6], absx: [0x3F, 7], absy: [0x3B, 7], indx: [0x23, 8], indy: [0x33, 8] } },
+    SRE: { fn: SRE, modes: { zp: [0x47, 5], zpx: [0x57, 6], abs: [0x4F, 6], absx: [0x5F, 7], absy: [0x5B, 7], indx: [0x43, 8], indy: [0x53, 8] } },
+    RRA: { fn: RRA, modes: { zp: [0x67, 5], zpx: [0x77, 6], abs: [0x6F, 6], absx: [0x7F, 7], absy: [0x7B, 7], indx: [0x63, 8], indy: [0x73, 8] } },
+    'SBC*': { fn: SBC, modes: { imm: [0xEB, 2] } },
+    ANC: { fn: ANC, modes: { imm: [0x0B, 2] } },
+    'ANC*': { fn: ANC, modes: { imm: [0x2B, 2] } },
+    ALR: { fn: ALR, modes: { imm: [0x4B, 2] } },
+    ARR: { fn: ARR, modes: { imm: [0x6B, 2] } },
+    SBX: { fn: SBX, modes: { imm: [0xCB, 2] } },
+    'NOP*': { fn: NOP, modes: { impl: [0x1A, 2] } },
+    'NOP*2': { fn: NOP, modes: { impl: [0x3A, 2] } },
+    'NOP*3': { fn: NOP, modes: { impl: [0x5A, 2] } },
+    'NOP*4': { fn: NOP, modes: { impl: [0x7A, 2] } },
+    'NOP*5': { fn: NOP, modes: { impl: [0xDA, 2] } },
+    'NOP*6': { fn: NOP, modes: { impl: [0xFA, 2] } },
+    'NOP#': { fn: NOP, modes: { imm: [0x80, 2] } },
+    'NOP#2': { fn: NOP, modes: { imm: [0x82, 2] } },
+    'NOP#3': { fn: NOP, modes: { imm: [0x89, 2] } },
+    'NOP#4': { fn: NOP, modes: { imm: [0xC2, 2] } },
+    'NOP#5': { fn: NOP, modes: { imm: [0xE2, 2] } },
+    'NOPz': { fn: NOP, modes: { zp: [0x04, 3] } },
+    'NOPz2': { fn: NOP, modes: { zp: [0x44, 3] } },
+    'NOPz3': { fn: NOP, modes: { zp: [0x64, 3] } },
+    'NOPzx': { fn: NOP, modes: { zpx: [0x14, 4] } },
+    'NOPzx2': { fn: NOP, modes: { zpx: [0x34, 4] } },
+    'NOPzx3': { fn: NOP, modes: { zpx: [0x54, 4] } },
+    'NOPzx4': { fn: NOP, modes: { zpx: [0x74, 4] } },
+    'NOPzx5': { fn: NOP, modes: { zpx: [0xD4, 4] } },
+    'NOPzx6': { fn: NOP, modes: { zpx: [0xF4, 4] } },
+    'NOPa': { fn: NOP, modes: { abs: [0x0C, 4] } },
+    'NOPax': { fn: NOPX, modes: { absx: [0x1C, 4] } },
+    'NOPax2': { fn: NOPX, modes: { absx: [0x3C, 4] } },
+    'NOPax3': { fn: NOPX, modes: { absx: [0x5C, 4] } },
+    'NOPax4': { fn: NOPX, modes: { absx: [0x7C, 4] } },
+    'NOPax5': { fn: NOPX, modes: { absx: [0xDC, 4] } },
+    'NOPax6': { fn: NOPX, modes: { absx: [0xFC, 4] } },
+    // 非公式(不安定。一般的な解釈)
+    XAA: { fn: XAA, modes: { imm: [0x8B, 2] } },
+    'LAX#': { fn: LAXimm, modes: { imm: [0xAB, 2] } },
+    LAS: { fn: LAS, modes: { absy: [0xBB, 4] } },
+    SHY: { fn: SHY, modes: { absx: [0x9C, 5] } },
+    SHX: { fn: SHX, modes: { absy: [0x9E, 5] } },
+    SHA: { fn: SHA, modes: { absy: [0x9F, 5], indy: [0x93, 6] } },
+    TAS: { fn: TAS, modes: { absy: [0x9B, 5] } },
+    JAM: { fn: JAM, modes: { impl: [0x02, 2] } },
+    'JAM2': { fn: JAM, modes: { impl: [0x12, 2] } },
+    'JAM3': { fn: JAM, modes: { impl: [0x22, 2] } },
+    'JAM4': { fn: JAM, modes: { impl: [0x32, 2] } },
+    'JAM5': { fn: JAM, modes: { impl: [0x42, 2] } },
+    'JAM6': { fn: JAM, modes: { impl: [0x52, 2] } },
+    'JAM7': { fn: JAM, modes: { impl: [0x62, 2] } },
+    'JAM8': { fn: JAM, modes: { impl: [0x72, 2] } },
+    'JAM9': { fn: JAM, modes: { impl: [0x92, 2] } },
+    'JAM10': { fn: JAM, modes: { impl: [0xB2, 2] } },
+    'JAM11': { fn: JAM, modes: { impl: [0xD2, 2] } },
+    'JAM12': { fn: JAM, modes: { impl: [0xF2, 2] } },
     ADC: { fn: ADC, modes: { imm: [0x69, 2], zp: [0x65, 3], zpx: [0x75, 4], abs: [0x6D, 4], absx: [0x7D, 4], absy: [0x79, 4], indx: [0x61, 6], indy: [0x71, 5] } },
     AND: { fn: AND, modes: { imm: [0x29, 2], zp: [0x25, 3], zpx: [0x35, 4], abs: [0x2D, 4], absx: [0x3D, 4], absy: [0x39, 4], indx: [0x21, 6], indy: [0x31, 5] } },
     ASL: { fn: ASL, modes: { acc: [0x0A, 2], zp: [0x06, 5], zpx: [0x16, 6], abs: [0x0E, 6], absx: [0x1E, 7] } },
@@ -3914,6 +4002,7 @@
       this.chrMap = new Int32Array(8);
       this.ntMap = [0, 0, 1, 1];
       this.audio = null;      // 拡張音源(Emu.N163Audio など)。clock()/mixSample() を持つ
+      this.ramRead = true; this.ramWrite = true; // PRG RAM($6000-$7FFF)の保護ビット(基板ごとに書き換える。無効なら読みは open bus、書きは捨てる)
       this.extBits = 0;
       this.ppu = null;        // PPU が自分を入れる(MMC5 が描画の位相を見る)
       this.irqFlag = false;
@@ -3931,12 +4020,12 @@
 
     cpuRead(addr) {
       if (addr >= 0x8000) return this.prg[this.prgMap[(addr - 0x8000) >> 13] + (addr & 0x1FFF)];
-      if (addr >= 0x6000) return this.prgRam[(addr - 0x6000) % this.prgRam.length];
+      if (addr >= 0x6000) return this.ramRead ? this.prgRam[(addr - 0x6000) % this.prgRam.length] : -1;
       return -1;
     }
     cpuWrite(addr, v) {
       if (addr >= 0x8000) this.writeReg(addr, v);
-      else if (addr >= 0x6000) this.prgRam[(addr - 0x6000) % this.prgRam.length] = v;
+      else if (addr >= 0x6000) { if (this.ramWrite) this.prgRam[(addr - 0x6000) % this.prgRam.length] = v; }
     }
     writeReg() {}
     ppuRead(addr) {
@@ -4064,7 +4153,7 @@
         case 0x8000: this.bankSelect = v; this.apply(); break;
         case 0x8001: this.regs[this.bankSelect & 7] = v; this.apply(); break;
         case 0xA000: if (!this.rom.fourScreen) this.setMirroring((v & 1) ? 'H' : 'V'); break;
-        case 0xA001: break; // PRG RAM 保護(未対応)
+        case 0xA001: this.ramRead = (v & 0x80) !== 0; this.ramWrite = (v & 0xC0) === 0x80; break; // bit7 有効、bit6 書き込み禁止(MMC6 は別)
         case 0xC000: this.irqLatch = v; break;
         case 0xC001: this.irqReload = true; break;
         case 0xE000: this.irqEnable = false; this.irqFlag = false; break;
@@ -4135,6 +4224,11 @@
       if ((addr & 0xF800) === 0x4800) { if (this.audio) this.audio.writeRegister(0x4800, v); return; }
       if (addr === 0x5000) { this.irqCounter = (this.irqCounter & 0x7F00) | v; this.irqFlag = false; return; }
       if (addr === 0x5800) { this.irqCounter = (this.irqCounter & 0x00FF) | ((v & 0x7F) << 8); this.irqEnable = (v & 0x80) !== 0; this.irqFlag = false; return; }
+      if (addr >= 0x6000 && addr < 0x8000) { // 書き込み保護: $F800 bit6 が立ち、その 2K の禁止ビット(bit0-3)が 0 の時だけ書ける
+        const p = this.ramProtect | 0;
+        if ((p & 0x40) && !(p & (1 << ((addr >> 11) & 3)))) this.prgRam[(addr - 0x6000) % this.prgRam.length] = v;
+        return;
+      }
       super.cpuWrite(addr, v);
     }
     writeReg(addr, v) {
@@ -4149,7 +4243,7 @@
       if (hi === 0xE000) { this.setPrg8(0, v & 0x3F); return; }
       if (hi === 0xE800) { this.setPrg8(1, v & 0x3F); this.ntRamOk[0] = !(v & 0x40); this.ntRamOk[1] = !(v & 0x80); return; }
       if (hi === 0xF000) { this.setPrg8(2, v & 0x3F); return; }
-      if (hi === 0xF800) { if (this.audio) this.audio.writeRegister(0xF800, v); } // 音源アドレス(+PRG RAM 保護ビット、未対応)
+      if (hi === 0xF800) { if (this.audio) this.audio.writeRegister(0xF800, v); this.ramProtect = v; } // 音源アドレス+PRG RAM 書き込み保護(bit6=0 で全体禁止、bit0-3 で 2K ごとに禁止)
     }
     ppuRead(addr) {
       const slot = addr < 0x2000 ? (addr >> 10) : 8 + ((addr >> 10) & 3);
@@ -4171,7 +4265,8 @@
   }
 
   // 24/26: Konami VRC6(PRG 16K+8K 切替、CHR 1K×8、IRQ、音源。26 は A0/A1 が入れ替わった配線)
-  //   未対応: $B003 の CHR モード(bit0-1,4-6。ほぼ全てのソフトがモード 0=1K×8)、PRG RAM 保護
+  //   $B003: bit0-1 CHR モード(0=1K×8、1=2K×4、2/3=1K×4+2K×2)、bit5 2K の下位ビット固定、bit2-3 ミラーリング、bit7 PRG RAM 有効。
+  //   未対応: bit4 のネームテーブルを CHR ROM から出す配線
   class VRC6 extends Mapper {
     constructor(rom) {
       super(rom);
@@ -4180,7 +4275,36 @@
       this.extBits = 0x01;
       this.irq = new VrcIrq();
       this.shadow = new Int16Array(0x10).fill(-1); // 音源 9 レジスタの影(index = (hi-9)*4+lo)
+      this.chrRegs = new Uint8Array(8); this.bankMode = 0; // $B003 の値(bit0-1 CHR モード、bit5 2K の下位ビット固定、bit7 PRG RAM 有効)
+      this.ramRead = this.ramWrite = false;
       this.setPrg16(0, 0); this.setPrg8(2, -2); this.setPrg8(3, -1);
+    }
+    // CHR: モード 0=1K×8(R0-R7)、1=2K×4(R0-R3)、2/3=1K×4(R0-R3)+2K×2(R4,R5)。2K は bit5 が立つと下位ビットを 0/1 に固定、
+    //   立たなければ R の値そのまま(=同じ 1K が 2 回)。未対応: bit4 のネームテーブルを CHR ROM から出す配線(使うソフトは稀)
+    applyChr() {
+      const r = this.chrRegs, m = this.bankMode, mask = (m & 0x20) ? 0xFE : 0xFF, or = (m & 0x20) ? 1 : 0;
+      const two = (slot, v) => { this.setChr1(slot, v & mask); this.setChr1(slot + 1, (v & mask) | or); };
+      switch (m & 3) {
+        case 0: for (let i = 0; i < 8; i++) this.setChr1(i, r[i]); break;
+        case 1: for (let i = 0; i < 4; i++) two(i * 2, r[i]); break;
+        default: for (let i = 0; i < 4; i++) this.setChr1(i, r[i]); two(4, r[4]); two(6, r[5]);
+      }
+      // ネームテーブル(CIRAM): bit5 が立った通常の組み合わせは bit2-3 のミラーリング、それ以外は R4-R7 の bit0 がページを選ぶ
+      // (NesDev の表。bit4=1 で CHR ROM をネームテーブルに出す配線は未対応で、CIRAM として扱う)
+      switch (m & 0x2F) {
+        case 0x20: case 0x27: this.setMirroring('V'); break;
+        case 0x23: case 0x24: this.setMirroring('H'); break;
+        case 0x28: case 0x2F: this.setMirroring('1A'); break;
+        case 0x2B: case 0x2C: this.setMirroring('1B'); break;
+        default: {
+          const b = (i) => r[i] & 1;
+          switch (m & 7) {
+            case 0: case 6: case 7: this.ntMap = [b(6), b(6), b(7), b(7)]; break;
+            case 1: case 5: this.ntMap = [b(4), b(5), b(6), b(7)]; break;
+            default: this.ntMap = [b(6), b(7), b(6), b(7)];
+          }
+        }
+      }
     }
     _canon(addr) { return this.swapA0A1 ? (addr & 0xFFFC) | ((addr & 1) << 1) | ((addr >> 1) & 1) : addr; }
     audioAddr(addr) {
@@ -4203,11 +4327,11 @@
           break; // $9003(周波数制御)は未対応
         case 0xB000:
           if (lo <= 2) { this.shadow[8 + lo] = v; if (this.audio) this.audio.writeRegister(hi + lo, v); }
-          else this.setMirroring(['V', 'H', '1A', '1B'][(v >> 2) & 3]);
+          else { this.bankMode = v; this.ramRead = this.ramWrite = (v & 0x80) !== 0; this.applyChr(); }
           break;
         case 0xC000: this.setPrg8(2, v & 0x1F); break;
-        case 0xD000: this.setChr1(lo, v); break;
-        case 0xE000: this.setChr1(4 + lo, v); break;
+        case 0xD000: this.chrRegs[lo] = v; this.applyChr(); break;
+        case 0xE000: this.chrRegs[4 + lo] = v; this.applyChr(); break;
         case 0xF000:
           if (lo === 0) this.irq.writeLatch(v);
           else if (lo === 1) this.irq.writeControl(v);
@@ -4254,6 +4378,7 @@
           if (!second) {
             this.setMirroring(['V', 'H', '1A', '1B'][v & 3]);
             if ((v & 0x40) && this.audio) this.audio.reset(); // bit6: 音源を黙らせる(リセット)
+            this.ramRead = this.ramWrite = (v & 0x80) !== 0;  // bit7: PRG RAM 有効
           } else this.irq.writeLatch(v);
           break;
         case 0xF000: if (!second) this.irq.writeControl(v); else this.irq.ack(); break;
@@ -4982,7 +5107,8 @@
   //   ($5101)と 8×16 スプライト時の A/B 2 組、ネームテーブル割当($5105: CIRAM/ExRAM/塗りつぶし)、ExRAM の
   //   4 モード($5104。モード 1=拡張属性: タイルごとの 4K CHR バンクとパレット)、スキャンライン IRQ($5203/$5204。
   //   実機と同じく「同じネームテーブル番地の連続 3 回読み」で行を数える)、乗算器($5205/$5206)、音源($5000-$5015)。
-  //   未対応: 縦分割($5200-$5202)、PRG RAM 書き込み保護($5102/$5103)、$5015 の読み出し(音源の状態)
+  //   縦分割($5200-$5202)、PRG RAM 書き込み保護($5102/$5103)、$5015 の読み出し(音源の長さカウンタ)も対応。
+  //   未対応: 2 つめの 64K 以上の RAM 配置(NES 2.0 の 64K/128K RAM を 1 塊として扱う)
   class MMC5 extends Mapper {
     constructor(rom) {
       super(rom);
@@ -5000,6 +5126,9 @@
       this.slotIsRam = [false, false, false, false]; this.slotOff = new Int32Array(4);
       this.irqCompare = 0; this.irqEnable = false; this.irqPend = false; this.inFrame = false;
       this.scanline = 0; this.ntLast = -1; this.ntSame = 0; this.idleDots = 0;
+      this.prot1 = 0; this.prot2 = 0; this.ramWrite = false; // $5102/$5103 が 2/1 になるまで PRG RAM は書けない
+      this.splitOn = false; this.splitRight = false; this.splitTile = 0; this.splitScroll = 0; this.splitBank = 0; // 縦分割($5200-$5202)
+      this.splitN = 0; this.splitIn = false; this.splitAddr = 0; this.tickPending = false; // 行内の NT 取得の通し番号(3 連続読みで 0 に戻る)、分割領域の中か、分割側の NT 番地
       this.mulA = 0xFF; this.mulB = 0xFF;
       this.exTile = 0;                                    // 拡張属性モードで最後に読んだネームテーブルの ExRAM バイト
       this.audioShadow = new Int16Array(0x16).fill(-1);
@@ -5023,6 +5152,7 @@
       if (addr >= 0x5C00) return (this.exMode >= 2) ? this.exram[addr & 0x3FF] : -1;
       switch (addr) {
         case 0x5204: { const v = (this.irqPend ? 0x80 : 0) | (this.inFrame ? 0x40 : 0); this.irqPend = false; return v; }
+        case 0x5015: { const a = this.audio; return a && a.pulse1 && a.pulse2 ? ((a.pulse1.lengthCounter > 0 ? 1 : 0) | (a.pulse2.lengthCounter > 0 ? 2 : 0)) : 0; } // 音源の状態(長さカウンタ)
         case 0x5205: return (this.mulA * this.mulB) & 0xFF;
         case 0x5206: return ((this.mulA * this.mulB) >> 8) & 0xFF;
       }
@@ -5031,10 +5161,21 @@
     cpuWrite(addr, v) {
       if (addr >= 0x8000) {
         const s = (addr - 0x8000) >> 13;
-        if (this.slotIsRam[s]) this.prgRam[(this.slotOff[s] + (addr & 0x1FFF)) % this.prgRam.length] = v;
+        if (this.slotIsRam[s] && this.ramWrite) this.prgRam[(this.slotOff[s] + (addr & 0x1FFF)) % this.prgRam.length] = v;
         return;
       }
-      if (addr >= 0x6000) { this.prgRam[(((this.prgRegs[0] & 7) << 13) + (addr & 0x1FFF)) % this.prgRam.length] = v; return; }
+      if (addr >= 0x6000) { if (this.ramWrite) this.prgRam[(((this.prgRegs[0] & 7) << 13) + (addr & 0x1FFF)) % this.prgRam.length] = v; return; }
+      if (addr === 0x5102 || addr === 0x5103) { // PRG RAM 書き込み保護: $5102=2 かつ $5103=1 の時だけ書ける
+        if (addr === 0x5102) this.prot1 = v & 3; else this.prot2 = v & 3;
+        this.ramWrite = this.prot1 === 2 && this.prot2 === 1;
+        return;
+      }
+      if (addr >= 0x5200 && addr <= 0x5202) { // 縦分割
+        if (addr === 0x5200) { this.splitOn = (v & 0x80) !== 0; this.splitRight = (v & 0x40) !== 0; this.splitTile = v & 0x1F; }
+        else if (addr === 0x5201) this.splitScroll = v;
+        else this.splitBank = v;
+        return;
+      }
       if (addr >= 0x5C00) { if (this.exMode < 3) this.exram[addr & 0x3FF] = v; return; }
       if (addr >= 0x5000 && addr <= 0x5015) { this.audioShadow[addr - 0x5000] = v; if (this.audio) this.audio.writeRegister(addr, v); return; }
       if (addr >= 0x5120 && addr <= 0x512B) {
@@ -5102,7 +5243,16 @@
     }
     _nt(addr) { return (this.ntMode >> (((addr >> 10) & 3) * 2)) & 3; }
     ppuRead(addr) {
+      // 縦分割: 行内の NT 取得を数え(ダミー読み 2 回目で 0 に戻す)、境目のタイル列で領域に出入りする。領域内は NT/属性を ExRAM、
+      //   パターンを $5202 の 4K バンクと $5201 の縦スクロールから出す(Mesen と同じ数え方。画面の列 = 通し番号+2)
+      const isNt = addr >= 0x2000 && (addr & 0x3FF) < 0x3C0;
+      if (isNt) this.splitN++;
+      if (this.tickPending) { this.tickPending = false; this._scanlineTick(); } // 3 連続読みの「次の読み」(属性)で行を進める(Mesen と同じ)
       if (addr < 0x2000) {
+        if (this.splitOn && this.splitIn && this.exMode <= 1 && this.inFrame && this._bgFetching()) {
+          const vs = (this.scanline + this.splitScroll) % 240, bank = this.splitBank % Math.max(1, this.chrBanks1 >> 2);
+          return this.chr[(bank << 12) + (((addr & ~7) | (vs & 7)) & 0xFFF)];
+        }
         if (this.exMode === 1 && this._bgFetching()) {
           const bank = ((this.exTile & 0x3F) | (this.chrUpper << 6)) % Math.max(1, this.chrBanks1 >> 2);
           return this.chr[(bank << 12) + (addr & 0xFFF)];
@@ -5111,10 +5261,23 @@
       }
       // ネームテーブル。スキャンライン検出: 同じ番地の連続 3 回読み(337・339 ドット目のダミー読みと次の行の 1 ドット目)
       if (this._bgFetching()) {
-        if (addr === this.ntLast) { if (++this.ntSame === 3) this._scanlineTick(); }
+        if (addr === this.ntLast) { if (++this.ntSame === 3) { this.tickPending = true; this.splitN = 0; } }
         else { this.ntLast = addr; this.ntSame = 1; }
       }
       const mode = this._nt(addr), lo = addr & 0x3FF, isAttr = lo >= 0x3C0;
+      if (this.splitOn && this.exMode <= 1 && this.inFrame && this._bgFetching()) {
+        const sl = this.splitN >= 41 ? this.scanline + 1 : this.scanline;
+        const vs = (sl + this.splitScroll) % 240, col = (this.splitN + 2) % 42;
+        if (isNt) {
+          if (col === 0) this.splitIn = !this.splitRight;
+          if (col === this.splitTile && this.splitN < 42) this.splitIn = !this.splitIn;
+          else if (col > 32) this.splitIn = false;
+          if (this.splitIn) { this.splitAddr = ((vs & 0xF8) << 2) | col; return this.exram[this.splitAddr]; }
+        } else if (this.splitIn) {
+          const t = this.splitAddr, shift = ((t >> 4) & 4) | (t & 2), at = 0x3C0 | ((t & 0x380) >> 4) | ((t & 0x1F) >> 2);
+          return ((this.exram[at] >> shift) & 3) * 0x55;
+        }
+      }
       if (this.exMode === 1 && this._bgFetching()) {
         if (isAttr) return ((this.exTile >> 6) & 3) * 0x55;
         this.exTile = this.exram[lo];
@@ -5652,7 +5815,9 @@
           if (dot >= 257 && dot <= 320) {
             this.oamAddr = 0;
             const k = (dot - 257) & 7;
-            if (k === 5) this.fetchSpriteSlot((dot - 257) >> 3, 0);
+            if (k === 1) this.mapper.ppuRead(0x2000 | (this.v & 0x0FFF)); // ゴミの NT 読み(実機どおり。MMC5 はこれもタイル列として数える)
+            else if (k === 3) this.mapper.ppuRead(0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07)); // ゴミの属性読み
+            else if (k === 5) this.fetchSpriteSlot((dot - 257) >> 3, 0);
             else if (k === 7) this.fetchSpriteSlot((dot - 257) >> 3, 1);
           }
           if (line === 261 && dot >= 280 && dot <= 304) this.copyY();

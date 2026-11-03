@@ -14,7 +14,8 @@
  *   [VGM を保存](ダウンロード)と [変換へ](本体の VGM 経路で開いて鍵盤表示/MML 変換へ)を出す。
  * ■ 入力
  *   十字=矢印、A=X、B=Z、Start=Enter、Select=Shift。canvas にフォーカスがあるときだけ(エディタの矢印を奪わない)。
- *   ゲームパッドは標準配置(0=A、1/2=B、8=Select、9=Start、12-15=十字、左スティック)。
+ *   ゲームパッドは標準配置(0=A、1/2=B、8=Select、9=Start、12-15=十字、左スティック)。つながっている順に 1P(キーボードと
+ *   合成)、2P(2 台目)。
  */
 (function (global) {
   'use strict';
@@ -242,26 +243,38 @@
   }
 
   // ── 入力 ──
+  // ゲームパッド: つながっている順に 1P(キーボードと合成)、2P。戻り値は [1P のビット, 2P のビット]
   function gamepadBits() {
-    let bits = 0;
+    const out = [0, 0];
+    let n = 0;
     const pads = (navigator.getGamepads && navigator.getGamepads()) || [];
     for (const gp of pads) {
       if (!gp || !gp.connected) continue;
+      let bits = 0;
       const b = gp.buttons, on = (i) => !!(b[i] && (b[i].pressed || b[i].value > 0.5));
       if (on(0)) bits |= 1; if (on(1) || on(2)) bits |= 2; if (on(8)) bits |= 4; if (on(9)) bits |= 8;
       if (on(12)) bits |= 16; if (on(13)) bits |= 32; if (on(14)) bits |= 64; if (on(15)) bits |= 128;
       const ax = gp.axes[0] || 0, ay = gp.axes[1] || 0;
       if (ax < -0.5) bits |= 64; if (ax > 0.5) bits |= 128; if (ay < -0.5) bits |= 16; if (ay > 0.5) bits |= 32;
-      break;
+      out[n++] = bits;
+      if (n >= 2) break;
     }
-    return bits;
+    return out;
   }
+  let lastPad2 = -1;
   function pushPad() {
-    const bits = keyBits | gamepadBits();
-    if (bits === lastPad) return;
-    lastPad = bits;
-    if (node) node.port.postMessage({ type: 'pad', port: 0, bits });
-    else if (nes) nes.setController(0, bits);
+    const gp = gamepadBits();
+    const bits = keyBits | gp[0], bits2 = gp[1];
+    if (bits !== lastPad) {
+      lastPad = bits;
+      if (node) node.port.postMessage({ type: 'pad', port: 0, bits });
+      else if (nes) nes.setController(0, bits);
+    }
+    if (bits2 !== lastPad2) {
+      lastPad2 = bits2;
+      if (node) node.port.postMessage({ type: 'pad', port: 1, bits: bits2 });
+      else if (nes) nes.setController(1, bits2);
+    }
   }
 
   // ── 描画 ──

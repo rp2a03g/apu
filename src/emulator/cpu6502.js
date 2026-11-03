@@ -234,30 +234,17 @@
 
   // --- 命令ハンドラ ---
 
-  function ADC(cpu, mode) {
-    const op = cpu.fetchOperand(mode);
+  function adcValue(cpu, value) {
     const c = cpu.getFlag(F_C) ? 1 : 0;
-    const sum = cpu.A + op.value + c;
-    const result = sum & 0xFF;
-    cpu.setFlag(F_V, ((cpu.A ^ result) & (op.value ^ result) & 0x80) !== 0);
-    cpu.setFlag(F_C, sum > 0xFF);
-    cpu.A = result;
-    cpu.setZN(cpu.A);
-    return op.pageCrossed ? 1 : 0;
-  }
-
-  function SBC(cpu, mode) {
-    const op = cpu.fetchOperand(mode);
-    const c = cpu.getFlag(F_C) ? 1 : 0;
-    const value = op.value ^ 0xFF;
     const sum = cpu.A + value + c;
     const result = sum & 0xFF;
     cpu.setFlag(F_V, ((cpu.A ^ result) & (value ^ result) & 0x80) !== 0);
     cpu.setFlag(F_C, sum > 0xFF);
     cpu.A = result;
     cpu.setZN(cpu.A);
-    return op.pageCrossed ? 1 : 0;
   }
+  function ADC(cpu, mode) { const op = cpu.fetchOperand(mode); adcValue(cpu, op.value); return op.pageCrossed ? 1 : 0; }
+  function SBC(cpu, mode) { const op = cpu.fetchOperand(mode); adcValue(cpu, op.value ^ 0xFF); return op.pageCrossed ? 1 : 0; }
 
   function AND(cpu, mode) {
     const op = cpu.fetchOperand(mode);
@@ -443,9 +430,110 @@
     if (mode !== 'impl') cpu.fetchOperand(mode); // オペランド読み飛ばし(通常未使用)
     return 0;
   }
+  function NOPX(cpu, mode) { const op = cpu.fetchOperand(mode); return op.pageCrossed ? 1 : 0; } // 非公式 NOP abs,X はページ跨ぎで +1
+
+  // --- 非公式(未定義)命令。NESdev Wiki「CPU unofficial opcodes」の安定な物と、不安定な物は一般的な解釈 ---
+  //   読み書き複合(SLO/RLA/SRE/RRA/DCP/ISC)は「RMW してから A と演算」。SH*/TAS はページ跨ぎで番地の上位が値になる癖まで。
+  //   JAM は PC を進めず止まる(本体は回り続ける)。XAA/LAX #imm の定数は $EE(実機でもばらつく)
+  function LAX(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A = cpu.X = op.value; cpu.setZN(op.value); return op.pageCrossed ? 1 : 0; }
+  function SAX(cpu, mode) { const op = cpu.fetchOperand(mode, true); cpu.write(op.addr, cpu.A & cpu.X); return 0; }
+  function DCP(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value - 1) & 0xFF; cpu.write(op.addr, r); compare(cpu, cpu.A, r); return 0; }
+  function ISC(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value + 1) & 0xFF; cpu.write(op.addr, r); adcValue(cpu, r ^ 0xFF); return 0; }
+  function SLO(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = (op.value << 1) & 0xFF; cpu.write(op.addr, r); cpu.A |= r; cpu.setZN(cpu.A); return 0; }
+  function RLA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = ((op.value << 1) | c) & 0xFF; cpu.write(op.addr, r); cpu.A &= r; cpu.setZN(cpu.A); return 0; }
+  function SRE(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 1) !== 0); const r = op.value >> 1; cpu.write(op.addr, r); cpu.A ^= r; cpu.setZN(cpu.A); return 0; }
+  function RRA(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 1) !== 0); const r = (op.value >> 1) | (c << 7); cpu.write(op.addr, r); adcValue(cpu, r); return 0; }
+  function ANC(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A &= op.value; cpu.setZN(cpu.A); cpu.setFlag(F_C, (cpu.A & 0x80) !== 0); return 0; }
+  function ALR(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A &= op.value; cpu.setFlag(F_C, (cpu.A & 1) !== 0); cpu.A >>= 1; cpu.setZN(cpu.A); return 0; }
+  function ARR(cpu, mode) {
+    const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0;
+    cpu.A = (((cpu.A & op.value) >> 1) | (c << 7)) & 0xFF; cpu.setZN(cpu.A);
+    cpu.setFlag(F_C, (cpu.A & 0x40) !== 0); cpu.setFlag(F_V, (((cpu.A >> 6) ^ (cpu.A >> 5)) & 1) !== 0); return 0;
+  }
+  function SBX(cpu, mode) { const op = cpu.fetchOperand(mode); const t = (cpu.A & cpu.X) - op.value; cpu.setFlag(F_C, t >= 0); cpu.X = t & 0xFF; cpu.setZN(cpu.X); return 0; }
+  function XAA(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A = (cpu.A | 0xEE) & cpu.X & op.value; cpu.setZN(cpu.A); return 0; }
+  function LAXimm(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A = cpu.X = (cpu.A | 0xEE) & op.value; cpu.setZN(cpu.A); return 0; }
+  function LAS(cpu, mode) { const op = cpu.fetchOperand(mode); const v = op.value & cpu.S; cpu.A = cpu.X = cpu.S = v; cpu.setZN(v); return op.pageCrossed ? 1 : 0; }
+  // SHY/SHX/SHA/TAS: 値 = レジスタ & (ベース番地の上位+1)。ページを跨いだ時は書き込み先の上位バイトがその値になる
+  function storeHigh(cpu, mode, reg) {
+    const op = cpu.fetchOperand(mode, true);
+    const idx = mode === 'absx' ? cpu.X : cpu.Y;
+    const base = (op.addr - idx) & 0xFFFF;
+    const v = reg & (((base >> 8) + 1) & 0xFF);
+    const addr = op.pageCrossed ? ((v << 8) | (op.addr & 0xFF)) : op.addr;
+    cpu.write(addr, v);
+    return 0;
+  }
+  function SHY(cpu, mode) { return storeHigh(cpu, mode, cpu.Y); }
+  function SHX(cpu, mode) { return storeHigh(cpu, mode, cpu.X); }
+  function SHA(cpu, mode) { return storeHigh(cpu, mode, cpu.A & cpu.X); }
+  function TAS(cpu, mode) { cpu.S = cpu.A & cpu.X; return storeHigh(cpu, mode, cpu.S); }
+  function JAM(cpu) { cpu.halted = true; cpu.PC = (cpu.PC - 1) & 0xFFFF; return 0; }
 
   // mnemonic -> {mode: [opcodeByte, cycles]}
   const TABLE = {
+    // 非公式(安定)
+    LAX: { fn: LAX, modes: { zp: [0xA7, 3], zpy: [0xB7, 4], abs: [0xAF, 4], absy: [0xBF, 4], indx: [0xA3, 6], indy: [0xB3, 5] } },
+    SAX: { fn: SAX, modes: { zp: [0x87, 3], zpy: [0x97, 4], abs: [0x8F, 4], indx: [0x83, 6] } },
+    DCP: { fn: DCP, modes: { zp: [0xC7, 5], zpx: [0xD7, 6], abs: [0xCF, 6], absx: [0xDF, 7], absy: [0xDB, 7], indx: [0xC3, 8], indy: [0xD3, 8] } },
+    ISC: { fn: ISC, modes: { zp: [0xE7, 5], zpx: [0xF7, 6], abs: [0xEF, 6], absx: [0xFF, 7], absy: [0xFB, 7], indx: [0xE3, 8], indy: [0xF3, 8] } },
+    SLO: { fn: SLO, modes: { zp: [0x07, 5], zpx: [0x17, 6], abs: [0x0F, 6], absx: [0x1F, 7], absy: [0x1B, 7], indx: [0x03, 8], indy: [0x13, 8] } },
+    RLA: { fn: RLA, modes: { zp: [0x27, 5], zpx: [0x37, 6], abs: [0x2F, 6], absx: [0x3F, 7], absy: [0x3B, 7], indx: [0x23, 8], indy: [0x33, 8] } },
+    SRE: { fn: SRE, modes: { zp: [0x47, 5], zpx: [0x57, 6], abs: [0x4F, 6], absx: [0x5F, 7], absy: [0x5B, 7], indx: [0x43, 8], indy: [0x53, 8] } },
+    RRA: { fn: RRA, modes: { zp: [0x67, 5], zpx: [0x77, 6], abs: [0x6F, 6], absx: [0x7F, 7], absy: [0x7B, 7], indx: [0x63, 8], indy: [0x73, 8] } },
+    'SBC*': { fn: SBC, modes: { imm: [0xEB, 2] } },
+    ANC: { fn: ANC, modes: { imm: [0x0B, 2] } },
+    'ANC*': { fn: ANC, modes: { imm: [0x2B, 2] } },
+    ALR: { fn: ALR, modes: { imm: [0x4B, 2] } },
+    ARR: { fn: ARR, modes: { imm: [0x6B, 2] } },
+    SBX: { fn: SBX, modes: { imm: [0xCB, 2] } },
+    'NOP*': { fn: NOP, modes: { impl: [0x1A, 2] } },
+    'NOP*2': { fn: NOP, modes: { impl: [0x3A, 2] } },
+    'NOP*3': { fn: NOP, modes: { impl: [0x5A, 2] } },
+    'NOP*4': { fn: NOP, modes: { impl: [0x7A, 2] } },
+    'NOP*5': { fn: NOP, modes: { impl: [0xDA, 2] } },
+    'NOP*6': { fn: NOP, modes: { impl: [0xFA, 2] } },
+    'NOP#': { fn: NOP, modes: { imm: [0x80, 2] } },
+    'NOP#2': { fn: NOP, modes: { imm: [0x82, 2] } },
+    'NOP#3': { fn: NOP, modes: { imm: [0x89, 2] } },
+    'NOP#4': { fn: NOP, modes: { imm: [0xC2, 2] } },
+    'NOP#5': { fn: NOP, modes: { imm: [0xE2, 2] } },
+    'NOPz': { fn: NOP, modes: { zp: [0x04, 3] } },
+    'NOPz2': { fn: NOP, modes: { zp: [0x44, 3] } },
+    'NOPz3': { fn: NOP, modes: { zp: [0x64, 3] } },
+    'NOPzx': { fn: NOP, modes: { zpx: [0x14, 4] } },
+    'NOPzx2': { fn: NOP, modes: { zpx: [0x34, 4] } },
+    'NOPzx3': { fn: NOP, modes: { zpx: [0x54, 4] } },
+    'NOPzx4': { fn: NOP, modes: { zpx: [0x74, 4] } },
+    'NOPzx5': { fn: NOP, modes: { zpx: [0xD4, 4] } },
+    'NOPzx6': { fn: NOP, modes: { zpx: [0xF4, 4] } },
+    'NOPa': { fn: NOP, modes: { abs: [0x0C, 4] } },
+    'NOPax': { fn: NOPX, modes: { absx: [0x1C, 4] } },
+    'NOPax2': { fn: NOPX, modes: { absx: [0x3C, 4] } },
+    'NOPax3': { fn: NOPX, modes: { absx: [0x5C, 4] } },
+    'NOPax4': { fn: NOPX, modes: { absx: [0x7C, 4] } },
+    'NOPax5': { fn: NOPX, modes: { absx: [0xDC, 4] } },
+    'NOPax6': { fn: NOPX, modes: { absx: [0xFC, 4] } },
+    // 非公式(不安定。一般的な解釈)
+    XAA: { fn: XAA, modes: { imm: [0x8B, 2] } },
+    'LAX#': { fn: LAXimm, modes: { imm: [0xAB, 2] } },
+    LAS: { fn: LAS, modes: { absy: [0xBB, 4] } },
+    SHY: { fn: SHY, modes: { absx: [0x9C, 5] } },
+    SHX: { fn: SHX, modes: { absy: [0x9E, 5] } },
+    SHA: { fn: SHA, modes: { absy: [0x9F, 5], indy: [0x93, 6] } },
+    TAS: { fn: TAS, modes: { absy: [0x9B, 5] } },
+    JAM: { fn: JAM, modes: { impl: [0x02, 2] } },
+    'JAM2': { fn: JAM, modes: { impl: [0x12, 2] } },
+    'JAM3': { fn: JAM, modes: { impl: [0x22, 2] } },
+    'JAM4': { fn: JAM, modes: { impl: [0x32, 2] } },
+    'JAM5': { fn: JAM, modes: { impl: [0x42, 2] } },
+    'JAM6': { fn: JAM, modes: { impl: [0x52, 2] } },
+    'JAM7': { fn: JAM, modes: { impl: [0x62, 2] } },
+    'JAM8': { fn: JAM, modes: { impl: [0x72, 2] } },
+    'JAM9': { fn: JAM, modes: { impl: [0x92, 2] } },
+    'JAM10': { fn: JAM, modes: { impl: [0xB2, 2] } },
+    'JAM11': { fn: JAM, modes: { impl: [0xD2, 2] } },
+    'JAM12': { fn: JAM, modes: { impl: [0xF2, 2] } },
     ADC: { fn: ADC, modes: { imm: [0x69, 2], zp: [0x65, 3], zpx: [0x75, 4], abs: [0x6D, 4], absx: [0x7D, 4], absy: [0x79, 4], indx: [0x61, 6], indy: [0x71, 5] } },
     AND: { fn: AND, modes: { imm: [0x29, 2], zp: [0x25, 3], zpx: [0x35, 4], abs: [0x2D, 4], absx: [0x3D, 4], absy: [0x39, 4], indx: [0x21, 6], indy: [0x31, 5] } },
     ASL: { fn: ASL, modes: { acc: [0x0A, 2], zp: [0x06, 5], zpx: [0x16, 6], abs: [0x0E, 6], absx: [0x1E, 7] } },

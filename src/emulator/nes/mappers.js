@@ -48,6 +48,7 @@
       this.chrMap = new Int32Array(8);
       this.ntMap = [0, 0, 1, 1];
       this.audio = null;      // 拡張音源(Emu.N163Audio など)。clock()/mixSample() を持つ
+      this.ramRead = true; this.ramWrite = true; // PRG RAM($6000-$7FFF)の保護ビット(基板ごとに書き換える。無効なら読みは open bus、書きは捨てる)
       this.extBits = 0;
       this.ppu = null;        // PPU が自分を入れる(MMC5 が描画の位相を見る)
       this.irqFlag = false;
@@ -65,12 +66,12 @@
 
     cpuRead(addr) {
       if (addr >= 0x8000) return this.prg[this.prgMap[(addr - 0x8000) >> 13] + (addr & 0x1FFF)];
-      if (addr >= 0x6000) return this.prgRam[(addr - 0x6000) % this.prgRam.length];
+      if (addr >= 0x6000) return this.ramRead ? this.prgRam[(addr - 0x6000) % this.prgRam.length] : -1;
       return -1;
     }
     cpuWrite(addr, v) {
       if (addr >= 0x8000) this.writeReg(addr, v);
-      else if (addr >= 0x6000) this.prgRam[(addr - 0x6000) % this.prgRam.length] = v;
+      else if (addr >= 0x6000) { if (this.ramWrite) this.prgRam[(addr - 0x6000) % this.prgRam.length] = v; }
     }
     writeReg() {}
     ppuRead(addr) {
@@ -198,7 +199,7 @@
         case 0x8000: this.bankSelect = v; this.apply(); break;
         case 0x8001: this.regs[this.bankSelect & 7] = v; this.apply(); break;
         case 0xA000: if (!this.rom.fourScreen) this.setMirroring((v & 1) ? 'H' : 'V'); break;
-        case 0xA001: break; // PRG RAM 保護(未対応)
+        case 0xA001: this.ramRead = (v & 0x80) !== 0; this.ramWrite = (v & 0xC0) === 0x80; break; // bit7 有効、bit6 書き込み禁止(MMC6 は別)
         case 0xC000: this.irqLatch = v; break;
         case 0xC001: this.irqReload = true; break;
         case 0xE000: this.irqEnable = false; this.irqFlag = false; break;
@@ -269,6 +270,11 @@
       if ((addr & 0xF800) === 0x4800) { if (this.audio) this.audio.writeRegister(0x4800, v); return; }
       if (addr === 0x5000) { this.irqCounter = (this.irqCounter & 0x7F00) | v; this.irqFlag = false; return; }
       if (addr === 0x5800) { this.irqCounter = (this.irqCounter & 0x00FF) | ((v & 0x7F) << 8); this.irqEnable = (v & 0x80) !== 0; this.irqFlag = false; return; }
+      if (addr >= 0x6000 && addr < 0x8000) { // 書き込み保護: $F800 bit6 が立ち、その 2K の禁止ビット(bit0-3)が 0 の時だけ書ける
+        const p = this.ramProtect | 0;
+        if ((p & 0x40) && !(p & (1 << ((addr >> 11) & 3)))) this.prgRam[(addr - 0x6000) % this.prgRam.length] = v;
+        return;
+      }
       super.cpuWrite(addr, v);
     }
     writeReg(addr, v) {
@@ -283,7 +289,7 @@
       if (hi === 0xE000) { this.setPrg8(0, v & 0x3F); return; }
       if (hi === 0xE800) { this.setPrg8(1, v & 0x3F); this.ntRamOk[0] = !(v & 0x40); this.ntRamOk[1] = !(v & 0x80); return; }
       if (hi === 0xF000) { this.setPrg8(2, v & 0x3F); return; }
-      if (hi === 0xF800) { if (this.audio) this.audio.writeRegister(0xF800, v); } // 音源アドレス(+PRG RAM 保護ビット、未対応)
+      if (hi === 0xF800) { if (this.audio) this.audio.writeRegister(0xF800, v); this.ramProtect = v; } // 音源アドレス+PRG RAM 書き込み保護(bit6=0 で全体禁止、bit0-3 で 2K ごとに禁止)
     }
     ppuRead(addr) {
       const slot = addr < 0x2000 ? (addr >> 10) : 8 + ((addr >> 10) & 3);
@@ -305,7 +311,8 @@
   }
 
   // 24/26: Konami VRC6(PRG 16K+8K 切替、CHR 1K×8、IRQ、音源。26 は A0/A1 が入れ替わった配線)
-  //   未対応: $B003 の CHR モード(bit0-1,4-6。ほぼ全てのソフトがモード 0=1K×8)、PRG RAM 保護
+  //   $B003: bit0-1 CHR モード(0=1K×8、1=2K×4、2/3=1K×4+2K×2)、bit5 2K の下位ビット固定、bit2-3 ミラーリング、bit7 PRG RAM 有効。
+  //   未対応: bit4 のネームテーブルを CHR ROM から出す配線
   class VRC6 extends Mapper {
     constructor(rom) {
       super(rom);
@@ -314,7 +321,36 @@
       this.extBits = 0x01;
       this.irq = new VrcIrq();
       this.shadow = new Int16Array(0x10).fill(-1); // 音源 9 レジスタの影(index = (hi-9)*4+lo)
+      this.chrRegs = new Uint8Array(8); this.bankMode = 0; // $B003 の値(bit0-1 CHR モード、bit5 2K の下位ビット固定、bit7 PRG RAM 有効)
+      this.ramRead = this.ramWrite = false;
       this.setPrg16(0, 0); this.setPrg8(2, -2); this.setPrg8(3, -1);
+    }
+    // CHR: モード 0=1K×8(R0-R7)、1=2K×4(R0-R3)、2/3=1K×4(R0-R3)+2K×2(R4,R5)。2K は bit5 が立つと下位ビットを 0/1 に固定、
+    //   立たなければ R の値そのまま(=同じ 1K が 2 回)。未対応: bit4 のネームテーブルを CHR ROM から出す配線(使うソフトは稀)
+    applyChr() {
+      const r = this.chrRegs, m = this.bankMode, mask = (m & 0x20) ? 0xFE : 0xFF, or = (m & 0x20) ? 1 : 0;
+      const two = (slot, v) => { this.setChr1(slot, v & mask); this.setChr1(slot + 1, (v & mask) | or); };
+      switch (m & 3) {
+        case 0: for (let i = 0; i < 8; i++) this.setChr1(i, r[i]); break;
+        case 1: for (let i = 0; i < 4; i++) two(i * 2, r[i]); break;
+        default: for (let i = 0; i < 4; i++) this.setChr1(i, r[i]); two(4, r[4]); two(6, r[5]);
+      }
+      // ネームテーブル(CIRAM): bit5 が立った通常の組み合わせは bit2-3 のミラーリング、それ以外は R4-R7 の bit0 がページを選ぶ
+      // (NesDev の表。bit4=1 で CHR ROM をネームテーブルに出す配線は未対応で、CIRAM として扱う)
+      switch (m & 0x2F) {
+        case 0x20: case 0x27: this.setMirroring('V'); break;
+        case 0x23: case 0x24: this.setMirroring('H'); break;
+        case 0x28: case 0x2F: this.setMirroring('1A'); break;
+        case 0x2B: case 0x2C: this.setMirroring('1B'); break;
+        default: {
+          const b = (i) => r[i] & 1;
+          switch (m & 7) {
+            case 0: case 6: case 7: this.ntMap = [b(6), b(6), b(7), b(7)]; break;
+            case 1: case 5: this.ntMap = [b(4), b(5), b(6), b(7)]; break;
+            default: this.ntMap = [b(6), b(7), b(6), b(7)];
+          }
+        }
+      }
     }
     _canon(addr) { return this.swapA0A1 ? (addr & 0xFFFC) | ((addr & 1) << 1) | ((addr >> 1) & 1) : addr; }
     audioAddr(addr) {
@@ -337,11 +373,11 @@
           break; // $9003(周波数制御)は未対応
         case 0xB000:
           if (lo <= 2) { this.shadow[8 + lo] = v; if (this.audio) this.audio.writeRegister(hi + lo, v); }
-          else this.setMirroring(['V', 'H', '1A', '1B'][(v >> 2) & 3]);
+          else { this.bankMode = v; this.ramRead = this.ramWrite = (v & 0x80) !== 0; this.applyChr(); }
           break;
         case 0xC000: this.setPrg8(2, v & 0x1F); break;
-        case 0xD000: this.setChr1(lo, v); break;
-        case 0xE000: this.setChr1(4 + lo, v); break;
+        case 0xD000: this.chrRegs[lo] = v; this.applyChr(); break;
+        case 0xE000: this.chrRegs[4 + lo] = v; this.applyChr(); break;
         case 0xF000:
           if (lo === 0) this.irq.writeLatch(v);
           else if (lo === 1) this.irq.writeControl(v);
@@ -388,6 +424,7 @@
           if (!second) {
             this.setMirroring(['V', 'H', '1A', '1B'][v & 3]);
             if ((v & 0x40) && this.audio) this.audio.reset(); // bit6: 音源を黙らせる(リセット)
+            this.ramRead = this.ramWrite = (v & 0x80) !== 0;  // bit7: PRG RAM 有効
           } else this.irq.writeLatch(v);
           break;
         case 0xF000: if (!second) this.irq.writeControl(v); else this.irq.ack(); break;
@@ -1116,7 +1153,8 @@
   //   ($5101)と 8×16 スプライト時の A/B 2 組、ネームテーブル割当($5105: CIRAM/ExRAM/塗りつぶし)、ExRAM の
   //   4 モード($5104。モード 1=拡張属性: タイルごとの 4K CHR バンクとパレット)、スキャンライン IRQ($5203/$5204。
   //   実機と同じく「同じネームテーブル番地の連続 3 回読み」で行を数える)、乗算器($5205/$5206)、音源($5000-$5015)。
-  //   未対応: 縦分割($5200-$5202)、PRG RAM 書き込み保護($5102/$5103)、$5015 の読み出し(音源の状態)
+  //   縦分割($5200-$5202)、PRG RAM 書き込み保護($5102/$5103)、$5015 の読み出し(音源の長さカウンタ)も対応。
+  //   未対応: 2 つめの 64K 以上の RAM 配置(NES 2.0 の 64K/128K RAM を 1 塊として扱う)
   class MMC5 extends Mapper {
     constructor(rom) {
       super(rom);
@@ -1134,6 +1172,9 @@
       this.slotIsRam = [false, false, false, false]; this.slotOff = new Int32Array(4);
       this.irqCompare = 0; this.irqEnable = false; this.irqPend = false; this.inFrame = false;
       this.scanline = 0; this.ntLast = -1; this.ntSame = 0; this.idleDots = 0;
+      this.prot1 = 0; this.prot2 = 0; this.ramWrite = false; // $5102/$5103 が 2/1 になるまで PRG RAM は書けない
+      this.splitOn = false; this.splitRight = false; this.splitTile = 0; this.splitScroll = 0; this.splitBank = 0; // 縦分割($5200-$5202)
+      this.splitN = 0; this.splitIn = false; this.splitAddr = 0; this.tickPending = false; // 行内の NT 取得の通し番号(3 連続読みで 0 に戻る)、分割領域の中か、分割側の NT 番地
       this.mulA = 0xFF; this.mulB = 0xFF;
       this.exTile = 0;                                    // 拡張属性モードで最後に読んだネームテーブルの ExRAM バイト
       this.audioShadow = new Int16Array(0x16).fill(-1);
@@ -1157,6 +1198,7 @@
       if (addr >= 0x5C00) return (this.exMode >= 2) ? this.exram[addr & 0x3FF] : -1;
       switch (addr) {
         case 0x5204: { const v = (this.irqPend ? 0x80 : 0) | (this.inFrame ? 0x40 : 0); this.irqPend = false; return v; }
+        case 0x5015: { const a = this.audio; return a && a.pulse1 && a.pulse2 ? ((a.pulse1.lengthCounter > 0 ? 1 : 0) | (a.pulse2.lengthCounter > 0 ? 2 : 0)) : 0; } // 音源の状態(長さカウンタ)
         case 0x5205: return (this.mulA * this.mulB) & 0xFF;
         case 0x5206: return ((this.mulA * this.mulB) >> 8) & 0xFF;
       }
@@ -1165,10 +1207,21 @@
     cpuWrite(addr, v) {
       if (addr >= 0x8000) {
         const s = (addr - 0x8000) >> 13;
-        if (this.slotIsRam[s]) this.prgRam[(this.slotOff[s] + (addr & 0x1FFF)) % this.prgRam.length] = v;
+        if (this.slotIsRam[s] && this.ramWrite) this.prgRam[(this.slotOff[s] + (addr & 0x1FFF)) % this.prgRam.length] = v;
         return;
       }
-      if (addr >= 0x6000) { this.prgRam[(((this.prgRegs[0] & 7) << 13) + (addr & 0x1FFF)) % this.prgRam.length] = v; return; }
+      if (addr >= 0x6000) { if (this.ramWrite) this.prgRam[(((this.prgRegs[0] & 7) << 13) + (addr & 0x1FFF)) % this.prgRam.length] = v; return; }
+      if (addr === 0x5102 || addr === 0x5103) { // PRG RAM 書き込み保護: $5102=2 かつ $5103=1 の時だけ書ける
+        if (addr === 0x5102) this.prot1 = v & 3; else this.prot2 = v & 3;
+        this.ramWrite = this.prot1 === 2 && this.prot2 === 1;
+        return;
+      }
+      if (addr >= 0x5200 && addr <= 0x5202) { // 縦分割
+        if (addr === 0x5200) { this.splitOn = (v & 0x80) !== 0; this.splitRight = (v & 0x40) !== 0; this.splitTile = v & 0x1F; }
+        else if (addr === 0x5201) this.splitScroll = v;
+        else this.splitBank = v;
+        return;
+      }
       if (addr >= 0x5C00) { if (this.exMode < 3) this.exram[addr & 0x3FF] = v; return; }
       if (addr >= 0x5000 && addr <= 0x5015) { this.audioShadow[addr - 0x5000] = v; if (this.audio) this.audio.writeRegister(addr, v); return; }
       if (addr >= 0x5120 && addr <= 0x512B) {
@@ -1236,7 +1289,16 @@
     }
     _nt(addr) { return (this.ntMode >> (((addr >> 10) & 3) * 2)) & 3; }
     ppuRead(addr) {
+      // 縦分割: 行内の NT 取得を数え(ダミー読み 2 回目で 0 に戻す)、境目のタイル列で領域に出入りする。領域内は NT/属性を ExRAM、
+      //   パターンを $5202 の 4K バンクと $5201 の縦スクロールから出す(Mesen と同じ数え方。画面の列 = 通し番号+2)
+      const isNt = addr >= 0x2000 && (addr & 0x3FF) < 0x3C0;
+      if (isNt) this.splitN++;
+      if (this.tickPending) { this.tickPending = false; this._scanlineTick(); } // 3 連続読みの「次の読み」(属性)で行を進める(Mesen と同じ)
       if (addr < 0x2000) {
+        if (this.splitOn && this.splitIn && this.exMode <= 1 && this.inFrame && this._bgFetching()) {
+          const vs = (this.scanline + this.splitScroll) % 240, bank = this.splitBank % Math.max(1, this.chrBanks1 >> 2);
+          return this.chr[(bank << 12) + (((addr & ~7) | (vs & 7)) & 0xFFF)];
+        }
         if (this.exMode === 1 && this._bgFetching()) {
           const bank = ((this.exTile & 0x3F) | (this.chrUpper << 6)) % Math.max(1, this.chrBanks1 >> 2);
           return this.chr[(bank << 12) + (addr & 0xFFF)];
@@ -1245,10 +1307,23 @@
       }
       // ネームテーブル。スキャンライン検出: 同じ番地の連続 3 回読み(337・339 ドット目のダミー読みと次の行の 1 ドット目)
       if (this._bgFetching()) {
-        if (addr === this.ntLast) { if (++this.ntSame === 3) this._scanlineTick(); }
+        if (addr === this.ntLast) { if (++this.ntSame === 3) { this.tickPending = true; this.splitN = 0; } }
         else { this.ntLast = addr; this.ntSame = 1; }
       }
       const mode = this._nt(addr), lo = addr & 0x3FF, isAttr = lo >= 0x3C0;
+      if (this.splitOn && this.exMode <= 1 && this.inFrame && this._bgFetching()) {
+        const sl = this.splitN >= 41 ? this.scanline + 1 : this.scanline;
+        const vs = (sl + this.splitScroll) % 240, col = (this.splitN + 2) % 42;
+        if (isNt) {
+          if (col === 0) this.splitIn = !this.splitRight;
+          if (col === this.splitTile && this.splitN < 42) this.splitIn = !this.splitIn;
+          else if (col > 32) this.splitIn = false;
+          if (this.splitIn) { this.splitAddr = ((vs & 0xF8) << 2) | col; return this.exram[this.splitAddr]; }
+        } else if (this.splitIn) {
+          const t = this.splitAddr, shift = ((t >> 4) & 4) | (t & 2), at = 0x3C0 | ((t & 0x380) >> 4) | ((t & 0x1F) >> 2);
+          return ((this.exram[at] >> shift) & 3) * 0x55;
+        }
+      }
       if (this.exMode === 1 && this._bgFetching()) {
         if (isAttr) return ((this.exTile >> 6) & 3) * 0x55;
         this.exTile = this.exram[lo];

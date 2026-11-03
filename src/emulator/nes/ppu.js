@@ -247,7 +247,9 @@
           if (dot >= 257 && dot <= 320) {
             this.oamAddr = 0;
             const k = (dot - 257) & 7;
-            if (k === 5) this.fetchSpriteSlot((dot - 257) >> 3, 0);
+            if (k === 1) this.mapper.ppuRead(0x2000 | (this.v & 0x0FFF)); // ゴミの NT 読み(実機どおり。MMC5 はこれもタイル列として数える)
+            else if (k === 3) this.mapper.ppuRead(0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07)); // ゴミの属性読み
+            else if (k === 5) this.fetchSpriteSlot((dot - 257) >> 3, 0);
             else if (k === 7) this.fetchSpriteSlot((dot - 257) >> 3, 1);
           }
           if (line === 261 && dot >= 280 && dot <= 304) this.copyY();
