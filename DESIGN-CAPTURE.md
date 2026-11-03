@@ -484,6 +484,19 @@ capture.js の writeLog、NsfReplayStreamPlayer。
     画面と一致、endReverse 後の状態と次のフレームも一致。
   - 点検道具(`tools/headless/nes-sweep.js` / `nes-sweep-report.js` / `nes-state-cost.js`): フォルダの .nes を総当たりで回し
     (並列)、起動・音・Start の効き・固まり・速さを JSON Lines に出して分類する。スナップショットの時間も ROM ごとに測れる。
+- 実装(2026-11-04、段階 6i: 総当たり点検で見つかった物の修正):
+  - 6502 の IRQ 判定の遅れ(`cpu6502.js` irqPolledInhibited): IRQ は命令の最後のサイクルで I フラグを見るので、CLI/SEI/PLP で
+    変えた I は次の命令の後から効く(RTI と BRK は即時)。これが無いと「CLI の直後の BRK」で先に APU フレーム IRQ が入り、
+    BRK をシステムコールに使うゲーム(IRQ ハンドラが戻り番地の手前のバイトを機能番号として読む)が 2 バイト前を読んで暴走した。
+    電源投入時の $4017 はフレーム IRQ 有効(Mesen も同じ)なので、この遅れだけで直る。MMC1 256K の RPG 数本と、音は出るのに
+    真っ黒だった物(mapper 0 のアクションなど)がこれで起動した。6502 の SingleStepTests は変わらず JAM 以外一致。
+  - マッパー 16/157/159 のシリアル EEPROM(`mappers.js` Eeprom24C01/24C02): $800D の bit5=SCL・bit6=SDA で I2C を
+    ビット単位に話し、$6000 読みの bit4 に SDA を返す。24C01(128 バイト、番地 7bit+R/W)と 24C02(256 バイト、デバイス番地
+    1010xxxR → 番地 → データ)の状態機械は Mesen と同じ。iNES のヘッダは 24C01 の基板(本来 159)も 16 と書くので、16 では
+    両方に同じ信号を入れ、最初の 1 バイトがデバイス番地なら 24C02、違えば 24C01 と決める(ACK が返らず待ち続けていた)。
+    16 で PRG 512K の物は 153(SRAM)扱い。EEPROM の中身はセーブ(getBatteryData/setBatteryData → IndexedDB)。
+    157(Datach)は本体の 24C02+カートリッジの 24C01(CHR レジスタ 0-3 の bit3 が SCL)。バーコードリーダーは無し。
+  - 未解決: 16 の 512K 1 本(SRAM 上のコードから切り替えたバンクが表)、Datach でカートリッジ側 EEPROM を使う 1 本(ヘッダが 16)。
 
 ---
 

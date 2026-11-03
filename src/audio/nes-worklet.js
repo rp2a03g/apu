@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-03 23:48:19
+ * Built by tools/build-capture-workers.ps1 at 2026-11-04 00:17:05
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-03 23:48:19';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-04 00:17:05';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -56,6 +56,7 @@
       this.PC = 0;
       this.cycles = 0;
       this.halted = false;
+      this.irqPolledI = F_I; // IRQ 判定に使う I フラグ(前の命令の最後のサイクルで見た値。CLI/SEI/PLP は 1 命令遅れて効く)
       this.callActive = false;
     }
 
@@ -66,6 +67,7 @@
       this.push(this.PC & 0xFF);
       this.push((this.P | F_U) & ~F_B);
       this.setFlag(F_I, true);
+      this.irqPolledI = F_I;
       this.PC = this.read16(vector);
       return 7;
     }
@@ -75,6 +77,9 @@
     nmi() { return this.interrupt(0xFFFA); }
     irq() { return this.interrupt(0xFFFE); }
     irqInhibited() { return (this.P & F_I) !== 0; }
+    // 実機の IRQ 判定: I フラグは命令の最後のサイクルで見るので、CLI/SEI/PLP で変えた値は次の命令の後から効く
+    // (CLI の直後の BRK が先に実行される。BRK でサブルーチンを呼ぶゲームが CLI; BRK で 2 バイト前に戻って暴走した)。RTI は即時
+    irqPolledInhibited() { return this.irqPolledI !== 0; }
 
     // --- メモリアクセス ---
     read(addr) { return this.bus.read(addr & 0xFFFF) & 0xFF; }
@@ -193,13 +198,16 @@
     // --- 命令実行（1命令）---
     // 戻り値: 消費サイクル数
     step() {
+      const iBefore = this.P & F_I;
       const opcode = this.fetchByte();
       const def = OPS[opcode];
       if (!def) {
         // 未定義オペコードは2サイクルNOP相当として無視する
+        this.irqPolledI = iBefore;
         return 2;
       }
       const extra = def.exec(this, def.mode);
+      this.irqPolledI = (opcode === 0x40 || opcode === 0x00) ? (this.P & F_I) : iBefore; // RTI($40)と BRK($00)は即時
       return def.cycles + (extra || 0);
     }
 
@@ -4525,29 +4533,127 @@
     }
   }
 
-  // 16/153/159: Bandai FCG-1/2・LZ93D50(レジスタは $6000-$7FFF と $8000-$FFFF の両方。NES 2.0 のサブマッパー 4 は
+  // シリアル EEPROM(I2C)。Bandai の基板が $6000 読みの bit4(SDA)と $800D 書きの bit5(SCL)/bit6(SDA)でビット単位に話す。
+  //   24C01(X24C01、128 バイト): START → 7bit 番地+R/W → ACK → データ(読みは ACK で続き、書きは 1 バイトごと ACK)。
+  //   24C02(256 バイト): START → デバイス番地(1010xxxR) → ACK → (書き: 番地 → ACK → データ…)/(読み: 今の番地から)。
+  //   挙動は Mesen の Eeprom24C01/24C02 と同じ(ビットは MSB から。出力は離すと 1)。
+  const EE_IDLE = 0, EE_ADDR = 1, EE_READ = 2, EE_WRITE = 3, EE_SENDACK = 4, EE_WAITACK = 5, EE_CHIP = 6;
+  class Eeprom24C0X {
+    constructor(size) {
+      this.size = size; this.data = new Uint8Array(size).fill(0xFF);
+      this.mode = EE_IDLE; this.next = EE_IDLE; this.chip = 0; this.address = 0; this.byte = 0; this.counter = 0;
+      this.output = 1; this.prevScl = 0; this.prevSda = 0; this.dirty = false;
+    }
+    read() { return this.output; }
+    writeScl(scl) { this.write(scl, this.prevSda); }
+    writeSda(sda) { this.write(this.prevScl, sda); }
+    _in(field, sda) { if (this.counter < 8) { const bit = 7 - this.counter; this[field] = (this[field] & ~(1 << bit)) | (sda << bit); this.counter++; } }
+    _out() { if (this.counter < 8) { this.output = (this.byte >> (7 - this.counter)) & 1; this.counter++; } }
+  }
+  class Eeprom24C01 extends Eeprom24C0X {
+    constructor() { super(128); }
+    write(scl, sda) {
+      if (this.prevScl && scl && this.prevSda && !sda) { this.mode = EE_ADDR; this.address = 0; this.counter = 0; this.output = 1; } // START
+      else if (this.prevScl && scl && !this.prevSda && sda) { this.mode = EE_IDLE; this.output = 1; }                           // STOP
+      else if (scl && !this.prevScl) { // 立ち上がり
+        switch (this.mode) {
+          case EE_ADDR:
+            if (this.counter < 7) this._in('address', sda);
+            else { this.counter = 8; if (sda) { this.next = EE_READ; this.byte = this.data[this.address & 0x7F]; } else this.next = EE_WRITE; }
+            break;
+          case EE_SENDACK: this.output = 0; break;
+          case EE_READ: this._out(); break;
+          case EE_WRITE: this._in('byte', sda); break;
+          case EE_WAITACK: if (sda) this.mode = EE_IDLE; break;
+        }
+      } else if (!scl && this.prevScl) { // 立ち下がり
+        switch (this.mode) {
+          case EE_ADDR: if (this.counter === 8) { this.mode = EE_SENDACK; this.output = 1; } break;
+          case EE_SENDACK: this.mode = this.next; this.counter = 0; this.output = 1; break;
+          case EE_READ: if (this.counter === 8) { this.mode = EE_WAITACK; this.address = (this.address + 1) & 0x7F; } break;
+          case EE_WRITE: if (this.counter === 8) { this.data[this.address & 0x7F] = this.byte; this.dirty = true; this.address = (this.address + 1) & 0x7F; this.mode = EE_SENDACK; this.next = EE_IDLE; } break;
+          case EE_WAITACK: this.mode = EE_READ; this.counter = 0; this.byte = this.data[this.address & 0x7F]; this.output = 1; break;
+        }
+      }
+      this.prevScl = scl; this.prevSda = sda;
+    }
+  }
+  class Eeprom24C02 extends Eeprom24C0X {
+    constructor() { super(256); this.decided = null; } // 最初のデバイス番地で 'ok'/'ng'(16 の種別判定用)
+    write(scl, sda) {
+      if (this.prevScl && scl && this.prevSda && !sda) { this.mode = EE_CHIP; this.counter = 0; this.output = 1; } // START
+      else if (this.prevScl && scl && !this.prevSda && sda) { this.mode = EE_IDLE; this.output = 1; }            // STOP
+      else if (scl && !this.prevScl) {
+        switch (this.mode) {
+          case EE_CHIP: this._in('chip', sda); break;
+          case EE_ADDR: this._in('address', sda); break;
+          case EE_WRITE: this._in('byte', sda); break;
+          case EE_READ: this._out(); break;
+          case EE_SENDACK: this.output = 0; break;
+          case EE_WAITACK: if (!sda) { this.byte = this.data[this.address]; this.next = EE_READ; } else this.next = EE_IDLE; break;
+        }
+      } else if (!scl && this.prevScl) {
+        switch (this.mode) {
+          case EE_CHIP:
+            if (this.counter === 8) {
+              if ((this.chip & 0xF0) === 0xA0) { this.decided = 'ok'; this.counter = 0; this.mode = EE_SENDACK; this.output = 1; if (this.chip & 1) { this.next = EE_READ; this.byte = this.data[this.address]; } else this.next = EE_ADDR; }
+              else { this.decided = 'ng'; this.mode = EE_IDLE; this.output = 1; }
+            }
+            break;
+          case EE_ADDR: if (this.counter === 8) { this.counter = 0; this.mode = EE_SENDACK; this.next = EE_WRITE; this.output = 1; } break;
+          case EE_READ: if (this.counter === 8) { this.counter = 0; this.mode = EE_WAITACK; this.address = (this.address + 1) & 0xFF; } break;
+          case EE_WRITE: if (this.counter === 8) { this.counter = 0; this.data[this.address] = this.byte; this.dirty = true; this.address = (this.address + 1) & 0xFF; this.mode = EE_SENDACK; this.next = EE_WRITE; } break;
+          case EE_SENDACK: case EE_WAITACK: this.mode = this.next; this.counter = 0; this.output = 1; break;
+        }
+      }
+      this.prevScl = scl; this.prevSda = sda;
+    }
+  }
+
+  // 16/153/157/159: Bandai FCG-1/2・LZ93D50(レジスタは $6000-$7FFF と $8000-$FFFF の両方。NES 2.0 のサブマッパー 4 は
   //   FCG-1/2=$6000 側だけ・IRQ カウンタ直書き、5 は LZ93D50=$8000 側だけ)。0-7 CHR 1K、8 PRG 16K、9 ミラーリング、
-  //   A IRQ 有効(有効化でラッチをカウンタへ)、B/C ラッチ下位/上位、D EEPROM(未対応: 読みは SDA=1 を返す)。
+  //   A IRQ 有効(有効化でラッチをカウンタへ)、B/C ラッチ下位/上位、D EEPROM(bit5=SCL、bit6=SDA。読みは $6000 の bit4)。
+  //   EEPROM: 159 は 24C01、157(Datach)は本体の 24C02 とカートリッジの 24C01(SCL は CHR レジスタ 0-3 の bit3、SDA は D の
+  //   bit6。読みは両方の AND。バーコードリーダーは無し)。16 は iNES のヘッダでは 24C01 の基板(本来 159)も 16 と書かれているので、
+  //   24C02 と 24C01 の両方に同じ信号を入れ、最初の 1 バイトがデバイス番地(1010xxxx)なら 24C02、違えば 24C01 と決める
+  //   (NES 2.0 のサブマッパー 4 は EEPROM 無し、5 はセーブ 256 バイトのときだけ 24C02)。16 で PRG 512K の物は 153(SRAM)扱い。
+  //   EEPROM の中身はセーブデータとして扱う(getBatteryData/setBatteryData)。
   //   153(大容量): CHR レジスタの bit0 が PRG の外側バンク、$6000 RAM は D の bit5。IRQ は 16bit ダウン、0 で IRQ
   class BandaiFCG extends Mapper {
     constructor(rom) {
       super(rom);
       this.sub = rom.submapper | 0; this.big = rom.mapper === 153 || this.prgBanks8 >= 0x40; // 512K 以上
+      this.sram = this.big; // 153(と 16 で 512K): $6000 は SRAM、EEPROM 無し
       this.chrRegs = new Uint8Array(8); this.prgPage = 0; this.outer = 0;
       this.irqEnable = false; this.irqCounter = 0; this.irqLatch = 0;
+      this.eeprom = null; this.eeprom2 = null;
+      this.eepromAlt = null; // 16(iNES): 種別が決まるまで 24C01 にも同じ信号を入れておく
+      if (this.sram) { /* SRAM */ }
+      else if (rom.mapper === 157) { this.eeprom = new Eeprom24C02(); this.eeprom2 = new Eeprom24C01(); }
+      else if (rom.mapper === 159) this.eeprom = new Eeprom24C01();
+      else if (rom.mapper === 16 && this.sub === 0) { this.eeprom = new Eeprom24C02(); this.eepromAlt = new Eeprom24C01(); }
+      else if (rom.mapper === 16 && this.sub === 5 && rom.prgRamSize === 256) this.eeprom = new Eeprom24C02();
+      if (this.eeprom) {
+        this.getBatteryData = () => { const a = this.eeprom.data, b = this.eeprom2 ? this.eeprom2.data : null; const out = new Uint8Array(a.length + (b ? b.length : 0)); out.set(a); if (b) out.set(b, a.length); return out; };
+        this.setBatteryData = (bytes) => { const a = this.eeprom.data, b = this.eeprom2 ? this.eeprom2.data : null; if (bytes.length !== a.length + (b ? b.length : 0)) return false; a.set(bytes.subarray(0, a.length)); if (b) b.set(bytes.subarray(a.length)); return true; };
+      }
       this.setPrg16(0, 0); this.setPrg16(1, 0x0F);
     }
+    get diskDirty() { return !!((this.eeprom && this.eeprom.dirty) || (this.eeprom2 && this.eeprom2.dirty)); } // 本体の batteryDirty が見る
+    set diskDirty(v) { if (!v) { if (this.eeprom) this.eeprom.dirty = false; if (this.eeprom2) this.eeprom2.dirty = false; } }
     cpuRead(addr) {
       if (addr >= 0x6000 && addr < 0x8000) {
-        if (this.rom.mapper === 153) return this.prgRam[(addr - 0x6000) & 0x1FFF];
-        return 0x10; // EEPROM の SDA(アイドル=1)。バーコードリーダーは無し
+        if (this.sram) return this.prgRam[(addr - 0x6000) & 0x1FFF];
+        if (!this.eeprom) return 0x10; // EEPROM 無し: SDA=1
+        let sda = this.eeprom.read(); if (this.eeprom2) sda &= this.eeprom2.read();
+        return sda << 4; // バーコードリーダー(bit3)は無し
       }
       return super.cpuRead(addr);
     }
     cpuWrite(addr, v) {
       if (addr < 0x6000) return;
       if (addr < 0x8000) {
-        if (this.rom.mapper === 153) { this.prgRam[(addr - 0x6000) & 0x1FFF] = v; return; }
+        if (this.sram) { this.prgRam[(addr - 0x6000) & 0x1FFF] = v; return; }
         if (this.sub === 5) return;
       } else if (this.sub === 4) return;
       this.writeReg(addr, v);
@@ -4557,6 +4663,7 @@
       switch (addr & 0x0F) {
         case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7:
           this.chrRegs[addr & 7] = v;
+          if (this.eeprom2 && (addr & 7) < 4) this.eeprom2.writeScl((v >> 3) & 1);
           if (this.big) {
             this.outer = 0; for (let i = 0; i < 8; i++) this.outer |= (this.chrRegs[i] & 1) << 4;
             this.setPrg16(0, this.prgPage | this.outer); this.setPrg16(1, 0x0F | this.outer);
@@ -4567,7 +4674,18 @@
         case 0xA: this.irqEnable = (v & 1) !== 0; if (!fcg) this.irqCounter = this.irqLatch; this.irqFlag = false; break;
         case 0xB: if (fcg) this.irqCounter = (this.irqCounter & 0xFF00) | v; else this.irqLatch = (this.irqLatch & 0xFF00) | v; break;
         case 0xC: if (fcg) this.irqCounter = (this.irqCounter & 0x00FF) | (v << 8); else this.irqLatch = (this.irqLatch & 0x00FF) | (v << 8); break;
-        case 0xD: break; // EEPROM / 153 の RAM 許可(RAM は常に許可)
+        case 0xD: // EEPROM / 153 の RAM 許可(RAM は常に許可)
+          if (this.eeprom) {
+            this.eeprom.write((v >> 5) & 1, (v >> 6) & 1);
+            if (this.eeprom2) this.eeprom2.writeSda((v >> 6) & 1);
+            if (this.eepromAlt) { // 種別の判定: 24C02 がデバイス番地を受け取った/蹴った時点で決める
+              this.eepromAlt.write((v >> 5) & 1, (v >> 6) & 1);
+              const d = this.eeprom.decided;
+              if (d === 'ok') this.eepromAlt = null;
+              else if (d === 'ng') { this.eeprom = this.eepromAlt; this.eepromAlt = null; }
+            }
+          }
+          break;
       }
     }
     cpuClock(cycles) {
@@ -5310,7 +5428,7 @@
   }
 
   const TABLE = {
-    0: NROM, 1: MMC1, 155: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 5: MMC5, 7: AxROM, 9: MMC2, 10: MMC2, 16: BandaiFCG, 18: JalecoSS88006, 19: Namco163,
+    0: NROM, 1: MMC1, 155: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 5: MMC5, 7: AxROM, 9: MMC2, 10: MMC2, 16: BandaiFCG, 157: BandaiFCG, 18: JalecoSS88006, 19: Namco163,
     21: VRC24, 22: VRC24, 23: VRC24, 24: VRC6, 25: VRC24, 26: VRC6, 32: IremG101, 33: TaitoTC0190, 34: BNROM, 48: TaitoTC0690,
     65: IremH3001, 66: GxROM, 67: Sunsoft3, 68: Sunsoft4, 69: Sunsoft5B, 70: Bandai74161, 72: JalecoJF17, 73: VRC3, 75: VRC1,
     76: Namco108Variants, 77: IremLROG017, 78: JalecoJF16, 80: TaitoX1005, 82: TaitoX1017, 85: VRC7, 86: JalecoJF13, 87: JalecoJF13,
@@ -5949,12 +6067,13 @@
     // ── バッテリ バックアップ(セーブ)──
     // iNES でバッテリ ビットが立っていれば PRG RAM 全体、.fds ならディスク全面(ギャップつき)が保存の対象。
     // 書き込みがあると batteryDirty が立つ(主スレッド/ヘッドレスがそれを見て保存し、clearBatteryDirty() で下ろす)
-    get hasBattery() { return !!(this.rom.battery || this.rom.fds); }
+    get hasBattery() { return !!(this.rom.battery || this.rom.fds || this.mapper.getBatteryData); } // getBatteryData: EEPROM など基板が持つセーブ
     get batteryDirty() { return this._batDirty || !!this.mapper.diskDirty; }
     clearBatteryDirty() { this._batDirty = false; this.mapper.diskDirty = false; }
     getBattery() {
       if (!this.hasBattery) return null;
       if (this.rom.fds) { const sides = this.mapper.sides, out = new Uint8Array(sides.length * sides[0].length); sides.forEach((s, i) => out.set(s, i * s.length)); return out; }
+      if (this.mapper.getBatteryData) return this.mapper.getBatteryData();
       return this.mapper.prgRam.slice();
     }
     setBattery(bytes) {
@@ -5964,6 +6083,8 @@
         const sides = this.mapper.sides;
         if (bytes.length !== sides.length * sides[0].length) return false;
         sides.forEach((s, i) => s.set(bytes.subarray(i * s.length, (i + 1) * s.length)));
+      } else if (this.mapper.setBatteryData) {
+        if (!this.mapper.setBatteryData(bytes)) return false;
       } else {
         if (bytes.length !== this.mapper.prgRam.length) return false;
         this.mapper.prgRam.set(bytes);
@@ -6078,7 +6199,7 @@
       let cycles;
       if (this.pendingNmi) { this.pendingNmi = false; cycles = cpu.nmi(); this.advance(cycles); this._nmiEdge(ppu.nmiLine(), false); return cycles; }
       if (this.nmiNext) { this.pendingNmi = true; this.nmiNext = false; }
-      if (!cpu.irqInhibited() && (apu.frameIrqFlag || apu.dmc.irqFlag || mapper.irqPending())) {
+      if (!cpu.irqPolledInhibited() && (apu.frameIrqFlag || apu.dmc.irqFlag || mapper.irqPending())) {
         cycles = cpu.irq(); this.advance(cycles); this._nmiEdge(ppu.nmiLine(), false); return cycles;
       }
       const base = cpu.peekCycles();

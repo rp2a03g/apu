@@ -91,12 +91,13 @@
     // ── バッテリ バックアップ(セーブ)──
     // iNES でバッテリ ビットが立っていれば PRG RAM 全体、.fds ならディスク全面(ギャップつき)が保存の対象。
     // 書き込みがあると batteryDirty が立つ(主スレッド/ヘッドレスがそれを見て保存し、clearBatteryDirty() で下ろす)
-    get hasBattery() { return !!(this.rom.battery || this.rom.fds); }
+    get hasBattery() { return !!(this.rom.battery || this.rom.fds || this.mapper.getBatteryData); } // getBatteryData: EEPROM など基板が持つセーブ
     get batteryDirty() { return this._batDirty || !!this.mapper.diskDirty; }
     clearBatteryDirty() { this._batDirty = false; this.mapper.diskDirty = false; }
     getBattery() {
       if (!this.hasBattery) return null;
       if (this.rom.fds) { const sides = this.mapper.sides, out = new Uint8Array(sides.length * sides[0].length); sides.forEach((s, i) => out.set(s, i * s.length)); return out; }
+      if (this.mapper.getBatteryData) return this.mapper.getBatteryData();
       return this.mapper.prgRam.slice();
     }
     setBattery(bytes) {
@@ -106,6 +107,8 @@
         const sides = this.mapper.sides;
         if (bytes.length !== sides.length * sides[0].length) return false;
         sides.forEach((s, i) => s.set(bytes.subarray(i * s.length, (i + 1) * s.length)));
+      } else if (this.mapper.setBatteryData) {
+        if (!this.mapper.setBatteryData(bytes)) return false;
       } else {
         if (bytes.length !== this.mapper.prgRam.length) return false;
         this.mapper.prgRam.set(bytes);
@@ -220,7 +223,7 @@
       let cycles;
       if (this.pendingNmi) { this.pendingNmi = false; cycles = cpu.nmi(); this.advance(cycles); this._nmiEdge(ppu.nmiLine(), false); return cycles; }
       if (this.nmiNext) { this.pendingNmi = true; this.nmiNext = false; }
-      if (!cpu.irqInhibited() && (apu.frameIrqFlag || apu.dmc.irqFlag || mapper.irqPending())) {
+      if (!cpu.irqPolledInhibited() && (apu.frameIrqFlag || apu.dmc.irqFlag || mapper.irqPending())) {
         cycles = cpu.irq(); this.advance(cycles); this._nmiEdge(ppu.nmiLine(), false); return cycles;
       }
       const base = cpu.peekCycles();

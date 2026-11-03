@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-03 19:26:59
+ * Built by tools/build-capture-workers.ps1 at 2026-11-04 00:17:05
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-11-03 19:26:59';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-11-04 00:17:05';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -425,6 +425,7 @@
       this.PC = 0;
       this.cycles = 0;
       this.halted = false;
+      this.irqPolledI = F_I; // IRQ 判定に使う I フラグ(前の命令の最後のサイクルで見た値。CLI/SEI/PLP は 1 命令遅れて効く)
       this.callActive = false;
     }
 
@@ -435,6 +436,7 @@
       this.push(this.PC & 0xFF);
       this.push((this.P | F_U) & ~F_B);
       this.setFlag(F_I, true);
+      this.irqPolledI = F_I;
       this.PC = this.read16(vector);
       return 7;
     }
@@ -444,6 +446,9 @@
     nmi() { return this.interrupt(0xFFFA); }
     irq() { return this.interrupt(0xFFFE); }
     irqInhibited() { return (this.P & F_I) !== 0; }
+    // 実機の IRQ 判定: I フラグは命令の最後のサイクルで見るので、CLI/SEI/PLP で変えた値は次の命令の後から効く
+    // (CLI の直後の BRK が先に実行される。BRK でサブルーチンを呼ぶゲームが CLI; BRK で 2 バイト前に戻って暴走した)。RTI は即時
+    irqPolledInhibited() { return this.irqPolledI !== 0; }
 
     // --- メモリアクセス ---
     read(addr) { return this.bus.read(addr & 0xFFFF) & 0xFF; }
@@ -562,13 +567,16 @@
     // --- 命令実行（1命令）---
     // 戻り値: 消費サイクル数
     step() {
+      const iBefore = this.P & F_I;
       const opcode = this.fetchByte();
       const def = OPS[opcode];
       if (!def) {
         // 未定義オペコードは2サイクルNOP相当として無視する
+        this.irqPolledI = iBefore;
         return 2;
       }
       const extra = def.exec(this, def.mode);
+      this.irqPolledI = (opcode === 0x40 || opcode === 0x00) ? (this.P & F_I) : iBefore; // RTI($40)と BRK($00)は即時
       return def.cycles + (extra || 0);
     }
 
