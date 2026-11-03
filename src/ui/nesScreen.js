@@ -95,6 +95,50 @@
   }
   window.addEventListener('pagehide', () => { if (node && hasBattery) { try { node.port.postMessage({ type: 'unload' }); } catch (e) { /* ignore */ } } });
 
+  // ── ステート(状態の保存・読込。ROM ごとに 1 つ。IndexedDB の state ストア、キーは ROM 内容のハッシュ)──
+  const STATE_STORE = 'state';
+  let stateKey = '', stateBtnS = null, stateBtnL = null, flashTimer = 0;
+  function idbState(fn, mode) {
+    return new Promise((resolve) => {
+      if (typeof indexedDB === 'undefined') { resolve(null); return; }
+      let req;
+      try { req = indexedDB.open(BAT_DB, 2); } catch (e) { resolve(null); return; }
+      req.onupgradeneeded = () => { const db = req.result; if (!db.objectStoreNames.contains(BAT_STORE)) db.createObjectStore(BAT_STORE); if (!db.objectStoreNames.contains(STATE_STORE)) db.createObjectStore(STATE_STORE); };
+      req.onerror = () => resolve(null);
+      req.onsuccess = () => {
+        const db = req.result;
+        try {
+          const tx = db.transaction(STATE_STORE, mode || 'readonly');
+          const r = fn(tx.objectStore(STATE_STORE));
+          tx.oncomplete = () => { db.close(); resolve(r && r.result !== undefined ? r.result : true); };
+          tx.onerror = () => { db.close(); resolve(null); };
+        } catch (e) { db.close(); resolve(null); }
+      };
+    });
+  }
+  function flashStatus(text) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    if (flashTimer) clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { flashTimer = 0; updateStatus(); }, 2500);
+  }
+  async function saveStateRecord(state) {
+    if (!state || !stateKey) return;
+    await idbState((st) => st.put({ state, name: romName, time: Date.now() }, stateKey), 'readwrite');
+    flashStatus(T('ステートを保存しました'));
+  }
+  function requestSaveState() {
+    if (node) node.port.postMessage({ type: 'saveState' });
+    else if (nes) saveStateRecord(MML.Emu.NesState.save(nes));
+  }
+  async function requestLoadState() {
+    if (!stateKey) return;
+    const rec = await idbState((st) => st.get(stateKey));
+    if (!rec || !rec.state) { flashStatus(T('この ROM のステートはまだありません')); return; }
+    if (node) node.port.postMessage({ type: 'loadState', state: rec.state });
+    else if (nes) flashStatus(MML.Emu.NesState.load(nes, rec.state) ? T('ステートを読み込みました') : T('ステートを読み込めません(別の ROM の物か、形式が違います)'));
+  }
+
   function loadBios() {
     if (fdsBios) return fdsBios;
     try {
@@ -144,6 +188,10 @@
     resetBtn.addEventListener('click', () => { if (node) node.port.postMessage({ type: 'reset' }); else if (nes) nes.reset(); canvas.focus(); });
     speedBtn = document.createElement('button'); speedBtn.type = 'button'; speedBtn.className = 'nes-btn'; speedBtn.title = T('早送り。クリックで ×1→×2→×4。F キーを押している間は ×4');
     speedBtn.addEventListener('click', () => { speedSel = speedSel >= 4 ? 1 : speedSel * 2; pushSpeed(); canvas.focus(); });
+    stateBtnS = document.createElement('button'); stateBtnS.type = 'button'; stateBtnS.className = 'nes-btn'; stateBtnS.textContent = T('状態保存'); stateBtnS.title = T('今の状態をこのブラウザに保存(ROM ごとに 1 つ。F5)');
+    stateBtnS.addEventListener('click', () => { requestSaveState(); canvas.focus(); });
+    stateBtnL = document.createElement('button'); stateBtnL.type = 'button'; stateBtnL.className = 'nes-btn'; stateBtnL.textContent = T('状態読込'); stateBtnL.title = T('保存した状態に戻す(F7)');
+    stateBtnL.addEventListener('click', () => { requestLoadState(); canvas.focus(); });
     recBtn = document.createElement('button'); recBtn.type = 'button'; recBtn.className = 'nes-btn nes-rec';
     recBtn.addEventListener('click', () => { toggleRecord(); canvas.focus(); });
     statusEl = document.createElement('span'); statusEl.className = 'nes-status';
@@ -161,7 +209,7 @@
       storeBios(b.length === 0x2000 ? b : b.subarray(b.length - 0x2000));
       if (pendingFds) { const p = pendingFds; pendingFds = null; NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); }); }
     });
-    bar.appendChild(nameEl); bar.appendChild(pauseBtn); bar.appendChild(resetBtn); bar.appendChild(speedBtn); bar.appendChild(recBtn); bar.appendChild(sideBtn); bar.appendChild(biosBtn); bar.appendChild(biosInput); bar.appendChild(statusEl);
+    bar.appendChild(nameEl); bar.appendChild(pauseBtn); bar.appendChild(resetBtn); bar.appendChild(speedBtn); bar.appendChild(stateBtnS); bar.appendChild(stateBtnL); bar.appendChild(recBtn); bar.appendChild(sideBtn); bar.appendChild(biosBtn); bar.appendChild(biosInput); bar.appendChild(statusEl);
     const bar2 = document.createElement('div'); bar2.className = 'nes-bar';
     recInfoEl = document.createElement('span'); recInfoEl.className = 'nes-name';
     saveBtn = document.createElement('button'); saveBtn.type = 'button'; saveBtn.className = 'nes-btn'; saveBtn.textContent = T('VGM を保存'); saveBtn.hidden = true;
@@ -174,7 +222,13 @@
     help.textContent = T('十字=矢印キー、A=X、B=Z、Start=Enter、Select=Shift、F=早送り(画面をクリックしてから)。ゲームパッドも使えます。● で音源レジスタの書き込みを録音し、VGM として保存/変換できます');
     wrap.appendChild(help);
     body.appendChild(wrap);
-    canvas.addEventListener('keydown', (e) => { const b = KEYS[e.code]; if (b) { keyBits |= b; e.preventDefault(); pushPad(); } else if (e.code === 'KeyF' && !ffHold) { ffHold = true; e.preventDefault(); pushSpeed(); } });
+    canvas.addEventListener('keydown', (e) => {
+      const b = KEYS[e.code];
+      if (b) { keyBits |= b; e.preventDefault(); pushPad(); }
+      else if (e.code === 'KeyF' && !ffHold) { ffHold = true; e.preventDefault(); pushSpeed(); }
+      else if (e.code === 'F5') { e.preventDefault(); requestSaveState(); }
+      else if (e.code === 'F7') { e.preventDefault(); requestLoadState(); }
+    });
     canvas.addEventListener('keyup', (e) => { const b = KEYS[e.code]; if (b) { keyBits &= ~b; e.preventDefault(); pushPad(); } else if (e.code === 'KeyF') { ffHold = false; e.preventDefault(); pushSpeed(); } });
     canvas.addEventListener('blur', () => { if (ffHold) { ffHold = false; pushSpeed(); } });
     pushSpeed();
@@ -220,7 +274,7 @@
     if (now - fpsMs >= 1000) { fps = fpsCount; fpsCount = 0; fpsMs = now; updateStatus(); }
   }
   function updateStatus() {
-    if (!statusEl) return;
+    if (!statusEl || flashTimer) return; // 一時表示(ステート保存/読込の結果)の間は上書きしない
     const mode = node ? T('音: AudioWorklet') : T('音なし(主スレッド)');
     statusEl.textContent = `${fps} fps · ${mode}` + (underruns ? ' · ' + T('音切れ {n} 回', { n: underruns }) : '') + (hasBattery ? ' · ' + T('セーブ') : '');
     if (pendingFds) return; // BIOS 待ちの案内を消さない
@@ -297,6 +351,8 @@
       }
       case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
       case 'battery': onBatteryMessage(m); break;
+      case 'state': saveStateRecord(m.state); break;
+      case 'stateLoaded': flashStatus(m.ok ? T('ステートを読み込みました') : T('ステートを読み込めません(別の ROM の物か、形式が違います)')); break;
       case 'recordEnd': for (const fr of (m.frames || [])) recFrames.push(fr); finishRecording(); break;
       case 'error': console.error('[nes worklet]', m.message); statusEl.textContent = T('エラー: {msg}', { msg: String(m.message).split('\n')[0] }); break;
     }
@@ -419,7 +475,8 @@
       const probe = new MML.Emu.NesConsole(bytes, { bios: isFds ? fdsBios : null });
       await flushBattery(); // 前の ROM のセーブを受け取ってから止める
       romBytes = bytes; romName = name || '';
-      hasBattery = probe.hasBattery; batteryKey = hasBattery ? romKey(bytes) : '';
+      stateKey = romKey(bytes);
+      hasBattery = probe.hasBattery; batteryKey = hasBattery ? stateKey : '';
       const battery = hasBattery ? await loadBattery(batteryKey) : null;
       if (battery && probe.setBattery(battery)) console.log('[nes]', T('セーブデータを読み込みました({n} バイト)', { n: battery.length }));
       nameEl.textContent = romName;

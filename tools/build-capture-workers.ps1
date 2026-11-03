@@ -212,6 +212,7 @@ $bundles = @(
             'src\emulator\nes\fds.js',
             'src\emulator\nes\ppu.js',
             'src\emulator\nes\nesConsole.js',
+            'src\emulator\nes\nesState.js',
             'src\audio\nes-worklet-impl.js'
         )
     },
