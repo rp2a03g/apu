@@ -373,6 +373,14 @@ capture.js の writeLog、NsfReplayStreamPlayer。
     ミラーリングは基板ごとに違うので、書く前に V(1 画面しか無い基板は 1A→1B)を明示する)。NES 2.0 ヘッダの
     CHR RAM サイズは Mesen が優先する(77 は 8K と書かないと RAM 無しになる)。93 は CHR を有効にしてから RAM を埋める。
   - 未検証: 実ソフト全部。
+- 実装(2026-11-03、段階 6e-3 MMC1 の大容量基板): PRG 512K(SUROM)は CHR レジスタの bit4 が 256K 側を選ぶ、PRG RAM 32K(SXROM)は
+  bit2-3 が 8K バンク、16K(SOROM)は bit3。CHR 4K モードで最後に書いたのが $C000 ならそちらのレジスタを使う(Mesen と同じ)。
+  サブマッパー 5(SEROM/SHROM)は PRG 32K 固定。155(MMC1A)も同じクラス。合成 ROM(512K+RAM 32K、毎音 外側バンク・RAM バンク・
+  ミラーリングを切替、RAM の各バンク先頭を読む)で Mesen と画面 8 枚・録音 900 フレーム一致。iNES 1.0 ヘッダでは PRG RAM を
+  8K とみなすので、SXROM の実ソフトは NES 2.0 ヘッダ(RAM 32K)でないとバンクが効かない。未対応: 連続サイクルの二重書き無視
+  (本体 CPU は RMW 命令でも 1 回しか書かないので当面実害なし)、PRG RAM 無効ビット。
+- 出所の扱い: マッパーと FDS は Mesen 2(GPL-3.0)のソースで挙動を確認して書き起こした(コードは持ち込まない。
+  THIRD-PARTY-NOTICES.md に一致率と同じ定数を記載)。
 
 ---
 

@@ -73,6 +73,7 @@
 | KSS のメモリマップ / 曲初期化 | libkss (digital-sound-antiques) `vm.c` / `mmap.c` | `src/emulator/kssBus.js`, `kssPlayer.js` |
 | SM83 (Game Boy CPU) | NESdev BBS "Game Boy CPU isn't a Z80. What is it?" | `src/emulator/cpuSm83.js` |
 | VRC6 のこぎり波 | NESdev Wiki | `src/emulator/expansion/vrc6.js` |
+| NES マッパー(バンク切替・IRQ カウンタ・ミラーリングの挙動、サブマッパーの扱い)と FDS のドライブ(RP2C33 の読み書きの状態遷移と待ち時間) | Mesen 2 (GPL-3.0、SourMesen) の各マッパーのソースと NESdev Wiki。Mesen は挙動の確認と録音・画面の突き合わせの基準に使い、コードは持ち込んでいない(下記の一致率) | `src/emulator/nes/mappers.js`, `src/emulator/nes/fds.js` |
 
 ### mck / ppmck（NSF書き出し用サウンドドライバ）
 
@@ -109,6 +110,15 @@ emu2413 の4〜13%とはっきり分かれる）。そのうえで、次の小�
 
 OKIM6258 / OKIM6295 の ADPCM 伸張（段階表 `16×1.1^n` と増分表）は、OKI / Dialogic ADPCM の
 公開仕様どおりの標準的な定式で、特定の実装の写しではない。
+
+NES マッパーと FDS(2026-11-03 に同じ方法で測定): `src/emulator/nes/mappers.js` と Mesen 2 の該当マッパー
+45 ファイルの 6 語連鎖の一致率は 4.7%、`fds.js` と Mesen の `Fds.h`/`Fds.cpp` は 2.5%(無関係な本ツール内の
+2 ファイル同士で 3.2%、移植の Nuked-OPLL は 7.9%)。一致した連鎖は `for (i = 0; i < 8; i++)` や
+`switch (addr) { case` の類で、識別子を 2 つ以上含む連鎖は無い。Mesen 由来で同じ値にしてある「挙動の定数」は、
+FDS ドライブの待ち時間(ヘッド終端から 50000 サイクル、1 バイト 149 サイクル、先頭ギャップ 28300 ビット、
+ブロック間 976 ビット)と Taito TC0690 の IRQ 遅れ(22 サイクル、サブマッパー 1 は 6)。いずれも実機の挙動を
+表す数値で、NESdev Wiki にも同じ値がある。Mesen 2 は GPL-3.0 で、本体の GPL-2.0 とは両立しないため、
+コードの移植はしない方針(参照だけ)。
 
 BSD-3-Clause（MAME の `c352.cpp` / `multipcm.cpp`）の条件：
 

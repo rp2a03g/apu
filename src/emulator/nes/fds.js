@@ -94,11 +94,11 @@
       this.diskNumber = rom.sides.length ? 0 : NO_DISK;
       // タイマ
       this.irqReload = 0; this.irqCounter = 0; this.irqEnable = false; this.irqRepeat = false; this.timerIrq = false;
-      this.diskRegEnabled = true; this.soundRegEnabled = true;
+      this.diskIoOn = true; this.soundRegEnabled = true;
       // ドライブ
-      this.writeDataReg = 0; this.readDataReg = 0; this.extCon = 0;
-      this.motorOn = false; this.resetTransfer = false; this.readMode = false; this.crcControl = false; this.diskReady = false; this.diskIrqEnabled = false;
-      this.endOfHead = false; this.scanningDisk = false; this.gapEnded = true; this.transferComplete = false; this.diskIrq = false;
+      this.writeLatch = 0; this.readLatch = 0; this.extCon = 0;
+      this.motorOn = false; this.xferReset = false; this.readMode = false; this.crcControl = false; this.diskReady = false; this.diskIrqEnabled = false;
+      this.headAtEnd = false; this.scanning = false; this.pastGap = true; this.byteReady = false; this.diskIrq = false;
       this.diskPosition = 0; this.delay = 0; this.crcAcc = 0; this.prevCrcControl = false;
       this.audioShadow = new Int16Array(0xA0).fill(-1); // $4000-$409F の影($4023, $4040-$409E)
     }
@@ -127,16 +127,16 @@
         case 0x4030: {
           let v = 0; // open bus のビット(2,5)は本体が足す
           if (this.timerIrq) v |= 0x01;
-          if (this.transferComplete) v |= 0x02;
+          if (this.byteReady) v |= 0x02;
           if (this.ntMap[1] === 0) v |= 0x08; // 水平ミラー(ntMap が [0,0,1,1])
-          this.transferComplete = false; this.timerIrq = false; this.diskIrq = false;
+          this.byteReady = false; this.timerIrq = false; this.diskIrq = false;
           return v;
         }
-        case 0x4031: this.transferComplete = false; this.diskIrq = false; return this.readDataReg;
+        case 0x4031: this.byteReady = false; this.diskIrq = false; return this.readLatch;
         case 0x4032: {
           let v = 0;
           if (this.diskNumber === NO_DISK) v |= 0x07;
-          else if (!this.scanningDisk) v |= 0x02;
+          else if (!this.scanning) v |= 0x02;
           return v;
         }
         case 0x4033: return this.extCon;
@@ -152,24 +152,24 @@
         if (this.soundRegEnabled && this.audio) this.audio.writeRegister(addr, v);
         return;
       }
-      if (!this.diskRegEnabled && addr >= 0x4024 && addr <= 0x4026) return;
+      if (!this.diskIoOn && addr >= 0x4024 && addr <= 0x4026) return;
       switch (addr) {
         case 0x4020: this.irqReload = (this.irqReload & 0xFF00) | v; break;
         case 0x4021: this.irqReload = (this.irqReload & 0x00FF) | (v << 8); break;
         case 0x4022:
           this.irqRepeat = (v & 1) !== 0;
-          this.irqEnable = (v & 2) !== 0 && this.diskRegEnabled;
+          this.irqEnable = (v & 2) !== 0 && this.diskIoOn;
           if (this.irqEnable) this.irqCounter = this.irqReload; else this.timerIrq = false;
           break;
         case 0x4023:
           this.audioShadow[0x23] = v;
-          this.diskRegEnabled = (v & 1) !== 0; this.soundRegEnabled = (v & 2) !== 0;
-          if (!this.diskRegEnabled) { this.irqEnable = false; this.timerIrq = false; this.diskIrq = false; }
+          this.diskIoOn = (v & 1) !== 0; this.soundRegEnabled = (v & 2) !== 0;
+          if (!this.diskIoOn) { this.irqEnable = false; this.timerIrq = false; this.diskIrq = false; }
           if (this.audio) this.audio.writeRegister(0x4023, v);
           break;
-        case 0x4024: this.writeDataReg = v; this.transferComplete = false; this.diskIrq = false; break;
+        case 0x4024: this.writeLatch = v; this.byteReady = false; this.diskIrq = false; break;
         case 0x4025:
-          this.motorOn = (v & 0x01) !== 0; this.resetTransfer = (v & 0x02) !== 0; this.readMode = (v & 0x04) !== 0;
+          this.motorOn = (v & 0x01) !== 0; this.xferReset = (v & 0x02) !== 0; this.readMode = (v & 0x04) !== 0;
           this.setMirroring((v & 0x08) ? 'H' : 'V');
           this.crcControl = (v & 0x10) !== 0; this.diskReady = (v & 0x40) !== 0; this.diskIrqEnabled = (v & 0x80) !== 0;
           this.diskIrq = false;
@@ -198,27 +198,27 @@
       this.crcAcc = acc;
     }
     _driveClock() {
-      if (this.diskNumber === NO_DISK || !this.motorOn) { this.endOfHead = true; this.scanningDisk = false; return; }
-      if (this.resetTransfer && !this.scanningDisk) return;
-      if (this.endOfHead) { this.delay = 50000; this.endOfHead = false; this.diskPosition = 0; this.gapEnded = false; return; }
+      if (this.diskNumber === NO_DISK || !this.motorOn) { this.headAtEnd = true; this.scanning = false; return; }
+      if (this.xferReset && !this.scanning) return;
+      if (this.headAtEnd) { this.delay = 50000; this.headAtEnd = false; this.diskPosition = 0; this.pastGap = false; return; }
       if (this.delay > 0) { this.delay--; return; }
-      this.scanningDisk = true;
+      this.scanning = true;
       const side = this.sides[this.diskNumber];
-      let needIrq = this.diskIrqEnabled;
+      let irqOnByte = this.diskIrqEnabled;
       let data = 0;
       if (this.readMode) {
         data = side[this.diskPosition];
         if (!this.prevCrcControl) this._crc(data);
-        if (!this.diskReady) { this.gapEnded = false; this.crcAcc = 0; }
-        else if (data && !this.gapEnded) { this.gapEnded = true; needIrq = false; }
-        if (this.gapEnded) { this.transferComplete = true; this.readDataReg = data; if (needIrq) this.diskIrq = true; }
+        if (!this.diskReady) { this.pastGap = false; this.crcAcc = 0; }
+        else if (data && !this.pastGap) { this.pastGap = true; irqOnByte = false; }
+        if (this.pastGap) { this.byteReady = true; this.readLatch = data; if (irqOnByte) this.diskIrq = true; }
       } else {
-        if (!this.crcControl) { this.transferComplete = true; data = this.writeDataReg; if (needIrq) this.diskIrq = true; }
+        if (!this.crcControl) { this.byteReady = true; data = this.writeLatch; if (irqOnByte) this.diskIrq = true; }
         if (!this.diskReady) { data = 0; this.crcAcc = 0; }
         if (!this.crcControl) this._crc(data);
         else { data = this.crcAcc & 0xFF; this.crcAcc >>= 8; }
         side[this.diskPosition] = data;
-        this.gapEnded = false;
+        this.pastGap = false;
       }
       this.prevCrcControl = this.crcControl;
       this.diskPosition++;

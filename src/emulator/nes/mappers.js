@@ -113,11 +113,26 @@
   class NROM extends Mapper {}
 
   // 1: MMC1(シフトレジスタ 5 回書き)
+  //   大容量基板(Mesen と同じ扱い): PRG 512K(SUROM)は CHR レジスタの bit4 が PRG の 256K 側を選ぶ。PRG RAM が 32K(SXROM)なら
+  //   CHR レジスタの bit2-3 が 8K バンク、16K(SOROM)なら bit3。CHR 4K モードで最後に書いたのが $C000 ならそちらのレジスタを使う。
+  //   サブマッパー 5(SEROM/SHROM)は PRG 32K 固定。155(MMC1A)も同じ(PRG RAM の無効ビットはどちらでも見ない)。
+  //   未対応: 連続サイクルの二重書き無視(本体 CPU は RMW 命令でも 1 回しか書かないので実害は無い)
   class MMC1 extends Mapper {
     constructor(rom) {
       super(rom);
-      this.shift = 0x10; this.control = 0x0C; this.chr0 = 0; this.chr1 = 0; this.prgReg = 0;
+      this.shift = 0x10; this.control = 0x0C; this.chr0 = 0; this.chr1 = 0; this.prgReg = 0; this.lastChr = 0;
+      this.fixed32 = (rom.submapper | 0) === 5;
+      this.ramBanks = this.prgRam.length >> 13; // 1/2/4
+      this.ramBank = 0;
       this.apply();
+    }
+    cpuRead(addr) {
+      if (addr >= 0x6000 && addr < 0x8000) return this.prgRam[(this.ramBank << 13) | (addr & 0x1FFF)];
+      return super.cpuRead(addr);
+    }
+    cpuWrite(addr, v) {
+      if (addr >= 0x8000) this.writeReg(addr, v);
+      else if (addr >= 0x6000) this.prgRam[(this.ramBank << 13) | (addr & 0x1FFF)] = v;
     }
     writeReg(addr, v) {
       if (v & 0x80) { this.shift = 0x10; this.control |= 0x0C; this.apply(); return; }
@@ -128,19 +143,24 @@
       this.shift = 0x10;
       switch ((addr >> 13) & 3) {
         case 0: this.control = value; break;
-        case 1: this.chr0 = value; break;
-        case 2: this.chr1 = value; break;
+        case 1: this.chr0 = value; this.lastChr = 0; break;
+        case 2: this.chr1 = value; this.lastChr = 1; break;
         case 3: this.prgReg = value; break;
       }
       this.apply();
     }
     apply() {
       this.setMirroring(['1A', '1B', 'V', 'H'][this.control & 3]);
-      const prgMode = (this.control >> 2) & 3, prg = this.prgReg & 0x0F;
-      if (prgMode < 2) this.setPrg32(prg >> 1);
-      else if (prgMode === 2) { this.setPrg16(0, 0); this.setPrg16(1, prg); }
-      else { this.setPrg16(0, prg); this.setPrg16(1, (this.prgBanks8 >> 1) - 1); }
-      if (this.control & 0x10) { this.setChr1(0, this.chr0 * 4); this.setChr1(1, this.chr0 * 4 + 1); this.setChr1(2, this.chr0 * 4 + 2); this.setChr1(3, this.chr0 * 4 + 3);
+      const chr4k = (this.control & 0x10) !== 0;
+      const extra = (this.lastChr === 1 && chr4k) ? this.chr1 : this.chr0;
+      const outer = this.prg.length === 0x80000 ? (extra & 0x10) : 0; // 512K: 16K バンク番号の bit4
+      this.ramBank = this.ramBanks >= 4 ? (extra >> 2) & 3 : this.ramBanks === 2 ? (extra >> 3) & 1 : 0;
+      const prgMode = (this.control >> 2) & 3, prg = (this.prgReg & 0x0F) | outer;
+      if (this.fixed32) this.setPrg32(0);
+      else if (prgMode < 2) this.setPrg32(prg >> 1);
+      else if (prgMode === 2) { this.setPrg16(0, outer); this.setPrg16(1, prg); }
+      else { this.setPrg16(0, prg); this.setPrg16(1, 0x0F | outer); }
+      if (chr4k) { this.setChr1(0, this.chr0 * 4); this.setChr1(1, this.chr0 * 4 + 1); this.setChr1(2, this.chr0 * 4 + 2); this.setChr1(3, this.chr0 * 4 + 3);
         this.setChr1(4, this.chr1 * 4); this.setChr1(5, this.chr1 * 4 + 1); this.setChr1(6, this.chr1 * 4 + 2); this.setChr1(7, this.chr1 * 4 + 3); }
       else this.setChr8(this.chr0 >> 1);
     }
@@ -1261,7 +1281,7 @@
   }
 
   const TABLE = {
-    0: NROM, 1: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 5: MMC5, 7: AxROM, 9: MMC2, 10: MMC2, 16: BandaiFCG, 18: JalecoSS88006, 19: Namco163,
+    0: NROM, 1: MMC1, 155: MMC1, 2: UxROM, 3: CNROM, 4: MMC3, 5: MMC5, 7: AxROM, 9: MMC2, 10: MMC2, 16: BandaiFCG, 18: JalecoSS88006, 19: Namco163,
     21: VRC24, 22: VRC24, 23: VRC24, 24: VRC6, 25: VRC24, 26: VRC6, 32: IremG101, 33: TaitoTC0190, 34: BNROM, 48: TaitoTC0690,
     65: IremH3001, 66: GxROM, 67: Sunsoft3, 68: Sunsoft4, 69: Sunsoft5B, 70: Bandai74161, 72: JalecoJF17, 73: VRC3, 75: VRC1,
     76: Namco108Variants, 77: IremLROG017, 78: JalecoJF16, 80: TaitoX1005, 82: TaitoX1017, 85: VRC7, 86: JalecoJF13, 87: JalecoJF13,
