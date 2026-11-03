@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-04 01:41:02
+ * Built by tools/build-capture-workers.ps1 at 2026-11-04 01:58:32
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-04 01:41:02';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-04 01:58:32';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -755,7 +755,7 @@
     }
 
     clockTimer() {
-      if (this.timer === 0) {
+      if (this.timer <= 0) { // 保険: 周期が負になっても止まらない
         this.timer = this.timerPeriod;
         this.dutyStep = (this.dutyStep + 1) & 7;
       } else {
@@ -772,7 +772,9 @@
 
       if (this.sweepDivider === 0 && this.sweepEnabled && this.sweepShift > 0) {
         const target = this.sweepTarget();
-        if (target <= 0x7FF) this.timerPeriod = target;
+        // 負(パルス 1 の 1 の補数で周期 0/1 のとき)は 11bit の加算器どおり折り返す。以前は -1 がそのまま周期になり、
+        // タイマが負のまま減り続けて(0 に戻らない)そのチャンネルが永久に黙った(ゲームの効果音でスイープを使うと起きた)
+        if (target <= 0x7FF) this.timerPeriod = target & 0x7FF;
       }
       if (this.sweepDivider === 0 || this.sweepReload) {
         this.sweepDivider = this.sweepPeriod;
