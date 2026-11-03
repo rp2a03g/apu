@@ -6,6 +6,7 @@
  *                                          [--press "start:120-130,a:300-305,right:400-600"] [--audio out.wav]
  *                                          [--vgm out.vgm] [--rec-from F] [--bios disksys.rom] [--disk "1:900"]
  *   --bios   : .fds を開くときの BIOS(環境変数 FDS_BIOS でも可)。--disk side:frame でそのフレームに面を入れ替える
+ *   --battery: セーブ RAM(iNES のバッテリ ビットが立つ ROM の PRG RAM、.fds はディスク全面)のファイル。あれば読んで始め、終わりに書く
  *   --press  : ボタン名:開始フレーム-終了フレーム をカンマ区切り(a b select start up down left right)
  *   --png-every M : M フレームごとに out_<frame>.png も書く(動きの確認用)
  *   --audio  : 音も計算して WAV(44.1kHz mono 16bit)に書く
@@ -28,6 +29,7 @@ const audioOut = arg('--audio', null);
 const vgmOut = arg('--vgm', null);
 const recFrom = parseInt(arg('--rec-from', '0'), 10);
 const biosPath = arg('--bios', process.env.FDS_BIOS || null); // .fds 用の BIOS(disksys.rom)
+const batteryPath = arg('--battery', null); // セーブ RAM(バッテリ/FDS ディスク)のファイル。あれば読み、終わりに書く
 // --disk "side:frame[,side:frame]" : そのフレームで取り出し、90 フレーム後にその面を入れる(FDS)
 const diskOps = [];
 for (const item of (arg('--disk', '') || '').split(',').map(s => s.trim()).filter(Boolean)) {
@@ -83,6 +85,7 @@ const { MML } = load({ strict: true });
 const bytes = readBytes(file);
 const nes = new MML.Emu.NesConsole(bytes, { bios: biosPath ? readBytes(biosPath) : null });
 console.log(`${path.basename(file)}: ${MML.Emu.INES.describe(nes.rom)}, reset=$${nes.cpu.PC.toString(16)}`);
+if (batteryPath && nes.hasBattery && fs.existsSync(batteryPath)) console.log('battery', batteryPath, nes.setBattery(readBytes(batteryPath)) ? 'loaded' : 'size mismatch (ignored)');
 const SR = 44100;
 const audio = [];
 if (audioOut) nes.setSampleRate(SR);
@@ -99,6 +102,7 @@ const ms = Number(process.hrtime.bigint() - t0) / 1e6;
 const colors = new Set(nes.frame).size;
 console.log(`${frames} frames in ${ms.toFixed(0)}ms (${(ms / frames).toFixed(2)} ms/frame), 画面の色数 ${colors}, PPU frame ${nes.ppu.frameCount}, CPU cycles ${nes.cpuCycles}, ctrl=$${nes.ppu.ctrl.toString(16)} mask=$${nes.ppu.mask.toString(16)}`);
 if (pngOut) { writePng(pngOut, nes.frame, 256, 240); console.log('wrote', pngOut); }
+if (batteryPath) { if (nes.hasBattery) { fs.writeFileSync(batteryPath, nes.getBattery()); console.log('wrote', batteryPath, nes.getBattery().length, 'bytes', nes.batteryDirty ? '(changed)' : '(unchanged)'); } else console.log('battery: この ROM にはセーブ RAM(バッテリ)がありません'); }
 if (vgmOut) {
   const rec = nes.stopRecording();
   const r = MML.VGM.encodeNesRecording({ frames: rec, extBits: nes.extBits(), name: path.basename(file), creator: 'nes-run.js' });

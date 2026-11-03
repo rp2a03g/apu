@@ -83,6 +83,31 @@
     ejectDisk() { if (this.mapper.ejectDisk) this.mapper.ejectDisk(); }
     // NSF ヘッダと同じ拡張音源ビット(録音の NESX ヘッダ用)
     extBits() { return this.mapper.audio ? (this.mapper.extBits || 0) : 0; }
+    // ── バッテリ バックアップ(セーブ)──
+    // iNES でバッテリ ビットが立っていれば PRG RAM 全体、.fds ならディスク全面(ギャップつき)が保存の対象。
+    // 書き込みがあると batteryDirty が立つ(主スレッド/ヘッドレスがそれを見て保存し、clearBatteryDirty() で下ろす)
+    get hasBattery() { return !!(this.rom.battery || this.rom.fds); }
+    get batteryDirty() { return this._batDirty || !!this.mapper.diskDirty; }
+    clearBatteryDirty() { this._batDirty = false; this.mapper.diskDirty = false; }
+    getBattery() {
+      if (!this.hasBattery) return null;
+      if (this.rom.fds) { const sides = this.mapper.sides, out = new Uint8Array(sides.length * sides[0].length); sides.forEach((s, i) => out.set(s, i * s.length)); return out; }
+      return this.mapper.prgRam.slice();
+    }
+    setBattery(bytes) {
+      if (!this.hasBattery || !bytes) return false;
+      bytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      if (this.rom.fds) {
+        const sides = this.mapper.sides;
+        if (bytes.length !== sides.length * sides[0].length) return false;
+        sides.forEach((s, i) => s.set(bytes.subarray(i * s.length, (i + 1) * s.length)));
+      } else {
+        if (bytes.length !== this.mapper.prgRam.length) return false;
+        this.mapper.prgRam.set(bytes);
+      }
+      this.clearBatteryDirty();
+      return true;
+    }
     // フレーム内の時刻(0〜1)。PPU の位置から出す(書き込みの t と録音の精度はこれ)
     frameFrac() { return (((this.ppu.scanline + 262 - 241) % 262) * 341 + this.ppu.dot) / (262 * 341); } // vblank の頭を 0 とする
 
@@ -134,6 +159,7 @@
         return;
       }
       this.mapper.cpuWrite(addr, v);
+      if (addr >= 0x6000 && addr < 0x8000) this._batDirty = true; // PRG RAM(セーブ)への書き込み
       if (this.mapper.audio) { const aa = this.mapper.audioAddr(addr); if (aa >= 0) this._logWrite(aa, v); } // 正規の番地で記録(VRC6b の A0/A1 入れ替えなど)
     }
     _t() { return Math.min(SAMPLES_PER_FRAME - 1, Math.floor(this.frameFrac() * SAMPLES_PER_FRAME)); }

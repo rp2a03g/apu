@@ -381,6 +381,20 @@ capture.js の writeLog、NsfReplayStreamPlayer。
   (本体 CPU は RMW 命令でも 1 回しか書かないので当面実害なし)、PRG RAM 無効ビット。
 - 出所の扱い: マッパーと FDS は Mesen 2(GPL-3.0)のソースで挙動を確認して書き起こした(コードは持ち込まない。
   THIRD-PARTY-NOTICES.md に一致率と同じ定数を記載)。
+- 実装(2026-11-03、段階 6e-4 セーブ(バッテリ RAM / FDS ディスク)の保存):
+  - 対象は iNES のバッテリ ビットが立つ ROM の PRG RAM 全体(MMC1 の 32K バンクも丸ごと)と .fds のディスク全面
+    (ギャップつきのまま)。NesConsole に hasBattery / getBattery() / setBattery() / batteryDirty($6000-$7FFF への書き込み、
+    FDS は面への書き込みで立つ)。
+  - 置き場はブラウザの IndexedDB(nes-battery / sram)。キーは ROM 内容の FNV-1a 32bit×2 と長さ(ファイル名は使わない。
+    同じ ROM なら名前が違っても同じセーブ)。Worklet 内の本体が 1 秒ごとに「変わっていれば」主スレッドへ送り、
+    別の ROM を開く時・閉じる時は unload を送って最後の分を待つ(300ms で諦める)。pagehide でも送る(届く保証は無い)。
+    主スレッド実行(音なし)では tick が 60 フレームごとに見る。状態行に「セーブ」と出し、ツールチップにキーを出す。
+  - nes-run.js --battery <file>: あれば読んで始め、終わりに書く(ヘッドレス検証用)。
+  - 検証: MMC1 512K+RAM 32K の合成 ROM(バッテリ ビット付き)で、RAM の 4 バンク先頭に書いた値が --battery の
+    ファイルに残り、読み戻せる。ブラウザでは IndexedDB に 32KB の記録ができ、開き直すと読み込みのログが出る。
+    ※ この合成 ROM の初期化は生成器の改行の取り違えで一度は `STA $A000` が抜けていた(Mesen との一致は
+    「両方とも RAM バンク 0 しか使わない」偽の一致だった)。直して再検証し、4 バンクとも一致。
+  - 書き出し/取り込み(.sav ファイル)の UI は未実装。
 
 ---
 

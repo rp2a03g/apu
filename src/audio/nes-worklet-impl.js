@@ -33,11 +33,15 @@
             const nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });
             nes.setSampleRate(sampleRate);
             nes.onFrame = () => this.onFrame();
+            if (m.battery) nes.setBattery(new Uint8Array(m.battery)); // 前回のセーブ(主スレッドが IndexedDB から)
             this.nes = nes;
             this.dcX = 0; this.dcY = 0;
-            this.port.postMessage({ type: 'loaded', info: MML.Emu.INES.describe(nes.rom), extBits: nes.extBits(), sampleRate, disks: nes.diskCount });
+            this.port.postMessage({ type: 'loaded', info: MML.Emu.INES.describe(nes.rom), extBits: nes.extBits(), sampleRate, disks: nes.diskCount, battery: nes.hasBattery });
             break;
           }
+          case 'unload': // 止める前の最後のセーブ要求。変化が無くても返事をする(主スレッドが待つ)
+            this.postBattery(true);
+            break;
           case 'disk': // FDS: side < 0 で取り出し、0 以上でその面を入れる
             if (!this.nes) break;
             if (m.side < 0) this.nes.ejectDisk(); else this.nes.insertDisk(m.side | 0);
@@ -61,6 +65,16 @@
       const msg = { type: 'frame', seq: ++this.frameSeq, frame: frame.buffer, underruns: nes.underruns };
       if (nes.rec) { msg.writes = nes.rec.frames.splice(0); }
       this.port.postMessage(msg, [frame.buffer]);
+      if ((this.frameSeq % 60) === 0) this.postBattery(false); // 1 秒ごとに、セーブ RAM が変わっていれば主スレッドへ
+    }
+    // セーブ RAM(バッテリ/FDS ディスク)を主スレッドへ送る。final=true は unload への返事(変化が無くても data 無しで返す)
+    postBattery(final) {
+      const nes = this.nes;
+      if (!nes || !nes.hasBattery) { if (final) this.port.postMessage({ type: 'battery', final: true, data: null }); return; }
+      if (!nes.batteryDirty) { if (final) this.port.postMessage({ type: 'battery', final: true, data: null }); return; }
+      const data = nes.getBattery();
+      nes.clearBatteryDirty();
+      this.port.postMessage({ type: 'battery', final: !!final, data: data.buffer }, [data.buffer]);
     }
     process(inputs, outputs) {
       const out = outputs[0] && outputs[0][0];

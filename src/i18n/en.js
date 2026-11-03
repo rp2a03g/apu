@@ -1699,5 +1699,8 @@
     'ディスク {side} 面': 'Disk side {side}',
     'クリックで次の面に入れ替える(取り出してから入れる)': 'Click to switch to the next side (ejects, then inserts)',
     '入れ替え中…': 'Switching…',
+    'セーブ': 'Save',
+    'セーブデータはこのブラウザ(IndexedDB)に自動保存します(1 秒ごと・閉じる時)。キー: {key}': 'Save data is stored automatically in this browser (IndexedDB), every second and on close. Key: {key}',
+    'セーブデータを読み込みました({n} バイト)': 'Loaded save data ({n} bytes)',
   });
 })(typeof window !== 'undefined' ? window : globalThis);

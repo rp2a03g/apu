@@ -218,6 +218,7 @@
         if (!this.crcControl) this._crc(data);
         else { data = this.crcAcc & 0xFF; this.crcAcc >>= 8; }
         side[this.diskPosition] = data;
+        this.diskDirty = true; // ディスクへの書き込み(セーブの対象。NesConsole.batteryDirty が見る)
         this.pastGap = false;
       }
       this.prevCrcControl = this.crcControl;

@@ -43,6 +43,58 @@
   const BIOS_KEY = 'nes.fdsBios';
   let fdsBios = null, biosBtn = null, biosInput = null, sideBtn = null, fdsSides = 0, fdsSide = 0, pendingFds = null, sideTimer = 0;
 
+  // ── セーブ(バッテリ RAM / FDS ディスク)──
+  // ROM の内容のハッシュをキーに IndexedDB(nes-battery/sram)へ。本体(Worklet 内)が 1 秒ごとに「変わっていれば」送ってくる
+  // (battery メッセージ)。別の ROM を開く時と閉じる時は unload を送って最後の分を待つ。主スレッド実行時は tick が見る。
+  const BAT_DB = 'nes-battery', BAT_STORE = 'sram';
+  let batteryKey = '', batteryWait = null, hasBattery = false;
+  function romKey(bytes) {
+    // FNV-1a 32bit を 2 系統(種を変える)+長さ。暗号用途ではなく同じ ROM を見分けるだけ
+    let a = 0x811C9DC5, b = 0x050C5D1F;
+    for (let i = 0; i < bytes.length; i++) { a = Math.imul(a ^ bytes[i], 0x01000193) >>> 0; b = Math.imul(b ^ bytes[i], 0x01000193) >>> 0; }
+    return a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0') + ':' + bytes.length;
+  }
+  function idb(fn, mode) {
+    return new Promise((resolve) => {
+      if (typeof indexedDB === 'undefined') { resolve(null); return; }
+      let req;
+      try { req = indexedDB.open(BAT_DB, 1); } catch (e) { resolve(null); return; }
+      req.onupgradeneeded = () => { const db = req.result; if (!db.objectStoreNames.contains(BAT_STORE)) db.createObjectStore(BAT_STORE); };
+      req.onerror = () => resolve(null);
+      req.onsuccess = () => {
+        const db = req.result;
+        try {
+          const tx = db.transaction(BAT_STORE, mode || 'readonly');
+          const r = fn(tx.objectStore(BAT_STORE));
+          tx.oncomplete = () => { db.close(); resolve(r && r.result !== undefined ? r.result : true); };
+          tx.onerror = () => { db.close(); resolve(null); };
+        } catch (e) { db.close(); resolve(null); }
+      };
+    });
+  }
+  async function loadBattery(key) {
+    const rec = await idb((st) => st.get(key));
+    return rec && rec.data instanceof Uint8Array ? rec.data : null;
+  }
+  async function saveBattery(key, data) {
+    if (!key || !data) return;
+    await idb((st) => st.put({ data, name: romName, time: Date.now() }, key), 'readwrite');
+  }
+  // Worklet 内の最後の分を受け取る(battery final=true を待つ。300ms で諦める)
+  function flushBattery() {
+    if (!node || !hasBattery) return Promise.resolve();
+    return new Promise((resolve) => {
+      const t = setTimeout(() => { batteryWait = null; resolve(); }, 300);
+      batteryWait = () => { clearTimeout(t); batteryWait = null; resolve(); };
+      try { node.port.postMessage({ type: 'unload' }); } catch (e) { batteryWait(); }
+    });
+  }
+  function onBatteryMessage(m) {
+    if (m.data) saveBattery(batteryKey, new Uint8Array(m.data));
+    if (m.final && batteryWait) batteryWait();
+  }
+  window.addEventListener('pagehide', () => { if (node && hasBattery) { try { node.port.postMessage({ type: 'unload' }); } catch (e) { /* ignore */ } } });
+
   function loadBios() {
     if (fdsBios) return fdsBios;
     try {
@@ -166,10 +218,11 @@
   function updateStatus() {
     if (!statusEl) return;
     const mode = node ? T('音: AudioWorklet') : T('音なし(主スレッド)');
-    statusEl.textContent = `${fps} fps · ${mode}` + (underruns ? ' · ' + T('音切れ {n} 回', { n: underruns }) : '');
+    statusEl.textContent = `${fps} fps · ${mode}` + (underruns ? ' · ' + T('音切れ {n} 回', { n: underruns }) : '') + (hasBattery ? ' · ' + T('セーブ') : '');
     if (pendingFds) return; // BIOS 待ちの案内を消さない
     const chips = ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
-    statusEl.title = (chips ? chips + ' ' : '') + (workletState === 'failed' ? T('AudioWorklet が使えないので主スレッドで実行しています(音は出ません)') : '');
+    statusEl.title = (chips ? chips + ' ' : '') + (workletState === 'failed' ? T('AudioWorklet が使えないので主スレッドで実行しています(音は出ません)') : '') +
+      (hasBattery ? ' ' + T('セーブデータはこのブラウザ(IndexedDB)に自動保存します(1 秒ごと・閉じる時)。キー: {key}', { key: batteryKey }) : '');
   }
 
   // ── AudioWorklet 実行 ──
@@ -188,7 +241,7 @@
     const code = '(' + src + ')();';
     return 'data:application/javascript;base64,' + btoa(unescape(encodeURIComponent(code)));
   }
-  async function startWorklet(bytes) {
+  async function startWorklet(bytes, battery) {
     if (workletState === 'failed') return false;
     try {
       if (!actx) actx = (NesScreen.getAudioContext && NesScreen.getAudioContext()) || new (window.AudioContext || window.webkitAudioContext)();
@@ -210,7 +263,8 @@
       limiter.connect(MML.Audio && MML.Audio.getMasterGain ? MML.Audio.getMasterGain(actx) : actx.destination);
       const rom = bytes.slice().buffer;
       const bios = fdsBios ? fdsBios.slice().buffer : null;
-      node.port.postMessage({ type: 'load', rom, bios }, bios ? [rom, bios] : [rom]);
+      const bat = battery ? battery.slice().buffer : null;
+      node.port.postMessage({ type: 'load', rom, bios, battery: bat }, [rom, bios, bat].filter(Boolean));
       resumeAudio();
       lastPad = -1; pushPad();
       if (!gpRaf) gpRaf = requestAnimationFrame(gpLoop);
@@ -237,7 +291,8 @@
         tickFps(performance.now());
         break;
       }
-      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; fdsSides = m.disks || 0; fdsSide = 0; updateDiskUi(); updateStatus(); break;
+      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
+      case 'battery': onBatteryMessage(m); break;
       case 'recordEnd': for (const fr of (m.frames || [])) recFrames.push(fr); finishRecording(); break;
       case 'error': console.error('[nes worklet]', m.message); statusEl.textContent = T('エラー: {msg}', { msg: String(m.message).split('\n')[0] }); break;
     }
@@ -263,10 +318,12 @@
     if (n) {
       blitFrame(nes.frame);
       if (recFrames && nes.rec) for (const fr of nes.rec.frames.splice(0)) recFrames.push(fr);
+      if (hasBattery && nes.batteryDirty && (++mainFrames % 60) === 0) { saveBattery(batteryKey, nes.getBattery()); nes.clearBatteryDirty(); }
     }
     tickFps(now);
     raf = requestAnimationFrame(tick);
   }
+  let mainFrames = 0;
   function startMain() { if (!raf) { lastMs = 0; raf = requestAnimationFrame(tick); } }
   function stopMain() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
 
@@ -347,7 +404,11 @@
       pendingFds = null;
       // ヘッダとマッパーの検査は主スレッドで先に(未対応なら例外で知らせる)
       const probe = new MML.Emu.NesConsole(bytes, { bios: isFds ? fdsBios : null });
+      await flushBattery(); // 前の ROM のセーブを受け取ってから止める
       romBytes = bytes; romName = name || '';
+      hasBattery = probe.hasBattery; batteryKey = hasBattery ? romKey(bytes) : '';
+      const battery = hasBattery ? await loadBattery(batteryKey) : null;
+      if (battery && probe.setBattery(battery)) console.log('[nes]', T('セーブデータを読み込みました({n} バイト)', { n: battery.length }));
       nameEl.textContent = romName;
       nameEl.title = MML.Emu.INES.describe(probe.rom);
       recExtBits = probe.extBits();
@@ -361,13 +422,17 @@
       const btn = document.querySelector('.toggle-btn[data-target="win-nes"]');
       if (btn) btn.classList.add('active');
       blitFrame(probe.frame);
-      const ok = await startWorklet(bytes);
-      if (!ok) { nes = probe; lastPad = -1; startMain(); }
+      const ok = await startWorklet(bytes, battery);
+      if (!ok) { nes = probe; lastPad = -1; mainFrames = 0; startMain(); }
       updateStatus();
       canvas.focus();
       return ok ? null : nes;
     },
-    close() { stopMain(); stopWorkletNode(); nes = null; },
+    async close() {
+      if (nes && hasBattery && nes.batteryDirty) { saveBattery(batteryKey, nes.getBattery()); nes.clearBatteryDirty(); }
+      await flushBattery();
+      stopMain(); stopWorkletNode(); nes = null;
+    },
     get console() { return nes; },
     get running() { return !!(node || (nes && raf)); },
     get usingWorklet() { return !!node; },
