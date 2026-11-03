@@ -1925,8 +1925,7 @@ button.secondary {
 #win-nes .float-window-header { flex-wrap: nowrap; padding: 4px 8px; } /* × は右端。ボタンは .nes-hdr の中で折り返す */
 #win-nes .float-window-header > span:first-child { display: none; }
 .nes-hdr { gap: 2px; flex: 1 1 auto; min-width: 0; }
-.nes-hdr-sp { flex: 1 1 12px; min-width: 6px; }
-.nes-hdr-r { display: inline-flex; gap: 2px; margin-left: auto; flex: none; } /* 一時停止/巻き戻し/録音はまとまって右端 */
+.nes-hdr-g { flex: none; width: 10px; } /* ボタン群の間(早送り/一時停止/巻き戻し/録音/設定の前) */
 .nes-ib[hidden] { display: none !important; } /* display:inline-flex が hidden 属性に勝つのを防ぐ */
 .nes-ib { background: transparent; color: var(--text); border: 1px solid transparent; border-radius: 5px; height: 26px; min-width: 26px; padding: 0 3px; display: inline-flex; align-items: center; justify-content: center; gap: 2px; font-size: 10.5px; font-weight: 600; cursor: pointer; }
 .nes-ib svg { width: 17px; height: 17px; display: block; pointer-events: none; }

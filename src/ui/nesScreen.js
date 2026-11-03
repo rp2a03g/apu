@@ -308,14 +308,13 @@
       if (pendingFds) { const p = pendingFds; pendingFds = null; NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); }); }
     });
     cfgBtn = mkIcon('gear', T('設定(キー/ゲームパッドの割り当て、連射、ロールへ流す)'), () => toggleCfgPopover(cfgBtn));
-    const sp = document.createElement('span'); sp.className = 'nes-hdr-sp';
     pauseBtn = mkIcon('pause', T('一時停止'), () => setPaused(!paused));
     rewindBtn = mkIcon('rewind', '', null);
     attachHold(rewindBtn, () => rewindHoldStart(), () => rewindHoldEnd());
     recBtn = mkIcon('rec', '', toggleRecord); recBtn.classList.add('nes-rec');
-    const right = document.createElement('span'); right.className = 'nes-hdr-r';
-    for (const el of [pauseBtn, rewindBtn, recBtn]) right.appendChild(el);
-    for (const el of [romInput, openBtn, resetBtn, speedBtn, stateBtnS, stateBtnL, sideBtn, biosBtn, biosInput, cfgBtn, sp, right]) hdr.appendChild(el);
+    // 並び: [開く][リセット][状態保存][状態読込]([面][BIOS]) 間 [早送り] 間 [一時停止] 間 [巻き戻し] 間 [録音] 間 [設定]
+    const gap = () => { const g = document.createElement('span'); g.className = 'nes-hdr-g'; return g; };
+    for (const el of [romInput, openBtn, resetBtn, stateBtnS, stateBtnL, sideBtn, biosBtn, biosInput, gap(), speedBtn, gap(), pauseBtn, gap(), rewindBtn, gap(), recBtn, gap(), cfgBtn]) hdr.appendChild(el);
     // 本体: 上にファイル名+状態+録音結果、画面、タッチ操作キー
     const bar = document.createElement('div'); bar.className = 'nes-bar';
     nameEl = document.createElement('span'); nameEl.className = 'nes-name';
