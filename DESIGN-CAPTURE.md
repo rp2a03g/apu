@@ -426,6 +426,23 @@ capture.js の writeLog、NsfReplayStreamPlayer。
     合成 ROM 8 枚一致。bit4 の CHR ROM ネームテーブルは未対応(CIRAM として扱う)。
   - PRG RAM 保護: Mapper 基底に ramRead/ramWrite を持たせ、MMC3($A001 bit7/bit6)、VRC6($B003 bit7)、VRC7($E000 bit7)、
     N163($F800 bit6+2K ごとの bit0-3)、MMC5 で見る。MMC1 の $E000 bit4 は基板(MMC1A/B)で既定が違うので見ない。
+- 実装(2026-11-03、段階 6f: 操作まわりとライブ表示):
+  - 窓の見出し: 操作ボタン([開く…][一時停止][リセット][早送り][状態保存][状態読込][● 録音][ディスク面][FDS BIOS…][⚙])を
+    窓のタイトル行(.fw-header-extra)に並べ、本体は画面と状態行だけにした。[開く…] は .nes/.fds のファイル選択、窓への
+    ドロップでも開ける。
+  - ⚙ 設定(localStorage nes.cfg): キーボードの割り当て(A/B/連射 A/連射 B/Select/Start/十字/早送り/状態保存/読込。
+    ボタンを押して次のキーを受ける、同じキーは 1 つの操作にだけ)、ゲームパッドのボタン割り当て(A/B/連射 A/連射 B/
+    Select/Start。1P/2P 共通、十字は 12-15 番と左スティックに固定)、連射の速さ(30/15/10/7.5 回/秒)、「ロールへ流す」。
+  - 連射: 本体 `NesConsole.setController(port, bits, turbo)`。turbo のビットを turboRate フレームごとに押す/離すして pad
+    (ゲームが $4016/$4017 で読む値)に足す。主スレッドの rAF ではなく本体のフレームで刻むので、早送り中も一定の比率で入る。
+  - ライブ表示(鍵盤表示のロールへ流す): 本体の録音(書き込み列)を毎フレーム `NesScreen.onLiveFrame` で main.js へ渡し、
+    main.js が [LIVE] の WebSocket と同じ `LiveRollSession`(§6)につなぐ。チップ名は ROM の拡張音源ビットから、像は
+    `startRecording()` が先頭フレームに置く物をそのまま使う(initWrites は要らない。N163 の RAM もここに入る)。
+    VGM 録音と本体の録音を共有するため、Worklet の record メッセージを拡張した: on は「溜まった分を writes で先に
+    返してから像を取り直して始める」、off は keep(ライブが続く時。像を取り直して続ける)/discard(結果を返さない)。
+    リセットとステート読込は書き込み無しにレジスタが変わるので on を送り直して像を取り直す(表示は切れない)。
+    鍵盤表示側で別の曲を開くと LiveRollSession の closer 経由で NES 画面に知らせる(`liveStopped`)。
+    実測: ロールが 60 フレーム/秒で伸び、VGM 録音の開始/停止・ステート読込の後もライブが続く。
 
 ---
 

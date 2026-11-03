@@ -47,7 +47,8 @@
             if (!this.nes) break;
             if (m.side < 0) this.nes.ejectDisk(); else this.nes.insertDisk(m.side | 0);
             break;
-          case 'pad': if (this.nes) this.nes.setController(m.port | 0, m.bits | 0); break;
+          case 'pad': if (this.nes) this.nes.setController(m.port | 0, m.bits | 0, m.turbo | 0); break;
+          case 'turboRate': if (this.nes) this.nes.setTurboRate(m.frames | 0); break;
           case 'reset': if (this.nes) this.nes.reset(); break;
           case 'pause': this.paused = !!m.on; break;
           case 'speed': this.speed = Math.max(1, Math.min(8, m.n | 0)); break; // 早送り: 1 回の process で speed 回ぶん進める(音は最後の 1 回ぶんだけ出す)
@@ -58,9 +59,18 @@
             if (this.nes) this.port.postMessage({ type: 'stateLoaded', ok: MML.Emu.NesState.load(this.nes, m.state) });
             break;
           case 'record':
+            // 録音は VGM(主スレッドが溜める)とライブ表示(ロールへ流す)の 2 つが使う。
+            //   on: 既に録音中なら溜まった分(途中のフレーム込み)を writes として先に送ってから、像を取り直して始める
+            //   off: 止めて recordEnd を返す。keep なら(ライブ表示が要るので)すぐ像を取り直して続ける。discard なら返さない
             if (!this.nes) break;
-            if (m.on) this.nes.startRecording();
-            else { const frames = this.nes.stopRecording(); this.port.postMessage({ type: 'recordEnd', frames }); }
+            if (m.on) {
+              if (this.nes.rec) this.port.postMessage({ type: 'writes', frames: this.nes.stopRecording() }); // 途中のフレームも末尾に入る
+              this.nes.startRecording();
+            } else {
+              const frames = this.nes.stopRecording();
+              if (!m.discard) this.port.postMessage({ type: 'recordEnd', frames });
+              if (m.keep) this.nes.startRecording();
+            }
             break;
         }
       } catch (e) {

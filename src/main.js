@@ -4248,6 +4248,14 @@
     MML.UI.NesScreen.onOpenRecording = (bytes, name) => {
       if (openSoundFileAndPlay) openSoundFileAndPlay(new File([bytes], name, { type: 'application/octet-stream' }), []);
     };
+    // ライブ表示: NES 画面の録音(書き込み列)を毎フレーム鍵盤表示の追記モードへ(LIVE の WebSocket と同じ LiveRollSession)。
+    // 鍵盤表示側で終わった時(別の曲を開いた等)は closer 経由で NES 画面に知らせる
+    MML.UI.NesScreen.onLiveBegin = (info) => {
+      liveRollSession.begin(info);
+      liveRollSession.closer = () => MML.UI.NesScreen.liveStopped();
+    };
+    MML.UI.NesScreen.onLiveFrame = (writes) => liveRollSession.pushFrame(writes);
+    MML.UI.NesScreen.onLiveEnd = (reason) => { if (liveRollSession.active) { liveRollSession.closer = null; liveRollSession.end(reason || 'end'); } };
   }
 
   keyboardDisplay.onToMml = () => {

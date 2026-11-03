@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-03 15:27:44
+ * Built by tools/build-capture-workers.ps1 at 2026-11-03 18:27:24
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-03 15:27:44';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-03 18:27:24';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -5901,6 +5901,8 @@
       this.apuShadow = new Uint8Array(0x18); // $4000-$4017 の最後の書き込み値(録音開始時の像)
       this.openBus = 0;
       this.pad = [0, 0]; this.padShift = [0, 0]; this.padStrobe = false;
+      // 連射: padHeld(押しっぱなし)に padTurbo のビットを turboRate フレームごとに ON/OFF して足した物が pad(ゲームが読む値)
+      this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
       this.dmaCycles = 0;
       this.prevNmi = false; this.pendingNmi = false; this.nmiNext = false;
       this.cpuCycles = 0;
@@ -5929,7 +5931,10 @@
     }
 
     setSampleRate(sr) { this.sampleRate = sr; this.cycleAccum = 0; this.ringHead = 0; this.ringLen = 0; }
-    setController(port, bits) { this.pad[port & 1] = bits & 0xFF; }
+    // bits=押しているボタン、turbo=連射するボタン(同じビット割り当て)。連射は turboRate フレームごとに押す/離すを繰り返す
+    setController(port, bits, turbo) { port &= 1; this.padHeld[port] = bits & 0xFF; this.padTurbo[port] = (turbo | 0) & 0xFF; this._applyPad(port); }
+    setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(0); this._applyPad(1); }
+    _applyPad(p) { const on = ((this.turboPhase / this.turboRate) | 0) === 0; this.pad[p] = this.padHeld[p] | (on ? this.padTurbo[p] : 0); }
     // FDS のディスク(面)。.fds 以外では 0 面
     get diskCount() { return this.mapper.sides ? this.mapper.sides.length : 0; }
     get diskNumber() { return this.mapper.sides ? this.mapper.diskNumber : -1; }
@@ -6118,6 +6123,7 @@
     }
     _frameEnd() {
       this._frameFlag = true;
+      if (this.padTurbo[0] || this.padTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(0); this._applyPad(1); }
       if (this.rec) { this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       if (this.onFrame) this.onFrame();
     }
@@ -6304,7 +6310,8 @@
             if (!this.nes) break;
             if (m.side < 0) this.nes.ejectDisk(); else this.nes.insertDisk(m.side | 0);
             break;
-          case 'pad': if (this.nes) this.nes.setController(m.port | 0, m.bits | 0); break;
+          case 'pad': if (this.nes) this.nes.setController(m.port | 0, m.bits | 0, m.turbo | 0); break;
+          case 'turboRate': if (this.nes) this.nes.setTurboRate(m.frames | 0); break;
           case 'reset': if (this.nes) this.nes.reset(); break;
           case 'pause': this.paused = !!m.on; break;
           case 'speed': this.speed = Math.max(1, Math.min(8, m.n | 0)); break; // 早送り: 1 回の process で speed 回ぶん進める(音は最後の 1 回ぶんだけ出す)
@@ -6315,9 +6322,18 @@
             if (this.nes) this.port.postMessage({ type: 'stateLoaded', ok: MML.Emu.NesState.load(this.nes, m.state) });
             break;
           case 'record':
+            // 録音は VGM(主スレッドが溜める)とライブ表示(ロールへ流す)の 2 つが使う。
+            //   on: 既に録音中なら溜まった分(途中のフレーム込み)を writes として先に送ってから、像を取り直して始める
+            //   off: 止めて recordEnd を返す。keep なら(ライブ表示が要るので)すぐ像を取り直して続ける。discard なら返さない
             if (!this.nes) break;
-            if (m.on) this.nes.startRecording();
-            else { const frames = this.nes.stopRecording(); this.port.postMessage({ type: 'recordEnd', frames }); }
+            if (m.on) {
+              if (this.nes.rec) this.port.postMessage({ type: 'writes', frames: this.nes.stopRecording() }); // 途中のフレームも末尾に入る
+              this.nes.startRecording();
+            } else {
+              const frames = this.nes.stopRecording();
+              if (!m.discard) this.port.postMessage({ type: 'recordEnd', frames });
+              if (m.keep) this.nes.startRecording();
+            }
             break;
         }
       } catch (e) {

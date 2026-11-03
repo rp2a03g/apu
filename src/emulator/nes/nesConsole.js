@@ -47,6 +47,8 @@
       this.apuShadow = new Uint8Array(0x18); // $4000-$4017 の最後の書き込み値(録音開始時の像)
       this.openBus = 0;
       this.pad = [0, 0]; this.padShift = [0, 0]; this.padStrobe = false;
+      // 連射: padHeld(押しっぱなし)に padTurbo のビットを turboRate フレームごとに ON/OFF して足した物が pad(ゲームが読む値)
+      this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
       this.dmaCycles = 0;
       this.prevNmi = false; this.pendingNmi = false; this.nmiNext = false;
       this.cpuCycles = 0;
@@ -75,7 +77,10 @@
     }
 
     setSampleRate(sr) { this.sampleRate = sr; this.cycleAccum = 0; this.ringHead = 0; this.ringLen = 0; }
-    setController(port, bits) { this.pad[port & 1] = bits & 0xFF; }
+    // bits=押しているボタン、turbo=連射するボタン(同じビット割り当て)。連射は turboRate フレームごとに押す/離すを繰り返す
+    setController(port, bits, turbo) { port &= 1; this.padHeld[port] = bits & 0xFF; this.padTurbo[port] = (turbo | 0) & 0xFF; this._applyPad(port); }
+    setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(0); this._applyPad(1); }
+    _applyPad(p) { const on = ((this.turboPhase / this.turboRate) | 0) === 0; this.pad[p] = this.padHeld[p] | (on ? this.padTurbo[p] : 0); }
     // FDS のディスク(面)。.fds 以外では 0 面
     get diskCount() { return this.mapper.sides ? this.mapper.sides.length : 0; }
     get diskNumber() { return this.mapper.sides ? this.mapper.diskNumber : -1; }
@@ -264,6 +269,7 @@
     }
     _frameEnd() {
       this._frameFlag = true;
+      if (this.padTurbo[0] || this.padTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(0); this._applyPad(1); }
       if (this.rec) { this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       if (this.onFrame) this.onFrame();
     }
