@@ -1676,7 +1676,7 @@
     // NES 画面(src/ui/nesScreen.js)
     '再開': 'Resume',
     'クリックしてキー入力(十字=矢印、A=X、B=Z、Start=Enter、Select=Shift)': 'Click to send keys (D-pad=arrows, A=X, B=Z, Start=Enter, Select=Shift)',
-    '十字=矢印キー、A=X、B=Z、Start=Enter、Select=Shift(画面をクリックしてから)。ゲームパッドも使えます。● で音源レジスタの書き込みを録音し、VGM として保存/変換できます': 'D-pad=arrow keys, A=X, B=Z, Start=Enter, Select=Shift (click the screen first). Gamepads work too. ● records the sound register writes; save them as VGM or convert them',
+    '十字=矢印キー、A=X、B=Z、Start=Enter、Select=Shift、F=早送り(画面をクリックしてから)。ゲームパッドも使えます。● で音源レジスタの書き込みを録音し、VGM として保存/変換できます': 'D-pad=arrow keys, A=X, B=Z, Start=Enter, Select=Shift, F=fast forward (click the screen first). Gamepads work too. ● records the sound register writes; save them as VGM or convert them',
     'VGM を保存': 'Save VGM',
     '変換へ': 'To conversion',
     '● 録音': '● Record',
@@ -1700,6 +1700,8 @@
     'クリックで次の面に入れ替える(取り出してから入れる)': 'Click to switch to the next side (ejects, then inserts)',
     '入れ替え中…': 'Switching…',
     'セーブ': 'Save',
+    '早送り ×{n}': 'Fast ×{n}',
+    '早送り。クリックで ×1→×2→×4。F キーを押している間は ×4': 'Fast forward. Click to cycle ×1→×2→×4; hold F for ×4',
     'セーブデータはこのブラウザ(IndexedDB)に自動保存します(1 秒ごと・閉じる時)。キー: {key}': 'Save data is stored automatically in this browser (IndexedDB), every second and on close. Key: {key}',
     'セーブデータを読み込みました({n} バイト)': 'Loaded save data ({n} bytes)',
   });

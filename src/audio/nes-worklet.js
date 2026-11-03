@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-03 15:00:57
+ * Built by tools/build-capture-workers.ps1 at 2026-11-03 15:05:42
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-03 15:00:57';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-03 15:05:42';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -6021,6 +6021,7 @@
       super();
       this.nes = null;
       this.paused = false;
+      this.speed = 1; this.ffTmp = null; this.ffSkip = 0;
       this.dcX = 0; this.dcY = 0;
       this.frameSeq = 0;
       this.port.onmessage = (e) => this.onMessage(e.data || {});
@@ -6048,6 +6049,7 @@
           case 'pad': if (this.nes) this.nes.setController(m.port | 0, m.bits | 0); break;
           case 'reset': if (this.nes) this.nes.reset(); break;
           case 'pause': this.paused = !!m.on; break;
+          case 'speed': this.speed = Math.max(1, Math.min(8, m.n | 0)); break; // 早送り: 1 回の process で speed 回ぶん進める(音は最後の 1 回ぶんだけ出す)
           case 'record':
             if (!this.nes) break;
             if (m.on) this.nes.startRecording();
@@ -6060,8 +6062,10 @@
     }
     onFrame() {
       const nes = this.nes;
+      ++this.frameSeq;
+      if (this.speed > 1 && (++this.ffSkip % this.speed) !== 0) { if ((this.frameSeq % 60) === 0) this.postBattery(false); return; } // 早送り中は speed 枚に 1 枚だけ送る(録音の書き込み列は次に送る時まで溜まる)
       const frame = nes.frame.slice();
-      const msg = { type: 'frame', seq: ++this.frameSeq, frame: frame.buffer, underruns: nes.underruns };
+      const msg = { type: 'frame', seq: this.frameSeq, frame: frame.buffer, underruns: nes.underruns };
       if (nes.rec) { msg.writes = nes.rec.frames.splice(0); }
       this.port.postMessage(msg, [frame.buffer]);
       if ((this.frameSeq % 60) === 0) this.postBattery(false); // 1 秒ごとに、セーブ RAM が変わっていれば主スレッドへ
@@ -6080,6 +6084,10 @@
       if (!out) return true;
       if (!this.nes || this.paused) { out.fill(0); return true; }
       try {
+        if (this.speed > 1) {
+          if (!this.ffTmp || this.ffTmp.length !== out.length) this.ffTmp = new Float32Array(out.length);
+          for (let k = 1; k < this.speed; k++) this.nes.runSamples(this.ffTmp); // 捨てる分
+        }
         this.nes.runSamples(out);
       } catch (e) {
         this.port.postMessage({ type: 'error', message: String((e && e.stack) || e) });

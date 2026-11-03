@@ -1917,6 +1917,7 @@ button.secondary {
 .nes-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
 .nes-btn { font-size: 12px; padding: 3px 10px; cursor: pointer; }
 .nes-rec--on { color: #ff5a5a; border-color: #ff5a5a; }
+.nes-ff { color: #ffd05a; border-color: #ffd05a; }
 .nes-status { color: var(--text-muted); min-width: 48px; text-align: right; }
 .nes-help { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
 /* ライブ入力(src/ui/liveRoll.js)のポップオーバー。枠は .kbd-layout-pop と共通 */

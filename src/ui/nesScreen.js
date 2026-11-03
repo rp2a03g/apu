@@ -142,6 +142,8 @@
     pauseBtn.addEventListener('click', () => { setPaused(!paused); canvas.focus(); });
     const resetBtn = document.createElement('button'); resetBtn.type = 'button'; resetBtn.className = 'nes-btn'; resetBtn.textContent = T('リセット');
     resetBtn.addEventListener('click', () => { if (node) node.port.postMessage({ type: 'reset' }); else if (nes) nes.reset(); canvas.focus(); });
+    speedBtn = document.createElement('button'); speedBtn.type = 'button'; speedBtn.className = 'nes-btn'; speedBtn.title = T('早送り。クリックで ×1→×2→×4。F キーを押している間は ×4');
+    speedBtn.addEventListener('click', () => { speedSel = speedSel >= 4 ? 1 : speedSel * 2; pushSpeed(); canvas.focus(); });
     recBtn = document.createElement('button'); recBtn.type = 'button'; recBtn.className = 'nes-btn nes-rec';
     recBtn.addEventListener('click', () => { toggleRecord(); canvas.focus(); });
     statusEl = document.createElement('span'); statusEl.className = 'nes-status';
@@ -159,7 +161,7 @@
       storeBios(b.length === 0x2000 ? b : b.subarray(b.length - 0x2000));
       if (pendingFds) { const p = pendingFds; pendingFds = null; NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); }); }
     });
-    bar.appendChild(nameEl); bar.appendChild(pauseBtn); bar.appendChild(resetBtn); bar.appendChild(recBtn); bar.appendChild(sideBtn); bar.appendChild(biosBtn); bar.appendChild(biosInput); bar.appendChild(statusEl);
+    bar.appendChild(nameEl); bar.appendChild(pauseBtn); bar.appendChild(resetBtn); bar.appendChild(speedBtn); bar.appendChild(recBtn); bar.appendChild(sideBtn); bar.appendChild(biosBtn); bar.appendChild(biosInput); bar.appendChild(statusEl);
     const bar2 = document.createElement('div'); bar2.className = 'nes-bar';
     recInfoEl = document.createElement('span'); recInfoEl.className = 'nes-name';
     saveBtn = document.createElement('button'); saveBtn.type = 'button'; saveBtn.className = 'nes-btn'; saveBtn.textContent = T('VGM を保存'); saveBtn.hidden = true;
@@ -169,11 +171,13 @@
     bar2.appendChild(recInfoEl); bar2.appendChild(saveBtn); bar2.appendChild(convBtn);
     wrap.appendChild(canvas); wrap.appendChild(bar); wrap.appendChild(bar2);
     const help = document.createElement('div'); help.className = 'nes-help';
-    help.textContent = T('十字=矢印キー、A=X、B=Z、Start=Enter、Select=Shift(画面をクリックしてから)。ゲームパッドも使えます。● で音源レジスタの書き込みを録音し、VGM として保存/変換できます');
+    help.textContent = T('十字=矢印キー、A=X、B=Z、Start=Enter、Select=Shift、F=早送り(画面をクリックしてから)。ゲームパッドも使えます。● で音源レジスタの書き込みを録音し、VGM として保存/変換できます');
     wrap.appendChild(help);
     body.appendChild(wrap);
-    canvas.addEventListener('keydown', (e) => { const b = KEYS[e.code]; if (b) { keyBits |= b; e.preventDefault(); pushPad(); } });
-    canvas.addEventListener('keyup', (e) => { const b = KEYS[e.code]; if (b) { keyBits &= ~b; e.preventDefault(); pushPad(); } });
+    canvas.addEventListener('keydown', (e) => { const b = KEYS[e.code]; if (b) { keyBits |= b; e.preventDefault(); pushPad(); } else if (e.code === 'KeyF' && !ffHold) { ffHold = true; e.preventDefault(); pushSpeed(); } });
+    canvas.addEventListener('keyup', (e) => { const b = KEYS[e.code]; if (b) { keyBits &= ~b; e.preventDefault(); pushPad(); } else if (e.code === 'KeyF') { ffHold = false; e.preventDefault(); pushSpeed(); } });
+    canvas.addEventListener('blur', () => { if (ffHold) { ffHold = false; pushSpeed(); } });
+    pushSpeed();
     canvas.addEventListener('blur', () => { keyBits = 0; pushPad(); });
     canvas.addEventListener('pointerdown', () => { canvas.focus(); resumeAudio(); });
     // 閉じたら止める、開いたら続ける(表示の切替は FloatingWindows が style.display で行う)
@@ -266,7 +270,7 @@
       const bat = battery ? battery.slice().buffer : null;
       node.port.postMessage({ type: 'load', rom, bios, battery: bat }, [rom, bios, bat].filter(Boolean));
       resumeAudio();
-      lastPad = -1; pushPad();
+      lastPad = -1; pushPad(); pushSpeed();
       if (!gpRaf) gpRaf = requestAnimationFrame(gpLoop);
       return true;
     } catch (e) {
@@ -314,7 +318,8 @@
     lastMs = now;
     let n = 0;
     pushPad();
-    while (acc >= FRAME_MS && n < 3) { nes.runFrame(); acc -= FRAME_MS; n++; }
+    const sp = curSpeed(), fms = FRAME_MS / sp;
+    while (acc >= fms && n < 3 * sp) { nes.runFrame(); acc -= fms; n++; }
     if (n) {
       blitFrame(nes.frame);
       if (recFrames && nes.rec) for (const fr of nes.rec.frames.splice(0)) recFrames.push(fr);
@@ -324,6 +329,14 @@
     raf = requestAnimationFrame(tick);
   }
   let mainFrames = 0;
+  // 早送り: ボタンで ×1/×2/×4、F キーを押している間は ×4。Worklet には speed メッセージ、主スレッド実行は tick が倍の枚数を回す
+  let speedBtn = null, speedSel = 1, ffHold = false;
+  function curSpeed() { return ffHold ? 4 : speedSel; }
+  function pushSpeed() {
+    const n = curSpeed();
+    if (speedBtn) { speedBtn.textContent = T('早送り ×{n}', { n }); speedBtn.classList.toggle('nes-ff', n > 1); }
+    if (node) node.port.postMessage({ type: 'speed', n });
+  }
   function startMain() { if (!raf) { lastMs = 0; raf = requestAnimationFrame(tick); } }
   function stopMain() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
 
