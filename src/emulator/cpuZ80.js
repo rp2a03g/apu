@@ -54,6 +54,11 @@
       // INT 受け付けの線(MSX 本体が VDP 等の線を毎命令セットする)。interrupt() は呼び手(msxConsole.js)が
       // iff1 && !eiPending を見て呼ぶ。eiPending は EI の直後 1 命令だけ受け付けない Z80 の規則
       this.eiPending = false;
+      // R800(MSX turboR、段階 7e): true のとき MULUB/MULUW(ED C1/C9/D1/D9、ED C3/F3)が動き、step() の時間が r800Scale 倍になる。
+      // R800 の命令時間は 1 命令 1〜2 クロック(7.16MHz)+メモリ待ちで Z80 とは表が全く違う。ここでは Z80 の T 数に定数を掛ける近似
+      // (DRAM モード 0.2、ROM モード 0.35: 「Z80 の 4〜6 倍/ROM では 2.5〜3 倍」という通説からの推定値。msxConsole.js の S1990 が設定する)。
+      // 本体の時間は Z80 クロック(3.58MHz)のままなので、値は「Z80 クロックで数えた所要時間」
+      this.r800 = false; this.r800Scale = 0.2;
       this.reset();
     }
 
@@ -367,6 +372,10 @@
 
     // --- メイン実行ループ ---
     step() {
+      const c = this._stepZ80();
+      return this.r800 ? Math.max(1, Math.ceil(c * this.r800Scale)) : c;
+    }
+    _stepZ80() {
       // BIOSトラップ: 実ROMを積んでいないため、既知のBIOSエントリアドレスにPCが
       // 来たら実CPU命令の代わりに登録済みJS関数を実行しRETをシミュレートする
       // (呼び出し元が汎用ドライバでMSX BIOSコールを使う場合に必須。kssPlayer.js参照)。
@@ -667,6 +676,26 @@
       const z = opcode & 7;
       const p = y >> 1;
       const q = y & 1;
+
+      if (x === 3 && this.r800) {
+        // R800 の乗算(Z80 では ED の未定義=NOP)。フラグ: Z=結果 0、C=上位(バイト/ワード)が非 0、S/PV=0、H/N は保存(openMSX の実装に合わせた)
+        if (z === 1 && y < 4) { // MULUB A,r(r = B/C/D/E): HL = A × r
+          const r = y === 0 ? this.b : y === 1 ? this.c : y === 2 ? this.d : this.e;
+          const res = this.a * r;
+          this.h = (res >> 8) & 0xFF; this.l = res & 0xFF;
+          this.f = (this.f & (F_N | F_H)) | (res === 0 ? F_Z : 0) | (res > 0xFF ? F_C : 0);
+          return 14;
+        }
+        if (z === 3 && (y === 0 || y === 6)) { // MULUW HL,rr(rr = BC/SP): DE:HL = HL × rr
+          const rr = y === 0 ? ((this.b << 8) | this.c) : this.sp;
+          const hl = (this.h << 8) | this.l;
+          const res = hl * rr; // 32bit(2^32 未満なので倍精度で正確)
+          const lo = res % 0x10000, hi = Math.floor(res / 0x10000);
+          this.h = (lo >> 8) & 0xFF; this.l = lo & 0xFF; this.d = (hi >> 8) & 0xFF; this.e = hi & 0xFF;
+          this.f = (this.f & (F_N | F_H)) | (res === 0 ? F_Z : 0) | (hi ? F_C : 0);
+          return 36;
+        }
+      }
 
       if (x === 1) {
         if (z === 0) {

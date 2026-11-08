@@ -5,7 +5,11 @@
  * V9938(7c): GRAPHIC3=SCREEN4、GRAPHIC4=SCREEN5(256×212 4bpp)、GRAPHIC5=SCREEN6(512×212 2bpp)、GRAPHIC6=SCREEN7(512×212 4bpp)、
  * GRAPHIC7=SCREEN8(256×212 8bpp GRB332)、TEXT2=SCREEN0 WIDTH80 と スプライトモード 2(行 8 枚、行ごとの色、EC/CC/IC)、
  * 212 ライン、縦スクロール(R23)、パレット 16×9bit、ライン割り込み(R19/S1)、ステータス S0〜S9、VDP コマンド(下記)。
- * V9958 の横スクロール(R26/R27)と YJK(SCREEN10〜12)は 7e。インターレース(R9 bit3)は非インターレースとして描く。
+ * V9958(7e): 横スクロール(R26 bit0-4 ×8 ドット、R27 bit0-2 の右ずらし、R25 bit0 SP2=2 ページ(ページは R26 bit5、R2 の bit5 は無視)、
+ * R25 bit1 MSK=左 8 ドットをボーダー色で隠す。全モードに効き、スプライトは動かない)、YJK(R25 bit3、GRAPHIC7 のバイト列を 4 ドット 1 組の
+ * Y5+J6/K6 で色にする=SCREEN12。R25 bit4 YAE=バイトの bit3 が 1 のドットはパレット(bit7-4)=SCREEN10/11)、R25 bit6 CMD=ビットマップ以外の
+ * モードでもコマンドが動く(GRAPHIC7 の配置として扱う: openMSX の挙動の記憶による推定)。S1 bit2 で V9958 を名乗る。
+ * YJK の frameIdx(巻き戻し用)は GRB332 への丸め(表示は frame の正確な色)。インターレース(R9 bit3)は非インターレースとして描く。
  *
  * ■ 時間
  *   行単位。1 行 = 228 Z80 サイクル(VDP 1368 サイクル/6)、NTSC 262 行・PAL(R9 bit1)313 行。1 行の終わりでその行を描く
@@ -28,6 +32,7 @@
  *   R6 スプライトパターン ×$800  R7 文字色<<4|背景色(G7 ではボーダー色 8bit)  R8: bit1 SPD(スプライト無効)、bit5 TP(色 0 もパレット)
  *   R9: bit7 LN(212 行)、bit1 NT(PAL)  R12/R13 TEXT2 の点滅色/周期(未対応: 常に文字色)  R14: VRAM 番地の A16-14  R15: 読むステータス番号
  *   R16/R17: パレット/間接レジスタの番地  R18: 表示位置調整(縦のみ反映)  R19: ライン割り込みの行  R23: 縦スクロール
+ *   R25(V9958): bit0 SP2、bit1 MSK、bit3 YJK、bit4 YAE、bit6 CMD  R26/R27(V9958): 横スクロール(上記)
  *   R32-R46: コマンドの SX/SY/DX/DY/NX/NY/CLR/ARG/CMD
  */
 (function (global) {
@@ -52,6 +57,7 @@
   const TMS_PALETTE = new Uint32Array(16);
   for (let i = 0; i < 16; i++) TMS_PALETTE[i] = abgr(TMS_RGB[i][0], TMS_RGB[i][1], TMS_RGB[i][2]);
   const LEVEL3 = [0, 36, 73, 109, 146, 182, 219, 255];
+  const LEVEL5 = Array.from({ length: 32 }, (_, i) => Math.round(i * 255 / 31)); // YJK の 5bit
   const LEVEL2 = [0, 85, 170, 255];
   // GRAPHIC7 の 8bit 色(GGGRRRBB → 表示色)
   const G7_PALETTE = new Uint32Array(256);
@@ -68,6 +74,7 @@
       opts = opts || {};
       this.type = opts.type || 'v9938';
       this.isTms = this.type === 'tms9918';
+      this.isV9958 = this.type === 'v9958';
       const kb = opts.vramKB || (this.isTms ? 16 : 128);
       this.vram = new Uint8Array(kb * 1024);
       this.vramMask = this.vram.length - 1;
@@ -79,6 +86,8 @@
       this.frameIdx = new Uint8Array(W * H);
       this.lineBuf = new Uint8Array(WIDE);   // 1 行の色番号(0 は透明=背景色)。G7 は 8bit 色そのもの
       this.sprBuf = new Uint8Array(W);       // 1 行のスプライト色(0 無し、bit4 = スプライトあり)
+      this.lineRgb = new Uint32Array(W);     // YJK(V9958)の 1 行の表示色(lb は GRB332 への丸め。スプライトと索引は lb で)
+      this.lineTmpA = new Uint8Array(WIDE); this.lineTmpB = new Uint8Array(WIDE); this.lineRgbA = new Uint32Array(W); this.lineRgbB = new Uint32Array(W); this.yjkBg = new Uint8Array(W); // 横スクロール/YJK の作業用
       this.onInt = null;                     // 割り込み線の変化(本体が見てもよい。線は intLine() で読む)
       this.reset();
     }
@@ -284,19 +293,16 @@
       else {
         // 縦スクロール(V9938 R23): パターン行/ビットマップ行をずらす
         const sy = this.isTms ? y : ((y + regs[23]) & 0xFF);
-        switch (mode) {
-          case 0: this._lineG1(sy, lb); break;                 // GRAPHIC1 (SCREEN 1)
-          case 1: this._lineT1(sy, lb); break;                 // TEXT1 (SCREEN 0)
-          case 2: this._lineMC(sy, lb); break;                 // MULTICOLOR (SCREEN 3)
-          case 4: this._lineG2(sy, lb); break;                 // GRAPHIC2 (SCREEN 2)
-          case 8: this._lineG2(sy, lb); break;                 // GRAPHIC3 (SCREEN 4): 背景は G2 と同じ、スプライトはモード 2
-          case 9: if (this.isTms) { this.unsupportedMode = true; lb.fill(0, 0, mw); } else this._lineT2(sy, lb); break; // TEXT2 (SCREEN 0 WIDTH 80)
-          case 12: this._lineG4(sy, lb); break;                // GRAPHIC4 (SCREEN 5)
-          case 16: this._lineG5(sy, lb); break;                // GRAPHIC5 (SCREEN 6)
-          case 20: this._lineG6(sy, lb); break;                // GRAPHIC6 (SCREEN 7)
-          case 28: this._lineG7(sy, lb); break;                // GRAPHIC7 (SCREEN 8)
-          default: this.unsupportedMode = true; lb.fill(0, 0, mw); break;
-        }
+        const yjk = g7 && this.isV9958 && (regs[25] & 0x08) !== 0;
+        // 横スクロール(V9958 R26/R27): SP2 の 2 ページはビットマップでだけ(ページは R26 bit5 が R2 bit5 の代わり)
+        const hs = this.isV9958 && ((regs[26] & 0x1F) || (regs[27] & 0x07));
+        const sp2 = hs && (regs[25] & 0x01) && (mode === 12 || mode === 16 || mode === 20 || mode === 28);
+        const r2 = regs[2];
+        if (sp2) regs[2] = (r2 & ~0x20) | (regs[26] & 0x20);
+        this._lineBg(mode, sy, lb, mw, yjk ? this.lineRgb : null);
+        if (hs) this._hScroll(mode, sy, mw, sp2, yjk);
+        if (sp2) regs[2] = r2;
+        if (yjk) this.yjkBg.set(lb.subarray(0, W)); // スプライトの前の背景(合成で「スプライトが上書きした所」を見分ける)
         if (mode !== 1 && mode !== 9 && !(regs[8] & 0x02)) {
           if (this.isTms || mode === 0 || mode === 2 || mode === 4) this._spritesMode1(y, lb, mw);
           else this._spritesMode2(y, lb, mw, g7);
@@ -311,13 +317,16 @@
       const kind = this.idxKindCur;
       if (g7) {
         // G7: lb は 8bit 色(ボーダー色 R7 を透明 0 の代わりに使う: 背景の 0 は黒ではなく 0 色そのもの。スプライトは _spritesMode2 が 8bit 色に直して上書き済み)
+        // YJK(V9958): 背景の正確な色は lineRgb。lb が背景のまま(スプライトに上書きされていない)なら lineRgb を出す
+        const yjk = this.isV9958 && this.displayEnabled && (regs[25] & 0x08) !== 0, rgb = this.lineRgb, bgc = this.yjkBg;
         for (let x = 0; x < W; x++) {
           const c = lb[x];
-          const col = G7_PALETTE[c];
+          const col = (yjk && c === bgc[x]) ? rgb[x] : G7_PALETTE[c];
           if (ow === W) { frame[base + x] = col; } else { frame[base + x * 2] = col; frame[base + x * 2 + 1] = col; }
           idx[ibase + x] = kind ? c : (c & 0x0F);
         }
         void bdc; void bdi;
+        this._maskLeft(fy, ow);
         return;
       }
       for (let x = 0; x < mw; x++) {
@@ -329,6 +338,68 @@
         else if (!(x & 1)) frame[base + (x >> 1)] = col;
         if (mw === W) idx[ibase + x] = kind ? this._toGrb(c) : c;
         else if (!(x & 1)) idx[ibase + (x >> 1)] = kind ? this._toGrb(c) : c;
+      }
+      this._maskLeft(fy, ow);
+    }
+    // 背景の 1 行をモードで描く(lb に色番号/G7 は 8bit 色。rgb を渡すと YJK として lineRgb に表示色も)
+    _lineBg(mode, sy, lb, mw, rgb) {
+      switch (mode) {
+        case 0: this._lineG1(sy, lb); break;                 // GRAPHIC1 (SCREEN 1)
+        case 1: this._lineT1(sy, lb); break;                 // TEXT1 (SCREEN 0)
+        case 2: this._lineMC(sy, lb); break;                 // MULTICOLOR (SCREEN 3)
+        case 4: this._lineG2(sy, lb); break;                 // GRAPHIC2 (SCREEN 2)
+        case 8: this._lineG2(sy, lb); break;                 // GRAPHIC3 (SCREEN 4): 背景は G2 と同じ、スプライトはモード 2
+        case 9: if (this.isTms) { this.unsupportedMode = true; lb.fill(0, 0, mw); } else this._lineT2(sy, lb); break; // TEXT2 (SCREEN 0 WIDTH 80)
+        case 12: this._lineG4(sy, lb); break;                // GRAPHIC4 (SCREEN 5)
+        case 16: this._lineG5(sy, lb); break;                // GRAPHIC5 (SCREEN 6)
+        case 20: this._lineG6(sy, lb); break;                // GRAPHIC6 (SCREEN 7)
+        case 28: if (rgb) this._lineYjk(sy, lb, rgb); else this._lineG7(sy, lb); break; // GRAPHIC7 (SCREEN 8) / YJK (SCREEN 10-12)
+        default: this.unsupportedMode = true; lb.fill(0, 0, mw); break;
+      }
+    }
+    // 横スクロール(V9958): lb(と YJK の lineRgb)を R26/R27 ぶんずらす。幅 512 のモードは 2 倍。SP2 はもう一方のページ(R2 bit5 を反転)を
+    // 右側(と、R27 で右にずれた左端)に続ける。SP2 でなければ同じページで巻く
+    _hScroll(mode, sy, mw, sp2, yjk) {
+      const regs = this.regs, lb = this.lineBuf, A = this.lineTmpA, B = this.lineTmpB, rgb = this.lineRgb, rgbA = this.lineRgbA, rgbB = this.lineRgbB;
+      const unit = mw === WIDE ? 2 : 1;
+      const x0 = (((regs[26] & 0x1F) << 3) - (regs[27] & 0x07)) * unit; // 画面の左端に出る元の x(負あり)
+      A.set(lb.subarray(0, mw)); if (yjk) rgbA.set(rgb);
+      if (sp2) { regs[2] ^= 0x20; this._lineBg(mode, sy, B, mw, yjk ? rgbB : null); regs[2] ^= 0x20; }
+      for (let x = 0; x < mw; x++) {
+        let sx = x + x0, other = false;
+        if (sx < 0) { sx += mw; other = true; } else if (sx >= mw) { sx -= mw; other = true; }
+        const src = (sp2 && other) ? B : A;
+        lb[x] = src[sx];
+        if (yjk) rgb[x] = (sp2 && other) ? rgbB[sx] : rgbA[sx];
+      }
+    }
+    // 左 8 ドット(幅 512 は 16)をボーダー色で隠す(V9958 R25 bit1 MSK)。横スクロールの R27 で欠けた端を隠すための物
+    _maskLeft(fy, ow) {
+      if (!this.isV9958 || !(this.regs[25] & 0x02)) return;
+      const [c, ci] = this._borderColor();
+      const n = ow === WIDE ? 16 : 8, base = fy * ow;
+      for (let x = 0; x < n; x++) this.frame[base + x] = c;
+      for (let x = 0; x < 8; x++) this.frameIdx[fy * W + x] = ci;
+    }
+    // YJK(V9958 SCREEN 10-12): 4 ドット 1 組。各バイトの bit7-3 が Y(5bit)、bit2-0 が 4 バイトで K(下位 3+上位 3、符号つき 6bit)と J。
+    //   R = Y + J、G = Y + K、B = (5Y - 2J - K) / 4(各 0-31 に飽和、5bit → 8bit は ×255/31)。YAE(R25 bit4)のとき bit3=1 のドットはパレット bit7-4
+    // lb には GRB332 への丸め(索引/スプライト合成/巻き戻しの画用)、rgb に表示色
+    _lineYjk(y, lb, rgb) {
+      const vram = this.vram, m = this.vramMask, base = ((this.regs[2] & 0x20) << 11) + (y << 8);
+      const yae = (this.regs[25] & 0x10) !== 0, pal = this.palette;
+      for (let x = 0; x < 256; x += 4) {
+        const b0 = vram[(base + x) & m], b1 = vram[(base + x + 1) & m], b2 = vram[(base + x + 2) & m], b3 = vram[(base + x + 3) & m];
+        let k = (b0 & 7) | ((b1 & 7) << 3), j = (b2 & 7) | ((b3 & 7) << 3);
+        if (k & 0x20) k -= 64; if (j & 0x20) j -= 64;
+        for (let i = 0; i < 4; i++) {
+          const b = i === 0 ? b0 : i === 1 ? b1 : i === 2 ? b2 : b3;
+          if (yae && (b & 0x08)) { const p = b >> 4; rgb[x + i] = pal[p]; lb[x + i] = this._toGrb(p); continue; }
+          const yy = b >> 3;
+          let r = yy + j, g = yy + k, bl = ((5 * yy - 2 * j - k) >> 2);
+          r = r < 0 ? 0 : r > 31 ? 31 : r; g = g < 0 ? 0 : g > 31 ? 31 : g; bl = bl < 0 ? 0 : bl > 31 ? 31 : bl;
+          rgb[x + i] = abgr(LEVEL5[r], LEVEL5[g], LEVEL5[bl]);
+          lb[x + i] = ((g >> 2) << 5) | ((r >> 2) << 2) | (bl >> 3);
+        }
       }
     }
     _lineG1(y, lb) {
@@ -513,7 +584,7 @@
         case 16: return { shift: 7, ppb: 4, w: 512 }; // G5
         case 20: return { shift: 8, ppb: 2, w: 512 }; // G6
         case 28: return { shift: 8, ppb: 1, w: 256 }; // G7
-        default: return null;
+        default: return (this.isV9958 && (this.regs[25] & 0x40)) ? { shift: 8, ppb: 1, w: 256 } : null; // V9958 R25 CMD: ビットマップ以外でも G7 の配置で動く(推定)
       }
     }
     _addrOf(pi, x, y) { return (((y & 0x3FF) << pi.shift) + ((x & (pi.w - 1)) / pi.ppb | 0)) & this.vramMask; }

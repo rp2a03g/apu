@@ -73,7 +73,7 @@ function writeWav(file, samples, sr) {
 // BIOS を集める
 function pickBios() {
   const bios = {};
-  if (has('--stub')) { bios.main = require('./mk-msx-test-rom').buildBios(); bios.name = 'stub'; return bios; }
+  if (has('--stub')) { bios.main = require('./mk-msx-test-rom').buildBios({ ramSec: machine === 'turbor' ? 3 : 2 }); bios.name = 'stub'; return bios; }
   const dir = arg('--bios-dir', process.env.MSX_BIOS_DIR || null);
   const main = arg('--bios-main', null), sub = arg('--bios-sub', null), logo = arg('--bios-logo', null);
   if (main) bios.main = readBytes(main);

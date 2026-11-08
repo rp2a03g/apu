@@ -54,8 +54,9 @@
   // MSX の DAC ブロック(規格外。DESIGN-MSX-CAPTURE.md §5.6。NESX と同じ流儀で、他のプレイヤーは読み飛ばす)
   //   0x67 0x66 TYPE size(4) "MSXX" ver(1) kind(1) payload
   //   kind 0 = ヘッダ: payload[0] = 機種(1=MSX1 2=MSX2 3=MSX2+ 4=turboR)、payload[1] = DAC ビット(bit0=turboR PCM、bit1=コナミ DAC $5000、bit2=コナミシンセサイザー $4000)
-  //   kind 1 = DAC の書き込み列: 2 バイト×n = value8 meta8(bit0-6=フレーム内時刻×1/128)。同じ時刻の物を 1 ブロックに(ブロックの位置が時刻)
-  VGM.MSXX = { TYPE: 0xBE, MAGIC: [0x4D, 0x53, 0x58, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_DAC: 1,
+  //   kind 1 = DAC の書き込み列: 2 バイト×n = value8 meta8(bit0-6=フレーム内時刻×1/128、bit7=1 なら turboR PCM、0 ならコナミ DAC)。同じ時刻の物を 1 ブロックに(ブロックの位置が時刻)
+  //   kind 2 = turboR PCM の制御($A5)の書き込み: value8 meta8(時刻)。再生は読み飛ばしてよい(kind 1 には D/A に出た物だけが載る)
+  VGM.MSXX = { TYPE: 0xBE, MAGIC: [0x4D, 0x53, 0x58, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_DAC: 1, KIND_PCM_CTRL: 2, META_PCM: 0x80,
     MACHINES: { msx1: 1, msx2: 2, msx2plus: 3, turbor: 4 }, DAC_TURBOR_PCM: 1, DAC_KONAMI: 2, DAC_KONAMI_SYNTH: 4 };
   VGM.isMsxxBlock = function (type, block) {
     const m = VGM.MSXX.MAGIC;

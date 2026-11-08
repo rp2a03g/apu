@@ -62,6 +62,7 @@ NES2VGM(DESIGN-CAPTURE.md §7、src/emulator/nes/)の MSX 版。実機 MSX の�
 - turboR 専用ソフト(Fray、Illusion City の turboR 版など)以外は Z80 モードで動く。
   **段階を分ける案**: 最初は turboR の BIOS を Z80 モードで動かすだけ(R800 命令 2 つは未定義のまま)、R800 の命令/サイクル表は後段。
 - turboR には SingleStepTests 相当の公開テストが無い(推定)。openMSX の `cpuregs` デバッグとの突き合わせで代える。
+- 実装(7e、2026-11-09): MULUB/MULUW は入れた。命令時間は Z80 の T 数 × 定数(DRAM 0.2 / ROM 0.35)の近似で、R800 の表は未移植(ROADMAP 段階 7 の 7e)。
 
 ### 3.3 メモリ(スロット、マッパー)
 
@@ -258,5 +259,5 @@ MSXX ブロックのビット配置、Y8950 ADPCM RAM 像の「鳴っている�
   録音開始像、ライブ表示、vgmClean の可変フレーム対応、KSS との A/B。
 - **7c MSX2**(実装 2026-11-08、進捗は ROADMAP.md 段階 7。機種プリセット UI と辞書は未): V9938 全モード+コマンド+ライン割り込み、RTC、漢字 ROM、SRAM 系マッパーとバッテリー、実 BIOS の控え、機種プリセット。
 - **7d ディスク**(実装 2026-11-09、進捗は ROADMAP.md 段階 7。実ディスク ROM での起動は未確認): FDC 2 系統、.dsk、ディスク ROM、書き戻し。
-- **7e MSX2+/turboR**: V9958、S1990、turboR PCM(MSXX)、R800。
+- **7e MSX2+/turboR**(実装 2026-11-09、進捗は ROADMAP.md 段階 7。実 turboR BIOS での起動は未確認、R800 の命令時間は近似): V9958、S1990、turboR PCM(MSXX)、R800。
 - **7f 仕上げ**: タッチ用ソフトキーボード、openMSX 比較道具、総当たり(msx-sweep.js)。

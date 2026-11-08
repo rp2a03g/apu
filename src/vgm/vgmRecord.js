@@ -141,12 +141,13 @@
   VGM.SAMPLES_PER_FRAME = VGM.SAMPLES_PER_FRAME || SAMPLES_PER_FRAME;
 
   // ── MSX の書き込み列 → VGM (MML.VGM.encodeMsxRecording) — DESIGN-MSX-CAPTURE.md §5 ──
-  // 入力: { frames: [[write...]...], chips: ['psg','scc','opll','opl','dac'], machine, name, creator, notes }
+  // 入力: { frames: [[write...]...], chips: ['psg','scc','opll','opl','dac','pcm'], machine, name, creator, notes }
   //   frames[f].spf = そのフレームのサンプル数(735=60Hz / 882=50Hz。無ければ 735)
   //   write = { chip, addr, value, t, adpcm?: { start, data } }(msxConsole.js の録音列そのまま)
   //   psg: addr=レジスタ(0-13) → 0xA0 rr dd。scc: addr=メモリ番地 → 0xD2 pp aa dd(classic $9800 台/SCC+ $B800 台を
   //   pp に写す。$BFFE のモードと $B000 の窓は符号化せず SCC+ の有無(ヘッダ bit31)だけに使う)。opll: 0x51。opl(Y8950): 0x5C
   //   ($0F のメモリデータは落とし、adpcm 付きの書き込みの直前に 0x88 のデータブロック)。dac: MSXX ブロック(kind 1、同じ時刻を 1 ブロックに)。
+  //   pcm(turboR、7e): $A4 は kind 1 に meta bit7 を立てて、$A5 は kind 2 に
   //   1 フレーム=VBlank 1 回。待ちは 0x62(735)/0x63(882)/0x61。ヘッダの 0x24 は多数派のレート、GD3 notes に "rate: 50Hz"
   const MSX_PSG_CLOCK = 1789772;
   const MSX_SCC_CLOCK = 1789772;
@@ -158,7 +159,7 @@
     const MSXX = VGM.MSXX;
     const body = [];
     let emitted = 0, dropped = 0, sccPlus = false, n882 = 0;
-    const used = { psg: false, scc: false, opll: false, opl: false, dac: false };
+    const used = { psg: false, scc: false, opll: false, opl: false, dac: false, pcm: false };
     const flushWait = (t) => {
       let d = t - emitted;
       while (d > 0) {
@@ -180,11 +181,12 @@
         if ((w.addr & 0xFFFE) === 0xBFFE) plusMode = !!(w.value & 0x20);
         else if (w.addr >= 0xB800 && w.addr <= 0xBFFD && plusMode) sccPlus = true;
       }
-      if (used[w.chip] !== undefined) used[w.chip] = true;
+      if (w.chip === 'pcm') { if (w.addr === 0xA4) used.pcm = true; }
+      else if (used[w.chip] !== undefined) used[w.chip] = true;
     }
     const chips = rec.chips || [];
-    for (const c of chips) if (used[c] !== undefined && c !== 'dac') used[c] = true; // 挿している音源はヘッダに出す(書き込みが無くても)
-    if (used.dac) body.push(...msxxBlock(MSXX.KIND_HEADER, [MSXX.MACHINES[rec.machine] || 2, MSXX.DAC_KONAMI]));
+    for (const c of chips) if (used[c] !== undefined && c !== 'dac' && c !== 'pcm') used[c] = true; // 挿している音源はヘッダに出す(書き込みが無くても。DAC/PCM は鳴った時だけ)
+    if (used.dac || used.pcm) body.push(...msxxBlock(MSXX.KIND_HEADER, [MSXX.MACHINES[rec.machine] || 2, (used.dac ? MSXX.DAC_KONAMI : 0) | (used.pcm ? MSXX.DAC_TURBOR_PCM : 0)]));
     // DAC: 同じ時刻の書き込みをまとめて 1 ブロック
     let dac = null; // { t, entries }
     const flushDac = () => { if (!dac) return; flushWait(dac.t); body.push(...msxxBlock(MSXX.KIND_DAC, dac.entries)); dac = null; };
@@ -244,10 +246,12 @@
             flushDac();
             if (w.adpcm && w.adpcm.data && w.adpcm.data.length) emitAdpcm(w.adpcm, t);
             flushWait(t); body.push(0x5C, w.addr & 0xFF, w.value & 0xFF); break;
-          case 'dac': {
+          case 'dac': case 'pcm': {
+            const meta = Math.min(127, Math.round((t - frameSample) / spf * 128));
+            if (w.chip === 'pcm' && w.addr !== 0xA4) { flushDac(); flushWait(t); body.push(...msxxBlock(MSXX.KIND_PCM_CTRL, [w.value & 0xFF, meta])); break; } // $A5 の制御
             if (dac && dac.t !== t) flushDac();
             if (!dac) dac = { t, entries: [] };
-            dac.entries.push(w.value & 0xFF, Math.min(127, Math.round((t - frameSample) / spf * 128)));
+            dac.entries.push(w.value & 0xFF, meta | (w.chip === 'pcm' ? MSXX.META_PCM : 0));
             break;
           }
           default: dropped++; break;

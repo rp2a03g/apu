@@ -275,10 +275,10 @@
     let out = null;
     try {
       // 控えた物を種類ごとに(メインが無くても漢字/ディスク ROM だけ控えてあることがある: 同梱 C-BIOS に足して使う)
-      for (const k of ['main', 'sub', 'logo', 'kanji', 'disk']) {
+      for (const k of ['main', 'sub', 'logo', 'kanji', 'disk', 'kdr']) {
         const v = localStorage.getItem(MSX_BIOS_KEY + mach + '.' + k);
         if (!v) continue;
-        if (!out) out = { main: null, sub: null, logo: null, kanji: null, disk: null, name: T('控えた BIOS') };
+        if (!out) out = { main: null, sub: null, logo: null, kanji: null, disk: null, kdr: null, name: T('控えた BIOS') };
         out[k] = b64dec(v);
       }
     } catch (e) { /* localStorage 不可 */ }
@@ -287,7 +287,7 @@
   }
   function storeMsxBios(mach, kind, bytes) {
     try { localStorage.setItem(MSX_BIOS_KEY + mach + '.' + kind, b64enc(bytes)); } catch (e) { /* 控えられなくても今回は使える */ }
-    const cur = msxBiosCache[mach] || (msxBiosCache[mach] = { main: null, sub: null, logo: null, kanji: null, disk: null, name: T('控えた BIOS') });
+    const cur = msxBiosCache[mach] || (msxBiosCache[mach] = { main: null, sub: null, logo: null, kanji: null, disk: null, kdr: null, name: T('控えた BIOS') });
     cur[kind] = bytes;
   }
   // 機種に使える BIOS: 控え(メインあり) → 同梱 C-BIOS(+控えた漢字/ディスク ROM) → null
@@ -296,7 +296,7 @@
     if (stored && stored.main) return stored;
     const C = MML.Emu.MsxConsole;
     const def = C && C.hasDefaultBios && C.hasDefaultBios(mach) ? C.defaultBios(mach) : null;
-    if (def && stored) { if (stored.disk) def.disk = stored.disk; if (stored.kanji) def.kanji = stored.kanji; } // C-BIOS に利用者の漢字/ディスク ROM を足す
+    if (def && stored) { if (stored.disk) def.disk = stored.disk; if (stored.kanji) def.kanji = stored.kanji; if (stored.kdr) def.kdr = stored.kdr; } // C-BIOS に利用者の漢字/ディスク ROM を足す
     return def;
   }
   // 設定のカートリッジ 2 を本体の opts.cartB の形に。fmpac の ROM は同梱 C-BIOS の MSX-MUSIC(控えた実 BIOS には無いので明示する)
@@ -326,10 +326,10 @@
     const list = [];
     for (const f of files) {
       const b = new Uint8Array(await f.arrayBuffer());
-      if (b.length === 0x8000) list.push({ kind: 'main', bytes: b });
+      if (b.length === 0x8000) list.push({ kind: (b[0] === 0x41 && b[1] === 0x42) ? 'kdr' : 'main', bytes: b }); // 32K で 'AB' ヘッダ=漢字ドライバ(2+/turboR の内蔵 ROM。メイン BIOS は DI/JP で始まる)
       else if (b.length === 0x4000) list.push({ kind: (b[0] === 0x41 && b[1] === 0x42) ? 'disk' : /logo/i.test(f.name) ? 'logo' : 'sub', bytes: b }); // 16K で 'AB' ヘッダ=ディスク ROM(サブ/ロゴ ROM に AB は無い)
       else if (b.length === 0x20000 || b.length === 0x40000) list.push({ kind: 'kanji', bytes: b }); // 漢字 ROM(第一水準 128K / 第一+第二 256K)
-      else alert(T('MSX の BIOS は 32K(メイン)、16K(サブ/ロゴ)、128K/256K(漢字 ROM)のファイルです: {name}', { name: f.name }));
+      else alert(T('MSX の BIOS は 32K(メイン/漢字ドライバ)、16K(サブ/ロゴ/ディスク)、128K/256K(漢字 ROM)のファイルです: {name}', { name: f.name }));
     }
     if (!list.length) return;
     const target = cfg.msx.machine !== 'auto' ? cfg.msx.machine : (resolveMsxMachine() || (list.some((x) => x.kind !== 'main') ? 'msx2' : 'msx1'));
@@ -339,7 +339,7 @@
   }
   function updateBiosBtn() {
     if (!biosBtn) return;
-    biosBtn.title = machine === 'msx' ? T('MSX の BIOS を選ぶ(メイン 32K、サブ/ロゴ/ディスク 16K、漢字 128K/256K。複数選択可)。機種ごとにこのブラウザに控えて次回も使います')
+    biosBtn.title = machine === 'msx' ? T('MSX の BIOS を選ぶ(メイン 32K、サブ/ロゴ/ディスク 16K、漢字 128K/256K、漢字ドライバ 32K。複数選択可)。機種ごとにこのブラウザに控えて次回も使います')
       : T('ディスクシステムの BIOS(disksys.rom、8KB)を選ぶ。このブラウザに控えて次回も使います');
     biosBtn.setAttribute('aria-label', biosBtn.title);
   }
@@ -692,6 +692,7 @@
     sm.appendChild(jl);
     note(sm, T('BIOS は [BIOS] で機種ごとに控えます(メイン 32K、サブ/ロゴ 16K。複数選択可)。機種「自動」は BIOS のある機種のうち MSX2 を優先します。マッパーは ROM ごとに覚え、変えると開き直します。ゲームパッドの A/B はジョイスティックのトリガ 1/2'));
     note(sm, T('カートリッジ 2 はゲームと一緒に挿す音源です。FM 版の曲を持つゲームは FM-PAC を挿すと FM で鳴り、録音にも載ります(MSX2+/turbo R は内蔵 MSX-MUSIC が常にあります)。変えると開き直します'));
+    note(sm, T('MSX turbo R は同梱 C-BIOS に無いので実 BIOS(メイン 32K+サブ 16K、あれば漢字ドライバ 32K とディスク ROM)を [BIOS] で控えます。内蔵ソフト(512K)は載せません。R800 は S1990 の切り替えに従い、命令時間は近似です。PCM は録音に載り DAC の行で見えます'));
     note(sm, T('ディスク(.dsk)は実 BIOS とディスク ROM(16K)を [BIOS] で控えてから開けます。FDC はディスク ROM の機種に合わせます(合わないと「ディスクがありません」のまま)。動作中に別の .dsk を開くと入れ替えになり、書き込みは .dsk ごとにこのブラウザへ保存します'));
     // 同梱 C-BIOS(cbiosData.js)の版とライセンス表示(BSD 2 条項は再配布時の著作権表示を求める)。実 BIOS を控えた機種はそちらが優先
     const CB = MML.Emu.CBIOS;
@@ -1141,6 +1142,7 @@
           case 'opll': out.push({ addr: 0x7C, value: w.addr, io: true }, { addr: 0x7D, value: w.value, io: true }); break;
           case 'opl': if (w.addr !== 0x0F) out.push({ addr: 0xC0, value: w.addr, io: true }, { addr: 0xC1, value: w.value, io: true }); break;
           case 'scc': case 'dac': out.push({ addr: w.addr, value: w.value, io: false }); break;
+          case 'pcm': if (w.addr === 0xA4) out.push({ addr: 0x5000, value: w.value, io: false }); break; // turboR PCM: KSS の D/A($5000)として KDA 行へ
           default: break;
         }
       }
@@ -1170,7 +1172,7 @@
     if (msxChips.includes('scc')) out.push('kssScc');
     if (msxChips.includes('opll')) out.push('kssOpll');
     if (msxChips.includes('opl')) out.push('opl');
-    if (msxChips.includes('dac')) out.push('kssDac');
+    if (msxChips.includes('dac') || msxChips.includes('pcm')) out.push('kssDac'); // コナミ DAC と turboR PCM は同じ行(KDA)
     return out;
   }
   // ライブ表示を始める(設定 ON、main.js がつないでいる、本体が動いている時)。像つきで録音を回す
@@ -1364,7 +1366,7 @@
     const rom = romA ? romA.slice().buffer : null, tr = rom ? [rom] : [];
     const dmsg = disks.map((d) => d.slice().buffer); for (const b of dmsg) tr.push(b);
     const bmsg = { name: bios.name || null };
-    for (const k of ['main', 'sub', 'logo', 'kanji', 'disk']) if (bios[k]) { bmsg[k] = bios[k].slice().buffer; tr.push(bmsg[k]); }
+    for (const k of ['main', 'sub', 'logo', 'kanji', 'disk', 'kdr']) if (bios[k]) { bmsg[k] = bios[k].slice().buffer; tr.push(bmsg[k]); }
     const cbMsg = cartB ? { kind: cartB.kind, rom: cartB.rom ? cartB.rom.slice().buffer : null } : null;
     if (cbMsg && cbMsg.rom) tr.push(cbMsg.rom);
     const batMsg = battery ? battery.slice().buffer : null; if (batMsg) tr.push(batMsg);

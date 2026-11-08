@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-09 00:04:11
+ * Built by tools/build-capture-workers.ps1 at 2026-11-09 07:33:54
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-09 00:04:11';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-09 07:33:54';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -6626,6 +6626,11 @@
       // INT 受け付けの線(MSX 本体が VDP 等の線を毎命令セットする)。interrupt() は呼び手(msxConsole.js)が
       // iff1 && !eiPending を見て呼ぶ。eiPending は EI の直後 1 命令だけ受け付けない Z80 の規則
       this.eiPending = false;
+      // R800(MSX turboR、段階 7e): true のとき MULUB/MULUW(ED C1/C9/D1/D9、ED C3/F3)が動き、step() の時間が r800Scale 倍になる。
+      // R800 の命令時間は 1 命令 1〜2 クロック(7.16MHz)+メモリ待ちで Z80 とは表が全く違う。ここでは Z80 の T 数に定数を掛ける近似
+      // (DRAM モード 0.2、ROM モード 0.35: 「Z80 の 4〜6 倍/ROM では 2.5〜3 倍」という通説からの推定値。msxConsole.js の S1990 が設定する)。
+      // 本体の時間は Z80 クロック(3.58MHz)のままなので、値は「Z80 クロックで数えた所要時間」
+      this.r800 = false; this.r800Scale = 0.2;
       this.reset();
     }
 
@@ -6939,6 +6944,10 @@
 
     // --- メイン実行ループ ---
     step() {
+      const c = this._stepZ80();
+      return this.r800 ? Math.max(1, Math.ceil(c * this.r800Scale)) : c;
+    }
+    _stepZ80() {
       // BIOSトラップ: 実ROMを積んでいないため、既知のBIOSエントリアドレスにPCが
       // 来たら実CPU命令の代わりに登録済みJS関数を実行しRETをシミュレートする
       // (呼び出し元が汎用ドライバでMSX BIOSコールを使う場合に必須。kssPlayer.js参照)。
@@ -7239,6 +7248,26 @@
       const z = opcode & 7;
       const p = y >> 1;
       const q = y & 1;
+
+      if (x === 3 && this.r800) {
+        // R800 の乗算(Z80 では ED の未定義=NOP)。フラグ: Z=結果 0、C=上位(バイト/ワード)が非 0、S/PV=0、H/N は保存(openMSX の実装に合わせた)
+        if (z === 1 && y < 4) { // MULUB A,r(r = B/C/D/E): HL = A × r
+          const r = y === 0 ? this.b : y === 1 ? this.c : y === 2 ? this.d : this.e;
+          const res = this.a * r;
+          this.h = (res >> 8) & 0xFF; this.l = res & 0xFF;
+          this.f = (this.f & (F_N | F_H)) | (res === 0 ? F_Z : 0) | (res > 0xFF ? F_C : 0);
+          return 14;
+        }
+        if (z === 3 && (y === 0 || y === 6)) { // MULUW HL,rr(rr = BC/SP): DE:HL = HL × rr
+          const rr = y === 0 ? ((this.b << 8) | this.c) : this.sp;
+          const hl = (this.h << 8) | this.l;
+          const res = hl * rr; // 32bit(2^32 未満なので倍精度で正確)
+          const lo = res % 0x10000, hi = Math.floor(res / 0x10000);
+          this.h = (lo >> 8) & 0xFF; this.l = lo & 0xFF; this.d = (hi >> 8) & 0xFF; this.e = hi & 0xFF;
+          this.f = (this.f & (F_N | F_H)) | (res === 0 ? F_Z : 0) | (hi ? F_C : 0);
+          return 36;
+        }
+      }
 
       if (x === 1) {
         if (z === 0) {
@@ -11483,7 +11512,11 @@
  * V9938(7c): GRAPHIC3=SCREEN4、GRAPHIC4=SCREEN5(256×212 4bpp)、GRAPHIC5=SCREEN6(512×212 2bpp)、GRAPHIC6=SCREEN7(512×212 4bpp)、
  * GRAPHIC7=SCREEN8(256×212 8bpp GRB332)、TEXT2=SCREEN0 WIDTH80 と スプライトモード 2(行 8 枚、行ごとの色、EC/CC/IC)、
  * 212 ライン、縦スクロール(R23)、パレット 16×9bit、ライン割り込み(R19/S1)、ステータス S0〜S9、VDP コマンド(下記)。
- * V9958 の横スクロール(R26/R27)と YJK(SCREEN10〜12)は 7e。インターレース(R9 bit3)は非インターレースとして描く。
+ * V9958(7e): 横スクロール(R26 bit0-4 ×8 ドット、R27 bit0-2 の右ずらし、R25 bit0 SP2=2 ページ(ページは R26 bit5、R2 の bit5 は無視)、
+ * R25 bit1 MSK=左 8 ドットをボーダー色で隠す。全モードに効き、スプライトは動かない)、YJK(R25 bit3、GRAPHIC7 のバイト列を 4 ドット 1 組の
+ * Y5+J6/K6 で色にする=SCREEN12。R25 bit4 YAE=バイトの bit3 が 1 のドットはパレット(bit7-4)=SCREEN10/11)、R25 bit6 CMD=ビットマップ以外の
+ * モードでもコマンドが動く(GRAPHIC7 の配置として扱う: openMSX の挙動の記憶による推定)。S1 bit2 で V9958 を名乗る。
+ * YJK の frameIdx(巻き戻し用)は GRB332 への丸め(表示は frame の正確な色)。インターレース(R9 bit3)は非インターレースとして描く。
  *
  * ■ 時間
  *   行単位。1 行 = 228 Z80 サイクル(VDP 1368 サイクル/6)、NTSC 262 行・PAL(R9 bit1)313 行。1 行の終わりでその行を描く
@@ -11506,6 +11539,7 @@
  *   R6 スプライトパターン ×$800  R7 文字色<<4|背景色(G7 ではボーダー色 8bit)  R8: bit1 SPD(スプライト無効)、bit5 TP(色 0 もパレット)
  *   R9: bit7 LN(212 行)、bit1 NT(PAL)  R12/R13 TEXT2 の点滅色/周期(未対応: 常に文字色)  R14: VRAM 番地の A16-14  R15: 読むステータス番号
  *   R16/R17: パレット/間接レジスタの番地  R18: 表示位置調整(縦のみ反映)  R19: ライン割り込みの行  R23: 縦スクロール
+ *   R25(V9958): bit0 SP2、bit1 MSK、bit3 YJK、bit4 YAE、bit6 CMD  R26/R27(V9958): 横スクロール(上記)
  *   R32-R46: コマンドの SX/SY/DX/DY/NX/NY/CLR/ARG/CMD
  */
 (function (global) {
@@ -11530,6 +11564,7 @@
   const TMS_PALETTE = new Uint32Array(16);
   for (let i = 0; i < 16; i++) TMS_PALETTE[i] = abgr(TMS_RGB[i][0], TMS_RGB[i][1], TMS_RGB[i][2]);
   const LEVEL3 = [0, 36, 73, 109, 146, 182, 219, 255];
+  const LEVEL5 = Array.from({ length: 32 }, (_, i) => Math.round(i * 255 / 31)); // YJK の 5bit
   const LEVEL2 = [0, 85, 170, 255];
   // GRAPHIC7 の 8bit 色(GGGRRRBB → 表示色)
   const G7_PALETTE = new Uint32Array(256);
@@ -11546,6 +11581,7 @@
       opts = opts || {};
       this.type = opts.type || 'v9938';
       this.isTms = this.type === 'tms9918';
+      this.isV9958 = this.type === 'v9958';
       const kb = opts.vramKB || (this.isTms ? 16 : 128);
       this.vram = new Uint8Array(kb * 1024);
       this.vramMask = this.vram.length - 1;
@@ -11557,6 +11593,8 @@
       this.frameIdx = new Uint8Array(W * H);
       this.lineBuf = new Uint8Array(WIDE);   // 1 行の色番号(0 は透明=背景色)。G7 は 8bit 色そのもの
       this.sprBuf = new Uint8Array(W);       // 1 行のスプライト色(0 無し、bit4 = スプライトあり)
+      this.lineRgb = new Uint32Array(W);     // YJK(V9958)の 1 行の表示色(lb は GRB332 への丸め。スプライトと索引は lb で)
+      this.lineTmpA = new Uint8Array(WIDE); this.lineTmpB = new Uint8Array(WIDE); this.lineRgbA = new Uint32Array(W); this.lineRgbB = new Uint32Array(W); this.yjkBg = new Uint8Array(W); // 横スクロール/YJK の作業用
       this.onInt = null;                     // 割り込み線の変化(本体が見てもよい。線は intLine() で読む)
       this.reset();
     }
@@ -11762,19 +11800,16 @@
       else {
         // 縦スクロール(V9938 R23): パターン行/ビットマップ行をずらす
         const sy = this.isTms ? y : ((y + regs[23]) & 0xFF);
-        switch (mode) {
-          case 0: this._lineG1(sy, lb); break;                 // GRAPHIC1 (SCREEN 1)
-          case 1: this._lineT1(sy, lb); break;                 // TEXT1 (SCREEN 0)
-          case 2: this._lineMC(sy, lb); break;                 // MULTICOLOR (SCREEN 3)
-          case 4: this._lineG2(sy, lb); break;                 // GRAPHIC2 (SCREEN 2)
-          case 8: this._lineG2(sy, lb); break;                 // GRAPHIC3 (SCREEN 4): 背景は G2 と同じ、スプライトはモード 2
-          case 9: if (this.isTms) { this.unsupportedMode = true; lb.fill(0, 0, mw); } else this._lineT2(sy, lb); break; // TEXT2 (SCREEN 0 WIDTH 80)
-          case 12: this._lineG4(sy, lb); break;                // GRAPHIC4 (SCREEN 5)
-          case 16: this._lineG5(sy, lb); break;                // GRAPHIC5 (SCREEN 6)
-          case 20: this._lineG6(sy, lb); break;                // GRAPHIC6 (SCREEN 7)
-          case 28: this._lineG7(sy, lb); break;                // GRAPHIC7 (SCREEN 8)
-          default: this.unsupportedMode = true; lb.fill(0, 0, mw); break;
-        }
+        const yjk = g7 && this.isV9958 && (regs[25] & 0x08) !== 0;
+        // 横スクロール(V9958 R26/R27): SP2 の 2 ページはビットマップでだけ(ページは R26 bit5 が R2 bit5 の代わり)
+        const hs = this.isV9958 && ((regs[26] & 0x1F) || (regs[27] & 0x07));
+        const sp2 = hs && (regs[25] & 0x01) && (mode === 12 || mode === 16 || mode === 20 || mode === 28);
+        const r2 = regs[2];
+        if (sp2) regs[2] = (r2 & ~0x20) | (regs[26] & 0x20);
+        this._lineBg(mode, sy, lb, mw, yjk ? this.lineRgb : null);
+        if (hs) this._hScroll(mode, sy, mw, sp2, yjk);
+        if (sp2) regs[2] = r2;
+        if (yjk) this.yjkBg.set(lb.subarray(0, W)); // スプライトの前の背景(合成で「スプライトが上書きした所」を見分ける)
         if (mode !== 1 && mode !== 9 && !(regs[8] & 0x02)) {
           if (this.isTms || mode === 0 || mode === 2 || mode === 4) this._spritesMode1(y, lb, mw);
           else this._spritesMode2(y, lb, mw, g7);
@@ -11789,13 +11824,16 @@
       const kind = this.idxKindCur;
       if (g7) {
         // G7: lb は 8bit 色(ボーダー色 R7 を透明 0 の代わりに使う: 背景の 0 は黒ではなく 0 色そのもの。スプライトは _spritesMode2 が 8bit 色に直して上書き済み)
+        // YJK(V9958): 背景の正確な色は lineRgb。lb が背景のまま(スプライトに上書きされていない)なら lineRgb を出す
+        const yjk = this.isV9958 && this.displayEnabled && (regs[25] & 0x08) !== 0, rgb = this.lineRgb, bgc = this.yjkBg;
         for (let x = 0; x < W; x++) {
           const c = lb[x];
-          const col = G7_PALETTE[c];
+          const col = (yjk && c === bgc[x]) ? rgb[x] : G7_PALETTE[c];
           if (ow === W) { frame[base + x] = col; } else { frame[base + x * 2] = col; frame[base + x * 2 + 1] = col; }
           idx[ibase + x] = kind ? c : (c & 0x0F);
         }
         void bdc; void bdi;
+        this._maskLeft(fy, ow);
         return;
       }
       for (let x = 0; x < mw; x++) {
@@ -11807,6 +11845,68 @@
         else if (!(x & 1)) frame[base + (x >> 1)] = col;
         if (mw === W) idx[ibase + x] = kind ? this._toGrb(c) : c;
         else if (!(x & 1)) idx[ibase + (x >> 1)] = kind ? this._toGrb(c) : c;
+      }
+      this._maskLeft(fy, ow);
+    }
+    // 背景の 1 行をモードで描く(lb に色番号/G7 は 8bit 色。rgb を渡すと YJK として lineRgb に表示色も)
+    _lineBg(mode, sy, lb, mw, rgb) {
+      switch (mode) {
+        case 0: this._lineG1(sy, lb); break;                 // GRAPHIC1 (SCREEN 1)
+        case 1: this._lineT1(sy, lb); break;                 // TEXT1 (SCREEN 0)
+        case 2: this._lineMC(sy, lb); break;                 // MULTICOLOR (SCREEN 3)
+        case 4: this._lineG2(sy, lb); break;                 // GRAPHIC2 (SCREEN 2)
+        case 8: this._lineG2(sy, lb); break;                 // GRAPHIC3 (SCREEN 4): 背景は G2 と同じ、スプライトはモード 2
+        case 9: if (this.isTms) { this.unsupportedMode = true; lb.fill(0, 0, mw); } else this._lineT2(sy, lb); break; // TEXT2 (SCREEN 0 WIDTH 80)
+        case 12: this._lineG4(sy, lb); break;                // GRAPHIC4 (SCREEN 5)
+        case 16: this._lineG5(sy, lb); break;                // GRAPHIC5 (SCREEN 6)
+        case 20: this._lineG6(sy, lb); break;                // GRAPHIC6 (SCREEN 7)
+        case 28: if (rgb) this._lineYjk(sy, lb, rgb); else this._lineG7(sy, lb); break; // GRAPHIC7 (SCREEN 8) / YJK (SCREEN 10-12)
+        default: this.unsupportedMode = true; lb.fill(0, 0, mw); break;
+      }
+    }
+    // 横スクロール(V9958): lb(と YJK の lineRgb)を R26/R27 ぶんずらす。幅 512 のモードは 2 倍。SP2 はもう一方のページ(R2 bit5 を反転)を
+    // 右側(と、R27 で右にずれた左端)に続ける。SP2 でなければ同じページで巻く
+    _hScroll(mode, sy, mw, sp2, yjk) {
+      const regs = this.regs, lb = this.lineBuf, A = this.lineTmpA, B = this.lineTmpB, rgb = this.lineRgb, rgbA = this.lineRgbA, rgbB = this.lineRgbB;
+      const unit = mw === WIDE ? 2 : 1;
+      const x0 = (((regs[26] & 0x1F) << 3) - (regs[27] & 0x07)) * unit; // 画面の左端に出る元の x(負あり)
+      A.set(lb.subarray(0, mw)); if (yjk) rgbA.set(rgb);
+      if (sp2) { regs[2] ^= 0x20; this._lineBg(mode, sy, B, mw, yjk ? rgbB : null); regs[2] ^= 0x20; }
+      for (let x = 0; x < mw; x++) {
+        let sx = x + x0, other = false;
+        if (sx < 0) { sx += mw; other = true; } else if (sx >= mw) { sx -= mw; other = true; }
+        const src = (sp2 && other) ? B : A;
+        lb[x] = src[sx];
+        if (yjk) rgb[x] = (sp2 && other) ? rgbB[sx] : rgbA[sx];
+      }
+    }
+    // 左 8 ドット(幅 512 は 16)をボーダー色で隠す(V9958 R25 bit1 MSK)。横スクロールの R27 で欠けた端を隠すための物
+    _maskLeft(fy, ow) {
+      if (!this.isV9958 || !(this.regs[25] & 0x02)) return;
+      const [c, ci] = this._borderColor();
+      const n = ow === WIDE ? 16 : 8, base = fy * ow;
+      for (let x = 0; x < n; x++) this.frame[base + x] = c;
+      for (let x = 0; x < 8; x++) this.frameIdx[fy * W + x] = ci;
+    }
+    // YJK(V9958 SCREEN 10-12): 4 ドット 1 組。各バイトの bit7-3 が Y(5bit)、bit2-0 が 4 バイトで K(下位 3+上位 3、符号つき 6bit)と J。
+    //   R = Y + J、G = Y + K、B = (5Y - 2J - K) / 4(各 0-31 に飽和、5bit → 8bit は ×255/31)。YAE(R25 bit4)のとき bit3=1 のドットはパレット bit7-4
+    // lb には GRB332 への丸め(索引/スプライト合成/巻き戻しの画用)、rgb に表示色
+    _lineYjk(y, lb, rgb) {
+      const vram = this.vram, m = this.vramMask, base = ((this.regs[2] & 0x20) << 11) + (y << 8);
+      const yae = (this.regs[25] & 0x10) !== 0, pal = this.palette;
+      for (let x = 0; x < 256; x += 4) {
+        const b0 = vram[(base + x) & m], b1 = vram[(base + x + 1) & m], b2 = vram[(base + x + 2) & m], b3 = vram[(base + x + 3) & m];
+        let k = (b0 & 7) | ((b1 & 7) << 3), j = (b2 & 7) | ((b3 & 7) << 3);
+        if (k & 0x20) k -= 64; if (j & 0x20) j -= 64;
+        for (let i = 0; i < 4; i++) {
+          const b = i === 0 ? b0 : i === 1 ? b1 : i === 2 ? b2 : b3;
+          if (yae && (b & 0x08)) { const p = b >> 4; rgb[x + i] = pal[p]; lb[x + i] = this._toGrb(p); continue; }
+          const yy = b >> 3;
+          let r = yy + j, g = yy + k, bl = ((5 * yy - 2 * j - k) >> 2);
+          r = r < 0 ? 0 : r > 31 ? 31 : r; g = g < 0 ? 0 : g > 31 ? 31 : g; bl = bl < 0 ? 0 : bl > 31 ? 31 : bl;
+          rgb[x + i] = abgr(LEVEL5[r], LEVEL5[g], LEVEL5[bl]);
+          lb[x + i] = ((g >> 2) << 5) | ((r >> 2) << 2) | (bl >> 3);
+        }
       }
     }
     _lineG1(y, lb) {
@@ -11991,7 +12091,7 @@
         case 16: return { shift: 7, ppb: 4, w: 512 }; // G5
         case 20: return { shift: 8, ppb: 2, w: 512 }; // G6
         case 28: return { shift: 8, ppb: 1, w: 256 }; // G7
-        default: return null;
+        default: return (this.isV9958 && (this.regs[25] & 0x40)) ? { shift: 8, ppb: 1, w: 256 } : null; // V9958 R25 CMD: ビットマップ以外でも G7 の配置で動く(推定)
       }
     }
     _addrOf(pi, x, y) { return (((y & 0x3FF) << pi.shift) + ((x & (pi.w - 1)) / pi.ppb | 0)) & this.vramMask; }
@@ -12579,7 +12679,11 @@
  *   setController(port, bits, turbo)(NES と同じビット: A=1 B=2 Up=16 Down=32 Left=64 Right=128 → ジョイスティックのトリガ 1/2 と方向)/
  *   setKey(code, down)(PC のキー)/reset()/hasBattery・getBattery・setBattery(SRAM/FM-PAC/RTC、7c)
  *
- * ■ 構成(機種は opts.machine: 'msx1' | 'msx2' | 'msx2plus' | 'turbor'。7a の turboR は Z80 モードの MSX2+ 相当)
+ * ■ 構成(機種は opts.machine: 'msx1' | 'msx2' | 'msx2plus' | 'turbor')
+ *   turboR(7e): スロット 0-0 メイン BIOS、0-2 内蔵 MSX-MUSIC、3-0 サブ ROM(+漢字ドライバ 32K bios.kdr を $4000〜)、3-2 ディスク(TC8566AF)、
+ *   3-3 マッパー RAM 256K(FS-A1ST の配置。パナソニックの内蔵ソフト ROM(3-1、512K の専用マッパー)は載せない)。S1990(I/O $E4-$E7: CPU モードと
+ *   255.68kHz の 16bit タイマ)、PCM(I/O $A4/$A5、8bit D/A、15.75kHz の 2bit カウンタ。A/D は無し)、PAUSE($A7、押せない)。
+ *   R800 は cpuZ80.js の r800 フラグ(MULUB/MULUW と時間の近似)。実 BIOS は利用者の物(C-BIOS に turboR は無い)
  *   Z80 3.58MHz(M1 ウェイト 1)、PPI 8255($A8-$AB: 一次スロット選択/キーボード行/キー読み)、拡張スロットレジスタ($FFFF)、
  *   メモリマッパー RAM($FC-$FF、msx1 64K / msx2〜 128K〜)、VDP(msx/vdp.js、$98-$9B)、PSG(expansion/ay8910Msx.js、$A0-$A2。
  *   R14 はジョイスティック、R15 は口の選択)、カートリッジ(msx/cartridge.js、スロット 1 と 2)、BIOS ROM(利用者または同梱 C-BIOS)。
@@ -12621,8 +12725,63 @@
     msx1: { vdp: 'tms9918', vramKB: 16, ramKB: 64, expanded: [false, false, false, false], sub: false, fm: false },
     msx2: { vdp: 'v9938', vramKB: 128, ramKB: 128, expanded: [false, false, false, true], sub: true, fm: false },
     msx2plus: { vdp: 'v9958', vramKB: 128, ramKB: 128, expanded: [false, false, false, true], sub: true, fm: true },
-    turbor: { vdp: 'v9958', vramKB: 128, ramKB: 256, expanded: [false, false, false, true], sub: true, fm: true },
+    turbor: { vdp: 'v9958', vramKB: 128, ramKB: 256, expanded: [false, false, false, true], sub: true, fm: true, turbor: true,
+      layout: { sub: [3, 0], disk: [3, 2], ram: [3, 3], music: [0, 2] } },
   };
+  // 内蔵物のスロット(一次, 二次)。msx2/2+ は 7a〜7d の配置のまま(C-BIOS と実 BIOS の両方で動いている)
+  const DEFAULT_LAYOUT = { sub: [3, 0], disk: [3, 1], ram: [3, 2], music: [3, 3] };
+  const PCM_TICK = 3579545 / 15750; // PCM のカウンタ(2bit)の 1 刻み(Z80 サイクル)
+  const S1990_TICK = 14;            // S1990 のタイマ: 3.579545MHz / 14 = 255.68kHz
+
+  // turboR の S1990(システム制御): $E4 レジスタ番号、$E5 データ、$E6/$E7 タイマ(読み=下位/上位、$E6 書き=リセット)。
+  //   レジスタ 6 = CPU モード(bit5: 1=Z80 0=R800、bit6: 1=ROM モード 0=DRAM モード。リセット時 $60)。5 = PAUSE LED 等(読み書きだけ)。
+  //   13/14 は openMSX が固定値を返している記憶(0x03/0x2F)による推定。DRAM モードは速度の違いだけ(BIOS の RAM への写しは模擬しない)
+  class S1990 {
+    constructor(owner) { this.owner = owner; this.sel = 0; this.regs = new Uint8Array(16); this.timerBase = 0; this.reset(); }
+    reset() { this.sel = 0; this.regs.fill(0); this.regs[6] = 0x60; this.timerBase = 0; this._applyCpu(); }
+    ioRead(port) {
+      switch (port) {
+        case 0xE4: return this.sel;
+        case 0xE5: return this.sel === 13 ? 0x03 : this.sel === 14 ? 0x2F : this.regs[this.sel & 15];
+        case 0xE6: return this._timer() & 0xFF;
+        case 0xE7: return (this._timer() >> 8) & 0xFF;
+        default: return 0xFF;
+      }
+    }
+    ioWrite(port, v) {
+      switch (port) {
+        case 0xE4: this.sel = v & 0x0F; return;
+        case 0xE5: this.regs[this.sel] = v; if (this.sel === 6) this._applyCpu(); return;
+        case 0xE6: this.timerBase = this.owner.cpuCycles; return;
+        default: return;
+      }
+    }
+    _timer() { return Math.floor((this.owner.cpuCycles - this.timerBase) / S1990_TICK) & 0xFFFF; }
+    get r800() { return !(this.regs[6] & 0x20); }
+    get dram() { return !(this.regs[6] & 0x40); }
+    _applyCpu() { const cpu = this.owner.cpu; if (!cpu) return; cpu.r800 = this.r800; cpu.r800Scale = this.dram ? 0.2 : 0.35; }
+  }
+  // turboR の PCM(8bit D/A。A/D は模擬しない): $A4 データ(書き=D/A、読み=最後の値)、$A5 制御/状態。
+  //   $A5 書き: bit0 SMPL、bit1 SEL(1 のとき $A4 の書き込みが D/A に出る)、bit2 FILT、bit3 MUTE(1=消音)。読み: bit1-0 = $A4 アクセスからの
+  //   15.75kHz カウンタ(2bit。BIOS/ゲームはこれを待って 1 サンプルずつ書く)、bit4-2 = 書いた値、bit7 = 比較器(A/D 無しなので 0)。
+  //   ビット配置は MSX Datapack の記述の記憶による(SEL/MUTE の極性は推定。録音には SEL のときの $A4 を載せる)。音は牌の魔術師の D/A と同じ零次ホールド
+  class TurboRPcm {
+    constructor(owner) { this.owner = owner; this.dac = new Emu.MajutsushiDAC(); this.status = 0; this.value = 0x80; this.lastAccess = 0; }
+    reset() { this.dac.reset(); this.status = 0; this.value = 0x80; this.lastAccess = 0; }
+    get outputOn() { return (this.status & 0x02) !== 0; }
+    ioRead(port) {
+      if (port === 0xA4) { this.lastAccess = this.owner.cpuCycles; return this.value; }
+      const ticks = Math.floor((this.owner.cpuCycles - this.lastAccess) / PCM_TICK) & 3;
+      return (this.status & 0x1C) | ticks;
+    }
+    ioWrite(port, v) {
+      if (port === 0xA4) { this.lastAccess = this.owner.cpuCycles; this.value = v & 0xFF; if (this.outputOn) this.dac.write(v); return true; }
+      this.status = v & 0x1F; return false;
+    }
+    mixSample() { return (this.status & 0x08) ? 0 : this.dac.mixSample(); }
+    get mute() { return this.dac.mute; } get vol() { return this.dac.vol; }
+  }
+
   const CART_B_KINDS = ['none', 'fmpac', 'msxaudio', 'scci', 'rom'];
 
   const EMPTY_PAGE = new Uint8Array(PAGE).fill(0xFF);
@@ -12748,7 +12907,7 @@
   class MsxConsole {
     /**
      * @param {Uint8Array} romBytes カートリッジ ROM(.rom)。null なら BIOS だけで起動
-     * @param {object} [opts] { machine, bios: { main, sub, logo, disk, kanji, music }, mapperType, ramKB,
+     * @param {object} [opts] { machine, bios: { main, sub, logo, disk, kanji, kdr(漢字ドライバ 32K、2+/turboR), music }, mapperType, ramKB,
      *                          cartB: { kind: 'fmpac'|'msxaudio'|'scci'|'rom', rom?: Uint8Array, mapperType? } | Uint8Array(=rom),
      *                          disks: Uint8Array[](.dsk 画像。bios.disk=ディスク ROM 16K が要る), fdc: 'wd2793'|'tc8566af' }
      */
@@ -12784,6 +12943,9 @@
       this.opll = ((cb && cb.kind === 'fmpac') || this.fmInternal) && Emu.OPLLAudio ? new Emu.OPLLAudio() : null;
       this.fm = this.opll ? new FmPacDevice(fmRom) : null;
       this.opl = cb && cb.kind === 'msxaudio' && Emu.OPLAudio ? new Emu.OPLAudio(CPU_CLOCK, { type: 'y8950' }) : null;
+      this.cpuCycles = 0;
+      this.s1990 = mc.turbor ? new S1990(this) : null; // turboR(7e)
+      this.pcm = mc.turbor && Emu.MajutsushiDAC ? new TurboRPcm(this) : null;
       this.cart = romBytes ? new Emu.MsxCartridge(romBytes, { type: opts.mapperType, scc: sccA ? this.scc : null, dac: this.dac }) : null;
       this.cartB = null;
       if (cb && cb.kind === 'rom') this.cartB = new Emu.MsxCartridge(cb.rom, { type: cb.mapperType, scc: null });
@@ -12793,13 +12955,21 @@
       // スロット表 slot[primary][secondary]
       this.expanded = mc.expanded.slice();
       this.slot = [[null, null, null, null], [null, null, null, null], [null, null, null, null], [null, null, null, null]];
+      const lay = mc.layout || DEFAULT_LAYOUT;
       const mainList = [new RomDevice(this.bios.main, 0)];
       if (this.bios.logo) mainList.push(new RomDevice(this.bios.logo, 0x8000));
       this.slot[0][0] = new MultiRomDevice(mainList);
       if (this.cart) this.slot[1][0] = new CartDevice(this.cart);
       if (this.cartB) this.slot[2][0] = new CartDevice(this.cartB);
       else if (this.fm && !this.fmInternal) this.slot[2][0] = this.fm; // FM-PAC はカートリッジ B
-      if (mc.sub) { if (this.bios.sub) this.slot[3][0] = new RomDevice(this.bios.sub, 0); this.slot[3][2] = this.ramDev; }
+      if (mc.sub) {
+        // サブ ROM(+turboR/2+ の漢字ドライバ 32K を $4000〜 に同居: FS-A1ST/WSX の 3-0 と同じ)
+        const subList = [];
+        if (this.bios.sub) subList.push(new RomDevice(this.bios.sub, 0));
+        if (this.bios.kdr && this.bios.kdr.length === 0x8000) subList.push(new RomDevice(this.bios.kdr, 0x4000));
+        if (subList.length) this.slot[lay.sub[0]][lay.sub[1]] = subList.length === 1 ? subList[0] : new MultiRomDevice(subList);
+        this.slot[lay.ram[0]][lay.ram[1]] = this.ramDev;
+      }
       else this.slot[3][0] = this.ramDev;
       // ディスク(7d): ディスク ROM(利用者の物)+FDC をスロット 3-1 に。画像が無くても ROM があればドライブ(空)は付く
       this.disk = null;
@@ -12807,9 +12977,9 @@
       if (this.bios.disk && Emu.MsxDiskInterface) {
         const images = (opts.disks || []).map((b) => new Emu.MsxDiskImage(b));
         this.disk = new Emu.MsxDiskInterface(this.bios.disk, opts.fdc || 'wd2793', images);
-        this.slot[3][1] = this.disk;
+        this.slot[lay.disk[0]][lay.disk[1]] = this.disk;
       }
-      if (this.fm && this.fmInternal) this.slot[3][3] = this.fm; // 内蔵 MSX-MUSIC(MSX2+/turboR の実機配置と同じ 3-3)
+      if (this.fm && this.fmInternal) this.slot[lay.music[0]][lay.music[1]] = this.fm; // 内蔵 MSX-MUSIC(2+ は 3-3、turboR は 0-2)
       this.pageDev = new Array(8).fill(null);
       this.ppiA = 0; this.ppiC = 0; this.ssl = new Uint8Array(4);
       this.joy = [0, 0]; this.joyHeld = [0, 0]; this.joyTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
@@ -12835,6 +13005,8 @@
       if (this.rtc) this.rtc.reset();
       if (this.kanji) this.kanji.reset();
       if (this.disk) this.disk.reset();
+      if (this.s1990) this.s1990.reset();
+      if (this.pcm) this.pcm.reset();
       if (this.cart) this.cart.reset();
       if (this.cartB) this.cartB.reset();
       this.keyboard.releaseAll();
@@ -12861,7 +13033,7 @@
       return MsxConsole.defaultBios(Object.keys(C).find((k) => C[k] && C[k].main) || 'msx2').music;
     }
     static describe(c) {
-      const parts = [{ msx1: 'MSX1', msx2: 'MSX2', msx2plus: 'MSX2+', turbor: 'MSX turbo R' }[c.machine]];
+      const parts = [{ msx1: 'MSX1', msx2: 'MSX2', msx2plus: 'MSX2+', turbor: 'MSX turbo R' }[c.machine] + (c.r800Active ? ' (R800)' : '')];
       if (c.cart) parts.push(c.cart.title + (c.cart.hasSram ? '+SRAM' : ''));
       if (c.kanji) parts.push('漢字');
       const b = { fmpac: 'FM-PAC', msxaudio: 'MSX-AUDIO', scci: 'SCC-I' }[c.cartBKind];
@@ -12880,8 +13052,10 @@
       if (this.opll) out.push('opll');
       if (this.opl) out.push('opl');
       if (this.dac) out.push('dac');
+      if (this.pcm) out.push('pcm');
       return out;
     }
+    get r800Active() { return !!(this.s1990 && this.s1990.r800); }
     get sccPlus() { return !!((this.cart && this.cart.sccPlusMode) || (this.cartB && this.cartB.sccPlusMode)); }
     extBits() { return 0; }
     // バッテリーバックアップ(7c): カートリッジの SRAM + FM-PAC の SRAM + RTC の RAM を 1 本に("MSXB" + [tag len32 data]...)。
@@ -12982,6 +13156,9 @@
         case 0xAB: return 0xFF;
         case 0xB4: case 0xB5: return this.rtc ? this.rtc.ioRead(port) : 0xFF;
         case 0xD8: case 0xD9: case 0xDA: case 0xDB: return this.kanji ? this.kanji.ioRead(port) : 0xFF;
+        case 0xA4: case 0xA5: return this.pcm ? this.pcm.ioRead(port) : 0xFF; // turboR PCM
+        case 0xA7: return this.s1990 ? 0x00 : 0xFF;                            // turboR PAUSE(bit0: 押されていない)
+        case 0xE4: case 0xE5: case 0xE6: case 0xE7: return this.s1990 ? this.s1990.ioRead(port) : 0xFF;
         case 0xC0: return this.opl ? this.opl.readStatus() : 0xFF; // MSX-AUDIO: ステータス(無ければ 0xFF=無し)
         case 0xC1: return this.opl ? this.opl.readData() : 0xFF;
         case 0xFC: case 0xFD: case 0xFE: case 0xFF: return this.ramDev.ioRead(port);
@@ -13006,6 +13183,9 @@
         case 0x7D: if (this.opll) { this.opll.ioWrite(0x7D, v); this._logWrite('opll', this.opllLatch, v); } return;
         case 0xB4: case 0xB5: if (this.rtc) this.rtc.ioWrite(port, v); return;
         case 0xD8: case 0xD9: case 0xDA: case 0xDB: if (this.kanji) this.kanji.ioWrite(port, v); return;
+        case 0xA4: case 0xA5: if (this.pcm) { const out = this.pcm.ioWrite(port, v); if (out || port === 0xA5) this._logWrite('pcm', port, v); } return; // turboR PCM($A4 は D/A に出た物だけ録音)
+        case 0xA7: return;
+        case 0xE4: case 0xE5: case 0xE6: case 0xE7: if (this.s1990) this.s1990.ioWrite(port, v); return;
         case 0xC0: if (this.opl) { this.oplLatch = v; this.opl.ioWrite(0xC0, v); } return; // MSX-AUDIO
         case 0xC1: if (this.opl) this._oplData(v); return;
         case 0xFC: case 0xFD: case 0xFE: case 0xFF: this.ramDev.ioWrite(port, v); return;
@@ -13083,6 +13263,7 @@
         put('opl', 0xBD, rg[0xBD]);
         for (let i = 0; i < 9; i++) put('opl', 0xB0 + i, rg[0xB0 + i]);
       }
+      if (this.pcm) put('pcm', 0xA5, this.pcm.status);
       return out;
     }
     startRecording() { this.rec = { frames: [], cur: this.audioImage() }; }
@@ -13104,7 +13285,7 @@
       return cycles;
     }
     advance(cycles) {
-      const vdp = this.vdp, psg = this.psg, scc = this.scc, opll = this.opll, opl = this.opl, dac = this.dac;
+      const vdp = this.vdp, psg = this.psg, scc = this.scc, opll = this.opll, opl = this.opl, dac = this.dac, pcm = this.pcm;
       this.cpuCycles += cycles;
       vdp.step(cycles);
       if (this.disk) this.disk.clock(cycles);
@@ -13125,6 +13306,7 @@
               if (opll) s += opll.mixSample() * OPLL_GAIN;
               if (opl) s += opl.mixSample() * OPL_GAIN;
               if (dac) s += dac.mixSample() * DAC_GAIN;
+              if (pcm) s += pcm.mixSample() * DAC_GAIN;
               this.ring[(this.ringHead + this.ringLen) & (AUDIO_RING - 1)] = s;
               this.ringLen++;
             }
@@ -13164,10 +13346,11 @@
     // 鍵盤表示のミュート/音量(worklet の mix メッセージ)。psg: [3]、scc: [5]、opll: [14]、opl: [15]、dac: [1]
     applyMix(mute, volume) {
       const put = (target, source, conv) => { if (!target || !source) return; for (let i = 0; i < target.length; i++) if (source[i] !== undefined) target[i] = conv(source[i]); };
-      const chips = { psg: this.psg, scc: this.scc, opll: this.opll, opl: this.opl, dac: this.dac };
+      const chips = { psg: this.psg, scc: this.scc, opll: this.opll, opl: this.opl, dac: this.dac, pcm: this.pcm };
       for (const k of Object.keys(chips)) {
         const c = chips[k];
         if (!c) continue;
+        if (k === 'pcm') { if (mute && mute.dac) put(c.mute, mute.dac, (v) => !!v); if (volume && volume.dac) put(c.vol, volume.dac, (v) => Math.max(0, Math.min(2, +v || 0))); continue; } // turboR PCM は dac(KDA 行)の指定に従う
         if (mute && mute[k]) put(c.mute, mute[k], (v) => !!v);
         if (volume && volume[k] && c.vol) put(c.vol, volume[k], (v) => Math.max(0, Math.min(2, +v || 0)));
       }
@@ -13177,6 +13360,8 @@
       if (this.cart) { if (this.cart.type === 'plain') this.cart._mapPlain(); else this.cart._remap(); }
       if (this.cartB) { if (this.cartB.type === 'plain') this.cartB._mapPlain(); else this.cartB._remap(); }
       if (this.opl && this.opl._pitchCache) this.opl._pitchCache.clear();
+      if (this.s1990) { this.s1990.owner = this; this.s1990._applyCpu(); }
+      if (this.pcm) this.pcm.owner = this;
       this._remapAll();
     }
   }
@@ -13538,7 +13723,7 @@
               // MSX: ROM(null なら BIOS だけで起動)+ 機種/BIOS(main 32K・sub/logo 16K、ArrayBuffer で届く)/マッパー種別
               const o = m.msx || {};
               const bios = {};
-              if (o.bios) { for (const k of ['main', 'sub', 'logo', 'kanji', 'disk']) if (o.bios[k]) bios[k] = new Uint8Array(o.bios[k]); if (o.bios.name) bios.name = o.bios.name; }
+              if (o.bios) { for (const k of ['main', 'sub', 'logo', 'kanji', 'disk', 'kdr']) if (o.bios[k]) bios[k] = new Uint8Array(o.bios[k]); if (o.bios.name) bios.name = o.bios.name; }
               const cartB = o.cartB && o.cartB.kind ? { kind: o.cartB.kind, rom: o.cartB.rom ? new Uint8Array(o.cartB.rom) : null } : null; // 音源カートリッジ(FM-PAC/MSX-AUDIO/SCC-I)
               const disks = (o.disks || []).map((b) => new Uint8Array(b)); // .dsk 画像(7d)
               nes = new MML.Emu.MsxConsole(m.rom ? new Uint8Array(m.rom) : null, { machine: o.machine, bios: bios.main ? bios : null, mapperType: o.mapperType || undefined, cartB, disks, fdc: o.fdc || undefined });

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-09 00:04:11
+ * Built by tools/build-capture-workers.ps1 at 2026-11-09 07:33:54
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-09 00:04:11';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-09 07:33:54';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -67,8 +67,9 @@
   // MSX の DAC ブロック(規格外。DESIGN-MSX-CAPTURE.md §5.6。NESX と同じ流儀で、他のプレイヤーは読み飛ばす)
   //   0x67 0x66 TYPE size(4) "MSXX" ver(1) kind(1) payload
   //   kind 0 = ヘッダ: payload[0] = 機種(1=MSX1 2=MSX2 3=MSX2+ 4=turboR)、payload[1] = DAC ビット(bit0=turboR PCM、bit1=コナミ DAC $5000、bit2=コナミシンセサイザー $4000)
-  //   kind 1 = DAC の書き込み列: 2 バイト×n = value8 meta8(bit0-6=フレーム内時刻×1/128)。同じ時刻の物を 1 ブロックに(ブロックの位置が時刻)
-  VGM.MSXX = { TYPE: 0xBE, MAGIC: [0x4D, 0x53, 0x58, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_DAC: 1,
+  //   kind 1 = DAC の書き込み列: 2 バイト×n = value8 meta8(bit0-6=フレーム内時刻×1/128、bit7=1 なら turboR PCM、0 ならコナミ DAC)。同じ時刻の物を 1 ブロックに(ブロックの位置が時刻)
+  //   kind 2 = turboR PCM の制御($A5)の書き込み: value8 meta8(時刻)。再生は読み飛ばしてよい(kind 1 には D/A に出た物だけが載る)
+  VGM.MSXX = { TYPE: 0xBE, MAGIC: [0x4D, 0x53, 0x58, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_DAC: 1, KIND_PCM_CTRL: 2, META_PCM: 0x80,
     MACHINES: { msx1: 1, msx2: 2, msx2plus: 3, turbor: 4 }, DAC_TURBOR_PCM: 1, DAC_KONAMI: 2, DAC_KONAMI_SYNTH: 4 };
   VGM.isMsxxBlock = function (type, block) {
     const m = VGM.MSXX.MAGIC;
@@ -15028,7 +15029,7 @@
     };
   }
 
-  // MSX の DAC(規格外 MSXX ブロック、本ツールの MSX 録音。DESIGN-MSX-CAPTURE.md §5.6): KSS の牌の魔術師 D/A と同じ
+  // MSX の DAC(規格外 MSXX ブロック、本ツールの MSX 録音。DESIGN-MSX-CAPTURE.md §5.6。コナミ DAC と turboR PCM の両方): KSS の牌の魔術師 D/A と同じ
   // majutsushiDac.js で鳴らす。書き込みはブロックの位置(時刻)で届くので clock は要らない。ミュート/音量は kss の dac 配列
   function makeMsxDacAdapter(msxx) {
     const chip = new Emu.MajutsushiDAC();
@@ -15389,7 +15390,7 @@
         const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
-      // MSX の DAC の書き込み列(規格外 MSXX、vgmHeader.js VGM.MSXX 参照): value8 meta8(bit0-6=フレーム内時刻/128)×n
+      // MSX の DAC の書き込み列(規格外 MSXX、vgmHeader.js VGM.MSXX 参照): value8 meta8(bit0-6=フレーム内時刻/128、bit7=turboR PCM)×n。kind 2(PCM の制御)は読み飛ばす
       if (MML.VGM && MML.VGM.isMsxxBlock && MML.VGM.isMsxxBlock(type, block)) {
         const a = this.adapterById.msxdac;
         if (a && block[5] === MML.VGM.MSXX.KIND_DAC) {

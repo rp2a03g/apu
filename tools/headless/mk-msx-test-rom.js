@@ -53,6 +53,10 @@ function asm(build) {
       push_af: () => out.push(0xF5), pop_af: () => out.push(0xF1), push_hl: () => out.push(0xE5), pop_hl: () => out.push(0xE1), push_bc: () => out.push(0xC5), pop_bc: () => out.push(0xC1), push_de: () => out.push(0xD5), pop_de: () => out.push(0xD1),
       ldir: () => out.push(0xED, 0xB0), ex_af: () => out.push(0x08), exx: () => out.push(0xD9), bit7_a: () => out.push(0xCB, 0x7F), bit0_a: () => out.push(0xCB, 0x47), bit3_a: () => out.push(0xCB, 0x5F),
       ld_a_i: () => out.push(0xED, 0x57),
+      // R800(7e)
+      mulub_a_b: () => out.push(0xED, 0xC1), mulub_a_c: () => out.push(0xED, 0xC9), muluw_hl_bc: () => out.push(0xED, 0xC3),
+      ld_mem_de: (n) => out.push(0xED, 0x53, ...w16(typeof n === 'string' ? ref(n) : n)), ld_mem_bc: (n) => out.push(0xED, 0x43, ...w16(n)),
+      in_a_c: () => out.push(0xED, 0x78), out_c_a: () => out.push(0xED, 0x79), and_a: () => out.push(0xA7), dec_c_: () => out.push(0x0D),
     };
     build(A);
     if (pass === 1) return { bytes: Uint8Array.from(out), labels, org };
@@ -67,11 +71,13 @@ function asm(build) {
 // 0x0038: INT。VDP S0 を読んで F を落とし、H.KEYI 相当は無し。FD9A(H.TIMI)を CALL(RAM に RET を置くのはテスト ROM 側)… 簡単のため
 //         INT ハンドラは「AF を保存、S0 読み、JIFFY(0xFC9E、実機 BIOS と同じ番地)を +1、AF 復元、EI、RETI」。
 // 0x0093/0x0096: WRTPSG/RDPSG、0x004D RDVRM、0x004A WRTVRM、0x0047 WRTVDP は最小実装(本物の番地と同じ)。
-function buildBios() {
+// opts.ramSec: 拡張スロット 3 の中で RAM のある二次スロット(msx2/2+ の配置は 2、turboR は 3。msxConsole.js の MACHINES.layout と合わせる)
+function buildBios(opts) {
+  const ramSec = (opts && opts.ramSec !== undefined) ? opts.ramSec : 2;
   const r = asm((A) => {
     A.org(0);
     A.di(); A.ld_sp(0xF380); A.ld_a(0xF4); A.out(0xA8); A.im1();
-    A.ld_a(0xAA); A.ld_mem_a(0xFFFF); // スロット 3 が拡張されている機種(msx2 配置)では 3-2(RAM)を全ページに。msx1 ではただの RAM 書き
+    A.ld_a(ramSec * 0x55); A.ld_mem_a(0xFFFF); // スロット 3 が拡張されている機種では RAM の二次スロットを全ページに(msx2 配置 0xAA=3-2、turboR 0xFF=3-3)。msx1 ではただの RAM 書き
     // マッパー RAM の既定(3,2,1,0)はエミュレータが reset で置く
     A.ld_a_mem(0x4000); A.cp(0x41); A.jr_nz('noCart'); A.ld_a_mem(0x4001); A.cp(0x42); A.jr_nz('noCart');
     A.ld_hl_mem(0x4002); A.jp_hl();
@@ -292,6 +298,10 @@ function buildSoundTestRom(kind, opts) {
 //   kind 'g7': SCREEN8(GRAPHIC7)。HMMV で画面を GRB=0x1C(緑)に塗り、LMMV で矩形 0xE0(赤)。
 //   kind 'g6': SCREEN7(GRAPHIC6、512 幅)。HMMV で色 4、LMMV で 128×32 の矩形 色 9。
 //   kind 't2': SCREEN0 WIDTH 80(TEXT2)。名前表に 'A'(0x41)を並べ、パターン 0x41 を縞に。
+//   kind 'scroll'(V9958、7e): SCREEN5。ページ 0 を色 4 で塗り左上 64×212 を色 9、ページ 1(VRAM $8000〜)を色 2 で塗る。R25=SP2|MSK、R26=4(32 ドット)、R27=3。
+//              期待: x 0-7 ボーダー(MSK、色 6)、x 8-34 色 9(矩形 64 の残り 32+右ずらし 3)、35-226 色 4、227-255 色 2(ページ 1)
+//   kind 'yjk'(V9958): SCREEN12(G7+YJK)。HMMV で全面を Y=16 K=0 J=0(バイト $80)に塗り、行 0 の 0-3 を Y=31 J=+15 K=0(バイト $F8 $F8 $FF $F9)に。
+//   kind 'yae'(V9958): SCREEN10(YJK+YAE)。行 0 の 0-3 を bit3=1 の パレット 9(バイト $98)に、他は $80
 function buildV9938TestRom(kind) {
   const r = asm((A) => {
     A.org(0x4000);
@@ -308,7 +318,22 @@ function buildV9938TestRom(kind) {
     // コマンドのレジスタ R32〜R46 を間接レジスタ(R17 ← 32、$9B へ連続)で書く
     const cmd = (vals) => { A.di(); A.ld_a(32); A.out(0x99); A.ld_a(0x91); A.out(0x99); for (const v of vals) { A.ld_a(v); A.out(0x9B); } };
     const w16 = (v) => [v & 0xFF, (v >> 8) & 0xFF];
-    if (kind === 'g4' || kind === 'g6' || kind === 'g7') {
+    if (kind === 'scroll') {
+      vdp(0, 0x06); vdp(2, 0x1F); vdp(9, 0x80); vdp(7, 0x06); vdp(8, 0x02); vdp(1, 0x60); // ボーダー 6(赤。色 0/1 は黒で見分けられない)
+      cmd([...w16(0), ...w16(0), ...w16(0), ...w16(0), ...w16(256), ...w16(212), 0x44, 0x00, 0xC0]); waitCmd('a');          // ページ 0 全面 4
+      cmd([...w16(0), ...w16(0), ...w16(0), ...w16(0), ...w16(64), ...w16(212), 0x09, 0x00, 0x80]); waitCmd('b');           // 左 64 を 9
+      cmd([...w16(0), ...w16(0), ...w16(0), ...w16(256), ...w16(256), ...w16(212), 0x22, 0x00, 0xC0]); waitCmd('c');        // ページ 1(DY=256)全面 2
+      vdp(27, 3); vdp(26, 4); vdp(25, 0x03);
+      A.ei(); A.label('idle'); A.halt(); A.jr('idle');
+    } else if (kind === 'yjk' || kind === 'yae') {
+      vdp(0, 0x0E); vdp(2, 0x1F); vdp(9, 0x80); vdp(7, 0x00); vdp(8, 0x02); vdp(1, 0x60);
+      cmd([...w16(0), ...w16(0), ...w16(0), ...w16(0), ...w16(256), ...w16(212), 0x80, 0x00, 0xC0]); waitCmd('a');          // 全面 Y=16
+      const vram17 = (a) => { A.di(); A.ld_a((a >> 14) & 7); A.out(0x99); A.ld_a(0x8E); A.out(0x99); A.ld_a(a & 0xFF); A.out(0x99); A.ld_a(((a >> 8) & 0x3F) | 0x40); A.out(0x99); };
+      vram17(0x0000);
+      for (const b of (kind === 'yjk' ? [0xF8, 0xF8, 0xFF, 0xF9] : [0x98, 0x98, 0x98, 0x98])) { A.ld_a(b); A.out(0x98); }
+      vdp(25, kind === 'yjk' ? 0x08 : 0x18);
+      A.ei(); A.label('idle'); A.halt(); A.jr('idle');
+    } else if (kind === 'g4' || kind === 'g6' || kind === 'g7') {
       // モード: G4 = M4(R0 bit2=0x04... M3=bit1 M4=bit2 M5=bit3): G4: R0=0x06 (M4|M3)、R1=0x60(表示+IE0)、212 行 R9=0x80
       const r0 = kind === 'g4' ? 0x06 : kind === 'g6' ? 0x0A : 0x0E;
       vdp(0, r0); vdp(2, kind === 'g4' ? 0x1F : 0x1F); vdp(9, 0x80); vdp(7, kind === 'g7' ? 0x00 : 0x01); vdp(1, 0x60);
@@ -459,4 +484,36 @@ if (require.main === module) {
   for (const t of Object.keys(MEGA)) fs.writeFileSync(path.join(dir, 'mega-' + t + '.rom'), buildMegaRom(t));
   console.log('wrote', path.join(dir, 'stub-bios.rom'), 'and test-tone.rom');
 }
-module.exports = { asm, buildBios, buildTestRom, buildMegaRom, buildSoundTestRom, buildV9938TestRom, buildDiskTestRom, MEGA };
+// ── turboR のテスト ROM(7e)──
+// 16K カートリッジ。DI のまま: (1) S1990 のタイマをリセットして空ループ(Z80)→ $E000/1 に経過、(2) レジスタ 6 ← $00(R800、DRAM)に切り替え
+// 同じ空ループ → $E002/3、読み戻し → $E00A、(3) MULUB A,B(200×100=20000)→ $E004、MULUW HL,BC($1234×$5678=$06260060)→ $E006(HL)/$E008(DE)、
+// (4) PCM: $A5 ← $02(SEL)、$A4 に鋸波を 4096 サンプル、$A5 の bit1-0 が 0 でなくなるまで待って次へ(15.75kHz)。終わったら $E00C ← 1、ボーダー緑、HALT ループ
+function buildTurboRTestRom() {
+  const r = asm((A) => {
+    A.org(0x4000);
+    A.db('AB'); A.dw('init'); A.dw(0, 0, 0, 0, 0, 0);
+    A.label('init');
+    A.di(); A.ld_sp(0xF380);
+    A.xor_a(); A.ld_mem_a(0xE00C);
+    const busy = (tag) => { A.ld_b(64); A.label('bz' + tag); A.ld_c(0); A.label('bz2' + tag); A.dec_c(); A.jr_nz('bz2' + tag); A.djnz('bz' + tag); }; // 64×256 回(Z80 で約 30 万サイクル=タイマ 2.1 万刻み。16bit を回さない大きさ)
+    A.out(0xE6); busy('z'); A.in(0xE6); A.ld_mem_a(0xE000); A.in(0xE7); A.ld_mem_a(0xE001);
+    A.ld_a(6); A.out(0xE4); A.xor_a(); A.out(0xE5);                 // R800 / DRAM
+    A.in(0xE5); A.ld_mem_a(0xE00A);
+    A.out(0xE6); busy('r'); A.in(0xE6); A.ld_mem_a(0xE002); A.in(0xE7); A.ld_mem_a(0xE003);
+    A.ld_a(200); A.ld_b(100); A.mulub_a_b(); A.ld_mem_hl(0xE004);
+    A.ld_hl(0x1234); A.ld_bc(0x5678); A.muluw_hl_bc(); A.ld_mem_hl(0xE006); A.ld_mem_de(0xE008);
+    // PCM
+    A.ld_a(0x02); A.out(0xA5);
+    A.ld_de(4096); A.ld_c(0);
+    A.label('pcm'); A.ld_a_c(); A.out(0xA4); A.ld_a_c(); A.add(8); A.ld_c_a();
+    A.label('pw'); A.in(0xA5); A.and(0x03); A.jr_z('pw');
+    A.dec_de(); A.ld_a_d(); A.or_e(); A.jr_nz('pcm');
+    A.ld_a(1); A.ld_mem_a(0xE00C);
+    A.ld_a(0x12); A.out(0x99); A.ld_a(0x87); A.out(0x99);           // ボーダー緑
+    A.label('idle'); A.halt(); A.jr('idle');
+    while (A.here() < 0x8000) A.db(0xFF);
+  });
+  return r.bytes;
+}
+
+module.exports = { asm, buildBios, buildTestRom, buildMegaRom, buildSoundTestRom, buildV9938TestRom, buildDiskTestRom, buildTurboRTestRom, MEGA };

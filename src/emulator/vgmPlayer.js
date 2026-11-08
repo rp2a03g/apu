@@ -639,7 +639,7 @@
     };
   }
 
-  // MSX の DAC(規格外 MSXX ブロック、本ツールの MSX 録音。DESIGN-MSX-CAPTURE.md §5.6): KSS の牌の魔術師 D/A と同じ
+  // MSX の DAC(規格外 MSXX ブロック、本ツールの MSX 録音。DESIGN-MSX-CAPTURE.md §5.6。コナミ DAC と turboR PCM の両方): KSS の牌の魔術師 D/A と同じ
   // majutsushiDac.js で鳴らす。書き込みはブロックの位置(時刻)で届くので clock は要らない。ミュート/音量は kss の dac 配列
   function makeMsxDacAdapter(msxx) {
     const chip = new Emu.MajutsushiDAC();
@@ -1000,7 +1000,7 @@
         const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
-      // MSX の DAC の書き込み列(規格外 MSXX、vgmHeader.js VGM.MSXX 参照): value8 meta8(bit0-6=フレーム内時刻/128)×n
+      // MSX の DAC の書き込み列(規格外 MSXX、vgmHeader.js VGM.MSXX 参照): value8 meta8(bit0-6=フレーム内時刻/128、bit7=turboR PCM)×n。kind 2(PCM の制御)は読み飛ばす
       if (MML.VGM && MML.VGM.isMsxxBlock && MML.VGM.isMsxxBlock(type, block)) {
         const a = this.adapterById.msxdac;
         if (a && block[5] === MML.VGM.MSXX.KIND_DAC) {

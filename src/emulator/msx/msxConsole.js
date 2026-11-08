@@ -7,7 +7,11 @@
  *   setController(port, bits, turbo)(NES と同じビット: A=1 B=2 Up=16 Down=32 Left=64 Right=128 → ジョイスティックのトリガ 1/2 と方向)/
  *   setKey(code, down)(PC のキー)/reset()/hasBattery・getBattery・setBattery(SRAM/FM-PAC/RTC、7c)
  *
- * ■ 構成(機種は opts.machine: 'msx1' | 'msx2' | 'msx2plus' | 'turbor'。7a の turboR は Z80 モードの MSX2+ 相当)
+ * ■ 構成(機種は opts.machine: 'msx1' | 'msx2' | 'msx2plus' | 'turbor')
+ *   turboR(7e): スロット 0-0 メイン BIOS、0-2 内蔵 MSX-MUSIC、3-0 サブ ROM(+漢字ドライバ 32K bios.kdr を $4000〜)、3-2 ディスク(TC8566AF)、
+ *   3-3 マッパー RAM 256K(FS-A1ST の配置。パナソニックの内蔵ソフト ROM(3-1、512K の専用マッパー)は載せない)。S1990(I/O $E4-$E7: CPU モードと
+ *   255.68kHz の 16bit タイマ)、PCM(I/O $A4/$A5、8bit D/A、15.75kHz の 2bit カウンタ。A/D は無し)、PAUSE($A7、押せない)。
+ *   R800 は cpuZ80.js の r800 フラグ(MULUB/MULUW と時間の近似)。実 BIOS は利用者の物(C-BIOS に turboR は無い)
  *   Z80 3.58MHz(M1 ウェイト 1)、PPI 8255($A8-$AB: 一次スロット選択/キーボード行/キー読み)、拡張スロットレジスタ($FFFF)、
  *   メモリマッパー RAM($FC-$FF、msx1 64K / msx2〜 128K〜)、VDP(msx/vdp.js、$98-$9B)、PSG(expansion/ay8910Msx.js、$A0-$A2。
  *   R14 はジョイスティック、R15 は口の選択)、カートリッジ(msx/cartridge.js、スロット 1 と 2)、BIOS ROM(利用者または同梱 C-BIOS)。
@@ -49,8 +53,63 @@
     msx1: { vdp: 'tms9918', vramKB: 16, ramKB: 64, expanded: [false, false, false, false], sub: false, fm: false },
     msx2: { vdp: 'v9938', vramKB: 128, ramKB: 128, expanded: [false, false, false, true], sub: true, fm: false },
     msx2plus: { vdp: 'v9958', vramKB: 128, ramKB: 128, expanded: [false, false, false, true], sub: true, fm: true },
-    turbor: { vdp: 'v9958', vramKB: 128, ramKB: 256, expanded: [false, false, false, true], sub: true, fm: true },
+    turbor: { vdp: 'v9958', vramKB: 128, ramKB: 256, expanded: [false, false, false, true], sub: true, fm: true, turbor: true,
+      layout: { sub: [3, 0], disk: [3, 2], ram: [3, 3], music: [0, 2] } },
   };
+  // 内蔵物のスロット(一次, 二次)。msx2/2+ は 7a〜7d の配置のまま(C-BIOS と実 BIOS の両方で動いている)
+  const DEFAULT_LAYOUT = { sub: [3, 0], disk: [3, 1], ram: [3, 2], music: [3, 3] };
+  const PCM_TICK = 3579545 / 15750; // PCM のカウンタ(2bit)の 1 刻み(Z80 サイクル)
+  const S1990_TICK = 14;            // S1990 のタイマ: 3.579545MHz / 14 = 255.68kHz
+
+  // turboR の S1990(システム制御): $E4 レジスタ番号、$E5 データ、$E6/$E7 タイマ(読み=下位/上位、$E6 書き=リセット)。
+  //   レジスタ 6 = CPU モード(bit5: 1=Z80 0=R800、bit6: 1=ROM モード 0=DRAM モード。リセット時 $60)。5 = PAUSE LED 等(読み書きだけ)。
+  //   13/14 は openMSX が固定値を返している記憶(0x03/0x2F)による推定。DRAM モードは速度の違いだけ(BIOS の RAM への写しは模擬しない)
+  class S1990 {
+    constructor(owner) { this.owner = owner; this.sel = 0; this.regs = new Uint8Array(16); this.timerBase = 0; this.reset(); }
+    reset() { this.sel = 0; this.regs.fill(0); this.regs[6] = 0x60; this.timerBase = 0; this._applyCpu(); }
+    ioRead(port) {
+      switch (port) {
+        case 0xE4: return this.sel;
+        case 0xE5: return this.sel === 13 ? 0x03 : this.sel === 14 ? 0x2F : this.regs[this.sel & 15];
+        case 0xE6: return this._timer() & 0xFF;
+        case 0xE7: return (this._timer() >> 8) & 0xFF;
+        default: return 0xFF;
+      }
+    }
+    ioWrite(port, v) {
+      switch (port) {
+        case 0xE4: this.sel = v & 0x0F; return;
+        case 0xE5: this.regs[this.sel] = v; if (this.sel === 6) this._applyCpu(); return;
+        case 0xE6: this.timerBase = this.owner.cpuCycles; return;
+        default: return;
+      }
+    }
+    _timer() { return Math.floor((this.owner.cpuCycles - this.timerBase) / S1990_TICK) & 0xFFFF; }
+    get r800() { return !(this.regs[6] & 0x20); }
+    get dram() { return !(this.regs[6] & 0x40); }
+    _applyCpu() { const cpu = this.owner.cpu; if (!cpu) return; cpu.r800 = this.r800; cpu.r800Scale = this.dram ? 0.2 : 0.35; }
+  }
+  // turboR の PCM(8bit D/A。A/D は模擬しない): $A4 データ(書き=D/A、読み=最後の値)、$A5 制御/状態。
+  //   $A5 書き: bit0 SMPL、bit1 SEL(1 のとき $A4 の書き込みが D/A に出る)、bit2 FILT、bit3 MUTE(1=消音)。読み: bit1-0 = $A4 アクセスからの
+  //   15.75kHz カウンタ(2bit。BIOS/ゲームはこれを待って 1 サンプルずつ書く)、bit4-2 = 書いた値、bit7 = 比較器(A/D 無しなので 0)。
+  //   ビット配置は MSX Datapack の記述の記憶による(SEL/MUTE の極性は推定。録音には SEL のときの $A4 を載せる)。音は牌の魔術師の D/A と同じ零次ホールド
+  class TurboRPcm {
+    constructor(owner) { this.owner = owner; this.dac = new Emu.MajutsushiDAC(); this.status = 0; this.value = 0x80; this.lastAccess = 0; }
+    reset() { this.dac.reset(); this.status = 0; this.value = 0x80; this.lastAccess = 0; }
+    get outputOn() { return (this.status & 0x02) !== 0; }
+    ioRead(port) {
+      if (port === 0xA4) { this.lastAccess = this.owner.cpuCycles; return this.value; }
+      const ticks = Math.floor((this.owner.cpuCycles - this.lastAccess) / PCM_TICK) & 3;
+      return (this.status & 0x1C) | ticks;
+    }
+    ioWrite(port, v) {
+      if (port === 0xA4) { this.lastAccess = this.owner.cpuCycles; this.value = v & 0xFF; if (this.outputOn) this.dac.write(v); return true; }
+      this.status = v & 0x1F; return false;
+    }
+    mixSample() { return (this.status & 0x08) ? 0 : this.dac.mixSample(); }
+    get mute() { return this.dac.mute; } get vol() { return this.dac.vol; }
+  }
+
   const CART_B_KINDS = ['none', 'fmpac', 'msxaudio', 'scci', 'rom'];
 
   const EMPTY_PAGE = new Uint8Array(PAGE).fill(0xFF);
@@ -176,7 +235,7 @@
   class MsxConsole {
     /**
      * @param {Uint8Array} romBytes カートリッジ ROM(.rom)。null なら BIOS だけで起動
-     * @param {object} [opts] { machine, bios: { main, sub, logo, disk, kanji, music }, mapperType, ramKB,
+     * @param {object} [opts] { machine, bios: { main, sub, logo, disk, kanji, kdr(漢字ドライバ 32K、2+/turboR), music }, mapperType, ramKB,
      *                          cartB: { kind: 'fmpac'|'msxaudio'|'scci'|'rom', rom?: Uint8Array, mapperType? } | Uint8Array(=rom),
      *                          disks: Uint8Array[](.dsk 画像。bios.disk=ディスク ROM 16K が要る), fdc: 'wd2793'|'tc8566af' }
      */
@@ -212,6 +271,9 @@
       this.opll = ((cb && cb.kind === 'fmpac') || this.fmInternal) && Emu.OPLLAudio ? new Emu.OPLLAudio() : null;
       this.fm = this.opll ? new FmPacDevice(fmRom) : null;
       this.opl = cb && cb.kind === 'msxaudio' && Emu.OPLAudio ? new Emu.OPLAudio(CPU_CLOCK, { type: 'y8950' }) : null;
+      this.cpuCycles = 0;
+      this.s1990 = mc.turbor ? new S1990(this) : null; // turboR(7e)
+      this.pcm = mc.turbor && Emu.MajutsushiDAC ? new TurboRPcm(this) : null;
       this.cart = romBytes ? new Emu.MsxCartridge(romBytes, { type: opts.mapperType, scc: sccA ? this.scc : null, dac: this.dac }) : null;
       this.cartB = null;
       if (cb && cb.kind === 'rom') this.cartB = new Emu.MsxCartridge(cb.rom, { type: cb.mapperType, scc: null });
@@ -221,13 +283,21 @@
       // スロット表 slot[primary][secondary]
       this.expanded = mc.expanded.slice();
       this.slot = [[null, null, null, null], [null, null, null, null], [null, null, null, null], [null, null, null, null]];
+      const lay = mc.layout || DEFAULT_LAYOUT;
       const mainList = [new RomDevice(this.bios.main, 0)];
       if (this.bios.logo) mainList.push(new RomDevice(this.bios.logo, 0x8000));
       this.slot[0][0] = new MultiRomDevice(mainList);
       if (this.cart) this.slot[1][0] = new CartDevice(this.cart);
       if (this.cartB) this.slot[2][0] = new CartDevice(this.cartB);
       else if (this.fm && !this.fmInternal) this.slot[2][0] = this.fm; // FM-PAC はカートリッジ B
-      if (mc.sub) { if (this.bios.sub) this.slot[3][0] = new RomDevice(this.bios.sub, 0); this.slot[3][2] = this.ramDev; }
+      if (mc.sub) {
+        // サブ ROM(+turboR/2+ の漢字ドライバ 32K を $4000〜 に同居: FS-A1ST/WSX の 3-0 と同じ)
+        const subList = [];
+        if (this.bios.sub) subList.push(new RomDevice(this.bios.sub, 0));
+        if (this.bios.kdr && this.bios.kdr.length === 0x8000) subList.push(new RomDevice(this.bios.kdr, 0x4000));
+        if (subList.length) this.slot[lay.sub[0]][lay.sub[1]] = subList.length === 1 ? subList[0] : new MultiRomDevice(subList);
+        this.slot[lay.ram[0]][lay.ram[1]] = this.ramDev;
+      }
       else this.slot[3][0] = this.ramDev;
       // ディスク(7d): ディスク ROM(利用者の物)+FDC をスロット 3-1 に。画像が無くても ROM があればドライブ(空)は付く
       this.disk = null;
@@ -235,9 +305,9 @@
       if (this.bios.disk && Emu.MsxDiskInterface) {
         const images = (opts.disks || []).map((b) => new Emu.MsxDiskImage(b));
         this.disk = new Emu.MsxDiskInterface(this.bios.disk, opts.fdc || 'wd2793', images);
-        this.slot[3][1] = this.disk;
+        this.slot[lay.disk[0]][lay.disk[1]] = this.disk;
       }
-      if (this.fm && this.fmInternal) this.slot[3][3] = this.fm; // 内蔵 MSX-MUSIC(MSX2+/turboR の実機配置と同じ 3-3)
+      if (this.fm && this.fmInternal) this.slot[lay.music[0]][lay.music[1]] = this.fm; // 内蔵 MSX-MUSIC(2+ は 3-3、turboR は 0-2)
       this.pageDev = new Array(8).fill(null);
       this.ppiA = 0; this.ppiC = 0; this.ssl = new Uint8Array(4);
       this.joy = [0, 0]; this.joyHeld = [0, 0]; this.joyTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
@@ -263,6 +333,8 @@
       if (this.rtc) this.rtc.reset();
       if (this.kanji) this.kanji.reset();
       if (this.disk) this.disk.reset();
+      if (this.s1990) this.s1990.reset();
+      if (this.pcm) this.pcm.reset();
       if (this.cart) this.cart.reset();
       if (this.cartB) this.cartB.reset();
       this.keyboard.releaseAll();
@@ -289,7 +361,7 @@
       return MsxConsole.defaultBios(Object.keys(C).find((k) => C[k] && C[k].main) || 'msx2').music;
     }
     static describe(c) {
-      const parts = [{ msx1: 'MSX1', msx2: 'MSX2', msx2plus: 'MSX2+', turbor: 'MSX turbo R' }[c.machine]];
+      const parts = [{ msx1: 'MSX1', msx2: 'MSX2', msx2plus: 'MSX2+', turbor: 'MSX turbo R' }[c.machine] + (c.r800Active ? ' (R800)' : '')];
       if (c.cart) parts.push(c.cart.title + (c.cart.hasSram ? '+SRAM' : ''));
       if (c.kanji) parts.push('漢字');
       const b = { fmpac: 'FM-PAC', msxaudio: 'MSX-AUDIO', scci: 'SCC-I' }[c.cartBKind];
@@ -308,8 +380,10 @@
       if (this.opll) out.push('opll');
       if (this.opl) out.push('opl');
       if (this.dac) out.push('dac');
+      if (this.pcm) out.push('pcm');
       return out;
     }
+    get r800Active() { return !!(this.s1990 && this.s1990.r800); }
     get sccPlus() { return !!((this.cart && this.cart.sccPlusMode) || (this.cartB && this.cartB.sccPlusMode)); }
     extBits() { return 0; }
     // バッテリーバックアップ(7c): カートリッジの SRAM + FM-PAC の SRAM + RTC の RAM を 1 本に("MSXB" + [tag len32 data]...)。
@@ -410,6 +484,9 @@
         case 0xAB: return 0xFF;
         case 0xB4: case 0xB5: return this.rtc ? this.rtc.ioRead(port) : 0xFF;
         case 0xD8: case 0xD9: case 0xDA: case 0xDB: return this.kanji ? this.kanji.ioRead(port) : 0xFF;
+        case 0xA4: case 0xA5: return this.pcm ? this.pcm.ioRead(port) : 0xFF; // turboR PCM
+        case 0xA7: return this.s1990 ? 0x00 : 0xFF;                            // turboR PAUSE(bit0: 押されていない)
+        case 0xE4: case 0xE5: case 0xE6: case 0xE7: return this.s1990 ? this.s1990.ioRead(port) : 0xFF;
         case 0xC0: return this.opl ? this.opl.readStatus() : 0xFF; // MSX-AUDIO: ステータス(無ければ 0xFF=無し)
         case 0xC1: return this.opl ? this.opl.readData() : 0xFF;
         case 0xFC: case 0xFD: case 0xFE: case 0xFF: return this.ramDev.ioRead(port);
@@ -434,6 +511,9 @@
         case 0x7D: if (this.opll) { this.opll.ioWrite(0x7D, v); this._logWrite('opll', this.opllLatch, v); } return;
         case 0xB4: case 0xB5: if (this.rtc) this.rtc.ioWrite(port, v); return;
         case 0xD8: case 0xD9: case 0xDA: case 0xDB: if (this.kanji) this.kanji.ioWrite(port, v); return;
+        case 0xA4: case 0xA5: if (this.pcm) { const out = this.pcm.ioWrite(port, v); if (out || port === 0xA5) this._logWrite('pcm', port, v); } return; // turboR PCM($A4 は D/A に出た物だけ録音)
+        case 0xA7: return;
+        case 0xE4: case 0xE5: case 0xE6: case 0xE7: if (this.s1990) this.s1990.ioWrite(port, v); return;
         case 0xC0: if (this.opl) { this.oplLatch = v; this.opl.ioWrite(0xC0, v); } return; // MSX-AUDIO
         case 0xC1: if (this.opl) this._oplData(v); return;
         case 0xFC: case 0xFD: case 0xFE: case 0xFF: this.ramDev.ioWrite(port, v); return;
@@ -511,6 +591,7 @@
         put('opl', 0xBD, rg[0xBD]);
         for (let i = 0; i < 9; i++) put('opl', 0xB0 + i, rg[0xB0 + i]);
       }
+      if (this.pcm) put('pcm', 0xA5, this.pcm.status);
       return out;
     }
     startRecording() { this.rec = { frames: [], cur: this.audioImage() }; }
@@ -532,7 +613,7 @@
       return cycles;
     }
     advance(cycles) {
-      const vdp = this.vdp, psg = this.psg, scc = this.scc, opll = this.opll, opl = this.opl, dac = this.dac;
+      const vdp = this.vdp, psg = this.psg, scc = this.scc, opll = this.opll, opl = this.opl, dac = this.dac, pcm = this.pcm;
       this.cpuCycles += cycles;
       vdp.step(cycles);
       if (this.disk) this.disk.clock(cycles);
@@ -553,6 +634,7 @@
               if (opll) s += opll.mixSample() * OPLL_GAIN;
               if (opl) s += opl.mixSample() * OPL_GAIN;
               if (dac) s += dac.mixSample() * DAC_GAIN;
+              if (pcm) s += pcm.mixSample() * DAC_GAIN;
               this.ring[(this.ringHead + this.ringLen) & (AUDIO_RING - 1)] = s;
               this.ringLen++;
             }
@@ -592,10 +674,11 @@
     // 鍵盤表示のミュート/音量(worklet の mix メッセージ)。psg: [3]、scc: [5]、opll: [14]、opl: [15]、dac: [1]
     applyMix(mute, volume) {
       const put = (target, source, conv) => { if (!target || !source) return; for (let i = 0; i < target.length; i++) if (source[i] !== undefined) target[i] = conv(source[i]); };
-      const chips = { psg: this.psg, scc: this.scc, opll: this.opll, opl: this.opl, dac: this.dac };
+      const chips = { psg: this.psg, scc: this.scc, opll: this.opll, opl: this.opl, dac: this.dac, pcm: this.pcm };
       for (const k of Object.keys(chips)) {
         const c = chips[k];
         if (!c) continue;
+        if (k === 'pcm') { if (mute && mute.dac) put(c.mute, mute.dac, (v) => !!v); if (volume && volume.dac) put(c.vol, volume.dac, (v) => Math.max(0, Math.min(2, +v || 0))); continue; } // turboR PCM は dac(KDA 行)の指定に従う
         if (mute && mute[k]) put(c.mute, mute[k], (v) => !!v);
         if (volume && volume[k] && c.vol) put(c.vol, volume[k], (v) => Math.max(0, Math.min(2, +v || 0)));
       }
@@ -605,6 +688,8 @@
       if (this.cart) { if (this.cart.type === 'plain') this.cart._mapPlain(); else this.cart._remap(); }
       if (this.cartB) { if (this.cartB.type === 'plain') this.cartB._mapPlain(); else this.cartB._remap(); }
       if (this.opl && this.opl._pitchCache) this.opl._pitchCache.clear();
+      if (this.s1990) { this.s1990.owner = this; this.s1990._applyCpu(); }
+      if (this.pcm) this.pcm.owner = this;
       this._remapAll();
     }
   }
