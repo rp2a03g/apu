@@ -30,6 +30,10 @@ MMLを書きながら、音量・音色・ピッチ・ノートの4種類のエ�
   ブラウザ再生とNSF書き出しの両方で動く。バンク切り替え対応なので4KBを超えるチャンネルも書ける
 - **実機の曲を読んで聴く** — NSF / NSFe / SPC / KSS / GBS / HES / VGM / PSF(PlayStation、PSF1)。zip・7z・RAR(SPC曲集の .rsn を含む)・gzipの中身も開ける。
   CPUと音源をエミュレートして鳴らすので、曲送り・シーク・早送り・ch単位のミュートと音量調整ができる
+- **ゲームを遊びながら録音する** — 自前のファミコン(.nes/.fds)と MSX(.rom/.mx1/.mx2/.dsk。MSX1〜MSX2+、turbo R は実 BIOS が要る)の
+  エミュレータをブラウザの中で動かし、遊んでいる最中のサウンドレジスタの書き込みを VGM に録る。効果音や処理落ちの入った「ゲームを使った演奏」を
+  そのまま残せるし、変換設定の「録音の補正」で曲だけにもできる。鍵盤表示・ピアノロールは演奏中も追随し、巻き戻し(逆再生)・状態保存・早送りがある。
+  MSX は C-BIOS を同梱しているのでカートリッジ ROM はそのまま遊べる(ディスクと turbo R は実 BIOS を [BIOS] で控える)
 - **鳴っている音を見る** — 鍵盤表示とピアノロールが、チャンネルごとの音程・音量・音色・
   波形・使用中のPCMサンプルを演奏に同期して描く
 - **読んだ曲をMMLへ変換する** — 解析・学習・自分用アレンジの下地に。「MMLへ変換」で、鳴っているレジスタ列からMMLを起こす。
@@ -68,6 +72,11 @@ path or from any static server.
 - **Play chiptune files.** NSF / NSFe / SPC / KSS / GBS / HES / VGM / PSF (PSF1), including
   files inside zip / 7z / RAR (including .rsn SPC sets) / gzip. The CPU and the sound chips are emulated, so you get track
   select, seeking, fast-forward, and per-channel mute and volume.
+- **Record while you play.** Built-in Famicom/NES (.nes/.fds) and MSX (.rom/.mx1/.mx2/.dsk;
+  MSX1 to MSX2+, turbo R needs a real BIOS) emulators run inside the browser and record the
+  sound-register writes of your play session to VGM, sound effects and slowdown included
+  (or cleaned up to the music alone by the conversion settings). Rewind, save states and
+  fast-forward are there; MSX cartridges run on the bundled C-BIOS.
 - **See what is playing.** A keyboard view and a piano roll draw pitch, volume, timbre,
   waveform and the PCM sample in use for every channel, in sync with playback.
 - **Convert a song back into MML.** The register writes are turned into MML: channel
@@ -117,6 +126,13 @@ original music and program.
 行の色は鍵盤・ピアノロールの色と連動する。
 「MMLへ変換」で今の曲をMMLに起こしてMMLエディタへ流し込む。変換の細かさは隣の「⚙ 変換設定」で決める。
 「WAVE書き出し」では WAV / FLAC / AAC を書き出せる。
+
+ゲームの ROM(.nes / .fds / .rom / .mx1 / .mx2 / .dsk)をドロップすると「ゲーム画面」のウィンドウで自前エミュレータが動く。
+操作は PC のキー(⚙ で割り当て)かゲームパッドで、MSX のキーボードは PC のキーをそのまま流す(タッチ端末では画面の下にソフトキーボードが出る。⌨ で PC でも出せる)。
+見出しの ● で録音を始めて止めると VGM ができ、「VGM を保存」か「変換へ」(本体の VGM として開き、ロール表示と MML 変換へ)に進める。
+F12(既定)を押している間は逆再生で戻り、F9/F10 で状態の保存と読込、F11 で早送り。ディスクシステムの BIOS と MSX の実 BIOS は [BIOS] で選ぶとこのブラウザに控えられる。
+MSX の音源は PSG・SCC/SCC+・MSX-MUSIC(FM-PAC は ⚙ の「カートリッジ 2」で挿す)・MSX-AUDIO・コナミの DAC・turbo R の PCM で、
+DAC/PCM は規格外のブロックで VGM に入る(他のプレイヤーは読み飛ばす)。
 
 PSF(PlayStation)は `.psf` と、共通部品 `.psflib` を参照する `.minipsf` の両方を開ける。
 `.minipsf` は zip のまま開くか、`.psflib` と一緒に選ぶ(ドラッグ&ドロップも複数まとめて落とせる)。

@@ -1950,6 +1950,15 @@ button.secondary {
 .nes-trow { display: flex; gap: 8px; }
 .nes-tk-turbo { width: 50px; height: 30px; font-size: 10px; border-radius: 15px; }
 .nes-tk-ab { width: 54px; height: 54px; border-radius: 50%; font-size: 16px; }
+/* MSX のソフトキーボード(7f) */
+.nes-skbd { display: flex; flex-direction: column; gap: 3px; width: 100%; max-width: 560px; padding: 4px 0 2px; touch-action: none; user-select: none; -webkit-user-select: none; }
+.nes-skbd[hidden] { display: none !important; }
+.nes-skrow { display: flex; gap: 3px; }
+.nes-skey { flex: 1 1 0; min-width: 0; height: 30px; display: flex; align-items: center; justify-content: center; background: var(--control-bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; font-size: 11px; font-weight: 600; box-shadow: inset 0 1px 2px rgba(0,0,0,0.25); cursor: pointer; overflow: hidden; white-space: nowrap; }
+.nes-skey.is-on { background: var(--accent); color: var(--on-accent); }
+.nes-skey-mod { font-size: 10px; }
+.nes-skgap { flex: 0.6 1 0; }
+.nes-ib.nes-ib--on { background: var(--hover-bg); border-color: var(--border); }
 /* ⚙ 設定のポップオーバー(枠は .kbd-layout-pop と共通) */
 .nes-cfg-pop { max-width: 380px; max-height: calc(100vh - 16px); overflow: auto; }
 .nes-cfg-row { display: flex; align-items: center; gap: 8px; margin: 2px 0; }

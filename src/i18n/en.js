@@ -1764,6 +1764,7 @@
     '[開く] か .nes/.fds/.rom のドロップで始まります': 'Start with [Open] or by dropping a .nes/.fds/.rom file',
     'MSX の BIOS(メイン ROM 32K。C-BIOS でも可)を [BIOS] で指定してください': 'Choose an MSX BIOS (main ROM, 32 KB; C-BIOS works too) with [BIOS]',
     'ディスクの FDC': 'Disk FDC',
+    'MSX のソフトキーボードを表示/隠す(タッチ端末では常に表示)': 'Show/hide the MSX soft keyboard (always shown on touch devices)',
     'MSX の BIOS は 32K(メイン/漢字ドライバ)、16K(サブ/ロゴ/ディスク)、128K/256K(漢字 ROM)のファイルです: {name}': 'An MSX BIOS file is 32K (main / kanji driver), 16K (sub / logo / disk) or 128K/256K (kanji ROM): {name}',
     'MSX の BIOS を選ぶ(メイン 32K、サブ/ロゴ/ディスク 16K、漢字 128K/256K、漢字ドライバ 32K。複数選択可)。機種ごとにこのブラウザに控えて次回も使います': 'Choose MSX BIOS files (main 32K, sub/logo/disk 16K, kanji 128K/256K, kanji driver 32K; multiple allowed). Stored per machine in this browser for next time',
     'MSX turbo R は同梱 C-BIOS に無いので実 BIOS(メイン 32K+サブ 16K、あれば漢字ドライバ 32K とディスク ROM)を [BIOS] で控えます。内蔵ソフト(512K)は載せません。R800 は S1990 の切り替えに従い、命令時間は近似です。PCM は録音に載り DAC の行で見えます': 'MSX turbo R has no bundled C-BIOS: store the real BIOS (main 32K + sub 16K, plus the kanji driver 32K and disk ROM if you have them) with [BIOS]. The built-in firmware (512K) is not emulated. The R800 follows the S1990 switch with approximate instruction timing. PCM is recorded and shown on the DAC row',

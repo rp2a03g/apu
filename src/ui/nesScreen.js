@@ -81,7 +81,7 @@
     liveRoll: true,
     sfxRemove: false, // 録音の補正の初期値(録音ごとに保存/変換への横のチェックで変えられる)
     lagFix: false,
-    msx: { keys: { FF: 'F11', Rewind: 'F12', Pause: 'Pause', SaveState: 'F9', LoadState: 'F10' }, machine: 'auto', joyFromKeys: false, cartB: 'none', fdc: 'wd2793' },
+    msx: { keys: { FF: 'F11', Rewind: 'F12', Pause: 'Pause', SaveState: 'F9', LoadState: 'F10' }, machine: 'auto', joyFromKeys: false, cartB: 'none', fdc: 'wd2793', softKbd: false },
   };
   function loadMsxCfg(c) {
     c = c && typeof c === 'object' ? c : {};
@@ -91,6 +91,7 @@
       joyFromKeys: typeof c.joyFromKeys === 'boolean' ? c.joyFromKeys : DEFAULT_CFG.msx.joyFromKeys,
       cartB: MSX_CART_B.includes(c.cartB) ? c.cartB : DEFAULT_CFG.msx.cartB,
       fdc: MSX_FDC.includes(c.fdc) ? c.fdc : DEFAULT_CFG.msx.fdc,
+      softKbd: typeof c.softKbd === 'boolean' ? c.softKbd : false, // ソフトキーボード(⌨)を出しておく(タッチ端末は設定に関係なく出る)
     };
   }
   function loadCfg() {
@@ -136,6 +137,7 @@
   let machine = 'nes';        // 'nes' | 'msx'(open がファイルで決める)
   let msxChips = [], msxMachine = '', pendingMsx = null, msxFps = 60, msxDisk = false; // msxDisk: 今の MSX はディスクで起動している(次の .dsk は入れ替え) // MSX: 載っている音源名(psg/scc/opll/opl/dac)、起動した機種、BIOS 待ちの ROM、本体のフレームレート(50Hz 中は 50)
   let keyBits = 0, keyTurbo = 0, touchBits = 0, touchTurbo = 0, lastPad = -1;
+  let kbdBtn = null, softKbdEl = null, touchPadEl = null; // MSX のソフトキーボード(7f)とタッチ操作キー
   let fpsCount = 0, fpsMs = 0, fps = 0, frameSeq = 0, underruns = 0; // frameSeq: 本体の frameCount(最後に届いたフレーム)、underruns: 音切れ回数
   let paused = false;
   // 主スレッド実行(音なし)
@@ -395,6 +397,7 @@
     rec: '<circle cx="10" cy="10" r="5" fill="currentColor" stroke="none"/>',
     stop: '<rect x="5.5" y="5.5" width="9" height="9" rx="1" fill="currentColor" stroke="none"/>',
     disk: '<rect x="3.5" y="3.5" width="13" height="13" rx="1.5"/><circle cx="10" cy="10" r="2.5"/>',
+    keyboard: '<rect x="2.5" y="5.5" width="15" height="9" rx="1.5"/><path d="M5 8.5h1M8 8.5h1M11 8.5h1M14 8.5h1M5 11.5h1M7.5 11.5h5M14 11.5h1"/>',
     chip: '<rect x="4.5" y="4.5" width="11" height="11" rx="1"/><path d="M7.5 2v2.5M10 2v2.5M12.5 2v2.5M7.5 15.5V18M10 15.5V18M12.5 15.5V18M2 7.5h2.5M2 10h2.5M2 12.5h2.5M15.5 7.5H18M15.5 10H18M15.5 12.5H18"/>',
   };
   function svgOf(name) { return '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + ICON[name] + '</svg>'; }
@@ -453,6 +456,7 @@
       storeBios(b.length === 0x2000 ? b : b.subarray(b.length - 0x2000));
       if (pendingFds) { const p = pendingFds; pendingFds = null; NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); }); }
     });
+    kbdBtn = mkIcon('keyboard', T('MSX のソフトキーボードを表示/隠す(タッチ端末では常に表示)'), () => { cfg.msx.softKbd = !cfg.msx.softKbd; saveCfg(); updateSoftKbd(); }); kbdBtn.hidden = true;
     cfgBtn = mkIcon('gear', T('設定(キー/ゲームパッドの割り当て、連射、ロールへ流す)'), () => toggleCfgPopover(cfgBtn));
     pauseBtn = mkIcon('pause', T('一時停止'), () => setPaused(!paused));
     rewindBtn = mkIcon('rewind', '', null);
@@ -460,7 +464,7 @@
     recBtn = mkIcon('rec', '', toggleRecord); recBtn.classList.add('nes-rec');
     // 並び: [開く][リセット][状態保存][状態読込]([面][BIOS]) 間 [早送り] 間 [一時停止] 間 [巻き戻し] 間 [録音] 間 [設定]
     const gap = () => { const g = document.createElement('span'); g.className = 'nes-hdr-g'; return g; };
-    for (const el of [romInput, openBtn, resetBtn, stateBtnS, stateBtnL, sideBtn, biosBtn, biosInput, gap(), speedBtn, gap(), pauseBtn, gap(), rewindBtn, gap(), recBtn, gap(), cfgBtn]) hdr.appendChild(el);
+    for (const el of [romInput, openBtn, resetBtn, stateBtnS, stateBtnL, sideBtn, biosBtn, kbdBtn, biosInput, gap(), speedBtn, gap(), pauseBtn, gap(), rewindBtn, gap(), recBtn, gap(), cfgBtn]) hdr.appendChild(el);
     // 本体: 上にファイル名+状態+録音結果、画面、タッチ操作キー
     const bar = document.createElement('div'); bar.className = 'nes-bar';
     nameEl = document.createElement('span'); nameEl.className = 'nes-name';
@@ -483,6 +487,7 @@
     statusEl.textContent = T('[開く] か .nes/.fds/.rom のドロップで始まります');
     wrap.appendChild(bar); wrap.appendChild(canvas);
     if (MML.Device && MML.Device.isTouch && MML.Device.isTouch()) wrap.appendChild(buildTouchPad());
+    softKbdEl = buildSoftKeyboard(); softKbdEl.hidden = true; wrap.appendChild(softKbdEl);
     body.appendChild(wrap);
     applyCfgLabels();
     canvas.addEventListener('keydown', (e) => {
@@ -548,6 +553,66 @@
     for (const b of [speedBtn, stateBtnS, stateBtnL, rewindBtn]) b.setAttribute('aria-label', b.title);
   }
 
+  // ── MSX のソフトキーボード(7f): タッチ端末では MSX のとき常に、PC では ⌨ で出す。日本語配列。Shift/Ctrl/Graph はタップで掛かり、次のキーを離すと外れる ──
+  const SOFT_ROWS = [
+    [['F1', 'F1', 1.5], ['F2', 'F2', 1.5], ['F3', 'F3', 1.5], ['F4', 'F4', 1.5], ['F5', 'F5', 1.5], null, ['Esc', 'ESC'], ['Tab', 'TAB'], ['Stop', 'STOP'], ['Select', 'SEL'], ['BS', 'BS'], ['Home', 'HOME'], ['Ins', 'INS'], ['Del', 'DEL']],
+    [['Digit1', '1'], ['Digit2', '2'], ['Digit3', '3'], ['Digit4', '4'], ['Digit5', '5'], ['Digit6', '6'], ['Digit7', '7'], ['Digit8', '8'], ['Digit9', '9'], ['Digit0', '0'], ['Minus', '-'], ['Caret', '^'], ['Yen', '¥']],
+    [['Q', 'Q'], ['W', 'W'], ['E', 'E'], ['R', 'R'], ['T', 'T'], ['Y', 'Y'], ['U', 'U'], ['I', 'I'], ['O', 'O'], ['P', 'P'], ['At', '@'], ['BracketLeft', '['], ['Return', 'RET', 1.6]],
+    [['Ctrl', 'CTRL', 1.4, 'mod'], ['A', 'A'], ['S', 'S'], ['D', 'D'], ['F', 'F'], ['G', 'G'], ['H', 'H'], ['J', 'J'], ['K', 'K'], ['L', 'L'], ['Semicolon', ';'], ['Colon', ':'], ['BracketRight', ']']],
+    [['Shift', 'SHIFT', 1.8, 'mod'], ['Z', 'Z'], ['X', 'X'], ['C', 'C'], ['V', 'V'], ['B', 'B'], ['N', 'N'], ['M', 'M'], ['Comma', ','], ['Period', '.'], ['Slash', '/'], ['Underscore', '_'], ['Graph', 'GRPH', 1.4, 'mod']],
+    [['Caps', 'CAPS', 1.4], ['Kana', 'かな', 1.4], ['Space', '', 5], ['Left', '←'], ['Up', '↑'], ['Down', '↓'], ['Right', '→']],
+  ];
+  function buildSoftKeyboard() {
+    const kb = document.createElement('div'); kb.className = 'nes-skbd';
+    const latched = new Set(); // 掛かっている修飾キー
+    const els = new Map();     // キー名 → 要素
+    for (const row of SOFT_ROWS) {
+      const r = document.createElement('div'); r.className = 'nes-skrow';
+      for (const k of row) {
+        if (!k) { const g = document.createElement('span'); g.className = 'nes-skgap'; r.appendChild(g); continue; }
+        const [name, label, w, mod] = k;
+        const el = document.createElement('div'); el.className = 'nes-skey' + (mod ? ' nes-skey-mod' : ''); el.textContent = label; el.dataset.key = name;
+        if (w) el.style.flexGrow = String(w);
+        els.set(name, el);
+        r.appendChild(el);
+      }
+      kb.appendChild(r);
+    }
+    const downPointers = new Map(); // pointerId → キー名
+    const press = (name) => { msxKey(name, true); els.get(name).classList.add('is-on'); };
+    const release = (name) => { msxKey(name, false); els.get(name).classList.remove('is-on'); };
+    kb.addEventListener('pointerdown', (e) => {
+      const el = e.target.closest ? e.target.closest('.nes-skey') : null;
+      if (!el || !kb.contains(el)) return;
+      e.preventDefault(); resumeAudio();
+      const name = el.dataset.key;
+      if (el.classList.contains('nes-skey-mod')) { // 修飾キー: タップで掛け外し
+        if (latched.has(name)) { latched.delete(name); release(name); } else { latched.add(name); press(name); }
+        return;
+      }
+      try { kb.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ }
+      downPointers.set(e.pointerId, name); press(name);
+    });
+    const up = (e) => {
+      const name = downPointers.get(e.pointerId);
+      if (!name) return;
+      downPointers.delete(e.pointerId); release(name);
+      if (!downPointers.size) { for (const m of latched) release(m); latched.clear(); } // 修飾キーは次のキーを離したら外す
+    };
+    for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) kb.addEventListener(ev, up);
+    kb.addEventListener('contextmenu', (e) => e.preventDefault());
+    kb.releaseAll = () => { for (const n of downPointers.values()) release(n); downPointers.clear(); for (const m of latched) release(m); latched.clear(); };
+    return kb;
+  }
+  // 表示の更新: MSX のときだけ ⌨ を出し、タッチ端末か設定 ON ならソフトキーボードを出す。タッチ操作キーの SELECT/START のラベルも機種で変える
+  function updateSoftKbd() {
+    const msx = machine === 'msx';
+    if (kbdBtn) { kbdBtn.hidden = !msx; kbdBtn.classList.toggle('nes-ib--on', msx && !!cfg.msx.softKbd); }
+    const touch = !!(MML.Device && MML.Device.isTouch && MML.Device.isTouch());
+    if (softKbdEl) { const show = msx && (touch || cfg.msx.softKbd); if (!show && !softKbdEl.hidden && softKbdEl.releaseAll) softKbdEl.releaseAll(); softKbdEl.hidden = !show; }
+    if (touchPadEl && touchPadEl.relabel) touchPadEl.relabel();
+  }
+
   // ── タッチ操作キー(タッチ端末だけ。画面の下)──
   // 十字/A/B/連射 A/B/Select/Start。複数の指を別々に追い(pointerId ごとに押しているボタン)、指を滑らせても下のボタンへ移る
   function buildTouchPad() {
@@ -562,7 +627,9 @@
     dpad.appendChild(key('nes-tk-up', '▲', PAD_BITS.Up)); dpad.appendChild(key('nes-tk-left', '◀', PAD_BITS.Left));
     dpad.appendChild(key('nes-tk-right', '▶', PAD_BITS.Right)); dpad.appendChild(key('nes-tk-down', '▼', PAD_BITS.Down));
     const mid = document.createElement('div'); mid.className = 'nes-tmid';
-    mid.appendChild(key('nes-tk-small', 'SELECT', PAD_BITS.Select)); mid.appendChild(key('nes-tk-small', 'START', PAD_BITS.Start));
+    const selK = key('nes-tk-small', 'SELECT', PAD_BITS.Select), startK = key('nes-tk-small', 'START', PAD_BITS.Start);
+    selK.dataset.nesLabel = 'SELECT'; selK.dataset.msxKey = 'Space'; selK.dataset.msxLabel = 'SPACE'; startK.dataset.nesLabel = 'START'; startK.dataset.msxKey = 'Return'; startK.dataset.msxLabel = 'RETURN'; // MSX では SPACE/RETURN(MSX のキー)に
+    mid.appendChild(selK); mid.appendChild(startK);
     const ab = document.createElement('div'); ab.className = 'nes-tab';
     const row1 = document.createElement('div'); row1.className = 'nes-trow';
     row1.appendChild(key('nes-tk-turbo', T('連射 B'), 0, 2)); row1.appendChild(key('nes-tk-turbo', T('連射 A'), 0, 1));
@@ -571,14 +638,20 @@
     ab.appendChild(row1); ab.appendChild(row2);
     pad.appendChild(dpad); pad.appendChild(mid); pad.appendChild(ab);
     const held = new Map(); // pointerId → 押しているキー要素
+    let msxDown = new Set(); // MSX で押している MSX キー名(SPACE/RETURN)
     const recompute = () => {
       let bits = 0, turbo = 0;
       const on = new Set(held.values());
-      for (const el of on) { bits |= +(el.dataset.bits || 0); turbo |= +(el.dataset.turbo || 0); }
+      const msx = machine === 'msx', names = new Set();
+      for (const el of on) { if (msx && el.dataset.msxKey) { names.add(el.dataset.msxKey); continue; } bits |= +(el.dataset.bits || 0); turbo |= +(el.dataset.turbo || 0); }
       for (const el of pad.querySelectorAll('.nes-tkey')) el.classList.toggle('is-on', on.has(el));
       touchBits = bits; touchTurbo = turbo;
       pushPad();
+      if (msx) { for (const n of msxDown) if (!names.has(n)) msxKey(n, false); for (const n of names) if (!msxDown.has(n)) msxKey(n, true); }
+      msxDown = names;
     };
+    pad.relabel = () => { for (const el of [selK, startK]) el.textContent = machine === 'msx' ? el.dataset.msxLabel : el.dataset.nesLabel; };
+    touchPadEl = pad;
     const keyAt = (x, y) => { const el = document.elementFromPoint(x, y); return el && el.classList && el.classList.contains('nes-tkey') && pad.contains(el) ? el : null; };
     pad.addEventListener('pointerdown', (e) => {
       e.preventDefault(); resumeAudio();
@@ -1319,7 +1392,7 @@
   async function openMsx(bytes, name, opt) {
     opt = opt || {};
     machine = 'msx'; pendingFds = null;
-    biosBtn.hidden = false; updateBiosBtn();
+    biosBtn.hidden = false; updateBiosBtn(); updateSoftKbd();
     const mach = resolveMsxMachine();
     let bios = mach ? msxBiosFor(mach) : null;
     if (bios && opt.disk && !bios.disk) bios = null; // ディスクにはディスク ROM(16K、[BIOS] で控える)が要る
@@ -1400,7 +1473,7 @@
       if (MML.Emu.MsxConsole && MML.Emu.MsxConsole.isMsxFile(name, bytes)) return openMsx(bytes, name); // .rom/.mx1/.mx2(iNES でない)→ MSX
       machine = 'nes'; pendingMsx = null; msxChips = []; msxDisk = false;
       const isFds = !!(MML.Emu.FdsDisk && MML.Emu.FdsDisk.isFds(bytes));
-      biosBtn.hidden = !isFds; updateBiosBtn();
+      biosBtn.hidden = !isFds; updateBiosBtn(); updateSoftKbd();
       if (isFds && !loadBios()) {
         // BIOS が無い: 窓を開いて選ばせ、選ばれたら開き直す
         pendingFds = { bytes, name };
