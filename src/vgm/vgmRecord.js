@@ -139,4 +139,150 @@
     return { vgm, frames: frames.length, dropped, fds };
   };
   VGM.SAMPLES_PER_FRAME = VGM.SAMPLES_PER_FRAME || SAMPLES_PER_FRAME;
+
+  // ── MSX の書き込み列 → VGM (MML.VGM.encodeMsxRecording) — DESIGN-MSX-CAPTURE.md §5 ──
+  // 入力: { frames: [[write...]...], chips: ['psg','scc','opll','opl','dac'], machine, name, creator, notes }
+  //   frames[f].spf = そのフレームのサンプル数(735=60Hz / 882=50Hz。無ければ 735)
+  //   write = { chip, addr, value, t, adpcm?: { start, data } }(msxConsole.js の録音列そのまま)
+  //   psg: addr=レジスタ(0-13) → 0xA0 rr dd。scc: addr=メモリ番地 → 0xD2 pp aa dd(classic $9800 台/SCC+ $B800 台を
+  //   pp に写す。$BFFE のモードと $B000 の窓は符号化せず SCC+ の有無(ヘッダ bit31)だけに使う)。opll: 0x51。opl(Y8950): 0x5C
+  //   ($0F のメモリデータは落とし、adpcm 付きの書き込みの直前に 0x88 のデータブロック)。dac: MSXX ブロック(kind 1、同じ時刻を 1 ブロックに)。
+  //   1 フレーム=VBlank 1 回。待ちは 0x62(735)/0x63(882)/0x61。ヘッダの 0x24 は多数派のレート、GD3 notes に "rate: 50Hz"
+  const MSX_PSG_CLOCK = 1789772;
+  const MSX_SCC_CLOCK = 1789772;
+  const MSX_FM_CLOCK = 3579545;
+  const Y8950_RAM = 0x40000;
+  const SCC_PLUS_FLAG = 0x80000000;
+  VGM.encodeMsxRecording = function (rec) {
+    const frames = rec.frames || [];
+    const MSXX = VGM.MSXX;
+    const body = [];
+    let emitted = 0, dropped = 0, sccPlus = false, n882 = 0;
+    const used = { psg: false, scc: false, opll: false, opl: false, dac: false };
+    const flushWait = (t) => {
+      let d = t - emitted;
+      while (d > 0) {
+        if (d === 735) { body.push(0x62); d = 0; }
+        else if (d === 882) { body.push(0x63); d = 0; }
+        else if (d > 0xFFFF) { body.push(0x61, ...u16(0xFFFF)); d -= 0xFFFF; }
+        else { body.push(0x61, ...u16(d)); d = 0; }
+      }
+      if (t > emitted) emitted = t;
+    };
+    const msxxBlock = (kind, payload) => {
+      const b = [].concat(MSXX.MAGIC, [MSXX.VERSION, kind], payload);
+      return [0x67, 0x66, MSXX.TYPE, ...u32(b.length), ...b];
+    };
+    // 先に全体を見て、載る音源(ヘッダのクロック)と DAC の有無を決める
+    let plusMode = false;
+    for (const list of frames) for (const w of (list || [])) {
+      if (w.chip === 'scc') {
+        if ((w.addr & 0xFFFE) === 0xBFFE) plusMode = !!(w.value & 0x20);
+        else if (w.addr >= 0xB800 && w.addr <= 0xBFFD && plusMode) sccPlus = true;
+      }
+      if (used[w.chip] !== undefined) used[w.chip] = true;
+    }
+    const chips = rec.chips || [];
+    for (const c of chips) if (used[c] !== undefined && c !== 'dac') used[c] = true; // 挿している音源はヘッダに出す(書き込みが無くても)
+    if (used.dac) body.push(...msxxBlock(MSXX.KIND_HEADER, [MSXX.MACHINES[rec.machine] || 2, MSXX.DAC_KONAMI]));
+    // DAC: 同じ時刻の書き込みをまとめて 1 ブロック
+    let dac = null; // { t, entries }
+    const flushDac = () => { if (!dac) return; flushWait(dac.t); body.push(...msxxBlock(MSXX.KIND_DAC, dac.entries)); dac = null; };
+    const adpcmCache = new Map();
+    const emitAdpcm = (blk, t) => {
+      const data = blk.data;
+      let h = 2166136261 | 0; for (let i = 0; i < data.length; i++) h = Math.imul(h ^ data[i], 16777619) | 0;
+      const key = blk.start + ':' + data.length + ':' + (h >>> 0);
+      if (adpcmCache.has(key)) return;
+      adpcmCache.set(key, true);
+      flushWait(t);
+      body.push(0x67, 0x66, 0x88, ...u32(data.length + 8), ...u32(Math.max(Y8950_RAM, blk.start + data.length)), ...u32(blk.start), ...data);
+    };
+    // SCC のメモリ番地 → 0xD2 の (pp, aa)。載せない物は null
+    const sccCmd = (addr) => {
+      if (addr >= 0x9800 && addr <= 0x9FFF) {
+        const off = addr & 0xFF;
+        if (off < 0x80) return [0, off];
+        if (off < 0x8A) return [1, off - 0x80];
+        if (off < 0x8F) return [2, off - 0x8A];
+        if (off === 0x8F) return [3, 0];
+        return null; // ch4 の波形(読み出し専用)とテスト/デフォーム
+      }
+      if (addr >= 0xB800 && addr <= 0xBFFD) {
+        const off = addr & 0xFF;
+        if (off < 0x80) return [0, off];
+        if (off < 0xA0) return [4, off - 0x80];
+        if (off < 0xAA) return [1, off - 0xA0];
+        if (off < 0xAF) return [2, off - 0xAA];
+        if (off === 0xAF) return [3, 0];
+        return null;
+      }
+      return null; // $BFFE のモード、$B000 の窓
+    };
+    let frameSample = 0;
+    plusMode = false;
+    for (let f = 0; f < frames.length; f++) {
+      const list = frames[f] || [];
+      const spf = list.spf === 882 ? 882 : 735;
+      if (spf === 882) n882++;
+      for (let i = 0; i < list.length; i++) {
+        const w = list[i];
+        const t = frameSample + Math.max(0, Math.min(spf - 1, w.t | 0));
+        switch (w.chip) {
+          case 'psg':
+            if (w.addr > 13) { dropped++; break; }
+            flushDac(); flushWait(t); body.push(0xA0, w.addr & 0x0F, w.value & 0xFF); break;
+          case 'scc': {
+            if ((w.addr & 0xFFFE) === 0xBFFE) { plusMode = !!(w.value & 0x20); break; }
+            const c = sccCmd(w.addr);
+            if (!c) { if (!((w.addr & 0xF800) === 0xB000 && w.addr < 0xB800) && (w.addr & 0xF800) !== 0x9000) dropped++; break; }
+            flushDac(); flushWait(t); body.push(0xD2, c[0], c[1], w.value & 0xFF); break;
+          }
+          case 'opll': flushDac(); flushWait(t); body.push(0x51, w.addr & 0x3F, w.value & 0xFF); break;
+          case 'opl':
+            if (w.addr === 0x0F) break; // ADPCM メモリへのデータは本体同梱(0x88)で運ぶ
+            flushDac();
+            if (w.adpcm && w.adpcm.data && w.adpcm.data.length) emitAdpcm(w.adpcm, t);
+            flushWait(t); body.push(0x5C, w.addr & 0xFF, w.value & 0xFF); break;
+          case 'dac': {
+            if (dac && dac.t !== t) flushDac();
+            if (!dac) dac = { t, entries: [] };
+            dac.entries.push(w.value & 0xFF, Math.min(127, Math.round((t - frameSample) / spf * 128)));
+            break;
+          }
+          default: dropped++; break;
+        }
+      }
+      frameSample += spf;
+    }
+    flushDac();
+    flushWait(frameSample);
+    body.push(0x66);
+
+    const SYSTEMS = { msx1: 'MSX', msx2: 'MSX2', msx2plus: 'MSX2+', turbor: 'MSX turbo R' };
+    const rate50 = n882 > frames.length / 2;
+    const notes = [rec.notes || '', n882 ? 'rate: 50Hz' : ''].filter(Boolean).join(' ');
+    const fields = [].concat(utf16(rec.name || ''), utf16(''), utf16(rec.game || ''), utf16(''),
+      utf16(rec.system || SYSTEMS[rec.machine] || 'MSX'), utf16(''), utf16(rec.artist || ''), utf16(''), utf16(''),
+      utf16(rec.creator || 'Sound Emulation Foundry'), utf16(notes));
+    const gd3 = [].concat([0x47, 0x64, 0x33, 0x20], u32(0x100), u32(fields.length), fields);
+
+    const hdr = new Uint8Array(HEADER_SIZE);
+    hdr.set([0x56, 0x67, 0x6D, 0x20], 0);
+    const total = HEADER_SIZE + body.length + gd3.length;
+    hdr.set(u32(total - 4), 0x04);
+    hdr.set(u32(0x00000161), 0x08);
+    hdr.set(u32(HEADER_SIZE + body.length - 0x14), 0x14);
+    hdr.set(u32(frameSample), 0x18);
+    hdr.set(u32(rate50 ? 50 : 60), 0x24);
+    hdr.set(u32(HEADER_SIZE - 0x34), 0x34);
+    if (used.psg) { hdr.set(u32(MSX_PSG_CLOCK), 0x74); hdr[0x78] = 0x00; hdr[0x79] = 0x01; } // AY-3-8910、legacy output
+    if (used.scc) hdr.set(u32((MSX_SCC_CLOCK | (sccPlus ? SCC_PLUS_FLAG : 0)) >>> 0), 0x9C);
+    if (used.opll) hdr.set(u32(MSX_FM_CLOCK), 0x10);
+    if (used.opl) hdr.set(u32(MSX_FM_CLOCK), 0x58);
+
+    const vgm = new Uint8Array(total);
+    vgm.set(hdr, 0); vgm.set(body, HEADER_SIZE); vgm.set(gd3, HEADER_SIZE + body.length);
+    return { vgm, frames: frames.length, dropped, chips: Object.keys(used).filter((k) => used[k]), sccPlus, rate: rate50 ? 50 : 60 };
+  };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-04 01:58:32
+ * Built by tools/build-capture-workers.ps1 at 2026-11-09 00:04:11
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-11-04 01:58:32';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-11-09 00:04:11';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -6486,7 +6486,7 @@
     if (chips.includes('kssPsg')) {
       // PSG(AY-3-8910): 2A03のFME-7表示と同じ考え方(50%矩形波固定、noise有効chはノイズ波形)。
       const live = extraSnaps && extraSnaps.kssPsgLive;
-      const snaps = live ? live() : null;
+      const snaps = live ? live() : (extraSnaps && extraSnaps.kssPsg ? extraSnaps.kssPsg[frameIdx] : null); // 配列はライブ表示(MSX ゲーム画面)の追記
       const COLS = ['#66ddff', '#33aaff', '#0077dd'];
       // VGMのデュアルAY8910(2個目)はスナップショットが6要素で返るのでKP4-6行も出す
       const nKp = snaps && snaps.length > 3 ? snaps.length : 3;
@@ -6517,7 +6517,7 @@
     if (chips.includes('kssScc')) {
       // SCC: N163と同じ波形メモリ音源(要素数のみ異なる: SCCは32点符号付き8bit)。
       const live = extraSnaps && extraSnaps.kssSccLive;
-      const snaps = live ? live() : null;
+      const snaps = live ? live() : (extraSnaps && extraSnaps.kssScc ? extraSnaps.kssScc[frameIdx] : null);
       for (let ch = 0; ch < 5; ch++) {
         const c = snaps ? snaps[ch] : { freq: 0, vol: 0, active: false };
         const hue = (280 + ch * 20) % 360;
@@ -6532,7 +6532,7 @@
       // FMPAC(YM2413): VRC7と同じFM表示だが、9メロディモードとリズムモード(6melody+BD/SD/TOM/CYM/HH)
       // の両方に対応する(VRC7ハードウェアにはリズムモードが存在しないため6ch固定だった)。
       const live = extraSnaps && extraSnaps.kssOpllLive;
-      const snap2 = live ? live() : null;
+      const snap2 = live ? live() : (extraSnaps && extraSnaps.kssOpll ? extraSnaps.kssOpll[frameIdx] : null);
       // ★2026-08-22: リズムモード(レジスタ$0E bit5)は「打つ瞬間だけ立てて即降ろす」ドライバが
       // 実在する(SMS版After Burnerは毎秒10〜16回トグル)。生ビットに追随すると9ch表示と
       // 6ch+リズム表示が激しく入れ替わって読めないため、**一度でも見たら以後は保持する**
@@ -6584,7 +6584,7 @@
       // D#2(dmcRateIdx 15)の鍵に置く。ロールの KDA トラックも同じ鍵(roll-builders.js RollBuild.kss)。
       // active は「書込みが続いているか」(D/A は最後の値を保持し続けるので値では判定できない)
       const live = extraSnaps && extraSnaps.kssDacLive;
-      const d = (live ? live() : null) || { level: 0x80, vol: 0, active: false };
+      const d = (live ? live() : (extraSnaps && extraSnaps.kssDac ? extraSnaps.kssDac[frameIdx] : null)) || { level: 0x80, vol: 0, active: false };
       channels.push({ id: 'KDA', color: '#ff66aa', freq: 0, vol: d.vol, rawVol: d.level, rawVolMax: 255,
         wave: { t: 'sample' }, active: !!d.active, sample: true, dmcReg: d.level, dmcRateIdx: 15, dmcFreq: 0 });
     }
@@ -6683,7 +6683,7 @@
       // (6メロディ+BD/SD/TOM/CYM/HH)。表示流儀はkssOpll(FMPAC)と同じで、リズムモードは
       // 一度見たら以後保持する単調運用(extraSnaps.oplRhythmSeen)。
       const live = extraSnaps && extraSnaps.oplLive;
-      const s = live ? live() : null;
+      const s = live ? live() : (extraSnaps && extraSnaps.opl ? extraSnaps.opl[frameIdx] : null);
       if (s && s.rhythm && s.rhythm.on && extraSnaps) extraSnaps.oplRhythmSeen = true;
       const oplRhythm = !!(extraSnaps && extraSnaps.oplRhythmSeen);
       const MCOLS = ['#66ffcc', '#55eebb', '#44ddaa', '#33cc99', '#22bb88', '#11aa77', '#66e0d0', '#55d0c0', '#44c0b0'];
@@ -7458,6 +7458,46 @@
         end = (r & 0x40) ? Infinity : f + Math.ceil(bits * DMC_RATE[r & 15] / 29780.5);
       }
       return { seq, end };
+    };
+  }
+  // KSS 形式の書き込み列 [{addr,value,io}](PSG=I/O $A0/$A1、OPLL=$7C/$7D、Y8950=$C0/$C1、SCC=$9800/$B800 台、DAC=$5000 台)を
+  // 本物の音源クラス(ay8910Msx/sccAudio/opllMsx/opl/majutsushiDac)に流し、鍵盤行の採り方(Emu.snapshot*)で 1 フレームぶんの
+  // スナップショットを返す stepper。MSX のゲーム画面のライブ表示(DESIGN-MSX-CAPTURE.md §6、7b)が使う。音は鳴らさないので
+  // clock は回さない(Nuked OPLL は書き込みがキューなので flushWrites で反映する)。SCC は $BFFE bit5 で classic/SCC+ の配置を切り替える
+  function makeKssStepper(chips) {
+    const E = MML.Emu;
+    const psg = chips.includes('kssPsg') && E.AY8910Audio ? new E.AY8910Audio() : null;
+    const scc = chips.includes('kssScc') && E.SCCAudio ? new E.SCCAudio() : null;
+    const opll = chips.includes('kssOpll') && E.OPLLAudio ? new E.OPLLAudio() : null;
+    const opl = chips.includes('opl') && E.OPLAudio ? new E.OPLAudio(3579545, { type: 'y8950' }) : null;
+    const dac = chips.includes('kssDac') && E.MajutsushiDAC ? new E.MajutsushiDAC() : null;
+    let psgLatch = 0, oplLatch = 0, sccPlus = false;
+    return (writes) => {
+      for (const w of writes) {
+        const a = w.addr, v = w.value & 0xFF;
+        if (w.io) {
+          if (a === 0xA0) psgLatch = v & 0x0F;
+          else if (a === 0xA1) { if (psg && psgLatch < 14) psg.writeInternal(psgLatch, v); }
+          else if (a === 0x7C || a === 0x7D) { if (opll) opll.ioWrite(a, v); }
+          else if (a === 0xC0) oplLatch = v;
+          else if (a === 0xC1) { if (opl && oplLatch !== 0x0F) opl.writeReg(oplLatch, v); }
+          continue;
+        }
+        if ((a & 0xFFFE) === 0xBFFE) { sccPlus = !!(v & 0x20); continue; }
+        if (scc) {
+          if (!sccPlus && a >= 0x9800 && a <= 0x9FFF) scc.writeClassic(a & 0xFF, v);
+          else if (sccPlus && a >= 0xB800 && a <= 0xBFFD) scc.writePlus(a & 0xFF, v);
+        }
+        if (dac && a >= 0x5000 && a <= 0x5FFF) dac.write(v);
+      }
+      if (opll && typeof opll.flushWrites === 'function') opll.flushWrites();
+      return {
+        psg: psg ? E.snapshotAY8910(psg) : null,
+        scc: scc ? E.snapshotSCC(scc) : null,
+        opll: opll ? E.snapshotOPLL(opll) : null,
+        opl: opl ? E.snapshotOPL(opl, { skipWave: true }) : null,
+        dac: dac ? E.snapshotMajutsushiDac(dac) : null,
+      };
     };
   }
   function makeFme7Stepper() {
@@ -10466,6 +10506,7 @@
       if (this._chips.includes('vrc7')) { steppers.vrc7 = makeVrc7Stepper(); ex.vrc7 = []; }
       if (this._chips.includes('n163')) { steppers.n163 = makeN163Stepper(); ex.n163 = []; ex.n163.maxNumCh = 1; }
       if (this._chips.includes('fme7')) { steppers.fme7 = makeFme7Stepper(); ex.fme7 = []; }
+      if (this._chips.includes('kss')) { steppers.kss = makeKssStepper(this._chips); ex.kssPsg = []; ex.kssScc = []; ex.kssOpll = []; ex.kssDac = []; ex.opl = []; } // MSX のゲーム画面(KSS 形式の書き込み列)
       // Live系(再生中のチップを直接読む関数)はライブ表示には無い(あっても全フレームが同じ値になる)
       for (const k of Object.keys(ex)) if (/Live$/.test(k)) ex[k] = null;
       ex.apuEnv = null;
@@ -10501,6 +10542,7 @@
       if (lr.steppers.vrc7) ex.vrc7[f] = lr.steppers.vrc7(writes);
       if (lr.steppers.n163) { const sn = lr.steppers.n163(writes); ex.n163[f] = sn; if (sn.numCh > ex.n163.maxNumCh) ex.n163.maxNumCh = sn.numCh; }
       if (lr.steppers.fme7) ex.fme7[f] = lr.steppers.fme7(writes);
+      if (lr.steppers.kss) { const k = lr.steppers.kss(writes); ex.kssPsg[f] = k.psg; ex.kssScc[f] = k.scc; ex.kssOpll[f] = k.opll; ex.kssDac[f] = k.dac; ex.opl[f] = k.opl; }
       const channels = extractChannels(st.regSnapshots[f], ex, f, this._chips);
       lr.builder.feed(channels, f);
       // 打点(DPCM 等の drumKey つき)が新しく始まったらドラム区画を組み直す(区画が無いと打点は描かれない。
@@ -10538,10 +10580,11 @@
       if (f === st.totalFrames) return;
       st.writeLog.length = f; st.regSnapshots.length = f; st.totalFrames = f;
       const ex = this._extraSnaps;
-      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd']) if (ex[k]) ex[k].length = f;
+      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl']) if (ex[k]) ex[k].length = f;
       if (lr.steppers.vrc7) lr.steppers.vrc7 = makeVrc7Stepper();
       if (lr.steppers.n163) lr.steppers.n163 = makeN163Stepper();
       if (lr.steppers.fme7) lr.steppers.fme7 = makeFme7Stepper();
+      if (lr.steppers.kss) lr.steppers.kss = makeKssStepper(this._chips); // 戻った先の像(録音の取り直し)から組み直す
       lr.steppers.dmc = makeDmcStepper();
       lr.regs = Object.assign({}, f > 0 ? st.regSnapshots[f - 1] : {});
       if (lr.regs[0x4015] === undefined) lr.regs[0x4015] = 0x0F;

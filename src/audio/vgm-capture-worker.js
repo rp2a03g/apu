@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-04 01:58:32
+ * Built by tools/build-capture-workers.ps1 at 2026-11-09 00:04:11
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-04 01:58:32';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-09 00:04:11';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -63,6 +63,31 @@
   VGM.isNesxBlock = function (type, block) {
     const m = VGM.NESX.MAGIC;
     return type === VGM.NESX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
+  };
+  // MSX の DAC ブロック(規格外。DESIGN-MSX-CAPTURE.md §5.6。NESX と同じ流儀で、他のプレイヤーは読み飛ばす)
+  //   0x67 0x66 TYPE size(4) "MSXX" ver(1) kind(1) payload
+  //   kind 0 = ヘッダ: payload[0] = 機種(1=MSX1 2=MSX2 3=MSX2+ 4=turboR)、payload[1] = DAC ビット(bit0=turboR PCM、bit1=コナミ DAC $5000、bit2=コナミシンセサイザー $4000)
+  //   kind 1 = DAC の書き込み列: 2 バイト×n = value8 meta8(bit0-6=フレーム内時刻×1/128)。同じ時刻の物を 1 ブロックに(ブロックの位置が時刻)
+  VGM.MSXX = { TYPE: 0xBE, MAGIC: [0x4D, 0x53, 0x58, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_DAC: 1,
+    MACHINES: { msx1: 1, msx2: 2, msx2plus: 3, turbor: 4 }, DAC_TURBOR_PCM: 1, DAC_KONAMI: 2, DAC_KONAMI_SYNTH: 4 };
+  VGM.isMsxxBlock = function (type, block) {
+    const m = VGM.MSXX.MAGIC;
+    return type === VGM.MSXX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
+  };
+  // ストリーム先頭のデータブロックに MSXX のヘッダがあれば { machine, dac } を返す(無ければ null)
+  VGM.scanMsxExtension = function (bytes, dataOffset) {
+    let p = dataOffset;
+    while (p + 7 <= bytes.length && bytes[p] === 0x67 && bytes[p + 1] === 0x66) {
+      const type = bytes[p + 2];
+      const size = (bytes[p + 3] | (bytes[p + 4] << 8) | (bytes[p + 5] << 16) | (bytes[p + 6] << 24)) & 0x7FFFFFFF;
+      const block = bytes.subarray(p + 7, p + 7 + size);
+      if (VGM.isMsxxBlock(type, block) && block[5] === VGM.MSXX.KIND_HEADER && block.length >= 8) {
+        const names = Object.keys(VGM.MSXX.MACHINES);
+        return { machine: names.find((k) => VGM.MSXX.MACHINES[k] === block[6]) || 'msx2', dac: block[7] };
+      }
+      p += 7 + size;
+    }
+    return null;
   };
   VGM.scanNesExtension = function (bytes, dataOffset) {
     let p = dataOffset;
@@ -287,12 +312,14 @@
     // 種別 0(ヘッダ)の 1 バイトが NSF ヘッダと同じ拡張音源ビット(VRC6/VRC7/FDS/MMC5/N163/SUNSOFT 5B)。
     // 最初の待ち/書き込みコマンドより前にあるものだけ見る(ここで分かればアダプタ生成と鍵盤の行構成に使える)
     if (chips.nes) chips.nes.extraChips = VGM.scanNesExtension(bytes, dataOffset);
+    const msxx = VGM.scanMsxExtension(bytes, dataOffset); // MSX の DAC(規格外 MSXX)。本ツールの MSX 録音だけが持つ
 
     const gd3Offset = gd3Rel ? 0x14 + gd3Rel : 0;
     const gd3 = gd3Offset ? parseGd3(bytes, gd3Offset) : null;
 
     return {
       magicOk: true,
+      msxx,           // MSXX ブロック { machine, dac } | null
       version,
       versionText: ((version >> 8) & 0xFF).toString(16) + '.' + ((version >> 4) & 0xF).toString(16) + (version & 0xF).toString(16),
       eofOffset,
@@ -9057,7 +9084,9 @@
   Emu.OpnAdpcm = {
     AdpcmA, AdpcmB, decodeAdpcmA, decodeAdpcmB, ADPCM_SCALE,
     attachSampleApi(proto) {
-      proto.loadRom = YM2610Audio.prototype.loadRom;
+      // ★loadRom は上書きしない(2026-11-08): OPLAudio は自前の loadRom(romSize, start, data) を持ち、VGM の 0x88 ブロックは
+      //   その形で呼ぶ。ここで (kind, romSize, start, data) の物に差し替えると data が undefined になり Y8950 の DELTA-T が落ちていた
+      if (!proto.loadRom) proto.loadRom = YM2610Audio.prototype.loadRom;
       proto.samplePitch = YM2610Audio.prototype.samplePitch;
       proto._decodeSample = YM2610Audio.prototype._decodeSample;
       proto.samplePcm = YM2610Audio.prototype.samplePcm;
@@ -14999,6 +15028,20 @@
     };
   }
 
+  // MSX の DAC(規格外 MSXX ブロック、本ツールの MSX 録音。DESIGN-MSX-CAPTURE.md §5.6): KSS の牌の魔術師 D/A と同じ
+  // majutsushiDac.js で鳴らす。書き込みはブロックの位置(時刻)で届くので clock は要らない。ミュート/音量は kss の dac 配列
+  function makeMsxDacAdapter(msxx) {
+    const chip = new Emu.MajutsushiDAC();
+    return {
+      id: 'msxdac', clockHz: 0, accum: 0, chip, gain: CHIP_GAIN.k051649, msxx,
+      write(v) { chip.write(v); },
+      clock() {},
+      mix(out) { const s = chip.mixSample() * this.gain; out[0] += s; out[1] += s; },
+      applyMute(m) { const e = m.expansion || m; if (e.dac) Emu.applyMute(chip.mute, e.dac); },
+      applyVolume(v) { const e = v.expansion || v; if (e.dac) Emu.applyVolume(chip.vol, e.dac); }
+    };
+  }
+
   const ADAPTERS = {
     nes: makeNesAdapter, gb: makeGbAdapter, huc6280: makeHucAdapter,
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
@@ -15130,6 +15173,7 @@
           this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
         }
       }
+      if (h.msxx && h.msxx.dac && Emu.MajutsushiDAC) { const a = makeMsxDacAdapter(h.msxx); this.adapters.push(a); this.adapterById.msxdac = a; } // MSX の DAC(MSXX)
       this.pos = h.dataOffset;
       this.samplePos = 0;      // VGMサンプル位置(44100Hz)
       this.waitRemaining = 0;  // 消化待ちのサンプル数
@@ -15344,6 +15388,17 @@
       if (type === 0xC2) { // NES APU RAM書込み: 先頭2バイト=開始アドレス
         const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
+      }
+      // MSX の DAC の書き込み列(規格外 MSXX、vgmHeader.js VGM.MSXX 参照): value8 meta8(bit0-6=フレーム内時刻/128)×n
+      if (MML.VGM && MML.VGM.isMsxxBlock && MML.VGM.isMsxxBlock(type, block)) {
+        const a = this.adapterById.msxdac;
+        if (a && block[5] === MML.VGM.MSXX.KIND_DAC) {
+          for (let p = 6; p + 2 <= block.length; p += 2) {
+            a.write(block[p]);
+            if (this.onWrite) this.onWrite('msxdac', block[p], (block[p + 1] & 0x7F) / 128);
+          }
+        }
+        return;
       }
       // NES 拡張音源の書き込み列(規格外 NESX、vgmHeader.js VGM.NESX 参照)。ヘッダ種別は parseHeader が先読み済み
       if (MML.VGM && MML.VGM.isNesxBlock(type, block)) {
@@ -15767,8 +15822,8 @@
       // clock: kss2mml抽出器(AY/SCC)に渡す「Z80相当クロック」(=AY実クロック×2)。MSXの3.58MHz固定では
       // 別クロックのAY(Exed Exes 1.5MHz等)やYM2610内蔵SSG(チップクロック/4)のロール音程がずれる。
       // vgm2mml/converter.js の kssClock と同じ優先順位。
-      kss: (has('ay8910') || has('k051649') || has('ym2413') || has('ym2610') || has('ym2203') || has('ym2608') || has('ym3812') || has('ym3526') || has('y8950'))
-        ? { writeLog: [], ay: has('ay8910') || has('ym2610') || has('ym2203') || has('ym2608'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus),
+      kss: (has('ay8910') || has('k051649') || has('ym2413') || has('ym2610') || has('ym2203') || has('ym2608') || has('ym3812') || has('ym3526') || has('y8950') || has('msxdac'))
+        ? { writeLog: [], dac: has('msxdac'), ay: has('ay8910') || has('ym2610') || has('ym2203') || has('ym2608'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus),
             // OPL(YM3812/YM3526/Y8950): 書込みは io 0xC0/0xC1 として同じwriteLogへ流す
             // (KSSのMSX-AUDIOと同じ形。抽出器 Kss2MmlExpansion.opl をKSS/VGMで共有するため)
             opl: has('ym3812') || has('ym3526') || has('y8950'),
@@ -15979,6 +16034,8 @@
         case 'ym3812': case 'ym3526': case 'y8950':
           kssFrameWrites.push(kpk(0xC0, a, 1), kpk(0xC1, b, 1)); break;
         case 'k051649': kssFrameWrites.push(kpk(d, c, 0)); break;
+        // MSX の DAC(MSXX): KSS の牌の魔術師と同じ $5000 への書き込みとして流す(KDA 行/kssDacDrumFor が読む)
+        case 'msxdac': kssFrameWrites.push(kpk(0x5000, a, 0)); break;
         case 'huc6280': hesTraceWrite(a); break; // (reg, value)。書込み適用後に呼ばれるのでAPUの状態をそのまま記録
       }
     };
@@ -17850,7 +17907,7 @@
     if (chips.includes('kssPsg')) {
       // PSG(AY-3-8910): 2A03のFME-7表示と同じ考え方(50%矩形波固定、noise有効chはノイズ波形)。
       const live = extraSnaps && extraSnaps.kssPsgLive;
-      const snaps = live ? live() : null;
+      const snaps = live ? live() : (extraSnaps && extraSnaps.kssPsg ? extraSnaps.kssPsg[frameIdx] : null); // 配列はライブ表示(MSX ゲーム画面)の追記
       const COLS = ['#66ddff', '#33aaff', '#0077dd'];
       // VGMのデュアルAY8910(2個目)はスナップショットが6要素で返るのでKP4-6行も出す
       const nKp = snaps && snaps.length > 3 ? snaps.length : 3;
@@ -17881,7 +17938,7 @@
     if (chips.includes('kssScc')) {
       // SCC: N163と同じ波形メモリ音源(要素数のみ異なる: SCCは32点符号付き8bit)。
       const live = extraSnaps && extraSnaps.kssSccLive;
-      const snaps = live ? live() : null;
+      const snaps = live ? live() : (extraSnaps && extraSnaps.kssScc ? extraSnaps.kssScc[frameIdx] : null);
       for (let ch = 0; ch < 5; ch++) {
         const c = snaps ? snaps[ch] : { freq: 0, vol: 0, active: false };
         const hue = (280 + ch * 20) % 360;
@@ -17896,7 +17953,7 @@
       // FMPAC(YM2413): VRC7と同じFM表示だが、9メロディモードとリズムモード(6melody+BD/SD/TOM/CYM/HH)
       // の両方に対応する(VRC7ハードウェアにはリズムモードが存在しないため6ch固定だった)。
       const live = extraSnaps && extraSnaps.kssOpllLive;
-      const snap2 = live ? live() : null;
+      const snap2 = live ? live() : (extraSnaps && extraSnaps.kssOpll ? extraSnaps.kssOpll[frameIdx] : null);
       // ★2026-08-22: リズムモード(レジスタ$0E bit5)は「打つ瞬間だけ立てて即降ろす」ドライバが
       // 実在する(SMS版After Burnerは毎秒10〜16回トグル)。生ビットに追随すると9ch表示と
       // 6ch+リズム表示が激しく入れ替わって読めないため、**一度でも見たら以後は保持する**
@@ -17948,7 +18005,7 @@
       // D#2(dmcRateIdx 15)の鍵に置く。ロールの KDA トラックも同じ鍵(roll-builders.js RollBuild.kss)。
       // active は「書込みが続いているか」(D/A は最後の値を保持し続けるので値では判定できない)
       const live = extraSnaps && extraSnaps.kssDacLive;
-      const d = (live ? live() : null) || { level: 0x80, vol: 0, active: false };
+      const d = (live ? live() : (extraSnaps && extraSnaps.kssDac ? extraSnaps.kssDac[frameIdx] : null)) || { level: 0x80, vol: 0, active: false };
       channels.push({ id: 'KDA', color: '#ff66aa', freq: 0, vol: d.vol, rawVol: d.level, rawVolMax: 255,
         wave: { t: 'sample' }, active: !!d.active, sample: true, dmcReg: d.level, dmcRateIdx: 15, dmcFreq: 0 });
     }
@@ -18047,7 +18104,7 @@
       // (6メロディ+BD/SD/TOM/CYM/HH)。表示流儀はkssOpll(FMPAC)と同じで、リズムモードは
       // 一度見たら以後保持する単調運用(extraSnaps.oplRhythmSeen)。
       const live = extraSnaps && extraSnaps.oplLive;
-      const s = live ? live() : null;
+      const s = live ? live() : (extraSnaps && extraSnaps.opl ? extraSnaps.opl[frameIdx] : null);
       if (s && s.rhythm && s.rhythm.on && extraSnaps) extraSnaps.oplRhythmSeen = true;
       const oplRhythm = !!(extraSnaps && extraSnaps.oplRhythmSeen);
       const MCOLS = ['#66ffcc', '#55eebb', '#44ddaa', '#33cc99', '#22bb88', '#11aa77', '#66e0d0', '#55d0c0', '#44c0b0'];
@@ -18822,6 +18879,46 @@
         end = (r & 0x40) ? Infinity : f + Math.ceil(bits * DMC_RATE[r & 15] / 29780.5);
       }
       return { seq, end };
+    };
+  }
+  // KSS 形式の書き込み列 [{addr,value,io}](PSG=I/O $A0/$A1、OPLL=$7C/$7D、Y8950=$C0/$C1、SCC=$9800/$B800 台、DAC=$5000 台)を
+  // 本物の音源クラス(ay8910Msx/sccAudio/opllMsx/opl/majutsushiDac)に流し、鍵盤行の採り方(Emu.snapshot*)で 1 フレームぶんの
+  // スナップショットを返す stepper。MSX のゲーム画面のライブ表示(DESIGN-MSX-CAPTURE.md §6、7b)が使う。音は鳴らさないので
+  // clock は回さない(Nuked OPLL は書き込みがキューなので flushWrites で反映する)。SCC は $BFFE bit5 で classic/SCC+ の配置を切り替える
+  function makeKssStepper(chips) {
+    const E = MML.Emu;
+    const psg = chips.includes('kssPsg') && E.AY8910Audio ? new E.AY8910Audio() : null;
+    const scc = chips.includes('kssScc') && E.SCCAudio ? new E.SCCAudio() : null;
+    const opll = chips.includes('kssOpll') && E.OPLLAudio ? new E.OPLLAudio() : null;
+    const opl = chips.includes('opl') && E.OPLAudio ? new E.OPLAudio(3579545, { type: 'y8950' }) : null;
+    const dac = chips.includes('kssDac') && E.MajutsushiDAC ? new E.MajutsushiDAC() : null;
+    let psgLatch = 0, oplLatch = 0, sccPlus = false;
+    return (writes) => {
+      for (const w of writes) {
+        const a = w.addr, v = w.value & 0xFF;
+        if (w.io) {
+          if (a === 0xA0) psgLatch = v & 0x0F;
+          else if (a === 0xA1) { if (psg && psgLatch < 14) psg.writeInternal(psgLatch, v); }
+          else if (a === 0x7C || a === 0x7D) { if (opll) opll.ioWrite(a, v); }
+          else if (a === 0xC0) oplLatch = v;
+          else if (a === 0xC1) { if (opl && oplLatch !== 0x0F) opl.writeReg(oplLatch, v); }
+          continue;
+        }
+        if ((a & 0xFFFE) === 0xBFFE) { sccPlus = !!(v & 0x20); continue; }
+        if (scc) {
+          if (!sccPlus && a >= 0x9800 && a <= 0x9FFF) scc.writeClassic(a & 0xFF, v);
+          else if (sccPlus && a >= 0xB800 && a <= 0xBFFD) scc.writePlus(a & 0xFF, v);
+        }
+        if (dac && a >= 0x5000 && a <= 0x5FFF) dac.write(v);
+      }
+      if (opll && typeof opll.flushWrites === 'function') opll.flushWrites();
+      return {
+        psg: psg ? E.snapshotAY8910(psg) : null,
+        scc: scc ? E.snapshotSCC(scc) : null,
+        opll: opll ? E.snapshotOPLL(opll) : null,
+        opl: opl ? E.snapshotOPL(opl, { skipWave: true }) : null,
+        dac: dac ? E.snapshotMajutsushiDac(dac) : null,
+      };
     };
   }
   function makeFme7Stepper() {
@@ -21830,6 +21927,7 @@
       if (this._chips.includes('vrc7')) { steppers.vrc7 = makeVrc7Stepper(); ex.vrc7 = []; }
       if (this._chips.includes('n163')) { steppers.n163 = makeN163Stepper(); ex.n163 = []; ex.n163.maxNumCh = 1; }
       if (this._chips.includes('fme7')) { steppers.fme7 = makeFme7Stepper(); ex.fme7 = []; }
+      if (this._chips.includes('kss')) { steppers.kss = makeKssStepper(this._chips); ex.kssPsg = []; ex.kssScc = []; ex.kssOpll = []; ex.kssDac = []; ex.opl = []; } // MSX のゲーム画面(KSS 形式の書き込み列)
       // Live系(再生中のチップを直接読む関数)はライブ表示には無い(あっても全フレームが同じ値になる)
       for (const k of Object.keys(ex)) if (/Live$/.test(k)) ex[k] = null;
       ex.apuEnv = null;
@@ -21865,6 +21963,7 @@
       if (lr.steppers.vrc7) ex.vrc7[f] = lr.steppers.vrc7(writes);
       if (lr.steppers.n163) { const sn = lr.steppers.n163(writes); ex.n163[f] = sn; if (sn.numCh > ex.n163.maxNumCh) ex.n163.maxNumCh = sn.numCh; }
       if (lr.steppers.fme7) ex.fme7[f] = lr.steppers.fme7(writes);
+      if (lr.steppers.kss) { const k = lr.steppers.kss(writes); ex.kssPsg[f] = k.psg; ex.kssScc[f] = k.scc; ex.kssOpll[f] = k.opll; ex.kssDac[f] = k.dac; ex.opl[f] = k.opl; }
       const channels = extractChannels(st.regSnapshots[f], ex, f, this._chips);
       lr.builder.feed(channels, f);
       // 打点(DPCM 等の drumKey つき)が新しく始まったらドラム区画を組み直す(区画が無いと打点は描かれない。
@@ -21902,10 +22001,11 @@
       if (f === st.totalFrames) return;
       st.writeLog.length = f; st.regSnapshots.length = f; st.totalFrames = f;
       const ex = this._extraSnaps;
-      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd']) if (ex[k]) ex[k].length = f;
+      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl']) if (ex[k]) ex[k].length = f;
       if (lr.steppers.vrc7) lr.steppers.vrc7 = makeVrc7Stepper();
       if (lr.steppers.n163) lr.steppers.n163 = makeN163Stepper();
       if (lr.steppers.fme7) lr.steppers.fme7 = makeFme7Stepper();
+      if (lr.steppers.kss) lr.steppers.kss = makeKssStepper(this._chips); // 戻った先の像(録音の取り直し)から組み直す
       lr.steppers.dmc = makeDmcStepper();
       lr.regs = Object.assign({}, f > 0 ? st.regSnapshots[f - 1] : {});
       if (lr.regs[0x4015] === undefined) lr.regs[0x4015] = 0x0F;

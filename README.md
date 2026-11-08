@@ -248,7 +248,7 @@ NSFに埋め込まれるのは、曲データと、サウンドドライバ `src
 ### 第三者のコード
 
 他の作者のコードを移植した部分（Nuked-OPLL、Nuked-OPN2、emu2413、LZMA SDK）と、
-他の実装を参照して書き起こした部分がある。出所・著作者・ライセンスは
+他の実装を参照して書き起こした部分、そのまま同梱したバイナリ（MSX 互換 BIOS の C-BIOS、BSD 2-Clause）がある。出所・著作者・ライセンスは
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) にまとめてある。
 Nuked-OPN2 由来の部分は LGPL-2.1 なので、その本文も [LICENSE.LGPL-2.1](LICENSE.LGPL-2.1) として同梱している。
 

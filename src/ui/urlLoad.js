@@ -46,7 +46,7 @@
 
   // openSoundFile() が知っている拡張子。URL末尾の綴りがこの中に無ければマジックで判定する
   const KNOWN_EXTS = ['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz',
-                      'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn', 'mml', 'txt', 'nes', 'fds'];
+                      'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn', 'mml', 'txt', 'nes', 'fds', 'rom', 'mx1', 'mx2', 'dsk'];
 
   /**
    * クエリ文字列を読む。無指定なら null。

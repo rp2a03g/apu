@@ -41,7 +41,7 @@
  *      ギャップになっているもの。書き込みのあるフレームは詰めない。
  *   詰めたフレームにあった書き込み(効果音だけのフレーム等)は捨てずに次のフレームの頭へ移す。
  *
- * 出力は 1 フレーム=735 サンプルの格子に乗せ直す(録音スクリプトの VGM は元からこの格子)。
+ * 出力は 1 フレーム=735 サンプル(ヘッダのレートが 50 なら 882)の格子に乗せ直す(録音スクリプトの VGM は元からこの格子)。
  * フレーム内の時刻(0x61 の端数)は各書き込みの相対位置として保つ。
  */
 (function (global) {
@@ -49,7 +49,7 @@
   const MML = global.MML = global.MML || {};
   const VGM = MML.VGM = MML.VGM || {};
 
-  const SPF = 735; // 1 フレームのサンプル数(44100/60)
+  let SPF = 735; // 1 フレームのサンプル数(44100/60)。50Hz の録音(MSX の PAL モード、ヘッダ 0x24=50)は 882(cleanCapture が入口で決める)
   const LAG_EVERY_FRAME_RATE = 0.98; // 曲の間のフレームのうち書き込みがある割合がこれ以上なら「毎フレーム書くドライバ」
   const LAG_MIN_FRAMES = 120;    // 判定に要る「書き込みのあるフレーム」の最小数
   const LAG_MAX_RUN = 60;        // これより長く続く無書き込み区間は処理落ちでなくポーズ/曲の終わり
@@ -508,6 +508,7 @@
     const report = { lag: { on: !!opt.lag, applied: false, removedRegular: 0, removedAlign: 0 }, sfx: { on: !!opt.sfx, applied: false } }; // removedRegular: a の方式 / removedAlign: b の方式
     if (!opt.sfx && !opt.lag) return { bytes, report };
     const hdr = VGM.parseHeader(bytes);
+    SPF = hdr.rate === 50 ? 882 : 735; // MSX の 50Hz 録音(DESIGN-MSX-CAPTURE.md §5.2)
     if (!hdr || !hdr.magicOk) { report.error = 'header'; return { bytes, report }; }
     const parsed = parse(bytes, hdr);
     if (parsed.error) { report.error = parsed.error; return { bytes, report }; }

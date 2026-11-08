@@ -21,7 +21,8 @@
 
   function isTyped(v) { return ArrayBuffer.isView(v) && !(v instanceof DataView); }
 
-  function snapshot(root, skipArrays) {
+  function snapshot(root, skipArrays, skipKeys) {
+    skipKeys = skipKeys || SKIP_KEYS;
     const seen = new Map();
     let nextId = 1;
     function walk(obj, top) {
@@ -33,7 +34,7 @@
       if (Array.isArray(obj)) return obj.map((x) => { const w = walk(x); return w === undefined ? null : w; });
       const out = {};
       for (const k of Object.keys(obj)) {
-        if (SKIP_KEYS.has(k)) continue;
+        if (skipKeys.has(k)) continue;
         const w = walk(obj[k]);
         if (w !== undefined) out[k] = w;
       }
@@ -89,4 +90,6 @@
     },
   };
   Emu.NesState = NesState;
+  // 木の写し/書き戻しは MSX 本体(msx/msxState.js)も使う。skipKeys を渡すと除外するキーを差し替えられる
+  Emu.StateTree = { snapshot, restore, SKIP_KEYS, isTyped };
 })(typeof window !== 'undefined' ? window : globalThis);

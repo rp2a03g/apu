@@ -1,5 +1,9 @@
 /*
- * NES 本体を AudioWorklet の中で回す (nes-worklet バンドルの本体。DESIGN-CAPTURE.md §6/§7、段階 6b)
+ * NES / MSX 本体を AudioWorklet の中で回す (nes-worklet バンドルの本体。DESIGN-CAPTURE.md §6/§7 段階 6b、DESIGN-MSX-CAPTURE.md §6 段階 7a)
+ *
+ * 本体クラスは load メッセージの machine('nes' | 'msx')で選ぶ(NesConsole / MsxConsole。外形は同じ)。State/Rewind も機種で選ぶ。
+ * 以下「NES」「nes」とあるのは本体一般のこと(変数名は NES 時代のまま)。MSX だけの物: load の msx オプション(機種/BIOS/マッパー)、
+ * key/keyReleaseAll(PC のキー → MSX キーボード)、rwframe の palette(逆再生の 8bit 画面の色)、loaded の chips。
  *
  * 音の時刻を基準にフレームを刻む: process() が 128 サンプルを求めるたびに、その分だけ CPU/PPU/APU を進める
  * (NesConsole.runSamples)。画面が 1 枚できるたびに主スレッドへ frame(Uint32Array の ArrayBuffer、転送)と、
@@ -28,35 +32,67 @@
       this.dcX = 0; this.dcY = 0;
       this.frameSeq = 0;
       this.rw = null; // 逆再生中 { speed, acc }
+      this.machine = 'nes'; this.State = null; // load で機種に合わせる
       this.port.onmessage = (e) => this.onMessage(e.data || {});
     }
     onMessage(m) {
       try {
         switch (m.type) {
           case 'load': {
-            const nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });
+            const machine = m.machine === 'msx' ? 'msx' : 'nes';
+            let nes, info;
+            if (machine === 'msx') {
+              // MSX: ROM(null なら BIOS だけで起動)+ 機種/BIOS(main 32K・sub/logo 16K、ArrayBuffer で届く)/マッパー種別
+              const o = m.msx || {};
+              const bios = {};
+              if (o.bios) { for (const k of ['main', 'sub', 'logo', 'kanji', 'disk']) if (o.bios[k]) bios[k] = new Uint8Array(o.bios[k]); if (o.bios.name) bios.name = o.bios.name; }
+              const cartB = o.cartB && o.cartB.kind ? { kind: o.cartB.kind, rom: o.cartB.rom ? new Uint8Array(o.cartB.rom) : null } : null; // 音源カートリッジ(FM-PAC/MSX-AUDIO/SCC-I)
+              const disks = (o.disks || []).map((b) => new Uint8Array(b)); // .dsk 画像(7d)
+              nes = new MML.Emu.MsxConsole(m.rom ? new Uint8Array(m.rom) : null, { machine: o.machine, bios: bios.main ? bios : null, mapperType: o.mapperType || undefined, cartB, disks, fdc: o.fdc || undefined });
+              info = MML.Emu.MsxConsole.describe(nes);
+            } else {
+              nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });
+              info = MML.Emu.INES.describe(nes.rom);
+            }
             nes.setSampleRate(sampleRate);
             nes.onFrame = () => this.onFrame();
-            if (m.battery) nes.setBattery(new Uint8Array(m.battery)); // 前回のセーブ(主スレッドが IndexedDB から)
+            if (m.battery && nes.hasBattery) nes.setBattery(new Uint8Array(m.battery)); // 前回のセーブ(主スレッドが IndexedDB から)
             this.nes = nes;
-            this.rewind = MML.Emu.NesRewind ? new MML.Emu.NesRewind(nes) : null;
+            this.machine = machine;
+            this.State = machine === 'msx' ? MML.Emu.MsxState : MML.Emu.NesState;
+            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : MML.Emu.NesRewind;
+            this.rewind = Rewind ? new Rewind(nes) : null;
             this.dcX = 0; this.dcY = 0;
-            this.port.postMessage({ type: 'loaded', info: MML.Emu.INES.describe(nes.rom), extBits: nes.extBits(), sampleRate, disks: nes.diskCount, battery: nes.hasBattery });
+            this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH() });
             break;
           }
+          case 'key': // MSX: PC のキー(KeyboardEvent.code)を押す/離す。対応の無いキーは本体が無視する
+            if (this.nes && typeof this.nes.setKey === 'function') this.nes.setKey(String(m.code || ''), !!m.down);
+            break;
+          case 'keyReleaseAll':
+            if (this.nes && this.nes.keyboard && this.nes.keyboard.releaseAll) this.nes.keyboard.releaseAll();
+            break;
           case 'unload': // 止める前の最後のセーブ要求。変化が無くても返事をする(主スレッドが待つ)
             this.postBattery(true);
             break;
           case 'disk': // FDS: side < 0 で取り出し、0 以上でその面を入れる
-            if (!this.nes) break;
+            if (!this.nes || typeof this.nes.insertDisk !== 'function') break;
             if (m.side < 0) this.nes.ejectDisk(); else this.nes.insertDisk(m.side | 0);
             if (this.rewind) this.rewind.clear();
             break;
+          case 'diskAdd': { // MSX: .dsk を足してドライブ A に入れる(入れ替え。主スレッドが取り出し→少し待って送る)
+            if (!this.nes || typeof this.nes.addDisk !== 'function') break;
+            const n = this.nes.addDisk(new Uint8Array(m.image)); if (n >= 0) this.nes.insertDisk(n);
+            if (this.rewind) this.rewind.clear();
+            this.port.postMessage({ type: 'diskAdded', count: this.nes.diskCount, index: n });
+            break;
+          }
           case 'pad': if (this.nes) this.nes.setController(m.port | 0, m.bits | 0, m.turbo | 0); break;
           case 'turboRate': if (this.nes) this.nes.setTurboRate(m.frames | 0); break;
           case 'reset': if (this.nes) { this.nes.reset(); if (this.rewind) this.rewind.clear(); } break;
           case 'mix': { // 鍵盤表示のミュート/音量(2A03 は apu.mute/vol、拡張音源はマッパーの audio.mute/vol)。capture.js の applyMute/applyVolume と同じ流儀(バンドルに無いので自前)
             if (!this.nes) break;
+            if (typeof this.nes.applyMix === 'function') { this.nes.applyMix(m.mute || null, m.volume || null); break; } // MSX: 本体が { psg: [...], scc: [...] } を受ける
             const put = (target, source, conv) => {
               if (!target || !source) return;
               if (Array.isArray(target)) { for (let i = 0; i < target.length; i++) if (source[i] !== undefined) target[i] = conv(source[i]); }
@@ -77,8 +113,8 @@
             this.rw = null;
             const got = this.rewind.endReverse();
             this.frameSeq = got;
-            const frame = this.nes.frame.slice();
-            this.port.postMessage({ type: 'rewound', frame: frame.buffer, seq: got, oldest: this.rewind.oldest }, [frame.buffer]);
+            const frame = this.nes.frame.slice(0, this.frameW() * this.frameH());
+            this.port.postMessage({ type: 'rewound', frame: frame.buffer, seq: got, oldest: this.rewind.oldest, w: this.frameW(), h: this.frameH() }, [frame.buffer]);
             break;
           }
           case 'rewind': { // frame(本体の frameCount)の終わりへ戻る。録音中なら像から取り直す。戻った所の画面と frameCount を返す
@@ -88,17 +124,17 @@
             const got = this.rewind.rewindTo(m.frame | 0);
             if (wasRec) this.nes.startRecording();
             this.frameSeq = got;
-            const frame = this.nes.frame.slice();
-            this.port.postMessage({ type: 'rewound', frame: frame.buffer, seq: got, oldest: this.rewind.oldest }, [frame.buffer]);
+            const frame = this.nes.frame.slice(0, this.frameW() * this.frameH());
+            this.port.postMessage({ type: 'rewound', frame: frame.buffer, seq: got, oldest: this.rewind.oldest, w: this.frameW(), h: this.frameH() }, [frame.buffer]);
             break;
           }
           case 'pause': this.paused = !!m.on; break;
           case 'speed': this.speed = Math.max(1, Math.min(8, m.n | 0)); break; // 早送り: 1 回の process で speed 回ぶん進める(音は最後の 1 回ぶんだけ出す)
           case 'saveState': // ステート保存: 木を写して主スレッドへ(構造化複製。IndexedDB に置くのは主スレッド)
-            if (this.nes) this.port.postMessage({ type: 'state', state: MML.Emu.NesState.save(this.nes), slot: m.slot });
+            if (this.nes) this.port.postMessage({ type: 'state', state: this.State.save(this.nes), slot: m.slot });
             break;
           case 'loadState':
-            if (this.nes) { const ok = MML.Emu.NesState.load(this.nes, m.state); if (ok) { if (this.rewind) this.rewind.clear(); this.frameSeq = this.nes.frameCount; } this.port.postMessage({ type: 'stateLoaded', ok }); }
+            if (this.nes) { const ok = this.State.load(this.nes, m.state); if (ok) { if (this.rewind) this.rewind.clear(); this.frameSeq = this.nes.frameCount; } this.port.postMessage({ type: 'stateLoaded', ok }); }
             break;
           case 'record':
             // 録音は VGM(主スレッドが溜める)とライブ表示(ロールへ流す)の 2 つが使う。
@@ -119,13 +155,15 @@
         this.port.postMessage({ type: 'error', message: String((e && e.stack) || e) });
       }
     }
+    frameW() { return (this.nes && this.nes.frameWidth) || 256; }
+    frameH() { return (this.nes && this.nes.frameHeight) || 240; }
     onFrame() {
       const nes = this.nes;
       if (this.rewind) { if (this.rewind.replaying) return; this.rewind.onFrame(); } // 巻き戻しの再生中は送らない
       this.frameSeq = nes.frameCount; // 主スレッドのフレーム番号 = 本体の frameCount(巻き戻しで戻る)
       if (this.speed > 1 && (++this.ffSkip % this.speed) !== 0) { if ((this.frameSeq % 60) === 0) this.postBattery(false); return; } // 早送り中は speed 枚に 1 枚だけ送る(録音の書き込み列は次に送る時まで溜まる)
-      const frame = nes.frame.slice();
-      const msg = { type: 'frame', seq: this.frameSeq, frame: frame.buffer, underruns: nes.underruns };
+      const frame = nes.frame.slice(0, this.frameW() * this.frameH()); // MSX は幅がモードで変わる(frame は最大幅で確保。幅ぶんだけ送る)
+      const msg = { type: 'frame', seq: this.frameSeq, frame: frame.buffer, underruns: nes.underruns, w: this.frameW(), h: this.frameH() };
       if (nes.rec) { msg.writes = nes.rec.frames.splice(0); }
       this.port.postMessage(msg, [frame.buffer]);
       if ((this.frameSeq % 60) === 0) this.postBattery(false); // 1 秒ごとに、セーブ RAM が変わっていれば主スレッドへ
@@ -143,7 +181,7 @@
     reverseTick() {
       const rw = this.rw, rewind = this.rewind;
       rewind.regenStep(1);
-      rw.acc += rw.speed * 128 / (sampleRate / 60.0988);
+      rw.acc += rw.speed * 128 / (sampleRate / (this.nes.frameRate || 60.0988));
       for (let n = 0; rw.acc >= 1 && n < 8; n++) {
         const r = rewind.reverseStep();
         if (r === null) { rw.acc = Math.min(rw.acc, 1); break; } // まだ作っていない: 待つ(溜めない)
@@ -153,7 +191,10 @@
       if (rw.pending && currentTime - rw.lastPost >= 1 / 61) {
         rw.lastPost = currentTime;
         const idx = rw.pending.slice(); rw.pending = null;
-        this.port.postMessage({ type: 'rwframe', seq: rw.pendingSeq, idx: idx.buffer, oldest: rewind.oldest }, [idx.buffer]);
+        const msg = { type: 'rwframe', seq: rw.pendingSeq, idx: idx.buffer, oldest: rewind.oldest, w: rewind.idxWidth || this.frameW(), h: this.frameH() };
+        const tr = [idx.buffer];
+        if (this.machine === 'msx' && rewind.palette) { const pal = (rewind.paletteOf ? rewind.paletteOf(rw.pendingSeq) : rewind.palette).slice(); msg.palette = pal.buffer; tr.push(pal.buffer); } // 8bit 画面の色(そのフレームの色表: パレット 16 色か GRAPHIC7 の 256 色)
+        this.port.postMessage(msg, tr);
       }
     }
     process(inputs, outputs) {

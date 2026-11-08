@@ -51,6 +51,31 @@
     const m = VGM.NESX.MAGIC;
     return type === VGM.NESX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
   };
+  // MSX の DAC ブロック(規格外。DESIGN-MSX-CAPTURE.md §5.6。NESX と同じ流儀で、他のプレイヤーは読み飛ばす)
+  //   0x67 0x66 TYPE size(4) "MSXX" ver(1) kind(1) payload
+  //   kind 0 = ヘッダ: payload[0] = 機種(1=MSX1 2=MSX2 3=MSX2+ 4=turboR)、payload[1] = DAC ビット(bit0=turboR PCM、bit1=コナミ DAC $5000、bit2=コナミシンセサイザー $4000)
+  //   kind 1 = DAC の書き込み列: 2 バイト×n = value8 meta8(bit0-6=フレーム内時刻×1/128)。同じ時刻の物を 1 ブロックに(ブロックの位置が時刻)
+  VGM.MSXX = { TYPE: 0xBE, MAGIC: [0x4D, 0x53, 0x58, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_DAC: 1,
+    MACHINES: { msx1: 1, msx2: 2, msx2plus: 3, turbor: 4 }, DAC_TURBOR_PCM: 1, DAC_KONAMI: 2, DAC_KONAMI_SYNTH: 4 };
+  VGM.isMsxxBlock = function (type, block) {
+    const m = VGM.MSXX.MAGIC;
+    return type === VGM.MSXX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
+  };
+  // ストリーム先頭のデータブロックに MSXX のヘッダがあれば { machine, dac } を返す(無ければ null)
+  VGM.scanMsxExtension = function (bytes, dataOffset) {
+    let p = dataOffset;
+    while (p + 7 <= bytes.length && bytes[p] === 0x67 && bytes[p + 1] === 0x66) {
+      const type = bytes[p + 2];
+      const size = (bytes[p + 3] | (bytes[p + 4] << 8) | (bytes[p + 5] << 16) | (bytes[p + 6] << 24)) & 0x7FFFFFFF;
+      const block = bytes.subarray(p + 7, p + 7 + size);
+      if (VGM.isMsxxBlock(type, block) && block[5] === VGM.MSXX.KIND_HEADER && block.length >= 8) {
+        const names = Object.keys(VGM.MSXX.MACHINES);
+        return { machine: names.find((k) => VGM.MSXX.MACHINES[k] === block[6]) || 'msx2', dac: block[7] };
+      }
+      p += 7 + size;
+    }
+    return null;
+  };
   VGM.scanNesExtension = function (bytes, dataOffset) {
     let p = dataOffset;
     while (p + 7 <= bytes.length && bytes[p] === 0x67 && bytes[p + 1] === 0x66) {
@@ -274,12 +299,14 @@
     // 種別 0(ヘッダ)の 1 バイトが NSF ヘッダと同じ拡張音源ビット(VRC6/VRC7/FDS/MMC5/N163/SUNSOFT 5B)。
     // 最初の待ち/書き込みコマンドより前にあるものだけ見る(ここで分かればアダプタ生成と鍵盤の行構成に使える)
     if (chips.nes) chips.nes.extraChips = VGM.scanNesExtension(bytes, dataOffset);
+    const msxx = VGM.scanMsxExtension(bytes, dataOffset); // MSX の DAC(規格外 MSXX)。本ツールの MSX 録音だけが持つ
 
     const gd3Offset = gd3Rel ? 0x14 + gd3Rel : 0;
     const gd3 = gd3Offset ? parseGd3(bytes, gd3Offset) : null;
 
     return {
       magicOk: true,
+      msxx,           // MSXX ブロック { machine, dac } | null
       version,
       versionText: ((version >> 8) & 0xFF).toString(16) + '.' + ((version >> 4) & 0xF).toString(16) + (version & 0xF).toString(16),
       eofOffset,

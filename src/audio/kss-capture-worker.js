@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-01 12:28:12
+ * Built by tools/build-capture-workers.ps1 at 2026-11-09 00:04:11
  *
  * regsOnly capture worker bundle (kssCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.kssCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.kssCaptureBuiltAt = '2026-11-01 12:28:12';
+  MML.WorkerBundles.kssCaptureBuiltAt = '2026-11-09 00:04:11';
   MML.WorkerBundles.kssCapture = function () {
 /*
  * KSS (MSX/SEGA chiptune) ヘッダ解析
@@ -216,6 +216,9 @@
       // M1 の回数は R レジスタの増分と同じ(プレフィックス DD/FD/CB/ED もそれぞれ 1 回、
       // DD CB d op の d と op は M1 ではない)。resetでは消さない
       this.m1Wait = 0;
+      // INT 受け付けの線(MSX 本体が VDP 等の線を毎命令セットする)。interrupt() は呼び手(msxConsole.js)が
+      // iff1 && !eiPending を見て呼ぶ。eiPending は EI の直後 1 命令だけ受け付けない Z80 の規則
+      this.eiPending = false;
       this.reset();
     }
 
@@ -235,6 +238,7 @@
       this.i = 0; this.r = 0;
       this.iff1 = false; this.iff2 = false; this.im = 0;
       this.halted = false;
+      this.eiPending = false;
       this.callActive = false;
       this._eaddr = 0; // 直近に計算した実効アドレス((HL)/(IX+d)/(IY+d))
     }
@@ -535,6 +539,10 @@
         const trap = this.traps[this.pc];
         if (trap) return trap(this);
       }
+      this.eiPending = false;
+      // HALT 中は割り込みが来るまで NOP を実行し続ける(PC は HALT の次を指したまま)。KSS の call()/stepCall() は
+      // ここへ来る前に halted を見て抜けるので従来の挙動は変わらない
+      if (this.halted) { this.r = (this.r & 0x80) | ((this.r + 1) & 0x7F); return 4 + this.m1Wait; }
       this.r = (this.r & 0x80) | ((this.r + 1) & 0x7F);
       let idx = null;
       let prefixBytes = 0;
@@ -562,6 +570,26 @@
         return extraPrefixCycles + this.execED() + (m1 ? m1 * (prefixBytes + 2) : 0);
       }
       return extraPrefixCycles + this.execMain(opcode, idx) + (m1 ? m1 * (prefixBytes + 1) : 0);
+    }
+
+    /**
+     * マスカブル割り込み(INT)を受け付ける。呼び手が「iff1 && !eiPending && 線が立っている」を確認してから呼ぶ。
+     * IM0 はデータバスに RST 38H(0xFF)が乗る前提(MSX は IM1 が普通。IM0 の機種は無い)、IM1 は RST 38H、
+     * IM2 は I レジスタ上位+バスの 0xFF をベクタ表の番地にする(実機のデータバスはプルアップで 0xFF)。
+     * @returns {number} 消費サイクル(IM0/1: 13、IM2: 19。M1 ウェイト込み)
+     */
+    interrupt() {
+      this.halted = false;
+      this.iff1 = false; this.iff2 = false;
+      this.r = (this.r & 0x80) | ((this.r + 1) & 0x7F);
+      this.push16(this.pc);
+      if (this.im === 2) {
+        const vec = (this.i << 8) | 0xFF;
+        this.pc = this.read(vec) | (this.read((vec + 1) & 0xFFFF) << 8);
+        return 19 + this.m1Wait;
+      }
+      this.pc = 0x0038;
+      return 13 + this.m1Wait;
     }
 
     // 実効アドレスを計算して this._eaddr にセットする(code===6のとき使用)。
@@ -726,7 +754,7 @@
           }
           case 5: { const de = this.getDE(); this.setDE(this.getHL()); this.setHL(de); return 4; }
           case 6: this.iff1 = false; this.iff2 = false; return 4;
-          case 7: this.iff1 = true; this.iff2 = true; return 4;
+          case 7: this.iff1 = true; this.iff2 = true; this.eiPending = true; return 4;
         }
       }
       if (z === 4) { const nn = this.fetch16(); if (this.condTest(y)) { this.push16((this.pc) & 0xFFFF); this.pc = nn; return 17; } return 10; }
@@ -3961,7 +3989,9 @@
   Emu.OpnAdpcm = {
     AdpcmA, AdpcmB, decodeAdpcmA, decodeAdpcmB, ADPCM_SCALE,
     attachSampleApi(proto) {
-      proto.loadRom = YM2610Audio.prototype.loadRom;
+      // ★loadRom は上書きしない(2026-11-08): OPLAudio は自前の loadRom(romSize, start, data) を持ち、VGM の 0x88 ブロックは
+      //   その形で呼ぶ。ここで (kind, romSize, start, data) の物に差し替えると data が undefined になり Y8950 の DELTA-T が落ちていた
+      if (!proto.loadRom) proto.loadRom = YM2610Audio.prototype.loadRom;
       proto.samplePitch = YM2610Audio.prototype.samplePitch;
       proto._decodeSample = YM2610Audio.prototype._decodeSample;
       proto.samplePcm = YM2610Audio.prototype.samplePcm;

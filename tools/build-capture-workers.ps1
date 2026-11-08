@@ -214,6 +214,23 @@ $bundles = @(
             'src\emulator\nes\nesConsole.js',
             'src\emulator\nes\nesState.js',
             'src\emulator\nes\nesRewind.js',
+            # MSX 本体(DESIGN-MSX-CAPTURE.md 段階 7a。同じ Worklet で load の machine='msx' のとき使う。msxState.js は nesState.js の Emu.StateTree を使う)
+            'src\emulator\cpuZ80.js',
+            'src\emulator\expansion\ay8910Msx.js',
+            'src\emulator\expansion\sccAudio.js',
+            # 7b の音源: MSX-MUSIC(opllMsx → Nuked)、MSX-AUDIO(opl.js。ADPCM は ym2610.js の AdpcmB)、コナミ DAC
+            'src\emulator\expansion\opllNuked.js',
+            'src\emulator\expansion\opllMsx.js',
+            'src\emulator\expansion\ym2610.js',
+            'src\emulator\expansion\opl.js',
+            'src\emulator\expansion\majutsushiDac.js',
+            'src\emulator\msx\cartridge.js',
+            'src\emulator\msx\msxKeyboard.js',
+            'src\emulator\msx\vdp.js',
+            'src\emulator\msx\fdc.js',
+            'src\emulator\msx\msxConsole.js',
+            'src\emulator\msx\msxState.js',
+            'src\emulator\msx\msxRewind.js',
             'src\audio\nes-worklet-impl.js'
         )
     },

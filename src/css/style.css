@@ -1956,6 +1956,8 @@ button.secondary {
 .nes-cfg-row select { font-size: 12px; }
 .nes-cfg-check { display: flex; align-items: center; gap: 4px; cursor: pointer; }
 .nes-cfg-note { font-size: 10.5px; color: var(--text-muted); line-height: 1.4; white-space: normal; margin-top: 3px; }
+details.nes-cfg-note > summary { cursor: pointer; }
+.nes-cfg-license { font-size: 9.5px; line-height: 1.3; white-space: pre-wrap; max-height: 160px; overflow: auto; margin: 3px 0 0; padding: 4px 6px; background: var(--surface); box-shadow: inset 0 1px 2px rgba(0,0,0,.25); border-radius: 3px; }
 .nes-cfg-table { border-collapse: collapse; }
 .nes-cfg-table td { padding: 1px 6px 1px 0; white-space: nowrap; }
 .nes-cfg-key { font-size: 11.5px; padding: 2px 8px; min-width: 110px; text-align: left; cursor: pointer; }

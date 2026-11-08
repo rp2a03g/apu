@@ -737,7 +737,9 @@
   Emu.OpnAdpcm = {
     AdpcmA, AdpcmB, decodeAdpcmA, decodeAdpcmB, ADPCM_SCALE,
     attachSampleApi(proto) {
-      proto.loadRom = YM2610Audio.prototype.loadRom;
+      // ★loadRom は上書きしない(2026-11-08): OPLAudio は自前の loadRom(romSize, start, data) を持ち、VGM の 0x88 ブロックは
+      //   その形で呼ぶ。ここで (kind, romSize, start, data) の物に差し替えると data が undefined になり Y8950 の DELTA-T が落ちていた
+      if (!proto.loadRom) proto.loadRom = YM2610Audio.prototype.loadRom;
       proto.samplePitch = YM2610Audio.prototype.samplePitch;
       proto._decodeSample = YM2610Audio.prototype._decodeSample;
       proto.samplePcm = YM2610Audio.prototype.samplePcm;

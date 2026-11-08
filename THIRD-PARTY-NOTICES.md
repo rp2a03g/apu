@@ -53,6 +53,15 @@
 - ライセンス: パブリックドメイン
 - 該当ファイル: `src/archive/lzma.js`（展開のみ。圧縮は移植していない）
 
+### C-BIOS (MSX 互換 BIOS、同梱バイナリ)
+
+- 原典: <http://cbios.sourceforge.net/> (C-BIOS 0.29、`roms/cbios_main_msx1_jp.rom` / `cbios_main_msx2_jp.rom` / `cbios_main_msx2+_jp.rom` / `cbios_sub.rom` / `cbios_logo_*.rom`)
+- 著作者: BouKiCHi、Reikan、Maarten ter Huurne、Albert Beevendorp、Patrick van Arkel、Manuel Bilderbeek、Joost Yervante Damad、Jussi Pitkänen、Eric Boon
+- ライセンス: BSD 2-Clause（全文は下記）
+- 該当ファイル: `src/emulator/msx/cbiosData.js`（ROM を base64 で埋め込んだ生成物。`tools/headless/mk-cbios-data.js` が作る）
+- 自前 MSX エミュレータ(ゲーム画面で .rom を開く)が、利用者の BIOS が控えられていない機種で使う。コードは移植しておらず、バイナリをそのまま同梱している。
+  ライセンス文はアプリ内(ゲーム画面 ⚙ の MSX 節)にも表示する
+
 ---
 
 ## 参照して書き起こしたもの（コードは移植していない）
@@ -163,6 +172,40 @@ DAMAGE.
 ダウンロードして使う。ベクタ自体はこのリポジトリには含まれない。
 
 ---
+
+## BSD 2-Clause License（C-BIOS）
+
+```
+Copyright (c) 2002-2005 BouKiCHi.  All rights reserved.
+Copyright (c) 2003 Reikan.  All rights reserved.
+Copyright (c) 2004-2006,2008-2010 Maarten ter Huurne.  All rights reserved.
+Copyright (c) 2004-2006,2008-2011 Albert Beevendorp.  All rights reserved.
+Copyright (c) 2004-2005 Patrick van Arkel.  All rights reserved.
+Copyright (c) 2004,2010-2011 Manuel Bilderbeek.  All rights reserved.
+Copyright (c) 2004-2006 Joost Yervante Damad.  All rights reserved.
+Copyright (c) 2004-2006 Jussi Pitkänen.  All rights reserved.
+Copyright (c) 2004-2007 Eric Boon.  All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
 
 ## MIT License（emu2413 / emu2212）
 

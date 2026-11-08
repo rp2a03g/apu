@@ -639,6 +639,20 @@
     };
   }
 
+  // MSX の DAC(規格外 MSXX ブロック、本ツールの MSX 録音。DESIGN-MSX-CAPTURE.md §5.6): KSS の牌の魔術師 D/A と同じ
+  // majutsushiDac.js で鳴らす。書き込みはブロックの位置(時刻)で届くので clock は要らない。ミュート/音量は kss の dac 配列
+  function makeMsxDacAdapter(msxx) {
+    const chip = new Emu.MajutsushiDAC();
+    return {
+      id: 'msxdac', clockHz: 0, accum: 0, chip, gain: CHIP_GAIN.k051649, msxx,
+      write(v) { chip.write(v); },
+      clock() {},
+      mix(out) { const s = chip.mixSample() * this.gain; out[0] += s; out[1] += s; },
+      applyMute(m) { const e = m.expansion || m; if (e.dac) Emu.applyMute(chip.mute, e.dac); },
+      applyVolume(v) { const e = v.expansion || v; if (e.dac) Emu.applyVolume(chip.vol, e.dac); }
+    };
+  }
+
   const ADAPTERS = {
     nes: makeNesAdapter, gb: makeGbAdapter, huc6280: makeHucAdapter,
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
@@ -770,6 +784,7 @@
           this.adapters.push(b); this.adapterById[info.id + '_2'] = b;
         }
       }
+      if (h.msxx && h.msxx.dac && Emu.MajutsushiDAC) { const a = makeMsxDacAdapter(h.msxx); this.adapters.push(a); this.adapterById.msxdac = a; } // MSX の DAC(MSXX)
       this.pos = h.dataOffset;
       this.samplePos = 0;      // VGMサンプル位置(44100Hz)
       this.waitRemaining = 0;  // 消化待ちのサンプル数
@@ -984,6 +999,17 @@
       if (type === 0xC2) { // NES APU RAM書込み: 先頭2バイト=開始アドレス
         const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
+      }
+      // MSX の DAC の書き込み列(規格外 MSXX、vgmHeader.js VGM.MSXX 参照): value8 meta8(bit0-6=フレーム内時刻/128)×n
+      if (MML.VGM && MML.VGM.isMsxxBlock && MML.VGM.isMsxxBlock(type, block)) {
+        const a = this.adapterById.msxdac;
+        if (a && block[5] === MML.VGM.MSXX.KIND_DAC) {
+          for (let p = 6; p + 2 <= block.length; p += 2) {
+            a.write(block[p]);
+            if (this.onWrite) this.onWrite('msxdac', block[p], (block[p + 1] & 0x7F) / 128);
+          }
+        }
+        return;
       }
       // NES 拡張音源の書き込み列(規格外 NESX、vgmHeader.js VGM.NESX 参照)。ヘッダ種別は parseHeader が先読み済み
       if (MML.VGM && MML.VGM.isNesxBlock(type, block)) {
@@ -1407,8 +1433,8 @@
       // clock: kss2mml抽出器(AY/SCC)に渡す「Z80相当クロック」(=AY実クロック×2)。MSXの3.58MHz固定では
       // 別クロックのAY(Exed Exes 1.5MHz等)やYM2610内蔵SSG(チップクロック/4)のロール音程がずれる。
       // vgm2mml/converter.js の kssClock と同じ優先順位。
-      kss: (has('ay8910') || has('k051649') || has('ym2413') || has('ym2610') || has('ym2203') || has('ym2608') || has('ym3812') || has('ym3526') || has('y8950'))
-        ? { writeLog: [], ay: has('ay8910') || has('ym2610') || has('ym2203') || has('ym2608'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus),
+      kss: (has('ay8910') || has('k051649') || has('ym2413') || has('ym2610') || has('ym2203') || has('ym2608') || has('ym3812') || has('ym3526') || has('y8950') || has('msxdac'))
+        ? { writeLog: [], dac: has('msxdac'), ay: has('ay8910') || has('ym2610') || has('ym2203') || has('ym2608'), scc: has('k051649'), opll: has('ym2413'), sccPlus: !!(player.adapterById.k051649 && player.adapterById.k051649.plus),
             // OPL(YM3812/YM3526/Y8950): 書込みは io 0xC0/0xC1 として同じwriteLogへ流す
             // (KSSのMSX-AUDIOと同じ形。抽出器 Kss2MmlExpansion.opl をKSS/VGMで共有するため)
             opl: has('ym3812') || has('ym3526') || has('y8950'),
@@ -1619,6 +1645,8 @@
         case 'ym3812': case 'ym3526': case 'y8950':
           kssFrameWrites.push(kpk(0xC0, a, 1), kpk(0xC1, b, 1)); break;
         case 'k051649': kssFrameWrites.push(kpk(d, c, 0)); break;
+        // MSX の DAC(MSXX): KSS の牌の魔術師と同じ $5000 への書き込みとして流す(KDA 行/kssDacDrumFor が読む)
+        case 'msxdac': kssFrameWrites.push(kpk(0x5000, a, 0)); break;
         case 'huc6280': hesTraceWrite(a); break; // (reg, value)。書込み適用後に呼ばれるのでAPUの状態をそのまま記録
       }
     };

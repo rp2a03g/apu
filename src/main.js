@@ -4922,7 +4922,7 @@
   // (2026-09-23: スマホでは accept の絞り込みが無いので .nsf を選べてしまい、バイナリがそのまま
   //  エディタに流し込まれていた)。実体は initUnifiedSoundFileWindow 内で設定する
   let openSoundFileAndPlay = null;
-  const SOUND_FILE_EXTS = new Set(['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn', 'nes', 'fds']);
+  const SOUND_FILE_EXTS = new Set(['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn', 'nes', 'fds', 'rom', 'mx1', 'mx2', 'dsk']);
   async function openMmlTextFile(file, handle, extraFiles) {
     if (!file) return false;
     const ext = file.name.split('.').pop().toLowerCase();
@@ -9588,6 +9588,7 @@
     if (h.chips.ay8910) chips.push('kssPsg');
     if (h.chips.k051649) chips.push('kssScc');
     if (h.chips.ym2413) chips.push('kssOpll');
+    if (h.msxx && h.msxx.dac) chips.push('kssDac'); // MSX の DAC(規格外 MSXX ブロック)=KDA 行
     if (h.chips.sn76489) chips.push('sn76489');
     if (h.chips.ym2612) chips.push('ym2612');
     if (h.chips.ym2151) chips.push('ym2151');
@@ -9694,6 +9695,7 @@
     },
     getKssScc: () => { const a = vgmAdapter('k051649'); return a ? MML.Emu.snapshotSCC(a.chip) : null; },
     getKssOpll: () => { const a = vgmAdapter('ym2413'); return a ? MML.Emu.snapshotOPLL(a.chip) : null; },
+    getKssDac: () => { const a = vgmAdapter('msxdac'); return a ? MML.Emu.snapshotMajutsushiDac(a.chip) : null; }, // MSX の DAC(MSXX)
     getSn76489: () => { const a = vgmAdapter('sn76489'); if (!a) return null; const s = MML.Emu.snapshotSN76489(a.chip, a.clockHz); const b = vgmAdapter('sn76489_2'); return b ? s.concat(MML.Emu.snapshotSN76489(b.chip, b.clockHz)) : s; }
 ,
     getYm2612: () => { const a = vgmAdapter('ym2612'); return a ? MML.Emu.snapshotYM2612(a.chip) : null; }
@@ -9841,6 +9843,7 @@
       getKssPsg: liveVgm.getKssPsg,
       getKssScc: liveVgm.getKssScc,
       getKssOpll: liveVgm.getKssOpll,
+      getKssDac: liveVgm.getKssDac, // ★転送リスト: ここに足さないと鍵盤だけ消灯する
       getSn76489: liveVgm.getSn76489,
       getYm2612: liveVgm.getYm2612,
       getYm2610Fm: liveVgm.getYm2610Fm,
@@ -10510,8 +10513,9 @@
         alert(T('.psflib は曲ではなく共通部品です。.minipsf と一緒に選ぶか、zip のまま開いてください。'));
         return false;
       }
-      // .nes(iNES ROM)/.fds(ディスク画像)は自前 NES エミュレータの画面へ(DESIGN-CAPTURE.md §7 段階 6a/6d。再生系には載らない)
-      if (ext === 'nes' || ext === 'fds') {
+      // .nes(iNES ROM)/.fds(ディスク画像)は自前 NES エミュレータ、.rom/.mx1/.mx2(MSX カートリッジ)は自前 MSX エミュレータの
+      // 「ゲーム画面」へ(DESIGN-CAPTURE.md §7 段階 6a/6d、DESIGN-MSX-CAPTURE.md §6 段階 7a。窓は共用で中身を見て機種を選ぶ。再生系には載らない)
+      if (ext === 'nes' || ext === 'fds' || ext === 'rom' || ext === 'mx1' || ext === 'mx2' || ext === 'dsk') {
         try {
           MML.UI.NesScreen.open(new Uint8Array(await file.arrayBuffer()), file.name);
         } catch (e) {

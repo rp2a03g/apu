@@ -1,6 +1,16 @@
 /*
- * ゲーム画面 (MML.UI.NesScreen) — 自前 NES エミュレータ(src/emulator/nes/)の表示・操作・録音
- * (DESIGN-CAPTURE.md §6/§7。段階 6a=映像と入力、6b=AudioWorklet の実時間ループ・音・録音)
+ * ゲーム画面 (MML.UI.NesScreen) — 自前 NES エミュレータ(src/emulator/nes/)と自前 MSX エミュレータ(src/emulator/msx/)の表示・操作・録音
+ * (DESIGN-CAPTURE.md §6/§7。段階 6a=映像と入力、6b=AudioWorklet の実時間ループ・音・録音。MSX は DESIGN-MSX-CAPTURE.md §6 段階 7a)
+ *
+ * ■ 機種(窓は NES と MSX で共用。名前は NES 時代のまま)
+ *   open(bytes, name) がファイルで判別する: .nes/.fds → NES、.rom/.mx1/.mx2(iNES でない物)→ MSX(MsxConsole.isMsxFile)。
+ *   本体の API は同形(runSamples/frame/setController/startRecording/State/Rewind)なので、Worklet(load の machine)も主スレッド実行も
+ *   同じ経路で回し、違う所だけ machine で分ける: 入力(MSX はキーボードが主入力。設定の操作キー以外は key メッセージで本体へ)、
+ *   BIOS(MSX は機種別に localStorage msx.bios.<machine>.main/sub/logo。無ければ同梱 C-BIOS、それも無ければ [BIOS] を案内)、
+ *   逆再生の 8bit 画面の色(NES は PPU.PALETTE、MSX は rwframe の palette)、画面の大きさ(frame の w/h)、録音の符号化
+ *   (MSX の VGM 化は 7b。encodeMsxRecording が無ければ案内だけ)、ライブ表示(MSX は 7b まで始めない)。
+ *   設定(nes.cfg)は MSX の節 cfg.msx を持つ: 操作キー(F9/F10/F11/F12/Pause。F1〜F5 は MSX のキー)、機種、カーソル+スペースのジョイスティック兼用。
+ *   マッパーの手動指定は ROM 内容のハッシュ別に localStorage msx.mapper。
  *
  * ■ 実行の置き場
  *   AudioWorklet が使えるとき: エミュレータ本体は AudioWorklet(src/audio/nes-worklet-impl.js を
@@ -53,6 +63,13 @@
   const PAD_BITS = { A: 1, B: 2, Select: 4, Start: 8, Up: 16, Down: 32, Left: 64, Right: 128 };
   const KEY_ACTIONS = ['A', 'B', 'TurboA', 'TurboB', 'Select', 'Start', 'Up', 'Down', 'Left', 'Right', 'FF', 'Rewind', 'Pause', 'SaveState', 'LoadState'];
   const PAD_ACTIONS = ['A', 'B', 'TurboA', 'TurboB', 'Select', 'Start', 'FF', 'Rewind', 'Pause', 'SaveState', 'LoadState'];
+  // MSX: キーボードがゲームの主入力なので、キー割り当ては操作キーだけ(他のキーはそのまま MSX のキーボードへ)。既定は F1〜F5(MSX のファンクションキー)を避ける
+  const MSX_KEY_ACTIONS = ['FF', 'Rewind', 'Pause', 'SaveState', 'LoadState'];
+  const MSX_MACHINES = ['auto', 'msx1', 'msx2', 'msx2plus', 'turbor'];
+  const MSX_MAPPERS = ['auto', 'plain', 'konami', 'konamiScc', 'konamiSccI', 'konamiDac', 'ascii8', 'ascii16', 'ascii8Sram', 'ascii16Sram', 'gameMaster2', 'koei'];
+  const MSX_CART_B = ['none', 'fmpac', 'msxaudio', 'scci']; // カートリッジ 2(ゲームと一緒に挿す音源。7b)
+  const MSX_FDC = ['wd2793', 'tc8566af']; // ディスクの FDC(ディスク ROM が叩く方。7d)
+  const MSX_JOY_KEYS = { ArrowUp: 16, ArrowDown: 32, ArrowLeft: 64, ArrowRight: 128, Space: 1 }; // 「カーソルキーとスペースをジョイスティック 1 にも使う」
   const TURBO_RATES = [1, 2, 3, 4]; // 押す/離すの長さ(フレーム)。1=30 回/秒、2=15、3=10、4=7.5
   const SPEEDS = [1, 2, 4, 8];
   const DEFAULT_CFG = {
@@ -64,7 +81,18 @@
     liveRoll: true,
     sfxRemove: false, // 録音の補正の初期値(録音ごとに保存/変換への横のチェックで変えられる)
     lagFix: false,
+    msx: { keys: { FF: 'F11', Rewind: 'F12', Pause: 'Pause', SaveState: 'F9', LoadState: 'F10' }, machine: 'auto', joyFromKeys: false, cartB: 'none', fdc: 'wd2793' },
   };
+  function loadMsxCfg(c) {
+    c = c && typeof c === 'object' ? c : {};
+    return {
+      keys: Object.assign({}, DEFAULT_CFG.msx.keys, c.keys && typeof c.keys === 'object' ? c.keys : null),
+      machine: MSX_MACHINES.includes(c.machine) ? c.machine : DEFAULT_CFG.msx.machine,
+      joyFromKeys: typeof c.joyFromKeys === 'boolean' ? c.joyFromKeys : DEFAULT_CFG.msx.joyFromKeys,
+      cartB: MSX_CART_B.includes(c.cartB) ? c.cartB : DEFAULT_CFG.msx.cartB,
+      fdc: MSX_FDC.includes(c.fdc) ? c.fdc : DEFAULT_CFG.msx.fdc,
+    };
+  }
   function loadCfg() {
     let c = null;
     try { c = JSON.parse(localStorage.getItem(CFG_KEY) || 'null'); } catch (e) { /* localStorage 不可 */ }
@@ -77,11 +105,15 @@
       liveRoll: typeof c.liveRoll === 'boolean' ? c.liveRoll : DEFAULT_CFG.liveRoll,
       sfxRemove: typeof c.sfxRemove === 'boolean' ? c.sfxRemove : DEFAULT_CFG.sfxRemove,
       lagFix: typeof c.lagFix === 'boolean' ? c.lagFix : DEFAULT_CFG.lagFix,
+      msx: loadMsxCfg(c.msx),
     };
   }
   function saveCfg() { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { /* ignore */ } }
   let cfg = loadCfg();
-  function keyActionOf(code) { for (const a of KEY_ACTIONS) if (cfg.keys[a] === code) return a; return null; }
+  // 今の機種のキー割り当て表と操作の一覧(NES: 十字/A/B…+操作キー、MSX: 操作キーだけ)
+  function curKeys() { return machine === 'msx' ? cfg.msx.keys : cfg.keys; }
+  function curKeyActions() { return machine === 'msx' ? MSX_KEY_ACTIONS : KEY_ACTIONS; }
+  function keyActionOf(code) { const keys = curKeys(); for (const a of curKeyActions()) if (keys[a] === code) return a; return null; }
   function actionLabel(a) {
     return { A: 'A', B: 'B', TurboA: T('連射 A'), TurboB: T('連射 B'), Select: 'Select', Start: 'Start', Up: T('上'), Down: T('下'), Left: T('左'), Right: T('右'),
       FF: T('早送り(押している間)'), Rewind: T('巻き戻し(押している間)'), Pause: T('一時停止'), SaveState: T('状態保存'), LoadState: T('状態読込') }[a] || a;
@@ -100,7 +132,9 @@
 
   let win = null, canvas = null, ctx2d = null, statusEl = null, nameEl = null, pauseBtn = null, recBtn = null, saveBtn = null, convBtn = null, recInfoEl = null, rewindBtn = null;
   let romName = '', romBytes = null;
-  let image = null, imageBuf = null;
+  let image = null, imageBuf = null, frameW = 256, frameH = 240; // 画面の大きさ(frame メッセージの w/h。今は NES/MSX とも 256×240)
+  let machine = 'nes';        // 'nes' | 'msx'(open がファイルで決める)
+  let msxChips = [], msxMachine = '', pendingMsx = null, msxFps = 60, msxDisk = false; // msxDisk: 今の MSX はディスクで起動している(次の .dsk は入れ替え) // MSX: 載っている音源名(psg/scc/opll/opl/dac)、起動した機種、BIOS 待ちの ROM、本体のフレームレート(50Hz 中は 50)
   let keyBits = 0, keyTurbo = 0, touchBits = 0, touchTurbo = 0, lastPad = -1;
   let fpsCount = 0, fpsMs = 0, fps = 0, frameSeq = 0, underruns = 0; // frameSeq: 本体の frameCount(最後に届いたフレーム)、underruns: 音切れ回数
   let paused = false;
@@ -203,7 +237,7 @@
   }
   function requestSaveState() {
     if (node) node.port.postMessage({ type: 'saveState' });
-    else if (nes) saveStateRecord(MML.Emu.NesState.save(nes));
+    else if (nes) saveStateRecord(stateApi().save(nes));
   }
   async function requestLoadState() {
     if (!stateKey) return;
@@ -211,7 +245,7 @@
     if (!rec || !rec.state) { flashStatus(T('この ROM のステートはまだありません')); return; }
     if (node) node.port.postMessage({ type: 'loadState', state: rec.state });
     else if (nes) {
-      const ok = MML.Emu.NesState.load(nes, rec.state);
+      const ok = stateApi().load(nes, rec.state);
       flashStatus(ok ? T('ステートを読み込みました') : T('ステートを読み込めません(別の ROM の物か、形式が違います)'));
       if (ok) { if (rewindBuf) rewindBuf.clear(); liveRestart(); }
     }
@@ -229,12 +263,113 @@
     fdsBios = bytes;
     try { let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); localStorage.setItem(BIOS_KEY, btoa(s)); } catch (e) { /* 控えられなくても今回は使える */ }
   }
-  function sideLabel() { return T('ディスク {side} 面', { side: String.fromCharCode(65 + (fdsSide % 26)) }); }
+  // ── MSX の BIOS(機種別に localStorage msx.bios.<machine>.main/sub/logo、base64)とマッパーの手動指定(msx.mapper、ROM ハッシュ別)──
+  // 控えが無ければ同梱の C-BIOS(MsxConsole.defaultBios。cbiosData.js があるとき)、それも無ければ [BIOS] を案内する
+  const MSX_BIOS_KEY = 'msx.bios.', MSX_MAPPER_KEY = 'msx.mapper';
+  const MSX_MACHINE_LABEL = { msx1: 'MSX1', msx2: 'MSX2', msx2plus: 'MSX2+', turbor: 'MSX turbo R' };
+  const msxBiosCache = {};
+  function b64enc(bytes) { let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return btoa(s); }
+  function b64dec(s) { const bin = atob(s); const b = new Uint8Array(bin.length); for (let i = 0; i < b.length; i++) b[i] = bin.charCodeAt(i); return b; }
+  function loadMsxBios(mach) {
+    if (msxBiosCache[mach]) return msxBiosCache[mach]; // 無かった時は控えない(後から入る)
+    let out = null;
+    try {
+      // 控えた物を種類ごとに(メインが無くても漢字/ディスク ROM だけ控えてあることがある: 同梱 C-BIOS に足して使う)
+      for (const k of ['main', 'sub', 'logo', 'kanji', 'disk']) {
+        const v = localStorage.getItem(MSX_BIOS_KEY + mach + '.' + k);
+        if (!v) continue;
+        if (!out) out = { main: null, sub: null, logo: null, kanji: null, disk: null, name: T('控えた BIOS') };
+        out[k] = b64dec(v);
+      }
+    } catch (e) { /* localStorage 不可 */ }
+    if (out) msxBiosCache[mach] = out;
+    return out;
+  }
+  function storeMsxBios(mach, kind, bytes) {
+    try { localStorage.setItem(MSX_BIOS_KEY + mach + '.' + kind, b64enc(bytes)); } catch (e) { /* 控えられなくても今回は使える */ }
+    const cur = msxBiosCache[mach] || (msxBiosCache[mach] = { main: null, sub: null, logo: null, kanji: null, disk: null, name: T('控えた BIOS') });
+    cur[kind] = bytes;
+  }
+  // 機種に使える BIOS: 控え(メインあり) → 同梱 C-BIOS(+控えた漢字/ディスク ROM) → null
+  function msxBiosFor(mach) {
+    const stored = loadMsxBios(mach);
+    if (stored && stored.main) return stored;
+    const C = MML.Emu.MsxConsole;
+    const def = C && C.hasDefaultBios && C.hasDefaultBios(mach) ? C.defaultBios(mach) : null;
+    if (def && stored) { if (stored.disk) def.disk = stored.disk; if (stored.kanji) def.kanji = stored.kanji; } // C-BIOS に利用者の漢字/ディスク ROM を足す
+    return def;
+  }
+  // 設定のカートリッジ 2 を本体の opts.cartB の形に。fmpac の ROM は同梱 C-BIOS の MSX-MUSIC(控えた実 BIOS には無いので明示する)
+  function msxCartB() {
+    const k = cfg.msx.cartB;
+    if (!k || k === 'none') return null;
+    if (k === 'fmpac') { const rom = MML.Emu.MsxConsole.defaultMusicRom ? MML.Emu.MsxConsole.defaultMusicRom() : null; return rom ? { kind: 'fmpac', rom } : { kind: 'fmpac' }; }
+    return { kind: k };
+  }
+  // 設定の機種。自動 = BIOS のある機種のうち MSX2 を優先、無ければ MSX1(→ MSX2+ → turbo R)。どれも無ければ null(BIOS 待ち)
+  function resolveMsxMachine() {
+    if (cfg.msx.machine !== 'auto') return cfg.msx.machine;
+    for (const m of ['msx2', 'msx1', 'msx2plus', 'turbor']) if (msxBiosFor(m)) return m;
+    return null;
+  }
+  function msxMapperFor(key) { try { const m = JSON.parse(localStorage.getItem(MSX_MAPPER_KEY) || 'null'); const v = m && m[key]; return MSX_MAPPERS.includes(v) && v !== 'auto' ? v : null; } catch (e) { return null; } }
+  function setMsxMapper(key, type) {
+    try {
+      const m = JSON.parse(localStorage.getItem(MSX_MAPPER_KEY) || 'null') || {};
+      if (!type || type === 'auto') delete m[key]; else m[key] = type;
+      localStorage.setItem(MSX_MAPPER_KEY, JSON.stringify(m));
+    } catch (e) { /* ignore */ }
+  }
+  // [BIOS] で選ばれたファイル(複数可): 32K=メイン、16K=名前に logo を含めばロゴ、それ以外はサブ。控える機種は設定の機種(自動なら今使える機種、
+  // 無ければ 16K が一緒に選ばれていれば MSX2、そうでなければ MSX1)
+  async function storeMsxBiosFiles(files) {
+    const list = [];
+    for (const f of files) {
+      const b = new Uint8Array(await f.arrayBuffer());
+      if (b.length === 0x8000) list.push({ kind: 'main', bytes: b });
+      else if (b.length === 0x4000) list.push({ kind: (b[0] === 0x41 && b[1] === 0x42) ? 'disk' : /logo/i.test(f.name) ? 'logo' : 'sub', bytes: b }); // 16K で 'AB' ヘッダ=ディスク ROM(サブ/ロゴ ROM に AB は無い)
+      else if (b.length === 0x20000 || b.length === 0x40000) list.push({ kind: 'kanji', bytes: b }); // 漢字 ROM(第一水準 128K / 第一+第二 256K)
+      else alert(T('MSX の BIOS は 32K(メイン)、16K(サブ/ロゴ)、128K/256K(漢字 ROM)のファイルです: {name}', { name: f.name }));
+    }
+    if (!list.length) return;
+    const target = cfg.msx.machine !== 'auto' ? cfg.msx.machine : (resolveMsxMachine() || (list.some((x) => x.kind !== 'main') ? 'msx2' : 'msx1'));
+    for (const x of list) storeMsxBios(target, x.kind, x.bytes);
+    flashStatus(T('BIOS を控えました({machine}: {kinds})', { machine: MSX_MACHINE_LABEL[target] || target, kinds: list.map((x) => x.kind).join('/') }));
+    if (pendingMsx) { const p = pendingMsx; pendingMsx = null; NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); }); }
+  }
+  function updateBiosBtn() {
+    if (!biosBtn) return;
+    biosBtn.title = machine === 'msx' ? T('MSX の BIOS を選ぶ(メイン 32K、サブ/ロゴ/ディスク 16K、漢字 128K/256K。複数選択可)。機種ごとにこのブラウザに控えて次回も使います')
+      : T('ディスクシステムの BIOS(disksys.rom、8KB)を選ぶ。このブラウザに控えて次回も使います');
+    biosBtn.setAttribute('aria-label', biosBtn.title);
+  }
+  // MSX のキー: 設定の操作キー以外は本体のキーボードへ(Worklet なら key メッセージ)。兼用 ON ならカーソル/スペースをジョイスティック 1 にも
+  function msxKey(code, down) {
+    if (node) node.port.postMessage({ type: 'key', code, down });
+    else if (nes && typeof nes.setKey === 'function') nes.setKey(code, down);
+    const jb = cfg.msx.joyFromKeys ? (MSX_JOY_KEYS[code] || 0) : 0;
+    if (jb) { if (down) keyBits |= jb; else keyBits &= ~jb; pushPad(); }
+  }
+  function msxKeyReleaseAll() {
+    if (node) node.port.postMessage({ type: 'keyReleaseAll' });
+    else if (nes && nes.keyboard && nes.keyboard.releaseAll) nes.keyboard.releaseAll();
+  }
+  // 機種別のステート API
+  function stateApi() { return machine === 'msx' ? MML.Emu.MsxState : MML.Emu.NesState; }
+  // 設定(機種/マッパー)が変わった: 開いている MSX の ROM を開き直す(BIOS 待ちなら待っている ROM で再試行)
+  function reopenMsx() {
+    const p = pendingMsx ? pendingMsx : (machine === 'msx' && romBytes ? { bytes: romBytes, name: romName } : null);
+    if (!p) return;
+    pendingMsx = null;
+    NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); });
+  }
+
+  function sideLabel() { return machine === 'msx' ? T('ディスク {side}', { side: String.fromCharCode(65 + (fdsSide % 26)) }) : T('ディスク {side} 面', { side: String.fromCharCode(65 + (fdsSide % 26)) }); }
   function updateDiskUi() {
     if (!sideBtn) return;
     sideBtn.hidden = fdsSides < 2;
     sideBtn.querySelector('.nes-ib-lbl').textContent = String.fromCharCode(65 + (fdsSide % 26));
-    sideBtn.title = sideLabel() + ' — ' + T('クリックで次の面に入れ替える(取り出してから入れる)');
+    sideBtn.title = sideLabel() + ' — ' + (machine === 'msx' ? T('クリックで次のディスクに入れ替える(取り出してから入れる)。別の .dsk を開いても入れ替わります') : T('クリックで次の面に入れ替える(取り出してから入れる)'));
   }
   // 面の入れ替え: 取り出し → 少し待って次の面を入れる(ゲームの BIOS が「ディスクなし」を見てから入れ直す)
   function switchSide(next) {
@@ -298,19 +433,21 @@
     let hdr = header.querySelector('.fw-header-extra');
     if (!hdr) { hdr = document.createElement('span'); hdr.className = 'fw-header-extra nes-hdr'; header.insertBefore(hdr, header.querySelector('.float-window-close')); }
     hdr.innerHTML = '';
-    romInput = document.createElement('input'); romInput.type = 'file'; romInput.accept = '.nes,.fds'; romInput.style.display = 'none';
+    romInput = document.createElement('input'); romInput.type = 'file'; romInput.accept = '.nes,.fds,.rom,.mx1,.mx2'; romInput.style.display = 'none';
     romInput.addEventListener('change', () => { const f = romInput.files && romInput.files[0]; romInput.value = ''; openRomFile(f); });
-    const openBtn = mkIcon('open', T('開く(.nes/.fds。ウィンドウへのドロップでも開けます)'), () => romInput.click());
+    const openBtn = mkIcon('open', T('開く(.nes/.fds/.rom。ウィンドウへのドロップでも開けます)'), () => romInput.click());
     const resetBtn = mkIcon('reset', T('リセット'), () => { if (node) node.port.postMessage({ type: 'reset' }); else if (nes) { nes.reset(); if (rewindBuf) rewindBuf.clear(); } liveRestart(); });
     speedBtn = mkIcon('ff', '', () => { speedSel = SPEEDS[(SPEEDS.indexOf(speedSel) + 1) % SPEEDS.length]; pushSpeed(); }, '');
     stateBtnS = mkIcon('saveState', '', requestSaveState);
     stateBtnL = mkIcon('loadState', '', requestLoadState);
     sideBtn = mkIcon('disk', '', () => { if (fdsSides > 1 && !sideTimer) switchSide(fdsSide + 1); }, 'A'); sideBtn.hidden = true;
     biosBtn = mkIcon('chip', T('ディスクシステムの BIOS(disksys.rom、8KB)を選ぶ。このブラウザに控えて次回も使います'), () => biosInput.click(), 'BIOS'); biosBtn.hidden = true;
-    biosInput = document.createElement('input'); biosInput.type = 'file'; biosInput.accept = '.rom,.bin,.nes'; biosInput.style.display = 'none';
+    biosInput = document.createElement('input'); biosInput.type = 'file'; biosInput.accept = '.rom,.bin,.nes'; biosInput.multiple = true; biosInput.style.display = 'none';
     biosInput.addEventListener('change', async () => {
-      const f = biosInput.files && biosInput.files[0]; biosInput.value = '';
-      if (!f) return;
+      const files = Array.from(biosInput.files || []); biosInput.value = '';
+      if (!files.length) return;
+      if (machine === 'msx') { await storeMsxBiosFiles(files); return; } // MSX: 複数ファイル(メイン/サブ/ロゴ)を大きさと名前で振り分けて控える
+      const f = files[0];
       const b = new Uint8Array(await f.arrayBuffer());
       if (b.length < 0x2000) { alert(T('BIOS は 8KB 以上のファイルです: {name}', { name: f.name })); return; }
       storeBios(b.length === 0x2000 ? b : b.subarray(b.length - 0x2000));
@@ -343,14 +480,14 @@
     saveBtn = mkBtn(T('VGM を保存'), '', saveRecording); saveBtn.hidden = true;
     convBtn = mkBtn(T('変換へ'), '', () => { if (recVgm && NesScreen.onOpenRecording) { setPaused(true); NesScreen.onOpenRecording(recVgm, recFileName()); } }); convBtn.hidden = true;
     bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn);
-    statusEl.textContent = T('[開く] か .nes/.fds のドロップで始まります');
+    statusEl.textContent = T('[開く] か .nes/.fds/.rom のドロップで始まります');
     wrap.appendChild(bar); wrap.appendChild(canvas);
     if (MML.Device && MML.Device.isTouch && MML.Device.isTouch()) wrap.appendChild(buildTouchPad());
     body.appendChild(wrap);
     applyCfgLabels();
     canvas.addEventListener('keydown', (e) => {
       const a = keyActionOf(e.code);
-      if (!a) return;
+      if (!a) { if (machine === 'msx') { e.preventDefault(); msxKey(e.code, true); } return; } // MSX: 操作キー以外はそのまま MSX のキーボードへ
       e.preventDefault();
       if (PAD_BITS[a]) { keyBits |= PAD_BITS[a]; pushPad(); }
       else if (a === 'TurboA') { keyTurbo |= 1; pushPad(); }
@@ -363,7 +500,7 @@
     });
     canvas.addEventListener('keyup', (e) => {
       const a = keyActionOf(e.code);
-      if (!a) return;
+      if (!a) { if (machine === 'msx') { e.preventDefault(); msxKey(e.code, false); } return; }
       e.preventDefault();
       if (PAD_BITS[a]) { keyBits &= ~PAD_BITS[a]; pushPad(); }
       else if (a === 'TurboA') { keyTurbo &= ~1; pushPad(); }
@@ -371,13 +508,13 @@
       else if (a === 'FF') { ffHold = false; pushSpeed(); }
       else if (a === 'Rewind') rewindHoldEnd();
     });
-    canvas.addEventListener('blur', () => { if (ffHold) { ffHold = false; pushSpeed(); } rewindHoldEnd(); keyBits = 0; keyTurbo = 0; pushPad(); });
+    canvas.addEventListener('blur', () => { if (ffHold) { ffHold = false; pushSpeed(); } rewindHoldEnd(); keyBits = 0; keyTurbo = 0; pushPad(); if (machine === 'msx') msxKeyReleaseAll(); });
     pushSpeed();
     canvas.addEventListener('pointerdown', () => { canvas.focus(); resumeAudio(); });
     // ROM のドロップ(窓のどこでも)
     win.addEventListener('dragover', (e) => { if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'copy'; } });
     win.addEventListener('drop', (e) => {
-      const f = e.dataTransfer && e.dataTransfer.files && Array.from(e.dataTransfer.files).find((x) => /\.(nes|fds)$/i.test(x.name));
+      const f = e.dataTransfer && e.dataTransfer.files && Array.from(e.dataTransfer.files).find((x) => /\.(nes|fds|rom|mx1|mx2)$/i.test(x.name));
       if (!f) return; // ROM 以外は本体のドロップ処理に任せる
       e.preventDefault(); e.stopPropagation();
       openRomFile(f);
@@ -399,8 +536,10 @@
   // 設定が変わった時に、キー名を含む表示を取り直す
   function applyCfgLabels() {
     if (!canvas) return;
-    const k = (a) => keyLabel(cfg.keys[a]);
-    canvas.title = T('クリックしてキー入力(十字=矢印、A={a}、B={b}、連射 A={ta}、連射 B={tb}、Start={st}、Select={se}、{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止)',
+    const keys = curKeys(), k = (a) => keyLabel(keys[a]);
+    if (machine === 'msx') canvas.title = T('クリックしてキー入力(PC のキーがそのまま MSX のキーボードに。{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止、{ss}/{ls}=状態保存/読込)',
+      { ff: k('FF'), rw: k('Rewind'), pa: k('Pause'), ss: k('SaveState'), ls: k('LoadState') });
+    else canvas.title = T('クリックしてキー入力(十字=矢印、A={a}、B={b}、連射 A={ta}、連射 B={tb}、Start={st}、Select={se}、{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止)',
       { a: k('A'), b: k('B'), ta: k('TurboA'), tb: k('TurboB'), st: k('Start'), se: k('Select'), ff: k('FF'), rw: k('Rewind'), pa: k('Pause') });
     speedBtn.title = T('早送り。クリックで ×1→×2→×4→×8。{key} キーを押している間は ×4', { key: k('FF') });
     stateBtnS.title = T('今の状態をこのブラウザに保存(ROM ごとに 1 つ。{key})', { key: k('SaveState') });
@@ -517,11 +656,59 @@
     const sfxChk = cfgCheck(s1c, 'sfxRemove', T('効果音を除く'));
     const lagChk = cfgCheck(s1c, 'lagFix', T('処理落ちを詰める'));
     note(s1c, T('録音が終わった時の初期値です。録音ごとの ON/OFF は [VGM を保存][変換へ] の横のチェックで変えられ、保存する VGM と変換に進む VGM の両方に効きます。効果音除去は曲が 3 周以上入った録音を周期で重ねて周回ごとに違う書き込みを多数決で置き換え、処理落ち補正は音楽の定期書き込みが無いフレームを詰めます。補正した VGM には印が付き、MML 変換設定の同じ補正は重ねて掛かりません'));
-    // キー割り当て
-    const s2 = sec(T('キーボード(1P)'));
+    // MSX(機種/マッパー/ジョイスティック兼用。ROM を開く前でも機種は選べる)
+    const sm = sec('MSX');
+    const selRow = (label) => { const r = document.createElement('div'); r.className = 'nes-cfg-row'; const l = document.createElement('span'); l.textContent = label; const s = document.createElement('select'); r.appendChild(l); r.appendChild(s); return { r, s }; };
+    const mr = selRow(T('機種'));
+    for (const m of MSX_MACHINES) { const o = document.createElement('option'); o.value = m; o.textContent = m === 'auto' ? T('自動') : MSX_MACHINE_LABEL[m]; mr.s.appendChild(o); }
+    mr.s.value = cfg.msx.machine;
+    mr.s.addEventListener('change', () => { cfg.msx.machine = MSX_MACHINES.includes(mr.s.value) ? mr.s.value : 'auto'; saveCfg(); reopenMsx(); });
+    sm.appendChild(mr.r);
+    const pr = selRow(T('マッパー'));
+    for (const m of MSX_MAPPERS) { const o = document.createElement('option'); o.value = m; o.textContent = m === 'auto' ? T('自動(判別)') : m; pr.s.appendChild(o); }
+    const msxRomOpen = machine === 'msx' && !!romBytes && !pendingMsx;
+    pr.s.value = msxRomOpen ? (msxMapperFor(stateKey) || 'auto') : 'auto';
+    pr.s.disabled = !msxRomOpen; // ROM ごとに覚えるので、MSX の ROM を開いている時だけ
+    pr.s.addEventListener('change', () => { if (!msxRomOpen) return; setMsxMapper(stateKey, pr.s.value); reopenMsx(); });
+    sm.appendChild(pr.r);
+    // カートリッジ 2(音源カートリッジ。FM-PAC は同梱 C-BIOS の MSX-MUSIC ROM、MSX-AUDIO は Y8950 のみ(BIOS 無し)、SCC-I は RAM 128K+SCC+)
+    const cr = selRow(T('カートリッジ 2'));
+    const CART_B_LABEL = { none: T('無し'), fmpac: 'FM-PAC (MSX-MUSIC)', msxaudio: 'MSX-AUDIO (Y8950)', scci: 'SCC-I (SCC+)' };
+    for (const k of MSX_CART_B) { const o = document.createElement('option'); o.value = k; o.textContent = CART_B_LABEL[k]; cr.s.appendChild(o); }
+    cr.s.value = cfg.msx.cartB;
+    cr.s.addEventListener('change', () => { cfg.msx.cartB = MSX_CART_B.includes(cr.s.value) ? cr.s.value : 'none'; saveCfg(); reopenMsx(); });
+    sm.appendChild(cr.r);
+    // ディスクの FDC(ディスク ROM の出どころで決まる: Philips/Sony 系=WD2793、松下/turbo R=TC8566AF)
+    const fr = selRow(T('ディスクの FDC'));
+    const FDC_LABEL = { wd2793: 'WD2793 (Philips / Sony)', tc8566af: 'TC8566AF (Panasonic / turbo R)' };
+    for (const k of MSX_FDC) { const o = document.createElement('option'); o.value = k; o.textContent = FDC_LABEL[k]; fr.s.appendChild(o); }
+    fr.s.value = cfg.msx.fdc;
+    fr.s.addEventListener('change', () => { cfg.msx.fdc = MSX_FDC.includes(fr.s.value) ? fr.s.value : 'wd2793'; saveCfg(); if (msxDisk) reopenMsx(); });
+    sm.appendChild(fr.r);
+    const jl = document.createElement('label'); jl.className = 'nes-cfg-check';
+    const jc = document.createElement('input'); jc.type = 'checkbox'; jc.checked = !!cfg.msx.joyFromKeys;
+    jc.addEventListener('change', () => { cfg.msx.joyFromKeys = jc.checked; saveCfg(); });
+    jl.appendChild(jc); jl.appendChild(document.createTextNode(' ' + T('カーソルキーとスペースをジョイスティック 1 にも使う')));
+    sm.appendChild(jl);
+    note(sm, T('BIOS は [BIOS] で機種ごとに控えます(メイン 32K、サブ/ロゴ 16K。複数選択可)。機種「自動」は BIOS のある機種のうち MSX2 を優先します。マッパーは ROM ごとに覚え、変えると開き直します。ゲームパッドの A/B はジョイスティックのトリガ 1/2'));
+    note(sm, T('カートリッジ 2 はゲームと一緒に挿す音源です。FM 版の曲を持つゲームは FM-PAC を挿すと FM で鳴り、録音にも載ります(MSX2+/turbo R は内蔵 MSX-MUSIC が常にあります)。変えると開き直します'));
+    note(sm, T('ディスク(.dsk)は実 BIOS とディスク ROM(16K)を [BIOS] で控えてから開けます。FDC はディスク ROM の機種に合わせます(合わないと「ディスクがありません」のまま)。動作中に別の .dsk を開くと入れ替えになり、書き込みは .dsk ごとにこのブラウザへ保存します'));
+    // 同梱 C-BIOS(cbiosData.js)の版とライセンス表示(BSD 2 条項は再配布時の著作権表示を求める)。実 BIOS を控えた機種はそちらが優先
+    const CB = MML.Emu.CBIOS;
+    if (CB && CB.license) {
+      const dt = document.createElement('details'); dt.className = 'nes-cfg-note';
+      const su = document.createElement('summary');
+      const have = ['msx1', 'msx2', 'msx2plus'].filter((m) => CB[m] && CB[m].main).map((m) => MSX_MACHINE_LABEL[m]).join('/');
+      su.textContent = T('同梱 BIOS: C-BIOS {ver}({machines})。控えた BIOS の無い機種で使います(BASIC/ディスク/漢字は無し)。ライセンス表示', { ver: CB.version || '', machines: have });
+      const pre = document.createElement('pre'); pre.className = 'nes-cfg-license'; pre.textContent = CB.license;
+      dt.appendChild(su); dt.appendChild(pre); sm.appendChild(dt);
+    }
+    // キー割り当て(MSX は操作キーだけ。他のキーはそのまま MSX のキーボードへ)
+    const keyActs = curKeyActions(), keyMap = curKeys();
+    const s2 = sec(machine === 'msx' ? T('キーボード(操作キー。他のキーはそのまま MSX のキーボードへ)') : T('キーボード(1P)'));
     const tbl = document.createElement('table'); tbl.className = 'nes-cfg-table';
     const keyBtns = {};
-    for (const a of KEY_ACTIONS) {
+    for (const a of keyActs) {
       const tr = document.createElement('tr');
       const td1 = document.createElement('td'); td1.textContent = actionLabel(a);
       const td2 = document.createElement('td');
@@ -550,10 +737,11 @@
     note(s3, T('十字は 12-15 番のボタンと左スティック(固定)。つながっている順に 1P、2P。早送り/巻き戻しは押している間、一時停止/状態保存/読込は押した時'));
     const s4 = sec('');
     const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'nes-btn'; reset.textContent = T('既定に戻す');
-    reset.addEventListener('click', () => { cfg = loadCfgDefaults(); saveCfg(); pushTurboRate(); sel.value = String(cfg.turboRate); sel2.value = String(cfg.rewindSpeed); chk.checked = cfg.liveRoll; sfxChk.checked = cfg.sfxRemove; lagChk.checked = cfg.lagFix; refresh(); });
+    reset.addEventListener('click', () => { cfg = loadCfgDefaults(); saveCfg(); pushTurboRate(); sel.value = String(cfg.turboRate); sel2.value = String(cfg.rewindSpeed); chk.checked = cfg.liveRoll; sfxChk.checked = cfg.sfxRemove; lagChk.checked = cfg.lagFix; jc.checked = cfg.msx.joyFromKeys; refresh(); });
     s4.appendChild(reset);
     const refresh = () => {
-      for (const a of KEY_ACTIONS) keyBtns[a].textContent = keyLabel(cfg.keys[a]);
+      const km = curKeys();
+      for (const a of keyActs) keyBtns[a].textContent = keyLabel(km[a]);
       for (const a of PAD_ACTIONS) padBtns[a].textContent = cfg.pad[a] >= 0 ? T('ボタン {n}', { n: cfg.pad[a] }) : T('(なし)');
       applyCfgLabels();
     };
@@ -565,8 +753,9 @@
         e.preventDefault(); e.stopPropagation();
         done();
         if (e.code !== 'Escape') {
-          for (const o of KEY_ACTIONS) if (o !== action && cfg.keys[o] === e.code) cfg.keys[o] = ''; // 同じキーは 1 つの操作にだけ
-          cfg.keys[action] = e.code; saveCfg();
+          const km = curKeys();
+          for (const o of keyActs) if (o !== action && km[o] === e.code) km[o] = ''; // 同じキーは 1 つの操作にだけ
+          km[action] = e.code; saveCfg();
         }
         refresh();
       };
@@ -624,7 +813,8 @@
     document.addEventListener('mousedown', popClose, true);
     document.addEventListener('keydown', popClose, true);
   }
-  function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll, sfxRemove: DEFAULT_CFG.sfxRemove, lagFix: DEFAULT_CFG.lagFix }; }
+  function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll, sfxRemove: DEFAULT_CFG.sfxRemove, lagFix: DEFAULT_CFG.lagFix,
+    msx: { keys: Object.assign({}, DEFAULT_CFG.msx.keys), machine: cfg.msx.machine, joyFromKeys: DEFAULT_CFG.msx.joyFromKeys, cartB: cfg.msx.cartB, fdc: cfg.msx.fdc } }; } // 機種は BIOS の控えに結びつくので残す
 
   // ── 入力 ──
   // ゲームパッド: つながっている順に 1P(キーボードと合成)、2P。戻り値は [[1P のビット, 連射ビット, 操作の集合], [2P ...]]
@@ -680,18 +870,32 @@
   }
 
   // ── 描画 ──
-  function blitFrame(u32) {
+  // 画面の大きさ(本体の frameWidth/frameHeight、frame メッセージの w/h)。変われば canvas と ImageData を作り直す
+  function ensureCanvasSize(w, h) {
+    w = w || frameW; h = h || frameH;
+    if (canvas.width === w && canvas.height === h && imageBuf) return;
+    canvas.width = w; canvas.height = h; frameW = w; frameH = h;
+    canvas.style.aspectRatio = w + ' / ' + h;
+    imageBuf = new Uint8ClampedArray(w * h * 4);
+    image = new ImageData(imageBuf, w, h);
+    idxScratch = null;
+  }
+  function blitFrame(u32, w, h) {
+    ensureCanvasSize(w, h);
+    if (u32.length !== frameW * frameH) return; // 大きさの合わない古い画面(機種を切り替えた直後)は捨てる
     imageBuf.set(new Uint8ClampedArray(u32.buffer, u32.byteOffset, u32.byteLength));
     ctx2d.putImageData(image, 0, 0);
     fpsCount++;
   }
   let idxScratch = null;
-  function blitIndex(u8) { // 逆再生の画面(パレット番号 8bit) → RGBA
-    const pal = MML.Emu.PPU.PALETTE;
-    if (!idxScratch) idxScratch = new Uint32Array(256 * 240);
+  function blitIndex(u8, pal, w, h) { // 逆再生の画面(パレット番号 8bit) → RGBA。pal: NES は PPU.PALETTE、MSX は VDP のパレット(rwframe の palette)
+    ensureCanvasSize(w, h);
+    pal = pal || MML.Emu.PPU.PALETTE;
+    if (!idxScratch) idxScratch = new Uint32Array(frameW * frameH);
     for (let i = 0; i < idxScratch.length; i++) idxScratch[i] = pal[u8[i]];
     blitFrame(idxScratch);
   }
+  function rewindPalette(seq) { if (machine !== 'msx' || !rewindBuf) return null; return rewindBuf.paletteOf ? rewindBuf.paletteOf(seq) : rewindBuf.palette; } // 主スレッド実行の逆再生の色(フレームごと: パレット/GRAPHIC7 の 256 色)
   function tickFps(now) {
     if (now - fpsMs >= 1000) { fps = fpsCount; fpsCount = 0; fpsMs = now; updateStatus(); }
   }
@@ -699,8 +903,8 @@
     if (!statusEl || flashTimer) return; // 一時表示(ステート保存/読込の結果)の間は上書きしない
     const mode = node ? T('音: AudioWorklet') : T('音なし(主スレッド)');
     statusEl.textContent = `${fps} fps · ${mode}` + (underruns ? ' · ' + T('音切れ {n} 回', { n: underruns }) : '') + (hasBattery ? ' · ' + T('セーブ') : '') + (liveActive ? ' · ' + T('ロール') : '');
-    if (pendingFds) return; // BIOS 待ちの案内を消さない
-    const chips = ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
+    if (pendingFds || pendingMsx) return; // BIOS 待ちの案内を消さない
+    const chips = machine === 'msx' ? msxChips.map((c) => c.toUpperCase()).join('+') : ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
     statusEl.title = (chips ? chips + ' ' : '') + (workletState === 'failed' ? T('AudioWorklet が使えないので主スレッドで実行しています(音は出ません)') : '') +
       (hasBattery ? ' ' + T('セーブデータはこのブラウザ(IndexedDB)に自動保存します(1 秒ごと・閉じる時)。キー: {key}', { key: batteryKey }) : '') +
       (liveActive ? ' ' + T('鍵盤表示のロールへ流しています') : '');
@@ -713,6 +917,8 @@
     const src = fn.toString();
     // 再ビルド忘れの検出(capture-worker-client.js と同じ考え方): 主スレッドの現行ソースがバンドルに含まれているか
     const probes = [MML.Emu.NesConsole, MML.Emu.PPU, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC3, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC5, MML.Emu.NesMappers && MML.Emu.NesMappers.VRC7, MML.Emu.FdsDisk && MML.Emu.FdsDisk.Mapper, MML.Emu.NesRewind];
+    // MSX 本体(同じバンドルに入る)。ページが MSX の script を読んでいない時は比べる物が無いので飛ばす
+    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp]) if (p) probes.push(p);
     for (const p of probes) {
       if (typeof p !== 'function' || src.indexOf(p.toString()) < 0) {
         console.warn('[nes] nes-worklet.js がソースより古い(再ビルド忘れ)ため使いません。tools/build-capture-workers.ps1 で再ビルドしてください');
@@ -722,7 +928,8 @@
     const code = '(' + src + ')();';
     return 'data:application/javascript;base64,' + btoa(unescape(encodeURIComponent(code)));
   }
-  async function startWorklet(bytes, battery) {
+  // loadMsg: Worklet への load メッセージ(NES: { rom, bios, battery }、MSX: { machine:'msx', rom, msx:{ machine, mapperType, bios } })、transfers: 移す ArrayBuffer
+  async function startWorklet(loadMsg, transfers) {
     if (workletState === 'failed') return false;
     try {
       if (!actx) actx = (NesScreen.getAudioContext && NesScreen.getAudioContext()) || new (window.AudioContext || window.webkitAudioContext)();
@@ -742,10 +949,7 @@
       limiter.threshold.value = -3.0; limiter.knee.value = 0; limiter.ratio.value = 20; limiter.attack.value = 0.001; limiter.release.value = 0.05;
       node.connect(gain); gain.connect(limiter);
       limiter.connect(MML.Audio && MML.Audio.getMasterGain ? MML.Audio.getMasterGain(actx) : actx.destination);
-      const rom = bytes.slice().buffer;
-      const bios = fdsBios ? fdsBios.slice().buffer : null;
-      const bat = battery ? battery.slice().buffer : null;
-      node.port.postMessage({ type: 'load', rom, bios, battery: bat }, [rom, bios, bat].filter(Boolean));
+      node.port.postMessage(loadMsg, transfers);
       resumeAudio();
       lastPad = -1; lastPad2 = -1; pushPad(); pushSpeed(); pushTurboRate();
       if (!gpRaf) gpRaf = requestAnimationFrame(gpLoop);
@@ -766,17 +970,18 @@
   function onWorkletMessage(m) {
     switch (m.type) {
       case 'frame': {
-        blitFrame(new Uint32Array(m.frame));
+        blitFrame(new Uint32Array(m.frame), m.w, m.h);
         frameSeq = m.seq; underruns = m.underruns || 0;
         if (m.writes) takeFrames(m.writes, m.seq);
         tickFps(performance.now());
         break;
       }
       case 'writes': takeFrames(m.frames || [], frameSeq); break; // record on で像を取り直す前に溜まっていた分(最後は今の途中フレーム)
-      case 'rewound': blitFrame(new Uint32Array(m.frame)); onRewound(m.seq); break;
-      case 'rwframe': blitIndex(new Uint8Array(m.idx)); onReverseFrame(m.seq); break;
-      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
+      case 'rewound': blitFrame(new Uint32Array(m.frame), m.w, m.h); onRewound(m.seq); break;
+      case 'rwframe': blitIndex(new Uint8Array(m.idx), m.palette ? new Uint32Array(m.palette) : null, m.w, m.h); onReverseFrame(m.seq); break;
+      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; if (m.chips) msxChips = m.chips.slice(); if (m.fps > 0) msxFps = m.fps; fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
       case 'battery': onBatteryMessage(m); break;
+      case 'diskAdded': fdsSides = m.count | 0; fdsSide = m.index | 0; updateDiskUi(); break;
       case 'state': saveStateRecord(m.state); break;
       case 'stateLoaded': flashStatus(m.ok ? T('ステートを読み込みました') : T('ステートを読み込めません(別の ROM の物か、形式が違います)')); if (m.ok) liveRestart(); break;
       case 'recordEnd': takeFrames(m.frames || [], frameSeq); finishRecording(); break;
@@ -799,7 +1004,7 @@
       rewindBuf.regenStep(3);
       let last = null, seq = 0;
       for (let n = 0; n < cfg.rewindSpeed; n++) { const r = rewindBuf.reverseStep(); if (!r) break; last = r; seq = rewindBuf.rv.cur; }
-      if (last) { blitIndex(last); onReverseFrame(seq); }
+      if (last) { blitIndex(last, rewindPalette(seq), rewindBuf && rewindBuf.idxWidth ? rewindBuf.idxWidth : undefined); onReverseFrame(seq); }
       raf = requestAnimationFrame(tick);
       return;
     }
@@ -925,9 +1130,22 @@
       if (liveActive && NesScreen.onLiveFrame) NesScreen.onLiveFrame(toLiveWrites(fr));
     }
   }
-  // 録音の 1 フレーム → ライブ表示の書き込み列 [{addr,value,read?}](DPCM 本体 {dmc} は落とす)
+  // 録音の 1 フレーム → ライブ表示の書き込み列。NES: [{addr,value,read?}](DPCM 本体 {dmc} は落とす)。
+  // MSX: KSS 形式 [{addr,value,io}](psg=I/O $A0/$A1、opll=$7C/$7D、opl=$C0/$C1、scc/dac=メモリ番地。鍵盤表示の kss* 行が読む形)
   function toLiveWrites(fr) {
     const out = [];
+    if (machine === 'msx') {
+      for (const w of fr) {
+        switch (w.chip) {
+          case 'psg': out.push({ addr: 0xA0, value: w.addr, io: true }, { addr: 0xA1, value: w.value, io: true }); break;
+          case 'opll': out.push({ addr: 0x7C, value: w.addr, io: true }, { addr: 0x7D, value: w.value, io: true }); break;
+          case 'opl': if (w.addr !== 0x0F) out.push({ addr: 0xC0, value: w.addr, io: true }, { addr: 0xC1, value: w.value, io: true }); break;
+          case 'scc': case 'dac': out.push({ addr: w.addr, value: w.value, io: false }); break;
+          default: break;
+        }
+      }
+      return out;
+    }
     for (const w of fr) if (w.addr !== undefined) out.push(w.read ? { addr: w.addr, value: 0, read: true } : { addr: w.addr, value: w.value });
     return out;
   }
@@ -946,12 +1164,22 @@
   }
   let liveActive = false, liveBase = null;
   function chipNames() { return ['vrc6', 'vrc7', 'fds', 'mmc5', 'n163', 'fme7'].filter((_, i) => recExtBits & (1 << i)); }
+  // MSX のライブ表示の行構成(鍵盤表示の KSS 系の行名。'kss' で 2A03 の行を消す)
+  function msxLiveChips() {
+    const out = ['kss', 'kssPsg'];
+    if (msxChips.includes('scc')) out.push('kssScc');
+    if (msxChips.includes('opll')) out.push('kssOpll');
+    if (msxChips.includes('opl')) out.push('opl');
+    if (msxChips.includes('dac')) out.push('kssDac');
+    return out;
+  }
   // ライブ表示を始める(設定 ON、main.js がつないでいる、本体が動いている時)。像つきで録音を回す
   function liveBegin() {
     if (!cfg.liveRoll || !NesScreen.onLiveBegin || !(node || nes)) return;
     if (liveActive) liveEnd('restart');
     liveActive = true; liveBase = null;
-    NesScreen.onLiveBegin({ chips: chipNames(), fps: FPS, name: romName || 'NES' });
+    if (machine === 'msx') NesScreen.onLiveBegin({ chips: msxLiveChips(), fps: msxFps || 60, name: romName || 'MSX' });
+    else NesScreen.onLiveBegin({ chips: chipNames(), fps: FPS, name: romName || 'NES' });
     sendRecord(true);
     applyMix();
     updateStatus();
@@ -977,6 +1205,14 @@
   function applyMix(mute, volume) {
     if (mute || volume) lastMix = { mute: mute || (lastMix && lastMix.mute) || null, volume: volume || (lastMix && lastMix.volume) || null };
     if (!lastMix || !(node || nes)) return;
+    if (machine === 'msx') {
+      // 鍵盤表示の expansion の psg/scc/opll/opl/dac をそのまま本体へ(msxConsole.applyMix)
+      const pickMsx = (cfgObj) => { if (!cfgObj || !cfgObj.expansion) return null; const e = cfgObj.expansion, o = {}; for (const k of ['psg', 'scc', 'opll', 'opl', 'dac']) if (e[k]) o[k] = e[k]; return o; };
+      const mm = { type: 'mix', mute: pickMsx(lastMix.mute), volume: pickMsx(lastMix.volume) };
+      if (node) node.port.postMessage(mm);
+      else if (nes && typeof nes.applyMix === 'function') nes.applyMix(mm.mute, mm.volume);
+      return;
+    }
     const name = chipNames()[0];
     const pick = (cfgObj) => cfgObj ? { apu: cfgObj.apu || null, ext: (name && cfgObj.expansion && cfgObj.expansion[name]) || null } : null;
     const msg = { type: 'mix', mute: pick(lastMix.mute), volume: pick(lastMix.volume) };
@@ -987,7 +1223,7 @@
       if (msg.volume) { if (msg.volume.apu) MML.Emu.applyVolume(nes.apu.vol, msg.volume.apu); if (a && a.vol && msg.volume.ext) MML.Emu.applyVolume(a.vol, msg.volume.ext); }
     }
   }
-  function recFileName() { return (romName || 'nes').replace(/\.(nes|fds)$/i, '') + '-rec.vgm'; }
+  function recFileName() { return (romName || machine).replace(/\.(nes|fds|rom|mx1|mx2)$/i, '') + '-rec.vgm'; }
   function toggleRecord() {
     if (recording) {
       recording = false;
@@ -1001,6 +1237,20 @@
   function finishRecording() {
     const frames = recFrames || [];
     recFrames = null; recBase = null;
+    if (machine === 'msx') {
+      // MSX の VGM 符号化(PSG 0xA0 / SCC 0xD2、50Hz の 882 サンプル wait、DESIGN-MSX-CAPTURE.md §5)は 7b。無ければ案内だけ出して保存/変換は出さない
+      if (typeof MML.VGM.encodeMsxRecording !== 'function') {
+        recRaw = null; recVgm = null; updateRecUi();
+        recInfoEl.textContent = T('MSX の VGM 書き出しは次の段階(7b)'); recInfoEl.title = T('録音した {n} フレームの書き込み列は捨てました', { n: frames.length });
+        return;
+      }
+      const r = MML.VGM.encodeMsxRecording({ frames, chips: msxChips, machine: msxMachine, name: (romName || 'MSX').replace(/\.(rom|mx1|mx2)$/i, ''), creator: 'Sound Emulation Foundry (MSX)' });
+      recRaw = r.vgm; recVgm = r.vgm;
+      recSfxChk.checked = !!cfg.sfxRemove; recLagChk.checked = !!cfg.lagFix;
+      applyRecClean();
+      updateRecUi();
+      return;
+    }
     const r = MML.VGM.encodeNesRecording({ frames, extBits: recExtBits, name: (romName || 'NES').replace(/\.nes$/i, ''), creator: 'Sound Emulation Foundry (NES)' });
     recRaw = r.vgm; recVgm = r.vgm;
     recSfxChk.checked = !!cfg.sfxRemove; recLagChk.checked = !!cfg.lagFix;
@@ -1012,8 +1262,9 @@
   function applyRecClean() {
     if (!recRaw) return;
     const flags = { sfx: !!(recSfxChk && recSfxChk.checked), lag: !!(recLagChk && recLagChk.checked) };
-    const frames = Math.round(MML.VGM.parseHeader(recRaw).totalSamples / 735);
-    let text = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (frames / FPS).toFixed(1), frames, kb: (recRaw.length / 1024).toFixed(1) });
+    const rh = MML.VGM.parseHeader(recRaw), rspf = rh.rate === 50 ? 882 : 735; // MSX の 50Hz 録音は 882 サンプル/フレーム
+    const frames = Math.round(rh.totalSamples / rspf);
+    let text = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (frames * rspf / 44100).toFixed(1), frames, kb: (recRaw.length / 1024).toFixed(1) });
     let title = '';
     if ((flags.sfx || flags.lag) && MML.VGM.cleanCapture) {
       const marked = MML.VGM.setGd3Notes(recRaw, MML.VGM.cleanNoteOf(flags));
@@ -1048,6 +1299,83 @@
   }
   let recTimer = 0;
 
+  // MSX の ROM を開く(open から。流れは NES と同じ: BIOS → 主スレッドで本体を作って検査 → Worklet(無理なら主スレッド実行))
+  // ディスクで動いている MSX へ別の .dsk を入れる: 取り出し → 少し待って入れる(ゲームが「ディスクなし」を見てから)
+  function swapMsxDisk(bytes, name) {
+    const send = (side) => { if (node) node.port.postMessage({ type: 'disk', side }); else if (nes) { if (side < 0) nes.ejectDisk(); else nes.insertDisk(side); } };
+    send(-1);
+    if (sideTimer) clearTimeout(sideTimer);
+    sideBtn.title = T('入れ替え中…');
+    sideTimer = setTimeout(() => {
+      sideTimer = 0;
+      if (node) { const buf = bytes.slice().buffer; node.port.postMessage({ type: 'diskAdd', image: buf }, [buf]); }
+      else if (nes) { const n = nes.addDisk(bytes); if (n >= 0) nes.insertDisk(n); fdsSides = nes.diskCount; fdsSide = n; if (rewindBuf) rewindBuf.clear(); updateDiskUi(); }
+      flashStatus(T('ディスクを入れ替えました: {name}', { name }));
+    }, 1500);
+    return Promise.resolve(null);
+  }
+  async function openMsx(bytes, name, opt) {
+    opt = opt || {};
+    machine = 'msx'; pendingFds = null;
+    biosBtn.hidden = false; updateBiosBtn();
+    const mach = resolveMsxMachine();
+    let bios = mach ? msxBiosFor(mach) : null;
+    if (bios && opt.disk && !bios.disk) bios = null; // ディスクにはディスク ROM(16K、[BIOS] で控える)が要る
+    if (!bios) {
+      // BIOS が無い: 窓を開いて [BIOS] で選ばせ、選ばれたら開き直す(FDS と同じ)
+      pendingMsx = { bytes, name };
+      romName = name || ''; nameEl.textContent = romName; nameEl.title = '';
+      win.style.display = 'flex';
+      if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
+      statusEl.textContent = opt.disk ? T('ディスクには MSX の実 BIOS(メイン 32K+サブ 16K)とディスク ROM(16K、AB ヘッダ)が要ります。[BIOS] で指定してください(同梱 C-BIOS にディスクは無い)')
+        : T('MSX の BIOS(メイン ROM 32K。C-BIOS でも可)を [BIOS] で指定してください');
+      return null;
+    }
+    pendingMsx = null;
+    msxDisk = !!opt.disk;
+    const key = romKey(bytes);
+    const mapperType = opt.disk ? null : msxMapperFor(key); // null = 本体の判別に任せる
+    const cartB = msxCartB();
+    const romA = opt.disk ? null : bytes, disks = opt.disk ? [bytes] : [];
+    const probe = new MML.Emu.MsxConsole(romA, { machine: mach, bios, mapperType: mapperType || undefined, cartB, disks, fdc: cfg.msx.fdc }); // マッパー未対応等は例外で知らせる
+    liveEnd('restart');
+    rewindHoldEnd();
+    await flushBattery(); // 前の ROM(NES)のセーブを受け取ってから止める
+    romBytes = bytes; romName = name || '';
+    stateKey = key; msxMachine = mach;
+    hasBattery = probe.hasBattery; batteryKey = hasBattery ? stateKey : ''; // SRAM/FM-PAC/RTC(7c)。NES と同じく IndexedDB に ROM のハッシュ別
+    const battery = hasBattery ? await loadBattery(batteryKey) : null;
+    if (battery && probe.setBattery(battery)) console.log('[msx]', T('セーブデータを読み込みました({n} バイト)', { n: battery.length }));
+    nameEl.textContent = romName;
+    nameEl.title = MML.Emu.MsxConsole.describe(probe);
+    recExtBits = 0; msxChips = probe.chips(); msxFps = probe.frameRate || 60;
+    fdsSides = probe.diskCount; fdsSide = 0; if (sideTimer) { clearTimeout(sideTimer); sideTimer = 0; } updateDiskUi();
+    stopMain(); nes = null; rewindBuf = null;
+    if (recording) { recording = false; recFrames = null; recBase = null; }
+    recVgm = null; recRaw = null; updateRecUi();
+    paused = false; setIcon(pauseBtn, 'pause'); pauseBtn.classList.remove('nes-paused'); acc = 0; fpsCount = 0; fpsMs = 0; frameSeq = 0;
+    win.style.display = 'flex';
+    if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
+    const btn = document.querySelector('.toggle-btn[data-target="win-nes"]');
+    if (btn) btn.classList.add('active');
+    ensureCanvasSize(probe.frameWidth, probe.frameHeight);
+    blitFrame(probe.frame);
+    applyCfgLabels();
+    const rom = romA ? romA.slice().buffer : null, tr = rom ? [rom] : [];
+    const dmsg = disks.map((d) => d.slice().buffer); for (const b of dmsg) tr.push(b);
+    const bmsg = { name: bios.name || null };
+    for (const k of ['main', 'sub', 'logo', 'kanji', 'disk']) if (bios[k]) { bmsg[k] = bios[k].slice().buffer; tr.push(bmsg[k]); }
+    const cbMsg = cartB ? { kind: cartB.kind, rom: cartB.rom ? cartB.rom.slice().buffer : null } : null;
+    if (cbMsg && cbMsg.rom) tr.push(cbMsg.rom);
+    const batMsg = battery ? battery.slice().buffer : null; if (batMsg) tr.push(batMsg);
+    const ok = await startWorklet({ type: 'load', machine: 'msx', rom, battery: batMsg, msx: { machine: mach, mapperType: mapperType || null, bios: bmsg, cartB: cbMsg, disks: dmsg, fdc: cfg.msx.fdc } }, tr);
+    if (!ok) { nes = probe; rewindBuf = MML.Emu.MsxRewind ? new MML.Emu.MsxRewind(nes) : null; lastPad = -1; lastPad2 = -1; mainFrames = 0; nes.setTurboRate(cfg.turboRate); startMain(); }
+    liveBegin(); // ライブ表示(設定 ON なら。MSX は PSG/SCC/OPLL/Y8950/DAC の書き込み列を KSS 形式で鍵盤表示へ)
+    updateStatus();
+    canvas.focus();
+    return ok ? null : nes;
+  }
+
   const NesScreen = {
     getAudioContext: null,   // () => AudioContext(main.js が共用の物を渡す)。無ければ自前で作る
     onOpenRecording: null,   // (vgmBytes, fileName) 録音を本体の VGM 経路で開く(main.js)
@@ -1063,8 +1391,14 @@
     // ROM(iNES のバイト列)を読み込んで表示・開始する。失敗は例外(マッパー未対応など)
     async open(bytes, name) {
       if (!ensureDom()) throw new Error('win-nes がありません');
+      if (MML.Emu.MsxConsole && MML.Emu.MsxConsole.isDskFile && MML.Emu.MsxConsole.isDskFile(name, bytes)) {
+        if (machine === 'msx' && msxDisk && !pendingMsx && (node || nes)) return swapMsxDisk(bytes, name); // ディスクで動いている MSX に別の .dsk: 入れ替え(再起動しない)
+        return openMsx(bytes, name, { disk: true });
+      }
+      if (MML.Emu.MsxConsole && MML.Emu.MsxConsole.isMsxFile(name, bytes)) return openMsx(bytes, name); // .rom/.mx1/.mx2(iNES でない)→ MSX
+      machine = 'nes'; pendingMsx = null; msxChips = []; msxDisk = false;
       const isFds = !!(MML.Emu.FdsDisk && MML.Emu.FdsDisk.isFds(bytes));
-      biosBtn.hidden = !isFds;
+      biosBtn.hidden = !isFds; updateBiosBtn();
       if (isFds && !loadBios()) {
         // BIOS が無い: 窓を開いて選ばせ、選ばれたら開き直す
         pendingFds = { bytes, name };
@@ -1097,8 +1431,13 @@
       if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
       const btn = document.querySelector('.toggle-btn[data-target="win-nes"]');
       if (btn) btn.classList.add('active');
+      ensureCanvasSize(256, 240);
       blitFrame(probe.frame);
-      const ok = await startWorklet(bytes, battery);
+      applyCfgLabels();
+      const rom = bytes.slice().buffer;
+      const bios = fdsBios ? fdsBios.slice().buffer : null;
+      const bat = battery ? battery.slice().buffer : null;
+      const ok = await startWorklet({ type: 'load', rom, bios, battery: bat }, [rom, bios, bat].filter(Boolean));
       if (!ok) { nes = probe; rewindBuf = MML.Emu.NesRewind ? new MML.Emu.NesRewind(nes) : null; lastPad = -1; lastPad2 = -1; mainFrames = 0; nes.setTurboRate(cfg.turboRate); startMain(); }
       liveBegin();
       updateStatus();
@@ -1113,9 +1452,10 @@
       stopMain(); stopWorkletNode(); nes = null; rewindBuf = null;
     },
     get console() { return nes; },
+    get machine() { return machine; },   // 'nes' | 'msx'
     get running() { return !!(node || (nes && raf)); },
     get usingWorklet() { return !!node; },
-    get stats() { return { frameSeq, underruns, fps, liveBase }; },
+    get stats() { return { frameSeq, underruns, fps, liveBase, machine, frameW, frameH }; },
     get audioNodes() { return { ctx: actx, node, gain, limiter }; }, // 検証用(音が出ているかを外から測る)
     get live() { return liveActive; },
     get config() { return cfg; },
