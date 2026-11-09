@@ -1959,6 +1959,11 @@ button.secondary {
 .nes-skey-mod { font-size: 10px; }
 .nes-skgap { flex: 0.6 1 0; }
 .nes-ib.nes-ib--on { background: var(--hover-bg); border-color: var(--border); }
+/* [disk] のポップオーバー(枚数 × 面) */
+.nes-disk-pop { min-width: 220px; }
+.nes-disk-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+.nes-disk-row .nes-disk-lbl { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.nes-disk-row .nes-btn.is-on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 /* ⚙ 設定のポップオーバー(枠は .kbd-layout-pop と共通) */
 .nes-cfg-pop { max-width: 380px; max-height: calc(100vh - 16px); overflow: auto; }
 .nes-cfg-row { display: flex; align-items: center; gap: 8px; margin: 2px 0; }

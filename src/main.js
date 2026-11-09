@@ -4922,7 +4922,7 @@
   // (2026-09-23: スマホでは accept の絞り込みが無いので .nsf を選べてしまい、バイナリがそのまま
   //  エディタに流し込まれていた)。実体は initUnifiedSoundFileWindow 内で設定する
   let openSoundFileAndPlay = null;
-  const SOUND_FILE_EXTS = new Set(['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn', 'nes', 'fds', 'rom', 'mx1', 'mx2', 'dsk']);
+  const SOUND_FILE_EXTS = new Set(['nsf', 'nsfe', 'spc', 'kss', 'gbs', 'hes', 'vgm', 'vgz', 'psf', 'minipsf', 'psflib', 'zip', '7z', 'rar', 'rsn', 'lzh', 'lha', 'nes', 'fds', 'rom', 'mx1', 'mx2', 'dsk']);
   async function openMmlTextFile(file, handle, extraFiles) {
     if (!file) return false;
     const ext = file.name.split('.').pop().toLowerCase();
@@ -10405,8 +10405,32 @@
         playlist = await MML.Archive.buildPlaylist(parsed.entries, ARCHIVE_EXTS, (m3u) => MML.Archive.readEntry(bytes, m3u));
       } catch (e) { alert(T('アーカイブを解析できませんでした: {msg}', { msg: e.message })); return false; }
       if (playlist.length === 0) {
-        alert(T('アーカイブ内に対応するサウンドファイル(NSF/NSFE/SPC/KSS/GBS/HES/VGM/PSF)がありません。'));
-        return false;
+        // サウンドファイルが無ければゲームの画像(.nes/.fds/.rom/.dsk、拡張子無しのディスク画像も)を探す。
+        // ディスクが複数(.dsk の組、.fds の DISK1/DISK2)なら 1 台にまとめて開き([disk] で選ぶ)、ROM が複数なら曲リストに載せて曲送りで切り替える
+        const Image = MML.Emu.Image;
+        const games = Image ? parsed.entries.filter(e => !e.isDir && Image.looksLikeGameEntry(e.name, e.size)).sort((a, b) => MML.Archive.naturalCompare(a.name, b.name)) : [];
+        if (games.length === 0) {
+          alert(T('アーカイブ内に対応するファイル(サウンド NSF/NSFE/SPC/KSS/GBS/HES/VGM/PSF、ゲーム .nes/.fds/.rom/.dsk)がありません。'));
+          return false;
+        }
+        const readGame = async (e) => ({ bytes: await MML.Archive.readEntry(bytes, e), name: MML.Archive.baseName(e.name) });
+        const isDsk = (e) => Image.extOf(e.name) === 'dsk' || (Image.extOf(e.name) === '' && Image.DSK_SIZES.has(e.size));
+        const dsks = games.filter(isDsk), fdss = games.filter(e => Image.extOf(e.name) === 'fds');
+        try {
+          if (dsks.length || fdss.length >= 2) {
+            const items = []; for (const e of (dsks.length ? dsks : fdss)) items.push(await readGame(e));
+            stopAllFormatPlayback();
+            await MML.UI.NesScreen.openSet(items, file.name.replace(/\.[^.]+$/, ''));
+            return 'nes';
+          }
+          if (games.length === 1) { const it = await readGame(games[0]); stopAllFormatPlayback(); await MML.UI.NesScreen.open(it.bytes, it.name); return 'nes'; }
+        } catch (e) { alert(T('この ROM は開けません: {msg}', { msg: e && e.message ? e.message : String(e) })); return false; }
+        // ROM が複数: 曲リスト(アーカイブバー)に載せる。選ぶと openSoundFile → ゲーム画面
+        stopAllFormatPlayback();
+        archive = { name: file.name, bytes, playlist: games.map(entry => ({ entry, song: null, title: MML.Archive.baseName(entry.name) })), index: 0, loadedEntry: null, loadedFormat: null, entries: parsed.entries };
+        ensureKeyboardWindowOpen();
+        renderArchiveBar();
+        return loadArchiveIndex(0, false);
       }
       stopAllFormatPlayback();
       archive = { name: file.name, bytes, playlist, index: 0, loadedEntry: null, loadedFormat: null, entries: parsed.entries };
@@ -10504,7 +10528,7 @@
       let ext = file.name.split('.').pop().toLowerCase();
       // zip/7z/rar(.rsn): 中のサウンドファイルを曲リストとして開く(上記アーカイブ節)。アーカイブ内から
       // 再帰的に呼ばれた場合(opts.fromArchive)は通常のファイルとして扱う。
-      if ((ext === 'zip' || ext === '7z' || ext === 'rar' || ext === 'rsn') && !(opts && opts.fromArchive)) return openArchive(file);
+      if ((ext === 'zip' || ext === '7z' || ext === 'rar' || ext === 'rsn' || ext === 'lzh' || ext === 'lha') && !(opts && opts.fromArchive)) return openArchive(file);
       if (!(opts && opts.fromArchive)) clearArchive(); // 単体ファイルを開いたらアーカイブ曲リストは閉じる
       if (ext === 'vgz') ext = 'vgm'; // gzip圧縮VGM(中身の判別はloadVgmFile側)
       if (ext === 'nsfe') ext = 'nsf'; // NSFe(チャンク形式のNSF拡張。素のNSFへの変換はloadNsfFile→MML.NSF.normalize)
@@ -10515,14 +10539,21 @@
       }
       // .nes(iNES ROM)/.fds(ディスク画像)は自前 NES エミュレータ、.rom/.mx1/.mx2(MSX カートリッジ)は自前 MSX エミュレータの
       // 「ゲーム画面」へ(DESIGN-CAPTURE.md §7 段階 6a/6d、DESIGN-MSX-CAPTURE.md §6 段階 7a。窓は共用で中身を見て機種を選ぶ。再生系には載らない)
-      if (ext === 'nes' || ext === 'fds' || ext === 'rom' || ext === 'mx1' || ext === 'mx2' || ext === 'dsk') {
-        try {
-          MML.UI.NesScreen.open(new Uint8Array(await file.arrayBuffer()), file.name);
-        } catch (e) {
-          alert(T('この ROM は開けません: {msg}', { msg: e && e.message ? e.message : String(e) }));
-          return false;
+      // 拡張子がゲームの物か、拡張子が無い物は中身で見分ける(MML.Emu.Image。アーカイブの中の拡張子無しディスク画像など)
+      const Image = MML.Emu.Image;
+      const gameExt = Image ? Image.GAME_EXTS.includes(ext) : (ext === 'nes' || ext === 'fds' || ext === 'rom' || ext === 'mx1' || ext === 'mx2' || ext === 'dsk');
+      if (gameExt || (Image && !file.name.includes('.'))) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const img = Image ? Image.detect(bytes, file.name) : null;
+        if (img || gameExt) {
+          try {
+            await MML.UI.NesScreen.open(bytes, file.name);
+          } catch (e) {
+            alert(T('この ROM は開けません: {msg}', { msg: e && e.message ? e.message : String(e) }));
+            return false;
+          }
+          return 'nes';
         }
-        return 'nes';
       }
       // 単体ファイルとして開いた PSF の _lib は、同時に選ばれた/ドロップされたファイルから引く
       if (!(opts && opts.fromArchive)) psfSiblingResolver = makeFileListSiblingResolver(opts && opts.siblings);

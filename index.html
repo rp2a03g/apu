@@ -299,7 +299,7 @@
          #xxxFileHeader / #xxxFileStatus だけはこの箱から鍵盤表示側へ付け替えて表示する -->
   <div id="soundFileControls" hidden>
       <!-- multiple: PSF の .minipsf と、_lib で参照する .psflib を一緒に選べるように(先頭の曲ファイルを開く) -->
-      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.psf,.minipsf,.psflib,.zip,.7z,.rar,.rsn,.mml,.txt,.dmc,.nes,.fds" multiple style="display:none" />
+      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.psf,.minipsf,.psflib,.zip,.7z,.rar,.rsn,.lzh,.lha,.mml,.txt,.dmc,.nes,.fds" multiple style="display:none" />
       <!-- 内部的にフォーマット別ロジックを呼び出すための非表示input（互換用） -->
       <input type="file" id="nsfFile" accept=".nsf,.nsfe" style="display:none" />
       <input type="file" id="spcFile" accept=".spc" style="display:none" />
@@ -1069,6 +1069,7 @@
   <script src="src/emulator/msx/fdc.js"></script>
   <script src="src/emulator/msx/cbiosData.js"></script><!-- 同梱 C-BIOS(BSD)。tools/headless/mk-cbios-data.js が生成。BIOS 無しで ROM が即遊べる -->
   <script src="src/emulator/msx/msxConsole.js"></script>
+  <script src="src/emulator/imageDetect.js"></script> <!-- ROM/ディスク画像を中身で見分ける共通層(NES/FDS/MSX。アーカイブ内も同じ判定) -->
   <script src="src/emulator/msx/msxState.js"></script>
   <script src="src/emulator/msx/msxRewind.js"></script>
   <script src="src/emulator/expansion/majutsushiDac.js"></script>
@@ -1103,6 +1104,7 @@
   <script src="src/hes2mml/converter.js"></script>
   <script src="src/archive/lzma.js"></script>
   <script src="src/archive/sevenzip.js"></script>
+  <script src="src/archive/lzh.js"></script>
   <script src="src/archive/rarppm.js"></script>
   <script src="src/archive/rar.js"></script>
   <script src="src/archive/archive.js"></script>

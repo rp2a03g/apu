@@ -11,7 +11,7 @@
  * ('deflate-raw' / 'gzip')。DOM非依存(INV-4)。
  * 7zは同じ器に載せるが、ヘッダ解析と LZMA/LZMA2 展開が別物なので src/archive/sevenzip.js
  * (+ src/archive/lzma.js)に分けてある。RAR(1.5〜4.x 形式。SNESmusic.org の .rsn も中身は RAR3)も
- * 同じ器で、src/archive/rar.js(+ PPMd の src/archive/rarppm.js)。入口は Archive.parse() / Archive.readEntry()。
+ * 同じ器で、src/archive/rar.js(+ PPMd の src/archive/rarppm.js)。LZH/LHA(lh0/lh4〜lh7)も同じ器で src/archive/lzh.js。入口は Archive.parse() / Archive.readEntry()。
  *
  * - zip: セントラルディレクトリを末尾のEOCDから辿る。対応する圧縮方式は
  *   store(0)とdeflate(8)のみ。それ以外は readEntry() が明示エラーを投げる。
@@ -53,6 +53,7 @@
     if (Archive.isZip(bytes)) return 'zip';
     if (Archive.is7z && Archive.is7z(bytes)) return '7z';
     if (Archive.isRar && Archive.isRar(bytes)) return 'rar';
+    if (Archive.isLzh && Archive.isLzh(bytes)) return 'lzh';
     return null;
   };
 
@@ -64,6 +65,7 @@
   Archive.parse = async function (bytes) {
     if (Archive.is7z && Archive.is7z(bytes)) return Archive.parse7z(bytes); // src/archive/sevenzip.js
     if (Archive.isRar && Archive.isRar(bytes)) return Archive.parseRar(bytes); // src/archive/rar.js
+    if (Archive.isLzh && Archive.isLzh(bytes)) return Archive.parseLzh(bytes); // LZH/LHA(src/archive/lzh.js)
     return { type: 'zip', entries: Archive.parseZip(bytes).entries };
   };
 
@@ -153,6 +155,7 @@
   Archive.readEntry = async function (bytes, entry) {
     if (entry.sevenZip) return Archive.read7zEntry(entry); // 7zはブロック単位(src/archive/sevenzip.js)
     if (entry.rar) return Archive.readRarEntry(entry);     // RARはソリッドの鎖単位(src/archive/rar.js)
+    if (entry.lzh) return Archive.readLzhEntry(bytes, entry); // LZH/LHA(src/archive/lzh.js)
     const p = entry.localOffset;
     if (u32(bytes, p) !== SIG_LOCAL) throw new Error('zip: bad local header');
     if (entry.encrypted) throw new Error('zip: encrypted entry');

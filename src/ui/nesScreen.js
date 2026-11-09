@@ -151,6 +151,7 @@
   // FDS(段階 6d): BIOS は利用者が用意する(disksys.rom、8K)。localStorage に base64 で控える
   const BIOS_KEY = 'nes.fdsBios';
   let fdsBios = null, biosBtn = null, biosInput = null, sideBtn = null, fdsSides = 0, fdsSide = 0, pendingFds = null, sideTimer = 0;
+  let diskNames = [], fdsSideInfo = null, diskPopEl = null, diskPopClose = null; // [disk] のポップオーバー用: 入っている画像の名前(MSX)、FDS の面ごとの枚数/面(ヘッダ)
   let romInput = null, cfgBtn = null, speedBtn = null, stateBtnS = null, stateBtnL = null;
 
   // ── セーブ(バッテリ RAM / FDS ディスク)──
@@ -372,12 +373,59 @@
     NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); });
   }
 
-  function sideLabel() { return machine === 'msx' ? T('ディスク {side}', { side: String.fromCharCode(65 + (fdsSide % 26)) }) : T('ディスク {side} 面', { side: String.fromCharCode(65 + (fdsSide % 26)) }); }
+  // [disk] の一覧: 枚数 × 面。MSX は 1 枚 1 行(名前つき)、FDS はヘッダの枚数/面でまとめる(値が妥当でなければ 2 面ずつ 1 枚と見なす)
+  function diskRows() {
+    const rows = [];
+    if (machine === 'msx') { for (let i = 0; i < fdsSides; i++) rows.push({ num: i + 1, label: T('ディスク {n}', { n: i + 1 }), name: diskNames[i] || '', sides: [{ index: i, label: '', code: '' }] }); return rows; }
+    const info = fdsSideInfo && fdsSideInfo.length === fdsSides && fdsSideInfo.every((x) => x.disk < 16 && x.side < 2) ? fdsSideInfo : null;
+    const byDisk = new Map();
+    for (let i = 0; i < fdsSides; i++) {
+      const d = info ? info[i].disk : (i >> 1), sd = info ? info[i].side : (i & 1);
+      if (!byDisk.has(d)) byDisk.set(d, []);
+      byDisk.get(d).push({ index: i, label: sd ? T('B 面') : T('A 面'), code: sd ? 'B' : 'A' });
+    }
+    for (const [d, sides] of [...byDisk.entries()].sort((a, b) => a[0] - b[0])) rows.push({ num: d + 1, label: T('ディスク {n}', { n: d + 1 }), name: '', sides });
+    return rows;
+  }
+  function diskButtonLabel() { for (const r of diskRows()) for (const sd of r.sides) if (sd.index === fdsSide) return r.num + sd.code; return String(fdsSide + 1); }
+  function sideLabel() { return T('ディスク {label}', { label: diskButtonLabel() }); }
   function updateDiskUi() {
     if (!sideBtn) return;
     sideBtn.hidden = fdsSides < 2;
-    sideBtn.querySelector('.nes-ib-lbl').textContent = String.fromCharCode(65 + (fdsSide % 26));
-    sideBtn.title = sideLabel() + ' — ' + (machine === 'msx' ? T('クリックで次のディスクに入れ替える(取り出してから入れる)。別の .dsk を開いても入れ替わります') : T('クリックで次の面に入れ替える(取り出してから入れる)'));
+    sideBtn.querySelector('.nes-ib-lbl').textContent = diskButtonLabel();
+    sideBtn.title = sideLabel() + ' — ' + T('クリックで枚数と面を選ぶ(取り出してから入れる)。別の .dsk を開くと足して入れ替わります');
+  }
+  function closeDiskPopover() {
+    if (!diskPopEl) return;
+    diskPopEl.remove(); diskPopEl = null;
+    if (diskPopClose) { document.removeEventListener('mousedown', diskPopClose, true); document.removeEventListener('keydown', diskPopClose, true); diskPopClose = null; }
+  }
+  function toggleDiskPopover(anchorEl) {
+    if (diskPopEl) { closeDiskPopover(); return; }
+    const pop = document.createElement('div');
+    pop.className = 'kbd-layout-pop nes-cfg-pop nes-disk-pop';
+    pop.addEventListener('mousedown', (e) => e.stopPropagation());
+    const title = document.createElement('div'); title.className = 'kbd-layout-sec-title'; title.textContent = T('ディスクを選ぶ'); pop.appendChild(title);
+    for (const r of diskRows()) {
+      const row = document.createElement('div'); row.className = 'nes-disk-row';
+      const lbl = document.createElement('span'); lbl.className = 'nes-disk-lbl'; lbl.textContent = r.label + (r.name ? ' ' + r.name : ''); lbl.title = r.name || r.label; row.appendChild(lbl);
+      for (const sd of r.sides) {
+        const b = mkBtn(sd.label || T('入れる'), '', () => { closeDiskPopover(); if (sd.index !== fdsSide && !sideTimer) switchSide(sd.index); });
+        if (sd.index === fdsSide) b.classList.add('is-on');
+        row.appendChild(b);
+      }
+      pop.appendChild(row);
+    }
+    document.body.appendChild(pop);
+    diskPopEl = pop;
+    const rc = anchorEl.getBoundingClientRect();
+    let left = rc.left, top = rc.bottom + 4;
+    if (left + pop.offsetWidth > window.innerWidth - 4) left = Math.max(4, window.innerWidth - pop.offsetWidth - 4);
+    if (top + pop.offsetHeight > window.innerHeight - 4) top = Math.max(4, rc.top - pop.offsetHeight - 4);
+    pop.style.left = left + 'px'; pop.style.top = top + 'px';
+    diskPopClose = (e) => { if (e.type === 'keydown' && e.key !== 'Escape') return; if (e.type === 'mousedown' && (pop.contains(e.target) || anchorEl.contains(e.target))) return; closeDiskPopover(); };
+    document.addEventListener('mousedown', diskPopClose, true);
+    document.addEventListener('keydown', diskPopClose, true);
   }
   // 面の入れ替え: 取り出し → 少し待って次の面を入れる(ゲームの BIOS が「ディスクなし」を見てから入れ直す)
   function switchSide(next) {
@@ -449,7 +497,7 @@
     speedBtn = mkIcon('ff', '', () => { speedSel = SPEEDS[(SPEEDS.indexOf(speedSel) + 1) % SPEEDS.length]; pushSpeed(); }, '');
     stateBtnS = mkIcon('saveState', '', requestSaveState);
     stateBtnL = mkIcon('loadState', '', requestLoadState);
-    sideBtn = mkIcon('disk', '', () => { if (fdsSides > 1 && !sideTimer) switchSide(fdsSide + 1); }, 'A'); sideBtn.hidden = true;
+    sideBtn = mkIcon('disk', '', () => { if (fdsSides >= 1) toggleDiskPopover(sideBtn); }, 'A'); sideBtn.hidden = true;
     biosBtn = mkIcon('chip', T('ディスクシステムの BIOS(disksys.rom、8KB)を選ぶ。このブラウザに控えて次回も使います'), () => biosInput.click(), 'BIOS'); biosBtn.hidden = true;
     biosInput = document.createElement('input'); biosInput.type = 'file'; biosInput.accept = '.rom,.bin,.nes'; biosInput.multiple = true; biosInput.style.display = 'none';
     biosInput.addEventListener('change', async () => {
@@ -1394,6 +1442,7 @@
     sideBtn.title = T('入れ替え中…');
     sideTimer = setTimeout(() => {
       sideTimer = 0;
+      diskNames.push(name || '');
       if (node) { const buf = bytes.slice().buffer; node.port.postMessage({ type: 'diskAdd', image: buf }, [buf]); }
       else if (nes) { const n = nes.addDisk(bytes); if (n >= 0) nes.insertDisk(n); fdsSides = nes.diskCount; fdsSide = n; if (rewindBuf) rewindBuf.clear(); updateDiskUi(); }
       flashStatus(T('ディスクを入れ替えました: {name}', { name }));
@@ -1422,7 +1471,8 @@
     const key = romKey(bytes);
     const mapperType = opt.disk ? null : msxMapperFor(key); // null = 本体の判別に任せる
     const cartB = msxCartB();
-    const romA = opt.disk ? null : bytes, disks = opt.disk ? [bytes] : [];
+    const romA = opt.disk ? null : bytes, disks = opt.disk ? [bytes].concat(opt.extraDisks || []) : []; // extraDisks: 同じ組の 2 枚目以降([disk] で選ぶ)
+    diskNames = opt.disk ? [name || ''].concat(opt.extraNames || []) : []; fdsSideInfo = null;
     const probe = new MML.Emu.MsxConsole(romA, { machine: mach, bios, mapperType: mapperType || undefined, cartB, disks, fdc: cfg.msx.fdc }); // マッパー未対応等は例外で知らせる
     liveEnd('restart');
     rewindHoldEnd();
@@ -1462,6 +1512,12 @@
     return ok ? null : nes;
   }
 
+  // 中身の種類(imageDetect.js の kind)→ 開き方。iNES/FDS は open() の本体(NES)で開く
+  const OPENERS = {
+    'fds-bios': (bytes, name) => { storeFdsBiosFile(bytes, name); return null; }, // disksys.rom: 控えるだけ(.rom でも MSX にしない)
+    'msx-rom': (bytes, name) => openMsx(bytes, name),
+    'msx-dsk': (bytes, name) => (machine === 'msx' && msxDisk && !pendingMsx && (node || nes)) ? swapMsxDisk(bytes, name) : openMsx(bytes, name, { disk: true }), // 動いている MSX には足して入れ替え
+  };
   const NesScreen = {
     getAudioContext: null,   // () => AudioContext(main.js が共用の物を渡す)。無ければ自前で作る
     onOpenRecording: null,   // (vgmBytes, fileName) 録音を本体の VGM 経路で開く(main.js)
@@ -1474,15 +1530,27 @@
     applyMix,                // (muteConfig, volumeConfig) 鍵盤表示のミュート/音量
     // ROM を開く前でも窓の中身(開くアイコン等のヘッダ、案内)を組んでおく(main.js が起動時に呼ぶ)。ヘッドレス(main.js を読む)には canvas が無いので何もしない
     mount: () => (typeof ImageData === 'function' ? ensureDom() : false),
+    // 機種の開き方を足す(kind は imageDetect.js の detect が返す物。将来の機種はここに登録すれば全経路に乗る)
+    registerOpener(kind, fn) { OPENERS[kind] = fn; },
+    // 複数の画像をひとまとめに開く(zip の中のディスク組など): MSX の .dsk は全部同じドライブの組にして [disk] で選ぶ、
+    // FDS の .fds が複数なら面を順に並べて 1 本に、それ以外は最初の 1 本
+    async openSet(items, setName) {
+      if (!ensureDom()) throw new Error('win-nes がありません');
+      const I = MML.Emu.Image;
+      const typed = items.map((it) => ({ bytes: it.bytes, name: it.name, img: I ? I.detect(it.bytes, it.name) : null }));
+      const dsks = typed.filter((t) => t.img && t.img.kind === 'msx-dsk');
+      if (dsks.length) return openMsx(dsks[0].bytes, dsks[0].name, { disk: true, extraDisks: dsks.slice(1).map((t) => t.bytes), extraNames: dsks.slice(1).map((t) => t.name) });
+      const fds = typed.filter((t) => t.img && t.img.kind === 'fds');
+      if (fds.length >= 2 && I) return NesScreen.open(I.combineFds(fds.map((t) => t.bytes)), setName || fds[0].name);
+      const first = typed.find((t) => t.img && t.img.kind !== 'fds-bios') || typed[0];
+      return first ? NesScreen.open(first.bytes, first.name) : null;
+    },
     // ROM(iNES のバイト列)を読み込んで表示・開始する。失敗は例外(マッパー未対応など)
     async open(bytes, name) {
       if (!ensureDom()) throw new Error('win-nes がありません');
-      if (MML.Emu.FdsDisk && MML.Emu.FdsDisk.isFdsBios && MML.Emu.FdsDisk.isFdsBios(bytes)) { storeFdsBiosFile(bytes, name); return null; } // disksys.rom: 中身で見分けて控える(.rom でも MSX にしない)
-      if (MML.Emu.MsxConsole && MML.Emu.MsxConsole.isDskFile && MML.Emu.MsxConsole.isDskFile(name, bytes)) {
-        if (machine === 'msx' && msxDisk && !pendingMsx && (node || nes)) return swapMsxDisk(bytes, name); // ディスクで動いている MSX に別の .dsk: 入れ替え(再起動しない)
-        return openMsx(bytes, name, { disk: true });
-      }
-      if (MML.Emu.MsxConsole && MML.Emu.MsxConsole.isMsxFile(name, bytes)) return openMsx(bytes, name); // .rom/.mx1/.mx2(iNES でない)→ MSX
+      // 中身で見分けて(MML.Emu.Image、imageDetect.js)、開き方の表で振り分ける。表に無い物(iNES/FDS/不明)はこの下の NES の経路
+      const img = MML.Emu.Image && MML.Emu.Image.detect ? MML.Emu.Image.detect(bytes, name) : null;
+      if (img && OPENERS[img.kind]) return OPENERS[img.kind](bytes, name, img);
       machine = 'nes'; pendingMsx = null; msxChips = []; msxDisk = false;
       const isFds = !!(MML.Emu.FdsDisk && MML.Emu.FdsDisk.isFds(bytes));
       biosBtn.hidden = !isFds; updateBiosBtn(); updateSoftKbd();
@@ -1509,6 +1577,7 @@
       nameEl.textContent = romName;
       nameEl.title = MML.Emu.INES.describe(probe.rom);
       recExtBits = probe.extBits();
+      fdsSideInfo = probe.rom && probe.rom.fds && probe.rom.headers ? probe.rom.headers.map((h) => ({ side: h[0x14], disk: h[0x15] })) : null; diskNames = []; // FDS のヘッダ: $15 面(0=A)、$16 枚数(0 始まり)。headers は $01 から
       fdsSides = probe.diskCount; fdsSide = 0; if (sideTimer) { clearTimeout(sideTimer); sideTimer = 0; } updateDiskUi();
       stopMain(); nes = null; rewindBuf = null;
       if (recording) { recording = false; recFrames = null; recBase = null; }
