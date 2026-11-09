@@ -8,8 +8,8 @@
  *   setKey(code, down)(PC のキー)/reset()/hasBattery・getBattery・setBattery(SRAM/FM-PAC/RTC、7c)
  *
  * ■ 構成(機種は opts.machine: 'msx1' | 'msx2' | 'msx2plus' | 'turbor')
- *   turboR(7e): スロット 0-0 メイン BIOS、0-2 内蔵 MSX-MUSIC、3-0 サブ ROM(+漢字ドライバ 32K bios.kdr を $4000〜)、3-2 ディスク(TC8566AF)、
- *   3-3 マッパー RAM 256K(FS-A1ST の配置。パナソニックの内蔵ソフト ROM(3-1、512K の専用マッパー)は載せない)。S1990(I/O $E4-$E7: CPU モードと
+ *   turboR(7e): スロット 0-0 メイン BIOS、0-2 内蔵 MSX-MUSIC、3-0 マッパー RAM 256K、3-1 サブ ROM(+漢字ドライバ 32K bios.kdr を $4000〜)、3-2 ディスク(TC8566AF)
+ *   (FS-A1ST/GT の配置。パナソニックの内蔵ソフト ROM(3-1、512K の専用マッパー)は載せない)。S1990(I/O $E4-$E7: CPU モードと
  *   255.68kHz の 16bit タイマ)、PCM(I/O $A4/$A5、8bit D/A、15.75kHz の 2bit カウンタ。A/D は無し)、PAUSE($A7、押せない)。
  *   R800 は cpuZ80.js の r800 フラグ(MULUB/MULUW と時間の近似)。実 BIOS は利用者の物(C-BIOS に turboR は無い)
  *   Z80 3.58MHz(M1 ウェイト 1)、PPI 8255($A8-$AB: 一次スロット選択/キーボード行/キー読み)、拡張スロットレジスタ($FFFF)、
@@ -52,9 +52,9 @@
   const MACHINES = {
     msx1: { vdp: 'tms9918', vramKB: 16, ramKB: 64, expanded: [false, false, false, false], sub: false, fm: false },
     msx2: { vdp: 'v9938', vramKB: 128, ramKB: 128, expanded: [false, false, false, true], sub: true, fm: false },
-    msx2plus: { vdp: 'v9958', vramKB: 128, ramKB: 128, expanded: [false, false, false, true], sub: true, fm: true },
-    turbor: { vdp: 'v9958', vramKB: 128, ramKB: 256, expanded: [false, false, false, true], sub: true, fm: true, turbor: true,
-      layout: { sub: [3, 0], disk: [3, 2], ram: [3, 3], music: [0, 2] } },
+    msx2plus: { vdp: 'v9958', vramKB: 128, ramKB: 128, expanded: [false, false, false, true], sub: true, fm: true, f4: 'inverted' },
+    turbor: { vdp: 'v9958', vramKB: 128, ramKB: 256, expanded: [false, false, false, true], sub: true, fm: true, turbor: true, f4: 'normal',
+      layout: { sub: [3, 1], disk: [3, 2], ram: [3, 0], music: [0, 2] } }, // FS-A1ST/GT: RAM 3-0、サブ+漢字ドライバ 3-1、ディスク 3-2、内蔵ソフト 3-3(載せない)。★turboR の BIOS は RAM を探さず 3-0 と決め打つ(実測: $FFFF=0 で page 3 を 3-0 に)
   };
   // 内蔵物のスロット(一次, 二次)。msx2/2+ は 7a〜7d の配置のまま(C-BIOS と実 BIOS の両方で動いている)
   const DEFAULT_LAYOUT = { sub: [3, 0], disk: [3, 1], ram: [3, 2], music: [3, 3] };
@@ -273,6 +273,7 @@
       this.opl = cb && cb.kind === 'msxaudio' && Emu.OPLAudio ? new Emu.OPLAudio(CPU_CLOCK, { type: 'y8950' }) : null;
       this.cpuCycles = 0;
       this.s1990 = mc.turbor ? new S1990(this) : null; // turboR(7e)
+      this.f4Mode = mc.f4 || null; this.f4 = 0; // I/O $F4(2+/turboR): 起動フラグ。bit7=1 なら BIOS は暖かい起動(RAM の初期化を飛ばす)。電源投入で 0。'inverted' は読み書きが反転(パナソニック 2+)。★0xFF を返すと turboR BIOS は RAM の未初期化ベクタへ飛んで暴走する
       this.pcm = mc.turbor && Emu.MajutsushiDAC ? new TurboRPcm(this) : null;
       this.cart = romBytes ? new Emu.MsxCartridge(romBytes, { type: opts.mapperType, scc: sccA ? this.scc : null, dac: this.dac }) : null;
       this.cartB = null;
@@ -486,7 +487,9 @@
         case 0xD8: case 0xD9: case 0xDA: case 0xDB: return this.kanji ? this.kanji.ioRead(port) : 0xFF;
         case 0xA4: case 0xA5: return this.pcm ? this.pcm.ioRead(port) : 0xFF; // turboR PCM
         case 0xA7: return this.s1990 ? 0x00 : 0xFF;                            // turboR PAUSE(bit0: 押されていない)
+        case 0xF4: return this.f4Mode ? (this.f4Mode === 'inverted' ? (~this.f4 & 0xFF) : this.f4) : 0xFF;
         case 0xE4: case 0xE5: case 0xE6: case 0xE7: return this.s1990 ? this.s1990.ioRead(port) : 0xFF;
+        case 0xE8: case 0xE9: case 0xEA: case 0xEB: case 0xEC: case 0xED: case 0xEE: case 0xEF: return this.s1990 ? 0x00 : 0xFF; // turboR 内蔵 MSX-MIDI(GT)。無い: 0(★BIOS の INT が $E9 の bit1/bit7 を見てフックへ飛ぶので 0xFF は駄目)
         case 0xC0: return this.opl ? this.opl.readStatus() : 0xFF; // MSX-AUDIO: ステータス(無ければ 0xFF=無し)
         case 0xC1: return this.opl ? this.opl.readData() : 0xFF;
         case 0xFC: case 0xFD: case 0xFE: case 0xFF: return this.ramDev.ioRead(port);
@@ -513,7 +516,9 @@
         case 0xD8: case 0xD9: case 0xDA: case 0xDB: if (this.kanji) this.kanji.ioWrite(port, v); return;
         case 0xA4: case 0xA5: if (this.pcm) { const out = this.pcm.ioWrite(port, v); if (out || port === 0xA5) this._logWrite('pcm', port, v); } return; // turboR PCM($A4 は D/A に出た物だけ録音)
         case 0xA7: return;
+        case 0xF4: if (this.f4Mode) this.f4 = (this.f4Mode === 'inverted' ? ~v : v) & 0xFF; return;
         case 0xE4: case 0xE5: case 0xE6: case 0xE7: if (this.s1990) this.s1990.ioWrite(port, v); return;
+        case 0xE8: case 0xE9: case 0xEA: case 0xEB: case 0xEC: case 0xED: case 0xEE: case 0xEF: return; // MSX-MIDI(無し)
         case 0xC0: if (this.opl) { this.oplLatch = v; this.opl.ioWrite(0xC0, v); } return; // MSX-AUDIO
         case 0xC1: if (this.opl) this._oplData(v); return;
         case 0xFC: case 0xFD: case 0xFE: case 0xFF: this.ramDev.ioWrite(port, v); return;

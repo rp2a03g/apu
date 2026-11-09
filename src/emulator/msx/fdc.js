@@ -11,7 +11,7 @@
  *     タイプ III(READ ADDRESS、READ TRACK は未対応=すぐ終わる、WRITE TRACK=フォーマットはバイトを飲み込むだけ)、タイプ IV(FORCE INTERRUPT)。
  *     データは 1 バイトごとに DRQ(CPU が読むとすぐ次のバイト。実機の 32µs/バイトより速いが、ドライバは DRQ を見て回すので支障なし)。
  *   TC8566AF(松下/turboR。μPD765 互換): $7FF8 制御 0(bit0-1 ドライブ、bit2=1 で動作、bit3 モータ)、$7FF9 制御 1、$7FFA メインステータス(読み:
- *     RQM bit7、DIO bit6、NDM bit5、CB bit4)、$7FFB データ。コマンド: SPECIFY/SENSE DRIVE STATUS/RECALIBRATE/SENSE INTERRUPT STATUS/SEEK/
+ *     RQM bit7、DIO bit6、NDM bit5、CB bit4)、$7FFB データ、$7FF9 bit0 TC(転送の打ち切り)。コマンド: SPECIFY/SENSE DRIVE STATUS/RECALIBRATE/SENSE INTERRUPT STATUS/SEEK/
  *     READ DATA/WRITE DATA/READ ID/FORMAT TRACK(非 DMA、結果 7 バイト)。無効コマンドは ST0=$80。割り込み線は MSX では使わない(ポーリング)。
  * ■ インターフェース(MsxDiskInterface): スロット 3-1 に置く。$4000-$7FFF がディスク ROM(16K。32K は前半だけ)、末尾 8 バイトが FDC のレジスタ。
  *   ドライブは A/B の 2 台(images[] から入れる。insertDisk(n) はドライブ A に n 番の画像)。
@@ -250,17 +250,24 @@
     }
     _advance() {
       const x = this.xfer;
+      x.justAdvanced = false;
       if (++this.dataPos < SECTOR) return;
       this.dataPos = 0;
       if (x.r >= x.eot) { this._finish(0x00); return; } // EOT まで転送した: 正常終了(ST1 の EN は立てない。ドライバは結果の R を見る)
-      x.r++;
+      x.r++; x.justAdvanced = true;
       if (!this.drive.image.hasSector(x.c, x.h, x.r)) { this._finish(0x40, 0x80); return; } // 無い: EN
+    }
+    // TC(Terminal Count): 実行中なら転送を打ち切って結果へ。セクタ境界で来たら結果の R は次のセクタ(もう進めてある)
+    terminalCount() {
+      if (this.phase !== 2 || !this.xfer) return;
+      this.dataPos = 0;
+      this._finish(0x00, 0x00);
     }
     _finish(st0, st1) {
       const x = this.xfer, d = this.drive;
       this.st0 = (st0 | this.driveNo | (x.h << 2)) & 0xFF; this.st1 = st1 || 0; this.st2 = 0;
       let c = x.c, h = x.h, r = x.r;
-      if (!x.format) { r++; if (r > d.image.spt) { r = 1; c++; } }
+      if (!x.format && !(x.justAdvanced && this.dataPos === 0)) { r++; if (r > d.image.spt) { r = 1; c++; } }
       this.result = [this.st0, this.st1, this.st2, c, h, r, 2];
       this.resPos = 0; this.phase = 3; this.xfer = null;
     }
@@ -397,7 +404,7 @@
           for (let i = 0; i < 2; i++) this.drives[i].motor = !!(v & 0x08) && (v & 3) === i;
           return;
         }
-        case 1: return; // 制御 1(未使用)
+        case 1: if (v & 0x01) f.terminalCount(); return; // 制御 1: bit0 TC(転送の打ち切り。実機のディスク ROM は 1 セクタ読むごとに 2→3→2 と打つ)
         case 3: f.writeData(v); return;
         default: return;
       }

@@ -519,7 +519,7 @@
     // ROM のドロップ(窓のどこでも)
     win.addEventListener('dragover', (e) => { if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'copy'; } });
     win.addEventListener('drop', (e) => {
-      const f = e.dataTransfer && e.dataTransfer.files && Array.from(e.dataTransfer.files).find((x) => /\.(nes|fds|rom|mx1|mx2)$/i.test(x.name));
+      const f = e.dataTransfer && e.dataTransfer.files && Array.from(e.dataTransfer.files).find((x) => /\.(nes|fds|rom|mx1|mx2|dsk)$/i.test(x.name));
       if (!f) return; // ROM 以外は本体のドロップ処理に任せる
       e.preventDefault(); e.stopPropagation();
       openRomFile(f);
@@ -1298,7 +1298,7 @@
       if (msg.volume) { if (msg.volume.apu) MML.Emu.applyVolume(nes.apu.vol, msg.volume.apu); if (a && a.vol && msg.volume.ext) MML.Emu.applyVolume(a.vol, msg.volume.ext); }
     }
   }
-  function recFileName() { return (romName || machine).replace(/\.(nes|fds|rom|mx1|mx2)$/i, '') + '-rec.vgm'; }
+  function recFileName() { return (romName || machine).replace(/\.(nes|fds|rom|mx1|mx2|dsk)$/i, '') + '-rec.vgm'; }
   function toggleRecord() {
     if (recording) {
       recording = false;
@@ -1319,7 +1319,7 @@
         recInfoEl.textContent = T('MSX の VGM 書き出しは次の段階(7b)'); recInfoEl.title = T('録音した {n} フレームの書き込み列は捨てました', { n: frames.length });
         return;
       }
-      const r = MML.VGM.encodeMsxRecording({ frames, chips: msxChips, machine: msxMachine, name: (romName || 'MSX').replace(/\.(rom|mx1|mx2)$/i, ''), creator: 'Sound Emulation Foundry (MSX)' });
+      const r = MML.VGM.encodeMsxRecording({ frames, chips: msxChips, machine: msxMachine, name: (romName || 'MSX').replace(/\.(rom|mx1|mx2|dsk)$/i, ''), creator: 'Sound Emulation Foundry (MSX)' });
       recRaw = r.vgm; recVgm = r.vgm;
       recSfxChk.checked = !!cfg.sfxRemove; recLagChk.checked = !!cfg.lagFix;
       applyRecClean();

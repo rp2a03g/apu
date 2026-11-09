@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-09 07:33:54
+ * Built by tools/build-capture-workers.ps1 at 2026-11-09 08:34:45
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-09 07:33:54';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-09 08:34:45';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -11135,7 +11135,19 @@
   }
 
   // 発見的な種別判定(openMSX RomInfo::guessRomType の近似)。64K 以下は plain
+  // CRC32 → 種別の小辞書(2026-11-09、手元の ROM の総当たりで「全種別を試して明らかに別の種別の方が動く」と確かめた物だけ。名前は書かない。
+  // 発見的手法(guessType)より優先。辞書に無ければ発見的手法)
+  const MAPPER_DB = {
+    'c29edd84': 'ascii16', '8cf0e6c0': 'ascii8', '28094960': 'konami', 'd6465702': 'ascii16', 'fb348de6': 'ascii8',
+  };
+  const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+  function crc32(b) { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return ((c ^ 0xFFFFFFFF) >>> 0).toString(16).padStart(8, '0'); }
   function guessType(rom) {
+    const known = MAPPER_DB[crc32(rom)];
+    if (known) return known;
+    return guessTypeHeuristic(rom);
+  }
+  function guessTypeHeuristic(rom) {
     if (rom.length <= 0x10000) return 'plain';
     const score = { konami: 0, konamiScc: 0, ascii8: 0, ascii16: 0 };
     for (let i = 0; i + 2 < rom.length; i++) {
@@ -12271,7 +12283,7 @@
  *     タイプ III(READ ADDRESS、READ TRACK は未対応=すぐ終わる、WRITE TRACK=フォーマットはバイトを飲み込むだけ)、タイプ IV(FORCE INTERRUPT)。
  *     データは 1 バイトごとに DRQ(CPU が読むとすぐ次のバイト。実機の 32µs/バイトより速いが、ドライバは DRQ を見て回すので支障なし)。
  *   TC8566AF(松下/turboR。μPD765 互換): $7FF8 制御 0(bit0-1 ドライブ、bit2=1 で動作、bit3 モータ)、$7FF9 制御 1、$7FFA メインステータス(読み:
- *     RQM bit7、DIO bit6、NDM bit5、CB bit4)、$7FFB データ。コマンド: SPECIFY/SENSE DRIVE STATUS/RECALIBRATE/SENSE INTERRUPT STATUS/SEEK/
+ *     RQM bit7、DIO bit6、NDM bit5、CB bit4)、$7FFB データ、$7FF9 bit0 TC(転送の打ち切り)。コマンド: SPECIFY/SENSE DRIVE STATUS/RECALIBRATE/SENSE INTERRUPT STATUS/SEEK/
  *     READ DATA/WRITE DATA/READ ID/FORMAT TRACK(非 DMA、結果 7 バイト)。無効コマンドは ST0=$80。割り込み線は MSX では使わない(ポーリング)。
  * ■ インターフェース(MsxDiskInterface): スロット 3-1 に置く。$4000-$7FFF がディスク ROM(16K。32K は前半だけ)、末尾 8 バイトが FDC のレジスタ。
  *   ドライブは A/B の 2 台(images[] から入れる。insertDisk(n) はドライブ A に n 番の画像)。
@@ -12510,17 +12522,24 @@
     }
     _advance() {
       const x = this.xfer;
+      x.justAdvanced = false;
       if (++this.dataPos < SECTOR) return;
       this.dataPos = 0;
       if (x.r >= x.eot) { this._finish(0x00); return; } // EOT まで転送した: 正常終了(ST1 の EN は立てない。ドライバは結果の R を見る)
-      x.r++;
+      x.r++; x.justAdvanced = true;
       if (!this.drive.image.hasSector(x.c, x.h, x.r)) { this._finish(0x40, 0x80); return; } // 無い: EN
+    }
+    // TC(Terminal Count): 実行中なら転送を打ち切って結果へ。セクタ境界で来たら結果の R は次のセクタ(もう進めてある)
+    terminalCount() {
+      if (this.phase !== 2 || !this.xfer) return;
+      this.dataPos = 0;
+      this._finish(0x00, 0x00);
     }
     _finish(st0, st1) {
       const x = this.xfer, d = this.drive;
       this.st0 = (st0 | this.driveNo | (x.h << 2)) & 0xFF; this.st1 = st1 || 0; this.st2 = 0;
       let c = x.c, h = x.h, r = x.r;
-      if (!x.format) { r++; if (r > d.image.spt) { r = 1; c++; } }
+      if (!x.format && !(x.justAdvanced && this.dataPos === 0)) { r++; if (r > d.image.spt) { r = 1; c++; } }
       this.result = [this.st0, this.st1, this.st2, c, h, r, 2];
       this.resPos = 0; this.phase = 3; this.xfer = null;
     }
@@ -12657,7 +12676,7 @@
           for (let i = 0; i < 2; i++) this.drives[i].motor = !!(v & 0x08) && (v & 3) === i;
           return;
         }
-        case 1: return; // 制御 1(未使用)
+        case 1: if (v & 0x01) f.terminalCount(); return; // 制御 1: bit0 TC(転送の打ち切り。実機のディスク ROM は 1 セクタ読むごとに 2→3→2 と打つ)
         case 3: f.writeData(v); return;
         default: return;
       }
@@ -12680,8 +12699,8 @@
  *   setKey(code, down)(PC のキー)/reset()/hasBattery・getBattery・setBattery(SRAM/FM-PAC/RTC、7c)
  *
  * ■ 構成(機種は opts.machine: 'msx1' | 'msx2' | 'msx2plus' | 'turbor')
- *   turboR(7e): スロット 0-0 メイン BIOS、0-2 内蔵 MSX-MUSIC、3-0 サブ ROM(+漢字ドライバ 32K bios.kdr を $4000〜)、3-2 ディスク(TC8566AF)、
- *   3-3 マッパー RAM 256K(FS-A1ST の配置。パナソニックの内蔵ソフト ROM(3-1、512K の専用マッパー)は載せない)。S1990(I/O $E4-$E7: CPU モードと
+ *   turboR(7e): スロット 0-0 メイン BIOS、0-2 内蔵 MSX-MUSIC、3-0 マッパー RAM 256K、3-1 サブ ROM(+漢字ドライバ 32K bios.kdr を $4000〜)、3-2 ディスク(TC8566AF)
+ *   (FS-A1ST/GT の配置。パナソニックの内蔵ソフト ROM(3-1、512K の専用マッパー)は載せない)。S1990(I/O $E4-$E7: CPU モードと
  *   255.68kHz の 16bit タイマ)、PCM(I/O $A4/$A5、8bit D/A、15.75kHz の 2bit カウンタ。A/D は無し)、PAUSE($A7、押せない)。
  *   R800 は cpuZ80.js の r800 フラグ(MULUB/MULUW と時間の近似)。実 BIOS は利用者の物(C-BIOS に turboR は無い)
  *   Z80 3.58MHz(M1 ウェイト 1)、PPI 8255($A8-$AB: 一次スロット選択/キーボード行/キー読み)、拡張スロットレジスタ($FFFF)、
@@ -12724,9 +12743,9 @@
   const MACHINES = {
     msx1: { vdp: 'tms9918', vramKB: 16, ramKB: 64, expanded: [false, false, false, false], sub: false, fm: false },
     msx2: { vdp: 'v9938', vramKB: 128, ramKB: 128, expanded: [false, false, false, true], sub: true, fm: false },
-    msx2plus: { vdp: 'v9958', vramKB: 128, ramKB: 128, expanded: [false, false, false, true], sub: true, fm: true },
-    turbor: { vdp: 'v9958', vramKB: 128, ramKB: 256, expanded: [false, false, false, true], sub: true, fm: true, turbor: true,
-      layout: { sub: [3, 0], disk: [3, 2], ram: [3, 3], music: [0, 2] } },
+    msx2plus: { vdp: 'v9958', vramKB: 128, ramKB: 128, expanded: [false, false, false, true], sub: true, fm: true, f4: 'inverted' },
+    turbor: { vdp: 'v9958', vramKB: 128, ramKB: 256, expanded: [false, false, false, true], sub: true, fm: true, turbor: true, f4: 'normal',
+      layout: { sub: [3, 1], disk: [3, 2], ram: [3, 0], music: [0, 2] } }, // FS-A1ST/GT: RAM 3-0、サブ+漢字ドライバ 3-1、ディスク 3-2、内蔵ソフト 3-3(載せない)。★turboR の BIOS は RAM を探さず 3-0 と決め打つ(実測: $FFFF=0 で page 3 を 3-0 に)
   };
   // 内蔵物のスロット(一次, 二次)。msx2/2+ は 7a〜7d の配置のまま(C-BIOS と実 BIOS の両方で動いている)
   const DEFAULT_LAYOUT = { sub: [3, 0], disk: [3, 1], ram: [3, 2], music: [3, 3] };
@@ -12945,6 +12964,7 @@
       this.opl = cb && cb.kind === 'msxaudio' && Emu.OPLAudio ? new Emu.OPLAudio(CPU_CLOCK, { type: 'y8950' }) : null;
       this.cpuCycles = 0;
       this.s1990 = mc.turbor ? new S1990(this) : null; // turboR(7e)
+      this.f4Mode = mc.f4 || null; this.f4 = 0; // I/O $F4(2+/turboR): 起動フラグ。bit7=1 なら BIOS は暖かい起動(RAM の初期化を飛ばす)。電源投入で 0。'inverted' は読み書きが反転(パナソニック 2+)。★0xFF を返すと turboR BIOS は RAM の未初期化ベクタへ飛んで暴走する
       this.pcm = mc.turbor && Emu.MajutsushiDAC ? new TurboRPcm(this) : null;
       this.cart = romBytes ? new Emu.MsxCartridge(romBytes, { type: opts.mapperType, scc: sccA ? this.scc : null, dac: this.dac }) : null;
       this.cartB = null;
@@ -13158,7 +13178,9 @@
         case 0xD8: case 0xD9: case 0xDA: case 0xDB: return this.kanji ? this.kanji.ioRead(port) : 0xFF;
         case 0xA4: case 0xA5: return this.pcm ? this.pcm.ioRead(port) : 0xFF; // turboR PCM
         case 0xA7: return this.s1990 ? 0x00 : 0xFF;                            // turboR PAUSE(bit0: 押されていない)
+        case 0xF4: return this.f4Mode ? (this.f4Mode === 'inverted' ? (~this.f4 & 0xFF) : this.f4) : 0xFF;
         case 0xE4: case 0xE5: case 0xE6: case 0xE7: return this.s1990 ? this.s1990.ioRead(port) : 0xFF;
+        case 0xE8: case 0xE9: case 0xEA: case 0xEB: case 0xEC: case 0xED: case 0xEE: case 0xEF: return this.s1990 ? 0x00 : 0xFF; // turboR 内蔵 MSX-MIDI(GT)。無い: 0(★BIOS の INT が $E9 の bit1/bit7 を見てフックへ飛ぶので 0xFF は駄目)
         case 0xC0: return this.opl ? this.opl.readStatus() : 0xFF; // MSX-AUDIO: ステータス(無ければ 0xFF=無し)
         case 0xC1: return this.opl ? this.opl.readData() : 0xFF;
         case 0xFC: case 0xFD: case 0xFE: case 0xFF: return this.ramDev.ioRead(port);
@@ -13185,7 +13207,9 @@
         case 0xD8: case 0xD9: case 0xDA: case 0xDB: if (this.kanji) this.kanji.ioWrite(port, v); return;
         case 0xA4: case 0xA5: if (this.pcm) { const out = this.pcm.ioWrite(port, v); if (out || port === 0xA5) this._logWrite('pcm', port, v); } return; // turboR PCM($A4 は D/A に出た物だけ録音)
         case 0xA7: return;
+        case 0xF4: if (this.f4Mode) this.f4 = (this.f4Mode === 'inverted' ? ~v : v) & 0xFF; return;
         case 0xE4: case 0xE5: case 0xE6: case 0xE7: if (this.s1990) this.s1990.ioWrite(port, v); return;
+        case 0xE8: case 0xE9: case 0xEA: case 0xEB: case 0xEC: case 0xED: case 0xEE: case 0xEF: return; // MSX-MIDI(無し)
         case 0xC0: if (this.opl) { this.oplLatch = v; this.opl.ioWrite(0xC0, v); } return; // MSX-AUDIO
         case 0xC1: if (this.opl) this._oplData(v); return;
         case 0xFC: case 0xFD: case 0xFE: case 0xFF: this.ramDev.ioWrite(port, v); return;

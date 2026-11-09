@@ -71,13 +71,13 @@ function asm(build) {
 // 0x0038: INT。VDP S0 を読んで F を落とし、H.KEYI 相当は無し。FD9A(H.TIMI)を CALL(RAM に RET を置くのはテスト ROM 側)… 簡単のため
 //         INT ハンドラは「AF を保存、S0 読み、JIFFY(0xFC9E、実機 BIOS と同じ番地)を +1、AF 復元、EI、RETI」。
 // 0x0093/0x0096: WRTPSG/RDPSG、0x004D RDVRM、0x004A WRTVRM、0x0047 WRTVDP は最小実装(本物の番地と同じ)。
-// opts.ramSec: 拡張スロット 3 の中で RAM のある二次スロット(msx2/2+ の配置は 2、turboR は 3。msxConsole.js の MACHINES.layout と合わせる)
+// opts.ramSec: 拡張スロット 3 の中で RAM のある二次スロット(msx2/2+ の配置は 2、turboR は 0。msxConsole.js の MACHINES.layout と合わせる)
 function buildBios(opts) {
   const ramSec = (opts && opts.ramSec !== undefined) ? opts.ramSec : 2;
   const r = asm((A) => {
     A.org(0);
     A.di(); A.ld_sp(0xF380); A.ld_a(0xF4); A.out(0xA8); A.im1();
-    A.ld_a(ramSec * 0x55); A.ld_mem_a(0xFFFF); // スロット 3 が拡張されている機種では RAM の二次スロットを全ページに(msx2 配置 0xAA=3-2、turboR 0xFF=3-3)。msx1 ではただの RAM 書き
+    A.ld_a(ramSec * 0x55); A.ld_mem_a(0xFFFF); // スロット 3 が拡張されている機種では RAM の二次スロットを全ページに(msx2 配置 0xAA=3-2、turboR 0x00=3-0)。msx1 ではただの RAM 書き
     // マッパー RAM の既定(3,2,1,0)はエミュレータが reset で置く
     A.ld_a_mem(0x4000); A.cp(0x41); A.jr_nz('noCart'); A.ld_a_mem(0x4001); A.cp(0x42); A.jr_nz('noCart');
     A.ld_hl_mem(0x4002); A.jp_hl();

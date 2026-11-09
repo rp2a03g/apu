@@ -261,3 +261,4 @@ MSXX ブロックのビット配置、Y8950 ADPCM RAM 像の「鳴っている�
 - **7d ディスク**(実装 2026-11-09、進捗は ROADMAP.md 段階 7。実ディスク ROM での起動は未確認): FDC 2 系統、.dsk、ディスク ROM、書き戻し。
 - **7e MSX2+/turboR**(実装 2026-11-09、進捗は ROADMAP.md 段階 7。実 turboR BIOS での起動は未確認、R800 の命令時間は近似): V9958、S1990、turboR PCM(MSXX)、R800。
 - **7f 仕上げ**(実装 2026-11-09、進捗は ROADMAP.md 段階 7。openMSX の道具は未検証): タッチ用ソフトキーボード、openMSX 比較道具、総当たり(msx-sweep.js)。
+- **7g 実ソフトでの総当たり**(2026-11-09、ROADMAP.md 段階 7): 手元の ROM/.dsk/実 BIOS で回して TC8566AF の TC、turboR の $F4/$E9/スロット配置、マッパー辞書を直した。実 BIOS(MSX1/MSX2/MSX2+/turboR)での起動と実ディスク ROM での .dsk 起動を確認済み。

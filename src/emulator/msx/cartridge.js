@@ -49,7 +49,19 @@
   }
 
   // 発見的な種別判定(openMSX RomInfo::guessRomType の近似)。64K 以下は plain
+  // CRC32 → 種別の小辞書(2026-11-09、手元の ROM の総当たりで「全種別を試して明らかに別の種別の方が動く」と確かめた物だけ。名前は書かない。
+  // 発見的手法(guessType)より優先。辞書に無ければ発見的手法)
+  const MAPPER_DB = {
+    'c29edd84': 'ascii16', '8cf0e6c0': 'ascii8', '28094960': 'konami', 'd6465702': 'ascii16', 'fb348de6': 'ascii8',
+  };
+  const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+  function crc32(b) { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return ((c ^ 0xFFFFFFFF) >>> 0).toString(16).padStart(8, '0'); }
   function guessType(rom) {
+    const known = MAPPER_DB[crc32(rom)];
+    if (known) return known;
+    return guessTypeHeuristic(rom);
+  }
+  function guessTypeHeuristic(rom) {
     if (rom.length <= 0x10000) return 'plain';
     const score = { konami: 0, konamiScc: 0, ascii8: 0, ascii16: 0 };
     for (let i = 0; i + 2 < rom.length; i++) {
