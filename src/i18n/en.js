@@ -1764,6 +1764,7 @@
     '[開く] か .nes/.fds/.rom のドロップで始まります': 'Start with [Open] or by dropping a .nes/.fds/.rom file',
     'MSX の BIOS(メイン ROM 32K。C-BIOS でも可)を [BIOS] で指定してください': 'Choose an MSX BIOS (main ROM, 32 KB; C-BIOS works too) with [BIOS]',
     'ディスクの FDC': 'Disk FDC',
+    'ディスクシステムの BIOS を控えました: {name}': 'Stored the Disk System BIOS: {name}',
     'MSX のソフトキーボードを表示/隠す(タッチ端末では常に表示)': 'Show/hide the MSX soft keyboard (always shown on touch devices)',
     'MSX の BIOS は 32K(メイン/漢字ドライバ)、16K(サブ/ロゴ/ディスク)、128K/256K(漢字 ROM)のファイルです: {name}': 'An MSX BIOS file is 32K (main / kanji driver), 16K (sub / logo / disk) or 128K/256K (kanji ROM): {name}',
     'MSX の BIOS を選ぶ(メイン 32K、サブ/ロゴ/ディスク 16K、漢字 128K/256K、漢字ドライバ 32K。複数選択可)。機種ごとにこのブラウザに控えて次回も使います': 'Choose MSX BIOS files (main 32K, sub/logo/disk 16K, kanji 128K/256K, kanji driver 32K; multiple allowed). Stored per machine in this browser for next time',

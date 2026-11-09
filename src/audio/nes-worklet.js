@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-09 08:34:45
+ * Built by tools/build-capture-workers.ps1 at 2026-11-09 09:22:51
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-09 08:34:45';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-09 09:22:51';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -5493,6 +5493,14 @@
   const SIDE_SIZE = 65500;
   const NO_DISK = -1;
 
+  // ディスクシステムの BIOS(disksys.rom)か: 8K ちょうどで、MSX カートリッジの 'AB' ヘッダが無く、末尾の 6502 ベクタ(NMI/RESET/IRQ)が
+  // すべて $E000-$FFFF(BIOS の置き場)を指す。拡張子は見ない(.rom なので MSX の ROM と取り違えやすい)
+  function isFdsBios(bytes) {
+    if (!bytes || bytes.length !== 0x2000) return false;
+    if (bytes[0] === 0x41 && bytes[1] === 0x42) return false;
+    for (let o = 0x1FFA; o < 0x2000; o += 2) if (bytes[o + 1] < 0xE0) return false;
+    return true;
+  }
   function isFds(bytes) {
     if (!bytes || bytes.length < 16) return false;
     if (bytes[0] === 0x46 && bytes[1] === 0x44 && bytes[2] === 0x53 && bytes[3] === 0x1A) return true;
@@ -5696,7 +5704,7 @@
     }
   }
 
-  Emu.FdsDisk = { isFds, parse, buildSide, describe, Mapper: FdsMapper, SIDE_SIZE };
+  Emu.FdsDisk = { isFds, isFdsBios, parse, buildSide, describe, Mapper: FdsMapper, SIDE_SIZE };
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*

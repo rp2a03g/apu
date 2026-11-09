@@ -261,6 +261,12 @@
     } catch (e) { /* localStorage 不可 */ }
     return fdsBios;
   }
+  // FDS の BIOS を控えて知らせる(ドロップ/[BIOS] の両方から)。.fds を開いて BIOS 待ちなら、そのまま開き直す
+  function storeFdsBiosFile(bytes, name) {
+    storeBios(bytes);
+    flashStatus(T('ディスクシステムの BIOS を控えました: {name}', { name: name || 'disksys.rom' }));
+    if (pendingFds) { const p = pendingFds; pendingFds = null; NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); }); }
+  }
   function storeBios(bytes) {
     fdsBios = bytes;
     try { let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); localStorage.setItem(BIOS_KEY, btoa(s)); } catch (e) { /* 控えられなくても今回は使える */ }
@@ -449,8 +455,13 @@
     biosInput.addEventListener('change', async () => {
       const files = Array.from(biosInput.files || []); biosInput.value = '';
       if (!files.length) return;
-      if (machine === 'msx') { await storeMsxBiosFiles(files); return; } // MSX: 複数ファイル(メイン/サブ/ロゴ)を大きさと名前で振り分けて控える
-      const f = files[0];
+      const fdsFiles = [];
+      for (const f of files) { const b = new Uint8Array(await f.arrayBuffer()); if (MML.Emu.FdsDisk && MML.Emu.FdsDisk.isFdsBios(b)) fdsFiles.push({ f, b }); }
+      if (fdsFiles.length) { storeFdsBiosFile(fdsFiles[0].b, fdsFiles[0].f.name); if (files.length === fdsFiles.length) return; } // disksys.rom は機種に関係なく FDS 側へ
+      const rest = files.filter((f) => !fdsFiles.some((x) => x.f === f));
+      if (machine === 'msx') { if (rest.length) await storeMsxBiosFiles(rest); return; } // MSX: 複数ファイル(メイン/サブ/ロゴ)を大きさと名前で振り分けて控える
+      if (!rest.length) return;
+      const f = rest[0];
       const b = new Uint8Array(await f.arrayBuffer());
       if (b.length < 0x2000) { alert(T('BIOS は 8KB 以上のファイルです: {name}', { name: f.name })); return; }
       storeBios(b.length === 0x2000 ? b : b.subarray(b.length - 0x2000));
@@ -1466,6 +1477,7 @@
     // ROM(iNES のバイト列)を読み込んで表示・開始する。失敗は例外(マッパー未対応など)
     async open(bytes, name) {
       if (!ensureDom()) throw new Error('win-nes がありません');
+      if (MML.Emu.FdsDisk && MML.Emu.FdsDisk.isFdsBios && MML.Emu.FdsDisk.isFdsBios(bytes)) { storeFdsBiosFile(bytes, name); return null; } // disksys.rom: 中身で見分けて控える(.rom でも MSX にしない)
       if (MML.Emu.MsxConsole && MML.Emu.MsxConsole.isDskFile && MML.Emu.MsxConsole.isDskFile(name, bytes)) {
         if (machine === 'msx' && msxDisk && !pendingMsx && (node || nes)) return swapMsxDisk(bytes, name); // ディスクで動いている MSX に別の .dsk: 入れ替え(再起動しない)
         return openMsx(bytes, name, { disk: true });
