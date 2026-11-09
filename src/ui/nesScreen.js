@@ -414,7 +414,7 @@
   }
   // [BIOS] で選ばれたファイル(複数可): 32K=メイン、16K=名前に logo を含めばロゴ、それ以外はサブ。控える機種は設定の機種(自動なら今使える機種、
   // 無ければ 16K が一緒に選ばれていれば MSX2、そうでなければ MSX1)
-  async function storeMsxBiosFiles(files) {
+  async function storeMsxBiosFiles(files, targetMach) {
     const list = [];
     for (const f of files) {
       const b = new Uint8Array(await f.arrayBuffer());
@@ -424,15 +424,16 @@
       else alert(T('MSX の BIOS は 32K(メイン/漢字ドライバ)、16K(サブ/ロゴ/ディスク)、128K/256K(漢字 ROM)のファイルです: {name}', { name: f.name }));
     }
     if (!list.length) return;
-    const target = cfg.msx.machine !== 'auto' ? cfg.msx.machine : (resolveMsxMachine() || (list.some((x) => x.kind !== 'main') ? 'msx2' : 'msx1'));
+    const target = targetMach || (cfg.msx.machine !== 'auto' ? cfg.msx.machine : (resolveMsxMachine() || (list.some((x) => x.kind !== 'main') ? 'msx2' : 'msx1')));
     for (const x of list) storeMsxBios(target, x.kind, x.bytes);
     flashStatus(T('BIOS を控えました({machine}: {kinds})', { machine: MSX_MACHINE_LABEL[target] || target, kinds: list.map((x) => x.kind).join('/') }));
     if (pendingMsx) { const p = pendingMsx; pendingMsx = null; NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); }); }
   }
   function updateBiosBtn() {
     if (!biosBtn) return;
-    biosBtn.title = machine === 'msx' ? T('MSX の BIOS を選ぶ(メイン 32K、サブ/ロゴ/ディスク 16K、漢字 128K/256K、漢字ドライバ 32K。複数選択可)。機種ごとにこのブラウザに控えて次回も使います')
-      : T('ディスクシステムの BIOS(disksys.rom、8KB)を選ぶ。このブラウザに控えて次回も使います');
+    biosBtn.title = T('BIOS を選ぶ(複数選択可。中身で振り分けてこのブラウザに控え、次回も使います)') + '\n' +
+      T('ディスクシステム: disksys.rom(8K)') + '\n' +
+      T('MSX: メイン 32K、サブ/ロゴ/ディスク ROM 16K、漢字 128K/256K、漢字ドライバ 32K(⚙ の機種の控えに。自動なら MSX2)。ディスクの起動にはメイン+サブ+ディスク ROM の 3 つが要ります');
     biosBtn.setAttribute('aria-label', biosBtn.title);
   }
   // MSX のキー: 設定の操作キー以外は本体のキーボードへ(Worklet なら key メッセージ)。兼用 ON ならカーソル/スペースをジョイスティック 1 にも
@@ -591,24 +592,27 @@
     stateBtnS = mkIcon('saveState', '', requestSaveState);
     stateBtnL = mkIcon('loadState', '', requestLoadState);
     sideBtn = mkIcon('disk', '', () => { if (fdsSides >= 1) toggleDiskPopover(sideBtn); }, 'A'); sideBtn.hidden = true;
-    biosBtn = mkIcon('chip', T('ディスクシステムの BIOS(disksys.rom、8KB)を選ぶ。このブラウザに控えて次回も使います'), () => biosInput.click(), 'BIOS'); biosBtn.hidden = true;
+    biosBtn = mkIcon('chip', T('ディスクシステムの BIOS(disksys.rom、8KB)を選ぶ。このブラウザに控えて次回も使います'), () => biosInput.click(), 'BIOS'); biosBtn.hidden = true; // BIOS の選択は ⚙ の機種タブへ(2026-11-10)。入力欄は共用
     biosInput = document.createElement('input'); biosInput.type = 'file'; biosInput.accept = '.rom,.bin,.nes'; biosInput.multiple = true; biosInput.style.display = 'none';
     biosInput.addEventListener('change', async () => {
       const files = Array.from(biosInput.files || []); biosInput.value = '';
+      const target = biosTarget; biosTarget = null;
       if (!files.length) return;
       const fdsFiles = [];
       for (const f of files) { const b = new Uint8Array(await f.arrayBuffer()); if (MML.Emu.FdsDisk && MML.Emu.FdsDisk.isFdsBios(b)) fdsFiles.push({ f, b }); }
-      if (fdsFiles.length) { storeFdsBiosFile(fdsFiles[0].b, fdsFiles[0].f.name); if (files.length === fdsFiles.length) return; } // disksys.rom は機種に関係なく FDS 側へ
+      if (fdsFiles.length) { storeFdsBiosFile(fdsFiles[0].b, fdsFiles[0].f.name); if (files.length === fdsFiles.length) { if (cfgBiosRefresh) cfgBiosRefresh(); return; } } // disksys.rom は機種に関係なく FDS 側へ
       const rest = files.filter((f) => !fdsFiles.some((x) => x.f === f));
-      if (machine === 'msx') { if (rest.length) await storeMsxBiosFiles(rest); return; } // MSX: 複数ファイル(メイン/サブ/ロゴ)を大きさと名前で振り分けて控える
       if (!rest.length) return;
-      const f = rest[0];
-      const b = new Uint8Array(await f.arrayBuffer());
-      if (b.length < 0x2000) { alert(T('BIOS は 8KB 以上のファイルです: {name}', { name: f.name })); return; }
-      storeBios(b.length === 0x2000 ? b : b.subarray(b.length - 0x2000));
-      if (pendingFds) { const p = pendingFds; pendingFds = null; NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); }); }
+      // 残りは MSX の BIOS として大きさで振り分ける(16K/32K/128K/256K)。それ以外の大きさは案内
+      const sizes = await Promise.all(rest.map((f) => f.arrayBuffer().then((b) => b.byteLength)));
+      const msxFiles = rest.filter((f, i) => [0x4000, 0x8000, 0x20000, 0x40000].includes(sizes[i]));
+      const odd = rest.filter((f, i) => ![0x4000, 0x8000, 0x20000, 0x40000].includes(sizes[i]));
+      if (odd.length) alert(T('BIOS として扱えないファイルです(ディスクシステムは 8K、MSX は 16K/32K/128K/256K): {name}', { name: odd.map((f) => f.name).join(', ') }));
+      if (msxFiles.length) await storeMsxBiosFiles(msxFiles, target && target.kind === 'msx' ? target.mach : null);
+      if (cfgBiosRefresh) cfgBiosRefresh();
     });
     kbdBtn = mkIcon('keyboard', T('MSX のソフトキーボードを表示/隠す(タッチ端末では常に表示)'), () => { cfg.msx.softKbd = !cfg.msx.softKbd; saveCfg(); updateSoftKbd(); }); kbdBtn.hidden = true;
+    updateBiosBtn(); // 空の窓でも説明(FDS/MSX 両方)を出す
     cfgBtn = mkIcon('gear', T('設定(キー/ゲームパッドの割り当て、連射、ロールへ流す)'), () => toggleCfgPopover(cfgBtn));
     pauseBtn = mkIcon('pause', T('一時停止'), () => setPaused(!paused));
     rewindBtn = mkIcon('rewind', '', null);
@@ -638,7 +642,7 @@
     diskBadgeEl = document.createElement('button'); diskBadgeEl.type = 'button'; diskBadgeEl.className = 'nes-diskbadge'; diskBadgeEl.hidden = true;
     diskBadgeEl.addEventListener('click', () => { if (cfg.msx.writeBack && !diskDirHandle) pickDiskDir(); else toggleDiskPopover(sideBtn.hidden ? diskBadgeEl : sideBtn); });
     bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn);
-    statusEl.textContent = T('[開く] か .nes/.fds/.rom のドロップで始まります');
+    statusEl.textContent = T('[開く] か .nes/.fds/.rom/.dsk(zip でも)のドロップで始まります。ディスクシステムや MSX のディスクは先に ⚙ の機種タブで BIOS を控えてください');
     wrap.appendChild(bar); wrap.appendChild(canvas);
     if (MML.Device && MML.Device.isTouch && MML.Device.isTouch()) wrap.appendChild(buildTouchPad());
     softKbdEl = buildSoftKeyboard(); softKbdEl.hidden = true; wrap.appendChild(softKbdEl);
@@ -831,31 +835,55 @@
   function closeCfgPopover() {
     if (captureCancel) { captureCancel(); captureCancel = null; }
     if (!popEl) return;
-    popEl.remove(); popEl = null;
+    popEl.remove(); popEl = null; cfgBiosRefresh = null;
     if (popClose) { document.removeEventListener('mousedown', popClose, true); document.removeEventListener('keydown', popClose, true); popClose = null; }
   }
+  let cfgTab = null;          // 開いているタブ('common' | 'nes' | 'msx')。閉じても覚える
+  let cfgBiosRefresh = null;  // 開いている設定の BIOS 表を描き直す(BIOS を控えた/消した後)
+  let biosTarget = null;      // [選ぶ…] を押した機種({ kind: 'nes' } | { kind: 'msx', mach })
+  const MSX_BIOS_KINDS = [['main', 'メイン 32K'], ['sub', 'サブ 16K'], ['disk', 'ディスク ROM 16K'], ['kanji', '漢字 ROM'], ['kdr', '漢字ドライバ 32K'], ['logo', 'ロゴ 16K']];
+  function clearMsxBios(mach) {
+    try { for (const [k] of MSX_BIOS_KINDS) localStorage.removeItem(MSX_BIOS_KEY + mach + '.' + k); } catch (e) { /* ignore */ }
+    delete msxBiosCache[mach];
+  }
+  function clearFdsBios() { try { localStorage.removeItem(BIOS_KEY); } catch (e) { /* ignore */ } fdsBios = null; }
   function toggleCfgPopover(anchorEl) {
     if (popEl) { closeCfgPopover(); return; }
     const pop = document.createElement('div');
     pop.className = 'kbd-layout-pop nes-cfg-pop';
     pop.addEventListener('mousedown', (e) => e.stopPropagation());
     pop.addEventListener('click', (e) => e.stopPropagation());
-    const sec = (title) => {
+    // タブ: 共通 / ファミコン / MSX(機種の設定は機種のタブに、どの機種にも効く物は共通に)
+    const TABS = [['common', T('共通')], ['nes', T('ファミコン / FDS')], ['msx', 'MSX']];
+    if (!cfgTab) cfgTab = machine === 'msx' ? 'msx' : (romBytes ? 'nes' : 'common');
+    const tabBar = document.createElement('div'); tabBar.className = 'nes-cfg-tabs';
+    const panes = {}, tabBtns = {};
+    const selectTab = (id) => { cfgTab = id; for (const k of Object.keys(panes)) { panes[k].hidden = k !== id; tabBtns[k].classList.toggle('is-on', k === id); } };
+    for (const [id, label] of TABS) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'nes-cfg-tab'; b.textContent = label; b.addEventListener('click', () => selectTab(id));
+      tabBar.appendChild(b); tabBtns[id] = b;
+      const p = document.createElement('div'); p.className = 'nes-cfg-pane'; panes[id] = p;
+    }
+    pop.appendChild(tabBar); for (const id of Object.keys(panes)) pop.appendChild(panes[id]);
+    const sec = (title, tab) => {
       const d = document.createElement('div'); d.className = 'kbd-layout-sec';
       if (title) { const t = document.createElement('div'); t.className = 'kbd-layout-sec-title'; t.textContent = title; d.appendChild(t); }
-      pop.appendChild(d); return d;
+      panes[tab || 'common'].appendChild(d); return d;
     };
     const note = (parent, text) => { const d = document.createElement('div'); d.className = 'nes-cfg-note'; d.textContent = text; parent.appendChild(d); return d; };
-    // ロールへ流す
-    const s0 = sec(T('鍵盤表示'));
-    const lbl = document.createElement('label'); lbl.className = 'nes-cfg-check';
-    const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = !!cfg.liveRoll;
-    chk.addEventListener('change', () => { cfg.liveRoll = chk.checked; saveCfg(); if (cfg.liveRoll) liveBegin(); else liveEnd('end'); });
-    lbl.appendChild(chk); lbl.appendChild(document.createTextNode(' ' + T('鳴っている音をロールへ流す(ライブ表示)')));
-    s0.appendChild(lbl);
-    note(s0, T('鍵盤表示を開いておくと、音源レジスタの書き込みがその場で追記モードのロールに出ます(未来は無いので、鳴った音符が縁から生えて遠ざかる表示)。鍵盤表示のミュートと ch 別音量はゲームの音にも効き、ロールをドラッグするとゲームもそこまで巻き戻ります'));
-    // 連射
-    const s1 = sec(T('連射'));
+    const selRow = (label) => { const r = document.createElement('div'); r.className = 'nes-cfg-row'; const l = document.createElement('span'); l.textContent = label; const s = document.createElement('select'); r.appendChild(l); r.appendChild(s); return { r, s }; };
+    const check = (parent, checked, label, onChange) => {
+      const l = document.createElement('label'); l.className = 'nes-cfg-check';
+      const c = document.createElement('input'); c.type = 'checkbox'; c.checked = !!checked;
+      c.addEventListener('change', () => onChange(c.checked));
+      l.appendChild(c); l.appendChild(document.createTextNode(' ' + label)); parent.appendChild(l); return c;
+    };
+
+    // ── 共通 ──
+    const s0 = sec(T('鍵盤表示'), 'common');
+    check(s0, cfg.liveRoll, T('鳴っている音をロールへ流す(ライブ表示)'), (v) => { cfg.liveRoll = v; saveCfg(); if (cfg.liveRoll) liveBegin(); else liveEnd('end'); });
+    note(s0, T('鍵盤表示を開いておくと、音源レジスタの書き込みがその場で追記モードのロールに出ます(未来は無いので、鳴った音符が縁から生えて遠ざかる表示)。鍵盤表示のミュートと ch 別音量もゲームの音に効きます'));
+    const s1 = sec(T('連射'), 'common');
     const row = document.createElement('div'); row.className = 'nes-cfg-row';
     const rl = document.createElement('span'); rl.textContent = T('速さ');
     const sel = document.createElement('select');
@@ -863,8 +891,7 @@
     sel.value = String(cfg.turboRate);
     sel.addEventListener('change', () => { cfg.turboRate = +sel.value; saveCfg(); pushTurboRate(); });
     row.appendChild(rl); row.appendChild(sel); s1.appendChild(row);
-    // 巻き戻しの速さ
-    const s1b = sec(T('巻き戻し'));
+    const s1b = sec(T('巻き戻し'), 'common');
     const row2 = document.createElement('div'); row2.className = 'nes-cfg-row';
     const rl2 = document.createElement('span'); rl2.textContent = T('速さ');
     const sel2 = document.createElement('select');
@@ -873,88 +900,12 @@
     sel2.addEventListener('change', () => { cfg.rewindSpeed = +sel2.value; saveCfg(); if (node && rwActive) node.port.postMessage({ type: 'rewindSpeed', speed: cfg.rewindSpeed }); });
     row2.appendChild(rl2); row2.appendChild(sel2); s1b.appendChild(row2);
     note(s1b, T('押している間、直前 2 分の映像を逆再生で戻ります(音は止まります)。離した所からゲームが続きます'));
-    // 録音の補正(効果音除去/処理落ち補正)の初期値。録音ごとの実際の ON/OFF は保存/変換への横のチェック
-    const s1c = sec(T('録音の補正'));
-    const cfgCheck = (parent, key, label) => {
-      const l = document.createElement('label'); l.className = 'nes-cfg-check';
-      const c = document.createElement('input'); c.type = 'checkbox'; c.checked = !!cfg[key];
-      c.addEventListener('change', () => { cfg[key] = c.checked; saveCfg(); });
-      l.appendChild(c); l.appendChild(document.createTextNode(' ' + label)); parent.appendChild(l); return c;
-    };
-    const sfxChk = cfgCheck(s1c, 'sfxRemove', T('効果音を除く'));
-    const lagChk = cfgCheck(s1c, 'lagFix', T('処理落ちを詰める'));
-    note(s1c, T('録音が終わった時の初期値です。録音ごとの ON/OFF は [VGM を保存][変換へ] の横のチェックで変えられ、保存する VGM と変換に進む VGM の両方に効きます。効果音除去は曲が 3 周以上入った録音を周期で重ねて周回ごとに違う書き込みを多数決で置き換え、処理落ち補正は音楽の定期書き込みが無いフレームを詰めます。補正した VGM には印が付き、MML 変換設定の同じ補正は重ねて掛かりません'));
-    // MSX(機種/マッパー/ジョイスティック兼用。ROM を開く前でも機種は選べる)
-    const sm = sec('MSX');
-    const selRow = (label) => { const r = document.createElement('div'); r.className = 'nes-cfg-row'; const l = document.createElement('span'); l.textContent = label; const s = document.createElement('select'); r.appendChild(l); r.appendChild(s); return { r, s }; };
-    const mr = selRow(T('機種'));
-    for (const m of MSX_MACHINES) { const o = document.createElement('option'); o.value = m; o.textContent = m === 'auto' ? T('自動') : MSX_MACHINE_LABEL[m]; mr.s.appendChild(o); }
-    mr.s.value = cfg.msx.machine;
-    mr.s.addEventListener('change', () => { cfg.msx.machine = MSX_MACHINES.includes(mr.s.value) ? mr.s.value : 'auto'; saveCfg(); reopenMsx(); });
-    sm.appendChild(mr.r);
-    const pr = selRow(T('マッパー'));
-    for (const m of MSX_MAPPERS) { const o = document.createElement('option'); o.value = m; o.textContent = m === 'auto' ? T('自動(判別)') : m; pr.s.appendChild(o); }
-    const msxRomOpen = machine === 'msx' && !!romBytes && !pendingMsx;
-    pr.s.value = msxRomOpen ? (msxMapperFor(stateKey) || 'auto') : 'auto';
-    pr.s.disabled = !msxRomOpen; // ROM ごとに覚えるので、MSX の ROM を開いている時だけ
-    pr.s.addEventListener('change', () => { if (!msxRomOpen) return; setMsxMapper(stateKey, pr.s.value); reopenMsx(); });
-    sm.appendChild(pr.r);
-    // カートリッジ 2(音源カートリッジ。FM-PAC は同梱 C-BIOS の MSX-MUSIC ROM、MSX-AUDIO は Y8950 のみ(BIOS 無し)、SCC-I は RAM 128K+SCC+)
-    const cr = selRow(T('カートリッジ 2'));
-    const CART_B_LABEL = { none: T('無し'), fmpac: 'FM-PAC (MSX-MUSIC)', msxaudio: 'MSX-AUDIO (Y8950)', scci: 'SCC-I (SCC+)' };
-    for (const k of MSX_CART_B) { const o = document.createElement('option'); o.value = k; o.textContent = CART_B_LABEL[k]; cr.s.appendChild(o); }
-    cr.s.value = cfg.msx.cartB;
-    cr.s.addEventListener('change', () => { cfg.msx.cartB = MSX_CART_B.includes(cr.s.value) ? cr.s.value : 'none'; saveCfg(); reopenMsx(); });
-    sm.appendChild(cr.r);
-    // ディスクの FDC(ディスク ROM の出どころで決まる: Philips/Sony 系=WD2793、松下/turbo R=TC8566AF)
-    const fr = selRow(T('ディスクの FDC'));
-    const FDC_LABEL = { wd2793: 'WD2793 (Philips / Sony)', tc8566af: 'TC8566AF (Panasonic / turbo R)' };
-    for (const k of MSX_FDC) { const o = document.createElement('option'); o.value = k; o.textContent = FDC_LABEL[k]; fr.s.appendChild(o); }
-    fr.s.value = cfg.msx.fdc;
-    fr.s.addEventListener('change', () => { cfg.msx.fdc = MSX_FDC.includes(fr.s.value) ? fr.s.value : 'wd2793'; saveCfg(); if (msxDisk) reopenMsx(); });
-    sm.appendChild(fr.r);
-    const jl = document.createElement('label'); jl.className = 'nes-cfg-check';
-    const jc = document.createElement('input'); jc.type = 'checkbox'; jc.checked = !!cfg.msx.joyFromKeys;
-    jc.addEventListener('change', () => { cfg.msx.joyFromKeys = jc.checked; saveCfg(); });
-    jl.appendChild(jc); jl.appendChild(document.createTextNode(' ' + T('カーソルキーとスペースをジョイスティック 1 にも使う')));
-    sm.appendChild(jl);
-    note(sm, T('BIOS は [BIOS] で機種ごとに控えます(メイン 32K、サブ/ロゴ 16K。複数選択可)。機種「自動」は BIOS のある機種のうち MSX2 を優先します。マッパーは ROM ごとに覚え、変えると開き直します。ゲームパッドの A/B はジョイスティックのトリガ 1/2'));
-    note(sm, T('カートリッジ 2 はゲームと一緒に挿す音源です。FM 版の曲を持つゲームは FM-PAC を挿すと FM で鳴り、録音にも載ります(MSX2+/turbo R は内蔵 MSX-MUSIC が常にあります)。変えると開き直します'));
-    note(sm, T('MSX turbo R は同梱 C-BIOS に無いので実 BIOS(メイン 32K+サブ 16K、あれば漢字ドライバ 32K とディスク ROM)を [BIOS] で控えます。内蔵ソフト(512K)は載せません。R800 は S1990 の切り替えに従い、命令時間は近似です。PCM は録音に載り DAC の行で見えます'));
-    const wbl = document.createElement('label'); wbl.className = 'nes-cfg-check';
-    const wbc = document.createElement('input'); wbc.type = 'checkbox'; wbc.checked = !!cfg.msx.writeBack;
-    wbc.addEventListener('change', () => { cfg.msx.writeBack = wbc.checked; saveCfg(); updateDiskBadge(); if (wbc.checked && !diskDirHandle && machine === 'msx' && fdsSides > 0) pickDiskDir(); });
-    wbl.appendChild(wbc); wbl.appendChild(document.createTextNode(' ' + T('ディスクの書き込みを元の .dsk へ書き戻す(フォルダを選ぶ。初回に <名前>.bak を作る)')));
-    sm.appendChild(wbl);
-    note(sm, T('OFF(既定)でも書き込みはこのブラウザに保存され、同じ .dsk を開くと戻ります。[disk] の「書き出す」でいつでも .dsk として保存できます。ON にすると選んだフォルダの同名ファイルへ書きます(無ければ新規)。フォルダの選択はこのセッションだけ覚えます'));
-    note(sm, T('ディスク(.dsk)は実 BIOS とディスク ROM(16K)を [BIOS] で控えてから開けます。FDC はディスク ROM の機種に合わせます(合わないと「ディスクがありません」のまま)。動作中に別の .dsk を開くと入れ替えになり、書き込みは .dsk ごとにこのブラウザへ保存します'));
-    // 同梱 C-BIOS(cbiosData.js)の版とライセンス表示(BSD 2 条項は再配布時の著作権表示を求める)。実 BIOS を控えた機種はそちらが優先
-    const CB = MML.Emu.CBIOS;
-    if (CB && CB.license) {
-      const dt = document.createElement('details'); dt.className = 'nes-cfg-note';
-      const su = document.createElement('summary');
-      const have = ['msx1', 'msx2', 'msx2plus'].filter((m) => CB[m] && CB[m].main).map((m) => MSX_MACHINE_LABEL[m]).join('/');
-      su.textContent = T('同梱 BIOS: C-BIOS {ver}({machines})。控えた BIOS の無い機種で使います(BASIC/ディスク/漢字は無し)。ライセンス表示', { ver: CB.version || '', machines: have });
-      const pre = document.createElement('pre'); pre.className = 'nes-cfg-license'; pre.textContent = CB.license;
-      dt.appendChild(su); dt.appendChild(pre); sm.appendChild(dt);
-    }
-    // キー割り当て(MSX は操作キーだけ。他のキーはそのまま MSX のキーボードへ)
-    const keyActs = curKeyActions(), keyMap = curKeys();
-    const s2 = sec(machine === 'msx' ? T('キーボード(操作キー。他のキーはそのまま MSX のキーボードへ)') : T('キーボード(1P)'));
-    const tbl = document.createElement('table'); tbl.className = 'nes-cfg-table';
-    const keyBtns = {};
-    for (const a of keyActs) {
-      const tr = document.createElement('tr');
-      const td1 = document.createElement('td'); td1.textContent = actionLabel(a);
-      const td2 = document.createElement('td');
-      const b = document.createElement('button'); b.type = 'button'; b.className = 'nes-cfg-key secondary';
-      b.addEventListener('click', () => captureKey(b, a));
-      td2.appendChild(b); tr.appendChild(td1); tr.appendChild(td2); tbl.appendChild(tr);
-      keyBtns[a] = b;
-    }
-    s2.appendChild(tbl);
-    // ゲームパッド
-    const s3 = sec(T('ゲームパッド(1P/2P 共通)'));
+    const s1c = sec(T('録音の補正'), 'common');
+    check(s1c, cfg.sfxRemove, T('効果音を除く'), (v) => { cfg.sfxRemove = v; saveCfg(); });
+    check(s1c, cfg.lagFix, T('処理落ちを詰める'), (v) => { cfg.lagFix = v; saveCfg(); });
+    note(s1c, T('録音が終わった時の初期値です。録音ごとの ON/OFF は [VGM を保存][変換へ] の横のチェックで変えられ、保存する VGM と変換に進む VGM の両方に効きます。効果音除去は曲が 3 周以上入っている録音で効きます(周回の多数決)'));
+    // ゲームパッド(共通)
+    const s3 = sec(T('ゲームパッド(1P/2P 共通)'), 'common');
     const tbl2 = document.createElement('table'); tbl2.className = 'nes-cfg-table';
     const padBtns = {};
     for (const a of PAD_ACTIONS) {
@@ -970,26 +921,132 @@
     }
     s3.appendChild(tbl2);
     note(s3, T('十字は 12-15 番のボタンと左スティック(固定)。つながっている順に 1P、2P。早送り/巻き戻しは押している間、一時停止/状態保存/読込は押した時'));
-    const s4 = sec('');
+    const s4 = sec('', 'common');
     const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'nes-btn'; reset.textContent = T('既定に戻す');
-    reset.addEventListener('click', () => { cfg = loadCfgDefaults(); saveCfg(); pushTurboRate(); sel.value = String(cfg.turboRate); sel2.value = String(cfg.rewindSpeed); chk.checked = cfg.liveRoll; sfxChk.checked = cfg.sfxRemove; lagChk.checked = cfg.lagFix; jc.checked = cfg.msx.joyFromKeys; refresh(); });
+    reset.addEventListener('click', () => { cfg = loadCfgDefaults(); saveCfg(); pushTurboRate(); applyCfgLabels(); updateSoftKbd(); updateDiskBadge(); const a = anchorEl; closeCfgPopover(); toggleCfgPopover(a); });
     s4.appendChild(reset);
+    note(s4, T('キー/パッドの割り当て、連射、巻き戻し、録音の補正、MSX のカートリッジ 2/FDC/書き戻しを既定に戻します(BIOS の控えと機種は残ります)'));
+
+    // ── BIOS(ファミコン / MSX)──
+    const biosNote = (parent, text) => note(parent, text);
+    const ok = (v) => { const sp = document.createElement('span'); sp.className = v ? 'nes-bios-ok' : 'nes-bios-ng'; sp.textContent = v ? '✔' : '–'; return sp; };
+    const sn = sec(T('BIOS'), 'nes');
+    const fdsBox = document.createElement('div'); sn.appendChild(fdsBox);
+    biosNote(sn, T('ディスクシステム(.fds)の起動に disksys.rom(8K)が要ります。このブラウザに控えて次回も使います。.nes のカートリッジには要りません'));
+    const sb = sec(T('BIOS(機種ごとの控え)'), 'msx');
+    const msxBox = document.createElement('div'); sb.appendChild(msxBox);
+    biosNote(sb, T('メインを控えていない機種は同梱 C-BIOS で動きます(BASIC・ディスク・漢字は無し)。ディスクの起動にはメイン+サブ+ディスク ROM の 3 つ、turbo R はメイン+サブ(+漢字ドライバ)が要ります。ファイルは中身で振り分けるので名前は問いません(複数選択可)。機種「自動」は控えのある機種のうち MSX2 を優先します'));
+    const renderBios = () => {
+      // FDS
+      fdsBox.innerHTML = '';
+      const r = document.createElement('div'); r.className = 'nes-cfg-row';
+      const have = !!loadBios();
+      const lab = document.createElement('span'); lab.className = 'nes-disk-lbl'; lab.appendChild(ok(have)); lab.appendChild(document.createTextNode(' disksys.rom ' + (have ? T('(控え済み)') : T('(未)')))); r.appendChild(lab);
+      r.appendChild(mkBtn(T('選ぶ…'), T('disksys.rom(8K)を選ぶ'), () => { biosTarget = { kind: 'nes' }; biosInput.click(); }));
+      if (have) r.appendChild(mkBtn(T('消す'), T('控えを消す'), () => { clearFdsBios(); renderBios(); }));
+      fdsBox.appendChild(r);
+      // MSX: 機種 × 種類の表
+      msxBox.innerHTML = '';
+      const t = document.createElement('table'); t.className = 'nes-cfg-table nes-bios-table';
+      const th = document.createElement('tr');
+      for (const h of [T('機種'), T('メイン'), T('サブ'), T('ディスク'), T('漢字'), T('漢字ドライバ'), T('ロゴ'), T('同梱'), '']) { const c = document.createElement('th'); c.textContent = h; th.appendChild(c); }
+      t.appendChild(th);
+      const C = MML.Emu.MsxConsole;
+      for (const m of ['msx1', 'msx2', 'msx2plus', 'turbor']) {
+        const st = loadMsxBios(m) || {};
+        const tr = document.createElement('tr');
+        const c0 = document.createElement('td'); c0.textContent = MSX_MACHINE_LABEL[m]; tr.appendChild(c0);
+        for (const k of ['main', 'sub', 'disk', 'kanji', 'kdr', 'logo']) { const c = document.createElement('td'); c.appendChild(ok(!!st[k])); tr.appendChild(c); }
+        const cb = document.createElement('td'); cb.textContent = C && C.hasDefaultBios && C.hasDefaultBios(m) ? 'C-BIOS' : '–'; cb.className = 'nes-bios-ng'; tr.appendChild(cb);
+        const ca = document.createElement('td');
+        ca.appendChild(mkBtn(T('選ぶ…'), T('この機種の BIOS を選ぶ(複数選択可)'), () => { biosTarget = { kind: 'msx', mach: m }; biosInput.click(); }));
+        if (Object.keys(st).some((k) => k !== 'name' && st[k])) ca.appendChild(mkBtn(T('消す'), T('この機種の控えを全部消す'), () => { clearMsxBios(m); renderBios(); }));
+        tr.appendChild(ca);
+        t.appendChild(tr);
+      }
+      msxBox.appendChild(t);
+    };
+    renderBios();
+    cfgBiosRefresh = renderBios;
+
+    // ── MSX の本体設定 ──
+    const sm = sec(T('本体'), 'msx');
+    const mr = selRow(T('機種'));
+    for (const m of MSX_MACHINES) { const o = document.createElement('option'); o.value = m; o.textContent = m === 'auto' ? T('自動') : MSX_MACHINE_LABEL[m]; mr.s.appendChild(o); }
+    mr.s.value = cfg.msx.machine;
+    mr.s.addEventListener('change', () => { cfg.msx.machine = MSX_MACHINES.includes(mr.s.value) ? mr.s.value : 'auto'; saveCfg(); reopenMsx(); });
+    sm.appendChild(mr.r);
+    const pr = selRow(T('マッパー'));
+    for (const m of MSX_MAPPERS) { const o = document.createElement('option'); o.value = m; o.textContent = m === 'auto' ? T('自動(判別)') : m; pr.s.appendChild(o); }
+    const msxRomOpen = machine === 'msx' && !!romBytes && !pendingMsx;
+    pr.s.value = msxRomOpen ? (msxMapperFor(stateKey) || 'auto') : 'auto';
+    pr.s.disabled = !msxRomOpen; // ROM ごとに覚えるので、MSX の ROM を開いている時だけ
+    pr.s.addEventListener('change', () => { if (!msxRomOpen) return; setMsxMapper(stateKey, pr.s.value); reopenMsx(); });
+    sm.appendChild(pr.r);
+    const cr = selRow(T('カートリッジ 2'));
+    const CART_B_LABEL = { none: T('無し'), fmpac: 'FM-PAC (MSX-MUSIC)', msxaudio: 'MSX-AUDIO (Y8950)', scci: 'SCC-I (SCC+)' };
+    for (const k of MSX_CART_B) { const o = document.createElement('option'); o.value = k; o.textContent = CART_B_LABEL[k]; cr.s.appendChild(o); }
+    cr.s.value = cfg.msx.cartB;
+    cr.s.addEventListener('change', () => { cfg.msx.cartB = MSX_CART_B.includes(cr.s.value) ? cr.s.value : 'none'; saveCfg(); reopenMsx(); });
+    sm.appendChild(cr.r);
+    const fr = selRow(T('ディスクの FDC'));
+    const FDC_LABEL = { wd2793: 'WD2793 (Philips / Sony)', tc8566af: 'TC8566AF (Panasonic / turbo R)' };
+    for (const k of MSX_FDC) { const o = document.createElement('option'); o.value = k; o.textContent = FDC_LABEL[k]; fr.s.appendChild(o); }
+    fr.s.value = cfg.msx.fdc;
+    fr.s.addEventListener('change', () => { cfg.msx.fdc = MSX_FDC.includes(fr.s.value) ? fr.s.value : 'wd2793'; saveCfg(); if (msxDisk) reopenMsx(); });
+    sm.appendChild(fr.r);
+    check(sm, cfg.msx.joyFromKeys, T('カーソルキーとスペースをジョイスティック 1 にも使う'), (v) => { cfg.msx.joyFromKeys = v; saveCfg(); });
+    note(sm, T('マッパーは ROM ごとに覚え、変えると開き直します。カートリッジ 2 はゲームと一緒に挿す音源です。FM 版の曲を持つゲームは FM-PAC を挿すと FM で鳴り、録音にも載ります(MSX2+/turbo R は内蔵 MSX-MUSIC が常にあります)。変えると開き直します'));
+    note(sm, T('ディスク(.dsk)の FDC はディスク ROM の機種に合わせます(Philips/Sony=WD2793、Panasonic/turbo R=TC8566AF。合わないと「ディスクがありません」のまま)。動作中に別の .dsk を開くと足して入れ替わり、[disk] で選べます'));
+    note(sm, T('turbo R は同梱 C-BIOS に無いので実 BIOS が要ります。内蔵ソフト(512K)は載せません。R800 は S1990 の切り替えに従い、命令時間は近似です。PCM は録音に載り DAC の行で見えます'));
+    const sw = sec(T('ディスクの書き込み'), 'msx');
+    check(sw, cfg.msx.writeBack, T('ディスクの書き込みを元の .dsk へ書き戻す(フォルダを選ぶ。初回に <名前>.bak を作る)'), (v) => { cfg.msx.writeBack = v; saveCfg(); updateDiskBadge(); if (v && !diskDirHandle && machine === 'msx' && fdsSides > 0) pickDiskDir(); });
+    note(sw, T('OFF(既定)でも書き込みはこのブラウザに保存され、同じ .dsk を開くと戻ります。[disk] の「書き出す」でいつでも .dsk として保存できます。ON にすると選んだフォルダの同名ファイルへ書きます(無ければ新規)。フォルダの選択はこのセッションだけ覚えます'));
+    // 同梱 C-BIOS(cbiosData.js)の版とライセンス表示(BSD 2 条項は再配布時の著作権表示を求める)。実 BIOS を控えた機種はそちらが優先
+    const CB = MML.Emu.CBIOS;
+    if (CB && CB.license) {
+      const dt = document.createElement('details'); dt.className = 'nes-cfg-note';
+      const su = document.createElement('summary');
+      const have = ['msx1', 'msx2', 'msx2plus'].filter((m) => CB[m] && CB[m].main).map((m) => MSX_MACHINE_LABEL[m]).join('/');
+      su.textContent = T('同梱 BIOS: C-BIOS {ver}({machines})。控えた BIOS の無い機種で使います(BASIC/ディスク/漢字は無し)。ライセンス表示', { ver: CB.version || '', machines: have });
+      const pre = document.createElement('pre'); pre.className = 'nes-cfg-license'; pre.textContent = CB.license;
+      dt.appendChild(su); dt.appendChild(pre); sb.appendChild(dt);
+    }
+
+    // ── キー割り当て(機種のタブに。NES は 1P の全操作、MSX は操作キーだけで他のキーは MSX のキーボードへ)──
+    const keyBtns = {};
+    const keyTable = (parent, acts, getMap, id) => {
+      const tbl = document.createElement('table'); tbl.className = 'nes-cfg-table';
+      for (const a of acts) {
+        const tr = document.createElement('tr');
+        const td1 = document.createElement('td'); td1.textContent = actionLabel(a);
+        const td2 = document.createElement('td');
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'nes-cfg-key secondary';
+        b.addEventListener('click', () => captureKey(b, a, acts, getMap));
+        td2.appendChild(b); tr.appendChild(td1); tr.appendChild(td2); tbl.appendChild(tr);
+        keyBtns[id + ':' + a] = { b, getMap };
+      }
+      parent.appendChild(tbl);
+    };
+    const s2 = sec(T('キーボード(1P)'), 'nes');
+    keyTable(s2, KEY_ACTIONS, () => cfg.keys, 'nes');
+    const s2m = sec(T('キーボード(操作キー。他のキーはそのまま MSX のキーボードへ)'), 'msx');
+    keyTable(s2m, MSX_KEY_ACTIONS, () => cfg.msx.keys, 'msx');
     const refresh = () => {
-      const km = curKeys();
-      for (const a of keyActs) keyBtns[a].textContent = keyLabel(km[a]);
+      for (const k of Object.keys(keyBtns)) { const { b, getMap } = keyBtns[k]; b.textContent = keyLabel(getMap()[k.split(':')[1]]); }
       for (const a of PAD_ACTIONS) padBtns[a].textContent = cfg.pad[a] >= 0 ? T('ボタン {n}', { n: cfg.pad[a] }) : T('(なし)');
       applyCfgLabels();
     };
     // キーを 1 つ受け取る(Esc で取り消し)
-    function captureKey(btn, action) {
+    function captureKey(btn, action, acts, getMap) {
       if (captureCancel) captureCancel();
       btn.textContent = T('キーを押してください…'); btn.classList.add('nes-cfg-key--wait');
       const h = (e) => {
         e.preventDefault(); e.stopPropagation();
         done();
         if (e.code !== 'Escape') {
-          const km = curKeys();
-          for (const o of keyActs) if (o !== action && km[o] === e.code) km[o] = ''; // 同じキーは 1 つの操作にだけ
+          const km = getMap();
+          for (const o of acts) if (o !== action && km[o] === e.code) km[o] = ''; // 同じキーは 1 つの操作にだけ
           km[action] = e.code; saveCfg();
         }
         refresh();
@@ -1032,6 +1089,7 @@
       r = requestAnimationFrame(poll);
     }
     refresh();
+    selectTab(cfgTab);
     document.body.appendChild(pop);
     popEl = pop;
     const rc = anchorEl.getBoundingClientRect();
@@ -1554,7 +1612,7 @@
   async function openMsx(bytes, name, opt) {
     opt = opt || {};
     machine = 'msx'; pendingFds = null;
-    biosBtn.hidden = false; updateBiosBtn(); updateSoftKbd();
+    updateBiosBtn(); updateSoftKbd();
     const mach = resolveMsxMachine();
     let bios = mach ? msxBiosFor(mach) : null;
     if (bios && opt.disk && !bios.disk) bios = null; // ディスクにはディスク ROM(16K、[BIOS] で控える)が要る
@@ -1569,8 +1627,8 @@
         const st = loadMsxBios(mach || cfg.msx.machine || 'msx2') || {};
         const kinds = [['main', T('メイン 32K')], ['sub', T('サブ 16K')], ['disk', T('ディスク ROM 16K')]];
         const have = kinds.filter(([k]) => st[k]).map(([, l]) => l), miss = kinds.filter(([k]) => !st[k]).map(([, l]) => l);
-        statusEl.textContent = T('ディスクの起動には実 BIOS が要ります(同梱 C-BIOS では起動できません)。[BIOS] で足りない物を選んでください: {miss}', { miss: miss.join(' / ') }) + (have.length ? ' ' + T('(控え済み: {have})', { have: have.join(' / ') }) : '');
-      } else statusEl.textContent = T('MSX の BIOS(メイン ROM 32K。C-BIOS でも可)を [BIOS] で指定してください');
+        statusEl.textContent = T('ディスクの起動には実 BIOS が要ります(同梱 C-BIOS では起動できません)。⚙ の MSX タブで足りない物を選んでください: {miss}', { miss: miss.join(' / ') }) + (have.length ? ' ' + T('(控え済み: {have})', { have: have.join(' / ') }) : '');
+      } else statusEl.textContent = T('⚙ の MSX タブで BIOS(メイン ROM 32K)を控えてください');
       return null;
     }
     pendingMsx = null;
@@ -1665,14 +1723,14 @@
       if (img && OPENERS[img.kind]) return OPENERS[img.kind](bytes, name, img);
       machine = 'nes'; pendingMsx = null; msxChips = []; msxDisk = false;
       const isFds = !!(MML.Emu.FdsDisk && MML.Emu.FdsDisk.isFds(bytes));
-      biosBtn.hidden = !isFds; updateBiosBtn(); updateSoftKbd();
+      updateBiosBtn(); updateSoftKbd();
       if (isFds && !loadBios()) {
         // BIOS が無い: 窓を開いて選ばせ、選ばれたら開き直す
         pendingFds = { bytes, name };
         romName = name || ''; nameEl.textContent = romName; nameEl.title = '';
         win.style.display = 'flex';
         if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
-        statusEl.textContent = T('FDS の BIOS(disksys.rom)を [BIOS] で指定してください');
+        statusEl.textContent = T('⚙ のファミコンタブで FDS の BIOS(disksys.rom)を控えてください');
         return null;
       }
       pendingFds = null;

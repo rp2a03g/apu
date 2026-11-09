@@ -1968,7 +1968,16 @@ button.secondary {
 .nes-diskbadge { background: rgba(255, 208, 90, 0.15); color: #ffd05a; border: 1px solid #ffd05a; border-radius: 10px; font-size: 10.5px; padding: 1px 8px; cursor: pointer; }
 .nes-diskbadge[hidden] { display: none !important; }
 /* ⚙ 設定のポップオーバー(枠は .kbd-layout-pop と共通) */
-.nes-cfg-pop { max-width: 380px; max-height: calc(100vh - 16px); overflow: auto; }
+.nes-cfg-pop { max-width: 470px; max-height: calc(100vh - 16px); overflow: auto; }
+.nes-cfg-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.nes-cfg-tab { background: transparent; color: var(--text-muted); border: 1px solid transparent; border-bottom: none; border-radius: 5px 5px 0 0; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.nes-cfg-tab:hover { color: var(--text); }
+.nes-cfg-tab.is-on { color: var(--text); background: var(--hover-bg); border-color: var(--border); font-weight: 600; }
+.nes-cfg-pane[hidden] { display: none !important; }
+.nes-bios-table th { font-weight: 500; color: var(--text-muted); font-size: 10.5px; padding: 1px 4px; text-align: center; white-space: nowrap; }
+.nes-bios-table td { padding: 1px 4px; text-align: center; white-space: nowrap; }
+.nes-bios-table td:first-child { text-align: left; }
+.nes-bios-ok { color: #7bd88f; } .nes-bios-ng { color: var(--text-muted); }
 .nes-cfg-row { display: flex; align-items: center; gap: 8px; margin: 2px 0; }
 .nes-cfg-row select { font-size: 12px; }
 .nes-cfg-check { display: flex; align-items: center; gap: 4px; cursor: pointer; }
