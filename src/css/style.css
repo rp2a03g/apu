@@ -1914,7 +1914,11 @@ button.secondary {
 .nes-canvas { width: 512px; max-width: 100%; aspect-ratio: 256 / 240; height: auto; image-rendering: pixelated; background: #000; outline: none; border: 1px solid var(--border); }
 .nes-canvas:focus { border-color: var(--accent); }
 .nes-bar { display: flex; align-items: center; gap: 8px; font-size: 12px; width: 100%; }
+.nes-machine { font-weight: 600; white-space: nowrap; color: var(--text); }
+.nes-machine:empty { display: none; }
 .nes-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.nes-ilbadge { margin-left: auto; font-size: 10px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; white-space: nowrap; }
+.nes-ilbadge[hidden] { display: none !important; }
 .nes-btn { font-size: 12px; padding: 3px 10px; cursor: pointer; }
 .nes-rec--on { color: #ff5a5a; border-color: #ff5a5a; }
 .nes-ff { color: #ffd05a; border-color: #ffd05a; }

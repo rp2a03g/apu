@@ -9,7 +9,9 @@
  * R25 bit1 MSK=左 8 ドットをボーダー色で隠す。全モードに効き、スプライトは動かない)、YJK(R25 bit3、GRAPHIC7 のバイト列を 4 ドット 1 組の
  * Y5+J6/K6 で色にする=SCREEN12。R25 bit4 YAE=バイトの bit3 が 1 のドットはパレット(bit7-4)=SCREEN10/11)、R25 bit6 CMD=ビットマップ以外の
  * モードでもコマンドが動く(GRAPHIC7 の配置として扱う: openMSX の挙動の記憶による推定)。S1 bit2 で V9958 を名乗る。
- * YJK の frameIdx(巻き戻し用)は GRB332 への丸め(表示は frame の正確な色)。インターレース(R9 bit3)は非インターレースとして描く。
+ * YJK の frameIdx(巻き戻し用)は GRB332 への丸め(表示は frame の正確な色)。
+ * インターレース(R9 bit3 IL): フレームを 480 行にし、偶奇フィールドを交互の行に描く(frameHeight が 480 になる。interlaced で分かる)。
+ * EO(R9 bit2): フィールドごとに名前表のページ(R2 bit5)を 0/1 に切り替える(IL 無しなら 240 行のままフレームごとに切替)。巻き戻し用の frameIdx は偶数フィールドだけ。
  *
  * ■ 時間
  *   行単位。1 行 = 228 Z80 サイクル(VDP 1368 サイクル/6)、NTSC 262 行・PAL(R9 bit1)313 行。1 行の終わりでその行を描く
@@ -82,7 +84,7 @@
       this.status = new Uint8Array(10);
       this.palette = new Uint32Array(16);   // 表示色(ABGR)
       this.paletteRaw = new Uint16Array(16); // V9938 の 9bit 値(保存/録音用)
-      this.frame = new Uint32Array(WIDE * H); // 幅 256 のフレームは先頭 256×240 だけ使う(frameWidth)
+      this.frame = new Uint32Array(WIDE * H * 2); // 幅 256 のフレームは先頭 256×240 だけ使う(frameWidth)。インターレース中は 480 行(frameHeight)
       this.frameIdx = new Uint8Array(W * H);
       this.lineBuf = new Uint8Array(WIDE);   // 1 行の色番号(0 は透明=背景色)。G7 は 8bit 色そのもの
       this.sprBuf = new Uint8Array(W);       // 1 行のスプライト色(0 無し、bit4 = スプライトあり)
@@ -107,6 +109,7 @@
       this.frameWidthOut = W;     // 本体に見せる幅(VBlank で確定)
       this.frameIdxKind = 0;      // 0=パレット番号、1=GRB332(G7)
       this.idxKindCur = 0;
+      this.field = 0; this.ilCur = false; this.eoCur = false; this.frameHeightOut = H; this.interlacedOut = false; // インターレース(IL/EO)
       this.cmd = { op: 0, sx: 0, sy: 0, dx: 0, dy: 0, nx: 0, ny: 0, anx: 0, any: 0, clr: 0, arg: 0, lop: 0, dix: 1, diy: 1, cx: 0, cy: 0, maj: 0, eq: 0, lineAcc: 0, budget: 0, tr: false };
       for (let i = 0; i < 16; i++) this._setPalette(i, V9938_DEFAULT_PALETTE[i][0], V9938_DEFAULT_PALETTE[i][1], V9938_DEFAULT_PALETTE[i][2]);
       this.frame.fill(this.palette[0]); this.frameIdx.fill(0);
@@ -132,7 +135,9 @@
     get cyclesPerFrame() { return this.linesPerFrame * CYCLES_PER_LINE; }
     get displayEnabled() { return (this.regs[1] & 0x40) !== 0; }
     get frameWidth() { return this.frameWidthOut; }
-    get frameHeight() { return H; }
+    get frameHeight() { return this.frameHeightOut; } // 240、インターレース中は 480
+    get interlaced() { return this.interlacedOut; }
+    _row(fy) { return this.ilCur ? fy * 2 + this.field : fy; } // frame 上の行(インターレースはフィールドで交互)
     get frameIdxWidth() { return W; }
     _updateTiming() {
       // 表示の先頭行: 垂直同期 3 + 上の消去 13 + 上のボーダー(192 行: 26、212 行: 16)+ R18 の縦調整(符号付き 4bit)
@@ -246,7 +251,7 @@
     }
     _endLine() {
       const l = this.line;
-      if (l === this.displayStart) { this.outW = this.modeWidth; this.idxKindCur = (this.mode === 28) ? 1 : 0; } // このフレームの幅/索引の種類はモードで決める
+      if (l === this.displayStart) { this.outW = this.modeWidth; this.idxKindCur = (this.mode === 28) ? 1 : 0; this.ilCur = !this.isTms && (this.regs[9] & 0x08) !== 0; this.eoCur = !this.isTms && (this.regs[9] & 0x04) !== 0; } // このフレームの幅/索引の種類/インターレースはモードで決める
       if (l >= this.displayStart && l < this.displayEnd) this._renderLine(l - this.displayStart);
       // ライン割り込み(V9938): 表示行 R19(縦スクロール R23 ぶんずれる)の終わりで FH
       if (!this.isTms && l >= this.displayStart && l < this.displayEnd) {
@@ -261,6 +266,8 @@
         this._fillBorders();
         this.frameWidthOut = this.outW;
         this.frameIdxKind = this.idxKindCur;
+        this.frameHeightOut = this.ilCur ? H * 2 : H; this.interlacedOut = this.ilCur;
+        this.field = (this.ilCur || this.eoCur) ? (this.field ^ 1) : 0;
         this.frameCount++;
         this.vblankStarted = true;
         if (this.onInt && (this.regs[1] & 0x20)) this.onInt(true);
@@ -275,8 +282,9 @@
     _fillBorders() {
       const [c, ci] = this._borderColor();
       const ow = this.outW, y0 = this.frameY0, y1 = y0 + this.displayLines;
-      this.frame.fill(c, 0, y0 * ow); this.frameIdx.fill(ci, 0, y0 * W);
-      this.frame.fill(c, y1 * ow, H * ow); this.frameIdx.fill(ci, y1 * W);
+      if (this.ilCur) { for (let r = 0; r < H; r++) if (r < y0 || r >= y1) { const b = (r * 2 + this.field) * ow; this.frame.fill(c, b, b + ow); } }
+      else { this.frame.fill(c, 0, y0 * ow); this.frame.fill(c, y1 * ow, H * ow); }
+      if (!this.ilCur || this.field === 0) { this.frameIdx.fill(ci, 0, y0 * W); this.frameIdx.fill(ci, y1 * W); }
     }
 
     // 表示行 y(0〜displayLines-1)を描く
@@ -297,11 +305,14 @@
         // 横スクロール(V9958 R26/R27): SP2 の 2 ページはビットマップでだけ(ページは R26 bit5 が R2 bit5 の代わり)
         const hs = this.isV9958 && ((regs[26] & 0x1F) || (regs[27] & 0x07));
         const sp2 = hs && (regs[25] & 0x01) && (mode === 12 || mode === 16 || mode === 20 || mode === 28);
+        const r2eo = regs[2];
+        if (this.eoCur && (mode === 12 || mode === 16 || mode === 20 || mode === 28)) regs[2] = (r2eo & ~0x20) | (this.field << 5); // EO: 偶奇フィールドでページ 0/1
         const r2 = regs[2];
         if (sp2) regs[2] = (r2 & ~0x20) | (regs[26] & 0x20);
         this._lineBg(mode, sy, lb, mw, yjk ? this.lineRgb : null);
         if (hs) this._hScroll(mode, sy, mw, sp2, yjk);
         if (sp2) regs[2] = r2;
+        regs[2] = r2eo;
         if (yjk) this.yjkBg.set(lb.subarray(0, W)); // スプライトの前の背景(合成で「スプライトが上書きした所」を見分ける)
         if (mode !== 1 && mode !== 9 && !(regs[8] & 0x02)) {
           if (this.isTms || mode === 0 || mode === 2 || mode === 4) this._spritesMode1(y, lb, mw);
@@ -311,8 +322,8 @@
       }
       void spritesOn;
       // 合成: frame(フレームの幅 outW に合わせる)と frameIdx(常に 256)
-      const ow = this.outW, base = fy * ow, pal = this.palette, tp = !this.isTms && (regs[8] & 0x20);
-      const frame = this.frame, idx = this.frameIdx, ibase = fy * W;
+      const ow = this.outW, row = this._row(fy), base = row * ow, pal = this.palette, tp = !this.isTms && (regs[8] & 0x20);
+      const frame = this.frame, idx = this.frameIdx, ibase = fy * W, wIdx = !this.ilCur || this.field === 0; // 巻き戻し用の索引は偶数フィールドだけ
       const [bdc, bdi] = this._borderColor();
       const kind = this.idxKindCur;
       if (g7) {
@@ -323,10 +334,10 @@
           const c = lb[x];
           const col = (yjk && c === bgc[x]) ? rgb[x] : G7_PALETTE[c];
           if (ow === W) { frame[base + x] = col; } else { frame[base + x * 2] = col; frame[base + x * 2 + 1] = col; }
-          idx[ibase + x] = kind ? c : (c & 0x0F);
+          if (wIdx) idx[ibase + x] = kind ? c : (c & 0x0F);
         }
         void bdc; void bdi;
-        this._maskLeft(fy, ow);
+        this._maskLeft(fy, row, ow);
         return;
       }
       for (let x = 0; x < mw; x++) {
@@ -336,10 +347,11 @@
         if (ow === mw) frame[base + x] = col;
         else if (ow === WIDE) { frame[base + x * 2] = col; frame[base + x * 2 + 1] = col; }
         else if (!(x & 1)) frame[base + (x >> 1)] = col;
+        if (!wIdx) continue;
         if (mw === W) idx[ibase + x] = kind ? this._toGrb(c) : c;
         else if (!(x & 1)) idx[ibase + (x >> 1)] = kind ? this._toGrb(c) : c;
       }
-      this._maskLeft(fy, ow);
+      this._maskLeft(fy, row, ow);
     }
     // 背景の 1 行をモードで描く(lb に色番号/G7 は 8bit 色。rgb を渡すと YJK として lineRgb に表示色も)
     _lineBg(mode, sy, lb, mw, rgb) {
@@ -374,12 +386,12 @@
       }
     }
     // 左 8 ドット(幅 512 は 16)をボーダー色で隠す(V9958 R25 bit1 MSK)。横スクロールの R27 で欠けた端を隠すための物
-    _maskLeft(fy, ow) {
+    _maskLeft(fy, row, ow) {
       if (!this.isV9958 || !(this.regs[25] & 0x02)) return;
       const [c, ci] = this._borderColor();
-      const n = ow === WIDE ? 16 : 8, base = fy * ow;
+      const n = ow === WIDE ? 16 : 8, base = row * ow;
       for (let x = 0; x < n; x++) this.frame[base + x] = c;
-      for (let x = 0; x < 8; x++) this.frameIdx[fy * W + x] = ci;
+      if (!this.ilCur || this.field === 0) for (let x = 0; x < 8; x++) this.frameIdx[fy * W + x] = ci;
     }
     // YJK(V9958 SCREEN 10-12): 4 ドット 1 組。各バイトの bit7-3 が Y(5bit)、bit2-0 が 4 バイトで K(下位 3+上位 3、符号つき 6bit)と J。
     //   R = Y + J、G = Y + K、B = (5Y - 2J - K) / 4(各 0-31 に飽和、5bit → 8bit は ×255/31)。YAE(R25 bit4)のとき bit3=1 のドットはパレット bit7-4

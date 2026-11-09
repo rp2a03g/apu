@@ -15,7 +15,7 @@ NES2VGM(DESIGN-CAPTURE.md §7、src/emulator/nes/)の MSX 版。実機 MSX の�
 | CPU | Z80(3.58MHz、M1 ウェイト 1) / R800(turboR、7.16MHz 相当) | — |
 | 音源 | PSG(AY-3-8910 / YM2149) / SCC / SCC+(SCC-I) / MSX-MUSIC(YM2413、FM-PAC・内蔵) / MSX-AUDIO(Y8950、ADPCM 込み) / turboR 内蔵 PCM / コナミ 8bit DAC(牌の魔術師・シンセサイザー) | MoonSound(OPL4: 規模が大きくコーパスも薄い) / SFG-01・05(YM2151: 既存 ym2151.js で安いが後回し) / MSX-MIDI / Covox |
 | 媒体 | カートリッジ ROM(.rom/.mx1/.mx2、zip 内も) / ディスク(.dsk、ディスク ROM は利用者が用意) | カセット(.cas) / .qd 系 / ハードディスク |
-| 映像 | TMS9918(MSX1) / V9938(MSX2) / V9958(MSX2+・turboR) の全画面モード・スプライト・VDP コマンド | インターレース表示の実描画(フレーム合成だけ) / 外部 VDP(Vシリーズ以外) |
+| 映像 | TMS9918(MSX1) / V9938(MSX2) / V9958(MSX2+・turboR) の全画面モード・スプライト・VDP コマンド | インターレース(2026-11-10 対応: 480 行に偶奇フィールドを交互に描く。EO のページ切替も) / 外部 VDP(Vシリーズ以外) |
 | 入力 | キーボード(日本語配列マトリクス) / ジョイスティック 2 口 / turboR の PAUSE | マウス・ライトペン・トラックボール・アルカノイドパドル |
 
 ★ turboR の内蔵 PCM とコナミ DAC は turboR / 一部コナミソフトを遊ぶと必ず鳴る。鳴らすだけでなく **録音にも載せる**(規格外ブロック、§5.6。2026-11-08 決定)。

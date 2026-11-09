@@ -298,6 +298,7 @@ function buildSoundTestRom(kind, opts) {
 //   kind 'g7': SCREEN8(GRAPHIC7)。HMMV で画面を GRB=0x1C(緑)に塗り、LMMV で矩形 0xE0(赤)。
 //   kind 'g6': SCREEN7(GRAPHIC6、512 幅)。HMMV で色 4、LMMV で 128×32 の矩形 色 9。
 //   kind 't2': SCREEN0 WIDTH 80(TEXT2)。名前表に 'A'(0x41)を並べ、パターン 0x41 を縞に。
+//   kind 'il'(V9938): SCREEN5 でページ 0 を色 4、ページ 1 を色 2 に塗り R9=LN|IL|EO。期待: frameHeight 480、偶数行が 4、奇数行が 2
 //   kind 'scroll'(V9958、7e): SCREEN5。ページ 0 を色 4 で塗り左上 64×212 を色 9、ページ 1(VRAM $8000〜)を色 2 で塗る。R25=SP2|MSK、R26=4(32 ドット)、R27=3。
 //              期待: x 0-7 ボーダー(MSK、色 6)、x 8-34 色 9(矩形 64 の残り 32+右ずらし 3)、35-226 色 4、227-255 色 2(ページ 1)
 //   kind 'yjk'(V9958): SCREEN12(G7+YJK)。HMMV で全面を Y=16 K=0 J=0(バイト $80)に塗り、行 0 の 0-3 を Y=31 J=+15 K=0(バイト $F8 $F8 $FF $F9)に。
@@ -318,7 +319,13 @@ function buildV9938TestRom(kind) {
     // コマンドのレジスタ R32〜R46 を間接レジスタ(R17 ← 32、$9B へ連続)で書く
     const cmd = (vals) => { A.di(); A.ld_a(32); A.out(0x99); A.ld_a(0x91); A.out(0x99); for (const v of vals) { A.ld_a(v); A.out(0x9B); } };
     const w16 = (v) => [v & 0xFF, (v >> 8) & 0xFF];
-    if (kind === 'scroll') {
+    if (kind === 'il') {
+      vdp(0, 0x06); vdp(2, 0x1F); vdp(7, 0x06); vdp(8, 0x02); vdp(1, 0x60);
+      cmd([...w16(0), ...w16(0), ...w16(0), ...w16(0), ...w16(256), ...w16(212), 0x44, 0x00, 0xC0]); waitCmd('a');          // ページ 0 全面 4
+      cmd([...w16(0), ...w16(0), ...w16(0), ...w16(256), ...w16(256), ...w16(212), 0x22, 0x00, 0xC0]); waitCmd('b');        // ページ 1 全面 2
+      vdp(9, 0x80 | 0x08 | 0x04);                                                                                             // 212 行 + IL + EO
+      A.ei(); A.label('idle'); A.halt(); A.jr('idle');
+    } else if (kind === 'scroll') {
       vdp(0, 0x06); vdp(2, 0x1F); vdp(9, 0x80); vdp(7, 0x06); vdp(8, 0x02); vdp(1, 0x60); // ボーダー 6(赤。色 0/1 は黒で見分けられない)
       cmd([...w16(0), ...w16(0), ...w16(0), ...w16(0), ...w16(256), ...w16(212), 0x44, 0x00, 0xC0]); waitCmd('a');          // ページ 0 全面 4
       cmd([...w16(0), ...w16(0), ...w16(0), ...w16(0), ...w16(64), ...w16(212), 0x09, 0x00, 0x80]); waitCmd('b');           // 左 64 を 9

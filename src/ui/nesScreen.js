@@ -139,6 +139,7 @@
   let msxChips = [], msxMachine = '', pendingMsx = null, msxFps = 60, msxDisk = false; // msxDisk: 今の MSX はディスクで起動している(次の .dsk は入れ替え) // MSX: 載っている音源名(psg/scc/opll/opl/dac)、起動した機種、BIOS 待ちの ROM、本体のフレームレート(50Hz 中は 50)
   let keyBits = 0, keyTurbo = 0, touchBits = 0, touchTurbo = 0, lastPad = -1;
   let kbdBtn = null, softKbdEl = null, touchPadEl = null; // MSX のソフトキーボード(7f)とタッチ操作キー
+  let machineEl = null, ilBadgeEl = null; // 左上の機種表示、右上の「インターレース」の印
   let fpsCount = 0, fpsMs = 0, fps = 0, frameSeq = 0, underruns = 0; // frameSeq: 本体の frameCount(最後に届いたフレーム)、underruns: 音切れ回数
   let paused = false;
   // 主スレッド実行(音なし)
@@ -627,7 +628,9 @@
     for (const el of [romInput, openBtn, resetBtn, stateBtnS, stateBtnL, sideBtn, biosBtn, kbdBtn, biosInput, gap(), speedBtn, gap(), pauseBtn, gap(), rewindBtn, gap(), recBtn, gap(), cfgBtn]) hdr.appendChild(el);
     // 本体: 上にファイル名+状態+録音結果、画面、タッチ操作キー
     const bar = document.createElement('div'); bar.className = 'nes-bar';
+    machineEl = document.createElement('span'); machineEl.className = 'nes-machine';
     nameEl = document.createElement('span'); nameEl.className = 'nes-name';
+    ilBadgeEl = document.createElement('span'); ilBadgeEl.className = 'nes-ilbadge'; ilBadgeEl.textContent = T('インターレース'); ilBadgeEl.title = T('インターレース表示中(偶奇フィールドを交互の行に描いた 480 行)'); ilBadgeEl.hidden = true;
     statusEl = document.createElement('span'); statusEl.className = 'nes-status';
     recInfoEl = document.createElement('span'); recInfoEl.className = 'nes-recinfo';
     const recOpt = (key) => {
@@ -645,8 +648,8 @@
     convBtn = mkBtn(T('変換へ'), '', () => { if (recVgm && NesScreen.onOpenRecording) { setPaused(true); NesScreen.onOpenRecording(recVgm, recFileName()); } }); convBtn.hidden = true;
     diskBadgeEl = document.createElement('button'); diskBadgeEl.type = 'button'; diskBadgeEl.className = 'nes-diskbadge'; diskBadgeEl.hidden = true;
     diskBadgeEl.addEventListener('click', () => { if (cfg.msx.writeBack && !diskDirHandle) pickDiskDir(); else toggleDiskPopover(sideBtn.hidden ? diskBadgeEl : sideBtn); });
-    bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn);
-    statusEl.textContent = T('[開く] か .nes/.fds/.rom/.dsk(zip でも)のドロップで始まります。ディスクシステムや MSX のディスクは先に ⚙ の機種タブで BIOS を控えてください');
+    bar.appendChild(machineEl); bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn); bar.appendChild(ilBadgeEl);
+    statusEl.textContent = '';
     wrap.appendChild(bar); wrap.appendChild(canvas);
     if (MML.Device && MML.Device.isTouch && MML.Device.isTouch()) wrap.appendChild(buildTouchPad());
     softKbdEl = buildSoftKeyboard(); softKbdEl.hidden = true; wrap.appendChild(softKbdEl);
@@ -1172,7 +1175,8 @@
     w = w || frameW; h = h || frameH;
     if (canvas.width === w && canvas.height === h && imageBuf) return;
     canvas.width = w; canvas.height = h; frameW = w; frameH = h;
-    canvas.style.aspectRatio = '256 / ' + h; // 画面の形は幅のモードによらず同じ(幅 512 のモードはドットが横に半分になるだけ。実機のテレビと同じ)
+    canvas.style.aspectRatio = '256 / 240'; // 画面の形は幅/行数のモードによらず同じ(幅 512 は横半分のドット、インターレースの 480 行は縦半分の行。実機のテレビと同じ)
+    if (ilBadgeEl) ilBadgeEl.hidden = h < 480;
     imageBuf = new Uint8ClampedArray(w * h * 4);
     image = new ImageData(imageBuf, w, h);
     idxScratch = null;
@@ -1623,7 +1627,7 @@
     if (!bios) {
       // BIOS が無い: 窓を開いて [BIOS] で選ばせ、選ばれたら開き直す(FDS と同じ)
       pendingMsx = { bytes, name };
-      romName = name || ''; nameEl.textContent = romName; nameEl.title = '';
+      romName = name || ''; nameEl.textContent = romName; nameEl.title = ''; machineEl.textContent = '';
       win.style.display = 'flex';
       if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
       if (opt.disk) {
@@ -1656,7 +1660,7 @@
     if (battery && probe.disk) probe.disk.images.forEach((im, i) => { const o = disks[i]; if (o && !(im.img.length === o.length && im.img.every((v, k) => v === o[k]))) { diskImages[i] = im.img.slice(); diskDirty.add(i); } });
     updateDiskBadge();
     nameEl.textContent = romName;
-    nameEl.title = MML.Emu.MsxConsole.describe(probe);
+    nameEl.title = MML.Emu.MsxConsole.describe(probe); machineEl.textContent = (MSX_MACHINE_LABEL[mach] || 'MSX') + (probe.r800Active ? ' (R800)' : '') + (bios && bios.name && /C-BIOS/.test(bios.name) ? ' (C-BIOS)' : '');
     recExtBits = 0; msxChips = probe.chips(); msxFps = probe.frameRate || 60;
     fdsSides = probe.diskCount; fdsSide = 0; if (sideTimer) { clearTimeout(sideTimer); sideTimer = 0; } updateDiskUi();
     stopMain(); nes = null; rewindBuf = null;
@@ -1731,7 +1735,7 @@
       if (isFds && !loadBios()) {
         // BIOS が無い: 窓を開いて選ばせ、選ばれたら開き直す
         pendingFds = { bytes, name };
-        romName = name || ''; nameEl.textContent = romName; nameEl.title = '';
+        romName = name || ''; nameEl.textContent = romName; nameEl.title = ''; machineEl.textContent = '';
         win.style.display = 'flex';
         if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
         statusEl.textContent = T('⚙ のファミコンタブで FDS の BIOS(disksys.rom)を控えてください');
@@ -1748,6 +1752,7 @@
       hasBattery = probe.hasBattery; batteryKey = hasBattery ? stateKey : '';
       const battery = hasBattery ? await loadBattery(batteryKey) : null;
       if (battery && probe.setBattery(battery)) console.log('[nes]', T('セーブデータを読み込みました({n} バイト)', { n: battery.length }));
+      machineEl.textContent = isFds ? T('ディスクシステム') : T('ファミコン');
       nameEl.textContent = romName;
       nameEl.title = MML.Emu.INES.describe(probe.rom);
       recExtBits = probe.extBits();

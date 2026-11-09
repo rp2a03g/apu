@@ -431,7 +431,9 @@
     get frame() { return this.vdp.frame; }
     get frameIdx() { return this.vdp.frameIdx; }
     get frameWidth() { return this.vdp.frameWidth; }      // そのフレームの幅(256/512。モードで変わる)
-    get frameHeight() { return Emu.MsxVdp.H; }
+    get frameHeight() { return this.vdp.frameHeight; }      // 240、インターレース中は 480
+    get frameIdxHeight() { return Emu.MsxVdp.H; }          // 巻き戻しの索引は常に 240 行
+    get interlaced() { return this.vdp.interlaced; }
     get frameIdxWidth() { return this.vdp.frameIdxWidth; } // 巻き戻しの映像の輪(frameIdx)の幅(常に 256)
     get frameIdxKind() { return this.vdp.frameIdxKind; }   // 0=パレット番号、1=GRB332(GRAPHIC7)
     idxPalette(kind) { return kind ? Emu.MsxVdp.G7_PALETTE : this.vdp.palette; }

@@ -163,7 +163,7 @@
       this.frameSeq = nes.frameCount; // 主スレッドのフレーム番号 = 本体の frameCount(巻き戻しで戻る)
       if (this.speed > 1 && (++this.ffSkip % this.speed) !== 0) { if ((this.frameSeq % 60) === 0) this.postBattery(false); return; } // 早送り中は speed 枚に 1 枚だけ送る(録音の書き込み列は次に送る時まで溜まる)
       const frame = nes.frame.slice(0, this.frameW() * this.frameH()); // MSX は幅がモードで変わる(frame は最大幅で確保。幅ぶんだけ送る)
-      const msg = { type: 'frame', seq: this.frameSeq, frame: frame.buffer, underruns: nes.underruns, w: this.frameW(), h: this.frameH() };
+      const msg = { type: 'frame', seq: this.frameSeq, frame: frame.buffer, underruns: nes.underruns, w: this.frameW(), h: this.frameH(), il: !!nes.interlaced };
       if (nes.rec) { msg.writes = nes.rec.frames.splice(0); }
       this.port.postMessage(msg, [frame.buffer]);
       if ((this.frameSeq % 60) === 0) this.postBattery(false); // 1 秒ごとに、セーブ RAM が変わっていれば主スレッドへ
@@ -191,7 +191,7 @@
       if (rw.pending && currentTime - rw.lastPost >= 1 / 61) {
         rw.lastPost = currentTime;
         const idx = rw.pending.slice(); rw.pending = null;
-        const msg = { type: 'rwframe', seq: rw.pendingSeq, idx: idx.buffer, oldest: rewind.oldest, w: rewind.idxWidth || this.frameW(), h: this.frameH() };
+        const msg = { type: 'rwframe', seq: rw.pendingSeq, idx: idx.buffer, oldest: rewind.oldest, w: rewind.idxWidth || this.frameW(), h: (this.nes && this.nes.frameIdxHeight) || this.frameH() };
         const tr = [idx.buffer];
         if (this.machine === 'msx' && rewind.palette) { const pal = (rewind.paletteOf ? rewind.paletteOf(rw.pendingSeq) : rewind.palette).slice(); msg.palette = pal.buffer; tr.push(pal.buffer); } // 8bit 画面の色(そのフレームの色表: パレット 16 色か GRAPHIC7 の 256 色)
         this.port.postMessage(msg, tr);
