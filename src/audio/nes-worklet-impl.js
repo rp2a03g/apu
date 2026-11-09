@@ -45,7 +45,7 @@
               // MSX: ROM(null なら BIOS だけで起動)+ 機種/BIOS(main 32K・sub/logo 16K、ArrayBuffer で届く)/マッパー種別
               const o = m.msx || {};
               const bios = {};
-              if (o.bios) { for (const k of ['main', 'sub', 'logo', 'kanji', 'disk', 'kdr']) if (o.bios[k]) bios[k] = new Uint8Array(o.bios[k]); if (o.bios.name) bios.name = o.bios.name; }
+              if (o.bios) { for (const k of ['main', 'sub', 'logo', 'kanji', 'disk', 'kdr', 'music']) if (o.bios[k]) bios[k] = new Uint8Array(o.bios[k]); if (o.bios.name) bios.name = o.bios.name; }
               const cartB = o.cartB && o.cartB.kind ? { kind: o.cartB.kind, rom: o.cartB.rom ? new Uint8Array(o.cartB.rom) : null } : null; // 音源カートリッジ(FM-PAC/MSX-AUDIO/SCC-I)
               const disks = (o.disks || []).map((b) => new Uint8Array(b)); // .dsk 画像(7d)
               nes = new MML.Emu.MsxConsole(m.rom ? new Uint8Array(m.rom) : null, { machine: o.machine, bios: bios.main ? bios : null, mapperType: o.mapperType || undefined, cartB, disks, fdc: o.fdc || undefined });

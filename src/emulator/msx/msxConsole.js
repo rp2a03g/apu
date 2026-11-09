@@ -266,7 +266,7 @@
       const sccA = typeA === 'konamiScc' || typeA === 'konamiSccI';
       this.scc = (sccA || this.cartBKind === 'scci') && Emu.SCCAudio ? new Emu.SCCAudio() : null;
       this.dac = typeA === 'konamiDac' && Emu.MajutsushiDAC ? new Emu.MajutsushiDAC() : null;
-      const fmRom = (cb && cb.kind === 'fmpac' && cb.rom) ? cb.rom : (this.bios.music || null);
+      const fmRom = (cb && cb.kind === 'fmpac' && cb.rom) ? cb.rom : (this.bios.music || (mc.fm ? MsxConsole.defaultMusicRom() : null)); // 内蔵 FM の機種で控えが無ければ同梱 C-BIOS の MSX-MUSIC ROM
       this.fmInternal = !!mc.fm && !!fmRom;
       this.opll = ((cb && cb.kind === 'fmpac') || this.fmInternal) && Emu.OPLLAudio ? new Emu.OPLLAudio() : null;
       this.fm = this.opll ? new FmPacDevice(fmRom) : null;

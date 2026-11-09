@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-09 20:45:33
+ * Built by tools/build-capture-workers.ps1 at 2026-11-10 02:45:38
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-09 20:45:33';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-10 02:45:38';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -12965,7 +12965,7 @@
       const sccA = typeA === 'konamiScc' || typeA === 'konamiSccI';
       this.scc = (sccA || this.cartBKind === 'scci') && Emu.SCCAudio ? new Emu.SCCAudio() : null;
       this.dac = typeA === 'konamiDac' && Emu.MajutsushiDAC ? new Emu.MajutsushiDAC() : null;
-      const fmRom = (cb && cb.kind === 'fmpac' && cb.rom) ? cb.rom : (this.bios.music || null);
+      const fmRom = (cb && cb.kind === 'fmpac' && cb.rom) ? cb.rom : (this.bios.music || (mc.fm ? MsxConsole.defaultMusicRom() : null)); // 内蔵 FM の機種で控えが無ければ同梱 C-BIOS の MSX-MUSIC ROM
       this.fmInternal = !!mc.fm && !!fmRom;
       this.opll = ((cb && cb.kind === 'fmpac') || this.fmInternal) && Emu.OPLLAudio ? new Emu.OPLLAudio() : null;
       this.fm = this.opll ? new FmPacDevice(fmRom) : null;
@@ -13767,7 +13767,7 @@
               // MSX: ROM(null なら BIOS だけで起動)+ 機種/BIOS(main 32K・sub/logo 16K、ArrayBuffer で届く)/マッパー種別
               const o = m.msx || {};
               const bios = {};
-              if (o.bios) { for (const k of ['main', 'sub', 'logo', 'kanji', 'disk', 'kdr']) if (o.bios[k]) bios[k] = new Uint8Array(o.bios[k]); if (o.bios.name) bios.name = o.bios.name; }
+              if (o.bios) { for (const k of ['main', 'sub', 'logo', 'kanji', 'disk', 'kdr', 'music']) if (o.bios[k]) bios[k] = new Uint8Array(o.bios[k]); if (o.bios.name) bios.name = o.bios.name; }
               const cartB = o.cartB && o.cartB.kind ? { kind: o.cartB.kind, rom: o.cartB.rom ? new Uint8Array(o.cartB.rom) : null } : null; // 音源カートリッジ(FM-PAC/MSX-AUDIO/SCC-I)
               const disks = (o.disks || []).map((b) => new Uint8Array(b)); // .dsk 画像(7d)
               nes = new MML.Emu.MsxConsole(m.rom ? new Uint8Array(m.rom) : null, { machine: o.machine, bios: bios.main ? bios : null, mapperType: o.mapperType || undefined, cartB, disks, fdc: o.fdc || undefined });

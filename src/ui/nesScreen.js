@@ -367,10 +367,10 @@
     let out = null;
     try {
       // 控えた物を種類ごとに(メインが無くても漢字/ディスク ROM だけ控えてあることがある: 同梱 C-BIOS に足して使う)
-      for (const k of ['main', 'sub', 'logo', 'kanji', 'disk', 'kdr']) {
+      for (const k of ['main', 'sub', 'logo', 'kanji', 'disk', 'kdr', 'music']) {
         const v = localStorage.getItem(MSX_BIOS_KEY + mach + '.' + k);
         if (!v) continue;
-        if (!out) out = { main: null, sub: null, logo: null, kanji: null, disk: null, kdr: null, name: T('控えた BIOS') };
+        if (!out) out = { main: null, sub: null, logo: null, kanji: null, disk: null, kdr: null, music: null, name: T('控えた BIOS') };
         out[k] = b64dec(v);
       }
     } catch (e) { /* localStorage 不可 */ }
@@ -379,7 +379,7 @@
   }
   function storeMsxBios(mach, kind, bytes) {
     try { localStorage.setItem(MSX_BIOS_KEY + mach + '.' + kind, b64enc(bytes)); } catch (e) { /* 控えられなくても今回は使える */ }
-    const cur = msxBiosCache[mach] || (msxBiosCache[mach] = { main: null, sub: null, logo: null, kanji: null, disk: null, kdr: null, name: T('控えた BIOS') });
+    const cur = msxBiosCache[mach] || (msxBiosCache[mach] = { main: null, sub: null, logo: null, kanji: null, disk: null, kdr: null, music: null, name: T('控えた BIOS') });
     cur[kind] = bytes;
   }
   // 機種に使える BIOS: 控え(メインあり) → 同梱 C-BIOS(+控えた漢字/ディスク ROM) → null
@@ -395,7 +395,7 @@
   function msxCartB() {
     const k = cfg.msx.cartB;
     if (!k || k === 'none') return null;
-    if (k === 'fmpac') { const rom = MML.Emu.MsxConsole.defaultMusicRom ? MML.Emu.MsxConsole.defaultMusicRom() : null; return rom ? { kind: 'fmpac', rom } : { kind: 'fmpac' }; }
+    if (k === 'fmpac') { const st = loadMsxBios(resolveMsxMachine() || 'msx2'); const rom = (st && st.music) || (MML.Emu.MsxConsole.defaultMusicRom ? MML.Emu.MsxConsole.defaultMusicRom() : null); return rom ? { kind: 'fmpac', rom } : { kind: 'fmpac' }; }
     return { kind: k };
   }
   // 設定の機種。自動 = BIOS のある機種のうち MSX2 を優先、無ければ MSX1(→ MSX2+ → turbo R)。どれも無ければ null(BIOS 待ち)
@@ -418,8 +418,10 @@
     const list = [];
     for (const f of files) {
       const b = new Uint8Array(await f.arrayBuffer());
-      if (b.length === 0x8000) list.push({ kind: (b[0] === 0x41 && b[1] === 0x42) ? 'kdr' : 'main', bytes: b }); // 32K で 'AB' ヘッダ=漢字ドライバ(2+/turboR の内蔵 ROM。メイン BIOS は DI/JP で始まる)
-      else if (b.length === 0x4000) list.push({ kind: (b[0] === 0x41 && b[1] === 0x42) ? 'disk' : /logo/i.test(f.name) ? 'logo' : 'sub', bytes: b }); // 16K で 'AB' ヘッダ=ディスク ROM(サブ/ロゴ ROM に AB は無い)
+      const ab = b[0] === 0x41 && b[1] === 0x42, opll = ab && b[0x1C] === 0x4F && b[0x1D] === 0x50 && b[0x1E] === 0x4C && b[0x1F] === 0x4C; // $401C-$401F = "OPLL"(APRLOPLL=内蔵 MSX-MUSIC / PAC2OPLL=FM-PAC)
+      if (opll && (b.length === 0x4000 || b.length === 0x10000)) list.push({ kind: 'music', bytes: b });
+      else if (b.length === 0x8000) list.push({ kind: ab ? 'kdr' : 'main', bytes: b }); // 32K で 'AB' ヘッダ=漢字ドライバ(2+/turboR の内蔵 ROM。メイン BIOS は DI/JP で始まる)
+      else if (b.length === 0x4000) list.push({ kind: ab ? 'disk' : /logo/i.test(f.name) ? 'logo' : 'sub', bytes: b }); // 16K で 'AB' ヘッダ=ディスク ROM(サブ/ロゴ ROM に AB は無い)
       else if (b.length === 0x20000 || b.length === 0x40000) list.push({ kind: 'kanji', bytes: b }); // 漢字 ROM(第一水準 128K / 第一+第二 256K)
       else alert(T('MSX の BIOS は 32K(メイン/漢字ドライバ)、16K(サブ/ロゴ/ディスク)、128K/256K(漢字 ROM)のファイルです: {name}', { name: f.name }));
     }
@@ -451,10 +453,12 @@
   function stateApi() { return machine === 'msx' ? MML.Emu.MsxState : MML.Emu.NesState; }
   // 設定(機種/マッパー)が変わった: 開いている MSX の ROM を開き直す(BIOS 待ちなら待っている ROM で再試行)
   function reopenMsx() {
-    const p = pendingMsx ? pendingMsx : (machine === 'msx' && romBytes ? { bytes: romBytes, name: romName } : null);
-    if (!p) return;
-    pendingMsx = null;
-    NesScreen.open(p.bytes, p.name).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); });
+    const onErr = (e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); };
+    if (pendingMsx) { const p = pendingMsx; pendingMsx = null; NesScreen.open(p.bytes, p.name).catch(onErr); return; }
+    if (machine !== 'msx') return;
+    // ディスクで動いていれば、入っている組ごと開き直す(open() に渡すと「同じディスクを足す」入れ替えになってしまう)
+    if (msxDisk && diskImages.length) { openMsx(diskImages[0], diskNames[0] || romName, { disk: true, extraDisks: diskImages.slice(1), extraNames: diskNames.slice(1) }).catch(onErr); return; }
+    if (romBytes) NesScreen.open(romBytes, romName).catch(onErr);
   }
 
   // [disk] の一覧: 枚数 × 面。MSX は 1 枚 1 行(名前つき)、FDS はヘッダの枚数/面でまとめる(値が妥当でなければ 2 面ずつ 1 枚と見なす)
@@ -605,8 +609,8 @@
       if (!rest.length) return;
       // 残りは MSX の BIOS として大きさで振り分ける(16K/32K/128K/256K)。それ以外の大きさは案内
       const sizes = await Promise.all(rest.map((f) => f.arrayBuffer().then((b) => b.byteLength)));
-      const msxFiles = rest.filter((f, i) => [0x4000, 0x8000, 0x20000, 0x40000].includes(sizes[i]));
-      const odd = rest.filter((f, i) => ![0x4000, 0x8000, 0x20000, 0x40000].includes(sizes[i]));
+      const msxFiles = rest.filter((f, i) => [0x4000, 0x8000, 0x10000, 0x20000, 0x40000].includes(sizes[i]));
+      const odd = rest.filter((f, i) => ![0x4000, 0x8000, 0x10000, 0x20000, 0x40000].includes(sizes[i]));
       if (odd.length) alert(T('BIOS として扱えないファイルです(ディスクシステムは 8K、MSX は 16K/32K/128K/256K): {name}', { name: odd.map((f) => f.name).join(', ') }));
       if (msxFiles.length) await storeMsxBiosFiles(msxFiles, target && target.kind === 'msx' ? target.mach : null);
       if (cfgBiosRefresh) cfgBiosRefresh();
@@ -841,7 +845,7 @@
   let cfgTab = null;          // 開いているタブ('common' | 'nes' | 'msx')。閉じても覚える
   let cfgBiosRefresh = null;  // 開いている設定の BIOS 表を描き直す(BIOS を控えた/消した後)
   let biosTarget = null;      // [選ぶ…] を押した機種({ kind: 'nes' } | { kind: 'msx', mach })
-  const MSX_BIOS_KINDS = [['main', 'メイン 32K'], ['sub', 'サブ 16K'], ['disk', 'ディスク ROM 16K'], ['kanji', '漢字 ROM'], ['kdr', '漢字ドライバ 32K'], ['logo', 'ロゴ 16K']];
+  const MSX_BIOS_KINDS = [['main', 'メイン 32K'], ['sub', 'サブ 16K'], ['disk', 'ディスク ROM 16K'], ['kanji', '漢字 ROM'], ['kdr', '漢字ドライバ 32K'], ['logo', 'ロゴ 16K'], ['music', 'MSX-MUSIC/FM-PAC ROM']];
   function clearMsxBios(mach) {
     try { for (const [k] of MSX_BIOS_KINDS) localStorage.removeItem(MSX_BIOS_KEY + mach + '.' + k); } catch (e) { /* ignore */ }
     delete msxBiosCache[mach];
@@ -935,7 +939,7 @@
     biosNote(sn, T('ディスクシステム(.fds)の起動に disksys.rom(8K)が要ります。このブラウザに控えて次回も使います。.nes のカートリッジには要りません'));
     const sb = sec(T('BIOS(機種ごとの控え)'), 'msx');
     const msxBox = document.createElement('div'); sb.appendChild(msxBox);
-    biosNote(sb, T('メインを控えていない機種は同梱 C-BIOS で動きます(BASIC・ディスク・漢字は無し)。ディスクの起動にはメイン+サブ+ディスク ROM の 3 つ、turbo R はメイン+サブ(+漢字ドライバ)が要ります。ファイルは中身で振り分けるので名前は問いません(複数選択可)。機種「自動」は控えのある機種のうち MSX2 を優先します'));
+    biosNote(sb, T('メインを控えていない機種は同梱 C-BIOS で動きます(BASIC・ディスク・漢字は無し)。ディスクの起動にはメイン+サブ+ディスク ROM の 3 つ、turbo R はメイン+サブ(+漢字ドライバ)が要ります。ファイルは中身で振り分けるので名前は問いません(複数選択可)。機種「自動」は控えのある機種のうち MSX2 を優先します。MUSIC は MSX-MUSIC/FM-PAC の ROM(16K/64K)で、カートリッジ 2 の FM-PAC と 2+/turbo R の内蔵 FM に使います(無ければ同梱 C-BIOS の物)'));
     const renderBios = () => {
       // FDS
       fdsBox.innerHTML = '';
@@ -949,14 +953,14 @@
       msxBox.innerHTML = '';
       const t = document.createElement('table'); t.className = 'nes-cfg-table nes-bios-table';
       const th = document.createElement('tr');
-      for (const h of [T('機種'), T('メイン'), T('サブ'), T('ディスク'), T('漢字'), T('漢字ドライバ'), T('ロゴ'), T('同梱'), '']) { const c = document.createElement('th'); c.textContent = h; th.appendChild(c); }
+      for (const h of [T('機種'), T('メイン'), T('サブ'), T('ディスク'), 'MUSIC', T('漢字'), T('漢字ドライバ'), T('ロゴ'), T('同梱'), '']) { const c = document.createElement('th'); c.textContent = h; th.appendChild(c); }
       t.appendChild(th);
       const C = MML.Emu.MsxConsole;
       for (const m of ['msx1', 'msx2', 'msx2plus', 'turbor']) {
         const st = loadMsxBios(m) || {};
         const tr = document.createElement('tr');
         const c0 = document.createElement('td'); c0.textContent = MSX_MACHINE_LABEL[m]; tr.appendChild(c0);
-        for (const k of ['main', 'sub', 'disk', 'kanji', 'kdr', 'logo']) { const c = document.createElement('td'); c.appendChild(ok(!!st[k])); tr.appendChild(c); }
+        for (const k of ['main', 'sub', 'disk', 'music', 'kanji', 'kdr', 'logo']) { const c = document.createElement('td'); c.appendChild(ok(!!st[k])); tr.appendChild(c); }
         const cb = document.createElement('td'); cb.textContent = C && C.hasDefaultBios && C.hasDefaultBios(m) ? 'C-BIOS' : '–'; cb.className = 'nes-bios-ng'; tr.appendChild(cb);
         const ca = document.createElement('td');
         ca.appendChild(mkBtn(T('選ぶ…'), T('この機種の BIOS を選ぶ(複数選択可)'), () => { biosTarget = { kind: 'msx', mach: m }; biosInput.click(); }));
@@ -1168,7 +1172,7 @@
     w = w || frameW; h = h || frameH;
     if (canvas.width === w && canvas.height === h && imageBuf) return;
     canvas.width = w; canvas.height = h; frameW = w; frameH = h;
-    canvas.style.aspectRatio = w + ' / ' + h;
+    canvas.style.aspectRatio = '256 / ' + h; // 画面の形は幅のモードによらず同じ(幅 512 のモードはドットが横に半分になるだけ。実機のテレビと同じ)
     imageBuf = new Uint8ClampedArray(w * h * 4);
     image = new ImageData(imageBuf, w, h);
     idxScratch = null;
@@ -1669,7 +1673,7 @@
     const rom = romA ? romA.slice().buffer : null, tr = rom ? [rom] : [];
     const dmsg = disks.map((d) => d.slice().buffer); for (const b of dmsg) tr.push(b);
     const bmsg = { name: bios.name || null };
-    for (const k of ['main', 'sub', 'logo', 'kanji', 'disk', 'kdr']) if (bios[k]) { bmsg[k] = bios[k].slice().buffer; tr.push(bmsg[k]); }
+    for (const k of ['main', 'sub', 'logo', 'kanji', 'disk', 'kdr', 'music']) if (bios[k]) { bmsg[k] = bios[k].slice().buffer; tr.push(bmsg[k]); }
     const cbMsg = cartB ? { kind: cartB.kind, rom: cartB.rom ? cartB.rom.slice().buffer : null } : null;
     if (cbMsg && cbMsg.rom) tr.push(cbMsg.rom);
     const batMsg = battery ? battery.slice().buffer : null; if (batMsg) tr.push(batMsg);
