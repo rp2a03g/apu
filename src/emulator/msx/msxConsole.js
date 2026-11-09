@@ -698,6 +698,18 @@
       this._remapAll();
     }
   }
+  // バッテリーの塊("MSXB")から tag 5(書き込みのあったディスク画像: [番号]+画像)を取り出す(主スレッドが書き出し/書き戻しに使う)
+  MsxConsole.batteryDisks = (blob) => {
+    const out = [];
+    if (!blob || blob.length < 4 || blob[0] !== 0x4D || blob[1] !== 0x53 || blob[2] !== 0x58 || blob[3] !== 0x42) return out;
+    let o = 4;
+    while (o + 5 <= blob.length) {
+      const tag = blob[o], len = (blob[o + 1] | (blob[o + 2] << 8) | (blob[o + 3] << 16) | (blob[o + 4] << 24)) >>> 0;
+      const data = blob.subarray(o + 5, o + 5 + len); o += 5 + len;
+      if (tag === 5 && data.length > 1) out.push({ index: data[0], image: data.subarray(1) });
+    }
+    return out;
+  };
   MsxConsole.CPU_CLOCK = CPU_CLOCK;
   MsxConsole.MACHINES = MACHINES;
   MsxConsole.CART_B_KINDS = CART_B_KINDS;

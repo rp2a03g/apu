@@ -81,7 +81,7 @@
     liveRoll: true,
     sfxRemove: false, // 録音の補正の初期値(録音ごとに保存/変換への横のチェックで変えられる)
     lagFix: false,
-    msx: { keys: { FF: 'F11', Rewind: 'F12', Pause: 'Pause', SaveState: 'F9', LoadState: 'F10' }, machine: 'auto', joyFromKeys: false, cartB: 'none', fdc: 'wd2793', softKbd: false },
+    msx: { keys: { FF: 'F11', Rewind: 'F12', Pause: 'Pause', SaveState: 'F9', LoadState: 'F10' }, machine: 'auto', joyFromKeys: false, cartB: 'none', fdc: 'wd2793', softKbd: false, writeBack: false },
   };
   function loadMsxCfg(c) {
     c = c && typeof c === 'object' ? c : {};
@@ -92,6 +92,7 @@
       cartB: MSX_CART_B.includes(c.cartB) ? c.cartB : DEFAULT_CFG.msx.cartB,
       fdc: MSX_FDC.includes(c.fdc) ? c.fdc : DEFAULT_CFG.msx.fdc,
       softKbd: typeof c.softKbd === 'boolean' ? c.softKbd : false, // ソフトキーボード(⌨)を出しておく(タッチ端末は設定に関係なく出る)
+      writeBack: typeof c.writeBack === 'boolean' ? c.writeBack : false, // ディスクの書き込みを元の .dsk へ書き戻す(既定 OFF。フォルダを選び .bak を 1 回作る)
     };
   }
   function loadCfg() {
@@ -152,6 +153,11 @@
   const BIOS_KEY = 'nes.fdsBios';
   let fdsBios = null, biosBtn = null, biosInput = null, sideBtn = null, fdsSides = 0, fdsSide = 0, pendingFds = null, sideTimer = 0;
   let diskNames = [], fdsSideInfo = null, diskPopEl = null, diskPopClose = null; // [disk] のポップオーバー用: 入っている画像の名前(MSX)、FDS の面ごとの枚数/面(ヘッダ)
+  // MSX のディスク書き込み(2026-11-09 決定: ブラウザ内保存は従来どおり + 書き出し(複製) + 書き戻しモードは既定 OFF で .bak を作る)
+  let diskImages = [];          // 入っている画像の今の中身(書き込み反映後。バッテリーの tag 5 で更新)
+  let diskDirty = new Set();    // 書き込みがあって、まだ書き戻していない番号
+  let diskDirHandle = null;     // 書き戻し先のフォルダ(showDirectoryPicker。このセッションだけ)
+  let diskWbBusy = false, diskBadgeEl = null;
   let romInput = null, cfgBtn = null, speedBtn = null, stateBtnS = null, stateBtnL = null;
 
   // ── セーブ(バッテリ RAM / FDS ディスク)──
@@ -200,9 +206,86 @@
       try { node.port.postMessage({ type: 'unload' }); } catch (e) { batteryWait(); }
     });
   }
+  function handleBatteryBlob(data) {
+    saveBattery(batteryKey, data);
+    if (machine === 'msx' && MML.Emu.MsxConsole && MML.Emu.MsxConsole.batteryDisks) {
+      for (const d of MML.Emu.MsxConsole.batteryDisks(data)) {
+        const cur = diskImages[d.index];
+        if (cur && cur.length === d.image.length && cur.every((v, i) => v === d.image[i])) continue; // 変わっていない(前回の書き込みぶんを毎回送ってくる)
+        diskImages[d.index] = d.image.slice(); diskDirty.add(d.index);
+      }
+      updateDiskBadge();
+      if (cfg.msx.writeBack && diskDirty.size) writeBackDirty();
+    }
+  }
   function onBatteryMessage(m) {
-    if (m.data) saveBattery(batteryKey, new Uint8Array(m.data));
+    if (m.data) handleBatteryBlob(new Uint8Array(m.data));
     if (m.final && batteryWait) batteryWait();
+  }
+  // 「書き込みあり」のバッジ(見出し下の行)。クリックで [disk] のポップオーバー(書き出し/書き戻し)
+  function updateDiskBadge() {
+    if (!diskBadgeEl) return;
+    const n = machine === 'msx' ? diskDirty.size : 0;
+    diskBadgeEl.hidden = n === 0;
+    if (!n) return;
+    const needDir = cfg.msx.writeBack && !diskDirHandle;
+    diskBadgeEl.textContent = cfg.msx.writeBack ? (needDir ? T('ディスク書き込みあり: 書き戻し先のフォルダを選ぶ') : T('ディスク書き込みあり: 書き戻し中…')) : T('ディスク書き込みあり({n} 枚、このブラウザに保存)', { n });
+    diskBadgeEl.title = T('書き込みのあったディスク画像はこのブラウザに保存されます(次に同じ .dsk を開くと戻る)。[disk] から .dsk として書き出せます。⚙ の「元の .dsk へ書き戻す」を ON にするとフォルダ内の元ファイルへ書きます(.bak を 1 回作る)');
+  }
+  // 画像の今の中身を取り出す(Worklet 内の最後の書き込みを受け取ってから)
+  async function currentDiskImage(i) {
+    if (node && hasBattery) await flushBattery();
+    return diskImages[i] || null;
+  }
+  function downloadBytes(name, bytes) {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' })); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+  // 書き出し(複製): 保存ダイアログ(FSA)、無ければダウンロード。元ファイルは触らない
+  async function exportDisk(i) {
+    const img = await currentDiskImage(i);
+    if (!img) return;
+    const name = diskNames[i] || ('disk' + (i + 1) + '.dsk');
+    if (window.showSaveFilePicker) {
+      let h = null;
+      try { h = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'MSX disk image', accept: { 'application/octet-stream': ['.dsk'] } }] }); }
+      catch (e) { if (e && e.name === 'AbortError') return; h = null; }
+      if (h) { try { const w = await h.createWritable(); await w.write(img); await w.close(); flashStatus(T('ディスクを書き出しました: {name}', { name: h.name })); return; } catch (e) { /* 下のダウンロードへ */ } }
+    }
+    downloadBytes(name, img);
+    flashStatus(T('ディスクを書き出しました: {name}', { name }));
+  }
+  // 書き戻し先のフォルダ(★クリックの中から呼ぶ: showDirectoryPicker はユーザー操作が要る)
+  async function pickDiskDir() {
+    if (typeof window.showDirectoryPicker !== 'function') { flashStatus(T('このブラウザはフォルダへの書き込みに対応していません(書き出しを使ってください)')); return null; }
+    try { diskDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' }); } catch (e) { return null; }
+    updateDiskBadge();
+    if (diskDirty.size) writeBackDirty();
+    return diskDirHandle;
+  }
+  // 書き戻し: 選んだフォルダの同名ファイルへ。初回は元ファイルの複製 <name>.bak を作る(無ければ)。元ファイルが無い(アーカイブ由来など)なら新規に書く
+  async function writeBackDirty() {
+    if (!diskDirHandle || diskWbBusy || machine !== 'msx') return;
+    diskWbBusy = true;
+    try {
+      for (const i of Array.from(diskDirty)) {
+        const name = diskNames[i], img = diskImages[i];
+        if (!name || !img) { diskDirty.delete(i); continue; }
+        try {
+          let orig = null;
+          try { const fh = await diskDirHandle.getFileHandle(name); orig = fh; } catch (e) { orig = null; }
+          if (orig) {
+            let bakExists = true;
+            try { await diskDirHandle.getFileHandle(name + '.bak'); } catch (e) { bakExists = false; }
+            if (!bakExists) { const src = new Uint8Array(await (await orig.getFile()).arrayBuffer()); const bh = await diskDirHandle.getFileHandle(name + '.bak', { create: true }); const bw = await bh.createWritable(); await bw.write(src); await bw.close(); }
+          }
+          const fh = await diskDirHandle.getFileHandle(name, { create: true });
+          const w = await fh.createWritable(); await w.write(img); await w.close();
+          diskDirty.delete(i);
+          flashStatus(T('ディスクを書き戻しました: {name}', { name }));
+        } catch (e) { flashStatus(T('ディスクを書き戻せませんでした: {msg}', { msg: e && e.message ? e.message : String(e) })); break; }
+      }
+    } finally { diskWbBusy = false; updateDiskBadge(); }
   }
   window.addEventListener('pagehide', () => { if (node && hasBattery) { try { node.port.postMessage({ type: 'unload' }); } catch (e) { /* ignore */ } } });
 
@@ -413,7 +496,17 @@
         const b = mkBtn(sd.label || T('入れる'), '', () => { closeDiskPopover(); if (sd.index !== fdsSide && !sideTimer) switchSide(sd.index); });
         if (sd.index === fdsSide) b.classList.add('is-on');
         row.appendChild(b);
+        if (machine === 'msx') {
+          if (diskDirty.has(sd.index)) { const m = document.createElement('span'); m.className = 'nes-disk-dirty'; m.textContent = '●'; m.title = T('書き込みあり(まだ書き戻していない)'); row.appendChild(m); }
+          row.appendChild(mkBtn(T('書き出す'), T('今の中身を .dsk として保存する(元のファイルは触らない)'), () => { closeDiskPopover(); exportDisk(sd.index); }));
+        }
       }
+      pop.appendChild(row);
+    }
+    if (machine === 'msx' && cfg.msx.writeBack) {
+      const row = document.createElement('div'); row.className = 'nes-disk-row';
+      const lbl = document.createElement('span'); lbl.className = 'nes-disk-lbl'; lbl.textContent = diskDirHandle ? T('書き戻し先: {dir}', { dir: diskDirHandle.name }) : T('書き戻し先のフォルダが未選択'); row.appendChild(lbl);
+      row.appendChild(mkBtn(T('フォルダを選ぶ'), '', () => { closeDiskPopover(); pickDiskDir(); }));
       pop.appendChild(row);
     }
     document.body.appendChild(pop);
@@ -542,7 +635,9 @@
     recSfxChk = so.c; recLagChk = lo.c;
     saveBtn = mkBtn(T('VGM を保存'), '', saveRecording); saveBtn.hidden = true;
     convBtn = mkBtn(T('変換へ'), '', () => { if (recVgm && NesScreen.onOpenRecording) { setPaused(true); NesScreen.onOpenRecording(recVgm, recFileName()); } }); convBtn.hidden = true;
-    bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn);
+    diskBadgeEl = document.createElement('button'); diskBadgeEl.type = 'button'; diskBadgeEl.className = 'nes-diskbadge'; diskBadgeEl.hidden = true;
+    diskBadgeEl.addEventListener('click', () => { if (cfg.msx.writeBack && !diskDirHandle) pickDiskDir(); else toggleDiskPopover(sideBtn.hidden ? diskBadgeEl : sideBtn); });
+    bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn);
     statusEl.textContent = T('[開く] か .nes/.fds/.rom のドロップで始まります');
     wrap.appendChild(bar); wrap.appendChild(canvas);
     if (MML.Device && MML.Device.isTouch && MML.Device.isTouch()) wrap.appendChild(buildTouchPad());
@@ -670,6 +765,7 @@
     const touch = !!(MML.Device && MML.Device.isTouch && MML.Device.isTouch());
     if (softKbdEl) { const show = msx && (touch || cfg.msx.softKbd); if (!show && !softKbdEl.hidden && softKbdEl.releaseAll) softKbdEl.releaseAll(); softKbdEl.hidden = !show; }
     if (touchPadEl && touchPadEl.relabel) touchPadEl.relabel();
+    updateDiskBadge();
   }
 
   // ── タッチ操作キー(タッチ端末だけ。画面の下)──
@@ -825,6 +921,12 @@
     note(sm, T('BIOS は [BIOS] で機種ごとに控えます(メイン 32K、サブ/ロゴ 16K。複数選択可)。機種「自動」は BIOS のある機種のうち MSX2 を優先します。マッパーは ROM ごとに覚え、変えると開き直します。ゲームパッドの A/B はジョイスティックのトリガ 1/2'));
     note(sm, T('カートリッジ 2 はゲームと一緒に挿す音源です。FM 版の曲を持つゲームは FM-PAC を挿すと FM で鳴り、録音にも載ります(MSX2+/turbo R は内蔵 MSX-MUSIC が常にあります)。変えると開き直します'));
     note(sm, T('MSX turbo R は同梱 C-BIOS に無いので実 BIOS(メイン 32K+サブ 16K、あれば漢字ドライバ 32K とディスク ROM)を [BIOS] で控えます。内蔵ソフト(512K)は載せません。R800 は S1990 の切り替えに従い、命令時間は近似です。PCM は録音に載り DAC の行で見えます'));
+    const wbl = document.createElement('label'); wbl.className = 'nes-cfg-check';
+    const wbc = document.createElement('input'); wbc.type = 'checkbox'; wbc.checked = !!cfg.msx.writeBack;
+    wbc.addEventListener('change', () => { cfg.msx.writeBack = wbc.checked; saveCfg(); updateDiskBadge(); if (wbc.checked && !diskDirHandle && machine === 'msx' && fdsSides > 0) pickDiskDir(); });
+    wbl.appendChild(wbc); wbl.appendChild(document.createTextNode(' ' + T('ディスクの書き込みを元の .dsk へ書き戻す(フォルダを選ぶ。初回に <名前>.bak を作る)')));
+    sm.appendChild(wbl);
+    note(sm, T('OFF(既定)でも書き込みはこのブラウザに保存され、同じ .dsk を開くと戻ります。[disk] の「書き出す」でいつでも .dsk として保存できます。ON にすると選んだフォルダの同名ファイルへ書きます(無ければ新規)。フォルダの選択はこのセッションだけ覚えます'));
     note(sm, T('ディスク(.dsk)は実 BIOS とディスク ROM(16K)を [BIOS] で控えてから開けます。FDC はディスク ROM の機種に合わせます(合わないと「ディスクがありません」のまま)。動作中に別の .dsk を開くと入れ替えになり、書き込みは .dsk ごとにこのブラウザへ保存します'));
     // 同梱 C-BIOS(cbiosData.js)の版とライセンス表示(BSD 2 条項は再配布時の著作権表示を求める)。実 BIOS を控えた機種はそちらが優先
     const CB = MML.Emu.CBIOS;
@@ -1153,7 +1255,7 @@
       blitFrame(nes.frame);
       frameSeq = nes.frameCount;
       if (nes.rec) takeFrames(nes.rec.frames.splice(0), frameSeq);
-      if (hasBattery && nes.batteryDirty && (++mainFrames % 60) === 0) { saveBattery(batteryKey, nes.getBattery()); nes.clearBatteryDirty(); }
+      if (hasBattery && nes.batteryDirty && (++mainFrames % 60) === 0) { handleBatteryBlob(nes.getBattery()); nes.clearBatteryDirty(); }
     }
     tickFps(now);
     raf = requestAnimationFrame(tick);
@@ -1442,7 +1544,7 @@
     sideBtn.title = T('入れ替え中…');
     sideTimer = setTimeout(() => {
       sideTimer = 0;
-      diskNames.push(name || '');
+      diskNames.push(name || ''); diskImages.push(bytes.slice());
       if (node) { const buf = bytes.slice().buffer; node.port.postMessage({ type: 'diskAdd', image: buf }, [buf]); }
       else if (nes) { const n = nes.addDisk(bytes); if (n >= 0) nes.insertDisk(n); fdsSides = nes.diskCount; fdsSide = n; if (rewindBuf) rewindBuf.clear(); updateDiskUi(); }
       flashStatus(T('ディスクを入れ替えました: {name}', { name }));
@@ -1473,6 +1575,7 @@
     const cartB = msxCartB();
     const romA = opt.disk ? null : bytes, disks = opt.disk ? [bytes].concat(opt.extraDisks || []) : []; // extraDisks: 同じ組の 2 枚目以降([disk] で選ぶ)
     diskNames = opt.disk ? [name || ''].concat(opt.extraNames || []) : []; fdsSideInfo = null;
+    diskImages = disks.map((d) => d.slice()); diskDirty = new Set();
     const probe = new MML.Emu.MsxConsole(romA, { machine: mach, bios, mapperType: mapperType || undefined, cartB, disks, fdc: cfg.msx.fdc }); // マッパー未対応等は例外で知らせる
     liveEnd('restart');
     rewindHoldEnd();
@@ -1482,6 +1585,9 @@
     hasBattery = probe.hasBattery; batteryKey = hasBattery ? stateKey : ''; // SRAM/FM-PAC/RTC(7c)。NES と同じく IndexedDB に ROM のハッシュ別
     const battery = hasBattery ? await loadBattery(batteryKey) : null;
     if (battery && probe.setBattery(battery)) console.log('[msx]', T('セーブデータを読み込みました({n} バイト)', { n: battery.length }));
+    // ブラウザ内保存から戻した画像は「書き込みあり(未書き戻し)」として扱う
+    if (battery && probe.disk) probe.disk.images.forEach((im, i) => { const o = disks[i]; if (o && !(im.img.length === o.length && im.img.every((v, k) => v === o[k]))) { diskImages[i] = im.img.slice(); diskDirty.add(i); } });
+    updateDiskBadge();
     nameEl.textContent = romName;
     nameEl.title = MML.Emu.MsxConsole.describe(probe);
     recExtBits = 0; msxChips = probe.chips(); msxFps = probe.frameRate || 60;
@@ -1532,6 +1638,7 @@
     mount: () => (typeof ImageData === 'function' ? ensureDom() : false),
     // 機種の開き方を足す(kind は imageDetect.js の detect が返す物。将来の機種はここに登録すれば全経路に乗る)
     registerOpener(kind, fn) { OPENERS[kind] = fn; },
+    _debug: { setDiskDir: (h) => { diskDirHandle = h; updateDiskBadge(); }, injectBattery: (blob) => handleBatteryBlob(blob), diskImage: (i) => currentDiskImage(i), dirty: () => Array.from(diskDirty), writeBack: () => writeBackDirty() },
     // 複数の画像をひとまとめに開く(zip の中のディスク組など): MSX の .dsk は全部同じドライブの組にして [disk] で選ぶ、
     // FDS の .fds が複数なら面を順に並べて 1 本に、それ以外は最初の 1 本
     async openSet(items, setName) {
@@ -1603,7 +1710,7 @@
     async close() {
       liveEnd('end');
       rewindHoldEnd();
-      if (nes && hasBattery && nes.batteryDirty) { saveBattery(batteryKey, nes.getBattery()); nes.clearBatteryDirty(); }
+      if (nes && hasBattery && nes.batteryDirty) { handleBatteryBlob(nes.getBattery()); nes.clearBatteryDirty(); }
       await flushBattery();
       stopMain(); stopWorkletNode(); nes = null; rewindBuf = null;
     },
