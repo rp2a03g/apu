@@ -388,7 +388,7 @@
     if (stored && stored.main) return stored;
     const C = MML.Emu.MsxConsole;
     const def = C && C.hasDefaultBios && C.hasDefaultBios(mach) ? C.defaultBios(mach) : null;
-    if (def && stored) { if (stored.disk) def.disk = stored.disk; if (stored.kanji) def.kanji = stored.kanji; if (stored.kdr) def.kdr = stored.kdr; } // C-BIOS に利用者の漢字/ディスク ROM を足す
+    if (def && stored && stored.kanji) def.kanji = stored.kanji; // C-BIOS に足すのは漢字 ROM だけ(ディスク ROM/漢字ドライバは実 BIOS の BASIC/DOS が前提で、C-BIOS だと起動が止まる)
     return def;
   }
   // 設定のカートリッジ 2 を本体の opts.cartB の形に。fmpac の ROM は同梱 C-BIOS の MSX-MUSIC(控えた実 BIOS には無いので明示する)
@@ -1564,8 +1564,13 @@
       romName = name || ''; nameEl.textContent = romName; nameEl.title = '';
       win.style.display = 'flex';
       if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
-      statusEl.textContent = opt.disk ? T('ディスクには MSX の実 BIOS(メイン 32K+サブ 16K)とディスク ROM(16K、AB ヘッダ)が要ります。[BIOS] で指定してください(同梱 C-BIOS にディスクは無い)')
-        : T('MSX の BIOS(メイン ROM 32K。C-BIOS でも可)を [BIOS] で指定してください');
+      if (opt.disk) {
+        // 何が控えてあって何が足りないかを出す(C-BIOS はディスクを起動できないので、実 BIOS のメイン+サブ+ディスク ROM の 3 つが要る)
+        const st = loadMsxBios(mach || cfg.msx.machine || 'msx2') || {};
+        const kinds = [['main', T('メイン 32K')], ['sub', T('サブ 16K')], ['disk', T('ディスク ROM 16K')]];
+        const have = kinds.filter(([k]) => st[k]).map(([, l]) => l), miss = kinds.filter(([k]) => !st[k]).map(([, l]) => l);
+        statusEl.textContent = T('ディスクの起動には実 BIOS が要ります(同梱 C-BIOS では起動できません)。[BIOS] で足りない物を選んでください: {miss}', { miss: miss.join(' / ') }) + (have.length ? ' ' + T('(控え済み: {have})', { have: have.join(' / ') }) : '');
+      } else statusEl.textContent = T('MSX の BIOS(メイン ROM 32K。C-BIOS でも可)を [BIOS] で指定してください');
       return null;
     }
     pendingMsx = null;
