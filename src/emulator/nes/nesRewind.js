@@ -130,9 +130,10 @@
       for (let i = this.snaps.length - 1; i >= 0; i--) if (this.snaps[i].frame <= frame) { si = i; break; }
       if (si < 0) { si = 0; frame = this.snaps[0].frame; }
       const snap = this.snaps[si];
+      // 今押している物は状態を読む「前」に控える(読んだ後に取ると、巻き戻した先で押していた物が残って押しっぱなしになった。2026-11-11)
+      const held = [nes.padHeld[0], nes.padHeld[1]], turbo = [nes.padTurbo[0], nes.padTurbo[1]];
       Emu.NesState.load(nes, snap.state);
       // 控えていたパッドの値で進める(setController を通さず pad を直接。連射の位相も記録に含まれている)
-      const held = [nes.padHeld[0], nes.padHeld[1]], turbo = [nes.padTurbo[0], nes.padTurbo[1]];
       this.replaying = true;
       try {
         while (nes.frameCount < frame) {

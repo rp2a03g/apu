@@ -230,6 +230,7 @@
         this.pastGap = false;
       }
       this.prevCrcControl = this.crcControl;
+      this.diskAccess = (this.diskAccess || 0) + 1; // アクセスランプ用(ヘッドが読み書きしたバイト数)
       this.diskPosition++;
       if (this.diskPosition >= side.length) { this.motorOn = false; if (this.diskIrqEnabled) this.diskIrq = true; }
       else this.delay = 149;

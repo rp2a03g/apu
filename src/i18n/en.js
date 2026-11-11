@@ -1753,7 +1753,9 @@
     // ---- ゲーム画面の MSX 対応 (src/ui/nesScreen.js、index.html。DESIGN-MSX-CAPTURE.md 段階 7a) ----
     'ゲーム画面 (.nes/.fds/.rom を開いて遊びながら録音)': 'Game screen (open a .nes/.fds/.rom, play and record)',
     'ゲーム画面': 'Game screen',
-    '開く(.nes/.fds/.rom。ウィンドウへのドロップでも開けます)': 'Open (.nes/.fds/.rom; dropping a file on this window works too)',
+    '開く(.nes/.fds/.rom/.dsk、zip などの圧縮ファイル。ウィンドウへのドロップでも開けます)': 'Open (.nes/.fds/.rom/.dsk or an archive such as zip; dropping a file on this window works too)',
+    'ドライブ {d} のアクセスランプ(読み書き中に点灯)': 'Drive {d} access lamp (lit while reading or writing)',
+    '媒体なし': 'no media',
     'ディスクの FDC': 'Disk FDC',
     'インターレース': 'Interlace',
     'インターレース表示中(偶奇フィールドを交互の行に描いた 480 行)': 'Interlaced display (even/odd fields drawn on alternate lines, 480 rows)',

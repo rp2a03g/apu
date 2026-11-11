@@ -28,6 +28,10 @@ function run(args) {
 function main() {
   const argv = process.argv.slice(2);
   const flag = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : d; };
+  // まずバンドルの再ビルド忘れ(古いとブラウザは黙って主スレッド実行に落ちる。2026-11-11)
+  const fresh = run([path.join(__dirname, 'bundle-fresh.js')]);
+  process.stdout.write(fresh.out);
+  if (fresh.code !== 0) { console.error('バンドルが古いので止めます'); process.exit(1); }
   const root = flag('--corpus-root', ENV_ROOT);
   if (!root) {
     console.error('コーパスの場所が指定されていません。');

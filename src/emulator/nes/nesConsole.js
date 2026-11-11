@@ -83,6 +83,8 @@
     _applyPad(p) { const on = ((this.turboPhase / this.turboRate) | 0) === 0; this.pad[p] = this.padHeld[p] | (on ? this.padTurbo[p] : 0); }
     // FDS のディスク(面)。.fds 以外では 0 面
     get diskCount() { return this.mapper.sides ? this.mapper.sides.length : 0; }
+    // アクセスランプ(ディスク系の媒体の共通形、MsxConsole と同じ): ドライブごとの [{ access, media }]。FDS は 1 台。ディスクでなければ null
+    diskActivity() { const mp = this.mapper; return mp.sides ? [{ access: mp.diskAccess || 0, media: mp.diskNumber !== undefined && mp.diskNumber >= 0 }] : null; }
     get diskNumber() { return this.mapper.sides ? this.mapper.diskNumber : -1; }
     insertDisk(n) { if (this.mapper.insertDisk) this.mapper.insertDisk(n); }
     ejectDisk() { if (this.mapper.ejectDisk) this.mapper.ejectDisk(); }

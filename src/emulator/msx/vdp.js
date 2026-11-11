@@ -68,7 +68,10 @@
   const G7_SPRITE_COLOR = [0x00, 0x02, 0x03, 0x07, 0x24, 0x64, 0x80, 0x1B, 0xC0, 0xE4, 0x90, 0xB5, 0x0C, 0xD6, 0xDB, 0xFF];
 
   // コマンドの 1 ドットあたりの時間(Z80 サイクル、表示中)。VBlank/表示 OFF は半分(_cmdCost)
-  const CMD_COST = { 0xF: 0, 0xE: 11, 0xD: 15, 0xC: 8, 0xB: 0, 0xA: 0, 0x9: 20, 0x8: 12, 0x7: 20, 0x6: 15, 0x5: 12, 0x4: 8 };
+  // コマンド 1 歩(H 系はバイト、L 系/LINE/SRCH はドット)の所要時間。VDP の 21.48MHz 刻み(Z80 の 6 倍)で [表示 OFF/帰線, 表示 ON+スプライトあり, 表示 ON+スプライトなし]。
+  // 2026-11-11: openMSX の VDPCmdEngine の表の記憶(推定)。HMMV の表示 OFF(8.1 Z80 サイクル/バイト)とスプライトあり(VBlank 込みで 10.2)は openMSX の
+  //  残り行数の減り方で実測して一致。以前は「表示 OFF と VBlank の間は半分」にしていて、画面を消して塗るゲームで 2 倍速になり流れが変わった
+  const CMD_TICKS = { 0xC: [49, 65, 62], 0x8: [98, 137, 124], 0xE: [65, 125, 68], 0xD: [92, 136, 97], 0x9: [129, 197, 132], 0x7: [120, 147, 120], 0x6: [92, 125, 92], 0x5: [72, 72, 72], 0x4: [48, 48, 48] };
 
   class MsxVdp {
     /** @param {object} [opts] { type: 'tms9918' | 'v9938' | 'v9958', vramKB: 16 | 64 | 128 } */
@@ -97,7 +100,7 @@
     reset() {
       this.regs.fill(0);
       this.status.fill(0);
-      this.status[2] = 0x8C; // TR=1(転送可)、bit2-3 は常に 1、CE=0
+      this.status[2] = 0x0C; // bit2-3 は常に 1(TR/CE は読むときにコマンドの状態から作る。ここでは BD=bit4 だけを持つ)
       this.vram.fill(0);
       this.addr = 0; this.latch = -1; this.readBuf = 0; this.palLatch = -1;
       this.line = 0;              // 今の行(0 = フレームの先頭。表示は displayStart 行から)
@@ -166,7 +169,7 @@
         case 0: { // VRAM 読み: 先読みバッファを返し、次を読む
           const v = this.readBuf;
           this.readBuf = this.vram[this.addr & this.vramMask];
-          this.addr = (this.addr + 1) & 0x1FFFF;
+          this._incAddr();
           this.latch = -1;
           return v;
         }
@@ -179,7 +182,9 @@
             const vr = this.inVBlank ? 0x40 : 0x00;
             const hr = this.cycle >= 200 ? 0x20 : 0x00; // 水平帰線(行末 28 サイクルを近似)
             const c = this.cmd;
-            return ((c.tr || !c.op) ? 0x80 : 0x00) | 0x0C | vr | hr | (this.status[2] & 0x10) | (c.op ? 0x01 : 0x00); // TR: コマンドが無い間は 1(BIOS は HMMC の前に TR を待つ)
+            // TR はコマンドの最中でデータを受け渡せるときだけ 1。コマンドが無い間は 0(2026-11-11、openMSX の S#2 で確認: 待機中 $6C、HMMC 中 $ED。
+            //  待機中 1 にしていたら、割り込み処理が S#2 を選んだまま割り込まれたゲームが「VBlank 来た」と読み違え、要因を消さずに戻って入れ子の割り込みでスタックがあふれた)
+            return ((c.op && c.tr) ? 0x80 : 0x00) | 0x0C | vr | hr | (this.status[2] & 0x10) | (c.op ? 0x01 : 0x00);
           }
           if (n === 7) { const v = this.status[7]; if (this.cmd.op === 0xA) this._lmcmNext(); return v; } // LMCM: 読むと次のドットへ
           return n < 10 ? this.status[n] : 0xFF;
@@ -193,7 +198,7 @@
         case 0: // VRAM 書き
           this.vram[this.addr & this.vramMask] = v;
           this.readBuf = v;
-          this.addr = (this.addr + 1) & 0x1FFFF;
+          this._incAddr();
           this.latch = -1;
           return;
         case 1: // 制御: 2 バイト目で レジスタ書き(bit7) / 番地設定(bit6=書き、0=読み先読み)
@@ -203,7 +208,7 @@
             if (v & 0x80) { this.writeReg(v & 0x3F, lo); return; }
             const hi = (this.isTms ? 0 : (this.regs[14] & 0x07) << 14);
             this.addr = hi | ((v & 0x3F) << 8) | lo;
-            if (!(v & 0x40)) { this.readBuf = this.vram[this.addr & this.vramMask]; this.addr = (this.addr + 1) & 0x1FFFF; }
+            if (!(v & 0x40)) { this.readBuf = this.vram[this.addr & this.vramMask]; this._incAddr(); }
           }
           return;
         case 2: // パレット(V9938): 1 バイト目 0RRR0BBB、2 バイト目 00000GGG → R16 が指す色、R16 を +1
@@ -226,6 +231,14 @@
           return;
       }
     }
+    // VRAM の番地を 1 進める。V9938 のモード(G3〜G7/T2)では下位 14bit が 0 に戻ったら R14 も +1(128K を通しで)、それ以外のモードと TMS は 16K の中で回る
+    // (2026-11-11、openMSX の作りの記憶による推定)
+    _incAddr() {
+      const lo = (this.addr + 1) & 0x3FFF;
+      if (this.isTms) { this.addr = lo; return; }
+      if (lo === 0 && (this.mode & 0x18)) this.regs[14] = (this.regs[14] + 1) & 0x07;
+      this.addr = (this.regs[14] << 14) | lo;
+    }
     writeReg(r, v) {
       if (this.isTms) { if (r > 7) return; }
       else if (r >= 47) return;
@@ -235,6 +248,9 @@
       if (r === 1 && ((old ^ v) & 0x20) && this.onInt) this.onInt(this.intLine());
       if (r === 0 && ((old ^ v) & 0x10) && this.onInt) this.onInt(this.intLine());
       if (r === 15) this.regs[15] = v & 0x0F;
+      // R14(VRAM 番地の上位 3bit)は読み書きのたびに使われる: 番地(下位 14bit)を設定した後に R14 を書いても効く(2026-11-11。
+      //  番地→R14 の順で書くゲームで、設定時の R14 で番地を決めていたため部品が別のページに書かれ画面が崩れていた)
+      if (r === 14 && !this.isTms) { this.regs[14] = v & 0x07; this.addr = (this.regs[14] << 14) | (this.addr & 0x3FFF); }
       if (r === 44) this._cmdData(v);        // HMMC/LMMC のデータ
       else if (r === 46) this._cmdStart(v);  // コマンド開始
     }
@@ -253,10 +269,12 @@
       const l = this.line;
       if (l === this.displayStart) { this.outW = this.modeWidth; this.idxKindCur = (this.mode === 28) ? 1 : 0; this.ilCur = !this.isTms && (this.regs[9] & 0x08) !== 0; this.eoCur = !this.isTms && (this.regs[9] & 0x04) !== 0; } // このフレームの幅/索引の種類/インターレースはモードで決める
       if (l >= this.displayStart && l < this.displayEnd) this._renderLine(l - this.displayStart);
-      // ライン割り込み(V9938): 表示行 R19(縦スクロール R23 ぶんずれる)の終わりで FH
-      if (!this.isTms && l >= this.displayStart && l < this.displayEnd) {
+      // ライン割り込み(V9938): 表示行 R19(縦スクロール R23 ぶんずれる)の終わりで FH。FH は IE1(R0 bit4)が立っている時だけ立てる
+      // (2026-11-11。IE1=0 でも立てていたら、割り込みのたびに S#1 の FH で「行割り込みか VBlank か」を見分けるゲームが
+      //  VBlank を行割り込みと取り違え、空のラスタ表で BIOS の先頭を VDP レジスタへ流し込んで画面が崩れていた。openMSX も IE1 の時だけ、の記憶による推定)
+      if (!this.isTms && (this.regs[0] & 0x10) && l >= this.displayStart && l < this.displayEnd) {
         const dl = l - this.displayStart;
-        if (((dl + this.regs[23]) & 0xFF) === this.regs[19]) { this.status[1] |= 0x01; if (this.onInt && (this.regs[0] & 0x10)) this.onInt(this.intLine()); }
+        if (((dl + this.regs[23]) & 0xFF) === this.regs[19]) { this.status[1] |= 0x01; if (this.onInt) this.onInt(this.intLine()); }
       }
       this.line++;
       if (this.line >= this.linesPerFrame) { this.line = 0; }
@@ -315,12 +333,15 @@
         regs[2] = r2eo;
         if (yjk) this.yjkBg.set(lb.subarray(0, W)); // スプライトの前の背景(合成で「スプライトが上書きした所」を見分ける)
         if (mode !== 1 && mode !== 9 && !(regs[8] & 0x02)) {
-          if (this.isTms || mode === 0 || mode === 2 || mode === 4) this._spritesMode1(y, lb, mw);
-          else this._spritesMode2(y, lb, mw, g7);
+          // スプライトの Y は縦スクロール後の行で比べる(V9938: スプライトも R23 で背景と一緒にずれる。2026-11-11、推定。
+          //  画面の途中で R23 を変えるゲームで自機の表示が当たり判定より下にずれていた)
+          if (this.isTms || mode === 0 || mode === 2 || mode === 4) this._spritesMode1(sy, lb, mw);
+          else this._spritesMode2(sy, lb, mw, g7);
           spritesOn = true;
         }
       }
       void spritesOn;
+      if (!this.isTms && (regs[18] & 0x0F)) this._hAdjust(lb, mw, g7);
       // 合成: frame(フレームの幅 outW に合わせる)と frameIdx(常に 256)
       const ow = this.outW, row = this._row(fy), base = row * ow, pal = this.palette, tp = !this.isTms && (regs[8] & 0x20);
       const frame = this.frame, idx = this.frameIdx, ibase = fy * W, wIdx = !this.ilCur || this.field === 0; // 巻き戻し用の索引は偶数フィールドだけ
@@ -352,6 +373,18 @@
         else if (!(x & 1)) idx[ibase + (x >> 1)] = kind ? this._toGrb(c) : c;
       }
       this._maskLeft(fy, row, ow);
+    }
+    // 横の set adjust(R18 下位 4bit): 表示全体(背景+スプライト)を横にずらす。0=中央、1〜7=左へ 1〜7、8〜15=右へ 8〜1 ドット(幅 512 のモードは 2 倍)。
+    // 空いた所はボーダー色。2026-11-11(画面の途中で R18 を 8/A/C/E と変えて 2 ドットずつ横スクロールするゲームで、背景が 8 ドットずつ飛んでいた)
+    _hAdjust(lb, mw, g7) {
+      const h = this.regs[18] & 0x0F, sh = -(((h ^ 8) - 8)) * (mw / W);
+      const fill = g7 ? this.regs[7] : (this.regs[7] & 0x0F);
+      const yjk = g7 && this.isV9958 && (this.regs[25] & 0x08) !== 0;
+      for (const a of yjk ? [lb, this.lineRgb, this.yjkBg] : [lb]) {
+        const f = a === lb ? fill : (a === this.yjkBg ? -1 : G7_PALETTE[this.regs[7]]);
+        if (sh > 0) { a.copyWithin(sh, 0, mw - sh); a.fill(f, 0, sh); }
+        else { a.copyWithin(0, -sh, mw); a.fill(f, mw + sh, mw); }
+      }
     }
     // 背景の 1 行をモードで描く(lb に色番号/G7 は 8bit 色。rgb を渡すと YJK として lineRgb に表示色も)
     _lineBg(mode, sy, lb, mw, rgb) {
@@ -509,14 +542,15 @@
         if (sy === 0xD0) break; // 終端
         sy = sy > 0xE0 ? sy - 0x100 : sy; // 画面上端より上
         const top = sy + 1;
-        if (y < top || y >= top + h) continue;
+        const d = this.isTms ? y - top : ((y - top) & 0xFF); // V9938 は 8bit で折り返す(縦スクロールで行が 255 を越える)
+        if (d < 0 || d >= h) continue;
         if (count === 4) { if (!(this.status[0] & 0x40)) this.status[0] = (this.status[0] & 0xE0) | 0x40 | (i & 0x1F); break; }
         count++;
         let sx = vram[a + 1];
         const pat = vram[a + 2], attr = vram[a + 3];
         const color = attr & 0x0F;
         if (attr & 0x80) sx -= 32;
-        const ly = ((y - top) / mag) | 0;
+        const ly = (d / mag) | 0;
         const pbase = spg + ((size === 16 ? (pat & 0xFC) : pat) << 3);
         for (let px = 0; px < size; px++) {
           const byte = vram[(pbase + ly + ((px >> 3) << 4)) & m];
@@ -550,10 +584,11 @@
         if (sy === 0xD8) break;
         sy = sy > 0xE0 ? sy - 0x100 : sy;
         const top = sy + 1;
-        if (y < top || y >= top + h) continue;
+        const d = this.isTms ? y - top : ((y - top) & 0xFF); // V9938 は 8bit で折り返す(縦スクロールで行が 255 を越える)
+        if (d < 0 || d >= h) continue;
         if (count === 8) { if (!(this.status[0] & 0x40)) this.status[0] = (this.status[0] & 0xE0) | 0x40 | (i & 0x1F); break; }
         count++;
-        const ly = ((y - top) / mag) | 0;
+        const ly = (d / mag) | 0;
         const cattr = vram[(sct + i * 16 + ly) & m];
         let sx = vram[a + 1];
         const pat = vram[a + 2];
@@ -635,6 +670,9 @@
       c.sx = r[32] | ((r[33] & 1) << 8); c.sy = r[34] | ((r[35] & 3) << 8);
       c.dx = r[36] | ((r[37] & 1) << 8); c.dy = r[38] | ((r[39] & 3) << 8);
       c.nx = (r[40] | ((r[41] & 1) << 8)) || 512; c.ny = (r[42] | ((r[43] & 3) << 8)) || 1024;
+      // LINE の NX/NY は長辺/短辺の長さそのもの(0 は 0。範囲のコマンドの「0 = 512/1024」は当てない)。2026-11-11: 短辺 0 の水平線/垂直線が
+      //  1024 として斜め線になっていた(お絵描きソフトの格子、openMSX との突き合わせで判明)
+      if ((v >> 4) === 0x7) { c.nx = r[40] | ((r[41] & 1) << 8); c.ny = r[42] | ((r[43] & 3) << 8); }
       c.clr = r[44]; c.arg = r[45];
       c.dix = (c.arg & 0x04) ? -1 : 1; c.diy = (c.arg & 0x08) ? -1 : 1;
       c.maj = (c.arg & 0x01); c.eq = (c.arg & 0x02);
@@ -642,6 +680,14 @@
       c.tr = false;
       this.status[2] &= ~0x10;
       const pi = this._pixInfo();
+      // 横幅 NX は画面の端で打ち切る(右へ進むなら 幅-X、左へなら X+1。転送は転送元と転送先の両方で)。2026-11-11: SCREEN 5 で NX=512 の HMMC を
+      //  出すゲームで、打ち切らないと 1 行で 2 行ぶんのデータを使って絵が崩れた(openMSX の clipNX の記憶による推定、ab.js で一致を確認)
+      {
+        const w = pi.w, room = (x) => c.dix > 0 ? w - (x & (w - 1)) : (x & (w - 1)) + 1;
+        let lim = (c.op === 0xA) ? room(c.sx) : room(c.dx);
+        if (c.op === 0xD || c.op === 0x9) lim = Math.min(lim, room(c.sx));
+        if (c.op !== 0xE && c.op !== 0x4 && c.op !== 0x5 && c.op !== 0x6 && c.op !== 0x7) c.nx = Math.min(c.nx, lim);
+      }
       // バイト単位のコマンド(HMMV/HMMM/YMMM/HMMC)は x をバイト境界に
       if (c.op === 0xC || c.op === 0xD || c.op === 0xE || c.op === 0xF) { const q = pi.ppb; c.nx = Math.max(1, (c.nx / q) | 0) * q; }
       switch (c.op) {
@@ -655,8 +701,10 @@
     }
     _cmdCost() {
       const c = this.cmd;
-      const base = CMD_COST[c.op] || 10;
-      return (!this.displayEnabled || this.inVBlank) ? base * 0.5 : base;
+      const t = CMD_TICKS[c.op]; if (!t) return 10;
+      if (!this.displayEnabled || this.inVBlank) return t[0] / 6;
+      const m = this.mode, spr = m !== 1 && m !== 9 && !(this.regs[8] & 0x02); // テキスト(T1/T2)はスプライト無し、R8 bit1 SPD=1 で消える
+      return t[spr ? 1 : 2] / 6;
     }
     // 時間を進めてコマンドを実行する(HMMC/LMMC は CPU 駆動なのでここでは進まない)
     _cmdRun(cycles) {

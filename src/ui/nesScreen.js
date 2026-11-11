@@ -140,6 +140,7 @@
   let keyBits = 0, keyTurbo = 0, touchBits = 0, touchTurbo = 0, lastPad = -1;
   let kbdBtn = null, softKbdEl = null, touchPadEl = null; // MSX のソフトキーボード(7f)とタッチ操作キー
   let machineEl = null, ilBadgeEl = null; // 左上の機種表示、右上の「インターレース」の印
+  let lampsEl = null, lampLast = [], lampOnUntil = [], lampTimer = 0; // ディスクのアクセスランプ(ドライブごと)
   let fpsCount = 0, fpsMs = 0, fps = 0, frameSeq = 0, underruns = 0; // frameSeq: 本体の frameCount(最後に届いたフレーム)、underruns: 音切れ回数
   let paused = false;
   // 主スレッド実行(音なし)
@@ -440,13 +441,16 @@
     biosBtn.setAttribute('aria-label', biosBtn.title);
   }
   // MSX のキー: 設定の操作キー以外は本体のキーボードへ(Worklet なら key メッセージ)。兼用 ON ならカーソル/スペースをジョイスティック 1 にも
+  const msxHeld = new Set(); // 今押している MSX のキー(巻き戻しの後に本体へ送り直す)
   function msxKey(code, down) {
+    if (down) msxHeld.add(code); else msxHeld.delete(code);
     if (node) node.port.postMessage({ type: 'key', code, down });
     else if (nes && typeof nes.setKey === 'function') nes.setKey(code, down);
     const jb = cfg.msx.joyFromKeys ? (MSX_JOY_KEYS[code] || 0) : 0;
     if (jb) { if (down) keyBits |= jb; else keyBits &= ~jb; pushPad(); }
   }
   function msxKeyReleaseAll() {
+    msxHeld.clear();
     if (node) node.port.postMessage({ type: 'keyReleaseAll' });
     else if (nes && nes.keyboard && nes.keyboard.releaseAll) nes.keyboard.releaseAll();
   }
@@ -571,6 +575,9 @@
   }
   function openRomFile(f) {
     if (!f) return;
+    // 圧縮ファイル(zip/7z/rar/lzh)は本体の入口(main.js openSoundFile → openArchive)で展開してもらう。
+    // ドロップは元からそちらへ素通りしていたが、[開く] は中身をそのまま open() に渡して「iNES ヘッダではありません」になっていた
+    if (/\.(zip|7z|rar|rsn|lzh|lha)$/i.test(f.name) && NesScreen.onOpenFile) { NesScreen.onOpenFile(f); return; }
     f.arrayBuffer().then((buf) => NesScreen.open(new Uint8Array(buf), f.name)).catch((e) => { alert(T('この ROM は開けません: {msg}', { msg: e && e.message ? e.message : String(e) })); });
   }
   function ensureDom() {
@@ -589,9 +596,9 @@
     let hdr = header.querySelector('.fw-header-extra');
     if (!hdr) { hdr = document.createElement('span'); hdr.className = 'fw-header-extra nes-hdr'; header.insertBefore(hdr, header.querySelector('.float-window-close')); }
     hdr.innerHTML = '';
-    romInput = document.createElement('input'); romInput.type = 'file'; romInput.accept = '.nes,.fds,.rom,.mx1,.mx2'; romInput.style.display = 'none';
+    romInput = document.createElement('input'); romInput.type = 'file'; romInput.accept = '.nes,.fds,.rom,.mx1,.mx2,.dsk,.zip,.7z,.rar,.rsn,.lzh,.lha'; romInput.style.display = 'none';
     romInput.addEventListener('change', () => { const f = romInput.files && romInput.files[0]; romInput.value = ''; openRomFile(f); });
-    const openBtn = mkIcon('open', T('開く(.nes/.fds/.rom。ウィンドウへのドロップでも開けます)'), () => romInput.click());
+    const openBtn = mkIcon('open', T('開く(.nes/.fds/.rom/.dsk、zip などの圧縮ファイル。ウィンドウへのドロップでも開けます)'), () => romInput.click());
     const resetBtn = mkIcon('reset', T('リセット'), () => { if (node) node.port.postMessage({ type: 'reset' }); else if (nes) { nes.reset(); if (rewindBuf) rewindBuf.clear(); } liveRestart(); });
     speedBtn = mkIcon('ff', '', () => { speedSel = SPEEDS[(SPEEDS.indexOf(speedSel) + 1) % SPEEDS.length]; pushSpeed(); }, '');
     stateBtnS = mkIcon('saveState', '', requestSaveState);
@@ -630,6 +637,7 @@
     const bar = document.createElement('div'); bar.className = 'nes-bar';
     machineEl = document.createElement('span'); machineEl.className = 'nes-machine';
     nameEl = document.createElement('span'); nameEl.className = 'nes-name';
+    lampsEl = document.createElement('span'); lampsEl.className = 'nes-lamps'; lampsEl.hidden = true;
     ilBadgeEl = document.createElement('span'); ilBadgeEl.className = 'nes-ilbadge'; ilBadgeEl.textContent = T('インターレース'); ilBadgeEl.title = T('インターレース表示中(偶奇フィールドを交互の行に描いた 480 行)'); ilBadgeEl.hidden = true;
     statusEl = document.createElement('span'); statusEl.className = 'nes-status';
     recInfoEl = document.createElement('span'); recInfoEl.className = 'nes-recinfo';
@@ -648,7 +656,7 @@
     convBtn = mkBtn(T('変換へ'), '', () => { if (recVgm && NesScreen.onOpenRecording) { setPaused(true); NesScreen.onOpenRecording(recVgm, recFileName()); } }); convBtn.hidden = true;
     diskBadgeEl = document.createElement('button'); diskBadgeEl.type = 'button'; diskBadgeEl.className = 'nes-diskbadge'; diskBadgeEl.hidden = true;
     diskBadgeEl.addEventListener('click', () => { if (cfg.msx.writeBack && !diskDirHandle) pickDiskDir(); else toggleDiskPopover(sideBtn.hidden ? diskBadgeEl : sideBtn); });
-    bar.appendChild(machineEl); bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn); bar.appendChild(ilBadgeEl);
+    bar.appendChild(machineEl); bar.appendChild(lampsEl); bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn); bar.appendChild(ilBadgeEl);
     statusEl.textContent = '';
     wrap.appendChild(bar); wrap.appendChild(canvas);
     if (MML.Device && MML.Device.isTouch && MML.Device.isTouch()) wrap.appendChild(buildTouchPad());
@@ -1188,6 +1196,8 @@
     ctx2d.putImageData(image, 0, 0);
     fpsCount++;
   }
+  // 本体(主スレッド実行)の画面を描く。MSX の frame は最大の大きさ(512×480)で確保してあるので、今の幅×行数ぶんだけ切り出す(Worklet の frameW/frameH と同じ)
+  function blitConsole(c) { const w = c.frameWidth || 256, h = c.frameHeight || 240; blitFrame(c.frame.subarray(0, w * h), w, h); }
   let idxScratch = null;
   function blitIndex(u8, pal, w, h) { // 逆再生の画面(パレット番号 8bit) → RGBA。pal: NES は PPU.PALETTE、MSX は VDP のパレット(rwframe の palette)
     ensureCanvasSize(w, h);
@@ -1197,6 +1207,37 @@
     blitFrame(idxScratch);
   }
   function rewindPalette(seq) { if (machine !== 'msx' || !rewindBuf) return null; return rewindBuf.paletteOf ? rewindBuf.paletteOf(seq) : rewindBuf.palette; } // 主スレッド実行の逆再生の色(フレームごと: パレット/GRAPHIC7 の 256 色)
+  // ディスクのアクセスランプ(2026-11-11、利用者要望: 読み込み中か止まっているか見分けたい。MSX/FDS、今後のディスク系の媒体も同じ形)。
+  // act は本体の diskActivity(): ドライブごとの { access(読み書きしたバイト数), media }。null ならディスク系でないので隠す。
+  // ドライブ A は常に、B 以降は媒体が入っている時だけ出す(2 台なら A/B の文字も)。access が増えたら 150ms 点ける
+  const LAMP_HOLD_MS = 150;
+  function updateLamps(act) {
+    if (!lampsEl) return;
+    if (!act || !act.length) { if (!lampsEl.hidden) { lampsEl.hidden = true; lampsEl.textContent = ''; } lampLast = []; lampOnUntil = []; return; }
+    const now = performance.now();
+    if (lampsEl.children.length !== act.length) {
+      lampsEl.textContent = ''; lampLast = []; lampOnUntil = [];
+      act.forEach((_, i) => { const s = document.createElement('span'); s.className = 'nes-lamp'; s.dataset.drive = String.fromCharCode(65 + i); lampsEl.appendChild(s); });
+    }
+    lampsEl.hidden = false;
+    const shown = act.filter((d, i) => i === 0 || d.media).length;
+    let next = 0;
+    act.forEach((d, i) => {
+      const el = lampsEl.children[i], letter = String.fromCharCode(65 + i);
+      if (lampLast[i] !== undefined && d.access !== lampLast[i]) lampOnUntil[i] = now + LAMP_HOLD_MS;
+      lampLast[i] = d.access;
+      const on = now < (lampOnUntil[i] || 0);
+      if (on) next = Math.max(next, lampOnUntil[i]);
+      el.hidden = !(i === 0 || d.media);
+      el.classList.toggle('on', on);
+      el.classList.toggle('empty', !d.media);
+      el.textContent = shown > 1 ? letter : '';
+      el.title = T('ドライブ {d} のアクセスランプ(読み書き中に点灯)', { d: letter }) + (d.media ? '' : ' — ' + T('媒体なし'));
+    });
+    // フレームが届かなくなっても(一時停止など)点けっぱなしにしない
+    if (lampTimer) clearTimeout(lampTimer);
+    lampTimer = next ? setTimeout(() => { lampTimer = 0; for (const el of lampsEl.children) el.classList.remove('on'); }, next - now + 10) : 0;
+  }
   function tickFps(now) {
     if (now - fpsMs >= 1000) { fps = fpsCount; fpsCount = 0; fpsMs = now; updateStatus(); }
   }
@@ -1272,6 +1313,7 @@
     switch (m.type) {
       case 'frame': {
         blitFrame(new Uint32Array(m.frame), m.w, m.h);
+        updateLamps(m.disk);
         frameSeq = m.seq; underruns = m.underruns || 0;
         if (m.writes) takeFrames(m.writes, m.seq);
         tickFps(performance.now());
@@ -1318,7 +1360,8 @@
     const sp = curSpeed(), fms = FRAME_MS / sp;
     while (acc >= fms && n < 3 * sp) { nes.runFrame(); if (rewindBuf) rewindBuf.onFrame(); acc -= fms; n++; }
     if (n) {
-      blitFrame(nes.frame);
+      blitConsole(nes);
+      updateLamps(nes.diskActivity ? nes.diskActivity() : null);
       frameSeq = nes.frameCount;
       if (nes.rec) takeFrames(nes.rec.frames.splice(0), frameSeq);
       if (hasBattery && nes.batteryDirty && (++mainFrames % 60) === 0) { handleBatteryBlob(nes.getBattery()); nes.clearBatteryDirty(); }
@@ -1365,13 +1408,23 @@
       nes.rec = null;
       const got = rewindBuf.rewindTo(absFrame);
       if (wasRec) nes.startRecording();
-      blitFrame(nes.frame);
+      blitConsole(nes);
       onRewound(got);
     }
   }
   // 戻った後: フレーム番号を合わせ、ロールと VGM 録音を切り詰める(像は録音の取り直しで次のフレームに届く)
+  // 巻き戻しの後: 実際に押しているパッド/キーを本体へ送り直す。本体は過去の状態を読み直して進め直すので、そのとき押していた物が残りうる
+  // (逆再生の間は過去の状態を何度も読むので、本体側だけでは「今押している物」を保てない。2026-11-11、押しっぱなしになる不具合)
+  function resyncInput() {
+    lastPad = -1; lastPad2 = -1; pushPad();
+    if (machine !== 'msx') return;
+    if (node) node.port.postMessage({ type: 'keyReleaseAll' });
+    else if (nes && nes.keyboard && nes.keyboard.releaseAll) nes.keyboard.releaseAll();
+    for (const code of msxHeld) { if (node) node.port.postMessage({ type: 'key', code, down: true }); else if (nes && typeof nes.setKey === 'function') nes.setKey(code, true); }
+  }
   function onRewound(seq) {
     frameSeq = seq;
+    resyncInput();
     if (liveActive) {
       const keep = liveBase === null ? -1 : seq - liveBase + 1;
       if (keep >= 0 && NesScreen.onLiveTruncate) NesScreen.onLiveTruncate(keep);
@@ -1397,7 +1450,7 @@
     rwActive = false;
     rewindBtn.classList.remove('nes-rewinding');
     if (node) node.port.postMessage({ type: 'rewindEnd' });
-    else if (nes && rewindBuf) { const got = rewindBuf.endReverse(); blitFrame(nes.frame); onRewound(got); lastMs = 0; if (paused) stopMain(); }
+    else if (nes && rewindBuf) { const got = rewindBuf.endReverse(); blitConsole(nes); onRewound(got); lastMs = 0; if (paused) stopMain(); }
   }
   // 逆再生中の 1 枚: ロールは数フレームごとに切り詰めて追わせる(最後に rewound で正確に切り詰める)
   function onReverseFrame(seq) {
@@ -1672,7 +1725,7 @@
     const btn = document.querySelector('.toggle-btn[data-target="win-nes"]');
     if (btn) btn.classList.add('active');
     ensureCanvasSize(probe.frameWidth, probe.frameHeight);
-    blitFrame(probe.frame);
+    blitConsole(probe);
     applyCfgLabels();
     const rom = romA ? romA.slice().buffer : null, tr = rom ? [rom] : [];
     const dmsg = disks.map((d) => d.slice().buffer); for (const b of dmsg) tr.push(b);
@@ -1698,6 +1751,7 @@
   const NesScreen = {
     getAudioContext: null,   // () => AudioContext(main.js が共用の物を渡す)。無ければ自前で作る
     onOpenRecording: null,   // (vgmBytes, fileName) 録音を本体の VGM 経路で開く(main.js)
+    onOpenFile: null,        // (File) [開く] で選ばれた圧縮ファイルを本体の入口で開く(main.js。展開してゲーム画面へ戻ってくる)
     onLiveBegin: null,       // ({chips, fps, name}) ライブ表示の開始(main.js が LiveRollSession につなぐ)
     onLiveFrame: null,       // (writes) 1 フレームぶんの書き込み列
     onLiveTruncate: null,    // (frames) 巻き戻し: ロールをこのフレーム数に切り詰める
@@ -1767,7 +1821,7 @@
       const btn = document.querySelector('.toggle-btn[data-target="win-nes"]');
       if (btn) btn.classList.add('active');
       ensureCanvasSize(256, 240);
-      blitFrame(probe.frame);
+      blitConsole(probe);
       applyCfgLabels();
       const rom = bytes.slice().buffer;
       const bios = fdsBios ? fdsBios.slice().buffer : null;

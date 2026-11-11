@@ -4249,6 +4249,8 @@
     MML.UI.NesScreen.onOpenRecording = (bytes, name) => {
       if (openSoundFileAndPlay) openSoundFileAndPlay(new File([bytes], name, { type: 'application/octet-stream' }), []);
     };
+    // ゲーム画面の [開く] で選ばれた圧縮ファイル: ドロップと同じ本体の入口で展開して開く
+    MML.UI.NesScreen.onOpenFile = (file) => { if (openSoundFileAndPlay) openSoundFileAndPlay(file, [file]); };
     MML.UI.NesScreen.mount(); // ROM を開く前にツールバーから窓を出しても [開く] 等のヘッダが出るように
     // ライブ表示: NES 画面の録音(書き込み列)を毎フレーム鍵盤表示の追記モードへ(LIVE の WebSocket と同じ LiveRollSession)。
     // 鍵盤表示側で終わった時(別の曲を開いた等)は closer 経由で NES 画面に知らせる

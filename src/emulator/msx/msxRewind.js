@@ -154,9 +154,10 @@
       for (let i = this.snaps.length - 1; i >= 0; i--) if (this.snaps[i].frame <= frame) { si = i; break; }
       if (si < 0) { si = 0; frame = this.snaps[0].frame; }
       const full = this._stateAt(si);
-      Emu.MsxState.load(m, full);
+      // 今押している物(ジョイスティック/キーボード)は状態を読む「前」に控える(読んだ後に取ると、巻き戻した先で押していた物が残って押しっぱなしになった。2026-11-11)
       const held = [m.joyHeld[0], m.joyHeld[1]], turbo = [m.joyTurbo[0], m.joyTurbo[1]];
       const rowsNow = m.keyboard.rows.slice();
+      Emu.MsxState.load(m, full);
       this.replaying = true;
       try {
         while (m.frameCount < frame) {

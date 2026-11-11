@@ -53,6 +53,7 @@
   // 発見的手法(guessType)より優先。辞書に無ければ発見的手法)
   const MAPPER_DB = {
     'c29edd84': 'ascii16', '8cf0e6c0': 'ascii8', '28094960': 'konami', 'd6465702': 'ascii16', 'fb348de6': 'ascii8',
+    'c89b93b5': 'koei', // 2026-11-11: 推定 konami だと SRAM の検査で止まる。koei で起動を確認
   };
   const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
   function crc32(b) { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return ((c ^ 0xFFFFFFFF) >>> 0).toString(16).padStart(8, '0'); }
@@ -168,11 +169,19 @@
       if (size <= 0x8000) {
         // 32K: 'AB' が先頭なら 0x4000-0xBFFF、'AB' が 0x4000 にあるなら 0x0000-0x7FFF(前半がデータ)
         base = hdr === 0x4000 ? 0x0000 : 0x4000;
+        // INIT がページ 1〜3 を指すなら、ヘッダのページと INIT のページの差で置き場所を決める(openMSX と同じ考え。2026-11-11:
+        //  前半 16K が空でヘッダが $4000、INIT が $8010 の ROM は 0x4000-0xBFFF に置くのが正しく、決め打ちだと C-BIOS が「BASIC の ROM」と見て止まった)
+        const init = hdr >= 0 ? (rom[hdr + 2] | (rom[hdr + 3] << 8)) : 0;
+        //  元の置き方で INIT が ROM の中に入るなら変えない(先頭にヘッダ、INIT $8010 の ROM は $4000-$BFFF のままが正しい)
+        if (init >= 0x4000 && !(init >= base && init < base + size)) { const b = ((init >> 14) - (hdr >> 14)) * 0x4000; if (b >= 0 && b <= 0x8000) base = b; }
       } else if (size <= 0xC000) {
         base = hdr === 0x4000 ? 0x0000 : 0x4000; // 48K: 0x0000-0xBFFF か 0x4000-0xFFFF
       } else base = 0x0000; // 64K
       const img = new Uint8Array(0x10000).fill(0xFF);
       img.set(rom.subarray(0, Math.min(size, 0x10000 - base)), base);
+      // 32K は 64K 全体に鏡像で置く(openMSX の Mirrored と同じ。番地 a は rom[(a - base) & 0x7FFF])。
+      // INIT がページ 0($003B など)を指す ROM があり、鏡像が無いと $FF(RST 38)を実行して止まっていた(2026-11-11、openMSX との突き合わせで判明)
+      if (size === 0x8000) for (let a = 0; a < 0x10000; a++) img[a] = rom[(a - base) & 0x7FFF];
       for (let p = 0; p < 8; p++) this.pages[p] = img.subarray(p * PAGE, (p + 1) * PAGE);
     }
 
@@ -233,7 +242,9 @@
             if (this.onWrite) this.onWrite('dac', addr, v);
             return;
           }
-          if (addr === 0x6000) this.bankSel[1] = v; else if (addr === 0x8000) this.bankSel[2] = v; else if (addr === 0xA000) this.bankSel[3] = v; else return;
+          // $6000-$BFFF のどこに書いても、その 8K の窓のバンク($4000-$5FFF は固定)。2026-11-11: $6000/$8000/$A000 ちょうどだけにしていて、
+          //  $7000/$9000/$B000 に書くゲームでバンクが切り替わらず別のコードを実行していた(openMSX RomKonami の記憶による推定、ab.js で一致を確認)
+          if (addr >= 0x6000 && addr < 0xC000) this.bankSel[(addr - 0x4000) >> 13] = v; else return;
           this._remap(); return;
         case 'konamiScc':
           if (this.sccEnabled && addr >= 0x9800 && addr <= 0x9FFF) {
@@ -296,7 +307,8 @@
           let w = -1;
           if (addr >= 0x6000 && addr < 0x6800) w = 0; else if (addr >= 0x7000 && addr < 0x7800) w = 1;
           if (w < 0) return;
-          if (v & this.sramEnableBit) this.sramSel[w] = 1; else { this.sramSel[w] = 0; this.bankSel[w] = v; }
+          // SRAM はバンク値がちょうど $10 のときだけ(openMSX RomAscii16_2 の記憶による推定。bit4 で見ると $10 以外の値で ROM のはずが SRAM になった)
+          if (v === 0x10) this.sramSel[w] = 1; else { this.sramSel[w] = 0; this.bankSel[w] = v; }
           this._remap(); return;
         }
         case 'gameMaster2': {

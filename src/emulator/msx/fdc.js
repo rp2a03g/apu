@@ -46,7 +46,7 @@
   }
 
   class Drive {
-    constructor() { this.image = null; this.track = 0; this.side = 0; this.motor = false; this.indexCount = 0; }
+    constructor() { this.image = null; this.track = 0; this.side = 0; this.motor = false; this.indexCount = 0; this.access = 0; } // access: 読み書きしたバイト数(アクセスランプ用。増えたら点ける)
     get ready() { return !!this.image; }
   }
 
@@ -160,7 +160,7 @@
         default: break;
       }
     }
-    _fetch() { const d = this.drive; this.data = d.image.readByte(d.track, d.side, this.sector, this.pos); }
+    _fetch() { const d = this.drive; d.access++; this.data = d.image.readByte(d.track, d.side, this.sector, this.pos); }
     _nextRead() {
       const d = this.drive;
       if (this.phase === 4) {
@@ -182,7 +182,7 @@
         if (++this.pos >= 6250) { this.drq = false; this.busy = false; this.phase = 0; this.irq = true; }
         return;
       }
-      d.image.writeByte(d.track, d.side, this.sector, this.pos, v);
+      d.access++; d.image.writeByte(d.track, d.side, this.sector, this.pos, v);
       this.pos++;
       if (this.pos >= SECTOR) {
         this.pos = 0;
@@ -223,7 +223,7 @@
       }
       if (this.phase === 2 && this.xfer && !this.xfer.write) {
         const x = this.xfer, d = this.drive;
-        const v = d.image.readByte(x.c, x.h, x.r, this.dataPos);
+        d.access++; const v = d.image.readByte(x.c, x.h, x.r, this.dataPos);
         this._advance();
         return v;
       }
@@ -234,7 +234,7 @@
       if (this.phase === 2 && this.xfer && this.xfer.write) {
         const x = this.xfer, d = this.drive;
         if (x.format) { if (++this.dataPos >= 4 * d.image.spt) this._finish(0x00); return; } // FORMAT: セクタごとの 4 バイト(C H R N)を飲み込む
-        d.image.writeByte(x.c, x.h, x.r, this.dataPos, v);
+        d.access++; d.image.writeByte(x.c, x.h, x.r, this.dataPos, v);
         this._advance();
         return;
       }
@@ -344,6 +344,8 @@
     get diskCount() { return this.images.length; }
     get dirty() { return this.images.some((i) => i.dirty); }
     clearDirty() { for (const i of this.images) i.dirty = false; }
+    // アクセスランプ: ドライブごとの { access(読み書きしたバイト数), media(入っているか) }。ドライブは A/B の 2 台
+    diskActivity() { return this.drives.map((d) => ({ access: d.access, media: !!d.image })); }
     insertDisk(n) { if (!this.images.length) return; n = ((n % this.images.length) + this.images.length) % this.images.length; this.drives[0].image = this.images[n]; this.inserted = n; }
     ejectDisk() { this.drives[0].image = null; this.inserted = -1; }
     addImage(img) { this.images.push(img); return this.images.length - 1; }
