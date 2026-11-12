@@ -70,6 +70,7 @@
   const MSX_CART_B = ['none', 'fmpac', 'msxaudio', 'scci']; // カートリッジ 2(ゲームと一緒に挿す音源。7b)
   const MSX_FDC = ['wd2793', 'tc8566af']; // ディスクの FDC(ディスク ROM が叩く方。7d)
   const MSX_JOY_KEYS = { ArrowUp: 16, ArrowDown: 32, ArrowLeft: 64, ArrowRight: 128, Space: 1 }; // 「カーソルキーとスペースをジョイスティック 1 にも使う」
+  const MSX_TOUCH_KEYS = [[16, 'ArrowUp'], [32, 'ArrowDown'], [64, 'ArrowLeft'], [128, 'ArrowRight'], [1, 'Space'], [2, 'KeyM']]; // タッチ操作キーを MSX のキーボードにも
   const TURBO_RATES = [1, 2, 3, 4]; // 押す/離すの長さ(フレーム)。1=30 回/秒、2=15、3=10、4=7.5
   const SPEEDS = [1, 2, 4, 8];
   const DEFAULT_CFG = {
@@ -82,7 +83,7 @@
     sfxRemove: false, // 録音の補正の初期値(録音ごとに保存/変換への横のチェックで変えられる)
     lagFix: false,
     diskFast: false, // ディスクの読み込み: false = 実機の速さ(既定。読み込みの間の音も曲のうち)、true = 読み込み中は自動で早送り(録音は実機の時間のまま)
-    msx: { keys: { FF: 'F11', Rewind: 'F12', Pause: 'Pause', SaveState: 'F9', LoadState: 'F10' }, machine: 'auto', joyFromKeys: false, cartB: 'none', fdc: 'wd2793', softKbd: false, writeBack: false },
+    msx: { keys: { FF: 'F11', Rewind: 'F12', Pause: 'Pause', SaveState: 'F9', LoadState: 'F10' }, machine: 'auto', joyFromKeys: false, touchKbd: false, cartB: 'none', fdc: 'wd2793', softKbd: false, writeBack: false },
   };
   function loadMsxCfg(c) {
     c = c && typeof c === 'object' ? c : {};
@@ -90,6 +91,7 @@
       keys: Object.assign({}, DEFAULT_CFG.msx.keys, c.keys && typeof c.keys === 'object' ? c.keys : null),
       machine: MSX_MACHINES.includes(c.machine) ? c.machine : DEFAULT_CFG.msx.machine,
       joyFromKeys: typeof c.joyFromKeys === 'boolean' ? c.joyFromKeys : DEFAULT_CFG.msx.joyFromKeys,
+      touchKbd: typeof c.touchKbd === 'boolean' ? c.touchKbd : DEFAULT_CFG.msx.touchKbd,
       cartB: MSX_CART_B.includes(c.cartB) ? c.cartB : DEFAULT_CFG.msx.cartB,
       fdc: MSX_FDC.includes(c.fdc) ? c.fdc : DEFAULT_CFG.msx.fdc,
       softKbd: typeof c.softKbd === 'boolean' ? c.softKbd : false, // ソフトキーボード(⌨)を出しておく(タッチ端末は設定に関係なく出る)
@@ -815,7 +817,7 @@
     row2.appendChild(key('nes-tk-ab', 'B', PAD_BITS.B)); row2.appendChild(key('nes-tk-ab', 'A', PAD_BITS.A));
     ab.appendChild(row1); ab.appendChild(row2);
     pad.appendChild(dpad); pad.appendChild(mid); pad.appendChild(ab);
-    const held = new Map(); // pointerId → 押しているキー要素、または十字キーの指なら { dir: 方向ビット }
+    const held = new Map(); // pointerId → 押しているキー要素、または十字キーの指なら { dpadBits: 方向ビット }(名前に dir は使わない: 要素が元から dir 属性を持つ)
     const dirEls = [[PAD_BITS.Up, dpad.querySelector('.nes-tk-up')], [PAD_BITS.Down, dpad.querySelector('.nes-tk-down')], [PAD_BITS.Left, dpad.querySelector('.nes-tk-left')], [PAD_BITS.Right, dpad.querySelector('.nes-tk-right')]];
     const DIRS8 = [PAD_BITS.Right, PAD_BITS.Right | PAD_BITS.Down, PAD_BITS.Down, PAD_BITS.Down | PAD_BITS.Left, PAD_BITS.Left, PAD_BITS.Left | PAD_BITS.Up, PAD_BITS.Up, PAD_BITS.Up | PAD_BITS.Right];
     // 十字キーの中心からの位置 → { r: 半径比(1 = 十字キーの外接円の内側の端), bits }
@@ -831,8 +833,11 @@
       const on = new Set(held.values());
       const msx = machine === 'msx', names = new Set();
       let dir = 0;
-      for (const el of on) { if (el.dir !== undefined) { dir |= el.dir; continue; } if (msx && el.dataset.msxKey) { names.add(el.dataset.msxKey); continue; } bits |= +(el.dataset.bits || 0); turbo |= +(el.dataset.turbo || 0); }
+      for (const el of on) { if (el.dpadBits !== undefined) { dir |= el.dpadBits; continue; } if (msx && el.dataset.msxKey) { names.add(el.dataset.msxKey); continue; } bits |= +(el.dataset.bits || 0); turbo |= +(el.dataset.turbo || 0); }
       bits |= dir;
+      // MSX で設定「タッチの十字/A/B をキーボードに送る」が ON: ジョイスティック 1 の代わりにキーボードへ
+      // (十字 → カーソルキー、A → スペース、B → M)。両方へは送らない(2 人用でキーボードとジョイスティックが別の人になるソフトがある)。連射はジョイスティックのまま
+      if (msx && cfg.msx.touchKbd) for (const [b, n] of MSX_TOUCH_KEYS) if (bits & b) { names.add(n); bits &= ~b; }
       for (const el of pad.querySelectorAll('.nes-tkey')) el.classList.toggle('is-on', on.has(el));
       for (const [b, el] of dirEls) if (dir & b) el.classList.add('is-on');
       touchBits = bits; touchTurbo = turbo;
@@ -847,7 +852,7 @@
       e.preventDefault(); resumeAudio();
       try { pad.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ }
       const dp = dpadAt(e.clientX, e.clientY);
-      if (dp.r <= 1.15) { held.set(e.pointerId, { dir: dp.bits }); recompute(); return; } // 十字キーの円(少しはみ出しても)に触れた
+      if (dp.r <= 1.15) { held.set(e.pointerId, { dpadBits: dp.bits }); recompute(); return; } // 十字キーの円(少しはみ出しても)に触れた
       const k = keyAt(e.clientX, e.clientY);
       if (k) held.set(e.pointerId, k); else held.delete(e.pointerId);
       recompute();
@@ -855,7 +860,7 @@
     pad.addEventListener('pointermove', (e) => {
       if (!held.has(e.pointerId) && !(e.buttons & 1) && e.pointerType === 'mouse') return;
       const cur = held.get(e.pointerId) || null;
-      if (cur && cur.dir !== undefined) { const b = dpadAt(e.clientX, e.clientY).bits; if (b !== cur.dir) { cur.dir = b; recompute(); } return; }
+      if (cur && cur.dpadBits !== undefined) { const b = dpadAt(e.clientX, e.clientY).bits; if (b !== cur.dpadBits) { cur.dpadBits = b; recompute(); } return; }
       const k = keyAt(e.clientX, e.clientY);
       if (k !== cur) { if (k) held.set(e.pointerId, k); else held.delete(e.pointerId); recompute(); }
     });
@@ -1039,6 +1044,7 @@
     fr.s.addEventListener('change', () => { cfg.msx.fdc = MSX_FDC.includes(fr.s.value) ? fr.s.value : 'wd2793'; saveCfg(); if (msxDisk) reopenMsx(); });
     sm.appendChild(fr.r);
     check(sm, cfg.msx.joyFromKeys, T('カーソルキーとスペースをジョイスティック 1 にも使う'), (v) => { cfg.msx.joyFromKeys = v; saveCfg(); });
+    check(sm, cfg.msx.touchKbd, T('スマホの十字/A/B をキーボード(カーソルキー/スペース/M)に送る(ジョイスティックを読まないソフト用)'), (v) => { cfg.msx.touchKbd = v; saveCfg(); });
     note(sm, T('マッパーは ROM ごとに覚え、変えると開き直します。カートリッジ 2 はゲームと一緒に挿す音源です。FM 版の曲を持つゲームは FM-PAC を挿すと FM で鳴り、録音にも載ります(MSX2+/turbo R は内蔵 MSX-MUSIC が常にあります)。変えると開き直します'));
     note(sm, T('ディスク(.dsk)の FDC はディスク ROM の機種に合わせます(Philips/Sony=WD2793、Panasonic/turbo R=TC8566AF。合わないと「ディスクがありません」のまま)。動作中に別の .dsk を開くと足して入れ替わり、[disk] で選べます'));
     note(sm, T('turbo R は同梱 C-BIOS に無いので実 BIOS が要ります。内蔵ソフト(512K)は載せません。R800 は S1990 の切り替えに従い、命令時間は近似です。PCM は録音に載り DAC の行で見えます'));
@@ -1150,7 +1156,7 @@
     document.addEventListener('keydown', popClose, true);
   }
   function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll, sfxRemove: DEFAULT_CFG.sfxRemove, lagFix: DEFAULT_CFG.lagFix, diskFast: DEFAULT_CFG.diskFast,
-    msx: { keys: Object.assign({}, DEFAULT_CFG.msx.keys), machine: cfg.msx.machine, joyFromKeys: DEFAULT_CFG.msx.joyFromKeys, cartB: cfg.msx.cartB, fdc: cfg.msx.fdc } }; } // 機種は BIOS の控えに結びつくので残す
+    msx: { keys: Object.assign({}, DEFAULT_CFG.msx.keys), machine: cfg.msx.machine, joyFromKeys: DEFAULT_CFG.msx.joyFromKeys, touchKbd: DEFAULT_CFG.msx.touchKbd, cartB: cfg.msx.cartB, fdc: cfg.msx.fdc } }; } // 機種は BIOS の控えに結びつくので残す
 
   // ── 入力 ──
   // ゲームパッド: つながっている順に 1P(キーボードと合成)、2P。戻り値は [[1P のビット, 連射ビット, 操作の集合], [2P ...]]

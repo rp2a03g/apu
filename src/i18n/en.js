@@ -1841,6 +1841,7 @@
     'マッパー': 'Mapper',
     '自動(判別)': 'Auto (detect)',
     'カーソルキーとスペースをジョイスティック 1 にも使う': 'Also use the cursor keys and Space as joystick 1',
+    'スマホの十字/A/B をキーボード(カーソルキー/スペース/M)に送る(ジョイスティックを読まないソフト用)': 'Send the touch D-pad/A/B to the keyboard (cursor keys/Space/M) instead (for software that does not read the joystick)',
     'キーボード(操作キー。他のキーはそのまま MSX のキーボードへ)': 'Keyboard (control keys; every other key goes to the MSX keyboard)',
     'クリックしてキー入力(PC のキーがそのまま MSX のキーボードに。{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止、{ss}/{ls}=状態保存/読込)': 'Click to type (PC keys go straight to the MSX keyboard; {ff}=fast forward, {rw}=rewind, {pa}=pause, {ss}/{ls}=save/load state)',
   });
