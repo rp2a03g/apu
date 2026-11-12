@@ -791,6 +791,8 @@
 
   // ── タッチ操作キー(タッチ端末だけ。画面の下)──
   // 十字/A/B/連射 A/B/Select/Start。複数の指を別々に追い(pointerId ごとに押しているボタン)、指を滑らせても下のボタンへ移る
+  // 十字キーは見た目は 4 つのボタンのまま、入力は円: 中心からの角度を 45° ずつ 8 方向に分け(斜めは 2 つのボタンが光る)、
+  // 中心付近は何も押さない。十字キーの円の中で触れた指は、離すまで十字キーの指として扱い、円の外へはみ出しても角度で方向を決める
   function buildTouchPad() {
     const pad = document.createElement('div'); pad.className = 'nes-tpad';
     const key = (cls, label, bits, turbo) => {
@@ -813,14 +815,26 @@
     row2.appendChild(key('nes-tk-ab', 'B', PAD_BITS.B)); row2.appendChild(key('nes-tk-ab', 'A', PAD_BITS.A));
     ab.appendChild(row1); ab.appendChild(row2);
     pad.appendChild(dpad); pad.appendChild(mid); pad.appendChild(ab);
-    const held = new Map(); // pointerId → 押しているキー要素
+    const held = new Map(); // pointerId → 押しているキー要素、または十字キーの指なら { dir: 方向ビット }
+    const dirEls = [[PAD_BITS.Up, dpad.querySelector('.nes-tk-up')], [PAD_BITS.Down, dpad.querySelector('.nes-tk-down')], [PAD_BITS.Left, dpad.querySelector('.nes-tk-left')], [PAD_BITS.Right, dpad.querySelector('.nes-tk-right')]];
+    const DIRS8 = [PAD_BITS.Right, PAD_BITS.Right | PAD_BITS.Down, PAD_BITS.Down, PAD_BITS.Down | PAD_BITS.Left, PAD_BITS.Left, PAD_BITS.Left | PAD_BITS.Up, PAD_BITS.Up, PAD_BITS.Up | PAD_BITS.Right];
+    // 十字キーの中心からの位置 → { r: 半径比(1 = 十字キーの外接円の内側の端), bits }
+    const dpadAt = (x, y) => {
+      const rc = dpad.getBoundingClientRect(), R = Math.min(rc.width, rc.height) / 2;
+      const dx = x - (rc.left + rc.width / 2), dy = y - (rc.top + rc.height / 2), d = Math.hypot(dx, dy);
+      const sec = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) & 7; // 画面座標は下が +y なので 0=右 2=下 4=左 6=上
+      return { r: R > 0 ? d / R : 99, bits: d < R * 0.18 ? 0 : DIRS8[sec] }; // 中心の 18% は遊び
+    };
     let msxDown = new Set(); // MSX で押している MSX キー名(SPACE/RETURN)
     const recompute = () => {
       let bits = 0, turbo = 0;
       const on = new Set(held.values());
       const msx = machine === 'msx', names = new Set();
-      for (const el of on) { if (msx && el.dataset.msxKey) { names.add(el.dataset.msxKey); continue; } bits |= +(el.dataset.bits || 0); turbo |= +(el.dataset.turbo || 0); }
+      let dir = 0;
+      for (const el of on) { if (el.dir !== undefined) { dir |= el.dir; continue; } if (msx && el.dataset.msxKey) { names.add(el.dataset.msxKey); continue; } bits |= +(el.dataset.bits || 0); turbo |= +(el.dataset.turbo || 0); }
+      bits |= dir;
       for (const el of pad.querySelectorAll('.nes-tkey')) el.classList.toggle('is-on', on.has(el));
+      for (const [b, el] of dirEls) if (dir & b) el.classList.add('is-on');
       touchBits = bits; touchTurbo = turbo;
       pushPad();
       if (msx) { for (const n of msxDown) if (!names.has(n)) msxKey(n, false); for (const n of names) if (!msxDown.has(n)) msxKey(n, true); }
@@ -832,14 +846,17 @@
     pad.addEventListener('pointerdown', (e) => {
       e.preventDefault(); resumeAudio();
       try { pad.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ }
+      const dp = dpadAt(e.clientX, e.clientY);
+      if (dp.r <= 1.15) { held.set(e.pointerId, { dir: dp.bits }); recompute(); return; } // 十字キーの円(少しはみ出しても)に触れた
       const k = keyAt(e.clientX, e.clientY);
       if (k) held.set(e.pointerId, k); else held.delete(e.pointerId);
       recompute();
     });
     pad.addEventListener('pointermove', (e) => {
       if (!held.has(e.pointerId) && !(e.buttons & 1) && e.pointerType === 'mouse') return;
-      const k = keyAt(e.clientX, e.clientY);
       const cur = held.get(e.pointerId) || null;
+      if (cur && cur.dir !== undefined) { const b = dpadAt(e.clientX, e.clientY).bits; if (b !== cur.dir) { cur.dir = b; recompute(); } return; }
+      const k = keyAt(e.clientX, e.clientY);
       if (k !== cur) { if (k) held.set(e.pointerId, k); else held.delete(e.pointerId); recompute(); }
     });
     for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) pad.addEventListener(ev, (e) => { if (held.delete(e.pointerId)) recompute(); });

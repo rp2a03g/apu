@@ -1954,7 +1954,8 @@ button.secondary {
 .nes-tkey.is-on { background: var(--accent); color: var(--on-accent); }
 .nes-tdpad { display: grid; grid-template-columns: 44px 44px 44px; grid-template-rows: 44px 44px 44px; gap: 2px; }
 .nes-tk-up { grid-column: 2; grid-row: 1; } .nes-tk-left { grid-column: 1; grid-row: 2; } .nes-tk-right { grid-column: 3; grid-row: 2; } .nes-tk-down { grid-column: 2; grid-row: 3; }
-.nes-tmid { display: flex; gap: 8px; align-self: flex-end; padding-bottom: 6px; }
+.nes-tmid { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; align-self: flex-end; padding-bottom: 6px; } /* 幅が足りない(375px 級のスマホ)と SELECT/START が縦に積まれ、A ボタンがはみ出さない */
+.nes-tdpad, .nes-tab { flex: none; }
 .nes-tk-small { width: 54px; height: 24px; font-size: 10px; border-radius: 12px; }
 .nes-tab { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
 .nes-trow { display: flex; gap: 8px; }
