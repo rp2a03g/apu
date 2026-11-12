@@ -81,6 +81,7 @@
     liveRoll: true,
     sfxRemove: false, // 録音の補正の初期値(録音ごとに保存/変換への横のチェックで変えられる)
     lagFix: false,
+    diskFast: false, // ディスクの読み込み: false = 実機の速さ(既定。読み込みの間の音も曲のうち)、true = 読み込み中は自動で早送り(録音は実機の時間のまま)
     msx: { keys: { FF: 'F11', Rewind: 'F12', Pause: 'Pause', SaveState: 'F9', LoadState: 'F10' }, machine: 'auto', joyFromKeys: false, cartB: 'none', fdc: 'wd2793', softKbd: false, writeBack: false },
   };
   function loadMsxCfg(c) {
@@ -107,6 +108,7 @@
       liveRoll: typeof c.liveRoll === 'boolean' ? c.liveRoll : DEFAULT_CFG.liveRoll,
       sfxRemove: typeof c.sfxRemove === 'boolean' ? c.sfxRemove : DEFAULT_CFG.sfxRemove,
       lagFix: typeof c.lagFix === 'boolean' ? c.lagFix : DEFAULT_CFG.lagFix,
+      diskFast: typeof c.diskFast === 'boolean' ? c.diskFast : DEFAULT_CFG.diskFast,
       msx: loadMsxCfg(c.msx),
     };
   }
@@ -915,6 +917,15 @@
     sel2.addEventListener('change', () => { cfg.rewindSpeed = +sel2.value; saveCfg(); if (node && rwActive) node.port.postMessage({ type: 'rewindSpeed', speed: cfg.rewindSpeed }); });
     row2.appendChild(rl2); row2.appendChild(sel2); s1b.appendChild(row2);
     note(s1b, T('押している間、直前 2 分の映像を逆再生で戻ります(音は止まります)。離した所からゲームが続きます'));
+    const sDisk = sec(T('ディスクの読み込み'), 'common');
+    const rowD = document.createElement('div'); rowD.className = 'nes-cfg-row';
+    const rlD = document.createElement('span'); rlD.textContent = T('速さ');
+    const selD = document.createElement('select');
+    for (const [v, label] of [['real', T('実機の速さ')], ['fast', T('速く(読み込み中は自動で早送り)')]]) { const o = document.createElement('option'); o.value = v; o.textContent = label; selD.appendChild(o); }
+    selD.value = cfg.diskFast ? 'fast' : 'real';
+    selD.addEventListener('change', () => { cfg.diskFast = selD.value === 'fast'; saveCfg(); pushDiskFast(); });
+    rowD.appendChild(rlD); rowD.appendChild(selD); sDisk.appendChild(rowD);
+    note(sDisk, T('MSX のフロッピーとディスクシステム(FDS)に効きます。どちらでもディスクの待ち時間は実機どおりに動き、録音も実機の時間で残ります。「速く」はアクセスランプが点いている間だけ早送りして待ちを縮めます(その間の音は飛び飛びになります)'));
     const s1c = sec(T('録音の補正'), 'common');
     check(s1c, cfg.sfxRemove, T('効果音を除く'), (v) => { cfg.sfxRemove = v; saveCfg(); });
     check(s1c, cfg.lagFix, T('処理落ちを詰める'), (v) => { cfg.lagFix = v; saveCfg(); });
@@ -938,7 +949,7 @@
     note(s3, T('十字は 12-15 番のボタンと左スティック(固定)。つながっている順に 1P、2P。早送り/巻き戻しは押している間、一時停止/状態保存/読込は押した時'));
     const s4 = sec('', 'common');
     const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'nes-btn'; reset.textContent = T('既定に戻す');
-    reset.addEventListener('click', () => { cfg = loadCfgDefaults(); saveCfg(); pushTurboRate(); applyCfgLabels(); updateSoftKbd(); updateDiskBadge(); const a = anchorEl; closeCfgPopover(); toggleCfgPopover(a); });
+    reset.addEventListener('click', () => { cfg = loadCfgDefaults(); saveCfg(); pushTurboRate(); pushDiskFast(); applyCfgLabels(); updateSoftKbd(); updateDiskBadge(); const a = anchorEl; closeCfgPopover(); toggleCfgPopover(a); });
     s4.appendChild(reset);
     note(s4, T('キー/パッドの割り当て、連射、巻き戻し、録音の補正、MSX のカートリッジ 2/FDC/書き戻しを既定に戻します(BIOS の控えと機種は残ります)'));
 
@@ -1121,7 +1132,7 @@
     document.addEventListener('mousedown', popClose, true);
     document.addEventListener('keydown', popClose, true);
   }
-  function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll, sfxRemove: DEFAULT_CFG.sfxRemove, lagFix: DEFAULT_CFG.lagFix,
+  function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll, sfxRemove: DEFAULT_CFG.sfxRemove, lagFix: DEFAULT_CFG.lagFix, diskFast: DEFAULT_CFG.diskFast,
     msx: { keys: Object.assign({}, DEFAULT_CFG.msx.keys), machine: cfg.msx.machine, joyFromKeys: DEFAULT_CFG.msx.joyFromKeys, cartB: cfg.msx.cartB, fdc: cfg.msx.fdc } }; } // 機種は BIOS の控えに結びつくので残す
 
   // ── 入力 ──
@@ -1172,6 +1183,7 @@
       if (down & bit('LoadState')) requestLoadState();
     }
   }
+  function pushDiskFast() { if (node) node.port.postMessage({ type: 'diskFast', on: !!cfg.diskFast }); }
   function pushTurboRate() {
     if (node) node.port.postMessage({ type: 'turboRate', frames: cfg.turboRate });
     else if (nes) nes.setTurboRate(cfg.turboRate);
@@ -1293,7 +1305,7 @@
       limiter.connect(MML.Audio && MML.Audio.getMasterGain ? MML.Audio.getMasterGain(actx) : actx.destination);
       node.port.postMessage(loadMsg, transfers);
       resumeAudio();
-      lastPad = -1; lastPad2 = -1; pushPad(); pushSpeed(); pushTurboRate();
+      lastPad = -1; lastPad2 = -1; pushPad(); pushSpeed(); pushTurboRate(); pushDiskFast();
       if (!gpRaf) gpRaf = requestAnimationFrame(gpLoop);
       return true;
     } catch (e) {
@@ -1357,7 +1369,9 @@
     lastMs = now;
     let n = 0;
     pushPad();
-    const sp = curSpeed(), fms = FRAME_MS / sp;
+    let sp = curSpeed();
+    if (sp === 1 && cfg.diskFast && nes.diskBusy && nes.diskBusy()) sp = 8; // 速い読み込み(主スレッド実行は音が無いので ×8 固定)
+    const fms = FRAME_MS / sp;
     while (acc >= fms && n < 3 * sp) { nes.runFrame(); if (rewindBuf) rewindBuf.onFrame(); acc -= fms; n++; }
     if (n) {
       blitConsole(nes);

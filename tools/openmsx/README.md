@@ -15,6 +15,9 @@ openMSX の公式 Windows 版(`openmsx-<版>-windows-vc-x64-bin.zip`、GitHub �
 - 実 BIOS の機種(`fsa1f`)は、手元の分割 BIOS(既定 `_tmp_test/msx/sweep/bios`)を openMSX の `share/systemroms/sef/` に写し、
   こちらと同じスロット配置(メイン 0、サブ 3-0、ディスク TC8566AF 3-1、RAM 128K 3-2、ドライブ 2 台)の機種定義 `SEF_FSA1F` を書く。
   openMSX 付属の FS-A1F は 1 本にまとめた 512K の ROM を要求するので、分割の物では動かない。
+- `wd2793` は同じ配置でディスク ROM だけ WD2793(Philips 式)を叩く物(`msx2plus__DISK.ROM`)にした機種定義 `SEF_WD2793`。
+- openMSX は RTC の中身(`.cmos`)を `Documents/openMSX/persistent/<機種>/` に残して次の起動に持ち越す。ゲームが書き換えた起動音の設定が残ると
+  起動が 19 フレームずれたので、ab.js / disk-timing.js は openMSX を起動する前に毎回消す(環境変数 `OPENMSX_PERSISTENT` で場所を変えられる)。
 
 ## 使い方
 
@@ -37,6 +40,8 @@ node tools/openmsx/ab.js --batch _tmp_test/msx/sweep/roms --kind rom --jobs 4 --
 - フレームの起点は両方とも電源投入からの VBlank 回数。こちらが数フレーム先に進む傾向(VRAM の埋まり方で 1〜5 フレーム)があるので、-6〜+3 フレームから最も合う物を採る。
 - **CPU の時間の細かい差は積み重なる**: ゲームが進むほど敵の位置などがずれ、描画が正しくても `mismatch` は上がる。
   描画の誤りを探すときは、起動直後・タイトル・静止画面のように時間に左右されにくい所で比べる。
+- **ディスクの読み込みの速さ**は画面では測れない(静止画面はどのフレームとも合う)。`node tools/openmsx/disk-timing.js a.dsk [b.dsk …] --machine fsa1f|wd2793 --frames 2400`
+  で FDC のデータレジスタ($7FFB)を読んだ回数の累計が 1%〜100% に届いたフレームを並べる(2026-11-12、FDC に実機の時間を入れた時の確かめ)。
 - **レジスタはフレームの終わりの値**: 画面の途中でレジスタを書き換えるゲーム(ラスタ)では `regDiff` は撮る時刻の違いを拾いやすい。
 
 ## 罠(実測)

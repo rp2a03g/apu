@@ -9,6 +9,9 @@
  * (NesConsole.runSamples)。画面が 1 枚できるたびに主スレッドへ frame(Uint32Array の ArrayBuffer、転送)と、
  * 録音中ならそのフレームの書き込み列を送る。主スレッドは描くだけ。
  * 主スレッドからは load(ROM)/pad(入力)/reset/pause/record/rewind(飛ぶ)/rewindStart・rewindSpeed・rewindEnd(逆再生)を受ける。
+ * 速い読み込み(diskFast、2026-11-12): 本体は常に実機の時間で動き(ディスクの待ちも実機どおり。録音も実機の時間)、ディスクを読み書きしている間
+ * (本体の diskBusy())だけ自動で早送りする。1 回の process で回す回数 afN は、直近の処理時間が実時間の 7 割に収まるよう増減させる
+ * (Worklet には performance.now が無く Date.now は 1ms 刻みなので、64 回ぶん溜めて割合を見る)。画面は 60 枚/秒まで送る。
  * 逆再生(押している間の巻き戻し)の間は本体を止め、無音を出しながら NesRewind の映像の輪から古い画面を rwframe
  * (8bit パレット番号)で送る。離したら rewindEnd でそのフレームへ本当に戻り、rewound を返す。
  *
@@ -29,6 +32,7 @@
       this.nes = null;
       this.paused = false;
       this.speed = 1; this.ffTmp = null; this.ffSkip = 0;
+      this.diskFast = false; this.afN = 2; this.afOn = false; this.afMs = 0; this.afBlocks = 0; this.afT = 0; this.lastPost = -1; // 速い読み込み
       this.dcX = 0; this.dcY = 0;
       this.frameSeq = 0;
       this.rw = null; // 逆再生中 { speed, acc }
@@ -129,6 +133,7 @@
             break;
           }
           case 'pause': this.paused = !!m.on; break;
+          case 'diskFast': this.diskFast = !!m.on; break;
           case 'speed': this.speed = Math.max(1, Math.min(8, m.n | 0)); break; // 早送り: 1 回の process で speed 回ぶん進める(音は最後の 1 回ぶんだけ出す)
           case 'saveState': // ステート保存: 木を写して主スレッドへ(構造化複製。IndexedDB に置くのは主スレッド)
             if (this.nes) this.port.postMessage({ type: 'state', state: this.State.save(this.nes), slot: m.slot });
@@ -162,6 +167,7 @@
       if (this.rewind) { if (this.rewind.replaying) return; this.rewind.onFrame(); } // 巻き戻しの再生中は送らない
       this.frameSeq = nes.frameCount; // 主スレッドのフレーム番号 = 本体の frameCount(巻き戻しで戻る)
       if (this.speed > 1 && (++this.ffSkip % this.speed) !== 0) { if ((this.frameSeq % 60) === 0) this.postBattery(false); return; } // 早送り中は speed 枚に 1 枚だけ送る(録音の書き込み列は次に送る時まで溜まる)
+      if (this.afOn) { if (currentTime - this.lastPost < 1 / 62) { if ((this.frameSeq % 60) === 0) this.postBattery(false); return; } this.lastPost = currentTime; } // 自動早送り中: 60 枚/秒まで
       const frame = nes.frame.slice(0, this.frameW() * this.frameH()); // MSX は幅がモードで変わる(frame は最大幅で確保。幅ぶんだけ送る)
       const msg = { type: 'frame', seq: this.frameSeq, frame: frame.buffer, underruns: nes.underruns, w: this.frameW(), h: this.frameH(), il: !!nes.interlaced, disk: nes.diskActivity ? nes.diskActivity() : null }; // disk: アクセスランプ(ドライブごとの { access, media })
       if (nes.rec) { msg.writes = nes.rec.frames.splice(0); }
@@ -197,6 +203,19 @@
         this.port.postMessage(msg, tr);
       }
     }
+    // 速い読み込み: ディスクを読んでいる間、afN 回ぶん余分に進める(音は最後の 1 回ぶんだけ)。afN は処理時間の割合で増減
+    autoFast(len) {
+      const t0 = Date.now();
+      const n = Math.max(1, Math.round(this.afN));
+      for (let k = 0; k < n && this.nes.diskBusy(); k++) this.nes.runSamples(this.ffTmp);
+      this.afMs += Date.now() - t0;
+      if (++this.afBlocks >= 64) {
+        const budget = 64 * len / sampleRate * 1000;
+        const load = (this.afMs + 1) / budget;            // 余分に回した分が実時間に占める割合(1x の分は含まない)
+        this.afN = Math.max(1, Math.min(64, this.afN * Math.max(0.5, Math.min(1.5, 0.6 / load))));
+        this.afMs = 0; this.afBlocks = 0;
+      }
+    }
     process(inputs, outputs) {
       const out = outputs[0] && outputs[0][0];
       if (!out) return true;
@@ -207,10 +226,12 @@
       }
       if (!this.nes || this.paused) { out.fill(0); return true; }
       try {
+        if (!this.ffTmp || this.ffTmp.length !== out.length) this.ffTmp = new Float32Array(out.length);
         if (this.speed > 1) {
-          if (!this.ffTmp || this.ffTmp.length !== out.length) this.ffTmp = new Float32Array(out.length);
           for (let k = 1; k < this.speed; k++) this.nes.runSamples(this.ffTmp); // 捨てる分
         }
+        this.afOn = this.diskFast && this.speed === 1 && !!(this.nes.diskBusy && this.nes.diskBusy());
+        if (this.afOn) this.autoFast(out.length);
         this.nes.runSamples(out);
       } catch (e) {
         this.port.postMessage({ type: 'error', message: String((e && e.stack) || e) });

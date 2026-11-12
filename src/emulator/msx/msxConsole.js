@@ -426,6 +426,7 @@
     get diskCount() { return this.disk ? this.disk.diskCount : 0; }
     // アクセスランプ(ディスク系の媒体の共通形): ドライブごとの [{ access, media }]。ディスクが無ければ null
     diskActivity() { return this.disk ? this.disk.diskActivity() : null; }
+    diskBusy() { return this.disk ? this.disk.diskBusy() : false; } // 「速い読み込み」の自動早送りが見る
     insertDisk(n) { if (this.disk) this.disk.insertDisk(n); }
     ejectDisk() { if (this.disk) this.disk.ejectDisk(); }
     addDisk(bytes) { return this.disk ? this.disk.addImage(new Emu.MsxDiskImage(bytes)) : -1; }

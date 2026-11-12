@@ -9,13 +9,30 @@
  *     モータ(bit7)、$7FFF 読み: bit6=~IRQ、bit7=~DRQ(負論理。openMSX PhilipsFDC と同じ)。$BFF8-$BFFF にも鏡像。
  *     コマンド: タイプ I(RESTORE/SEEK/STEP/STEP-IN/STEP-OUT。ステップ時間 r1r0=6/12/20/30ms)、タイプ II(READ/WRITE SECTOR、m=複数)、
  *     タイプ III(READ ADDRESS、READ TRACK は未対応=すぐ終わる、WRITE TRACK=フォーマットはバイトを飲み込むだけ)、タイプ IV(FORCE INTERRUPT)。
- *     データは 1 バイトごとに DRQ(CPU が読むとすぐ次のバイト。実機の 32µs/バイトより速いが、ドライバは DRQ を見て回すので支障なし)。
- *   TC8566AF(松下/turboR。μPD765 互換): $7FF8 制御 0(bit0-1 ドライブ、bit2=1 で動作、bit3 モータ)、$7FF9 制御 1、$7FFA メインステータス(読み:
+ *     データは 1 バイトごとに DRQ。
+ *   TC8566AF(松下/turboR。μPD765 互換): $7FF8 制御 0(bit0-1 ドライブ、bit2=1 で動作、bit4-7 ドライブごとのモータ)、$7FF9 制御 1、$7FFA メインステータス(読み:
  *     RQM bit7、DIO bit6、NDM bit5、CB bit4)、$7FFB データ、$7FF9 bit0 TC(転送の打ち切り)。コマンド: SPECIFY/SENSE DRIVE STATUS/RECALIBRATE/SENSE INTERRUPT STATUS/SEEK/
  *     READ DATA/WRITE DATA/READ ID/FORMAT TRACK(非 DMA、結果 7 バイト)。無効コマンドは ST0=$80。割り込み線は MSX では使わない(ポーリング)。
  * ■ インターフェース(MsxDiskInterface): スロット 3-1 に置く。$4000-$7FFF がディスク ROM(16K。32K は前半だけ)、末尾 8 バイトが FDC のレジスタ。
  *   ドライブは A/B の 2 台(images[] から入れる。insertDisk(n) はドライブ A に n 番の画像)。
  * 時間は本体が clock(cycles) で進める(Z80 サイクル)。
+ * ■ 実機の時間(2026-11-12。録音が主体なので読み込みの間も実機どおりに。速くしたい時は再生側がアクセス中だけ早送りする)
+ *   ディスクは 300rpm(1 周 200ms)で回り続け、1 周 6250 バイト(250kbps MFM、1 バイト 32µs)。トラックの並びは openMSX の
+ *   セクタ型ディスクと同じ: 頭に 146 バイト(GAP4a 80+SYNC 12+IAM 4+GAP1 50)、セクタごとに 658 バイト(SYNC 12+IDAM 4+ID 4+CRC 2+GAP2 22+
+ *   SYNC 12+DAM 4+データ 512+CRC 2+GAP3 84)。インターリーブ 1:1。角度はドライブごとにモータが回っていた時間の累計(spin)で決める(openMSX の RealDrive と同じく、モータが止まると角度も止まる。電源投入時は 0)。
+ *   READ/WRITE SECTOR はそのセクタの ID が頭を通るまで待ち、データは 32µs ごとに 1 バイト。WD2793 の読みは、CPU が読む前に次のバイトが
+ *   来ていたらロストデータ(ステータス bit2)を立て、データレジスタは来ている一番新しいバイトになる(openMSX と同じ。ディスク ROM はこれで
+ *   そのセクタを読み直し、1 周ぶん遅れる)。セクタを読み終わらないうちに CRC が過ぎたら、ロストデータで終わる。無いセクタはインデックス 5 回で RNF。E(ヘッド整定)は 30ms(1MHz 時)。タイプ I の V(照合)は時間を足さない。
+ *   1 セクタの READ は最後のバイトを読んだ時点で終わり、複数セクタ(m)はその場から次のセクタを探す。
+ *   INDEX(タイプ I の bit1)はモータが回っている間、1 周に 1 回 4ms。TRACK0 もモータが止まっていると見えない(openMSX の RealDrive.isTrack00 と同じ)。
+ *   そのため WD2793 の RESTORE はモータが止まっていると 255 ステップ(トラックレジスタ $FF→0。openMSX と同じ 278→369 フレームを実測)で諦める
+ *   (途中でモータが回り出したら次のステップで終わる)、TC8566AF の RECALIBRATE は
+ *   255 ステップして EC(装置チェック)。ディスク ROM は起動時にこれをタイムアウトで抜けるので、起動が実機どおり数秒かかる。
+ *   TC8566AF: SPECIFY のステップ (16-SRT)ms、ヘッドロード 2×HLT ms(ヘッドが降りている時だけ)、ヘッドアンロード 16×HUT ms(コマンドの終わりから)。
+ *   SEEK/RECALIBRATE はその場で終わり裏でステップ(1 歩目はすぐ、N 歩で N×ステップ後にシーク終了 SE)、その間メインステータスの D0B/D1B が立つ。
+ *   SENSE INTERRUPT STATUS はいつでも ST0 と PCN の 2 バイト(シーク中は SE の無い ST0=0)。データの 1 バイト目は ID の FE が通った時点
+ *   (ギャップを待たない)。READ ID は次に通る ID のセクタ番号を返す。
+ *   ★時間の決め方は openMSX(src/fdc/TC8566AF.cc、WD2793.cc、RealDrive.cc)に揃えた。tools/openmsx/disk-timing.js で読んだバイト数のフレーム推移を比べる。
  */
 (function (global) {
   'use strict';
@@ -25,6 +42,28 @@
   const SECTOR = 512;
   const CPU_HZ = 3579545;
   const ms = (n) => Math.round(CPU_HZ * n / 1000);
+  // 回転と並び(上の説明)
+  const ROT = CPU_HZ * 0.2;          // 1 周(サイクル)
+  const TRACK_BYTES = 6250;
+  const BYTE = ROT / TRACK_BYTES;    // 1 バイト(約 114.5 サイクル)
+  const GAP_HEAD = 146, SEC_LEN = 658;
+  const ID_MARK = 12, ID_LEN = 10, DATA_OFF = 60; // セクタの頭から: A1 A1 A1 FE の始まり、そこから C H R N CRC の終わりまで、データの始まり
+  const INDEX_LEN = ROT / 50;        // インデックス穴が見えている長さ(4ms)
+  // from 以降で角度が off(バイト)になる時刻
+  // ph: そのドライブの角度と FDC の時刻の差(drive.spin - fdc.now。モータが回っている間は一定)
+  function nextAt(off, from, ph) {
+    const a = off * BYTE, r = (from + ph) % ROT;
+    let d = a - r; if (d < 0) d += ROT;
+    return from + d;
+  }
+  // セクタ r の ID(A1 から CRC まで)を from 以降に読み終える時刻
+  const idEndAt = (r, from, ph) => nextAt(GAP_HEAD + (r - 1) * SEC_LEN + ID_MARK, from, ph) + ID_LEN * BYTE;
+  // from 以降で最初に頭を通る ID: { r, end(読み終える時刻) }
+  function nextId(spt, from, ph) {
+    let best = null;
+    for (let r = 1; r <= spt; r++) { const e = idEndAt(r, from, ph); if (!best || e < best.end) best = { r, end: e }; }
+    return best;
+  }
 
   class MsxDiskImage {
     constructor(bytes) {
@@ -46,7 +85,7 @@
   }
 
   class Drive {
-    constructor() { this.image = null; this.track = 0; this.side = 0; this.motor = false; this.indexCount = 0; this.access = 0; } // access: 読み書きしたバイト数(アクセスランプ用。増えたら点ける)
+    constructor() { this.image = null; this.track = 0; this.side = 0; this.motor = false; this.access = 0; this.spin = 0; this.changed = false; } // changed: ディスクが入れ替わった(Philips の $7FFD bit2 が 0 になる。読むと消える) // spin: モータが回っていた時間の累計(サイクル。ディスクの角度) // access: 読み書きしたバイト数(アクセスランプ用。増えたら点ける)
     get ready() { return !!this.image; }
   }
 
@@ -62,8 +101,14 @@
       this.status = 0; this.track = 0; this.sector = 1; this.data = 0;
       this.cmd = 0; this.busy = false; this.drq = false; this.irq = false;
       this.dirIn = true;         // ステップの向き(1=内側)
-      this.wait = 0;             // コマンド完了までのサイクル
-      this.phase = 0;            // 0 無し、1 タイプ I、2 読み、3 書き、4 READ ADDRESS、5 WRITE TRACK、6 READ TRACK
+      this.now = this.now || 0;  // 通算サイクル(ディスクの角度。リセットでも回り続ける)
+      this.due = 0;              // 次の出来事の時刻(0 = 無し)
+      this.t0 = 0;               // 今のデータ(セクタのデータ/ID/トラック)の 1 バイト目が頭に来る時刻
+      this.writing = false;
+      this.restoring = 0;        // モータ待ちの RESTORE(ステップの間隔)
+      this.hldTime = Infinity;   // ヘッドを載せた時刻(HLD の 3 秒の起点)
+      this.typeI = true;         // 最後のコマンドがタイプ I か IV(ステータスの bit1・bit2 の意味が変わる)
+      this.phase = 0;            // 0 無し、1 タイプ I、2 読み、3 書き、4 READ ADDRESS、5 WRITE TRACK、6 READ TRACK、7 エラー終了待ち、9 セクタの終わり(CRC)
       this.pos = 0; this.multi = false; this.addrBuf = null;
       this.sideSel = 0;
     }
@@ -73,18 +118,23 @@
     readStatus() {
       this.irq = false;
       let s = this.status;
-      if (this.phase === 1 || this.phase === 0) { // タイプ I の形: bit2 TRACK0、bit1 INDEX(回転で点滅)、bit5 ヘッドロード
+      if (this.typeI) { // タイプ I(と IV)の形: bit2 TRACK0、bit1 INDEX(回転で点滅)、bit5 ヘッドロード。タイプ II/III の後は bit2 ロストデータ・bit1 DRQ のまま(終わった後も。ここを I の形にするとディスク ROM が TRACK0 をロストデータと読んで読み直しを繰り返した)
         s &= ~0x06;
-        if (this.drive && this.drive.track === 0) s |= 0x04;
-        if (this.drive && this.drive.ready && ((this.drive.indexCount >> 6) & 1)) s |= 0x02;
+        if (this.drive && this.drive.track === 0 && this.drive.motor) s |= 0x04;
+        s = (s & ~0x20) | (this._hld() ? 0x20 : 0);
+        if (this.drive && this.drive.ready && this.drive.motor && (this.drive.spin % ROT) < INDEX_LEN) s |= 0x02;
       }
       if (!this.drive || !this.drive.ready) s |= 0x80; else s &= ~0x80;
       if (this.drive && this.drive.image && this.drive.image.writeProtect) s |= 0x40;
       return (s & ~0x03) | (this.busy ? 0x01 : 0) | (this.drq ? 0x02 : 0);
     }
     readData() {
+      if (this.phase === 2 && this.drq) { // 遅れて読んだ: その間に来たバイトで上書きされている
+        const last = Math.min(SECTOR - 1, Math.floor((this.now - this.t0) / BYTE) - 1);
+        if (last > this.pos) { this.status |= 0x04; this.pos = last; this._fetch(); }
+      }
       const v = this.data; // 今のバイトを返してから次のバイトを用意する(先に進めると 1 バイト目が飛ぶ)
-      if (this.drq && (this.phase === 2 || this.phase === 4)) this._nextRead();
+      if (this.drq && (this.phase === 2 || this.phase === 4 || this.phase === 6)) this._nextRead();
       return v;
     }
     writeData(v) {
@@ -97,21 +147,28 @@
       if (this.busy && !type4) return;
       this.irq = false;
       if (type4) { // FORCE INTERRUPT
+        this.typeI = true;
         const was = this.busy;
-        this.busy = false; this.drq = false; this.phase = 0; this.wait = 0;
+        this.busy = false; this.drq = false; this.phase = 0; this.due = 0; this.restoring = 0;
         this.status &= ~0x01;
         if (v & 0x08 || !was) this.irq = true; // 即時割り込み(bit3)。待機中なら IRQ だけ
         return;
       }
       this.cmd = v;
+      // ヘッドロード(HLD): タイプ I は h フラグの時だけ、タイプ II/III はいつも。そこから 3 秒(openMSX の IDLE。実機は 15 インデックス)。終わる時にまだ載っていれば延長
+      this.hldTime = v < 0x80 ? ((v & 0x08) ? this.now : Infinity) : this.now;
       this.busy = true; this.drq = false; this.status = 0;
       const d = this.drive;
+      this.typeI = v < 0x80;
       if (v < 0x80) { // タイプ I
         this.phase = 1;
         const rate = ms(STEP_MS[v & 3]);
         let steps = 0;
         const op = v >> 4;
-        if (op === 0) { steps = d ? d.track : 0; if (d) d.track = 0; this.track = 0; this.dirIn = true; }                 // RESTORE
+        if (op === 0) { // RESTORE: TRACK0 が見えるまで外へ(モータが止まっていると見えないので、回り出すまで終わらない)
+          steps = d ? d.track : 0; if (d) d.track = 0; this.track = 0; this.dirIn = true;
+          if (d && !d.motor) { this.restoring = rate; this.due = this.now + 255 * rate; return; }
+        }
         else if (op === 1) { const to = this.data; steps = d ? Math.abs(to - d.track) : 0; this.dirIn = to >= this.track; if (d) d.track = Math.max(0, Math.min(d.image ? d.image.tracks + 1 : 85, to)); this.track = to; } // SEEK(データレジスタへ)
         else {
           if (op >= 4 && op <= 5) this.dirIn = true; else if (op >= 6) this.dirIn = false;
@@ -119,9 +176,8 @@
           if (v & 0x10) this.track = d ? d.track : this.track; // u: トラックレジスタも更新
           steps = 1;
         }
-        if (v & 0x08) this.status |= 0x20; // h: ヘッドロード
         if (v & 0x04 && d && d.ready && d.track !== this.track) this.status |= 0x10; // V: 照合(トラック不一致)
-        this.wait = Math.max(ms(1), steps * rate);
+        this.due = this.now + steps * rate + 64;
         return;
       }
       const op = v & 0xF0;
@@ -129,66 +185,85 @@
         this.multi = !!(v & 0x10);
         const write = op >= 0xA0;
         if (!d || !d.ready) { this.busy = false; this.irq = true; this.status |= 0x80; this.phase = 0; return; }
-        if (!d.image.hasSector(d.track, d.side, this.sector)) { this.status |= 0x10; this.wait = ms(2); this.phase = 7; return; } // RNF
-        if (write && d.image.writeProtect) { this.status |= 0x40; this.wait = ms(1); this.phase = 7; return; }
-        this.phase = write ? 3 : 2; this.pos = 0;
-        this.wait = ms(1); // セクタが頭に来るまで(近似)。その後 1 バイト目の DRQ
+        const from = this.now + 64 + ((v & 0x04) ? ms(30) : 0); // E: ヘッド整定 30ms
+        if (!d.image.hasSector(d.track, d.side, this.sector)) { this.status |= 0x10; this.due = nextAt(0, from, this._ph()) + 4 * ROT; this.phase = 7; return; } // RNF(インデックス 5 回)
+        if (write && d.image.writeProtect) { this.status |= 0x40; this.due = from; this.phase = 7; return; }
+        this.writing = write;
+        this._seekSector(from);
         return;
       }
       if (op === 0xC0) { // READ ADDRESS: トラック、面、セクタ、サイズ(2=512)、CRC×2
         if (!d || !d.ready) { this.busy = false; this.irq = true; this.status |= 0x80; this.phase = 0; return; }
-        this.addrBuf = [d.track, d.side, 1, 2, 0, 0]; this.pos = 0; this.phase = 4; this.wait = ms(1);
+        const id = nextId(d.image.spt, this.now + 64 + ((v & 0x04) ? ms(30) : 0), this._ph());
+        this.addrBuf = [d.track, d.side, id.r, 2, 0, 0]; this.pos = 0; this.phase = 4;
+        this.t0 = id.end - 6 * BYTE; this.due = this.t0 + BYTE;
         return;
       }
-      if (op === 0xE0) { this.phase = 6; this.pos = 0; this.wait = ms(1); return; }  // READ TRACK(未対応: 0 を返して終わる)
-      if (op === 0xF0) { this.phase = 5; this.pos = 0; this.wait = ms(1); return; }  // WRITE TRACK(フォーマット: 飲み込むだけ)
+      if (op === 0xE0) { this.phase = 6; this.pos = 0; this.t0 = nextAt(0, this.now + 64, this._ph()); this.due = this.t0 + BYTE; return; }  // READ TRACK(中身は $4E で埋める。インデックスから 1 周)
+      if (op === 0xF0) { this.phase = 5; this.pos = 0; this.multi = false; this.t0 = nextAt(0, this.now + 3 * BYTE, this._ph()); this.due = this.now + 3 * BYTE; return; }  // WRITE TRACK(フォーマット: インデックスから 1 周ぶん飲み込むだけ)
       this.busy = false; this.phase = 0; this.irq = true;
     }
     // ── 時間 ──
+    // セクタ this.sector の ID を from 以降に見つけ、読みなら 1 バイト目、書きなら最初の DRQ を予約
+    _seekSector(from) {
+      const idEnd = idEndAt(this.sector, from, this._ph());
+      this.t0 = idEnd + (DATA_OFF - ID_MARK - ID_LEN) * BYTE;
+      this.phase = this.writing ? 3 : 2; this.pos = 0;
+      this.due = this.writing ? idEnd + 2 * BYTE : this.t0 + BYTE; // 書き: ID の 2 バイト後に DRQ(データを書き始めるまでに 1 バイト目を入れる)
+    }
+    _ph() { return this.drive ? this.drive.spin - this.now : 0; }
+    _done() { this.drq = false; this.busy = false; this.phase = 0; this.due = 0; this.irq = true; this.restoring = 0; if (this._hld()) this.hldTime = this.now; }
+    _hld() { return this.hldTime <= this.now && this.now < this.hldTime + ms(3000); }
     clock(cycles) {
-      for (const d of this.drives) if (d.motor) d.indexCount = (d.indexCount + cycles) & 0xFFFFF;
-      if (!this.busy || this.wait <= 0) return;
-      this.wait -= cycles;
-      if (this.wait > 0) return;
-      this.wait = 0;
+      this.now += cycles;
+      if (this.phase === 2 && this.drq && this.now > this.t0 + (SECTOR + 2) * BYTE) { this.status |= 0x04; this.drq = false; this.phase = 9; this.due = this.now; } // 読まれないままセクタが過ぎた
+      if (this.restoring && this.busy && this.drive && this.drive.motor) { this.due = Math.min(this.due, this.now + this.restoring); this.restoring = 0; }
+      if (!this.busy || !this.due || this.now < this.due) return;
+      this.due = 0;
       switch (this.phase) {
-        case 1: case 7: this.busy = false; this.phase = 0; this.irq = true; break; // タイプ I 完了 / エラー終了
-        case 2: this._fetch(); this.drq = true; break;                             // 最初のバイト
-        case 3: case 5: this.drq = true; break;                                    // 最初の DRQ(書き)
-        case 4: this.data = this.addrBuf[0]; this.drq = true; break;
-        case 6: this.data = 0; this.drq = true; break;
+        case 1: case 7: this._done(); break;                                       // タイプ I 完了 / エラー終了
+        case 2: this._fetch(); this.drq = true; break;                             // 次のバイトが頭を通った
+        case 3: case 5: this.drq = true; break;                                    // 次のバイトを書く番
+        case 4: this.data = this.addrBuf[this.pos]; this.drq = true; break;
+        case 6: this.data = 0x4E; this.drq = true; break;
+        case 9: { // セクタの終わり(CRC を通った)。複数セクタなら次のセクタへ
+          const d = this.drive;
+          if (this.multi && d && d.image && d.image.hasSector(d.track, d.side, this.sector + 1)) { this.sector++; this._seekSector(this.now); }
+          else this._done();
+          break;
+        }
         default: break;
       }
     }
     _fetch() { const d = this.drive; d.access++; this.data = d.image.readByte(d.track, d.side, this.sector, this.pos); }
+    // CPU がバイトを読んだ: 次のバイトの時刻を予約(遅れて読んでもデータは失わない)
     _nextRead() {
       const d = this.drive;
-      if (this.phase === 4) {
-        this.pos++;
-        if (this.pos >= 6) { this.drq = false; this.busy = false; this.phase = 0; this.irq = true; this.sector = d.track; return; } // READ ADDRESS の後はセクタレジスタにトラック
-        this.data = this.addrBuf[this.pos]; return;
-      }
+      this.drq = false;
       this.pos++;
-      if (this.pos >= SECTOR) {
-        this.pos = 0;
-        if (this.multi && d.image.hasSector(d.track, d.side, this.sector + 1)) { this.sector++; this._fetch(); return; }
-        this.drq = false; this.busy = false; this.phase = 0; this.irq = true; return;
+      if (this.phase === 4) {
+        if (this.pos >= 6) { this._done(); this.sector = d.track; return; } // READ ADDRESS の後はセクタレジスタにトラック
+        this.due = this.t0 + (this.pos + 1) * BYTE; return;
       }
-      this._fetch();
+      if (this.phase === 6) {
+        if (this.pos >= TRACK_BYTES) { this._done(); return; }
+        this.due = this.t0 + (this.pos + 1) * BYTE; return;
+      }
+      if (this.pos >= SECTOR) { this.phase = 9; this.due = this.now + 1; return; }
+      this.due = this.t0 + (this.pos + 1) * BYTE;
     }
     _nextWrite(v) {
       const d = this.drive;
-      if (this.phase === 5) { // WRITE TRACK: 1 トラックぶん(6250 バイト)飲み込んで終わる
-        if (++this.pos >= 6250) { this.drq = false; this.busy = false; this.phase = 0; this.irq = true; }
+      this.drq = false;
+      if (this.phase === 5) { // WRITE TRACK: インデックスから 1 トラックぶん(6250 バイト)飲み込んで終わる
+        if (++this.pos >= TRACK_BYTES) { this.phase = 9; this.due = this.t0 + TRACK_BYTES * BYTE; return; }
+        this.due = Math.max(this.now + 1, this.t0 + (this.pos - 1) * BYTE);
         return;
       }
       d.access++; d.image.writeByte(d.track, d.side, this.sector, this.pos, v);
       this.pos++;
-      if (this.pos >= SECTOR) {
-        this.pos = 0;
-        if (this.multi && d.image.hasSector(d.track, d.side, this.sector + 1)) { this.sector++; return; }
-        this.drq = false; this.busy = false; this.phase = 0; this.irq = true;
-      }
+      if (this.pos >= SECTOR) { this.phase = 9; this.due = this.t0 + (SECTOR + 2) * BYTE; return; }
+      this.due = Math.max(this.now + 1, this.t0 + (this.pos - 1) * BYTE); // 前のバイトが書き出され始めたら次を求める
     }
   }
 
@@ -206,11 +281,39 @@
       this.seekEnd = false; this.intPending = false;
       this.dataPos = 0; this.sectorCount = 0; this.xfer = null; // 実行中の READ/WRITE の状態
       this.enabled = true;
+      this.now = this.now || 0;  // 通算サイクル(ディスクの角度)
+      this.srt = 0; this.hut = 0; this.hlt = 0; // SPECIFY の値(openMSX のリセット値)
+      this.seekDue = 0; this.seekDrive = 0; // シーク中ならステップが終わる時刻
+      this.due = 0; this.ready = false; this.t0 = 0; this.headUntil = 0; // 実行中: 次のバイトの時刻、そのバイトが用意できたか、データの 1 バイト目の時刻、ヘッドが載っている期限
+      this.idWait = false;       // READ ID の待ち(実行中だがデータは無い)
+    }
+    get stepCycles() { return ms(16 - this.srt); }
+    get hltCycles() { return ms(2 * this.hlt); }
+    get hutCycles() { return ms(16 * this.hut); }
+    _headFrom() { return this.now < this.headUntil ? this.now : this.now + this.hltCycles; }
+    // 実行中のセクタ x.r の ID を from 以降に見つけ、最初のバイトを予約
+    _seekSector(from) {
+      const x = this.xfer;
+      this.t0 = idEndAt(x.r, from, this._ph()) - 6 * BYTE; // ID の FE が通った時刻(openMSX の TC はここから 1 バイトごと。ギャップを待たない)
+      this.ready = false;
+      this.due = this.t0;
+    }
+    _ph() { return this.drive ? this.drive.spin - this.now : 0; }
+    _startSeek(steps) { this.seekDrive = this.driveNo & 1; this.seekEnd = false; this.seekDue = this.now + Math.min(255, steps) * this.stepCycles + 1; }
+    clock(cycles) {
+      this.now += cycles;
+      if (this.seekDue && this.now >= this.seekDue) { this.seekDue = 0; this.seekEnd = true; }
+      if (this.phase === 2 && !this.ready && this.due && this.now >= this.due) {
+        this.due = 0;
+        if (this.idWait) { this.idWait = false; this.phase = 3; this.resPos = 0; this.headUntil = this.now + this.hutCycles; }
+        else this.ready = true;
+      }
     }
     selectDrive(n) { this.driveNo = n & 3; this.drive = this.drives[this.driveNo] || null; }
     get mainStatus() {
       let s = 0x80; // RQM
-      if (this.phase === 2) s |= 0x20 | 0x10 | (this.xfer && this.xfer.write ? 0 : 0x40); // 実行中: NDM、CB、読みなら DIO=1
+      if (this.seekDue) s |= 1 << this.seekDrive; // D0B/D1B: シーク中
+      if (this.phase === 2) { s |= this.idWait ? 0x10 : 0x20 | 0x10 | (this.xfer && this.xfer.write ? 0 : 0x40); if (!this.ready) s &= ~0x80; } // 実行中: NDM、CB、読みなら DIO=1。バイトが頭に来るまで RQM=0
       else if (this.phase === 3) s |= 0x40 | 0x10;                                            // 結果: DIO=1、CB
       else if (this.phase === 1) s |= 0x10;
       return s;
@@ -222,9 +325,11 @@
         return v;
       }
       if (this.phase === 2 && this.xfer && !this.xfer.write) {
+        if (!this.ready) return 0xFF;
         const x = this.xfer, d = this.drive;
         d.access++; const v = d.image.readByte(x.c, x.h, x.r, this.dataPos);
         this._advance();
+        this._next();
         return v;
       }
       return 0xFF;
@@ -232,10 +337,16 @@
     writeData(v) {
       v &= 0xFF;
       if (this.phase === 2 && this.xfer && this.xfer.write) {
+        if (!this.ready) return;
         const x = this.xfer, d = this.drive;
-        if (x.format) { if (++this.dataPos >= 4 * d.image.spt) this._finish(0x00); return; } // FORMAT: セクタごとの 4 バイト(C H R N)を飲み込む
+        if (x.format) { // FORMAT: セクタごとの 4 バイト(C H R N)を、そのセクタが頭を通る頃に 1 組ずつ受ける
+          if (++this.dataPos >= 4 * d.image.spt) { this._finish(0x00); return; }
+          this.ready = false; this.due = Math.max(this.now + 1, this.t0 + Math.floor(this.dataPos / 4) * SEC_LEN * BYTE);
+          return;
+        }
         d.access++; d.image.writeByte(x.c, x.h, x.r, this.dataPos, v);
         this._advance();
+        this._next();
         return;
       }
       if (this.phase === 0) {
@@ -247,6 +358,14 @@
         this.cmd.push(v);
         if (this.cmd.length >= this.cmdLen) this._execute();
       }
+    }
+    // バイトを受け渡した後: 次のバイトの時刻(セクタが変われば次のセクタの ID を探す)
+    _next() {
+      if (this.phase !== 2 || !this.xfer) return;
+      const x = this.xfer;
+      if (this.dataPos === 0) { this._seekSector(this.t0 + (SECTOR + 2) * BYTE); return; }
+      this.ready = false;
+      this.due = Math.max(this.now + 1, this.t0 + this.dataPos * BYTE); void x;
     }
     _advance() {
       const x = this.xfer;
@@ -269,35 +388,41 @@
       let c = x.c, h = x.h, r = x.r;
       if (!x.format && !(x.justAdvanced && this.dataPos === 0)) { r++; if (r > d.image.spt) { r = 1; c++; } }
       this.result = [this.st0, this.st1, this.st2, c, h, r, 2];
-      this.resPos = 0; this.phase = 3; this.xfer = null;
+      this.resPos = 0; this.phase = 3; this.xfer = null; this.ready = false; this.due = 0;
+      this.headUntil = this.now + this.hutCycles;
     }
     _execute() {
-      const c = this.cmd, op = c[0] & 0x1F, d = this.drive;
+      const c = this.cmd, op = c[0] & 0x1F; let d = this.drive;
       switch (op) {
-        case 0x03: this.phase = 0; break;                                     // SPECIFY
+        case 0x03: this.srt = c[1] >> 4; this.hut = c[1] & 0x0F; this.hlt = c[2] >> 1; this.phase = 0; break; // SPECIFY
         case 0x04: { // SENSE DRIVE STATUS → ST3
           const n = c[1] & 3; const dr = this.drives[n];
           this.st3 = n | ((c[1] >> 2) & 1) << 2 | (dr && dr.image ? 0x20 : 0) | (dr && dr.track === 0 ? 0x10 : 0) | (dr && dr.image && dr.image.sides === 2 ? 0x08 : 0) | (dr && dr.image && dr.image.writeProtect ? 0x40 : 0);
           this.result = [this.st3]; this.resPos = 0; this.phase = 3; break;
         }
         case 0x07: { // RECALIBRATE
-          this.selectDrive(c[1] & 3);
+          this.selectDrive(c[1] & 3); d = this.drive;
+          // TRACK0 が見えるまで最大 255 ステップ。モータが止まっていると見えないので 255 ステップして EC(装置チェック)
+          const blind = !this.drive || !this.drive.motor;
+          const steps = blind ? 255 : this.drive.track;
           if (this.drive) this.drive.track = 0; this.pcn[this.driveNo] = 0;
-          this.st0 = 0x20 | this.driveNo; this.seekEnd = true; this.phase = 0; break;
+          this.st0 = 0x20 | this.driveNo | (blind ? 0x10 : 0); this._startSeek(steps); this.phase = 0; break;
         }
         case 0x0F: { // SEEK
-          this.selectDrive(c[1] & 3);
+          this.selectDrive(c[1] & 3); d = this.drive;
           const to = c[2];
+          const steps = Math.abs(to - this.pcn[this.driveNo]);
           if (this.drive) this.drive.track = Math.max(0, Math.min(85, to)); this.pcn[this.driveNo] = to;
-          this.st0 = 0x20 | this.driveNo; this.seekEnd = true; this.phase = 0; break;
+          this.st0 = 0x20 | this.driveNo; this._startSeek(steps); this.phase = 0; break;
         }
-        case 0x08: { // SENSE INTERRUPT STATUS → ST0, PCN(待っている割り込みが無ければ ST0=$80)
+        case 0x08: { // SENSE INTERRUPT STATUS → ST0, PCN
+          // openMSX と同じく常に 2 バイト。シーク中(まだ SE が無い)は ST0=0
           if (this.seekEnd) { this.seekEnd = false; this.result = [this.st0, this.pcn[this.driveNo]]; }
-          else this.result = [0x80];
+          else this.result = [0x00, this.pcn[this.driveNo]];
           this.resPos = 0; this.phase = 3; break;
         }
         case 0x06: case 0x0C: case 0x05: case 0x09: { // READ DATA / READ DELETED / WRITE DATA / WRITE DELETED
-          this.selectDrive(c[1] & 3);
+          this.selectDrive(c[1] & 3); d = this.drive;
           const h = (c[1] >> 2) & 1;
           if (!d || !d.image) { this.xfer = { c: c[2], h, r: c[4], eot: c[6], write: false }; this._finish(0x40, 0x00); this.st0 |= 0x08; this.result[0] = this.st0; break; } // NR
           d.side = h;
@@ -306,25 +431,28 @@
           if (x.write && d.image.writeProtect) { this.xfer = x; this._finish(0x40, 0x02); break; }  // NW
           this.xfer = x; this.dataPos = 0; this.phase = 2;
           d.track = x.c;
+          this._seekSector(this._headFrom());
           break;
         }
         case 0x0A: { // READ ID → ST0 ST1 ST2 C H R N
-          this.selectDrive(c[1] & 3);
+          this.selectDrive(c[1] & 3); d = this.drive;
           const h = (c[1] >> 2) & 1;
-          if (!d || !d.image) { this.result = [0x48 | this.driveNo, 0, 0, 0, h, 1, 2]; }
-          else this.result = [this.driveNo | (h << 2), 0, 0, d.track, h, 1, 2];
-          this.resPos = 0; this.phase = 3; break;
+          if (!d || !d.image) { this.result = [0x48 | this.driveNo, 0, 0, 0, h, 1, 2]; this.resPos = 0; this.phase = 3; break; }
+          const id = nextId(d.image.spt, this._headFrom(), this._ph()); // 次に頭を通る ID を読み終えたら結果
+          this.result = [this.driveNo | (h << 2), 0, 0, d.track, h, id.r, 2];
+          this.xfer = null; this.phase = 2; this.idWait = true; this.ready = false; this.due = id.end;
+          break;
         }
         case 0x0D: { // FORMAT TRACK: N SC GPL D のあとセクタごとの 4 バイト(飲み込む)
-          this.selectDrive(c[1] & 3);
+          this.selectDrive(c[1] & 3); d = this.drive;
           const h = (c[1] >> 2) & 1;
           if (!d || !d.image || d.image.writeProtect) { this.xfer = { c: d ? d.track : 0, h, r: 1, eot: 1, write: true, format: true }; this._finish(0x40, 0x02); break; }
-          this.xfer = { c: d.track, h, r: 1, eot: 1, write: true, format: true }; this.dataPos = 0; this.phase = 2; break;
+          this.xfer = { c: d.track, h, r: 1, eot: 1, write: true, format: true }; this.dataPos = 0; this.phase = 2;
+          this.t0 = nextAt(0, this._headFrom(), this._ph()); this.ready = false; this.due = this.t0; break; // インデックスから
         }
         default: this.result = [0x80]; this.resPos = 0; this.phase = 3; break; // 無効
       }
     }
-    clock() {}
   }
 
   // ── スロットに挿すディスクインターフェース ──
@@ -336,20 +464,25 @@
       this.images = images || [];
       this.drives = [new Drive(), new Drive()];
       this.fdc = this.kind === 'tc8566af' ? new TC8566AF(this.drives) : new WD2793(this.drives);
-      this.ctrl = 0;
-      if (this.images.length) this.drives[0].image = this.images[0];
+      this.ctrl = 0; this.sideReg = 0;
+      if (this.images.length) { this.drives[0].image = this.images[0]; this.drives[0].changed = true; } // 起動時に入っていたディスクも「入れ替わった」(openMSX と同じ)
       this.inserted = this.images.length ? 0 : -1;
     }
-    reset() { this.fdc.reset(); this.ctrl = 0; for (const d of this.drives) { d.track = 0; d.side = 0; d.motor = false; } }
+    reset() { this.fdc.reset(); this.ctrl = 0; this.sideReg = 0; for (const d of this.drives) { d.track = 0; d.side = 0; d.motor = false; } }
     get diskCount() { return this.images.length; }
     get dirty() { return this.images.some((i) => i.dirty); }
     clearDirty() { for (const i of this.images) i.dirty = false; }
     // アクセスランプ: ドライブごとの { access(読み書きしたバイト数), media(入っているか) }。ドライブは A/B の 2 台
     diskActivity() { return this.drives.map((d) => ({ access: d.access, media: !!d.image })); }
-    insertDisk(n) { if (!this.images.length) return; n = ((n % this.images.length) + this.images.length) % this.images.length; this.drives[0].image = this.images[n]; this.inserted = n; }
-    ejectDisk() { this.drives[0].image = null; this.inserted = -1; }
+    // ディスクを読み書きしている最中か(モータが回っている/FDC が動いている。「速い読み込み」の自動早送りが見る)
+    diskBusy() {
+      const f = this.fdc;
+      return this.drives.some((d) => d.motor && d.image) || (this.kind === 'wd2793' ? f.busy : (f.phase === 2 || !!f.seekDue));
+    }
+    insertDisk(n) { if (!this.images.length) return; n = ((n % this.images.length) + this.images.length) % this.images.length; this.drives[0].image = this.images[n]; this.drives[0].changed = true; this.inserted = n; }
+    ejectDisk() { this.drives[0].image = null; this.drives[0].changed = true; this.inserted = -1; }
     addImage(img) { this.images.push(img); return this.images.length - 1; }
-    clock(cycles) { this.fdc.clock(cycles); }
+    clock(cycles) { for (const d of this.drives) if (d.motor) d.spin += cycles; this.fdc.clock(cycles); }
     read(a) {
       if (a >= 0x7FF8 && a <= 0x7FFF || (a >= 0xBFF8 && a <= 0xBFFF)) return this._readReg(a & 7);
       if (a >= 0x4000 && a < 0x8000) { const o = a - 0x4000; return o < this.rom.length ? this.rom[o] : 0xFF; }
@@ -366,8 +499,12 @@
           case 1: return f.track;
           case 2: return f.sector;
           case 3: return f.readData();
-          case 4: return 0xFE | f.sideSel;
-          case 5: return this.ctrl;
+          case 4: return this.sideReg;  // 書いた値のまま(openMSX PhilipsFDC)
+          case 5: { // 書いた値。bit2 だけは「ディスクが入れ替わっていない」(0 = 入れ替わった。読むと消える)
+            const d = f.drive; let v = this.ctrl & ~4;
+            if (!(d && d.changed)) v |= 4; else d.changed = false;
+            return v;
+          }
           case 7: return (0xC0 & ~(f.irq ? 0x40 : 0) & ~(f.drq ? 0x80 : 0)) | 0x3F; // bit6=~IRQ、bit7=~DRQ、他は 1
           default: return 0xFF;
         }
@@ -386,12 +523,13 @@
           case 1: f.track = v; return;
           case 2: f.sector = v; return;
           case 3: f.writeData(v); return;
-          case 4: f.setSide(v & 1); return;
+          case 4: this.sideReg = v; f.setSide(v & 1); return;
           case 5: { // bit0-1 ドライブ(2/3 は無し)、bit7 モータ
             this.ctrl = v;
             const n = v & 3;
-            f.selectDrive(n < 2 ? n : 0);
-            for (let i = 0; i < 2; i++) this.drives[i].motor = !!(v & 0x80) && n === i;
+            const sel = n === 3 ? -1 : (n & 1); // 0・2 = A、1 = B、3 = 無し
+            f.selectDrive(sel);
+            for (let i = 0; i < 2; i++) this.drives[i].motor = !!(v & 0x80) && sel === i;
             if (f.drive) f.drive.side = f.sideSel;
             return;
           }
@@ -399,11 +537,11 @@
         }
       }
       switch (r) {
-        case 0: { // 制御 0: bit0-1 ドライブ、bit2 有効(0 でリセット)、bit3 モータ
+        case 0: { // 制御 0: bit0-1 ドライブ、bit2 有効(0 でリセット)、bit3 DMA、bit4-7 ドライブ A〜D のモータ
           this.ctrl = v;
           if (!(v & 0x04)) f.reset();
           f.selectDrive(v & 3);
-          for (let i = 0; i < 2; i++) this.drives[i].motor = !!(v & 0x08) && (v & 3) === i;
+          for (let i = 0; i < 2; i++) this.drives[i].motor = !!(v & (0x10 << i));
           return;
         }
         case 1: if (v & 0x01) f.terminalCount(); return; // 制御 1: bit0 TC(転送の打ち切り。実機のディスク ROM は 1 セクタ読むごとに 2→3→2 と打つ)

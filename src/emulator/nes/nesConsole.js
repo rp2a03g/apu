@@ -85,6 +85,8 @@
     get diskCount() { return this.mapper.sides ? this.mapper.sides.length : 0; }
     // アクセスランプ(ディスク系の媒体の共通形、MsxConsole と同じ): ドライブごとの [{ access, media }]。FDS は 1 台。ディスクでなければ null
     diskActivity() { const mp = this.mapper; return mp.sides ? [{ access: mp.diskAccess || 0, media: mp.diskNumber !== undefined && mp.diskNumber >= 0 }] : null; }
+    // ディスクを読み書きしている最中か(FDS のモータが回っている。「速い読み込み」の自動早送りが見る)
+    diskBusy() { const mp = this.mapper; return !!(mp.sides && mp.motorOn && mp.diskNumber >= 0); }
     get diskNumber() { return this.mapper.sides ? this.mapper.diskNumber : -1; }
     insertDisk(n) { if (this.mapper.insertDisk) this.mapper.insertDisk(n); }
     ejectDisk() { if (this.mapper.ejectDisk) this.mapper.ejectDisk(); }

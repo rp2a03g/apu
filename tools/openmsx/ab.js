@@ -9,6 +9,7 @@
  *   node tools/openmsx/ab.js --disk a.dsk [--disk b.dsk] --machine fsa1f [--script "...,disk1:3000"]
  * まとめて(ずれの大きい順に並べる):
  *   node tools/openmsx/ab.js --batch <folder> [--kind rom|dsk] [--jobs 4] [--out dir] [--limit N]
+ *   --wide N : こちらの f-N〜f+60 フレームから最も合うものを探す(ディスクは読み込みの速さの差で数百フレームずれる。df に差が出る)
  *
  * openMSX の場所: 環境変数 OPENMSX(openmsx.exe)。無ければ _tmp_test/openmsx/app/openmsx.exe(公式の Windows 版 zip を展開した物)。
  * 実 BIOS の機種(fsa1f)は、手元の分割 BIOS(--bios-dir、既定 _tmp_test/msx/sweep/bios)を openMSX の share/systemroms/sef/ に写し、
@@ -49,6 +50,11 @@ const MACHINES = {
     ours: { machine: 'msx2', fdc: 'tc8566af' }, openmsx: 'SEF_FSA1F',
     bios: { main: 'paraMSX032__MSX2_J.ROM', sub: 'paraMSX032__MSX2EXT_J.ROM', disk: 'paraMSX032__DISK_P.ROM' },
   },
+  // WD2793(Philips 式のレジスタ配置)のディスク。本体は fsa1f と同じ分割 BIOS、ディスク ROM だけ WD2793 を叩く物
+  wd2793: {
+    ours: { machine: 'msx2', fdc: 'wd2793' }, openmsx: 'SEF_WD2793',
+    bios: { main: 'paraMSX032__MSX2_J.ROM', sub: 'paraMSX032__MSX2EXT_J.ROM', disk: 'msx2plus__DISK.ROM' },
+  },
 };
 const sha1 = (b) => crypto.createHash('sha1').update(b).digest('hex');
 
@@ -61,7 +67,9 @@ function ensureMachines() {
   const cb = fs.readFileSync(path.join(mdir, 'C-BIOS_MSX2_JP.xml'), 'utf8').replace('<size>512</size>', '<size>128</size>');
   fs.writeFileSync(path.join(mdir, 'SEF_CBIOS_MSX2.xml'), cb);
   // 実 BIOS(分割)の FS-A1F 相当: メイン 0、サブ 3-0、ディスク(TC8566AF)3-1、RAM 128K 3-2。こちらの DEFAULT_LAYOUT と同じ
-  const b = MACHINES.fsa1f.bios;
+  // ★FDC の mem は $4000-$BFFF(付属の FS-A1F と同じ 32K)。$4000-$7FFF の 16K にしていたら BIOS が起動中に止まり、ディスクの総当たりが全部 BASIC の青画面になった(2026-11-11)
+  for (const [mname, fdcEl] of [['fsa1f', 'TC8566AF'], ['wd2793', 'WD2793']]) {
+  const b = MACHINES[mname].bios;
   if (Object.values(b).every((f) => fs.existsSync(path.join(BIOS_DIR, f)))) {
     const sdir = path.join(share, 'systemroms', 'sef'); fs.mkdirSync(sdir, { recursive: true });
     const rom = {};
@@ -80,18 +88,19 @@ function ensureMachines() {
     <primary external="true" slot="2"/>
     <primary slot="3">
       <secondary slot="0"><ROM id="Sub ROM"><mem base="0x0000" size="0x4000"/>${romEl(rom.sub)}</ROM></secondary>
-      <secondary slot="1"><TC8566AF id="Memory Mapped FDC"><io_regs>7FF8</io_regs><drives>2</drives>${romEl(rom.disk)}<mem base="0x4000" size="0x4000"/></TC8566AF></secondary>
+      <secondary slot="1">${fdcEl === 'WD2793' ? `<WD2793 id="Memory Mapped FDC"><connectionstyle>Philips</connectionstyle><drives>2</drives>${romEl(rom.disk)}<mem base="0x4000" size="0x8000"/></WD2793>` : `<TC8566AF id="Memory Mapped FDC"><io_regs>7FF8</io_regs><drives>2</drives>${romEl(rom.disk)}<mem base="0x4000" size="0x8000"/></TC8566AF>`}</secondary>
       <secondary slot="2"><MemoryMapper id="Main RAM"><mem base="0x0000" size="0x10000"/><size>128</size></MemoryMapper></secondary>
     </primary>
     <PPI id="ppi"><io base="0xA8" num="4"/><sound><volume>16000</volume></sound><key_ghosting>false</key_ghosting><keyboard_type>jp_jis</keyboard_type><has_keypad>false</has_keypad><code_kana_locks>true</code_kana_locks><graph_locks>false</graph_locks></PPI>
     <VDP id="VDP"><io base="0x98" num="4" type="O"/><io base="0x98" num="2" type="I"/><version>V9938</version><vram>128</vram></VDP>
     <PSG id="PSG"><type>YM2149</type><keyboardlayout>50on</keyboardlayout><io base="0xA0" num="4" type="IO"/><sound><volume>21000</volume></sound></PSG>
-    <RTC id="Real time clock"><io base="0xB4" num="2" type="O"/><io base="0xB5" num="1" type="I"/><sramname>sef_fsa1f.cmos</sramname></RTC>
+    <RTC id="Real time clock"><io base="0xB4" num="2" type="O"/><io base="0xB5" num="1" type="I"/><sramname>sef_${mname}.cmos</sramname></RTC>
     <PrinterPort id="Printer Port"><io base="0x90" num="2"/></PrinterPort>
   </devices>
 </msxconfig>
 `;
-    fs.writeFileSync(path.join(mdir, 'SEF_FSA1F.xml'), xml);
+    fs.writeFileSync(path.join(mdir, MACHINES[mname].openmsx + '.xml'), xml);
+  }
   }
 }
 
@@ -141,7 +150,14 @@ function tclFor(job, dir, KEYS) {
     'after frame onFrame');
   return lines.join('\n') + '\n';
 }
+// openMSX は RTC の中身(sramname の .cmos)を persistent/<機種>/untitled*/ に残し、次の起動に持ち越す。ゲームが書き換えた起動音の設定
+// (ブロック 2 のレジスタ 10)が残って、起動のビープが長いメロディになり 19 フレームずれた(2026-11-12)。毎回消して電源投入直後の状態から
+function freshCmos(machine) {
+  const base = path.join(process.env.OPENMSX_PERSISTENT || path.join(process.env.USERPROFILE || process.env.HOME || '', 'Documents', 'openMSX', 'persistent'), MACHINES[machine].openmsx);
+  try { for (const d of fs.readdirSync(base)) for (const c of fs.readdirSync(path.join(base, d))) if (/[.]cmos$/i.test(c)) fs.unlinkSync(path.join(base, d, c)); } catch (e) { /* 無ければよい */ }
+}
 function runOpenMsx(job, dir, KEYS, timeoutMs) {
+  freshCmos(job.machine);
   const tcl = path.join(dir, 'ref.tcl');
   fs.writeFileSync(tcl, tclFor(job, dir, KEYS));
   const a = ['-machine', MACHINES[job.machine].openmsx];
@@ -167,8 +183,9 @@ function ours(job) {
   if (job.mapper) opts.mapperType = job.mapper;
   const m = new Emu.MsxConsole(job.rom ? new Uint8Array(fs.readFileSync(job.rom)) : null, opts);
   const want = new Set(); for (const s of job.shots) for (let d = -6; d <= 3; d++) want.add(s + d);
-  const snaps = {};
-  const end = Math.max(...job.shots) + 2;
+  for (const g of job.exact || []) want.add(g);
+  const snaps = {}, small = {};
+  const end = Math.max(...job.shots, ...(job.exact || [0])) + (job.wide ? 60 : 3);
   // openMSX の after frame は「フレーム n の終わり」に呼ばれ、そこで入れたキーは次のフレームから効く。こちらも runFrame の前に入れる
   for (let f = 0; f <= end; f++) {
     for (const a of job.script) {
@@ -178,8 +195,9 @@ function ours(job) {
     }
     m.runFrame();
     if (want.has(f)) snaps[f] = { w: m.frameWidth, h: m.frameHeight, px: m.frame.slice(0, m.frameWidth * m.frameHeight), vram: m.vdp.vram.slice(0, 0x20000), regs: Array.from(m.vdp.regs.subarray(0, 47)) };
+    if (job.wide) small[f] = half(normOurs({ w: m.frameWidth, h: m.frameHeight, px: m.frame }), W, H);
   }
-  return { snaps, KEYS: Emu.MsxKeyboard && Emu.MsxKeyboard.KEYS };
+  return { snaps, small, KEYS: Emu.MsxKeyboard && Emu.MsxKeyboard.KEYS };
 }
 
 // ── PNG ──
@@ -230,6 +248,18 @@ function normRef(r) { // 640×480 → 320×240(320×240 ならそのまま)
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) out[y * w + x] = r.px[(y * 2) * r.w + x * 2];
   return { w, h, px: out };
 }
+// 縦横半分(--wide の候補探し用。安く広く探す)
+function half(px, w, h) { const o = new Uint32Array((w >> 1) * (h >> 1)); for (let y = 0; y < h >> 1; y++) for (let x = 0; x < w >> 1; x++) o[y * (w >> 1) + x] = px[(y * 2) * w + x * 2]; return o; }
+// 大きさを指定できる mismatch(--wide 用)
+function mismatchSz(a, aw, ah, ref, rw, rh, ox, oy, step) {
+  const ab = new Map(), ba = new Map(); let n = 0;
+  for (let y = 0; y < ah; y += step) { const ry = y + oy; if (ry < 0 || ry >= rh) continue;
+    for (let x = 0; x < aw; x += step) { const rx = x + ox; if (rx < 0 || rx >= rw) continue;
+      const ca = a[y * aw + x], cb = ref[ry * rw + rx], k1 = ca * 16777216 + cb, k2 = cb * 16777216 + ca;
+      ab.set(k1, (ab.get(k1) || 0) + 1); ba.set(k2, (ba.get(k2) || 0) + 1); n++; } }
+  const best = (mp) => { const top = new Map(); for (const [k, c] of mp) { const s = Math.floor(k / 16777216); if (c > (top.get(s) || 0)) top.set(s, c); } let t = 0; for (const c of top.values()) t += c; return t; };
+  return n ? 1 - Math.min(best(ab), best(ba)) / n : 1;
+}
 // 色の対応で比べる: こちらの色 a → openMSX の色 b の組を数え、各 a でいちばん多い b に乗らない画素の割合(逆向きも数えて大きい方)
 function mismatch(a, ref, ox, oy, step) {
   const ab = new Map(), ba = new Map(); let n = 0;
@@ -276,8 +306,21 @@ async function runJob(job) {
   const dir = path.join(OUT, job.name); fs.mkdirSync(dir, { recursive: true });
   for (const f of fs.readdirSync(dir)) if (/^(ref_|ours_|cmp_)/.test(f)) fs.unlinkSync(path.join(dir, f));
   const t0 = Date.now();
-  const o = ours(job);
+  let o = ours(job);
   const code = await runOpenMsx(job, dir, o.KEYS, job.timeout || 120000);
+  // --wide N: こちらの f-N..f+60 から最も合うフレームを縦横半分の像で探し(ディスクの読み込みの速さの差で大きくずれる)、そのフレームを撮り直す
+  const wideBest = {};
+  if (job.wide) {
+    for (const f of job.shots) {
+      const rp = path.join(dir, `ref_${f}.png`); if (!fs.existsSync(rp)) continue;
+      const ref = normRef(pngDecode(fs.readFileSync(rp))), rs = half(ref.px, ref.w, ref.h);
+      const al0 = o.snaps[f] ? align(normOurs(o.snaps[f]), ref) : { ox: 32, oy: 0 };
+      let best = null;
+      for (let g = Math.max(0, f - job.wide); g <= f + 60; g++) { const a = o.small[g]; if (!a) continue; const mm = mismatchSz(a, W >> 1, H >> 1, rs, ref.w >> 1, ref.h >> 1, al0.ox >> 1, al0.oy >> 1, 2); if (!best || mm < best.mm - 1e-9) best = { g, mm }; }
+      if (best) wideBest[f] = best.g;
+    }
+    o = ours(Object.assign({}, job, { wide: 0, exact: Object.values(wideBest) }));
+  }
   const res = { name: job.name, machine: job.machine, openmsx: code, ms: Date.now() - t0, shots: [] };
   if (fs.existsSync(path.join(dir, 'ref_error.txt'))) res.tclError = fs.readFileSync(path.join(dir, 'ref_error.txt'), 'utf8').trim().split('\n')[0];
   for (const f of job.shots) {
@@ -287,7 +330,8 @@ async function runJob(job) {
     // フレームのずれ: こちらの f-6..f+3 から最も合う物(こちらが数フレーム先に進む傾向。VRAM の埋まり方で 1〜5 フレームと実測)。
     // 位置合わせは候補ごとに探す(1 枚で決めた位置を使い回すと、その位置が外れたとき候補選びも外れた。実測)
     let best = null;
-    for (let d = -6; d <= 3; d++) { const s = o.snaps[f + d]; if (!s) continue; const a = normOurs(s); const al = align(a, ref); if (!best || al.m < best.al.m) best = { d, a, al, s }; }
+    const cands = wideBest[f] !== undefined ? [wideBest[f] - f] : [-6, -5, -4, -3, -2, -1, 0, 1, 2, 3];
+    for (const d of cands) { const s = o.snaps[f + d]; if (!s) continue; const a = normOurs(s); const al = align(a, ref); if (!best || al.m < best.al.m) best = { d, a, al, s }; }
     const m = mismatch(best.a, ref, best.al.ox, best.al.oy, 1);
     const shot = { f, mismatch: +(m * 100).toFixed(2), df: best.d, ox: best.al.ox, oy: best.al.oy };
     const vp = path.join(dir, `ref_${f}.vram`);
@@ -327,7 +371,7 @@ async function batch() {
       const name = f.replace(/[^\w.-]/g, '_'), rp = path.join(OUT, name, 'result.json');
       let r = null;
       if (resume && fs.existsSync(rp)) { try { r = JSON.parse(fs.readFileSync(rp, 'utf8')); } catch (e) { r = null; } if (r) { all.push(r); done++; continue; } }
-      const a = [__filename, ...(kind === 'dsk' ? ['--disk', path.join(folder, f)] : [path.join(folder, f)]), '--name', name, '--out', OUT, '--machine', machine, '--shots', shots.join(','), '--script', script, '--quiet', '--bios-dir', BIOS_DIR];
+      const a = [__filename, ...(kind === 'dsk' ? ['--disk', path.join(folder, f)] : [path.join(folder, f)]), '--name', name, '--out', OUT, '--machine', machine, '--shots', shots.join(','), '--script', script, '--quiet', '--bios-dir', BIOS_DIR, ...(arg('--wide') ? ['--wide', arg('--wide')] : [])];
       const code = await new Promise((res) => { const p = spawn(process.execPath, a, { stdio: 'ignore', windowsHide: true }); p.on('exit', res); p.on('error', () => res(-1)); });
       try { r = JSON.parse(fs.readFileSync(rp, 'utf8')); } catch (e) { r = { name, error: 'result.json がありません(exit ' + code + ')', worst: 100 }; }
       all.push(r); fs.appendFileSync(jl, JSON.stringify(r) + '\n');
@@ -352,6 +396,7 @@ async function main() {
     machine: arg('--machine', disks.length ? 'fsa1f' : 'cbios2'), rom: rom ? path.resolve(rom) : null, disks,
     mapper: arg('--mapper', null),
     shots: arg('--shots', '300,600,900,1200').split(',').map(Number), script: parseScript(arg('--script', '')),
+    wide: +arg('--wide', '0'),
   };
   // openMSX のソフトウェア DB(SHA-1 → マッパー種別・吸い出しの良否)。openMSX はこれで種別を決めるので、こちらも同じ種別で回す
   // (マッパー推定の外れは画面の比較に混ぜず、mapperGuess/mapperDb として別に出す)
@@ -392,5 +437,5 @@ function softDb() {
   }
   return softDbCache;
 }
-module.exports = { ensureMachines, runOpenMsx, ours, pngDecode, normRef, normOurs, align, mismatch, parseScript, MACHINES, softDb, DB_TYPES };
+module.exports = { freshCmos, ensureMachines, runOpenMsx, ours, pngDecode, normRef, normOurs, align, mismatch, parseScript, MACHINES, softDb, DB_TYPES };
 if (require.main === module) main().catch((e) => { console.error(e.stack || e.message); process.exit(1); });
