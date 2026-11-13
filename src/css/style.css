@@ -1991,6 +1991,9 @@ button.secondary {
 .nes-bios-ok { color: #7bd88f; } .nes-bios-ng { color: var(--text-muted); }
 .nes-cfg-row { display: flex; align-items: center; gap: 8px; margin: 2px 0; }
 .nes-cfg-row select { font-size: 12px; }
+.nes-cfg-row input[type=range] { flex: 1 1 auto; min-width: 80px; }
+.nes-cfg-slabel { flex: none; min-width: 4.5em; }
+.nes-cfg-sval { flex: none; min-width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
 .nes-cfg-check { display: flex; align-items: center; gap: 4px; cursor: pointer; }
 .nes-cfg-note { font-size: 10.5px; color: var(--text-muted); line-height: 1.4; white-space: normal; margin-top: 3px; }
 details.nes-cfg-note > summary { cursor: pointer; }

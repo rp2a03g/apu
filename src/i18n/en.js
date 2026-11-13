@@ -1842,6 +1842,12 @@
     '自動(判別)': 'Auto (detect)',
     'カーソルキーとスペースをジョイスティック 1 にも使う': 'Also use the cursor keys and Space as joystick 1',
     'スマホの十字/A/B をキーボード(カーソルキー/スペース/M)に送る(ジョイスティックを読まないソフト用)': 'Send the touch D-pad/A/B to the keyboard (cursor keys/Space/M) instead (for software that does not read the joystick)',
+    'スマホの十字キー': 'Touch D-pad',
+    '遊び': 'Dead zone',
+    '斜めの幅': 'Diagonal width',
+    '粘り': 'Stickiness',
+    '方向が変わったら短く振動する(Android のみ)': 'Vibrate briefly when the direction changes (Android only)',
+    '方向は十字キーの中心からの角度で決まります(指を滑らせず、転がすように押すのが実機に近い操作)。遊び: 中心からこの距離までは何も押さない。斜めの幅: 斜めが入る角度(45° で 8 方向が等分、小さいほど斜めが入りにくい、0 で斜め無し)。粘り: 今の方向から境目をこの角度だけ越えるまで切り替えない(境目でのばたつきを抑える)。動かすとすぐ効きます': 'The direction is the angle from the center of the D-pad (rolling your thumb rather than sliding it is closest to a real D-pad). Dead zone: nothing is pressed within this distance of the center. Diagonal width: the angle that counts as a diagonal (45° splits the 8 directions evenly; smaller makes diagonals harder; 0 disables them). Stickiness: the direction does not change until the finger passes the boundary by this many degrees (stops flicker at the boundary). Changes take effect immediately',
     'キーボード(操作キー。他のキーはそのまま MSX のキーボードへ)': 'Keyboard (control keys; every other key goes to the MSX keyboard)',
     'クリックしてキー入力(PC のキーがそのまま MSX のキーボードに。{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止、{ss}/{ls}=状態保存/読込)': 'Click to type (PC keys go straight to the MSX keyboard; {ff}=fast forward, {rw}=rewind, {pa}=pause, {ss}/{ls}=save/load state)',
   });

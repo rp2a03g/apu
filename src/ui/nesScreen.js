@@ -83,8 +83,18 @@
     sfxRemove: false, // 録音の補正の初期値(録音ごとに保存/変換への横のチェックで変えられる)
     lagFix: false,
     diskFast: false, // ディスクの読み込み: false = 実機の速さ(既定。読み込みの間の音も曲のうち)、true = 読み込み中は自動で早送り(録音は実機の時間のまま)
+    // スマホの十字キー(buildTouchPad): 遊び(中心からの px)/ 斜めの幅(度。45 で 8 方向が等分、0 で斜め無し)/ 粘り(度。今の方向から境目をこれだけ越えるまで切り替えない)/ 方向が変わった時の振動
+    dpad: { dead: 6, diag: 30, hold: 10, vibrate: true },
     msx: { keys: { FF: 'F11', Rewind: 'F12', Pause: 'Pause', SaveState: 'F9', LoadState: 'F10' }, machine: 'auto', joyFromKeys: false, touchKbd: false, cartB: 'none', fdc: 'wd2793', softKbd: false, writeBack: false },
   };
+  const DPAD_LIMITS = { dead: [0, 30], diag: [0, 60], hold: [0, 25] };
+  function loadDpadCfg(c) {
+    c = c && typeof c === 'object' ? c : {};
+    const out = {};
+    for (const k of Object.keys(DPAD_LIMITS)) { const [lo, hi] = DPAD_LIMITS[k], v = c[k]; out[k] = typeof v === 'number' && isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : DEFAULT_CFG.dpad[k]; }
+    out.vibrate = typeof c.vibrate === 'boolean' ? c.vibrate : DEFAULT_CFG.dpad.vibrate;
+    return out;
+  }
   function loadMsxCfg(c) {
     c = c && typeof c === 'object' ? c : {};
     return {
@@ -111,6 +121,7 @@
       sfxRemove: typeof c.sfxRemove === 'boolean' ? c.sfxRemove : DEFAULT_CFG.sfxRemove,
       lagFix: typeof c.lagFix === 'boolean' ? c.lagFix : DEFAULT_CFG.lagFix,
       diskFast: typeof c.diskFast === 'boolean' ? c.diskFast : DEFAULT_CFG.diskFast,
+      dpad: loadDpadCfg(c.dpad),
       msx: loadMsxCfg(c.msx),
     };
   }
@@ -795,7 +806,7 @@
   // 十字/A/B/連射 A/B/Select/Start。複数の指を別々に追い(pointerId ごとに押しているボタン)、指を滑らせても下のボタンへ移る
   // 十字キーは見た目は 4 つのボタンのまま、入力は円: 中心からの角度を 45° ずつ 8 方向に分け(斜めは 2 つのボタンが光る)、
   // 中心付近は何も押さない。十字キーの円の中で触れた指は、離すまで十字キーの指として扱い、円の外へはみ出しても角度で方向を決める。
-  // 判定の中心は指について来るので、方向の切り替えは指を少し動かすだけで済む(dpadBitsAt)
+  // 斜めの幅・粘り・遊び・振動は ⚙ で調整(dpadBitsAt)
   function buildTouchPad() {
     const pad = document.createElement('div'); pad.className = 'nes-tpad';
     const key = (cls, label, bits, turbo) => {
@@ -821,17 +832,27 @@
     const held = new Map(); // pointerId → 押しているキー要素、または十字キーの指なら { dpadBits: 方向ビット }(名前に dir は使わない: 要素が元から dir 属性を持つ)
     const dirEls = [[PAD_BITS.Up, dpad.querySelector('.nes-tk-up')], [PAD_BITS.Down, dpad.querySelector('.nes-tk-down')], [PAD_BITS.Left, dpad.querySelector('.nes-tk-left')], [PAD_BITS.Right, dpad.querySelector('.nes-tk-right')]];
     const DIRS8 = [PAD_BITS.Right, PAD_BITS.Right | PAD_BITS.Down, PAD_BITS.Down, PAD_BITS.Down | PAD_BITS.Left, PAD_BITS.Left, PAD_BITS.Left | PAD_BITS.Up, PAD_BITS.Up, PAD_BITS.Up | PAD_BITS.Right];
-    // 判定の中心は指について来る(浮動中心): 指が中心から DPAD_REACH px より離れたら、中心を指の方へその距離まで引き寄せる。
-    // 反対の方向へ切り替えるのに要る指の移動が DPAD_REACH + DPAD_DEAD px で済む(固定の中心だとボタンの上から中心を越えるまで動かす必要があった)
-    const DPAD_DEAD = 8, DPAD_REACH = 18; // 遊び(中心からこの px 以内は何も押さない)/ 中心が引き寄せられ始める距離(px)
+    // 判定は実機の十字キー(中心を支点に傾ける板)に寄せる: 中心は十字キーの真ん中に固定、方向は角度で決める。
+    // 調整は ⚙「スマホの十字キー」(cfg.dpad): 遊び(px)/ 斜めの幅(度)/ 粘り(度)/ 振動
     const dpadCenter = () => { const rc = dpad.getBoundingClientRect(); return { x: rc.left + rc.width / 2, y: rc.top + rc.height / 2, R: Math.min(rc.width, rc.height) / 2 }; };
-    // 指の位置と判定の中心 st({ cx, cy }。引き寄せで書き換える)→ 方向ビット
-    const dpadBitsAt = (x, y, st) => {
-      let dx = x - st.cx, dy = y - st.cy; const d = Math.hypot(dx, dy);
-      if (d > DPAD_REACH) { const k = (d - DPAD_REACH) / d; st.cx += dx * k; st.cy += dy * k; dx = x - st.cx; dy = y - st.cy; }
-      if (d < DPAD_DEAD) return 0;
-      return DIRS8[Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) & 7]; // 画面座標は下が +y なので 0=右 2=下 4=左 6=上
+    // 角度(度。0=右 90=下 180=左 270=上、画面座標は下が +y)→ 方向ビット。上下左右はそれぞれ 90-斜めの幅 度、斜めは 斜めの幅 度
+    const sectorBits = (a, diag) => {
+      a = ((a % 360) + 360) % 360;
+      const ci = Math.round(a / 90) & 3, off = a - Math.round(a / 90) * 90; // 一番近い上下左右(0=右 1=下 2=左 3=上)とそこからのずれ(-45〜45)
+      const card = [PAD_BITS.Right, PAD_BITS.Down, PAD_BITS.Left, PAD_BITS.Up];
+      if (Math.abs(off) <= (90 - diag) / 2) return card[ci];
+      return card[ci] | card[(ci + (off > 0 ? 1 : 3)) & 3]; // 時計回り側(+)か反時計回り側(-)の隣と合わせて斜め
     };
+    // 指の位置 + 今の方向(粘りに使う)→ 方向ビット
+    const dpadBitsAt = (x, y, cur) => {
+      const c = dpadCenter(), dx = x - c.x, dy = y - c.y;
+      if (Math.hypot(dx, dy) < cfg.dpad.dead) return 0;
+      const a = Math.atan2(dy, dx) * 180 / Math.PI, diag = cfg.dpad.diag, h = cfg.dpad.hold;
+      const b = sectorBits(a, diag);
+      if (cur && b !== cur && h > 0 && (sectorBits(a - h, diag) === cur || sectorBits(a + h, diag) === cur)) return cur; // 境目から粘りの角度以内なら今の方向のまま
+      return b;
+    };
+    const buzz = () => { if (cfg.dpad.vibrate && navigator.vibrate) { try { navigator.vibrate(8); } catch (e) { /* ignore */ } } };
     let msxDown = new Set(); // MSX で押している MSX キー名(SPACE/RETURN)
     const recompute = () => {
       let bits = 0, turbo = 0;
@@ -857,9 +878,9 @@
       e.preventDefault(); resumeAudio();
       try { pad.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ }
       const c = dpadCenter();
-      if (Math.hypot(e.clientX - c.x, e.clientY - c.y) <= c.R * 1.15) { // 十字キーの円(少しはみ出しても)に触れた。最初の判定は十字キーの中心から
-        const st = { cx: c.x, cy: c.y, dpadBits: 0 }; st.dpadBits = dpadBitsAt(e.clientX, e.clientY, st);
-        held.set(e.pointerId, st); recompute(); return;
+      if (Math.hypot(e.clientX - c.x, e.clientY - c.y) <= c.R * 1.15) { // 十字キーの円(少しはみ出しても)に触れた
+        const st = { dpadBits: dpadBitsAt(e.clientX, e.clientY, 0) };
+        held.set(e.pointerId, st); if (st.dpadBits) buzz(); recompute(); return;
       }
       const k = keyAt(e.clientX, e.clientY);
       if (k) held.set(e.pointerId, k); else held.delete(e.pointerId);
@@ -868,7 +889,7 @@
     pad.addEventListener('pointermove', (e) => {
       if (!held.has(e.pointerId) && !(e.buttons & 1) && e.pointerType === 'mouse') return;
       const cur = held.get(e.pointerId) || null;
-      if (cur && cur.dpadBits !== undefined) { const b = dpadBitsAt(e.clientX, e.clientY, cur); if (b !== cur.dpadBits) { cur.dpadBits = b; recompute(); } return; }
+      if (cur && cur.dpadBits !== undefined) { const b = dpadBitsAt(e.clientX, e.clientY, cur.dpadBits); if (b !== cur.dpadBits) { cur.dpadBits = b; if (b) buzz(); recompute(); } return; }
       const k = keyAt(e.clientX, e.clientY);
       if (k !== cur) { if (k) held.set(e.pointerId, k); else held.delete(e.pointerId); recompute(); }
     });
@@ -956,6 +977,21 @@
     selD.addEventListener('change', () => { cfg.diskFast = selD.value === 'fast'; saveCfg(); pushDiskFast(); });
     rowD.appendChild(rlD); rowD.appendChild(selD); sDisk.appendChild(rowD);
     note(sDisk, T('MSX のフロッピーとディスクシステム(FDS)に効きます。どちらでもディスクの待ち時間は実機どおりに動き、録音も実機の時間で残ります。「速く」はアクセスランプが点いている間だけ早送りして待ちを縮めます(その間の音は飛び飛びになります)'));
+    const sPad = sec(T('スマホの十字キー'), 'common');
+    const slider = (label, key, unit) => {
+      const r = document.createElement('div'); r.className = 'nes-cfg-row';
+      const l = document.createElement('span'); l.textContent = label; l.className = 'nes-cfg-slabel';
+      const s = document.createElement('input'); s.type = 'range'; s.min = String(DPAD_LIMITS[key][0]); s.max = String(DPAD_LIMITS[key][1]); s.step = '1'; s.value = String(cfg.dpad[key]);
+      const v = document.createElement('span'); v.className = 'nes-cfg-sval';
+      const show = () => { v.textContent = s.value + unit; };
+      s.addEventListener('input', () => { cfg.dpad[key] = +s.value; show(); saveCfg(); });
+      show(); r.appendChild(l); r.appendChild(s); r.appendChild(v); sPad.appendChild(r);
+    };
+    slider(T('遊び'), 'dead', 'px');
+    slider(T('斜めの幅'), 'diag', '°');
+    slider(T('粘り'), 'hold', '°');
+    check(sPad, cfg.dpad.vibrate, T('方向が変わったら短く振動する(Android のみ)'), (v) => { cfg.dpad.vibrate = v; saveCfg(); });
+    note(sPad, T('方向は十字キーの中心からの角度で決まります(指を滑らせず、転がすように押すのが実機に近い操作)。遊び: 中心からこの距離までは何も押さない。斜めの幅: 斜めが入る角度(45° で 8 方向が等分、小さいほど斜めが入りにくい、0 で斜め無し)。粘り: 今の方向から境目をこの角度だけ越えるまで切り替えない(境目でのばたつきを抑える)。動かすとすぐ効きます'));
     const s1c = sec(T('録音の補正'), 'common');
     check(s1c, cfg.sfxRemove, T('効果音を除く'), (v) => { cfg.sfxRemove = v; saveCfg(); });
     check(s1c, cfg.lagFix, T('処理落ちを詰める'), (v) => { cfg.lagFix = v; saveCfg(); });
@@ -1163,7 +1199,7 @@
     document.addEventListener('mousedown', popClose, true);
     document.addEventListener('keydown', popClose, true);
   }
-  function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll, sfxRemove: DEFAULT_CFG.sfxRemove, lagFix: DEFAULT_CFG.lagFix, diskFast: DEFAULT_CFG.diskFast,
+  function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll, sfxRemove: DEFAULT_CFG.sfxRemove, lagFix: DEFAULT_CFG.lagFix, diskFast: DEFAULT_CFG.diskFast, dpad: Object.assign({}, DEFAULT_CFG.dpad),
     msx: { keys: Object.assign({}, DEFAULT_CFG.msx.keys), machine: cfg.msx.machine, joyFromKeys: DEFAULT_CFG.msx.joyFromKeys, touchKbd: DEFAULT_CFG.msx.touchKbd, cartB: cfg.msx.cartB, fdc: cfg.msx.fdc } }; } // 機種は BIOS の控えに結びつくので残す
 
   // ── 入力 ──
