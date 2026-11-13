@@ -123,13 +123,48 @@ function buildTestRom(opt) {
   return rom;
 }
 
-module.exports = { buildTestRom, EXPECT_BY_MBC };
+// 周辺の通し試験用 ROM(段階 8e): CGB+MBC5(振動つき)。赤外線の読み取りを有効にし、振動モータを回し、
+// ポケットプリンタへ「初期化 → 画像 2 段(真っ黒)→ 空データ → 印刷」を通信ポートから送って止まる。
+// 画面側の [光] ボタン、振動、[印刷 n 枚を保存] が出るかを市販ソフト無しで確かめる
+function buildPeriphRom() {
+  const rom = new Uint8Array(0x10000).fill(0xFF);
+  const pkt = (cmd, data) => { data = data || []; const head = [cmd, 0, data.length & 0xFF, data.length >> 8]; let sum = 0; for (const b of head) sum += b; for (const b of data) sum += b; return [0x88, 0x33, ...head, ...data, sum & 0xFF, (sum >> 8) & 0xFF, 0, 0]; };
+  // 最後にバーコードボーイの握手($10 $07 $10 $07)。その後は外部クロックで 30 バイト待ち、受けた物を $C100〜 に並べる
+  const table = [...pkt(1), ...pkt(4, new Array(0x280).fill(0xFF)), ...pkt(4), ...pkt(2, [1, 0x13, 0xE4, 0x40]), 0x10, 0x07, 0x10, 0x07];
+  const TABLE = 0x400;
+  rom.set(table, TABLE);
+  const a = new Asm(0x150);
+  a.b(0xF3, 0x31, 0xFE, 0xFF);                         // DI / LD SP,$FFFE
+  a.b(0x3E, 0xC0, 0xE0, 0x56);                         // RP=$C0(赤外線の読み取り有効)
+  a.b(0x3E, 0x08, 0xEA, 0x00, 0x40);                   // 振動モータ ON
+  a.b(0x21, TABLE & 0xFF, TABLE >> 8, 0x11, table.length & 0xFF, table.length >> 8); // LD HL,table / LD DE,len
+  a.label('lp').b(0x2A, 0xE0, 0x01, 0x3E, 0x81, 0xE0, 0x02); // LD A,(HL+) / LDH (SB),A / SC=$81
+  a.label('w').b(0xF0, 0x02, 0xCB, 0x7F).jr(0x20, 'w');
+  a.b(0x1B, 0x7A, 0xB3).jr(0x20, 'lp');                // DEC DE / LD A,D / OR E / JR NZ
+  a.b(0x21, 0x00, 0xC1, 0x06, 30);                      // LD HL,$C100 / LD B,30
+  a.label('rx').b(0x3E, 0x80, 0xE0, 0x02);              // SC=$80(外部クロックで待つ)
+  a.label('rw').b(0xF0, 0x02, 0xCB, 0x7F).jr(0x20, 'rw');
+  a.b(0xF0, 0x01, 0x22, 0x05).jr(0x20, 'rx');           // LDH A,(SB) / LD (HL+),A / DEC B / JR NZ
+  a.label('end').b(0x76, 0x00).jr(0x18, 'end');
+  rom.set(a.done(), 0x150);
+  rom.set([0x00, 0xC3, 0x50, 0x01], 0x100);
+  rom[0x104] = 0xCE; rom[0x105] = 0xED;
+  const title = 'GBPERIPH';
+  for (let i = 0; i < 15; i++) rom[0x134 + i] = i < title.length ? title.charCodeAt(i) : 0;
+  rom[0x143] = 0x80; rom[0x146] = 0; rom[0x147] = 0x1E; rom[0x148] = 1; rom[0x149] = 2; rom[0x14A] = 0; rom[0x14B] = 0; rom[0x14C] = 0;
+  let x = 0; for (let i = 0x134; i <= 0x14C; i++) x = (x - rom[i] - 1) & 0xFF;
+  rom[0x14D] = x;
+  return rom;
+}
+
+module.exports = { buildTestRom, buildPeriphRom, EXPECT_BY_MBC };
 
 if (require.main === module) {
   const out = process.argv[2];
   const i = process.argv.indexOf('--mbc');
   const mbc = i >= 0 ? process.argv[i + 1] : 'mbc1';
-  if (!out || !TYPE.hasOwnProperty(mbc)) { console.error('使い方: node mk-gb-test-rom.js out.gb [--mbc rom|mbc1|mbc3|mbc5]'); process.exit(2); }
+  if (process.argv.includes('--periph') && out) { const r = buildPeriphRom(); require('fs').writeFileSync(out, r); console.log('wrote', out, r.length, 'bytes(周辺の通し試験用)'); process.exit(0); }
+  if (!out || !TYPE.hasOwnProperty(mbc)) { console.error('使い方: node mk-gb-test-rom.js out.gb [--mbc rom|mbc1|mbc3|mbc5] | out.gbc --periph'); process.exit(2); }
   const rom = buildTestRom({ mbc });
   require('fs').writeFileSync(out, rom);
   console.log('wrote', out, rom.length, 'bytes, 期待するシリアル出力:', EXPECT_BY_MBC[mbc]);

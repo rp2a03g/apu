@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 16:09:37
+ * Built by tools/build-capture-workers.ps1 at 2026-11-13 17:16:06
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-13 16:09:37';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-13 17:16:06';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -15053,8 +15053,13 @@
  * ゲームボーイのカートリッジ(ヘッダ解析と MBC)
  * MML.Emu.GbCart
  *
- * 段階 8a: ROM のみ / MBC1 / MBC2 / MBC3(時計) / MBC5(振動ビット)。
- * MBC6 / MBC7 / MMM01 / HuC1 / HuC3 / カメラ、MBC1 の多本入り判別は段階 8e(DESIGN-GB-CAPTURE.md §9)。
+ * ROM のみ / MBC1(多本入り含む) / MBC2 / MBC3(時計) / MBC5(振動) / MBC7(傾き+EEPROM) / HuC1(赤外線)。
+ * MBC6 / MMM01 / HuC3 / ポケットカメラは gb/cartMore.js(下の EXTRA の差し込み口に登録する。このファイルの後に読む)。
+ *
+ * 時計(MBC3): 動いている間はエミュレータ内の時間で進む(巻き戻し/ステートと食い違わない)。セーブには実時刻も控え、
+ *   次に読み込んだ時に「電源を切っていた間」の分を進める。
+ * MBC7: $A000 台はレジスタ(加速度の取り込みと値、EEPROM 93LC56 の 4 本の線)。傾きは tiltX/tiltY(−1〜+1、右/下が正、1 = 重力 1 個ぶん)。
+ * HuC1: $0000 台に $0E で $A000 台が赤外線レジスタになる(読むと $C0 = 光なし / $C1 = 光あり。irIn を本体が入れる)。
  *
  * 本体(gbConsole.js)からは read(addr)/write(addr,v)($0000-$7FFF)と readRam(addr)/writeRam(addr,v)($A000-$BFFF)で触る。
  * 参考: Pan Docs "The Cartridge Header" "MBCs"
@@ -15074,7 +15079,12 @@
     0x11: { mbc: 'mbc3' }, 0x12: { mbc: 'mbc3', ram: 1 }, 0x13: { mbc: 'mbc3', ram: 1, battery: 1 },
     0x19: { mbc: 'mbc5' }, 0x1A: { mbc: 'mbc5', ram: 1 }, 0x1B: { mbc: 'mbc5', ram: 1, battery: 1 },
     0x1C: { mbc: 'mbc5', rumble: 1 }, 0x1D: { mbc: 'mbc5', ram: 1, rumble: 1 }, 0x1E: { mbc: 'mbc5', ram: 1, battery: 1, rumble: 1 },
+    0x22: { mbc: 'mbc7', battery: 1, tilt: 1 },
+    0xFF: { mbc: 'huc1', ram: 1, battery: 1, ir: 1 },
   };
+
+  // 追加の基板(gb/cartMore.js が登録する)。EXTRA[mbc] = { detect?, init?, reset?, map?, read?, write?, readRam?, writeRam?, tick?, getBattery?, setBattery? }
+  const EXTRA = {};
 
   // ヘッダのチェックサム($0134-$014C)。実機のブート ROM が確かめるのと同じ式
   function headerChecksum(rom) {
@@ -15098,7 +15108,7 @@
       cgb: (cgbFlag & 0x80) !== 0, cgbOnly: (cgbFlag & 0xC0) === 0xC0,
       sgb: rom[0x146] === 0x03 && rom[0x14B] === 0x33,
       romBanks: Math.max(2, rom.length >> 14),
-      ramSize: info && info.mbc === 'mbc2' ? 0x200 : (RAM_SIZES[rom[0x149]] || 0),
+      ramSize: info && info.mbc === 'mbc2' ? 0x200 : info && info.mbc === 'mbc7' ? 0x100 : (RAM_SIZES[rom[0x149]] || 0), // MBC7 は EEPROM 256 バイト
       checksumOk: headerChecksum(rom) === rom[0x14D],
     };
   }
@@ -15109,18 +15119,30 @@
       // バンク境界(16K)へ切り上げて持つ(端数のある吸い出しでも範囲外を読まない)
       const size = Math.max(0x8000, Math.ceil(bytes.length / 0x4000) * 0x4000);
       this.rom = new Uint8Array(size).fill(0xFF); this.rom.set(bytes);
-      this.header = parseHeader(this.rom);
+      // 中身で決まる基板(MMM01 はメニューが ROM の最後の 32K にあり、ヘッダもそこ)
+      for (const k of Object.keys(EXTRA)) if (EXTRA[k].detect) { const r = EXTRA[k].detect(this.rom); if (r) { this.rom = r.rom; this.headerAt = r.headerAt; break; } }
+      this.header = parseHeader(this.headerAt ? this.rom.subarray(this.headerAt) : this.rom);
+      if (this.headerAt) this.header.romBanks = this.rom.length >> 14;
       const info = this.header.info;
       this.unsupported = !info;                 // 未対応の種別は ROM のみとして動かす(起動画面くらいは出る)
       this.mbc = info ? info.mbc : 'rom';
       this.hasBattery = !!(info && info.battery);
       this.hasRtc = !!(info && info.rtc);
       this.hasRumble = !!(info && info.rumble);
+      this.hasTilt = !!(info && info.tilt);
+      this.hasIr = !!(info && info.ir);
+      this.tiltX = 0; this.tiltY = 0; // 傾き(本体が入れる)
+      this.irIn = false; this.irOut = false; // 赤外線: 受光している/発光している
       this.romMask = (this.rom.length >> 14) - 1; // バンク数は 2 のべき(違う吸い出しは下の % で畳む)
       this.romBanks = this.rom.length >> 14;
       // MBC1 の多本入り(1MB で、$40000 のバンクにもロゴがある): BANK2 が 4bit 上にずれ、BANK1 は下位 4bit だけ効く
       this.multicart = this.mbc === 'mbc1' && this.rom.length === 0x100000 && [0x104, 0x105, 0x106, 0x107].every(a => this.rom[0x40000 + a] === this.rom[a]) && this.rom[0x104] === 0xCE;
-      this.ram = new Uint8Array(this.header.ramSize || (info && info.ram ? 0x2000 : 0));
+      this.x = EXTRA[this.mbc] || null;
+      this.ram = new Uint8Array((this.x && this.x.ramSize) || this.header.ramSize || (info && info.ram ? 0x2000 : 0));
+      this.hasBuzzer = !!(info && info.buzzer); this.hasCamera = !!(info && info.camera);
+      this.buzzQueue = [];    // 鳴らしたブザーの音番号(本体が takeBuzz で取る)
+      if (this.x && this.x.init) this.x.init(this);
+      if (this.mbc === 'mbc7') this.ram.fill(0xFF); // 新品の EEPROM は全ビット 1
       this.dirty = false;     // セーブ RAM/時計に書いた(本体が batteryDirty として見る)
       this.rumble = false;    // 振動モータ(MBC5 の RAM バンクレジスタ bit3)
       this.reset();
@@ -15131,11 +15153,16 @@
       this.bank1 = 1; this.bank2 = 0; this.mode = 0; // MBC1
       this.romBank = 1; this.ramBank = 0;            // MBC2/3/5
       this.rtcSel = -1; this.rtcLatchPrev = 1;
+      this.irMode = false;                           // HuC1
+      this.ramEnable2 = false; this.accX = 0x8000; this.accY = 0x8000; this.accErased = false; // MBC7
+      this.ee = { cs: 0, clk: 0, di: 0, dout: 1, bits: 0, n: 0, state: 0, addr: 0, data: 0, left: 0, wen: false };
       if (!this.rtc) this.rtc = { s: 0, m: 0, h: 0, dl: 0, dh: 0, latched: new Uint8Array(5), sub: 0 };
+      if (this.x && this.x.reset) this.x.reset(this);
       this._map();
     }
 
     _map() {
+      if (this.x && this.x.map) { this.x.map(this); return; }
       const n = this.romBanks;
       if (this.mbc === 'mbc1') {
         const sh = this.multicart ? 4 : 5, b1 = this.multicart ? this.bank1 & 0x0F : this.bank1;
@@ -15149,9 +15176,14 @@
       }
     }
 
-    read(addr) { return addr < 0x4000 ? this.rom[this.lo + addr] : this.rom[this.hi + (addr & 0x3FFF)]; }
+    read(addr) {
+      if (this.x && this.x.read) return this.x.read(this, addr);
+      return addr < 0x4000 ? this.rom[this.lo + addr] : this.rom[this.hi + (addr & 0x3FFF)];
+    }
+    takeBuzz() { return this.buzzQueue.length ? this.buzzQueue.splice(0) : null; }
 
     write(addr, v) {
+      if (this.x && this.x.write) { this.x.write(this, addr, v); this._map(); return; }
       switch (this.mbc) {
         case 'mbc1':
           if (addr < 0x2000) this.ramEnable = (v & 0x0F) === 0x0A;
@@ -15171,6 +15203,16 @@
             this.rtcLatchPrev = v & 1;
           }
           break;
+        case 'huc1': // RAM は常に使える。$0E で赤外線レジスタへ切り替え
+          if (addr < 0x2000) this.irMode = (v & 0x0F) === 0x0E;
+          else if (addr < 0x4000) { this.romBank = v & 0x3F; if (!this.romBank) this.romBank = 1; }
+          else if (addr < 0x6000) this.ramBank = v & 3;
+          break;
+        case 'mbc7': // RAM(レジスタ)の許可は 2 か所とも要る
+          if (addr < 0x2000) this.ramEnable = (v & 0x0F) === 0x0A;
+          else if (addr < 0x4000) this.romBank = v & 0x7F;
+          else if (addr < 0x6000) this.ramEnable2 = v === 0x40;
+          break;
         case 'mbc5':
           if (addr < 0x2000) this.ramEnable = (v & 0x0F) === 0x0A;
           else if (addr < 0x3000) this.romBank = (this.romBank & 0x100) | v;
@@ -15182,6 +15224,9 @@
     }
 
     readRam(addr) {
+      if (this.x && this.x.readRam) return this.x.readRam(this, addr);
+      if (this.mbc === 'huc1') return this.irMode ? (this.irIn ? 0xC1 : 0xC0) : (this.ram.length ? this.ram[(this.ramOff + (addr & 0x1FFF)) % this.ram.length] : 0xFF);
+      if (this.mbc === 'mbc7') return this._mbc7Read(addr);
       if (!this.ramEnable) return 0xFF;
       if (this.mbc === 'mbc3' && this.rtcSel >= 0) return this.hasRtc ? this.rtc.latched[this.rtcSel] : 0xFF;
       if (!this.ram.length) return 0xFF;
@@ -15190,6 +15235,13 @@
     }
 
     writeRam(addr, v) {
+      if (this.x && this.x.writeRam) { this.x.writeRam(this, addr, v); return; }
+      if (this.mbc === 'huc1') {
+        if (this.irMode) this.irOut = (v & 1) !== 0;
+        else if (this.ram.length) { this.ram[(this.ramOff + (addr & 0x1FFF)) % this.ram.length] = v; this.dirty = true; }
+        return;
+      }
+      if (this.mbc === 'mbc7') { this._mbc7Write(addr, v); return; }
       if (!this.ramEnable) return;
       if (this.mbc === 'mbc3' && this.rtcSel >= 0) {
         if (!this.hasRtc) return;
@@ -15210,15 +15262,88 @@
       this.dirty = true;
     }
 
+    // ── MBC7 ──
+    _mbc7Read(addr) {
+      if (!this.ramEnable || !this.ramEnable2 || addr >= 0xB000) return 0xFF;
+      switch ((addr >> 4) & 0x0F) {
+        case 2: return this.accX & 0xFF;
+        case 3: return this.accX >> 8;
+        case 4: return this.accY & 0xFF;
+        case 5: return this.accY >> 8;
+        case 6: return 0x00;
+        case 8: { const e = this.ee; return (e.dout ? 1 : 0) | (e.di ? 2 : 0) | (e.clk ? 0x40 : 0) | (e.cs ? 0x80 : 0); }
+      }
+      return 0xFF;
+    }
+    _mbc7Write(addr, v) {
+      if (!this.ramEnable || !this.ramEnable2 || addr >= 0xB000) return;
+      switch ((addr >> 4) & 0x0F) {
+        case 0: if (v === 0x55) { this.accErased = true; this.accX = 0x8000; this.accY = 0x8000; } break;
+        case 1: // $55 で消した後の $AA でだけ取り込む。中心 $81D0、重力 1 個で約 $70。X は右へ傾けると小さく、Y は下へ傾けると小さく
+          if (v === 0xAA && this.accErased) {
+            this.accErased = false;
+            const cl = (t) => Math.max(-2, Math.min(2, +t || 0));
+            this.accX = (0x81D0 - Math.round(cl(this.tiltX) * 0x70)) & 0xFFFF;
+            this.accY = (0x81D0 - Math.round(cl(this.tiltY) * 0x70)) & 0xFFFF;
+          }
+          break;
+        case 8: this._eeWrite(v); break;
+      }
+    }
+    // EEPROM 93LC56(16bit × 128 語。語 n の上位バイトが ram[n*2]、下位が ram[n*2+1])。bit7=CS、bit6=CLK、bit1=DI、読み出しの bit0=DO。
+    // CLK の立ち上がりで DI を 1 ビット取り込む。開始ビット 1 の後に 10 ビット(命令 2+番地 8)。命令: 10=READ、01=WRITE、11=ERASE、
+    // 00 は番地の上位 2 ビットで 11=EWEN、00=EWDS、10=ERAL、01=WRAL。書き込み系は EWEN の後だけ効く
+    _eeWrite(v) {
+      const e = this.ee, cs = (v >> 7) & 1, clk = (v >> 6) & 1, di = (v >> 1) & 1;
+      const rise = cs && clk && !e.clk;
+      if (!cs) { e.state = 0; e.n = 0; e.bits = 0; e.dout = 1; }
+      e.cs = cs; e.clk = clk; e.di = di;
+      if (!rise) return;
+      const ram = this.ram;
+      switch (e.state) {
+        case 0: if (di) { e.state = 1; e.bits = 0; e.n = 0; } break;          // 開始ビット待ち
+        case 1:                                                               // 命令+番地の 10 ビット
+          e.bits = (e.bits << 1) | di;
+          if (++e.n < 10) break;
+          { const op = (e.bits >> 8) & 3, a = e.bits & 0x7F, sub = (e.bits >> 6) & 3;
+            e.addr = a; e.n = 0; e.data = 0;
+            if (op === 2) { e.data = (ram[a * 2] << 8) | ram[a * 2 + 1]; e.left = 16; e.state = 2; e.dout = 0; }
+            else if (op === 1) { e.state = 3; e.left = 16; e.wral = false; }
+            else if (op === 3) { if (e.wen) { ram[a * 2] = 0xFF; ram[a * 2 + 1] = 0xFF; this.dirty = true; } e.state = 4; e.dout = 1; }
+            else if (sub === 3) { e.wen = true; e.state = 4; }
+            else if (sub === 0) { e.wen = false; e.state = 4; }
+            else if (sub === 2) { if (e.wen) { ram.fill(0xFF); this.dirty = true; } e.state = 4; e.dout = 1; }
+            else { e.state = 3; e.left = 16; e.wral = true; } }
+          break;
+        case 2:                                                               // READ: 上位ビットから 16 ビット出す
+          e.dout = (e.data >> 15) & 1; e.data = (e.data << 1) & 0xFFFF;
+          if (--e.left === 0) e.state = 4;
+          break;
+        case 3:                                                               // WRITE / WRAL: 16 ビット受ける
+          e.data = ((e.data << 1) | di) & 0xFFFF;
+          if (--e.left === 0) {
+            if (e.wen) {
+              if (e.wral) for (let i = 0; i < ram.length; i += 2) { ram[i] = e.data >> 8; ram[i + 1] = e.data & 0xFF; }
+              else { ram[e.addr * 2] = e.data >> 8; ram[e.addr * 2 + 1] = e.data & 0xFF; }
+              this.dirty = true;
+            }
+            e.state = 4; e.dout = 1; // 書き終わり(RDY)
+          }
+          break;
+        default: break;                                                       // 命令の終わり: CS が下がるまで何もしない
+      }
+    }
+
     // 時計を t T ぶん進める(本体が 1 フレームごとに呼ぶ)。エミュレータ内の時間で進む
-    // (実時刻との同期=電源を切っていた間の経過は段階 8e で battery に時刻を控えて足す)
     tickRtc(t, clockHz) {
+      if (this.x && this.x.tick) this.x.tick(this, t, clockHz);
       if (!this.hasRtc) return;
       const r = this.rtc;
       if (r.dh & 0x40) return; // 停止ビット
       r.sub += t;
       while (r.sub >= clockHz) {
         r.sub -= clockHz;
+        this.dirty = true; // 時計が進んだ(セーブに実時刻を控え直す)
         r.s = (r.s + 1) & 0x3F;
         if (r.s !== 60) continue; // 60 以上を書かれた時は 63→0 で桁上がりしない(実機の癖)
         r.s = 0; r.m = (r.m + 1) & 0x3F; if (r.m !== 60) continue;
@@ -15228,27 +15353,388 @@
       }
     }
 
-    // セーブ: RAM の後ろに時計 8 バイト(s m h dl dh + 予約 3)。段階 8e で実時刻を足す
+    // 時計を秒数ぶんまとめて進める(電源を切っていた間の分)
+    advanceRtc(seconds) {
+      const r = this.rtc;
+      if (!this.hasRtc || (r.dh & 0x40) || !(seconds > 0)) return;
+      let total = Math.floor(seconds) + (r.s % 60) + (r.m % 60) * 60 + (r.h % 24) * 3600 + (r.dl | ((r.dh & 1) << 8)) * 86400;
+      r.s = total % 60; total = Math.floor(total / 60);
+      r.m = total % 60; total = Math.floor(total / 60);
+      r.h = total % 24; total = Math.floor(total / 24);
+      if (total > 511) { r.dh |= 0x80; total %= 512; }
+      r.dl = total & 0xFF; r.dh = (r.dh & 0xFE) | ((total >> 8) & 1);
+    }
+    // セーブ: RAM の後ろに時計 16 バイト(s m h dl dh、予約 3、控えた時の実時刻 = 1970 年からのミリ秒を倍精度 8 バイト)
     getBattery() {
       if (!this.hasBattery) return null;
-      const out = new Uint8Array(this.ram.length + (this.hasRtc ? 8 : 0));
+      if (this.x && this.x.getBattery) return this.x.getBattery(this);
+      const out = new Uint8Array(this.ram.length + (this.hasRtc ? 16 : 0));
       out.set(this.ram);
-      if (this.hasRtc) { const r = this.rtc, o = this.ram.length; out[o] = r.s; out[o + 1] = r.m; out[o + 2] = r.h; out[o + 3] = r.dl; out[o + 4] = r.dh; }
+      if (this.hasRtc) {
+        const r = this.rtc, o = this.ram.length; out[o] = r.s; out[o + 1] = r.m; out[o + 2] = r.h; out[o + 3] = r.dl; out[o + 4] = r.dh;
+        new DataView(out.buffer).setFloat64(o + 8, GbCart.now(), true);
+      }
       return out;
     }
     setBattery(bytes) {
+      if (this.hasBattery && bytes && this.x && this.x.setBattery) { const ok = this.x.setBattery(this, bytes); if (ok) this.dirty = false; return ok; }
       if (!this.hasBattery || !bytes || bytes.length < this.ram.length) return false;
       this.ram.set(bytes.subarray(0, this.ram.length));
-      if (this.hasRtc && bytes.length >= this.ram.length + 5) { const r = this.rtc, o = this.ram.length; r.s = bytes[o]; r.m = bytes[o + 1]; r.h = bytes[o + 2]; r.dl = bytes[o + 3]; r.dh = bytes[o + 4]; }
+      if (this.hasRtc && bytes.length >= this.ram.length + 5) {
+        const r = this.rtc, o = this.ram.length; r.s = bytes[o]; r.m = bytes[o + 1]; r.h = bytes[o + 2]; r.dl = bytes[o + 3]; r.dh = bytes[o + 4];
+        if (bytes.length >= o + 16) { // 電源を切っていた間の分を進める
+          const saved = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getFloat64(o + 8, true);
+          if (saved > 0 && isFinite(saved)) this.advanceRtc((GbCart.now() - saved) / 1000);
+        }
+      }
       this.dirty = false;
       return true;
     }
   }
 
+  GbCart.now = () => Date.now(); // 実時刻(試験で差し替える)
+  GbCart.EXTRA = EXTRA;
+  GbCart.TYPES = TYPES;
   GbCart.isGb = isGb;
   GbCart.parseHeader = parseHeader;
   GbCart.headerChecksum = headerChecksum;
   Emu.GbCart = GbCart;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * ゲームボーイの追加の基板: HuC3 / MMM01 / MBC6 / ポケットカメラ
+ * (gb/cart.js の GbCart.EXTRA に登録する。cart.js の後に読む)
+ *
+ * どれも市販ソフトで確かめられていない(手元に無い)。仕様の出どころと、分かっていない所は各節に書く。
+ * 参考: Pan Docs(HuC-3 / MMM01 / MBC6 / Game Boy Camera)、SameBoy(Expat License)の Core/mbc.c・memory.c・camera.c(読んで動作を確かめた。写してはいない)
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+  const GbCart = Emu.GbCart;
+  if (!GbCart) return;
+  const EXTRA = GbCart.EXTRA, TYPES = GbCart.TYPES;
+  const f64 = (bytes, o) => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getFloat64(o, true);
+  const putF64 = (bytes, o, v) => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setFloat64(o, v, true);
+
+  // ───────────────────────── HuC3(時計+赤外線+ブザー)─────────────────────────
+  // $0000 台の下位 4bit で $A000 台の中身を選ぶ: 0=RAM(読むだけ)、A=RAM、B=時計マイコンへの命令(上位=命令、下位=引数)、
+  // C=命令と結果の読み出し、D=セマフォ(bit0=1 で受け付け可。bit0=0 を書くと B の命令を実行)、E=赤外線。
+  // マイコンは 256 ニブルの記憶を持つ: $10-12=1 日の中の分(0〜1439)、$13-15=日数、$26=音の番号(下位 2bit)、$27=1 でブザー有効。
+  // 命令: 1=読んで番地+1、3=書いて番地+1、4/5=番地の下位/上位、6=拡張(0=今の時刻を $00-06 へ、1=$00-06 を時刻へ、2=状態(1 を返す)、
+  //   $E=2 回続けるとブザーを鳴らす)。
+  // ★ブザーの音の高さと長さは資料が無い。鳴らした事実と音の番号だけを確かに記録し、音そのものは本体側の仮の値で鳴らす
+  TYPES[0xFE] = { mbc: 'huc3', ram: 1, battery: 1, ir: 1, buzzer: 1 };
+  EXTRA.huc3 = {
+    init(c) { c.h3 = { mode: 0, cmd: 0, arg: 0, result: 0, addr: 0, mem: new Uint8Array(256), sub: 0, sec: 0, tone: 0 }; },
+    reset(c) { const h = c.h3; h.mode = 0; h.cmd = 0; h.arg = 0; h.result = 0; h.addr = 0; h.tone = 0; },
+    map(c) { c.lo = 0; c.hi = (c.romBank % c.romBanks) << 14; c.ramOff = c.ram.length > 0x2000 ? (c.ramBank << 13) % c.ram.length : 0; },
+    write(c, addr, v) {
+      if (addr < 0x2000) c.h3.mode = v & 0x0F;
+      else if (addr < 0x4000) c.romBank = v & 0x7F;
+      else if (addr < 0x6000) c.ramBank = v & 3;
+    },
+    readRam(c, addr) {
+      const h = c.h3;
+      switch (h.mode) {
+        case 0x0: case 0xA: return c.ram.length ? c.ram[(c.ramOff + (addr & 0x1FFF)) % c.ram.length] : 0xFF;
+        case 0xC: return 0x80 | (h.cmd << 4) | h.result;
+        case 0xD: return 0x81; // いつでも受け付け可
+        case 0xE: return 0xC0 | (c.irIn ? 1 : 0);
+      }
+      return 0xFF;
+    },
+    writeRam(c, addr, v) {
+      const h = c.h3, m = h.mem;
+      switch (h.mode) {
+        case 0xA: if (c.ram.length) { c.ram[(c.ramOff + (addr & 0x1FFF)) % c.ram.length] = v; c.dirty = true; } break;
+        case 0xB: h.cmd = (v >> 4) & 7; h.arg = v & 0x0F; break;
+        case 0xE: c.irOut = (v & 1) !== 0; break;
+        case 0xD:
+          if (v & 1) break;
+          switch (h.cmd) {
+            case 1: h.result = m[h.addr]; h.addr = (h.addr + 1) & 0xFF; break;
+            case 3: m[h.addr] = h.arg; h.addr = (h.addr + 1) & 0xFF; c.dirty = true; break;
+            case 4: h.addr = (h.addr & 0xF0) | h.arg; break;
+            case 5: h.addr = (h.addr & 0x0F) | (h.arg << 4); break;
+            case 6:
+              if (h.arg === 0) { for (let i = 0; i < 6; i++) m[i] = m[0x10 + i]; m[6] = 0; }
+              else if (h.arg === 1) { for (let i = 0; i < 6; i++) m[0x10 + i] = m[i]; h.sec = 0; c.dirty = true; }
+              else if (h.arg === 2) h.result = 1;
+              else if (h.arg === 0xE) { if (++h.tone >= 2) { h.tone = 0; if (m[0x27] === 1) c.buzzQueue.push(m[0x26] & 3); } }
+              if (h.arg !== 0xE) h.tone = 0;
+              break;
+          }
+          break;
+      }
+    },
+    // 時計: 1 分ごとに $10-12 を進め、1440 で日数 $13-15 へ
+    addMinutes(c, n) {
+      const m = c.h3.mem;
+      let min = m[0x10] | (m[0x11] << 4) | (m[0x12] << 8), day = m[0x13] | (m[0x14] << 4) | (m[0x15] << 8);
+      min += n; day = (day + Math.floor(min / 1440)) & 0xFFF; min %= 1440;
+      m[0x10] = min & 15; m[0x11] = (min >> 4) & 15; m[0x12] = (min >> 8) & 15;
+      m[0x13] = day & 15; m[0x14] = (day >> 4) & 15; m[0x15] = (day >> 8) & 15;
+    },
+    tick(c, t, clockHz) {
+      const h = c.h3;
+      h.sub += t;
+      while (h.sub >= clockHz) { h.sub -= clockHz; if (++h.sec >= 60) { h.sec = 0; EXTRA.huc3.addMinutes(c, 1); c.dirty = true; } }
+    },
+    // セーブ: RAM、マイコンの記憶 256、秒、控えた時の実時刻(倍精度 8 バイト)
+    getBattery(c) {
+      const out = new Uint8Array(c.ram.length + 256 + 8 + 8);
+      out.set(c.ram); out.set(c.h3.mem, c.ram.length); out[c.ram.length + 256] = c.h3.sec;
+      putF64(out, c.ram.length + 264, GbCart.now());
+      return out;
+    },
+    setBattery(c, bytes) {
+      if (bytes.length < c.ram.length) return false;
+      c.ram.set(bytes.subarray(0, c.ram.length));
+      const o = c.ram.length;
+      if (bytes.length >= o + 272) {
+        c.h3.mem.set(bytes.subarray(o, o + 256)); c.h3.sec = bytes[o + 256] % 60;
+        const saved = f64(bytes, o + 264);
+        if (saved > 0 && isFinite(saved)) { const s = Math.floor((GbCart.now() - saved) / 1000) + c.h3.sec; if (s > 0) { EXTRA.huc3.addMinutes(c, Math.floor(s / 60)); c.h3.sec = s % 60; } }
+      }
+      return true;
+    },
+  };
+
+  // ───────────────────────── MMM01(多本入り)─────────────────────────
+  // 電源投入時は「未マップ」: ROM の最後の 32K(メニュー)が $0000-$7FFF に出る。メニューが選んだゲームの位置と大きさをレジスタの
+  // 上位ビットに書き、$0000 台の bit6 で「マップ」すると、以後は選ばれたゲームに対して MBC1 として振る舞う(上位ビットは書けなくなる)。
+  //   $0000: bit0-3 RAM 許可、bit4-5 RAM バンクの固定マスク、bit6 マップ
+  //   $2000: bit0-4 ROM バンク下位(マスクされたビットは書けない)、bit5-6 ROM バンク中位
+  //   $4000: bit0-1 RAM バンク下位、bit2-3 RAM バンク上位、bit4-5 ROM バンク上位、bit6 モード切替の禁止
+  //   $6000: bit0 MBC1 のモード、bit2-5 ROM バンク下位の固定マスク(bit1-4 に当たる)、bit6 多重化(市販品では未使用)
+  // 吸い出しには「メニューが先頭」の物と「最後」の物がある。先頭の種別が MMM01 なら最初の 32K を最後へ回す(SameBoy と同じ扱い)
+  for (const [t, o] of [[0x0B, {}], [0x0C, { ram: 1 }], [0x0D, { ram: 1, battery: 1 }]]) TYPES[t] = Object.assign({ mbc: 'mmm01' }, o);
+  const isMmm01Type = (t) => t >= 0x0B && t <= 0x0D;
+  EXTRA.mmm01 = {
+    detect(rom) {
+      const n = rom.length;
+      if (n <= 0x8000) return null;
+      if (isMmm01Type(rom[0x147])) { // メニューが先頭 → 最後へ回す
+        const out = new Uint8Array(n); out.set(rom.subarray(0x8000)); out.set(rom.subarray(0, 0x8000), n - 0x8000);
+        return { rom: out, headerAt: n - 0x8000 };
+      }
+      const m = n - 0x8000;
+      let logo = true; for (let i = 0x104; i < 0x134; i++) if (rom[i] !== rom[m + i]) { logo = false; break; }
+      if (logo && rom[0x104] === 0xCE && isMmm01Type(rom[m + 0x147])) return { rom, headerAt: m };
+      return null;
+    },
+    reset(c) { c.mm = { mapped: false, ramMask: 0, romLow: 0, romMid: 0, romMask: 0, ramLow: 0, ramHigh: 0, romHigh: 0, modeLock: false, mode: 0, mux: false }; },
+    map(c) {
+      const m = c.mm, n = c.romBanks;
+      if (!m.mapped) { c.lo = (n - 2) << 14; c.hi = (n - 1) << 14; c.ramOff = 0; return; }
+      let rom0, romB, ramB;
+      if (m.mux) {
+        rom0 = (m.romLow & m.romMask) | ((m.mode ? m.ramLow : m.ramLow & m.ramMask) << 5) | (m.romHigh << 7);
+        romB = m.romLow | (m.ramLow << 5) | (m.romHigh << 7);
+        ramB = m.romMid | (m.ramHigh << 2);
+      } else {
+        rom0 = (m.romLow & m.romMask) | (m.romMid << 5) | (m.romHigh << 7);
+        romB = m.romLow | (m.romMid << 5) | (m.romHigh << 7);
+        ramB = (m.mode ? m.ramLow : m.ramLow & m.ramMask) | (m.ramHigh << 2);
+      }
+      if ((m.romLow & ~m.romMask & 0x1F) === 0) romB |= 1; // ゲーム内のバンク 0 は 1 に読み替え(MBC1 と同じ)
+      c.lo = (rom0 % n) << 14; c.hi = (romB % n) << 14;
+      c.ramOff = c.ram.length ? (ramB << 13) % c.ram.length : 0;
+    },
+    write(c, addr, v) {
+      const m = c.mm;
+      if (addr < 0x2000) {
+        c.ramEnable = (v & 0x0F) === 0x0A;
+        if (!m.mapped) { m.ramMask = (v >> 4) & 3; if (v & 0x40) m.mapped = true; }
+      } else if (addr < 0x4000) {
+        if (!m.mapped) m.romMid = (v >> 5) & 3;
+        m.romLow = (m.romLow & m.romMask) | (v & 0x1F & ~m.romMask);
+      } else if (addr < 0x6000) {
+        m.ramLow = (m.ramLow & m.ramMask) | (v & 3 & ~m.ramMask);
+        if (!m.mapped) { m.ramHigh = (v >> 2) & 3; m.romHigh = (v >> 4) & 3; m.modeLock = (v & 0x40) !== 0; }
+      } else {
+        if (!m.modeLock) m.mode = v & 1;
+        if (!m.mapped) { m.romMask = ((v >> 2) & 0x0F) << 1; m.mux = (v & 0x40) !== 0; }
+      }
+    },
+  };
+
+  // ───────────────────────── MBC6(フラッシュメモリつき)─────────────────────────
+  // ROM は 8K 単位で 2 窓($4000 台=A、$6000 台=B)、RAM は 4K 単位で 2 窓($A000 台=A、$B000 台=B)。
+  // 窓ごとに ROM とフラッシュ(1MB+隠し領域 256 バイト)を切り替えられる。フラッシュは JEDEC 式の命令列
+  // ($5555 に $AA、$2AAA に $55、$5555 に命令)。番地はフラッシュ内の番地 = バンク×$2000+窓内の位置。
+  //   $80…$30=セクタ(128K)消去、$80…$10=全消去、$90=ID(C2 81)、$A0=書き込み(128 バイト単位。最後の番地にもう一度書くと確定)、
+  //   $60…$04/$E0=隠し領域の消去/書き込み、$60…$40/$20=セクタ 0 の保護解除/保護、$77…$77=隠し領域を読む、$F0=読み出しへ戻る
+  // 書き込み/消去の後は状態バイト($80=完了)が読める。セクタ 0 と隠し領域は $1000 の書き込み許可が要る
+  TYPES[0x20] = { mbc: 'mbc6', ram: 1, battery: 1 };
+  const FLASH = 0x100000;
+  EXTRA.mbc6 = {
+    ramSize: 0x8000,
+    init(c) { c.m6 = { flash: new Uint8Array(FLASH).fill(0xFF), hidden: new Uint8Array(256).fill(0xFF), protect0: false }; },
+    reset(c) { Object.assign(c.m6, { romA: 2, romB: 3, flashA: false, flashB: false, ramA: 0, ramB: 0, flashOn: false, wp: false, seq: 0, mode: 'read', pre: 0, last: -1, status: 0x80 }); },
+    map() {},
+    read(c, addr) {
+      if (addr < 0x4000) return c.rom[addr];
+      const m = c.m6, isB = addr >= 0x6000, bank = isB ? m.romB : m.romA, off = addr & 0x1FFF;
+      if (isB ? m.flashB : m.flashA) {
+        if (!m.flashOn) return 0xFF;
+        const fa = ((bank << 13) | off) & (FLASH - 1);
+        if (m.mode === 'status') return m.status;
+        if (m.mode === 'id') return (off & 1) ? 0x81 : 0xC2;
+        if (m.mode === 'hidden') return m.hidden[fa & 0xFF];
+        return m.flash[fa];
+      }
+      return c.rom[((bank << 13) | off) % c.rom.length];
+    },
+    write(c, addr, v) {
+      const m = c.m6;
+      if (addr < 0x0400) c.ramEnable = (v & 0x0F) === 0x0A;
+      else if (addr < 0x0800) m.ramA = v & 7;
+      else if (addr < 0x0C00) m.ramB = v & 7;
+      else if (addr < 0x1000) m.flashOn = (v & 1) !== 0;
+      else if (addr === 0x1000) m.wp = (v & 1) !== 0;
+      else if (addr < 0x2000) { /* 使われていない */ }
+      else if (addr < 0x2800) m.romA = v & 0x7F;
+      else if (addr < 0x3000) m.flashA = v === 0x08;
+      else if (addr < 0x3800) m.romB = v & 0x7F;
+      else if (addr < 0x4000) m.flashB = v === 0x08;
+      else EXTRA.mbc6.flashWrite(c, addr, v);
+    },
+    flashWrite(c, addr, v) {
+      const m = c.m6, isB = addr >= 0x6000;
+      if (!(isB ? m.flashB : m.flashA) || !m.flashOn) return;
+      const fa = (((isB ? m.romB : m.romA) << 13) | (addr & 0x1FFF)) & (FLASH - 1);
+      const canSector0 = m.wp && !m.protect0;
+      if (m.mode === 'program' || m.mode === 'programHidden') {
+        if (v === 0xF0 && m.last < 0) { m.mode = 'read'; return; }
+        if (fa === m.last) { m.mode = 'status'; m.status = 0x80; m.last = -1; c.dirty = true; return; } // 最後の番地にもう一度 = 確定
+        if (m.mode === 'programHidden') { if (m.wp) m.hidden[fa & 0xFF] &= v; }
+        else if (fa >= 0x20000 || canSector0) m.flash[fa] &= v; // 書き込みは 1→0 だけ
+        m.last = fa;
+        return;
+      }
+      if (v === 0xF0) { m.mode = 'read'; m.seq = 0; m.pre = 0; return; }
+      if (m.seq === 0) { if (fa === 0x5555 && v === 0xAA) m.seq = 1; return; }
+      if (m.seq === 1) { m.seq = (fa === 0x2AAA && v === 0x55) ? 2 : 0; return; }
+      m.seq = 0; // 3 つ目 = 命令
+      const pre = m.pre; m.pre = 0;
+      if (pre === 0x80) {
+        if (v === 0x30) { const s = fa >> 17; if (s || canSector0) m.flash.fill(0xFF, s << 17, (s + 1) << 17); }
+        else if (v === 0x10) m.flash.fill(0xFF, canSector0 ? 0 : 0x20000);
+        else return;
+        m.mode = 'status'; m.status = 0x80; c.dirty = true; return;
+      }
+      if (pre === 0x60) {
+        if (v === 0x04) { if (m.wp) m.hidden.fill(0xFF); }
+        else if (v === 0xE0) { m.mode = 'programHidden'; m.last = -1; return; }
+        else if (v === 0x40) { if (m.wp) m.protect0 = false; }
+        else if (v === 0x20) { if (m.wp) m.protect0 = true; }
+        else return;
+        m.mode = 'status'; m.status = 0x80 | (m.protect0 ? 2 : 0); c.dirty = true; return;
+      }
+      if (pre === 0x77) { if (v === 0x77) m.mode = 'hidden'; return; }
+      if (v === 0x80 || v === 0x60 || v === 0x77) m.pre = v;
+      else if (v === 0x90) m.mode = 'id';
+      else if (v === 0xA0) { m.mode = 'program'; m.last = -1; }
+    },
+    readRam(c, addr) { if (!c.ramEnable) return 0xFF; const m = c.m6; return c.ram[(((addr < 0xB000 ? m.ramA : m.ramB) << 12) | (addr & 0xFFF)) % c.ram.length]; },
+    writeRam(c, addr, v) { if (!c.ramEnable) return; const m = c.m6; c.ram[(((addr < 0xB000 ? m.ramA : m.ramB) << 12) | (addr & 0xFFF)) % c.ram.length] = v; c.dirty = true; },
+    // セーブ: RAM 32K、フラッシュ 1MB、隠し領域 256、保護の印 1
+    getBattery(c) { const m = c.m6, out = new Uint8Array(c.ram.length + FLASH + 257); out.set(c.ram); out.set(m.flash, c.ram.length); out.set(m.hidden, c.ram.length + FLASH); out[out.length - 1] = m.protect0 ? 1 : 0; return out; },
+    setBattery(c, bytes) {
+      if (bytes.length < c.ram.length) return false;
+      c.ram.set(bytes.subarray(0, c.ram.length));
+      if (bytes.length >= c.ram.length + FLASH + 257) { const m = c.m6, o = c.ram.length; m.flash.set(bytes.subarray(o, o + FLASH)); m.hidden.set(bytes.subarray(o + FLASH, o + FLASH + 256)); m.protect0 = bytes[o + FLASH + 256] === 1; }
+      return true;
+    },
+  };
+
+  // ───────────────────────── ポケットカメラ ─────────────────────────
+  // バンクは MBC5 と同じ。RAM バンクに $10 以上を選ぶと $A000 台がカメラのレジスタになる:
+  //   $A000 bit0=撮影開始/撮影中、$A001 下位 5bit=ゲイン・上位 3bit=輪郭強調の種類、$A002-3=露光時間、$A004 bit4-6=輪郭強調の強さ、
+  //   $A006-$A035=ディザの閾値(4×4 画素 × 3 段)
+  // 撮影が終わると、128×112 の絵が 2bpp のタイル(16×14 個)で RAM バンク 0 の $A100-$AEFF に入る。撮影中は RAM が読めない(0)。
+  // 画素の作り方は SameBoy と同じ考え方: 明るさ × ゲイン × 露光/$1000 → 輪郭強調 → 位置ごとの 3 つの閾値で 4 階調。
+  // 元の絵は camImage(128×112、0〜255。本体が Web カメラから入れる)。無ければ斜めの濃淡の試験模様
+  TYPES[0xFC] = { mbc: 'camera', ram: 1, battery: 1, camera: 1 };
+  const CAM_W = 128, CAM_H = 112;
+  const GAIN = [0.8809390, 0.9149149, 0.9457498, 0.9739758, 1.0000000, 1.0241412, 1.0466537, 1.0677433, 1.0875793, 1.1240310, 1.1568911, 1.1868043, 1.2142561, 1.2396208, 1.2743837, 1.3157323,
+    1.3525190, 1.3856512, 1.4157897, 1.4434309, 1.4689574, 1.4926697, 1.5148087, 1.5355703, 1.5551159, 1.5735801, 1.5910762, 1.6077008, 1.6235366, 1.6386550, 1.6531183, 1.6669808];
+  const EDGE = [0.5, 0.75, 1, 1.25, 2, 3, 4, 5];
+  EXTRA.camera = {
+    ramSize: 0x20000,
+    init(c) { c.cam = { regs: new Uint8Array(0x36), mapped: false, left: 0, shots: 0 }; c.camImage = null; },
+    reset(c) { c.cam.regs.fill(0); c.cam.mapped = false; c.cam.left = 0; c.romBank = 1; },
+    map(c) { c.lo = 0; c.hi = (c.romBank % c.romBanks) << 14; c.ramOff = ((c.ramBank & 0x0F) << 13) % c.ram.length; },
+    write(c, addr, v) {
+      if (addr < 0x2000) c.ramEnable = (v & 0x0F) === 0x0A;
+      else if (addr < 0x4000) c.romBank = v & 0x3F;
+      else if (addr < 0x6000) { c.ramBank = v & 0x1F; c.cam.mapped = (v & 0x10) !== 0; }
+    },
+    readRam(c, addr) {
+      const cam = c.cam;
+      if (cam.mapped) return (addr & 0x7F) === 0 ? cam.regs[0] & 7 : 0x00; // レジスタは $A000 だけ読める
+      if (cam.regs[0] & 1) return 0x00;                                    // 撮影中は RAM が読めない
+      return c.ram[c.ramOff + (addr & 0x1FFF)];
+    },
+    writeRam(c, addr, v) {
+      const cam = c.cam;
+      if (cam.mapped) {
+        const r = addr & 0x7F;
+        if (r >= 0x36) return;
+        if (r === 0) {
+          v &= 7;
+          if ((v & 1) && !(cam.regs[0] & 1)) { // 撮影開始。掛かる時間は露光時間で決まる(実機の値)
+            const exposure = (cam.regs[2] << 8) | cam.regs[3];
+            cam.left = 129792 + ((cam.regs[1] & 0x80) ? 0 : 2048) + exposure * 64;
+            cam.shots++;
+          }
+          if (!(v & 1) && (cam.regs[0] & 1)) v |= 1; // 途中でやめる操作は無視
+        }
+        cam.regs[r] = v;
+        return;
+      }
+      if (!c.ramEnable || (cam.regs[0] & 1)) return;
+      c.ram[c.ramOff + (addr & 0x1FFF)] = v; c.dirty = true;
+    },
+    tick(c, t) {
+      const cam = c.cam;
+      if (!(cam.regs[0] & 1)) return;
+      cam.left -= t;
+      if (cam.left <= 0) { EXTRA.camera.develop(c); cam.regs[0] &= ~1; }
+    },
+    // 元の絵をレジスタどおりに 4 階調へ落として RAM に入れる
+    develop(c) {
+      const r = c.cam.regs, img = c.camImage;
+      const gain = GAIN[r[1] & 0x1F], exposure = ((r[2] << 8) | r[3]) / 0x1000;
+      const lum = new Float32Array(CAM_W * CAM_H);
+      for (let y = 0; y < CAM_H; y++) for (let x = 0; x < CAM_W; x++) {
+        const src = img && img.length >= CAM_W * CAM_H ? img[y * CAM_W + x] : ((x + y) * 255 / (CAM_W + CAM_H)) | 0;
+        lum[y * CAM_W + x] = src * gain * exposure;
+      }
+      const edgeOn = (r[1] & 0xE0) === 0xE0, ratio = EDGE[(r[4] >> 4) & 7];
+      const at = (x, y) => lum[Math.max(0, Math.min(CAM_H - 1, y)) * CAM_W + Math.max(0, Math.min(CAM_W - 1, x))];
+      const out = c.ram; // バンク 0 の $0100 から
+      for (let ty = 0; ty < 14; ty++) for (let tx = 0; tx < 16; tx++) for (let py = 0; py < 8; py++) {
+        let lo = 0, hi = 0;
+        const y = ty * 8 + py;
+        for (let px = 0; px < 8; px++) {
+          const x = tx * 8 + px;
+          let v = at(x, y);
+          if (edgeOn) v += (v * 4 - at(x - 1, y) - at(x + 1, y) - at(x, y - 1) - at(x, y + 1)) * ratio;
+          const pb = 6 + ((x & 3) + (y & 3) * 4) * 3;
+          const col = v < r[pb] ? 3 : v < r[pb + 1] ? 2 : v < r[pb + 2] ? 1 : 0;
+          lo = (lo << 1) | (col & 1); hi = (hi << 1) | (col >> 1);
+        }
+        const o = 0x100 + (ty * 16 + tx) * 16 + py * 2;
+        out[o] = lo; out[o + 1] = hi;
+      }
+      c.dirty = true;
+    },
+  };
+  GbCart.CAM_W = CAM_W; GbCart.CAM_H = CAM_H;
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
@@ -15562,6 +16048,185 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
+ * ポケットプリンタ(通信ポートにつなぐ感熱プリンタ)
+ * MML.Emu.GbPrinter
+ *
+ * 本体(gbConsole.js)の serialDevice として使う: exchange(GB が送ったバイト) → プリンタが返すバイト。
+ * パケット: $88 $33 命令 圧縮 長さ(下位, 上位) データ… チェックサム(下位, 上位)、続く 2 バイトの間にプリンタが $81 と状態を返す。
+ *   命令 1 = 初期化、2 = 印刷(枚数、余白[上位=前/下位=後]、パレット、濃さ)、4 = 画像データ(2bpp のタイル、横 20 タイル。
+ *   1 パケット最大 $280 バイト = 2 段)、$F = 状態の問い合わせ
+ *   圧縮(フラグ 1): 制御バイトの bit7 が 1 なら次の 1 バイトを (下位 7bit+2) 回、0 なら続く (値+1) バイトをそのまま
+ * 印刷: 溜まったタイルをパレットで階調(0=白〜3=黒)にして 1 枚の帯にする。後ろの余白が 0 の印刷は次の印刷とつながる(長い絵)ので、
+ *   余白ありの印刷が来た所で 1 枚として確定し、onPrint({ width: 160, height, pixels: Uint8Array(階調) }) に渡す。
+ * 状態: データあり $08 → 印刷命令の直後 $06(印刷中)→ 何度か問い合わせると $04(完了)。初期化で 0 に戻る。
+ *
+ * 参考: Pan Docs "Game Boy Printer"
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const W = 160;
+
+  class GbPrinter {
+    constructor() {
+      this.onPrint = null;
+      this.pages = [];       // 確定した絵(onPrint が無い時に溜まる)
+      this.reset();
+    }
+    reset() {
+      this.state = 0;        // 0,1 = マジック、2 = 命令、3 = 圧縮、4,5 = 長さ、6 = データ、7,8 = チェックサム、9 = $81 を返す、10 = 状態を返す
+      this.cmd = 0; this.compress = 0; this.len = 0; this.got = 0; this.sum = 0; this.chk = 0;
+      this.data = new Uint8Array(0x280);
+      this.tiles = [];       // 溜まった画像データ(バイト列)
+      this.strips = [];      // 印刷済みでまだ確定していない帯(階調の行列)
+      this.status = 0;
+      this.busy = 0;         // 印刷中として答える残り回数
+    }
+
+    // 1 バイトのやり取り
+    exchange(b) {
+      b &= 0xFF;
+      switch (this.state) {
+        case 0: this.state = b === 0x88 ? 1 : 0; return 0x00;
+        case 1: this.state = b === 0x33 ? 2 : (b === 0x88 ? 1 : 0); return 0x00;
+        case 2: this.cmd = b; this.sum = b; this.state = 3; return 0x00;
+        case 3: this.compress = b & 1; this.sum += b; this.state = 4; return 0x00;
+        case 4: this.len = b; this.sum += b; this.state = 5; return 0x00;
+        case 5: this.len |= b << 8; this.sum += b; this.got = 0; this.state = this.len ? 6 : 7; if (this.len > this.data.length) this.data = new Uint8Array(this.len); return 0x00;
+        case 6: this.data[this.got++] = b; this.sum += b; if (this.got >= this.len) this.state = 7; return 0x00;
+        case 7: this.chk = b; this.state = 8; return 0x00;
+        case 8: this.chk |= b << 8; this._run((this.sum & 0xFFFF) === this.chk); this.state = 9; return 0x00;
+        case 9: this.state = 10; return 0x81;
+        default: {
+          this.state = 0;
+          const st = this.status;
+          if (this.busy > 0 && --this.busy === 0) this.status = (this.status & ~0x02) & ~0x08 | 0x04; // 印刷が終わった
+          return st;
+        }
+      }
+    }
+
+    _run(sumOk) {
+      if (!sumOk) { this.status |= 0x01; return; }
+      this.status &= ~0x01;
+      const d = this.data.subarray(0, this.len);
+      switch (this.cmd) {
+        case 0x01: this.tiles = []; this.status = 0; this.busy = 0; break;
+        case 0x04:
+          if (!this.len) break; // 空のデータ = 「これで全部」
+          if (this.compress) {
+            for (let i = 0; i < d.length;) {
+              const c = d[i++];
+              if (c & 0x80) { const v = d[i++]; for (let k = (c & 0x7F) + 2; k > 0; k--) this.tiles.push(v); }
+              else { for (let k = c + 1; k > 0 && i < d.length; k--) this.tiles.push(d[i++]); }
+            }
+          } else for (let i = 0; i < d.length; i++) this.tiles.push(d[i]);
+          this.status |= 0x08;
+          break;
+        case 0x02: {
+          const margins = d.length > 1 ? d[1] : 0x13, pal = (d.length > 2 && d[2]) ? d[2] : 0xE4;
+          if (d.length && d[0] === 0) { this._finish(); break; } // 0 枚 = 紙送りだけ
+          this._strip(pal);
+          this.tiles = [];
+          this.status = (this.status | 0x02 | 0x08) & 0xFF; this.busy = 3;
+          if (margins & 0x0F) this._finish(); // 後ろに余白がある = ここで 1 枚
+          break;
+        }
+        default: break; // $0F: 状態だけ
+      }
+    }
+    // 溜まったタイル(横 20 個ずつ)を階調の帯にする
+    _strip(pal) {
+      const rows = Math.floor(this.tiles.length / (20 * 16));
+      if (!rows) return;
+      const px = new Uint8Array(W * rows * 8), t = this.tiles;
+      for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < 20; tx++) {
+        const base = (ty * 20 + tx) * 16;
+        for (let y = 0; y < 8; y++) {
+          const lo = t[base + y * 2], hi = t[base + y * 2 + 1];
+          for (let x = 0; x < 8; x++) {
+            const c = (((hi >> (7 - x)) & 1) << 1) | ((lo >> (7 - x)) & 1);
+            px[(ty * 8 + y) * W + tx * 8 + x] = (pal >> (c * 2)) & 3;
+          }
+        }
+      }
+      this.strips.push(px);
+    }
+    // 帯をつないで 1 枚にして渡す
+    _finish() {
+      if (!this.strips.length) return;
+      const total = this.strips.reduce((n, s) => n + s.length, 0);
+      const pixels = new Uint8Array(total);
+      let o = 0; for (const s of this.strips) { pixels.set(s, o); o += s.length; }
+      this.strips = [];
+      const page = { width: W, height: total / W, pixels };
+      if (this.onPrint) this.onPrint(page); else this.pages.push(page);
+    }
+    // つながる印刷の途中で止まっている帯があれば確定する(ゲームを閉じる時など)
+    flush() { this._finish(); }
+  }
+
+  Emu.GbPrinter = GbPrinter;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * バーコードボーイ(通信ポートにつなぐバーコードリーダー、1992 年、対応ソフト 5 本)
+ * MML.Emu.GbBarcodeBoy
+ *
+ * 1. ゲームが内部クロックで $10 $07 $10 $07 を送る。リーダーは $FF $FF $10 $07 を返す(後ろの 2 つが合えば「つながっている」)
+ * 2. その後ゲームは外部クロックで待つ。カードを通すとリーダーの側がクロックを出して 30 バイト送る:
+ *    $02、EAN-13 の 13 桁(ASCII)、$03 を 2 回
+ * 3. 送り終わるとまた 1 の握手から
+ *
+ * exchange(b): ゲームが内部クロックで送った 1 バイトへの返事。握手に関係ないバイトは null(呼び出し側が他の機器=プリンタへ回す)
+ * pull(): ゲームが外部クロックで待っている時に本体が呼ぶ。送るバイトがあればそれ、無ければ −1
+ * scan(digits): 13 桁(JAN/EAN-13)を読ませる。握手が済んでいる時だけ受け付ける
+ *
+ * 参考: Shonumi "Dan Docs" の Barcode Boy の章。実機の送る間隔は分からないので、本体の都合の速さ(約 2ms に 1 バイト)で送る
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const HELLO = [0x10, 0x07, 0x10, 0x07], REPLY = [0xFF, 0xFF, 0x10, 0x07];
+
+  class GbBarcodeBoy {
+    constructor() { this.reset(); }
+    reset() { this.pos = 0; this.armed = false; this.queue = []; }
+    exchange(b) {
+      if (b === HELLO[this.pos]) { const r = REPLY[this.pos]; if (++this.pos === 4) { this.pos = 0; this.armed = true; } return r; }
+      if (this.pos > 0) { this.pos = b === HELLO[0] ? 1 : 0; return b === HELLO[0] ? REPLY[0] : 0xFF; }
+      return this.armed ? 0xFF : null; // 握手の後、ゲームが自分のクロックで送ってきた物には $FF
+    }
+    pull() {
+      if (!this.queue.length) return -1;
+      const b = this.queue.shift();
+      if (!this.queue.length) this.armed = false; // 送り終わったら握手からやり直し
+      return b;
+    }
+    scan(digits) {
+      const s = String(digits || '').replace(/\D/g, '');
+      if (s.length !== 13 || !this.armed || this.queue.length) return false;
+      const part = [0x02]; for (let i = 0; i < 13; i++) part.push(s.charCodeAt(i)); part.push(0x03);
+      this.queue = part.concat(part);
+      return true;
+    }
+    // EAN-13 の検査数字が合っているか(入力の確認用)
+    static checkEan13(digits) {
+      const s = String(digits || '').replace(/\D/g, '');
+      if (s.length !== 13) return false;
+      let sum = 0; for (let i = 0; i < 12; i++) sum += (s.charCodeAt(i) - 48) * (i % 2 ? 3 : 1);
+      return (10 - sum % 10) % 10 === s.charCodeAt(12) - 48;
+    }
+  }
+
+  Emu.GbBarcodeBoy = GbBarcodeBoy;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
  * ゲームボーイ本体(段階 8a: DMG の骨格)
  * MML.Emu.GbConsole
  *
@@ -15587,6 +16252,8 @@
   // TAC の下位 2bit → TIMA を進める DIV(16bit)のビット。そのビットと許可の AND の立ち下がりで +1
   const TAC_BIT = [1 << 9, 1 << 3, 1 << 5, 1 << 7];
   const SERIAL_BIT = 1 << 8; // 内部クロック 8192Hz = DIV bit8 の立ち下がり
+  // HuC3 のブザー: 音の番号 0-3 の高さと 1 回の長さ。★実機の値は分からない(推定の仮の値)。分かったらここだけ直す
+  const BUZZ_HZ = [2048, 2560, 3072, 4096], BUZZ_SEC = 0.2, BUZZ_LEVEL = 0.06;
   const APU_BIT = 1 << 12;   // APU のフレームシーケンサ 512Hz = DIV bit12 の立ち下がり(CGB の倍速時は bit13。this.apuBit)
 
   class GbConsole {
@@ -15617,6 +16284,16 @@
       this.onFrame = null;
       this.onSerial = null; // (byte) シリアルへ 1 バイト送り終えた(テスト ROM の結果表示など)
       this.serialDevice = null; // (byte) => 受け取るバイト。未接続は $FF
+      // 通信ポートのポケットプリンタ(opts.printer === false で外す)。刷り上がった絵は prints に溜まる(画面側が takePrints で取る)
+      this.prints = [];
+      this.printer = opts.printer === false || !Emu.GbPrinter ? null : new Emu.GbPrinter();
+      if (this.printer) this.printer.onPrint = (page) => { this.prints.push(page); };
+      // バーコードボーイも同じ口に。ゲームが送る最初のバイトで見分かれる(握手 $10 $07… はバーコードボーイ、$88 $33… はプリンタ)
+      this.barcode = opts.barcode === false || !Emu.GbBarcodeBoy ? null : new Emu.GbBarcodeBoy();
+      if (this.printer || this.barcode) this.serialDevice = (b) => { const r = this.barcode ? this.barcode.exchange(b) : null; return r !== null ? r : (this.printer ? this.printer.exchange(b) : 0xFF); };
+      // カートリッジ内ブザー(HuC3)。音の高さと長さは資料が無く仮の値(BUZZ_HZ / BUZZ_SEC)。録音には「鳴らした時刻と音の番号」を載せる
+      this.bzLeft = 0; this.bzPhase = 0; this.bzStep = 0;
+      this.irIn = false; // 赤外線の受光(CGB 本体のポートと HuC1 のカートリッジ。画面側が setLight で入れる)
       this.serialOut = [];  // 送り終えたバイト
       this.serialSent = []; // 送り始めたバイト(完了を待たずに次を送るソフトの出力も拾える。mooneye のテスト ROM の合否)
       this.rec = null;
@@ -15682,6 +16359,29 @@
     get frameHeight() { return 144; }
     get frameRate() { return CLOCK / FRAME_T; } // 59.7275Hz
     get stereo() { return true; }
+    // ── 周辺の入出力(段階 8e)──
+    // 傾き(MBC7): −1〜+1、右/下が正、1 = 重力 1 個ぶん
+    setTilt(x, y) { this.cart.tiltX = +x || 0; this.cart.tiltY = +y || 0; }
+    get hasTilt() { return !!this.cart.hasTilt; }
+    // 赤外線の受光(押している間 true)
+    setLight(on) { this.irIn = !!on; this.cart.irIn = !!on; }
+    // ゲームが今、赤外線を読もうとしているか(画面側が受光ボタンを出す目安)
+    get irWanted() { return !!(this.cart.hasIr && this.cart.irMode) || (this.cgb && (this.rp & 0xC0) === 0xC0); }
+    // 振動モータ(MBC5 の振動つき)
+    get rumble() { return !!this.cart.rumble; }
+    takePrints() { return this.prints.length ? this.prints.splice(0) : null; }
+    // ポケットカメラ: 元の絵(128×112、0〜255 の明るさ)を入れる。cameraWanted はゲームが撮影を始めたか(画面側が Web カメラを動かす目安)
+    setCameraImage(u8) { if (this.cart.hasCamera) this.cart.camImage = u8; }
+    get cameraWanted() { return !!(this.cart.hasCamera && this.cart.cam && this.cart.cam.shots > 0); }
+    // バーコードボーイ: ゲームが握手を済ませて読み取りを待っているか/13 桁を読ませる
+    get barcodeWanted() { return !!(this.barcode && this.barcode.armed && !this.barcode.queue.length); }
+    scanBarcode(digits) { return !!(this.barcode && this.barcode.scan(digits)); }
+    _buzz(tones) {
+      for (const tone of tones) {
+        if (this.rec) this.rec.cur.push({ buzz: tone & 3, t: this.frameT });
+        this.bzLeft = Math.round(BUZZ_SEC * (this.sampleRate || 44100)); this.bzPhase = 0; this.bzStep = BUZZ_HZ[tone & 3] / (this.sampleRate || 44100);
+      }
+    }
     // ゲーム画面(nesScreen.js / nes-worklet-impl.js)が機種を問わず呼ぶ口
     extBits() { return 0; }
     get diskCount() { return 0; }
@@ -15758,7 +16458,9 @@
           if (this.ringLen < AUDIO_RING) {
             const s = apu.mixSample();
             const i = (this.ringHead + this.ringLen) & (AUDIO_RING - 1);
-            this.ring[i] = s.left; this.ringR[i] = s.right;
+            let bz = 0;
+            if (this.bzLeft > 0) { this.bzLeft--; this.bzPhase += this.bzStep; if (this.bzPhase >= 1) this.bzPhase -= 1; bz = this.bzPhase < 0.5 ? BUZZ_LEVEL : -BUZZ_LEVEL; }
+            this.ring[i] = s.left + bz; this.ringR[i] = s.right + bz;
             this.ringLen++;
           }
         }
@@ -15770,7 +16472,11 @@
       const old = this.div;
       this.div = nv;
       if (this.tac & 4) { const b = TAC_BIT[this.tac & 3]; if ((old & b) && !(nv & b)) this._incTima(); }
-      if ((old & this.apuBit) && !(nv & this.apuBit)) this.apu.seqTick();
+      if ((old & this.apuBit) && !(nv & this.apuBit)) {
+        this.apu.seqTick();
+        // 外部クロックで待っているゲームへ、つないだ機器(バーコードボーイ)の側から 1 バイト送る(512Hz に 1 回見る)
+        if ((this.sc & 0x81) === 0x80 && this.barcode) { const b = this.barcode.pull(); if (b >= 0) { this.sb = b; this.sc &= 0x7F; this.if |= 8; } }
+      }
       const sbit = (this.sc & 2) ? 1 << 3 : SERIAL_BIT; // CGB の高速クロック(SC bit1)
       if (this.serialBits && (old & sbit) && !(nv & sbit)) {
         if (--this.serialBits === 0) {
@@ -15837,7 +16543,7 @@
           case 0xFF4D: return (this.doubleSpeed ? 0x80 : 0) | (this.key1 & 1) | 0x7E;
           case 0xFF4F: return ppu.vbk | 0xFE;
           case 0xFF55: return this.hdmaActive ? ((this.hdmaLeft - 1) & 0x7F) : (this.hdmaLeft > 0 ? 0x80 | ((this.hdmaLeft - 1) & 0x7F) : 0xFF);
-          case 0xFF56: return (this.rp & 0xC1) | 0x3E; // 赤外線: 受光なし(bit1=1)
+          case 0xFF56: return (this.rp & 0xC1) | 0x3C | (this.irIn && (this.rp & 0xC0) === 0xC0 ? 0 : 2); // 赤外線: 読み取りを有効にしていて光があれば bit1=0
           case 0xFF68: return ppu.bcps | 0x40;
           case 0xFF69: return ppu.bgPalRam[ppu.bcps & 0x3F];
           case 0xFF6A: return ppu.ocps | 0x40;
@@ -15858,7 +16564,7 @@
     write(addr, v) {
       if (addr < 0x8000) { this.cart.write(addr, v); return; }
       if (addr < 0xA000) { if (!this.ppu.vramBlocked()) this.ppu.vram[this.ppu.vbk * 0x2000 + addr - 0x8000] = v; return; }
-      if (addr < 0xC000) { this.cart.writeRam(addr, v); return; }
+      if (addr < 0xC000) { this.cart.writeRam(addr, v); if (this.cart.buzzQueue && this.cart.buzzQueue.length) this._buzz(this.cart.takeBuzz()); return; } // buzzQueue: GBS 用のカートリッジには無い
       if (addr < 0xFE00) { this.wram[this._w(addr)] = v; return; }
       if (addr < 0xFEA0) { if (!this.dmaActive && !this.ppu.oamBlocked()) this.ppu.oam[addr - 0xFE00] = v; return; }
       if (addr < 0xFF00) return;
@@ -16020,6 +16726,7 @@
  *   - ステート: 本体(GbConsole)のオブジェクト木を汎用に写す。除外は ROM、録音、音のリング、画面、コールバック、シリアルの記録
  *   - 巻き戻し: 0.5 秒ごとのステート+毎フレームのパッド値。逆再生の映像は ppu.frameIdx(階調番号 8bit、160×144)
  * 形: { v: 1, machine: 'gb', title, romLen, tree }
+ * MBC6 のフラッシュ(1MB)はステート/巻き戻しに入れない(大きすぎる。フラッシュへ書いた後に巻き戻すと中身は戻らない)
  */
 (function (global) {
   'use strict';
@@ -16027,7 +16734,7 @@
   const Emu = MML.Emu = MML.Emu || {};
 
   const SKIP_KEYS = new Set(['rom', 'rec', 'ring', 'ringR', 'frame', 'frameIdx', 'onFrame', 'onWrite', 'onSerial', 'serialDevice',
-    'serialOut', 'serialSent', 'bus', 'divBit', 'con', 'shades', 'palRing', 'lineIdx', 'claimed', '_out', 'header', 'data', 'low']);
+    'serialOut', 'serialSent', 'bus', 'divBit', 'con', 'shades', 'palRing', 'prints', 'onPrint', 'pages', 'camImage', 'flash', 'x', 'buzzQueue', 'lineIdx', 'claimed', '_out', 'header', 'data', 'low']);
 
   const GbState = {
     save(gb) {
@@ -16150,7 +16857,7 @@
             const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? MML.Emu.GbRewind : MML.Emu.NesRewind;
             this.rewind = Rewind ? new Rewind(nes) : null;
             this.dcX = 0; this.dcY = 0; this.dcX2 = 0; this.dcY2 = 0;
-            this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH() });
+            this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, tilt: !!nes.hasTilt, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH() });
             break;
           }
           case 'key': // MSX: PC のキー(KeyboardEvent.code)を押す/離す。対応の無いキーは本体が無視する
@@ -16175,6 +16882,13 @@
             break;
           }
           case 'pad': if (this.nes) this.nes.setController(m.port | 0, m.bits | 0, m.turbo | 0); break;
+          case 'sensor': // GB: 傾き(MBC7)と赤外線の受光
+            if (!this.nes) break;
+            if (m.tiltX !== undefined && typeof this.nes.setTilt === 'function') this.nes.setTilt(+m.tiltX || 0, +m.tiltY || 0);
+            if (m.light !== undefined && typeof this.nes.setLight === 'function') this.nes.setLight(!!m.light);
+            if (m.camera && typeof this.nes.setCameraImage === 'function') this.nes.setCameraImage(new Uint8Array(m.camera)); // ポケットカメラの元の絵(128×112 の明るさ)
+            if (m.barcode !== undefined && typeof this.nes.scanBarcode === 'function') this.port.postMessage({ type: 'barcode', ok: this.nes.scanBarcode(String(m.barcode)) });
+            break;
           case 'turboRate': if (this.nes) this.nes.setTurboRate(m.frames | 0); break;
           case 'reset': if (this.nes) { this.nes.reset(); if (this.rewind) this.rewind.clear(); } break;
           case 'mix': { // 鍵盤表示のミュート/音量(2A03 は apu.mute/vol、拡張音源はマッパーの audio.mute/vol)。capture.js の applyMute/applyVolume と同じ流儀(バンドルに無いので自前)
@@ -16254,7 +16968,13 @@
       const frame = nes.frame.slice(0, this.frameW() * this.frameH()); // MSX は幅がモードで変わる(frame は最大幅で確保。幅ぶんだけ送る)
       const msg = { type: 'frame', seq: this.frameSeq, frame: frame.buffer, underruns: nes.underruns, w: this.frameW(), h: this.frameH(), il: !!nes.interlaced, disk: nes.diskActivity ? nes.diskActivity() : null }; // disk: アクセスランプ(ドライブごとの { access, media })
       if (nes.rec) { msg.writes = nes.rec.frames.splice(0); }
-      this.port.postMessage(msg, [frame.buffer]);
+      const tr = [frame.buffer];
+      if (this.machine === 'gb') { // GB の周辺: 振動モータ、赤外線を読もうとしているか、刷り上がった絵
+        msg.gb = { rumble: !!nes.rumble, ir: !!nes.irWanted, camera: !!nes.cameraWanted, barcode: !!nes.barcodeWanted };
+        const pr = nes.takePrints();
+        if (pr) msg.gb.prints = pr.map((p) => { tr.push(p.pixels.buffer); return { width: p.width, height: p.height, pixels: p.pixels.buffer }; });
+      }
+      this.port.postMessage(msg, tr);
       if ((this.frameSeq % 60) === 0) this.postBattery(false); // 1 秒ごとに、セーブ RAM が変わっていれば主スレッドへ
     }
     // セーブ RAM(バッテリ/FDS ディスク)を主スレッドへ送る。final=true は unload への返事(変化が無くても data 無しで返す)

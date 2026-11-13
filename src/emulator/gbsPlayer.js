@@ -37,7 +37,9 @@
       this.mbc = 'gbs'; this.unsupported = false; this.hasBattery = false; this.hasRtc = false; this.dirty = false;
       this.header = { title: header.title || '', type: 0, cgb: false, cgbOnly: false, sgb: false, checksumOk: true };
       const L = this.loadAddr;
-      this.bankCount = Math.max(2, Math.ceil((L + data.length) / 0x4000));
+      // バンク数は 2 のべきに切り上げる(実カートリッジと同じ。足りない上位ビットは無視され、同じ中身が繰り返し見える)
+      let bc = 2; while (bc * 0x4000 < L + data.length) bc *= 2;
+      this.bankCount = bc;
       const low = this.low = new Uint8Array(0x40);
       for (let i = 0; i <= 0x38; i += 8) { const t = (L + i) & 0xFFFF; low[i] = 0xC3; low[i + 1] = t & 0xFF; low[i + 2] = t >> 8; }
       this.reset();
@@ -48,13 +50,15 @@
       if (addr < L) return addr < 0x40 ? this.low[addr] : 0;
       // $4000 までが固定、$4000-$7FFF はバンク 1 がその続き、バンク 2 以降は $4000 バイトずつ後ろ
       const off = addr < 0x4000 ? addr - L : (0x4000 - L) + (this.bank - 1) * 0x4000 + (addr - 0x4000);
-      return off < this.data.length ? this.data[off] : 0;
+      return off >= 0 && off < this.data.length ? this.data[off] : 0;
     }
     write(addr, v) {
       if (addr >= 0x2000 && addr < 0x4000) {
+        // MBC1 と同じ: 0 は 1 に読み替えてから、ある分のビットだけ見る。2 バンクしか無い曲データが上位ビットの立った番号を書いても
+        // 正しいバンクが出る(2026-11-13 まで番号をそのまま使っていて、データの外=0 を読んで暴走する曲があった。Mesen との突き合わせで判明)
         let n = this.bankCount <= 32 ? v & 0x1F : v;
         if (n === 0) n = 1;
-        this.bank = n;
+        this.bank = n % this.bankCount;
       }
     }
     readRam(addr) { return this.ram[addr & 0x1FFF]; }
@@ -82,7 +86,10 @@
       this.con.onWrite = (addr, value) => { if (this.bus.onWrite) this.bus.onWrite(addr, value, this.con.cpuCycles - this._frameStartT); };
 
       this.clockHz = MML.GBS.CPU_CLOCK;
-      this.frameRate = this.header.playFps; // 採取の刻み(ヘッダの TMA/TAC から。曲が後で変えても刻みは変えない)
+      // 採取の刻み = PLAY の周期。ヘッダの TMA/TAC が基本だが、曲ごとに INIT や最初の PLAY でタイマを書き換えてテンポを変える作品がある
+      // (ヘッダ 89Hz に対して曲により 69〜108Hz など)。initSong がその曲の実際の値に直す(GbsPlayer.songFps)
+      this.bytes = gbsBytes;
+      this.frameRate = this.header.playFps;
       this.speedFactor = 1;
       this._playAccum = 0;
       this._frameStartT = 0;
@@ -106,7 +113,7 @@
       con._setDiv(0);
       con.write(0xFF06, h.tma | 0); con.write(0xFF05, h.tma | 0); con.write(0xFF07, tac & 0x07);
       cpu.ime = false; cpu.halted = false; cpu.stopped = false;
-      cpu.a = songIndex & 0xFF;
+      cpu.a = songIndex & 0xFF; cpu.setBC(IDLE); cpu.setDE(IDLE); cpu.setHL(IDLE); // INIT も釣り合わない戻り方に備える
       cpu.sp = h.stackPointer; this._push(IDLE);
       cpu.pc = h.initAddr;
       // INIT が戻るまで(最大 1 秒ぶん)。HALT/STOP で止まる INIT は戻ったものとして扱う(旧実装と同じ)
@@ -121,6 +128,15 @@
       while (!this._boundary && con.cpuCycles < limit2) this._step();
       con.ringHead = 0; con.ringLen = 0; con.cycleAccum = 0;
       this._frameStartT = con.cpuCycles;
+      this._due = 0;
+      if (!this._probe) this.frameRate = GbsPlayer.songFps(this.bytes, songIndex);
+    }
+    // 今のタイマの設定での PLAY の周期(Hz)。VBlank 駆動なら 59.7275
+    _fpsNow() {
+      const con = this.con;
+      if (!(this.irqMask & 4) || !(con.tac & 4)) return MML.GBS.VBLANK_FPS;
+      const div = [1024, 16, 64, 256][con.tac & 3] * (256 - con.tma);
+      return this.clockHz / div * (this.fast ? 2 : 1);
     }
 
     // 1 命令進める。IDLE/割り込みの入口/PLAY からの戻りはここで捌く
@@ -130,18 +146,22 @@
       if ((pc === 0x40 || pc === 0x50) && !cpu.ime && !cpu.halted) {
         if (!this._atEntry) { this._atEntry = true; this._boundary = true; return; } // ここがフレームの区切り。処理は次のフレームの頭で
         this._atEntry = false;
-        // 待ちループから来た時はスタックを毎回ヘッダの位置へ戻す(ドライバがスタックをずらしたままでも流れていかない)
-        if ((con._busRead(cpu.sp) | (con._busRead((cpu.sp + 1) & 0xFFFF) << 8)) === IDLE) { cpu.sp = this.header.stackPointer; this._push(IDLE); }
+        // PLAY の外(待ちループ)から来た時は、スタックを毎回ヘッダの位置へ戻す。INIT が自分で SP を動かしたまま終わる曲や、
+        // HALT で止まった INIT の続きから来る曲があり、戻さないと PLAY が音源レジスタの番地をスタックにして壊す(Mesen との突き合わせで判明)
+        if (!this._inPlay) { cpu.sp = this.header.stackPointer; this._push(IDLE); }
         // 再生速度(1/1〜1/8): PLAY を何回かに 1 回だけ呼ぶ(音程は変えずテンポだけ落とす)
         let call = true;
         if (this.speedFactor < 1) { this._playAccum += this.speedFactor; if (this._playAccum >= 1) this._playAccum -= 1; else call = false; }
         // PLAY の最中に(曲が自分で EI して)割り込みが重なった時は、重ねて呼ばずに戻る(旧実装の「実行中なら次のフレームは呼ばない」と同じ)
         if (this._inPlay) call = false;
-        if (call) { this._inPlay = true; this._push(RET_MAGIC); cpu.pc = this.header.playAddr; }
+        // レジスタも全部 RET_MAGIC にしておく: 「PUSH を 4 つ積んで CALL して、POP せずに RET」という釣り合わない PLAY を持つ曲データがあり、
+        // その RET は積んだレジスタの値へ飛ぶ(GBS は PLAY に入る時のレジスタを決めていない)。どのレジスタが一番上でも「戻った」と分かる
+        if (call) { this._inPlay = true; this._push(RET_MAGIC); cpu.a = RET_MAGIC >> 8; cpu.f = RET_MAGIC & 0xF0; cpu.setBC(RET_MAGIC); cpu.setDE(RET_MAGIC); cpu.setHL(RET_MAGIC); cpu.pc = this.header.playAddr; }
         else { cpu.pc = this._pop(); cpu.ime = true; }
         return;
       }
-      if (pc === RET_MAGIC) { this._inPlay = false; cpu.pc = this._pop(); cpu.ime = true; return; } // RETI 相当
+      // PLAY から戻った: 待ちループへ(スタックは次の PLAY の頭でヘッダの位置へ戻すので、釣り合っていなくてよい)
+      if (pc === RET_MAGIC) { this._inPlay = false; cpu.sp = this.header.stackPointer; cpu.pc = IDLE; cpu.ime = true; return; }
       // 曲が自分で IE を書き換えて STAT/シリアル/ジョイパッドの割り込みが来た時は何もせず戻る
       if ((pc === 0x48 || pc === 0x58 || pc === 0x60) && !cpu.ime && !cpu.halted && pc < this.cart.loadAddr) { cpu.pc = this._pop(); cpu.ime = true; return; }
       // PLAY の中で HALT/STOP して割り込みも来ない: 戻ったものとして待ちループへ
@@ -166,9 +186,14 @@
       if (con.sampleRate !== want) con.setSampleRate(want);
       this._frameStartT = con.cpuCycles;
       this._boundary = false;
-      // 割り込みが来なくなった曲でも進むよう、公称の 3 周期で打ち切る
-      const limit = con.cpuCycles + 3 * this.clockHz / this.frameRate;
+      // 区切りは次の PLAY の入口。PLAY が 1 周期に収まらない時(HALT で間を取りながら PCM を流し続ける曲など)は入口が来ないので、
+      // 公称の周期の格子(_due)で区切る。入口が来たら格子をそこへ合わせ直す(時間軸がずれていかない)
+      const period = this.clockHz / this.frameRate;
+      if (!(this._due > 0)) this._due = con.cpuCycles;
+      this._due += period;
+      const limit = this._due + period * 0.02;
       while (!this._boundary && con.cpuCycles < limit) this._step();
+      if (this._boundary) this._due = con.cpuCycles;
       if (regsOnly) return null;
       const n = con.ringLen;
       const outL = new Float32Array(n);
@@ -261,6 +286,26 @@
     return { audio, writeLog, snapshots, player, frameRate: player.frameRate };
   };
 
+  // その曲の PLAY の周期(Hz): INIT と最初の数回の PLAY を試しに回して、落ち着いたタイマの設定から出す。
+  // 画面の時間軸、変換のテンポ、写し再生の速さはこの値を使う(ヘッダの playFps ではなく)。結果は (データ, 曲) ごとに覚える
+  const fpsCache = new WeakMap();
+  GbsPlayer.songFps = function (gbsBytes, songIndex) {
+    let m = fpsCache.get(gbsBytes);
+    if (!m) { m = new Map(); fpsCache.set(gbsBytes, m); }
+    const k = songIndex | 0;
+    if (m.has(k)) return m.get(k);
+    let fps;
+    try {
+      const p = new GbsPlayer(gbsBytes);
+      p._probe = true;
+      p.initSong(k);
+      for (let i = 0; i < 4; i++) p.renderFrame(44100, true);
+      fps = p._fpsNow();
+      if (!(fps > 1 && fps < 2000)) fps = p.header.playFps;
+    } catch (e) { fps = MML.GBS.parseHeader(gbsBytes).playFps; }
+    m.set(k, fps);
+    return fps;
+  };
   Emu.GbsPlayer = GbsPlayer;
   Emu.GbsCart = GbsCart;
   // VGM(vgmPlayer.js captureVgmSongAsync)がGB DMGチップのフレームスナップショットを

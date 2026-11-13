@@ -1027,13 +1027,19 @@
     return cfg;
   }
   // 表示中の形式のフレームレートと総フレーム数(打点のフレーム換算用)
+  // 今選んでいる GBS の曲の PLAY の周期(曲ごとにタイマを書き換える作品があるので、ヘッダの値ではなく実際の値)
+  function gbsSongFps() {
+    if (!loadedGbsHeader || !loadedGbsBytes || !MML.Emu.GbsPlayer.songFps) return loadedGbsHeader ? loadedGbsHeader.playFps : 0;
+    const disp = parseInt(gbsSongIndexEl.value, 10) || loadedGbsHeader.firstSong;
+    return MML.Emu.GbsPlayer.songFps(loadedGbsBytes, Math.max(0, disp - loadedGbsHeader.firstSong));
+  }
   function synthDrumFrameInfo() {
     const prov = drumHitsProvider;
     if (prov && prov.frameRate && prov.totalFrames) return { frameRate: prov.frameRate, totalFrames: prov.totalFrames };
     const fmt = kbdSourceKind;
     let frameRate = 60;
     if (fmt === 'nsf') frameRate = 60.0988;
-    else if (fmt === 'gbs' && loadedGbsHeader) frameRate = loadedGbsHeader.playFps || 60;
+    else if (fmt === 'gbs' && loadedGbsHeader) frameRate = gbsSongFps() || 60;
     else if (fmt === 'kss' && loadedKssHeader) frameRate = loadedKssHeader.device.palMode ? MML.KSS.PAL_FPS : MML.KSS.NTSC_FPS;
     else if (fmt === 'hes') frameRate = MML.HES.VBLANK_FPS;
     else if (fmt === 'vgm') frameRate = MML.Emu.VGM_FRAME_RATE;
@@ -8049,7 +8055,7 @@
     // 指定時間ぶん鳴らした後さらにFADE_SEC秒フェードアウトする仕様のため、実際の
     // キャプチャ/再生長はduration+FADE_SECにする(playNsfStream冒頭コメント参照)。
     const captureDuration = duration + FADE_SEC;
-    const gbsFrameRate = loadedGbsHeader.playFps;
+    const gbsFrameRate = MML.Emu.GbsPlayer.songFps(loadedGbsBytes, songIndex); // その曲の実際の PLAY の周期(ヘッダと違う曲がある)
     const totalFrames = Math.ceil(captureDuration * gbsFrameRate);
 
     // NSF/KSSと同じ理由(二重エミュレーション解消・シーク対応)で、ライブ再生用プレイヤーと

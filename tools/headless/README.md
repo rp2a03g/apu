@@ -26,6 +26,9 @@ export PATH="$PATH:/path/to/nodejs"
 | `nes-run.js` | 自前 NES エミュレータ(`src/emulator/nes/`)をヘッドレスで回して画面を PNG に書く。`--press "start:400-410,right:500-900"` でボタン、`--png-every` で途中の画面、`--audio` で WAV、`--vgm` で音源レジスタの録音(本体の ● と同じ経路)。.fds は `--bios disksys.rom`(または環境変数 FDS_BIOS)と、必要なら `--disk 1:900`(そのフレームで取り出し、90 フレーム後に B 面)。`--battery save.bin` でセーブ RAM(バッテリ/FDS 全面)を読んで始め、終わりに書く。Mesen の `tools/mesen/ref-screenshot.lua` と同じフレームの画面を比べる |
 | `gb-run.js` | 自前ゲームボーイエミュレータ(`src/emulator/gb/`、DESIGN-GB-CAPTURE.md)をヘッドレスで回す。`--selftest` で自作テスト ROM(`mk-gb-test-rom.js`)を全 MBC で通す。`--serial` / `--expect-serial Passed`(blargg)/ `--mooneye` でテスト ROM の合否、`--press` `--png` `--audio` `--dump` は nes-run.js と同じ |
 | `gb-state-test.js` | ゲームボーイ本体まわりの通し確認(中身判定、ステート保存/復元、巻き戻し、録音 → VGM → 読み直し、書き込み列から鍵盤の値)。引数に ROM を渡すと実ソフトで |
+| `gb-periph-test.js` | ゲームボーイの周辺(時計の実時間、振動、HuC1、MBC7 の傾きと EEPROM、赤外線、ポケットプリンタ、HuC3 とブザー、MMM01、MBC6、ポケットカメラ、バーコードボーイ)をレジスタと通信ポートを直接たたいて確かめる。`mk-gb-test-rom.js out.gbc --periph` は同じ周辺を ROM からたたく通し試験用(画面側のボタンの確認に使う) |
+| `gb-sweep.js` | ゲームボーイの総当たり。`<フォルダ>` で ROM を 1 本ずつ回して起動/音/固まりを JSON Lines に、`--gbs <フォルダ>` で GBS を曲ごとに回す(例外、PLAY の周期、書き込みの有無) |
+| `gb-mesen-ab.js` | 同じ ROM か GBS を Mesen 2(`--mesen` か環境変数 `MESEN_EXE`)と自前で走らせ、音源レジスタの書き込み列を突き合わせる。音をたくさん書く物でないと位置を合わせられない |
 | `gb-testroms.js` | 公開テスト ROM(blargg / mooneye / dmg-acid2。`_tmp_test/gb` か `GB_TESTROM_ROOT` に各自で置く、同梱しない)をまとめて回して合否の表を出す。`--check tools/headless/gb-testroms-pass.txt` で前に通っていた物が落ちていないか見る。`src/emulator/gb/` か `cpuSm83.js` を触ったら回す |
 | `live-roll-test.js` | ライブ表示(ロール追記モード)の点検。先読みのタイムラインのハッシュ(HEAD の worktree と比べる)、追記(`liveAppendFrame`)が同じ材料の一括構築と一致すること、1 フレームの追記時間、過去向きの座標系の自己検査 |
 | `vgm-clean-test.js` | 録音の補正(変換設定 SFX_REMOVE / LAG_FIX、`src/vgm/vgmClean.js`)の点検。NSF→VGM に効果音と空フレームを人工的に混ぜ、OFF の不変性と「効果音が残らない・フレーム数が戻る」を見る。`--vgm` で実ファイルの OFF 不変性も |

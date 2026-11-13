@@ -296,12 +296,13 @@
   //   本体 APU は VGM の正規チップ: ヘッダ $80 にクロック(DMG/CGB/SGB2 は 4194304、SGB 初代は 4295454)、0xB3 aa dd(aa = 番地 - $FF10)。
   //   1 フレームは 70224T ≒ 738.35 サンプルで 0x62(735)に乗らないので、時刻は録音頭からの通算 T をサンプルへ換算して 0x61 で待つ
   //   (フレーム境界の端数は自然に 738/739 へ散る)。フレーム内の時刻も T から換算するので、PCM 再生の技の間隔が保たれる。
+  //   { buzz: 音の番号, t } はカートリッジ内ブザー(HuC3)。規格外ブロック GBXX(vgmHeader.js)で載せる(本ツールの再生はまだ鳴らさない)。
   const GB_CLOCK = 4194304, GB_FRAME_T = 70224;
   VGM.encodeGbRecording = function (rec) {
     const frames = rec.frames || [];
     const clock = rec.clock || GB_CLOCK;
     const body = [];
-    let emitted = 0, dropped = 0, baseT = 0, writes = 0;
+    let emitted = 0, dropped = 0, baseT = 0, writes = 0, buzzes = 0;
     const flushWait = (s) => {
       let d = s - emitted;
       while (d > 0) {
@@ -317,6 +318,13 @@
       const len = list.len > 0 ? list.len : GB_FRAME_T;
       for (let i = 0; i < list.length; i++) {
         const w = list[i];
+        if (w.buzz !== undefined && VGM.GBXX) { // カートリッジ内ブザー: 規格外ブロック(種類 2、音の番号)
+          flushWait(toSample(baseT + Math.max(0, Math.min(len - 1, w.t | 0))));
+          const blk = [].concat(VGM.GBXX.MAGIC, [VGM.GBXX.VERSION, VGM.GBXX.KIND_BUZZER, w.buzz & 3]);
+          body.push(0x67, 0x66, VGM.GBXX.TYPE, ...u32(blk.length), ...blk);
+          buzzes++;
+          continue;
+        }
         if (w.addr === undefined) continue;
         if (w.addr < 0xFF10 || w.addr > 0xFF3F) { dropped++; continue; }
         flushWait(toSample(baseT + Math.max(0, Math.min(len - 1, w.t | 0))));
@@ -345,6 +353,6 @@
     hdr.set(u32(clock), 0x80);
     const vgm = new Uint8Array(size);
     vgm.set(hdr, 0); vgm.set(body, HEADER_SIZE); vgm.set(gd3, HEADER_SIZE + body.length);
-    return { vgm, frames: frames.length, dropped, writes, samples: total, clock };
+    return { vgm, frames: frames.length, dropped, writes, buzzes, samples: total, clock };
   };
 })(typeof window !== 'undefined' ? window : globalThis);

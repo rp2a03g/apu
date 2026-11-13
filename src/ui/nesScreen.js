@@ -671,15 +671,24 @@
     recSfxChk = so.c; recLagChk = lo.c;
     saveBtn = mkBtn(T('VGM を保存'), '', saveRecording); saveBtn.hidden = true;
     convBtn = mkBtn(T('変換へ'), '', () => { if (recVgm && NesScreen.onOpenRecording) { setPaused(true); NesScreen.onOpenRecording(recVgm, recFileName()); } }); convBtn.hidden = true;
+    // GB: 赤外線の受光(押している間)と、ポケットプリンタの絵の保存
+    gbLightBtn = mkBtn(T('光'), T('押している間、赤外線の受光部に光を当てる(リモコンなどの光の代わり)'), () => {}); gbLightBtn.hidden = true;
+    attachHold(gbLightBtn, () => sendSensor({ light: true }), () => sendSensor({ light: false }));
+    gbPrintBtn = mkBtn('', T('ポケットプリンタの印刷結果を PNG で保存'), saveGbPrints); gbPrintBtn.hidden = true;
+    gbBarcodeBtn = mkBtn(T('バーコード'), T('バーコードボーイにバーコード(13 桁の数字)を読ませる'), askGbBarcode); gbBarcodeBtn.hidden = true;
     diskBadgeEl = document.createElement('button'); diskBadgeEl.type = 'button'; diskBadgeEl.className = 'nes-diskbadge'; diskBadgeEl.hidden = true;
     diskBadgeEl.addEventListener('click', () => { if (cfg.msx.writeBack && !diskDirHandle) pickDiskDir(); else toggleDiskPopover(sideBtn.hidden ? diskBadgeEl : sideBtn); });
-    bar.appendChild(machineEl); bar.appendChild(lampsEl); bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn); bar.appendChild(ilBadgeEl);
+    bar.appendChild(machineEl); bar.appendChild(lampsEl); bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn); bar.appendChild(gbLightBtn); bar.appendChild(gbBarcodeBtn); bar.appendChild(gbPrintBtn); bar.appendChild(ilBadgeEl);
     statusEl.textContent = '';
     wrap.appendChild(bar); wrap.appendChild(canvas);
     if (MML.Device && MML.Device.isTouch && MML.Device.isTouch()) wrap.appendChild(buildTouchPad());
     softKbdEl = buildSoftKeyboard(); softKbdEl.hidden = true; wrap.appendChild(softKbdEl);
     body.appendChild(wrap);
     applyCfgLabels();
+    // GB の傾き(MBC7): マウスを画面の上で動かすと、中心からの距離ぶん傾く(外へ出ると水平)。スマホは本体の傾き
+    canvas.addEventListener('pointermove', (e) => { if (machine !== 'gb' || !gbTilt || e.pointerType === 'touch') return; const r = canvas.getBoundingClientRect(); sendTilt((e.clientX - r.left - r.width / 2) / (r.width / 2), (e.clientY - r.top - r.height / 2) / (r.height / 2)); });
+    canvas.addEventListener('pointerleave', () => sendTilt(0, 0));
+    window.addEventListener('deviceorientation', (e) => { if (machine !== 'gb' || !gbTilt || e.gamma === null || e.beta === null) return; sendTilt(Math.sin(e.gamma * Math.PI / 180), Math.sin((e.beta - 45) * Math.PI / 180)); }); // 手前へ 45 度傾けて持った姿勢を水平とみなす
     canvas.addEventListener('keydown', (e) => {
       const a = keyActionOf(e.code);
       if (!a) { if (machine === 'msx') { e.preventDefault(); msxKey(e.code, true); } return; } // MSX: 操作キー以外はそのまま MSX のキーボードへ
@@ -794,8 +803,126 @@
     kb.releaseAll = () => { for (const n of downPointers.values()) release(n); downPointers.clear(); for (const m of latched) release(m); latched.clear(); };
     return kb;
   }
+  // ── ゲームボーイの周辺(段階 8e): 赤外線の受光ボタン、傾き(MBC7)、振動、ポケットプリンタの絵 ──
+  let gbLightBtn = null, gbPrintBtn = null, gbPrints = [], gbPrintSeq = 0, gbIrShown = false, gbTilt = false, gbRumbleMs = 0, gbTiltSent = '';
+  function sendSensor(o) {
+    if (machine !== 'gb') return;
+    if (node) node.port.postMessage(Object.assign({ type: 'sensor' }, o));
+    else if (nes) { if (o.light !== undefined && nes.setLight) nes.setLight(o.light); if (o.tiltX !== undefined && nes.setTilt) nes.setTilt(o.tiltX, o.tiltY); }
+  }
+  function sendTilt(x, y) {
+    if (machine !== 'gb' || !gbTilt) return;
+    x = Math.max(-1, Math.min(1, x)); y = Math.max(-1, Math.min(1, y));
+    const key = x.toFixed(2) + ',' + y.toFixed(2);
+    if (key === gbTiltSent) return;
+    gbTiltSent = key;
+    sendSensor({ tiltX: x, tiltY: y });
+  }
+  // ポケットカメラ: ゲームが撮影を始めたら Web カメラを動かし、128×112 の明るさにして本体へ送り続ける(使えなければ本体の試験模様のまま)
+  let gbCam = null; // { stream, video, canvas, timer }
+  function startGbCamera() {
+    if (gbCam || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { if (!gbCam) flashStatus(T('カメラを使えません(試験模様で撮影されます)')); gbCam = gbCam || { failed: true }; return; }
+    gbCam = { pending: true };
+    navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 320 }, height: { ideal: 240 } }, audio: false }).then((stream) => {
+      if (machine !== 'gb' || !gbCam) { stream.getTracks().forEach((t) => t.stop()); return; }
+      const video = document.createElement('video'); video.srcObject = stream; video.muted = true; video.playsInline = true; video.play().catch(() => {});
+      const cv = document.createElement('canvas'); cv.width = 128; cv.height = 112;
+      const g = cv.getContext('2d', { willReadFrequently: true });
+      const timer = setInterval(() => {
+        if (!video.videoWidth) return;
+        // 縦横比を保って中央を切り出す
+        const sw = Math.min(video.videoWidth, video.videoHeight * 128 / 112), sh = sw * 112 / 128;
+        g.drawImage(video, (video.videoWidth - sw) / 2, (video.videoHeight - sh) / 2, sw, sh, 0, 0, 128, 112);
+        const d = g.getImageData(0, 0, 128, 112).data, lum = new Uint8Array(128 * 112);
+        for (let i = 0; i < lum.length; i++) lum[i] = (d[i * 4] * 77 + d[i * 4 + 1] * 150 + d[i * 4 + 2] * 29) >> 8;
+        if (node) node.port.postMessage({ type: 'sensor', camera: lum.buffer }, [lum.buffer]);
+        else if (nes && nes.setCameraImage) nes.setCameraImage(lum);
+      }, 100);
+      gbCam = { stream, video, timer };
+    }).catch(() => { gbCam = { failed: true }; flashStatus(T('カメラを使えません(試験模様で撮影されます)')); });
+  }
+  function stopGbCamera() {
+    if (!gbCam) return;
+    if (gbCam.timer) clearInterval(gbCam.timer);
+    if (gbCam.stream) gbCam.stream.getTracks().forEach((t) => t.stop());
+    gbCam = null;
+  }
+  // バーコードボーイ: 13 桁(JAN/EAN-13)を入れて読ませる
+  let gbBarcodeBtn = null, gbBarcodeShown = false;
+  function askGbBarcode() {
+    const s = window.prompt(T('バーコードの数字 13 桁(JAN/EAN-13)を入れてください'), '');
+    if (s === null) return;
+    const digits = s.replace(/\D/g, '');
+    if (digits.length !== 13) { flashStatus(T('13 桁の数字ではありません')); return; }
+    const okSum = MML.Emu.GbBarcodeBoy && MML.Emu.GbBarcodeBoy.checkEan13(digits);
+    if (node) node.port.postMessage({ type: 'sensor', barcode: digits });
+    else if (nes && nes.scanBarcode) onGbBarcodeResult(nes.scanBarcode(digits));
+    if (!okSum) flashStatus(T('検査数字が合いませんが、そのまま読ませました'));
+  }
+  function onGbBarcodeResult(ok) { if (!ok) flashStatus(T('ゲームが読み取りを待っていません')); }
+
+  // 機種/ROM が変わった時: ボタンを隠し、溜まった絵は残す(保存し損ねないように)
+  function updateGbUi() {
+    gbIrShown = false; gbTiltSent = ''; gbBarcodeShown = false;
+    stopGbCamera();
+    if (gbBarcodeBtn) gbBarcodeBtn.hidden = true;
+    if (machine !== 'gb') gbTilt = false;
+    if (gbLightBtn) gbLightBtn.hidden = true;
+    if (gbPrintBtn) gbPrintBtn.hidden = !gbPrints.length;
+  }
+  // 本体から毎フレーム届く: { rumble, ir, prints }
+  function gbFrameInfo(info) {
+    if (!info || machine !== 'gb') return;
+    if (!!info.ir !== gbIrShown) { gbIrShown = !!info.ir; if (gbLightBtn) gbLightBtn.hidden = !gbIrShown; }
+    if (!!info.barcode !== gbBarcodeShown) { gbBarcodeShown = !!info.barcode; if (gbBarcodeBtn) gbBarcodeBtn.hidden = !gbBarcodeShown; }
+    if (info.camera && !gbCam) startGbCamera();
+    if (info.rumble) {
+      // モータは細かく ON/OFF されるので、回っている間 50ms ごとに短い振動を重ねる(ゲームパッドの振動、スマホは本体の振動)
+      const now = performance.now();
+      if (now - gbRumbleMs >= 50) {
+        gbRumbleMs = now;
+        try {
+          const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+          for (const gp of pads) if (gp && gp.vibrationActuator && gp.vibrationActuator.playEffect) gp.vibrationActuator.playEffect('dual-rumble', { duration: 70, strongMagnitude: 0.8, weakMagnitude: 0.5 }).catch(() => {});
+          if (cfg.vibrate !== false && navigator.vibrate && MML.Device && MML.Device.isTouch && MML.Device.isTouch()) navigator.vibrate(60);
+        } catch (e) { /* 振動が使えない環境 */ }
+      }
+    }
+    if (info.prints && info.prints.length) {
+      for (const p of info.prints) gbPrints.push({ width: p.width, height: p.height, pixels: p.pixels instanceof Uint8Array ? p.pixels : new Uint8Array(p.pixels) });
+      updateGbPrintBtn();
+      flashStatus(T('印刷しました({n} 枚)', { n: gbPrints.length }));
+    }
+  }
+  function updateGbPrintBtn() {
+    if (!gbPrintBtn) return;
+    gbPrintBtn.hidden = !gbPrints.length;
+    gbPrintBtn.textContent = T('印刷 {n} 枚を保存', { n: gbPrints.length });
+  }
+  // 階調(0=白〜3=黒)の絵を PNG にして保存する
+  function saveGbPrints() {
+    const pages = gbPrints.splice(0);
+    updateGbPrintBtn();
+    const GRAY = [255, 170, 85, 0];
+    pages.forEach((p, i) => {
+      const c = document.createElement('canvas'); c.width = p.width; c.height = p.height;
+      const g = c.getContext('2d'), im = g.createImageData(p.width, p.height);
+      for (let k = 0; k < p.pixels.length; k++) { const v = GRAY[p.pixels[k] & 3]; im.data[k * 4] = v; im.data[k * 4 + 1] = v; im.data[k * 4 + 2] = v; im.data[k * 4 + 3] = 255; }
+      g.putImageData(im, 0, 0);
+      c.toBlob((blob) => {
+        if (!blob) return;
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = (romName || 'gb').replace(/\.(gb|gbc|sgb)$/i, '') + '-print-' + (++gbPrintSeq) + '.png';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      }, 'image/png');
+      void i;
+    });
+  }
+
   // 表示の更新: MSX のときだけ ⌨ を出し、タッチ端末か設定 ON ならソフトキーボードを出す。タッチ操作キーの SELECT/START のラベルも機種で変える
   function updateSoftKbd() {
+    updateGbUi();
     const msx = machine === 'msx';
     if (kbdBtn) { kbdBtn.hidden = !msx; kbdBtn.classList.toggle('nes-ib--on', msx && !!cfg.msx.softKbd); }
     const touch = !!(MML.Device && MML.Device.isTouch && MML.Device.isTouch());
@@ -1341,7 +1468,7 @@
     // 再ビルド忘れの検出(capture-worker-client.js と同じ考え方): 主スレッドの現行ソースがバンドルに含まれているか
     const probes = [MML.Emu.NesConsole, MML.Emu.PPU, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC3, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC5, MML.Emu.NesMappers && MML.Emu.NesMappers.VRC7, MML.Emu.FdsDisk && MML.Emu.FdsDisk.Mapper, MML.Emu.NesRewind];
     // MSX 本体(同じバンドルに入る)。ページが MSX の script を読んでいない時は比べる物が無いので飛ばす
-    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.APUGb, MML.Emu.CPUSm83]) if (p) probes.push(p);
+    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.GbPrinter, MML.Emu.GbBarcodeBoy, MML.Emu.APUGb, MML.Emu.CPUSm83]) if (p) probes.push(p);
     for (const p of probes) {
       if (typeof p !== 'function' || src.indexOf(p.toString()) < 0) {
         console.warn('[nes] nes-worklet.js がソースより古い(再ビルド忘れ)ため使いません。tools/build-capture-workers.ps1 で再ビルドしてください');
@@ -1397,14 +1524,16 @@
         updateLamps(m.disk);
         frameSeq = m.seq; underruns = m.underruns || 0;
         if (m.writes) takeFrames(m.writes, m.seq);
+        if (m.gb) gbFrameInfo(m.gb);
         tickFps(performance.now());
         break;
       }
       case 'writes': takeFrames(m.frames || [], frameSeq); break; // record on で像を取り直す前に溜まっていた分(最後は今の途中フレーム)
       case 'rewound': blitFrame(new Uint32Array(m.frame), m.w, m.h); onRewound(m.seq); break;
       case 'rwframe': blitIndex(new Uint8Array(m.idx), m.palette ? new Uint32Array(m.palette) : null, m.w, m.h); onReverseFrame(m.seq); break;
-      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; if (m.chips && machine === 'msx') msxChips = m.chips.slice(); if (m.fps > 0) msxFps = m.fps; fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
+      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; if (m.chips && machine === 'msx') msxChips = m.chips.slice(); if (m.fps > 0) msxFps = m.fps; if (machine === 'gb') { gbTilt = !!m.tilt; if (gbTilt) canvas.title = T('マウスを画面の上で動かすと傾きます(スマホは本体の傾き)'); } fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
       case 'battery': onBatteryMessage(m); break;
+      case 'barcode': onGbBarcodeResult(!!m.ok); break;
       case 'diskAdded': fdsSides = m.count | 0; fdsSide = m.index | 0; updateDiskUi(); break;
       case 'state': saveStateRecord(m.state); break;
       case 'stateLoaded': flashStatus(m.ok ? T('ステートを読み込みました') : T('ステートを読み込めません(別の ROM の物か、形式が違います)')); if (m.ok) liveRestart(); break;
@@ -1447,6 +1576,7 @@
       updateLamps(nes.diskActivity ? nes.diskActivity() : null);
       frameSeq = nes.frameCount;
       if (nes.rec) takeFrames(nes.rec.frames.splice(0), frameSeq);
+      if (machine === 'gb') gbFrameInfo({ rumble: nes.rumble, ir: nes.irWanted, camera: nes.cameraWanted, barcode: nes.barcodeWanted, prints: nes.takePrints() });
       if (hasBattery && nes.batteryDirty && (++mainFrames % 60) === 0) { handleBatteryBlob(nes.getBattery()); nes.clearBatteryDirty(); }
     }
     tickFps(now);
@@ -1877,6 +2007,7 @@
     const rom = bytes.slice().buffer;
     const bat = battery ? battery.slice().buffer : null;
     const ok = await startWorklet({ type: 'load', machine: 'gb', rom, battery: bat, gb: { model: probe.model } }, [rom, bat].filter(Boolean));
+    gbTilt = !!probe.hasTilt; if (gbTilt) canvas.title = T('マウスを画面の上で動かすと傾きます(スマホは本体の傾き)');
     if (!ok) { nes = probe; rewindBuf = MML.Emu.GbRewind ? new MML.Emu.GbRewind(nes) : null; lastPad = -1; lastPad2 = -1; mainFrames = 0; nes.setTurboRate(cfg.turboRate); startMain(); }
     liveBegin();
     updateStatus();
@@ -1982,6 +2113,7 @@
       if (nes && hasBattery && nes.batteryDirty) { handleBatteryBlob(nes.getBattery()); nes.clearBatteryDirty(); }
       await flushBattery();
       stopMain(); stopWorkletNode(); nes = null; rewindBuf = null;
+      stopGbCamera();
     },
     get console() { return nes; },
     get machine() { return machine; },   // 'nes' | 'msx' | 'gb'

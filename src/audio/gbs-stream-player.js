@@ -241,7 +241,8 @@
     load(gbsBytes, songIndex, totalFrames, capture, mute) {
       this.stop();
       this.header = MML.GBS.parseHeader(gbsBytes);
-      this.frameRate = this.header.playFps;
+      // 刻みはその曲の実際の PLAY の周期(曲ごとにタイマを書き換える作品がある。gbsPlayer.js の GbsPlayer.songFps)
+      this.frameRate = MML.Emu.GbsPlayer && MML.Emu.GbsPlayer.songFps ? MML.Emu.GbsPlayer.songFps(gbsBytes, songIndex) : this.header.playFps;
       this.clockHz = MML.GBS.CPU_CLOCK;
       this.snapshots = capture.snapshots;
       this.totalFrames = totalFrames;

@@ -24,6 +24,8 @@
   // TAC の下位 2bit → TIMA を進める DIV(16bit)のビット。そのビットと許可の AND の立ち下がりで +1
   const TAC_BIT = [1 << 9, 1 << 3, 1 << 5, 1 << 7];
   const SERIAL_BIT = 1 << 8; // 内部クロック 8192Hz = DIV bit8 の立ち下がり
+  // HuC3 のブザー: 音の番号 0-3 の高さと 1 回の長さ。★実機の値は分からない(推定の仮の値)。分かったらここだけ直す
+  const BUZZ_HZ = [2048, 2560, 3072, 4096], BUZZ_SEC = 0.2, BUZZ_LEVEL = 0.06;
   const APU_BIT = 1 << 12;   // APU のフレームシーケンサ 512Hz = DIV bit12 の立ち下がり(CGB の倍速時は bit13。this.apuBit)
 
   class GbConsole {
@@ -54,6 +56,16 @@
       this.onFrame = null;
       this.onSerial = null; // (byte) シリアルへ 1 バイト送り終えた(テスト ROM の結果表示など)
       this.serialDevice = null; // (byte) => 受け取るバイト。未接続は $FF
+      // 通信ポートのポケットプリンタ(opts.printer === false で外す)。刷り上がった絵は prints に溜まる(画面側が takePrints で取る)
+      this.prints = [];
+      this.printer = opts.printer === false || !Emu.GbPrinter ? null : new Emu.GbPrinter();
+      if (this.printer) this.printer.onPrint = (page) => { this.prints.push(page); };
+      // バーコードボーイも同じ口に。ゲームが送る最初のバイトで見分かれる(握手 $10 $07… はバーコードボーイ、$88 $33… はプリンタ)
+      this.barcode = opts.barcode === false || !Emu.GbBarcodeBoy ? null : new Emu.GbBarcodeBoy();
+      if (this.printer || this.barcode) this.serialDevice = (b) => { const r = this.barcode ? this.barcode.exchange(b) : null; return r !== null ? r : (this.printer ? this.printer.exchange(b) : 0xFF); };
+      // カートリッジ内ブザー(HuC3)。音の高さと長さは資料が無く仮の値(BUZZ_HZ / BUZZ_SEC)。録音には「鳴らした時刻と音の番号」を載せる
+      this.bzLeft = 0; this.bzPhase = 0; this.bzStep = 0;
+      this.irIn = false; // 赤外線の受光(CGB 本体のポートと HuC1 のカートリッジ。画面側が setLight で入れる)
       this.serialOut = [];  // 送り終えたバイト
       this.serialSent = []; // 送り始めたバイト(完了を待たずに次を送るソフトの出力も拾える。mooneye のテスト ROM の合否)
       this.rec = null;
@@ -119,6 +131,29 @@
     get frameHeight() { return 144; }
     get frameRate() { return CLOCK / FRAME_T; } // 59.7275Hz
     get stereo() { return true; }
+    // ── 周辺の入出力(段階 8e)──
+    // 傾き(MBC7): −1〜+1、右/下が正、1 = 重力 1 個ぶん
+    setTilt(x, y) { this.cart.tiltX = +x || 0; this.cart.tiltY = +y || 0; }
+    get hasTilt() { return !!this.cart.hasTilt; }
+    // 赤外線の受光(押している間 true)
+    setLight(on) { this.irIn = !!on; this.cart.irIn = !!on; }
+    // ゲームが今、赤外線を読もうとしているか(画面側が受光ボタンを出す目安)
+    get irWanted() { return !!(this.cart.hasIr && this.cart.irMode) || (this.cgb && (this.rp & 0xC0) === 0xC0); }
+    // 振動モータ(MBC5 の振動つき)
+    get rumble() { return !!this.cart.rumble; }
+    takePrints() { return this.prints.length ? this.prints.splice(0) : null; }
+    // ポケットカメラ: 元の絵(128×112、0〜255 の明るさ)を入れる。cameraWanted はゲームが撮影を始めたか(画面側が Web カメラを動かす目安)
+    setCameraImage(u8) { if (this.cart.hasCamera) this.cart.camImage = u8; }
+    get cameraWanted() { return !!(this.cart.hasCamera && this.cart.cam && this.cart.cam.shots > 0); }
+    // バーコードボーイ: ゲームが握手を済ませて読み取りを待っているか/13 桁を読ませる
+    get barcodeWanted() { return !!(this.barcode && this.barcode.armed && !this.barcode.queue.length); }
+    scanBarcode(digits) { return !!(this.barcode && this.barcode.scan(digits)); }
+    _buzz(tones) {
+      for (const tone of tones) {
+        if (this.rec) this.rec.cur.push({ buzz: tone & 3, t: this.frameT });
+        this.bzLeft = Math.round(BUZZ_SEC * (this.sampleRate || 44100)); this.bzPhase = 0; this.bzStep = BUZZ_HZ[tone & 3] / (this.sampleRate || 44100);
+      }
+    }
     // ゲーム画面(nesScreen.js / nes-worklet-impl.js)が機種を問わず呼ぶ口
     extBits() { return 0; }
     get diskCount() { return 0; }
@@ -195,7 +230,9 @@
           if (this.ringLen < AUDIO_RING) {
             const s = apu.mixSample();
             const i = (this.ringHead + this.ringLen) & (AUDIO_RING - 1);
-            this.ring[i] = s.left; this.ringR[i] = s.right;
+            let bz = 0;
+            if (this.bzLeft > 0) { this.bzLeft--; this.bzPhase += this.bzStep; if (this.bzPhase >= 1) this.bzPhase -= 1; bz = this.bzPhase < 0.5 ? BUZZ_LEVEL : -BUZZ_LEVEL; }
+            this.ring[i] = s.left + bz; this.ringR[i] = s.right + bz;
             this.ringLen++;
           }
         }
@@ -207,7 +244,11 @@
       const old = this.div;
       this.div = nv;
       if (this.tac & 4) { const b = TAC_BIT[this.tac & 3]; if ((old & b) && !(nv & b)) this._incTima(); }
-      if ((old & this.apuBit) && !(nv & this.apuBit)) this.apu.seqTick();
+      if ((old & this.apuBit) && !(nv & this.apuBit)) {
+        this.apu.seqTick();
+        // 外部クロックで待っているゲームへ、つないだ機器(バーコードボーイ)の側から 1 バイト送る(512Hz に 1 回見る)
+        if ((this.sc & 0x81) === 0x80 && this.barcode) { const b = this.barcode.pull(); if (b >= 0) { this.sb = b; this.sc &= 0x7F; this.if |= 8; } }
+      }
       const sbit = (this.sc & 2) ? 1 << 3 : SERIAL_BIT; // CGB の高速クロック(SC bit1)
       if (this.serialBits && (old & sbit) && !(nv & sbit)) {
         if (--this.serialBits === 0) {
@@ -274,7 +315,7 @@
           case 0xFF4D: return (this.doubleSpeed ? 0x80 : 0) | (this.key1 & 1) | 0x7E;
           case 0xFF4F: return ppu.vbk | 0xFE;
           case 0xFF55: return this.hdmaActive ? ((this.hdmaLeft - 1) & 0x7F) : (this.hdmaLeft > 0 ? 0x80 | ((this.hdmaLeft - 1) & 0x7F) : 0xFF);
-          case 0xFF56: return (this.rp & 0xC1) | 0x3E; // 赤外線: 受光なし(bit1=1)
+          case 0xFF56: return (this.rp & 0xC1) | 0x3C | (this.irIn && (this.rp & 0xC0) === 0xC0 ? 0 : 2); // 赤外線: 読み取りを有効にしていて光があれば bit1=0
           case 0xFF68: return ppu.bcps | 0x40;
           case 0xFF69: return ppu.bgPalRam[ppu.bcps & 0x3F];
           case 0xFF6A: return ppu.ocps | 0x40;
@@ -295,7 +336,7 @@
     write(addr, v) {
       if (addr < 0x8000) { this.cart.write(addr, v); return; }
       if (addr < 0xA000) { if (!this.ppu.vramBlocked()) this.ppu.vram[this.ppu.vbk * 0x2000 + addr - 0x8000] = v; return; }
-      if (addr < 0xC000) { this.cart.writeRam(addr, v); return; }
+      if (addr < 0xC000) { this.cart.writeRam(addr, v); if (this.cart.buzzQueue && this.cart.buzzQueue.length) this._buzz(this.cart.takeBuzz()); return; } // buzzQueue: GBS 用のカートリッジには無い
       if (addr < 0xFE00) { this.wram[this._w(addr)] = v; return; }
       if (addr < 0xFEA0) { if (!this.dmaActive && !this.ppu.oamBlocked()) this.ppu.oam[addr - 0xFE00] = v; return; }
       if (addr < 0xFF00) return;

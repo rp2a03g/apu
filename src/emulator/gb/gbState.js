@@ -6,6 +6,7 @@
  *   - ステート: 本体(GbConsole)のオブジェクト木を汎用に写す。除外は ROM、録音、音のリング、画面、コールバック、シリアルの記録
  *   - 巻き戻し: 0.5 秒ごとのステート+毎フレームのパッド値。逆再生の映像は ppu.frameIdx(階調番号 8bit、160×144)
  * 形: { v: 1, machine: 'gb', title, romLen, tree }
+ * MBC6 のフラッシュ(1MB)はステート/巻き戻しに入れない(大きすぎる。フラッシュへ書いた後に巻き戻すと中身は戻らない)
  */
 (function (global) {
   'use strict';
@@ -13,7 +14,7 @@
   const Emu = MML.Emu = MML.Emu || {};
 
   const SKIP_KEYS = new Set(['rom', 'rec', 'ring', 'ringR', 'frame', 'frameIdx', 'onFrame', 'onWrite', 'onSerial', 'serialDevice',
-    'serialOut', 'serialSent', 'bus', 'divBit', 'con', 'shades', 'palRing', 'lineIdx', 'claimed', '_out', 'header', 'data', 'low']);
+    'serialOut', 'serialSent', 'bus', 'divBit', 'con', 'shades', 'palRing', 'prints', 'onPrint', 'pages', 'camImage', 'flash', 'x', 'buzzQueue', 'lineIdx', 'claimed', '_out', 'header', 'data', 'low']);
 
   const GbState = {
     save(gb) {

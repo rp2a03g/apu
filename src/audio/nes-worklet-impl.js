@@ -72,7 +72,7 @@
             const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? MML.Emu.GbRewind : MML.Emu.NesRewind;
             this.rewind = Rewind ? new Rewind(nes) : null;
             this.dcX = 0; this.dcY = 0; this.dcX2 = 0; this.dcY2 = 0;
-            this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH() });
+            this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, tilt: !!nes.hasTilt, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH() });
             break;
           }
           case 'key': // MSX: PC のキー(KeyboardEvent.code)を押す/離す。対応の無いキーは本体が無視する
@@ -97,6 +97,13 @@
             break;
           }
           case 'pad': if (this.nes) this.nes.setController(m.port | 0, m.bits | 0, m.turbo | 0); break;
+          case 'sensor': // GB: 傾き(MBC7)と赤外線の受光
+            if (!this.nes) break;
+            if (m.tiltX !== undefined && typeof this.nes.setTilt === 'function') this.nes.setTilt(+m.tiltX || 0, +m.tiltY || 0);
+            if (m.light !== undefined && typeof this.nes.setLight === 'function') this.nes.setLight(!!m.light);
+            if (m.camera && typeof this.nes.setCameraImage === 'function') this.nes.setCameraImage(new Uint8Array(m.camera)); // ポケットカメラの元の絵(128×112 の明るさ)
+            if (m.barcode !== undefined && typeof this.nes.scanBarcode === 'function') this.port.postMessage({ type: 'barcode', ok: this.nes.scanBarcode(String(m.barcode)) });
+            break;
           case 'turboRate': if (this.nes) this.nes.setTurboRate(m.frames | 0); break;
           case 'reset': if (this.nes) { this.nes.reset(); if (this.rewind) this.rewind.clear(); } break;
           case 'mix': { // 鍵盤表示のミュート/音量(2A03 は apu.mute/vol、拡張音源はマッパーの audio.mute/vol)。capture.js の applyMute/applyVolume と同じ流儀(バンドルに無いので自前)
@@ -176,7 +183,13 @@
       const frame = nes.frame.slice(0, this.frameW() * this.frameH()); // MSX は幅がモードで変わる(frame は最大幅で確保。幅ぶんだけ送る)
       const msg = { type: 'frame', seq: this.frameSeq, frame: frame.buffer, underruns: nes.underruns, w: this.frameW(), h: this.frameH(), il: !!nes.interlaced, disk: nes.diskActivity ? nes.diskActivity() : null }; // disk: アクセスランプ(ドライブごとの { access, media })
       if (nes.rec) { msg.writes = nes.rec.frames.splice(0); }
-      this.port.postMessage(msg, [frame.buffer]);
+      const tr = [frame.buffer];
+      if (this.machine === 'gb') { // GB の周辺: 振動モータ、赤外線を読もうとしているか、刷り上がった絵
+        msg.gb = { rumble: !!nes.rumble, ir: !!nes.irWanted, camera: !!nes.cameraWanted, barcode: !!nes.barcodeWanted };
+        const pr = nes.takePrints();
+        if (pr) msg.gb.prints = pr.map((p) => { tr.push(p.pixels.buffer); return { width: p.width, height: p.height, pixels: p.pixels.buffer }; });
+      }
+      this.port.postMessage(msg, tr);
       if ((this.frameSeq % 60) === 0) this.postBattery(false); // 1 秒ごとに、セーブ RAM が変わっていれば主スレッドへ
     }
     // セーブ RAM(バッテリ/FDS ディスク)を主スレッドへ送る。final=true は unload への返事(変化が無くても data 無しで返す)

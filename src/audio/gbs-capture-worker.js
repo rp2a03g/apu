@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 16:09:37
+ * Built by tools/build-capture-workers.ps1 at 2026-11-13 17:16:06
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-13 16:09:37';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-13 17:16:06';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -1506,6 +1506,185 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
+ * ポケットプリンタ(通信ポートにつなぐ感熱プリンタ)
+ * MML.Emu.GbPrinter
+ *
+ * 本体(gbConsole.js)の serialDevice として使う: exchange(GB が送ったバイト) → プリンタが返すバイト。
+ * パケット: $88 $33 命令 圧縮 長さ(下位, 上位) データ… チェックサム(下位, 上位)、続く 2 バイトの間にプリンタが $81 と状態を返す。
+ *   命令 1 = 初期化、2 = 印刷(枚数、余白[上位=前/下位=後]、パレット、濃さ)、4 = 画像データ(2bpp のタイル、横 20 タイル。
+ *   1 パケット最大 $280 バイト = 2 段)、$F = 状態の問い合わせ
+ *   圧縮(フラグ 1): 制御バイトの bit7 が 1 なら次の 1 バイトを (下位 7bit+2) 回、0 なら続く (値+1) バイトをそのまま
+ * 印刷: 溜まったタイルをパレットで階調(0=白〜3=黒)にして 1 枚の帯にする。後ろの余白が 0 の印刷は次の印刷とつながる(長い絵)ので、
+ *   余白ありの印刷が来た所で 1 枚として確定し、onPrint({ width: 160, height, pixels: Uint8Array(階調) }) に渡す。
+ * 状態: データあり $08 → 印刷命令の直後 $06(印刷中)→ 何度か問い合わせると $04(完了)。初期化で 0 に戻る。
+ *
+ * 参考: Pan Docs "Game Boy Printer"
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const W = 160;
+
+  class GbPrinter {
+    constructor() {
+      this.onPrint = null;
+      this.pages = [];       // 確定した絵(onPrint が無い時に溜まる)
+      this.reset();
+    }
+    reset() {
+      this.state = 0;        // 0,1 = マジック、2 = 命令、3 = 圧縮、4,5 = 長さ、6 = データ、7,8 = チェックサム、9 = $81 を返す、10 = 状態を返す
+      this.cmd = 0; this.compress = 0; this.len = 0; this.got = 0; this.sum = 0; this.chk = 0;
+      this.data = new Uint8Array(0x280);
+      this.tiles = [];       // 溜まった画像データ(バイト列)
+      this.strips = [];      // 印刷済みでまだ確定していない帯(階調の行列)
+      this.status = 0;
+      this.busy = 0;         // 印刷中として答える残り回数
+    }
+
+    // 1 バイトのやり取り
+    exchange(b) {
+      b &= 0xFF;
+      switch (this.state) {
+        case 0: this.state = b === 0x88 ? 1 : 0; return 0x00;
+        case 1: this.state = b === 0x33 ? 2 : (b === 0x88 ? 1 : 0); return 0x00;
+        case 2: this.cmd = b; this.sum = b; this.state = 3; return 0x00;
+        case 3: this.compress = b & 1; this.sum += b; this.state = 4; return 0x00;
+        case 4: this.len = b; this.sum += b; this.state = 5; return 0x00;
+        case 5: this.len |= b << 8; this.sum += b; this.got = 0; this.state = this.len ? 6 : 7; if (this.len > this.data.length) this.data = new Uint8Array(this.len); return 0x00;
+        case 6: this.data[this.got++] = b; this.sum += b; if (this.got >= this.len) this.state = 7; return 0x00;
+        case 7: this.chk = b; this.state = 8; return 0x00;
+        case 8: this.chk |= b << 8; this._run((this.sum & 0xFFFF) === this.chk); this.state = 9; return 0x00;
+        case 9: this.state = 10; return 0x81;
+        default: {
+          this.state = 0;
+          const st = this.status;
+          if (this.busy > 0 && --this.busy === 0) this.status = (this.status & ~0x02) & ~0x08 | 0x04; // 印刷が終わった
+          return st;
+        }
+      }
+    }
+
+    _run(sumOk) {
+      if (!sumOk) { this.status |= 0x01; return; }
+      this.status &= ~0x01;
+      const d = this.data.subarray(0, this.len);
+      switch (this.cmd) {
+        case 0x01: this.tiles = []; this.status = 0; this.busy = 0; break;
+        case 0x04:
+          if (!this.len) break; // 空のデータ = 「これで全部」
+          if (this.compress) {
+            for (let i = 0; i < d.length;) {
+              const c = d[i++];
+              if (c & 0x80) { const v = d[i++]; for (let k = (c & 0x7F) + 2; k > 0; k--) this.tiles.push(v); }
+              else { for (let k = c + 1; k > 0 && i < d.length; k--) this.tiles.push(d[i++]); }
+            }
+          } else for (let i = 0; i < d.length; i++) this.tiles.push(d[i]);
+          this.status |= 0x08;
+          break;
+        case 0x02: {
+          const margins = d.length > 1 ? d[1] : 0x13, pal = (d.length > 2 && d[2]) ? d[2] : 0xE4;
+          if (d.length && d[0] === 0) { this._finish(); break; } // 0 枚 = 紙送りだけ
+          this._strip(pal);
+          this.tiles = [];
+          this.status = (this.status | 0x02 | 0x08) & 0xFF; this.busy = 3;
+          if (margins & 0x0F) this._finish(); // 後ろに余白がある = ここで 1 枚
+          break;
+        }
+        default: break; // $0F: 状態だけ
+      }
+    }
+    // 溜まったタイル(横 20 個ずつ)を階調の帯にする
+    _strip(pal) {
+      const rows = Math.floor(this.tiles.length / (20 * 16));
+      if (!rows) return;
+      const px = new Uint8Array(W * rows * 8), t = this.tiles;
+      for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < 20; tx++) {
+        const base = (ty * 20 + tx) * 16;
+        for (let y = 0; y < 8; y++) {
+          const lo = t[base + y * 2], hi = t[base + y * 2 + 1];
+          for (let x = 0; x < 8; x++) {
+            const c = (((hi >> (7 - x)) & 1) << 1) | ((lo >> (7 - x)) & 1);
+            px[(ty * 8 + y) * W + tx * 8 + x] = (pal >> (c * 2)) & 3;
+          }
+        }
+      }
+      this.strips.push(px);
+    }
+    // 帯をつないで 1 枚にして渡す
+    _finish() {
+      if (!this.strips.length) return;
+      const total = this.strips.reduce((n, s) => n + s.length, 0);
+      const pixels = new Uint8Array(total);
+      let o = 0; for (const s of this.strips) { pixels.set(s, o); o += s.length; }
+      this.strips = [];
+      const page = { width: W, height: total / W, pixels };
+      if (this.onPrint) this.onPrint(page); else this.pages.push(page);
+    }
+    // つながる印刷の途中で止まっている帯があれば確定する(ゲームを閉じる時など)
+    flush() { this._finish(); }
+  }
+
+  Emu.GbPrinter = GbPrinter;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * バーコードボーイ(通信ポートにつなぐバーコードリーダー、1992 年、対応ソフト 5 本)
+ * MML.Emu.GbBarcodeBoy
+ *
+ * 1. ゲームが内部クロックで $10 $07 $10 $07 を送る。リーダーは $FF $FF $10 $07 を返す(後ろの 2 つが合えば「つながっている」)
+ * 2. その後ゲームは外部クロックで待つ。カードを通すとリーダーの側がクロックを出して 30 バイト送る:
+ *    $02、EAN-13 の 13 桁(ASCII)、$03 を 2 回
+ * 3. 送り終わるとまた 1 の握手から
+ *
+ * exchange(b): ゲームが内部クロックで送った 1 バイトへの返事。握手に関係ないバイトは null(呼び出し側が他の機器=プリンタへ回す)
+ * pull(): ゲームが外部クロックで待っている時に本体が呼ぶ。送るバイトがあればそれ、無ければ −1
+ * scan(digits): 13 桁(JAN/EAN-13)を読ませる。握手が済んでいる時だけ受け付ける
+ *
+ * 参考: Shonumi "Dan Docs" の Barcode Boy の章。実機の送る間隔は分からないので、本体の都合の速さ(約 2ms に 1 バイト)で送る
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const HELLO = [0x10, 0x07, 0x10, 0x07], REPLY = [0xFF, 0xFF, 0x10, 0x07];
+
+  class GbBarcodeBoy {
+    constructor() { this.reset(); }
+    reset() { this.pos = 0; this.armed = false; this.queue = []; }
+    exchange(b) {
+      if (b === HELLO[this.pos]) { const r = REPLY[this.pos]; if (++this.pos === 4) { this.pos = 0; this.armed = true; } return r; }
+      if (this.pos > 0) { this.pos = b === HELLO[0] ? 1 : 0; return b === HELLO[0] ? REPLY[0] : 0xFF; }
+      return this.armed ? 0xFF : null; // 握手の後、ゲームが自分のクロックで送ってきた物には $FF
+    }
+    pull() {
+      if (!this.queue.length) return -1;
+      const b = this.queue.shift();
+      if (!this.queue.length) this.armed = false; // 送り終わったら握手からやり直し
+      return b;
+    }
+    scan(digits) {
+      const s = String(digits || '').replace(/\D/g, '');
+      if (s.length !== 13 || !this.armed || this.queue.length) return false;
+      const part = [0x02]; for (let i = 0; i < 13; i++) part.push(s.charCodeAt(i)); part.push(0x03);
+      this.queue = part.concat(part);
+      return true;
+    }
+    // EAN-13 の検査数字が合っているか(入力の確認用)
+    static checkEan13(digits) {
+      const s = String(digits || '').replace(/\D/g, '');
+      if (s.length !== 13) return false;
+      let sum = 0; for (let i = 0; i < 12; i++) sum += (s.charCodeAt(i) - 48) * (i % 2 ? 3 : 1);
+      return (10 - sum % 10) % 10 === s.charCodeAt(12) - 48;
+    }
+  }
+
+  Emu.GbBarcodeBoy = GbBarcodeBoy;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
  * ゲームボーイ本体(段階 8a: DMG の骨格)
  * MML.Emu.GbConsole
  *
@@ -1531,6 +1710,8 @@
   // TAC の下位 2bit → TIMA を進める DIV(16bit)のビット。そのビットと許可の AND の立ち下がりで +1
   const TAC_BIT = [1 << 9, 1 << 3, 1 << 5, 1 << 7];
   const SERIAL_BIT = 1 << 8; // 内部クロック 8192Hz = DIV bit8 の立ち下がり
+  // HuC3 のブザー: 音の番号 0-3 の高さと 1 回の長さ。★実機の値は分からない(推定の仮の値)。分かったらここだけ直す
+  const BUZZ_HZ = [2048, 2560, 3072, 4096], BUZZ_SEC = 0.2, BUZZ_LEVEL = 0.06;
   const APU_BIT = 1 << 12;   // APU のフレームシーケンサ 512Hz = DIV bit12 の立ち下がり(CGB の倍速時は bit13。this.apuBit)
 
   class GbConsole {
@@ -1561,6 +1742,16 @@
       this.onFrame = null;
       this.onSerial = null; // (byte) シリアルへ 1 バイト送り終えた(テスト ROM の結果表示など)
       this.serialDevice = null; // (byte) => 受け取るバイト。未接続は $FF
+      // 通信ポートのポケットプリンタ(opts.printer === false で外す)。刷り上がった絵は prints に溜まる(画面側が takePrints で取る)
+      this.prints = [];
+      this.printer = opts.printer === false || !Emu.GbPrinter ? null : new Emu.GbPrinter();
+      if (this.printer) this.printer.onPrint = (page) => { this.prints.push(page); };
+      // バーコードボーイも同じ口に。ゲームが送る最初のバイトで見分かれる(握手 $10 $07… はバーコードボーイ、$88 $33… はプリンタ)
+      this.barcode = opts.barcode === false || !Emu.GbBarcodeBoy ? null : new Emu.GbBarcodeBoy();
+      if (this.printer || this.barcode) this.serialDevice = (b) => { const r = this.barcode ? this.barcode.exchange(b) : null; return r !== null ? r : (this.printer ? this.printer.exchange(b) : 0xFF); };
+      // カートリッジ内ブザー(HuC3)。音の高さと長さは資料が無く仮の値(BUZZ_HZ / BUZZ_SEC)。録音には「鳴らした時刻と音の番号」を載せる
+      this.bzLeft = 0; this.bzPhase = 0; this.bzStep = 0;
+      this.irIn = false; // 赤外線の受光(CGB 本体のポートと HuC1 のカートリッジ。画面側が setLight で入れる)
       this.serialOut = [];  // 送り終えたバイト
       this.serialSent = []; // 送り始めたバイト(完了を待たずに次を送るソフトの出力も拾える。mooneye のテスト ROM の合否)
       this.rec = null;
@@ -1626,6 +1817,29 @@
     get frameHeight() { return 144; }
     get frameRate() { return CLOCK / FRAME_T; } // 59.7275Hz
     get stereo() { return true; }
+    // ── 周辺の入出力(段階 8e)──
+    // 傾き(MBC7): −1〜+1、右/下が正、1 = 重力 1 個ぶん
+    setTilt(x, y) { this.cart.tiltX = +x || 0; this.cart.tiltY = +y || 0; }
+    get hasTilt() { return !!this.cart.hasTilt; }
+    // 赤外線の受光(押している間 true)
+    setLight(on) { this.irIn = !!on; this.cart.irIn = !!on; }
+    // ゲームが今、赤外線を読もうとしているか(画面側が受光ボタンを出す目安)
+    get irWanted() { return !!(this.cart.hasIr && this.cart.irMode) || (this.cgb && (this.rp & 0xC0) === 0xC0); }
+    // 振動モータ(MBC5 の振動つき)
+    get rumble() { return !!this.cart.rumble; }
+    takePrints() { return this.prints.length ? this.prints.splice(0) : null; }
+    // ポケットカメラ: 元の絵(128×112、0〜255 の明るさ)を入れる。cameraWanted はゲームが撮影を始めたか(画面側が Web カメラを動かす目安)
+    setCameraImage(u8) { if (this.cart.hasCamera) this.cart.camImage = u8; }
+    get cameraWanted() { return !!(this.cart.hasCamera && this.cart.cam && this.cart.cam.shots > 0); }
+    // バーコードボーイ: ゲームが握手を済ませて読み取りを待っているか/13 桁を読ませる
+    get barcodeWanted() { return !!(this.barcode && this.barcode.armed && !this.barcode.queue.length); }
+    scanBarcode(digits) { return !!(this.barcode && this.barcode.scan(digits)); }
+    _buzz(tones) {
+      for (const tone of tones) {
+        if (this.rec) this.rec.cur.push({ buzz: tone & 3, t: this.frameT });
+        this.bzLeft = Math.round(BUZZ_SEC * (this.sampleRate || 44100)); this.bzPhase = 0; this.bzStep = BUZZ_HZ[tone & 3] / (this.sampleRate || 44100);
+      }
+    }
     // ゲーム画面(nesScreen.js / nes-worklet-impl.js)が機種を問わず呼ぶ口
     extBits() { return 0; }
     get diskCount() { return 0; }
@@ -1702,7 +1916,9 @@
           if (this.ringLen < AUDIO_RING) {
             const s = apu.mixSample();
             const i = (this.ringHead + this.ringLen) & (AUDIO_RING - 1);
-            this.ring[i] = s.left; this.ringR[i] = s.right;
+            let bz = 0;
+            if (this.bzLeft > 0) { this.bzLeft--; this.bzPhase += this.bzStep; if (this.bzPhase >= 1) this.bzPhase -= 1; bz = this.bzPhase < 0.5 ? BUZZ_LEVEL : -BUZZ_LEVEL; }
+            this.ring[i] = s.left + bz; this.ringR[i] = s.right + bz;
             this.ringLen++;
           }
         }
@@ -1714,7 +1930,11 @@
       const old = this.div;
       this.div = nv;
       if (this.tac & 4) { const b = TAC_BIT[this.tac & 3]; if ((old & b) && !(nv & b)) this._incTima(); }
-      if ((old & this.apuBit) && !(nv & this.apuBit)) this.apu.seqTick();
+      if ((old & this.apuBit) && !(nv & this.apuBit)) {
+        this.apu.seqTick();
+        // 外部クロックで待っているゲームへ、つないだ機器(バーコードボーイ)の側から 1 バイト送る(512Hz に 1 回見る)
+        if ((this.sc & 0x81) === 0x80 && this.barcode) { const b = this.barcode.pull(); if (b >= 0) { this.sb = b; this.sc &= 0x7F; this.if |= 8; } }
+      }
       const sbit = (this.sc & 2) ? 1 << 3 : SERIAL_BIT; // CGB の高速クロック(SC bit1)
       if (this.serialBits && (old & sbit) && !(nv & sbit)) {
         if (--this.serialBits === 0) {
@@ -1781,7 +2001,7 @@
           case 0xFF4D: return (this.doubleSpeed ? 0x80 : 0) | (this.key1 & 1) | 0x7E;
           case 0xFF4F: return ppu.vbk | 0xFE;
           case 0xFF55: return this.hdmaActive ? ((this.hdmaLeft - 1) & 0x7F) : (this.hdmaLeft > 0 ? 0x80 | ((this.hdmaLeft - 1) & 0x7F) : 0xFF);
-          case 0xFF56: return (this.rp & 0xC1) | 0x3E; // 赤外線: 受光なし(bit1=1)
+          case 0xFF56: return (this.rp & 0xC1) | 0x3C | (this.irIn && (this.rp & 0xC0) === 0xC0 ? 0 : 2); // 赤外線: 読み取りを有効にしていて光があれば bit1=0
           case 0xFF68: return ppu.bcps | 0x40;
           case 0xFF69: return ppu.bgPalRam[ppu.bcps & 0x3F];
           case 0xFF6A: return ppu.ocps | 0x40;
@@ -1802,7 +2022,7 @@
     write(addr, v) {
       if (addr < 0x8000) { this.cart.write(addr, v); return; }
       if (addr < 0xA000) { if (!this.ppu.vramBlocked()) this.ppu.vram[this.ppu.vbk * 0x2000 + addr - 0x8000] = v; return; }
-      if (addr < 0xC000) { this.cart.writeRam(addr, v); return; }
+      if (addr < 0xC000) { this.cart.writeRam(addr, v); if (this.cart.buzzQueue && this.cart.buzzQueue.length) this._buzz(this.cart.takeBuzz()); return; } // buzzQueue: GBS 用のカートリッジには無い
       if (addr < 0xFE00) { this.wram[this._w(addr)] = v; return; }
       if (addr < 0xFEA0) { if (!this.dmaActive && !this.ppu.oamBlocked()) this.ppu.oam[addr - 0xFE00] = v; return; }
       if (addr < 0xFF00) return;
@@ -1995,7 +2215,9 @@
       this.mbc = 'gbs'; this.unsupported = false; this.hasBattery = false; this.hasRtc = false; this.dirty = false;
       this.header = { title: header.title || '', type: 0, cgb: false, cgbOnly: false, sgb: false, checksumOk: true };
       const L = this.loadAddr;
-      this.bankCount = Math.max(2, Math.ceil((L + data.length) / 0x4000));
+      // バンク数は 2 のべきに切り上げる(実カートリッジと同じ。足りない上位ビットは無視され、同じ中身が繰り返し見える)
+      let bc = 2; while (bc * 0x4000 < L + data.length) bc *= 2;
+      this.bankCount = bc;
       const low = this.low = new Uint8Array(0x40);
       for (let i = 0; i <= 0x38; i += 8) { const t = (L + i) & 0xFFFF; low[i] = 0xC3; low[i + 1] = t & 0xFF; low[i + 2] = t >> 8; }
       this.reset();
@@ -2006,13 +2228,15 @@
       if (addr < L) return addr < 0x40 ? this.low[addr] : 0;
       // $4000 までが固定、$4000-$7FFF はバンク 1 がその続き、バンク 2 以降は $4000 バイトずつ後ろ
       const off = addr < 0x4000 ? addr - L : (0x4000 - L) + (this.bank - 1) * 0x4000 + (addr - 0x4000);
-      return off < this.data.length ? this.data[off] : 0;
+      return off >= 0 && off < this.data.length ? this.data[off] : 0;
     }
     write(addr, v) {
       if (addr >= 0x2000 && addr < 0x4000) {
+        // MBC1 と同じ: 0 は 1 に読み替えてから、ある分のビットだけ見る。2 バンクしか無い曲データが上位ビットの立った番号を書いても
+        // 正しいバンクが出る(2026-11-13 まで番号をそのまま使っていて、データの外=0 を読んで暴走する曲があった。Mesen との突き合わせで判明)
         let n = this.bankCount <= 32 ? v & 0x1F : v;
         if (n === 0) n = 1;
-        this.bank = n;
+        this.bank = n % this.bankCount;
       }
     }
     readRam(addr) { return this.ram[addr & 0x1FFF]; }
@@ -2040,7 +2264,10 @@
       this.con.onWrite = (addr, value) => { if (this.bus.onWrite) this.bus.onWrite(addr, value, this.con.cpuCycles - this._frameStartT); };
 
       this.clockHz = MML.GBS.CPU_CLOCK;
-      this.frameRate = this.header.playFps; // 採取の刻み(ヘッダの TMA/TAC から。曲が後で変えても刻みは変えない)
+      // 採取の刻み = PLAY の周期。ヘッダの TMA/TAC が基本だが、曲ごとに INIT や最初の PLAY でタイマを書き換えてテンポを変える作品がある
+      // (ヘッダ 89Hz に対して曲により 69〜108Hz など)。initSong がその曲の実際の値に直す(GbsPlayer.songFps)
+      this.bytes = gbsBytes;
+      this.frameRate = this.header.playFps;
       this.speedFactor = 1;
       this._playAccum = 0;
       this._frameStartT = 0;
@@ -2064,7 +2291,7 @@
       con._setDiv(0);
       con.write(0xFF06, h.tma | 0); con.write(0xFF05, h.tma | 0); con.write(0xFF07, tac & 0x07);
       cpu.ime = false; cpu.halted = false; cpu.stopped = false;
-      cpu.a = songIndex & 0xFF;
+      cpu.a = songIndex & 0xFF; cpu.setBC(IDLE); cpu.setDE(IDLE); cpu.setHL(IDLE); // INIT も釣り合わない戻り方に備える
       cpu.sp = h.stackPointer; this._push(IDLE);
       cpu.pc = h.initAddr;
       // INIT が戻るまで(最大 1 秒ぶん)。HALT/STOP で止まる INIT は戻ったものとして扱う(旧実装と同じ)
@@ -2079,6 +2306,15 @@
       while (!this._boundary && con.cpuCycles < limit2) this._step();
       con.ringHead = 0; con.ringLen = 0; con.cycleAccum = 0;
       this._frameStartT = con.cpuCycles;
+      this._due = 0;
+      if (!this._probe) this.frameRate = GbsPlayer.songFps(this.bytes, songIndex);
+    }
+    // 今のタイマの設定での PLAY の周期(Hz)。VBlank 駆動なら 59.7275
+    _fpsNow() {
+      const con = this.con;
+      if (!(this.irqMask & 4) || !(con.tac & 4)) return MML.GBS.VBLANK_FPS;
+      const div = [1024, 16, 64, 256][con.tac & 3] * (256 - con.tma);
+      return this.clockHz / div * (this.fast ? 2 : 1);
     }
 
     // 1 命令進める。IDLE/割り込みの入口/PLAY からの戻りはここで捌く
@@ -2088,18 +2324,22 @@
       if ((pc === 0x40 || pc === 0x50) && !cpu.ime && !cpu.halted) {
         if (!this._atEntry) { this._atEntry = true; this._boundary = true; return; } // ここがフレームの区切り。処理は次のフレームの頭で
         this._atEntry = false;
-        // 待ちループから来た時はスタックを毎回ヘッダの位置へ戻す(ドライバがスタックをずらしたままでも流れていかない)
-        if ((con._busRead(cpu.sp) | (con._busRead((cpu.sp + 1) & 0xFFFF) << 8)) === IDLE) { cpu.sp = this.header.stackPointer; this._push(IDLE); }
+        // PLAY の外(待ちループ)から来た時は、スタックを毎回ヘッダの位置へ戻す。INIT が自分で SP を動かしたまま終わる曲や、
+        // HALT で止まった INIT の続きから来る曲があり、戻さないと PLAY が音源レジスタの番地をスタックにして壊す(Mesen との突き合わせで判明)
+        if (!this._inPlay) { cpu.sp = this.header.stackPointer; this._push(IDLE); }
         // 再生速度(1/1〜1/8): PLAY を何回かに 1 回だけ呼ぶ(音程は変えずテンポだけ落とす)
         let call = true;
         if (this.speedFactor < 1) { this._playAccum += this.speedFactor; if (this._playAccum >= 1) this._playAccum -= 1; else call = false; }
         // PLAY の最中に(曲が自分で EI して)割り込みが重なった時は、重ねて呼ばずに戻る(旧実装の「実行中なら次のフレームは呼ばない」と同じ)
         if (this._inPlay) call = false;
-        if (call) { this._inPlay = true; this._push(RET_MAGIC); cpu.pc = this.header.playAddr; }
+        // レジスタも全部 RET_MAGIC にしておく: 「PUSH を 4 つ積んで CALL して、POP せずに RET」という釣り合わない PLAY を持つ曲データがあり、
+        // その RET は積んだレジスタの値へ飛ぶ(GBS は PLAY に入る時のレジスタを決めていない)。どのレジスタが一番上でも「戻った」と分かる
+        if (call) { this._inPlay = true; this._push(RET_MAGIC); cpu.a = RET_MAGIC >> 8; cpu.f = RET_MAGIC & 0xF0; cpu.setBC(RET_MAGIC); cpu.setDE(RET_MAGIC); cpu.setHL(RET_MAGIC); cpu.pc = this.header.playAddr; }
         else { cpu.pc = this._pop(); cpu.ime = true; }
         return;
       }
-      if (pc === RET_MAGIC) { this._inPlay = false; cpu.pc = this._pop(); cpu.ime = true; return; } // RETI 相当
+      // PLAY から戻った: 待ちループへ(スタックは次の PLAY の頭でヘッダの位置へ戻すので、釣り合っていなくてよい)
+      if (pc === RET_MAGIC) { this._inPlay = false; cpu.sp = this.header.stackPointer; cpu.pc = IDLE; cpu.ime = true; return; }
       // 曲が自分で IE を書き換えて STAT/シリアル/ジョイパッドの割り込みが来た時は何もせず戻る
       if ((pc === 0x48 || pc === 0x58 || pc === 0x60) && !cpu.ime && !cpu.halted && pc < this.cart.loadAddr) { cpu.pc = this._pop(); cpu.ime = true; return; }
       // PLAY の中で HALT/STOP して割り込みも来ない: 戻ったものとして待ちループへ
@@ -2124,9 +2364,14 @@
       if (con.sampleRate !== want) con.setSampleRate(want);
       this._frameStartT = con.cpuCycles;
       this._boundary = false;
-      // 割り込みが来なくなった曲でも進むよう、公称の 3 周期で打ち切る
-      const limit = con.cpuCycles + 3 * this.clockHz / this.frameRate;
+      // 区切りは次の PLAY の入口。PLAY が 1 周期に収まらない時(HALT で間を取りながら PCM を流し続ける曲など)は入口が来ないので、
+      // 公称の周期の格子(_due)で区切る。入口が来たら格子をそこへ合わせ直す(時間軸がずれていかない)
+      const period = this.clockHz / this.frameRate;
+      if (!(this._due > 0)) this._due = con.cpuCycles;
+      this._due += period;
+      const limit = this._due + period * 0.02;
       while (!this._boundary && con.cpuCycles < limit) this._step();
+      if (this._boundary) this._due = con.cpuCycles;
       if (regsOnly) return null;
       const n = con.ringLen;
       const outL = new Float32Array(n);
@@ -2219,6 +2464,26 @@
     return { audio, writeLog, snapshots, player, frameRate: player.frameRate };
   };
 
+  // その曲の PLAY の周期(Hz): INIT と最初の数回の PLAY を試しに回して、落ち着いたタイマの設定から出す。
+  // 画面の時間軸、変換のテンポ、写し再生の速さはこの値を使う(ヘッダの playFps ではなく)。結果は (データ, 曲) ごとに覚える
+  const fpsCache = new WeakMap();
+  GbsPlayer.songFps = function (gbsBytes, songIndex) {
+    let m = fpsCache.get(gbsBytes);
+    if (!m) { m = new Map(); fpsCache.set(gbsBytes, m); }
+    const k = songIndex | 0;
+    if (m.has(k)) return m.get(k);
+    let fps;
+    try {
+      const p = new GbsPlayer(gbsBytes);
+      p._probe = true;
+      p.initSong(k);
+      for (let i = 0; i < 4; i++) p.renderFrame(44100, true);
+      fps = p._fpsNow();
+      if (!(fps > 1 && fps < 2000)) fps = p.header.playFps;
+    } catch (e) { fps = MML.GBS.parseHeader(gbsBytes).playFps; }
+    m.set(k, fps);
+    return fps;
+  };
   Emu.GbsPlayer = GbsPlayer;
   Emu.GbsCart = GbsCart;
   // VGM(vgmPlayer.js captureVgmSongAsync)がGB DMGチップのフレームスナップショットを
