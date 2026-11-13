@@ -56,9 +56,15 @@
               nes = new MML.Emu.MsxConsole(m.rom ? new Uint8Array(m.rom) : null, { machine: o.machine, bios: bios.main ? bios : null, mapperType: o.mapperType || undefined, cartB, disks, fdc: o.fdc || undefined });
               info = MML.Emu.MsxConsole.describe(nes);
             } else if (machine === 'gb') {
-              nes = new MML.Emu.GbConsole(new Uint8Array(m.rom), { model: (m.gb && m.gb.model) || 'dmg' });
-              if (m.gb && m.gb.shades) nes.ppu.shades = Array.from(m.gb.shades);
-              info = MML.Emu.GbConsole.describe(nes);
+              if (m.gb && m.gb.sgb) { // スーパーゲームボーイ: SNES 側ごと動かす(BIOS は主スレッドから。ブート ROM は任意)
+                const o = m.gb.sgb;
+                nes = new MML.Emu.SgbConsole(new Uint8Array(m.rom), { bios: new Uint8Array(o.bios), bootRom: o.boot ? new Uint8Array(o.boot) : null, revision: o.revision || 0 });
+                info = MML.Emu.SgbConsole.describe(nes);
+              } else {
+                nes = new MML.Emu.GbConsole(new Uint8Array(m.rom), { model: (m.gb && m.gb.model) || 'dmg' });
+                if (m.gb && m.gb.shades) nes.ppu.shades = Array.from(m.gb.shades);
+                info = MML.Emu.GbConsole.describe(nes);
+              }
             } else {
               nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });
               info = MML.Emu.INES.describe(nes.rom);
@@ -68,11 +74,11 @@
             if (m.battery && nes.hasBattery) nes.setBattery(new Uint8Array(m.battery)); // 前回のセーブ(主スレッドが IndexedDB から)
             this.nes = nes;
             this.machine = machine;
-            this.State = machine === 'msx' ? MML.Emu.MsxState : machine === 'gb' ? MML.Emu.GbState : MML.Emu.NesState;
-            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? MML.Emu.GbRewind : MML.Emu.NesRewind;
+            this.State = machine === 'msx' ? MML.Emu.MsxState : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState;
+            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? (nes.isSgb ? null : MML.Emu.GbRewind) : MML.Emu.NesRewind; // SGB は巻き戻し無し(1 枚が大きい)
             this.rewind = Rewind ? new Rewind(nes) : null;
             this.dcX = 0; this.dcY = 0; this.dcX2 = 0; this.dcY2 = 0;
-            this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, tilt: !!nes.hasTilt, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH() });
+            this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, tilt: !!nes.hasTilt, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH(), clock: nes.clockHz || 0, sgb: nes.isSgb ? nes.revision : 0 });
             break;
           }
           case 'key': // MSX: PC のキー(KeyboardEvent.code)を押す/離す。対応の無いキーは本体が無視する

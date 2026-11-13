@@ -58,8 +58,9 @@
   //   kind 2 = turboR PCM の制御($A5)の書き込み: value8 meta8(時刻)。再生は読み飛ばしてよい(kind 1 には D/A に出た物だけが載る)
   // ゲームボーイの規格外ブロック(DESIGN-GB-CAPTURE.md §4)。0x67 0x66 TYPE 長さ 'GBXX' 版 種類 中身…
   //   種類 2 = カートリッジ内ブザー(HuC3): 中身 1 バイト = 音の番号(0-3)。ブロックの置かれた時刻に鳴り始める
-  //   種類 1 = SGB の SNES 側音源(段階 8g)
-  VGM.GBXX = { TYPE: 0xBD, MAGIC: [0x47, 0x42, 0x58, 0x58], VERSION: 1, KIND_SGB: 1, KIND_BUZZER: 2 };
+  //   種類 1 = SGB の SNES 側音源: 続く 1 バイトが下位種別。0 = 音源の像(.spc ファイルの形 0x10200 バイト。録音の頭に 1 個)、
+  //            1 = APU ポート $2140-$2143 への書き込み(ポート番号 0-3、値)。ブロックの置かれた時刻に書く
+  VGM.GBXX = { TYPE: 0xBD, MAGIC: [0x47, 0x42, 0x58, 0x58], VERSION: 1, KIND_SGB: 1, KIND_BUZZER: 2, SGB_STATE: 0, SGB_PORT: 1 };
   VGM.MSXX = { TYPE: 0xBE, MAGIC: [0x4D, 0x53, 0x58, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_DAC: 1, KIND_PCM_CTRL: 2, META_PCM: 0x80,
     MACHINES: { msx1: 1, msx2: 2, msx2plus: 3, turbor: 4 }, DAC_TURBOR_PCM: 1, DAC_KONAMI: 2, DAC_KONAMI_SYNTH: 4 };
   VGM.isMsxxBlock = function (type, block) {

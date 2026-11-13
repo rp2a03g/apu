@@ -295,5 +295,56 @@
     },
   };
 
+  // ---------------------------------------------------------------- 65816
+  // ファイルは命令ごとに 2 本: <op>.n.json(ネイティブ)と <op>.e.json(エミュレーション)。番地は 24bit なので RAM は 16MB。
+  // 見る物: レジスタ(pc s p a x y dbr d pbr e)、RAM、サイクル数
+  CpuTest.SPECS['65816'] = {
+    label: '65C816 (SNES / スーパーゲームボーイ)',
+    vectorBase: 'https://raw.githubusercontent.com/SingleStepTests/65816/main/v1/',
+    scripts: ['src/emulator/cpu65816.js'],
+    defaultPer: 10000,
+    groups: () => ['n', 'e'].map((mode) => ({
+      key: mode,
+      files: Array.from({ length: 256 }, (_, op) => { const h = hex2(op); return { group: mode, op, hex: h, name: h + '.' + mode, path: h + '.' + mode + '.json', localPath: h + '.' + mode + '.json' }; }),
+    })),
+    createRunner() {
+      const ram = new Uint8Array(1 << 24);
+      const bus = { read: (a) => ram[a & 0xFFFFFF], write: (a, v) => { ram[a & 0xFFFFFF] = v & 0xFF; } };
+      const cpu = new MML.Emu.CPU65816(bus);
+      const KEYS = ['pc', 's', 'p', 'a', 'x', 'y', 'dbr', 'd', 'pbr', 'e'];
+      return {
+        isImplemented: () => true,
+        runOne(tests, per) {
+          const n = Math.min(per, tests.length);
+          let pass = 0, cycBad = 0, stateBad = 0, ramBad = 0; const fails = [];
+          for (let i = 0; i < n; i++) {
+            const t = tests[i], I = t.initial, F = t.final;
+            for (const [a, v] of I.ram) ram[a] = v;
+            for (const k of KEYS) cpu[k] = I[k];
+            cpu.waiting = false; cpu.stopped = false;
+            // ベクタの初期値は e=1 でも S の上位などが好き勝手な値。実機が保っている形(S 上位=$01、X/Y 上位=0、M=X=1)に直してから走らせる
+            if (cpu.e) { cpu.s = 0x0100 | (cpu.s & 0xFF); cpu.x &= 0xFF; cpu.y &= 0xFF; cpu.p |= 0x30; }
+            let cyc = cpu.step();
+            // MVN/MVP のベクタは「A が $FFFF になるまで」を 1 回として数えている(実機は 1 バイトごとに命令を取り直す)
+            if (t.cycles.length > 7 && (ram[(I.pbr << 16) | I.pc] === 0x44 || ram[(I.pbr << 16) | I.pc] === 0x54)) { let guard = 0; while (cpu.pc === I.pc && guard++ < 70000) cyc += cpu.step(); }
+            // WAI/STP のベクタは止まった後の空回り 1 サイクルまで含む
+            while ((cpu.waiting || cpu.stopped) && cyc < t.cycles.length) cyc += cpu.step();
+            let regOK = true; for (const k of KEYS) if (cpu[k] !== F[k]) { regOK = false; break; }
+            let ramOK = true; for (const [a, v] of F.ram) if (ram[a] !== v) { ramOK = false; break; }
+            const cycOK = cyc === t.cycles.length;
+            if (regOK && ramOK && cycOK) pass++;
+            else {
+              if (!cycOK) cycBad++; if (!regOK) stateBad++; if (!ramOK) ramBad++;
+              if (fails.length < 3) { const got = {}; for (const k of KEYS) got[k] = cpu[k]; got.cyc = cyc; const exp = {}; for (const k of KEYS) exp[k] = F[k]; exp.cyc = t.cycles.length; const ini = {}; for (const k of KEYS) ini[k] = I[k]; fails.push({ name: t.name, regOK, ramOK, cycOK, exp, got, ini }); }
+            }
+            for (const [a] of I.ram) ram[a] = 0;
+            for (const [a] of F.ram) ram[a] = 0;
+          }
+          return { pass, total: n, cycBad, stateBad, ramBad, fails };
+        },
+      };
+    },
+  };
+
   CpuTest.opcodeFiles = opcodeFiles;
 })(typeof window !== 'undefined' ? window : globalThis);

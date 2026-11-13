@@ -147,6 +147,7 @@
           if (!this.noRender) this._renderTo(d - FIRST_PIXEL_DOT - this.scxFine + 4);
           if (d >= this.mode3End) {
             if (!this.noRender) this._renderTo(W);
+            if (this.con.sgb) this.con.sgb.lcdLine(this.line, this.frameIdx); // スーパーゲームボーイ: 描き終えた行を ICD2 へ
             if (this.winActive) this.winLine++;
             this.mode = 0; this.firstLine = false;
             this._stat();

@@ -96,6 +96,7 @@
     out.vibrate = typeof c.vibrate === 'boolean' ? c.vibrate : DEFAULT_CFG.dpad.vibrate;
     return out;
   }
+  const GB_MODELS = ['auto', 'dmg', 'cgb', 'sgb', 'sgb2']; // 自動 = カートリッジがカラー対応ならカラー、でなければ白黒
   function loadMsxCfg(c) {
     c = c && typeof c === 'object' ? c : {};
     return {
@@ -124,6 +125,7 @@
       diskFast: typeof c.diskFast === 'boolean' ? c.diskFast : DEFAULT_CFG.diskFast,
       dpad: loadDpadCfg(c.dpad),
       msx: loadMsxCfg(c.msx),
+      gb: { model: GB_MODELS.includes(c.gb && c.gb.model) ? c.gb.model : 'auto' },
     };
   }
   function saveCfg() { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { /* ignore */ } }
@@ -152,7 +154,9 @@
   let romName = '', romBytes = null;
   let image = null, imageBuf = null, frameW = 256, frameH = 240; // 画面の大きさ(frame メッセージの w/h。今は NES/MSX とも 256×240)
   let machine = 'nes';        // 'nes' | 'msx' | 'gb'(open がファイルで決める)
-  function curFps() { return machine === 'gb' ? GB_FPS : FPS; }
+  function curFps() { return machine === 'gb' ? (gbSgb ? SGB_FPS : GB_FPS) : FPS; }
+  const SGB_FPS = 21477272 / (1364 * 262); // スーパーゲームボーイは SNES の 1 フレーム
+  let gbSgb = 0, gbClock = 0;              // 今のゲームボーイがスーパーゲームボーイなら 1 か 2 / 録音の VGM に入れる時計(0 = 既定の 4194304)
   let msxChips = [], msxMachine = '', pendingMsx = null, msxFps = 60, msxDisk = false; // msxDisk: 今の MSX はディスクで起動している(次の .dsk は入れ替え) // MSX: 載っている音源名(psg/scc/opll/opl/dac)、起動した機種、BIOS 待ちの ROM、本体のフレームレート(50Hz 中は 50)
   let keyBits = 0, keyTurbo = 0, touchBits = 0, touchTurbo = 0, lastPad = -1;
   let kbdBtn = null, softKbdEl = null, touchPadEl = null; // MSX のソフトキーボード(7f)とタッチ操作キー
@@ -374,6 +378,33 @@
     fdsBios = bytes;
     try { let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); localStorage.setItem(BIOS_KEY, btoa(s)); } catch (e) { /* 控えられなくても今回は使える */ }
   }
+  // ── スーパーゲームボーイの BIOS(localStorage gb.sgb.<1|2>.bios / .boot、base64)──
+  // bios = SNES 側のカートリッジ(256K = 初代、512K = SGB2)、boot = ゲームボーイ側のブート ROM 256 バイト(無くても動く)
+  const SGB_BIOS_KEY = 'gb.sgb.';
+  const sgbBiosCache = {};
+  function loadSgbBios(rev) {
+    if (sgbBiosCache[rev]) return sgbBiosCache[rev];
+    const out = { bios: null, boot: null };
+    try { for (const k of ['bios', 'boot']) { const v = localStorage.getItem(SGB_BIOS_KEY + rev + '.' + k); if (v) { const bin = atob(v); const b = new Uint8Array(bin.length); for (let i = 0; i < b.length; i++) b[i] = bin.charCodeAt(i); out[k] = b; } } } catch (e) { /* localStorage 不可 */ }
+    if (out.bios || out.boot) sgbBiosCache[rev] = out;
+    return out;
+  }
+  function storeSgbBios(rev, kind, bytes) {
+    if ((bytes.length & 0x3FF) === 0x200) bytes = bytes.slice(0x200); // コピー機のヘッダは落とす
+    const cur = sgbBiosCache[rev] || (sgbBiosCache[rev] = loadSgbBios(rev));
+    cur[kind] = bytes; sgbBiosCache[rev] = cur;
+    let kept = true;
+    try { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); localStorage.setItem(SGB_BIOS_KEY + rev + '.' + kind, btoa(s)); } catch (e) { kept = false; /* 容量不足など。今回は使える */ }
+    return kept;
+  }
+  function clearSgbBios(rev) { try { for (const k of ['bios', 'boot']) localStorage.removeItem(SGB_BIOS_KEY + rev + '.' + k); } catch (e) { /* ignore */ } delete sgbBiosCache[rev]; }
+  // BIOS のファイルを控えて知らせる(ドロップ/[選ぶ…] の両方から)
+  function storeSgbBiosFile(bytes, name) {
+    const rev = bytes.length >= 0x80000 ? 2 : 1;
+    const kept = storeSgbBios(rev, 'bios', bytes);
+    flashStatus((rev === 2 ? T('スーパーゲームボーイ 2 の BIOS を控えました: {name}', { name: name || '' }) : T('スーパーゲームボーイの BIOS を控えました: {name}', { name: name || '' })) + (kept ? '' : ' ' + T('(ブラウザの保存領域が足りないので、今回だけ使います)')));
+    if (cfgBiosRefresh) cfgBiosRefresh();
+  }
   // ── MSX の BIOS(機種別に localStorage msx.bios.<machine>.main/sub/logo、base64)とマッパーの手動指定(msx.mapper、ROM ハッシュ別)──
   // 控えが無ければ同梱の C-BIOS(MsxConsole.defaultBios。cbiosData.js があるとき)、それも無ければ [BIOS] を案内する
   const MSX_BIOS_KEY = 'msx.bios.', MSX_MAPPER_KEY = 'msx.mapper';
@@ -472,7 +503,7 @@
     else if (nes && nes.keyboard && nes.keyboard.releaseAll) nes.keyboard.releaseAll();
   }
   // 機種別のステート API
-  function stateApi() { return machine === 'msx' ? MML.Emu.MsxState : machine === 'gb' ? MML.Emu.GbState : MML.Emu.NesState; }
+  function stateApi() { return machine === 'msx' ? MML.Emu.MsxState : machine === 'gb' ? (gbSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState; }
   // 設定(機種/マッパー)が変わった: 開いている MSX の ROM を開き直す(BIOS 待ちなら待っている ROM で再試行)
   function reopenMsx() {
     const onErr = (e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); };
@@ -613,7 +644,7 @@
     let hdr = header.querySelector('.fw-header-extra');
     if (!hdr) { hdr = document.createElement('span'); hdr.className = 'fw-header-extra nes-hdr'; header.insertBefore(hdr, header.querySelector('.float-window-close')); }
     hdr.innerHTML = '';
-    romInput = document.createElement('input'); romInput.type = 'file'; romInput.accept = '.nes,.fds,.rom,.mx1,.mx2,.dsk,.gb,.gbc,.sgb,.zip,.7z,.rar,.rsn,.lzh,.lha'; romInput.style.display = 'none';
+    romInput = document.createElement('input'); romInput.type = 'file'; romInput.accept = '.nes,.fds,.rom,.mx1,.mx2,.dsk,.gb,.gbc,.sgb,.sfc,.zip,.7z,.rar,.rsn,.lzh,.lha'; romInput.style.display = 'none';
     romInput.addEventListener('change', () => { const f = romInput.files && romInput.files[0]; romInput.value = ''; openRomFile(f); });
     const openBtn = mkIcon('open', T('開く(.nes/.fds/.rom/.dsk、zip などの圧縮ファイル。ウィンドウへのドロップでも開けます)'), () => romInput.click());
     const resetBtn = mkIcon('reset', T('リセット'), () => { if (node) node.port.postMessage({ type: 'reset' }); else if (nes) { nes.reset(); if (rewindBuf) rewindBuf.clear(); } liveRestart(); });
@@ -622,7 +653,7 @@
     stateBtnL = mkIcon('loadState', '', requestLoadState);
     sideBtn = mkIcon('disk', '', () => { if (fdsSides >= 1) toggleDiskPopover(sideBtn); }, 'A'); sideBtn.hidden = true;
     biosBtn = mkIcon('chip', T('ディスクシステムの BIOS(disksys.rom、8KB)を選ぶ。このブラウザに控えて次回も使います'), () => biosInput.click(), 'BIOS'); biosBtn.hidden = true; // BIOS の選択は ⚙ の機種タブへ(2026-11-10)。入力欄は共用
-    biosInput = document.createElement('input'); biosInput.type = 'file'; biosInput.accept = '.rom,.bin,.nes'; biosInput.multiple = true; biosInput.style.display = 'none';
+    biosInput = document.createElement('input'); biosInput.type = 'file'; biosInput.accept = '.rom,.bin,.nes,.sfc,.smc'; biosInput.multiple = true; biosInput.style.display = 'none';
     biosInput.addEventListener('change', async () => {
       const files = Array.from(biosInput.files || []); biosInput.value = '';
       const target = biosTarget; biosTarget = null;
@@ -630,8 +661,15 @@
       const fdsFiles = [];
       for (const f of files) { const b = new Uint8Array(await f.arrayBuffer()); if (MML.Emu.FdsDisk && MML.Emu.FdsDisk.isFdsBios(b)) fdsFiles.push({ f, b }); }
       if (fdsFiles.length) { storeFdsBiosFile(fdsFiles[0].b, fdsFiles[0].f.name); if (files.length === fdsFiles.length) { if (cfgBiosRefresh) cfgBiosRefresh(); return; } } // disksys.rom は機種に関係なく FDS 側へ
-      const rest = files.filter((f) => !fdsFiles.some((x) => x.f === f));
-      if (!rest.length) return;
+      let rest = files.filter((f) => !fdsFiles.some((x) => x.f === f));
+      // スーパーゲームボーイ: SNES 側の BIOS(題名で判定)と、[選ぶ…] を SGB の行で押した時の 256 バイト(ブート ROM)
+      for (const f of rest.slice()) {
+        const b = new Uint8Array(await f.arrayBuffer());
+        const D = MML.Emu.Image;
+        if (D && D.isSgbBios && D.isSgbBios(b)) { storeSgbBiosFile(b, f.name); rest = rest.filter((x) => x !== f); }
+        else if (b.length === 256 && target && target.kind === 'sgb') { storeSgbBios(target.rev, 'boot', b); flashStatus(T('ブート ROM を控えました: {name}', { name: f.name })); rest = rest.filter((x) => x !== f); }
+      }
+      if (!rest.length) { if (cfgBiosRefresh) cfgBiosRefresh(); return; }
       // 残りは MSX の BIOS として大きさで振り分ける(16K/32K/128K/256K)。それ以外の大きさは案内
       const sizes = await Promise.all(rest.map((f) => f.arrayBuffer().then((b) => b.byteLength)));
       const msxFiles = rest.filter((f, i) => [0x4000, 0x8000, 0x10000, 0x20000, 0x40000].includes(sizes[i]));
@@ -1051,8 +1089,8 @@
     pop.addEventListener('mousedown', (e) => e.stopPropagation());
     pop.addEventListener('click', (e) => e.stopPropagation());
     // タブ: 共通 / ファミコン / MSX(機種の設定は機種のタブに、どの機種にも効く物は共通に)
-    const TABS = [['common', T('共通')], ['nes', T('ファミコン / FDS')], ['msx', 'MSX']];
-    if (!cfgTab) cfgTab = machine === 'msx' ? 'msx' : (romBytes ? 'nes' : 'common');
+    const TABS = [['common', T('共通')], ['nes', T('ファミコン / FDS')], ['msx', 'MSX'], ['gb', T('ゲームボーイ')]];
+    if (!cfgTab) cfgTab = machine === 'msx' ? 'msx' : machine === 'gb' ? 'gb' : (romBytes ? 'nes' : 'common');
     const tabBar = document.createElement('div'); tabBar.className = 'nes-cfg-tabs';
     const panes = {}, tabBtns = {};
     const selectTab = (id) => { cfgTab = id; for (const k of Object.keys(panes)) { panes[k].hidden = k !== id; tabBtns[k].classList.toggle('is-on', k === id); } };
@@ -1187,8 +1225,34 @@
       }
       msxBox.appendChild(t);
     };
+    // ── ゲームボーイ: 機種とスーパーゲームボーイの BIOS ──
+    const sg = sec(T('本体'), 'gb');
+    { const { r, s } = selRow(T('機種'));
+      for (const [v, label] of [['auto', T('自動(カートリッジに合わせて白黒/カラー)')], ['dmg', T('ゲームボーイ(白黒)')], ['cgb', T('ゲームボーイカラー')], ['sgb', T('スーパーゲームボーイ')], ['sgb2', T('スーパーゲームボーイ 2')]]) { const o = document.createElement('option'); o.value = v; o.textContent = label; s.appendChild(o); }
+      s.value = cfg.gb.model;
+      s.addEventListener('change', () => { cfg.gb.model = s.value; saveCfg(); });
+      sg.appendChild(r); }
+    note(sg, T('次に開く(またはリセットでなく開き直す)ソフトから効きます。スーパーゲームボーイは SNES 側ごと動かし、専用の枠・配色・SNES 側の音が出ます。初代は実機のゲームボーイより約 2.4% 速く動きます(実機どおり)。巻き戻しは使えません'));
+    const sgbSec = sec(T('スーパーゲームボーイの BIOS'), 'gb');
+    const sgbBox = document.createElement('div'); sgbSec.appendChild(sgbBox);
+    note(sgbSec, T('スーパーゲームボーイの SNES 側のカートリッジ(256K、SGB2 は 512K)を各自で用意して選びます。ゲームボーイ側のブート ROM(256 バイト)は無くても動きます。このブラウザに控えて次回も使います'));
+    const renderSgb = () => {
+      sgbBox.innerHTML = '';
+      for (const rev of [1, 2]) {
+        const st = loadSgbBios(rev);
+        const r = document.createElement('div'); r.className = 'nes-cfg-row';
+        const lab = document.createElement('span'); lab.className = 'nes-disk-lbl';
+        lab.appendChild(document.createTextNode((rev === 2 ? 'SGB2 ' : 'SGB ') + 'BIOS ')); lab.appendChild(ok(!!st.bios));
+        lab.appendChild(document.createTextNode(' ' + T('ブート ROM') + ' ')); lab.appendChild(ok(!!st.boot));
+        r.appendChild(lab);
+        r.appendChild(mkBtn(T('選ぶ…'), T('BIOS(.sfc)かブート ROM(256 バイト)を選ぶ'), () => { biosTarget = { kind: 'sgb', rev }; biosInput.click(); }));
+        if (st.bios || st.boot) r.appendChild(mkBtn(T('消す'), T('控えを消す'), () => { clearSgbBios(rev); renderSgb(); }));
+        sgbBox.appendChild(r);
+      }
+    };
+    renderSgb();
     renderBios();
-    cfgBiosRefresh = renderBios;
+    cfgBiosRefresh = () => { renderBios(); renderSgb(); };
 
     // ── MSX の本体設定 ──
     const sm = sec(T('本体'), 'msx');
@@ -1329,7 +1393,7 @@
     document.addEventListener('keydown', popClose, true);
   }
   function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll, sfxRemove: DEFAULT_CFG.sfxRemove, lagFix: DEFAULT_CFG.lagFix, diskFast: DEFAULT_CFG.diskFast, dpad: Object.assign({}, DEFAULT_CFG.dpad),
-    msx: { keys: Object.assign({}, DEFAULT_CFG.msx.keys), machine: cfg.msx.machine, joyFromKeys: DEFAULT_CFG.msx.joyFromKeys, touchKbd: DEFAULT_CFG.msx.touchKbd, cartB: cfg.msx.cartB, fdc: cfg.msx.fdc } }; } // 機種は BIOS の控えに結びつくので残す
+    msx: { keys: Object.assign({}, DEFAULT_CFG.msx.keys), machine: cfg.msx.machine, joyFromKeys: DEFAULT_CFG.msx.joyFromKeys, touchKbd: DEFAULT_CFG.msx.touchKbd, cartB: cfg.msx.cartB, fdc: cfg.msx.fdc }, gb: { model: cfg.gb.model } }; } // 機種は BIOS の控えに結びつくので残す
 
   // ── 入力 ──
   // ゲームパッド: つながっている順に 1P(キーボードと合成)、2P。戻り値は [[1P のビット, 連射ビット, 操作の集合], [2P ...]]
@@ -1531,7 +1595,7 @@
       case 'writes': takeFrames(m.frames || [], frameSeq); break; // record on で像を取り直す前に溜まっていた分(最後は今の途中フレーム)
       case 'rewound': blitFrame(new Uint32Array(m.frame), m.w, m.h); onRewound(m.seq); break;
       case 'rwframe': blitIndex(new Uint8Array(m.idx), m.palette ? new Uint32Array(m.palette) : null, m.w, m.h); onReverseFrame(m.seq); break;
-      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; if (m.chips && machine === 'msx') msxChips = m.chips.slice(); if (m.fps > 0) msxFps = m.fps; if (machine === 'gb') { gbTilt = !!m.tilt; if (gbTilt) canvas.title = T('マウスを画面の上で動かすと傾きます(スマホは本体の傾き)'); } fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
+      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; if (m.chips && machine === 'msx') msxChips = m.chips.slice(); if (m.fps > 0) msxFps = m.fps; if (machine === 'gb') { if (m.clock) gbClock = m.sgb ? Math.round(m.clock) : 0; gbTilt = !!m.tilt; if (gbTilt) canvas.title = T('マウスを画面の上で動かすと傾きます(スマホは本体の傾き)'); } fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
       case 'battery': onBatteryMessage(m); break;
       case 'barcode': onGbBarcodeResult(!!m.ok); break;
       case 'diskAdded': fdsSides = m.count | 0; fdsSide = m.index | 0; updateDiskUi(); break;
@@ -1816,7 +1880,8 @@
     recFrames = null; recBase = null;
     if (machine === 'gb') {
       // GB: 本体 APU は VGM の正規チップ(0xB3)。1 フレームが 735 サンプルでないので、効果音/処理落ちの補正(vgmClean.js)はまだ掛けられない
-      const r = MML.VGM.encodeGbRecording({ frames, name: (romName || 'GB').replace(/\.(gb|gbc|sgb)$/i, ''), creator: 'Sound Emulation Foundry (GB)' });
+      // スーパーゲームボーイ(初代)はクロックが 4295454Hz。SNES 側の音源は規格外ブロック GBXX に入る
+      const r = MML.VGM.encodeGbRecording({ frames, clock: gbSgb && gbClock ? gbClock : undefined, system: gbSgb ? 'Nintendo Super Game Boy' : undefined, name: (romName || 'GB').replace(/\.(gb|gbc|sgb)$/i, ''), creator: 'Sound Emulation Foundry (GB)' });
       recRaw = r.vgm; recVgm = r.vgm;
       updateRecUi();
       recSfxChk.parentNode.hidden = recLagChk.parentNode.hidden = true;
@@ -1979,18 +2044,24 @@
   async function openGb(bytes, name) {
     machine = 'gb'; pendingFds = null; pendingMsx = null; msxChips = []; msxDisk = false;
     updateBiosBtn(); updateSoftKbd();
-    const probe = new MML.Emu.GbConsole(bytes, { model: 'auto' });
+    // 機種: 設定の指定。スーパーゲームボーイは BIOS が控えてあれば SNES 側ごと動かす(無ければ案内して白黒/カラーで開く)
+    const want = cfg.gb.model;
+    let sgbRev = want === 'sgb' ? 1 : want === 'sgb2' ? 2 : 0, sgbBios = null;
+    if (sgbRev) { sgbBios = loadSgbBios(sgbRev); if (!sgbBios.bios || !MML.Emu.SgbConsole) { sgbRev = 0; flashStatus(T('スーパーゲームボーイの BIOS がまだ控えてありません(⚙ → ゲームボーイ)。普通のゲームボーイとして開きます')); } }
+    const probe = sgbRev ? new MML.Emu.SgbConsole(bytes, { bios: sgbBios.bios, bootRom: sgbBios.boot, revision: sgbRev }) : new MML.Emu.GbConsole(bytes, { model: want === 'dmg' || want === 'cgb' ? want : 'auto' });
+    gbSgb = sgbRev; gbClock = sgbRev ? Math.round(probe.clockHz) : 0;
     liveEnd('restart');
     rewindHoldEnd();
     await flushBattery(); // 前の ROM のセーブを受け取ってから止める
     romBytes = bytes; romName = name || '';
     stateKey = romKey(bytes);
     hasBattery = probe.hasBattery; batteryKey = hasBattery ? stateKey : '';
+    if (sgbRev) stateKey += ':sgb' + sgbRev; // ステートは形が違うので別に持つ(セーブ RAM は共通)
     const battery = hasBattery ? await loadBattery(batteryKey) : null;
     if (battery && probe.setBattery(battery)) console.log('[gb]', T('セーブデータを読み込みました({n} バイト)', { n: battery.length }));
-    machineEl.textContent = probe.cgb ? T('ゲームボーイカラー') : T('ゲームボーイ');
+    machineEl.textContent = sgbRev === 2 ? T('スーパーゲームボーイ 2') : sgbRev ? T('スーパーゲームボーイ') : probe.cgb ? T('ゲームボーイカラー') : T('ゲームボーイ');
     nameEl.textContent = romName;
-    nameEl.title = MML.Emu.GbConsole.describe(probe);
+    nameEl.title = sgbRev ? MML.Emu.SgbConsole.describe(probe) : MML.Emu.GbConsole.describe(probe);
     recExtBits = 0; fdsSideInfo = null; diskNames = [];
     fdsSides = 0; fdsSide = 0; if (sideTimer) { clearTimeout(sideTimer); sideTimer = 0; } updateDiskUi();
     stopMain(); nes = null; rewindBuf = null;
@@ -2001,14 +2072,15 @@
     if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
     const btn = document.querySelector('.toggle-btn[data-target="win-nes"]');
     if (btn) btn.classList.add('active');
-    ensureCanvasSize(160, 144);
+    ensureCanvasSize(probe.frameWidth, probe.frameHeight);
     blitConsole(probe);
     applyCfgLabels();
     const rom = bytes.slice().buffer;
     const bat = battery ? battery.slice().buffer : null;
-    const ok = await startWorklet({ type: 'load', machine: 'gb', rom, battery: bat, gb: { model: probe.model } }, [rom, bat].filter(Boolean));
+    const sgbMsg = sgbRev ? { bios: sgbBios.bios.slice().buffer, boot: sgbBios.boot ? sgbBios.boot.slice().buffer : null, revision: sgbRev } : null;
+    const ok = await startWorklet({ type: 'load', machine: 'gb', rom, battery: bat, gb: { model: probe.model, sgb: sgbMsg } }, [rom, bat, sgbMsg && sgbMsg.bios, sgbMsg && sgbMsg.boot].filter(Boolean));
     gbTilt = !!probe.hasTilt; if (gbTilt) canvas.title = T('マウスを画面の上で動かすと傾きます(スマホは本体の傾き)');
-    if (!ok) { nes = probe; rewindBuf = MML.Emu.GbRewind ? new MML.Emu.GbRewind(nes) : null; lastPad = -1; lastPad2 = -1; mainFrames = 0; nes.setTurboRate(cfg.turboRate); startMain(); }
+    if (!ok) { nes = probe; rewindBuf = MML.Emu.GbRewind && !sgbRev ? new MML.Emu.GbRewind(nes) : null; lastPad = -1; lastPad2 = -1; mainFrames = 0; nes.setTurboRate(cfg.turboRate); startMain(); }
     liveBegin();
     updateStatus();
     canvas.focus();
@@ -2018,6 +2090,7 @@
   // 中身の種類(imageDetect.js の kind)→ 開き方。iNES/FDS は open() の本体(NES)で開く
   const OPENERS = {
     'gb': (bytes, name) => openGb(bytes, name),
+    'sgb-bios': (bytes, name) => { storeSgbBiosFile(bytes, name); return null; }, // スーパーゲームボーイの BIOS: 控えるだけ
     'fds-bios': (bytes, name) => { storeFdsBiosFile(bytes, name); return null; }, // disksys.rom: 控えるだけ(.rom でも MSX にしない)
     'msx-rom': (bytes, name) => openMsx(bytes, name),
     'msx-dsk': (bytes, name) => (machine === 'msx' && msxDisk && !pendingMsx && (node || nes)) ? swapMsxDisk(bytes, name) : openMsx(bytes, name, { disk: true }), // 動いている MSX には足して入れ替え

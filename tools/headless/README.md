@@ -29,6 +29,9 @@ export PATH="$PATH:/path/to/nodejs"
 | `gb-periph-test.js` | ゲームボーイの周辺(時計の実時間、振動、HuC1、MBC7 の傾きと EEPROM、赤外線、ポケットプリンタ、HuC3 とブザー、MMM01、MBC6、ポケットカメラ、バーコードボーイ)をレジスタと通信ポートを直接たたいて確かめる。`mk-gb-test-rom.js out.gbc --periph` は同じ周辺を ROM からたたく通し試験用(画面側のボタンの確認に使う) |
 | `gb-sweep.js` | ゲームボーイの総当たり。`<フォルダ>` で ROM を 1 本ずつ回して起動/音/固まりを JSON Lines に、`--gbs <フォルダ>` で GBS を曲ごとに回す(例外、PLAY の周期、書き込みの有無) |
 | `gb-mesen-ab.js` | 同じ ROM か GBS を Mesen 2(`--mesen` か環境変数 `MESEN_EXE`)と自前で走らせ、音源レジスタの書き込み列を突き合わせる。音をたくさん書く物でないと位置を合わせられない |
+| `gb-mesen-shot.js` | Mesen 2 に ROM を無操作で回させ、決めたフレームの画面を PNG に取る(色数と PC も出す)。総当たりで「1 色のまま」「固まった疑い」になった物が Mesen でも同じかを見る |
+| `snes-run.js` | SNES 本体の骨格(`src/emulator/snes/`、スーパーゲームボーイの土台)を回して画面を PNG に書く。`--gb rom.gb [--gb-boot sgb.boot.rom]` で SGB の BIOS にゲームボーイの ROM を挿す。`--text` は BG1 のタイル番号を文字として読む(公開テスト ROM の結果表示)。`src/emulator/snes/`、`cpu65816.js`、`spc700.js` を触ったら gilyon/snes-tests の 3 本(各自で `_tmp_test/snes/` に置く)が Success のままか見る |
+| `sgb-test.js` | スーパーゲームボーイ(`snes/sgbConsole.js`)の通し試験。`--bios SGB1.sfc [--boot sgb1.boot.rom] --gb rom.gb`(BIOS は同梱しない、各自で渡す)。絵が GB 側と対応するか、音のサンプル数、SNES 側と GB 側の両方が鳴るか、録音(VGM のクロックと GBXX 種類 1)、ステートを見る。`--png` `--wav` で画面と音を書き出す |
 | `gb-testroms.js` | 公開テスト ROM(blargg / mooneye / dmg-acid2。`_tmp_test/gb` か `GB_TESTROM_ROOT` に各自で置く、同梱しない)をまとめて回して合否の表を出す。`--check tools/headless/gb-testroms-pass.txt` で前に通っていた物が落ちていないか見る。`src/emulator/gb/` か `cpuSm83.js` を触ったら回す |
 | `live-roll-test.js` | ライブ表示(ロール追記モード)の点検。先読みのタイムラインのハッシュ(HEAD の worktree と比べる)、追記(`liveAppendFrame`)が同じ材料の一括構築と一致すること、1 フレームの追記時間、過去向きの座標系の自己検査 |
 | `vgm-clean-test.js` | 録音の補正(変換設定 SFX_REMOVE / LAG_FIX、`src/vgm/vgmClean.js`)の点検。NSF→VGM に効果音と空フレームを人工的に混ぜ、OFF の不変性と「効果音が残らない・フレーム数が戻る」を見る。`--vgm` で実ファイルの OFF 不変性も |
@@ -36,7 +39,7 @@ export PATH="$PATH:/path/to/nodejs"
 | `nsf-batch.js` | 変換 → コンパイル → NSF書き出しを一括で(耳で確かめる用。`.mml`/`.nsf`/`.dmc` を出力先へ並べる) |
 | `regress.js` | コーパス一括変換のスナップショット回帰テスト |
 | `audio-check.js` | 実際に鳴らした音を数値で点検(クリップ/DC/無音/オクターブずれ/プチノイズ) |
-| `cpu-test.js` | CPU命令テストCLI(検証ロジックは `../cpu-test-core.js` をブラウザ版と共有) |
+| `cpu-test.js` | CPU命令テストCLI(検証ロジックは `../cpu-test-core.js` をブラウザ版と共有)。`65816` は重いので `all` に含めず名指しで(`65816 --all` は初回に約 3.2GB 落とす。`--group n` / `--group e` で片方だけ) |
 | `help-lint.js` | MMLヘルプ(`;@help`タグ)の自己点検。書式・実演スニペットのコンパイル・コマンド網羅。組み込みサンプルの英語版(`src/mml/sampleMml.en.js`)も見て、コメントを除いたMML本文が日本語版と1行も違わないこと・同じ項目が同じ順で並んでいること・訳し忘れ(日本語の残り)を検査する |
 | `i18n-dupkeys.js` | `src/i18n/en.js` の重複キー検出(後勝ちで先の訳が黙って死ぬため) |
 | `notelist-check.js` | 楽譜出力用の音符列 `compile().noteList`(音価付き)の点検。フレーム合計/ticks逆算/タイ・連符・w・k・PS・`;@time``;@key` の固定ケース |

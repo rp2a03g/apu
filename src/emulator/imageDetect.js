@@ -25,6 +25,13 @@
 
   function extOf(name) { const b = (name || '').replace(/\\/g, '/'); const base = b.slice(b.lastIndexOf('/') + 1); const i = base.lastIndexOf('.'); return i > 0 ? base.slice(i + 1).toLowerCase() : ''; }
 
+  // スーパーゲームボーイの BIOS(SNES のカートリッジ。256K = 初代、512K = SGB2): LoROM のヘッダの題名で見分ける
+  function isSgbBios(bytes) {
+    let b = bytes; if ((b.length & 0x3FF) === 0x200) b = b.subarray(0x200); // コピー機のヘッダ
+    if (b.length !== 0x40000 && b.length !== 0x80000) return false;
+    let t = ''; for (let i = 0; i < 13; i++) t += String.fromCharCode(b[0x7FC0 + i]);
+    return t === 'Super GAMEBOY';
+  }
   function detect(bytes, name) {
     if (!bytes || bytes.length < 16) return null;
     const ext = extOf(name);
@@ -32,6 +39,7 @@
     if (bytes[0] === 0x4E && bytes[1] === 0x45 && bytes[2] === 0x53 && bytes[3] === 0x1A) return { kind: 'nes', machine: 'nes', media: 'cart' };
     if (F && F.isFds && F.isFds(bytes)) return { kind: 'fds', machine: 'nes', media: 'disk' };
     if (F && F.isFdsBios && F.isFdsBios(bytes)) return { kind: 'fds-bios', machine: 'nes', media: 'bios' };
+    if (isSgbBios(bytes)) return { kind: 'sgb-bios', machine: 'gb', media: 'bios' };
     // ゲームボーイ: ヘッダが整っていれば拡張子に関係なく(.rom/.bin でも)。拡張子が GB の物ならヘッダが崩れていても GB として開く
     if ((Emu.GbCart && Emu.GbCart.isGb(bytes)) || GB_EXTS.includes(ext)) return { kind: 'gb', machine: 'gb', media: 'cart' };
     // MSX のディスク: サイズで(拡張子が無い物も多い。カートリッジの拡張子なら ROM として扱う)
@@ -56,5 +64,5 @@
     raws.forEach((s, i) => out.set(s.subarray(0, FDS_SIDE), i * FDS_SIDE));
     return out;
   }
-  Emu.Image = { GAME_EXTS, MSX_CART_EXTS, DSK_SIZES, extOf, detect, looksLikeGameEntry, combineFds };
+  Emu.Image = { isSgbBios, GAME_EXTS, MSX_CART_EXTS, DSK_SIZES, extOf, detect, looksLikeGameEntry, combineFds };
 })(typeof window !== 'undefined' ? window : globalThis);

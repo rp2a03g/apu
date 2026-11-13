@@ -296,13 +296,14 @@
   //   本体 APU は VGM の正規チップ: ヘッダ $80 にクロック(DMG/CGB/SGB2 は 4194304、SGB 初代は 4295454)、0xB3 aa dd(aa = 番地 - $FF10)。
   //   1 フレームは 70224T ≒ 738.35 サンプルで 0x62(735)に乗らないので、時刻は録音頭からの通算 T をサンプルへ換算して 0x61 で待つ
   //   (フレーム境界の端数は自然に 738/739 へ散る)。フレーム内の時刻も T から換算するので、PCM 再生の技の間隔が保たれる。
+  //   { sgbSpc: Uint8Array, t } / { sgbPort, value, t } はスーパーゲームボーイの SNES 側の音源(GBXX 種類 1。本ツールの再生はまだ鳴らさない)。
   //   { buzz: 音の番号, t } はカートリッジ内ブザー(HuC3)。規格外ブロック GBXX(vgmHeader.js)で載せる(本ツールの再生はまだ鳴らさない)。
   const GB_CLOCK = 4194304, GB_FRAME_T = 70224;
   VGM.encodeGbRecording = function (rec) {
     const frames = rec.frames || [];
     const clock = rec.clock || GB_CLOCK;
     const body = [];
-    let emitted = 0, dropped = 0, baseT = 0, writes = 0, buzzes = 0;
+    let emitted = 0, dropped = 0, baseT = 0, writes = 0, buzzes = 0, sgbPorts = 0;
     const flushWait = (s) => {
       let d = s - emitted;
       while (d > 0) {
@@ -323,6 +324,13 @@
           const blk = [].concat(VGM.GBXX.MAGIC, [VGM.GBXX.VERSION, VGM.GBXX.KIND_BUZZER, w.buzz & 3]);
           body.push(0x67, 0x66, VGM.GBXX.TYPE, ...u32(blk.length), ...blk);
           buzzes++;
+          continue;
+        }
+        if ((w.sgbSpc || w.sgbPort !== undefined) && VGM.GBXX) { // スーパーゲームボーイの SNES 側の音源: 規格外ブロック(種類 1)。下位種別 0 = 音源の像(.spc の形)、1 = APU ポートへの書き込み(ポート番号、値)
+          flushWait(toSample(baseT + Math.max(0, Math.min(len - 1, w.t | 0))));
+          const head = [].concat(VGM.GBXX.MAGIC, [VGM.GBXX.VERSION, VGM.GBXX.KIND_SGB]);
+          if (w.sgbSpc) { body.push(0x67, 0x66, VGM.GBXX.TYPE, ...u32(head.length + 1 + w.sgbSpc.length), ...head, VGM.GBXX.SGB_STATE); for (let k = 0; k < w.sgbSpc.length; k++) body.push(w.sgbSpc[k]); }
+          else { body.push(0x67, 0x66, VGM.GBXX.TYPE, ...u32(head.length + 3), ...head, VGM.GBXX.SGB_PORT, w.sgbPort & 3, w.value & 0xFF); sgbPorts++; }
           continue;
         }
         if (w.addr === undefined) continue;
@@ -353,6 +361,6 @@
     hdr.set(u32(clock), 0x80);
     const vgm = new Uint8Array(size);
     vgm.set(hdr, 0); vgm.set(body, HEADER_SIZE); vgm.set(gd3, HEADER_SIZE + body.length);
-    return { vgm, frames: frames.length, dropped, writes, buzzes, samples: total, clock };
+    return { vgm, frames: frames.length, dropped, writes, buzzes, sgbPorts, samples: total, clock };
   };
 })(typeof window !== 'undefined' ? window : globalThis);

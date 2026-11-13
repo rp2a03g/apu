@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 17:16:06
+ * Built by tools/build-capture-workers.ps1 at 2026-11-13 20:23:48
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-13 17:16:06';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-13 20:23:48';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -15886,6 +15886,7 @@
           if (!this.noRender) this._renderTo(d - FIRST_PIXEL_DOT - this.scxFine + 4);
           if (d >= this.mode3End) {
             if (!this.noRender) this._renderTo(W);
+            if (this.con.sgb) this.con.sgb.lcdLine(this.line, this.frameIdx); // スーパーゲームボーイ: 描き終えた行を ICD2 へ
             if (this.winActive) this.winLine++;
             this.mode = 0; this.firstLine = false;
             this._stat();
@@ -16297,6 +16298,10 @@
       this.serialOut = [];  // 送り終えたバイト
       this.serialSent = []; // 送り始めたバイト(完了を待たずに次を送るソフトの出力も拾える。mooneye のテスト ROM の合否)
       this.rec = null;
+      // スーパーゲームボーイ: opts.sgb = ICD2(snes/icd2.js。パッドの線と LCD の行を横取りする)、opts.bootRom = ブート ROM 256 バイト(任意)
+      this.sgb = opts.sgb || null;
+      this.clockHz = CLOCK; // 音の標本化に使う時計。スーパーゲームボーイ(初代)は 4295454Hz で動くので ICD2 が入れ直す
+      this.bootImage = opts.bootRom || null; this.bootRom = null;
       this.reset();
     }
 
@@ -16309,6 +16314,7 @@
       cpu.a = 0x01; cpu.f = 0xB0; cpu.b = 0x00; cpu.c = 0x13; cpu.d = 0x00; cpu.e = 0xD8; cpu.h = 0x01; cpu.l = 0x4D;
       if (this.cgb) { cpu.a = 0x11; cpu.f = 0x80; cpu.b = 0x00; cpu.c = 0x00; cpu.d = 0xFF; cpu.e = 0x56; cpu.h = 0x00; cpu.l = 0x0D; }
       cpu.sp = 0xFFFE; cpu.pc = 0x0100;
+      this.bootRom = this.bootImage;
       // CGB のレジスタ
       this.stepT = 4;          // CPU の 1 M サイクルが元のクロックで何 T か(倍速なら 2)
       this.apuBit = APU_BIT;
@@ -16318,6 +16324,8 @@
       this.ie = 0; this.if = 0x01;
       this.div = this.cgb ? 0x2674 : 0xABC8; // CGB の値は mooneye の boot_div-cgbABCDE を総当たりして決めた(白黒ソフトを CGB で起動した時の値。カラー対応ソフトでも同じとみなす=推定) this.tima = 0; this.tma = 0; this.tac = 0; this.timaReload = false; this.timaReloading = false;
       this.p1 = 0x00; this.sb = 0; this.sc = 0; this.serialBits = 0;
+      // タイマ。ここで 0 を入れておかないと、TMA を一度も書かないソフトで TIMA が NaN→0 のままあふれ続ける(実ソフトの総当たりで見つけた)
+      this.tima = 0; this.tma = 0; this.tac = 0; this.timaReload = false; this.timaReloading = false;
       this.dma = 0xFF; this.dmaActive = false; this.dmaPos = 0; this.dmaSrc = 0; this.dmaStart = 0; this.dmaNext = 0; this.dmaByte = 0xFF;
       // ブート ROM が「ポーン」を鳴らした後のレジスタ。CH1 は鳴り終わりかけで有効のまま(NR52=$F1)。
       // 残響の音量は分からないので 0 にしておく(起動直後に余韻は鳴らさない)
@@ -16327,6 +16335,10 @@
       apu.ch1.envelope.volume = 0; apu.ch1.envelope.running = false;
       apu.regRaw[0x03] = 0xFF; apu.ch1.triggerSeq = 0;
       this.cpuCycles = 0; this.frameT = 0;
+      if (this.bootRom) { // ブート ROM を $0000 から実行する(LCD は消えた状態から。$FF50 に書くとカートリッジに切り替わる)
+        cpu.a = 0; cpu.f = 0; cpu.b = 0; cpu.c = 0; cpu.d = 0; cpu.e = 0; cpu.h = 0; cpu.l = 0; cpu.sp = 0; cpu.pc = 0;
+        this.ppu.writeReg(0xFF40, 0x00); this.if = 0; this.div = 0;
+      }
     }
 
     setSampleRate(sr) { this.sampleRate = sr; this.cycleAccum = 0; this.ringHead = 0; this.ringLen = 0; if (sr) this.apu.setSampleRate(sr); }
@@ -16342,6 +16354,7 @@
     }
     // P1 の下位 4bit(押すと 0)。bit4=0 で十字(右左上下)、bit5=0 でボタン(A B SELECT START)
     _p1Low() {
+      if (this.sgb) return this.sgb.p1Low(this.p1);
       const p = this.pad[0];
       let low = 0x0F;
       if (!(this.p1 & 0x10)) low &= ~(((p >> 7) & 1) | (((p >> 6) & 1) << 1) | (((p >> 4) & 1) << 2) | (((p >> 5) & 1) << 3));
@@ -16453,8 +16466,8 @@
       const sr = this.sampleRate;
       if (sr) {
         this.cycleAccum += sr * st;
-        if (this.cycleAccum >= CLOCK) {
-          this.cycleAccum -= CLOCK;
+        if (this.cycleAccum >= this.clockHz) {
+          this.cycleAccum -= this.clockHz;
           if (this.ringLen < AUDIO_RING) {
             const s = apu.mixSample();
             const i = (this.ringHead + this.ringLen) & (AUDIO_RING - 1);
@@ -16509,8 +16522,10 @@
         // OAM DMA の間: OAM は $FF。DMA の読み元と同じバス(外部バス=ROM/カートリッジ RAM/WRAM、または VRAM)を読むと、
         // DMA が今運んでいるバイトが見える(DMG)。I/O と HRAM は普通に読める
         if (addr >= 0xFE00) return 0xFF;
-        const srcVram = this.dmaSrc >= 0x8000 && this.dmaSrc < 0xA000, adrVram = addr >= 0x8000 && addr < 0xA000;
-        if (srcVram === adrVram) return this.dmaByte;
+        // バスは DMG が 2 本(外部=ROM/カートリッジ RAM/WRAM、VRAM)、CGB は WRAM が別で 3 本。
+        // CGB で WRAM から運んでいる間も ROM のコードは普通に走る(倍速のソフトが HRAM の待ちを早く抜けて ROM へ戻る例があった)
+        const busOf = (x) => x >= 0x8000 && x < 0xA000 ? 1 : (this.cgb && x >= 0xC000 ? 2 : 0);
+        if (busOf(this.dmaSrc) === busOf(addr)) return this.dmaByte;
       }
       // モード 3 の VRAM、モード 2/3 の OAM は PPU が使っていて読めない
       if (addr >= 0x8000 && addr < 0xA000) { if (this.ppu.vramBlocked()) return 0xFF; }
@@ -16518,7 +16533,7 @@
       return this._busRead(addr);
     }
     _busRead(addr) {
-      if (addr < 0x8000) return this.cart.read(addr);
+      if (addr < 0x8000) return this.bootRom && addr < 0x100 ? this.bootRom[addr] : this.cart.read(addr);
       if (addr < 0xA000) return this.ppu.vram[this.ppu.vbk * 0x2000 + addr - 0x8000];
       if (addr < 0xC000) return this.cart.readRam(addr);
       if (addr < 0xFE00) return this.wram[this._w(addr)]; // $E000-$FDFF は WRAM の写し
@@ -16582,7 +16597,8 @@
         return;
       }
       switch (addr) {
-        case 0xFF00: { const before = this._p1Low(); this.p1 = v & 0x30; if (before & ~this._p1Low() & 0x0F) this.requestIrq(4); break; }
+        case 0xFF50: if (v & 1) this.bootRom = null; break;
+        case 0xFF00: { const before = this._p1Low(); this.p1 = v & 0x30; if (this.sgb) this.sgb.joypWrite((v >> 4) & 1, (v >> 5) & 1); if (before & ~this._p1Low() & 0x0F) this.requestIrq(4); break; }
         case 0xFF01: this.sb = v; break;
         case 0xFF02:
           this.sc = v & (this.cgb ? 0x83 : 0x81);
@@ -16784,6 +16800,2803 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
+ * 65C816(スーパーファミコンの CPU)コア
+ * MML.Emu.CPU65816
+ *
+ * スーパーゲームボーイ(DESIGN-GB-CAPTURE.md §5、段階 8g)の土台。SNES 本体を作る時もそのまま使う。
+ *
+ * バス: bus.read(addr24) / bus.write(addr24, value)。あれば bus.idle()(バスに触らない内部サイクル)。
+ * 1 サイクル = バスの読み/書き/内部のどれか 1 回。時間(マスタークロック)はバス側が番地ごとの速さで数える。
+ * step() は 1 命令を実行してサイクル数を返す。nmi() / irq() は割り込みの受け付け。
+ *
+ * レジスタ: a(16bit、8bit モードでも上位 = B を保つ)、x、y、s、d(ダイレクトページ)、pc(16bit)、pbr、dbr、p(NVMXDIZC)、e(エミュレーション)。
+ * e=1 の間は M=X=1、S の上位は $01、X/Y の上位は 0。
+ *
+ * 検証: SingleStepTests/65816(tools/headless/cpu-test.js 65816)。ネイティブモード(.n)を基準にし、エミュレーションモード(.e)の
+ * ページ内折り返しなどの癖は分かる範囲で入れてある。
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const C = 0x01, Z = 0x02, I = 0x04, D = 0x08, X = 0x10, M = 0x20, V = 0x40, N = 0x80;
+
+  class CPU65816 {
+    constructor(bus) {
+      this.bus = bus;
+      this.hasIdle = typeof bus.idle === 'function';
+      this.cyc = 0;
+      this.reset();
+    }
+
+    reset() {
+      this.a = 0; this.x = 0; this.y = 0; this.s = 0x01FF; this.d = 0; this.pbr = 0; this.dbr = 0;
+      this.p = M | X | I; this.e = 1;
+      this.waiting = false; this.stopped = false;
+      this.wrap = 0;
+      this.pc = this.bus.read(0x00FFFC) | (this.bus.read(0x00FFFD) << 8);
+    }
+
+    // ── バス ──
+    rd(addr) { this.cyc++; return this.bus.read(addr & 0xFFFFFF) & 0xFF; }
+    wr(addr, v) { this.cyc++; this.bus.write(addr & 0xFFFFFF, v & 0xFF); }
+    io() { this.cyc++; if (this.hasIdle) this.bus.idle(); }
+    fetch() { const v = this.rd((this.pbr << 16) | this.pc); this.pc = (this.pc + 1) & 0xFFFF; return v; }
+    fetch16() { const lo = this.fetch(); return lo | (this.fetch() << 8); }
+
+    // 次のバイトの番地。wrap: 0 = 24bit で進む(絶対/ロング)、1 = バンク内 16bit で折り返す(ダイレクトページ/スタック)
+    next(ea) { return this.wrap ? ((ea & 0xFF0000) | ((ea + 1) & 0xFFFF)) : ((ea + 1) & 0xFFFFFF); }
+    // ダイレクトページの 1 バイト(off = オペランド+添字+何バイト目)。e=1 で D の下位が 0 ならページ内で折り返す
+    rdDp(off) { return (this.e && !(this.d & 0xFF)) ? this.rd(this.d | (off & 0xFF)) : this.rd((this.d + off) & 0xFFFF); }
+    dpAddr(off) { return (this.e && !(this.d & 0xFF)) ? (this.d | (off & 0xFF)) : ((this.d + off) & 0xFFFF); }
+
+    // ── スタック ──
+    push(v) { this.wr(this.s, v); this.s = this.e ? (0x0100 | ((this.s - 1) & 0xFF)) : ((this.s - 1) & 0xFFFF); }
+    pull() { this.s = this.e ? (0x0100 | ((this.s + 1) & 0xFF)) : ((this.s + 1) & 0xFFFF); return this.rd(this.s); }
+    // 65816 で増えた命令は e=1 でも 16bit の S で積み降ろしし、終わってから上位を $01 に戻す
+    pushN(v) { this.wr(this.s, v); this.s = (this.s - 1) & 0xFFFF; }
+    pullN() { this.s = (this.s + 1) & 0xFFFF; return this.rd(this.s); }
+    fixS() { if (this.e) this.s = 0x0100 | (this.s & 0xFF); }
+
+    // ── フラグ ──
+    setP(v) {
+      this.p = v & 0xFF;
+      if (this.e) this.p |= M | X;
+      if (this.p & X) { this.x &= 0xFF; this.y &= 0xFF; }
+    }
+    nz8(v) { this.p = (this.p & ~(N | Z)) | (v & 0x80) | ((v & 0xFF) ? 0 : Z); }
+    nz16(v) { this.p = (this.p & ~(N | Z)) | ((v >> 8) & 0x80) | ((v & 0xFFFF) ? 0 : Z); }
+
+    // ── アドレッシング(実効番地を返し、wrap を決める)──
+    aDp() { const o = this.fetch(); if (this.d & 0xFF) this.io(); this.wrap = 1; return this.dpAddr(o); }
+    aDpX() { const o = this.fetch(); if (this.d & 0xFF) this.io(); this.io(); this.wrap = 1; return this.dpAddr(o + this.x); }
+    aDpY() { const o = this.fetch(); if (this.d & 0xFF) this.io(); this.io(); this.wrap = 1; return this.dpAddr(o + this.y); }
+    aAbs() { const a = this.fetch16(); this.wrap = 0; return (this.dbr << 16) | a; }
+    // 絶対,X/Y: 書き込み命令か、添字が 16bit か、ページをまたぐ時は 1 サイクル余分
+    aAbsI(idx, write) {
+      const a = this.fetch16();
+      if (write || !(this.p & X) || ((a & 0xFF) + (idx & 0xFF)) > 0xFF) this.io();
+      this.wrap = 0;
+      return ((this.dbr << 16) + a + idx) & 0xFFFFFF;
+    }
+    aLong() { const a = this.fetch16(); const b = this.fetch(); this.wrap = 0; return (b << 16) | a; }
+    aLongX() { const a = this.fetch16(); const b = this.fetch(); this.wrap = 0; return (((b << 16) | a) + this.x) & 0xFFFFFF; }
+    aInd() { const o = this.fetch(); if (this.d & 0xFF) this.io(); const lo = this.rdDp(o), hi = this.rdDp(o + 1); this.wrap = 0; return (this.dbr << 16) | (hi << 8) | lo; }
+    aIndX() { const o = this.fetch(); if (this.d & 0xFF) this.io(); this.io(); let lo, hi;
+      if (this.e && (this.d & 0xFF)) { // 実機の癖: E=1 で DL≠0 の時、上位バイトだけページ内で折り返して読む(gilyon/snes-tests で確認できる)
+        const p = (this.d + o + this.x) & 0xFFFF; lo = this.rd(p); hi = this.rd((p & 0xFF00) | ((p + 1) & 0xFF));
+      } else { lo = this.rdDp(o + this.x); hi = this.rdDp(o + this.x + 1); }
+      this.wrap = 0; return (this.dbr << 16) | (hi << 8) | lo; }
+    aIndY(write) {
+      const o = this.fetch(); if (this.d & 0xFF) this.io();
+      const lo = this.rdDp(o), hi = this.rdDp(o + 1), a = (hi << 8) | lo;
+      if (write || !(this.p & X) || ((a & 0xFF) + (this.y & 0xFF)) > 0xFF) this.io();
+      this.wrap = 0;
+      return ((this.dbr << 16) + a + this.y) & 0xFFFFFF;
+    }
+    aIndL() { const o = this.fetch(); if (this.d & 0xFF) this.io(); const b0 = this.rd((this.d + o) & 0xFFFF), b1 = this.rd((this.d + o + 1) & 0xFFFF), b2 = this.rd((this.d + o + 2) & 0xFFFF); this.wrap = 0; return (b2 << 16) | (b1 << 8) | b0; }
+    aIndLY() { return (this.aIndL() + this.y) & 0xFFFFFF; }
+    aSr() { const o = this.fetch(); this.io(); this.wrap = 1; return (this.s + o) & 0xFFFF; }
+    aSrY() { const o = this.fetch(); this.io(); const lo = this.rd((this.s + o) & 0xFFFF), hi = this.rd((this.s + o + 1) & 0xFFFF); this.io(); this.wrap = 0; return ((this.dbr << 16) + ((hi << 8) | lo) + this.y) & 0xFFFFFF; }
+
+    // 演算系 8 族(ORA AND EOR ADC STA LDA CMP SBC)の番地。mode = op & 0x1F
+    aluAddr(mode, write) {
+      switch (mode) {
+        case 0x01: return this.aIndX();
+        case 0x03: return this.aSr();
+        case 0x05: return this.aDp();
+        case 0x07: return this.aIndL();
+        case 0x0D: return this.aAbs();
+        case 0x0F: return this.aLong();
+        case 0x11: return this.aIndY(write);
+        case 0x12: return this.aInd();
+        case 0x13: return this.aSrY();
+        case 0x15: return this.aDpX();
+        case 0x17: return this.aIndLY();
+        case 0x19: return this.aAbsI(this.y, write);
+        case 0x1D: return this.aAbsI(this.x, write);
+        case 0x1F: return this.aLongX();
+      }
+      return -1;
+    }
+
+    // ── 幅つきの読み書き ──
+    rdM(ea) { if (this.p & M) return this.rd(ea); const lo = this.rd(ea); return lo | (this.rd(this.next(ea)) << 8); }
+    rdX(ea) { if (this.p & X) return this.rd(ea); const lo = this.rd(ea); return lo | (this.rd(this.next(ea)) << 8); }
+    wrM(ea, v) { this.wr(ea, v); if (!(this.p & M)) this.wr(this.next(ea), v >> 8); }
+    wrX(ea, v) { this.wr(ea, v); if (!(this.p & X)) this.wr(this.next(ea), v >> 8); }
+    immM() { return (this.p & M) ? this.fetch() : this.fetch16(); }
+    immX() { return (this.p & X) ? this.fetch() : this.fetch16(); }
+
+    // ── 演算 ──
+    ora(v) { if (this.p & M) { const r = (this.a | v) & 0xFF; this.a = (this.a & 0xFF00) | r; this.nz8(r); } else { this.a = (this.a | v) & 0xFFFF; this.nz16(this.a); } }
+    and(v) { if (this.p & M) { const r = this.a & v & 0xFF; this.a = (this.a & 0xFF00) | r; this.nz8(r); } else { this.a &= v; this.nz16(this.a); } }
+    eor(v) { if (this.p & M) { const r = (this.a ^ v) & 0xFF; this.a = (this.a & 0xFF00) | r; this.nz8(r); } else { this.a = (this.a ^ v) & 0xFFFF; this.nz16(this.a); } }
+    lda(v) { if (this.p & M) { this.a = (this.a & 0xFF00) | (v & 0xFF); this.nz8(v); } else { this.a = v & 0xFFFF; this.nz16(v); } }
+    cmpW(reg, v, eight) {
+      if (eight) { const r = (reg & 0xFF) - (v & 0xFF); this.p = (this.p & ~C) | (r >= 0 ? C : 0); this.nz8(r); }
+      else { const r = (reg & 0xFFFF) - (v & 0xFFFF); this.p = (this.p & ~C) | (r >= 0 ? C : 0); this.nz16(r); }
+    }
+    // 加算(10 進モードは桁ごとに補正。V は最上位の桁を補正する前の値で決まる)
+    adc(v) {
+      const dec = (this.p & D) !== 0;
+      let c = this.p & C, r;
+      if (this.p & M) {
+        const a = this.a & 0xFF;
+        if (!dec) r = a + v + c;
+        else { r = (a & 0x0F) + (v & 0x0F) + c; if (r > 0x09) r += 0x06; c = r > 0x0F ? 1 : 0; r = (a & 0xF0) + (v & 0xF0) + (c << 4) + (r & 0x0F); }
+        const ov = ~(a ^ v) & (a ^ r) & 0x80;
+        if (dec && r > 0x9F) r += 0x60;
+        this.p = (this.p & ~(C | V)) | (r > 0xFF ? C : 0) | (ov ? V : 0);
+        this.a = (this.a & 0xFF00) | (r & 0xFF); this.nz8(r);
+      } else {
+        const a = this.a;
+        if (!dec) r = a + v + c;
+        else {
+          r = (a & 0x000F) + (v & 0x000F) + c; if (r > 0x0009) r += 0x0006; c = r > 0x000F ? 1 : 0;
+          r = (a & 0x00F0) + (v & 0x00F0) + (c << 4) + (r & 0x000F); if (r > 0x009F) r += 0x0060; c = r > 0x00FF ? 1 : 0;
+          r = (a & 0x0F00) + (v & 0x0F00) + (c << 8) + (r & 0x00FF); if (r > 0x09FF) r += 0x0600; c = r > 0x0FFF ? 1 : 0;
+          r = (a & 0xF000) + (v & 0xF000) + (c << 12) + (r & 0x0FFF);
+        }
+        const ov = ~(a ^ v) & (a ^ r) & 0x8000;
+        if (dec && r > 0x9FFF) r += 0x6000;
+        this.p = (this.p & ~(C | V)) | (r > 0xFFFF ? C : 0) | (ov ? V : 0);
+        this.a = r & 0xFFFF; this.nz16(r);
+      }
+    }
+    sbc(v) {
+      const dec = (this.p & D) !== 0;
+      let c = this.p & C, r;
+      if (this.p & M) {
+        const a = this.a & 0xFF; v ^= 0xFF;
+        if (!dec) r = a + v + c;
+        else { r = (a & 0x0F) + (v & 0x0F) + c; if (r <= 0x0F) r -= 0x06; c = r > 0x0F ? 1 : 0; r = (a & 0xF0) + (v & 0xF0) + (c << 4) + (r & 0x0F); }
+        const ov = ~(a ^ v) & (a ^ r) & 0x80;
+        if (dec && r <= 0xFF) r -= 0x60;
+        this.p = (this.p & ~(C | V)) | (r > 0xFF ? C : 0) | (ov ? V : 0);
+        this.a = (this.a & 0xFF00) | (r & 0xFF); this.nz8(r);
+      } else {
+        const a = this.a; v ^= 0xFFFF;
+        if (!dec) r = a + v + c;
+        else {
+          r = (a & 0x000F) + (v & 0x000F) + c; if (r <= 0x000F) r -= 0x0006; c = r > 0x000F ? 1 : 0;
+          r = (a & 0x00F0) + (v & 0x00F0) + (c << 4) + (r & 0x000F); if (r <= 0x00FF) r -= 0x0060; c = r > 0x00FF ? 1 : 0;
+          r = (a & 0x0F00) + (v & 0x0F00) + (c << 8) + (r & 0x00FF); if (r <= 0x0FFF) r -= 0x0600; c = r > 0x0FFF ? 1 : 0;
+          r = (a & 0xF000) + (v & 0xF000) + (c << 12) + (r & 0x0FFF);
+        }
+        const ov = ~(a ^ v) & (a ^ r) & 0x8000;
+        if (dec && r <= 0xFFFF) r -= 0x6000;
+        this.p = (this.p & ~(C | V)) | (r > 0xFFFF ? C : 0) | (ov ? V : 0);
+        this.a = r & 0xFFFF; this.nz16(r);
+      }
+    }
+    // シフト/回転/増減(値を受けて結果を返す。eight = 8bit 幅)
+    shift(kind, v, eight) {
+      const top = eight ? 0x80 : 0x8000, mask = eight ? 0xFF : 0xFFFF;
+      let r, c = this.p & C;
+      switch (kind) {
+        case 0: r = (v << 1) & mask; c = (v & top) ? 1 : 0; break;                  // ASL
+        case 1: r = ((v << 1) | c) & mask; c = (v & top) ? 1 : 0; break;            // ROL
+        case 2: r = v >> 1; c = v & 1; break;                                       // LSR
+        case 3: r = (v >> 1) | (c ? top : 0); c = v & 1; break;                     // ROR
+        case 4: r = (v + 1) & mask; break;                                          // INC
+        default: r = (v - 1) & mask; break;                                         // DEC
+      }
+      if (kind < 4) this.p = (this.p & ~C) | c;
+      if (eight) this.nz8(r); else this.nz16(r);
+      return r;
+    }
+    // メモリを読んで書き戻す命令(RMW): 読む、内部 1 サイクル、書く(16bit は上位から)
+    rmw(ea, kind) {
+      if (this.p & M) { const v = this.rd(ea); this.io(); this.wr(ea, this.shift(kind, v, true)); }
+      else { const hiA = this.next(ea); const v = this.rd(ea) | (this.rd(hiA) << 8); this.io(); const r = this.shift(kind, v, false); this.wr(hiA, r >> 8); this.wr(ea, r); }
+    }
+    tsbTrb(ea, set) {
+      if (this.p & M) {
+        const v = this.rd(ea); this.io(); const a = this.a & 0xFF;
+        this.p = (this.p & ~Z) | ((v & a) ? 0 : Z);
+        this.wr(ea, set ? (v | a) : (v & ~a));
+      } else {
+        const hiA = this.next(ea); const v = this.rd(ea) | (this.rd(hiA) << 8); this.io();
+        this.p = (this.p & ~Z) | ((v & this.a) ? 0 : Z);
+        const r = set ? (v | this.a) : (v & ~this.a);
+        this.wr(hiA, r >> 8); this.wr(ea, r);
+      }
+    }
+    bit(v) {
+      if (this.p & M) this.p = (this.p & ~(N | V | Z)) | (v & 0xC0) | ((v & this.a & 0xFF) ? 0 : Z);
+      else this.p = (this.p & ~(N | V | Z)) | ((v >> 8) & 0xC0) | ((v & this.a) ? 0 : Z);
+    }
+    branch(cond) {
+      const o = this.fetch();
+      if (!cond) return;
+      this.io();
+      const t = (this.pc + (o < 0x80 ? o : o - 0x100)) & 0xFFFF;
+      if (this.e && ((t ^ this.pc) & 0xFF00)) this.io(); // e=1 はページをまたぐと 1 サイクル余分
+      this.pc = t;
+    }
+
+    // ── 割り込み ──
+    // 受け付け(NMI / IRQ / ABORT): 内部 2 サイクル、(ネイティブなら PBR)、PC、P を積み、ベクタへ
+    interrupt(vecNative, vecEmu) {
+      const c0 = this.cyc;
+      this.waiting = false;
+      this.io(); this.io();
+      if (!this.e) this.push(this.pbr);
+      this.push(this.pc >> 8); this.push(this.pc);
+      this.push(this.e ? (this.p & ~0x10) : this.p); // e=1 では B フラグ(bit4)を落として積む
+      this.p = (this.p | I) & ~D;
+      const v = this.e ? vecEmu : vecNative;
+      this.pc = this.rd(v) | (this.rd(v + 1) << 8);
+      this.pbr = 0;
+      return this.cyc - c0;
+    }
+    nmi() { return this.interrupt(0x00FFEA, 0x00FFFA); }
+    irq() { return this.interrupt(0x00FFEE, 0x00FFFE); }
+
+    // ── 1 命令 ──
+    step() {
+      const c0 = this.cyc;
+      if (this.stopped || this.waiting) { this.io(); return this.cyc - c0; }
+      const op = this.fetch();
+      const m5 = op & 0x1F;
+      // 演算系 8 族
+      if (m5 === 0x01 || m5 === 0x03 || m5 === 0x05 || m5 === 0x07 || m5 === 0x0D || m5 === 0x0F || m5 === 0x11 || m5 === 0x12 || m5 === 0x13 || m5 === 0x15 || m5 === 0x17 || m5 === 0x19 || m5 === 0x1D || m5 === 0x1F || (m5 === 0x09 && op !== 0x89)) {
+        const fam = op >> 5;
+        if (m5 === 0x09) { const v = this.immM(); this.alu(fam, v); return this.cyc - c0; }
+        const ea = this.aluAddr(m5, fam === 4);
+        if (fam === 4) this.wrM(ea, this.a); else this.alu(fam, this.rdM(ea));
+        return this.cyc - c0;
+      }
+      this.exec(op);
+      return this.cyc - c0;
+    }
+    alu(fam, v) {
+      switch (fam) {
+        case 0: this.ora(v); break;
+        case 1: this.and(v); break;
+        case 2: this.eor(v); break;
+        case 3: this.adc(v); break;
+        case 5: this.lda(v); break;
+        case 6: this.cmpW(this.a, v, (this.p & M) !== 0); break;
+        case 7: this.sbc(v); break;
+      }
+    }
+
+    exec(op) {
+      const x8 = (this.p & X) !== 0, m8 = (this.p & M) !== 0;
+      switch (op) {
+        // ── 割り込み命令 ──
+        case 0x00: case 0x02: { // BRK / COP
+          this.fetch();
+          if (!this.e) this.push(this.pbr);
+          this.push(this.pc >> 8); this.push(this.pc);
+          this.push(this.e ? (this.p | 0x10) : this.p);
+          this.p = (this.p | I) & ~D;
+          const v = op === 0x00 ? (this.e ? 0x00FFFE : 0x00FFE6) : (this.e ? 0x00FFF4 : 0x00FFE4);
+          this.pc = this.rd(v) | (this.rd(v + 1) << 8); this.pbr = 0;
+          break;
+        }
+        case 0x40: { // RTI
+          this.io(); this.io();
+          this.setP(this.pull());
+          this.pc = this.pull(); this.pc |= this.pull() << 8;
+          if (!this.e) this.pbr = this.pull();
+          break;
+        }
+        // ── メモリの TSB/TRB/シフト/増減 ──
+        case 0x04: this.tsbTrb(this.aDp(), true); break;
+        case 0x0C: this.tsbTrb(this.aAbs(), true); break;
+        case 0x14: this.tsbTrb(this.aDp(), false); break;
+        case 0x1C: this.tsbTrb(this.aAbs(), false); break;
+        case 0x06: this.rmw(this.aDp(), 0); break;   case 0x0E: this.rmw(this.aAbs(), 0); break;
+        case 0x16: this.rmw(this.aDpX(), 0); break;  case 0x1E: this.rmw(this.aAbsI(this.x, true), 0); break;
+        case 0x26: this.rmw(this.aDp(), 1); break;   case 0x2E: this.rmw(this.aAbs(), 1); break;
+        case 0x36: this.rmw(this.aDpX(), 1); break;  case 0x3E: this.rmw(this.aAbsI(this.x, true), 1); break;
+        case 0x46: this.rmw(this.aDp(), 2); break;   case 0x4E: this.rmw(this.aAbs(), 2); break;
+        case 0x56: this.rmw(this.aDpX(), 2); break;  case 0x5E: this.rmw(this.aAbsI(this.x, true), 2); break;
+        case 0x66: this.rmw(this.aDp(), 3); break;   case 0x6E: this.rmw(this.aAbs(), 3); break;
+        case 0x76: this.rmw(this.aDpX(), 3); break;  case 0x7E: this.rmw(this.aAbsI(this.x, true), 3); break;
+        case 0xE6: this.rmw(this.aDp(), 4); break;   case 0xEE: this.rmw(this.aAbs(), 4); break;
+        case 0xF6: this.rmw(this.aDpX(), 4); break;  case 0xFE: this.rmw(this.aAbsI(this.x, true), 4); break;
+        case 0xC6: this.rmw(this.aDp(), 5); break;   case 0xCE: this.rmw(this.aAbs(), 5); break;
+        case 0xD6: this.rmw(this.aDpX(), 5); break;  case 0xDE: this.rmw(this.aAbsI(this.x, true), 5); break;
+        // ── A のシフト/増減 ──
+        case 0x0A: case 0x2A: case 0x4A: case 0x6A: case 0x1A: case 0x3A: {
+          this.io();
+          const kind = op === 0x0A ? 0 : op === 0x2A ? 1 : op === 0x4A ? 2 : op === 0x6A ? 3 : op === 0x1A ? 4 : 5;
+          if (m8) this.a = (this.a & 0xFF00) | this.shift(kind, this.a & 0xFF, true); else this.a = this.shift(kind, this.a, false);
+          break;
+        }
+        // ── スタック ──
+        case 0x08: this.io(); this.push(this.e ? (this.p | 0x30) : this.p); break;                 // PHP
+        case 0x28: this.io(); this.io(); this.setP(this.pull()); break;                           // PLP
+        case 0x48: this.io(); if (!m8) this.push(this.a >> 8); this.push(this.a); break;         // PHA
+        case 0x68: this.io(); this.io(); if (m8) { const v = this.pull(); this.a = (this.a & 0xFF00) | v; this.nz8(v); } else { const lo = this.pull(); this.a = lo | (this.pull() << 8); this.nz16(this.a); } break; // PLA
+        case 0xDA: this.io(); if (!x8) this.push(this.x >> 8); this.push(this.x); break;         // PHX
+        case 0xFA: this.io(); this.io(); if (x8) { this.x = this.pull(); this.nz8(this.x); } else { const lo = this.pull(); this.x = lo | (this.pull() << 8); this.nz16(this.x); } break; // PLX
+        case 0x5A: this.io(); if (!x8) this.push(this.y >> 8); this.push(this.y); break;         // PHY
+        case 0x7A: this.io(); this.io(); if (x8) { this.y = this.pull(); this.nz8(this.y); } else { const lo = this.pull(); this.y = lo | (this.pull() << 8); this.nz16(this.y); } break; // PLY
+        case 0x0B: this.io(); this.pushN(this.d >> 8); this.pushN(this.d); this.fixS(); break;   // PHD
+        case 0x2B: { this.io(); this.io(); const lo = this.pullN(); this.d = lo | (this.pullN() << 8); this.nz16(this.d); this.fixS(); break; } // PLD
+        case 0x4B: this.io(); this.push(this.pbr); break;                                         // PHK
+        case 0x8B: this.io(); this.push(this.dbr); break;                                         // PHB
+        case 0xAB: this.io(); this.io(); this.dbr = this.pullN(); this.nz8(this.dbr); this.fixS(); break; // PLB
+        case 0xF4: { const v = this.fetch16(); this.pushN(v >> 8); this.pushN(v); this.fixS(); break; } // PEA
+        case 0xD4: { const o = this.fetch(); if (this.d & 0xFF) this.io(); const lo = this.rd((this.d + o) & 0xFFFF), hi = this.rd((this.d + o + 1) & 0xFFFF); this.pushN(hi); this.pushN(lo); this.fixS(); break; } // PEI
+        case 0x62: { const o = this.fetch16(); this.io(); const v = (this.pc + o) & 0xFFFF; this.pushN(v >> 8); this.pushN(v); this.fixS(); break; } // PER
+        // ── 分岐/ジャンプ ──
+        case 0x10: this.branch(!(this.p & N)); break;  case 0x30: this.branch((this.p & N) !== 0); break;
+        case 0x50: this.branch(!(this.p & V)); break;  case 0x70: this.branch((this.p & V) !== 0); break;
+        case 0x90: this.branch(!(this.p & C)); break;  case 0xB0: this.branch((this.p & C) !== 0); break;
+        case 0xD0: this.branch(!(this.p & Z)); break;  case 0xF0: this.branch((this.p & Z) !== 0); break;
+        case 0x80: this.branch(true); break;
+        case 0x82: { const o = this.fetch16(); this.io(); this.pc = (this.pc + o) & 0xFFFF; break; }                   // BRL
+        case 0x4C: this.pc = this.fetch16(); break;                                                                     // JMP abs
+        case 0x5C: { const a = this.fetch16(); this.pbr = this.fetch(); this.pc = a; break; }                           // JML
+        case 0x6C: { const a = this.fetch16(); const lo = this.rd(a); this.pc = lo | (this.rd((a + 1) & 0xFFFF) << 8); break; } // JMP (abs)
+        case 0x7C: { const a = (this.fetch16() + this.x) & 0xFFFF; this.io(); const b = this.pbr << 16; const lo = this.rd(b | a); this.pc = lo | (this.rd(b | ((a + 1) & 0xFFFF)) << 8); break; } // JMP (abs,X)
+        case 0xDC: { const a = this.fetch16(); const lo = this.rd(a), hi = this.rd((a + 1) & 0xFFFF); this.pbr = this.rd((a + 2) & 0xFFFF); this.pc = lo | (hi << 8); break; } // JML [abs]
+        case 0x20: { const a = this.fetch16(); this.io(); const r = (this.pc - 1) & 0xFFFF; this.push(r >> 8); this.push(r); this.pc = a; break; } // JSR
+        case 0x22: { const a = this.fetch16(); this.pushN(this.pbr); this.io(); const b = this.fetch(); const r = (this.pc - 1) & 0xFFFF; this.pushN(r >> 8); this.pushN(r); this.fixS(); this.pbr = b; this.pc = a; break; } // JSL
+        case 0xFC: { const lo = this.fetch(); this.pushN(this.pc >> 8); this.pushN(this.pc); const hi = this.fetch(); this.io(); const a = (((hi << 8) | lo) + this.x) & 0xFFFF, b = this.pbr << 16; const l2 = this.rd(b | a); this.pc = l2 | (this.rd(b | ((a + 1) & 0xFFFF)) << 8); this.fixS(); break; } // JSR (abs,X)
+        case 0x60: { this.io(); this.io(); const lo = this.pull(); this.pc = ((lo | (this.pull() << 8)) + 1) & 0xFFFF; this.io(); break; } // RTS
+        case 0x6B: { this.io(); this.io(); const lo = this.pullN(), hi = this.pullN(); this.pbr = this.pullN(); this.pc = ((lo | (hi << 8)) + 1) & 0xFFFF; this.fixS(); break; } // RTL
+        // ── フラグ ──
+        case 0x18: this.io(); this.p &= ~C; break;  case 0x38: this.io(); this.p |= C; break;
+        case 0x58: this.io(); this.p &= ~I; break;  case 0x78: this.io(); this.p |= I; break;
+        case 0xD8: this.io(); this.p &= ~D; break;  case 0xF8: this.io(); this.p |= D; break;
+        case 0xB8: this.io(); this.p &= ~V; break;
+        case 0xC2: { const v = this.fetch(); this.io(); this.setP(this.p & ~v); break; }             // REP
+        case 0xE2: { const v = this.fetch(); this.io(); this.setP(this.p | v); break; }              // SEP
+        case 0xFB: { // XCE: C と E を入れ替える
+          this.io();
+          const c = this.p & C;
+          this.p = (this.p & ~C) | this.e;
+          this.e = c;
+          if (this.e) { this.p |= M | X; this.s = 0x0100 | (this.s & 0xFF); this.x &= 0xFF; this.y &= 0xFF; }
+          break;
+        }
+        // ── 転送 ──
+        case 0xAA: this.io(); if (x8) { this.x = this.a & 0xFF; this.nz8(this.x); } else { this.x = this.a; this.nz16(this.x); } break; // TAX
+        case 0xA8: this.io(); if (x8) { this.y = this.a & 0xFF; this.nz8(this.y); } else { this.y = this.a; this.nz16(this.y); } break; // TAY
+        case 0x8A: this.io(); if (m8) { this.a = (this.a & 0xFF00) | (this.x & 0xFF); this.nz8(this.a); } else { this.a = this.x; this.nz16(this.a); } break; // TXA
+        case 0x98: this.io(); if (m8) { this.a = (this.a & 0xFF00) | (this.y & 0xFF); this.nz8(this.a); } else { this.a = this.y; this.nz16(this.a); } break; // TYA
+        case 0x9A: this.io(); this.s = this.e ? (0x0100 | (this.x & 0xFF)) : this.x; break;                                              // TXS
+        case 0xBA: this.io(); if (x8) { this.x = this.s & 0xFF; this.nz8(this.x); } else { this.x = this.s; this.nz16(this.x); } break; // TSX
+        case 0x9B: this.io(); this.y = this.x; if (x8) this.nz8(this.y); else this.nz16(this.y); break;                                  // TXY
+        case 0xBB: this.io(); this.x = this.y; if (x8) this.nz8(this.x); else this.nz16(this.x); break;                                  // TYX
+        case 0x1B: this.io(); this.s = this.e ? (0x0100 | (this.a & 0xFF)) : this.a; break;                                              // TCS
+        case 0x3B: this.io(); this.a = this.s; this.nz16(this.a); break;                                                                 // TSC
+        case 0x5B: this.io(); this.d = this.a; this.nz16(this.d); break;                                                                 // TCD
+        case 0x7B: this.io(); this.a = this.d; this.nz16(this.a); break;                                                                 // TDC
+        case 0xEB: { this.io(); this.io(); this.a = ((this.a >> 8) | (this.a << 8)) & 0xFFFF; this.nz8(this.a); break; }               // XBA
+        // ── X/Y の増減 ──
+        case 0xE8: this.io(); this.x = this.shift(4, this.x, x8); break;  case 0xCA: this.io(); this.x = this.shift(5, this.x, x8); break;
+        case 0xC8: this.io(); this.y = this.shift(4, this.y, x8); break;  case 0x88: this.io(); this.y = this.shift(5, this.y, x8); break;
+        // ── BIT ──
+        case 0x89: { const v = this.immM(); if (m8) this.p = (this.p & ~Z) | ((v & this.a & 0xFF) ? 0 : Z); else this.p = (this.p & ~Z) | ((v & this.a) ? 0 : Z); break; } // BIT #(Z だけ)
+        case 0x24: this.bit(this.rdM(this.aDp())); break;   case 0x2C: this.bit(this.rdM(this.aAbs())); break;
+        case 0x34: this.bit(this.rdM(this.aDpX())); break;  case 0x3C: this.bit(this.rdM(this.aAbsI(this.x, false))); break;
+        // ── STZ / STX / STY ──
+        case 0x64: this.wrM(this.aDp(), 0); break;   case 0x74: this.wrM(this.aDpX(), 0); break;
+        case 0x9C: this.wrM(this.aAbs(), 0); break;  case 0x9E: this.wrM(this.aAbsI(this.x, true), 0); break;
+        case 0x86: this.wrX(this.aDp(), this.x); break;  case 0x96: this.wrX(this.aDpY(), this.x); break;  case 0x8E: this.wrX(this.aAbs(), this.x); break;
+        case 0x84: this.wrX(this.aDp(), this.y); break;  case 0x94: this.wrX(this.aDpX(), this.y); break;  case 0x8C: this.wrX(this.aAbs(), this.y); break;
+        // ── LDX / LDY / CPX / CPY ──
+        case 0xA2: this.x = this.immX(); if (x8) this.nz8(this.x); else this.nz16(this.x); break;
+        case 0xA6: this.x = this.rdX(this.aDp()); if (x8) this.nz8(this.x); else this.nz16(this.x); break;
+        case 0xB6: this.x = this.rdX(this.aDpY()); if (x8) this.nz8(this.x); else this.nz16(this.x); break;
+        case 0xAE: this.x = this.rdX(this.aAbs()); if (x8) this.nz8(this.x); else this.nz16(this.x); break;
+        case 0xBE: this.x = this.rdX(this.aAbsI(this.y, false)); if (x8) this.nz8(this.x); else this.nz16(this.x); break;
+        case 0xA0: this.y = this.immX(); if (x8) this.nz8(this.y); else this.nz16(this.y); break;
+        case 0xA4: this.y = this.rdX(this.aDp()); if (x8) this.nz8(this.y); else this.nz16(this.y); break;
+        case 0xB4: this.y = this.rdX(this.aDpX()); if (x8) this.nz8(this.y); else this.nz16(this.y); break;
+        case 0xAC: this.y = this.rdX(this.aAbs()); if (x8) this.nz8(this.y); else this.nz16(this.y); break;
+        case 0xBC: this.y = this.rdX(this.aAbsI(this.x, false)); if (x8) this.nz8(this.y); else this.nz16(this.y); break;
+        case 0xE0: this.cmpW(this.x, this.immX(), x8); break;  case 0xE4: this.cmpW(this.x, this.rdX(this.aDp()), x8); break;  case 0xEC: this.cmpW(this.x, this.rdX(this.aAbs()), x8); break;
+        case 0xC0: this.cmpW(this.y, this.immX(), x8); break;  case 0xC4: this.cmpW(this.y, this.rdX(this.aDp()), x8); break;  case 0xCC: this.cmpW(this.y, this.rdX(this.aAbs()), x8); break;
+        // ── ブロック転送(1 バイトぶん。A が $FFFF になるまで同じ命令を繰り返す)──
+        case 0x44: case 0x54: {
+          const dst = this.fetch(), src = this.fetch();
+          this.dbr = dst;
+          const v = this.rd((src << 16) | this.x);
+          this.wr((dst << 16) | this.y, v);
+          this.io(); this.io();
+          const step = op === 0x54 ? 1 : -1, mask = x8 ? 0xFF : 0xFFFF;
+          this.x = (this.x + step) & mask; this.y = (this.y + step) & mask;
+          this.a = (this.a - 1) & 0xFFFF;
+          if (this.a !== 0xFFFF) this.pc = (this.pc - 3) & 0xFFFF;
+          break;
+        }
+        // ── その他 ──
+        case 0xEA: this.io(); break;                    // NOP
+        case 0x42: this.fetch(); break;                 // WDM(2 バイトの NOP)
+        case 0xCB: this.io(); this.io(); this.waiting = true; break;  // WAI: 割り込みまで待つ
+        case 0xDB: this.io(); this.io(); this.stopped = true; break;  // STP: リセットまで止まる
+      }
+    }
+  }
+
+  CPU65816.FLAGS = { C, Z, I, D, X, M, V, N };
+  Emu.CPU65816 = CPU65816;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * SPC700 CPU エミュレータ
+ * Sony 製 8bit CPU（SFC/SNES APU 内蔵）
+ *
+ * MML.Emu.SPC700
+ *   constructor(bus)
+ *   reset()
+ *   step() → cycles
+ *   runCycles(n)
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  // IPL ROM (64 bytes, $FFC0-$FFFF)
+  const IPL_ROM = new Uint8Array([
+    0xCD,0xEF,0xBD,0xE8,0x00,0xC6,0x1D,0xD0,0xFC,0x8F,0xAA,0xF4,0x8F,0xBB,0xF5,0x78,
+    0xCC,0xF4,0xD0,0xFB,0x2F,0x19,0xEB,0xF4,0xD0,0xFC,0x7E,0xF4,0xD0,0x0B,0xE4,0xF5,
+    0xCB,0xF4,0xD7,0x00,0xFC,0xD0,0xF3,0xAB,0x01,0x10,0xEF,0x7E,0xF4,0x10,0xEB,0xBA,
+    0xF6,0xDA,0x00,0xBA,0xF4,0xC4,0xF4,0xDD,0x5D,0xD0,0xDB,0x1F,0x00,0x00,0xC0,0xFF,
+  ]);
+
+  class SPC700 {
+    constructor(bus) {
+      this.bus = bus;
+      this.A = 0; this.X = 0; this.Y = 0;
+      this.SP = 0xFF; this.PC = 0xFFC0; this.PSW = 0;
+      this.halted = false; // STOP/SLEEP で真になる
+      // PSW bits: N=7 V=6 P=5 B=4 H=3 I=2 Z=1 C=0
+    }
+
+    reset() {
+      this.A = 0; this.X = 0; this.Y = 0;
+      this.SP = 0xFF; this.PSW = 0;
+      this.PC = this.bus.read(0xFFFE) | (this.bus.read(0xFFFF) << 8);
+    }
+
+    // ── バス ──────────────────────────────────────────────────────
+    _r(addr) { return this.bus.read(addr & 0xFFFF); }
+    _w(addr, val) { this.bus.write(addr & 0xFFFF, val & 0xFF); }
+
+    // ── スタック ──────────────────────────────────────────────────
+    _push(v) { this._w(0x0100 | this.SP, v & 0xFF); this.SP = (this.SP - 1) & 0xFF; }
+    _pop()   { this.SP = (this.SP + 1) & 0xFF; return this._r(0x0100 | this.SP); }
+
+    // ── フラグ ────────────────────────────────────────────────────
+    _getC() { return this.PSW & 0x01; }
+    _dpBase() { return (this.PSW & 0x20) ? 0x0100 : 0x0000; }
+
+    _setNZ(v) {
+      const b = v & 0xFF;
+      this.PSW = (this.PSW & ~0x82) | (b & 0x80) | (b === 0 ? 0x02 : 0);
+      return b;
+    }
+    _setC(v)  { this.PSW = (this.PSW & ~0x01) | (v ? 0x01 : 0); }
+    _setV(v)  { this.PSW = (this.PSW & ~0x40) | (v ? 0x40 : 0); }
+    _setH(v)  { this.PSW = (this.PSW & ~0x08) | (v ? 0x08 : 0); }
+
+    // ── アドレッシング ────────────────────────────────────────────
+    _imm()   { return this._r(this.PC++); }
+    _dpAddr(){ return (this._dpBase() + this._r(this.PC++)) & 0xFFFF; }
+    _dpXAddr(){ const b=this._dpBase(); return b | ((this._r(this.PC++) + this.X) & 0xFF); }
+    _dpYAddr(){ const b=this._dpBase(); return b | ((this._r(this.PC++) + this.Y) & 0xFF); }
+    // ダイレクトページ内 16bit アクセスの上位バイトアドレス。dp+1 はページ内で
+    // ラップする（$xxFF の次は $xx00）。実機準拠。MOVW/ADDW/(dp)+Y 等で使用。
+    _dpHi(a){ return (a & 0xFF00) | ((a + 1) & 0xFF); }
+    _absAddr(){
+      const lo = this._r(this.PC++); const hi = this._r(this.PC++);
+      return (hi << 8) | lo;
+    }
+    _absXAddr(){ return (this._absAddr() + this.X) & 0xFFFF; }
+    _absYAddr(){ return (this._absAddr() + this.Y) & 0xFFFF; }
+    _dpIndX() { // (dp+X) → 16bit address, dp+X wraps within DP page
+      const base = this._dpBase();
+      const off  = (this._r(this.PC++) + this.X) & 0xFF;
+      const ptr0 = base | off;
+      const ptr1 = base | ((off + 1) & 0xFF);
+      return this._r(ptr0) | (this._r(ptr1) << 8);
+    }
+    _dpIndY() { // (dp)+Y → 16bit address
+      const base = this._dpBase();
+      const dp   = (base + this._r(this.PC++)) & 0xFFFF;
+      const ptr  = this._r(dp) | (this._r(this._dpHi(dp)) << 8);
+      return (ptr + this.Y) & 0xFFFF;
+    }
+    // mem.bit 形式: 2バイト読み取り → { addr, bit }
+    _memBit() {
+      const lo = this._r(this.PC++); const hi = this._r(this.PC++);
+      const v  = (hi << 8) | lo;
+      return { addr: v & 0x1FFF, bit: (v >> 13) & 7 };
+    }
+
+    // ── ALU ───────────────────────────────────────────────────────
+    _adc(a, b) {
+      const c = this._getC();
+      const r = a + b + c;
+      const h = (a & 0xF) + (b & 0xF) + c;
+      this.PSW = (this.PSW & ~0xCB)
+        | (r & 0x80)
+        | (((a ^ r) & (b ^ r) & 0x80) ? 0x40 : 0)
+        | (h > 0xF ? 0x08 : 0)
+        | ((r & 0xFF) === 0 ? 0x02 : 0)
+        | (r > 0xFF ? 0x01 : 0);
+      return r & 0xFF;
+    }
+    _sbc(a, b) {
+      const c = this._getC();
+      const r = a - b - (1 - c);
+      const h = (a & 0xF) - (b & 0xF) - (1 - c);
+      this.PSW = (this.PSW & ~0xCB)
+        | (r & 0x80)
+        | (((a ^ b) & (a ^ r) & 0x80) ? 0x40 : 0)
+        | (h >= 0 ? 0x08 : 0)
+        | ((r & 0xFF) === 0 ? 0x02 : 0)
+        | (r >= 0 ? 0x01 : 0);
+      return r & 0xFF;
+    }
+    _cmp(a, b) {
+      const r = a - b;
+      this.PSW = (this.PSW & ~0x83) | (r & 0x80) | ((r & 0xFF) === 0 ? 0x02 : 0) | (r >= 0 ? 0x01 : 0);
+    }
+    _asl(v) {
+      const c = (v >> 7) & 1, r = (v << 1) & 0xFF;
+      this.PSW = (this.PSW & ~0x83) | (r & 0x80) | (r === 0 ? 0x02 : 0) | c;
+      return r;
+    }
+    _lsr(v) {
+      const c = v & 1, r = (v >> 1) & 0xFF;
+      this.PSW = (this.PSW & ~0x83) | (r & 0x80) | (r === 0 ? 0x02 : 0) | c;
+      return r;
+    }
+    _rol(v) {
+      const cin = this._getC(), cout = (v >> 7) & 1;
+      const r = ((v << 1) | cin) & 0xFF;
+      this.PSW = (this.PSW & ~0x83) | (r & 0x80) | (r === 0 ? 0x02 : 0) | cout;
+      return r;
+    }
+    _ror(v) {
+      const cin = this._getC(), cout = v & 1;
+      const r = ((v >> 1) | (cin << 7)) & 0xFF;
+      this.PSW = (this.PSW & ~0x83) | (r & 0x80) | (r === 0 ? 0x02 : 0) | cout;
+      return r;
+    }
+
+    // ── 分岐ヘルパー ──────────────────────────────────────────────
+    // 条件分岐は成立時に +2 サイクル。取った extra を返す（呼び出し側で加算）。
+    _branch(cond) {
+      const off = this._r(this.PC++);
+      if (cond) { this.PC = (this.PC + ((off & 0x80) ? off - 256 : off)) & 0xFFFF; return 2; }
+      return 0;
+    }
+
+    // ── CALL 系 ───────────────────────────────────────────────────
+    _call(addr) {
+      this._push((this.PC >> 8) & 0xFF);
+      this._push(this.PC & 0xFF);
+      this.PC = addr;
+    }
+    _tcall(n) {
+      const vec = 0xFFDE - n * 2;
+      this._call(this._r(vec) | (this._r(vec + 1) << 8));
+    }
+
+    // ── ビット操作ヘルパー ────────────────────────────────────────
+    _set1(addr, bit) { this._w(addr, this._r(addr) | (1 << bit)); }
+    _clr1(addr, bit) { this._w(addr, this._r(addr) & ~(1 << bit)); }
+    _bbs(addr, bit)  {
+      const d = this._r(addr), off = this._r(this.PC++);
+      if ((d >> bit) & 1) { this.PC = (this.PC + ((off & 0x80) ? off - 256 : off)) & 0xFFFF; return 2; }
+      return 0;
+    }
+    _bbc(addr, bit)  {
+      const d = this._r(addr), off = this._r(this.PC++);
+      if (!((d >> bit) & 1)) { this.PC = (this.PC + ((off & 0x80) ? off - 256 : off)) & 0xFFFF; return 2; }
+      return 0;
+    }
+
+    // ── 1命令実行、消費サイクル数を返す ──────────────────────────
+    step() {
+      const cycles = this._step1();
+      this.PC &= 0xFFFF; // PC が $FFFF で命令フェッチすると $10000 に溢れるためラップ
+      return cycles;
+    }
+    _step1() {
+      const op = this._r(this.PC++);
+      switch (op) {
+
+        // ── NOP / 特殊 ────────────────────────────────────────────
+        case 0x00: /* NOP  */ return 2;
+        case 0xEF: /* SLEEP */ this.halted = true; return 3;
+        case 0xFF: /* STOP  */ this.halted = true; return 3;
+
+        // ── TCALL 0-15 ───────────────────────────────────────────
+        case 0x01: this._tcall(0);  return 8;
+        case 0x11: this._tcall(1);  return 8;
+        case 0x21: this._tcall(2);  return 8;
+        case 0x31: this._tcall(3);  return 8;
+        case 0x41: this._tcall(4);  return 8;
+        case 0x51: this._tcall(5);  return 8;
+        case 0x61: this._tcall(6);  return 8;
+        case 0x71: this._tcall(7);  return 8;
+        case 0x81: this._tcall(8);  return 8;
+        case 0x91: this._tcall(9);  return 8;
+        case 0xA1: this._tcall(10); return 8;
+        case 0xB1: this._tcall(11); return 8;
+        case 0xC1: this._tcall(12); return 8;
+        case 0xD1: this._tcall(13); return 8;
+        case 0xE1: this._tcall(14); return 8;
+        case 0xF1: this._tcall(15); return 8;
+
+        // ── SET1 dp.n / CLR1 dp.n ────────────────────────────────
+        case 0x02: this._set1(this._dpAddr(),0); return 4;
+        case 0x22: this._set1(this._dpAddr(),1); return 4;
+        case 0x42: this._set1(this._dpAddr(),2); return 4;
+        case 0x62: this._set1(this._dpAddr(),3); return 4;
+        case 0x82: this._set1(this._dpAddr(),4); return 4;
+        case 0xA2: this._set1(this._dpAddr(),5); return 4;
+        case 0xC2: this._set1(this._dpAddr(),6); return 4;
+        case 0xE2: this._set1(this._dpAddr(),7); return 4;
+        case 0x12: this._clr1(this._dpAddr(),0); return 4;
+        case 0x32: this._clr1(this._dpAddr(),1); return 4;
+        case 0x52: this._clr1(this._dpAddr(),2); return 4;
+        case 0x72: this._clr1(this._dpAddr(),3); return 4;
+        case 0x92: this._clr1(this._dpAddr(),4); return 4;
+        case 0xB2: this._clr1(this._dpAddr(),5); return 4;
+        case 0xD2: this._clr1(this._dpAddr(),6); return 4;
+        case 0xF2: this._clr1(this._dpAddr(),7); return 4;
+
+        // ── BBS / BBC ────────────────────────────────────────────
+        case 0x03: { const a=this._dpAddr(); return 5 + this._bbs(a,0); }
+        case 0x23: { const a=this._dpAddr(); return 5 + this._bbs(a,1); }
+        case 0x43: { const a=this._dpAddr(); return 5 + this._bbs(a,2); }
+        case 0x63: { const a=this._dpAddr(); return 5 + this._bbs(a,3); }
+        case 0x83: { const a=this._dpAddr(); return 5 + this._bbs(a,4); }
+        case 0xA3: { const a=this._dpAddr(); return 5 + this._bbs(a,5); }
+        case 0xC3: { const a=this._dpAddr(); return 5 + this._bbs(a,6); }
+        case 0xE3: { const a=this._dpAddr(); return 5 + this._bbs(a,7); }
+        case 0x13: { const a=this._dpAddr(); return 5 + this._bbc(a,0); }
+        case 0x33: { const a=this._dpAddr(); return 5 + this._bbc(a,1); }
+        case 0x53: { const a=this._dpAddr(); return 5 + this._bbc(a,2); }
+        case 0x73: { const a=this._dpAddr(); return 5 + this._bbc(a,3); }
+        case 0x93: { const a=this._dpAddr(); return 5 + this._bbc(a,4); }
+        case 0xB3: { const a=this._dpAddr(); return 5 + this._bbc(a,5); }
+        case 0xD3: { const a=this._dpAddr(); return 5 + this._bbc(a,6); }
+        case 0xF3: { const a=this._dpAddr(); return 5 + this._bbc(a,7); }
+
+        // ── OR A, ... ─────────────────────────────────────────────
+        case 0x04: this.A=this._setNZ(this.A|this._r(this._dpAddr())); return 3;
+        case 0x05: this.A=this._setNZ(this.A|this._r(this._absAddr())); return 4;
+        case 0x06: this.A=this._setNZ(this.A|this._r((this._dpBase()+(this.X&0xFF))&0xFFFF)); return 3;
+        case 0x07: this.A=this._setNZ(this.A|this._r(this._dpIndX())); return 6;
+        case 0x08: this.A=this._setNZ(this.A|this._imm()); return 2;
+        case 0x09: { const s=this._dpAddr(), d=this._dpAddr(); this._w(d,this._setNZ(this._r(d)|this._r(s))); return 6; }
+        case 0x14: this.A=this._setNZ(this.A|this._r(this._dpXAddr())); return 4;
+        case 0x15: this.A=this._setNZ(this.A|this._r(this._absXAddr())); return 5;
+        case 0x16: this.A=this._setNZ(this.A|this._r(this._absYAddr())); return 5;
+        case 0x17: this.A=this._setNZ(this.A|this._r(this._dpIndY())); return 6;
+        // encoding: [18][imm][dp]  imm先読み
+        case 0x18: { const imm=this._imm(), d=this._dpAddr(); this._w(d,this._setNZ(this._r(d)|imm)); return 5; }
+        case 0x19: this._w((this._dpBase()+(this.X&0xFF))&0xFFFF,
+                     this._setNZ(this._r((this._dpBase()+(this.X&0xFF))&0xFFFF)|
+                                 this._r((this._dpBase()+(this.Y&0xFF))&0xFFFF))); return 5;
+
+        // ── AND A, ... ────────────────────────────────────────────
+        case 0x24: this.A=this._setNZ(this.A&this._r(this._dpAddr())); return 3;
+        case 0x25: this.A=this._setNZ(this.A&this._r(this._absAddr())); return 4;
+        case 0x26: this.A=this._setNZ(this.A&this._r((this._dpBase()+this.X)&0xFFFF)); return 3;
+        case 0x27: this.A=this._setNZ(this.A&this._r(this._dpIndX())); return 6;
+        case 0x28: this.A=this._setNZ(this.A&this._imm()); return 2;
+        case 0x29: { const s=this._dpAddr(), d=this._dpAddr(); this._w(d,this._setNZ(this._r(d)&this._r(s))); return 6; }
+        case 0x34: this.A=this._setNZ(this.A&this._r(this._dpXAddr())); return 4;
+        case 0x35: this.A=this._setNZ(this.A&this._r(this._absXAddr())); return 5;
+        case 0x36: this.A=this._setNZ(this.A&this._r(this._absYAddr())); return 5;
+        case 0x37: this.A=this._setNZ(this.A&this._r(this._dpIndY())); return 6;
+        case 0x38: { const imm=this._imm(), d=this._dpAddr(); this._w(d,this._setNZ(this._r(d)&imm)); return 5; }
+        case 0x39: { const xA=(this._dpBase()+this.X)&0xFFFF, yA=(this._dpBase()+this.Y)&0xFFFF;
+                     this._w(xA,this._setNZ(this._r(xA)&this._r(yA))); return 5; }
+
+        // ── EOR A, ... ────────────────────────────────────────────
+        case 0x44: this.A=this._setNZ(this.A^this._r(this._dpAddr())); return 3;
+        case 0x45: this.A=this._setNZ(this.A^this._r(this._absAddr())); return 4;
+        case 0x46: this.A=this._setNZ(this.A^this._r((this._dpBase()+this.X)&0xFFFF)); return 3;
+        case 0x47: this.A=this._setNZ(this.A^this._r(this._dpIndX())); return 6;
+        case 0x48: this.A=this._setNZ(this.A^this._imm()); return 2;
+        case 0x49: { const s=this._dpAddr(), d=this._dpAddr(); this._w(d,this._setNZ(this._r(d)^this._r(s))); return 6; }
+        case 0x54: this.A=this._setNZ(this.A^this._r(this._dpXAddr())); return 4;
+        case 0x55: this.A=this._setNZ(this.A^this._r(this._absXAddr())); return 5;
+        case 0x56: this.A=this._setNZ(this.A^this._r(this._absYAddr())); return 5;
+        case 0x57: this.A=this._setNZ(this.A^this._r(this._dpIndY())); return 6;
+        case 0x58: { const imm=this._imm(), d=this._dpAddr(); this._w(d,this._setNZ(this._r(d)^imm)); return 5; }
+        case 0x59: { const xA=(this._dpBase()+this.X)&0xFFFF, yA=(this._dpBase()+this.Y)&0xFFFF;
+                     this._w(xA,this._setNZ(this._r(xA)^this._r(yA))); return 5; }
+
+        // ── CMP A, ... ────────────────────────────────────────────
+        case 0x64: this._cmp(this.A,this._r(this._dpAddr())); return 3;
+        case 0x65: this._cmp(this.A,this._r(this._absAddr())); return 4;
+        case 0x66: this._cmp(this.A,this._r((this._dpBase()+this.X)&0xFFFF)); return 3;
+        case 0x67: this._cmp(this.A,this._r(this._dpIndX())); return 6;
+        case 0x68: this._cmp(this.A,this._imm()); return 2;
+        case 0x69: { const s=this._dpAddr(), d=this._dpAddr(); this._cmp(this._r(d),this._r(s)); return 6; }
+        case 0x74: this._cmp(this.A,this._r(this._dpXAddr())); return 4;
+        case 0x75: this._cmp(this.A,this._r(this._absXAddr())); return 5;
+        case 0x76: this._cmp(this.A,this._r(this._absYAddr())); return 5;
+        case 0x77: this._cmp(this.A,this._r(this._dpIndY())); return 6;
+        case 0x78: { const imm=this._imm(), d=this._dpAddr(); this._cmp(this._r(d),imm); return 5; }
+        case 0x79: this._cmp(this._r((this._dpBase()+this.X)&0xFFFF),
+                             this._r((this._dpBase()+this.Y)&0xFFFF)); return 5;
+
+        // ── ADC A, ... ────────────────────────────────────────────
+        case 0x84: this.A=this._adc(this.A,this._r(this._dpAddr())); return 3;
+        case 0x85: this.A=this._adc(this.A,this._r(this._absAddr())); return 4;
+        case 0x86: this.A=this._adc(this.A,this._r((this._dpBase()+this.X)&0xFFFF)); return 3;
+        case 0x87: this.A=this._adc(this.A,this._r(this._dpIndX())); return 6;
+        case 0x88: this.A=this._adc(this.A,this._imm()); return 2;
+        case 0x89: { const s=this._dpAddr(), d=this._dpAddr(); this._w(d,this._adc(this._r(d),this._r(s))); return 6; }
+        case 0x94: this.A=this._adc(this.A,this._r(this._dpXAddr())); return 4;
+        case 0x95: this.A=this._adc(this.A,this._r(this._absXAddr())); return 5;
+        case 0x96: this.A=this._adc(this.A,this._r(this._absYAddr())); return 5;
+        case 0x97: this.A=this._adc(this.A,this._r(this._dpIndY())); return 6;
+        case 0x98: { const imm=this._imm(), d=this._dpAddr(); this._w(d,this._adc(this._r(d),imm)); return 5; }
+        case 0x99: { const xA=(this._dpBase()+this.X)&0xFFFF, yA=(this._dpBase()+this.Y)&0xFFFF;
+                     this._w(xA,this._adc(this._r(xA),this._r(yA))); return 5; }
+
+        // ── SBC A, ... ────────────────────────────────────────────
+        case 0xA4: this.A=this._sbc(this.A,this._r(this._dpAddr())); return 3;
+        case 0xA5: this.A=this._sbc(this.A,this._r(this._absAddr())); return 4;
+        case 0xA6: this.A=this._sbc(this.A,this._r((this._dpBase()+this.X)&0xFFFF)); return 3;
+        case 0xA7: this.A=this._sbc(this.A,this._r(this._dpIndX())); return 6;
+        case 0xA8: this.A=this._sbc(this.A,this._imm()); return 2;
+        case 0xA9: { const s=this._dpAddr(), d=this._dpAddr(); this._w(d,this._sbc(this._r(d),this._r(s))); return 6; }
+        case 0xB4: this.A=this._sbc(this.A,this._r(this._dpXAddr())); return 4;
+        case 0xB5: this.A=this._sbc(this.A,this._r(this._absXAddr())); return 5;
+        case 0xB6: this.A=this._sbc(this.A,this._r(this._absYAddr())); return 5;
+        case 0xB7: this.A=this._sbc(this.A,this._r(this._dpIndY())); return 6;
+        case 0xB8: { const imm=this._imm(), d=this._dpAddr(); this._w(d,this._sbc(this._r(d),imm)); return 5; }
+        case 0xB9: { const xA=(this._dpBase()+this.X)&0xFFFF, yA=(this._dpBase()+this.Y)&0xFFFF;
+                     this._w(xA,this._sbc(this._r(xA),this._r(yA))); return 5; }
+
+        // ── ASL ──────────────────────────────────────────────────
+        case 0x0B: { const a=this._dpAddr(); this._w(a,this._asl(this._r(a))); return 4; }
+        case 0x0C: { const a=this._absAddr(); this._w(a,this._asl(this._r(a))); return 5; }
+        case 0x1B: { const a=this._dpXAddr(); this._w(a,this._asl(this._r(a))); return 5; }
+        case 0x1C: this.A=this._asl(this.A); return 2;
+
+        // ── LSR ──────────────────────────────────────────────────
+        case 0x4B: { const a=this._dpAddr(); this._w(a,this._lsr(this._r(a))); return 4; }
+        case 0x4C: { const a=this._absAddr(); this._w(a,this._lsr(this._r(a))); return 5; }
+        case 0x5B: { const a=this._dpXAddr(); this._w(a,this._lsr(this._r(a))); return 5; }
+        case 0x5C: this.A=this._lsr(this.A); return 2;
+
+        // ── ROL ──────────────────────────────────────────────────
+        case 0x2B: { const a=this._dpAddr(); this._w(a,this._rol(this._r(a))); return 4; }
+        case 0x2C: { const a=this._absAddr(); this._w(a,this._rol(this._r(a))); return 5; }
+        case 0x3B: { const a=this._dpXAddr(); this._w(a,this._rol(this._r(a))); return 5; }
+        case 0x3C: this.A=this._rol(this.A); return 2;
+
+        // ── ROR ──────────────────────────────────────────────────
+        case 0x6B: { const a=this._dpAddr(); this._w(a,this._ror(this._r(a))); return 4; }
+        case 0x6C: { const a=this._absAddr(); this._w(a,this._ror(this._r(a))); return 5; }
+        case 0x7B: { const a=this._dpXAddr(); this._w(a,this._ror(this._r(a))); return 5; }
+        case 0x7C: this.A=this._ror(this.A); return 2;
+
+        // ── INC ──────────────────────────────────────────────────
+        case 0xAB: { const a=this._dpAddr(); this._w(a,this._setNZ(this._r(a)+1)); return 4; }
+        case 0xAC: { const a=this._absAddr(); this._w(a,this._setNZ(this._r(a)+1)); return 5; }
+        case 0xBB: { const a=this._dpXAddr(); this._w(a,this._setNZ(this._r(a)+1)); return 5; }
+        case 0xBC: this.A=this._setNZ(this.A+1); return 2;
+        case 0x3D: this.X=this._setNZ(this.X+1); return 2;
+        case 0xFC: this.Y=this._setNZ(this.Y+1); return 2;
+
+        // ── DEC ──────────────────────────────────────────────────
+        case 0x8B: { const a=this._dpAddr(); this._w(a,this._setNZ(this._r(a)-1)); return 4; }
+        case 0x8C: { const a=this._absAddr(); this._w(a,this._setNZ(this._r(a)-1)); return 5; }
+        case 0x9B: { const a=this._dpXAddr(); this._w(a,this._setNZ(this._r(a)-1)); return 5; }
+        case 0x9C: this.A=this._setNZ(this.A-1); return 2;
+        case 0x1D: this.X=this._setNZ(this.X-1); return 2;
+        case 0xDC: this.Y=this._setNZ(this.Y-1); return 2;
+
+        // ── CMP X/Y ──────────────────────────────────────────────
+        case 0xC8: this._cmp(this.X,this._imm()); return 2;
+        case 0x3E: this._cmp(this.X,this._r(this._dpAddr())); return 3;
+        case 0x1E: this._cmp(this.X,this._r(this._absAddr())); return 4;
+        case 0xAD: this._cmp(this.Y,this._imm()); return 2;
+        case 0x7E: this._cmp(this.Y,this._r(this._dpAddr())); return 3;
+        case 0x5E: this._cmp(this.Y,this._r(this._absAddr())); return 4;
+
+        // ── 分岐 ─────────────────────────────────────────────────
+        case 0x10: return 2 + this._branch(!(this.PSW&0x80));  // BPL
+        case 0x30: return 2 + this._branch(!!(this.PSW&0x80)); // BMI
+        case 0x50: return 2 + this._branch(!(this.PSW&0x40));  // BVC
+        case 0x70: return 2 + this._branch(!!(this.PSW&0x40)); // BVS
+        case 0x90: return 2 + this._branch(!(this.PSW&0x01));  // BCC
+        case 0xB0: return 2 + this._branch(!!(this.PSW&0x01)); // BCS
+        case 0xD0: return 2 + this._branch(!(this.PSW&0x02));  // BNE
+        case 0xF0: return 2 + this._branch(!!(this.PSW&0x02)); // BEQ
+        case 0x2F: this._branch(true); return 4;               // BRA
+
+        // ── CBNE ─────────────────────────────────────────────────
+        // CBNE/DBNZ も分岐成立時 +2 サイクル
+        case 0x2E: { const a=this._dpAddr(), d=this._r(a), off=this._r(this.PC++);
+                     if(d!==this.A){ this.PC=(this.PC+((off&0x80)?off-256:off))&0xFFFF; return 7; } return 5; }
+        case 0xDE: { const a=this._dpXAddr(), d=this._r(a), off=this._r(this.PC++);
+                     if(d!==this.A){ this.PC=(this.PC+((off&0x80)?off-256:off))&0xFFFF; return 8; } return 6; }
+
+        // ── DBNZ ─────────────────────────────────────────────────
+        case 0x6E: { const a=this._dpAddr(), d=(this._r(a)-1)&0xFF; this._w(a,d);
+                     const off=this._r(this.PC++);
+                     if(d!==0){ this.PC=(this.PC+((off&0x80)?off-256:off))&0xFFFF; return 7; } return 5; }
+        case 0xFE: { this.Y=(this.Y-1)&0xFF;
+                     const off=this._r(this.PC++);
+                     if(this.Y!==0){ this.PC=(this.PC+((off&0x80)?off-256:off))&0xFFFF; return 6; } return 4; }
+
+        // ── CALL / RET ────────────────────────────────────────────
+        case 0x3F: { const a=this._absAddr(); this._call(a); return 8; }
+        case 0x6F: { const lo=this._pop(), hi=this._pop(); this.PC=(hi<<8)|lo; return 5; } // RET
+        // RETI: BRK/割り込みがPCH→PCL→PSWの順でpushするので逆順でpop
+        case 0x7F: { this.PSW=this._pop();
+                     const lo=this._pop(), hi=this._pop(); this.PC=(hi<<8)|lo; return 6; } // RETI
+
+        // ── PCALL ─────────────────────────────────────────────────
+        case 0x4F: { const u=this._imm(); this._call(0xFF00|u); return 6; }
+
+        // ── BRK ──────────────────────────────────────────────────
+        case 0x0F: {
+          this._push((this.PC>>8)&0xFF); this._push(this.PC&0xFF); this._push(this.PSW);
+          this.PSW=(this.PSW|0x10)&~0x04; // B=1, I=0
+          this.PC=this._r(0xFFDE)|(this._r(0xFFDF)<<8);
+          return 8;
+        }
+
+        // ── JMP ──────────────────────────────────────────────────
+        case 0x5F: this.PC=this._absAddr(); return 3;
+        case 0x1F: { const a=this._absAddr(); this.PC=this._r((a+this.X)&0xFFFF)|(this._r((a+this.X+1)&0xFFFF)<<8); return 6; }
+
+        // ── PUSH / POP ───────────────────────────────────────────
+        case 0x2D: this._push(this.A); return 4;
+        case 0x4D: this._push(this.X); return 4;
+        case 0x6D: this._push(this.Y); return 4;
+        case 0x0D: this._push(this.PSW); return 4;
+        // POP A/X/Y は SPC700 ではフラグを一切変更しない（6502 の PLA と違う）。
+        // 誤って N/Z を書き換えると "PUSH A; …; POP A; Bcc" のイディオムが壊れる。
+        case 0xAE: this.A=this._pop(); return 4;
+        case 0xCE: this.X=this._pop(); return 4;
+        case 0xEE: this.Y=this._pop(); return 4;
+        case 0x8E: this.PSW=this._pop(); return 4;
+
+        // ── MOV A, ... ───────────────────────────────────────────
+        case 0xE4: this.A=this._setNZ(this._r(this._dpAddr())); return 3;
+        case 0xE5: this.A=this._setNZ(this._r(this._absAddr())); return 4;
+        case 0xE6: this.A=this._setNZ(this._r((this._dpBase()+this.X)&0xFFFF)); return 3;
+        case 0xE7: this.A=this._setNZ(this._r(this._dpIndX())); return 6;
+        case 0xE8: this.A=this._setNZ(this._imm()); return 2;
+        case 0xF4: this.A=this._setNZ(this._r(this._dpXAddr())); return 4;
+        case 0xF5: this.A=this._setNZ(this._r(this._absXAddr())); return 5;
+        case 0xF6: this.A=this._setNZ(this._r(this._absYAddr())); return 5;
+        case 0xF7: this.A=this._setNZ(this._r(this._dpIndY())); return 6;
+        case 0x7D: this.A=this._setNZ(this.X); return 2;        // MOV A, X
+        case 0xDD: this.A=this._setNZ(this.Y); return 2;        // MOV A, Y
+        case 0xBF: { this.A=this._setNZ(this._r((this._dpBase()+this.X)&0xFFFF)); // MOV A, (X)+
+                     this.X=(this.X+1)&0xFF; return 4; }
+
+        // ── MOV X, ... ───────────────────────────────────────────
+        case 0xF8: this.X=this._setNZ(this._r(this._dpAddr())); return 3;
+        case 0xE9: this.X=this._setNZ(this._r(this._absAddr())); return 4;
+        case 0xF9: this.X=this._setNZ(this._r(this._dpYAddr())); return 4;
+        case 0xCD: this.X=this._setNZ(this._imm()); return 2;
+        case 0x5D: this.X=this._setNZ(this.A); return 2;        // MOV X, A
+        case 0x9D: this.X=this._setNZ(this.SP); return 2;       // MOV X, SP
+
+        // ── MOV Y, ... ───────────────────────────────────────────
+        case 0xEB: this.Y=this._setNZ(this._r(this._dpAddr())); return 3;
+        case 0xEC: this.Y=this._setNZ(this._r(this._absAddr())); return 4;
+        case 0xFB: this.Y=this._setNZ(this._r(this._dpXAddr())); return 4;
+        case 0x8D: this.Y=this._setNZ(this._imm()); return 2;
+        case 0xFD: this.Y=this._setNZ(this.A); return 2;        // MOV Y, A
+
+        // ── MOV mem, A ───────────────────────────────────────────
+        case 0xC4: this._w(this._dpAddr(),this.A); return 4;
+        case 0xC5: this._w(this._absAddr(),this.A); return 5;
+        case 0xC6: this._w((this._dpBase()+this.X)&0xFFFF,this.A); return 4;
+        case 0xC7: this._w(this._dpIndX(),this.A); return 7;
+        case 0xD4: this._w(this._dpXAddr(),this.A); return 5;
+        case 0xD5: this._w(this._absXAddr(),this.A); return 6;
+        case 0xD6: this._w(this._absYAddr(),this.A); return 6;
+        case 0xD7: this._w(this._dpIndY(),this.A); return 7;
+        case 0xAF: { this._w((this._dpBase()+this.X)&0xFFFF,this.A); // MOV (X)+, A
+                     this.X=(this.X+1)&0xFF; return 4; }
+
+        // ── MOV mem, X ───────────────────────────────────────────
+        case 0xD8: this._w(this._dpAddr(),this.X); return 4;
+        case 0xC9: this._w(this._absAddr(),this.X); return 5;
+        case 0xD9: this._w(this._dpYAddr(),this.X); return 5;
+
+        // ── MOV mem, Y ───────────────────────────────────────────
+        case 0xCB: this._w(this._dpAddr(),this.Y); return 4;
+        case 0xCC: this._w(this._absAddr(),this.Y); return 5;
+        case 0xDB: this._w(this._dpXAddr(),this.Y); return 5;
+
+        // ── MOV dp, dp / dp, #imm ────────────────────────────────
+        // FA: [FA][src][dst]  ニーモニックは MOV dd,ds だが機械語は src バイトが先・
+        // dst バイトが後（SPC700 特有の逆順）。以前は第1バイトを書き込み先として扱い
+        // src/dst が逆になっていた。MOV dp,dp で「マスクをコピーしてから走査」する
+        // N-SPC 系ドライバ（Chrono Trigger 等）でコピー元（アクティブボイスマスク）を
+        // 0 で潰し、全ボイスの発音が止まっていた。
+        case 0xFA: { const s=this._dpAddr(), d=this._dpAddr(); this._w(d,this._r(s)); return 5; }
+        // 8F: [8F][imm][dst]  imm 先読み
+        case 0x8F: { const imm=this._imm(), d=this._dpAddr(); this._w(d,imm); return 5; }
+
+        // ── MOV SP, X ────────────────────────────────────────────
+        case 0xBD: this.SP=this.X; return 2;
+
+        // ── MOVW YA, dp ──────────────────────────────────────────
+        case 0xBA: { const a=this._dpAddr(); const lo=this._r(a), hi=this._r(this._dpHi(a));
+                     this.A=lo; this.Y=hi;
+                     const ya=(hi<<8)|lo;
+                     this.PSW=(this.PSW&~0x82)|(ya&0x8000?0x80:0)|(ya===0?0x02:0); return 5; }
+
+        // ── MOVW dp, YA ──────────────────────────────────────────
+        case 0xDA: { const a=this._dpAddr(); this._w(a,this.A); this._w(this._dpHi(a),this.Y); return 5; }
+
+        // ── ADDW YA, dp ──────────────────────────────────────────
+        case 0x7A: { const a=this._dpAddr();
+                     const ya=(this.Y<<8)|this.A, m=this._r(a)|(this._r(this._dpHi(a))<<8);
+                     const r=ya+m;
+                     const h=(ya&0xFFF)+(m&0xFFF);
+                     this.PSW=(this.PSW&~0xCB)|(r&0x8000?0x80:0)
+                       |((ya^r)&(m^r)&0x8000?0x40:0)|(h>0xFFF?0x08:0)|((r&0xFFFF)===0?0x02:0)|(r>0xFFFF?0x01:0);
+                     this.A=r&0xFF; this.Y=(r>>8)&0xFF; return 5; }
+
+        // ── SUBW YA, dp ──────────────────────────────────────────
+        case 0x9A: { const a=this._dpAddr();
+                     const ya=(this.Y<<8)|this.A, m=this._r(a)|(this._r(this._dpHi(a))<<8);
+                     const r=ya-m;
+                     const h=(ya&0xFFF)-(m&0xFFF);
+                     this.PSW=(this.PSW&~0xCB)|(r&0x8000?0x80:0)
+                       |((ya^m)&(ya^r)&0x8000?0x40:0)|(h>=0?0x08:0)|((r&0xFFFF)===0?0x02:0)|(r>=0?0x01:0);
+                     this.A=r&0xFF; this.Y=(r>>8)&0xFF; return 5; }
+
+        // ── CMPW YA, dp ──────────────────────────────────────────
+        case 0x5A: { const a=this._dpAddr();
+                     const ya=(this.Y<<8)|this.A, m=this._r(a)|(this._r(this._dpHi(a))<<8);
+                     const r=ya-m;
+                     this.PSW=(this.PSW&~0x83)|(r&0x8000?0x80:0)|((r&0xFFFF)===0?0x02:0)|(r>=0?0x01:0);
+                     return 4; }
+
+        // ── INCW / DECW ──────────────────────────────────────────
+        case 0x3A: { const a=this._dpAddr(), a1=this._dpHi(a); const lo=this._r(a), hi=this._r(a1);
+                     const v=((hi<<8)|lo)+1;
+                     this._w(a,v&0xFF); this._w(a1,(v>>8)&0xFF);
+                     this.PSW=(this.PSW&~0x82)|(v&0x8000?0x80:0)|((v&0xFFFF)===0?0x02:0); return 6; }
+        case 0x1A: { const a=this._dpAddr(), a1=this._dpHi(a); const lo=this._r(a), hi=this._r(a1);
+                     const v=((hi<<8)|lo)-1;
+                     this._w(a,v&0xFF); this._w(a1,(v>>8)&0xFF);
+                     this.PSW=(this.PSW&~0x82)|(v&0x8000?0x80:0)|((v&0xFFFF)===0?0x02:0); return 6; }
+
+        // ── MUL YA ───────────────────────────────────────────────
+        case 0xCF: { const r=this.Y*this.A; this.Y=(r>>8)&0xFF; this.A=r&0xFF;
+                     this.PSW=(this.PSW&~0x82)|(this.Y&0x80)|(this.Y===0?0x02:0); return 9; }
+
+        // ── DIV YA, X ────────────────────────────────────────────
+        case 0x9E: {
+          // SPC700 の DIV YA,X は独特（bsnes/higan 準拠）。9bit に収まらない商は
+          // 別式で近似され、V/H フラグも特殊。以前の素朴な ya/X, ya%X は不一致だった。
+          const ya=(this.Y<<8)|this.A, X=this.X;
+          // H: X 下位ニブル <= Y 下位ニブル、V: Y >= X
+          if((X&0x0F)<=(this.Y&0x0F)) this.PSW|=0x08; else this.PSW&=~0x08;
+          if(this.Y>=X) this.PSW|=0x40; else this.PSW&=~0x40;
+          if(this.Y < (X<<1)) {
+            this.A = Math.floor(ya / X) & 0xFF;
+            this.Y = (ya % X) & 0xFF;
+          } else {
+            this.A = (255 - Math.floor((ya - (X<<9)) / (256 - X))) & 0xFF;
+            this.Y = (X + ((ya - (X<<9)) % (256 - X))) & 0xFF;
+          }
+          this._setNZ(this.A); return 12;
+        }
+
+        // ── XCN A ────────────────────────────────────────────────
+        case 0x9F: this.A=this._setNZ(((this.A>>4)|(this.A<<4))&0xFF); return 5;
+
+        // ── DAA / DAS ────────────────────────────────────────────
+        case 0xDF: { // DAA
+          let a=this.A; const c=this._getC(), h=(this.PSW>>3)&1;
+          if(c||a>0x99){a+=0x60; this.PSW|=0x01;} else this.PSW&=~0x01;
+          if(h||(a&0xF)>9) a+=0x06;
+          this.A=this._setNZ(a); return 3;
+        }
+        case 0xBE: { // DAS
+          let a=this.A; const c=this._getC(), h=(this.PSW>>3)&1;
+          if(!c||a>0x99){a-=0x60; this.PSW&=~0x01;} else this.PSW|=0x01;
+          if(!h||(a&0xF)>9) a-=0x06;
+          this.A=this._setNZ(a); return 3;
+        }
+
+        // ── フラグ操作 ────────────────────────────────────────────
+        case 0x60: this.PSW&=~0x01; return 2;  // CLRC
+        case 0x80: this.PSW|=0x01; return 2;   // SETC
+        case 0x20: this.PSW&=~0x20; return 2;  // CLRP
+        case 0x40: this.PSW|=0x20; return 2;   // SETP
+        case 0xE0: this.PSW&=~0x48; return 2;  // CLRV（V と H の両方をクリア）
+        case 0xA0: this.PSW|=0x04; return 3;   // EI
+        case 0xC0: this.PSW&=~0x04; return 3;  // DI
+        case 0xED: this.PSW^=0x01; return 3;   // NOTC
+
+        // ── TSET1 / TCLR1 ────────────────────────────────────────
+        // TSET1/TCLR1: N,Z は A-mem（CMP と同じ）で決まる。以前は A&mem で判定して
+        // いたため N/Z が誤り。C,V は不変。
+        case 0x0E: { const a=this._absAddr(), d=this._r(a); this._w(a,d|this.A);
+                     this._setNZ((this.A-d)&0xFF); return 6; }
+        case 0x4E: { const a=this._absAddr(), d=this._r(a); this._w(a,d&~this.A);
+                     this._setNZ((this.A-d)&0xFF); return 6; }
+
+        // ── 1ビット演算 (C, mem.bit) ─────────────────────────────
+        case 0x0A: { const mb=this._memBit(); const bit=(this._r(mb.addr)>>mb.bit)&1;
+                     this.PSW=(this.PSW&~0x01)|(this._getC()|bit); return 5; }    // OR1
+        case 0x2A: { const mb=this._memBit(); const bit=((this._r(mb.addr)>>mb.bit)&1)^1;
+                     this.PSW=(this.PSW&~0x01)|(this._getC()|bit); return 5; }   // OR1 /
+        case 0x4A: { const mb=this._memBit(); const bit=(this._r(mb.addr)>>mb.bit)&1;
+                     this.PSW=(this.PSW&~0x01)|(this._getC()&bit); return 4; }   // AND1
+        case 0x6A: { const mb=this._memBit(); const bit=((this._r(mb.addr)>>mb.bit)&1)^1;
+                     this.PSW=(this.PSW&~0x01)|(this._getC()&bit); return 4; }   // AND1 /
+        case 0x8A: { const mb=this._memBit(); const bit=(this._r(mb.addr)>>mb.bit)&1;
+                     this.PSW=(this.PSW&~0x01)|(this._getC()^bit); return 5; }   // EOR1
+        case 0xEA: { const mb=this._memBit();
+                     const d=this._r(mb.addr), bit=(d>>mb.bit)&1;
+                     this._w(mb.addr,(d&~(1<<mb.bit))|((bit^1)<<mb.bit)); return 5; } // NOT1
+        case 0xAA: { const mb=this._memBit();
+                     this.PSW=(this.PSW&~0x01)|((this._r(mb.addr)>>mb.bit)&1); return 4; } // MOV1 C, mb
+        case 0xCA: { const mb=this._memBit(); const d=this._r(mb.addr);
+                     this._w(mb.addr,(d&~(1<<mb.bit))|(this._getC()<<mb.bit)); return 6; } // MOV1 mb, C
+
+        // ── デフォルト（未定義命令 = NOP 扱い） ────────────────────
+        default:
+          return 2;
+      }
+    }
+
+    /**
+     * 指定サイクル数実行 (STOP/SLEEP でハルトしたら即座に抜ける)
+     */
+    runCycles(cycles) {
+      if (this.halted) return;
+      let spent = 0;
+      while (spent < cycles) {
+        spent += this.step();
+        if (this.halted) return;
+      }
+    }
+  }
+
+  Emu.SPC700 = SPC700;
+  Emu.SPC_IPL_ROM = IPL_ROM;
+
+})(globalThis);
+
+/*
+ * SNES DSP エミュレータ (CXD1222Q/CXD2922Q)
+ * MML.Emu.SpcDsp
+ *
+ * 8ボイス BRR サンプル再生、ADSR エンベロープ、エコー処理
+ * clock() を 32 SPC700 サイクルごとに呼び出すと 32kHz で 1 ステレオサンプルを生成
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  // ── ガウシアン補間テーブル (512 entries) ─────────────────────────
+  // SNES DSP の4タップ・ガウシアン補間カーネル。
+  // 【修正】旧テーブルは形状が誤っており(index 426 付近で 0x3FF 頭打ち・末尾 0)、
+  // 4タップの合計が 2048 にならず、補間利得がサブサンプル位置(frac)に依存して
+  // 最大 ±30% 変動していた。frac は毎サンプル進むため、この利得リップルが持続音
+  // (特に低音)に信号比例の高域うなり=音割れを生じさせていた。
+  // 正しくは実機同様に単調増加(ピーク G[511]≈1305)し、各列(4タップ)合計が
+  // ほぼ 2048 になる単位利得カーネルでなければならない。
+  //   G[n] = round(h((511.5 - n)/256) * scale),  h(u) = exp(-u^2 / (2σ^2))
+  // σ=0.63 で実機ピーク(≈1305)を再現し、全列合計が 2044〜2050(±0.3%)に収まる。
+  // ★2026-09-07 σ=0.63 のガウス関数から合成した近似表(実機との最大差20、8kHzで0.14dB差)を、
+  // 実機DSPのROM表そのもの(blargg snes_spc / snes9x SPC_DSP.cpp の gauss[512]、fullsnes と同一)へ
+  // 差し替えた。鍵盤表示の「ガウス補間」の図と実出力を実機どおりにするため。
+  const GAUSS = new Int16Array([
+       0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+       1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   2,   2,   2,   2,   2,
+       2,   2,   3,   3,   3,   3,   3,   4,   4,   4,   4,   4,   5,   5,   5,   5,
+       6,   6,   6,   6,   7,   7,   7,   8,   8,   8,   9,   9,   9,  10,  10,  10,
+      11,  11,  11,  12,  12,  13,  13,  14,  14,  15,  15,  15,  16,  16,  17,  17,
+      18,  19,  19,  20,  20,  21,  21,  22,  23,  23,  24,  24,  25,  26,  27,  27,
+      28,  29,  29,  30,  31,  32,  32,  33,  34,  35,  36,  36,  37,  38,  39,  40,
+      41,  42,  43,  44,  45,  46,  47,  48,  49,  50,  51,  52,  53,  54,  55,  56,
+      58,  59,  60,  61,  62,  64,  65,  66,  67,  69,  70,  71,  73,  74,  76,  77,
+      78,  80,  81,  83,  84,  86,  87,  89,  90,  92,  94,  95,  97,  99, 100, 102,
+     104, 106, 107, 109, 111, 113, 115, 117, 118, 120, 122, 124, 126, 128, 130, 132,
+     134, 137, 139, 141, 143, 145, 147, 150, 152, 154, 156, 159, 161, 163, 166, 168,
+     171, 173, 175, 178, 180, 183, 186, 188, 191, 193, 196, 199, 201, 204, 207, 210,
+     212, 215, 218, 221, 224, 227, 230, 233, 236, 239, 242, 245, 248, 251, 254, 257,
+     260, 263, 267, 270, 273, 276, 280, 283, 286, 290, 293, 297, 300, 304, 307, 311,
+     314, 318, 321, 325, 328, 332, 336, 339, 343, 347, 351, 354, 358, 362, 366, 370,
+     374, 378, 381, 385, 389, 393, 397, 401, 405, 410, 414, 418, 422, 426, 430, 434,
+     439, 443, 447, 451, 456, 460, 464, 469, 473, 477, 482, 486, 491, 495, 499, 504,
+     508, 513, 517, 522, 527, 531, 536, 540, 545, 550, 554, 559, 563, 568, 573, 577,
+     582, 587, 592, 596, 601, 606, 611, 615, 620, 625, 630, 635, 640, 644, 649, 654,
+     659, 664, 669, 674, 678, 683, 688, 693, 698, 703, 708, 713, 718, 723, 728, 732,
+     737, 742, 747, 752, 757, 762, 767, 772, 777, 782, 787, 792, 797, 802, 806, 811,
+     816, 821, 826, 831, 836, 841, 846, 851, 855, 860, 865, 870, 875, 880, 884, 889,
+     894, 899, 904, 908, 913, 918, 923, 927, 932, 937, 941, 946, 951, 955, 960, 965,
+     969, 974, 978, 983, 988, 992, 997,1001,1005,1010,1014,1019,1023,1027,1032,1036,
+    1040,1045,1049,1053,1057,1061,1066,1070,1074,1078,1082,1086,1090,1094,1098,1102,
+    1106,1109,1113,1117,1121,1125,1128,1132,1136,1139,1143,1146,1150,1153,1157,1160,
+    1164,1167,1170,1174,1177,1180,1183,1186,1190,1193,1196,1199,1202,1205,1207,1210,
+    1213,1216,1219,1221,1224,1227,1229,1232,1234,1237,1239,1241,1244,1246,1248,1251,
+    1253,1255,1257,1259,1261,1263,1265,1267,1269,1270,1272,1274,1275,1277,1279,1280,
+    1282,1283,1284,1286,1287,1288,1290,1291,1292,1293,1294,1295,1296,1297,1297,1298,
+    1299,1300,1300,1301,1302,1302,1303,1303,1303,1304,1304,1304,1304,1304,1305,1305,
+  ]);
+
+  // ── ガウス補間(実機の演算順そのまま) ──────────────────────────────
+  // buf: brrBuf(履歴4+現ブロック16[+先読み])、i: sampleIdx、frac: 8bit 小数(pitchFrac>>4)。
+  // タップは古い順に buf[1+i], buf[2+i], buf[3+i], buf[4+i](=サンプル i−3 … i)。
+  // frac=0 のとき重みは s[i−2] を中心に対称、frac→1 で s[i−1] 中心へ移る。つまり出力は
+  // 「サンプル位置 (i−2)+frac/256」の値(鍵盤表示の横軸合わせに使う)。
+  // 実機は各タップを個別に >>11 し、3タップ目までの和を16bitに折り返してから4タップ目を
+  // 足し、クランプして最下位ビットを落とす(blargg SPC_DSP.cpp 準拠。以前は合計してから
+  // >>11 していたため数LSBの丸め差があり、大音量時の折り返し歪みも無かった)
+  function gaussInterp(buf, i, frac) {
+    let out = (GAUSS[0xFF - frac] * buf[1 + i]) >> 11;
+    out += (GAUSS[0x1FF - frac] * buf[2 + i]) >> 11;
+    out += (GAUSS[0x100 + frac] * buf[3 + i]) >> 11;
+    out = (out << 16) >> 16;
+    out += (GAUSS[frac] * buf[4 + i]) >> 11;
+    return Math.max(-32768, Math.min(32767, out)) & ~1;
+  }
+
+  // ── エンベロープレートテーブル ──────────────────────────────────
+  // 各エントリ = 何 DSP サンプルごとに envelope を更新するか
+  const RATE_TABLE = new Uint16Array([
+    0,2048,1536,1280,1024,768,640,512,
+    384,320,256,192,160,128,96,80,
+    64,48,40,32,24,20,16,12,
+    10,8,6,5,4,3,2,1,
+  ]);
+
+  // ── BRR デコーダ ─────────────────────────────────────────────────
+  function decodeBrrBlock(ram, addr, prev1, prev2) {
+    const header = ram[addr & 0xFFFF];
+    const shift  = header >> 4;
+    const filter = (header >> 2) & 3;
+    const loop   = (header >> 1) & 1;
+    const end    = header & 1;
+    const samples = new Int16Array(16);
+
+    for (let i = 0; i < 8; i++) {
+      const byte = ram[(addr + 1 + i) & 0xFFFF];
+      for (let nib = 0; nib < 2; nib++) {
+        const raw = (nib === 0) ? (byte >> 4) : (byte & 0xF);
+        // 4bit符号拡張 → 16bit
+        let s = (raw & 8) ? (raw | 0xFFFFFFF0) : raw;
+        // シフト適用
+        if (shift <= 12) {
+          s = (s << shift) >> 1;
+        } else {
+          // range 13-15: nybble の符号ビット（bit3）で飽和
+          // 実機では BRR フェードアウト用の意図的な無音化に使われる
+          // 負 nybble (bit3=1) → -1、非負 nybble (bit3=0) → 0
+          s = (s >> 3) & ~1;  // 符号だけ残して偶数化（SNESAPU 準拠）
+        }
+
+        // フィルタ適用
+        switch (filter) {
+          case 1: s += prev1 - (prev1 >> 4); break;
+          case 2: s += (prev1 << 1) - ((prev1 * 3) >> 5) - prev2 + (prev2 >> 4); break;
+          case 3: s += (prev1 << 1) - ((prev1 * 13) >> 6) - prev2 + ((prev2 * 3) >> 4); break;
+        }
+        // 15bit符号付きにクランプ
+        s = Math.max(-32768, Math.min(32767, s));
+        // 15bit（下位 1bit は常に 0）
+        s = (s << 1) >> 1;
+        samples[i * 2 + nib] = s;
+        prev2 = prev1;
+        prev1 = s;
+      }
+    }
+    return { samples, prev1, prev2, loop, end };
+  }
+
+  // ── ボイス状態 ────────────────────────────────────────────────────
+  class Voice {
+    constructor() {
+      this.volL = 0; this.volR = 0;
+      this.pitch = 0;
+      this.srcn  = 0;
+      this.adsr1 = 0; this.adsr2 = 0; this.gain = 0;
+      this.env   = 0;          // 11bit エンベロープ値 0x000-0x7FF
+      this.envMode = 'off';    // 'attack'|'decay'|'sustain'|'release'|'off'
+      this.sampleIdx = 0;      // デコード済みサンプルバッファ内インデックス
+      this.pitchFrac = 0;      // 12.12 固定小数点の小数部 (0-0xFFF)
+      this.pitchInt  = 0;      // 整数部
+      // [0-3]=直前ブロック末尾4サンプル(履歴), [4-19]=現ブロック16サンプル
+      this.brrBuf  = new Int16Array(20);
+      this.brrPrev1 = 0; this.brrPrev2 = 0;
+      this.brrAddr  = 0;       // 次に読む BRR ブロックアドレス
+      this.loopAddr = 0;
+      this.konDelay = 0;       // KON 後の遅延サンプル数
+      this.outSample = 0;      // 直近のボイス出力 (for PMON)
+      this.envRate  = 0;       // エンベロープ更新カウンタ
+    }
+  }
+
+  // ── DSP クラス ────────────────────────────────────────────────────
+  class SpcDsp {
+    /**
+     * @param {Uint8Array} ram - SPC 64KB RAM (参照渡し)
+     */
+    constructor(ram) {
+      this.ram = ram;
+      // BRR サンプル読み取り専用の元データコピー（エコー書き込みによる破壊を防ぐ）
+      // spcPlayer 側から set される
+      this.origRam = null;
+      this.regs = new Uint8Array(128); // DSP レジスタ
+      this.voices = Array.from({length:8}, () => new Voice());
+      this.kon  = 0;  // KON ラッチ
+      this.koff = 0;  // KOFF ラッチ
+      this.endx = 0;  // ENDX フラグ
+      this.mutedVoices = 0;  // ミュートビットマスク (bit0=Voice0 ... bit7=Voice7)
+      this.voiceVol = new Array(8).fill(1); // ボイスごとの音量(0〜2、既定1=100%)。鍵盤表示のch別音量バー用
+      // エコー
+      this.echoPos = 0;
+      this.echoBufL = new Int32Array(8192);
+      this.echoBufR = new Int32Array(8192);
+      // メインステレオ出力
+      this.outL = 0;
+      this.outR = 0;
+      // ノイズ
+      this.noiseLfsr = 0x4000;
+      this.noiseSample = 0;
+      this.noiseCounter = 0;
+      // ログ用 DSP 書き込みコールバック
+      this.onWrite = null;
+      // サンプルカウンタ (エンベロープ/エコー用)
+      this.sampleClock = 0;
+    }
+
+    reset() {
+      this.regs.fill(0);
+      this.voices.forEach(v => {
+        Object.assign(v, new Voice());
+      });
+      this.endx = 0; this.echoPos = 0;
+      this.echoBufL.fill(0); this.echoBufR.fill(0);
+      this.outL = 0; this.outR = 0;
+      this.noiseLfsr = 0x4000; this.sampleClock = 0;
+    }
+
+    // ── レジスタ アクセス ──────────────────────────────────────────
+    readReg(addr) {
+      addr &= 0x7F;
+      const v = addr & 0x0F;
+      if (v === 0x08) return this.voices[addr >> 4].env & 0xFF;
+      if (v === 0x09) return this.voices[addr >> 4].outSample >> 7;
+      if (addr === 0x7C) { const e=this.endx; this.endx=0; return e; }
+      return this.regs[addr];
+    }
+
+    writeReg(addr, val) {
+      addr &= 0x7F; val &= 0xFF;
+      this.regs[addr] = val;
+      if (this.onWrite) this.onWrite(addr, val);
+
+      const ch = addr >> 4, reg = addr & 0x0F;
+      const v  = this.voices[ch];
+
+      switch (addr) {
+        case 0x4C: // KON
+          this.kon = val;
+          for (let i = 0; i < 8; i++) {
+            if (val & (1 << i)) this._keyOn(i);
+          }
+          break;
+        case 0x5C: // KOFF
+          this.koff = val;
+          for (let i = 0; i < 8; i++) {
+            if (val & (1 << i)) this.voices[i].envMode = 'release';
+          }
+          break;
+        case 0x6C: // FLG
+          if (val & 0x80) this.reset(); // RESET
+          break;
+      }
+
+      // per-voice ADSR/GAIN
+      if (reg === 0x05) v.adsr1 = val;
+      else if (reg === 0x06) v.adsr2 = val;
+      else if (reg === 0x07) v.gain  = val;
+    }
+
+    // ── KON ───────────────────────────────────────────────────────
+    _keyOn(ch) {
+      const v = this.voices[ch];
+      const srcn = this.regs[(ch << 4) | 0x04];
+      const dir  = this.regs[0x5D];
+      const dirAddr = (dir << 8) + srcn * 4;
+      // brrDirCache があればそちらを優先（エコーバッファとの重複破壊対策）
+      if (this.brrDirCache) {
+        const base = srcn * 4;
+        v.brrAddr  = this.brrDirCache[base] | (this.brrDirCache[base+1] << 8);
+        v.loopAddr = this.brrDirCache[base+2] | (this.brrDirCache[base+3] << 8);
+      } else {
+        v.brrAddr  = this.ram[dirAddr & 0xFFFF] | (this.ram[(dirAddr+1) & 0xFFFF] << 8);
+        v.loopAddr = this.ram[(dirAddr+2) & 0xFFFF] | (this.ram[(dirAddr+3) & 0xFFFF] << 8);
+      }
+      v.srcn     = srcn;
+      v.pitchFrac = 0; v.pitchInt = 0;
+      v.sampleIdx = 0;
+      v.brrPrev1 = 0; v.brrPrev2 = 0;
+      v.brrBuf.fill(0); // 20要素すべてクリア（履歴も含む）
+      v.env      = 0;
+      v.envMode  = 'attack';
+      v.envRate  = 0;
+      v.konDelay = 5; // KON 後 5 サンプル遅延
+      // KON したボイスの ENDX ビットをクリア (SNESAPU v2.11.3 相当)
+      this.endx &= ~(1 << ch);
+    }
+
+    // ── エンベロープ更新 ───────────────────────────────────────────
+    _updateEnvelope(ch) {
+      const v = this.voices[ch];
+      if (v.envMode === 'off') return;
+
+      const adsr1 = this.regs[(ch << 4) | 0x05];
+      const adsr2 = this.regs[(ch << 4) | 0x06];
+      const gain  = this.regs[(ch << 4) | 0x07];
+      const adsrEn = adsr1 & 0x80;
+
+      if (v.envMode === 'release') {
+        // Release: 指数減衰 rate=31 (毎サンプル) - 線形 -8 ではなく指数
+        v.env -= ((v.env - 1) >> 8) + 1;
+        if (v.env <= 0) { v.env = 0; v.envMode = 'off'; }
+        return;
+      }
+
+      if (!adsrEn) {
+        // GAIN モード
+        const mode = (gain >> 5) & 3;
+        const rate = gain & 0x1F;
+        if (gain & 0x80) {
+          // カスタムモード。rate=0は実機では「周期無限=エンベロープ変化なし」(sustainの
+          // sr===0と同じ扱い)。RATE_TABLE[0]=0のまま比較すると毎サンプル発火=最速減衰に
+          // 化け、GAIN $A0(exp減衰,rate0)を「現レベル保持」として使うFF4等のAKAOドライバで
+          // 全ボイスが数フレームで無音になっていた(2026-08-25、FF4全曲異常の真因)。
+          if (rate === 0) { v.env = Math.max(0, Math.min(0x7FF, v.env)); return; }
+          v.envRate++;
+          if (v.envRate >= RATE_TABLE[rate]) {
+            v.envRate = 0;
+            switch (mode) {
+              case 0: v.env -= 32; break; // Linear decrease
+              case 1: // Exponential decrease
+                v.env -= ((v.env - 1) >> 8) + 1;
+                break;
+              case 2: v.env += 32; break; // Linear increase
+              case 3: v.env += (v.env < 0x600) ? 32 : 8; break; // Bent increase
+            }
+          }
+        } else {
+          // Direct GAIN: 直接 0-127 → 0x000-0x7E0
+          v.env = (gain & 0x7F) << 4;
+        }
+        v.env = Math.max(0, Math.min(0x7FF, v.env));
+        return;
+      }
+
+      // ADSR モード
+      if (v.envMode === 'attack') {
+        const ar = (adsr1 & 0x0F);
+        const rate = ar === 15 ? 31 : ar * 2 + 1;
+        v.envRate++;
+        if (v.envRate >= RATE_TABLE[rate]) {
+          v.envRate = 0;
+          v.env += (ar === 15) ? 1024 : 32;
+          if (v.env >= 0x7E0) { v.env = 0x7E0; v.envMode = 'decay'; }
+        }
+      } else if (v.envMode === 'decay') {
+        const dr = (adsr1 >> 4) & 0x07;
+        const rate = 8 + dr * 2;
+        v.envRate++;
+        if (v.envRate >= RATE_TABLE[rate]) {
+          v.envRate = 0;
+          v.env -= ((v.env - 1) >> 8) + 1;
+          const sl = ((adsr2 >> 5) & 0x07);
+          const sustLevel = (sl + 1) << 8;
+          if (v.env <= sustLevel) { v.env = sustLevel; v.envMode = 'sustain'; }
+        }
+      } else if (v.envMode === 'sustain') {
+        const sr = adsr2 & 0x1F;
+        if (sr === 0) return;
+        v.envRate++;
+        if (v.envRate >= RATE_TABLE[sr]) {
+          v.envRate = 0;
+          v.env -= ((v.env - 1) >> 8) + 1;
+          if (v.env <= 0) { v.env = 0; v.envMode = 'off'; }
+        }
+      }
+      v.env = Math.max(0, Math.min(0x7FF, v.env));
+    }
+
+    // ── BRR サンプル取得（ガウシアン補間） ────────────────────────
+    // brrBuf[0-3]=直前ブロック末尾4サンプル, brrBuf[4-19]=現ブロック16サンプル
+    // sampleIdx=i(0-15) → buf[4+i], buf[3+i], buf[2+i], buf[1+i] を参照
+    // i=0 のとき buf[1-3] は直前ブロックの末尾サンプルを正しく参照する
+    _getSample(v) {
+      return gaussInterp(v.brrBuf, v.sampleIdx, (v.pitchFrac >> 4) & 0xFF);
+    }
+
+    // ── ノイズ更新 ────────────────────────────────────────────────
+    _updateNoise() {
+      const flg  = this.regs[0x6C];
+      const rate = flg & 0x1F;
+      if (rate === 0) return;
+      this.noiseCounter++;
+      if (this.noiseCounter >= RATE_TABLE[rate]) {
+        this.noiseCounter = 0;
+        const bit = (this.noiseLfsr & 1) ^ ((this.noiseLfsr >> 1) & 1);
+        this.noiseLfsr = ((this.noiseLfsr >> 1) | (bit << 14)) & 0x7FFF;
+        this.noiseSample = (this.noiseLfsr & 0x7FFF) - (bit ? 0x8000 : 0);
+      }
+    }
+
+    // ── メインクロック (32 SPC サイクルごとに呼ぶ) ─────────────────
+    clock() {
+      this.sampleClock++;
+      this._updateNoise();
+
+      const flg  = this.regs[0x6C];
+      const non  = this.regs[0x3D]; // noise enable
+      const pmon = this.regs[0x2D]; // pitch modulation
+      const eon  = this.regs[0x4D]; // echo enable
+      const echoOff = (flg & 0x20) !== 0;
+
+      let mainL = 0, mainR = 0, echoInL = 0, echoInR = 0;
+      let prevVoiceOut = 0;
+
+      for (let ch = 0; ch < 8; ch++) {
+        const v   = this.voices[ch];
+        const base = ch << 4;
+
+        // KON 遅延 (5サンプル: ピッチ進行・エンベロープも停止)
+        if (v.konDelay > 0) {
+          v.konDelay--;
+          if (v.konDelay === 0) {
+            // 最初のブロックをデコード（履歴部[0-3]は0のまま=KON直後は無音から開始）
+            const res = decodeBrrBlock(this.origRam || this.ram, v.brrAddr, 0, 0);
+            v.brrBuf.fill(0, 0, 4);        // 履歴ゼロクリア
+            v.brrBuf.set(res.samples, 4);   // 現ブロックを[4-19]に配置
+            v.brrPrev1 = res.prev1; v.brrPrev2 = res.prev2;
+            v.brrAddr += 9;
+            v.sampleIdx = 0;
+            v.pitchFrac = 0;
+          }
+          continue; // 遅延中はサンプル生成をスキップ
+        }
+
+        // エンベロープ更新
+        this._updateEnvelope(ch);
+
+        // ピッチ計算
+        let pitchVal = (this.regs[base+2] | ((this.regs[base+3] & 0x3F) << 8));
+        // ピッチモジュレーション (PMON bit で前ボイス出力を乗算)
+        if (ch > 0 && (pmon & (1 << ch))) {
+          pitchVal = (pitchVal * (prevVoiceOut + 0x8000)) >> 15;
+          pitchVal = Math.max(0, Math.min(0x3FFF, pitchVal));
+        }
+        v.pitch = pitchVal;
+
+        // 位置進行
+        v.pitchFrac += pitchVal;
+        const steps = (v.pitchFrac >> 12) & 0xF;
+        v.pitchFrac &= 0xFFF;
+        v.sampleIdx = (v.sampleIdx + steps) % 16;
+
+        // 次ブロックが必要かチェック (sampleIdx < steps ⇔ ブロック境界を越えた)
+        if (v.sampleIdx < steps || v.sampleIdx >= 16) {
+          // 直前ブロック末尾4サンプルを履歴[0-3]に保存してから上書き
+          v.brrBuf[0] = v.brrBuf[16];
+          v.brrBuf[1] = v.brrBuf[17];
+          v.brrBuf[2] = v.brrBuf[18];
+          v.brrBuf[3] = v.brrBuf[19];
+          const res = decodeBrrBlock(this.origRam || this.ram, v.brrAddr, v.brrPrev1, v.brrPrev2);
+          v.brrBuf.set(res.samples, 4); // 現ブロックを[4-19]に配置
+          v.brrPrev1 = res.prev1; v.brrPrev2 = res.prev2;
+          if (res.end) {
+            this.endx |= (1 << ch);
+            if (res.loop) {
+              v.brrAddr = v.loopAddr;
+              v.envMode = v.envMode === 'attack' ? 'decay' : v.envMode; // ループ時はdecayへ
+            } else {
+              v.envMode = 'off';
+              v.env = 0;
+            }
+          } else {
+            v.brrAddr += 9;
+          }
+        }
+
+        // サンプル取得
+        let sample;
+        if (non & (1 << ch)) {
+          sample = this.noiseSample; // ノイズ
+        } else {
+          sample = this._getSample(v);
+        }
+
+        // エンベロープ適用
+        const envApplied = Math.round((sample * v.env) / 0x800);
+        v.outSample = Math.max(-32768, Math.min(32767, envApplied));
+
+        // ボリューム適用・ミックス
+        const volL = (this.regs[base+0] << 24) >> 24; // 符号付き
+        const volR = (this.regs[base+1] << 24) >> 24;
+        const mixL = Math.round((v.outSample * volL) / 128);
+        const mixR = Math.round((v.outSample * volR) / 128);
+
+        if (!(this.mutedVoices & (1 << ch))) {
+          const vv = this.voiceVol[ch];
+          mainL += mixL * vv; mainR += mixR * vv;
+          if (eon & (1 << ch)) { echoInL += mixL * vv; echoInR += mixR * vv; }
+        }
+
+        prevVoiceOut = v.outSample;
+      }
+
+      // マスターボリューム
+      const mvolL = (this.regs[0x0C] << 24) >> 24;
+      const mvolR = (this.regs[0x1C] << 24) >> 24;
+
+      // エコー処理
+      const edl      = this.regs[0x7D] & 0x0F;
+      // エコーバッファのサイズ = EDL × 2KB（EDL=0 は最小 4 バイト = 1 フレーム）。
+      // フレーム(=4バイト)単位では EDL × 512。以前は (edl+1)*512 と 1 段大きく取って
+      // いたため、ESA が高位のゲーム（例 Axelay "Unkai" ESA=$D8/EDL=5 → 0xD800+）で
+      // 書き込みアドレスが $FFFF を跨いでページ0（$F1 タイマー制御やドライバの
+      // ゼロページ変数）を上書きし、バッファ一巡直後（約0.08秒）にタイマーが停止して
+      // 曲が最初の音で止まっていた。
+      const eLen     = (edl === 0 ? 1 : edl * 512); // フレーム数 (512〜7680)
+      const ePos     = this.echoPos;              // 既に % eLen 済み
+      const esa      = this.regs[0x6D];
+      const echoBase = (esa << 8);
+
+      // FIR フィルタ読み取り (8タップ、1フレームずつ遡る)
+      let echoL = 0, echoR = 0;
+      for (let tap = 0; tap < 8; tap++) {
+        const fir     = (this.regs[tap * 0x10 + 0x0F] << 24) >> 24;
+        const tapPos  = (ePos - tap + eLen) % eLen;  // tap*2→tap に修正
+        const addr    = (echoBase + tapPos * 4) & 0xFFFF;
+        const eL = (this.ram[addr] | (this.ram[(addr+1)&0xFFFF] << 8)) << 16 >> 16;
+        const eR = (this.ram[(addr+2)&0xFFFF] | (this.ram[(addr+3)&0xFFFF] << 8)) << 16 >> 16;
+        echoL += (eL * fir) >> 7;
+        echoR += (eR * fir) >> 7;
+      }
+      echoL = Math.max(-32768, Math.min(32767, echoL));
+      echoR = Math.max(-32768, Math.min(32767, echoR));
+
+      // エコーフィードバック書き込み
+      // BRR サンプルディレクトリ領域 (DIR<<8 ～ DIR<<8+1023) には書き込まない。
+      // エコーバッファとディレクトリが重複する場合、実機では整合した値になるが
+      // 我々の計算値は異なるため、初期 SPC ダンプ値をそのまま保持することで
+      // KON 時に正しいサンプルアドレスを読めるようにする。
+      if (!echoOff) {
+        const efb = (this.regs[0x0D] << 24) >> 24;
+        const writeL = Math.max(-32768, Math.min(32767, echoInL + ((echoL * efb) >> 7)));
+        const writeR = Math.max(-32768, Math.min(32767, echoInR + ((echoR * efb) >> 7)));
+        const waddr = (echoBase + ePos * 4) & 0xFFFF;
+        // BRR ディレクトリは brrDirCache にキャッシュ済みなので RAM には自由に書ける
+        this.ram[waddr]               = writeL & 0xFF;
+        this.ram[(waddr+1) & 0xFFFF]  = (writeL >> 8) & 0xFF;
+        this.ram[(waddr+2) & 0xFFFF]  = writeR & 0xFF;
+        this.ram[(waddr+3) & 0xFFFF]  = (writeR >> 8) & 0xFF;
+      }
+      this.echoPos = (this.echoPos + 1) % eLen;
+
+      // エコーボリューム適用（全ボイスミュート中はエコーも無音）
+      const allMuted = (this.mutedVoices & 0xFF) === 0xFF;
+      const evolL = allMuted ? 0 : (this.regs[0x2C] << 24) >> 24;
+      const evolR = allMuted ? 0 : (this.regs[0x3C] << 24) >> 24;
+
+      // 最終出力 (-1.0〜+1.0 に正規化)
+      const outL = (Math.round((mainL * mvolL) / 128) + Math.round((echoL * evolL) / 128));
+      const outR = (Math.round((mainR * mvolR) / 128) + Math.round((echoR * evolR) / 128));
+      this.outL = Math.max(-32768, Math.min(32767, outL)) / 32768;
+      this.outR = Math.max(-32768, Math.min(32767, outR)) / 32768;
+    }
+  }
+
+  // ── 鍵盤表示(大波形)プレビュー用: 現ブロックのガウス補間後の連続波形と、現在ピッチでの
+  // 実際の出力サンプル位置を、dsp本体と同じ式で非破壊に計算する(voice本体は変更しない)。
+  //   curve[k] (k=0..16*STEPS-1): サンプル位置 p=k/STEPS(0〜16、現ブロック内)の補間値。
+  //     位置 p は (i−2)+frac/256 なので i=floor(p)+2、ブロック末尾(i=16,17)は次ブロックの
+  //     先頭2サンプルが要る → 次ブロックを非破壊にデコードして継ぎ足す(ループ/終端は
+  //     brrAddr が既に次に読む先を指しているのでそのまま使える)
+  //   points: 現在位置から DSP と同じ順(位置を進めてから補間)で出す出力サンプル。ブロックを
+  //     抜けるまで(最大 maxPoints 個)。{ p: 位置(0〜16), v: 値 }
+  // ★2026-09-07 以前は「48出力サンプルを現ブロック内で折り返して並べただけ」で、BRR16点と
+  //   横軸が対応せず(48出力サンプルの元波形上の長さは 48×pitch/4096 で pitch 依存)、境界の先も
+  //   実出力と違っていた。位置基準の曲線+出力点に改めた。
+  function previewVoiceWave(voice, dsp, pitchVal, opts) {
+    const STEPS = (opts && opts.steps) || 8;
+    const maxPoints = (opts && opts.maxPoints) || 64;
+    const ext = new Int16Array(20 + 16);
+    ext.set(voice.brrBuf.subarray(0, 20), 0);
+    if (dsp && voice.envMode !== 'off') {
+      try {
+        const res = decodeBrrBlock(dsp.origRam || dsp.ram, voice.brrAddr, voice.brrPrev1, voice.brrPrev2);
+        ext.set(res.samples, 20);
+      } catch (e) { /* 先読み不能なら 0 のまま */ }
+    }
+    const curve = new Float32Array(16 * STEPS);
+    for (let k = 0; k < curve.length; k++) {
+      const p = k / STEPS;
+      const i = Math.floor(p) + 2;
+      const frac = Math.round((p - Math.floor(p)) * 256) & 0xFF;
+      curve[k] = gaussInterp(ext, i, frac);
+    }
+    const points = [];
+    let sampleIdx = voice.sampleIdx, pitchFrac = voice.pitchFrac;
+    for (let n = 0; n < maxPoints; n++) {
+      pitchFrac += pitchVal;
+      const steps = (pitchFrac >> 12) & 0xF;
+      pitchFrac &= 0xFFF;
+      const next = sampleIdx + steps;
+      if (next >= 16) break;            // 次ブロックへ(実機はここでフェッチ)
+      sampleIdx = next;
+      const frac = (pitchFrac >> 4) & 0xFF;
+      const p = (sampleIdx - 2) + frac / 256;
+      // ブロック先頭2サンプル分(i=0,1)は位置が負=前ブロックの末尾に当たるので図の範囲外として省く
+      if (p >= 0) points.push({ p, v: gaussInterp(ext, sampleIdx, frac) });
+    }
+    return { curve, points };
+  }
+
+  Emu.SpcDsp = SpcDsp;
+  Emu.decodeBrrBlock = decodeBrrBlock;
+  Emu.previewVoiceWave = previewVoiceWave;
+  Emu.gaussInterp = gaussInterp;
+  Emu.GAUSS = GAUSS;
+
+})(globalThis);
+
+/*
+ * スーパーファミコンの PPU(段階 8g-2/8g-3 の範囲)
+ * MML.Emu.SnesPpu
+ *
+ * スーパーゲームボーイの枠と GB 画面の表示、公開テスト ROM の結果表示に要る範囲:
+ *   - レジスタ $2100-$213F(VRAM/CGRAM/OAM の読み書き、スクロール、BG の設定、表示の有効、明るさ)
+ *   - 描画は行単位。BG モード 0(2bpp×4)、1(4bpp×2+2bpp)、3(8bpp+4bpp)。タイル 8×8/16×16、マップ 32/64、反転、優先
+ *   - スプライト(1 行 32 個まで、大きさ 6 通り、優先 4 段)
+ *   まだ無い物: 窓、色演算(サブ画面)、モザイク、モード 2/4/5/6/7、オフセットパータイル、高解像度、インターレース、
+ *   スプライトの 1 行あたりのタイル数制限。SNES 本体(SNES2VGM)をやる時に足す
+ *
+ * 画面は 256×224(frame、0xAABBGGRR)。本体(snesConsole.js)が表示行ごとに renderLine(y) を呼ぶ。
+ * 参考: fullsnes(nocash)、SNESdev Wiki "PPU registers" "Backgrounds" "Sprites"
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const W = 256, H = 224;
+  const OBJ_SIZES = [[8, 16], [8, 32], [8, 64], [16, 32], [16, 64], [32, 64], [16, 32], [16, 32]];
+  // モードごとの BG の色深度(0 = その BG は無い)
+  const BPP = [[2, 2, 2, 2], [4, 4, 2, 0], [4, 4, 0, 0], [8, 4, 0, 0], [8, 2, 0, 0], [4, 2, 0, 0], [4, 0, 0, 0], [8, 0, 0, 0]];
+
+  class SnesPpu {
+    constructor() {
+      this.vram = new Uint16Array(0x8000);
+      this.cgram = new Uint16Array(256);
+      this.oam = new Uint8Array(544);
+      this.frame = new Uint32Array(W * H);
+      this.lineZ = new Uint8Array(W);
+      this.lineC = new Uint16Array(W);
+      this.objC = new Uint8Array(W); this.objP = new Uint8Array(W);
+      this.reset();
+    }
+
+    reset() {
+      this.vram.fill(0); this.cgram.fill(0); this.oam.fill(0);
+      this.forceBlank = true; this.brightness = 0;
+      this.obsel = 0; this.oamAddr = 0; this.oamReload = 0; this.oamLatch = 0;
+      this.bgMode = 0; this.bg3Prio = false; this.tileBig = [false, false, false, false];
+      this.bgMap = [0, 0, 0, 0]; this.bgMapSize = [0, 0, 0, 0]; this.bgChar = [0, 0, 0, 0];
+      this.hofs = [0, 0, 0, 0]; this.vofs = [0, 0, 0, 0]; this.bgLatch = 0; this.hLatch = 0;
+      this.vmain = 0; this.vaddr = 0; this.vbuf = 0;
+      this.cgAddr = 0; this.cgFlip = false; this.cgLatch = 0;
+      this.tm = 0; this.ts = 0;
+      this.ophct = 0; this.opvct = 0; this.opLatched = false; this.opHFlip = false; this.opVFlip = false;
+      this.openBus = 0;
+      this.frame.fill(0xFF000000);
+    }
+
+    // VRAM の番地の変換($2115 bit2-3)
+    _vaddr() {
+      const a = this.vaddr;
+      switch ((this.vmain >> 2) & 3) {
+        case 1: return ((a & 0xFF00) | ((a & 0x00E0) >> 5) | ((a & 0x001F) << 3)) & 0x7FFF;
+        case 2: return ((a & 0xFE00) | ((a & 0x01C0) >> 6) | ((a & 0x003F) << 3)) & 0x7FFF;
+        case 3: return ((a & 0xFC00) | ((a & 0x0380) >> 7) | ((a & 0x007F) << 3)) & 0x7FFF;
+      }
+      return a & 0x7FFF;
+    }
+    _vstep() { const s = this.vmain & 3; this.vaddr = (this.vaddr + (s === 0 ? 1 : s === 1 ? 32 : 128)) & 0xFFFF; }
+
+    write(reg, v) {
+      switch (reg) {
+        case 0x00: this.forceBlank = (v & 0x80) !== 0; this.brightness = v & 15; break;
+        case 0x01: this.obsel = v; break;
+        case 0x02: this.oamReload = (this.oamReload & 0x200) | (v << 1); this.oamAddr = this.oamReload; break;
+        case 0x03: this.oamReload = (this.oamReload & 0x1FE) | ((v & 1) << 9); this.oamAddr = this.oamReload; break;
+        case 0x04: {
+          const a = this.oamAddr;
+          if (a >= 0x200) this.oam[0x200 | (a & 0x1F)] = v;
+          else if (a & 1) { this.oam[a - 1] = this.oamLatch; this.oam[a] = v; }
+          else this.oamLatch = v;
+          this.oamAddr = (a + 1) & 0x3FF;
+          break;
+        }
+        case 0x05: this.bgMode = v & 7; this.bg3Prio = (v & 8) !== 0; for (let i = 0; i < 4; i++) this.tileBig[i] = (v & (0x10 << i)) !== 0; break;
+        case 0x07: case 0x08: case 0x09: case 0x0A: this.bgMap[reg - 7] = ((v >> 2) << 10) & 0x7FFF; this.bgMapSize[reg - 7] = v & 3; break;
+        case 0x0B: this.bgChar[0] = (v & 0x0F) << 12; this.bgChar[1] = (v >> 4) << 12; break;
+        case 0x0C: this.bgChar[2] = (v & 0x0F) << 12; this.bgChar[3] = (v >> 4) << 12; break;
+        // スクロール: 2 回書き(下位 → 上位)。水平は前々回の下位 3bit が混ざる
+        case 0x0D: case 0x0F: case 0x11: case 0x13: { const i = (reg - 0x0D) >> 1; this.hofs[i] = ((v << 8) | (this.bgLatch & ~7) | (this.hLatch & 7)) & 0x3FF; this.bgLatch = v; this.hLatch = v; break; }
+        case 0x0E: case 0x10: case 0x12: case 0x14: { const i = (reg - 0x0E) >> 1; this.vofs[i] = ((v << 8) | this.bgLatch) & 0x3FF; this.bgLatch = v; break; }
+        case 0x15: this.vmain = v; break;
+        case 0x16: this.vaddr = (this.vaddr & 0xFF00) | v; this.vbuf = this.vram[this._vaddr()]; break;
+        case 0x17: this.vaddr = (this.vaddr & 0x00FF) | (v << 8); this.vbuf = this.vram[this._vaddr()]; break;
+        case 0x18: { const a = this._vaddr(); this.vram[a] = (this.vram[a] & 0xFF00) | v; if (!(this.vmain & 0x80)) this._vstep(); break; }
+        case 0x19: { const a = this._vaddr(); this.vram[a] = (this.vram[a] & 0x00FF) | (v << 8); if (this.vmain & 0x80) this._vstep(); break; }
+        case 0x21: this.cgAddr = v; this.cgFlip = false; break;
+        case 0x22:
+          if (!this.cgFlip) this.cgLatch = v;
+          else { this.cgram[this.cgAddr] = ((v & 0x7F) << 8) | this.cgLatch; this.cgAddr = (this.cgAddr + 1) & 0xFF; }
+          this.cgFlip = !this.cgFlip;
+          break;
+        case 0x2C: this.tm = v; break;
+        case 0x2D: this.ts = v; break;
+      }
+    }
+
+    read(reg) {
+      let v;
+      switch (reg) {
+        case 0x38: { const a = this.oamAddr; v = a >= 0x200 ? this.oam[0x200 | (a & 0x1F)] : this.oam[a]; this.oamAddr = (a + 1) & 0x3FF; break; }
+        case 0x39: v = this.vbuf & 0xFF; if (!(this.vmain & 0x80)) { this.vbuf = this.vram[this._vaddr()]; this._vstep(); } break;
+        case 0x3A: v = this.vbuf >> 8; if (this.vmain & 0x80) { this.vbuf = this.vram[this._vaddr()]; this._vstep(); } break;
+        case 0x3B:
+          if (!this.cgFlip) v = this.cgram[this.cgAddr] & 0xFF;
+          else { v = (this.cgram[this.cgAddr] >> 8) | (this.openBus & 0x80); this.cgAddr = (this.cgAddr + 1) & 0xFF; }
+          this.cgFlip = !this.cgFlip;
+          break;
+        case 0x3C: v = this.opHFlip ? ((this.ophct >> 8) & 1) | (this.openBus & 0xFE) : this.ophct & 0xFF; this.opHFlip = !this.opHFlip; break;
+        case 0x3D: v = this.opVFlip ? ((this.opvct >> 8) & 1) | (this.openBus & 0xFE) : this.opvct & 0xFF; this.opVFlip = !this.opVFlip; break;
+        case 0x3E: v = 0x01; break; // STAT77: PPU1 の版
+        case 0x3F: v = 0x02 | (this.opLatched ? 0x40 : 0); this.opLatched = false; this.opHFlip = false; this.opVFlip = false; break; // STAT78: NTSC、PPU2 の版
+        default: return this.openBus;
+      }
+      this.openBus = v;
+      return v;
+    }
+    // H/V カウンタを控える($2137 の読み出し、または $4201 bit7 の立ち下がり)
+    latchCounters(h, vline) { this.ophct = h; this.opvct = vline; this.opLatched = true; }
+    // VBlank の頭: OAM の番地を戻す
+    vblank() { if (!this.forceBlank) this.oamAddr = this.oamReload; }
+
+    // ── 描画 ──
+    // BG 1 枚をこの行ぶん。zLow/zHigh = タイルの優先ビット 0/1 の時の深さ(大きいほど手前)
+    _bgLine(bg, y, bpp, zLow, zHigh, palBase) {
+      const vram = this.vram, lineZ = this.lineZ, lineC = this.lineC;
+      const big = this.tileBig[bg], tsh = big ? 4 : 3;
+      const size = this.bgMapSize[bg], wide = (size & 1) !== 0, tall = (size & 2) !== 0;
+      const map = this.bgMap[bg], chr = this.bgChar[bg];
+      const hofs = this.hofs[bg], py = (y + this.vofs[bg]) & 0x3FF;
+      const ty = py >> tsh, words = bpp * 4;
+      let lastTx = -1, entry = 0, p0 = 0, p1 = 0, p2 = 0, p3 = 0, zt = 0, pal = 0, hflip = false;
+      for (let x = 0; x < W; x++) {
+        const px = (x + hofs) & 0x3FF, tx = px >> tsh;
+        if (tx !== lastTx || big) {
+          lastTx = tx;
+          let off = ((ty & 31) << 5) | (tx & 31);
+          if (wide && (tx & 32)) off += 0x400;
+          if (tall && (ty & 32)) off += wide ? 0x800 : 0x400;
+          entry = vram[(map + off) & 0x7FFF];
+          hflip = (entry & 0x4000) !== 0;
+          const vflip = (entry & 0x8000) !== 0;
+          let tile = entry & 0x3FF, row = py & 7;
+          if (big) {
+            const subX = ((px >> 3) & 1) ^ (hflip ? 1 : 0), subY = ((py >> 3) & 1) ^ (vflip ? 1 : 0);
+            tile = (tile + subX + (subY << 4)) & 0x3FF;
+          }
+          if (vflip) row = 7 - row;
+          const a = (chr + tile * words + row) & 0x7FFF;
+          const w0 = vram[a]; p0 = w0 & 0xFF; p1 = w0 >> 8;
+          if (bpp >= 4) { const w1 = vram[(a + 8) & 0x7FFF]; p2 = w1 & 0xFF; p3 = w1 >> 8; }
+          if (bpp === 8) { this._w2 = vram[(a + 16) & 0x7FFF]; this._w3 = vram[(a + 24) & 0x7FFF]; }
+          zt = (entry & 0x2000) ? zHigh : zLow;
+          pal = (entry >> 10) & 7;
+        }
+        if (zt <= lineZ[x]) continue;
+        const bit = hflip ? (px & 7) : 7 - (px & 7);
+        let c = ((p0 >> bit) & 1) | (((p1 >> bit) & 1) << 1);
+        if (bpp >= 4) c |= (((p2 >> bit) & 1) << 2) | (((p3 >> bit) & 1) << 3);
+        if (bpp === 8) c |= (((this._w2 >> bit) & 1) << 4) | (((this._w2 >> (bit + 8)) & 1) << 5) | (((this._w3 >> bit) & 1) << 6) | (((this._w3 >> (bit + 8)) & 1) << 7);
+        if (!c) continue;
+        lineZ[x] = zt;
+        lineC[x] = bpp === 8 ? c : bpp === 4 ? (pal << 4) | c : palBase + (pal << 2) + c;
+      }
+    }
+
+    // スプライトをこの行ぶん objC/objP(色番号 1-15+パレット、優先)に集める
+    _objLine(y) {
+      const oam = this.oam, vram = this.vram, objC = this.objC, objP = this.objP;
+      objC.fill(0);
+      const sizes = OBJ_SIZES[this.obsel >> 5];
+      const base = (this.obsel & 7) << 13, gap = (((this.obsel >> 3) & 3) + 1) << 12;
+      let count = 0;
+      for (let i = 0; i < 128 && count < 32; i++) {
+        const o = i * 4, hb = (oam[0x200 + (i >> 2)] >> ((i & 3) * 2)) & 3;
+        const size = sizes[hb >> 1];
+        const sy = oam[o + 1];
+        let row = (y - sy) & 0xFF;
+        if (row >= size) continue;
+        count++;
+        let sx = oam[o] | ((hb & 1) << 8);
+        if (sx >= 256) sx -= 512;
+        if (sx <= -size) continue;
+        const attr = oam[o + 3], tile = oam[o + 2] | ((attr & 1) << 8);
+        const pal = (attr >> 1) & 7, prio = (attr >> 4) & 3, hflip = (attr & 0x40) !== 0;
+        if (attr & 0x80) row = size - 1 - row;
+        const tcol0 = tile & 0x0F, trow = ((tile >> 4) + (row >> 3)) & 0x0F;
+        const tbase = base + ((tile & 0x100) ? gap : 0);
+        for (let px = 0; px < size; px++) {
+          const x = sx + px;
+          if (x < 0 || x >= W || objC[x]) continue;
+          const col = hflip ? size - 1 - px : px;
+          const t = (trow << 4) | ((tcol0 + (col >> 3)) & 0x0F);
+          const a = (tbase + t * 16 + (row & 7)) & 0x7FFF;
+          const w0 = vram[a], w1 = vram[(a + 8) & 0x7FFF], bit = 7 - (col & 7);
+          const c = ((w0 >> bit) & 1) | (((w0 >> (bit + 8)) & 1) << 1) | (((w1 >> bit) & 1) << 2) | (((w1 >> (bit + 8)) & 1) << 3);
+          if (!c) continue;
+          objC[x] = 0x80 | (pal << 4) | c; objP[x] = prio;
+        }
+      }
+    }
+
+    // 表示行 y(1〜224)を frame の y-1 行目に描く
+    renderLine(y) {
+      if (y < 1 || y > H) return;
+      const out = this.frame, base = (y - 1) * W;
+      if (this.forceBlank) { for (let x = 0; x < W; x++) out[base + x] = 0xFF000000; return; }
+      const lineZ = this.lineZ, lineC = this.lineC, tm = this.tm, mode = this.bgMode, bpp = BPP[mode];
+      lineZ.fill(0); lineC.fill(0);
+      if (mode === 0) {
+        if ((tm & 1) && bpp[0]) this._bgLine(0, y, 2, 8, 11, 0);
+        if ((tm & 2) && bpp[1]) this._bgLine(1, y, 2, 7, 10, 32);
+        if ((tm & 4) && bpp[2]) this._bgLine(2, y, 2, 2, 5, 64);
+        if ((tm & 8) && bpp[3]) this._bgLine(3, y, 2, 1, 4, 96);
+      } else {
+        if ((tm & 1) && bpp[0]) this._bgLine(0, y, bpp[0], 8, 11, 0);
+        if ((tm & 2) && bpp[1]) this._bgLine(1, y, bpp[1], 7, 10, 0);
+        if ((tm & 4) && bpp[2]) this._bgLine(2, y, bpp[2], 2, (mode === 1 && this.bg3Prio) ? 13 : 5, 0);
+      }
+      if (tm & 0x10) {
+        this._objLine(y);
+        const objC = this.objC, objP = this.objP;
+        for (let x = 0; x < W; x++) { const c = objC[x]; if (!c) continue; const z = 3 + objP[x] * 3; if (z > lineZ[x]) { lineZ[x] = z; lineC[x] = c; } } // 優先 0-3 → 深さ 3/6/9/12
+      }
+      const cg = this.cgram, br = this.brightness;
+      for (let x = 0; x < W; x++) {
+        const c = cg[lineC[x]];
+        let r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
+        r = ((r << 3) | (r >> 2)) * br / 15 | 0; g = ((g << 3) | (g >> 2)) * br / 15 | 0; b = ((b << 3) | (b >> 2)) * br / 15 | 0;
+        out[base + x] = (0xFF000000 | (b << 16) | (g << 8) | r) >>> 0;
+      }
+    }
+  }
+
+  SnesPpu.WIDTH = W; SnesPpu.HEIGHT = H;
+  Emu.SnesPpu = SnesPpu;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * スーパーファミコン本体の骨格(段階 8g-2)
+ * MML.Emu.SnesConsole / MML.Emu.SnesApu
+ *
+ * スーパーゲームボーイ(DESIGN-GB-CAPTURE.md §5)の SNES 側。SGB の BIOS を動かすのに要る範囲から作る:
+ *   - 65816(cpu65816.js)、メモリ配置(LoROM/HiROM、WRAM 128K、SRAM)、番地ごとのアクセスの速さ
+ *   - $4200 台: NMI/IRQ(H/V タイマ)、乗除算、パッドの自動読み、$4016/$4017 の直列読み
+ *   - DMA(一括)と HDMA(行ごと)
+ *   - PPU(snes/ppu.js)を行単位で描く。1 行 = 1364 マスタークロック、262 行(NTSC)
+ *   - APU: 既存の SPC700(spc700.js、IPL ROM つき)と DSP(spcDsp.js)。ポート $2140-$2143 の読み書きのたびに時間を合わせる
+ *   - 拡張の口 ext($6000-$7FFF。SGB の ICD2 が挿さる)
+ * 時間はマスタークロック(21.477MHz)で数える。CPU の 1 サイクルは番地で 6/8/12 クロック、内部サイクルは 6。
+ * まだ無い物: 行の長さの例外、DRAM リフレッシュ、DMA/HDMA の細かい時刻、PAL、オープンバスの細部、音の出力(8g-5)
+ *
+ * 参考: fullsnes(nocash)、SNESdev Wiki
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const LINE_CLK = 1364, LINES = 262, VBLANK_LINE = 225;
+  const APU_RATIO = 1024000 / 21477272; // SPC700 のサイクル / マスタークロック
+  const DMA_PATTERN = [[0], [0, 1], [0, 0], [0, 0, 1, 1], [0, 1, 2, 3], [0, 1, 0, 1], [0, 0], [0, 0, 1, 1]];
+
+  // ── APU(SPC700+DSP)。SNES 側とは 4 本のポートでつながる ──
+  class SnesApu {
+    constructor() {
+      this.ram = new Uint8Array(65536);
+      this.dsp = Emu.SpcDsp ? new Emu.SpcDsp(this.ram) : null;
+      this.in = new Uint8Array(4);  // SNES → SPC($F4-$F7 を読むと見える)
+      this.out = new Uint8Array(4); // SPC → SNES($2140-$2143 を読むと見える)
+      this.cpu = new Emu.SPC700(this);
+      this.onSample = null;         // (L, R) DSP の 1 サンプル(32kHz)
+      this.reset();
+    }
+    reset() {
+      this.ram.fill(0); this.in.fill(0); this.out.fill(0);
+      this.dspAddr = 0; this.romEnable = true;
+      this.timers = [0, 0, 0]; this.timerDiv = [0, 0, 0]; this.timerCnt = [0, 0, 0]; this.timerEn = [false, false, false]; this.timerClk = [0, 0, 0];
+      this.dspClk = 0;
+      if (this.dsp) { this.dsp.reset(); this.dsp.regs[0x6C] = 0xE0; } // 電源投入時の FLG は $E0(リセット+ミュート+エコー書き込み禁止)。0 だとエコーが RAM $0000 台を壊し、IPL の転送先が化ける
+      this.cpu.halted = false;
+      this.cpu.reset(); // IPL ROM の先頭($FFC0)から
+    }
+    read(addr) {
+      if (this.romEnable && addr >= 0xFFC0) return Emu.SPC_IPL_ROM[addr - 0xFFC0];
+      if (addr >= 0xF0 && addr <= 0xFF) {
+        switch (addr) {
+          case 0xF2: return this.dspAddr;
+          case 0xF3: return this.dsp ? this.dsp.readReg(this.dspAddr & 0x7F) : 0;
+          case 0xF4: case 0xF5: case 0xF6: case 0xF7: return this.in[addr - 0xF4];
+          case 0xFD: case 0xFE: case 0xFF: { const c = this.timerCnt[addr - 0xFD]; this.timerCnt[addr - 0xFD] = 0; return c; }
+          case 0xF0: case 0xF1: case 0xFA: case 0xFB: case 0xFC: return 0;
+        }
+      }
+      return this.ram[addr];
+    }
+    write(addr, v) {
+      if (addr >= 0xF0 && addr <= 0xFF) {
+        switch (addr) {
+          case 0xF1:
+            this.romEnable = (v & 0x80) !== 0;
+            for (let t = 0; t < 3; t++) { const en = (v & (1 << t)) !== 0; if (en && !this.timerEn[t]) { this.timers[t] = 0; this.timerCnt[t] = 0; } this.timerEn[t] = en; }
+            if (v & 0x10) { this.in[0] = 0; this.in[1] = 0; }
+            if (v & 0x20) { this.in[2] = 0; this.in[3] = 0; }
+            return;
+          case 0xF2: this.dspAddr = v; return;
+          case 0xF3: if (this.dsp && !(this.dspAddr & 0x80)) this.dsp.writeReg(this.dspAddr, v); return;
+          case 0xF4: case 0xF5: case 0xF6: case 0xF7: this.out[addr - 0xF4] = v; return;
+          case 0xFA: case 0xFB: case 0xFC: this.timerDiv[addr - 0xFA] = v; return;
+        }
+      }
+      this.ram[addr] = v;
+    }
+    // 今の状態を .spc ファイルの形(0x10200 バイト)にする。録音の頭に入れる(SPC の再生系がそのまま読める形)
+    toSpc() {
+      const out = new Uint8Array(0x10200), c = this.cpu;
+      const sig = 'SNES-SPC700 Sound File Data v0.30';
+      for (let i = 0; i < sig.length; i++) out[i] = sig.charCodeAt(i);
+      out[0x21] = 26; out[0x22] = 26; out[0x23] = 27; out[0x24] = 30; // 27 = ID666 タグ無し
+      out[0x25] = c.PC & 0xFF; out[0x26] = (c.PC >> 8) & 0xFF; out[0x27] = c.A; out[0x28] = c.X; out[0x29] = c.Y; out[0x2A] = c.PSW; out[0x2B] = c.SP;
+      out.set(this.ram, 0x100);
+      // $F0-$FF はレジスタの値を入れておく(.spc の約束)
+      out[0x1F1] = (this.romEnable ? 0x80 : 0) | (this.timerEn[0] ? 1 : 0) | (this.timerEn[1] ? 2 : 0) | (this.timerEn[2] ? 4 : 0);
+      out[0x1F2] = this.dspAddr;
+      for (let i = 0; i < 4; i++) out[0x1F4 + i] = this.in[i];
+      for (let i = 0; i < 3; i++) { out[0x1FA + i] = this.timerDiv[i]; out[0x1FD + i] = this.timerCnt[i]; }
+      if (this.dsp) for (let i = 0; i < 128; i++) out[0x10100 + i] = this.dsp.regs[i];
+      out.set(this.ram.subarray(0xFFC0, 0x10000), 0x101C0);
+      return out;
+    }
+    // SPC700 を cycles サイクルぶん進める。戻り値は実際に進んだサイクル(命令の切れ目まで)
+    run(cycles) {
+      let spent = 0;
+      const cpu = this.cpu;
+      while (spent < cycles) {
+        const c = cpu.halted ? 2 : cpu.step();
+        spent += c;
+        for (let t = 0; t < 3; t++) {
+          if (!this.timerEn[t]) continue;
+          const period = t < 2 ? 128 : 16;
+          this.timerClk[t] += c;
+          while (this.timerClk[t] >= period) {
+            this.timerClk[t] -= period;
+            if (++this.timers[t] >= (this.timerDiv[t] || 256)) { this.timers[t] = 0; this.timerCnt[t] = (this.timerCnt[t] + 1) & 0x0F; }
+          }
+        }
+        this.dspClk += c;
+        while (this.dspClk >= 32) { this.dspClk -= 32; if (this.dsp) { this.dsp.clock(); if (this.onSample) this.onSample(this.dsp.outL, this.dsp.outR); } }
+      }
+      return spent;
+    }
+  }
+
+  // ── カートリッジ(LoROM/HiROM。SGB の BIOS は LoROM 256K)──
+  function parseRom(bytes) {
+    if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
+    if ((bytes.length & 0x3FF) === 0x200) bytes = bytes.subarray(0x200); // コピー機のヘッダ
+    const score = (at) => {
+      if (at + 0x40 > bytes.length) return -1;
+      let s = 0;
+      const ck = bytes[at + 0x1E] | (bytes[at + 0x1F] << 8), cc = bytes[at + 0x1C] | (bytes[at + 0x1D] << 8);
+      if (((ck ^ cc) & 0xFFFF) === 0xFFFF) s += 4;
+      const map = bytes[at + 0x15] & 0x0F;
+      if (at === 0x7FC0 && (map & 1) === 0) s += 2;
+      if (at === 0xFFC0 && (map & 1) === 1) s += 2;
+      const reset = bytes[at + 0x3C] | (bytes[at + 0x3D] << 8);
+      if (reset >= 0x8000) s += 2;
+      for (let i = 0; i < 21; i++) { const c = bytes[at + i]; if (c >= 0x20 && c < 0x7F) s += 0.05; }
+      return s;
+    };
+    const hi = score(0xFFC0) > score(0x7FC0);
+    const at = hi ? 0xFFC0 : 0x7FC0;
+    let title = ''; for (let i = 0; i < 21; i++) { const c = bytes[at + i]; title += c >= 0x20 && c < 0x7F ? String.fromCharCode(c) : ' '; }
+    const ramCode = bytes[at + 0x18];
+    return { rom: bytes, hirom: hi, title: title.trim(), sramSize: ramCode ? (0x400 << ramCode) : 0 };
+  }
+
+  class SnesConsole {
+    constructor(romBytes, opts) {
+      opts = opts || {};
+      this.cart = parseRom(romBytes);
+      this.rom = this.cart.rom;
+      this.romMask = 1; while (this.romMask < this.rom.length) this.romMask <<= 1; this.romMask -= 1;
+      this.sram = new Uint8Array(Math.max(this.cart.sramSize, 0));
+      this.wram = new Uint8Array(0x20000);
+      this.ppu = new Emu.SnesPpu();
+      this.apu = new SnesApu();
+      this.ext = opts.ext || null; // $6000-$7FFF(バンク $00-$3F/$80-$BF)に挿さる機器: { read(a), write(a, v), tick?(clk) }
+      // CPU は生成時にリセットベクタを読む(= advance が走る)ので、時計を先に置く
+      this.clock = 0; this.hclk = 0; this.vline = 0; this.apuAcc = 0; this.lineStage = 0; this.irqMode = 0; this.hdmaEn = 0; this.fastRom = false; this.openBus = 0;
+      this.cpu = new Emu.CPU65816(this);
+      this.pad = [0, 0];          // パッド 1/2(16bit: B Y Sel Start ↑ ↓ ← → A X L R 0 0 0 0)
+      this.dma = Array.from({ length: 8 }, () => ({ dmap: 0xFF, bbad: 0xFF, a1t: 0xFFFF, a1b: 0xFF, das: 0xFFFF, dasb: 0xFF, a2a: 0xFFFF, nltr: 0xFF, done: true, doXfer: false }));
+      this.onFrame = null;
+      this.onApuPort = null; // (port, value) APU ポート $2140-$2143 への書き込み(録音用)
+      this.frameCount = 0;
+      this.reset();
+    }
+
+    reset() {
+      this.wram.fill(0x55);
+      this.ppu.reset(); this.apu.reset();
+      this.clock = 0; this.hclk = 0; this.vline = 0; this.apuAcc = 0;
+      this.nmiEnable = false; this.irqMode = 0; this.autoJoy = false;
+      this.nmiFlag = false; this.nmiPending = false; this.irqFlag = false; this.irqDone = false;
+      this.htime = 0x1FF; this.vtime = 0x1FF;
+      this.wrio = 0xFF; this.mpyA = 0xFF; this.rdmpy = 0; this.rddiv = 0; this.dividend = 0xFFFF;
+      this.hdmaEn = 0; this.fastRom = false;
+      this.joy = [0, 0, 0, 0]; this.joyStrobe = false; this.joyShift = [0, 0]; this.autoJoyBusyUntil = -1;
+      this.wmAddr = 0;
+      this.openBus = 0;
+      this.lineStage = 0;
+      this._frameFlag = false;
+      for (const d of this.dma) { d.done = true; d.doXfer = false; }
+      this.cpu.reset();
+    }
+
+    setController(port, bits) { this.pad[port & 1] = bits & 0xFFFF; }
+    get frame() { return this.ppu.frame; }
+    get frameWidth() { return 256; }
+    get frameHeight() { return 224; }
+
+    // ── 時間 ──
+    // CPU の 1 サイクルが何マスタークロックか(番地で決まる)
+    speed(addr) {
+      const bank = addr >> 16, a = addr & 0xFFFF;
+      if ((bank & 0x40) === 0) { // $00-$3F / $80-$BF
+        if (a < 0x2000) return 8;
+        if (a < 0x4000) return 6;
+        if (a < 0x4200) return 12;
+        if (a < 0x6000) return 6;
+        if (a < 0x8000) return 8;
+        return (bank & 0x80) && this.fastRom ? 6 : 8;
+      }
+      if (bank >= 0xC0) return this.fastRom ? 6 : 8;
+      return 8;
+    }
+    // マスタークロックを進め、行の中の出来事(行頭、描画、HBlank、H/V タイマ)を起こす
+    advance(clk) {
+      this.clock += clk;
+      this.apuAcc += clk * APU_RATIO;
+      if (this.ext && this.ext.tick) this.ext.tick(clk);
+      let h = (this.hclk += clk);
+      for (;;) {
+        if (this.lineStage === 0) { if (h < 2) break; this.lineStage = 1; this._lineStart(); }
+        if (this.lineStage === 1) { if (h < 88) break; this.lineStage = 2; if (this.vline >= 1 && this.vline < VBLANK_LINE) this.ppu.renderLine(this.vline); }
+        if (this.lineStage === 2) { if (h < 1112) break; this.lineStage = 3; if (this.vline < VBLANK_LINE && this.hdmaEn) this._hdmaRun(); }
+        if (h < LINE_CLK) break;
+        h = (this.hclk -= LINE_CLK);
+        this.lineStage = 0; this.irqDone = false;
+        if (++this.vline >= LINES) this.vline = 0;
+      }
+      // H/V タイマの IRQ: モード 1 = 毎行 HTIME、2 = VTIME の行頭、3 = VTIME の行の HTIME
+      if (this.irqMode && !this.irqDone) {
+        const vOk = this.irqMode === 1 || this.vline === this.vtime;
+        const ht = this.irqMode === 2 ? 10 : this.htime * 4 + 14;
+        if (vOk && this.hclk >= ht && ht < LINE_CLK) { this.irqDone = true; this.irqFlag = true; }
+      }
+    }
+    _lineStart() {
+      const v = this.vline;
+      if (v === VBLANK_LINE) {
+        this.nmiFlag = true;
+        if (this.nmiEnable) this.nmiPending = true;
+        this.ppu.vblank();
+        if (this.autoJoy) { this.joy[0] = this.pad[0]; this.joy[1] = this.pad[1]; this.joy[2] = 0; this.joy[3] = 0; this.autoJoyBusyUntil = this.clock + 4224; }
+        this.syncApu();
+        this.frameCount++; this._frameFlag = true;
+        if (this.onFrame) this.onFrame();
+      } else if (v === 0) {
+        this.nmiFlag = false;
+        if (this.hdmaEn) this._hdmaInit();
+      }
+    }
+    syncApu() {
+      const n = Math.floor(this.apuAcc);
+      if (n > 0) this.apuAcc -= this.apu.run(n);
+    }
+
+    // ── バス(CPU から)──
+    read(addr) { this.advance(this.speed(addr)); const v = this.peek(addr); this.openBus = v; return v; }
+    write(addr, v) { this.advance(this.speed(addr)); this.openBus = v; this.poke(addr, v); }
+    idle() { this.advance(6); }
+
+    _romAddr(bank, a) { return this.cart.hirom ? (((bank & 0x3F) << 16) | a) : (((bank & 0x7F) << 15) | (a & 0x7FFF)); }
+    peek(addr) {
+      const bank = addr >> 16, a = addr & 0xFFFF;
+      if (bank === 0x7E || bank === 0x7F) return this.wram[addr & 0x1FFFF];
+      if ((bank & 0x40) === 0) {
+        if (a < 0x2000) return this.wram[a];
+        if (a < 0x6000) return this._ioRead(a);
+        if (a < 0x8000) {
+          if (this.ext) return this.ext.read(a);
+          if (this.cart.hirom && this.sram.length && (bank & 0x3F) >= 0x20) return this.sram[(((bank & 0x1F) << 13) | (a & 0x1FFF)) % this.sram.length];
+          return this.openBus;
+        }
+        return this.rom[this._romAddr(bank, a) & this.romMask] | 0;
+      }
+      // $40-$7D / $C0-$FF
+      if (!this.cart.hirom && (bank & 0x7F) >= 0x70 && a < 0x8000) return this.sram.length ? this.sram[((((bank & 0x7F) - 0x70) << 15) | a) % this.sram.length] : this.openBus;
+      return this.rom[this._romAddr(bank, a) & this.romMask] | 0;
+    }
+    poke(addr, v) {
+      const bank = addr >> 16, a = addr & 0xFFFF;
+      if (bank === 0x7E || bank === 0x7F) { this.wram[addr & 0x1FFFF] = v; return; }
+      if ((bank & 0x40) === 0) {
+        if (a < 0x2000) { this.wram[a] = v; return; }
+        if (a < 0x6000) { this._ioWrite(a, v); return; }
+        if (a < 0x8000) {
+          if (this.ext) this.ext.write(a, v);
+          else if (this.cart.hirom && this.sram.length && (bank & 0x3F) >= 0x20) this.sram[(((bank & 0x1F) << 13) | (a & 0x1FFF)) % this.sram.length] = v;
+        }
+        return;
+      }
+      if (!this.cart.hirom && (bank & 0x7F) >= 0x70 && a < 0x8000 && this.sram.length) this.sram[((((bank & 0x7F) - 0x70) << 15) | a) % this.sram.length] = v;
+    }
+
+    _ioRead(a) {
+      if (a >= 0x2100 && a < 0x2140) {
+        if (a === 0x2137) { if (this.wrio & 0x80) this.ppu.latchCounters((this.hclk >> 2) & 0x1FF, this.vline); return this.openBus; }
+        return this.ppu.read(a - 0x2100);
+      }
+      if (a >= 0x2140 && a < 0x2180) { this.syncApu(); return this.apu.out[a & 3]; }
+      if (a === 0x2180) { const v = this.wram[this.wmAddr]; this.wmAddr = (this.wmAddr + 1) & 0x1FFFF; return v; }
+      if (a === 0x4016 || a === 0x4017) { // 直列読み(B から 1 ビットずつ)。読み切ると 1
+        const p = a & 1;
+        if (this.joyStrobe) return (this.openBus & 0xFC) | ((this.pad[p] >> 15) & 1);
+        const bit = (this.joyShift[p] >> 15) & 1;
+        this.joyShift[p] = ((this.joyShift[p] << 1) | 1) & 0xFFFF;
+        return (this.openBus & 0xFC) | bit | (p ? 0x1C : 0);
+      }
+      if (a >= 0x4300 && a < 0x4380) {
+        const d = this.dma[(a >> 4) & 7];
+        switch (a & 0x0F) {
+          case 0x0: return d.dmap; case 0x1: return d.bbad;
+          case 0x2: return d.a1t & 0xFF; case 0x3: return d.a1t >> 8; case 0x4: return d.a1b;
+          case 0x5: return d.das & 0xFF; case 0x6: return d.das >> 8; case 0x7: return d.dasb;
+          case 0x8: return d.a2a & 0xFF; case 0x9: return d.a2a >> 8; case 0xA: return d.nltr;
+        }
+        return this.openBus;
+      }
+      switch (a) {
+        case 0x4210: { const v = (this.nmiFlag ? 0x80 : 0) | 0x02 | (this.openBus & 0x70); this.nmiFlag = false; return v; }
+        case 0x4211: { const v = (this.irqFlag ? 0x80 : 0) | (this.openBus & 0x7F); this.irqFlag = false; return v; }
+        case 0x4212: return (this.vline >= VBLANK_LINE ? 0x80 : 0) | (this.hclk < 4 || this.hclk >= 1096 ? 0x40 : 0) | (this.clock < this.autoJoyBusyUntil ? 1 : 0) | (this.openBus & 0x3E);
+        case 0x4213: return this.wrio;
+        case 0x4214: return this.rddiv & 0xFF; case 0x4215: return this.rddiv >> 8;
+        case 0x4216: return this.rdmpy & 0xFF; case 0x4217: return this.rdmpy >> 8;
+        case 0x4218: case 0x421A: case 0x421C: case 0x421E: return this.joy[(a - 0x4218) >> 1] & 0xFF;
+        case 0x4219: case 0x421B: case 0x421D: case 0x421F: return this.joy[(a - 0x4218) >> 1] >> 8;
+      }
+      return this.openBus;
+    }
+    _ioWrite(a, v) {
+      if (a >= 0x2100 && a < 0x2140) { this.ppu.write(a - 0x2100, v); return; }
+      if (a >= 0x2140 && a < 0x2180) { this.syncApu(); this.apu.in[a & 3] = v; if (this.onApuPort) this.onApuPort(a & 3, v); return; }
+      if (a >= 0x2180 && a < 0x2184) {
+        if (a === 0x2180) { this.wram[this.wmAddr] = v; this.wmAddr = (this.wmAddr + 1) & 0x1FFFF; }
+        else if (a === 0x2181) this.wmAddr = (this.wmAddr & 0x1FF00) | v;
+        else if (a === 0x2182) this.wmAddr = (this.wmAddr & 0x100FF) | (v << 8);
+        else this.wmAddr = (this.wmAddr & 0x0FFFF) | ((v & 1) << 16);
+        return;
+      }
+      if (a === 0x4016) { const was = this.joyStrobe; this.joyStrobe = (v & 1) !== 0; if (was && !this.joyStrobe) { this.joyShift[0] = this.pad[0]; this.joyShift[1] = this.pad[1]; } return; }
+      if (a >= 0x4300 && a < 0x4380) {
+        const d = this.dma[(a >> 4) & 7];
+        switch (a & 0x0F) {
+          case 0x0: d.dmap = v; break; case 0x1: d.bbad = v; break;
+          case 0x2: d.a1t = (d.a1t & 0xFF00) | v; break; case 0x3: d.a1t = (d.a1t & 0xFF) | (v << 8); break; case 0x4: d.a1b = v; break;
+          case 0x5: d.das = (d.das & 0xFF00) | v; break; case 0x6: d.das = (d.das & 0xFF) | (v << 8); break; case 0x7: d.dasb = v; break;
+          case 0x8: d.a2a = (d.a2a & 0xFF00) | v; break; case 0x9: d.a2a = (d.a2a & 0xFF) | (v << 8); break; case 0xA: d.nltr = v; break;
+        }
+        return;
+      }
+      switch (a) {
+        case 0x4200: {
+          const was = this.nmiEnable;
+          this.nmiEnable = (v & 0x80) !== 0; this.irqMode = (v >> 4) & 3; this.autoJoy = (v & 1) !== 0;
+          if (!was && this.nmiEnable && this.nmiFlag) this.nmiPending = true; // VBlank の最中に許可すると、その場で入る
+          if (!this.irqMode) this.irqFlag = false;
+          break;
+        }
+        case 0x4201: if ((this.wrio & 0x80) && !(v & 0x80)) this.ppu.latchCounters((this.hclk >> 2) & 0x1FF, this.vline); this.wrio = v; break;
+        case 0x4202: this.mpyA = v; break;
+        case 0x4203: this.rdmpy = this.mpyA * v; break;
+        case 0x4204: this.dividend = (this.dividend & 0xFF00) | v; break;
+        case 0x4205: this.dividend = (this.dividend & 0xFF) | (v << 8); break;
+        case 0x4206: if (v) { this.rddiv = (this.dividend / v) | 0; this.rdmpy = this.dividend % v; } else { this.rddiv = 0xFFFF; this.rdmpy = this.dividend; } break;
+        case 0x4207: this.htime = (this.htime & 0x100) | v; break;
+        case 0x4208: this.htime = (this.htime & 0xFF) | ((v & 1) << 8); break;
+        case 0x4209: this.vtime = (this.vtime & 0x100) | v; break;
+        case 0x420A: this.vtime = (this.vtime & 0xFF) | ((v & 1) << 8); break;
+        case 0x420B: if (v) this._dmaRun(v); break;
+        case 0x420C: this.hdmaEn = v; break;
+        case 0x420D: this.fastRom = (v & 1) !== 0; break;
+      }
+    }
+
+    // ── DMA ──
+    _bRead(reg) { return this._ioRead(0x2100 | reg); }
+    _bWrite(reg, v) { this._ioWrite(0x2100 | reg, v); }
+    _dmaRun(mask) {
+      this.advance(8);
+      for (let ch = 0; ch < 8; ch++) {
+        if (!(mask & (1 << ch))) continue;
+        const d = this.dma[ch], pat = DMA_PATTERN[d.dmap & 7], toA = (d.dmap & 0x80) !== 0;
+        const step = (d.dmap & 0x08) ? 0 : (d.dmap & 0x10) ? -1 : 1;
+        this.advance(8);
+        let i = 0;
+        do {
+          const aaddr = (d.a1b << 16) | d.a1t, breg = (d.bbad + pat[i % pat.length]) & 0xFF;
+          if (toA) this.poke(aaddr, this._bRead(breg)); else this._bWrite(breg, this.peek(aaddr));
+          d.a1t = (d.a1t + step) & 0xFFFF;
+          d.das = (d.das - 1) & 0xFFFF;
+          i++;
+          this.advance(8);
+        } while (d.das !== 0);
+      }
+    }
+    // HDMA: フレームの頭で表を読み始め、行ごとの HBlank で決まったバイト数を B バスへ書く
+    _hdmaLoad(d) {
+      d.nltr = this.peek((d.a1b << 16) | d.a2a); d.a2a = (d.a2a + 1) & 0xFFFF;
+      if (d.nltr === 0) { d.done = true; return; }
+      if (d.dmap & 0x40) { // 間接: 表にはデータの番地が入っている
+        const lo = this.peek((d.a1b << 16) | d.a2a), hi = this.peek((d.a1b << 16) | ((d.a2a + 1) & 0xFFFF));
+        d.a2a = (d.a2a + 2) & 0xFFFF; d.das = lo | (hi << 8);
+      }
+      d.doXfer = true;
+    }
+    _hdmaInit() {
+      for (let ch = 0; ch < 8; ch++) {
+        const d = this.dma[ch];
+        if (!(this.hdmaEn & (1 << ch))) { d.done = true; continue; }
+        d.done = false; d.a2a = d.a1t;
+        this._hdmaLoad(d);
+      }
+    }
+    _hdmaRun() {
+      for (let ch = 0; ch < 8; ch++) {
+        const d = this.dma[ch];
+        if (!(this.hdmaEn & (1 << ch)) || d.done) continue;
+        if (d.doXfer) {
+          const pat = DMA_PATTERN[d.dmap & 7], ind = (d.dmap & 0x40) !== 0;
+          for (let i = 0; i < pat.length; i++) {
+            let v;
+            if (ind) { v = this.peek((d.dasb << 16) | d.das); d.das = (d.das + 1) & 0xFFFF; }
+            else { v = this.peek((d.a1b << 16) | d.a2a); d.a2a = (d.a2a + 1) & 0xFFFF; }
+            this._bWrite((d.bbad + pat[i]) & 0xFF, v);
+          }
+        }
+        d.nltr = (d.nltr - 1) & 0xFF;
+        d.doXfer = (d.nltr & 0x80) !== 0;
+        if ((d.nltr & 0x7F) === 0) this._hdmaLoad(d);
+      }
+    }
+
+    // ── 実行 ──
+    step() {
+      const cpu = this.cpu;
+      if (this.nmiPending) { this.nmiPending = false; cpu.nmi(); return; }
+      if (this.irqFlag && this.irqMode) {
+        if (!(cpu.p & 0x04)) { cpu.irq(); return; }
+        if (cpu.waiting) cpu.waiting = false; // I が立っていても WAI は抜ける
+      }
+      cpu.step();
+    }
+    runFrame() {
+      this._frameFlag = false;
+      let guard = 0;
+      while (!this._frameFlag && ++guard < 400000) this.step();
+      this.syncApu();
+    }
+  }
+
+  SnesConsole.BUTTON = { B: 0x8000, Y: 0x4000, SELECT: 0x2000, START: 0x1000, UP: 0x0800, DOWN: 0x0400, LEFT: 0x0200, RIGHT: 0x0100, A: 0x0080, X: 0x0040, L: 0x0020, R: 0x0010 };
+  Emu.SnesConsole = SnesConsole;
+  Emu.SnesApu = SnesApu;
+  Emu.parseSnesRom = parseRom;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * スーパーゲームボーイのカートリッジ(段階 8g-4): ICD2 チップ+ゲームボーイ本体
+ * MML.Emu.SgbIcd2
+ *
+ * SNES 側からは $6000-$7FFF に見える(SnesConsole の ext に挿す)。中にゲームボーイ(gb/gbConsole.js)が丸ごと入っていて、
+ * SNES のマスタークロックを分周した時計で動く(初代: 21.477MHz÷5 = 4.295MHz。実機のゲームボーイより約 2.4% 速い)。
+ *   $6000 R : 今 LCD が描いている行(上位 5bit = 8 行単位の段)と、書き込み中のバッファ番号(下位 2bit)
+ *   $6001 W : 読み出すバッファ番号(読み出し位置を 0 に戻す)
+ *   $6002 R : ゲームボーイからのコマンド(16 バイト)が届いているか。読むと 1 つ取り出して $7000-$700F に置く
+ *   $6003 W : bit7 = 0 でゲームボーイをリセット、1 で動かす / bit5-4 = パッドの人数(0=1 人、1=2 人、3=4 人) / bit1-0 = 時計の分周(÷4 ÷5 ÷7 ÷9)
+ *   $6004-7 W: パッド 1〜4(0 = 押している。bit7-4 = START SELECT B A、bit3-0 = ↓ ↑ ← →)
+ *   $600F R : チップの版
+ *   $7000-F R: コマンド 16 バイト
+ *   $7800 R : 選んだバッファの絵(20 タイル × 16 バイト = 320 バイト、ゲームボーイのタイル形式)。続けて読むと進む
+ * ゲームボーイ側は P1($FF00)の P14/P15 の上げ下げでコマンドを 1 ビットずつ送る(両方 L = 開始、P14 だけ L = 0、P15 だけ L = 1)。
+ * LCD の出力(4 階調の番号)は 8 行ぶんずつ 4 本のバッファに順に溜まり、BIOS がそれを読んで SNES の画面に描く。
+ *
+ * ブート ROM(256 バイト)があればそれを実行する(カートリッジのヘッダを 6 個のコマンドで SNES へ送るのがその仕事)。
+ * 無ければ同じ 6 個のコマンドをここで作って届け、ゲームボーイは起動後の状態から始める。
+ *
+ * 出どころ: fullsnes(nocash)の SGB の章。パッド番号の進み方とコマンド受信の状態機械は bsnes の ICD を覚えている範囲で再現した物(推定を含む)
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const DIVIDER = [4, 5, 7, 9];
+
+  class SgbIcd2 {
+    // opts: { bootRom: Uint8Array(256) | null, revision: 1 | 2, gbOpts: GbConsole へ渡す追加の指定 }
+    constructor(gbRom, opts) {
+      opts = opts || {};
+      this.revision = opts.revision || 1;
+      this.gb = new Emu.GbConsole(gbRom, Object.assign({ model: 'dmg', sgb: this, bootRom: opts.bootRom || null }, opts.gbOpts || {}));
+      this.hasBoot = !!opts.bootRom;
+      this.baseHz = 21477272; this.clkScale = 1; // SGB2 は専用の水晶(20.97152MHz)。SgbConsole が入れる
+      this.onClock = null;                       // (clk) SNES のマスタークロックが進んだ(音の標本化に使う)
+      this.rows = new Uint8Array(4 * 8 * 160); // バッファ 4 本 × 8 行 × 160 画素(階調番号 0-3)
+      this.packet = new Uint8Array(16);         // $7000-$700F
+      this.reset();
+    }
+    reset() {
+      this.r6003 = 0; this.running = false; this.div = DIVIDER[1]; this.mltReq = 0;
+      this.pads = [0xFF, 0xFF, 0xFF, 0xFF];
+      this.joypId = 0; this.joypLock = false;
+      this.queue = [];                 // 届いたコマンド(16 バイトずつ)
+      this.pulseLock = true; this.strobeLock = false; this.packetLock = false;
+      this.bitData = 0; this.bitOffset = 0; this.packetOffset = 0; this.joypPacket = new Uint8Array(16);
+      this.v = 0; this.writeBank = 0; this.readBank = 0; this.readAddr = 0;
+      this.rows.fill(0); this.packet.fill(0);
+      this.acc = 0;
+      this._applyClock();
+    }
+    // ゲームボーイの時計(Hz)= 元の時計 ÷ 分周。音の標本化が使う
+    _applyClock() { this.gb.clockHz = this.baseHz / this.div; }
+
+    // ── SNES 側 ──
+    read(a) {
+      a &= 0xFFFF;
+      if (a === 0x6000) { this._follow(this.gb.ppu.line); return (this.v & 0xF8) | this.writeBank; }
+      if (a === 0x6002) {
+        if (!this.queue.length) return 0;
+        this.packet.set(this.queue.shift());
+        return 1;
+      }
+      if (a === 0x600F) return 0x21;
+      if ((a & 0xFFF0) === 0x7000) return this.packet[a & 15];
+      if (a === 0x7800) {
+        const p = this.readAddr; this.readAddr = (p + 1) & 511;
+        if (p >= 320) return 0xFF;
+        // タイル t の y 行目、ビットプレーン pl(左端の画素が bit7)
+        const t = p >> 4, y = (p >> 1) & 7, pl = p & 1, base = this.readBank * 1280 + y * 160 + t * 8, rows = this.rows;
+        let b = 0;
+        for (let i = 0; i < 8; i++) b = (b << 1) | ((rows[base + i] >> pl) & 1);
+        return b;
+      }
+      return 0;
+    }
+    write(a, v) {
+      a &= 0xFFFF;
+      if (a === 0x6001) { this.readBank = v & 3; this.readAddr = 0; return; }
+      if (a === 0x6003) {
+        if (!(this.r6003 & 0x80) && (v & 0x80)) this._powerGb();
+        this.r6003 = v; this.running = (v & 0x80) !== 0; this.div = DIVIDER[v & 3]; this._applyClock();
+        this.mltReq = (v >> 4) & 3;
+        this.joypId &= this.mltReq === 2 ? 3 : this.mltReq;
+        return;
+      }
+      if (a >= 0x6004 && a <= 0x6007) { this.pads[a - 0x6004] = v; return; }
+    }
+    // SNES のマスタークロックが clk 進んだ
+    tick(clk) {
+      if (this.onClock) this.onClock(clk);
+      if (!this.running) return;
+      this.acc += clk * this.clkScale;
+      const gb = this.gb, div = this.div, need = div * 4;
+      while (this.acc >= need) {
+        const before = gb.cpuCycles;
+        gb.step();
+        this.acc -= (gb.cpuCycles - before) * div;
+      }
+    }
+
+    _powerGb() {
+      this.gb.reset();
+      this.joypId = 0; this.joypLock = false;
+      this.pulseLock = true; this.strobeLock = false; this.packetLock = false; this.bitOffset = 0; this.packetOffset = 0;
+      this.queue.length = 0;
+      this.v = 0; this.acc = 0;
+      this._applyClock();
+      if (!this.hasBoot) { // ブート ROM の代わり: ヘッダ $0104-$0157 を 14 バイトずつ 6 個のコマンドで届ける
+        const rom = this.gb.cart.rom || [];
+        for (let i = 0; i < 6; i++) {
+          const pk = new Uint8Array(16);
+          pk[0] = 0xF1 + i * 2;
+          let sum = 0;
+          for (let k = 0; k < 14; k++) { const b = rom[0x104 + i * 14 + k] | 0; pk[2 + k] = b; sum += b; }
+          pk[1] = sum & 0xFF;
+          this.queue.push(pk);
+        }
+      }
+    }
+
+    // ── ゲームボーイ側 ──
+    // LCD の行 y を描き終えた(idx = 画面全体の階調番号)
+    lcdLine(y, idx) {
+      this._follow(y);
+      this.rows.set(idx.subarray(y * 160, y * 160 + 160), this.writeBank * 1280 + (y & 7) * 160);
+    }
+    // 行カウンタを追いかける。見えている行の 8 行ごと(0 行目を含む)に書き込みバッファが次へ移る。VBlank の間は移らない
+    // (VBlank でも移すと、BIOS が中身の無いバッファを最後の段として読んでしまう。実測: dmg-acid2 の最下段が化けた)
+    _follow(line) {
+      while (this.v !== line) {
+        if (++this.v >= 154) this.v = 0;
+        if (this.v < 144 && (this.v & 7) === 0) this.writeBank = (this.writeBank + 1) & 3;
+      }
+    }
+    // P1 の下位 4bit。両方 H の時はパッド番号($F − 番号)が読める
+    p1Low(p1) {
+      const p14 = (p1 >> 4) & 1, p15 = (p1 >> 5) & 1, pad = this.pads[this.joypId];
+      let low = 0x0F;
+      if (p14 && p15) low = 0x0F - this.joypId;
+      if (!p14) low &= pad & 0x0F;
+      if (!p15) low &= (pad >> 4) & 0x0F;
+      return low & 0x0F;
+    }
+    // P1 への書き込み(p14/p15 = 書いた値の bit4/bit5)
+    joypWrite(p14, p15) {
+      // パッド番号: 両方 H に戻るたびに次の人へ(人数は $6003)
+      if (p14 && p15) {
+        if (!this.joypLock) {
+          this.joypLock = true;
+          this.joypId = (this.joypId + 1) & (this.mltReq === 2 ? 3 : this.mltReq);
+        }
+      }
+      if (p14 && !p15) this.joypLock = false;
+
+      // コマンドの受信
+      if (!p14 && !p15) { this.pulseLock = false; this.packetOffset = 0; this.bitOffset = 0; this.strobeLock = true; this.packetLock = false; return; }
+      if (this.pulseLock) return;
+      if (p14 && p15) { this.strobeLock = false; return; }
+      if (this.strobeLock) return; // 前のビットから H に戻っていない
+      this.strobeLock = true;
+      const bit = p15 ? 0 : 1; // P14 だけ L = 0、P15 だけ L = 1
+      if (this.packetLock) { // 16 バイト受け終えた後の止めのビット(0)
+        if (!bit) { if (this.queue.length < 64) this.queue.push(this.joypPacket.slice()); }
+        this.packetLock = false; this.pulseLock = true;
+        return;
+      }
+      this.bitData = (bit << 7) | (this.bitData >> 1);
+      if (++this.bitOffset < 8) return;
+      this.bitOffset = 0;
+      this.joypPacket[this.packetOffset] = this.bitData;
+      if (++this.packetOffset < 16) return;
+      this.packetOffset = 0;
+      this.packetLock = true;
+    }
+  }
+
+  Emu.SgbIcd2 = SgbIcd2;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * スーパーゲームボーイ本体(段階 8g-5): SNES(snesConsole.js)+ICD2(icd2.js)+ゲームボーイ(gb/gbConsole.js)を 1 台にまとめる
+ * MML.Emu.SgbConsole / MML.Emu.SgbState
+ *
+ * 外形は GbConsole / NesConsole と同じ(Worklet と画面がそのまま扱える): setSampleRate / runSamplesStereo / runFrame / frame /
+ * setController / startRecording / stopRecording / セーブ RAM / 周辺(傾き、赤外線、プリンタ…は中の GbConsole へ素通し)。
+ *   - 画面は SNES の 256×224(枠つき)。1 フレーム = SNES の 1 フレーム(60.0988Hz)
+ *   - 時計: 初代は SNES のマスタークロック ÷5 = 4,295,454Hz(実機のゲームボーイより約 2.4% 速い)。SGB2 は専用の水晶で 4,194,304Hz
+ *   - 音: ゲームボーイの APU(出力レートで直接標本化)+SNES の DSP(32kHz を線形補間で出力レートへ)を足す。
+ *     SPC700 は出力 1 サンプルごとに追いつかせる(ポートを触った時だけだと 1 フレームぶん固まって届く)
+ *   - 録音: ゲームボーイの書き込み列(GbConsole の録音)に、SNES 側の音源の控え(.spc の形の像)と APU ポートへの書き込みを混ぜる。
+ *     VGM では規格外ブロック GBXX の種類 1 に載る(vgmRecord.js encodeGbRecording)
+ *   - パッド: NesConsole.BUTTON の並びを SNES のパッドへ写す(A→A、B→B、SELECT、START、十字)。2P も渡す(多人数対応ソフト用)
+ * ステート(SgbState)は SNES 側を木ごと写し、ゲームボーイは GbState に任せる。巻き戻しは無い(1 枚が大きい)。
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const MASTER = 21477272, SGB2_XTAL = 20971520;
+  const RING = 16384, SPC_FIFO = 4096, SPC_RATE = 32000;
+  // NesConsole.BUTTON(A B SELECT START UP DOWN LEFT RIGHT)→ SNES のパッド
+  const PAD_MAP = [0x0080, 0x8000, 0x2000, 0x1000, 0x0800, 0x0400, 0x0200, 0x0100];
+  const toSnesPad = (bits) => { let o = 0; for (let i = 0; i < 8; i++) if (bits & (1 << i)) o |= PAD_MAP[i]; return o; };
+
+  class SgbConsole {
+    // opts: { bios: SGB の BIOS(256K = 初代、512K = SGB2), bootRom: ゲームボーイ側のブート ROM 256 バイト(任意), revision: 1 | 2(省略時は BIOS の大きさ) }
+    constructor(gbRom, opts) {
+      opts = opts || {};
+      if (!opts.bios) throw new Error('SGB BIOS が要ります');
+      const bios = opts.bios instanceof Uint8Array ? opts.bios : new Uint8Array(opts.bios);
+      this.revision = opts.revision || (bios.length > 0x40000 ? 2 : 1);
+      this.icd = new Emu.SgbIcd2(gbRom, { bootRom: opts.bootRom || null, revision: this.revision });
+      this.gb = this.icd.gb;
+      this.snes = new Emu.SnesConsole(bios, { ext: this.icd });
+      this.icd.baseHz = this.revision === 2 ? SGB2_XTAL : MASTER;
+      this.icd.clkScale = this.revision === 2 ? SGB2_XTAL / MASTER : 1;
+      this.icd._applyClock();
+      this.model = 'sgb'; this.cgb = false; this.isSgb = true;
+      this.cart = this.gb.cart; this.ppu = this.gb.ppu; this.apu = this.gb.apu;
+      this.sampleRate = 0; this.acc = 0; this.underruns = 0;
+      this.ring = new Float32Array(RING); this.ringR = new Float32Array(RING); this.ringHead = 0; this.ringLen = 0;
+      this.spcL = new Float32Array(SPC_FIFO); this.spcR = new Float32Array(SPC_FIFO); this.spcHead = 0; this.spcLen = 0; this.spcFrac = 0; this.spcStep = 0;
+      this.spcGain = 1; this.gbGain = 1;
+      this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.onFrame = null;
+      this.snes.apu.onSample = (l, r) => {
+        if (!this.sampleRate) return;
+        if (this.spcLen >= SPC_FIFO) { this.spcHead = (this.spcHead + 1) & (SPC_FIFO - 1); this.spcLen--; }
+        const i = (this.spcHead + this.spcLen) & (SPC_FIFO - 1);
+        this.spcL[i] = l; this.spcR[i] = r; this.spcLen++;
+      };
+      this.snes.onApuPort = (port, v) => { const rec = this.gb.rec; if (rec) rec.cur.push({ sgbPort: port & 3, value: v & 0xFF, t: this.gb.frameT }); };
+      this.icd.onClock = (clk) => this._clock(clk);
+      this.snes.onFrame = () => {
+        if (this.padTurbo[0] || this.padTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
+        if (this.onFrame) this.onFrame();
+      };
+    }
+
+    reset() {
+      this.icd.reset(); this.gb.reset(); this.snes.reset(); this.icd._applyClock();
+      this.acc = 0; this.ringHead = 0; this.ringLen = 0; this.spcHead = 0; this.spcLen = 0; this.spcFrac = 0;
+      this._applyPad();
+    }
+
+    // ── 音 ──
+    setSampleRate(sr) {
+      this.sampleRate = sr; this.acc = 0; this.ringHead = 0; this.ringLen = 0; this.spcHead = 0; this.spcLen = 0; this.spcFrac = 0;
+      this.spcStep = sr ? SPC_RATE / sr : 0;
+      this.gb.setSampleRate(sr);
+    }
+    // SNES のマスタークロックが clk 進んだ(ICD2 から)。出力 1 サンプルぶん溜まるたびに GB と SPC の音を足して輪へ
+    _clock(clk) {
+      const sr = this.sampleRate;
+      if (!sr) return;
+      this.acc += clk * sr;
+      while (this.acc >= MASTER) {
+        this.acc -= MASTER;
+        this.snes.syncApu();
+        // SPC: 32kHz → 出力レート(線形補間)
+        let sl = 0, sp = 0;
+        const M = SPC_FIFO - 1;
+        while (this.spcFrac >= 1 && this.spcLen > 1) { this.spcFrac -= 1; this.spcHead = (this.spcHead + 1) & M; this.spcLen--; }
+        if (this.spcLen > 1) {
+          const a = this.spcHead, b = (a + 1) & M, f = this.spcFrac < 1 ? this.spcFrac : 1;
+          sl = this.spcL[a] + (this.spcL[b] - this.spcL[a]) * f; sp = this.spcR[a] + (this.spcR[b] - this.spcR[a]) * f;
+          this.spcFrac += this.spcStep;
+        } else if (this.spcLen === 1) { sl = this.spcL[this.spcHead]; sp = this.spcR[this.spcHead]; }
+        // GB: 中の GbConsole が同じ出力レートで自分の輪に溜めている(止められている間は空)
+        let gl = 0, gr = 0;
+        const gb = this.gb;
+        if (gb.ringLen > 0) {
+          const GM = gb.ring.length - 1;
+          if (gb.ringLen > 256) { gb.ringHead = (gb.ringHead + gb.ringLen - 8) & GM; gb.ringLen = 8; } // 溜まり過ぎ(時計の切り替え直後など)は捨てて遅れを持ち越さない
+          gl = gb.ring[gb.ringHead]; gr = gb.ringR[gb.ringHead]; gb.ringHead = (gb.ringHead + 1) & GM; gb.ringLen--;
+        }
+        if (this.ringLen < RING) {
+          const i = (this.ringHead + this.ringLen) & (RING - 1);
+          this.ring[i] = gl * this.gbGain + sl * this.spcGain; this.ringR[i] = gr * this.gbGain + sp * this.spcGain;
+          this.ringLen++;
+        }
+      }
+    }
+    runFrame() { this.snes.runFrame(); return this.sampleRate ? this.takeAudio(this.ringLen) : null; }
+    runSamples(out) {
+      const n = out.length;
+      if (!this.sampleRate) { out.fill(0); return; }
+      let guard = 0;
+      while (this.ringLen < n && ++guard < 400000) this.snes.step();
+      if (this.ringLen < n) this.underruns++;
+      this.takeAudioInto(out, n);
+    }
+    runSamplesStereo(outL, outR) {
+      const n = outL.length;
+      if (!this.sampleRate) { outL.fill(0); outR.fill(0); return; }
+      let guard = 0;
+      while (this.ringLen < n && ++guard < 400000) this.snes.step();
+      if (this.ringLen < n) this.underruns++;
+      this.takeAudioInto(outL, n, outR);
+    }
+    takeAudio(n) { const out = new Float32Array(n); this.takeAudioInto(out, n); return out; }
+    takeAudioInto(out, n, outR) {
+      const take = Math.min(n, this.ringLen), M = RING - 1, h = this.ringHead;
+      if (outR) { for (let i = 0; i < take; i++) { out[i] = this.ring[(h + i) & M]; outR[i] = this.ringR[(h + i) & M]; } for (let i = take; i < n; i++) outR[i] = 0; }
+      else for (let i = 0; i < take; i++) out[i] = (this.ring[(h + i) & M] + this.ringR[(h + i) & M]) * 0.5;
+      for (let i = take; i < n; i++) out[i] = 0;
+      this.ringHead = (h + take) & M; this.ringLen -= take;
+    }
+    applyMix(mute, volume) { return this.gb.applyMix(mute, volume); }
+
+    // ── 画面と時間 ──
+    get frame() { return this.snes.frame; }
+    get frameWidth() { return 256; }
+    get frameHeight() { return 224; }
+    get frameRate() { return MASTER / (1364 * 262); }
+    get frameCount() { return this.snes.frameCount; }
+    set frameCount(v) { this.snes.frameCount = v; }
+    get stereo() { return true; }
+    get clockHz() { return this.gb.clockHz; } // 録音の VGM ヘッダに入れるゲームボーイのクロック
+
+    // ── パッド ──
+    setController(port, bits, turbo) { const p = port ? 1 : 0; this.padHeld[p] = bits & 0xFF; this.padTurbo[p] = (turbo | 0) & 0xFF; this._applyPad(); }
+    setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(); }
+    _applyPad() {
+      const on = ((this.turboPhase / this.turboRate) | 0) === 0;
+      for (let p = 0; p < 2; p++) this.snes.setController(p, toSnesPad(this.padHeld[p] | (on ? this.padTurbo[p] : 0)));
+    }
+    get pad() { return this.padHeld; }
+
+    // ── 録音 ──
+    get rec() { return this.gb.rec; }
+    startRecording() {
+      this.gb.startRecording();
+      this.snes.syncApu();
+      this.gb.rec.cur.push({ sgbSpc: this.snes.apu.toSpc(), t: 0 }); // SNES 側の音源の今の像(.spc の形)
+    }
+    stopRecording() { return this.gb.stopRecording(); }
+
+    // ── 中のゲームボーイへ素通し ──
+    get hasBattery() { return this.gb.hasBattery; }
+    get batteryDirty() { return this.gb.batteryDirty; }
+    clearBatteryDirty() { this.gb.clearBatteryDirty(); }
+    getBattery() { return this.gb.getBattery(); }
+    setBattery(b) { return this.gb.setBattery(b); }
+    setTilt(x, y) { this.gb.setTilt(x, y); }
+    get hasTilt() { return this.gb.hasTilt; }
+    setLight(on) { this.gb.setLight(on); }
+    get irWanted() { return this.gb.irWanted; }
+    get rumble() { return this.gb.rumble; }
+    takePrints() { return this.gb.takePrints(); }
+    setCameraImage(u8) { this.gb.setCameraImage(u8); }
+    get cameraWanted() { return this.gb.cameraWanted; }
+    get barcodeWanted() { return this.gb.barcodeWanted; }
+    scanBarcode(d) { return this.gb.scanBarcode(d); }
+    extBits() { return 0; }
+    get diskCount() { return 0; }
+    chips() { return ['gb']; }
+
+    static describe(sgb) { return Emu.GbConsole.describe(sgb.gb) + (sgb.revision === 2 ? ' / Super Game Boy 2' : ' / Super Game Boy'); }
+  }
+
+  // ── ステート ──
+  // SNES 側(本体、CPU、PPU、APU、DSP、ICD2)は木ごと写す。関数と、親や ROM への参照(下の SKIP)は写さない
+  const SKIP = new Set(['bus', 'rom', 'cart', 'ext', 'gb', 'frame', 'con', 'sgb', 'bootImage']);
+  function snap(o) {
+    const out = {};
+    for (const k of Object.keys(o)) {
+      if (SKIP.has(k)) continue;
+      const v = o[k];
+      if (typeof v === 'function') continue;
+      out[k] = snapVal(v);
+    }
+    return out;
+  }
+  function snapVal(v) {
+    if (v === null || typeof v !== 'object') return v;
+    if (ArrayBuffer.isView(v)) return v.slice();
+    if (Array.isArray(v)) return v.map(snapVal);
+    return snap(v);
+  }
+  function restore(o, s) {
+    for (const k of Object.keys(s)) {
+      const v = s[k], cur = o[k];
+      if (v === null || typeof v !== 'object') { o[k] = v; continue; }
+      if (ArrayBuffer.isView(v)) { if (cur && ArrayBuffer.isView(cur) && cur.length === v.length) cur.set(v); else o[k] = v.slice(); continue; }
+      if (Array.isArray(v)) {
+        const plainObjs = v.length > 0 && Array.isArray(cur) && cur.length === v.length && v.every((e) => e && typeof e === 'object' && !ArrayBuffer.isView(e) && !Array.isArray(e));
+        if (plainObjs) for (let i = 0; i < v.length; i++) restore(cur[i], v[i]);
+        else o[k] = v.map(snapVal);
+        continue;
+      }
+      if (cur && typeof cur === 'object') restore(cur, v); else o[k] = snapVal(v);
+    }
+  }
+  const SgbState = {
+    VERSION: 1,
+    save(sgb) {
+      sgb.snes.syncApu();
+      const snes = snap(sgb.snes);
+      if (snes.apu && snes.apu.dsp) delete snes.apu.dsp.ram; // APU の RAM と同じ物
+      return { kind: 'sgb', v: SgbState.VERSION, revision: sgb.revision, snes, icd: snap(sgb.icd), gb: Emu.GbState.save(sgb.gb), gbBoot: !!sgb.gb.bootRom, gbClock: sgb.gb.clockHz };
+    },
+    load(sgb, st) {
+      if (!st || st.kind !== 'sgb' || st.v !== SgbState.VERSION || st.revision !== sgb.revision) return false;
+      if (!Emu.GbState.load(sgb.gb, st.gb)) return false;
+      restore(sgb.snes, st.snes);
+      restore(sgb.icd, st.icd);
+      sgb.gb.bootRom = st.gbBoot ? sgb.gb.bootImage : null;
+      sgb.gb.clockHz = st.gbClock;
+      sgb.acc = 0; sgb.ringHead = 0; sgb.ringLen = 0; sgb.spcHead = 0; sgb.spcLen = 0; sgb.spcFrac = 0;
+      sgb.gb.ringHead = 0; sgb.gb.ringLen = 0;
+      sgb._applyPad();
+      return true;
+    },
+  };
+
+  Emu.SgbConsole = SgbConsole;
+  Emu.SgbState = SgbState;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
  * NES / MSX 本体を AudioWorklet の中で回す (nes-worklet バンドルの本体。DESIGN-CAPTURE.md §6/§7 段階 6b、DESIGN-MSX-CAPTURE.md §6 段階 7a)
  *
  * 本体クラスは load メッセージの machine('nes' | 'msx' | 'gb')で選ぶ(NesConsole / MsxConsole / GbConsole。外形は同じ)。State/Rewind も機種で選ぶ。
@@ -16841,9 +19654,15 @@
               nes = new MML.Emu.MsxConsole(m.rom ? new Uint8Array(m.rom) : null, { machine: o.machine, bios: bios.main ? bios : null, mapperType: o.mapperType || undefined, cartB, disks, fdc: o.fdc || undefined });
               info = MML.Emu.MsxConsole.describe(nes);
             } else if (machine === 'gb') {
-              nes = new MML.Emu.GbConsole(new Uint8Array(m.rom), { model: (m.gb && m.gb.model) || 'dmg' });
-              if (m.gb && m.gb.shades) nes.ppu.shades = Array.from(m.gb.shades);
-              info = MML.Emu.GbConsole.describe(nes);
+              if (m.gb && m.gb.sgb) { // スーパーゲームボーイ: SNES 側ごと動かす(BIOS は主スレッドから。ブート ROM は任意)
+                const o = m.gb.sgb;
+                nes = new MML.Emu.SgbConsole(new Uint8Array(m.rom), { bios: new Uint8Array(o.bios), bootRom: o.boot ? new Uint8Array(o.boot) : null, revision: o.revision || 0 });
+                info = MML.Emu.SgbConsole.describe(nes);
+              } else {
+                nes = new MML.Emu.GbConsole(new Uint8Array(m.rom), { model: (m.gb && m.gb.model) || 'dmg' });
+                if (m.gb && m.gb.shades) nes.ppu.shades = Array.from(m.gb.shades);
+                info = MML.Emu.GbConsole.describe(nes);
+              }
             } else {
               nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });
               info = MML.Emu.INES.describe(nes.rom);
@@ -16853,11 +19672,11 @@
             if (m.battery && nes.hasBattery) nes.setBattery(new Uint8Array(m.battery)); // 前回のセーブ(主スレッドが IndexedDB から)
             this.nes = nes;
             this.machine = machine;
-            this.State = machine === 'msx' ? MML.Emu.MsxState : machine === 'gb' ? MML.Emu.GbState : MML.Emu.NesState;
-            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? MML.Emu.GbRewind : MML.Emu.NesRewind;
+            this.State = machine === 'msx' ? MML.Emu.MsxState : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState;
+            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? (nes.isSgb ? null : MML.Emu.GbRewind) : MML.Emu.NesRewind; // SGB は巻き戻し無し(1 枚が大きい)
             this.rewind = Rewind ? new Rewind(nes) : null;
             this.dcX = 0; this.dcY = 0; this.dcX2 = 0; this.dcY2 = 0;
-            this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, tilt: !!nes.hasTilt, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH() });
+            this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, tilt: !!nes.hasTilt, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH(), clock: nes.clockHz || 0, sgb: nes.isSgb ? nes.revision : 0 });
             break;
           }
           case 'key': // MSX: PC のキー(KeyboardEvent.code)を押す/離す。対応の無いキーは本体が無視する

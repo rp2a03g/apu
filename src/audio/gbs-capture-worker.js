@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 17:16:06
+ * Built by tools/build-capture-workers.ps1 at 2026-11-13 20:23:48
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-13 17:16:06';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-13 20:23:48';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -1344,6 +1344,7 @@
           if (!this.noRender) this._renderTo(d - FIRST_PIXEL_DOT - this.scxFine + 4);
           if (d >= this.mode3End) {
             if (!this.noRender) this._renderTo(W);
+            if (this.con.sgb) this.con.sgb.lcdLine(this.line, this.frameIdx); // スーパーゲームボーイ: 描き終えた行を ICD2 へ
             if (this.winActive) this.winLine++;
             this.mode = 0; this.firstLine = false;
             this._stat();
@@ -1755,6 +1756,10 @@
       this.serialOut = [];  // 送り終えたバイト
       this.serialSent = []; // 送り始めたバイト(完了を待たずに次を送るソフトの出力も拾える。mooneye のテスト ROM の合否)
       this.rec = null;
+      // スーパーゲームボーイ: opts.sgb = ICD2(snes/icd2.js。パッドの線と LCD の行を横取りする)、opts.bootRom = ブート ROM 256 バイト(任意)
+      this.sgb = opts.sgb || null;
+      this.clockHz = CLOCK; // 音の標本化に使う時計。スーパーゲームボーイ(初代)は 4295454Hz で動くので ICD2 が入れ直す
+      this.bootImage = opts.bootRom || null; this.bootRom = null;
       this.reset();
     }
 
@@ -1767,6 +1772,7 @@
       cpu.a = 0x01; cpu.f = 0xB0; cpu.b = 0x00; cpu.c = 0x13; cpu.d = 0x00; cpu.e = 0xD8; cpu.h = 0x01; cpu.l = 0x4D;
       if (this.cgb) { cpu.a = 0x11; cpu.f = 0x80; cpu.b = 0x00; cpu.c = 0x00; cpu.d = 0xFF; cpu.e = 0x56; cpu.h = 0x00; cpu.l = 0x0D; }
       cpu.sp = 0xFFFE; cpu.pc = 0x0100;
+      this.bootRom = this.bootImage;
       // CGB のレジスタ
       this.stepT = 4;          // CPU の 1 M サイクルが元のクロックで何 T か(倍速なら 2)
       this.apuBit = APU_BIT;
@@ -1776,6 +1782,8 @@
       this.ie = 0; this.if = 0x01;
       this.div = this.cgb ? 0x2674 : 0xABC8; // CGB の値は mooneye の boot_div-cgbABCDE を総当たりして決めた(白黒ソフトを CGB で起動した時の値。カラー対応ソフトでも同じとみなす=推定) this.tima = 0; this.tma = 0; this.tac = 0; this.timaReload = false; this.timaReloading = false;
       this.p1 = 0x00; this.sb = 0; this.sc = 0; this.serialBits = 0;
+      // タイマ。ここで 0 を入れておかないと、TMA を一度も書かないソフトで TIMA が NaN→0 のままあふれ続ける(実ソフトの総当たりで見つけた)
+      this.tima = 0; this.tma = 0; this.tac = 0; this.timaReload = false; this.timaReloading = false;
       this.dma = 0xFF; this.dmaActive = false; this.dmaPos = 0; this.dmaSrc = 0; this.dmaStart = 0; this.dmaNext = 0; this.dmaByte = 0xFF;
       // ブート ROM が「ポーン」を鳴らした後のレジスタ。CH1 は鳴り終わりかけで有効のまま(NR52=$F1)。
       // 残響の音量は分からないので 0 にしておく(起動直後に余韻は鳴らさない)
@@ -1785,6 +1793,10 @@
       apu.ch1.envelope.volume = 0; apu.ch1.envelope.running = false;
       apu.regRaw[0x03] = 0xFF; apu.ch1.triggerSeq = 0;
       this.cpuCycles = 0; this.frameT = 0;
+      if (this.bootRom) { // ブート ROM を $0000 から実行する(LCD は消えた状態から。$FF50 に書くとカートリッジに切り替わる)
+        cpu.a = 0; cpu.f = 0; cpu.b = 0; cpu.c = 0; cpu.d = 0; cpu.e = 0; cpu.h = 0; cpu.l = 0; cpu.sp = 0; cpu.pc = 0;
+        this.ppu.writeReg(0xFF40, 0x00); this.if = 0; this.div = 0;
+      }
     }
 
     setSampleRate(sr) { this.sampleRate = sr; this.cycleAccum = 0; this.ringHead = 0; this.ringLen = 0; if (sr) this.apu.setSampleRate(sr); }
@@ -1800,6 +1812,7 @@
     }
     // P1 の下位 4bit(押すと 0)。bit4=0 で十字(右左上下)、bit5=0 でボタン(A B SELECT START)
     _p1Low() {
+      if (this.sgb) return this.sgb.p1Low(this.p1);
       const p = this.pad[0];
       let low = 0x0F;
       if (!(this.p1 & 0x10)) low &= ~(((p >> 7) & 1) | (((p >> 6) & 1) << 1) | (((p >> 4) & 1) << 2) | (((p >> 5) & 1) << 3));
@@ -1911,8 +1924,8 @@
       const sr = this.sampleRate;
       if (sr) {
         this.cycleAccum += sr * st;
-        if (this.cycleAccum >= CLOCK) {
-          this.cycleAccum -= CLOCK;
+        if (this.cycleAccum >= this.clockHz) {
+          this.cycleAccum -= this.clockHz;
           if (this.ringLen < AUDIO_RING) {
             const s = apu.mixSample();
             const i = (this.ringHead + this.ringLen) & (AUDIO_RING - 1);
@@ -1967,8 +1980,10 @@
         // OAM DMA の間: OAM は $FF。DMA の読み元と同じバス(外部バス=ROM/カートリッジ RAM/WRAM、または VRAM)を読むと、
         // DMA が今運んでいるバイトが見える(DMG)。I/O と HRAM は普通に読める
         if (addr >= 0xFE00) return 0xFF;
-        const srcVram = this.dmaSrc >= 0x8000 && this.dmaSrc < 0xA000, adrVram = addr >= 0x8000 && addr < 0xA000;
-        if (srcVram === adrVram) return this.dmaByte;
+        // バスは DMG が 2 本(外部=ROM/カートリッジ RAM/WRAM、VRAM)、CGB は WRAM が別で 3 本。
+        // CGB で WRAM から運んでいる間も ROM のコードは普通に走る(倍速のソフトが HRAM の待ちを早く抜けて ROM へ戻る例があった)
+        const busOf = (x) => x >= 0x8000 && x < 0xA000 ? 1 : (this.cgb && x >= 0xC000 ? 2 : 0);
+        if (busOf(this.dmaSrc) === busOf(addr)) return this.dmaByte;
       }
       // モード 3 の VRAM、モード 2/3 の OAM は PPU が使っていて読めない
       if (addr >= 0x8000 && addr < 0xA000) { if (this.ppu.vramBlocked()) return 0xFF; }
@@ -1976,7 +1991,7 @@
       return this._busRead(addr);
     }
     _busRead(addr) {
-      if (addr < 0x8000) return this.cart.read(addr);
+      if (addr < 0x8000) return this.bootRom && addr < 0x100 ? this.bootRom[addr] : this.cart.read(addr);
       if (addr < 0xA000) return this.ppu.vram[this.ppu.vbk * 0x2000 + addr - 0x8000];
       if (addr < 0xC000) return this.cart.readRam(addr);
       if (addr < 0xFE00) return this.wram[this._w(addr)]; // $E000-$FDFF は WRAM の写し
@@ -2040,7 +2055,8 @@
         return;
       }
       switch (addr) {
-        case 0xFF00: { const before = this._p1Low(); this.p1 = v & 0x30; if (before & ~this._p1Low() & 0x0F) this.requestIrq(4); break; }
+        case 0xFF50: if (v & 1) this.bootRom = null; break;
+        case 0xFF00: { const before = this._p1Low(); this.p1 = v & 0x30; if (this.sgb) this.sgb.joypWrite((v >> 4) & 1, (v >> 5) & 1); if (before & ~this._p1Low() & 0x0F) this.requestIrq(4); break; }
         case 0xFF01: this.sb = v; break;
         case 0xFF02:
           this.sc = v & (this.cgb ? 0x83 : 0x81);

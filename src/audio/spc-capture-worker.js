@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-12 02:00:42
+ * Built by tools/build-capture-workers.ps1 at 2026-11-13 20:23:48
  *
  * regsOnly capture worker bundle (spcCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.spcCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.spcCaptureBuiltAt = '2026-11-12 02:00:42';
+  MML.WorkerBundles.spcCaptureBuiltAt = '2026-11-13 20:23:48';
   MML.WorkerBundles.spcCapture = function () {
 /*
  * SPC (SNES-SPC700 Sound File) v0.30 ヘッダ / ID666 タグ解析
@@ -673,7 +673,7 @@
                      const r=ya+m;
                      const h=(ya&0xFFF)+(m&0xFFF);
                      this.PSW=(this.PSW&~0xCB)|(r&0x8000?0x80:0)
-                       |((ya^r)&(m^r)&0x8000?0x40:0)|(h>0xFFF?0x08:0)|(r===0?0x02:0)|(r>0xFFFF?0x01:0);
+                       |((ya^r)&(m^r)&0x8000?0x40:0)|(h>0xFFF?0x08:0)|((r&0xFFFF)===0?0x02:0)|(r>0xFFFF?0x01:0);
                      this.A=r&0xFF; this.Y=(r>>8)&0xFF; return 5; }
 
         // ── SUBW YA, dp ──────────────────────────────────────────

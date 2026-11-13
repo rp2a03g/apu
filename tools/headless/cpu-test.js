@@ -5,7 +5,8 @@
  *   node tools/headless/cpu-test.js 6502 --all        全256命令
  *   node tools/headless/cpu-test.js z80 --group cb    プレフィックス群を指定
  *   node tools/headless/cpu-test.js sm83 --opcodes 00,cb 07
- *   node tools/headless/cpu-test.js all --per 100     4種まとめて
+ *   node tools/headless/cpu-test.js all --per 100     4種まとめて(65816 は含めない。重いので名指しで)
+ *   node tools/headless/cpu-test.js 65816 --all        65816 の全命令(初回は約 3.2GB 落ちる)。--group n でネイティブだけ
  *
  * 検証ロジックは tools/cpu-test-core.js(ブラウザ版 tools/*-test.html と共通)。
  * ここがやるのはベクタの取得・キャッシュ・進捗表示・終了コードだけ。
@@ -27,6 +28,8 @@ const DEFAULT_OPCODES = {
   '6502': ['69', '65', '75', '6d', '7d', '79', '61', '71', 'a9', 'bd', '4c', '6c', '20', '60', 'e8', 'c9', 'f0', '0a', '66', '28'],
   z80: ['00', '01', '09', '12', '27', '34', '3a', '76', '80', '90', 'a8', 'b0', 'c3', 'cd', 'c9', 'db', 'ed 42', 'ed b0', 'cb 06', 'dd 34'],
   sm83: ['00', '01', '09', '12', '27', '34', '3a', '76', '80', '90', 'a8', 'b0', 'c3', 'cd', 'c9', 'e8', 'f8', 'cb 06', 'cb 26', 'cb 46'],
+  // 65816 は 1 本 6MB ある。既定は代表だけ(ネイティブ)。全部は --all(512 本、約 3.2GB)、--group n / e で片方だけ
+  '65816': ['a9.n', 'a5.n', 'b5.n', 'ad.n', 'bd.n', 'b1.n', 'a1.n', 'a7.n', 'b7.n', 'a3.n', 'b3.n', '69.n', 'e9.n', '06.n', '1e.n', '20.n', '22.n', '60.n', '6b.n', '54.n', 'fb.n', 'c2.n', 'a9.e', '20.e'],
   spc700: ['00', '04', '10', '1c', '28', '30', '3f', '48', '5d', '65', '78', '7a', '8f', '9c', 'af', 'ba', 'c4', 'cf', 'da', 'e4'],
 };
 
@@ -106,6 +109,7 @@ async function testCpu(cpuName, opt) {
       console.log(`      ${f.name}`);
       console.log(`        exp ${JSON.stringify(f.exp)}`);
       console.log(`        got ${JSON.stringify(f.got)}`);
+      if (f.ini) console.log(`        ini ${JSON.stringify(f.ini)}`);
     }
   }
   return failCount;

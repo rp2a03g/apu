@@ -525,7 +525,7 @@
                      const r=ya+m;
                      const h=(ya&0xFFF)+(m&0xFFF);
                      this.PSW=(this.PSW&~0xCB)|(r&0x8000?0x80:0)
-                       |((ya^r)&(m^r)&0x8000?0x40:0)|(h>0xFFF?0x08:0)|(r===0?0x02:0)|(r>0xFFFF?0x01:0);
+                       |((ya^r)&(m^r)&0x8000?0x40:0)|(h>0xFFF?0x08:0)|((r&0xFFFF)===0?0x02:0)|(r>0xFFFF?0x01:0);
                      this.A=r&0xFF; this.Y=(r>>8)&0xFF; return 5; }
 
         // ── SUBW YA, dp ──────────────────────────────────────────

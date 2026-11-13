@@ -243,6 +243,13 @@ $bundles = @(
             'src\emulator\gb\barcodeBoy.js',
             'src\emulator\gb\gbConsole.js',
             'src\emulator\gb\gbState.js',
+            'src\emulator\cpu65816.js',
+            'src\emulator\spc700.js',
+            'src\emulator\spcDsp.js',
+            'src\emulator\snes\ppu.js',
+            'src\emulator\snes\snesConsole.js',
+            'src\emulator\snes\icd2.js',
+            'src\emulator\snes\sgbConsole.js',
             'src\audio\nes-worklet-impl.js'
         )
     },
