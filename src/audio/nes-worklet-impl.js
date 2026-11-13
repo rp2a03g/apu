@@ -1,7 +1,8 @@
 /*
  * NES / MSX 本体を AudioWorklet の中で回す (nes-worklet バンドルの本体。DESIGN-CAPTURE.md §6/§7 段階 6b、DESIGN-MSX-CAPTURE.md §6 段階 7a)
  *
- * 本体クラスは load メッセージの machine('nes' | 'msx')で選ぶ(NesConsole / MsxConsole。外形は同じ)。State/Rewind も機種で選ぶ。
+ * 本体クラスは load メッセージの machine('nes' | 'msx' | 'gb')で選ぶ(NesConsole / MsxConsole / GbConsole。外形は同じ)。State/Rewind も機種で選ぶ。
+ * GB(2026-11-13、DESIGN-GB-CAPTURE.md 段階 8c)は音がステレオ(本体の stereo が真なら左右別に出す)。
  * 以下「NES」「nes」とあるのは本体一般のこと(変数名は NES 時代のまま)。MSX だけの物: load の msx オプション(機種/BIOS/マッパー)、
  * key/keyReleaseAll(PC のキー → MSX キーボード)、rwframe の palette(逆再生の 8bit 画面の色)、loaded の chips。
  *
@@ -43,7 +44,7 @@
       try {
         switch (m.type) {
           case 'load': {
-            const machine = m.machine === 'msx' ? 'msx' : 'nes';
+            const machine = m.machine === 'msx' ? 'msx' : m.machine === 'gb' ? 'gb' : 'nes';
             let nes, info;
             if (machine === 'msx') {
               // MSX: ROM(null なら BIOS だけで起動)+ 機種/BIOS(main 32K・sub/logo 16K、ArrayBuffer で届く)/マッパー種別
@@ -54,6 +55,10 @@
               const disks = (o.disks || []).map((b) => new Uint8Array(b)); // .dsk 画像(7d)
               nes = new MML.Emu.MsxConsole(m.rom ? new Uint8Array(m.rom) : null, { machine: o.machine, bios: bios.main ? bios : null, mapperType: o.mapperType || undefined, cartB, disks, fdc: o.fdc || undefined });
               info = MML.Emu.MsxConsole.describe(nes);
+            } else if (machine === 'gb') {
+              nes = new MML.Emu.GbConsole(new Uint8Array(m.rom), { model: (m.gb && m.gb.model) || 'dmg' });
+              if (m.gb && m.gb.shades) nes.ppu.shades = Array.from(m.gb.shades);
+              info = MML.Emu.GbConsole.describe(nes);
             } else {
               nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });
               info = MML.Emu.INES.describe(nes.rom);
@@ -63,10 +68,10 @@
             if (m.battery && nes.hasBattery) nes.setBattery(new Uint8Array(m.battery)); // 前回のセーブ(主スレッドが IndexedDB から)
             this.nes = nes;
             this.machine = machine;
-            this.State = machine === 'msx' ? MML.Emu.MsxState : MML.Emu.NesState;
-            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : MML.Emu.NesRewind;
+            this.State = machine === 'msx' ? MML.Emu.MsxState : machine === 'gb' ? MML.Emu.GbState : MML.Emu.NesState;
+            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? MML.Emu.GbRewind : MML.Emu.NesRewind;
             this.rewind = Rewind ? new Rewind(nes) : null;
-            this.dcX = 0; this.dcY = 0;
+            this.dcX = 0; this.dcY = 0; this.dcX2 = 0; this.dcY2 = 0;
             this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH() });
             break;
           }
@@ -199,7 +204,7 @@
         const idx = rw.pending.slice(); rw.pending = null;
         const msg = { type: 'rwframe', seq: rw.pendingSeq, idx: idx.buffer, oldest: rewind.oldest, w: rewind.idxWidth || this.frameW(), h: (this.nes && this.nes.frameIdxHeight) || this.frameH() };
         const tr = [idx.buffer];
-        if (this.machine === 'msx' && rewind.palette) { const pal = (rewind.paletteOf ? rewind.paletteOf(rw.pendingSeq) : rewind.palette).slice(); msg.palette = pal.buffer; tr.push(pal.buffer); } // 8bit 画面の色(そのフレームの色表: パレット 16 色か GRAPHIC7 の 256 色)
+        if (this.machine !== 'nes' && rewind.palette) { const pal = (rewind.paletteOf ? rewind.paletteOf(rw.pendingSeq) : rewind.palette).slice(); msg.palette = pal.buffer; tr.push(pal.buffer); } // 8bit 画面の色(そのフレームの色表: パレット 16 色か GRAPHIC7 の 256 色)
         this.port.postMessage(msg, tr);
       }
     }
@@ -224,7 +229,9 @@
         try { this.reverseTick(); } catch (e) { this.port.postMessage({ type: 'error', message: String((e && e.stack) || e) }); this.rw = null; }
         return true;
       }
-      if (!this.nes || this.paused) { out.fill(0); return true; }
+      if (!this.nes || this.paused) { out.fill(0); for (let c = 1; c < outputs[0].length; c++) outputs[0][c].fill(0); return true; }
+      // 本体がステレオ(GB)で出力が 2ch あれば左右別に
+      const stereoOut = this.nes.stereo && outputs[0].length > 1 && typeof this.nes.runSamplesStereo === 'function' ? outputs[0][1] : null;
       try {
         if (!this.ffTmp || this.ffTmp.length !== out.length) this.ffTmp = new Float32Array(out.length);
         if (this.speed > 1) {
@@ -232,7 +239,7 @@
         }
         this.afOn = this.diskFast && this.speed === 1 && !!(this.nes.diskBusy && this.nes.diskBusy());
         if (this.afOn) this.autoFast(out.length);
-        this.nes.runSamples(out);
+        if (stereoOut) this.nes.runSamplesStereo(out, stereoOut); else this.nes.runSamples(out);
       } catch (e) {
         this.port.postMessage({ type: 'error', message: String((e && e.stack) || e) });
         this.nes = null; out.fill(0); return true;
@@ -245,6 +252,13 @@
         out[i] = y;
       }
       this.dcX = x1; this.dcY = y1;
+      if (stereoOut) {
+        let x2 = this.dcX2, y2 = this.dcY2;
+        for (let i = 0; i < stereoOut.length; i++) { const x = stereoOut[i]; const y = x - x2 + 0.999 * y2; x2 = x; y2 = y; stereoOut[i] = y; }
+        this.dcX2 = x2; this.dcY2 = y2;
+        for (let c = 2; c < outputs[0].length; c++) outputs[0][c].set(out);
+        return true;
+      }
       for (let c = 1; c < outputs[0].length; c++) outputs[0][c].set(out);
       return true;
     }

@@ -232,6 +232,12 @@ $bundles = @(
             'src\emulator\msx\msxConsole.js',
             'src\emulator\msx\msxState.js',
             'src\emulator\msx\msxRewind.js',
+            'src\emulator\cpuSm83.js',
+            'src\emulator\apuGb.js',
+            'src\emulator\gb\cart.js',
+            'src\emulator\gb\ppu.js',
+            'src\emulator\gb\gbConsole.js',
+            'src\emulator\gb\gbState.js',
             'src\audio\nes-worklet-impl.js'
         )
     },

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-12 02:00:42
+ * Built by tools/build-capture-workers.ps1 at 2026-11-13 14:55:27
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-12 02:00:42';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-13 14:55:27';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -6452,8 +6452,11 @@
   const FRAME_BYTES = 256 * 240;
 
   class NesRewind {
-    constructor(nes) {
+    // opt: { State, frameBytes }(GB の GbRewind が差し替える。既定は NES)
+    constructor(nes, opt) {
       this.nes = nes;
+      this.State = (opt && opt.State) || Emu.NesState;
+      this.frameBytes = (opt && opt.frameBytes) || FRAME_BYTES;
       this.snaps = [];          // [{ frame, state }] frame = そのフレームが終わった時点の frameCount
       this.pads = [];           // pads[frameCount] = pad0 | pad1 << 8(そのフレーム終わりの値。フレーム番号は frameCount)
       this.base = 0;            // pads の先頭が指す frameCount(古い分は捨てる)
@@ -6465,15 +6468,16 @@
     clear() { this.snaps.length = 0; this.pads.length = 0; this.base = this.nes.frameCount; this.ringFrame.fill(-1); }
     // 今の画面(ppu.frameIdx)を輪に控える
     _capture(f) {
-      if (!this.ring) this.ring = new Uint8Array(RING * FRAME_BYTES);
+      const FB = this.frameBytes;
+      if (!this.ring) this.ring = new Uint8Array(RING * FB);
       const slot = f % RING;
-      this.ring.set(this.nes.ppu.frameIdx, slot * FRAME_BYTES);
+      this.ring.set(this.nes.ppu.frameIdx, slot * FB);
       this.ringFrame[slot] = f;
     }
     // 輪にあるフレーム f の画面(無ければ null)
     frameAt(f) {
       const slot = f % RING;
-      return this.ring && this.ringFrame[slot] === f ? this.ring.subarray(slot * FRAME_BYTES, (slot + 1) * FRAME_BYTES) : null;
+      return this.ring && this.ringFrame[slot] === f ? this.ring.subarray(slot * this.frameBytes, (slot + 1) * this.frameBytes) : null;
     }
     // 逆再生を始める(本体は止めたまま呼び手が reverseStep/regenStep を回す)。戻れる履歴が無ければ false
     beginReverse() {
@@ -6495,7 +6499,7 @@
         let si = -1;
         for (let i = this.snaps.length - 1; i >= 0; i--) if (this.snaps[i].frame < target) { si = i; break; }
         if (si < 0) return false;
-        Emu.NesState.load(this.nes, this.snaps[si].state);
+        this.State.load(this.nes, this.snaps[si].state);
         rv.regen = { next: this.snaps[si].frame + 1, upto: target };
         this.replaying = true;
       }
@@ -6537,7 +6541,7 @@
       this.pads[f - this.base] = (nes.pad[0] & 0xFF) | ((nes.pad[1] & 0xFF) << 8);
       this._capture(f);
       if (f % INTERVAL === 0) {
-        this.snaps.push({ frame: f, state: Emu.NesState.save(nes) });
+        this.snaps.push({ frame: f, state: this.State.save(nes) });
         if (this.snaps.length > KEEP) {
           const drop = this.snaps.shift();
           // 捨てたスナップショットより前のパッド記録も要らない
@@ -6558,7 +6562,7 @@
       const snap = this.snaps[si];
       // 今押している物は状態を読む「前」に控える(読んだ後に取ると、巻き戻した先で押していた物が残って押しっぱなしになった。2026-11-11)
       const held = [nes.padHeld[0], nes.padHeld[1]], turbo = [nes.padTurbo[0], nes.padTurbo[1]];
-      Emu.NesState.load(nes, snap.state);
+      this.State.load(nes, snap.state);
       // 控えていたパッドの値で進める(setController を通さず pad を直接。連射の位相も記録に含まれている)
       this.replaying = true;
       try {
@@ -13945,9 +13949,1970 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
+ * SM83 (LR35902 / Game Boy CPU) コア
+ * MML.Emu.CPUSm83
+ *
+ * Z80と命令セットは似ているが別物であり、cpuZ80.js は流用できない
+ * (参考: Pan Docs https://gbdev.io/pandocs/ 、
+ *  NESdev BBS "Game Boy CPU isn't a Z80. What is it?" https://forums.nesdev.org/viewtopic.php?t=18335)。
+ * 主な相違点:
+ *   - IX/IY・裏レジスタ(BC'/DE'/HL'/AF')・ブロック命令(LDIR等)・IN/OUT・IM0-2・NMI が無い
+ *   - フラグはZ/N/H/Cの4bitのみ(Z80のS・P/V・未定義X/Yビットは無い。下位4bitは常に0)
+ *   - GB固有命令: LD (HL+/-),A / LD A,(HL+/-) / LDH (n),A / LDH A,(n) / LDH (C),A / LDH A,(C) /
+ *     ADD SP,r8 / LD HL,SP+r8 / STOP
+ *   - RLCA/RRCA/RLA/RRA はZ80と異なり常にZフラグをクリアする(CB接頭辞のRLC A等はZ80同様
+ *     結果に応じてZが立つ。ここが取り違えやすい既知の相違点)
+ *   - CB接頭辞のビット演算はZ80とほぼ同一だが、y=6のスロットがZ80の非公式SLLではなく
+ *     正式命令SWAP(上下ニブル交換)になっている
+ *   - DAAの補正アルゴリズムはZ80と異なる専用式(下記daa()参照)
+ *   - RETIはRETと違い、戻った直後ではなく即座に割込を許可する(EIのような1命令遅延が無い)
+ *
+ * bus.read(addr)/bus.write(addr,value) のみを介してアクセスする(I/Oポートは無く、
+ * 全てメモリマップド。IE($FFFF)/IF($FF0F)もこのバス経由の通常アドレスとして扱う)。
+ *
+ * ★2026-11-13 M サイクル単位に作り直し(DESIGN-GB-CAPTURE.md §2.1)。バスに次が在れば使う(本体コア gb/gbConsole.js):
+ *   - bus.tick()        : 1 M サイクル(4T)ぶん本体を進める。読み書きの前と内部サイクルで呼ぶ
+ *   - bus.irqPending()  : IE & IF & $1F。bus.irqAck(bit) で IF を下ろす。割り込みの受け付け/HALT の起床/HALT バグに使う
+ *   - bus.stop(cpu)     : STOP 命令
+ *   どれも無いバス(CPU テストなど)では「割り込み無し、step() が T を返すだけ」で動く。
+ * call(addr)/beginCall(addr)/stepCall() は cpu6502.js/cpuZ80.js と同じ設計
+ * (呼び出し先アドレスをCALLし、番兵アドレスへのRETで終了を検知する)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const F_C = 0x10;
+  const F_H = 0x20;
+  const F_N = 0x40;
+  const F_Z = 0x80;
+
+  // CALL終了検知用の番兵リターンアドレス(cpuZ80.js/cpu6502.jsと同じ手法)
+  const CALL_SENTINEL = 0xFFFF;
+
+  class CPUSm83 {
+    /**
+     * @param {{read:(addr:number)=>number, write:(addr:number,value:number)=>void}} bus
+     */
+    constructor(bus) {
+      this.bus = bus;
+      this.hasTick = typeof bus.tick === 'function';        // 本体コア(gb/gbConsole.js)は M サイクルごとに進む
+      this.hasIrq = typeof bus.irqPending === 'function';   // IE & IF & $1F を返す。無ければ割り込み無し(GBS の旧経路)
+      this.cyc = 0; // 通算 T(4 刻み)
+      this.reset();
+    }
+
+    reset() {
+      this.a = 0; this.f = 0;
+      this.b = 0; this.c = 0;
+      this.d = 0; this.e = 0;
+      this.h = 0; this.l = 0;
+      this.sp = 0xFFFF;
+      this.pc = 0;
+      this.ime = false;
+      this.imePending = 0; // EI発行後の遅延カウンタ(2で発行、0でime=true確定)
+      this.halted = false;
+      this.stopped = false;
+      this.haltBug = false;
+      this.callActive = false;
+    }
+
+    // --- メモリアクセス ---
+    // バスの読み書き 1 回 = 1 M サイクル。アクセスの前に本体を 4T 進める(bus.tick が在る時。GBS の旧バスには無い)
+    read(addr) { this.cyc += 4; if (this.hasTick) this.bus.tick(); return this.bus.read(addr & 0xFFFF) & 0xFF; }
+    write(addr, value) { this.cyc += 4; if (this.hasTick) this.bus.tick(); this.bus.write(addr & 0xFFFF, value & 0xFF); }
+    // バスに触らない内部 M サイクル
+    idle() { this.cyc += 4; if (this.hasTick) this.bus.tick(); }
+
+    fetchByte() { const v = this.read(this.pc); this.pc = (this.pc + 1) & 0xFFFF; return v; }
+    fetchSigned() { const v = this.fetchByte(); return v < 0x80 ? v : v - 0x100; }
+    fetch16() {
+      const lo = this.fetchByte();
+      const hi = this.fetchByte();
+      return lo | (hi << 8);
+    }
+
+    push16(value) {
+      this.sp = (this.sp - 1) & 0xFFFF;
+      this.write(this.sp, (value >> 8) & 0xFF);
+      this.sp = (this.sp - 1) & 0xFFFF;
+      this.write(this.sp, value & 0xFF);
+    }
+    pop16() {
+      const lo = this.read(this.sp);
+      this.sp = (this.sp + 1) & 0xFFFF;
+      const hi = this.read(this.sp);
+      this.sp = (this.sp + 1) & 0xFFFF;
+      return lo | (hi << 8);
+    }
+
+    // --- フラグ(下位4bitは常に0) ---
+    getFlag(mask) { return (this.f & mask) !== 0; }
+    setFlag(mask, on) { this.f = on ? (this.f | mask) : (this.f & ~mask); }
+
+    // --- レジスタペア ---
+    getBC() { return (this.b << 8) | this.c; }
+    setBC(v) { this.b = (v >> 8) & 0xFF; this.c = v & 0xFF; }
+    getDE() { return (this.d << 8) | this.e; }
+    setDE(v) { this.d = (v >> 8) & 0xFF; this.e = v & 0xFF; }
+    getHL() { return (this.h << 8) | this.l; }
+    setHL(v) { this.h = (v >> 8) & 0xFF; this.l = v & 0xFF; }
+    getAF() { return (this.a << 8) | this.f; }
+    setAF(v) { this.a = (v >> 8) & 0xFF; this.f = v & 0xF0; } // Fの下位4bitは実機同様常に0
+
+    // 8bitレジスタコード(0=B,1=C,2=D,3=E,4=H,5=L,6=(HL),7=A)。Z80と同じ並び。
+    getR8(code) {
+      switch (code) {
+        case 0: return this.b;
+        case 1: return this.c;
+        case 2: return this.d;
+        case 3: return this.e;
+        case 4: return this.h;
+        case 5: return this.l;
+        case 6: return this.read(this.getHL());
+        case 7: return this.a;
+      }
+    }
+    setR8(code, value) {
+      value &= 0xFF;
+      switch (code) {
+        case 0: this.b = value; break;
+        case 1: this.c = value; break;
+        case 2: this.d = value; break;
+        case 3: this.e = value; break;
+        case 4: this.h = value; break;
+        case 5: this.l = value; break;
+        case 6: this.write(this.getHL(), value); break;
+        case 7: this.a = value; break;
+      }
+    }
+
+    // --- 8bit ALU ---
+    add8(value, carryIn) {
+      const a = this.a;
+      const sum = a + value + carryIn;
+      const result = sum & 0xFF;
+      this.setFlag(F_H, ((a & 0xF) + (value & 0xF) + carryIn) > 0xF);
+      this.setFlag(F_C, sum > 0xFF);
+      this.setFlag(F_N, false);
+      this.setFlag(F_Z, result === 0);
+      this.a = result;
+    }
+    sub8(value, carryIn, storeResult) {
+      const a = this.a;
+      const diff = a - value - carryIn;
+      const result = diff & 0xFF;
+      this.setFlag(F_H, ((a & 0xF) - (value & 0xF) - carryIn) < 0);
+      this.setFlag(F_C, diff < 0);
+      this.setFlag(F_N, true);
+      this.setFlag(F_Z, result === 0);
+      if (storeResult) this.a = result;
+    }
+    and8(value) {
+      this.a &= value;
+      this.setFlag(F_H, true); this.setFlag(F_C, false); this.setFlag(F_N, false);
+      this.setFlag(F_Z, this.a === 0);
+    }
+    or8(value) {
+      this.a |= value;
+      this.setFlag(F_H, false); this.setFlag(F_C, false); this.setFlag(F_N, false);
+      this.setFlag(F_Z, this.a === 0);
+    }
+    xor8(value) {
+      this.a ^= value;
+      this.setFlag(F_H, false); this.setFlag(F_C, false); this.setFlag(F_N, false);
+      this.setFlag(F_Z, this.a === 0);
+    }
+    inc8(v) {
+      const result = (v + 1) & 0xFF;
+      this.setFlag(F_H, (v & 0xF) === 0xF);
+      this.setFlag(F_N, false);
+      this.setFlag(F_Z, result === 0);
+      return result;
+    }
+    dec8(v) {
+      const result = (v - 1) & 0xFF;
+      this.setFlag(F_H, (v & 0xF) === 0x0);
+      this.setFlag(F_N, true);
+      this.setFlag(F_Z, result === 0);
+      return result;
+    }
+    aluOp(y, value) {
+      switch (y) {
+        case 0: this.add8(value, 0); break;
+        case 1: this.add8(value, this.getFlag(F_C) ? 1 : 0); break;
+        case 2: this.sub8(value, 0, true); break;
+        case 3: this.sub8(value, this.getFlag(F_C) ? 1 : 0, true); break;
+        case 4: this.and8(value); break;
+        case 5: this.xor8(value); break;
+        case 6: this.or8(value); break;
+        case 7: this.sub8(value, 0, false); break;
+      }
+    }
+
+    // --- 16bit ---
+    addHL(rpVal) {
+      const hl = this.getHL();
+      const sum = hl + rpVal;
+      const result = sum & 0xFFFF;
+      this.setFlag(F_H, ((hl & 0xFFF) + (rpVal & 0xFFF)) > 0xFFF);
+      this.setFlag(F_C, sum > 0xFFFF);
+      this.setFlag(F_N, false);
+      this.idle();
+      this.setHL(result); // Zは変化しない(実機仕様)
+    }
+    // ADD SP,r8 と LD HL,SP+r8 で共用。r8をフェッチし、フラグはSPの下位バイト+符号無し
+    // 表現の加算で計算する(実機の既知仕様。符号拡張した実際の加算結果とは別に判定する)。
+    addSpR8() {
+      const r8 = this.fetchSigned();
+      const raw = r8 & 0xFF;
+      const result = (this.sp + r8) & 0xFFFF;
+      this.setFlag(F_H, ((this.sp & 0xF) + (raw & 0xF)) > 0xF);
+      this.setFlag(F_C, ((this.sp & 0xFF) + raw) > 0xFF);
+      this.setFlag(F_Z, false);
+      this.setFlag(F_N, false);
+      return result;
+    }
+
+    // RLCA/RRCA/RLA/RRA: CB接頭辞版と異なり常にZをクリアする(GB固有、取り違え注意)
+    rlca() { const c = (this.a >> 7) & 1; this.a = ((this.a << 1) | c) & 0xFF; this.setFlag(F_C, c !== 0); this.setFlag(F_H, false); this.setFlag(F_N, false); this.setFlag(F_Z, false); }
+    rrca() { const c = this.a & 1; this.a = ((this.a >> 1) | (c << 7)) & 0xFF; this.setFlag(F_C, c !== 0); this.setFlag(F_H, false); this.setFlag(F_N, false); this.setFlag(F_Z, false); }
+    rla() { const c = (this.a >> 7) & 1; const oldC = this.getFlag(F_C) ? 1 : 0; this.a = ((this.a << 1) | oldC) & 0xFF; this.setFlag(F_C, c !== 0); this.setFlag(F_H, false); this.setFlag(F_N, false); this.setFlag(F_Z, false); }
+    rra() { const c = this.a & 1; const oldC = this.getFlag(F_C) ? 0x80 : 0; this.a = ((this.a >> 1) | oldC) & 0xFF; this.setFlag(F_C, c !== 0); this.setFlag(F_H, false); this.setFlag(F_N, false); this.setFlag(F_Z, false); }
+
+    // GB固有のDAA補正式(Z80とは別物。Pan Docs "DAA" 参照)
+    daa() {
+      let a = this.a;
+      let corr = 0;
+      let setC = false;
+      const n = this.getFlag(F_N), c = this.getFlag(F_C), h = this.getFlag(F_H);
+      if (!n) {
+        if (h || (a & 0x0F) > 0x09) corr |= 0x06;
+        if (c || a > 0x99) { corr |= 0x60; setC = true; }
+        a = (a + corr) & 0xFF;
+      } else {
+        if (h) corr |= 0x06;
+        if (c) corr |= 0x60;
+        a = (a - corr) & 0xFF;
+        setC = c;
+      }
+      this.a = a;
+      this.setFlag(F_C, setC);
+      this.setFlag(F_H, false);
+      this.setFlag(F_Z, a === 0);
+    }
+
+    // --- CB接頭辞の回転/シフト共通処理。y=6はZ80の非公式SLLではなく正式命令SWAP ---
+    rotOp(y, v) {
+      let carry, result;
+      switch (y) {
+        case 0: carry = (v >> 7) & 1; result = ((v << 1) | carry) & 0xFF; break; // RLC
+        case 1: carry = v & 1; result = ((v >> 1) | (carry << 7)) & 0xFF; break; // RRC
+        case 2: carry = (v >> 7) & 1; result = ((v << 1) | (this.getFlag(F_C) ? 1 : 0)) & 0xFF; break; // RL
+        case 3: carry = v & 1; result = ((v >> 1) | (this.getFlag(F_C) ? 0x80 : 0)) & 0xFF; break; // RR
+        case 4: carry = (v >> 7) & 1; result = (v << 1) & 0xFF; break; // SLA
+        case 5: carry = v & 1; result = ((v >> 1) | (v & 0x80)) & 0xFF; break; // SRA
+        case 6: carry = 0; result = (((v & 0x0F) << 4) | ((v & 0xF0) >> 4)) & 0xFF; break; // SWAP
+        case 7: carry = v & 1; result = (v >> 1) & 0xFF; break; // SRL
+      }
+      this.setFlag(F_C, carry !== 0);
+      this.setFlag(F_H, false); this.setFlag(F_N, false);
+      this.setFlag(F_Z, result === 0);
+      return result;
+    }
+
+    // --- メイン実行ループ ---
+    // 1 命令(または割り込みの受け付け、HALT 中の 1 M サイクル)を実行し、かかった T を返す。
+    // 時間は read/write/idle が進めた分を数える。execMain/execCB の return 値は命令表の公称値で、
+    // 両者が合うことは tools/headless/cpu-test.js が見る(M サイクルごとのバスの動きも突き合わせる)。
+    //
+    // 割り込みを見るのは「命令の取り込みサイクルを進めた後」。実機は前の命令の最後のサイクル(=次の命令の取り込みと
+    // 重なる)で割り込みを判定するので、取り込みサイクルの間に立った IF はその命令を実行させずに飛ぶ
+    // (mooneye の timer/rapid_toggle が見る。先に判定すると 1 命令遅れる)。
+    step() {
+      const c0 = this.cyc;
+      if (this.halted) {
+        this.idle();
+        if (!(this.hasIrq && this.bus.irqPending())) return this.cyc - c0;
+        this.halted = false;
+        if (this.ime) { this.dispatchIrq(); return this.cyc - c0; }
+        // IME=0 の起床: 保留を見つけたこのサイクルが次の命令の取り込みを兼ねる
+      } else {
+        // EI の次の 1 命令が終わるまで割り込みは入らない(この命令の後から有効)。RETI は即時
+        const ime = this.ime;
+        if (this.imePending > 0) { this.imePending = 0; this.ime = true; }
+        this.cyc += 4; if (this.hasTick) this.bus.tick(); // 取り込みサイクル
+        if (ime && this.hasIrq && this.bus.irqPending()) { this.dispatchIrq(); return this.cyc - c0; }
+      }
+      const opcode = this.bus.read(this.pc) & 0xFF;
+      if (this.haltBug) this.haltBug = false; else this.pc = (this.pc + 1) & 0xFFFF;
+      this.lastNominal = opcode === 0xCB ? this.execCB() : this.execMain(opcode);
+      return this.cyc - c0;
+    }
+
+    // 割り込みの受け付け。判定した取り込みサイクル(または HALT の起床サイクル)を含めて 5 M サイクル:
+    // 内部 2、PC の上位/下位を積む 2。PC の上位を積んだ後に IE/IF が変わって保留が消えると PC=0 へ飛ぶ(実機の癖)
+    dispatchIrq() {
+      this.ime = false; this.imePending = 0;
+      this.idle(); this.idle();
+      this.sp = (this.sp - 1) & 0xFFFF; this.write(this.sp, (this.pc >> 8) & 0xFF);
+      const pend = this.bus.irqPending();
+      this.sp = (this.sp - 1) & 0xFFFF; this.write(this.sp, this.pc & 0xFF);
+      if (!pend) this.pc = 0;
+      else {
+        let bit = 0; while (!((pend >> bit) & 1)) bit++;
+        this.bus.irqAck(bit);
+        this.pc = 0x40 + bit * 8;
+      }
+    }
+
+    execMain(opcode) {
+      switch (opcode) {
+        case 0x00: return 4; // NOP
+        case 0x01: this.setBC(this.fetch16()); return 12;
+        case 0x02: this.write(this.getBC(), this.a); return 8;
+        case 0x03: this.setBC((this.getBC() + 1) & 0xFFFF); this.idle(); return 8;
+        case 0x04: this.b = this.inc8(this.b); return 4;
+        case 0x05: this.b = this.dec8(this.b); return 4;
+        case 0x06: this.b = this.fetchByte(); return 8;
+        case 0x07: this.rlca(); return 4;
+        case 0x08: { const nn = this.fetch16(); this.write(nn, this.sp & 0xFF); this.write((nn + 1) & 0xFFFF, (this.sp >> 8) & 0xFF); return 20; }
+        case 0x09: this.addHL(this.getBC()); return 8;
+        case 0x0A: this.a = this.read(this.getBC()); return 8;
+        case 0x0B: this.setBC((this.getBC() - 1) & 0xFFFF); this.idle(); return 8;
+        case 0x0C: this.c = this.inc8(this.c); return 4;
+        case 0x0D: this.c = this.dec8(this.c); return 4;
+        case 0x0E: this.c = this.fetchByte(); return 8;
+        case 0x0F: this.rrca(); return 4;
+
+        // STOP 0: SingleStepTests実測では2バイト目を実際には読まず(bus読出し無しの内部
+        // サイクルのみ)、PCは1しか進まないが所要時間は3Mサイクル(12T)。
+        case 0x10:
+          if (this.bus.stop) { this.bus.stop(this); return 4; } // 本体コア: CGB の速度切り替え/キー待ち
+          this.stopped = true; this.idle(); this.idle(); return 12;
+        case 0x11: this.setDE(this.fetch16()); return 12;
+        case 0x12: this.write(this.getDE(), this.a); return 8;
+        case 0x13: this.setDE((this.getDE() + 1) & 0xFFFF); this.idle(); return 8;
+        case 0x14: this.d = this.inc8(this.d); return 4;
+        case 0x15: this.d = this.dec8(this.d); return 4;
+        case 0x16: this.d = this.fetchByte(); return 8;
+        case 0x17: this.rla(); return 4;
+        case 0x18: { const d = this.fetchSigned(); this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; }
+        case 0x19: this.addHL(this.getDE()); return 8;
+        case 0x1A: this.a = this.read(this.getDE()); return 8;
+        case 0x1B: this.setDE((this.getDE() - 1) & 0xFFFF); this.idle(); return 8;
+        case 0x1C: this.e = this.inc8(this.e); return 4;
+        case 0x1D: this.e = this.dec8(this.e); return 4;
+        case 0x1E: this.e = this.fetchByte(); return 8;
+        case 0x1F: this.rra(); return 4;
+
+        case 0x20: { const d = this.fetchSigned(); if (!this.getFlag(F_Z)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
+        case 0x21: this.setHL(this.fetch16()); return 12;
+        case 0x22: this.write(this.getHL(), this.a); this.setHL((this.getHL() + 1) & 0xFFFF); return 8;
+        case 0x23: this.setHL((this.getHL() + 1) & 0xFFFF); this.idle(); return 8;
+        case 0x24: this.h = this.inc8(this.h); return 4;
+        case 0x25: this.h = this.dec8(this.h); return 4;
+        case 0x26: this.h = this.fetchByte(); return 8;
+        case 0x27: this.daa(); return 4;
+        case 0x28: { const d = this.fetchSigned(); if (this.getFlag(F_Z)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
+        case 0x29: this.addHL(this.getHL()); return 8;
+        case 0x2A: this.a = this.read(this.getHL()); this.setHL((this.getHL() + 1) & 0xFFFF); return 8;
+        case 0x2B: this.setHL((this.getHL() - 1) & 0xFFFF); this.idle(); return 8;
+        case 0x2C: this.l = this.inc8(this.l); return 4;
+        case 0x2D: this.l = this.dec8(this.l); return 4;
+        case 0x2E: this.l = this.fetchByte(); return 8;
+        case 0x2F: this.a = (~this.a) & 0xFF; this.setFlag(F_N, true); this.setFlag(F_H, true); return 4; // CPL
+
+        case 0x30: { const d = this.fetchSigned(); if (!this.getFlag(F_C)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
+        case 0x31: this.sp = this.fetch16(); return 12;
+        case 0x32: this.write(this.getHL(), this.a); this.setHL((this.getHL() - 1) & 0xFFFF); return 8;
+        case 0x33: this.sp = (this.sp + 1) & 0xFFFF; this.idle(); return 8;
+        case 0x34: { const hl = this.getHL(); this.write(hl, this.inc8(this.read(hl))); return 12; }
+        case 0x35: { const hl = this.getHL(); this.write(hl, this.dec8(this.read(hl))); return 12; }
+        case 0x36: this.write(this.getHL(), this.fetchByte()); return 12;
+        case 0x37: this.setFlag(F_C, true); this.setFlag(F_N, false); this.setFlag(F_H, false); return 4; // SCF
+        case 0x38: { const d = this.fetchSigned(); if (this.getFlag(F_C)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
+        case 0x39: this.addHL(this.sp); return 8;
+        case 0x3A: this.a = this.read(this.getHL()); this.setHL((this.getHL() - 1) & 0xFFFF); return 8;
+        case 0x3B: this.sp = (this.sp - 1) & 0xFFFF; this.idle(); return 8;
+        case 0x3C: this.a = this.inc8(this.a); return 4;
+        case 0x3D: this.a = this.dec8(this.a); return 4;
+        case 0x3E: this.a = this.fetchByte(); return 8;
+        case 0x3F: { const c = this.getFlag(F_C); this.setFlag(F_C, !c); this.setFlag(F_N, false); this.setFlag(F_H, false); return 4; } // CCF
+      }
+
+      if (opcode >= 0x40 && opcode <= 0x7F) {
+        if (opcode === 0x76) { // HALT: 命令は 1 M サイクル。止まっている間は step() が 1 M サイクルずつ空回りする
+          // IME=0 で割り込みが既に保留なら止まらず、次の 1 バイトを 2 度読む(HALT バグ)
+          if (!this.ime && this.hasIrq && this.bus.irqPending()) this.haltBug = true;
+          else this.halted = true;
+          return 4;
+        }
+        const y = (opcode >> 3) & 7, z = opcode & 7;
+        this.setR8(y, this.getR8(z));
+        return (y === 6 || z === 6) ? 8 : 4;
+      }
+
+      if (opcode >= 0x80 && opcode <= 0xBF) {
+        const y = (opcode >> 3) & 7, z = opcode & 7;
+        this.aluOp(y, this.getR8(z));
+        return z === 6 ? 8 : 4;
+      }
+
+      switch (opcode) {
+        case 0xC0: this.idle(); if (!this.getFlag(F_Z)) { this.pc = this.pop16(); this.idle(); return 20; } return 8;
+        case 0xC1: this.setBC(this.pop16()); return 12;
+        case 0xC2: { const nn = this.fetch16(); if (!this.getFlag(F_Z)) { this.pc = nn; this.idle(); return 16; } return 12; }
+        case 0xC3: this.pc = this.fetch16(); this.idle(); return 16;
+        case 0xC4: { const nn = this.fetch16(); if (!this.getFlag(F_Z)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xC5: this.idle(); this.push16(this.getBC()); return 16;
+        case 0xC6: this.add8(this.fetchByte(), 0); return 8;
+        case 0xC7: this.idle(); this.push16(this.pc); this.pc = 0x00; return 16;
+        case 0xC8: this.idle(); if (this.getFlag(F_Z)) { this.pc = this.pop16(); this.idle(); return 20; } return 8;
+        case 0xC9: this.pc = this.pop16(); this.idle(); return 16;
+        case 0xCA: { const nn = this.fetch16(); if (this.getFlag(F_Z)) { this.pc = nn; this.idle(); return 16; } return 12; }
+        case 0xCC: { const nn = this.fetch16(); if (this.getFlag(F_Z)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xCD: { const nn = this.fetch16(); this.idle(); this.push16(this.pc); this.pc = nn; return 24; }
+        case 0xCE: this.add8(this.fetchByte(), this.getFlag(F_C) ? 1 : 0); return 8;
+        case 0xCF: this.idle(); this.push16(this.pc); this.pc = 0x08; return 16;
+
+        case 0xD0: this.idle(); if (!this.getFlag(F_C)) { this.pc = this.pop16(); this.idle(); return 20; } return 8;
+        case 0xD1: this.setDE(this.pop16()); return 12;
+        case 0xD2: { const nn = this.fetch16(); if (!this.getFlag(F_C)) { this.pc = nn; this.idle(); return 16; } return 12; }
+        case 0xD4: { const nn = this.fetch16(); if (!this.getFlag(F_C)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xD5: this.idle(); this.push16(this.getDE()); return 16;
+        case 0xD6: this.sub8(this.fetchByte(), 0, true); return 8;
+        case 0xD7: this.idle(); this.push16(this.pc); this.pc = 0x10; return 16;
+        case 0xD8: this.idle(); if (this.getFlag(F_C)) { this.pc = this.pop16(); this.idle(); return 20; } return 8;
+        case 0xD9: this.pc = this.pop16(); this.idle(); this.ime = true; this.imePending = 0; return 16; // RETI(EIと違い即時)
+        case 0xDA: { const nn = this.fetch16(); if (this.getFlag(F_C)) { this.pc = nn; this.idle(); return 16; } return 12; }
+        case 0xDC: { const nn = this.fetch16(); if (this.getFlag(F_C)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xDE: this.sub8(this.fetchByte(), this.getFlag(F_C) ? 1 : 0, true); return 8;
+        case 0xDF: this.idle(); this.push16(this.pc); this.pc = 0x18; return 16;
+
+        case 0xE0: { const n = this.fetchByte(); this.write(0xFF00 + n, this.a); return 12; } // LDH (n),A
+        case 0xE1: this.setHL(this.pop16()); return 12;
+        case 0xE2: this.write(0xFF00 + this.c, this.a); return 8; // LDH (C),A
+        case 0xE5: this.idle(); this.push16(this.getHL()); return 16;
+        case 0xE6: this.and8(this.fetchByte()); return 8;
+        case 0xE7: this.idle(); this.push16(this.pc); this.pc = 0x20; return 16;
+        case 0xE8: { const r = this.addSpR8(); this.idle(); this.idle(); this.sp = r; return 16; }
+        case 0xE9: this.pc = this.getHL(); return 4; // JP HL(間接読出しではなくPC=HL)
+        case 0xEA: { const nn = this.fetch16(); this.write(nn, this.a); return 16; }
+        case 0xEE: this.xor8(this.fetchByte()); return 8;
+        case 0xEF: this.idle(); this.push16(this.pc); this.pc = 0x28; return 16;
+
+        case 0xF0: { const n = this.fetchByte(); this.a = this.read(0xFF00 + n); return 12; } // LDH A,(n)
+        case 0xF1: this.setAF(this.pop16()); return 12;
+        case 0xF2: this.a = this.read(0xFF00 + this.c); return 8; // LDH A,(C)
+        case 0xF3: this.ime = false; this.imePending = 0; return 4; // DI
+        case 0xF5: this.idle(); this.push16(this.getAF()); return 16;
+        case 0xF6: this.or8(this.fetchByte()); return 8;
+        case 0xF7: this.idle(); this.push16(this.pc); this.pc = 0x30; return 16;
+        case 0xF8: this.setHL(this.addSpR8()); this.idle(); return 12;
+        case 0xF9: this.sp = this.getHL(); this.idle(); return 8;
+        case 0xFA: { const nn = this.fetch16(); this.a = this.read(nn); return 16; }
+        case 0xFB: if (!this.ime && this.imePending === 0) this.imePending = 1; return 4; // EI(次の 1 命令が終わってから有効)
+        case 0xFE: this.sub8(this.fetchByte(), 0, false); return 8;
+        case 0xFF: this.idle(); this.push16(this.pc); this.pc = 0x38; return 16;
+      }
+      // 未定義オペコード(D3/DB/DD/E3/E4/EB/EC/ED/F4/FC/FD): 実機はCPU停止(フリーズ)するが、
+      // GBSの曲データがこれらを使うことは無い想定のためNOP相当として扱い暴走を防ぐ
+      return 4;
+    }
+
+    execCB() {
+      const opcode = this.fetchByte();
+      const x = (opcode >> 6) & 3, y = (opcode >> 3) & 7, z = opcode & 7;
+      const hasMem = z === 6;
+      const v = this.getR8(z);
+      if (x === 1) { // BIT b,r
+        const bit = (v >> y) & 1;
+        this.setFlag(F_Z, bit === 0);
+        this.setFlag(F_N, false);
+        this.setFlag(F_H, true);
+        return hasMem ? 12 : 8;
+      }
+      let result;
+      if (x === 0) result = this.rotOp(y, v);
+      else if (x === 2) result = v & ~(1 << y); // RES
+      else result = v | (1 << y); // SET
+      this.setR8(z, result);
+      return hasMem ? 16 : 8;
+    }
+
+    /**
+     * addr のサブルーチンを呼び出し、RET で戻るまで実行する(GBSのINIT/PLAY呼び出しに使用)
+     * @param {number} addr
+     * @param {number} [maxSteps=500000]
+     * @returns {number} 実行した命令数
+     */
+    call(addr, maxSteps = 500000) {
+      this.push16(CALL_SENTINEL);
+      this.pc = addr & 0xFFFF;
+      let steps = 0;
+      while (this.pc !== CALL_SENTINEL && steps < maxSteps) {
+        if (this.halted) { this.halted = false; break; }
+        this.step();
+        steps++;
+      }
+      return steps;
+    }
+
+    beginCall(addr) {
+      this.push16(CALL_SENTINEL);
+      this.pc = addr & 0xFFFF;
+      this.callActive = true;
+      this.halted = false;
+    }
+
+    stepCall() {
+      if (this.halted || this.haltBug) { this.halted = false; this.haltBug = false; this.callActive = false; return 4; }
+      const c = this.step();
+      if (this.pc === CALL_SENTINEL) this.callActive = false;
+      return c;
+    }
+  }
+
+  Emu.CPUSm83 = CPUSm83;
+  Emu.SM83_FLAGS = { C: F_C, H: F_H, N: F_N, Z: F_Z };
+})(globalThis);
+
+/*
+ * Game Boy 内蔵音源エミュレータ
+ * MML.Emu.APUGb
+ *
+ * CH1(パルス+周波数スイープ)、CH2(パルス)、CH3(波形メモリ 32 サンプル×4bit)、CH4(ノイズ)。
+ * レジスタは $FF10-$FF26(NR10-NR52)+ $FF30-$FF3F(波形 RAM)。
+ *
+ * ★2026-11-13 作り直し(DESIGN-GB-CAPTURE.md §2.2)。旧実装との違い:
+ *   - ノイズの周期が 16 倍遅かった(16×分周値×2^shift としていた。正しくは 分周値×2^shift。VGMPlay 0.52 と突き合わせて確認)
+ *   - 各 ch のタイマが「周期+1」T で 1 歩進んでいた(高い音ほど低くずれる)
+ *   - フレームシーケンサ(長さ/スイープ/エンベロープ)は本体の DIV で進む(seqTick を本体が呼ぶ)。
+ *     単体で使う時(VGM、GBS の写し再生)は内部の 8192T 分周で進む
+ *   - 長さカウンタの余分な 1 減算、ゾンビモード、スイープの減算→加算での停止、ノイズ shift 14/15 の停止、
+ *     NR52 OFF でのレジスタ消去と書き込み無視、読み出しのマスク、パルスのデューティ位置をトリガで戻さない、
+ *     波形 ch のサンプルバッファと再生中の RAM アクセス(DMG/CGB)
+ *   - 出力は ch ごとの DAC(デジタル 0〜15 → アナログ、DAC OFF は 0)+ハイパスフィルタ。
+ *     NR50 や DAC の ON/OFF、波形 ch の直流分を使った PCM 再生が鳴る
+ *
+ * 時間は advance(t) で T(4194304Hz)単位に進める。clock() は advance(1)(旧呼び出し側との互換)。
+ *
+ * 参考: Pan Docs "Audio" "Audio details"、gbdev wiki "Gameboy sound hardware"。細部は blargg の dmg_sound で確かめる
+ *       (tools/headless/gb-testroms.js)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const DUTY_TABLE = [
+    [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%
+    [1, 0, 0, 0, 0, 0, 0, 1], // 25%
+    [1, 0, 0, 0, 0, 1, 1, 1], // 50%
+    [0, 1, 1, 1, 1, 1, 1, 0]  // 75%
+  ];
+
+  // ノイズの分周値(T)。LFSR の 1 歩 = NOISE_DIVISOR[r] << shift T(= 262144 / (r × 2^shift) Hz、r=0 は 0.5)
+  const NOISE_DIVISOR = [8, 16, 32, 48, 64, 80, 96, 112];
+
+  // 読み出しで 1 が返るビット($FF10 からの並び。$FF27-$FF2F は全部 1)
+  const READ_OR_MASK = [
+    0x80, 0x3F, 0x00, 0xFF, 0xBF,
+    0xFF, 0x3F, 0x00, 0xFF, 0xBF,
+    0x7F, 0xFF, 0x9F, 0xFF, 0xBF,
+    0xFF, 0xFF, 0x00, 0x00, 0xBF,
+    0x00, 0x00, 0x70
+  ];
+
+  // 音量エンベロープ(NRx2)。CH1/CH2/CH4 共用
+  class Envelope {
+    constructor() {
+      this.initialVolume = 0;
+      this.direction = 0; // 0=減衰, 1=増加
+      this.period = 0;
+      this.volume = 0;
+      this.timer = 0;
+      this.running = false; // 自動更新が続いているか(端に着くと止まる。ゾンビモードの式が見る)
+    }
+    // active: その ch が鳴っている最中か(鳴っている最中の書き込みは音量を変える=ゾンビモード)
+    write(value, active) {
+      const oldPeriod = this.period, oldDir = this.direction;
+      this.initialVolume = (value >> 4) & 0x0F;
+      this.direction = (value & 0x08) ? 1 : 0;
+      this.period = value & 0x07;
+      if (active) {
+        let v = this.volume;
+        if (oldPeriod === 0 && this.running) v += 1;
+        else if (oldDir === 0) v += 2;
+        if (oldDir !== this.direction) v = 16 - v;
+        this.volume = v & 0x0F;
+      }
+    }
+    dacOn() { return this.initialVolume !== 0 || this.direction !== 0; } // NRx2 の上位 5bit が非 0
+    trigger(nextIsEnvStep) {
+      this.volume = this.initialVolume;
+      this.timer = this.period === 0 ? 8 : this.period;
+      if (nextIsEnvStep) this.timer++; // 次のシーケンサ段がエンベロープなら 1 回ぶん遅れる
+      this.running = true;
+    }
+    clock() {
+      if (--this.timer > 0) return;
+      this.timer = this.period === 0 ? 8 : this.period;
+      if (this.period === 0 || !this.running) return;
+      if (this.direction === 1 && this.volume < 15) this.volume++;
+      else if (this.direction === 0 && this.volume > 0) this.volume--;
+      else this.running = false;
+    }
+  }
+
+  class PulseChannel {
+    constructor(hasSweep) {
+      this.hasSweep = !!hasSweep;
+      this.enabled = false;
+      this.dac = false;
+      this.duty = 0;
+      this.dutyStep = 0;
+      this.lengthCounter = 0;
+      this.lengthEnabled = false;
+      this.freq = 0; // 11bit
+      this.timer = 0;
+      this.envelope = new Envelope();
+      // スイープ(CH1 のみ)
+      this.sweepPeriod = 0;
+      this.sweepDirection = 0; // 0=加算, 1=減算
+      this.sweepShift = 0;
+      this.sweepTimer = 0;
+      this.sweepEnabled = false;
+      this.sweepNegUsed = false; // トリガ以降に減算で計算したか(その後に加算へ変えると ch が止まる)
+      this.shadowFreq = 0;
+      // トリガのたびに増える通し番号(gbs2mml の抽出が「このフレームでアタックがあったか」を見る)
+      this.triggerSeq = 0;
+    }
+
+    writeNRx0(value) {
+      const wasNeg = this.sweepDirection === 1;
+      this.sweepPeriod = (value >> 4) & 0x07;
+      this.sweepDirection = (value & 0x08) ? 1 : 0;
+      this.sweepShift = value & 0x07;
+      if (wasNeg && this.sweepDirection === 0 && this.sweepNegUsed) this.enabled = false;
+    }
+    writeDuty(value) { this.duty = (value >> 6) & 0x03; }
+    writeLength(value) { this.lengthCounter = 64 - (value & 0x3F); }
+    writeNRx2(value) {
+      this.envelope.write(value, this.enabled);
+      this.dac = this.envelope.dacOn();
+      if (!this.dac) this.enabled = false;
+    }
+    writeNRx3(value) { this.freq = (this.freq & 0x700) | value; }
+    // oddStep: 次のシーケンサ段が長さを数えない段か(長さの余分な 1 減算の条件)
+    writeNRx4(value, oddStep, envNext) {
+      this.freq = (this.freq & 0xFF) | ((value & 0x07) << 8);
+      const was = this.lengthEnabled;
+      this.lengthEnabled = (value & 0x40) !== 0;
+      if (!was && this.lengthEnabled && oddStep && this.lengthCounter > 0) {
+        if (--this.lengthCounter === 0 && !(value & 0x80)) this.enabled = false;
+      }
+      if (value & 0x80) this.trigger(oddStep, envNext);
+    }
+
+    trigger(oddStep, envNext) {
+      this.triggerSeq++;
+      if (this.dac) this.enabled = true;
+      if (this.lengthCounter === 0) { this.lengthCounter = 64; if (this.lengthEnabled && oddStep) this.lengthCounter--; }
+      this.timer = (2048 - this.freq) * 4; // デューティ位置は戻さない(電源 OFF でだけ戻る)
+      this.envelope.trigger(envNext);
+      if (this.hasSweep) {
+        this.shadowFreq = this.freq;
+        this.sweepTimer = this.sweepPeriod === 0 ? 8 : this.sweepPeriod;
+        this.sweepEnabled = this.sweepPeriod !== 0 || this.sweepShift !== 0;
+        this.sweepNegUsed = false;
+        if (this.sweepShift !== 0) this.sweepCalc(); // トリガ時にもあふれを確かめる
+      }
+    }
+
+    // シャドウ周波数からスイープ後の値を計算する。あふれたら ch を止める
+    sweepCalc() {
+      const delta = this.shadowFreq >> this.sweepShift;
+      let newFreq;
+      if (this.sweepDirection === 1) { newFreq = this.shadowFreq - delta; this.sweepNegUsed = true; }
+      else newFreq = this.shadowFreq + delta;
+      if (newFreq > 0x7FF) this.enabled = false;
+      return newFreq;
+    }
+
+    clockSweep() {
+      if (!this.hasSweep) return;
+      if (--this.sweepTimer > 0) return;
+      this.sweepTimer = this.sweepPeriod === 0 ? 8 : this.sweepPeriod;
+      if (!this.sweepEnabled || this.sweepPeriod === 0) return;
+      const newFreq = this.sweepCalc();
+      if (newFreq <= 0x7FF && this.sweepShift !== 0) {
+        this.shadowFreq = newFreq;
+        this.freq = newFreq;
+        this.sweepCalc(); // 反映した値でもう一度あふれを確かめる
+      }
+    }
+
+    clockLength() {
+      if (this.lengthEnabled && this.lengthCounter > 0 && --this.lengthCounter === 0) this.enabled = false;
+    }
+
+    advance(t) {
+      this.timer -= t;
+      while (this.timer <= 0) {
+        this.timer += (2048 - this.freq) * 4;
+        this.dutyStep = (this.dutyStep + 1) & 7;
+      }
+    }
+    clockTimer() { this.advance(1); }
+
+    // DAC へ入るデジタル値(0〜15)。ch が止まっていれば 0
+    output() {
+      if (!this.enabled) return 0;
+      return DUTY_TABLE[this.duty][this.dutyStep] ? this.envelope.volume : 0;
+    }
+  }
+
+  class WaveChannel {
+    constructor() {
+      this.enabled = false;
+      this.dacOn = false;
+      this.lengthCounter = 0;
+      this.lengthEnabled = false;
+      this.freq = 0;
+      this.timer = 0;
+      this.volumeShift = 0; // 0=ミュート, 1=100%, 2=50%, 3=25%
+      // 展開済みの 4bit サンプル(0-15)。電源投入時の波形 RAM は $00,$FF の繰り返し(DMG。書かずに鳴らす曲がある)
+      this.wave = new Uint8Array(32);
+      for (let i = 0; i < 32; i++) this.wave[i] = (i & 2) ? 15 : 0;
+      this.samplePos = 0;
+      this.sampleBuffer = 0; // 最後に取り込んだサンプル。トリガしても次の取り込みまで前の値が出る
+      this.sinceFetch = 0x7FFFFFFF; // 最後の取り込みからの T(DMG は取り込みと同時でないと RAM に触れない)
+      this.triggerSeq = 0;
+    }
+
+    writeNR30(value) {
+      this.dacOn = (value & 0x80) !== 0;
+      if (!this.dacOn) this.enabled = false;
+    }
+    writeLength(value) { this.lengthCounter = 256 - value; }
+    writeNR32(value) { this.volumeShift = (value >> 5) & 0x03; }
+    writeNR33(value) { this.freq = (this.freq & 0x700) | value; }
+    writeNR34(value, oddStep, dmg) {
+      this.freq = (this.freq & 0xFF) | ((value & 0x07) << 8);
+      const was = this.lengthEnabled;
+      this.lengthEnabled = (value & 0x40) !== 0;
+      if (!was && this.lengthEnabled && oddStep && this.lengthCounter > 0) {
+        if (--this.lengthCounter === 0 && !(value & 0x80)) this.enabled = false;
+      }
+      if (value & 0x80) this.trigger(oddStep, dmg);
+    }
+    // $FF30-$FF3F: 1 バイト = 2 サンプル(上位ニブルが先)
+    writeWaveRam(offset, value) {
+      this.wave[offset * 2] = (value >> 4) & 0x0F;
+      this.wave[offset * 2 + 1] = value & 0x0F;
+    }
+    readWaveRam(offset) {
+      return (this.wave[offset * 2] << 4) | this.wave[offset * 2 + 1];
+    }
+
+    trigger(oddStep, dmg) {
+      this.triggerSeq++;
+      // DMG: 鳴っている最中に、次の取り込みの直前でトリガすると波形 RAM の先頭が壊れる
+      if (dmg && this.enabled && this.timer === WaveChannel.CORRUPT_T) {
+        const off = (((this.samplePos + 1) & 31) >> 1);
+        if (off < 4) this.writeWaveRam(0, this.readWaveRam(off));
+        else { const b = off & ~3; for (let i = 0; i < 4; i++) this.writeWaveRam(i, this.readWaveRam(b + i)); }
+      }
+      if (this.dacOn) this.enabled = true;
+      if (this.lengthCounter === 0) { this.lengthCounter = 256; if (this.lengthEnabled && oddStep) this.lengthCounter--; }
+      this.timer = (2048 - this.freq) * 2 + WaveChannel.TRIGGER_DELAY_T;
+      this.samplePos = 0; // バッファは取り込み直さない(最初に出るのは前の値)
+      this.sinceFetch = 0x7FFFFFFF;
+    }
+
+    clockLength() {
+      if (this.lengthEnabled && this.lengthCounter > 0 && --this.lengthCounter === 0) this.enabled = false;
+    }
+
+    advance(t) {
+      if (this.sinceFetch < 0x40000000) this.sinceFetch += t;
+      if (!this.enabled) return; // 止まっている間は位置も進まない
+      this.timer -= t;
+      while (this.timer <= 0) {
+        const period = (2048 - this.freq) * 2;
+        this.timer += period;
+        this.samplePos = (this.samplePos + 1) & 31;
+        this.sampleBuffer = this.wave[this.samplePos];
+        this.sinceFetch = period - this.timer;
+      }
+    }
+    clockTimer() { this.advance(1); }
+
+    output() {
+      if (!this.enabled || this.volumeShift === 0) return 0;
+      return this.sampleBuffer >> (this.volumeShift - 1);
+    }
+  }
+  WaveChannel.TRIGGER_DELAY_T = 6; // トリガから最初の取り込みまでの余分な遅れ
+  WaveChannel.CORRUPT_T = 2;       // 「次の取り込みの直前」= 残り 2T
+  WaveChannel.ACCESS_T = 2;        // DMG: 取り込みからこの T 未満なら RAM に触れる
+
+  class NoiseChannel {
+    constructor() {
+      this.enabled = false;
+      this.dac = false;
+      this.lengthCounter = 0;
+      this.lengthEnabled = false;
+      this.envelope = new Envelope();
+      this.clockShift = 0;
+      this.widthMode = 0; // 0=15bit, 1=7bit
+      this.divisorCode = 0;
+      this.timer = 0;
+      this.lfsr = 0x7FFF;
+      this.triggerSeq = 0;
+    }
+
+    writeLength(value) { this.lengthCounter = 64 - (value & 0x3F); }
+    writeNR42(value) {
+      this.envelope.write(value, this.enabled);
+      this.dac = this.envelope.dacOn();
+      if (!this.dac) this.enabled = false;
+    }
+    writeNR43(value) {
+      this.clockShift = (value >> 4) & 0x0F;
+      this.widthMode = (value & 0x08) ? 1 : 0;
+      this.divisorCode = value & 0x07;
+    }
+    writeNR44(value, oddStep, envNext) {
+      const was = this.lengthEnabled;
+      this.lengthEnabled = (value & 0x40) !== 0;
+      if (!was && this.lengthEnabled && oddStep && this.lengthCounter > 0) {
+        if (--this.lengthCounter === 0 && !(value & 0x80)) this.enabled = false;
+      }
+      if (value & 0x80) this.trigger(oddStep, envNext);
+    }
+
+    periodT() { return NOISE_DIVISOR[this.divisorCode] << this.clockShift; }
+
+    trigger(oddStep, envNext) {
+      this.triggerSeq++;
+      if (this.dac) this.enabled = true;
+      if (this.lengthCounter === 0) { this.lengthCounter = 64; if (this.lengthEnabled && oddStep) this.lengthCounter--; }
+      this.timer = this.periodT();
+      this.lfsr = 0x7FFF;
+      this.envelope.trigger(envNext);
+    }
+
+    clockLength() {
+      if (this.lengthEnabled && this.lengthCounter > 0 && --this.lengthCounter === 0) this.enabled = false;
+    }
+
+    advance(t) {
+      this.timer -= t;
+      if (this.timer > 0) return;
+      const period = this.periodT();
+      if (this.clockShift >= 14) { this.timer = period; return; } // shift 14/15 は LFSR が進まない
+      while (this.timer <= 0) {
+        this.timer += period;
+        const bit = (this.lfsr ^ (this.lfsr >> 1)) & 1;
+        this.lfsr = (this.lfsr >> 1) | (bit << 14);
+        if (this.widthMode) this.lfsr = (this.lfsr & ~0x40) | (bit << 6);
+      }
+    }
+    clockTimer() { this.advance(1); }
+
+    output() {
+      if (!this.enabled) return 0;
+      return (this.lfsr & 1) === 0 ? this.envelope.volume : 0; // LFSR の bit0 が 0 で出力あり
+    }
+  }
+
+  class APUGb {
+    // model: 'dmg'(既定)/ 'cgb'。波形 RAM の再生中アクセス、OFF 中の長さ書き込み、フィルタの定数が変わる
+    constructor(model) {
+      this.model = model || 'dmg';
+      this.regRaw = new Uint8Array(0x17); // $FF10-$FF26 に最後に書いた値
+      this.mute = { ch1: false, ch2: false, ch3: false, ch4: false };
+      this.vol = { ch1: 1, ch2: 1, ch3: 1, ch4: 1 };
+      this.externalSeq = false; // true: フレームシーケンサは本体が DIV の立ち下がりで seqTick() を呼ぶ
+      this.divBit = null;       // () => DIV の該当ビットが今 1 か(電源 ON 直後の 1 回を飛ばす判定)
+      this._out = { left: 0, right: 0 };
+      this.setSampleRate(44100);
+      this.reset();
+    }
+
+    reset() {
+      this.ch1 = new PulseChannel(true);
+      this.ch2 = new PulseChannel(false);
+      this.ch3 = new WaveChannel();
+      this.ch4 = new NoiseChannel();
+      this.ch1.duty = 2; // ブート ROM 実行後の NR11=$BF(50%)。NR21 は $3F(12.5%)。デューティを書かない曲はこの値で鳴る
+      // 単体利用(GBS の旧経路、VGM)は起動直後から鳴らせる状態で始める: 電源 ON、NR50/NR51 はブート ROM 実行後の値。
+      // 本体コア(gbConsole.js)は reset の後で起動後のレジスタを書き直す
+      this.powerOn = true;
+      this.nr50 = 0x77;
+      this.nr51 = 0xF3;
+      this.regRaw.fill(0);
+      this.regRaw[0x14] = 0x77; this.regRaw[0x15] = 0xF3; this.regRaw[0x16] = 0x80;
+      this.seqStep = 0;     // 次に実行するシーケンサ段(0-7)。偶数=長さ、2/6=スイープ、7=エンベロープ
+      this.seqCounter = 0;  // 内部分周(externalSeq=false の時)
+      this.skipSeq = false;
+      this.capL = 0; this.capR = 0;
+    }
+
+    // ハイパスフィルタ(出力段のコンデンサ)の 1 サンプルぶんの係数。mixSample を呼ぶ頻度を伝える
+    setSampleRate(sr) {
+      this.sampleRate = sr;
+      this.hpf = Math.pow(this.model === 'cgb' ? 0.998943 : 0.999958, 4194304 / sr);
+    }
+
+    // フレームシーケンサを 1 段進める(512Hz)
+    seqTick() {
+      if (!this.powerOn) return;
+      if (this.skipSeq) { this.skipSeq = false; return; }
+      const s = this.seqStep;
+      this.seqStep = (s + 1) & 7;
+      if (!(s & 1)) { this.ch1.clockLength(); this.ch2.clockLength(); this.ch3.clockLength(); this.ch4.clockLength(); }
+      if (s === 2 || s === 6) this.ch1.clockSweep();
+      if (s === 7) { this.ch1.envelope.clock(); this.ch2.envelope.clock(); this.ch4.envelope.clock(); }
+    }
+    // 旧名(外から呼ぶ所は無いが残す)
+    clockLength() { this.ch1.clockLength(); this.ch2.clockLength(); this.ch3.clockLength(); this.ch4.clockLength(); }
+    clockSweep() { this.ch1.clockSweep(); }
+    clockEnvelope() { this.ch1.envelope.clock(); this.ch2.envelope.clock(); this.ch4.envelope.clock(); }
+
+    writeRegister(addr, value) {
+      value &= 0xFF;
+      if (addr >= 0xFF30 && addr <= 0xFF3F) {
+        const w = this.ch3;
+        if (w.enabled) { // 再生中: 今読んでいるバイトに当たる。DMG は取り込みと同時の時だけ
+          if (this.model === 'dmg' && w.sinceFetch >= WaveChannel.ACCESS_T) return;
+          w.writeWaveRam(w.samplePos >> 1, value);
+        } else w.writeWaveRam(addr - 0xFF30, value);
+        return;
+      }
+      if (addr < 0xFF10 || addr > 0xFF26) return;
+      const dmg = this.model === 'dmg';
+      if (!this.powerOn && addr !== 0xFF26) {
+        // 電源 OFF 中は書けない。DMG だけ長さカウンタ(NRx1 の長さ部分)は書ける
+        if (!dmg) return;
+        if (addr === 0xFF11) this.ch1.writeLength(value);
+        else if (addr === 0xFF16) this.ch2.writeLength(value);
+        else if (addr === 0xFF1B) this.ch3.writeLength(value);
+        else if (addr === 0xFF20) this.ch4.writeLength(value);
+        return;
+      }
+      this.regRaw[addr - 0xFF10] = value;
+      const odd = (this.seqStep & 1) === 1, envNext = this.seqStep === 7;
+      switch (addr) {
+        case 0xFF10: this.ch1.writeNRx0(value); break;
+        case 0xFF11: this.ch1.writeDuty(value); this.ch1.writeLength(value); break;
+        case 0xFF12: this.ch1.writeNRx2(value); break;
+        case 0xFF13: this.ch1.writeNRx3(value); break;
+        case 0xFF14: this.ch1.writeNRx4(value, odd, envNext); break;
+        case 0xFF16: this.ch2.writeDuty(value); this.ch2.writeLength(value); break;
+        case 0xFF17: this.ch2.writeNRx2(value); break;
+        case 0xFF18: this.ch2.writeNRx3(value); break;
+        case 0xFF19: this.ch2.writeNRx4(value, odd, envNext); break;
+        case 0xFF1A: this.ch3.writeNR30(value); break;
+        case 0xFF1B: this.ch3.writeLength(value); break;
+        case 0xFF1C: this.ch3.writeNR32(value); break;
+        case 0xFF1D: this.ch3.writeNR33(value); break;
+        case 0xFF1E: this.ch3.writeNR34(value, odd, dmg); break;
+        case 0xFF20: this.ch4.writeLength(value); break;
+        case 0xFF21: this.ch4.writeNR42(value); break;
+        case 0xFF22: this.ch4.writeNR43(value); break;
+        case 0xFF23: this.ch4.writeNR44(value, odd, envNext); break;
+        case 0xFF24: this.nr50 = value; break;
+        case 0xFF25: this.nr51 = value; break;
+        case 0xFF26: {
+          const on = (value & 0x80) !== 0;
+          if (this.powerOn && !on) this._powerOff();
+          else if (!this.powerOn && on) {
+            this.powerOn = true;
+            this.seqStep = 0; this.seqCounter = 0;
+            // 本体の DIV で進む時: 該当ビットが 1 の最中に電源を入れると、最初の立ち下がりは数えない
+            this.skipSeq = !!(this.externalSeq && this.divBit && this.divBit());
+            this.ch1.dutyStep = 0; this.ch2.dutyStep = 0;
+            this.ch3.sampleBuffer = 0;
+          }
+          this.regRaw[0x16] = value & 0x80;
+          break;
+        }
+      }
+    }
+
+    // NR52 OFF: $FF10-$FF25 を全部 0 にする(波形 RAM は残る。DMG は長さカウンタも残る)
+    _powerOff() {
+      const keep = this.model === 'dmg' ? [this.ch1.lengthCounter, this.ch2.lengthCounter, this.ch3.lengthCounter, this.ch4.lengthCounter] : null;
+      for (let a = 0xFF10; a < 0xFF26; a++) { if (a !== 0xFF15 && a !== 0xFF1F) this.writeRegister(a, 0); }
+      this.regRaw.fill(0);
+      this.powerOn = false;
+      for (const ch of [this.ch1, this.ch2, this.ch3, this.ch4]) { ch.enabled = false; ch.lengthEnabled = false; ch.lengthCounter = 0; }
+      this.ch1.envelope.volume = 0; this.ch2.envelope.volume = 0; this.ch4.envelope.volume = 0;
+      if (keep) { this.ch1.lengthCounter = keep[0]; this.ch2.lengthCounter = keep[1]; this.ch3.lengthCounter = keep[2]; this.ch4.lengthCounter = keep[3]; }
+    }
+
+    readRegister(addr) {
+      if (addr >= 0xFF30 && addr <= 0xFF3F) {
+        const w = this.ch3;
+        if (!w.enabled) return w.readWaveRam(addr - 0xFF30);
+        if (this.model === 'dmg' && w.sinceFetch >= WaveChannel.ACCESS_T) return 0xFF;
+        return w.readWaveRam(w.samplePos >> 1);
+      }
+      if (addr < 0xFF10 || addr > 0xFF2F) return 0xFF;
+      if (addr > 0xFF26) return 0xFF;
+      if (addr === 0xFF26) {
+        return (this.powerOn ? 0x80 : 0) | 0x70 | (this.ch1.enabled ? 1 : 0) | (this.ch2.enabled ? 2 : 0) | (this.ch3.enabled ? 4 : 0) | (this.ch4.enabled ? 8 : 0);
+      }
+      const off = addr - 0xFF10;
+      return this.regRaw[off] | READ_OR_MASK[off];
+    }
+
+    // CGB の PCM12 / PCM34($FF76/$FF77): 各 ch の今のデジタル出力
+    readPcm12() { return this.ch1.output() | (this.ch2.output() << 4); }
+    readPcm34() { return this.ch3.output() | (this.ch4.output() << 4); }
+
+    // t T 進める
+    advance(t) {
+      if (this.powerOn) {
+        this.ch1.advance(t); this.ch2.advance(t); this.ch3.advance(t); this.ch4.advance(t);
+        if (!this.externalSeq) {
+          this.seqCounter += t;
+          while (this.seqCounter >= 8192) { this.seqCounter -= 8192; this.seqTick(); }
+        }
+      }
+    }
+    clock() { this.advance(1); }
+
+    /**
+     * 今の出力を {left, right} で返す(同じオブジェクトを使い回す。呼ぶたびにフィルタが 1 サンプル進む)。
+     * ch ごとに DAC がデジタル 0〜15 をアナログ −1〜+1 に直す(DAC OFF は 0)。NR51 で左右へ配り、NR50 の音量(1〜8)を掛け、
+     * 出力段のコンデンサ(ハイパスフィルタ)を通す。大きさは旧実装に合わせてある(1ch の振れ幅が 0.25)。
+     */
+    mixSample() {
+      const m = this.mute, vol = this.vol, nr51 = this.nr51;
+      let left = 0, right = 0, a;
+      if (this.ch1.dac && !m.ch1) { a = (this.ch1.output() / 7.5 - 1) * vol.ch1; if (nr51 & 0x10) left += a; if (nr51 & 0x01) right += a; }
+      if (this.ch2.dac && !m.ch2) { a = (this.ch2.output() / 7.5 - 1) * vol.ch2; if (nr51 & 0x20) left += a; if (nr51 & 0x02) right += a; }
+      if (this.ch3.dacOn && !m.ch3) { a = (this.ch3.output() / 7.5 - 1) * vol.ch3; if (nr51 & 0x40) left += a; if (nr51 & 0x04) right += a; }
+      if (this.ch4.dac && !m.ch4) { a = (this.ch4.output() / 7.5 - 1) * vol.ch4; if (nr51 & 0x80) left += a; if (nr51 & 0x08) right += a; }
+      left *= (((this.nr50 >> 4) & 7) + 1) * 0.015625;  // ÷8(音量)÷8(1ch の振れ幅 2 → 0.25)
+      right *= ((this.nr50 & 7) + 1) * 0.015625;
+      const o = this._out;
+      o.left = left - this.capL; this.capL = left - o.left * this.hpf;
+      o.right = right - this.capR; this.capR = right - o.right * this.hpf;
+      return o;
+    }
+  }
+
+  // NR51 の該当ビットが左右とも 0 なら、音量があっても聞こえない(ch=0-3)
+  function nr51Audible(nr51, ch) {
+    return (((nr51 >> (4 + ch)) & 1) !== 0) || (((nr51 >> ch) & 1) !== 0);
+  }
+
+  // 鍵盤表示用のライブ値(snapshotAY8910/snapshotSCC と同じ考え方)
+  Emu.snapshotGbApu = function (apu) {
+    const p = (ch, chIndex) => {
+      const freq = ch.enabled ? 131072 / (2048 - ch.freq) : 0;
+      return {
+        freq, vol: ch.envelope.volume / 15, rawVol: ch.envelope.volume,
+        duty: ch.duty, envPeriod: ch.envelope.period,
+        active: ch.enabled && ch.envelope.volume > 0 && freq > 0 && nr51Audible(apu.nr51, chIndex)
+      };
+    };
+    const w = apu.ch3;
+    const wVol = { 0: 0, 1: 1, 2: 0.5, 3: 0.25 }[w.volumeShift] || 0;
+    const wFreq = (w.enabled && w.dacOn) ? 65536 / (2048 - w.freq) : 0;
+    const n = apu.ch4;
+    const nFreq = n.enabled ? 4194304 / (NOISE_DIVISOR[n.divisorCode] * Math.pow(2, n.clockShift)) : 0;
+    return {
+      ch1: p(apu.ch1, 0),
+      ch2: p(apu.ch2, 1),
+      ch3: {
+        freq: wFreq, vol: wVol, rawVol: w.volumeShift,
+        waveData: Array.from(w.wave, v => v / 7.5 - 1), // 0-15 → -1..1
+        active: w.enabled && w.dacOn && wVol > 0 && wFreq > 0 && nr51Audible(apu.nr51, 2)
+      },
+      ch4: {
+        freq: nFreq, vol: n.envelope.volume / 15, rawVol: n.envelope.volume,
+        widthMode: n.widthMode, envPeriod: n.envelope.period,
+        active: n.enabled && n.envelope.volume > 0 && nr51Audible(apu.nr51, 3)
+      },
+      nr50: apu.nr50, nr51: apu.nr51
+    };
+  };
+
+  APUGb.NOISE_DIVISOR = NOISE_DIVISOR;
+  APUGb.WaveChannel = WaveChannel;
+  Emu.APUGb = APUGb;
+})(globalThis);
+
+/*
+ * ゲームボーイのカートリッジ(ヘッダ解析と MBC)
+ * MML.Emu.GbCart
+ *
+ * 段階 8a: ROM のみ / MBC1 / MBC2 / MBC3(時計) / MBC5(振動ビット)。
+ * MBC6 / MBC7 / MMM01 / HuC1 / HuC3 / カメラ、MBC1 の多本入り判別は段階 8e(DESIGN-GB-CAPTURE.md §9)。
+ *
+ * 本体(gbConsole.js)からは read(addr)/write(addr,v)($0000-$7FFF)と readRam(addr)/writeRam(addr,v)($A000-$BFFF)で触る。
+ * 参考: Pan Docs "The Cartridge Header" "MBCs"
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const RAM_SIZES = { 0: 0, 1: 0x800, 2: 0x2000, 3: 0x8000, 4: 0x20000, 5: 0x10000 };
+  // ヘッダ $0147 → { mbc, ram, battery, rtc, rumble }
+  const TYPES = {
+    0x00: { mbc: 'rom' }, 0x08: { mbc: 'rom', ram: 1 }, 0x09: { mbc: 'rom', ram: 1, battery: 1 },
+    0x01: { mbc: 'mbc1' }, 0x02: { mbc: 'mbc1', ram: 1 }, 0x03: { mbc: 'mbc1', ram: 1, battery: 1 },
+    0x05: { mbc: 'mbc2' }, 0x06: { mbc: 'mbc2', battery: 1 },
+    0x0F: { mbc: 'mbc3', battery: 1, rtc: 1 }, 0x10: { mbc: 'mbc3', ram: 1, battery: 1, rtc: 1 },
+    0x11: { mbc: 'mbc3' }, 0x12: { mbc: 'mbc3', ram: 1 }, 0x13: { mbc: 'mbc3', ram: 1, battery: 1 },
+    0x19: { mbc: 'mbc5' }, 0x1A: { mbc: 'mbc5', ram: 1 }, 0x1B: { mbc: 'mbc5', ram: 1, battery: 1 },
+    0x1C: { mbc: 'mbc5', rumble: 1 }, 0x1D: { mbc: 'mbc5', ram: 1, rumble: 1 }, 0x1E: { mbc: 'mbc5', ram: 1, battery: 1, rumble: 1 },
+  };
+
+  // ヘッダのチェックサム($0134-$014C)。実機のブート ROM が確かめるのと同じ式
+  function headerChecksum(rom) {
+    let x = 0;
+    for (let a = 0x134; a <= 0x14C; a++) x = (x - rom[a] - 1) & 0xFF;
+    return x;
+  }
+  function isGb(bytes) {
+    return !!bytes && bytes.length >= 0x150 && headerChecksum(bytes) === bytes[0x14D] &&
+      bytes[0x104] === 0xCE && bytes[0x105] === 0xED; // 任天堂ロゴの先頭 2 バイト(ロゴ全体は持たない)
+  }
+
+  function parseHeader(rom) {
+    const cgbFlag = rom[0x143];
+    let title = '';
+    for (let a = 0x134; a < (cgbFlag & 0x80 ? 0x13F : 0x144); a++) { const c = rom[a]; if (!c) break; title += c >= 0x20 && c < 0x7F ? String.fromCharCode(c) : '?'; }
+    const type = rom[0x147];
+    const info = TYPES[type] || null;
+    return {
+      title: title.trim(), type, info,
+      cgb: (cgbFlag & 0x80) !== 0, cgbOnly: (cgbFlag & 0xC0) === 0xC0,
+      sgb: rom[0x146] === 0x03 && rom[0x14B] === 0x33,
+      romBanks: Math.max(2, rom.length >> 14),
+      ramSize: info && info.mbc === 'mbc2' ? 0x200 : (RAM_SIZES[rom[0x149]] || 0),
+      checksumOk: headerChecksum(rom) === rom[0x14D],
+    };
+  }
+
+  class GbCart {
+    constructor(bytes) {
+      if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
+      // バンク境界(16K)へ切り上げて持つ(端数のある吸い出しでも範囲外を読まない)
+      const size = Math.max(0x8000, Math.ceil(bytes.length / 0x4000) * 0x4000);
+      this.rom = new Uint8Array(size).fill(0xFF); this.rom.set(bytes);
+      this.header = parseHeader(this.rom);
+      const info = this.header.info;
+      this.unsupported = !info;                 // 未対応の種別は ROM のみとして動かす(起動画面くらいは出る)
+      this.mbc = info ? info.mbc : 'rom';
+      this.hasBattery = !!(info && info.battery);
+      this.hasRtc = !!(info && info.rtc);
+      this.hasRumble = !!(info && info.rumble);
+      this.romMask = (this.rom.length >> 14) - 1; // バンク数は 2 のべき(違う吸い出しは下の % で畳む)
+      this.romBanks = this.rom.length >> 14;
+      // MBC1 の多本入り(1MB で、$40000 のバンクにもロゴがある): BANK2 が 4bit 上にずれ、BANK1 は下位 4bit だけ効く
+      this.multicart = this.mbc === 'mbc1' && this.rom.length === 0x100000 && [0x104, 0x105, 0x106, 0x107].every(a => this.rom[0x40000 + a] === this.rom[a]) && this.rom[0x104] === 0xCE;
+      this.ram = new Uint8Array(this.header.ramSize || (info && info.ram ? 0x2000 : 0));
+      this.dirty = false;     // セーブ RAM/時計に書いた(本体が batteryDirty として見る)
+      this.rumble = false;    // 振動モータ(MBC5 の RAM バンクレジスタ bit3)
+      this.reset();
+    }
+
+    reset() {
+      this.ramEnable = false;
+      this.bank1 = 1; this.bank2 = 0; this.mode = 0; // MBC1
+      this.romBank = 1; this.ramBank = 0;            // MBC2/3/5
+      this.rtcSel = -1; this.rtcLatchPrev = 1;
+      if (!this.rtc) this.rtc = { s: 0, m: 0, h: 0, dl: 0, dh: 0, latched: new Uint8Array(5), sub: 0 };
+      this._map();
+    }
+
+    _map() {
+      const n = this.romBanks;
+      if (this.mbc === 'mbc1') {
+        const sh = this.multicart ? 4 : 5, b1 = this.multicart ? this.bank1 & 0x0F : this.bank1;
+        this.lo = (this.mode ? (this.bank2 << sh) % n : 0) << 14;
+        this.hi = (((this.bank2 << sh) | b1) % n) << 14;
+        this.ramOff = this.ram.length > 0x2000 && this.mode ? (this.bank2 << 13) % this.ram.length : 0;
+      } else {
+        this.lo = 0;
+        this.hi = (this.romBank % n) << 14;
+        this.ramOff = this.ram.length > 0x2000 ? (this.ramBank << 13) % this.ram.length : 0;
+      }
+    }
+
+    read(addr) { return addr < 0x4000 ? this.rom[this.lo + addr] : this.rom[this.hi + (addr & 0x3FFF)]; }
+
+    write(addr, v) {
+      switch (this.mbc) {
+        case 'mbc1':
+          if (addr < 0x2000) this.ramEnable = (v & 0x0F) === 0x0A;
+          else if (addr < 0x4000) { this.bank1 = v & 0x1F; if (!this.bank1) this.bank1 = 1; }
+          else if (addr < 0x6000) this.bank2 = v & 3;
+          else this.mode = v & 1;
+          break;
+        case 'mbc2': // $0000-$3FFF: 番地の bit8 が 0 なら RAM 許可、1 なら ROM バンク
+          if (addr < 0x4000) { if (addr & 0x100) { this.romBank = v & 0x0F; if (!this.romBank) this.romBank = 1; } else this.ramEnable = (v & 0x0F) === 0x0A; }
+          break;
+        case 'mbc3':
+          if (addr < 0x2000) this.ramEnable = (v & 0x0F) === 0x0A;
+          else if (addr < 0x4000) { this.romBank = v & 0x7F; if (!this.romBank) this.romBank = 1; }
+          else if (addr < 0x6000) { if (v >= 0x08 && v <= 0x0C) this.rtcSel = v - 8; else { this.rtcSel = -1; this.ramBank = v & 3; } }
+          else { // 0 → 1 で時計を控える
+            if (this.rtcLatchPrev === 0 && (v & 1) === 1) { const r = this.rtc; r.latched[0] = r.s; r.latched[1] = r.m; r.latched[2] = r.h; r.latched[3] = r.dl; r.latched[4] = r.dh; }
+            this.rtcLatchPrev = v & 1;
+          }
+          break;
+        case 'mbc5':
+          if (addr < 0x2000) this.ramEnable = (v & 0x0F) === 0x0A;
+          else if (addr < 0x3000) this.romBank = (this.romBank & 0x100) | v;
+          else if (addr < 0x4000) this.romBank = (this.romBank & 0xFF) | ((v & 1) << 8);
+          else if (addr < 0x6000) { if (this.hasRumble) { this.rumble = (v & 8) !== 0; this.ramBank = v & 7; } else this.ramBank = v & 0x0F; }
+          break;
+      }
+      this._map();
+    }
+
+    readRam(addr) {
+      if (!this.ramEnable) return 0xFF;
+      if (this.mbc === 'mbc3' && this.rtcSel >= 0) return this.hasRtc ? this.rtc.latched[this.rtcSel] : 0xFF;
+      if (!this.ram.length) return 0xFF;
+      if (this.mbc === 'mbc2') return this.ram[addr & 0x1FF] | 0xF0; // 4bit RAM。上位は 1
+      return this.ram[(this.ramOff + (addr & 0x1FFF)) % this.ram.length];
+    }
+
+    writeRam(addr, v) {
+      if (!this.ramEnable) return;
+      if (this.mbc === 'mbc3' && this.rtcSel >= 0) {
+        if (!this.hasRtc) return;
+        const r = this.rtc;
+        switch (this.rtcSel) {
+          case 0: r.s = v & 0x3F; r.sub = 0; break;
+          case 1: r.m = v & 0x3F; break;
+          case 2: r.h = v & 0x1F; break;
+          case 3: r.dl = v; break;
+          case 4: r.dh = v & 0xC1; break;
+        }
+        this.dirty = true;
+        return;
+      }
+      if (!this.ram.length) return;
+      if (this.mbc === 'mbc2') this.ram[addr & 0x1FF] = v & 0x0F;
+      else this.ram[(this.ramOff + (addr & 0x1FFF)) % this.ram.length] = v;
+      this.dirty = true;
+    }
+
+    // 時計を t T ぶん進める(本体が 1 フレームごとに呼ぶ)。エミュレータ内の時間で進む
+    // (実時刻との同期=電源を切っていた間の経過は段階 8e で battery に時刻を控えて足す)
+    tickRtc(t, clockHz) {
+      if (!this.hasRtc) return;
+      const r = this.rtc;
+      if (r.dh & 0x40) return; // 停止ビット
+      r.sub += t;
+      while (r.sub >= clockHz) {
+        r.sub -= clockHz;
+        r.s = (r.s + 1) & 0x3F;
+        if (r.s !== 60) continue; // 60 以上を書かれた時は 63→0 で桁上がりしない(実機の癖)
+        r.s = 0; r.m = (r.m + 1) & 0x3F; if (r.m !== 60) continue;
+        r.m = 0; r.h = (r.h + 1) & 0x1F; if (r.h !== 24) continue;
+        r.h = 0; r.dl = (r.dl + 1) & 0xFF; if (r.dl !== 0) continue;
+        if (r.dh & 1) r.dh = (r.dh & 0xFE) | 0x80; else r.dh |= 1; // 512 日であふれフラグ
+      }
+    }
+
+    // セーブ: RAM の後ろに時計 8 バイト(s m h dl dh + 予約 3)。段階 8e で実時刻を足す
+    getBattery() {
+      if (!this.hasBattery) return null;
+      const out = new Uint8Array(this.ram.length + (this.hasRtc ? 8 : 0));
+      out.set(this.ram);
+      if (this.hasRtc) { const r = this.rtc, o = this.ram.length; out[o] = r.s; out[o + 1] = r.m; out[o + 2] = r.h; out[o + 3] = r.dl; out[o + 4] = r.dh; }
+      return out;
+    }
+    setBattery(bytes) {
+      if (!this.hasBattery || !bytes || bytes.length < this.ram.length) return false;
+      this.ram.set(bytes.subarray(0, this.ram.length));
+      if (this.hasRtc && bytes.length >= this.ram.length + 5) { const r = this.rtc, o = this.ram.length; r.s = bytes[o]; r.m = bytes[o + 1]; r.h = bytes[o + 2]; r.dl = bytes[o + 3]; r.dh = bytes[o + 4]; }
+      this.dirty = false;
+      return true;
+    }
+  }
+
+  GbCart.isGb = isGb;
+  GbCart.parseHeader = parseHeader;
+  GbCart.headerChecksum = headerChecksum;
+  Emu.GbCart = GbCart;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * ゲームボーイの PPU(DMG)
+ * MML.Emu.GbPpu
+ *
+ * 1 行 = 456T、154 行(0-143 表示、144-153 VBlank)。行の中はモード 2(OAM 走査、0-79)→ 3(描画)→ 0(HBlank)。
+ *
+ * ★2026-11-13 段階 8c で行単位から作り直し(DESIGN-GB-CAPTURE.md §3):
+ *   - モード 3 の長さは 172T+(SCX の下位 3bit)+ウィンドウ 6T+スプライトごとの遅れ(Pan Docs の OBJ penalty の式)。
+ *     HBlank の STAT 割り込みで音ドライバや演出を回すソフトの時刻が合う
+ *   - 画素はモード 3 の間、時間の進みに合わせて左から描く(本体は 4T ずつ進むので 4 画素刻み)。行の途中で
+ *     SCX/SCY/LCDC/パレット/ウィンドウを書き換えるとその位置から効く。スプライトの遅れによる画素位置のずれまでは追わない
+ *   - モード 2/3 の間の OAM、モード 3 の間の VRAM は CPU から触れない(読むと $FF、書きは捨てる)
+ *   - 153 行目は 4T で LY=0 になる。LCD を点けた直後の 1 行目はモード 2 が無く 4T 短い。LCD が消えている間 LY=LYC の旗は動かない
+ *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)、OAM 破壊バグ
+ *
+ * 参考: Pan Docs "Rendering" "STAT" "OAM"。細部は mooneye の acceptance/ppu と dmg-acid2 で確かめる(tools/headless/gb-testroms.js)。
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const W = 160, H = 144;
+  const FIRST_PIXEL_DOT = 92; // モード 3 の頭(80)から最初の画素が出るまで 12T(+SCX の下位 3bit)
+
+  class GbPpu {
+    constructor(con) {
+      this.con = con; // requestIrq(bit)
+      this.vram = new Uint8Array(0x2000);
+      this.oam = new Uint8Array(0xA0);
+      this.frame = new Uint32Array(W * H);   // 0xAABBGGRR
+      this.frameIdx = new Uint8Array(W * H); // 階調番号 0-3(巻き戻しの映像の輪が控える。色は shades で引く)
+      this.shades = [0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000]; // 白 → 黒(設定で差し替える)
+      this.sprList = new Uint8Array(10); // その行のスプライト(OAM 番号、優先順)
+      this.noRender = false;             // true: 絵は描かない(GBS プレイヤー)
+      this.reset();
+    }
+
+    reset() {
+      this.vram.fill(0); this.oam.fill(0);
+      this.lcdc = 0x91; this.statEn = 0;
+      this.scy = 0; this.scx = 0; this.ly = 0; this.lyc = 0;
+      this.bgp = 0xFC; this.obp0 = 0xFF; this.obp1 = 0xFF;
+      this.wy = 0; this.wx = 0;
+      this.line = 0;          // 内部の行(153 行目でも 153 のまま。ly は読み出し値)
+      this.dot = 0; this.mode = 2;
+      this.mode3End = 252;    // この行のモード 3 が終わる位置(T)
+      this.px = 0;            // この行で次に描く画素
+      this.scxFine = 0;
+      this.sprCount = 0;
+      this.winLine = 0; this.wyHit = false; this.winActive = false; this.winX = 0;
+      this.firstLine = false; // LCD を点けた直後の 1 行目(モード 2 が無い)
+      this.lycFlag = true;    // 起動直後は LY=LYC=0
+      this.statLine = false;
+      this.vblankStarted = false;
+      this.frame.fill(this.shades[0]); this.frameIdx.fill(0);
+    }
+
+    get on() { return (this.lcdc & 0x80) !== 0; }
+    // CPU から見て触れない間(本体のバスが見る)
+    oamBlocked() { return (this.lcdc & 0x80) !== 0 && this.line < H && !this.firstLine && (this.mode === 2 || this.mode === 3); }
+    vramBlocked() { return (this.lcdc & 0x80) !== 0 && this.line < H && this.mode === 3; }
+
+    readReg(addr) {
+      switch (addr) {
+        case 0xFF40: return this.lcdc;
+        case 0xFF41: return 0x80 | this.statEn | (this.lycFlag ? 4 : 0) | (this.on ? (this.firstLine && this.mode === 2 ? 0 : this.mode) : 0);
+        case 0xFF42: return this.scy;
+        case 0xFF43: return this.scx;
+        case 0xFF44: return this.ly;
+        case 0xFF45: return this.lyc;
+        case 0xFF47: return this.bgp;
+        case 0xFF48: return this.obp0;
+        case 0xFF49: return this.obp1;
+        case 0xFF4A: return this.wy;
+        case 0xFF4B: return this.wx;
+      }
+      return 0xFF;
+    }
+
+    writeReg(addr, v) {
+      switch (addr) {
+        case 0xFF40: {
+          const was = this.on;
+          this.lcdc = v;
+          if (was && !this.on) { // 消灯: LY=0、モード 0、画面は白。LY=LYC の旗はそのまま残る
+            this.ly = 0; this.line = 0; this.dot = 0; this.mode = 0; this.winLine = 0; this.wyHit = false; this.firstLine = false;
+            this.frame.fill(this.shades[0]); this.frameIdx.fill(0);
+            this._stat();
+          } else if (!was && this.on) { // 点灯: 1 行目は 4T 短く、モード 2 の間も STAT はモード 0 を返す(OAM にも触れる)
+            this.ly = 0; this.line = 0; this.dot = 4; this.mode = 2; this.firstLine = true;
+            this.winLine = 0; this.wyHit = false; this.px = 0;
+            this.lycFlag = this.lyc === 0;
+            this._stat();
+          }
+          break;
+        }
+        case 0xFF41: this.statEn = v & 0x78; this._stat(); break;
+        case 0xFF42: this.scy = v; break;
+        case 0xFF43: this.scx = v; break;
+        case 0xFF44: break; // LY は読み出し専用
+        case 0xFF45: this.lyc = v; if (this.on) { this.lycFlag = this._lyCmp() === v; this._stat(); } break;
+        case 0xFF47: this.bgp = v; break;
+        case 0xFF48: this.obp0 = v; break;
+        case 0xFF49: this.obp1 = v; break;
+        case 0xFF4A: this.wy = v; break;
+        case 0xFF4B: this.wx = v; break;
+      }
+    }
+
+    // LYC と比べる値。153 行目は LY が 0 に変わった後もしばらく 153 と比べ、その後 0 と比べる
+    _lyCmp() { return this.line === 153 ? (this.dot < 12 ? 153 : 0) : this.line; }
+
+    // STAT の割り込み線は各要因の OR。立ち上がりでだけ割り込む(要因が重なっている間は次が出ない)
+    _stat() {
+      const e = this.statEn, m = this.firstLine && this.mode === 2 ? 0 : this.mode;
+      const line = this.on && (((e & 0x40) && this.lycFlag) || ((e & 0x20) && m === 2) || ((e & 0x10) && m === 1) || ((e & 0x08) && m === 0) ||
+        ((e & 0x20) && this.line === H && this.dot < 4)); // VBlank の頭ではモード 2 の要因でも割り込む(実機の癖)
+      if (line && !this.statLine) this.con.requestIrq(1);
+      this.statLine = !!line;
+    }
+
+    // 4T 進める(本体が M サイクルごとに呼ぶ)
+    tick() {
+      if (!(this.lcdc & 0x80)) return;
+      const d = (this.dot += 4);
+      if (this.line < H) {
+        if (this.mode === 2) {
+          if (d >= 80) this._startMode3();
+        } else if (this.mode === 3) {
+          if (!this.noRender) this._renderTo(d - FIRST_PIXEL_DOT - this.scxFine + 4);
+          if (d >= this.mode3End) {
+            if (!this.noRender) this._renderTo(W);
+            if (this.winActive) this.winLine++;
+            this.mode = 0; this.firstLine = false;
+            this._stat();
+          }
+        }
+      } else if (this.line === 153) {
+        if (d === 4) this.ly = 0;
+        else if (d === 12) { this.lycFlag = this.lyc === 0; this._stat(); }
+      } else if (d === 4 && this.line === H && this.statLine) this._stat(); // VBlank 頭だけのモード 2 要因を下ろす
+      // LY の読み出し値は行の終わりの 4T 前に次の行へ進む(DMG。mooneye の hblank_ly_scx_timing が見る)
+      if (d === 452 && this.line < 153) this.ly = this.line + 1;
+      // 新しい行の LY=LYC は行頭の 4T 後に立つ
+      if (d === 4 && !this.firstLine) { this.lycFlag = this.line === this.lyc; this._stat(); }
+      if (d >= 456) {
+        this.dot = 0;
+        this.line++;
+        if (this.line === 154) { this.line = 0; this.winLine = 0; this.wyHit = false; }
+        if (this.line !== 0) this.ly = this.line;
+        if (this.line !== 0) this.lycFlag = false; // 行頭の 4T は比較が外れる(0 行目は 153 行目の途中から LY=0 として比べている)
+        if (this.line === H) { this.mode = 1; this.vblankStarted = true; this.con.requestIrq(0); }
+        else if (this.line < H) { this.mode = 2; this.px = 0; }
+        this._stat();
+      }
+    }
+
+    // モード 2 の終わり: その行のスプライトを集め、モード 3 の長さを決める
+    _startMode3() {
+      const y = this.line, lcdc = this.lcdc, oam = this.oam;
+      if (y === this.wy) this.wyHit = true;
+      const h = (lcdc & 0x04) ? 16 : 8;
+      let n = 0;
+      const list = this.sprList;
+      if (lcdc & 0x02) for (let i = 0; i < 40 && n < 10; i++) { const sy = oam[i * 4] - 16; if (y >= sy && y < sy + h) list[n++] = i; }
+      // 優先順(X の小さい方、同じなら OAM の若い方)に並べる。挿入ソート(高々 10 個)
+      for (let i = 1; i < n; i++) { const v = list[i]; let j = i - 1; while (j >= 0 && oam[list[j] * 4 + 1] > oam[v * 4 + 1]) { list[j + 1] = list[j]; j--; } list[j + 1] = v; }
+      this.sprCount = n;
+      this.scxFine = this.scx & 7;
+      const winOnLine = (lcdc & 0x20) && this.wyHit && this.wx <= 166;
+      let len = 172 + this.scxFine + (winOnLine ? 6 : 0);
+      // スプライトの遅れ: 左端の画素が乗る BG/ウィンドウのタイルごとに 1 回だけ「そのタイルの残り画素 − 2(0 未満は 0)」、どのスプライトにも一律 6
+      let lastTile = -999;
+      for (let i = 0; i < n; i++) {
+        const ox = oam[list[i] * 4 + 1];
+        if (ox >= 168) continue;
+        let tile, right;
+        if (winOnLine && ox >= this.wx + 1) { const wxp = ox - (this.wx + 1); tile = 0x1000 + (wxp >> 3); right = 7 - (wxp & 7); }
+        else { const bx = (ox + this.scx) & 0xFF; tile = bx >> 3; right = 7 - (bx & 7); }
+        if (tile !== lastTile) { lastTile = tile; len += Math.max(0, right - 2); }
+        len += 6;
+      }
+      this.mode3End = 80 + len;
+      this.mode = 3; this.px = 0; this.winActive = false; this.winX = 0;
+      this._stat();
+    }
+
+    // この行の画素を x1 の手前まで描く(今のレジスタで)
+    _renderTo(x1) {
+      if (x1 > W) x1 = W;
+      let x = this.px;
+      if (x >= x1) return;
+      const y = this.line, lcdc = this.lcdc, vram = this.vram, oam = this.oam, sh = this.shades;
+      const out = this.frame, outIdx = this.frameIdx, base = y * W;
+      const bgOn = (lcdc & 0x01) !== 0, signedTiles = !(lcdc & 0x10);
+      const winOk = bgOn && (lcdc & 0x20) && this.wyHit && this.wx <= 166, wx0 = this.wx - 7;
+      const bgMap = (lcdc & 0x08) ? 0x1C00 : 0x1800, winMap = (lcdc & 0x40) ? 0x1C00 : 0x1800;
+      const yy = (y + this.scy) & 0xFF, bgRow = bgMap + (yy >> 3) * 32, bgFine = (yy & 7) * 2, scx = this.scx;
+      const wl = this.winLine, winRow = winMap + (wl >> 3) * 32, winFine = (wl & 7) * 2;
+      const sprOn = (lcdc & 0x02) !== 0, n = this.sprCount, list = this.sprList, h = (lcdc & 0x04) ? 16 : 8;
+      const bgp = this.bgp;
+      for (; x < x1; x++) {
+        let c = 0;
+        if (bgOn) {
+          // ウィンドウはその行で WX に達した所から始まり、行の終わりまで続く(WX<7 は左が欠ける)
+          if (winOk && !this.winActive && x >= wx0) { this.winActive = true; this.winX = x - wx0; }
+          let a, bit;
+          if (this.winActive && (lcdc & 0x20)) {
+            const wxp = this.winX++;
+            const t = vram[winRow + ((wxp >> 3) & 31)];
+            a = (signedTiles ? 0x1000 + ((t << 24) >> 24) * 16 : t * 16) + winFine; bit = 7 - (wxp & 7);
+          } else {
+            const xx = (x + scx) & 0xFF;
+            const t = vram[bgRow + (xx >> 3)];
+            a = (signedTiles ? 0x1000 + ((t << 24) >> 24) * 16 : t * 16) + bgFine; bit = 7 - (xx & 7);
+          }
+          c = (((vram[a + 1] >> bit) & 1) << 1) | ((vram[a] >> bit) & 1);
+        }
+        let shade = (bgp >> (c * 2)) & 3;
+        if (sprOn) {
+          for (let i = 0; i < n; i++) {
+            const o = list[i] * 4, sx = oam[o + 1] - 8;
+            if (x < sx || x >= sx + 8) continue;
+            const fl = oam[o + 3];
+            let ln = y - (oam[o] - 16), tile = oam[o + 2];
+            if (fl & 0x40) ln = h - 1 - ln;
+            if (h === 16) tile &= 0xFE;
+            const sa = tile * 16 + ln * 2, sb = (fl & 0x20) ? x - sx : 7 - (x - sx);
+            const sc = (((vram[sa + 1] >> sb) & 1) << 1) | ((vram[sa] >> sb) & 1);
+            if (!sc) continue;
+            // 勝ったスプライトが BG の後ろなら BG が出る(下位のスプライトは出ない)
+            if (!((fl & 0x80) && c)) shade = (((fl & 0x10) ? this.obp1 : this.obp0) >> (sc * 2)) & 3;
+            break;
+          }
+        }
+        outIdx[base + x] = shade;
+        out[base + x] = sh[shade];
+      }
+      this.px = x;
+    }
+  }
+
+  GbPpu.WIDTH = W; GbPpu.HEIGHT = H;
+  Emu.GbPpu = GbPpu;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * ゲームボーイ本体(段階 8a: DMG の骨格)
+ * MML.Emu.GbConsole
+ *
+ * CPU(cpuSm83.js)がバスに触るたび(1 M サイクル)に tick() で本体を 4T 進める。進むのは
+ * タイマ(DIV/TIMA)、シリアル、OAM DMA、PPU、APU、音の標本化。NesConsole/MsxConsole と同じ形の API を持つ
+ * (runFrame / runSamples / setController / startRecording / getBattery …)。
+ *
+ * まだ無い物(DESIGN-GB-CAPTURE.md §9): 
+ * CGB(8d)、周辺と残りの MBC(8e)、SGB(8g)。ブート ROM は使わず起動後の状態を直接セットする。
+ *
+ * 参考: Pan Docs "Timer obscure behaviour" "Interrupts" "Power-Up Sequence"
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const CLOCK = 4194304;
+  const FRAME_T = 70224; // 154 行 × 456T(59.7275Hz)
+  const AUDIO_RING = 1 << 14;
+  // TAC の下位 2bit → TIMA を進める DIV(16bit)のビット。そのビットと許可の AND の立ち下がりで +1
+  const TAC_BIT = [1 << 9, 1 << 3, 1 << 5, 1 << 7];
+  const SERIAL_BIT = 1 << 8; // 内部クロック 8192Hz = DIV bit8 の立ち下がり
+  const APU_BIT = 1 << 12;   // APU のフレームシーケンサ 512Hz = DIV bit12 の立ち下がり(CGB の倍速時は bit13)
+
+  class GbConsole {
+    // opts.model: 'dmg'(既定)。'cgb' / 'sgb' は後の段階
+    constructor(romBytes, opts) {
+      opts = opts || {};
+      this.model = opts.model || 'dmg';
+      // opts.cart: 出来合いのカートリッジを挿す(GBS プレイヤーが使う)。opts.lcdAlwaysOn / opts.noRender も GBS 用
+      this.cart = opts.cart || new Emu.GbCart(romBytes);
+      this.lcdAlwaysOn = !!opts.lcdAlwaysOn;
+      this.ppu = new Emu.GbPpu(this);
+      this.ppu.noRender = !!opts.noRender;
+      this.apu = new Emu.APUGb(this.model === 'cgb' ? 'cgb' : 'dmg');
+      this.apu.externalSeq = true;
+      this.apu.divBit = () => (this.div & APU_BIT) !== 0;
+      this.cpu = new Emu.CPUSm83(this);
+      this.wram = new Uint8Array(0x2000);
+      this.hram = new Uint8Array(0x7F);
+      // パッドは NesConsole と同じ形(配列の [0] だけ使う。巻き戻し NesRewind/GbRewind が pad[0]/pad[1] を記録する)
+      this.pad = [0, 0]; this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.cpuCycles = 0; this.frameCount = 0; this.frameT = 0; this._frameFlag = false;
+      this.sampleRate = 0; this.cycleAccum = 0;
+      this.ring = new Float32Array(AUDIO_RING); this.ringR = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0; this.underruns = 0;
+      this.onWrite = null;  // (addr, value, frameFrac) 音源レジスタの書き込み
+      this.onFrame = null;
+      this.onSerial = null; // (byte) シリアルへ 1 バイト送り終えた(テスト ROM の結果表示など)
+      this.serialDevice = null; // (byte) => 受け取るバイト。未接続は $FF
+      this.serialOut = [];  // 送り終えたバイト
+      this.serialSent = []; // 送り始めたバイト(完了を待たずに次を送るソフトの出力も拾える。mooneye のテスト ROM の合否)
+      this.rec = null;
+      this.reset();
+    }
+
+    // 電源投入+ブート ROM 実行後の状態(DMG)
+    reset() {
+      this.wram.fill(0); this.hram.fill(0);
+      this.cart.reset(); this.ppu.reset(); this.apu.reset();
+      const cpu = this.cpu;
+      cpu.reset();
+      cpu.a = 0x01; cpu.f = 0xB0; cpu.b = 0x00; cpu.c = 0x13; cpu.d = 0x00; cpu.e = 0xD8; cpu.h = 0x01; cpu.l = 0x4D;
+      cpu.sp = 0xFFFE; cpu.pc = 0x0100;
+      this.ie = 0; this.if = 0x01;
+      this.div = 0xABC8; this.tima = 0; this.tma = 0; this.tac = 0; this.timaReload = false; this.timaReloading = false;
+      this.p1 = 0x00; this.sb = 0; this.sc = 0; this.serialBits = 0;
+      this.dma = 0xFF; this.dmaActive = false; this.dmaPos = 0; this.dmaSrc = 0; this.dmaStart = 0; this.dmaNext = 0; this.dmaByte = 0xFF;
+      // ブート ROM が「ポーン」を鳴らした後のレジスタ。CH1 は鳴り終わりかけで有効のまま(NR52=$F1)。
+      // 残響の音量は分からないので 0 にしておく(起動直後に余韻は鳴らさない)
+      const apu = this.apu;
+      for (const [a, v] of [[0xFF26, 0x80], [0xFF10, 0x80], [0xFF11, 0xBF], [0xFF12, 0xF3], [0xFF13, 0xC1], [0xFF14, 0x87], [0xFF16, 0x3F], [0xFF18, 0xFF],
+        [0xFF1A, 0x7F], [0xFF1B, 0xFF], [0xFF1C, 0x9F], [0xFF1D, 0xFF], [0xFF20, 0xFF], [0xFF24, 0x77], [0xFF25, 0xF3]]) apu.writeRegister(a, v);
+      apu.ch1.envelope.volume = 0; apu.ch1.envelope.running = false;
+      apu.regRaw[0x03] = 0xFF; apu.ch1.triggerSeq = 0;
+      this.cpuCycles = 0; this.frameT = 0;
+    }
+
+    setSampleRate(sr) { this.sampleRate = sr; this.cycleAccum = 0; this.ringHead = 0; this.ringLen = 0; if (sr) this.apu.setSampleRate(sr); }
+    // ボタンのビットは NesConsole.BUTTON と同じ並び(A B SELECT START UP DOWN LEFT RIGHT)。画面側の入力をそのまま使える
+    setController(port, bits, turbo) { if (port) return; this.padHeld[0] = bits & 0xFF; this.padTurbo[0] = (turbo | 0) & 0xFF; this._applyPad(0); }
+    setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(0); }
+    _applyPad(port) {
+      if (port) return;
+      const on = ((this.turboPhase / this.turboRate) | 0) === 0;
+      const before = this._p1Low();
+      this.pad[0] = this.padHeld[0] | (on ? this.padTurbo[0] : 0);
+      if (before & ~this._p1Low() & 0x0F) this.requestIrq(4); // 選ばれている線が H→L
+    }
+    // P1 の下位 4bit(押すと 0)。bit4=0 で十字(右左上下)、bit5=0 でボタン(A B SELECT START)
+    _p1Low() {
+      const p = this.pad[0];
+      let low = 0x0F;
+      if (!(this.p1 & 0x10)) low &= ~(((p >> 7) & 1) | (((p >> 6) & 1) << 1) | (((p >> 4) & 1) << 2) | (((p >> 5) & 1) << 3));
+      if (!(this.p1 & 0x20)) low &= ~(p & 0x0F);
+      return low & 0x0F;
+    }
+
+    get hasBattery() { return this.cart.hasBattery; }
+    get batteryDirty() { return this.cart.dirty; }
+    clearBatteryDirty() { this.cart.dirty = false; }
+    getBattery() { return this.cart.getBattery(); }
+    setBattery(bytes) { return this.cart.setBattery(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)); }
+    get frame() { return this.ppu.frame; }
+    get frameWidth() { return 160; }
+    get frameHeight() { return 144; }
+    get frameRate() { return CLOCK / FRAME_T; } // 59.7275Hz
+    get stereo() { return true; }
+    // ゲーム画面(nesScreen.js / nes-worklet-impl.js)が機種を問わず呼ぶ口
+    extBits() { return 0; }
+    get diskCount() { return 0; }
+    chips() { return ['gb']; }
+    // 鍵盤表示のミュート/音量: { gb: { ch1..ch4 } }
+    applyMix(mute, volume) {
+      const put = (t, s, conv) => { if (s) for (const k of Object.keys(t)) if (s[k] !== undefined) t[k] = conv(s[k]); };
+      if (mute && mute.gb) put(this.apu.mute, mute.gb, (v) => !!v);
+      if (volume && volume.gb) put(this.apu.vol, volume.gb, (v) => Math.max(0, Math.min(2, +v || 0)));
+    }
+    frameFrac() { return Math.min(0.999999, this.frameT / FRAME_T); }
+
+    // ── 割り込み(CPU から呼ばれる)──
+    requestIrq(bit) { this.if |= 1 << bit; }
+    irqPending() { return this.ie & this.if & 0x1F; }
+    irqAck(bit) { this.if &= ~(1 << bit); }
+    // STOP: DMG はボタンが押されるまで止まる(CGB の速度切り替えは 8d)
+    stop(cpu) { cpu.stopped = true; }
+
+    // ── 4T 進める ──
+    tick() {
+      this.cpuCycles += 4;
+      // TIMA があふれた 1 M サイクル後に TMA を読み込んで割り込む(その間 TIMA は 0)
+      this.timaReloading = false;
+      if (this.timaReload) { this.timaReload = false; this.timaReloading = true; this.tima = this.tma; this.if |= 4; }
+      this._setDiv((this.div + 4) & 0xFFFF);
+
+      // OAM DMA: $FF46 に書いた M サイクルの 2 つ後から 160 サイクル、1 サイクルに 1 バイト。
+      // 走っている最中に書き直すと、古い方は新しい方が始まる直前まで続く
+      if (this.dmaActive && this.dmaPos >= 0xA0) this.dmaActive = false;
+      if (this.dmaStart > 0 && --this.dmaStart === 0) { this.dmaActive = true; this.dmaPos = 0; this.dmaSrc = this.dmaNext; }
+      if (this.dmaActive) {
+        this.dmaByte = this._busRead((this.dmaSrc + this.dmaPos) & 0xFFFF);
+        this.ppu.oam[this.dmaPos++] = this.dmaByte;
+      }
+
+      const ppu = this.ppu;
+      ppu.tick();
+      const apu = this.apu;
+      apu.advance(4);
+
+      this.frameT += 4;
+      // フレームの区切りは VBlank の頭。LCD が消えている間は 70224T ごとに刻む(音と録音の時間を止めない)
+      if (ppu.vblankStarted) { ppu.vblankStarted = false; this._frameEnd(); }
+      else if (this.frameT >= FRAME_T && !ppu.on) this._frameEnd();
+
+      const sr = this.sampleRate;
+      if (sr) {
+        this.cycleAccum += sr * 4;
+        if (this.cycleAccum >= CLOCK) {
+          this.cycleAccum -= CLOCK;
+          if (this.ringLen < AUDIO_RING) {
+            const s = apu.mixSample();
+            const i = (this.ringHead + this.ringLen) & (AUDIO_RING - 1);
+            this.ring[i] = s.left; this.ringR[i] = s.right;
+            this.ringLen++;
+          }
+        }
+      }
+    }
+
+    // DIV(16bit)を書き換える。TIMA とシリアルは DIV のビットの立ち下がりで進むので、DIV への書き込み(0 に戻る)でも進み得る
+    _setDiv(nv) {
+      const old = this.div;
+      this.div = nv;
+      if (this.tac & 4) { const b = TAC_BIT[this.tac & 3]; if ((old & b) && !(nv & b)) this._incTima(); }
+      if ((old & APU_BIT) && !(nv & APU_BIT)) this.apu.seqTick();
+      if (this.serialBits && (old & SERIAL_BIT) && !(nv & SERIAL_BIT)) {
+        if (--this.serialBits === 0) {
+          const out = this.sb;
+          this.sb = this.serialDevice ? (this.serialDevice(out) & 0xFF) : 0xFF;
+          this.sc &= 0x7F; this.if |= 8;
+          this.serialOut.push(out);
+          if (this.onSerial) this.onSerial(out);
+        }
+      }
+    }
+    _incTima() {
+      this.tima = (this.tima + 1) & 0xFF;
+      if (this.tima === 0) this.timaReload = true;
+    }
+
+    _frameEnd() {
+      this.cart.tickRtc(this.frameT, CLOCK);
+      this.frameCount++;
+      this._frameFlag = true;
+      if (this.padTurbo[0] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(0); }
+      if (this.rec) { this.rec.cur.len = this.frameT; this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
+      this.frameT = 0;
+      if (this.onFrame) this.onFrame();
+    }
+
+    // ── バス(CPU から。tick は CPU 側が先に呼んでいる)──
+    read(addr) {
+      if (this.dmaActive && addr < 0xFF00) {
+        // OAM DMA の間: OAM は $FF。DMA の読み元と同じバス(外部バス=ROM/カートリッジ RAM/WRAM、または VRAM)を読むと、
+        // DMA が今運んでいるバイトが見える(DMG)。I/O と HRAM は普通に読める
+        if (addr >= 0xFE00) return 0xFF;
+        const srcVram = this.dmaSrc >= 0x8000 && this.dmaSrc < 0xA000, adrVram = addr >= 0x8000 && addr < 0xA000;
+        if (srcVram === adrVram) return this.dmaByte;
+      }
+      // モード 3 の VRAM、モード 2/3 の OAM は PPU が使っていて読めない
+      if (addr >= 0x8000 && addr < 0xA000) { if (this.ppu.vramBlocked()) return 0xFF; }
+      else if (addr >= 0xFE00 && addr < 0xFEA0) { if (this.ppu.oamBlocked()) return 0xFF; }
+      return this._busRead(addr);
+    }
+    _busRead(addr) {
+      if (addr < 0x8000) return this.cart.read(addr);
+      if (addr < 0xA000) return this.ppu.vram[addr - 0x8000];
+      if (addr < 0xC000) return this.cart.readRam(addr);
+      if (addr < 0xFE00) return this.wram[addr & 0x1FFF]; // $E000-$FDFF は WRAM の写し
+      if (addr < 0xFEA0) return this.ppu.oam[addr - 0xFE00];
+      if (addr < 0xFF00) return 0x00;
+      if (addr >= 0xFF80) return addr === 0xFFFF ? this.ie : this.hram[addr - 0xFF80];
+      if (addr >= 0xFF10 && addr <= 0xFF3F) return this.apu.readRegister(addr);
+      if (addr >= 0xFF40 && addr <= 0xFF4B) return addr === 0xFF46 ? this.dma : this.ppu.readReg(addr);
+      switch (addr) {
+        case 0xFF00: return 0xC0 | (this.p1 & 0x30) | this._p1Low();
+        case 0xFF01: return this.sb;
+        case 0xFF02: return this.sc | 0x7E;
+        case 0xFF04: return this.div >> 8;
+        case 0xFF05: return this.tima;
+        case 0xFF06: return this.tma;
+        case 0xFF07: return this.tac | 0xF8;
+        case 0xFF0F: return this.if | 0xE0;
+      }
+      return 0xFF;
+    }
+
+    write(addr, v) {
+      if (addr < 0x8000) { this.cart.write(addr, v); return; }
+      if (addr < 0xA000) { if (!this.ppu.vramBlocked()) this.ppu.vram[addr - 0x8000] = v; return; }
+      if (addr < 0xC000) { this.cart.writeRam(addr, v); return; }
+      if (addr < 0xFE00) { this.wram[addr & 0x1FFF] = v; return; }
+      if (addr < 0xFEA0) { if (!this.dmaActive && !this.ppu.oamBlocked()) this.ppu.oam[addr - 0xFE00] = v; return; }
+      if (addr < 0xFF00) return;
+      if (addr >= 0xFF80) { if (addr === 0xFFFF) this.ie = v; else this.hram[addr - 0xFF80] = v; return; }
+      if (addr >= 0xFF10 && addr <= 0xFF3F) {
+        this.apu.writeRegister(addr, v);
+        if (this.rec) this.rec.cur.push({ addr, value: v, t: this.frameT });
+        if (this.onWrite) this.onWrite(addr, v, this.frameFrac());
+        return;
+      }
+      if (addr >= 0xFF40 && addr <= 0xFF4B) {
+        if (addr === 0xFF46) { this.dma = v; this.dmaNext = (v >= 0xE0 ? v - 0x20 : v) << 8; this.dmaStart = 2; } // $E0 以上は WRAM の写し側を読む
+        else if (addr === 0xFF40 && this.lcdAlwaysOn) this.ppu.writeReg(addr, v | 0x80);
+        else this.ppu.writeReg(addr, v);
+        return;
+      }
+      switch (addr) {
+        case 0xFF00: { const before = this._p1Low(); this.p1 = v & 0x30; if (before & ~this._p1Low() & 0x0F) this.requestIrq(4); break; }
+        case 0xFF01: this.sb = v; break;
+        case 0xFF02:
+          this.sc = v & 0x81;
+          // 内部クロックで開始。外部クロック(bit0=0)は相手がいないので終わらない
+          this.serialBits = (v & 0x81) === 0x81 ? 8 : 0;
+          if (this.serialBits) { this.serialSent.push(this.sb); if (this.serialSent.length > 4096) this.serialSent.splice(0, 2048); }
+          break;
+        case 0xFF04: this._setDiv(0); break;
+        // あふれた直後のサイクルの書き込みは再読込を取り消す。再読込のサイクルの書き込みは無視される(TMA が勝つ)
+        case 0xFF05: if (!this.timaReloading) { this.tima = v; this.timaReload = false; } break;
+        case 0xFF06: this.tma = v; if (this.timaReloading) this.tima = v; break; // 再読込のサイクルなら新しい値がそのまま入る
+        case 0xFF07: { // 許可/選択を変えた瞬間に選択ビットの AND が落ちると 1 進む
+          const was = (this.tac & 4) && (this.div & TAC_BIT[this.tac & 3]);
+          this.tac = v & 7;
+          const now = (this.tac & 4) && (this.div & TAC_BIT[this.tac & 3]);
+          if (was && !now) this._incTima();
+          break;
+        }
+        case 0xFF0F: this.if = v & 0x1F; break;
+      }
+    }
+
+    // ── 録音(VGM への符号化は段階 8c)。書き込みの t はフレーム頭からの T、フレームの長さは frames[f].len ──
+    startRecording() {
+      const cur = [];
+      const apu = this.apu;
+      // 今のレジスタ像(NR52 を先に。OFF だと他が書けない)と波形 RAM
+      cur.push({ addr: 0xFF26, value: apu.powerOn ? 0x80 : 0x00, t: 0 });
+      for (let a = 0xFF10; a < 0xFF26; a++) {
+        if (a === 0xFF15 || a === 0xFF1F) continue;
+        let v = apu.regRaw[a - 0xFF10];
+        if (a === 0xFF14 || a === 0xFF19 || a === 0xFF1E || a === 0xFF23) v &= 0x7F; // トリガは写さない(鳴り直してしまう)
+        cur.push({ addr: a, value: v, t: 0 });
+      }
+      for (let i = 0; i < 16; i++) cur.push({ addr: 0xFF30 + i, value: apu.ch3.readWaveRam(i), t: 0 });
+      this.rec = { frames: [], cur };
+    }
+    stopRecording() {
+      const rec = this.rec;
+      if (!rec) return [];
+      this.rec = null;
+      if (rec.cur.length) { rec.cur.len = this.frameT; rec.frames.push(rec.cur); }
+      return rec.frames;
+    }
+
+    // ── 実行 ──
+    step() {
+      const cpu = this.cpu;
+      if (cpu.stopped) { // STOP 中: ボタンが押されるまで時間だけ進む
+        if ((this.pad[0] & 0xFF) !== 0) cpu.stopped = false;
+        else { this.tick(); return 4; }
+      }
+      return cpu.step();
+    }
+    runFrame() {
+      this._frameFlag = false;
+      let guard = 0;
+      while (!this._frameFlag) { this.step(); if (++guard > 200000) break; }
+      return this.sampleRate ? this.takeAudio(this.ringLen) : null;
+    }
+    runSamples(out) {
+      const n = out.length;
+      if (!this.sampleRate) { out.fill(0); return; }
+      let guard = 0;
+      while (this.ringLen < n && ++guard < 400000) this.step();
+      if (this.ringLen < n) this.underruns++;
+      this.takeAudioInto(out, n);
+    }
+    // 左右別(AudioWorklet の process)
+    runSamplesStereo(outL, outR) {
+      const n = outL.length;
+      if (!this.sampleRate) { outL.fill(0); outR.fill(0); return; }
+      let guard = 0;
+      while (this.ringLen < n && ++guard < 400000) this.step();
+      if (this.ringLen < n) this.underruns++;
+      this.takeAudioInto(outL, n, outR);
+    }
+    takeAudio(n) { const out = new Float32Array(n); this.takeAudioInto(out, n); return out; }
+    // 音はステレオ(NR51 の左右振り分け)。outR を渡せば左右別、渡さなければ左右の平均を out へ
+    takeAudioInto(out, n, outR) {
+      const take = Math.min(n, this.ringLen), M = AUDIO_RING - 1, h = this.ringHead;
+      if (outR) { for (let i = 0; i < take; i++) { out[i] = this.ring[(h + i) & M]; outR[i] = this.ringR[(h + i) & M]; } for (let i = take; i < n; i++) outR[i] = 0; }
+      else for (let i = 0; i < take; i++) out[i] = (this.ring[(h + i) & M] + this.ringR[(h + i) & M]) * 0.5;
+      for (let i = take; i < n; i++) out[i] = 0;
+      this.ringHead = (this.ringHead + take) & (AUDIO_RING - 1);
+      this.ringLen -= take;
+    }
+
+    static describe(gb) {
+      const h = gb.cart.header;
+      return `${h.title || '(no title)'} [${gb.cart.mbc}${gb.cart.unsupported ? ' 未対応種別 $' + h.type.toString(16) : ''}] ROM ${gb.cart.rom.length >> 10}K RAM ${gb.cart.ram.length}` +
+        `${gb.cart.hasBattery ? ' battery' : ''}${gb.cart.hasRtc ? ' rtc' : ''}${h.cgb ? (h.cgbOnly ? ' CGB専用' : ' CGB対応') : ''}${h.sgb ? ' SGB対応' : ''}${h.checksumOk ? '' : ' ヘッダ不整合'}`;
+    }
+  }
+
+  GbConsole.CLOCK = CLOCK;
+  GbConsole.FRAME_T = FRAME_T;
+  GbConsole.BUTTON = { A: 1, B: 2, SELECT: 4, START: 8, UP: 16, DOWN: 32, LEFT: 64, RIGHT: 128 };
+  Emu.GbConsole = GbConsole;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * ゲームボーイ本体のステート(状態の保存・復元)と巻き戻し
+ * MML.Emu.GbState / MML.Emu.GbRewind
+ *
+ * どちらも NES の物(nes/nesState.js の StateTree、nes/nesRewind.js)をそのまま使う:
+ *   - ステート: 本体(GbConsole)のオブジェクト木を汎用に写す。除外は ROM、録音、音のリング、画面、コールバック、シリアルの記録
+ *   - 巻き戻し: 0.5 秒ごとのステート+毎フレームのパッド値。逆再生の映像は ppu.frameIdx(階調番号 8bit、160×144)
+ * 形: { v: 1, machine: 'gb', title, romLen, tree }
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const SKIP_KEYS = new Set(['rom', 'rec', 'ring', 'ringR', 'frame', 'frameIdx', 'onFrame', 'onWrite', 'onSerial', 'serialDevice',
+    'serialOut', 'serialSent', 'bus', 'divBit', 'con', 'shades', 'lineIdx', 'claimed', '_out', 'header', 'data', 'low']);
+
+  const GbState = {
+    save(gb) {
+      const T = Emu.StateTree;
+      return { v: 1, machine: 'gb', title: gb.cart.header.title || '', romLen: gb.cart.rom.length, tree: T.snapshot(gb, [gb.cart.rom], SKIP_KEYS) };
+    },
+    // 同じ ROM で作ったステートを書き戻す。合わなければ false
+    load(gb, state) {
+      if (!state || state.v !== 1 || state.machine !== 'gb' || !state.tree) return false;
+      if (state.romLen !== gb.cart.rom.length || state.title !== (gb.cart.header.title || '')) return false;
+      const rec = gb.rec;
+      Emu.StateTree.restore(gb, state.tree);
+      gb.rec = rec;                      // 録音中ならそのまま続ける
+      gb.ringHead = 0; gb.ringLen = 0;   // 音のリングは捨てる
+      gb._frameFlag = false;
+      gb.cart._map();                    // バンクの参照位置を作り直す
+      return true;
+    },
+  };
+
+  // 逆再生の色: 階調番号 → 色(ppu.shades)。nesScreen.js の blitIndex / Worklet の rwframe が palette として使う
+  class GbRewind extends (Emu.NesRewind || class {}) {
+    constructor(gb) {
+      super(gb, { State: GbState, frameBytes: 160 * 144 });
+      this.idxWidth = 160;
+    }
+    get palette() { const p = new Uint32Array(256); const sh = this.nes.ppu.shades; for (let i = 0; i < sh.length; i++) p[i] = sh[i]; return p; }
+  }
+
+  Emu.GbState = GbState;
+  Emu.GbRewind = GbRewind;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
  * NES / MSX 本体を AudioWorklet の中で回す (nes-worklet バンドルの本体。DESIGN-CAPTURE.md §6/§7 段階 6b、DESIGN-MSX-CAPTURE.md §6 段階 7a)
  *
- * 本体クラスは load メッセージの machine('nes' | 'msx')で選ぶ(NesConsole / MsxConsole。外形は同じ)。State/Rewind も機種で選ぶ。
+ * 本体クラスは load メッセージの machine('nes' | 'msx' | 'gb')で選ぶ(NesConsole / MsxConsole / GbConsole。外形は同じ)。State/Rewind も機種で選ぶ。
+ * GB(2026-11-13、DESIGN-GB-CAPTURE.md 段階 8c)は音がステレオ(本体の stereo が真なら左右別に出す)。
  * 以下「NES」「nes」とあるのは本体一般のこと(変数名は NES 時代のまま)。MSX だけの物: load の msx オプション(機種/BIOS/マッパー)、
  * key/keyReleaseAll(PC のキー → MSX キーボード)、rwframe の palette(逆再生の 8bit 画面の色)、loaded の chips。
  *
@@ -13989,7 +15954,7 @@
       try {
         switch (m.type) {
           case 'load': {
-            const machine = m.machine === 'msx' ? 'msx' : 'nes';
+            const machine = m.machine === 'msx' ? 'msx' : m.machine === 'gb' ? 'gb' : 'nes';
             let nes, info;
             if (machine === 'msx') {
               // MSX: ROM(null なら BIOS だけで起動)+ 機種/BIOS(main 32K・sub/logo 16K、ArrayBuffer で届く)/マッパー種別
@@ -14000,6 +15965,10 @@
               const disks = (o.disks || []).map((b) => new Uint8Array(b)); // .dsk 画像(7d)
               nes = new MML.Emu.MsxConsole(m.rom ? new Uint8Array(m.rom) : null, { machine: o.machine, bios: bios.main ? bios : null, mapperType: o.mapperType || undefined, cartB, disks, fdc: o.fdc || undefined });
               info = MML.Emu.MsxConsole.describe(nes);
+            } else if (machine === 'gb') {
+              nes = new MML.Emu.GbConsole(new Uint8Array(m.rom), { model: (m.gb && m.gb.model) || 'dmg' });
+              if (m.gb && m.gb.shades) nes.ppu.shades = Array.from(m.gb.shades);
+              info = MML.Emu.GbConsole.describe(nes);
             } else {
               nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });
               info = MML.Emu.INES.describe(nes.rom);
@@ -14009,10 +15978,10 @@
             if (m.battery && nes.hasBattery) nes.setBattery(new Uint8Array(m.battery)); // 前回のセーブ(主スレッドが IndexedDB から)
             this.nes = nes;
             this.machine = machine;
-            this.State = machine === 'msx' ? MML.Emu.MsxState : MML.Emu.NesState;
-            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : MML.Emu.NesRewind;
+            this.State = machine === 'msx' ? MML.Emu.MsxState : machine === 'gb' ? MML.Emu.GbState : MML.Emu.NesState;
+            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? MML.Emu.GbRewind : MML.Emu.NesRewind;
             this.rewind = Rewind ? new Rewind(nes) : null;
-            this.dcX = 0; this.dcY = 0;
+            this.dcX = 0; this.dcY = 0; this.dcX2 = 0; this.dcY2 = 0;
             this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH() });
             break;
           }
@@ -14145,7 +16114,7 @@
         const idx = rw.pending.slice(); rw.pending = null;
         const msg = { type: 'rwframe', seq: rw.pendingSeq, idx: idx.buffer, oldest: rewind.oldest, w: rewind.idxWidth || this.frameW(), h: (this.nes && this.nes.frameIdxHeight) || this.frameH() };
         const tr = [idx.buffer];
-        if (this.machine === 'msx' && rewind.palette) { const pal = (rewind.paletteOf ? rewind.paletteOf(rw.pendingSeq) : rewind.palette).slice(); msg.palette = pal.buffer; tr.push(pal.buffer); } // 8bit 画面の色(そのフレームの色表: パレット 16 色か GRAPHIC7 の 256 色)
+        if (this.machine !== 'nes' && rewind.palette) { const pal = (rewind.paletteOf ? rewind.paletteOf(rw.pendingSeq) : rewind.palette).slice(); msg.palette = pal.buffer; tr.push(pal.buffer); } // 8bit 画面の色(そのフレームの色表: パレット 16 色か GRAPHIC7 の 256 色)
         this.port.postMessage(msg, tr);
       }
     }
@@ -14170,7 +16139,9 @@
         try { this.reverseTick(); } catch (e) { this.port.postMessage({ type: 'error', message: String((e && e.stack) || e) }); this.rw = null; }
         return true;
       }
-      if (!this.nes || this.paused) { out.fill(0); return true; }
+      if (!this.nes || this.paused) { out.fill(0); for (let c = 1; c < outputs[0].length; c++) outputs[0][c].fill(0); return true; }
+      // 本体がステレオ(GB)で出力が 2ch あれば左右別に
+      const stereoOut = this.nes.stereo && outputs[0].length > 1 && typeof this.nes.runSamplesStereo === 'function' ? outputs[0][1] : null;
       try {
         if (!this.ffTmp || this.ffTmp.length !== out.length) this.ffTmp = new Float32Array(out.length);
         if (this.speed > 1) {
@@ -14178,7 +16149,7 @@
         }
         this.afOn = this.diskFast && this.speed === 1 && !!(this.nes.diskBusy && this.nes.diskBusy());
         if (this.afOn) this.autoFast(out.length);
-        this.nes.runSamples(out);
+        if (stereoOut) this.nes.runSamplesStereo(out, stereoOut); else this.nes.runSamples(out);
       } catch (e) {
         this.port.postMessage({ type: 'error', message: String((e && e.stack) || e) });
         this.nes = null; out.fill(0); return true;
@@ -14191,6 +16162,13 @@
         out[i] = y;
       }
       this.dcX = x1; this.dcY = y1;
+      if (stereoOut) {
+        let x2 = this.dcX2, y2 = this.dcY2;
+        for (let i = 0; i < stereoOut.length; i++) { const x = stereoOut[i]; const y = x - x2 + 0.999 * y2; x2 = x; y2 = y; stereoOut[i] = y; }
+        this.dcX2 = x2; this.dcY2 = y2;
+        for (let c = 2; c < outputs[0].length; c++) outputs[0][c].set(out);
+        return true;
+      }
       for (let c = 1; c < outputs[0].length; c++) outputs[0][c].set(out);
       return true;
     }

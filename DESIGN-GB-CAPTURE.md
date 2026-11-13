@@ -86,9 +86,15 @@ APU を入れ替えると GBS、VGM の DMG チップ、gbs2mml の結果が全�
 - `gbConsole.js`: バス、タイマ(DIV 16bit、TIMA は選択ビットの立ち下がり、あふれから 1 M サイクル後に再読込と割り込み)、
   ジョイパッド、シリアル、OAM DMA、割り込み、機種(dmg/cgb/sgb)、録音、`runFrame()`。NesConsole/MsxConsole と同じ形の API。
 - `cart.js`: ヘッダ解析と MBC。種別はヘッダ $0147、多本入り MBC1 と MMM01 は中身で判別。
-- `ppu.js`: 8a は行単位(LY/STAT/割り込みの時刻は行内の固定位置、描画はモード 3 の頭で 1 行)。8c でドット単位
-  (モード 3 の長さがスプライト数/SCX/ウィンドウで変わる、行の途中のレジスタ書き換え)に作り直す。
-  STAT 割り込みで音ドライバを回すソフトがあるので音にも効く。
+- `ppu.js`: 8c(2026-11-13)で行単位から作り直した。モード 3 の長さは 172T+SCX の下位 3bit+ウィンドウ 6T+スプライトごとの遅れ、
+  画素はモード 3 の間に時間の進みに合わせて左から描く(行の途中のレジスタ書き換えがその位置から効く。本体が 4T 刻みなので 4 画素刻み)、
+  モード 2/3 の OAM とモード 3 の VRAM は CPU から触れない。STAT 割り込みで音ドライバを回すソフトがあるので音にも効く。
+  残り: スプライトの遅れによる画素位置のずれ、スプライト数での HBlank 時刻(式は入れたが mooneye の試験は落ちる)、
+  LCD を点けた直後の細部、LCD OFF 中の LY=LYC、OAM 破壊バグ。
+- `gbState.js`: ステートと巻き戻し。NES の StateTree / NesRewind をそのまま使う(NesRewind は保存係と画面の大きさを差し替えられるようにした)。
+- ゲーム画面(8c): 中身判定は imageDetect.js の kind 'gb'(ヘッダのロゴ先頭+チェックサム。拡張子が .rom でも拾う)、nesScreen.js の openGb、
+  Worklet は同じバンドル(machine 'gb')。音はステレオ(Worklet の出力を 2ch にした。NES/MSX は同じ音を左右へ)。
+  ライブ表示は鍵盤表示の GB の行(chips ['gbs']、keyboard.js の makeGbStepper が書き込み列を APUGb に流してフレームごとの値を作る)。
 - CGB(8d): 倍速、VRAM/WRAM バンク、HDMA、パレット、赤外線、DMG ソフトの着色(ブート ROM があれば)。
 - SGB(8g): §5。
 
@@ -102,8 +108,9 @@ APU を入れ替えると GBS、VGM の DMG チップ、gbs2mml の結果が全�
 - **SGB 初代は約 2.4% 速い**(SNES のクロック由来で 4295454Hz)。ヘッダのクロック欄にその値を書く(規格内)。
   SGB2 は 4194304Hz。本ツールの VGM 再生がヘッダ値で音程を変えることは 8c で鳴らして確かめる(コメント上は「ヘッダ値そのまま」)。
   tools/mesen/vgm-recorder.lua は 4194304 固定なので SGB 録音向けに直す。
-- フレーム長は 44100/59.7275 ≈ 738.35 サンプル。0x62(735)は使えないので 0x61 nnnn の可変 wait で出し、
-  端数は積算して 738/739 に振る。vgmClean.js(MSX で可変フレーム対応済み)がそのまま通るかは 8c で確かめる。
+- フレーム長は 44100/59.7275 ≈ 738.35 サンプル。0x62(735)は使えないので、録音頭からの通算 T をサンプルへ換算して 0x61/0x7n で待つ
+  (MML.VGM.encodeGbRecording。端数は自然に 738/739 へ散る)。vgmClean.js(効果音/処理落ちの補正)は 735/882 サンプルのフレームを前提にしていて
+  GB の録音には掛けられない(画面では補正のチェックを隠す)。対応は別途。
 - フレーム内の時刻は T をサンプルへ換算(PCM 再生の技を潰さない)。
 - 規格外ブロック "GBXX"(NESX/MSXX と同じ流儀):
   - kind 1: SGB 音源。開始時の SPC メモリ 64K+DSP レジスタの控えと、SNES 側からの APU ポート($2140〜$2143)書き込み列(時刻つき)。
@@ -141,15 +148,15 @@ SNES 本体の土台になるので、SNES2VGM をやる時にそのまま広げ
 |---|---|---|
 | blargg cpu_instrs / instr_timing / mem_timing / mem_timing-2 / halt_bug | 全部 | — |
 | blargg dmg_sound(12 本) | 全部(8b で) | — |
-| blargg oam_bug(8 本) | 2 | OAM 破壊バグ(8c) |
+| blargg oam_bug(8 本) | 2 | OAM 破壊バグ(未実装。必要になったら) |
 | blargg interrupt_time | 0 | CGB の倍速を使う試験(8d) |
 | mooneye acceptance 直下(命令/割り込み/HALT/DMA の時刻、起動時の値) | 32/32(8b で) | — |
 | mooneye bits / instr / interrupts / oam_dma / serial / timer | 22/22(8b で) | — |
-| mooneye ppu | 5/12 | モード 3 の長さ、LCD を点けた直後、STAT の細部(8c) |
+| mooneye ppu | 8/12(8c で) | スプライト数での HBlank 時刻、LCD を点けた直後 2 本、LCD OFF 中の LY=LYC |
 | mooneye emulator-only mbc1 / mbc2 / mbc5 | 28/28 | — |
 | dmg-acid2 | 合格 | — |
 
-合計 125/140(8a の終わりは 113。mooneye のうち DMG 以外の機種向け、手動確認用、cgb_sound の 34 本は回していない)。
+合計 128/140(8a の終わり 113、8b の終わり 125。mooneye のうち DMG 以外の機種向け、手動確認用、cgb_sound の 34 本は回していない)。
 
 この表を取る過程で決まった実装上の事実(実測):
 - バスの読み書きは「先に 4T 進めてからアクセス」で mem_timing と mooneye の *_timing が全部通る。
@@ -157,6 +164,7 @@ SNES 本体の土台になるので、SNES2VGM をやる時にそのまま広げ
 - 起動時の DIV(16bit)は、最初の取り込みサイクルの前で $ABC8(boot_div)。
 - OAM DMA は書いた 2 M サイクル後から 160 サイクル。その間 OAM は $FF、読み元と同じバスは運搬中のバイトが見える。
 - mooneye は送信完了を待たずに結果を連続送信するので、合否は「送り始めたバイト」で読む。
+- LY の読み出し値は行の終わりの 4T 前に次の行へ進む(hblank_ly_scx_timing。HALT からの割り込み受け付けに 1 サイクル足す案は他の試験を壊した)。
 
 テスト ROM のライセンス(2026-11-13 確認): mooneye-test-suite は MIT、dmg-acid2 は MIT、blargg の物はリポジトリにライセンスの記載が無い
 (readme は出所の説明だけ)。どれも同梱もコミットもしない。
@@ -193,7 +201,7 @@ SNES 本体の土台になるので、SNES2VGM をやる時にそのまま広げ
 |---|---|
 | 8a | CPU の M サイクル化と割り込み、本体骨格(タイマ/MBC1・2・3・5/ジョイパッド/シリアル/行単位 PPU)、gb-run.js、自作テスト ROM、テスト ROM の合格表(済、2026-11-13。§6.1) |
 | 8b | APU の作り直し(済)、GBS を本体コアへ載せ替え(済)、時刻つき書き込みログ(採取は済、写し再生への適用は未)、gbs2mml の A/B(済、§2.3) |
-| 8c | DMG の PPU をドット単位に、ゲーム画面(中身判定、Worklet、巻き戻し、状態保存)、録音→VGM |
+| 8c | DMG の PPU をドット単位に、ゲーム画面(中身判定、Worklet、巻き戻し、状態保存)、録音→VGM(済、2026-11-13。ブラウザで起動/録音/ステート/巻き戻し/ライブ表示を確認。実ソフトでは未確認。録音の補正 vgmClean は GB 未対応、SGB のクロック選択は 8g) |
 | 8d | CGB |
 | 8e | 周辺: 時計、振動、傾き、赤外線、ブザー、MBC6/MBC7/HuC1/HuC3/MMM01、カメラ、プリンタ、バーコード |
 | 8f | 実ソフト総当たり、Mesen との A/B |

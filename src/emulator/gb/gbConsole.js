@@ -6,7 +6,7 @@
  * タイマ(DIV/TIMA)、シリアル、OAM DMA、PPU、APU、音の標本化。NesConsole/MsxConsole と同じ形の API を持つ
  * (runFrame / runSamples / setController / startRecording / getBattery …)。
  *
- * まだ無い物(DESIGN-GB-CAPTURE.md §9): PPU は行単位(8c)、
+ * まだ無い物(DESIGN-GB-CAPTURE.md §9): 
  * CGB(8d)、周辺と残りの MBC(8e)、SGB(8g)。ブート ROM は使わず起動後の状態を直接セットする。
  *
  * 参考: Pan Docs "Timer obscure behaviour" "Interrupts" "Power-Up Sequence"
@@ -40,7 +40,8 @@
       this.cpu = new Emu.CPUSm83(this);
       this.wram = new Uint8Array(0x2000);
       this.hram = new Uint8Array(0x7F);
-      this.pad = 0; this.padHeld = 0; this.padTurbo = 0; this.turboRate = 2; this.turboPhase = 0;
+      // パッドは NesConsole と同じ形(配列の [0] だけ使う。巻き戻し NesRewind/GbRewind が pad[0]/pad[1] を記録する)
+      this.pad = [0, 0]; this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
       this.cpuCycles = 0; this.frameCount = 0; this.frameT = 0; this._frameFlag = false;
       this.sampleRate = 0; this.cycleAccum = 0;
       this.ring = new Float32Array(AUDIO_RING); this.ringR = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0; this.underruns = 0;
@@ -78,17 +79,18 @@
 
     setSampleRate(sr) { this.sampleRate = sr; this.cycleAccum = 0; this.ringHead = 0; this.ringLen = 0; if (sr) this.apu.setSampleRate(sr); }
     // ボタンのビットは NesConsole.BUTTON と同じ並び(A B SELECT START UP DOWN LEFT RIGHT)。画面側の入力をそのまま使える
-    setController(port, bits, turbo) { if (port) return; this.padHeld = bits & 0xFF; this.padTurbo = (turbo | 0) & 0xFF; this._applyPad(); }
-    setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(); }
-    _applyPad() {
+    setController(port, bits, turbo) { if (port) return; this.padHeld[0] = bits & 0xFF; this.padTurbo[0] = (turbo | 0) & 0xFF; this._applyPad(0); }
+    setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(0); }
+    _applyPad(port) {
+      if (port) return;
       const on = ((this.turboPhase / this.turboRate) | 0) === 0;
       const before = this._p1Low();
-      this.pad = this.padHeld | (on ? this.padTurbo : 0);
+      this.pad[0] = this.padHeld[0] | (on ? this.padTurbo[0] : 0);
       if (before & ~this._p1Low() & 0x0F) this.requestIrq(4); // 選ばれている線が H→L
     }
     // P1 の下位 4bit(押すと 0)。bit4=0 で十字(右左上下)、bit5=0 でボタン(A B SELECT START)
     _p1Low() {
-      const p = this.pad;
+      const p = this.pad[0];
       let low = 0x0F;
       if (!(this.p1 & 0x10)) low &= ~(((p >> 7) & 1) | (((p >> 6) & 1) << 1) | (((p >> 4) & 1) << 2) | (((p >> 5) & 1) << 3));
       if (!(this.p1 & 0x20)) low &= ~(p & 0x0F);
@@ -103,6 +105,18 @@
     get frame() { return this.ppu.frame; }
     get frameWidth() { return 160; }
     get frameHeight() { return 144; }
+    get frameRate() { return CLOCK / FRAME_T; } // 59.7275Hz
+    get stereo() { return true; }
+    // ゲーム画面(nesScreen.js / nes-worklet-impl.js)が機種を問わず呼ぶ口
+    extBits() { return 0; }
+    get diskCount() { return 0; }
+    chips() { return ['gb']; }
+    // 鍵盤表示のミュート/音量: { gb: { ch1..ch4 } }
+    applyMix(mute, volume) {
+      const put = (t, s, conv) => { if (s) for (const k of Object.keys(t)) if (s[k] !== undefined) t[k] = conv(s[k]); };
+      if (mute && mute.gb) put(this.apu.mute, mute.gb, (v) => !!v);
+      if (volume && volume.gb) put(this.apu.vol, volume.gb, (v) => Math.max(0, Math.min(2, +v || 0)));
+    }
     frameFrac() { return Math.min(0.999999, this.frameT / FRAME_T); }
 
     // ── 割り込み(CPU から呼ばれる)──
@@ -179,7 +193,7 @@
       this.cart.tickRtc(this.frameT, CLOCK);
       this.frameCount++;
       this._frameFlag = true;
-      if (this.padTurbo || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
+      if (this.padTurbo[0] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(0); }
       if (this.rec) { this.rec.cur.len = this.frameT; this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       this.frameT = 0;
       if (this.onFrame) this.onFrame();
@@ -194,6 +208,9 @@
         const srcVram = this.dmaSrc >= 0x8000 && this.dmaSrc < 0xA000, adrVram = addr >= 0x8000 && addr < 0xA000;
         if (srcVram === adrVram) return this.dmaByte;
       }
+      // モード 3 の VRAM、モード 2/3 の OAM は PPU が使っていて読めない
+      if (addr >= 0x8000 && addr < 0xA000) { if (this.ppu.vramBlocked()) return 0xFF; }
+      else if (addr >= 0xFE00 && addr < 0xFEA0) { if (this.ppu.oamBlocked()) return 0xFF; }
       return this._busRead(addr);
     }
     _busRead(addr) {
@@ -221,10 +238,10 @@
 
     write(addr, v) {
       if (addr < 0x8000) { this.cart.write(addr, v); return; }
-      if (addr < 0xA000) { this.ppu.vram[addr - 0x8000] = v; return; }
+      if (addr < 0xA000) { if (!this.ppu.vramBlocked()) this.ppu.vram[addr - 0x8000] = v; return; }
       if (addr < 0xC000) { this.cart.writeRam(addr, v); return; }
       if (addr < 0xFE00) { this.wram[addr & 0x1FFF] = v; return; }
-      if (addr < 0xFEA0) { if (!this.dmaActive) this.ppu.oam[addr - 0xFE00] = v; return; }
+      if (addr < 0xFEA0) { if (!this.dmaActive && !this.ppu.oamBlocked()) this.ppu.oam[addr - 0xFE00] = v; return; }
       if (addr < 0xFF00) return;
       if (addr >= 0xFF80) { if (addr === 0xFFFF) this.ie = v; else this.hram[addr - 0xFF80] = v; return; }
       if (addr >= 0xFF10 && addr <= 0xFF3F) {
@@ -290,7 +307,7 @@
     step() {
       const cpu = this.cpu;
       if (cpu.stopped) { // STOP 中: ボタンが押されるまで時間だけ進む
-        if ((this.pad & 0xFF) !== 0) cpu.stopped = false;
+        if ((this.pad[0] & 0xFF) !== 0) cpu.stopped = false;
         else { this.tick(); return 4; }
       }
       return cpu.step();
@@ -308,6 +325,15 @@
       while (this.ringLen < n && ++guard < 400000) this.step();
       if (this.ringLen < n) this.underruns++;
       this.takeAudioInto(out, n);
+    }
+    // 左右別(AudioWorklet の process)
+    runSamplesStereo(outL, outR) {
+      const n = outL.length;
+      if (!this.sampleRate) { outL.fill(0); outR.fill(0); return; }
+      let guard = 0;
+      while (this.ringLen < n && ++guard < 400000) this.step();
+      if (this.ringLen < n) this.underruns++;
+      this.takeAudioInto(outL, n, outR);
     }
     takeAudio(n) { const out = new Float32Array(n); this.takeAudioInto(out, n); return out; }
     // 音はステレオ(NR51 の左右振り分け)。outR を渡せば左右別、渡さなければ左右の平均を out へ

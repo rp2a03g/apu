@@ -26,8 +26,11 @@
   const FRAME_BYTES = 256 * 240;
 
   class NesRewind {
-    constructor(nes) {
+    // opt: { State, frameBytes }(GB の GbRewind が差し替える。既定は NES)
+    constructor(nes, opt) {
       this.nes = nes;
+      this.State = (opt && opt.State) || Emu.NesState;
+      this.frameBytes = (opt && opt.frameBytes) || FRAME_BYTES;
       this.snaps = [];          // [{ frame, state }] frame = そのフレームが終わった時点の frameCount
       this.pads = [];           // pads[frameCount] = pad0 | pad1 << 8(そのフレーム終わりの値。フレーム番号は frameCount)
       this.base = 0;            // pads の先頭が指す frameCount(古い分は捨てる)
@@ -39,15 +42,16 @@
     clear() { this.snaps.length = 0; this.pads.length = 0; this.base = this.nes.frameCount; this.ringFrame.fill(-1); }
     // 今の画面(ppu.frameIdx)を輪に控える
     _capture(f) {
-      if (!this.ring) this.ring = new Uint8Array(RING * FRAME_BYTES);
+      const FB = this.frameBytes;
+      if (!this.ring) this.ring = new Uint8Array(RING * FB);
       const slot = f % RING;
-      this.ring.set(this.nes.ppu.frameIdx, slot * FRAME_BYTES);
+      this.ring.set(this.nes.ppu.frameIdx, slot * FB);
       this.ringFrame[slot] = f;
     }
     // 輪にあるフレーム f の画面(無ければ null)
     frameAt(f) {
       const slot = f % RING;
-      return this.ring && this.ringFrame[slot] === f ? this.ring.subarray(slot * FRAME_BYTES, (slot + 1) * FRAME_BYTES) : null;
+      return this.ring && this.ringFrame[slot] === f ? this.ring.subarray(slot * this.frameBytes, (slot + 1) * this.frameBytes) : null;
     }
     // 逆再生を始める(本体は止めたまま呼び手が reverseStep/regenStep を回す)。戻れる履歴が無ければ false
     beginReverse() {
@@ -69,7 +73,7 @@
         let si = -1;
         for (let i = this.snaps.length - 1; i >= 0; i--) if (this.snaps[i].frame < target) { si = i; break; }
         if (si < 0) return false;
-        Emu.NesState.load(this.nes, this.snaps[si].state);
+        this.State.load(this.nes, this.snaps[si].state);
         rv.regen = { next: this.snaps[si].frame + 1, upto: target };
         this.replaying = true;
       }
@@ -111,7 +115,7 @@
       this.pads[f - this.base] = (nes.pad[0] & 0xFF) | ((nes.pad[1] & 0xFF) << 8);
       this._capture(f);
       if (f % INTERVAL === 0) {
-        this.snaps.push({ frame: f, state: Emu.NesState.save(nes) });
+        this.snaps.push({ frame: f, state: this.State.save(nes) });
         if (this.snaps.length > KEEP) {
           const drop = this.snaps.shift();
           // 捨てたスナップショットより前のパッド記録も要らない
@@ -132,7 +136,7 @@
       const snap = this.snaps[si];
       // 今押している物は状態を読む「前」に控える(読んだ後に取ると、巻き戻した先で押していた物が残って押しっぱなしになった。2026-11-11)
       const held = [nes.padHeld[0], nes.padHeld[1]], turbo = [nes.padTurbo[0], nes.padTurbo[1]];
-      Emu.NesState.load(nes, snap.state);
+      this.State.load(nes, snap.state);
       // 控えていたパッドの値で進める(setController を通さず pad を直接。連射の位相も記録に含まれている)
       this.replaying = true;
       try {

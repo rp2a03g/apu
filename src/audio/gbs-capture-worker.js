@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 14:37:44
+ * Built by tools/build-capture-workers.ps1 at 2026-11-13 14:55:27
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-13 14:37:44';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-13 14:55:27';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -1193,15 +1193,21 @@
 })(globalThis);
 
 /*
- * ゲームボーイの PPU(段階 8a: 行単位、DMG)
+ * ゲームボーイの PPU(DMG)
  * MML.Emu.GbPpu
  *
- * 1 行 = 456T、154 行(0-143 表示、144-153 VBlank)。行の中はモード 2(OAM、0-79)→ 3(描画、80-251)→ 0(HBlank、252-455)の
- * 固定長で、モード 3 の頭でその行をまとめて描く。LY/STAT/割り込みの時刻は合うが、次は合わない(段階 8c でドット単位にする):
- *   - モード 3 の長さ(スプライト数/SCX/ウィンドウで 172〜289T に伸びる)
- *   - 行の途中のレジスタ書き換え、モード 2/3 中の OAM/VRAM アクセスの遮断
- *   - 153 行目の LY=0 の早出し、LCD を点けた直後の 1 行目、STAT 書き込みの癖(DMG)
- * 参考: Pan Docs "Rendering" "STAT"
+ * 1 行 = 456T、154 行(0-143 表示、144-153 VBlank)。行の中はモード 2(OAM 走査、0-79)→ 3(描画)→ 0(HBlank)。
+ *
+ * ★2026-11-13 段階 8c で行単位から作り直し(DESIGN-GB-CAPTURE.md §3):
+ *   - モード 3 の長さは 172T+(SCX の下位 3bit)+ウィンドウ 6T+スプライトごとの遅れ(Pan Docs の OBJ penalty の式)。
+ *     HBlank の STAT 割り込みで音ドライバや演出を回すソフトの時刻が合う
+ *   - 画素はモード 3 の間、時間の進みに合わせて左から描く(本体は 4T ずつ進むので 4 画素刻み)。行の途中で
+ *     SCX/SCY/LCDC/パレット/ウィンドウを書き換えるとその位置から効く。スプライトの遅れによる画素位置のずれまでは追わない
+ *   - モード 2/3 の間の OAM、モード 3 の間の VRAM は CPU から触れない(読むと $FF、書きは捨てる)
+ *   - 153 行目は 4T で LY=0 になる。LCD を点けた直後の 1 行目はモード 2 が無く 4T 短い。LCD が消えている間 LY=LYC の旗は動かない
+ *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)、OAM 破壊バグ
+ *
+ * 参考: Pan Docs "Rendering" "STAT" "OAM"。細部は mooneye の acceptance/ppu と dmg-acid2 で確かめる(tools/headless/gb-testroms.js)。
  */
 (function (global) {
   'use strict';
@@ -1209,16 +1215,18 @@
   const Emu = MML.Emu = MML.Emu || {};
 
   const W = 160, H = 144;
+  const FIRST_PIXEL_DOT = 92; // モード 3 の頭(80)から最初の画素が出るまで 12T(+SCX の下位 3bit)
 
   class GbPpu {
     constructor(con) {
       this.con = con; // requestIrq(bit)
       this.vram = new Uint8Array(0x2000);
       this.oam = new Uint8Array(0xA0);
-      this.frame = new Uint32Array(W * H); // 0xAABBGGRR
+      this.frame = new Uint32Array(W * H);   // 0xAABBGGRR
+      this.frameIdx = new Uint8Array(W * H); // 階調番号 0-3(巻き戻しの映像の輪が控える。色は shades で引く)
       this.shades = [0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000]; // 白 → 黒(設定で差し替える)
-      this.lineIdx = new Uint8Array(W);  // その行の BG/ウィンドウの色番号(スプライトの優先判定用)
-      this.claimed = new Uint8Array(W);
+      this.sprList = new Uint8Array(10); // その行のスプライト(OAM 番号、優先順)
+      this.noRender = false;             // true: 絵は描かない(GBS プレイヤー)
       this.reset();
     }
 
@@ -1228,19 +1236,29 @@
       this.scy = 0; this.scx = 0; this.ly = 0; this.lyc = 0;
       this.bgp = 0xFC; this.obp0 = 0xFF; this.obp1 = 0xFF;
       this.wy = 0; this.wx = 0;
+      this.line = 0;          // 内部の行(153 行目でも 153 のまま。ly は読み出し値)
       this.dot = 0; this.mode = 2;
-      this.winLine = 0; this.wyHit = false;
+      this.mode3End = 252;    // この行のモード 3 が終わる位置(T)
+      this.px = 0;            // この行で次に描く画素
+      this.scxFine = 0;
+      this.sprCount = 0;
+      this.winLine = 0; this.wyHit = false; this.winActive = false; this.winX = 0;
+      this.firstLine = false; // LCD を点けた直後の 1 行目(モード 2 が無い)
+      this.lycFlag = true;    // 起動直後は LY=LYC=0
       this.statLine = false;
       this.vblankStarted = false;
-      this.frame.fill(this.shades[0]);
+      this.frame.fill(this.shades[0]); this.frameIdx.fill(0);
     }
 
     get on() { return (this.lcdc & 0x80) !== 0; }
+    // CPU から見て触れない間(本体のバスが見る)
+    oamBlocked() { return (this.lcdc & 0x80) !== 0 && this.line < H && !this.firstLine && (this.mode === 2 || this.mode === 3); }
+    vramBlocked() { return (this.lcdc & 0x80) !== 0 && this.line < H && this.mode === 3; }
 
     readReg(addr) {
       switch (addr) {
         case 0xFF40: return this.lcdc;
-        case 0xFF41: return 0x80 | this.statEn | (this.ly === this.lyc ? 4 : 0) | (this.on ? this.mode : 0);
+        case 0xFF41: return 0x80 | this.statEn | (this.lycFlag ? 4 : 0) | (this.on ? (this.firstLine && this.mode === 2 ? 0 : this.mode) : 0);
         case 0xFF42: return this.scy;
         case 0xFF43: return this.scx;
         case 0xFF44: return this.ly;
@@ -1259,18 +1277,23 @@
         case 0xFF40: {
           const was = this.on;
           this.lcdc = v;
-          if (was && !this.on) { // 消灯: LY=0、モード 0、画面は白
-            this.ly = 0; this.dot = 0; this.mode = 0; this.winLine = 0; this.wyHit = false;
-            this.frame.fill(this.shades[0]);
+          if (was && !this.on) { // 消灯: LY=0、モード 0、画面は白。LY=LYC の旗はそのまま残る
+            this.ly = 0; this.line = 0; this.dot = 0; this.mode = 0; this.winLine = 0; this.wyHit = false; this.firstLine = false;
+            this.frame.fill(this.shades[0]); this.frameIdx.fill(0);
             this._stat();
-          } else if (!was && this.on) { this.ly = 0; this.dot = 0; this.mode = 2; this.winLine = 0; this.wyHit = false; this._stat(); }
+          } else if (!was && this.on) { // 点灯: 1 行目は 4T 短く、モード 2 の間も STAT はモード 0 を返す(OAM にも触れる)
+            this.ly = 0; this.line = 0; this.dot = 4; this.mode = 2; this.firstLine = true;
+            this.winLine = 0; this.wyHit = false; this.px = 0;
+            this.lycFlag = this.lyc === 0;
+            this._stat();
+          }
           break;
         }
         case 0xFF41: this.statEn = v & 0x78; this._stat(); break;
         case 0xFF42: this.scy = v; break;
         case 0xFF43: this.scx = v; break;
         case 0xFF44: break; // LY は読み出し専用
-        case 0xFF45: this.lyc = v; if (this.on) this._stat(); break;
+        case 0xFF45: this.lyc = v; if (this.on) { this.lycFlag = this._lyCmp() === v; this._stat(); } break;
         case 0xFF47: this.bgp = v; break;
         case 0xFF48: this.obp0 = v; break;
         case 0xFF49: this.obp1 = v; break;
@@ -1279,10 +1302,14 @@
       }
     }
 
+    // LYC と比べる値。153 行目は LY が 0 に変わった後もしばらく 153 と比べ、その後 0 と比べる
+    _lyCmp() { return this.line === 153 ? (this.dot < 12 ? 153 : 0) : this.line; }
+
     // STAT の割り込み線は各要因の OR。立ち上がりでだけ割り込む(要因が重なっている間は次が出ない)
     _stat() {
-      const e = this.statEn, m = this.mode;
-      const line = this.on && (((e & 0x40) && this.ly === this.lyc) || ((e & 0x20) && m === 2) || ((e & 0x10) && m === 1) || ((e & 0x08) && m === 0));
+      const e = this.statEn, m = this.firstLine && this.mode === 2 ? 0 : this.mode;
+      const line = this.on && (((e & 0x40) && this.lycFlag) || ((e & 0x20) && m === 2) || ((e & 0x10) && m === 1) || ((e & 0x08) && m === 0) ||
+        ((e & 0x20) && this.line === H && this.dot < 4)); // VBlank の頭ではモード 2 の要因でも割り込む(実機の癖)
       if (line && !this.statLine) this.con.requestIrq(1);
       this.statLine = !!line;
     }
@@ -1291,84 +1318,120 @@
     tick() {
       if (!(this.lcdc & 0x80)) return;
       const d = (this.dot += 4);
-      if (this.ly < H) {
-        if (d === 80) { this.mode = 3; if (!this.noRender) this._renderLine(); this._stat(); }
-        else if (d === 252) { this.mode = 0; this._stat(); }
-      }
+      if (this.line < H) {
+        if (this.mode === 2) {
+          if (d >= 80) this._startMode3();
+        } else if (this.mode === 3) {
+          if (!this.noRender) this._renderTo(d - FIRST_PIXEL_DOT - this.scxFine + 4);
+          if (d >= this.mode3End) {
+            if (!this.noRender) this._renderTo(W);
+            if (this.winActive) this.winLine++;
+            this.mode = 0; this.firstLine = false;
+            this._stat();
+          }
+        }
+      } else if (this.line === 153) {
+        if (d === 4) this.ly = 0;
+        else if (d === 12) { this.lycFlag = this.lyc === 0; this._stat(); }
+      } else if (d === 4 && this.line === H && this.statLine) this._stat(); // VBlank 頭だけのモード 2 要因を下ろす
+      // LY の読み出し値は行の終わりの 4T 前に次の行へ進む(DMG。mooneye の hblank_ly_scx_timing が見る)
+      if (d === 452 && this.line < 153) this.ly = this.line + 1;
+      // 新しい行の LY=LYC は行頭の 4T 後に立つ
+      if (d === 4 && !this.firstLine) { this.lycFlag = this.line === this.lyc; this._stat(); }
       if (d >= 456) {
         this.dot = 0;
-        this.ly++;
-        if (this.ly === H) { this.mode = 1; this.vblankStarted = true; this.con.requestIrq(0); }
-        else if (this.ly === 154) { this.ly = 0; this.winLine = 0; this.wyHit = false; }
-        if (this.ly < H) this.mode = 2;
+        this.line++;
+        if (this.line === 154) { this.line = 0; this.winLine = 0; this.wyHit = false; }
+        if (this.line !== 0) this.ly = this.line;
+        if (this.line !== 0) this.lycFlag = false; // 行頭の 4T は比較が外れる(0 行目は 153 行目の途中から LY=0 として比べている)
+        if (this.line === H) { this.mode = 1; this.vblankStarted = true; this.con.requestIrq(0); }
+        else if (this.line < H) { this.mode = 2; this.px = 0; }
         this._stat();
       }
     }
 
-    _renderLine() {
-      const y = this.ly, lcdc = this.lcdc, vram = this.vram, idx = this.lineIdx, out = this.frame, base = y * W, sh = this.shades;
+    // モード 2 の終わり: その行のスプライトを集め、モード 3 の長さを決める
+    _startMode3() {
+      const y = this.line, lcdc = this.lcdc, oam = this.oam;
       if (y === this.wy) this.wyHit = true;
-      const signedTiles = !(lcdc & 0x10);
-      if (lcdc & 0x01) {
-        const map = (lcdc & 0x08) ? 0x1C00 : 0x1800;
-        const yy = (y + this.scy) & 0xFF, row = map + (yy >> 3) * 32, fine = (yy & 7) * 2, scx = this.scx;
-        let tileX = -1, lo = 0, hi = 0;
-        for (let x = 0; x < W; x++) {
-          const xx = (x + scx) & 0xFF;
-          if ((xx >> 3) !== tileX) {
-            tileX = xx >> 3;
-            const t = vram[row + tileX];
-            const a = (signedTiles ? 0x1000 + ((t << 24) >> 24) * 16 : t * 16) + fine;
-            lo = vram[a]; hi = vram[a + 1];
-          }
-          const bit = 7 - (xx & 7);
-          idx[x] = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
-        }
-        // ウィンドウ: この行で WY に達していて WX が画面内。描いた行だけ内部の行カウンタが進む
-        if ((lcdc & 0x20) && this.wyHit && this.wx <= 166) {
-          const map2 = (lcdc & 0x40) ? 0x1C00 : 0x1800;
-          const wl = this.winLine++, row2 = map2 + (wl >> 3) * 32, fine2 = (wl & 7) * 2, x0 = this.wx - 7;
-          for (let x = Math.max(0, x0); x < W; x++) {
-            const wx = x - x0, t = vram[row2 + (wx >> 3)];
-            const a = (signedTiles ? 0x1000 + ((t << 24) >> 24) * 16 : t * 16) + fine2;
-            const bit = 7 - (wx & 7);
-            idx[x] = (((vram[a + 1] >> bit) & 1) << 1) | ((vram[a] >> bit) & 1);
-          }
-        }
-        const bgp = this.bgp;
-        for (let x = 0; x < W; x++) out[base + x] = sh[(bgp >> (idx[x] * 2)) & 3];
-      } else { // DMG: BG 無効は白
-        idx.fill(0);
-        for (let x = 0; x < W; x++) out[base + x] = sh[0];
+      const h = (lcdc & 0x04) ? 16 : 8;
+      let n = 0;
+      const list = this.sprList;
+      if (lcdc & 0x02) for (let i = 0; i < 40 && n < 10; i++) { const sy = oam[i * 4] - 16; if (y >= sy && y < sy + h) list[n++] = i; }
+      // 優先順(X の小さい方、同じなら OAM の若い方)に並べる。挿入ソート(高々 10 個)
+      for (let i = 1; i < n; i++) { const v = list[i]; let j = i - 1; while (j >= 0 && oam[list[j] * 4 + 1] > oam[v * 4 + 1]) { list[j + 1] = list[j]; j--; } list[j + 1] = v; }
+      this.sprCount = n;
+      this.scxFine = this.scx & 7;
+      const winOnLine = (lcdc & 0x20) && this.wyHit && this.wx <= 166;
+      let len = 172 + this.scxFine + (winOnLine ? 6 : 0);
+      // スプライトの遅れ: 左端の画素が乗る BG/ウィンドウのタイルごとに 1 回だけ「そのタイルの残り画素 − 2(0 未満は 0)」、どのスプライトにも一律 6
+      let lastTile = -999;
+      for (let i = 0; i < n; i++) {
+        const ox = oam[list[i] * 4 + 1];
+        if (ox >= 168) continue;
+        let tile, right;
+        if (winOnLine && ox >= this.wx + 1) { const wxp = ox - (this.wx + 1); tile = 0x1000 + (wxp >> 3); right = 7 - (wxp & 7); }
+        else { const bx = (ox + this.scx) & 0xFF; tile = bx >> 3; right = 7 - (bx & 7); }
+        if (tile !== lastTile) { lastTile = tile; len += Math.max(0, right - 2); }
+        len += 6;
       }
+      this.mode3End = 80 + len;
+      this.mode = 3; this.px = 0; this.winActive = false; this.winX = 0;
+      this._stat();
+    }
 
-      if (lcdc & 0x02) {
-        const oam = this.oam, h = (lcdc & 0x04) ? 16 : 8;
-        // その行に掛かる先頭 10 個(OAM 順)。優先は X の小さい方、同じなら OAM の若い方(DMG)
-        const list = [];
-        for (let i = 0; i < 40 && list.length < 10; i++) { const sy = oam[i * 4] - 16; if (y >= sy && y < sy + h) list.push(i); }
-        if (list.length) {
-          list.sort((a, b) => (oam[a * 4 + 1] - oam[b * 4 + 1]) || (a - b));
-          const claimed = this.claimed; claimed.fill(0);
-          for (const i of list) {
-            const sx = oam[i * 4 + 1] - 8, fl = oam[i * 4 + 3];
-            let line = y - (oam[i * 4] - 16), tile = oam[i * 4 + 2];
-            if (fl & 0x40) line = h - 1 - line;
+    // この行の画素を x1 の手前まで描く(今のレジスタで)
+    _renderTo(x1) {
+      if (x1 > W) x1 = W;
+      let x = this.px;
+      if (x >= x1) return;
+      const y = this.line, lcdc = this.lcdc, vram = this.vram, oam = this.oam, sh = this.shades;
+      const out = this.frame, outIdx = this.frameIdx, base = y * W;
+      const bgOn = (lcdc & 0x01) !== 0, signedTiles = !(lcdc & 0x10);
+      const winOk = bgOn && (lcdc & 0x20) && this.wyHit && this.wx <= 166, wx0 = this.wx - 7;
+      const bgMap = (lcdc & 0x08) ? 0x1C00 : 0x1800, winMap = (lcdc & 0x40) ? 0x1C00 : 0x1800;
+      const yy = (y + this.scy) & 0xFF, bgRow = bgMap + (yy >> 3) * 32, bgFine = (yy & 7) * 2, scx = this.scx;
+      const wl = this.winLine, winRow = winMap + (wl >> 3) * 32, winFine = (wl & 7) * 2;
+      const sprOn = (lcdc & 0x02) !== 0, n = this.sprCount, list = this.sprList, h = (lcdc & 0x04) ? 16 : 8;
+      const bgp = this.bgp;
+      for (; x < x1; x++) {
+        let c = 0;
+        if (bgOn) {
+          // ウィンドウはその行で WX に達した所から始まり、行の終わりまで続く(WX<7 は左が欠ける)
+          if (winOk && !this.winActive && x >= wx0) { this.winActive = true; this.winX = x - wx0; }
+          let a, bit;
+          if (this.winActive && (lcdc & 0x20)) {
+            const wxp = this.winX++;
+            const t = vram[winRow + ((wxp >> 3) & 31)];
+            a = (signedTiles ? 0x1000 + ((t << 24) >> 24) * 16 : t * 16) + winFine; bit = 7 - (wxp & 7);
+          } else {
+            const xx = (x + scx) & 0xFF;
+            const t = vram[bgRow + (xx >> 3)];
+            a = (signedTiles ? 0x1000 + ((t << 24) >> 24) * 16 : t * 16) + bgFine; bit = 7 - (xx & 7);
+          }
+          c = (((vram[a + 1] >> bit) & 1) << 1) | ((vram[a] >> bit) & 1);
+        }
+        let shade = (bgp >> (c * 2)) & 3;
+        if (sprOn) {
+          for (let i = 0; i < n; i++) {
+            const o = list[i] * 4, sx = oam[o + 1] - 8;
+            if (x < sx || x >= sx + 8) continue;
+            const fl = oam[o + 3];
+            let ln = y - (oam[o] - 16), tile = oam[o + 2];
+            if (fl & 0x40) ln = h - 1 - ln;
             if (h === 16) tile &= 0xFE;
-            const a = tile * 16 + line * 2, lo = vram[a], hi = vram[a + 1], pal = (fl & 0x10) ? this.obp1 : this.obp0;
-            for (let px = 0; px < 8; px++) {
-              const x = sx + px;
-              if (x < 0 || x >= W || claimed[x]) continue;
-              const bit = (fl & 0x20) ? px : 7 - px;
-              const c = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
-              if (!c) continue;
-              claimed[x] = 1; // 勝ったスプライトが BG の後ろでも、下位のスプライトは出ない
-              if ((fl & 0x80) && idx[x]) continue;
-              out[base + x] = sh[(pal >> (c * 2)) & 3];
-            }
+            const sa = tile * 16 + ln * 2, sb = (fl & 0x20) ? x - sx : 7 - (x - sx);
+            const sc = (((vram[sa + 1] >> sb) & 1) << 1) | ((vram[sa] >> sb) & 1);
+            if (!sc) continue;
+            // 勝ったスプライトが BG の後ろなら BG が出る(下位のスプライトは出ない)
+            if (!((fl & 0x80) && c)) shade = (((fl & 0x10) ? this.obp1 : this.obp0) >> (sc * 2)) & 3;
+            break;
           }
         }
+        outIdx[base + x] = shade;
+        out[base + x] = sh[shade];
       }
+      this.px = x;
     }
   }
 
@@ -1384,7 +1447,7 @@
  * タイマ(DIV/TIMA)、シリアル、OAM DMA、PPU、APU、音の標本化。NesConsole/MsxConsole と同じ形の API を持つ
  * (runFrame / runSamples / setController / startRecording / getBattery …)。
  *
- * まだ無い物(DESIGN-GB-CAPTURE.md §9): PPU は行単位(8c)、
+ * まだ無い物(DESIGN-GB-CAPTURE.md §9): 
  * CGB(8d)、周辺と残りの MBC(8e)、SGB(8g)。ブート ROM は使わず起動後の状態を直接セットする。
  *
  * 参考: Pan Docs "Timer obscure behaviour" "Interrupts" "Power-Up Sequence"
@@ -1418,7 +1481,8 @@
       this.cpu = new Emu.CPUSm83(this);
       this.wram = new Uint8Array(0x2000);
       this.hram = new Uint8Array(0x7F);
-      this.pad = 0; this.padHeld = 0; this.padTurbo = 0; this.turboRate = 2; this.turboPhase = 0;
+      // パッドは NesConsole と同じ形(配列の [0] だけ使う。巻き戻し NesRewind/GbRewind が pad[0]/pad[1] を記録する)
+      this.pad = [0, 0]; this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
       this.cpuCycles = 0; this.frameCount = 0; this.frameT = 0; this._frameFlag = false;
       this.sampleRate = 0; this.cycleAccum = 0;
       this.ring = new Float32Array(AUDIO_RING); this.ringR = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0; this.underruns = 0;
@@ -1456,17 +1520,18 @@
 
     setSampleRate(sr) { this.sampleRate = sr; this.cycleAccum = 0; this.ringHead = 0; this.ringLen = 0; if (sr) this.apu.setSampleRate(sr); }
     // ボタンのビットは NesConsole.BUTTON と同じ並び(A B SELECT START UP DOWN LEFT RIGHT)。画面側の入力をそのまま使える
-    setController(port, bits, turbo) { if (port) return; this.padHeld = bits & 0xFF; this.padTurbo = (turbo | 0) & 0xFF; this._applyPad(); }
-    setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(); }
-    _applyPad() {
+    setController(port, bits, turbo) { if (port) return; this.padHeld[0] = bits & 0xFF; this.padTurbo[0] = (turbo | 0) & 0xFF; this._applyPad(0); }
+    setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(0); }
+    _applyPad(port) {
+      if (port) return;
       const on = ((this.turboPhase / this.turboRate) | 0) === 0;
       const before = this._p1Low();
-      this.pad = this.padHeld | (on ? this.padTurbo : 0);
+      this.pad[0] = this.padHeld[0] | (on ? this.padTurbo[0] : 0);
       if (before & ~this._p1Low() & 0x0F) this.requestIrq(4); // 選ばれている線が H→L
     }
     // P1 の下位 4bit(押すと 0)。bit4=0 で十字(右左上下)、bit5=0 でボタン(A B SELECT START)
     _p1Low() {
-      const p = this.pad;
+      const p = this.pad[0];
       let low = 0x0F;
       if (!(this.p1 & 0x10)) low &= ~(((p >> 7) & 1) | (((p >> 6) & 1) << 1) | (((p >> 4) & 1) << 2) | (((p >> 5) & 1) << 3));
       if (!(this.p1 & 0x20)) low &= ~(p & 0x0F);
@@ -1481,6 +1546,18 @@
     get frame() { return this.ppu.frame; }
     get frameWidth() { return 160; }
     get frameHeight() { return 144; }
+    get frameRate() { return CLOCK / FRAME_T; } // 59.7275Hz
+    get stereo() { return true; }
+    // ゲーム画面(nesScreen.js / nes-worklet-impl.js)が機種を問わず呼ぶ口
+    extBits() { return 0; }
+    get diskCount() { return 0; }
+    chips() { return ['gb']; }
+    // 鍵盤表示のミュート/音量: { gb: { ch1..ch4 } }
+    applyMix(mute, volume) {
+      const put = (t, s, conv) => { if (s) for (const k of Object.keys(t)) if (s[k] !== undefined) t[k] = conv(s[k]); };
+      if (mute && mute.gb) put(this.apu.mute, mute.gb, (v) => !!v);
+      if (volume && volume.gb) put(this.apu.vol, volume.gb, (v) => Math.max(0, Math.min(2, +v || 0)));
+    }
     frameFrac() { return Math.min(0.999999, this.frameT / FRAME_T); }
 
     // ── 割り込み(CPU から呼ばれる)──
@@ -1557,7 +1634,7 @@
       this.cart.tickRtc(this.frameT, CLOCK);
       this.frameCount++;
       this._frameFlag = true;
-      if (this.padTurbo || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
+      if (this.padTurbo[0] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(0); }
       if (this.rec) { this.rec.cur.len = this.frameT; this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       this.frameT = 0;
       if (this.onFrame) this.onFrame();
@@ -1572,6 +1649,9 @@
         const srcVram = this.dmaSrc >= 0x8000 && this.dmaSrc < 0xA000, adrVram = addr >= 0x8000 && addr < 0xA000;
         if (srcVram === adrVram) return this.dmaByte;
       }
+      // モード 3 の VRAM、モード 2/3 の OAM は PPU が使っていて読めない
+      if (addr >= 0x8000 && addr < 0xA000) { if (this.ppu.vramBlocked()) return 0xFF; }
+      else if (addr >= 0xFE00 && addr < 0xFEA0) { if (this.ppu.oamBlocked()) return 0xFF; }
       return this._busRead(addr);
     }
     _busRead(addr) {
@@ -1599,10 +1679,10 @@
 
     write(addr, v) {
       if (addr < 0x8000) { this.cart.write(addr, v); return; }
-      if (addr < 0xA000) { this.ppu.vram[addr - 0x8000] = v; return; }
+      if (addr < 0xA000) { if (!this.ppu.vramBlocked()) this.ppu.vram[addr - 0x8000] = v; return; }
       if (addr < 0xC000) { this.cart.writeRam(addr, v); return; }
       if (addr < 0xFE00) { this.wram[addr & 0x1FFF] = v; return; }
-      if (addr < 0xFEA0) { if (!this.dmaActive) this.ppu.oam[addr - 0xFE00] = v; return; }
+      if (addr < 0xFEA0) { if (!this.dmaActive && !this.ppu.oamBlocked()) this.ppu.oam[addr - 0xFE00] = v; return; }
       if (addr < 0xFF00) return;
       if (addr >= 0xFF80) { if (addr === 0xFFFF) this.ie = v; else this.hram[addr - 0xFF80] = v; return; }
       if (addr >= 0xFF10 && addr <= 0xFF3F) {
@@ -1668,7 +1748,7 @@
     step() {
       const cpu = this.cpu;
       if (cpu.stopped) { // STOP 中: ボタンが押されるまで時間だけ進む
-        if ((this.pad & 0xFF) !== 0) cpu.stopped = false;
+        if ((this.pad[0] & 0xFF) !== 0) cpu.stopped = false;
         else { this.tick(); return 4; }
       }
       return cpu.step();
@@ -1686,6 +1766,15 @@
       while (this.ringLen < n && ++guard < 400000) this.step();
       if (this.ringLen < n) this.underruns++;
       this.takeAudioInto(out, n);
+    }
+    // 左右別(AudioWorklet の process)
+    runSamplesStereo(outL, outR) {
+      const n = outL.length;
+      if (!this.sampleRate) { outL.fill(0); outR.fill(0); return; }
+      let guard = 0;
+      while (this.ringLen < n && ++guard < 400000) this.step();
+      if (this.ringLen < n) this.underruns++;
+      this.takeAudioInto(outL, n, outR);
     }
     takeAudio(n) { const out = new Float32Array(n); this.takeAudioInto(out, n); return out; }
     // 音はステレオ(NR51 の左右振り分け)。outR を渡せば左右別、渡さなければ左右の平均を out へ

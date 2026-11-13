@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 14:37:44
+ * Built by tools/build-capture-workers.ps1 at 2026-11-13 14:55:27
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-13 14:37:44';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-13 14:55:27';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -18630,7 +18630,8 @@
 
     if (isGbs) {
       const live = extraSnaps && extraSnaps.gbsApuLive;
-      const s = live ? live() : null;
+      // ライブ表示(ゲーム画面)はフレームごとの値 gbsApu[f]、GBS/VGM の再生は今の値を直接読む関数
+      const s = (extraSnaps && extraSnaps.gbsApu && extraSnaps.gbsApu[frameIdx]) || (live ? live() : null);
       // NR50(マスター音量+VIN)/NR51(パンニング)。ライブでなければ全て0(無音扱い)。
       const nr50 = s ? s.nr50 : 0;
       const nr51 = s ? s.nr51 : 0;
@@ -19045,6 +19046,18 @@
         opl: opl ? E.snapshotOPL(opl, { skipWave: true }) : null,
         dac: dac ? E.snapshotMajutsushiDac(dac) : null,
       };
+    };
+  }
+  // ゲームボーイの書き込み列 [{addr($FF10-$FF3F), value}] を本物の APUGb に流し、1 フレームぶん進めた後の鍵盤行の値(Emu.snapshotGbApu)を返す。
+  // GB のゲーム画面のライブ表示(DESIGN-GB-CAPTURE.md、8c)が使う。エンベロープ/スイープ/長さは書き込み無しで動くので時間も進める
+  function makeGbStepper() {
+    const E = MML.Emu;
+    const apu = E.APUGb ? new E.APUGb() : null;
+    return (writes) => {
+      if (!apu) return null;
+      for (const w of writes) if (!w.read && w.addr >= 0xFF10 && w.addr <= 0xFF3F) apu.writeRegister(w.addr, w.value);
+      apu.advance(70224);
+      return E.snapshotGbApu(apu);
     };
   }
   function makeFme7Stepper() {
@@ -22054,6 +22067,7 @@
       if (this._chips.includes('n163')) { steppers.n163 = makeN163Stepper(); ex.n163 = []; ex.n163.maxNumCh = 1; }
       if (this._chips.includes('fme7')) { steppers.fme7 = makeFme7Stepper(); ex.fme7 = []; }
       if (this._chips.includes('kss')) { steppers.kss = makeKssStepper(this._chips); ex.kssPsg = []; ex.kssScc = []; ex.kssOpll = []; ex.kssDac = []; ex.opl = []; } // MSX のゲーム画面(KSS 形式の書き込み列)
+      if (this._chips.includes('gbs')) { steppers.gb = makeGbStepper(); ex.gbsApu = []; } // GB のゲーム画面
       // Live系(再生中のチップを直接読む関数)はライブ表示には無い(あっても全フレームが同じ値になる)
       for (const k of Object.keys(ex)) if (/Live$/.test(k)) ex[k] = null;
       ex.apuEnv = null;
@@ -22090,6 +22104,7 @@
       if (lr.steppers.n163) { const sn = lr.steppers.n163(writes); ex.n163[f] = sn; if (sn.numCh > ex.n163.maxNumCh) ex.n163.maxNumCh = sn.numCh; }
       if (lr.steppers.fme7) ex.fme7[f] = lr.steppers.fme7(writes);
       if (lr.steppers.kss) { const k = lr.steppers.kss(writes); ex.kssPsg[f] = k.psg; ex.kssScc[f] = k.scc; ex.kssOpll[f] = k.opll; ex.kssDac[f] = k.dac; ex.opl[f] = k.opl; }
+      if (lr.steppers.gb) ex.gbsApu[f] = lr.steppers.gb(writes);
       const channels = extractChannels(st.regSnapshots[f], ex, f, this._chips);
       lr.builder.feed(channels, f);
       // 打点(DPCM 等の drumKey つき)が新しく始まったらドラム区画を組み直す(区画が無いと打点は描かれない。
@@ -22127,7 +22142,8 @@
       if (f === st.totalFrames) return;
       st.writeLog.length = f; st.regSnapshots.length = f; st.totalFrames = f;
       const ex = this._extraSnaps;
-      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl']) if (ex[k]) ex[k].length = f;
+      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu']) if (ex[k]) ex[k].length = f;
+      if (lr.steppers.gb) lr.steppers.gb = makeGbStepper();
       if (lr.steppers.vrc7) lr.steppers.vrc7 = makeVrc7Stepper();
       if (lr.steppers.n163) lr.steppers.n163 = makeN163Stepper();
       if (lr.steppers.fme7) lr.steppers.fme7 = makeFme7Stepper();

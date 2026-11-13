@@ -69,11 +69,14 @@ mooneye/acceptance/oam_dma_restart.gb
 mooneye/acceptance/oam_dma_start.gb
 mooneye/acceptance/oam_dma_timing.gb
 mooneye/acceptance/pop_timing.gb
+mooneye/acceptance/ppu/hblank_ly_scx_timing-GS.gb
 mooneye/acceptance/ppu/intr_1_2_timing-GS.gb
 mooneye/acceptance/ppu/intr_2_0_timing.gb
 mooneye/acceptance/ppu/intr_2_mode0_timing.gb
 mooneye/acceptance/ppu/intr_2_mode3_timing.gb
+mooneye/acceptance/ppu/intr_2_oam_ok_timing.gb
 mooneye/acceptance/ppu/stat_irq_blocking.gb
+mooneye/acceptance/ppu/vblank_stat_intr-GS.gb
 mooneye/acceptance/push_timing.gb
 mooneye/acceptance/rapid_di_ei.gb
 mooneye/acceptance/ret_cc_timing.gb

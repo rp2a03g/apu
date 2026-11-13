@@ -289,4 +289,62 @@
     vgm.set(hdr, 0); vgm.set(body, HEADER_SIZE); vgm.set(gd3, HEADER_SIZE + body.length);
     return { vgm, frames: frames.length, dropped, chips: Object.keys(used).filter((k) => used[k]), sccPlus, rate: rate50 ? 50 : 60 };
   };
+
+  // ── ゲームボーイの書き込み列 → VGM (MML.VGM.encodeGbRecording) — DESIGN-GB-CAPTURE.md §4 ──
+  // 入力: { frames: [[write...]...], clock, name, creator, notes }
+  //   write = { addr($FF10-$FF3F), value, t(フレーム頭からの T) }、frames[f].len = そのフレームの長さ(T。無ければ 70224)
+  //   本体 APU は VGM の正規チップ: ヘッダ $80 にクロック(DMG/CGB/SGB2 は 4194304、SGB 初代は 4295454)、0xB3 aa dd(aa = 番地 - $FF10)。
+  //   1 フレームは 70224T ≒ 738.35 サンプルで 0x62(735)に乗らないので、時刻は録音頭からの通算 T をサンプルへ換算して 0x61 で待つ
+  //   (フレーム境界の端数は自然に 738/739 へ散る)。フレーム内の時刻も T から換算するので、PCM 再生の技の間隔が保たれる。
+  const GB_CLOCK = 4194304, GB_FRAME_T = 70224;
+  VGM.encodeGbRecording = function (rec) {
+    const frames = rec.frames || [];
+    const clock = rec.clock || GB_CLOCK;
+    const body = [];
+    let emitted = 0, dropped = 0, baseT = 0, writes = 0;
+    const flushWait = (s) => {
+      let d = s - emitted;
+      while (d > 0) {
+        if (d > 0xFFFF) { body.push(0x61, 0xFF, 0xFF); d -= 0xFFFF; }
+        else if (d <= 16) { body.push(0x70 + d - 1); d = 0; }
+        else { body.push(0x61, ...u16(d)); d = 0; }
+      }
+      if (s > emitted) emitted = s;
+    };
+    const toSample = (t) => Math.floor(t * 44100 / clock);
+    for (let f = 0; f < frames.length; f++) {
+      const list = frames[f] || [];
+      const len = list.len > 0 ? list.len : GB_FRAME_T;
+      for (let i = 0; i < list.length; i++) {
+        const w = list[i];
+        if (w.addr === undefined) continue;
+        if (w.addr < 0xFF10 || w.addr > 0xFF3F) { dropped++; continue; }
+        flushWait(toSample(baseT + Math.max(0, Math.min(len - 1, w.t | 0))));
+        body.push(0xB3, w.addr - 0xFF10, w.value & 0xFF);
+        writes++;
+      }
+      baseT += len;
+    }
+    const total = toSample(baseT);
+    flushWait(total);
+    body.push(0x66);
+
+    const fields = [].concat(utf16(rec.name || ''), utf16(''), utf16(rec.game || ''), utf16(''),
+      utf16(rec.system || 'Nintendo Game Boy'), utf16(''), utf16(rec.artist || ''), utf16(''), utf16(''),
+      utf16(rec.creator || 'Sound Emulation Foundry'), utf16(rec.notes || ''));
+    const gd3 = [].concat([0x47, 0x64, 0x33, 0x20], u32(0x100), u32(fields.length), fields);
+    const hdr = new Uint8Array(HEADER_SIZE);
+    hdr.set([0x56, 0x67, 0x6D, 0x20], 0);
+    const size = HEADER_SIZE + body.length + gd3.length;
+    hdr.set(u32(size - 4), 0x04);
+    hdr.set(u32(0x00000161), 0x08);
+    hdr.set(u32(HEADER_SIZE + body.length - 0x14), 0x14);
+    hdr.set(u32(total), 0x18);
+    hdr.set(u32(60), 0x24);
+    hdr.set(u32(HEADER_SIZE - 0x34), 0x34);
+    hdr.set(u32(clock), 0x80);
+    const vgm = new Uint8Array(size);
+    vgm.set(hdr, 0); vgm.set(body, HEADER_SIZE); vgm.set(gd3, HEADER_SIZE + body.length);
+    return { vgm, frames: frames.length, dropped, writes, samples: total, clock };
+  };
 })(typeof window !== 'undefined' ? window : globalThis);

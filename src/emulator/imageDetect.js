@@ -6,8 +6,9 @@
  * 新しい機種は detect に判定を足し、nesScreen.js の開き方の表(registerOpener)に開き方を登録すれば全経路に乗る。
  *
  *   detect(bytes, name) → { kind, machine, media } | null
- *     kind: 'nes'(iNES) / 'fds'(ディスクシステムの画像) / 'fds-bios'(disksys.rom) / 'msx-rom'(カートリッジ) / 'msx-dsk'(ディスク画像)
- *     machine: 'nes' | 'msx'、media: 'cart' | 'disk' | 'bios'
+ *     kind: 'nes'(iNES) / 'fds'(ディスクシステムの画像) / 'fds-bios'(disksys.rom) / 'msx-rom'(カートリッジ) / 'msx-dsk'(ディスク画像) /
+ *           'gb'(ゲームボーイのカートリッジ。ヘッダ $0104 のロゴ先頭と $014D のチェックサムで見る)
+ *     machine: 'nes' | 'msx' | 'gb'、media: 'cart' | 'disk' | 'bios'
  *   looksLikeGameEntry(name, size): アーカイブの一覧(中身を読む前)で「ゲームの画像らしい」か。拡張子がゲームの物か、拡張子無しでディスクのサイズ
  *   combineFds(list): 複数の .fds(1 枚ずつの画像)の面を順に並べて 1 本の .fds(ヘッダ無し)にする(zip に DISK1/DISK2 と分かれている物)
  */
@@ -16,7 +17,8 @@
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
 
-  const GAME_EXTS = ['nes', 'fds', 'rom', 'mx1', 'mx2', 'dsk'];
+  const GAME_EXTS = ['nes', 'fds', 'rom', 'mx1', 'mx2', 'dsk', 'gb', 'gbc', 'sgb'];
+  const GB_EXTS = ['gb', 'gbc', 'sgb'];
   const MSX_CART_EXTS = ['rom', 'mx1', 'mx2'];
   const DSK_SIZES = new Set([737280, 368640, 655360, 327680]); // 720K 2DD / 360K 1DD / 640K / 320K
   const FDS_SIDE = 65500;
@@ -30,6 +32,8 @@
     if (bytes[0] === 0x4E && bytes[1] === 0x45 && bytes[2] === 0x53 && bytes[3] === 0x1A) return { kind: 'nes', machine: 'nes', media: 'cart' };
     if (F && F.isFds && F.isFds(bytes)) return { kind: 'fds', machine: 'nes', media: 'disk' };
     if (F && F.isFdsBios && F.isFdsBios(bytes)) return { kind: 'fds-bios', machine: 'nes', media: 'bios' };
+    // ゲームボーイ: ヘッダが整っていれば拡張子に関係なく(.rom/.bin でも)。拡張子が GB の物ならヘッダが崩れていても GB として開く
+    if ((Emu.GbCart && Emu.GbCart.isGb(bytes)) || GB_EXTS.includes(ext)) return { kind: 'gb', machine: 'gb', media: 'cart' };
     // MSX のディスク: サイズで(拡張子が無い物も多い。カートリッジの拡張子なら ROM として扱う)
     if (DSK_SIZES.has(bytes.length) && !MSX_CART_EXTS.includes(ext)) return { kind: 'msx-dsk', machine: 'msx', media: 'disk' };
     // MSX のカートリッジ: 拡張子がそれ、または拡張子が無くて 'AB' ヘッダ(先頭か $4000)がありサイズが 8K の倍数

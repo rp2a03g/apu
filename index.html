@@ -299,7 +299,7 @@
          #xxxFileHeader / #xxxFileStatus だけはこの箱から鍵盤表示側へ付け替えて表示する -->
   <div id="soundFileControls" hidden>
       <!-- multiple: PSF の .minipsf と、_lib で参照する .psflib を一緒に選べるように(先頭の曲ファイルを開く) -->
-      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.psf,.minipsf,.psflib,.zip,.7z,.rar,.rsn,.lzh,.lha,.mml,.txt,.dmc,.nes,.fds" multiple style="display:none" />
+      <input type="file" id="soundFile" accept=".nsf,.nsfe,.spc,.kss,.gbs,.hes,.vgm,.vgz,.psf,.minipsf,.psflib,.zip,.7z,.rar,.rsn,.lzh,.lha,.mml,.txt,.dmc,.nes,.fds,.gb,.gbc" multiple style="display:none" />
       <!-- 内部的にフォーマット別ロジックを呼び出すための非表示input（互換用） -->
       <input type="file" id="nsfFile" accept=".nsf,.nsfe" style="display:none" />
       <input type="file" id="spcFile" accept=".spc" style="display:none" />
@@ -1088,6 +1088,7 @@
   <script src="src/emulator/gb/cart.js"></script>
   <script src="src/emulator/gb/ppu.js"></script>
   <script src="src/emulator/gb/gbConsole.js"></script>
+  <script src="src/emulator/gb/gbState.js"></script>
   <script src="src/emulator/gbsPlayer.js"></script>
   <script src="src/audio/gbs-stream-player.js"></script>
   <script src="src/gbs2mml/expansion/hwEnvelope.js"></script>
