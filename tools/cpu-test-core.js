@@ -181,9 +181,26 @@
         { key: 'cb', files: opcodeFiles('cb', 'cb') },
       ],
       createRunner() {
-        const { ram, bus } = makeRam();
+        const { ram } = makeRam();
+        // M サイクルごとのバスの動きも突き合わせる: tick が 1 サイクルを開き、read/write がその中身を埋める
+        // (何も埋まらなければ内部サイクル)。ベクタの cycles は [番地, 値, "r-m"/"-wm"/"---"]
+        let trace = [];
+        const bus = {
+          tick: () => { trace.push(null); },
+          read: (a) => { const v = ram[a & 0xFFFF]; trace[trace.length - 1] = ['r', a & 0xFFFF, v]; return v; },
+          write: (a, v) => { ram[a & 0xFFFF] = v & 0xFF; trace[trace.length - 1] = ['w', a & 0xFFFF, v & 0xFF]; },
+        };
         const cpu = new MML.Emu.CPUSm83(bus);
         const KEYS = ['a', 'f', 'b', 'c', 'd', 'e', 'h', 'l', 'sp', 'pc'];
+        function busMatches(cycles) {
+          if (trace.length !== cycles.length) return false;
+          for (let i = 0; i < cycles.length; i++) {
+            const c = cycles[i], t = trace[i], kind = c[2][0] === 'r' ? 'r' : c[2][1] === 'w' ? 'w' : '-';
+            if (kind === '-') { if (t) return false; continue; }
+            if (!t || t[0] !== kind || t[1] !== c[0] || t[2] !== c[1]) return false;
+          }
+          return true;
+        }
 
         // テストベクタの initial.ie は前提条件の一部(HALTバグ等の分岐用)を表すだけで、
         // final側には存在しない(=検証対象外)。$FFFFは通常のram読み書き対象アドレスとしても
@@ -196,6 +213,7 @@
           cpu.imePending = 0;
           cpu.halted = false;
           cpu.stopped = false;
+          cpu.haltBug = false;
         }
         const stateOf = () => ({ a: cpu.a, f: cpu.f, b: cpu.b, c: cpu.c, d: cpu.d, e: cpu.e, h: cpu.h, l: cpu.l, sp: cpu.sp, pc: cpu.pc });
 
@@ -203,27 +221,32 @@
           isImplemented: () => true,
           runOne(tests, per) {
             const n = Math.min(per, tests.length);
-            let pass = 0, cycBad = 0, stateBad = 0, ramBad = 0, imeBad = 0; const fails = [];
+            let pass = 0, cycBad = 0, stateBad = 0, ramBad = 0, imeBad = 0, busBad = 0; const fails = [];
             for (let i = 0; i < n; i++) {
               const t = tests[i], I = t.initial, F = t.final;
               for (const [a, v] of I.ram) ram[a] = v;
               applyState(I);
-              const cyc = cpu.step();
+              trace = [];
+              let cyc = cpu.step();
+              const nominalOK = cpu.lastNominal === cyc; // 命令表の公称値と、実際に進めた M サイクルの合計
+              // HALT のベクタは止まった後の空回り 2 サイクルまで含む
+              while (cpu.halted && cyc < t.cycles.length * 4) cyc += cpu.step();
               const got = stateOf();
               let regOK = true;
               for (const k of KEYS) { if (got[k] !== F[k]) { regOK = false; break; } }
               const imeOK = cpu.ime === !!F.ime;
               const ramOK = ramMatches(ram, F);
               // ベクタのcyclesはMサイクル単位。こちらはTサイクルを返すので4倍で比較する
-              const cycOK = cyc === t.cycles.length * 4;
-              if (regOK && ramOK && cycOK && imeOK) pass++;
+              const cycOK = cyc === t.cycles.length * 4 && nominalOK;
+              const busOK = busMatches(t.cycles);
+              if (regOK && ramOK && cycOK && imeOK && busOK) pass++;
               else {
-                if (!cycOK) cycBad++; if (!regOK) stateBad++; if (!ramOK) ramBad++; if (!imeOK) imeBad++;
-                if (fails.length < 3) fails.push({ name: t.name, regOK, ramOK, cycOK, imeOK, exp: F, got, cycExp: t.cycles.length * 4, cycGot: cyc });
+                if (!cycOK) cycBad++; if (!regOK) stateBad++; if (!ramOK) ramBad++; if (!imeOK) imeBad++; if (!busOK) busBad++;
+                if (fails.length < 3) fails.push({ name: t.name, regOK, ramOK, cycOK, imeOK, busOK, nominal: cpu.lastNominal, exp: F, got, cycExp: t.cycles.length * 4, cycGot: cyc, busExp: t.cycles, busGot: trace });
               }
               clearRam(ram, I, F);
             }
-            return { pass, total: n, cycBad, stateBad, ramBad, imeBad, fails };
+            return { pass, total: n, cycBad, stateBad, ramBad, imeBad, busBad, fails };
           },
         };
       },

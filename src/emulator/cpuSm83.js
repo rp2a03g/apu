@@ -19,6 +19,12 @@
  *
  * bus.read(addr)/bus.write(addr,value) のみを介してアクセスする(I/Oポートは無く、
  * 全てメモリマップド。IE($FFFF)/IF($FF0F)もこのバス経由の通常アドレスとして扱う)。
+ *
+ * ★2026-11-13 M サイクル単位に作り直し(DESIGN-GB-CAPTURE.md §2.1)。バスに次が在れば使う(本体コア gb/gbConsole.js):
+ *   - bus.tick()        : 1 M サイクル(4T)ぶん本体を進める。読み書きの前と内部サイクルで呼ぶ
+ *   - bus.irqPending()  : IE & IF & $1F。bus.irqAck(bit) で IF を下ろす。割り込みの受け付け/HALT の起床/HALT バグに使う
+ *   - bus.stop(cpu)     : STOP 命令
+ *   どれも無いバス(GBS の旧経路 gbsBus.js)では従来どおり「割り込み無し、step() が T を返すだけ」で動く。
  * call(addr)/beginCall(addr)/stepCall() は cpu6502.js/cpuZ80.js と同じ設計
  * (呼び出し先アドレスをCALLし、番兵アドレスへのRETで終了を検知する)。
  */
@@ -40,6 +46,9 @@
      */
     constructor(bus) {
       this.bus = bus;
+      this.hasTick = typeof bus.tick === 'function';        // 本体コア(gb/gbConsole.js)は M サイクルごとに進む
+      this.hasIrq = typeof bus.irqPending === 'function';   // IE & IF & $1F を返す。無ければ割り込み無し(GBS の旧経路)
+      this.cyc = 0; // 通算 T(4 刻み)
       this.reset();
     }
 
@@ -54,12 +63,16 @@
       this.imePending = 0; // EI発行後の遅延カウンタ(2で発行、0でime=true確定)
       this.halted = false;
       this.stopped = false;
+      this.haltBug = false;
       this.callActive = false;
     }
 
     // --- メモリアクセス ---
-    read(addr) { return this.bus.read(addr & 0xFFFF) & 0xFF; }
-    write(addr, value) { this.bus.write(addr & 0xFFFF, value & 0xFF); }
+    // バスの読み書き 1 回 = 1 M サイクル。アクセスの前に本体を 4T 進める(bus.tick が在る時。GBS の旧バスには無い)
+    read(addr) { this.cyc += 4; if (this.hasTick) this.bus.tick(); return this.bus.read(addr & 0xFFFF) & 0xFF; }
+    write(addr, value) { this.cyc += 4; if (this.hasTick) this.bus.tick(); this.bus.write(addr & 0xFFFF, value & 0xFF); }
+    // バスに触らない内部 M サイクル
+    idle() { this.cyc += 4; if (this.hasTick) this.bus.tick(); }
 
     fetchByte() { const v = this.read(this.pc); this.pc = (this.pc + 1) & 0xFFFF; return v; }
     fetchSigned() { const v = this.fetchByte(); return v < 0x80 ? v : v - 0x100; }
@@ -195,6 +208,7 @@
       this.setFlag(F_H, ((hl & 0xFFF) + (rpVal & 0xFFF)) > 0xFFF);
       this.setFlag(F_C, sum > 0xFFFF);
       this.setFlag(F_N, false);
+      this.idle();
       this.setHL(result); // Zは変化しない(実機仕様)
     }
     // ADD SP,r8 と LD HL,SP+r8 で共用。r8をフェッチし、フラグはSPの下位バイト+符号無し
@@ -258,16 +272,48 @@
     }
 
     // --- メイン実行ループ ---
+    // 1 命令(または割り込みの受け付け、HALT 中の 1 M サイクル)を実行し、かかった T を返す。
+    // 時間は read/write/idle が進めた分を数える。execMain/execCB の return 値は命令表の公称値で、
+    // 両者が合うことは tools/headless/cpu-test.js が見る(M サイクルごとのバスの動きも突き合わせる)。
+    //
+    // 割り込みを見るのは「命令の取り込みサイクルを進めた後」。実機は前の命令の最後のサイクル(=次の命令の取り込みと
+    // 重なる)で割り込みを判定するので、取り込みサイクルの間に立った IF はその命令を実行させずに飛ぶ
+    // (mooneye の timer/rapid_toggle が見る。先に判定すると 1 命令遅れる)。
     step() {
-      // EI発行から1命令分遅延させてimeを立てる(EI自身の命令実行中はまだ有効化しない)。
-      // RETIはこの経路を通さず即座にthis.ime=trueにする(GB固有、Pan Docs "Interrupts"参照)。
-      if (this.imePending > 0) {
-        this.imePending--;
-        if (this.imePending === 0) this.ime = true;
+      const c0 = this.cyc;
+      if (this.halted) {
+        this.idle();
+        if (!(this.hasIrq && this.bus.irqPending())) return this.cyc - c0;
+        this.halted = false;
+        if (this.ime) { this.dispatchIrq(); return this.cyc - c0; }
+        // IME=0 の起床: 保留を見つけたこのサイクルが次の命令の取り込みを兼ねる
+      } else {
+        // EI の次の 1 命令が終わるまで割り込みは入らない(この命令の後から有効)。RETI は即時
+        const ime = this.ime;
+        if (this.imePending > 0) { this.imePending = 0; this.ime = true; }
+        this.cyc += 4; if (this.hasTick) this.bus.tick(); // 取り込みサイクル
+        if (ime && this.hasIrq && this.bus.irqPending()) { this.dispatchIrq(); return this.cyc - c0; }
       }
-      const opcode = this.fetchByte();
-      if (opcode === 0xCB) return this.execCB();
-      return this.execMain(opcode);
+      const opcode = this.bus.read(this.pc) & 0xFF;
+      if (this.haltBug) this.haltBug = false; else this.pc = (this.pc + 1) & 0xFFFF;
+      this.lastNominal = opcode === 0xCB ? this.execCB() : this.execMain(opcode);
+      return this.cyc - c0;
+    }
+
+    // 割り込みの受け付け。判定した取り込みサイクル(または HALT の起床サイクル)を含めて 5 M サイクル:
+    // 内部 2、PC の上位/下位を積む 2。PC の上位を積んだ後に IE/IF が変わって保留が消えると PC=0 へ飛ぶ(実機の癖)
+    dispatchIrq() {
+      this.ime = false; this.imePending = 0;
+      this.idle(); this.idle();
+      this.sp = (this.sp - 1) & 0xFFFF; this.write(this.sp, (this.pc >> 8) & 0xFF);
+      const pend = this.bus.irqPending();
+      this.sp = (this.sp - 1) & 0xFFFF; this.write(this.sp, this.pc & 0xFF);
+      if (!pend) this.pc = 0;
+      else {
+        let bit = 0; while (!((pend >> bit) & 1)) bit++;
+        this.bus.irqAck(bit);
+        this.pc = 0x40 + bit * 8;
+      }
     }
 
     execMain(opcode) {
@@ -275,7 +321,7 @@
         case 0x00: return 4; // NOP
         case 0x01: this.setBC(this.fetch16()); return 12;
         case 0x02: this.write(this.getBC(), this.a); return 8;
-        case 0x03: this.setBC((this.getBC() + 1) & 0xFFFF); return 8;
+        case 0x03: this.setBC((this.getBC() + 1) & 0xFFFF); this.idle(); return 8;
         case 0x04: this.b = this.inc8(this.b); return 4;
         case 0x05: this.b = this.dec8(this.b); return 4;
         case 0x06: this.b = this.fetchByte(); return 8;
@@ -283,7 +329,7 @@
         case 0x08: { const nn = this.fetch16(); this.write(nn, this.sp & 0xFF); this.write((nn + 1) & 0xFFFF, (this.sp >> 8) & 0xFF); return 20; }
         case 0x09: this.addHL(this.getBC()); return 8;
         case 0x0A: this.a = this.read(this.getBC()); return 8;
-        case 0x0B: this.setBC((this.getBC() - 1) & 0xFFFF); return 8;
+        case 0x0B: this.setBC((this.getBC() - 1) & 0xFFFF); this.idle(); return 8;
         case 0x0C: this.c = this.inc8(this.c); return 4;
         case 0x0D: this.c = this.dec8(this.c); return 4;
         case 0x0E: this.c = this.fetchByte(); return 8;
@@ -291,52 +337,54 @@
 
         // STOP 0: SingleStepTests実測では2バイト目を実際には読まず(bus読出し無しの内部
         // サイクルのみ)、PCは1しか進まないが所要時間は3Mサイクル(12T)。
-        case 0x10: this.stopped = true; return 12;
+        case 0x10:
+          if (this.bus.stop) { this.bus.stop(this); return 4; } // 本体コア: CGB の速度切り替え/キー待ち
+          this.stopped = true; this.idle(); this.idle(); return 12;
         case 0x11: this.setDE(this.fetch16()); return 12;
         case 0x12: this.write(this.getDE(), this.a); return 8;
-        case 0x13: this.setDE((this.getDE() + 1) & 0xFFFF); return 8;
+        case 0x13: this.setDE((this.getDE() + 1) & 0xFFFF); this.idle(); return 8;
         case 0x14: this.d = this.inc8(this.d); return 4;
         case 0x15: this.d = this.dec8(this.d); return 4;
         case 0x16: this.d = this.fetchByte(); return 8;
         case 0x17: this.rla(); return 4;
-        case 0x18: { const d = this.fetchSigned(); this.pc = (this.pc + d) & 0xFFFF; return 12; }
+        case 0x18: { const d = this.fetchSigned(); this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; }
         case 0x19: this.addHL(this.getDE()); return 8;
         case 0x1A: this.a = this.read(this.getDE()); return 8;
-        case 0x1B: this.setDE((this.getDE() - 1) & 0xFFFF); return 8;
+        case 0x1B: this.setDE((this.getDE() - 1) & 0xFFFF); this.idle(); return 8;
         case 0x1C: this.e = this.inc8(this.e); return 4;
         case 0x1D: this.e = this.dec8(this.e); return 4;
         case 0x1E: this.e = this.fetchByte(); return 8;
         case 0x1F: this.rra(); return 4;
 
-        case 0x20: { const d = this.fetchSigned(); if (!this.getFlag(F_Z)) { this.pc = (this.pc + d) & 0xFFFF; return 12; } return 8; }
+        case 0x20: { const d = this.fetchSigned(); if (!this.getFlag(F_Z)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
         case 0x21: this.setHL(this.fetch16()); return 12;
         case 0x22: this.write(this.getHL(), this.a); this.setHL((this.getHL() + 1) & 0xFFFF); return 8;
-        case 0x23: this.setHL((this.getHL() + 1) & 0xFFFF); return 8;
+        case 0x23: this.setHL((this.getHL() + 1) & 0xFFFF); this.idle(); return 8;
         case 0x24: this.h = this.inc8(this.h); return 4;
         case 0x25: this.h = this.dec8(this.h); return 4;
         case 0x26: this.h = this.fetchByte(); return 8;
         case 0x27: this.daa(); return 4;
-        case 0x28: { const d = this.fetchSigned(); if (this.getFlag(F_Z)) { this.pc = (this.pc + d) & 0xFFFF; return 12; } return 8; }
+        case 0x28: { const d = this.fetchSigned(); if (this.getFlag(F_Z)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
         case 0x29: this.addHL(this.getHL()); return 8;
         case 0x2A: this.a = this.read(this.getHL()); this.setHL((this.getHL() + 1) & 0xFFFF); return 8;
-        case 0x2B: this.setHL((this.getHL() - 1) & 0xFFFF); return 8;
+        case 0x2B: this.setHL((this.getHL() - 1) & 0xFFFF); this.idle(); return 8;
         case 0x2C: this.l = this.inc8(this.l); return 4;
         case 0x2D: this.l = this.dec8(this.l); return 4;
         case 0x2E: this.l = this.fetchByte(); return 8;
         case 0x2F: this.a = (~this.a) & 0xFF; this.setFlag(F_N, true); this.setFlag(F_H, true); return 4; // CPL
 
-        case 0x30: { const d = this.fetchSigned(); if (!this.getFlag(F_C)) { this.pc = (this.pc + d) & 0xFFFF; return 12; } return 8; }
+        case 0x30: { const d = this.fetchSigned(); if (!this.getFlag(F_C)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
         case 0x31: this.sp = this.fetch16(); return 12;
         case 0x32: this.write(this.getHL(), this.a); this.setHL((this.getHL() - 1) & 0xFFFF); return 8;
-        case 0x33: this.sp = (this.sp + 1) & 0xFFFF; return 8;
+        case 0x33: this.sp = (this.sp + 1) & 0xFFFF; this.idle(); return 8;
         case 0x34: { const hl = this.getHL(); this.write(hl, this.inc8(this.read(hl))); return 12; }
         case 0x35: { const hl = this.getHL(); this.write(hl, this.dec8(this.read(hl))); return 12; }
         case 0x36: this.write(this.getHL(), this.fetchByte()); return 12;
         case 0x37: this.setFlag(F_C, true); this.setFlag(F_N, false); this.setFlag(F_H, false); return 4; // SCF
-        case 0x38: { const d = this.fetchSigned(); if (this.getFlag(F_C)) { this.pc = (this.pc + d) & 0xFFFF; return 12; } return 8; }
+        case 0x38: { const d = this.fetchSigned(); if (this.getFlag(F_C)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
         case 0x39: this.addHL(this.sp); return 8;
         case 0x3A: this.a = this.read(this.getHL()); this.setHL((this.getHL() - 1) & 0xFFFF); return 8;
-        case 0x3B: this.sp = (this.sp - 1) & 0xFFFF; return 8;
+        case 0x3B: this.sp = (this.sp - 1) & 0xFFFF; this.idle(); return 8;
         case 0x3C: this.a = this.inc8(this.a); return 4;
         case 0x3D: this.a = this.dec8(this.a); return 4;
         case 0x3E: this.a = this.fetchByte(); return 8;
@@ -344,7 +392,12 @@
       }
 
       if (opcode >= 0x40 && opcode <= 0x7F) {
-        if (opcode === 0x76) { this.halted = true; return 12; } // HALT(SingleStepTests実測で3Mサイクル=12T)
+        if (opcode === 0x76) { // HALT: 命令は 1 M サイクル。止まっている間は step() が 1 M サイクルずつ空回りする
+          // IME=0 で割り込みが既に保留なら止まらず、次の 1 バイトを 2 度読む(HALT バグ)
+          if (!this.ime && this.hasIrq && this.bus.irqPending()) this.haltBug = true;
+          else this.halted = true;
+          return 4;
+        }
         const y = (opcode >> 3) & 7, z = opcode & 7;
         this.setR8(y, this.getR8(z));
         return (y === 6 || z === 6) ? 8 : 4;
@@ -357,61 +410,61 @@
       }
 
       switch (opcode) {
-        case 0xC0: if (!this.getFlag(F_Z)) { this.pc = this.pop16(); return 20; } return 8;
+        case 0xC0: this.idle(); if (!this.getFlag(F_Z)) { this.pc = this.pop16(); this.idle(); return 20; } return 8;
         case 0xC1: this.setBC(this.pop16()); return 12;
-        case 0xC2: { const nn = this.fetch16(); if (!this.getFlag(F_Z)) { this.pc = nn; return 16; } return 12; }
-        case 0xC3: this.pc = this.fetch16(); return 16;
-        case 0xC4: { const nn = this.fetch16(); if (!this.getFlag(F_Z)) { this.push16(this.pc); this.pc = nn; return 24; } return 12; }
-        case 0xC5: this.push16(this.getBC()); return 16;
+        case 0xC2: { const nn = this.fetch16(); if (!this.getFlag(F_Z)) { this.pc = nn; this.idle(); return 16; } return 12; }
+        case 0xC3: this.pc = this.fetch16(); this.idle(); return 16;
+        case 0xC4: { const nn = this.fetch16(); if (!this.getFlag(F_Z)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xC5: this.idle(); this.push16(this.getBC()); return 16;
         case 0xC6: this.add8(this.fetchByte(), 0); return 8;
-        case 0xC7: this.push16(this.pc); this.pc = 0x00; return 16;
-        case 0xC8: if (this.getFlag(F_Z)) { this.pc = this.pop16(); return 20; } return 8;
-        case 0xC9: this.pc = this.pop16(); return 16;
-        case 0xCA: { const nn = this.fetch16(); if (this.getFlag(F_Z)) { this.pc = nn; return 16; } return 12; }
-        case 0xCC: { const nn = this.fetch16(); if (this.getFlag(F_Z)) { this.push16(this.pc); this.pc = nn; return 24; } return 12; }
-        case 0xCD: { const nn = this.fetch16(); this.push16(this.pc); this.pc = nn; return 24; }
+        case 0xC7: this.idle(); this.push16(this.pc); this.pc = 0x00; return 16;
+        case 0xC8: this.idle(); if (this.getFlag(F_Z)) { this.pc = this.pop16(); this.idle(); return 20; } return 8;
+        case 0xC9: this.pc = this.pop16(); this.idle(); return 16;
+        case 0xCA: { const nn = this.fetch16(); if (this.getFlag(F_Z)) { this.pc = nn; this.idle(); return 16; } return 12; }
+        case 0xCC: { const nn = this.fetch16(); if (this.getFlag(F_Z)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xCD: { const nn = this.fetch16(); this.idle(); this.push16(this.pc); this.pc = nn; return 24; }
         case 0xCE: this.add8(this.fetchByte(), this.getFlag(F_C) ? 1 : 0); return 8;
-        case 0xCF: this.push16(this.pc); this.pc = 0x08; return 16;
+        case 0xCF: this.idle(); this.push16(this.pc); this.pc = 0x08; return 16;
 
-        case 0xD0: if (!this.getFlag(F_C)) { this.pc = this.pop16(); return 20; } return 8;
+        case 0xD0: this.idle(); if (!this.getFlag(F_C)) { this.pc = this.pop16(); this.idle(); return 20; } return 8;
         case 0xD1: this.setDE(this.pop16()); return 12;
-        case 0xD2: { const nn = this.fetch16(); if (!this.getFlag(F_C)) { this.pc = nn; return 16; } return 12; }
-        case 0xD4: { const nn = this.fetch16(); if (!this.getFlag(F_C)) { this.push16(this.pc); this.pc = nn; return 24; } return 12; }
-        case 0xD5: this.push16(this.getDE()); return 16;
+        case 0xD2: { const nn = this.fetch16(); if (!this.getFlag(F_C)) { this.pc = nn; this.idle(); return 16; } return 12; }
+        case 0xD4: { const nn = this.fetch16(); if (!this.getFlag(F_C)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xD5: this.idle(); this.push16(this.getDE()); return 16;
         case 0xD6: this.sub8(this.fetchByte(), 0, true); return 8;
-        case 0xD7: this.push16(this.pc); this.pc = 0x10; return 16;
-        case 0xD8: if (this.getFlag(F_C)) { this.pc = this.pop16(); return 20; } return 8;
-        case 0xD9: this.pc = this.pop16(); this.ime = true; this.imePending = 0; return 16; // RETI(EIと違い即時)
-        case 0xDA: { const nn = this.fetch16(); if (this.getFlag(F_C)) { this.pc = nn; return 16; } return 12; }
-        case 0xDC: { const nn = this.fetch16(); if (this.getFlag(F_C)) { this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xD7: this.idle(); this.push16(this.pc); this.pc = 0x10; return 16;
+        case 0xD8: this.idle(); if (this.getFlag(F_C)) { this.pc = this.pop16(); this.idle(); return 20; } return 8;
+        case 0xD9: this.pc = this.pop16(); this.idle(); this.ime = true; this.imePending = 0; return 16; // RETI(EIと違い即時)
+        case 0xDA: { const nn = this.fetch16(); if (this.getFlag(F_C)) { this.pc = nn; this.idle(); return 16; } return 12; }
+        case 0xDC: { const nn = this.fetch16(); if (this.getFlag(F_C)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
         case 0xDE: this.sub8(this.fetchByte(), this.getFlag(F_C) ? 1 : 0, true); return 8;
-        case 0xDF: this.push16(this.pc); this.pc = 0x18; return 16;
+        case 0xDF: this.idle(); this.push16(this.pc); this.pc = 0x18; return 16;
 
         case 0xE0: { const n = this.fetchByte(); this.write(0xFF00 + n, this.a); return 12; } // LDH (n),A
         case 0xE1: this.setHL(this.pop16()); return 12;
         case 0xE2: this.write(0xFF00 + this.c, this.a); return 8; // LDH (C),A
-        case 0xE5: this.push16(this.getHL()); return 16;
+        case 0xE5: this.idle(); this.push16(this.getHL()); return 16;
         case 0xE6: this.and8(this.fetchByte()); return 8;
-        case 0xE7: this.push16(this.pc); this.pc = 0x20; return 16;
-        case 0xE8: this.sp = this.addSpR8(); return 16;
+        case 0xE7: this.idle(); this.push16(this.pc); this.pc = 0x20; return 16;
+        case 0xE8: { const r = this.addSpR8(); this.idle(); this.idle(); this.sp = r; return 16; }
         case 0xE9: this.pc = this.getHL(); return 4; // JP HL(間接読出しではなくPC=HL)
         case 0xEA: { const nn = this.fetch16(); this.write(nn, this.a); return 16; }
         case 0xEE: this.xor8(this.fetchByte()); return 8;
-        case 0xEF: this.push16(this.pc); this.pc = 0x28; return 16;
+        case 0xEF: this.idle(); this.push16(this.pc); this.pc = 0x28; return 16;
 
         case 0xF0: { const n = this.fetchByte(); this.a = this.read(0xFF00 + n); return 12; } // LDH A,(n)
         case 0xF1: this.setAF(this.pop16()); return 12;
         case 0xF2: this.a = this.read(0xFF00 + this.c); return 8; // LDH A,(C)
         case 0xF3: this.ime = false; this.imePending = 0; return 4; // DI
-        case 0xF5: this.push16(this.getAF()); return 16;
+        case 0xF5: this.idle(); this.push16(this.getAF()); return 16;
         case 0xF6: this.or8(this.fetchByte()); return 8;
-        case 0xF7: this.push16(this.pc); this.pc = 0x30; return 16;
-        case 0xF8: this.setHL(this.addSpR8()); return 12;
-        case 0xF9: this.sp = this.getHL(); return 8;
+        case 0xF7: this.idle(); this.push16(this.pc); this.pc = 0x30; return 16;
+        case 0xF8: this.setHL(this.addSpR8()); this.idle(); return 12;
+        case 0xF9: this.sp = this.getHL(); this.idle(); return 8;
         case 0xFA: { const nn = this.fetch16(); this.a = this.read(nn); return 16; }
-        case 0xFB: this.imePending = 2; return 4; // EI(1命令分遅延して有効化)
+        case 0xFB: if (!this.ime && this.imePending === 0) this.imePending = 1; return 4; // EI(次の 1 命令が終わってから有効)
         case 0xFE: this.sub8(this.fetchByte(), 0, false); return 8;
-        case 0xFF: this.push16(this.pc); this.pc = 0x38; return 16;
+        case 0xFF: this.idle(); this.push16(this.pc); this.pc = 0x38; return 16;
       }
       // 未定義オペコード(D3/DB/DD/E3/E4/EB/EC/ED/F4/FC/FD): 実機はCPU停止(フリーズ)するが、
       // GBSの曲データがこれらを使うことは無い想定のためNOP相当として扱い暴走を防ぐ
@@ -464,7 +517,7 @@
     }
 
     stepCall() {
-      if (this.halted) { this.callActive = false; return 4; }
+      if (this.halted || this.haltBug) { this.halted = false; this.haltBug = false; this.callActive = false; return 4; }
       const c = this.step();
       if (this.pc === CALL_SENTINEL) this.callActive = false;
       return c;

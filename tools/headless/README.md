@@ -24,6 +24,8 @@ export PATH="$PATH:/path/to/nodejs"
 | `shim.js` | 最小のDOM/AudioContext/Workerシム。UIコードが読み込み時に落ちないための張りぼて |
 | `convert.js` | 変換API + CLI(NSF/SPC/KSS/GBS/HES/VGM/PSF、zip/7z/gzip内も可。PSFの `_lib` は同じzip/フォルダから引く) |
 | `nes-run.js` | 自前 NES エミュレータ(`src/emulator/nes/`)をヘッドレスで回して画面を PNG に書く。`--press "start:400-410,right:500-900"` でボタン、`--png-every` で途中の画面、`--audio` で WAV、`--vgm` で音源レジスタの録音(本体の ● と同じ経路)。.fds は `--bios disksys.rom`(または環境変数 FDS_BIOS)と、必要なら `--disk 1:900`(そのフレームで取り出し、90 フレーム後に B 面)。`--battery save.bin` でセーブ RAM(バッテリ/FDS 全面)を読んで始め、終わりに書く。Mesen の `tools/mesen/ref-screenshot.lua` と同じフレームの画面を比べる |
+| `gb-run.js` | 自前ゲームボーイエミュレータ(`src/emulator/gb/`、DESIGN-GB-CAPTURE.md)をヘッドレスで回す。`--selftest` で自作テスト ROM(`mk-gb-test-rom.js`)を全 MBC で通す。`--serial` / `--expect-serial Passed`(blargg)/ `--mooneye` でテスト ROM の合否、`--press` `--png` `--audio` `--dump` は nes-run.js と同じ |
+| `gb-testroms.js` | 公開テスト ROM(blargg / mooneye / dmg-acid2。`_tmp_test/gb` か `GB_TESTROM_ROOT` に各自で置く、同梱しない)をまとめて回して合否の表を出す。`--check tools/headless/gb-testroms-pass.txt` で前に通っていた物が落ちていないか見る。`src/emulator/gb/` か `cpuSm83.js` を触ったら回す |
 | `live-roll-test.js` | ライブ表示(ロール追記モード)の点検。先読みのタイムラインのハッシュ(HEAD の worktree と比べる)、追記(`liveAppendFrame`)が同じ材料の一括構築と一致すること、1 フレームの追記時間、過去向きの座標系の自己検査 |
 | `vgm-clean-test.js` | 録音の補正(変換設定 SFX_REMOVE / LAG_FIX、`src/vgm/vgmClean.js`)の点検。NSF→VGM に効果音と空フレームを人工的に混ぜ、OFF の不変性と「効果音が残らない・フレーム数が戻る」を見る。`--vgm` で実ファイルの OFF 不変性も |
 | `nsf2vgm.js` | NSF → VGM(NES APU)書き出し。Mesen 用録音スクリプト(`tools/mesen/`)と同じ符号化(735サンプル=1フレーム固定、DPCM はデータブロック 0xC2)。拡張音源(VRC6/VRC7/MMC5/N163/SUNSOFT 5B)は規格外の NESX ブロック(`src/vgm/vgmHeader.js` VGM.NESX)で運ぶ。VGM 経路の変換が NSF 直接変換と一致するかの A/B 用 |
