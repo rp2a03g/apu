@@ -6,7 +6,7 @@
  * タイマ(DIV/TIMA)、シリアル、OAM DMA、PPU、APU、音の標本化。NesConsole/MsxConsole と同じ形の API を持つ
  * (runFrame / runSamples / setController / startRecording / getBattery …)。
  *
- * まだ無い物(DESIGN-GB-CAPTURE.md §9): APU は旧 apuGb.js のまま(8b で作り直す)、PPU は行単位(8c)、
+ * まだ無い物(DESIGN-GB-CAPTURE.md §9): PPU は行単位(8c)、
  * CGB(8d)、周辺と残りの MBC(8e)、SGB(8g)。ブート ROM は使わず起動後の状態を直接セットする。
  *
  * 参考: Pan Docs "Timer obscure behaviour" "Interrupts" "Power-Up Sequence"
@@ -22,22 +22,28 @@
   // TAC の下位 2bit → TIMA を進める DIV(16bit)のビット。そのビットと許可の AND の立ち下がりで +1
   const TAC_BIT = [1 << 9, 1 << 3, 1 << 5, 1 << 7];
   const SERIAL_BIT = 1 << 8; // 内部クロック 8192Hz = DIV bit8 の立ち下がり
+  const APU_BIT = 1 << 12;   // APU のフレームシーケンサ 512Hz = DIV bit12 の立ち下がり(CGB の倍速時は bit13)
 
   class GbConsole {
     // opts.model: 'dmg'(既定)。'cgb' / 'sgb' は後の段階
     constructor(romBytes, opts) {
       opts = opts || {};
       this.model = opts.model || 'dmg';
-      this.cart = new Emu.GbCart(romBytes);
+      // opts.cart: 出来合いのカートリッジを挿す(GBS プレイヤーが使う)。opts.lcdAlwaysOn / opts.noRender も GBS 用
+      this.cart = opts.cart || new Emu.GbCart(romBytes);
+      this.lcdAlwaysOn = !!opts.lcdAlwaysOn;
       this.ppu = new Emu.GbPpu(this);
-      this.apu = new Emu.APUGb();
+      this.ppu.noRender = !!opts.noRender;
+      this.apu = new Emu.APUGb(this.model === 'cgb' ? 'cgb' : 'dmg');
+      this.apu.externalSeq = true;
+      this.apu.divBit = () => (this.div & APU_BIT) !== 0;
       this.cpu = new Emu.CPUSm83(this);
       this.wram = new Uint8Array(0x2000);
       this.hram = new Uint8Array(0x7F);
       this.pad = 0; this.padHeld = 0; this.padTurbo = 0; this.turboRate = 2; this.turboPhase = 0;
       this.cpuCycles = 0; this.frameCount = 0; this.frameT = 0; this._frameFlag = false;
       this.sampleRate = 0; this.cycleAccum = 0;
-      this.ring = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0; this.underruns = 0;
+      this.ring = new Float32Array(AUDIO_RING); this.ringR = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0; this.underruns = 0;
       this.onWrite = null;  // (addr, value, frameFrac) 音源レジスタの書き込み
       this.onFrame = null;
       this.onSerial = null; // (byte) シリアルへ 1 バイト送り終えた(テスト ROM の結果表示など)
@@ -60,14 +66,17 @@
       this.div = 0xABC8; this.tima = 0; this.tma = 0; this.tac = 0; this.timaReload = false; this.timaReloading = false;
       this.p1 = 0x00; this.sb = 0; this.sc = 0; this.serialBits = 0;
       this.dma = 0xFF; this.dmaActive = false; this.dmaPos = 0; this.dmaSrc = 0; this.dmaStart = 0; this.dmaNext = 0; this.dmaByte = 0xFF;
-      // ブート ROM が鳴らした「ポーン」の後のレジスタ(発音はさせない)
+      // ブート ROM が「ポーン」を鳴らした後のレジスタ。CH1 は鳴り終わりかけで有効のまま(NR52=$F1)。
+      // 残響の音量は分からないので 0 にしておく(起動直後に余韻は鳴らさない)
       const apu = this.apu;
-      for (const [a, v] of [[0xFF26, 0x80], [0xFF10, 0x80], [0xFF11, 0xBF], [0xFF12, 0xF3], [0xFF13, 0xFF], [0xFF16, 0x3F], [0xFF18, 0xFF],
+      for (const [a, v] of [[0xFF26, 0x80], [0xFF10, 0x80], [0xFF11, 0xBF], [0xFF12, 0xF3], [0xFF13, 0xC1], [0xFF14, 0x87], [0xFF16, 0x3F], [0xFF18, 0xFF],
         [0xFF1A, 0x7F], [0xFF1B, 0xFF], [0xFF1C, 0x9F], [0xFF1D, 0xFF], [0xFF20, 0xFF], [0xFF24, 0x77], [0xFF25, 0xF3]]) apu.writeRegister(a, v);
+      apu.ch1.envelope.volume = 0; apu.ch1.envelope.running = false;
+      apu.regRaw[0x03] = 0xFF; apu.ch1.triggerSeq = 0;
       this.cpuCycles = 0; this.frameT = 0;
     }
 
-    setSampleRate(sr) { this.sampleRate = sr; this.cycleAccum = 0; this.ringHead = 0; this.ringLen = 0; }
+    setSampleRate(sr) { this.sampleRate = sr; this.cycleAccum = 0; this.ringHead = 0; this.ringLen = 0; if (sr) this.apu.setSampleRate(sr); }
     // ボタンのビットは NesConsole.BUTTON と同じ並び(A B SELECT START UP DOWN LEFT RIGHT)。画面側の入力をそのまま使える
     setController(port, bits, turbo) { if (port) return; this.padHeld = bits & 0xFF; this.padTurbo = (turbo | 0) & 0xFF; this._applyPad(); }
     setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(); }
@@ -123,7 +132,7 @@
       const ppu = this.ppu;
       ppu.tick();
       const apu = this.apu;
-      apu.clock(); apu.clock(); apu.clock(); apu.clock();
+      apu.advance(4);
 
       this.frameT += 4;
       // フレームの区切りは VBlank の頭。LCD が消えている間は 70224T ごとに刻む(音と録音の時間を止めない)
@@ -137,7 +146,8 @@
           this.cycleAccum -= CLOCK;
           if (this.ringLen < AUDIO_RING) {
             const s = apu.mixSample();
-            this.ring[(this.ringHead + this.ringLen) & (AUDIO_RING - 1)] = (s.left + s.right) * 0.5; // ステレオ出しは 8b(APU の作り直し)で
+            const i = (this.ringHead + this.ringLen) & (AUDIO_RING - 1);
+            this.ring[i] = s.left; this.ringR[i] = s.right;
             this.ringLen++;
           }
         }
@@ -149,6 +159,7 @@
       const old = this.div;
       this.div = nv;
       if (this.tac & 4) { const b = TAC_BIT[this.tac & 3]; if ((old & b) && !(nv & b)) this._incTima(); }
+      if ((old & APU_BIT) && !(nv & APU_BIT)) this.apu.seqTick();
       if (this.serialBits && (old & SERIAL_BIT) && !(nv & SERIAL_BIT)) {
         if (--this.serialBits === 0) {
           const out = this.sb;
@@ -224,6 +235,7 @@
       }
       if (addr >= 0xFF40 && addr <= 0xFF4B) {
         if (addr === 0xFF46) { this.dma = v; this.dmaNext = (v >= 0xE0 ? v - 0x20 : v) << 8; this.dmaStart = 2; } // $E0 以上は WRAM の写し側を読む
+        else if (addr === 0xFF40 && this.lcdAlwaysOn) this.ppu.writeReg(addr, v | 0x80);
         else this.ppu.writeReg(addr, v);
         return;
       }
@@ -298,9 +310,11 @@
       this.takeAudioInto(out, n);
     }
     takeAudio(n) { const out = new Float32Array(n); this.takeAudioInto(out, n); return out; }
-    takeAudioInto(out, n) {
-      const take = Math.min(n, this.ringLen);
-      for (let i = 0; i < take; i++) out[i] = this.ring[(this.ringHead + i) & (AUDIO_RING - 1)];
+    // 音はステレオ(NR51 の左右振り分け)。outR を渡せば左右別、渡さなければ左右の平均を out へ
+    takeAudioInto(out, n, outR) {
+      const take = Math.min(n, this.ringLen), M = AUDIO_RING - 1, h = this.ringHead;
+      if (outR) { for (let i = 0; i < take; i++) { out[i] = this.ring[(h + i) & M]; outR[i] = this.ringR[(h + i) & M]; } for (let i = take; i < n; i++) outR[i] = 0; }
+      else for (let i = 0; i < take; i++) out[i] = (this.ring[(h + i) & M] + this.ringR[(h + i) & M]) * 0.5;
       for (let i = take; i < n; i++) out[i] = 0;
       this.ringHead = (this.ringHead + take) & (AUDIO_RING - 1);
       this.ringLen -= take;

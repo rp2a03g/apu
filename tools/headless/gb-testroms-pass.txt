@@ -10,9 +10,19 @@ blargg/gb-test-roms-master/cpu_instrs/individual/08-misc instrs.gb
 blargg/gb-test-roms-master/cpu_instrs/individual/09-op r,r.gb
 blargg/gb-test-roms-master/cpu_instrs/individual/10-bit ops.gb
 blargg/gb-test-roms-master/cpu_instrs/individual/11-op a,(hl).gb
+blargg/gb-test-roms-master/dmg_sound/dmg_sound.gb
+blargg/gb-test-roms-master/dmg_sound/rom_singles/01-registers.gb
 blargg/gb-test-roms-master/dmg_sound/rom_singles/02-len ctr.gb
+blargg/gb-test-roms-master/dmg_sound/rom_singles/03-trigger.gb
 blargg/gb-test-roms-master/dmg_sound/rom_singles/04-sweep.gb
+blargg/gb-test-roms-master/dmg_sound/rom_singles/05-sweep details.gb
 blargg/gb-test-roms-master/dmg_sound/rom_singles/06-overflow on trigger.gb
+blargg/gb-test-roms-master/dmg_sound/rom_singles/07-len sweep period sync.gb
+blargg/gb-test-roms-master/dmg_sound/rom_singles/08-len ctr during power.gb
+blargg/gb-test-roms-master/dmg_sound/rom_singles/09-wave read while on.gb
+blargg/gb-test-roms-master/dmg_sound/rom_singles/10-wave trigger while on.gb
+blargg/gb-test-roms-master/dmg_sound/rom_singles/11-regs after power.gb
+blargg/gb-test-roms-master/dmg_sound/rom_singles/12-wave write while on.gb
 blargg/gb-test-roms-master/halt_bug.gb
 blargg/gb-test-roms-master/instr_timing/instr_timing.gb
 blargg/gb-test-roms-master/mem_timing-2/mem_timing.gb
@@ -29,7 +39,9 @@ dmg-acid2.gb
 mooneye/acceptance/add_sp_e_timing.gb
 mooneye/acceptance/bits/mem_oam.gb
 mooneye/acceptance/bits/reg_f.gb
+mooneye/acceptance/bits/unused_hwio-GS.gb
 mooneye/acceptance/boot_div-dmgABCmgb.gb
+mooneye/acceptance/boot_hwio-dmgABCmgb.gb
 mooneye/acceptance/boot_regs-dmgABC.gb
 mooneye/acceptance/call_cc_timing.gb
 mooneye/acceptance/call_cc_timing2.gb

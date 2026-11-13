@@ -24,7 +24,7 @@
  *   - bus.tick()        : 1 M サイクル(4T)ぶん本体を進める。読み書きの前と内部サイクルで呼ぶ
  *   - bus.irqPending()  : IE & IF & $1F。bus.irqAck(bit) で IF を下ろす。割り込みの受け付け/HALT の起床/HALT バグに使う
  *   - bus.stop(cpu)     : STOP 命令
- *   どれも無いバス(GBS の旧経路 gbsBus.js)では従来どおり「割り込み無し、step() が T を返すだけ」で動く。
+ *   どれも無いバス(CPU テストなど)では「割り込み無し、step() が T を返すだけ」で動く。
  * call(addr)/beginCall(addr)/stepCall() は cpu6502.js/cpuZ80.js と同じ設計
  * (呼び出し先アドレスをCALLし、番兵アドレスへのRETで終了を検知する)。
  */

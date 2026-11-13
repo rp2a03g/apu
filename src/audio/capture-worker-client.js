@@ -411,7 +411,7 @@
   Emu.captureGbsSongWorkerAsync = function (gbsBytes, opt = {}, onProgress = null) {
     if (!opt.regsOnly) return Emu.captureGbsSongAsync(gbsBytes, opt, onProgress);
     return _runMultiCapture('gbs', 'gbsCapture',
-      () => [MML.GBS && MML.GBS.parseHeader, Emu.CPUSm83, Emu.GbsBus, Emu.APUGb,
+      () => [MML.GBS && MML.GBS.parseHeader, Emu.CPUSm83, Emu.GbPpu, Emu.GbConsole, Emu.APUGb,
              Emu.GbsPlayer, Emu.snapshotGbApuForCapture, Emu.captureGbsSongAsync,
              MML.RollBuild && MML.RollBuild.gbs,
              MML.Gbs2MmlExpansion && MML.Gbs2MmlExpansion.pulse,

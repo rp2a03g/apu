@@ -18,11 +18,13 @@
   MML.Gbs2MmlExpansion = MML.Gbs2MmlExpansion || {};
   const { volumeAt, updateAnchor } = MML.Gbs2MmlExpansion.hwEnvelope;
 
-  // GBノイズ周期(Tステート) = 16 * divisor * 2^shift (apuGb.jsのNoiseChannel.periodT()と同じ式)
+  // GBノイズ周期(Tステート) = divisor << shift (apuGb.jsのNoiseChannel.periodT()と同じ式)。
+  // ★2026-11-13 まで 16 * divisor << shift としていて 16 倍(4 オクターブ)低く見積もっていた(エミュレータ側も同じ誤り。
+  //   VGMPlay 0.52 と突き合わせて確認)。2A03 の周期への割り当てはこの修正で高い側へ動く
   const NOISE_DIVISOR = [8, 16, 32, 48, 64, 80, 96, 112];
   const GB_CLOCK = 4194304;
   function gbNoiseFreq(divisorCode, clockShift) {
-    const periodT = 16 * NOISE_DIVISOR[divisorCode] * (1 << clockShift);
+    const periodT = NOISE_DIVISOR[divisorCode] * Math.pow(2, clockShift);
     return GB_CLOCK / periodT;
   }
 

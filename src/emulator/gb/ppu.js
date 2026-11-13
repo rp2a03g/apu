@@ -98,7 +98,7 @@
       if (!(this.lcdc & 0x80)) return;
       const d = (this.dot += 4);
       if (this.ly < H) {
-        if (d === 80) { this.mode = 3; this._renderLine(); this._stat(); }
+        if (d === 80) { this.mode = 3; if (!this.noRender) this._renderLine(); this._stat(); }
         else if (d === 252) { this.mode = 0; this._stat(); }
       }
       if (d >= 456) {

@@ -276,6 +276,8 @@
       apu.ch3.freq = s.ch3.freq; apu.ch3.volumeShift = s.ch3.volumeShift; apu.ch3.enabled = s.ch3.enabled; apu.ch3.dacOn = s.ch3.dacOn;
       for (let i = 0; i < 32; i++) apu.ch3.wave[i] = s.ch3.wave[i];
       apu.ch4.envelope.volume = s.ch4.vol; apu.ch4.enabled = s.ch4.enabled;
+      // 新しい APU(2026-11-13)は ch ごとの DAC を見る。写しには DAC の状態が無いので常に ON(止まっている ch は直流になるだけで、フィルタが落とす)
+      apu.ch1.dac = true; apu.ch2.dac = true; apu.ch4.dac = true;
       apu.ch4.clockShift = s.ch4.clockShift; apu.ch4.widthMode = s.ch4.widthMode; apu.ch4.divisorCode = s.ch4.divisorCode;
       // CH4のLFSRロックアップ対策: lfsr/timerは上記の方針どおり通常は触らないが、
       // LFSR(線形帰還シフトレジスタ)は数学的な性質上$0000へ到達すると以後ずっと$0000の
