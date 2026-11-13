@@ -794,7 +794,8 @@
   // ── タッチ操作キー(タッチ端末だけ。画面の下)──
   // 十字/A/B/連射 A/B/Select/Start。複数の指を別々に追い(pointerId ごとに押しているボタン)、指を滑らせても下のボタンへ移る
   // 十字キーは見た目は 4 つのボタンのまま、入力は円: 中心からの角度を 45° ずつ 8 方向に分け(斜めは 2 つのボタンが光る)、
-  // 中心付近は何も押さない。十字キーの円の中で触れた指は、離すまで十字キーの指として扱い、円の外へはみ出しても角度で方向を決める
+  // 中心付近は何も押さない。十字キーの円の中で触れた指は、離すまで十字キーの指として扱い、円の外へはみ出しても角度で方向を決める。
+  // 判定の中心は指について来るので、方向の切り替えは指を少し動かすだけで済む(dpadBitsAt)
   function buildTouchPad() {
     const pad = document.createElement('div'); pad.className = 'nes-tpad';
     const key = (cls, label, bits, turbo) => {
@@ -820,12 +821,16 @@
     const held = new Map(); // pointerId → 押しているキー要素、または十字キーの指なら { dpadBits: 方向ビット }(名前に dir は使わない: 要素が元から dir 属性を持つ)
     const dirEls = [[PAD_BITS.Up, dpad.querySelector('.nes-tk-up')], [PAD_BITS.Down, dpad.querySelector('.nes-tk-down')], [PAD_BITS.Left, dpad.querySelector('.nes-tk-left')], [PAD_BITS.Right, dpad.querySelector('.nes-tk-right')]];
     const DIRS8 = [PAD_BITS.Right, PAD_BITS.Right | PAD_BITS.Down, PAD_BITS.Down, PAD_BITS.Down | PAD_BITS.Left, PAD_BITS.Left, PAD_BITS.Left | PAD_BITS.Up, PAD_BITS.Up, PAD_BITS.Up | PAD_BITS.Right];
-    // 十字キーの中心からの位置 → { r: 半径比(1 = 十字キーの外接円の内側の端), bits }
-    const dpadAt = (x, y) => {
-      const rc = dpad.getBoundingClientRect(), R = Math.min(rc.width, rc.height) / 2;
-      const dx = x - (rc.left + rc.width / 2), dy = y - (rc.top + rc.height / 2), d = Math.hypot(dx, dy);
-      const sec = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) & 7; // 画面座標は下が +y なので 0=右 2=下 4=左 6=上
-      return { r: R > 0 ? d / R : 99, bits: d < R * 0.18 ? 0 : DIRS8[sec] }; // 中心の 18% は遊び
+    // 判定の中心は指について来る(浮動中心): 指が中心から DPAD_REACH px より離れたら、中心を指の方へその距離まで引き寄せる。
+    // 反対の方向へ切り替えるのに要る指の移動が DPAD_REACH + DPAD_DEAD px で済む(固定の中心だとボタンの上から中心を越えるまで動かす必要があった)
+    const DPAD_DEAD = 8, DPAD_REACH = 18; // 遊び(中心からこの px 以内は何も押さない)/ 中心が引き寄せられ始める距離(px)
+    const dpadCenter = () => { const rc = dpad.getBoundingClientRect(); return { x: rc.left + rc.width / 2, y: rc.top + rc.height / 2, R: Math.min(rc.width, rc.height) / 2 }; };
+    // 指の位置と判定の中心 st({ cx, cy }。引き寄せで書き換える)→ 方向ビット
+    const dpadBitsAt = (x, y, st) => {
+      let dx = x - st.cx, dy = y - st.cy; const d = Math.hypot(dx, dy);
+      if (d > DPAD_REACH) { const k = (d - DPAD_REACH) / d; st.cx += dx * k; st.cy += dy * k; dx = x - st.cx; dy = y - st.cy; }
+      if (d < DPAD_DEAD) return 0;
+      return DIRS8[Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) & 7]; // 画面座標は下が +y なので 0=右 2=下 4=左 6=上
     };
     let msxDown = new Set(); // MSX で押している MSX キー名(SPACE/RETURN)
     const recompute = () => {
@@ -851,8 +856,11 @@
     pad.addEventListener('pointerdown', (e) => {
       e.preventDefault(); resumeAudio();
       try { pad.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ }
-      const dp = dpadAt(e.clientX, e.clientY);
-      if (dp.r <= 1.15) { held.set(e.pointerId, { dpadBits: dp.bits }); recompute(); return; } // 十字キーの円(少しはみ出しても)に触れた
+      const c = dpadCenter();
+      if (Math.hypot(e.clientX - c.x, e.clientY - c.y) <= c.R * 1.15) { // 十字キーの円(少しはみ出しても)に触れた。最初の判定は十字キーの中心から
+        const st = { cx: c.x, cy: c.y, dpadBits: 0 }; st.dpadBits = dpadBitsAt(e.clientX, e.clientY, st);
+        held.set(e.pointerId, st); recompute(); return;
+      }
       const k = keyAt(e.clientX, e.clientY);
       if (k) held.set(e.pointerId, k); else held.delete(e.pointerId);
       recompute();
@@ -860,7 +868,7 @@
     pad.addEventListener('pointermove', (e) => {
       if (!held.has(e.pointerId) && !(e.buttons & 1) && e.pointerType === 'mouse') return;
       const cur = held.get(e.pointerId) || null;
-      if (cur && cur.dpadBits !== undefined) { const b = dpadAt(e.clientX, e.clientY).bits; if (b !== cur.dpadBits) { cur.dpadBits = b; recompute(); } return; }
+      if (cur && cur.dpadBits !== undefined) { const b = dpadBitsAt(e.clientX, e.clientY, cur); if (b !== cur.dpadBits) { cur.dpadBits = b; recompute(); } return; }
       const k = keyAt(e.clientX, e.clientY);
       if (k !== cur) { if (k) held.set(e.pointerId, k); else held.delete(e.pointerId); recompute(); }
     });
