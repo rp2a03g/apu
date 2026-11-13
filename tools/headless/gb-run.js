@@ -3,7 +3,7 @@
  * 自前ゲームボーイエミュレータ(src/emulator/gb/)をヘッドレスで回す(nes-run.js / msx-run.js の GB 版)。
  *
  * 使い方: node tools/headless/gb-run.js "game.gb" [--frames N] [--png out.png] [--png-every M] [--audio out.wav]
- *           [--press "right:120-130,a:300-305"] [--dump N] [--serial] [--expect-serial STR] [--mooneye]
+ *           [--press "right:120-130,a:300-305"] [--dump N] [--serial] [--expect-serial STR] [--mooneye] [--model dmg|cgb|auto]
  *         node tools/headless/gb-run.js --selftest        自作テスト ROM(mk-gb-test-rom.js)を全 MBC で通す
  *   --serial         : シリアルへ出た文字を最後に出す(blargg のテスト ROM は結果をここへ書く)
  *   --expect-serial  : シリアル出力に STR が現れたらそこで止めて合格(終了コード 0)。出なければ 1
@@ -77,8 +77,8 @@ if (has('--selftest')) {
 }
 
 if (!file) { console.error('ROM を指定してください(.gb/.gbc)。--selftest で自作テスト ROM'); process.exit(2); }
-const gb = new MML.Emu.GbConsole(readBytes(file));
-console.log(`${path.basename(file)}: ${MML.Emu.GbConsole.describe(gb)}`);
+const gb = new MML.Emu.GbConsole(readBytes(file), { model: arg('--model', 'auto') });
+console.log(`${path.basename(file)}: ${MML.Emu.GbConsole.describe(gb)} → ${gb.model}`);
 const audio = [];
 if (audioOut) gb.setSampleRate(SR);
 const W = gb.frameWidth, H = gb.frameHeight;

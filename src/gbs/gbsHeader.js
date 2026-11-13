@@ -64,6 +64,9 @@
       const divider = TAC_DIVIDER[tac & 0x03];
       const framesTCycles = divider * (256 - tma);
       playFps = GBS.CPU_CLOCK / framesTCycles;
+      // TAC bit7 = CGB の倍速で動かす曲。タイマは CPU の速さで進むので周期は半分になる
+      // (2026-11-13 まで bit7 を見ておらず、この種の曲は半分の速さで鳴っていた)
+      if (tac & 0x80) playFps *= 2;
     } else {
       playFps = GBS.VBLANK_FPS;
     }

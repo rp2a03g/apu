@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 14:55:27
+ * Built by tools/build-capture-workers.ps1 at 2026-11-13 16:09:37
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-13 14:55:27';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-13 16:09:37';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -4139,7 +4139,9 @@
       this.header = MML.GBS.parseHeader(gbsBytes);
       this.cart = new GbsCart(this.header, gbsBytes.slice(this.header.dataOffset));
       // lcdAlwaysOn: VBlank 駆動の曲が LCDC を触っても割り込みが止まらないように。noRender: 絵は描かない
-      this.con = new Emu.GbConsole(null, { cart: this.cart, lcdAlwaysOn: true, noRender: true });
+      // ヘッダの TAC bit7 が立っている曲は CGB の倍速で動かす(CPU とタイマが 2 倍速。音源は元の速さのまま)
+      this.fast = ((this.header.tac | 0) & 0x80) !== 0;
+      this.con = new Emu.GbConsole(null, { cart: this.cart, lcdAlwaysOn: true, noRender: true, model: this.fast ? 'cgb' : 'dmg' });
       this.apu = this.con.apu;
       this.cpu = this.con.cpu;
       // 旧 API 互換: player.bus.onWrite に関数を入れると音源レジスタの書き込みが届く
@@ -4162,6 +4164,7 @@
     initSong(songIndex) {
       const con = this.con, cpu = con.cpu, h = this.header;
       con.reset();
+      if (this.fast) { con.doubleSpeed = true; con.stepT = 2; con.apuBit = 1 << 13; }
       con.apu.reset(); // 音源は起動チャイム後の値でなく素の状態から(GBS はブート ROM を通らない。旧実装と同じ出発点)
       // ヘッダの TMA/TAC を先に入れる(GBS の規約)。TAC bit2=1 ならタイマ割り込み、0 なら VBlank。bit6 は両方
       const tac = h.tac | 0, timer = (tac & 0x04) !== 0;

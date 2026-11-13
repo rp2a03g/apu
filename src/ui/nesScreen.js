@@ -1327,7 +1327,7 @@
     const mode = node ? T('音: AudioWorklet') : T('音なし(主スレッド)');
     statusEl.textContent = `${fps} fps · ${mode}` + (underruns ? ' · ' + T('音切れ {n} 回', { n: underruns }) : '') + (hasBattery ? ' · ' + T('セーブ') : '') + (liveActive ? ' · ' + T('ロール') : '');
     if (pendingFds || pendingMsx) return; // BIOS 待ちの案内を消さない
-    const chips = machine === 'gb' ? 'DMG' : machine === 'msx' ? msxChips.map((c) => c.toUpperCase()).join('+') : ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
+    const chips = machine === 'gb' ? 'GB APU' : machine === 'msx' ? msxChips.map((c) => c.toUpperCase()).join('+') : ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
     statusEl.title = (chips ? chips + ' ' : '') + (workletState === 'failed' ? T('AudioWorklet が使えないので主スレッドで実行しています(音は出ません)') : '') +
       (hasBattery ? ' ' + T('セーブデータはこのブラウザ(IndexedDB)に自動保存します(1 秒ごと・閉じる時)。キー: {key}', { key: batteryKey }) : '') +
       (liveActive ? ' ' + T('鍵盤表示のロールへ流しています') : '');
@@ -1845,11 +1845,11 @@
   }
 
   // ゲームボーイのカートリッジを開く(流れは NES と同じ: 主スレッドで本体を作って検査 → Worklet(無理なら主スレッド実行))。
-  // 段階 8c は DMG。カラー専用のソフトは開けるが絵は正しく出ない(CGB は 8d)
+  // 機種はカートリッジのヘッダで決める: カラー対応(専用含む)なら CGB、それ以外は DMG(model 'auto')
   async function openGb(bytes, name) {
     machine = 'gb'; pendingFds = null; pendingMsx = null; msxChips = []; msxDisk = false;
     updateBiosBtn(); updateSoftKbd();
-    const probe = new MML.Emu.GbConsole(bytes, { model: 'dmg' });
+    const probe = new MML.Emu.GbConsole(bytes, { model: 'auto' });
     liveEnd('restart');
     rewindHoldEnd();
     await flushBattery(); // 前の ROM のセーブを受け取ってから止める
@@ -1858,8 +1858,7 @@
     hasBattery = probe.hasBattery; batteryKey = hasBattery ? stateKey : '';
     const battery = hasBattery ? await loadBattery(batteryKey) : null;
     if (battery && probe.setBattery(battery)) console.log('[gb]', T('セーブデータを読み込みました({n} バイト)', { n: battery.length }));
-    const hd = probe.cart.header;
-    machineEl.textContent = T('ゲームボーイ') + (hd.cgbOnly ? ' ' + T('(カラー専用: 未対応)') : '');
+    machineEl.textContent = probe.cgb ? T('ゲームボーイカラー') : T('ゲームボーイ');
     nameEl.textContent = romName;
     nameEl.title = MML.Emu.GbConsole.describe(probe);
     recExtBits = 0; fdsSideInfo = null; diskNames = [];
@@ -1877,7 +1876,7 @@
     applyCfgLabels();
     const rom = bytes.slice().buffer;
     const bat = battery ? battery.slice().buffer : null;
-    const ok = await startWorklet({ type: 'load', machine: 'gb', rom, battery: bat, gb: { model: 'dmg' } }, [rom, bat].filter(Boolean));
+    const ok = await startWorklet({ type: 'load', machine: 'gb', rom, battery: bat, gb: { model: probe.model } }, [rom, bat].filter(Boolean));
     if (!ok) { nes = probe; rewindBuf = MML.Emu.GbRewind ? new MML.Emu.GbRewind(nes) : null; lastPad = -1; lastPad2 = -1; mainFrames = 0; nes.setTurboRate(cfg.turboRate); startMain(); }
     liveBegin();
     updateStatus();

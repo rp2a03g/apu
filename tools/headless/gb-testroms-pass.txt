@@ -1,3 +1,16 @@
+blargg/gb-test-roms-master/cgb_sound/cgb_sound.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/01-registers.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/02-len ctr.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/03-trigger.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/04-sweep.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/05-sweep details.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/06-overflow on trigger.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/07-len sweep period sync.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/08-len ctr during power.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/09-wave read while on.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/10-wave trigger while on.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/11-regs after power.gb
+blargg/gb-test-roms-master/cgb_sound/rom_singles/12-wave.gb
 blargg/gb-test-roms-master/cpu_instrs/cpu_instrs.gb
 blargg/gb-test-roms-master/cpu_instrs/individual/01-special.gb
 blargg/gb-test-roms-master/cpu_instrs/individual/02-interrupts.gb
@@ -25,6 +38,7 @@ blargg/gb-test-roms-master/dmg_sound/rom_singles/11-regs after power.gb
 blargg/gb-test-roms-master/dmg_sound/rom_singles/12-wave write while on.gb
 blargg/gb-test-roms-master/halt_bug.gb
 blargg/gb-test-roms-master/instr_timing/instr_timing.gb
+blargg/gb-test-roms-master/interrupt_time/interrupt_time.gb
 blargg/gb-test-roms-master/mem_timing-2/mem_timing.gb
 blargg/gb-test-roms-master/mem_timing-2/rom_singles/01-read_timing.gb
 blargg/gb-test-roms-master/mem_timing-2/rom_singles/02-write_timing.gb
@@ -35,6 +49,7 @@ blargg/gb-test-roms-master/mem_timing/individual/03-modify_timing.gb
 blargg/gb-test-roms-master/mem_timing/mem_timing.gb
 blargg/gb-test-roms-master/oam_bug/rom_singles/3-non_causes.gb
 blargg/gb-test-roms-master/oam_bug/rom_singles/6-timing_no_bug.gb
+cgb-acid2.gbc
 dmg-acid2.gb
 mooneye/acceptance/add_sp_e_timing.gb
 mooneye/acceptance/bits/mem_oam.gb

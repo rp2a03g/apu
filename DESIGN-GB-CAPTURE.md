@@ -69,6 +69,8 @@ GBS の旧経路(`beginCall`/`stepCall`)は 8b で載せ替えるまで同じ結
 (区切りを時間で刻むと PLAY の途中の半端な状態を写してしまう。実際に踏んだ)。
 旧実装との比較(手元の 60 曲、曲 0、20〜30 秒): トリガの列(周波数つき)は全曲同じ(違いは最初の 1 個=起動時のレジスタ値だけ)。
 MML への変換は、ノイズの式を直す前の時点で 53 曲が完全一致、残り 7 曲は 1 フレームの時刻ゆれとスイープ/エンベロープの位相の差。
+ヘッダの TAC bit7(CGB の倍速)は 8d で対応: CPU とタイマを倍速にし、採取の刻み playFps も 2 倍(それまで bit7+タイマ駆動の曲は半分の速さで鳴っていた。
+手元 125 本中 3 本。直した後の周期は 59.8Hz / 99.9Hz)。
 書き込みログには時刻(フレーム頭からの T)が付いた。**写し再生(GbsReplayStreamPlayer)はまだフレーム 1 回のスナップショット**で、
 時刻つきログでの再生(PCM が潰れない)は残っている。
 
@@ -95,7 +97,14 @@ APU を入れ替えると GBS、VGM の DMG チップ、gbs2mml の結果が全�
 - ゲーム画面(8c): 中身判定は imageDetect.js の kind 'gb'(ヘッダのロゴ先頭+チェックサム。拡張子が .rom でも拾う)、nesScreen.js の openGb、
   Worklet は同じバンドル(machine 'gb')。音はステレオ(Worklet の出力を 2ch にした。NES/MSX は同じ音を左右へ)。
   ライブ表示は鍵盤表示の GB の行(chips ['gbs']、keyboard.js の makeGbStepper が書き込み列を APUGb に流してフレームごとの値を作る)。
-- CGB(8d): 倍速、VRAM/WRAM バンク、HDMA、パレット、赤外線、DMG ソフトの着色(ブート ROM があれば)。
+- CGB(8d、2026-11-13 済): 機種は opts.model('dmg' / 'cgb' / 'auto'=カートリッジのヘッダがカラー対応なら cgb)。ゲーム画面は auto。
+  - 倍速(KEY1+STOP): CPU の 1 M サイクルが元のクロックで 2T になる(本体の stepT)。タイマ/シリアル/OAM DMA は CPU の速さ、PPU と APU は元の速さ。
+    APU のフレームシーケンサは DIV の bit13 で進む
+  - VRAM 2 バンク、WRAM 8 バンク、HDMA(一括/HBlank ごと。運んでいる間 CPU は止まる)、パレット 8+8 本、赤外線ポート(受光なし)、PCM12/34
+  - 描画: BG の属性(パレット/タイルのバンク/反転/優先)、スプライトの優先は OAM 順、LCDC bit0 は BG の優先の親スイッチ
+  - 巻き戻しの映像はパレットの番号(64 色)で控え、色表もフレームごとに控える
+  - 無い物: CGB 本体で白黒ソフトを動かした時の着色(白黒ソフトは DMG として動かす。mooneye の CGB 向け試験はこの動作を見る物なので回していない)、
+    パレットのモード 3 中の書き込み禁止、赤外線の受光(8e)
 - SGB(8g): §5。
 
 1 フレーム=70224T(154 行×456T)、59.7275Hz。LCD OFF 中もフレームは同じ長さで刻む(音の時刻のため)。
@@ -149,14 +158,15 @@ SNES 本体の土台になるので、SNES2VGM をやる時にそのまま広げ
 | blargg cpu_instrs / instr_timing / mem_timing / mem_timing-2 / halt_bug | 全部 | — |
 | blargg dmg_sound(12 本) | 全部(8b で) | — |
 | blargg oam_bug(8 本) | 2 | OAM 破壊バグ(未実装。必要になったら) |
-| blargg interrupt_time | 0 | CGB の倍速を使う試験(8d) |
+| blargg interrupt_time | 合格(8d で) | — |
+| blargg cgb_sound(13 本)、cgb-acid2 | 全部(8d で、CGB として実行) | — |
 | mooneye acceptance 直下(命令/割り込み/HALT/DMA の時刻、起動時の値) | 32/32(8b で) | — |
 | mooneye bits / instr / interrupts / oam_dma / serial / timer | 22/22(8b で) | — |
 | mooneye ppu | 8/12(8c で) | スプライト数での HBlank 時刻、LCD を点けた直後 2 本、LCD OFF 中の LY=LYC |
 | mooneye emulator-only mbc1 / mbc2 / mbc5 | 28/28 | — |
 | dmg-acid2 | 合格 | — |
 
-合計 128/140(8a の終わり 113、8b の終わり 125。mooneye のうち DMG 以外の機種向け、手動確認用、cgb_sound の 34 本は回していない)。
+合計 143/154(8a の終わり 113/140、8b 125/140、8c 128/140。8d で CGB 向け 14 本を足した。mooneye のうち DMG 以外の機種向け、手動確認用、cgb_sound の 34 本は回していない)。
 
 この表を取る過程で決まった実装上の事実(実測):
 - バスの読み書きは「先に 4T 進めてからアクセス」で mem_timing と mooneye の *_timing が全部通る。
@@ -202,7 +212,7 @@ SNES 本体の土台になるので、SNES2VGM をやる時にそのまま広げ
 | 8a | CPU の M サイクル化と割り込み、本体骨格(タイマ/MBC1・2・3・5/ジョイパッド/シリアル/行単位 PPU)、gb-run.js、自作テスト ROM、テスト ROM の合格表(済、2026-11-13。§6.1) |
 | 8b | APU の作り直し(済)、GBS を本体コアへ載せ替え(済)、時刻つき書き込みログ(採取は済、写し再生への適用は未)、gbs2mml の A/B(済、§2.3) |
 | 8c | DMG の PPU をドット単位に、ゲーム画面(中身判定、Worklet、巻き戻し、状態保存)、録音→VGM(済、2026-11-13。ブラウザで起動/録音/ステート/巻き戻し/ライブ表示を確認。実ソフトでは未確認。録音の補正 vgmClean は GB 未対応、SGB のクロック選択は 8g) |
-| 8d | CGB |
+| 8d | CGB(済、2026-11-13。cgb-acid2 と cgb_sound が合格、ブラウザで色つきの画面と巻き戻しを確認。実ソフトでは未確認) |
 | 8e | 周辺: 時計、振動、傾き、赤外線、ブザー、MBC6/MBC7/HuC1/HuC3/MMM01、カメラ、プリンタ、バーコード |
 | 8f | 実ソフト総当たり、Mesen との A/B |
 | 8g | SGB(65816+SNES の一部+ICD2+SPC 連携、GBXX kind 1) |

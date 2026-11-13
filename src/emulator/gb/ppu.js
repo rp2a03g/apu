@@ -11,6 +11,8 @@
  *     SCX/SCY/LCDC/パレット/ウィンドウを書き換えるとその位置から効く。スプライトの遅れによる画素位置のずれまでは追わない
  *   - モード 2/3 の間の OAM、モード 3 の間の VRAM は CPU から触れない(読むと $FF、書きは捨てる)
  *   - 153 行目は 4T で LY=0 になる。LCD を点けた直後の 1 行目はモード 2 が無く 4T 短い。LCD が消えている間 LY=LYC の旗は動かない
+ *   CGB(段階 8d): VRAM 2 バンク、BG の属性(バンク 1 のマップ: パレット/タイルのバンク/反転/優先)、パレット 8+8 本(15bit 色)、
+ *     スプライトの優先は OAM 順、LCDC bit0 は「BG がスプライトより前に出られるか」。frameIdx はパレットの番号(BG 0-31、OBJ 32-63)
  *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)、OAM 破壊バグ
  *
  * 参考: Pan Docs "Rendering" "STAT" "OAM"。細部は mooneye の acceptance/ppu と dmg-acid2 で確かめる(tools/headless/gb-testroms.js)。
@@ -26,7 +28,11 @@
   class GbPpu {
     constructor(con) {
       this.con = con; // requestIrq(bit)
-      this.vram = new Uint8Array(0x2000);
+      this.vram = new Uint8Array(0x4000); // 8K × 2 バンク(DMG はバンク 0 だけ)
+      this.cgb = false;                   // 本体が決める
+      this.bgPalRam = new Uint8Array(64); this.objPalRam = new Uint8Array(64); // CGB のパレット(色 1 つ 2 バイト、15bit BGR)
+      this.colors = new Uint32Array(64);  // 上を 0xAABBGGRR に直した物(BG 0-31、OBJ 32-63)
+      this.sprSorted = new Uint8Array(10);
       this.oam = new Uint8Array(0xA0);
       this.frame = new Uint32Array(W * H);   // 0xAABBGGRR
       this.frameIdx = new Uint8Array(W * H); // 階調番号 0-3(巻き戻しの映像の輪が控える。色は shades で引く)
@@ -42,6 +48,8 @@
       this.scy = 0; this.scx = 0; this.ly = 0; this.lyc = 0;
       this.bgp = 0xFC; this.obp0 = 0xFF; this.obp1 = 0xFF;
       this.wy = 0; this.wx = 0;
+      this.vbk = 0; this.bcps = 0; this.ocps = 0; this.opri = 0;
+      this.bgPalRam.fill(0xFF); this.objPalRam.fill(0xFF); this.colors.fill(0xFFFFFFFF);
       this.line = 0;          // 内部の行(153 行目でも 153 のまま。ly は読み出し値)
       this.dot = 0; this.mode = 2;
       this.mode3End = 252;    // この行のモード 3 が終わる位置(T)
@@ -57,6 +65,14 @@
     }
 
     get on() { return (this.lcdc & 0x80) !== 0; }
+    // CGB のパレットへ 1 バイト(which: 0=BG $FF69、1=OBJ $FF6B)。番号は自動で進む(bit7)
+    writePal(which, v) {
+      const ram = which ? this.objPalRam : this.bgPalRam, sel = which ? this.ocps : this.bcps, i = sel & 0x3F;
+      ram[i] = v;
+      const c = ram[i & 0x3E] | (ram[i | 1] << 8), r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
+      this.colors[(which ? 32 : 0) + (i >> 1)] = (0xFF000000 | (((b << 3) | (b >> 2)) << 16) | (((g << 3) | (g >> 2)) << 8) | ((r << 3) | (r >> 2))) >>> 0;
+      if (sel & 0x80) { if (which) this.ocps = 0x80 | ((i + 1) & 0x3F); else this.bcps = 0x80 | ((i + 1) & 0x3F); }
+    }
     // CPU から見て触れない間(本体のバスが見る)
     oamBlocked() { return (this.lcdc & 0x80) !== 0 && this.line < H && !this.firstLine && (this.mode === 2 || this.mode === 3); }
     vramBlocked() { return (this.lcdc & 0x80) !== 0 && this.line < H && this.mode === 3; }
@@ -120,10 +136,10 @@
       this.statLine = !!line;
     }
 
-    // 4T 進める(本体が M サイクルごとに呼ぶ)
-    tick() {
+    // step T 進める(本体が M サイクルごとに呼ぶ。4、CGB の倍速なら 2)
+    tick(step) {
       if (!(this.lcdc & 0x80)) return;
-      const d = (this.dot += 4);
+      const d = (this.dot += step || 4);
       if (this.line < H) {
         if (this.mode === 2) {
           if (d >= 80) this._startMode3();
@@ -134,6 +150,7 @@
             if (this.winActive) this.winLine++;
             this.mode = 0; this.firstLine = false;
             this._stat();
+            if (this.cgb) this.con.hblank(); // HDMA(HBlank ごと)
           }
         }
       } else if (this.line === 153) {
@@ -164,8 +181,10 @@
       let n = 0;
       const list = this.sprList;
       if (lcdc & 0x02) for (let i = 0; i < 40 && n < 10; i++) { const sy = oam[i * 4] - 16; if (y >= sy && y < sy + h) list[n++] = i; }
-      // 優先順(X の小さい方、同じなら OAM の若い方)に並べる。挿入ソート(高々 10 個)
-      for (let i = 1; i < n; i++) { const v = list[i]; let j = i - 1; while (j >= 0 && oam[list[j] * 4 + 1] > oam[v * 4 + 1]) { list[j + 1] = list[j]; j--; } list[j + 1] = v; }
+      // X の小さい順(同じなら OAM の若い方)。挿入ソート(高々 10 個)。DMG はこれが描画の優先順、CGB の優先は OAM 順のまま(遅れの計算だけ X 順)
+      const sorted = this.cgb && !this.opri ? this.sprSorted : list;
+      if (sorted !== list) sorted.set(list);
+      for (let i = 1; i < n; i++) { const v = sorted[i]; let j = i - 1; while (j >= 0 && oam[sorted[j] * 4 + 1] > oam[v * 4 + 1]) { sorted[j + 1] = sorted[j]; j--; } sorted[j + 1] = v; }
       this.sprCount = n;
       this.scxFine = this.scx & 7;
       const winOnLine = (lcdc & 0x20) && this.wyHit && this.wx <= 166;
@@ -173,7 +192,7 @@
       // スプライトの遅れ: 左端の画素が乗る BG/ウィンドウのタイルごとに 1 回だけ「そのタイルの残り画素 − 2(0 未満は 0)」、どのスプライトにも一律 6
       let lastTile = -999;
       for (let i = 0; i < n; i++) {
-        const ox = oam[list[i] * 4 + 1];
+        const ox = oam[sorted[i] * 4 + 1];
         if (ox >= 168) continue;
         let tile, right;
         if (winOnLine && ox >= this.wx + 1) { const wxp = ox - (this.wx + 1); tile = 0x1000 + (wxp >> 3); right = 7 - (wxp & 7); }
@@ -191,6 +210,7 @@
       if (x1 > W) x1 = W;
       let x = this.px;
       if (x >= x1) return;
+      if (this.cgb) { this._renderToCgb(x1); return; }
       const y = this.line, lcdc = this.lcdc, vram = this.vram, oam = this.oam, sh = this.shades;
       const out = this.frame, outIdx = this.frameIdx, base = y * W;
       const bgOn = (lcdc & 0x01) !== 0, signedTiles = !(lcdc & 0x10);
@@ -240,6 +260,49 @@
       this.px = x;
     }
   }
+
+  // CGB の描画(_renderTo の CGB 版)
+  GbPpu.prototype._renderToCgb = function (x1) {
+    let x = this.px;
+    const y = this.line, lcdc = this.lcdc, vram = this.vram, oam = this.oam, colors = this.colors;
+    const out = this.frame, outIdx = this.frameIdx, base = y * W;
+    const master = (lcdc & 0x01) !== 0, signedTiles = !(lcdc & 0x10);
+    const winOk = (lcdc & 0x20) && this.wyHit && this.wx <= 166, wx0 = this.wx - 7;
+    const bgMap = (lcdc & 0x08) ? 0x1C00 : 0x1800, winMap = (lcdc & 0x40) ? 0x1C00 : 0x1800;
+    const yy = (y + this.scy) & 0xFF, bgRow = bgMap + (yy >> 3) * 32, scx = this.scx;
+    const wl = this.winLine, winRow = winMap + (wl >> 3) * 32;
+    const sprOn = (lcdc & 0x02) !== 0, n = this.sprCount, list = this.sprList, h = (lcdc & 0x04) ? 16 : 8;
+    for (; x < x1; x++) {
+      if (winOk && !this.winActive && x >= wx0) { this.winActive = true; this.winX = x - wx0; }
+      let mi, pxl, fy;
+      if (this.winActive && (lcdc & 0x20)) { const wxp = this.winX++; mi = winRow + ((wxp >> 3) & 31); pxl = wxp & 7; fy = wl & 7; }
+      else { const xx = (x + scx) & 0xFF; mi = bgRow + (xx >> 3); pxl = xx & 7; fy = yy & 7; }
+      const t = vram[mi], at = vram[0x2000 + mi];
+      const a = (signedTiles ? 0x1000 + ((t << 24) >> 24) * 16 : t * 16) + ((at & 0x40) ? 7 - fy : fy) * 2 + ((at & 0x08) ? 0x2000 : 0);
+      const bit = (at & 0x20) ? pxl : 7 - pxl;
+      const c = (((vram[a + 1] >> bit) & 1) << 1) | ((vram[a] >> bit) & 1);
+      let entry = (at & 7) * 4 + c;
+      if (sprOn) {
+        for (let i = 0; i < n; i++) {
+          const o = list[i] * 4, sx = oam[o + 1] - 8;
+          if (x < sx || x >= sx + 8) continue;
+          const fl = oam[o + 3];
+          let ln = y - (oam[o] - 16), tile = oam[o + 2];
+          if (fl & 0x40) ln = h - 1 - ln;
+          if (h === 16) tile &= 0xFE;
+          const sa = tile * 16 + ln * 2 + ((fl & 0x08) ? 0x2000 : 0), sb = (fl & 0x20) ? x - sx : 7 - (x - sx);
+          const sc = (((vram[sa + 1] >> sb) & 1) << 1) | ((vram[sa] >> sb) & 1);
+          if (!sc) continue;
+          // LCDC bit0=0 ならスプライトが常に前。そうでなければ BG の色 0 か、BG 属性とスプライトの両方が「前」を譲っている時だけ
+          if (!master || !c || (!(at & 0x80) && !(fl & 0x80))) entry = 32 + (fl & 7) * 4 + sc;
+          break;
+        }
+      }
+      outIdx[base + x] = entry;
+      out[base + x] = colors[entry];
+    }
+    this.px = x;
+  };
 
   GbPpu.WIDTH = W; GbPpu.HEIGHT = H;
   Emu.GbPpu = GbPpu;

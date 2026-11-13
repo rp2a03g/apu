@@ -8,12 +8,14 @@
  * ROM は同梱しない。DIR(既定 _tmp_test/gb、環境変数 GB_TESTROM_ROOT)の下に置く:
  *   blargg/…   blargg の gb-test-roms(cpu_instrs, instr_timing, mem_timing, mem_timing-2, halt_bug, interrupt_time, dmg_sound, oam_bug …)
  *   mooneye/…  mooneye-test-suite のビルド済み(acceptance, emulator-only …)
- *   dmg-acid2.gb(+ dmg-acid2.png = 正解の絵。あれば突き合わせる)
+ *   dmg-acid2.gb(+ dmg-acid2.png = 正解の絵。あれば突き合わせる)、cgb-acid2.gbc(+ cgb-acid2.png)
  *
  * 合否の読み方:
  *   blargg  : シリアルに "Passed"/"Failed"。新しい枠組みの物は $A000 に状態($80=実行中、0=合格)、$A001-3 に DE B0 61、$A004〜に文
  *   mooneye : シリアルに 3,5,8,13,21,34 が出れば合格、$42×6 なら不合格(完了を待たずに次を送るので「送り始めたバイト」serialSent で見る)
- *   機種の印(-dmgABC、-C、-S など)が付いた mooneye は DMG で通るはずの物だけ回す(--all-models で全部)
+ *   機種: 既定は DMG。blargg の cgb_sound / interrupt_time と cgb-acid2 は CGB で回す。
+ *   mooneye の印が DMG を含まない物(-C、-S、-cgb… )は回さない(--all-models で DMG のまま全部)。mooneye の CGB 向けは
+ *   「CGB 本体で白黒ソフトを動かした時」の試験(起動時のレジスタが違う)で、その動作はまだ無い
  *
  * --save は通った ROM の一覧を書き、--check はその一覧にあるのに今回落ちた物があれば終了コード 1(回帰の見張り)。
  */
@@ -47,7 +49,7 @@ function runsOnDmg(name) {
   return true;
 }
 
-// PNG(8bit、インターレース無し)を RGBA の行列に解く。dmg-acid2 の正解の絵用
+// PNG(8bit 以下、インターレース無し)を解く。acid2 の正解の絵用
 function readPng(file) {
   const b = fs.readFileSync(file);
   let o = 8, w = 0, h = 0, depth = 0, ctype = 0, pal = null; const idat = [];
@@ -72,16 +74,16 @@ function readPng(file) {
       px[dst + x] = v & 0xFF;
     }
   }
-  // 明るさ(0〜255)だけ返す
-  const lum = new Uint8Array(w * h);
+  // 明るさ(0〜255)と色(0xBBGGRR)
+  const lum = new Uint8Array(w * h), rgb = new Uint32Array(w * h);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     let v;
-    if (ctype === 3) { const bitPos = x * depth, byte = px[y * stride + (bitPos >> 3)], i = (byte >> (8 - depth - (bitPos & 7))) & ((1 << depth) - 1); v = pal[i * 3]; }
+    if (ctype === 3) { const bitPos = x * depth, byte = px[y * stride + (bitPos >> 3)], i = (byte >> (8 - depth - (bitPos & 7))) & ((1 << depth) - 1); v = pal[i * 3]; rgb[y * w + x] = pal[i * 3] | (pal[i * 3 + 1] << 8) | (pal[i * 3 + 2] << 16); }
     else if (ctype === 0) { const bitPos = x * depth, byte = px[y * stride + (bitPos >> 3)]; v = depth === 8 ? byte : Math.round(((byte >> (8 - depth - (bitPos & 7))) & ((1 << depth) - 1)) * 255 / ((1 << depth) - 1)); }
-    else v = px[y * stride + x * ch];
+    else { v = px[y * stride + x * ch]; if (ch >= 3) rgb[y * w + x] = px[y * stride + x * ch] | (px[y * stride + x * ch + 1] << 8) | (px[y * stride + x * ch + 2] << 16); }
     lum[y * w + x] = v;
   }
-  return { w, h, lum };
+  return { w, h, lum, rgb };
 }
 
 const { MML } = load({ strict: true });
@@ -91,8 +93,9 @@ const endsWith = (arr, tail) => arr.length >= tail.length && tail.every((v, i) =
 function runOne(file) {
   const rel = path.relative(ROOT, file).replace(/\\/g, '/');
   const suite = rel.startsWith('blargg/') ? 'blargg' : rel.startsWith('mooneye/') ? 'mooneye' : /acid2/.test(rel) ? 'acid2' : 'other';
+  const model = /cgb_sound|interrupt_time|cgb-acid2/.test(rel) ? 'cgb' : 'dmg';
   let gb;
-  try { gb = new MML.Emu.GbConsole(readBytes(file)); } catch (e) { return { rel, suite, pass: false, note: '起動できない: ' + e.message }; }
+  try { gb = new MML.Emu.GbConsole(readBytes(file), { model }); } catch (e) { return { rel, suite, pass: false, note: '起動できない: ' + e.message }; }
   const maxFrames = suite === 'blargg' ? 4200 : suite === 'acid2' ? 30 : 1200;
   let pass = null, note = '', f = 0;
   for (; f < maxFrames && pass === null; f++) {
@@ -115,9 +118,14 @@ function runOne(file) {
     }
   }
   if (suite === 'acid2') {
-    const ref = path.join(ROOT, 'dmg-acid2.png');
-    if (!fs.existsSync(ref)) return { rel, suite, pass: null, note: '正解の絵(dmg-acid2.png)が無い', frames: f };
+    const ref = path.join(ROOT, model === 'cgb' ? 'cgb-acid2.png' : 'dmg-acid2.png');
+    if (!fs.existsSync(ref)) return { rel, suite, pass: null, note: '正解の絵(' + path.basename(ref) + ')が無い', frames: f };
     const png = readPng(ref);
+    if (model === 'cgb') { // 色そのものを比べる(正解の絵は 5bit → 8bit を (c<<3)|(c>>2) で作ってある)
+      let diff = 0;
+      for (let i = 0; i < 160 * 144; i++) if ((gb.frame[i] & 0xFFFFFF) !== png.rgb[i]) diff++;
+      return { rel, suite, model, pass: png.w === 160 && png.h === 144 && diff === 0, note: diff ? `違う画素 ${diff}` : '', frames: f };
+    }
     // 正解は 4 階調。こちらの階調番号(0=白〜3=黒)と明るさの順位で比べる
     const levels = Array.from(new Set(png.lum)).sort((a, b) => b - a);
     let diff = 0;
@@ -126,20 +134,20 @@ function runOne(file) {
     note = pass ? '' : `違う画素 ${diff}`;
   }
   if (pass === null) { pass = false; note = '終わらなかった' + (gb.serialOut.length ? ' serial=' + JSON.stringify(String.fromCharCode(...gb.serialOut.slice(-40))) : ''); }
-  return { rel, suite, pass, note, frames: f };
+  return { rel, suite, model, pass, note, frames: f };
 }
 
 if (!fs.existsSync(ROOT)) { console.error('テスト ROM の置き場がありません: ' + ROOT); process.exit(2); }
 let files = walk(ROOT, []).sort();
 if (only) files = files.filter(f => only.test(f));
 const skipped = [];
-if (!has('--all-models')) files = files.filter(f => { if (/mooneye/.test(f) && !runsOnDmg(path.basename(f))) { skipped.push(f); return false; } if (/cgb_sound|[\\/](utils|manual-only|madness)[\\/]/.test(f)) { skipped.push(f); return false; } return true; });
+if (!has('--all-models')) files = files.filter(f => { if (/mooneye/.test(f) && !runsOnDmg(path.basename(f))) { skipped.push(f); return false; } if (/[\\/](utils|manual-only|madness)[\\/]/.test(f)) { skipped.push(f); return false; } return true; });
 
 const t0 = Date.now();
 const results = files.map(runOne);
 const groups = {};
 for (const r of results) {
-  const g = r.suite === 'acid2' ? 'acid2' : r.rel.split('/').slice(0, r.suite === 'mooneye' ? 4 : 2).filter(x => !/\.gbc?$/i.test(x) && !/^mts-/.test(x)).join('/');
+  const g = r.suite === 'acid2' ? 'acid2' :  r.rel.split('/').slice(0, r.suite === 'mooneye' ? 4 : 2).filter(x => !/\.gbc?$/i.test(x) && !/^mts-/.test(x)).join('/');
   (groups[g] = groups[g] || []).push(r);
 }
 let passN = 0;

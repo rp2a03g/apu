@@ -6,6 +6,8 @@
  * タイマ(DIV/TIMA)、シリアル、OAM DMA、PPU、APU、音の標本化。NesConsole/MsxConsole と同じ形の API を持つ
  * (runFrame / runSamples / setController / startRecording / getBattery …)。
  *
+ * CGB(段階 8d): 倍速(KEY1+STOP。CPU/タイマ/シリアル/OAM DMA は CPU の速さ、PPU と APU は元の速さのまま)、VRAM 2 バンク、WRAM 8 バンク、
+ *   HDMA(一括/HBlank ごと)、パレット、赤外線ポート(受光なし)、PCM12/34。機種は opts.model('dmg' / 'cgb' / 'auto'=カートリッジのヘッダで決める)。
  * まだ無い物(DESIGN-GB-CAPTURE.md §9): 
  * CGB(8d)、周辺と残りの MBC(8e)、SGB(8g)。ブート ROM は使わず起動後の状態を直接セットする。
  *
@@ -22,23 +24,26 @@
   // TAC の下位 2bit → TIMA を進める DIV(16bit)のビット。そのビットと許可の AND の立ち下がりで +1
   const TAC_BIT = [1 << 9, 1 << 3, 1 << 5, 1 << 7];
   const SERIAL_BIT = 1 << 8; // 内部クロック 8192Hz = DIV bit8 の立ち下がり
-  const APU_BIT = 1 << 12;   // APU のフレームシーケンサ 512Hz = DIV bit12 の立ち下がり(CGB の倍速時は bit13)
+  const APU_BIT = 1 << 12;   // APU のフレームシーケンサ 512Hz = DIV bit12 の立ち下がり(CGB の倍速時は bit13。this.apuBit)
 
   class GbConsole {
-    // opts.model: 'dmg'(既定)。'cgb' / 'sgb' は後の段階
+    // opts.model: 'dmg'(既定)/ 'cgb' / 'auto'(カートリッジがカラー対応なら cgb)。'sgb' は後の段階
     constructor(romBytes, opts) {
       opts = opts || {};
-      this.model = opts.model || 'dmg';
       // opts.cart: 出来合いのカートリッジを挿す(GBS プレイヤーが使う)。opts.lcdAlwaysOn / opts.noRender も GBS 用
       this.cart = opts.cart || new Emu.GbCart(romBytes);
+      this.model = opts.model === 'auto' ? (this.cart.header.cgb ? 'cgb' : 'dmg') : (opts.model || 'dmg');
+      this.cgb = this.model === 'cgb';
       this.lcdAlwaysOn = !!opts.lcdAlwaysOn;
       this.ppu = new Emu.GbPpu(this);
+      this.ppu.cgb = this.cgb;
       this.ppu.noRender = !!opts.noRender;
       this.apu = new Emu.APUGb(this.model === 'cgb' ? 'cgb' : 'dmg');
       this.apu.externalSeq = true;
-      this.apu.divBit = () => (this.div & APU_BIT) !== 0;
+      this.apuBit = APU_BIT;
+      this.apu.divBit = () => (this.div & this.apuBit) !== 0;
       this.cpu = new Emu.CPUSm83(this);
-      this.wram = new Uint8Array(0x2000);
+      this.wram = new Uint8Array(0x8000); // 4K × 8 バンク(DMG は 0 と 1 だけ使う)
       this.hram = new Uint8Array(0x7F);
       // パッドは NesConsole と同じ形(配列の [0] だけ使う。巻き戻し NesRewind/GbRewind が pad[0]/pad[1] を記録する)
       this.pad = [0, 0]; this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
@@ -62,9 +67,16 @@
       const cpu = this.cpu;
       cpu.reset();
       cpu.a = 0x01; cpu.f = 0xB0; cpu.b = 0x00; cpu.c = 0x13; cpu.d = 0x00; cpu.e = 0xD8; cpu.h = 0x01; cpu.l = 0x4D;
+      if (this.cgb) { cpu.a = 0x11; cpu.f = 0x80; cpu.b = 0x00; cpu.c = 0x00; cpu.d = 0xFF; cpu.e = 0x56; cpu.h = 0x00; cpu.l = 0x0D; }
       cpu.sp = 0xFFFE; cpu.pc = 0x0100;
+      // CGB のレジスタ
+      this.stepT = 4;          // CPU の 1 M サイクルが元のクロックで何 T か(倍速なら 2)
+      this.apuBit = APU_BIT;
+      this.key1 = 0; this.doubleSpeed = false; this.svbk = 1; this.rp = 0;
+      this.hdmaSrc = 0; this.hdmaDst = 0; this.hdmaLeft = 0; this.hdmaActive = false; this.hdmaDue = false; this.hdmaReg = [0xFF, 0xFF, 0xFF, 0xFF];
+      this.undoc = [0, 0, 0, 0]; // $FF72-$FF75
       this.ie = 0; this.if = 0x01;
-      this.div = 0xABC8; this.tima = 0; this.tma = 0; this.tac = 0; this.timaReload = false; this.timaReloading = false;
+      this.div = this.cgb ? 0x2674 : 0xABC8; // CGB の値は mooneye の boot_div-cgbABCDE を総当たりして決めた(白黒ソフトを CGB で起動した時の値。カラー対応ソフトでも同じとみなす=推定) this.tima = 0; this.tma = 0; this.tac = 0; this.timaReload = false; this.timaReloading = false;
       this.p1 = 0x00; this.sb = 0; this.sc = 0; this.serialBits = 0;
       this.dma = 0xFF; this.dmaActive = false; this.dmaPos = 0; this.dmaSrc = 0; this.dmaStart = 0; this.dmaNext = 0; this.dmaByte = 0xFF;
       // ブート ROM が「ポーン」を鳴らした後のレジスタ。CH1 は鳴り終わりかけで有効のまま(NR52=$F1)。
@@ -123,12 +135,34 @@
     requestIrq(bit) { this.if |= 1 << bit; }
     irqPending() { return this.ie & this.if & 0x1F; }
     irqAck(bit) { this.if &= ~(1 << bit); }
-    // STOP: DMG はボタンが押されるまで止まる(CGB の速度切り替えは 8d)
-    stop(cpu) { cpu.stopped = true; }
+    // STOP: CGB で KEY1 bit0 が立っていれば速度切り替え(DIV は 0 に戻る)。それ以外はボタンが押されるまで止まる
+    stop(cpu) {
+      if (this.cgb && (this.key1 & 1)) {
+        this.key1 = 0;
+        this.doubleSpeed = !this.doubleSpeed;
+        this.stepT = this.doubleSpeed ? 2 : 4;
+        this.apuBit = this.doubleSpeed ? APU_BIT << 1 : APU_BIT;
+        this._setDiv(0);
+        return;
+      }
+      cpu.stopped = true;
+    }
+    // WRAM の番地 → 配列の位置($C000-$CFFF はバンク 0、$D000-$DFFF は SVBK のバンク。$E000 台は写し)
+    _w(addr) { const a = addr & 0x1FFF; return a < 0x1000 ? a : (this.svbk << 12) | (a & 0xFFF); }
+    // HDMA の 1 ブロック(16 バイト)を VRAM へ
+    _hdmaBlock() {
+      const ppu = this.ppu;
+      for (let i = 0; i < 16; i++) { ppu.vram[ppu.vbk * 0x2000 + (this.hdmaDst & 0x1FFF)] = this._busRead(this.hdmaSrc & 0xFFFF); this.hdmaSrc++; this.hdmaDst++; }
+      this.hdmaLeft--;
+      const stall = this.doubleSpeed ? 16 : 8; // 1 ブロックは元のクロックで 32T。その間 CPU は止まる
+      for (let i = 0; i < stall; i++) this.tick();
+    }
+    hblank() { if (this.hdmaActive) this.hdmaDue = true; } // PPU がモード 0 に入った
 
-    // ── 4T 進める ──
+    // ── CPU の 1 M サイクルぶん進める(元のクロックで 4T。CGB の倍速なら 2T)──
     tick() {
-      this.cpuCycles += 4;
+      const st = this.stepT;
+      this.cpuCycles += st;
       // TIMA があふれた 1 M サイクル後に TMA を読み込んで割り込む(その間 TIMA は 0)
       this.timaReloading = false;
       if (this.timaReload) { this.timaReload = false; this.timaReloading = true; this.tima = this.tma; this.if |= 4; }
@@ -144,18 +178,18 @@
       }
 
       const ppu = this.ppu;
-      ppu.tick();
+      ppu.tick(st);
       const apu = this.apu;
-      apu.advance(4);
+      apu.advance(st);
 
-      this.frameT += 4;
+      this.frameT += st;
       // フレームの区切りは VBlank の頭。LCD が消えている間は 70224T ごとに刻む(音と録音の時間を止めない)
       if (ppu.vblankStarted) { ppu.vblankStarted = false; this._frameEnd(); }
       else if (this.frameT >= FRAME_T && !ppu.on) this._frameEnd();
 
       const sr = this.sampleRate;
       if (sr) {
-        this.cycleAccum += sr * 4;
+        this.cycleAccum += sr * st;
         if (this.cycleAccum >= CLOCK) {
           this.cycleAccum -= CLOCK;
           if (this.ringLen < AUDIO_RING) {
@@ -173,8 +207,9 @@
       const old = this.div;
       this.div = nv;
       if (this.tac & 4) { const b = TAC_BIT[this.tac & 3]; if ((old & b) && !(nv & b)) this._incTima(); }
-      if ((old & APU_BIT) && !(nv & APU_BIT)) this.apu.seqTick();
-      if (this.serialBits && (old & SERIAL_BIT) && !(nv & SERIAL_BIT)) {
+      if ((old & this.apuBit) && !(nv & this.apuBit)) this.apu.seqTick();
+      const sbit = (this.sc & 2) ? 1 << 3 : SERIAL_BIT; // CGB の高速クロック(SC bit1)
+      if (this.serialBits && (old & sbit) && !(nv & sbit)) {
         if (--this.serialBits === 0) {
           const out = this.sb;
           this.sb = this.serialDevice ? (this.serialDevice(out) & 0xFF) : 0xFF;
@@ -215,9 +250,9 @@
     }
     _busRead(addr) {
       if (addr < 0x8000) return this.cart.read(addr);
-      if (addr < 0xA000) return this.ppu.vram[addr - 0x8000];
+      if (addr < 0xA000) return this.ppu.vram[this.ppu.vbk * 0x2000 + addr - 0x8000];
       if (addr < 0xC000) return this.cart.readRam(addr);
-      if (addr < 0xFE00) return this.wram[addr & 0x1FFF]; // $E000-$FDFF は WRAM の写し
+      if (addr < 0xFE00) return this.wram[this._w(addr)]; // $E000-$FDFF は WRAM の写し
       if (addr < 0xFEA0) return this.ppu.oam[addr - 0xFE00];
       if (addr < 0xFF00) return 0x00;
       if (addr >= 0xFF80) return addr === 0xFFFF ? this.ie : this.hram[addr - 0xFF80];
@@ -233,14 +268,35 @@
         case 0xFF07: return this.tac | 0xF8;
         case 0xFF0F: return this.if | 0xE0;
       }
+      if (this.cgb) {
+        const ppu = this.ppu;
+        switch (addr) {
+          case 0xFF4D: return (this.doubleSpeed ? 0x80 : 0) | (this.key1 & 1) | 0x7E;
+          case 0xFF4F: return ppu.vbk | 0xFE;
+          case 0xFF55: return this.hdmaActive ? ((this.hdmaLeft - 1) & 0x7F) : (this.hdmaLeft > 0 ? 0x80 | ((this.hdmaLeft - 1) & 0x7F) : 0xFF);
+          case 0xFF56: return (this.rp & 0xC1) | 0x3E; // 赤外線: 受光なし(bit1=1)
+          case 0xFF68: return ppu.bcps | 0x40;
+          case 0xFF69: return ppu.bgPalRam[ppu.bcps & 0x3F];
+          case 0xFF6A: return ppu.ocps | 0x40;
+          case 0xFF6B: return ppu.objPalRam[ppu.ocps & 0x3F];
+          case 0xFF6C: return ppu.opri | 0xFE;
+          case 0xFF70: return this.svbk | 0xF8;
+          case 0xFF72: return this.undoc[0];
+          case 0xFF73: return this.undoc[1];
+          case 0xFF74: return this.undoc[2];
+          case 0xFF75: return this.undoc[3] | 0x8F;
+          case 0xFF76: return this.apu.readPcm12();
+          case 0xFF77: return this.apu.readPcm34();
+        }
+      }
       return 0xFF;
     }
 
     write(addr, v) {
       if (addr < 0x8000) { this.cart.write(addr, v); return; }
-      if (addr < 0xA000) { if (!this.ppu.vramBlocked()) this.ppu.vram[addr - 0x8000] = v; return; }
+      if (addr < 0xA000) { if (!this.ppu.vramBlocked()) this.ppu.vram[this.ppu.vbk * 0x2000 + addr - 0x8000] = v; return; }
       if (addr < 0xC000) { this.cart.writeRam(addr, v); return; }
-      if (addr < 0xFE00) { this.wram[addr & 0x1FFF] = v; return; }
+      if (addr < 0xFE00) { this.wram[this._w(addr)] = v; return; }
       if (addr < 0xFEA0) { if (!this.dmaActive && !this.ppu.oamBlocked()) this.ppu.oam[addr - 0xFE00] = v; return; }
       if (addr < 0xFF00) return;
       if (addr >= 0xFF80) { if (addr === 0xFFFF) this.ie = v; else this.hram[addr - 0xFF80] = v; return; }
@@ -260,12 +316,13 @@
         case 0xFF00: { const before = this._p1Low(); this.p1 = v & 0x30; if (before & ~this._p1Low() & 0x0F) this.requestIrq(4); break; }
         case 0xFF01: this.sb = v; break;
         case 0xFF02:
-          this.sc = v & 0x81;
+          this.sc = v & (this.cgb ? 0x83 : 0x81);
           // 内部クロックで開始。外部クロック(bit0=0)は相手がいないので終わらない
           this.serialBits = (v & 0x81) === 0x81 ? 8 : 0;
           if (this.serialBits) { this.serialSent.push(this.sb); if (this.serialSent.length > 4096) this.serialSent.splice(0, 2048); }
           break;
         case 0xFF04: this._setDiv(0); break;
+        default: if (this.cgb) this._writeCgb(addr, v); break;
         // あふれた直後のサイクルの書き込みは再読込を取り消す。再読込のサイクルの書き込みは無視される(TMA が勝つ)
         case 0xFF05: if (!this.timaReloading) { this.tima = v; this.timaReload = false; } break;
         case 0xFF06: this.tma = v; if (this.timaReloading) this.tima = v; break; // 再読込のサイクルなら新しい値がそのまま入る
@@ -277,6 +334,37 @@
           break;
         }
         case 0xFF0F: this.if = v & 0x1F; break;
+      }
+    }
+
+    // CGB だけのレジスタ
+    _writeCgb(addr, v) {
+      const ppu = this.ppu;
+      switch (addr) {
+        case 0xFF4D: this.key1 = v & 1; break;
+        case 0xFF4F: ppu.vbk = v & 1; break;
+        case 0xFF51: case 0xFF52: case 0xFF53: case 0xFF54: this.hdmaReg[addr - 0xFF51] = v; break;
+        case 0xFF55: {
+          if (this.hdmaActive && !(v & 0x80)) { this.hdmaActive = false; break; } // HBlank ごとの転送を止める(残りは読める)
+          const r = this.hdmaReg;
+          this.hdmaSrc = ((r[0] << 8) | r[1]) & 0xFFF0;
+          this.hdmaDst = ((r[2] << 8) | r[3]) & 0x1FF0;
+          this.hdmaLeft = (v & 0x7F) + 1;
+          if (v & 0x80) { this.hdmaActive = true; this.hdmaDue = false; if (!ppu.on) this._hdmaBlock(); } // HBlank ごと(LCD が消えていれば 1 ブロックはすぐ)
+          else { this.hdmaActive = false; while (this.hdmaLeft > 0) this._hdmaBlock(); }                    // 一括
+          break;
+        }
+        case 0xFF56: this.rp = v & 0xC1; break;
+        case 0xFF68: ppu.bcps = v & 0xBF; break;
+        case 0xFF69: ppu.writePal(0, v); break;
+        case 0xFF6A: ppu.ocps = v & 0xBF; break;
+        case 0xFF6B: ppu.writePal(1, v); break;
+        case 0xFF6C: ppu.opri = v & 1; break;
+        case 0xFF70: this.svbk = (v & 7) || 1; break;
+        case 0xFF72: this.undoc[0] = v; break;
+        case 0xFF73: this.undoc[1] = v; break;
+        case 0xFF74: this.undoc[2] = v; break;
+        case 0xFF75: this.undoc[3] = v & 0x70; break;
       }
     }
 
@@ -310,6 +398,8 @@
         if ((this.pad[0] & 0xFF) !== 0) cpu.stopped = false;
         else { this.tick(); return 4; }
       }
+      // CGB の HBlank ごとの HDMA: モード 0 に入るたびに 1 ブロック(CPU が HALT 中は運ばない)
+      if (this.hdmaDue) { this.hdmaDue = false; if (this.hdmaActive && !cpu.halted) { this._hdmaBlock(); if (this.hdmaLeft <= 0) this.hdmaActive = false; } }
       return cpu.step();
     }
     runFrame() {

@@ -15,7 +15,7 @@ const hash = (a) => { let h = 2166136261 | 0; for (let i = 0; i < a.length; i++)
 
 // 状態保存/復元: 60 フレーム目で保存 → 120 まで進めて画面を控える → 復元 → 同じだけ進めて同じ画面か
 const rom = process.argv[2] ? readBytes(process.argv[2]) : buildTestRom({ mbc: 'mbc5' }); // 実ソフトで確かめる時は ROM を引数に
-const gb = new E.GbConsole(rom); gb.setSampleRate(44100);
+const gb = new E.GbConsole(rom, { model: 'auto' }); gb.setSampleRate(44100);
 for (let f = 0; f < 60; f++) gb.runFrame();
 const st = E.GbState.save(gb);
 const copy = structuredClone(st);
@@ -27,7 +27,7 @@ ok(hash(new Uint8Array(gb.frame.buffer)) === h1 && gb.cpu.pc === pc1 && gb.cpuCy
 ok(!E.GbState.load(new E.GbConsole(acid), copy), '別の ROM のステートは拒否');
 
 // 巻き戻し
-const g2 = new E.GbConsole(rom); const rw = new E.GbRewind(g2);
+const g2 = new E.GbConsole(rom, { model: 'auto' }); const rw = new E.GbRewind(g2);
 const shots = {};
 for (let f = 0; f < 200; f++) { g2.setController(0, f % 50 < 10 ? 8 : 0); g2.runFrame(); rw.onFrame(); if (g2.frameCount === 130) shots.h = hash(new Uint8Array(g2.frame.buffer)); if (g2.frameCount === 130) shots.cyc = g2.cpuCycles; }
 const got = rw.rewindTo(130);
