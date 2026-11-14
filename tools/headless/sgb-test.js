@@ -47,7 +47,7 @@ console.log(`${frames} フレーム ${ms.toFixed(0)}ms(${(ms / frames).toFixed(2
 // 1. 絵
 {
   const fr = sgb.frame, idx = sgb.gb.ppu.frameIdx, maps = [new Map(), new Map(), new Map(), new Map()];
-  for (let y = 0; y < 144; y++) for (let x = 0; x < 160; x++) { const c = fr[(y + 39) * 256 + x + 48], m = maps[idx[y * 160 + x]]; m.set(c, (m.get(c) || 0) + 1); }
+  for (let y = 0; y < 144; y++) for (let x = 0; x < 160; x++) { const c = fr[(y + 39) * 256 + x + 48], m = maps[idx[y * 160 + x] & 3]; m.set(c, (m.get(c) || 0) + 1); }
   let ok = 0; for (const m of maps) { let best = 0; for (const v of m.values()) if (v > best) best = v; ok += best; }
   check(ok >= 23040 * 0.98, `絵: GB の階調と SNES の画面が対応 ${ok}/23040(動いている絵は 1 フレームずれるので 98% 以上で合格)`);
 }

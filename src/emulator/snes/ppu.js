@@ -6,7 +6,8 @@
  *   - レジスタ $2100-$213F(VRAM/CGRAM/OAM の読み書き、スクロール、BG の設定、表示の有効、明るさ)
  *   - 描画は行単位。BG モード 0(2bpp×4)、1(4bpp×2+2bpp)、3(8bpp+4bpp)。タイル 8×8/16×16、マップ 32/64、反転、優先
  *   - スプライト(1 行 32 個まで、大きさ 6 通り、優先 4 段)
- *   まだ無い物: 窓、色演算(サブ画面)、モザイク、モード 2/4/5/6/7、オフセットパータイル、高解像度、インターレース、
+ *   窓($2123-$212B)と色演算($2130-$2132、副画面/固定色)はある。
+ *   まだ無い物: モザイク、モード 2/4/5/6/7、オフセットパータイル、高解像度、インターレース、
  *   スプライトの 1 行あたりのタイル数制限。SNES 本体(SNES2VGM)をやる時に足す
  *
  * 画面は 256×224(frame、0xAABBGGRR)。本体(snesConsole.js)が表示行ごとに renderLine(y) を呼ぶ。
@@ -28,8 +29,11 @@
       this.cgram = new Uint16Array(256);
       this.oam = new Uint8Array(544);
       this.frame = new Uint32Array(W * H);
-      this.lineZ = new Uint8Array(W);
-      this.lineC = new Uint16Array(W);
+      // 面ごとの 1 行ぶん(0-3 = BG1-4、4 = OBJ): 色番号(0 = 透明)と深さ。窓 = その面を隠す画素(5 = 色演算の窓)
+      this.layC = []; this.layZ = []; this.win = [];
+      for (let i = 0; i < 5; i++) { this.layC.push(new Uint16Array(W)); this.layZ.push(new Uint8Array(W)); }
+      for (let i = 0; i < 6; i++) this.win.push(new Uint8Array(W));
+      this.lineZ = this.layZ[0]; this.lineC = this.layC[0];
       this.objC = new Uint8Array(W); this.objP = new Uint8Array(W);
       this.reset();
     }
@@ -43,7 +47,11 @@
       this.hofs = [0, 0, 0, 0]; this.vofs = [0, 0, 0, 0]; this.bgLatch = 0; this.hLatch = 0;
       this.vmain = 0; this.vaddr = 0; this.vbuf = 0;
       this.cgAddr = 0; this.cgFlip = false; this.cgLatch = 0;
-      this.tm = 0; this.ts = 0;
+      this.tm = 0; this.ts = 0; this.tmw = 0; this.tsw = 0;
+      this.wsel = [0, 0, 0, 0, 0, 0]; // 面ごとの窓の選び方(BG1-4、OBJ、色演算): bit0 W1 反転、bit1 W1 有効、bit2 W2 反転、bit3 W2 有効
+      this.wlog = [0, 0, 0, 0, 0, 0]; // 2 つの窓の重ね方(0 OR、1 AND、2 XOR、3 XNOR)
+      this.w1l = 0; this.w1r = 0; this.w2l = 0; this.w2r = 0;
+      this.cgwsel = 0; this.cgadsub = 0; this.fixR = 0; this.fixG = 0; this.fixB = 0;
       this.ophct = 0; this.opvct = 0; this.opLatched = false; this.opHFlip = false; this.opVFlip = false;
       this.openBus = 0;
       this.frame.fill(0xFF000000);
@@ -93,8 +101,19 @@
           else { this.cgram[this.cgAddr] = ((v & 0x7F) << 8) | this.cgLatch; this.cgAddr = (this.cgAddr + 1) & 0xFF; }
           this.cgFlip = !this.cgFlip;
           break;
+        case 0x23: this.wsel[0] = v & 15; this.wsel[1] = v >> 4; break;
+        case 0x24: this.wsel[2] = v & 15; this.wsel[3] = v >> 4; break;
+        case 0x25: this.wsel[4] = v & 15; this.wsel[5] = v >> 4; break;
+        case 0x26: this.w1l = v; break; case 0x27: this.w1r = v; break; case 0x28: this.w2l = v; break; case 0x29: this.w2r = v; break;
+        case 0x2A: for (let i = 0; i < 4; i++) this.wlog[i] = (v >> (i * 2)) & 3; break;
+        case 0x2B: this.wlog[4] = v & 3; this.wlog[5] = (v >> 2) & 3; break;
         case 0x2C: this.tm = v; break;
         case 0x2D: this.ts = v; break;
+        case 0x2E: this.tmw = v; break;
+        case 0x2F: this.tsw = v; break;
+        case 0x30: this.cgwsel = v; break;
+        case 0x31: this.cgadsub = v; break;
+        case 0x32: if (v & 0x20) this.fixR = v & 31; if (v & 0x40) this.fixG = v & 31; if (v & 0x80) this.fixB = v & 31; break;
       }
     }
 
@@ -126,7 +145,7 @@
     // ── 描画 ──
     // BG 1 枚をこの行ぶん。zLow/zHigh = タイルの優先ビット 0/1 の時の深さ(大きいほど手前)
     _bgLine(bg, y, bpp, zLow, zHigh, palBase) {
-      const vram = this.vram, lineZ = this.lineZ, lineC = this.lineC;
+      const vram = this.vram, lineZ = this.layZ[bg], lineC = this.layC[bg];
       const big = this.tileBig[bg], tsh = big ? 4 : 3;
       const size = this.bgMapSize[bg], wide = (size & 1) !== 0, tall = (size & 2) !== 0;
       const map = this.bgMap[bg], chr = this.bgChar[bg];
@@ -203,32 +222,91 @@
       }
     }
 
-    // 表示行 y(1〜224)を frame の y-1 行目に描く
+    // 面 l の窓(隠す画素)をこの行ぶん作る。窓を使っていなければ false
+    _winLine(l) {
+      const sel = this.wsel[l];
+      if (!(sel & 0x0A)) return false;
+      const out = this.win[l], e1 = (sel & 2) !== 0, i1 = (sel & 1) !== 0, e2 = (sel & 8) !== 0, i2 = (sel & 4) !== 0, log = this.wlog[l];
+      const l1 = this.w1l, r1 = this.w1r, l2 = this.w2l, r2 = this.w2r;
+      for (let x = 0; x < W; x++) {
+        const a = ((x >= l1 && x <= r1) ? 1 : 0) ^ (i1 ? 1 : 0), b = ((x >= l2 && x <= r2) ? 1 : 0) ^ (i2 ? 1 : 0);
+        out[x] = e1 && e2 ? (log === 0 ? a | b : log === 1 ? a & b : log === 2 ? a ^ b : (a ^ b) ^ 1) : e1 ? a : b;
+      }
+      return true;
+    }
+
+    // 表示行 y(1〜224)を frame の y-1 行目に描く。
+    // 面(BG1-4、OBJ)を別々に 1 行ぶん作り、主画面(TM)と副画面(TS)でそれぞれ一番手前の画素を選び、色演算(加算/減算、半分)を掛ける
     renderLine(y) {
       if (y < 1 || y > H) return;
       const out = this.frame, base = (y - 1) * W;
       if (this.forceBlank) { for (let x = 0; x < W; x++) out[base + x] = 0xFF000000; return; }
-      const lineZ = this.lineZ, lineC = this.lineC, tm = this.tm, mode = this.bgMode, bpp = BPP[mode];
-      lineZ.fill(0); lineC.fill(0);
+      const layC = this.layC, layZ = this.layZ, mode = this.bgMode, bpp = BPP[mode];
+      const tm = this.tm, ts = this.ts, cgw = this.cgwsel, cga = this.cgadsub;
+      const mathOn = (cga & 0x3F) !== 0 && ((cgw >> 4) & 3) !== 3, useSub = mathOn && (cgw & 2) !== 0;
+      const need = tm | (useSub ? ts : 0);
+      const has = [false, false, false, false, false];
+      for (let i = 0; i < 4; i++) { if (!((need >> i) & 1) || !bpp[i]) continue; layC[i].fill(0); layZ[i].fill(0); has[i] = true; }
       if (mode === 0) {
-        if ((tm & 1) && bpp[0]) this._bgLine(0, y, 2, 8, 11, 0);
-        if ((tm & 2) && bpp[1]) this._bgLine(1, y, 2, 7, 10, 32);
-        if ((tm & 4) && bpp[2]) this._bgLine(2, y, 2, 2, 5, 64);
-        if ((tm & 8) && bpp[3]) this._bgLine(3, y, 2, 1, 4, 96);
+        if (has[0]) this._bgLine(0, y, 2, 8, 11, 0);
+        if (has[1]) this._bgLine(1, y, 2, 7, 10, 32);
+        if (has[2]) this._bgLine(2, y, 2, 2, 5, 64);
+        if (has[3]) this._bgLine(3, y, 2, 1, 4, 96);
       } else {
-        if ((tm & 1) && bpp[0]) this._bgLine(0, y, bpp[0], 8, 11, 0);
-        if ((tm & 2) && bpp[1]) this._bgLine(1, y, bpp[1], 7, 10, 0);
-        if ((tm & 4) && bpp[2]) this._bgLine(2, y, bpp[2], 2, (mode === 1 && this.bg3Prio) ? 13 : 5, 0);
+        if (has[0]) this._bgLine(0, y, bpp[0], 8, 11, 0);
+        if (has[1]) this._bgLine(1, y, bpp[1], 7, 10, 0);
+        if (has[2]) this._bgLine(2, y, bpp[2], 2, (mode === 1 && this.bg3Prio) ? 13 : 5, 0);
       }
-      if (tm & 0x10) {
+      if (need & 0x10) {
         this._objLine(y);
-        const objC = this.objC, objP = this.objP;
-        for (let x = 0; x < W; x++) { const c = objC[x]; if (!c) continue; const z = 3 + objP[x] * 3; if (z > lineZ[x]) { lineZ[x] = z; lineC[x] = c; } } // 優先 0-3 → 深さ 3/6/9/12
+        const objC = this.objC, objP = this.objP, oc = layC[4], oz = layZ[4];
+        for (let x = 0; x < W; x++) { const c = objC[x]; oc[x] = c; oz[x] = c ? 3 + objP[x] * 3 : 0; } // 優先 0-3 → 深さ 3/6/9/12
+        has[4] = true;
       }
-      const cg = this.cgram, br = this.brightness;
+      // 窓
+      const wOn = [false, false, false, false, false, false], win = this.win;
+      if ((this.tmw | this.tsw) & 0x1F) for (let i = 0; i < 5; i++) if (has[i] && (((this.tmw | this.tsw) >> i) & 1)) wOn[i] = this._winLine(i);
+      const blackSel = (cgw >> 6) & 3, preventSel = (cgw >> 4) & 3;
+      if (blackSel === 1 || blackSel === 2 || preventSel === 1 || preventSel === 2) wOn[5] = this._winLine(5);
+      const cw = win[5], cwOn = wOn[5];
+      const cg = this.cgram, br = this.brightness, tmw = this.tmw, tsw = this.tsw;
+      const sub = (cga & 0x80) !== 0, half = (cga & 0x40) !== 0, fr = this.fixR, fg = this.fixG, fb = this.fixB;
       for (let x = 0; x < W; x++) {
-        const c = cg[lineC[x]];
-        let r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
+        // 主画面
+        let z = 0, c = 0, lay = 5;
+        for (let i = 0; i < 5; i++) {
+          if (!has[i] || !((tm >> i) & 1)) continue;
+          if (((tmw >> i) & 1) && wOn[i] && win[i][x]) continue;
+          const zz = layZ[i][x];
+          if (zz > z) { z = zz; c = layC[i][x]; lay = i; }
+        }
+        const col = cg[c];
+        let r = col & 31, g = (col >> 5) & 31, b = (col >> 10) & 31;
+        const inW = cwOn ? cw[x] : 0;
+        // 主画面を黒にする範囲(色演算の窓の内/外/常に)
+        if (blackSel === 3 || (blackSel === 1 && !inW) || (blackSel === 2 && inW)) { r = 0; g = 0; b = 0; }
+        if (mathOn) {
+          const prevented = (preventSel === 1 && !inW) || (preventSel === 2 && inW);
+          // OBJ はパレット 4-7 の画素だけ色演算に加わる
+          const en = lay === 4 ? ((cga & 0x10) !== 0 && (c & 0x40) !== 0) : ((cga >> lay) & 1) !== 0;
+          if (en && !prevented) {
+            let sr = fr, sg = fg, sb = fb, subOpaque = !useSub;
+            if (useSub) {
+              let z2 = 0, c2 = 0;
+              for (let i = 0; i < 5; i++) {
+                if (!has[i] || !((ts >> i) & 1)) continue;
+                if (((tsw >> i) & 1) && wOn[i] && win[i][x]) continue;
+                const zz = layZ[i][x];
+                if (zz > z2) { z2 = zz; c2 = layC[i][x]; }
+              }
+              if (z2) { const s2 = cg[c2]; sr = s2 & 31; sg = (s2 >> 5) & 31; sb = (s2 >> 10) & 31; subOpaque = true; } // 副画面が透明なら固定色(その時は半分にしない)
+            }
+            if (sub) { r -= sr; g -= sg; b -= sb; if (r < 0) r = 0; if (g < 0) g = 0; if (b < 0) b = 0; }
+            else { r += sr; g += sg; b += sb; }
+            if (half && subOpaque) { r >>= 1; g >>= 1; b >>= 1; }
+            if (r > 31) r = 31; if (g > 31) g = 31; if (b > 31) b = 31;
+          }
+        }
         r = ((r << 3) | (r >> 2)) * br / 15 | 0; g = ((g << 3) | (g >> 2)) * br / 15 | 0; b = ((b << 3) | (b >> 2)) * br / 15 | 0;
         out[base + x] = (0xFF000000 | (b << 16) | (g << 8) | r) >>> 0;
       }

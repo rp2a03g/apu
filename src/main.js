@@ -4265,6 +4265,7 @@
       liveRollSession.closer = () => MML.UI.NesScreen.liveStopped();
     };
     MML.UI.NesScreen.onLiveFrame = (writes) => liveRollSession.pushFrame(writes);
+    MML.UI.NesScreen.onSpcState = (st) => sgbSpcLive(st);
     MML.UI.NesScreen.onLiveEnd = (reason) => { if (liveRollSession.active) { liveRollSession.closer = null; liveRollSession.end(reason || 'end'); } };
     // 巻き戻し: ロールをそのフレーム数に切り詰める(戻った先の像は NES 画面が録音を取り直して流す)
     MML.UI.NesScreen.onLiveTruncate = (frames) => { if (liveRoll) { keyboardDisplay.liveRollTruncate(frames); liveRollSession.frames = keyboardDisplay.liveFrameCount(); if (monitorState && monitorState.regSnapshots === liveRoll.state.regSnapshots) monitorState.totalFrames = keyboardDisplay.liveFrameCount(); } };
@@ -7464,6 +7465,32 @@
     return { spcVoices, master };
   }
 
+  // ── スーパーゲームボーイの SNES 側の音(SPC700+DSP)を鍵盤表示へ ──
+  // SPC ファイルと同じ表示(V0〜V7 の行と鍵盤)に載せる。入力源は 2 つ: VGM 再生中はアダプタ(vgmPlayer.js makeSgbSpcAdapter)の DSP、
+  // ゲーム画面は Worklet が 4 フレームに 1 回送る写し(NesScreen.onSpcState)。ロール(時間軸)には出さない。ミュートは SPC と同じ操作
+  let sgbSpcShown = false, sgbSpcLiveAt = 0;
+  function sgbSpcShow(regs, voiceOf, pos) {
+    const r = buildSpcVoices(regs, voiceOf, spcMutedVoices, null);
+    keyboardDisplay.updateSpcVoices(r.spcVoices, r.master, pos || 0);
+    sgbSpcShown = true;
+  }
+  function sgbSpcLive(st) {
+    if (!st) { sgbSpcLiveAt = 0; return; }
+    if (spcActivePlayer) return; // SPC ファイルを再生中ならそちらが主
+    sgbSpcLiveAt = performance.now();
+    sgbSpcShow(st.regs, (ch) => ({ env: st.env[ch], envMode: st.mode[ch] }), 0);
+  }
+  setInterval(() => {
+    const sp = vgmActivePlayer, p = sp && sp.player, a = p && p.adapterById && p.adapterById.sgbspc;
+    if (a && a.loaded && sp.isPlaying && !spcActivePlayer) {
+      const dsp = a.spc.dsp;
+      dsp.mutedVoices = spcMutedVoices & 0xFF;
+      sgbSpcShow(dsp.regs, (ch) => dsp.voices[ch], typeof sp.getPosition === 'function' ? sp.getPosition() : 0);
+    } else if (sgbSpcShown && !spcActivePlayer && performance.now() - sgbSpcLiveAt > 500) { // VGM も止まり、ゲーム画面からも届かなくなった
+      keyboardDisplay.updateSpcVoices([]); sgbSpcShown = false;
+    }
+  }, 80);
+
   // 先読みキャプチャが残した「フレーム末尾のDSP状態の写し」(SPC2MML.captureAsync の stateLog)。
   // 時刻 t のボイス一覧を DSP を動かさずに引く(動画書き出し src/video/videoExport.js が使う)
   let spcStateLog = null; // { buf: Uint8Array, frames, stride, frameRate }
@@ -7499,6 +7526,7 @@
   keyboardDisplay.onSpcMuteChange = (idx, muted) => {
     spcMutedVoices = muted ? (spcMutedVoices | (1 << idx)) : (spcMutedVoices & ~(1 << idx));
     if (spcActivePlayer) spcActivePlayer.applyMute(effectiveSpcMute());
+    if (MML.UI.NesScreen && MML.UI.NesScreen.setSpcMute) MML.UI.NesScreen.setSpcMute(spcMutedVoices); // スーパーゲームボーイの SNES 側(VGM 再生は 80ms ごとの表示更新が DSP へ入れる)
     updateMuteButton(idx, spcMutedVoices);
   };
   // ch別音量スライダー(V0〜V7)。SPCはミュートと同じくビットマスクではなく配列そのものを

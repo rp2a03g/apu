@@ -62,7 +62,7 @@
                 info = MML.Emu.SgbConsole.describe(nes);
               } else {
                 nes = new MML.Emu.GbConsole(new Uint8Array(m.rom), { model: (m.gb && m.gb.model) || 'dmg' });
-                if (m.gb && m.gb.shades) nes.ppu.shades = Array.from(m.gb.shades);
+                if (m.gb && m.gb.shades) nes.ppu.setShades(m.gb.shades);
                 info = MML.Emu.GbConsole.describe(nes);
               }
             } else {
@@ -75,7 +75,7 @@
             this.nes = nes;
             this.machine = machine;
             this.State = machine === 'msx' ? MML.Emu.MsxState : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState;
-            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? (nes.isSgb ? null : MML.Emu.GbRewind) : MML.Emu.NesRewind; // SGB は巻き戻し無し(1 枚が大きい)
+            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbRewind : MML.Emu.GbRewind) : MML.Emu.NesRewind;
             this.rewind = Rewind ? new Rewind(nes) : null;
             this.dcX = 0; this.dcY = 0; this.dcX2 = 0; this.dcY2 = 0;
             this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, tilt: !!nes.hasTilt, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH(), clock: nes.clockHz || 0, sgb: nes.isSgb ? nes.revision : 0 });
@@ -106,6 +106,9 @@
           case 'sensor': // GB: 傾き(MBC7)と赤外線の受光
             if (!this.nes) break;
             if (m.tiltX !== undefined && typeof this.nes.setTilt === 'function') this.nes.setTilt(+m.tiltX || 0, +m.tiltY || 0);
+            if (m.shades && !this.nes.isSgb && this.nes.ppu && this.nes.ppu.setShades) this.nes.ppu.setShades(m.shades); // 白黒の色(設定を変えた時)
+            if (m.sgbMenu && typeof this.nes.pressMenu === 'function') this.nes.pressMenu();
+            if (m.spcMute !== undefined) { this.spcMute = m.spcMute & 0xFF; if (this.nes.isSgb && this.nes.snes.apu.dsp) this.nes.snes.apu.dsp.mutedVoices = this.spcMute; } // SNES 側の声ごとのミュート
             if (m.light !== undefined && typeof this.nes.setLight === 'function') this.nes.setLight(!!m.light);
             if (m.camera && typeof this.nes.setCameraImage === 'function') this.nes.setCameraImage(new Uint8Array(m.camera)); // ポケットカメラの元の絵(128×112 の明るさ)
             if (m.barcode !== undefined && typeof this.nes.scanBarcode === 'function') this.port.postMessage({ type: 'barcode', ok: this.nes.scanBarcode(String(m.barcode)) });
@@ -189,6 +192,11 @@
       const frame = nes.frame.slice(0, this.frameW() * this.frameH()); // MSX は幅がモードで変わる(frame は最大幅で確保。幅ぶんだけ送る)
       const msg = { type: 'frame', seq: this.frameSeq, frame: frame.buffer, underruns: nes.underruns, w: this.frameW(), h: this.frameH(), il: !!nes.interlaced, disk: nes.diskActivity ? nes.diskActivity() : null }; // disk: アクセスランプ(ドライブごとの { access, media })
       if (nes.rec) { msg.writes = nes.rec.frames.splice(0); }
+      if (nes.isSgb && (this.frameSeq & 3) === 0) { // スーパーゲームボーイ: SNES 側の音源(DSP)の今の状態を鍵盤表示用に(4 フレームに 1 回)
+        const dsp = nes.snes.apu.dsp;
+        if (dsp) { const env = new Uint16Array(8), mode = []; for (let i = 0; i < 8; i++) { env[i] = dsp.voices[i].env; mode.push(dsp.voices[i].envMode); } msg.spc = { regs: dsp.regs.slice(0, 128), env, mode }; }
+        if (this.spcMute !== undefined && dsp) dsp.mutedVoices = this.spcMute;
+      }
       const tr = [frame.buffer];
       if (this.machine === 'gb') { // GB の周辺: 振動モータ、赤外線を読もうとしているか、刷り上がった絵
         msg.gb = { rumble: !!nes.rumble, ir: !!nes.irWanted, camera: !!nes.cameraWanted, barcode: !!nes.barcodeWanted };
@@ -210,7 +218,7 @@
     // 逆再生の 1 回(process ごと): 再生成を 1 フレーム進め、速さに応じて戻し、画面は 60 枚/秒まで(それ以上送ると主スレッドが詰まる)
     reverseTick() {
       const rw = this.rw, rewind = this.rewind;
-      rewind.regenStep(1);
+      if (!rewind.regenEvery || (this.rgTick = ((this.rgTick | 0) + 1) % rewind.regenEvery) === 0) rewind.regenStep(1); // 重い機種(スーパーゲームボーイ)は間引く
       rw.acc += rw.speed * 128 / (sampleRate / (this.nes.frameRate || 60.0988));
       for (let n = 0; rw.acc >= 1 && n < 8; n++) {
         const r = rewind.reverseStep();

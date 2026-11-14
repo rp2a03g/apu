@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 20:33:55
+ * Built by tools/build-capture-workers.ps1 at 2026-11-14 14:07:48
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-13 20:33:55';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-14 14:07:48';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -1219,7 +1219,7 @@
  *   - モード 2/3 の間の OAM、モード 3 の間の VRAM は CPU から触れない(読むと $FF、書きは捨てる)
  *   - 153 行目は 4T で LY=0 になる。LCD を点けた直後の 1 行目はモード 2 が無く 4T 短い。LCD が消えている間 LY=LYC の旗は動かない
  *   CGB(段階 8d): VRAM 2 バンク、BG の属性(バンク 1 のマップ: パレット/タイルのバンク/反転/優先)、パレット 8+8 本(15bit 色)、
- *     スプライトの優先は OAM 順、LCDC bit0 は「BG がスプライトより前に出られるか」。frameIdx はパレットの番号(BG 0-31、OBJ 32-63)
+ *     スプライトの優先は OAM 順、LCDC bit0 は「BG がスプライトより前に出られるか」。白黒の frameIdx は 階調 0-3 + 色の組(BG 0 / OBJ0 4 / OBJ1 8)。frameIdx はパレットの番号(BG 0-31、OBJ 32-63)
  *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)、OAM 破壊バグ
  *
  * 参考: Pan Docs "Rendering" "STAT" "OAM"。細部は mooneye の acceptance/ppu と dmg-acid2 で確かめる(tools/headless/gb-testroms.js)。
@@ -1243,7 +1243,8 @@
       this.oam = new Uint8Array(0xA0);
       this.frame = new Uint32Array(W * H);   // 0xAABBGGRR
       this.frameIdx = new Uint8Array(W * H); // 階調番号 0-3(巻き戻しの映像の輪が控える。色は shades で引く)
-      this.shades = [0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000]; // 白 → 黒(設定で差し替える)
+      // 白黒の色。12 個 = BG 用 4、OBJ0 用 4、OBJ1 用 4(白 → 黒)。普通は 3 組とも同じ。カラー本体で白黒ソフトを動かす時の着色は組ごとに違う色を入れる
+      this.shades = []; this.setShades([0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000]);
       this.sprList = new Uint8Array(10); // その行のスプライト(OAM 番号、優先順)
       this.noRender = false;             // true: 絵は描かない(GBS プレイヤー)
       this.reset();
@@ -1271,6 +1272,8 @@
       this.frame.fill(this.shades[0]); this.frameIdx.fill(0);
     }
 
+    // 4 個(3 組とも同じ色)か 12 個(BG、OBJ0、OBJ1)
+    setShades(a) { const s = Array.from(a || []); if (s.length !== 4 && s.length !== 12) return; this.shades = s.length === 12 ? s : s.concat(s, s); }
     get on() { return (this.lcdc & 0x80) !== 0; }
     // CGB のパレットへ 1 バイト(which: 0=BG $FF69、1=OBJ $FF6B)。番号は自動で進む(bit7)
     writePal(which, v) {
@@ -1445,7 +1448,7 @@
           }
           c = (((vram[a + 1] >> bit) & 1) << 1) | ((vram[a] >> bit) & 1);
         }
-        let shade = (bgp >> (c * 2)) & 3;
+        let shade = (bgp >> (c * 2)) & 3; // 下位 2bit = 階調、上位 = 色の組(0 = BG、4 = OBJ0、8 = OBJ1)
         if (sprOn) {
           for (let i = 0; i < n; i++) {
             const o = list[i] * 4, sx = oam[o + 1] - 8;
@@ -1458,7 +1461,7 @@
             const sc = (((vram[sa + 1] >> sb) & 1) << 1) | ((vram[sa] >> sb) & 1);
             if (!sc) continue;
             // 勝ったスプライトが BG の後ろなら BG が出る(下位のスプライトは出ない)
-            if (!((fl & 0x80) && c)) shade = (((fl & 0x10) ? this.obp1 : this.obp0) >> (sc * 2)) & 3;
+            if (!((fl & 0x80) && c)) shade = (fl & 0x10) ? 8 | ((this.obp1 >> (sc * 2)) & 3) : 4 | ((this.obp0 >> (sc * 2)) & 3);
             break;
           }
         }
@@ -1732,7 +1735,9 @@
       // opts.cart: 出来合いのカートリッジを挿す(GBS プレイヤーが使う)。opts.lcdAlwaysOn / opts.noRender も GBS 用
       this.cart = opts.cart || new Emu.GbCart(romBytes);
       this.model = opts.model === 'auto' ? (this.cart.header.cgb ? 'cgb' : 'dmg') : (opts.model || 'dmg');
-      this.cgb = this.model === 'cgb';
+      // カラー本体に白黒専用ソフトを挿した時: カラーの機能は閉じて白黒として動き、色だけ本体が付ける(BG/OBJ0/OBJ1 に別の色。ppu.setShades)
+      this.dmgOnCgb = this.model === 'cgb' && !this.cart.header.cgb;
+      this.cgb = this.model === 'cgb' && !this.dmgOnCgb;
       this.lcdAlwaysOn = !!opts.lcdAlwaysOn;
       this.ppu = new Emu.GbPpu(this);
       this.ppu.cgb = this.cgb;
@@ -1765,6 +1770,7 @@
       this.irIn = false; // 赤外線の受光(CGB 本体のポートと HuC1 のカートリッジ。画面側が setLight で入れる)
       this.serialOut = [];  // 送り終えたバイト
       this.serialSent = []; // 送り始めたバイト(完了を待たずに次を送るソフトの出力も拾える。mooneye のテスト ROM の合否)
+      if (this.dmgOnCgb) this.ppu.setShades(GbConsole.CGB_TINT.cgb);
       this.rec = null;
       // スーパーゲームボーイ: opts.sgb = ICD2(snes/icd2.js。パッドの線と LCD の行を横取りする)、opts.bootRom = ブート ROM 256 バイト(任意)
       this.sgb = opts.sgb || null;
@@ -1781,6 +1787,7 @@
       cpu.reset();
       cpu.a = 0x01; cpu.f = 0xB0; cpu.b = 0x00; cpu.c = 0x13; cpu.d = 0x00; cpu.e = 0xD8; cpu.h = 0x01; cpu.l = 0x4D;
       if (this.cgb) { cpu.a = 0x11; cpu.f = 0x80; cpu.b = 0x00; cpu.c = 0x00; cpu.d = 0xFF; cpu.e = 0x56; cpu.h = 0x00; cpu.l = 0x0D; }
+      if (this.dmgOnCgb) { cpu.a = 0x11; cpu.f = 0x80; cpu.b = 0x00; cpu.c = 0x00; cpu.d = 0x00; cpu.e = 0x08; cpu.h = 0x00; cpu.l = 0x7C; } // カラー本体が白黒ソフトを起動した時の値
       cpu.sp = 0xFFFE; cpu.pc = 0x0100;
       this.bootRom = this.bootImage;
       // CGB のレジスタ
@@ -2198,6 +2205,29 @@
 
   GbConsole.CLOCK = CLOCK;
   GbConsole.FRAME_T = FRAME_T;
+  // 色(ABGR)。rgb('RRGGBB') の並びで書く
+  const rgb = (h) => (0xFF000000 | (parseInt(h.slice(4, 6), 16) << 16) | (parseInt(h.slice(2, 4), 16) << 8) | parseInt(h.slice(0, 2), 16)) >>> 0;
+  const tint = (bg, o0, o1) => bg.concat(o0 || bg, o1 || o0 || bg).map(rgb);
+  // 白黒の画面の色(4 階調)
+  GbConsole.SHADES = {
+    gray: tint(['FFFFFF', 'AAAAAA', '555555', '000000']),
+    green: tint(['9BBC0F', '8BAC0F', '306230', '0F380F']),   // 初代の液晶風
+    pocket: tint(['C4CFA1', '8B956D', '4D533C', '1F1F1F']),  // ポケット風
+  };
+  // カラー本体が白黒ソフトに付ける色(BG、OBJ0、OBJ1)。実機はソフトごとの表と起動時のボタンで選ぶ。ここは既定と、ボタンで選べる物のうち 3 つ
+  // (色の値は記憶によるもので、実機の表との照合はしていない)
+  GbConsole.CGB_TINT = {
+    cgb: tint(['FFFFFF', '7BFF31', '0063C5', '000000'], ['FFFFFF', 'FF8484', '943A3A', '000000']),
+    brown: tint(['FFFFFF', 'FFAD63', '843100', '000000']),
+    blue: tint(['FFFFFF', '63A5FF', '0000FF', '000000'], ['FFFFFF', 'FF8484', '943A3A', '000000'], ['FFFFFF', '7BFF31', '008400', '000000']),
+    pastel: tint(['FFFFA5', 'FF9494', '9494FF', '000000']),
+  };
+  // 設定の名前 → 12 色。'auto' は 白黒本体 = 灰色、カラー本体で白黒ソフト = カラー本体の既定
+  GbConsole.shadesFor = function (name, dmgOnCgb) {
+    if (!name || name === 'auto') return dmgOnCgb ? GbConsole.CGB_TINT.cgb : GbConsole.SHADES.gray;
+    return GbConsole.SHADES[name] || GbConsole.CGB_TINT[name] || GbConsole.SHADES.gray;
+  };
+  GbConsole.BUZZ = { HZ: BUZZ_HZ, SEC: BUZZ_SEC, LEVEL: BUZZ_LEVEL }; // VGM の再生(vgmPlayer.js)も同じ値で鳴らす
   GbConsole.BUTTON = { A: 1, B: 2, SELECT: 4, START: 8, UP: 16, DOWN: 32, LEFT: 64, RIGHT: 128 };
   Emu.GbConsole = GbConsole;
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -2262,7 +2292,9 @@
         // 正しいバンクが出る(2026-11-13 まで番号をそのまま使っていて、データの外=0 を読んで暴走する曲があった。Mesen との突き合わせで判明)
         let n = this.bankCount <= 32 ? v & 0x1F : v;
         if (n === 0) n = 1;
-        this.bank = n % this.bankCount;
+        // 折り返した結果が 0 になっても $4000 に固定バンクは出さない(2 バンクしか無い曲データがバンク 6 を選ぶ例があった。
+        // 0 のままだと固定バンクの中身を曲データとして読み、音が出ない。Mesen との突き合わせで判明)
+        this.bank = (n % this.bankCount) || 1;
       }
     }
     readRam(addr) { return this.ram[addr & 0x1FFF]; }

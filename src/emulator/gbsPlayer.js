@@ -58,7 +58,9 @@
         // 正しいバンクが出る(2026-11-13 まで番号をそのまま使っていて、データの外=0 を読んで暴走する曲があった。Mesen との突き合わせで判明)
         let n = this.bankCount <= 32 ? v & 0x1F : v;
         if (n === 0) n = 1;
-        this.bank = n % this.bankCount;
+        // 折り返した結果が 0 になっても $4000 に固定バンクは出さない(2 バンクしか無い曲データがバンク 6 を選ぶ例があった。
+        // 0 のままだと固定バンクの中身を曲データとして読み、音が出ない。Mesen との突き合わせで判明)
+        this.bank = (n % this.bankCount) || 1;
       }
     }
     readRam(addr) { return this.ram[addr & 0x1FFF]; }

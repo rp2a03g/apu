@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 20:33:55
+ * Built by tools/build-capture-workers.ps1 at 2026-11-14 14:07:48
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-13 20:33:55';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-14 14:07:48';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -4160,7 +4160,9 @@
         // 正しいバンクが出る(2026-11-13 まで番号をそのまま使っていて、データの外=0 を読んで暴走する曲があった。Mesen との突き合わせで判明)
         let n = this.bankCount <= 32 ? v & 0x1F : v;
         if (n === 0) n = 1;
-        this.bank = n % this.bankCount;
+        // 折り返した結果が 0 になっても $4000 に固定バンクは出さない(2 バンクしか無い曲データがバンク 6 を選ぶ例があった。
+        // 0 のままだと固定バンクの中身を曲データとして読み、音が出ない。Mesen との突き合わせで判明)
+        this.bank = (n % this.bankCount) || 1;
       }
     }
     readRam(addr) { return this.ram[addr & 0x1FFF]; }
@@ -16098,7 +16100,7 @@
         this.nmiFlag = true;
         if (this.nmiEnable) this.nmiPending = true;
         this.ppu.vblank();
-        if (this.autoJoy) { this.joy[0] = this.pad[0]; this.joy[1] = this.pad[1]; this.joy[2] = 0; this.joy[3] = 0; this.autoJoyBusyUntil = this.clock + 4224; }
+        if (this.autoJoy) { this.joy[0] = this.pad[0]; this.joy[1] = this.pad[1]; this.joy[2] = 0; this.joy[3] = 0; this.autoJoyBusyUntil = this.clock + 4224; this.joyShift[0] = 0xFFFF; this.joyShift[1] = 0xFFFF; } // 自動読みは 16 ビットを読み切る。この後 $4016/$4017 を読むと 1(パッドがつながっている印)
         this.syncApu();
         this.frameCount++; this._frameFlag = true;
         if (this.onFrame) this.onFrame();
@@ -16487,9 +16489,12 @@
     const apu = new Emu.APUGb();
     return {
       id: 'gb', clockHz: info.clock, accum: 0, apu, gain: CHIP_GAIN.gb,
+      // カートリッジ内ブザー(HuC3。規格外ブロック GBXX 種類 2 = 音の番号)。音の高さと長さは本体(gbConsole.js)と同じ仮の値
+      bzLeft: 0, bzPhase: 0, bzStep: 0,
+      buzz(tone) { const hz = (Emu.GbConsole && Emu.GbConsole.BUZZ) || { HZ: [2048, 2560, 3072, 4096], SEC: 0.2, LEVEL: 0.06 }; this.bzLeft = Math.round(hz.SEC * this.clockHz); this.bzPhase = 0; this.bzStep = hz.HZ[tone & 3] / this.clockHz; this.bzLevel = hz.LEVEL; },
       write(aa, dd) { apu.writeRegister(0xFF10 + (aa & 0x3F), dd); },
-      clock() { apu.clock(); },
-      mix(out) { const s = apu.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      clock() { apu.clock(); if (this.bzLeft > 0) { this.bzLeft--; this.bzPhase += this.bzStep; if (this.bzPhase >= 1) this.bzPhase -= 1; } },
+      mix(out) { const s = apu.mixSample(); let bz = 0; if (this.bzLeft > 0) bz = this.bzPhase < 0.5 ? this.bzLevel : -this.bzLevel; out[0] += (s.left + bz) * this.gain; out[1] += (s.right + bz) * this.gain; },
       applyMute(m) { const e = m.expansion || m; if (e.gb) Object.assign(apu.mute, e.gb); },
       applyVolume(v) { const e = v.expansion || v; if (e.gb) Emu.applyVolume(apu.vol, e.gb); }
     };
@@ -17354,9 +17359,10 @@
         const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
       }
-      // スーパーゲームボーイの SNES 側音源(規格外 GBXX 種類 1): 下位種別 0 = 像、1 = APU ポートへの書き込み。種類 2(ブザー)は読み飛ばす
+      // スーパーゲームボーイの SNES 側音源(規格外 GBXX 種類 1): 下位種別 0 = 像、1 = APU ポートへの書き込み。種類 2 はカートリッジ内ブザー
       if (MML.VGM && MML.VGM.isGbxxBlock && MML.VGM.isGbxxBlock(type, block)) {
         const a = this.adapterById.sgbspc, G = MML.VGM.GBXX;
+        if (block[5] === G.KIND_BUZZER && this.adapterById.gb && this.adapterById.gb.buzz) { this.adapterById.gb.buzz(block[6]); return; }
         if (a && block[5] === G.KIND_SGB) {
           if (block[6] === G.SGB_STATE) a.loadSpc(block.subarray(7));
           else if (block[6] === G.SGB_PORT && block.length >= 13) a.port(block[7], block[8], (block[9] | (block[10] << 8) | (block[11] << 16) | (block[12] << 24)) >>> 0);

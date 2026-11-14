@@ -247,6 +247,7 @@ $bundles = @(
             'src\emulator\gb\barcodeBoy.js',
             'src\emulator\gb\gbConsole.js',
             'src\emulator\gb\gbState.js',
+            'src\emulator\ean.js',
             'src\emulator\cpu65816.js',
             'src\emulator\spc700.js',
             'src\emulator\spcDsp.js',

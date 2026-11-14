@@ -12,7 +12,7 @@
  *   - モード 2/3 の間の OAM、モード 3 の間の VRAM は CPU から触れない(読むと $FF、書きは捨てる)
  *   - 153 行目は 4T で LY=0 になる。LCD を点けた直後の 1 行目はモード 2 が無く 4T 短い。LCD が消えている間 LY=LYC の旗は動かない
  *   CGB(段階 8d): VRAM 2 バンク、BG の属性(バンク 1 のマップ: パレット/タイルのバンク/反転/優先)、パレット 8+8 本(15bit 色)、
- *     スプライトの優先は OAM 順、LCDC bit0 は「BG がスプライトより前に出られるか」。frameIdx はパレットの番号(BG 0-31、OBJ 32-63)
+ *     スプライトの優先は OAM 順、LCDC bit0 は「BG がスプライトより前に出られるか」。白黒の frameIdx は 階調 0-3 + 色の組(BG 0 / OBJ0 4 / OBJ1 8)。frameIdx はパレットの番号(BG 0-31、OBJ 32-63)
  *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)、OAM 破壊バグ
  *
  * 参考: Pan Docs "Rendering" "STAT" "OAM"。細部は mooneye の acceptance/ppu と dmg-acid2 で確かめる(tools/headless/gb-testroms.js)。
@@ -36,7 +36,8 @@
       this.oam = new Uint8Array(0xA0);
       this.frame = new Uint32Array(W * H);   // 0xAABBGGRR
       this.frameIdx = new Uint8Array(W * H); // 階調番号 0-3(巻き戻しの映像の輪が控える。色は shades で引く)
-      this.shades = [0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000]; // 白 → 黒(設定で差し替える)
+      // 白黒の色。12 個 = BG 用 4、OBJ0 用 4、OBJ1 用 4(白 → 黒)。普通は 3 組とも同じ。カラー本体で白黒ソフトを動かす時の着色は組ごとに違う色を入れる
+      this.shades = []; this.setShades([0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000]);
       this.sprList = new Uint8Array(10); // その行のスプライト(OAM 番号、優先順)
       this.noRender = false;             // true: 絵は描かない(GBS プレイヤー)
       this.reset();
@@ -64,6 +65,8 @@
       this.frame.fill(this.shades[0]); this.frameIdx.fill(0);
     }
 
+    // 4 個(3 組とも同じ色)か 12 個(BG、OBJ0、OBJ1)
+    setShades(a) { const s = Array.from(a || []); if (s.length !== 4 && s.length !== 12) return; this.shades = s.length === 12 ? s : s.concat(s, s); }
     get on() { return (this.lcdc & 0x80) !== 0; }
     // CGB のパレットへ 1 バイト(which: 0=BG $FF69、1=OBJ $FF6B)。番号は自動で進む(bit7)
     writePal(which, v) {
@@ -238,7 +241,7 @@
           }
           c = (((vram[a + 1] >> bit) & 1) << 1) | ((vram[a] >> bit) & 1);
         }
-        let shade = (bgp >> (c * 2)) & 3;
+        let shade = (bgp >> (c * 2)) & 3; // 下位 2bit = 階調、上位 = 色の組(0 = BG、4 = OBJ0、8 = OBJ1)
         if (sprOn) {
           for (let i = 0; i < n; i++) {
             const o = list[i] * 4, sx = oam[o + 1] - 8;
@@ -251,7 +254,7 @@
             const sc = (((vram[sa + 1] >> sb) & 1) << 1) | ((vram[sa] >> sb) & 1);
             if (!sc) continue;
             // 勝ったスプライトが BG の後ろなら BG が出る(下位のスプライトは出ない)
-            if (!((fl & 0x80) && c)) shade = (((fl & 0x10) ? this.obp1 : this.obp0) >> (sc * 2)) & 3;
+            if (!((fl & 0x80) && c)) shade = (fl & 0x10) ? 8 | ((this.obp1 >> (sc * 2)) & 3) : 4 | ((this.obp0 >> (sc * 2)) & 3);
             break;
           }
         }

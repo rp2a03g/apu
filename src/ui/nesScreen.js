@@ -96,6 +96,7 @@
     out.vibrate = typeof c.vibrate === 'boolean' ? c.vibrate : DEFAULT_CFG.dpad.vibrate;
     return out;
   }
+  const GB_PALETTES = ['auto', 'gray', 'green', 'pocket', 'cgb', 'brown', 'blue', 'pastel']; // 白黒ソフトの画面の色(GbConsole.SHADES / CGB_TINT)
   const GB_MODELS = ['auto', 'dmg', 'cgb', 'sgb', 'sgb2']; // 自動 = カートリッジがカラー対応ならカラー、でなければ白黒
   function loadMsxCfg(c) {
     c = c && typeof c === 'object' ? c : {};
@@ -123,9 +124,10 @@
       sfxRemove: typeof c.sfxRemove === 'boolean' ? c.sfxRemove : DEFAULT_CFG.sfxRemove,
       lagFix: typeof c.lagFix === 'boolean' ? c.lagFix : DEFAULT_CFG.lagFix,
       diskFast: typeof c.diskFast === 'boolean' ? c.diskFast : DEFAULT_CFG.diskFast,
+      nesBarcode: !!c.nesBarcode, // ファミコンの拡張端子にバーコードバトラー II をつなぐ([バーコード] ボタンを出す)
       dpad: loadDpadCfg(c.dpad),
       msx: loadMsxCfg(c.msx),
-      gb: { model: GB_MODELS.includes(c.gb && c.gb.model) ? c.gb.model : 'auto' },
+      gb: { model: GB_MODELS.includes(c.gb && c.gb.model) ? c.gb.model : 'auto', palette: GB_PALETTES.includes(c.gb && c.gb.palette) ? c.gb.palette : 'auto' },
     };
   }
   function saveCfg() { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { /* ignore */ } }
@@ -713,10 +715,11 @@
     gbLightBtn = mkBtn(T('光'), T('押している間、赤外線の受光部に光を当てる(リモコンなどの光の代わり)'), () => {}); gbLightBtn.hidden = true;
     attachHold(gbLightBtn, () => sendSensor({ light: true }), () => sendSensor({ light: false }));
     gbPrintBtn = mkBtn('', T('ポケットプリンタの印刷結果を PNG で保存'), saveGbPrints); gbPrintBtn.hidden = true;
-    gbBarcodeBtn = mkBtn(T('バーコード'), T('バーコードボーイにバーコード(13 桁の数字)を読ませる'), askGbBarcode); gbBarcodeBtn.hidden = true;
+    gbSgbMenuBtn = mkBtn(T('メニュー'), T('スーパーゲームボーイのメニュー(配色・枠の変更)を開く/閉じる(SNES のパッドの L+R)'), () => { if (node) node.port.postMessage({ type: 'sensor', sgbMenu: true }); else if (nes && nes.pressMenu) nes.pressMenu(); canvas.focus(); }); gbSgbMenuBtn.hidden = true;
+    gbBarcodeBtn = mkBtn(T('バーコード'), T('バーコードを読ませる(数字を打つか、カメラで写す)'), askGbBarcode); gbBarcodeBtn.hidden = true;
     diskBadgeEl = document.createElement('button'); diskBadgeEl.type = 'button'; diskBadgeEl.className = 'nes-diskbadge'; diskBadgeEl.hidden = true;
     diskBadgeEl.addEventListener('click', () => { if (cfg.msx.writeBack && !diskDirHandle) pickDiskDir(); else toggleDiskPopover(sideBtn.hidden ? diskBadgeEl : sideBtn); });
-    bar.appendChild(machineEl); bar.appendChild(lampsEl); bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn); bar.appendChild(gbLightBtn); bar.appendChild(gbBarcodeBtn); bar.appendChild(gbPrintBtn); bar.appendChild(ilBadgeEl);
+    bar.appendChild(machineEl); bar.appendChild(lampsEl); bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn); bar.appendChild(gbLightBtn); bar.appendChild(gbBarcodeBtn); bar.appendChild(gbPrintBtn); bar.appendChild(gbSgbMenuBtn); bar.appendChild(ilBadgeEl);
     statusEl.textContent = '';
     wrap.appendChild(bar); wrap.appendChild(canvas);
     if (MML.Device && MML.Device.isTouch && MML.Device.isTouch()) wrap.appendChild(buildTouchPad());
@@ -842,7 +845,15 @@
     return kb;
   }
   // ── ゲームボーイの周辺(段階 8e): 赤外線の受光ボタン、傾き(MBC7)、振動、ポケットプリンタの絵 ──
+  let gbSgbMenuBtn = null;
   let gbLightBtn = null, gbPrintBtn = null, gbPrints = [], gbPrintSeq = 0, gbIrShown = false, gbTilt = false, gbRumbleMs = 0, gbTiltSent = '';
+  let gbDmgOnCgb = false;
+  // 白黒の色の設定を今動いている本体へ(スーパーゲームボーイは BIOS が色を付けるので送らない)
+  function pushGbShades() {
+    if (machine !== 'gb' || gbSgb) return;
+    const sh = MML.Emu.GbConsole.shadesFor(cfg.gb.palette, gbDmgOnCgb);
+    if (node) node.port.postMessage({ type: 'sensor', shades: sh }); else if (nes && nes.ppu && nes.ppu.setShades) nes.ppu.setShades(sh);
+  }
   function sendSensor(o) {
     if (machine !== 'gb') return;
     if (node) node.port.postMessage(Object.assign({ type: 'sensor' }, o));
@@ -887,15 +898,19 @@
   }
   // バーコードボーイ: 13 桁(JAN/EAN-13)を入れて読ませる
   let gbBarcodeBtn = null, gbBarcodeShown = false;
+  let nesBarcodeKind = ''; // ファミコン: 'datach'(マッパー 157)/ 'bb2'(設定でバーコードバトラー II をつないだ時)/ ''
+  // バーコードを読ませる(ゲームボーイのバーコードボーイ、ファミコンのデータック/バーコードバトラー II)。数字を打つかカメラで写す(ui/barcodeDialog.js)
   function askGbBarcode() {
+    const send = (digits) => {
+      if (machine === 'gb' && digits.length !== 13) { flashStatus(T('13 桁の数字ではありません')); return; }
+      if (node) node.port.postMessage({ type: 'sensor', barcode: digits });
+      else if (nes && nes.scanBarcode) onGbBarcodeResult(nes.scanBarcode(digits));
+      flashStatus(T('バーコードを読ませました: {digits}', { digits }));
+      canvas.focus();
+    };
+    if (MML.UI.BarcodeDialog) { MML.UI.BarcodeDialog.open({ title: machine === 'gb' ? T('バーコードボーイに読ませる') : nesBarcodeKind === 'datach' ? T('データックに読ませる') : T('バーコードバトラー II に読ませる'), onDigits: send }); return; }
     const s = window.prompt(T('バーコードの数字 13 桁(JAN/EAN-13)を入れてください'), '');
-    if (s === null) return;
-    const digits = s.replace(/\D/g, '');
-    if (digits.length !== 13) { flashStatus(T('13 桁の数字ではありません')); return; }
-    const okSum = MML.Emu.GbBarcodeBoy && MML.Emu.GbBarcodeBoy.checkEan13(digits);
-    if (node) node.port.postMessage({ type: 'sensor', barcode: digits });
-    else if (nes && nes.scanBarcode) onGbBarcodeResult(nes.scanBarcode(digits));
-    if (!okSum) flashStatus(T('検査数字が合いませんが、そのまま読ませました'));
+    if (s !== null) send(s.replace(/\D/g, ''));
   }
   function onGbBarcodeResult(ok) { if (!ok) flashStatus(T('ゲームが読み取りを待っていません')); }
 
@@ -903,10 +918,13 @@
   function updateGbUi() {
     gbIrShown = false; gbTiltSent = ''; gbBarcodeShown = false;
     stopGbCamera();
-    if (gbBarcodeBtn) gbBarcodeBtn.hidden = true;
+    if (gbBarcodeBtn) gbBarcodeBtn.hidden = !(machine === 'nes' && nesBarcodeKind);
+    if (machine !== 'nes') nesBarcodeKind = '';
+    if (MML.UI.BarcodeDialog && MML.UI.BarcodeDialog.isOpen) MML.UI.BarcodeDialog.close();
     if (machine !== 'gb') gbTilt = false;
     if (gbLightBtn) gbLightBtn.hidden = true;
     if (gbPrintBtn) gbPrintBtn.hidden = !gbPrints.length;
+    if (gbSgbMenuBtn) gbSgbMenuBtn.hidden = !(machine === 'gb' && gbSgb);
   }
   // 本体から毎フレーム届く: { rumble, ir, prints }
   function gbFrameInfo(info) {
@@ -1189,6 +1207,9 @@
     // ── BIOS(ファミコン / MSX)──
     const biosNote = (parent, text) => note(parent, text);
     const ok = (v) => { const sp = document.createElement('span'); sp.className = v ? 'nes-bios-ok' : 'nes-bios-ng'; sp.textContent = v ? '✔' : '–'; return sp; };
+    const sbc = sec(T('バーコード'), 'nes');
+    check(sbc, cfg.nesBarcode, T('拡張端子にバーコードバトラー II をつなぐ'), (v) => { cfg.nesBarcode = v; saveCfg(); if (machine === 'nes' && nesBarcodeKind !== 'datach') { nesBarcodeKind = v ? 'bb2' : ''; if (gbBarcodeBtn) gbBarcodeBtn.hidden = !nesBarcodeKind; } });
+    note(sbc, T('ツールバーに [バーコード] が出て、数字を打つかカメラで写して読ませられます。データック(バーコードつきのカートリッジ)は設定に関係なく出ます'));
     const sn = sec(T('BIOS'), 'nes');
     const fdsBox = document.createElement('div'); sn.appendChild(fdsBox);
     biosNote(sn, T('ディスクシステム(.fds)の起動に disksys.rom(8K)が要ります。このブラウザに控えて次回も使います。.nes のカートリッジには要りません'));
@@ -1232,7 +1253,12 @@
       s.value = cfg.gb.model;
       s.addEventListener('change', () => { cfg.gb.model = s.value; saveCfg(); });
       sg.appendChild(r); }
-    note(sg, T('次に開く(またはリセットでなく開き直す)ソフトから効きます。スーパーゲームボーイは SNES 側ごと動かし、専用の枠・配色・SNES 側の音が出ます。初代は実機のゲームボーイより約 2.4% 速く動きます(実機どおり)。巻き戻しは使えません'));
+    { const { r, s } = selRow(T('白黒ソフトの色'));
+      for (const [v, label] of [['auto', T('自動(白黒本体は灰色、カラー本体はカラーの標準)')], ['gray', T('灰色')], ['green', T('緑(初代の液晶風)')], ['pocket', T('ポケット風')], ['cgb', T('カラー本体の標準(緑・青・赤)')], ['brown', T('茶')], ['blue', T('青')], ['pastel', T('パステル')]]) { const o = document.createElement('option'); o.value = v; o.textContent = label; s.appendChild(o); }
+      s.value = cfg.gb.palette;
+      s.addEventListener('change', () => { cfg.gb.palette = s.value; saveCfg(); pushGbShades(); });
+      sg.appendChild(r); }
+    note(sg, T('次に開く(またはリセットでなく開き直す)ソフトから効きます。スーパーゲームボーイは SNES 側ごと動かし、専用の枠・配色・SNES 側の音が出ます。初代は実機のゲームボーイより約 2.4% 速く動きます(実機どおり)。巻き戻しは 30 秒ぶんです'));
     const sgbSec = sec(T('スーパーゲームボーイの BIOS'), 'gb');
     const sgbBox = document.createElement('div'); sgbSec.appendChild(sgbBox);
     note(sgbSec, T('スーパーゲームボーイの SNES 側のカートリッジ(256K、SGB2 は 512K)を各自で用意して選びます。ゲームボーイ側のブート ROM(256 バイト)は無くても動きます。このブラウザに控えて次回も使います'));
@@ -1393,7 +1419,7 @@
     document.addEventListener('keydown', popClose, true);
   }
   function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll, sfxRemove: DEFAULT_CFG.sfxRemove, lagFix: DEFAULT_CFG.lagFix, diskFast: DEFAULT_CFG.diskFast, dpad: Object.assign({}, DEFAULT_CFG.dpad),
-    msx: { keys: Object.assign({}, DEFAULT_CFG.msx.keys), machine: cfg.msx.machine, joyFromKeys: DEFAULT_CFG.msx.joyFromKeys, touchKbd: DEFAULT_CFG.msx.touchKbd, cartB: cfg.msx.cartB, fdc: cfg.msx.fdc }, gb: { model: cfg.gb.model } }; } // 機種は BIOS の控えに結びつくので残す
+    msx: { keys: Object.assign({}, DEFAULT_CFG.msx.keys), machine: cfg.msx.machine, joyFromKeys: DEFAULT_CFG.msx.joyFromKeys, touchKbd: DEFAULT_CFG.msx.touchKbd, cartB: cfg.msx.cartB, fdc: cfg.msx.fdc }, gb: { model: cfg.gb.model, palette: cfg.gb.palette }, nesBarcode: cfg.nesBarcode }; } // 機種は BIOS の控えに結びつくので残す
 
   // ── 入力 ──
   // ゲームパッド: つながっている順に 1P(キーボードと合成)、2P。戻り値は [[1P のビット, 連射ビット, 操作の集合], [2P ...]]
@@ -1588,6 +1614,7 @@
         updateLamps(m.disk);
         frameSeq = m.seq; underruns = m.underruns || 0;
         if (m.writes) takeFrames(m.writes, m.seq);
+        if (m.spc && NesScreen.onSpcState) NesScreen.onSpcState(m.spc);
         if (m.gb) gbFrameInfo(m.gb);
         tickFps(performance.now());
         break;
@@ -1879,14 +1906,21 @@
     const frames = recFrames || [];
     recFrames = null; recBase = null;
     if (machine === 'gb') {
-      // GB: 本体 APU は VGM の正規チップ(0xB3)。1 フレームが 735 サンプルでないので、効果音/処理落ちの補正(vgmClean.js)はまだ掛けられない
+      // GB: 本体 APU は VGM の正規チップ(0xB3)
       // スーパーゲームボーイ(初代)はクロックが 4295454Hz。SNES 側の音源は規格外ブロック GBXX に入る
       const r = MML.VGM.encodeGbRecording({ frames, clock: gbSgb && gbClock ? gbClock : undefined, system: gbSgb ? 'Nintendo Super Game Boy' : undefined, name: (romName || 'GB').replace(/\.(gb|gbc|sgb)$/i, ''), creator: 'Sound Emulation Foundry (GB)' });
       recRaw = r.vgm; recVgm = r.vgm;
+      if (!gbSgb) { // 効果音/処理落ちの補正(1 フレーム ≒ 738.35 サンプルの格子で掛ける)
+        recSfxChk.checked = !!cfg.sfxRemove; recLagChk.checked = !!cfg.lagFix;
+        applyRecClean();
+        updateRecUi();
+        return;
+      }
+      // スーパーゲームボーイ: SNES 側の音は書き込みの刻印(SPC700 のサイクル数)で鳴るので、フレームを詰める補正とは噛み合わない。補正は出さない
       updateRecUi();
       recSfxChk.parentNode.hidden = recLagChk.parentNode.hidden = true;
       recInfoEl.textContent = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (r.samples / 44100).toFixed(1), frames: r.frames, kb: (r.vgm.length / 1024).toFixed(1) });
-      recInfoEl.title = T('ゲームボーイの録音には効果音/処理落ちの補正はまだ掛けられません');
+      recInfoEl.title = T('スーパーゲームボーイの録音には効果音/処理落ちの補正は掛けられません(SNES 側の音と時刻が合わなくなるため)');
       return;
     }
     if (machine === 'msx') {
@@ -1914,7 +1948,7 @@
   function applyRecClean() {
     if (!recRaw) return;
     const flags = { sfx: !!(recSfxChk && recSfxChk.checked), lag: !!(recLagChk && recLagChk.checked) };
-    const rh = MML.VGM.parseHeader(recRaw), rspf = rh.rate === 50 ? 882 : 735; // MSX の 50Hz 録音は 882 サンプル/フレーム
+    const rh = MML.VGM.parseHeader(recRaw), rspf = MML.VGM.captureFrameSamples ? MML.VGM.captureFrameSamples(rh) : (rh.rate === 50 ? 882 : 735); // MSX の 50Hz 録音は 882、ゲームボーイは約 738.35 サンプル/フレーム
     const frames = Math.round(rh.totalSamples / rspf);
     let text = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (frames * rspf / 44100).toFixed(1), frames, kb: (recRaw.length / 1024).toFixed(1) });
     let title = '';
@@ -2043,6 +2077,7 @@
   // 機種はカートリッジのヘッダで決める: カラー対応(専用含む)なら CGB、それ以外は DMG(model 'auto')
   async function openGb(bytes, name) {
     machine = 'gb'; pendingFds = null; pendingMsx = null; msxChips = []; msxDisk = false;
+    if (NesScreen.onSpcState) NesScreen.onSpcState(null);
     updateBiosBtn(); updateSoftKbd();
     // 機種: 設定の指定。スーパーゲームボーイは BIOS が控えてあれば SNES 側ごと動かす(無ければ案内して白黒/カラーで開く)
     const want = cfg.gb.model;
@@ -2050,6 +2085,9 @@
     if (sgbRev) { sgbBios = loadSgbBios(sgbRev); if (!sgbBios.bios || !MML.Emu.SgbConsole) { sgbRev = 0; flashStatus(T('スーパーゲームボーイの BIOS がまだ控えてありません(⚙ → ゲームボーイ)。普通のゲームボーイとして開きます')); } }
     const probe = sgbRev ? new MML.Emu.SgbConsole(bytes, { bios: sgbBios.bios, bootRom: sgbBios.boot, revision: sgbRev }) : new MML.Emu.GbConsole(bytes, { model: want === 'dmg' || want === 'cgb' ? want : 'auto' });
     gbSgb = sgbRev; gbClock = sgbRev ? Math.round(probe.clockHz) : 0;
+    gbDmgOnCgb = !sgbRev && !!probe.dmgOnCgb;
+    if (gbSgbMenuBtn) gbSgbMenuBtn.hidden = !sgbRev;
+    if (!sgbRev) probe.ppu.setShades(MML.Emu.GbConsole.shadesFor(cfg.gb.palette, gbDmgOnCgb));
     liveEnd('restart');
     rewindHoldEnd();
     await flushBattery(); // 前の ROM のセーブを受け取ってから止める
@@ -2078,9 +2116,9 @@
     const rom = bytes.slice().buffer;
     const bat = battery ? battery.slice().buffer : null;
     const sgbMsg = sgbRev ? { bios: sgbBios.bios.slice().buffer, boot: sgbBios.boot ? sgbBios.boot.slice().buffer : null, revision: sgbRev } : null;
-    const ok = await startWorklet({ type: 'load', machine: 'gb', rom, battery: bat, gb: { model: probe.model, sgb: sgbMsg } }, [rom, bat, sgbMsg && sgbMsg.bios, sgbMsg && sgbMsg.boot].filter(Boolean));
+    const ok = await startWorklet({ type: 'load', machine: 'gb', rom, battery: bat, gb: { model: probe.model, sgb: sgbMsg, shades: sgbRev ? null : MML.Emu.GbConsole.shadesFor(cfg.gb.palette, gbDmgOnCgb) } }, [rom, bat, sgbMsg && sgbMsg.bios, sgbMsg && sgbMsg.boot].filter(Boolean));
     gbTilt = !!probe.hasTilt; if (gbTilt) canvas.title = T('マウスを画面の上で動かすと傾きます(スマホは本体の傾き)');
-    if (!ok) { nes = probe; rewindBuf = MML.Emu.GbRewind && !sgbRev ? new MML.Emu.GbRewind(nes) : null; lastPad = -1; lastPad2 = -1; mainFrames = 0; nes.setTurboRate(cfg.turboRate); startMain(); }
+    if (!ok) { nes = probe; rewindBuf = sgbRev ? (MML.Emu.SgbRewind ? new MML.Emu.SgbRewind(nes) : null) : (MML.Emu.GbRewind ? new MML.Emu.GbRewind(nes) : null); lastPad = -1; lastPad2 = -1; mainFrames = 0; nes.setTurboRate(cfg.turboRate); startMain(); }
     liveBegin();
     updateStatus();
     canvas.focus();
@@ -2103,6 +2141,8 @@
     onLiveFrame: null,       // (writes) 1 フレームぶんの書き込み列
     onLiveTruncate: null,    // (frames) 巻き戻し: ロールをこのフレーム数に切り詰める
     onLiveEnd: null,         // (reason) ライブ表示の終了
+    onSpcState: null,        // ({regs, env, mode} | null) スーパーゲームボーイの SNES 側の音源の今の状態(鍵盤表示用。止まったら null)
+    setSpcMute(mask) { if (node && machine === 'gb' && gbSgb) node.port.postMessage({ type: 'sensor', spcMute: mask & 0xFF }); },
     liveStopped,             // 鍵盤表示側から「終わった」と知らせる
     rewindTo,                // (曲の秒) ロールのドラッグシークから。戻せる秒を返す(ライブ表示中でなければ null)
     applyMix,                // (muteConfig, volumeConfig) 鍵盤表示のミュート/音量
@@ -2154,6 +2194,8 @@
       const battery = hasBattery ? await loadBattery(batteryKey) : null;
       if (battery && probe.setBattery(battery)) console.log('[nes]', T('セーブデータを読み込みました({n} バイト)', { n: battery.length }));
       machineEl.textContent = isFds ? T('ディスクシステム') : T('ファミコン');
+      nesBarcodeKind = !isFds && probe.rom && probe.rom.mapper === 157 ? 'datach' : (cfg.nesBarcode ? 'bb2' : '');
+      if (gbBarcodeBtn) gbBarcodeBtn.hidden = !nesBarcodeKind;
       nameEl.textContent = romName;
       nameEl.title = MML.Emu.INES.describe(probe.rom);
       recExtBits = probe.extBits();

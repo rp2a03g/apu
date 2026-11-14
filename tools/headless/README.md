@@ -32,6 +32,7 @@ export PATH="$PATH:/path/to/nodejs"
 | `gb-mesen-shot.js` | Mesen 2 に ROM を無操作で回させ、決めたフレームの画面を PNG に取る(色数と PC も出す)。総当たりで「1 色のまま」「固まった疑い」になった物が Mesen でも同じかを見る |
 | `snes-run.js` | SNES 本体の骨格(`src/emulator/snes/`、スーパーゲームボーイの土台)を回して画面を PNG に書く。`--gb rom.gb [--gb-boot sgb.boot.rom]` で SGB の BIOS にゲームボーイの ROM を挿す。`--text` は BG1 のタイル番号を文字として読む(公開テスト ROM の結果表示)。`src/emulator/snes/`、`cpu65816.js`、`spc700.js` を触ったら gilyon/snes-tests の 3 本(各自で `_tmp_test/snes/` に置く)が Success のままか見る |
 | `sgb-test.js` | スーパーゲームボーイ(`snes/sgbConsole.js`)の通し試験。`--bios SGB1.sfc [--boot sgb1.boot.rom] --gb rom.gb`(BIOS は同梱しない、各自で渡す)。絵が GB 側と対応するか、音のサンプル数、SNES 側と GB 側の両方が鳴るか、録音(VGM のクロックと GBXX 種類 1)、ステートを見る。`--png` `--wav` で画面と音を書き出す |
+| (バーコード) | `src/emulator/ean.js`(符号化/復号)と `src/input/barcodeScan.js`(画像から読む)は道具なし。合成データの確認は scratch で行った(符号化 → ぼかし+雑音 → 復号)。触ったら同じ形で確かめる |
 | `gb-testroms.js` | 公開テスト ROM(blargg / mooneye / dmg-acid2。`_tmp_test/gb` か `GB_TESTROM_ROOT` に各自で置く、同梱しない)をまとめて回して合否の表を出す。`--check tools/headless/gb-testroms-pass.txt` で前に通っていた物が落ちていないか見る。`src/emulator/gb/` か `cpuSm83.js` を触ったら回す |
 | `live-roll-test.js` | ライブ表示(ロール追記モード)の点検。先読みのタイムラインのハッシュ(HEAD の worktree と比べる)、追記(`liveAppendFrame`)が同じ材料の一括構築と一致すること、1 フレームの追記時間、過去向きの座標系の自己検査 |
 | `vgm-clean-test.js` | 録音の補正(変換設定 SFX_REMOVE / LAG_FIX、`src/vgm/vgmClean.js`)の点検。NSF→VGM に効果音と空フレームを人工的に混ぜ、OFF の不変性と「効果音が残らない・フレーム数が戻る」を見る。`--vgm` で実ファイルの OFF 不変性も |

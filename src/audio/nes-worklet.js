@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 20:33:55
+ * Built by tools/build-capture-workers.ps1 at 2026-11-14 14:07:48
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-13 20:33:55';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-14 14:07:48';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -4665,9 +4665,9 @@
     cpuRead(addr) {
       if (addr >= 0x6000 && addr < 0x8000) {
         if (this.sram) return this.prgRam[(addr - 0x6000) & 0x1FFF];
-        if (!this.eeprom) return 0x10; // EEPROM 無し: SDA=1
+        if (!this.eeprom) return 0x10 | (this.barcodeRead ? this.barcodeRead() : 0); // EEPROM 無し: SDA=1
         let sda = this.eeprom.read(); if (this.eeprom2) sda &= this.eeprom2.read();
-        return sda << 4; // バーコードリーダー(bit3)は無し
+        return (sda << 4) | (this.barcodeRead ? this.barcodeRead() : 0); // bit3 = データックのバーコードリーダー(本体が barcodeRead を挿す)
       }
       return super.cpuRead(addr);
     }
@@ -6046,6 +6046,7 @@
       } else {
         this.rom = Emu.INES.parse(romBytes);
         this.mapper = Emu.NesMappers.create(this.rom);
+        if (this.rom.mapper === 157) this.mapper.barcodeRead = () => (this.barcode && this.barcode.kind === 'datach' ? this._barcodeBit() << 3 : 0);
       }
       this.ppu = new Emu.PPU(this.mapper);
       this.apu = new Emu.APU2A03(this);
@@ -6099,6 +6100,39 @@
     ejectDisk() { if (this.mapper.ejectDisk) this.mapper.ejectDisk(); }
     // NSF ヘッダと同じ拡張音源ビット(録音の NESX ヘッダ用)
     extBits() { return this.mapper.audio ? (this.mapper.extBits || 0) : 0; }
+    // ── バーコード ──
+    // データック(マッパー 157): カートリッジのリーダーにカードを通す。黒白の並び(余白つき)が 1 個 1000 CPU サイクルで $6000 bit3 に出る(白 = 1)。
+    // バーコードバトラー II(それ以外): 拡張端子から 1200 ボーの直列(開始 1、データ 8bit を下位から反転、停止 0)で
+    //   数字+"EPOCH\r\n"(20 文字に空白で詰める)が $4017 bit2 に出る。
+    // どちらも Mesen の実装を覚えている範囲で再現した物で、実ソフトでは確かめていない
+    get barcodeKind() { return this.rom && this.rom.mapper === 157 ? 'datach' : 'bb2'; }
+    scanBarcode(digits) {
+      const Ean = Emu.Ean;
+      const s = Ean ? Ean.withCheck(digits) : String(digits || '').replace(/\D/g, '');
+      if (s.length !== 13 && s.length !== 8) return false;
+      const bits = [];
+      if (this.barcodeKind === 'datach') {
+        const mod = Ean ? Ean.modules(s) : null;
+        if (!mod) return false;
+        for (let i = 0; i < 33; i++) bits.push(1);
+        for (const m of mod) bits.push(m ? 0 : 1);
+        for (let i = 0; i < 32; i++) bits.push(1);
+        this.barcode = { kind: 'datach', bits: Uint8Array.from(bits), start: this.cpuCycles, per: 1000 };
+      } else {
+        let text = s + 'EPOCH\r\n';
+        while (text.length < 20) text += ' ';
+        for (let i = 0; i < 20; i++) { bits.push(1); const c = text.charCodeAt(i); for (let j = 0; j < 8; j++) bits.push(((c >> j) & 1) ^ 1); bits.push(0); }
+        this.barcode = { kind: 'bb2', bits: Uint8Array.from(bits), start: this.cpuCycles, per: 1789773 / 1200 };
+      }
+      return true;
+    }
+    _barcodeBit() {
+      const b = this.barcode;
+      if (!b) return 0;
+      const pos = Math.floor((this.cpuCycles - b.start) / b.per);
+      if (pos >= b.bits.length) { this.barcode = null; return 0; }
+      return b.bits[pos];
+    }
     // ── バッテリ バックアップ(セーブ)──
     // iNES でバッテリ ビットが立っていれば PRG RAM 全体、.fds ならディスク全面(ギャップつき)が保存の対象。
     // 書き込みがあると batteryDirty が立つ(主スレッド/ヘッドレスがそれを見て保存し、clearBatteryDirty() で下ろす)
@@ -6142,6 +6176,7 @@
         if (this.padStrobe) v = this.pad[p] & 1;
         else { v = this.padShift[p] & 1; this.padShift[p] = (this.padShift[p] >> 1) | 0x80; }
         v |= this.openBus & 0xE0;
+        if (p && this.barcode && this.barcode.kind === 'bb2') v |= this._barcodeBit() << 2; // バーコードバトラー II(拡張端子、$4017 bit2)
       } else if (addr < 0x4020) v = this.openBus;
       else {
         v = this.mapper.cpuRead(addr);
@@ -6452,11 +6487,13 @@
   const FRAME_BYTES = 256 * 240;
 
   class NesRewind {
-    // opt: { State, frameBytes }(GB の GbRewind が差し替える。既定は NES)
+    // opt: { State, frameBytes, interval, keep }(GB の GbRewind、スーパーゲームボーイの SgbRewind が差し替える。既定は NES)
     constructor(nes, opt) {
       this.nes = nes;
       this.State = (opt && opt.State) || Emu.NesState;
       this.frameBytes = (opt && opt.frameBytes) || FRAME_BYTES;
+      this.interval = (opt && opt.interval) || INTERVAL; // スナップショットの間隔と個数(状態が大きい機種は個数を減らす)
+      this.keep = (opt && opt.keep) || KEEP;
       this.snaps = [];          // [{ frame, state }] frame = そのフレームが終わった時点の frameCount
       this.pads = [];           // pads[frameCount] = pad0 | pad1 << 8(そのフレーム終わりの値。フレーム番号は frameCount)
       this.base = 0;            // pads の先頭が指す frameCount(古い分は捨てる)
@@ -6540,9 +6577,9 @@
       if (this.base > f) this.clear();
       this.pads[f - this.base] = (nes.pad[0] & 0xFF) | ((nes.pad[1] & 0xFF) << 8);
       this._capture(f);
-      if (f % INTERVAL === 0) {
+      if (f % this.interval === 0) {
         this.snaps.push({ frame: f, state: this.State.save(nes) });
-        if (this.snaps.length > KEEP) {
+        if (this.snaps.length > this.keep) {
           const drop = this.snaps.shift();
           // 捨てたスナップショットより前のパッド記録も要らない
           const keepFrom = this.snaps[0].frame;
@@ -15412,7 +15449,7 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
- * ゲームボーイの追加の基板: HuC3 / MMM01 / MBC6 / ポケットカメラ
+ * ゲームボーイの追加の基板: HuC3 / MMM01 / MBC6 / ポケットカメラ / TAMA5
  * (gb/cart.js の GbCart.EXTRA に登録する。cart.js の後に読む)
  *
  * どれも市販ソフトで確かめられていない(手元に無い)。仕様の出どころと、分かっていない所は各節に書く。
@@ -15745,6 +15782,101 @@
     },
   };
   GbCart.CAM_W = CAM_W; GbCart.CAM_H = CAM_H;
+
+  // ───────────────────────── TAMA5(バンダイ。時計つき)─────────────────────────
+  // $A000 台は番地の bit0 だけを見る: 奇数 = レジスタ番号を選ぶ、偶数 = 選んだレジスタへ 4bit のデータ。
+  //   レジスタ 0/1 = ROM バンクの下位/上位 4bit(書くとすぐ切り替わる)、4/5 = 書くデータの下位/上位、6 = 番地の bit4(bit0)とモード(bit3-1)、
+  //   7 = 番地の下位 4bit(ここへ書いた時にモードの動作をする)、$A = 読むと $F1(生きている印)、$C/$D = 結果の下位/上位 4bit を読む($F0 を重ねて返る)。
+  //   モード 0 = RAM(32 バイト)へ書く、1 = RAM を読む、2 = 命令(番地 0/1 = 時計を止める/動かす、4/5 = 分/時を書く、6/7 = 分/時を読む、$10/$11 = アラーム)、
+  //   4 = 時計(TC8521 風。16 ニブル × 4 ページ)のレジスタ: 番地の下位 0/2/4/6 でページを選んで書く、1/3/5/7 で読む(番号はレジスタ 4、データはレジスタ 5)。
+  // 時計は「今の実時刻+ずれ」で持ち、読むたびに桁へ直す(24 時間制として扱う。12 時間制の桁の意味は再現していない)。
+  // 出どころ: mGBA の実装(MPL 2.0。読んで動作を確かめた。写してはいない)。★手元に該当ソフトが無く、実ソフトでは確かめていない
+  TYPES[0xFD] = { mbc: 'tama5', ram: 1, battery: 1 };
+  const T5_MASK = [0xF, 7, 0xF, 7, 0xF, 3, 7, 0xF, 3, 0xF, 1, 0xF, 0xF, 0, 0, 0, 0, 0, 0xF, 7, 0xF, 3, 7, 0xF, 3, 0, 1, 3, 0, 0, 0, 0];
+  EXTRA.tama5 = {
+    init(c) { c.t5 = { reg: 0, regs: new Uint8Array(8), ram: new Uint8Array(32), pages: new Uint8Array(64), disabled: false, offset: 0 }; EXTRA.tama5.reset(c); },
+    reset(c) { const t = c.t5; t.reg = 0; t.regs.fill(0); t.pages[16 + 13] = 1; t.pages[32 + 13] = 2; t.pages[48 + 13] = 3; c.romBank = 1; },
+    map(c) { c.lo = 0; c.hi = (c.romBank % c.romBanks) << 14; },
+    write() {},
+    // 今の時刻を時計ページ(ページ 0)の桁へ
+    latch(c) {
+      const t = c.t5, p = t.pages;
+      if (t.disabled) return;
+      const d = new Date(GbCart.now() + t.offset);
+      const put = (i, v) => { p[i] = v % 10; p[i + 1] = (v / 10) | 0; };
+      put(0, d.getSeconds()); put(2, d.getMinutes()); put(4, d.getHours()); p[6] = d.getDay();
+      put(7, d.getDate()); put(9, d.getMonth() + 1); put(11, d.getFullYear() % 100);
+    },
+    // 時計ページの桁から「ずれ」を作り直す(ソフトが時刻を書いた後)
+    sync(c) {
+      const t = c.t5, p = t.pages, two = (i) => p[i] + p[i + 1] * 10;
+      const d = new Date(2000 + two(11), Math.max(0, two(9) - 1), Math.max(1, two(7)), two(4), two(2), two(0));
+      if (isFinite(d.getTime())) t.offset = d.getTime() - GbCart.now();
+      c.dirty = true;
+    },
+    readRam(c, addr) {
+      if (addr & 1) return 0xFF;
+      const t = c.t5, r = t.regs;
+      if (t.reg !== 0xC && t.reg !== 0xD) return 0xF1;
+      const a5 = ((r[6] & 1) << 4) | r[7], mode = r[6] >> 1;
+      let v = 0xF0;
+      if (mode === 1) v = t.ram[a5];
+      else if (mode === 2) { EXTRA.tama5.latch(c); v = a5 === 6 ? (t.pages[3] << 4) | t.pages[2] : a5 === 7 ? (t.pages[5] << 4) | t.pages[4] : a5; }
+      else if (mode === 4) {
+        if (t.reg === 0xD) return 0xFF;
+        EXTRA.tama5.latch(c);
+        const idx = r[4];
+        if (idx > 13) v = 0; else if (r[7] & 1) v = t.pages[idx];
+      }
+      if (t.reg === 0xD) v >>= 4;
+      return 0xF0 | (v & 0x0F);
+    },
+    writeRam(c, addr, v) {
+      const t = c.t5, r = t.regs;
+      if (addr & 1) { t.reg = v; return; }
+      v &= 0x0F;
+      if (t.reg >= 8) return;
+      r[t.reg] = v;
+      if (t.reg === 0 || t.reg === 1) { c.romBank = r[0] | (r[1] << 4); c._map(); return; }
+      if (t.reg !== 7) return;
+      const a5 = ((r[6] & 1) << 4) | r[7], out = (r[5] << 4) | r[4], mode = r[6] >> 1, p = t.pages;
+      if (mode === 0) { t.ram[a5] = out; c.dirty = true; }
+      else if (mode === 2) {
+        switch (a5) {
+          case 0x00: EXTRA.tama5.latch(c); t.disabled = true; for (let k = 0; k < 4; k++) p[k * 16 + 13] &= 7; c.dirty = true; break;
+          case 0x01: t.disabled = false; p[0] = 0; p[1] = 0; for (let k = 0; k < 4; k++) p[k * 16 + 13] |= 8; EXTRA.tama5.sync(c); break;
+          case 0x04: EXTRA.tama5.latch(c); p[2] = out & 0xF; p[3] = out >> 4; EXTRA.tama5.sync(c); break;
+          case 0x05: EXTRA.tama5.latch(c); p[4] = out & 0xF; p[5] = out >> 4; EXTRA.tama5.sync(c); break;
+          case 0x10: for (let k = 0; k < 4; k++) p[k * 16 + 13] &= 0xB; break;
+          case 0x11: for (let k = 0; k < 4; k++) p[k * 16 + 13] |= 4; break;
+        }
+      } else if (mode === 4) {
+        const idx = r[4], data = r[5];
+        if (idx >= 13) return;
+        switch (r[7]) {
+          case 0: EXTRA.tama5.latch(c); p[idx] = data & T5_MASK[idx]; EXTRA.tama5.sync(c); break;
+          case 2: p[16 + idx] = data & T5_MASK[idx + 16]; c.dirty = true; break;
+          case 4: p[32 + idx] = data; c.dirty = true; break;
+          case 6: p[48 + idx] = data; c.dirty = true; break;
+        }
+      }
+    },
+    // セーブ: RAM 32 バイト+時計の 4 ページ 64 ニブル+止めているか+「ずれ」(実時刻との差。時計はセーブを読んだ後も実時間で進む)
+    getBattery(c) {
+      const t = c.t5, out = new Uint8Array(32 + 64 + 8 + 8);
+      out.set(t.ram); out.set(t.pages, 32); out[96] = t.disabled ? 1 : 0;
+      if (t.disabled) EXTRA.tama5.sync(c);
+      putF64(out, 104, t.offset);
+      return out;
+    },
+    setBattery(c, bytes) {
+      const t = c.t5;
+      if (bytes.length < 32) return false;
+      t.ram.set(bytes.subarray(0, 32));
+      if (bytes.length >= 112) { t.pages.set(bytes.subarray(32, 96)); t.disabled = bytes[96] === 1; const o = f64(bytes, 104); if (isFinite(o)) t.offset = o; }
+      return true;
+    },
+  };
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
@@ -15761,7 +15893,7 @@
  *   - モード 2/3 の間の OAM、モード 3 の間の VRAM は CPU から触れない(読むと $FF、書きは捨てる)
  *   - 153 行目は 4T で LY=0 になる。LCD を点けた直後の 1 行目はモード 2 が無く 4T 短い。LCD が消えている間 LY=LYC の旗は動かない
  *   CGB(段階 8d): VRAM 2 バンク、BG の属性(バンク 1 のマップ: パレット/タイルのバンク/反転/優先)、パレット 8+8 本(15bit 色)、
- *     スプライトの優先は OAM 順、LCDC bit0 は「BG がスプライトより前に出られるか」。frameIdx はパレットの番号(BG 0-31、OBJ 32-63)
+ *     スプライトの優先は OAM 順、LCDC bit0 は「BG がスプライトより前に出られるか」。白黒の frameIdx は 階調 0-3 + 色の組(BG 0 / OBJ0 4 / OBJ1 8)。frameIdx はパレットの番号(BG 0-31、OBJ 32-63)
  *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)、OAM 破壊バグ
  *
  * 参考: Pan Docs "Rendering" "STAT" "OAM"。細部は mooneye の acceptance/ppu と dmg-acid2 で確かめる(tools/headless/gb-testroms.js)。
@@ -15785,7 +15917,8 @@
       this.oam = new Uint8Array(0xA0);
       this.frame = new Uint32Array(W * H);   // 0xAABBGGRR
       this.frameIdx = new Uint8Array(W * H); // 階調番号 0-3(巻き戻しの映像の輪が控える。色は shades で引く)
-      this.shades = [0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000]; // 白 → 黒(設定で差し替える)
+      // 白黒の色。12 個 = BG 用 4、OBJ0 用 4、OBJ1 用 4(白 → 黒)。普通は 3 組とも同じ。カラー本体で白黒ソフトを動かす時の着色は組ごとに違う色を入れる
+      this.shades = []; this.setShades([0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000]);
       this.sprList = new Uint8Array(10); // その行のスプライト(OAM 番号、優先順)
       this.noRender = false;             // true: 絵は描かない(GBS プレイヤー)
       this.reset();
@@ -15813,6 +15946,8 @@
       this.frame.fill(this.shades[0]); this.frameIdx.fill(0);
     }
 
+    // 4 個(3 組とも同じ色)か 12 個(BG、OBJ0、OBJ1)
+    setShades(a) { const s = Array.from(a || []); if (s.length !== 4 && s.length !== 12) return; this.shades = s.length === 12 ? s : s.concat(s, s); }
     get on() { return (this.lcdc & 0x80) !== 0; }
     // CGB のパレットへ 1 バイト(which: 0=BG $FF69、1=OBJ $FF6B)。番号は自動で進む(bit7)
     writePal(which, v) {
@@ -15987,7 +16122,7 @@
           }
           c = (((vram[a + 1] >> bit) & 1) << 1) | ((vram[a] >> bit) & 1);
         }
-        let shade = (bgp >> (c * 2)) & 3;
+        let shade = (bgp >> (c * 2)) & 3; // 下位 2bit = 階調、上位 = 色の組(0 = BG、4 = OBJ0、8 = OBJ1)
         if (sprOn) {
           for (let i = 0; i < n; i++) {
             const o = list[i] * 4, sx = oam[o + 1] - 8;
@@ -16000,7 +16135,7 @@
             const sc = (((vram[sa + 1] >> sb) & 1) << 1) | ((vram[sa] >> sb) & 1);
             if (!sc) continue;
             // 勝ったスプライトが BG の後ろなら BG が出る(下位のスプライトは出ない)
-            if (!((fl & 0x80) && c)) shade = (((fl & 0x10) ? this.obp1 : this.obp0) >> (sc * 2)) & 3;
+            if (!((fl & 0x80) && c)) shade = (fl & 0x10) ? 8 | ((this.obp1 >> (sc * 2)) & 3) : 4 | ((this.obp0 >> (sc * 2)) & 3);
             break;
           }
         }
@@ -16274,7 +16409,9 @@
       // opts.cart: 出来合いのカートリッジを挿す(GBS プレイヤーが使う)。opts.lcdAlwaysOn / opts.noRender も GBS 用
       this.cart = opts.cart || new Emu.GbCart(romBytes);
       this.model = opts.model === 'auto' ? (this.cart.header.cgb ? 'cgb' : 'dmg') : (opts.model || 'dmg');
-      this.cgb = this.model === 'cgb';
+      // カラー本体に白黒専用ソフトを挿した時: カラーの機能は閉じて白黒として動き、色だけ本体が付ける(BG/OBJ0/OBJ1 に別の色。ppu.setShades)
+      this.dmgOnCgb = this.model === 'cgb' && !this.cart.header.cgb;
+      this.cgb = this.model === 'cgb' && !this.dmgOnCgb;
       this.lcdAlwaysOn = !!opts.lcdAlwaysOn;
       this.ppu = new Emu.GbPpu(this);
       this.ppu.cgb = this.cgb;
@@ -16307,6 +16444,7 @@
       this.irIn = false; // 赤外線の受光(CGB 本体のポートと HuC1 のカートリッジ。画面側が setLight で入れる)
       this.serialOut = [];  // 送り終えたバイト
       this.serialSent = []; // 送り始めたバイト(完了を待たずに次を送るソフトの出力も拾える。mooneye のテスト ROM の合否)
+      if (this.dmgOnCgb) this.ppu.setShades(GbConsole.CGB_TINT.cgb);
       this.rec = null;
       // スーパーゲームボーイ: opts.sgb = ICD2(snes/icd2.js。パッドの線と LCD の行を横取りする)、opts.bootRom = ブート ROM 256 バイト(任意)
       this.sgb = opts.sgb || null;
@@ -16323,6 +16461,7 @@
       cpu.reset();
       cpu.a = 0x01; cpu.f = 0xB0; cpu.b = 0x00; cpu.c = 0x13; cpu.d = 0x00; cpu.e = 0xD8; cpu.h = 0x01; cpu.l = 0x4D;
       if (this.cgb) { cpu.a = 0x11; cpu.f = 0x80; cpu.b = 0x00; cpu.c = 0x00; cpu.d = 0xFF; cpu.e = 0x56; cpu.h = 0x00; cpu.l = 0x0D; }
+      if (this.dmgOnCgb) { cpu.a = 0x11; cpu.f = 0x80; cpu.b = 0x00; cpu.c = 0x00; cpu.d = 0x00; cpu.e = 0x08; cpu.h = 0x00; cpu.l = 0x7C; } // カラー本体が白黒ソフトを起動した時の値
       cpu.sp = 0xFFFE; cpu.pc = 0x0100;
       this.bootRom = this.bootImage;
       // CGB のレジスタ
@@ -16740,6 +16879,29 @@
 
   GbConsole.CLOCK = CLOCK;
   GbConsole.FRAME_T = FRAME_T;
+  // 色(ABGR)。rgb('RRGGBB') の並びで書く
+  const rgb = (h) => (0xFF000000 | (parseInt(h.slice(4, 6), 16) << 16) | (parseInt(h.slice(2, 4), 16) << 8) | parseInt(h.slice(0, 2), 16)) >>> 0;
+  const tint = (bg, o0, o1) => bg.concat(o0 || bg, o1 || o0 || bg).map(rgb);
+  // 白黒の画面の色(4 階調)
+  GbConsole.SHADES = {
+    gray: tint(['FFFFFF', 'AAAAAA', '555555', '000000']),
+    green: tint(['9BBC0F', '8BAC0F', '306230', '0F380F']),   // 初代の液晶風
+    pocket: tint(['C4CFA1', '8B956D', '4D533C', '1F1F1F']),  // ポケット風
+  };
+  // カラー本体が白黒ソフトに付ける色(BG、OBJ0、OBJ1)。実機はソフトごとの表と起動時のボタンで選ぶ。ここは既定と、ボタンで選べる物のうち 3 つ
+  // (色の値は記憶によるもので、実機の表との照合はしていない)
+  GbConsole.CGB_TINT = {
+    cgb: tint(['FFFFFF', '7BFF31', '0063C5', '000000'], ['FFFFFF', 'FF8484', '943A3A', '000000']),
+    brown: tint(['FFFFFF', 'FFAD63', '843100', '000000']),
+    blue: tint(['FFFFFF', '63A5FF', '0000FF', '000000'], ['FFFFFF', 'FF8484', '943A3A', '000000'], ['FFFFFF', '7BFF31', '008400', '000000']),
+    pastel: tint(['FFFFA5', 'FF9494', '9494FF', '000000']),
+  };
+  // 設定の名前 → 12 色。'auto' は 白黒本体 = 灰色、カラー本体で白黒ソフト = カラー本体の既定
+  GbConsole.shadesFor = function (name, dmgOnCgb) {
+    if (!name || name === 'auto') return dmgOnCgb ? GbConsole.CGB_TINT.cgb : GbConsole.SHADES.gray;
+    return GbConsole.SHADES[name] || GbConsole.CGB_TINT[name] || GbConsole.SHADES.gray;
+  };
+  GbConsole.BUZZ = { HZ: BUZZ_HZ, SEC: BUZZ_SEC, LEVEL: BUZZ_LEVEL }; // VGM の再生(vgmPlayer.js)も同じ値で鳴らす
   GbConsole.BUTTON = { A: 1, B: 2, SELECT: 4, START: 8, UP: 16, DOWN: 32, LEFT: 64, RIGHT: 128 };
   Emu.GbConsole = GbConsole;
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -16807,6 +16969,107 @@
 
   Emu.GbState = GbState;
   Emu.GbRewind = GbRewind;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * JAN/EAN バーコード(13 桁・8 桁)の共通部品 MML.Emu.Ean
+ *
+ * ゲームボーイのバーコードボーイ、ファミコンのデータック(マッパー 157)とバーコードバトラー II、カメラ読み取り(input/barcodeScan.js)が使う。
+ *   check(digits)        検査数字が合っているか(13 桁か 8 桁)
+ *   withCheck(digits)    12 桁/7 桁なら検査数字を足して返す
+ *   modules(digits)      バーの並び(1 = 黒、0 = 白)。13 桁は 95 個、8 桁は 67 個(左右の余白は含まない)
+ *   decodeRuns(runs, i)  黒白の幅の並び(runs[i] が開始ガードの最初の黒)から数字を読む(カメラ読み取り用)。読めなければ null
+ * DOM 非依存。
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  // 左側の奇数パリティ(L)の幅 4 本(白 黒 白 黒、合計 7)。偶数パリティ(G)は逆順、右側(R)は同じ幅で黒から始まる
+  const L_WIDTHS = ['3211', '2221', '2122', '1411', '1132', '1231', '1114', '1312', '1213', '3112'];
+  // 13 桁の先頭の数字 = 左 6 桁のパリティの並び(0 = L、1 = G)
+  const PARITY = ['000000', '001011', '001101', '001110', '010011', '011001', '011100', '010101', '010110', '011010'];
+
+  const clean = (d) => String(d == null ? '' : d).replace(/\D/g, '');
+  function checkDigit(body) { // body = 検査数字を除いた 12 桁か 7 桁
+    let sum = 0;
+    for (let i = 0; i < body.length; i++) { const w = ((body.length - i) & 1) ? 3 : 1; sum += (body.charCodeAt(i) - 48) * w; }
+    return (10 - (sum % 10)) % 10;
+  }
+  function check(digits) {
+    const s = clean(digits);
+    if (s.length !== 13 && s.length !== 8) return false;
+    return checkDigit(s.slice(0, -1)) === s.charCodeAt(s.length - 1) - 48;
+  }
+  function withCheck(digits) {
+    const s = clean(digits);
+    return s.length === 12 || s.length === 7 ? s + checkDigit(s) : s;
+  }
+  function pushWidths(out, widths, first) { let v = first; for (let i = 0; i < 4; i++) { for (let k = widths.charCodeAt(i) - 48; k > 0; k--) out.push(v); v ^= 1; } }
+  function modules(digits) {
+    const s = clean(digits), out = [];
+    if (s.length !== 13 && s.length !== 8) return null;
+    out.push(1, 0, 1);
+    if (s.length === 13) {
+      const par = PARITY[s.charCodeAt(0) - 48];
+      for (let i = 0; i < 6; i++) { const w = L_WIDTHS[s.charCodeAt(1 + i) - 48]; pushWidths(out, par[i] === '1' ? w.split('').reverse().join('') : w, 0); }
+      out.push(0, 1, 0, 1, 0);
+      for (let i = 0; i < 6; i++) pushWidths(out, L_WIDTHS[s.charCodeAt(7 + i) - 48], 1);
+    } else {
+      for (let i = 0; i < 4; i++) pushWidths(out, L_WIDTHS[s.charCodeAt(i) - 48], 0);
+      out.push(0, 1, 0, 1, 0);
+      for (let i = 0; i < 4; i++) pushWidths(out, L_WIDTHS[s.charCodeAt(4 + i) - 48], 1);
+    }
+    out.push(1, 0, 1);
+    return out;
+  }
+
+  // 幅 4 本(画素)を 7 モジュールに割り付けて '3211' の形にする
+  function normalize(runs, at) {
+    const total = runs[at] + runs[at + 1] + runs[at + 2] + runs[at + 3];
+    if (!(total > 0)) return null;
+    const unit = total / 7, e = [0, 0, 0, 0], r = [0, 0, 0, 0];
+    let sum = 0;
+    for (let i = 0; i < 4; i++) { e[i] = runs[at + i] / unit; r[i] = Math.max(1, Math.min(4, Math.round(e[i]))); sum += r[i]; }
+    for (let guard = 0; sum !== 7 && guard < 6; guard++) {
+      let best = -1, bestV = -Infinity;
+      for (let i = 0; i < 4; i++) { const v = sum > 7 ? r[i] - e[i] : e[i] - r[i]; if (v > bestV && (sum > 7 ? r[i] > 1 : r[i] < 4)) { bestV = v; best = i; } }
+      if (best < 0) return null;
+      if (sum > 7) { r[best]--; sum--; } else { r[best]++; sum++; }
+    }
+    return sum === 7 ? '' + r[0] + r[1] + r[2] + r[3] : null;
+  }
+  // 開始ガード(黒 白 黒)が runs[i] から始まるとして数字を読む。len = 13 か 8
+  function decodeAt(runs, i, len) {
+    const half = len === 13 ? 6 : 4, need = 3 + half * 4 + 5 + half * 4 + 3;
+    if (i + need > runs.length) return null;
+    const unit = (runs[i] + runs[i + 1] + runs[i + 2]) / 3;
+    for (let k = 0; k < 3; k++) if (runs[i + k] < unit * 0.4 || runs[i + k] > unit * 1.8) return null;
+    let p = i + 3, digits = '', par = '';
+    for (let d = 0; d < half; d++, p += 4) {
+      const w = normalize(runs, p);
+      if (!w) return null;
+      let v = L_WIDTHS.indexOf(w), g = false;
+      if (v < 0) { v = L_WIDTHS.indexOf(w.split('').reverse().join('')); g = true; }
+      if (v < 0 || (g && len === 8)) return null;
+      digits += v; par += g ? '1' : '0';
+    }
+    for (let k = 0; k < 5; k++) if (runs[p + k] > unit * 2.2) return null; // 中央ガード
+    p += 5;
+    for (let d = 0; d < half; d++, p += 4) {
+      const w = normalize(runs, p);
+      if (!w) return null;
+      const v = L_WIDTHS.indexOf(w);
+      if (v < 0) return null;
+      digits += v;
+    }
+    if (len === 13) { const first = PARITY.indexOf(par); if (first < 0) return null; digits = first + digits; }
+    return check(digits) ? digits : null;
+  }
+  function decodeRuns(runs, i) { return decodeAt(runs, i, 13) || decodeAt(runs, i, 8); }
+
+  Emu.Ean = { check, withCheck, modules, decodeRuns, clean };
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
@@ -18506,7 +18769,8 @@
  *   - レジスタ $2100-$213F(VRAM/CGRAM/OAM の読み書き、スクロール、BG の設定、表示の有効、明るさ)
  *   - 描画は行単位。BG モード 0(2bpp×4)、1(4bpp×2+2bpp)、3(8bpp+4bpp)。タイル 8×8/16×16、マップ 32/64、反転、優先
  *   - スプライト(1 行 32 個まで、大きさ 6 通り、優先 4 段)
- *   まだ無い物: 窓、色演算(サブ画面)、モザイク、モード 2/4/5/6/7、オフセットパータイル、高解像度、インターレース、
+ *   窓($2123-$212B)と色演算($2130-$2132、副画面/固定色)はある。
+ *   まだ無い物: モザイク、モード 2/4/5/6/7、オフセットパータイル、高解像度、インターレース、
  *   スプライトの 1 行あたりのタイル数制限。SNES 本体(SNES2VGM)をやる時に足す
  *
  * 画面は 256×224(frame、0xAABBGGRR)。本体(snesConsole.js)が表示行ごとに renderLine(y) を呼ぶ。
@@ -18528,8 +18792,11 @@
       this.cgram = new Uint16Array(256);
       this.oam = new Uint8Array(544);
       this.frame = new Uint32Array(W * H);
-      this.lineZ = new Uint8Array(W);
-      this.lineC = new Uint16Array(W);
+      // 面ごとの 1 行ぶん(0-3 = BG1-4、4 = OBJ): 色番号(0 = 透明)と深さ。窓 = その面を隠す画素(5 = 色演算の窓)
+      this.layC = []; this.layZ = []; this.win = [];
+      for (let i = 0; i < 5; i++) { this.layC.push(new Uint16Array(W)); this.layZ.push(new Uint8Array(W)); }
+      for (let i = 0; i < 6; i++) this.win.push(new Uint8Array(W));
+      this.lineZ = this.layZ[0]; this.lineC = this.layC[0];
       this.objC = new Uint8Array(W); this.objP = new Uint8Array(W);
       this.reset();
     }
@@ -18543,7 +18810,11 @@
       this.hofs = [0, 0, 0, 0]; this.vofs = [0, 0, 0, 0]; this.bgLatch = 0; this.hLatch = 0;
       this.vmain = 0; this.vaddr = 0; this.vbuf = 0;
       this.cgAddr = 0; this.cgFlip = false; this.cgLatch = 0;
-      this.tm = 0; this.ts = 0;
+      this.tm = 0; this.ts = 0; this.tmw = 0; this.tsw = 0;
+      this.wsel = [0, 0, 0, 0, 0, 0]; // 面ごとの窓の選び方(BG1-4、OBJ、色演算): bit0 W1 反転、bit1 W1 有効、bit2 W2 反転、bit3 W2 有効
+      this.wlog = [0, 0, 0, 0, 0, 0]; // 2 つの窓の重ね方(0 OR、1 AND、2 XOR、3 XNOR)
+      this.w1l = 0; this.w1r = 0; this.w2l = 0; this.w2r = 0;
+      this.cgwsel = 0; this.cgadsub = 0; this.fixR = 0; this.fixG = 0; this.fixB = 0;
       this.ophct = 0; this.opvct = 0; this.opLatched = false; this.opHFlip = false; this.opVFlip = false;
       this.openBus = 0;
       this.frame.fill(0xFF000000);
@@ -18593,8 +18864,19 @@
           else { this.cgram[this.cgAddr] = ((v & 0x7F) << 8) | this.cgLatch; this.cgAddr = (this.cgAddr + 1) & 0xFF; }
           this.cgFlip = !this.cgFlip;
           break;
+        case 0x23: this.wsel[0] = v & 15; this.wsel[1] = v >> 4; break;
+        case 0x24: this.wsel[2] = v & 15; this.wsel[3] = v >> 4; break;
+        case 0x25: this.wsel[4] = v & 15; this.wsel[5] = v >> 4; break;
+        case 0x26: this.w1l = v; break; case 0x27: this.w1r = v; break; case 0x28: this.w2l = v; break; case 0x29: this.w2r = v; break;
+        case 0x2A: for (let i = 0; i < 4; i++) this.wlog[i] = (v >> (i * 2)) & 3; break;
+        case 0x2B: this.wlog[4] = v & 3; this.wlog[5] = (v >> 2) & 3; break;
         case 0x2C: this.tm = v; break;
         case 0x2D: this.ts = v; break;
+        case 0x2E: this.tmw = v; break;
+        case 0x2F: this.tsw = v; break;
+        case 0x30: this.cgwsel = v; break;
+        case 0x31: this.cgadsub = v; break;
+        case 0x32: if (v & 0x20) this.fixR = v & 31; if (v & 0x40) this.fixG = v & 31; if (v & 0x80) this.fixB = v & 31; break;
       }
     }
 
@@ -18626,7 +18908,7 @@
     // ── 描画 ──
     // BG 1 枚をこの行ぶん。zLow/zHigh = タイルの優先ビット 0/1 の時の深さ(大きいほど手前)
     _bgLine(bg, y, bpp, zLow, zHigh, palBase) {
-      const vram = this.vram, lineZ = this.lineZ, lineC = this.lineC;
+      const vram = this.vram, lineZ = this.layZ[bg], lineC = this.layC[bg];
       const big = this.tileBig[bg], tsh = big ? 4 : 3;
       const size = this.bgMapSize[bg], wide = (size & 1) !== 0, tall = (size & 2) !== 0;
       const map = this.bgMap[bg], chr = this.bgChar[bg];
@@ -18703,32 +18985,91 @@
       }
     }
 
-    // 表示行 y(1〜224)を frame の y-1 行目に描く
+    // 面 l の窓(隠す画素)をこの行ぶん作る。窓を使っていなければ false
+    _winLine(l) {
+      const sel = this.wsel[l];
+      if (!(sel & 0x0A)) return false;
+      const out = this.win[l], e1 = (sel & 2) !== 0, i1 = (sel & 1) !== 0, e2 = (sel & 8) !== 0, i2 = (sel & 4) !== 0, log = this.wlog[l];
+      const l1 = this.w1l, r1 = this.w1r, l2 = this.w2l, r2 = this.w2r;
+      for (let x = 0; x < W; x++) {
+        const a = ((x >= l1 && x <= r1) ? 1 : 0) ^ (i1 ? 1 : 0), b = ((x >= l2 && x <= r2) ? 1 : 0) ^ (i2 ? 1 : 0);
+        out[x] = e1 && e2 ? (log === 0 ? a | b : log === 1 ? a & b : log === 2 ? a ^ b : (a ^ b) ^ 1) : e1 ? a : b;
+      }
+      return true;
+    }
+
+    // 表示行 y(1〜224)を frame の y-1 行目に描く。
+    // 面(BG1-4、OBJ)を別々に 1 行ぶん作り、主画面(TM)と副画面(TS)でそれぞれ一番手前の画素を選び、色演算(加算/減算、半分)を掛ける
     renderLine(y) {
       if (y < 1 || y > H) return;
       const out = this.frame, base = (y - 1) * W;
       if (this.forceBlank) { for (let x = 0; x < W; x++) out[base + x] = 0xFF000000; return; }
-      const lineZ = this.lineZ, lineC = this.lineC, tm = this.tm, mode = this.bgMode, bpp = BPP[mode];
-      lineZ.fill(0); lineC.fill(0);
+      const layC = this.layC, layZ = this.layZ, mode = this.bgMode, bpp = BPP[mode];
+      const tm = this.tm, ts = this.ts, cgw = this.cgwsel, cga = this.cgadsub;
+      const mathOn = (cga & 0x3F) !== 0 && ((cgw >> 4) & 3) !== 3, useSub = mathOn && (cgw & 2) !== 0;
+      const need = tm | (useSub ? ts : 0);
+      const has = [false, false, false, false, false];
+      for (let i = 0; i < 4; i++) { if (!((need >> i) & 1) || !bpp[i]) continue; layC[i].fill(0); layZ[i].fill(0); has[i] = true; }
       if (mode === 0) {
-        if ((tm & 1) && bpp[0]) this._bgLine(0, y, 2, 8, 11, 0);
-        if ((tm & 2) && bpp[1]) this._bgLine(1, y, 2, 7, 10, 32);
-        if ((tm & 4) && bpp[2]) this._bgLine(2, y, 2, 2, 5, 64);
-        if ((tm & 8) && bpp[3]) this._bgLine(3, y, 2, 1, 4, 96);
+        if (has[0]) this._bgLine(0, y, 2, 8, 11, 0);
+        if (has[1]) this._bgLine(1, y, 2, 7, 10, 32);
+        if (has[2]) this._bgLine(2, y, 2, 2, 5, 64);
+        if (has[3]) this._bgLine(3, y, 2, 1, 4, 96);
       } else {
-        if ((tm & 1) && bpp[0]) this._bgLine(0, y, bpp[0], 8, 11, 0);
-        if ((tm & 2) && bpp[1]) this._bgLine(1, y, bpp[1], 7, 10, 0);
-        if ((tm & 4) && bpp[2]) this._bgLine(2, y, bpp[2], 2, (mode === 1 && this.bg3Prio) ? 13 : 5, 0);
+        if (has[0]) this._bgLine(0, y, bpp[0], 8, 11, 0);
+        if (has[1]) this._bgLine(1, y, bpp[1], 7, 10, 0);
+        if (has[2]) this._bgLine(2, y, bpp[2], 2, (mode === 1 && this.bg3Prio) ? 13 : 5, 0);
       }
-      if (tm & 0x10) {
+      if (need & 0x10) {
         this._objLine(y);
-        const objC = this.objC, objP = this.objP;
-        for (let x = 0; x < W; x++) { const c = objC[x]; if (!c) continue; const z = 3 + objP[x] * 3; if (z > lineZ[x]) { lineZ[x] = z; lineC[x] = c; } } // 優先 0-3 → 深さ 3/6/9/12
+        const objC = this.objC, objP = this.objP, oc = layC[4], oz = layZ[4];
+        for (let x = 0; x < W; x++) { const c = objC[x]; oc[x] = c; oz[x] = c ? 3 + objP[x] * 3 : 0; } // 優先 0-3 → 深さ 3/6/9/12
+        has[4] = true;
       }
-      const cg = this.cgram, br = this.brightness;
+      // 窓
+      const wOn = [false, false, false, false, false, false], win = this.win;
+      if ((this.tmw | this.tsw) & 0x1F) for (let i = 0; i < 5; i++) if (has[i] && (((this.tmw | this.tsw) >> i) & 1)) wOn[i] = this._winLine(i);
+      const blackSel = (cgw >> 6) & 3, preventSel = (cgw >> 4) & 3;
+      if (blackSel === 1 || blackSel === 2 || preventSel === 1 || preventSel === 2) wOn[5] = this._winLine(5);
+      const cw = win[5], cwOn = wOn[5];
+      const cg = this.cgram, br = this.brightness, tmw = this.tmw, tsw = this.tsw;
+      const sub = (cga & 0x80) !== 0, half = (cga & 0x40) !== 0, fr = this.fixR, fg = this.fixG, fb = this.fixB;
       for (let x = 0; x < W; x++) {
-        const c = cg[lineC[x]];
-        let r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
+        // 主画面
+        let z = 0, c = 0, lay = 5;
+        for (let i = 0; i < 5; i++) {
+          if (!has[i] || !((tm >> i) & 1)) continue;
+          if (((tmw >> i) & 1) && wOn[i] && win[i][x]) continue;
+          const zz = layZ[i][x];
+          if (zz > z) { z = zz; c = layC[i][x]; lay = i; }
+        }
+        const col = cg[c];
+        let r = col & 31, g = (col >> 5) & 31, b = (col >> 10) & 31;
+        const inW = cwOn ? cw[x] : 0;
+        // 主画面を黒にする範囲(色演算の窓の内/外/常に)
+        if (blackSel === 3 || (blackSel === 1 && !inW) || (blackSel === 2 && inW)) { r = 0; g = 0; b = 0; }
+        if (mathOn) {
+          const prevented = (preventSel === 1 && !inW) || (preventSel === 2 && inW);
+          // OBJ はパレット 4-7 の画素だけ色演算に加わる
+          const en = lay === 4 ? ((cga & 0x10) !== 0 && (c & 0x40) !== 0) : ((cga >> lay) & 1) !== 0;
+          if (en && !prevented) {
+            let sr = fr, sg = fg, sb = fb, subOpaque = !useSub;
+            if (useSub) {
+              let z2 = 0, c2 = 0;
+              for (let i = 0; i < 5; i++) {
+                if (!has[i] || !((ts >> i) & 1)) continue;
+                if (((tsw >> i) & 1) && wOn[i] && win[i][x]) continue;
+                const zz = layZ[i][x];
+                if (zz > z2) { z2 = zz; c2 = layC[i][x]; }
+              }
+              if (z2) { const s2 = cg[c2]; sr = s2 & 31; sg = (s2 >> 5) & 31; sb = (s2 >> 10) & 31; subOpaque = true; } // 副画面が透明なら固定色(その時は半分にしない)
+            }
+            if (sub) { r -= sr; g -= sg; b -= sb; if (r < 0) r = 0; if (g < 0) g = 0; if (b < 0) b = 0; }
+            else { r += sr; g += sg; b += sb; }
+            if (half && subOpaque) { r >>= 1; g >>= 1; b >>= 1; }
+            if (r > 31) r = 31; if (g > 31) g = 31; if (b > 31) b = 31;
+          }
+        }
         r = ((r << 3) | (r >> 2)) * br / 15 | 0; g = ((g << 3) | (g >> 2)) * br / 15 | 0; b = ((b << 3) | (b >> 2)) * br / 15 | 0;
         out[base + x] = (0xFF000000 | (b << 16) | (g << 8) | r) >>> 0;
       }
@@ -18996,7 +19337,7 @@
         this.nmiFlag = true;
         if (this.nmiEnable) this.nmiPending = true;
         this.ppu.vblank();
-        if (this.autoJoy) { this.joy[0] = this.pad[0]; this.joy[1] = this.pad[1]; this.joy[2] = 0; this.joy[3] = 0; this.autoJoyBusyUntil = this.clock + 4224; }
+        if (this.autoJoy) { this.joy[0] = this.pad[0]; this.joy[1] = this.pad[1]; this.joy[2] = 0; this.joy[3] = 0; this.autoJoyBusyUntil = this.clock + 4224; this.joyShift[0] = 0xFFFF; this.joyShift[1] = 0xFFFF; } // 自動読みは 16 ビットを読み切る。この後 $4016/$4017 を読むと 1(パッドがつながっている印)
         this.syncApu();
         this.frameCount++; this._frameFlag = true;
         if (this.onFrame) this.onFrame();
@@ -19349,7 +19690,8 @@
     // LCD の行 y を描き終えた(idx = 画面全体の階調番号)
     lcdLine(y, idx) {
       this._follow(y);
-      this.rows.set(idx.subarray(y * 160, y * 160 + 160), this.writeBank * 1280 + (y & 7) * 160);
+      const rows = this.rows, to = this.writeBank * 1280 + (y & 7) * 160, from = y * 160;
+      for (let x = 0; x < 160; x++) rows[to + x] = idx[from + x] & 3; // 下位 2bit が階調(上位は色の組)
     }
     // 行カウンタを追いかける。見えている行の 8 行ごと(0 行目を含む)に書き込みバッファが次へ移る。VBlank の間は移らない
     // (VBlank でも移すと、BIOS が中身の無いバッファを最後の段として読んでしまう。実測: dmg-acid2 の最下段が化けた)
@@ -19417,7 +19759,7 @@
  *   - 録音: ゲームボーイの書き込み列(GbConsole の録音)に、SNES 側の音源の控え(.spc の形の像)と APU ポートへの書き込みを混ぜる。
  *     VGM では規格外ブロック GBXX の種類 1 に載る(vgmRecord.js encodeGbRecording)
  *   - パッド: NesConsole.BUTTON の並びを SNES のパッドへ写す(A→A、B→B、SELECT、START、十字)。2P も渡す(多人数対応ソフト用)
- * ステート(SgbState)は SNES 側を木ごと写し、ゲームボーイは GbState に任せる。巻き戻しは無い(1 枚が大きい)。
+ * ステート(SgbState)は SNES 側を木ごと写し、ゲームボーイは GbState に任せる。巻き戻し(SgbRewind)は 30 秒ぶん。
  */
 (function (global) {
   'use strict';
@@ -19450,8 +19792,9 @@
       this.spcL = new Float32Array(SPC_FIFO); this.spcR = new Float32Array(SPC_FIFO); this.spcHead = 0; this.spcLen = 0; this.spcFrac = 0; this.spcStep = 0;
       this.spcGain = 1; this.gbGain = 1;
       this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.pad = [0, 0]; // 今効いているパッド値(NesConsole.BUTTON の並び)。巻き戻し(SgbRewind)が記録し、進め直す時は直接書く
       this.onFrame = null;
-      this.recBase = 0; this.recPort = [0, 0, 0, 0];
+      this.recBase = 0; this.recPort = [0, 0, 0, 0]; this.menuFrames = 0;
       this.snes.apu.onSample = (l, r) => {
         if (!this.sampleRate) return;
         if (this.spcLen >= SPC_FIFO) { this.spcHead = (this.spcHead + 1) & (SPC_FIFO - 1); this.spcLen--; }
@@ -19462,6 +19805,7 @@
       this.snes.onApuPort = (port, v) => { const rec = this.gb.rec; if (rec && this.recPort[port & 3] === (v & 0xFF)) return; if (rec) this.recPort[port & 3] = v & 0xFF; if (rec) rec.cur.push({ sgbPort: port & 3, value: v & 0xFF, t: this.gb.frameT, c: (this.snes.apu.cycles - this.recBase) >>> 0 }); };
       this.icd.onClock = (clk) => this._clock(clk);
       this.snes.onFrame = () => {
+        if (this.menuFrames > 0 && --this.menuFrames === 0) this._applyPad();
         if (this.padTurbo[0] || this.padTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
         if (this.onFrame) this.onFrame();
       };
@@ -19511,7 +19855,7 @@
         }
       }
     }
-    runFrame() { this.snes.runFrame(); return this.sampleRate ? this.takeAudio(this.ringLen) : null; }
+    runFrame() { this._pushPad(); this.snes.runFrame(); return this.sampleRate ? this.takeAudio(this.ringLen) : null; }
     runSamples(out) {
       const n = out.length;
       if (!this.sampleRate) { out.fill(0); return; }
@@ -19553,12 +19897,18 @@
     setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(); }
     _applyPad() {
       const on = ((this.turboPhase / this.turboRate) | 0) === 0;
-      for (let p = 0; p < 2; p++) this.snes.setController(p, toSnesPad(this.padHeld[p] | (on ? this.padTurbo[p] : 0)));
+      for (let p = 0; p < 2; p++) this.pad[p] = this.padHeld[p] | (on ? this.padTurbo[p] : 0);
+      this._pushPad();
     }
-    get pad() { return this.padHeld; }
+    _pushPad() {
+      for (let p = 0; p < 2; p++) this.snes.setController(p, toSnesPad(this.pad[p]) | (p === 0 && this.menuFrames > 0 ? 0x0030 : 0));
+    }
+    // スーパーゲームボーイのメニュー(配色・枠の変更)を開く: SNES のパッドの L と R を同時に少しの間押す
+    pressMenu() { this.menuFrames = 8; this._applyPad(); }
 
     // ── 録音 ──
     get rec() { return this.gb.rec; }
+    set rec(v) { this.gb.rec = v; } // 巻き戻しが録音を止める(null を入れる)
     startRecording() {
       this.gb.startRecording();
       this.snes.syncApu();
@@ -19646,6 +19996,30 @@
     },
   };
 
+  // ── 巻き戻し ──
+  // NES の物(nes/nesRewind.js)をそのまま使う。状態が 1 個 400KB ほどあるので控えるのは 30 秒ぶん(0.5 秒ごと × 60 個 ≒ 24MB)。
+  // 逆再生の映像は SNES の画面(色は直接指定)を 8bit(R3 G3 B2)に丸めて輪に控える(戻っている間だけ色が粗い)。
+  // メニューボタン(L+R)は記録しないので、メニューを開いた所をまたいで戻ると、進め直しではメニューが開かない
+  class SgbRewind extends (Emu.NesRewind || class {}) {
+    constructor(sgb) {
+      super(sgb, { State: SgbState, frameBytes: 256 * 224, interval: 30, keep: 60 });
+      this.idxWidth = 256;
+      this.regenEvery = 3; // 1 フレームの計算が重いので、逆再生中の作り直しは process 3 回に 1 フレーム
+      const p = new Uint32Array(256);
+      for (let i = 0; i < 256; i++) { const r = (i >> 5) & 7, g = (i >> 2) & 7, b = i & 3; p[i] = (0xFF000000 | ((b * 85) << 16) | (((g * 255 / 7) | 0) << 8) | ((r * 255 / 7) | 0)) >>> 0; }
+      this._pal = p;
+    }
+    get palette() { return this._pal; }
+    _capture(f) {
+      const FB = this.frameBytes, RING = Emu.NesRewind.RING;
+      if (!this.ring) this.ring = new Uint8Array(RING * FB);
+      const slot = f % RING, src = this.nes.frame, ring = this.ring, base = slot * FB;
+      for (let i = 0; i < FB; i++) { const c = src[i]; ring[base + i] = ((c & 0xE0)) | ((c >> 11) & 0x1C) | ((c >> 22) & 3); } // ABGR → R3 G3 B2
+      this.ringFrame[slot] = f;
+    }
+  }
+
+  Emu.SgbRewind = SgbRewind;
   Emu.SgbConsole = SgbConsole;
   Emu.SgbState = SgbState;
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -19714,7 +20088,7 @@
                 info = MML.Emu.SgbConsole.describe(nes);
               } else {
                 nes = new MML.Emu.GbConsole(new Uint8Array(m.rom), { model: (m.gb && m.gb.model) || 'dmg' });
-                if (m.gb && m.gb.shades) nes.ppu.shades = Array.from(m.gb.shades);
+                if (m.gb && m.gb.shades) nes.ppu.setShades(m.gb.shades);
                 info = MML.Emu.GbConsole.describe(nes);
               }
             } else {
@@ -19727,7 +20101,7 @@
             this.nes = nes;
             this.machine = machine;
             this.State = machine === 'msx' ? MML.Emu.MsxState : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState;
-            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? (nes.isSgb ? null : MML.Emu.GbRewind) : MML.Emu.NesRewind; // SGB は巻き戻し無し(1 枚が大きい)
+            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbRewind : MML.Emu.GbRewind) : MML.Emu.NesRewind;
             this.rewind = Rewind ? new Rewind(nes) : null;
             this.dcX = 0; this.dcY = 0; this.dcX2 = 0; this.dcY2 = 0;
             this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, tilt: !!nes.hasTilt, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH(), clock: nes.clockHz || 0, sgb: nes.isSgb ? nes.revision : 0 });
@@ -19758,6 +20132,9 @@
           case 'sensor': // GB: 傾き(MBC7)と赤外線の受光
             if (!this.nes) break;
             if (m.tiltX !== undefined && typeof this.nes.setTilt === 'function') this.nes.setTilt(+m.tiltX || 0, +m.tiltY || 0);
+            if (m.shades && !this.nes.isSgb && this.nes.ppu && this.nes.ppu.setShades) this.nes.ppu.setShades(m.shades); // 白黒の色(設定を変えた時)
+            if (m.sgbMenu && typeof this.nes.pressMenu === 'function') this.nes.pressMenu();
+            if (m.spcMute !== undefined) { this.spcMute = m.spcMute & 0xFF; if (this.nes.isSgb && this.nes.snes.apu.dsp) this.nes.snes.apu.dsp.mutedVoices = this.spcMute; } // SNES 側の声ごとのミュート
             if (m.light !== undefined && typeof this.nes.setLight === 'function') this.nes.setLight(!!m.light);
             if (m.camera && typeof this.nes.setCameraImage === 'function') this.nes.setCameraImage(new Uint8Array(m.camera)); // ポケットカメラの元の絵(128×112 の明るさ)
             if (m.barcode !== undefined && typeof this.nes.scanBarcode === 'function') this.port.postMessage({ type: 'barcode', ok: this.nes.scanBarcode(String(m.barcode)) });
@@ -19841,6 +20218,11 @@
       const frame = nes.frame.slice(0, this.frameW() * this.frameH()); // MSX は幅がモードで変わる(frame は最大幅で確保。幅ぶんだけ送る)
       const msg = { type: 'frame', seq: this.frameSeq, frame: frame.buffer, underruns: nes.underruns, w: this.frameW(), h: this.frameH(), il: !!nes.interlaced, disk: nes.diskActivity ? nes.diskActivity() : null }; // disk: アクセスランプ(ドライブごとの { access, media })
       if (nes.rec) { msg.writes = nes.rec.frames.splice(0); }
+      if (nes.isSgb && (this.frameSeq & 3) === 0) { // スーパーゲームボーイ: SNES 側の音源(DSP)の今の状態を鍵盤表示用に(4 フレームに 1 回)
+        const dsp = nes.snes.apu.dsp;
+        if (dsp) { const env = new Uint16Array(8), mode = []; for (let i = 0; i < 8; i++) { env[i] = dsp.voices[i].env; mode.push(dsp.voices[i].envMode); } msg.spc = { regs: dsp.regs.slice(0, 128), env, mode }; }
+        if (this.spcMute !== undefined && dsp) dsp.mutedVoices = this.spcMute;
+      }
       const tr = [frame.buffer];
       if (this.machine === 'gb') { // GB の周辺: 振動モータ、赤外線を読もうとしているか、刷り上がった絵
         msg.gb = { rumble: !!nes.rumble, ir: !!nes.irWanted, camera: !!nes.cameraWanted, barcode: !!nes.barcodeWanted };
@@ -19862,7 +20244,7 @@
     // 逆再生の 1 回(process ごと): 再生成を 1 フレーム進め、速さに応じて戻し、画面は 60 枚/秒まで(それ以上送ると主スレッドが詰まる)
     reverseTick() {
       const rw = this.rw, rewind = this.rewind;
-      rewind.regenStep(1);
+      if (!rewind.regenEvery || (this.rgTick = ((this.rgTick | 0) + 1) % rewind.regenEvery) === 0) rewind.regenStep(1); // 重い機種(スーパーゲームボーイ)は間引く
       rw.acc += rw.speed * 128 / (sampleRate / (this.nes.frameRate || 60.0988));
       for (let n = 0; rw.acc >= 1 && n < 8; n++) {
         const r = rewind.reverseStep();

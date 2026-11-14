@@ -26,11 +26,13 @@
   const FRAME_BYTES = 256 * 240;
 
   class NesRewind {
-    // opt: { State, frameBytes }(GB の GbRewind が差し替える。既定は NES)
+    // opt: { State, frameBytes, interval, keep }(GB の GbRewind、スーパーゲームボーイの SgbRewind が差し替える。既定は NES)
     constructor(nes, opt) {
       this.nes = nes;
       this.State = (opt && opt.State) || Emu.NesState;
       this.frameBytes = (opt && opt.frameBytes) || FRAME_BYTES;
+      this.interval = (opt && opt.interval) || INTERVAL; // スナップショットの間隔と個数(状態が大きい機種は個数を減らす)
+      this.keep = (opt && opt.keep) || KEEP;
       this.snaps = [];          // [{ frame, state }] frame = そのフレームが終わった時点の frameCount
       this.pads = [];           // pads[frameCount] = pad0 | pad1 << 8(そのフレーム終わりの値。フレーム番号は frameCount)
       this.base = 0;            // pads の先頭が指す frameCount(古い分は捨てる)
@@ -114,9 +116,9 @@
       if (this.base > f) this.clear();
       this.pads[f - this.base] = (nes.pad[0] & 0xFF) | ((nes.pad[1] & 0xFF) << 8);
       this._capture(f);
-      if (f % INTERVAL === 0) {
+      if (f % this.interval === 0) {
         this.snaps.push({ frame: f, state: this.State.save(nes) });
-        if (this.snaps.length > KEEP) {
+        if (this.snaps.length > this.keep) {
           const drop = this.snaps.shift();
           // 捨てたスナップショットより前のパッド記録も要らない
           const keepFrom = this.snaps[0].frame;

@@ -690,9 +690,9 @@
     cpuRead(addr) {
       if (addr >= 0x6000 && addr < 0x8000) {
         if (this.sram) return this.prgRam[(addr - 0x6000) & 0x1FFF];
-        if (!this.eeprom) return 0x10; // EEPROM 無し: SDA=1
+        if (!this.eeprom) return 0x10 | (this.barcodeRead ? this.barcodeRead() : 0); // EEPROM 無し: SDA=1
         let sda = this.eeprom.read(); if (this.eeprom2) sda &= this.eeprom2.read();
-        return sda << 4; // バーコードリーダー(bit3)は無し
+        return (sda << 4) | (this.barcodeRead ? this.barcodeRead() : 0); // bit3 = データックのバーコードリーダー(本体が barcodeRead を挿す)
       }
       return super.cpuRead(addr);
     }

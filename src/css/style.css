@@ -4089,3 +4089,13 @@ html.ui-mobile #win-keyboard.m-extras.m-view-list .m-listzoom {
 }
 html.ui-mobile #win-keyboard .m-listzoom input { flex: 1 1 auto; min-width: 0; height: 28px; accent-color: var(--accent); }
 html.ui-mobile #win-keyboard .m-listzoom-value { width: 44px; text-align: right; }
+
+/* バーコードを入れる小窓(ui/barcodeDialog.js) */
+.barcode-dlg { position: fixed; inset: 0; z-index: 4000; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; }
+.barcode-dlg-box { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 12px; width: min(92vw, 420px); display: flex; flex-direction: column; gap: 8px; }
+.barcode-dlg-title { font-weight: 600; }
+.barcode-dlg-row { display: flex; gap: 6px; align-items: center; }
+.barcode-dlg-input { flex: 1; min-width: 0; background: var(--panel-raised); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 5px 7px; font-family: var(--mono, monospace); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25); }
+.barcode-dlg-video { width: 100%; max-height: 45vh; background: #000; border-radius: 4px; }
+.barcode-dlg-video[hidden] { display: none !important; }
+.barcode-dlg-note { font-size: 12px; color: var(--text-muted); min-height: 1.2em; }

@@ -41,6 +41,7 @@
  *      ギャップになっているもの。書き込みのあるフレームは詰めない。
  *   詰めたフレームにあった書き込み(効果音だけのフレーム等)は捨てずに次のフレームの頭へ移す。
  *
+ * ゲームボーイの録音(チップが GB だけ)は 1 フレーム = 70224T(約 738.35 サンプル、端数つき)の格子で扱う。
  * 出力は 1 フレーム=735 サンプル(ヘッダのレートが 50 なら 882)の格子に乗せ直す(録音スクリプトの VGM は元からこの格子)。
  * フレーム内の時刻(0x61 の端数)は各書き込みの相対位置として保つ。
  */
@@ -49,6 +50,16 @@
   const MML = global.MML = global.MML || {};
   const VGM = MML.VGM = MML.VGM || {};
 
+  // ゲームボーイの録音は 1 フレーム = 70224T ≒ 738.35 サンプル(スーパーゲームボーイは約 720.97)で整数にならない。SPF は端数つきで持ち、
+  // フレーム f の頭を round(f × SPF) サンプルに置く(fs)。整数の SPF ではこれまでと同じ格子になる
+  let W62 = 735; // 0x62 の待ちのサンプル数(50Hz の録音は SPF と同じ 882 として扱う。これまでどおり)
+  const fs = (f) => Math.round(f * SPF);
+  const frameOf = (t) => { let f = Math.floor(t / SPF); while (fs(f + 1) <= t) f++; while (f > 0 && fs(f) > t) f--; return f; };
+  VGM.captureFrameSamples = function (hdr) {
+    if (hdr && hdr.rate === 50) return 882;
+    if (hdr && hdr.usedChips && hdr.usedChips.length === 1 && hdr.usedChips[0].id === 'gb' && hdr.usedChips[0].clock > 0) return 70224 * 44100 / hdr.usedChips[0].clock;
+    return 735;
+  };
   let SPF = 735; // 1 フレームのサンプル数(44100/60)。50Hz の録音(MSX の PAL モード、ヘッダ 0x24=50)は 882(cleanCapture が入口で決める)
   const LAG_EVERY_FRAME_RATE = 0.98; // 曲の間のフレームのうち書き込みがある割合がこれ以上なら「毎フレーム書くドライバ」
   const LAG_MIN_FRAMES = 120;    // 判定に要る「書き込みのあるフレーム」の最小数
@@ -101,11 +112,11 @@
     const opLen = VGM.operandLength;
     while (p < end) {
       const op = bytes[p];
-      if (hdr.loopOffset && loopFrame < 0 && p >= hdr.loopOffset) loopFrame = Math.floor(t / SPF);
+      if (hdr.loopOffset && loopFrame < 0 && p >= hdr.loopOffset) loopFrame = frameOf(t);
       if (op === 0x66) break;
-      const f = Math.floor(t / SPF), sub = t - f * SPF;
+      const f = frameOf(t), sub = t - fs(f);
       if (op === 0x61) { t += bytes[p + 1] | (bytes[p + 2] << 8); p += 3; continue; }
-      if (op === 0x62) { t += SPF; p++; continue; }
+      if (op === 0x62) { t += W62; p++; continue; }
       if (op === 0x63) { t += 882; p++; continue; }
       if (op >= 0x70 && op <= 0x7F) { t += (op & 0xF) + 1; p++; continue; }
       if (op === 0x67) { // データブロック
@@ -453,7 +464,7 @@
     const waitBytes = (n) => {
       const o = [];
       while (n > 0) {
-        if (n === SPF) { o.push(0x62); n = 0; }
+        if (n === W62) { o.push(0x62); n = 0; }
         else if (n === 882) { o.push(0x63); n = 0; }
         else if (n <= 16) { o.push(0x70 + n - 1); n = 0; }
         else { const m = Math.min(n, 0xFFFF); o.push(0x61, m & 0xFF, m >> 8); n -= m; }
@@ -466,13 +477,15 @@
       if (f === loopFrame) loopPos = body.length;
       const fr = frames[f];
       const items = fr.pass.concat(fr.body).sort((a, b) => a.sub - b.sub || 0); // sort は安定(pass → body の順は保たれる)
+      const flen = fs(f + 1) - fs(f); // このフレームの長さ(端数つきの SPF では 1 サンプル前後する)
       let cur = 0;
       for (const it of items) {
-        if (it.sub > cur) { for (const b of waitBytes(it.sub - cur)) body.push(b); cur = it.sub; }
+        const sub = Math.min(it.sub, flen);
+        if (sub > cur) { for (const b of waitBytes(sub - cur)) body.push(b); cur = sub; }
         if (it.rewrite != null) body.push(it.rewrite); else body.push(bytes[it.off]);
         for (let i = 1; i < it.len; i++) body.push(bytes[it.off + i]);
       }
-      for (const b of waitBytes(SPF - cur)) body.push(b);
+      for (const b of waitBytes(flen - cur)) body.push(b);
     }
     body.push(0x66);
     const bodyArr = Uint8Array.from(body);
@@ -490,10 +503,10 @@
     const u32 = (off, v) => { out[off] = v & 0xFF; out[off + 1] = (v >> 8) & 0xFF; out[off + 2] = (v >> 16) & 0xFF; out[off + 3] = (v >>> 24) & 0xFF; };
     u32(0x04, total - 4);
     u32(0x14, gd3Pos ? gd3Pos - 0x14 : 0);
-    u32(0x18, frames.length * SPF);
+    u32(0x18, fs(frames.length));
     if (loopPos >= 0 && loopFrame < frames.length) {
       u32(0x1C, bodyStart + loopPos - 0x1C);
-      u32(0x20, (frames.length - loopFrame) * SPF);
+      u32(0x20, fs(frames.length) - fs(loopFrame));
     } else { u32(0x1C, 0); u32(0x20, 0); }
     return out;
   }
@@ -508,7 +521,7 @@
     const report = { lag: { on: !!opt.lag, applied: false, removedRegular: 0, removedAlign: 0 }, sfx: { on: !!opt.sfx, applied: false } }; // removedRegular: a の方式 / removedAlign: b の方式
     if (!opt.sfx && !opt.lag) return { bytes, report };
     const hdr = VGM.parseHeader(bytes);
-    SPF = hdr.rate === 50 ? 882 : 735; // MSX の 50Hz 録音(DESIGN-MSX-CAPTURE.md §5.2)
+    SPF = VGM.captureFrameSamples(hdr); W62 = SPF === 882 ? 882 : 735; // MSX の 50Hz 録音(DESIGN-MSX-CAPTURE.md §5.2)は 882、ゲームボーイは端数つき
     if (!hdr || !hdr.magicOk) { report.error = 'header'; return { bytes, report }; }
     const parsed = parse(bytes, hdr);
     if (parsed.error) { report.error = parsed.error; return { bytes, report }; }

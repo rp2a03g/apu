@@ -255,7 +255,7 @@
         this.nmiFlag = true;
         if (this.nmiEnable) this.nmiPending = true;
         this.ppu.vblank();
-        if (this.autoJoy) { this.joy[0] = this.pad[0]; this.joy[1] = this.pad[1]; this.joy[2] = 0; this.joy[3] = 0; this.autoJoyBusyUntil = this.clock + 4224; }
+        if (this.autoJoy) { this.joy[0] = this.pad[0]; this.joy[1] = this.pad[1]; this.joy[2] = 0; this.joy[3] = 0; this.autoJoyBusyUntil = this.clock + 4224; this.joyShift[0] = 0xFFFF; this.joyShift[1] = 0xFFFF; } // 自動読みは 16 ビットを読み切る。この後 $4016/$4017 を読むと 1(パッドがつながっている印)
         this.syncApu();
         this.frameCount++; this._frameFlag = true;
         if (this.onFrame) this.onFrame();

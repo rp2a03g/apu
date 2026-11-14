@@ -136,7 +136,8 @@
     // LCD の行 y を描き終えた(idx = 画面全体の階調番号)
     lcdLine(y, idx) {
       this._follow(y);
-      this.rows.set(idx.subarray(y * 160, y * 160 + 160), this.writeBank * 1280 + (y & 7) * 160);
+      const rows = this.rows, to = this.writeBank * 1280 + (y & 7) * 160, from = y * 160;
+      for (let x = 0; x < 160; x++) rows[to + x] = idx[from + x] & 3; // 下位 2bit が階調(上位は色の組)
     }
     // 行カウンタを追いかける。見えている行の 8 行ごと(0 行目を含む)に書き込みバッファが次へ移る。VBlank の間は移らない
     // (VBlank でも移すと、BIOS が中身の無いバッファを最後の段として読んでしまう。実測: dmg-acid2 の最下段が化けた)

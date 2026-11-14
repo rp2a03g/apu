@@ -1,5 +1,5 @@
 /*
- * ゲームボーイの追加の基板: HuC3 / MMM01 / MBC6 / ポケットカメラ
+ * ゲームボーイの追加の基板: HuC3 / MMM01 / MBC6 / ポケットカメラ / TAMA5
  * (gb/cart.js の GbCart.EXTRA に登録する。cart.js の後に読む)
  *
  * どれも市販ソフトで確かめられていない(手元に無い)。仕様の出どころと、分かっていない所は各節に書く。
@@ -332,4 +332,99 @@
     },
   };
   GbCart.CAM_W = CAM_W; GbCart.CAM_H = CAM_H;
+
+  // ───────────────────────── TAMA5(バンダイ。時計つき)─────────────────────────
+  // $A000 台は番地の bit0 だけを見る: 奇数 = レジスタ番号を選ぶ、偶数 = 選んだレジスタへ 4bit のデータ。
+  //   レジスタ 0/1 = ROM バンクの下位/上位 4bit(書くとすぐ切り替わる)、4/5 = 書くデータの下位/上位、6 = 番地の bit4(bit0)とモード(bit3-1)、
+  //   7 = 番地の下位 4bit(ここへ書いた時にモードの動作をする)、$A = 読むと $F1(生きている印)、$C/$D = 結果の下位/上位 4bit を読む($F0 を重ねて返る)。
+  //   モード 0 = RAM(32 バイト)へ書く、1 = RAM を読む、2 = 命令(番地 0/1 = 時計を止める/動かす、4/5 = 分/時を書く、6/7 = 分/時を読む、$10/$11 = アラーム)、
+  //   4 = 時計(TC8521 風。16 ニブル × 4 ページ)のレジスタ: 番地の下位 0/2/4/6 でページを選んで書く、1/3/5/7 で読む(番号はレジスタ 4、データはレジスタ 5)。
+  // 時計は「今の実時刻+ずれ」で持ち、読むたびに桁へ直す(24 時間制として扱う。12 時間制の桁の意味は再現していない)。
+  // 出どころ: mGBA の実装(MPL 2.0。読んで動作を確かめた。写してはいない)。★手元に該当ソフトが無く、実ソフトでは確かめていない
+  TYPES[0xFD] = { mbc: 'tama5', ram: 1, battery: 1 };
+  const T5_MASK = [0xF, 7, 0xF, 7, 0xF, 3, 7, 0xF, 3, 0xF, 1, 0xF, 0xF, 0, 0, 0, 0, 0, 0xF, 7, 0xF, 3, 7, 0xF, 3, 0, 1, 3, 0, 0, 0, 0];
+  EXTRA.tama5 = {
+    init(c) { c.t5 = { reg: 0, regs: new Uint8Array(8), ram: new Uint8Array(32), pages: new Uint8Array(64), disabled: false, offset: 0 }; EXTRA.tama5.reset(c); },
+    reset(c) { const t = c.t5; t.reg = 0; t.regs.fill(0); t.pages[16 + 13] = 1; t.pages[32 + 13] = 2; t.pages[48 + 13] = 3; c.romBank = 1; },
+    map(c) { c.lo = 0; c.hi = (c.romBank % c.romBanks) << 14; },
+    write() {},
+    // 今の時刻を時計ページ(ページ 0)の桁へ
+    latch(c) {
+      const t = c.t5, p = t.pages;
+      if (t.disabled) return;
+      const d = new Date(GbCart.now() + t.offset);
+      const put = (i, v) => { p[i] = v % 10; p[i + 1] = (v / 10) | 0; };
+      put(0, d.getSeconds()); put(2, d.getMinutes()); put(4, d.getHours()); p[6] = d.getDay();
+      put(7, d.getDate()); put(9, d.getMonth() + 1); put(11, d.getFullYear() % 100);
+    },
+    // 時計ページの桁から「ずれ」を作り直す(ソフトが時刻を書いた後)
+    sync(c) {
+      const t = c.t5, p = t.pages, two = (i) => p[i] + p[i + 1] * 10;
+      const d = new Date(2000 + two(11), Math.max(0, two(9) - 1), Math.max(1, two(7)), two(4), two(2), two(0));
+      if (isFinite(d.getTime())) t.offset = d.getTime() - GbCart.now();
+      c.dirty = true;
+    },
+    readRam(c, addr) {
+      if (addr & 1) return 0xFF;
+      const t = c.t5, r = t.regs;
+      if (t.reg !== 0xC && t.reg !== 0xD) return 0xF1;
+      const a5 = ((r[6] & 1) << 4) | r[7], mode = r[6] >> 1;
+      let v = 0xF0;
+      if (mode === 1) v = t.ram[a5];
+      else if (mode === 2) { EXTRA.tama5.latch(c); v = a5 === 6 ? (t.pages[3] << 4) | t.pages[2] : a5 === 7 ? (t.pages[5] << 4) | t.pages[4] : a5; }
+      else if (mode === 4) {
+        if (t.reg === 0xD) return 0xFF;
+        EXTRA.tama5.latch(c);
+        const idx = r[4];
+        if (idx > 13) v = 0; else if (r[7] & 1) v = t.pages[idx];
+      }
+      if (t.reg === 0xD) v >>= 4;
+      return 0xF0 | (v & 0x0F);
+    },
+    writeRam(c, addr, v) {
+      const t = c.t5, r = t.regs;
+      if (addr & 1) { t.reg = v; return; }
+      v &= 0x0F;
+      if (t.reg >= 8) return;
+      r[t.reg] = v;
+      if (t.reg === 0 || t.reg === 1) { c.romBank = r[0] | (r[1] << 4); c._map(); return; }
+      if (t.reg !== 7) return;
+      const a5 = ((r[6] & 1) << 4) | r[7], out = (r[5] << 4) | r[4], mode = r[6] >> 1, p = t.pages;
+      if (mode === 0) { t.ram[a5] = out; c.dirty = true; }
+      else if (mode === 2) {
+        switch (a5) {
+          case 0x00: EXTRA.tama5.latch(c); t.disabled = true; for (let k = 0; k < 4; k++) p[k * 16 + 13] &= 7; c.dirty = true; break;
+          case 0x01: t.disabled = false; p[0] = 0; p[1] = 0; for (let k = 0; k < 4; k++) p[k * 16 + 13] |= 8; EXTRA.tama5.sync(c); break;
+          case 0x04: EXTRA.tama5.latch(c); p[2] = out & 0xF; p[3] = out >> 4; EXTRA.tama5.sync(c); break;
+          case 0x05: EXTRA.tama5.latch(c); p[4] = out & 0xF; p[5] = out >> 4; EXTRA.tama5.sync(c); break;
+          case 0x10: for (let k = 0; k < 4; k++) p[k * 16 + 13] &= 0xB; break;
+          case 0x11: for (let k = 0; k < 4; k++) p[k * 16 + 13] |= 4; break;
+        }
+      } else if (mode === 4) {
+        const idx = r[4], data = r[5];
+        if (idx >= 13) return;
+        switch (r[7]) {
+          case 0: EXTRA.tama5.latch(c); p[idx] = data & T5_MASK[idx]; EXTRA.tama5.sync(c); break;
+          case 2: p[16 + idx] = data & T5_MASK[idx + 16]; c.dirty = true; break;
+          case 4: p[32 + idx] = data; c.dirty = true; break;
+          case 6: p[48 + idx] = data; c.dirty = true; break;
+        }
+      }
+    },
+    // セーブ: RAM 32 バイト+時計の 4 ページ 64 ニブル+止めているか+「ずれ」(実時刻との差。時計はセーブを読んだ後も実時間で進む)
+    getBattery(c) {
+      const t = c.t5, out = new Uint8Array(32 + 64 + 8 + 8);
+      out.set(t.ram); out.set(t.pages, 32); out[96] = t.disabled ? 1 : 0;
+      if (t.disabled) EXTRA.tama5.sync(c);
+      putF64(out, 104, t.offset);
+      return out;
+    },
+    setBattery(c, bytes) {
+      const t = c.t5;
+      if (bytes.length < 32) return false;
+      t.ram.set(bytes.subarray(0, 32));
+      if (bytes.length >= 112) { t.pages.set(bytes.subarray(32, 96)); t.disabled = bytes[96] === 1; const o = f64(bytes, 104); if (isFinite(o)) t.offset = o; }
+      return true;
+    },
+  };
 })(typeof window !== 'undefined' ? window : globalThis);

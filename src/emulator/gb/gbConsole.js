@@ -35,7 +35,9 @@
       // opts.cart: 出来合いのカートリッジを挿す(GBS プレイヤーが使う)。opts.lcdAlwaysOn / opts.noRender も GBS 用
       this.cart = opts.cart || new Emu.GbCart(romBytes);
       this.model = opts.model === 'auto' ? (this.cart.header.cgb ? 'cgb' : 'dmg') : (opts.model || 'dmg');
-      this.cgb = this.model === 'cgb';
+      // カラー本体に白黒専用ソフトを挿した時: カラーの機能は閉じて白黒として動き、色だけ本体が付ける(BG/OBJ0/OBJ1 に別の色。ppu.setShades)
+      this.dmgOnCgb = this.model === 'cgb' && !this.cart.header.cgb;
+      this.cgb = this.model === 'cgb' && !this.dmgOnCgb;
       this.lcdAlwaysOn = !!opts.lcdAlwaysOn;
       this.ppu = new Emu.GbPpu(this);
       this.ppu.cgb = this.cgb;
@@ -68,6 +70,7 @@
       this.irIn = false; // 赤外線の受光(CGB 本体のポートと HuC1 のカートリッジ。画面側が setLight で入れる)
       this.serialOut = [];  // 送り終えたバイト
       this.serialSent = []; // 送り始めたバイト(完了を待たずに次を送るソフトの出力も拾える。mooneye のテスト ROM の合否)
+      if (this.dmgOnCgb) this.ppu.setShades(GbConsole.CGB_TINT.cgb);
       this.rec = null;
       // スーパーゲームボーイ: opts.sgb = ICD2(snes/icd2.js。パッドの線と LCD の行を横取りする)、opts.bootRom = ブート ROM 256 バイト(任意)
       this.sgb = opts.sgb || null;
@@ -84,6 +87,7 @@
       cpu.reset();
       cpu.a = 0x01; cpu.f = 0xB0; cpu.b = 0x00; cpu.c = 0x13; cpu.d = 0x00; cpu.e = 0xD8; cpu.h = 0x01; cpu.l = 0x4D;
       if (this.cgb) { cpu.a = 0x11; cpu.f = 0x80; cpu.b = 0x00; cpu.c = 0x00; cpu.d = 0xFF; cpu.e = 0x56; cpu.h = 0x00; cpu.l = 0x0D; }
+      if (this.dmgOnCgb) { cpu.a = 0x11; cpu.f = 0x80; cpu.b = 0x00; cpu.c = 0x00; cpu.d = 0x00; cpu.e = 0x08; cpu.h = 0x00; cpu.l = 0x7C; } // カラー本体が白黒ソフトを起動した時の値
       cpu.sp = 0xFFFE; cpu.pc = 0x0100;
       this.bootRom = this.bootImage;
       // CGB のレジスタ
@@ -501,6 +505,29 @@
 
   GbConsole.CLOCK = CLOCK;
   GbConsole.FRAME_T = FRAME_T;
+  // 色(ABGR)。rgb('RRGGBB') の並びで書く
+  const rgb = (h) => (0xFF000000 | (parseInt(h.slice(4, 6), 16) << 16) | (parseInt(h.slice(2, 4), 16) << 8) | parseInt(h.slice(0, 2), 16)) >>> 0;
+  const tint = (bg, o0, o1) => bg.concat(o0 || bg, o1 || o0 || bg).map(rgb);
+  // 白黒の画面の色(4 階調)
+  GbConsole.SHADES = {
+    gray: tint(['FFFFFF', 'AAAAAA', '555555', '000000']),
+    green: tint(['9BBC0F', '8BAC0F', '306230', '0F380F']),   // 初代の液晶風
+    pocket: tint(['C4CFA1', '8B956D', '4D533C', '1F1F1F']),  // ポケット風
+  };
+  // カラー本体が白黒ソフトに付ける色(BG、OBJ0、OBJ1)。実機はソフトごとの表と起動時のボタンで選ぶ。ここは既定と、ボタンで選べる物のうち 3 つ
+  // (色の値は記憶によるもので、実機の表との照合はしていない)
+  GbConsole.CGB_TINT = {
+    cgb: tint(['FFFFFF', '7BFF31', '0063C5', '000000'], ['FFFFFF', 'FF8484', '943A3A', '000000']),
+    brown: tint(['FFFFFF', 'FFAD63', '843100', '000000']),
+    blue: tint(['FFFFFF', '63A5FF', '0000FF', '000000'], ['FFFFFF', 'FF8484', '943A3A', '000000'], ['FFFFFF', '7BFF31', '008400', '000000']),
+    pastel: tint(['FFFFA5', 'FF9494', '9494FF', '000000']),
+  };
+  // 設定の名前 → 12 色。'auto' は 白黒本体 = 灰色、カラー本体で白黒ソフト = カラー本体の既定
+  GbConsole.shadesFor = function (name, dmgOnCgb) {
+    if (!name || name === 'auto') return dmgOnCgb ? GbConsole.CGB_TINT.cgb : GbConsole.SHADES.gray;
+    return GbConsole.SHADES[name] || GbConsole.CGB_TINT[name] || GbConsole.SHADES.gray;
+  };
+  GbConsole.BUZZ = { HZ: BUZZ_HZ, SEC: BUZZ_SEC, LEVEL: BUZZ_LEVEL }; // VGM の再生(vgmPlayer.js)も同じ値で鳴らす
   GbConsole.BUTTON = { A: 1, B: 2, SELECT: 4, START: 8, UP: 16, DOWN: 32, LEFT: 64, RIGHT: 128 };
   Emu.GbConsole = GbConsole;
 })(typeof window !== 'undefined' ? window : globalThis);

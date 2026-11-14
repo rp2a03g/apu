@@ -39,6 +39,7 @@
       } else {
         this.rom = Emu.INES.parse(romBytes);
         this.mapper = Emu.NesMappers.create(this.rom);
+        if (this.rom.mapper === 157) this.mapper.barcodeRead = () => (this.barcode && this.barcode.kind === 'datach' ? this._barcodeBit() << 3 : 0);
       }
       this.ppu = new Emu.PPU(this.mapper);
       this.apu = new Emu.APU2A03(this);
@@ -92,6 +93,39 @@
     ejectDisk() { if (this.mapper.ejectDisk) this.mapper.ejectDisk(); }
     // NSF ヘッダと同じ拡張音源ビット(録音の NESX ヘッダ用)
     extBits() { return this.mapper.audio ? (this.mapper.extBits || 0) : 0; }
+    // ── バーコード ──
+    // データック(マッパー 157): カートリッジのリーダーにカードを通す。黒白の並び(余白つき)が 1 個 1000 CPU サイクルで $6000 bit3 に出る(白 = 1)。
+    // バーコードバトラー II(それ以外): 拡張端子から 1200 ボーの直列(開始 1、データ 8bit を下位から反転、停止 0)で
+    //   数字+"EPOCH\r\n"(20 文字に空白で詰める)が $4017 bit2 に出る。
+    // どちらも Mesen の実装を覚えている範囲で再現した物で、実ソフトでは確かめていない
+    get barcodeKind() { return this.rom && this.rom.mapper === 157 ? 'datach' : 'bb2'; }
+    scanBarcode(digits) {
+      const Ean = Emu.Ean;
+      const s = Ean ? Ean.withCheck(digits) : String(digits || '').replace(/\D/g, '');
+      if (s.length !== 13 && s.length !== 8) return false;
+      const bits = [];
+      if (this.barcodeKind === 'datach') {
+        const mod = Ean ? Ean.modules(s) : null;
+        if (!mod) return false;
+        for (let i = 0; i < 33; i++) bits.push(1);
+        for (const m of mod) bits.push(m ? 0 : 1);
+        for (let i = 0; i < 32; i++) bits.push(1);
+        this.barcode = { kind: 'datach', bits: Uint8Array.from(bits), start: this.cpuCycles, per: 1000 };
+      } else {
+        let text = s + 'EPOCH\r\n';
+        while (text.length < 20) text += ' ';
+        for (let i = 0; i < 20; i++) { bits.push(1); const c = text.charCodeAt(i); for (let j = 0; j < 8; j++) bits.push(((c >> j) & 1) ^ 1); bits.push(0); }
+        this.barcode = { kind: 'bb2', bits: Uint8Array.from(bits), start: this.cpuCycles, per: 1789773 / 1200 };
+      }
+      return true;
+    }
+    _barcodeBit() {
+      const b = this.barcode;
+      if (!b) return 0;
+      const pos = Math.floor((this.cpuCycles - b.start) / b.per);
+      if (pos >= b.bits.length) { this.barcode = null; return 0; }
+      return b.bits[pos];
+    }
     // ── バッテリ バックアップ(セーブ)──
     // iNES でバッテリ ビットが立っていれば PRG RAM 全体、.fds ならディスク全面(ギャップつき)が保存の対象。
     // 書き込みがあると batteryDirty が立つ(主スレッド/ヘッドレスがそれを見て保存し、clearBatteryDirty() で下ろす)
@@ -135,6 +169,7 @@
         if (this.padStrobe) v = this.pad[p] & 1;
         else { v = this.padShift[p] & 1; this.padShift[p] = (this.padShift[p] >> 1) | 0x80; }
         v |= this.openBus & 0xE0;
+        if (p && this.barcode && this.barcode.kind === 'bb2') v |= this._barcodeBit() << 2; // バーコードバトラー II(拡張端子、$4017 bit2)
       } else if (addr < 0x4020) v = this.openBus;
       else {
         v = this.mapper.cpuRead(addr);

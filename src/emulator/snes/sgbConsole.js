@@ -11,7 +11,7 @@
  *   - 録音: ゲームボーイの書き込み列(GbConsole の録音)に、SNES 側の音源の控え(.spc の形の像)と APU ポートへの書き込みを混ぜる。
  *     VGM では規格外ブロック GBXX の種類 1 に載る(vgmRecord.js encodeGbRecording)
  *   - パッド: NesConsole.BUTTON の並びを SNES のパッドへ写す(A→A、B→B、SELECT、START、十字)。2P も渡す(多人数対応ソフト用)
- * ステート(SgbState)は SNES 側を木ごと写し、ゲームボーイは GbState に任せる。巻き戻しは無い(1 枚が大きい)。
+ * ステート(SgbState)は SNES 側を木ごと写し、ゲームボーイは GbState に任せる。巻き戻し(SgbRewind)は 30 秒ぶん。
  */
 (function (global) {
   'use strict';
@@ -44,8 +44,9 @@
       this.spcL = new Float32Array(SPC_FIFO); this.spcR = new Float32Array(SPC_FIFO); this.spcHead = 0; this.spcLen = 0; this.spcFrac = 0; this.spcStep = 0;
       this.spcGain = 1; this.gbGain = 1;
       this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.pad = [0, 0]; // 今効いているパッド値(NesConsole.BUTTON の並び)。巻き戻し(SgbRewind)が記録し、進め直す時は直接書く
       this.onFrame = null;
-      this.recBase = 0; this.recPort = [0, 0, 0, 0];
+      this.recBase = 0; this.recPort = [0, 0, 0, 0]; this.menuFrames = 0;
       this.snes.apu.onSample = (l, r) => {
         if (!this.sampleRate) return;
         if (this.spcLen >= SPC_FIFO) { this.spcHead = (this.spcHead + 1) & (SPC_FIFO - 1); this.spcLen--; }
@@ -56,6 +57,7 @@
       this.snes.onApuPort = (port, v) => { const rec = this.gb.rec; if (rec && this.recPort[port & 3] === (v & 0xFF)) return; if (rec) this.recPort[port & 3] = v & 0xFF; if (rec) rec.cur.push({ sgbPort: port & 3, value: v & 0xFF, t: this.gb.frameT, c: (this.snes.apu.cycles - this.recBase) >>> 0 }); };
       this.icd.onClock = (clk) => this._clock(clk);
       this.snes.onFrame = () => {
+        if (this.menuFrames > 0 && --this.menuFrames === 0) this._applyPad();
         if (this.padTurbo[0] || this.padTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
         if (this.onFrame) this.onFrame();
       };
@@ -105,7 +107,7 @@
         }
       }
     }
-    runFrame() { this.snes.runFrame(); return this.sampleRate ? this.takeAudio(this.ringLen) : null; }
+    runFrame() { this._pushPad(); this.snes.runFrame(); return this.sampleRate ? this.takeAudio(this.ringLen) : null; }
     runSamples(out) {
       const n = out.length;
       if (!this.sampleRate) { out.fill(0); return; }
@@ -147,12 +149,18 @@
     setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(); }
     _applyPad() {
       const on = ((this.turboPhase / this.turboRate) | 0) === 0;
-      for (let p = 0; p < 2; p++) this.snes.setController(p, toSnesPad(this.padHeld[p] | (on ? this.padTurbo[p] : 0)));
+      for (let p = 0; p < 2; p++) this.pad[p] = this.padHeld[p] | (on ? this.padTurbo[p] : 0);
+      this._pushPad();
     }
-    get pad() { return this.padHeld; }
+    _pushPad() {
+      for (let p = 0; p < 2; p++) this.snes.setController(p, toSnesPad(this.pad[p]) | (p === 0 && this.menuFrames > 0 ? 0x0030 : 0));
+    }
+    // スーパーゲームボーイのメニュー(配色・枠の変更)を開く: SNES のパッドの L と R を同時に少しの間押す
+    pressMenu() { this.menuFrames = 8; this._applyPad(); }
 
     // ── 録音 ──
     get rec() { return this.gb.rec; }
+    set rec(v) { this.gb.rec = v; } // 巻き戻しが録音を止める(null を入れる)
     startRecording() {
       this.gb.startRecording();
       this.snes.syncApu();
@@ -240,6 +248,30 @@
     },
   };
 
+  // ── 巻き戻し ──
+  // NES の物(nes/nesRewind.js)をそのまま使う。状態が 1 個 400KB ほどあるので控えるのは 30 秒ぶん(0.5 秒ごと × 60 個 ≒ 24MB)。
+  // 逆再生の映像は SNES の画面(色は直接指定)を 8bit(R3 G3 B2)に丸めて輪に控える(戻っている間だけ色が粗い)。
+  // メニューボタン(L+R)は記録しないので、メニューを開いた所をまたいで戻ると、進め直しではメニューが開かない
+  class SgbRewind extends (Emu.NesRewind || class {}) {
+    constructor(sgb) {
+      super(sgb, { State: SgbState, frameBytes: 256 * 224, interval: 30, keep: 60 });
+      this.idxWidth = 256;
+      this.regenEvery = 3; // 1 フレームの計算が重いので、逆再生中の作り直しは process 3 回に 1 フレーム
+      const p = new Uint32Array(256);
+      for (let i = 0; i < 256; i++) { const r = (i >> 5) & 7, g = (i >> 2) & 7, b = i & 3; p[i] = (0xFF000000 | ((b * 85) << 16) | (((g * 255 / 7) | 0) << 8) | ((r * 255 / 7) | 0)) >>> 0; }
+      this._pal = p;
+    }
+    get palette() { return this._pal; }
+    _capture(f) {
+      const FB = this.frameBytes, RING = Emu.NesRewind.RING;
+      if (!this.ring) this.ring = new Uint8Array(RING * FB);
+      const slot = f % RING, src = this.nes.frame, ring = this.ring, base = slot * FB;
+      for (let i = 0; i < FB; i++) { const c = src[i]; ring[base + i] = ((c & 0xE0)) | ((c >> 11) & 0x1C) | ((c >> 22) & 3); } // ABGR → R3 G3 B2
+      this.ringFrame[slot] = f;
+    }
+  }
+
+  Emu.SgbRewind = SgbRewind;
   Emu.SgbConsole = SgbConsole;
   Emu.SgbState = SgbState;
 })(typeof window !== 'undefined' ? window : globalThis);
