@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 20:23:48
+ * Built by tools/build-capture-workers.ps1 at 2026-11-13 20:33:55
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-13 20:23:48';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-13 20:33:55';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -974,6 +974,7 @@
     }
   }
 
+  const STATE_SKIP = new Set(['mute', 'vol', 'divBit', '_out', 'apu']);
   class APUGb {
     // model: 'dmg'(既定)/ 'cgb'。波形 RAM の再生中アクセス、OFF 中の長さ書き込み、フィルタの定数が変わる
     constructor(model) {
@@ -986,6 +987,15 @@
       this._out = { left: 0, right: 0 };
       this.setSampleRate(44100);
       this.reset();
+    }
+    // VGM 再生のシーク用の控え(vgmPlayer.js のチェックポイント)。ミュート/音量と関数は写さない
+    getState() {
+      const cp = (v) => { if (v === null || typeof v !== 'object') return v; if (ArrayBuffer.isView(v)) return v.slice(); if (Array.isArray(v)) return v.map(cp); const o = {}; for (const k of Object.keys(v)) { if (typeof v[k] === 'function' || STATE_SKIP.has(k)) continue; o[k] = cp(v[k]); } return o; };
+      return cp(this);
+    }
+    setState(st) {
+      const put = (o, v) => { for (const k of Object.keys(v)) { const x = v[k], cur = o[k]; if (x === null || typeof x !== 'object') o[k] = x; else if (ArrayBuffer.isView(x)) { if (cur && ArrayBuffer.isView(cur) && cur.length === x.length) cur.set(x); else o[k] = x.slice(); } else if (Array.isArray(x)) o[k] = x.map((e) => (ArrayBuffer.isView(e) ? e.slice() : e)); else if (cur && typeof cur === 'object') put(cur, x); else o[k] = x; } };
+      put(this, st);
     }
 
     reset() {

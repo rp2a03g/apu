@@ -136,6 +136,10 @@ $bundles = @(
             'src\emulator\expansion\msm5205.js',
             'src\emulator\expansion\pwm32x.js',
             'src\emulator\expansion\rf5c164.js',
+            # スーパーゲームボーイの SNES 側音源(規格外 GBXX): vgmPlayer.js の makeSgbSpcAdapter が使う
+            'src\emulator\spc700.js',
+            'src\emulator\spcDsp.js',
+            'src\emulator\snes\snesConsole.js',
             'src\emulator\vgmPlayer.js',
             'src\hes\hesHeader.js',
             'src\ui\keyboard.js',

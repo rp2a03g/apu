@@ -39,6 +39,7 @@
       this.dspAddr = 0; this.romEnable = true;
       this.timers = [0, 0, 0]; this.timerDiv = [0, 0, 0]; this.timerCnt = [0, 0, 0]; this.timerEn = [false, false, false]; this.timerClk = [0, 0, 0];
       this.dspClk = 0;
+      this.cycles = 0; // 走らせた SPC700 のサイクルの通算(録音がポート書き込みの刻印に使う)
       if (this.dsp) { this.dsp.reset(); this.dsp.regs[0x6C] = 0xE0; } // 電源投入時の FLG は $E0(リセット+ミュート+エコー書き込み禁止)。0 だとエコーが RAM $0000 台を壊し、IPL の転送先が化ける
       this.cpu.halted = false;
       this.cpu.reset(); // IPL ROM の先頭($FFC0)から
@@ -73,6 +74,34 @@
       }
       this.ram[addr] = v;
     }
+    // .spc ファイルの形の像(toSpc の逆)から始める。VGM の再生(GBXX 種類 1)が使う。DSP の内部(エンベロープの途中など)は像に無いので、鳴っていた音は次のキーオンから
+    loadSpc(img) {
+      if (!img || img.length < 0x10180) return false;
+      this.reset();
+      const c = this.cpu;
+      this.ram.set(img.subarray(0x100, 0x10100));
+      c.PC = img[0x25] | (img[0x26] << 8); c.A = img[0x27]; c.X = img[0x28]; c.Y = img[0x29]; c.PSW = img[0x2A]; c.SP = img[0x2B];
+      const ctl = img[0x1F1];
+      this.romEnable = (ctl & 0x80) !== 0;
+      for (let t = 0; t < 3; t++) { this.timerEn[t] = (ctl & (1 << t)) !== 0; this.timerDiv[t] = img[0x1FA + t]; this.timerCnt[t] = img[0x1FD + t] & 0x0F; }
+      this.dspAddr = img[0x1F2];
+      for (let i = 0; i < 4; i++) this.in[i] = img[0x1F4 + i];
+      if (this.dsp) for (let i = 0; i < 128; i++) { if (i === 0x4C || i === 0x5C) continue; this.dsp.writeReg(i, img[0x10100 + i]); } // KON/KOFF は書かない(鳴り直さない)
+      if (this.dsp) this.dsp.regs[0x6C] = img[0x10100 + 0x6C];
+      return true;
+    }
+    // シークの控え用(VGM 再生のチェックポイント)。関数と RAM への別名は写さない
+    getState() {
+      const cp = (v) => { if (v === null || typeof v !== 'object') return v; if (ArrayBuffer.isView(v)) return v.slice(); if (Array.isArray(v)) return v.map(cp); const o = {}; for (const k of Object.keys(v)) { if (typeof v[k] === 'function' || k === 'bus' || k === 'ram' || k === 'origRam') continue; o[k] = cp(v[k]); } return o; };
+      return { ram: this.ram.slice(), in: this.in.slice(), out: this.out.slice(), dspAddr: this.dspAddr, romEnable: this.romEnable, timers: this.timers.slice(), timerDiv: this.timerDiv.slice(), timerCnt: this.timerCnt.slice(), timerEn: this.timerEn.slice(), timerClk: this.timerClk.slice(), dspClk: this.dspClk, cycles: this.cycles,
+        cpu: cp(this.cpu), dsp: this.dsp ? cp(this.dsp) : null };
+    }
+    setState(s) {
+      const put = (o, v) => { for (const k of Object.keys(v)) { const x = v[k], cur = o[k]; if (x === null || typeof x !== 'object') o[k] = x; else if (ArrayBuffer.isView(x)) { if (cur && ArrayBuffer.isView(cur) && cur.length === x.length) cur.set(x); else o[k] = x.slice(); } else if (Array.isArray(x)) { if (Array.isArray(cur) && cur.length === x.length && x.length && x[0] && typeof x[0] === 'object' && !ArrayBuffer.isView(x[0])) for (let i = 0; i < x.length; i++) put(cur[i], x[i]); else o[k] = x.map((e) => (ArrayBuffer.isView(e) ? e.slice() : e)); } else if (cur && typeof cur === 'object') put(cur, x); else o[k] = x; } };
+      this.ram.set(s.ram); this.in.set(s.in); this.out.set(s.out); this.dspAddr = s.dspAddr; this.romEnable = s.romEnable;
+      this.timers = s.timers.slice(); this.timerDiv = s.timerDiv.slice(); this.timerCnt = s.timerCnt.slice(); this.timerEn = s.timerEn.slice(); this.timerClk = s.timerClk.slice(); this.dspClk = s.dspClk; this.cycles = s.cycles || 0;
+      put(this.cpu, s.cpu); if (this.dsp && s.dsp) put(this.dsp, s.dsp);
+    }
     // 今の状態を .spc ファイルの形(0x10200 バイト)にする。録音の頭に入れる(SPC の再生系がそのまま読める形)
     toSpc() {
       const out = new Uint8Array(0x10200), c = this.cpu;
@@ -106,6 +135,7 @@
             if (++this.timers[t] >= (this.timerDiv[t] || 256)) { this.timers[t] = 0; this.timerCnt[t] = (this.timerCnt[t] + 1) & 0x0F; }
           }
         }
+        this.cycles += c;
         this.dspClk += c;
         while (this.dspClk >= 32) { this.dspClk -= 32; if (this.dsp) { this.dsp.clock(); if (this.onSample) this.onSample(this.dsp.outL, this.dsp.outR); } }
       }

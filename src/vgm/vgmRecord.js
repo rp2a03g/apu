@@ -330,7 +330,7 @@
           flushWait(toSample(baseT + Math.max(0, Math.min(len - 1, w.t | 0))));
           const head = [].concat(VGM.GBXX.MAGIC, [VGM.GBXX.VERSION, VGM.GBXX.KIND_SGB]);
           if (w.sgbSpc) { body.push(0x67, 0x66, VGM.GBXX.TYPE, ...u32(head.length + 1 + w.sgbSpc.length), ...head, VGM.GBXX.SGB_STATE); for (let k = 0; k < w.sgbSpc.length; k++) body.push(w.sgbSpc[k]); }
-          else { body.push(0x67, 0x66, VGM.GBXX.TYPE, ...u32(head.length + 3), ...head, VGM.GBXX.SGB_PORT, w.sgbPort & 3, w.value & 0xFF); sgbPorts++; }
+          else { body.push(0x67, 0x66, VGM.GBXX.TYPE, ...u32(head.length + 7), ...head, VGM.GBXX.SGB_PORT, w.sgbPort & 3, w.value & 0xFF, ...u32((w.c || 0) >>> 0)); sgbPorts++; }
           continue;
         }
         if (w.addr === undefined) continue;

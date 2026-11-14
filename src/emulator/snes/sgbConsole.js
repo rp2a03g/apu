@@ -45,13 +45,15 @@
       this.spcGain = 1; this.gbGain = 1;
       this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
       this.onFrame = null;
+      this.recBase = 0; this.recPort = [0, 0, 0, 0];
       this.snes.apu.onSample = (l, r) => {
         if (!this.sampleRate) return;
         if (this.spcLen >= SPC_FIFO) { this.spcHead = (this.spcHead + 1) & (SPC_FIFO - 1); this.spcLen--; }
         const i = (this.spcHead + this.spcLen) & (SPC_FIFO - 1);
         this.spcL[i] = l; this.spcR[i] = r; this.spcLen++;
       };
-      this.snes.onApuPort = (port, v) => { const rec = this.gb.rec; if (rec) rec.cur.push({ sgbPort: port & 3, value: v & 0xFF, t: this.gb.frameT }); };
+      // 録音: APU ポートへの書き込み。c = 録音の頭からの SPC700 のサイクル数(再生はこの刻印どおりに書く)
+      this.snes.onApuPort = (port, v) => { const rec = this.gb.rec; if (rec && this.recPort[port & 3] === (v & 0xFF)) return; if (rec) this.recPort[port & 3] = v & 0xFF; if (rec) rec.cur.push({ sgbPort: port & 3, value: v & 0xFF, t: this.gb.frameT, c: (this.snes.apu.cycles - this.recBase) >>> 0 }); };
       this.icd.onClock = (clk) => this._clock(clk);
       this.snes.onFrame = () => {
         if (this.padTurbo[0] || this.padTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
@@ -154,7 +156,9 @@
     startRecording() {
       this.gb.startRecording();
       this.snes.syncApu();
-      this.gb.rec.cur.push({ sgbSpc: this.snes.apu.toSpc(), t: 0 }); // SNES 側の音源の今の像(.spc の形)
+      this.recBase = this.snes.apu.cycles;
+      this.recPort = Array.from(this.snes.apu.in); // 同じ値の書き直しは録音に入れない(SPC700 から見て変化が無い。BIOS は毎フレーム書く)
+      this.gb.rec.cur.unshift({ sgbSpc: this.snes.apu.toSpc(), t: 0 }); // SNES 側の音源の今の像(.spc の形)。VGM の先頭に来るよう、GB のレジスタ像より前へ
     }
     stopRecording() { return this.gb.stopRecording(); }
 

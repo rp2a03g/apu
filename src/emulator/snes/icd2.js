@@ -49,7 +49,7 @@
       this.bitData = 0; this.bitOffset = 0; this.packetOffset = 0; this.joypPacket = new Uint8Array(16);
       this.v = 0; this.writeBank = 0; this.readBank = 0; this.readAddr = 0;
       this.rows.fill(0); this.packet.fill(0);
-      this.acc = 0;
+      this.acc = 0; this.idleAcc = 0;
       this._applyClock();
     }
     // ゲームボーイの時計(Hz)= 元の時計 ÷ 分周。音の標本化が使う
@@ -92,7 +92,17 @@
     // SNES のマスタークロックが clk 進んだ
     tick(clk) {
       if (this.onClock) this.onClock(clk);
-      if (!this.running) return;
+      if (!this.running) {
+        // 止められている間も、録音中なら録音の時間(ゲームボーイのフレーム内時刻)だけは進める。
+        // 進めないと、その間の SNES 側の音(APU ポートへの書き込み)が全部同じ時刻に潰れる
+        const gb = this.gb;
+        if (gb.rec) {
+          this.idleAcc += clk * this.clkScale;
+          const t = Math.floor(this.idleAcc / this.div);
+          if (t > 0) { this.idleAcc -= t * this.div; gb.frameT += t; if (gb.frameT >= 70224) gb._frameEnd(); }
+        }
+        return;
+      }
       this.acc += clk * this.clkScale;
       const gb = this.gb, div = this.div, need = div * 4;
       while (this.acc >= need) {

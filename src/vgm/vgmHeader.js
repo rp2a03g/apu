@@ -59,7 +59,9 @@
   // ゲームボーイの規格外ブロック(DESIGN-GB-CAPTURE.md §4)。0x67 0x66 TYPE 長さ 'GBXX' 版 種類 中身…
   //   種類 2 = カートリッジ内ブザー(HuC3): 中身 1 バイト = 音の番号(0-3)。ブロックの置かれた時刻に鳴り始める
   //   種類 1 = SGB の SNES 側音源: 続く 1 バイトが下位種別。0 = 音源の像(.spc ファイルの形 0x10200 バイト。録音の頭に 1 個)、
-  //            1 = APU ポート $2140-$2143 への書き込み(ポート番号 0-3、値)。ブロックの置かれた時刻に書く
+  //            1 = APU ポート $2140-$2143 への書き込み(ポート番号 0-3、値、刻印 4 バイト = 像の時点からの SPC700 のサイクル数)。
+  //                ブロックの位置はおおよその時刻で、書く瞬間は刻印で決める(BIOS がドライバを送る握手は数十サイクル間隔なので、
+  //                1/44100 秒に丸めると前後して化ける)
   VGM.GBXX = { TYPE: 0xBD, MAGIC: [0x47, 0x42, 0x58, 0x58], VERSION: 1, KIND_SGB: 1, KIND_BUZZER: 2, SGB_STATE: 0, SGB_PORT: 1 };
   VGM.MSXX = { TYPE: 0xBE, MAGIC: [0x4D, 0x53, 0x58, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_DAC: 1, KIND_PCM_CTRL: 2, META_PCM: 0x80,
     MACHINES: { msx1: 1, msx2: 2, msx2plus: 3, turbor: 4 }, DAC_TURBOR_PCM: 1, DAC_KONAMI: 2, DAC_KONAMI_SYNTH: 4 };
@@ -81,6 +83,22 @@
       p += 7 + size;
     }
     return null;
+  };
+  VGM.isGbxxBlock = function (type, block) {
+    const m = VGM.GBXX.MAGIC;
+    return type === VGM.GBXX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
+  };
+  // ストリーム先頭のデータブロックにスーパーゲームボーイの SNES 側音源の像(GBXX 種類 1・下位種別 0)があるか
+  VGM.scanSgbExtension = function (bytes, dataOffset) {
+    let p = dataOffset;
+    while (p + 7 <= bytes.length && bytes[p] === 0x67 && bytes[p + 1] === 0x66) {
+      const type = bytes[p + 2];
+      const size = (bytes[p + 3] | (bytes[p + 4] << 8) | (bytes[p + 5] << 16) | (bytes[p + 6] << 24)) & 0x7FFFFFFF;
+      const block = bytes.subarray(p + 7, p + 7 + size);
+      if (VGM.isGbxxBlock(type, block) && block[5] === VGM.GBXX.KIND_SGB && block[6] === VGM.GBXX.SGB_STATE) return true;
+      p += 7 + size;
+    }
+    return false;
   };
   VGM.scanNesExtension = function (bytes, dataOffset) {
     let p = dataOffset;
@@ -306,6 +324,7 @@
     // 最初の待ち/書き込みコマンドより前にあるものだけ見る(ここで分かればアダプタ生成と鍵盤の行構成に使える)
     if (chips.nes) chips.nes.extraChips = VGM.scanNesExtension(bytes, dataOffset);
     const msxx = VGM.scanMsxExtension(bytes, dataOffset); // MSX の DAC(規格外 MSXX)。本ツールの MSX 録音だけが持つ
+    const sgb = chips.gb ? VGM.scanSgbExtension(bytes, dataOffset) : false; // スーパーゲームボーイの SNES 側音源(規格外 GBXX)。本ツールの SGB 録音だけが持つ
 
     const gd3Offset = gd3Rel ? 0x14 + gd3Rel : 0;
     const gd3 = gd3Offset ? parseGd3(bytes, gd3Offset) : null;
@@ -313,6 +332,7 @@
     return {
       magicOk: true,
       msxx,           // MSXX ブロック { machine, dac } | null
+      sgb,            // GBXX の SNES 側音源の像があるか
       version,
       versionText: ((version >> 8) & 0xFF).toString(16) + '.' + ((version >> 4) & 0xF).toString(16) + (version & 0xF).toString(16),
       eofOffset,

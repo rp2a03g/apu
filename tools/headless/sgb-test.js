@@ -75,6 +75,47 @@ console.log(`${frames} フレーム ${ms.toFixed(0)}ms(${(ms / frames).toFixed(2
   check(states === 1, `録音: SNES 側の音源の像(GBXX 種類 1)${states} 個、APU ポートの書き込み ${ports} 個、GB の書き込み ${r.writes} 個、${(r.samples / 44100).toFixed(2)} 秒`);
   check(Math.abs(r.samples / 44100 - 180 / sgb.frameRate) < 0.1, `録音: 長さが実時間(${(180 / sgb.frameRate).toFixed(2)} 秒)と合う`);
 }
+// 3b. 再生: 電源投入から録音した VGM(BIOS が音のドライバを送り、起動の音を鳴らすところ)を VGM の再生系に掛け、SNES 側の音を録音時と秒ごとに比べる
+{
+  const s2 = mk(); const live = []; let e = 0, n = 0;
+  const tap = s2.snes.apu.onSample; s2.snes.apu.onSample = (l, r) => { e += Math.abs(l) + Math.abs(r); if (++n === 32000) { live.push(e); e = 0; n = 0; } tap(l, r); };
+  s2.startRecording();
+  for (let f = 0; f < 600; f++) { s2.snes.runFrame(); s2.ringLen = 0; }
+  const r = MML.VGM.encodeGbRecording({ frames: s2.stopRecording(), clock: Math.round(s2.clockHz), name: 'sgb-replay' });
+  const h = MML.VGM.parseHeader(r.vgm);
+  check(!!h.sgb, `再生: ヘッダの解析が SNES 側の音源の像を見つける(長さ ${(r.samples / 44100).toFixed(2)} 秒、実時間 ${(600 / s2.frameRate).toFixed(2)} 秒)`);
+  const play = (mode) => { // mode: 'render' = 普通の再生、'regs' = clock を回さない先読み(キャプチャと同じ経路)
+    const p = new MML.Emu.VgmPlayer(r.vgm); const a = p.adapterById.sgbspc; const out = []; let ee = 0, nn = 0;
+    if (!a) return null;
+    const t2 = a.spc.onSample; a.spc.onSample = (l, rr) => { ee += Math.abs(l) + Math.abs(rr); if (++nn === 32000) { out.push(ee); ee = 0; nn = 0; } t2(l, rr); };
+    let mix = 0;
+    for (let f = 0; f < 600 && !p.ended; f++) { const o = p.renderFrame(48000, mode === 'regs', true); if (o) for (let i = 0; i < o.left.length; i += 4) mix = Math.max(mix, Math.abs(o.left[i])); }
+    return { out, mix, p };
+  };
+  const cmp = (x) => x && x.out.length >= live.length - 1 && live.slice(0, x.out.length).every((v, i) => Math.abs(v - x.out[i]) <= Math.max(v, x.out[i]) * 0.1 + 1);
+  const fmt = (a) => a.map((v) => v.toFixed(0)).join(' ');
+  const a1 = play('render');
+  check(cmp(a1) && live.some((v) => v > 100), `再生: SNES 側の音の量が秒ごとに録音時と合う(録音 ${fmt(live)} / 再生 ${a1 ? fmt(a1.out) : '無し'})`);
+  check(a1 && a1.mix > 0.01, `再生: 混ぜた出力に音がある(ピーク ${a1 ? a1.mix.toFixed(3) : 0})`);
+  const a2 = play('regs');
+  check(cmp(a2), `再生: clock を回さない先読みの経路でも同じ(${a2 ? fmt(a2.out) : '無し'})`);
+  // シーク: 5 秒の位置へ飛んでから 1 秒ぶんの音の量が、通しで再生した時の同じ区間と合う
+  if (a1) {
+    const p = new MML.Emu.VgmPlayer(r.vgm); for (let f = 0; f < 480; f++) p.renderFrame(48000, false, true); // 一度通って控えを作る
+    const a = p.adapterById.sgbspc; let es = 0, ns = 0; const t3 = a.spc.onSample;
+    p.seekTo(2 * 44100);
+    const b = p.adapterById.sgbspc; const t4 = b.spc.onSample; b.spc.onSample = (l, rr) => { if (ns < 32000) { es += Math.abs(l) + Math.abs(rr); ns++; } t4(l, rr); };
+    for (let f = 0; f < 70; f++) p.renderFrame(48000, false, true);
+    check(Math.abs(es - a1.out[2]) <= Math.max(es, a1.out[2]) * 0.15 + 1, `再生: 2 秒へシークした後の 1 秒が、通しの再生の同じ区間と合う(${es.toFixed(0)} / ${a1.out[2].toFixed(0)}、控えを使えるか ${p.canCheckpoint})`);
+    void t3;
+    // シークの控え(チェックポイント): 3 秒の所で状態を控え、1 秒鳴らし、戻してもう 1 秒鳴らすと同じ
+    const q = new MML.Emu.VgmPlayer(r.vgm); for (let f = 0; f < 180; f++) q.renderFrame(48000, false, true);
+    const qa = q.adapterById.sgbspc; let eq = 0; const t5 = qa.spc.onSample; qa.spc.onSample = (l, rr) => { eq += Math.abs(l) + Math.abs(rr); t5(l, rr); };
+    const cp = q._saveCheckpoint(); for (let f = 0; f < 60; f++) q.renderFrame(48000, false, true); const e1 = eq; eq = 0;
+    q._restoreCheckpoint(cp); for (let f = 0; f < 60; f++) q.renderFrame(48000, false, true);
+    check(e1 > 100 && Math.abs(e1 - eq) < 1e-6, `再生: 状態を控えて戻すと同じ音になる(${e1.toFixed(1)} / ${eq.toFixed(1)})`);
+  }
+}
 // 4. ステート
 {
   // 画面は完全一致、音は量が同じか(出力の標本化の位相は保存しないので、サンプル単位の一致は求めない)

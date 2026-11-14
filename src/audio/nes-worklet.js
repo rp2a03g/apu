@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 20:23:48
+ * Built by tools/build-capture-workers.ps1 at 2026-11-13 20:33:55
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-13 20:23:48';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-13 20:33:55';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -14828,6 +14828,7 @@
     }
   }
 
+  const STATE_SKIP = new Set(['mute', 'vol', 'divBit', '_out', 'apu']);
   class APUGb {
     // model: 'dmg'(既定)/ 'cgb'。波形 RAM の再生中アクセス、OFF 中の長さ書き込み、フィルタの定数が変わる
     constructor(model) {
@@ -14840,6 +14841,15 @@
       this._out = { left: 0, right: 0 };
       this.setSampleRate(44100);
       this.reset();
+    }
+    // VGM 再生のシーク用の控え(vgmPlayer.js のチェックポイント)。ミュート/音量と関数は写さない
+    getState() {
+      const cp = (v) => { if (v === null || typeof v !== 'object') return v; if (ArrayBuffer.isView(v)) return v.slice(); if (Array.isArray(v)) return v.map(cp); const o = {}; for (const k of Object.keys(v)) { if (typeof v[k] === 'function' || STATE_SKIP.has(k)) continue; o[k] = cp(v[k]); } return o; };
+      return cp(this);
+    }
+    setState(st) {
+      const put = (o, v) => { for (const k of Object.keys(v)) { const x = v[k], cur = o[k]; if (x === null || typeof x !== 'object') o[k] = x; else if (ArrayBuffer.isView(x)) { if (cur && ArrayBuffer.isView(cur) && cur.length === x.length) cur.set(x); else o[k] = x.slice(); } else if (Array.isArray(x)) o[k] = x.map((e) => (ArrayBuffer.isView(e) ? e.slice() : e)); else if (cur && typeof cur === 'object') put(cur, x); else o[k] = x; } };
+      put(this, st);
     }
 
     reset() {
@@ -18770,6 +18780,7 @@
       this.dspAddr = 0; this.romEnable = true;
       this.timers = [0, 0, 0]; this.timerDiv = [0, 0, 0]; this.timerCnt = [0, 0, 0]; this.timerEn = [false, false, false]; this.timerClk = [0, 0, 0];
       this.dspClk = 0;
+      this.cycles = 0; // 走らせた SPC700 のサイクルの通算(録音がポート書き込みの刻印に使う)
       if (this.dsp) { this.dsp.reset(); this.dsp.regs[0x6C] = 0xE0; } // 電源投入時の FLG は $E0(リセット+ミュート+エコー書き込み禁止)。0 だとエコーが RAM $0000 台を壊し、IPL の転送先が化ける
       this.cpu.halted = false;
       this.cpu.reset(); // IPL ROM の先頭($FFC0)から
@@ -18804,6 +18815,34 @@
       }
       this.ram[addr] = v;
     }
+    // .spc ファイルの形の像(toSpc の逆)から始める。VGM の再生(GBXX 種類 1)が使う。DSP の内部(エンベロープの途中など)は像に無いので、鳴っていた音は次のキーオンから
+    loadSpc(img) {
+      if (!img || img.length < 0x10180) return false;
+      this.reset();
+      const c = this.cpu;
+      this.ram.set(img.subarray(0x100, 0x10100));
+      c.PC = img[0x25] | (img[0x26] << 8); c.A = img[0x27]; c.X = img[0x28]; c.Y = img[0x29]; c.PSW = img[0x2A]; c.SP = img[0x2B];
+      const ctl = img[0x1F1];
+      this.romEnable = (ctl & 0x80) !== 0;
+      for (let t = 0; t < 3; t++) { this.timerEn[t] = (ctl & (1 << t)) !== 0; this.timerDiv[t] = img[0x1FA + t]; this.timerCnt[t] = img[0x1FD + t] & 0x0F; }
+      this.dspAddr = img[0x1F2];
+      for (let i = 0; i < 4; i++) this.in[i] = img[0x1F4 + i];
+      if (this.dsp) for (let i = 0; i < 128; i++) { if (i === 0x4C || i === 0x5C) continue; this.dsp.writeReg(i, img[0x10100 + i]); } // KON/KOFF は書かない(鳴り直さない)
+      if (this.dsp) this.dsp.regs[0x6C] = img[0x10100 + 0x6C];
+      return true;
+    }
+    // シークの控え用(VGM 再生のチェックポイント)。関数と RAM への別名は写さない
+    getState() {
+      const cp = (v) => { if (v === null || typeof v !== 'object') return v; if (ArrayBuffer.isView(v)) return v.slice(); if (Array.isArray(v)) return v.map(cp); const o = {}; for (const k of Object.keys(v)) { if (typeof v[k] === 'function' || k === 'bus' || k === 'ram' || k === 'origRam') continue; o[k] = cp(v[k]); } return o; };
+      return { ram: this.ram.slice(), in: this.in.slice(), out: this.out.slice(), dspAddr: this.dspAddr, romEnable: this.romEnable, timers: this.timers.slice(), timerDiv: this.timerDiv.slice(), timerCnt: this.timerCnt.slice(), timerEn: this.timerEn.slice(), timerClk: this.timerClk.slice(), dspClk: this.dspClk, cycles: this.cycles,
+        cpu: cp(this.cpu), dsp: this.dsp ? cp(this.dsp) : null };
+    }
+    setState(s) {
+      const put = (o, v) => { for (const k of Object.keys(v)) { const x = v[k], cur = o[k]; if (x === null || typeof x !== 'object') o[k] = x; else if (ArrayBuffer.isView(x)) { if (cur && ArrayBuffer.isView(cur) && cur.length === x.length) cur.set(x); else o[k] = x.slice(); } else if (Array.isArray(x)) { if (Array.isArray(cur) && cur.length === x.length && x.length && x[0] && typeof x[0] === 'object' && !ArrayBuffer.isView(x[0])) for (let i = 0; i < x.length; i++) put(cur[i], x[i]); else o[k] = x.map((e) => (ArrayBuffer.isView(e) ? e.slice() : e)); } else if (cur && typeof cur === 'object') put(cur, x); else o[k] = x; } };
+      this.ram.set(s.ram); this.in.set(s.in); this.out.set(s.out); this.dspAddr = s.dspAddr; this.romEnable = s.romEnable;
+      this.timers = s.timers.slice(); this.timerDiv = s.timerDiv.slice(); this.timerCnt = s.timerCnt.slice(); this.timerEn = s.timerEn.slice(); this.timerClk = s.timerClk.slice(); this.dspClk = s.dspClk; this.cycles = s.cycles || 0;
+      put(this.cpu, s.cpu); if (this.dsp && s.dsp) put(this.dsp, s.dsp);
+    }
     // 今の状態を .spc ファイルの形(0x10200 バイト)にする。録音の頭に入れる(SPC の再生系がそのまま読める形)
     toSpc() {
       const out = new Uint8Array(0x10200), c = this.cpu;
@@ -18837,6 +18876,7 @@
             if (++this.timers[t] >= (this.timerDiv[t] || 256)) { this.timers[t] = 0; this.timerCnt[t] = (this.timerCnt[t] + 1) & 0x0F; }
           }
         }
+        this.cycles += c;
         this.dspClk += c;
         while (this.dspClk >= 32) { this.dspClk -= 32; if (this.dsp) { this.dsp.clock(); if (this.onSample) this.onSample(this.dsp.outL, this.dsp.outR); } }
       }
@@ -19222,7 +19262,7 @@
       this.bitData = 0; this.bitOffset = 0; this.packetOffset = 0; this.joypPacket = new Uint8Array(16);
       this.v = 0; this.writeBank = 0; this.readBank = 0; this.readAddr = 0;
       this.rows.fill(0); this.packet.fill(0);
-      this.acc = 0;
+      this.acc = 0; this.idleAcc = 0;
       this._applyClock();
     }
     // ゲームボーイの時計(Hz)= 元の時計 ÷ 分周。音の標本化が使う
@@ -19265,7 +19305,17 @@
     // SNES のマスタークロックが clk 進んだ
     tick(clk) {
       if (this.onClock) this.onClock(clk);
-      if (!this.running) return;
+      if (!this.running) {
+        // 止められている間も、録音中なら録音の時間(ゲームボーイのフレーム内時刻)だけは進める。
+        // 進めないと、その間の SNES 側の音(APU ポートへの書き込み)が全部同じ時刻に潰れる
+        const gb = this.gb;
+        if (gb.rec) {
+          this.idleAcc += clk * this.clkScale;
+          const t = Math.floor(this.idleAcc / this.div);
+          if (t > 0) { this.idleAcc -= t * this.div; gb.frameT += t; if (gb.frameT >= 70224) gb._frameEnd(); }
+        }
+        return;
+      }
       this.acc += clk * this.clkScale;
       const gb = this.gb, div = this.div, need = div * 4;
       while (this.acc >= need) {
@@ -19401,13 +19451,15 @@
       this.spcGain = 1; this.gbGain = 1;
       this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
       this.onFrame = null;
+      this.recBase = 0; this.recPort = [0, 0, 0, 0];
       this.snes.apu.onSample = (l, r) => {
         if (!this.sampleRate) return;
         if (this.spcLen >= SPC_FIFO) { this.spcHead = (this.spcHead + 1) & (SPC_FIFO - 1); this.spcLen--; }
         const i = (this.spcHead + this.spcLen) & (SPC_FIFO - 1);
         this.spcL[i] = l; this.spcR[i] = r; this.spcLen++;
       };
-      this.snes.onApuPort = (port, v) => { const rec = this.gb.rec; if (rec) rec.cur.push({ sgbPort: port & 3, value: v & 0xFF, t: this.gb.frameT }); };
+      // 録音: APU ポートへの書き込み。c = 録音の頭からの SPC700 のサイクル数(再生はこの刻印どおりに書く)
+      this.snes.onApuPort = (port, v) => { const rec = this.gb.rec; if (rec && this.recPort[port & 3] === (v & 0xFF)) return; if (rec) this.recPort[port & 3] = v & 0xFF; if (rec) rec.cur.push({ sgbPort: port & 3, value: v & 0xFF, t: this.gb.frameT, c: (this.snes.apu.cycles - this.recBase) >>> 0 }); };
       this.icd.onClock = (clk) => this._clock(clk);
       this.snes.onFrame = () => {
         if (this.padTurbo[0] || this.padTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
@@ -19510,7 +19562,9 @@
     startRecording() {
       this.gb.startRecording();
       this.snes.syncApu();
-      this.gb.rec.cur.push({ sgbSpc: this.snes.apu.toSpc(), t: 0 }); // SNES 側の音源の今の像(.spc の形)
+      this.recBase = this.snes.apu.cycles;
+      this.recPort = Array.from(this.snes.apu.in); // 同じ値の書き直しは録音に入れない(SPC700 から見て変化が無い。BIOS は毎フレーム書く)
+      this.gb.rec.cur.unshift({ sgbSpc: this.snes.apu.toSpc(), t: 0 }); // SNES 側の音源の今の像(.spc の形)。VGM の先頭に来るよう、GB のレジスタ像より前へ
     }
     stopRecording() { return this.gb.stopRecording(); }
 

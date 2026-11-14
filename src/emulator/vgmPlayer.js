@@ -653,6 +653,43 @@
     };
   }
 
+  // スーパーゲームボーイの SNES 側音源(規格外 GBXX 種類 1、本ツールの SGB 録音。DESIGN-GB-CAPTURE.md §5.1): SPC700+DSP を丸ごと動かす。
+  // 始まりは録音の頭の像(.spc の形)、あとは APU ポート $2140-$2143 への書き込みがブロックの位置(時刻)で届く。
+  // 1 クロック = DSP の 1 サンプル(32kHz、SPC700 の 32 サイクル)。clock() を回さない経路(シークの早送り、先読みキャプチャ)でも
+  // SPC700 は動かさないと状態が進まないので、advanceVgm(VGM のサンプル数)で時間を進める
+  const SGB_SPC_LAG = 512; // サイクル(0.5ms)
+  function makeSgbSpcAdapter() {
+    const apu = new Emu.SnesApu();
+    const a = {
+      id: 'sgbspc', clockHz: 32000, accum: 0, chip: null, spc: apu, gain: CHIP_GAIN.gb, l: 0, r: 0, debt: 0, skipAcc: 0, loaded: false, muted: false, queue: [],
+      // SPC700 はわざと LAG サイクル遅らせて走らせる: ポート書き込みは VGM の位置(1/44100 秒刻み)で届くが、書く瞬間は刻印(サイクル数)で決めるので、
+      // 刻印の時刻より先に届いていないといけない
+      loadSpc(img) { this.loaded = apu.loadSpc(img); this.debt = -SGB_SPC_LAG; this.skipAcc = 0; this.l = 0; this.r = 0; this.queue.length = 0; },
+      port(p, v, stamp) { if (stamp <= apu.cycles) apu.in[p & 3] = v & 0xFF; else this.queue.push(p & 3, v & 0xFF, stamp); },
+      run() {
+        const q = this.queue;
+        while (this.debt > 0) {
+          if (q.length) {
+            const left = q[2] - apu.cycles;
+            if (left <= 0) { apu.in[q[0]] = q[1]; q.splice(0, 3); continue; }
+            this.debt -= apu.run(Math.min(this.debt, left));
+          } else this.debt -= apu.run(this.debt);
+        }
+      },
+      clock() { if (!this.loaded) return; this.debt += 32; this.run(); },
+      advanceVgm(n) { if (!this.loaded) return; this.skipAcc += n * (1024000 / 44100); const c = Math.floor(this.skipAcc); if (c > 0) { this.skipAcc -= c; this.debt += c; this.run(); } },
+      // シークの控え: 音源の状態に、待っている書き込みと遅れの残りを添える
+      getState() { return { apu: apu.getState(), queue: this.queue.slice(), debt: this.debt, skipAcc: this.skipAcc, loaded: this.loaded }; },
+      setState(s) { apu.setState(s.apu); this.queue = s.queue.slice(); this.debt = s.debt; this.skipAcc = s.skipAcc; this.loaded = s.loaded; },
+      mix(out) { if (this.muted) return; out[0] += this.l * this.gain; out[1] += this.r * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.sgbspc !== undefined) this.muted = !!(Array.isArray(e.sgbspc) ? e.sgbspc[0] : e.sgbspc); },
+      applyVolume() {}
+    };
+    apu.onSample = (l, r) => { a.l = l; a.r = r; };
+    a.chip = { getState: () => a.getState(), setState: (s) => a.setState(s) }; // チェックポイントはアダプタごと(待ちの書き込みを含めて)控える
+    return a;
+  }
+
   const ADAPTERS = {
     nes: makeNesAdapter, gb: makeGbAdapter, huc6280: makeHucAdapter,
     ay8910: makeAyAdapter, k051649: makeSccAdapter, ym2413: makeOpllAdapter,
@@ -785,6 +822,8 @@
         }
       }
       if (h.msxx && h.msxx.dac && Emu.MajutsushiDAC) { const a = makeMsxDacAdapter(h.msxx); this.adapters.push(a); this.adapterById.msxdac = a; } // MSX の DAC(MSXX)
+      if (h.sgb && Emu.SnesApu && Emu.SPC700) { const a = makeSgbSpcAdapter(); this.adapters.push(a); this.adapterById.sgbspc = a; } // スーパーゲームボーイの SNES 側音源(GBXX)
+      this.timeAdapters = this.adapters.filter((a) => typeof a.advanceVgm === 'function'); // clock() を回さない経路でも時間を進める物
       this.pos = h.dataOffset;
       this.samplePos = 0;      // VGMサンプル位置(44100Hz)
       this.waitRemaining = 0;  // 消化待ちのサンプル数
@@ -999,6 +1038,15 @@
       if (type === 0xC2) { // NES APU RAM書込み: 先頭2バイト=開始アドレス
         const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
+      }
+      // スーパーゲームボーイの SNES 側音源(規格外 GBXX 種類 1): 下位種別 0 = 像、1 = APU ポートへの書き込み。種類 2(ブザー)は読み飛ばす
+      if (MML.VGM && MML.VGM.isGbxxBlock && MML.VGM.isGbxxBlock(type, block)) {
+        const a = this.adapterById.sgbspc, G = MML.VGM.GBXX;
+        if (a && block[5] === G.KIND_SGB) {
+          if (block[6] === G.SGB_STATE) a.loadSpc(block.subarray(7));
+          else if (block[6] === G.SGB_PORT && block.length >= 13) a.port(block[7], block[8], (block[9] | (block[10] << 8) | (block[11] << 16) | (block[12] << 24)) >>> 0);
+        }
+        return;
       }
       // MSX の DAC の書き込み列(規格外 MSXX、vgmHeader.js VGM.MSXX 参照): value8 meta8(bit0-6=フレーム内時刻/128、bit7=turboR PCM)×n。kind 2(PCM の制御)は読み飛ばす
       if (MML.VGM && MML.VGM.isMsxxBlock && MML.VGM.isMsxxBlock(type, block)) {
@@ -1330,6 +1378,7 @@
         if (step <= 0) { if (this.ended) break; continue; }
         this.waitRemaining -= step;
         this.samplePos += step;
+        for (let k = 0; k < this.timeAdapters.length; k++) this.timeAdapters[k].advanceVgm(step);
         // ストリームはサンプル単位でしか進められないが、シーク用途では最終位置だけ合えばよい
         for (let i = 0; i < step; i++) this._stepStreams();
       }
@@ -1364,7 +1413,9 @@
       this._noteCheckpoint();
       if (regsOnly) {
         // 速度は無関係(キャプチャはVGM時間で進める)
-        for (let i = 0; i < SAMPLES_PER_FRAME; i++) this._stepVgmSample();
+        const ta = this.timeAdapters;
+        if (ta.length) for (let i = 0; i < SAMPLES_PER_FRAME; i++) { this._stepVgmSample(); for (let k = 0; k < ta.length; k++) ta[k].advanceVgm(1); }
+        else for (let i = 0; i < SAMPLES_PER_FRAME; i++) this._stepVgmSample();
         this._flushWrites(); // Nukedコアの書込みキュー適用(スナップショットを正しく読むため)
         return null;
       }
