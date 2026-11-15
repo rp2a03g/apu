@@ -1,0 +1,95 @@
+/*
+ * PC エンジン本体のステート(状態の保存・復元)と巻き戻し
+ * MML.Emu.PceState / MML.Emu.PceRewind(段階 9c)
+ *
+ * どちらも NES の物(nes/nesState.js の StateTree、nes/nesRewind.js)をそのまま使う(GB の gbState.js と同じ流儀):
+ *   - ステート: 本体(PceConsole)のオブジェクト木を汎用に写す。除外はカードの ROM、録音、音のリング、出来上がった画面、コールバック。
+ *     描きかけの 1 行(vdc.row)と VDC の内部状態は入るので、復元後は命令の途中の位置から同じに続く。
+ *     出来上がった画面(vdc.out)は入れない(1 枚 330KB)。復元した直後の 1 フレームは、上半分が復元前の絵のままになる
+ *   - 巻き戻し: 0.5 秒ごとのステート(1 分ぶん)+毎フレームのパッド値。逆再生の映像は、その時の画面を幅 292 に縮めて
+ *     「色の番号 8bit+その画面の色表」で控える(PC エンジンは 512 色出せるので、1 画面に 256 色を超えた分は近い色に寄せる。逆再生の絵だけの話)
+ * 形: { v: 1, machine: 'pce', romLen, romSum, tree }
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  // 出来上がった画面(vdc.out)はキー名でなく配列そのもので外す(キー名 'out' で外すと、音源の ch の今の出力 out まで落ちる。見直しで分かった)
+  const SKIP_KEYS = new Set(['rom', 'card', 'rec', 'ring', 'ringR', '_frame', '_frameIdx', 'onFrame', 'onFrameExact', 'onWrite', 'onIo', 'host', 'bus']);
+  const romSum = (card) => {
+    if (card._sum === undefined) { let h = 2166136261 | 0; const r = card.rom; for (let i = 0; i < r.length; i += 97) h = Math.imul(h ^ r[i], 16777619) | 0; card._sum = h >>> 0; }
+    return card._sum;
+  };
+
+  const PceState = {
+    save(pce) {
+      return { v: 1, machine: 'pce', romLen: pce.card.rom.length, romSum: romSum(pce.card), tree: Emu.StateTree.snapshot(pce, [pce.card.rom, pce.vdc.out], SKIP_KEYS) };
+    },
+    // 同じ ROM で作ったステートを書き戻す。合わなければ false
+    load(pce, state) {
+      if (!state || state.v !== 1 || state.machine !== 'pce' || !state.tree) return false;
+      if (state.romLen !== pce.card.rom.length || state.romSum !== romSum(pce.card)) return false;
+      const rec = pce.rec;
+      Emu.StateTree.restore(pce, state.tree);
+      pce.rec = rec;                       // 録音中ならそのまま続ける
+      pce.ringHead = 0; pce.ringLen = 0;   // 音のリングは捨てる
+      pce._frameFlag = false; pce._frameCb = false; pce._frameDirty = true;
+      return true;
+    },
+  };
+
+  const RW_W = 292, RW_H = 242;
+  class PceRewind extends (Emu.NesRewind || class {}) {
+    constructor(pce) {
+      super(pce, { State: PceState, frameBytes: RW_W * RW_H, keep: 120 });
+      this.idxWidth = RW_W;
+      this._idx = new Uint8Array(RW_W * RW_H);
+      this._pal = new Uint32Array(256);
+      this._lut = new Int16Array(1024);
+    }
+    get palette() { return this._pal.slice(); }
+    // 今の画面を「色の番号+色表」にして輪に控える
+    _capture(f) {
+      const pce = this.nes, RING = Emu.NesRewind.RING, FB = this.frameBytes;
+      if (!this.ring) this.ring = new Uint8Array(RING * FB);
+      if (!this.palRing) this.palRing = new Uint32Array(RING * 256);
+      // 画面は色の番号(VCE の 9bit+白黒の印)で持っているので、番号 → その画面の中の通し番号(0-255)を表で引く
+      const src = pce.frameIdx, w = pce.frameWidth, idx = this._idx, pal = this._pal, lut = this._lut, COLORS = Emu.PceConsole.COLORS;
+      lut.fill(-1);
+      let n = 0;
+      const step = w / RW_W;
+      for (let y = 0; y < RW_H; y++) {
+        const row = y * w, out = y * RW_W;
+        for (let x = 0; x < RW_W; x++) {
+          const c = src[row + ((x * step) | 0)];
+          let i = lut[c];
+          if (i < 0) {
+            if (n < 256) { i = n++; pal[i] = COLORS[c]; }
+            else { // 257 色目から: 色表の中で一番近い色
+              const col = COLORS[c], r = col & 0xFF, g = (col >> 8) & 0xFF, b = (col >> 16) & 0xFF;
+              let best = 0, bd = 1e9;
+              for (let k = 0; k < 256; k++) { const p = pal[k], d = Math.abs((p & 0xFF) - r) + Math.abs(((p >> 8) & 0xFF) - g) + Math.abs(((p >> 16) & 0xFF) - b); if (d < bd) { bd = d; best = k; } }
+              i = best;
+            }
+            lut[c] = i;
+          }
+          idx[out + x] = i;
+        }
+      }
+      for (let k = n; k < 256; k++) pal[k] = 0xFF000000;
+      const slot = f % RING;
+      this.ring.set(idx, slot * FB);
+      this.palRing.set(pal, slot * 256);
+      this.ringFrame[slot] = f;
+    }
+    paletteOf(f) {
+      const RING = Emu.NesRewind.RING, slot = f % RING;
+      if (!this.palRing || this.ringFrame[slot] !== f) return this.palette;
+      return this.palRing.slice(slot * 256, slot * 256 + 256);
+    }
+  }
+
+  Emu.PceState = PceState;
+  Emu.PceRewind = PceRewind;
+})(typeof window !== 'undefined' ? window : globalThis);

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-12 02:00:42
+ * Built by tools/build-capture-workers.ps1 at 2026-11-16 01:50:49
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-11-12 02:00:42';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-11-16 01:50:49';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -108,200 +108,210 @@
 })(globalThis);
 
 /*
- * HuC6280 (PC Engine / TurboGrafx-16 CPU) コア
+ * HuC6280(PC エンジンの CPU)コア — サイクル単位(2026-11-15 作り直し、段階 9a)
  * MML.Emu.CPUHuC6280
  *
- * 65C02をベースに、PCEハードウェア固有の拡張命令を追加したチップ。cpu6502.js(NES用、
- * NMOS 6502・151正規命令のみ・デコード無効)とは別物として新規実装する
- * (参考: HuC6280 CMOS 8-bit Microprocessor Software Manual、
- *  HuC6280 opcode matrix https://taotao54321.github.io/appsouko/work/PCE/6280op.html 、
- *  PC Engine Hardware Docs 各種。GME(Game_Music_Emu)等の実装は参照せず、公開ドキュメントの
- *  レジスタ/命令仕様という事実のみをクリーンルームで再実装している)。
+ * 作り: バスの読み書き 1 回 = 1 CPU サイクル。読み書きの前に必ず bus.tick() を呼ぶので、本体(タイマ/映像/音)は
+ * 「いま CPU が何サイクル目のどこを触っているか」を知った状態で進められる。バスを触らないサイクル(内部サイクル)も
+ * tick だけ呼ぶ。1 サイクルが何マスタークロックか(CSH=3、CSL=12)はバス側が数える(setSpeed で知らせる)。
  *
- * 6502からの主な相違点:
- *   - 65C02系の追加: BRA, PHX/PHY/PLX/PLY, STZ, TRB/TSB, (zp)間接アドレッシング,
- *     JMP (abs,X), BBRi/BBSi/RMBi/SMBi(ゼロページビット演算+分岐), 未定義オペコード無し
- *     (全256通りに何らかの意味がある)。JMP (abs) のページ境界バグは無い(65C02で修正済み)。
- *   - 6280固有拡張: TAM/TMA(MMU、8x8KBページのバンク切替)、ST0/ST1/ST2(HuC6270向け
- *     固定アドレスストア)、TII/TDD/TIA/TAI/TIN(ブロック転送)、SXY/SAX/SAY(レジスタ交換)、
- *     CLA/CLX/CLY(レジスタクリア)、BSR(相対サブルーチン呼出)、CSH/CSL(CPU速度切替)、
- *     SET(次の1命令だけゼロページ,X/Yのラップアラウンドを無効化するTフラグ)、
- *     TST(ゼロページ/絶対アドレスへの即値AND、BITの拡張版)。
- *   - IRQディスパッチを本実装で唯一実装している(GBS/NSF/KSSは簡略化してPLAYを直接呼ぶ設計
- *     だが、HESはヘッダにPLAYアドレスが無く、曲データ自身のIRQベクタ経由でしかPLAY相当の
- *     処理を起動できないため、本物の割込停止/分岐/RTIを実装する必要がある)。
- *     bus.pollIrq() が現在有効な割込のベクタアドレス(無ければ-1)を返す前提
- *     (優先度・個別マスクの判断はhesBus.js側の責務、CPUはIフラグの成否だけを見る)。
- *   - 10進(BCD)モードはHuC6280でも機能する(NESの2A03と違いここは無効化されない)。
- *     ADC/SBCのBCD補正はCMOS 65C02方式(N/V/ZフラグもBCD結果から正しく再計算される)を
- *     採用しているが、実チップでの実測検証はしていない(HES曲データの範囲では
- *     オーディオドライバがSEDを使うことは通常無く、実害の想定は低いという判断)。
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3):
+ *   [試験] SingleStepTests/huc6280(tools/headless/cpu-test.js huc6280 --all)。レジスタ/メモリ/サイクル数に加えて
+ *          サイクルごとのバスの動き(番地・値・読み/書き/内部)まで突き合わせる。このベクタは Mesen 2 が作った物なので、
+ *          「実機と合っている」ではなく「Mesen と合っている」の意味(README の断り書きどおり)。
+ *   [参照] Mesen 2 の Core/PCE/PceCpu.cpp / PceCpu.Instructions.cpp / PceMemoryManager.cpp を読んで動きを合わせた所
+ *          (読んだだけで写していない)。ベクタでは測れない所(割り込み、速度切り替え、ST0-2)に付く。
+ *   [文書] HuC6280 CMOS 8-bit Microprocessor Software Manual
+ *   [推定] 上のどれでもない所。理由を添える。
+ * 札の無い行は、その命令のベクタ([試験])で確かめている。
+ *
+ * バスに求める物:
+ *   read(addr) / write(addr, value)   論理番地(MPR で変換するのはバス)
+ *   tick()                            (あれば)1 CPU サイクル進める。読み書きの前に呼ぶ
+ *   irqLines()                        (あれば)今かかっている割り込み(マスク後)。bit0=IRQ2 bit1=IRQ1 bit2=タイマ
+ *   setMpr(i, bank) / getMpr(i)       MPR の読み書き(TAM/TMA)
+ *   setSpeed(high)                    (あれば)CSH/CSL
+ *   stWrite(port, value)              (あれば)ST0/ST1/ST2 の書き先(VDC のポート 0/2/3)。MPR を通らない
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
 
   const F_C = 0x01, F_Z = 0x02, F_I = 0x04, F_D = 0x08, F_B = 0x10, F_T = 0x20, F_V = 0x40, F_N = 0x80;
-
+  const ZP = 0x2000, STACK = 0x2100; // ゼロページとスタックは論理 $2000/$2100(MPR1 の窓)
+  const VEC_IRQ2 = 0xFFF6, VEC_IRQ1 = 0xFFF8, VEC_TIMER = 0xFFFA, VEC_RESET = 0xFFFE;
+  const LINE_IRQ2 = 1, LINE_IRQ1 = 2, LINE_TIMER = 4;
   const CALL_SENTINEL = 0xFFFF;
 
+  // アドレッシング。MEM0 以上 MEM1 以下が「番地を指す」種類(値はもう 1 サイクル使って読む)
+  const IMP = 0, IMM = 1, REL = 2,
+    ZPG = 3, ZPX = 4, ZPY = 5, ABS = 6, ABX = 7, ABY = 8, IZX = 9, IZY = 10, IZP = 11,
+    IND = 12, IAX = 13, ZRL = 14, BLK = 15, TZP = 16, TZX = 17, TAB = 18, TAX = 19, NON = 20;
+  const MEM0 = ZPG, MEM1 = IZP;
+
   class CPUHuC6280 {
-    /**
-     * @param {{read:(a:number)=>number, write:(a:number,v:number)=>void, pollIrq?:()=>number}} bus
-     */
     constructor(bus) {
       this.bus = bus;
+      this.cycles = 0; // 通算の CPU サイクル(速度に関係なく 1 ずつ)
+      this.idleAtSentinel = false; // HES 再生だけ true(step() の頭の説明)
       this.reset();
     }
 
     reset() {
       this.A = 0; this.X = 0; this.Y = 0;
       this.S = 0xFF;
-      this.P = F_I; // T/D/V/N/Z/Cはクリア、Iはセット(実機はRESET直後IRQ禁止)
+      this.P = F_I;          // [参照] 電源投入で I=1、D と T は 0(PceCpu.cpp のコンストラクタ)
       this.PC = 0;
-      this.halted = false;
       this.callActive = false;
-      this.speedHigh = true; // CSH(既定)/CSL。master clockに対するCPUサイクルの重み換算に使う
+      this.idleAtSentinel = false;
+      this.speedHigh = true; // 本体(pce/)は電源投入で低速にする。HES 再生は高速のまま始める(hesPlayer.js 側の説明)
       this.lastDataAddr = -1;
+      this.irqSample = 0;    // 直前のサイクルで見た割り込み線(I=1 なら 0)
+      this.mprBuffer = 0;    // TAM/TMA が最後に通した値
+      this.tMode = false;    // いまの命令が T フラグつきで始まったか
+      this.ea = 0; this.imm = 0; this.mode = IMP;
     }
 
+    /**
+     * リセットベクタから始める(本体用)。HES は使わない。
+     * [参照] 電源投入で S=0、CPU は低速(PceCpu.cpp のコンストラクタ、PceMemoryManager.cpp)。A/X/Y と残りのフラグは実機では不定
+     */
+    powerOn() {
+      this.reset();
+      this.S = 0;
+      this.speedHigh = false;
+      if (this.bus.setSpeed) this.bus.setSpeed(false);
+      this.PC = (this.bus.read(VEC_RESET) | (this.bus.read(VEC_RESET + 1) << 8)) & 0xFFFF;
+    }
+
+    // ── サイクル ──
+    // [参照] 割り込み線は「サイクルを進めた直後、そのサイクルの読み書きの前」に見る(PceCpu::ProcessCpuCycle)。
+    // 命令の最後のサイクルで見た値で、次に割り込むかが決まる。CLI の直後の 1 命令は割り込まれず、SEI の直後は割り込まれる、
+    // という 6502 系の癖はここから出る(I を変えるのは最後のサイクルの後なので)。
+    _tick() {
+      this.cycles++;
+      const b = this.bus;
+      if (b.tick) b.tick();
+      this.irqSample = (this.P & F_I) ? 0 : (b.irqLines ? b.irqLines() : 0);
+    }
+    rd(addr) { this._tick(); return this.bus.read(addr & 0xFFFF) & 0xFF; }
+    wr(addr, value) { this._tick(); this.bus.write(addr & 0xFFFF, value & 0xFF); }
+    /** 内部サイクル。バスが VDC/VCE の読み書きで CPU を 1 サイクル待たせる時にも呼ぶ */
+    idle() { this._tick(); }
+
+    // 時間を進めない読み書き(デバッグ/旧い呼び出し用)
     read(addr) { return this.bus.read(addr & 0xFFFF) & 0xFF; }
     write(addr, value) { this.bus.write(addr & 0xFFFF, value & 0xFF); }
-    fetchByte() { const v = this.read(this.PC); this.PC = (this.PC + 1) & 0xFFFF; return v; }
-    fetchSigned() { const v = this.fetchByte(); return v < 0x80 ? v : v - 0x100; }
-    read16(addr) { return this.read(addr) | (this.read((addr + 1) & 0xFFFF) << 8); }
 
-    getFlag(mask) { return (this.P & mask) !== 0; }
-    setFlag(mask, on) { this.P = on ? (this.P | mask) : (this.P & ~mask); }
-    setZN(v) { v &= 0xFF; this.setFlag(F_Z, v === 0); this.setFlag(F_N, (v & 0x80) !== 0); }
+    _fetch() { const v = this.rd(this.PC); this.PC = (this.PC + 1) & 0xFFFF; return v; }
+    _push(v) { this.wr(STACK + this.S, v); this.S = (this.S - 1) & 0xFF; }
+    _pop() { this.S = (this.S + 1) & 0xFF; return this.rd(STACK + this.S); }
+    // ゼロページ上の 2 バイト。上位は $FF の次が $00 に折り返す
+    _zpWord(zp) { const lo = this.rd(ZP + zp); return lo | (this.rd(ZP + ((zp + 1) & 0xFF)) << 8); }
+    _word(addr) { const lo = this.rd(addr); return lo | (this.rd((addr + 1) & 0xFFFF) << 8); }
+    _nz(v) { this.P = (this.P & ~(F_N | F_Z)) | (v & 0x80) | (v ? 0 : F_Z); }
 
-    push(value) { this.write(0x2100 + this.S, value); this.S = (this.S - 1) & 0xFF; }
-    pop() { this.S = (this.S + 1) & 0xFF; return this.read(0x2100 + this.S); }
-
-    // ゼロページは実機で $2000-$20FF に固定配置されている(6280固有、通常の6502の
-    // $0000-$00FFとは異なる。cc65 issue #317 等で確認済みの既知のハードウェア仕様。
-    // PCE本体のI/Oは物理バンク$FFが割り当てられたMPRウィンドウにのみ現れ、通常
-    // MPR1(論理$2000-$3FFF)はワークRAM(バンク$F8)に固定されるため、ゼロページ/スタックは
-    // 素直にRAMへ到達する)。zpToAddr() で一括してこの+$2000オフセットを付与する。
-    zpToAddr(zp) { return 0x2000 + (zp & 0xFF); }
-
-    // ゼロページ,X/Y のインデックス計算(オフセット、0-255の枠内)。SET直後(Tフラグ立)の
-    // 1命令だけ0xFFでラップしない(6280固有、マニュアル記載の"T=1のときのゼロページ,X"挙動。
-    // ラップしない場合そのまま$20FFを超えて$21xx(スタックページ)側まで伸びうる)。
-    zpIndexOffset(base, idx) {
-      if (this.getFlag(F_T)) return (base + idx) & 0x1FF;
-      return (base + idx) & 0xFF;
+    /** オペランドの値。番地を指す種類なら 1 サイクル使って読む */
+    _val() {
+      if (this.mode >= MEM0 && this.mode <= MEM1) {
+        // DDA(PCM)の採取(hesPlayer.js)が「$0806 へ書いた値は ROM のどこから読んだか」を知るのに使う
+        this.lastDataAddr = this.ea;
+        return this.rd(this.ea);
+      }
+      return this.imm;
     }
 
-    // --- オペランド取得(cpu6502.js と同じ設計。zpindを追加、zp系は$2000オフセット付き) ---
-    fetchOperand(mode, skipRead = false) {
-      let addr = null, value = 0, pageCrossed = false;
+    // ── オペランドの取り込み(命令ごとのサイクルの前半) ──
+    _operand(mode) {
       switch (mode) {
-        case 'imm': value = this.fetchByte(); break;
-        case 'acc': value = this.A; break;
-        case 'impl': break;
-        case 'zp': addr = this.zpToAddr(this.fetchByte()); if (!skipRead) value = this.read(addr); break;
-        case 'zpx': addr = 0x2000 + this.zpIndexOffset(this.fetchByte(), this.X); if (!skipRead) value = this.read(addr); break;
-        case 'zpy': addr = 0x2000 + this.zpIndexOffset(this.fetchByte(), this.Y); if (!skipRead) value = this.read(addr); break;
-        case 'zpind': { const zp = this.fetchByte(); addr = this.read(this.zpToAddr(zp)) | (this.read(this.zpToAddr((zp + 1) & 0xFF)) << 8); if (!skipRead) value = this.read(addr); break; }
-        case 'abs': addr = this.read16(this.PC); this.PC = (this.PC + 2) & 0xFFFF; if (!skipRead) value = this.read(addr); break;
-        case 'absx': {
-          const base = this.read16(this.PC); this.PC = (this.PC + 2) & 0xFFFF;
-          addr = (base + this.X) & 0xFFFF; pageCrossed = (base & 0xFF00) !== (addr & 0xFF00);
-          if (!skipRead) value = this.read(addr); break;
-        }
-        case 'absy': {
-          const base = this.read16(this.PC); this.PC = (this.PC + 2) & 0xFFFF;
-          addr = (base + this.Y) & 0xFFFF; pageCrossed = (base & 0xFF00) !== (addr & 0xFF00);
-          if (!skipRead) value = this.read(addr); break;
-        }
-        case 'indx': { const zp = (this.fetchByte() + this.X) & 0xFF; addr = this.read(this.zpToAddr(zp)) | (this.read(this.zpToAddr((zp + 1) & 0xFF)) << 8); if (!skipRead) value = this.read(addr); break; }
-        case 'indy': {
-          const zp = this.fetchByte();
-          const base = this.read(this.zpToAddr(zp)) | (this.read(this.zpToAddr((zp + 1) & 0xFF)) << 8);
-          addr = (base + this.Y) & 0xFFFF; pageCrossed = (base & 0xFF00) !== (addr & 0xFF00);
-          if (!skipRead) value = this.read(addr); break;
-        }
-        case 'rel': addr = this.fetchByte(); break;
-        default: throw new Error(`未知のアドレッシングモード: ${mode}`);
+        case IMP: this.rd(this.PC); break;                       // 次のバイトを空読み
+        case IMM: case REL: this.imm = this._fetch(); break;
+        case ZPG: this.ea = ZP + this._fetch(); this._tick(); break;
+        case ZPX: this.ea = ZP + ((this._fetch() + this.X) & 0xFF); this._tick(); break;
+        case ZPY: this.ea = ZP + ((this._fetch() + this.Y) & 0xFF); this._tick(); break;
+        case ABS: { const lo = this._fetch(); this.ea = lo | (this._fetch() << 8); this._tick(); break; }
+        case ABX: { const lo = this._fetch(); this.ea = ((lo | (this._fetch() << 8)) + this.X) & 0xFFFF; this._tick(); break; }
+        case ABY: { const lo = this._fetch(); this.ea = ((lo | (this._fetch() << 8)) + this.Y) & 0xFFFF; this._tick(); break; }
+        case IZX: { const z = this._fetch(); this._tick(); this.ea = this._zpWord((z + this.X) & 0xFF); this._tick(); break; }
+        case IZY: { const z = this._fetch(); this._tick(); this.ea = (this._zpWord(z) + this.Y) & 0xFFFF; this._tick(); break; }
+        case IZP: { const z = this._fetch(); this._tick(); this.ea = this._zpWord(z); this._tick(); break; }
+        case IND: { const lo = this._fetch(); this.ea = lo | (this._fetch() << 8); break; }
+        case IAX: { const lo = this._fetch(); this.ea = ((lo | (this._fetch() << 8)) + this.X) & 0xFFFF; this._tick(); break; }
+        case TZP: this.imm = this._fetch(); this.ea = ZP + this._fetch(); this._tick(); break;
+        case TZX: this.imm = this._fetch(); this.ea = ZP + ((this._fetch() + this.X) & 0xFF); this._tick(); break;
+        case TAB: { this.imm = this._fetch(); const lo = this._fetch(); this.ea = lo | (this._fetch() << 8); this._tick(); break; }
+        case TAX: { this.imm = this._fetch(); const lo = this._fetch(); this.ea = ((lo | (this._fetch() << 8)) + this.X) & 0xFFFF; this._tick(); break; }
+        default: break; // ZRL / BLK / NON は命令の中で読む
       }
-      // 直近の「メモリからのデータ読出し」の論理アドレス。DDA(PCM)キャプチャ
-      // (hesPlayer.js captureHesSongAsync)が「$0806へ書かれたサンプル値はROMのどこから
-      // 読まれたか」を突き止めるために参照する(hes2mml/expansion/dpcm.js冒頭コメント参照)。
-      // skipRead(STA/STZ等のストア系。書込み先アドレスは読出しではない)とrel(分岐オフセット)
-      // は除外する。実測(NX91002.hes)ではストリーミングループのLDA (zp)がここに残り、
-      // 43142/43142件でROMバイトと書込み値が一致した。
-      if (!skipRead && addr !== null && mode !== 'rel') this.lastDataAddr = addr;
-      return { addr, value, pageCrossed };
     }
 
-    writeOperand(mode, addr, value) {
-      if (mode === 'acc') this.A = value & 0xFF; else this.write(addr, value);
+    /**
+     * 割り込みへ入る(8 サイクル)。
+     * [参照] PceCpu::ProcessIrq: 空読み 2 回 → PC 上位/下位 → P(B=0、D と T はそのまま積む)→ D と T を消して I=1 → ベクタ 2 バイト → 内部 1。
+     */
+    _interrupt(vector) {
+      this.rd(this.PC); this.rd(this.PC);
+      this._push(this.PC >> 8); this._push(this.PC & 0xFF);
+      this._push(this.P & ~F_B);
+      this.P = (this.P & ~(F_D | F_T)) | F_I;
+      this.PC = this._word(vector);
+      this._tick();
     }
 
-    // SETのTフラグは「直後の1命令」だけ有効(命令実行後に必ずクリアする)
-    clearSetFlagIfNeeded(wasSet) { if (wasSet) this.setFlag(F_T, false); }
+    /**
+     * 命令の後の割り込み判定。
+     * [参照] PceCpu::Exec / ProcessIrq: 最後のサイクルで見た線(irqSample)で決める。優先はタイマ > IRQ1 > IRQ2。
+     * タイマだけは「今もかかっているか」をもう一度見る(最後のサイクルで $1403 に書いて下げた時は入らない)。
+     * IRQ1/IRQ2 は最後のサイクルの読み書きで下がっても入る。
+     * ★ Mesen のコメントによれば、タイマと IRQ1/IRQ2 でこの扱いが違うのは実機では未確認で、ゲームの動きから決めた物。
+     */
+    _checkIrq() {
+      const p = this.irqSample;
+      if (!p) return;
+      if ((p & LINE_TIMER) && (this.bus.irqLines() & LINE_TIMER)) this._interrupt(VEC_TIMER);
+      else if (p & LINE_IRQ1) this._interrupt(VEC_IRQ1);
+      else if (p & LINE_IRQ2) this._interrupt(VEC_IRQ2);
+    }
 
+    /** 1 命令(と、その後の割り込み入り)を実行し、使った CPU サイクル数を返す */
     step() {
-      // 割込ディスパッチ: Iフラグがクリアで、busが未処理の割込ベクタを返せば分岐する。
-      // BRKと違いBフラグは立てずに積む(標準65C02仕様)。
-      if (!this.getFlag(F_I) && this.bus.pollIrq) {
-        const vector = this.bus.pollIrq();
-        if (vector >= 0) {
-          this.push((this.PC >> 8) & 0xFF);
-          this.push(this.PC & 0xFF);
-          this.push(this.P & ~F_B);
-          this.setFlag(F_I, true);
-          this.setFlag(F_T, false); // 実機挙動未確認だが、割込を跨いでTフラグを持ち越す意味は無い
-          this.PC = this.read16(vector);
-          return 7; // 割込受付にかかる概算サイクル数
-        }
+      const c0 = this.cycles;
+      // HES 用の待ち場所: INIT が RTS で戻った先。何も実行せず割り込みだけ待つ。
+      // [推定] 実機には無い仕掛け(HES という形式の都合)。Mesen は I/O の空き番地 $1C00 に「自分へ飛ぶ BRA」を見せて同じ事をしている。
+      // 4 サイクルの BRA を回すのと同じ間隔で割り込みを見るよう、4 サイクルずつ進める。
+      if (this.idleAtSentinel && this.PC === CALL_SENTINEL) {
+        this._tick(); this._tick(); this._tick(); this._tick();
+        this._checkIrq();
+        return this.cycles - c0;
       }
-      // 番兵アドレス到達時は実フェッチを一切行わずアイドルする(HuC6280にWAI相当命令が無いための
-      // 代替措置)。★重要な経緯: 当初は「INITがRTSで戻ってきたら$3FFF(ゼロ初期化RAM=BRK)へ
-      // 落とし、BRK→IRQ2ベクタ→ゲーム側のスタブへ」という設計だったが、実測でHESのINITは
-      // 本当にRTSで返ってくることが判明し(GBS/NSF等と違い稀なケースではなかった)、そのたびに
-      // $4000番地以降の「たまたまBRKの戻り先計算で踏んでしまった、本来無関係なROMバイト列」を
-      // 本物の命令として実行してしまっていた。これが実在の命令列に偶然似た(特に$FF=BBS7が
-      // 0除算ならぬ「無限に0xFFを読み進むだけの安定した徘徊」を生む)ため一見動いているように
-      // 見えるが、最終的に対応しないRTS(スタックアンダーフロー)を踏んでスタックが破壊され、
-      // Iフラグが立ちっぱなしで割込が二度と発生しなくなる(音が1音で固まる/やがて完全に
-      // ハングする)不具合の直接原因だった(NAPH-1011.hes/NX91002.hesの実測で確認)。
-      // beginCall()が積む番兵($FFFF、cpu.js等の他CPUコアと同じCALL_SENTINEL)へPCが到達したら、
-      // メモリ上の中身に関わらず「割込待ちでアイドル」させることで、この種の暴走を根治する。
-      if (this.PC === CALL_SENTINEL) return 2;
-      const wasSet = this.getFlag(F_T);
-      const opcode = this.fetchByte();
-      const def = OPS[opcode];
-      let cycles;
-      if (!def) {
-        cycles = 2; // 6280は未定義オペコードが無いはずだが、防御的にNOP扱い
-      } else {
-        const extra = def.exec(this, def.mode);
-        cycles = def.cycles + (extra || 0);
-      }
-      // TSTのようにmode自体がゼロページ,Xを内部で使う命令もzpIndexed経由でTを消費する。
-      // ここで一括してクリアすることで「SET直後の命令」以外に影響が及ばないようにする。
-      this.clearSetFlagIfNeeded(wasSet);
-      return cycles;
+      // T フラグは命令の頭で取り込んで消す(効くのは次の 1 命令だけ)
+      this.tMode = (this.P & F_T) !== 0;
+      this.P &= ~F_T;
+      const op = this._fetch();
+      const mode = MODE[op];
+      this.mode = mode;
+      this._operand(mode);
+      EXEC[op](this);
+      this._checkIrq();
+      return this.cycles - c0;
     }
 
+    // ── HES の呼び出し枠(旧インターフェース) ──
     call(addr, maxSteps = 500000) {
-      const ret = (CALL_SENTINEL - 1) & 0xFFFF;
-      this.push((ret >> 8) & 0xFF); this.push(ret & 0xFF);
-      this.PC = addr & 0xFFFF;
+      this.beginCall(addr);
       let steps = 0;
       while (this.PC !== CALL_SENTINEL && steps < maxSteps) { this.step(); steps++; }
+      this.callActive = false;
       return steps;
     }
-
     beginCall(addr) {
+      this.idleAtSentinel = true;
       const ret = (CALL_SENTINEL - 1) & 0xFFFF;
-      this.push((ret >> 8) & 0xFF); this.push(ret & 0xFF);
+      this.write(STACK + this.S, ret >> 8); this.S = (this.S - 1) & 0xFF;
+      this.write(STACK + this.S, ret & 0xFF); this.S = (this.S - 1) & 0xFF;
       this.PC = addr & 0xFFFF;
       this.callActive = true;
     }
-
     stepCall() {
       const c = this.step();
       if (this.PC === CALL_SENTINEL) this.callActive = false;
@@ -309,396 +319,372 @@
     }
   }
 
-  // --- 命令ハンドラ ---
+  // ── 演算 ──
 
-  function binAdd(cpu, value, carryIn) {
-    const sum = cpu.A + value + carryIn;
-    const result = sum & 0xFF;
-    cpu.setFlag(F_V, ((cpu.A ^ result) & (value ^ result) & 0x80) !== 0);
-    cpu.setFlag(F_C, sum > 0xFF);
-    cpu.A = result;
-    cpu.setZN(cpu.A);
+  // T フラグつきの AND/ORA/EOR/ADC は、A の代わりにゼロページ,X のメモリを相手にする(読み → 内部 1 → 書き)
+  function tRead(c) { const v = c.rd(ZP + c.X); c._tick(); return v; }
+  function tWrite(c, v) { c._nz(v); c.wr(ZP + c.X, v); }
+
+  function logic(c, f) {
+    const v = c._val();
+    if (c.tMode) { const m = tRead(c); tWrite(c, f(m, v) & 0xFF); }
+    else { c.A = f(c.A, v) & 0xFF; c._nz(c.A); }
   }
-  // CMOS(65C02系)方式のBCD補正。Zは2進加算の結果から、N/Vは下位ニブル補正後の値から
-  // 求める(WDC 65C02仕様。冒頭コメントの通り実機未検証の近似)。
-  function decAdd(cpu, value, carryIn) {
-    const a = cpu.A;
-    let al = (a & 0x0F) + (value & 0x0F) + carryIn;
-    let ah = (a >> 4) + (value >> 4);
-    if (al > 9) { al += 6; }
-    if (al > 0x0F) ah++;
-    const preClampResult = ((ah & 0x0F) << 4) | (al & 0x0F);
-    cpu.setFlag(F_Z, ((a + value + carryIn) & 0xFF) === 0);
-    cpu.setFlag(F_N, (preClampResult & 0x80) !== 0);
-    cpu.setFlag(F_V, (((a ^ value) & 0x80) === 0) && (((a ^ preClampResult) & 0x80) !== 0));
-    if (ah > 9) ah += 6;
-    cpu.setFlag(F_C, ah > 15);
-    cpu.A = ((ah & 0x0F) << 4) | (al & 0x0F);
-  }
-  function ADC(cpu, mode) {
-    const op = cpu.fetchOperand(mode);
-    const c = cpu.getFlag(F_C) ? 1 : 0;
-    if (cpu.getFlag(F_D)) decAdd(cpu, op.value, c); else binAdd(cpu, op.value, c);
-    return op.pageCrossed ? 1 : 0;
-  }
-  function decSub(cpu, value, carryIn) {
-    const a = cpu.A;
-    const binResult = (a - value - (1 - carryIn)) & 0xFF;
-    let al = (a & 0x0F) - (value & 0x0F) - (1 - carryIn);
-    let ah = (a >> 4) - (value >> 4);
-    if (al < 0) { al -= 6; ah--; }
-    if (ah < 0) ah -= 6;
-    const sum = a - value - (1 - carryIn);
-    cpu.setFlag(F_C, sum >= 0);
-    cpu.setFlag(F_V, (((a ^ value) & 0x80) !== 0) && (((a ^ binResult) & 0x80) !== 0));
-    cpu.setFlag(F_Z, binResult === 0);
-    cpu.setFlag(F_N, (binResult & 0x80) !== 0);
-    cpu.A = ((ah & 0x0F) << 4) | (al & 0x0F);
-  }
-  function SBC(cpu, mode) {
-    const op = cpu.fetchOperand(mode);
-    const c = cpu.getFlag(F_C) ? 1 : 0;
-    if (cpu.getFlag(F_D)) decSub(cpu, op.value, c);
-    else binAdd(cpu, op.value ^ 0xFF, c);
-    return op.pageCrossed ? 1 : 0;
-  }
+  const fAnd = (a, b) => a & b, fOra = (a, b) => a | b, fEor = (a, b) => a ^ b;
 
-  function AND(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A &= op.value; cpu.setZN(cpu.A); return op.pageCrossed ? 1 : 0; }
-  function ORA(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A |= op.value; cpu.setZN(cpu.A); return op.pageCrossed ? 1 : 0; }
-  function EOR(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A ^= op.value; cpu.setZN(cpu.A); return op.pageCrossed ? 1 : 0; }
-
-  function ASL(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = (op.value << 1) & 0xFF; cpu.setZN(r); cpu.writeOperand(mode, op.addr, r); return 0; }
-  function LSR(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_C, (op.value & 0x01) !== 0); const r = (op.value >> 1) & 0xFF; cpu.setZN(r); cpu.writeOperand(mode, op.addr, r); return 0; }
-  function ROL(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 0x80) !== 0); const r = ((op.value << 1) | c) & 0xFF; cpu.setZN(r); cpu.writeOperand(mode, op.addr, r); return 0; }
-  function ROR(cpu, mode) { const op = cpu.fetchOperand(mode); const c = cpu.getFlag(F_C) ? 1 : 0; cpu.setFlag(F_C, (op.value & 0x01) !== 0); const r = ((op.value >> 1) | (c << 7)) & 0xFF; cpu.setZN(r); cpu.writeOperand(mode, op.addr, r); return 0; }
-  function INC(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value + 1) & 0xFF; cpu.setZN(r); cpu.writeOperand(mode, op.addr, r); return 0; }
-  function DEC(cpu, mode) { const op = cpu.fetchOperand(mode); const r = (op.value - 1) & 0xFF; cpu.setZN(r); cpu.writeOperand(mode, op.addr, r); return 0; }
-
-  function compare(cpu, reg, value) { const r = (reg - value) & 0x1FF; cpu.setFlag(F_C, reg >= value); cpu.setZN(r & 0xFF); }
-  function CMP(cpu, mode) { const op = cpu.fetchOperand(mode); compare(cpu, cpu.A, op.value); return op.pageCrossed ? 1 : 0; }
-  function CPX(cpu, mode) { const op = cpu.fetchOperand(mode); compare(cpu, cpu.X, op.value); return 0; }
-  function CPY(cpu, mode) { const op = cpu.fetchOperand(mode); compare(cpu, cpu.Y, op.value); return 0; }
-
-  function BIT(cpu, mode) {
-    const op = cpu.fetchOperand(mode);
-    cpu.setFlag(F_Z, (cpu.A & op.value) === 0);
-    if (mode !== 'imm') { cpu.setFlag(F_V, (op.value & 0x40) !== 0); cpu.setFlag(F_N, (op.value & 0x80) !== 0); }
-    return 0;
-  }
-  // TRB/TSB: メモリのZフラグ判定はBITと同じ(A&Mが0か)。TRBはMからAのビットを取り除き、
-  // TSBはMへAのビットを立てる(いずれもN/Vは変化しない、65C02仕様)。
-  function TSB(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_Z, (cpu.A & op.value) === 0); cpu.writeOperand(mode, op.addr, op.value | cpu.A); return 0; }
-  function TRB(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.setFlag(F_Z, (cpu.A & op.value) === 0); cpu.writeOperand(mode, op.addr, op.value & ~cpu.A); return 0; }
-  function STZ(cpu, mode) { const op = cpu.fetchOperand(mode, true); cpu.write(op.addr, 0); return 0; }
-
-  function branch(cpu, mode, cond) {
-    const op = cpu.fetchOperand(mode);
-    if (!cond) return 0;
-    const offset = op.addr < 0x80 ? op.addr : op.addr - 0x100;
-    const oldPC = cpu.PC;
-    cpu.PC = (cpu.PC + offset) & 0xFFFF;
-    return (oldPC & 0xFF00) !== (cpu.PC & 0xFF00) ? 2 : 1;
-  }
-
-  function LDA(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.A = op.value; cpu.setZN(cpu.A); return op.pageCrossed ? 1 : 0; }
-  function LDX(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.X = op.value; cpu.setZN(cpu.X); return op.pageCrossed ? 1 : 0; }
-  function LDY(cpu, mode) { const op = cpu.fetchOperand(mode); cpu.Y = op.value; cpu.setZN(cpu.Y); return op.pageCrossed ? 1 : 0; }
-  function STA(cpu, mode) { const op = cpu.fetchOperand(mode, true); cpu.write(op.addr, cpu.A); return 0; }
-  function STX(cpu, mode) { const op = cpu.fetchOperand(mode, true); cpu.write(op.addr, cpu.X); return 0; }
-  function STY(cpu, mode) { const op = cpu.fetchOperand(mode, true); cpu.write(op.addr, cpu.Y); return 0; }
-
-  function JMP(cpu, mode) {
-    if (mode === 'abs') { cpu.PC = cpu.read16(cpu.PC); }
-    else if (mode === 'abind') { const ptr = cpu.read16(cpu.PC); cpu.PC = cpu.read16(ptr); } // 65C02: ページ境界バグ無し
-    else { const base = cpu.read16(cpu.PC); const ptr = (base + cpu.X) & 0xFFFF; cpu.PC = cpu.read16(ptr); } // abindx
-    return 0;
-  }
-  function JSR(cpu) {
-    const target = cpu.read16(cpu.PC);
-    const ret = (cpu.PC + 1) & 0xFFFF;
-    cpu.push((ret >> 8) & 0xFF); cpu.push(ret & 0xFF);
-    cpu.PC = target;
-    return 0;
-  }
-  function RTS(cpu) { const lo = cpu.pop(); const hi = cpu.pop(); cpu.PC = (((hi << 8) | lo) + 1) & 0xFFFF; return 0; }
-  function BSR(cpu) {
-    // BSR rel: 相対サブルーチン呼出(絶対番地ではなく符号付き8bitオフセット指定のJSR)。
-    // JSRと同じく「命令末尾のアドレス」を積み、RTSが+1して次命令へ戻る。
-    const d = cpu.fetchSigned();
-    const retM1 = (cpu.PC - 1) & 0xFFFF;
-    cpu.push((retM1 >> 8) & 0xFF); cpu.push(retM1 & 0xFF);
-    cpu.PC = (cpu.PC + d) & 0xFFFF;
-    return 0;
-  }
-  function BRK(cpu) {
-    cpu.PC = (cpu.PC + 1) & 0xFFFF;
-    cpu.push((cpu.PC >> 8) & 0xFF); cpu.push(cpu.PC & 0xFF);
-    cpu.push(cpu.P | F_B);
-    cpu.setFlag(F_I, true);
-    cpu.setFlag(F_D, false); // 65C02はBRK/IRQでDフラグを自動クリアする
-    cpu.PC = cpu.read16(0xFFF6); // HES: BRK/IRQ2ベクタ
-    return 0;
-  }
-  function RTI(cpu) {
-    cpu.P = cpu.pop() & ~F_B;
-    const lo = cpu.pop(); const hi = cpu.pop();
-    cpu.PC = (hi << 8) | lo;
-    return 0;
-  }
-
-  function PHA(cpu) { cpu.push(cpu.A); return 0; }
-  function PHX(cpu) { cpu.push(cpu.X); return 0; }
-  function PHY(cpu) { cpu.push(cpu.Y); return 0; }
-  function PHP(cpu) { cpu.push(cpu.P | F_B); return 0; }
-  function PLA(cpu) { cpu.A = cpu.pop(); cpu.setZN(cpu.A); return 0; }
-  function PLX(cpu) { cpu.X = cpu.pop(); cpu.setZN(cpu.X); return 0; }
-  function PLY(cpu) { cpu.Y = cpu.pop(); cpu.setZN(cpu.Y); return 0; }
-  function PLP(cpu) { cpu.P = cpu.pop() & ~F_B; return 0; }
-
-  function TAX(cpu) { cpu.X = cpu.A; cpu.setZN(cpu.X); return 0; }
-  function TAY(cpu) { cpu.Y = cpu.A; cpu.setZN(cpu.Y); return 0; }
-  function TXA(cpu) { cpu.A = cpu.X; cpu.setZN(cpu.A); return 0; }
-  function TYA(cpu) { cpu.A = cpu.Y; cpu.setZN(cpu.A); return 0; }
-  function TSX(cpu) { cpu.X = cpu.S; cpu.setZN(cpu.X); return 0; }
-  function TXS(cpu) { cpu.S = cpu.X; return 0; } // Zフラグ等は変化しない(標準6502仕様)
-  // 6280固有のレジスタ交換/クリア命令
-  function SXY(cpu) { const t = cpu.X; cpu.X = cpu.Y; cpu.Y = t; return 0; }
-  function SAX(cpu) { const t = cpu.A; cpu.A = cpu.X; cpu.X = t; return 0; }
-  function SAY(cpu) { const t = cpu.A; cpu.A = cpu.Y; cpu.Y = t; return 0; }
-  function CLA(cpu) { cpu.A = 0; return 0; }
-  function CLX(cpu) { cpu.X = 0; return 0; }
-  function CLY(cpu) { cpu.Y = 0; return 0; }
-
-  function INX(cpu) { cpu.X = (cpu.X + 1) & 0xFF; cpu.setZN(cpu.X); return 0; }
-  function INY(cpu) { cpu.Y = (cpu.Y + 1) & 0xFF; cpu.setZN(cpu.Y); return 0; }
-  function DEX(cpu) { cpu.X = (cpu.X - 1) & 0xFF; cpu.setZN(cpu.X); return 0; }
-  function DEY(cpu) { cpu.Y = (cpu.Y - 1) & 0xFF; cpu.setZN(cpu.Y); return 0; }
-  function INC_A(cpu) { cpu.A = (cpu.A + 1) & 0xFF; cpu.setZN(cpu.A); return 0; }
-  function DEC_A(cpu) { cpu.A = (cpu.A - 1) & 0xFF; cpu.setZN(cpu.A); return 0; }
-
-  function SEC(cpu) { cpu.setFlag(F_C, true); return 0; }
-  function CLC(cpu) { cpu.setFlag(F_C, false); return 0; }
-  function SEI(cpu) { cpu.setFlag(F_I, true); return 0; }
-  function CLI(cpu) { cpu.setFlag(F_I, false); return 0; }
-  function SED(cpu) { cpu.setFlag(F_D, true); return 0; }
-  function CLD(cpu) { cpu.setFlag(F_D, false); return 0; }
-  function CLV(cpu) { cpu.setFlag(F_V, false); return 0; }
-  function SET(cpu) { cpu.setFlag(F_T, true); return 0; }
-  // CSH/CSL: CPU速度切替(High=7.16MHz相当/Low=1.79MHz相当)。命令自体の効果はフラグ切替のみ
-  // (hesPlayer.js側がcpu.speedHighを見てCPUサイクル→マスタークロックティックの換算比を変える)。
-  function CSH(cpu) { cpu.speedHigh = true; return 0; }
-  function CSL(cpu) { cpu.speedHigh = false; return 0; }
-
-  function NOP(cpu, mode) { if (mode !== 'impl') cpu.fetchOperand(mode); return 0; }
-
-  // ST0/ST1/ST2: 即値1byteをそれぞれ $0000/$0002/$0003 (HuC6270 VDCポート) へ直接ストアする
-  // 専用命令(通常のSTAより1byte短い・高速)。bus経由で書くのでMMU/I/O分岐は自然に効く。
-  function ST0(cpu) { const v = cpu.fetchByte(); cpu.write(0x0000, v); return 0; }
-  function ST1(cpu) { const v = cpu.fetchByte(); cpu.write(0x0002, v); return 0; }
-  function ST2(cpu) { const v = cpu.fetchByte(); cpu.write(0x0003, v); return 0; }
-
-  // TAMi/TMAi: オペランドはビットマスク(bit0=MPR0 .. bit7=MPR7)。セットされている全bitに
-  // 対しAを書き込む/読み出す(複数bit同時指定可、TMAは該当する最初のMPRを返す)。
-  function TAMi(cpu) {
-    const mask = cpu.fetchByte();
-    for (let i = 0; i < 8; i++) if (mask & (1 << i)) cpu.bus.setMpr(i, cpu.A);
-    return 0;
-  }
-  function TMAi(cpu) {
-    const mask = cpu.fetchByte();
-    for (let i = 0; i < 8; i++) if (mask & (1 << i)) { cpu.A = cpu.bus.getMpr(i); break; }
-    return 0;
-  }
-
-  // TST #nn,target: target(zp/zpx/abs/absx)の値と即値nnをANDしてN/Zを更新する(Aは変化しない)。
-  // Vフラグは変化しない(BITと違い、この命令の対象はメモリ即値マスクでしかない)。
-  function TST(cpu, mode) {
-    const imm = cpu.fetchByte();
-    const op = cpu.fetchOperand(mode);
-    const r = imm & op.value;
-    cpu.setFlag(F_Z, r === 0);
-    cpu.setFlag(F_N, (imm & 0x80) !== 0); // 65C02系実装の通例(即値のbit7をNへ反映)
-    return 0;
-  }
-
-  // RMBi/SMBi: ゼロページのbit iをクリア/セットする。BBRi/BBSi: 同bitが0/1なら分岐する
-  // (65C02標準、opcodeのy=bit3-5相当が命令テーブル生成時にbitIndexとして渡される)。
-  function RMB(cpu, bit) { const zp = cpu.zpToAddr(cpu.fetchByte()); const v = cpu.read(zp); cpu.write(zp, v & ~(1 << bit)); return 0; }
-  function SMB(cpu, bit) { const zp = cpu.zpToAddr(cpu.fetchByte()); const v = cpu.read(zp); cpu.write(zp, v | (1 << bit)); return 0; }
-  function BBR(cpu, bit) {
-    const zp = cpu.zpToAddr(cpu.fetchByte()); const v = cpu.read(zp); const d = cpu.fetchSigned();
-    if (((v >> bit) & 1) === 0) { cpu.PC = (cpu.PC + d) & 0xFFFF; return 2; }
-    return 0;
-  }
-  function BBS(cpu, bit) {
-    const zp = cpu.zpToAddr(cpu.fetchByte()); const v = cpu.read(zp); const d = cpu.fetchSigned();
-    if (((v >> bit) & 1) === 1) { cpu.PC = (cpu.PC + d) & 0xFFFF; return 2; }
-    return 0;
-  }
-
-  // TII/TDD/TIA/TAI/TIN: 7byte命令(opcode,SL,SH,DL,DH,LL,LH)。srcMode/dstModeはそれぞれ
-  // 'inc'|'dec'|'alt'|'fix'。lengthが0なら65536byte転送。cycles=17+6*count(マニュアル値)。
-  function blockTransfer(cpu, srcMode, dstMode) {
-    let src = cpu.fetchByte() | (cpu.fetchByte() << 8);
-    let dst = cpu.fetchByte() | (cpu.fetchByte() << 8);
-    let len = cpu.fetchByte() | (cpu.fetchByte() << 8);
-    const count = len === 0 ? 0x10000 : len;
-    let altToggle = 0; // TIA/TAIの"alternate"側で使う+1/-1の交互パターン
-    for (let i = 0; i < count; i++) {
-      const value = cpu.read(src);
-      cpu.write(dst, value);
-      if (srcMode === 'inc') src = (src + 1) & 0xFFFF;
-      else if (srcMode === 'dec') src = (src - 1) & 0xFFFF;
-      else if (srcMode === 'alt') { src = (src + (altToggle === 0 ? 1 : -1)) & 0xFFFF; }
-      if (dstMode === 'inc') dst = (dst + 1) & 0xFFFF;
-      else if (dstMode === 'dec') dst = (dst - 1) & 0xFFFF;
-      else if (dstMode === 'alt') { dst = (dst + (altToggle === 0 ? 1 : -1)) & 0xFFFF; }
-      // 'fix'は据え置き
-      altToggle ^= 1;
+  function ADC(c) {
+    const v = c._val();
+    const src = c.tMode ? tRead(c) : c.A;
+    const cin = c.P & F_C;
+    let r;
+    if (c.P & F_D) {
+      // 10 進は 1 サイクル多い。V は変わらない
+      if (c.tMode) c._tick(); else c.rd(c.PC);
+      r = (src & 0x0F) + (v & 0x0F) + cin;
+      if (r > 0x09) r += 0x06;
+      r = (src & 0xF0) + (v & 0xF0) + (r > 0x0F ? 0x10 : 0) + (r & 0x0F);
+      if (r > 0x9F) r += 0x60;
+    } else {
+      r = src + v + cin;
+      c.P = (~(src ^ v) & (src ^ r) & 0x80) ? (c.P | F_V) : (c.P & ~F_V);
     }
-    cpu.setFlag(F_Z, true); // マニュアル: 転送後Z=1固定 (T列以外は"-"だがZだけ明示的に0扱いの記述あり、安全側でZ=1にしておく)
-    return 6 * count; // 基本17サイクルはOPS側cyclesに含める。追加分のみここで返す
+    c.P = (c.P & ~F_C) | (r > 0xFF ? F_C : 0);
+    r &= 0xFF;
+    if (c.tMode) tWrite(c, r); else { c.A = r; c._nz(r); }
   }
-  function TII(cpu) { return blockTransfer(cpu, 'inc', 'inc'); }
-  function TDD(cpu) { return blockTransfer(cpu, 'dec', 'dec'); }
-  function TIA(cpu) { return blockTransfer(cpu, 'inc', 'alt'); }
-  function TAI(cpu) { return blockTransfer(cpu, 'alt', 'inc'); }
-  function TIN(cpu) { return blockTransfer(cpu, 'inc', 'fix'); }
 
-  // mnemonic -> {mode: [opcodeByte, cycles]}
-  const TABLE = {
-    ADC: { fn: ADC, modes: { imm: [0x69, 2], zp: [0x65, 4], zpx: [0x75, 4], zpind: [0x72, 7], abs: [0x6D, 5], absx: [0x7D, 5], absy: [0x79, 5], indx: [0x61, 7], indy: [0x71, 7] } },
-    AND: { fn: AND, modes: { imm: [0x29, 2], zp: [0x25, 4], zpx: [0x35, 4], zpind: [0x32, 7], abs: [0x2D, 5], absx: [0x3D, 5], absy: [0x39, 5], indx: [0x21, 7], indy: [0x31, 7] } },
-    ASL: { fn: ASL, modes: { acc: [0x0A, 2], zp: [0x06, 6], zpx: [0x16, 6], abs: [0x0E, 6], absx: [0x1E, 7] } },
-    BCC: { fn: (c, m) => branch(c, m, !c.getFlag(F_C)), modes: { rel: [0x90, 2] } },
-    BCS: { fn: (c, m) => branch(c, m, c.getFlag(F_C)), modes: { rel: [0xB0, 2] } },
-    BEQ: { fn: (c, m) => branch(c, m, c.getFlag(F_Z)), modes: { rel: [0xF0, 2] } },
-    BMI: { fn: (c, m) => branch(c, m, c.getFlag(F_N)), modes: { rel: [0x30, 2] } },
-    BNE: { fn: (c, m) => branch(c, m, !c.getFlag(F_Z)), modes: { rel: [0xD0, 2] } },
-    BPL: { fn: (c, m) => branch(c, m, !c.getFlag(F_N)), modes: { rel: [0x10, 2] } },
-    BVC: { fn: (c, m) => branch(c, m, !c.getFlag(F_V)), modes: { rel: [0x50, 2] } },
-    BVS: { fn: (c, m) => branch(c, m, c.getFlag(F_V)), modes: { rel: [0x70, 2] } },
-    BRA: { fn: (c, m) => branch(c, m, true), modes: { rel: [0x80, 4] } },
-    BIT: { fn: BIT, modes: { imm: [0x89, 2], zp: [0x24, 4], zpx: [0x34, 4], abs: [0x2C, 5], absx: [0x3C, 5] } },
-    BRK: { fn: BRK, modes: { impl: [0x00, 8] } },
-    BSR: { fn: BSR, modes: { rel: [0x44, 8] } },
-    CLC: { fn: CLC, modes: { impl: [0x18, 2] } },
-    CLD: { fn: CLD, modes: { impl: [0xD8, 2] } },
-    CLI: { fn: CLI, modes: { impl: [0x58, 2] } },
-    CLV: { fn: CLV, modes: { impl: [0xB8, 2] } },
-    CLA: { fn: CLA, modes: { impl: [0x62, 2] } },
-    CLX: { fn: CLX, modes: { impl: [0x82, 2] } },
-    CLY: { fn: CLY, modes: { impl: [0xC2, 2] } },
-    CSH: { fn: CSH, modes: { impl: [0xD4, 3] } },
-    CSL: { fn: CSL, modes: { impl: [0x54, 3] } },
-    CMP: { fn: CMP, modes: { imm: [0xC9, 2], zp: [0xC5, 4], zpx: [0xD5, 4], zpind: [0xD2, 7], abs: [0xCD, 5], absx: [0xDD, 5], absy: [0xD9, 5], indx: [0xC1, 7], indy: [0xD1, 7] } },
-    CPX: { fn: CPX, modes: { imm: [0xE0, 2], zp: [0xE4, 4], abs: [0xEC, 5] } },
-    CPY: { fn: CPY, modes: { imm: [0xC0, 2], zp: [0xC4, 4], abs: [0xCC, 5] } },
-    DEC: { fn: DEC, modes: { acc: [0x3A, 2], zp: [0xC6, 6], zpx: [0xD6, 6], abs: [0xCE, 6], absx: [0xDE, 7] } },
-    DEX: { fn: DEX, modes: { impl: [0xCA, 2] } },
-    DEY: { fn: DEY, modes: { impl: [0x88, 2] } },
-    EOR: { fn: EOR, modes: { imm: [0x49, 2], zp: [0x45, 4], zpx: [0x55, 4], zpind: [0x52, 7], abs: [0x4D, 5], absx: [0x5D, 5], absy: [0x59, 5], indx: [0x41, 7], indy: [0x51, 7] } },
-    INC: { fn: INC, modes: { acc: [0x1A, 2], zp: [0xE6, 6], zpx: [0xF6, 6], abs: [0xEE, 6], absx: [0xFE, 7] } },
-    INX: { fn: INX, modes: { impl: [0xE8, 2] } },
-    INY: { fn: INY, modes: { impl: [0xC8, 2] } },
-    JMP: { fn: JMP, modes: { abs: [0x4C, 4], abind: [0x6C, 7], abindx: [0x7C, 7] } },
-    JSR: { fn: JSR, modes: { abs: [0x20, 7] } },
-    LDA: { fn: LDA, modes: { imm: [0xA9, 2], zp: [0xA5, 4], zpx: [0xB5, 4], zpind: [0xB2, 7], abs: [0xAD, 5], absx: [0xBD, 5], absy: [0xB9, 5], indx: [0xA1, 7], indy: [0xB1, 7] } },
-    LDX: { fn: LDX, modes: { imm: [0xA2, 2], zp: [0xA6, 4], zpy: [0xB6, 4], abs: [0xAE, 5], absy: [0xBE, 5] } },
-    LDY: { fn: LDY, modes: { imm: [0xA0, 2], zp: [0xA4, 4], zpx: [0xB4, 4], abs: [0xAC, 5], absx: [0xBC, 5] } },
-    LSR: { fn: LSR, modes: { acc: [0x4A, 2], zp: [0x46, 6], zpx: [0x56, 6], abs: [0x4E, 6], absx: [0x5E, 7] } },
-    NOP: { fn: NOP, modes: { impl: [0xEA, 2] } },
-    ORA: { fn: ORA, modes: { imm: [0x09, 2], zp: [0x05, 4], zpx: [0x15, 4], zpind: [0x12, 7], abs: [0x0D, 5], absx: [0x1D, 5], absy: [0x19, 5], indx: [0x01, 7], indy: [0x11, 7] } },
-    PHA: { fn: PHA, modes: { impl: [0x48, 3] } },
-    PHX: { fn: PHX, modes: { impl: [0xDA, 3] } },
-    PHY: { fn: PHY, modes: { impl: [0x5A, 3] } },
-    PHP: { fn: PHP, modes: { impl: [0x08, 3] } },
-    PLA: { fn: PLA, modes: { impl: [0x68, 4] } },
-    PLX: { fn: PLX, modes: { impl: [0xFA, 4] } },
-    PLY: { fn: PLY, modes: { impl: [0x7A, 4] } },
-    PLP: { fn: PLP, modes: { impl: [0x28, 4] } },
-    ROL: { fn: ROL, modes: { acc: [0x2A, 2], zp: [0x26, 6], zpx: [0x36, 6], abs: [0x2E, 6], absx: [0x3E, 7] } },
-    ROR: { fn: ROR, modes: { acc: [0x6A, 2], zp: [0x66, 6], zpx: [0x76, 6], abs: [0x6E, 6], absx: [0x7E, 7] } },
-    RTI: { fn: RTI, modes: { impl: [0x40, 7] } },
-    RTS: { fn: RTS, modes: { impl: [0x60, 7] } },
-    SAX: { fn: SAX, modes: { impl: [0x22, 3] } },
-    SAY: { fn: SAY, modes: { impl: [0x42, 3] } },
-    SBC: { fn: SBC, modes: { imm: [0xE9, 2], zp: [0xE5, 4], zpx: [0xF5, 4], zpind: [0xF2, 7], abs: [0xED, 5], absx: [0xFD, 5], absy: [0xF9, 5], indx: [0xE1, 7], indy: [0xF1, 7] } },
-    SEC: { fn: SEC, modes: { impl: [0x38, 2] } },
-    SED: { fn: SED, modes: { impl: [0xF8, 2] } },
-    SEI: { fn: SEI, modes: { impl: [0x78, 2] } },
-    SET: { fn: SET, modes: { impl: [0xF4, 2] } },
-    STA: { fn: STA, modes: { zp: [0x85, 4], zpx: [0x95, 4], zpind: [0x92, 7], abs: [0x8D, 5], absx: [0x9D, 5], absy: [0x99, 5], indx: [0x81, 7], indy: [0x91, 7] } },
-    STX: { fn: STX, modes: { zp: [0x86, 4], zpy: [0x96, 4], abs: [0x8E, 5] } },
-    STY: { fn: STY, modes: { zp: [0x84, 4], zpx: [0x94, 4], abs: [0x8C, 5] } },
-    STZ: { fn: STZ, modes: { zp: [0x64, 4], zpx: [0x74, 4], abs: [0x9C, 5], absx: [0x9E, 5] } },
-    SXY: { fn: SXY, modes: { impl: [0x02, 3] } },
-    TAX: { fn: TAX, modes: { impl: [0xAA, 2] } },
-    TAY: { fn: TAY, modes: { impl: [0xA8, 2] } },
-    TSX: { fn: TSX, modes: { impl: [0xBA, 2] } },
-    TXA: { fn: TXA, modes: { impl: [0x8A, 2] } },
-    TXS: { fn: TXS, modes: { impl: [0x9A, 2] } },
-    TYA: { fn: TYA, modes: { impl: [0x98, 2] } },
-    TRB: { fn: TRB, modes: { zp: [0x14, 6], abs: [0x1C, 7] } },
-    TSB: { fn: TSB, modes: { zp: [0x04, 6], abs: [0x0C, 7] } },
-    ST0: { fn: ST0, modes: { impl: [0x03, 4] } },
-    ST1: { fn: ST1, modes: { impl: [0x13, 4] } },
-    ST2: { fn: ST2, modes: { impl: [0x23, 4] } },
-    TAM: { fn: TAMi, modes: { impl: [0x53, 5] } },
-    TMA: { fn: TMAi, modes: { impl: [0x43, 4] } },
-    TII: { fn: TII, modes: { impl: [0x73, 17] } },
-    TDD: { fn: TDD, modes: { impl: [0xC3, 17] } },
-    TIA: { fn: TIA, modes: { impl: [0xE3, 17] } },
-    TAI: { fn: TAI, modes: { impl: [0xF3, 17] } },
-    TIN: { fn: TIN, modes: { impl: [0xD3, 17] } }
-  };
-
-  const OPS = new Array(256).fill(null);
-  for (const mnemonic in TABLE) {
-    const { fn, modes } = TABLE[mnemonic];
-    for (const mode in modes) {
-      const [byte, cycles] = modes[mode];
-      OPS[byte] = { mnemonic, mode, exec: fn, cycles };
+  // SBC は T フラグを見ない(いつも A)。10 進の余分な 1 サイクルだけ T で種類が変わる
+  function SBC(c) {
+    const v = (~c._val()) & 0xFF;
+    const a = c.A, cin = c.P & F_C;
+    let r;
+    if (c.P & F_D) {
+      if (c.tMode) c._tick(); else c.rd(c.PC);
+      r = (a & 0x0F) + (v & 0x0F) + cin;
+      if (r <= 0x0F) r -= 0x06;
+      r = (a & 0xF0) + (v & 0xF0) + (r > 0x0F ? 0x10 : 0) + (r & 0x0F);
+      if (r <= 0xFF) r -= 0x60;
+    } else {
+      r = a + v + cin;
+      c.P = (~(a ^ v) & (a ^ r) & 0x80) ? (c.P | F_V) : (c.P & ~F_V);
     }
+    c.P = (c.P & ~F_C) | (r > 0xFF ? F_C : 0);
+    c.A = r & 0xFF; c._nz(c.A);
   }
-  // TST: y(row)ごとにアドレッシングモードが異なる特殊系列(imm+target二重オペランド)
-  OPS[0x83] = { mnemonic: 'TST', mode: 'zp', exec: TST, cycles: 7 };
-  OPS[0x93] = { mnemonic: 'TST', mode: 'abs', exec: TST, cycles: 8 };
-  OPS[0xA3] = { mnemonic: 'TST', mode: 'zpx', exec: TST, cycles: 7 };
-  OPS[0xB3] = { mnemonic: 'TST', mode: 'absx', exec: TST, cycles: 8 };
-  // RMBi/SMBi/BBRi/BBSi: 8本ずつ、opcode下位ニブルは固定(x7/xF)、上位ニブルがbit index
+
+  function compare(c, reg) {
+    const v = c._val(), r = (reg - v) & 0xFF;
+    c.P = (c.P & ~(F_C | F_Z | F_N)) | (reg >= v ? F_C : 0) | (reg === v ? F_Z : 0) | (r & 0x80);
+  }
+
+  function shl(c, v) { c.P = (c.P & ~F_C) | (v >> 7); const r = (v << 1) & 0xFF; c._nz(r); return r; }
+  function shr(c, v) { c.P = (c.P & ~F_C) | (v & 1); const r = v >> 1; c._nz(r); return r; }
+  function rol(c, v) { const ci = c.P & F_C; c.P = (c.P & ~F_C) | (v >> 7); const r = ((v << 1) | ci) & 0xFF; c._nz(r); return r; }
+  function ror(c, v) { const ci = c.P & F_C; c.P = (c.P & ~F_C) | (v & 1); const r = (v >> 1) | (ci << 7); c._nz(r); return r; }
+  const inc = (c, v) => { const r = (v + 1) & 0xFF; c._nz(r); return r; };
+  const dec = (c, v) => { const r = (v - 1) & 0xFF; c._nz(r); return r; };
+  // メモリを書き換える命令: 読み → 内部 1 → 書き
+  function rmw(c, f) { const v = c.rd(c.ea); c._tick(); c.wr(c.ea, f(c, v)); }
+
+  function branch(c, cond) {
+    if (!cond) return;
+    c.rd(c.PC); c._tick();
+    c.PC = (c.PC + (c.imm < 0x80 ? c.imm : c.imm - 0x100)) & 0xFFFF;
+  }
+
+  // BIT は即値でも N/V をオペランドから取る
+  function BIT(c) {
+    const v = c._val();
+    c.P = (c.P & ~(F_Z | F_V | F_N)) | (v & (F_V | F_N)) | ((c.A & v) ? 0 : F_Z);
+  }
+  // TSB/TRB/TST: N/V は元のメモリの値から。
+  // Z は TSB/TRB が「書き戻す値が 0 か」、TST が (即値 & メモリ)=0。
+  // ★食い違い: TSB/TRB の Z は参照どうしで合わない。
+  //   - Mesen 2 のソース(PceCpu::TSB / TRB)と、手元の Mesen 2 の実物: 書き戻す値(TSB はメモリ|A、TRB はメモリ&~A)が 0 なら Z=1
+  //   - SingleStepTests/huc6280 のベクタ(Mesen 製とされる): 4 命令 1 万件すべて (A & メモリ)=0 なら Z=1(65C02 と同じ)
+  //   9a ではベクタに合わせていたが、9c で実ソフト 1 本(54 本中)が Mesen の実物と時刻で食い違い、原因がここだった(TSB の後の分岐)。
+  //   実物とソースが一致している方に替えた([参照])。命令テストはこの 4 命令の Z だけ比べない(tools/cpu-test-core.js)。
+  //   どちらが実機かは未確認(DESIGN-PCE-CAPTURE.md §10)。
+  function TSB(c) {
+    const v = c.rd(c.ea), r = v | c.A;
+    c.P = (c.P & ~(F_Z | F_V | F_N)) | (v & (F_V | F_N)) | (r ? 0 : F_Z);
+    c._tick(); c.wr(c.ea, r);
+  }
+  function TRB(c) {
+    const v = c.rd(c.ea), r = v & ~c.A & 0xFF;
+    c.P = (c.P & ~(F_Z | F_V | F_N)) | (v & (F_V | F_N)) | (r ? 0 : F_Z);
+    c._tick(); c.wr(c.ea, r);
+  }
+  function TST(c) {
+    c._tick();
+    const v = c.rd(c.ea);
+    c._tick();
+    c.P = (c.P & ~(F_Z | F_V | F_N)) | (v & (F_V | F_N)) | ((v & c.imm) ? 0 : F_Z);
+  }
+
+  function setP(c, v) { c.P = v & ~F_B; } // B は P の中に無い(積む時だけ立つ)
+
+  function BRK(c) {
+    // オペコードの次の 1 バイトは読み飛ばす(_operand が IMM として読んでいる)。B=1 で積む。ベクタは IRQ2 と同じ
+    c._push(c.PC >> 8); c._push(c.PC & 0xFF);
+    c._push(c.P | F_B);
+    c.P = (c.P & ~(F_D | F_T)) | F_I;
+    c.PC = c._word(VEC_IRQ2);
+    c._tick();
+  }
+  function JSR(c) {
+    const lo = c._fetch();
+    c._tick();
+    c._push(c.PC >> 8); c._push(c.PC & 0xFF); // 上位バイトの番地を積む(RTS が +1 する)
+    const hi = c._fetch();
+    c._tick();
+    c.PC = lo | (hi << 8);
+  }
+  function RTS(c) { c._tick(); const lo = c._pop(), hi = c._pop(); c._tick(); c._tick(); c.PC = ((lo | (hi << 8)) + 1) & 0xFFFF; }
+  function RTI(c) { c._tick(); setP(c, c._pop()); const lo = c._pop(), hi = c._pop(); c.PC = lo | (hi << 8); c._tick(); }
+  function BSR(c) {
+    c._tick();
+    const ret = (c.PC - 1) & 0xFFFF;
+    c._push(ret >> 8); c._push(ret & 0xFF);
+    c._tick(); c._tick(); c._tick();
+    c.PC = (c.PC + (c.imm < 0x80 ? c.imm : c.imm - 0x100)) & 0xFFFF;
+  }
+  function BRA(c) { c._tick(); c._tick(); c.PC = (c.PC + (c.imm < 0x80 ? c.imm : c.imm - 0x100)) & 0xFFFF; }
+
+  // [参照] CSH/CSL は 3 サイクルで、最後の内部サイクルは切り替わった後の速さで進む(PceCpu::CSL / CSH)
+  function speed(c, high) { c.speedHigh = high; if (c.bus.setSpeed) c.bus.setSpeed(high); c._tick(); }
+
+  // [参照] ST0/ST1/ST2 は内部 1 + 書き 1。書き先は VDC のポートで、MPR を通らない(PceMemoryManager::WriteVdc)。
+  // VDC に書いた時の「CPU が 1 サイクル待つ」はバス側(stWrite の中)が cpu.idle() で足す。
+  function ST(c, port) { c._tick(); c._tick(); if (c.bus.stWrite) c.bus.stWrite(port, c.imm); }
+
+  // TAM/TMA。オペランドは MPR のビット並び。
+  // [参照] TAM は 0 なら何もしない。TMA は 0 なら「最後に通した値」、複数ビットなら OR(PceMemoryManager::SetMprValue / GetMprValue)。
+  // ベクタは 1 ビットだけの場合と TAM の複数ビットを通る。
+  function TAM(c) {
+    c._tick(); c._tick(); c._tick();
+    const m = c.imm;
+    if (!m) return;
+    c.mprBuffer = c.A;
+    for (let i = 0; i < 8; i++) if (m & (1 << i)) c.bus.setMpr(i, c.A);
+  }
+  function TMA(c) {
+    c._tick(); c._tick();
+    const m = c.imm;
+    if (!m) { c.A = c.mprBuffer; return; }
+    let v = 0;
+    for (let i = 0; i < 8; i++) if (m & (1 << i)) v |= c.bus.getMpr(i);
+    c.mprBuffer = v; c.A = v;
+  }
+
+  // ブロック転送: 17 + 6×個数 サイクル。Y/A/X を積んでから始め、終わりに戻す。フラグは変えない。長さ 0 は 65536 個。
+  // ds/dd: +1 / -1 / 0、2 = 行って戻る(+1, -1, +1, …)
+  function block(c, ds, dd) {
+    c.rd(c.PC); c._tick();
+    c._push(c.Y); c._push(c.A); c._push(c.X);
+    let src = c._fetch(); src |= c._fetch() << 8;
+    let dst = c._fetch(); dst |= c._fetch() << 8;
+    let len = c._fetch(); len |= c._fetch() << 8;
+    c._tick();
+    let n = 0;
+    do {
+      c._tick();
+      const v = c.rd(src);
+      c._tick();
+      c.wr(dst, v);
+      c._tick(); c._tick();
+      src = (src + (ds === 2 ? ((n & 1) ? -1 : 1) : ds)) & 0xFFFF;
+      dst = (dst + (dd === 2 ? ((n & 1) ? -1 : 1) : dd)) & 0xFFFF;
+      n++;
+      len = (len - 1) & 0xFFFF;
+    } while (len);
+    c._tick();
+    c.X = c._pop(); c.A = c._pop(); c.Y = c._pop();
+  }
+
+  function bitBranch(c, bit, want) {
+    const zp = c._fetch();
+    c._tick();
+    const off = c._fetch();
+    c._tick();
+    const v = c.rd(ZP + zp);
+    if (((v >> bit) & 1) === want) { c._tick(); c._tick(); c.PC = (c.PC + (off < 0x80 ? off : off - 0x100)) & 0xFFFF; }
+  }
+  function bitSet(c, bit, on) {
+    const v = c.rd(c.ea);
+    c._tick(); c._tick();
+    c.wr(c.ea, on ? (v | (1 << bit)) : (v & ~(1 << bit)));
+  }
+
+  // ── 命令表 ──
+  const MODE = new Uint8Array(256); // 既定 IMP
+  const EXEC = new Array(256);
+  const NAME = new Array(256).fill('NOP');
+  const NOP = () => {}; // 空いているオペコードは全部 2 サイクルの NOP
+  EXEC.fill(NOP);
+  function def(name, fn, list) { for (let i = 0; i < list.length; i += 2) { const op = list[i]; MODE[op] = list[i + 1]; EXEC[op] = fn; NAME[op] = name; } }
+
+  // A を相手にする 8 種類の並び(ORA/AND/EOR/ADC/STA/LDA/CMP/SBC は同じ形。STA に即値は無い)
+  const acc8 = (b) => [b + 0x09, IMM, b + 0x05, ZPG, b + 0x15, ZPX, b + 0x12, IZP, b + 0x0D, ABS, b + 0x1D, ABX, b + 0x19, ABY, b + 0x01, IZX, b + 0x11, IZY];
+  def('ORA', (c) => logic(c, fOra), acc8(0x00));
+  def('AND', (c) => logic(c, fAnd), acc8(0x20));
+  def('EOR', (c) => logic(c, fEor), acc8(0x40));
+  def('ADC', ADC, acc8(0x60));
+  def('STA', (c) => c.wr(c.ea, c.A), acc8(0x80).slice(2));
+  def('LDA', (c) => { c.A = c._val(); c._nz(c.A); }, acc8(0xA0));
+  def('CMP', (c) => compare(c, c.A), acc8(0xC0));
+  def('SBC', SBC, acc8(0xE0));
+
+  def('LDX', (c) => { c.X = c._val(); c._nz(c.X); }, [0xA2, IMM, 0xA6, ZPG, 0xB6, ZPY, 0xAE, ABS, 0xBE, ABY]);
+  def('LDY', (c) => { c.Y = c._val(); c._nz(c.Y); }, [0xA0, IMM, 0xA4, ZPG, 0xB4, ZPX, 0xAC, ABS, 0xBC, ABX]);
+  def('STX', (c) => c.wr(c.ea, c.X), [0x86, ZPG, 0x96, ZPY, 0x8E, ABS]);
+  def('STY', (c) => c.wr(c.ea, c.Y), [0x84, ZPG, 0x94, ZPX, 0x8C, ABS]);
+  def('STZ', (c) => c.wr(c.ea, 0), [0x64, ZPG, 0x74, ZPX, 0x9C, ABS, 0x9E, ABX]);
+  def('CPX', (c) => compare(c, c.X), [0xE0, IMM, 0xE4, ZPG, 0xEC, ABS]);
+  def('CPY', (c) => compare(c, c.Y), [0xC0, IMM, 0xC4, ZPG, 0xCC, ABS]);
+  def('BIT', BIT, [0x89, IMM, 0x24, ZPG, 0x34, ZPX, 0x2C, ABS, 0x3C, ABX]);
+  def('TSB', TSB, [0x04, ZPG, 0x0C, ABS]);
+  def('TRB', TRB, [0x14, ZPG, 0x1C, ABS]);
+  def('TST', TST, [0x83, TZP, 0x93, TAB, 0xA3, TZX, 0xB3, TAX]);
+
+  const rmw4 = (b) => [b + 0x06, ZPG, b + 0x16, ZPX, b + 0x0E, ABS, b + 0x1E, ABX];
+  def('ASL', (c) => rmw(c, shl), rmw4(0x00));
+  def('ROL', (c) => rmw(c, rol), rmw4(0x20));
+  def('LSR', (c) => rmw(c, shr), rmw4(0x40));
+  def('ROR', (c) => rmw(c, ror), rmw4(0x60));
+  def('DEC', (c) => rmw(c, dec), rmw4(0xC0));
+  def('INC', (c) => rmw(c, inc), rmw4(0xE0));
+  def('ASL', (c) => { c.A = shl(c, c.A); }, [0x0A, IMP]);
+  def('ROL', (c) => { c.A = rol(c, c.A); }, [0x2A, IMP]);
+  def('LSR', (c) => { c.A = shr(c, c.A); }, [0x4A, IMP]);
+  def('ROR', (c) => { c.A = ror(c, c.A); }, [0x6A, IMP]);
+  def('INC', (c) => { c.A = inc(c, c.A); }, [0x1A, IMP]);
+  def('DEC', (c) => { c.A = dec(c, c.A); }, [0x3A, IMP]);
+  def('INX', (c) => { c.X = inc(c, c.X); }, [0xE8, IMP]);
+  def('INY', (c) => { c.Y = inc(c, c.Y); }, [0xC8, IMP]);
+  def('DEX', (c) => { c.X = dec(c, c.X); }, [0xCA, IMP]);
+  def('DEY', (c) => { c.Y = dec(c, c.Y); }, [0x88, IMP]);
+
+  def('BPL', (c) => branch(c, !(c.P & F_N)), [0x10, REL]);
+  def('BMI', (c) => branch(c, c.P & F_N), [0x30, REL]);
+  def('BVC', (c) => branch(c, !(c.P & F_V)), [0x50, REL]);
+  def('BVS', (c) => branch(c, c.P & F_V), [0x70, REL]);
+  def('BCC', (c) => branch(c, !(c.P & F_C)), [0x90, REL]);
+  def('BCS', (c) => branch(c, c.P & F_C), [0xB0, REL]);
+  def('BNE', (c) => branch(c, !(c.P & F_Z)), [0xD0, REL]);
+  def('BEQ', (c) => branch(c, c.P & F_Z), [0xF0, REL]);
+  def('BRA', BRA, [0x80, REL]);
+  def('BSR', BSR, [0x44, REL]);
+  def('JMP', (c) => { c.PC = c.ea; }, [0x4C, ABS]);                                      // 番地 2 バイト+内部 1(4 サイクル)
+  def('JMP', (c) => { c._tick(); c.PC = c._word(c.ea); c._tick(); }, [0x6C, IND]);        // (abs)。ページ境界でも正しく読む
+  def('JMP', (c) => { c.PC = c._word(c.ea); c._tick(); }, [0x7C, IAX]);                   // (abs,X)
+  def('JSR', JSR, [0x20, NON]);
+  def('RTS', RTS, [0x60, IMP]);
+  def('RTI', RTI, [0x40, IMP]);
+  def('BRK', BRK, [0x00, IMM]);
+
+  def('PHA', (c) => c._push(c.A), [0x48, IMP]);
+  def('PHX', (c) => c._push(c.X), [0xDA, IMP]);
+  def('PHY', (c) => c._push(c.Y), [0x5A, IMP]);
+  def('PHP', (c) => c._push(c.P | F_B), [0x08, IMP]);
+  def('PLA', (c) => { c._tick(); c.A = c._pop(); c._nz(c.A); }, [0x68, IMP]);
+  def('PLX', (c) => { c._tick(); c.X = c._pop(); c._nz(c.X); }, [0xFA, IMP]);
+  def('PLY', (c) => { c._tick(); c.Y = c._pop(); c._nz(c.Y); }, [0x7A, IMP]);
+  def('PLP', (c) => { c._tick(); setP(c, c._pop()); }, [0x28, IMP]);
+
+  def('TAX', (c) => { c.X = c.A; c._nz(c.X); }, [0xAA, IMP]);
+  def('TAY', (c) => { c.Y = c.A; c._nz(c.Y); }, [0xA8, IMP]);
+  def('TXA', (c) => { c.A = c.X; c._nz(c.A); }, [0x8A, IMP]);
+  def('TYA', (c) => { c.A = c.Y; c._nz(c.A); }, [0x98, IMP]);
+  def('TSX', (c) => { c.X = c.S; c._nz(c.X); }, [0xBA, IMP]);
+  def('TXS', (c) => { c.S = c.X; }, [0x9A, IMP]);
+  // レジスタの入れ替えは 3 サイクル、クリアは 2 サイクル。どちらもフラグは変えない
+  def('SXY', (c) => { c._tick(); const t = c.X; c.X = c.Y; c.Y = t; }, [0x02, IMP]);
+  def('SAX', (c) => { c._tick(); const t = c.A; c.A = c.X; c.X = t; }, [0x22, IMP]);
+  def('SAY', (c) => { c._tick(); const t = c.A; c.A = c.Y; c.Y = t; }, [0x42, IMP]);
+  def('CLA', (c) => { c.A = 0; }, [0x62, IMP]);
+  def('CLX', (c) => { c.X = 0; }, [0x82, IMP]);
+  def('CLY', (c) => { c.Y = 0; }, [0xC2, IMP]);
+
+  def('CLC', (c) => { c.P &= ~F_C; }, [0x18, IMP]);
+  def('SEC', (c) => { c.P |= F_C; }, [0x38, IMP]);
+  def('CLI', (c) => { c.P &= ~F_I; }, [0x58, IMP]);
+  def('SEI', (c) => { c.P |= F_I; }, [0x78, IMP]);
+  def('CLV', (c) => { c.P &= ~F_V; }, [0xB8, IMP]);
+  def('CLD', (c) => { c.P &= ~F_D; }, [0xD8, IMP]);
+  def('SED', (c) => { c.P |= F_D; }, [0xF8, IMP]);
+  def('SET', (c) => { c.P |= F_T; }, [0xF4, IMP]);
+  def('CSL', (c) => speed(c, false), [0x54, IMP]);
+  def('CSH', (c) => speed(c, true), [0xD4, IMP]);
+
+  def('ST0', (c) => ST(c, 0), [0x03, IMM]);
+  def('ST1', (c) => ST(c, 2), [0x13, IMM]);
+  def('ST2', (c) => ST(c, 3), [0x23, IMM]);
+  def('TMA', TMA, [0x43, IMM]);
+  def('TAM', TAM, [0x53, IMM]);
+  def('TII', (c) => block(c, 1, 1), [0x73, BLK]);
+  def('TDD', (c) => block(c, -1, -1), [0xC3, BLK]);
+  def('TIN', (c) => block(c, 1, 0), [0xD3, BLK]);
+  def('TIA', (c) => block(c, 1, 2), [0xE3, BLK]);
+  def('TAI', (c) => block(c, 2, 1), [0xF3, BLK]);
   for (let bit = 0; bit < 8; bit++) {
-    OPS[bit * 0x10 + 0x07] = { mnemonic: `RMB${bit}`, mode: 'impl', exec: (c) => RMB(c, bit), cycles: 7 };
-    OPS[bit * 0x10 + 0x87] = { mnemonic: `SMB${bit}`, mode: 'impl', exec: (c) => SMB(c, bit), cycles: 7 };
-    OPS[bit * 0x10 + 0x0F] = { mnemonic: `BBR${bit}`, mode: 'impl', exec: (c) => BBR(c, bit), cycles: 6 };
-    OPS[bit * 0x10 + 0x8F] = { mnemonic: `BBS${bit}`, mode: 'impl', exec: (c) => BBS(c, bit), cycles: 6 };
+    def('RMB' + bit, (c) => bitSet(c, bit, false), [bit * 0x10 + 0x07, ZPG]);
+    def('SMB' + bit, (c) => bitSet(c, bit, true), [bit * 0x10 + 0x87, ZPG]);
+    def('BBR' + bit, (c) => bitBranch(c, bit, 0), [bit * 0x10 + 0x0F, ZRL]);
+    def('BBS' + bit, (c) => bitBranch(c, bit, 1), [bit * 0x10 + 0x8F, ZRL]);
   }
 
   Emu.CPUHuC6280 = CPUHuC6280;
   Emu.HUC6280_FLAGS = { C: F_C, Z: F_Z, I: F_I, D: F_D, B: F_B, T: F_T, V: F_V, N: F_N };
-  Emu.HUC6280_OPS = OPS;
+  Emu.HUC6280_IRQ = { IRQ2: LINE_IRQ2, IRQ1: LINE_IRQ1, TIMER: LINE_TIMER };
+  Emu.HUC6280_OPS = NAME.map((name, op) => ({ mnemonic: name, mode: MODE[op] }));
 })(globalThis);
 
 /*
- * HuC6280内蔵PSG (PC Engine/TurboGrafx-16 プログラマブルサウンドジェネレータ) エミュレータ
- * MML.Emu.APUHuC6280
+ * PC エンジンの波形メモリ音源(HuC6280 に内蔵。NEC/ハドソンの資料や Mesen は「PSG」と呼ぶ)
+ * MML.Emu.APUHuC6280 — 2026-11-15 に作り直し(段階 9b)
  *
- * 6チャンネル、各chが32サンプル・5bit符号無しの波形メモリを持つ(waveform playback)。
- * ch4/5のみノイズ生成機能を追加で持つ(bit7=noise on/offでch毎に波形出力とノイズ出力が
- * 排他)。各chは「Direct D/A」モードに切替可能(波形メモリ経由せず書込み値を直接出力、
- * 音声ストリーミング再生に使う)。LFO(周波数変調、ch0をch1のFM変調)は実機に存在するが
- * 音楽ドライバでの利用例が乏しく、参考実装(Game_Music_Emu)も自ら「未対応」と明記している
- * 機能のため本実装でも対象外とする。
+ * 6ch。各 ch は 32 個・5bit の波形メモリを、12bit の周期で読み進める。ch5/6 はノイズに切り替えられる。
+ * どの ch も DDA(波形を止めて、書いた値をそのまま出す。PCM 用)にできる。LFO は ch2 の出力で ch1 の周期を揺らす。
+ * 時間の単位は音源のクロック(マスタークロック 21.47727MHz の 1/6 = 3.579545MHz)1 個。
  *
- * 参考: "PC Engine Hardware: PSG" by Paul Clifford (magicengine.com/mkit) — レジスタ配置・
- *   周波数換算式($0802/0803, $0807)の一次資料。ボリューム/バランスの対数合成式は実測に
- *   基づく独自導出(32段・約1.5dB/stepの減衰特性という文献記載の"事実"から関数化した
- *   ものであり、既存実装のテーブルを転記したものではない。詳細はgainFromIndex参照)。
+ * 使い方: clockBy(n) で n 個ぶん進め、writeRegister() はその時点で効く。「いつ書かれたか」を合わせたい側
+ * (hesPlayer.js)は、書く前に runToMaster(マスタークロックの時刻) で時刻まで進めてから書く。
+ * mixSample() は「前に呼んでから今まで」の平均を返す(1 サンプルの間に何度も変わる DDA や高い音、音量の書き換えを、瞬間の値で拾わないため)。
+ * 平均するのは「出力 × その時の左右の減衰」。
  *
- * clock() を PSGクロック(3579545Hz。NTSCカラーバースト、HES.PSG_CLOCK)ごとに1回呼び出す
- * 設計(apu2a03.js/apuGb.jsと同じ考え方)。マスタークロック(7159090Hz)側のCPUと同期させる
- * hesPlayer.js は、CPU 2サイクルにつきPSG clock()を1回、という比で駆動する
- * (7159090 / 3579545 = 2ちょうど)。
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3)。[参照] は Mesen 2 の Core/PCE/PcePsg.cpp・PcePsgChannel.cpp(読んだだけで写していない):
+ *   [参照] 周期タイマは下向きに数え、0 になった所で周期を入れ直して読み位置を 1 つ進める。周期レジスタが 0 の時は $1000 として扱う
+ *   [参照] 周期レジスタを書いてもタイマは今の周回を終えるまで変わらない。ch の入/切($0804 bit7)が変わった時だけタイマを入れ直す
+ *   [参照] $0804 に「DDA=1」の値を書くたび(切り替わった時に限らない)、ch が切なら読み位置を 0 に戻す。入なら出力をすぐ DDA の値にする
+ *   [参照] $0806: DDA 中は出力値。そうでなければ今の読み位置に書く。読み位置が進むのは ch が切の時だけ
+ *          (鳴っている最中の書き込みは、今鳴っている 1 個を書き換える。Mesen のコメントに、これが要る曲の名前がある)
+ *   [参照] ノイズは 18bit の LFSR。右へずらし、出ていく bit0 が音(1 なら 31、0 なら 0)。bit0・1・11・12・17 の XOR を bit17 へ入れる。
+ *          リセットで bit0 だけ 1。ch の入/切やノイズの入/切に関係なく、いつも回り続ける
+ *          (Mesen が引いている出典は cgfm2 の調査記事。実機の測定に基づく、と書かれている)
+ *   [参照] ノイズの周期: レジスタの下位 5bit を反転して 64 倍。$1F(反転して 0)の時だけ 32
+ *   [参照] $0807 は ch5/6 だけが受ける。$0802-$0806 は ch1-6 だけ(ch7/8 を選んでいる間の書き込みは捨てる)
+ *   [参照] LFO: $0809 の bit7 が 0 で下位 2bit が 0 以外の時に掛かる。ch1 の周期 = (周期レジスタ + ch2 の出力 × 1/4/16) の下位 12bit。
+ *          ch2 自身は周期が $0808 倍(0 は 256 倍)に延びる
+ *   [参照] 音量の決まり: 全体($0801)と ch の左右($0805)は 1 段 3dB、ch の音量($0804)は 1 段 1.5dB の減衰として足し合わせ、30 段(45dB)以上で無音。
+ *          表の値そのものは自前(10^(-1.5×段/20))。Mesen は 8bit の整数の表なので、下の方の段では 1〜2dB 違う(29 段目で約 4.6dB)
+ *   ★ 無音になる段: VGMPlay の MAME 由来の実装は 30 段目がまだ鳴り、31 段目で無音(pce-vgm-ab.js --synth で実測)。Mesen は 30 段目から無音。Mesen に合わせた
+ *   ★ LFO が掛かっている間も ch2 自身の音は出したまま(Mesen と同じ)。実機で ch2 が消えるのかは未確認
+ *   [推定] リセット直後の全体の音量($0801)と ch の左右($0805)は最大($FF)にしてある(作り直し前と同じ)。
+ *          ★ Mesen は 0(何か書くまで無音)。ただし Mesen の 0 は「状態を 0 で埋めただけ」で、実機のリセット値を測った物ではなさそう(推定)。
+ *          手元の HES 357 曲のうち、$0801 を一度も書かずに鳴らす曲が 3 曲(1 本)、鳴らす ch の $0805 を一度も書かない曲が 5 曲ある。
+ *          HES はゲームの初期化を通らずに曲の INIT から始まるので、0 にするとこれらが無音になる。実機のリセット値は未確認
+ *   ★ 出力の中心: Mesen は設定「HuC6280A の音」が入の時、波形の値から 16 を引いて -16〜+15 として扱い、切の時は 0〜31 のまま扱う。
+ *      LFO が足す「ch2 の出力」もこの値なので、設定で LFO の掛かり方まで変わる。ここは入(-16〜+15)の側に合わせた。
+ *      初代の石(HuC6280)と後の石(HuC6280A)で LFO が本当に違うのかは未確認
+ *   ★ ノイズの最初の 1 歩: Mesen はノイズのタイマが 0 から始まり、「最初に時間を進めた時」に 1 歩目を踏む(それがいつかは、
+ *      最初の書き込みか最初の画面の終わりで決まる)。実機は電源投入から回り続けるはずなので、乱数の位相はここで実機とずれうる。
+ *      照合のために Mesen と同じにしてある(音としては聞き分けられない差)
+ *   ★ 「今の出力」が古いままになる瞬間: Mesen は ch の出力を「時間を進めた時」に作り直す。書き込みで ch を切った直後などは、
+ *      次に時間が進むまで前の値が残る。LFO はこの値を読むので、照合のために同じ作りにした(_oneChunk)。
+ *      音に出す時は、切の ch は 0 として扱う(level())
+ *   [推定] 音の大きさの基準(6ch ぶんを 16×6 で割る)は作り直し前のまま。ほかの形式との音量合わせで決めた値で、実機の電圧ではない
+ * 確かめ方: tools/headless/pce-apu-ab.js(書き込みのたびの内部状態を Mesen と比べる)。音量と左右の混ぜ方は VGMPlay の WAV と比べる。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -706,255 +692,311 @@
 
   const WAVE_LEN = 32;
   const CH_COUNT = 6;
+  const CENTER = 16;        // 出力の中心(★ 冒頭)
+  const MUTE_STEPS = 30;    // 1.5dB × 30 = 45dB で無音
 
-  // 32段(0-31)の対数ゲインテーブル。文献記載の「~1.5dB/step、31=1.0倍、0=無音」という
-  // 減衰特性から作る(2^((n-31)/4) は 4step=6dB=電圧半減 の等比数列。1step≒1.505dB相当で
-  // 文献の記述と整合する)。
-  function gainFromIndex(n) {
-    n = Math.max(0, Math.min(31, n | 0));
-    return n === 0 ? 0 : Math.pow(2, (n - 31) / 4);
-  }
+  // 減衰の表(1.5dB 刻み)。添字 = 減衰の段数
+  const GAIN = new Float64Array(MUTE_STEPS + 1);
+  for (let r = 0; r < MUTE_STEPS; r++) GAIN[r] = Math.pow(10, -1.5 * r / 20);
 
-  class PsgChannel {
-    constructor(hasNoise) {
-      this.hasNoise = !!hasNoise;
+  class WaveChannel {
+    constructor(index, chip) {
+      this.index = index;
+      this.chip = chip;
+      this.hasNoise = index >= 4;
       this.wave = new Uint8Array(WAVE_LEN);
-      this.wavePos = 0;    // 読出/書込 共有ポインタ(実機仕様、wavePlayback.js冒頭コメント参照)
-      this.freq = 0;       // 12bit周期レジスタ($0802/$0803)
-      this.control = 0;    // $0804: bit7=ch on, bit6=DDA, bit4-0=volume
-      this.balance = 0xFF; // $0805: bit7-4=left, bit3-0=right
-      this.dac = 0;        // DDAモード時の直接出力値(0-31)
-      this.noiseCtrl = 0;  // $0807 (ch4/5のみ有効): bit7=on, bit4-0=noise period select
-      this.lfsr = this.hasNoise ? 1 : 0;
-      this.wavePhaseAcc = 0;  // PSGクロック単位の波形読出しタイマ(小数を持たず整数カウントダウン)
-      this.noisePhaseAcc = 0;
-      this.noiseOut = 0; // ノイズLFSRの現在ビット(0/1)由来の出力値(0 or 31)
+      this.reset();
     }
 
     reset() {
       this.wave.fill(0);
-      this.wavePos = 0;
-      this.freq = 0;
-      this.control = 0;
-      this.balance = 0xFF;
-      this.dac = 0;
-      this.noiseCtrl = 0;
-      this.lfsr = this.hasNoise ? 1 : 0;
-      this.wavePhaseAcc = 0;
-      this.noisePhaseAcc = 0;
-      this.noiseOut = 0;
+      this.wavePos = 0;    // 読み位置(ch が切の間は書き位置でもある)
+      this.freq = 0;       // $0802/$0803: 12bit の周期
+      this.control = 0;    // $0804: bit7 = 入、bit6 = DDA、bit4-0 = 音量
+      this.balance = 0xFF; // $0805: 上位 = 左、下位 = 右(リセット値は冒頭 [推定])
+      this.dac = 0;        // DDA の出力値(0-31)
+      this.noiseCtrl = 0;  // $0807(ch5/6 だけ): bit7 = ノイズ、bit4-0 = 周期
+      this.timer = 0;      // 周期タイマの残り
+      this.out = 0;        // 今の出力(-16〜+15。切なら 0)。★ 冒頭「古いままになる瞬間」
+      this.lfsr = 1;
+      this.noiseTimer = 0;
+      this.noiseOut = 0;   // 0 か 31
+      this.accL = 0;       // 出力 × 左の減衰 × 時間 の積算(mixSample が平均を取って 0 に戻す)
+      this.accR = 0;
     }
 
     get on() { return (this.control & 0x80) !== 0; }
     get dda() { return (this.control & 0x40) !== 0; }
     get volume() { return this.control & 0x1F; }
+    get noiseOn() { return this.hasNoise && (this.noiseCtrl & 0x80) !== 0; }
 
-    writeControl(value) {
-      // DDAモードが1→0へ落ちた瞬間、波形の読出/書込ポインタが先頭へリセットされる
-      // (実機仕様。$0806での波形テーブル再ロードを先頭から行うための挙動)。
-      if ((this.control & 0x40) && !(value & 0x40)) this.wavePos = 0;
-      this.control = value;
+    /** 音に出す値。切の ch は 0 */
+    level() { return (this.control & 0x80) ? this.out : 0; }
+
+    /** 次の周回の長さ */
+    period() {
+      const chip = this.chip;
+      let p = this.freq;
+      if (this.index === 0 && chip.lfoOn) p = (p + (chip.ch[1].out << (((chip.lfoCtrl & 3) - 1) * 2))) & 0xFFF;
+      if (p === 0) p = 0x1000;
+      if (this.index === 1 && chip.lfoOn) p *= (chip.lfoFreq || 0x100);
+      return p;
     }
 
-    writeData(value) {
-      value &= 0x1F;
-      if (!this.dda) {
-        this.wave[this.wavePos] = value;
-        this.wavePos = (this.wavePos + 1) & (WAVE_LEN - 1);
-      } else if (this.on) {
-        this.dac = value;
-      }
+    noisePeriod() {
+      const f = this.noiseCtrl & 0x1F;
+      return f === 0x1F ? 32 : ((~f) & 0x1F) * 64;
     }
 
-    // PSGクロック1tickぶん波形読出し位相・ノイズ位相を進める。HesReplayStreamPlayer
-    // (src/audio/hes-stream-player.js)のリアルタイム再生が1サンプルあたり数十回
-    // 直接呼ぶホットパスのため、clockBy(1)経由(関数呼出しが1段増える)にはせず
-    // 従来通りその場で計算する(clockBy()と結果は数学的に同一)。
-    clock() {
-      if (this.on && !this.dda && this.freq > 0) {
-        this.wavePhaseAcc++;
-        if (this.wavePhaseAcc >= this.freq) {
-          this.wavePhaseAcc = 0;
-          this.wavePos = (this.wavePos + 1) & (WAVE_LEN - 1);
-        }
-      }
-      if (this.hasNoise && this.on && (this.noiseCtrl & 0x80)) {
-        const invVal = Math.max(1, (~this.noiseCtrl) & 0x1F);
-        const periodTicks = invVal * 64;
-        this.noisePhaseAcc++;
-        if (this.noisePhaseAcc >= periodTicks) {
-          this.noisePhaseAcc -= periodTicks;
-          const bit = (this.lfsr & 1) ^ ((this.lfsr >> 3) & 1);
-          this.lfsr = ((this.lfsr >> 1) | (bit << 16)) & 0x1FFFF;
-          this.noiseOut = (this.lfsr & 1) ? 31 : 0;
-        }
-      }
+    stepNoise() {
+      const v = this.lfsr;
+      const bit = (v ^ (v >>> 1) ^ (v >>> 11) ^ (v >>> 12) ^ (v >>> 17)) & 1;
+      this.noiseOut = (v & 1) ? 31 : 0;
+      this.lfsr = (v >>> 1) | (bit << 17);
     }
 
-    // clock()のnティック分バッチ版(数学的にclock()をn回呼ぶのと同値)。
-    // リアルタイム再生時の「がくがく」対策(hesBus.js clockBy()と同じ理由。
-    // hesPlayer.js renderFrame()冒頭コメント参照)。波形位相(wavePhaseAcc)は単純な
-    // 折り返しカウンタなので割り算でO(1)に飛ばせる。ノイズのLFSRは1tickごとの
-    // シフト演算(状態遷移)そのものが出力なので数学的に一括計算はできないが、
-    // 1オーディオサンプルあたりの折り返し回数は周期が最速でも64tickなので
-    // (n≈162tick/サンプルに対し)たかだか数回で済み、単純ループのままで十分軽い。
-    clockBy(n) {
-      if (n <= 0) return;
-      if (this.on && !this.dda && this.freq > 0) {
-        // period=0は「無限に長い周期」= 実質フリーズ(0除算回避、聴感上ほぼ無音相当)。
-        const period = this.freq;
-        let acc = this.wavePhaseAcc + n;
-        if (acc >= period) {
-          const steps = Math.floor(acc / period);
-          acc -= steps * period;
-          this.wavePos = (this.wavePos + steps) & (WAVE_LEN - 1);
+    write(reg, value) {
+      switch (reg) {
+        case 2: this.freq = (this.freq & 0xF00) | value; return;
+        case 3: this.freq = (this.freq & 0x0FF) | ((value & 0x0F) << 8); return;
+        case 4: {
+          const now = (value & 0x80) !== 0;
+          if (now !== this.on) this.timer = this.period();
+          this.control = value;
+          if (value & 0x40) { if (now) this.out = this.dac - CENTER; else this.wavePos = 0; }
+          return;
         }
-        this.wavePhaseAcc = acc;
-      }
-      if (this.hasNoise && this.on && (this.noiseCtrl & 0x80)) {
-        // 周波数式(文献): freq = PSG_CLOCK / (64 * (5bit値 XOR 31))。生値31(XOR後0)は
-        // 0除算になるため最小周期1として扱う(実機は最高速のはず、という近似)。
-        const invVal = Math.max(1, (~this.noiseCtrl) & 0x1F);
-        const periodTicks = invVal * 64;
-        let acc = this.noisePhaseAcc + n;
-        if (acc >= periodTicks) {
-          const steps = Math.floor(acc / periodTicks);
-          acc -= steps * periodTicks;
-          // 1bit LFSR(周期性が明確な単純フィボナッチ型)。実機の正確なタップ位置は資料が
-          // 無いため、聴感上の「ホワイトノイズらしさ」を優先した17bit LFSR(タップ0,3)を採用
-          // (2A03/GBのノイズと同種の近似。正確な多項式はハードウェア未公開)。
-          for (let s = 0; s < steps; s++) {
-            const bit = (this.lfsr & 1) ^ ((this.lfsr >> 3) & 1);
-            this.lfsr = ((this.lfsr >> 1) | (bit << 16)) & 0x1FFFF;
+        case 5: this.balance = value; return;
+        case 6:
+          if (this.dda) {
+            this.dac = value & 0x1F;
+            if (this.on) this.out = this.dac - CENTER;
+          } else {
+            this.wave[this.wavePos] = value & 0x1F;
+            if (!this.on) this.wavePos = (this.wavePos + 1) & (WAVE_LEN - 1);
+            if (!this.noiseOn) this.out = this.wave[this.wavePos] - CENTER;
           }
-          this.noiseOut = (this.lfsr & 1) ? 31 : 0;
-        }
-        this.noisePhaseAcc = acc;
+          return;
+        default: return;
       }
     }
 
-    // 現在の生サンプル値(0-31)
-    rawSample() {
-      if (!this.on) return 0;
-      if (this.dda) return this.dac;
-      if (this.hasNoise && (this.noiseCtrl & 0x80)) return this.noiseOut;
-      return this.wave[this.wavePos];
+    // ── 素直な道(Mesen と同じ刻み)。LFO が掛かっている間と、ノイズの最初の 1 歩に使う ──
+
+    /** この ch が「次に何かが起きるまで」の残り。0 は「待つ物が無い」。型の幅(16bit)も Mesen と同じ */
+    pending() {
+      const t = this.hasNoise ? this.noiseTimer : 0;
+      // 16bit に切って 0 になる値(65536 の倍数)は、Mesen では「待つ物が無い」扱いになる。Mesen は 1 回に 1 画面ぶんしか進めないので
+      // それで飛び越さないが、こちらは書き込みの間を一度に進めることがあるので、65535 で区切る
+      if (this.on && !this.dda && (t === 0 || this.timer < t)) return this.timer > 0 ? ((this.timer & 0xFFFF) || 0xFFFF) : 1;
+      return t & 0xFFFF;
     }
 
-    // (left, right) の実効ゲイン(0.0-1.0)を返す。$0805(ch balance)と全体balanceを
-    // 減算合成する(文献の"vol = chVol - 60、L = vol + chL*2 + gL*2"という式を再構成)。
+    chunk(m) {
+      if (this.hasNoise) {
+        if (this.noiseTimer <= m) { this.noiseTimer = this.noisePeriod(); this.stepNoise(); }
+        else this.noiseTimer -= m;
+      }
+      if (!this.on) { this.out = 0; return; }
+      if (this.dda) { this.out = this.dac - CENTER; return; }
+      if (this.noiseOn) { this.out = this.noiseOut - CENTER; return; }
+      this.timer -= m;
+      if (this.timer <= 0) { this.timer = this.period(); this.wavePos = (this.wavePos + 1) & (WAVE_LEN - 1); }
+      this.out = this.wave[this.wavePos] - CENTER;
+    }
+
+    // ── 速い道: LFO が掛かっていなければ ch どうしは無関係なので、ch ごとに n 個ぶんを一度に進める ──
+    // 結果(タイマ、読み位置、乱数、出力)は素直な道と同じになる(pce-apu-ab.js --selfcheck で確かめる)。
+
+    fast(n) {
+      const a = this._advance(n);
+      if (a !== 0) { const bal = this.chip.balance; this.accL += a * GAIN[this.steps(bal, true)]; this.accR += a * GAIN[this.steps(bal, false)]; }
+    }
+
+    /** n 個ぶん進めて、その間の「出力 × 時間」の合計を返す */
+    _advance(n) {
+      let acc = 0;
+      const audible = this.on;
+      if (this.hasNoise) {
+        const noisy = audible && !this.dda && this.noiseOn;
+        let left = n, lv = this.out;
+        while (left >= this.noiseTimer) {
+          if (noisy) acc += lv * this.noiseTimer;
+          left -= this.noiseTimer;
+          this.noiseTimer = this.noisePeriod();
+          this.stepNoise();
+          lv = this.noiseOut - CENTER;
+        }
+        this.noiseTimer -= left;
+        if (noisy) { acc += lv * left; this.out = this.noiseOut - CENTER; return acc; }
+      }
+      if (!audible) { this.out = 0; return 0; }
+      if (this.dda) { acc = this.out * n; this.out = this.dac - CENTER; return acc; }
+      // 波形
+      const wave = this.wave;
+      if (this.timer <= 0) this.timer = 1;
+      if (n < this.timer) {
+        acc += this.out * n;
+        this.timer -= n;
+      } else {
+        acc += this.out * this.timer;
+        const rem = n - this.timer;
+        const P = this.period();
+        const steps = Math.floor(rem / P);
+        const r = rem - steps * P;
+        let pos = (this.wavePos + 1) & (WAVE_LEN - 1);
+        if (steps > 0) {
+          // pos から steps 個ぶんを P ずつ鳴らした合計。32 個で一周するので、一周ぶんはまとめる
+          let sum = 0;
+          const full = Math.floor(steps / WAVE_LEN), part = steps - full * WAVE_LEN;
+          if (full > 0) { let total = 0; for (let k = 0; k < WAVE_LEN; k++) total += wave[k]; sum += full * (total - WAVE_LEN * CENTER); }
+          for (let k = 0; k < part; k++) sum += wave[(pos + k) & (WAVE_LEN - 1)] - CENTER;
+          acc += sum * P;
+          pos = (pos + part) & (WAVE_LEN - 1);
+        }
+        acc += (wave[pos] - CENTER) * r;
+        this.wavePos = pos;
+        this.timer = P - r;
+      }
+      this.out = wave[this.wavePos] - CENTER;
+      return acc;
+    }
+
+    /** 左右の減衰の段数(0 = 最大)。MUTE_STEPS 以上は無音 */
+    steps(globalBalance, left) {
+      const g = left ? (globalBalance >> 4) & 0x0F : globalBalance & 0x0F;
+      const p = left ? (this.balance >> 4) & 0x0F : this.balance & 0x0F;
+      const r = (15 - g) * 2 + (31 - (this.control & 0x1F)) + (15 - p) * 2;
+      return r < MUTE_STEPS ? r : MUTE_STEPS;
+    }
+
+    /** 左右の実効ゲイン(0.0-1.0) */
     gainLR(globalBalance) {
-      const vol = this.volume - 0x1E * 2;
-      const lPan = (this.balance >> 4) & 0x0F, rPan = this.balance & 0x0F;
-      const gL = (globalBalance >> 4) & 0x0F, gR = globalBalance & 0x0F;
-      const left = Math.max(0, vol + lPan * 2 + gL * 2);
-      const right = Math.max(0, vol + rPan * 2 + gR * 2);
-      return { left: gainFromIndex(left), right: gainFromIndex(right) };
+      return { left: GAIN[this.steps(globalBalance, true)], right: GAIN[this.steps(globalBalance, false)] };
     }
   }
 
   class APUHuC6280 {
     constructor() {
       this.ch = [];
-      for (let i = 0; i < CH_COUNT; i++) this.ch.push(new PsgChannel(i >= 4));
-      this.selected = 0;   // $0800: 操作対象ch(bit2-0)
-      this.balance = 0xFF; // $0801: 全体バランス
+      for (let i = 0; i < CH_COUNT; i++) this.ch.push(new WaveChannel(i, this));
       this.mute = { ch0: false, ch1: false, ch2: false, ch3: false, ch4: false, ch5: false };
       this.vol = { ch0: 1, ch1: 1, ch2: 1, ch3: 1, ch4: 1, ch5: 1 };
+      this.forceChunked = false; // true にすると、いつも素直な道で進める(速い道との突き合わせ用)
+      this.reset();
     }
 
     reset() {
       for (const c of this.ch) c.reset();
-      this.selected = 0;
-      this.balance = 0xFF;
+      this.selected = 0;   // $0800: 操作する ch(3bit。6・7 は無い ch)
+      this.balance = 0xFF; // $0801: 全体の左右の音量(リセット値は冒頭 [推定])
+      this.lfoFreq = 0;    // $0808
+      this.lfoCtrl = 0;    // $0809
+      this.ticks = 0;      // 進めた音源クロックの通算
+      this.accTicks = 0;   // mixSample が前に呼ばれてからの個数
     }
 
+    get lfoOn() { return (this.lfoCtrl & 0x80) === 0 && (this.lfoCtrl & 0x03) !== 0; }
+
+    /** 番地は $0800-$0809(下位 4bit だけ見る) */
     writeRegister(addr, value) {
       value &= 0xFF;
-      switch (addr) {
-        case 0x0800: this.selected = value & 0x07; return;
-        case 0x0801: this.balance = value; return;
-      }
-      if (this.selected >= CH_COUNT) return; // ch6/7は存在しない(書込みは無視)
-      const c = this.ch[this.selected];
-      switch (addr) {
-        case 0x0802: c.freq = (c.freq & 0xF00) | value; return;
-        case 0x0803: c.freq = (c.freq & 0x0FF) | ((value & 0x0F) << 8); return;
-        case 0x0804: c.writeControl(value); return;
-        case 0x0805: c.balance = value; return;
-        case 0x0806: c.writeData(value); return;
-        case 0x0807: c.noiseCtrl = value; return;
-        // 0x0808/0x0809 = LFO周波数/制御。冒頭コメントの通り本実装では対象外(無視のみ)。
+      const reg = addr & 0x0F;
+      switch (reg) {
+        case 0: this.selected = value & 0x07; return;
+        case 1: this.balance = value; return;
+        case 2: case 3: case 4: case 5: case 6:
+          if (this.selected < CH_COUNT) this.ch[this.selected].write(reg, value);
+          return;
+        case 7:
+          if (this.selected === 4 || this.selected === 5) this.ch[this.selected].noiseCtrl = value;
+          return;
+        case 8: this.lfoFreq = value; return;
+        case 9: this.lfoCtrl = value; return;
         default: return;
       }
     }
 
-    readRegister(addr) {
-      // PSGは基本ライトオンリー(実機もリードは未定義動作に近い)。読み出し依存の曲は
-      // 想定しないため0を返す(hesBus.js側で他I/Oと衝突しないよう明示的にここへ来る)。
-      return 0;
+    /** 音源は読めない(バス側が I/O バッファを返す) */
+    readRegister(addr) { return 0; }
+
+    // 素直な道の 1 区切り: 「どれかの ch で何かが起きる所」まで全 ch をまとめて進める。進めた後の残りを返す
+    _oneChunk(n) {
+      const ch = this.ch;
+      let m = n;
+      for (let i = 0; i < CH_COUNT; i++) { const t = ch[i].pending(); if (t !== 0 && t < m) m = t; }
+      const bal = this.balance;
+      for (let i = 0; i < CH_COUNT; i++) { const c = ch[i], a = c.level() * m; if (a !== 0) { c.accL += a * GAIN[c.steps(bal, true)]; c.accR += a * GAIN[c.steps(bal, false)]; } }
+      for (let i = 0; i < CH_COUNT; i++) ch[i].chunk(m); // ch1 から順に。ch1 の周期は「まだ進めていない ch2」の出力を読む
+      return n - m;
     }
 
-    // PSGクロック(3579545Hz)ごとに1回呼ぶ
-    clock() {
-      for (const c of this.ch) c.clock();
-    }
-
-    // clock()のnティック分バッチ版。hesPlayer.js renderFrame()から使う(冒頭コメント参照)。
+    /** 音源クロック n 個ぶん進める */
     clockBy(n) {
-      for (const c of this.ch) c.clockBy(n);
+      if (n <= 0) return;
+      this.ticks += n;
+      this.accTicks += n;
+      const ch = this.ch;
+      // ノイズのタイマが 0(電源投入直後)の間は素直な道で(★ 冒頭「ノイズの最初の 1 歩」)
+      while (n > 0 && (this.forceChunked || this.lfoOn || ch[4].noiseTimer === 0 || ch[5].noiseTimer === 0)) n = this._oneChunk(n);
+      if (n > 0) for (let i = 0; i < CH_COUNT; i++) ch[i].fast(n);
+    }
+
+    clock() { this.clockBy(1); }
+
+    /** マスタークロックの時刻(電源投入からの通算)まで進める */
+    runToMaster(masterClock) {
+      const t = Math.floor(masterClock / 6);
+      if (t > this.ticks) this.clockBy(t - this.ticks);
     }
 
     /**
-     * 現在の出力レベルを {left, right}(概ね-1.0〜1.0)で返す。6ch分のL/Rゲイン付き
-     * サンプルをそれぞれのバスへ合算して正規化する。基準は「0-31を中心±15.5とみなした
-     * 振幅×ゲイン」の合計を6ch分見込んだスケール。
-     * ★旧実装は(left+right)*0.5でモノラル化していた。センター定位(gainLRがleft=rightを
-     * 返すch)では平均してもモノラル値と一致するため、L/Rを別々に積むだけでモノラル時と
-     * 同じ音量感を保ったままステレオ分離できる。
+     * 前に呼んでから今までの平均の出力を {left, right}(概ね -1.0〜1.0)で返す。時間が進んでいなければ今の値。
+     * 6ch を足して 16×6 で割る(冒頭 [推定])。
      */
     mixSample() {
+      const t = this.accTicks, bal = this.balance;
       let sumL = 0, sumR = 0;
       for (let i = 0; i < CH_COUNT; i++) {
-        if (this.mute['ch' + i]) continue;
         const c = this.ch[i];
-        const raw = (c.rawSample() - 16) * this.vol['ch' + i]; // 0-31を中心0付近へ(±16相当)
-        const { left, right } = c.gainLR(this.balance);
-        sumL += raw * left;
-        sumR += raw * right;
+        let l, r;
+        if (t > 0) { l = c.accL / t; r = c.accR / t; } else { const v = c.level(); l = v * GAIN[c.steps(bal, true)]; r = v * GAIN[c.steps(bal, false)]; }
+        c.accL = 0; c.accR = 0;
+        if (this.mute['ch' + i]) continue;
+        const k = this.vol['ch' + i];
+        sumL += l * k;
+        sumR += r * k;
       }
+      this.accTicks = 0;
       return { left: sumL / (16 * CH_COUNT), right: sumR / (16 * CH_COUNT) };
     }
 
     /**
-     * mixSample()と同じ正規化(6ch分を単純合算するとmixSample()の返す値に一致する)で、
-     * 6chぶんを合算せず個別の配列で返す。hes-stream-player.js HesBufferedPlayerが
-     * 「chごとに別々のAudioBufferチャンネルへ書き出し、再生をリアルタイムミュート
-     * できるようにする」ために使う(mixSample()は合算済みで後からミュートできないため)。
-     * mute(this.mute)はここでは見ない — ミュートは録音後にGainNodeで即時に効かせる設計
-     * (録音時にミュートを焼き込むと、再生中のミュート切替に再レンダリングが必要になり
-     * 本末転倒なため)。
+     * mixSample と同じ基準で、ch ごとの値(左右の平均)を配列で返す。ミュートは見ない
+     * (hes-stream-player.js の HesBufferedPlayer が、録った後で ch ごとに切り替えられるようにするため)。
      */
     mixChannelSamples() {
+      const t = this.accTicks, bal = this.balance;
       const result = new Array(CH_COUNT);
       for (let i = 0; i < CH_COUNT; i++) {
         const c = this.ch[i];
-        const raw = c.rawSample() - 16;
-        const { left, right } = c.gainLR(this.balance);
-        result[i] = (raw * (left + right) * 0.5) / (16 * CH_COUNT);
+        const lr = t > 0 ? (c.accL + c.accR) / t : c.level() * (GAIN[c.steps(bal, true)] + GAIN[c.steps(bal, false)]);
+        c.accL = 0; c.accR = 0;
+        result[i] = (lr * 0.5) / (16 * CH_COUNT);
       }
+      this.accTicks = 0;
       return result;
     }
   }
 
-  // 鍵盤表示/ロール用ライブスナップショット(snapshotGbApu等と同じ考え方)。
-  // panL/panR: $0805(chバランス)の上位/下位ニブル(0-15、鍵盤表示のL/R列用)。
-  // 戻り値の配列自体にglobalPanL/globalPanR($0801、全体バランス)も生やしておく
-  // (main.js liveHesApu()参照。ch単位ではないため配列要素にはせず配列のプロパティとして持たせる)。
+  // 鍵盤表示/ロール用のライブの写し。panL/panR は $0805 の上位/下位。
+  // 配列そのものに globalPanL/globalPanR($0801)と lfoFreq/lfoCtrl($0808/$0809)を生やす(ch 単位ではないため)。
+  // ★ LFO が掛かっている間、ch1 の freq は周期レジスタから出した値で、揺れは入っていない
+  // ★ 周期レジスタが 0 の ch は音源の中では周期 $1000(約 27Hz)で回るが、ここでは従来どおり「鳴っていない」として返す(変換側 wave.js も同じ)
   Emu.snapshotHuC6280Apu = function (apu) {
     const arr = apu.ch.map((c, i) => {
       const freqHz = (c.on && !c.dda && c.freq > 0) ? MML.HES.PSG_CLOCK / (32 * c.freq) : 0;
-      const noiseOn = c.hasNoise && c.on && (c.noiseCtrl & 0x80) !== 0;
+      const noiseOn = c.noiseOn && c.on;
       return {
         on: c.on, dda: c.dda, noiseOn,
         freq: freqHz, vol: c.volume / 31, rawVol: c.volume,
@@ -965,6 +1007,8 @@
     });
     arr.globalPanL = (apu.balance >> 4) & 0x0F;
     arr.globalPanR = apu.balance & 0x0F;
+    arr.lfoFreq = apu.lfoFreq;
+    arr.lfoCtrl = apu.lfoCtrl;
     return arr;
   };
 
@@ -974,89 +1018,368 @@
 })(globalThis);
 
 /*
- * HES(PC Engine)実行用メモリバス + 最小限のハードウェア(MMU/タイマ/割込コントローラ/VDC)
- * MML.Emu.HesBus
+ * PC エンジンの内蔵タイマ(HuC6280 の中、I/O $0C00-$0FFF)
+ * MML.Emu.PceTimer
  *
- * HuC6280のMMU: 8個のMPR(Memory Page Register、TAM/TMAで読み書き)が論理アドレス空間
- * $0000-$FFFF を8KB単位8ページに分割し、各ページに物理バンク番号(0-255、1バンク=8KB、
- * 256バンク=2MB)を割り当てる。物理バンク $00-$7F がDATAブロック(HESヘッダのaddr以降)、
- * $F8=ワークRAM、$F9-$FB=SuperGrafx拡張RAM、$FF=I/O空間(PSG/タイマ/割込コントローラ/VDC等)、
- * それ以外($80-$F7、$FC-$FE)は未マップ(0xFF固定)。
+ * 7bit の下りカウンタ。マスタークロック 3072 個(=高速時の CPU 1024 サイクル)ごとに 1 減り、0 の次で再装填して割り込みを上げる。
+ * CPU の速さ(CSH/CSL)には関係なく進む。
  *
- * ★GBS/NSF/KSSと異なり、HESヘッダにはPLAYアドレスが存在しない(INITアドレスのみ)。
- * 実機は「タイマ割込またはVDCの垂直帰線割込のハンドラ」としてPLAY相当の処理を呼ぶ設計で、
- * そのハンドラのアドレスはヘッダにもDATAブロックの固定位置にも存在せず、ゲーム本体の
- * 割込ベクタテーブル($FFF6-$FFFF、DATAブロックの一部としてROMに含まれる)経由でしか
- * わからない。そのため本ツールは(GBS等の簡略化と違い)本物のIRQディスパッチ
- * (Iフラグ・BRK/IRQ/RTI)をcpuHuC6280.js側に実装し、このバスはタイマ/VDC垂直帰線の
- * 実際のハードウェア挙動(割込要求の発生・マスク・確認)を再現する。
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3)。このファイルは全部 [参照] Mesen 2 の Core/PCE/PceTimer.cpp(読んだだけで写していない):
+ *   - カウンタが 0 の時に刻みが来ると「再装填+割り込み」、それ以外は 1 減るだけ → 周期は (再装填値+1)×3072 マスタークロック
+ *   - $0C01 bit0 は「止まっている ↔ 動いている」が変わった時だけ、刻みとカウンタを頭に戻す(動いている最中に 1 を書き直しても何も起きない)
+ *   - $0C00 への書き込みは再装填値を変えるだけ(動いているカウンタには次の再装填まで効かない)
+ *   - 電源投入でカウンタは 0
+ *   - 読み出し: カウンタ。ただし 0 から再装填される直前(刻みの残り 15 マスタークロック以下)は $7F が見える。
+ *     ★ Mesen のコメントによれば、これに頼るゲームがあって入れた物で、正しい時間幅は未確認
+ * HES 119 本の Mesen との突き合わせ(tools/headless/pce-mesen-ab.js)で動きを確かめる。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const PRESCALE = 1024 * 3; // マスタークロック
+
+  class PceTimer {
+    constructor() { this.reset(); }
+
+    reset() {
+      this.reload = 0;
+      this.counter = 0;
+      this.scaler = PRESCALE;
+      this.enabled = false;
+    }
+
+    /**
+     * マスタークロック n 個ぶん進める。割り込みを上げる時は true を返す。
+     * 呼ぶ側は必ず n=3 で呼ぶ(低速の CPU 1 サイクルは 3 を 4 回)。刻みは 3 の倍数なので、ちょうど 0 になった所で次へ進む。
+     */
+    advance(n) {
+      if (!this.enabled) return false;
+      this.scaler -= n;
+      if (this.scaler > 0) return false;
+      this.scaler += PRESCALE;
+      if (this.counter === 0) { this.counter = this.reload; return true; }
+      this.counter--;
+      return false;
+    }
+
+    write(addr, value) {
+      if (addr & 1) {
+        const on = (value & 1) !== 0;
+        if (on !== this.enabled) { this.enabled = on; this.scaler = PRESCALE; this.counter = this.reload; }
+      } else {
+        this.reload = value & 0x7F;
+      }
+    }
+
+    read() {
+      return (this.counter === 0 && this.scaler <= 5 * 3) ? 0x7F : this.counter;
+    }
+  }
+
+  Emu.PceTimer = PceTimer;
+  Emu.PCE_MASTER_CLOCK = 21477270; // [参照] PceConstants.h(NTSC の色副搬送波 ×6)
+})(globalThis);
+
+/*
+ * HuC6270(VDC)の「時間の骨組み」だけ: 横と縦の状態機械、垂直帰線と走査線の割り込み、ステータス
+ * MML.Emu.PceVdcTiming
  *
- * 参考: Hes_Core.h/.cpp(Game_Music_Emu, kode54/Game_Music_Emu)のレジスタ挙動を実装から
- *   直接確認した上で、コードは移植せずクリーンルームで再実装(vector値$FFF6/$FFF8/$FFFAは
- *   HuC6280 CMOS Software Manual のBRK命令の記述($FFF6/$FFF7)から確認、IRQ1/TIQは
- *   cpu_done()が返す"reason code"(0x08/0x0A)が$FFF0起点のベクタ下位byteだったことから
- *   逆算して確認した)。
+ * 絵(VRAM、BG、スプライト)は持たない。HES の再生に要るのは「割り込みがいつ来るか」だけなので、まずここだけ作った(段階 9a)。
+ * 本体の VDC(段階 9c)はこの上に絵を足す。
+ *
+ * VDC は自分の中で 横 = 同期(HSW)→ 表示開始待ち(HDS)→ 表示(HDW)→ 表示終了(HDE) を回し、
+ * 縦 = 同期(VSW)→ 表示開始待ち(VDS)→ 表示(VDW)→ 表示終了(VCR) を 1 行に 1 回進める。VCE(色の石)が 1365 マスタークロックごとに
+ * 水平同期を、画面の終わりの 3 行で垂直同期を掛けて、VDC の周回を強制的に頭へ戻す。
+ * 横のレジスタが短いと 1 行の中で横の周回が 2 周し、縦のカウンタが 1 行に 2 回進む(電源投入時の値がこれ。HES は横のレジスタを
+ * 設定しない曲が多いので、垂直帰線が画面の半分の位置で来る)。
+ *
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3): このファイルの時間の決まりは全部 [参照] Mesen 2 の Core/PCE/PceVdc.cpp
+ * (Exec / ProcessVdcEvents / ProcessEvent / SetHorizontalMode / ProcessHorizontalSyncStart / SetVertMode / ClockVCounter /
+ *  IncrementRcrCounter / ProcessEndOfScanline / TriggerVerticalBlank)と PceVce.cpp。読んで動きを合わせた(写していない)。
+ * Mesen 自身が「概算」「要検証」とコメントしている所は下に ★ で写してある。
+ * 確かめ方: tools/headless/pce-iotrace.js(HES の I/O を時刻つきで Mesen と並べる。VDC ステータスの読み=垂直帰線の時刻が合うか)。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const LINE_CLOCKS = 1365;
+  const H_DS = 0, H_DW = 1, H_DE = 2, H_SW = 3;
+  const V_DS = 0, V_DW = 1, V_DE = 2, V_SW = 3;
+  const EV_NONE = 0, EV_LATCH_Y = 1, EV_LATCH_X = 2, EV_HDS_IRQ = 3, EV_INC_RCR = 4;
+  const NEVER = 0xFFFF;
+  const ST_VBLANK = 0x20, ST_RCR = 0x04;
+
+  class PceVdcTiming {
+    constructor() { this.reset(); }
+
+    reset() {
+      // VCE 側の設定
+      this.divider = 4;        // ドットクロック: 4 = 5.37MHz、3 = 7.16MHz、2 = 10.74MHz
+      this.lines = 262;        // 1 画面の行数(VCE の bit2 で 263)
+      // レジスタ(書かれた値)と、同期の頭で取り込んだ値。電源投入時は表示幅 32 桁・240 行、ほかは 0
+      this.reg = { hsw: 0, hds: 0, hdw: 0x1F, hde: 0, vsw: 0, vds: 0, vdw: 239, vcr: 0 };
+      this.lat = { hsw: 0, hds: 0, hdw: 0x1F, hde: 0, vsw: 0, vds: 0, vdw: 239, vcr: 0 };
+      this.currentReg = 0;
+      this.enableVblankIrq = false;  // R05 bit3
+      this.enableRcrIrq = false;     // R05 bit2
+      this.rcrReg = 0;               // R06(10bit)
+      // 状態
+      this.hClock = 0; this.scanline = 0;
+      this.hMode = H_DS; this.hCounter = 0;
+      this.vMode = V_DS; this.vCounter = 0;
+      this.rcr = 0;
+      this.event = EV_NONE; this.eventCounter = 0;
+      this.needRcrInc = false; this.needVClock = false;
+      this.needVblank = false; this.vblankDone = false;
+      this.status = 0;         // 読むと消える印(bit5 垂直帰線、bit2 走査線)
+      this.irq = false;        // IRQ1 の線
+      this.frameCount = 0;
+    }
+
+    _dots(n) { return n * this.divider; }
+
+    /** マスタークロック 3 個ぶん進める */
+    exec() {
+      if (this.hCounter <= 3 || this.eventCounter <= 3) {
+        for (let i = 0; i < 3; i++) {
+          this.hClock++;
+          if (--this.hCounter === 0) this._setHMode((this.hMode + 1) & 3);
+          if (this.eventCounter && --this.eventCounter === 0) this._event();
+        }
+      } else {
+        this.hCounter -= 3;
+        if (this.eventCounter > 0) this.eventCounter -= 3;
+        this.hClock += 3;
+      }
+      if (this.hClock === LINE_CLOCKS) this._endOfLine();
+    }
+
+    _setHMode(m) {
+      this.hMode = m;
+      const L = this.lat;
+      switch (m) {
+        case H_DS: this.hCounter = this._dots((L.hds + 1) * 8); break;
+        case H_DW:
+          // 表示期間に入るたびに「縦を 1 つ進める」予約が立ち、表示の終わり近くで実行される
+          this.needVClock = true; this.needRcrInc = true;
+          this.event = EV_INC_RCR;
+          this.eventCounter = this._dots((L.hdw - 1) * 8 + 2);
+          this.hCounter = this._dots((L.hdw + 1) * 8);
+          break;
+        case H_DE: this.hCounter = this._dots((L.hde + 1) * 8); break;
+        default: this.hCounter = this._dots((L.hsw + 1) * 8); this._hsyncStart(); break;
+      }
+    }
+
+    // 水平同期の頭: 横のレジスタを取り込み、この行の出来事(スクロールの取り込み → 割り込みの上げ時)を予約する
+    _hsyncStart() {
+      const L = this.lat, R = this.reg;
+      L.hsw = R.hsw; L.hds = R.hds; L.hdw = R.hdw; L.hde = R.hde;
+      this.event = EV_NONE; this.eventCounter = NEVER;
+      const displayStart = (this.hClock + this.hCounter + this._dots((L.hds + 1) * 8)) & 0xFFFF;
+      if (displayStart - this._dots(24) >= LINE_CLOCKS) return;
+      let lead;
+      // ★ Mesen: 表示期間中は表示開始の 34 ドット前(これより短いとちらつくゲームがある、という合わせ込み)、それ以外は 25 ドット前
+      if (this.vMode === V_DW) { this.event = EV_LATCH_Y; lead = this._dots(34); }
+      else { this.event = EV_HDS_IRQ; lead = this._dots(25); }
+      if (displayStart - lead <= this.hClock) this._event();
+      else this.eventCounter = displayStart - lead - this.hClock;
+    }
+
+    _event() {
+      switch (this.event) {
+        case EV_LATCH_Y: this.needVClock = true; this.event = EV_LATCH_X; this.eventCounter = this._dots(2); break;
+        case EV_LATCH_X: this.event = EV_HDS_IRQ; this.eventCounter = this._dots(6); break;
+        case EV_HDS_IRQ:
+          if (this.needVblank) this._vblank();
+          this.event = EV_NONE; this.eventCounter = NEVER; break;
+        case EV_INC_RCR: this._incRcr(); this.event = EV_NONE; this.eventCounter = NEVER; break;
+        default: break;
+      }
+    }
+
+    _setVMode(m) {
+      this.vMode = m;
+      const L = this.lat;
+      switch (m) {
+        case V_DS: this.vCounter = L.vds + 2; break;
+        case V_DW: this.vCounter = L.vdw + 1; this.rcr = 0; break;
+        case V_DE: this.vCounter = L.vcr; break;
+        default: { // 垂直同期の頭で縦のレジスタを取り込む
+          const R = this.reg; L.vsw = R.vsw; L.vds = R.vds; L.vdw = R.vdw; L.vcr = R.vcr;
+          this.vCounter = L.vsw + 1; break;
+        }
+      }
+    }
+
+    _clockV() {
+      if (--this.vCounter === 0) this._setVMode((this.vMode + 1) & 3);
+      this.needVClock = false;
+    }
+
+    _incRcr() {
+      this.rcr = (this.rcr + 1) & 0xFFFF; // 16bit(表示期間に入らないまま回り続ける設定でも Mesen と同じ所で一周する)
+      this.needRcrInc = false;
+      this._clockV();
+      // 表示が終わった行: 垂直帰線の割り込みを予約(上げるのは次の「割り込みの上げ時」)
+      if (this.vMode === V_DE && this.rcr === this.lat.vdw + 1) { this.needVblank = true; this.vblankDone = true; }
+      // 走査線の割り込み(R06 と比べる。値は $40 が画面の 1 行目)
+      if (this.enableRcrIrq && this.rcr === this.rcrReg - 0x40) { this.status |= ST_RCR; this.irq = true; }
+    }
+
+    // 垂直帰線。印と割り込みは許可(R05 bit3)の時だけ
+    _vblank() {
+      if (this.enableVblankIrq) { this.status |= ST_VBLANK; this.irq = true; }
+      this.needVblank = false;
+    }
+
+    _endOfLine() {
+      this.hClock = 0;
+      this.scanline++;
+      if (this.scanline === 256) this.frameCount++;
+      else if (this.scanline >= this.lines) { this.scanline = 0; this.vblankDone = false; }
+      // 行の中でやり残した「縦を進める」をここで済ませる
+      if (this.needRcrInc) this._incRcr();
+      else if (this.needVClock) this._clockV();
+      // VCE が水平同期を掛ける: VDC が何をしていても同期へ
+      this.hMode = H_SW;
+      // ★ Mesen: 7MHz の時だけ同期が長い(32 ドット、ほかは 24)。これより短いと崩れるゲームがある、という合わせ込み
+      this.hCounter = this._dots(this.divider === 3 ? 32 : 24);
+      this._hsyncStart();
+      if (this.scanline === this.lines - 3) this._setVMode(V_SW);              // VCE が終わりの 3 行で垂直同期を掛ける
+      else if (this.scanline === this.lines - 2 && !this.vblankDone) this.needVblank = true;
+    }
+
+    /** VDC のポート(0-3)への書き込み。時間に関わるレジスタだけ受ける */
+    write(port, value) {
+      switch (port & 3) {
+        case 0: this.currentReg = value & 0x1F; return;
+        case 1: return;
+        default: {
+          const msb = (port & 3) === 3, R = this.reg;
+          switch (this.currentReg) {
+            case 0x05: if (!msb) { this.enableRcrIrq = (value & 0x04) !== 0; this.enableVblankIrq = (value & 0x08) !== 0; } break;
+            case 0x06: this.rcrReg = msb ? ((this.rcrReg & 0xFF) | (value << 8)) & 0x3FF : ((this.rcrReg & 0xFF00) | value) & 0x3FF; break;
+            case 0x0A: if (msb) R.hds = value & 0x7F; else R.hsw = value & 0x1F; break;
+            case 0x0B: if (msb) R.hde = value & 0x7F; else R.hdw = value & 0x7F; break;
+            case 0x0C: if (msb) R.vds = value; else R.vsw = value & 0x1F; break;
+            case 0x0D: R.vdw = msb ? ((R.vdw & 0xFF) | (value << 8)) & 0x1FF : ((R.vdw & 0xFF00) | value) & 0x1FF; break;
+            case 0x0E: if (!msb) R.vcr = value; break;
+            default: break;
+          }
+        }
+      }
+    }
+
+    /** ステータス(ポート 0)の読み出し。印と割り込みの線が消える */
+    readStatus() {
+      const v = this.status;
+      this.status = 0; this.irq = false;
+      return v;
+    }
+
+    /** VCE の制御レジスタ($0400)への書き込み: ドットクロックと行数 */
+    writeVceControl(value) {
+      this.lines = (value & 0x04) ? 263 : 262;
+      this.divider = (value & 3) === 0 ? 4 : (value & 3) === 1 ? 3 : 2;
+    }
+  }
+
+  Emu.PceVdcTiming = PceVdcTiming;
+})(globalThis);
+
+/*
+ * HES(PC エンジンの曲データ)を走らせるためのバス: MMU、RAM、I/O(タイマ、割り込み、波形メモリ音源、VDC/VCE の時間だけ)
+ * MML.Emu.HesBus — 2026-11-15 に時計を作り直し(段階 9a)
+ *
+ * 作り: CPU(cpuHuC6280.js)が 1 サイクルごとに tick() を呼ぶ。tick はマスタークロック(21.47727MHz)を
+ * 高速時 3、低速時 12 進め、その分だけタイマ(pce/pceTimer.js)と VDC の時間(pce/vdcTiming.js)を進める。
+ * 割り込みは「今かかっている線」(irqLines)として CPU に見せ、CPU がサイクルごとに見て、命令の終わりに入る。
+ *
+ * HES という形式の事情: ヘッダには INIT 番地しか無い。曲を進める処理は、曲データ自身の割り込みベクタ($FFF6-$FFFB)から
+ * タイマか垂直帰線の割り込みで呼ばれる。だから本物の割り込みが要る。
+ * タイマ(PCM)と垂直帰線(曲)の両方を使う曲は、2 つの前後関係で音源への書き込みの順が変わるので、垂直帰線の時刻も本物どおりに出す。
+ *
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3)。[参照] は Mesen 2 の Core/PCE/(読んだだけで写していない):
+ *   [参照] PceMemoryManager.cpp: I/O の番地の分け方(1K ごと、下位ビットで鏡像)、$1402 は下位 3bit、$1403 への書き込みはタイマの割り込みを下げるだけ、
+ *          I/O バッファ(タイマ/割り込みレジスタの読み出しで上位ビットに前の値が残る)、音源の読み出しは I/O バッファ、
+ *          VDC/VCE を読み書きすると CPU が 1 サイクル待たされる、パッド無しの $1000 は $BF(北米本体扱い+CD 無し)、
+ *          電源投入で割り込みマスクは 0、1 サイクルの中の順番はタイマ → VDC
+ *   [参照] PceVdc.cpp: VDC のステータスを読むと印と割り込みの線が消える。ポート 1 の読みは 0
+ *   [参照] HesFileData.h / PceMemoryManager.cpp: バンク $00-$7F のうち DATA ブロックの外は $00 が読める(1MB を 0 で埋めた上に曲を置く)。
+ *          HES は SuperGrafx ではない本体として動くので、RAM は 8K 1 枚で、バンク $F8-$FB はどれも同じ RAM
+ *   [推定] VDC のデータポート(2/3)の読みは 0 を返す(VRAM を持たないため。HES の曲が VRAM を読んで分岐することは無い、という前提)
+ *   [推定] RAM は 0 で始める(Mesen も HES では 0 にしている。「0 でないと鳴らない曲が多い」というコメントつき)
+ * 動きは tools/headless/pce-mesen-ab.js(書き込みの並び)と pce-iotrace.js(I/O を時刻つきで)で Mesen と突き合わせる。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
 
   const PAGE_SIZE = 0x2000;
-  const SCANLINE_PERIOD = 262 * 455; // マスタークロック単位(60.05Hz相当)、hesHeader.jsのVBLANK_FPSと同じ根拠
-
-  const IRQ_VECTOR_IRQ2 = 0xFFF6; // BRKもここを共有(HuC6280仕様)
-  const IRQ_VECTOR_IRQ1 = 0xFFF8; // VDC(垂直帰線)
-  const IRQ_VECTOR_TIQ  = 0xFFFA; // 内蔵タイマ
+  const LINE_IRQ1 = 2, LINE_TIMER = 4;
 
   class HesBus {
     /**
      * @param {object} header - HES.parseHeader() の結果
-     * @param {Uint8Array} rom - DATAブロックの生バイト列(header.dataOffset以降、dataSizeぶん)
+     * @param {Uint8Array} rom - DATA ブロック(header.dataOffset から dataSize ぶん)
      */
     constructor(header, rom) {
       this.header = header;
       this.rom = rom;
       this.romBase = header.addr;
       this.mpr = new Uint8Array(8);
-      this.ram = new Uint8Array(PAGE_SIZE);       // 物理バンク$F8
-      this.sgx = [new Uint8Array(PAGE_SIZE), new Uint8Array(PAGE_SIZE), new Uint8Array(PAGE_SIZE)]; // $F9-$FB
-      this.apu = null;    // hesPlayer.js が構築後にセットする
-      this.onWrite = null; // write-logキャプチャ用(hes2mml向け)
+      this.ram = new Uint8Array(PAGE_SIZE);       // バンク $F8-$FB(同じ 8K が 4 回見える)
+      this.timer = new Emu.PceTimer();
+      this.vdc = new Emu.PceVdcTiming();
+      this.apu = null;     // hesPlayer.js が後から入れる
+      this.cpu = null;     // 同上(VDC/VCE を触った時に 1 サイクル待たせるのに使う)
+      this.onWrite = null; // 書き込みの採り口(論理番地, 値)
+      this.syncApu = null; // 音源へ書く直前に呼ぶ(hesPlayer.js が「今の時刻まで音源を進める」のに使う)
       this.reset();
     }
 
     reset() {
       for (let i = 0; i < 8; i++) this.mpr[i] = this.header.banks[i] || 0;
       this.ram.fill(0);
-      for (const p of this.sgx) p.fill(0);
-
-      this.timerReload = 0;      // $0C00 書込み値(7bit)
-      this.timerCounter = 1024;  // マスタークロック単位の残りカウント
-      this.timerEnabled = false;
-      this.timerFired = false;
-
-      // IRQディセーブルレジスタ($1402)。実機/HES規約とも起動直後はタイマ・VDC割込を
-      // マスクした状態で始まる(ゲーム側が明示的にCLIおよびマスク解除する前提)。
-      this.irqDisable = 0x06; // bit2=timer, bit1=vdp を disable
-
-      this.vdcLatch = 0;
-      this.vdcCr = 0;         // レジスタ5(CR)の下位byte。bit3=垂直帰線割込許可
-      this.vblankCounter = SCANLINE_PERIOD;
-      this.vblankPending = false;
+      this.timer.reset();
+      this.vdc.reset();
+      this.clock = 0;          // マスタークロックの通算
+      this.cycleSteps = 1;     // CPU 1 サイクル = マスタークロック 3 個が何回ぶんか(高速 1、低速 4)
+      this.timerIrq = false;   // タイマの割り込みの線($1403 への書き込みで下がる)
+      this.irqDisable = 0;     // $1402
+      this.ioBuffer = 0;
     }
 
     setMpr(i, bank) { this.mpr[i & 7] = bank & 0xFF; }
     getMpr(i) { return this.mpr[i & 7]; }
+    setSpeed(high) { this.cycleSteps = high ? 1 : 4; }
+
+    /** CPU 1 サイクル。マスタークロック 3 個ずつ、タイマ → VDC の順に進める */
+    tick() {
+      const timer = this.timer, vdc = this.vdc;
+      for (let i = this.cycleSteps; i > 0; i--) {
+        this.clock += 3;
+        if (timer.advance(3)) this.timerIrq = true;
+        vdc.exec();
+      }
+    }
+
+    /** かかっている割り込み(マスク前)。bit1 = IRQ1(VDC)、bit2 = タイマ。IRQ2(bit0)は CD/外部で、HES には無い */
+    get irqActive() { return (this.vdc.irq ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0); }
+    /** CPU が見る線(マスク後) */
+    irqLines() { return ((this.vdc.irq ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0)) & ~this.irqDisable; }
 
     read(addr) {
       addr &= 0xFFFF;
       const bank = this.mpr[addr >>> 13];
       if (bank === 0xFF) return this.readIo(addr & 0x1FFF);
-      if (bank === 0xF8) return this.ram[addr & 0x1FFF];
-      if (bank >= 0xF9 && bank <= 0xFB) return this.sgx[bank - 0xF9][addr & 0x1FFF];
-      if (bank >= 0x80) return 0xFF; // 未実装の特殊バンク
+      if (bank >= 0xF8 && bank <= 0xFB) return this.ram[addr & 0x1FFF];
+      if (bank >= 0x80) return 0xFF;
       const off = bank * PAGE_SIZE + (addr & 0x1FFF) - this.romBase;
-      return (off >= 0 && off < this.rom.length) ? this.rom[off] : 0xFF;
+      return (off >= 0 && off < this.rom.length) ? this.rom[off] : 0x00;
     }
 
     write(addr, value) {
@@ -1064,117 +1387,76 @@
       if (this.onWrite) this.onWrite(addr, value);
       const bank = this.mpr[addr >>> 13];
       if (bank === 0xFF) { this.writeIo(addr & 0x1FFF, value); return; }
-      if (bank === 0xF8) { this.ram[addr & 0x1FFF] = value; return; }
-      if (bank >= 0xF9 && bank <= 0xFB) { this.sgx[bank - 0xF9][addr & 0x1FFF] = value; return; }
-      // ROM(bank<0x80)・未実装特殊バンク(bank>=0x80)への書込みは無視
+      if (bank >= 0xF8 && bank <= 0xFB) { this.ram[addr & 0x1FFF] = value; return; }
     }
 
+    /** ST0/ST1/ST2 の書き先(VDC のポート 0/2/3)。MPR を通らない */
+    stWrite(port, value) { this.writeIo(port & 3, value & 0xFF); }
+
     readIo(off) {
-      if (off >= 0x0800 && off <= 0x0809 && this.apu) return this.apu.readRegister(off);
-      switch (off) {
-        case 0x0000: { // VDC ステータスレジスタ: 読み出しで垂直帰線割込フラグをack
-          const v = this.vblankPending ? 0x20 : 0x00;
-          this.vblankPending = false;
-          return v;
-        }
-        case 0x0C00:
-          return this.timerEnabled ? Math.max(0, Math.floor((this.timerCounter - 1) / 1024)) : 0;
-        case 0x1402:
-          return this.irqDisable;
-        case 0x1403: {
-          let s = 0;
-          if (this.timerFired) s |= 0x04;
-          if (this.vblankPending && (this.vdcCr & 0x08)) s |= 0x02;
-          return s;
-        }
+      if (off < 0x0400) { // VDC
+        this.tick(); // 1 サイクル待たされる
+        return (off & 3) === 0 ? this.vdc.readStatus() : 0;
       }
-      return 0xFF; // 未実装I/O(ジョイパッド・CD/ADPCM等)は安全側の既定値
+      if (off < 0x0800) { this.tick(); return 0xFF; }            // VCE(パレットは持たない。書き込み専用のレジスタは $FF)
+      if (off < 0x0C00) return this.ioBuffer;                    // 波形メモリ音源は読めない
+      if (off < 0x1000) { this.ioBuffer = (this.ioBuffer & 0x80) | (this.timer.read() & 0x7F); return this.ioBuffer; }
+      if (off < 0x1400) { this.ioBuffer = 0xBF; return this.ioBuffer; } // パッド無し
+      if (off < 0x1800) {
+        switch (off & 3) {
+          case 2: this.ioBuffer = (this.ioBuffer & 0xF8) | (this.irqDisable & 7); break;
+          case 3: this.ioBuffer = (this.ioBuffer & 0xF8) | (this.irqActive & 7); break;
+        }
+        return this.ioBuffer;
+      }
+      return 0xFF; // CD ほか
     }
 
     writeIo(off, value) {
-      if (off >= 0x0800 && off <= 0x0809 && this.apu) { this.apu.writeRegister(off, value); return; }
-      switch (off) {
-        case 0x0000: this.vdcLatch = value & 0x1F; return;
-        case 0x0002: if (this.vdcLatch === 5) this.vdcCr = value; return;
-        case 0x0003: return; // CR上位byte。本stubでは未使用(bit3は下位byte側)
-        case 0x0C00: this.timerReload = value & 0x7F; return;
-        case 0x0C01:
-          this.timerEnabled = (value & 1) !== 0;
-          if (this.timerEnabled) this.timerCounter = (this.timerReload + 1) * 1024;
-          return;
-        case 0x1402: this.irqDisable = value; return;
-        case 0x1403:
-          this.timerFired = false;
-          if (this.timerEnabled) this.timerCounter = (this.timerReload + 1) * 1024;
-          return;
+      if (off < 0x0400) { // VDC
+        this.vdc.write(off, value);
+        if (this.cpu) this.cpu.idle(); // 1 サイクル待たされる
+        return;
       }
-      // ジョイパッド($1000台)・CD/ADPCM($1800台)等は未実装、書込みは無視
-    }
-
-    // マスタークロック(hesHeader.js HES.CPU_CLOCK_HIGH)1tickごとに1回呼ぶ。
-    // タイマの減算・垂直帰線周期のカウントダウンを進める(CPU速度(CSH/CSL)に関わらず
-    // 一定レートで進む、実機のPSG/タイマがCPU速度と独立した固定クロックである仕様通り)。
-    clock() { this.clockBy(1); }
-
-    // clock()のnティック分バッチ版(数学的にclock()をn回呼ぶのと同値)。リアルタイム
-    // 再生(hes-stream-player.js経由)では1オーディオサンプルあたり約162回もこの関数を
-    // 呼ぶ必要があり(マスタークロック7.16MHz ÷ 44.1kHz)、tickごとの関数呼出しオーバー
-    // ヘッドの累積がユーザー実測で「がくがく」(音声スレッドが間に合わずアンダーラン)
-    // になるほど重かった。timerCounter/vblankCounterはどちらも「しきい値まで減算して
-    // 折り返す」単純なカウンタなので、n減算してからしきい値超過分だけwhileで折り返す
-    // ことでO(1)(ならし)にできる。hesPlayer.js renderFrame()から呼ぶ場合、命令境界
-    // (cpu.step())の間だけをまとめて渡すため、IRQ判定(pollIrq、命令境界でしか
-    // 見ない)の観測結果は1tickずつ呼んでいた場合と完全に同じになる。
-    clockBy(n) {
-      if (n <= 0) return;
-      if (this.timerEnabled) {
-        this.timerCounter -= n;
-        while (this.timerCounter <= 0) {
-          this.timerFired = true;
-          this.timerCounter += (this.timerReload + 1) * 1024;
+      if (off < 0x0800) { // VCE
+        if ((off & 7) === 0) this.vdc.writeVceControl(value);
+        if (this.cpu) this.cpu.idle();
+        return;
+      }
+      if (off < 0x0C00) { // 波形メモリ音源
+        if (this.apu) { if (this.syncApu) this.syncApu(); this.apu.writeRegister(0x0800 | (off & 0x0F), value); }
+        this.ioBuffer = value; return;
+      }
+      if (off < 0x1000) { this.timer.write(off, value); this.ioBuffer = value; return; }
+      if (off < 0x1400) { this.ioBuffer = value; return; }
+      if (off < 0x1800) {
+        switch (off & 3) {
+          case 2: this.irqDisable = value & 7; break;
+          case 3: this.timerIrq = false; break;
         }
+        this.ioBuffer = value;
+        return;
       }
-      this.vblankCounter -= n;
-      while (this.vblankCounter <= 0) {
-        this.vblankCounter += SCANLINE_PERIOD;
-        this.vblankPending = true;
-      }
-    }
-
-    // cpuHuC6280.js の step() が毎命令境界で呼ぶ。優先度はタイマ>VDC(Hes_Core.cpuの
-    // cpu_done()チェック順と同じ)。マスク済み(irqDisableの対応bitが立っている)なら無視。
-    pollIrq() {
-      if (this.timerFired && !(this.irqDisable & 0x04)) return IRQ_VECTOR_TIQ;
-      if (this.vblankPending && (this.vdcCr & 0x08) && !(this.irqDisable & 0x02)) return IRQ_VECTOR_IRQ1;
-      return -1;
     }
   }
 
   Emu.HesBus = HesBus;
-  Emu.HES_IRQ_VECTOR = { IRQ2: IRQ_VECTOR_IRQ2, IRQ1: IRQ_VECTOR_IRQ1, TIQ: IRQ_VECTOR_TIQ };
 })(globalThis);
 
 /*
- * HESプレイヤー (HuC6280 CPU + HesBus + APUHuC6280 の統合)
+ * HES プレイヤー(HuC6280 の CPU + HesBus + 波形メモリ音源)
  * MML.Emu.HesPlayer
  *
- * ★GBS/NSF/KSSと異なり「INITを呼んで完了を待ち、以後PLAYを一定間隔で直接呼ぶ」という
- *   簡略設計は使えない(HESヘッダにPLAYアドレスが無い。hesBus.js冒頭コメント参照)。
- *   代わりに「INITアドレスへPCをセットして、あとは実時間どおりCPUを自由継続実行し、
- *   バス側のタイマ/垂直帰線割込を本物のIRQとしてディスパッチする」方式を取る
- *   (実機の動作そのもの)。INITが最終的にRTS/無限ループのどちらへ転んでも、
- *   周期的なIRQがPLAY相当の処理を呼び続ける限り再生は問題なく進む。
+ * HES のヘッダには INIT 番地しか無い(hesBus.js 冒頭)。INIT へ飛ばしたら、あとは CPU を実時間どおりに走らせ続け、
+ * 曲データ自身の割り込み(タイマ、垂直帰線)に曲を進めさせる。INIT が RTS で戻っても、戻り先の番兵で CPU が待つ。
  *
- * - initSong(track): CPU/バス/APUをリセットし、PC=initAddr・A=track・SP=0xFDにセットする
- *   (Hes_Core.start_trackと同じ考え方の初期化。call/beginCallでRTSを待つのではなく、
- *   その場で以後の連続実行に委ねる)。
- * - renderFrame(sampleRate): マスタークロック(HES.CPU_CLOCK_HIGH=7159090Hz)を基準に
- *   CPU/バス/APUを1サンプル分ずつ同期実行する。CPUの消費サイクル数はCSH/CSLの状態で
- *   マスタークロックへの換算比が変わる(cpu.speedHigh: true→1倍, false→4倍)。
- *   APUクロック(PSG_CLOCK=3579545Hz=マスタークロックの半分)はマスタークロック2tickに
- *   つき1回進める。★CPU/バス用とAPU用でクロックのアキュムレータを分離しており、
- *   speedFactor(再生速度)はCPU/バス側にのみ掛かる(音程を変えずにテンポだけ変える。
- *   renderFrame()内のコメント参照)。
+ * 時間(2026-11-15、段階 9a・9b):
+ *   - CPU は 1 サイクルごとにバスの tick() を呼び、バスがマスタークロック(21.47727MHz)を数える(bus.clock)
+ *   - 音源は自分の時計(音源クロック = マスタークロックの 1/6)で進む。書き込みは「書かれた時刻」まで音源を進めてから効かせる
+ *     (バスが書く直前に syncApu を呼ぶ)。1 サンプルの終わりにも、その時刻まで進めて平均の出力を取る
+ *   - 再生速度(speedFactor)は CPU 側だけに掛ける(テンポが変わり、音程は変わらない)。等倍の時は CPU の時刻と音源の時刻が
+ *     同じ数になる。等倍でない時は、サンプルの中の位置で按分して音源の時刻へ直す
+ *   - regsOnly(変換用の先読み)では、サンプルごとには音源を進めない。書き込みが来た時にまとめて進む(結果は同じ)
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -1239,6 +1521,9 @@
   }
   Emu.HesTraceBuf = HesTraceBuf;
 
+  // HES を始める時の CPU の速さ(true=高速)。initSong の説明を参照
+  const HES_START_HIGH = false;
+
   class HesPlayer {
     /**
      * @param {Uint8Array} hesBytes - HESファイルの完全なバイナリ
@@ -1253,15 +1538,23 @@
       this.apu = new Emu.APUHuC6280();
       this.bus.apu = this.apu;
       this.cpu = new Emu.CPUHuC6280(this.bus);
+      this.bus.cpu = this.cpu;
+      this.bus.syncApu = () => this.apu.runToMaster(this._apuTimeOf(this.bus.clock));
 
       this.clockHz = MML.HES.CPU_CLOCK_HIGH;
       this.frameRate = MML.HES.VBLANK_FPS; // 抽出/描画用の名目フレームレート(実際のPLAY頻度とは独立)
 
-      this.cpuCycleAccum = 0;
-      this.apuCycleAccum = 0;
-      this.cpuDebt = 0;
-      this.psgTickAccum = 0;
+      this.cpuTarget = 0;   // CPU をここまで進める(マスタークロック。バスの clock と比べる)
+      this.apuTime = 0;     // 音源をここまで進めた(マスタークロック単位の実時間)
+      this._cpuStart = 0;   // 今のサンプルの頭の cpuTarget
+      this._exact = true;   // CPU の時刻と音源の時刻が同じ数か(等倍で、速度を一度も変えていない)
       this.speedFactor = 1;
+    }
+
+    /** CPU の時刻(bus.clock)を音源の時刻へ直す */
+    _apuTimeOf(clock) {
+      if (this._exact) return clock;
+      return this.apuTime + (clock - this._cpuStart) / (this.speedFactor || 1);
     }
 
     /**
@@ -1285,24 +1578,23 @@
       // 実機はRESET直後Iフラグ=1(割込禁止)。INITが自分でCLIするまでIRQは発生しない
       // (cpu.reset()が既にP=F_Iにしている)。
 
-      this.cpuCycleAccum = 0;
-      this.apuCycleAccum = 0;
-      this.cpuDebt = 0;
-      this.psgTickAccum = 0;
+      // CPU の速さ: 実機は電源投入で低速(1.79MHz)、ゲームが CSH で高速にする。HES は INIT から始まるので CSH を通らない曲がありうる。
+      // [参照] Mesen 2 は HES でも低速のまま始める(PceConsole::InitHesPlayback は速さに触らない)。それに合わせる。
+      this.cpu.speedHigh = HES_START_HIGH;
+      this.bus.setSpeed(HES_START_HIGH);
+      // [参照] Mesen はヘッダの MPR を TAM と同じ口で入れるので、「最後に通した値」(TMA #0 で読める)は MPR7 の値になる
+      this.cpu.mprBuffer = this.header.banks[7] || 0;
+      this.cpuTarget = 0;
+      this.apuTime = 0;
+      this._cpuStart = 0;
+      this._exact = true;
     }
 
     /**
      * 1フレーム分の音声サンプルを生成する。
-     * ★speedFactor(再生速度スライダー)はCPU/バス(タイマ・垂直帰線割込)の進行速度だけに
-     *   掛け、PSGのクロック(apu.clock())は常に実時間のまま進める。これによりCPUが
-     *   音符を書き換える頻度(テンポ)だけが変わり、実際に鳴っている音の周波数(音程)は
-     *   変化しない。当初はCPU/PSG共通の1つのアキュムレータにspeedFactorを掛けていたため、
-     *   速度を落とすとPSGの発振自体も遅くなり音程が下がってしまっていた
-     *   (実曲で発覚。GBS/NSF/KSSはPLAY呼び出し頻度だけをspeedFactorで変える設計
-     *   のため元々この問題が無かった。HESはPLAYを明示的に呼ばずCPU/バスを連続実行する
-     *   設計のため、CPU用とAPU用でアキュムレータを分離する必要があった)。
+     * 再生速度(speedFactor)は CPU とバスの進みだけに掛け、音源は実時間で進める(冒頭「時間」)。
      * @param {number} sampleRate
-     * @param {boolean} [regsOnly] - trueならmixSample()を省略(先読みキャプチャ用軽量モード)
+     * @param {boolean} [regsOnly] - true なら音を作らない(変換用の先読み)。音源は書き込みが来た時にだけ進む
      * @param {Float32Array[]} [channelOut] - 渡された場合、mixSample()(6ch合算)の代わりに
      *   apu.mixChannelSamples()でchごとの値をchannelOut[0..5]へ書き込む(各要素は
      *   samplesThisFrame長のFloat32Arrayを呼び出し側で事前確保しておくこと)。
@@ -1313,7 +1605,7 @@
      * @returns {Float32Array|{left:Float32Array,right:Float32Array}|null} channelOut指定時・regsOnly指定時はnull
      */
     renderFrame(sampleRate, regsOnly, channelOut, stereo) {
-      const masterTicksPerSample = this.clockHz / sampleRate;
+      const masterPerSample = Emu.PCE_MASTER_CLOCK / sampleRate;    // 1 サンプルぶんのマスタークロック
       const samplesThisFrame = Math.round(sampleRate / this.frameRate);
       const outL = (regsOnly || channelOut) ? null : new Float32Array(samplesThisFrame);
       const outR = (regsOnly || channelOut || !stereo) ? null : new Float32Array(samplesThisFrame);
@@ -1326,42 +1618,20 @@
 
       for (let i = 0; i < samplesThisFrame; i++) {
         this.frameSamplePos = i;
-        // PSG: 常に実時間のクロックで進める(音程を変えないため)。
-        // ★2026-08: 以前はマスタークロック1tickごとにapu.clock()を呼んでおり
-        // (1サンプルあたり約162tick=マスタークロック7.16MHz÷44.1kHz)、リアルタイム
-        // 再生(hes-stream-player.js)でこの関数呼出し回数の多さ自体がボトルネックになって
-        // 音声スレッドの処理が間に合わず「がくがく」になっていた(ユーザー実測)。
-        // 1サンプル分の整数tick数をまとめてapu.clockBy()へ渡す(結果はtickごとに
-        // 呼んだ場合と数学的に同値、詳細はapuHuC6280.js PsgChannel.clockBy参照)。
-        this.apuCycleAccum += masterTicksPerSample;
-        const masterTicks = Math.floor(this.apuCycleAccum);
-        this.apuCycleAccum -= masterTicks;
-        const totalPsgAcc = this.psgTickAccum + masterTicks;
-        const psgTicks = totalPsgAcc >> 1;      // PSGクロックはマスターの半分(2tickに1回)
-        this.psgTickAccum = totalPsgAcc & 1;
-        if (psgTicks > 0) apu.clockBy(psgTicks);
-
-        // CPU/バス(タイマ・垂直帰線): speedFactorで進行速度を変える(テンポ変化のため)。
-        // 命令境界(cpu.step())の間はバス側のカウンタをまとめて進めても、IRQ判定
-        // (pollIrq、step()冒頭でしか見ない)の観測結果はtickごとに呼んだ場合と完全に
-        // 同じになる(hesBus.js clockBy()冒頭コメント参照)。
-        this.cpuCycleAccum += masterTicksPerSample * this.speedFactor;
-        let cpuTicks = Math.floor(this.cpuCycleAccum);
-        this.cpuCycleAccum -= cpuTicks;
-        while (cpuTicks > 0) {
-          if (this.cpuDebt <= 0) {
-            const opCycles = cpu.step();
-            this.cpuDebt = opCycles * (cpu.speedHigh ? 1 : 4);
-          }
-          const advance = Math.max(1, Math.min(cpuTicks, this.cpuDebt));
-          bus.clockBy(advance);
-          this.cpuDebt -= advance;
-          cpuTicks -= advance;
-        }
+        // CPU とバス(タイマ・垂直帰線): 再生速度はこちらだけに掛ける。音源への書き込みは syncApu 経由で「書かれた時刻」に効く
+        this._cpuStart = this.cpuTarget;
+        this._exact = this.speedFactor === 1 && this.apuTime === this.cpuTarget;
+        this.cpuTarget += masterPerSample * this.speedFactor;
+        while (bus.clock < this.cpuTarget) cpu.step();
+        this.apuTime += masterPerSample;
+        if (regsOnly) continue;
+        // 音源をサンプルの終わりまで進めて、このサンプルの間の平均を取る
+        // (CPU が命令の途中でサンプルの終わりを少し越えて書いた時は、音源はもう先へ進んでいる。その時は進めない)
+        apu.runToMaster(this.apuTime);
         if (channelOut) {
           const samples = apu.mixChannelSamples();
           for (let c = 0; c < samples.length; c++) channelOut[c][i] = samples[c];
-        } else if (!regsOnly) {
+        } else {
           const s = apu.mixSample();
           if (stereo) { outL[i] = s.left; outR[i] = s.right; }
           else outL[i] = (s.left + s.right) * 0.5;
@@ -1409,6 +1679,7 @@
     // できなかった(apuHuC6280.js snapshotHuC6280ApuのglobalモPanL/PanRと同じ考え方、
     // ライブ鍵盤表示側には既にあったがregsOnly抽出側には無かった)。
     arr.globalBalance = apu.balance;
+    arr.lfoFreq = apu.lfoFreq; arr.lfoCtrl = apu.lfoCtrl; // $0808/$0809
     return arr;
   }
 
@@ -4391,9 +4662,11 @@
   const NES_NOISE_PERIOD = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068];
   const NES_NOISE_FREQS = NES_NOISE_PERIOD.map(p => NES_CPU_CLOCK / p);
 
+  // 乱数(LFSR)を進める速さ。周期 = 下位 5bit を反転して 64 倍、$1F(反転して 0)の時だけ 32
+  // (apuHuC6280.js の noisePeriod と同じ決まり。[参照] Mesen 2 PcePsgChannel.cpp。2026-11-15 までは $1F を 64 として扱っていた)
   function psgNoiseFreq(noiseCtrl) {
-    const invVal = Math.max(1, (~noiseCtrl) & 0x1F);
-    return MML.HES.PSG_CLOCK / (64 * invVal);
+    const f = noiseCtrl & 0x1F;
+    return MML.HES.PSG_CLOCK / (f === 0x1F ? 32 : 64 * ((~f) & 0x1F));
   }
 
   function psgNoiseFreqToNote(freqHz) {

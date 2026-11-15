@@ -382,6 +382,11 @@
     // apu(ライブ/スキャンどちらのAPUHuC6280インスタンスでも可)へスナップショットsを
     // 書き戻す共通処理(DDAの生トレース上書きは含まない。呼び出し側で必要なら別途行う)。
     _applySnapshotTo(apu, s) {
+      // 全体の音量($0801)と LFO($0808/$0809)。音源はリセット直後は全体の音量が 0(無音)なので、ここで入れないと鳴らない。
+      // 写しに入っていない古いキャプチャ結果は、全体の音量を最大として扱う
+      apu.balance = s.globalBalance !== undefined ? s.globalBalance : 0xFF;
+      apu.lfoFreq = s.lfoFreq || 0;
+      apu.lfoCtrl = s.lfoCtrl !== undefined ? s.lfoCtrl : 0x80;
       for (let i = 0; i < s.length; i++) {
         const c = apu.ch[i], sc = s[i];
         c.control = (sc.on ? 0x80 : 0) | (sc.dda ? 0x40 : 0) | (sc.vol & 0x1F);
@@ -448,7 +453,7 @@
         if (f !== this._scanFrame) this._scanApplyFrame(f);
 
         this._scanCycleAccum += this.clockHz / sr;
-        while (this._scanCycleAccum >= 1) { this._scanApu.clock(); this._scanCycleAccum -= 1; }
+        { const n = Math.floor(this._scanCycleAccum); this._scanCycleAccum -= n; this._scanApu.clockBy(n); }
         const raw = this._scanApu.mixSample();
         const yL = raw.left  - this._scanDcPrevXL + 0.999 * this._scanDcPrevYL;
         const yR = raw.right - this._scanDcPrevXR + 0.999 * this._scanDcPrevYR;
@@ -517,7 +522,7 @@
         }
 
         this.cycleAccum += this.clockHz / sr;
-        while (this.cycleAccum >= 1) { this.apu.clock(); this.cycleAccum -= 1; }
+        { const n = Math.floor(this.cycleAccum); this.cycleAccum -= n; this.apu.clockBy(n); }
         const raw = this.apu.mixSample();
         const yL = raw.left  - this.dcPrevXL + 0.999 * this.dcPrevYL;
         const yR = raw.right - this.dcPrevXR + 0.999 * this.dcPrevYR;

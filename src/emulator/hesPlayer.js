@@ -1,24 +1,17 @@
 /*
- * HESプレイヤー (HuC6280 CPU + HesBus + APUHuC6280 の統合)
+ * HES プレイヤー(HuC6280 の CPU + HesBus + 波形メモリ音源)
  * MML.Emu.HesPlayer
  *
- * ★GBS/NSF/KSSと異なり「INITを呼んで完了を待ち、以後PLAYを一定間隔で直接呼ぶ」という
- *   簡略設計は使えない(HESヘッダにPLAYアドレスが無い。hesBus.js冒頭コメント参照)。
- *   代わりに「INITアドレスへPCをセットして、あとは実時間どおりCPUを自由継続実行し、
- *   バス側のタイマ/垂直帰線割込を本物のIRQとしてディスパッチする」方式を取る
- *   (実機の動作そのもの)。INITが最終的にRTS/無限ループのどちらへ転んでも、
- *   周期的なIRQがPLAY相当の処理を呼び続ける限り再生は問題なく進む。
+ * HES のヘッダには INIT 番地しか無い(hesBus.js 冒頭)。INIT へ飛ばしたら、あとは CPU を実時間どおりに走らせ続け、
+ * 曲データ自身の割り込み(タイマ、垂直帰線)に曲を進めさせる。INIT が RTS で戻っても、戻り先の番兵で CPU が待つ。
  *
- * - initSong(track): CPU/バス/APUをリセットし、PC=initAddr・A=track・SP=0xFDにセットする
- *   (Hes_Core.start_trackと同じ考え方の初期化。call/beginCallでRTSを待つのではなく、
- *   その場で以後の連続実行に委ねる)。
- * - renderFrame(sampleRate): マスタークロック(HES.CPU_CLOCK_HIGH=7159090Hz)を基準に
- *   CPU/バス/APUを1サンプル分ずつ同期実行する。CPUの消費サイクル数はCSH/CSLの状態で
- *   マスタークロックへの換算比が変わる(cpu.speedHigh: true→1倍, false→4倍)。
- *   APUクロック(PSG_CLOCK=3579545Hz=マスタークロックの半分)はマスタークロック2tickに
- *   つき1回進める。★CPU/バス用とAPU用でクロックのアキュムレータを分離しており、
- *   speedFactor(再生速度)はCPU/バス側にのみ掛かる(音程を変えずにテンポだけ変える。
- *   renderFrame()内のコメント参照)。
+ * 時間(2026-11-15、段階 9a・9b):
+ *   - CPU は 1 サイクルごとにバスの tick() を呼び、バスがマスタークロック(21.47727MHz)を数える(bus.clock)
+ *   - 音源は自分の時計(音源クロック = マスタークロックの 1/6)で進む。書き込みは「書かれた時刻」まで音源を進めてから効かせる
+ *     (バスが書く直前に syncApu を呼ぶ)。1 サンプルの終わりにも、その時刻まで進めて平均の出力を取る
+ *   - 再生速度(speedFactor)は CPU 側だけに掛ける(テンポが変わり、音程は変わらない)。等倍の時は CPU の時刻と音源の時刻が
+ *     同じ数になる。等倍でない時は、サンプルの中の位置で按分して音源の時刻へ直す
+ *   - regsOnly(変換用の先読み)では、サンプルごとには音源を進めない。書き込みが来た時にまとめて進む(結果は同じ)
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -83,6 +76,9 @@
   }
   Emu.HesTraceBuf = HesTraceBuf;
 
+  // HES を始める時の CPU の速さ(true=高速)。initSong の説明を参照
+  const HES_START_HIGH = false;
+
   class HesPlayer {
     /**
      * @param {Uint8Array} hesBytes - HESファイルの完全なバイナリ
@@ -97,15 +93,23 @@
       this.apu = new Emu.APUHuC6280();
       this.bus.apu = this.apu;
       this.cpu = new Emu.CPUHuC6280(this.bus);
+      this.bus.cpu = this.cpu;
+      this.bus.syncApu = () => this.apu.runToMaster(this._apuTimeOf(this.bus.clock));
 
       this.clockHz = MML.HES.CPU_CLOCK_HIGH;
       this.frameRate = MML.HES.VBLANK_FPS; // 抽出/描画用の名目フレームレート(実際のPLAY頻度とは独立)
 
-      this.cpuCycleAccum = 0;
-      this.apuCycleAccum = 0;
-      this.cpuDebt = 0;
-      this.psgTickAccum = 0;
+      this.cpuTarget = 0;   // CPU をここまで進める(マスタークロック。バスの clock と比べる)
+      this.apuTime = 0;     // 音源をここまで進めた(マスタークロック単位の実時間)
+      this._cpuStart = 0;   // 今のサンプルの頭の cpuTarget
+      this._exact = true;   // CPU の時刻と音源の時刻が同じ数か(等倍で、速度を一度も変えていない)
       this.speedFactor = 1;
+    }
+
+    /** CPU の時刻(bus.clock)を音源の時刻へ直す */
+    _apuTimeOf(clock) {
+      if (this._exact) return clock;
+      return this.apuTime + (clock - this._cpuStart) / (this.speedFactor || 1);
     }
 
     /**
@@ -129,24 +133,23 @@
       // 実機はRESET直後Iフラグ=1(割込禁止)。INITが自分でCLIするまでIRQは発生しない
       // (cpu.reset()が既にP=F_Iにしている)。
 
-      this.cpuCycleAccum = 0;
-      this.apuCycleAccum = 0;
-      this.cpuDebt = 0;
-      this.psgTickAccum = 0;
+      // CPU の速さ: 実機は電源投入で低速(1.79MHz)、ゲームが CSH で高速にする。HES は INIT から始まるので CSH を通らない曲がありうる。
+      // [参照] Mesen 2 は HES でも低速のまま始める(PceConsole::InitHesPlayback は速さに触らない)。それに合わせる。
+      this.cpu.speedHigh = HES_START_HIGH;
+      this.bus.setSpeed(HES_START_HIGH);
+      // [参照] Mesen はヘッダの MPR を TAM と同じ口で入れるので、「最後に通した値」(TMA #0 で読める)は MPR7 の値になる
+      this.cpu.mprBuffer = this.header.banks[7] || 0;
+      this.cpuTarget = 0;
+      this.apuTime = 0;
+      this._cpuStart = 0;
+      this._exact = true;
     }
 
     /**
      * 1フレーム分の音声サンプルを生成する。
-     * ★speedFactor(再生速度スライダー)はCPU/バス(タイマ・垂直帰線割込)の進行速度だけに
-     *   掛け、PSGのクロック(apu.clock())は常に実時間のまま進める。これによりCPUが
-     *   音符を書き換える頻度(テンポ)だけが変わり、実際に鳴っている音の周波数(音程)は
-     *   変化しない。当初はCPU/PSG共通の1つのアキュムレータにspeedFactorを掛けていたため、
-     *   速度を落とすとPSGの発振自体も遅くなり音程が下がってしまっていた
-     *   (実曲で発覚。GBS/NSF/KSSはPLAY呼び出し頻度だけをspeedFactorで変える設計
-     *   のため元々この問題が無かった。HESはPLAYを明示的に呼ばずCPU/バスを連続実行する
-     *   設計のため、CPU用とAPU用でアキュムレータを分離する必要があった)。
+     * 再生速度(speedFactor)は CPU とバスの進みだけに掛け、音源は実時間で進める(冒頭「時間」)。
      * @param {number} sampleRate
-     * @param {boolean} [regsOnly] - trueならmixSample()を省略(先読みキャプチャ用軽量モード)
+     * @param {boolean} [regsOnly] - true なら音を作らない(変換用の先読み)。音源は書き込みが来た時にだけ進む
      * @param {Float32Array[]} [channelOut] - 渡された場合、mixSample()(6ch合算)の代わりに
      *   apu.mixChannelSamples()でchごとの値をchannelOut[0..5]へ書き込む(各要素は
      *   samplesThisFrame長のFloat32Arrayを呼び出し側で事前確保しておくこと)。
@@ -157,7 +160,7 @@
      * @returns {Float32Array|{left:Float32Array,right:Float32Array}|null} channelOut指定時・regsOnly指定時はnull
      */
     renderFrame(sampleRate, regsOnly, channelOut, stereo) {
-      const masterTicksPerSample = this.clockHz / sampleRate;
+      const masterPerSample = Emu.PCE_MASTER_CLOCK / sampleRate;    // 1 サンプルぶんのマスタークロック
       const samplesThisFrame = Math.round(sampleRate / this.frameRate);
       const outL = (regsOnly || channelOut) ? null : new Float32Array(samplesThisFrame);
       const outR = (regsOnly || channelOut || !stereo) ? null : new Float32Array(samplesThisFrame);
@@ -170,42 +173,20 @@
 
       for (let i = 0; i < samplesThisFrame; i++) {
         this.frameSamplePos = i;
-        // PSG: 常に実時間のクロックで進める(音程を変えないため)。
-        // ★2026-08: 以前はマスタークロック1tickごとにapu.clock()を呼んでおり
-        // (1サンプルあたり約162tick=マスタークロック7.16MHz÷44.1kHz)、リアルタイム
-        // 再生(hes-stream-player.js)でこの関数呼出し回数の多さ自体がボトルネックになって
-        // 音声スレッドの処理が間に合わず「がくがく」になっていた(ユーザー実測)。
-        // 1サンプル分の整数tick数をまとめてapu.clockBy()へ渡す(結果はtickごとに
-        // 呼んだ場合と数学的に同値、詳細はapuHuC6280.js PsgChannel.clockBy参照)。
-        this.apuCycleAccum += masterTicksPerSample;
-        const masterTicks = Math.floor(this.apuCycleAccum);
-        this.apuCycleAccum -= masterTicks;
-        const totalPsgAcc = this.psgTickAccum + masterTicks;
-        const psgTicks = totalPsgAcc >> 1;      // PSGクロックはマスターの半分(2tickに1回)
-        this.psgTickAccum = totalPsgAcc & 1;
-        if (psgTicks > 0) apu.clockBy(psgTicks);
-
-        // CPU/バス(タイマ・垂直帰線): speedFactorで進行速度を変える(テンポ変化のため)。
-        // 命令境界(cpu.step())の間はバス側のカウンタをまとめて進めても、IRQ判定
-        // (pollIrq、step()冒頭でしか見ない)の観測結果はtickごとに呼んだ場合と完全に
-        // 同じになる(hesBus.js clockBy()冒頭コメント参照)。
-        this.cpuCycleAccum += masterTicksPerSample * this.speedFactor;
-        let cpuTicks = Math.floor(this.cpuCycleAccum);
-        this.cpuCycleAccum -= cpuTicks;
-        while (cpuTicks > 0) {
-          if (this.cpuDebt <= 0) {
-            const opCycles = cpu.step();
-            this.cpuDebt = opCycles * (cpu.speedHigh ? 1 : 4);
-          }
-          const advance = Math.max(1, Math.min(cpuTicks, this.cpuDebt));
-          bus.clockBy(advance);
-          this.cpuDebt -= advance;
-          cpuTicks -= advance;
-        }
+        // CPU とバス(タイマ・垂直帰線): 再生速度はこちらだけに掛ける。音源への書き込みは syncApu 経由で「書かれた時刻」に効く
+        this._cpuStart = this.cpuTarget;
+        this._exact = this.speedFactor === 1 && this.apuTime === this.cpuTarget;
+        this.cpuTarget += masterPerSample * this.speedFactor;
+        while (bus.clock < this.cpuTarget) cpu.step();
+        this.apuTime += masterPerSample;
+        if (regsOnly) continue;
+        // 音源をサンプルの終わりまで進めて、このサンプルの間の平均を取る
+        // (CPU が命令の途中でサンプルの終わりを少し越えて書いた時は、音源はもう先へ進んでいる。その時は進めない)
+        apu.runToMaster(this.apuTime);
         if (channelOut) {
           const samples = apu.mixChannelSamples();
           for (let c = 0; c < samples.length; c++) channelOut[c][i] = samples[c];
-        } else if (!regsOnly) {
+        } else {
           const s = apu.mixSample();
           if (stereo) { outL[i] = s.left; outR[i] = s.right; }
           else outL[i] = (s.left + s.right) * 0.5;
@@ -253,6 +234,7 @@
     // できなかった(apuHuC6280.js snapshotHuC6280ApuのglobalモPanL/PanRと同じ考え方、
     // ライブ鍵盤表示側には既にあったがregsOnly抽出側には無かった)。
     arr.globalBalance = apu.balance;
+    arr.lfoFreq = apu.lfoFreq; arr.lfoCtrl = apu.lfoCtrl; // $0808/$0809
     return arr;
   }
 

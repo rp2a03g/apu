@@ -21,9 +21,11 @@
   const NES_NOISE_PERIOD = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068];
   const NES_NOISE_FREQS = NES_NOISE_PERIOD.map(p => NES_CPU_CLOCK / p);
 
+  // 乱数(LFSR)を進める速さ。周期 = 下位 5bit を反転して 64 倍、$1F(反転して 0)の時だけ 32
+  // (apuHuC6280.js の noisePeriod と同じ決まり。[参照] Mesen 2 PcePsgChannel.cpp。2026-11-15 までは $1F を 64 として扱っていた)
   function psgNoiseFreq(noiseCtrl) {
-    const invVal = Math.max(1, (~noiseCtrl) & 0x1F);
-    return MML.HES.PSG_CLOCK / (64 * invVal);
+    const f = noiseCtrl & 0x1F;
+    return MML.HES.PSG_CLOCK / (f === 0x1F ? 32 : 64 * ((~f) & 0x1F));
   }
 
   function psgNoiseFreqToNote(freqHz) {

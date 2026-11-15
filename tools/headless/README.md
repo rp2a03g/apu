@@ -30,6 +30,14 @@ export PATH="$PATH:/path/to/nodejs"
 | `gb-sweep.js` | ゲームボーイの総当たり。`<フォルダ>` で ROM を 1 本ずつ回して起動/音/固まりを JSON Lines に、`--gbs <フォルダ>` で GBS を曲ごとに回す(例外、PLAY の周期、書き込みの有無) |
 | `gb-mesen-ab.js` | 同じ ROM か GBS を Mesen 2(`--mesen` か環境変数 `MESEN_EXE`)と自前で走らせ、音源レジスタの書き込み列を突き合わせる。音をたくさん書く物でないと位置を合わせられない |
 | `gb-mesen-shot.js` | Mesen 2 に ROM を無操作で回させ、決めたフレームの画面を PNG に取る(色数と PC も出す)。総当たりで「1 色のまま」「固まった疑い」になった物が Mesen でも同じかを見る |
+| `pce-run.js` | 自前 PC エンジンエミュレータ(`src/emulator/pce/`、DESIGN-PCE-CAPTURE.md)をヘッドレスで回して画面を PNG、音を WAV に書く。`--press "start:60-70"` `--dump N` |
+| `pce-rom-ab.js` | HuCard の ROM を自前と Mesen 2 で無操作で走らせ、I/O の読み書き(マスタークロックの時刻つき)・終わりのメモリ(VRAM/スプライト表/パレット/RAM)・画面(全画素)の 3 つを比べる。`--all <フォルダ>` で一括。Mesen は「電源投入時のメモリ = 0」「描画の間引き無し」にした写しを使う(冒頭の説明) |
+| `mk-pce-test-rom.js` | PC エンジンの合成テスト ROM(15 場面: スプライトの大きさ/反転/優先、走査線の割り込み、あふれ、衝突、263 行、7MHz/10MHz、白黒、VRAM の読み返しと転送、表示中の書き込み、タイマ)。`--out <フォルダ>` で書き出し、`pce-rom-ab.js --all` に掛ける |
+| `pce-state-test.js` | PC エンジン本体まわりの通し確認(中身判定、ステート保存/復元、巻き戻し、録音 → VGM → VgmPlayer で読み直し)。ROM を引数で渡す |
+| `pce-sweep.js` | HES の総当たり(例外/無音/書き込み列のハッシュ)と、2 回ぶんの比較 |
+| `pce-mesen-ab.js` / `pce-iotrace.js` / `pce-apu-ab.js` | HES を Mesen 2 と比べる 3 本: 音源への書き込みの並び / I/O の読み書きを時刻つきで / 音源の内部状態(タイマ・読み位置・出力・波形・乱数)を書き込みごとに。どれも `--all <フォルダ>` で一括 |
+| `pce-vgm-ab.js` | PC エンジンの VGM を VGMPlay のリファレンス WAV と比べる(音量の包絡とスペクトルの形)。`--synth` で音量の表を 1 段ずつ |
+| `pce-provenance.js` | 根拠の札([試験] [参照] [文書] [推定] と ★)の集計。DESIGN-PCE-CAPTURE.md §10 の表の元 |
 | `snes-run.js` | SNES 本体の骨格(`src/emulator/snes/`、スーパーゲームボーイの土台)を回して画面を PNG に書く。`--gb rom.gb [--gb-boot sgb.boot.rom]` で SGB の BIOS にゲームボーイの ROM を挿す。`--text` は BG1 のタイル番号を文字として読む(公開テスト ROM の結果表示)。`src/emulator/snes/`、`cpu65816.js`、`spc700.js` を触ったら gilyon/snes-tests の 3 本(各自で `_tmp_test/snes/` に置く)が Success のままか見る |
 | `sgb-test.js` | スーパーゲームボーイ(`snes/sgbConsole.js`)の通し試験。`--bios SGB1.sfc [--boot sgb1.boot.rom] --gb rom.gb`(BIOS は同梱しない、各自で渡す)。絵が GB 側と対応するか、音のサンプル数、SNES 側と GB 側の両方が鳴るか、録音(VGM のクロックと GBXX 種類 1)、ステートを見る。`--png` `--wav` で画面と音を書き出す |
 | (バーコード) | `src/emulator/ean.js`(符号化/復号)と `src/input/barcodeScan.js`(画像から読む)は道具なし。合成データの確認は scratch で行った(符号化 → ぼかし+雑音 → 復号)。触ったら同じ形で確かめる |

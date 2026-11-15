@@ -10582,7 +10582,9 @@
       if (gameExt || (Image && !file.name.includes('.'))) {
         const bytes = new Uint8Array(await file.arrayBuffer());
         const img = Image ? Image.detect(bytes, file.name) : null;
-        if (img || gameExt) {
+        // 拡張子が .pce でも中身が HES(先頭 "HESM")の物は曲データ: ゲーム画面ではなく HES の再生へ回す
+        if ((ext === 'pce' || ext === 'sgx') && Image && Image.isHes && Image.isHes(bytes)) ext = 'hes';
+        else if (img || gameExt) {
           try {
             await MML.UI.NesScreen.open(bytes, file.name);
           } catch (e) {

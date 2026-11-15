@@ -186,6 +186,8 @@ $bundles = @(
             'src\hes\hesHeader.js',
             'src\emulator\cpuHuC6280.js',
             'src\emulator\apuHuC6280.js',
+            'src\emulator\pce\pceTimer.js',
+            'src\emulator\pce\vdcTiming.js',
             'src\emulator\hesBus.js',
             'src\emulator\hesPlayer.js',
             'src\convert\options.js',
@@ -255,6 +257,15 @@ $bundles = @(
             'src\emulator\snes\snesConsole.js',
             'src\emulator\snes\icd2.js',
             'src\emulator\snes\sgbConsole.js',
+            # PC Engine (DESIGN-PCE-CAPTURE.md stage 9c)
+            'src\emulator\cpuHuC6280.js',
+            'src\emulator\apuHuC6280.js',
+            'src\emulator\pce\pceTimer.js',
+            'src\emulator\pce\vce.js',
+            'src\emulator\pce\vdc.js',
+            'src\emulator\pce\card.js',
+            'src\emulator\pce\pceConsole.js',
+            'src\emulator\pce\pceState.js',
             'src\audio\nes-worklet-impl.js'
         )
     },

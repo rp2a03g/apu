@@ -187,9 +187,11 @@
     const apu = new Emu.APUHuC6280();
     return {
       id: 'huc6280', clockHz: info.clock, accum: 0, apu, gain: CHIP_GAIN.huc6280,
-      write(aa, dd) { apu.writeRegister(0x0800 + (aa & 0x0F), dd); },
-      clock() { apu.clock(); },
-      mix(out) { const s = apu.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      // 進める数は貯めておき、書き込みと音の取り出しの直前にまとめて進める(音源は n 個ぶんを一度に進める方が速い。結果は同じ)
+      pend: 0,
+      write(aa, dd) { if (this.pend) { apu.clockBy(this.pend); this.pend = 0; } apu.writeRegister(0x0800 + (aa & 0x0F), dd); },
+      clock() { this.pend++; },
+      mix(out) { if (this.pend) { apu.clockBy(this.pend); this.pend = 0; } const s = apu.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
       applyMute(m) { const e = m.expansion || m; if (e.hes) Object.assign(apu.mute, e.hes); },
       applyVolume(v) { const e = v.expansion || v; if (e.hes) Emu.applyVolume(apu.vol, e.hes); }
     };

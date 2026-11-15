@@ -7,8 +7,9 @@
  *
  *   detect(bytes, name) → { kind, machine, media } | null
  *     kind: 'nes'(iNES) / 'fds'(ディスクシステムの画像) / 'fds-bios'(disksys.rom) / 'msx-rom'(カートリッジ) / 'msx-dsk'(ディスク画像) /
- *           'gb'(ゲームボーイのカートリッジ。ヘッダ $0104 のロゴ先頭と $014D のチェックサムで見る)
- *     machine: 'nes' | 'msx' | 'gb'、media: 'cart' | 'disk' | 'bios'
+ *           'gb'(ゲームボーイのカートリッジ。ヘッダ $0104 のロゴ先頭と $014D のチェックサムで見る) /
+ *           'pce'(PC エンジンの HuCard。中身に目印が無いので拡張子 .pce / .sgx だけで決める)
+ *     machine: 'nes' | 'msx' | 'gb' | 'pce'、media: 'cart' | 'disk' | 'bios'
  *   looksLikeGameEntry(name, size): アーカイブの一覧(中身を読む前)で「ゲームの画像らしい」か。拡張子がゲームの物か、拡張子無しでディスクのサイズ
  *   combineFds(list): 複数の .fds(1 枚ずつの画像)の面を順に並べて 1 本の .fds(ヘッダ無し)にする(zip に DISK1/DISK2 と分かれている物)
  */
@@ -17,7 +18,8 @@
   const MML = global.MML = global.MML || {};
   const Emu = MML.Emu = MML.Emu || {};
 
-  const GAME_EXTS = ['nes', 'fds', 'rom', 'mx1', 'mx2', 'dsk', 'gb', 'gbc', 'sgb'];
+  const GAME_EXTS = ['nes', 'fds', 'rom', 'mx1', 'mx2', 'dsk', 'gb', 'gbc', 'sgb', 'pce', 'sgx'];
+  const PCE_EXTS = ['pce', 'sgx'];
   const GB_EXTS = ['gb', 'gbc', 'sgb'];
   const MSX_CART_EXTS = ['rom', 'mx1', 'mx2'];
   const DSK_SIZES = new Set([737280, 368640, 655360, 327680]); // 720K 2DD / 360K 1DD / 640K / 320K
@@ -32,6 +34,7 @@
     let t = ''; for (let i = 0; i < 13; i++) t += String.fromCharCode(b[0x7FC0 + i]);
     return t === 'Super GAMEBOY';
   }
+  function isHes(bytes) { return bytes.length >= 4 && bytes[0] === 0x48 && bytes[1] === 0x45 && bytes[2] === 0x53 && bytes[3] === 0x4D; }
   function detect(bytes, name) {
     if (!bytes || bytes.length < 16) return null;
     const ext = extOf(name);
@@ -40,6 +43,9 @@
     if (F && F.isFds && F.isFds(bytes)) return { kind: 'fds', machine: 'nes', media: 'disk' };
     if (F && F.isFdsBios && F.isFdsBios(bytes)) return { kind: 'fds-bios', machine: 'nes', media: 'bios' };
     if (isSgbBios(bytes)) return { kind: 'sgb-bios', machine: 'gb', media: 'bios' };
+    // PC エンジン: 拡張子で決める。ただし先頭が "HESM" の物は HES(曲データ)に .pce の名前を付けた物なので、ゲームとしては開かない
+    // (手元の「Sound Rips」152 本中 135 本がこれだった。Mesen も中身で HES として開く)
+    if (PCE_EXTS.includes(ext) && bytes.length >= 0x2000 && !isHes(bytes)) return { kind: 'pce', machine: 'pce', media: 'cart' };
     // ゲームボーイ: ヘッダが整っていれば拡張子に関係なく(.rom/.bin でも)。拡張子が GB の物ならヘッダが崩れていても GB として開く
     if ((Emu.GbCart && Emu.GbCart.isGb(bytes)) || GB_EXTS.includes(ext)) return { kind: 'gb', machine: 'gb', media: 'cart' };
     // MSX のディスク: サイズで(拡張子が無い物も多い。カートリッジの拡張子なら ROM として扱う)
@@ -64,5 +70,5 @@
     raws.forEach((s, i) => out.set(s.subarray(0, FDS_SIDE), i * FDS_SIDE));
     return out;
   }
-  Emu.Image = { isSgbBios, GAME_EXTS, MSX_CART_EXTS, DSK_SIZES, extOf, detect, looksLikeGameEntry, combineFds };
+  Emu.Image = { isSgbBios, isHes, GAME_EXTS, MSX_CART_EXTS, DSK_SIZES, extOf, detect, looksLikeGameEntry, combineFds };
 })(typeof window !== 'undefined' ? window : globalThis);

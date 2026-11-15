@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-14 14:07:48
+ * Built by tools/build-capture-workers.ps1 at 2026-11-16 01:50:49
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-14 14:07:48';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-16 01:50:49';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -4418,25 +4418,50 @@
 })(globalThis);
 
 /*
- * HuC6280内蔵PSG (PC Engine/TurboGrafx-16 プログラマブルサウンドジェネレータ) エミュレータ
- * MML.Emu.APUHuC6280
+ * PC エンジンの波形メモリ音源(HuC6280 に内蔵。NEC/ハドソンの資料や Mesen は「PSG」と呼ぶ)
+ * MML.Emu.APUHuC6280 — 2026-11-15 に作り直し(段階 9b)
  *
- * 6チャンネル、各chが32サンプル・5bit符号無しの波形メモリを持つ(waveform playback)。
- * ch4/5のみノイズ生成機能を追加で持つ(bit7=noise on/offでch毎に波形出力とノイズ出力が
- * 排他)。各chは「Direct D/A」モードに切替可能(波形メモリ経由せず書込み値を直接出力、
- * 音声ストリーミング再生に使う)。LFO(周波数変調、ch0をch1のFM変調)は実機に存在するが
- * 音楽ドライバでの利用例が乏しく、参考実装(Game_Music_Emu)も自ら「未対応」と明記している
- * 機能のため本実装でも対象外とする。
+ * 6ch。各 ch は 32 個・5bit の波形メモリを、12bit の周期で読み進める。ch5/6 はノイズに切り替えられる。
+ * どの ch も DDA(波形を止めて、書いた値をそのまま出す。PCM 用)にできる。LFO は ch2 の出力で ch1 の周期を揺らす。
+ * 時間の単位は音源のクロック(マスタークロック 21.47727MHz の 1/6 = 3.579545MHz)1 個。
  *
- * 参考: "PC Engine Hardware: PSG" by Paul Clifford (magicengine.com/mkit) — レジスタ配置・
- *   周波数換算式($0802/0803, $0807)の一次資料。ボリューム/バランスの対数合成式は実測に
- *   基づく独自導出(32段・約1.5dB/stepの減衰特性という文献記載の"事実"から関数化した
- *   ものであり、既存実装のテーブルを転記したものではない。詳細はgainFromIndex参照)。
+ * 使い方: clockBy(n) で n 個ぶん進め、writeRegister() はその時点で効く。「いつ書かれたか」を合わせたい側
+ * (hesPlayer.js)は、書く前に runToMaster(マスタークロックの時刻) で時刻まで進めてから書く。
+ * mixSample() は「前に呼んでから今まで」の平均を返す(1 サンプルの間に何度も変わる DDA や高い音、音量の書き換えを、瞬間の値で拾わないため)。
+ * 平均するのは「出力 × その時の左右の減衰」。
  *
- * clock() を PSGクロック(3579545Hz。NTSCカラーバースト、HES.PSG_CLOCK)ごとに1回呼び出す
- * 設計(apu2a03.js/apuGb.jsと同じ考え方)。マスタークロック(7159090Hz)側のCPUと同期させる
- * hesPlayer.js は、CPU 2サイクルにつきPSG clock()を1回、という比で駆動する
- * (7159090 / 3579545 = 2ちょうど)。
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3)。[参照] は Mesen 2 の Core/PCE/PcePsg.cpp・PcePsgChannel.cpp(読んだだけで写していない):
+ *   [参照] 周期タイマは下向きに数え、0 になった所で周期を入れ直して読み位置を 1 つ進める。周期レジスタが 0 の時は $1000 として扱う
+ *   [参照] 周期レジスタを書いてもタイマは今の周回を終えるまで変わらない。ch の入/切($0804 bit7)が変わった時だけタイマを入れ直す
+ *   [参照] $0804 に「DDA=1」の値を書くたび(切り替わった時に限らない)、ch が切なら読み位置を 0 に戻す。入なら出力をすぐ DDA の値にする
+ *   [参照] $0806: DDA 中は出力値。そうでなければ今の読み位置に書く。読み位置が進むのは ch が切の時だけ
+ *          (鳴っている最中の書き込みは、今鳴っている 1 個を書き換える。Mesen のコメントに、これが要る曲の名前がある)
+ *   [参照] ノイズは 18bit の LFSR。右へずらし、出ていく bit0 が音(1 なら 31、0 なら 0)。bit0・1・11・12・17 の XOR を bit17 へ入れる。
+ *          リセットで bit0 だけ 1。ch の入/切やノイズの入/切に関係なく、いつも回り続ける
+ *          (Mesen が引いている出典は cgfm2 の調査記事。実機の測定に基づく、と書かれている)
+ *   [参照] ノイズの周期: レジスタの下位 5bit を反転して 64 倍。$1F(反転して 0)の時だけ 32
+ *   [参照] $0807 は ch5/6 だけが受ける。$0802-$0806 は ch1-6 だけ(ch7/8 を選んでいる間の書き込みは捨てる)
+ *   [参照] LFO: $0809 の bit7 が 0 で下位 2bit が 0 以外の時に掛かる。ch1 の周期 = (周期レジスタ + ch2 の出力 × 1/4/16) の下位 12bit。
+ *          ch2 自身は周期が $0808 倍(0 は 256 倍)に延びる
+ *   [参照] 音量の決まり: 全体($0801)と ch の左右($0805)は 1 段 3dB、ch の音量($0804)は 1 段 1.5dB の減衰として足し合わせ、30 段(45dB)以上で無音。
+ *          表の値そのものは自前(10^(-1.5×段/20))。Mesen は 8bit の整数の表なので、下の方の段では 1〜2dB 違う(29 段目で約 4.6dB)
+ *   ★ 無音になる段: VGMPlay の MAME 由来の実装は 30 段目がまだ鳴り、31 段目で無音(pce-vgm-ab.js --synth で実測)。Mesen は 30 段目から無音。Mesen に合わせた
+ *   ★ LFO が掛かっている間も ch2 自身の音は出したまま(Mesen と同じ)。実機で ch2 が消えるのかは未確認
+ *   [推定] リセット直後の全体の音量($0801)と ch の左右($0805)は最大($FF)にしてある(作り直し前と同じ)。
+ *          ★ Mesen は 0(何か書くまで無音)。ただし Mesen の 0 は「状態を 0 で埋めただけ」で、実機のリセット値を測った物ではなさそう(推定)。
+ *          手元の HES 357 曲のうち、$0801 を一度も書かずに鳴らす曲が 3 曲(1 本)、鳴らす ch の $0805 を一度も書かない曲が 5 曲ある。
+ *          HES はゲームの初期化を通らずに曲の INIT から始まるので、0 にするとこれらが無音になる。実機のリセット値は未確認
+ *   ★ 出力の中心: Mesen は設定「HuC6280A の音」が入の時、波形の値から 16 を引いて -16〜+15 として扱い、切の時は 0〜31 のまま扱う。
+ *      LFO が足す「ch2 の出力」もこの値なので、設定で LFO の掛かり方まで変わる。ここは入(-16〜+15)の側に合わせた。
+ *      初代の石(HuC6280)と後の石(HuC6280A)で LFO が本当に違うのかは未確認
+ *   ★ ノイズの最初の 1 歩: Mesen はノイズのタイマが 0 から始まり、「最初に時間を進めた時」に 1 歩目を踏む(それがいつかは、
+ *      最初の書き込みか最初の画面の終わりで決まる)。実機は電源投入から回り続けるはずなので、乱数の位相はここで実機とずれうる。
+ *      照合のために Mesen と同じにしてある(音としては聞き分けられない差)
+ *   ★ 「今の出力」が古いままになる瞬間: Mesen は ch の出力を「時間を進めた時」に作り直す。書き込みで ch を切った直後などは、
+ *      次に時間が進むまで前の値が残る。LFO はこの値を読むので、照合のために同じ作りにした(_oneChunk)。
+ *      音に出す時は、切の ch は 0 として扱う(level())
+ *   [推定] 音の大きさの基準(6ch ぶんを 16×6 で割る)は作り直し前のまま。ほかの形式との音量合わせで決めた値で、実機の電圧ではない
+ * 確かめ方: tools/headless/pce-apu-ab.js(書き込みのたびの内部状態を Mesen と比べる)。音量と左右の混ぜ方は VGMPlay の WAV と比べる。
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -4444,255 +4469,311 @@
 
   const WAVE_LEN = 32;
   const CH_COUNT = 6;
+  const CENTER = 16;        // 出力の中心(★ 冒頭)
+  const MUTE_STEPS = 30;    // 1.5dB × 30 = 45dB で無音
 
-  // 32段(0-31)の対数ゲインテーブル。文献記載の「~1.5dB/step、31=1.0倍、0=無音」という
-  // 減衰特性から作る(2^((n-31)/4) は 4step=6dB=電圧半減 の等比数列。1step≒1.505dB相当で
-  // 文献の記述と整合する)。
-  function gainFromIndex(n) {
-    n = Math.max(0, Math.min(31, n | 0));
-    return n === 0 ? 0 : Math.pow(2, (n - 31) / 4);
-  }
+  // 減衰の表(1.5dB 刻み)。添字 = 減衰の段数
+  const GAIN = new Float64Array(MUTE_STEPS + 1);
+  for (let r = 0; r < MUTE_STEPS; r++) GAIN[r] = Math.pow(10, -1.5 * r / 20);
 
-  class PsgChannel {
-    constructor(hasNoise) {
-      this.hasNoise = !!hasNoise;
+  class WaveChannel {
+    constructor(index, chip) {
+      this.index = index;
+      this.chip = chip;
+      this.hasNoise = index >= 4;
       this.wave = new Uint8Array(WAVE_LEN);
-      this.wavePos = 0;    // 読出/書込 共有ポインタ(実機仕様、wavePlayback.js冒頭コメント参照)
-      this.freq = 0;       // 12bit周期レジスタ($0802/$0803)
-      this.control = 0;    // $0804: bit7=ch on, bit6=DDA, bit4-0=volume
-      this.balance = 0xFF; // $0805: bit7-4=left, bit3-0=right
-      this.dac = 0;        // DDAモード時の直接出力値(0-31)
-      this.noiseCtrl = 0;  // $0807 (ch4/5のみ有効): bit7=on, bit4-0=noise period select
-      this.lfsr = this.hasNoise ? 1 : 0;
-      this.wavePhaseAcc = 0;  // PSGクロック単位の波形読出しタイマ(小数を持たず整数カウントダウン)
-      this.noisePhaseAcc = 0;
-      this.noiseOut = 0; // ノイズLFSRの現在ビット(0/1)由来の出力値(0 or 31)
+      this.reset();
     }
 
     reset() {
       this.wave.fill(0);
-      this.wavePos = 0;
-      this.freq = 0;
-      this.control = 0;
-      this.balance = 0xFF;
-      this.dac = 0;
-      this.noiseCtrl = 0;
-      this.lfsr = this.hasNoise ? 1 : 0;
-      this.wavePhaseAcc = 0;
-      this.noisePhaseAcc = 0;
-      this.noiseOut = 0;
+      this.wavePos = 0;    // 読み位置(ch が切の間は書き位置でもある)
+      this.freq = 0;       // $0802/$0803: 12bit の周期
+      this.control = 0;    // $0804: bit7 = 入、bit6 = DDA、bit4-0 = 音量
+      this.balance = 0xFF; // $0805: 上位 = 左、下位 = 右(リセット値は冒頭 [推定])
+      this.dac = 0;        // DDA の出力値(0-31)
+      this.noiseCtrl = 0;  // $0807(ch5/6 だけ): bit7 = ノイズ、bit4-0 = 周期
+      this.timer = 0;      // 周期タイマの残り
+      this.out = 0;        // 今の出力(-16〜+15。切なら 0)。★ 冒頭「古いままになる瞬間」
+      this.lfsr = 1;
+      this.noiseTimer = 0;
+      this.noiseOut = 0;   // 0 か 31
+      this.accL = 0;       // 出力 × 左の減衰 × 時間 の積算(mixSample が平均を取って 0 に戻す)
+      this.accR = 0;
     }
 
     get on() { return (this.control & 0x80) !== 0; }
     get dda() { return (this.control & 0x40) !== 0; }
     get volume() { return this.control & 0x1F; }
+    get noiseOn() { return this.hasNoise && (this.noiseCtrl & 0x80) !== 0; }
 
-    writeControl(value) {
-      // DDAモードが1→0へ落ちた瞬間、波形の読出/書込ポインタが先頭へリセットされる
-      // (実機仕様。$0806での波形テーブル再ロードを先頭から行うための挙動)。
-      if ((this.control & 0x40) && !(value & 0x40)) this.wavePos = 0;
-      this.control = value;
+    /** 音に出す値。切の ch は 0 */
+    level() { return (this.control & 0x80) ? this.out : 0; }
+
+    /** 次の周回の長さ */
+    period() {
+      const chip = this.chip;
+      let p = this.freq;
+      if (this.index === 0 && chip.lfoOn) p = (p + (chip.ch[1].out << (((chip.lfoCtrl & 3) - 1) * 2))) & 0xFFF;
+      if (p === 0) p = 0x1000;
+      if (this.index === 1 && chip.lfoOn) p *= (chip.lfoFreq || 0x100);
+      return p;
     }
 
-    writeData(value) {
-      value &= 0x1F;
-      if (!this.dda) {
-        this.wave[this.wavePos] = value;
-        this.wavePos = (this.wavePos + 1) & (WAVE_LEN - 1);
-      } else if (this.on) {
-        this.dac = value;
-      }
+    noisePeriod() {
+      const f = this.noiseCtrl & 0x1F;
+      return f === 0x1F ? 32 : ((~f) & 0x1F) * 64;
     }
 
-    // PSGクロック1tickぶん波形読出し位相・ノイズ位相を進める。HesReplayStreamPlayer
-    // (src/audio/hes-stream-player.js)のリアルタイム再生が1サンプルあたり数十回
-    // 直接呼ぶホットパスのため、clockBy(1)経由(関数呼出しが1段増える)にはせず
-    // 従来通りその場で計算する(clockBy()と結果は数学的に同一)。
-    clock() {
-      if (this.on && !this.dda && this.freq > 0) {
-        this.wavePhaseAcc++;
-        if (this.wavePhaseAcc >= this.freq) {
-          this.wavePhaseAcc = 0;
-          this.wavePos = (this.wavePos + 1) & (WAVE_LEN - 1);
-        }
-      }
-      if (this.hasNoise && this.on && (this.noiseCtrl & 0x80)) {
-        const invVal = Math.max(1, (~this.noiseCtrl) & 0x1F);
-        const periodTicks = invVal * 64;
-        this.noisePhaseAcc++;
-        if (this.noisePhaseAcc >= periodTicks) {
-          this.noisePhaseAcc -= periodTicks;
-          const bit = (this.lfsr & 1) ^ ((this.lfsr >> 3) & 1);
-          this.lfsr = ((this.lfsr >> 1) | (bit << 16)) & 0x1FFFF;
-          this.noiseOut = (this.lfsr & 1) ? 31 : 0;
-        }
-      }
+    stepNoise() {
+      const v = this.lfsr;
+      const bit = (v ^ (v >>> 1) ^ (v >>> 11) ^ (v >>> 12) ^ (v >>> 17)) & 1;
+      this.noiseOut = (v & 1) ? 31 : 0;
+      this.lfsr = (v >>> 1) | (bit << 17);
     }
 
-    // clock()のnティック分バッチ版(数学的にclock()をn回呼ぶのと同値)。
-    // リアルタイム再生時の「がくがく」対策(hesBus.js clockBy()と同じ理由。
-    // hesPlayer.js renderFrame()冒頭コメント参照)。波形位相(wavePhaseAcc)は単純な
-    // 折り返しカウンタなので割り算でO(1)に飛ばせる。ノイズのLFSRは1tickごとの
-    // シフト演算(状態遷移)そのものが出力なので数学的に一括計算はできないが、
-    // 1オーディオサンプルあたりの折り返し回数は周期が最速でも64tickなので
-    // (n≈162tick/サンプルに対し)たかだか数回で済み、単純ループのままで十分軽い。
-    clockBy(n) {
-      if (n <= 0) return;
-      if (this.on && !this.dda && this.freq > 0) {
-        // period=0は「無限に長い周期」= 実質フリーズ(0除算回避、聴感上ほぼ無音相当)。
-        const period = this.freq;
-        let acc = this.wavePhaseAcc + n;
-        if (acc >= period) {
-          const steps = Math.floor(acc / period);
-          acc -= steps * period;
-          this.wavePos = (this.wavePos + steps) & (WAVE_LEN - 1);
+    write(reg, value) {
+      switch (reg) {
+        case 2: this.freq = (this.freq & 0xF00) | value; return;
+        case 3: this.freq = (this.freq & 0x0FF) | ((value & 0x0F) << 8); return;
+        case 4: {
+          const now = (value & 0x80) !== 0;
+          if (now !== this.on) this.timer = this.period();
+          this.control = value;
+          if (value & 0x40) { if (now) this.out = this.dac - CENTER; else this.wavePos = 0; }
+          return;
         }
-        this.wavePhaseAcc = acc;
-      }
-      if (this.hasNoise && this.on && (this.noiseCtrl & 0x80)) {
-        // 周波数式(文献): freq = PSG_CLOCK / (64 * (5bit値 XOR 31))。生値31(XOR後0)は
-        // 0除算になるため最小周期1として扱う(実機は最高速のはず、という近似)。
-        const invVal = Math.max(1, (~this.noiseCtrl) & 0x1F);
-        const periodTicks = invVal * 64;
-        let acc = this.noisePhaseAcc + n;
-        if (acc >= periodTicks) {
-          const steps = Math.floor(acc / periodTicks);
-          acc -= steps * periodTicks;
-          // 1bit LFSR(周期性が明確な単純フィボナッチ型)。実機の正確なタップ位置は資料が
-          // 無いため、聴感上の「ホワイトノイズらしさ」を優先した17bit LFSR(タップ0,3)を採用
-          // (2A03/GBのノイズと同種の近似。正確な多項式はハードウェア未公開)。
-          for (let s = 0; s < steps; s++) {
-            const bit = (this.lfsr & 1) ^ ((this.lfsr >> 3) & 1);
-            this.lfsr = ((this.lfsr >> 1) | (bit << 16)) & 0x1FFFF;
+        case 5: this.balance = value; return;
+        case 6:
+          if (this.dda) {
+            this.dac = value & 0x1F;
+            if (this.on) this.out = this.dac - CENTER;
+          } else {
+            this.wave[this.wavePos] = value & 0x1F;
+            if (!this.on) this.wavePos = (this.wavePos + 1) & (WAVE_LEN - 1);
+            if (!this.noiseOn) this.out = this.wave[this.wavePos] - CENTER;
           }
-          this.noiseOut = (this.lfsr & 1) ? 31 : 0;
-        }
-        this.noisePhaseAcc = acc;
+          return;
+        default: return;
       }
     }
 
-    // 現在の生サンプル値(0-31)
-    rawSample() {
-      if (!this.on) return 0;
-      if (this.dda) return this.dac;
-      if (this.hasNoise && (this.noiseCtrl & 0x80)) return this.noiseOut;
-      return this.wave[this.wavePos];
+    // ── 素直な道(Mesen と同じ刻み)。LFO が掛かっている間と、ノイズの最初の 1 歩に使う ──
+
+    /** この ch が「次に何かが起きるまで」の残り。0 は「待つ物が無い」。型の幅(16bit)も Mesen と同じ */
+    pending() {
+      const t = this.hasNoise ? this.noiseTimer : 0;
+      // 16bit に切って 0 になる値(65536 の倍数)は、Mesen では「待つ物が無い」扱いになる。Mesen は 1 回に 1 画面ぶんしか進めないので
+      // それで飛び越さないが、こちらは書き込みの間を一度に進めることがあるので、65535 で区切る
+      if (this.on && !this.dda && (t === 0 || this.timer < t)) return this.timer > 0 ? ((this.timer & 0xFFFF) || 0xFFFF) : 1;
+      return t & 0xFFFF;
     }
 
-    // (left, right) の実効ゲイン(0.0-1.0)を返す。$0805(ch balance)と全体balanceを
-    // 減算合成する(文献の"vol = chVol - 60、L = vol + chL*2 + gL*2"という式を再構成)。
+    chunk(m) {
+      if (this.hasNoise) {
+        if (this.noiseTimer <= m) { this.noiseTimer = this.noisePeriod(); this.stepNoise(); }
+        else this.noiseTimer -= m;
+      }
+      if (!this.on) { this.out = 0; return; }
+      if (this.dda) { this.out = this.dac - CENTER; return; }
+      if (this.noiseOn) { this.out = this.noiseOut - CENTER; return; }
+      this.timer -= m;
+      if (this.timer <= 0) { this.timer = this.period(); this.wavePos = (this.wavePos + 1) & (WAVE_LEN - 1); }
+      this.out = this.wave[this.wavePos] - CENTER;
+    }
+
+    // ── 速い道: LFO が掛かっていなければ ch どうしは無関係なので、ch ごとに n 個ぶんを一度に進める ──
+    // 結果(タイマ、読み位置、乱数、出力)は素直な道と同じになる(pce-apu-ab.js --selfcheck で確かめる)。
+
+    fast(n) {
+      const a = this._advance(n);
+      if (a !== 0) { const bal = this.chip.balance; this.accL += a * GAIN[this.steps(bal, true)]; this.accR += a * GAIN[this.steps(bal, false)]; }
+    }
+
+    /** n 個ぶん進めて、その間の「出力 × 時間」の合計を返す */
+    _advance(n) {
+      let acc = 0;
+      const audible = this.on;
+      if (this.hasNoise) {
+        const noisy = audible && !this.dda && this.noiseOn;
+        let left = n, lv = this.out;
+        while (left >= this.noiseTimer) {
+          if (noisy) acc += lv * this.noiseTimer;
+          left -= this.noiseTimer;
+          this.noiseTimer = this.noisePeriod();
+          this.stepNoise();
+          lv = this.noiseOut - CENTER;
+        }
+        this.noiseTimer -= left;
+        if (noisy) { acc += lv * left; this.out = this.noiseOut - CENTER; return acc; }
+      }
+      if (!audible) { this.out = 0; return 0; }
+      if (this.dda) { acc = this.out * n; this.out = this.dac - CENTER; return acc; }
+      // 波形
+      const wave = this.wave;
+      if (this.timer <= 0) this.timer = 1;
+      if (n < this.timer) {
+        acc += this.out * n;
+        this.timer -= n;
+      } else {
+        acc += this.out * this.timer;
+        const rem = n - this.timer;
+        const P = this.period();
+        const steps = Math.floor(rem / P);
+        const r = rem - steps * P;
+        let pos = (this.wavePos + 1) & (WAVE_LEN - 1);
+        if (steps > 0) {
+          // pos から steps 個ぶんを P ずつ鳴らした合計。32 個で一周するので、一周ぶんはまとめる
+          let sum = 0;
+          const full = Math.floor(steps / WAVE_LEN), part = steps - full * WAVE_LEN;
+          if (full > 0) { let total = 0; for (let k = 0; k < WAVE_LEN; k++) total += wave[k]; sum += full * (total - WAVE_LEN * CENTER); }
+          for (let k = 0; k < part; k++) sum += wave[(pos + k) & (WAVE_LEN - 1)] - CENTER;
+          acc += sum * P;
+          pos = (pos + part) & (WAVE_LEN - 1);
+        }
+        acc += (wave[pos] - CENTER) * r;
+        this.wavePos = pos;
+        this.timer = P - r;
+      }
+      this.out = wave[this.wavePos] - CENTER;
+      return acc;
+    }
+
+    /** 左右の減衰の段数(0 = 最大)。MUTE_STEPS 以上は無音 */
+    steps(globalBalance, left) {
+      const g = left ? (globalBalance >> 4) & 0x0F : globalBalance & 0x0F;
+      const p = left ? (this.balance >> 4) & 0x0F : this.balance & 0x0F;
+      const r = (15 - g) * 2 + (31 - (this.control & 0x1F)) + (15 - p) * 2;
+      return r < MUTE_STEPS ? r : MUTE_STEPS;
+    }
+
+    /** 左右の実効ゲイン(0.0-1.0) */
     gainLR(globalBalance) {
-      const vol = this.volume - 0x1E * 2;
-      const lPan = (this.balance >> 4) & 0x0F, rPan = this.balance & 0x0F;
-      const gL = (globalBalance >> 4) & 0x0F, gR = globalBalance & 0x0F;
-      const left = Math.max(0, vol + lPan * 2 + gL * 2);
-      const right = Math.max(0, vol + rPan * 2 + gR * 2);
-      return { left: gainFromIndex(left), right: gainFromIndex(right) };
+      return { left: GAIN[this.steps(globalBalance, true)], right: GAIN[this.steps(globalBalance, false)] };
     }
   }
 
   class APUHuC6280 {
     constructor() {
       this.ch = [];
-      for (let i = 0; i < CH_COUNT; i++) this.ch.push(new PsgChannel(i >= 4));
-      this.selected = 0;   // $0800: 操作対象ch(bit2-0)
-      this.balance = 0xFF; // $0801: 全体バランス
+      for (let i = 0; i < CH_COUNT; i++) this.ch.push(new WaveChannel(i, this));
       this.mute = { ch0: false, ch1: false, ch2: false, ch3: false, ch4: false, ch5: false };
       this.vol = { ch0: 1, ch1: 1, ch2: 1, ch3: 1, ch4: 1, ch5: 1 };
+      this.forceChunked = false; // true にすると、いつも素直な道で進める(速い道との突き合わせ用)
+      this.reset();
     }
 
     reset() {
       for (const c of this.ch) c.reset();
-      this.selected = 0;
-      this.balance = 0xFF;
+      this.selected = 0;   // $0800: 操作する ch(3bit。6・7 は無い ch)
+      this.balance = 0xFF; // $0801: 全体の左右の音量(リセット値は冒頭 [推定])
+      this.lfoFreq = 0;    // $0808
+      this.lfoCtrl = 0;    // $0809
+      this.ticks = 0;      // 進めた音源クロックの通算
+      this.accTicks = 0;   // mixSample が前に呼ばれてからの個数
     }
 
+    get lfoOn() { return (this.lfoCtrl & 0x80) === 0 && (this.lfoCtrl & 0x03) !== 0; }
+
+    /** 番地は $0800-$0809(下位 4bit だけ見る) */
     writeRegister(addr, value) {
       value &= 0xFF;
-      switch (addr) {
-        case 0x0800: this.selected = value & 0x07; return;
-        case 0x0801: this.balance = value; return;
-      }
-      if (this.selected >= CH_COUNT) return; // ch6/7は存在しない(書込みは無視)
-      const c = this.ch[this.selected];
-      switch (addr) {
-        case 0x0802: c.freq = (c.freq & 0xF00) | value; return;
-        case 0x0803: c.freq = (c.freq & 0x0FF) | ((value & 0x0F) << 8); return;
-        case 0x0804: c.writeControl(value); return;
-        case 0x0805: c.balance = value; return;
-        case 0x0806: c.writeData(value); return;
-        case 0x0807: c.noiseCtrl = value; return;
-        // 0x0808/0x0809 = LFO周波数/制御。冒頭コメントの通り本実装では対象外(無視のみ)。
+      const reg = addr & 0x0F;
+      switch (reg) {
+        case 0: this.selected = value & 0x07; return;
+        case 1: this.balance = value; return;
+        case 2: case 3: case 4: case 5: case 6:
+          if (this.selected < CH_COUNT) this.ch[this.selected].write(reg, value);
+          return;
+        case 7:
+          if (this.selected === 4 || this.selected === 5) this.ch[this.selected].noiseCtrl = value;
+          return;
+        case 8: this.lfoFreq = value; return;
+        case 9: this.lfoCtrl = value; return;
         default: return;
       }
     }
 
-    readRegister(addr) {
-      // PSGは基本ライトオンリー(実機もリードは未定義動作に近い)。読み出し依存の曲は
-      // 想定しないため0を返す(hesBus.js側で他I/Oと衝突しないよう明示的にここへ来る)。
-      return 0;
+    /** 音源は読めない(バス側が I/O バッファを返す) */
+    readRegister(addr) { return 0; }
+
+    // 素直な道の 1 区切り: 「どれかの ch で何かが起きる所」まで全 ch をまとめて進める。進めた後の残りを返す
+    _oneChunk(n) {
+      const ch = this.ch;
+      let m = n;
+      for (let i = 0; i < CH_COUNT; i++) { const t = ch[i].pending(); if (t !== 0 && t < m) m = t; }
+      const bal = this.balance;
+      for (let i = 0; i < CH_COUNT; i++) { const c = ch[i], a = c.level() * m; if (a !== 0) { c.accL += a * GAIN[c.steps(bal, true)]; c.accR += a * GAIN[c.steps(bal, false)]; } }
+      for (let i = 0; i < CH_COUNT; i++) ch[i].chunk(m); // ch1 から順に。ch1 の周期は「まだ進めていない ch2」の出力を読む
+      return n - m;
     }
 
-    // PSGクロック(3579545Hz)ごとに1回呼ぶ
-    clock() {
-      for (const c of this.ch) c.clock();
-    }
-
-    // clock()のnティック分バッチ版。hesPlayer.js renderFrame()から使う(冒頭コメント参照)。
+    /** 音源クロック n 個ぶん進める */
     clockBy(n) {
-      for (const c of this.ch) c.clockBy(n);
+      if (n <= 0) return;
+      this.ticks += n;
+      this.accTicks += n;
+      const ch = this.ch;
+      // ノイズのタイマが 0(電源投入直後)の間は素直な道で(★ 冒頭「ノイズの最初の 1 歩」)
+      while (n > 0 && (this.forceChunked || this.lfoOn || ch[4].noiseTimer === 0 || ch[5].noiseTimer === 0)) n = this._oneChunk(n);
+      if (n > 0) for (let i = 0; i < CH_COUNT; i++) ch[i].fast(n);
+    }
+
+    clock() { this.clockBy(1); }
+
+    /** マスタークロックの時刻(電源投入からの通算)まで進める */
+    runToMaster(masterClock) {
+      const t = Math.floor(masterClock / 6);
+      if (t > this.ticks) this.clockBy(t - this.ticks);
     }
 
     /**
-     * 現在の出力レベルを {left, right}(概ね-1.0〜1.0)で返す。6ch分のL/Rゲイン付き
-     * サンプルをそれぞれのバスへ合算して正規化する。基準は「0-31を中心±15.5とみなした
-     * 振幅×ゲイン」の合計を6ch分見込んだスケール。
-     * ★旧実装は(left+right)*0.5でモノラル化していた。センター定位(gainLRがleft=rightを
-     * 返すch)では平均してもモノラル値と一致するため、L/Rを別々に積むだけでモノラル時と
-     * 同じ音量感を保ったままステレオ分離できる。
+     * 前に呼んでから今までの平均の出力を {left, right}(概ね -1.0〜1.0)で返す。時間が進んでいなければ今の値。
+     * 6ch を足して 16×6 で割る(冒頭 [推定])。
      */
     mixSample() {
+      const t = this.accTicks, bal = this.balance;
       let sumL = 0, sumR = 0;
       for (let i = 0; i < CH_COUNT; i++) {
-        if (this.mute['ch' + i]) continue;
         const c = this.ch[i];
-        const raw = (c.rawSample() - 16) * this.vol['ch' + i]; // 0-31を中心0付近へ(±16相当)
-        const { left, right } = c.gainLR(this.balance);
-        sumL += raw * left;
-        sumR += raw * right;
+        let l, r;
+        if (t > 0) { l = c.accL / t; r = c.accR / t; } else { const v = c.level(); l = v * GAIN[c.steps(bal, true)]; r = v * GAIN[c.steps(bal, false)]; }
+        c.accL = 0; c.accR = 0;
+        if (this.mute['ch' + i]) continue;
+        const k = this.vol['ch' + i];
+        sumL += l * k;
+        sumR += r * k;
       }
+      this.accTicks = 0;
       return { left: sumL / (16 * CH_COUNT), right: sumR / (16 * CH_COUNT) };
     }
 
     /**
-     * mixSample()と同じ正規化(6ch分を単純合算するとmixSample()の返す値に一致する)で、
-     * 6chぶんを合算せず個別の配列で返す。hes-stream-player.js HesBufferedPlayerが
-     * 「chごとに別々のAudioBufferチャンネルへ書き出し、再生をリアルタイムミュート
-     * できるようにする」ために使う(mixSample()は合算済みで後からミュートできないため)。
-     * mute(this.mute)はここでは見ない — ミュートは録音後にGainNodeで即時に効かせる設計
-     * (録音時にミュートを焼き込むと、再生中のミュート切替に再レンダリングが必要になり
-     * 本末転倒なため)。
+     * mixSample と同じ基準で、ch ごとの値(左右の平均)を配列で返す。ミュートは見ない
+     * (hes-stream-player.js の HesBufferedPlayer が、録った後で ch ごとに切り替えられるようにするため)。
      */
     mixChannelSamples() {
+      const t = this.accTicks, bal = this.balance;
       const result = new Array(CH_COUNT);
       for (let i = 0; i < CH_COUNT; i++) {
         const c = this.ch[i];
-        const raw = c.rawSample() - 16;
-        const { left, right } = c.gainLR(this.balance);
-        result[i] = (raw * (left + right) * 0.5) / (16 * CH_COUNT);
+        const lr = t > 0 ? (c.accL + c.accR) / t : c.level() * (GAIN[c.steps(bal, true)] + GAIN[c.steps(bal, false)]);
+        c.accL = 0; c.accR = 0;
+        result[i] = (lr * 0.5) / (16 * CH_COUNT);
       }
+      this.accTicks = 0;
       return result;
     }
   }
 
-  // 鍵盤表示/ロール用ライブスナップショット(snapshotGbApu等と同じ考え方)。
-  // panL/panR: $0805(chバランス)の上位/下位ニブル(0-15、鍵盤表示のL/R列用)。
-  // 戻り値の配列自体にglobalPanL/globalPanR($0801、全体バランス)も生やしておく
-  // (main.js liveHesApu()参照。ch単位ではないため配列要素にはせず配列のプロパティとして持たせる)。
+  // 鍵盤表示/ロール用のライブの写し。panL/panR は $0805 の上位/下位。
+  // 配列そのものに globalPanL/globalPanR($0801)と lfoFreq/lfoCtrl($0808/$0809)を生やす(ch 単位ではないため)。
+  // ★ LFO が掛かっている間、ch1 の freq は周期レジスタから出した値で、揺れは入っていない
+  // ★ 周期レジスタが 0 の ch は音源の中では周期 $1000(約 27Hz)で回るが、ここでは従来どおり「鳴っていない」として返す(変換側 wave.js も同じ)
   Emu.snapshotHuC6280Apu = function (apu) {
     const arr = apu.ch.map((c, i) => {
       const freqHz = (c.on && !c.dda && c.freq > 0) ? MML.HES.PSG_CLOCK / (32 * c.freq) : 0;
-      const noiseOn = c.hasNoise && c.on && (c.noiseCtrl & 0x80) !== 0;
+      const noiseOn = c.noiseOn && c.on;
       return {
         on: c.on, dda: c.dda, noiseOn,
         freq: freqHz, vol: c.volume / 31, rawVol: c.volume,
@@ -4703,6 +4784,8 @@
     });
     arr.globalPanL = (apu.balance >> 4) & 0x0F;
     arr.globalPanR = apu.balance & 0x0F;
+    arr.lfoFreq = apu.lfoFreq;
+    arr.lfoCtrl = apu.lfoCtrl;
     return arr;
   };
 
@@ -4712,26 +4795,19 @@
 })(globalThis);
 
 /*
- * HESプレイヤー (HuC6280 CPU + HesBus + APUHuC6280 の統合)
+ * HES プレイヤー(HuC6280 の CPU + HesBus + 波形メモリ音源)
  * MML.Emu.HesPlayer
  *
- * ★GBS/NSF/KSSと異なり「INITを呼んで完了を待ち、以後PLAYを一定間隔で直接呼ぶ」という
- *   簡略設計は使えない(HESヘッダにPLAYアドレスが無い。hesBus.js冒頭コメント参照)。
- *   代わりに「INITアドレスへPCをセットして、あとは実時間どおりCPUを自由継続実行し、
- *   バス側のタイマ/垂直帰線割込を本物のIRQとしてディスパッチする」方式を取る
- *   (実機の動作そのもの)。INITが最終的にRTS/無限ループのどちらへ転んでも、
- *   周期的なIRQがPLAY相当の処理を呼び続ける限り再生は問題なく進む。
+ * HES のヘッダには INIT 番地しか無い(hesBus.js 冒頭)。INIT へ飛ばしたら、あとは CPU を実時間どおりに走らせ続け、
+ * 曲データ自身の割り込み(タイマ、垂直帰線)に曲を進めさせる。INIT が RTS で戻っても、戻り先の番兵で CPU が待つ。
  *
- * - initSong(track): CPU/バス/APUをリセットし、PC=initAddr・A=track・SP=0xFDにセットする
- *   (Hes_Core.start_trackと同じ考え方の初期化。call/beginCallでRTSを待つのではなく、
- *   その場で以後の連続実行に委ねる)。
- * - renderFrame(sampleRate): マスタークロック(HES.CPU_CLOCK_HIGH=7159090Hz)を基準に
- *   CPU/バス/APUを1サンプル分ずつ同期実行する。CPUの消費サイクル数はCSH/CSLの状態で
- *   マスタークロックへの換算比が変わる(cpu.speedHigh: true→1倍, false→4倍)。
- *   APUクロック(PSG_CLOCK=3579545Hz=マスタークロックの半分)はマスタークロック2tickに
- *   つき1回進める。★CPU/バス用とAPU用でクロックのアキュムレータを分離しており、
- *   speedFactor(再生速度)はCPU/バス側にのみ掛かる(音程を変えずにテンポだけ変える。
- *   renderFrame()内のコメント参照)。
+ * 時間(2026-11-15、段階 9a・9b):
+ *   - CPU は 1 サイクルごとにバスの tick() を呼び、バスがマスタークロック(21.47727MHz)を数える(bus.clock)
+ *   - 音源は自分の時計(音源クロック = マスタークロックの 1/6)で進む。書き込みは「書かれた時刻」まで音源を進めてから効かせる
+ *     (バスが書く直前に syncApu を呼ぶ)。1 サンプルの終わりにも、その時刻まで進めて平均の出力を取る
+ *   - 再生速度(speedFactor)は CPU 側だけに掛ける(テンポが変わり、音程は変わらない)。等倍の時は CPU の時刻と音源の時刻が
+ *     同じ数になる。等倍でない時は、サンプルの中の位置で按分して音源の時刻へ直す
+ *   - regsOnly(変換用の先読み)では、サンプルごとには音源を進めない。書き込みが来た時にまとめて進む(結果は同じ)
  */
 (function (global) {
   const MML = global.MML = global.MML || {};
@@ -4796,6 +4872,9 @@
   }
   Emu.HesTraceBuf = HesTraceBuf;
 
+  // HES を始める時の CPU の速さ(true=高速)。initSong の説明を参照
+  const HES_START_HIGH = false;
+
   class HesPlayer {
     /**
      * @param {Uint8Array} hesBytes - HESファイルの完全なバイナリ
@@ -4810,15 +4889,23 @@
       this.apu = new Emu.APUHuC6280();
       this.bus.apu = this.apu;
       this.cpu = new Emu.CPUHuC6280(this.bus);
+      this.bus.cpu = this.cpu;
+      this.bus.syncApu = () => this.apu.runToMaster(this._apuTimeOf(this.bus.clock));
 
       this.clockHz = MML.HES.CPU_CLOCK_HIGH;
       this.frameRate = MML.HES.VBLANK_FPS; // 抽出/描画用の名目フレームレート(実際のPLAY頻度とは独立)
 
-      this.cpuCycleAccum = 0;
-      this.apuCycleAccum = 0;
-      this.cpuDebt = 0;
-      this.psgTickAccum = 0;
+      this.cpuTarget = 0;   // CPU をここまで進める(マスタークロック。バスの clock と比べる)
+      this.apuTime = 0;     // 音源をここまで進めた(マスタークロック単位の実時間)
+      this._cpuStart = 0;   // 今のサンプルの頭の cpuTarget
+      this._exact = true;   // CPU の時刻と音源の時刻が同じ数か(等倍で、速度を一度も変えていない)
       this.speedFactor = 1;
+    }
+
+    /** CPU の時刻(bus.clock)を音源の時刻へ直す */
+    _apuTimeOf(clock) {
+      if (this._exact) return clock;
+      return this.apuTime + (clock - this._cpuStart) / (this.speedFactor || 1);
     }
 
     /**
@@ -4842,24 +4929,23 @@
       // 実機はRESET直後Iフラグ=1(割込禁止)。INITが自分でCLIするまでIRQは発生しない
       // (cpu.reset()が既にP=F_Iにしている)。
 
-      this.cpuCycleAccum = 0;
-      this.apuCycleAccum = 0;
-      this.cpuDebt = 0;
-      this.psgTickAccum = 0;
+      // CPU の速さ: 実機は電源投入で低速(1.79MHz)、ゲームが CSH で高速にする。HES は INIT から始まるので CSH を通らない曲がありうる。
+      // [参照] Mesen 2 は HES でも低速のまま始める(PceConsole::InitHesPlayback は速さに触らない)。それに合わせる。
+      this.cpu.speedHigh = HES_START_HIGH;
+      this.bus.setSpeed(HES_START_HIGH);
+      // [参照] Mesen はヘッダの MPR を TAM と同じ口で入れるので、「最後に通した値」(TMA #0 で読める)は MPR7 の値になる
+      this.cpu.mprBuffer = this.header.banks[7] || 0;
+      this.cpuTarget = 0;
+      this.apuTime = 0;
+      this._cpuStart = 0;
+      this._exact = true;
     }
 
     /**
      * 1フレーム分の音声サンプルを生成する。
-     * ★speedFactor(再生速度スライダー)はCPU/バス(タイマ・垂直帰線割込)の進行速度だけに
-     *   掛け、PSGのクロック(apu.clock())は常に実時間のまま進める。これによりCPUが
-     *   音符を書き換える頻度(テンポ)だけが変わり、実際に鳴っている音の周波数(音程)は
-     *   変化しない。当初はCPU/PSG共通の1つのアキュムレータにspeedFactorを掛けていたため、
-     *   速度を落とすとPSGの発振自体も遅くなり音程が下がってしまっていた
-     *   (実曲で発覚。GBS/NSF/KSSはPLAY呼び出し頻度だけをspeedFactorで変える設計
-     *   のため元々この問題が無かった。HESはPLAYを明示的に呼ばずCPU/バスを連続実行する
-     *   設計のため、CPU用とAPU用でアキュムレータを分離する必要があった)。
+     * 再生速度(speedFactor)は CPU とバスの進みだけに掛け、音源は実時間で進める(冒頭「時間」)。
      * @param {number} sampleRate
-     * @param {boolean} [regsOnly] - trueならmixSample()を省略(先読みキャプチャ用軽量モード)
+     * @param {boolean} [regsOnly] - true なら音を作らない(変換用の先読み)。音源は書き込みが来た時にだけ進む
      * @param {Float32Array[]} [channelOut] - 渡された場合、mixSample()(6ch合算)の代わりに
      *   apu.mixChannelSamples()でchごとの値をchannelOut[0..5]へ書き込む(各要素は
      *   samplesThisFrame長のFloat32Arrayを呼び出し側で事前確保しておくこと)。
@@ -4870,7 +4956,7 @@
      * @returns {Float32Array|{left:Float32Array,right:Float32Array}|null} channelOut指定時・regsOnly指定時はnull
      */
     renderFrame(sampleRate, regsOnly, channelOut, stereo) {
-      const masterTicksPerSample = this.clockHz / sampleRate;
+      const masterPerSample = Emu.PCE_MASTER_CLOCK / sampleRate;    // 1 サンプルぶんのマスタークロック
       const samplesThisFrame = Math.round(sampleRate / this.frameRate);
       const outL = (regsOnly || channelOut) ? null : new Float32Array(samplesThisFrame);
       const outR = (regsOnly || channelOut || !stereo) ? null : new Float32Array(samplesThisFrame);
@@ -4883,42 +4969,20 @@
 
       for (let i = 0; i < samplesThisFrame; i++) {
         this.frameSamplePos = i;
-        // PSG: 常に実時間のクロックで進める(音程を変えないため)。
-        // ★2026-08: 以前はマスタークロック1tickごとにapu.clock()を呼んでおり
-        // (1サンプルあたり約162tick=マスタークロック7.16MHz÷44.1kHz)、リアルタイム
-        // 再生(hes-stream-player.js)でこの関数呼出し回数の多さ自体がボトルネックになって
-        // 音声スレッドの処理が間に合わず「がくがく」になっていた(ユーザー実測)。
-        // 1サンプル分の整数tick数をまとめてapu.clockBy()へ渡す(結果はtickごとに
-        // 呼んだ場合と数学的に同値、詳細はapuHuC6280.js PsgChannel.clockBy参照)。
-        this.apuCycleAccum += masterTicksPerSample;
-        const masterTicks = Math.floor(this.apuCycleAccum);
-        this.apuCycleAccum -= masterTicks;
-        const totalPsgAcc = this.psgTickAccum + masterTicks;
-        const psgTicks = totalPsgAcc >> 1;      // PSGクロックはマスターの半分(2tickに1回)
-        this.psgTickAccum = totalPsgAcc & 1;
-        if (psgTicks > 0) apu.clockBy(psgTicks);
-
-        // CPU/バス(タイマ・垂直帰線): speedFactorで進行速度を変える(テンポ変化のため)。
-        // 命令境界(cpu.step())の間はバス側のカウンタをまとめて進めても、IRQ判定
-        // (pollIrq、step()冒頭でしか見ない)の観測結果はtickごとに呼んだ場合と完全に
-        // 同じになる(hesBus.js clockBy()冒頭コメント参照)。
-        this.cpuCycleAccum += masterTicksPerSample * this.speedFactor;
-        let cpuTicks = Math.floor(this.cpuCycleAccum);
-        this.cpuCycleAccum -= cpuTicks;
-        while (cpuTicks > 0) {
-          if (this.cpuDebt <= 0) {
-            const opCycles = cpu.step();
-            this.cpuDebt = opCycles * (cpu.speedHigh ? 1 : 4);
-          }
-          const advance = Math.max(1, Math.min(cpuTicks, this.cpuDebt));
-          bus.clockBy(advance);
-          this.cpuDebt -= advance;
-          cpuTicks -= advance;
-        }
+        // CPU とバス(タイマ・垂直帰線): 再生速度はこちらだけに掛ける。音源への書き込みは syncApu 経由で「書かれた時刻」に効く
+        this._cpuStart = this.cpuTarget;
+        this._exact = this.speedFactor === 1 && this.apuTime === this.cpuTarget;
+        this.cpuTarget += masterPerSample * this.speedFactor;
+        while (bus.clock < this.cpuTarget) cpu.step();
+        this.apuTime += masterPerSample;
+        if (regsOnly) continue;
+        // 音源をサンプルの終わりまで進めて、このサンプルの間の平均を取る
+        // (CPU が命令の途中でサンプルの終わりを少し越えて書いた時は、音源はもう先へ進んでいる。その時は進めない)
+        apu.runToMaster(this.apuTime);
         if (channelOut) {
           const samples = apu.mixChannelSamples();
           for (let c = 0; c < samples.length; c++) channelOut[c][i] = samples[c];
-        } else if (!regsOnly) {
+        } else {
           const s = apu.mixSample();
           if (stereo) { outL[i] = s.left; outR[i] = s.right; }
           else outL[i] = (s.left + s.right) * 0.5;
@@ -4966,6 +5030,7 @@
     // できなかった(apuHuC6280.js snapshotHuC6280ApuのglobalモPanL/PanRと同じ考え方、
     // ライブ鍵盤表示側には既にあったがregsOnly抽出側には無かった)。
     arr.globalBalance = apu.balance;
+    arr.lfoFreq = apu.lfoFreq; arr.lfoCtrl = apu.lfoCtrl; // $0808/$0809
     return arr;
   }
 
@@ -16504,9 +16569,11 @@
     const apu = new Emu.APUHuC6280();
     return {
       id: 'huc6280', clockHz: info.clock, accum: 0, apu, gain: CHIP_GAIN.huc6280,
-      write(aa, dd) { apu.writeRegister(0x0800 + (aa & 0x0F), dd); },
-      clock() { apu.clock(); },
-      mix(out) { const s = apu.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
+      // 進める数は貯めておき、書き込みと音の取り出しの直前にまとめて進める(音源は n 個ぶんを一度に進める方が速い。結果は同じ)
+      pend: 0,
+      write(aa, dd) { if (this.pend) { apu.clockBy(this.pend); this.pend = 0; } apu.writeRegister(0x0800 + (aa & 0x0F), dd); },
+      clock() { this.pend++; },
+      mix(out) { if (this.pend) { apu.clockBy(this.pend); this.pend = 0; } const s = apu.mixSample(); out[0] += s.left * this.gain; out[1] += s.right * this.gain; },
       applyMute(m) { const e = m.expansion || m; if (e.hes) Object.assign(apu.mute, e.hes); },
       applyVolume(v) { const e = v.expansion || v; if (e.hes) Emu.applyVolume(apu.vol, e.hes); }
     };
@@ -20532,7 +20599,8 @@
       // PSG(PC Engine) 6ch: 32サンプル5bit波形音源。ch4/5はノイズモード中のみノイズ波形表示に
       // 切り替わる(hesBus.js/apuHuC6280.js参照。物理的にノイズ生成回路を持つのはch4/5のみ)。
       const live = extraSnaps && extraSnaps.hesApuLive;
-      const s = live ? live() : null;
+      // ライブ表示(PC エンジンのゲーム画面)はフレームごとの値 hesApu[f]、HES/VGM の再生は今の値を直接読む関数
+      const s = (extraSnaps && extraSnaps.hesApu && extraSnaps.hesApu[frameIdx]) || (live ? live() : null);
       const PCOLS = ['#66ddff', '#33aaff', '#0099ff', '#33cc99', '#ffaa00', '#ff6699'];
       // ALL行($0801、全体バランス。SPCのALL行と同じ考え方): 実チャンネルではないので
       // active/wave/note/freqは無く、L/R列だけを持つ(_rebuildRows()のisAllRow参照)。
@@ -20915,6 +20983,18 @@
       for (const w of writes) if (!w.read && w.addr >= 0xFF10 && w.addr <= 0xFF3F) apu.writeRegister(w.addr, w.value);
       apu.advance(70224);
       return E.snapshotGbApu(apu);
+    };
+  }
+  // PC エンジンの書き込み列 [{addr(音源のレジスタ 0-9 = $0800-$0809), value}] を本物の音源に流し、鍵盤行の値(Emu.snapshotHuC6280Apu)を返す。
+  // PC エンジンのゲーム画面のライブ表示(DESIGN-PCE-CAPTURE.md §6、9c)が使う。行は HES と同じ。
+  // 番地 0-9 で来るのは録音(pceConsole.js)の形。鍵盤に出すのはレジスタの値だけなので、音源の時計は進めない
+  function makePceStepper() {
+    const E = MML.Emu;
+    const apu = E.APUHuC6280 ? new E.APUHuC6280() : null;
+    return (writes) => {
+      if (!apu) return null;
+      for (const w of writes) if (!w.read && w.addr >= 0 && w.addr <= 9) apu.writeRegister(0x0800 | w.addr, w.value);
+      return E.snapshotHuC6280Apu(apu);
     };
   }
   function makeFme7Stepper() {
@@ -23925,6 +24005,7 @@
       if (this._chips.includes('fme7')) { steppers.fme7 = makeFme7Stepper(); ex.fme7 = []; }
       if (this._chips.includes('kss')) { steppers.kss = makeKssStepper(this._chips); ex.kssPsg = []; ex.kssScc = []; ex.kssOpll = []; ex.kssDac = []; ex.opl = []; } // MSX のゲーム画面(KSS 形式の書き込み列)
       if (this._chips.includes('gbs')) { steppers.gb = makeGbStepper(); ex.gbsApu = []; } // GB のゲーム画面
+      if (this._chips.includes('hes')) { steppers.pce = makePceStepper(); ex.hesApu = []; } // PC エンジンのゲーム画面
       // Live系(再生中のチップを直接読む関数)はライブ表示には無い(あっても全フレームが同じ値になる)
       for (const k of Object.keys(ex)) if (/Live$/.test(k)) ex[k] = null;
       ex.apuEnv = null;
@@ -23962,6 +24043,7 @@
       if (lr.steppers.fme7) ex.fme7[f] = lr.steppers.fme7(writes);
       if (lr.steppers.kss) { const k = lr.steppers.kss(writes); ex.kssPsg[f] = k.psg; ex.kssScc[f] = k.scc; ex.kssOpll[f] = k.opll; ex.kssDac[f] = k.dac; ex.opl[f] = k.opl; }
       if (lr.steppers.gb) ex.gbsApu[f] = lr.steppers.gb(writes);
+      if (lr.steppers.pce) ex.hesApu[f] = lr.steppers.pce(writes);
       const channels = extractChannels(st.regSnapshots[f], ex, f, this._chips);
       lr.builder.feed(channels, f);
       // 打点(DPCM 等の drumKey つき)が新しく始まったらドラム区画を組み直す(区画が無いと打点は描かれない。
@@ -23999,8 +24081,9 @@
       if (f === st.totalFrames) return;
       st.writeLog.length = f; st.regSnapshots.length = f; st.totalFrames = f;
       const ex = this._extraSnaps;
-      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu']) if (ex[k]) ex[k].length = f;
+      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu']) if (ex[k]) ex[k].length = f;
       if (lr.steppers.gb) lr.steppers.gb = makeGbStepper();
+      if (lr.steppers.pce) lr.steppers.pce = makePceStepper();
       if (lr.steppers.vrc7) lr.steppers.vrc7 = makeVrc7Stepper();
       if (lr.steppers.n163) lr.steppers.n163 = makeN163Stepper();
       if (lr.steppers.fme7) lr.steppers.fme7 = makeFme7Stepper();
@@ -31355,9 +31438,11 @@
   const NES_NOISE_PERIOD = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068];
   const NES_NOISE_FREQS = NES_NOISE_PERIOD.map(p => NES_CPU_CLOCK / p);
 
+  // 乱数(LFSR)を進める速さ。周期 = 下位 5bit を反転して 64 倍、$1F(反転して 0)の時だけ 32
+  // (apuHuC6280.js の noisePeriod と同じ決まり。[参照] Mesen 2 PcePsgChannel.cpp。2026-11-15 までは $1F を 64 として扱っていた)
   function psgNoiseFreq(noiseCtrl) {
-    const invVal = Math.max(1, (~noiseCtrl) & 0x1F);
-    return MML.HES.PSG_CLOCK / (64 * invVal);
+    const f = noiseCtrl & 0x1F;
+    return MML.HES.PSG_CLOCK / (f === 0x1F ? 32 : 64 * ((~f) & 0x1F));
   }
 
   function psgNoiseFreqToNote(freqHz) {

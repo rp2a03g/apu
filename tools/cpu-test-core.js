@@ -346,5 +346,106 @@
     },
   };
 
+  // ---------------------------------------------------------------- HuC6280
+  // SingleStepTests/huc6280(MIT)。Mesen 2 が作ったベクタなので「Mesen と同じか」を測る物(実機の保証ではない)。
+  // ファイルはバイナリ(<op>.json.bin)。番地は MPR を通した後の 21bit(2MB の平らな RAM、I/O は無い)。
+  // 見る物: レジスタ(A X Y S P PC)、MPR、RAM、サイクル数、サイクルごとのバスの動き(番地・値・読み/書き/内部)。
+  // 記録は 500 サイクル/500 番地まで(ブロック転送はそこまでを比べ、総サイクル数は num_cycles で見る)。
+  // TSB/TRB($04 $0C $14 $1C)の Z フラグだけは比べない: ベクタは (A & メモリ)=0、手元の Mesen 2 の実物とソースは「書き戻す値が 0」で、
+  // 本体は後者に合わせてある(cpuHuC6280.js の TSB の説明)。ベクタと違った件数は zDiff に数える。
+  CpuTest.SPECS.huc6280 = {
+    label: 'HuC6280 (PC エンジン / HES)',
+    vectorBase: 'https://raw.githubusercontent.com/SingleStepTests/huc6280/main/v1/',
+    scripts: ['src/emulator/cpuHuC6280.js'],
+    defaultPer: 2500,
+    groups: () => [{ key: 'main', files: Array.from({ length: 256 }, (_, op) => { const h = hex2(op); return { group: 'main', op, hex: h, name: h, path: h + '.json.bin', localPath: h + '.json.bin' }; }) }],
+    decode(b) {
+      const u32 = (p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
+      const n = u32(0); let p = 4; const out = [];
+      const state = (q) => {
+        const sz = u32(q); let r = q + 4;
+        const s = { A: b[r], X: b[r + 1], Y: b[r + 2], S: b[r + 3], P: b[r + 4], PC: b[r + 5] | (b[r + 6] << 8), MPR: Array.from(b.subarray(r + 7, r + 15)), ram: [] };
+        r += 15; const nr = u32(r); r += 4;
+        for (let i = 0; i < nr; i++) { s.ram.push([u32(r), b[r + 4]]); r += 5; }
+        return [sz, s];
+      };
+      for (let i = 0; i < n; i++) {
+        const full = u32(p); let q = p + 4;
+        let name = ''; for (let k = 0; k < 50 && b[q + k]; k++) name += String.fromCharCode(b[q + k]);
+        const t = { name: name.trim() }; q += 50;
+        t.opcode = u32(q); q += 4;
+        let sz; [sz, t.initial] = state(q); q += sz; [sz, t.final] = state(q); q += sz;
+        t.num_cycles = u32(q); const rec = u32(q + 4); q += 8;
+        t.cycles = new Uint32Array(rec);
+        for (let k = 0; k < rec; k++) { t.cycles[k] = u32(q); q += 4; }
+        out.push(t); p += full;
+      }
+      return out;
+    },
+    createRunner() {
+      const ram = new Uint8Array(1 << 21);
+      const mpr = new Uint8Array(8);
+      // バスの記録: 1 サイクル 1 個。0 = 内部サイクル、それ以外はベクタと同じ詰め方(bit0 読み、bit1 書き、bit3-23 番地、bit24-31 値)
+      let trace = [], tn = 0;
+      const bus = {
+        tick: () => { trace[tn++] = 0; },
+        read: (a) => { const pa = (mpr[a >>> 13] << 13) | (a & 0x1FFF), v = ram[pa]; trace[tn - 1] = (1 | (pa << 3) | (v << 24)) >>> 0; return v; },
+        write: (a, v) => { const pa = (mpr[a >>> 13] << 13) | (a & 0x1FFF); ram[pa] = v; trace[tn - 1] = (2 | (pa << 3) | (v << 24)) >>> 0; },
+        setMpr: (i, v) => { mpr[i] = v; },
+        getMpr: (i) => mpr[i],
+        irqLines: () => 0,
+      };
+      const cpu = new MML.Emu.CPUHuC6280(bus);
+      const KEYS = ['A', 'X', 'Y', 'S', 'P', 'PC'], KEYS_CUT = ['S', 'P', 'PC'];
+      const showBus = (list, n) => { let s = ''; for (let i = 0; i < Math.min(n, 24); i++) { const c = list[i] >>> 0; s += (c & 3) ? ((c >>> 3) & 0x1FFFFF).toString(16) + ':' + (c >>> 24).toString(16) + ((c & 1) ? 'r' : 'w') + ' ' : '-- '; } return s; };
+      return {
+        isImplemented: () => true,
+        runOne(tests, per) {
+          const n = Math.min(per, tests.length);
+          let pass = 0, cycBad = 0, stateBad = 0, ramBad = 0, busBad = 0, cutCount = 0, zDiff = 0; const fails = [];
+          for (let i = 0; i < n; i++) {
+            const t = tests[i], I = t.initial, F = t.final;
+            for (const [a, v] of I.ram) ram[a] = v;
+            for (let k = 0; k < 8; k++) mpr[k] = I.MPR[k];
+            cpu.A = I.A; cpu.X = I.X; cpu.Y = I.Y; cpu.S = I.S; cpu.P = I.P; cpu.PC = I.PC;
+            cpu.irqSample = 0;
+            tn = 0;
+            const cyc = cpu.step();
+            // 記録が 500 サイクルで切られたケース(長いブロック転送)は、読む元のメモリが最初の 500 番地ぶんしか載っていない。
+            // 転送した中身と、転送でスタックを上書きした時の A/X/Y は確かめようが無いので、S・P・PC・総サイクル数・切られる前までのバスだけを見る
+            const cut = t.num_cycles > t.cycles.length;
+            let regOK = true;
+            const zSkip = t.opcode === 0x04 || t.opcode === 0x0C || t.opcode === 0x14 || t.opcode === 0x1C;
+            if (zSkip && ((cpu.P ^ F.P) & 0x02)) zDiff++;
+            for (const k of (cut ? KEYS_CUT : KEYS)) if (k === 'P' && zSkip ? ((cpu.P ^ F.P) & ~0x02) !== 0 : cpu[k] !== F[k]) { regOK = false; break; }
+            for (let k = 0; k < 8; k++) if (mpr[k] !== F.MPR[k]) regOK = false;
+            const ramOK = cut || ramMatches(ram, F);
+            const cycOK = cyc === t.num_cycles;
+            if (cut) cutCount++;
+            // 読み/書き/内部の別と番地・値。ベクタの「空読み」印(bit2)は見ない
+            let busOK = true;
+            const rec = t.cycles.length;
+            if (tn < rec) busOK = false;
+            else for (let k = 0; k < rec; k++) { const e = t.cycles[k]; const want = (e & 3) ? (e & ~4) >>> 0 : 0; if (trace[k] !== want) { busOK = false; break; } }
+            if (regOK && ramOK && cycOK && busOK) pass++;
+            else {
+              if (!cycOK) cycBad++; if (!regOK) stateBad++; if (!ramOK) ramBad++; if (!busOK) busBad++;
+              if (fails.length < 3) {
+                const got = {}; for (const k of KEYS) got[k] = cpu[k]; got.MPR = Array.from(mpr); got.cyc = cyc;
+                const exp = {}; for (const k of KEYS) exp[k] = F[k]; exp.MPR = F.MPR; exp.cyc = t.num_cycles;
+                const ini = {}; for (const k of KEYS) ini[k] = I[k]; ini.MPR = I.MPR;
+                fails.push({ name: t.name, regOK, ramOK, cycOK, busOK, exp, got, ini, bus: busOK ? '' : '期待 ' + showBus(t.cycles, rec) + '/ 実際 ' + showBus(trace, tn) });
+              }
+            }
+            for (const [a] of I.ram) ram[a] = 0;
+            for (const [a] of F.ram) ram[a] = 0;
+            if (cut) ram.fill(0); // 記録に無い番地へも書いている
+          }
+          return { pass, total: n, cycBad, stateBad, ramBad, busBad, cut: cutCount, zDiff, fails };
+        },
+      };
+    },
+  };
+
   CpuTest.opcodeFiles = opcodeFiles;
 })(typeof window !== 'undefined' ? window : globalThis);

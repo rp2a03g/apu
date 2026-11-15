@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-13 14:55:27
+ * Built by tools/build-capture-workers.ps1 at 2026-11-16 01:50:49
  *
  * regsOnly capture worker bundle (psfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.psfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.psfCaptureBuiltAt = '2026-11-13 14:55:27';
+  MML.WorkerBundles.psfCaptureBuiltAt = '2026-11-16 01:50:49';
   MML.WorkerBundles.psfCapture = function () {
 /*
  * PSF (Portable Sound Format) 容器 / PS-EXE 解析
@@ -7262,7 +7262,8 @@
       // PSG(PC Engine) 6ch: 32サンプル5bit波形音源。ch4/5はノイズモード中のみノイズ波形表示に
       // 切り替わる(hesBus.js/apuHuC6280.js参照。物理的にノイズ生成回路を持つのはch4/5のみ)。
       const live = extraSnaps && extraSnaps.hesApuLive;
-      const s = live ? live() : null;
+      // ライブ表示(PC エンジンのゲーム画面)はフレームごとの値 hesApu[f]、HES/VGM の再生は今の値を直接読む関数
+      const s = (extraSnaps && extraSnaps.hesApu && extraSnaps.hesApu[frameIdx]) || (live ? live() : null);
       const PCOLS = ['#66ddff', '#33aaff', '#0099ff', '#33cc99', '#ffaa00', '#ff6699'];
       // ALL行($0801、全体バランス。SPCのALL行と同じ考え方): 実チャンネルではないので
       // active/wave/note/freqは無く、L/R列だけを持つ(_rebuildRows()のisAllRow参照)。
@@ -7645,6 +7646,18 @@
       for (const w of writes) if (!w.read && w.addr >= 0xFF10 && w.addr <= 0xFF3F) apu.writeRegister(w.addr, w.value);
       apu.advance(70224);
       return E.snapshotGbApu(apu);
+    };
+  }
+  // PC エンジンの書き込み列 [{addr(音源のレジスタ 0-9 = $0800-$0809), value}] を本物の音源に流し、鍵盤行の値(Emu.snapshotHuC6280Apu)を返す。
+  // PC エンジンのゲーム画面のライブ表示(DESIGN-PCE-CAPTURE.md §6、9c)が使う。行は HES と同じ。
+  // 番地 0-9 で来るのは録音(pceConsole.js)の形。鍵盤に出すのはレジスタの値だけなので、音源の時計は進めない
+  function makePceStepper() {
+    const E = MML.Emu;
+    const apu = E.APUHuC6280 ? new E.APUHuC6280() : null;
+    return (writes) => {
+      if (!apu) return null;
+      for (const w of writes) if (!w.read && w.addr >= 0 && w.addr <= 9) apu.writeRegister(0x0800 | w.addr, w.value);
+      return E.snapshotHuC6280Apu(apu);
     };
   }
   function makeFme7Stepper() {
@@ -10655,6 +10668,7 @@
       if (this._chips.includes('fme7')) { steppers.fme7 = makeFme7Stepper(); ex.fme7 = []; }
       if (this._chips.includes('kss')) { steppers.kss = makeKssStepper(this._chips); ex.kssPsg = []; ex.kssScc = []; ex.kssOpll = []; ex.kssDac = []; ex.opl = []; } // MSX のゲーム画面(KSS 形式の書き込み列)
       if (this._chips.includes('gbs')) { steppers.gb = makeGbStepper(); ex.gbsApu = []; } // GB のゲーム画面
+      if (this._chips.includes('hes')) { steppers.pce = makePceStepper(); ex.hesApu = []; } // PC エンジンのゲーム画面
       // Live系(再生中のチップを直接読む関数)はライブ表示には無い(あっても全フレームが同じ値になる)
       for (const k of Object.keys(ex)) if (/Live$/.test(k)) ex[k] = null;
       ex.apuEnv = null;
@@ -10692,6 +10706,7 @@
       if (lr.steppers.fme7) ex.fme7[f] = lr.steppers.fme7(writes);
       if (lr.steppers.kss) { const k = lr.steppers.kss(writes); ex.kssPsg[f] = k.psg; ex.kssScc[f] = k.scc; ex.kssOpll[f] = k.opll; ex.kssDac[f] = k.dac; ex.opl[f] = k.opl; }
       if (lr.steppers.gb) ex.gbsApu[f] = lr.steppers.gb(writes);
+      if (lr.steppers.pce) ex.hesApu[f] = lr.steppers.pce(writes);
       const channels = extractChannels(st.regSnapshots[f], ex, f, this._chips);
       lr.builder.feed(channels, f);
       // 打点(DPCM 等の drumKey つき)が新しく始まったらドラム区画を組み直す(区画が無いと打点は描かれない。
@@ -10729,8 +10744,9 @@
       if (f === st.totalFrames) return;
       st.writeLog.length = f; st.regSnapshots.length = f; st.totalFrames = f;
       const ex = this._extraSnaps;
-      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu']) if (ex[k]) ex[k].length = f;
+      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu']) if (ex[k]) ex[k].length = f;
       if (lr.steppers.gb) lr.steppers.gb = makeGbStepper();
+      if (lr.steppers.pce) lr.steppers.pce = makePceStepper();
       if (lr.steppers.vrc7) lr.steppers.vrc7 = makeVrc7Stepper();
       if (lr.steppers.n163) lr.steppers.n163 = makeN163Stepper();
       if (lr.steppers.fme7) lr.steppers.fme7 = makeFme7Stepper();

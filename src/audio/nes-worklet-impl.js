@@ -1,7 +1,7 @@
 /*
  * NES / MSX 本体を AudioWorklet の中で回す (nes-worklet バンドルの本体。DESIGN-CAPTURE.md §6/§7 段階 6b、DESIGN-MSX-CAPTURE.md §6 段階 7a)
  *
- * 本体クラスは load メッセージの machine('nes' | 'msx' | 'gb')で選ぶ(NesConsole / MsxConsole / GbConsole。外形は同じ)。State/Rewind も機種で選ぶ。
+ * 本体クラスは load メッセージの machine('nes' | 'msx' | 'gb' | 'pce')で選ぶ(NesConsole / MsxConsole / GbConsole / PceConsole。外形は同じ)。State/Rewind も機種で選ぶ。
  * GB(2026-11-13、DESIGN-GB-CAPTURE.md 段階 8c)は音がステレオ(本体の stereo が真なら左右別に出す)。
  * 以下「NES」「nes」とあるのは本体一般のこと(変数名は NES 時代のまま)。MSX だけの物: load の msx オプション(機種/BIOS/マッパー)、
  * key/keyReleaseAll(PC のキー → MSX キーボード)、rwframe の palette(逆再生の 8bit 画面の色)、loaded の chips。
@@ -45,7 +45,7 @@
       try {
         switch (m.type) {
           case 'load': {
-            const machine = m.machine === 'msx' ? 'msx' : m.machine === 'gb' ? 'gb' : 'nes';
+            const machine = m.machine === 'msx' ? 'msx' : m.machine === 'gb' ? 'gb' : m.machine === 'pce' ? 'pce' : 'nes';
             let nes, info;
             if (machine === 'msx') {
               // MSX: ROM(null なら BIOS だけで起動)+ 機種/BIOS(main 32K・sub/logo 16K、ArrayBuffer で届く)/マッパー種別
@@ -66,6 +66,9 @@
                 if (m.gb && m.gb.shades) nes.ppu.setShades(m.gb.shades);
                 info = MML.Emu.GbConsole.describe(nes);
               }
+            } else if (machine === 'pce') {
+              nes = new MML.Emu.PceConsole(new Uint8Array(m.rom), { region: (m.pce && m.pce.region) || 'auto' });
+              info = MML.Emu.PceConsole.describe(nes);
             } else {
               nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });
               info = MML.Emu.INES.describe(nes.rom);
@@ -75,8 +78,8 @@
             if (m.battery && nes.hasBattery) nes.setBattery(new Uint8Array(m.battery)); // 前回のセーブ(主スレッドが IndexedDB から)
             this.nes = nes;
             this.machine = machine;
-            this.State = machine === 'msx' ? MML.Emu.MsxState : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState;
-            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbRewind : MML.Emu.GbRewind) : MML.Emu.NesRewind;
+            this.State = machine === 'msx' ? MML.Emu.MsxState : machine === 'pce' ? MML.Emu.PceState : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState;
+            const Rewind = machine === 'msx' ? MML.Emu.MsxRewind : machine === 'pce' ? MML.Emu.PceRewind : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbRewind : MML.Emu.GbRewind) : MML.Emu.NesRewind;
             this.rewind = Rewind ? new Rewind(nes) : null;
             this.dcX = 0; this.dcY = 0; this.dcX2 = 0; this.dcY2 = 0;
             this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, tilt: !!nes.hasTilt, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH(), clock: nes.clockHz || 0, sgb: nes.isSgb ? nes.revision : 0 });

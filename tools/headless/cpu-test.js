@@ -1,5 +1,5 @@
 /*
- * CPU命令テスト CLI (6502 / Z80 / SM83 / SPC700)
+ * CPU命令テスト CLI (6502 / Z80 / SM83 / SPC700 / 65816 / HuC6280)
  *
  *   node tools/headless/cpu-test.js 6502              代表命令だけ(既定)
  *   node tools/headless/cpu-test.js 6502 --all        全256命令
@@ -30,13 +30,25 @@ const DEFAULT_OPCODES = {
   sm83: ['00', '01', '09', '12', '27', '34', '3a', '76', '80', '90', 'a8', 'b0', 'c3', 'cd', 'c9', 'e8', 'f8', 'cb 06', 'cb 26', 'cb 46'],
   // 65816 は 1 本 6MB ある。既定は代表だけ(ネイティブ)。全部は --all(512 本、約 3.2GB)、--group n / e で片方だけ
   '65816': ['a9.n', 'a5.n', 'b5.n', 'ad.n', 'bd.n', 'b1.n', 'a1.n', 'a7.n', 'b7.n', 'a3.n', 'b3.n', '69.n', 'e9.n', '06.n', '1e.n', '20.n', '22.n', '60.n', '6b.n', '54.n', 'fb.n', 'c2.n', 'a9.e', '20.e'],
+  // huc6280 のベクタは Mesen 2 が作った物(=Mesen と同じ動きかの確認)。サイクルごとのバスの動きまで見る
+  huc6280: ['00', '03', '20', '40', '43', '53', '54', '61', '69', '71', '72', '73', '7c', '83', '87', '8f', 'a9', 'b3', 'e9', 'f3'],
   spc700: ['00', '04', '10', '1c', '28', '30', '3f', '48', '5d', '65', '78', '7a', '8f', '9c', 'af', 'ba', 'c4', 'cf', 'da', 'e4'],
 };
 
 async function fetchVector(spec, cpuName, file) {
   const cachePath = path.join(CACHE_DIR, cpuName, file.localPath);
   if (fs.existsSync(cachePath)) {
+    if (spec.decode) return { json: spec.decode(fs.readFileSync(cachePath)), cached: true };
     return { json: JSON.parse(fs.readFileSync(cachePath, 'utf8')), cached: true };
+  }
+  if (spec.decode) {
+    // バイナリのベクタ(huc6280)。落として控え、spec.decode で JSON と同じ形にする
+    const res = await fetch(spec.vectorBase + file.path);
+    if (!res.ok) return { missing: true, status: res.status };
+    const buf = Buffer.from(await res.arrayBuffer());
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    fs.writeFileSync(cachePath, buf);
+    return { json: spec.decode(buf), cached: false, bytes: buf.length };
   }
   const res = await fetch(spec.vectorBase + file.path);
   if (!res.ok) return { missing: true, status: res.status };
@@ -72,7 +84,7 @@ async function testCpu(cpuName, opt) {
 
   if (!files.length) throw new Error('対象命令が0件');
 
-  let okSum = 0, totalSum = 0, downloaded = 0, dlBytes = 0, missing = 0;
+  let okSum = 0, totalSum = 0, downloaded = 0, dlBytes = 0, missing = 0, cutSum = 0, zDiffSum = 0;
   const failed = {};
 
   for (let i = 0; i < files.length; i++) {
@@ -89,7 +101,7 @@ async function testCpu(cpuName, opt) {
     if (!v.cached) { downloaded++; dlBytes += v.bytes; }
 
     const r = runner.runOne(v.json, per);
-    okSum += r.pass; totalSum += r.total;
+    okSum += r.pass; totalSum += r.total; cutSum += r.cut || 0; zDiffSum += r.zDiff || 0;
     if (r.pass === r.total) process.stderr.write('.');
     else { process.stderr.write('X'); failed[f.name] = r; }
     if ((i + 1) % 64 === 0) process.stderr.write(` ${i + 1}/${files.length}\n`);
@@ -100,16 +112,19 @@ async function testCpu(cpuName, opt) {
   console.log(`\n[${cpuName}] ${spec.label}`);
   console.log(`  命令   : ${files.length}${missing ? ` (ベクタ無し ${missing})` : ''}`);
   console.log(`  ケース : ${okSum.toLocaleString()} / ${totalSum.toLocaleString()} pass`);
+  if (cutSum) console.log(`  うち記録が途中で切られたケース ${cutSum.toLocaleString()}(メモリの中身と A/X/Y は見ていない)`);
+  if (zDiffSum) console.log(`  比べていない物: TSB/TRB の Z フラグ(ベクタと違った ${zDiffSum.toLocaleString()} 件。手元の Mesen の実物に合わせてある)`);
   console.log(`  DL     : ${downloaded} ファイル (${(dlBytes / 1048576).toFixed(1)} MB)${downloaded ? '' : ' ※全てキャッシュ'}`);
   console.log(`  結果   : ${failCount === 0 ? '✅ 全命令 PASS' : `❌ ${failCount} 命令で失敗`}`);
 
   for (const [name, r] of Object.entries(failed)) {
-    console.log(`\n  --- ${name}: ${r.total - r.pass}/${r.total} 失敗 (cyc:${r.cycBad} state:${r.stateBad} ram:${r.ramBad}${r.imeBad ? ` ime:${r.imeBad}` : ''})`);
+    console.log(`\n  --- ${name}: ${r.total - r.pass}/${r.total} 失敗 (cyc:${r.cycBad} state:${r.stateBad} ram:${r.ramBad}${r.busBad ? ` bus:${r.busBad}` : ''}${r.imeBad ? ` ime:${r.imeBad}` : ''})`);
     for (const f of r.fails) {
       console.log(`      ${f.name}`);
       console.log(`        exp ${JSON.stringify(f.exp)}`);
       console.log(`        got ${JSON.stringify(f.got)}`);
       if (f.ini) console.log(`        ini ${JSON.stringify(f.ini)}`);
+      if (f.bus) console.log(`        bus ${f.bus}`);
     }
   }
   return failCount;
