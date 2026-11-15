@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-15 08:48:47
+ * Built by tools/build-capture-workers.ps1 at 2026-11-15 09:53:07
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-15 08:48:47';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-15 09:53:07';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -20296,8 +20296,27 @@
         this.afMs = 0; this.afBlocks = 0;
       }
     }
+    // 実測(1 秒ごとに主スレッドへ): busy = process の中にいた時間の割合(1 に近いと間に合っていない)、rate = 音の進み ÷ 実時間(1 が正常。
+    // 1 を大きく超えるなら端末が音を実時間より速く引いている、下回るなら止まり止まり)、frames = その間に本体が作ったフレーム数、span = 測った実時間(ms)。
+    // 2026-11-15、Android で「FPS が 100 を超え、音と入力が乱れる」の切り分け用。時計は Date.now(Worklet には performance が無い)
     process(inputs, outputs) {
       if (this.dead) return false;
+      const t0 = Date.now();
+      const r = this.processMain(inputs, outputs);
+      const t1 = Date.now();
+      if (!this.dgT) { this.dgT = t0; this.dgBusy = 0; this.dgCalls = 0; this.dgFrame0 = this.nes ? this.nes.frameCount : 0; }
+      else {
+        this.dgBusy += t1 - t0; this.dgCalls++;
+        const span = t1 - this.dgT;
+        if (span >= 1000) {
+          const fc = this.nes ? this.nes.frameCount : 0;
+          this.port.postMessage({ type: 'diag', busy: this.dgBusy / span, rate: this.dgCalls * 128 / sampleRate * 1000 / span, frames: fc - this.dgFrame0, span, speed: this.speed });
+          this.dgT = t1; this.dgBusy = 0; this.dgCalls = 0; this.dgFrame0 = fc;
+        }
+      }
+      return r;
+    }
+    processMain(inputs, outputs) {
       const out = outputs[0] && outputs[0][0];
       if (!out) return true;
       if (this.nes && this.rw) {

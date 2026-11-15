@@ -1537,12 +1537,22 @@
     lampTimer = next ? setTimeout(() => { lampTimer = 0; for (const el of lampsEl.children) el.classList.remove('on'); }, next - now + 10) : 0;
   }
   function tickFps(now) {
-    if (now - fpsMs >= 1000) { fps = fpsCount; fpsCount = 0; fpsMs = now; updateStatus(); }
+    // 経過時間で割る(数をそのまま出すと、画面側が詰まって 1 秒より長く空いた時に実際より大きく出る)
+    if (now - fpsMs >= 1000) { fps = fpsMs ? Math.round(fpsCount * 1000 / (now - fpsMs)) : fpsCount; fpsCount = 0; fpsMs = now; updateStatus(); }
   }
   function updateStatus() {
     if (!statusEl || flashTimer) return; // 一時表示(ステート保存/読込の結果)の間は上書きしない
     const mode = node ? T('音: AudioWorklet') : T('音なし(主スレッド)');
-    statusEl.textContent = `${fps} fps · ${mode}` + (underruns ? ' · ' + T('音切れ {n} 回', { n: underruns }) : '') + (hasBattery ? ' · ' + T('セーブ') : '') + (liveActive ? ' · ' + T('ロール') : '');
+    // 実測(Worklet が 1 秒ごとに送る diag): 本体が実際に進んだ速さ(実時間比)と、音スレッドの負荷。異常な時は理由が分かるように出す
+    let dg = '';
+    if (node && diag) {
+      const emu = Math.round(diag.frames * 1000 / diag.span / curFps() / (diag.speed || 1) * 100);
+      dg = ' · ' + T('負荷 {n}%', { n: Math.round(diag.busy * 100) });
+      if (Math.abs(emu - 100) > 5) dg += ' · ' + T('本体の速さ {n}%', { n: emu });
+      if (Math.abs(diag.rate - 1) > 0.05) dg += ' · ' + T('音の進み {n}%', { n: Math.round(diag.rate * 100) });
+    }
+    if (node && actx && actx.state !== 'running') dg += ' · ' + T('音の出口が止まっています({s})。画面をタップしてください', { s: actx.state });
+    statusEl.textContent = `${fps} fps · ${mode}` + dg + (underruns ? ' · ' + T('音切れ {n} 回', { n: underruns }) : '') + (hasBattery ? ' · ' + T('セーブ') : '') + (liveActive ? ' · ' + T('ロール') : '');
     if (pendingFds || pendingMsx) return; // BIOS 待ちの案内を消さない
     const chips = machine === 'gb' ? 'GB APU' : machine === 'msx' ? msxChips.map((c) => c.toUpperCase()).join('+') : ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
     statusEl.title = (chips ? chips + ' ' : '') + (workletState === 'failed' ? T('AudioWorklet が使えないので主スレッドで実行しています(音は出ません)') : '') +
@@ -1582,6 +1592,8 @@
         workletState = 'ok';
       }
       stopWorkletNode();
+      diag = null;
+      if (actxWatched !== actx) { actxWatched = actx; actx.addEventListener('statechange', () => updateStatus()); }
       node = new AudioWorkletNode(actx, 'nes-console', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] }); // 2ch: GB はステレオ。NES/MSX は同じ音を左右へ
       node.port.onmessage = (e) => onWorkletMessage(e.data || {});
       gain = actx.createGain(); gain.gain.value = NSF_GAIN;
@@ -1607,7 +1619,9 @@
     if (gain) { try { gain.disconnect(); } catch (e) { /* ignore */ } gain = null; }
     if (limiter) { try { limiter.disconnect(); } catch (e) { /* ignore */ } limiter = null; }
   }
-  function resumeAudio() { if (actx && actx.state === 'suspended' && actx.resume) actx.resume().catch(() => {}); }
+  // 'suspended' のほか、Android の Chrome が音の割り込み(通話、他のアプリの音)で入れる 'interrupted' からも戻す
+  function resumeAudio() { if (actx && actx.state !== 'running' && actx.state !== 'closed' && actx.resume) actx.resume().catch(() => {}); }
+  let diag = null, actxWatched = null;
   function onWorkletMessage(m) {
     switch (m.type) {
       case 'frame': {
@@ -1625,6 +1639,7 @@
       case 'rwframe': blitIndex(new Uint8Array(m.idx), m.palette ? new Uint32Array(m.palette) : null, m.w, m.h); onReverseFrame(m.seq); break;
       case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; if (m.chips && machine === 'msx') msxChips = m.chips.slice(); if (m.fps > 0) msxFps = m.fps; if (machine === 'gb') { if (m.clock) gbClock = m.sgb ? Math.round(m.clock) : 0; gbTilt = !!m.tilt; if (gbTilt) canvas.title = T('マウスを画面の上で動かすと傾きます(スマホは本体の傾き)'); } fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
       case 'battery': onBatteryMessage(m); break;
+      case 'diag': diag = m; break;
       case 'barcode': onGbBarcodeResult(!!m.ok); break;
       case 'diskAdded': fdsSides = m.count | 0; fdsSide = m.index | 0; updateDiskUi(); break;
       case 'state': saveStateRecord(m.state); break;
