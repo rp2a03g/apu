@@ -1602,7 +1602,8 @@
     }
   }
   function stopWorkletNode() {
-    if (node) { try { node.port.onmessage = null; node.disconnect(); } catch (e) { /* ignore */ } node = null; }
+    // dispose: 切るだけでは Worklet の中の本体が動き続ける(nes-worklet-impl.js の 'dispose' の説明)。必ず止めさせる
+    if (node) { try { node.port.onmessage = null; node.port.postMessage({ type: 'dispose' }); node.disconnect(); } catch (e) { /* ignore */ } node = null; }
     if (gain) { try { gain.disconnect(); } catch (e) { /* ignore */ } gain = null; }
     if (limiter) { try { limiter.disconnect(); } catch (e) { /* ignore */ } limiter = null; }
   }
@@ -2126,6 +2127,7 @@
   }
 
   // 中身の種類(imageDetect.js の kind)→ 開き方。iNES/FDS は open() の本体(NES)で開く
+  let openChain = Promise.resolve();
   const OPENERS = {
     'gb': (bytes, name) => openGb(bytes, name),
     'sgb-bios': (bytes, name) => { storeSgbBiosFile(bytes, name); return null; }, // スーパーゲームボーイの BIOS: 控えるだけ
@@ -2165,7 +2167,9 @@
       return first ? NesScreen.open(first.bytes, first.name) : null;
     },
     // ROM(iNES のバイト列)を読み込んで表示・開始する。失敗は例外(マッパー未対応など)
-    async open(bytes, name) {
+    // 開く/閉じるは 1 つずつ順に(途中に待ちがいくつもあり、重なると前の分の続きが後の分の状態を触る。スマホは読み込みが遅く重なりやすい)
+    open(bytes, name) { const p = openChain.then(() => NesScreen._open(bytes, name)); openChain = p.catch(() => {}); return p; },
+    async _open(bytes, name) {
       if (!ensureDom()) throw new Error('win-nes がありません');
       // 中身で見分けて(MML.Emu.Image、imageDetect.js)、開き方の表で振り分ける。表に無い物(iNES/FDS/不明)はこの下の NES の経路
       const img = MML.Emu.Image && MML.Emu.Image.detect ? MML.Emu.Image.detect(bytes, name) : null;
@@ -2222,7 +2226,8 @@
       canvas.focus();
       return ok ? null : nes;
     },
-    async close() {
+    close() { const p = openChain.then(() => NesScreen._close()); openChain = p.catch(() => {}); return p; },
+    async _close() {
       liveEnd('end');
       rewindHoldEnd();
       if (nes && hasBattery && nes.batteryDirty) { handleBatteryBlob(nes.getBattery()); nes.clearBatteryDirty(); }

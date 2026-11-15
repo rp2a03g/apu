@@ -41,6 +41,7 @@
       this.port.onmessage = (e) => this.onMessage(e.data || {});
     }
     onMessage(m) {
+      if (this.dead) return;
       try {
         switch (m.type) {
           case 'load': {
@@ -154,6 +155,9 @@
             break;
           }
           case 'pause': this.paused = !!m.on; break;
+          // 片付け(主スレッドがノードを捨てる時)。disconnect しただけの AudioWorkletNode は process が呼ばれ続ける(Chrome で実測: 切った後も毎秒 375 回)。
+          // 本体を手放し、process が false を返して止まる。これが無いと、開き直すたびに前の本体が音スレッドの中で動き続けて積み重なる
+          case 'dispose': this.dead = true; this.nes = null; this.rewind = null; this.rw = null; this.ffTmp = null; break;
           case 'diskFast': this.diskFast = !!m.on; break;
           case 'speed': this.speed = Math.max(1, Math.min(8, m.n | 0)); break; // 早送り: 1 回の process で speed 回ぶん進める(音は最後の 1 回ぶんだけ出す)
           case 'saveState': // ステート保存: 木を写して主スレッドへ(構造化複製。IndexedDB に置くのは主スレッド)
@@ -249,6 +253,7 @@
       }
     }
     process(inputs, outputs) {
+      if (this.dead) return false;
       const out = outputs[0] && outputs[0][0];
       if (!out) return true;
       if (this.nes && this.rw) {

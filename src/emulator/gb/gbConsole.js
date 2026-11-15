@@ -303,8 +303,8 @@
         if (busOf(this.dmaSrc) === busOf(addr)) return this.dmaByte;
       }
       // モード 3 の VRAM、モード 2/3 の OAM は PPU が使っていて読めない
-      if (addr >= 0x8000 && addr < 0xA000) { if (this.ppu.vramBlocked()) return 0xFF; }
-      else if (addr >= 0xFE00 && addr < 0xFEA0) { if (this.ppu.oamBlocked()) return 0xFF; }
+      if (addr >= 0x8000 && addr < 0xA000) { if (this.ppu.vramReadBlocked()) return 0xFF; }
+      else if (addr >= 0xFE00 && addr < 0xFEA0) { if (this.ppu.oamReadBlocked()) return 0xFF; }
       return this._busRead(addr);
     }
     _busRead(addr) {

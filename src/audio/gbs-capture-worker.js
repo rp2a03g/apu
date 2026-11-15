@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-14 14:07:48
+ * Built by tools/build-capture-workers.ps1 at 2026-11-15 08:48:47
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-14 14:07:48';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-15 08:48:47';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -1217,10 +1217,15 @@
  *   - 画素はモード 3 の間、時間の進みに合わせて左から描く(本体は 4T ずつ進むので 4 画素刻み)。行の途中で
  *     SCX/SCY/LCDC/パレット/ウィンドウを書き換えるとその位置から効く。スプライトの遅れによる画素位置のずれまでは追わない
  *   - モード 2/3 の間の OAM、モード 3 の間の VRAM は CPU から触れない(読むと $FF、書きは捨てる)
- *   - 153 行目は 4T で LY=0 になる。LCD を点けた直後の 1 行目はモード 2 が無く 4T 短い。LCD が消えている間 LY=LYC の旗は動かない
+ *   - 153 行目は 4T で LY=0 になる。LCD が消えている間 LY=LYC の旗も STAT の割り込み線も動かない(消す前に上がっていた線は上がったまま)
+ *   - LY の読み出し値は行末の 452T 目に次の行へ進み、同時に LY=LYC の旗が落ち、次の行の頭(4T 後)に比べ直す
+ *   - LCD を点けた直後の 1 行目: 0T 目から数え、STAT はモード 3 が出るまで 0、OAM はモード 3 の間だけ閉じる
+ *   - 読みは書きより早く閉じる: OAM の読みは行末の 452T 目から(次の行のモード 2 の 4T 前)、VRAM の読みは 76T 目から(モード 3 の 4T 前)。
+ *     OAM の書きはモード 2 と 3 の境目の 4T(76T 目)だけ通る
+ *     (ここまで 2026-11-15、mooneye の lcdon_timing / lcdon_write_timing / stat_lyc_onoff に合わせた。読み書きの時刻を記録して 1 項目ずつ)
  *   CGB(段階 8d): VRAM 2 バンク、BG の属性(バンク 1 のマップ: パレット/タイルのバンク/反転/優先)、パレット 8+8 本(15bit 色)、
  *     スプライトの優先は OAM 順、LCDC bit0 は「BG がスプライトより前に出られるか」。白黒の frameIdx は 階調 0-3 + 色の組(BG 0 / OBJ0 4 / OBJ1 8)。frameIdx はパレットの番号(BG 0-31、OBJ 32-63)
- *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)、OAM 破壊バグ
+ *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)、OAM 破壊バグ(初代の実機の不具合。blargg oam_bug の 6 本が落ちる。避けて作られた市販ソフトには影響しない)
  *
  * 参考: Pan Docs "Rendering" "STAT" "OAM"。細部は mooneye の acceptance/ppu と dmg-acid2 で確かめる(tools/headless/gb-testroms.js)。
  */
@@ -1284,7 +1289,17 @@
       if (sel & 0x80) { if (which) this.ocps = 0x80 | ((i + 1) & 0x3F); else this.bcps = 0x80 | ((i + 1) & 0x3F); }
     }
     // CPU から見て触れない間(本体のバスが見る)
-    oamBlocked() { return (this.lcdc & 0x80) !== 0 && this.line < H && !this.firstLine && (this.mode === 2 || this.mode === 3); }
+    // 読みは書きより 4T 早く閉じる: 次の行のモード 2 が STAT に出る 4T 前(行末の 452T 目)から、点灯直後の 1 行目はモード 3 の間だけ(mooneye lcdon_timing)
+    oamReadBlocked() {
+      if (!(this.lcdc & 0x80)) return false;
+      if (this.dot >= 452 && (this.line < H - 1 || this.line === 153)) return true;
+      if (this.line >= H) return false;
+      if (this.firstLine) return this.mode === 3;
+      return this.mode === 2 || this.mode === 3;
+    }
+    oamBlocked() { return (this.lcdc & 0x80) !== 0 && this.line < H && (this.mode === 3 || (this.mode === 2 && !this.firstLine && this.dot < 76)); } // モード 2 と 3 の境目の 4T(76T 目)は書ける(mooneye lcdon_write_timing)
+    // VRAM の読みも、モード 3 が STAT に出る 4T 前(76T 目)から閉じる(点灯直後の 1 行目は除く)
+    vramReadBlocked() { return (this.lcdc & 0x80) !== 0 && this.line < H && (this.mode === 3 || (this.mode === 2 && !this.firstLine && this.dot >= 76)); }
     vramBlocked() { return (this.lcdc & 0x80) !== 0 && this.line < H && this.mode === 3; }
 
     readReg(addr) {
@@ -1314,7 +1329,7 @@
             this.frame.fill(this.shades[0]); this.frameIdx.fill(0);
             this._stat();
           } else if (!was && this.on) { // 点灯: 1 行目は 4T 短く、モード 2 の間も STAT はモード 0 を返す(OAM にも触れる)
-            this.ly = 0; this.line = 0; this.dot = 4; this.mode = 2; this.firstLine = true;
+            this.ly = 0; this.line = 0; this.dot = 0; this.mode = 2; this.firstLine = true;
             this.winLine = 0; this.wyHit = false; this.px = 0;
             this.lycFlag = this.lyc === 0;
             this._stat();
@@ -1339,8 +1354,9 @@
 
     // STAT の割り込み線は各要因の OR。立ち上がりでだけ割り込む(要因が重なっている間は次が出ない)
     _stat() {
+      if (!this.on) return; // 消えている間は割り込み線も止まったまま(消す前に上がっていれば上がったまま。点けた時に同じ要因が立っていても新しい立ち上がりにならない。mooneye stat_lyc_onoff)
       const e = this.statEn, m = this.firstLine && this.mode === 2 ? 0 : this.mode;
-      const line = this.on && (((e & 0x40) && this.lycFlag) || ((e & 0x20) && m === 2) || ((e & 0x10) && m === 1) || ((e & 0x08) && m === 0) ||
+      const line = (((e & 0x40) && this.lycFlag) || ((e & 0x20) && m === 2) || ((e & 0x10) && m === 1) || ((e & 0x08) && m === 0) ||
         ((e & 0x20) && this.line === H && this.dot < 4)); // VBlank の頭ではモード 2 の要因でも割り込む(実機の癖)
       if (line && !this.statLine) this.con.requestIrq(1);
       this.statLine = !!line;
@@ -1369,15 +1385,14 @@
         else if (d === 12) { this.lycFlag = this.lyc === 0; this._stat(); }
       } else if (d === 4 && this.line === H && this.statLine) this._stat(); // VBlank 頭だけのモード 2 要因を下ろす
       // LY の読み出し値は行の終わりの 4T 前に次の行へ進む(DMG。mooneye の hblank_ly_scx_timing が見る)
-      if (d === 452 && this.line < 153) this.ly = this.line + 1;
+      if (d === 452 && this.line < 153) { this.ly = this.line + 1; if (this.lycFlag) { this.lycFlag = false; this._stat(); } }
       // 新しい行の LY=LYC は行頭の 4T 後に立つ
-      if (d === 4 && !this.firstLine) { this.lycFlag = this.line === this.lyc; this._stat(); }
       if (d >= 456) {
         this.dot = 0;
         this.line++;
         if (this.line === 154) { this.line = 0; this.winLine = 0; this.wyHit = false; }
         if (this.line !== 0) this.ly = this.line;
-        if (this.line !== 0) this.lycFlag = false; // 行頭の 4T は比較が外れる(0 行目は 153 行目の途中から LY=0 として比べている)
+        if (this.line !== 0) this.lycFlag = this.line === this.lyc; // 行頭の 4T は比較が外れる(0 行目は 153 行目の途中から LY=0 として比べている)
         if (this.line === H) { this.mode = 1; this.vblankStarted = true; this.con.requestIrq(0); }
         else if (this.line < H) { this.mode = 2; this.px = 0; }
         this._stat();
@@ -1401,16 +1416,19 @@
       const winOnLine = (lcdc & 0x20) && this.wyHit && this.wx <= 166;
       let len = 172 + this.scxFine + (winOnLine ? 6 : 0);
       // スプライトの遅れ: 左端の画素が乗る BG/ウィンドウのタイルごとに 1 回だけ「そのタイルの残り画素 − 2(0 未満は 0)」、どのスプライトにも一律 6
-      let lastTile = -999;
+      // 遅れの合計は 4T 単位に切り捨てて足す: mooneye intr_2_mode0_timing_sprites の 53 通り(ROM の中の表)が、Pan Docs の式の合計を 4 で割って切り捨てた M サイクル数と
+      // 全部一致する(60〜63T → 15、64〜67T → 16)。SCX の端数(切り上げで見える。hblank_ly_scx_timing)と重なった時の本当の端数は分からない
+      let lastTile = -999, spr = 0;
       for (let i = 0; i < n; i++) {
         const ox = oam[sorted[i] * 4 + 1];
         if (ox >= 168) continue;
         let tile, right;
         if (winOnLine && ox >= this.wx + 1) { const wxp = ox - (this.wx + 1); tile = 0x1000 + (wxp >> 3); right = 7 - (wxp & 7); }
         else { const bx = (ox + this.scx) & 0xFF; tile = bx >> 3; right = 7 - (bx & 7); }
-        if (tile !== lastTile) { lastTile = tile; len += Math.max(0, right - 2); }
-        len += 6;
+        if (tile !== lastTile) { lastTile = tile; spr += Math.max(0, right - 2); }
+        spr += 6;
       }
+      len += spr & ~3;
       this.mode3End = 80 + len;
       this.mode = 3; this.px = 0; this.winActive = false; this.winX = 0;
       this._stat();
@@ -2003,8 +2021,8 @@
         if (busOf(this.dmaSrc) === busOf(addr)) return this.dmaByte;
       }
       // モード 3 の VRAM、モード 2/3 の OAM は PPU が使っていて読めない
-      if (addr >= 0x8000 && addr < 0xA000) { if (this.ppu.vramBlocked()) return 0xFF; }
-      else if (addr >= 0xFE00 && addr < 0xFEA0) { if (this.ppu.oamBlocked()) return 0xFF; }
+      if (addr >= 0x8000 && addr < 0xA000) { if (this.ppu.vramReadBlocked()) return 0xFF; }
+      else if (addr >= 0xFE00 && addr < 0xFEA0) { if (this.ppu.oamReadBlocked()) return 0xFF; }
       return this._busRead(addr);
     }
     _busRead(addr) {

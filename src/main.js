@@ -7480,7 +7480,7 @@
     sgbSpcLiveAt = performance.now();
     sgbSpcShow(st.regs, (ch) => ({ env: st.env[ch], envMode: st.mode[ch] }), 0);
   }
-  setInterval(() => {
+  const sgbSpcTimer = setInterval(() => {
     const sp = vgmActivePlayer, p = sp && sp.player, a = p && p.adapterById && p.adapterById.sgbspc;
     if (a && a.loaded && sp.isPlaying && !spcActivePlayer) {
       const dsp = a.spc.dsp;
@@ -7490,6 +7490,7 @@
       keyboardDisplay.updateSpcVoices([]); sgbSpcShown = false;
     }
   }, 80);
+  if (sgbSpcTimer && sgbSpcTimer.unref) sgbSpcTimer.unref(); // node(ヘッドレスの道具)が終わらない原因にならないように
 
   // 先読みキャプチャが残した「フレーム末尾のDSP状態の写し」(SPC2MML.captureAsync の stateLog)。
   // 時刻 t のボイス一覧を DSP を動かさずに引く(動画書き出し src/video/videoExport.js が使う)
