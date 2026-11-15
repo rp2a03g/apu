@@ -98,6 +98,21 @@ function runOne(file) {
   try { gb = new MML.Emu.GbConsole(readBytes(file), { model }); } catch (e) { return { rel, suite, pass: false, note: '起動できない: ' + e.message }; }
   const maxFrames = suite === 'blargg' ? 4200 : suite === 'acid2' ? 30 : 1200;
   let pass = null, note = '', f = 0;
+  // blargg oam_bug の 7-timing_effect(単体の ROM): 結果の文字(壊れた OAM の表 19 個ぶん、約 10.5K)を SRAM の $A004〜 へためる処理に上限が無く、
+  // 8K を超えると $C000 からの自分のコードを上書きして暴走する(テスト ROM の側の作り。まとめ ROM の oam_bug.gb では起きない)。
+  // ためる処理($C3E7、先頭が PUSH HL)だけ飛ばして最後まで走らせ、終了処理($C35A)に入った時の A(0 = 内蔵の CRC が一致)で判定する
+  if (/7-timing_effect.gb$/.test(rel)) {
+    const c = gb.cpu;
+    for (; f < 4200 && pass === null; f++) {
+      gb._frameFlag = false;
+      for (let g = 0; !gb._frameFlag && g < 200000; g++) {
+        if (c.pc === 0xC3E7 && gb._busRead(0xC3E7) === 0xE5) { c.pc = c.pop16(); continue; }
+        if (c.pc === 0xC35A && f > 30) { pass = c.a === 0; if (!pass) note = 'CRC が合わない(code ' + c.a + ')'; break; }
+        gb.step();
+      }
+    }
+    return { rel, suite, pass, note: pass === null ? '終わらなかった' : note, frames: f };
+  }
   for (; f < maxFrames && pass === null; f++) {
     gb.runFrame();
     if (suite === 'mooneye') {

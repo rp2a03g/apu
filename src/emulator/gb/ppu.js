@@ -18,7 +18,7 @@
  *     (ここまで 2026-11-15、mooneye の lcdon_timing / lcdon_write_timing / stat_lyc_onoff に合わせた。読み書きの時刻を記録して 1 項目ずつ)
  *   CGB(段階 8d): VRAM 2 バンク、BG の属性(バンク 1 のマップ: パレット/タイルのバンク/反転/優先)、パレット 8+8 本(15bit 色)、
  *     スプライトの優先は OAM 順、LCDC bit0 は「BG がスプライトより前に出られるか」。白黒の frameIdx は 階調 0-3 + 色の組(BG 0 / OBJ0 4 / OBJ1 8)。frameIdx はパレットの番号(BG 0-31、OBJ 32-63)
- *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)、OAM 破壊バグ(初代の実機の不具合。blargg oam_bug の 6 本が落ちる。避けて作られた市販ソフトには影響しない)
+ *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)。OAM 破壊バグは本体コア(gbConsole.js の「OAM 破壊」)にある
  *
  * 参考: Pan Docs "Rendering" "STAT" "OAM"。細部は mooneye の acceptance/ppu と dmg-acid2 で確かめる(tools/headless/gb-testroms.js)。
  */

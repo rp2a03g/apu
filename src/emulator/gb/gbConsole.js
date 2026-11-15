@@ -37,6 +37,7 @@
       this.model = opts.model === 'auto' ? (this.cart.header.cgb ? 'cgb' : 'dmg') : (opts.model || 'dmg');
       // カラー本体に白黒専用ソフトを挿した時: カラーの機能は閉じて白黒として動き、色だけ本体が付ける(BG/OBJ0/OBJ1 に別の色。ppu.setShades)
       this.dmgOnCgb = this.model === 'cgb' && !this.cart.header.cgb;
+      this.oamBug = !(opts && opts.oamBug === false); // 初代の OAM 破壊を再現するか(既定はする。下の「OAM 破壊」)
       this.cgb = this.model === 'cgb' && !this.dmgOnCgb;
       this.lcdAlwaysOn = !!opts.lcdAlwaysOn;
       this.ppu = new Emu.GbPpu(this);
@@ -291,6 +292,43 @@
       if (this.onFrame) this.onFrame();
     }
 
+    // ── OAM 破壊(初代の本体の不具合。blargg oam_bug)──
+    // PPU が OAM を走査している間(モード 2)に、CPU が $FE00-$FEFF を読み書きするか、16bit の増減器がその範囲の番地を扱うと、
+    // PPU がその時たどっていた 8 バイトの行が、手前の行との混ぜ物で壊れる。式は Pan Docs "OAM Corruption Bug"。
+    // 行の位置: 行頭(このコアの数え方で前の行の 452T 目)は 0 行目=壊れない、以後 4T ごとに 1 行ずつ進む(0T 目が 1 行目)
+    // 確かめ(2026-11-15): blargg oam_bug の 8 本+まとめ ROM が全部通る(7 番は内蔵の CRC が一致)。POP は「読み+増加」を 1 回目だけにしても 2 回ともにしても通る(2 回ともを採用)。
+    // 実ソフト(白黒 478 本、各 900 フレーム)では 19 本で破壊が起き、うち画面に出たのは 4 本で計 10 フレーム(1 フレームだけスプライトが乱れる)。実機と同じ場面で同じに出るかは未確認
+    _oamBugRow() {
+      const p = this.ppu;
+      if (this.cgb || !this.oamBug || !(p.lcdc & 0x80) || p.firstLine) return -1;
+      if (p.dot >= 452) return (p.line < 143 || p.line === 153) ? 0 : -1;
+      if (p.line < 144 && p.mode === 2) return ((p.dot >> 2) + 1) * 8;
+      return -1;
+    }
+    oamBugWrite() {
+      const r = this._oamBugRow(); if (r < 8 || r >= 0xA0) return;
+      const o = this.ppu.oam, a = o[r] | (o[r + 1] << 8), b = o[r - 8] | (o[r - 7] << 8), c = o[r - 4] | (o[r - 3] << 8);
+      const v = ((a ^ c) & (b ^ c)) ^ c;
+      o[r] = v & 0xFF; o[r + 1] = v >> 8;
+      for (let i = 2; i < 8; i++) o[r + i] = o[r - 8 + i];
+    }
+    oamBugRead() {
+      const r = this._oamBugRow(); if (r < 8 || r >= 0xA0) return;
+      const o = this.ppu.oam, a = o[r] | (o[r + 1] << 8), b = o[r - 8] | (o[r - 7] << 8), c = o[r - 4] | (o[r - 3] << 8);
+      const v = b | (a & c);
+      o[r] = v & 0xFF; o[r + 1] = v >> 8;
+      for (let i = 2; i < 8; i++) o[r + i] = o[r - 8 + i];
+    }
+    // 読みと増減が同じサイクルに重なった時(LD A,(HL+) など)。この後に普通の読みの破壊も起きる(read が呼ぶ)
+    oamBugReadInc() {
+      const r = this._oamBugRow(); if (r < 0x20 || r >= 0x98) return;
+      const o = this.ppu.oam, w = (i) => o[i] | (o[i + 1] << 8);
+      const a = w(r - 16), b = w(r - 8), c = w(r), d = w(r - 4);
+      const v = (b & (a | c | d)) | (a & c & d);
+      o[r - 8] = v & 0xFF; o[r - 7] = v >> 8;
+      for (let i = 0; i < 8; i++) o[r - 16 + i] = o[r + i] = o[r - 8 + i];
+    }
+
     // ── バス(CPU から。tick は CPU 側が先に呼んでいる)──
     read(addr) {
       if (this.dmaActive && addr < 0xFF00) {
@@ -304,7 +342,7 @@
       }
       // モード 3 の VRAM、モード 2/3 の OAM は PPU が使っていて読めない
       if (addr >= 0x8000 && addr < 0xA000) { if (this.ppu.vramReadBlocked()) return 0xFF; }
-      else if (addr >= 0xFE00 && addr < 0xFEA0) { if (this.ppu.oamReadBlocked()) return 0xFF; }
+      else if (addr >= 0xFE00 && addr < 0xFF00) { if (!this.cgb) this.oamBugRead(); if (addr < 0xFEA0 && this.ppu.oamReadBlocked()) return 0xFF; }
       return this._busRead(addr);
     }
     _busRead(addr) {
@@ -356,8 +394,8 @@
       if (addr < 0xA000) { if (!this.ppu.vramBlocked()) this.ppu.vram[this.ppu.vbk * 0x2000 + addr - 0x8000] = v; return; }
       if (addr < 0xC000) { this.cart.writeRam(addr, v); if (this.cart.buzzQueue && this.cart.buzzQueue.length) this._buzz(this.cart.takeBuzz()); return; } // buzzQueue: GBS 用のカートリッジには無い
       if (addr < 0xFE00) { this.wram[this._w(addr)] = v; return; }
-      if (addr < 0xFEA0) { if (!this.dmaActive && !this.ppu.oamBlocked()) this.ppu.oam[addr - 0xFE00] = v; return; }
-      if (addr < 0xFF00) return;
+      if (addr < 0xFEA0) { if (!this.cgb) this.oamBugWrite(); if (!this.dmaActive && !this.ppu.oamBlocked()) this.ppu.oam[addr - 0xFE00] = v; return; }
+      if (addr < 0xFF00) { if (!this.cgb) this.oamBugWrite(); return; }
       if (addr >= 0xFF80) { if (addr === 0xFFFF) this.ie = v; else this.hram[addr - 0xFF80] = v; return; }
       if (addr >= 0xFF10 && addr <= 0xFF3F) {
         this.apu.writeRegister(addr, v);

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-15 09:53:07
+ * Built by tools/build-capture-workers.ps1 at 2026-11-15 10:31:39
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-15 09:53:07';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-15 10:31:39';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -14033,6 +14033,7 @@
      */
     constructor(bus) {
       this.bus = bus;
+      this.hasOamBug = typeof bus.oamBugWrite === 'function';
       this.hasTick = typeof bus.tick === 'function';        // 本体コア(gb/gbConsole.js)は M サイクルごとに進む
       this.hasIrq = typeof bus.irqPending === 'function';   // IE & IF & $1F を返す。無ければ割り込み無し(GBS の旧経路)
       this.cyc = 0; // 通算 T(4 刻み)
@@ -14060,6 +14061,11 @@
     write(addr, value) { this.cyc += 4; if (this.hasTick) this.bus.tick(); this.bus.write(addr & 0xFFFF, value & 0xFF); }
     // バスに触らない内部 M サイクル
     idle() { this.cyc += 4; if (this.hasTick) this.bus.tick(); }
+    // 内部サイクルのうち、16bit の増減器が番地 addr を扱う物(INC/DEC rr、PUSH/CALL/RST の SP、LD SP,HL)。
+    // 初代の本体は、その番地が $FE00-$FEFF だと OAM を壊す(本体コアの oamBugWrite。blargg oam_bug)
+    idleAt(addr) { this.cyc += 4; if (this.hasTick) this.bus.tick(); if (this.hasOamBug && (addr & 0xFF00) === 0xFE00) this.bus.oamBugWrite(); }
+    // 読みと増減が同じサイクルに重なる物(LD A,(HL+) / LD A,(HL-))
+    readInc(addr) { this.cyc += 4; if (this.hasTick) this.bus.tick(); if (this.hasOamBug && (addr & 0xFF00) === 0xFE00) this.bus.oamBugReadInc(); return this.bus.read(addr & 0xFFFF) & 0xFF; }
 
     fetchByte() { const v = this.read(this.pc); this.pc = (this.pc + 1) & 0xFFFF; return v; }
     fetchSigned() { const v = this.fetchByte(); return v < 0x80 ? v : v - 0x100; }
@@ -14075,10 +14081,11 @@
       this.sp = (this.sp - 1) & 0xFFFF;
       this.write(this.sp, value & 0xFF);
     }
+    // POP/RET: 読みと SP の増加が同じサイクル(OAM 破壊では LD A,(HL+) と同じ扱い。blargg oam_bug 8-instr_effect)
     pop16() {
-      const lo = this.read(this.sp);
+      const lo = this.readInc(this.sp);
       this.sp = (this.sp + 1) & 0xFFFF;
-      const hi = this.read(this.sp);
+      const hi = this.readInc(this.sp);
       this.sp = (this.sp + 1) & 0xFFFF;
       return lo | (hi << 8);
     }
@@ -14308,7 +14315,7 @@
         case 0x00: return 4; // NOP
         case 0x01: this.setBC(this.fetch16()); return 12;
         case 0x02: this.write(this.getBC(), this.a); return 8;
-        case 0x03: this.setBC((this.getBC() + 1) & 0xFFFF); this.idle(); return 8;
+        case 0x03: { const r = this.getBC(); this.setBC((r + 1) & 0xFFFF); this.idleAt(r); return 8; }
         case 0x04: this.b = this.inc8(this.b); return 4;
         case 0x05: this.b = this.dec8(this.b); return 4;
         case 0x06: this.b = this.fetchByte(); return 8;
@@ -14316,7 +14323,7 @@
         case 0x08: { const nn = this.fetch16(); this.write(nn, this.sp & 0xFF); this.write((nn + 1) & 0xFFFF, (this.sp >> 8) & 0xFF); return 20; }
         case 0x09: this.addHL(this.getBC()); return 8;
         case 0x0A: this.a = this.read(this.getBC()); return 8;
-        case 0x0B: this.setBC((this.getBC() - 1) & 0xFFFF); this.idle(); return 8;
+        case 0x0B: { const r = this.getBC(); this.setBC((r - 1) & 0xFFFF); this.idleAt(r); return 8; }
         case 0x0C: this.c = this.inc8(this.c); return 4;
         case 0x0D: this.c = this.dec8(this.c); return 4;
         case 0x0E: this.c = this.fetchByte(); return 8;
@@ -14329,7 +14336,7 @@
           this.stopped = true; this.idle(); this.idle(); return 12;
         case 0x11: this.setDE(this.fetch16()); return 12;
         case 0x12: this.write(this.getDE(), this.a); return 8;
-        case 0x13: this.setDE((this.getDE() + 1) & 0xFFFF); this.idle(); return 8;
+        case 0x13: { const r = this.getDE(); this.setDE((r + 1) & 0xFFFF); this.idleAt(r); return 8; }
         case 0x14: this.d = this.inc8(this.d); return 4;
         case 0x15: this.d = this.dec8(this.d); return 4;
         case 0x16: this.d = this.fetchByte(); return 8;
@@ -14337,7 +14344,7 @@
         case 0x18: { const d = this.fetchSigned(); this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; }
         case 0x19: this.addHL(this.getDE()); return 8;
         case 0x1A: this.a = this.read(this.getDE()); return 8;
-        case 0x1B: this.setDE((this.getDE() - 1) & 0xFFFF); this.idle(); return 8;
+        case 0x1B: { const r = this.getDE(); this.setDE((r - 1) & 0xFFFF); this.idleAt(r); return 8; }
         case 0x1C: this.e = this.inc8(this.e); return 4;
         case 0x1D: this.e = this.dec8(this.e); return 4;
         case 0x1E: this.e = this.fetchByte(); return 8;
@@ -14346,15 +14353,15 @@
         case 0x20: { const d = this.fetchSigned(); if (!this.getFlag(F_Z)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
         case 0x21: this.setHL(this.fetch16()); return 12;
         case 0x22: this.write(this.getHL(), this.a); this.setHL((this.getHL() + 1) & 0xFFFF); return 8;
-        case 0x23: this.setHL((this.getHL() + 1) & 0xFFFF); this.idle(); return 8;
+        case 0x23: { const r = this.getHL(); this.setHL((r + 1) & 0xFFFF); this.idleAt(r); return 8; }
         case 0x24: this.h = this.inc8(this.h); return 4;
         case 0x25: this.h = this.dec8(this.h); return 4;
         case 0x26: this.h = this.fetchByte(); return 8;
         case 0x27: this.daa(); return 4;
         case 0x28: { const d = this.fetchSigned(); if (this.getFlag(F_Z)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
         case 0x29: this.addHL(this.getHL()); return 8;
-        case 0x2A: this.a = this.read(this.getHL()); this.setHL((this.getHL() + 1) & 0xFFFF); return 8;
-        case 0x2B: this.setHL((this.getHL() - 1) & 0xFFFF); this.idle(); return 8;
+        case 0x2A: this.a = this.readInc(this.getHL()); this.setHL((this.getHL() + 1) & 0xFFFF); return 8;
+        case 0x2B: { const r = this.getHL(); this.setHL((r - 1) & 0xFFFF); this.idleAt(r); return 8; }
         case 0x2C: this.l = this.inc8(this.l); return 4;
         case 0x2D: this.l = this.dec8(this.l); return 4;
         case 0x2E: this.l = this.fetchByte(); return 8;
@@ -14363,15 +14370,15 @@
         case 0x30: { const d = this.fetchSigned(); if (!this.getFlag(F_C)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
         case 0x31: this.sp = this.fetch16(); return 12;
         case 0x32: this.write(this.getHL(), this.a); this.setHL((this.getHL() - 1) & 0xFFFF); return 8;
-        case 0x33: this.sp = (this.sp + 1) & 0xFFFF; this.idle(); return 8;
+        case 0x33: { const r = this.sp; this.sp = (r + 1) & 0xFFFF; this.idleAt(r); return 8; }
         case 0x34: { const hl = this.getHL(); this.write(hl, this.inc8(this.read(hl))); return 12; }
         case 0x35: { const hl = this.getHL(); this.write(hl, this.dec8(this.read(hl))); return 12; }
         case 0x36: this.write(this.getHL(), this.fetchByte()); return 12;
         case 0x37: this.setFlag(F_C, true); this.setFlag(F_N, false); this.setFlag(F_H, false); return 4; // SCF
         case 0x38: { const d = this.fetchSigned(); if (this.getFlag(F_C)) { this.pc = (this.pc + d) & 0xFFFF; this.idle(); return 12; } return 8; }
         case 0x39: this.addHL(this.sp); return 8;
-        case 0x3A: this.a = this.read(this.getHL()); this.setHL((this.getHL() - 1) & 0xFFFF); return 8;
-        case 0x3B: this.sp = (this.sp - 1) & 0xFFFF; this.idle(); return 8;
+        case 0x3A: this.a = this.readInc(this.getHL()); this.setHL((this.getHL() - 1) & 0xFFFF); return 8;
+        case 0x3B: { const r = this.sp; this.sp = (r - 1) & 0xFFFF; this.idleAt(r); return 8; }
         case 0x3C: this.a = this.inc8(this.a); return 4;
         case 0x3D: this.a = this.dec8(this.a); return 4;
         case 0x3E: this.a = this.fetchByte(); return 8;
@@ -14401,57 +14408,57 @@
         case 0xC1: this.setBC(this.pop16()); return 12;
         case 0xC2: { const nn = this.fetch16(); if (!this.getFlag(F_Z)) { this.pc = nn; this.idle(); return 16; } return 12; }
         case 0xC3: this.pc = this.fetch16(); this.idle(); return 16;
-        case 0xC4: { const nn = this.fetch16(); if (!this.getFlag(F_Z)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
-        case 0xC5: this.idle(); this.push16(this.getBC()); return 16;
+        case 0xC4: { const nn = this.fetch16(); if (!this.getFlag(F_Z)) { this.idleAt(this.sp); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xC5: this.idleAt(this.sp); this.push16(this.getBC()); return 16;
         case 0xC6: this.add8(this.fetchByte(), 0); return 8;
-        case 0xC7: this.idle(); this.push16(this.pc); this.pc = 0x00; return 16;
+        case 0xC7: this.idleAt(this.sp); this.push16(this.pc); this.pc = 0x00; return 16;
         case 0xC8: this.idle(); if (this.getFlag(F_Z)) { this.pc = this.pop16(); this.idle(); return 20; } return 8;
         case 0xC9: this.pc = this.pop16(); this.idle(); return 16;
         case 0xCA: { const nn = this.fetch16(); if (this.getFlag(F_Z)) { this.pc = nn; this.idle(); return 16; } return 12; }
-        case 0xCC: { const nn = this.fetch16(); if (this.getFlag(F_Z)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
-        case 0xCD: { const nn = this.fetch16(); this.idle(); this.push16(this.pc); this.pc = nn; return 24; }
+        case 0xCC: { const nn = this.fetch16(); if (this.getFlag(F_Z)) { this.idleAt(this.sp); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xCD: { const nn = this.fetch16(); this.idleAt(this.sp); this.push16(this.pc); this.pc = nn; return 24; }
         case 0xCE: this.add8(this.fetchByte(), this.getFlag(F_C) ? 1 : 0); return 8;
-        case 0xCF: this.idle(); this.push16(this.pc); this.pc = 0x08; return 16;
+        case 0xCF: this.idleAt(this.sp); this.push16(this.pc); this.pc = 0x08; return 16;
 
         case 0xD0: this.idle(); if (!this.getFlag(F_C)) { this.pc = this.pop16(); this.idle(); return 20; } return 8;
         case 0xD1: this.setDE(this.pop16()); return 12;
         case 0xD2: { const nn = this.fetch16(); if (!this.getFlag(F_C)) { this.pc = nn; this.idle(); return 16; } return 12; }
-        case 0xD4: { const nn = this.fetch16(); if (!this.getFlag(F_C)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
-        case 0xD5: this.idle(); this.push16(this.getDE()); return 16;
+        case 0xD4: { const nn = this.fetch16(); if (!this.getFlag(F_C)) { this.idleAt(this.sp); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xD5: this.idleAt(this.sp); this.push16(this.getDE()); return 16;
         case 0xD6: this.sub8(this.fetchByte(), 0, true); return 8;
-        case 0xD7: this.idle(); this.push16(this.pc); this.pc = 0x10; return 16;
+        case 0xD7: this.idleAt(this.sp); this.push16(this.pc); this.pc = 0x10; return 16;
         case 0xD8: this.idle(); if (this.getFlag(F_C)) { this.pc = this.pop16(); this.idle(); return 20; } return 8;
         case 0xD9: this.pc = this.pop16(); this.idle(); this.ime = true; this.imePending = 0; return 16; // RETI(EIと違い即時)
         case 0xDA: { const nn = this.fetch16(); if (this.getFlag(F_C)) { this.pc = nn; this.idle(); return 16; } return 12; }
-        case 0xDC: { const nn = this.fetch16(); if (this.getFlag(F_C)) { this.idle(); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
+        case 0xDC: { const nn = this.fetch16(); if (this.getFlag(F_C)) { this.idleAt(this.sp); this.push16(this.pc); this.pc = nn; return 24; } return 12; }
         case 0xDE: this.sub8(this.fetchByte(), this.getFlag(F_C) ? 1 : 0, true); return 8;
-        case 0xDF: this.idle(); this.push16(this.pc); this.pc = 0x18; return 16;
+        case 0xDF: this.idleAt(this.sp); this.push16(this.pc); this.pc = 0x18; return 16;
 
         case 0xE0: { const n = this.fetchByte(); this.write(0xFF00 + n, this.a); return 12; } // LDH (n),A
         case 0xE1: this.setHL(this.pop16()); return 12;
         case 0xE2: this.write(0xFF00 + this.c, this.a); return 8; // LDH (C),A
-        case 0xE5: this.idle(); this.push16(this.getHL()); return 16;
+        case 0xE5: this.idleAt(this.sp); this.push16(this.getHL()); return 16;
         case 0xE6: this.and8(this.fetchByte()); return 8;
-        case 0xE7: this.idle(); this.push16(this.pc); this.pc = 0x20; return 16;
+        case 0xE7: this.idleAt(this.sp); this.push16(this.pc); this.pc = 0x20; return 16;
         case 0xE8: { const r = this.addSpR8(); this.idle(); this.idle(); this.sp = r; return 16; }
         case 0xE9: this.pc = this.getHL(); return 4; // JP HL(間接読出しではなくPC=HL)
         case 0xEA: { const nn = this.fetch16(); this.write(nn, this.a); return 16; }
         case 0xEE: this.xor8(this.fetchByte()); return 8;
-        case 0xEF: this.idle(); this.push16(this.pc); this.pc = 0x28; return 16;
+        case 0xEF: this.idleAt(this.sp); this.push16(this.pc); this.pc = 0x28; return 16;
 
         case 0xF0: { const n = this.fetchByte(); this.a = this.read(0xFF00 + n); return 12; } // LDH A,(n)
         case 0xF1: this.setAF(this.pop16()); return 12;
         case 0xF2: this.a = this.read(0xFF00 + this.c); return 8; // LDH A,(C)
         case 0xF3: this.ime = false; this.imePending = 0; return 4; // DI
-        case 0xF5: this.idle(); this.push16(this.getAF()); return 16;
+        case 0xF5: this.idleAt(this.sp); this.push16(this.getAF()); return 16;
         case 0xF6: this.or8(this.fetchByte()); return 8;
-        case 0xF7: this.idle(); this.push16(this.pc); this.pc = 0x30; return 16;
+        case 0xF7: this.idleAt(this.sp); this.push16(this.pc); this.pc = 0x30; return 16;
         case 0xF8: this.setHL(this.addSpR8()); this.idle(); return 12;
-        case 0xF9: this.sp = this.getHL(); this.idle(); return 8;
+        case 0xF9: this.sp = this.getHL(); this.idleAt(this.sp); return 8;
         case 0xFA: { const nn = this.fetch16(); this.a = this.read(nn); return 16; }
         case 0xFB: if (!this.ime && this.imePending === 0) this.imePending = 1; return 4; // EI(次の 1 命令が終わってから有効)
         case 0xFE: this.sub8(this.fetchByte(), 0, false); return 8;
-        case 0xFF: this.idle(); this.push16(this.pc); this.pc = 0x38; return 16;
+        case 0xFF: this.idleAt(this.sp); this.push16(this.pc); this.pc = 0x38; return 16;
       }
       // 未定義オペコード(D3/DB/DD/E3/E4/EB/EC/ED/F4/FC/FD): 実機はCPU停止(フリーズ)するが、
       // GBSの曲データがこれらを使うことは無い想定のためNOP相当として扱い暴走を防ぐ
@@ -15899,7 +15906,7 @@
  *     (ここまで 2026-11-15、mooneye の lcdon_timing / lcdon_write_timing / stat_lyc_onoff に合わせた。読み書きの時刻を記録して 1 項目ずつ)
  *   CGB(段階 8d): VRAM 2 バンク、BG の属性(バンク 1 のマップ: パレット/タイルのバンク/反転/優先)、パレット 8+8 本(15bit 色)、
  *     スプライトの優先は OAM 順、LCDC bit0 は「BG がスプライトより前に出られるか」。白黒の frameIdx は 階調 0-3 + 色の組(BG 0 / OBJ0 4 / OBJ1 8)。frameIdx はパレットの番号(BG 0-31、OBJ 32-63)
- *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)、OAM 破壊バグ(初代の実機の不具合。blargg oam_bug の 6 本が落ちる。避けて作られた市販ソフトには影響しない)
+ *   まだ無い物: 画素 FIFO の細部(スプライトの遅れによる画素位置、WX=166 などの癖)、STAT 書き込みの癖(DMG)。OAM 破壊バグは本体コア(gbConsole.js の「OAM 破壊」)にある
  *
  * 参考: Pan Docs "Rendering" "STAT" "OAM"。細部は mooneye の acceptance/ppu と dmg-acid2 で確かめる(tools/headless/gb-testroms.js)。
  */
@@ -16429,6 +16436,7 @@
       this.model = opts.model === 'auto' ? (this.cart.header.cgb ? 'cgb' : 'dmg') : (opts.model || 'dmg');
       // カラー本体に白黒専用ソフトを挿した時: カラーの機能は閉じて白黒として動き、色だけ本体が付ける(BG/OBJ0/OBJ1 に別の色。ppu.setShades)
       this.dmgOnCgb = this.model === 'cgb' && !this.cart.header.cgb;
+      this.oamBug = !(opts && opts.oamBug === false); // 初代の OAM 破壊を再現するか(既定はする。下の「OAM 破壊」)
       this.cgb = this.model === 'cgb' && !this.dmgOnCgb;
       this.lcdAlwaysOn = !!opts.lcdAlwaysOn;
       this.ppu = new Emu.GbPpu(this);
@@ -16683,6 +16691,43 @@
       if (this.onFrame) this.onFrame();
     }
 
+    // ── OAM 破壊(初代の本体の不具合。blargg oam_bug)──
+    // PPU が OAM を走査している間(モード 2)に、CPU が $FE00-$FEFF を読み書きするか、16bit の増減器がその範囲の番地を扱うと、
+    // PPU がその時たどっていた 8 バイトの行が、手前の行との混ぜ物で壊れる。式は Pan Docs "OAM Corruption Bug"。
+    // 行の位置: 行頭(このコアの数え方で前の行の 452T 目)は 0 行目=壊れない、以後 4T ごとに 1 行ずつ進む(0T 目が 1 行目)
+    // 確かめ(2026-11-15): blargg oam_bug の 8 本+まとめ ROM が全部通る(7 番は内蔵の CRC が一致)。POP は「読み+増加」を 1 回目だけにしても 2 回ともにしても通る(2 回ともを採用)。
+    // 実ソフト(白黒 478 本、各 900 フレーム)では 19 本で破壊が起き、うち画面に出たのは 4 本で計 10 フレーム(1 フレームだけスプライトが乱れる)。実機と同じ場面で同じに出るかは未確認
+    _oamBugRow() {
+      const p = this.ppu;
+      if (this.cgb || !this.oamBug || !(p.lcdc & 0x80) || p.firstLine) return -1;
+      if (p.dot >= 452) return (p.line < 143 || p.line === 153) ? 0 : -1;
+      if (p.line < 144 && p.mode === 2) return ((p.dot >> 2) + 1) * 8;
+      return -1;
+    }
+    oamBugWrite() {
+      const r = this._oamBugRow(); if (r < 8 || r >= 0xA0) return;
+      const o = this.ppu.oam, a = o[r] | (o[r + 1] << 8), b = o[r - 8] | (o[r - 7] << 8), c = o[r - 4] | (o[r - 3] << 8);
+      const v = ((a ^ c) & (b ^ c)) ^ c;
+      o[r] = v & 0xFF; o[r + 1] = v >> 8;
+      for (let i = 2; i < 8; i++) o[r + i] = o[r - 8 + i];
+    }
+    oamBugRead() {
+      const r = this._oamBugRow(); if (r < 8 || r >= 0xA0) return;
+      const o = this.ppu.oam, a = o[r] | (o[r + 1] << 8), b = o[r - 8] | (o[r - 7] << 8), c = o[r - 4] | (o[r - 3] << 8);
+      const v = b | (a & c);
+      o[r] = v & 0xFF; o[r + 1] = v >> 8;
+      for (let i = 2; i < 8; i++) o[r + i] = o[r - 8 + i];
+    }
+    // 読みと増減が同じサイクルに重なった時(LD A,(HL+) など)。この後に普通の読みの破壊も起きる(read が呼ぶ)
+    oamBugReadInc() {
+      const r = this._oamBugRow(); if (r < 0x20 || r >= 0x98) return;
+      const o = this.ppu.oam, w = (i) => o[i] | (o[i + 1] << 8);
+      const a = w(r - 16), b = w(r - 8), c = w(r), d = w(r - 4);
+      const v = (b & (a | c | d)) | (a & c & d);
+      o[r - 8] = v & 0xFF; o[r - 7] = v >> 8;
+      for (let i = 0; i < 8; i++) o[r - 16 + i] = o[r + i] = o[r - 8 + i];
+    }
+
     // ── バス(CPU から。tick は CPU 側が先に呼んでいる)──
     read(addr) {
       if (this.dmaActive && addr < 0xFF00) {
@@ -16696,7 +16741,7 @@
       }
       // モード 3 の VRAM、モード 2/3 の OAM は PPU が使っていて読めない
       if (addr >= 0x8000 && addr < 0xA000) { if (this.ppu.vramReadBlocked()) return 0xFF; }
-      else if (addr >= 0xFE00 && addr < 0xFEA0) { if (this.ppu.oamReadBlocked()) return 0xFF; }
+      else if (addr >= 0xFE00 && addr < 0xFF00) { if (!this.cgb) this.oamBugRead(); if (addr < 0xFEA0 && this.ppu.oamReadBlocked()) return 0xFF; }
       return this._busRead(addr);
     }
     _busRead(addr) {
@@ -16748,8 +16793,8 @@
       if (addr < 0xA000) { if (!this.ppu.vramBlocked()) this.ppu.vram[this.ppu.vbk * 0x2000 + addr - 0x8000] = v; return; }
       if (addr < 0xC000) { this.cart.writeRam(addr, v); if (this.cart.buzzQueue && this.cart.buzzQueue.length) this._buzz(this.cart.takeBuzz()); return; } // buzzQueue: GBS 用のカートリッジには無い
       if (addr < 0xFE00) { this.wram[this._w(addr)] = v; return; }
-      if (addr < 0xFEA0) { if (!this.dmaActive && !this.ppu.oamBlocked()) this.ppu.oam[addr - 0xFE00] = v; return; }
-      if (addr < 0xFF00) return;
+      if (addr < 0xFEA0) { if (!this.cgb) this.oamBugWrite(); if (!this.dmaActive && !this.ppu.oamBlocked()) this.ppu.oam[addr - 0xFE00] = v; return; }
+      if (addr < 0xFF00) { if (!this.cgb) this.oamBugWrite(); return; }
       if (addr >= 0xFF80) { if (addr === 0xFFFF) this.ie = v; else this.hram[addr - 0xFF80] = v; return; }
       if (addr >= 0xFF10 && addr <= 0xFF3F) {
         this.apu.writeRegister(addr, v);

@@ -47,9 +47,15 @@ blargg/gb-test-roms-master/mem_timing/individual/01-read_timing.gb
 blargg/gb-test-roms-master/mem_timing/individual/02-write_timing.gb
 blargg/gb-test-roms-master/mem_timing/individual/03-modify_timing.gb
 blargg/gb-test-roms-master/mem_timing/mem_timing.gb
+blargg/gb-test-roms-master/oam_bug/oam_bug.gb
 blargg/gb-test-roms-master/oam_bug/rom_singles/1-lcd_sync.gb
+blargg/gb-test-roms-master/oam_bug/rom_singles/2-causes.gb
 blargg/gb-test-roms-master/oam_bug/rom_singles/3-non_causes.gb
+blargg/gb-test-roms-master/oam_bug/rom_singles/4-scanline_timing.gb
+blargg/gb-test-roms-master/oam_bug/rom_singles/5-timing_bug.gb
 blargg/gb-test-roms-master/oam_bug/rom_singles/6-timing_no_bug.gb
+blargg/gb-test-roms-master/oam_bug/rom_singles/7-timing_effect.gb
+blargg/gb-test-roms-master/oam_bug/rom_singles/8-instr_effect.gb
 cgb-acid2.gbc
 dmg-acid2.gb
 mooneye/acceptance/add_sp_e_timing.gb
