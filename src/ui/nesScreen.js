@@ -201,8 +201,10 @@
     return new Promise((resolve) => {
       if (typeof indexedDB === 'undefined') { resolve(null); return; }
       let req;
-      try { req = indexedDB.open(BAT_DB, 1); } catch (e) { resolve(null); return; }
-      req.onupgradeneeded = () => { const db = req.result; if (!db.objectStoreNames.contains(BAT_STORE)) db.createObjectStore(BAT_STORE); };
+      // ★版は下の idbState(ステート)と同じ 2 で開く。以前はここだけ 1 で、ステートを一度でも保存して入れ物が 2 になると、
+      //   こちらは VersionError で開けず、セーブの読み書きが黙って全部失敗していた(2026-11-16、CPS3 の BIOS が控えられないことで発覚)
+      try { req = indexedDB.open(BAT_DB, 2); } catch (e) { resolve(null); return; }
+      req.onupgradeneeded = () => { const db = req.result; if (!db.objectStoreNames.contains(BAT_STORE)) db.createObjectStore(BAT_STORE); if (!db.objectStoreNames.contains('state')) db.createObjectStore('state'); };
       req.onerror = () => resolve(null);
       req.onsuccess = () => {
         const db = req.result;
