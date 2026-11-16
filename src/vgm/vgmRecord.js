@@ -421,4 +421,158 @@
     vgm.set(hdr, 0); vgm.set(body, HEADER_SIZE); vgm.set(gd3, HEADER_SIZE + body.length);
     return { vgm, frames: frames.length, dropped, writes, samples: total, clock: PCE_CHIP_CLOCK };
   };
+
+  /*
+   * CP システム III の録音からループを探す(DESIGN-CPS3-CAPTURE.md §13)。
+   * frames: [{ n0, n1, w: [レジスタ番号, 値, n, …] }]。戻り値 { start, length, checked, matched, verified } か null
+   * (start / length は録り始めを 0 とした音源のサンプル数)。
+   *
+   * やり方: キーオンの列(声ごとに、時刻と「開始番地+ピッチ」)を作り、ある周期 T だけ後に同じ声・同じキーのキーオンがあるかを見る。
+   *   - フレームごとの書き込みの並びは比べない。曲の 1 小節がフレームの整数倍でないと、周回ごとに書き込みのフレームがずれて一致しない
+   *     (実測: 1 小節 347.3 フレームの曲で、フレーム単位の一致率は最高でも 12%)。なので時刻に ±1.5 フレームの幅を持たせる
+   *   - 周期の候補は、同じ声の同じキーどうしの時刻の差の多数決。確かめる時に、相手との差の中央値で T を詰める
+   *   - 相手のいないキーオンのうち最後の物までがイントロ、その後がループ
+   *   - 「確かめられた区間」(録音の長さ − T − 開始)が短い物は採らない(曲の中の繰り返しを 1 周と見誤る。実測: 90 秒の録音で
+   *     65 秒のループを 46 秒と誤った)。min(T の半分, 25 秒) 以上を要る。録音が足りなければ「ループ無し」になる
+   */
+  VGM.cps3FindLoop = function (frames, opt) {
+    const RATE = (42954545 / 3) / 384, FRAME = RATE / 59.6, TOL = Math.round(FRAME * 1.5);
+    const minLoop = ((opt && opt.minLoopSec) || 8) * RATE;
+    if (!frames || !frames.length) return null;
+    const n0 = frames[0].n0, end = frames[frames.length - 1].n1 - n0;
+    const regs = new Uint16Array(0x180); let keyBits = 0;
+    const ev = []; for (let v = 0; v < 16; v++) ev.push([]);
+    for (const f of frames) for (let i = 0; i + 2 < f.w.length; i += 3) {
+      const reg = f.w[i], val = f.w[i + 1], t = f.w[i + 2] - n0;
+      if (reg < 0x100) { regs[reg] = val; continue; }
+      if (reg !== 0x100) continue;
+      for (let v = 0; v < 16; v++) if ((val >> v & 1) && !(keyBits >> v & 1)) ev[v].push({ t, key: regs[v * 16 + 2] + regs[v * 16 + 3] * 65536 + regs[v * 16 + 6] * 4294967296 });
+      keyBits = val;
+    }
+    if (ev.reduce((a, e) => a + e.length, 0) < 40) return null;
+    const BIN = Math.round(FRAME), votes = new Map();
+    for (const list of ev) {
+      const byKey = new Map();
+      for (const e of list) { let a = byKey.get(e.key); if (!a) byKey.set(e.key, a = []); a.push(e.t); }
+      for (const ts of byKey.values()) for (let i = 0; i < ts.length; i++) for (let j = i + 1; j < ts.length && j < i + 400; j++) {
+        const d = ts[j] - ts[i]; if (d < minLoop) continue; if (d > end * 0.75) break;
+        const b = Math.round(d / BIN); votes.set(b, (votes.get(b) || 0) + 1);
+      }
+    }
+    if (!votes.size) return null;
+    const score = (b) => (votes.get(b) || 0) + (votes.get(b - 1) || 0) + (votes.get(b + 1) || 0);
+    const cands = Array.from(votes.keys()).sort((a, b) => score(b) - score(a)).slice(0, 60);
+    const find = (list, key, t) => { let lo = 0, hi = list.length; while (lo < hi) { const m = (lo + hi) >> 1; if (list[m].t < t - TOL) lo = m + 1; else hi = m; } for (let k = lo; k < list.length && list[k].t <= t + TOL; k++) if (list[k].key === key) return list[k].t; return -1; };
+    let best = null;
+    for (const b of cands) {
+      let T = b * BIN;
+      for (let pass = 0; pass < 2; pass++) {
+        const diffs = [];
+        for (const list of ev) for (const e of list) { if (e.t + T > end - TOL) break; const m = find(list, e.key, e.t + T); if (m >= 0) diffs.push(m - e.t); }
+        if (diffs.length < 20) { T = 0; break; }
+        diffs.sort((x, y) => x - y); T = diffs[diffs.length >> 1];
+      }
+      if (!T) continue;
+      let lastMiss = -1, checked = 0, matched = 0;
+      for (const list of ev) for (const e of list) { if (e.t + T > end - TOL) break; checked++; if (find(list, e.key, e.t + T) >= 0) matched++; else if (e.t > lastMiss) lastMiss = e.t; }
+      let start = lastMiss < 0 ? 0 : lastMiss + 1;
+      const verified = end - T - start;
+      if (verified < Math.max(10 * RATE, Math.min(T * 0.5, 25 * RATE))) continue;
+      // 開始位置は、ループに入って最初のキーオンのあるフレームの頭
+      let firstEv = Infinity; for (const list of ev) for (const e of list) if (e.t >= start && e.t < firstEv) firstEv = e.t;
+      if (firstEv === Infinity) continue;
+      let fs = 0; for (const f of frames) { if (f.n0 - n0 <= firstEv) fs = f.n0 - n0; else break; }
+      start = Math.max(start, fs);
+      const cand = { start, length: T, checked, matched, verified };
+      // 倍の周期も必ず通るので、同じくらい確かなら短い周期を採る
+      if (!best || cand.length < best.length * 0.75) best = cand;
+    }
+    return best;
+  };
+
+  /*
+   * CP システム III の録音 → VGM(規格外ブロック CP3X。DESIGN-CPS3-CAPTURE.md §3、vgmHeader.js VGM.CP3X)
+   *
+   * 入力: { frames: [{ n0, n1, w: [レジスタ番号, 値, n, …] }…], gfx, name, game, creator, autoLoop, trimSilence }
+   *   n は音源の通算サンプル番号(その書き込みが「何サンプル目の前に効くか」)。gfx は波形のある領域を CPU から見える順のまま繋いだ物
+   *   (音源が読む順はそれを 2 バイトずつ入れ替えた物。番地 0x400000 が先頭)。本体は src/emulator/cps3/cps3Console.js
+   *   autoLoop: ループが見つかったら、イントロ+1 周ぶんで切ってループ位置を入れる(cps3FindLoop)
+   *   trimSilence: ループが無い時、最後の音が消えてから 0.5 秒で切る(1 回で終わる曲)
+   * 時刻: VGM のサンプル位置 s = ceil(n × 44100 ÷ 出力レート)。再生側は n = floor(s × 出力レート ÷ 44100) で同じ n に戻す
+   * 波形: 録った書き込みを音源に通してみて、実際に読まれた所だけ(256 バイト単位)を入れる
+   * 書き込みのブロックは 735 サンプルごと。ループの頭はブロックの境目に来るように、そこから数え直す
+   */
+  VGM.encodeCps3Recording = function (rec) {
+    const C = VGM.CP3X, frames = rec.frames || [], gfx = rec.gfx || new Uint8Array(0);
+    const CLOCK = 14318182, RATE = (42954545 / 3) / 384, BIAS = 0x400000, FRAME = 735;
+    const n0 = frames.length ? frames[0].n0 : 0, nEnd = frames.length ? frames[frames.length - 1].n1 : 0;
+    let count = 0; for (const f of frames) count += f.w.length / 3;
+    const reg = new Uint16Array(count), val = new Uint16Array(count), at = new Uint32Array(count);
+    { let k = 0; for (const f of frames) for (let i = 0; i + 2 < f.w.length; i += 3) { reg[k] = f.w[i]; val[k] = f.w[i + 1]; at[k] = Math.max(0, f.w[i + 2] - n0); k++; } }
+    let natTotal = Math.max(0, nEnd - n0);
+    const loop = rec.autoLoop ? VGM.cps3FindLoop(frames) : null;
+    if (loop) natTotal = Math.min(natTotal, loop.start + loop.length);
+    // 音源に通す: 読まれた波形の範囲と、最後に音が出ていた位置
+    const chip = new MML.Emu.Cps3Audio(CLOCK);
+    chip.rom = gfx; chip.romBase = BIAS; chip.romXor = 1; chip.touched = new Uint8Array((gfx.length >>> 8) + 1);
+    let lastSound = -1;
+    for (let n = 0, k = 0; n < natTotal; n++) { while (k < count && at[k] <= n) { chip.write(reg[k], val[k]); k++; } chip.clock(); if (chip.outL !== 0 || chip.outR !== 0) lastSound = n; }
+    let trimmed = false;
+    if (!loop && rec.trimSilence && lastSound >= 0 && natTotal - lastSound > RATE) { natTotal = lastSound + Math.round(RATE * 0.5); trimmed = true; }
+    while (count > 0 && at[count - 1] >= natTotal) count--;                // 切った後ろの書き込みは捨てる
+
+    const chunks = []; let size = 0;
+    const put = (bytes) => { const u = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes); chunks.push(u); size += u.length; };
+    const block = (kind, payloadLen) => put([0x67, 0x66, C.TYPE].concat(u32(payloadLen + 6), C.MAGIC, [C.VERSION, kind]));
+    block(C.KIND_HEADER, 5); put(u32(CLOCK).concat([C.FLAG_OUT1_LEFT]));
+    let romBytes = 0;
+    const touched = chip.touched;
+    for (let p = 0; p < touched.length; p++) {
+      if (!touched[p]) continue;
+      let q = p; while (q + 1 < touched.length && touched[q + 1]) q++;
+      const from = p << 8, to = Math.min(gfx.length, (q + 1) << 8), data = new Uint8Array(to - from);
+      for (let i = from; i < to; i++) data[i - from] = gfx[i ^ 1];           // 音源が読む順で入れる
+      block(C.KIND_ROM, 4 + data.length); put(u32(from + BIAS)); put(data);
+      romBytes += data.length; p = q;
+    }
+    const toS = (n) => Math.ceil(n * 44100 / RATE);
+    const total = toS(natTotal), loopS = loop ? toS(loop.start) : -1;
+    let k = 0, wait = 0, loopByte = -1;
+    const flushWait = () => { while (wait > 0) { const d = Math.min(wait, 0xFFFF); put(d === FRAME ? [0x62] : [0x61].concat(u16(d))); wait -= d; } };
+    // [sFrom, sTo) を 735 サンプルずつのブロックにして出す
+    const emit = (sFrom, sTo) => {
+      for (let s0 = sFrom; s0 < sTo; s0 += FRAME) {
+        const s1 = Math.min(sTo, s0 + FRAME), j = k;
+        while (k < count && toS(at[k]) < s1) k++;
+        if (k > j) {
+          flushWait();
+          const b = new Uint8Array((k - j) * 6);
+          for (let i = j; i < k; i++) { const t = Math.max(0, toS(at[i]) - s0), o = (i - j) * 6; b[o] = t & 0xFF; b[o + 1] = t >> 8; b[o + 2] = reg[i] & 0xFF; b[o + 3] = reg[i] >> 8; b[o + 4] = val[i] & 0xFF; b[o + 5] = val[i] >> 8; }
+          block(C.KIND_WRITES, b.length); put(b);
+        }
+        wait += s1 - s0;
+      }
+    };
+    if (loop && loopS > 0 && loopS < total) { emit(0, loopS); flushWait(); loopByte = size; emit(loopS, total); }
+    else { if (loop) loopByte = size; emit(0, total); }
+    flushWait();
+    put([0x66]);
+    const bodyLen = size;
+    const fields = [].concat(utf16(rec.name || ''), utf16(''), utf16(rec.game || ''), utf16(''),
+      utf16(rec.system || 'CP System III'), utf16(''), utf16(rec.artist || ''), utf16(''), utf16(''),
+      utf16(rec.creator || 'Sound Emulation Foundry'), utf16(rec.notes || ''));
+    put([].concat([0x47, 0x64, 0x33, 0x20], u32(0x100), u32(fields.length), fields));
+    const vgm = new Uint8Array(HEADER_SIZE + size);
+    vgm.set([0x56, 0x67, 0x6D, 0x20], 0);
+    vgm.set(u32(vgm.length - 4), 0x04);
+    vgm.set(u32(0x00000171), 0x08);
+    vgm.set(u32(HEADER_SIZE + bodyLen - 0x14), 0x14);
+    vgm.set(u32(total), 0x18);
+    if (loopByte >= 0) { vgm.set(u32(HEADER_SIZE + loopByte - 0x1C), 0x1C); vgm.set(u32(total - Math.max(0, loopS)), 0x20); }
+    vgm.set(u32(60), 0x24);
+    vgm.set(u32(HEADER_SIZE - 0x34), 0x34);
+    let o = HEADER_SIZE; for (const c of chunks) { vgm.set(c, o); o += c.length; }
+    return { vgm, frames: frames.length, dropped: 0, writes: count, samples: total, clock: CLOCK, romBytes, trimmed,
+      loop: loop ? { startSec: loop.start / RATE, lengthSec: loop.length / RATE, matched: loop.matched, checked: loop.checked } : null };
+  };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -69,6 +69,31 @@
     const m = VGM.MSXX.MAGIC;
     return type === VGM.MSXX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
   };
+  // CP システム III の規格外ブロック(DESIGN-CPS3-CAPTURE.md §3)。0x67 0x66 TYPE 長さ 'CP3X' 版 種類 中身…
+  //   種類 0 = ヘッダ: クロック u32(音源に入るクロック。出力レート = クロック/384)、フラグ u8(bit0 = 音源の出力 1 を左へ = MAME の配線)
+  //   種類 1 = 波形: 番地 u32(レジスタに書かれる番地そのまま)+ バイト列(音源が読む順)
+  //   種類 2 = 書き込み: 6 バイト × n。時刻 u16(ブロックの位置からのサンプル数)、レジスタ番号 u16(番地/2)、値 u16。1 フレームに 1 個
+  // VGM に CPS3 の枠は無いので、標準チップのクロック欄は全部 0。このヘッダがあるかどうかで判定する
+  VGM.CP3X = { TYPE: 0xBC, MAGIC: [0x43, 0x50, 0x33, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_ROM: 1, KIND_WRITES: 2, FLAG_OUT1_LEFT: 1 };
+  VGM.isCp3xBlock = function (type, block) {
+    const m = VGM.CP3X.MAGIC;
+    return type === VGM.CP3X.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
+  };
+  // ストリーム先頭のデータブロックに CP3X のヘッダがあれば { clock, flags } を返す(無ければ null)
+  VGM.scanCps3Extension = function (bytes, dataOffset) {
+    let p = dataOffset;
+    while (p + 7 <= bytes.length && bytes[p] === 0x67 && bytes[p + 1] === 0x66) {
+      const type = bytes[p + 2];
+      const size = (bytes[p + 3] | (bytes[p + 4] << 8) | (bytes[p + 5] << 16) | (bytes[p + 6] << 24)) & 0x7FFFFFFF;
+      const block = bytes.subarray(p + 7, p + 7 + size);
+      if (VGM.isCp3xBlock(type, block) && block[5] === VGM.CP3X.KIND_HEADER && block.length >= 11) {
+        return { clock: (block[6] | (block[7] << 8) | (block[8] << 16) | (block[9] << 24)) >>> 0, flags: block[10] };
+      }
+      p += 7 + size;
+    }
+    return null;
+  };
+
   // ストリーム先頭のデータブロックに MSXX のヘッダがあれば { machine, dac } を返す(無ければ null)
   VGM.scanMsxExtension = function (bytes, dataOffset) {
     let p = dataOffset;
@@ -325,6 +350,9 @@
     if (chips.nes) chips.nes.extraChips = VGM.scanNesExtension(bytes, dataOffset);
     const msxx = VGM.scanMsxExtension(bytes, dataOffset); // MSX の DAC(規格外 MSXX)。本ツールの MSX 録音だけが持つ
     const sgb = chips.gb ? VGM.scanSgbExtension(bytes, dataOffset) : false; // スーパーゲームボーイの SNES 側音源(規格外 GBXX)。本ツールの SGB 録音だけが持つ
+    // CP システム III(規格外 CP3X)。標準のクロック欄を持たないので、ここでチップ一覧へ足す(以降は他のチップと同じ経路)
+    const cp3x = usedChips.length ? null : VGM.scanCps3Extension(bytes, dataOffset);
+    if (cp3x) { const info = { id: 'cps3', name: 'CPS3', clock: cp3x.clock, dual: false, impl: true, flags: cp3x.flags }; chips.cps3 = info; usedChips.push(info); }
 
     const gd3Offset = gd3Rel ? 0x14 + gd3Rel : 0;
     const gd3 = gd3Offset ? parseGd3(bytes, gd3Offset) : null;

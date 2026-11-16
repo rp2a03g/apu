@@ -93,7 +93,7 @@
   // 正しいのに音量が全区間でちょうど2倍だった(Rave Racer 3曲)。1.0ではナムコSystem 22/NB系の全曲がリミッタ前で
   // ピーク1.0超(1.0〜2.1)・RMS -9.5〜-17dBFS と他のナムコ作品(C140のワルキューレ -18〜-20dBFS)より6〜8dB大きく、
   // 大きい所をリミッタが押しつぶしていた。0.5でVGMPlayと同じ比率になり、ピークは0.49〜1.06に収まる
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0, k007232: 1.6, msm5205: 1.45, k054539: 2.4 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0, k007232: 1.6, msm5205: 1.45, k054539: 2.4, cps3: 1.6 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -563,6 +563,40 @@
     };
   }
 
+  // CP システム III(規格外 CP3X ブロック、DESIGN-CPS3-CAPTURE.md §3): 16 ボイス PCM(expansion/cps3.js)。
+  // 書き込みは 1 フレーム 1 ブロックで、フレーム内の時刻つきで届く。「音源の何サンプル目の前に効くか」を保つ決まり
+  // (n = floor(VGM のサンプル位置 × 出力レート / 44100))なので、ブロックの位置から数えた音源のサンプル数に直して音源側の待ち行列へ積む。
+  // clock() を回さない経路(先読みキャプチャ、シークの早送り)では advanceVgm で音源を進める(終端に来たかどうかが位置で決まるため)
+  function makeCps3Adapter(info) {
+    const chip = new Emu.Cps3Audio(info.clock);
+    chip.out1Left = !!((info.flags || 0) & 1);
+    const perVgm = chip.sampleRate / VGM_RATE;
+    // ★音源のサンプルの刻みと VGM の位置の関係(端数 = accum)は、どの経路でも同じでないといけない。ずれると、ブロックの位置から数えた
+    //   待ちが 1 サンプル前後して、キーオンの位置が頭から鳴らした時と変わる(実測: シーク後の 9 割のサンプルが不一致)。
+    //   なので早送りも accum を使い、シークの控えにも accum を入れる(控えは chip.getState が取るので、そこへ添える)
+    const gs = chip.getState.bind(chip), ss = chip.setState.bind(chip);
+    const a = {
+      id: 'cps3', clockHz: chip.sampleRate, accum: 0, chip, gain: CHIP_GAIN.cps3,
+      loadRom(addr, data) { chip.loadRom(addr, data); },
+      queueWrites(block, vgmPos, speed) {
+        const base = Math.floor(vgmPos * perVgm), sp = speed > 0 ? speed : 1;
+        for (let p = 6; p + 6 <= block.length; p += 6) {
+          const t = block[p] | (block[p + 1] << 8), reg = block[p + 2] | (block[p + 3] << 8), value = block[p + 4] | (block[p + 5] << 8);
+          const d = Math.floor((vgmPos + t) * perVgm) - base;
+          chip.queueWrite(sp === 1 ? d : Math.floor(d / sp), reg, value);
+        }
+      },
+      clock() { chip.clock(); },
+      advanceVgm(n) { this.accum += n * perVgm; let c = Math.floor(this.accum); this.accum -= c; while (c-- > 0) chip.clock(); },
+      mix(out) { out[0] += chip.outL * this.gain; out[1] += chip.outR * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.cps3) Emu.applyMute(chip.mute, e.cps3); },
+      applyVolume(v) { const e = v.expansion || v; if (e.cps3) Emu.applyVolume(chip.vol, e.cps3); }
+    };
+    chip.getState = () => { const s = gs(); s.accum = a.accum; return s; };
+    chip.setState = (s) => { ss(s); a.accum = s.accum || 0; };
+    return a;
+  }
+
   // MultiPCM(セガModel 1/2/Multi 32の28ch PCM): expansion/multipcm.js。コマンドは
   // 0xB5 aa dd(aa=ポート0-2、bit7=デュアル2個目)、バンクは0xC3 cc bbaa(専用case)、
   // ROMはデータブロック0x89。
@@ -705,7 +739,8 @@
     ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter,
     c352: makeC352Adapter, okim6258: makeOkim6258Adapter, qsound: makeQsoundAdapter,
     okim6295: makeOkim6295Adapter, multipcm: makeMultiPcmAdapter,
-    k007232: makeK007232Adapter, msm5205: makeMsm5205Adapter, k054539: makeK054539Adapter
+    k007232: makeK007232Adapter, msm5205: makeMsm5205Adapter, k054539: makeK054539Adapter,
+    cps3: makeCps3Adapter
   };
 
   // ---------------------------------------------------------------------------
@@ -1043,6 +1078,13 @@
       if (type === 0xC2) { // NES APU RAM書込み: 先頭2バイト=開始アドレス
         const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
+      }
+      // CP システム III(規格外 CP3X): 種類 1 = 波形(番地 4 バイト+中身)、種類 2 = 書き込み列。ヘッダ(種類 0)は parseHeader が先読み済み
+      if (MML.VGM && MML.VGM.isCp3xBlock && MML.VGM.isCp3xBlock(type, block)) {
+        const a = this.adapterById.cps3, C = MML.VGM.CP3X;
+        if (a && block[5] === C.KIND_ROM && block.length >= 10) a.loadRom((block[6] | (block[7] << 8) | (block[8] << 16) | (block[9] << 24)) >>> 0, block.subarray(10));
+        else if (a && block[5] === C.KIND_WRITES) a.queueWrites(block, this.samplePos, this.speedFactor);
+        return;
       }
       // スーパーゲームボーイの SNES 側音源(規格外 GBXX 種類 1): 下位種別 0 = 像、1 = APU ポートへの書き込み。種類 2 はカートリッジ内ブザー
       if (MML.VGM && MML.VGM.isGbxxBlock && MML.VGM.isGbxxBlock(type, block)) {
@@ -1528,6 +1570,7 @@
       c352: has('c352') ? { snapshots: [], logical: [] } : null,
       okim6258: has('okim6258') ? { snapshots: [] } : null,
       qsound: has('qsound') ? { snapshots: [], logical: [] } : null,
+      cps3: has('cps3') ? { snapshots: [], logical: [] } : null,
       okim6295: has('okim6295') ? { snapshots: [] } : null,
       // multipcm: snapshots=物理スロット(実機のまま)、logical=割当逆算(ソフトウェア
       // チャンネル合成)。チャンネルプール式ドライバ対策で両方を常時保持し、
@@ -1588,6 +1631,7 @@
     const c140Regrouper = data.c140 ? new Emu.PoolChannelRegrouper(24) : null;
     const c352Regrouper = data.c352 ? new Emu.PoolChannelRegrouper(32) : null;
     const qsRegrouper = data.qsound ? new Emu.PoolChannelRegrouper(16) : null;
+    const cps3Regrouper = data.cps3 ? new Emu.PoolChannelRegrouper(16) : null;
     let kssFrameWrites = [];
     let kss2FrameWrites = []; // 2個目のPSG(data.kss2)
     const nesRegs = {};
@@ -1836,6 +1880,12 @@
         data.qsound.snapshots.push(s);
         data.qsound.logical.push(qsRegrouper.step(s));
       }
+      if (data.cps3) {
+        // CPS3: 先読みでも音源を実際に進めている(アダプタの advanceVgm)ので、終端に来たかどうかは音源が知っている。QSound のような窓での打ち切りは要らない
+        const s = Emu.snapshotCps3(player.adapterById.cps3.chip);
+        data.cps3.snapshots.push(s);
+        data.cps3.logical.push(cps3Regrouper.step(s));
+      }
       if (data.multipcm) {
         const s = Emu.snapshotMultiPCM(player.adapterById.multipcm.chip);
         const st = mpcmState;
@@ -2018,7 +2068,7 @@
       ['ga20', (s) => s, 'ga20'], ['k007232', (s) => s, 'k007232'], ['k054539', (s) => s, 'k054539'],
       ['segapcm', (s) => s, 'segapcm'],
       ['c140', (s) => s, 'c140'], ['c352', (s) => s, 'c352'],
-      ['qsound', (s) => s, 'qsound'], ['okim6295', (s) => s, 'okim6295'],
+      ['qsound', (s) => s, 'qsound'], ['cps3', (s) => s, 'cps3'], ['okim6295', (s) => s, 'okim6295'],
       ['multipcm', (s) => s, 'multipcm'],
       // ★YM2610/YM2608のアダプタはチップを .chip ではなく .fm で持つ(SSGと2個持ちのため)
       ['ym2610fm', (s) => (s && s.adpcmA ? s.adpcmA.concat(s.adpcmB ? [s.adpcmB] : []) : null), 'ym2610', (a) => a.fm],

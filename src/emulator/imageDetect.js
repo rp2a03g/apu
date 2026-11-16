@@ -21,6 +21,9 @@
   const GAME_EXTS = ['nes', 'fds', 'rom', 'mx1', 'mx2', 'dsk', 'gb', 'gbc', 'sgb', 'pce', 'sgx'];
   const PCE_EXTS = ['pce', 'sgx'];
   const GB_EXTS = ['gb', 'gbc', 'sgb'];
+  // CP システム III: ゲーム CD のイメージと BIOS。拡張子がありふれているので、必ず中身で確かめる(cps3Image.js)
+  //   BIOS は名前がまちまち(.u2、.bios など)。本体側(main.js)は BIOS を拡張子でなく大きさ(0x80000)で拾う
+  const CPS3_EXTS = ['bin', 'iso', 'img', 'u2', 'bios'];
   const MSX_CART_EXTS = ['rom', 'mx1', 'mx2'];
   const DSK_SIZES = new Set([737280, 368640, 655360, 327680]); // 720K 2DD / 360K 1DD / 640K / 320K
   const FDS_SIDE = 65500;
@@ -43,6 +46,10 @@
     if (F && F.isFds && F.isFds(bytes)) return { kind: 'fds', machine: 'nes', media: 'disk' };
     if (F && F.isFdsBios && F.isFdsBios(bytes)) return { kind: 'fds-bios', machine: 'nes', media: 'bios' };
     if (isSgbBios(bytes)) return { kind: 'sgb-bios', machine: 'gb', media: 'bios' };
+    // CP システム III: BIOS は 0x80000 バイトで、どれかのゲームの鍵で解くと先頭が飛び先とスタックの形になる物。CD は ISO9660 でルートに「10」「30」がある物
+    const C3 = Emu.Cps3 && Emu.Cps3.Image;
+    if (C3 && bytes.length === 0x80000 && C3.identifyBios(bytes)) return { kind: 'cps3-bios', machine: 'cps3', media: 'bios' };
+    if (C3 && bytes.length >= 0x1000000 && C3.isCd(bytes)) return { kind: 'cps3-cd', machine: 'cps3', media: 'cd' };
     // PC エンジン: 拡張子で決める。ただし先頭が "HESM" の物は HES(曲データ)に .pce の名前を付けた物なので、ゲームとしては開かない
     // (手元の「Sound Rips」152 本中 135 本がこれだった。Mesen も中身で HES として開く)
     if (PCE_EXTS.includes(ext) && bytes.length >= 0x2000 && !isHes(bytes)) return { kind: 'pce', machine: 'pce', media: 'cart' };
@@ -60,6 +67,7 @@
   function looksLikeGameEntry(name, size) {
     const ext = extOf(name);
     if (GAME_EXTS.includes(ext)) return true;
+    if (CPS3_EXTS.includes(ext) && size !== undefined && (size === 0x80000 || size >= 0x1000000)) return true; // CPS3 の BIOS か CD のイメージらしい大きさ(中身は開く時に確かめる)
     return ext === '' && size !== undefined && DSK_SIZES.has(size);
   }
   function combineFds(list) {
@@ -70,5 +78,5 @@
     raws.forEach((s, i) => out.set(s.subarray(0, FDS_SIDE), i * FDS_SIDE));
     return out;
   }
-  Emu.Image = { isSgbBios, isHes, GAME_EXTS, MSX_CART_EXTS, DSK_SIZES, extOf, detect, looksLikeGameEntry, combineFds };
+  Emu.Image = { isSgbBios, isHes, GAME_EXTS, CPS3_EXTS, MSX_CART_EXTS, DSK_SIZES, extOf, detect, looksLikeGameEntry, combineFds };
 })(typeof window !== 'undefined' ? window : globalThis);

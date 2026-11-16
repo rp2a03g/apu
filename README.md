@@ -138,6 +138,13 @@ F12(既定)を押している間は逆再生で戻り、F9/F10 で状態の保�
 MSX の音源は PSG・SCC/SCC+・MSX-MUSIC(FM-PAC は ⚙ の「カートリッジ 2」で挿す)・MSX-AUDIO・コナミの DAC・turbo R の PCM で、
 DAC/PCM は規格外のブロックで VGM に入る(他のプレイヤーは読み飛ばす)。
 
+カプコンの CP システム III(CPS3)も録音用に動く。ゲーム CD のイメージ(.bin。zip のままでもよい)と BIOS(0x80000 バイト。名前は問わない)を
+ゲーム画面へ入れると始まる(どのゲームかは中身から決まる。BIOS はこのブラウザに控えるので、次からは CD だけでよい)。
+画面は文字の面だけ(スプライトや背景は出ない)で、[テスト](F2)から「SOUND & VOICE」に入れば好きな曲を鳴らして録れる。
+ショット 3〜6 は数字の 3〜6、サービスは F1。録音を止めると、ループする曲はイントロと 1 周ぶんに切ってループ位置が入り、1 回で終わる曲は末尾の無音が切られる
+(ループの検出には 2 周目の途中まで録る)。VGM の規格に CPS3 の枠は無いので、規格外のブロックに書き込みと波形(使った所だけ)を入れている。
+BIOS と CD イメージは同梱していない(手持ちの物を使う)。仕組みと検証は [DESIGN-CPS3-CAPTURE.md](DESIGN-CPS3-CAPTURE.md)。
+
 PSF(PlayStation)は `.psf` と、共通部品 `.psflib` を参照する `.minipsf` の両方を開ける。
 `.minipsf` は zip のまま開くか、`.psflib` と一緒に選ぶ(ドラッグ&ドロップも複数まとめて落とせる)。
 PS2 の PSF2 には対応していない。
@@ -215,6 +222,7 @@ Chrome / Edge（Chromium系）で開発・確認している。次の機能はCh
 - [DESIGN.md](DESIGN.md) — 恒久的な設計原則（不変条件 INV-1〜6、Song IR仕様、層の分離ルール）。手を入れる前に読む
 - [DESIGN-PITCH.md](DESIGN-PITCH.md) — 音程・デチューン・ビブラートまわりの設計と実測の記録
 - [DESIGN-CAPTURE.md](DESIGN-CAPTURE.md) — ゲームプレイ録音(エミュレータ → VGM → MML)と他機種・自前エミュレータへの展開の設計
+- [DESIGN-CPS3-CAPTURE.md](DESIGN-CPS3-CAPTURE.md) — CP システム III の録音(規格外ブロック CP3X、自前の本体、MAME との照合)
 - [IMPLEMENTATION.md](IMPLEMENTATION.md) — どの順に何を作ってきたかの記録（フェーズ別の実装メモ）
 
 ### ヘッドレス実行ハーネス

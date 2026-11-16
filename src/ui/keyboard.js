@@ -269,7 +269,7 @@
   // note列クリックで「打楽器/音階の指定」を出す行(サンプルPCM系のチャンネル)。
   // NA/NB=YM2610 ADPCM、GA=GA20、SP=SegaPCM、CN=C140、CS=C352、QS=QSound、
   // OK=OKIM6295、MP=MultiPCM
-  const SAMPLE_ROW_RE = /^(N[AB]\d?|GA\d|SP\d+|CN\d+|CS\d+|QS\d+|OK\d|MP\d+)$/;
+  const SAMPLE_ROW_RE = /^(N[AB]\d?|GA\d|SP\d+|CN\d+|CS\d+|QS\d+|C3\d+|OK\d|MP\d+)$/;
 
   function drumLaneX(lane, sub, subN, laneW) {
     const n = Math.max(1, subN || 1);
@@ -498,6 +498,9 @@
     // VGM: QSound(QS1-16)。chip.mute[]はch 0-15
     const qs = id.match(/^QS(\d+)$/);
     if (qs) return { section: 'expansion', chip: 'qsound', type: 'array', index: +qs[1] - 1 };
+    // VGM: CP システム III(C31-C316)。chip.mute[] は声 0-15
+    const c3 = id.match(/^C3(\d+)$/);
+    if (c3) return { section: 'expansion', chip: 'cps3', type: 'array', index: +c3[1] - 1 };
     // VGM: OKIM6295(OK1-4)。chip.mute[]はch 0-3('OKI'=OKIM6258は上の完全一致で先に拾われる)
     const ok = id.match(/^OK(\d)$/);
     if (ok) return { section: 'expansion', chip: 'okim6295', type: 'array', index: +ok[1] - 1 };
@@ -572,6 +575,7 @@
     // poolModes: 表示モード切替の段(既定は2段 logical/phys)。PSF はドライバ内部トラック単位の「トラック」を先頭に足す
     { header: 'SPU (CXD2922 , PlayStation)', prefix: 'PX', name: (id) => 'V' + (+id.slice(2) - 1), pool: 'psx', poolModes: ['track', 'logical', 'phys'] },
     { header: 'QSound (DL-1425 , Capcom CPS2)', prefix: 'QS', name: (id) => 'PCM' + id.slice(2), pool: 'qsound' },
+    { header: 'CPS3 (Capcom CP System III)', prefix: 'C3', name: (id) => 'PCM' + id.slice(2), pool: 'cps3' },
     // ★prefix 'OK' は 'OKI'(OKIM6258)にも前方一致するが、完全一致(ids)が全グループ横断で
     //   先に評価されるので衝突しない(getChannelDisplayの2段ループ参照)
     { header: 'OKIM6295 (MSM6295 , Toaplan / Raizing etc.)', prefix: 'OK', name: (id) => 'ADPCM' + id.slice(2) },
@@ -1908,6 +1912,23 @@
       }
     }
 
+    if (chips.includes('cps3')) {
+      // CP システム III(規格外ブロック CP3X の VGM): 16 声の PCM。QSound と同じ 3 段階表示(音程が取れれば音名、取れなければ「サンプル」行)
+      const live = extraSnaps && extraSnaps.cps3Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.cps3 ? extraSnaps.cps3[frameIdx] : null);
+      const c3Wave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 16; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (20 + ch * 7) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `C3${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0x7FFF,
+          wave: c3Wave(c), active: !!c.active, ...panVolFields(c),
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
     if (chips.includes('qsound')) {
       // QSound(VGM: カプコンCPS1ダッシュ/CPS2): 16ch PCM。CS/SP/GA行と同じ3段階表示
       // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。
@@ -2445,6 +2466,25 @@
   // PC エンジンの書き込み列 [{addr(音源のレジスタ 0-9 = $0800-$0809), value}] を本物の音源に流し、鍵盤行の値(Emu.snapshotHuC6280Apu)を返す。
   // PC エンジンのゲーム画面のライブ表示(DESIGN-PCE-CAPTURE.md §6、9c)が使う。行は HES と同じ。
   // 番地 0-9 で来るのは録音(pceConsole.js)の形。鍵盤に出すのはレジスタの値だけなので、音源の時計は進めない
+  // CP システム III のゲーム画面(nesScreen.js toLiveWrites): 書き込みは { addr: 0x30000 + レジスタ番号, value, n }(n = 音源の通算サンプル番号)、
+  // フレームの終わりは { addr: 0x3FFFF, n }。音源のモデルを n まで進めてから書き込みを当てる(終端に来たかどうかは位置で決まるので、進めないと分からない)。
+  // rom は波形(CD の並びのまま。番地 0x400000 が先頭、読む時に 2 バイトずつ入れ替える)
+  function makeCps3Stepper(rom) {
+    const E = MML.Emu;
+    const chip = E.Cps3Audio ? new E.Cps3Audio() : null;
+    if (chip) { chip.rom = rom || new Uint8Array(0); chip.romBase = 0x400000; chip.romXor = 1; }
+    let started = false;
+    return (writes) => {
+      if (!chip) return null;
+      for (const w of writes) {
+        if (!(w.addr >= 0x30000 && w.addr <= 0x3FFFF)) continue;
+        if (!started) { chip.nat = w.n; started = true; }
+        let guard = 4096; while (chip.nat < w.n && guard-- > 0) chip.clock();   // 1 フレームは 626 サンプルほど
+        if (w.addr !== 0x3FFFF) chip.write(w.addr - 0x30000, w.value);
+      }
+      return E.snapshotCps3(chip);
+    };
+  }
   function makePceStepper() {
     const E = MML.Emu;
     const apu = E.APUHuC6280 ? new E.APUHuC6280() : null;
@@ -5326,13 +5366,13 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'k007232', 'k054539', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'k007232', 'k054539', 'qsound', 'cps3', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       // ★L/R列に16bitの実レジスタを出す音源は列ごと広げる(2026-09-17のユーザー合意)。
       //   PSX=VOLL/VOLR(-32768..32767) / QSound=パン(0x110-0x130) / C352=前後4値の併記。
       //   曲頭はスナップショットがまだ無く行データからは判定できないので、**チップ構成で決める**
       //   (PAN_CHIPS と同じ考え方。列は縦に揃っていないと読めないので一覧まるごと切り替える)
-      const LR_WIDE_CHIPS = ['psx', 'qsound', 'c352'];
+      const LR_WIDE_CHIPS = ['psx', 'qsound', 'c352', 'cps3'];
       this._leftEl.classList.toggle('kbd-left--lrwide', LR_WIDE_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
@@ -5370,6 +5410,7 @@
       this._extraSnaps.psxLive = typeof result.getPsx === 'function' ? result.getPsx : null;
       this._extraSnaps.okim6258Live = typeof result.getOkim6258 === 'function' ? result.getOkim6258 : null;
       this._extraSnaps.qsoundLive = typeof result.getQsound === 'function' ? result.getQsound : null;
+      this._extraSnaps.cps3Live = typeof result.getCps3 === 'function' ? result.getCps3 : null;
       this._extraSnaps.okim6295Live = typeof result.getOkim6295 === 'function' ? result.getOkim6295 : null;
       this._extraSnaps.multipcmLive = typeof result.getMultiPcm === 'function' ? result.getMultiPcm : null;
       this._extraSnaps.pwmLive = typeof result.getPwm === 'function' ? result.getPwm : null;
@@ -5463,6 +5504,8 @@
       if (this._chips.includes('kss')) { steppers.kss = makeKssStepper(this._chips); ex.kssPsg = []; ex.kssScc = []; ex.kssOpll = []; ex.kssDac = []; ex.opl = []; } // MSX のゲーム画面(KSS 形式の書き込み列)
       if (this._chips.includes('gbs')) { steppers.gb = makeGbStepper(); ex.gbsApu = []; } // GB のゲーム画面
       if (this._chips.includes('hes')) { steppers.pce = makePceStepper(); ex.hesApu = []; } // PC エンジンのゲーム画面
+      const cps3Rom = (opts && opts.cps3Rom) || null;
+      if (this._chips.includes('cps3')) { steppers.cps3 = makeCps3Stepper(cps3Rom); ex.cps3 = []; } // CPS3 のゲーム画面
       // Live系(再生中のチップを直接読む関数)はライブ表示には無い(あっても全フレームが同じ値になる)
       for (const k of Object.keys(ex)) if (/Live$/.test(k)) ex[k] = null;
       ex.apuEnv = null;
@@ -5472,7 +5515,7 @@
       const regs = Object.assign({}, (opts && opts.initRegs) || {});
       if (initWrites) for (const w of initWrites) if (!w.read && regs[w.addr] === undefined) regs[w.addr] = w.value;
       if (regs[0x4015] === undefined) regs[0x4015] = 0x0F; // 書かれない曲もあるので「全ch有効」を既定に(VGM 経路と同じ)
-      this._liveRoll = { builder, steppers, regs, lastRangeOpened: 0, lastRangeMs: 0, lastDrumOpened: 0 };
+      this._liveRoll = { builder, steppers, regs, lastRangeOpened: 0, lastRangeMs: 0, lastDrumOpened: 0, cps3Rom };
       this._rollPastKeep = false;
       this._rollTimeline = builder.timeline();
       this._rollCursor = {};
@@ -5501,6 +5544,7 @@
       if (lr.steppers.kss) { const k = lr.steppers.kss(writes); ex.kssPsg[f] = k.psg; ex.kssScc[f] = k.scc; ex.kssOpll[f] = k.opll; ex.kssDac[f] = k.dac; ex.opl[f] = k.opl; }
       if (lr.steppers.gb) ex.gbsApu[f] = lr.steppers.gb(writes);
       if (lr.steppers.pce) ex.hesApu[f] = lr.steppers.pce(writes);
+      if (lr.steppers.cps3) ex.cps3[f] = lr.steppers.cps3(writes);
       const channels = extractChannels(st.regSnapshots[f], ex, f, this._chips);
       lr.builder.feed(channels, f);
       // 打点(DPCM 等の drumKey つき)が新しく始まったらドラム区画を組み直す(区画が無いと打点は描かれない。
@@ -5538,9 +5582,10 @@
       if (f === st.totalFrames) return;
       st.writeLog.length = f; st.regSnapshots.length = f; st.totalFrames = f;
       const ex = this._extraSnaps;
-      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu']) if (ex[k]) ex[k].length = f;
+      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu', 'cps3']) if (ex[k]) ex[k].length = f;
       if (lr.steppers.gb) lr.steppers.gb = makeGbStepper();
       if (lr.steppers.pce) lr.steppers.pce = makePceStepper();
+      if (lr.steppers.cps3) lr.steppers.cps3 = makeCps3Stepper(lr.cps3Rom);
       if (lr.steppers.vrc7) lr.steppers.vrc7 = makeVrc7Stepper();
       if (lr.steppers.n163) lr.steppers.n163 = makeN163Stepper();
       if (lr.steppers.fme7) lr.steppers.fme7 = makeFme7Stepper();

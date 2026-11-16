@@ -157,7 +157,8 @@
   let image = null, imageBuf = null, frameW = 256, frameH = 240; // 画面の大きさ(frame メッセージの w/h。今は NES/MSX とも 256×240)
   let machine = 'nes';        // 'nes' | 'msx' | 'gb' | 'pce'(open がファイルで決める)
   let pceFps = 21477270 / 1365 / 263; // PC エンジン: 1 画面 263 行(59.83Hz)か 262 行(60.05Hz)。ソフトが VCE で選ぶ(loaded/フレームで知らされる)
-  function curFps() { return machine === 'gb' ? (gbSgb ? SGB_FPS : GB_FPS) : machine === 'pce' ? pceFps : FPS; }
+  let cps3Fps = 59.6;         // CP システム III: 1 画面 264 行(59.60Hz)
+  function curFps() { return machine === 'gb' ? (gbSgb ? SGB_FPS : GB_FPS) : machine === 'pce' ? pceFps : machine === 'cps3' ? cps3Fps : FPS; }
   const SGB_FPS = 21477272 / (1364 * 262); // スーパーゲームボーイは SNES の 1 フレーム
   let gbSgb = 0, gbClock = 0;              // 今のゲームボーイがスーパーゲームボーイなら 1 か 2 / 録音の VGM に入れる時計(0 = 既定の 4194304)
   let msxChips = [], msxMachine = '', pendingMsx = null, msxFps = 60, msxDisk = false; // msxDisk: 今の MSX はディスクで起動している(次の .dsk は入れ替え) // MSX: 載っている音源名(psg/scc/opll/opl/dac)、起動した機種、BIOS 待ちの ROM、本体のフレームレート(50Hz 中は 50)
@@ -508,7 +509,7 @@
     else if (nes && nes.keyboard && nes.keyboard.releaseAll) nes.keyboard.releaseAll();
   }
   // 機種別のステート API
-  function stateApi() { return machine === 'msx' ? MML.Emu.MsxState : machine === 'pce' ? MML.Emu.PceState : machine === 'gb' ? (gbSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState; }
+  function stateApi() { return machine === 'cps3' ? MML.Emu.Cps3State : machine === 'msx' ? MML.Emu.MsxState : machine === 'pce' ? MML.Emu.PceState : machine === 'gb' ? (gbSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState; }
   // 設定(機種/マッパー)が変わった: 開いている MSX の ROM を開き直す(BIOS 待ちなら待っている ROM で再試行)
   function reopenMsx() {
     const onErr = (e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); };
@@ -649,7 +650,7 @@
     let hdr = header.querySelector('.fw-header-extra');
     if (!hdr) { hdr = document.createElement('span'); hdr.className = 'fw-header-extra nes-hdr'; header.insertBefore(hdr, header.querySelector('.float-window-close')); }
     hdr.innerHTML = '';
-    romInput = document.createElement('input'); romInput.type = 'file'; romInput.accept = '.nes,.fds,.rom,.mx1,.mx2,.dsk,.gb,.gbc,.sgb,.sfc,.zip,.7z,.rar,.rsn,.lzh,.lha'; romInput.style.display = 'none';
+    romInput = document.createElement('input'); romInput.type = 'file'; romInput.accept = '.nes,.fds,.rom,.mx1,.mx2,.dsk,.gb,.gbc,.sgb,.sfc,.pce,.sgx,.bin,.iso,.img,.u2,.bios,.zip,.7z,.rar,.rsn,.lzh,.lha'; romInput.style.display = 'none';
     romInput.addEventListener('change', () => { const f = romInput.files && romInput.files[0]; romInput.value = ''; openRomFile(f); });
     const openBtn = mkIcon('open', T('開く(.nes/.fds/.rom/.dsk、zip などの圧縮ファイル。ウィンドウへのドロップでも開けます)'), () => romInput.click());
     const resetBtn = mkIcon('reset', T('リセット'), () => { if (node) node.port.postMessage({ type: 'reset' }); else if (nes) { nes.reset(); if (rewindBuf) rewindBuf.clear(); } liveRestart(); });
@@ -719,10 +720,11 @@
     attachHold(gbLightBtn, () => sendSensor({ light: true }), () => sendSensor({ light: false }));
     gbPrintBtn = mkBtn('', T('ポケットプリンタの印刷結果を PNG で保存'), saveGbPrints); gbPrintBtn.hidden = true;
     gbSgbMenuBtn = mkBtn(T('メニュー'), T('スーパーゲームボーイのメニュー(配色・枠の変更)を開く/閉じる(SNES のパッドの L+R)'), () => { if (node) node.port.postMessage({ type: 'sensor', sgbMenu: true }); else if (nes && nes.pressMenu) nes.pressMenu(); canvas.focus(); }); gbSgbMenuBtn.hidden = true;
+    cps3TestBtn = mkBtn(T('テスト'), T('CPS3 のテストボタンを押す(テストメニュー。サウンドテストもここから)。キーは F2。ショット 3〜6 は数字の 3〜6、サービスは F1'), () => { cps3Bits |= 0x1000; pushPad(); setTimeout(() => { cps3Bits &= ~0x1000; pushPad(); }, 700); canvas.focus(); }); cps3TestBtn.hidden = true;
     gbBarcodeBtn = mkBtn(T('バーコード'), T('バーコードを読ませる(数字を打つか、カメラで写す)'), askGbBarcode); gbBarcodeBtn.hidden = true;
     diskBadgeEl = document.createElement('button'); diskBadgeEl.type = 'button'; diskBadgeEl.className = 'nes-diskbadge'; diskBadgeEl.hidden = true;
     diskBadgeEl.addEventListener('click', () => { if (cfg.msx.writeBack && !diskDirHandle) pickDiskDir(); else toggleDiskPopover(sideBtn.hidden ? diskBadgeEl : sideBtn); });
-    bar.appendChild(machineEl); bar.appendChild(lampsEl); bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn); bar.appendChild(gbLightBtn); bar.appendChild(gbBarcodeBtn); bar.appendChild(gbPrintBtn); bar.appendChild(gbSgbMenuBtn); bar.appendChild(ilBadgeEl);
+    bar.appendChild(machineEl); bar.appendChild(lampsEl); bar.appendChild(nameEl); bar.appendChild(statusEl); bar.appendChild(diskBadgeEl); bar.appendChild(recInfoEl); bar.appendChild(so.lbl); bar.appendChild(lo.lbl); bar.appendChild(saveBtn); bar.appendChild(convBtn); bar.appendChild(gbLightBtn); bar.appendChild(gbBarcodeBtn); bar.appendChild(gbPrintBtn); bar.appendChild(gbSgbMenuBtn); bar.appendChild(cps3TestBtn); bar.appendChild(ilBadgeEl);
     statusEl.textContent = '';
     wrap.appendChild(bar); wrap.appendChild(canvas);
     if (MML.Device && MML.Device.isTouch && MML.Device.isTouch()) wrap.appendChild(buildTouchPad());
@@ -735,7 +737,11 @@
     window.addEventListener('deviceorientation', (e) => { if (machine !== 'gb' || !gbTilt || e.gamma === null || e.beta === null) return; sendTilt(Math.sin(e.gamma * Math.PI / 180), Math.sin((e.beta - 45) * Math.PI / 180)); }); // 手前へ 45 度傾けて持った姿勢を水平とみなす
     canvas.addEventListener('keydown', (e) => {
       const a = keyActionOf(e.code);
-      if (!a) { if (machine === 'msx') { e.preventDefault(); msxKey(e.code, true); } return; } // MSX: 操作キー以外はそのまま MSX のキーボードへ
+      if (!a) {
+        if (machine === 'msx') { e.preventDefault(); msxKey(e.code, true); } // MSX: 操作キー以外はそのまま MSX のキーボードへ
+        else if (machine === 'cps3' && CPS3_KEYS[e.code]) { e.preventDefault(); cps3Bits |= CPS3_KEYS[e.code]; pushPad(); } // CPS3: ショット 3〜6、テスト、サービス
+        return;
+      }
       e.preventDefault();
       if (PAD_BITS[a]) { keyBits |= PAD_BITS[a]; pushPad(); }
       else if (a === 'TurboA') { keyTurbo |= 1; pushPad(); }
@@ -748,7 +754,11 @@
     });
     canvas.addEventListener('keyup', (e) => {
       const a = keyActionOf(e.code);
-      if (!a) { if (machine === 'msx') { e.preventDefault(); msxKey(e.code, false); } return; }
+      if (!a) {
+        if (machine === 'msx') { e.preventDefault(); msxKey(e.code, false); }
+        else if (machine === 'cps3' && CPS3_KEYS[e.code]) { e.preventDefault(); cps3Bits &= ~CPS3_KEYS[e.code]; pushPad(); }
+        return;
+      }
       e.preventDefault();
       if (PAD_BITS[a]) { keyBits &= ~PAD_BITS[a]; pushPad(); }
       else if (a === 'TurboA') { keyTurbo &= ~1; pushPad(); }
@@ -756,14 +766,14 @@
       else if (a === 'FF') { ffHold = false; pushSpeed(); }
       else if (a === 'Rewind') rewindHoldEnd();
     });
-    canvas.addEventListener('blur', () => { if (ffHold) { ffHold = false; pushSpeed(); } rewindHoldEnd(); keyBits = 0; keyTurbo = 0; pushPad(); if (machine === 'msx') msxKeyReleaseAll(); });
+    canvas.addEventListener('blur', () => { if (ffHold) { ffHold = false; pushSpeed(); } rewindHoldEnd(); keyBits = 0; keyTurbo = 0; cps3Bits = 0; pushPad(); if (machine === 'msx') msxKeyReleaseAll(); });
     pushSpeed();
     canvas.addEventListener('pointerdown', () => { canvas.focus(); resumeAudio(); });
     // ROM のドロップ(窓のどこでも)
     win.addEventListener('dragover', (e) => { if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'copy'; } });
     win.addEventListener('drop', (e) => {
       const f = e.dataTransfer && e.dataTransfer.files && Array.from(e.dataTransfer.files).find((x) => /\.(nes|fds|rom|mx1|mx2|dsk)$/i.test(x.name));
-      if (!f) return; // ROM 以外は本体のドロップ処理に任せる
+      if (!f) return; // ROM 以外は本体のドロップ処理に任せる(CPS3 の CD イメージと BIOS もそちらから中身で見分けられて戻ってくる)
       e.preventDefault(); e.stopPropagation();
       openRomFile(f);
     });
@@ -1448,14 +1458,17 @@
     return out;
   }
   let lastPad2 = -1, lastPadActs = 0, padFF = false;
+  // CPS3 だけのボタン(cps3Console.js の setController の上位ビット)。キーの割り当て(⚙)に無いキーだけがここへ来る
+  const CPS3_KEYS = { Digit3: 0x100, Digit4: 0x200, Digit5: 0x400, Digit6: 0x800, F2: 0x1000, F1: 0x2000 };
+  let cps3Bits = 0, cps3TestBtn = null, cps3Gfx = null, cps3Title = '', pendingCps3 = null;
   function sendPad(port, bits, turbo) {
     if (node) node.port.postMessage({ type: 'pad', port, bits, turbo });
     else if (nes) nes.setController(port, bits, turbo);
   }
   function pushPad() {
     const gp = gamepadBits();
-    const bits = keyBits | touchBits | gp[0][0], turbo = keyTurbo | touchTurbo | gp[0][1];
-    const k1 = bits | (turbo << 8), k2 = gp[1][0] | (gp[1][1] << 8);
+    const bits = keyBits | touchBits | gp[0][0] | (machine === 'cps3' ? cps3Bits : 0), turbo = keyTurbo | touchTurbo | gp[0][1];
+    const k1 = bits | (turbo << 16), k2 = gp[1][0] | (gp[1][1] << 8); // CPS3 は bits が 8bit を超える(ショット 3〜6、テスト、サービス)
     if (k1 !== lastPad) { lastPad = k1; sendPad(0, bits, turbo); }
     if (k2 !== lastPad2) { lastPad2 = k2; sendPad(1, gp[1][0], gp[1][1]); }
     // パッドの操作(早送り/巻き戻し=押している間、一時停止/状態保存/読込=押した瞬間)。どちらのパッドでも
@@ -1484,7 +1497,7 @@
     w = w || frameW; h = h || frameH;
     if (canvas.width === w && canvas.height === h && imageBuf) return;
     canvas.width = w; canvas.height = h; frameW = w; frameH = h;
-    canvas.style.aspectRatio = machine === 'gb' ? '160 / 144' : machine === 'pce' ? '292 / 242' : '256 / 240'; // PC エンジンは幅がドットクロックで 292/389/584 と変わるが、画面の形は同じ // 画面の形は幅/行数のモードによらず同じ(幅 512 は横半分のドット、インターレースの 480 行は縦半分の行。実機のテレビと同じ)
+    canvas.style.aspectRatio = machine === 'gb' ? '160 / 144' : machine === 'pce' ? '292 / 242' : machine === 'cps3' ? '4 / 3' : '256 / 240'; // PC エンジンは幅がドットクロックで 292/389/584 と変わるが、画面の形は同じ // 画面の形は幅/行数のモードによらず同じ(幅 512 は横半分のドット、インターレースの 480 行は縦半分の行。実機のテレビと同じ)
     if (ilBadgeEl) ilBadgeEl.hidden = h < 480;
     imageBuf = new Uint8ClampedArray(w * h * 4);
     image = new ImageData(imageBuf, w, h);
@@ -1544,6 +1557,7 @@
     if (now - fpsMs >= 1000) { fps = fpsMs ? Math.round(fpsCount * 1000 / (now - fpsMs)) : fpsCount; fpsCount = 0; fpsMs = now; updateStatus(); }
   }
   function updateStatus() {
+    if (pendingCps3) { if (cps3TestBtn) cps3TestBtn.hidden = true; return; } // CPS3 の BIOS 待ち: 案内の文を消さない
     if (!statusEl || flashTimer) return; // 一時表示(ステート保存/読込の結果)の間は上書きしない
     const mode = node ? T('音: AudioWorklet') : T('音なし(主スレッド)');
     // 実測(Worklet が 1 秒ごとに送る diag): 本体が実際に進んだ速さ(実時間比)と、音スレッドの負荷。異常な時は理由が分かるように出す
@@ -1556,8 +1570,9 @@
     }
     if (node && actx && actx.state !== 'running') dg += ' · ' + T('音の出口が止まっています({s})。画面をタップしてください', { s: actx.state });
     statusEl.textContent = `${fps} fps · ${mode}` + dg + (underruns ? ' · ' + T('音切れ {n} 回', { n: underruns }) : '') + (hasBattery ? ' · ' + T('セーブ') : '') + (liveActive ? ' · ' + T('ロール') : '');
-    if (pendingFds || pendingMsx) return; // BIOS 待ちの案内を消さない
-    const chips = machine === 'gb' ? 'GB APU' : machine === 'pce' ? 'HuC6280' : machine === 'msx' ? msxChips.map((c) => c.toUpperCase()).join('+') : ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
+    if (cps3TestBtn) cps3TestBtn.hidden = machine !== 'cps3' || !!pendingCps3;
+    if (pendingFds || pendingMsx || pendingCps3) return; // BIOS 待ちの案内を消さない
+    const chips = machine === 'gb' ? 'GB APU' : machine === 'pce' ? 'HuC6280' : machine === 'cps3' ? 'CPS3' : machine === 'msx' ? msxChips.map((c) => c.toUpperCase()).join('+') : ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
     statusEl.title = (chips ? chips + ' ' : '') + (workletState === 'failed' ? T('AudioWorklet が使えないので主スレッドで実行しています(音は出ません)') : '') +
       (hasBattery ? ' ' + T('セーブデータはこのブラウザ(IndexedDB)に自動保存します(1 秒ごと・閉じる時)。キー: {key}', { key: batteryKey }) : '') +
       (liveActive ? ' ' + T('鍵盤表示のロールへ流しています') : '');
@@ -1571,7 +1586,7 @@
     // 再ビルド忘れの検出(capture-worker-client.js と同じ考え方): 主スレッドの現行ソースがバンドルに含まれているか
     const probes = [MML.Emu.NesConsole, MML.Emu.PPU, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC3, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC5, MML.Emu.NesMappers && MML.Emu.NesMappers.VRC7, MML.Emu.FdsDisk && MML.Emu.FdsDisk.Mapper, MML.Emu.NesRewind];
     // MSX 本体(同じバンドルに入る)。ページが MSX の script を読んでいない時は比べる物が無いので飛ばす
-    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.GbPrinter, MML.Emu.GbBarcodeBoy, MML.Emu.APUGb, MML.Emu.CPUSm83, MML.Emu.PceConsole, MML.Emu.PceVdc, MML.Emu.PceVce, MML.Emu.PceCard, MML.Emu.PceTimer, MML.Emu.CPUHuC6280, MML.Emu.APUHuC6280]) if (p) probes.push(p);
+    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.GbPrinter, MML.Emu.GbBarcodeBoy, MML.Emu.APUGb, MML.Emu.CPUSm83, MML.Emu.PceConsole, MML.Emu.PceVdc, MML.Emu.PceVce, MML.Emu.PceCard, MML.Emu.PceTimer, MML.Emu.CPUHuC6280, MML.Emu.APUHuC6280, MML.Emu.Cps3Console, MML.Emu.Cps3Audio, MML.Emu.Cps3 && MML.Emu.Cps3.Machine, MML.Emu.Cps3 && MML.Emu.Cps3.SH2, MML.Emu.Cps3Rewind]) if (p) probes.push(p);
     for (const p of probes) {
       if (typeof p !== 'function' || src.indexOf(p.toString()) < 0) {
         console.warn('[nes] nes-worklet.js がソースより古い(再ビルド忘れ)ため使いません。tools/build-capture-workers.ps1 で再ビルドしてください');
@@ -1640,7 +1655,7 @@
       case 'writes': takeFrames(m.frames || [], frameSeq); break; // record on で像を取り直す前に溜まっていた分(最後は今の途中フレーム)
       case 'rewound': blitFrame(new Uint32Array(m.frame), m.w, m.h); onRewound(m.seq); break;
       case 'rwframe': blitIndex(new Uint8Array(m.idx), m.palette ? new Uint32Array(m.palette) : null, m.w, m.h); onReverseFrame(m.seq); break;
-      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; if (m.chips && machine === 'msx') msxChips = m.chips.slice(); if (m.fps > 0) { if (machine === 'pce') pceFps = m.fps; else msxFps = m.fps; } if (machine === 'gb') { if (m.clock) gbClock = m.sgb ? Math.round(m.clock) : 0; gbTilt = !!m.tilt; if (gbTilt) canvas.title = T('マウスを画面の上で動かすと傾きます(スマホは本体の傾き)'); } fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
+      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; if (m.chips && machine === 'msx') msxChips = m.chips.slice(); if (m.fps > 0) { if (machine === 'pce') pceFps = m.fps; else if (machine === 'cps3') cps3Fps = m.fps; else msxFps = m.fps; } if (machine === 'gb') { if (m.clock) gbClock = m.sgb ? Math.round(m.clock) : 0; gbTilt = !!m.tilt; if (gbTilt) canvas.title = T('マウスを画面の上で動かすと傾きます(スマホは本体の傾き)'); } fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
       case 'battery': onBatteryMessage(m); break;
       case 'diag': diag = m; break;
       case 'barcode': onGbBarcodeResult(!!m.ok); break;
@@ -1811,6 +1826,14 @@
   // MSX: KSS 形式 [{addr,value,io}](psg=I/O $A0/$A1、opll=$7C/$7D、opl=$C0/$C1、scc/dac=メモリ番地。鍵盤表示の kss* 行が読む形)
   function toLiveWrites(fr) {
     const out = [];
+    if (machine === 'cps3') {
+      // CPS3: 録音の 1 フレーム { n0, n1, w: [レジスタ番号, 値, n, …] } → 鍵盤表示のステッパ(keyboard.js makeCps3Stepper)が読む形。
+      // 番地は他の音源と重ならない所(0x30000 + レジスタ番号)に置き、フレームの終わりを 0x3FFFF で知らせる
+      const w = (fr && fr.w) || [];
+      for (let i = 0; i + 2 < w.length; i += 3) out.push({ addr: 0x30000 + w[i], value: w[i + 1], n: w[i + 2] });
+      if (fr) out.push({ addr: 0x3FFFF, value: 0, n: fr.n1 });
+      return out;
+    }
     if (machine === 'msx') {
       for (const w of fr) {
         switch (w.chip) {
@@ -1856,7 +1879,8 @@
     if (!cfg.liveRoll || !NesScreen.onLiveBegin || !(node || nes)) return;
     if (liveActive) liveEnd('restart');
     liveActive = true; liveBase = null;
-    if (machine === 'gb') NesScreen.onLiveBegin({ chips: ['gbs'], fps: GB_FPS, name: romName || 'GB' }); // 鍵盤表示の GB の行(GBS と同じ)
+    if (machine === 'cps3') NesScreen.onLiveBegin({ chips: ['vgm', 'cps3'], fps: cps3Fps, name: romName || 'CPS3', cps3Rom: cps3Gfx }); // 鍵盤表示の CPS3 の行(VGM と同じ)。波形は音程の解析用
+    else if (machine === 'gb') NesScreen.onLiveBegin({ chips: ['gbs'], fps: GB_FPS, name: romName || 'GB' }); // 鍵盤表示の GB の行(GBS と同じ)
     else if (machine === 'pce') NesScreen.onLiveBegin({ chips: ['hes'], fps: pceFps, name: romName || 'PCE' }); // 鍵盤表示の波形メモリ音源の行(HES と同じ)
     else if (machine === 'msx') NesScreen.onLiveBegin({ chips: msxLiveChips(), fps: msxFps || 60, name: romName || 'MSX' });
     else NesScreen.onLiveBegin({ chips: chipNames(), fps: FPS, name: romName || 'NES' });
@@ -1885,6 +1909,14 @@
   function applyMix(mute, volume) {
     if (mute || volume) lastMix = { mute: mute || (lastMix && lastMix.mute) || null, volume: volume || (lastMix && lastMix.volume) || null };
     if (!lastMix || !(node || nes)) return;
+    if (machine === 'cps3') {
+      // 鍵盤表示の expansion.cps3(声ごとの配列)を本体へ(cps3Console.applyMix)
+      const pick = (cfgObj) => (cfgObj && cfgObj.expansion && cfgObj.expansion.cps3 ? { cps3: cfgObj.expansion.cps3 } : null);
+      const mc = { type: 'mix', mute: pick(lastMix.mute), volume: pick(lastMix.volume) };
+      if (node) node.port.postMessage(mc);
+      else if (nes && typeof nes.applyMix === 'function') nes.applyMix(mc.mute, mc.volume);
+      return;
+    }
     if (machine === 'gb') {
       // 鍵盤表示の expansion.gb({ ch1..ch4 })を本体へ(gbConsole.applyMix)
       const pickGb = (cfgObj) => (cfgObj && cfgObj.expansion && cfgObj.expansion.gb ? { gb: cfgObj.expansion.gb } : null);
@@ -1919,7 +1951,7 @@
       if (msg.volume) { if (msg.volume.apu) MML.Emu.applyVolume(nes.apu.vol, msg.volume.apu); if (a && a.vol && msg.volume.ext) MML.Emu.applyVolume(a.vol, msg.volume.ext); }
     }
   }
-  function recFileName() { return (romName || machine).replace(/\.(nes|fds|rom|mx1|mx2|dsk|gb|gbc|sgb|pce|sgx)$/i, '') + '-rec.vgm'; }
+  function recFileName() { return (romName || machine).replace(/\.(nes|fds|rom|mx1|mx2|dsk|gb|gbc|sgb|pce|sgx|bin|iso|img)$/i, '') + '-rec.vgm'; }
   function toggleRecord() {
     if (recording) {
       recording = false;
@@ -1949,6 +1981,18 @@
       recSfxChk.parentNode.hidden = recLagChk.parentNode.hidden = true;
       recInfoEl.textContent = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (r.samples / 44100).toFixed(1), frames: r.frames, kb: (r.vgm.length / 1024).toFixed(1) });
       recInfoEl.title = T('スーパーゲームボーイの録音には効果音/処理落ちの補正は掛けられません(SNES 側の音と時刻が合わなくなるため)');
+      return;
+    }
+    if (machine === 'cps3') {
+      // CP システム III: VGM に枠が無いので規格外ブロック CP3X(DESIGN-CPS3-CAPTURE.md §3)。波形は実際に読まれた所だけを CD のイメージから入れる
+      // ループを探して(見つかればイントロ+1 周ぶんで切ってループ位置を入れる)、ループが無ければ最後の音の後の無音を切る(vgmRecord.js cps3FindLoop)
+      const r = MML.VGM.encodeCps3Recording({ frames, gfx: cps3Gfx, name: (romName || 'CPS3').replace(/\.(bin|iso|img)$/i, ''), game: cps3Title, creator: 'Sound Emulation Foundry (CPS3)', autoLoop: true, trimSilence: true });
+      recRaw = r.vgm; recVgm = r.vgm;
+      updateRecUi();
+      recSfxChk.parentNode.hidden = recLagChk.parentNode.hidden = true;
+      const base = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (r.samples / 44100).toFixed(1), frames: r.frames, kb: (r.vgm.length / 1024).toFixed(1) });
+      recInfoEl.textContent = base + (r.loop ? ' · ' + T('ループ {start} 秒から {len} 秒', { start: r.loop.startSec.toFixed(1), len: r.loop.lengthSec.toFixed(1) }) : r.trimmed ? ' · ' + T('末尾の無音を切りました') : '');
+      recInfoEl.title = T('CPS3 の録音には、効果音/処理落ちの補正は掛けられません') + ' ' + (r.loop ? T('ループを検出したので、イントロと 1 周ぶんで切ってループ位置を入れました') : T('ループは見つかりませんでした(ループする曲は、2 周目の途中まで録ると検出できます)'));
       return;
     }
     if (machine === 'pce') {
@@ -2206,11 +2250,88 @@
     return ok ? null : nes;
   }
 
+  // ── CP システム III(DESIGN-CPS3-CAPTURE.md §10)──
+  // 入れる物はゲーム CD のイメージ(.bin)と BIOS(0x80000 バイト)。どのゲームかは中身から決まる(cps3Image.js)。
+  // BIOS は IndexedDB(セーブと同じ入れ物、キー cps3.bios.<ゲーム>)に控える。CD のイメージは控えない(毎回入れる)
+  const CPS3_BIOS_KEY = 'cps3.bios.';
+  async function storeCps3BiosFile(bytes, name) {
+    const I = MML.Emu.Cps3 && MML.Emu.Cps3.Image, game = I ? I.identifyBios(bytes) : null;
+    if (!game) return null;
+    await idb((st) => st.put({ data: bytes.slice(), name: name || '', time: Date.now() }, CPS3_BIOS_KEY + game), 'readwrite');
+    if (!ensureDom()) return null;
+    flashStatus(T('CPS3 の BIOS を控えました: {name}({title})', { name: name || '', title: I.NAMES[game] || game }));
+    if (pendingCps3 && pendingCps3.game === game) { const p = pendingCps3; pendingCps3 = null; return openCps3(p.bytes, p.name); }
+    // BIOS だけ先に入れた時: 何も動いていなければ窓を出して、次に入れる物を案内する(窓が閉じたままだと、控えたことが見えない)
+    if (!node && !nes && !pendingCps3) {
+      win.style.display = 'flex';
+      if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
+      const btn = document.querySelector('.toggle-btn[data-target="win-nes"]');
+      if (btn) btn.classList.add('active');
+      machineEl.textContent = 'CPS3'; nameEl.textContent = name || '';
+      if (flashTimer) { clearTimeout(flashTimer); flashTimer = 0; }
+      statusEl.textContent = T('{title} の BIOS を控えました。続けてゲーム CD のイメージ(.bin)を入れてください', { title: I.NAMES[game] || game });
+    }
+    return null;
+  }
+  async function openCps3(bytes, name) {
+    const I = MML.Emu.Cps3 && MML.Emu.Cps3.Image;
+    const pkg = I ? I.unpackCd(bytes) : null;
+    if (!pkg || !pkg.game) throw new Error(T('CPS3 のゲーム CD として読めません'));
+    machine = 'cps3'; pendingFds = null; pendingMsx = null; msxChips = []; msxDisk = false; gbSgb = 0; gbTilt = false;
+    if (NesScreen.onSpcState) NesScreen.onSpcState(null);
+    updateBiosBtn(); updateSoftKbd();
+    if (gbSgbMenuBtn) gbSgbMenuBtn.hidden = true;
+    liveEnd('restart');
+    rewindHoldEnd();
+    await flushBattery(); // 前の ROM のセーブを受け取ってから止める
+    romBytes = null; romName = name || pkg.volume || '';
+    stateKey = 'cps3:' + pkg.game + ':' + pkg.volume;                    // ステートはゲームと CD の版ごと
+    hasBattery = true; batteryKey = 'cps3.eeprom.' + pkg.game;          // EEPROM(設定とハイスコア)はゲームごと。セーブと同じ入れ物に置く
+    const battery = await loadBattery(batteryKey);
+    cps3Gfx = pkg.gfx; cps3Title = pkg.title; cps3Bits = 0;
+    machineEl.textContent = 'CPS3';
+    nameEl.textContent = romName;
+    nameEl.title = 'CP System III — ' + pkg.title;
+    recExtBits = 0; fdsSideInfo = null; diskNames = [];
+    fdsSides = 0; fdsSide = 0; if (sideTimer) { clearTimeout(sideTimer); sideTimer = 0; } updateDiskUi();
+    stopMain(); nes = null; rewindBuf = null;
+    if (recording) { recording = false; recFrames = null; recBase = null; }
+    recVgm = null; recRaw = null; updateRecUi();
+    paused = false; setIcon(pauseBtn, 'pause'); pauseBtn.classList.remove('nes-paused'); acc = 0; fpsCount = 0; fpsMs = 0; frameSeq = 0;
+    win.style.display = 'flex';
+    if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
+    const btn = document.querySelector('.toggle-btn[data-target="win-nes"]');
+    if (btn) btn.classList.add('active');
+    ensureCanvasSize(384, 224);
+    applyCfgLabels();
+    const bios = await loadBattery(CPS3_BIOS_KEY + pkg.game);
+    if (!bios) {
+      // BIOS が無い: 窓を開いて案内し、BIOS が入ったら開き直す
+      pendingCps3 = { bytes, name, game: pkg.game };
+      if (node) { try { node.port.postMessage({ type: 'dispose' }); node.disconnect(); } catch (e) { /* ignore */ } node = null; }
+      statusEl.textContent = T('{title} の BIOS(0x80000 バイト)をこの窓へ入れてください。入れると始まります', { title: pkg.title });
+      if (cps3TestBtn) cps3TestBtn.hidden = true;
+      return null;
+    }
+    pendingCps3 = null;
+    const gfxCopy = pkg.gfx.slice().buffer;   // 音スレッドへ移す分。主スレッドの分は録音を VGM にする時に使う
+    const bat = battery && battery.length === 0x80 ? battery.slice().buffer : null;
+    const load = { type: 'load', machine: 'cps3', rom: null, battery: bat, cps3: { bios: bios.buffer.slice(bios.byteOffset, bios.byteOffset + bios.length), simm1: pkg.simm1.buffer, simm2: pkg.simm2 ? pkg.simm2.buffer : null, gfx: gfxCopy, game: pkg.game } };
+    const ok = await startWorklet(load, [gfxCopy]);
+    if (!ok) { nes = new MML.Emu.Cps3Console(null, { bios, simm1: pkg.simm1, simm2: pkg.simm2, gfx: pkg.gfx, game: pkg.game }); if (battery) nes.setBattery(battery); rewindBuf = MML.Emu.Cps3Rewind ? new MML.Emu.Cps3Rewind(nes) : null; lastPad = -1; lastPad2 = -1; mainFrames = 0; startMain(); }
+    liveBegin();
+    updateStatus();
+    canvas.focus();
+    return ok ? null : nes;
+  }
+
   // 中身の種類(imageDetect.js の kind)→ 開き方。iNES/FDS は open() の本体(NES)で開く
   let openChain = Promise.resolve();
   const OPENERS = {
     'gb': (bytes, name) => openGb(bytes, name),
     'pce': (bytes, name) => openPce(bytes, name),
+    'cps3-cd': (bytes, name) => openCps3(bytes, name),
+    'cps3-bios': (bytes, name) => storeCps3BiosFile(bytes, name), // 控えるだけ(CD が BIOS 待ちなら、そのまま始める)
     'sgb-bios': (bytes, name) => { storeSgbBiosFile(bytes, name); return null; }, // スーパーゲームボーイの BIOS: 控えるだけ
     'fds-bios': (bytes, name) => { storeFdsBiosFile(bytes, name); return null; }, // disksys.rom: 控えるだけ(.rom でも MSX にしない)
     'msx-rom': (bytes, name) => openMsx(bytes, name),

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-16 01:50:49
+ * Built by tools/build-capture-workers.ps1 at 2026-11-17 07:03:48
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-16 01:50:49';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-17 07:03:48';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -82,6 +82,31 @@
     const m = VGM.MSXX.MAGIC;
     return type === VGM.MSXX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
   };
+  // CP システム III の規格外ブロック(DESIGN-CPS3-CAPTURE.md §3)。0x67 0x66 TYPE 長さ 'CP3X' 版 種類 中身…
+  //   種類 0 = ヘッダ: クロック u32(音源に入るクロック。出力レート = クロック/384)、フラグ u8(bit0 = 音源の出力 1 を左へ = MAME の配線)
+  //   種類 1 = 波形: 番地 u32(レジスタに書かれる番地そのまま)+ バイト列(音源が読む順)
+  //   種類 2 = 書き込み: 6 バイト × n。時刻 u16(ブロックの位置からのサンプル数)、レジスタ番号 u16(番地/2)、値 u16。1 フレームに 1 個
+  // VGM に CPS3 の枠は無いので、標準チップのクロック欄は全部 0。このヘッダがあるかどうかで判定する
+  VGM.CP3X = { TYPE: 0xBC, MAGIC: [0x43, 0x50, 0x33, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_ROM: 1, KIND_WRITES: 2, FLAG_OUT1_LEFT: 1 };
+  VGM.isCp3xBlock = function (type, block) {
+    const m = VGM.CP3X.MAGIC;
+    return type === VGM.CP3X.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
+  };
+  // ストリーム先頭のデータブロックに CP3X のヘッダがあれば { clock, flags } を返す(無ければ null)
+  VGM.scanCps3Extension = function (bytes, dataOffset) {
+    let p = dataOffset;
+    while (p + 7 <= bytes.length && bytes[p] === 0x67 && bytes[p + 1] === 0x66) {
+      const type = bytes[p + 2];
+      const size = (bytes[p + 3] | (bytes[p + 4] << 8) | (bytes[p + 5] << 16) | (bytes[p + 6] << 24)) & 0x7FFFFFFF;
+      const block = bytes.subarray(p + 7, p + 7 + size);
+      if (VGM.isCp3xBlock(type, block) && block[5] === VGM.CP3X.KIND_HEADER && block.length >= 11) {
+        return { clock: (block[6] | (block[7] << 8) | (block[8] << 16) | (block[9] << 24)) >>> 0, flags: block[10] };
+      }
+      p += 7 + size;
+    }
+    return null;
+  };
+
   // ストリーム先頭のデータブロックに MSXX のヘッダがあれば { machine, dac } を返す(無ければ null)
   VGM.scanMsxExtension = function (bytes, dataOffset) {
     let p = dataOffset;
@@ -338,6 +363,9 @@
     if (chips.nes) chips.nes.extraChips = VGM.scanNesExtension(bytes, dataOffset);
     const msxx = VGM.scanMsxExtension(bytes, dataOffset); // MSX の DAC(規格外 MSXX)。本ツールの MSX 録音だけが持つ
     const sgb = chips.gb ? VGM.scanSgbExtension(bytes, dataOffset) : false; // スーパーゲームボーイの SNES 側音源(規格外 GBXX)。本ツールの SGB 録音だけが持つ
+    // CP システム III(規格外 CP3X)。標準のクロック欄を持たないので、ここでチップ一覧へ足す(以降は他のチップと同じ経路)
+    const cp3x = usedChips.length ? null : VGM.scanCps3Extension(bytes, dataOffset);
+    if (cp3x) { const info = { id: 'cps3', name: 'CPS3', clock: cp3x.clock, dual: false, impl: true, flags: cp3x.flags }; chips.cps3 = info; usedChips.push(info); }
 
     const gd3Offset = gd3Rel ? 0x14 + gd3Rel : 0;
     const gd3 = gd3Offset ? parseGd3(bytes, gd3Offset) : null;
@@ -12575,6 +12603,216 @@
 })(globalThis);
 
 /*
+ * カプコン CP システム III の音源(16 ボイス、符号付き 8bit PCM)
+ * MML.Emu.Cps3Audio
+ *
+ * 動作は MAME src/mame/capcom/cps3_a.cpp(BSD-3-Clause、THIRD-PARTY-NOTICES.md)の写し。DESIGN-CPS3-CAPTURE.md §2.1。
+ *   出力レート = クロック/384(14.318181MHz → 37286.93Hz)。clock() 1 回 = 1 サンプル
+ *   レジスタは 32bit × 8 本 × 16 ボイス。ここでは 16bit 単位(番号 = 番地/2、上位が偶数)で受ける:
+ *     reg1 = 開始、reg5 = 終了(上下 16bit が入れ替わった形)、reg2 bit0 = ループ有効、
+ *     reg3 上位 = ピッチ(小数 12bit、0x1000 で等速)、reg3 下位+reg4 下位 = ループ位置、
+ *     reg7 = 音量(下位 = 出力 0、上位 = 出力 1、符号付き 16bit)
+ *   キー = 番号 0x100(番地 0x200 の上位)。0→1 で再生位置を 0 に戻す。エンベロープは無い。終端に来てもキーは落ちない
+ *   波形は番地そのまま(0x400000 始まり)で届く。読み順は音源が読む順(VGM の CP3X ブロックがその順で持つ)
+ *
+ * ★鳴らされる波形の約半分は、2 バイトずつ入れ替えた並びのほうが滑らかに見えるが、正しいのはこの読み順
+ *   (市販の移植版に同梱の公式の音と単体で突き合わせて確認。DESIGN-CPS3-CAPTURE.md §2.2)。「直す」と公式の音から離れる。
+ */
+(function (global) {
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const NUM_CH = 16;
+  const SCALE = 1 / (32768 * 256); // MAME の add_int と同じ尺度(サンプル × 音量 ÷ これ)
+
+  class Cps3Audio {
+    /** @param {number} [clock=14318182] - 音源に入るクロック(出力レート = clock/384) */
+    constructor(clock) {
+      this.clockHz = clock || 14318182;
+      this.sampleRate = this.clockHz / 384;
+      this.out1Left = true;              // MAME の配線(出力 1 を左スピーカーへ)。CP3X のヘッダのフラグで決まる
+      this.rom = new Uint8Array(0);      // 波形(romBase 番地が rom[0])
+      this.romBase = 0;
+      this.romXor = 0;                   // 1 にすると 2 バイトずつ入れ替えて読む(CD の並びのままの波形を、写しを作らずに使う時)
+      this.touched = null;               // Uint8Array を置くと、読んだ所(rom 内の位置 ÷ 256)に 1 を立てる(録音に入れる波形の範囲を決める)
+      this.mute = new Array(NUM_CH).fill(false);
+      this.vol = new Array(NUM_CH).fill(1);
+      this._pitchCache = new Map();      // '開始:終了' → { cps, conf, … }(鍵盤表示の音程。波形が入れ替わったら捨てる)
+      this.reset();
+    }
+    reset() {
+      this.regs = new Uint16Array(0x180); // 16bit 単位。ボイス v の reg r の上位 = v*16 + r*2、下位 = +1
+      this.pos = new Uint32Array(NUM_CH);
+      this.frac = new Uint32Array(NUM_CH);
+      this.seq = new Uint32Array(NUM_CH); // キーオンの通番(鍵盤表示とロールが打ち直しを見分ける)
+      this.ended = new Uint8Array(NUM_CH); // ループ無しで終端に来た(キーは立ったまま音は出ない)
+      // キーオンの時点の開始/終了/ループ位置(番地)。鍵盤表示と変換が「どの波形か」を見分けるのに使う。
+      // 音を出す側は MAME と同じくレジスタを毎サンプル読むので、こちらは表示用の控え
+      this.smpStart = new Uint32Array(NUM_CH); this.smpEnd = new Uint32Array(NUM_CH); this.smpLoop = new Uint32Array(NUM_CH);
+      this.key = 0;
+      this.outL = 0; this.outR = 0;
+      this.nat = 0;      // これまでに出したサンプル数
+      this.q = [];       // 待っている書き込み(効かせるサンプル番号、レジスタ番号、値 の 3 つ組)。届いた順に効かせる
+      this.qHead = 0;
+    }
+    /** delay サンプル後に効く書き込みを積む(CP3X の書き込みブロックはフレーム内の時刻つきで届く) */
+    queueWrite(delay, reg, value) {
+      if (delay <= 0 && this.qHead >= this.q.length) { this.write(reg, value); return; }
+      this.q.push(this.nat + Math.max(0, delay), reg, value);
+    }
+    _drain() {
+      const q = this.q;
+      while (this.qHead < q.length && q[this.qHead] <= this.nat) { this.write(q[this.qHead + 1], q[this.qHead + 2]); this.qHead += 3; }
+      if (this.qHead >= q.length) { q.length = 0; this.qHead = 0; }
+    }
+    /** 待っている書き込みを全部効かせる(シークの早送りの終わりなど、時間経過を再現しない所から呼ぶ) */
+    flushWrites() { const q = this.q; for (let i = this.qHead; i < q.length; i += 3) this.write(q[i + 1], q[i + 2]); q.length = 0; this.qHead = 0; }
+    /** 波形を置く。addr = レジスタに書かれる番地そのまま。飛び飛びに何度でも呼べる */
+    loadRom(addr, data) {
+      if (!data || !data.length) return;
+      const lo = this.rom.length ? Math.min(this.romBase, addr) : addr;
+      const hi = Math.max(this.rom.length ? this.romBase + this.rom.length : 0, addr + data.length);
+      if (lo !== this.romBase || hi - lo !== this.rom.length) {
+        const grown = new Uint8Array(hi - lo);
+        grown.set(this.rom, this.rom.length ? this.romBase - lo : 0);
+        this.rom = grown; this.romBase = lo;
+      }
+      this.rom.set(data, addr - this.romBase);
+      this._pitchCache.clear();
+    }
+    /** 16bit 単位の書き込み(reg = 番地/2) */
+    write(reg, value) {
+      value &= 0xFFFF;
+      if (reg < 0x100) { this.regs[reg] = value; return; }
+      if (reg === 0x100) {
+        for (let i = 0; i < NUM_CH; i++) if ((value >> i & 1) && !(this.key >> i & 1)) {
+          this.frac[i] = 0; this.pos[i] = 0; this.ended[i] = 0; this.seq[i]++;
+          this.smpStart[i] = this.startOf(i); this.smpEnd[i] = this.endOf(i); this.smpLoop[i] = this.loopOn(i) ? this.loopOf(i) : 0;
+        }
+        this.key = value;
+      }
+    }
+    // ボイス v の番地類(レジスタの生値から。MAME と同じく毎サンプル読み直す)
+    startOf(v) { const r = v * 16; return ((this.regs[r + 3] << 16) | this.regs[r + 2]) >>> 0; }   // reg1: 下位 16bit が番地の上位
+    endOf(v) { const r = v * 16; return ((this.regs[r + 11] << 16) | this.regs[r + 10]) >>> 0; }   // reg5
+    loopOf(v) { const r = v * 16; return ((this.regs[r + 9] << 16) | this.regs[r + 7]) >>> 0; }    // reg4 下位 : reg3 下位
+    stepOf(v) { return this.regs[v * 16 + 6]; }                                                     // reg3 上位
+    loopOn(v) { return (this.regs[v * 16 + 5] & 1) !== 0; }                                         // reg2 下位 bit0
+    volOf(v, out) { const x = this.regs[v * 16 + (out ? 14 : 15)]; return (x << 16) >> 16; }        // reg7: 上位 = 出力 1、下位 = 出力 0
+
+    clock() {
+      if (this.qHead < this.q.length) this._drain();
+      this.nat++;
+      let o0 = 0, o1 = 0;
+      const rom = this.rom, base = this.romBase, n = rom.length;
+      for (let i = 0; i < NUM_CH; i++) {
+        if (!(this.key >> i & 1)) continue;
+        const start = this.startOf(i), end = this.endOf(i);
+        let p = this.pos[i] + (this.frac[i] >>> 12), fr = this.frac[i] & 0xFFF;
+        if (start + p >= end) {
+          if (this.loopOn(i)) p = (p + this.loopOf(i) - end) >>> 0;
+          else { this.pos[i] = p; this.frac[i] = fr; this.ended[i] = 1; continue; } // MAME は break(この更新でこのボイスは進まない)。次も同じ判定に落ちるので位置は動かさなくてよい
+        }
+        const a = (start + p - base) ^ this.romXor;
+        const s = a >= 0 && a < n ? (rom[a] << 24) >> 24 : 0;
+        if (this.touched && a >= 0 && a < n) this.touched[a >>> 8] = 1;
+        this.pos[i] = p; this.frac[i] = fr + this.stepOf(i);
+        if (this.mute[i]) continue;
+        const g = this.vol[i];
+        o0 += s * this.volOf(i, 0) * g; o1 += s * this.volOf(i, 1) * g;
+      }
+      if (this.out1Left) { this.outL = o1 * SCALE; this.outR = o0 * SCALE; } else { this.outL = o0 * SCALE; this.outR = o1 * SCALE; }
+    }
+    mixSample() { return { left: this.outL, right: this.outR }; }
+
+    // シークの控え(波形は含めない。波形はストリームの先頭で入り、控えから戻す時にはもう入っている)
+    // ── 鍵盤表示・ロール・変換が使う口(QSound と同じ形。src/emulator/expansion/qsound.js)──
+    /** 再生レート(1 秒あたりの波形のバイト数)。ピッチ 0x1000 = 等速(出力レート) */
+    playRate(v) { return this.stepOf(v) / 4096 * this.sampleRate; }
+    // 番地の区間 → -1..1 の波形(最大 64KB)。番地はレジスタの値そのまま(romBase を引いて、必要なら 2 バイトずつ入れ替えて読む)
+    _decodeSample(start, end) {
+      const rom = this.rom, base = this.romBase, x = this.romXor;
+      const n = Math.max(0, Math.min(end, start + 64 * 1024) - start), pcm = new Float32Array(n);
+      for (let i = 0; i < n; i++) { const a = (start + i - base) ^ x; pcm[i] = a >= 0 && a < rom.length ? ((rom[a] << 24) >> 24) / 128 : 0; }
+      return pcm;
+    }
+    /** 波形の基本周期の解析(控えつき)。ループ区間は継ぎ目なく繋がるので、音程が取れない時はループ長から周期を出す(QSound と同じ) */
+    samplePitch(kind, start, end, loop) {
+      if (start === undefined || end === undefined || !(end > start) || !this.rom.length) return null;
+      const key = start + ':' + end;
+      let r = this._pitchCache.get(key);
+      if (r) return r;
+      const U = Emu.SamplePitchUtil;
+      const pcm = this._decodeSample(start, end);
+      let auto = U.detectCps(pcm), wavePcm = pcm;
+      if (auto.conf < 0.5 && loop && loop >= start && loop < end) {
+        const loopLen = end - loop;
+        if (loopLen >= 16 && loopLen <= 16384) { const one = this._decodeSample(loop, end), r2 = U.loopCps(one); if (r2) { auto = r2; wavePcm = one; } }
+      }
+      // 中身のハッシュは「音源が読む順のバイト列」で取る(本体の録音中と VGM の再生とで波形の持ち方が違っても同じ値になるように)
+      const n = Math.min(end - start, 64 * 1024), bytes = new Uint8Array(n);
+      for (let i = 0; i < n; i++) { const a = (start + i - this.romBase) ^ this.romXor; bytes[i] = a >= 0 && a < this.rom.length ? this.rom[a] : 0; }
+      r = { cps: auto.cps, conf: auto.conf, cpsAuto: auto.cps, confAuto: auto.conf, manual: false, hash: U.sampleHash(bytes, 0, n), wave: null, lenBytes: pcm.length };
+      const t = U.getTuningMap()[r.hash];
+      if (t !== undefined && t > 0) { r.cps = t; r.conf = 1; r.manual = true; }
+      r.wave = U.makeSampleWave(wavePcm, r.conf >= 0.5 ? r.cps : 0);
+      U.applyKindOverride(r);
+      this._pitchCache.set(key, r);
+      return r;
+    }
+    /** 打楽器/音階の手動上書き(kind: 'drum' | 'pitch' | null)。QSound と同じ */
+    setSampleKind(sample, kind) {
+      if (!sample) return null;
+      const r = this.samplePitch(sample.kind, sample.start, sample.end);
+      if (!r || !r.hash) return null;
+      Emu.SamplePitchUtil.setKindOverride(r.hash, kind);
+      const needsTuning = kind === 'pitch' && !(r.cps > 0);
+      this._pitchCache.delete(sample.start + ':' + sample.end);
+      return { kind: kind || null, needsTuning };
+    }
+    samplePcm(sample) { return sample ? this._decodeSample(sample.start, sample.end) : null; }
+    /** 手動のピッチ補正。QSound と同じ */
+    setSampleTuning(kind, start, end, cps) {
+      const r = this.samplePitch(kind, start, end);
+      if (!r) return null;
+      const U = Emu.SamplePitchUtil, map = U.getTuningMap();
+      if (cps && cps > 0) { map[r.hash] = cps; r.cps = cps; r.conf = 1; r.manual = true; }
+      else { delete map[r.hash]; r.cps = r.cpsAuto; r.conf = r.confAuto; r.manual = false; }
+      U.saveTuningMap(map);
+      r.wave = U.makeSampleWave(this._decodeSample(start, end), r.conf >= 0.5 ? r.cps : 0);
+      return r;
+    }
+
+    getState() { return { smpStart: this.smpStart.slice(), smpEnd: this.smpEnd.slice(), smpLoop: this.smpLoop.slice(), regs: this.regs.slice(), pos: this.pos.slice(), frac: this.frac.slice(), seq: this.seq.slice(), ended: this.ended.slice(), key: this.key, outL: this.outL, outR: this.outR, nat: this.nat, q: this.q.slice(this.qHead) }; }
+    setState(s) { if (s.smpStart) { this.smpStart.set(s.smpStart); this.smpEnd.set(s.smpEnd); this.smpLoop.set(s.smpLoop); } this.regs.set(s.regs); this.pos.set(s.pos); this.frac.set(s.frac); this.seq.set(s.seq); this.ended.set(s.ended); this.key = s.key; this.outL = s.outL; this.outR = s.outR; this.nat = s.nat; this.q = s.q.slice(); this.qHead = 0; }
+  }
+
+  // 鍵盤表示用のスナップショット(QSound と同じ形の配列 16 要素)。
+  //   音量は 16bit 符号付きが 2 つ(出力 0 と出力 1)。大きいほうの絶対値を音量、左右はその比で出す(左右の配線は out1Left)
+  //   発音中 = キーが立っていて、終端に来ておらず、ピッチと音量が 0 でない(この音源はキーが立ったまま終端で黙る)
+  Emu.snapshotCps3 = function (chip) {
+    const out = [];
+    for (let i = 0; i < NUM_CH; i++) {
+      const v0 = chip.volOf(i, 0), v1 = chip.volOf(i, 1), a0 = Math.abs(v0), a1 = Math.abs(v1), raw = Math.max(a0, a1);
+      const rate = chip.playRate(i), seq = chip.seq[i];
+      const start = chip.smpStart[i], end = chip.smpEnd[i], loopAt = chip.smpLoop[i];
+      const p = seq ? chip.samplePitch('cps3', start, end, loopAt) : null;
+      const lenBytes = p ? p.lenBytes : Math.max(0, end - start), loop = loopAt > 0;
+      const l = chip.out1Left ? a1 : a0, r = chip.out1Left ? a0 : a1;
+      out.push({ active: !!(chip.key >> i & 1) && !chip.ended[i] && rate > 0 && raw > 0, vol: Math.min(1, raw / 0x8000), rawVol: raw, rawVolMax: 0x7FFF, lrWide: true,
+        panL: raw ? Math.round(l / raw * 15) : 0, panR: raw ? Math.round(r / raw * 15) : 0,
+        rate, seq, loop, lenSec: loop ? Infinity : (rate > 0 ? lenBytes / rate : 0),
+        pitchHz: p ? p.cps * rate : 0, pitchConf: p ? p.conf : 0, pitchManual: !!(p && p.manual), sampleKind: p ? (p.kindManual || 'auto') : 'auto', sampleHash: p ? p.hash : null,
+        waveData: p ? p.wave : null,
+        sample: seq ? { kind: 'cps3', start, end } : null });
+    }
+    return out;
+  };
+
+  Emu.Cps3Audio = Cps3Audio;
+})(globalThis);
+
+/*
  * OKI MSM6295 (OKIM6295) 4ch ADPCM 音源 (VGM: chip 'okim6295'。東亜プラン2/ライジング/
  * NMK/データイースト/アイレム等、90年代アーケードの定番PCM。YM2151等とペアが多い。
  * Battle Garegga / Armed Police Batrider / Truxton II / Batsugun 等)
@@ -13417,7 +13655,7 @@
   // ★psx だけ実機ボイス(24)より多い32本: ドライバ内部のトラックで束ねると、トラック数+和音の分で24本を超える
   //   (babel14 で30本。24本に押し込むと別トラックのレーンを使い回してレーン純度が100%→83%に落ちる)。
   //   実機スロット表示のスナップショットは24要素のまま(鍵盤の行数はスナップショットの長さに従う)
-  Emu.POOL_CHIP_CHANNELS = { multipcm: 28, segapcm: 16, c140: 24, c352: 32, qsound: 16, psx: 32 };
+  Emu.POOL_CHIP_CHANNELS = { multipcm: 28, segapcm: 16, c140: 24, c352: 32, qsound: 16, psx: 32, cps3: 16 };
 
   Emu.PoolChannelRegrouper = class {
     constructor(numCh) {
@@ -16475,7 +16713,7 @@
   // 正しいのに音量が全区間でちょうど2倍だった(Rave Racer 3曲)。1.0ではナムコSystem 22/NB系の全曲がリミッタ前で
   // ピーク1.0超(1.0〜2.1)・RMS -9.5〜-17dBFS と他のナムコ作品(C140のワルキューレ -18〜-20dBFS)より6〜8dB大きく、
   // 大きい所をリミッタが押しつぶしていた。0.5でVGMPlayと同じ比率になり、ピークは0.49〜1.06に収まる
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0, k007232: 1.6, msm5205: 1.45, k054539: 2.4 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0, k007232: 1.6, msm5205: 1.45, k054539: 2.4, cps3: 1.6 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -16945,6 +17183,40 @@
     };
   }
 
+  // CP システム III(規格外 CP3X ブロック、DESIGN-CPS3-CAPTURE.md §3): 16 ボイス PCM(expansion/cps3.js)。
+  // 書き込みは 1 フレーム 1 ブロックで、フレーム内の時刻つきで届く。「音源の何サンプル目の前に効くか」を保つ決まり
+  // (n = floor(VGM のサンプル位置 × 出力レート / 44100))なので、ブロックの位置から数えた音源のサンプル数に直して音源側の待ち行列へ積む。
+  // clock() を回さない経路(先読みキャプチャ、シークの早送り)では advanceVgm で音源を進める(終端に来たかどうかが位置で決まるため)
+  function makeCps3Adapter(info) {
+    const chip = new Emu.Cps3Audio(info.clock);
+    chip.out1Left = !!((info.flags || 0) & 1);
+    const perVgm = chip.sampleRate / VGM_RATE;
+    // ★音源のサンプルの刻みと VGM の位置の関係(端数 = accum)は、どの経路でも同じでないといけない。ずれると、ブロックの位置から数えた
+    //   待ちが 1 サンプル前後して、キーオンの位置が頭から鳴らした時と変わる(実測: シーク後の 9 割のサンプルが不一致)。
+    //   なので早送りも accum を使い、シークの控えにも accum を入れる(控えは chip.getState が取るので、そこへ添える)
+    const gs = chip.getState.bind(chip), ss = chip.setState.bind(chip);
+    const a = {
+      id: 'cps3', clockHz: chip.sampleRate, accum: 0, chip, gain: CHIP_GAIN.cps3,
+      loadRom(addr, data) { chip.loadRom(addr, data); },
+      queueWrites(block, vgmPos, speed) {
+        const base = Math.floor(vgmPos * perVgm), sp = speed > 0 ? speed : 1;
+        for (let p = 6; p + 6 <= block.length; p += 6) {
+          const t = block[p] | (block[p + 1] << 8), reg = block[p + 2] | (block[p + 3] << 8), value = block[p + 4] | (block[p + 5] << 8);
+          const d = Math.floor((vgmPos + t) * perVgm) - base;
+          chip.queueWrite(sp === 1 ? d : Math.floor(d / sp), reg, value);
+        }
+      },
+      clock() { chip.clock(); },
+      advanceVgm(n) { this.accum += n * perVgm; let c = Math.floor(this.accum); this.accum -= c; while (c-- > 0) chip.clock(); },
+      mix(out) { out[0] += chip.outL * this.gain; out[1] += chip.outR * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.cps3) Emu.applyMute(chip.mute, e.cps3); },
+      applyVolume(v) { const e = v.expansion || v; if (e.cps3) Emu.applyVolume(chip.vol, e.cps3); }
+    };
+    chip.getState = () => { const s = gs(); s.accum = a.accum; return s; };
+    chip.setState = (s) => { ss(s); a.accum = s.accum || 0; };
+    return a;
+  }
+
   // MultiPCM(セガModel 1/2/Multi 32の28ch PCM): expansion/multipcm.js。コマンドは
   // 0xB5 aa dd(aa=ポート0-2、bit7=デュアル2個目)、バンクは0xC3 cc bbaa(専用case)、
   // ROMはデータブロック0x89。
@@ -17087,7 +17359,8 @@
     ga20: makeGa20Adapter, segapcm: makeSegaPcmAdapter, c140: makeC140Adapter,
     c352: makeC352Adapter, okim6258: makeOkim6258Adapter, qsound: makeQsoundAdapter,
     okim6295: makeOkim6295Adapter, multipcm: makeMultiPcmAdapter,
-    k007232: makeK007232Adapter, msm5205: makeMsm5205Adapter, k054539: makeK054539Adapter
+    k007232: makeK007232Adapter, msm5205: makeMsm5205Adapter, k054539: makeK054539Adapter,
+    cps3: makeCps3Adapter
   };
 
   // ---------------------------------------------------------------------------
@@ -17425,6 +17698,13 @@
       if (type === 0xC2) { // NES APU RAM書込み: 先頭2バイト=開始アドレス
         const nes = ad('nes');
         if (nes && block.length >= 2) nes.ramWrite(block[0] | (block[1] << 8), block.subarray(2));
+      }
+      // CP システム III(規格外 CP3X): 種類 1 = 波形(番地 4 バイト+中身)、種類 2 = 書き込み列。ヘッダ(種類 0)は parseHeader が先読み済み
+      if (MML.VGM && MML.VGM.isCp3xBlock && MML.VGM.isCp3xBlock(type, block)) {
+        const a = this.adapterById.cps3, C = MML.VGM.CP3X;
+        if (a && block[5] === C.KIND_ROM && block.length >= 10) a.loadRom((block[6] | (block[7] << 8) | (block[8] << 16) | (block[9] << 24)) >>> 0, block.subarray(10));
+        else if (a && block[5] === C.KIND_WRITES) a.queueWrites(block, this.samplePos, this.speedFactor);
+        return;
       }
       // スーパーゲームボーイの SNES 側音源(規格外 GBXX 種類 1): 下位種別 0 = 像、1 = APU ポートへの書き込み。種類 2 はカートリッジ内ブザー
       if (MML.VGM && MML.VGM.isGbxxBlock && MML.VGM.isGbxxBlock(type, block)) {
@@ -17910,6 +18190,7 @@
       c352: has('c352') ? { snapshots: [], logical: [] } : null,
       okim6258: has('okim6258') ? { snapshots: [] } : null,
       qsound: has('qsound') ? { snapshots: [], logical: [] } : null,
+      cps3: has('cps3') ? { snapshots: [], logical: [] } : null,
       okim6295: has('okim6295') ? { snapshots: [] } : null,
       // multipcm: snapshots=物理スロット(実機のまま)、logical=割当逆算(ソフトウェア
       // チャンネル合成)。チャンネルプール式ドライバ対策で両方を常時保持し、
@@ -17970,6 +18251,7 @@
     const c140Regrouper = data.c140 ? new Emu.PoolChannelRegrouper(24) : null;
     const c352Regrouper = data.c352 ? new Emu.PoolChannelRegrouper(32) : null;
     const qsRegrouper = data.qsound ? new Emu.PoolChannelRegrouper(16) : null;
+    const cps3Regrouper = data.cps3 ? new Emu.PoolChannelRegrouper(16) : null;
     let kssFrameWrites = [];
     let kss2FrameWrites = []; // 2個目のPSG(data.kss2)
     const nesRegs = {};
@@ -18218,6 +18500,12 @@
         data.qsound.snapshots.push(s);
         data.qsound.logical.push(qsRegrouper.step(s));
       }
+      if (data.cps3) {
+        // CPS3: 先読みでも音源を実際に進めている(アダプタの advanceVgm)ので、終端に来たかどうかは音源が知っている。QSound のような窓での打ち切りは要らない
+        const s = Emu.snapshotCps3(player.adapterById.cps3.chip);
+        data.cps3.snapshots.push(s);
+        data.cps3.logical.push(cps3Regrouper.step(s));
+      }
       if (data.multipcm) {
         const s = Emu.snapshotMultiPCM(player.adapterById.multipcm.chip);
         const st = mpcmState;
@@ -18400,7 +18688,7 @@
       ['ga20', (s) => s, 'ga20'], ['k007232', (s) => s, 'k007232'], ['k054539', (s) => s, 'k054539'],
       ['segapcm', (s) => s, 'segapcm'],
       ['c140', (s) => s, 'c140'], ['c352', (s) => s, 'c352'],
-      ['qsound', (s) => s, 'qsound'], ['okim6295', (s) => s, 'okim6295'],
+      ['qsound', (s) => s, 'qsound'], ['cps3', (s) => s, 'cps3'], ['okim6295', (s) => s, 'okim6295'],
       ['multipcm', (s) => s, 'multipcm'],
       // ★YM2610/YM2608のアダプタはチップを .chip ではなく .fm で持つ(SSGと2個持ちのため)
       ['ym2610fm', (s) => (s && s.adpcmA ? s.adpcmA.concat(s.adpcmB ? [s.adpcmB] : []) : null), 'ym2610', (a) => a.fm],
@@ -18812,7 +19100,7 @@
   // note列クリックで「打楽器/音階の指定」を出す行(サンプルPCM系のチャンネル)。
   // NA/NB=YM2610 ADPCM、GA=GA20、SP=SegaPCM、CN=C140、CS=C352、QS=QSound、
   // OK=OKIM6295、MP=MultiPCM
-  const SAMPLE_ROW_RE = /^(N[AB]\d?|GA\d|SP\d+|CN\d+|CS\d+|QS\d+|OK\d|MP\d+)$/;
+  const SAMPLE_ROW_RE = /^(N[AB]\d?|GA\d|SP\d+|CN\d+|CS\d+|QS\d+|C3\d+|OK\d|MP\d+)$/;
 
   function drumLaneX(lane, sub, subN, laneW) {
     const n = Math.max(1, subN || 1);
@@ -19041,6 +19329,9 @@
     // VGM: QSound(QS1-16)。chip.mute[]はch 0-15
     const qs = id.match(/^QS(\d+)$/);
     if (qs) return { section: 'expansion', chip: 'qsound', type: 'array', index: +qs[1] - 1 };
+    // VGM: CP システム III(C31-C316)。chip.mute[] は声 0-15
+    const c3 = id.match(/^C3(\d+)$/);
+    if (c3) return { section: 'expansion', chip: 'cps3', type: 'array', index: +c3[1] - 1 };
     // VGM: OKIM6295(OK1-4)。chip.mute[]はch 0-3('OKI'=OKIM6258は上の完全一致で先に拾われる)
     const ok = id.match(/^OK(\d)$/);
     if (ok) return { section: 'expansion', chip: 'okim6295', type: 'array', index: +ok[1] - 1 };
@@ -19115,6 +19406,7 @@
     // poolModes: 表示モード切替の段(既定は2段 logical/phys)。PSF はドライバ内部トラック単位の「トラック」を先頭に足す
     { header: 'SPU (CXD2922 , PlayStation)', prefix: 'PX', name: (id) => 'V' + (+id.slice(2) - 1), pool: 'psx', poolModes: ['track', 'logical', 'phys'] },
     { header: 'QSound (DL-1425 , Capcom CPS2)', prefix: 'QS', name: (id) => 'PCM' + id.slice(2), pool: 'qsound' },
+    { header: 'CPS3 (Capcom CP System III)', prefix: 'C3', name: (id) => 'PCM' + id.slice(2), pool: 'cps3' },
     // ★prefix 'OK' は 'OKI'(OKIM6258)にも前方一致するが、完全一致(ids)が全グループ横断で
     //   先に評価されるので衝突しない(getChannelDisplayの2段ループ参照)
     { header: 'OKIM6295 (MSM6295 , Toaplan / Raizing etc.)', prefix: 'OK', name: (id) => 'ADPCM' + id.slice(2) },
@@ -20451,6 +20743,23 @@
       }
     }
 
+    if (chips.includes('cps3')) {
+      // CP システム III(規格外ブロック CP3X の VGM): 16 声の PCM。QSound と同じ 3 段階表示(音程が取れれば音名、取れなければ「サンプル」行)
+      const live = extraSnaps && extraSnaps.cps3Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.cps3 ? extraSnaps.cps3[frameIdx] : null);
+      const c3Wave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 16; ch++) {
+        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (20 + ch * 7) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `C3${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0x7FFF,
+          wave: c3Wave(c), active: !!c.active, ...panVolFields(c),
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
     if (chips.includes('qsound')) {
       // QSound(VGM: カプコンCPS1ダッシュ/CPS2): 16ch PCM。CS/SP/GA行と同じ3段階表示
       // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。
@@ -20988,6 +21297,25 @@
   // PC エンジンの書き込み列 [{addr(音源のレジスタ 0-9 = $0800-$0809), value}] を本物の音源に流し、鍵盤行の値(Emu.snapshotHuC6280Apu)を返す。
   // PC エンジンのゲーム画面のライブ表示(DESIGN-PCE-CAPTURE.md §6、9c)が使う。行は HES と同じ。
   // 番地 0-9 で来るのは録音(pceConsole.js)の形。鍵盤に出すのはレジスタの値だけなので、音源の時計は進めない
+  // CP システム III のゲーム画面(nesScreen.js toLiveWrites): 書き込みは { addr: 0x30000 + レジスタ番号, value, n }(n = 音源の通算サンプル番号)、
+  // フレームの終わりは { addr: 0x3FFFF, n }。音源のモデルを n まで進めてから書き込みを当てる(終端に来たかどうかは位置で決まるので、進めないと分からない)。
+  // rom は波形(CD の並びのまま。番地 0x400000 が先頭、読む時に 2 バイトずつ入れ替える)
+  function makeCps3Stepper(rom) {
+    const E = MML.Emu;
+    const chip = E.Cps3Audio ? new E.Cps3Audio() : null;
+    if (chip) { chip.rom = rom || new Uint8Array(0); chip.romBase = 0x400000; chip.romXor = 1; }
+    let started = false;
+    return (writes) => {
+      if (!chip) return null;
+      for (const w of writes) {
+        if (!(w.addr >= 0x30000 && w.addr <= 0x3FFFF)) continue;
+        if (!started) { chip.nat = w.n; started = true; }
+        let guard = 4096; while (chip.nat < w.n && guard-- > 0) chip.clock();   // 1 フレームは 626 サンプルほど
+        if (w.addr !== 0x3FFFF) chip.write(w.addr - 0x30000, w.value);
+      }
+      return E.snapshotCps3(chip);
+    };
+  }
   function makePceStepper() {
     const E = MML.Emu;
     const apu = E.APUHuC6280 ? new E.APUHuC6280() : null;
@@ -23869,13 +24197,13 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'k007232', 'k054539', 'qsound', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'k007232', 'k054539', 'qsound', 'cps3', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       // ★L/R列に16bitの実レジスタを出す音源は列ごと広げる(2026-09-17のユーザー合意)。
       //   PSX=VOLL/VOLR(-32768..32767) / QSound=パン(0x110-0x130) / C352=前後4値の併記。
       //   曲頭はスナップショットがまだ無く行データからは判定できないので、**チップ構成で決める**
       //   (PAN_CHIPS と同じ考え方。列は縦に揃っていないと読めないので一覧まるごと切り替える)
-      const LR_WIDE_CHIPS = ['psx', 'qsound', 'c352'];
+      const LR_WIDE_CHIPS = ['psx', 'qsound', 'c352', 'cps3'];
       this._leftEl.classList.toggle('kbd-left--lrwide', LR_WIDE_CHIPS.some(c => this._chips.includes(c)));
       this._extraSnaps = {};
       const wl = result.writeLog || [];
@@ -23913,6 +24241,7 @@
       this._extraSnaps.psxLive = typeof result.getPsx === 'function' ? result.getPsx : null;
       this._extraSnaps.okim6258Live = typeof result.getOkim6258 === 'function' ? result.getOkim6258 : null;
       this._extraSnaps.qsoundLive = typeof result.getQsound === 'function' ? result.getQsound : null;
+      this._extraSnaps.cps3Live = typeof result.getCps3 === 'function' ? result.getCps3 : null;
       this._extraSnaps.okim6295Live = typeof result.getOkim6295 === 'function' ? result.getOkim6295 : null;
       this._extraSnaps.multipcmLive = typeof result.getMultiPcm === 'function' ? result.getMultiPcm : null;
       this._extraSnaps.pwmLive = typeof result.getPwm === 'function' ? result.getPwm : null;
@@ -24006,6 +24335,8 @@
       if (this._chips.includes('kss')) { steppers.kss = makeKssStepper(this._chips); ex.kssPsg = []; ex.kssScc = []; ex.kssOpll = []; ex.kssDac = []; ex.opl = []; } // MSX のゲーム画面(KSS 形式の書き込み列)
       if (this._chips.includes('gbs')) { steppers.gb = makeGbStepper(); ex.gbsApu = []; } // GB のゲーム画面
       if (this._chips.includes('hes')) { steppers.pce = makePceStepper(); ex.hesApu = []; } // PC エンジンのゲーム画面
+      const cps3Rom = (opts && opts.cps3Rom) || null;
+      if (this._chips.includes('cps3')) { steppers.cps3 = makeCps3Stepper(cps3Rom); ex.cps3 = []; } // CPS3 のゲーム画面
       // Live系(再生中のチップを直接読む関数)はライブ表示には無い(あっても全フレームが同じ値になる)
       for (const k of Object.keys(ex)) if (/Live$/.test(k)) ex[k] = null;
       ex.apuEnv = null;
@@ -24015,7 +24346,7 @@
       const regs = Object.assign({}, (opts && opts.initRegs) || {});
       if (initWrites) for (const w of initWrites) if (!w.read && regs[w.addr] === undefined) regs[w.addr] = w.value;
       if (regs[0x4015] === undefined) regs[0x4015] = 0x0F; // 書かれない曲もあるので「全ch有効」を既定に(VGM 経路と同じ)
-      this._liveRoll = { builder, steppers, regs, lastRangeOpened: 0, lastRangeMs: 0, lastDrumOpened: 0 };
+      this._liveRoll = { builder, steppers, regs, lastRangeOpened: 0, lastRangeMs: 0, lastDrumOpened: 0, cps3Rom };
       this._rollPastKeep = false;
       this._rollTimeline = builder.timeline();
       this._rollCursor = {};
@@ -24044,6 +24375,7 @@
       if (lr.steppers.kss) { const k = lr.steppers.kss(writes); ex.kssPsg[f] = k.psg; ex.kssScc[f] = k.scc; ex.kssOpll[f] = k.opll; ex.kssDac[f] = k.dac; ex.opl[f] = k.opl; }
       if (lr.steppers.gb) ex.gbsApu[f] = lr.steppers.gb(writes);
       if (lr.steppers.pce) ex.hesApu[f] = lr.steppers.pce(writes);
+      if (lr.steppers.cps3) ex.cps3[f] = lr.steppers.cps3(writes);
       const channels = extractChannels(st.regSnapshots[f], ex, f, this._chips);
       lr.builder.feed(channels, f);
       // 打点(DPCM 等の drumKey つき)が新しく始まったらドラム区画を組み直す(区画が無いと打点は描かれない。
@@ -24081,9 +24413,10 @@
       if (f === st.totalFrames) return;
       st.writeLog.length = f; st.regSnapshots.length = f; st.totalFrames = f;
       const ex = this._extraSnaps;
-      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu']) if (ex[k]) ex[k].length = f;
+      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu', 'cps3']) if (ex[k]) ex[k].length = f;
       if (lr.steppers.gb) lr.steppers.gb = makeGbStepper();
       if (lr.steppers.pce) lr.steppers.pce = makePceStepper();
+      if (lr.steppers.cps3) lr.steppers.cps3 = makeCps3Stepper(lr.cps3Rom);
       if (lr.steppers.vrc7) lr.steppers.vrc7 = makeVrc7Stepper();
       if (lr.steppers.n163) lr.steppers.n163 = makeN163Stepper();
       if (lr.steppers.fme7) lr.steppers.fme7 = makeFme7Stepper();
@@ -32712,7 +33045,7 @@
     }
     // スナップショット型チップ: extractChannels(keyboard.js)が読むextraSnapsに
     // フレーム毎スナップショット配列を渡して同じ抽出経路でトラック化する
-    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'k007232', 'k054539', 'msm5205', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'k007232', 'k054539', 'msm5205', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'cps3', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
     const chipToken = { sn: 'sn76489' };
     const poolMode = (opts && opts.poolMode) || {};
     for (const key of snapChips) {

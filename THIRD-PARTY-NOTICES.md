@@ -72,6 +72,8 @@
 | Sega MultiPCM | MAME `multipcm.cpp`（ElSemiコア） | `src/emulator/expansion/multipcm.js` |
 | Sega PCM | MAME `segapcm.cpp` | `src/emulator/expansion/segapcm.js` |
 | Capcom QSound | 旧MAME / VGMPlay の HLE `qsound.c` | `src/emulator/expansion/qsound.js` |
+| Capcom CP System III | MAME `cps3_a.cpp`（Copyright David Haywood, Andreas Naive, Tomasz Slanina, ElSemi。BSD-3-Clause） | `src/emulator/expansion/cps3.js` |
+| Capcom CP System III 本体 / Hitachi SH-2 | MAME `cps3.cpp`（同上）、`cpu/sh/sh.cpp` / `sh2.cpp` / `sh7604.cpp`（Copyright R. Belmont, Juergen Buchmueller ほか。BSD-3-Clause）、`machine/intelfsh.cpp` | `src/emulator/cps3/sh2.js`, `cps3Machine.js` |
 | Irem GA20 | MAME `iremga20.cpp` | `src/emulator/expansion/ga20.js` |
 | OKIM6258 / OKIM6295 | MAME `okim6258.cpp` / `okim6295.cpp`、VGMPlay `okim6258.c` (Valley Bell) | `src/emulator/expansion/okim6258.js`, `okim6295.js` |
 | RF5C164 | MAME `rf5c68.cpp` | `src/emulator/expansion/rf5c164.js` |

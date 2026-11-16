@@ -129,6 +129,7 @@ $bundles = @(
             'src\emulator\expansion\c352.js',
             'src\emulator\expansion\okim6258.js',
             'src\emulator\expansion\qsound.js',
+            'src\emulator\expansion\cps3.js',
             'src\emulator\expansion\okim6295.js',
             'src\emulator\expansion\multipcm.js',
             'src\emulator\expansion\k007232.js',
@@ -266,6 +267,12 @@ $bundles = @(
             'src\emulator\pce\card.js',
             'src\emulator\pce\pceConsole.js',
             'src\emulator\pce\pceState.js',
+            # CP System III (DESIGN-CPS3-CAPTURE.md stage 10d)
+            'src\emulator\expansion\cps3.js',
+            'src\emulator\cps3\sh2.js',
+            'src\emulator\cps3\cps3Machine.js',
+            'src\emulator\cps3\cps3Console.js',
+            'src\emulator\cps3\cps3State.js',
             'src\audio\nes-worklet-impl.js'
         )
     },

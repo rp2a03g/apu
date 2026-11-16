@@ -126,7 +126,7 @@
     const data = vgmCaptureMirror && vgmCaptureMirror.data;
     if (!fn || !data) return null;
     const refs = {};
-    for (const key of ['ga20', 'k007232', 'k054539', 'segapcm', 'c140', 'c352', 'qsound', 'okim6295', 'multipcm', 'psx']) {
+    for (const key of ['ga20', 'k007232', 'k054539', 'segapcm', 'c140', 'c352', 'qsound', 'cps3', 'okim6295', 'multipcm', 'psx']) {
       const e = data[key];
       if (e && Array.isArray(e.snapshots) && e.snapshots.length) refs[key] = fn(e.snapshots);
     }
@@ -1752,7 +1752,7 @@
       return out;
     };
     const CHIP_OF_DATA = { ga20: 'ga20', k007232: 'k007232', k054539: 'k054539', segapcm: 'segapcm', c140: 'c140', c352: 'c352',
-                          qsound: 'qsound', okim6295: 'okim6295', multipcm: 'multipcm', ym2610fm: 'ym2610', ym2608fm: 'ym2608' };
+                          qsound: 'qsound', cps3: 'cps3', okim6295: 'okim6295', multipcm: 'multipcm', ym2610fm: 'ym2610', ym2608fm: 'ym2608' };
     return {
       format: 'vgm',
       frameRate: MML.Emu.VGM_FRAME_RATE,
@@ -1833,6 +1833,8 @@
       ? (p && p.adapterById.c352 && p.adapterById.c352.chip)
       : smp.kind === 'qsound'
       ? (p && p.adapterById.qsound && p.adapterById.qsound.chip)
+      : smp.kind === 'cps3'
+      ? (p && p.adapterById.cps3 && p.adapterById.cps3.chip)
       : smp.kind === 'okim6295'
       ? (p && p.adapterById.okim6295 && p.adapterById.okim6295.chip)
       : smp.kind === 'multipcm'
@@ -2217,7 +2219,7 @@
     //   liveRoll.frameDur を参照すると TypeError → monitorLoop の例外で全描画が永久停止する(実測で踏んだ)。
     //   フレーム数は鍵盤表示が数える(setSource は state を複製するので state.totalFrames は増えない。これも実測で踏んだ)
     setMonitorSource(state, () => keyboardDisplay.liveFrameCount() * frameDur, chips);
-    keyboardDisplay.liveRollBegin({ initRegs: info.initRegs || {}, initWrites: info.initWrites || null });
+    keyboardDisplay.liveRollBegin({ initRegs: info.initRegs || {}, initWrites: info.initWrites || null, cps3Rom: info.cps3Rom || null }); // cps3Rom: CPS3 のゲーム画面の波形(鍵盤表示が音程を解析するのに要る)
     keyboardDisplay.setSourceInfo('live', info.name || 'LIVE');
   }
   function liveRollFrame(writes) {
@@ -9638,6 +9640,7 @@
     if (h.chips.c352) chips.push('c352');
     if (h.chips.okim6258) chips.push('okim6258');
     if (h.chips.qsound) chips.push('qsound');
+    if (h.chips.cps3) chips.push('cps3');
     if (h.chips.okim6295) chips.push('okim6295');
     if (h.chips.multipcm) chips.push('multipcm');
     if (h.chips.ym2610) { chips.push('ym2610fm'); chips.push('kssPsg'); } // SSGはKSS PSG行(KP1-3)を流用
@@ -9659,7 +9662,7 @@
   // 他はペア交互でも音符ストリームはほぼ安定と実測されたため実機スロット既定
   // (Outfoxies等のマルチサンプル曲では合成が僅かに劣るケースもある。トグルで曲別に選ぶ)
   // psx は 'track'(ドライバ内部トラック×声部、Emu.PsfTrackVoicer)/'logical'/'phys' の3段
-  const POOL_CHIP_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', c140: 'phys', segapcm: 'phys', psx: 'track' };
+  const POOL_CHIP_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', cps3: 'phys', c140: 'phys', segapcm: 'phys', psx: 'track' };
   const vgmPoolModes = (() => {
     let modes;
     try { modes = Object.assign({}, POOL_CHIP_DEFAULTS, JSON.parse(localStorage.getItem(POOL_MODE_KEY) || '{}')); }
@@ -9760,6 +9763,7 @@
 ,
     getOkim6258: () => { const a = vgmAdapter('okim6258'); return a ? MML.Emu.snapshotOKIM6258(a.chip) : null; }
 ,
+    getCps3: () => { const a = vgmAdapter('cps3'); return a ? poolLive('cps3', MML.Emu.snapshotCps3(a.chip)) : null; },
     getQsound: () => { const a = vgmAdapter('qsound'); return a ? poolLive('qsound', MML.Emu.snapshotQSound(a.chip)) : null; }
 ,
     getOkim6295: () => { const a = vgmAdapter('okim6295'); return a ? MML.Emu.snapshotOKIM6295(a.chip) : null; }
@@ -9899,7 +9903,7 @@
       getC140: liveVgm.getC140,
       getC352: liveVgm.getC352,
       getOkim6258: liveVgm.getOkim6258,
-      getQsound: liveVgm.getQsound,
+      getQsound: liveVgm.getQsound, getCps3: liveVgm.getCps3,
       getOkim6295: liveVgm.getOkim6295,
       getMultiPcm: liveVgm.getMultiPcm,
       getPwm: liveVgm.getPwm,
@@ -9969,7 +9973,7 @@
   function updateVgmDrumSamples(data) {
     const out = {};
     const CH = [['ga20', 4, 'pcm'], ['k007232', 2, 'pcm'], ['k054539', 16, 'pcm'], ['segapcm', 16, 'pcm'], ['c140', 24, 'pcm'], ['c352', 32, 'pcm'],
-                ['qsound', 16, 'pcm'], ['okim6295', 4, 'pcm'], ['multipcm', 28, 'pcm'],
+                ['qsound', 16, 'pcm'], ['cps3', 16, 'pcm'], ['okim6295', 4, 'pcm'], ['multipcm', 28, 'pcm'],
                 ['ym2610fm', 6, 'adpcmA'], ['ym2608fm', 6, 'adpcmA'],
                 ['ym2610fm', 1, 'adpcmB'], ['ym2608fm', 1, 'adpcmB']]; // ADPCM-B は snapshot.adpcmB の1本
     for (const [key, n, shape] of CH) {
@@ -10579,12 +10583,16 @@
       // 拡張子がゲームの物か、拡張子が無い物は中身で見分ける(MML.Emu.Image。アーカイブの中の拡張子無しディスク画像など)
       const Image = MML.Emu.Image;
       const gameExt = Image ? Image.GAME_EXTS.includes(ext) : (ext === 'nes' || ext === 'fds' || ext === 'rom' || ext === 'mx1' || ext === 'mx2' || ext === 'dsk');
-      if (gameExt || (Image && !file.name.includes('.'))) {
+      // CPS3 の CD イメージ(.bin など)と BIOS(.u2)は拡張子がありふれているので、大きさで当たりを付けてから中身で見分ける
+      // BIOS は拡張子を問わない(.u2、.bios、.bin…。抽出ツールごとに名前が違う)。ちょうど 0x80000 バイトの物は中身を見て、CPS3 の BIOS の時だけゲーム画面へ回す
+      const cps3Ext = !!(Image && Image.CPS3_EXTS && (file.size === 0x80000 || (Image.CPS3_EXTS.includes(ext) && file.size >= 0x1000000)));
+      const cps3Only = cps3Ext && !gameExt && file.name.includes('.'); // 大きさだけで拾った物: CPS3 と分かった時だけ使う(他の形式の 512KB のファイルを横取りしない)
+      if (gameExt || cps3Ext || (Image && !file.name.includes('.'))) {
         const bytes = new Uint8Array(await file.arrayBuffer());
         const img = Image ? Image.detect(bytes, file.name) : null;
         // 拡張子が .pce でも中身が HES(先頭 "HESM")の物は曲データ: ゲーム画面ではなく HES の再生へ回す
         if ((ext === 'pce' || ext === 'sgx') && Image && Image.isHes && Image.isHes(bytes)) ext = 'hes';
-        else if (img || gameExt) {
+        else if ((img && (!cps3Only || img.machine === 'cps3')) || gameExt) {
           try {
             await MML.UI.NesScreen.open(bytes, file.name);
           } catch (e) {
