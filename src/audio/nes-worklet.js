@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-17 07:25:18
+ * Built by tools/build-capture-workers.ps1 at 2026-11-17 18:35:06
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-17 07:25:18';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-17 18:35:06';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -23084,7 +23084,7 @@
       this.gscrollBuf = new Uint32Array(8);                                          // 同じ時に取る、全体スクロールの値
       this.rb = new Uint32Array(RB_W * RB_H);
       this.tableAddr = -1;                                                           // 絵の展開に使う表の位置(キャラクタ DMA の命令 4)
-      this.screenWidth = 384;                                                        // 384 か 496(ソフトが画面の制御レジスタで選ぶ)
+      this.screenWidth = 384;                                                        // 384 か 495(ソフトが画面の制御レジスタで選ぶ)
       this.onVblank = null;                                                          // 垂直帰線に入った時(ゲーム画面の本体が絵を作る所。MAME も同じ時点で描く)
       this.snd = new Uint32Array(0x300 >> 2);
       const dv = (u) => new DataView(u.buffer, u.byteOffset, u.length);
@@ -23440,7 +23440,7 @@
       }
     }
     /**
-     * 画面を RGBA に描く(幅は this.screenWidth = 384 か 496、高さ 224)。スプライトと背景 → 色の RAM を引く → 文字の面を重ねる。
+     * 画面を RGBA に描く(幅は this.screenWidth = 384 か 495、高さ 224)。スプライトと背景 → 色の RAM を引く → 文字の面を重ねる。
      * out は 幅 × 224 × 4 バイト以上
      */
     renderScreen(out) {
@@ -23664,7 +23664,7 @@
       this.opts = opts;
       this.game = opts.game;
       this.sampleRate = 48000;
-      this.frame = new Uint32Array(512 * H);                            // 幅は 384 か 496(ソフトが選ぶ)。広い方に合わせて確保
+      this.frame = new Uint32Array(512 * H);                            // 幅は 384 か 495(ソフトが選ぶ)。広い方に合わせて確保
       this._rgba = new Uint8Array(this.frame.buffer);
       this.frameWidth = W; this.frameHeight = H;
       this.frameRate = Cps3.CPU_HZ / Cps3.FRAME_CYCLES;
@@ -23837,7 +23837,7 @@
     }
     clear() { super.clear(); this._last = null; }
     get palette() { return this._pal.slice(); }
-    // 今の画面(RGBA)を「色の番号 8bit+その画面の色表」にして輪に控える。輪は常に 384 幅(496 幅の画面は横を間引く)。
+    // 今の画面(RGBA)を「色の番号 8bit+その画面の色表」にして輪に控える。輪は常に 384 幅(495 幅の画面は横を間引く)。
     // 256 色に収まる画面(テストモードなど)はそのままの色、超える画面は赤 3bit・緑 3bit・青 2bit に丸める(逆再生の間だけの絵なので粗くてよい)
     _capture(f) {
       const RING = Emu.NesRewind.RING, FB = this.frameBytes, src = this.nes.frame;

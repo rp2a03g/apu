@@ -28,7 +28,7 @@
       this.opts = opts;
       this.game = opts.game;
       this.sampleRate = 48000;
-      this.frame = new Uint32Array(512 * H);                            // 幅は 384 か 496(ソフトが選ぶ)。広い方に合わせて確保
+      this.frame = new Uint32Array(512 * H);                            // 幅は 384 か 495(ソフトが選ぶ)。広い方に合わせて確保
       this._rgba = new Uint8Array(this.frame.buffer);
       this.frameWidth = W; this.frameHeight = H;
       this.frameRate = Cps3.CPU_HZ / Cps3.FRAME_CYCLES;

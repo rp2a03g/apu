@@ -95,7 +95,7 @@
       this.gscrollBuf = new Uint32Array(8);                                          // 同じ時に取る、全体スクロールの値
       this.rb = new Uint32Array(RB_W * RB_H);
       this.tableAddr = -1;                                                           // 絵の展開に使う表の位置(キャラクタ DMA の命令 4)
-      this.screenWidth = 384;                                                        // 384 か 496(ソフトが画面の制御レジスタで選ぶ)
+      this.screenWidth = 384;                                                        // 384 か 495(ソフトが画面の制御レジスタで選ぶ)
       this.onVblank = null;                                                          // 垂直帰線に入った時(ゲーム画面の本体が絵を作る所。MAME も同じ時点で描く)
       this.snd = new Uint32Array(0x300 >> 2);
       const dv = (u) => new DataView(u.buffer, u.byteOffset, u.length);
@@ -451,7 +451,7 @@
       }
     }
     /**
-     * 画面を RGBA に描く(幅は this.screenWidth = 384 か 496、高さ 224)。スプライトと背景 → 色の RAM を引く → 文字の面を重ねる。
+     * 画面を RGBA に描く(幅は this.screenWidth = 384 か 495、高さ 224)。スプライトと背景 → 色の RAM を引く → 文字の面を重ねる。
      * out は 幅 × 224 × 4 バイト以上
      */
     renderScreen(out) {

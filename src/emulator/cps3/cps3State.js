@@ -46,7 +46,7 @@
     }
     clear() { super.clear(); this._last = null; }
     get palette() { return this._pal.slice(); }
-    // 今の画面(RGBA)を「色の番号 8bit+その画面の色表」にして輪に控える。輪は常に 384 幅(496 幅の画面は横を間引く)。
+    // 今の画面(RGBA)を「色の番号 8bit+その画面の色表」にして輪に控える。輪は常に 384 幅(495 幅の画面は横を間引く)。
     // 256 色に収まる画面(テストモードなど)はそのままの色、超える画面は赤 3bit・緑 3bit・青 2bit に丸める(逆再生の間だけの絵なので粗くてよい)
     _capture(f) {
       const RING = Emu.NesRewind.RING, FB = this.frameBytes, src = this.nes.frame;
