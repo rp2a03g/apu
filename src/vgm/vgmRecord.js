@@ -434,7 +434,41 @@
    *   - 相手のいないキーオンのうち最後の物までがイントロ、その後がループ
    *   - 「確かめられた区間」(録音の長さ − T − 開始)が短い物は採らない(曲の中の繰り返しを 1 周と見誤る。実測: 90 秒の録音で
    *     65 秒のループを 46 秒と誤った)。min(T の半分, 25 秒) 以上を要る。録音が足りなければ「ループ無し」になる
+   *   - 最後に、継ぎ目を「音源の状態が 1 周後と同じになる所」へ後ろにずらす(cps3SeamStart)。上で決めた開始位置はイントロの直後なので、
+   *     イントロの最後の音がまだ鳴っている。そこへ 1 周目の終わりから戻ると「鳴っているはずの声が止まっている」状態になり、
+   *     その声のビットを立てたままのキーの書き込みで、関係ない音が鳴り直す(実測: ループの頭で「ぽーん」と鳴る)
    */
+  // 継ぎ目の位置を選ぶ。start 以降のフレームの頭のうち、その時点(s)と 1 周後(s + T)とで音源の状態が一番近い所を返す。
+  //   見る物: キーのビット(食い違うと鳴り直しや鳴らし損ねが起きるので最優先)、鳴っている声のレジスタ、前後 1.5 フレームに書き込みが無い事
+  //   (周回ごとに書き込みの時刻が 1 フレームほど揺れるので、書き込みのすぐそばで切ると片方だけが継ぎ目をまたぐ)
+  //   戻り値 { start, keyDiff }。keyDiff は残ったキーの食い違いの数
+  VGM.cps3SeamStart = function (frames, start, T, end) {
+    const RATE = (42954545 / 3) / 384, FRAME = RATE / 59.6, TOL = Math.round(FRAME * 1.5), n0 = frames[0].n0;
+    let count = 0; for (const f of frames) count += f.w.length / 3;
+    const at = new Float64Array(count), reg = new Uint16Array(count), val = new Uint16Array(count);
+    { let k = 0; for (const f of frames) for (let i = 0; i + 2 < f.w.length; i += 3) { reg[k] = f.w[i]; val[k] = f.w[i + 1]; at[k] = f.w[i + 2] - n0; k++; } }
+    const A = new Uint16Array(0x101), B = new Uint16Array(0x101);
+    let ia = 0, ib = 0, best = null;
+    const limit = Math.min(end - T - TOL * 2, start + 20 * RATE);            // ずらすのは 20 秒まで(イントロが長くなるだけで、1 周の長さは変わらない)
+    const busy = (t) => { let lo = 0, hi = count; while (lo < hi) { const m = (lo + hi) >> 1; if (at[m] < t - TOL) lo = m + 1; else hi = m; } return lo < count && at[lo] <= t + TOL; };
+    for (const f of frames) {
+      const s = f.n0 - n0;
+      if (s < start) continue;
+      if (s > limit) break;
+      while (ia < count && at[ia] < s) { if (reg[ia] <= 0x100) A[reg[ia]] = val[ia]; ia++; }
+      while (ib < count && at[ib] < s + T) { if (reg[ib] <= 0x100) B[reg[ib]] = val[ib]; ib++; }
+      const kx = A[0x100] ^ B[0x100]; let keyDiff = 0, regDiff = 0;
+      for (let v = 0; v < 16; v++) {
+        if (kx >> v & 1) { keyDiff++; continue; }
+        if (!(A[0x100] >> v & 1)) continue;                                   // 止まっている声のレジスタは、次のキーオンまでに書き直される
+        for (let r = v * 16; r < v * 16 + 16; r++) if (A[r] !== B[r]) regDiff++;
+      }
+      const score = keyDiff * 1e6 + ((busy(s) || busy(s + T)) ? 1e4 : 0) + regDiff * 100 + (s - start) / RATE;   // 同じなら早い方
+      if (!best || score < best.score) best = { start: s, keyDiff, score };
+      if (score < 1) break;                                                   // 完全に一致(これより後ろは遠くなるだけ)
+    }
+    return best || { start, keyDiff: -1 };
+  };
   VGM.cps3FindLoop = function (frames, opt) {
     const RATE = (42954545 / 3) / 384, FRAME = RATE / 59.6, TOL = Math.round(FRAME * 1.5);
     const minLoop = ((opt && opt.minLoopSec) || 8) * RATE;
@@ -487,6 +521,7 @@
       // 倍の周期も必ず通るので、同じくらい確かなら短い周期を採る
       if (!best || cand.length < best.length * 0.75) best = cand;
     }
+    if (best) { const seam = VGM.cps3SeamStart(frames, best.start, best.length, end); best.introEnd = best.start; best.start = seam.start; best.keyDiff = seam.keyDiff; }
     return best;
   };
 
@@ -520,6 +555,13 @@
     let trimmed = false;
     if (!loop && rec.trimSilence && lastSound >= 0 && natTotal - lastSound > RATE) { natTotal = lastSound + Math.round(RATE * 0.5); trimmed = true; }
     while (count > 0 && at[count - 1] >= natTotal) count--;                // 切った後ろの書き込みは捨てる
+    // ループの継ぎ目の後始末: 終わりの時点で鳴っている声のうち、ループの頭では止まっていた物を、終わりの直前で止める。
+    // (頭では鳴っていて終わりでは止まっている声は直せない。cps3SeamStart がそうならない位置を選んでいる)
+    let seamFix = null;
+    if (loop) {
+      let k0 = 0, k1 = 0; for (let i = 0; i < count; i++) if (reg[i] === 0x100) { if (at[i] < loop.start) k0 = val[i]; k1 = val[i]; }
+      if (k1 & ~k0) seamFix = { at: natTotal - 1, reg: 0x100, val: k1 & k0 };
+    }
 
     const chunks = []; let size = 0;
     const put = (bytes) => { const u = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes); chunks.push(u); size += u.length; };
@@ -544,10 +586,13 @@
       for (let s0 = sFrom; s0 < sTo; s0 += FRAME) {
         const s1 = Math.min(sTo, s0 + FRAME), j = k;
         while (k < count && toS(at[k]) < s1) k++;
-        if (k > j) {
+        const fix = seamFix && s1 === sTo && sTo === total ? 1 : 0;        // 最後のブロックの末尾に後始末の書き込みを足す
+        if (k > j || fix) {
           flushWait();
-          const b = new Uint8Array((k - j) * 6);
-          for (let i = j; i < k; i++) { const t = Math.max(0, toS(at[i]) - s0), o = (i - j) * 6; b[o] = t & 0xFF; b[o + 1] = t >> 8; b[o + 2] = reg[i] & 0xFF; b[o + 3] = reg[i] >> 8; b[o + 4] = val[i] & 0xFF; b[o + 5] = val[i] >> 8; }
+          const b = new Uint8Array((k - j + fix) * 6);
+          const w = (o, t, r, v) => { b[o] = t & 0xFF; b[o + 1] = t >> 8; b[o + 2] = r & 0xFF; b[o + 3] = r >> 8; b[o + 4] = v & 0xFF; b[o + 5] = v >> 8; };
+          for (let i = j; i < k; i++) w((i - j) * 6, Math.max(0, toS(at[i]) - s0), reg[i], val[i]);
+          if (fix) w((k - j) * 6, Math.max(0, s1 - 1 - s0), seamFix.reg, seamFix.val);
           block(C.KIND_WRITES, b.length); put(b);
         }
         wait += s1 - s0;
