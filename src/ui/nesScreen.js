@@ -40,6 +40,7 @@
  *   戻ったら鍵盤表示のロールを onLiveTruncate で切り詰める(戻った先の像は録音の取り直しで届く)。VGM 録音中なら録音も切り詰める。
  * ■ 入力
  *   キー割り当て・ゲームパッドのボタン割り当て・連射(A/B)は ⚙ 設定で変えられ、localStorage(nes.cfg)に残る。
+ *   CP システム III はボタンが 6 つあるので割り当てを別に持つ(cfg.cps3。⚙ の CPS3 のタブ。BIOS の控えの一覧もそこ)。
  *   既定: 十字=矢印、A=X、B=Z、連射 A=S、連射 B=A、Start=Enter、Select=Shift、F=早送り、R=巻き戻し、P=一時停止、
  *   F5/F7=状態保存/読込。canvas にフォーカスがあるときだけ(エディタの矢印を奪わない)。
  *   ゲームパッドは標準配置(0=A、1=B、2=連射 B、3=連射 A、4=巻き戻し、5=早送り、8=Select、9=Start、12-15=十字、左スティック)。
@@ -72,6 +73,11 @@
   const MSX_FDC = ['wd2793', 'tc8566af']; // ディスクの FDC(ディスク ROM が叩く方。7d)
   const MSX_JOY_KEYS = { ArrowUp: 16, ArrowDown: 32, ArrowLeft: 64, ArrowRight: 128, Space: 1 }; // 「カーソルキーとスペースをジョイスティック 1 にも使う」
   const MSX_TOUCH_KEYS = [[16, 'ArrowUp'], [32, 'ArrowDown'], [64, 'ArrowLeft'], [128, 'ArrowRight'], [1, 'Space'], [2, 'KeyM']]; // タッチ操作キーを MSX のキーボードにも
+  // CP システム III: ボタンが 6 つあるので、キーとパッドの割り当てを別に持つ(cfg.cps3)。ビットは cps3Console.js の setController と同じ
+  const CPS3_BITS = { Up: 16, Down: 32, Left: 64, Right: 128, Shot1: 0x01, Shot2: 0x02, Shot3: 0x100, Shot4: 0x200, Shot5: 0x400, Shot6: 0x800, Coin: 0x04, Start: 0x08, Test: 0x1000, Service: 0x2000 };
+  const CPS3_KEY_ACTIONS = ['Up', 'Down', 'Left', 'Right', 'Shot1', 'Shot2', 'Shot3', 'Shot4', 'Shot5', 'Shot6', 'Coin', 'Start', 'Test', 'Service', 'FF', 'Rewind', 'Pause', 'SaveState', 'LoadState'];
+  const CPS3_PAD_ACTIONS = ['Shot1', 'Shot2', 'Shot3', 'Shot4', 'Shot5', 'Shot6', 'Coin', 'Start', 'FF', 'Rewind', 'Pause', 'SaveState', 'LoadState'];
+  const PAD_OPS = ['FF', 'Rewind', 'Pause', 'SaveState', 'LoadState']; // パッドの操作(ゲームのボタンでない物)。gamepadBits の 3 つ目のビットの並び
   const TURBO_RATES = [1, 2, 3, 4]; // 押す/離すの長さ(フレーム)。1=30 回/秒、2=15、3=10、4=7.5
   const SPEEDS = [1, 2, 4, 8];
   const DEFAULT_CFG = {
@@ -87,7 +93,19 @@
     // スマホの十字キー(buildTouchPad): 遊び(中心からの px)/ 斜めの幅(度。45 で 8 方向が等分、0 で斜め無し)/ 粘り(度。今の方向から境目をこれだけ越えるまで切り替えない)/ 方向が変わった時の振動
     dpad: { dead: 6, diag: 30, hold: 10, vibrate: true },
     msx: { keys: { FF: 'F11', Rewind: 'F12', Pause: 'Pause', SaveState: 'F9', LoadState: 'F10' }, machine: 'auto', joyFromKeys: false, touchKbd: false, cartB: 'none', fdc: 'wd2793', softKbd: false, writeBack: false },
+    // CPS3: 上の段(A S D)がパンチ、下の段(Z X C)がキック。コインとスタートは 5 と 1(コインは続けて何度も押すので、Shift は避ける)。
+    //   パッドは上の列(X Y RB)がパンチ、下の列(A B RT)がキック。早送りと巻き戻しは、対戦中に間違って押さないよう既定では割り当てない
+    cps3: { keys: { Up: 'ArrowUp', Down: 'ArrowDown', Left: 'ArrowLeft', Right: 'ArrowRight', Shot1: 'KeyA', Shot2: 'KeyS', Shot3: 'KeyD', Shot4: 'KeyZ', Shot5: 'KeyX', Shot6: 'KeyC',
+        Coin: 'Digit5', Start: 'Digit1', Test: 'F2', Service: 'F1', FF: 'KeyF', Rewind: 'KeyR', Pause: 'KeyP', SaveState: 'F5', LoadState: 'F7' },
+      pad: { Shot1: 2, Shot2: 3, Shot3: 5, Shot4: 0, Shot5: 1, Shot6: 7, Coin: 8, Start: 9, FF: -1, Rewind: -1, Pause: -1, SaveState: -1, LoadState: -1 },
+      recLoop: true, recTrim: true }, // 録音を止めた時: ループを探して切る / 末尾の無音を切る(切れば録ったままが残る)
   };
+  function loadCps3Cfg(c) {
+    c = c && typeof c === 'object' ? c : {};
+    return { keys: Object.assign({}, DEFAULT_CFG.cps3.keys, c.keys && typeof c.keys === 'object' ? c.keys : null),
+      pad: Object.assign({}, DEFAULT_CFG.cps3.pad, c.pad && typeof c.pad === 'object' ? c.pad : null),
+      recLoop: typeof c.recLoop === 'boolean' ? c.recLoop : true, recTrim: typeof c.recTrim === 'boolean' ? c.recTrim : true };
+  }
   const DPAD_LIMITS = { dead: [0, 30], diag: [0, 60], hold: [0, 25] };
   function loadDpadCfg(c) {
     c = c && typeof c === 'object' ? c : {};
@@ -127,17 +145,20 @@
       nesBarcode: !!c.nesBarcode, // ファミコンの拡張端子にバーコードバトラー II をつなぐ([バーコード] ボタンを出す)
       dpad: loadDpadCfg(c.dpad),
       msx: loadMsxCfg(c.msx),
+      cps3: loadCps3Cfg(c.cps3),
       gb: { model: GB_MODELS.includes(c.gb && c.gb.model) ? c.gb.model : 'auto', palette: GB_PALETTES.includes(c.gb && c.gb.palette) ? c.gb.palette : 'auto' },
     };
   }
   function saveCfg() { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { /* ignore */ } }
   let cfg = loadCfg();
   // 今の機種のキー割り当て表と操作の一覧(NES: 十字/A/B…+操作キー、MSX: 操作キーだけ)
-  function curKeys() { return machine === 'msx' ? cfg.msx.keys : cfg.keys; }
-  function curKeyActions() { return machine === 'msx' ? MSX_KEY_ACTIONS : KEY_ACTIONS; }
+  function curKeys() { return machine === 'msx' ? cfg.msx.keys : machine === 'cps3' ? cfg.cps3.keys : cfg.keys; }
+  function curKeyActions() { return machine === 'msx' ? MSX_KEY_ACTIONS : machine === 'cps3' ? CPS3_KEY_ACTIONS : KEY_ACTIONS; }
   function keyActionOf(code) { const keys = curKeys(); for (const a of curKeyActions()) if (keys[a] === code) return a; return null; }
   function actionLabel(a) {
     return { A: 'A', B: 'B', TurboA: T('連射 A'), TurboB: T('連射 B'), Select: 'Select', Start: 'Start', Up: T('上'), Down: T('下'), Left: T('左'), Right: T('右'),
+      Shot1: T('ショット 1(弱パンチ)'), Shot2: T('ショット 2(中パンチ)'), Shot3: T('ショット 3(強パンチ)'), Shot4: T('ショット 4(弱キック)'), Shot5: T('ショット 5(中キック)'), Shot6: T('ショット 6(強キック)'),
+      Coin: T('コイン'), Test: T('テスト'), Service: T('サービス'),
       FF: T('早送り(押している間)'), Rewind: T('巻き戻し(押している間)'), Pause: T('一時停止'), SaveState: T('状態保存'), LoadState: T('状態読込') }[a] || a;
   }
   // KeyboardEvent.code → 表示名
@@ -659,7 +680,7 @@
     stateBtnL = mkIcon('loadState', '', requestLoadState);
     sideBtn = mkIcon('disk', '', () => { if (fdsSides >= 1) toggleDiskPopover(sideBtn); }, 'A'); sideBtn.hidden = true;
     biosBtn = mkIcon('chip', T('ディスクシステムの BIOS(disksys.rom、8KB)を選ぶ。このブラウザに控えて次回も使います'), () => biosInput.click(), 'BIOS'); biosBtn.hidden = true; // BIOS の選択は ⚙ の機種タブへ(2026-11-10)。入力欄は共用
-    biosInput = document.createElement('input'); biosInput.type = 'file'; biosInput.accept = '.rom,.bin,.nes,.sfc,.smc'; biosInput.multiple = true; biosInput.style.display = 'none';
+    biosInput = document.createElement('input'); biosInput.type = 'file'; biosInput.accept = '.rom,.bin,.nes,.sfc,.smc,.u2,.bios'; biosInput.multiple = true; biosInput.style.display = 'none';
     biosInput.addEventListener('change', async () => {
       const files = Array.from(biosInput.files || []); biosInput.value = '';
       const target = biosTarget; biosTarget = null;
@@ -674,6 +695,13 @@
         const D = MML.Emu.Image;
         if (D && D.isSgbBios && D.isSgbBios(b)) { storeSgbBiosFile(b, f.name); rest = rest.filter((x) => x !== f); }
         else if (b.length === 256 && target && target.kind === 'sgb') { storeSgbBios(target.rev, 'boot', b); flashStatus(T('ブート ROM を控えました: {name}', { name: f.name })); rest = rest.filter((x) => x !== f); }
+      }
+      // CPS3: 0x80000 バイトで、中身からゲームが分かる物(storeCps3BiosFile が控えて、設定の表も描き直す)
+      for (const f of rest.slice()) {
+        if (f.size !== 0x80000) continue;
+        const b = new Uint8Array(await f.arrayBuffer()), I = MML.Emu.Cps3 && MML.Emu.Cps3.Image;
+        if (I && I.identifyBios(b)) { await storeCps3BiosFile(b, f.name); rest = rest.filter((x) => x !== f); }
+        else if (target && target.kind === 'cps3') { alert(T('CPS3 の BIOS として読めません: {name}', { name: f.name })); rest = rest.filter((x) => x !== f); }
       }
       if (!rest.length) { if (cfgBiosRefresh) cfgBiosRefresh(); return; }
       // 残りは MSX の BIOS として大きさで振り分ける(16K/32K/128K/256K)。それ以外の大きさは案内
@@ -720,7 +748,7 @@
     attachHold(gbLightBtn, () => sendSensor({ light: true }), () => sendSensor({ light: false }));
     gbPrintBtn = mkBtn('', T('ポケットプリンタの印刷結果を PNG で保存'), saveGbPrints); gbPrintBtn.hidden = true;
     gbSgbMenuBtn = mkBtn(T('メニュー'), T('スーパーゲームボーイのメニュー(配色・枠の変更)を開く/閉じる(SNES のパッドの L+R)'), () => { if (node) node.port.postMessage({ type: 'sensor', sgbMenu: true }); else if (nes && nes.pressMenu) nes.pressMenu(); canvas.focus(); }); gbSgbMenuBtn.hidden = true;
-    cps3TestBtn = mkBtn(T('テスト'), T('CPS3 のテストボタンを押す(テストメニュー。サウンドテストもここから)。キーは F2。ショット 3〜6 は数字の 3〜6、サービスは F1'), () => { cps3Bits |= 0x1000; pushPad(); setTimeout(() => { cps3Bits &= ~0x1000; pushPad(); }, 700); canvas.focus(); }); cps3TestBtn.hidden = true;
+    cps3TestBtn = mkBtn(T('テスト'), T('CPS3 のテストボタンを押す(テストメニュー。サウンドテストもここから)。割り当ては ⚙ の CPS3)'), () => { cps3Bits |= 0x1000; pushPad(); setTimeout(() => { cps3Bits &= ~0x1000; pushPad(); }, 700); canvas.focus(); }); cps3TestBtn.hidden = true;
     gbBarcodeBtn = mkBtn(T('バーコード'), T('バーコードを読ませる(数字を打つか、カメラで写す)'), askGbBarcode); gbBarcodeBtn.hidden = true;
     diskBadgeEl = document.createElement('button'); diskBadgeEl.type = 'button'; diskBadgeEl.className = 'nes-diskbadge'; diskBadgeEl.hidden = true;
     diskBadgeEl.addEventListener('click', () => { if (cfg.msx.writeBack && !diskDirHandle) pickDiskDir(); else toggleDiskPopover(sideBtn.hidden ? diskBadgeEl : sideBtn); });
@@ -739,11 +767,11 @@
       const a = keyActionOf(e.code);
       if (!a) {
         if (machine === 'msx') { e.preventDefault(); msxKey(e.code, true); } // MSX: 操作キー以外はそのまま MSX のキーボードへ
-        else if (machine === 'cps3' && CPS3_KEYS[e.code]) { e.preventDefault(); cps3Bits |= CPS3_KEYS[e.code]; pushPad(); } // CPS3: ショット 3〜6、テスト、サービス
         return;
       }
       e.preventDefault();
-      if (PAD_BITS[a]) { keyBits |= PAD_BITS[a]; pushPad(); }
+      if (machine === 'cps3' && CPS3_BITS[a]) { cps3Bits |= CPS3_BITS[a]; pushPad(); } // CPS3: レバー、ショット 1〜6、コイン、スタート、テスト、サービス(割り当ては ⚙ の CPS3)
+      else if (PAD_BITS[a]) { keyBits |= PAD_BITS[a]; pushPad(); }
       else if (a === 'TurboA') { keyTurbo |= 1; pushPad(); }
       else if (a === 'TurboB') { keyTurbo |= 2; pushPad(); }
       else if (a === 'FF') { if (!ffHold) { ffHold = true; pushSpeed(); } }
@@ -756,11 +784,11 @@
       const a = keyActionOf(e.code);
       if (!a) {
         if (machine === 'msx') { e.preventDefault(); msxKey(e.code, false); }
-        else if (machine === 'cps3' && CPS3_KEYS[e.code]) { e.preventDefault(); cps3Bits &= ~CPS3_KEYS[e.code]; pushPad(); }
         return;
       }
       e.preventDefault();
-      if (PAD_BITS[a]) { keyBits &= ~PAD_BITS[a]; pushPad(); }
+      if (machine === 'cps3' && CPS3_BITS[a]) { cps3Bits &= ~CPS3_BITS[a]; pushPad(); }
+      else if (PAD_BITS[a]) { keyBits &= ~PAD_BITS[a]; pushPad(); }
       else if (a === 'TurboA') { keyTurbo &= ~1; pushPad(); }
       else if (a === 'TurboB') { keyTurbo &= ~2; pushPad(); }
       else if (a === 'FF') { ffHold = false; pushSpeed(); }
@@ -797,6 +825,8 @@
     const keys = curKeys(), k = (a) => keyLabel(keys[a]);
     if (machine === 'msx') canvas.title = T('クリックしてキー入力(PC のキーがそのまま MSX のキーボードに。{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止、{ss}/{ls}=状態保存/読込)',
       { ff: k('FF'), rw: k('Rewind'), pa: k('Pause'), ss: k('SaveState'), ls: k('LoadState') });
+    else if (machine === 'cps3') canvas.title = T('クリックしてキー入力(パンチ={p}、キック={kk}、コイン={c}、スタート={st}、テスト={te}、{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止。割り当ては ⚙ の CPS3)',
+      { p: [k('Shot1'), k('Shot2'), k('Shot3')].join(' '), kk: [k('Shot4'), k('Shot5'), k('Shot6')].join(' '), c: k('Coin'), st: k('Start'), te: k('Test'), ff: k('FF'), rw: k('Rewind'), pa: k('Pause') });
     else canvas.title = T('クリックしてキー入力(十字=矢印、A={a}、B={b}、連射 A={ta}、連射 B={tb}、Start={st}、Select={se}、{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止)',
       { a: k('A'), b: k('B'), ta: k('TurboA'), tb: k('TurboB'), st: k('Start'), se: k('Select'), ff: k('FF'), rw: k('Rewind'), pa: k('Pause') });
     speedBtn.title = T('早送り。クリックで ×1→×2→×4→×8。{key} キーを押している間は ×4', { key: k('FF') });
@@ -1120,8 +1150,8 @@
     pop.addEventListener('mousedown', (e) => e.stopPropagation());
     pop.addEventListener('click', (e) => e.stopPropagation());
     // タブ: 共通 / ファミコン / MSX(機種の設定は機種のタブに、どの機種にも効く物は共通に)
-    const TABS = [['common', T('共通')], ['nes', T('ファミコン / FDS')], ['msx', 'MSX'], ['gb', T('ゲームボーイ')]];
-    if (!cfgTab) cfgTab = machine === 'msx' ? 'msx' : machine === 'gb' ? 'gb' : (romBytes ? 'nes' : 'common');
+    const TABS = [['common', T('共通')], ['nes', T('ファミコン / FDS')], ['msx', 'MSX'], ['gb', T('ゲームボーイ')], ['cps3', 'CPS3']];
+    if (!cfgTab) cfgTab = machine === 'cps3' ? 'cps3' : machine === 'msx' ? 'msx' : machine === 'gb' ? 'gb' : (romBytes ? 'nes' : 'common');
     const tabBar = document.createElement('div'); tabBar.className = 'nes-cfg-tabs';
     const panes = {}, tabBtns = {};
     const selectTab = (id) => { cfgTab = id; for (const k of Object.keys(panes)) { panes[k].hidden = k !== id; tabBtns[k].classList.toggle('is-on', k === id); } };
@@ -1195,27 +1225,31 @@
     check(s1c, cfg.lagFix, T('処理落ちを詰める'), (v) => { cfg.lagFix = v; saveCfg(); });
     note(s1c, T('録音が終わった時の初期値です。録音ごとの ON/OFF は [VGM を保存][変換へ] の横のチェックで変えられ、保存する VGM と変換に進む VGM の両方に効きます。効果音除去は曲が 3 周以上入っている録音で効きます(周回の多数決)'));
     // ゲームパッド(共通)
-    const s3 = sec(T('ゲームパッド(1P/2P 共通)'), 'common');
-    const tbl2 = document.createElement('table'); tbl2.className = 'nes-cfg-table';
     const padBtns = {};
-    for (const a of PAD_ACTIONS) {
-      const tr = document.createElement('tr');
-      const td1 = document.createElement('td'); td1.textContent = actionLabel(a);
-      const td2 = document.createElement('td');
-      const b = document.createElement('button'); b.type = 'button'; b.className = 'nes-cfg-key secondary';
-      b.addEventListener('click', () => capturePadButton(b, a));
-      const clr = document.createElement('button'); clr.type = 'button'; clr.className = 'nes-cfg-clear secondary'; clr.textContent = '×'; clr.title = T('割り当てを外す');
-      clr.addEventListener('click', () => { cfg.pad[a] = -1; saveCfg(); refresh(); });
-      td2.appendChild(b); td2.appendChild(clr); tr.appendChild(td1); tr.appendChild(td2); tbl2.appendChild(tr);
-      padBtns[a] = b;
-    }
-    s3.appendChild(tbl2);
+    const padTable = (parent, acts, getMap, id) => {
+      const tbl2 = document.createElement('table'); tbl2.className = 'nes-cfg-table';
+      for (const a of acts) {
+        const tr = document.createElement('tr');
+        const td1 = document.createElement('td'); td1.textContent = actionLabel(a);
+        const td2 = document.createElement('td');
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'nes-cfg-key secondary';
+        b.addEventListener('click', () => capturePadButton(b, a, acts, getMap));
+        const clr = document.createElement('button'); clr.type = 'button'; clr.className = 'nes-cfg-clear secondary'; clr.textContent = '×'; clr.title = T('割り当てを外す');
+        clr.addEventListener('click', () => { getMap()[a] = -1; saveCfg(); refresh(); });
+        td2.appendChild(b); td2.appendChild(clr); tr.appendChild(td1); tr.appendChild(td2); tbl2.appendChild(tr);
+        padBtns[id + ':' + a] = { b, getMap };
+      }
+      parent.appendChild(tbl2);
+    };
+    const s3 = sec(T('ゲームパッド(1P/2P 共通)'), 'common');
+    padTable(s3, PAD_ACTIONS, () => cfg.pad, 'nes');
+    note(s3, T('CPS3 は ⚙ の CPS3 のタブに別の表があります(ボタンが 6 つあるため)'));
     note(s3, T('十字は 12-15 番のボタンと左スティック(固定)。つながっている順に 1P、2P。早送り/巻き戻しは押している間、一時停止/状態保存/読込は押した時'));
     const s4 = sec('', 'common');
     const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'nes-btn'; reset.textContent = T('既定に戻す');
     reset.addEventListener('click', () => { cfg = loadCfgDefaults(); saveCfg(); pushTurboRate(); pushDiskFast(); applyCfgLabels(); updateSoftKbd(); updateDiskBadge(); const a = anchorEl; closeCfgPopover(); toggleCfgPopover(a); });
     s4.appendChild(reset);
-    note(s4, T('キー/パッドの割り当て、連射、巻き戻し、録音の補正、MSX のカートリッジ 2/FDC/書き戻しを既定に戻します(BIOS の控えと機種は残ります)'));
+    note(s4, T('キー/パッドの割り当て(CPS3 を含む)、連射、巻き戻し、録音の補正、MSX のカートリッジ 2/FDC/書き戻しを既定に戻します(BIOS の控えと機種は残ります)'));
 
     // ── BIOS(ファミコン / MSX)──
     const biosNote = (parent, text) => note(parent, text);
@@ -1357,9 +1391,73 @@
     keyTable(s2, KEY_ACTIONS, () => cfg.keys, 'nes');
     const s2m = sec(T('キーボード(操作キー。他のキーはそのまま MSX のキーボードへ)'), 'msx');
     keyTable(s2m, MSX_KEY_ACTIONS, () => cfg.msx.keys, 'msx');
+    // ── CPS3: キーボード、ゲームパッド、BIOS ──
+    const s2c = sec(T('キーボード(1P)'), 'cps3');
+    keyTable(s2c, CPS3_KEY_ACTIONS, () => cfg.cps3.keys, 'cps3');
+    note(s2c, T('ショットの(弱パンチ)などはストリートファイター III での役目です。ゲームによって使うボタンの数と役目は変わります'));
+    const s3c = sec(T('ゲームパッド(1P/2P 共通)'), 'cps3');
+    padTable(s3c, CPS3_PAD_ACTIONS, () => cfg.cps3.pad, 'cps3');
+    note(s3c, T('十字は 12-15 番のボタンと左スティック(固定)。つながっている順に 1P、2P。早送り/巻き戻しは押している間、一時停止/状態保存/読込は押した時'));
+    const src3 = sec(T('録音'), 'cps3');
+    check(src3, cfg.cps3.recLoop, T('ループを探して、イントロと 1 周ぶんで切る'), (v) => { cfg.cps3.recLoop = v; saveCfg(); });
+    check(src3, cfg.cps3.recTrim, T('末尾の無音を切る'), (v) => { cfg.cps3.recTrim = v; saveCfg(); });
+    note(src3, T('録音を止めた時に効きます。ループの検出が外れた時は、切ってから録り直すと、録ったままの長さで VGM になります(ループ位置は入りません)。無音カットは、ループが見つからなかった時と、検出を切ってある時に効きます'));
+    const see3 = sec(T('ゲームの設定とハイスコア(EEPROM)'), 'cps3');
+    const eepBox = document.createElement('div'); see3.appendChild(eepBox);
+    note(see3, T('テストメニューの設定とハイスコアは、ゲームごとにこのブラウザへ自動で保存されます。「消す」で初期状態に戻ります(元には戻せません)。そのゲームが動いていれば、起動し直します'));
+    let eepSeq = 0;
+    const renderCps3Eeprom = async () => {
+      const I = MML.Emu.Cps3 && MML.Emu.Cps3.Image; if (!I) return;
+      const seq = ++eepSeq, games = Object.keys(I.NAMES);
+      const recs = await Promise.all(games.map((g) => idb((st) => st.get('cps3.eeprom.' + g))));
+      if (seq !== eepSeq || !eepBox.isConnected) return;
+      eepBox.innerHTML = '';
+      const have = games.filter((g, i) => recs[i] && recs[i].data instanceof Uint8Array);
+      if (!have.length) { note(eepBox, T('(保存された物はありません)')); return; }
+      const t = document.createElement('table'); t.className = 'nes-cfg-table nes-bios-table';
+      for (const g of have) {
+        const tr = document.createElement('tr');
+        const c0 = document.createElement('td'); c0.textContent = I.NAMES[g]; tr.appendChild(c0);
+        const c1 = document.createElement('td');
+        c1.appendChild(mkBtn(T('消す'), T('このゲームの設定とハイスコアを消す'), async () => {
+          if (!confirm(T('{title} の設定とハイスコアを消します。元には戻せません。よろしいですか?', { title: I.NAMES[g] }))) return;
+          await clearCps3Eeprom(g); renderCps3Eeprom();
+        }));
+        tr.appendChild(c1); t.appendChild(tr);
+      }
+      eepBox.appendChild(t);
+    };
+    renderCps3Eeprom();
+    const sbc3 = sec(T('BIOS(ゲームごとの控え)'), 'cps3');
+    const cps3Box = document.createElement('div'); sbc3.appendChild(cps3Box);
+    note(sbc3, T('ゲームごとの BIOS(0x80000 バイト)を各自で用意して選びます。どのゲームの物かは中身で見分けるので、名前は問いません(複数選択可。窓へのドロップでも入ります)。このブラウザに控えて次回も使います。ゲーム CD のイメージは控えないので、毎回入れてください'));
+    let cps3BiosSeq = 0;
+    const renderCps3Bios = async () => {
+      const I = MML.Emu.Cps3 && MML.Emu.Cps3.Image; if (!I) return;
+      const seq = ++cps3BiosSeq, games = Object.keys(I.NAMES);
+      const recs = await Promise.all(games.map((g) => idb((st) => st.get(CPS3_BIOS_KEY + g))));
+      if (seq !== cps3BiosSeq || !cps3Box.isConnected) return; // 待っている間に描き直しが重なった/窓が閉じた
+      cps3Box.innerHTML = '';
+      const t = document.createElement('table'); t.className = 'nes-cfg-table nes-bios-table';
+      games.forEach((g, i) => {
+        const rec = recs[i], have = !!(rec && rec.data instanceof Uint8Array);
+        const tr = document.createElement('tr');
+        const c0 = document.createElement('td'); c0.appendChild(ok(have)); c0.appendChild(document.createTextNode(' ' + I.NAMES[g])); tr.appendChild(c0);
+        const c1 = document.createElement('td'); c1.className = 'nes-bios-ng'; c1.textContent = have ? (rec.name || T('(控え済み)')) : T('(未)'); tr.appendChild(c1);
+        const c2 = document.createElement('td');
+        if (have) c2.appendChild(mkBtn(T('消す'), T('控えを消す'), async () => { await idb((st) => st.delete(CPS3_BIOS_KEY + g), 'readwrite'); renderCps3Bios(); }));
+        tr.appendChild(c2); t.appendChild(tr);
+      });
+      cps3Box.appendChild(t);
+      const r = document.createElement('div'); r.className = 'nes-cfg-row';
+      r.appendChild(mkBtn(T('選ぶ…'), T('CPS3 の BIOS を選ぶ(複数選択可)'), () => { biosTarget = { kind: 'cps3' }; biosInput.click(); }));
+      cps3Box.appendChild(r);
+    };
+    renderCps3Bios();
+    { const prev = cfgBiosRefresh; cfgBiosRefresh = () => { if (prev) prev(); renderCps3Bios(); }; }
     const refresh = () => {
       for (const k of Object.keys(keyBtns)) { const { b, getMap } = keyBtns[k]; b.textContent = keyLabel(getMap()[k.split(':')[1]]); }
-      for (const a of PAD_ACTIONS) padBtns[a].textContent = cfg.pad[a] >= 0 ? T('ボタン {n}', { n: cfg.pad[a] }) : T('(なし)');
+      for (const k of Object.keys(padBtns)) { const { b, getMap } = padBtns[k], v = getMap()[k.split(':')[1]]; b.textContent = v >= 0 ? T('ボタン {n}', { n: v }) : T('(なし)'); }
       applyCfgLabels();
     };
     // キーを 1 つ受け取る(Esc で取り消し)
@@ -1381,7 +1479,7 @@
       document.addEventListener('keydown', h, true);
     }
     // ゲームパッドのボタンを 1 つ受け取る(5 秒で取り消し)
-    function capturePadButton(btn, action) {
+    function capturePadButton(btn, action, acts, getMap) {
       if (captureCancel) captureCancel();
       btn.textContent = T('パッドのボタンを押してください…'); btn.classList.add('nes-cfg-key--wait');
       const pressed = () => {
@@ -1403,8 +1501,9 @@
         for (const i of now) {
           if (before.has(i)) continue;
           done();
-          for (const o of PAD_ACTIONS) if (o !== action && cfg.pad[o] === i) cfg.pad[o] = -1;
-          cfg.pad[action] = i; saveCfg(); refresh();
+          const pm = getMap();
+          for (const o of acts) if (o !== action && pm[o] === i) pm[o] = -1; // 同じボタンは 1 つの操作にだけ
+          pm[action] = i; saveCfg(); refresh();
           return;
         }
         for (const i of before) if (!now.has(i)) before.delete(i);
@@ -1432,7 +1531,7 @@
     document.addEventListener('keydown', popClose, true);
   }
   function loadCfgDefaults() { return { keys: Object.assign({}, DEFAULT_CFG.keys), pad: Object.assign({}, DEFAULT_CFG.pad), turboRate: DEFAULT_CFG.turboRate, rewindSpeed: DEFAULT_CFG.rewindSpeed, liveRoll: cfg.liveRoll, sfxRemove: DEFAULT_CFG.sfxRemove, lagFix: DEFAULT_CFG.lagFix, diskFast: DEFAULT_CFG.diskFast, dpad: Object.assign({}, DEFAULT_CFG.dpad),
-    msx: { keys: Object.assign({}, DEFAULT_CFG.msx.keys), machine: cfg.msx.machine, joyFromKeys: DEFAULT_CFG.msx.joyFromKeys, touchKbd: DEFAULT_CFG.msx.touchKbd, cartB: cfg.msx.cartB, fdc: cfg.msx.fdc }, gb: { model: cfg.gb.model, palette: cfg.gb.palette }, nesBarcode: cfg.nesBarcode }; } // 機種は BIOS の控えに結びつくので残す
+    msx: { keys: Object.assign({}, DEFAULT_CFG.msx.keys), machine: cfg.msx.machine, joyFromKeys: DEFAULT_CFG.msx.joyFromKeys, touchKbd: DEFAULT_CFG.msx.touchKbd, cartB: cfg.msx.cartB, fdc: cfg.msx.fdc }, gb: { model: cfg.gb.model, palette: cfg.gb.palette }, nesBarcode: cfg.nesBarcode, cps3: loadCps3Cfg(null) }; } // 機種は BIOS の控えに結びつくので残す
 
   // ── 入力 ──
   // ゲームパッド: つながっている順に 1P(キーボードと合成)、2P。戻り値は [[1P のビット, 連射ビット, 操作の集合], [2P ...]]
@@ -1444,10 +1543,11 @@
       if (!gp || !gp.connected) continue;
       let bits = 0, turbo = 0, acts = 0;
       const b = gp.buttons, on = (i) => !!(i >= 0 && b[i] && (b[i].pressed || b[i].value > 0.5));
-      for (let ai = 0; ai < PAD_ACTIONS.length; ai++) {
-        const a = PAD_ACTIONS[ai];
-        if (!on(cfg.pad[a])) continue;
-        if (a === 'TurboA') turbo |= 1; else if (a === 'TurboB') turbo |= 2; else if (PAD_BITS[a]) bits |= PAD_BITS[a]; else acts |= 1 << ai;
+      const cps = machine === 'cps3', list = cps ? CPS3_PAD_ACTIONS : PAD_ACTIONS, map = cps ? cfg.cps3.pad : cfg.pad;
+      for (const a of list) {
+        if (!on(map[a])) continue;
+        const op = PAD_OPS.indexOf(a);
+        if (op >= 0) acts |= 1 << op; else if (cps) bits |= CPS3_BITS[a]; else if (a === 'TurboA') turbo |= 1; else if (a === 'TurboB') turbo |= 2; else bits |= PAD_BITS[a];
       }
       if (on(12)) bits |= 16; if (on(13)) bits |= 32; if (on(14)) bits |= 64; if (on(15)) bits |= 128;
       const ax = gp.axes[0] || 0, ay = gp.axes[1] || 0;
@@ -1458,8 +1558,7 @@
     return out;
   }
   let lastPad2 = -1, lastPadActs = 0, padFF = false;
-  // CPS3 だけのボタン(cps3Console.js の setController の上位ビット)。キーの割り当て(⚙)に無いキーだけがここへ来る
-  const CPS3_KEYS = { Digit3: 0x100, Digit4: 0x200, Digit5: 0x400, Digit6: 0x800, F2: 0x1000, F1: 0x2000 };
+  // cps3Bits: CPS3 のキーボードの入力(CPS3_BITS の並び。8bit を超えるので他の機種の keyBits とは別に持つ)
   let cps3Bits = 0, cps3TestBtn = null, cps3Gfx = null, cps3Title = '', pendingCps3 = null;
   function sendPad(port, bits, turbo) {
     if (node) node.port.postMessage({ type: 'pad', port, bits, turbo });
@@ -1468,7 +1567,7 @@
   function pushPad() {
     const gp = gamepadBits();
     const bits = keyBits | touchBits | gp[0][0] | (machine === 'cps3' ? cps3Bits : 0), turbo = keyTurbo | touchTurbo | gp[0][1];
-    const k1 = bits | (turbo << 16), k2 = gp[1][0] | (gp[1][1] << 8); // CPS3 は bits が 8bit を超える(ショット 3〜6、テスト、サービス)
+    const k1 = bits | (turbo << 16), k2 = gp[1][0] | (gp[1][1] << 16); // CPS3 は bits が 8bit を超える(ショット 3〜6、テスト、サービス)
     if (k1 !== lastPad) { lastPad = k1; sendPad(0, bits, turbo); }
     if (k2 !== lastPad2) { lastPad2 = k2; sendPad(1, gp[1][0], gp[1][1]); }
     // パッドの操作(早送り/巻き戻し=押している間、一時停止/状態保存/読込=押した瞬間)。どちらのパッドでも
@@ -1476,7 +1575,7 @@
     if (acts !== lastPadActs) {
       const down = acts & ~lastPadActs, up = lastPadActs & ~acts;
       lastPadActs = acts;
-      const bit = (a) => 1 << PAD_ACTIONS.indexOf(a);
+      const bit = (a) => 1 << PAD_OPS.indexOf(a);
       if ((down | up) & bit('FF')) { padFF = !!(acts & bit('FF')); pushSpeed(); }
       if (down & bit('Rewind')) rewindHoldStart();
       if (up & bit('Rewind')) rewindHoldEnd();
@@ -1986,13 +2085,13 @@
     if (machine === 'cps3') {
       // CP システム III: VGM に枠が無いので規格外ブロック CP3X(DESIGN-CPS3-CAPTURE.md §3)。波形は実際に読まれた所だけを CD のイメージから入れる
       // ループを探して(見つかればイントロ+1 周ぶんで切ってループ位置を入れる)、ループが無ければ最後の音の後の無音を切る(vgmRecord.js cps3FindLoop)
-      const r = MML.VGM.encodeCps3Recording({ frames, gfx: cps3Gfx, name: (romName || 'CPS3').replace(/\.(bin|iso|img)$/i, ''), game: cps3Title, creator: 'Sound Emulation Foundry (CPS3)', autoLoop: true, trimSilence: true });
+      const r = MML.VGM.encodeCps3Recording({ frames, gfx: cps3Gfx, name: (romName || 'CPS3').replace(/\.(bin|iso|img)$/i, ''), game: cps3Title, creator: 'Sound Emulation Foundry (CPS3)', autoLoop: cfg.cps3.recLoop, trimSilence: cfg.cps3.recTrim });
       recRaw = r.vgm; recVgm = r.vgm;
       updateRecUi();
       recSfxChk.parentNode.hidden = recLagChk.parentNode.hidden = true;
       const base = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (r.samples / 44100).toFixed(1), frames: r.frames, kb: (r.vgm.length / 1024).toFixed(1) });
       recInfoEl.textContent = base + (r.loop ? ' · ' + T('ループ {start} 秒から {len} 秒', { start: r.loop.startSec.toFixed(1), len: r.loop.lengthSec.toFixed(1) }) : r.trimmed ? ' · ' + T('末尾の無音を切りました') : '');
-      recInfoEl.title = T('CPS3 の録音には、効果音/処理落ちの補正は掛けられません') + ' ' + (r.loop ? T('ループを検出したので、イントロと 1 周ぶんで切ってループ位置を入れました') : T('ループは見つかりませんでした(ループする曲は、2 周目の途中まで録ると検出できます)'));
+      recInfoEl.title = T('CPS3 の録音には、効果音/処理落ちの補正は掛けられません') + ' ' + (r.loop ? T('ループを検出したので、イントロと 1 周ぶんで切ってループ位置を入れました') : !cfg.cps3.recLoop ? T('ループの自動検出は切ってあります(⚙ の CPS3)') : T('ループは見つかりませんでした(ループする曲は、2 周目の途中まで録ると検出できます)'));
       return;
     }
     if (machine === 'pce') {
@@ -2258,6 +2357,7 @@
     const I = MML.Emu.Cps3 && MML.Emu.Cps3.Image, game = I ? I.identifyBios(bytes) : null;
     if (!game) return null;
     await idb((st) => st.put({ data: bytes.slice(), name: name || '', time: Date.now() }, CPS3_BIOS_KEY + game), 'readwrite');
+    if (cfgBiosRefresh) cfgBiosRefresh(); // 設定を開いていれば BIOS の表を描き直す
     if (!ensureDom()) return null;
     flashStatus(T('CPS3 の BIOS を控えました: {name}({title})', { name: name || '', title: I.NAMES[game] || game }));
     if (pendingCps3 && pendingCps3.game === game) { const p = pendingCps3; pendingCps3 = null; return openCps3(p.bytes, p.name); }
@@ -2272,6 +2372,17 @@
       statusEl.textContent = T('{title} の BIOS を控えました。続けてゲーム CD のイメージ(.bin)を入れてください', { title: I.NAMES[game] || game });
     }
     return null;
+  }
+  // EEPROM(設定とハイスコア)を消す。そのゲームが動いていれば、本体も空の EEPROM で起動し直す(そうしないと、動いている本体がすぐ書き戻す)
+  async function clearCps3Eeprom(game) {
+    const key = 'cps3.eeprom.' + game, running = machine === 'cps3' && batteryKey === key && (node || nes);
+    if (running) {
+      if (node) node.port.postMessage({ type: 'batteryClear' }); else { nes.clearBattery(); if (rewindBuf) rewindBuf.clear(); }
+      liveRestart();
+      await new Promise((r) => setTimeout(r, 200)); // 起動し直す前に本体が送った保存が、消した後に届かないように待つ
+    }
+    await idb((st) => st.delete(key), 'readwrite');
+    flashStatus(T('設定とハイスコアを消しました: {title}', { title: (MML.Emu.Cps3.Image.NAMES[game]) || game }));
   }
   async function openCps3(bytes, name) {
     const I = MML.Emu.Cps3 && MML.Emu.Cps3.Image;

@@ -124,6 +124,7 @@
             break;
           case 'turboRate': if (this.nes) this.nes.setTurboRate(m.frames | 0); break;
           case 'reset': if (this.nes) { this.nes.reset(); if (this.rewind) this.rewind.clear(); } break;
+          case 'batteryClear': if (this.nes && typeof this.nes.clearBattery === 'function') { this.nes.clearBattery(); if (this.rewind) this.rewind.clear(); } break; // CPS3: EEPROM を空にして起動し直す
           case 'mix': { // 鍵盤表示のミュート/音量(2A03 は apu.mute/vol、拡張音源はマッパーの audio.mute/vol)。capture.js の applyMute/applyVolume と同じ流儀(バンドルに無いので自前)
             if (!this.nes) break;
             if (typeof this.nes.applyMix === 'function') { this.nes.applyMix(m.mute || null, m.volume || null); break; } // MSX: 本体が { psg: [...], scc: [...] } を受ける

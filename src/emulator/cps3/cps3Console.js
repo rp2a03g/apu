@@ -79,6 +79,8 @@
       this.eepromInit = e; this.machine.eeprom.set(e); this.machine.eepromDirty = false;
       return true;
     }
+    // EEPROM を空にして起動し直す(ゲームが初期値を書き直す。テストメニューの設定とハイスコアが消える)
+    clearBattery() { const rec = !!this.rec; this.rec = null; this.eepromInit = null; this._boot(); this.machine.eepromDirty = false; if (rec) this.startRecording(); }
     static describe(c) { return 'CP System III — ' + ((Cps3.Image && Cps3.Image.NAMES[c.game]) || c.game); }
 
     setSampleRate(sr) { this.sampleRate = sr > 0 ? sr : 48000; }
