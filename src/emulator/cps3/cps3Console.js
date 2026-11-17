@@ -2,10 +2,10 @@
  * CP システム III — ゲーム画面(src/ui/nesScreen.js)と音スレッド(src/audio/nes-worklet-impl.js)が期待する「本体」の形。
  * MML.Emu.Cps3Console。DESIGN-CPS3-CAPTURE.md §10。
  *
- * 中身は Cps3.Machine(CPU と周辺。画面は文字の面だけ)+ Cps3Audio(音源)。他の機種の本体(PceConsole など)と同じ口を持つ:
+ * 中身は Cps3.Machine(CPU、周辺、画面)+ Cps3Audio(音源)。他の機種の本体(PceConsole など)と同じ口を持つ:
  *   setSampleRate / runSamples / runSamplesStereo / runFrame / frame / frameWidth / frameHeight / frameRate / frameCount / onFrame
  *   setController / setTurboRate / reset / startRecording / stopRecording / chips / extBits / diskCount / hasBattery / applyMix
- * 作っていない物: ステートセーブ、巻き戻し、EEPROM の保存。
+ * ステートセーブと巻き戻しは cps3State.js。EEPROM(設定とハイスコア)は他の機種の「セーブ」と同じ口で出し入れする。
  *
  * 入力(setController の bits)。下位 8bit は他の機種と同じ並び、CPS3 だけの物を上に足した:
  *   0x01 A = ショット 1(弱パンチ)、0x02 B = ショット 2(中パンチ)、0x04 Select = コイン、0x08 Start = スタート、0x10-0x80 = 上下左右
@@ -28,7 +28,7 @@
       this.opts = opts;
       this.game = opts.game;
       this.sampleRate = 48000;
-      this.frame = new Uint32Array(W * H);
+      this.frame = new Uint32Array(512 * H);                            // 幅は 384 か 496(ソフトが選ぶ)。広い方に合わせて確保
       this._rgba = new Uint8Array(this.frame.buffer);
       this.frameWidth = W; this.frameHeight = H;
       this.frameRate = Cps3.CPU_HZ / Cps3.FRAME_CYCLES;
@@ -58,12 +58,13 @@
       };
       m.onFrameEnd = () => {
         this._catchUp(m.cpu.cycles);
-        m.renderText(this._rgba);
         this.frameCount = m.frame;
         const rec = this.rec;
         if (rec) { rec.cur.n1 = chip.nat; rec.frames.push(rec.cur); rec.cur = { n0: chip.nat, n1: chip.nat, w: [] }; }
         if (this.onFrame) this.onFrame();
       };
+      // 絵は垂直帰線に入った時の状態で作る(MAME と同じ時点。フレームの終わりだと、ソフトが次の絵の用意を始めている)
+      m.onVblank = () => { m.renderScreen(this._rgba); this.frameWidth = m.screenWidth; };
       if (this.eepromInit) m.eeprom.set(this.eepromInit);
       this._applyPad();
     }

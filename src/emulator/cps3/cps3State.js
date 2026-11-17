@@ -29,7 +29,7 @@
       c.pad[0] = state.pad[0] | 0; c.pad[1] = state.pad[1] | 0;
       c.frameCount = c.machine.frame;
       c._applyPad();
-      c.machine.renderText(c._rgba);
+      c.machine.renderScreen(c._rgba); c.frameWidth = c.machine.screenWidth;
       return true;
     },
   };
@@ -46,18 +46,32 @@
     }
     clear() { super.clear(); this._last = null; }
     get palette() { return this._pal.slice(); }
-    // 今の画面(RGBA)を「色の番号 8bit+その画面の色表」にして輪に控える。文字の面だけなので色数は少ない(256 色を超えた分は 0 番に寄せる)
+    // 今の画面(RGBA)を「色の番号 8bit+その画面の色表」にして輪に控える。輪は常に 384 幅(496 幅の画面は横を間引く)。
+    // 256 色に収まる画面(テストモードなど)はそのままの色、超える画面は赤 3bit・緑 3bit・青 2bit に丸める(逆再生の間だけの絵なので粗くてよい)
     _capture(f) {
       const RING = Emu.NesRewind.RING, FB = this.frameBytes, src = this.nes.frame;
       if (!this.ring) this.ring = new Uint8Array(RING * FB);
       if (!this.palRing) this.palRing = new Uint32Array(RING * 256);
       const slot = f % RING, out = this.ring.subarray(slot * FB, slot * FB + FB), pal = this._pal, map = new Map();
-      let n = 0;
-      for (let i = 0; i < FB; i++) {
-        const col = src[i];
-        let k = map.get(col);
-        if (k === undefined) { if (n < 256) { k = n; pal[n++] = col; } else k = 0; map.set(col, k); }
-        out[i] = k;
+      const SW = this.nes.frameWidth || RW_W, step = SW / RW_W;
+      let n = 0, over = false;
+      for (let y = 0, i = 0; y < RW_H && !over; y++) {
+        const row = y * SW;
+        for (let x = 0; x < RW_W; x++, i++) {
+          const col = src[row + ((x * step) | 0)];
+          let k = map.get(col);
+          if (k === undefined) { if (n >= 256) { over = true; break; } k = n; pal[n++] = col; map.set(col, k); }
+          out[i] = k;
+        }
+      }
+      if (over) {
+        // 色は ABGR(下位が赤)。5bit ずつしか無いので、上位 3bit・3bit・2bit を取る
+        for (let y = 0, i = 0; y < RW_H; y++) {
+          const row = y * SW;
+          for (let x = 0; x < RW_W; x++, i++) { const col = src[row + ((x * step) | 0)]; out[i] = ((col >> 5) & 7) | (((col >> 13) & 7) << 3) | (((col >> 22) & 3) << 6); }
+        }
+        for (let k = 0; k < 256; k++) pal[k] = (0xFF000000 | (((k & 7) * 255 / 7) | 0) | ((((k >> 3) & 7) * 255 / 7 | 0) << 8) | (((k >> 6) * 85) << 16)) >>> 0;
+        n = 256;
       }
       for (let k = n; k < 256; k++) pal[k] = 0xFF000000;
       this.palRing.set(pal, slot * 256);

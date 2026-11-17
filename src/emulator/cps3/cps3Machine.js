@@ -1,6 +1,7 @@
 /*
- * CP システム III の本体(録音用。画面は作らない)。MML.Emu.Cps3.Machine
- * DESIGN-CPS3-CAPTURE.md 段階 10c。メモリマップ、暗号の解除、割り込み、DMA の状態は MAME src/mame/capcom/cps3.cpp
+ * CP システム III の本体。MML.Emu.Cps3.Machine
+ * DESIGN-CPS3-CAPTURE.md 段階 10c(CPU と周辺)、10d(文字の面と入力)、10f(スプライト、背景、絵の展開)。
+ * メモリマップ、暗号の解除、割り込み、DMA、画面の作り方は MAME src/mame/capcom/cps3.cpp
  * (BSD-3-Clause、THIRD-PARTY-NOTICES.md)に合わせた。
  *
  * 入力:
@@ -26,6 +27,7 @@
   const CPU_HZ = 25000000;                                   // 6.25MHz × 4
   const FRAME_CYCLES = CPU_HZ * 546 * 264 / (42954545 / 5);  // 画素クロック 42.954545MHz/5、横 546、縦 264 → 59.60Hz
   const VBLANK_LINE = 224, LINES = 264;
+  const RB_W = 1024, RB_H = 448;                             // 色の番号の面。画面全体の拡大縮小(見える範囲が最大 2 倍)に備えて画面の 2 倍
 
   // ゲームごとの鍵(MAME cps3.cpp の init_*)
   Cps3.KEYS = {
@@ -89,6 +91,12 @@
       this.ssram = new Uint8Array(0x10000); this.ssregs = new Uint8Array(0x30);
       this.cache = new Uint8Array(0x400); this.cacheOp = new Uint8Array(0x400);
       this.eeprom = new Uint16Array(0x40); this.eepromRead = 0;
+      this.spritelist = new Uint32Array(0x20000); this.spritelist[0] = 0x80000000;   // スプライト DMA の時に取る、スプライトの表の写し
+      this.gscrollBuf = new Uint32Array(8);                                          // 同じ時に取る、全体スクロールの値
+      this.rb = new Uint32Array(RB_W * RB_H);
+      this.tableAddr = -1;                                                           // 絵の展開に使う表の位置(キャラクタ DMA の命令 4)
+      this.screenWidth = 384;                                                        // 384 か 496(ソフトが画面の制御レジスタで選ぶ)
+      this.onVblank = null;                                                          // 垂直帰線に入った時(ゲーム画面の本体が絵を作る所。MAME も同じ時点で描く)
       this.snd = new Uint32Array(0x300 >> 2);
       const dv = (u) => new DataView(u.buffer, u.byteOffset, u.length);
       this.vBios = dv(this.bios); this.vBiosRaw = dv(this.biosRaw); this.vFlashOp = dv(this.flashOp); this.vFlashData = dv(this.flashData); this.vFlashRaw = dv(this.flashRaw);
@@ -281,11 +289,12 @@
         const prev = this.spriteDma; this.spriteDma = ((prev & ~mask) | (v & mask)) & 0xFFFF;
         if (!(this.dmaStatus & 1) && (this.spriteDma & 9) === 8 && (prev & 9) === 9) {
           this.dmaStatus |= 1;
+          this._latchSprites();
           this.schedule(CPU_HZ * 4e-6, 1);
         }
       } else if (o === 0x84 && (mask & 0xFF)) this.cramBank = v & 0xFF;
       else if (o === 0x88 && (mask & 0xFF000000)) this.gfxBank = ((v >>> 16) - 2) | 0;
-      else if (o === 0x98 && (mask & 0xFF000000) && ((v >>> 16) & 0x40)) this._dmaDone(2);   // キャラクタの DMA(展開はしない)
+      else if (o === 0x98 && (mask & 0xFF000000) && ((v >>> 16) & 0x40)) { this._charDma(); this._dmaDone(2); }   // キャラクタの DMA
       else if (o === 0xAC && (mask & 0xFF) && (v & 2)) { this._paletteDma(v & 1); this._dmaDone(4); }   // パレットの DMA
     }
     // パレットの DMA: 絵のフラッシュから色の RAM へ 16bit ずつ写す(フェードつき)。MAME の palettedma_w と同じ。
@@ -311,18 +320,229 @@
       else if (kind === 2) { this.dmaStatus &= ~6; this.cpu.setIrq(10, true); }
     }
 
+    // ── 画面(スプライトと背景。MAME cps3.cpp の screen_update、draw_tilemapsprite_line、cps3_drawgfxzoom と同じ流れ)──
+    // 絵は全部 16×16・8bpp のタイルで、キャラクタ RAM(cram、8MB)に置かれる。タイルの画素 (x, y) = cram[タイル × 256 + y × 16 + x]。
+    // スプライトの表はスプライト DMA の時に写し(spritelist)を取り、描く時はその写しを見る。背景(タイルマップ)は表の中の
+    // 「横 0 枚のスプライト」として出てきて、1 行ずつ描く。描く先は「色の番号」の面(rb)で、最後に色の RAM を引いて RGB にする。
+    // 半透明は色の番号の上位ビットを立てるだけ(その番号の色が、混ぜた後の色として色の RAM に用意されている)。
+
+    // スプライト DMA: 表(スプライト RAM の先頭)と、表が指す下位の表を写す。全体スクロールの値もこの時の物を使う
+    _latchSprites() {
+      const v = this.vSpr, L = this.spritelist;
+      for (let i = 0; i < 0x800; i += 4) {
+        for (let k = 0; k < 4; k++) L[i + k] = v.getUint32((i + k) * 4);
+        const dat = L[i];
+        if (dat & 0x80000000) break;
+        const offs = (dat & 0x7FFF) << 2, len = ((dat & 0x01FF0000) >>> 16) * 4;
+        for (let j = 0; j < len && offs + j < 0x20000; j++) L[offs + j] = v.getUint32((offs + j) * 4);
+      }
+      for (let k = 0; k < 8; k++) this.gscrollBuf[k] = this.vPpu.getUint32(k * 4);
+    }
+
+    // キャラクタの DMA: キャラクタ RAM に置かれた命令の表を読んで、絵のフラッシュ(this.gfx)からキャラクタ RAM へ展開する
+    //   命令 4 = 展開に使う表の位置、2 = 6bpp の圧縮、3 = 8bpp の圧縮、0 = そのまま写す
+    _charDma() {
+      const cram = this.cram, gfx = this.gfx, vc = this.vCram, G = gfx.length;
+      const list = (this.vPpu.getUint32(0x94) & 0xFFFF) | (this.vPpu.getUint32(0x98) & 0x003F0000);
+      const src8 = (a) => (a >= 0 && a < G ? gfx[a] : 0);
+      for (let i = 0; i < 0x1000; i += 3) {
+        const p = ((list + i) & 0x1FFFFF) * 4;
+        if (p + 12 > cram.length) break;
+        const dat1 = vc.getUint32(p), dat2 = vc.getUint32(p + 4), dat3 = vc.getUint32(p + 8);
+        if (dat1 & 0x01000000) break;
+        const cmd = (dat1 & 0x00E00000) >>> 21, length = ((dat1 & 0x001FFFFF) + 1) << 3;
+        let dst = (dat2 << 3) >>> 0, src = ((dat3 << 1) >>> 0) - 0x400000;
+        if (cmd === 4) { this.tableAddr = src; continue; }
+        const tab = this.tableAddr;
+        if (cmd === 0) { for (let n = length; n > 0; n--) { cram[dst & 0x7FFFFF] = src8(src); src++; dst++; } continue; }
+        if (cmd === 2) {
+          // 6bpp: bit7 = 表を引く(2 バイトに展開)、bit6 = 直前の値を (下位 6bit + 1) 回繰り返す
+          let last = 0, remain = length;
+          const put = (b) => {                                      // 戻り値 = 進んだ数(MAME の process_byte)
+            const d = dst & 0x7FFFFF;
+            if (b & 0x40) {
+              let rle = (b & 0x3F) + 1, n = 0, left = remain;          // left は MAME の max_length(呼んだ側の残りは減らさない)
+              while (rle) { cram[(d + n) & 0x7FFFFF] = last & 0x3F; n++; rle--; left--; if (d + n > 0x7FFFFF) return left; }
+              return n;
+            }
+            cram[d] = b; last = b; return 1;
+          };
+          while (remain) {
+            let cur = src8(src); src++;
+            if (cur & 0x80) {
+              cur &= 0x7F;
+              let n = put(src8(tab + cur * 2)); remain -= n; dst += n;
+              if (dst > 0x7FFFFF || remain <= 0) break;
+              n = put(src8(tab + cur * 2 + 1)); remain -= n; dst += n;
+              if (dst > 0x7FFFFF || remain <= 0) break;
+            } else {
+              const n = put(cur); remain -= n; dst += n;
+              if (dst > 0x7FFFFF || remain <= 0) break;
+            }
+          }
+          continue;
+        }
+        if (cmd === 3) {
+          // 8bpp: 8 個ごとに制御バイト(bit が立っていれば表を引く)。同じ値が 2 回続いたら、次のバイトは繰り返しの回数
+          let lastb = 0xFFFE, lastb2 = 0xFFFF, ds = dst;
+          const start = dst;
+          const put8 = (b) => {
+            if (lastb === lastb2) { const rle = (b + 1) & 0xFF; for (let k = 0; k < rle; k++) { cram[ds & 0x7FFFFF] = lastb; ds++; } lastb2 = 0xFFFF; }
+            else { lastb2 = lastb; lastb = b; cram[ds & 0x7FFFFF] = b; ds++; }
+          };
+          let done = false, guard = 0x800000;
+          while (!done && guard-- > 0) {
+            let ctrl = src8(src); src++;
+            for (let k = 0; k < 8; k++) {
+              let pb = src8(src);
+              if (ctrl & 0x80) { pb &= 0x7F; put8(src8(tab + pb * 2)); put8(src8(tab + pb * 2 + 1)); } else put8(pb);
+              src++; ctrl = (ctrl << 1) & 0xFF;
+              if (ds - start >= length) { done = true; break; }
+            }
+          }
+        }
+      }
+    }
+
+    // タイル 1 枚(拡大縮小つき)を色の番号の面へ。scalex/scaley は 16.16 の固定小数。clipT/clipB は描く行の範囲(背景は 1 行だけ)
+    _tile(code, color, gran, flipx, flipy, sx, sy, blend, scalex, scaley, clipL, clipR, clipT, clipB) {
+      if (!scalex || !scaley) return;
+      const sw = (scalex * 16 + 0x8000) >>> 16, sh = (scaley * 16 + 0x8000) >>> 16;
+      if (!sw || !sh) return;
+      const palbase = (gran * color) & 0x1FFFF, src = (code & 0x7FFF) * 256, cram = this.cram, rb = this.rb;
+      let dx = Math.floor((16 << 16) / sw), dy = Math.floor((16 << 16) / sh);
+      let ex = sx + sw, ey = sy + sh, xb = 0, yi = 0;
+      if (flipx) { xb = (sw - 1) * dx; dx = -dx; }
+      if (flipy) { yi = (sh - 1) * dy; dy = -dy; }
+      if (sx < clipL) { const n = clipL - sx; sx += n; xb += n * dx; }
+      if (sy < clipT) { const n = clipT - sy; sy += n; yi += n * dy; }
+      if (ex > clipR + 1) ex = clipR + 1;
+      if (ey > clipB + 1) ey = clipB + 1;
+      if (ex <= sx) return;
+      const blendColor = (color & 1) << 16;
+      for (let y = sy; y < ey; y++, yi += dy) {
+        const row = src + (yi >> 16) * 16, d = y * RB_W;
+        let xi = xb;
+        if (!blend) {
+          for (let x = sx; x < ex; x++, xi += dx) { const c = cram[row + (xi >> 16)]; if (c) rb[d + x] = c | palbase; }
+        } else if (gran === 64) {
+          for (let x = sx; x < ex; x++, xi += dx) { const c = cram[row + (xi >> 16)]; if (c) rb[d + x] |= (c & 0xF) << 13; }
+        } else {
+          for (let x = sx; x < ex; x++, xi += dx) { const c = cram[row + (xi >> 16)]; if (c) rb[d + x] |= ((c & 1) << 15) | blendColor; }
+        }
+      }
+    }
+    // 背景(タイルマップ)の 1 行
+    _tilemapLine(tm, drawline, clipL, clipR) {
+      const vp = this.vPpu, vs = this.vSpr, r0 = vp.getUint32(0x20 + tm * 16), r1 = vp.getUint32(0x24 + tm * 16), r2 = vp.getUint32(0x28 + tm * 16);
+      if (!(r1 & 0x8000)) return;
+      let scrollx = r0 >>> 16;
+      const scrolly = (r0 & 0xFFFF) + 4, flipXAll = (r1 & 0x800) ? 0x3F : 0, flipYAll = r1 & 0x400;
+      const linebase = ((r2 & 0x7F000000) >>> 24) << 10, mapbase = ((r2 & 0x007F0000) >>> 16) << 10;
+      let line = (drawline + scrolly) & 0x3FF;
+      if (flipYAll) line ^= 0x3FF;
+      const tileline = (line >> 4) + 1, sub = line & 15;
+      if (r1 & 0x4000) scrollx += (vs.getUint32(((linebase + ((line + 16) & 0x3FF)) & 0x1FFFF) * 4) >>> 16) & 0x3FF;
+      const x0 = clipL >> 4, x1 = (clipR >> 4) + 2, sxOff = scrollx % 16, col0 = Math.floor(scrollx / 16);
+      for (let x = x0; x < x1; x++) {
+        const dat = vs.getUint32(((mapbase + ((tileline & 63) * 64) + (((x + col0) & 63) ^ flipXAll)) & 0x1FFFF) * 4);
+        const xflip = ((dat >>> 12) & 1) ^ (flipXAll & 1);
+        this._tile(dat >>> 17, dat & 0x1FF, (dat & 0x200) ? 64 : 256, xflip, (dat >>> 11) & 1, x * 16 - sxOff, drawline - sub, (dat & 0x400) !== 0, 0x10000, 0x10000, clipL, clipR, drawline, drawline);
+      }
+    }
+    /**
+     * 画面を RGBA に描く(幅は this.screenWidth = 384 か 496、高さ 224)。スプライトと背景 → 色の RAM を引く → 文字の面を重ねる。
+     * out は 幅 × 224 × 4 バイト以上
+     */
+    renderScreen(out) {
+      const vp = this.vPpu, H = 224;
+      const z = (k) => vp.getUint32(0x60 + k * 4);
+      const width = (z(1) >>> 16) - (z(0) & 0xFFFF);
+      if (width > 0 && width <= 512) this.screenWidth = width;
+      const W = this.screenWidth;
+      let zx = z(3) & 0xFF, zy = z(7) & 0xFF;
+      if (zx > 0x80) zx = 0x80; if (zy > 0x80) zy = 0x80;
+      const fszx = Math.floor((zx << 16) / 0x40), fszy = Math.floor((zy << 16) / 0x40), plain = zx === 0x40 && zy === 0x40;
+      const clipL = 0, clipT = 0;
+      const clipR = Math.min(RB_W - 1, plain ? W - 1 : ((W * fszx + 0x8000) >>> 16) - 1), clipB = Math.min(RB_H - 1, plain ? H - 1 : ((H * fszy + 0x8000) >>> 16) - 1);
+      const rb = this.rb, L = this.spritelist, gs = this.gscrollBuf;
+      for (let y = 0; y <= clipB; y++) rb.fill(0, y * RB_W, y * RB_W + clipR + 1);
+      const TILES = [8, 1, 2, 4];
+      for (let i = 0; i < 0x800; i += 4) {
+        const e0 = L[i], e1 = L[i + 1], e2 = L[i + 2];
+        if (e0 & 0x80000000) break;
+        const g = gs[(e0 >>> 28) & 7], gscrollx = (g >>> 16) & 0x3FF, gscrolly = g & 0x3FF;
+        const length = (e0 & 0x01FF0000) >>> 16, start = ((e0 & 0x7FF0) >>> 4) * 64;
+        const xpos = (e1 >>> 16) & 0x3FF, ypos = e1 & 0x3FF;
+        const whichbpp = (e2 >>> 30) & 1, whichpal = (e2 >>> 29) & 1, gxflip = (e2 >>> 28) & 1, gyflip = (e2 >>> 27) & 1, galpha = (e2 >>> 26) & 1, gbpp = (e2 >>> 25) & 1, gpal = (e2 >>> 16) & 0x1FF;
+        for (let j = 0; j < length * 4; j += 4) {
+          if (start + j + 2 >= 0x20000) break;
+          const v1 = L[start + j], v2 = L[start + j + 1], v3 = L[start + j + 2];
+          const tileno = v1 >>> 17, alpha = (v1 >>> 10) & 1, bpp = (v1 >>> 9) & 1, pal = v1 & 0x1FF;
+          let flipx = (v1 >>> 12) & 1, flipy = (v1 >>> 11) & 1;
+          let xpos2 = (v2 >>> 16) & 0x3FF, ypos2 = v2 & 0x3FF;
+          const ysd = ((v3 >>> 24) & 0x7F) + 1, xsd = ((v3 >>> 16) & 0x7F) + 1;
+          let ys = (v3 >>> 2) & 3, xs = v3 & 3;
+          if (ys === 0) continue;
+          if (xs === 0) {                                             // 横 0 枚 = 背景を ysd 行ぶん描く
+            const tm = (v3 >>> 4) & 3;
+            for (let yy = 0; yy < ysd; yy++) {
+              const cy = ((~(ypos2 + gscrolly - yy)) - 18) & 0x3FF;
+              if (cy >= clipT && cy <= clipB) this._tilemapLine(tm, cy, clipL, clipR);
+            }
+            continue;
+          }
+          ys = TILES[ys]; xs = TILES[xs];
+          const xinc = Math.floor((xsd << 16) / xs), yinc = Math.floor((ysd << 16) / ys);
+          let xscale = Math.floor(xinc / 16), yscale = Math.floor(yinc / 16);
+          if (xscale & 0xFFFF) xscale += 0x1000;                      // 継ぎ目に隙間が出ないように切り上げ
+          if (yscale & 0xFFFF) yscale += 0x1000;
+          xs -= 1; ys -= 1;
+          flipx ^= gxflip; flipy ^= gyflip;
+          if (!flipx) xpos2 += xsd >> 1; else xpos2 -= xsd >> 1;
+          ypos2 += ysd >> 1;
+          if (!flipx) xpos2 -= ((xs + 1) * xinc) >> 16; else xpos2 += (xs * xinc) >> 16;
+          if (flipy) ypos2 -= (ys * yinc) >> 16;
+          const color = whichpal ? gpal : pal, gran = (whichbpp ? gbpp : bpp) ? 64 : 256, blend = !!(galpha || alpha);
+          let count = 0;
+          for (let xx = 0; xx <= xs; xx++) {
+            let cx = !flipx ? xpos + xpos2 + ((xx * xinc) >> 16) : xpos + xpos2 - ((xx * xinc) >> 16);
+            cx = (cx + gscrollx + 1) & 0x3FF; if (cx & 0x200) cx -= 0x400;
+            for (let yy = 0; yy <= ys; yy++) {
+              let cy = flipy ? ypos + ypos2 + ((yy * yinc) >> 16) : ypos + ypos2 - ((yy * yinc) >> 16);
+              cy = (0x3FF - (cy + gscrolly) - 17) & 0x3FF; if (cy & 0x200) cy -= 0x400;
+              this._tile(tileno + count, color, gran, flipx, flipy, cx, cy, blend, xscale, yscale, clipL, clipR, clipT, clipB);
+              count++;
+            }
+          }
+        }
+      }
+      // 色の番号 → RGB(色は 5bit ずつ、下位 3bit は 0)
+      const col = this.col;
+      for (let y = 0, sy = 0; y < H; y++, sy += fszy) {
+        const srow = (plain ? y : Math.min(RB_H - 1, sy >>> 16)) * RB_W;
+        let o = y * W * 4, sxv = 0;
+        for (let x = 0; x < W; x++, o += 4, sxv += fszx) {
+          const idx = rb[srow + (plain ? x : Math.min(RB_W - 1, sxv >>> 16))] & 0x1FFFF, c = (col[idx * 2] << 8) | col[idx * 2 + 1];
+          out[o] = (c & 0x1F) << 3; out[o + 1] = ((c >> 5) & 0x1F) << 3; out[o + 2] = ((c >> 10) & 0x1F) << 3; out[o + 3] = 255;
+        }
+      }
+      this.renderText(out, W, true);
+      return out;
+    }
+
     // ── 文字の面(スコアなどを出す 8×8 の面。テストモードもこの面)────────────
     /**
-     * 文字の面だけを RGBA(384×224)に描く。他の面(スプライト、背景)は作っていないので地は黒。MAME の draw_fg_layer と同じ読み方:
+     * 文字の面を RGBA に描く(幅は width、省略時 384)。overlay が真なら下の絵を消さずに重ねる(renderScreen が使う)。偽なら地は黒。MAME の draw_fg_layer と同じ読み方:
      *   マップ = ssram の先頭から 1 行 128 バイト(64 マス × 2 バイト: 下位 9bit がタイル、bit9-13 がパレット、bit14/15 が上下/左右反転)
      *   タイルの絵 = ssram の 0x4000 から 1 個 32 バイト(4bpp、1 バイトに 2 画素で下位 4bit が左)。色 0 は透明
      *   行ごとの横ずらし = ssram の 0x2000 から 2 バイトおき
      */
-    renderText(out) {
-      const W = 384, H = 224, ss = this.ssram, col = this.vCol;
+    renderText(out, width, overlay) {
+      const W = width || 384, H = 224, ss = this.ssram, col = this.vCol;
       const vscroll = this.ssregs[0x10] | (this.ssregs[0x11] << 8), palBase = this.ssregs[0x12] << 5;
       const scrolly = (-vscroll) & 0x100;
-      out.fill(0); for (let i = 3; i < out.length; i += 4) out[i] = 255;
+      if (!overlay) { out.fill(0); for (let i = 3; i < out.length; i += 4) out[i] = 255; }
       for (let line = 0; line < H; line++) {
         const ty = (line + scrolly) & 7, row = ((((line + scrolly) >> 3) * 128) & 0x1FFF);
         const rowscroll = ss[(((line + scrolly - 1) & 0x1FF) * 2 + 0x2000) & 0xFFFF];
@@ -379,6 +599,7 @@
         fram: this.fram.slice(), ppu: this.ppu.slice(), ssregs: this.ssregs.slice(), cache: this.cache.slice(), cacheOp: this.cacheOp.slice(),
         eeprom: this.eeprom.slice(), eepromRead: this.eepromRead, snd: this.snd.slice(),
         cramBank: this.cramBank, gfxBank: this.gfxBank, dmaStatus: this.dmaStatus, spriteDma: this.spriteDma,
+        sprl: pages(new Uint8Array(this.spritelist.buffer), p.sprl), gscroll: this.gscrollBuf.slice(), tableAddr: this.tableAddr, screenWidth: this.screenWidth,
         events: this.events.map((e) => ({ at: e.at, kind: e.kind })), frame: this.frame, frameStart: this.frameStart, vblDone: this.vblDone,
         flash: this.progChips.map((c) => c.mode).concat(this.gfxChips.map((c) => c.mode)), flashBusy: this.flashBusy,
         cpu: this.cpu.saveState()
@@ -390,6 +611,7 @@
       this.fram.set(s.fram); this.ppu.set(s.ppu); this.ssregs.set(s.ssregs); this.cache.set(s.cache); this.cacheOp.set(s.cacheOp);
       this.eeprom.set(s.eeprom); this.eepromRead = s.eepromRead; this.snd.set(s.snd);
       this.cramBank = s.cramBank; this.gfxBank = s.gfxBank; this.dmaStatus = s.dmaStatus; this.spriteDma = s.spriteDma;
+      if (s.sprl) { put(new Uint8Array(this.spritelist.buffer), s.sprl); this.gscrollBuf.set(s.gscroll); this.tableAddr = s.tableAddr; this.screenWidth = s.screenWidth || 384; }
       this.events = s.events.map((e) => ({ at: e.at, kind: e.kind })); this.frame = s.frame; this.frameStart = s.frameStart; this.vblDone = s.vblDone;
       const all = this.progChips.concat(this.gfxChips); for (let i = 0; i < all.length; i++) all[i].mode = s.flash[i] | 0;
       this.flashBusy = s.flashBusy;
@@ -411,7 +633,7 @@
         const end = this.frameStart + FRAME_CYCLES, next = this.vblDone ? end : this.frameStart + FRAME_CYCLES * VBLANK_LINE / LINES;
         if (next > target) { this._runTo(target); return; }
         this._runTo(next);
-        if (!this.vblDone) { this.cpu.setIrq(12, true); this.vblDone = true; }
+        if (!this.vblDone) { this.cpu.setIrq(12, true); this.vblDone = true; if (this.onVblank) this.onVblank(); }
         else { this.vblDone = false; this.frameStart = end; this.frame++; if (this.onFrameEnd) this.onFrameEnd(); }
       }
     }
