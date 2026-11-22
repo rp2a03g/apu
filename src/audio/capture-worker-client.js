@@ -438,7 +438,7 @@
              Emu.AY8910Audio, Emu.SCCAudio, Emu.OPLLAudio, Emu.OPLLNuked, Emu.SN76489Audio,
              Emu.YM2612Nuked, Emu.YM2610Audio, Emu.YM2151Audio, Emu.YM2203Audio, Emu.YM2608Audio, Emu.OPLAudio,
              MML.Kss2MmlExpansion && MML.Kss2MmlExpansion.opl,
-             Emu.GA20Audio, Emu.SegaPCMAudio, Emu.C140Audio, Emu.C352Audio, Emu.OKIM6258Audio, Emu.QSoundAudio, Emu.Cps3Audio, Emu.snapshotCps3, Emu.OKIM6295Audio, Emu.MultiPCMAudio, Emu.PWM32XAudio, Emu.RF5C164Audio,
+             Emu.GA20Audio, Emu.SegaPCMAudio, Emu.C140Audio, Emu.C352Audio, Emu.OKIM6258Audio, Emu.QSoundAudio, Emu.Cps3Audio, Emu.snapshotCps3, Emu.createTms57002, Emu.Zsg2Audio, Emu.snapshotZsg2, Emu.OKIM6295Audio, Emu.MultiPCMAudio, Emu.PWM32XAudio, Emu.RF5C164Audio,
              Emu.snapshotGbApuForCapture, Emu.snapshotHesApuForCapture,
              MML.RollBuild && MML.RollBuild.vgm,
              MML.UI && MML.UI.buildRollTracksFromRegSnapshots,

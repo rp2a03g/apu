@@ -79,20 +79,35 @@
     const m = VGM.CP3X.MAGIC;
     return type === VGM.CP3X.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
   };
-  // ストリーム先頭のデータブロックに CP3X のヘッダがあれば { clock, flags } を返す(無ければ null)
-  VGM.scanCps3Extension = function (bytes, dataOffset) {
+  // ZOOM ZSG-2(タイトー FX-1B / G-NET の音源基板)の規格外ブロック。0x67 0x66 TYPE 長さ 'ZSGX' 版 種類 中身…(tools/zsg2/zsg2-vgm.js)
+  //   種類 0 = ヘッダ: クロック u32(ZSG-2 に入るクロック。出力レート = floor(クロック/768))、フラグ u8(bit0 = 後段に TMS57002 がある、bit1 = ループの長さつき)
+  //            bit1 が立っていれば続けて ループの頭 u32・1 周の長さ u32(音源のサンプル数)。2 周目以降の書き込みの位置はこの値で数える
+  //            (VGM ヘッダのループ長は 44100Hz で、音源のサンプル数に直すと端数が出るため)
+  //   種類 1 = 波形: 位置 u32(波形 ROM 内のバイト位置)+ バイト列
+  //   種類 2 = 書き込み: 6 バイト × n。時刻 u16(ブロックの位置からのサンプル数)、レジスタ番号 u16、値 u16。1 フレームに 1 個。
+  //            番号 0x000-0x3FF = ZSG-2(番地/2)、0x8000 以上 = DSP と全体音量(src/emulator/expansion/zsg2.js の冒頭)
+  VGM.ZSGX = { TYPE: 0xBB, MAGIC: [0x5A, 0x53, 0x47, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_ROM: 1, KIND_WRITES: 2, FLAG_DSP: 1, FLAG_LOOP: 2 };
+  VGM.isZsgxBlock = function (type, block) {
+    const m = VGM.ZSGX.MAGIC;
+    return type === VGM.ZSGX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
+  };
+  // ストリーム先頭のデータブロックに、指定の規格外ブロックのヘッダ(種類 0)があれば { clock, flags } を返す(無ければ null)
+  function scanClockHeader(bytes, dataOffset, isBlock) {
     let p = dataOffset;
     while (p + 7 <= bytes.length && bytes[p] === 0x67 && bytes[p + 1] === 0x66) {
       const type = bytes[p + 2];
       const size = (bytes[p + 3] | (bytes[p + 4] << 8) | (bytes[p + 5] << 16) | (bytes[p + 6] << 24)) & 0x7FFFFFFF;
       const block = bytes.subarray(p + 7, p + 7 + size);
-      if (VGM.isCp3xBlock(type, block) && block[5] === VGM.CP3X.KIND_HEADER && block.length >= 11) {
-        return { clock: (block[6] | (block[7] << 8) | (block[8] << 16) | (block[9] << 24)) >>> 0, flags: block[10] };
+      if (isBlock(type, block) && block[5] === 0 && block.length >= 11) {
+        const u = (o) => (block[o] | (block[o + 1] << 8) | (block[o + 2] << 16) | (block[o + 3] << 24)) >>> 0;
+        return { clock: u(6), flags: block[10], extra: block.length >= 19 ? [u(11), u(15)] : null };
       }
       p += 7 + size;
     }
     return null;
-  };
+  }
+  VGM.scanCps3Extension = function (bytes, dataOffset) { return scanClockHeader(bytes, dataOffset, VGM.isCp3xBlock); };
+  VGM.scanZsg2Extension = function (bytes, dataOffset) { return scanClockHeader(bytes, dataOffset, VGM.isZsgxBlock); };
 
   // ストリーム先頭のデータブロックに MSXX のヘッダがあれば { machine, dac } を返す(無ければ null)
   VGM.scanMsxExtension = function (bytes, dataOffset) {
@@ -353,6 +368,10 @@
     // CP システム III(規格外 CP3X)。標準のクロック欄を持たないので、ここでチップ一覧へ足す(以降は他のチップと同じ経路)
     const cp3x = usedChips.length ? null : VGM.scanCps3Extension(bytes, dataOffset);
     if (cp3x) { const info = { id: 'cps3', name: 'CPS3', clock: cp3x.clock, dual: false, impl: true, flags: cp3x.flags }; chips.cps3 = info; usedChips.push(info); }
+    // ZOOM ZSG-2(規格外 ZSGX)。同じく標準のクロック欄を持たない
+    const zsgx = usedChips.length ? null : VGM.scanZsg2Extension(bytes, dataOffset);
+    if (zsgx) { const info = { id: 'zsg2', name: 'ZSG-2', clock: zsgx.clock, dual: false, impl: true, flags: zsgx.flags,
+      loopStartN: (zsgx.flags & VGM.ZSGX.FLAG_LOOP) && zsgx.extra ? zsgx.extra[0] : 0, loopLenN: (zsgx.flags & VGM.ZSGX.FLAG_LOOP) && zsgx.extra ? zsgx.extra[1] : 0 }; chips.zsg2 = info; usedChips.push(info); }
 
     const gd3Offset = gd3Rel ? 0x14 + gd3Rel : 0;
     const gd3 = gd3Offset ? parseGd3(bytes, gd3Offset) : null;

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-18 00:39:18
+ * Built by tools/build-capture-workers.ps1 at 2026-11-22 18:33:47
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-18 00:39:18';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-22 18:33:47';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -6042,7 +6042,7 @@
     }
     // スナップショット型チップ: extractChannels(keyboard.js)が読むextraSnapsに
     // フレーム毎スナップショット配列を渡して同じ抽出経路でトラック化する
-    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'k007232', 'k054539', 'msm5205', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'cps3', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'k007232', 'k054539', 'msm5205', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'cps3', 'zsg2', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
     const chipToken = { sn: 'sn76489' };
     const poolMode = (opts && opts.poolMode) || {};
     for (const key of snapChips) {
@@ -6124,7 +6124,7 @@
     if (!numCh || !Emu.PoolChannelRegrouper) return null;
     if (!st || d.logical !== st.out) {
       // 列挙されない印にして、構造化複製やJSON化で運ばれないようにする
-      Object.defineProperty(d, '__logicalState', { value: { rg: new Emu.PoolChannelRegrouper(numCh), out: [] }, configurable: true, writable: true });
+      Object.defineProperty(d, '__logicalState', { value: { rg: new Emu.PoolChannelRegrouper(numCh, Emu.POOL_CHIP_OPTIONS && Emu.POOL_CHIP_OPTIONS[key]), out: [] }, configurable: true, writable: true });
       d.logical = d.__logicalState.out;
     }
     const S = d.__logicalState;

@@ -104,7 +104,7 @@
   //   変換結果と食い違う。基準値は変換と同一の関数(Vgm2MmlExpansion.attRefOfSnapshots)で作る。
   // (2026-11-17 まで \d のバックスラッシュが抜けていて(/^QSd+$/ など)どの行にも一致せず、この正規化は全チップで効いていなかった)
   const ROW_CHIP = [[/^GA\d$/, 'ga20'], [/^K7\d$/, 'k007232'], [/^K5\d+$/, 'k054539'],
-    [/^SP\d+$/, 'segapcm'], [/^CN\d+$/, 'c140'], [/^CS\d+$/, 'c352'], [/^QS\d+$/, 'qsound'], [/^C3\d+$/, 'cps3'],
+    [/^SP\d+$/, 'segapcm'], [/^CN\d+$/, 'c140'], [/^CS\d+$/, 'c352'], [/^QS\d+$/, 'qsound'], [/^C3\d+$/, 'cps3'], [/^ZS\d+$/, 'zsg2'],
     [/^OK\d$/, 'okim6295'], [/^MP\d+$/, 'multipcm'], [/^PX\d+$/, 'psx']];
   function rowChipOf(id) { for (const [re, c] of ROW_CHIP) if (re.test(id)) return c; return null; }
   function attDbOf(spec, vol, refs) {

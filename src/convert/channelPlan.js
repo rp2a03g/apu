@@ -334,6 +334,7 @@
     [/^CS(\d+)$/, function (m) { return ['pcm', 'c352:' + (+m[1] - 1)]; }],                 // C352
     [/^QS(\d+)$/, function (m) { return ['pcm', 'qs:' + (+m[1] - 1)]; }],                   // QSound
     [/^C3(\d+)$/, function (m) { return ['pcm', 'cp3:' + (+m[1] - 1)]; }],                  // CP システム III
+    [/^ZS(\d+)$/, function (m) { return ['pcm', 'zsg:' + (+m[1] - 1)]; }],                  // ZOOM ZSG-2
     [/^OK([1-4])$/, function (m) { return ['pcm', 'oki:' + (+m[1] - 1)]; }],                // OKIM6295('OKI'=6258は不一致)
     [/^MP(\d+)$/, function (m) { return ['pcm', 'mp:' + (+m[1] - 1)]; }],                   // MultiPCM
     [/^PX(\d+)$/, function (m) { return ['pcm', 'psx:' + (+m[1] - 1)]; }],                  // PSF(実機スロット=ボイス0-23 / 合成ch=32本 / トラック=レーン番号)
@@ -363,7 +364,7 @@
 
   // 逆引き: 変換器のソースID(VGM) → 鍵盤表示の行ID。VGMの構成駆動の既定割当
   // (MML.VGM2MML.defaultPlan)を鍵盤の行へ移すのに使う。
-  const VGM_SRC_TO_CH = { ay: 'KP', scc: 'KS', opll: 'KF', opn: 'YM', opm: 'OM', opn3: 'OP', opna: 'OA', opnb: 'NF', opl: 'OL', pcma: 'NA', ga20: 'GA', k7: 'K7', k5: 'K5', spcm: 'SP', c140: 'CN', c352: 'CS', qs: 'QS', cp3: 'C3', oki: 'OK', mp: 'MP', psx: 'PX' };
+  const VGM_SRC_TO_CH = { ay: 'KP', scc: 'KS', opll: 'KF', opn: 'YM', opm: 'OM', opn3: 'OP', opna: 'OA', opnb: 'NF', opl: 'OL', pcma: 'NA', ga20: 'GA', k7: 'K7', k5: 'K5', spcm: 'SP', c140: 'CN', c352: 'CS', qs: 'QS', cp3: 'C3', zsg: 'ZS', oki: 'OK', mp: 'MP', psx: 'PX' };
   function chIdForVgmSource(srcId) {
     // 複製('opm:0#1')は元のIDを引いて番号を付け直す
     const cm = COPY_RE.exec(srcId || '');

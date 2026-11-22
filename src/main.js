@@ -126,7 +126,7 @@
     const data = vgmCaptureMirror && vgmCaptureMirror.data;
     if (!fn || !data) return null;
     const refs = {};
-    for (const key of ['ga20', 'k007232', 'k054539', 'segapcm', 'c140', 'c352', 'qsound', 'cps3', 'okim6295', 'multipcm', 'psx']) {
+    for (const key of ['ga20', 'k007232', 'k054539', 'segapcm', 'c140', 'c352', 'qsound', 'cps3', 'zsg2', 'okim6295', 'multipcm', 'psx']) {
       const e = data[key];
       if (e && Array.isArray(e.snapshots) && e.snapshots.length) refs[key] = fn(e.snapshots);
     }
@@ -1752,7 +1752,7 @@
       return out;
     };
     const CHIP_OF_DATA = { ga20: 'ga20', k007232: 'k007232', k054539: 'k054539', segapcm: 'segapcm', c140: 'c140', c352: 'c352',
-                          qsound: 'qsound', cps3: 'cps3', okim6295: 'okim6295', multipcm: 'multipcm', ym2610fm: 'ym2610', ym2608fm: 'ym2608' };
+                          qsound: 'qsound', cps3: 'cps3', zsg2: 'zsg2', okim6295: 'okim6295', multipcm: 'multipcm', ym2610fm: 'ym2610', ym2608fm: 'ym2608' };
     return {
       format: 'vgm',
       frameRate: MML.Emu.VGM_FRAME_RATE,
@@ -1835,6 +1835,8 @@
       ? (p && p.adapterById.qsound && p.adapterById.qsound.chip)
       : smp.kind === 'cps3'
       ? (p && p.adapterById.cps3 && p.adapterById.cps3.chip)
+      : smp.kind === 'zsg2'
+      ? (p && p.adapterById.zsg2 && p.adapterById.zsg2.chip)
       : smp.kind === 'okim6295'
       ? (p && p.adapterById.okim6295 && p.adapterById.okim6295.chip)
       : smp.kind === 'multipcm'
@@ -9641,6 +9643,7 @@
     if (h.chips.okim6258) chips.push('okim6258');
     if (h.chips.qsound) chips.push('qsound');
     if (h.chips.cps3) chips.push('cps3');
+    if (h.chips.zsg2) chips.push('zsg2');
     if (h.chips.okim6295) chips.push('okim6295');
     if (h.chips.multipcm) chips.push('multipcm');
     if (h.chips.ym2610) { chips.push('ym2610fm'); chips.push('kssPsg'); } // SSGはKSS PSG行(KP1-3)を流用
@@ -9662,7 +9665,7 @@
   // 他はペア交互でも音符ストリームはほぼ安定と実測されたため実機スロット既定
   // (Outfoxies等のマルチサンプル曲では合成が僅かに劣るケースもある。トグルで曲別に選ぶ)
   // psx は 'track'(ドライバ内部トラック×声部、Emu.PsfTrackVoicer)/'logical'/'phys' の3段
-  const POOL_CHIP_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', cps3: 'phys', c140: 'phys', segapcm: 'phys', psx: 'track' };
+  const POOL_CHIP_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', cps3: 'phys', zsg2: 'logical', c140: 'phys', segapcm: 'phys', psx: 'track' };
   const vgmPoolModes = (() => {
     let modes;
     try { modes = Object.assign({}, POOL_CHIP_DEFAULTS, JSON.parse(localStorage.getItem(POOL_MODE_KEY) || '{}')); }
@@ -9681,7 +9684,7 @@
   const POOL_CHIP_CHANNELS = MML.Emu.POOL_CHIP_CHANNELS; // psx は合成chだけ32本(multipcm.js 参照)
   function poolLive(token, snap) {
     if (!snap || vgmPoolModes[token] !== 'logical') return snap;
-    if (!vgmLiveRegroupers[token]) vgmLiveRegroupers[token] = new MML.Emu.PoolChannelRegrouper(POOL_CHIP_CHANNELS[token]);
+    if (!vgmLiveRegroupers[token]) vgmLiveRegroupers[token] = new MML.Emu.PoolChannelRegrouper(POOL_CHIP_CHANNELS[token], MML.Emu.POOL_CHIP_OPTIONS[token]);
     return vgmLiveRegroupers[token].step(snap);
   }
   const vgmLiveRegroupers = {}; // chipToken → PoolChannelRegrouperインスタンス(再生/モード切替でリセット)
@@ -9764,6 +9767,7 @@
     getOkim6258: () => { const a = vgmAdapter('okim6258'); return a ? MML.Emu.snapshotOKIM6258(a.chip) : null; }
 ,
     getCps3: () => { const a = vgmAdapter('cps3'); return a ? poolLive('cps3', MML.Emu.snapshotCps3(a.chip)) : null; },
+    getZsg2: () => { const a = vgmAdapter('zsg2'); return a ? poolLive('zsg2', MML.Emu.snapshotZsg2(a.chip)) : null; },
     getQsound: () => { const a = vgmAdapter('qsound'); return a ? poolLive('qsound', MML.Emu.snapshotQSound(a.chip)) : null; }
 ,
     getOkim6295: () => { const a = vgmAdapter('okim6295'); return a ? MML.Emu.snapshotOKIM6295(a.chip) : null; }
@@ -9903,7 +9907,7 @@
       getC140: liveVgm.getC140,
       getC352: liveVgm.getC352,
       getOkim6258: liveVgm.getOkim6258,
-      getQsound: liveVgm.getQsound, getCps3: liveVgm.getCps3,
+      getQsound: liveVgm.getQsound, getCps3: liveVgm.getCps3, getZsg2: liveVgm.getZsg2,
       getOkim6295: liveVgm.getOkim6295,
       getMultiPcm: liveVgm.getMultiPcm,
       getPwm: liveVgm.getPwm,
@@ -9973,7 +9977,7 @@
   function updateVgmDrumSamples(data) {
     const out = {};
     const CH = [['ga20', 4, 'pcm'], ['k007232', 2, 'pcm'], ['k054539', 16, 'pcm'], ['segapcm', 16, 'pcm'], ['c140', 24, 'pcm'], ['c352', 32, 'pcm'],
-                ['qsound', 16, 'pcm'], ['cps3', 16, 'pcm'], ['okim6295', 4, 'pcm'], ['multipcm', 28, 'pcm'],
+                ['qsound', 16, 'pcm'], ['cps3', 16, 'pcm'], ['zsg2', 48, 'pcm'], ['okim6295', 4, 'pcm'], ['multipcm', 28, 'pcm'],
                 ['ym2610fm', 6, 'adpcmA'], ['ym2608fm', 6, 'adpcmA'],
                 ['ym2610fm', 1, 'adpcmB'], ['ym2608fm', 1, 'adpcmB']]; // ADPCM-B は snapshot.adpcmB の1本
     for (const [key, n, shape] of CH) {

@@ -130,6 +130,8 @@ $bundles = @(
             'src\emulator\expansion\okim6258.js',
             'src\emulator\expansion\qsound.js',
             'src\emulator\expansion\cps3.js',
+            'src\emulator\expansion\tms57002.js',
+            'src\emulator\expansion\zsg2.js',
             'src\emulator\expansion\okim6295.js',
             'src\emulator\expansion\multipcm.js',
             'src\emulator\expansion\k007232.js',

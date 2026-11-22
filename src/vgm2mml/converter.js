@@ -317,6 +317,7 @@
     if (c.c352) for (let i = 0; i < 32; i++) out.push({ id: `c352:${i}`, label: `C352 PCM${i + 1}`, kind: 'pcm', chip: 'c352', chipIndex: 0, ch: i });
     if (c.qsound) for (let i = 0; i < 16; i++) out.push({ id: `qs:${i}`, label: `QSound PCM${i + 1}`, kind: 'pcm', chip: 'qsound', chipIndex: 0, ch: i });
     if (c.cps3) for (let i = 0; i < 16; i++) out.push({ id: `cp3:${i}`, label: `CPS3 PCM${i + 1}`, kind: 'pcm', chip: 'cps3', chipIndex: 0, ch: i });
+    if (c.zsg2) for (let i = 0; i < 48; i++) out.push({ id: `zsg:${i}`, label: `ZSG-2 PCM${i + 1}`, kind: 'pcm', chip: 'zsg2', chipIndex: 0, ch: i });
     if (c.okim6295) for (let i = 0; i < 4; i++) out.push({ id: `oki:${i}`, label: `OKIM6295 ADPCM${i + 1}`, kind: 'pcm', chip: 'okim6295', chipIndex: 0, ch: i });
     if (c.multipcm) for (let i = 0; i < 28; i++) out.push({ id: `mp:${i}`, label: `MultiPCM PCM${i + 1}`, kind: 'pcm', chip: 'multipcm', chipIndex: 0, ch: i });
     // PSF(PlayStation SPU)。VGM には現れない仮想チップで、src/psf2mml/converter.js が header.chips.psx を立てて使う
@@ -361,6 +362,7 @@
     { flag: 'c352',     key: 'c352', name: 'C352',            n: 32, shape: 'pcm',    data: 'c352' },
     { flag: 'qsound',   key: 'qs',   name: 'QSound',          n: 16, shape: 'pcm',    data: 'qsound' },
     { flag: 'cps3',     key: 'cp3',  name: 'CPS3',            n: 16, shape: 'pcm',    data: 'cps3' },
+    { flag: 'zsg2',     key: 'zsg',  name: 'ZSG-2',           n: 48, shape: 'pcm',    data: 'zsg2' },
     { flag: 'okim6295', key: 'oki',  name: 'OKIM6295',        n: 4,  shape: 'pcm',    data: 'okim6295' },
     { flag: 'multipcm', key: 'mp',   name: 'MultiPCM',        n: 28, shape: 'pcm',    data: 'multipcm' },
     { flag: 'psx',      key: 'psx',  name: 'SPU',             n: 32, shape: 'pcm',    data: 'psx' },
@@ -598,7 +600,11 @@
         // rank(並べ順)だけ複製の音符を差し引く。枠に空きがあれば複製しか無いレーンも載せる(notes>0)
         // ★差し引いた数で「載せるか」まで決めると、FF7 The Prelude で30フレーム遅れのエコーのレーンが空き枠があるのに落ちた
         const counts = items.map(s => { const n = onsets(r.channels[s.ch].events); return { s, notes: n, rank: n - (dbl ? (dbl.copyCount.get(s.ch) || 0) : 0) }; });
-        counts.sort((a, b) => b.rank - a.rank || b.notes - a.notes);
+        // 詰める方式の合成 ch(Emu.POOL_CHIP_OPTIONS の pack。ZSG-2): 先頭 pack 本は「その瞬間に大きい音」を集めてあるので、音符のある物を先に載せる。
+        // 音符数だけで選ぶと、短い音の多い後ろのレーンが、長く大きい音の先頭レーンより上に来る(実測: 1 番で音量×時間の取り分が 61% → 35%)
+        const packN = data[chipKey].pack || 0;
+        const front = (x) => (packN > 0 && x.s.ch < packN && x.notes > 0 ? 1 : 0);
+        counts.sort((a, b) => front(b) - front(a) || b.rank - a.rank || b.notes - a.notes);
         for (const it of items) plan[it.id] = 'skip';
         const picked = [];
         counts.slice(0, slots.length).forEach((cn, k) => {
@@ -606,7 +612,9 @@
         });
         if (picked.length && counts.length > picked.length) {
           const chipName = items[0].label.replace(/ (PCM|V)\d+$/, ''); // 'SPU V0' → 'SPU'
-          notes.push(`${chipName} は${items.length}chのうち音符の多いch(${picked.join(',')})を既定割当に自動選択しました(鍵盤表示のチャンネル割当で変更できます)。`);
+          notes.push(packN > 0
+            ? `${chipName} は${items.length}chのうち、その瞬間に大きい音を集めた先頭のch(${picked.join(',')})を既定割当に自動選択しました(鍵盤表示のチャンネル割当で変更できます)。`
+            : `${chipName} は${items.length}chのうち音符の多いch(${picked.join(',')})を既定割当に自動選択しました(鍵盤表示のチャンネル割当で変更できます)。`);
         }
       }
     }
@@ -812,6 +820,10 @@
     if (data.cps3 && c.cps3) {
       const pcmItems = src.filter(s => s.chip === 'cps3' && s.ch >= 0 && wantExtract(s));
       extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.cps3(data.cps3.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
+    }
+    if (data.zsg2 && c.zsg2) {
+      const pcmItems = src.filter(s => s.chip === 'zsg2' && s.ch >= 0 && wantExtract(s));
+      extractEnvModes(pcmItems, (o) => MML.Vgm2MmlExpansion.zsg2(data.zsg2.snapshots, drumMap, o), (r, s) => r.channels[s.ch]);
     }
     if (data.okim6295 && c.okim6295) {
       const pcmItems = src.filter(s => s.chip === 'okim6295' && s.ch >= 0 && wantExtract(s));
@@ -1222,7 +1234,7 @@
       bpm: Math.round(bpm),
       pitchCheck,
       scoreChannels,
-      chips: h.usedChips.filter(ch => ['ay8910', 'k051649', 'ym2413', 'sn76489', 'ym2612', 'ym2610', 'ym2151', 'ym2203', 'ym2608', 'ym3812', 'ym3526', 'y8950', 'ga20', 'k007232', 'k054539', 'segapcm', 'c140', 'c352', 'qsound', 'cps3', 'okim6295', 'multipcm', 'psx'].includes(ch.id)).map(ch => ch.name + (ch.dual ? ' x2' : '')),
+      chips: h.usedChips.filter(ch => ['ay8910', 'k051649', 'ym2413', 'sn76489', 'ym2612', 'ym2610', 'ym2151', 'ym2203', 'ym2608', 'ym3812', 'ym3526', 'y8950', 'ga20', 'k007232', 'k054539', 'segapcm', 'c140', 'c352', 'qsound', 'cps3', 'zsg2', 'okim6295', 'multipcm', 'psx'].includes(ch.id)).map(ch => ch.name + (ch.dual ? ' x2' : '')),
       expansions,
       assignments,
       plan,
@@ -1530,13 +1542,14 @@
     // 'logical'=割当逆算(合成ch)で変換。既定はMultiPCMのみ合成(完全プール式で
     // 既定8枠カバー率45%→100%の劇的改善)、他は実機スロット(ペア交互でも音符
     // ストリームはほぼ安定で、マルチサンプル曲では合成が僅かに劣るケースもあるため)。
-    const POOL_CONVERT_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', cps3: 'phys', c140: 'phys', segapcm: 'phys' };
+    const POOL_CONVERT_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', cps3: 'phys', zsg2: 'logical', c140: 'phys', segapcm: 'phys' };
     const pm = options.poolMode || {};
     for (const key of Object.keys(POOL_CONVERT_DEFAULTS)) {
       const mode = pm[key] || POOL_CONVERT_DEFAULTS[key];
       if (mode === 'logical' && data[key] && data[key].logical) {
         // pooled: 合成chのレーン(convertData が複製パートを探す対象。src/convert/poolDoubles.js)
-        data = Object.assign({}, data, { [key]: Object.assign({}, data[key], { snapshots: data[key].logical, pooled: true }) });
+        const po = MML.Emu.POOL_CHIP_OPTIONS && MML.Emu.POOL_CHIP_OPTIONS[key];
+        data = Object.assign({}, data, { [key]: Object.assign({}, data[key], { snapshots: data[key].logical, pooled: true, pack: (po && po.pack) || 0 }) });
       }
     }
     return MML.VGM2MML.convertData(data, options);
@@ -1580,7 +1593,7 @@
     // 変換ファミリ: PSG系(AY/SCC/OPLL/SN、同居可) / NES / GB / HES。複数同居していれば先頭だけ。
     const families = [];
     const msmDrum = !!(h.chips && h.chips.msm5205) && (options.drumHits || []).some(x => x.chId === 'M5');
-    if (data.kss || data.sn || data.ym2612 || data.ym2610fm || data.ym2151 || data.ym2203fm || data.ym2608fm || data.ga20 || data.k007232 || data.k054539 || data.segapcm || data.c140 || data.c352 || data.qsound || data.cps3 || data.okim6295 || data.multipcm || data.psx) families.push('psg');
+    if (data.kss || data.sn || data.ym2612 || data.ym2610fm || data.ym2151 || data.ym2203fm || data.ym2608fm || data.ga20 || data.k007232 || data.k054539 || data.segapcm || data.c140 || data.c352 || data.qsound || data.cps3 || data.zsg2 || data.okim6295 || data.multipcm || data.psx) families.push('psg');
     if (data.nes) families.push('nes');
     if (data.gb) families.push('gb');
     if (data.hes) families.push('hes');
@@ -1589,7 +1602,7 @@
       throw new Error(tr('MML変換に対応した音源がありません({chips})', { chips: names }));
     }
     const family = families[0];
-    const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', ym2610: 'psg', ym2612: 'psg', ym2151: 'psg', ym2203: 'psg', ym2608: 'psg', ym3812: 'psg', ym3526: 'psg', y8950: 'psg', ga20: 'psg', k007232: 'psg', k054539: 'psg', segapcm: 'psg', c140: 'psg', c352: 'psg', qsound: 'psg', cps3: 'psg', okim6295: 'psg', multipcm: 'psg', psx: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };
+    const famOf = { ay8910: 'psg', k051649: 'psg', ym2413: 'psg', sn76489: 'psg', ym2610: 'psg', ym2612: 'psg', ym2151: 'psg', ym2203: 'psg', ym2608: 'psg', ym3812: 'psg', ym3526: 'psg', y8950: 'psg', ga20: 'psg', k007232: 'psg', k054539: 'psg', segapcm: 'psg', c140: 'psg', c352: 'psg', qsound: 'psg', cps3: 'psg', zsg2: 'psg', okim6295: 'psg', multipcm: 'psg', psx: 'psg', nes: 'nes', gb: 'gb', huc6280: 'hes' };
     // ストリーミングDAC(YM2612 DAC / OKIM6258)は旋律の変換対象ではないが、main.js が
     // ログから打点を取って options.drumHits で渡してくると E(DPCM) へ焼かれる(2026-09-05)。
     // その場合は「無視した」と言わない(X68000曲は音源がYM2151+OKIM6258しか無いので目立つ)
@@ -1619,6 +1632,7 @@
     if (h.chips.c352 && family === 'psg') ignoredNotes.push(`C352 はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
     if (h.chips.qsound && family === 'psg') ignoredNotes.push(`QSound はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
     if (h.chips.cps3 && family === 'psg') ignoredNotes.push(`CPS3 はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
+    if (h.chips.zsg2 && family === 'psg') ignoredNotes.push(`ZSG-2 はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。リバーブとコーラス(後段の DSP)は変換しません。`);
     if (h.chips.okim6295 && family === 'psg') ignoredNotes.push(`OKIM6295 はフレーズのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
     if (h.chips.multipcm && family === 'psg') ignoredNotes.push(`MultiPCM はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);
     if (h.chips.psx && family === 'psg') ignoredNotes.push(`PlayStation SPU はサンプルのピッチ解析で音程が取れた区間だけ音符にしています${noPitchNote}。`);

@@ -93,7 +93,7 @@
   // 正しいのに音量が全区間でちょうど2倍だった(Rave Racer 3曲)。1.0ではナムコSystem 22/NB系の全曲がリミッタ前で
   // ピーク1.0超(1.0〜2.1)・RMS -9.5〜-17dBFS と他のナムコ作品(C140のワルキューレ -18〜-20dBFS)より6〜8dB大きく、
   // 大きい所をリミッタが押しつぶしていた。0.5でVGMPlayと同じ比率になり、ピークは0.49〜1.06に収まる
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0, k007232: 1.6, msm5205: 1.45, k054539: 2.4, cps3: 1.6 };
+  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0, k007232: 1.6, msm5205: 1.45, k054539: 2.4, cps3: 1.6, zsg2: 1.0 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -597,6 +597,51 @@
     return a;
   }
 
+  // ZOOM ZSG-2+TMS57002(規格外 ZSGX ブロック。タイトー FX-1B / G-NET の音源基板、expansion/zsg2.js)。
+  // 書き込みの届き方と時刻の決まりは CPS3 と同じ(上の makeCps3Adapter の説明)。DSP と全体音量の書き込みも同じ列に入っている。
+  // ★CPS3 と違う所: 書き込みが効く位置は「今からの待ち」ではなく「音源の通し番号」(= floor(VGM の位置 × 出力レート ÷ 44100))で積む。
+  //   出力レートが整数(32552Hz)なので 11025 サンプルごとに比がちょうど割り切れ、そこでは本体の端数の足し込み(accum)が丸め誤差で
+  //   1 回ぶん遅れることがある。待ちで積むとその 1 回がずれて、以降のキーオンが 1 サンプル動く(実測: 2.25 秒から 16% のサンプルが不一致)。
+  //   通し番号は掛けてから割って出す(perVgm を掛けると、割り切れる所で 1 小さく出る)。
+  //   速度を変えている間は位置と通し番号が比例しないので待ちで積み、等速に戻った所でずれを測り直す。
+  function makeZsg2Adapter(info) {
+    const chip = new Emu.Zsg2Audio(info.clock, info.flags);
+    const rate = chip.sampleRate, perVgm = rate / VGM_RATE, loopN = info.loopLenN || 0;
+    const natOf = (pos) => Math.floor(pos * rate / VGM_RATE);
+    const gs = chip.getState.bind(chip), ss = chip.setState.bind(chip);
+    const a = {
+      id: 'zsg2', clockHz: chip.sampleRate, accum: 0, chip, gain: CHIP_GAIN.zsg2, bias: 0, biasDirty: false, lastLoops: 0,
+      loadRom(addr, data) { chip.loadRom(addr, data); },
+      // loops / posInPass: 今が何周目か(0 始まり)と、1 周目に置き直した VGM の位置(プレイヤーが、ループで戻った時点から数えて出す)。
+      //   2 周目以降は、1 周目の位置を通し番号にしてから 周回数 × 1 周の長さ(音源のサンプル数。ZSGX のヘッダにある)を足す。
+      //   VGM の位置をそのまま通し番号にすると、ループ長が音源のサンプル数の整数倍でないぶん、周ごとに書き込みの間隔が 1 サンプル揺れる
+      queueWrites(block, vgmPos, speed, loops, posInPass) {
+        const sp = speed > 0 ? speed : 1;
+        const k = (loops > 0 && loopN > 0) ? loops : 0, pos1 = k ? posInPass : vgmPos, add = k * loopN;
+        // 戻った時に、音源を進める端数(accum)を「1 周目の位置+周回ぶん」に合わせ直す。VGM のループ長と 1 周の長さ(loopN)は端数ぶん食い違い、
+        // 戻る時にはプレイヤーが 1 サンプル余分に進むので、放っておくと音源の進みが書き込みの位置とずれていく。
+        // 符号化側は VGM の長さを 2 サンプル短くしてあり(zsg2-vgm.js)、ここでは必ず「音源が遅れている」側になる = 追いつくだけで済む
+        if (k !== this.lastLoops) { if (sp === 1) this.accum = pos1 * rate / VGM_RATE + add - chip.nat - 1e-9; this.lastLoops = k; }
+        if (sp === 1 && this.biasDirty) { this.bias = chip.nat - (natOf(pos1) + add); this.biasDirty = false; }
+        if (sp !== 1) this.biasDirty = true;
+        const base = natOf(pos1);
+        for (let p = 6; p + 6 <= block.length; p += 6) {
+          const t = block[p] | (block[p + 1] << 8), reg = block[p + 2] | (block[p + 3] << 8), value = block[p + 4] | (block[p + 5] << 8);
+          const n = natOf(pos1 + t) + add;
+          if (sp === 1) chip.queueWriteAt(n + this.bias, reg, value); else chip.queueWrite(Math.floor((n - add - base) / sp), reg, value);
+        }
+      },
+      clock() { chip.clock(); },
+      advanceVgm(n) { this.accum += n * perVgm; let c = Math.floor(this.accum); this.accum -= c; while (c-- > 0) chip.clock(); },
+      mix(out) { out[0] += chip.outL * this.gain; out[1] += chip.outR * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.zsg2) Emu.applyMute(chip.mute, e.zsg2); },
+      applyVolume(v) { const e = v.expansion || v; if (e.zsg2) Emu.applyVolume(chip.vol, e.zsg2); }
+    };
+    chip.getState = () => { const s = gs(); s.accum = a.accum; s.bias = a.bias; s.biasDirty = a.biasDirty; s.lastLoops = a.lastLoops; return s; };
+    chip.setState = (s) => { ss(s); a.accum = s.accum || 0; a.bias = s.bias || 0; a.biasDirty = !!s.biasDirty; a.lastLoops = s.lastLoops || 0; };
+    return a;
+  }
+
   // MultiPCM(セガModel 1/2/Multi 32の28ch PCM): expansion/multipcm.js。コマンドは
   // 0xB5 aa dd(aa=ポート0-2、bit7=デュアル2個目)、バンクは0xC3 cc bbaa(専用case)、
   // ROMはデータブロック0x89。
@@ -740,7 +785,8 @@
     c352: makeC352Adapter, okim6258: makeOkim6258Adapter, qsound: makeQsoundAdapter,
     okim6295: makeOkim6295Adapter, multipcm: makeMultiPcmAdapter,
     k007232: makeK007232Adapter, msm5205: makeMsm5205Adapter, k054539: makeK054539Adapter,
-    cps3: makeCps3Adapter
+    cps3: makeCps3Adapter,
+    zsg2: makeZsg2Adapter
   };
 
   // ---------------------------------------------------------------------------
@@ -869,6 +915,7 @@
       this.waitRemaining = 0;  // 消化待ちのサンプル数
       this.ended = false;
       this.loopCount = 0;
+      this.loopBase = 0; this._loopPending = false; // ループで戻った後の最初のコマンドの位置(_runCommands)
       this._lastLoopSample = -1;
       this.vgmAccum = 0;
       this.dataBlocks = [];    // {type, size}(表示用)
@@ -902,6 +949,9 @@
     _runCommands() {
       const d = this.data;
       const h = this.header;
+      // ループで戻った直後: ループ先頭のコマンドを実行する時の位置を控える(loopBase)。_endOfData で戻った呼び出しは待ち 0 のまま
+      // 1 サンプル進むので、ループ先頭のコマンドは「曲の長さ+1」の位置で実行される。周回の中での位置が要るチップ(ZSG-2)はここから数える
+      if (this._loopPending) { this._loopPending = false; this.loopBase = this.samplePos; }
       while (this.waitRemaining === 0 && !this.ended) {
         // eofOffset(0x04)が壊れている/データ開始より手前のファイルは無視してデータ長だけを見る
         const eof = (h.eofOffset && h.eofOffset > h.dataOffset) ? Math.min(h.eofOffset, d.length) : d.length;
@@ -1052,6 +1102,7 @@
         if (this._lastLoopSample === this.samplePos) { this.ended = true; return; }
         this._lastLoopSample = this.samplePos;
         this.loopCount++;
+        this._loopPending = true;
         this.pos = h.loopOffset;
         return;
       }
@@ -1084,6 +1135,14 @@
         const a = this.adapterById.cps3, C = MML.VGM.CP3X;
         if (a && block[5] === C.KIND_ROM && block.length >= 10) a.loadRom((block[6] | (block[7] << 8) | (block[8] << 16) | (block[9] << 24)) >>> 0, block.subarray(10));
         else if (a && block[5] === C.KIND_WRITES) a.queueWrites(block, this.samplePos, this.speedFactor);
+        return;
+      }
+      // ZOOM ZSG-2(規格外 ZSGX): 種類 1 = 波形(位置 4 バイト+中身)、種類 2 = 書き込み列(音源・DSP・全体音量)
+      if (MML.VGM && MML.VGM.isZsgxBlock && MML.VGM.isZsgxBlock(type, block)) {
+        const a = this.adapterById.zsg2, Zx = MML.VGM.ZSGX;
+        if (a && block[5] === Zx.KIND_ROM && block.length >= 10) a.loadRom((block[6] | (block[7] << 8) | (block[8] << 16) | (block[9] << 24)) >>> 0, block.subarray(10));
+        else if (a && block[5] === Zx.KIND_WRITES) a.queueWrites(block, this.samplePos, this.speedFactor, this.loopCount,
+          this.loopCount ? (this.header.totalSamples - this.header.loopSamples) + (this.samplePos - this.loopBase) : this.samplePos);
         return;
       }
       // スーパーゲームボーイの SNES 側音源(規格外 GBXX 種類 1): 下位種別 0 = 像、1 = APU ポートへの書き込み。種類 2 はカートリッジ内ブザー
@@ -1337,7 +1396,7 @@
       const streams = {};
       for (const id in this.streams) streams[id] = Object.assign({}, this.streams[id]);
       return { samplePos: this.samplePos, pos: this.pos, waitRemaining: this.waitRemaining,
-               pcmPos: this.pcmPos, loopCount: this.loopCount, streams, chips,
+               pcmPos: this.pcmPos, loopCount: this.loopCount, loopBase: this.loopBase, loopPending: this._loopPending, streams, chips,
                dacHitsLen: this.dacHits.length };
     }
     _restoreCheckpoint(cp) {
@@ -1346,7 +1405,7 @@
         if (chip && cp.chips[i]) chip.setState(cp.chips[i]);
       }
       this.samplePos = cp.samplePos; this.pos = cp.pos; this.waitRemaining = cp.waitRemaining;
-      this.pcmPos = cp.pcmPos; this.loopCount = cp.loopCount;
+      this.pcmPos = cp.pcmPos; this.loopCount = cp.loopCount; this.loopBase = cp.loopBase || 0; this._loopPending = !!cp.loopPending;
       this.streams = {};
       for (const id in cp.streams) this.streams[id] = Object.assign({}, cp.streams[id]);
       // 打点は「そこまでに拾った分」へ戻す(シークで重複して積まないように)
@@ -1571,6 +1630,7 @@
       okim6258: has('okim6258') ? { snapshots: [] } : null,
       qsound: has('qsound') ? { snapshots: [], logical: [] } : null,
       cps3: has('cps3') ? { snapshots: [], logical: [] } : null,
+      zsg2: has('zsg2') ? { snapshots: [], logical: [] } : null,
       okim6295: has('okim6295') ? { snapshots: [] } : null,
       // multipcm: snapshots=物理スロット(実機のまま)、logical=割当逆算(ソフトウェア
       // チャンネル合成)。チャンネルプール式ドライバ対策で両方を常時保持し、
@@ -1632,6 +1692,8 @@
     const c352Regrouper = data.c352 ? new Emu.PoolChannelRegrouper(32) : null;
     const qsRegrouper = data.qsound ? new Emu.PoolChannelRegrouper(16) : null;
     const cps3Regrouper = data.cps3 ? new Emu.PoolChannelRegrouper(16) : null;
+    const zsg2Regrouper = data.zsg2 ? new Emu.PoolChannelRegrouper(48, Emu.POOL_CHIP_OPTIONS.zsg2) : null;
+    if (data.zsg2) player.adapterById.zsg2.chip.captureOnly = true; // 先読みでは音を作らない(DSP が重い)。声の位置と音量だけ進める
     let kssFrameWrites = [];
     let kss2FrameWrites = []; // 2個目のPSG(data.kss2)
     const nesRegs = {};
@@ -1886,6 +1948,12 @@
         data.cps3.snapshots.push(s);
         data.cps3.logical.push(cps3Regrouper.step(s));
       }
+      if (data.zsg2) {
+        // ZSG-2: CPS3 と同じく、先読みでも音源を進めている(終端とランプは音源が知っている)
+        const s = Emu.snapshotZsg2(player.adapterById.zsg2.chip);
+        data.zsg2.snapshots.push(s);
+        data.zsg2.logical.push(zsg2Regrouper.step(s));
+      }
       if (data.multipcm) {
         const s = Emu.snapshotMultiPCM(player.adapterById.multipcm.chip);
         const st = mpcmState;
@@ -2068,7 +2136,7 @@
       ['ga20', (s) => s, 'ga20'], ['k007232', (s) => s, 'k007232'], ['k054539', (s) => s, 'k054539'],
       ['segapcm', (s) => s, 'segapcm'],
       ['c140', (s) => s, 'c140'], ['c352', (s) => s, 'c352'],
-      ['qsound', (s) => s, 'qsound'], ['cps3', (s) => s, 'cps3'], ['okim6295', (s) => s, 'okim6295'],
+      ['qsound', (s) => s, 'qsound'], ['cps3', (s) => s, 'cps3'], ['zsg2', (s) => s, 'zsg2'], ['okim6295', (s) => s, 'okim6295'],
       ['multipcm', (s) => s, 'multipcm'],
       // ★YM2610/YM2608のアダプタはチップを .chip ではなく .fm で持つ(SSGと2個持ちのため)
       ['ym2610fm', (s) => (s && s.adpcmA ? s.adpcmA.concat(s.adpcmB ? [s.adpcmB] : []) : null), 'ym2610', (a) => a.fm],

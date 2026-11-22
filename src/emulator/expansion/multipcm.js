@@ -537,15 +537,27 @@
   // ★psx だけ実機ボイス(24)より多い32本: ドライバ内部のトラックで束ねると、トラック数+和音の分で24本を超える
   //   (babel14 で30本。24本に押し込むと別トラックのレーンを使い回してレーン純度が100%→83%に落ちる)。
   //   実機スロット表示のスナップショットは24要素のまま(鍵盤の行数はスナップショットの長さに従う)
-  Emu.POOL_CHIP_CHANNELS = { multipcm: 28, segapcm: 16, c140: 24, c352: 32, qsound: 16, psx: 32, cps3: 16 };
+  Emu.POOL_CHIP_CHANNELS = { multipcm: 28, segapcm: 16, c140: 24, c352: 32, qsound: 16, psx: 32, cps3: 16, zsg2: 48 };
+  // チップごとの合成の仕方(new Emu.PoolChannelRegrouper(n, opts) の opts。作る所は 3 つ: vgmPlayer.js / main.js / roll-builders.js)
+  //   foldTwins: 同じ瞬間に同じ波形を 0.6 半音以内の音程で鳴らす 2 声目(左右に振ってわずかに音程をずらす重ね方)に、レーンを与えない。
+  //   ZSG-2(タイトー ZOOM 基板)のドライバは旋律の大半をこの形で鳴らす。別々のレーンにすると同時発音が倍になり、合成 ch が散らばる
+  //   (実測: 3 番で音程ありの音符 1357 個が 47 レーンに散り、上位 8 本に入るのは 35%)
+  //   pack: 先頭の K 本に音を詰める。新しいノートは、先頭 K 本のうち 空いているレーン(同じ音色を優先)→ 余韻のレーン(いちばん小さい音)→
+  //   鳴っているがずっと小さい音のレーン(今の音量が新しいノートの狙いの音量の半分未満)の順に入り、どれも無ければ K 本より後ろへ従来の規則で入る。
+  //   先頭 K 本は音色が混ざる(1 本のレーンが楽器を渡り歩く)。その代わり、既定で変換に使う 8 本が「その瞬間に大きい音」をほぼ拾う。
+  //   ZSG-2 の曲は同時発音が多く(余韻を除いて平均 7〜12 声)、音色ごとにレーンを分けると 24〜48 本に散って、音符数の多い 8 本を選んでも
+  //   音量×時間で中央値 37% しか拾えなかった(16 曲で実測。毎フレーム大きい順に 8 声なら 86%)
+  Emu.POOL_CHIP_OPTIONS = { zsg2: { foldTwins: true, pack: 8 } };
 
   Emu.PoolChannelRegrouper = class {
-    constructor(numCh) {
+    constructor(numCh, opts) {
       this.numCh = numCh;
+      this.foldTwins = !!(opts && opts.foldTwins);
+      this.pack = (opts && opts.pack) | 0;
       this.lanes = [];
       // fam: このレーンが受け持つ音色キーの集合(規則3で別サンプルを足す)。lastMidi: 最後のノートの音程(音程なしは null)
       for (let i = 0; i < numCh; i++) this.lanes.push({
-        fam: null, boundSlot: -1, boundSeq: -1, lastSlot: -1, lastStep: -1e9, lastMidi: null, outSeq: 0 });
+        fam: null, boundSlot: -1, boundSeq: -1, lastSlot: -1, lastStep: -1e9, lastMidi: null, outSeq: 0, boundStep: -1e9, boundKey: null, boundMidi: null });
       this.stepCount = 0;
       this.seenKeys = new Set();
       this.dropped = new Map(); // スロット → seq(リリース中にレーンを譲ったノート。seq が変わるまで割り当て直さない)
@@ -579,10 +591,44 @@
         // laneKey: ドライバ内部のトラックが分かっているチップ(PSF)はトラック単位で束ねる(音色より確か)
         const key = c.laneKey || (c.sample ? (c.sample.start + ':' + c.sample.end) : (c.noise ? 'noise' : 'x'));
         const midi = c.pitchHz > 0 ? 69 + 12 * Math.log2(c.pitchHz / 440) : null;
+        // 2 声重ねの 2 声目(foldTwins): 今か 1 つ前のステップで鳴り始めた、同じ波形で音程のごく近いノートがあれば、こちらにはレーンを与えない
+        if (this.foldTwins && midi !== null) {
+          let twin = false;
+          for (let li = 0; li < lanes.length && !twin; li++) {
+            const L = lanes[li];
+            if (L.boundSlot >= 0 && L.boundKey === key && st - L.boundStep <= 1 && L.boundMidi !== null && Math.abs(midi - L.boundMidi) < 0.6) twin = true;
+          }
+          if (twin) { this.dropped.set(s, c.seq); continue; }
+        }
+        // 先頭 K 本へ詰める(pack)。入れる先があれば packed に入れ、下の従来の規則の結果より優先する
+        let packed = -1;
+        // 先頭 K 本は音程ありのノート専用。音程なし(打楽器)は lo 本目より後ろだけを従来の規則で使う
+        // (打楽器まで詰めると、音の大きい打楽器が旋律のレーンを奪う。実測: 7 番で旋律の音符が 71 → 49 個に減った)
+        const lo = (this.pack > 0 && midi === null) ? Math.min(this.pack, lanes.length) : 0;
+        if (this.pack > 0 && midi !== null) {
+          const K = Math.min(this.pack, lanes.length), aim = c.volAim !== undefined ? c.volAim : c.vol;
+          let cost = Infinity;
+          for (let li = 0; li < K; li++) {          // 空いているレーン: 同じ音色(直近・音程が近い・同じ声の続き)→ 別の音色(長く空いている物から)
+            const L = lanes[li];
+            if (L.boundSlot >= 0) continue;
+            const age = st - L.lastStep, same = !!(L.fam && L.fam.has(key));
+            const d = (midi !== null && L.lastMidi !== null) ? Math.abs(midi - L.lastMidi) : 0;
+            const k = same ? age * 0.2 + d * 0.1 + (L.lastSlot === s ? -2 : 0) : 1e4 - Math.min(age, 5000);
+            if (k < cost) { cost = k; packed = li; }
+          }
+          if (packed < 0) {                          // 余韻のレーン(いちばん小さい音)
+            let q = Infinity;
+            for (let li = 0; li < K; li++) { const L = lanes[li], o = snap[L.boundSlot]; if (o && o.release && o.vol < q) { q = o.vol; packed = li; } }
+          }
+          if (packed < 0 && aim > 0) {               // 鳴っているが、新しいノートの狙いの音量の半分に満たないレーン
+            let q = aim * 0.5;
+            for (let li = 0; li < K; li++) { const L = lanes[li], o = snap[L.boundSlot]; if (o && (o.volAim !== undefined ? o.volAim : o.vol) < q) { q = o.volAim !== undefined ? o.volAim : o.vol; packed = li; } }
+          }
+        }
         let best = -1, bestCost = Infinity, joinFam = false;
         for (let li = 0; li < lanes.length; li++) {
           const L = lanes[li];
-          if (!L.fam || !L.fam.has(key)) continue;
+          if (li < lo || !L.fam || !L.fam.has(key)) continue;
           const rel = releasing(L);
           if (L.boundSlot >= 0 && !rel) continue; // 鳴っている最中のレーンは奪わない
           // 直近に使ったほど・音程が近いほど低コスト。同じ物理ボイスの続きは優先(ボイス固定のドライバで
@@ -606,19 +652,20 @@
           }
         }
         // 4) 未使用 → 最も昔に空いた別音色 → リリース中の別音色
-        if (best < 0) best = lanes.findIndex(L => !L.fam);
+        if (best < 0) best = lanes.findIndex((L, i) => i >= lo && !L.fam);
         if (best < 0) {
           let oldest = Infinity;
-          for (let li = 0; li < lanes.length; li++) if (lanes[li].boundSlot < 0 && lanes[li].lastStep < oldest) { oldest = lanes[li].lastStep; best = li; }
+          for (let li = lo; li < lanes.length; li++) if (lanes[li].boundSlot < 0 && lanes[li].lastStep < oldest) { oldest = lanes[li].lastStep; best = li; }
         }
-        if (best < 0) best = lanes.findIndex(releasing);
+        if (best < 0) best = lanes.findIndex((L, i) => i >= lo && releasing(L));
+        if (packed >= 0) { best = packed; joinFam = false; }
         this.seenKeys.add(key);
         if (best < 0) continue; // 全レーンが鳴っている最中(次のフレームでまた探す)
         const L = lanes[best];
         if (L.boundSlot >= 0) { this.dropped.set(L.boundSlot, L.boundSeq); slotLane[L.boundSlot] = -1; }
         if (joinFam) L.fam.add(key);
         else if (!L.fam || !L.fam.has(key)) L.fam = new Set([key]);
-        L.boundSlot = s; L.boundSeq = c.seq; L.lastSlot = s;
+        L.boundSlot = s; L.boundSeq = c.seq; L.lastSlot = s; L.boundStep = st; L.boundKey = key; L.boundMidi = midi;
         if (midi !== null) L.lastMidi = midi;
         L.outSeq++;
         slotLane[s] = best;
