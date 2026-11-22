@@ -93,7 +93,7 @@
   // 正しいのに音量が全区間でちょうど2倍だった(Rave Racer 3曲)。1.0ではナムコSystem 22/NB系の全曲がリミッタ前で
   // ピーク1.0超(1.0〜2.1)・RMS -9.5〜-17dBFS と他のナムコ作品(C140のワルキューレ -18〜-20dBFS)より6〜8dB大きく、
   // 大きい所をリミッタが押しつぶしていた。0.5でVGMPlayと同じ比率になり、ピークは0.49〜1.06に収まる
-  const CHIP_GAIN = { nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0, k007232: 1.6, msm5205: 1.45, k054539: 2.4, cps3: 1.6, zsg2: 1.0 };
+  const CHIP_GAIN = { es5505: 0.8, nes: 1.56, gb: 1.35, huc6280: 1.65, ay8910: 1.99, k051649: 1.99, ym2413: 1.99, sn76489: 2.0, ym2612: 2.0, pwm: 0.9, rf5c164: 1.6, rf5c68: 1.6, ym2610: 1.0, ym2610ssg: 0.8, ym2151: 2.0, ym2203: 2.0, ym2203ssg: 1.6, ym2608: 2.0, ym2608ssg: 1.6, opl: 1.4, ga20: 3.0, segapcm: 2.0, c140: 1.0, c352: 0.5, okim6258: 0.6, qsound: 5.0, okim6295: 1.0, multipcm: 1.0, k007232: 1.6, msm5205: 1.45, k054539: 2.4, cps3: 1.6, zsg2: 1.0 };
 
   // ---------------------------------------------------------------------------
   // チップアダプタ: { id, clockHz, accum, chip, clock(), mix(out2), write..., snapshot() }
@@ -642,6 +642,41 @@
     return a;
   }
 
+  // ES5505(規格外 ENSX ブロック。タイトーの Ensoniq 音源基板、expansion/es5505.js)。時刻の扱いは ZSG-2 と同じ:
+  // 書き込みは「音源の通しのサンプル番号」で積み、ループの 2 周目以降は 1 周目の位置+周回数 × 1 周の長さ(ヘッダにある)で数える。
+  // 出力レートは クロック / 512(32 声。端数つき)。ES5510 への書き込み(キー 0x1000〜)は、今は読み飛ばす
+  function makeEs5505Adapter(info) {
+    const chip = new Emu.Es5505Audio(info.clock, new Int16Array(0));
+    const rate = info.clock / 512, perVgm = rate / VGM_RATE, loopN = info.loopLenN || 0;
+    const natOf = (pos) => Math.floor(pos * rate / VGM_RATE);
+    const gs = chip.getState.bind(chip), ss = chip.setState.bind(chip);
+    const a = {
+      id: 'es5505', clockHz: rate, accum: 0, chip, gain: CHIP_GAIN.es5505, bias: 0, biasDirty: false, lastLoops: 0,
+      loadRom(addr, data) { chip.loadRom8(addr, data); },
+      queueWrites(block, vgmPos, speed, loops, posInPass) {
+        const sp = speed > 0 ? speed : 1;
+        const k = (loops > 0 && loopN > 0) ? loops : 0, pos1 = k ? posInPass : vgmPos, add = k * loopN;
+        if (k !== this.lastLoops) { if (sp === 1) this.accum = pos1 * rate / VGM_RATE + add - chip.nat - 1e-9; this.lastLoops = k; }
+        if (sp === 1 && this.biasDirty) { this.bias = chip.nat - (natOf(pos1) + add); this.biasDirty = false; }
+        if (sp !== 1) this.biasDirty = true;
+        const base = natOf(pos1);
+        for (let p = 6; p + 6 <= block.length; p += 6) {
+          const t = block[p] | (block[p + 1] << 8), key = block[p + 2] | (block[p + 3] << 8), value = block[p + 4] | (block[p + 5] << 8);
+          const n = natOf(pos1 + t) + add;
+          if (sp === 1) chip.queueWriteAt(n + this.bias, key, value); else chip.queueWrite(Math.floor((n - add - base) / sp), key, value);
+        }
+      },
+      clock() { chip.clock(); },
+      advanceVgm(n) { this.accum += n * perVgm; let c = Math.floor(this.accum); this.accum -= c; while (c-- > 0) chip.clock(); },
+      mix(out) { out[0] += chip.outL * this.gain; out[1] += chip.outR * this.gain; },
+      applyMute(m) { const e = m.expansion || m; if (e.es5505) Emu.applyMute(chip.mute, e.es5505); },
+      applyVolume(v) { const e = v.expansion || v; if (e.es5505) Emu.applyVolume(chip.vol, e.es5505); }
+    };
+    chip.getState = () => { const st = gs(); st.accum = a.accum; st.bias = a.bias; st.biasDirty = a.biasDirty; st.lastLoops = a.lastLoops; return st; };
+    chip.setState = (st) => { ss(st); a.accum = st.accum || 0; a.bias = st.bias || 0; a.biasDirty = !!st.biasDirty; a.lastLoops = st.lastLoops || 0; };
+    return a;
+  }
+
   // MultiPCM(セガModel 1/2/Multi 32の28ch PCM): expansion/multipcm.js。コマンドは
   // 0xB5 aa dd(aa=ポート0-2、bit7=デュアル2個目)、バンクは0xC3 cc bbaa(専用case)、
   // ROMはデータブロック0x89。
@@ -786,7 +821,8 @@
     okim6295: makeOkim6295Adapter, multipcm: makeMultiPcmAdapter,
     k007232: makeK007232Adapter, msm5205: makeMsm5205Adapter, k054539: makeK054539Adapter,
     cps3: makeCps3Adapter,
-    zsg2: makeZsg2Adapter
+    zsg2: makeZsg2Adapter,
+    es5505: makeEs5505Adapter
   };
 
   // ---------------------------------------------------------------------------
@@ -1142,6 +1178,14 @@
         const a = this.adapterById.zsg2, Zx = MML.VGM.ZSGX;
         if (a && block[5] === Zx.KIND_ROM && block.length >= 10) a.loadRom((block[6] | (block[7] << 8) | (block[8] << 16) | (block[9] << 24)) >>> 0, block.subarray(10));
         else if (a && block[5] === Zx.KIND_WRITES) a.queueWrites(block, this.samplePos, this.speedFactor, this.loopCount,
+          this.loopCount ? (this.header.totalSamples - this.header.loopSamples) + (this.samplePos - this.loopBase) : this.samplePos);
+        return;
+      }
+      // タイトーの Ensoniq 音源基板(規格外 ENSX): 種類 1 = 波形(語の番地 4 バイト+8bit の中身)、種類 2 = 書き込み列
+      if (MML.VGM && MML.VGM.isEnsxBlock && MML.VGM.isEnsxBlock(type, block)) {
+        const a = this.adapterById.es5505, Ex = MML.VGM.ENSX;
+        if (a && block[5] === Ex.KIND_ROM8 && block.length >= 10) a.loadRom((block[6] | (block[7] << 8) | (block[8] << 16) | (block[9] << 24)) >>> 0, block.subarray(10));
+        else if (a && block[5] === Ex.KIND_WRITES) a.queueWrites(block, this.samplePos, this.speedFactor, this.loopCount,
           this.loopCount ? (this.header.totalSamples - this.header.loopSamples) + (this.samplePos - this.loopBase) : this.samplePos);
         return;
       }
@@ -1631,6 +1675,7 @@
       qsound: has('qsound') ? { snapshots: [], logical: [] } : null,
       cps3: has('cps3') ? { snapshots: [], logical: [] } : null,
       zsg2: has('zsg2') ? { snapshots: [], logical: [] } : null,
+      es5505: has('es5505') ? { snapshots: [], logical: [] } : null,
       okim6295: has('okim6295') ? { snapshots: [] } : null,
       // multipcm: snapshots=物理スロット(実機のまま)、logical=割当逆算(ソフトウェア
       // チャンネル合成)。チャンネルプール式ドライバ対策で両方を常時保持し、
@@ -1693,6 +1738,8 @@
     const qsRegrouper = data.qsound ? new Emu.PoolChannelRegrouper(16) : null;
     const cps3Regrouper = data.cps3 ? new Emu.PoolChannelRegrouper(16) : null;
     const zsg2Regrouper = data.zsg2 ? new Emu.PoolChannelRegrouper(48, Emu.POOL_CHIP_OPTIONS.zsg2) : null;
+    const es5505Regrouper = data.es5505 ? new Emu.PoolChannelRegrouper(32, Emu.POOL_CHIP_OPTIONS.es5505) : null;
+    if (data.es5505) player.adapterById.es5505.chip.captureOnly = true; // 先読みでは音を作らない(声の位置と停止だけ進める)
     if (data.zsg2) player.adapterById.zsg2.chip.captureOnly = true; // 先読みでは音を作らない(DSP が重い)。声の位置と音量だけ進める
     let kssFrameWrites = [];
     let kss2FrameWrites = []; // 2個目のPSG(data.kss2)
@@ -1954,6 +2001,12 @@
         data.zsg2.snapshots.push(s);
         data.zsg2.logical.push(zsg2Regrouper.step(s));
       }
+      if (data.es5505) {
+        // ES5505(タイトーの Ensoniq 音源基板): 同じく、先読みでも音源を進めている(波形の終端は音源が知っている)
+        const s = Emu.snapshotEs5505(player.adapterById.es5505.chip);
+        data.es5505.snapshots.push(s);
+        data.es5505.logical.push(es5505Regrouper.step(s));
+      }
       if (data.multipcm) {
         const s = Emu.snapshotMultiPCM(player.adapterById.multipcm.chip);
         const st = mpcmState;
@@ -2136,7 +2189,7 @@
       ['ga20', (s) => s, 'ga20'], ['k007232', (s) => s, 'k007232'], ['k054539', (s) => s, 'k054539'],
       ['segapcm', (s) => s, 'segapcm'],
       ['c140', (s) => s, 'c140'], ['c352', (s) => s, 'c352'],
-      ['qsound', (s) => s, 'qsound'], ['cps3', (s) => s, 'cps3'], ['zsg2', (s) => s, 'zsg2'], ['okim6295', (s) => s, 'okim6295'],
+      ['qsound', (s) => s, 'qsound'], ['cps3', (s) => s, 'cps3'], ['zsg2', (s) => s, 'zsg2'], ['es5505', (s) => s, 'es5505'], ['okim6295', (s) => s, 'okim6295'],
       ['multipcm', (s) => s, 'multipcm'],
       // ★YM2610/YM2608のアダプタはチップを .chip ではなく .fm で持つ(SSGと2個持ちのため)
       ['ym2610fm', (s) => (s && s.adpcmA ? s.adpcmA.concat(s.adpcmB ? [s.adpcmB] : []) : null), 'ym2610', (a) => a.fm],

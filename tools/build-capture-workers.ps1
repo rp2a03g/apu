@@ -132,6 +132,7 @@ $bundles = @(
             'src\emulator\expansion\cps3.js',
             'src\emulator\expansion\tms57002.js',
             'src\emulator\expansion\zsg2.js',
+            'src\emulator\expansion\es5505.js',
             'src\emulator\expansion\okim6295.js',
             'src\emulator\expansion\multipcm.js',
             'src\emulator\expansion\k007232.js',
@@ -275,6 +276,18 @@ $bundles = @(
             'src\emulator\cps3\cps3Machine.js',
             'src\emulator\cps3\cps3Console.js',
             'src\emulator\cps3\cps3State.js',
+            # Taito ZOOM sound board (sound-test screen): MN10200 + board + ZSG-2 + TMS57002
+            'src\emulator\expansion\tms57002.js',
+            'src\emulator\expansion\zsg2.js',
+            'src\emulator\expansion\es5505.js',
+            'src\emulator\zsg2\mn10200.js',
+            'src\emulator\zsg2\zoomBoard.js',
+            'src\emulator\zsg2\zoomConsole.js',
+            # Taito Ensoniq sound board (sound-test screen): 68000 + MC68681 + ES5505
+            'src\emulator\cpu68000.js',
+            'src\emulator\f3\ensoniqBoard.js',
+            'src\emulator\f3\ensoniqRomSet.js',
+            'src\emulator\f3\ensoniqConsole.js',
             'src\audio\nes-worklet-impl.js'
         )
     },

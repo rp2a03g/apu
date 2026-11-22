@@ -698,7 +698,11 @@
   function fitEnvelopeTables(scoreChannels, envReg, c) {
     if (!c.ENV_FIT) return;
     const limit = MML.Convert.NSF_ENV_TABLE_MAX;
-    if (envReg.fitToLimit(scoreChannels, 'envelopeV', limit)) envReg.compact(scoreChannels);
+    // 減らす時は、上限ちょうどではなくパートの数だけ下まで減らす: この後の emitScore が、ループの頭(L)で割った音符の後半に表を足す事がある
+    // (1 パートにつき高々 1 つ。mmlEmit.js splitAtFrame)。ちょうどまでにすると、足された分で上限を超えて NSF に書き出せなくなる(実測: 255 → 256)。
+    // 減らし始める条件は変えない(上限以下の曲の出力は変わらない)
+    const spare = (scoreChannels || []).length;
+    if (envReg.fitToLimit(scoreChannels, 'envelopeV', limit, limit - spare)) envReg.compact(scoreChannels);
     if (envReg._release) envReg._release.fitToLimit(scoreChannels, 'envelopeVr', limit);
   }
 
@@ -833,7 +837,8 @@
     if (t.loop == null || t.loop >= n) return v[n - 1];
     return v[t.loop + ((i - n) % (n - t.loop))];
   }
-  MML.Convert.EnvelopeRegistry.prototype.fitToLimit = function (scoreChannels, field, limit) {
+  // target: 減らす時の目標(省略時は limit)。limit を超えた時だけ、target まで減らす
+  MML.Convert.EnvelopeRegistry.prototype.fitToLimit = function (scoreChannels, field, limit, target) {
     field = field || 'envelopeV';
     const uses = new Map(), horizon = new Map();
     for (const ch of scoreChannels || []) for (const ev of (ch && ch.events) || []) {
@@ -849,8 +854,10 @@
     const used = Array.from(uses.keys());
     // ハードウェア減衰表は動かさない。番号(100番台)では見分けない: ソフトウェア表が100種類を超えると番号が100を越える
     const cand = used.filter(i => !this.tables.get(i).hw);
-    const budget = limit - (used.length - cand.length);
-    if (cand.length <= budget || budget < 1) return 0;
+    const hwCount = used.length - cand.length;
+    if (cand.length <= limit - hwCount) return 0;
+    const budget = Math.min(limit, target > 0 ? target : limit) - hwCount;
+    if (budget < 1) return 0;
     const info = new Map();
     for (const i of cand) {
       const t = this.tables.get(i);

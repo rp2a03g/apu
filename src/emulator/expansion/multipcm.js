@@ -537,7 +537,7 @@
   // ★psx だけ実機ボイス(24)より多い32本: ドライバ内部のトラックで束ねると、トラック数+和音の分で24本を超える
   //   (babel14 で30本。24本に押し込むと別トラックのレーンを使い回してレーン純度が100%→83%に落ちる)。
   //   実機スロット表示のスナップショットは24要素のまま(鍵盤の行数はスナップショットの長さに従う)
-  Emu.POOL_CHIP_CHANNELS = { multipcm: 28, segapcm: 16, c140: 24, c352: 32, qsound: 16, psx: 32, cps3: 16, zsg2: 48 };
+  Emu.POOL_CHIP_CHANNELS = { multipcm: 28, segapcm: 16, c140: 24, c352: 32, qsound: 16, psx: 32, cps3: 16, zsg2: 48, es5505: 32 };
   // チップごとの合成の仕方(new Emu.PoolChannelRegrouper(n, opts) の opts。作る所は 3 つ: vgmPlayer.js / main.js / roll-builders.js)
   //   foldTwins: 同じ瞬間に同じ波形を 0.6 半音以内の音程で鳴らす 2 声目(左右に振ってわずかに音程をずらす重ね方)に、レーンを与えない。
   //   ZSG-2(タイトー ZOOM 基板)のドライバは旋律の大半をこの形で鳴らす。別々のレーンにすると同時発音が倍になり、合成 ch が散らばる

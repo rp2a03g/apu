@@ -126,7 +126,7 @@
     const data = vgmCaptureMirror && vgmCaptureMirror.data;
     if (!fn || !data) return null;
     const refs = {};
-    for (const key of ['ga20', 'k007232', 'k054539', 'segapcm', 'c140', 'c352', 'qsound', 'cps3', 'zsg2', 'okim6295', 'multipcm', 'psx']) {
+    for (const key of ['ga20', 'k007232', 'k054539', 'segapcm', 'c140', 'c352', 'qsound', 'cps3', 'zsg2', 'es5505', 'okim6295', 'multipcm', 'psx']) {
       const e = data[key];
       if (e && Array.isArray(e.snapshots) && e.snapshots.length) refs[key] = fn(e.snapshots);
     }
@@ -1752,7 +1752,7 @@
       return out;
     };
     const CHIP_OF_DATA = { ga20: 'ga20', k007232: 'k007232', k054539: 'k054539', segapcm: 'segapcm', c140: 'c140', c352: 'c352',
-                          qsound: 'qsound', cps3: 'cps3', zsg2: 'zsg2', okim6295: 'okim6295', multipcm: 'multipcm', ym2610fm: 'ym2610', ym2608fm: 'ym2608' };
+                          qsound: 'qsound', cps3: 'cps3', zsg2: 'zsg2', es5505: 'es5505', okim6295: 'okim6295', multipcm: 'multipcm', ym2610fm: 'ym2610', ym2608fm: 'ym2608' };
     return {
       format: 'vgm',
       frameRate: MML.Emu.VGM_FRAME_RATE,
@@ -1837,6 +1837,8 @@
       ? (p && p.adapterById.cps3 && p.adapterById.cps3.chip)
       : smp.kind === 'zsg2'
       ? (p && p.adapterById.zsg2 && p.adapterById.zsg2.chip)
+      : smp.kind === 'es5505'
+      ? (p && p.adapterById.es5505 && p.adapterById.es5505.chip)
       : smp.kind === 'okim6295'
       ? (p && p.adapterById.okim6295 && p.adapterById.okim6295.chip)
       : smp.kind === 'multipcm'
@@ -2221,7 +2223,7 @@
     //   liveRoll.frameDur を参照すると TypeError → monitorLoop の例外で全描画が永久停止する(実測で踏んだ)。
     //   フレーム数は鍵盤表示が数える(setSource は state を複製するので state.totalFrames は増えない。これも実測で踏んだ)
     setMonitorSource(state, () => keyboardDisplay.liveFrameCount() * frameDur, chips);
-    keyboardDisplay.liveRollBegin({ initRegs: info.initRegs || {}, initWrites: info.initWrites || null, cps3Rom: info.cps3Rom || null }); // cps3Rom: CPS3 のゲーム画面の波形(鍵盤表示が音程を解析するのに要る)
+    keyboardDisplay.liveRollBegin({ initRegs: info.initRegs || {}, initWrites: info.initWrites || null, cps3Rom: info.cps3Rom || null, zsg2Rom: info.zsg2Rom || null, es5505Rom: info.es5505Rom || null }); // cps3Rom: CPS3 のゲーム画面の波形(鍵盤表示が音程を解析するのに要る)
     keyboardDisplay.setSourceInfo('live', info.name || 'LIVE');
   }
   function liveRollFrame(writes) {
@@ -9644,6 +9646,7 @@
     if (h.chips.qsound) chips.push('qsound');
     if (h.chips.cps3) chips.push('cps3');
     if (h.chips.zsg2) chips.push('zsg2');
+    if (h.chips.es5505) chips.push('es5505');
     if (h.chips.okim6295) chips.push('okim6295');
     if (h.chips.multipcm) chips.push('multipcm');
     if (h.chips.ym2610) { chips.push('ym2610fm'); chips.push('kssPsg'); } // SSGはKSS PSG行(KP1-3)を流用
@@ -9665,7 +9668,7 @@
   // 他はペア交互でも音符ストリームはほぼ安定と実測されたため実機スロット既定
   // (Outfoxies等のマルチサンプル曲では合成が僅かに劣るケースもある。トグルで曲別に選ぶ)
   // psx は 'track'(ドライバ内部トラック×声部、Emu.PsfTrackVoicer)/'logical'/'phys' の3段
-  const POOL_CHIP_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', cps3: 'phys', zsg2: 'logical', c140: 'phys', segapcm: 'phys', psx: 'track' };
+  const POOL_CHIP_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', cps3: 'phys', zsg2: 'logical', es5505: 'logical', c140: 'phys', segapcm: 'phys', psx: 'track' };
   const vgmPoolModes = (() => {
     let modes;
     try { modes = Object.assign({}, POOL_CHIP_DEFAULTS, JSON.parse(localStorage.getItem(POOL_MODE_KEY) || '{}')); }
@@ -9768,6 +9771,7 @@
 ,
     getCps3: () => { const a = vgmAdapter('cps3'); return a ? poolLive('cps3', MML.Emu.snapshotCps3(a.chip)) : null; },
     getZsg2: () => { const a = vgmAdapter('zsg2'); return a ? poolLive('zsg2', MML.Emu.snapshotZsg2(a.chip)) : null; },
+    getEs5505: () => { const a = vgmAdapter('es5505'); return a ? poolLive('es5505', MML.Emu.snapshotEs5505(a.chip)) : null; },
     getQsound: () => { const a = vgmAdapter('qsound'); return a ? poolLive('qsound', MML.Emu.snapshotQSound(a.chip)) : null; }
 ,
     getOkim6295: () => { const a = vgmAdapter('okim6295'); return a ? MML.Emu.snapshotOKIM6295(a.chip) : null; }
@@ -9907,7 +9911,7 @@
       getC140: liveVgm.getC140,
       getC352: liveVgm.getC352,
       getOkim6258: liveVgm.getOkim6258,
-      getQsound: liveVgm.getQsound, getCps3: liveVgm.getCps3, getZsg2: liveVgm.getZsg2,
+      getQsound: liveVgm.getQsound, getCps3: liveVgm.getCps3, getZsg2: liveVgm.getZsg2, getEs5505: liveVgm.getEs5505,
       getOkim6295: liveVgm.getOkim6295,
       getMultiPcm: liveVgm.getMultiPcm,
       getPwm: liveVgm.getPwm,
@@ -9977,7 +9981,7 @@
   function updateVgmDrumSamples(data) {
     const out = {};
     const CH = [['ga20', 4, 'pcm'], ['k007232', 2, 'pcm'], ['k054539', 16, 'pcm'], ['segapcm', 16, 'pcm'], ['c140', 24, 'pcm'], ['c352', 32, 'pcm'],
-                ['qsound', 16, 'pcm'], ['cps3', 16, 'pcm'], ['zsg2', 48, 'pcm'], ['okim6295', 4, 'pcm'], ['multipcm', 28, 'pcm'],
+                ['qsound', 16, 'pcm'], ['cps3', 16, 'pcm'], ['zsg2', 48, 'pcm'], ['es5505', 32, 'pcm'], ['okim6295', 4, 'pcm'], ['multipcm', 28, 'pcm'],
                 ['ym2610fm', 6, 'adpcmA'], ['ym2608fm', 6, 'adpcmA'],
                 ['ym2610fm', 1, 'adpcmB'], ['ym2608fm', 1, 'adpcmB']]; // ADPCM-B は snapshot.adpcmB の1本
     for (const [key, n, shape] of CH) {
@@ -10440,6 +10444,21 @@
       }
     }
 
+    // ZOOM 音源基板(タイトー FX-1B)の ROM の組: サウンド基板だけを動かす「サウンドテスト画面」をゲーム画面の窓で開く。
+    // サウンド CPU(MN10200)と音源をその場で動かすので、コードを送った瞬間に鳴る。録音(●)で VGM、[変換へ] で鍵盤表示と MML 変換へ(src/ui/nesScreen.js openZoom)
+    async function openZoomRomSet(file, bytes, parsed, set) {
+      let program, wave;
+      try {
+        program = await MML.Archive.readEntry(bytes, set.program);
+        const parts = []; for (const w of set.waves) parts.push(await MML.Archive.readEntry(bytes, w));
+        wave = new Uint8Array(parts.reduce((a, p) => a + p.length, 0)); let o = 0; for (const p of parts) { wave.set(p, o); o += p.length; }
+      } catch (e) { alert(T('アーカイブを解析できませんでした: {msg}', { msg: e.message })); return false; }
+      stopAllFormatPlayback();
+      try { await MML.UI.NesScreen.openZoom({ program, wave, info: set.info }, file.name); }
+      catch (e) { alert(T('この ROM は開けません: {msg}', { msg: e && e.message ? e.message : String(e) })); return false; }
+      return 'nes';
+    }
+
     async function openArchive(file) {
       const bytes = new Uint8Array(await file.arrayBuffer());
       let parsed;
@@ -10453,6 +10472,35 @@
         // サウンドファイルが無ければゲームの画像(.nes/.fds/.rom/.dsk、拡張子無しのディスク画像も)を探す。
         // ディスクが複数(.dsk の組、.fds の DISK1/DISK2)なら 1 台にまとめて開き([disk] で選ぶ)、ROM が複数なら曲リストに載せて曲送りで切り替える
         const Image = MML.Emu.Image;
+        // ZOOM 音源基板(タイトー FX-1B)の ROM の組: サウンドテスト画面を開く(コードを選んで鳴らし、鳴らしながら録る)
+        const zoomSet = MML.Emu.ZoomRomSet ? MML.Emu.ZoomRomSet.find(parsed.entries) : null;
+        if (zoomSet) return openZoomRomSet(file, bytes, parsed, zoomSet);
+        // タイトーの Ensoniq 音源基板(F3 システムほか)の ROM の組: 同じくサウンドテスト画面を開く(分かっているゲームだけ。src/emulator/f3/ensoniqRomSet.js)
+        const ensSet = MML.Emu.EnsoniqRomSet ? MML.Emu.EnsoniqRomSet.find(parsed.entries, file.name) : null;
+        if (ensSet) {
+          let program, wave;
+          try {
+            const hi = await MML.Archive.readEntry(bytes, ensSet.hi), lo = await MML.Archive.readEntry(bytes, ensSet.lo);
+            program = new Uint8Array(hi.length * 2); for (let i = 0; i < hi.length; i++) { program[i * 2] = hi[i]; program[i * 2 + 1] = lo[i]; }   // 16bit の上位・下位を交互に
+            // 8bit の波形は語の上位バイトへ。置く位置(語の番地)は表にある。全体は 2 のべき乗の長さにする(基板はその大きさで折り返す)
+            const parts = []; let words = 0;
+            for (const w of ensSet.waves) { const r = await MML.Archive.readEntry(bytes, w.entry); parts.push({ at: w.at, r }); words = Math.max(words, w.at + r.length); }
+            let len = 0x100000; while (len < words) len <<= 1;
+            wave = new Int16Array(len);
+            for (const p of parts) for (let i = 0; i < p.r.length; i++) wave[p.at + i] = (p.r[i] << 8) << 16 >> 16;
+          } catch (e) { alert(T('アーカイブを解析できませんでした: {msg}', { msg: e.message })); return false; }
+          stopAllFormatPlayback();
+          try { await MML.UI.NesScreen.openZoom({ kind: 'ensoniq', program, wave, info: ensSet.info }, file.name); }
+          catch (e) { alert(T('この ROM は開けません: {msg}', { msg: e && e.message ? e.message : String(e) })); return false; }
+          return 'nes';
+        }
+        // MAME の子セットの zip で、音源の ROM が親セットの zip にしか無い時: 親セットを開くよう案内する
+        const ensParent = MML.Emu.EnsoniqRomSet ? MML.Emu.EnsoniqRomSet.parentHint(file.name) : '';
+        if (ensParent) { alert(T('この zip には音源の ROM が入っていません。親セットの zip({parent}.zip)を開いてください。', { parent: ensParent })); return false; }
+        if (MML.Emu.ZoomRomSet && MML.Emu.ZoomRomSet.hint(parsed.entries)) {
+          alert(T('この zip には音源の ROM が入っていません。サウンドプログラム(512KB、名前が .14 で終わる)と波形(名前が .27 で終わる)の入った zip を開いてください(MAME の ROM なら親セットの zip)。'));
+          return false;
+        }
         const games = Image ? parsed.entries.filter(e => !e.isDir && Image.looksLikeGameEntry(e.name, e.size)).sort((a, b) => MML.Archive.naturalCompare(a.name, b.name)) : [];
         if (games.length === 0) {
           alert(T('アーカイブ内に対応するファイル(サウンド NSF/NSFE/SPC/KSS/GBS/HES/VGM/PSF、ゲーム .nes/.fds/.rom/.dsk)がありません。'));

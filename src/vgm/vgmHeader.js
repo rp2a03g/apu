@@ -108,6 +108,15 @@
   }
   VGM.scanCps3Extension = function (bytes, dataOffset) { return scanClockHeader(bytes, dataOffset, VGM.isCp3xBlock); };
   VGM.scanZsg2Extension = function (bytes, dataOffset) { return scanClockHeader(bytes, dataOffset, VGM.isZsgxBlock); };
+  // タイトーの Ensoniq 音源基板(F3 システムほか: ES5505+ES5510)の規格外ブロック。0x67 0x66 TYPE 長さ 'ENSX' 版 種類 中身…(src/vgm/ensoniqRecord.js の冒頭)
+  //   種類 0 = ヘッダ(クロック u32、フラグ u8: bit0 = ES5510 への書き込みを含む、bit1 = ループの長さつき → 続けて ループの頭 u32・1 周の長さ u32)
+  //   種類 1 = 波形(語の番地 u32+8bit のサンプル列)、種類 2 = 書き込み列(時刻 u16・キー u16・値 u16)
+  VGM.ENSX = { TYPE: 0xBC, MAGIC: [0x45, 0x4E, 0x53, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_ROM8: 1, KIND_WRITES: 2, FLAG_ESP: 1, FLAG_LOOP: 2 };
+  VGM.isEnsxBlock = function (type, block) {
+    const m = VGM.ENSX.MAGIC;
+    return type === VGM.ENSX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
+  };
+  VGM.scanEnsoniqExtension = function (bytes, dataOffset) { return scanClockHeader(bytes, dataOffset, VGM.isEnsxBlock); };
 
   // ストリーム先頭のデータブロックに MSXX のヘッダがあれば { machine, dac } を返す(無ければ null)
   VGM.scanMsxExtension = function (bytes, dataOffset) {
@@ -372,6 +381,10 @@
     const zsgx = usedChips.length ? null : VGM.scanZsg2Extension(bytes, dataOffset);
     if (zsgx) { const info = { id: 'zsg2', name: 'ZSG-2', clock: zsgx.clock, dual: false, impl: true, flags: zsgx.flags,
       loopStartN: (zsgx.flags & VGM.ZSGX.FLAG_LOOP) && zsgx.extra ? zsgx.extra[0] : 0, loopLenN: (zsgx.flags & VGM.ZSGX.FLAG_LOOP) && zsgx.extra ? zsgx.extra[1] : 0 }; chips.zsg2 = info; usedChips.push(info); }
+    // タイトーの Ensoniq 音源基板(規格外 ENSX)。標準の ES5505/6 のクロック欄(0xD0)は使わない(声ごとのバンクと ES5510 が規格のコマンドで書けないため)
+    const ensx = usedChips.length ? null : VGM.scanEnsoniqExtension(bytes, dataOffset);
+    if (ensx) { const info = { id: 'es5505', name: 'ES5505', clock: ensx.clock, dual: false, impl: true, flags: ensx.flags,
+      loopStartN: (ensx.flags & VGM.ENSX.FLAG_LOOP) && ensx.extra ? ensx.extra[0] : 0, loopLenN: (ensx.flags & VGM.ENSX.FLAG_LOOP) && ensx.extra ? ensx.extra[1] : 0 }; chips.es5505 = info; usedChips.push(info); }
 
     const gd3Offset = gd3Rel ? 0x14 + gd3Rel : 0;
     const gd3 = gd3Offset ? parseGd3(bytes, gd3Offset) : null;

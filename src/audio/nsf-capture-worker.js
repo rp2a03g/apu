@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-22 18:47:22
+ * Built by tools/build-capture-workers.ps1 at 2026-11-23 00:12:00
  *
  * regsOnly capture worker bundle (nsfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nsfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-11-22 18:47:22';
+  MML.WorkerBundles.nsfCaptureBuiltAt = '2026-11-23 00:12:00';
   MML.WorkerBundles.nsfCapture = function () {
 /*
  * NSF (Nintendo Sound Format) 1.x 128バイトヘッダ生成 / NSFe(チャンク形式)の解析
@@ -5576,6 +5576,9 @@
     // VGM: ZOOM ZSG-2(ZS1-ZS48)。chip.mute[] は声 0-47
     const zs = id.match(/^ZS(\d+)$/);
     if (zs) return { section: 'expansion', chip: 'zsg2', type: 'array', index: +zs[1] - 1 };
+    // VGM: ES5505(ES1-ES32。タイトーの Ensoniq 音源基板)。chip.mute[] は声 0-31
+    const es = id.match(/^ES(\d+)$/);
+    if (es) return { section: 'expansion', chip: 'es5505', type: 'array', index: +es[1] - 1 };
     // VGM: OKIM6295(OK1-4)。chip.mute[]はch 0-3('OKI'=OKIM6258は上の完全一致で先に拾われる)
     const ok = id.match(/^OK(\d)$/);
     if (ok) return { section: 'expansion', chip: 'okim6295', type: 'array', index: +ok[1] - 1 };
@@ -5652,6 +5655,7 @@
     { header: 'QSound (DL-1425 , Capcom CPS2)', prefix: 'QS', name: (id) => 'PCM' + id.slice(2), pool: 'qsound' },
     { header: 'CPS3 (Capcom CP System III)', prefix: 'C3', name: (id) => 'PCM' + id.slice(2), pool: 'cps3' },
     { header: 'ZSG-2 (ZOOM , Taito FX-1B / G-NET)', prefix: 'ZS', name: (id) => 'PCM' + id.slice(2), pool: 'zsg2' },
+    { header: 'ES5505 (Ensoniq , Taito F3)', prefix: 'ES', name: (id) => 'PCM' + id.slice(2), pool: 'es5505' },
     // ★prefix 'OK' は 'OKI'(OKIM6258)にも前方一致するが、完全一致(ids)が全グループ横断で
     //   先に評価されるので衝突しない(getChannelDisplayの2段ループ参照)
     { header: 'OKIM6295 (MSM6295 , Toaplan / Raizing etc.)', prefix: 'OK', name: (id) => 'ADPCM' + id.slice(2) },
@@ -7022,6 +7026,23 @@
       }
     }
 
+    if (chips.includes('es5505')) {
+      // ES5505(規格外ブロック ENSX の VGM。タイトーの Ensoniq 音源基板): 32 声の PCM。ZSG-2 / CPS3 と同じ 3 段階表示
+      const live = extraSnaps && extraSnaps.es5505Live;
+      const s = live ? live() : (extraSnaps && extraSnaps.es5505 ? extraSnaps.es5505[frameIdx] : null);
+      const esWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
+      for (let ch = 0; ch < 32; ch++) {
+        const c = (s && s[ch]) || { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+        const hue = (150 + ch * 11) % 360;
+        const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
+        channels.push({ id: `ES${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0xFF,
+          wave: esWave(c), active: !!c.active, ...panVolFields(c),
+          adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
+          ...(exact ? { adpcmPitch: true, adpcmExact: true }
+                    : pcmSampleRow(c)) });
+      }
+    }
+
     if (chips.includes('qsound')) {
       // QSound(VGM: カプコンCPS1ダッシュ/CPS2): 16ch PCM。CS/SP/GA行と同じ3段階表示
       // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。
@@ -7576,6 +7597,46 @@
         if (w.addr !== 0x3FFFF) chip.write(w.addr - 0x30000, w.value);
       }
       return E.snapshotCps3(chip);
+    };
+  }
+  // ZOOM 音源基板のサウンドテスト画面: 書き込み [{ addr: 0x40000 + レジスタ番号, value, n }](n = 音源の通算サンプル番号。0x4FFFF はフレームの終わり)を
+  // 音源(音は作らない)へ流して、声の像を返す。DSP と全体音量(0x48000〜)は表示に要らないので流さない
+  function makeZsg2Stepper(rom) {
+    const E = MML.Emu;
+    const chip = E.Zsg2Audio ? new E.Zsg2Audio(25000000, 0) : null;
+    if (chip) { chip.captureOnly = true; if (rom && rom.length) chip.loadRom(0, rom); }
+    let started = false;
+    return (writes) => {
+      if (!chip) return null;
+      for (const w of writes) {
+        if (!(w.addr >= 0x40000 && w.addr <= 0x4FFFF)) continue;
+        const reg = w.addr - 0x40000;
+        if (reg >= 0x400 && reg !== 0xFFFF) continue;
+        if (!started) { chip.nat = w.n; started = true; }
+        let guard = 4096; while (chip.nat < w.n && guard-- > 0) chip.clock();   // 1 フレームは 543 サンプルほど(録音の頭の、昔の n の書き込みは進めずに入れる)
+        if (reg !== 0xFFFF) chip.write(reg, w.value);
+      }
+      return E.snapshotZsg2(chip);
+    };
+  }
+  // タイトーの Ensoniq 音源基板のサウンドテスト画面: 書き込み [{ addr: 0x50000 + キー, value, n }](キーは src/vgm/ensoniqRecord.js。0x5FFFF はフレームの終わり)を
+  // 音源(音は作らない)へ流して、声の像を返す。波形は音程の解析に使う(語の列)
+  function makeEs5505Stepper(rom) {
+    const E = MML.Emu;
+    const chip = E.Es5505Audio ? new E.Es5505Audio(15238090, rom && rom.length ? rom : new Int16Array(0)) : null;
+    if (chip) chip.captureOnly = true;
+    let started = false;
+    return (writes) => {
+      if (!chip) return null;
+      for (const w of writes) {
+        if (!(w.addr >= 0x50000 && w.addr <= 0x5FFFF)) continue;
+        const key = w.addr - 0x50000;
+        if (key >= 0x1000 && key !== 0xFFFF) continue;                       // ES5510 などは表示に要らない
+        if (!started) { chip.nat = w.n; started = true; }
+        let guard = 4096; while (chip.nat < w.n && guard-- > 0) chip.clock();   // 1 フレームは 496 サンプルほど
+        if (key !== 0xFFFF) chip.writeKey(key, w.value);
+      }
+      return E.snapshotEs5505(chip);
     };
   }
   function makePceStepper() {
@@ -10459,7 +10520,7 @@
       // VGMのステレオ定位を持つチップ(SN76489=Game Gearステレオ、YM2612/YM2610=FM/ADPCMのL/R、
       // 32X PWM、RF5C68/164=パン)もGBS用のL/R列表示を流用する。
       // ★以前は gbs/sn76489 だけだったため、SN76489の無い Neo Geo(YM2610)では L/R 列が出ていなかった
-      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'k007232', 'k054539', 'qsound', 'cps3', 'zsg2', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+      const PAN_CHIPS = ['gbs', 'sn76489', 'ym2612', 'ym2610fm', 'ym2151', 'ym2608fm', 'segapcm', 'c140', 'c352', 'psx', 'okim6258', 'k007232', 'k054539', 'qsound', 'cps3', 'zsg2', 'es5505', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
       this._leftEl.classList.toggle('kbd-left--gbs', PAN_CHIPS.some(c => this._chips.includes(c)));
       // ★L/R列に16bitの実レジスタを出す音源は列ごと広げる(2026-09-17のユーザー合意)。
       //   PSX=VOLL/VOLR(-32768..32767) / QSound=パン(0x110-0x130) / C352=前後4値の併記。
@@ -10505,6 +10566,7 @@
       this._extraSnaps.qsoundLive = typeof result.getQsound === 'function' ? result.getQsound : null;
       this._extraSnaps.cps3Live = typeof result.getCps3 === 'function' ? result.getCps3 : null;
       this._extraSnaps.zsg2Live = typeof result.getZsg2 === 'function' ? result.getZsg2 : null;
+      this._extraSnaps.es5505Live = typeof result.getEs5505 === 'function' ? result.getEs5505 : null;
       this._extraSnaps.okim6295Live = typeof result.getOkim6295 === 'function' ? result.getOkim6295 : null;
       this._extraSnaps.multipcmLive = typeof result.getMultiPcm === 'function' ? result.getMultiPcm : null;
       this._extraSnaps.pwmLive = typeof result.getPwm === 'function' ? result.getPwm : null;
@@ -10600,6 +10662,10 @@
       if (this._chips.includes('hes')) { steppers.pce = makePceStepper(); ex.hesApu = []; } // PC エンジンのゲーム画面
       const cps3Rom = (opts && opts.cps3Rom) || null;
       if (this._chips.includes('cps3')) { steppers.cps3 = makeCps3Stepper(cps3Rom); ex.cps3 = []; } // CPS3 のゲーム画面
+      const zsg2Rom = (opts && opts.zsg2Rom) || null;
+      if (this._chips.includes('zsg2')) { steppers.zsg2 = makeZsg2Stepper(zsg2Rom); ex.zsg2 = []; } // ZOOM 音源基板のサウンドテスト画面
+      const es5505Rom = (opts && opts.es5505Rom) || null;
+      if (this._chips.includes('es5505')) { steppers.es5505 = makeEs5505Stepper(es5505Rom); ex.es5505 = []; } // Ensoniq 音源基板のサウンドテスト画面
       // Live系(再生中のチップを直接読む関数)はライブ表示には無い(あっても全フレームが同じ値になる)
       for (const k of Object.keys(ex)) if (/Live$/.test(k)) ex[k] = null;
       ex.apuEnv = null;
@@ -10609,7 +10675,7 @@
       const regs = Object.assign({}, (opts && opts.initRegs) || {});
       if (initWrites) for (const w of initWrites) if (!w.read && regs[w.addr] === undefined) regs[w.addr] = w.value;
       if (regs[0x4015] === undefined) regs[0x4015] = 0x0F; // 書かれない曲もあるので「全ch有効」を既定に(VGM 経路と同じ)
-      this._liveRoll = { builder, steppers, regs, lastRangeOpened: 0, lastRangeMs: 0, lastDrumOpened: 0, cps3Rom };
+      this._liveRoll = { builder, steppers, regs, lastRangeOpened: 0, lastRangeMs: 0, lastDrumOpened: 0, cps3Rom, zsg2Rom, es5505Rom };
       this._rollPastKeep = false;
       this._rollTimeline = builder.timeline();
       this._rollCursor = {};
@@ -10639,6 +10705,8 @@
       if (lr.steppers.gb) ex.gbsApu[f] = lr.steppers.gb(writes);
       if (lr.steppers.pce) ex.hesApu[f] = lr.steppers.pce(writes);
       if (lr.steppers.cps3) ex.cps3[f] = lr.steppers.cps3(writes);
+      if (lr.steppers.zsg2) ex.zsg2[f] = lr.steppers.zsg2(writes);
+      if (lr.steppers.es5505) ex.es5505[f] = lr.steppers.es5505(writes);
       const channels = extractChannels(st.regSnapshots[f], ex, f, this._chips);
       lr.builder.feed(channels, f);
       // 打点(DPCM 等の drumKey つき)が新しく始まったらドラム区画を組み直す(区画が無いと打点は描かれない。
@@ -10676,10 +10744,12 @@
       if (f === st.totalFrames) return;
       st.writeLog.length = f; st.regSnapshots.length = f; st.totalFrames = f;
       const ex = this._extraSnaps;
-      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu', 'cps3']) if (ex[k]) ex[k].length = f;
+      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu', 'cps3', 'zsg2', 'es5505']) if (ex[k]) ex[k].length = f;
       if (lr.steppers.gb) lr.steppers.gb = makeGbStepper();
       if (lr.steppers.pce) lr.steppers.pce = makePceStepper();
       if (lr.steppers.cps3) lr.steppers.cps3 = makeCps3Stepper(lr.cps3Rom);
+      if (lr.steppers.zsg2) lr.steppers.zsg2 = makeZsg2Stepper(lr.zsg2Rom);
+      if (lr.steppers.es5505) lr.steppers.es5505 = makeEs5505Stepper(lr.es5505Rom);
       if (lr.steppers.vrc7) lr.steppers.vrc7 = makeVrc7Stepper();
       if (lr.steppers.n163) lr.steppers.n163 = makeN163Stepper();
       if (lr.steppers.fme7) lr.steppers.fme7 = makeFme7Stepper();
@@ -14511,7 +14581,7 @@
     }
     // スナップショット型チップ: extractChannels(keyboard.js)が読むextraSnapsに
     // フレーム毎スナップショット配列を渡して同じ抽出経路でトラック化する
-    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'k007232', 'k054539', 'msm5205', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'cps3', 'zsg2', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
+    const snapChips = ['sn', 'ym2612', 'ym2610fm', 'ym2151', 'ym2203fm', 'ym2608fm', 'ga20', 'k007232', 'k054539', 'msm5205', 'segapcm', 'c140', 'c352', 'okim6258', 'qsound', 'cps3', 'zsg2', 'es5505', 'okim6295', 'multipcm', 'pwm', 'rf5c164', 'rf5c68'];
     const chipToken = { sn: 'sn76489' };
     const poolMode = (opts && opts.poolMode) || {};
     for (const key of snapChips) {

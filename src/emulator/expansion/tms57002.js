@@ -39,7 +39,7 @@
     let st0 = 0, st1 = 0, sti = S_IDLE, aacc = 0, xoa = 0, xba = 0, xwr = 0, xrd = 0, txrd = 0, creg = 0;
     let pc = 0, ca = 0, id = 0, ba0 = 0, ba1 = 0, rptc = 0, rptcNext = 0, sa = 0, xmAdr = 0, hidx = 0, uHead = 0, uTail = 0;
     const unhandled = new Map();
-    let instCount = 0, overrun = 0, xramDirty = false;
+    let instCount = 0, overrun = 0, xramDirty = false, stepIdx = 0, emptyAt = -1;
 
     function reset() {
       sti = (sti & ~(SU_MASK | S_READ | S_WRITE | S_BRANCH | S_HOST | S_UPDATE)) | (SU_ST0 | S_IDLE);
@@ -92,7 +92,7 @@
       if (sa === addr && uHead !== uTail) sti |= S_UPDATE;
       if (sti & S_UPDATE) {
         cmem[addr] = update[uTail]; uTail = (uTail + 1) & 0xf;
-        if (uHead === uTail) sti &= ~S_UPDATE;
+        if (uHead === uTail) { sti &= ~S_UPDATE; emptyAt = stepIdx; }
         return cmem[addr];
       }
       const crm = (st1 & ST1_CRM) >> 18, v = cmem[addr];
@@ -524,10 +524,10 @@
         st1 &= ~(ST1_AOV | ST1_MOV);
         sti &= ~S_IDLE;
       }
-      let n = CYCLES_PER_SAMPLE;
+      let n = CYCLES_PER_SAMPLE; emptyAt = -1;
       while (n > 0 && !(sti & (S_IDLE | IN_PLOAD))) {
         if (jit && !rptc && !rptcNext && uHead === uTail && !(sti & S_UPDATE)) { const b = getBlock(); if (b && b.len <= n) { runBlock(b); n -= b.len; continue; } }
-        step(); n--;
+        stepIdx = CYCLES_PER_SAMPLE - n; step(); n--;
       }
       if (n === 0) overrun++;
       return out;
@@ -546,6 +546,10 @@
     return { reset, ctrl, dataW, sample, getState, setState, unhandled, prog, cmem,
       // jit: false で逐次実行だけにする(照合用)。jitStats: 変換した関数の数と、呼んだ回数
       get jit() { return jit; }, set jit(v) { jit = !!v; }, get jitStats() { return { blocks: jitBlocks, runs: jitRuns }; },
+      // empty: ホストからの係数の更新を全部食べ終えたか(実機の EMPTY 端子。サウンド CPU はこれを割り込みで待つ)
+      get empty() { return uHead === uTail; },
+      // emptyAt: 直前の sample() の中で、更新を食べ終えた命令の番号(食べ終えていなければ -1)。サウンド CPU への割り込みの時刻に使う
+      get emptyAt() { return emptyAt; },
       get st0() { return st0; }, get st1() { return st1; }, get sti() { return sti; }, get instCount() { return instCount; }, get overrun() { return overrun; } };
   };
 })(typeof window !== 'undefined' ? window : globalThis);

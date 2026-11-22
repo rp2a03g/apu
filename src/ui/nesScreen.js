@@ -179,7 +179,7 @@
   let machine = 'nes';        // 'nes' | 'msx' | 'gb' | 'pce'(open がファイルで決める)
   let pceFps = 21477270 / 1365 / 263; // PC エンジン: 1 画面 263 行(59.83Hz)か 262 行(60.05Hz)。ソフトが VCE で選ぶ(loaded/フレームで知らされる)
   let cps3Fps = 59.6;         // CP システム III: 1 画面 264 行(59.60Hz)
-  function curFps() { return machine === 'gb' ? (gbSgb ? SGB_FPS : GB_FPS) : machine === 'pce' ? pceFps : machine === 'cps3' ? cps3Fps : FPS; }
+  function curFps() { return machine === 'zoom' ? 60 : machine === 'gb' ? (gbSgb ? SGB_FPS : GB_FPS) : machine === 'pce' ? pceFps : machine === 'cps3' ? cps3Fps : FPS; }
   const SGB_FPS = 21477272 / (1364 * 262); // スーパーゲームボーイは SNES の 1 フレーム
   let gbSgb = 0, gbClock = 0;              // 今のゲームボーイがスーパーゲームボーイなら 1 か 2 / 録音の VGM に入れる時計(0 = 既定の 4194304)
   let msxChips = [], msxMachine = '', pendingMsx = null, msxFps = 60, msxDisk = false; // msxDisk: 今の MSX はディスクで起動している(次の .dsk は入れ替え) // MSX: 載っている音源名(psg/scc/opll/opl/dac)、起動した機種、BIOS 待ちの ROM、本体のフレームレート(50Hz 中は 50)
@@ -373,7 +373,7 @@
   }
   function requestSaveState() {
     if (node) node.port.postMessage({ type: 'saveState' });
-    else if (nes) saveStateRecord(stateApi().save(nes));
+    else if (nes && stateApi()) saveStateRecord(stateApi().save(nes));
   }
   async function requestLoadState() {
     if (!stateKey) return;
@@ -381,7 +381,7 @@
     if (!rec || !rec.state) { flashStatus(T('この ROM のステートはまだありません')); return; }
     if (node) node.port.postMessage({ type: 'loadState', state: rec.state });
     else if (nes) {
-      const ok = stateApi().load(nes, rec.state);
+      const ok = stateApi() ? stateApi().load(nes, rec.state) : false;
       flashStatus(ok ? T('ステートを読み込みました') : T('ステートを読み込めません(別の ROM の物か、形式が違います)'));
       if (ok) { if (rewindBuf) rewindBuf.clear(); liveRestart(); }
     }
@@ -530,7 +530,7 @@
     else if (nes && nes.keyboard && nes.keyboard.releaseAll) nes.keyboard.releaseAll();
   }
   // 機種別のステート API
-  function stateApi() { return machine === 'cps3' ? MML.Emu.Cps3State : machine === 'msx' ? MML.Emu.MsxState : machine === 'pce' ? MML.Emu.PceState : machine === 'gb' ? (gbSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState; }
+  function stateApi() { return machine === 'zoom' ? null : machine === 'cps3' ? MML.Emu.Cps3State : machine === 'msx' ? MML.Emu.MsxState : machine === 'pce' ? MML.Emu.PceState : machine === 'gb' ? (gbSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState; }
   // 設定(機種/マッパー)が変わった: 開いている MSX の ROM を開き直す(BIOS 待ちなら待っている ROM で再試行)
   function reopenMsx() {
     const onErr = (e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); };
@@ -1596,7 +1596,7 @@
     w = w || frameW; h = h || frameH;
     if (canvas.width === w && canvas.height === h && imageBuf) return;
     canvas.width = w; canvas.height = h; frameW = w; frameH = h;
-    canvas.style.aspectRatio = machine === 'gb' ? '160 / 144' : machine === 'pce' ? '292 / 242' : machine === 'cps3' ? '4 / 3' : '256 / 240'; // PC エンジンは幅がドットクロックで 292/389/584 と変わるが、画面の形は同じ // 画面の形は幅/行数のモードによらず同じ(幅 512 は横半分のドット、インターレースの 480 行は縦半分の行。実機のテレビと同じ)
+    canvas.style.aspectRatio = machine === 'gb' ? '160 / 144' : machine === 'pce' ? '292 / 242' : machine === 'cps3' ? '4 / 3' : machine === 'zoom' ? '320 / 224' : '256 / 240'; // PC エンジンは幅がドットクロックで 292/389/584 と変わるが、画面の形は同じ // 画面の形は幅/行数のモードによらず同じ(幅 512 は横半分のドット、インターレースの 480 行は縦半分の行。実機のテレビと同じ)
     if (ilBadgeEl) ilBadgeEl.hidden = h < 480;
     imageBuf = new Uint8ClampedArray(w * h * 4);
     image = new ImageData(imageBuf, w, h);
@@ -1671,7 +1671,7 @@
     statusEl.textContent = `${fps} fps · ${mode}` + dg + (underruns ? ' · ' + T('音切れ {n} 回', { n: underruns }) : '') + (hasBattery ? ' · ' + T('セーブ') : '') + (liveActive ? ' · ' + T('ロール') : '');
     if (cps3TestBtn) cps3TestBtn.hidden = machine !== 'cps3' || !!pendingCps3;
     if (pendingFds || pendingMsx || pendingCps3) return; // BIOS 待ちの案内を消さない
-    const chips = machine === 'gb' ? 'GB APU' : machine === 'pce' ? 'HuC6280' : machine === 'cps3' ? 'CPS3' : machine === 'msx' ? msxChips.map((c) => c.toUpperCase()).join('+') : ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
+    const chips = machine === 'gb' ? 'GB APU' : machine === 'pce' ? 'HuC6280' : machine === 'cps3' ? 'CPS3' : machine === 'zoom' ? (zoomSet && zoomSet.kind === 'ensoniq' ? 'ES5505' : 'ZSG-2') : machine === 'msx' ? msxChips.map((c) => c.toUpperCase()).join('+') : ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
     statusEl.title = (chips ? chips + ' ' : '') + (workletState === 'failed' ? T('AudioWorklet が使えないので主スレッドで実行しています(音は出ません)') : '') +
       (hasBattery ? ' ' + T('セーブデータはこのブラウザ(IndexedDB)に自動保存します(1 秒ごと・閉じる時)。キー: {key}', { key: batteryKey }) : '') +
       (liveActive ? ' ' + T('鍵盤表示のロールへ流しています') : '');
@@ -1685,7 +1685,7 @@
     // 再ビルド忘れの検出(capture-worker-client.js と同じ考え方): 主スレッドの現行ソースがバンドルに含まれているか
     const probes = [MML.Emu.NesConsole, MML.Emu.PPU, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC3, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC5, MML.Emu.NesMappers && MML.Emu.NesMappers.VRC7, MML.Emu.FdsDisk && MML.Emu.FdsDisk.Mapper, MML.Emu.NesRewind];
     // MSX 本体(同じバンドルに入る)。ページが MSX の script を読んでいない時は比べる物が無いので飛ばす
-    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.GbPrinter, MML.Emu.GbBarcodeBoy, MML.Emu.APUGb, MML.Emu.CPUSm83, MML.Emu.PceConsole, MML.Emu.PceVdc, MML.Emu.PceVce, MML.Emu.PceCard, MML.Emu.PceTimer, MML.Emu.CPUHuC6280, MML.Emu.APUHuC6280, MML.Emu.Cps3Console, MML.Emu.Cps3Audio, MML.Emu.Cps3 && MML.Emu.Cps3.Machine, MML.Emu.Cps3 && MML.Emu.Cps3.SH2, MML.Emu.Cps3Rewind]) if (p) probes.push(p);
+    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.GbPrinter, MML.Emu.GbBarcodeBoy, MML.Emu.APUGb, MML.Emu.CPUSm83, MML.Emu.PceConsole, MML.Emu.PceVdc, MML.Emu.PceVce, MML.Emu.PceCard, MML.Emu.PceTimer, MML.Emu.CPUHuC6280, MML.Emu.APUHuC6280, MML.Emu.Cps3Console, MML.Emu.Cps3Audio, MML.Emu.ZoomConsole, MML.Emu.Zsg2Audio, MML.Emu.EnsoniqConsole, MML.Emu.Es5505Audio, MML.Emu.createM68000, MML.Emu.Cps3 && MML.Emu.Cps3.Machine, MML.Emu.Cps3 && MML.Emu.Cps3.SH2, MML.Emu.Cps3Rewind]) if (p) probes.push(p);
     for (const p of probes) {
       if (typeof p !== 'function' || src.indexOf(p.toString()) < 0) {
         console.warn('[nes] nes-worklet.js がソースより古い(再ビルド忘れ)ため使いません。tools/build-capture-workers.ps1 で再ビルドしてください');
@@ -1754,7 +1754,7 @@
       case 'writes': takeFrames(m.frames || [], frameSeq); break; // record on で像を取り直す前に溜まっていた分(最後は今の途中フレーム)
       case 'rewound': blitFrame(new Uint32Array(m.frame), m.w, m.h); onRewound(m.seq); break;
       case 'rwframe': blitIndex(new Uint8Array(m.idx), m.palette ? new Uint32Array(m.palette) : null, m.w, m.h); onReverseFrame(m.seq); break;
-      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; if (m.chips && machine === 'msx') msxChips = m.chips.slice(); if (m.fps > 0) { if (machine === 'pce') pceFps = m.fps; else if (machine === 'cps3') cps3Fps = m.fps; else msxFps = m.fps; } if (machine === 'gb') { if (m.clock) gbClock = m.sgb ? Math.round(m.clock) : 0; gbTilt = !!m.tilt; if (gbTilt) canvas.title = T('マウスを画面の上で動かすと傾きます(スマホは本体の傾き)'); } fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
+      case 'loaded': nameEl.title = m.info; recExtBits = m.extBits || 0; if (m.chips && machine === 'msx') msxChips = m.chips.slice(); if (m.fps > 0) { if (machine === 'pce') pceFps = m.fps; else if (machine === 'cps3') cps3Fps = m.fps; else if (machine !== 'zoom') msxFps = m.fps; } if (machine === 'gb') { if (m.clock) gbClock = m.sgb ? Math.round(m.clock) : 0; gbTilt = !!m.tilt; if (gbTilt) canvas.title = T('マウスを画面の上で動かすと傾きます(スマホは本体の傾き)'); } fdsSides = m.disks || 0; fdsSide = 0; hasBattery = !!m.battery; updateDiskUi(); updateStatus(); break;
       case 'battery': onBatteryMessage(m); break;
       case 'diag': diag = m; break;
       case 'barcode': onGbBarcodeResult(!!m.ok); break;
@@ -1933,6 +1933,15 @@
       if (fr) out.push({ addr: 0x3FFFF, value: 0, n: fr.n1 });
       return out;
     }
+    if (machine === 'zoom') {
+      // ZOOM 音源基板: 録音の 1 フレーム { n0, n1, w: [レジスタ番号, 値, n, …] } → 鍵盤表示のステッパ(keyboard.js makeZsg2Stepper)が読む形。
+      // 番地は 0x40000 + レジスタ番号(DSP と全体音量は 0x48000〜)、フレームの終わりを 0x4FFFF で知らせる。0xFFFF(コードを送った印)は流さない
+      const w = (fr && fr.w) || [];
+      const base = zoomSet && zoomSet.kind === 'ensoniq' ? 0x50000 : 0x40000;   // Ensoniq 音源基板は 0x50000 + キー(keyboard.js makeEs5505Stepper)
+      for (let i = 0; i + 2 < w.length; i += 3) if (w[i] !== 0xFFFF) out.push({ addr: base + w[i], value: w[i + 1], n: w[i + 2] });
+      if (fr) out.push({ addr: base + 0xFFFF, value: 0, n: fr.n1 });
+      return out;
+    }
     if (machine === 'msx') {
       for (const w of fr) {
         switch (w.chip) {
@@ -1979,6 +1988,8 @@
     if (liveActive) liveEnd('restart');
     liveActive = true; liveBase = null;
     if (machine === 'cps3') NesScreen.onLiveBegin({ chips: ['vgm', 'cps3'], fps: cps3Fps, name: romName || 'CPS3', cps3Rom: cps3Gfx }); // 鍵盤表示の CPS3 の行(VGM と同じ)。波形は音程の解析用
+    else if (machine === 'zoom' && zoomSet && zoomSet.kind === 'ensoniq') NesScreen.onLiveBegin({ chips: ['vgm', 'es5505'], fps: 60, name: romName || 'ES5505', es5505Rom: zoomSet.wave }); // 鍵盤表示の ES5505 の行。波形は音程の解析用
+    else if (machine === 'zoom') NesScreen.onLiveBegin({ chips: ['vgm', 'zsg2'], fps: 60, name: romName || 'ZSG-2', zsg2Rom: zoomSet && zoomSet.wave }); // 鍵盤表示の ZSG-2 の行(VGM と同じ)。波形は音程の解析用
     else if (machine === 'gb') NesScreen.onLiveBegin({ chips: ['gbs'], fps: GB_FPS, name: romName || 'GB' }); // 鍵盤表示の GB の行(GBS と同じ)
     else if (machine === 'pce') NesScreen.onLiveBegin({ chips: ['hes'], fps: pceFps, name: romName || 'PCE' }); // 鍵盤表示の波形メモリ音源の行(HES と同じ)
     else if (machine === 'msx') NesScreen.onLiveBegin({ chips: msxLiveChips(), fps: msxFps || 60, name: romName || 'MSX' });
@@ -2014,6 +2025,14 @@
       const mc = { type: 'mix', mute: pick(lastMix.mute), volume: pick(lastMix.volume) };
       if (node) node.port.postMessage(mc);
       else if (nes && typeof nes.applyMix === 'function') nes.applyMix(mc.mute, mc.volume);
+      return;
+    }
+    if (machine === 'zoom') {
+      const ck = zoomSet && zoomSet.kind === 'ensoniq' ? 'es5505' : 'zsg2';
+      const pick = (cfgObj) => (cfgObj && cfgObj.expansion && cfgObj.expansion[ck] ? { [ck]: cfgObj.expansion[ck] } : null);
+      const mz = { type: 'mix', mute: pick(lastMix.mute), volume: pick(lastMix.volume) };
+      if (node) node.port.postMessage(mz);
+      else if (nes && typeof nes.applyMix === 'function') nes.applyMix(mz.mute, mz.volume);
       return;
     }
     if (machine === 'gb') {
@@ -2092,6 +2111,19 @@
       const base = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (r.samples / 44100).toFixed(1), frames: r.frames, kb: (r.vgm.length / 1024).toFixed(1) });
       recInfoEl.textContent = base + (r.loop ? ' · ' + T('ループ {start} 秒から {len} 秒', { start: r.loop.startSec.toFixed(1), len: r.loop.lengthSec.toFixed(1) }) : r.trimmed ? ' · ' + T('末尾の無音を切りました') : '');
       recInfoEl.title = T('CPS3 の録音には、効果音/処理落ちの補正は掛けられません') + ' ' + (r.loop ? T('ループを検出したので、イントロと 1 周ぶんで切ってループ位置を入れました') : !cfg.cps3.recLoop ? T('ループの自動検出は切ってあります(⚙ の CPS3)') : T('ループは見つかりませんでした(ループする曲は、2 周目の途中まで録ると検出できます)'));
+      return;
+    }
+    if (machine === 'zoom') {
+      // ZOOM 音源基板: 規格外ブロック ZSGX(src/vgm/zsg2Record.js)。録音の中で最初にコードを送った所を曲の頭にし、ループを探して切る。終わった曲は末尾の無音を切る
+      const tags = { title: '', game: (zoomSet.info && zoomSet.info.game) || (romName || '').replace(/\.[^.]+$/, ''), creator: 'Sound Emulation Foundry (' + (zoomSet.kind === 'ensoniq' ? 'F3' : 'ZOOM') + ')' };
+      const r = zoomSet.kind === 'ensoniq' ? MML.VGM.encodeEnsoniqRecording({ frames, wave: zoomSet.wave, tags }) : MML.VGM.encodeZoomRecording({ frames, wave: zoomSet.wave, tags });
+      if (!r) { recInfoEl.textContent = ''; return; }
+      recRaw = r.vgm; recVgm = r.vgm; recCode = r.code || 0;
+      updateRecUi();
+      recSfxChk.parentNode.hidden = recLagChk.parentNode.hidden = true;
+      const base = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (r.samples / 44100).toFixed(1), frames: r.frames, kb: (r.vgm.length / 1024).toFixed(1) });
+      recInfoEl.textContent = base + (r.loop ? ' · ' + T('ループ {start} 秒から {len} 秒', { start: r.loop.startSec.toFixed(1), len: r.loop.lengthSec.toFixed(1) }) : r.trimmed ? ' · ' + T('末尾の無音を切りました') : '');
+      recInfoEl.title = r.loop ? T('ループを検出したので、イントロと 1 周ぶんで切ってループ位置を入れました') : T('ループは見つかりませんでした(ループする曲は、2 周目の途中まで録ると見つかります)');
       return;
     }
     if (machine === 'pce') {
@@ -2436,6 +2468,46 @@
     return ok ? null : nes;
   }
 
+  // タイトーの ZOOM 音源基板(FX-1B): メイン基板は動かさず、サウンド基板だけを動かして自前のサウンドテスト画面を出す(src/emulator/zsg2/zoomConsole.js)。
+  // set = { program, wave, info: { game, first, last } }(主スレッドが zip から取り出す。zoomRomSet.js)。左右でコード、A で鳴らす、B で止める
+  let zoomSet = null, recCode = 0;
+  async function openZoom(set, name) {
+    machine = 'zoom'; pendingFds = null; pendingMsx = null; pendingCps3 = null; msxChips = []; msxDisk = false; gbSgb = 0; gbTilt = false;
+    if (NesScreen.onSpcState) NesScreen.onSpcState(null);
+    updateBiosBtn(); updateSoftKbd();
+    if (gbSgbMenuBtn) gbSgbMenuBtn.hidden = true;
+    liveEnd('restart');
+    rewindHoldEnd();
+    await flushBattery(); // 前の ROM のセーブを受け取ってから止める
+    romBytes = null; romName = name || '';
+    stateKey = ''; hasBattery = false; batteryKey = '';
+    zoomSet = set; recCode = 0;
+    const ens = set.kind === 'ensoniq';   // タイトーの Ensoniq 音源基板(F3 ほか)。無ければ ZOOM 音源基板
+    machineEl.textContent = ens ? 'F3' : 'ZOOM';
+    nameEl.textContent = romName;
+    nameEl.title = (ens ? 'Taito Ensoniq sound board (ES5505)' : 'Taito ZOOM sound board (ZSG-2)') + (set.info && set.info.game ? ' — ' + set.info.game : '');
+    recExtBits = 0; fdsSideInfo = null; diskNames = [];
+    fdsSides = 0; fdsSide = 0; if (sideTimer) { clearTimeout(sideTimer); sideTimer = 0; } updateDiskUi();
+    stopMain(); nes = null; rewindBuf = null;
+    if (recording) { recording = false; recFrames = null; recBase = null; }
+    recVgm = null; recRaw = null; updateRecUi();
+    paused = false; setIcon(pauseBtn, 'pause'); pauseBtn.classList.remove('nes-paused'); acc = 0; fpsCount = 0; fpsMs = 0; frameSeq = 0;
+    win.style.display = 'flex';
+    if (MML.FloatingWindows && MML.FloatingWindows.bringToFront) MML.FloatingWindows.bringToFront('win-nes');
+    const btn = document.querySelector('.toggle-btn[data-target="win-nes"]');
+    if (btn) btn.classList.add('active');
+    ensureCanvasSize(320, 224);
+    applyCfgLabels();
+    const program = set.program.slice().buffer, wave = set.wave.slice().buffer;   // 音スレッドへ移す分。主スレッドの分(set.wave)は録音を VGM にする時と、鍵盤表示の音程の解析に使う
+    const load = ens ? { type: 'load', machine: 'ensoniq', rom: null, ensoniq: { program, wave, info: set.info || {} } } : { type: 'load', machine: 'zoom', rom: null, zoom: { program, wave, info: set.info || {} } };
+    const ok = await startWorklet(load, [program, wave]);
+    if (!ok) { nes = ens ? new MML.Emu.EnsoniqConsole(null, { program: set.program, wave: set.wave, info: set.info || {} }) : new MML.Emu.ZoomConsole(null, { program: set.program, wave: set.wave, info: set.info || {} }); rewindBuf = null; lastPad = -1; lastPad2 = -1; mainFrames = 0; startMain(); }
+    liveBegin();
+    updateStatus();
+    canvas.focus();
+    return ok ? null : nes;
+  }
+
   // 中身の種類(imageDetect.js の kind)→ 開き方。iNES/FDS は open() の本体(NES)で開く
   let openChain = Promise.resolve();
   const OPENERS = {
@@ -2449,6 +2521,8 @@
     'msx-dsk': (bytes, name) => (machine === 'msx' && msxDisk && !pendingMsx && (node || nes)) ? swapMsxDisk(bytes, name) : openMsx(bytes, name, { disk: true }), // 動いている MSX には足して入れ替え
   };
   const NesScreen = {
+    /** タイトーの ZOOM 音源基板のサウンドテスト画面を開く。set = { program, wave, info }(zoomRomSet.js)*/
+    openZoom(set, name) { const p = openChain.then(() => { if (!ensureDom()) throw new Error('win-nes がありません'); return openZoom(set, name); }); openChain = p.catch(() => {}); return p; },
     getAudioContext: null,   // () => AudioContext(main.js が共用の物を渡す)。無ければ自前で作る
     onOpenRecording: null,   // (vgmBytes, fileName) 録音を本体の VGM 経路で開く(main.js)
     onOpenFile: null,        // (File) [開く] で選ばれた圧縮ファイルを本体の入口で開く(main.js。展開してゲーム画面へ戻ってくる)

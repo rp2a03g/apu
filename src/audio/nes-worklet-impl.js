@@ -45,7 +45,7 @@
       try {
         switch (m.type) {
           case 'load': {
-            const machine = m.machine === 'msx' ? 'msx' : m.machine === 'gb' ? 'gb' : m.machine === 'pce' ? 'pce' : m.machine === 'cps3' ? 'cps3' : 'nes';
+            const machine = m.machine === 'msx' ? 'msx' : m.machine === 'gb' ? 'gb' : m.machine === 'pce' ? 'pce' : m.machine === 'cps3' ? 'cps3' : m.machine === 'zoom' ? 'zoom' : m.machine === 'ensoniq' ? 'ensoniq' : 'nes';
             let nes, info;
             if (machine === 'msx') {
               // MSX: ROM(null なら BIOS だけで起動)+ 機種/BIOS(main 32K・sub/logo 16K、ArrayBuffer で届く)/マッパー種別
@@ -74,6 +74,16 @@
               const o = m.cps3 || {};
               nes = new MML.Emu.Cps3Console(null, { bios: new Uint8Array(o.bios), simm1: new Uint8Array(o.simm1), simm2: o.simm2 ? new Uint8Array(o.simm2) : null, gfx: new Uint8Array(o.gfx), game: o.game });
               info = MML.Emu.Cps3Console.describe(nes);
+            } else if (machine === 'zoom') {
+              // タイトーの ZOOM 音源基板(サウンドテスト画面): サウンドプログラムと波形。主スレッドが zip から取り出して送る
+              const o = m.zoom || {};
+              nes = new MML.Emu.ZoomConsole(null, { program: new Uint8Array(o.program), wave: new Uint8Array(o.wave), info: o.info || {} });
+              info = MML.Emu.ZoomConsole.describe(nes);
+            } else if (machine === 'ensoniq') {
+              // タイトーの Ensoniq 音源基板(サウンドテスト画面): サウンドプログラム(0xC00000 から見える並び)と波形(16bit の語の列)、ゲームごとの表
+              const o = m.ensoniq || {};
+              nes = new MML.Emu.EnsoniqConsole(null, { program: new Uint8Array(o.program), wave: new Int16Array(o.wave), info: o.info || {} });
+              info = MML.Emu.EnsoniqConsole.describe(nes);
             } else {
               nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });
               info = MML.Emu.INES.describe(nes.rom);
@@ -83,8 +93,8 @@
             if (m.battery && nes.hasBattery) nes.setBattery(new Uint8Array(m.battery)); // 前回のセーブ(主スレッドが IndexedDB から)
             this.nes = nes;
             this.machine = machine;
-            this.State = machine === 'cps3' ? MML.Emu.Cps3State : machine === 'msx' ? MML.Emu.MsxState : machine === 'pce' ? MML.Emu.PceState : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState;
-            const Rewind = machine === 'cps3' ? MML.Emu.Cps3Rewind : machine === 'msx' ? MML.Emu.MsxRewind : machine === 'pce' ? MML.Emu.PceRewind : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbRewind : MML.Emu.GbRewind) : MML.Emu.NesRewind;
+            this.State = (machine === 'zoom' || machine === 'ensoniq') ? null : machine === 'cps3' ? MML.Emu.Cps3State : machine === 'msx' ? MML.Emu.MsxState : machine === 'pce' ? MML.Emu.PceState : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbState : MML.Emu.GbState) : MML.Emu.NesState;
+            const Rewind = (machine === 'zoom' || machine === 'ensoniq') ? null : machine === 'cps3' ? MML.Emu.Cps3Rewind : machine === 'msx' ? MML.Emu.MsxRewind : machine === 'pce' ? MML.Emu.PceRewind : machine === 'gb' ? (nes.isSgb ? MML.Emu.SgbRewind : MML.Emu.GbRewind) : MML.Emu.NesRewind;
             this.rewind = Rewind ? new Rewind(nes) : null;
             this.dcX = 0; this.dcY = 0; this.dcX2 = 0; this.dcY2 = 0;
             this.port.postMessage({ type: 'loaded', machine, info, chips: typeof nes.chips === 'function' ? nes.chips() : null, fps: nes.frameRate || 0, extBits: nes.extBits(), sampleRate, tilt: !!nes.hasTilt, disks: nes.diskCount, battery: nes.hasBattery, w: this.frameW(), h: this.frameH(), clock: nes.clockHz || 0, sgb: nes.isSgb ? nes.revision : 0 });

@@ -382,6 +382,7 @@
   MML.Vgm2MmlExpansion.qsound = (snapshots, drumMap, opts) => pcmChannels(snapshots, 16, opts);
   MML.Vgm2MmlExpansion.cps3 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 16, opts); // CP システム III: QSound と同じ 16 声の PCM
   MML.Vgm2MmlExpansion.zsg2 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 48, opts); // ZOOM ZSG-2: 48 声の PCM
+  MML.Vgm2MmlExpansion.es5505 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 32, opts); // Ensoniq ES5505: 32 声の PCM
   MML.Vgm2MmlExpansion.okim6295 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 4, opts);
   MML.Vgm2MmlExpansion.multipcm = (snapshots, drumMap, opts) => pcmChannels(snapshots, 28, opts);
   // PSF(PlayStation SPU、24ボイス)。スナップショットは Emu.snapshotPsx が C352 と同じ形で作る(src/psf2mml/converter.js)
