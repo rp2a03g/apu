@@ -10478,7 +10478,7 @@
         // タイトーの Ensoniq 音源基板(F3 システムほか)の ROM の組: 同じくサウンドテスト画面を開く(分かっているゲームだけ。src/emulator/f3/ensoniqRomSet.js)
         const ensSet = MML.Emu.EnsoniqRomSet ? MML.Emu.EnsoniqRomSet.find(parsed.entries, file.name) : null;
         if (ensSet) {
-          let program, wave;
+          let program, wave, main = null;
           try {
             const hi = await MML.Archive.readEntry(bytes, ensSet.hi), lo = await MML.Archive.readEntry(bytes, ensSet.lo);
             program = new Uint8Array(hi.length * 2); for (let i = 0; i < hi.length; i++) { program[i * 2] = hi[i]; program[i * 2 + 1] = lo[i]; }   // 16bit の上位・下位を交互に
@@ -10488,9 +10488,27 @@
             let len = 0x100000; while (len < words) len <<= 1;
             wave = new Int16Array(len);
             for (const p of parts) for (let i = 0; i < p.r.length; i++) wave[p.at + i] = (p.r[i] << 8) << 16 >> 16;
+            // F3 システム: メイン CPU の ROM(4 本をバイトごとに組む)があれば、メイン基板も動かして本物のテストモード画面を出す
+            if (ensSet.main && MML.Emu.createF3Main) {
+              const mp = new Uint8Array(0x200000);
+              for (let k = 0; k < 4; k++) { const r = await MML.Archive.readEntry(bytes, ensSet.main.roms[k]); for (let i = 0; i < r.length && i * 4 + k < mp.length; i++) mp[i * 4 + k] = r[i]; }
+              // 絵の ROM(スプライト、背景、それぞれの上位 2bit): MAME の領域と同じ並びに組む(飛ばし幅とまとまりは表のとおり)。そろわないセットは文字の面だけ
+              let gfx = null;
+              if (ensSet.main.gfx) {
+                const regs = [];
+                for (const g of ensSet.main.gfx) {
+                  if (!g.size || !g.roms.length) { regs.push(null); continue; }
+                  const out = new Uint8Array(g.size);
+                  for (const x of g.roms) { const r = await MML.Archive.readEntry(bytes, x.entry); for (let i = 0; i < r.length; i++) { const j = x.swap ? i ^ 1 : i, a = x.at + Math.floor(j / x.group) * x.stride + (j % x.group); if (a < out.length) out[a] = r[i]; } }
+                  regs.push(out);
+                }
+                gfx = { spr: regs[0], sprHi: regs[1], tile: regs[2], tileHi: regs[3] };
+              }
+              main = { program: mp, top: ensSet.main.top, height: ensSet.main.height, rot: ensSet.main.rot, pal12: ensSet.main.pal12, extend: ensSet.main.extend, lag: ensSet.main.lag, gfx, eeprom: ensSet.main.eeprom ? await MML.Archive.readEntry(bytes, ensSet.main.eeprom) : null };
+            }
           } catch (e) { alert(T('アーカイブを解析できませんでした: {msg}', { msg: e.message })); return false; }
           stopAllFormatPlayback();
-          try { await MML.UI.NesScreen.openZoom({ kind: 'ensoniq', program, wave, info: ensSet.info }, file.name); }
+          try { await MML.UI.NesScreen.openZoom({ kind: 'ensoniq', program, wave, info: ensSet.info, main }, file.name); }
           catch (e) { alert(T('この ROM は開けません: {msg}', { msg: e && e.message ? e.message : String(e) })); return false; }
           return 'nes';
         }

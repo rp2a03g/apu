@@ -64,6 +64,7 @@
         startCt(Math.max(du.ctr, 1), at);
       } else { du.isr |= 0x08; startCt(0xffff, at); }
     }
+    function espHalt() { const h = (du.opr ^ 0xff) & 0x40 ? 1 : 0; if (chip.esp) chip.esp.halted = !!h; push('O', h); }
     function duRead(reg, now) { const r = duRead1(reg, now); if (opt.traceDuart) push('u', reg, r); return r; }
     function duRead1(reg, now) {
       switch (reg) {
@@ -104,8 +105,8 @@
         case 0x07: du.ctr = (du.ctr & 0xff00) | v; break;
         case 0x0c: du.ivr = v; break;
         case 0x0d: du.opcr = v; break;
-        case 0x0e: du.opr |= v; push('O', (du.opr ^ 0xff) & 0x40 ? 1 : 0); break;      // 出力ポート(端子は反転)。OP6 = ESPHALT
-        case 0x0f: du.opr &= ~v; push('O', (du.opr ^ 0xff) & 0x40 ? 1 : 0); break;
+        case 0x0e: du.opr |= v; espHalt(); break;      // 出力ポート(端子は反転)。OP6 = ESPHALT
+        case 0x0f: du.opr &= ~v; espHalt(); break;
         default: break;
       }
       duIrq(now);
@@ -119,6 +120,7 @@
     }
     function espWriteReg(r, v) { v &= 0xffffff; if (r < 0xc0) esp.gpr[r] = v; else if (r === 250 || r === 251) esp.reg[r] = v >> 16; else esp.reg[r] = v; }
     function espRead(off) {
+      if (chip.esp) return chip.esp.hostR(off);
       switch (off) {
         case 0x00: return esp.gprLatch >> 16 & 0xff; case 0x01: return esp.gprLatch >> 8 & 0xff; case 0x02: return esp.gprLatch & 0xff;
         case 0x03: return esp.instrHi >> 8 & 0xff; case 0x04: return esp.instrHi & 0xff;
@@ -131,6 +133,7 @@
       }
     }
     function espWrite(off, d) {
+      if (chip.esp) { chip.esp.hostW(off, d); push('D', off, d); return; }
       switch (off) {
         case 0x00: esp.gprLatch = (esp.gprLatch & 0x00ffff) | d << 16; break;
         case 0x01: esp.gprLatch = (esp.gprLatch & 0xff00ff) | d << 8; break;
@@ -207,9 +210,17 @@
     ram.set(program.subarray(0, 8), 0);          // スタックと開始番地
     cpu.reset();
     cpu.cycles = 0;
+    // サウンド CPU のリセット線(メイン CPU が握る。F3 のメイン基板は、起動時に押さえたまま → 0xC80000 への書き込みで放す)
+    let held = !!opt.startHeld;
+    function setReset(hold) {
+      hold = !!hold;
+      if (held && !hold) { const c = cpu.cycles; cpu.reset(); cpu.cycles = c; }
+      held = hold;
+    }
 
     // CPU を通しのクロック数 until まで進める。途中のタイマと送信完了の時刻で区切る
     function runTo(until) {
+      if (held) { if (cpu.cycles < until) cpu.cycles = until; return; }
       for (;;) {
         const now = cpu.cycles, ev = duNextEvent(now);
         if (ev > until) { cpu.run(until); break; }
@@ -230,7 +241,7 @@
       }
     }
     function takeEvents() { const e = events; events = []; return e; }
-    return { run, runTo, takeEvents, cpu, chip, ram, dpram, du, esp, stats,
+    return { run, runTo, takeEvents, setReset, get held() { return held; }, cpu, chip, ram, dpram, du, esp, stats,
       get time() { return samples * CYCLES_PER_SAMPLE / CPU_HZ; }, get samples() { return samples; } };
   };
   Emu.ENSONIQ_BOARD = { CPU_HZ, CYCLES_PER_SAMPLE };

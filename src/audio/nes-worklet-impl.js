@@ -82,7 +82,11 @@
             } else if (machine === 'ensoniq') {
               // タイトーの Ensoniq 音源基板(サウンドテスト画面): サウンドプログラム(0xC00000 から見える並び)と波形(16bit の語の列)、ゲームごとの表
               const o = m.ensoniq || {};
-              nes = new MML.Emu.EnsoniqConsole(null, { program: new Uint8Array(o.program), wave: new Int16Array(o.wave), info: o.info || {} });
+              // main があれば(F3 システム)メイン基板も動かして、本物のテストモード画面を出す
+              const u8 = (b) => (b ? new Uint8Array(b) : null);
+              const mn = o.main ? Object.assign({}, o.main, { program: new Uint8Array(o.main.program), eeprom: u8(o.main.eeprom),
+                gfx: o.main.gfx ? { spr: u8(o.main.gfx.spr), sprHi: u8(o.main.gfx.sprHi), tile: u8(o.main.gfx.tile), tileHi: u8(o.main.gfx.tileHi) } : null }) : null;
+              nes = new MML.Emu.EnsoniqConsole(null, { program: new Uint8Array(o.program), wave: new Int16Array(o.wave), info: o.info || {}, main: mn });
               info = MML.Emu.EnsoniqConsole.describe(nes);
             } else {
               nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });

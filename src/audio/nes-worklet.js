@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-23 00:12:00
+ * Built by tools/build-capture-workers.ps1 at 2026-11-23 10:43:13
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-23 00:12:00';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-23 10:43:13';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -24851,6 +24851,8 @@
   'use strict';
   const MML = root.MML = root.MML || {}, Emu = MML.Emu = MML.Emu || {};
   const M = 0x7fffffff;
+  // ES5510 とのつなぎ(MAME の taito_en.cpp / esqpump.cpp と同じ尺度): 入力 = 20bit の値 ÷ 2^19 × 0.18 × 1.3125 × 32768、出力はその逆
+  const ESP_IN = 0.18 * 1.3125 * 32768 / 524288, ESP_OUT = 0.18 * 1.3125 * 32768;
   const VOL_TAB = new Int32Array(256);
   for (let i = 0; i < 256; i++) VOL_TAB[i] = (((i & 15) | 16) << 11) >>> (16 - (i >> 4));
   const lp = (out, cutoff, inp) => Math.trunc((cutoff >> 4) * (out - inp) / 4096) + inp;
@@ -24867,6 +24869,8 @@
       this.vol = new Array(32).fill(1);
       this.out = new Float64Array(8);
       this.captureOnly = false;          // true で音を作らない(位置と停止だけ進める)
+      this.esp = null;                   // 後段の ES5510(attachEsp で付ける)。付いていれば、出力の組 1〜3 はここを通る
+      this.espBypass = false;            // true で ES5510 を通さず、4 組を足すだけにする(聴き比べ用)
       this.reset();
     }
     reset() {
@@ -25024,6 +25028,8 @@
       return r;
     }
 
+    /** 後段の ES5510 を付ける(タイトーの基板のつなぎ方: 組 0 はそのまま出力へ、組 1〜3 が ES5510 の入力 ser0〜2、ES5510 の ser3 が出力) */
+    attachEsp() { if (!this.esp && Emu.createEs5510) { this.esp = Emu.createEs5510(); this._espIn = new Int16Array(6); } return this.esp; }
     // ── VGM(規格外 ENSX)と録音の「キー」での書き込み ──
     //   0x000-0x00F = レジスタ(16bit)、0x100+レジスタ = 上位バイトだけ、0x200+レジスタ = 下位バイトだけ、
     //   0x400+声 = 波形のバンク(語の番地の上位。値 × 0x100000 語)、0x2200 = 2 声の中身を入れ替える(上位/下位バイトが声の番号)、0x2201 = その声を止める
@@ -25035,6 +25041,8 @@
       else if (key >= 0x400 && key < 0x420) this.setBank(key & 31, (value & 0xff) * 0x100000);
       else if (key === 0x2200) { const a = value >> 8 & 31, b = value & 31, t = this.v[a]; this.v[a] = this.v[b]; this.v[b] = t; }
       else if (key === 0x2201) this.v[value & 31].control |= 1;
+      else if (key >= 0x1000 && key < 0x1100) { if (this.esp) this.esp.hostW(key - 0x1000, value); }
+      else if (key === 0x2000) { if (this.esp) this.esp.halted = !!value; }
     }
     queueWrite(delay, key, value) {
       if (delay <= 0 && this.qHead >= this.q.length) { this.writeKey(key, value); return; }
@@ -25060,11 +25068,12 @@
     }
     mixSample() { return { left: this.outL, right: this.outR }; }
     getState() {
-      return { v: this.v.map((v) => Object.assign({}, v)), page: this.page, active: this.active, irqv: this.irqv, mode: this.mode, nat: this.nat, outL: this.outL, outR: this.outR, q: this.q.slice(this.qHead) };
+      return { v: this.v.map((v) => Object.assign({}, v)), page: this.page, active: this.active, irqv: this.irqv, mode: this.mode, nat: this.nat, outL: this.outL, outR: this.outR, q: this.q.slice(this.qHead), esp: this.esp ? this.esp.getState() : null };
     }
     setState(s) {
       this.v = s.v.map((v) => Object.assign({}, v)); this.page = s.page; this.active = s.active; this.irqv = s.irqv; this.mode = s.mode; this.nat = s.nat;
       this.outL = s.outL; this.outR = s.outR; this.q = s.q.slice(); this.qHead = 0;
+      if (this.esp && s.esp) this.esp.setState(s.esp);
     }
     clock() {
       if (this.qHead < this.q.length) this._drain();
@@ -25114,8 +25123,16 @@
         // 割り込みの印: ベクタが空いていれば声の番号を入れる
         if ((v.control & 0x80) && (this.irqv & 0x80)) { this.irqv = n & 0x1f; v.control &= ~0x80; }
       }
-      // 4 組を足した左右(-1〜1 の目安。20bit を 1.0 とする)。ES5510 は通さない
-      this.outL = (out[0] + out[2] + out[4] + out[6]) / 524288; this.outR = (out[1] + out[3] + out[5] + out[7]) / 524288;
+      // 左右(-1〜1 の目安。20bit を 1.0 とする)
+      const esp = this.esp;
+      if (esp && !quiet && !this.espBypass && !esp.halted) {
+        // ES5510 の入力は 16bit。MAME のつなぎ方と同じ尺度(ES5505 の 20bit × 0.18 × 音量 IC 1.3125 を 16bit に)で渡し、出力を同じ比で戻す。
+        // こうすると、ES5510 が素通しのプログラムなら「4 組を足しただけ」と同じ大きさになる
+        const inp = this._espIn, k = ESP_IN;
+        for (let i = 0; i < 6; i++) { const x = Math.trunc(out[i + 2] * k); inp[i] = x > 32767 ? 32767 : x < -32768 ? -32768 : x; }
+        esp.run(inp);
+        this.outL = out[0] / 524288 + esp.out[0] / ESP_OUT; this.outR = out[1] / 524288 + esp.out[1] / ESP_OUT;
+      } else { this.outL = (out[0] + out[2] + out[4] + out[6]) / 524288; this.outR = (out[1] + out[3] + out[5] + out[7]) / 524288; }
     }
   }
   // 鍵盤表示用のスナップショット(CPS3 / QSound / ZSG-2 と同じ形の配列 32 要素)。
@@ -25139,6 +25156,262 @@
     return out;
   };
   Emu.Es5505Audio = Es5505Audio;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * MML.Emu.createEs5510() — Ensoniq ES5510(ESP)。エフェクト用の DSP(残響、コーラスなど)。
+ * MAME の src/devices/cpu/es5510/es5510.cpp(Christian Brunschen、BSD-3-Clause)の写し。
+ *
+ * 1 サンプルごとに最大 160 命令のプログラムを 1 周する。1 命令は 48bit で、ALU(24bit)と乗算累算(24×24 → 48bit)と、
+ * 遅延メモリ(16bit × 1M 語)の読み書きを 1 つずつ持つ。命令はパイプラインになっていて、読んだオペランドは次の命令の時に演算される。
+ * 入出力は 16bit のシリアル 4 組(ser0〜ser3 の左右)。タイトーの基板では ser0〜2 に ES5505 の出力 3 組が入り、ser3 から最終の左右が出る。
+ *
+ * 口:
+ *   hostW(レジスタ, 値) / hostR(レジスタ)  サウンド CPU から(プログラムと係数の読み書き、遅延メモリの読み書き)
+ *   run(in[6]) → 出力は out[0](左)と out[1](右)。入出力は 16bit の整数
+ *   halted  基板の ESPHALT(true の間は走らせない。ホストからの読み書きはできる)
+ *   getState / setState
+ * MAME と同じく、I/O 空間の読み書き(RAM 制御の 6・7)は中身なし。MAME のソースの TODO にあるとおり、実機との差は確かめられていない。
+ */
+(function (root) {
+  'use strict';
+  const MML = root.MML = root.MML || {}, Emu = MML.Emu = MML.Emu || {};
+  const FN = 0x80, FC = 0x40, FV = 0x20, FLT = 0x10, FZ = 0x08, FNOT = 0x04, FMASK = FN | FC | FV | FLT | FZ;
+  const DRAM_SIZE = 1 << 20, DRAM_MASK = DRAM_SIZE - 1, P24 = 16777216, P47 = 140737488355328, P48 = 281474976710656;
+  // オペランドの選び方: [ALU の元, ALU の先, 乗算の元, 乗算の先](1 = レジスタ、2 = 遅延メモリ、3 = 両方)
+  const OPSEL = [[1, 1, 1, 1], [1, 1, 1, 2], [1, 1, 1, 3], [1, 1, 2, 1], [1, 1, 2, 3], [1, 2, 1, 1], [1, 2, 2, 1], [1, 3, 1, 1],
+    [1, 3, 2, 1], [2, 1, 1, 1], [2, 1, 1, 2], [2, 1, 1, 3], [2, 1, 2, 1], [2, 1, 2, 3], [2, 3, 1, 1], [2, 3, 2, 1]];
+  // RAM 制御: [サイクル(0 読む / 1 書く / 2 読んで FIFO を進める), 種類(0 遅延 / 1 表 A / 2 表 B / 3 I/O)]
+  const RAMCTL = [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [2, 0], [0, 3], [1, 3]];
+  const ALU_OPERANDS = [2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 0];
+  const s24 = (v) => v << 8 >> 8;
+  const mod24 = (x) => ((x % P24) + P24) % P24;
+
+  Emu.createEs5510 = function () {
+    const gpr = new Int32Array(0xc0), instrLo = new Uint32Array(160), instrHi = new Uint16Array(160);
+    // 命令をばらした控え(命令が書かれた時に作る): RAM のサイクルと種類、オペランドの選び方 4 つ、スキップ可、累算、ALU の命令とレジスタ、乗算のレジスタ
+    const dCyc = new Uint8Array(160), dAcc = new Uint8Array(160), dS0 = new Uint8Array(160).fill(1), dS1 = new Uint8Array(160).fill(1), dS2 = new Uint8Array(160).fill(1), dS3 = new Uint8Array(160).fill(1);
+    const dSkip = new Uint8Array(160), dMacAcc = new Uint8Array(160), dOp = new Uint8Array(160), dA = new Uint8Array(160), dB = new Uint8Array(160), dC = new Uint8Array(160), dD = new Uint8Array(160);
+    function decode(i) {
+      const lo = instrLo[i], hi = instrHi[i], rc = RAMCTL[lo >> 3 & 7], sel = OPSEL[lo >> 8 & 15];
+      dCyc[i] = rc[0]; dAcc[i] = rc[1]; dS0[i] = sel[0]; dS1[i] = sel[1]; dS2[i] = sel[2]; dS3[i] = sel[3];
+      dSkip[i] = lo >> 7 & 1; dMacAcc[i] = lo >> 6 & 1; dOp[i] = lo >> 12 & 15; dA[i] = lo >> 16 & 0xff; dB[i] = lo >>> 24; dC[i] = hi & 0xff; dD[i] = hi >> 8 & 0xff;
+    }
+    const dram = new Int16Array(DRAM_SIZE);
+    const ser = new Int16Array(8);            // 0 ser0l 1 ser0r 2 ser1l 3 ser1r 4 ser2l 5 ser2r 6 ser3l 7 ser3r
+    const out = new Int16Array(2);
+    let pc = 0, running = true, haltLine = false, halted = true, dramHi = 0;   // running: リセット直後は「走っている」(MAME の device_reset と同じ)。halted は基板の ESPHALT(既定は掛かっている)
+    let machl = 0, macOverflow = false, dil = 0, memsiz = 0xffffff, memmask = 0, memincrement = 0x1000000, memshift = 24;
+    let dlength = 0, abase = 0, bbase = 0, dbase = 0, sigreg = 0, mulshift = 2, ccr = 0, cmr = 0, dol0 = 0, dol1 = 0, dolCount = 0;
+    let dolLatch = 0, dilLatch = 0, dadrLatch = 0, gprLatch = 0, latchLo = 0, latchHi = 0, ramSel = 0, hostControl = 0x04, hostSerial = 0, flags = 0;
+    // 実行中の命令
+    let aluA = 0, aluB = 0, aluOp = 0, aluDst = 1, aluAV = 0, aluBV = 0, aluWrite = false, aluCcr = false;
+    let macC = 0, macDst = 1, macAcc = false, macCV = 0, macDV = 0, macWrite = false;
+    let ramAddr = 0, ramIo = false, ramCycle = 0, ramPAddr = 0, ramPIo = false, ramPCycle = 0, ramPPAddr = 0, ramPPIo = false, ramPPCycle = 0;
+
+    function readReg(r) {
+      if (r < 0xc0) return gpr[r];
+      switch (r) {
+        case 234: return ser[1] << 8; case 235: return ser[0] << 8; case 236: return ser[3] << 8; case 237: return ser[2] << 8;
+        case 238: return ser[5] << 8; case 239: return ser[4] << 8; case 240: return ser[7] << 8; case 241: return ser[6] << 8;
+        case 242: return macOverflow ? (machl < 0 ? 0 : 0xffffff) : mod24(machl);
+        case 243: return macOverflow ? (machl < 0 ? 0x800000 : 0x7fffff) : mod24(Math.floor(machl / P24));
+        case 244: return dil << 8;
+        case 245: return dlength; case 246: return abase; case 247: return bbase; case 248: return dbase; case 249: return sigreg;
+        case 250: return ccr << 16; case 251: return cmr << 16;
+        case 252: return 0xffffff; case 253: return 0x800000; case 254: return 0x7fffff;
+        default: return 0;
+      }
+    }
+    const to16 = (v) => (v >> 8) << 16 >> 16;
+    function writeReg(r, value) {
+      value &= 0xffffff;
+      if (r < 0xc0) { gpr[r] = value; return; }
+      switch (r) {
+        case 234: ser[1] = to16(value); break; case 235: ser[0] = to16(value); break; case 236: ser[3] = to16(value); break; case 237: ser[2] = to16(value); break;
+        case 238: ser[5] = to16(value); break; case 239: ser[4] = to16(value); break; case 240: ser[7] = to16(value); break; case 241: ser[6] = to16(value); break;
+        case 242: { let v = mod24(Math.floor(machl / P24)) * P24 + value; if (v >= P47) v -= P48; machl = v; break; }
+        case 243: { let v = value * P24 + mod24(machl); if (v >= P47) v -= P48; machl = v; macOverflow = false; break; }
+        case 244: { let n = 0, x = value; while (x & 1) { n++; x >>= 1; } memshift = n; memsiz = n >= 24 ? 0xffffff : 0xffffff >> (24 - n); memmask = 0xffffff & ~memsiz; memincrement = n >= 31 ? 0 : 1 << n; dbase &= memmask; break; }
+        case 245: dlength = value; break; case 246: abase = value; break; case 247: bbase = value; break; case 248: dbase = value; break;
+        case 249: sigreg = value; mulshift = (sigreg >> 22 & 1) ? 1 : 2; break;
+        case 250: ccr = (value >> 16) & FMASK; break;
+        case 251: cmr = (value >> 16) & (FMASK | FNOT); break;
+        default: break;
+      }
+    }
+    function writeToDol(value) {
+      const d = (value >> 8) << 16 >> 16;       // 下位 8bit を捨てる(-∞ 方向)
+      if (dolCount >= 2) { dol0 = dol1; dol1 = d; } else if (dolCount++ === 0) dol0 = d; else dol1 = d;
+    }
+    const setTo = (f, on) => { flags = on ? flags | f : flags & ~f; };
+    function add(a, b) {
+      const aS = a & 0x800000, bS = b & 0x800000, r = (a + b) | 0, rS = r & 0x800000;
+      const ov = aS === bS && aS !== rS, neg = rS !== 0;
+      setTo(FC, r & 0x1000000); setTo(FN, neg); setTo(FZ, (r & 0xffffff) === 0); setTo(FV, ov); setTo(FLT, (ov && !neg) || (!ov && neg));
+      return r & 0xffffff;
+    }
+    function saturate(v, negative) { if (flags & FV) { setTo(FN, negative); flags &= ~FZ; return negative ? 0x800000 : 0x7fffff; } return v; }
+    const negate = (v) => ((v ^ 0xffffff) + 1) & 0xffffff;
+    function asl(value, shift) {
+      const src = value & 0xffffff, carry = src >> (24 - shift) & 1, shifted = s24(src) * (1 << shift);
+      const ov = shifted > 0x7fffff || shifted < -0x800000, r = ov ? (shifted < 0 ? 0x800000 : 0x7fffff) : shifted & 0xffffff;
+      setTo(FC, carry); setTo(FV, ov); setTo(FN, r & 0x800000); setTo(FZ, (r & 0xffffff) === 0);
+      return r;
+    }
+    function alu(op, a, b) {
+      switch (op) {
+        case 0x0: return saturate(add(a, b), (a & 0x800000) !== 0);
+        case 0x1: return saturate(add(a, negate(b)), (a & 0x800000) !== 0);
+        case 0x2: return add(a, b);
+        case 0x3: return add(a, negate(b));
+        case 0x4: add(a, negate(b)); return a;
+        case 0x5: a &= b; setTo(FN, a & 0x800000); setTo(FZ, a === 0); return a;
+        case 0x6: a |= b; setTo(FN, a & 0x800000); setTo(FZ, a === 0); return a;
+        case 0x7: a ^= b; setTo(FN, a & 0x800000); setTo(FZ, a === 0); return a;
+        case 0x8: { flags &= ~FN; const neg = (b & 0x800000) !== 0; setTo(FC, neg); const r = neg ? (0xffffff ^ b) : b; setTo(FZ, (r & 0xffffff) === 0); return r; }   // 1 の補数で絶対値
+        case 0x9: return b;
+        case 0xa: return asl(b, 2);
+        case 0xb: return asl(b, 8);
+        case 0xc: flags &= ~FN; setTo(FC, b & 0x800000); return (b << 15) & 0x7fffff;
+        case 0xd: return add(0x7fffff, negate(b));
+        case 0xe: setTo(FN, b & 0x800000); setTo(FC, b & 1); return (b >> 1) | (b & 0x800000);
+        default: return 0;
+      }
+    }
+    // 1 命令ぶん(MAME の execute_run の 1 回)
+    function step() {
+      if (!running) {
+        if (haltLine) hostControl &= ~0x04; else { running = true; hostControl |= 0x04; pc = 0; }
+        return;
+      }
+      ramPPAddr = ramPAddr; ramPPIo = ramPIo; ramPPCycle = ramPCycle;
+      ramPAddr = ramAddr; ramPIo = ramIo; ramPCycle = ramCycle;
+      const i = pc < 160 ? pc : pc % 160;
+      if (ramPPCycle !== 1) dil = ramPPIo ? 0 : dram[ramPPAddr & DRAM_MASK];
+      const acc = dAcc[i], offset = gpr[i];
+      ramCycle = dCyc[i]; ramIo = acc === 3;
+      if (acc === 0) { const m = dlength + memincrement; ramAddr = m ? (((dbase + offset) % m) & memmask) >>> memshift : 0; }
+      else if (acc === 1) ramAddr = ((abase + offset) & memmask) >>> memshift;
+      else if (acc === 2) ramAddr = ((bbase + offset) & memmask) >>> memshift;
+      else ramAddr = offset & 0xfffff0;
+      const skippable = dSkip[i] !== 0;
+      let skip = false;
+      if (skippable) { skip = (ccr & cmr & FMASK) !== 0; if (cmr & FNOT) skip = !skip; }
+      // 乗算累算: 前の命令で読んだオペランドを掛ける
+      if (macWrite) {
+        const product = s24(macCV) * s24(macDV) * (1 << mulshift), result = macAcc ? product + machl : product;
+        macOverflow = result < -P47 || result >= P47;
+        machl = result;
+        const tmp = macOverflow ? (machl < 0 ? 0x800000 : 0x7fffff) : mod24(Math.floor(result / P24));
+        if (macDst & 1) { if (macC < 0xc0) gpr[macC] = tmp; else writeReg(macC, tmp); }
+        if (macDst & 2) writeToDol(tmp);
+      }
+      macC = dC[i]; const macD = dD[i];
+      macDst = dS3[i]; macAcc = dMacAcc[i] !== 0; macWrite = !skip;
+      macCV = dS2[i] === 1 ? (macC < 0xc0 ? gpr[macC] : readReg(macC)) : dil << 8;
+      macDV = macD < 0xc0 ? gpr[macD] : readReg(macD);
+      // ALU
+      if (aluWrite) {
+        flags = ccr;
+        const r = alu(aluOp, aluAV, aluBV);
+        if (aluOp !== 4) { if (aluDst & 1) { if (aluA < 0xc0) gpr[aluA] = r & 0xffffff; else writeReg(aluA, r); } if (aluDst & 2) writeToDol(r); }
+        if (aluCcr) ccr = flags;
+      }
+      aluA = dA[i]; aluB = dB[i]; aluOp = dOp[i]; aluDst = dS1[i];
+      aluWrite = !skip || aluOp === 4; aluCcr = !skippable || aluOp === 4;
+      if (aluOp === 0xf) {
+        // END: HALT 線を見て止まる。遅延メモリの基点を 1 つ戻す
+        if (haltLine) { running = false; hostControl &= ~0x04; }
+        dbase = (dbase - memincrement) | 0; if (dbase < 0) dbase = dlength;
+        if (running) pc = 0;
+      } else if (ALU_OPERANDS[aluOp] === 1) aluBV = dS0[i] === 1 ? (aluB < 0xc0 ? gpr[aluB] : readReg(aluB)) : dil << 8;
+      else { aluAV = dS0[i] === 1 ? (aluA < 0xc0 ? gpr[aluA] : readReg(aluA)) : dil << 8; aluBV = aluB < 0xc0 ? gpr[aluB] : readReg(aluB); }
+      if (ramPCycle !== 0) {
+        if (ramPCycle === 1 && !ramPIo) { const a = ramPAddr & DRAM_MASK; dram[a] = dol0; if (a > dramHi) dramHi = a; }
+        dol0 = dol1; if (dolCount > 0) dolCount--;
+      }
+      pc = (pc + 1) & 0xff;
+    }
+    // 1 サンプル(MAME の run_once): HALT を離して 1 命令、HALT を掛けて END まで
+    function run(inp) {
+      if (halted) return;
+      ser[0] = inp[0]; ser[1] = inp[1]; ser[2] = inp[2]; ser[3] = inp[3]; ser[4] = inp[4]; ser[5] = inp[5];
+      haltLine = false; step();
+      haltLine = true;
+      let guard = 400;                       // END の無いプログラム(書きかけ)で回り続けないように
+      while (running && guard-- > 0) step();
+      out[0] = ser[6]; out[1] = ser[7];
+    }
+    function hostR(off) {
+      switch (off) {
+        case 0x00: return gprLatch >> 16 & 0xff; case 0x01: return gprLatch >> 8 & 0xff; case 0x02: return gprLatch & 0xff;
+        case 0x03: return latchHi >> 8 & 0xff; case 0x04: return latchHi & 0xff;
+        case 0x05: return latchLo >>> 24; case 0x06: return latchLo >> 16 & 0xff; case 0x07: return latchLo >> 8 & 0xff; case 0x08: return latchLo & 0xff;
+        case 0x09: return dilLatch >> 16 & 0xff; case 0x0a: return dilLatch >> 8 & 0xff; case 0x0b: return 0;
+        case 0x0c: return dolLatch >> 16 & 0xff; case 0x0d: return dolLatch >> 8 & 0xff; case 0x0e: return 0xff;
+        case 0x0f: return dadrLatch >> 16 & 0xff; case 0x10: return dadrLatch >> 8 & 0xff; case 0x11: return dadrLatch & 0xff;
+        case 0x16: return 0x27;
+        default: return 0;
+      }
+    }
+    function hostW(off, d) {
+      d &= 0xff;
+      switch (off) {
+        case 0x00: gprLatch = (gprLatch & 0x00ffff) | d << 16; break;
+        case 0x01: gprLatch = (gprLatch & 0xff00ff) | d << 8; break;
+        case 0x02: gprLatch = (gprLatch & 0xffff00) | d; break;
+        case 0x03: latchHi = (latchHi & 0x00ff) | d << 8; break;
+        case 0x04: latchHi = (latchHi & 0xff00) | d; break;
+        case 0x05: latchLo = ((latchLo & 0x00ffffff) | d << 24) >>> 0; break;
+        case 0x06: latchLo = ((latchLo & 0xff00ffff) | d << 16) >>> 0; break;
+        case 0x07: latchLo = ((latchLo & 0xffff00ff) | d << 8) >>> 0; break;
+        case 0x08: latchLo = ((latchLo & 0xffffff00) | d) >>> 0; break;
+        case 0x0c: dolLatch = (dolLatch & 0x00ffff) | d << 16; break;
+        case 0x0d: dolLatch = (dolLatch & 0xff00ff) | d << 8; break;
+        case 0x0e: dolLatch = (dolLatch & 0xffff00) | d; break;
+        case 0x0f:
+          dadrLatch = (dadrLatch & 0x00ffff) | d << 16;
+          if (ramSel) dilLatch = dram[dadrLatch & DRAM_MASK] << 8;
+          else { const a = dadrLatch & DRAM_MASK; dram[a] = (dolLatch >> 8) << 16 >> 16; if (a > dramHi) dramHi = a; }
+          break;
+        case 0x10: dadrLatch = (dadrLatch & 0xff00ff) | d << 8; break;
+        case 0x11: dadrLatch = (dadrLatch & 0xffff00) | d; break;
+        case 0x12:
+          hostControl = (hostControl & 0x4) | (d & 0x3);
+          if (hostControl & 2) { if (!running) { dram.fill(0, 0, dramHi + 1); dramHi = 0; } hostControl &= ~0x2; }   // RAM の消去(止まっている時だけ)
+          break;
+        case 0x14: ramSel = d & 0x80; break;
+        case 0x18: hostSerial = d; break;
+        case 0x1f: if (haltLine) running = false; break;
+        case 0x80: if (d < 0xa0) { latchLo = instrLo[d]; latchHi = instrHi[d]; } if (d < 0xc0) gprLatch = gpr[d] & 0xffffff; else if (d >= 0xea) gprLatch = readReg(d); break;
+        case 0xa0: writeReg(d, gprLatch); break;
+        case 0xc0: if (d < 0xa0) { instrLo[d] = latchLo; instrHi[d] = latchHi; decode(d); } break;
+        case 0xe0: if (d < 0xa0) { instrLo[d] = latchLo; instrHi[d] = latchHi; decode(d); } writeReg(d, gprLatch); break;
+        default: break;
+      }
+    }
+    // 状態(シークの控え)。遅延メモリは書かれた所まで
+    function getState() {
+      return { gpr: gpr.slice(), instrLo: instrLo.slice(), instrHi: instrHi.slice(), dram: dram.slice(0, dramHi + 1), ser: ser.slice(), out: out.slice(),
+        n: [pc, running ? 1 : 0, haltLine ? 1 : 0, halted ? 1 : 0, machl, macOverflow ? 1 : 0, dil, memsiz, memmask, memincrement, memshift, dlength, abase, bbase, dbase, sigreg, mulshift, ccr, cmr, dol0, dol1, dolCount,
+          dolLatch, dilLatch, dadrLatch, gprLatch, latchLo, latchHi, ramSel, hostControl, hostSerial,
+          aluA, aluB, aluOp, aluDst, aluAV, aluBV, aluWrite ? 1 : 0, aluCcr ? 1 : 0, macC, macDst, macAcc ? 1 : 0, macCV, macDV, macWrite ? 1 : 0,
+          ramAddr, ramIo ? 1 : 0, ramCycle, ramPAddr, ramPIo ? 1 : 0, ramPCycle, ramPPAddr, ramPPIo ? 1 : 0, ramPPCycle] };
+    }
+    function setState(s) {
+      gpr.set(s.gpr); instrLo.set(s.instrLo); instrHi.set(s.instrHi); for (let i = 0; i < 160; i++) decode(i); dram.fill(0, 0, Math.max(dramHi, s.dram.length) + 1); dram.set(s.dram); dramHi = Math.max(0, s.dram.length - 1); ser.set(s.ser); out.set(s.out);
+      let r, hl, h, mo, aw, ac, ma, mw, ri, rpi, rppi;
+      [pc, r, hl, h, machl, mo, dil, memsiz, memmask, memincrement, memshift, dlength, abase, bbase, dbase, sigreg, mulshift, ccr, cmr, dol0, dol1, dolCount,
+        dolLatch, dilLatch, dadrLatch, gprLatch, latchLo, latchHi, ramSel, hostControl, hostSerial,
+        aluA, aluB, aluOp, aluDst, aluAV, aluBV, aw, ac, macC, macDst, ma, macCV, macDV, mw,
+        ramAddr, ri, ramCycle, ramPAddr, rpi, ramPCycle, ramPPAddr, rppi, ramPPCycle] = s.n;
+      running = !!r; haltLine = !!hl; halted = !!h; macOverflow = !!mo; aluWrite = !!aw; aluCcr = !!ac; macAcc = !!ma; macWrite = !!mw; ramIo = !!ri; ramPIo = !!rpi; ramPPIo = !!rppi;
+    }
+    return { hostR, hostW, run, out, getState, setState, readReg, writeReg,
+      get halted() { return halted; }, set halted(v) { halted = !!v; },
+      get programLength() { let n = 0; for (let i = 0; i < 160; i++) if ((instrLo[i] >> 12 & 15) === 0xf) { n = i + 1; break; } return n; } };
+  };
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
@@ -26475,6 +26748,715 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 
 /*
+ * MML.Emu.createM68020(bus) — モトローラ MC68EC020(番地は 24bit)。
+ *
+ * タイトー F3 システムのメイン CPU 用。cpu68000.js(音源基板のサウンド CPU 用。タイミングを MAME と突き合わせてある)を元に、
+ * 68020 で増えた物を足した別の物(68000 の側のタイミングを動かさないため、分けてある)。
+ *   増えた物: フル形式の拡張語(ベース変位、メモリ間接、スケール)、32bit の分岐、MULL / DIVL、EXTB、LINK.L、RTD、MOVEC(VBR ほか)、
+ *             ビットフィールド、CAS / CAS2、CHK2 / CMP2、CHK.L、TRAPcc、PACK / UNPK、MOVE CCR,ea、MOVES、
+ *             例外のスタックフレーム(形式の語つき。形式 0 と 2)、マスタ / 割り込みのスタック、奇数番地の語の読み書き
+ *   無い物: コプロセッサ(F ライン例外になる)、CALLM / RTM、トレース、キャッシュ(CACR は値を持つだけ)
+ * 命令の意味はモトローラの「M68000 Family Programmer's Reference Manual」のとおり。
+ * サイクル数は粗い近似(命令の取り込み 1 語 = 2、データの読み書き 1 回 = 3、ほか内部の待ち)。垂直同期で動くゲームには足りる。
+ *
+ * bus: { read8(a), read16(a), write8(a, v), write16(a, v), irqAck(level) → ベクタ番号(省略時は自動ベクタ 24 + level) }
+ *   番地は 24bit に切ってから渡す。16bit の読み書きは偶数番地だけ渡す(奇数番地の語はこちらでバイトに割る)。
+ * 口: reset() / run(until)(通しのクロック数 until まで進める)/ setIrq(level)(0 = 無し。レベルは外が保つ)/ pc / cycles / getState / setState
+ */
+(function (root) {
+  'use strict';
+  const MML = root.MML = root.MML || {}, Emu = MML.Emu = MML.Emu || {};
+
+  Emu.createM68020 = function (bus) {
+    const D = new Int32Array(8), A = new Int32Array(8);
+    let pc = 0, cyc = 0, irq = 0, stopped = false, illegalCount = 0, lastIllegal = 0;
+    // SR: T1(15) T0(14) S(13) M(12) I(10-8) X N Z V C。フラグは 0/1 でばらに持つ
+    let fT = 0, fS = 1, fM = 0, fI = 7, fX = 0, fN = 0, fZ = 0, fV = 0, fC = 0;
+    // 使っていないスタックポインタの控え(今のスタックは A[7])
+    let usp = 0, isp = 0, msp = 0;
+    let vbr = 0, cacr = 0, caar = 0, sfc = 0, dfc = 0;
+    const MASK = [0xff, 0xffff, 0xffffffff], MSB = [0x80, 0x8000, 0x80000000], BYTES = [1, 2, 4];
+
+    // ── バス ──
+    function rd8(a) { cyc += 3; return bus.read8(a & 0xffffff); }
+    function rd16(a) { cyc += 3; return a & 1 ? (bus.read8(a & 0xffffff) << 8 | bus.read8((a + 1) & 0xffffff)) : bus.read16(a & 0xffffff); }
+    function rd32(a) { cyc += 3; return a & 1 ? ((bus.read8(a & 0xffffff) << 24 | bus.read16((a + 1) & 0xffffff) << 8 | bus.read8((a + 3) & 0xffffff)) >>> 0) : ((bus.read16(a & 0xffffff) << 16 | bus.read16((a + 2) & 0xffffff)) >>> 0); }
+    function wr8(a, v) { cyc += 3; bus.write8(a & 0xffffff, v & 0xff); }
+    function wr16(a, v) { cyc += 3; if (a & 1) { bus.write8(a & 0xffffff, v >> 8 & 0xff); bus.write8((a + 1) & 0xffffff, v & 0xff); } else bus.write16(a & 0xffffff, v & 0xffff); }
+    function wr32(a, v) {
+      cyc += 3;
+      if (a & 1) { bus.write8(a & 0xffffff, v >>> 24); bus.write16((a + 1) & 0xffffff, v >>> 8 & 0xffff); bus.write8((a + 3) & 0xffffff, v & 0xff); }
+      else { bus.write16(a & 0xffffff, v >>> 16); bus.write16((a + 2) & 0xffffff, v & 0xffff); }
+    }
+    const rd = (sz, a) => (sz === 0 ? rd8(a) : sz === 1 ? rd16(a) : rd32(a));
+    const wr = (sz, a, v) => { if (sz === 0) wr8(a, v); else if (sz === 1) wr16(a, v); else wr32(a, v); };
+    function fetch16() { const v = bus.read16(pc & 0xfffffe); cyc += 2; pc = (pc + 2) >>> 0; return v; }
+    function fetch32() { const h = fetch16(); return ((h << 16) | fetch16()) >>> 0; }
+    const s8 = (v) => v << 24 >> 24, s16 = (v) => v << 16 >> 16;
+    const sext = (sz, v) => (sz === 0 ? v << 24 >> 24 : sz === 1 ? v << 16 >> 16 : v | 0);
+
+    // ── SR ──
+    function getCcr() { return fX << 4 | fN << 3 | fZ << 2 | fV << 1 | fC; }
+    function setCcr(v) { fX = v >> 4 & 1; fN = v >> 3 & 1; fZ = v >> 2 & 1; fV = v >> 1 & 1; fC = v & 1; }
+    function getSr() { return fT << 14 | fS << 13 | fM << 12 | fI << 8 | getCcr(); }
+    // 今のスタックを控えへ戻し、(s, m) のスタックを A[7] に出す
+    function setMode(s, m) {
+      if (s === fS && m === fM) return;
+      if (!fS) usp = A[7]; else if (fM) msp = A[7]; else isp = A[7];
+      fS = s; fM = m;
+      A[7] = !fS ? usp : fM ? msp : isp;
+    }
+    function setSr(v) { setMode(v >> 13 & 1, v >> 12 & 1); fT = v >> 14 & 3; fI = v >> 8 & 7; setCcr(v); }
+
+    // ── 実効アドレス ──
+    function index(base) {
+      const ext = fetch16(), r = ext >> 12 & 7;
+      let x = ext & 0x8000 ? A[r] : D[r];
+      if (!(ext & 0x800)) x = s16(x);
+      x = x << (ext >> 9 & 3);
+      cyc += 2;
+      if (!(ext & 0x100)) return (base + s8(ext) + x) >>> 0;       // 短い形式
+      // フル形式
+      if (ext & 0x80) base = 0;                                    // ベースなし
+      if (ext & 0x40) x = 0;                                       // インデックスなし
+      const bdSize = ext >> 4 & 3, iis = ext & 7;
+      const bd = bdSize === 2 ? s16(fetch16()) : bdSize === 3 ? fetch32() | 0 : 0;
+      if (iis === 0) return (base + bd + x) >>> 0;
+      const odSize = iis & 3, post = (iis & 4) && !(ext & 0x40);
+      const ptr = post ? rd32((base + bd) >>> 0) : rd32((base + bd + x) >>> 0);
+      const od = odSize === 2 ? s16(fetch16()) : odSize === 3 ? fetch32() | 0 : 0;
+      return (ptr + (post ? x : 0) + od) >>> 0;
+    }
+    function eaAddr(mode, reg, sz) {
+      switch (mode) {
+        case 2: return A[reg] >>> 0;
+        case 3: { const a = A[reg]; A[reg] = (a + (sz === 0 && reg === 7 ? 2 : BYTES[sz])) | 0; return a >>> 0; }
+        case 4: { A[reg] = (A[reg] - (sz === 0 && reg === 7 ? 2 : BYTES[sz])) | 0; return A[reg] >>> 0; }
+        case 5: return (A[reg] + s16(fetch16())) >>> 0;
+        case 6: return index(A[reg]);
+        default:
+          switch (reg) {
+            case 0: return s16(fetch16()) >>> 0;
+            case 1: return fetch32();
+            case 2: { const b = pc; return (b + s16(fetch16())) >>> 0; }
+            case 3: { const b = pc; return index(b); }
+            default: return -1;
+          }
+      }
+    }
+    function readEa(mode, reg, sz) {
+      if (mode === 0) return D[reg] & MASK[sz];
+      if (mode === 1) return (sz === 1 ? A[reg] & 0xffff : A[reg]) >>> 0;
+      if (mode === 7 && reg === 4) return sz === 2 ? fetch32() : sz === 1 ? fetch16() : fetch16() & 0xff;
+      return rd(sz, eaAddr(mode, reg, sz)) >>> 0;
+    }
+    function setD(reg, sz, v) { if (sz === 2) D[reg] = v | 0; else if (sz === 1) D[reg] = (D[reg] & 0xffff0000) | (v & 0xffff); else D[reg] = (D[reg] & 0xffffff00) | (v & 0xff); }
+    function writeEa(mode, reg, sz, v) {
+      if (mode === 0) setD(reg, sz, v);
+      else if (mode === 1) A[reg] = sz === 1 ? s16(v) : v | 0;
+      else wr(sz, eaAddr(mode, reg, sz), v);
+    }
+    let rmwAddr = 0, rmwReg = -1;
+    function rmwRead(mode, reg, sz) {
+      if (mode === 0) { rmwReg = reg; return D[reg] & MASK[sz]; }
+      rmwReg = -1; rmwAddr = eaAddr(mode, reg, sz);
+      return rd(sz, rmwAddr) >>> 0;
+    }
+    function rmwWrite(sz, v) { if (rmwReg >= 0) setD(rmwReg, sz, v); else wr(sz, rmwAddr, v); }
+
+    // ── 演算とフラグ ──
+    function flagsNZ(sz, r) { fN = (r & MSB[sz]) ? 1 : 0; fZ = (r & MASK[sz]) === 0 ? 1 : 0; }
+    function logic(sz, r) { flagsNZ(sz, r); fV = 0; fC = 0; return r; }
+    function add(sz, s, d, x) {
+      const m = MASK[sz], sm = (s & m) >>> 0, dm = (d & m) >>> 0, r = sm + dm + x, rm = sz === 2 ? r % 4294967296 : r & m;
+      fC = r > (m >>> 0) ? 1 : 0; fX = fC;
+      fV = ((sm ^ rm) & (dm ^ rm) & MSB[sz]) ? 1 : 0;
+      fN = (rm & MSB[sz]) ? 1 : 0; fZ = rm === 0 ? 1 : 0;
+      return rm >>> 0;
+    }
+    function sub(sz, s, d, x, setX) {
+      const m = MASK[sz], sm = (s & m) >>> 0, dm = (d & m) >>> 0, r = dm - sm - x, rm = (sz === 2 ? (r < 0 ? r + 4294967296 : r) : r & m) >>> 0;
+      fC = r < 0 ? 1 : 0; if (setX) fX = fC;
+      fV = ((sm ^ dm) & (rm ^ dm) & MSB[sz]) ? 1 : 0;
+      fN = (rm & MSB[sz]) ? 1 : 0; fZ = rm === 0 ? 1 : 0;
+      return rm;
+    }
+    function cond(cc) {
+      switch (cc) {
+        case 0: return true; case 1: return false;
+        case 2: return !fC && !fZ; case 3: return !!(fC || fZ);
+        case 4: return !fC; case 5: return !!fC;
+        case 6: return !fZ; case 7: return !!fZ;
+        case 8: return !fV; case 9: return !!fV;
+        case 10: return !fN; case 11: return !!fN;
+        case 12: return fN === fV; case 13: return fN !== fV;
+        case 14: return !fZ && fN === fV; default: return !!(fZ || fN !== fV);
+      }
+    }
+
+    // ── 例外(形式 0: SR、PC、形式とベクタ。形式 2: それに命令の番地)──
+    function exception(vec, retPc, instAddr) {
+      const sr = getSr();
+      setMode(1, fM);
+      fT = 0;
+      if (instAddr !== undefined) { A[7] = (A[7] - 4) | 0; wr32(A[7], instAddr); }
+      A[7] = (A[7] - 2) | 0; wr16(A[7], (instAddr !== undefined ? 0x2000 : 0) | (vec * 4));
+      A[7] = (A[7] - 4) | 0; wr32(A[7], retPc);
+      A[7] = (A[7] - 2) | 0; wr16(A[7], sr);
+      pc = rd32((vbr + vec * 4) >>> 0);
+      cyc += 8;
+    }
+    function illegal(op, at) {
+      const g = op >> 12;
+      if (g !== 0xA && g !== 0xF) { illegalCount++; lastIllegal = at; }
+      exception(g === 0xA ? 10 : g === 0xF ? 11 : 4, at);
+    }
+    function checkIrq() {
+      if (irq > fI || irq === 7) {
+        const level = irq;
+        stopped = false;
+        const vec = bus.irqAck ? bus.irqAck(level) : 24 + level;
+        const sr = getSr();
+        exception(vec, pc);
+        if (fM) {   // マスタのスタックを使っていた時: 割り込みのスタックへ移り、形式 1 のフレームをもう 1 つ積む
+          setMode(1, 0);
+          A[7] = (A[7] - 2) | 0; wr16(A[7], 0x1000 | (vec * 4));
+          A[7] = (A[7] - 4) | 0; wr32(A[7], pc);
+          A[7] = (A[7] - 2) | 0; wr16(A[7], sr | 0x2000);
+        }
+        fI = level;
+        cyc += 8;
+        return true;
+      }
+      return false;
+    }
+    function rte(at) {
+      for (;;) {
+        const sr = rd16(A[7]), p = rd32((A[7] + 2) >>> 0), fmt = rd16((A[7] + 6) >>> 0) >> 12;
+        if (fmt === 0) { A[7] = (A[7] + 8) | 0; setSr(sr); pc = p; return; }
+        if (fmt === 2) { A[7] = (A[7] + 12) | 0; setSr(sr); pc = p; return; }
+        if (fmt === 1) { A[7] = (A[7] + 8) | 0; setSr(sr); continue; }   // 形式 1: SR を戻して、次のフレームへ
+        exception(14, at); return;                                       // 形式エラー
+      }
+    }
+
+    // ── シフト・回転(kind 0 AS / 1 LS / 2 ROX / 3 RO、left)──
+    function shift(kind, left, sz, v, n) {
+      const m = MASK[sz] >>> 0, msb = MSB[sz] >>> 0;
+      v = (v & m) >>> 0;
+      fV = 0;
+      if (n === 0) { fC = kind === 2 ? fX : 0; flagsNZ(sz, v); return v; }
+      for (let i = 0; i < n; i++) {
+        if (left) {
+          const out = (v & msb) ? 1 : 0;
+          let nv = (v * 2) % 4294967296; nv = (nv & m) >>> 0;
+          if (kind === 2) nv = (nv | fX) >>> 0; else if (kind === 3) nv = (nv | out) >>> 0;
+          if (kind === 0 && ((nv & msb) !== (v & msb))) fV = 1;
+          if (kind !== 3) fX = out;
+          fC = out; v = nv;
+        } else {
+          const out = v & 1;
+          let nv = v >>> 1;
+          if (kind === 0) nv = (nv | (v & msb)) >>> 0; else if (kind === 2) nv = (nv | (fX ? msb : 0)) >>> 0; else if (kind === 3) nv = (nv | (out ? msb : 0)) >>> 0;
+          if (kind !== 3) fX = out;
+          fC = out; v = nv;
+        }
+      }
+      flagsNZ(sz, v);
+      return v;
+    }
+
+    function movem(op) {
+      const toReg = op & 0x400, sz = op & 0x40 ? 2 : 1, mode = op >> 3 & 7, reg = op & 7, list = fetch16(), step = BYTES[sz];
+      if (!toReg) {
+        if (mode === 4) {   // -(An): 並びが逆(A7 … D0)。An 自身を積む時は、引いた後の値(68020)
+          let a = A[reg] >>> 0;
+          const self = (a - step) | 0;
+          for (let i = 0; i < 16; i++) if (list >> i & 1) { a = (a - step) >>> 0; const v = i < 8 ? (7 - i === reg ? self : A[7 - i]) : D[15 - i]; wr(sz, a, v); }
+          A[reg] = a | 0;
+        } else {
+          let a = eaAddr(mode, reg, sz);
+          for (let i = 0; i < 16; i++) if (list >> i & 1) { wr(sz, a, i < 8 ? D[i] : A[i - 8]); a = (a + step) >>> 0; }
+        }
+      } else {
+        let a = mode === 3 ? A[reg] >>> 0 : eaAddr(mode, reg, sz);
+        for (let i = 0; i < 16; i++) if (list >> i & 1) { const v = sz === 1 ? s16(rd16(a)) : rd32(a) | 0; if (i < 8) D[i] = v; else A[i - 8] = v; a = (a + step) >>> 0; }
+        if (mode === 3) A[reg] = a | 0;
+      }
+      cyc += 4;
+    }
+
+    function bcd(sub2, s, d) {
+      let r;
+      if (!sub2) {
+        let lo = (s & 15) + (d & 15) + fX, hi = (s >> 4 & 15) + (d >> 4 & 15);
+        if (lo > 9) { lo -= 10; hi++; }
+        fC = 0; if (hi > 9) { hi -= 10; fC = 1; }
+        r = (hi << 4 | lo) & 0xff;
+      } else {
+        let lo = (d & 15) - (s & 15) - fX, hi = (d >> 4 & 15) - (s >> 4 & 15);
+        if (lo < 0) { lo += 10; hi--; }
+        fC = 0; if (hi < 0) { hi += 10; fC = 1; }
+        r = (hi << 4 | lo) & 0xff;
+      }
+      fX = fC; if (r) fZ = 0; fN = r >> 7 & 1;
+      return r;
+    }
+
+    // ── 68020: MULL / DIVL(64bit は BigInt)──
+    function mull(at, mode, reg) {
+      const ext = fetch16(), dl = ext >> 12 & 7, dh = ext & 7, signed = ext & 0x800, wide = ext & 0x400;
+      const s = readEa(mode, reg, 2);
+      const p = signed ? BigInt(s | 0) * BigInt(D[dl]) : BigInt(s >>> 0) * BigInt(D[dl] >>> 0);
+      const lo = Number(BigInt.asUintN(32, p));
+      fC = 0;
+      if (wide) {
+        const hi = Number(BigInt.asUintN(32, p >> 32n));
+        D[dh] = hi | 0; D[dl] = lo | 0;
+        fN = hi >>> 31; fZ = (hi === 0 && lo === 0) ? 1 : 0; fV = 0;
+      } else {
+        D[dl] = lo | 0;
+        fN = lo >>> 31; fZ = lo === 0 ? 1 : 0;
+        fV = (signed ? p !== BigInt(lo | 0) : p !== BigInt(lo)) ? 1 : 0;
+      }
+      cyc += 40;
+    }
+    function divl(at, mode, reg) {
+      const ext = fetch16(), dq = ext >> 12 & 7, dr = ext & 7, signed = ext & 0x800, wide = ext & 0x400;
+      const s = readEa(mode, reg, 2);
+      if (s === 0) { exception(5, pc, at); return; }
+      let n, d;
+      if (signed) { d = BigInt(s | 0); n = wide ? BigInt.asIntN(64, (BigInt(D[dr] >>> 0) << 32n) | BigInt(D[dq] >>> 0)) : BigInt(D[dq]); }
+      else { d = BigInt(s >>> 0); n = wide ? (BigInt(D[dr] >>> 0) << 32n) | BigInt(D[dq] >>> 0) : BigInt(D[dq] >>> 0); }
+      const q = n / d, r = n % d;
+      fC = 0;
+      if (signed ? (q > 2147483647n || q < -2147483648n) : q > 4294967295n) { fV = 1; cyc += 80; return; }
+      const qn = Number(BigInt.asUintN(32, q)), rn = Number(BigInt.asUintN(32, r));
+      if (dr !== dq) D[dr] = rn | 0;
+      D[dq] = qn | 0;
+      fV = 0; fN = qn >>> 31; fZ = qn === 0 ? 1 : 0;
+      cyc += 80;
+    }
+
+    // ── 68020: ビットフィールド(kind 0 TST / 1 EXTU / 2 CHG / 3 EXTS / 4 CLR / 5 FFO / 6 SET / 7 INS)──
+    function bitfield(op, at, mode, reg) {
+      const kind = op >> 8 & 7, ext = fetch16(), dn = ext >> 12 & 7;
+      let offset = ext & 0x800 ? D[ext >> 6 & 7] : ext >> 6 & 31;
+      let width = ext & 0x20 ? D[ext & 7] & 31 : ext & 31;
+      if (width === 0) width = 32;
+      let field, old, a = 0, bo = 0;
+      const wm = width === 32 ? 4294967296 : Math.pow(2, width);
+      if (mode === 0) {
+        offset &= 31;
+        old = D[reg] >>> 0;
+        const rot = offset === 0 ? old : ((old << offset) | (old >>> (32 - offset))) >>> 0;   // フィールドを上位へ寄せる
+        field = width === 32 ? rot : rot >>> (32 - width);
+      } else {
+        a = eaAddr(mode, reg, 0);
+        a = (a + (offset >> 3)) >>> 0; bo = offset & 7;      // offset は符号つき。>> は床関数になる
+        const nb = (bo + width + 7) >> 3;
+        old = 0; for (let i = 0; i < 5; i++) old = old * 256 + (i < nb ? rd8((a + i) >>> 0) : 0);   // 40bit(上位詰め)
+        field = Math.floor(old / Math.pow(2, 40 - bo - width)) % wm;
+      }
+      fN = Math.floor(field / (wm / 2)) & 1; fZ = field === 0 ? 1 : 0; fV = 0; fC = 0;
+      let nv = -1;
+      switch (kind) {
+        case 0: break;
+        case 1: D[dn] = field | 0; break;
+        case 3: D[dn] = width === 32 ? field | 0 : (field << (32 - width)) >> (32 - width); break;
+        case 5: { let k = 0; while (k < width && !(Math.floor(field / Math.pow(2, width - 1 - k)) & 1)) k++; D[dn] = (offset + k) | 0; break; }
+        case 2: nv = wm - 1 - field; break;
+        case 4: nv = 0; break;
+        case 6: nv = wm - 1; break;
+        default: {
+          nv = width === 32 ? D[dn] >>> 0 : (D[dn] >>> 0) % wm;
+          fN = Math.floor(nv / (wm / 2)) & 1; fZ = nv === 0 ? 1 : 0;
+        }
+      }
+      if (nv < 0) return;
+      if (mode === 0) {
+        const up = width === 32 ? nv : (nv << (32 - width)) >>> 0, maskUp = width === 32 ? 0xffffffff : ((wm - 1) << (32 - width)) >>> 0;
+        const rot = offset === 0 ? old : ((old << offset) | (old >>> (32 - offset))) >>> 0;
+        const r2 = ((rot & ~maskUp) | up) >>> 0;
+        D[reg] = (offset === 0 ? r2 : ((r2 >>> offset) | (r2 << (32 - offset)))) | 0;
+      } else {
+        const sh = Math.pow(2, 40 - bo - width), nb = (bo + width + 7) >> 3;
+        const res = old + (nv - field) * sh;
+        for (let i = 0; i < nb; i++) wr8((a + i) >>> 0, Math.floor(res / Math.pow(2, 32 - i * 8)) & 0xff);
+      }
+    }
+
+    // ── 68020: MOVEC ──
+    function movec(at, toCtl) {
+      if (!fS) return exception(8, at);
+      const ext = fetch16(), r = ext >> 12 & 7, isA = ext & 0x8000, id = ext & 0xfff;
+      if (toCtl) {
+        const v = isA ? A[r] : D[r];
+        switch (id) {
+          case 0x000: sfc = v & 7; break; case 0x001: dfc = v & 7; break; case 0x002: cacr = v & 3; break;
+          case 0x800: usp = v; break; case 0x801: vbr = v >>> 0; break; case 0x802: caar = v; break;
+          case 0x803: if (fM) A[7] = v; else msp = v; break;
+          case 0x804: if (!fM) A[7] = v; else isp = v; break;
+          default: return illegal(0x4E7B, at);
+        }
+      } else {
+        let v;
+        switch (id) {
+          case 0x000: v = sfc; break; case 0x001: v = dfc; break; case 0x002: v = cacr; break;
+          case 0x800: v = usp; break; case 0x801: v = vbr; break; case 0x802: v = caar; break;
+          case 0x803: v = fM ? A[7] : msp; break;
+          case 0x804: v = !fM ? A[7] : isp; break;
+          default: return illegal(0x4E7A, at);
+        }
+        if (isA) A[r] = v | 0; else D[r] = v | 0;
+      }
+      cyc += 8;
+    }
+
+    function step() {
+      const at = pc, op = fetch16();
+      const mode = op >> 3 & 7, reg = op & 7, rx = op >> 9 & 7;
+      switch (op >> 12) {
+        case 0x0: {
+          if (op & 0x100) {
+            if (mode === 1) {   // MOVEP
+              const dir = op >> 6 & 3; const a = (A[reg] + s16(fetch16())) >>> 0;
+              if (dir === 0) setD(rx, 1, rd8(a) << 8 | rd8(a + 2));
+              else if (dir === 1) D[rx] = (rd8(a) << 24 | rd8(a + 2) << 16 | rd8(a + 4) << 8 | rd8(a + 6)) | 0;
+              else if (dir === 2) { wr8(a, D[rx] >> 8); wr8(a + 2, D[rx]); }
+              else { wr8(a, D[rx] >>> 24); wr8(a + 2, D[rx] >> 16); wr8(a + 4, D[rx] >> 8); wr8(a + 6, D[rx]); }
+              return;
+            }
+            return bitOp(op, D[rx], mode, reg);
+          }
+          const kind = op >> 9 & 7, sz = op >> 6 & 3;
+          if (kind === 4) return bitOp(op, fetch16(), mode, reg);
+          if (sz === 3) {
+            if (kind < 3) {   // CMP2 / CHK2
+              const ext = fetch16(), r = ext >> 12 & 7, a = eaAddr(mode, reg, kind);
+              const lo = sext(kind, rd(kind, a)), hi = sext(kind, rd(kind, (a + BYTES[kind]) >>> 0));
+              const v = ext & 0x8000 ? A[r] : sext(kind, D[r]);
+              fZ = (v === lo || v === hi) ? 1 : 0;
+              // 境界は符号つき / 符号なしのどちらでも通るように、lo <= hi なら符号つき、逆なら符号なしで見る
+              const out = lo <= hi ? (v < lo || v > hi) : ((v >>> 0) < (lo >>> 0) || (v >>> 0) > (hi >>> 0));
+              fC = out ? 1 : 0;
+              if (out && (ext & 0x800)) exception(6, pc, at);
+              return;
+            }
+            if (kind >= 5) {   // CAS / CAS2
+              const csz = kind - 5;
+              if (mode === 7 && reg === 4) {
+                const e1 = fetch16(), e2 = fetch16();
+                const a1 = (e1 & 0x8000 ? A[e1 >> 12 & 7] : D[e1 >> 12 & 7]) >>> 0, a2 = (e2 & 0x8000 ? A[e2 >> 12 & 7] : D[e2 >> 12 & 7]) >>> 0;
+                const v1 = rd(csz, a1), v2 = rd(csz, a2);
+                sub(csz, D[e1 & 7], v1, 0, false);
+                if (fZ) sub(csz, D[e2 & 7], v2, 0, false);
+                if (fZ) { wr(csz, a1, D[e1 >> 6 & 7]); wr(csz, a2, D[e2 >> 6 & 7]); }
+                else { setD(e1 & 7, csz, v1); setD(e2 & 7, csz, v2); }
+                return;
+              }
+              const ext = fetch16(), a = eaAddr(mode, reg, csz), v = rd(csz, a);
+              sub(csz, D[ext & 7], v, 0, false);
+              if (fZ) wr(csz, a, D[ext >> 6 & 7]); else setD(ext & 7, csz, v);
+              return;
+            }
+            return illegal(op, at);   // CALLM / RTM
+          }
+          if (kind === 7) {   // MOVES
+            if (!fS) return exception(8, at);
+            const ext = fetch16(), r = ext >> 12 & 7, a = eaAddr(mode, reg, sz);
+            if (ext & 0x800) wr(sz, a, ext & 0x8000 ? A[r] : D[r]);
+            else { const v = rd(sz, a); if (ext & 0x8000) A[r] = sext(sz, v); else setD(r, sz, v); }
+            return;
+          }
+          if (mode === 7 && reg === 4) {   // CCR / SR への演算
+            const v = fetch16();
+            if (sz === 1 && !fS) return exception(8, at);
+            const cur = sz === 0 ? getCcr() : getSr();
+            const r = kind === 0 ? cur | v : kind === 1 ? cur & v : kind === 5 ? cur ^ v : -1;
+            if (r < 0) return illegal(op, at);
+            if (sz === 0) setCcr(r); else setSr(r);
+            cyc += 6; return;
+          }
+          const imm = sz === 2 ? fetch32() : sz === 1 ? fetch16() : fetch16() & 0xff;
+          if (kind === 6) { const d = readEa(mode, reg, sz); sub(sz, imm, d, 0, false); return; }   // CMPI
+          const d = rmwRead(mode, reg, sz);
+          let r;
+          switch (kind) {
+            case 0: r = logic(sz, d | imm); break;
+            case 1: r = logic(sz, d & imm); break;
+            case 2: r = sub(sz, imm, d, 0, true); break;
+            case 3: r = add(sz, imm, d, 0); break;
+            case 5: r = logic(sz, d ^ imm); break;
+            default: return illegal(op, at);
+          }
+          rmwWrite(sz, r);
+          return;
+        }
+        case 0x1: case 0x2: case 0x3: {   // MOVE / MOVEA
+          const sz = (op >> 12) === 1 ? 0 : (op >> 12) === 3 ? 1 : 2;
+          const v = readEa(mode, reg, sz), dm = op >> 6 & 7;
+          if (dm === 1) { A[rx] = sz === 1 ? s16(v) : v | 0; return; }
+          logic(sz, v);
+          writeEa(dm, rx, sz, v);
+          return;
+        }
+        case 0x4: return group4(op, at, mode, reg, rx);
+        case 0x5: {
+          const sz = op >> 6 & 3;
+          if (sz === 3) {
+            const cc = op >> 8 & 15;
+            if (mode === 1) {   // DBcc
+              const base = pc, disp = s16(fetch16());
+              if (!cond(cc)) {
+                const c = ((D[reg] & 0xffff) - 1) & 0xffff; setD(reg, 1, c);
+                if (c !== 0xffff) pc = (base + disp) >>> 0;
+              }
+              cyc += 4;
+              return;
+            }
+            if (mode === 7 && reg >= 2) {   // TRAPcc
+              if (reg === 2) fetch16(); else if (reg === 3) fetch32(); else if (reg !== 4) return illegal(op, at);
+              if (cond(cc)) exception(7, pc, at);
+              return;
+            }
+            const t = cond(cc);   // Scc
+            if (mode === 0) setD(reg, 0, t ? 0xff : 0); else wr8(eaAddr(mode, reg, 0), t ? 0xff : 0);
+            return;
+          }
+          const q = rx || 8;   // ADDQ / SUBQ
+          if (mode === 1) { A[reg] = (op & 0x100 ? A[reg] - q : A[reg] + q) | 0; return; }
+          const d = rmwRead(mode, reg, sz);
+          rmwWrite(sz, op & 0x100 ? sub(sz, q, d, 0, true) : add(sz, q, d, 0));
+          return;
+        }
+        case 0x6: {   // Bcc / BRA / BSR
+          const cc = op >> 8 & 15, base = pc;
+          let disp = s8(op);
+          if (disp === 0) disp = s16(fetch16()); else if (disp === -1) disp = fetch32() | 0;
+          if (cc === 1) { A[7] = (A[7] - 4) | 0; wr32(A[7], pc); pc = (base + disp) >>> 0; cyc += 2; return; }
+          if (cond(cc)) { pc = (base + disp) >>> 0; cyc += 4; } else cyc += 2;
+          return;
+        }
+        case 0x7: if (op & 0x100) return illegal(op, at); D[rx] = s8(op); logic(2, D[rx]); return;   // MOVEQ
+        case 0x8: case 0xC: {
+          const isAnd = (op >> 12) === 0xC, opm = op >> 6 & 7;
+          if (opm === 3 || opm === 7) {   // DIVU / DIVS / MULU / MULS(語)
+            const s = readEa(mode, reg, 1);
+            if (isAnd) {
+              const r = opm === 3 ? (D[rx] & 0xffff) * s : Math.imul(s16(D[rx]), s16(s));
+              D[rx] = r | 0; logic(2, D[rx]); cyc += 25; return;
+            }
+            if (s === 0) { exception(5, pc, at); return; }
+            if (opm === 3) {
+              const n = D[rx] >>> 0, q = Math.floor(n / s), r = n % s;
+              if (q > 0xffff) { fV = 1; fN = 1; fC = 0; } else { D[rx] = (r << 16 | q) | 0; logic(1, q); }
+              cyc += 42;
+            } else {
+              const n = D[rx], dv = s16(s), q = Math.trunc(n / dv), r = n - q * dv;
+              if (q > 32767 || q < -32768) { fV = 1; fN = 1; fC = 0; } else { D[rx] = ((r & 0xffff) << 16 | (q & 0xffff)) | 0; logic(1, q); }
+              cyc += 54;
+            }
+            return;
+          }
+          if ((op & 0x1f0) === 0x100) {   // SBCD / ABCD
+            let s, d;
+            if (mode === 1) { s = rd8(eaAddr(4, reg, 0)); const a = eaAddr(4, rx, 0); d = rd8(a); wr8(a, bcd(!isAnd, s, d)); }
+            else { s = D[reg] & 0xff; d = D[rx] & 0xff; setD(rx, 0, bcd(!isAnd, s, d)); }
+            return;
+          }
+          if (!isAnd && mode < 2 && (opm === 5 || opm === 6)) {   // PACK / UNPK
+            const adj = fetch16();
+            if (opm === 5) {
+              let s; if (mode === 1) { const lo = rd8(eaAddr(4, reg, 0)), hi = rd8(eaAddr(4, reg, 0)); s = hi << 8 | lo; } else s = D[reg] & 0xffff;
+              s = (s + adj) & 0xffff; const r = (s >> 4 & 0xf0) | (s & 0x0f);
+              if (mode === 1) wr8(eaAddr(4, rx, 0), r); else setD(rx, 0, r);
+            } else {
+              const s = mode === 1 ? rd8(eaAddr(4, reg, 0)) : D[reg] & 0xff;
+              const r = (((s << 4 & 0x0f00) | (s & 0x0f)) + adj) & 0xffff;
+              if (mode === 1) { wr8(eaAddr(4, rx, 0), r); wr8(eaAddr(4, rx, 0), r >> 8); } else setD(rx, 1, r);
+            }
+            return;
+          }
+          if (isAnd && (op & 0x130) === 0x100 && (opm === 5 || opm === 6)) {   // EXG
+            const m5 = op >> 3 & 0x1f;
+            if (m5 === 0x08) { const t = D[rx]; D[rx] = D[reg]; D[reg] = t; }
+            else if (m5 === 0x09) { const t = A[rx]; A[rx] = A[reg]; A[reg] = t; }
+            else if (m5 === 0x11) { const t = D[rx]; D[rx] = A[reg]; A[reg] = t; }
+            else return illegal(op, at);
+            return;
+          }
+          const sz = opm & 3;
+          if (opm & 4) { const d = rmwRead(mode, reg, sz); rmwWrite(sz, logic(sz, isAnd ? d & D[rx] : d | D[rx])); }
+          else { const s = readEa(mode, reg, sz); setD(rx, sz, logic(sz, isAnd ? (D[rx] & s) : (D[rx] | s))); }
+          return;
+        }
+        case 0x9: case 0xD: {   // SUB / ADD
+          const isAdd = (op >> 12) === 0xD, opm = op >> 6 & 7;
+          if (opm === 3 || opm === 7) {   // ADDA / SUBA
+            const sz = opm === 3 ? 1 : 2, s = sext(sz, readEa(mode, reg, sz));
+            A[rx] = (isAdd ? A[rx] + s : A[rx] - s) | 0; return;
+          }
+          const sz = opm & 3;
+          if ((opm & 4) && mode < 2) {   // ADDX / SUBX
+            const z = fZ;
+            if (mode === 1) { const s = rd(sz, eaAddr(4, reg, sz)), a = eaAddr(4, rx, sz), d = rd(sz, a); wr(sz, a, isAdd ? add(sz, s, d, fX) : sub(sz, s, d, fX, true)); }
+            else { const r = isAdd ? add(sz, D[reg], D[rx], fX) : sub(sz, D[reg], D[rx], fX, true); setD(rx, sz, r); }
+            if (fZ) fZ = z;
+            return;
+          }
+          if (opm & 4) { const d = rmwRead(mode, reg, sz); rmwWrite(sz, isAdd ? add(sz, D[rx], d, 0) : sub(sz, D[rx], d, 0, true)); }
+          else { const s = readEa(mode, reg, sz); setD(rx, sz, isAdd ? add(sz, s, D[rx], 0) : sub(sz, s, D[rx], 0, true)); }
+          return;
+        }
+        case 0xB: {   // CMP / CMPA / EOR / CMPM
+          const opm = op >> 6 & 7;
+          if (opm === 3 || opm === 7) { const sz = opm === 3 ? 1 : 2, s = sext(sz, readEa(mode, reg, sz)); sub(2, s, A[rx], 0, false); return; }
+          const sz = opm & 3;
+          if (!(opm & 4)) { const s = readEa(mode, reg, sz); sub(sz, s, D[rx], 0, false); return; }
+          if (mode === 1) { const s = rd(sz, eaAddr(3, reg, sz)), d = rd(sz, eaAddr(3, rx, sz)); sub(sz, s, d, 0, false); return; }
+          { const d = rmwRead(mode, reg, sz); rmwWrite(sz, logic(sz, d ^ D[rx])); }
+          return;
+        }
+        case 0xE: {
+          const sz = op >> 6 & 3, left = op >> 8 & 1;
+          if (sz === 3) {
+            if (op & 0x800) return bitfield(op, at, mode, reg);
+            const kind = op >> 9 & 3, a = eaAddr(mode, reg, 1);   // メモリを 1 ビット
+            wr16(a, shift(kind, left, 1, rd16(a), 1)); return;
+          }
+          const kind = op >> 3 & 3, n = op & 0x20 ? D[rx] & 63 : (rx || 8);
+          setD(reg, sz, shift(kind, left, sz, D[reg], n));
+          cyc += 4;
+          return;
+        }
+        default: return illegal(op, at);
+      }
+    }
+
+    function bitOp(op, bitNo, mode, reg) {
+      const kind = op >> 6 & 3;
+      if (mode === 0) {
+        const b = 1 << (bitNo & 31);
+        fZ = (D[reg] & b) ? 0 : 1;
+        if (kind === 1) D[reg] ^= b; else if (kind === 2) D[reg] &= ~b; else if (kind === 3) D[reg] |= b;
+        return;
+      }
+      const b = 1 << (bitNo & 7);
+      if (kind === 0) { fZ = (readEa(mode, reg, 0) & b) ? 0 : 1; return; }
+      const a = eaAddr(mode, reg, 0), v = rd8(a);
+      fZ = (v & b) ? 0 : 1;
+      wr8(a, kind === 1 ? v ^ b : kind === 2 ? v & ~b : v | b);
+    }
+
+    function group4(op, at, mode, reg, rx) {
+      if (op & 0x100) {
+        if ((op & 0x1c0) === 0x1c0) {
+          if (mode === 0) { D[reg] = s8(D[reg]); logic(2, D[reg]); return; }   // EXTB.L
+          A[rx] = eaAddr(mode, reg, 2) | 0; return;                            // LEA
+        }
+        if ((op & 0x1c0) === 0x180 || (op & 0x1c0) === 0x100) {   // CHK(語 / ロング)
+          const long = (op & 0x1c0) === 0x100;
+          const b = long ? readEa(mode, reg, 2) | 0 : s16(readEa(mode, reg, 1)), v = long ? D[rx] : s16(D[rx]);
+          if (v < 0) { fN = 1; exception(6, pc, at); } else if (v > b) { fN = 0; exception(6, pc, at); }
+          cyc += 4; return;
+        }
+        return illegal(op, at);
+      }
+      const sz = op >> 6 & 3;
+      switch (op >> 8 & 15) {
+        case 0x0:
+          if (sz === 3) { if (!fS) return exception(8, at); writeEa(mode, reg, 1, getSr()); return; }   // MOVE SR, ea(特権)
+          { const d = rmwRead(mode, reg, sz), z = fZ, r = sub(sz, d, 0, fX, true); if (r === 0) fZ = z; rmwWrite(sz, r); }   // NEGX
+          return;
+        case 0x2:
+          if (sz === 3) { writeEa(mode, reg, 1, getCcr()); return; }   // MOVE CCR, ea
+          if (mode === 0) setD(reg, sz, 0); else wr(sz, eaAddr(mode, reg, sz), 0);   // CLR(68020 は読まない)
+          fN = 0; fZ = 1; fV = 0; fC = 0; return;
+        case 0x4:
+          if (sz === 3) { setCcr(readEa(mode, reg, 1)); cyc += 4; return; }     // MOVE ea, CCR
+          { const d = rmwRead(mode, reg, sz); rmwWrite(sz, sub(sz, d, 0, 0, true)); }   // NEG
+          return;
+        case 0x6:
+          if (sz === 3) { if (!fS) return exception(8, at); setSr(readEa(mode, reg, 1)); cyc += 6; return; }   // MOVE ea, SR
+          { const d = rmwRead(mode, reg, sz); rmwWrite(sz, logic(sz, ~d & MASK[sz])); }   // NOT
+          return;
+        case 0x8:
+          if (sz === 0) {
+            if (mode === 1) { A[7] = (A[7] - 4) | 0; wr32(A[7], A[reg]); A[reg] = A[7]; A[7] = (A[7] + (fetch32() | 0)) | 0; return; }   // LINK.L
+            const d = rmwRead(mode, reg, 0), z = fZ; fZ = 1; const r = bcd(true, d, 0); if (r === 0) fZ = z; rmwWrite(0, r); return;   // NBCD
+          }
+          if (sz === 1) {
+            if (mode === 0) { D[reg] = (D[reg] << 16) | (D[reg] >>> 16); logic(2, D[reg]); return; }   // SWAP
+            if (mode === 1) return illegal(op, at);   // BKPT
+            const a = eaAddr(mode, reg, 2); A[7] = (A[7] - 4) | 0; wr32(A[7], a); return;   // PEA
+          }
+          if (mode === 0) { if (sz === 2) { setD(reg, 1, s8(D[reg])); logic(1, D[reg]); } else { D[reg] = s16(D[reg]); logic(2, D[reg]); } return; }   // EXT
+          return movem(op);
+        case 0xA:
+          if (sz === 3) {
+            if (mode === 7 && reg === 4) return illegal(op, at);
+            if (mode === 0) { logic(0, D[reg]); D[reg] |= 0x80; return; }   // TAS
+            const a = eaAddr(mode, reg, 0), v = rd8(a); logic(0, v); wr8(a, v | 0x80); return;
+          }
+          logic(sz, readEa(mode, reg, sz)); return;   // TST
+        case 0xC:
+          if (sz === 0) return mull(at, mode, reg);
+          if (sz === 1) return divl(at, mode, reg);
+          return movem(op);
+        case 0xE:
+          if (sz === 1) {
+            if (mode < 2) { exception(32 + (op & 15), pc); return; }   // TRAP
+            if (mode === 2) { A[7] = (A[7] - 4) | 0; wr32(A[7], A[reg]); A[reg] = A[7]; A[7] = (A[7] + s16(fetch16())) | 0; return; }   // LINK
+            if (mode === 3) { A[7] = A[reg]; A[reg] = rd32(A[7]) | 0; A[7] = (A[7] + 4) | 0; return; }   // UNLK
+            if (mode === 4) { if (!fS) return exception(8, at); usp = A[reg]; return; }   // MOVE An, USP
+            if (mode === 5) { if (!fS) return exception(8, at); A[reg] = usp; return; }   // MOVE USP, An
+            switch (op & 0x3f) {
+              case 0x30: if (!fS) return exception(8, at); cyc += 500; if (bus.reset) bus.reset(); return;   // RESET
+              case 0x31: return;   // NOP
+              case 0x32: if (!fS) return exception(8, at); setSr(fetch16()); stopped = true; return;   // STOP
+              case 0x33: if (!fS) return exception(8, at); rte(at); cyc += 10; return;   // RTE
+              case 0x34: { const p = rd32(A[7]); A[7] = (A[7] + 4 + s16(fetch16())) | 0; pc = p; cyc += 4; return; }   // RTD
+              case 0x35: pc = rd32(A[7]); A[7] = (A[7] + 4) | 0; cyc += 4; return;   // RTS
+              case 0x36: if (fV) exception(7, pc, at); return;   // TRAPV
+              case 0x37: { setCcr(rd16(A[7])); A[7] = (A[7] + 2) | 0; pc = rd32(A[7]); A[7] = (A[7] + 4) | 0; cyc += 4; return; }   // RTR
+              case 0x3a: return movec(at, false);
+              case 0x3b: return movec(at, true);
+              default: return illegal(op, at);
+            }
+          }
+          if (sz === 2) { const a = eaAddr(mode, reg, 2); A[7] = (A[7] - 4) | 0; wr32(A[7], pc); pc = a; cyc += 2; return; }   // JSR
+          if (sz === 3) { pc = eaAddr(mode, reg, 2); cyc += 2; return; }   // JMP
+          return illegal(op, at);
+        default: return illegal(op, at);
+      }
+    }
+
+    function reset() {
+      D.fill(0); A.fill(0); usp = 0; msp = 0; isp = 0; vbr = 0; cacr = 0; caar = 0; sfc = 0; dfc = 0;
+      fT = 0; fS = 1; fM = 0; fI = 7; setCcr(0); stopped = false; irq = 0;
+      A[7] = rd32(0) | 0; pc = rd32(4);
+    }
+    function run(until) {
+      while (cyc < until) {
+        if (irq && checkIrq()) continue;
+        if (stopped) { cyc = until; break; }
+        step();
+      }
+    }
+    function getState() { return { D: D.slice(), A: A.slice(), n: [pc, cyc, irq, stopped ? 1 : 0, getSr(), usp, isp, msp, vbr, cacr, caar, sfc, dfc] }; }
+    function setState(s) {
+      D.set(s.D); A.set(s.A); let st, sr;
+      [pc, cyc, irq, st, sr, usp, isp, msp, vbr, cacr, caar, sfc, dfc] = s.n;
+      stopped = !!st; fS = sr >> 13 & 1; fM = sr >> 12 & 1; fT = sr >> 14 & 3; fI = sr >> 8 & 7; setCcr(sr);
+    }
+    return { reset, run, step, setIrq(level) { irq = level & 7; }, getState, setState,
+      get pc() { return pc; }, get cycles() { return cyc; }, set cycles(v) { cyc = v; }, get sr() { return getSr(); }, get d() { return D; }, get a() { return A; },
+      get illegalCount() { return illegalCount; }, get lastIllegal() { return lastIllegal; }, get stopped() { return stopped; } };
+  };
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+/*
  * MML.Emu.createEnsoniqBoard({ program, wave, … })
  *
  * タイトーの Ensoniq 音源基板(F3 システム、Super Chase、JC システムほか): 68000+ES5505+ES5510+MC68681+共有 RAM。
@@ -26540,6 +27522,7 @@
         startCt(Math.max(du.ctr, 1), at);
       } else { du.isr |= 0x08; startCt(0xffff, at); }
     }
+    function espHalt() { const h = (du.opr ^ 0xff) & 0x40 ? 1 : 0; if (chip.esp) chip.esp.halted = !!h; push('O', h); }
     function duRead(reg, now) { const r = duRead1(reg, now); if (opt.traceDuart) push('u', reg, r); return r; }
     function duRead1(reg, now) {
       switch (reg) {
@@ -26580,8 +27563,8 @@
         case 0x07: du.ctr = (du.ctr & 0xff00) | v; break;
         case 0x0c: du.ivr = v; break;
         case 0x0d: du.opcr = v; break;
-        case 0x0e: du.opr |= v; push('O', (du.opr ^ 0xff) & 0x40 ? 1 : 0); break;      // 出力ポート(端子は反転)。OP6 = ESPHALT
-        case 0x0f: du.opr &= ~v; push('O', (du.opr ^ 0xff) & 0x40 ? 1 : 0); break;
+        case 0x0e: du.opr |= v; espHalt(); break;      // 出力ポート(端子は反転)。OP6 = ESPHALT
+        case 0x0f: du.opr &= ~v; espHalt(); break;
         default: break;
       }
       duIrq(now);
@@ -26595,6 +27578,7 @@
     }
     function espWriteReg(r, v) { v &= 0xffffff; if (r < 0xc0) esp.gpr[r] = v; else if (r === 250 || r === 251) esp.reg[r] = v >> 16; else esp.reg[r] = v; }
     function espRead(off) {
+      if (chip.esp) return chip.esp.hostR(off);
       switch (off) {
         case 0x00: return esp.gprLatch >> 16 & 0xff; case 0x01: return esp.gprLatch >> 8 & 0xff; case 0x02: return esp.gprLatch & 0xff;
         case 0x03: return esp.instrHi >> 8 & 0xff; case 0x04: return esp.instrHi & 0xff;
@@ -26607,6 +27591,7 @@
       }
     }
     function espWrite(off, d) {
+      if (chip.esp) { chip.esp.hostW(off, d); push('D', off, d); return; }
       switch (off) {
         case 0x00: esp.gprLatch = (esp.gprLatch & 0x00ffff) | d << 16; break;
         case 0x01: esp.gprLatch = (esp.gprLatch & 0xff00ff) | d << 8; break;
@@ -26683,9 +27668,17 @@
     ram.set(program.subarray(0, 8), 0);          // スタックと開始番地
     cpu.reset();
     cpu.cycles = 0;
+    // サウンド CPU のリセット線(メイン CPU が握る。F3 のメイン基板は、起動時に押さえたまま → 0xC80000 への書き込みで放す)
+    let held = !!opt.startHeld;
+    function setReset(hold) {
+      hold = !!hold;
+      if (held && !hold) { const c = cpu.cycles; cpu.reset(); cpu.cycles = c; }
+      held = hold;
+    }
 
     // CPU を通しのクロック数 until まで進める。途中のタイマと送信完了の時刻で区切る
     function runTo(until) {
+      if (held) { if (cpu.cycles < until) cpu.cycles = until; return; }
       for (;;) {
         const now = cpu.cycles, ev = duNextEvent(now);
         if (ev > until) { cpu.run(until); break; }
@@ -26706,10 +27699,540 @@
       }
     }
     function takeEvents() { const e = events; events = []; return e; }
-    return { run, runTo, takeEvents, cpu, chip, ram, dpram, du, esp, stats,
+    return { run, runTo, takeEvents, setReset, get held() { return held; }, cpu, chip, ram, dpram, du, esp, stats,
       get time() { return samples * CYCLES_PER_SAMPLE / CPU_HZ; }, get samples() { return samples; } };
   };
   Emu.ENSONIQ_BOARD = { CPU_HZ, CYCLES_PER_SAMPLE };
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+/*
+ * MML.Emu.createF3Main(opt) — タイトー F3 システムのメイン基板(68EC020+入出力+EEPROM+画面用の RAM)。音源基板(ensoniqBoard.js)をつないで一緒に進める。
+ *
+ * ゲームの本物のテストモード画面(サウンドテスト)を出すための物。配置と割り込みは MAME taito/taito_f3.cpp(Copyright Bryan McPhail。BSD-3-Clause)から。
+ *   0x000000 プログラム ROM(2MB)/ 0x400000 RAM(128KB。0x420000 に鏡像)/ 0x440000 パレット(32KB)
+ *   0x4A0000 入出力(入力 6 本、EEPROM、コインカウンタ)/ 0x4C0000 タイマの設定(何もしない)
+ *   0x600000 スプライト / 0x610000 背景 4 面 / 0x61C000 文字の面 / 0x61E000 文字の絵(RAM)/ 0x620000 ライン RAM / 0x630000 ピクセルの面
+ *   0x660000 画面の制御レジスタ / 0xC00000 音源基板との共有 RAM(バイト番地そのまま)/ 0xC80000 サウンド CPU のリセットを放す / 0xC80100 押さえる
+ * 割り込み: 垂直帰線の頭でレベル 2、その 10000 クロック後にレベル 3(どちらも受け付けで下がる)。
+ * ウォッチドッグ: 0x4A0000 への書き込みが 3 秒途絶えるとメイン基板ごとリセット(MAME の既定値)。ゲームは EEPROM を作り直した後、わざと止まってこれを待つ。
+ * 画面: 6.6715MHz ÷ 432 ÷ 262 = 58.94Hz。垂直帰線は 256 本目から。
+ *
+ * opt: { program(Uint8Array 2MB、並べ替え済み), sound(Emu.createEnsoniqBoard の戻り値。startHeld: true で作る), eeprom(Uint16Array 64。省略時は 0xFFFF) , onDpram(番地, 値, 秒) }
+ * 口: runSample()(音源の 1 サンプルぶん: メイン CPU と音源基板を進め、音源を 1 回刻む)/ frame(今のフレーム番号)/ setInputs({ in0, in1, system })
+ *     ram / pal / vram(0x600000〜0x63FFFF)/ ctrl(0x660000〜)/ eeprom / cpu
+ */
+(function (root) {
+  'use strict';
+  const MML = root.MML = root.MML || {}, Emu = MML.Emu = MML.Emu || {};
+  const MAIN_HZ = 16000000, FRAME_CYCLES = MAIN_HZ / (6671500 / 432 / 262), VBLANK_AT = 256 / 262, INT3_DELAY = 10000, WATCHDOG = 3 * MAIN_HZ;
+
+  // ── EEPROM 93C46(16bit × 64 語)。CS を上げ、開始ビット 1、命令 2bit、番地 6bit、(データ 16bit)──
+  function createEeprom93c46(data) {
+    const mem = data || new Uint16Array(64).fill(0xffff);
+    let cs = 0, clk = 0, di = 0, out = 1, bits = 0, count = 0, started = false, mode = 0, addr = 0, shiftOut = 0, outLeft = 0, writable = false, dirty = false;
+    function begin() { bits = 0; count = 0; started = false; mode = 0; outLeft = 0; out = 1; }
+    function clock() {
+      if (mode === 1) {          // 読み出し中: 上位から 1 ビットずつ
+        if (outLeft > 0) { out = shiftOut >> 15 & 1; shiftOut = (shiftOut << 1) & 0xffff; outLeft--; if (outLeft === 0) { addr = (addr + 1) & 63; shiftOut = mem[addr]; outLeft = 16; } }
+        return;
+      }
+      if (mode === 2 || mode === 3) {   // 書き込みのデータ待ち(2 = 1 語、3 = 全部)
+        bits = (bits << 1 | di) & 0xffff; count++;
+        if (count === 16) {
+          if (writable) { if (mode === 2) mem[addr] = bits; else mem.fill(bits); dirty = true; }
+          mode = 4; out = 1;
+        }
+        return;
+      }
+      if (mode === 4) return;
+      if (!started) { if (di) { started = true; bits = 0; count = 0; } return; }
+      bits = (bits << 1 | di) & 0xff; count++;
+      if (count < 8) return;
+      const op = bits >> 6 & 3; addr = bits & 63;
+      if (op === 2) { mode = 1; shiftOut = mem[addr]; outLeft = 16; out = 0; }         // READ(最初に 0 を 1 つ出す)
+      else if (op === 1) { mode = 2; bits = 0; count = 0; }                           // WRITE
+      else if (op === 3) { if (writable) { mem[addr] = 0xffff; dirty = true; } mode = 4; out = 1; }   // ERASE
+      else {
+        const sub = addr >> 4;
+        if (sub === 3) { writable = true; mode = 4; } else if (sub === 0) { writable = false; mode = 4; }
+        else if (sub === 2) { if (writable) { mem.fill(0xffff); dirty = true; } mode = 4; }
+        else { mode = 3; bits = 0; count = 0; }                                       // WRAL
+      }
+    }
+    return {
+      mem,
+      write(csNew, clkNew, diNew) {
+        di = diNew;
+        if (csNew && !cs) begin();
+        if (!csNew && cs) begin();
+        if (csNew && clkNew && !clk) clock();
+        cs = csNew; clk = clkNew;
+      },
+      get out() { return out; },
+      get dirty() { return dirty; }, set dirty(v) { dirty = v; },
+      getState() { return [cs, clk, di, out, bits, count, started ? 1 : 0, mode, addr, shiftOut, outLeft, writable ? 1 : 0]; },
+      setState(s) { let st, w; [cs, clk, di, out, bits, count, st, mode, addr, shiftOut, outLeft, w] = s; started = !!st; writable = !!w; }
+    };
+  }
+  Emu.createEeprom93c46 = createEeprom93c46;
+
+  Emu.createF3Main = function (opt) {
+    const rom = opt.program, sound = opt.sound, SB = Emu.ENSONIQ_BOARD;
+    const ram = new Uint8Array(0x20000), pal = new Uint8Array(0x8000), vram = new Uint8Array(0x40000), ctrl = new Uint8Array(0x20);
+    const eeprom = createEeprom93c46(opt.eeprom);
+    const dpram = sound.dpram, onDpram = opt.onDpram || null, onReset = opt.onReset || null;
+    // 入力(どれも押していない = 1)。in0 = ボタンとスタート、in1 = レバー、system = テスト / コイン(EEPROM の読み出しと同じバイト)
+    const inp = { in0: 0xffff, in1: 0xffff, system: 0xfe, in4: 0xffffffff, in5: 0xffff, analog0: 0, analog1: 0 };
+    const coinWord = [0, 0];
+    const stats = { unmappedR: 0, unmappedW: 0, lastUnmapped: 0, vramDirty: 0 };
+    let cpu = null, irqPending = 0, frame = 0, samples = 0, nextVblank = FRAME_CYCLES * VBLANK_AT, int3At = Infinity, eeOut = 0, watchdogAt = WATCHDOG, resets = 0;
+
+    function port(n) {
+      switch (n) {
+        case 0: { const e = (inp.system & 0xfe) | eeprom.out; return ((e << 24) | (e << 16) | (inp.in0 & 0xffff)) >>> 0; }
+        case 1: return ((coinWord[0] << 16) | (inp.in1 & 0xffff)) >>> 0;
+        case 2: return (0xffff0000 | (inp.analog0 & 0xffff)) >>> 0;
+        case 3: return (0xffff0000 | (inp.analog1 & 0xffff)) >>> 0;
+        case 4: return inp.in4 >>> 0;
+        case 5: return ((coinWord[1] << 16) | (inp.in5 & 0xffff)) >>> 0;
+        default: return 0xffffffff;
+      }
+    }
+    function ioWrite8(a, v) {
+      const off = (a - 0x4a0000) >> 2, lane = a & 3;
+      if (off === 0) { watchdogAt = cpu.cycles + WATCHDOG; return; }
+      if (off === 1) { if (lane < 2) coinWord[0] = lane === 0 ? (coinWord[0] & 0x00ff) | v << 8 : (coinWord[0] & 0xff00) | v; }
+      else if (off === 5) { if (lane < 2) coinWord[1] = lane === 0 ? (coinWord[1] & 0x00ff) | v << 8 : (coinWord[1] & 0xff00) | v; }
+      else if (off === 4 && lane === 3) { eeOut = v; eeprom.write(v >> 4 & 1, v >> 3 & 1, v >> 2 & 1); }
+    }
+    function updateIrq() { cpu.setIrq(irqPending & 8 ? 3 : irqPending & 4 ? 2 : 0); }
+
+    const bus = {
+      read8(a) {
+        if (a < 0x200000) return rom[a];
+        if (a >= 0x400000 && a < 0x440000) return ram[a & 0x1ffff];
+        if (a >= 0x600000 && a < 0x640000) return vram[a - 0x600000];
+        if (a >= 0x440000 && a < 0x448000) return pal[a - 0x440000];
+        if (a >= 0x4a0000 && a < 0x4a0020) return port((a - 0x4a0000) >> 2) >>> ((3 - (a & 3)) * 8) & 0xff;
+        if (a >= 0xc00000 && a < 0xc00800) return dpram[a - 0xc00000];
+        stats.unmappedR++; stats.lastUnmapped = a;
+        return 0xff;
+      },
+      read16(a) {
+        if (a < 0x200000) return rom[a] << 8 | rom[a + 1];
+        if (a >= 0x400000 && a < 0x440000) { const i = a & 0x1ffff; return ram[i] << 8 | ram[i + 1]; }
+        if (a >= 0x600000 && a < 0x640000) { const i = a - 0x600000; return vram[i] << 8 | vram[i + 1]; }
+        return bus.read8(a) << 8 | bus.read8(a + 1);
+      },
+      write8(a, v) {
+        if (a >= 0x400000 && a < 0x440000) { ram[a & 0x1ffff] = v; return; }
+        if (a >= 0x600000 && a < 0x640000) { vram[a - 0x600000] = v; stats.vramDirty++; return; }
+        if (a >= 0x440000 && a < 0x448000) { pal[a - 0x440000] = v; return; }
+        if (a >= 0x660000 && a < 0x660020) { ctrl[a - 0x660000] = v; return; }
+        if (a >= 0x4a0000 && a < 0x4a0020) { ioWrite8(a, v); return; }
+        if (a >= 0xc00000 && a < 0xc00800) { dpram[a - 0xc00000] = v; if (onDpram) onDpram(a - 0xc00000, v, cpu.cycles / MAIN_HZ); return; }
+        if (a >= 0xc80000 && a < 0xc80004) { if (sound.held) { sound.setReset(false); if (onReset) onReset(0, cpu.cycles / MAIN_HZ); } return; }
+        if (a >= 0xc80100 && a < 0xc80104) { if (!sound.held) { sound.setReset(true); if (onReset) onReset(1, cpu.cycles / MAIN_HZ); } return; }
+        if (a >= 0x4c0000 && a < 0x4c0004) return;
+        if (a >= 0x300000 && a < 0x300080) return;      // 波形のバンク(一部のゲームだけ。未対応)
+        stats.unmappedW++; stats.lastUnmapped = a;
+      },
+      write16(a, v) {
+        if (a >= 0x400000 && a < 0x440000) { const i = a & 0x1ffff; ram[i] = v >> 8; ram[i + 1] = v; return; }
+        if (a >= 0x600000 && a < 0x640000) { const i = a - 0x600000; vram[i] = v >> 8; vram[i + 1] = v; stats.vramDirty++; return; }
+        bus.write8(a, v >> 8); bus.write8(a + 1, v & 0xff);
+      },
+      irqAck(level) { irqPending &= ~(1 << level); updateIrq(); return 24 + level; }
+    };
+    cpu = Emu.createM68020(bus);
+    cpu.reset();
+    cpu.cycles = 0;
+
+    // メイン CPU を通しのクロック数 until まで進める。垂直帰線とレベル 3 の時刻で区切る
+    function hardReset() {
+      const c = cpu.cycles;
+      if (!sound.held) { sound.setReset(true); if (onReset) onReset(1, c / MAIN_HZ); }
+      cpu.reset(); cpu.cycles = c;
+      irqPending = 0; int3At = Infinity; watchdogAt = c + WATCHDOG; resets++;
+    }
+    function runTo(until) {
+      for (;;) {
+        if (cpu.cycles >= watchdogAt) hardReset();
+        const ev = Math.min(nextVblank, int3At);
+        if (ev > until) { cpu.run(until); return; }
+        if (cpu.cycles < ev) cpu.run(ev);
+        if (ev === nextVblank) { irqPending |= 4; frame++; int3At = cpu.cycles + INT3_DELAY; nextVblank += FRAME_CYCLES; }
+        else { irqPending |= 8; int3At = Infinity; }
+        updateIrq();
+      }
+    }
+    const MAIN_PER_SAMPLE = MAIN_HZ * SB.CYCLES_PER_SAMPLE / SB.CPU_HZ;
+    /** 音源の 1 サンプルぶん進める */
+    function runSample() {
+      samples++;
+      runTo(samples * MAIN_PER_SAMPLE);
+      sound.run(1);
+    }
+    return { runSample, runTo, cpu, ram, pal, vram, ctrl, eeprom, inp, stats, bus,
+      get frame() { return frame; }, get resets() { return resets; }, get samples() { return samples; }, get time() { return samples * SB.CYCLES_PER_SAMPLE / SB.CPU_HZ; } };
+  };
+  Emu.F3_MAIN = { MAIN_HZ, FRAME_CYCLES };
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+/*
+ * MML.Emu.createF3Video(main, opt) — タイトー F3 の画面(TC0630FDP): 背景 4 面、文字の面 / ピクセルの面、スプライト、ライン RAM による合成。
+ *
+ * MAME taito/taito_f3_v.cpp(Copyright Bryan McPhail, ywy, 12Me21。BSD-3-Clause)の移植。走査線ごとに「ライン RAM」の設定を読み、
+ * 9 枚(文字 / ピクセル 1、スプライトの優先度の組 4、背景 4)を優先度の順に混ぜる。半透明は「手前の色 × 係数 + 奥の色 × 係数」。
+ *   RAM(main.vram = 0x600000 から): スプライト 0x00000 / 背景 0x10000 / 文字の面 0x1C000 / 文字の絵 0x1E000 / ライン RAM 0x20000 / ピクセルの面の絵 0x30000
+ *   背景    : 1 枚 16 × 16 画素、4 / 5 / 6bpp。1 文字 = 属性の語 [yx.. ddac cccc cccc] と番号の語。面は 512 × 512 が 8 枚、または 1024 × 512 が 4 枚(extend)
+ *   文字の面: 64 × 64 文字、1 文字 16bit [y ccccccc x tttttttt]。絵は RAM(8 × 8、4bpp)
+ *   ピクセルの面: 512 × 256。絵は RAM の 2048 文字を縦に並べた物。色と反転は文字の面の同じ位置から
+ *   スプライト: 16 × 16、拡大縮小つき。並び(1 件 8 語)を読んで別の面に描いておき、走査線の合成で使う。ゲームによって 0〜2 フレーム遅れて出る(lag)
+ *   上下左右の反転: スプライトの並びの中の命令で切り替わる。絵を逆さに持っていて、これで正しい向きにするゲームがある
+ *   色      : パレット 0x440000 から 1 色 32bit(00RRGGBB。初期のゲームは 12bit)
+ * 絵の ROM(opt.gfx)が無い時は、背景とスプライトは出ない(文字の面とピクセルの面だけ)。
+ *
+ * opt: { top(見える範囲の最初の走査線。既定 24), height(既定 232), pal12, extend(背景が横 1024), lag(スプライトの遅れ 0〜2),
+ *        gfx: { spr, sprHi, tile, tileHi }(Uint8Array。MAME の領域と同じ並び。Hi は無ければ null)}
+ * 口: width / height / render(Uint32Array width × height。ABGR = キャンバスの ImageData の並び)/ busy(背景かスプライトを描いたか。重さの目安)
+ */
+(function (root) {
+  'use strict';
+  const MML = root.MML = root.MML || {}, Emu = MML.Emu = MML.Emu || {};
+  const H_START = 46, WIDTH = 320, H_TOTAL = 432, FBW = 512;
+  // 文字の絵の画素 x(0〜7)→ [行の中のバイト, 上位ニブルか]
+  const NIB_BYTE = [3, 3, 2, 2, 1, 1, 0, 0], NIB_HI = [0, 1, 0, 1, 0, 1, 0, 1];
+  const s16 = (v) => v << 16 >> 16;
+
+  Emu.createF3Video = function (main, opt) {
+    opt = opt || {};
+    const top = opt.top === undefined ? 24 : opt.top, height = opt.height || 232;
+    const vram = main.vram, pal = main.pal, ctrl = main.ctrl;
+    const extend = !!opt.extend, lag = opt.lag === undefined ? 1 : opt.lag, widthMask = extend ? 0x3ff : 0x1ff;
+    const gfx = opt.gfx || null;
+    const spr = gfx ? gfx.spr : null, sprHi = gfx ? gfx.sprHi : null, tile = gfx ? gfx.tile : null, tileHi = gfx ? gfx.tileHi : null;
+    const nSpr = spr ? Math.floor(spr.length / 128) : 0, nTile = tile ? Math.floor(tile.length / 128) : 0;
+    const PF = 0x10000, TEXT = 0x1c000, CHAR = 0x1e000, LINE = 0x20000, PIVOT = 0x30000;
+    const w16 = (o) => vram[o] << 8 | vram[o + 1];
+    const lineWord = (i) => vram[LINE + i * 2] << 8 | vram[LINE + i * 2 + 1];
+    const clut = new Uint32Array(0x2000);
+
+    // ── スプライト(別の面に描いておく)──
+    const fb = new Uint16Array(FBW * 256);
+    const MAXS = 0x400;
+    const sCode = new Int32Array(MAXS), sColor = new Uint8Array(MAXS), sFlipX = new Uint8Array(MAXS), sFlipY = new Uint8Array(MAXS);
+    const sX = new Int32Array(MAXS), sY = new Int32Array(MAXS), sScaleX = new Int32Array(MAXS), sScaleY = new Int32Array(MAXS);
+    let sCount = 0, flipscreen = false, spriteBank = 0, spriteTrails = false, spritePenMask = 0x0f, spritesDrawn = 0;
+    const minX = H_START, maxX = H_START + WIDTH - 1, minY = top, maxY = top + height - 1;
+
+    function getSpriteInfo() {
+      // 軸ごとの状態(x, y): ブロックの倍率、位置、ブロックの位置、全体 / 部分のスクロール
+      const ax = [{ bs: 256, pos: 0, bp: 0, g: 0, sg: 0 }, { bs: 256, pos: 0, bp: 0, g: 0, sg: 0 }];
+      const upd = (a, scroll, posw, multi, blockCtrl, zoom) => {
+        let np = (posw << 20) >> 20;
+        if (scroll & 1) a.sg = np;
+        if (scroll & 2) a.g = np;
+        if (!(scroll & 8)) { np += a.g; if (!(scroll & 4)) np += a.sg; }
+        np = s16(np);
+        if (blockCtrl === 0) { if (!multi) { a.bp = np << 8; a.bs = 0x100 - zoom; } a.pos = a.bp; }
+        else if (blockCtrl === 2) a.pos = a.bp;
+        else if (blockCtrl === 3) a.pos += a.bs * 16;
+      };
+      let color = 0, multi = false, n = 0, total = 0;
+      for (let offs = 0; offs < 0x400 && total < 0x400; offs++) {
+        total++;
+        const o = (spriteBank ? 0x8000 : 0) + offs * 16;
+        const w0 = w16(o), w1 = w16(o + 2), w2 = w16(o + 4), w3 = w16(o + 6), w4 = w16(o + 8), w5 = w16(o + 10), w6 = w16(o + 12);
+        if (w3 & 0x8000) {     // 命令: 反転、色の深さ、残像、並びの切り替え
+          flipscreen = !!(w5 & 0x2000);
+          spritePenMask = ((w5 >> 8 & 3) << 4) | 0x0f;
+          spriteTrails = !!(w5 & 2);
+          spriteBank = w5 & 1;
+        }
+        if (w6 & 0x8000) { const to = w6 & 0x3ff; if (to === offs) break; offs = to - 1; }   // ジャンプ(命令の後で見る)
+        const cont = w4 >> 8;
+        if (!(cont & 4)) color = w4 & 0xff;
+        const scroll = w2 >> 12;
+        upd(ax[0], scroll, w2 & 0xfff, multi, cont >> 6 & 3, w1 & 0xff);
+        upd(ax[1], scroll, w3 & 0xfff, multi, cont >> 4 & 3, w1 >> 8);
+        multi = !!(cont & 8);
+        const code = w0 | (w5 & 1) << 16;
+        if (!code) continue;
+        const x = ax[0], y = ax[1];
+        const tx = flipscreen ? (512 << 8) - x.bs * 16 - x.pos : x.pos, ty = flipscreen ? (256 << 8) - y.bs * 16 - y.pos : y.pos;
+        if (tx + x.bs * 16 <= minX << 8 || tx > maxX << 8 || ty + y.bs * 16 <= minY << 8 || ty > maxY << 8) continue;
+        sX[n] = tx; sY[n] = ty; sCode[n] = code; sColor[n] = color; sScaleX[n] = x.bs; sScaleY[n] = y.bs;
+        sFlipX[n] = (cont & 1 ? 1 : 0) ^ (flipscreen ? 1 : 0); sFlipY[n] = (cont & 2 ? 1 : 0) ^ (flipscreen ? 1 : 0);
+        n++;
+      }
+      sCount = n;
+    }
+    function drawSprites() {
+      if (!spriteTrails) fb.fill(0);
+      spritesDrawn = 0;
+      if (!spr) return;
+      const mask = spritePenMask, round = flipscreen ? 0 : 255;
+      for (let i = sCount - 1; i >= 0; i--) {
+        const base = (sCode[i] % nSpr) * 128, hiBase = (sCode[i] % nSpr) * 64, fx = sFlipX[i] ? 15 : 0, fy = sFlipY[i] ? 15 : 0;
+        const pen0 = 0x1000 + (sColor[i] << 4), scx = sScaleX[i], scy = sScaleY[i];
+        let dy8 = sY[i] + round;
+        for (let y = 0; y < 16; y++) {
+          const dy = dy8 >> 8; dy8 += scy;
+          if (dy < minY || dy > maxY) continue;
+          const row = dy * FBW, sy = y ^ fy, src = base + sy * 8, srcHi = hiBase + sy * 4;
+          let dx8 = sX[i] + 128;
+          for (let x = 0; x < 16; x++) {
+            const dx = dx8 >> 8; dx8 += scx;
+            if (dx < minX || dx > maxX) continue;
+            if (dx === dx8 >> 8) continue;
+            const sx = x ^ fx, b = spr[src + (sx >> 1)];
+            let c = sx & 1 ? b >> 4 : b & 15;
+            if (mask > 15 && sprHi) c |= ((sprHi[srcHi + (sx >> 2)] >> ((sx & 3) * 2)) & 3) << 4;
+            c &= mask;
+            if (c && !fb[row + dx]) { fb[row + dx] = pen0 | c; spritesDrawn++; }
+          }
+        }
+      }
+    }
+
+    // ── 走査線ごとの設定(ライン RAM から読んで、次の行へ持ち越す)──
+    const mkMix = (kind, index) => ({ kind, index, mix: 0, prio: 0, blendMode: 0, xSampleEn: false, blendSelV: false,
+      colscroll: 0, alt: false, xScale: 0x80, yScale: 0, palAdd: 0, rowscroll: 0, regSx: 0, regSy: 0, regFxY: 0, regFxX: 0, control: 0 });
+    const pivot = mkMix(0, 0), sp = [0, 1, 2, 3].map((i) => mkMix(1, i)), pf = [0, 1, 2, 3].map((i) => mkMix(2, i));
+    const BASE_ORDER = [pivot, sp[0], pf[0], sp[3], pf[3], sp[2], pf[2], sp[1], pf[1]], order = BASE_ORDER.slice();
+    const clipL = new Int16Array(4), clipR = new Int16Array(4), blend = new Uint8Array(4);
+    let xSample = 16, bgPalette = 0;
+    const setMix = (m, v) => { m.mix = v; m.prio = v & 15; m.blendMode = v >> 14 & 3; };
+
+    function readLineRam(y) {
+      const latched = (section, sub) => {
+        const l = lineWord(section * 0x100 + y), base = 0x4000 + 0x1000 * section + 0x200 * sub;
+        if (l >> (sub + 4) & 1) return (base + 0x800) / 2 + y;
+        if (l >> sub & 1) return base / 2 + y;
+        return 0;
+      };
+      let w;
+      for (let i = 2; i < 4; i++) if ((w = latched(0, i))) {
+        const c = lineWord(w), k = 2 * (i - 2);
+        pf[i].colscroll = c & 0x1ff; pf[i].alt = !extend && !!(c & 0x200);
+        clipL[k] = (clipL[k] & 0xff) | (c >> 12 & 1) << 8; clipR[k] = (clipR[k] & 0xff) | (c >> 13 & 1) << 8;
+        clipL[k + 1] = (clipL[k + 1] & 0xff) | (c >> 14 & 1) << 8; clipR[k + 1] = (clipR[k + 1] & 0xff) | (c >> 15 & 1) << 8;
+      }
+      for (let i = 0; i < 4; i++) if ((w = latched(1, i))) { const c = lineWord(w); clipL[i] = (clipL[i] & 0x100) | (c & 0xff); clipR[i] = (clipR[i] & 0x100) | (c >> 8); }
+      if ((w = latched(2, 0))) {
+        const c = lineWord(w);
+        pivot.blendSelV = !!(c & 0x200); pivot.control = c >> 8;
+        for (let g = 0; g < 4; g++) { const b = c >> (g * 2) & 3; sp[g].mix = (sp[g].mix & 0x3fff) | b << 14; sp[g].blendMode = b; }
+      }
+      if ((w = latched(2, 1))) { const c = lineWord(w); for (let i = 0; i < 4; i++) blend[i] = Math.min(8, 15 - (c >> (4 * i) & 15)); }
+      if ((w = latched(2, 2))) {
+        const c = lineWord(w);
+        xSample = 16 - (c >> 4 & 15);
+        for (let i = 0; i < 4; i++) { pf[i].xSampleEn = !!(c >> i & 1); sp[i].xSampleEn = !!(c & 0x100); }
+        pivot.xSampleEn = !!(c & 0x200);
+      }
+      if ((w = latched(2, 3))) bgPalette = lineWord(w);
+      if ((w = latched(3, 1))) setMix(pivot, lineWord(w));
+      if ((w = latched(3, 2))) { const c = lineWord(w); for (let g = 0; g < 4; g++) { setMix(sp[g], (sp[g].mix & 0xc00f) | (c & 0x3ff) << 4); sp[g].blendSelV = !!(c >> (12 + g) & 1); } }
+      if ((w = latched(3, 3))) { const c = lineWord(w); for (let g = 0; g < 4; g++) { const p = c >> (g * 4) & 15; sp[g].mix = (sp[g].mix & 0xfff0) | p; sp[g].prio = p; } }
+      const FIX_Y = [0, 3, 2, 1];
+      for (let i = 0; i < 4; i++) if ((w = latched(4, i))) { const c = lineWord(w); pf[i].xScale = 256 - (c >> 8); pf[FIX_Y[i]].yScale = (c & 0xff) << 1; }
+      for (let i = 0; i < 4; i++) if ((w = latched(5, i))) pf[i].palAdd = (lineWord(w) * 16) & 0xffff;
+      for (let i = 0; i < 4; i++) if ((w = latched(6, i))) { const r = lineWord(w) << 2; pf[i].rowscroll = (r & 0xffffff00) - (r & 0xff); }
+      for (let i = 0; i < 4; i++) if ((w = latched(7, i))) setMix(pf[i], lineWord(w));
+    }
+    function pfScroll(n, m) {
+      let sx = s16(ctrl[n * 2] << 8 | ctrl[n * 2 + 1]), sy = s16(ctrl[8 + n * 2] << 8 | ctrl[8 + n * 2 + 1]);
+      sy = s16(sy + 128);
+      if (flipscreen) { sx = s16(sx + (320 << 6)); sx = s16(sx + ((512 + 192) << 6)); sy = s16(-sy); }
+      sx = s16(sx + ((40 - 4 * n) << 6));
+      let fx = sx << 2, fy = sy << 1;
+      fx ^= 0xfc;
+      fx -= H_START << 8;
+      if (flipscreen) fy = -fy;
+      m.regSx = fx; m.regSy = fy;
+    }
+    // 見える範囲(クリップ面 4 つの組み合わせ)。MAME の calc_clip と同じ手順
+    function calcClip(m) {
+      const en = m.mix >> 8 & 15, inv = m.mix >> 4 & 15;
+      let normal = en & ~inv, invert = en & inv;
+      if (!(m.mix & 0x1000)) { const t = normal; normal = invert; invert = t; }
+      let ranges = [[H_START, H_START + WIDTH]];
+      for (let p = 0; p < 4; p++) {
+        const cl = clipL[p] - 1, cr = clipR[p] - 2;
+        if (normal >> p & 1) {
+          const out = [];
+          for (const r of ranges) { if (cl > cr || r[1] < cl || r[0] > cr) continue; out.push([Math.max(r[0], cl), Math.min(r[1], cr)]); }
+          ranges = out;
+        } else if ((invert >> p & 1) && cl <= cr) {
+          const nr = [];
+          for (let i = 0; i < ranges.length; i++) nr.push([H_START, cl]);
+          for (let i = 0; i < ranges.length; i++) nr.push([cr, H_START + WIDTH]);
+          const out = [];
+          for (const it of nr) {
+            let keep = true;
+            for (const r of ranges) { it[0] = Math.max(r[0], it[0]); it[1] = Math.max(r[0], it[1]); if (it[0] >= it[1]) { keep = false; break; } }
+            if (keep) out.push(it);
+          }
+          ranges = out;
+        }
+      }
+      return ranges;
+    }
+
+    // ── 1 枚の 1 行を、色の番号(0xFFFF = 何も無い)と係数の選択に直す ──
+    const colBuf = new Uint16Array(H_TOTAL + 8), selBuf = new Uint8Array(H_TOTAL + 8);
+    const NONE = 0xffff;
+    function mosaicX(x) { let c = x - 46 + 114; if (c >= 432) c -= 432; return x - (c % xSample); }
+    function fetchPlayfield(m, l, r) {
+      const y = ((m.regFxY >> 8) + m.colscroll) & 0x1ff, yy = flipscreen ? 511 - y : y;
+      let tmap = m.index; if (!extend && m.alt) tmap += 2;
+      const cols = extend ? 64 : 32, base = PF + tmap * (extend ? 0x2000 : 0x1000) + (yy >> 4) * cols * 4, py0 = yy & 15, W1 = widthMask;
+      const fxX = m.regFxX, xs = m.xScale, palAdd = m.palAdd, mos = m.xSampleEn;
+      let lastCol = -1, palBase = 0, sel = 0, penMask = 15, rowAddr = 0, rowHi = 0, flipX = 0;
+      for (let x = l; x < r; x++) {
+        const rx = mos ? mosaicX(x) : x;
+        let gx = (((fxX + (rx - H_START) * xs) >> 8) + H_START) & W1;
+        if (flipscreen) gx = W1 - gx;
+        const col = gx >> 4;
+        if (col !== lastCol) {
+          lastCol = col;
+          const o = base + col * 4, attr = vram[o] << 8 | vram[o + 1], code = (vram[o + 2] << 8 | vram[o + 3]) % nTile;
+          const pc = attr & 0x1ff, extra = attr >> 10 & 3;
+          palBase = pc << 4; sel = attr >> 9 & 1; penMask = ((extra & ~pc) << 4) | 15; flipX = attr & 0x4000 ? 15 : 0;
+          const py = attr & 0x8000 ? 15 - py0 : py0;
+          rowAddr = code * 128 + py * 8; rowHi = code * 64 + py * 4;
+        }
+        const px = (gx & 15) ^ flipX, b = tile[rowAddr + (px >> 1)];
+        let p = px & 1 ? b >> 4 : b & 15;
+        if (penMask > 15 && tileHi) { const k = rowHi + (px >> 3) * 2, bit = px & 7; p |= (tileHi[k] >> bit & 1) << 4 | (tileHi[k + 1] >> bit & 1) << 5; }
+        p &= penMask;
+        if (p) { colBuf[x] = (palBase + p + palAdd) & 0x1fff; selBuf[x] = sel; } else colBuf[x] = NONE;
+      }
+    }
+    function fetchText(m, l, r, lineY) {
+      const y = (m.regSy + lineY) & 0x1ff, ty = flipscreen ? 511 - y : y, row = ty >> 3, py0 = ty & 7, mos = m.xSampleEn, sel = m.blendSelV ? 1 : 0;
+      for (let x = l; x < r; x++) {
+        const rx = mos ? mosaicX(x) : x;
+        let tx = (rx + m.regSx) & 0x1ff; if (flipscreen) tx = 511 - tx;
+        const o = TEXT + (row * 64 + (tx >> 3)) * 2, hi = vram[o], t = vram[o + 1];
+        let px = tx & 7, py = py0;
+        if (hi & 0x01) px = 7 - px;
+        if (hi & 0x80) py = 7 - py;
+        const b = vram[CHAR + t * 32 + py * 4 + NIB_BYTE[px]], p = NIB_HI[px] ? b >> 4 : b & 15;
+        if (p) { colBuf[x] = ((hi >> 1 & 0x3f) << 4) | p; selBuf[x] = sel; } else colBuf[x] = NONE;
+      }
+    }
+    function fetchPixel(m, l, r, lineY) {
+      const y = (m.regSy + lineY) & 0xff, ty = flipscreen ? 255 - y : y, row = ty >> 3, py0 = ty & 7, mos = m.xSampleEn, sel = m.blendSelV ? 1 : 0;
+      // 色と反転は文字の面から。面を下へ送ると、文字の面の下半分の色を使う
+      const c5 = ctrl[0x1a] << 8 | ctrl[0x1b];
+      let yo = row * 8 + c5; if (flipscreen) yo += 0x100;
+      const arow = (yo & 0x1ff) >= 256 ? row + 32 : row;
+      for (let x = l; x < r; x++) {
+        const rx = mos ? mosaicX(x) : x;
+        let tx = (rx + m.regSx) & 0x1ff; if (flipscreen) tx = 511 - tx;
+        const col = tx >> 3, hi = vram[TEXT + (arow * 64 + col) * 2];
+        let px = tx & 7, py = py0;
+        if (hi & 0x01) px = 7 - px;
+        if (hi & 0x80) py = 7 - py;
+        const b = vram[PIVOT + (col * 32 + row) * 32 + py * 4 + NIB_BYTE[px]], p = NIB_HI[px] ? b >> 4 : b & 15;
+        if (p) { colBuf[x] = ((hi >> 1 & 0x3f) << 4) | p; selBuf[x] = sel; } else colBuf[x] = NONE;
+      }
+    }
+    function fetchSprite(m, l, r, lineY) {
+      const row = (lineY & 0xff) * FBW, g = m.index, mos = m.xSampleEn, sel = m.blendSelV ? 1 : 0;
+      for (let x = l; x < r; x++) {
+        const c = fb[row + (mos ? mosaicX(x) : x)];
+        if (c && (c >> 10 & 3) === g) { colBuf[x] = c; selBuf[x] = sel; } else colBuf[x] = NONE;
+      }
+    }
+
+    // ── 合成(1 行ぶんの控え)──
+    const srcPal = new Uint16Array(H_TOTAL), dstPal = new Uint16Array(H_TOTAL), srcBlend = new Uint8Array(H_TOTAL), dstBlend = new Uint8Array(H_TOTAL);
+    const srcPrio = new Uint8Array(H_TOTAL), dstPrio = new Uint8Array(H_TOTAL), srcMode = new Uint8Array(H_TOTAL);
+    function mixLine(m, l, r) {
+      const prio = m.prio, mode = m.blendMode;
+      for (let x = l; x < r; x++) {
+        if (mode === srcMode[x]) continue;            // 同じ混ぜ方の面どうしは重ならない
+        const color = colBuf[x];
+        if (color === NONE) continue;
+        const sel = selBuf[x];
+        if (prio > srcPrio[x]) {
+          if (mode === 1) { const b = blend[2 + sel]; if (b === 0) continue; srcBlend[x] = b; }
+          else if (mode === 2) { const b = blend[sel]; if (b === 0) continue; srcBlend[x] = b; }
+          else {
+            if (blend[sel] + blend[2 + sel] === 0) continue;
+            srcBlend[x] = blend[2 + sel]; dstBlend[x] = blend[sel]; dstPrio[x] = prio; dstPal[x] = color;
+          }
+          srcPal[x] = color; srcMode[x] = mode; srcPrio[x] = prio;
+        } else if (prio >= dstPrio[x]) {
+          dstPal[x] = prio !== dstPrio[x] ? color : 0;   // 優先度が同じ = 色の線がぶつかる(実機の癖)
+          dstPrio[x] = prio;
+          dstBlend[x] = srcMode[x] === 1 ? blend[sel] : blend[2 + sel];
+        }
+      }
+    }
+    let busy = false;
+    function scanlineDraw(out) {
+      // パレット
+      if (opt.pal12) for (let i = 0, o = 0; i < 0x2000; i++, o += 4) clut[i] = (0xff000000 | (pal[o + 3] >> 4) << 20 | (pal[o + 2] & 15) << 12 | (pal[o + 2] >> 4) << 4) >>> 0;
+      else for (let i = 0, o = 0; i < 0x2000; i++, o += 4) clut[i] = (0xff000000 | pal[o + 3] << 16 | pal[o + 2] << 8 | pal[o + 1]) >>> 0;
+      // 行をまたいで持つ設定を初期値へ
+      for (const m of BASE_ORDER) { m.mix = 0; m.prio = 0; m.blendMode = 0; m.xSampleEn = false; m.blendSelV = false; m.colscroll = 0; m.alt = false; m.xScale = 0x80; m.yScale = 0; m.palAdd = 0; m.rowscroll = 0; m.control = 0; }
+      clipL.fill(0); clipR.fill(0); blend.fill(0); xSample = 16; bgPalette = 0;
+      for (let i = 0; i < 4; i++) { pfScroll(i, pf[i]); pf[i].regFxY = pf[i].regSy; }
+      const c4 = ctrl[0x18] << 8 | ctrl[0x19], c5 = ctrl[0x1a] << 8 | ctrl[0x1b];
+      if (flipscreen) { pivot.regSx = (c4 - 12) & 0xffff; pivot.regSy = c5; } else { pivot.regSx = (-c4 - 5) & 0xffff; pivot.regSy = (-c5) & 0xffff; }
+      busy = false;
+      const L0 = H_START, R0 = H_START + WIDTH;
+      for (let sy = 0; sy < 256; sy++) {
+        readLineRam(flipscreen ? 255 - sy : sy);
+        if (sy >= top && sy < top + height) {
+          for (let i = 0; i < 4; i++) { const m = pf[i]; m.regFxX = m.regSx + m.rowscroll + 10 * (m.xScale - 256); }
+          for (let x = L0; x < R0; x++) { srcPal[x] = 0; dstPal[x] = bgPalette; srcBlend[x] = 0; dstBlend[x] = 8; srcPrio[x] = 0; dstPrio[x] = 0; srcMode[x] = 0xff; }
+          // 優先度の高い順(同じなら元の並び)
+          for (let i = 0; i < 9; i++) order[i] = BASE_ORDER[i];
+          for (let i = 1; i < 9; i++) { const m = order[i]; let j = i - 1; while (j >= 0 && order[j].prio < m.prio) { order[j + 1] = order[j]; j--; } order[j + 1] = m; }
+          for (let i = 0; i < 9; i++) {
+            const m = order[i];
+            if (!(m.mix & 0x2000)) continue;
+            if (m.kind === 1 ? m.blendMode === 0 : m.blendMode === 3) continue;
+            if (m.kind === 2 && !tile) continue;
+            if (m.kind === 1 && !spritesDrawn) continue;
+            const ranges = (m.mix & 0x0f00) ? calcClip(m) : null;
+            const n = ranges ? ranges.length : 1;
+            for (let k = 0; k < n; k++) {
+              const l = ranges ? Math.max(L0, ranges[k][0]) : L0, r = ranges ? Math.min(R0, ranges[k][1]) : R0;
+              if (l >= r) continue;
+              if (m.kind === 2) { fetchPlayfield(m, l, r); busy = true; }
+              else if (m.kind === 1) { fetchSprite(m, l, r, sy); busy = true; }
+              else if (m.control & 0xa0) fetchPixel(m, l, r, sy);
+              else fetchText(m, l, r, sy);
+              mixLine(m, l, r);
+            }
+          }
+          const o = (sy - top) * WIDTH - L0;
+          for (let x = L0; x < R0; x++) {
+            const sb = srcBlend[x], db = dstBlend[x];
+            if (sb === 0 && db === 8) { out[o + x] = clut[dstPal[x] & 0x1fff]; continue; }
+            const s = clut[srcPal[x] & 0x1fff], d = clut[dstPal[x] & 0x1fff];
+            let rr = ((s & 0xff) * sb + (d & 0xff) * db) >> 3, gg = ((s >> 8 & 0xff) * sb + (d >> 8 & 0xff) * db) >> 3, bb = ((s >> 16 & 0xff) * sb + (d >> 16 & 0xff) * db) >> 3;
+            if (rr > 255) rr = 255; if (gg > 255) gg = 255; if (bb > 255) bb = 255;
+            out[o + x] = (0xff000000 | bb << 16 | gg << 8 | rr) >>> 0;
+          }
+        }
+        if (sy !== 0) for (let i = 0; i < 4; i++) pf[i].regFxY += pf[i].yScale;
+      }
+    }
+    function render(out) {
+      if (lag === 0) { getSpriteInfo(); drawSprites(); scanlineDraw(out); }
+      else if (lag === 1) { scanlineDraw(out); getSpriteInfo(); drawSprites(); }
+      else { scanlineDraw(out); drawSprites(); getSpriteInfo(); }
+    }
+    return { width: WIDTH, height, render, get busy() { return busy; }, get flipscreen() { return flipscreen; } };
+  };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 
 /*
@@ -26846,6 +28369,148 @@
     { game: 'Twin Qix', sets: [['twinqix', 'Twin Qix']], hi: 'spr0-1.b66', lo: 'spr0-0.b65', waves: [['snd-0.b43', 0x0], ['snd-1.b44', 0x80000], ['snd-14.b10', 0x100000], ['snd-15.b11', 0x180000]] },
     { game: 'Under Fire', sets: [['undrfire', 'Under Fire'], ['undrfirej', 'Under Fire'], ['undrfireu', 'Under Fire']], hi: 'd67-20', lo: 'd67-21', waves: [['d67-01', 0x0], ['d67-02', 0x600000]] }
   ];
+  // F3 システムのメイン基板(本物のテストモード画面を出す時に使う): セット名 → [メインの ROM 4 本(バイトごとに組む), 見える範囲の最初の走査線, 高さ, 画面の向き, 12bit パレットか, EEPROM の既定値]
+  const MAINS = {
+    'ringrage': [['d21-23.40', 'd21-22.38', 'd21-21.36', 'd21-25.34'], 31, 224, 0, 1, '', 0, 0, 2],
+    'ringrageu': [['d21-23.40', 'd21-22.38', 'd21-21.36', 'd21-24.34'], 31, 224, 0, 1, '', 0, 0, 2],
+    'ringragej': [['d21-23.40', 'd21-22.38', 'd21-21.36', 'd21-20.34'], 31, 224, 0, 1, '', 0, 0, 2],
+    'arabianm': [['d29-23.ic40', 'd29-22.ic38', 'd29-21.ic36', 'd29-25.ic34'], 31, 224, 0, 1, '', 1, 0, 2],
+    'arabianmj': [['d29-23.ic40', 'd29-22.ic38', 'd29-21.ic36', 'd29-20.ic34'], 31, 224, 0, 1, '', 1, 0, 2],
+    'arabianmu': [['d29-23.ic40', 'd29-22.ic38', 'd29-21.ic36', 'd29-24.ic34'], 31, 224, 0, 1, '', 1, 0, 2],
+    'ridingf': [['d34-12.40', 'd34-11.38', 'd34-10.36', 'd34_14.34'], 32, 224, 0, 1, '', 2, 1, 1],
+    'ridingfj': [['d34-12.40', 'd34-11.38', 'd34-10.36', 'd34-09.34'], 32, 224, 0, 1, '', 2, 1, 1],
+    'ridingfu': [['d34-12.40', 'd34-11.38', 'd34-10.36', 'd34_13.34'], 32, 224, 0, 1, '', 2, 1, 1],
+    'gseeker': [['d40_12.rom', 'd40_11.rom', 'd40_10.rom', 'd40_14.rom'], 32, 224, 90, 0, 'gseeker.nv', -1, 0, 1],
+    'gseekerj': [['d40_12.rom', 'd40_11.rom', 'd40_10.rom', 'd40-09.34'], 32, 224, 90, 0, 'gseeker.nv', -1, 0, 1],
+    'gseekeru': [['d40_12.rom', 'd40_11.rom', 'd40_10.rom', 'd40-13.bin'], 32, 224, 90, 0, 'gseeker.nv', -1, 0, 1],
+    'commandw': [['cw_mpr3.bin', 'cw_mpr2.bin', 'cw_mpr1.bin', 'cw_mpr0.bin'], 32, 224, 0, 0, '', 3, 1, 1],
+    'cupfinal': [['d49-13.20', 'd49-14.19', 'd49-16.18', 'd49-20.17'], 31, 224, 0, 0, '', 4, 0, 1],
+    'hthero93': [['d49-13.20', 'd49-14.19', 'd49-16.18', 'd49-19.17'], 31, 224, 0, 0, '', 4, 0, 1],
+    'hthero93u': [['d49-13.24', 'd49-14.26', 'd49-16.37', 'd49-19.35'], 31, 224, 0, 0, '', 4, 0, 1],
+    'trstar': [['d53-15-1.24', 'd53-16-1.26', 'd53-18-1.37', 'd53-20-1.35'], 24, 232, 0, 0, '', 5, 1, 0],
+    'trstarj': [['d53-15-1.24', 'd53-16-1.26', 'd53-18-1.37', 'd53-17-1.35'], 24, 232, 0, 0, '', 5, 1, 0],
+    'prmtmfgt': [['d53-15-1.24', 'd53-16-1.26', 'd53-18-1.37', 'd53-19-1.35'], 24, 232, 0, 0, '', 5, 1, 0],
+    'trstaro': [['d53-15.24', 'd53-16.26', 'd53-18.37', 'd53-20.35'], 24, 232, 0, 0, '', 5, 1, 0],
+    'trstaroj': [['d53-15.24', 'd53-16.26', 'd53-18.37', 'd53-17.35'], 24, 232, 0, 0, '', 5, 1, 0],
+    'prmtmfgto': [['d53-15.24', 'd53-16.26', 'd53-18.37', 'd53-19.35'], 24, 232, 0, 0, '', 5, 1, 0],
+    'gunlock': [['d66-18.ic24', 'd66-19.ic26', 'd66-21.ic37', 'd66-24.ic35'], 31, 224, 90, 0, '', 6, 1, 2],
+    'gunlocko': [['ic24.ic24', 'ic26.ic26', 'ic37.ic37', 'ic35.ic35'], 31, 224, 270, 0, '', 7, 1, 2],
+    'rayforce': [['d66-18.ic24', 'd66-19.ic26', 'd66-21.ic37', 'd66-25.ic35'], 31, 224, 90, 0, '', 8, 1, 2],
+    'rayforcej': [['d66-18.ic24', 'd66-19.ic26', 'd66-21.ic37', 'd66-20.ic35'], 31, 224, 90, 0, '', 8, 1, 2],
+    'scfinals': [['d68-09.ic40', 'd68-10.ic38', 'd68-11.ic36', 'd68-12.ic34'], 31, 224, 0, 0, 'scfinals.nv', 4, 0, 1],
+    'scfinalso': [['s-final_rom_24_071293.ic24', 's-final_rom_26_071293.ic26', 's-final_rom_37_071293.ic37', 's-final_rom_35_071293.ic35'], 31, 224, 0, 0, 'scfinalso.nv', 4, 0, 1],
+    'scfinalsoc': [['d68-01.20', 'd68-02.19', 'd68-04.18', 'd68-03.17'], 31, 224, 0, 0, 'scfinalso.nv', 4, 0, 1],
+    'lightbr': [['d69-25.ic40', 'd69-26.ic38', 'd69-28.ic36', 'd69-27.ic34'], 31, 224, 0, 0, '', 9, 1, 2],
+    'dungeonm': [['d69-20.bin', 'd69-13.bin', 'd69-15.bin', 'd69-22.bin'], 31, 224, 0, 0, '', 9, 1, 2],
+    'dungeonmu': [['d69-20.bin', 'd69-13.bin', 'd69-15.bin', 'd69-21.bin'], 31, 224, 0, 0, '', 9, 1, 2],
+    'lightbrj': [['d69-20.bin', 'd69-13.bin', 'd69-15.bin', 'd69-14.bin'], 31, 224, 0, 0, '', 9, 1, 2],
+    'intcup94': [['d78-07.20', 'd78-06.19', 'd78-05.18', 'd78-11.17'], 31, 224, 0, 0, '', 10, 0, 1],
+    'hthero94': [['d78-07.20', 'd78-06.19', 'd78-05.18', 'd78-10.17'], 31, 224, 0, 0, '', 10, 0, 1],
+    'recalh': [['rh_mpr3.bin', 'rh_mpr2.bin', 'rh_mpr1.bin', 'rh_mpr0.bin'], 24, 232, 0, 0, 'recalh.nv', 11, 1, 1],
+    'kaiserkn': [['d84-25.20', 'd84-24.19', 'd84-23.18', 'd84-29.17'], 31, 224, 0, 0, '', 12, 0, 2],
+    'kaiserknj': [['d84-25.20', 'd84-24.19', 'd84-23.18', 'd84-22.17'], 31, 224, 0, 0, '', 12, 0, 2],
+    'gblchmp': [['d84-25.20', 'd84-24.19', 'd84-23.18', 'd84-28.17'], 31, 224, 0, 0, '', 12, 0, 2],
+    'dankuga': [['dkg_mpr3.20', 'dkg_mpr2.19', 'dkg_mpr1.18', 'dkg_mpr0.17'], 31, 224, 0, 0, '', 12, 0, 2],
+    'dariusg': [['d87-12.bin', 'd87-11.bin', 'd87-10.bin', 'd87-16.bin'], 24, 232, 0, 0, '', 13, 0, 2],
+    'dariusgj': [['d87-12.bin', 'd87-11.bin', 'd87-10.bin', 'd87-09.bin'], 24, 232, 0, 0, '', 13, 0, 2],
+    'dariusgu': [['d87-12.bin', 'd87-11.bin', 'd87-10.bin', 'd87-15.bin'], 24, 232, 0, 0, '', 13, 0, 2],
+    'dariusgx': [['dge_mpr3.bin', 'dge_mpr2.bin', 'dge_mpr1.bin', 'dge_mpr0.bin'], 24, 232, 0, 0, '', 13, 0, 2],
+    'bublbob2': [['d90-21.ic20', 'd90-20.ic19', 'd90-19.ic18', 'd90-18.ic17'], 31, 224, 0, 0, '', 14, 1, 1],
+    'bublbob2o': [['d90-12', 'd90-11', 'd90-10', 'd90-17'], 31, 224, 0, 0, '', 14, 1, 1],
+    'bublbob2p': [['soft-3-8c9b.ic60', 'soft-2-0587.ic61', 'soft-1-9a9c.ic62', 'soft-0-a523.ic63'], 31, 224, 0, 0, '', 15, 1, 1],
+    'bubsymphe': [['d90-12', 'd90-11', 'd90-10', 'd90-16'], 31, 224, 0, 0, '', 14, 1, 1],
+    'bubsymphj': [['d90-12', 'd90-11', 'd90-10', 'd90-09'], 31, 224, 0, 0, '', 14, 1, 1],
+    'bubsymphu': [['d90-12', 'd90-11', 'd90-10', 'd90-15'], 31, 224, 0, 0, '', 14, 1, 1],
+    'spcinvdj': [['d93-04.bin', 'd93-03.bin', 'd93-02.bin', 'd93-01.bin'], 24, 232, 0, 1, '', 16, 1, 1],
+    'pwrgoal': [['d94-18.20', 'd94-17.19', 'd94-16.18', 'd94-22.17'], 31, 224, 0, 0, '', 17, 0, 1],
+    'hthero95': [['d94-18.20', 'd94-17.19', 'd94-16.18', 'd94-15.17'], 31, 224, 0, 0, '', 17, 0, 1],
+    'hthero95u': [['d94-18.20', 'd94-17.19', 'd94-16.18', 'd94-21.17'], 31, 224, 0, 0, '', 17, 0, 1],
+    'hthero95a': [['d94-26.20', 'd94-25.19', 'd94-24.18', 'd94-23.17'], 31, 224, 0, 0, '', 17, 0, 1],
+    'qtheater': [['d95-12.20', 'd95-11.19', 'd95-10.18', 'd95-09.17'], 24, 224, 0, 0, '', 18, 1, 1],
+    'spcinv95u': [['e06-14.20', 'e06-13.19', 'e06-12.18', 'e06-15.17'], 31, 224, 270, 0, '', 19, 0, 1],
+    'spcinv95': [['e06-14.20', 'e06-13.19', 'e06-12.18', 'e06-16.17'], 31, 224, 270, 0, '', 19, 0, 1],
+    'akkanvdr': [['e06-14.20', 'e06-13.19', 'e06-12.18', 'e06-11.17'], 31, 224, 270, 0, '', 19, 0, 1],
+    'elvactr': [['e02-12.20', 'e02-11.19', 'e02-10.18', 'e02-16.17'], 24, 232, 0, 0, '', 20, 1, 2],
+    'elvactrj': [['e02-12.20', 'e02-11.19', 'e02-10.18', 'e02-09.17'], 24, 232, 0, 0, '', 20, 1, 2],
+    'elvact2u': [['e02-12.20', 'e02-11.19', 'e02-10.18', 'e02-15.17'], 24, 232, 0, 0, '', 20, 1, 2],
+    'twinqix': [['mpr0-3.b60', 'mpr0-2.b61', 'mpr0-1.b62', 'mpr0-0.b63'], 31, 224, 0, 0, '', 21, 1, 1],
+    'quizhuhu': [['e08-16.20', 'e08-15.19', 'e08-14.18', 'e08-13.17'], 24, 232, 0, 0, '', 22, 1, 1],
+    'pbobble2': [['e10-24.bin', 'e10-23.bin', 'e10-22.bin', 'e10-25.bin'], 24, 232, 0, 0, '', 23, 0, 1],
+    'pbobble2o': [['e10-11.20', 'e10-10.19', 'e10-09.18', 'e10-15.17'], 24, 232, 0, 0, '', 23, 0, 1],
+    'pbobble2j': [['e10-11.20', 'e10-10.19', 'e10-09.18', 'e10-08.17'], 24, 232, 0, 0, '', 23, 0, 1],
+    'pbobble2u': [['e10-20.20', 'e10-19.19', 'e10-18.18', 'e10-14.17'], 24, 232, 0, 0, '', 23, 0, 1],
+    'pbobble2x': [['e10-29.20', 'e10-28.19', 'e10-27.18', 'e10-26.17'], 24, 232, 0, 0, '', 23, 0, 1],
+    'gekiridn': [['e11-12.ic20', 'e11-11.ic19', 'e11-10.ic18', 'e11-15.ic17'], 24, 232, 270, 0, '', 24, 0, 1],
+    'gekiridnj': [['e11-12.ic20', 'e11-11.ic19', 'e11-10.ic18', 'e11-09.ic17'], 24, 232, 270, 0, '', 24, 0, 1],
+    'tcobra2': [['e15-14.ic20', 'e15-13.ic19', 'e15-12.ic18', 'e15-18.ic17'], 24, 232, 270, 0, '', 25, 0, 0],
+    'tcobra2u': [['e15-14.ic20', 'e15-13.ic19', 'e15-12.ic18', 'e15-17.ic17'], 24, 232, 270, 0, '', 25, 0, 0],
+    'ktiger2': [['e15-14.ic20', 'e15-13.ic19', 'e15-12.ic18', 'e15-11.ic17'], 24, 232, 270, 0, '', 25, 0, 0],
+    'bubblem': [['e21-21.20', 'e21-20.19', 'e21-19.18', 'e21-18.17'], 31, 224, 0, 0, 'bubblem.nv', 26, 1, 1],
+    'bubblemu': [['e21-17.20', 'e21-16.19', 'e21-15.18', 'e21-14.17'], 31, 224, 0, 0, 'bubblemu.nv', 26, 1, 1],
+    'bubblemj': [['e21-11.20', 'e21-10.19', 'e21-09.18', 'e21-08.17'], 31, 224, 0, 0, 'bubblemj.nv', 26, 1, 1],
+    'cleopatr': [['e28-10.bin', 'e28-09.bin', 'e28-08.bin', 'e28-07.bin'], 31, 224, 0, 0, '', 27, 0, 1],
+    'cleopatro': [['ic20.bin', 'ic19.bin', 'ic18.bin', 'ic17.bin'], 31, 224, 0, 0, '', 27, 0, 1],
+    'pbobble3': [['e29-12.rom', 'e29-11.rom', 'e29-10.rom', 'e29-16.rom'], 24, 232, 0, 0, '', 28, 0, 1],
+    'pbobble3u': [['e29-12.rom', 'e29-11.rom', 'e29-10.rom', 'e29-15.bin'], 24, 232, 0, 0, '', 28, 0, 1],
+    'pbobble3j': [['e29-12.ic20', 'e29-11.ic19', 'e29-10.ic18', 'e29-09.ic17'], 24, 232, 0, 0, '', 29, 0, 1],
+    'arkretrn': [['e36-11.20', 'e36-10.19', 'e36-09.18', 'e36-15.17'], 24, 232, 0, 0, '', 30, 1, 1],
+    'arkretrnu': [['e36-11.20', 'e36-10.19', 'e36-09.18', 'e36-14.17'], 24, 232, 0, 0, '', 30, 1, 1],
+    'arkretrnj': [['e36-11.20', 'e36-10.19', 'e36-09.18', 'e36-08.17'], 24, 232, 0, 0, '', 30, 1, 1],
+    'kirameki': [['e44-19.20', 'e44-18.19', 'e44-17.18', 'e44-16.17'], 31, 224, 0, 0, '', 31, 0, 1],
+    'puchicar': [['e46-16.ic20', 'e46-15.ic19', 'e46-14.ic18', 'e46-18.ic17'], 24, 232, 0, 0, '', 32, 1, 1],
+    'puchicarj': [['e46-16.ic20', 'e46-15.ic19', 'e46-14.ic18', 'e46-13.ic17'], 24, 232, 0, 0, '', 32, 1, 1],
+    'puchicaru': [['e46-29.ic20', 'e46-28.ic19', 'e46-27.ic18', 'e46-17.ic17'], 24, 232, 0, 0, '', 32, 1, 1],
+    'pbobble4': [['e49-12.20', 'e49-11.19', 'e49-10.18', 'e49-16.17'], 24, 232, 0, 0, '', 33, 0, 1],
+    'pbobble4j': [['e49-12.20', 'e49-11.19', 'e49-10.18', 'e49-09.17'], 24, 232, 0, 0, '', 33, 0, 1],
+    'pbobble4u': [['e49-12.20', 'e49-11.19', 'e49-10.18', 'e49-15.17'], 24, 232, 0, 0, '', 33, 0, 1],
+    'popnpopj': [['e51-12.20', 'e51-11.19', 'e51-10.18', 'e51-09.17'], 24, 232, 0, 0, '', 34, 1, 1],
+    'popnpop': [['e51-12.20', 'e51-11.19', 'e51-10.18', 'e51-16.17'], 24, 232, 0, 0, '', 34, 1, 1],
+    'popnpopu': [['e51-12.20', 'e51-11.19', 'e51-10.18', 'e51-15.17'], 24, 232, 0, 0, '', 34, 1, 1],
+    'landmakr': [['e61-19.20', 'e61-18.19', 'e61-17.18', 'e61-16.17'], 24, 232, 0, 0, '', 35, 1, 1],
+    'landmakrj': [['e61-13.20', 'e61-12.19', 'e61-11.18', 'e61-10.17'], 24, 232, 0, 0, '', 35, 1, 1],
+    'landmakrp': [['mpro-3.60', 'mpro-2.61', 'mpro-1.62', 'mpro-0.63'], 24, 232, 0, 0, '', 36, 0, 1]
+  };
+  // ↑ の続き: [6] 絵の並び(GFX の番号。-1 = 無し)、[7] 背景の面が横 1024 か、[8] スプライトの遅れ(フレーム数)
+  // 絵の ROM の並び: [スプライト, スプライトの上位 2bit, 背景, 背景の上位 2bit]。各々 [領域の大きさ, [[名前, 置く位置, 飛ばし幅, まとまり(バイト), 2 バイトごとの入れ替え]…]]
+  const GFX = [
+    [[4194304,[['d21-02.66',0,2,1,0],['d21-03.67',1,2,1,0]]],[2097152,[['d21-04.68',0,1,1,0]]],[1048576,[['d21-06.49',0,4,2,0],['d21-07.50',2,4,2,0]]],[524288,[['d21-08.51',0,1,1,0]]]],
+    [[2097152,[['d29-03.ic66',0,2,1,0],['d29-04.ic67',1,2,1,0]]],[1048576,[['d29-05.ic68',0,1,1,0]]],[1048576,[['d29-06.ic49',0,4,2,0],['d29-07.ic50',2,4,2,0]]],[524288,[['d29-08.ic51',0,1,1,0]]]],
+    [[4194304,[['d34-01.66',0,2,1,0],['d34-02.67',1,2,1,0]]],[0,[]],[1048576,[['d34-05.49',0,4,2,0],['d34-06.50',2,4,2,0]]],[0,[]]],
+    [[8388608,[['cw_objl0.bin',0,2,1,0],['cw_objm0.bin',1,2,1,0],['cw_objl1.bin',4194304,2,1,0],['cw_objm1.bin',4194305,2,1,0]]],[4194304,[['cw_objh0.bin',0,1,1,0],['cw_objh1.bin',2097152,1,1,0]]],[2097152,[['cw_scr_l.bin',0,4,2,0],['cw_scr_m.bin',2,4,2,0]]],[1048576,[['cw_scr_h.bin',0,1,1,0]]]],
+    [[6291456,[['d49-01.12',0,2,1,0],['d49-02.8',1,2,1,0],['d49-06.11',4194304,2,1,0],['d49-07.7',4194305,2,1,0]]],[3145728,[['d49-03.4',0,1,1,0],['d49-08.3',2097152,1,1,0]]],[1048576,[['d49-09.47',0,4,2,0],['d49-10.45',2,4,2,0]]],[524288,[['d49-11.43',0,1,1,0]]]],
+    [[6291456,[['d53-03.45',0,2,1,0],['d53-04.46',1,2,1,0],['d53-06.64',4194304,2,1,0],['d53-07.65',4194305,2,1,0]]],[3145728,[['d53-05.47',0,1,1,0],['d53-08.66',2097152,1,1,0]]],[2097152,[['d53-09.48',0,4,2,0],['d53-10.49',2,4,2,0]]],[1048576,[['d53-11.50',0,1,1,0]]]],
+    [[2097152,[['d66-03.ic45',0,2,1,0],['d66-04.ic46',1,2,1,0]]],[1048576,[['d66-05.ic47',0,1,1,0]]],[2097152,[['d66-06.ic48',0,4,2,0],['d66-07.ic49',2,4,2,0]]],[1048576,[['d66-08.ic50',0,1,1,0]]]],
+    [[2097152,[['lobj0-l.ic33',0,2,1,0],['lobj0-m.ic25',1,2,1,0],['lobj1-l.ic32',1048576,2,1,0],['lobj1-m.ic24',1048577,2,1,0]]],[1048576,[['lobj0-h.ic16',0,1,1,0],['lobj1-h.ic15',524288,1,1,0]]],[2097152,[['scr0-0.ic40',0,4,1,0],['scr0-1.ic46',1,4,1,0],['scr0-2.ic38',2,4,1,0],['scr0-3.ic44',3,4,1,0]]],[1048576,[['scr0-4.ic36',0,2,1,0]]]],
+    [[2097152,[['d66-03.ic45',0,2,1,0],['d66-04.ic46',1,2,1,0]]],[1048576,[['d66-05.ic47',0,1,1,0]]],[2097152,[['d66-06.ic48',0,4,2,0],['d66-07.ic49',2,4,2,0]]],[1048576,[['d66-08.ic49',0,1,1,0]]]],
+    [[6291456,[['d69-06.bin',0,2,1,0],['d69-07.bin',1,2,1,0],['d69-09.bin',4194304,2,1,0],['d69-10.bin',4194305,2,1,0]]],[3145728,[['d69-08.bin',0,1,1,0],['d69-11.bin',2097152,1,1,0]]],[4194304,[['d69-03.bin',0,4,2,0],['d69-04.bin',2,4,2,0]]],[2097152,[['d69-05.bin',0,1,1,0]]]],
+    [[6291456,[['d49-01.12',0,2,1,0],['d49-02.8',1,2,1,0],['d49-06.11',4194304,2,1,0],['d49-07.7',4194305,2,1,0]]],[3145728,[['d49-03.4',0,1,1,0],['d49-08.3',2097152,1,1,0]]],[1048576,[['d78-01.47',0,4,2,0],['d78-02.45',2,4,2,0]]],[524288,[['d78-03.43',0,1,1,0]]]],
+    [[2097152,[['rh_objl.bin',0,2,1,0],['rh_objm.bin',1,2,1,0]]],[0,[]],[2097152,[['rh_scrl.bin',0,4,2,0],['rh_scrm.bin',2,4,2,0]]],[0,[]]],
+    [[13631488,[['d84-03.rom',0,2,1,0],['d84-04.rom',1,2,1,0],['d84-06.rom',4194304,2,1,0],['d84-07.rom',4194305,2,1,0],['d84-09.rom',8388608,2,1,0],['d84-10.rom',8388609,2,1,0],['d84-19.rom',12582912,2,1,0],['d84-20.rom',12582913,2,1,0]]],[6815744,[['d84-05.rom',0,1,1,0],['d84-08.rom',2097152,1,1,0],['d84-11.rom',4194304,1,1,0],['d84-21.rom',6291456,1,1,0]]],[6291456,[['d84-12.rom',0,4,2,0],['d84-13.rom',2,4,2,0],['d84-16.rom',4194304,4,2,0],['d84-17.rom',4194306,4,2,0]]],[3145728,[['d84-14.rom',0,1,1,0],['d84-18.rom',2097152,1,1,0]]]],
+    [[4194304,[['d87-03.bin',0,2,1,0],['d87-04.bin',1,2,1,0]]],[2097152,[['d87-05.bin',0,1,1,0]]],[4194304,[['d87-06.bin',0,4,2,0],['d87-17.bin',2,4,2,0]]],[2097152,[['d87-08.bin',0,1,1,0]]]],
+    [[2097152,[['d90-03',0,2,1,0],['d90-02',1,2,1,0]]],[1048576,[['d90-01',0,1,1,0]]],[2097152,[['d90-08',0,4,2,0],['d90-07',2,4,2,0]]],[1048576,[['d90-06',0,1,1,0]]]],
+    [[1048576,[['cq80-obj-0l-c166.ic8',0,2,1,0],['cq80-obj-0m-24f4.ic30',1,2,1,0]]],[524288,[['cq80-obj-0h-990d.ic32',0,1,1,0]]],[2097152,[['cq80-scr0-5ba4.ic7',0,4,1,0],['cq80-scr1-a5f3.ic6',1,4,1,0],['cq80-scr2-cc11.ic5',2,4,1,0],['cq80-scr3-4266.ic4',3,4,1,0]]],[1048576,[['cq80-scr4-7fe1.ic3',0,2,1,0]]]],
+    [[1048576,[['d93-07.12',0,2,1,0],['d93-08.08',1,2,1,0]]],[0,[]],[262144,[['d93-09.47',0,4,2,0],['d93-10.45',2,4,2,0]]],[0,[]]],
+    [[12582912,[['d94-09.bin',0,2,1,0],['d94-08.bin',4194304,2,1,0],['d94-07.bin',8388608,2,1,0],['d94-06.bin',1,2,1,0],['d94-05.bin',4194305,2,1,0],['d94-04.bin',8388609,2,1,0]]],[6291456,[['d94-03.bin',0,1,1,0],['d94-02.bin',2097152,1,1,0],['d94-01.bin',4194304,1,1,0]]],[2097152,[['d94-14.bin',0,4,2,0],['d94-13.bin',2,4,2,0]]],[1048576,[['d94-12.bin',0,1,1,0]]]],
+    [[4194304,[['d95-02.12',0,2,1,0],['d95-01.8',1,2,1,0]]],[0,[]],[4194304,[['d95-06.47',0,4,2,0],['d95-05.45',2,4,2,0]]],[0,[]]],
+    [[2097152,[['e06-03',0,2,1,0],['e06-02',1,2,1,0]]],[1048576,[['e06-01',0,1,1,0]]],[2097152,[['e06-08',0,4,2,0],['e06-07',2,4,2,0]]],[1048576,[['e06-06',0,1,1,0]]]],
+    [[4194304,[['e02-03.12',0,2,1,0],['e02-02.8',1,2,1,0]]],[2097152,[['e02-01.4',0,1,1,0]]],[4194304,[['e02-08.47',0,4,2,0],['e02-07.45',2,4,2,0]]],[2097152,[['e02-06.43',0,1,1,0]]]],
+    [[1048576,[['obj0-0.a08',0,2,1,0],['obj0-1.a20',1,2,1,0]]],[0,[]],[2097152,[['scr0-0.b07',0,4,1,0],['scr0-1.b06',1,4,1,0],['scr0-2.b05',2,4,1,0],['scr0-3.b04',3,4,1,0]]],[1048576,[['scr0-4.b03',0,2,1,0],['scr0-5.b02',1,2,1,0]]]],
+    [[6291456,[['e08-06.12',0,2,1,0],['e08-04.8',1,2,1,0],['e08-05.11',4194304,2,1,0],['e08-03.7',4194305,2,1,0]]],[3145728,[['e08-02.4',0,1,1,0],['e08-01.3',2097152,1,1,0]]],[2097152,[['e08-12.47',0,4,2,0],['e08-11.45',2,4,2,0]]],[1048576,[['e08-10.43',0,1,1,0]]]],
+    [[2097152,[['e10-02.rom',0,2,1,0],['e10-01.rom',1,2,1,0]]],[0,[]],[2097152,[['e10-07.rom',0,4,2,0],['e10-06.rom',2,4,2,0]]],[1048576,[['e10-05.rom',0,1,1,0]]]],
+    [[4194304,[['e11-03.ic12',0,2,1,0],['e11-02.ic8',1,2,1,0]]],[2097152,[['e11-01.ic4',0,1,1,0]]],[4194304,[['e11-08.ic47',0,4,2,0],['e11-07.ic45',2,4,2,0]]],[2097152,[['e11-06.ic43',0,1,1,0]]]],
+    [[6291456,[['e15-04.ic12',0,2,1,0],['e15-02.ic8',1,2,1,0],['e15-03.ic11',4194304,2,1,0],['e15-01.ic7',4194305,2,1,0]]],[0,[]],[6291456,[['e15-10.ic47',0,4,2,0],['e15-08.ic45',2,4,2,0],['e15-09.ic46',4194304,4,2,0],['e15-07.ic44',4194306,4,2,0]]],[0,[]]],
+    [[4194304,[['e21-02.rom',0,2,1,0],['e21-01.rom',1,2,1,0]]],[0,[]],[2097152,[['e21-07.rom',0,4,2,0],['e21-06.rom',2,4,2,0]]],[1048576,[['e21-05.rom',0,1,1,0]]]],
+    [[1048576,[['e28-02.bin',0,2,1,0],['e28-01.bin',1,2,1,0]]],[0,[]],[2097152,[['e28-06.bin',0,4,2,0],['e28-05.bin',2,4,2,0]]],[1048576,[['e28-04.bin',0,1,1,0]]]],
+    [[2097152,[['e29-02.rom',0,2,1,0],['e29-01.rom',1,2,1,0]]],[0,[]],[2097152,[['e29-08.rom',0,4,2,0],['e29-07.rom',2,4,2,0]]],[1048576,[['e29-06.rom',0,1,1,0]]]],
+    [[2097152,[['e29-02.ic8',0,2,1,0],['e29-01.ic12',1,2,1,0]]],[0,[]],[2097152,[['e29-08.ic47',0,4,2,0],['e29-07.ic45',2,4,2,0]]],[1048576,[['e29-06.ic43',0,1,1,0]]]],
+    [[524288,[['e36-03.12',0,2,1,0],['e36-02.8',1,2,1,0]]],[262144,[['e36-01.4',0,1,1,0]]],[1048576,[['e36-07.47',0,4,2,0],['e36-06.45',2,4,2,0]]],[524288,[['e36-05.43',0,1,1,0]]]],
+    [[12582912,[['e44-06.12',0,2,1,0],['e44-04.8',1,2,1,0],['e44-05.11',8388608,2,1,0],['e44-03.7',8388609,2,1,0]]],[6291456,[['e44-02.4',0,1,1,0],['e44-01.3',4194304,1,1,0]]],[6291456,[['e44-14.47',0,4,2,0],['e44-12.45',2,4,2,0],['e44-13.46',4194304,4,2,0],['e44-11.44',4194306,4,2,0]]],[3145728,[['e44-10.43',0,1,1,0],['e44-09.42',2097152,1,1,0]]]],
+    [[8388608,[['e46-06.ic12',0,2,1,0],['e46-04.ic8',1,2,1,0],['e46-05.ic11',4194304,2,1,0],['e46-03.ic7',4194305,2,1,0]]],[4194304,[['e46-02.ic4',0,1,1,0],['e46-01.ic3',2097152,1,1,0]]],[2097152,[['e46-12.ic47',0,4,2,0],['e46-11.ic45',2,4,2,0]]],[1048576,[['e46-10.ic43',0,1,1,0]]]],
+    [[2097152,[['e49-02',0,2,1,0],['e49-01',1,2,1,0]]],[0,[]],[2097152,[['e49-08',0,4,2,0],['e49-07',2,4,2,0]]],[1048576,[['e49-06',0,1,1,0]]]],
+    [[2097152,[['e51-03.12',0,2,1,0],['e51-02.8',1,2,1,0]]],[1048576,[['e51-01.4',0,1,1,0]]],[4194304,[['e51-08.47',0,4,2,0],['e51-07.45',2,4,2,0]]],[2097152,[['e51-06.43',0,1,1,0]]]],
+    [[4194304,[['e61-03.12',0,2,1,0],['e61-02.08',1,2,1,0]]],[2097152,[['e61-01.04',0,1,1,0]]],[4194304,[['e61-09.47',0,4,2,0],['e61-08.45',2,4,2,0]]],[2097152,[['e61-07.43',0,1,1,0]]]],
+    [[4194304,[['obj0-0.8',0,2,1,0],['obj1-0.7',1048576,2,1,0],['obj2-0.6',2097152,2,1,0],['obj3-0.5',3145728,2,1,0],['obj0-1.20',1,2,1,0],['obj1-1.19',1048577,2,1,0],['obj2-1.18',2097153,2,1,0],['obj3-1.17',3145729,2,1,0]]],[2097152,[['obj0-2.32',0,1,1,0],['obj1-2.31',524288,1,1,0],['obj2-2.30',1048576,1,1,0],['obj3-2.29',1572864,1,1,0]]],[4194304,[['scr0-0.7',0,4,1,0],['scr0-1.6',1,4,1,0],['scr0-2.5',2,4,1,0],['scr0-3.4',3,4,1,0],['scr1-0.19',2097152,4,1,0],['scr1-1.18',2097153,4,1,0],['scr1-2.17',2097154,4,1,0],['scr1-3.16',2097155,4,1,0]]],[2097152,[['scr0-4.3',0,2,1,0],['scr0-5.2',1,2,1,0],['scr1-4.15',1048576,2,1,0],['scr1-5.14',1048577,2,1,0]]]]
+  ];
   const PARENT_OF = {"akkanvdr":"spcinv95","arabianmj":"arabianm","arabianmu":"arabianm","arkretrnj":"arkretrn","arkretrnu":"arkretrn","bubblemj":"bubblem","bubblemu":"bubblem","bublbob2o":"bublbob2","bublbob2p":"bublbob2","bubsymphe":"bublbob2","bubsymphj":"bublbob2","bubsymphu":"bublbob2","cbombersj":"cbombers","cbombersp":"cbombers","cleopatro":"cleopatr","dangcurvj":"dangcurv","dariusgj":"dariusg","dariusgu":"dariusg","dendego23k":"dendego2","dendegoa":"dendego","dendegox":"dendego","dungeonm":"lightbr","dungeonmu":"lightbr","elvact2u":"elvactr","elvactrj":"elvactr","gblchmp":"kaiserkn","gekiridnj":"gekiridn","gseekerj":"gseeker","gseekeru":"gseeker","gunbustrj":"gunbustr","gunbustru":"gunbustr","gunlocko":"gunlock","hthero93":"cupfinal","hthero93u":"cupfinal","hthero94":"intcup94","hthero95":"pwrgoal","hthero95a":"pwrgoal","hthero95u":"pwrgoal","kaiserknj":"kaiserkn","ktiger2":"tcobra2","landgeara":"landgear","landgearj":"landgear","landgearja":"landgear","landmakrj":"landmakr","landmakrp":"landmakr","lightbrj":"lightbr","pbobble2j":"pbobble2","pbobble2o":"pbobble2","pbobble2u":"pbobble2","pbobble2x":"pbobble2","pbobble3j":"pbobble3","pbobble3u":"pbobble3","pbobble4j":"pbobble4","pbobble4u":"pbobble4","popnpopj":"popnpop","popnpopu":"popnpop","prmtmfgt":"trstar","prmtmfgto":"trstar","puchicarj":"puchicar","puchicaru":"puchicar","rayforce":"gunlock","rayforcej":"gunlock","ridingfj":"ridingf","ridingfu":"ridingf","ringragej":"ringrage","ringrageu":"ringrage","scfinalso":"scfinals","scfinalsoc":"scfinals","sidebs2j":"sidebs2","sidebs2ja":"sidebs2","sidebs2u":"sidebs2","sidebsj":"sidebs","sidebsja":"sidebs","sidebsjb":"sidebs","spcinv95u":"spcinv95","spcinvdj":"spacedx","superchsj":"superchs","superchsp":"superchs","superchsp2":"superchs","superchsu":"superchs","tcobra2u":"tcobra2","trstarj":"trstar","trstaro":"trstar","trstaroj":"trstar","undrfirej":"undrfire","undrfireu":"undrfire"};
   const base = (name) => String(name || '').replace(/\\/g, '/').split('/').pop().toLowerCase();
   function find(entries, zipName) {
@@ -26855,13 +28520,25 @@
       if (!hi || !lo || !waves.every((w) => w.entry)) continue;
       // ゲーム名は zip の名前(MAME のセット名)で選ぶ: 同じ音源の ROM を、題名の違うゲームが使う事がある
       const o = OVERRIDE[s.hi] || {}, stem = base(zipName).replace(/\.[^.]+$/, ''), mine = s.sets.find((x) => x[0] === stem);
-      return { hi, lo, waves, info: Object.assign({ game: mine ? mine[1] : s.game, boot: DEFAULT_BOOT, hex: true, volume: 0x30 }, o) };
+      // メイン基板: zip の名前のセットを先に、無ければ同じ音源を使うセットを順に見て、メインの ROM が 4 本そろう物
+      let main = null;
+      for (const name of [stem].concat(s.sets.map((x) => x[0]))) {
+        const m = MAINS[name]; if (!m) continue;
+        const roms = m[0].map((n) => by.get(n));
+        if (!roms.every(Boolean)) continue;
+        main = { set: name, roms, top: m[1], height: m[2], rot: m[3], pal12: !!m[4], eeprom: m[5] ? by.get(m[5]) || null : null, extend: !!m[7], lag: m[8], gfx: null };
+        // 絵の ROM が全部そろう時だけ付ける(無ければ文字の面だけ)
+        const g = m[6] >= 0 ? GFX[m[6]] : null;
+        if (g) { const regs = g.map((r) => ({ size: r[0], roms: r[1].map((x) => ({ entry: by.get(x[0]), at: x[1], stride: x[2], group: x[3], swap: !!x[4] })) })); if (regs.every((r) => r.roms.every((x) => x.entry))) main.gfx = regs; }
+        break;
+      }
+      return { hi, lo, waves, main, info: Object.assign({ game: mine ? mine[1] : s.game, boot: DEFAULT_BOOT, hex: true, volume: 0x30 }, o) };
     }
     return null;
   }
   function parentHint(zipName) { const stem = base(zipName).replace(/\.[^.]+$/, ''); return PARENT_OF[stem] || ''; }
   const bytes = (hex) => { const b = []; for (let i = 0; i + 1 < hex.length; i += 2) b.push(parseInt(hex.substr(i, 2), 16)); return b; };
-  Emu.EnsoniqRomSet = { find, parentHint, bytes, SETS, OVERRIDE, DEFAULT_BOOT };
+  Emu.EnsoniqRomSet = { find, parentHint, bytes, SETS, OVERRIDE, DEFAULT_BOOT, MAINS, GFX };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 
 /*
@@ -26869,10 +28546,14 @@
  * 音スレッド(src/audio/nes-worklet-impl.js)が期待する「本体」の形にした物。考え方は ZOOM 音源基板(src/emulator/zsg2/zoomConsole.js)と同じ:
  * メイン基板は動かさず、サウンド基板(ensoniqBoard.js)だけを動かして、自前の「サウンドテスト画面」から指令を送る。
  *
+ * ★メイン基板つき(opts.main がある時。F3 システムのゲーム): メイン CPU(68EC020、f3Main.js)も動かし、ゲームの本物のテストモード画面を出す(f3Video.js。絵の ROM があれば背景とスプライトも)。
+ *   起動の指令が済むまで早送りし、テストスイッチを押してメニューを出した所から始める。指令はゲーム自身が送る(自前の表は、録音の番号を引くのにだけ使う)。
+ *   操作: 十字 = レバー、A = ボタン 1、B = ボタン 2、Start = スタート、Select = テストスイッチ
+ *
  * 操作(setController の bits): 左右 = 番号を 1 ずつ、上下 = 16 ずつ、A = 鳴らす、B = 止める、Start = 基板のリセット
  * 番号と指令の対応は、ゲームごとの表(ensoniqRomSet.js の cmds。ゲームのサウンドテストが送る物を実測で控えた)。
  *
- * 音: ES5505 の 4 組の出力を足した物。ES5510(エフェクト)はまだ通していない。
+ * 音: ES5505 の 4 組の出力を足した物。1 組目はそのまま、残り 3 組は ES5510(エフェクト。es5510.js)を通す。
  *
  * 録音(rec): フレームごとに { n0, n1, w: [キー, 値, n, …] }(n = 音源の通算サンプル番号。キーは src/vgm/ensoniqRecord.js の冒頭)。
  *   0xFFFF は「ここで指令を送った」の印(値 = 番号)。最初のフレームには、それまでの ES5510 への書き込み全部と、ES5505 の今のレジスタを置く
@@ -26904,18 +28585,22 @@
       this.underruns = 0;
       this.pad = [0, 0]; this.prevPad = 0; this.repeat = 0;
       this.code = this.first;
+      this.mainOpt = opts.main && Emu.createF3Main && Emu.createF3Video ? opts.main : null;
+      this.eeprom = null;                                  // メイン基板の EEPROM(リセットをまたいで持つ)
       this._boot();
     }
     _boot() {
       const o = this.opts, Bd = Emu.ENSONIQ_BOARD, hexBytes = Emu.EnsoniqRomSet.bytes;
       this.hist = [];
-      this.board = Emu.createEnsoniqBoard({ program: o.program, wave: o.wave, onWrite: (kind, a, b, c) => this._write(kind, a, b, c) });
+      const chip0 = new Emu.Es5505Audio(Bd.CPU_HZ, o.wave); chip0.attachEsp();   // ES5510(エフェクト)つき
+      this.board = Emu.createEnsoniqBoard({ program: o.program, wave: o.wave, chip: chip0, startHeld: !!this.mainOpt, onWrite: (kind, a, b, c) => this._write(kind, a, b, c) });
       const chip = this.chip = this.board.chip;
       this.chipRate = Bd.CPU_HZ / Bd.CYCLES_PER_SAMPLE;
       this.framePeriod = this.chipRate / FPS;
       this.acc = 0; this.frameAcc = 0; this.prevL = 0; this.prevR = 0;
       this.frameCount = 0; this.playing = 0; this.playFrames = 0;
       this.ring = 0;
+      if (this.mainOpt) return this._bootMain();
       const vol = this.info.volume === undefined ? 0x30 : this.info.volume;
       for (let i = 0; i < 4; i++) this.board.dpram[0x7f8 + i] = vol;          // メイン CPU が置く音量(サウンドテストの既定)
       // 起動: 基板が立ち上がるのを待ってから、メイン CPU が起動時に送る指令を順に送る(音は出さずに先へ進める)
@@ -26925,6 +28610,64 @@
       void chip;
       this._draw();
     }
+    // ── メイン基板つき ──
+    _bootMain() {
+      const m = this.mainOpt;
+      if (!this.eeprom) { this.eeprom = new Uint16Array(64).fill(0xffff); if (m.eeprom) for (let i = 0; i < 64 && i * 2 + 1 < m.eeprom.length; i++) this.eeprom[i] = m.eeprom[i * 2] << 8 | m.eeprom[i * 2 + 1]; }
+      this.pkt = []; this.seenEffect = false; this.lastCmdFrame = 0;
+      const f3 = this.f3 = Emu.createF3Main({ program: m.program, sound: this.board, eeprom: this.eeprom, onDpram: (a, v) => this._mainWrite(a, v) });
+      this.video = Emu.createF3Video(f3, { top: m.top, height: m.height, pal12: m.pal12, extend: m.extend, lag: m.lag, gfx: m.gfx || null });
+      this.rot = m.rot || 0;
+      const vw = this.video.width, vh = this.video.height;
+      this.vbuf = new Uint32Array(vw * vh);
+      this.frameWidth = this.rot ? vh : vw; this.frameHeight = this.rot ? vw : vh;
+      this.frame = this.rot ? new Uint32Array(vw * vh) : this.vbuf;
+      this.frameRate = Emu.F3_MAIN.MAIN_HZ / Emu.F3_MAIN.FRAME_CYCLES;
+      this.mainFrame = 0;
+      // 起動の指令(エフェクトの番号まで)が済むまで早送り → テストスイッチを押す。それより前に押しても効かない(実測)
+      const runFrames = (n) => { const end = f3.frame + n; while (f3.frame < end) f3.runSample(); };
+      let guard = 2400;
+      while (guard-- > 0 && !(this.seenEffect && f3.frame > this.lastCmdFrame + 240)) runFrames(1);   // 指令が 4 秒途絶えたら起動は済んだとみなす(エフェクトの設定が 3 秒後に続くゲームがある)
+      f3.inp.system &= ~0x02; runFrames(6); f3.inp.system |= 0x02; runFrames(12);
+      this.mainFrame = f3.frame; this.playing = 0;
+      this._draw();
+    }
+    // メイン CPU が共有 RAM に書いた: 書き込み位置(0x481)が動いたら、そこまでのバイトを指令として読む(録音の印と、起動の進み具合)
+    _mainWrite(a, v) {
+      if (a < RING) { this.pkt.push(v); return; }
+      if (a !== 0x481) return;
+      const b = this.pkt; this.pkt = [];
+      let play = -1, at = -1;
+      for (let i = 0; i < b.length && b[i] > 0; i += b[i]) {
+        const c = b[i + 1];
+        if (c === 0x20 || c === 0x21) this.seenEffect = true;
+        if (c === 0x81 && play < 0) { play = b[i + 2]; at = i; } else if (c === 0x8D && play < 0) { play = b[i + 2]; at = i; }
+      }
+      if (this.f3) this.lastCmdFrame = this.f3.frame;
+      if (play < 0) return;
+      // 番号: 表のあるゲームは、サウンドテストの番号を引く(送ったバイト列が同じ物)。無ければ指令の中の番号
+      let no = play;
+      if (this.cmds) { const hex = b.slice(at).map((x) => x.toString(16).padStart(2, '0')).join(''), k = this.cmds.indexOf(hex); if (k >= 0) no = k + 1; }
+      this.playing = no; this.playFrames = 0;
+      if (this.rec) this.rec.cur.w.push(KEY_MARK, no, this.chip.nat);
+    }
+    _inputMain() {
+      const b = this.pad[0] | this.pad[1], inp = this.f3.inp;
+      inp.in0 = 0xffff & ~((b & 0x01 ? 0x01 : 0) | (b & 0x02 ? 0x02 : 0) | (b & 0x08 ? 0x1000 : 0));
+      inp.in1 = 0xffff & ~((b & 0x10 ? 0x01 : 0) | (b & 0x20 ? 0x02 : 0) | (b & 0x40 ? 0x04 : 0) | (b & 0x80 ? 0x08 : 0));
+      inp.system = 0xfe & ~(b & 0x04 ? 0x02 : 0);
+    }
+    _drawMain() {
+      const v = this.video, w = v.width, h = v.height, src = this.vbuf, dst = this.frame;
+      // 背景やスプライトを描く場面は重い(音スレッドの負荷が 2 割ほど増える)ので、1 フレームおきに描く。文字だけの場面(テストモード)は毎フレーム
+      this.drawSkip = !this.drawSkip;
+      if (v.busy && this.drawSkip) return;
+      v.render(src);
+      if (this.rot === 90) { for (let y = 0; y < w; y++) for (let x = 0; x < h; x++) dst[y * h + x] = src[(h - 1 - x) * w + y]; }
+      else if (this.rot === 270) { for (let y = 0; y < w; y++) for (let x = 0; x < h; x++) dst[y * h + x] = src[x * w + (w - 1 - y)]; }
+      else if (this.rot === 180) { for (let i = 0, n = w * h; i < n; i++) dst[i] = src[n - 1 - i]; }
+    }
+
     // 基板からの書き込み → 録音の「キー」
     _write(kind, a, b, c) {
       let key = -1, value = b;
@@ -26934,7 +28677,7 @@
       else if (kind === 'O') { key = 0x2000; value = a; this.hist.push(key, value, this.chip ? this.chip.nat : 0); }
       if (key >= 0 && this.rec) this.rec.cur.w.push(key, value, this.chip.nat);
     }
-    static describe(c) { return 'Taito Ensoniq sound board (ES5505)' + (c.info.game ? ' — ' + c.info.game : ''); }
+    static describe(c) { return (c.mainOpt ? 'Taito F3 (test mode, ES5505)' : 'Taito Ensoniq sound board (ES5505)') + (c.info.game ? ' — ' + c.info.game : ''); }
 
     get hasBattery() { return false; }
     setSampleRate(sr) { this.sampleRate = sr > 0 ? sr : 48000; }
@@ -26955,20 +28698,34 @@
       for (const b of bytes) { d[this.ring] = b; this.ring = (this.ring + 1) % RING; }
       d[0x480] = (this.ring * 2) >> 8; d[0x481] = (this.ring * 2) & 0xff;
     }
+    // 前に送った音を止める指令。ゲームのサウンドテストは、次の音を鳴らす前に必ずこれを送る(MAME で確かめた):
+    //   曲 [03 81 nn] → [04 86 nn 00][03 82 nn]、効果音 [06 8E a b d e] → [05 8F a b d]。送らないと曲が重なり、鳴り続ける効果音が止まらない
+    _stopOf(bytes) {
+      const out = [];
+      for (let i = 0; i < bytes.length && bytes[i] > 0; i += bytes[i]) {
+        if (bytes[i + 1] === 0x81) out.push(4, 0x86, bytes[i + 2], 0, 3, 0x82, bytes[i + 2]);
+        else if (bytes[i + 1] === 0x8E) out.push(5, 0x8F, bytes[i + 2], bytes[i + 3], bytes[i + 4]);
+      }
+      return out;
+    }
     _send(no) {
-      if (this.cmds) { const hex = this.cmds[no - 1]; if (!hex) return; this._sendBytes(Emu.EnsoniqRomSet.bytes(hex)); }
-      else { if (this.playing) this._sendBytes([4, 0x86, this.playing, 0, 3, 0x82, this.playing]); this._sendBytes([3, 0x81, no, 4, 0x86, no, 0x70]); }
+      let bytes;
+      if (this.cmds) { const hex = this.cmds[no - 1]; if (!hex) return; bytes = Emu.EnsoniqRomSet.bytes(hex); }
+      else bytes = [3, 0x81, no, 4, 0x86, no, 0x70];
+      if (this.lastStop && this.lastStop.length) this._sendBytes(this.lastStop);
+      this._sendBytes(bytes); this.lastStop = this._stopOf(bytes);
       this.playing = no; this.playFrames = 0;
       if (this.rec) this.rec.cur.w.push(KEY_MARK, no, this.chip.nat);
     }
     _stop() {
+      if (this.lastStop && this.lastStop.length) this._sendBytes(this.lastStop);
       if (this.cmds) for (const no of this.info.stop || []) { const hex = this.cmds[no - 1]; if (hex) this._sendBytes(Emu.EnsoniqRomSet.bytes(hex)); }
-      else if (this.playing) this._sendBytes([4, 0x86, this.playing, 0, 3, 0x82, this.playing]);       // ゲームが曲を止める時に送る形(音量 0 → 停止)
-      this.playing = 0;
+      this.lastStop = null; this.playing = 0;
     }
     setController(port, bits) { this.pad[port & 1] = bits | 0; }
     setTurboRate() {}
     _input() {
+      if (this.f3) return this._inputMain();
       const b = this.pad[0] | this.pad[1], hit = b & ~this.prevPad, lo = this.first, hi = this.last;
       const dir = b & 0xF0;
       let move = hit & 0xF0;
@@ -26995,6 +28752,7 @@
     }
     _num(n) { return this.info.hex ? n.toString(16).toUpperCase().padStart(2, '0') : String(n).padStart(2, '0'); }
     _draw() {
+      if (this.f3) return this._drawMain();
       const f = this.frame, vs = this.chip.v;
       f.fill(COL.bg);
       const two = (n) => String(n).padStart(2, '0');
@@ -27027,6 +28785,7 @@
     _stepChip() {
       const chip = this.chip;
       this.prevL = chip.outL; this.prevR = chip.outR;
+      if (this.f3) { this.f3.runSample(); if (this.f3.frame !== this.mainFrame) { this.mainFrame = this.f3.frame; this._frameEnd(); } return; }   // メイン基板つき: 垂直帰線ごとに 1 フレーム
       this.board.run(1);
       if (++this.frameAcc >= this.framePeriod) { this.frameAcc -= this.framePeriod; this._frameEnd(); }
     }
@@ -27153,7 +28912,11 @@
             } else if (machine === 'ensoniq') {
               // タイトーの Ensoniq 音源基板(サウンドテスト画面): サウンドプログラム(0xC00000 から見える並び)と波形(16bit の語の列)、ゲームごとの表
               const o = m.ensoniq || {};
-              nes = new MML.Emu.EnsoniqConsole(null, { program: new Uint8Array(o.program), wave: new Int16Array(o.wave), info: o.info || {} });
+              // main があれば(F3 システム)メイン基板も動かして、本物のテストモード画面を出す
+              const u8 = (b) => (b ? new Uint8Array(b) : null);
+              const mn = o.main ? Object.assign({}, o.main, { program: new Uint8Array(o.main.program), eeprom: u8(o.main.eeprom),
+                gfx: o.main.gfx ? { spr: u8(o.main.gfx.spr), sprHi: u8(o.main.gfx.sprHi), tile: u8(o.main.gfx.tile), tileHi: u8(o.main.gfx.tileHi) } : null }) : null;
+              nes = new MML.Emu.EnsoniqConsole(null, { program: new Uint8Array(o.program), wave: new Int16Array(o.wave), info: o.info || {}, main: mn });
               info = MML.Emu.EnsoniqConsole.describe(nes);
             } else {
               nes = new MML.Emu.NesConsole(new Uint8Array(m.rom), { bios: m.bios ? new Uint8Array(m.bios) : null });

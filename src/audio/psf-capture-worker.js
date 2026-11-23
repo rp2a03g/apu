@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-23 00:12:00
+ * Built by tools/build-capture-workers.ps1 at 2026-11-23 10:43:13
  *
  * regsOnly capture worker bundle (psfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.psfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.psfCaptureBuiltAt = '2026-11-23 00:12:00';
+  MML.WorkerBundles.psfCaptureBuiltAt = '2026-11-23 10:43:13';
   MML.WorkerBundles.psfCapture = function () {
 /*
  * PSF (Portable Sound Format) 容器 / PS-EXE 解析
@@ -5257,6 +5257,7 @@
  */
 (function (global) {
   'use strict';
+  const KeyboardDisplayLiveEmpty = Object.freeze([]);   // ライブ表示で「書き込みの無いフレーム」に共有する空の列
   const MML = global.MML = global.MML || {};
   const UI = MML.UI = MML.UI || {};
 
@@ -7806,7 +7807,7 @@
     const E = MML.Emu;
     const chip = E.Es5505Audio ? new E.Es5505Audio(15238090, rom && rom.length ? rom : new Int16Array(0)) : null;
     if (chip) chip.captureOnly = true;
-    let started = false;
+    let started = false, prevSnap = null;
     return (writes) => {
       if (!chip) return null;
       for (const w of writes) {
@@ -7817,7 +7818,15 @@
         let guard = 4096; while (chip.nat < w.n && guard-- > 0) chip.clock();   // 1 フレームは 496 サンプルほど
         if (key !== 0xFFFF) chip.writeKey(key, w.value);
       }
-      return E.snapshotEs5505(chip);
+      // 前のフレームと中身が同じ声は、前の物を使い回す(ライブ表示は何十分も積むので、毎フレーム 32 声ぶんを新しく持つとメモリが増え続ける)
+      const snap = E.snapshotEs5505(chip);
+      if (prevSnap) for (let i = 0; i < snap.length; i++) {
+        const a = snap[i], b = prevSnap[i];
+        if (b && a.active === b.active && a.rawVol === b.rawVol && a.panL === b.panL && a.panR === b.panR && a.rate === b.rate && a.seq === b.seq && a.loop === b.loop &&
+          a.pitchHz === b.pitchHz && a.sampleHash === b.sampleHash && a.sampleKind === b.sampleKind && a.pitchManual === b.pitchManual && a.lenSec === b.lenSec) snap[i] = b;
+      }
+      prevSnap = snap;
+      return snap;
     };
   }
   function makePceStepper() {
@@ -10867,16 +10876,21 @@
 
     // 1フレームぶんの書き込みを末尾へ積む。戻り値はそのフレームのチャンネル一覧(extractChannels の形)
     liveAppendFrame(writes) {
+      const LIVE_NO_WRITES = KeyboardDisplayLiveEmpty;
       const lr = this._liveRoll, st = this._state;
       if (!lr || !st) return null;
       writes = writes || [];
       const f = st.totalFrames;
-      for (const w of writes) if (!w.read) lr.regs[w.addr] = w.value;
+      // PCM 音源の基板(CPS3、ZSG-2、ES5505)は 1 秒に何万〜十数万件も書く。その列は専用のステッパ(下)が読むだけで、レジスタ像にも書き込みの控えにも要らない。
+      // 控えると毎秒数 MB ずつ増えてブラウザがメモリ不足で落ちる(2026-11-23)ので、番地 0x30000 以上は通すだけにする
+      let heavy = false;
+      for (const w of writes) { if (w.addr >= 0x30000) { heavy = true; continue; } if (!w.read) lr.regs[w.addr] = w.value; }
+      const kept = heavy ? writes.filter((w) => w.addr < 0x30000) : writes;
       // DPCM の通番/終了は $4015 を書いた時点のレジスタで決まるので、書き込みをもう一度なぞる(像の順序は $4010-13 → $4015)
       { const d = lr.steppers.dmc(writes, f, lr.regs); this._extraSnaps.dmcSeq[f] = d.seq; this._extraSnaps.dmcEnd[f] = d.end; }
-      st.writeLog[f] = writes;
+      st.writeLog[f] = kept.length ? kept : LIVE_NO_WRITES;
       // capture.js と同じ: 書き込みの無いフレームは前のスナップショットを共有する(メモリ)
-      st.regSnapshots[f] = (f > 0 && writes.length === 0) ? st.regSnapshots[f - 1] : Object.assign({}, lr.regs);
+      st.regSnapshots[f] = (f > 0 && kept.length === 0) ? st.regSnapshots[f - 1] : Object.assign({}, lr.regs);
       st.totalFrames = f + 1;
       const ex = this._extraSnaps;
       if (lr.steppers.vrc7) ex.vrc7[f] = lr.steppers.vrc7(writes);

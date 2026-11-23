@@ -647,6 +647,7 @@
   // 出力レートは クロック / 512(32 声。端数つき)。ES5510 への書き込み(キー 0x1000〜)は、今は読み飛ばす
   function makeEs5505Adapter(info) {
     const chip = new Emu.Es5505Audio(info.clock, new Int16Array(0));
+    if (info.flags & 1) chip.attachEsp();   // ES5510 への書き込みを含む VGM: エフェクトを通す
     const rate = info.clock / 512, perVgm = rate / VGM_RATE, loopN = info.loopLenN || 0;
     const natOf = (pos) => Math.floor(pos * rate / VGM_RATE);
     const gs = chip.getState.bind(chip), ss = chip.setState.bind(chip);

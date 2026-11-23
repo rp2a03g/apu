@@ -3,10 +3,14 @@
  * 音スレッド(src/audio/nes-worklet-impl.js)が期待する「本体」の形にした物。考え方は ZOOM 音源基板(src/emulator/zsg2/zoomConsole.js)と同じ:
  * メイン基板は動かさず、サウンド基板(ensoniqBoard.js)だけを動かして、自前の「サウンドテスト画面」から指令を送る。
  *
+ * ★メイン基板つき(opts.main がある時。F3 システムのゲーム): メイン CPU(68EC020、f3Main.js)も動かし、ゲームの本物のテストモード画面を出す(f3Video.js。絵の ROM があれば背景とスプライトも)。
+ *   起動の指令が済むまで早送りし、テストスイッチを押してメニューを出した所から始める。指令はゲーム自身が送る(自前の表は、録音の番号を引くのにだけ使う)。
+ *   操作: 十字 = レバー、A = ボタン 1、B = ボタン 2、Start = スタート、Select = テストスイッチ
+ *
  * 操作(setController の bits): 左右 = 番号を 1 ずつ、上下 = 16 ずつ、A = 鳴らす、B = 止める、Start = 基板のリセット
  * 番号と指令の対応は、ゲームごとの表(ensoniqRomSet.js の cmds。ゲームのサウンドテストが送る物を実測で控えた)。
  *
- * 音: ES5505 の 4 組の出力を足した物。ES5510(エフェクト)はまだ通していない。
+ * 音: ES5505 の 4 組の出力を足した物。1 組目はそのまま、残り 3 組は ES5510(エフェクト。es5510.js)を通す。
  *
  * 録音(rec): フレームごとに { n0, n1, w: [キー, 値, n, …] }(n = 音源の通算サンプル番号。キーは src/vgm/ensoniqRecord.js の冒頭)。
  *   0xFFFF は「ここで指令を送った」の印(値 = 番号)。最初のフレームには、それまでの ES5510 への書き込み全部と、ES5505 の今のレジスタを置く
@@ -38,18 +42,22 @@
       this.underruns = 0;
       this.pad = [0, 0]; this.prevPad = 0; this.repeat = 0;
       this.code = this.first;
+      this.mainOpt = opts.main && Emu.createF3Main && Emu.createF3Video ? opts.main : null;
+      this.eeprom = null;                                  // メイン基板の EEPROM(リセットをまたいで持つ)
       this._boot();
     }
     _boot() {
       const o = this.opts, Bd = Emu.ENSONIQ_BOARD, hexBytes = Emu.EnsoniqRomSet.bytes;
       this.hist = [];
-      this.board = Emu.createEnsoniqBoard({ program: o.program, wave: o.wave, onWrite: (kind, a, b, c) => this._write(kind, a, b, c) });
+      const chip0 = new Emu.Es5505Audio(Bd.CPU_HZ, o.wave); chip0.attachEsp();   // ES5510(エフェクト)つき
+      this.board = Emu.createEnsoniqBoard({ program: o.program, wave: o.wave, chip: chip0, startHeld: !!this.mainOpt, onWrite: (kind, a, b, c) => this._write(kind, a, b, c) });
       const chip = this.chip = this.board.chip;
       this.chipRate = Bd.CPU_HZ / Bd.CYCLES_PER_SAMPLE;
       this.framePeriod = this.chipRate / FPS;
       this.acc = 0; this.frameAcc = 0; this.prevL = 0; this.prevR = 0;
       this.frameCount = 0; this.playing = 0; this.playFrames = 0;
       this.ring = 0;
+      if (this.mainOpt) return this._bootMain();
       const vol = this.info.volume === undefined ? 0x30 : this.info.volume;
       for (let i = 0; i < 4; i++) this.board.dpram[0x7f8 + i] = vol;          // メイン CPU が置く音量(サウンドテストの既定)
       // 起動: 基板が立ち上がるのを待ってから、メイン CPU が起動時に送る指令を順に送る(音は出さずに先へ進める)
@@ -59,6 +67,64 @@
       void chip;
       this._draw();
     }
+    // ── メイン基板つき ──
+    _bootMain() {
+      const m = this.mainOpt;
+      if (!this.eeprom) { this.eeprom = new Uint16Array(64).fill(0xffff); if (m.eeprom) for (let i = 0; i < 64 && i * 2 + 1 < m.eeprom.length; i++) this.eeprom[i] = m.eeprom[i * 2] << 8 | m.eeprom[i * 2 + 1]; }
+      this.pkt = []; this.seenEffect = false; this.lastCmdFrame = 0;
+      const f3 = this.f3 = Emu.createF3Main({ program: m.program, sound: this.board, eeprom: this.eeprom, onDpram: (a, v) => this._mainWrite(a, v) });
+      this.video = Emu.createF3Video(f3, { top: m.top, height: m.height, pal12: m.pal12, extend: m.extend, lag: m.lag, gfx: m.gfx || null });
+      this.rot = m.rot || 0;
+      const vw = this.video.width, vh = this.video.height;
+      this.vbuf = new Uint32Array(vw * vh);
+      this.frameWidth = this.rot ? vh : vw; this.frameHeight = this.rot ? vw : vh;
+      this.frame = this.rot ? new Uint32Array(vw * vh) : this.vbuf;
+      this.frameRate = Emu.F3_MAIN.MAIN_HZ / Emu.F3_MAIN.FRAME_CYCLES;
+      this.mainFrame = 0;
+      // 起動の指令(エフェクトの番号まで)が済むまで早送り → テストスイッチを押す。それより前に押しても効かない(実測)
+      const runFrames = (n) => { const end = f3.frame + n; while (f3.frame < end) f3.runSample(); };
+      let guard = 2400;
+      while (guard-- > 0 && !(this.seenEffect && f3.frame > this.lastCmdFrame + 240)) runFrames(1);   // 指令が 4 秒途絶えたら起動は済んだとみなす(エフェクトの設定が 3 秒後に続くゲームがある)
+      f3.inp.system &= ~0x02; runFrames(6); f3.inp.system |= 0x02; runFrames(12);
+      this.mainFrame = f3.frame; this.playing = 0;
+      this._draw();
+    }
+    // メイン CPU が共有 RAM に書いた: 書き込み位置(0x481)が動いたら、そこまでのバイトを指令として読む(録音の印と、起動の進み具合)
+    _mainWrite(a, v) {
+      if (a < RING) { this.pkt.push(v); return; }
+      if (a !== 0x481) return;
+      const b = this.pkt; this.pkt = [];
+      let play = -1, at = -1;
+      for (let i = 0; i < b.length && b[i] > 0; i += b[i]) {
+        const c = b[i + 1];
+        if (c === 0x20 || c === 0x21) this.seenEffect = true;
+        if (c === 0x81 && play < 0) { play = b[i + 2]; at = i; } else if (c === 0x8D && play < 0) { play = b[i + 2]; at = i; }
+      }
+      if (this.f3) this.lastCmdFrame = this.f3.frame;
+      if (play < 0) return;
+      // 番号: 表のあるゲームは、サウンドテストの番号を引く(送ったバイト列が同じ物)。無ければ指令の中の番号
+      let no = play;
+      if (this.cmds) { const hex = b.slice(at).map((x) => x.toString(16).padStart(2, '0')).join(''), k = this.cmds.indexOf(hex); if (k >= 0) no = k + 1; }
+      this.playing = no; this.playFrames = 0;
+      if (this.rec) this.rec.cur.w.push(KEY_MARK, no, this.chip.nat);
+    }
+    _inputMain() {
+      const b = this.pad[0] | this.pad[1], inp = this.f3.inp;
+      inp.in0 = 0xffff & ~((b & 0x01 ? 0x01 : 0) | (b & 0x02 ? 0x02 : 0) | (b & 0x08 ? 0x1000 : 0));
+      inp.in1 = 0xffff & ~((b & 0x10 ? 0x01 : 0) | (b & 0x20 ? 0x02 : 0) | (b & 0x40 ? 0x04 : 0) | (b & 0x80 ? 0x08 : 0));
+      inp.system = 0xfe & ~(b & 0x04 ? 0x02 : 0);
+    }
+    _drawMain() {
+      const v = this.video, w = v.width, h = v.height, src = this.vbuf, dst = this.frame;
+      // 背景やスプライトを描く場面は重い(音スレッドの負荷が 2 割ほど増える)ので、1 フレームおきに描く。文字だけの場面(テストモード)は毎フレーム
+      this.drawSkip = !this.drawSkip;
+      if (v.busy && this.drawSkip) return;
+      v.render(src);
+      if (this.rot === 90) { for (let y = 0; y < w; y++) for (let x = 0; x < h; x++) dst[y * h + x] = src[(h - 1 - x) * w + y]; }
+      else if (this.rot === 270) { for (let y = 0; y < w; y++) for (let x = 0; x < h; x++) dst[y * h + x] = src[x * w + (w - 1 - y)]; }
+      else if (this.rot === 180) { for (let i = 0, n = w * h; i < n; i++) dst[i] = src[n - 1 - i]; }
+    }
+
     // 基板からの書き込み → 録音の「キー」
     _write(kind, a, b, c) {
       let key = -1, value = b;
@@ -68,7 +134,7 @@
       else if (kind === 'O') { key = 0x2000; value = a; this.hist.push(key, value, this.chip ? this.chip.nat : 0); }
       if (key >= 0 && this.rec) this.rec.cur.w.push(key, value, this.chip.nat);
     }
-    static describe(c) { return 'Taito Ensoniq sound board (ES5505)' + (c.info.game ? ' — ' + c.info.game : ''); }
+    static describe(c) { return (c.mainOpt ? 'Taito F3 (test mode, ES5505)' : 'Taito Ensoniq sound board (ES5505)') + (c.info.game ? ' — ' + c.info.game : ''); }
 
     get hasBattery() { return false; }
     setSampleRate(sr) { this.sampleRate = sr > 0 ? sr : 48000; }
@@ -89,20 +155,34 @@
       for (const b of bytes) { d[this.ring] = b; this.ring = (this.ring + 1) % RING; }
       d[0x480] = (this.ring * 2) >> 8; d[0x481] = (this.ring * 2) & 0xff;
     }
+    // 前に送った音を止める指令。ゲームのサウンドテストは、次の音を鳴らす前に必ずこれを送る(MAME で確かめた):
+    //   曲 [03 81 nn] → [04 86 nn 00][03 82 nn]、効果音 [06 8E a b d e] → [05 8F a b d]。送らないと曲が重なり、鳴り続ける効果音が止まらない
+    _stopOf(bytes) {
+      const out = [];
+      for (let i = 0; i < bytes.length && bytes[i] > 0; i += bytes[i]) {
+        if (bytes[i + 1] === 0x81) out.push(4, 0x86, bytes[i + 2], 0, 3, 0x82, bytes[i + 2]);
+        else if (bytes[i + 1] === 0x8E) out.push(5, 0x8F, bytes[i + 2], bytes[i + 3], bytes[i + 4]);
+      }
+      return out;
+    }
     _send(no) {
-      if (this.cmds) { const hex = this.cmds[no - 1]; if (!hex) return; this._sendBytes(Emu.EnsoniqRomSet.bytes(hex)); }
-      else { if (this.playing) this._sendBytes([4, 0x86, this.playing, 0, 3, 0x82, this.playing]); this._sendBytes([3, 0x81, no, 4, 0x86, no, 0x70]); }
+      let bytes;
+      if (this.cmds) { const hex = this.cmds[no - 1]; if (!hex) return; bytes = Emu.EnsoniqRomSet.bytes(hex); }
+      else bytes = [3, 0x81, no, 4, 0x86, no, 0x70];
+      if (this.lastStop && this.lastStop.length) this._sendBytes(this.lastStop);
+      this._sendBytes(bytes); this.lastStop = this._stopOf(bytes);
       this.playing = no; this.playFrames = 0;
       if (this.rec) this.rec.cur.w.push(KEY_MARK, no, this.chip.nat);
     }
     _stop() {
+      if (this.lastStop && this.lastStop.length) this._sendBytes(this.lastStop);
       if (this.cmds) for (const no of this.info.stop || []) { const hex = this.cmds[no - 1]; if (hex) this._sendBytes(Emu.EnsoniqRomSet.bytes(hex)); }
-      else if (this.playing) this._sendBytes([4, 0x86, this.playing, 0, 3, 0x82, this.playing]);       // ゲームが曲を止める時に送る形(音量 0 → 停止)
-      this.playing = 0;
+      this.lastStop = null; this.playing = 0;
     }
     setController(port, bits) { this.pad[port & 1] = bits | 0; }
     setTurboRate() {}
     _input() {
+      if (this.f3) return this._inputMain();
       const b = this.pad[0] | this.pad[1], hit = b & ~this.prevPad, lo = this.first, hi = this.last;
       const dir = b & 0xF0;
       let move = hit & 0xF0;
@@ -129,6 +209,7 @@
     }
     _num(n) { return this.info.hex ? n.toString(16).toUpperCase().padStart(2, '0') : String(n).padStart(2, '0'); }
     _draw() {
+      if (this.f3) return this._drawMain();
       const f = this.frame, vs = this.chip.v;
       f.fill(COL.bg);
       const two = (n) => String(n).padStart(2, '0');
@@ -161,6 +242,7 @@
     _stepChip() {
       const chip = this.chip;
       this.prevL = chip.outL; this.prevR = chip.outR;
+      if (this.f3) { this.f3.runSample(); if (this.f3.frame !== this.mainFrame) { this.mainFrame = this.f3.frame; this._frameEnd(); } return; }   // メイン基板つき: 垂直帰線ごとに 1 フレーム
       this.board.run(1);
       if (++this.frameAcc >= this.framePeriod) { this.frameAcc -= this.framePeriod; this._frameEnd(); }
     }

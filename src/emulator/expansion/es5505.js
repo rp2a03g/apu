@@ -10,6 +10,8 @@
   'use strict';
   const MML = root.MML = root.MML || {}, Emu = MML.Emu = MML.Emu || {};
   const M = 0x7fffffff;
+  // ES5510 とのつなぎ(MAME の taito_en.cpp / esqpump.cpp と同じ尺度): 入力 = 20bit の値 ÷ 2^19 × 0.18 × 1.3125 × 32768、出力はその逆
+  const ESP_IN = 0.18 * 1.3125 * 32768 / 524288, ESP_OUT = 0.18 * 1.3125 * 32768;
   const VOL_TAB = new Int32Array(256);
   for (let i = 0; i < 256; i++) VOL_TAB[i] = (((i & 15) | 16) << 11) >>> (16 - (i >> 4));
   const lp = (out, cutoff, inp) => Math.trunc((cutoff >> 4) * (out - inp) / 4096) + inp;
@@ -26,6 +28,8 @@
       this.vol = new Array(32).fill(1);
       this.out = new Float64Array(8);
       this.captureOnly = false;          // true で音を作らない(位置と停止だけ進める)
+      this.esp = null;                   // 後段の ES5510(attachEsp で付ける)。付いていれば、出力の組 1〜3 はここを通る
+      this.espBypass = false;            // true で ES5510 を通さず、4 組を足すだけにする(聴き比べ用)
       this.reset();
     }
     reset() {
@@ -183,6 +187,8 @@
       return r;
     }
 
+    /** 後段の ES5510 を付ける(タイトーの基板のつなぎ方: 組 0 はそのまま出力へ、組 1〜3 が ES5510 の入力 ser0〜2、ES5510 の ser3 が出力) */
+    attachEsp() { if (!this.esp && Emu.createEs5510) { this.esp = Emu.createEs5510(); this._espIn = new Int16Array(6); } return this.esp; }
     // ── VGM(規格外 ENSX)と録音の「キー」での書き込み ──
     //   0x000-0x00F = レジスタ(16bit)、0x100+レジスタ = 上位バイトだけ、0x200+レジスタ = 下位バイトだけ、
     //   0x400+声 = 波形のバンク(語の番地の上位。値 × 0x100000 語)、0x2200 = 2 声の中身を入れ替える(上位/下位バイトが声の番号)、0x2201 = その声を止める
@@ -194,6 +200,8 @@
       else if (key >= 0x400 && key < 0x420) this.setBank(key & 31, (value & 0xff) * 0x100000);
       else if (key === 0x2200) { const a = value >> 8 & 31, b = value & 31, t = this.v[a]; this.v[a] = this.v[b]; this.v[b] = t; }
       else if (key === 0x2201) this.v[value & 31].control |= 1;
+      else if (key >= 0x1000 && key < 0x1100) { if (this.esp) this.esp.hostW(key - 0x1000, value); }
+      else if (key === 0x2000) { if (this.esp) this.esp.halted = !!value; }
     }
     queueWrite(delay, key, value) {
       if (delay <= 0 && this.qHead >= this.q.length) { this.writeKey(key, value); return; }
@@ -219,11 +227,12 @@
     }
     mixSample() { return { left: this.outL, right: this.outR }; }
     getState() {
-      return { v: this.v.map((v) => Object.assign({}, v)), page: this.page, active: this.active, irqv: this.irqv, mode: this.mode, nat: this.nat, outL: this.outL, outR: this.outR, q: this.q.slice(this.qHead) };
+      return { v: this.v.map((v) => Object.assign({}, v)), page: this.page, active: this.active, irqv: this.irqv, mode: this.mode, nat: this.nat, outL: this.outL, outR: this.outR, q: this.q.slice(this.qHead), esp: this.esp ? this.esp.getState() : null };
     }
     setState(s) {
       this.v = s.v.map((v) => Object.assign({}, v)); this.page = s.page; this.active = s.active; this.irqv = s.irqv; this.mode = s.mode; this.nat = s.nat;
       this.outL = s.outL; this.outR = s.outR; this.q = s.q.slice(); this.qHead = 0;
+      if (this.esp && s.esp) this.esp.setState(s.esp);
     }
     clock() {
       if (this.qHead < this.q.length) this._drain();
@@ -273,8 +282,16 @@
         // 割り込みの印: ベクタが空いていれば声の番号を入れる
         if ((v.control & 0x80) && (this.irqv & 0x80)) { this.irqv = n & 0x1f; v.control &= ~0x80; }
       }
-      // 4 組を足した左右(-1〜1 の目安。20bit を 1.0 とする)。ES5510 は通さない
-      this.outL = (out[0] + out[2] + out[4] + out[6]) / 524288; this.outR = (out[1] + out[3] + out[5] + out[7]) / 524288;
+      // 左右(-1〜1 の目安。20bit を 1.0 とする)
+      const esp = this.esp;
+      if (esp && !quiet && !this.espBypass && !esp.halted) {
+        // ES5510 の入力は 16bit。MAME のつなぎ方と同じ尺度(ES5505 の 20bit × 0.18 × 音量 IC 1.3125 を 16bit に)で渡し、出力を同じ比で戻す。
+        // こうすると、ES5510 が素通しのプログラムなら「4 組を足しただけ」と同じ大きさになる
+        const inp = this._espIn, k = ESP_IN;
+        for (let i = 0; i < 6; i++) { const x = Math.trunc(out[i + 2] * k); inp[i] = x > 32767 ? 32767 : x < -32768 ? -32768 : x; }
+        esp.run(inp);
+        this.outL = out[0] / 524288 + esp.out[0] / ESP_OUT; this.outR = out[1] / 524288 + esp.out[1] / ESP_OUT;
+      } else { this.outL = (out[0] + out[2] + out[4] + out[6]) / 524288; this.outR = (out[1] + out[3] + out[5] + out[7]) / 524288; }
     }
   }
   // 鍵盤表示用のスナップショット(CPS3 / QSound / ZSG-2 と同じ形の配列 32 要素)。

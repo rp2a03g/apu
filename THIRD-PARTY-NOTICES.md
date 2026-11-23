@@ -77,7 +77,9 @@
 | ZOOM ZSG-2 / タイトー ZOOM 音源基板 | MAME `zsg2.cpp`（Copyright Olivier Galibert, R. Belmont, hap, superctr。BSD-3-Clause）、`taito_zm.cpp`（Copyright Olivier Galibert, hap, superctr, cam900。BSD-3-Clause） | `src/emulator/expansion/zsg2.js`, `src/emulator/zsg2/zoomBoard.js` |
 | Panasonic MN10200(ZOOM 音源基板のサウンド CPU) | MAME `cpu/mn10200/mn10200.cpp`（Copyright Olivier Galibert, R. Belmont, hap。BSD-3-Clause） | `src/emulator/zsg2/mn10200.js` |
 | Ensoniq ES5505 | MAME `es5506.cpp`（Copyright Aaron Giles。BSD-3-Clause） | `src/emulator/expansion/es5505.js` |
-| タイトー Ensoniq 音源基板 / MC68681 | MAME `taito_en.cpp`（Copyright Bryan McPhail, Aaron Giles, R. Belmont, Philip Bennett。BSD-3-Clause）、`machine/mc68681.cpp`（Copyright Mariusz Wojcieszek, R. Belmont, Joseph Zatarski。BSD-3-Clause）、`cpu/es5510/es5510.cpp`（Copyright Christian Brunschen。BSD-3-Clause。ホスト側の窓口のみ） | `src/emulator/f3/ensoniqBoard.js` |
+| タイトー Ensoniq 音源基板 / MC68681 | MAME `taito_en.cpp`（Copyright Bryan McPhail, Aaron Giles, R. Belmont, Philip Bennett。BSD-3-Clause）、`machine/mc68681.cpp`（Copyright Mariusz Wojcieszek, R. Belmont, Joseph Zatarski。BSD-3-Clause） | `src/emulator/f3/ensoniqBoard.js` |
+| タイトー F3 システムのメイン基板（配置・割り込み・文字の面） | MAME `taito/taito_f3.cpp`（Copyright Bryan McPhail。BSD-3-Clause）、`taito/taito_f3_v.cpp`（Copyright Bryan McPhail, ywy, 12Me21。BSD-3-Clause） | `src/emulator/f3/f3Main.js`、`src/emulator/f3/f3Video.js` |
+| Ensoniq ES5510（エフェクト用 DSP） | MAME `cpu/es5510/es5510.cpp`（Copyright Christian Brunschen。BSD-3-Clause） | `src/emulator/expansion/es5510.js` |
 | TI TMS57002 | MAME `cpu/tms57002`（Copyright Olivier Galibert。BSD-3-Clause） | `src/emulator/expansion/tms57002.js` |
 | Irem GA20 | MAME `iremga20.cpp` | `src/emulator/expansion/ga20.js` |
 | OKIM6258 / OKIM6295 | MAME `okim6258.cpp` / `okim6295.cpp`、VGMPlay `okim6258.c` (Valley Bell) | `src/emulator/expansion/okim6258.js`, `okim6295.js` |

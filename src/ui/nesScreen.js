@@ -1596,7 +1596,7 @@
     w = w || frameW; h = h || frameH;
     if (canvas.width === w && canvas.height === h && imageBuf) return;
     canvas.width = w; canvas.height = h; frameW = w; frameH = h;
-    canvas.style.aspectRatio = machine === 'gb' ? '160 / 144' : machine === 'pce' ? '292 / 242' : machine === 'cps3' ? '4 / 3' : machine === 'zoom' ? '320 / 224' : '256 / 240'; // PC エンジンは幅がドットクロックで 292/389/584 と変わるが、画面の形は同じ // 画面の形は幅/行数のモードによらず同じ(幅 512 は横半分のドット、インターレースの 480 行は縦半分の行。実機のテレビと同じ)
+    canvas.style.aspectRatio = machine === 'gb' ? '160 / 144' : machine === 'pce' ? '292 / 242' : machine === 'cps3' ? '4 / 3' : machine === 'zoom' ? (zoomSet && zoomSet.main ? (zoomSet.main.rot === 90 || zoomSet.main.rot === 270 ? '3 / 4' : '4 / 3') : '320 / 224') : '256 / 240'; // PC エンジンは幅がドットクロックで 292/389/584 と変わるが、画面の形は同じ // 画面の形は幅/行数のモードによらず同じ(幅 512 は横半分のドット、インターレースの 480 行は縦半分の行。実機のテレビと同じ)
     if (ilBadgeEl) ilBadgeEl.hidden = h < 480;
     imageBuf = new Uint8ClampedArray(w * h * 4);
     image = new ImageData(imageBuf, w, h);
@@ -1685,7 +1685,7 @@
     // 再ビルド忘れの検出(capture-worker-client.js と同じ考え方): 主スレッドの現行ソースがバンドルに含まれているか
     const probes = [MML.Emu.NesConsole, MML.Emu.PPU, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC3, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC5, MML.Emu.NesMappers && MML.Emu.NesMappers.VRC7, MML.Emu.FdsDisk && MML.Emu.FdsDisk.Mapper, MML.Emu.NesRewind];
     // MSX 本体(同じバンドルに入る)。ページが MSX の script を読んでいない時は比べる物が無いので飛ばす
-    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.GbPrinter, MML.Emu.GbBarcodeBoy, MML.Emu.APUGb, MML.Emu.CPUSm83, MML.Emu.PceConsole, MML.Emu.PceVdc, MML.Emu.PceVce, MML.Emu.PceCard, MML.Emu.PceTimer, MML.Emu.CPUHuC6280, MML.Emu.APUHuC6280, MML.Emu.Cps3Console, MML.Emu.Cps3Audio, MML.Emu.ZoomConsole, MML.Emu.Zsg2Audio, MML.Emu.EnsoniqConsole, MML.Emu.Es5505Audio, MML.Emu.createM68000, MML.Emu.Cps3 && MML.Emu.Cps3.Machine, MML.Emu.Cps3 && MML.Emu.Cps3.SH2, MML.Emu.Cps3Rewind]) if (p) probes.push(p);
+    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.GbPrinter, MML.Emu.GbBarcodeBoy, MML.Emu.APUGb, MML.Emu.CPUSm83, MML.Emu.PceConsole, MML.Emu.PceVdc, MML.Emu.PceVce, MML.Emu.PceCard, MML.Emu.PceTimer, MML.Emu.CPUHuC6280, MML.Emu.APUHuC6280, MML.Emu.Cps3Console, MML.Emu.Cps3Audio, MML.Emu.ZoomConsole, MML.Emu.Zsg2Audio, MML.Emu.EnsoniqConsole, MML.Emu.Es5505Audio, MML.Emu.createEs5510, MML.Emu.createM68000, MML.Emu.createM68020, MML.Emu.createF3Main, MML.Emu.createF3Video, MML.Emu.Cps3 && MML.Emu.Cps3.Machine, MML.Emu.Cps3 && MML.Emu.Cps3.SH2, MML.Emu.Cps3Rewind]) if (p) probes.push(p);
     for (const p of probes) {
       if (typeof p !== 'function' || src.indexOf(p.toString()) < 0) {
         console.warn('[nes] nes-worklet.js がソースより古い(再ビルド忘れ)ため使いません。tools/build-capture-workers.ps1 で再ビルドしてください');
@@ -2499,9 +2499,14 @@
     ensureCanvasSize(320, 224);
     applyCfgLabels();
     const program = set.program.slice().buffer, wave = set.wave.slice().buffer;   // 音スレッドへ移す分。主スレッドの分(set.wave)は録音を VGM にする時と、鍵盤表示の音程の解析に使う
-    const load = ens ? { type: 'load', machine: 'ensoniq', rom: null, ensoniq: { program, wave, info: set.info || {} } } : { type: 'load', machine: 'zoom', rom: null, zoom: { program, wave, info: set.info || {} } };
-    const ok = await startWorklet(load, [program, wave]);
-    if (!ok) { nes = ens ? new MML.Emu.EnsoniqConsole(null, { program: set.program, wave: set.wave, info: set.info || {} }) : new MML.Emu.ZoomConsole(null, { program: set.program, wave: set.wave, info: set.info || {} }); rewindBuf = null; lastPad = -1; lastPad2 = -1; mainFrames = 0; startMain(); }
+    // F3 システムはメイン基板の ROM も送る(本物のテストモード画面を出す。src/emulator/f3/f3Main.js)
+    // 絵の ROM(背景とスプライト。十数 MB)は音スレッドへ渡しきりにする(主スレッドでは使わない。音スレッドが立たなかった時だけ主スレッドで使う)
+    const gfxBuf = (g) => (g ? { spr: g.spr ? g.spr.buffer : null, sprHi: g.sprHi ? g.sprHi.buffer : null, tile: g.tile ? g.tile.buffer : null, tileHi: g.tileHi ? g.tileHi.buffer : null } : null);
+    const mainMsg = ens && set.main ? Object.assign({}, set.main, { program: set.main.program.slice().buffer, eeprom: set.main.eeprom ? set.main.eeprom.slice().buffer : null, gfx: gfxBuf(set.main.gfx) }) : null;
+    const mainMove = mainMsg ? [mainMsg.program].concat(mainMsg.gfx ? [mainMsg.gfx.spr, mainMsg.gfx.sprHi, mainMsg.gfx.tile, mainMsg.gfx.tileHi].filter(Boolean) : []) : [];
+    const load = ens ? { type: 'load', machine: 'ensoniq', rom: null, ensoniq: { program, wave, info: set.info || {}, main: mainMsg } } : { type: 'load', machine: 'zoom', rom: null, zoom: { program, wave, info: set.info || {} } };
+    const ok = await startWorklet(load, [program, wave].concat(mainMove));
+    if (!ok) { nes = ens ? new MML.Emu.EnsoniqConsole(null, { program: set.program, wave: set.wave, info: set.info || {}, main: set.main ? Object.assign({}, set.main, { gfx: set.main.gfx && set.main.gfx.tile && set.main.gfx.tile.byteLength ? set.main.gfx : null }) : null }) : new MML.Emu.ZoomConsole(null, { program: set.program, wave: set.wave, info: set.info || {} }); rewindBuf = null; lastPad = -1; lastPad2 = -1; mainFrames = 0; startMain(); }
     liveBegin();
     updateStatus();
     canvas.focus();
