@@ -286,6 +286,12 @@ $bundles = @(
             'src\emulator\expansion\es5510.js',
             'src\emulator\zsg2\mn10200.js',
             'src\emulator\zsg2\zoomBoard.js',
+            # Sony ZN-1 main board (real test-mode screen): R3000 + SPU + bus parts + GPU
+            'src\emulator\cpuR3000.js',
+            'src\emulator\spuPsx.js',
+            'src\emulator\psxBus.js',
+            'src\emulator\zn\znMain.js',
+            'src\emulator\zn\psxGpu.js',
             'src\emulator\zsg2\zoomConsole.js',
             # Taito Ensoniq sound board (sound-test screen): 68000 + MC68681 + ES5505
             'src\emulator\cpu68000.js',

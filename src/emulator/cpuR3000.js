@@ -39,6 +39,7 @@
       this.curPc = 0;             // 実行中の命令のアドレス(例外のEPC用)
       this.cycles = 0;            // 累積サイクル
       this.cpi = DEFAULT_CPI;
+      this.memCyc = 1; this.mulCyc = 6; this.divCyc = 30; // 読み書き・乗算・除算に足すサイクル(ZN-1 の基板は MAME と時間を合わせるため 0 にする)
       this.halted = false;        // HLE側が「もう進めない」と判断したとき
       this.exceptionCount = 0;
     }
@@ -160,20 +161,20 @@
             case 0x11: this.hi = r[rs]; break;                             // MTHI
             case 0x12: this.wr(rd, this.lo); break;                        // MFLO
             case 0x13: this.lo = r[rs]; break;                             // MTLO
-            case 0x18: this.mult(r[rs], r[rt], true); cyc += 6; break;     // MULT
-            case 0x19: this.mult(r[rs], r[rt], false); cyc += 6; break;    // MULTU
+            case 0x18: this.mult(r[rs], r[rt], true); cyc += this.mulCyc; break;     // MULT
+            case 0x19: this.mult(r[rs], r[rt], false); cyc += this.mulCyc; break;    // MULTU
             case 0x1A: { // DIV
               const a = r[rs], b = r[rt];
               if (b === 0) { this.lo = a >= 0 ? -1 : 1; this.hi = a; }
               else if (a === -2147483648 && b === -1) { this.lo = -2147483648; this.hi = 0; }
               else { this.lo = (a / b) | 0; this.hi = a % b; }
-              cyc += 30; break;
+              cyc += this.divCyc; break;
             }
             case 0x1B: { // DIVU
               const a = r[rs] >>> 0, b = r[rt] >>> 0;
               if (b === 0) { this.lo = -1; this.hi = a | 0; }
               else { this.lo = Math.floor(a / b) | 0; this.hi = (a % b) | 0; }
-              cyc += 30; break;
+              cyc += this.divCyc; break;
             }
             case 0x20: { // ADD
               const a = r[rs], b = r[rt], s = (a + b) | 0;
@@ -242,8 +243,8 @@
             default: break;                                                 // MTC2/CTC2/演算
           }
           break;
-        case 0x20: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read8(a) << 24 >> 24); cyc++; break; }   // LB
-        case 0x21: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read16(a) << 16 >> 16); cyc++; break; } // LH
+        case 0x20: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read8(a) << 24 >> 24); cyc += this.memCyc; break; }   // LB
+        case 0x21: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read16(a) << 16 >> 16); cyc += this.memCyc; break; } // LH
         case 0x22: { // LWL
           const a = (r[rs] + imm) | 0;
           const mem = bus.read32(a & ~3) | 0;
@@ -255,11 +256,11 @@
             case 2: v = (mem << 8) | (cur & 0x000000FF); break;
             default: v = mem; break;
           }
-          this.ld(rt, v); cyc++; break;
+          this.ld(rt, v); cyc += this.memCyc; break;
         }
-        case 0x23: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read32(a) | 0); cyc++; break; } // LW
-        case 0x24: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read8(a) & 0xFF); cyc++; break; }     // LBU
-        case 0x25: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read16(a) & 0xFFFF); cyc++; break; } // LHU
+        case 0x23: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read32(a) | 0); cyc += this.memCyc; break; } // LW
+        case 0x24: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read8(a) & 0xFF); cyc += this.memCyc; break; }     // LBU
+        case 0x25: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read16(a) & 0xFFFF); cyc += this.memCyc; break; } // LHU
         case 0x26: { // LWR
           const a = (r[rs] + imm) | 0;
           const mem = bus.read32(a & ~3) | 0;
@@ -271,10 +272,10 @@
             case 2: v = (mem >>> 16) | (cur & 0xFFFF0000); break;
             default: v = (mem >>> 24) | (cur & 0xFFFFFF00); break;
           }
-          this.ld(rt, v | 0); cyc++; break;
+          this.ld(rt, v | 0); cyc += this.memCyc; break;
         }
-        case 0x28: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write8(a, r[rt] & 0xFF); cyc++; break; }   // SB
-        case 0x29: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write16(a, r[rt] & 0xFFFF); cyc++; break; } // SH
+        case 0x28: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write8(a, r[rt] & 0xFF); cyc += this.memCyc; break; }   // SB
+        case 0x29: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write16(a, r[rt] & 0xFFFF); cyc += this.memCyc; break; } // SH
         case 0x2A: { // SWL
           const a = (r[rs] + imm) | 0;
           if (this.sr & 0x10000) break;
@@ -287,9 +288,9 @@
             case 2: out = (mem & 0xFF000000) | (v >>> 8); break;
             default: out = v; break;
           }
-          bus.write32(al, out | 0); cyc++; break;
+          bus.write32(al, out | 0); cyc += this.memCyc; break;
         }
-        case 0x2B: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write32(a, r[rt]); cyc++; break; } // SW
+        case 0x2B: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write32(a, r[rt]); cyc += this.memCyc; break; } // SW
         case 0x2E: { // SWR
           const a = (r[rs] + imm) | 0;
           if (this.sr & 0x10000) break;
@@ -302,12 +303,12 @@
             case 2: out = (mem & 0x0000FFFF) | (v << 16); break;
             default: out = (mem & 0x00FFFFFF) | (v << 24); break;
           }
-          bus.write32(al, out | 0); cyc++; break;
+          bus.write32(al, out | 0); cyc += this.memCyc; break;
         }
         case 0x30: case 0x31: case 0x33: this.exception(EXC_CPU, 0); break; // LWC0/1/3
-        case 0x32: { const a = (r[rs] + imm) | 0; bus.read32(a); cyc++; break; }   // LWC2 (GTEへ: 読み捨て)
+        case 0x32: { const a = (r[rs] + imm) | 0; bus.read32(a); cyc += this.memCyc; break; }   // LWC2 (GTEへ: 読み捨て)
         case 0x38: case 0x39: case 0x3B: this.exception(EXC_CPU, 0); break; // SWC0/1/3
-        case 0x3A: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write32(a, 0); cyc++; break; } // SWC2 (GTEレジスタは0)
+        case 0x3A: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write32(a, 0); cyc += this.memCyc; break; } // SWC2 (GTEレジスタは0)
         default: this.exception(EXC_RI, 0); break;
       }
 

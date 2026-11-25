@@ -574,23 +574,24 @@
     // pool: サンプルPCM系はドライバがスロットをペア交互/巡回割当する曲がある
     // (実測: SegaPCM 8-23%移動 / C140 37-100% / C352 74-79% / QSound 8-63% / MultiPCM 100%)。
     // ヘッダに「合成ch/実機スロット」トグルを出し、割当逆算した表示・変換と選べるようにする
-    { header: 'SegaPCM (315-5218 , OutRun / After Burner)', prefix: 'SP', name: (id) => 'PCM' + id.slice(2), pool: 'segapcm' },
-    { header: 'C140 (Namco System 2 / 21)', prefix: 'CN', name: (id) => 'PCM' + id.slice(2), pool: 'c140' },
-    { header: 'C352 (Namco System 11 / 12 / 22)', prefix: 'CS', name: (id) => 'PCM' + id.slice(2), pool: 'c352' },
+    { header: 'SegaPCM (315-5218 , OutRun / After Burner)', prefix: 'SP', name: (id) => 'PCM' + id.slice(2), pool: 'segapcm', poolModes: ['tone', 'logical', 'phys'] },
+    { header: 'C140 (Namco System 2 / 21)', prefix: 'CN', name: (id) => 'PCM' + id.slice(2), pool: 'c140', poolModes: ['tone', 'logical', 'phys'] },
+    { header: 'C352 (Namco System 11 / 12 / 22)', prefix: 'CS', name: (id) => 'PCM' + id.slice(2), pool: 'c352', poolModes: ['tone', 'logical', 'phys'] },
     { header: 'OKIM6258 (MSM6258 , Sharp X68000)', ids: { OKI: 'ADPCM' } },
     // PSF(PS1): ボイス番号は実機どおり0始まりで表示(PX1=Voice0)。ドライバがボイスを動的に割り当てるので pool
-    // poolModes: 表示モード切替の段(既定は2段 logical/phys)。PSF はドライバ内部トラック単位の「トラック」を先頭に足す
+    // poolModes: 表示モード切替の段(既定は2段 logical/phys)。PSF はドライバ内部トラック単位の「トラック」を先頭に足す。
+    // VGM のプール式チップはドライバが見えないので、代わりに「音色」(音色×声部のレーン。Emu.PoolToneVoicer)を先頭に足す
     { header: 'SPU (CXD2922 , PlayStation)', prefix: 'PX', name: (id) => 'V' + (+id.slice(2) - 1), pool: 'psx', poolModes: ['track', 'logical', 'phys'] },
-    { header: 'QSound (DL-1425 , Capcom CPS2)', prefix: 'QS', name: (id) => 'PCM' + id.slice(2), pool: 'qsound' },
-    { header: 'CPS3 (Capcom CP System III)', prefix: 'C3', name: (id) => 'PCM' + id.slice(2), pool: 'cps3' },
-    { header: 'ZSG-2 (ZOOM , Taito FX-1B / G-NET)', prefix: 'ZS', name: (id) => 'PCM' + id.slice(2), pool: 'zsg2' },
-    { header: 'ES5505 (Ensoniq , Taito F3)', prefix: 'ES', name: (id) => 'PCM' + id.slice(2), pool: 'es5505' },
+    { header: 'QSound (DL-1425 , Capcom CPS2)', prefix: 'QS', name: (id) => 'PCM' + id.slice(2), pool: 'qsound', poolModes: ['tone', 'logical', 'phys'] },
+    { header: 'CPS3 (Capcom CP System III)', prefix: 'C3', name: (id) => 'PCM' + id.slice(2), pool: 'cps3', poolModes: ['tone', 'logical', 'phys'] },
+    { header: 'ZSG-2 (ZOOM , Taito FX-1B / G-NET)', prefix: 'ZS', name: (id) => 'PCM' + id.slice(2), pool: 'zsg2', poolModes: ['tone', 'logical', 'phys'] },
+    { header: 'ES5505 (Ensoniq , Taito F3)', prefix: 'ES', name: (id) => 'PCM' + id.slice(2), pool: 'es5505', poolModes: ['tone', 'logical', 'phys'] },
     // ★prefix 'OK' は 'OKI'(OKIM6258)にも前方一致するが、完全一致(ids)が全グループ横断で
     //   先に評価されるので衝突しない(getChannelDisplayの2段ループ参照)
     { header: 'OKIM6295 (MSM6295 , Toaplan / Raizing etc.)', prefix: 'OK', name: (id) => 'ADPCM' + id.slice(2) },
     // pool: チャンネルプール式(ドライバがボイスを巡回割当する)チップの印。ヘッダ行に
     // 「実機スロット/合成ch」の表示モード切替を出す(_rebuildRows参照)
-    { header: 'MultiPCM (315-5560 , Sega Model 1 / 2)', prefix: 'MP', name: (id) => 'PCM' + id.slice(2), pool: 'multipcm' },
+    { header: 'MultiPCM (315-5560 , Sega Model 1 / 2)', prefix: 'MP', name: (id) => 'PCM' + id.slice(2), pool: 'multipcm', poolModes: ['tone', 'logical', 'phys'] },
     // NF1-4は完全一致(ids)で先に拾う(N163のprefix 'N' と衝突させない)
     { header: 'YM2610 (OPNB , Neo Geo)', ids: { NF1: 'FM1', NF2: 'FM2', NF3: 'FM3', NF4: 'FM4', NF5: 'FM5', NF6: 'FM6',
         NA1: 'PCMA1', NA2: 'PCMA2', NA3: 'PCMA3', NA4: 'PCMA4', NA5: 'PCMA5', NA6: 'PCMA6', NB: 'PCMB' } }, // NA=ADPCM-A, NB=ADPCM-B
@@ -884,13 +885,15 @@
   // PSF トラックモードのレーン(Emu.PsfTrackVoicer の出力。各要素に lane={index, group, track, voice, groupIndex})の
   // 並び順と行名。ロール構築は全フレームぶん呼ぶので、レーン数とレーン表(最後の lane の同一性)が同じなら使い回す。
   // 並び: トラックの分かった順(トラック番号)→ トラック不明の疑似トラック(出現順)、同じトラック内は声部順
-  let psxTrackOrderCache = null;
+  // (キャッシュはレーン表ごと。VGM の音色モードは 1 曲にプール式チップが 2 つあることがあり、1 個だけだと毎フレーム作り直しになる)
+  const psxTrackOrderCaches = new WeakMap();
   function psxTrackOrder(s) {
     const n = s.length, last = s[n - 1].lane;
     // 複製の印(lane.copyOf)は後から付くので、付け替えのたびに上がる版数も鍵に入れる
     // 言語を切り替えたら説明文(title)も作り直す
     const copyKey = ((MML.Emu && MML.Emu.PsfTrackVoicer && MML.Emu.PsfTrackVoicer.copyVersion) || 0) + ':' + (MML.I18n ? MML.I18n.getLang() : '');
-    if (psxTrackOrderCache && psxTrackOrderCache.n === n && psxTrackOrderCache.last === last && psxTrackOrderCache.copyKey === copyKey) return psxTrackOrderCache;
+    const psxTrackOrderCache = psxTrackOrderCaches.get(last);
+    if (psxTrackOrderCache && psxTrackOrderCache.n === n && psxTrackOrderCache.copyKey === copyKey) return psxTrackOrderCache;
     const lanes = s.map(c => c.lane);
     const voices = new Map();
     for (const l of lanes) voices.set(l.group, (voices.get(l.group) || 0) + 1);
@@ -914,8 +917,30 @@
     const copy = lanes.map(l => !!l.copyOf);
     // (Worker のロール構築には翻訳辞書が無いので、そこでは説明を作らない)
     const title = lanes.map(l => l.copyOf && MML.I18n ? T('{name} は {of} の複製(デチューン二重化/エコー)', { name: name(l, voices.get(l.group)), of: l.copyOf }) : '');
-    psxTrackOrderCache = { n, last, copyKey, order, label, title, group, copy, hueNum };
-    return psxTrackOrderCache;
+    const made = { n, last, copyKey, order, label, title, group, copy, hueNum };
+    psxTrackOrderCaches.set(last, made);
+    return made;
+  }
+
+  // プール式PCMチップの音色モード(Emu.PoolToneVoicer。要素に lane がある)の行の並び・行名・色。
+  // レーンの無いフレーム(実機スロット/合成ch)は null → 呼び出し側が従来の固定行数で描く。
+  // ★曲頭でレーンがまだ 1 本も無いフレームは空配列で、ここでは null になる。呼び出し側は s.laned(レーン列の印。
+  //   Emu.PsfTrackVoicer#step が付ける)を見て 0 行にすること(固定行数で描くと、使われない行がロールに並ぶ)
+  // 色はパート(音色)ごと、声部は明るさ違い(PSF のトラックモードと同じ見せ方)
+  function poolLaneRows(s) {
+    if (!s || !s.length || !s[0] || !s[0].lane) return null;
+    const o = psxTrackOrder(s);
+    if (!o.rows) {
+      o.rows = s.map((c, ch) => {
+        const lane = c.lane;
+        const hueNum = lane.copyOf ? o.hueNum[ch] : 40 + lane.groupIndex;
+        return {
+          color: `hsl(${(200 + hueNum * 137.508) % 360},${lane.copyOf ? 55 : 75}%,${Math.min(80, (lane.copyOf ? 45 : 58) + lane.voice * 7)}%)`,
+          fields: { label: o.label[ch], labelTitle: o.title[ch], laneGroup: o.group[ch], laneCopy: o.copy[ch] },
+        };
+      });
+    }
+    return o;
   }
 
   // サンプルPCM系チップ(GA20/SegaPCM/C140/C352/QSound/MultiPCM/OKIM6295/YM2610 ADPCM-A)の
@@ -1789,11 +1814,13 @@
       const live = extraSnaps && extraSnaps.segapcmLive;
       const s = live ? live() : (extraSnaps && extraSnaps.segapcm ? extraSnaps.segapcm[frameIdx] : null);
       const spWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
-      for (let ch = 0; ch < 16; ch++) {
-        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+      const lo = poolLaneRows(s); // 音色モードは行数・並び・行名がレーン表で決まる
+      for (let k = 0, nRows = (lo || (s && s.laned)) ? s.length : 16; k < nRows; k++) {
+        const ch = lo ? lo.order[k] : k;
+        const c = (s && s[ch]) || { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (200 + ch * 9) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
-        channels.push({ id: `SP${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 127,
+        channels.push({ id: `SP${ch + 1}`, color: lo ? lo.rows[ch].color : `hsl(${hue},75%,62%)`, ...(lo ? lo.rows[ch].fields : {}), freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 127,
           wave: spWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
@@ -1808,11 +1835,13 @@
       const live = extraSnaps && extraSnaps.c140Live;
       const s = live ? live() : (extraSnaps && extraSnaps.c140 ? extraSnaps.c140[frameIdx] : null);
       const cnWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
-      for (let ch = 0; ch < 24; ch++) {
-        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+      const lo = poolLaneRows(s); // 音色モードは行数・並び・行名がレーン表で決まる
+      for (let k = 0, nRows = (lo || (s && s.laned)) ? s.length : 24; k < nRows; k++) {
+        const ch = lo ? lo.order[k] : k;
+        const c = (s && s[ch]) || { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (330 + ch * 6) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
-        channels.push({ id: `CN${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+        channels.push({ id: `CN${ch + 1}`, color: lo ? lo.rows[ch].color : `hsl(${hue},75%,62%)`, ...(lo ? lo.rows[ch].fields : {}), freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: cnWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
@@ -1827,11 +1856,13 @@
       const live = extraSnaps && extraSnaps.c352Live;
       const s = live ? live() : (extraSnaps && extraSnaps.c352 ? extraSnaps.c352[frameIdx] : null);
       const csWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
-      for (let ch = 0; ch < 32; ch++) {
-        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+      const lo = poolLaneRows(s); // 音色モードは行数・並び・行名がレーン表で決まる
+      for (let k = 0, nRows = (lo || (s && s.laned)) ? s.length : 32; k < nRows; k++) {
+        const ch = lo ? lo.order[k] : k;
+        const c = (s && s[ch]) || { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (30 + ch * 5) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
-        channels.push({ id: `CS${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+        channels.push({ id: `CS${ch + 1}`, color: lo ? lo.rows[ch].color : `hsl(${hue},75%,62%)`, ...(lo ? lo.rows[ch].fields : {}), freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: csWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
@@ -1926,11 +1957,13 @@
       const live = extraSnaps && extraSnaps.cps3Live;
       const s = live ? live() : (extraSnaps && extraSnaps.cps3 ? extraSnaps.cps3[frameIdx] : null);
       const c3Wave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
-      for (let ch = 0; ch < 16; ch++) {
-        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+      const lo = poolLaneRows(s); // 音色モードは行数・並び・行名がレーン表で決まる
+      for (let k = 0, nRows = (lo || (s && s.laned)) ? s.length : 16; k < nRows; k++) {
+        const ch = lo ? lo.order[k] : k;
+        const c = (s && s[ch]) || { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (20 + ch * 7) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
-        channels.push({ id: `C3${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0x7FFF,
+        channels.push({ id: `C3${ch + 1}`, color: lo ? lo.rows[ch].color : `hsl(${hue},75%,62%)`, ...(lo ? lo.rows[ch].fields : {}), freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0x7FFF,
           wave: c3Wave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
@@ -1943,11 +1976,13 @@
       const live = extraSnaps && extraSnaps.zsg2Live;
       const s = live ? live() : (extraSnaps && extraSnaps.zsg2 ? extraSnaps.zsg2[frameIdx] : null);
       const zsWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
-      for (let ch = 0; ch < 48; ch++) {
+      const lo = poolLaneRows(s); // 音色モードは行数・並び・行名がレーン表で決まる
+      for (let k = 0, nRows = (lo || (s && s.laned)) ? s.length : 48; k < nRows; k++) {
+        const ch = lo ? lo.order[k] : k;
         const c = (s && s[ch]) || { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (200 + ch * 7) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
-        channels.push({ id: `ZS${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0xFFFF,
+        channels.push({ id: `ZS${ch + 1}`, color: lo ? lo.rows[ch].color : `hsl(${hue},75%,62%)`, ...(lo ? lo.rows[ch].fields : {}), freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0xFFFF,
           wave: zsWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
@@ -1960,11 +1995,13 @@
       const live = extraSnaps && extraSnaps.es5505Live;
       const s = live ? live() : (extraSnaps && extraSnaps.es5505 ? extraSnaps.es5505[frameIdx] : null);
       const esWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
-      for (let ch = 0; ch < 32; ch++) {
+      const lo = poolLaneRows(s); // 音色モードは行数・並び・行名がレーン表で決まる
+      for (let k = 0, nRows = (lo || (s && s.laned)) ? s.length : 32; k < nRows; k++) {
+        const ch = lo ? lo.order[k] : k;
         const c = (s && s[ch]) || { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (150 + ch * 11) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
-        channels.push({ id: `ES${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0xFF,
+        channels.push({ id: `ES${ch + 1}`, color: lo ? lo.rows[ch].color : `hsl(${hue},75%,62%)`, ...(lo ? lo.rows[ch].fields : {}), freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 0xFF,
           wave: esWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
@@ -1978,11 +2015,13 @@
       const live = extraSnaps && extraSnaps.qsoundLive;
       const s = live ? live() : (extraSnaps && extraSnaps.qsound ? extraSnaps.qsound[frameIdx] : null);
       const qsWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
-      for (let ch = 0; ch < 16; ch++) {
-        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+      const lo = poolLaneRows(s); // 音色モードは行数・並び・行名がレーン表で決まる
+      for (let k = 0, nRows = (lo || (s && s.laned)) ? s.length : 16; k < nRows; k++) {
+        const ch = lo ? lo.order[k] : k;
+        const c = (s && s[ch]) || { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (260 + ch * 7) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
-        channels.push({ id: `QS${ch + 1}`, color: `hsl(${hue},75%,62%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+        channels.push({ id: `QS${ch + 1}`, color: lo ? lo.rows[ch].color : `hsl(${hue},75%,62%)`, ...(lo ? lo.rows[ch].fields : {}), freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: qsWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
@@ -1996,11 +2035,13 @@
       const live = extraSnaps && extraSnaps.multipcmLive;
       const s = live ? live() : (extraSnaps && extraSnaps.multipcm ? extraSnaps.multipcm[frameIdx] : null);
       const mpWave = (c) => (c.waveData && c.waveData.length) ? { t: 'wave', data: c.waveData, smooth: true, nx: c.waveData.length, ny: 32 } : { t: 'sample' };
-      for (let ch = 0; ch < 28; ch++) {
-        const c = s ? s[ch] : { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
+      const lo = poolLaneRows(s); // 音色モードは行数・並び・行名がレーン表で決まる
+      for (let k = 0, nRows = (lo || (s && s.laned)) ? s.length : 28; k < nRows; k++) {
+        const ch = lo ? lo.order[k] : k;
+        const c = (s && s[ch]) || { vol: 0, rawVol: 0, active: false, panL: 15, panR: 15, rate: 0, pitchHz: 0, pitchConf: 0 };
         const hue = (190 + ch * 6) % 360;
         const exact = c.pitchConf >= ADPCM_PITCH_CONF && c.pitchHz > 0;
-        channels.push({ id: `MP${ch + 1}`, color: `hsl(${hue},72%,60%)`, freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
+        channels.push({ id: `MP${ch + 1}`, color: lo ? lo.rows[ch].color : `hsl(${hue},72%,60%)`, ...(lo ? lo.rows[ch].fields : {}), freq: exact ? c.pitchHz : 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 255,
           wave: mpWave(c), active: !!c.active, ...panVolFields(c),
           adpcmSample: c.sample || null, sampleHash: c.sampleHash || null, adpcmManual: !!c.pitchManual, sampleKind: c.sampleKind || 'auto', adpcmRate: c.rate || 0,
           ...(exact ? { adpcmPitch: true, adpcmExact: true }
@@ -7266,8 +7307,10 @@
               const modes = disp.poolModes || ['logical', 'phys'];
               sw.title = modes.indexOf('track') >= 0
                 ? T('表示モード: トラック=ドライバ内部のトラックごと(和音は声部ごとの行) / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す / 実機スロット=ドライバの割当そのまま')
+                : modes.indexOf('tone') >= 0
+                ? T('表示モード: 音色=同じ音色の音を1つのパートにまとめる(和音は声部ごとの行。行数は曲で決まる) / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す / 実機スロット=ドライバの割当そのまま')
                 : T('チャンネルプール式音源の表示モード: 実機スロット=ドライバの巡回割当そのまま / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す');
-              const MODE_LABEL = { track: T('トラック'), logical: T('合成ch'), phys: T('実機スロット') };
+              const MODE_LABEL = { track: T('トラック'), tone: T('音色'), logical: T('合成ch'), phys: T('実機スロット') };
               const segs = modes.map((m) => {
                 const s = document.createElement('span');
                 s.textContent = MODE_LABEL[m];

@@ -1087,6 +1087,8 @@
     '{name} は {of} の複製(デチューン二重化/エコー)': '{name} duplicates {of} (detuned doubling / echo)',
     '表示モード: トラック=ドライバ内部のトラックごと(和音は声部ごとの行) / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す / 実機スロット=ドライバの割当そのまま':
       'Display mode: Tracks = one row per sound-driver track (chords get one row per voice) / Merged ch = regroup notes into stable channels by instrument and pitch continuity / HW slots = raw voice allocation',
+    '表示モード: 音色=同じ音色の音を1つのパートにまとめる(和音は声部ごとの行。行数は曲で決まる) / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す / 実機スロット=ドライバの割当そのまま':
+      'Display mode: Tone = notes of the same instrument form one part (chords get one row per voice; the number of rows depends on the song) / Merged ch = regroup notes into stable channels by instrument and pitch continuity / HW slots = raw voice allocation',
     'チャンネルプール式音源の表示モード: 実機スロット=ドライバの巡回割当そのまま / 合成ch=音色と音程の連続性でメロディを同じ行へ束ね直す':
       'Display mode for channel-pool chips: HW slots = raw round-robin voice allocation / Merged ch = regroup notes into stable channels by instrument and pitch continuity',
     '{ch} 音量(中央100%・ダブルクリックで100%)': '{ch} Volume (center = 100%, double-click resets to 100%)',
@@ -1714,6 +1716,9 @@
     '巻き戻し(押している間)': 'Rewind (while held)',
     '開く(.nes/.fds。ウィンドウへのドロップでも開けます)': 'Open (.nes/.fds; dropping a file on this window works too)',
     '設定(キー/ゲームパッドの割り当て、連射、ロールへ流す)': 'Settings (key/gamepad bindings, turbo, feed the roll)',
+    'この zip の ROM を控えました。続けて {list} を開くと始まります。': 'Kept the ROMs in this zip. Open {list} next to start.',
+    'この zip の ROM を控えました。続けてゲームの ROM の zip(音源の ROM が入った親セット)を開くと始まります。': 'Kept the ROMs in this zip. Open the game ROM zip next (the parent set that contains the sound ROMs) to start.',
+    'クリックしてキー入力(十字=レバー、ボタン 1={a}、ボタン 2={b}、コイン={ta}、スタート={st}、テストスイッチ={se})': 'Click for key input (arrows = stick, button 1 = {a}, button 2 = {b}, coin = {ta}, start = {st}, test switch = {se})',
     'クリックしてキー入力(十字=矢印、A={a}、B={b}、連射 A={ta}、連射 B={tb}、Start={st}、Select={se}、{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止)': 'Click for key input (D-pad=arrows, A={a}, B={b}, turbo A={ta}, turbo B={tb}, Start={st}, Select={se}, {ff}=fast forward, {rw}=rewind, {pa}=pause)',
     '早送り。クリックで ×1→×2→×4→×8。{key} キーを押している間は ×4': 'Fast forward. Click to cycle ×1→×2→×4→×8; hold {key} for ×4',
     '巻き戻し(押している間 逆再生で戻る。{key} キー。鍵盤表示のロールをドラッグしても戻れます)': 'Rewind (hold to play backwards; {key} key. Dragging the keyboard view roll rewinds too)',
@@ -1772,16 +1777,16 @@
     'ゲームボーイ': 'Game Boy',
     'ゲームボーイカラー': 'Game Boy Color',
     'PC エンジン': 'PC Engine',
-    // ---- ゲーム画面の CPS3 対応(DESIGN-CPS3-CAPTURE.md §10)----
-    'テスト': 'Test',
-    'CPS3 のテストボタンを押す(テストメニュー。サウンドテストもここから)。割り当ては ⚙ の CPS3)': 'Press the CPS3 test button (test menu; the sound test is in there). Keys are set in ⚙ > CPS3',
-    'クリックしてキー入力(パンチ={p}、キック={kk}、コイン={c}、スタート={st}、テスト={te}、{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止。割り当ては ⚙ の CPS3)': 'Click to enable key input (punches={p}, kicks={kk}, coin={c}, start={st}, test={te}, {ff}=fast-forward, {rw}=rewind, {pa}=pause; keys are set in ⚙ > CPS3)',
-    'ショット 1(弱パンチ)': 'Shot 1 (light punch)',
     '自動(専用カードか拡張子 .sgx なら SuperGrafx)': 'Auto (SuperGrafx for SuperGrafx-only cards or .sgx files)',
     '2 ボタン': '2-button',
     '6 ボタン': '6-button',
     'マルチタップ(2 ボタン × 5)': 'Multitap (five 2-button pads)',
     '次に開くソフトから効きます。6 ボタンパッドの III〜VI はキーボードの D F G H です(割り当ての変更とゲームパッドへの割り当てはまだできません)。マルチタップの 2 番は 2 つ目のゲームパッドです。': 'Takes effect from the next game you open. Buttons III–VI of the 6-button pad are the D, F, G and H keys (remapping and gamepad assignment are not available yet). Multitap pad 2 is the second gamepad.',
+    // ---- ゲーム画面の CPS3 対応(DESIGN-CPS3-CAPTURE.md §10)----
+    'テスト': 'Test',
+    'CPS3 のテストボタンを押す(テストメニュー。サウンドテストもここから)。割り当ては ⚙ の CPS3)': 'Press the CPS3 test button (test menu; the sound test is in there). Keys are set in ⚙ > CPS3',
+    'クリックしてキー入力(パンチ={p}、キック={kk}、コイン={c}、スタート={st}、テスト={te}、{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止。割り当ては ⚙ の CPS3)': 'Click to enable key input (punches={p}, kicks={kk}, coin={c}, start={st}, test={te}, {ff}=fast-forward, {rw}=rewind, {pa}=pause; keys are set in ⚙ > CPS3)',
+    'ショット 1(弱パンチ)': 'Shot 1 (light punch)',
     'ショット 2(中パンチ)': 'Shot 2 (medium punch)',
     'ショット 3(強パンチ)': 'Shot 3 (heavy punch)',
     'ショット 4(弱キック)': 'Shot 4 (light kick)',

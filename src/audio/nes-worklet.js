@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-26 03:37:40
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 03:37:47
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 03:37:40';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 03:37:47';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -26311,6 +26311,2476 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 
 /*
+ * MIPS R3000A CPU エミュレータ (PlayStation)
+ * MML.Emu.CPUR3000
+ *
+ * - MIPS I 命令セット + COP0(SR/CAUSE/EPC/BadVaddr、RFE)。GTE(COP2)は演算しない(レジスタ読みは0)。
+ * - 分岐遅延スロットを実装する。ロード結果は即時に見える(ld() の注記参照)。
+ * - 例外: 割込み(0)/アドレス(4: 命令フェッチの非整列のみ)/SYSCALL(8)/BREAK(9)/不正命令(10)/オーバーフロー(12)。
+ *   データアクセスの非整列は例外にしない(実機/DuckStation と同じ。バス側でバイト単位に読む)。
+ *   ベクタは SR.BEV に従い 0x80000080 / 0xBFC00180。
+ * - 命令あたりのサイクルは固定 CPI(既定2、PCSXのBIASと同じ)。実機のキャッシュ/バス待ちは模倣しない。
+ *   (音源ドライバの時間管理はルートカウンタ/VBlank割込み駆動なので、CPIの誤差は
+ *    ビジーループの消費時間にしか効かない)
+ *
+ * バスに要求するもの:
+ *   bus.read8/read16/read32(addr), bus.write8/write16/write32(addr, value)
+ *   bus.irqLine  (I_STAT & I_MASK != 0 なら true。CAUSE.IP2 に反映される)
+ *   bus.onSyscall?(cpu)  HLE BIOS が SYSCALL/BREAK を横取りしたいとき(true を返すと例外を起こさない)
+ *   bus.onTrap?(cpu, pc) 実行アドレスが bus.trapMask に一致したとき(HLE BIOSの入口)。true で命令を実行しない
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const EXC_INT = 0, EXC_ADEL = 4, EXC_ADES = 5, EXC_SYS = 8, EXC_BP = 9, EXC_RI = 10, EXC_CPU = 11, EXC_OV = 12;
+  const DEFAULT_CPI = 2;
+
+  class CPUR3000 {
+    constructor(bus) {
+      this.bus = bus;
+      this.r = new Int32Array(32);
+      this.hi = 0; this.lo = 0;
+      this.pc = 0xBFC00000 | 0;
+      this.nextPc = 0;
+      this.sr = 0; this.cause = 0; this.epc = 0; this.badVaddr = 0;
+      this.cop0 = new Int32Array(16); // その他のCOP0レジスタ(BPC/DCIC等)の置き場
+      this.branchDelay = false;   // 次に実行する命令が分岐遅延スロットか
+      this.inDelay = false;       // 今実行中の命令が分岐遅延スロットか
+      this.curPc = 0;             // 実行中の命令のアドレス(例外のEPC用)
+      this.cycles = 0;            // 累積サイクル
+      this.cpi = DEFAULT_CPI;
+      this.memCyc = 1; this.mulCyc = 6; this.divCyc = 30; // 読み書き・乗算・除算に足すサイクル(ZN-1 の基板は MAME と時間を合わせるため 0 にする)
+      this.halted = false;        // HLE側が「もう進めない」と判断したとき
+      this.exceptionCount = 0;
+    }
+
+    reset() {
+      this.r.fill(0);
+      this.hi = 0; this.lo = 0;
+      this.pc = 0xBFC00000 | 0; this.nextPc = (this.pc + 4) | 0;
+      this.sr = 0x10900000 | 0; // BEV=1, CU0 は不要。RFE前はカーネルモード
+      this.cause = 0; this.epc = 0; this.badVaddr = 0;
+      this.cop0.fill(0);
+      this.cop0[15] = 0x00000002; // PRID
+      this.branchDelay = false; this.inDelay = false;
+      this.cycles = 0;
+      this.halted = false;
+      this.exceptionCount = 0;
+    }
+
+    /** レジスタを直接設定して実行開始点を決める(PSF: PC/SP/GP) */
+    setEntry(pc, sp, gp) {
+      this.pc = pc | 0; this.nextPc = (pc + 4) | 0;
+      this.r[29] = sp | 0; this.r[28] = gp | 0;
+      this.branchDelay = false;
+    }
+
+    // ── 例外 ──────────────────────────────────────────────
+    exception(code, badAddr) {
+      this.exceptionCount++;
+      const bd = this.inDelay;
+      this.epc = bd ? (this.curPc - 4) | 0 : this.curPc;
+      this.cause = (this.cause & 0x0000FF00) | (code << 2) | (bd ? 0x80000000 : 0) | (this.cop0[13] & 0x30000000);
+      if (code === EXC_ADEL || code === EXC_ADES) this.badVaddr = badAddr | 0;
+      // SR: KU/IE を2ビット分シフト(現在→旧)
+      this.sr = (this.sr & ~0x3F) | ((this.sr << 2) & 0x3C);
+      const vec = (this.sr & 0x400000) ? 0xBFC00180 : 0x80000080;
+      this.pc = vec | 0; this.nextPc = (vec + 4) | 0;
+      this.branchDelay = false; this.inDelay = false;
+    }
+
+    /** RFE: SR の KU/IE を戻す */
+    rfe() {
+      this.sr = (this.sr & ~0x0F) | ((this.sr >> 2) & 0x0F);
+    }
+
+    /** 割込み要求ラインの状態を CAUSE.IP2 に写し、受理できれば例外を起こす */
+    pollInterrupt() {
+      if (this.bus.irqLine) this.cause |= 0x400; else this.cause &= ~0x400;
+      if ((this.sr & 1) && (this.sr & this.cause & 0xFF00)) {
+        this.curPc = this.pc;
+        // 分岐遅延スロットの直前で受理すると EPC が分岐命令になる: そのまま扱える
+        this.inDelay = this.branchDelay;
+        this.exception(EXC_INT, 0);
+        return true;
+      }
+      return false;
+    }
+
+    // ── 実行 ──────────────────────────────────────────────
+    /**
+     * 指定サイクルぶん実行する(命令境界で停止)。戻り値は実際に消費したサイクル。
+     */
+    run(budget) {
+      const start = this.cycles;
+      const end = start + budget;
+      while (this.cycles < end && !this.halted) {
+        this.step();
+      }
+      return this.cycles - start;
+    }
+
+    /** 1命令実行。戻り値は消費サイクル */
+    step() {
+      const bus = this.bus;
+      const r = this.r;
+      // 割込み受理(命令境界)
+      if (bus.irqLine || (this.cause & 0x400)) {
+        if (this.pollInterrupt()) { this.cycles += this.cpi; return this.cpi; }
+      }
+      const pc = this.pc;
+      this.curPc = pc;
+      this.inDelay = this.branchDelay;
+      this.branchDelay = false;
+      // HLE BIOS の入口(トラップ)
+      if (bus.trapMask !== undefined && ((pc & bus.trapMask) >>> 0) === bus.trapBase) {
+        if (bus.onTrap(this, pc)) {
+          this.cycles += this.cpi;
+          return this.cpi;
+        }
+      }
+      if (pc & 3) { this.exception(EXC_ADEL, pc); this.cycles += this.cpi; return this.cpi; }
+      const op = bus.read32(pc) | 0;
+      this.pc = this.nextPc;
+      this.nextPc = (this.nextPc + 4) | 0;
+
+      const rs = (op >>> 21) & 31, rt = (op >>> 16) & 31, rd = (op >>> 11) & 31;
+      const imm = op << 16 >> 16;        // 符号拡張即値
+      const immU = op & 0xFFFF;
+      const sa = (op >>> 6) & 31;
+      let cyc = this.cpi;
+
+      switch (op >>> 26) {
+        case 0x00: // SPECIAL
+          switch (op & 0x3F) {
+            case 0x00: this.wr(rd, r[rt] << sa); break;                    // SLL
+            case 0x02: this.wr(rd, r[rt] >>> sa); break;                   // SRL
+            case 0x03: this.wr(rd, r[rt] >> sa); break;                    // SRA
+            case 0x04: this.wr(rd, r[rt] << (r[rs] & 31)); break;          // SLLV
+            case 0x06: this.wr(rd, r[rt] >>> (r[rs] & 31)); break;         // SRLV
+            case 0x07: this.wr(rd, r[rt] >> (r[rs] & 31)); break;          // SRAV
+            case 0x08: this.nextPc = r[rs]; this.branchDelay = true; break; // JR
+            case 0x09: { const t = r[rs]; this.wr(rd, this.nextPc); this.nextPc = t; this.branchDelay = true; break; } // JALR
+            case 0x0C: // SYSCALL
+              if (bus.onSyscall && bus.onSyscall(this, false)) break;
+              this.exception(EXC_SYS, 0); break;
+            case 0x0D: // BREAK
+              if (bus.onSyscall && bus.onSyscall(this, true)) break;
+              this.exception(EXC_BP, 0); break;
+            case 0x10: this.wr(rd, this.hi); break;                        // MFHI
+            case 0x11: this.hi = r[rs]; break;                             // MTHI
+            case 0x12: this.wr(rd, this.lo); break;                        // MFLO
+            case 0x13: this.lo = r[rs]; break;                             // MTLO
+            case 0x18: this.mult(r[rs], r[rt], true); cyc += this.mulCyc; break;     // MULT
+            case 0x19: this.mult(r[rs], r[rt], false); cyc += this.mulCyc; break;    // MULTU
+            case 0x1A: { // DIV
+              const a = r[rs], b = r[rt];
+              if (b === 0) { this.lo = a >= 0 ? -1 : 1; this.hi = a; }
+              else if (a === -2147483648 && b === -1) { this.lo = -2147483648; this.hi = 0; }
+              else { this.lo = (a / b) | 0; this.hi = a % b; }
+              cyc += this.divCyc; break;
+            }
+            case 0x1B: { // DIVU
+              const a = r[rs] >>> 0, b = r[rt] >>> 0;
+              if (b === 0) { this.lo = -1; this.hi = a | 0; }
+              else { this.lo = Math.floor(a / b) | 0; this.hi = (a % b) | 0; }
+              cyc += this.divCyc; break;
+            }
+            case 0x20: { // ADD
+              const a = r[rs], b = r[rt], s = (a + b) | 0;
+              if (((a ^ s) & (b ^ s)) < 0) { this.exception(EXC_OV, 0); break; }
+              this.wr(rd, s); break;
+            }
+            case 0x21: this.wr(rd, (r[rs] + r[rt]) | 0); break;            // ADDU
+            case 0x22: { // SUB
+              const a = r[rs], b = r[rt], s = (a - b) | 0;
+              if (((a ^ b) & (a ^ s)) < 0) { this.exception(EXC_OV, 0); break; }
+              this.wr(rd, s); break;
+            }
+            case 0x23: this.wr(rd, (r[rs] - r[rt]) | 0); break;            // SUBU
+            case 0x24: this.wr(rd, r[rs] & r[rt]); break;                  // AND
+            case 0x25: this.wr(rd, r[rs] | r[rt]); break;                  // OR
+            case 0x26: this.wr(rd, r[rs] ^ r[rt]); break;                  // XOR
+            case 0x27: this.wr(rd, ~(r[rs] | r[rt])); break;               // NOR
+            case 0x2A: this.wr(rd, r[rs] < r[rt] ? 1 : 0); break;          // SLT
+            case 0x2B: this.wr(rd, (r[rs] >>> 0) < (r[rt] >>> 0) ? 1 : 0); break; // SLTU
+            default: this.exception(EXC_RI, 0); break;
+          }
+          break;
+        case 0x01: { // REGIMM
+          const cond = r[rs] < 0;
+          const link = (rt & 0x1E) === 0x10;
+          const target = (this.pc + (imm << 2)) | 0;
+          if (link) this.wr(31, this.nextPc);
+          // BLTZ(0)/BGEZ(1)/BLTZAL(16)/BGEZAL(17)。他のrtはビット0で判定する実機挙動
+          if ((rt & 1) ? !cond : cond) this.nextPc = target;
+          this.branchDelay = true;
+          break;
+        }
+        case 0x02: this.nextPc = ((this.pc & 0xF0000000) | ((op & 0x03FFFFFF) << 2)) | 0; this.branchDelay = true; break; // J
+        case 0x03: this.wr(31, this.nextPc); this.nextPc = ((this.pc & 0xF0000000) | ((op & 0x03FFFFFF) << 2)) | 0; this.branchDelay = true; break; // JAL
+        case 0x04: if (r[rs] === r[rt]) this.nextPc = (this.pc + (imm << 2)) | 0; this.branchDelay = true; break; // BEQ
+        case 0x05: if (r[rs] !== r[rt]) this.nextPc = (this.pc + (imm << 2)) | 0; this.branchDelay = true; break; // BNE
+        case 0x06: if (r[rs] <= 0) this.nextPc = (this.pc + (imm << 2)) | 0; this.branchDelay = true; break;   // BLEZ
+        case 0x07: if (r[rs] > 0) this.nextPc = (this.pc + (imm << 2)) | 0; this.branchDelay = true; break;    // BGTZ
+        case 0x08: { // ADDI
+          const a = r[rs], s = (a + imm) | 0;
+          if (((a ^ s) & (imm ^ s)) < 0) { this.exception(EXC_OV, 0); break; }
+          this.wr(rt, s); break;
+        }
+        case 0x09: this.wr(rt, (r[rs] + imm) | 0); break;                  // ADDIU
+        case 0x0A: this.wr(rt, r[rs] < imm ? 1 : 0); break;                // SLTI
+        case 0x0B: this.wr(rt, (r[rs] >>> 0) < (imm >>> 0) ? 1 : 0); break; // SLTIU
+        case 0x0C: this.wr(rt, r[rs] & immU); break;                       // ANDI
+        case 0x0D: this.wr(rt, r[rs] | immU); break;                       // ORI
+        case 0x0E: this.wr(rt, r[rs] ^ immU); break;                       // XORI
+        case 0x0F: this.wr(rt, immU << 16); break;                         // LUI
+        case 0x10: // COP0
+          switch (rs) {
+            case 0x00: this.ld(rt, this.mfc0(rd)); break;                  // MFC0
+            case 0x02: this.ld(rt, this.mfc0(rd)); break;                  // CFC0(実機には無いが無害)
+            case 0x04: this.mtc0(rd, r[rt]); break;                        // MTC0
+            case 0x06: break;                                               // CTC0
+            case 0x10: if ((op & 0x3F) === 0x10) this.rfe(); break;        // RFE
+            default: break;
+          }
+          break;
+        case 0x11: // COP1(無い): 例外
+        case 0x13: this.exception(EXC_CPU, 0); break;
+        case 0x12: // COP2(GTE): 演算はしない。読みは0
+          switch (rs) {
+            case 0x00: case 0x02: this.ld(rt, 0); break;                   // MFC2/CFC2
+            default: break;                                                 // MTC2/CTC2/演算
+          }
+          break;
+        case 0x20: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read8(a) << 24 >> 24); cyc += this.memCyc; break; }   // LB
+        case 0x21: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read16(a) << 16 >> 16); cyc += this.memCyc; break; } // LH
+        case 0x22: { // LWL
+          const a = (r[rs] + imm) | 0;
+          const mem = bus.read32(a & ~3) | 0;
+          const cur = r[rt];
+          let v;
+          switch (a & 3) {
+            case 0: v = (mem << 24) | (cur & 0x00FFFFFF); break;
+            case 1: v = (mem << 16) | (cur & 0x0000FFFF); break;
+            case 2: v = (mem << 8) | (cur & 0x000000FF); break;
+            default: v = mem; break;
+          }
+          this.ld(rt, v); cyc += this.memCyc; break;
+        }
+        case 0x23: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read32(a) | 0); cyc += this.memCyc; break; } // LW
+        case 0x24: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read8(a) & 0xFF); cyc += this.memCyc; break; }     // LBU
+        case 0x25: { const a = (r[rs] + imm) | 0; this.ld(rt, bus.read16(a) & 0xFFFF); cyc += this.memCyc; break; } // LHU
+        case 0x26: { // LWR
+          const a = (r[rs] + imm) | 0;
+          const mem = bus.read32(a & ~3) | 0;
+          const cur = r[rt];
+          let v;
+          switch (a & 3) {
+            case 0: v = mem; break;
+            case 1: v = (mem >>> 8) | (cur & 0xFF000000); break;
+            case 2: v = (mem >>> 16) | (cur & 0xFFFF0000); break;
+            default: v = (mem >>> 24) | (cur & 0xFFFFFF00); break;
+          }
+          this.ld(rt, v | 0); cyc += this.memCyc; break;
+        }
+        case 0x28: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write8(a, r[rt] & 0xFF); cyc += this.memCyc; break; }   // SB
+        case 0x29: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write16(a, r[rt] & 0xFFFF); cyc += this.memCyc; break; } // SH
+        case 0x2A: { // SWL
+          const a = (r[rs] + imm) | 0;
+          if (this.sr & 0x10000) break;
+          const al = a & ~3;
+          const mem = bus.read32(al) | 0, v = r[rt];
+          let out;
+          switch (a & 3) {
+            case 0: out = (mem & 0xFFFFFF00) | (v >>> 24); break;
+            case 1: out = (mem & 0xFFFF0000) | (v >>> 16); break;
+            case 2: out = (mem & 0xFF000000) | (v >>> 8); break;
+            default: out = v; break;
+          }
+          bus.write32(al, out | 0); cyc += this.memCyc; break;
+        }
+        case 0x2B: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write32(a, r[rt]); cyc += this.memCyc; break; } // SW
+        case 0x2E: { // SWR
+          const a = (r[rs] + imm) | 0;
+          if (this.sr & 0x10000) break;
+          const al = a & ~3;
+          const mem = bus.read32(al) | 0, v = r[rt];
+          let out;
+          switch (a & 3) {
+            case 0: out = v; break;
+            case 1: out = (mem & 0x000000FF) | (v << 8); break;
+            case 2: out = (mem & 0x0000FFFF) | (v << 16); break;
+            default: out = (mem & 0x00FFFFFF) | (v << 24); break;
+          }
+          bus.write32(al, out | 0); cyc += this.memCyc; break;
+        }
+        case 0x30: case 0x31: case 0x33: this.exception(EXC_CPU, 0); break; // LWC0/1/3
+        case 0x32: { const a = (r[rs] + imm) | 0; bus.read32(a); cyc += this.memCyc; break; }   // LWC2 (GTEへ: 読み捨て)
+        case 0x38: case 0x39: case 0x3B: this.exception(EXC_CPU, 0); break; // SWC0/1/3
+        case 0x3A: { const a = (r[rs] + imm) | 0; if (!(this.sr & 0x10000)) bus.write32(a, 0); cyc += this.memCyc; break; } // SWC2 (GTEレジスタは0)
+        default: this.exception(EXC_RI, 0); break;
+      }
+
+      r[0] = 0;
+      this.cycles += cyc;
+      return cyc;
+    }
+
+    /** レジスタへ即時書き込み(遅延中の同レジスタへのロードは捨てる) */
+    wr(reg, val) {
+      if (reg === 0) return;
+      this.r[reg] = val | 0;
+    }
+
+    /**
+     * ロード結果の書き込み。
+     * MIPS I の仕様書上は「次の命令からは古い値が見える」ロード遅延があるが、PS1 の実機では
+     * 即時に見える(Philosoma の起動コードが lw s7 直後の add s7,s7,s4 で新しい値を前提にしており、
+     * 遅延を入れると加算オーバーフロー例外で止まる)。PCSX/Mednafen/DuckStation も即時扱い。
+     */
+    ld(reg, val) {
+      if (reg === 0) return;
+      this.r[reg] = val | 0;
+    }
+
+    mult(a, b, signed) {
+      let neg = false;
+      let ua = a, ub = b;
+      if (signed) {
+        if (a < 0) { ua = (-a) | 0; neg = !neg; }
+        if (b < 0) { ub = (-b) | 0; neg = !neg; }
+      }
+      ua >>>= 0; ub >>>= 0;
+      const ah = ua >>> 16, al = ua & 0xFFFF, bh = ub >>> 16, bl = ub & 0xFFFF;
+      const ll = al * bl;
+      const mid = al * bh + ah * bl + Math.floor(ll / 65536);
+      let lo = (ll % 65536 + (mid % 65536) * 65536) >>> 0;
+      let hi = (ah * bh + Math.floor(mid / 65536)) >>> 0;
+      if (neg) {
+        lo = (-lo) >>> 0;
+        hi = ((~hi) + (lo === 0 ? 1 : 0)) >>> 0;
+      }
+      this.lo = lo | 0; this.hi = hi | 0;
+    }
+
+    mfc0(reg) {
+      switch (reg) {
+        case 8: return this.badVaddr;
+        case 12: return this.sr;
+        case 13: return this.cause;
+        case 14: return this.epc;
+        default: return this.cop0[reg & 15];
+      }
+    }
+
+    mtc0(reg, val) {
+      switch (reg) {
+        case 12: this.sr = val | 0; break;
+        case 13: this.cause = (this.cause & ~0x300) | (val & 0x300); break; // ソフト割込みビットのみ書ける
+        case 14: this.epc = val | 0; break;
+        case 8: break;
+        default: this.cop0[reg & 15] = val | 0; break;
+      }
+    }
+  }
+
+  CPUR3000.EXC = { INT: EXC_INT, ADEL: EXC_ADEL, ADES: EXC_ADES, SYS: EXC_SYS, BP: EXC_BP, RI: EXC_RI, CPU: EXC_CPU, OV: EXC_OV };
+  Emu.CPUR3000 = CPUR3000;
+})(globalThis);
+
+/*
+ * PlayStation SPU (CXD2922/CXD2925) エミュレータ
+ * MML.Emu.SpuPsx
+ *
+ * 24ボイスの SPU-ADPCM 再生、ハードADSR、ボイス/メイン音量スイープ、ピッチ変調(PMON)、
+ * ノイズ、リバーブ、SPU RAM 転送(FIFO手動書き/DMA読み書き)、IRQ9。
+ * clock() 1回で 44.1kHz のステレオ1サンプル(outL/outR、-32768..32767)を生成する。
+ * CPU 33.8688MHz ÷ 768 = 44100Hz。
+ *
+ * 出典は psx-spx "Sound Processing Unit (SPU)" の記述(ガウス表・ADSR のカウンタ式・
+ * ノイズ・リバーブ式・39タップFIR はそこから写した)。ADSR は「Counter += Increment、
+ * bit15 が立ったら1ステップ」の実機検証済みの形を使う。
+ *
+ * レジスタは 0x1F801C00.. をハーフワード index(0..0xFF)で扱う:
+ *   voice n: n*8 + {0:volL 1:volR 2:pitch 3:startAddr 4:adsrLo 5:adsrHi 6:curAdsrVol 7:repeatAddr}
+ *   0xC0 mainL 0xC1 mainR 0xC2 vLOUT 0xC3 vROUT 0xC4/C5 KON 0xC6/C7 KOFF 0xC8/C9 PMON 0xCA/CB NON
+ *   0xCC/CD EON 0xCE/CF ENDX 0xD1 mBASE 0xD2 IRQaddr 0xD3 transferAddr 0xD4 FIFO 0xD5 SPUCNT
+ *   0xD6 transferCtrl 0xD7 SPUSTAT 0xD8/D9 CD vol 0xDA/DB ext vol 0xDC/DD curMainVol 0xE0..FF reverb
+ *   0x100..0x12F current voice volume L/R (read)  0x130..0x13F 不明(RAM扱い)
+ *
+ * フック:
+ *   onWrite(index, value)   レジスタ書き込み(キャプチャ用)
+ *   onKeyOn(voice, startAddr) KON でボイスが鳴り始めた時
+ *   onIrq()                 IRQ9 発生
+ * ミュート/音量: mute[24](bool) / vol[24](0..2)。Emu.applyMute/applyVolume と同じ配列規約。
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const SPU_RAM_SIZE = 0x80000;
+  const NUM_VOICES = 24;
+  const SAMPLES_PER_BLOCK = 28;
+
+  // ── ガウス補間表(psx-spx、512エントリ。4タップの和は 0x7F80 ±1) ──
+  const GAUSS = new Int16Array([
+        -1,    -1,    -1,    -1,    -1,    -1,    -1,    -1,    -1,    -1,    -1,    -1,    -1,    -1,    -1,    -1,
+         0,     0,     0,     0,     0,     0,     0,     1,     1,     1,     1,     2,     2,     2,     3,     3,
+         3,     4,     4,     5,     5,     6,     7,     7,     8,     9,     9,    10,    11,    12,    13,    14,
+        15,    16,    17,    18,    19,    21,    22,    24,    25,    27,    28,    30,    32,    33,    35,    37,
+        39,    41,    44,    46,    48,    51,    53,    56,    58,    61,    64,    67,    70,    73,    77,    80,
+        84,    87,    91,    95,    99,   103,   107,   111,   116,   120,   125,   130,   135,   140,   145,   150,
+       156,   161,   167,   173,   179,   186,   192,   199,   205,   212,   219,   227,   234,   242,   250,   257,
+       266,   274,   283,   291,   300,   309,   319,   328,   338,   348,   358,   369,   379,   390,   401,   412,
+       424,   436,   448,   460,   473,   485,   498,   512,   525,   539,   553,   567,   582,   597,   612,   627,
+       643,   659,   675,   692,   708,   726,   743,   761,   779,   797,   816,   835,   854,   874,   894,   914,
+       935,   956,   977,   999,  1020,  1043,  1066,  1089,  1112,  1136,  1160,  1184,  1209,  1234,  1260,  1286,
+      1312,  1339,  1366,  1394,  1422,  1450,  1479,  1508,  1537,  1567,  1598,  1628,  1660,  1691,  1723,  1756,
+      1789,  1822,  1856,  1890,  1924,  1959,  1995,  2031,  2067,  2104,  2141,  2179,  2217,  2256,  2295,  2334,
+      2374,  2415,  2456,  2497,  2539,  2582,  2624,  2668,  2712,  2756,  2801,  2846,  2892,  2938,  2985,  3032,
+      3079,  3128,  3176,  3225,  3275,  3325,  3376,  3427,  3479,  3531,  3584,  3637,  3691,  3745,  3799,  3855,
+      3910,  3967,  4023,  4081,  4138,  4197,  4255,  4315,  4374,  4435,  4495,  4557,  4619,  4681,  4744,  4807,
+      4871,  4935,  5000,  5065,  5131,  5197,  5264,  5332,  5399,  5468,  5536,  5606,  5676,  5746,  5817,  5888,
+      5959,  6032,  6104,  6177,  6251,  6325,  6400,  6475,  6550,  6626,  6702,  6779,  6856,  6934,  7012,  7091,
+      7170,  7249,  7329,  7409,  7490,  7571,  7653,  7735,  7817,  7900,  7983,  8066,  8150,  8234,  8319,  8404,
+      8489,  8575,  8661,  8748,  8834,  8922,  9009,  9097,  9185,  9273,  9362,  9451,  9541,  9630,  9720,  9811,
+      9901,  9992, 10083, 10174, 10266, 10358, 10450, 10542, 10635, 10727, 10820, 10913, 11007, 11100, 11194, 11288,
+     11382, 11476, 11571, 11665, 11760, 11855, 11950, 12045, 12140, 12236, 12331, 12427, 12522, 12618, 12714, 12809,
+     12905, 13001, 13097, 13193, 13289, 13385, 13481, 13577, 13673, 13769, 13865, 13961, 14056, 14152, 14248, 14343,
+     14439, 14534, 14630, 14725, 14820, 14915, 15010, 15104, 15199, 15293, 15387, 15481, 15575, 15669, 15762, 15855,
+     15948, 16041, 16133, 16226, 16317, 16409, 16500, 16592, 16682, 16773, 16863, 16953, 17042, 17131, 17220, 17308,
+     17396, 17484, 17571, 17658, 17744, 17830, 17916, 18001, 18086, 18170, 18254, 18337, 18420, 18502, 18584, 18665,
+     18746, 18826, 18905, 18985, 19063, 19141, 19219, 19295, 19372, 19447, 19522, 19597, 19671, 19744, 19816, 19888,
+     19959, 20030, 20100, 20169, 20238, 20306, 20373, 20439, 20505, 20570, 20634, 20698, 20760, 20822, 20884, 20944,
+     21004, 21063, 21121, 21178, 21235, 21290, 21345, 21399, 21452, 21505, 21556, 21607, 21657, 21706, 21754, 21801,
+     21848, 21893, 21938, 21982, 22025, 22066, 22107, 22148, 22187, 22225, 22262, 22299, 22334, 22369, 22402, 22435,
+     22467, 22498, 22527, 22556, 22584, 22611, 22637, 22662, 22686, 22709, 22731, 22752, 22772, 22791, 22809, 22826,
+     22842, 22857, 22872, 22885, 22897, 22908, 22918, 22927, 22935, 22942, 22948, 22953, 22957, 22960, 22962, 22963,
+  ]);
+
+  // ── リバーブ入出力の 39 タップ FIR(psx-spx) ──
+  const REVERB_FIR = new Int16Array([
+        -1,     0,     2,     0,   -10,     0,    35,     0,
+      -103,     0,   266,     0,  -616,     0,  1332,     0,
+     -2960,     0, 10246, 16384, 10246,     0, -2960,     0,
+      1332,     0,  -616,     0,   266,     0,  -103,     0,
+        35,     0,   -10,     0,     2,     0,    -1,
+  ]);
+
+  // SPU-ADPCM フィルタ係数(XA と同じ)
+  const ADPCM_POS = [0, 60, 115, 98, 122];
+  const ADPCM_NEG = [0, 0, -52, -55, -60];
+
+  const PH_OFF = 0, PH_ATTACK = 1, PH_DECAY = 2, PH_SUSTAIN = 3, PH_RELEASE = 4;
+
+  function clamp16(v) { return v < -32768 ? -32768 : (v > 32767 ? 32767 : v); }
+
+  /**
+   * 音量エンベロープ(ADSR の各相/音量スイープ共通)。psx-spx の式そのまま。
+   * @returns 新しいレベル
+   */
+  function envTick(env, level) {
+    // env: {shift, stepVal, decreasing, exponential, negative, counter}
+    let step = 7 - env.stepVal;
+    if (env.decreasing !== env.negative) step = ~step;      // +7..+4 → -8..-5
+    const shift = env.shift;
+    step = shift < 11 ? (step << (11 - shift)) : step;
+    let inc = shift > 11 ? (0x8000 >> (shift - 11)) : 0x8000;
+    if (env.exponential && !env.decreasing && level > 0x6000) {
+      if (shift < 10) step >>= 2;
+      else if (shift >= 11) inc >>= 2;
+      else { step >>= 1; inc >>= 1; }
+    } else if (env.exponential && env.decreasing) {
+      step = (step * level) >> 15;
+    }
+    if ((env.stepVal | (shift << 2)) !== 0x7F) { if (inc < 1) inc = 1; }
+    env.counter += inc;
+    if ((env.counter & 0x8000) === 0) return level;
+    env.counter = 0;
+    level += step;
+    if (!env.decreasing) return level < -0x8000 ? -0x8000 : (level > 0x7FFF ? 0x7FFF : level);
+    if (env.negative) return level < -0x8000 ? -0x8000 : (level > 0 ? 0 : level);
+    return level < 0 ? 0 : level;
+  }
+
+  function makeEnv() { return { shift: 0, stepVal: 0, decreasing: false, exponential: false, negative: false, counter: 0 }; }
+
+  class Voice {
+    constructor(index) {
+      this.index = index;
+      this.buf = new Int16Array(SAMPLES_PER_BLOCK + 3); // [0..2]=前ブロック末尾3サンプル、[3..30]=現ブロック
+      this.reset();
+    }
+    reset() {
+      this.buf.fill(0);
+      this.curAddr = 0;        // 現在のADPCMブロック(バイトアドレス)
+      this.repeatAddr = 0;     // バイトアドレス
+      this.counter = 0;        // ピッチカウンタ(bit12以上=ブロック内サンプル、bit4-11=補間index)
+      this.hasBlock = false;
+      this.blockFlags = 0;
+      this.ignoreLoopAddr = false;
+      this.phase = PH_OFF;
+      this.level = 0;          // ADSR レベル 0..0x7FFF
+      this.env = makeEnv();
+      this.out = 0;            // VxOUTX(ADSR適用後・音量前)
+      this.outL = 0; this.outR = 0;
+      this.volL = 0; this.volR = 0;         // 現在の音量(-0x8000..0x7FFF)
+      this.sweepL = null; this.sweepR = null; // スイープ中なら makeEnv()
+      this.keyOnFrame = -1;
+      this.keyOnSerial = 0;    // キーオンの通し番号(同じフレーム内の打ち直し検出用)
+    }
+  }
+
+  class SpuPsx {
+    constructor() {
+      this.ram = new Uint8Array(SPU_RAM_SIZE);
+      this.ram16 = new Int16Array(this.ram.buffer);
+      this.regs = new Uint16Array(0x200);
+      this.voices = [];
+      for (let i = 0; i < NUM_VOICES; i++) this.voices.push(new Voice(i));
+      this.mute = new Array(NUM_VOICES).fill(false);
+      this.vol = new Array(NUM_VOICES).fill(1);
+      this.onWrite = null; this.onKeyOn = null; this.onIrq = null;
+      this.onRamWrite = null; // (byteAddr, int16) 転送(FIFO/DMA)による SPU RAM 書き込み(キャプチャ用)
+      // replayMode: 記録済みの書き込みを流し直す再生専用。FIFO/DMA からの RAM 書き込みは
+      // 行わない(RAM はキャプチャの onRamWrite 記録を ramWrite16Direct で直接反映する)。
+      this.replayMode = false;
+      this.reverbBuf = new Int32Array(0); // 未使用(将来のため)
+      this.reset();
+    }
+
+    reset() {
+      this.ram.fill(0);
+      this.regs.fill(0);
+      for (const v of this.voices) v.reset();
+      this.outL = 0; this.outR = 0;
+      this.voiceOutL = new Int32Array(NUM_VOICES);
+      this.voiceOutR = new Int32Array(NUM_VOICES);
+      this.kon = 0; this.koff = 0; this.pmon = 0; this.non = 0; this.eon = 0; this.endx = 0;
+      this.cnt = 0; this.stat = 0;
+      this.irqAddr = 0; this.irqFlag = false;
+      this.transferAddr = 0; this.transferCur = 0;
+      this.fifo = new Uint16Array(32); this.fifoLen = 0;
+      this.mainVolL = 0; this.mainVolR = 0; this.mainSweepL = null; this.mainSweepR = null;
+      this.mainEnvL = makeEnv(); this.mainEnvR = makeEnv();
+      this.noiseLevel = 0; this.noiseTimer = 0;
+      // リバーブ
+      this.rvBase = 0; this.rvCur = 0;
+      this.rvDownL = new Int16Array(64); this.rvDownR = new Int16Array(64);
+      this.rvUpL = new Int16Array(64); this.rvUpR = new Int16Array(64);
+      this.rvPos = 0;
+      this.rvOutL = 0; this.rvOutR = 0;
+      this.sampleCount = 0;
+    }
+
+    // ── レジスタ ──────────────────────────────────────────
+    readReg(index) {
+      index &= 0x1FF;
+      if (index < 0xC0) {
+        const v = this.voices[index >> 3];
+        switch (index & 7) {
+          case 6: return v.level & 0xFFFF;
+          case 7: return (v.repeatAddr >>> 3) & 0xFFFF;
+          default: return this.regs[index];
+        }
+      }
+      switch (index) {
+        case 0xCE: return this.endx & 0xFFFF;
+        case 0xCF: return (this.endx >>> 16) & 0xFF;
+        case 0xD7: return this.stat;
+        case 0xDC: return this.mainVolL & 0xFFFF;
+        case 0xDD: return this.mainVolR & 0xFFFF;
+        default:
+          if (index >= 0x100 && index < 0x130) {
+            const v = this.voices[(index - 0x100) >> 1];
+            return ((index & 1) ? v.volR : v.volL) & 0xFFFF;
+          }
+          return this.regs[index];
+      }
+    }
+
+    writeReg(index, value) {
+      index &= 0x1FF; value &= 0xFFFF;
+      if (this.onWrite) this.onWrite(index, value);
+      this.regs[index] = value;
+      if (index < 0xC0) {
+        const v = this.voices[index >> 3];
+        switch (index & 7) {
+          case 0: this.setVoiceVolume(v, 'L', value); break;
+          case 1: this.setVoiceVolume(v, 'R', value); break;
+          case 6: v.level = value << 16 >> 16; break;
+          // 鳴っている最中に書いたときだけ、以後のループ開始フラグより優先する(DuckStation: ignore_loop_address |= IsOn())。
+          // 鳴る前に書いた値はキーオン後の最初のループ開始フラグで上書きされうる(FF7 の AKAO はこれでループ先を指定する)
+          case 7: v.repeatAddr = (value << 3) & 0x7FFFF; if (v.phase !== PH_OFF) v.ignoreLoopAddr = true; break;
+          default: break; // pitch/startAddr/ADSR は regs から都度読む
+        }
+        return;
+      }
+      switch (index) {
+        case 0xC0: this.setMainVolume('L', value); break;
+        case 0xC1: this.setMainVolume('R', value); break;
+        case 0xC4: this.kon = (this.kon & 0xFF0000) | value; this.applyKeyOn(value); break;
+        case 0xC5: this.kon = (this.kon & 0xFFFF) | ((value & 0xFF) << 16); this.applyKeyOn((value & 0xFF) << 16); break;
+        case 0xC6: this.koff = (this.koff & 0xFF0000) | value; this.applyKeyOff(value); break;
+        case 0xC7: this.koff = (this.koff & 0xFFFF) | ((value & 0xFF) << 16); this.applyKeyOff((value & 0xFF) << 16); break;
+        case 0xC8: this.pmon = (this.pmon & 0xFF0000) | value; break;
+        case 0xC9: this.pmon = (this.pmon & 0xFFFF) | ((value & 0xFF) << 16); break;
+        case 0xCA: this.non = (this.non & 0xFF0000) | value; break;
+        case 0xCB: this.non = (this.non & 0xFFFF) | ((value & 0xFF) << 16); break;
+        case 0xCC: this.eon = (this.eon & 0xFF0000) | value; break;
+        case 0xCD: this.eon = (this.eon & 0xFFFF) | ((value & 0xFF) << 16); break;
+        case 0xCE: this.endx = (this.endx & 0xFF0000) | value; break;
+        case 0xCF: this.endx = (this.endx & 0xFFFF) | ((value & 0xFF) << 16); break;
+        case 0xD1: this.rvBase = (value << 3) & 0x7FFFF; this.rvCur = this.rvBase; break;
+        case 0xD2: this.irqAddr = (value << 3) & 0x7FFFF; break;
+        case 0xD3: this.transferAddr = (value << 3) & 0x7FFFF; this.transferCur = this.transferAddr; break;
+        case 0xD4: // FIFO
+          if (this.fifoLen < 32) this.fifo[this.fifoLen++] = value;
+          else { this.fifo.copyWithin(0, 1); this.fifo[31] = value; }
+          if (((this.cnt >> 4) & 3) === 1) this.drainFifo(); // 既に手動書きモードなら随時反映
+          break;
+        case 0xD5: this.setControl(value); break;
+        case 0xD6: break; // transfer control(type=2 normal のみ対応)
+        default: break;
+      }
+    }
+
+    setControl(value) {
+      const prev = this.cnt;
+      this.cnt = value;
+      if (!(value & 0x40)) this.irqFlag = false; // IRQ9 disable/acknowledge
+      const mode = (value >> 4) & 3;
+      if (mode === 1 && ((prev >> 4) & 3) !== 1) this.drainFifo();
+      if (mode === 0) this.fifoLen = 0;
+      this.updateStat();
+    }
+
+    updateStat() {
+      const mode = (this.cnt >> 4) & 3;
+      let s = this.cnt & 0x3F;
+      if (this.irqFlag) s |= 0x40;
+      if (mode >= 2) s |= 0x80;
+      if (mode === 2) s |= 0x100;
+      if (mode === 3) s |= 0x200;
+      this.stat = s;
+    }
+
+    get irqEnabled() { return (this.cnt & 0x8040) === 0x8040; }
+
+    raiseIrq() {
+      if (this.irqFlag) return;
+      this.irqFlag = true;
+      this.updateStat();
+      if (this.onIrq) this.onIrq();
+    }
+
+    /** 転送(FIFO/DMA)による RAM 書き込み。IRQ アドレスに触れたら IRQ */
+    ramWrite16(addr, value) {
+      addr &= 0x7FFFE;
+      if (this.replayMode) return;
+      if (this.onRamWrite) this.onRamWrite(addr, value << 16 >> 16);
+      this.ram16[addr >> 1] = value << 16 >> 16;
+      if (this.irqEnabled && ((addr ^ this.irqAddr) & ~7) === 0) this.raiseIrq();
+    }
+
+    /** 記録済みの RAM 書き込みを直接反映する(replayMode 用、IRQ/フックなし) */
+    ramWrite16Direct(addr, value) {
+      this.ram16[(addr & 0x7FFFE) >> 1] = value;
+    }
+
+    drainFifo() {
+      for (let i = 0; i < this.fifoLen; i++) {
+        this.ramWrite16(this.transferCur, this.fifo[i]);
+        this.transferCur = (this.transferCur + 2) & 0x7FFFF;
+      }
+      this.fifoLen = 0;
+    }
+
+    /** DMA4 書き込み(1ワード=2ハーフワード) */
+    dmaWrite32(word) {
+      this.ramWrite16(this.transferCur, word & 0xFFFF);
+      this.transferCur = (this.transferCur + 2) & 0x7FFFF;
+      this.ramWrite16(this.transferCur, (word >>> 16) & 0xFFFF);
+      this.transferCur = (this.transferCur + 2) & 0x7FFFF;
+    }
+
+    /** DMA4 読み出し(1ワード) */
+    dmaRead32() {
+      const lo = this.ram16[this.transferCur >> 1] & 0xFFFF;
+      this.transferCur = (this.transferCur + 2) & 0x7FFFF;
+      const hi = this.ram16[this.transferCur >> 1] & 0xFFFF;
+      this.transferCur = (this.transferCur + 2) & 0x7FFFF;
+      return (lo | (hi << 16)) | 0;
+    }
+
+    setVoiceVolume(v, side, value) {
+      if (value & 0x8000) {
+        const env = makeEnv();
+        env.shift = (value >> 2) & 0x1F; env.stepVal = value & 3;
+        env.decreasing = !!(value & 0x2000); env.exponential = !!(value & 0x4000); env.negative = !!(value & 0x1000);
+        if (side === 'L') v.sweepL = env; else v.sweepR = env;
+      } else {
+        const vol = (value << 17) >> 16; // 15bit符号付き×2
+        if (side === 'L') { v.volL = vol; v.sweepL = null; } else { v.volR = vol; v.sweepR = null; }
+      }
+    }
+
+    setMainVolume(side, value) {
+      if (value & 0x8000) {
+        const env = makeEnv();
+        env.shift = (value >> 2) & 0x1F; env.stepVal = value & 3;
+        env.decreasing = !!(value & 0x2000); env.exponential = !!(value & 0x4000); env.negative = !!(value & 0x1000);
+        if (side === 'L') this.mainSweepL = env; else this.mainSweepR = env;
+      } else {
+        const vol = (value << 17) >> 16;
+        if (side === 'L') { this.mainVolL = vol; this.mainSweepL = null; } else { this.mainVolR = vol; this.mainSweepR = null; }
+      }
+    }
+
+    applyKeyOn(bits) {
+      for (let i = 0; i < NUM_VOICES; i++) {
+        if (!(bits & (1 << i))) continue;
+        const v = this.voices[i];
+        v.curAddr = (this.regs[i * 8 + 3] << 3) & 0x7FFFF;
+        v.counter = 0;
+        v.hasBlock = false;
+        v.buf.fill(0);
+        v.level = 0;
+        v.phase = PH_ATTACK;
+        v.env.counter = 0;
+        v.ignoreLoopAddr = false;
+        v.keyOnFrame = this.sampleCount;
+        v.keyOnSerial = (v.keyOnSerial + 1) | 0;
+        this.endx &= ~(1 << i);
+        if (this.onKeyOn) this.onKeyOn(i, v.curAddr);
+      }
+    }
+
+    applyKeyOff(bits) {
+      for (let i = 0; i < NUM_VOICES; i++) {
+        if (!(bits & (1 << i))) continue;
+        const v = this.voices[i];
+        if (v.phase !== PH_OFF) { v.phase = PH_RELEASE; v.env.counter = 0; }
+      }
+    }
+
+    // ── ADPCM ────────────────────────────────────────────
+    /** v.curAddr のブロックを v.buf[3..30] へ復号する(履歴は buf[1],buf[2]) */
+    decodeBlock(v) {
+      const ram = this.ram;
+      const addr = v.curAddr;
+      if (this.irqEnabled && ((addr ^ this.irqAddr) & ~0xF) === 0) this.raiseIrq();
+      const hdr = ram[addr];
+      let shift = hdr & 0x0F;
+      if (shift > 12) shift = 9;
+      let filter = (hdr >> 4) & 7;
+      if (filter > 4) filter = 4;
+      const flags = ram[addr + 1];
+      v.blockFlags = flags;
+      if ((flags & 4) && !v.ignoreLoopAddr) v.repeatAddr = addr;
+      const f0 = ADPCM_POS[filter], f1 = ADPCM_NEG[filter];
+      const buf = v.buf;
+      // 前ブロック末尾3サンプルを先頭へ
+      buf[0] = buf[28]; buf[1] = buf[29]; buf[2] = buf[30];
+      let old = buf[2], older = buf[1];
+      let o = 3;
+      for (let i = 2; i < 16; i++) {
+        const b = ram[addr + i];
+        for (let n = 0; n < 2; n++) {
+          const nib = n ? (b >> 4) : (b & 0x0F);
+          let s = ((nib << 12) << 16 >> 16) >> shift;
+          s += (old * f0 + older * f1 + 32) >> 6;
+          s = clamp16(s);
+          buf[o++] = s;
+          older = old; old = s;
+        }
+      }
+      v.hasBlock = true;
+    }
+
+    /** ブロック末尾に達したとき(ループ終端処理→次ブロック) */
+    advanceBlock(v) {
+      const flags = v.blockFlags;
+      if (flags & 1) { // Loop End
+        this.endx |= (1 << v.index);
+        v.curAddr = v.repeatAddr;
+        // End+Mute。ノイズ再生中のボイスでは無視される(ADPCM の読み進みは続く)
+        if (!(flags & 2) && !(this.non & (1 << v.index))) {
+          v.phase = PH_OFF; v.level = 0; v.env.counter = 0;
+        }
+      } else {
+        v.curAddr = (v.curAddr + 16) & 0x7FFFF;
+      }
+      this.decodeBlock(v);
+    }
+
+    // ── ADSR ─────────────────────────────────────────────
+    adsrTick(v) {
+      if (v.phase === PH_OFF) { v.level = 0; return; }
+      const lo = this.regs[v.index * 8 + 4], hi = this.regs[v.index * 8 + 5];
+      const env = v.env;
+      let target = -1, targetIsMin = false;
+      switch (v.phase) {
+        case PH_ATTACK:
+          env.shift = (lo >> 10) & 0x1F; env.stepVal = (lo >> 8) & 3;
+          env.decreasing = false; env.exponential = !!(lo & 0x8000); env.negative = false;
+          target = 0x7FFF; break;
+        case PH_DECAY:
+          env.shift = (lo >> 4) & 0x0F; env.stepVal = 0;
+          env.decreasing = true; env.exponential = true; env.negative = false;
+          target = Math.min(0x7FFF, ((lo & 0x0F) + 1) << 11); targetIsMin = true; break;
+        case PH_SUSTAIN:
+          env.shift = (hi >> 8) & 0x1F; env.stepVal = (hi >> 6) & 3;
+          env.decreasing = !!(hi & 0x4000); env.exponential = !!(hi & 0x8000); env.negative = false;
+          break;
+        case PH_RELEASE:
+          env.shift = hi & 0x1F; env.stepVal = 0;
+          env.decreasing = true; env.exponential = !!(hi & 0x20); env.negative = false;
+          target = 0; targetIsMin = true; break;
+        default: break;
+      }
+      v.level = envTick(env, v.level);
+      if (target >= 0) {
+        if (targetIsMin ? (v.level <= target) : (v.level >= target)) {
+          if (v.phase === PH_ATTACK) { v.phase = PH_DECAY; env.counter = 0; }
+          else if (v.phase === PH_DECAY) { v.phase = PH_SUSTAIN; env.counter = 0; }
+          else if (v.phase === PH_RELEASE) { v.phase = PH_OFF; v.level = 0; }
+        }
+      }
+    }
+
+    static sweepTick(env, level) {
+      const next = envTick(env, level);
+      // 到達したら終了(スイープはそのレベルで止まる)
+      const done = env.decreasing ? (env.negative ? next <= -0x8000 : next <= 0) : next >= 0x7FFF;
+      return { level: next, done };
+    }
+
+    // ── ノイズ ────────────────────────────────────────────
+    noiseTick() {
+      const shift = (this.cnt >> 10) & 0x0F;
+      const step = ((this.cnt >> 8) & 3) + 4;
+      this.noiseTimer -= step;
+      const lvl = this.noiseLevel;
+      const parity = ((lvl >> 15) ^ (lvl >> 12) ^ (lvl >> 11) ^ (lvl >> 10) ^ 1) & 1;
+      if (this.noiseTimer < 0) {
+        this.noiseLevel = ((lvl << 1) | parity) << 16 >> 16;
+        this.noiseTimer += 0x20000 >> shift;
+        if (this.noiseTimer < 0) this.noiseTimer += 0x20000 >> shift;
+      }
+    }
+
+    // ── リバーブ ──────────────────────────────────────────
+    rvAddr(off) {
+      // off はバイトオフセット。mBASE..0x7FFFE で折り返す
+      let a = this.rvCur + off;
+      const size = SPU_RAM_SIZE - this.rvBase;
+      if (a >= SPU_RAM_SIZE) a = this.rvBase + ((a - this.rvBase) % size);
+      else if (a < this.rvBase) a = this.rvBase + (((a - this.rvBase) % size) + size) % size;
+      return a & 0x7FFFE;
+    }
+    rvRead(regIdx, minus2) {
+      const off = (this.regs[0xE0 + regIdx] << 3) - (minus2 ? 2 : 0);
+      return this.ram16[this.rvAddr(off) >> 1];
+    }
+    rvReadDisp(regIdx, dispIdx) {
+      const off = ((this.regs[0xE0 + regIdx] - this.regs[0xE0 + dispIdx]) << 3);
+      return this.ram16[this.rvAddr(off) >> 1];
+    }
+    rvWrite(regIdx, value) {
+      if (!(this.cnt & 0x80)) return; // Reverb Master Enable=0 なら書かない
+      const off = this.regs[0xE0 + regIdx] << 3;
+      this.ram16[this.rvAddr(off) >> 1] = clamp16(value);
+    }
+
+    /** 22.05kHz で1回。inL/inR は FIR で間引いた入力 */
+    reverbProcess(inL, inR) {
+      const R = this.regs;
+      const vol = (i) => R[0xE0 + i] << 16 >> 16;
+      const mul = (a, b) => (a * b) >> 15;
+      const vIIR = vol(2), vCOMB1 = vol(3), vCOMB2 = vol(4), vCOMB3 = vol(5), vCOMB4 = vol(6), vWALL = vol(7);
+      const vAPF1 = vol(8), vAPF2 = vol(9), vLIN = vol(0x1E), vRIN = vol(0x1F);
+      const Lin = mul(vLIN, inL), Rin = mul(vRIN, inR);
+      // Same side reflection
+      const mLSAME2 = this.rvRead(0x0A, true), mRSAME2 = this.rvRead(0x0B, true);
+      this.rvWrite(0x0A, mul(clamp16(Lin + mul(this.rvRead(0x10), vWALL) - mLSAME2), vIIR) + mLSAME2);
+      this.rvWrite(0x0B, mul(clamp16(Rin + mul(this.rvRead(0x11), vWALL) - mRSAME2), vIIR) + mRSAME2);
+      // Different side reflection
+      const mLDIFF2 = this.rvRead(0x12, true), mRDIFF2 = this.rvRead(0x13, true);
+      this.rvWrite(0x12, mul(clamp16(Lin + mul(this.rvRead(0x19), vWALL) - mLDIFF2), vIIR) + mLDIFF2);
+      this.rvWrite(0x13, mul(clamp16(Rin + mul(this.rvRead(0x18), vWALL) - mRDIFF2), vIIR) + mRDIFF2);
+      // Comb
+      let Lout = clamp16(mul(vCOMB1, this.rvRead(0x0C)) + mul(vCOMB2, this.rvRead(0x0E)) + mul(vCOMB3, this.rvRead(0x14)) + mul(vCOMB4, this.rvRead(0x16)));
+      let Rout = clamp16(mul(vCOMB1, this.rvRead(0x0D)) + mul(vCOMB2, this.rvRead(0x0F)) + mul(vCOMB3, this.rvRead(0x15)) + mul(vCOMB4, this.rvRead(0x17)));
+      // APF1
+      {
+        const l = this.rvReadDisp(0x1A, 0x00), r = this.rvReadDisp(0x1B, 0x00);
+        Lout = clamp16(Lout - mul(vAPF1, l)); this.rvWrite(0x1A, Lout); Lout = clamp16(mul(Lout, vAPF1) + l);
+        Rout = clamp16(Rout - mul(vAPF1, r)); this.rvWrite(0x1B, Rout); Rout = clamp16(mul(Rout, vAPF1) + r);
+      }
+      // APF2
+      {
+        const l = this.rvReadDisp(0x1C, 0x01), r = this.rvReadDisp(0x1D, 0x01);
+        Lout = clamp16(Lout - mul(vAPF2, l)); this.rvWrite(0x1C, Lout); Lout = clamp16(mul(Lout, vAPF2) + l);
+        Rout = clamp16(Rout - mul(vAPF2, r)); this.rvWrite(0x1D, Rout); Rout = clamp16(mul(Rout, vAPF2) + r);
+      }
+      // 次のバッファ位置
+      let next = (this.rvCur + 2) & 0x7FFFE;
+      if (next < this.rvBase) next = this.rvBase;
+      this.rvCur = next;
+      return { l: Lout, r: Rout };
+    }
+
+    /** 44.1kHz ごとのリバーブ入出力(FIRで 22.05kHz と往復) */
+    reverbTick(inL, inR) {
+      const pos = this.rvPos;
+      this.rvDownL[pos] = clamp16(inL); this.rvDownR[pos] = clamp16(inR);
+      if (pos & 1) {
+        // 間引き: 39タップ FIR(中心=19)
+        let accL = 0, accR = 0;
+        for (let k = 0; k < 39; k += 2) { // 奇数タップは中心以外0
+          const c = REVERB_FIR[k];
+          const i = (pos - k) & 63;
+          accL += c * this.rvDownL[i]; accR += c * this.rvDownR[i];
+        }
+        {
+          const i = (pos - 19) & 63;
+          accL += REVERB_FIR[19] * this.rvDownL[i]; accR += REVERB_FIR[19] * this.rvDownR[i];
+        }
+        const out = this.reverbProcess(clamp16(accL >> 15), clamp16(accR >> 15));
+        this.rvUpL[pos >> 1 & 31] = out.l; this.rvUpR[pos >> 1 & 31] = out.r;
+      }
+      // 補間: 偶数位置は偶数タップの和(×2)、奇数位置は中心タップ
+      let oL, oR;
+      const upIdx = (pos >> 1) & 31;
+      if (pos & 1) {
+        let accL = 0, accR = 0;
+        for (let k = 0; k < 39; k += 2) {
+          const c = REVERB_FIR[k];
+          const i = (upIdx - (k >> 1)) & 31;
+          accL += c * this.rvUpL[i]; accR += c * this.rvUpR[i];
+        }
+        oL = clamp16(accL >> 14); oR = clamp16(accR >> 14);
+      } else {
+        const i = (upIdx - 10) & 31; // 中心タップ(19): 偶数位置では o[m-10] だけが寄与
+        oL = this.rvUpL[i]; oR = this.rvUpR[i];
+      }
+      this.rvPos = (pos + 1) & 63;
+      const vLOUT = this.regs[0xC2] << 16 >> 16, vROUT = this.regs[0xC3] << 16 >> 16;
+      this.rvOutL = (oL * vLOUT) >> 15; this.rvOutR = (oR * vROUT) >> 15;
+    }
+
+    // ── 1サンプル ─────────────────────────────────────────
+    clock() {
+      const enabled = (this.cnt & 0xC000) === 0xC000;
+      this.noiseTick();
+      let sumL = 0, sumR = 0, rvL = 0, rvR = 0;
+      let prevOut = 0;
+      for (let i = 0; i < NUM_VOICES; i++) {
+        const v = this.voices[i];
+        const base = i * 8;
+        if (!v.hasBlock) this.decodeBlock(v);
+        // 補間
+        const si = (v.counter >> 12) + 3;
+        const gi = (v.counter >> 4) & 0xFF;
+        const buf = v.buf;
+        let s = ((GAUSS[0x0FF - gi] * buf[si - 3]) >> 15)
+              + ((GAUSS[0x1FF - gi] * buf[si - 2]) >> 15)
+              + ((GAUSS[0x100 + gi] * buf[si - 1]) >> 15)
+              + ((GAUSS[0x000 + gi] * buf[si]) >> 15);
+        if (this.non & (1 << i)) s = this.noiseLevel;
+        // ADSR
+        this.adsrTick(v);
+        const out = (s * v.level) >> 15;
+        v.out = out;
+        // 音量スイープ
+        if (v.sweepL) { const r = SpuPsx.sweepTick(v.sweepL, v.volL); v.volL = r.level; if (r.done) v.sweepL = null; }
+        if (v.sweepR) { const r = SpuPsx.sweepTick(v.sweepR, v.volR); v.volR = r.level; if (r.done) v.sweepR = null; }
+        let l = (out * v.volL) >> 15, r = (out * v.volR) >> 15;
+        if (this.mute[i]) { l = 0; r = 0; }
+        else if (this.vol[i] !== 1) { l = (l * this.vol[i]) | 0; r = (r * this.vol[i]) | 0; }
+        this.voiceOutL[i] = l; this.voiceOutR[i] = r;
+        v.outL = l; v.outR = r;
+        sumL += l; sumR += r;
+        if (this.eon & (1 << i)) { rvL += l; rvR += r; }
+        // ピッチカウンタ
+        let step = this.regs[base + 2];
+        if (i > 0 && (this.pmon & (1 << i))) {
+          const factor = (prevOut + 0x8000);
+          step = ((step << 16 >> 16) * factor) >> 15;
+          step &= 0xFFFF;
+        }
+        if (step > 0x3FFF) step = 0x4000;
+        v.counter += step;
+        while ((v.counter >> 12) >= SAMPLES_PER_BLOCK) {
+          v.counter -= SAMPLES_PER_BLOCK << 12;
+          this.advanceBlock(v);
+        }
+        prevOut = out;
+      }
+      // メイン音量(スイープ)
+      if (this.mainSweepL) { const r = SpuPsx.sweepTick(this.mainSweepL, this.mainVolL); this.mainVolL = r.level; if (r.done) this.mainSweepL = null; }
+      if (this.mainSweepR) { const r = SpuPsx.sweepTick(this.mainSweepR, this.mainVolR); this.mainVolR = r.level; if (r.done) this.mainSweepR = null; }
+      this.reverbTick(rvL, rvR);
+      // リバーブ出力は主音量の前に足す(DuckStation SPU::Execute と同じ順序)
+      const outL = (clamp16(sumL + this.rvOutL) * this.mainVolL) >> 15;
+      const outR = (clamp16(sumR + this.rvOutR) * this.mainVolR) >> 15;
+      this.outL = enabled ? outL : 0; this.outR = enabled ? outR : 0;
+      this.sampleCount++;
+    }
+
+    // ── 補助(キャプチャ/表示用) ──────────────────────────
+    /** ボイスの現在状態の控え(鍵盤表示/ロール用) */
+    voiceInfo(i) {
+      const v = this.voices[i];
+      const base = i * 8;
+      return {
+        active: v.phase !== PH_OFF,
+        phase: v.phase,
+        level: v.level,
+        pitch: this.regs[base + 2],
+        startAddr: (this.regs[base + 3] << 3) & 0x7FFFF,
+        curAddr: v.curAddr,
+        repeatAddr: v.repeatAddr,
+        volL: v.volL, volR: v.volR,
+        noise: !!(this.non & (1 << i)),
+        pmon: !!(this.pmon & (1 << i)),
+        reverb: !!(this.eon & (1 << i)),
+        adsr: this.regs[base + 4] | (this.regs[base + 5] << 16),
+        keyOnFrame: v.keyOnFrame,
+      };
+    }
+  }
+
+  SpuPsx.NUM_VOICES = NUM_VOICES;
+  SpuPsx.GAUSS = GAUSS;
+  SpuPsx.PHASE = { OFF: PH_OFF, ATTACK: PH_ATTACK, DECAY: PH_DECAY, SUSTAIN: PH_SUSTAIN, RELEASE: PH_RELEASE };
+  SpuPsx.envTick = envTick;
+
+  /**
+   * SPU RAM 上の ADPCM サンプルを PCM に復号する(音色抽出/表示用)。
+   * addr から Loop End フラグのブロックまで読み、ループ開始点も返す。
+   * @returns {{pcm:Int16Array, loopStart:number|null, loopEnd:boolean, blocks:number, endMute:boolean}}
+   */
+  SpuPsx.decodeSample = function (ram, addr, maxBlocks) {
+    const limit = maxBlocks || 4096;
+    const out = [];
+    let old = 0, older = 0;
+    let loopStart = null, loopEnd = false, endMute = false;
+    let a = addr & 0x7FFF0;
+    let blocks = 0;
+    for (; blocks < limit; blocks++) {
+      const hdr = ram[a];
+      let shift = hdr & 0x0F; if (shift > 12) shift = 9;
+      let filter = (hdr >> 4) & 7; if (filter > 4) filter = 4;
+      const flags = ram[a + 1];
+      if (flags & 4) loopStart = blocks * SAMPLES_PER_BLOCK;
+      const f0 = ADPCM_POS[filter], f1 = ADPCM_NEG[filter];
+      for (let i = 2; i < 16; i++) {
+        const b = ram[a + i];
+        for (let n = 0; n < 2; n++) {
+          const nib = n ? (b >> 4) : (b & 0x0F);
+          let s = ((nib << 12) << 16 >> 16) >> shift;
+          s += (old * f0 + older * f1 + 32) >> 6;
+          s = clamp16(s);
+          out.push(s);
+          older = old; old = s;
+        }
+      }
+      if (flags & 1) { loopEnd = true; endMute = !(flags & 2); blocks++; break; }
+      a = (a + 16) & 0x7FFFF;
+      if (a === 0) break;
+    }
+    return { pcm: Int16Array.from(out), loopStart, loopEnd, blocks, endMute };
+  };
+
+  /**
+   * 実際に鳴るとおりのサンプル構造を復号する(音程解析/ドラムパッド/変換用)。
+   * start からループ終端フラグまでを「頭」とし、ループする場合の戻り先は
+   *   - 頭の中にループ開始フラグがあり、かつ repeat レジスタが鳴っている間に書き換えられていなければそのフラグ
+   *   - それ以外はドライバが書いた repeat レジスタ(FF7 の AKAO 等はフラグを使わずレジスタで指定する)
+   * 戻り先が頭の外なら、そこからループ終端までを復号して後ろへつなぐ(loopStart = 頭の長さ)。
+   * @returns {{pcm:Int16Array, loopStart:number|null, looped:boolean, endMute:boolean, blocks:number,
+   *            loopAddr:number|null, byteRanges:Array<[number,number]>}}
+   */
+  SpuPsx.describeSample = function (ram, start, repeatReg, ignoreFlag) {
+    start &= 0x7FFF0;
+    const head = SpuPsx.decodeSample(ram, start, 8192);
+    const headEnd = start + head.blocks * 16;
+    const base = { blocks: head.blocks, endMute: head.endMute, byteRanges: [[start, headEnd]] };
+    if (!head.loopEnd || head.endMute) {
+      return Object.assign(base, { pcm: head.pcm, loopStart: null, looped: false, loopAddr: null });
+    }
+    let loopAddr;
+    if (!ignoreFlag && head.loopStart != null) loopAddr = start + (head.loopStart / SAMPLES_PER_BLOCK) * 16;
+    else loopAddr = repeatReg & 0x7FFF0;
+    if (loopAddr >= start && loopAddr < headEnd) {
+      return Object.assign(base, { pcm: head.pcm, loopStart: ((loopAddr - start) / 16) * SAMPLES_PER_BLOCK, looped: true, loopAddr });
+    }
+    const tail = SpuPsx.decodeSample(ram, loopAddr, 8192);
+    const pcm = new Int16Array(head.pcm.length + tail.pcm.length);
+    pcm.set(head.pcm, 0); pcm.set(tail.pcm, head.pcm.length);
+    base.byteRanges.push([loopAddr, loopAddr + tail.blocks * 16]);
+    return Object.assign(base, { pcm, loopStart: head.pcm.length, looped: true, loopAddr });
+  };
+
+  Emu.SpuPsx = SpuPsx;
+  Emu.SPU_PSX_RATE = 44100;
+})(globalThis);
+
+/*
+ * PlayStation バス(PSF再生用の最小構成)
+ * MML.Emu.PsxBus
+ *
+ *   RAM 2MB(0x00000000/0x80000000/0xA0000000 の各セグメントで 4 回ミラー)
+ *   スクラッチパッド 1KB (0x1F800000)
+ *   割込みコントローラ I_STAT/I_MASK (0x1F801070/74)
+ *   DMA 7ch (0x1F801080..) — SPU(ch4) は即時転送、GPU(ch2)/OTC(ch6)/他は形だけ完了させる
+ *   ルートカウンタ 3 本 (0x1F801100..)
+ *   GPU ステータス (0x1F801814) — VBlank ごとに奇偶ビットが反転するだけ
+ *   SPU (0x1F801C00..0x1F801FFF) → Emu.SpuPsx
+ *   BIOS 領域 (0x1FC00000..) は HLE のトラップ用(読みは 0)
+ *
+ * 時間の進め方: CPU の累積サイクル(cpu.cycles)を sync(cycles) に渡すと、
+ * その時点までのルートカウンタ・VBlank・SPU(768 サイクルごとに 1 サンプル)を進める。
+ * SPU の出力は audioL/audioR(Int16Array のリング)に溜まり、player が取り出す。
+ *
+ * CPU クロック 33.8688MHz。フレーム周期は GPU クロック(53.693175MHz)の
+ * NTSC 3413×263 / PAL 3406×314 ドットから換算する(59.83Hz / 50.20Hz)。
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const CPU_CLOCK = 33868800;
+  const GPU_CLOCK = 53693175;
+  const RAM_SIZE = 0x200000;
+  const CYCLES_PER_SAMPLE = 768;
+
+  const IRQ_VBLANK = 1, IRQ_GPU = 2, IRQ_CDROM = 4, IRQ_DMA = 8, IRQ_TMR0 = 16, IRQ_TMR1 = 32, IRQ_TMR2 = 64, IRQ_SIO0 = 128, IRQ_SIO1 = 256, IRQ_SPU = 512, IRQ_PIO = 1024;
+
+  class RootCounter {
+    constructor(index, bus) {
+      this.index = index; this.bus = bus;
+      this.reset();
+    }
+    reset() {
+      this.count = 0; this.mode = 0; this.target = 0;
+      this.frac = 0;        // 分周の端数(CPUサイクル)
+      this.irqDone = false; // ワンショットで発火済み
+      this.reachedTarget = false; this.reachedOverflow = false;
+      this.irqRequest = true; // bit10: 0=要求中(反転論理)
+    }
+    /** 1カウントあたりの CPU サイクル(小数可) */
+    divisor() {
+      const src = (this.mode >> 8) & 3;
+      switch (this.index) {
+        case 0: return (src & 1) ? this.bus.cyclesPerDot : 1;
+        case 1: return (src & 1) ? this.bus.cyclesPerHblank : 1;
+        default: return (src & 2) ? 8 : 1;
+      }
+    }
+    stopped() {
+      if (!(this.mode & 1)) return false;
+      const sm = (this.mode >> 1) & 3;
+      if (this.index === 2) return sm === 0 || sm === 3;
+      return false; // 0/1 のブランク同期は自由走行として扱う
+    }
+    writeMode(v) {
+      this.mode = v & 0x3FF;
+      this.count = 0; this.frac = 0;
+      this.irqDone = false; this.irqRequest = true;
+      this.reachedTarget = false; this.reachedOverflow = false;
+    }
+    readMode() {
+      let v = this.mode | (this.irqRequest ? 0x400 : 0) | (this.reachedTarget ? 0x800 : 0) | (this.reachedOverflow ? 0x1000 : 0);
+      this.reachedTarget = false; this.reachedOverflow = false;
+      return v;
+    }
+    fireIrq() {
+      const repeat = !!(this.mode & 0x40);
+      if (!repeat && this.irqDone) return;
+      this.irqDone = true;
+      if (this.mode & 0x80) { // トグル
+        this.irqRequest = !this.irqRequest;
+        if (!this.irqRequest) this.bus.raiseIrq(IRQ_TMR0 << this.index);
+      } else {
+        this.irqRequest = false;
+        this.bus.raiseIrq(IRQ_TMR0 << this.index);
+        this.irqRequest = true; // パルス
+      }
+    }
+    targetHit() { this.reachedTarget = true; if (this.mode & 0x10) this.fireIrq(); }
+    overflowHit() { this.reachedOverflow = true; if (this.mode & 0x20) this.fireIrq(); }
+    advance(cycles) {
+      if (this.stopped()) return;
+      const div = this.divisor();
+      let ticks;
+      if (div === 1) ticks = cycles;
+      else { this.frac += cycles; ticks = Math.floor(this.frac / div); this.frac -= ticks * div; }
+      const tgt = this.target & 0xFFFF;
+      const resetOnTarget = !!(this.mode & 8);
+      if (resetOnTarget && tgt === 0) { // 毎カウント到達: 1回だけ扱う
+        if (ticks > 0) this.targetHit();
+        this.count = 0;
+        return;
+      }
+      while (ticks > 0) {
+        if (resetOnTarget) {
+          // 0..tgt を往復。count > tgt(目標を下げた直後)は 0xFFFF まで走る
+          const n = (this.count <= tgt) ? tgt - this.count : 0xFFFF - this.count;
+          if (ticks <= n) { this.count += ticks; ticks = 0; if (this.count === tgt) this.reachedTarget = true; }
+          else {
+            ticks -= n + 1;
+            if (this.count + n === tgt) this.targetHit(); else this.overflowHit();
+            this.count = 0;
+          }
+        } else {
+          const n = 0xFFFF - this.count;
+          if (ticks <= n) {
+            const nc = this.count + ticks;
+            if (this.count < tgt && nc >= tgt) this.targetHit();
+            this.count = nc; ticks = 0;
+          } else {
+            if (this.count < tgt) this.targetHit();
+            ticks -= n + 1;
+            this.overflowHit();
+            this.count = 0;
+          }
+        }
+      }
+    }
+  }
+
+  class PsxBus {
+    constructor(spu) {
+      this.ramBuf = new ArrayBuffer(RAM_SIZE);
+      this.ram = new Uint8Array(this.ramBuf);
+      this.ram16 = new Uint16Array(this.ramBuf);
+      this.ram32 = new Int32Array(this.ramBuf);
+      this.scratchBuf = new ArrayBuffer(0x400);
+      this.scratch = new Uint8Array(this.scratchBuf);
+      this.scratch16 = new Uint16Array(this.scratchBuf);
+      this.scratch32 = new Int32Array(this.scratchBuf);
+      this.spu = spu || new Emu.SpuPsx();
+      this.spu.onIrq = () => this.raiseIrq(IRQ_SPU);
+      this.counters = [new RootCounter(0, this), new RootCounter(1, this), new RootCounter(2, this)];
+      this.memCtrl = new Int32Array(9);
+      this.dmaMadr = new Int32Array(7); this.dmaBcr = new Int32Array(7); this.dmaChcr = new Int32Array(7);
+      this.audioL = new Int16Array(65536); this.audioR = new Int16Array(65536);
+      this.audioWrite = 0; this.audioRead = 0;
+      this.onWrite = null;   // (addr, value, size) 任意のフック(デバッグ用)
+      this.writeSeq = 0;         // CPU からの書き込み回数(アイドル判定用)
+      this.ioSeq = 0;            // 時間で値が変わりうる I/O の読み出し回数(アイドル判定用)
+      this.protectStubs = false; // HLE スタブ(0x80..0xCF)への書き込みを弾く(ドライバがベクタを消しても HLE が生き残るように)
+      this.speedFactor = 1;      // テンポ変更: CPU/タイマ/VBlank だけ速くする(SPU は不変)
+      this.trapMask = 0x1FF80000; this.trapBase = 0x1FC00000; // BIOS 領域(セグメントビットは落として比較)
+      this.onTrap = null; this.onSyscall = null;
+      this.setRefresh(60);
+      this.reset();
+    }
+
+    setRefresh(hz) {
+      const pal = hz === 50;
+      const dots = pal ? 3406 * 314 : 3413 * 263;
+      this.cyclesPerFrame = dots * CPU_CLOCK / GPU_CLOCK;
+      this.cyclesPerHblank = this.cyclesPerFrame / (pal ? 314 : 263);
+      this.cyclesPerDot = CPU_CLOCK / GPU_CLOCK * 8; // 320px モード相当(ドットクロック=GPU/8)
+      this.frameRate = CPU_CLOCK / this.cyclesPerFrame;
+    }
+
+    reset() {
+      this.ram.fill(0); this.scratch.fill(0);
+      this.spu.reset();
+      for (const c of this.counters) c.reset();
+      this.iStat = 0; this.iMask = 0; this.irqLine = false;
+      this.dmaMadr.fill(0); this.dmaBcr.fill(0); this.dmaChcr.fill(0);
+      this.dpcr = 0x07654321; this.dicr = 0;
+      this.memCtrl.fill(0);
+      this.ramSize = 0x00000B88;
+      this.cacheCtrl = 0;
+      this.gpuStat = 0x14802000 | 0;
+      this.gpuOdd = false;
+      this.syncedCycles = 0;
+      this.frameAccum = 0; this.spuAccum = 0;
+      this.frameCount = 0;
+      this.audioWrite = 0; this.audioRead = 0;
+      this.onVblank = null;
+      this.onSample = null;
+    }
+
+    // ── 割込み ────────────────────────────────────────────
+    raiseIrq(bit) { this.iStat |= bit; this.updateIrqLine(); }
+    updateIrqLine() { this.irqLine = (this.iStat & this.iMask) !== 0; }
+
+    // ── 時間 ──────────────────────────────────────────────
+    /** cpu.cycles(累積)まで周辺を進める */
+    sync(cycles) {
+      let elapsed = cycles - this.syncedCycles;
+      if (elapsed <= 0) return;
+      this.syncedCycles = cycles;
+      const timerElapsed = this.speedFactor === 1 ? elapsed : elapsed * this.speedFactor;
+      for (const c of this.counters) c.advance(timerElapsed);
+      this.frameAccum += timerElapsed;
+      while (this.frameAccum >= this.cyclesPerFrame) {
+        this.frameAccum -= this.cyclesPerFrame;
+        this.gpuOdd = !this.gpuOdd;
+        this.frameCount++;
+        this.raiseIrq(IRQ_VBLANK);
+        if (this.onVblank) this.onVblank(this.frameCount);
+      }
+      this.spuAccum += elapsed;
+      const spu = this.spu;
+      while (this.spuAccum >= CYCLES_PER_SAMPLE) {
+        this.spuAccum -= CYCLES_PER_SAMPLE;
+        spu.clock();
+        const w = this.audioWrite;
+        this.audioL[w] = spu.outL; this.audioR[w] = spu.outR;
+        this.audioWrite = (w + 1) & 0xFFFF;
+        if (this.onSample) this.onSample(spu);
+      }
+    }
+
+    /** 溜まった音声サンプル数 */
+    get audioAvailable() { return (this.audioWrite - this.audioRead) & 0xFFFF; }
+    /** サンプルを1つ取り出す({l,r} を避けて2値を配列 out[0],out[1] に書く) */
+    popSample(out) {
+      const r = this.audioRead;
+      out[0] = this.audioL[r]; out[1] = this.audioR[r];
+      this.audioRead = (r + 1) & 0xFFFF;
+    }
+
+    // ── メモリ ────────────────────────────────────────────
+    read8(addr) {
+      const p = addr & 0x1FFFFFFF;
+      if (p < 0x800000) return this.ram[p & 0x1FFFFF];
+      if ((p & 0x1FFFFC00) === 0x1F800000) return this.scratch[p & 0x3FF];
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        this.ioSeq++;
+        if (p >= 0x1F801C00 && p < 0x1F802000) { const h = this.spu.readReg((p - 0x1F801C00) >> 1); return (p & 1) ? (h >> 8) & 0xFF : h & 0xFF; }
+        const w = this.ioRead32(p & ~3);
+        return (w >>> ((p & 3) * 8)) & 0xFF;
+      }
+      if (p >= 0x1F000000 && p < 0x1F800000) return 0xFF; // 拡張1(未接続)
+      return 0;
+    }
+    read16(addr) {
+      const p = addr & 0x1FFFFFFF;
+      if (p & 1) return this.read8(addr) | (this.read8(addr + 1) << 8);
+      if (p < 0x800000) return this.ram16[(p & 0x1FFFFF) >> 1];
+      if ((p & 0x1FFFFC00) === 0x1F800000) return this.scratch16[(p & 0x3FF) >> 1];
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        this.ioSeq++;
+        if (p >= 0x1F801C00 && p < 0x1F802000) return this.spu.readReg((p - 0x1F801C00) >> 1);
+        const w = this.ioRead32(p & ~3);
+        return (w >>> ((p & 2) * 8)) & 0xFFFF;
+      }
+      if (p >= 0x1F000000 && p < 0x1F800000) return 0xFFFF;
+      return 0;
+    }
+    read32(addr) {
+      const p = addr & 0x1FFFFFFF;
+      if (p & 3) return (this.read16(addr) | (this.read16(addr + 2) << 16)) | 0;
+      if (p < 0x800000) return this.ram32[(p & 0x1FFFFF) >> 2];
+      if ((p & 0x1FFFFC00) === 0x1F800000) return this.scratch32[(p & 0x3FF) >> 2];
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        this.ioSeq++;
+        if (p >= 0x1F801C00 && p < 0x1F802000) {
+          const i = (p - 0x1F801C00) >> 1;
+          return (this.spu.readReg(i) | (this.spu.readReg(i + 1) << 16)) | 0;
+        }
+        return this.ioRead32(p);
+      }
+      if (p >= 0x1F000000 && p < 0x1F800000) return -1;
+      if ((addr >>> 0) === 0xFFFE0130) { this.ioSeq++; return this.cacheCtrl; }
+      return 0;
+    }
+    write8(addr, v) {
+      this.writeSeq++;
+      const p = addr & 0x1FFFFFFF;
+      if (p < 0x800000) { if (this.protectStubs && ((p & 0x1FFFFF) - 0x80 >>> 0) < 0x50) return; this.ram[p & 0x1FFFFF] = v; return; }
+      if ((p & 0x1FFFFC00) === 0x1F800000) { this.scratch[p & 0x3FF] = v; return; }
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        if (p >= 0x1F801C00 && p < 0x1F802000) { if (!(p & 1)) this.spu.writeReg((p - 0x1F801C00) >> 1, v & 0xFF); return; }
+        // 8bit I/O 書き(CD-ROM 等)は無視
+        return;
+      }
+    }
+    write16(addr, v) {
+      this.writeSeq++;
+      const p = addr & 0x1FFFFFFF;
+      if ((p & 1) && p < 0x800000) { this.write8(addr, v & 0xFF); this.write8(addr + 1, (v >>> 8) & 0xFF); return; }
+      if (p < 0x800000) { if (this.protectStubs && ((p & 0x1FFFFF) - 0x80 >>> 0) < 0x50) return; this.ram16[(p & 0x1FFFFF) >> 1] = v; return; }
+      if ((p & 0x1FFFFC00) === 0x1F800000) { this.scratch16[(p & 0x3FF) >> 1] = v; return; }
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        if (p >= 0x1F801C00 && p < 0x1F802000) { this.spu.writeReg((p - 0x1F801C00) >> 1, v); return; }
+        if (p >= 0x1F801100 && p < 0x1F801130) { this.timerWrite(p, v & 0xFFFF); return; }
+        if (p === 0x1F801070) { this.iStat &= v; this.updateIrqLine(); return; }
+        if (p === 0x1F801074) { this.iMask = v & 0x7FF; this.updateIrqLine(); return; }
+        return;
+      }
+    }
+    write32(addr, v) {
+      this.writeSeq++;
+      const p = addr & 0x1FFFFFFF;
+      if ((p & 3) && p < 0x800000) { this.write16(addr, v & 0xFFFF); this.write16(addr + 2, (v >>> 16) & 0xFFFF); return; }
+      if (p < 0x800000) { if (this.protectStubs && ((p & 0x1FFFFF) - 0x80 >>> 0) < 0x50) return; this.ram32[(p & 0x1FFFFF) >> 2] = v; return; }
+      if ((p & 0x1FFFFC00) === 0x1F800000) { this.scratch32[(p & 0x3FF) >> 2] = v; return; }
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        if (p >= 0x1F801C00 && p < 0x1F802000) {
+          const i = (p - 0x1F801C00) >> 1;
+          this.spu.writeReg(i, v & 0xFFFF); this.spu.writeReg(i + 1, (v >>> 16) & 0xFFFF);
+          return;
+        }
+        this.ioWrite32(p, v);
+        return;
+      }
+      if ((addr >>> 0) === 0xFFFE0130) { this.cacheCtrl = v; return; }
+    }
+
+    // ── I/O ───────────────────────────────────────────────
+    ioRead32(p) {
+      if (p >= 0x1F801000 && p < 0x1F801024) return this.memCtrl[(p - 0x1F801000) >> 2];
+      switch (p) {
+        case 0x1F801060: return this.ramSize;
+        case 0x1F801070: return this.iStat;
+        case 0x1F801074: return this.iMask;
+        case 0x1F8010F0: return this.dpcr;
+        case 0x1F8010F4: return this.dicr;
+        case 0x1F801814: return (this.gpuStat & 0x7FFFFFFF) | (this.gpuOdd ? 0x80000000 : 0);
+        case 0x1F801810: return 0;
+        case 0x1F801040: return 0xFFFFFFFF | 0; // SIO0 data(パッド無し)
+        case 0x1F801044: return 0x5; // SIO0 stat: TX ready
+        case 0x1F801800: return 0x18; // CDROM: parameter fifo empty/ready
+        default: break;
+      }
+      if (p >= 0x1F801080 && p < 0x1F8010F0) {
+        const ch = (p - 0x1F801080) >> 4;
+        switch (p & 0xC) { case 0: return this.dmaMadr[ch]; case 4: return this.dmaBcr[ch]; case 8: return this.dmaChcr[ch]; default: return 0; }
+      }
+      if (p >= 0x1F801100 && p < 0x1F801130) {
+        const c = this.counters[(p - 0x1F801100) >> 4];
+        switch (p & 0xC) { case 0: return c.count & 0xFFFF; case 4: return c.readMode(); case 8: return c.target; default: return 0; }
+      }
+      return 0;
+    }
+
+    ioWrite32(p, v) {
+      if (p >= 0x1F801000 && p < 0x1F801024) { this.memCtrl[(p - 0x1F801000) >> 2] = v; return; }
+      switch (p) {
+        case 0x1F801060: this.ramSize = v; return;
+        case 0x1F801070: this.iStat &= v; this.updateIrqLine(); return;
+        case 0x1F801074: this.iMask = v & 0x7FF; this.updateIrqLine(); return;
+        case 0x1F8010F0: this.dpcr = v; return;
+        case 0x1F8010F4: this.dicrWrite(v); return;
+        case 0x1F801810: return; // GP0
+        case 0x1F801814: return; // GP1
+        default: break;
+      }
+      if (p >= 0x1F801080 && p < 0x1F8010F0) {
+        const ch = (p - 0x1F801080) >> 4;
+        switch (p & 0xC) {
+          case 0: this.dmaMadr[ch] = v & 0x00FFFFFF; return;
+          case 4: this.dmaBcr[ch] = v; return;
+          case 8: this.dmaChcrWrite(ch, v); return;
+          default: return;
+        }
+      }
+      if (p >= 0x1F801100 && p < 0x1F801130) { this.timerWrite(p, v & 0xFFFF); return; }
+    }
+
+    timerWrite(p, v) {
+      const c = this.counters[(p - 0x1F801100) >> 4];
+      switch (p & 0xC) {
+        case 0: c.count = v & 0xFFFF; break;
+        case 4: c.writeMode(v); break;
+        case 8: c.target = v & 0xFFFF; break;
+        default: break;
+      }
+    }
+
+    // ── DMA ───────────────────────────────────────────────
+    dicrWrite(v) {
+      // bit24-30 は書き込み 1 でリセット(ack)、bit0-23 は R/W
+      const flags = this.dicr & 0x7F000000 & ~(v & 0x7F000000);
+      this.dicr = (v & 0x00FFFFFF) | flags;
+      this.updateDicrMaster();
+    }
+    updateDicrMaster() {
+      const force = !!(this.dicr & 0x8000);
+      const master = !!(this.dicr & 0x800000);
+      const flagged = ((this.dicr >>> 24) & 0x7F) & ((this.dicr >>> 16) & 0x7F);
+      if (force || (master && flagged)) this.dicr |= 0x80000000; else this.dicr &= 0x7FFFFFFF;
+    }
+    dmaComplete(ch) {
+      this.dmaChcr[ch] &= ~0x11000000; // busy/trigger を落とす
+      if ((this.dicr & 0x800000) && (this.dicr & (1 << (16 + ch)))) {
+        this.dicr |= (1 << (24 + ch));
+        const before = this.dicr & 0x80000000;
+        this.updateDicrMaster();
+        if (!before && (this.dicr & 0x80000000)) this.raiseIrq(IRQ_DMA);
+      }
+    }
+    dmaChcrWrite(ch, v) {
+      this.dmaChcr[ch] = v;
+      if (!(v & 0x01000000)) return;                     // start/busy
+      if (!(this.dpcr & (8 << (ch * 4)))) return;        // チャンネル無効
+      const sync = (v >> 9) & 3;
+      if (sync === 0 && !(v & 0x10000000)) return;       // 手動モードはトリガ待ち
+      const toDevice = !!(v & 1);
+      const step = (v & 2) ? -4 : 4;
+      let addr = this.dmaMadr[ch] & 0x1FFFFC;
+      const bcr = this.dmaBcr[ch];
+      let words;
+      if (sync === 0) { words = bcr & 0xFFFF; if (words === 0) words = 0x10000; }
+      else if (sync === 1) { const bs = bcr & 0xFFFF, ba = (bcr >>> 16) & 0xFFFF; words = (bs === 0 ? 0x10000 : bs) * (ba === 0 ? 0x10000 : ba); }
+      else words = 0; // linked list(GPU)
+      switch (ch) {
+        case 4: { // SPU
+          const spu = this.spu;
+          for (let i = 0; i < words; i++) {
+            if (toDevice) spu.dmaWrite32(this.ram32[addr >> 2]);
+            else this.ram32[addr >> 2] = spu.dmaRead32();
+            addr = (addr + step) & 0x1FFFFC;
+          }
+          break;
+        }
+        case 6: { // OTC: 逆順リンクリストを RAM に書く
+          for (let i = 0; i < words; i++) {
+            const next = (i === words - 1) ? 0xFFFFFF : ((addr - 4) & 0x1FFFFC);
+            this.ram32[addr >> 2] = next;
+            addr = (addr - 4) & 0x1FFFFC;
+          }
+          break;
+        }
+        case 2: { // GPU: リンクリストは辿るだけ
+          if (sync === 2) {
+            let guard = 0;
+            let node = addr;
+            while (node !== 0xFFFFFC && (node & 0x800000) === 0 && guard++ < 100000) {
+              const hdr = this.ram32[node >> 2];
+              const next = hdr & 0xFFFFFF;
+              if (next === 0xFFFFFF) break;
+              node = next & 0x1FFFFC;
+            }
+          } else {
+            addr = (addr + words * step) & 0x1FFFFC;
+          }
+          break;
+        }
+        default: // MDEC/CDROM/PIO: 読みは 0 で埋める
+          if (!toDevice) for (let i = 0; i < words; i++) { this.ram32[addr >> 2] = 0; addr = (addr + step) & 0x1FFFFC; }
+          break;
+      }
+      this.dmaMadr[ch] = addr;
+      this.dmaComplete(ch);
+    }
+
+    // ── ユーティリティ ────────────────────────────────────
+    /** RAM への一括書き込み(PS-EXE セグメント) */
+    loadSegment(addr, data) {
+      const p = addr & 0x1FFFFF;
+      const n = Math.min(data.length, RAM_SIZE - p);
+      this.ram.set(data.subarray(0, n), p);
+      return n;
+    }
+    readString(addr, max) {
+      let s = '';
+      for (let i = 0; i < (max || 1024); i++) {
+        const c = this.read8(addr + i);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      return s;
+    }
+  }
+
+  PsxBus.CPU_CLOCK = CPU_CLOCK;
+  PsxBus.CYCLES_PER_SAMPLE = CYCLES_PER_SAMPLE;
+  PsxBus.IRQ = { VBLANK: IRQ_VBLANK, GPU: IRQ_GPU, CDROM: IRQ_CDROM, DMA: IRQ_DMA, TMR0: IRQ_TMR0, TMR1: IRQ_TMR1, TMR2: IRQ_TMR2, SIO0: IRQ_SIO0, SIO1: IRQ_SIO1, SPU: IRQ_SPU, PIO: IRQ_PIO };
+  Emu.PsxBus = PsxBus;
+  Emu.PsxRootCounter = RootCounter; // ZN-1 の基板(zn/znMain.js)が同じ物を使う
+})(globalThis);
+
+/*
+ * MML.Emu.createZnMain({ bios, rom, cat1, cat2, sound, dsw, onSound })
+ *
+ * ソニー ZN-1(PlayStation 相当の業務用基板)+タイトー FX-1B のメイン側。本物の BIOS とゲームの ROM をそのまま走らせる。
+ * 目的はテストモードの画面を出して、ゲーム本体が音源基板(ZOOM、zsg2/zoomBoard.js)へ送る指令をそのまま使うこと。
+ * 配置と周辺の動きは MAME の写し(BSD-3-Clause):
+ *   src/mame/sony/zn.cpp(smf、R. Belmont)… 配置、保護チップの選択、入力
+ *   src/mame/sony/znmcu.cpp(smf)… DIP スイッチを読む MCU
+ *   src/devices/machine/cat702.cpp(smf)… 保護チップ CAT702
+ *   src/devices/cpu/psx/sio.cpp(smf)… シリアル
+ *   src/devices/machine/at28c16.cpp、mb3773.cpp(smf)… EEPROM、ウォッチドッグ
+ *
+ * 配置(物理番地):
+ *   0x00000000 RAM 4MB / 0x1F000000-0x1F7FFFFF ゲームの ROM(8MB ずつのバンク)/ 0x1F800000 スクラッチパッド
+ *   0x1F801000 PlayStation の入出力(割り込み、DMA、タイマ、SIO、GPU、SPU)/ 0x1FC00000 BIOS 512KB
+ *   0x1FA00000 P1 / 0x1FA00100 P2 / 0x1FA00200 サービス / 0x1FA00300 システム / 0x1FA10200 基板の構成
+ *   0x1FA10300 保護チップの選択 / 0x1FA20000 コイン / 0x1FAF0000 AT28C16 / 0x1FB00000 FRAM(偶数バイト)
+ *   0x1FB40000 バンクとウォッチドッグ / 0x1FB80000 音源基板のレジスタ(値、番号)/ 0x1FBA0000 音源基板への割り込み
+ *   0x1FBC0000 その読み出し / 0x1FBE0000 音源基板との共有 RAM(偶数バイト)
+ *
+ * 時間: CPU のサイクル = 33.8688MHz。1 命令のサイクル数は cpuR3000.js の固定値(MAME と起動の時間が合う値を znCpi で渡す)。
+ * 周辺(タイマ、VBlank、SPU、SIO、音源基板)は、CPU を短い区切りで走らせるたびに追いつかせる。
+ * GPU は差し替え式(opt.gpu)。渡さなければ「いつでも受け取れる」とだけ答える空の物を使う(画面は出ない)。
+ */
+(function (root) {
+  'use strict';
+  const MML = root.MML = root.MML || {}, Emu = MML.Emu = MML.Emu || {};
+  const CPU_HZ = 33868800, GPU_HZ = 53693175, RAM_SIZE = 0x400000, RAM_MASK = RAM_SIZE - 1;
+  const IRQ_VBLANK = 1, IRQ_DMA = 8, IRQ_SIO0 = 128, IRQ_SPU = 512;
+  const SIO_TX_RDY = 1, SIO_RX_RDY = 2, SIO_TX_EMPTY = 4, SIO_OVERRUN = 0x10, SIO_DSR = 0x80, SIO_IRQ = 0x200;
+  const SIOC_TX_ENA = 1, SIOC_DTR = 2, SIOC_IACK = 0x10, SIOC_RESET = 0x40, SIOC_TX_IENA = 0x400, SIOC_RX_IENA = 0x800, SIOC_DSR_IENA = 0x1000;
+  const CAT_INIT = [0xff, 0xfe, 0xfc, 0xf8, 0xf0, 0xe0, 0xc0, 0x7f];
+
+  /** 保護チップ CAT702。8 バイトの表で中身が決まる。out(bit) = データ出力の線 */
+  function createCat702(table, out) {
+    let select = 1, clock = 1, datain = 1, state = 0, bit = 0;
+    const coef = (sel, b) => {
+      if (!sel) return table[b];
+      let r = coef((sel - 1) & 7, (b - 1) & 7);
+      r = ((r << 1) | (((r >> 7) ^ (r >> 6)) & 1)) & 0xff;
+      return b !== 7 ? r : r ^ coef(sel, 0);
+    };
+    // 係数は 8×8 通りしか無いので前もって表にする
+    const C = []; for (let s = 0; s < 8; s++) { C.push([]); for (let b = 0; b < 8; b++) C[s].push(coef(s, b)); }
+    const apply = (box) => { let r = 0; for (let i = 0; i < 8; i++) if (state >> i & 1) r ^= box[i]; state = r; };
+    return {
+      select(s) { if (select !== s) { if (!s) { state = 0xfc; bit = 0; } else out(1); select = s; } },
+      datain(s) { datain = s; },
+      clock(s) {
+        if (!s && clock && !select) { if (bit === 0) apply(CAT_INIT); out(state >> bit & 1); }
+        if (s && !clock && !select) { if (!datain) apply(C[bit]); bit = (bit + 1) & 7; }
+        clock = s;
+      }
+    };
+  }
+
+  /** 何も描かない GPU。命令は捨て、状態は「いつでも受け取れる」と答える */
+  function createNullGpu() {
+    let mode = 0, dmaDir = 0, info = 0;
+    return {
+      gp0() {}, read() { return info; },
+      gp1(v) {
+        const c = v >>> 24;
+        if (c === 0) { mode = 0; dmaDir = 0; }
+        else if (c === 4) dmaDir = v & 3;
+        else if (c === 8) mode = v & 0xff;
+        else if (c === 0x10) info = (v & 7) === 7 ? 2 : 0;
+      },
+      // bit26 命令を受け取れる、bit27 読み出せる、bit28 DMA を受け取れる。bit31(奇偶)は基板側で足す
+      stat() { return 0x1C000000 | dmaDir << 29 | (dmaDir ? 1 << 25 : 0) | (mode & 0x3f) << 17 | (mode & 0x40) << 10; },
+      get interlace() { return !!(mode & 0x20); }, vblank() {}
+    };
+  }
+
+  Emu.createZnMain = function (opt) {
+    const bios = opt.bios, rom = opt.rom, sound = opt.sound || null, onSound = opt.onSound || null;
+    const ramBuf = new ArrayBuffer(RAM_SIZE), ram = new Uint8Array(ramBuf), ram16 = new Uint16Array(ramBuf), ram32 = new Int32Array(ramBuf);
+    const scrBuf = new ArrayBuffer(0x400), scr = new Uint8Array(scrBuf), scr16 = new Uint16Array(scrBuf), scr32 = new Int32Array(scrBuf);
+    const al = (u8) => { const b = new Uint8Array((u8.length + 3) & ~3); b.set(u8); return b; };
+    const biosB = al(bios), bios16 = new Uint16Array(biosB.buffer), bios32 = new Int32Array(biosB.buffer), BIOS_MASK = 0x7ffff;
+    const romB = al(rom), rom16 = new Uint16Array(romB.buffer), rom32 = new Int32Array(romB.buffer), ROM_LEN = romB.length;
+    const at28 = new Uint8Array(0x800).fill(0xff), fram = new Uint8Array(0x200).fill(0xff);
+    if (opt.at28) at28.set(opt.at28.subarray(0, 0x800)); if (opt.fram) fram.set(opt.fram.subarray(0, 0x200));
+    const spu = opt.spu || new Emu.SpuPsx(), gpu = opt.gpu || createNullGpu();
+    const inp = { p1: 0xff, p2: 0xff, service: 0xff, system: 0xff, p3: 0xff, p4: 0xff, dsw: opt.dsw === undefined ? 0xf : opt.dsw & 0xf };
+    const stats = { unmappedR: 0, unmappedW: 0, where: new Map(), sioBytes: 0, dma: [0, 0, 0, 0, 0, 0, 0] };
+    const miss = (k, p) => { if (stats.where.size < 64) { const key = k + p.toString(16); stats.where.set(key, (stats.where.get(key) || 0) + 1); } };
+
+    let iStat = 0, iMask = 0, dpcr = 0x07654321, dicr = 0, ramSizeReg = 0xB88, cacheCtrl = 0;
+    const memCtrl = new Int32Array(9), dmaMadr = new Int32Array(7), dmaBcr = new Int32Array(7), dmaChcr = new Int32Array(7);
+    let bank = 0, coin = 0, secsel = 0, regAddr = 0, wdCk = 0, wdAt = 0, resets = 0;
+    let frame = 0, frameAt = 0, synced = 0, spuAcc = 0, at28Last = -1;
+    let memSeq = 0, ioSeq = 0, idleCycles = 0;
+    const idleSkip = opt.idleSkip !== false, snap = new Int32Array(38);
+    const cyclesPerFrame = 3413 * 263 * CPU_HZ / GPU_HZ, cyclesPerLine = cyclesPerFrame / 263;
+
+    // ── 時刻で起きる物(SIO の 1 ビット、MCU の応答、EEPROM の書き込み待ち)──
+    const T_SIO = 0, T_MCU = 1, T_AT28 = 2, timers = [Infinity, Infinity, Infinity], timerArg = [0, 0, 0];
+    let nextTimer = Infinity;
+    let sliceLim = 0;
+    const setTimer = (i, at, arg) => { timers[i] = at; timerArg[i] = arg | 0; nextTimer = Math.min(timers[0], timers[1], timers[2]); if (nextTimer < sliceLim) sliceLim = nextTimer; };
+
+    const bus = {
+      irqLine: false, cyclesPerDot: CPU_HZ / GPU_HZ * 8, cyclesPerHblank: cyclesPerLine,
+      raiseIrq(bit) { iStat |= bit; bus.irqLine = (iStat & iMask) !== 0; },
+      read8, read16, read32, write8, write16, write32
+    };
+    const irqUpdate = () => { bus.irqLine = (iStat & iMask) !== 0; };
+    const counters = [new Emu.PsxRootCounter(0, bus), new Emu.PsxRootCounter(1, bus), new Emu.PsxRootCounter(2, bus)];
+    const cpu = new Emu.CPUR3000(bus);
+    if (opt.cpi) cpu.cpi = opt.cpi;
+    // 1 命令 = 2 サイクルの固定(MAME の PlayStation の CPU と同じ数え方。起動の時間を MAME と比べるため)。opt.memCyc で読み書きの上乗せを戻せる
+    cpu.memCyc = opt.memCyc | 0; cpu.mulCyc = 0; cpu.divCyc = 0;
+    spu.onIrq = () => bus.raiseIrq(IRQ_SPU);
+
+    // ── 保護チップと MCU(SIO0 の先)──
+    const catOut = [1, 1]; let mcuOut = 1, sioRxd = 1;
+    const rxdUpdate = () => { sioRxd = catOut[0] && catOut[1] && mcuOut ? 1 : 0; };
+    const cat = [createCat702(opt.cat1, (b) => { catOut[0] = b; rxdUpdate(); }), createCat702(opt.cat2, (b) => { catOut[1] = b; rxdUpdate(); })];
+    const mcu = { sck: 1, select: 1, bit: 0, byte: 0, databytes: 0, send: new Uint8Array(9), analogRead: 0, trackRead: 0 };
+    const US = CPU_HZ / 1e6;
+    function mcuSelect(s) {
+      if (mcu.select === s) return;
+      if (!s) { mcu.bit = 0; mcu.byte = 0; setTimer(T_MCU, cpu.cycles + 50 * US, 0); }
+      else { mcuOut = 1; rxdUpdate(); sioDsr(1); setTimer(T_MCU, Infinity, 0); }
+      mcu.select = s;
+    }
+    function mcuSck(s) {
+      if (mcu.sck === s) return;
+      if (!s && !mcu.select) {
+        const data = mcu.byte <= mcu.databytes && mcu.byte < mcu.send.length ? mcu.send[mcu.byte] : 0;
+        mcuOut = data >> mcu.bit & 1; rxdUpdate();
+        if (++mcu.bit === 8) { if (mcu.byte < mcu.databytes) setTimer(T_MCU, cpu.cycles + 50 * US, 0); mcu.bit = 0; mcu.byte++; }
+      }
+      mcu.sck = s;
+    }
+    function mcuTick(param) {
+      sioDsr(param);
+      if (!param) {
+        if (mcu.byte === 0) {
+          mcu.databytes = mcu.analogRead ? 8 : mcu.trackRead ? 6 : 1;
+          mcu.send.fill(0); mcu.send[0] = mcu.databytes << 4 | (inp.dsw & 0xf);
+          if (mcu.analogRead) for (let i = 0; i < 8; i++) mcu.send[1 + i] = 0xff;
+        }
+        setTimer(T_MCU, cpu.cycles + 5 * US, 1);
+      } else setTimer(T_MCU, Infinity, 0);
+    }
+
+    // ── SIO0 ──
+    const sio = { status: SIO_TX_EMPTY | SIO_TX_RDY, mode: 0, control: 0, baud: 0, txData: 0, rxData: 0, txShift: 0, rxShift: 0, txBits: 0, rxBits: 0 };
+    const sioIrq = () => { sio.status |= SIO_IRQ; bus.raiseIrq(IRQ_SIO0); };
+    function sioDsr(state) {
+      if (state) sio.status &= ~SIO_DSR;
+      else if (!(sio.status & SIO_DSR)) { sio.status |= SIO_DSR; if (sio.control & SIOC_DSR_IENA) sioIrq(); }
+    }
+    function sioTimer() {
+      if (!(sio.status & SIO_TX_EMPTY) || sio.txBits !== 0) {
+        const pre = [0, 1, 16, 64][sio.mode & 3];
+        setTimer(T_SIO, sio.baud && pre ? cpu.cycles + pre * sio.baud : Infinity, 0);
+      } else setTimer(T_SIO, Infinity, 0);
+    }
+    const sioSck = (s) => { cat[0].clock(s); cat[1].clock(s); mcuSck(s); };
+    const sioTxd = (s) => { cat[0].datain(s); cat[1].datain(s); };
+    function sioTick() {
+      if (sio.txBits === 0 && (sio.control & SIOC_TX_ENA) && !(sio.status & SIO_TX_EMPTY)) {
+        sio.txBits = 8; sio.txShift = sio.txData; sio.rxBits = 8; sio.rxShift = 0;
+        sio.status |= SIO_TX_EMPTY | SIO_TX_RDY;
+      }
+      if (sio.txBits !== 0) {
+        sioSck(0); sioTxd(sio.txShift & 1); sio.txShift >>= 1; sio.txBits--; sioSck(1);
+        if (sio.txBits === 0 && (sio.control & SIOC_TX_IENA)) sioIrq();
+      }
+      if (sio.rxBits !== 0) {
+        sio.rxShift = (sio.rxShift >> 1) | (sioRxd << 7);
+        if (--sio.rxBits === 0) {
+          if (sio.status & SIO_RX_RDY) sio.status |= SIO_OVERRUN; else { sio.rxData = sio.rxShift; sio.status |= SIO_RX_RDY; }
+          stats.sioBytes++;
+          if (sio.control & SIOC_RX_IENA) sioIrq();
+        }
+      }
+      sioTimer();
+    }
+    function sioWrite16(off, v) {
+      switch (off) {
+        case 0x0: sio.txData = v & 0xff; sio.status &= ~(SIO_TX_RDY | SIO_TX_EMPTY); sioTimer(); break;
+        case 0x8: sio.mode = v; break;
+        case 0xa:
+          sio.control = v;
+          if (v & SIOC_RESET) { sio.status |= SIO_TX_EMPTY | SIO_TX_RDY; sio.status &= ~(SIO_RX_RDY | SIO_OVERRUN | SIO_IRQ); sio.txBits = 0; sio.rxBits = 0; sioTxd(1); }
+          if (v & SIOC_IACK) { sio.status &= ~SIO_IRQ; sio.control &= ~SIOC_IACK; }
+          break;
+        case 0xe: sio.baud = v; break;
+        default: break;
+      }
+    }
+    function sioRead16(off) {
+      switch (off) {
+        case 0x0: { const d = sio.rxData; sio.status &= ~SIO_RX_RDY; sio.rxData = 0xff; return d; }
+        case 0x4: return sio.status;
+        case 0x8: return sio.mode;
+        case 0xa: return sio.control;
+        case 0xe: return sio.baud;
+        default: return 0;
+      }
+    }
+
+    // ── 音源基板 ──
+    const soundSync = () => { if (sound) sound.runToCycle(Math.floor(cpu.cycles * (6250000 / CPU_HZ))); };
+    function soundReg16(a, v) {          // 0x1FB80000 = 値、0x1FB80002 = 番号
+      if (a & 2) { regAddr = v & 0xff; return; }
+      if (onSound) onSound('G', regAddr, v);
+    }
+    function soundIrq() {
+      if (sound) { soundSync(); sound.cpu.setInput(0, 1); sound.cpu.setInput(0, 0); }
+      if (onSound) onSound('I', 0, 0);
+    }
+
+    // ── ZN と FX-1B の入出力(バイト単位)──
+    function znRead8(p) {
+      if (p >= 0x1FBE0000 && p < 0x1FBE0200) { if (p & 1) return 0; soundSync(); return sound ? sound.shared[(p - 0x1FBE0000) >> 1] : 0; }
+      if (p >= 0x1FAF0000 && p < 0x1FAF0800) return at28Last >= 0 ? at28Last ^ 0x80 : at28[p - 0x1FAF0000];
+      if (p >= 0x1FB00000 && p < 0x1FB00400) return p & 1 ? 0 : fram[(p - 0x1FB00000) >> 1];
+      switch (p) {
+        case 0x1FA00000: return inp.p1;
+        case 0x1FA00100: return inp.p2;
+        case 0x1FA00200: return inp.service;
+        case 0x1FA00300: return inp.system;
+        case 0x1FA10000: return inp.p3;
+        case 0x1FA10100: return inp.p4;
+        case 0x1FA10200: return 64 | 32 | 8 | 1;      // 基板の構成: VRAM 2MB、RAM 4MB
+        case 0x1FA10300: return secsel;
+        case 0x1FA20000: return coin;
+        default: break;
+      }
+      if (p >= 0x1FA00000 && p < 0x1FA00400 || p >= 0x1FA10000 && p < 0x1FA10400) return 0xff;   // 入力ポートの上位バイト
+      if (p >= 0x1FB20000 && p < 0x1FB20008) return 0xff;
+      if (p >= 0x1FBC0000 && p < 0x1FBC0002) return 0;                                           // 音源基板への割り込みの読み出し(使用中の印か)
+      if (p >= 0x1FA30000 && p < 0x1FA30004 || p >= 0x1FA40000 && p < 0x1FA40004) return 0;
+      stats.unmappedR++; miss('r', p); return 0xff;
+    }
+    function znWrite8(p, v) {
+      if (p >= 0x1FBE0000 && p < 0x1FBE0200) {
+        if (p & 1) return;
+        const o = (p - 0x1FBE0000) >> 1;
+        if (sound) { soundSync(); sound.shared[o] = v; }
+        if (onSound) onSound('M', o, v);
+        return;
+      }
+      if (p >= 0x1FAF0000 && p < 0x1FAF0800) {
+        const o = p - 0x1FAF0000;
+        if (at28Last < 0 && at28[o] !== v) { at28[o] = v; at28Last = v; setTimer(T_AT28, cpu.cycles + 200 * US, 0); }
+        return;
+      }
+      if (p >= 0x1FB00000 && p < 0x1FB00400) { if (!(p & 1)) fram[(p - 0x1FB00000) >> 1] = v; return; }
+      switch (p) {
+        case 0x1FA10300:
+          cat[0].select(v >> 2 & 1); cat[1].select(v >> 3 & 1);
+          mcu.analogRead = v >> 4 & 1; mcu.trackRead = v >> 5 & 1;
+          mcuSelect((v & 0x8c) !== 0x8c ? 1 : 0);
+          secsel = v; return;
+        case 0x1FA20000: coin = v; return;
+        case 0x1FB40000: {
+          const ck = v >> 5 & 1;
+          if (!ck && wdCk) wdAt = cpu.cycles;
+          wdCk = ck; bank = v & 3; return;
+        }
+        default: break;
+      }
+      if (p >= 0x1FA30000 && p < 0x1FA30004) return;
+      if (p >= 0x1FA00000 && p < 0x1FC00000 && (p & 3)) return;    // 8bit の口への 16/32bit 書き込みの残りのバイト
+      stats.unmappedW++; miss('w', p);
+    }
+    const isZn = (p) => p >= 0x1FA00000 && p < 0x1FC00000;
+
+    // ── 時間 ──
+    function sync() {
+      const now = cpu.cycles, el = now - synced;
+      if (el > 0) {
+        synced = now;
+        counters[0].advance(el); counters[1].advance(el); counters[2].advance(el);
+        while (now - frameAt >= cyclesPerFrame) { frameAt += cyclesPerFrame; frame++; gpu.vblank(frame); bus.raiseIrq(IRQ_VBLANK); }
+        spuAcc += el;
+        while (spuAcc >= 768) { spuAcc -= 768; spu.clock(); if (opt.onSpuSample) opt.onSpuSample(spu); }
+      }
+      while (nextTimer <= now) {
+        for (let i = 0; i < 3; i++) if (timers[i] <= now) {
+          const arg = timerArg[i]; timers[i] = Infinity;
+          if (i === T_SIO) sioTick(); else if (i === T_MCU) mcuTick(arg); else at28Last = -1;
+        }
+        nextTimer = Math.min(timers[0], timers[1], timers[2]);
+      }
+      if (now - wdAt > 5 * CPU_HZ) reset();
+    }
+    function gpuStat() {
+      // bit31: インターレースなら今のフィールド、そうでなければ表示中の走査線の偶奇(VBlank の間は 0)
+      const line = Math.floor((cpu.cycles - frameAt) / cyclesPerLine);
+      const odd = line >= 240 ? 0 : gpu.interlace ? frame & 1 : line & 1;
+      return (gpu.stat() | (odd ? 0x80000000 : 0)) | 0;
+    }
+
+    // ── PlayStation の入出力 ──
+    function ioRead32(p) {
+      if (p < 0x1F801024) return memCtrl[(p - 0x1F801000) >> 2];
+      switch (p) {
+        case 0x1F801040: return sioRead16(0);
+        case 0x1F801044: return sioRead16(4);
+        case 0x1F801048: return sioRead16(8) | sioRead16(0xa) << 16;
+        case 0x1F80104C: return sioRead16(0xe) << 16;
+        case 0x1F801054: return 5;
+        case 0x1F801060: return ramSizeReg;
+        case 0x1F801070: return iStat;
+        case 0x1F801074: return iMask;
+        case 0x1F8010F0: return dpcr;
+        case 0x1F8010F4: return dicr;
+        case 0x1F801810: return gpu.read() | 0;
+        case 0x1F801814: return gpuStat();
+        default: break;
+      }
+      if (p >= 0x1F801080 && p < 0x1F8010F0) {
+        const ch = (p - 0x1F801080) >> 4;
+        switch (p & 0xC) { case 0: return dmaMadr[ch]; case 4: return dmaBcr[ch]; case 8: return dmaChcr[ch]; default: return 0; }
+      }
+      if (p >= 0x1F801100 && p < 0x1F801130) {
+        sync();
+        const c = counters[(p - 0x1F801100) >> 4];
+        switch (p & 0xC) { case 0: return c.count & 0xFFFF; case 4: return c.readMode(); case 8: return c.target; default: return 0; }
+      }
+      return 0;
+    }
+    function timerWrite(p, v) {
+      sync(); sliceLim = 0;
+      const c = counters[(p - 0x1F801100) >> 4];
+      switch (p & 0xC) { case 0: c.count = v & 0xFFFF; break; case 4: c.writeMode(v); break; case 8: c.target = v & 0xFFFF; break; default: break; }
+    }
+    function ioWrite32(p, v) {
+      if (p < 0x1F801024) { memCtrl[(p - 0x1F801000) >> 2] = v; return; }
+      switch (p) {
+        case 0x1F801040: sioWrite16(0, v & 0xffff); return;
+        case 0x1F801048: sioWrite16(8, v & 0xffff); sioWrite16(0xa, v >>> 16); return;
+        case 0x1F80104C: sioWrite16(0xe, v >>> 16); return;
+        case 0x1F801060: ramSizeReg = v; return;
+        case 0x1F801070: iStat &= v; irqUpdate(); return;
+        case 0x1F801074: iMask = v & 0x7FF; irqUpdate(); return;
+        case 0x1F8010F0: dpcr = v; return;
+        case 0x1F8010F4: dicrWrite(v); return;
+        case 0x1F801810: gpu.gp0(v >>> 0); return;
+        case 0x1F801814: gpu.gp1(v >>> 0); return;
+        default: break;
+      }
+      if (p >= 0x1F801080 && p < 0x1F8010F0) {
+        const ch = (p - 0x1F801080) >> 4;
+        switch (p & 0xC) { case 0: dmaMadr[ch] = v & 0x00FFFFFF; return; case 4: dmaBcr[ch] = v; return; case 8: dmaChcrWrite(ch, v); return; default: return; }
+      }
+      if (p >= 0x1F801100 && p < 0x1F801130) timerWrite(p, v & 0xFFFF);
+    }
+
+    // ── DMA(転送はその場で済ませる)──
+    function dicrMaster() {
+      const flagged = (dicr >>> 24 & 0x7F) & (dicr >>> 16 & 0x7F);
+      if ((dicr & 0x8000) || ((dicr & 0x800000) && flagged)) dicr |= 0x80000000; else dicr &= 0x7FFFFFFF;
+    }
+    function dicrWrite(v) { dicr = (v & 0x00FFFFFF) | (dicr & 0x7F000000 & ~(v & 0x7F000000)); dicrMaster(); }
+    function dmaComplete(ch) {
+      dmaChcr[ch] &= ~0x11000000;
+      if ((dicr & 0x800000) && (dicr & 1 << (16 + ch))) {
+        dicr |= 1 << (24 + ch);
+        const before = dicr & 0x80000000; dicrMaster();
+        if (!before && (dicr & 0x80000000)) bus.raiseIrq(IRQ_DMA);
+      }
+    }
+    function dmaChcrWrite(ch, v) {
+      dmaChcr[ch] = v;
+      if (!(v & 0x01000000) || !(dpcr & 8 << ch * 4)) return;
+      const syncMode = v >> 9 & 3;
+      if (syncMode === 0 && !(v & 0x10000000)) return;
+      const toDev = !!(v & 1), step = v & 2 ? -4 : 4, M = RAM_MASK & ~3;
+      let addr = dmaMadr[ch] & M, words;
+      const bcr = dmaBcr[ch];
+      if (syncMode === 0) words = (bcr & 0xFFFF) || 0x10000;
+      else if (syncMode === 1) words = ((bcr & 0xFFFF) || 0x10000) * ((bcr >>> 16 & 0xFFFF) || 0x10000);
+      else words = 0;
+      stats.dma[ch]++;
+      if (ch === 4) {
+        for (let i = 0; i < words; i++) { if (toDev) spu.dmaWrite32(ram32[addr >> 2]); else ram32[addr >> 2] = spu.dmaRead32(); addr = (addr + step) & M; }
+      } else if (ch === 6) {
+        for (let i = 0; i < words; i++) { ram32[addr >> 2] = i === words - 1 ? 0xFFFFFF : (addr - 4) & M; addr = (addr - 4) & M; }
+      } else if (ch === 2) {
+        if (syncMode === 2) {
+          let node = dmaMadr[ch] & 0xFFFFFF, guard = 0;
+          while (guard++ < 0x40000) {
+            const hdr = ram32[(node & M) >> 2], n = hdr >>> 24;
+            for (let i = 1; i <= n; i++) gpu.gp0(ram32[((node + i * 4) & M) >> 2] >>> 0);
+            node = hdr & 0xFFFFFF;
+            if (node & 0x800000) break;
+          }
+          addr = node;
+        } else {
+          for (let i = 0; i < words; i++) { if (toDev) gpu.gp0(ram32[addr >> 2] >>> 0); else ram32[addr >> 2] = gpu.read() | 0; addr = (addr + step) & M; }
+        }
+      } else if (!toDev) {
+        for (let i = 0; i < words; i++) { ram32[addr >> 2] = 0; addr = (addr + step) & M; }
+      }
+      dmaMadr[ch] = addr;
+      dmaComplete(ch);
+    }
+
+    // ── メモリ ──
+    const romAt = (p) => bank * 0x800000 + (p - 0x1F000000);
+    function read8(addr) {
+      const p = addr & 0x1FFFFFFF;
+      if (p < 0x800000) return ram[p & RAM_MASK];
+      if (p >= 0x1FC00000) return biosB[p & BIOS_MASK];
+      if (p < 0x1F800000) { if (p < 0x1F000000) return 0; const a = romAt(p); return a < ROM_LEN ? romB[a] : 0; }
+      if (p < 0x1F800400) return scr[p & 0x3FF];
+      ioSeq++;
+      if (isZn(p)) return znRead8(p);
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        if (p >= 0x1F801C00) { const h = spu.readReg((p - 0x1F801C00) >> 1); return p & 1 ? h >> 8 & 0xFF : h & 0xFF; }
+        if (p >= 0x1F801040 && p < 0x1F801050) return sioRead16(p & 0xe) >> ((p & 1) * 8) & 0xFF;
+        return ioRead32(p & ~3) >>> ((p & 3) * 8) & 0xFF;
+      }
+      return 0;
+    }
+    function read16(addr) {
+      const p = addr & 0x1FFFFFFF;
+      if (p & 1) return read8(addr) | read8(addr + 1) << 8;
+      if (p < 0x800000) return ram16[(p & RAM_MASK) >> 1];
+      if (p >= 0x1FC00000) return bios16[(p & BIOS_MASK) >> 1];
+      if (p < 0x1F800000) { if (p < 0x1F000000) return 0; const a = romAt(p); return a < ROM_LEN ? rom16[a >> 1] : 0; }
+      if (p < 0x1F800400) return scr16[(p & 0x3FF) >> 1];
+      ioSeq++;
+      if (isZn(p)) return znRead8(p) | znRead8(p + 1) << 8;
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        if (p >= 0x1F801C00) return spu.readReg((p - 0x1F801C00) >> 1);
+        if (p >= 0x1F801040 && p < 0x1F801050) return sioRead16(p & 0xe);
+        return ioRead32(p & ~3) >>> ((p & 2) * 8) & 0xFFFF;
+      }
+      return 0;
+    }
+    function read32(addr) {
+      const p = addr & 0x1FFFFFFF;
+      if (p < 0x800000 && !(p & 3)) return ram32[(p & RAM_MASK) >> 2];
+      if (p & 3) return read16(addr) | read16(addr + 2) << 16;
+      if (p >= 0x1FC00000) return bios32[(p & BIOS_MASK) >> 2];
+      if (p < 0x1F800000) { if (p < 0x1F000000) return 0; const a = romAt(p); return a < ROM_LEN ? rom32[a >> 2] : 0; }
+      if (p < 0x1F800400) return scr32[(p & 0x3FF) >> 2];
+      if (isZn(p)) { ioSeq++; return znRead8(p) | znRead8(p + 1) << 8 | znRead8(p + 2) << 16 | znRead8(p + 3) << 24; }
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        if (p >= 0x1F801C00) { ioSeq++; const i = (p - 0x1F801C00) >> 1; return spu.readReg(i) | spu.readReg(i + 1) << 16; }
+        if (!(p === 0x1F801814 || (p === 0x1F801110 && (counters[1].mode & 0x100)))) ioSeq++;
+        return ioRead32(p);
+      }
+      if ((addr >>> 0) === 0xFFFE0130) return cacheCtrl;
+      return 0;
+    }
+    function write8(addr, v) {
+      const p = addr & 0x1FFFFFFF;
+      if (p < 0x800000) { const i = p & RAM_MASK; if (ram[i] !== (v & 0xff)) { ram[i] = v; memSeq++; } return; }
+      memSeq++;
+      if (p >= 0x1F800000 && p < 0x1F800400) { scr[p & 0x3FF] = v; return; }
+      if (isZn(p)) { znWrite8(p, v & 0xff); return; }
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        if (p >= 0x1F801C00) { if (!(p & 1)) spu.writeReg((p - 0x1F801C00) >> 1, v & 0xFF); return; }
+        if (p === 0x1F801040) sioWrite16(0, v & 0xff);
+      }
+    }
+    function write16(addr, v) {
+      const p = addr & 0x1FFFFFFF;
+      if (p & 1) { write8(addr, v & 0xFF); write8(addr + 1, v >>> 8 & 0xFF); return; }
+      if (p < 0x800000) { const i = (p & RAM_MASK) >> 1; if (ram16[i] !== (v & 0xffff)) { ram16[i] = v; memSeq++; } return; }
+      memSeq++;
+      if (p >= 0x1F800000 && p < 0x1F800400) { scr16[(p & 0x3FF) >> 1] = v; return; }
+      if (isZn(p)) {
+        if (p >= 0x1FB80000 && p < 0x1FB80004) { soundReg16(p, v & 0xffff); return; }
+        if (p === 0x1FBA0000) { soundIrq(); return; }
+        if (p === 0x1FBA0002) return;
+        znWrite8(p, v & 0xff); znWrite8(p + 1, v >>> 8 & 0xff); return;
+      }
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        if (p >= 0x1F801C00) { spu.writeReg((p - 0x1F801C00) >> 1, v & 0xFFFF); return; }
+        if (p >= 0x1F801040 && p < 0x1F801050) { sioWrite16(p & 0xe, v & 0xffff); return; }
+        if (p >= 0x1F801100 && p < 0x1F801130) { timerWrite(p, v & 0xFFFF); return; }
+        if (p === 0x1F801070) { iStat &= v | 0xFFFF0000; irqUpdate(); return; }
+        if (p === 0x1F801074) { iMask = v & 0x7FF; irqUpdate(); return; }
+      }
+    }
+    function write32(addr, v) {
+      const p = addr & 0x1FFFFFFF;
+      if (p & 3) { write16(addr, v & 0xFFFF); write16(addr + 2, v >>> 16 & 0xFFFF); return; }
+      if (p < 0x800000) { const i = (p & RAM_MASK) >> 2; if (ram32[i] !== (v | 0)) { ram32[i] = v; memSeq++; } return; }
+      memSeq++;
+      if (p >= 0x1F800000 && p < 0x1F800400) { scr32[(p & 0x3FF) >> 2] = v; return; }
+      if (isZn(p)) { write16(addr, v & 0xFFFF); write16(addr + 2, v >>> 16 & 0xFFFF); return; }
+      if ((p & 0x1FFFF000) === 0x1F801000) {
+        if (p >= 0x1F801C00) { const i = (p - 0x1F801C00) >> 1; spu.writeReg(i, v & 0xFFFF); spu.writeReg(i + 1, v >>> 16 & 0xFFFF); return; }
+        ioWrite32(p, v); return;
+      }
+      if ((addr >>> 0) === 0xFFFE0130) cacheCtrl = v;
+    }
+
+    /** リセット(電源投入とウォッチドッグ)。RAM と不揮発メモリはそのまま */
+    function reset() {
+      const c = cpu.cycles;
+      cpu.reset(); cpu.cycles = c;
+      iStat = 0; iMask = 0; irqUpdate(); dpcr = 0x07654321; dicr = 0; bank = 0; wdAt = c; wdCk = 0;
+      for (const k of counters) k.reset();
+      sio.status = SIO_TX_EMPTY | SIO_TX_RDY; sio.mode = 0; sio.control = 0; sio.baud = 0; sio.txBits = 0; sio.rxBits = 0;
+      setTimer(T_SIO, Infinity, 0); setTimer(T_MCU, Infinity, 0);
+      gpu.gp1(0); resets++;
+    }
+    cpu.reset(); resets = 0; wdAt = 0;
+
+    function saveCpu(a) { a.set(cpu.r); a[32] = cpu.hi; a[33] = cpu.lo; a[34] = cpu.pc; a[35] = cpu.nextPc; a[36] = cpu.sr; a[37] = cpu.cause | (cpu.branchDelay ? 0x40000000 : 0); }
+    function sameCpu(a) {
+      if (a[34] !== cpu.pc || a[35] !== cpu.nextPc || a[36] !== cpu.sr || a[32] !== cpu.hi || a[33] !== cpu.lo || a[37] !== (cpu.cause | (cpu.branchDelay ? 0x40000000 : 0))) return false;
+      const r = cpu.r; for (let i = 1; i < 32; i++) if (a[i] !== r[i]) return false;
+      return true;
+    }
+    // 待ちループの中から見える値(GPU の状態の奇偶、水平帰線を数えるタイマ 1)と、割り込みの元(VBlank、タイマ)が次に変わるまでのサイクル数。分からない時は 0(飛ばさない)
+    // 割り込みを出す設定のタイマが、次に目標か桁あふれに届く時刻(通しのサイクル数)。出さないタイマはいつ進んでも外から見えないので数えない
+    function counterEventAt() {
+      let at = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const c = counters[i];
+        if (!(c.mode & 0x30) || c.stopped()) continue;
+        const div = c.divisor(), tgt = c.target & 0xFFFF;
+        const toTarget = c.count < tgt ? tgt - c.count : (c.mode & 8) && c.count === tgt ? 1 : 0x10000, toOver = 0x10000 - c.count;
+        const t = synced + Math.max(1, Math.min(toTarget, toOver) * div - (div === 1 ? 0 : c.frac));
+        if (t < at) at = t;
+      }
+      return at;
+    }
+    // 区切りの終わり: 次に何か(VBlank、SPU の 1 サンプル、タイマ、SIO など)が起きる時刻。出来事はその時刻ちょうどで処理するので、区切りの切り方で結果は変わらない
+    function sliceEnd(target) {
+      let lim = target;
+      if (nextTimer < lim) lim = nextTimer;
+      const vb = frameAt + cyclesPerFrame; if (vb < lim) lim = vb;
+      const sp = synced + 768 - spuAcc; if (sp < lim) lim = sp;
+      const ce = counterEventAt(); if (ce < lim) lim = ce;
+      return lim;
+    }
+    // 待ちループの中から見える値と割り込みの元が、次に変わる時刻。待ちループが読んでよいのは GPU の状態(走査線の偶奇)と、水平帰線を数えるタイマ 1 の値だけ(read32 の ioSeq)
+    function quietUntil() {
+      const now = cpu.cycles;
+      let q = frameAt + cyclesPerFrame;
+      const lineEnd = frameAt + (Math.floor((now - frameAt) / cyclesPerLine) + 1) * cyclesPerLine; if (lineEnd < q) q = lineEnd;
+      if (nextTimer < q) q = nextTimer;
+      const wd = wdAt + 5 * CPU_HZ; if (wd < q) q = wd;
+      const c1 = counters[1]; if (c1.mode & 0x100) { const t = synced + c1.divisor() - c1.frac; if (t < q) q = t; }
+      const ce = counterEventAt(); if (ce < q) q = ce;
+      if (spu.readReg(0xD5) & 0x40) { const sp = synced + 768 - spuAcc; if (sp < q) q = sp; }   // SPU の割り込みが有効なら、次のサンプルまで
+      return q;
+    }
+    /**
+     * 通しのサイクル数 target まで進める。
+     * 待ちループの省略(厳密): 区切りの頭の番地へ 64 命令以内に戻ってきて、CPU の状態が完全に同じで、その間にメモリの中身が変わらず、
+     * 時間や外の状態で値が変わる読み出しも無ければ、その 1 周は「何もしない」。次に何かが変わる時刻までに丸ごと収まる周回の数だけ、時間だけを進める。
+     * 実行した時と同じ結果になる(省略あり/なしで、音源基板への指令の時刻・RAM・VRAM が一致するのを tools/zsg2 で確認)
+     */
+    function runTo(target) {
+      while (cpu.cycles < target) {
+        sliceLim = sliceEnd(target);
+        // 外れは 1 区切りに 3 回まで(走査線の変わり目をまたいだ周回は値が変わるので外れる。その次の周回でまた当たる)。当たった後も区切りの終わりまで続けて試す
+        for (let miss = 0; miss < 3 && idleSkip && !bus.irqLine && !cpu.branchDelay && cpu.cycles < sliceLim;) {
+          saveCpu(snap);
+          // 「変わる時刻」は周回を始める前の時点で求める(周回の途中で変わり目を過ぎても、読んだのがその前なら状態は同じに見えるため。後から求めると変わり目を見落とす)
+          const m0 = memSeq, i0 = ioSeq, c0 = cpu.cycles, pc0 = cpu.pc, quiet = Math.min(quietUntil(), target);
+          let k = 0;
+          while (k < 64 && cpu.cycles < sliceLim) { cpu.step(); k++; if (cpu.pc === pc0) break; }
+          if (!(cpu.pc === pc0 && cpu.cycles < sliceLim && memSeq === m0 && ioSeq === i0 && !bus.irqLine && sameCpu(snap))) { if (cpu.pc !== pc0) break; miss++; continue; }
+          const per = cpu.cycles - c0, n = Math.floor((quiet - cpu.cycles) / per);
+          if (n > 0) { cpu.cycles += n * per; idleCycles += n * per; } else miss++;
+        }
+        while (cpu.cycles < sliceLim) cpu.step();
+        sync();
+      }
+      soundSync();
+    }
+    function runFrame() { const f = frame; while (frame === f) runTo(Math.min(cpu.cycles + 4096, frameAt + cyclesPerFrame)); }
+
+    return { runTo, runFrame, reset, cpu, bus, ram, at28, fram, inp, spu, gpu, stats, sio, counters,
+      get frame() { return frame; }, get resets() { return resets; }, get time() { return cpu.cycles / CPU_HZ; }, get bank() { return bank; },
+      get iStat() { return iStat; }, get iMask() { return iMask; }, get idleCycles() { return idleCycles; } };
+  };
+  Emu.ZN_MAIN = { CPU_HZ, FRAME_HZ: GPU_HZ / (3413 * 263) };
+  Emu.createCat702 = createCat702;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+/*
+ * MML.Emu.createPsxGpu({ vramHeight })
+ *
+ * PlayStation の GPU(ソフトウェア描画)。ZN-1 の基板(znMain.js)のテストモード画面を出すための物。
+ * VRAM は横 1024、縦は 512(1MB)か 1024(2MB。業務用基板)。1 画素 15bit+マスク 1bit。
+ * 命令(GP0): 塗りつぶし、多角形(単色 / グラデーション / テクスチャ、3 角 / 4 角)、線、矩形(スプライト)、VRAM 内の複写、
+ *   CPU からの転送、CPU への読み出し、描画の設定(テクスチャページ、窓、描画範囲、原点、マスク)。
+ * 命令(GP1): リセット、表示の入切、DMA の向き、表示の位置と範囲、画面モード、情報の読み出し。
+ * 仕様は公開資料(Nocash PSX Specifications)による。ディザは掛けない。
+ *
+ * 口: gp0(word) / gp1(word) / read() / stat() / vblank() / interlace / render(out) / width / height / stats
+ *   render(out): 今の表示範囲を Uint32Array(RGBA、リトルエンディアン)へ書く。大きさは width × height(画面モードで変わる)
+ */
+(function (root) {
+  'use strict';
+  const MML = root.MML = root.MML || {}, Emu = MML.Emu = MML.Emu || {};
+  const HRES = [256, 320, 512, 640];
+
+  Emu.createPsxGpu = function (opt) {
+    opt = opt || {};
+    const VH = opt.vramHeight === 512 ? 512 : 1024, YM = VH - 1, XM = 1023;
+    const vram = new Uint16Array(1024 * VH);
+    const stats = { cmds: new Map(), pixels: 0, unknown: 0 };
+    // 描画の設定
+    let texPage = 0, texX = 0, texY = 0, semi = 0, depth = 0, drawToDisplay = 0, dither = 0;
+    let twMaskX = 0, twMaskY = 0, twOffX = 0, twOffY = 0, rawTw = 0;
+    let clipL = 0, clipT = 0, clipR = 0, clipB = 0, rawTL = 0, rawBR = 0, offX = 0, offY = 0, rawOff = 0;
+    let setMask = 0, checkMask = 0;
+    // 表示の設定
+    let dispOff = 1, dmaDir = 0, dispX = 0, dispY = 0, hr1 = 0x200, hr2 = 0xc00, vr1 = 0x10, vr2 = 0x100, mode = 0, irq = 0, info = 0, field = 0;
+    // 命令の受け取り
+    const buf = new Uint32Array(16); let have = 0, need = 0;
+    let loadLeft = 0, loadX = 0, loadY = 0, loadW = 0, loadH = 0, loadPos = 0;
+    let readLeft = 0, readX = 0, readY = 0, readW = 0, readPos = 0;
+    let poly = 0, polyColor = 0, polyPrev = 0, polyPrevC = 0, polyStage = 0;   // 折れ線の途中
+
+    function resetState() {
+      texPage = 0; texX = 0; texY = 0; semi = 0; depth = 0; drawToDisplay = 0; dither = 0;
+      twMaskX = twMaskY = twOffX = twOffY = rawTw = 0; clipL = clipT = clipR = clipB = rawTL = rawBR = 0; offX = offY = rawOff = 0; setMask = checkMask = 0;
+      dispOff = 1; dmaDir = 0; dispX = dispY = 0; hr1 = 0x200; hr2 = 0xc00; vr1 = 0x10; vr2 = 0x100; mode = 0; irq = 0;
+      have = need = 0; loadLeft = 0; readLeft = 0; poly = 0;
+    }
+    function setTexPage(v) {
+      texPage = v & (VH === 1024 ? 0x9ff : 0x1ff);
+      texX = (v & 15) * 64; texY = (v >> 4 & 1) * 256 + (VH === 1024 ? (v >> 11 & 1) * 512 : 0);
+      semi = v >> 5 & 3; depth = v >> 7 & 3;
+    }
+
+    // ── 画素 ──
+    // 半透明の 4 通り: 0 = 半分ずつ、1 = 足す、2 = 引く、3 = 1/4 を足す
+    function blend(b, f, m) {
+      let br = b & 31, bg = b >> 5 & 31, bb = b >> 10 & 31; const fr = f & 31, fg = f >> 5 & 31, fb = f >> 10 & 31;
+      if (m === 0) { br = (br + fr) >> 1; bg = (bg + fg) >> 1; bb = (bb + fb) >> 1; }
+      else if (m === 1) { br += fr; bg += fg; bb += fb; }
+      else if (m === 2) { br -= fr; bg -= fg; bb -= fb; }
+      else { br += fr >> 2; bg += fg >> 2; bb += fb >> 2; }
+      br = br < 0 ? 0 : br > 31 ? 31 : br; bg = bg < 0 ? 0 : bg > 31 ? 31 : bg; bb = bb < 0 ? 0 : bb > 31 ? 31 : bb;
+      return br | bg << 5 | bb << 10;
+    }
+    function texel(u, v, clutAt) {
+      u = (u & 255 & ~(twMaskX << 3)) | ((twOffX & twMaskX) << 3);
+      v = (v & 255 & ~(twMaskY << 3)) | ((twOffY & twMaskY) << 3);
+      const row = ((texY + v) & YM) * 1024;
+      if (depth === 0) { const w = vram[row + ((texX + (u >> 2)) & XM)]; return vram[clutAt + (w >> ((u & 3) * 4) & 15)]; }
+      if (depth === 1) { const w = vram[row + ((texX + (u >> 1)) & XM)]; return vram[clutAt + (w >> ((u & 1) * 8) & 255)]; }
+      return vram[row + ((texX + u) & XM)];
+    }
+    // 色(8bit ずつ)を掛けて 15bit に。128 が等倍
+    function modulate(t, r, g, b) {
+      let tr = (t & 31) * r >> 7, tg = (t >> 5 & 31) * g >> 7, tb = (t >> 10 & 31) * b >> 7;
+      if (tr > 31) tr = 31; if (tg > 31) tg = 31; if (tb > 31) tb = 31;
+      return tr | tg << 5 | tb << 10 | (t & 0x8000);
+    }
+    // 画面座標 (x, y) へ 1 画素。c = 15bit+bit15、tr = 半透明の指定、textured = テクスチャつき(bit15 の画素だけ半透明)
+    function put(x, y, c, tr, textured) {
+      const i = (y & YM) * 1024 + (x & XM), bg = vram[i];
+      if (checkMask && (bg & 0x8000)) return;
+      if (tr && (!textured || (c & 0x8000))) c = blend(bg, c, semi) | (c & 0x8000);
+      vram[i] = c | setMask; stats.pixels++;
+    }
+
+    // ── 図形 ──
+    const sx = (w) => ((w << 21) >> 21) + offX, sy = (w) => ((w << 21) >> 21) + offY;   // どちらも下位 11bit(符号つき)。y は呼ぶ側で 16bit 右へ寄せて渡す
+    function fill(color, xy, wh) {
+      const c = (color >> 3 & 31) | (color >> 11 & 31) << 5 | (color >> 19 & 31) << 10;
+      const x0 = xy & 0x3f0, y0 = xy >>> 16 & YM, w = ((wh & 0x3ff) + 15) & ~15, h = wh >>> 16 & 0x1ff;
+      for (let y = 0; y < h; y++) { const row = ((y0 + y) & YM) * 1024; for (let x = 0; x < w; x++) vram[row + ((x0 + x) & XM)] = c; }
+    }
+    function rect(x, y, w, h, color, tex, u0, v0, clut, tr, raw) {
+      const r = color & 255, g = color >> 8 & 255, b = color >> 16 & 255;
+      const flat = (r >> 3) | (g >> 3) << 5 | (b >> 3) << 10;
+      const clutAt = tex ? (clut >> 6 & YM) * 1024 + (clut & 63) * 16 : 0;
+      let x0 = x, y0 = y, x1 = x + w, y1 = y + h;
+      if (x0 < clipL) x0 = clipL; if (y0 < clipT) y0 = clipT; if (x1 > clipR + 1) x1 = clipR + 1; if (y1 > clipB + 1) y1 = clipB + 1;
+      for (let py = y0; py < y1; py++) for (let px = x0; px < x1; px++) {
+        if (!tex) { put(px, py, flat, tr, false); continue; }
+        let t = texel(u0 + px - x, v0 + py - y, clutAt);
+        if (t === 0) continue;
+        if (!raw) t = modulate(t, r, g, b);
+        put(px, py, t, tr, true);
+      }
+    }
+    // 3 角形。v = [x, y, r, g, b, u, v] ×3。左上の辺だけ含める(隣の 3 角形と重ならない)
+    function tri(a, b, c, tex, clut, tr, raw, shaded) {
+      let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+      if (area === 0) return;
+      if (area < 0) { const t = b; b = c; c = t; area = -area; }
+      let minX = Math.min(a[0], b[0], c[0]), maxX = Math.max(a[0], b[0], c[0]), minY = Math.min(a[1], b[1], c[1]), maxY = Math.max(a[1], b[1], c[1]);
+      if (maxX - minX > 1023 || maxY - minY > 511) return;
+      if (minX < clipL) minX = clipL; if (minY < clipT) minY = clipT; if (maxX > clipR) maxX = clipR; if (maxY > clipB) maxY = clipB;
+      if (minX > maxX || minY > maxY) return;
+      const clutAt = tex ? (clut >> 6 & YM) * 1024 + (clut & 63) * 16 : 0;
+      // 辺の関数 E(p) = (q.x - p0.x) * dy - (q.y - p0.y) * dx。左上の辺でなければ 1 だけ厳しくする
+      const e = (p, q) => { const dx = q[0] - p[0], dy = q[1] - p[1]; return { dx, dy, bias: (dy < 0 || (dy === 0 && dx > 0)) ? 0 : -1 }; };
+      const e0 = e(b, c), e1 = e(c, a), e2 = e(a, b), inv = 1 / area;
+      const r0 = a[2], g0 = a[3], b0 = a[4];
+      for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+        const w0 = (x - b[0]) * e0.dy - (y - b[1]) * e0.dx, w1 = (x - c[0]) * e1.dy - (y - c[1]) * e1.dx, w2 = (x - a[0]) * e2.dy - (y - a[1]) * e2.dx;
+        // 向きをそろえたので、内側は 3 つとも 0 以下(符号は辺の向きの取り方による)
+        if (-w0 + e0.bias < 0 || -w1 + e1.bias < 0 || -w2 + e2.bias < 0) continue;
+        const l0 = -w0 * inv, l1 = -w1 * inv, l2 = -w2 * inv;
+        let r = r0, g = g0, bl = b0;
+        if (shaded) { r = (a[2] * l0 + b[2] * l1 + c[2] * l2) | 0; g = (a[3] * l0 + b[3] * l1 + c[3] * l2) | 0; bl = (a[4] * l0 + b[4] * l1 + c[4] * l2) | 0; }
+        if (!tex) { put(x, y, (r >> 3) | (g >> 3) << 5 | (bl >> 3) << 10, tr, false); continue; }
+        let t = texel((a[5] * l0 + b[5] * l1 + c[5] * l2 + 0.5) | 0, (a[6] * l0 + b[6] * l1 + c[6] * l2 + 0.5) | 0, clutAt);
+        if (t === 0) continue;
+        if (!raw) t = modulate(t, r, g, bl);
+        put(x, y, t, tr, true);
+      }
+    }
+    function line(x0, y0, c0, x1, y1, c1, tr) {
+      const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0), n = Math.max(dx, dy);
+      if (dx > 1023 || dy > 511) return;
+      for (let i = 0; i <= n; i++) {
+        const t = n ? i / n : 0, x = Math.round(x0 + (x1 - x0) * t), y = Math.round(y0 + (y1 - y0) * t);
+        if (x < clipL || x > clipR || y < clipT || y > clipB) continue;
+        const r = (c0 & 255) + ((c1 & 255) - (c0 & 255)) * t, g = (c0 >> 8 & 255) + ((c1 >> 8 & 255) - (c0 >> 8 & 255)) * t, b = (c0 >> 16 & 255) + ((c1 >> 16 & 255) - (c0 >> 16 & 255)) * t;
+        put(x, y, (r >> 3) | (g >> 3) << 5 | (b >> 3) << 10, tr, false);
+      }
+    }
+
+    // ── 命令 ──
+    function words(cmd) {
+      const c = cmd >>> 24;
+      if (c >= 0x20 && c < 0x40) { const n = c & 8 ? 4 : 3, tex = c & 4 ? 1 : 0; return c & 0x10 ? n * (2 + tex) : 1 + n * (1 + tex); }
+      if (c >= 0x40 && c < 0x60) return c & 0x10 ? 4 : 3;       // 折れ線も最初の 1 本ぶんで受け、続きは別に読む
+      if (c >= 0x60 && c < 0x80) return 2 + (c & 4 ? 1 : 0) + ((c >> 3 & 3) === 0 ? 1 : 0);
+      if (c >= 0x80 && c < 0xa0) return 4;
+      if (c >= 0xa0 && c < 0xe0) return 3;
+      if (c === 2) return 3;
+      return 1;
+    }
+    function exec() {
+      const cmd = buf[0], c = cmd >>> 24;
+      stats.cmds.set(c, (stats.cmds.get(c) || 0) + 1);
+      if (c >= 0x20 && c < 0x40) {
+        const n = c & 8 ? 4 : 3, tex = !!(c & 4), shaded = !!(c & 0x10), tr = !!(c & 2), raw = !!(c & 1);
+        const v = []; let p = 0, clut = 0;
+        for (let i = 0; i < n; i++) {
+          const col = shaded || i === 0 ? buf[p++] : buf[0], xy = buf[p++];
+          let u = 0, tv = 0;
+          if (tex) { const t = buf[p++]; u = t & 255; tv = t >> 8 & 255; if (i === 0) clut = t >>> 16; else if (i === 1) setTexPage((texPage & ~0x9ff) | (t >>> 16 & 0x9ff)); }
+          v.push([sx(xy), sy(xy >>> 16), col & 255, col >> 8 & 255, col >> 16 & 255, u, tv]);
+        }
+        tri(v[0], v[1], v[2], tex, clut, tr, raw, shaded);
+        if (n === 4) tri(v[1], v[2], v[3], tex, clut, tr, raw, shaded);
+      } else if (c >= 0x40 && c < 0x60) {
+        const shaded = !!(c & 0x10), tr = !!(c & 2);
+        const c0 = buf[0] & 0xffffff, p0 = buf[1], c1 = shaded ? buf[2] & 0xffffff : c0, p1 = shaded ? buf[3] : buf[2];
+        line(sx(p0), sy(p0 >>> 16), c0, sx(p1), sy(p1 >>> 16), c1, tr);
+        if (c & 8) { poly = shaded ? 2 : 1; polyColor = cmd; polyPrev = p1; polyPrevC = c1; polyStage = 0; }
+      } else if (c >= 0x60 && c < 0x80) {
+        const tex = !!(c & 4), size = c >> 3 & 3, tr = !!(c & 2), raw = !!(c & 1);
+        let p = 1; const xy = buf[p++]; let u = 0, v = 0, clut = 0, w, h;
+        if (tex) { const t = buf[p++]; u = t & 255; v = t >> 8 & 255; clut = t >>> 16; }
+        if (size === 0) { const wh = buf[p++]; w = wh & 0x3ff; h = wh >>> 16 & 0x1ff; } else w = h = size === 1 ? 1 : size === 2 ? 8 : 16;
+        rect(sx(xy), sy(xy >>> 16), w, h, cmd & 0xffffff, tex, u, v, clut, tr, raw);
+      } else if (c >= 0x80 && c < 0xa0) {
+        const sX = buf[1] & XM, sY = buf[1] >>> 16 & YM, dX = buf[2] & XM, dY = buf[2] >>> 16 & YM;
+        const w = ((buf[3] - 1) & XM) + 1, h = ((buf[3] >>> 16) - 1 & 0x1ff) + 1;
+        const tmp = new Uint16Array(w);
+        for (let y = 0; y < h; y++) {
+          const sr = ((sY + y) & YM) * 1024, dr = ((dY + y) & YM) * 1024;
+          for (let x = 0; x < w; x++) tmp[x] = vram[sr + ((sX + x) & XM)];
+          for (let x = 0; x < w; x++) { const i = dr + ((dX + x) & XM); if (checkMask && (vram[i] & 0x8000)) continue; vram[i] = tmp[x] | setMask; }
+        }
+      } else if (c >= 0xa0 && c < 0xc0) {
+        loadX = buf[1] & XM; loadY = buf[1] >>> 16 & YM; loadW = ((buf[2] - 1) & XM) + 1; loadH = ((buf[2] >>> 16) - 1 & 0x1ff) + 1;
+        loadLeft = loadW * loadH; loadPos = 0;
+      } else if (c >= 0xc0 && c < 0xe0) {
+        readX = buf[1] & XM; readY = buf[1] >>> 16 & YM; readW = ((buf[2] - 1) & XM) + 1;
+        readLeft = readW * (((buf[2] >>> 16) - 1 & 0x1ff) + 1); readPos = 0;
+      } else switch (c) {
+        case 0x00: case 0x01: break;
+        case 0x02: fill(cmd, buf[1], buf[2]); break;
+        case 0x1f: irq = 1; if (opt.onIrq) opt.onIrq(); break;
+        case 0xe1: setTexPage(cmd); dither = cmd >> 9 & 1; drawToDisplay = cmd >> 10 & 1; break;
+        case 0xe2: rawTw = cmd & 0xfffff; twMaskX = cmd & 31; twMaskY = cmd >> 5 & 31; twOffX = cmd >> 10 & 31; twOffY = cmd >> 15 & 31; break;
+        case 0xe3: rawTL = cmd & 0xfffff; clipL = cmd & 0x3ff; clipT = cmd >> 10 & YM; break;
+        case 0xe4: rawBR = cmd & 0xfffff; clipR = cmd & 0x3ff; clipB = cmd >> 10 & YM; break;
+        case 0xe5: rawOff = cmd & 0x3fffff; offX = (cmd << 21) >> 21; offY = (cmd << 10) >> 21; break;
+        case 0xe6: setMask = cmd & 1 ? 0x8000 : 0; checkMask = cmd >> 1 & 1; break;
+        default: stats.unknown++; break;
+      }
+    }
+    function gp0(w) {
+      w >>>= 0;
+      if (loadLeft > 0) {                                  // CPU からの転送の途中: 1 語に 2 画素
+        for (let k = 0; k < 2 && loadLeft > 0; k++) {
+          const x = loadPos % loadW, y = (loadPos / loadW) | 0, i = ((loadY + y) & YM) * 1024 + ((loadX + x) & XM);
+          if (!(checkMask && (vram[i] & 0x8000))) vram[i] = (w >>> (k * 16) & 0xffff) | setMask;
+          loadPos++; loadLeft--;
+        }
+        return;
+      }
+      if (poly) {                                          // 折れ線の続き。終わりの印は 0x5xxx5xxx
+        if (polyStage === 0 && (w & 0xf000f000) === 0x50005000) { poly = 0; return; }
+        if (poly === 2 && polyStage === 0) { polyColor = w; polyStage = 1; return; }
+        const c1 = poly === 2 ? polyColor & 0xffffff : polyPrevC;
+        line(sx(polyPrev), sy(polyPrev >>> 16), polyPrevC, sx(w), sy(w >>> 16), c1, !!(polyColor >>> 24 & 2));
+        polyPrev = w; polyPrevC = c1; polyStage = 0;
+        return;
+      }
+      if (have === 0) need = words(w);
+      buf[have++] = w;
+      if (have >= need) { have = 0; exec(); }
+    }
+    function gp1(w) {
+      w >>>= 0;
+      switch (w >>> 24 & 0x3f) {
+        case 0x00: resetState(); break;
+        case 0x01: have = 0; loadLeft = 0; readLeft = 0; poly = 0; break;
+        case 0x02: irq = 0; break;
+        case 0x03: dispOff = w & 1; break;
+        case 0x04: dmaDir = w & 3; break;
+        case 0x05: dispX = w & 0x3ff; dispY = w >> 10 & YM; break;
+        case 0x06: hr1 = w & 0xfff; hr2 = w >> 12 & 0xfff; break;
+        case 0x07: vr1 = w & 0x3ff; vr2 = w >> 10 & 0x3ff; break;
+        case 0x08: mode = w & 0xff; break;
+        case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x17:
+        case 0x18: case 0x19: case 0x1a: case 0x1b: case 0x1c: case 0x1d: case 0x1e: case 0x1f:
+          switch (w & 7) { case 2: info = rawTw; break; case 3: info = rawTL; break; case 4: info = rawBR; break; case 5: info = rawOff; break; case 7: info = 2; break; default: break; }
+          break;
+        default: break;
+      }
+    }
+    function read() {
+      if (readLeft > 0) {
+        let v = 0;
+        for (let k = 0; k < 2 && readLeft > 0; k++) {
+          const x = readPos % readW, y = (readPos / readW) | 0;
+          v |= vram[((readY + y) & YM) * 1024 + ((readX + x) & XM)] << (k * 16);
+          readPos++; readLeft--;
+        }
+        return v >>> 0;
+      }
+      return info >>> 0;
+    }
+    function stat() {
+      // bit26 命令を受け取れる、bit27 読み出しの用意あり、bit28 DMA を受け取れる。bit25 は DMA の向きに応じた要求。bit31(奇偶)は基板側で足す
+      let s = (texPage & 0x7ff) | (setMask ? 1 << 11 : 0) | checkMask << 12 | dither << 9 | drawToDisplay << 10 | (texPage & 0x800 ? 1 << 15 : 0);
+      s |= (mode & 0x3f) << 17 | (mode & 0x40) << 10 | dispOff << 23 | irq << 24 | 0x1C000000 | dmaDir << 29;
+      if (dmaDir === 1 || dmaDir === 2 || dmaDir === 3) s |= 1 << 25;
+      return s | 0;
+    }
+
+    // ── 表示 ──
+    const width = () => mode & 0x40 ? 368 : HRES[mode & 3];
+    const height = () => (mode & 0x24) === 0x24 ? 480 : 240;
+    const C5 = new Uint8Array(32); for (let i = 0; i < 32; i++) C5[i] = i << 3 | i >> 2;
+    function render(out) {
+      const w = width(), h = height();
+      if (dispOff) { out.fill(0xff000000, 0, w * h); return; }
+      for (let y = 0; y < h; y++) {
+        const row = ((dispY + y) & YM) * 1024, o = y * w;
+        for (let x = 0; x < w; x++) { const c = vram[row + ((dispX + x) & XM)]; out[o + x] = 0xff000000 | C5[c >> 10 & 31] << 16 | C5[c >> 5 & 31] << 8 | C5[c & 31]; }
+      }
+    }
+    resetState();
+    return { gp0, gp1, read, stat, render, vram, stats, vblank() { field ^= 1; },
+      get interlace() { return (mode & 0x24) === 0x24; }, get width() { return width(); }, get height() { return height(); },
+      get display() { return { x: dispX, y: dispY, hr1, hr2, vr1, vr2, mode, off: dispOff }; } };
+  };
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+/*
  * MML.Emu.ZoomConsole — タイトーの ZOOM 音源基板(ZSG-2+TMS57002)を、ゲーム画面(src/ui/nesScreen.js)と
  * 音スレッド(src/audio/nes-worklet-impl.js)が期待する「本体」の形にした物。
  *
@@ -26321,6 +28791,12 @@
  *   setController / setTurboRate / reset / startRecording / stopRecording / chips / extBits / diskCount / hasBattery / applyMix
  *
  * 操作(setController の bits。他の機種と同じ並び): 左右 = コードを 1 ずつ、上下 = 16 ずつ、A = 鳴らす、B = 止める、Start = 基板のリセット
+ *
+ * メイン基板つき(opts.main = { bios, rom, cat1, cat2 }。ソニー ZN-1+FX-1B の ROM がそろっている時):
+ *   本物の BIOS とゲームを走らせ(zn/znMain.js、zn/psxGpu.js)、ゲーム本体のテストモード画面を出す。指令はゲームが音源基板へ送る物そのまま。
+ *   DIP の Test Mode を入れて起動し、最初の指令が出る所まで早送りする。
+ *   操作: 十字 = レバー、A / B = ボタン 1 / 2、Start = スタート、Select = DIP の Test Mode の入切、連射 A のキー = コイン
+ *   PlayStation の SPU(効果音)も混ぜて鳴らすが、録音(VGM)には入らない(ZSG-2 と DSP だけ)
  *
  * 指令(G-DARIUS のサウンドテストの実測): 共有 RAM に (01, コード, 01, 55) を書いて割り込み。止めるのは (01, 00, 00, 55)(起動時にメイン CPU が送る物と同じ)。
  *
@@ -26337,6 +28813,7 @@
   const W = 320, H = 224, FPS = 60;
   const GLOBAL_GAIN = 0x30;          // メイン CPU が書く全体音量(G-DARIUS のサウンドテストの実測。0〜63)
   const REG_MARK = 0xFFFF;
+  const SPU_GAIN = 0.3 / 32768;      // PlayStation の SPU を混ぜる大きさ(MAME の配線の 0.3。ZSG-2 側は 1.0)
   // 5×7 の字(上から 7 行、各行 5bit)
   const FONT = {
     '0': [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E], '1': [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E], '2': [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F], '3': [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
@@ -26368,7 +28845,11 @@
       this.rec = null;
       this.underruns = 0;
       this.pad = [0, 0]; this.prevPad = 0; this.repeat = 0;
+      this.coinKeys = [0, 0];                                // 連射 A / B のキー。メイン基板つきの時はコインに使う
       this.code = this.info.first;
+      this.mainOpt = opts.main && Emu.createZnMain && Emu.createPsxGpu ? opts.main : null;
+      this.nv = null;                                        // メイン基板の不揮発メモリ(リセットをまたいで持つ)
+      this.dsw = 0x7;                                        // DIP: bit3 = Test Mode(0 で入)
       this._boot();
     }
     _boot() {
@@ -26382,6 +28863,8 @@
       this.acc = 0; this.frameAcc = 0; this.prevL = 0; this.prevR = 0;
       this.frameCount = 0;
       this.playing = 0; this.playFrames = 0; this.sent = 0;
+      this.zn = null; this.spuL = 0; this.spuR = 0; this.prevSpuL = 0; this.prevSpuR = 0;
+      if (this.mainOpt) return this._bootMain();
       this._write(0x8002, GLOBAL_GAIN); this._write(0x8003, GLOBAL_GAIN);
       // 起動: 基板が立ち上がるのを 1 秒待って初期化の指令、さらに 0.5 秒。音は出さずに先へ進める(1.5 秒ぶんを一気に)
       const n1 = Math.round(this.chipRate), n2 = Math.round(this.chipRate * 0.5);
@@ -26390,6 +28873,63 @@
       for (let i = 0; i < n2; i++) { this.board.run(1); chip.clock(); }
       this._draw();
     }
+    // ── メイン基板つき ──
+    _bootMain() {
+      const m = this.mainOpt, chip = this.chip;
+      this.gain = [-1, -1]; this.slot = 0; this.booted = false;
+      this.gpu = Emu.createPsxGpu({ vramHeight: 1024 });
+      const zn = this.zn = Emu.createZnMain({ bios: m.bios, rom: m.rom, cat1: m.cat1, cat2: m.cat2, sound: this.board, gpu: this.gpu, dsw: this.dsw,
+        at28: this.nv ? this.nv.at28 : null, fram: this.nv ? this.nv.fram : null, onSound: (k, a, v) => this._mainSound(k, a, v) });
+      this.nv = { at28: zn.at28, fram: zn.fram };
+      this.frameRate = Emu.ZN_MAIN.FRAME_HZ;
+      this.mainRatio = Emu.ZN_MAIN.CPU_HZ / this.chipRate;   // 音源の 1 サンプルぶんのメイン CPU のサイクル数
+      this.nsamp = 0; this.mainFrame = 0;
+      // 最初の指令(音源基板の初期化)が出て 0.3 秒たつまで早送り。出なければ 20 秒で打ち切る(BIOS の画面やエラー表示のまま見せる)
+      let after = -1;
+      const limit = Math.round(this.chipRate * 20), tail = Math.round(this.chipRate * 0.3);
+      while (this.nsamp < limit) {
+        this._stepMain(); chip.clock();
+        if (this.booted) { if (after < 0) after = this.nsamp; if (this.nsamp - after >= tail) break; }
+      }
+      this.mainFrame = zn.frame; this.playing = 0;
+      this._drawMain();
+    }
+    // 音源の 1 サンプルぶん、メイン基板と音源基板を進める
+    _stepMain() {
+      const zn = this.zn, board = this.board;
+      this.nsamp++;
+      zn.runTo(this.nsamp * this.mainRatio);
+      while (board.samples < this.nsamp) board.run(1);       // 端数で 1 サンプル届いていない時
+      this.prevSpuL = this.spuL; this.prevSpuR = this.spuR;
+      this.spuL = zn.spu.outL * SPU_GAIN; this.spuR = zn.spu.outR * SPU_GAIN;
+    }
+    // ゲームが音源基板へ書いた: G = 全体音量(番号 4 / 5)、M = 共有 RAM、I = 割り込み(共有 RAM の 4 バイトを指令として読む)
+    _mainSound(kind, a, v) {
+      if (kind === 'G') {
+        if (a === 4 || a === 5) { const g = v & 0x3f; if (this.gain[a - 4] !== g) { this.gain[a - 4] = g; this._write(0x8002 + (a - 4), g); } }   // サウンドテストの画面は毎フレーム同じ値を書くので、変わった時だけ
+        return;
+      }
+      if (kind === 'M') { if (v) this.slot = a & ~3; return; }
+      const s = this.board.shared, o = this.slot;
+      this.booted = true;
+      if (s[o] !== 0x01 || s[o + 3] !== 0x55) return;
+      const code = s[o + 2] ? s[o + 1] : 0;
+      this.playing = code; this.playFrames = 0; this.sent++;
+      if (this.rec && code) this.rec.cur.w.push(REG_MARK, code, this.chip.nat);
+    }
+    _inputMain() {
+      const b = this.pad[0] | this.pad[1], hit = b & ~this.prevPad, c = this.coinKeys[0] | this.coinKeys[1], inp = this.zn.inp;
+      inp.p1 = 0xff & ~((b & 0x10 ? 0x01 : 0) | (b & 0x20 ? 0x02 : 0) | (b & 0x40 ? 0x04 : 0) | (b & 0x80 ? 0x08 : 0) | (b & 0x01 ? 0x10 : 0) | (b & 0x02 ? 0x20 : 0));
+      inp.system = 0xff & ~((b & 0x08 ? 0x01 : 0) | (c & 1 ? 0x10 : 0) | (c & 2 ? 0x20 : 0));
+      if (hit & 0x04) { this.dsw ^= 0x8; inp.dsw = this.dsw; }   // Select: DIP の Test Mode の入切(切ってからメニューの EXIT でゲームへ)
+      this.prevPad = b;
+    }
+    _drawMain() {
+      const g = this.gpu, w = g.width, h = g.height;
+      if (w !== this.frameWidth || h !== this.frameHeight || this.frame.length !== w * h) { this.frame = new Uint32Array(w * h); this.frameWidth = w; this.frameHeight = h; }
+      g.render(this.frame);
+    }
+
     _write(reg, value) {
       const chip = this.chip;
       chip.write(reg, value);
@@ -26404,7 +28944,7 @@
     extBits() { return 0; }
     get diskCount() { return 0; }
     chips() { return ['zsg2']; }
-    reset() { const rec = !!this.rec; this.rec = null; this._boot(); if (rec) this.startRecording(); }
+    reset() { const rec = !!this.rec; this.rec = null; this.frame = new Uint32Array(W * H); this.frameWidth = W; this.frameHeight = H; this._boot(); if (rec) this.startRecording(); }
     applyMix(mute, volume) {
       const put = (target, source, conv) => { if (source) for (let i = 0; i < target.length; i++) if (source[i] !== undefined) target[i] = conv(source[i]); };
       if (mute) put(this.chip.mute, (mute.expansion || mute).zsg2, (v) => !!v);
@@ -26412,7 +28952,7 @@
     }
 
     // ── 入力(フレームの終わりに読む)──
-    setController(port, bits) { this.pad[port & 1] = bits | 0; }
+    setController(port, bits, turbo) { this.pad[port & 1] = bits | 0; this.coinKeys[port & 1] = turbo | 0; }
     setTurboRate() {}
     _send(code) {
       if (code) this.board.command(0x01, code & 0xff, 0x01, 0x55); else this.board.command(0x01, 0x00, 0x00, 0x55);
@@ -26464,14 +29004,14 @@
       }
       this._text(16, 190, 'LEFT/RIGHT: CODE   UP/DOWN: +-16', COL.dim, 1);
       this._text(16, 202, 'A: PLAY   B: STOP   START: RESET BOARD', COL.dim, 1);
+      if (this.info.need && this.info.need.length) this._text(16, 214, ('TEST MODE: ALSO DROP ' + this.info.need.join(' + ')).toUpperCase().slice(0, 48), COL.dim, 1);
     }
 
     // ── 音と進行 ──
     _frameEnd() {
       this.frameCount++;
       if (this.playing) this.playFrames++;
-      this._input();
-      this._draw();
+      if (this.zn) { this._inputMain(); this._drawMain(); } else { this._input(); this._draw(); }
       const rec = this.rec, chip = this.chip;
       if (rec) { rec.cur.n1 = chip.nat; rec.frames.push(rec.cur); rec.cur = { n0: chip.nat, n1: chip.nat, w: [] }; }
       if (this.onFrame) this.onFrame();
@@ -26479,6 +29019,7 @@
     _stepChip() {
       const chip = this.chip;
       this.prevL = chip.outL; this.prevR = chip.outR;
+      if (this.zn) { this._stepMain(); chip.clock(); if (this.zn.frame !== this.mainFrame) { this.mainFrame = this.zn.frame; this._frameEnd(); } return; }   // メイン基板つき: 垂直帰線ごとに 1 フレーム
       this.board.run(1);
       chip.clock();
       if (++this.frameAcc >= this.framePeriod) { this.frameAcc -= this.framePeriod; this._frameEnd(); }
@@ -26490,6 +29031,7 @@
         while (this.acc >= 1) { this.acc -= 1; this._stepChip(); }
         const chip = this.chip, a = this.acc;            // 音源の 2 サンプルの間を直線でつなぐ
         let l = this.prevL + (chip.outL - this.prevL) * a, r = this.prevR + (chip.outR - this.prevR) * a;
+        if (this.zn) { l += this.prevSpuL + (this.spuL - this.prevSpuL) * a; r += this.prevSpuR + (this.spuR - this.prevSpuR) * a; }
         l = l > 1 ? 1 : l < -1 ? -1 : l; r = r > 1 ? 1 : r < -1 ? -1 : r;
         if (outR) { outL[i] = l; outR[i] = r; } else outL[i] = (l + r) * 0.5;
       }
@@ -28837,7 +31379,8 @@
       this.onFrame = null;
       this.rec = null;
       this.underruns = 0;
-      this.pad = [0, 0]; this.prevPad = 0; this.repeat = 0;
+      this.pad = [0, 0]; this.coinKeys = [0, 0];   // coinKeys = 連射 A / B のキー。メイン基板つきの時はコイン 1 / 2 に使う
+      this.prevPad = 0; this.repeat = 0;
       this.code = this.first;
       this.mainOpt = opts.main && Emu.createF3Main && Emu.createF3Video ? opts.main : null;
       this.eeprom = null;                                  // メイン基板の EEPROM(リセットをまたいで持つ)
@@ -28909,7 +31452,8 @@
       const b = this.pad[0] | this.pad[1], inp = this.f3.inp;
       inp.in0 = 0xffff & ~((b & 0x01 ? 0x01 : 0) | (b & 0x02 ? 0x02 : 0) | (b & 0x08 ? 0x1000 : 0));
       inp.in1 = 0xffff & ~((b & 0x10 ? 0x01 : 0) | (b & 0x20 ? 0x02 : 0) | (b & 0x40 ? 0x04 : 0) | (b & 0x80 ? 0x08 : 0));
-      inp.system = 0xfe & ~(b & 0x04 ? 0x02 : 0);
+      const c = this.coinKeys[0] | this.coinKeys[1];
+      inp.system = 0xfe & ~((b & 0x04 ? 0x02 : 0) | (c & 1 ? 0x10 : 0) | (c & 2 ? 0x20 : 0));
     }
     _drawMain() {
       const v = this.video, w = v.width, h = v.height, src = this.vbuf, dst = this.frame;
@@ -28976,7 +31520,7 @@
       if (this.cmds) for (const no of this.info.stop || []) { const hex = this.cmds[no - 1]; if (hex) this._sendBytes(Emu.EnsoniqRomSet.bytes(hex)); }
       this.lastStop = null; this.playing = 0;
     }
-    setController(port, bits) { this.pad[port & 1] = bits | 0; }
+    setController(port, bits, turbo) { this.pad[port & 1] = bits | 0; this.coinKeys[port & 1] = turbo | 0; }
     setTurboRate() {}
     _input() {
       if (this.f3) return this._inputMain();
@@ -29161,7 +31705,9 @@
             } else if (machine === 'zoom') {
               // タイトーの ZOOM 音源基板(サウンドテスト画面): サウンドプログラムと波形。主スレッドが zip から取り出して送る
               const o = m.zoom || {};
-              nes = new MML.Emu.ZoomConsole(null, { program: new Uint8Array(o.program), wave: new Uint8Array(o.wave), info: o.info || {} });
+              // main があれば(ソニー ZN-1 の BIOS とゲームの ROM)メイン基板も動かして、本物のテストモード画面を出す
+              const zm = o.main ? { bios: new Uint8Array(o.main.bios), rom: new Uint8Array(o.main.rom), cat1: new Uint8Array(o.main.cat1), cat2: new Uint8Array(o.main.cat2) } : null;
+              nes = new MML.Emu.ZoomConsole(null, { program: new Uint8Array(o.program), wave: new Uint8Array(o.wave), info: o.info || {}, main: zm });
               info = MML.Emu.ZoomConsole.describe(nes);
             } else if (machine === 'ensoniq') {
               // タイトーの Ensoniq 音源基板(サウンドテスト画面): サウンドプログラム(0xC00000 から見える並び)と波形(16bit の語の列)、ゲームごとの表

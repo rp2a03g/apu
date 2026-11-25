@@ -126,6 +126,14 @@
         if (this._mute[li]) spu.mute[c.slot] = true;
         if (this._vol[li] !== undefined) spu.vol[c.slot] = this._vol[li];
       }
+      // レーンを次の音に譲ったあとの余韻(Emu.PsfTrackVoicer#step の tails)にも、元のレーンのミュート/音量を効かせる
+      const tails = lanes.tails;
+      if (tails) for (let k = 0; k < tails.length; k += 2) {
+        const slot = tails[k], li = tails[k + 1];
+        if (!(slot >= 0 && slot < 24)) continue;
+        if (this._mute[li]) spu.mute[slot] = true;
+        if (this._vol[li] !== undefined) spu.vol[slot] = this._vol[li];
+      }
     }
 
     _fill(outL, outR) {

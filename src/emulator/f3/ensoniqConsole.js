@@ -40,7 +40,8 @@
       this.onFrame = null;
       this.rec = null;
       this.underruns = 0;
-      this.pad = [0, 0]; this.prevPad = 0; this.repeat = 0;
+      this.pad = [0, 0]; this.coinKeys = [0, 0];   // coinKeys = 連射 A / B のキー。メイン基板つきの時はコイン 1 / 2 に使う
+      this.prevPad = 0; this.repeat = 0;
       this.code = this.first;
       this.mainOpt = opts.main && Emu.createF3Main && Emu.createF3Video ? opts.main : null;
       this.eeprom = null;                                  // メイン基板の EEPROM(リセットをまたいで持つ)
@@ -112,7 +113,8 @@
       const b = this.pad[0] | this.pad[1], inp = this.f3.inp;
       inp.in0 = 0xffff & ~((b & 0x01 ? 0x01 : 0) | (b & 0x02 ? 0x02 : 0) | (b & 0x08 ? 0x1000 : 0));
       inp.in1 = 0xffff & ~((b & 0x10 ? 0x01 : 0) | (b & 0x20 ? 0x02 : 0) | (b & 0x40 ? 0x04 : 0) | (b & 0x80 ? 0x08 : 0));
-      inp.system = 0xfe & ~(b & 0x04 ? 0x02 : 0);
+      const c = this.coinKeys[0] | this.coinKeys[1];
+      inp.system = 0xfe & ~((b & 0x04 ? 0x02 : 0) | (c & 1 ? 0x10 : 0) | (c & 2 ? 0x20 : 0));
     }
     _drawMain() {
       const v = this.video, w = v.width, h = v.height, src = this.vbuf, dst = this.frame;
@@ -179,7 +181,7 @@
       if (this.cmds) for (const no of this.info.stop || []) { const hex = this.cmds[no - 1]; if (hex) this._sendBytes(Emu.EnsoniqRomSet.bytes(hex)); }
       this.lastStop = null; this.playing = 0;
     }
-    setController(port, bits) { this.pad[port & 1] = bits | 0; }
+    setController(port, bits, turbo) { this.pad[port & 1] = bits | 0; this.coinKeys[port & 1] = turbo | 0; }
     setTurboRate() {}
     _input() {
       if (this.f3) return this._inputMain();

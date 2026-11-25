@@ -90,6 +90,7 @@
             if (this.onEnded) this.onEnded();
             return;
           }
+          if (this._laneFrames && this._songFrame() !== this._laneFrame) this._applyMix(); // 行単位ミュート(音色モード)をこのフレームのボイスへ
           this.frameBuffer = this.player.renderFrame(sr, false, true);
           this.frameOffset = 0;
           this.currentFrame = this._songFrame();
@@ -142,8 +143,8 @@
       this.player.speedFactor = this.speedFactor;
       this.totalFrames = totalFrames;
       this._resetState();
-      if (mute) this.applyMute(mute);
-      if (this._lastVolume) this.applyVolume(this._lastVolume);
+      if (mute) this._lastMute = mute;
+      this._applyMix();
     }
 
     _resetState() {
@@ -164,8 +165,7 @@
       if (this.player) {
         this.player.reset();
         this.player.speedFactor = this.speedFactor;
-        if (this._lastMute) this.player.applyMute(this._lastMute);
-        if (this._lastVolume) this.player.applyVolume(this._lastVolume);
+        this._applyMix();
       }
       this._resetState();
     }
@@ -183,8 +183,7 @@
       // 無い/対応外のチップがある曲では中で reset()+頭から流す(VgmPlayer.seekTo参照)
       this.player.seekTo(targetVgmSample);
       this.player.speedFactor = this.speedFactor;
-      if (this._lastMute) this.player.applyMute(this._lastMute);
-      if (this._lastVolume) this.player.applyVolume(this._lastVolume);
+      this._applyMix();
       this._resetState();
       this.currentFrame = this._songFrame();
     }
@@ -192,13 +191,55 @@
     applyMute(mute) {
       if (!mute) return;
       this._lastMute = mute;
-      if (this.player) this.player.applyMute(mute);
+      this._applyMix();
     }
 
     applyVolume(volume) {
       if (!volume) return;
       this._lastVolume = volume;
-      if (this.player) this.player.applyVolume(volume);
+      this._applyMix();
+    }
+
+    /**
+     * プール式PCMチップの音色モードの、行単位のミュート・音量(main.js)。fn(chipToken, frame) → そのフレームのレーン配列
+     * (各要素の slot=物理ボイス、配列の tails=レーンを譲ったあとの余韻。Emu.PoolToneVoicer#step の出力)、
+     * null を返すとそのチップは実機スロット扱い(mute/vol の添字=ボイス番号)。
+     * 行(レーン)が使うボイスは発音のたびに変わるので、フレームが変わるたびにボイス単位の設定へ写し直す
+     * (PSF の PsfReplayStreamPlayer#setLaneFrames と同じ考え方)。表示モードを切り替えたら refreshLaneMix() を呼ぶ
+     */
+    setLaneFrames(fn) {
+      this._laneFrames = fn || null;
+      this._laneFrame = -1;
+      this._applyMix();
+    }
+    refreshLaneMix() { this._laneFrame = -1; this._applyMix(); }
+
+    _applyMix() {
+      if (!this.player) return;
+      let mute = this._lastMute, vol = this._lastVolume;
+      const POOL = MML.Emu.POOL_CHIP_CHANNELS;
+      if (this._laneFrames && POOL) {
+        const f = this._songFrame();
+        this._laneFrame = f;
+        for (const token of Object.keys(POOL)) {
+          const lanes = token === 'psx' ? null : this._laneFrames(token, f);
+          if (!lanes) continue;
+          const n = POOL[token];
+          const m = new Array(n).fill(false), v = new Array(n).fill(1);
+          const sm = mute && (mute.expansion || mute)[token], sv = vol && (vol.expansion || vol)[token];
+          const put = (slot, li) => {
+            if (!(slot >= 0 && slot < n)) return;
+            if (sm && sm[li]) m[slot] = true;
+            if (sv && sv[li] !== undefined) v[slot] = sv[li];
+          };
+          for (let li = 0; li < lanes.length; li++) if (lanes[li]) put(lanes[li].slot, li);
+          if (lanes.tails) for (let k = 0; k < lanes.tails.length; k += 2) put(lanes.tails[k], lanes.tails[k + 1]);
+          mute = Object.assign({}, mute, { expansion: Object.assign({}, mute && mute.expansion, { [token]: m }) });
+          vol = Object.assign({}, vol, { expansion: Object.assign({}, vol && vol.expansion, { [token]: v }) });
+        }
+      }
+      if (mute) this.player.applyMute(mute);
+      if (vol) this.player.applyVolume(vol);
     }
 
     // 曲の秒(stream-player.js MmlStreamPlayer.getPosition()参照)。VgmPlayer.samplePos が曲のサンプル位置。

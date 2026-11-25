@@ -126,6 +126,7 @@ function planOpts(opt) {
   if (opt.merge) o.merge = opt.merge;
   const copies = copiesOf(opt);
   if (copies) o.copies = copies;
+  if (opt.pool) o.poolMode = opt.pool; // --pool c352=tone,multipcm=logical(プール式PCMチップの表示モード。VGM)
   return o;
 }
 /** --plan の '<元ch>#<n>' キーと --copy の加工から複製の表 { copyId: { of, transpose, detune, delay } } を作る */
@@ -287,7 +288,7 @@ if (require.main === module) {
     return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : def;
   };
   if (!file) {
-    console.error('usage: node tools/headless/convert.js <file> [--song N] [--entry N] [--sec S] [-o out.mml] [--list] [--preset plain|faithful] [--cmd D=0,EP=0,NOTE_END=zero,...] [--plan V0=pulse1,V1=pulse1] [--merge V0+V1] [--copy V0#1/t=12/c=-5/d=30]');
+    console.error('usage: node tools/headless/convert.js <file> [--song N] [--entry N] [--sec S] [-o out.mml] [--list] [--preset plain|faithful] [--cmd D=0,EP=0,NOTE_END=zero,...] [--plan V0=pulse1,V1=pulse1] [--merge V0+V1] [--copy V0#1/t=12/c=-5/d=30] [--pool c352=tone]');
     process.exit(2);
   }
 
@@ -306,6 +307,7 @@ if (require.main === module) {
       plan: parsePlanFlag(flag('--plan', null)),
       merge: parseMergeFlag(flag('--merge', null)),
       copy: parseCopyFlag(flag('--copy', null)),
+      pool: flag('--pool', null) ? Object.fromEntries(flag('--pool', '').split(',').map(x => x.split('='))) : null,
     });
     const out = flag('-o', null);
     const title = r.header.songName || r.header.title || r.header.gameName || '(no title)';

@@ -255,6 +255,50 @@
    * ヘッダから変換元チャンネル一覧を作る(キャプチャ不要。UIの割当表とcomposePsgLikeが共有)。
    * @returns {Array<{id, label, kind, chip, chipIndex, ch}>}
    */
+  // プール式PCMチップの元ch名。音色モード(fromVgm の poolMode 'tone'。Emu.PoolToneVoicer)ではレーン数が曲で決まり、
+  // h.chips.<chip>.lanes(本数)/ .labels(レーン番号順の名前 'S3-2' 等)を持つ(PSF のトラックモードの c.psx と同じ形)
+  const poolLabel = (chip, i) => (chip.labels && chip.labels[i]) ? chip.labels[i] : 'PCM' + (i + 1);
+  // 音色モードを持つチップ → ソースID の接頭辞
+  const POOL_TONE_CHIPS = { segapcm: 'spcm', c140: 'c140', c352: 'c352', qsound: 'qs', cps3: 'cp3', zsg2: 'zsg', es5505: 'es5', multipcm: 'mp' };
+  MML.VGM2MML.POOL_TONE_CHIPS = POOL_TONE_CHIPS;
+
+  /**
+   * 音色モードのレーン列を作る(変換と、画面の既定割当の両方が使う)。
+   * @returns {{frames, lanes}} frames[f][lane] = スナップショット、lanes = レーン表(Emu.PsfTrackVoicer#laneTable)
+   */
+  MML.VGM2MML.toneLanes = function (snapshots) {
+    const vc = new MML.Emu.PoolToneVoicer();
+    const frames = snapshots.map(s => vc.step(s));
+    return { frames, lanes: vc.laneTable() };
+  };
+  /** ヘッダの写しに、音色モードのレーン数と名前を書き込む(sourceChannels が読む)。lanesByChip: {chip: レーン表} */
+  MML.VGM2MML.headerWithToneLanes = function (h, lanesByChip) {
+    const chips = Object.assign({}, h.chips);
+    for (const key of Object.keys(lanesByChip)) {
+      if (!chips[key] || !lanesByChip[key] || !lanesByChip[key].length) continue;
+      chips[key] = Object.assign({}, chips[key] === true ? {} : chips[key], { lanes: lanesByChip[key].length, labels: MML.PSF2MML.laneLabels(lanesByChip[key]) });
+    }
+    return Object.assign({}, h, { chips });
+  };
+  /**
+   * 音色モードの既定割当。h は headerWithToneLanes 済みのヘッダ、data[chip] = {snapshots(レーン列), lanes, doubles?}。
+   * 音色モードのチップのレーンだけ「単音のパート → 和音の一番上の声 → 残りの声 → 複製」の順(PSF2MML.trackPlan と同じ規則)で
+   * 空いている借用先へ載せ直す。ほかの元ch(FM、PSG、ドラムパート)は defaultPlan のまま
+   */
+  MML.VGM2MML.tonePlan = function (h, data) {
+    const plan = MML.VGM2MML.defaultPlan(h);
+    const src = MML.VGM2MML.sourceChannels(h);
+    for (const key of Object.keys(POOL_TONE_CHIPS)) {
+      if (!data[key] || !data[key].lanes || !data[key].lanes.length) continue;
+      const mine = new Set(src.filter(s => s.chip === key && s.kind === 'pcm').map(s => s.id));
+      const used = new Set(Object.keys(plan).filter(id => !mine.has(id)).map(id => plan[id]));
+      const sub = MML.PSF2MML.trackPlan(data, { key, prefix: POOL_TONE_CHIPS[key], noDrum: true,
+        free: MML.PSF2MML.TRACK_SLOT_ORDER.filter(t => !used.has(t)) });
+      for (const id of mine) plan[id] = sub[id] || 'skip';
+    }
+    return plan;
+  };
+
   MML.VGM2MML.sourceChannels = function (h) {
     const out = [];
     const c = h.chips || {};
@@ -312,15 +356,15 @@
     // デュアル(サラマンダー2)は16ch。2個目は ch8-15(鍵盤の K59-K516 と同じ並び)
     if (c.k054539) { const kn = c.k054539.dual ? 16 : 8;
       for (let i = 0; i < kn; i++) out.push({ id: `k5:${i}`, label: `K054539${kn > 8 ? '#' + (i < 8 ? 1 : 2) : ''} PCM${(i % 8) + 1}`, kind: 'pcm', chip: 'k054539', chipIndex: i < 8 ? 0 : 1, ch: i }); }
-    if (c.segapcm) for (let i = 0; i < 16; i++) out.push({ id: `spcm:${i}`, label: `SegaPCM PCM${i + 1}`, kind: 'pcm', chip: 'segapcm', chipIndex: 0, ch: i });
-    if (c.c140) for (let i = 0; i < 24; i++) out.push({ id: `c140:${i}`, label: `C140 PCM${i + 1}`, kind: 'pcm', chip: 'c140', chipIndex: 0, ch: i });
-    if (c.c352) for (let i = 0; i < 32; i++) out.push({ id: `c352:${i}`, label: `C352 PCM${i + 1}`, kind: 'pcm', chip: 'c352', chipIndex: 0, ch: i });
-    if (c.qsound) for (let i = 0; i < 16; i++) out.push({ id: `qs:${i}`, label: `QSound PCM${i + 1}`, kind: 'pcm', chip: 'qsound', chipIndex: 0, ch: i });
-    if (c.cps3) for (let i = 0; i < 16; i++) out.push({ id: `cp3:${i}`, label: `CPS3 PCM${i + 1}`, kind: 'pcm', chip: 'cps3', chipIndex: 0, ch: i });
-    if (c.zsg2) for (let i = 0; i < 48; i++) out.push({ id: `zsg:${i}`, label: `ZSG-2 PCM${i + 1}`, kind: 'pcm', chip: 'zsg2', chipIndex: 0, ch: i });
-    if (c.es5505) for (let i = 0; i < 32; i++) out.push({ id: `es5:${i}`, label: `ES5505 PCM${i + 1}`, kind: 'pcm', chip: 'es5505', chipIndex: 0, ch: i });
+    if (c.segapcm) for (let i = 0, n = c.segapcm.lanes || 16; i < n; i++) out.push({ id: `spcm:${i}`, label: `SegaPCM ${poolLabel(c.segapcm, i)}`, kind: 'pcm', chip: 'segapcm', chipIndex: 0, ch: i });
+    if (c.c140) for (let i = 0, n = c.c140.lanes || 24; i < n; i++) out.push({ id: `c140:${i}`, label: `C140 ${poolLabel(c.c140, i)}`, kind: 'pcm', chip: 'c140', chipIndex: 0, ch: i });
+    if (c.c352) for (let i = 0, n = c.c352.lanes || 32; i < n; i++) out.push({ id: `c352:${i}`, label: `C352 ${poolLabel(c.c352, i)}`, kind: 'pcm', chip: 'c352', chipIndex: 0, ch: i });
+    if (c.qsound) for (let i = 0, n = c.qsound.lanes || 16; i < n; i++) out.push({ id: `qs:${i}`, label: `QSound ${poolLabel(c.qsound, i)}`, kind: 'pcm', chip: 'qsound', chipIndex: 0, ch: i });
+    if (c.cps3) for (let i = 0, n = c.cps3.lanes || 16; i < n; i++) out.push({ id: `cp3:${i}`, label: `CPS3 ${poolLabel(c.cps3, i)}`, kind: 'pcm', chip: 'cps3', chipIndex: 0, ch: i });
+    if (c.zsg2) for (let i = 0, n = c.zsg2.lanes || 48; i < n; i++) out.push({ id: `zsg:${i}`, label: `ZSG-2 ${poolLabel(c.zsg2, i)}`, kind: 'pcm', chip: 'zsg2', chipIndex: 0, ch: i });
+    if (c.es5505) for (let i = 0, n = c.es5505.lanes || 32; i < n; i++) out.push({ id: `es5:${i}`, label: `ES5505 ${poolLabel(c.es5505, i)}`, kind: 'pcm', chip: 'es5505', chipIndex: 0, ch: i });
     if (c.okim6295) for (let i = 0; i < 4; i++) out.push({ id: `oki:${i}`, label: `OKIM6295 ADPCM${i + 1}`, kind: 'pcm', chip: 'okim6295', chipIndex: 0, ch: i });
-    if (c.multipcm) for (let i = 0; i < 28; i++) out.push({ id: `mp:${i}`, label: `MultiPCM PCM${i + 1}`, kind: 'pcm', chip: 'multipcm', chipIndex: 0, ch: i });
+    if (c.multipcm) for (let i = 0, n = c.multipcm.lanes || 28; i < n; i++) out.push({ id: `mp:${i}`, label: `MultiPCM ${poolLabel(c.multipcm, i)}`, kind: 'pcm', chip: 'multipcm', chipIndex: 0, ch: i });
     // PSF(PlayStation SPU)。VGM には現れない仮想チップで、src/psf2mml/converter.js が header.chips.psx を立てて使う
     // 合成chは実機の24ボイスより多い32本(Emu.POOL_CHIP_CHANNELS.psx)。実機スロットでは24以降は空。
     // トラックモード(PSF2MML.captureData の poolMode 'track')はレーン数が曲で決まり、c.psx.lanes / c.psx.labels
@@ -1545,18 +1589,31 @@
     }
     let data = await MML.Emu.captureVgmSongAsync(vgmBytes, { durationSeconds }, options.onProgress || null);
     // チャンネルプール/ペア交互割当チップの表示モード(鍵盤ヘッダの切替UIと同じ語彙)。
-    // 'logical'=割当逆算(合成ch)で変換。既定はMultiPCMのみ合成(完全プール式で
+    // 'logical'=割当逆算(合成ch)で変換、'tone'=音色モード。既定はMultiPCMのみ合成(完全プール式で
     // 既定8枠カバー率45%→100%の劇的改善)、他は実機スロット(ペア交互でも音符
     // ストリームはほぼ安定で、マルチサンプル曲では合成が僅かに劣るケースもあるため)。
     const POOL_CONVERT_DEFAULTS = { multipcm: 'logical', c352: 'phys', qsound: 'phys', cps3: 'phys', zsg2: 'logical', es5505: 'logical', c140: 'phys', segapcm: 'phys' };
     const pm = options.poolMode || {};
+    const toneLanes = {};
     for (const key of Object.keys(POOL_CONVERT_DEFAULTS)) {
       const mode = pm[key] || POOL_CONVERT_DEFAULTS[key];
+      // 'tone'=音色モード(音色×声部のレーン。Emu.PoolToneVoicer)。レーン数は曲で決まる
+      if (mode === 'tone' && data[key] && Array.isArray(data[key].snapshots) && MML.Emu.PoolToneVoicer) {
+        const t = MML.VGM2MML.toneLanes(data[key].snapshots);
+        data = Object.assign({}, data, { [key]: Object.assign({}, data[key], { snapshots: t.frames, pooled: true, lanes: t.lanes }) });
+        toneLanes[key] = t.lanes;
+      }
       if (mode === 'logical' && data[key] && data[key].logical) {
         // pooled: 合成chのレーン(convertData が複製パートを探す対象。src/convert/poolDoubles.js)
         const po = MML.Emu.POOL_CHIP_OPTIONS && MML.Emu.POOL_CHIP_OPTIONS[key];
         data = Object.assign({}, data, { [key]: Object.assign({}, data[key], { snapshots: data[key].logical, pooled: true, pack: (po && po.pack) || 0 }) });
       }
+    }
+    if (Object.keys(toneLanes).length) {
+      data = Object.assign({}, data, { header: MML.VGM2MML.headerWithToneLanes(data.header, toneLanes) });
+      // 割当の指定が無い(ヘッドレス等)ときは、パート単位の既定割当を使う
+      // (convertData の「音符の多いch上位を N163 の8枠へ」では和音の声部の単位が崩れる。PSF のトラックモードと同じ)
+      if (!options.channelMap) options = Object.assign({}, options, { channelMap: MML.VGM2MML.tonePlan(data.header, data) });
     }
     return MML.VGM2MML.convertData(data, options);
   };

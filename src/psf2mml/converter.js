@@ -101,11 +101,12 @@
    * data.psx.doubles(PoolDoubles.find の結果)が無ければここで探す。鍵盤の行名(「≈T8」)と trackPlan が共有する
    * @returns {Map<number, number>}
    */
-  PSF2MML.copyLanes = function (data, stats) {
-    const frames = data.psx.snapshots, n = (data.psx.lanes || []).length;
+  PSF2MML.copyLanes = function (data, stats, key) {
+    const cd = data[key || 'psx'];
+    const frames = cd.snapshots, n = (cd.lanes || []).length;
     const st = stats || laneStats(frames, n);
     const PD = MML.Convert && MML.Convert.PoolDoubles;
-    const doubles = data.psx.doubles || (PD ? PD.find(frames) : null);
+    const doubles = cd.doubles || (PD ? PD.find(frames) : null);
     const out = new Map();
     if (!doubles) return out;
     for (let li = 0; li < n; li++) {
@@ -118,12 +119,17 @@
     return out;
   };
 
-  PSF2MML.trackPlan = function (data) {
-    const frames = data.psx.snapshots, lanes = data.psx.lanes || [];
+  // opts(VGM のプール式チップの音色モードが使う。src/vgm2mml/converter.js VGM2MML.tonePlan):
+  //   key   … data のどのチップか(既定 'psx')   prefix … ソースID の接頭辞(既定 'psx')
+  //   free  … 使ってよい借用先(既定 TRACK_SLOT_ORDER)   noDrum … ドラムパートをノイズへ入れない
+  PSF2MML.trackPlan = function (data, opts) {
+    opts = opts || {};
+    const key = opts.key || 'psx', prefix = opts.prefix || 'psx';
+    const frames = data[key].snapshots, lanes = data[key].lanes || [];
     const n = lanes.length;
     const stats = laneStats(frames, n);
     const onsets = stats.onsets, pitched = stats.pitched;
-    const copyOf = PSF2MML.copyLanes(data, stats);
+    const copyOf = PSF2MML.copyLanes(data, stats, key);
     const isCopy = (li) => copyOf.has(li);
     const isPitched = (li) => pitched[li] > 0 && pitched[li] >= onsets[li] * 0.5;
     // トラックごとにまとめる(声部順)
@@ -154,17 +160,17 @@
       }
     }
     const plan = {};
-    for (let li = 0; li < n; li++) plan['psx:' + li] = 'skip';
-    const free = TRACK_SLOT_ORDER.slice();
+    for (let li = 0; li < n; li++) plan[prefix + ':' + li] = 'skip';
+    const free = (opts.free || TRACK_SLOT_ORDER).slice();
     for (const li of [...mono, ...chordTop, ...chordRest, ...copies]) {
       // 載せ先の最低音より低い音を含むレーンは、その載せ先を飛ばして次の空きへ(コンパイラは音域外の音を
       // 「鳴らさない+警告」にするので、既定の割当でベースが消えないように)
       const k = free.findIndex(t => !(lowest[li] < targetLowestMidi(t) - 0.5));
       if (k < 0) { if (!free.length) break; continue; } // 残りが VRC6 パルスだけで載せられない(次のレーンは載るかも)
-      plan['psx:' + li] = free[k];
+      plan[prefix + ':' + li] = free[k];
       free.splice(k, 1);
     }
-    plan['psx:drum'] = 'noise';
+    if (!opts.noDrum) plan[prefix + ':drum'] = 'noise';
     return plan;
   };
 

@@ -33,5 +33,42 @@
     const files = (entries || []).filter((e) => !e.isDir);
     return files.length > 0 && !find(entries) && files.every((e) => /^[a-z]\d\d-[0-9a-z]{2}\.[0-9a-z]+$/.test(base(e.name)) || /^tt\d\d$/.test(base(e.name)));
   }
-  Emu.ZoomRomSet = { find, hint, INFO };
+  // ── メイン基板(ソニー ZN-1+FX-1B)の ROM。本物のテストモード画面を出す時だけ要る(src/emulator/zn/znMain.js)──
+  // MAME の ROM は 3 つの zip に分かれている: BIOS(coh1000t.zip)、親セット(音源とデータ)、子セット(プログラム 2 本だけ)。
+  // 並びは MAME の src/mame/sony/zn.cpp の ROM_START のとおり。prog = [奇数番地, 偶数番地](1 バイトおきに並べて 2MB)
+  const BIOS = { bios: 'm534002c-14.ic353', cat1: 'tt01.ic652', zip: 'coh1000t' };
+  const GD_DATA = [['e39-01.1', 0x400000], ['e39-02.2', 0x800000], ['e39-03.12', 0xC00000]];
+  const MAINS = {
+    gdarius: { prog: ['e39-09.ic4', 'e39-10.ic3'], data: GD_DATA, cat2: 'tt07', parent: 'gdarius2' },
+    gdariusu: { prog: ['e39-08.ic4', 'e39-10.ic3'], data: GD_DATA, cat2: 'tt07', parent: 'gdarius2' },
+    gdariusj: { prog: ['e39-06.4', 'e39-05.3'], data: GD_DATA, cat2: 'tt07', parent: 'gdarius2' },
+    gdarius2: { prog: ['e39-12.4', 'e39-11.3'], data: GD_DATA, cat2: 'tt07', parent: '' }
+  };
+  const PART_NAMES = new Set([BIOS.bios, BIOS.cat1]);
+  for (const k in MAINS) { const m = MAINS[k]; for (const n of m.prog) PART_NAMES.add(n); for (const d of m.data) PART_NAMES.add(d[0]); PART_NAMES.add(m.cat2); }
+  /** この zip が、あとで他の zip と合わせて使う部品を持っているか(持っていれば呼ぶ側が控えておく) */
+  function isPart(entries) {
+    return (entries || []).some((e) => !e.isDir && (PART_NAMES.has(base(e.name)) || (e.size === 0x80000 && /\.14$/.test(base(e.name))) || /\.27$/.test(base(e.name))));
+  }
+  /**
+   * メイン基板の ROM の組を探す。entries は控えてある zip を全部合わせた一覧、prefer は今開いた zip の名前(同じ名前のセットを優先)。
+   * そろっていれば { set, prog: [奇数, 偶数], data: [{ entry, at }], cat2, bios, cat1 }、足りなければ { missing: [zip の名前…] }、対象外なら null
+   */
+  function findMain(entries, prefer) {
+    const by = new Map(); for (const e of entries || []) if (!e.isDir) by.set(base(e.name), e);
+    const want = String(prefer || '').toLowerCase().replace(/\.[^.]+$/, '');
+    const keys = Object.keys(MAINS).sort((a, b) => (b === want) - (a === want));
+    const has = (m) => m.prog.every((n) => by.has(n));
+    const key = keys.find((k) => has(MAINS[k]));
+    const anyData = GD_DATA.some((d) => by.has(d[0]));
+    if (!key && !anyData) return null;
+    const missing = [];
+    if (!key) missing.push('gdarius');                                  // プログラム 2 本(どの版でもよい。代表の名前を出す)
+    const m = MAINS[key || 'gdarius2'];
+    if (!m.data.every((d) => by.has(d[0])) || !by.has(m.cat2)) missing.push('gdarius2');
+    if (!by.has(BIOS.bios) || !by.has(BIOS.cat1)) missing.push(BIOS.zip);
+    if (missing.length) return { missing };
+    return { set: key, prog: m.prog.map((n) => by.get(n)), data: m.data.map((d) => ({ entry: by.get(d[0]), at: d[1] })), cat2: by.get(m.cat2), bios: by.get(BIOS.bios), cat1: by.get(BIOS.cat1) };
+  }
+  Emu.ZoomRomSet = { find, hint, isPart, findMain, INFO };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

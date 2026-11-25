@@ -376,15 +376,18 @@
   //   並べ替えは引数なしで呼ぶ)、片方だけ8のままだと channels[8..15] が undefined になる。
   MML.Vgm2MmlExpansion.k054539 = (snapshots, drumMap, opts) =>
     pcmChannels(snapshots, ((snapshots && snapshots[0] && snapshots[0].length) >= 16) ? 16 : 8, opts);
-  MML.Vgm2MmlExpansion.segapcm = (snapshots, drumMap, opts) => pcmChannels(snapshots, 16, opts);
-  MML.Vgm2MmlExpansion.c140 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 24, opts);
-  MML.Vgm2MmlExpansion.c352 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 32, opts);
-  MML.Vgm2MmlExpansion.qsound = (snapshots, drumMap, opts) => pcmChannels(snapshots, 16, opts);
-  MML.Vgm2MmlExpansion.cps3 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 16, opts); // CP システム III: QSound と同じ 16 声の PCM
-  MML.Vgm2MmlExpansion.zsg2 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 48, opts); // ZOOM ZSG-2: 48 声の PCM
-  MML.Vgm2MmlExpansion.es5505 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 32, opts); // Ensoniq ES5505: 32 声の PCM
+  // プール式チップの音色モード(Emu.PoolToneVoicer)はレーン数が曲で決まる(下の psx のトラックモードと同じ)ので、
+  // 表の ch 数より広いフレームがあればその幅まで取る
+  const laneWidth = (snapshots, n) => { if (snapshots) for (const s of snapshots) if (s && s.length > n) n = s.length; return n; };
+  MML.Vgm2MmlExpansion.segapcm = (snapshots, drumMap, opts) => pcmChannels(snapshots, laneWidth(snapshots, 16), opts);
+  MML.Vgm2MmlExpansion.c140 = (snapshots, drumMap, opts) => pcmChannels(snapshots, laneWidth(snapshots, 24), opts);
+  MML.Vgm2MmlExpansion.c352 = (snapshots, drumMap, opts) => pcmChannels(snapshots, laneWidth(snapshots, 32), opts);
+  MML.Vgm2MmlExpansion.qsound = (snapshots, drumMap, opts) => pcmChannels(snapshots, laneWidth(snapshots, 16), opts);
+  MML.Vgm2MmlExpansion.cps3 = (snapshots, drumMap, opts) => pcmChannels(snapshots, laneWidth(snapshots, 16), opts); // CP システム III: QSound と同じ 16 声の PCM
+  MML.Vgm2MmlExpansion.zsg2 = (snapshots, drumMap, opts) => pcmChannels(snapshots, laneWidth(snapshots, 48), opts); // ZOOM ZSG-2: 48 声の PCM
+  MML.Vgm2MmlExpansion.es5505 = (snapshots, drumMap, opts) => pcmChannels(snapshots, laneWidth(snapshots, 32), opts); // Ensoniq ES5505: 32 声の PCM
   MML.Vgm2MmlExpansion.okim6295 = (snapshots, drumMap, opts) => pcmChannels(snapshots, 4, opts);
-  MML.Vgm2MmlExpansion.multipcm = (snapshots, drumMap, opts) => pcmChannels(snapshots, 28, opts);
+  MML.Vgm2MmlExpansion.multipcm = (snapshots, drumMap, opts) => pcmChannels(snapshots, laneWidth(snapshots, 28), opts);
   // PSF(PlayStation SPU、24ボイス)。スナップショットは Emu.snapshotPsx が C352 と同じ形で作る(src/psf2mml/converter.js)
   // 合成chは32本(Emu.POOL_CHIP_CHANNELS.psx)。実機スロットのスナップショットは24要素なので残りは休符。
   // トラックモード(Emu.PsfTrackVoicer)はレーン数が曲で決まり、キャプチャが進むほど増えるので最大幅まで取る

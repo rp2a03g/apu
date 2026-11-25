@@ -833,6 +833,8 @@
     const keys = curKeys(), k = (a) => keyLabel(keys[a]);
     if (machine === 'msx') canvas.title = T('クリックしてキー入力(PC のキーがそのまま MSX のキーボードに。{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止、{ss}/{ls}=状態保存/読込)',
       { ff: k('FF'), rw: k('Rewind'), pa: k('Pause'), ss: k('SaveState'), ls: k('LoadState') });
+    else if (machine === 'zoom' && zoomSet && zoomSet.main) canvas.title = T('クリックしてキー入力(十字=レバー、ボタン 1={a}、ボタン 2={b}、コイン={ta}、スタート={st}、テストスイッチ={se})',
+      { a: k('A'), b: k('B'), ta: k('TurboA'), st: k('Start'), se: k('Select') });
     else if (machine === 'cps3') canvas.title = T('クリックしてキー入力(パンチ={p}、キック={kk}、コイン={c}、スタート={st}、テスト={te}、{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止。割り当ては ⚙ の CPS3)',
       { p: [k('Shot1'), k('Shot2'), k('Shot3')].join(' '), kk: [k('Shot4'), k('Shot5'), k('Shot6')].join(' '), c: k('Coin'), st: k('Start'), te: k('Test'), ff: k('FF'), rw: k('Rewind'), pa: k('Pause') });
     else canvas.title = T('クリックしてキー入力(十字=矢印、A={a}、B={b}、連射 A={ta}、連射 B={tb}、Start={st}、Select={se}、{ff}=早送り、{rw}=巻き戻し、{pa}=一時停止)',
@@ -1302,8 +1304,6 @@
       msxBox.appendChild(t);
     };
     // ── ゲームボーイ: 機種とスーパーゲームボーイの BIOS ──
-    const sg = sec(T('本体'), 'gb');
-    { const { r, s } = selRow(T('機種'));
     { // PC エンジン
       const sp = sec(T('本体'), 'pce'), pc = pceCfg();
       { const { r, s } = selRow(T('機種'));
@@ -1318,6 +1318,8 @@
         sp.appendChild(r); }
       note(sp, T('次に開くソフトから効きます。6 ボタンパッドの III〜VI はキーボードの D F G H です(割り当ての変更とゲームパッドへの割り当てはまだできません)。マルチタップの 2 番は 2 つ目のゲームパッドです。'));
     }
+    const sg = sec(T('本体'), 'gb');
+    { const { r, s } = selRow(T('機種'));
       for (const [v, label] of [['auto', T('自動(カートリッジに合わせて白黒/カラー)')], ['dmg', T('ゲームボーイ(白黒)')], ['cgb', T('ゲームボーイカラー')], ['sgb', T('スーパーゲームボーイ')], ['sgb2', T('スーパーゲームボーイ 2')]]) { const o = document.createElement('option'); o.value = v; o.textContent = label; s.appendChild(o); }
       s.value = cfg.gb.model;
       s.addEventListener('change', () => { cfg.gb.model = s.value; saveCfg(); });
@@ -1581,9 +1583,9 @@
   }
   let lastPad2 = -1, lastPadActs = 0, padFF = false;
   // cps3Bits: CPS3 のキーボードの入力(CPS3_BITS の並び。8bit を超えるので他の機種の keyBits とは別に持つ)
+  let pceBits = 0; // PC エンジンの 6 ボタンパッドの III〜VI(bit8-11)
   let cps3Bits = 0, cps3TestBtn = null, cps3Gfx = null, cps3Title = '', pendingCps3 = null;
   function sendPad(port, bits, turbo) {
-  let pceBits = 0; // PC エンジンの 6 ボタンパッドの III〜VI(bit8-11)
     if (node) node.port.postMessage({ type: 'pad', port, bits, turbo });
     else if (nes) nes.setController(port, bits, turbo);
   }
@@ -1708,7 +1710,7 @@
     // 再ビルド忘れの検出(capture-worker-client.js と同じ考え方): 主スレッドの現行ソースがバンドルに含まれているか
     const probes = [MML.Emu.NesConsole, MML.Emu.PPU, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC3, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC5, MML.Emu.NesMappers && MML.Emu.NesMappers.VRC7, MML.Emu.FdsDisk && MML.Emu.FdsDisk.Mapper, MML.Emu.NesRewind];
     // MSX 本体(同じバンドルに入る)。ページが MSX の script を読んでいない時は比べる物が無いので飛ばす
-    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.GbPrinter, MML.Emu.GbBarcodeBoy, MML.Emu.APUGb, MML.Emu.CPUSm83, MML.Emu.PceConsole, MML.Emu.PceVdc, MML.Emu.PceVce, MML.Emu.PceCard, MML.Emu.PceVpc, MML.Emu.PceInput, MML.Emu.PceTimer, MML.Emu.CPUHuC6280, MML.Emu.APUHuC6280, MML.Emu.Cps3Console, MML.Emu.Cps3Audio, MML.Emu.ZoomConsole, MML.Emu.Zsg2Audio, MML.Emu.EnsoniqConsole, MML.Emu.Es5505Audio, MML.Emu.createEs5510, MML.Emu.createM68000, MML.Emu.createM68020, MML.Emu.createF3Main, MML.Emu.createF3Video, MML.Emu.Cps3 && MML.Emu.Cps3.Machine, MML.Emu.Cps3 && MML.Emu.Cps3.SH2, MML.Emu.Cps3Rewind]) if (p) probes.push(p);
+    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.GbPrinter, MML.Emu.GbBarcodeBoy, MML.Emu.APUGb, MML.Emu.CPUSm83, MML.Emu.PceConsole, MML.Emu.PceVdc, MML.Emu.PceVce, MML.Emu.PceCard, MML.Emu.PceVpc, MML.Emu.PceInput, MML.Emu.PceTimer, MML.Emu.CPUHuC6280, MML.Emu.APUHuC6280, MML.Emu.Cps3Console, MML.Emu.Cps3Audio, MML.Emu.ZoomConsole, MML.Emu.Zsg2Audio, MML.Emu.EnsoniqConsole, MML.Emu.Es5505Audio, MML.Emu.createEs5510, MML.Emu.createM68000, MML.Emu.createM68020, MML.Emu.createF3Main, MML.Emu.createF3Video, MML.Emu.createZnMain, MML.Emu.createPsxGpu, MML.Emu.Cps3 && MML.Emu.Cps3.Machine, MML.Emu.Cps3 && MML.Emu.Cps3.SH2, MML.Emu.Cps3Rewind]) if (p) probes.push(p);
     for (const p of probes) {
       if (typeof p !== 'function' || src.indexOf(p.toString()) < 0) {
         console.warn('[nes] nes-worklet.js がソースより古い(再ビルド忘れ)ため使いません。tools/build-capture-workers.ps1 で再ビルドしてください');
@@ -2508,7 +2510,7 @@
     stateKey = ''; hasBattery = false; batteryKey = '';
     zoomSet = set; recCode = 0;
     const ens = set.kind === 'ensoniq';   // タイトーの Ensoniq 音源基板(F3 ほか)。無ければ ZOOM 音源基板
-    machineEl.textContent = ens ? 'F3' : 'ZOOM';
+    machineEl.textContent = ens ? 'F3' : set.main ? 'ZN-1' : 'ZOOM';
     nameEl.textContent = romName;
     nameEl.title = (ens ? 'Taito Ensoniq sound board (ES5505)' : 'Taito ZOOM sound board (ZSG-2)') + (set.info && set.info.game ? ' — ' + set.info.game : '');
     recExtBits = 0; fdsSideInfo = null; diskNames = [];
@@ -2529,9 +2531,11 @@
     const gfxBuf = (g) => (g ? { spr: g.spr ? g.spr.buffer : null, sprHi: g.sprHi ? g.sprHi.buffer : null, tile: g.tile ? g.tile.buffer : null, tileHi: g.tileHi ? g.tileHi.buffer : null } : null);
     const mainMsg = ens && set.main ? Object.assign({}, set.main, { program: set.main.program.slice().buffer, eeprom: set.main.eeprom ? set.main.eeprom.slice().buffer : null, gfx: gfxBuf(set.main.gfx) }) : null;
     const mainMove = mainMsg ? [mainMsg.program].concat(mainMsg.gfx ? [mainMsg.gfx.spr, mainMsg.gfx.sprHi, mainMsg.gfx.tile, mainMsg.gfx.tileHi].filter(Boolean) : []) : [];
-    const load = ens ? { type: 'load', machine: 'ensoniq', rom: null, ensoniq: { program, wave, info: set.info || {}, main: mainMsg } } : { type: 'load', machine: 'zoom', rom: null, zoom: { program, wave, info: set.info || {} } };
-    const ok = await startWorklet(load, [program, wave].concat(mainMove));
-    if (!ok) { nes = ens ? new MML.Emu.EnsoniqConsole(null, { program: set.program, wave: set.wave, info: set.info || {}, main: set.main ? Object.assign({}, set.main, { gfx: set.main.gfx && set.main.gfx.tile && set.main.gfx.tile.byteLength ? set.main.gfx : null }) : null }) : new MML.Emu.ZoomConsole(null, { program: set.program, wave: set.wave, info: set.info || {} }); rewindBuf = null; lastPad = -1; lastPad2 = -1; mainFrames = 0; startMain(); }
+    // ZOOM 音源基板もメイン基板(ソニー ZN-1)の ROM がそろっていれば送る(src/emulator/zn/znMain.js)。主スレッドの分は、音スレッドが立たなかった時だけ使う
+    const znMsg = !ens && set.main ? { bios: set.main.bios.slice().buffer, rom: set.main.rom.slice().buffer, cat1: set.main.cat1.slice().buffer, cat2: set.main.cat2.slice().buffer } : null;
+    const load = ens ? { type: 'load', machine: 'ensoniq', rom: null, ensoniq: { program, wave, info: set.info || {}, main: mainMsg } } : { type: 'load', machine: 'zoom', rom: null, zoom: { program, wave, info: set.info || {}, main: znMsg } };
+    const ok = await startWorklet(load, [program, wave].concat(mainMove, znMsg ? [znMsg.bios, znMsg.rom] : []));
+    if (!ok) { nes = ens ? new MML.Emu.EnsoniqConsole(null, { program: set.program, wave: set.wave, info: set.info || {}, main: set.main ? Object.assign({}, set.main, { gfx: set.main.gfx && set.main.gfx.tile && set.main.gfx.tile.byteLength ? set.main.gfx : null }) : null }) : new MML.Emu.ZoomConsole(null, { program: set.program, wave: set.wave, info: set.info || {}, main: set.main || null }); rewindBuf = null; lastPad = -1; lastPad2 = -1; mainFrames = 0; startMain(); }
     liveBegin();
     updateStatus();
     canvas.focus();

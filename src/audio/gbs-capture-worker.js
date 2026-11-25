@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-23 10:43:13
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 03:37:47
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-23 10:43:13';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-26 03:37:47';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -6006,7 +6006,8 @@
   };
 
   // ── VGM(チップファミリごとに上の各ビルダー/共通抽出経路を連結)─────────
-  // opts.poolMode: チャンネルプール式チップの表示モード({multipcm:'logical'|'phys'})。
+  // opts.poolMode: チャンネルプール式チップの表示モード({multipcm:'tone'|'logical'|'phys'})。
+  // 'tone' なら音色×声部のレーン(RollBuild.poolToneFrames)でロールを組む
   // 'logical'なら割当逆算済みスナップショット(data.multipcm.logical)でロールを組む
   RollBuild.vgm = function (data, done, opts) {
     const frameRate = data.frameRate;
@@ -6048,7 +6049,8 @@
     for (const key of snapChips) {
       if (!data[key]) continue;
       const token = chipToken[key] || key;
-      const snaps = (poolMode[key] === 'logical') ? (RollBuild.poolLogical(data, key) || data[key].snapshots) : data[key].snapshots;
+      const snaps = (poolMode[key] === 'logical') ? (RollBuild.poolLogical(data, key) || data[key].snapshots)
+        : (poolMode[key] === 'tone') ? (RollBuild.poolToneFrames(data, key) || data[key].snapshots) : data[key].snapshots;
       const extra = {}; extra[key] = snaps;
       const t = buildTracks(snaps, [], done, sr / frameRate, sr, ['vgm', token], null, extra);
       if (t) tracks = tracks.concat(t);
@@ -6105,6 +6107,25 @@
       S = d.__trackState;
     }
     for (let i = S.out.length; i < d.snapshots.length; i++) S.out.push(S.vc.step(d.snapshots[i]));
+    return S.out;
+  };
+
+  // ── プール式PCMチップの「音色」レーン(Emu.PoolToneVoicer) ─────────────────
+  // 表示モード 'tone'。psxTrackFrames と同じく snapshots が伸びた分だけ続きから足す。
+  // d.__toneState.vc.lanes がレーン表(鍵盤の行名/変換のソース名)。行数は曲で決まる(レーンは追記のみ)
+  RollBuild.poolToneFrames = function (data, key) {
+    const d = data && data[key];
+    const Emu = MML.Emu;
+    if (!d || !Array.isArray(d.snapshots) || !Emu.PoolToneVoicer || !(Emu.POOL_CHIP_CHANNELS && Emu.POOL_CHIP_CHANNELS[key])) return null;
+    let S = d.__toneState;
+    if (!S) {
+      Object.defineProperty(d, '__toneState', { value: { vc: new Emu.PoolToneVoicer(), out: [] }, configurable: true, writable: true });
+      S = d.__toneState;
+    }
+    for (let i = S.out.length; i < d.snapshots.length; i++) {
+      if (!d.snapshots[i]) break; // 取り込み途中の穴(まだ届いていないフレーム)より先へは進まない
+      S.out.push(S.vc.step(d.snapshots[i]));
+    }
     return S.out;
   };
 

@@ -2,6 +2,20 @@
  * 合成ch(Emu.PoolChannelRegrouper)の採点(ヘッドレス)
  *   node tools/headless/pool-regroup-score.js <psf|zip|7z> [--song 名前の一部] [--sec 60]
  *        [--hook-pc a8a40 --hook-reg 2 --table 0c43d0 --stride 10]
+ *        [--truth probe]        正解を自動のトラック推定(cap.trackProbe)にする(フック位置の分からないドライバ用)
+ *        [--pan-buckets 4,8]    試算: 左右音量の比を固定の段に分けて音色の鍵に足した場合(採用しなかった方式。比較用)
+ *
+ * 「音色モード」の行 = Emu.PoolToneVoicer(VGM のプール式PCMチップ用)に、トラックを隠した同じ曲を通したもの。
+ * 実測(60 秒、レーン純度 / トラック集中度。2026-11-26):
+ *   曲                合成ch(音色)    音色モード      トラックモード(上限)
+ *   babel14           59.5 / 56.9    96.0 / 85.6    100 / 89.3
+ *   Hokuto 01         90.1 / 77.1    98.4 / 85.3    100 / 88.9
+ *   Philosoma 01      85.4 / 72.0    89.5 / 74.2    100 / 74.6
+ *   FF8 102           94.5 / 91.7    98.8 / 92.3    100 / 100
+ *   Chrono 101        93.7 / 57.5    95.0 / 58.8    100 / 60.2
+ *   Ogre Battle 03    75.8 / 62.0    95.3 / 77.6    100 / 79.3
+ *   Rage Racer 01     94.0 / 91.7    100  / 100     100 / 100
+ *   Momotarou 01      81.4 / 70.8    100  / 84.1    100 / 85.0
  *
  * PSF はドライバごと動くので、ドライバ内部の「トラック構造体」を正解ラベルにできる。
  * ボイスの影テーブル(table + voice*stride)へ hook-pc の命令が書き込んだ瞬間の CPU レジスタ hook-reg を
@@ -27,6 +41,8 @@ const SEC = parseFloat(opt('--sec', '60'));
 const HOOK_PC = parseInt(opt('--hook-pc', 'a8a40'), 16) & 0x1FFFFF;
 const REG = parseInt(opt('--hook-reg', '2'), 10);
 const TABLE = parseInt(opt('--table', '0c43d0'), 16) & 0x1FFFFF;
+// --truth probe: 正解を自動のトラック推定(cap.trackProbe、snap.track)にする。フック位置の分からないドライバ用
+const PROBE_TRUTH = opt('--truth', '') === 'probe';
 const STRIDE = parseInt(opt('--stride', '10'), 16);
 
 async function loadPsf() {
@@ -75,14 +91,14 @@ async function loadPsf() {
     ? `found kind=${tp.kind} pc=${tp.pc.toString(16)} ${tp.reg ? 'r' + tp.reg : 'sp+' + tp.stackOff.toString(16)}${tp.tables ? ' table=' + tp.tables.map(t => t.base.toString(16) + '+v*' + t.stride.toString(16)).join(',') : ''} tracks=${tp.tracks.length} purity=${tp.purity.toFixed(3)} overlap=${tp.overlapRate.toFixed(3)}`
     : `not found (${tp.reason || 'off'}) tables=${(tp.tables || []).map(t => t.base.toString(16) + '+v*' + t.stride.toString(16)).join(',')} top=${JSON.stringify(tp.top || [])}`);
   const bank = new Emu.PsxSampleBank(cap.samples);
-  const phys = cap.snapshots.map(s => Emu.snapshotPsx(s, bank).map((c, v) => Object.assign(c, { _trk: truth.get(v + ':' + c.seq) })));
+  const phys = cap.snapshots.map(s => Emu.snapshotPsx(s, bank).map((c, v) => Object.assign(c, { _trk: PROBE_TRUTH ? (c.track >= 0 ? c.track : -1) : truth.get(v + ':' + c.seq) })));
   const labeled = [...truth.values()].filter(t => t !== -1).length;
   console.log(`keyons=${truth.size} labeled=${labeled}${labeled < truth.size * 0.9 ? '  ★正解フックの位置がこのドライバに合っていない可能性' : ''}`);
 
   const score = (label, frames) => {
     const prev = [], recs = [];
     frames.forEach(fr => fr.forEach((c, li) => {
-      if (c.active && prev[li] !== c.seq) recs.push({ li, trk: c._trk });
+      if (c.active && prev[li] !== c.seq && !(PROBE_TRUTH && c._trk === -1)) recs.push({ li, trk: c._trk });
       if (c.active) prev[li] = c.seq;
     }));
     const lanes = new Map(), trks = new Map();
@@ -98,6 +114,20 @@ async function loadPsf() {
   score('合成ch(音色)', phys.map(s => rg0.step(s.map(c => Object.assign({}, c, { laneKey: null })))));
   const rg = new Emu.PoolChannelRegrouper(nLanes);
   score('合成ch(トラック)', phys.map(s => rg.step(s)));
+  // レーンを必要なだけ足す方式(Emu.PsfTrackVoicer)。音色モード = トラックを隠して音色だけで束ねたもの
+  const runVoicer = (frames, make) => { const vc = make(); const out = frames.map(s => vc.step(s)); const n = vc.lanes.length; return out.map(fr => { const o = fr.slice(); while (o.length < n) o.push({ active: false }); return o; }); };
+  score('トラックモード', runVoicer(phys, () => new Emu.PsfTrackVoicer()));
+  {
+    const noTrk = phys.map(s => s.map(c => Object.assign({}, c, { laneKey: null, track: -1 })));
+    score('音色(族なし)', runVoicer(noTrk, () => new Emu.PsfTrackVoicer()));
+    for (const nb of (opt('--pan-buckets', '') || '').split(',').filter(Boolean).map(Number)) {
+      // 試算: 左右音量の比を nb 段に分け、音色の鍵に足す(同じ音色を使う別パートを分けられるか)
+      const pan = (c) => { const l = Math.abs(c.panL || 0), r = Math.abs(c.panR || 0); return (l + r) > 0 ? Math.round(Math.atan2(r, l) / (Math.PI / 2) * nb) : -1; };
+      const byPan = noTrk.map(fr => fr.map(c => c.sample ? Object.assign({}, c, { sample: Object.assign({}, c.sample, { start: c.sample.start * 64 + pan(c) + 1 }) }) : c));
+      score('音色+左右' + nb + '段', runVoicer(byPan, () => new Emu.PsfTrackVoicer()));
+    }
+    if (Emu.PoolToneVoicer) score("音色モード", runVoicer(noTrk, () => new Emu.PoolToneVoicer()));
+  }
   if (args.includes('--wide')) {
     const n = parseInt(opt('--wide', '48'), 10);
     const rgw = new Emu.PoolChannelRegrouper(n);

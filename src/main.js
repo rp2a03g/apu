@@ -1733,8 +1733,8 @@
       const Plan = MML.Convert.ChannelPlan;
       const out = { byChip: new Map(), rateIndex: null };
       if (!loadedVgmHeader || !mirror || !mirror.data) return out;
-      const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
-      for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
+      const def = vgmDefaultPlan();
+      for (const s of MML.VGM2MML.sourceChannels(vgmPlanHeader())) {
         if (s.kind !== 'pcm' || s.ch < 0) continue;
         const chId = Plan.chIdForVgmSource(s.id);
         const ent = (chId && Plan.get(chId)) || {};
@@ -9686,6 +9686,22 @@
   // ライブスナップショットの合成ch変換(モードがlogicalのチップだけ通す)
   const POOL_CHIP_CHANNELS = MML.Emu.POOL_CHIP_CHANNELS; // psx は合成chだけ32本(multipcm.js 参照)
   function poolLive(token, snap) {
+    if (snap && vgmPoolModes[token] === 'tone') {
+      // 音色モードは声部の割り当てが曲の頭からの状態を持つので、ライブで束ね直さず取り込み済みのレーン列を読む(PSF のトラックモードと同じ)。
+      // 行が再生位置で増減しないよう、その時点で分かっている全レーンぶんに空きを足す。まだ取り込めていない位置は実機スロットのまま
+      const m = vgmCaptureMirror;
+      const frames = (m && m.token === vgmRollToken && MML.RollBuild.poolToneFrames) ? MML.RollBuild.poolToneFrames(m.data, token) : null;
+      const st = frames && m.data[token].__toneState;
+      if (!st || !frames.length) return snap;
+      const f = Math.floor(getTransportPosition() * (m.data.frameRate || 60));
+      if (f < 0 || f >= frames.length) return snap;
+      const fr = frames[f], n = st.vc.lanes.length;
+      if (fr.length >= n) return fr;
+      const out = fr.slice();
+      for (let li = fr.length; li < n; li++) out.push(st.vc._idle[li]);
+      out.laned = true;
+      return out;
+    }
     if (!snap || vgmPoolModes[token] !== 'logical') return snap;
     if (!vgmLiveRegroupers[token]) vgmLiveRegroupers[token] = new MML.Emu.PoolChannelRegrouper(POOL_CHIP_CHANNELS[token], MML.Emu.POOL_CHIP_OPTIONS[token]);
     return vgmLiveRegroupers[token].step(snap);
@@ -9706,6 +9722,7 @@
     }
     if (token === 'psx' && lastPlayMode === 'psf') rebuildPsfRoll();
     else if (token === 'psx') psfRefreshTrackPlan();
+    else { vgmRefreshTonePlan(); if (vgmActivePlayer && vgmActivePlayer.refreshLaneMix) vgmActivePlayer.refreshLaneMix(); }
   };
 
   // VGM再生中のライブチップスナップショット(鍵盤表示用)。既存の各フォーマット向け
@@ -9857,6 +9874,19 @@
       }, 1000);
     };
     vgmActivePlayer = player;
+    // 行単位のミュート/音量: 音色モードの行はレーンなので、そのフレームにレーンが使っているボイスへ写す(PSF と同じ)。
+    // 合成chは対象外(鍵盤のライブ表示が取り込み済みのレーン列ではなく、その場で束ね直した物なので行が一致しない)
+    player.setLaneFrames((token, f) => {
+      if (vgmPoolModes[token] !== 'tone') return null;
+      const m = vgmCaptureMirror;
+      if (!m || m.token !== vgmRollToken || !m.data[token] || !MML.RollBuild.poolToneFrames) return null;
+      const frames = MML.RollBuild.poolToneFrames(m.data, token);
+      if (!frames || !frames.length) return null;
+      // 無限ループ中はイントロ+1周の中へ折り返す(取り込みはそこまでしか無い)
+      const lp = player.loopInfo, fr = m.data.frameRate || 60;
+      if (lp && lp.loop > 0 && f >= lp.natural * fr) { const start = (lp.natural - lp.loop) * fr; f = Math.floor(start + ((f - start) % (lp.loop * fr))); }
+      return frames[f] || null;
+    });
     player.setSpeed(currentSpeedFactor);
     workletDuration = captureDuration;
 
@@ -9927,6 +9957,7 @@
     // 曲が変わるのでプール式チップのライブ束ね直し状態とロール再構築用ミラーをリセット
     for (const k of Object.keys(vgmLiveRegroupers)) delete vgmLiveRegroupers[k];
     vgmCaptureMirror = null;
+    vgmCaptureComplete = false; // (音色モードの既定割当 vgmTonePlanCache は同じ曲なら前回の物を使い続け、取り込み完了で作り直す)
     drumSampleStore = {};
     drumHitsProvider = null;
     synthDrumReset();
@@ -9960,6 +9991,8 @@
       //   進捗コールバックの時点ではまだ無いので、完了後にもう一度拾い直さないと
       //   ドラムパッドの試聴が「押しても鳴らない」ままになる
       if (myToken !== vgmRollToken || !vgmCaptureMirror) return;
+      vgmCaptureComplete = true;
+      vgmRefreshTonePlan(); // 音色モード: レーンが出そろったので、パート単位の既定割当と複製の印を入れる
       // 先読みキャプチャが曲全体を歩きながら作ったシーク用チェックポイントを実再生側へ渡す。
       // これで「まだ再生していない位置」への初回シークも手前5秒からの再開で済む
       // (VgmPlayer.serializeSeekData/adoptSeekData)
@@ -10070,8 +10103,14 @@
   // (KP1/KS1/KF1/YM1/SN1…)へ移して既定として登録し、変換時にユーザー指定を読み戻す。
   function vgmSetPlanDefaults(h) {
     const Plan = MML.Convert.ChannelPlan;
+    vgmTonePlanCache = null; vgmCaptureComplete = false;
     if (!h) { Plan.newFile('vgm', {}, loadedVgmName); return; }
-    const plan = MML.VGM2MML.defaultPlan(h);
+    Plan.newFile('vgm', vgmDefaultChMap(h), loadedVgmName);
+  }
+  // 既定割当(ソースIDキーの plan)を鍵盤の行IDキーへ移したもの。plan 省略時は構成駆動の既定(VGM2MML.defaultPlan)
+  function vgmDefaultChMap(h, plan) {
+    const Plan = MML.Convert.ChannelPlan;
+    plan = plan || MML.VGM2MML.defaultPlan(h);
     const map = {};
     for (const srcId of Object.keys(plan)) {
       const chId = Plan.chIdForVgmSource(srcId);
@@ -10091,17 +10130,65 @@
     // 無い(DACストリームではない)。32X PWM と同じ「無音の切れ目でクリップに分ける」経路で
     // E(DPCM) へ載せる(vgmStreamDrumFor)。
     if (h.chips && h.chips.msm5205) map.M5 = 'dpcm';
-    Plan.newFile('vgm', map, loadedVgmName);
+    return map;
+  }
+
+  // ── プール式PCMチップの音色モード(表示モード 'tone'。Emu.PoolToneVoicer) ──
+  // レーン(音色×声部)は曲を取り込むまで決まらないので、PSF のトラックモード(psfRefreshTrackPlan)と同じく
+  // 取り込みが終わった時点で「レーン入りのヘッダ」と「パート単位の既定割当」(VGM2MML.tonePlan)を作って持つ。
+  // 変換は同じ VGM を取り込み直して同じレーンを作る(レーンは曲頭から追記のみで決まるので番号が一致する)
+  let vgmCaptureComplete = false;  // 表示用キャプチャが最後まで終わったか
+  let vgmTonePlanCache = null;     // { header(レーン数と名前入り), plan(ソースID→借用先) }
+  function vgmPlanHeader() { return (vgmTonePlanCache && vgmTonePlanCache.header) || loadedVgmHeader; }
+  function vgmDefaultPlan() { return vgmTonePlanCache ? vgmTonePlanCache.plan : MML.VGM2MML.defaultPlan(loadedVgmHeader); }
+  function vgmRefreshTonePlan() {
+    const Plan = MML.Convert.ChannelPlan;
+    const h = loadedVgmHeader;
+    if (!h || !MML.VGM2MML.POOL_TONE_CHIPS) return;
+    const keys = Object.keys(MML.VGM2MML.POOL_TONE_CHIPS).filter(k => h.chips && h.chips[k] && vgmPoolModes[k] === 'tone');
+    if (!keys.length) {
+      // 音色モードのチップが無くなった: 構成駆動の既定へ戻す(ユーザーが変えた分は残る)
+      if (vgmTonePlanCache) { vgmTonePlanCache = null; Plan.setDefaults(vgmDefaultChMap(h)); }
+      return;
+    }
+    if (!vgmCaptureComplete || !vgmCaptureMirror || vgmCaptureMirror.token !== vgmRollToken) return;
+    try {
+      const d = {}, lanesBy = {}, meta = {};
+      const laneName = MML.Emu.PsfTrackVoicer.laneName;
+      for (const key of keys) {
+        const frames = MML.RollBuild.poolToneFrames(vgmCaptureMirror.data, key);
+        const st = frames && vgmCaptureMirror.data[key].__toneState;
+        if (!st || !st.vc.lanes.length) continue;
+        const lanes = st.vc.laneTable();
+        d[key] = { snapshots: frames, lanes, doubles: MML.Convert.PoolDoubles ? MML.Convert.PoolDoubles.find(frames) : null };
+        lanesBy[key] = lanes;
+        // 複製レーン(デチューン二重化/エコー)に「≈S3」の印(鍵盤の行名、ロールの点線)
+        const labels = MML.PSF2MML.laneLabels(lanes);
+        const copyOf = MML.PSF2MML.copyLanes(d, null, key);
+        for (const l of st.vc.lanes) {
+          l.copyOf = copyOf.has(l.index) ? labels[copyOf.get(l.index)].replace(/-d+$/, '') : undefined;
+          const chId = Plan.chIdForVgmSource(MML.VGM2MML.POOL_TONE_CHIPS[key] + ':' + l.index);
+          if (chId) meta[chId] = { laneGroup: l.copyOf || laneName(l, 1), laneCopy: !!l.copyOf };
+        }
+      }
+      if (!Object.keys(lanesBy).length) return;
+      MML.Emu.PsfTrackVoicer.copyVersion++;
+      const header = MML.VGM2MML.headerWithToneLanes(h, lanesBy);
+      const plan = MML.VGM2MML.tonePlan(header, d);
+      vgmTonePlanCache = { header, plan };
+      keyboardDisplay.setRollTrackLaneMeta(meta);
+      Plan.setDefaults(vgmDefaultChMap(header, plan));
+    } catch (e) { console.warn('音色モードの既定割当に失敗:', e); }
   }
   // 現在の割当をVGM変換器のソースID体系で返す。既定と全く同じなら null(=構成から自動)
   function getVgmChannelMap() {
     if (!loadedVgmHeader) return null;
     const Plan = MML.Convert.ChannelPlan;
-    const src = MML.VGM2MML.sourceChannels(loadedVgmHeader);
+    const src = MML.VGM2MML.sourceChannels(vgmPlanHeader());
     // NES/GB/HuC6280のVGMはvgm2mmlが nsf2mml/gbs2mml/hes2mml へ丸ごと委譲する。
     // それらの変換器は鍵盤表示の行IDをそのままキーに使うので、変換せずに渡す。
     if (!src.length) return planConvertOptions().channelMap;
-    const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
+    const def = vgmDefaultPlan();
     const map = {};
     let changed = false;
     for (const s of src) {
@@ -10122,14 +10209,15 @@
       const drum = src.find(s => /:drum$/.test(s.id) && map[s.id] === 'skip');
       if (drum) { map[drum.id] = 'noise'; changed = true; }
     }
-    return changed ? map : null;
+    // 音色モードは常に渡す(渡さないと、取り込み時間の違いなどで変換器が別の既定割当を作ることがある。PSF のトラックモードと同じ)
+    return (changed || vgmTonePlanCache) ? map : null;
   }
   // 「まとめる」印(鍵盤の行 → VGM変換器のソースID)。同じ借用先を選んだ元chどうしを1パートに畳む
   // (src/convert/channelMerge.js)。1つも無ければ null
   function getVgmMerge() {
     if (!loadedVgmHeader) return null;
     const Plan = MML.Convert.ChannelPlan;
-    const src = MML.VGM2MML.sourceChannels(loadedVgmHeader);
+    const src = MML.VGM2MML.sourceChannels(vgmPlanHeader());
     if (!src.length) return planConvertOptions().merge; // NES/GB/HuC6280 のVGMは行IDのまま委譲先の変換器へ
     const merge = {};
     for (const s of src) {
@@ -10156,7 +10244,7 @@
   // 複製の表(VGM 変換器のソースIDキー)。src/convert/channelCopy.js
   function getVgmCopies() {
     if (!loadedVgmHeader) return null;
-    const src = MML.VGM2MML.sourceChannels(loadedVgmHeader);
+    const src = MML.VGM2MML.sourceChannels(vgmPlanHeader());
     if (!src.length) return planConvertOptions().copies; // NES/GB/HuC6280 のVGMは行IDのまま委譲先の変換器へ
     const o = {};
     for (const c of vgmCopyRows()) o[c.srcId] = { of: c.ofSrcId, transpose: c.opt.transpose, detune: c.opt.detune, delay: c.opt.delay };
@@ -10170,7 +10258,7 @@
     const Plan = MML.Convert.ChannelPlan;
     const map = {};
     if (!loadedVgmHeader) return map;
-    for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
+    for (const s of MML.VGM2MML.sourceChannels(vgmPlanHeader())) {
       const chId = Plan.chIdForVgmSource(s.id);
       const ent = (chId && Plan.get(chId)) || {};
       if (ent.tone !== undefined) map[s.id] = ent.tone;
@@ -10181,8 +10269,8 @@
     const Plan = MML.Convert.ChannelPlan;
     const map = {};
     if (!loadedVgmHeader) return map;
-    const def = MML.VGM2MML.defaultPlan(loadedVgmHeader);
-    for (const s of MML.VGM2MML.sourceChannels(loadedVgmHeader)) {
+    const def = vgmDefaultPlan();
+    for (const s of MML.VGM2MML.sourceChannels(vgmPlanHeader())) {
       const chId = Plan.chIdForVgmSource(s.id);
       const ent = (chId && Plan.get(chId)) || {};
       const target = ent.target || def[s.id] || 'skip';
@@ -10446,15 +10534,34 @@
 
     // ZOOM 音源基板(タイトー FX-1B)の ROM の組: サウンド基板だけを動かす「サウンドテスト画面」をゲーム画面の窓で開く。
     // サウンド CPU(MN10200)と音源をその場で動かすので、コードを送った瞬間に鳴る。録音(●)で VGM、[変換へ] で鍵盤表示と MML 変換へ(src/ui/nesScreen.js openZoom)
-    async function openZoomRomSet(file, bytes, parsed, set) {
-      let program, wave;
+    // メイン基板(ソニー ZN-1)の ROM は MAME だと 3 つの zip に分かれている(BIOS、親セット、子セット)。開いた zip を控えておき、
+    // そろった所でメイン基板つき(本物のテストモード画面)で開く。そろうまでは自前のサウンドテスト画面(音源の ROM だけで動く)
+    const taitoShelf = new Map();   // zip の名前 → { bytes, entries }(このページを開いている間だけ)
+    function taitoShelfEntries() {
+      const by = new Map();
+      for (const z of taitoShelf.values()) for (const e of z.entries) if (!e.isDir) by.set(MML.Archive.baseName(e.name).toLowerCase(), Object.assign({}, e, { zipBytes: z.bytes, zipEntry: e }));
+      return Array.from(by.values());
+    }
+    const readShelfEntry = (bytes, e) => MML.Archive.readEntry(e.zipBytes || bytes, e.zipEntry || e);
+    async function openZoomRomSet(file, bytes, parsed, set, merged) {
+      let program, wave, main = null;
+      const info = Object.assign({}, set.info);
       try {
-        program = await MML.Archive.readEntry(bytes, set.program);
-        const parts = []; for (const w of set.waves) parts.push(await MML.Archive.readEntry(bytes, w));
+        program = await readShelfEntry(bytes, set.program);
+        const parts = []; for (const w of set.waves) parts.push(await readShelfEntry(bytes, w));
         wave = new Uint8Array(parts.reduce((a, p) => a + p.length, 0)); let o = 0; for (const p of parts) { wave.set(p, o); o += p.length; }
+        const mm = merged && MML.Emu.createZnMain ? MML.Emu.ZoomRomSet.findMain(merged, file.name) : null;
+        if (mm && mm.missing) info.need = mm.missing.map((n) => n + '.zip');
+        else if (mm) {
+          // プログラム 2 本は 1 バイトおきに並べて先頭の 2MB、データは MAME の並びのまま 16MB の中へ
+          const rom = new Uint8Array(0x1000000), odd = await readShelfEntry(bytes, mm.prog[0]), even = await readShelfEntry(bytes, mm.prog[1]);
+          for (let i = 0; i < odd.length && i * 2 + 1 < 0x400000; i++) { rom[i * 2 + 1] = odd[i]; rom[i * 2] = even[i]; }
+          for (const d of mm.data) rom.set((await readShelfEntry(bytes, d.entry)).subarray(0, rom.length - d.at), d.at);
+          main = { bios: await readShelfEntry(bytes, mm.bios), rom, cat1: await readShelfEntry(bytes, mm.cat1), cat2: await readShelfEntry(bytes, mm.cat2), set: mm.set };
+        }
       } catch (e) { alert(T('アーカイブを解析できませんでした: {msg}', { msg: e.message })); return false; }
       stopAllFormatPlayback();
-      try { await MML.UI.NesScreen.openZoom({ program, wave, info: set.info }, file.name); }
+      try { await MML.UI.NesScreen.openZoom({ program, wave, info, main }, file.name); }
       catch (e) { alert(T('この ROM は開けません: {msg}', { msg: e && e.message ? e.message : String(e) })); return false; }
       return 'nes';
     }
@@ -10473,8 +10580,19 @@
         // ディスクが複数(.dsk の組、.fds の DISK1/DISK2)なら 1 台にまとめて開き([disk] で選ぶ)、ROM が複数なら曲リストに載せて曲送りで切り替える
         const Image = MML.Emu.Image;
         // ZOOM 音源基板(タイトー FX-1B)の ROM の組: サウンドテスト画面を開く(コードを選んで鳴らし、鳴らしながら録る)
-        const zoomSet = MML.Emu.ZoomRomSet ? MML.Emu.ZoomRomSet.find(parsed.entries) : null;
-        if (zoomSet) return openZoomRomSet(file, bytes, parsed, zoomSet);
+        const ZRS = MML.Emu.ZoomRomSet, zoomPart = !!(ZRS && ZRS.isPart && ZRS.isPart(parsed.entries));
+        if (zoomPart) taitoShelf.set(String(file.name || '').toLowerCase(), { bytes, entries: parsed.entries });
+        const zoomMerged = zoomPart ? taitoShelfEntries() : null;
+        const zoomSet = ZRS ? ZRS.find(zoomMerged || parsed.entries) : null;
+        if (zoomSet) return openZoomRomSet(file, bytes, parsed, zoomSet, zoomMerged);
+        if (zoomPart) {
+          // 音源の ROM がまだ無い(子セットか BIOS の zip を先に開いた): 控えたので、残りを開くよう案内する
+          const mm = ZRS.findMain(zoomMerged, file.name);
+          const rest = mm && mm.missing ? mm.missing.filter((n) => !taitoShelf.has(n + '.zip')) : [];
+          alert(rest.length ? T('この zip の ROM を控えました。続けて {list} を開くと始まります。', { list: rest.map((n) => n + '.zip').join('、') })
+            : T('この zip の ROM を控えました。続けてゲームの ROM の zip(音源の ROM が入った親セット)を開くと始まります。'));
+          return false;
+        }
         // タイトーの Ensoniq 音源基板(F3 システムほか)の ROM の組: 同じくサウンドテスト画面を開く(分かっているゲームだけ。src/emulator/f3/ensoniqRomSet.js)
         const ensSet = MML.Emu.EnsoniqRomSet ? MML.Emu.EnsoniqRomSet.find(parsed.entries, file.name) : null;
         if (ensSet) {

@@ -470,4 +470,5 @@
   PsxBus.CYCLES_PER_SAMPLE = CYCLES_PER_SAMPLE;
   PsxBus.IRQ = { VBLANK: IRQ_VBLANK, GPU: IRQ_GPU, CDROM: IRQ_CDROM, DMA: IRQ_DMA, TMR0: IRQ_TMR0, TMR1: IRQ_TMR1, TMR2: IRQ_TMR2, SIO0: IRQ_SIO0, SIO1: IRQ_SIO1, SPU: IRQ_SPU, PIO: IRQ_PIO };
   Emu.PsxBus = PsxBus;
+  Emu.PsxRootCounter = RootCounter; // ZN-1 の基板(zn/znMain.js)が同じ物を使う
 })(window);

@@ -77,7 +77,9 @@
             } else if (machine === 'zoom') {
               // タイトーの ZOOM 音源基板(サウンドテスト画面): サウンドプログラムと波形。主スレッドが zip から取り出して送る
               const o = m.zoom || {};
-              nes = new MML.Emu.ZoomConsole(null, { program: new Uint8Array(o.program), wave: new Uint8Array(o.wave), info: o.info || {} });
+              // main があれば(ソニー ZN-1 の BIOS とゲームの ROM)メイン基板も動かして、本物のテストモード画面を出す
+              const zm = o.main ? { bios: new Uint8Array(o.main.bios), rom: new Uint8Array(o.main.rom), cat1: new Uint8Array(o.main.cat1), cat2: new Uint8Array(o.main.cat2) } : null;
+              nes = new MML.Emu.ZoomConsole(null, { program: new Uint8Array(o.program), wave: new Uint8Array(o.wave), info: o.info || {}, main: zm });
               info = MML.Emu.ZoomConsole.describe(nes);
             } else if (machine === 'ensoniq') {
               // タイトーの Ensoniq 音源基板(サウンドテスト画面): サウンドプログラム(0xC00000 から見える並び)と波形(16bit の語の列)、ゲームごとの表
