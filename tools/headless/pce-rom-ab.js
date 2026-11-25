@@ -3,7 +3,9 @@
  * HuCard の ROM を自前の PC エンジン(src/emulator/pce/)と Mesen 2 で無操作で走らせ、3 つを比べる(段階 9c)。
  *
  *   node tools/headless/pce-rom-ab.js "game.pce" [--frames 300] [--shots 60,180,300] [--mesen "C:\path\Mesen.exe"]
- *        [--no-io] [--context 10] [--out <フォルダ>] [--keep]
+ *        [--no-io] [--context 10] [--out <フォルダ>] [--keep] [--pad pad2|pad6|tap]
+ *   拡張子が .sgx なら SuperGrafx として回す(Mesen も拡張子で SuperGrafx にする)。RAM は 32K、2 個目の VDC の VRAM とスプライト表も比べる。
+ *   --pad: 自前のパッドの種類。Mesen 側は設定(settings.json の PcEngine.Port1.Type)で決まるので、その種類にした Mesen の写しを --mesen で渡す
  *   node tools/headless/pce-rom-ab.js --all "<フォルダ>" [--frames 300] [--jobs 4] [--out result.txt] [--limit N]
  *
  * 1. I/O の読み書き(論理番地 $0000-$1FFF で、MPR0 が $FF の時だけ。ST0/ST1/ST2 は番地 0/2/3 への書き込みとして)を、マスタークロックの時刻つきで 1 行ずつ。
@@ -38,14 +40,14 @@ const USAGE = 'usage: node tools/headless/pce-rom-ab.js "game.pce" [--frames N] 
 if (has('--all')) {
   const folder = arg('--all', null);
   if (!folder || !fs.existsSync(folder)) { console.error(USAGE); process.exit(2); }
-  const walk = (dir, out) => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, e.name); if (e.isDirectory()) walk(p, out); else if (/\.pce$/i.test(e.name)) out.push(p); } return out; };
+  const walk = (dir, out) => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, e.name); if (e.isDirectory()) walk(p, out); else if (/\.(pce|sgx)$/i.test(e.name)) out.push(p); } return out; };
   let files = walk(folder, []).sort();
   // 拡張子が .pce でも中身が HES(先頭 "HESM")の物は曲データなので外す(HES は pce-iotrace.js / pce-apu-ab.js で比べる)
   { const isHes = (p) => { const fd = fs.openSync(p, 'r'), b = Buffer.alloc(4); fs.readSync(fd, b, 0, 4, 0); fs.closeSync(fd); return b.toString('latin1') === 'HESM'; };
     const n0 = files.length; files = files.filter(p => !isHes(p)); if (files.length !== n0) console.log(`中身が HES の物 ${n0 - files.length} 本は外しました(残り ${files.length} 本)`); }
   const limit = parseInt(arg('--limit', '0'), 10); if (limit) files = files.slice(0, limit);
   const jobs = Math.max(1, parseInt(arg('--jobs', '4'), 10));
-  const pass = ['--frames', arg('--frames', '300')].concat(has('--shots') ? ['--shots', arg('--shots', '')] : []).concat(has('--no-io') ? ['--no-io'] : []).concat(has('--mesen') ? ['--mesen', arg('--mesen', '')] : []);
+  const pass = ['--frames', arg('--frames', '300')].concat(has('--shots') ? ['--shots', arg('--shots', '')] : []).concat(has('--no-io') ? ['--no-io'] : []).concat(has('--pad') ? ['--pad', arg('--pad', 'pad2')] : []).concat(has('--mesen') ? ['--mesen', arg('--mesen', '')] : []);
   const rows = []; let next = 0, running = 0;
   const finishAll = () => {
     rows.sort((a, b) => a.file < b.file ? -1 : 1);
@@ -76,6 +78,7 @@ const rom = process.argv.slice(2).find(a => !a.startsWith('--') && /\.(pce|sgx)$
 const frames = parseInt(arg('--frames', '300'), 10);
 const mesen = arg('--mesen', process.env.MESEN_EXE || null);
 if (!rom || !mesen || !fs.existsSync(mesen)) { console.error(USAGE); process.exit(2); }
+const isSgx = /\.sgx$/i.test(rom);
 const shots = (arg('--shots', String(frames)) || '').split(',').map(x => parseInt(x, 10)).filter(x => x > 1 && x <= frames);
 const withIo = !has('--no-io');
 const ctx = parseInt(arg('--context', '10'), 10);
@@ -105,7 +108,8 @@ const lua = [
   '    if shots[n] then local f = io.open("' + W + '/shot_" .. n .. ".png", "wb") f:write(emu.takeScreenshot()) f:close() end',
   '    if n >= ' + frames + ' then',
   '      dump("vram", emu.memType.pceVideoRam, 0x10000) dump("satb", emu.memType.pceSpriteRam, 0x200)',
-  '      dump("pal", emu.memType.pcePaletteRam, 0x400) dump("ram", emu.memType.pceWorkRam, 0x2000)',
+  '      dump("pal", emu.memType.pcePaletteRam, 0x400) dump("ram", emu.memType.pceWorkRam, ' + (isSgx ? '0x8000' : '0x2000') + ')',
+  isSgx ? '      dump("vram2", emu.memType.pceVideoRamVdc2, 0x10000) dump("satb2", emu.memType.pceSpriteRamVdc2, 0x200)' : '',
   '      local st = emu.getState() local t = io.open("' + W + '/state.txt", "w")',
   '      t:write(string.format("pc=%04x clock=%d", st["cpu.pc"] or 0, st.masterClock or 0)) t:close()',
   withIo ? '      out:close()' : '',
@@ -136,7 +140,7 @@ if (!fs.existsSync(path.join(work, 'state.txt'))) {
 const { load, readBytes } = require('./load');
 const { writePng } = require('./pce-run');
 const { MML } = load({ strict: true });
-const pce = new MML.Emu.PceConsole(readBytes(rom));
+const pce = new MML.Emu.PceConsole(readBytes(rom), { model: isSgx ? 'sgx' : 'pce', pad: arg('--pad', 'pad2') });
 const B = [];
 if (withIo) pce.onIo = (k, a, v) => { if (a < 0x2000 && pce.mpr[0] === 0xFF) B.push({ t: pce.clock, k, a, v }); };
 const myShots = {};
@@ -145,7 +149,7 @@ const myShots = {};
 // なので「同じフレーム番号」ではなく「同じ時計の区切り」のメモリを比べる。合う区切りが無ければフレーム番号で取り、その旨を出す
 const mesenClock = +(/clock=(\d+)/.exec(fs.readFileSync(path.join(work, 'state.txt'), 'utf8')) || [0, 0])[1];
 let memAt = null, memByFrame = null;
-pce.onFrameExact = () => { const hit = pce.clock === mesenClock, byFrame = pce.frameCount === frames; if (!hit && !byFrame) return; const m = { vram: pce.vdc.vram.slice(), satb: pce.vdc.satb.slice(), pal: pce.vce.pal.slice(), ram: pce.ram.slice(), pc: pce.cpu.PC, clock: pce.clock, frame: pce.frameCount }; if (hit) memAt = m; if (byFrame) memByFrame = m; };
+pce.onFrameExact = () => { const hit = pce.clock === mesenClock, byFrame = pce.frameCount === frames; if (!hit && !byFrame) return; const m = { vram: pce.vdc.vram.slice(), satb: pce.vdc.satb.slice(), pal: pce.vce.pal.slice(), ram: pce.ram.slice(), vram2: pce.vdc2 ? pce.vdc2.vram.slice() : null, satb2: pce.vdc2 ? pce.vdc2.satb.slice() : null, pc: pce.cpu.PC, clock: pce.clock, frame: pce.frameCount }; if (hit) memAt = m; if (byFrame) memByFrame = m; };
 for (let f = 1; f <= frames + 2; f++) {
   pce._frameFlag = false;
   let guard = 0;
@@ -199,9 +203,10 @@ if (withIo) {
     if (bad) { allOk = false; console.log(`${label}: 違う ${bad} / ${a.length}  ${first.join(', ')}`); summary.push(`${label} ${bad} 個違う`); }
     return bad;
   };
-  const mine = memAt || { vram: pce.vdc.vram, satb: pce.vdc.satb, pal: pce.vce.pal, ram: pce.ram };
+  const mine = memAt || { vram: pce.vdc.vram, satb: pce.vdc.satb, pal: pce.vce.pal, ram: pce.ram, vram2: pce.vdc2 ? pce.vdc2.vram : null, satb2: pce.vdc2 ? pce.vdc2.satb : null };
   const bad = cmp('VRAM', words(rd('vram')), mine.vram, 4) + cmp('スプライト表', words(rd('satb')), mine.satb, 4)
-    + cmp('パレット', words(rd('pal')), mine.pal, 3) + cmp('RAM', rd('ram'), mine.ram, 2);
+    + cmp('パレット', words(rd('pal')), mine.pal, 3) + cmp('RAM', rd('ram'), mine.ram, 2)
+    + (isSgx ? cmp('VRAM(VDC2)', words(rd('vram2')), mine.vram2, 4) + cmp('スプライト表(VDC2)', words(rd('satb2')), mine.satb2, 4) : 0);
   if (!bad) { console.log('メモリ: VRAM・スプライト表・パレット・RAM とも同じ'); summary.push('メモリ同じ'); }
 }
 

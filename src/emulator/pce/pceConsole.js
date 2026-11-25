@@ -1,5 +1,9 @@
 /*
- * PC エンジン本体(段階 9c: HuCard、2 ボタンパッド 1 個、波形メモリ音源、VDC/VCE 1 組)
+ * PC エンジン本体(段階 9c: HuCard、2 ボタンパッド 1 個、波形メモリ音源、VDC/VCE 1 組。
+ *   段階 9d: SuperGrafx(VDC 2 個+優先順位の石 pce/vpc.js+RAM 32K)、1MB 超のカード、RAM 内蔵カード、6 ボタンパッドとマルチタップ pce/pad.js)
+ *   opts: model 'auto'(既定。SuperGrafx 専用カードなら SuperGrafx)/ 'pce' / 'sgx'、pad 'pad2'(既定)/ 'pad6' / 'tap'、region 'auto' / 'pce'
+ *   [参照] SuperGrafx の I/O(PceVpc.cpp): $0000-$03FF は下位 5bit で分ける。$00-$07 = VDC1、$08-$0E = 優先順位の石、$10-$17 = VDC2、ほかの読みは $FF。
+ *          RAM は 32K(バンク $F8-$FB が別々)。1 サイクルの中の順番はタイマ → VDC2 → VDC1
  * MML.Emu.PceConsole
  *
  * 作り: CPU(cpuHuC6280.js)が 1 サイクルごとに tick() を呼ぶ。tick はマスタークロック(21.47727MHz)を高速時 3、低速時 12 進め、
@@ -66,16 +70,31 @@
       opts = opts || {};
       this.card = opts.card || new Emu.PceCard(romBytes);
       this.region = opts.region || 'auto';
+      this.sgx = opts.model === 'sgx' || (opts.model !== 'pce' && this.card.sgxOnly);
       this.mpr = new Uint8Array(8);
-      this.ram = new Uint8Array(BANK);
+      this.ram = new Uint8Array(this.sgx ? BANK * 4 : BANK);
+      this.ramMask = this.ram.length - 1;
+      this.cardRam = this.card.ramSize ? new Uint8Array(this.card.ramSize) : null;
+      this.cardBank = 0; // 1MB 超のカードの段(ステートに入れるため本体側にも持つ)
       this.cdRam = new Uint8Array(0x10000);
       this.bram = PceConsole.blankBram();
       this.timer = new Emu.PceTimer();
       this.vce = new Emu.PceVce();
       this.vdc = new Emu.PceVdc(this);
+      this.vdc2 = null; this.vpc = null;
+      if (this.sgx) {
+        this.vdc2 = new Emu.PceVdc(this, true);
+        this.vpc = new Emu.PceVpc(this);
+        // 行の終わり: 2 個目は何もしない(1 個目より先に行末へ着く)。1 個目の時に 2 個ぶんを重ねて、両方の行を消す
+        this.vdcRowEnd = (vdc) => { if (vdc !== this.vdc) return; this.vpc.merge(); this.vdc.row.fill(0); this.vdc2.row.fill(0); };
+        this.vdcLineStart = () => { this.vpc.lineStart(); };
+      }
+      this.input = new Emu.PceInput(opts.pad);
       this.apu = new Emu.APUHuC6280();
       this.cpu = new Emu.CPUHuC6280(this);
-      this.pad = [0, 0]; this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.pad = [0, 0, 0, 0, 0]; this.padHeld = [0, 0, 0, 0, 0]; this.padTurbo = [0, 0, 0, 0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      // パッド端子が読むボタンは pad[] そのもの(同じ配列)。巻き戻しの進め直し(nesRewind.js)が pad[0] へ直接書くので、写しを持つと届かない
+      this.input.buttons = this.pad;
       this.sampleRate = 0; this.sampleAcc = 0;
       this.ring = new Float32Array(AUDIO_RING); this.ringR = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0; this.underruns = 0;
       this.onWrite = null;   // (reg(0-9), value, frameFrac) 波形メモリ音源への書き込み
@@ -91,12 +110,14 @@
     }
 
     reset() {
-      this.ram.fill(0); this.cdRam.fill(0);
+      this.ram.fill(0); this.cdRam.fill(0); if (this.cardRam) this.cardRam.fill(0);
       this.mpr.fill(0);
+      this.cardBank = 0; this.card.select(0);
       this.timer.reset(); this.vce.reset(); this.vdc.reset(); this.apu.reset && this.apu.reset();
+      if (this.sgx) { this.vdc2.reset(); this.vpc.reset(); }
+      this.input.reset();
       this.clock = 0; this.cycleSteps = 4;
       this.timerIrq = false; this.irq2 = false; this.irqDisable = 0; this.ioBuffer = 0; this.mprBuffer = 0;
-      this.padSel = false; this.padClr = false;
       this.bramLocked = false; this.cdIrqEnable = 0; this.cdReset = 0; this.cdRegs = new Uint8Array(16); this.cdAdpcmBusy = 0;
       this.frameCount = 0; this.frameStart = 0; this._frameFlag = false; this._frameCb = false; this.lastFrameLen = LINE * 262;
       this.sampleAcc = 0;
@@ -107,23 +128,13 @@
     static blankBram() { const b = new Uint8Array(0x800); b.set([0x48, 0x55, 0x42, 0x4D, 0x00, 0xA0, 0x10, 0x80]); return b; }
 
     setSampleRate(sr) { this.sampleRate = sr; this.sampleAcc = 0; this.ringHead = 0; this.ringLen = 0; }
-    // ボタンのビットは NesConsole.BUTTON と同じ並び(A B SELECT START UP DOWN LEFT RIGHT)。A = I、B = II、START = RUN
-    setController(port, bits, turbo) { if (port) return; this.padHeld[0] = bits & 0xFF; this.padTurbo[0] = (turbo | 0) & 0xFF; this._applyPad(); }
+    // ボタンのビットは NesConsole.BUTTON と同じ並び(A B SELECT START UP DOWN LEFT RIGHT)。A = I、B = II、START = RUN。
+    // 6 ボタンパッドは続けて bit8-11 = III IV V VI。port 1-4 はマルチタップの 2〜5 番
+    setController(port, bits, turbo) { if (port < 0 || port > 4) return; this.padHeld[port] = bits & 0xFFF; this.padTurbo[port] = (turbo | 0) & 0xFFF; this._applyPad(); }
     setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(); }
     _applyPad() {
       const on = ((this.turboPhase / this.turboRate) | 0) === 0;
-      let p = this.padHeld[0] | (on ? this.padTurbo[0] : 0);
-      if ((p & 0x30) === 0x30) p &= ~0x30; // [参照] 上+下、左+右を同時に押したら、どちらも押していない扱い(PceController.h の既定)
-      if ((p & 0xC0) === 0xC0) p &= ~0xC0;
-      this.pad[0] = p;
-    }
-    _padRead() {
-      if (this.padClr) return 0;
-      const p = this.pad[0];
-      let v = 0x0F;
-      if (this.padSel) v &= ~(((p >> 4) & 1) | (((p >> 7) & 1) << 1) | (((p >> 5) & 1) << 2) | (((p >> 6) & 1) << 3)); // 上 右 下 左
-      else v &= ~(p & 0x0F);                                                                                           // I II SELECT RUN
-      return v & 0x0F;
+      for (let i = 0; i < 5; i++) this.pad[i] = this.padHeld[i] | (on ? this.padTurbo[i] : 0);
     }
 
     get hasBattery() { return true; }
@@ -175,6 +186,7 @@
     execFast() {
       this.clock += 3;
       if (this.timer.advance(3)) this.timerIrq = true;
+      if (this.vdc2) this.vdc2.exec();
       this.vdc.exec();
       const sr = this.sampleRate;
       if (sr) {
@@ -195,7 +207,7 @@
       this.frameCount++;
       this._frameFlag = true; this._frameDirty = true;
       this.lastFrameLen = this.clock - this.frameStart;
-      if (this.padTurbo[0] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
+      if (this.padTurbo[0] || this.padTurbo[1] || this.padTurbo[2] || this.padTurbo[3] || this.padTurbo[4] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
       if (this.rec) { this.rec.cur.len = this.lastFrameLen; this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       this.frameStart = this.clock;
       if (!this.sampleRate) this.apu.runToMaster(this.clock); // 音を取らない時も、音源の時計を溜めすぎない
@@ -206,7 +218,7 @@
     }
 
     // ── 割り込み ──
-    get irqActive() { return (this.irq2 ? LINE_IRQ2 : 0) | (this.vdc.irq ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0); }
+    get irqActive() { return (this.irq2 ? LINE_IRQ2 : 0) | ((this.vdc.irq || (this.vdc2 !== null && this.vdc2.irq)) ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0); }
     irqLines() { return this.irqActive & ~this.irqDisable; }
 
     // ── MPR ──
@@ -216,9 +228,12 @@
     // ── バス ──
     read(addr) {
       const bank = this.mpr[addr >>> 13], off = addr & 0x1FFF;
-      if (bank < 0x80) return this.card.rom[this.card.offset[bank] + off];
+      if (bank < 0x80) {
+        if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) return this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF];
+        return this.card.rom[this.card.offset[bank] + off];
+      }
       if (bank === 0xFF) { const v = this.readIo(off); if (this.onIo) this.onIo('R', addr, v); return v; }
-      if (bank >= 0xF8 && bank <= 0xFB) return this.ram[off];
+      if (bank >= 0xF8 && bank <= 0xFB) return this.ram[(((bank - 0xF8) << 13) | off) & this.ramMask];
       if (bank === 0xF7) return (!this.bramLocked && off < 0x800) ? this.bram[off] : 0xFF;
       if (bank < 0x88) return this.cdRam[((bank - 0x80) << 13) | off];
       return 0xFF;
@@ -226,23 +241,33 @@
     write(addr, value) {
       const bank = this.mpr[addr >>> 13], off = addr & 0x1FFF;
       if (bank === 0xFF) { if (this.onIo) this.onIo('W', addr, value); this.writeIo(off, value); return; }
-      if (bank >= 0xF8 && bank <= 0xFB) { this.ram[off] = value; return; }
+      if (bank >= 0xF8 && bank <= 0xFB) { this.ram[(((bank - 0xF8) << 13) | off) & this.ramMask] = value; return; }
+      if (bank < 0x80) {
+        if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF] = value;
+        else if (this.card.banked && bank === 0 && (off & 0x1FF0) === 0x1FF0) { this.cardBank = off & 0x0F; this.card.select(this.cardBank); }
+        return;
+      }
       if (bank === 0xF7) { if (!this.bramLocked && off < 0x800) { this.bram[off] = value; this.bramDirty = true; } return; }
       if (bank >= 0x80 && bank < 0x88) this.cdRam[((bank - 0x80) << 13) | off] = value;
     }
     /** ST0/ST1/ST2 の書き先(VDC のポート 0/2/3)。MPR を通らない */
     stWrite(port, value) {
       if (this.onIo) this.onIo('W', port & 3, value);
-      this.vdc.write(port, value);
+      (this.vpc !== null && this.vpc.stToVdc2 ? this.vdc2 : this.vdc).write(port, value);
       this.cpu.idle();
     }
 
     readIo(off) {
-      if (off < 0x0400) { this.tick(); return this.vdc.read(off); }                       // VDC(1 サイクル待たされる)
-      if (off < 0x0800) { this.tick(); this.vdc.draw(); return this.vce.read(off); }      // VCE(同上)
+      if (off < 0x0400) {                                                                 // VDC(1 サイクル待たされる)
+        this.tick();
+        if (this.vpc === null) return this.vdc.read(off);
+        const r = off & 0x1F;
+        return r < 0x08 ? this.vdc.read(r) : r < 0x10 ? this.vpc.read(r) : r < 0x18 ? this.vdc2.read(r) : 0xFF;
+      }
+      if (off < 0x0800) { this.tick(); if (this.vdc2) this.vdc2.draw(); this.vdc.draw(); return this.vce.read(off); } // VCE(同上)
       if (off < 0x0C00) return this.ioBuffer;                                             // 波形メモリ音源は読めない
       if (off < 0x1000) { this.ioBuffer = (this.ioBuffer & 0x80) | (this.timer.read() & 0x7F); return this.ioBuffer; }
-      if (off < 0x1400) { this.ioBuffer = (this.region === 'pce' ? 0x40 : 0) | 0x30 | this._padRead(); return this.ioBuffer; }
+      if (off < 0x1400) { this.ioBuffer = (this.region === 'pce' ? 0x40 : 0) | 0x30 | this.input.read(); return this.ioBuffer; }
       if (off < 0x1800) {
         switch (off & 3) {
           case 2: this.ioBuffer = (this.ioBuffer & 0xF8) | (this.irqDisable & 7); break;
@@ -255,8 +280,17 @@
     }
 
     writeIo(off, value) {
-      if (off < 0x0400) { this.vdc.write(off, value); this.cpu.idle(); return; }
-      if (off < 0x0800) { this.vdc.draw(); this.vce.write(off, value); this.cpu.idle(); return; }
+      if (off < 0x0400) {
+        if (this.vpc === null) this.vdc.write(off, value);
+        else {
+          const r = off & 0x1F;
+          if (r < 0x08) this.vdc.write(r, value);
+          else if (r < 0x10) { if (r <= 0x0E) { this.vdc2.draw(); this.vdc.draw(); this.vpc.merge(); } this.vpc.write(r, value); } // 重ね方を変える前に、ここまでの分を今の決まりで重ねておく
+          else if (r < 0x18) this.vdc2.write(r, value);
+        }
+        this.cpu.idle(); return;
+      }
+      if (off < 0x0800) { if (this.vdc2) this.vdc2.draw(); this.vdc.draw(); this.vce.write(off, value); this.cpu.idle(); return; }
       if (off < 0x0C00) {
         const reg = off & 0x0F;
         this.apu.runToMaster(this.clock);
@@ -269,7 +303,7 @@
         return;
       }
       if (off < 0x1000) { this.timer.write(off, value); this.ioBuffer = value; return; }
-      if (off < 0x1400) { this.padSel = (value & 1) !== 0; this.padClr = (value & 2) !== 0; this.ioBuffer = value; return; }
+      if (off < 0x1400) { this.input.write(value); this.ioBuffer = value; return; }
       if (off < 0x1800) {
         switch (off & 3) {
           case 2: this.irqDisable = value & 7; break;
@@ -373,7 +407,7 @@
 
     static describe(pce) {
       const c = pce.card;
-      return `HuCard ${c.fileSize >> 10}K(${c.banks} バンク)${c.hadHeader ? ' ヘッダ 512 バイトを外した' : ''}${c.reversed ? ' ビットの逆順を戻した' : ''}${c.oversize ? ' 1MB 超=未対応' : ''}`;
+      return `${pce.sgx ? 'SuperGrafx ' : ''}HuCard ${c.fileSize >> 10}K(${c.banks} バンク)${c.banked ? ' バンク切り替えつき' : ''}${c.ramSize ? ' RAM 内蔵' : ''}${pce.input.type !== 'pad2' ? ' パッド=' + pce.input.type : ''}${c.hadHeader ? ' ヘッダ 512 バイトを外した' : ''}${c.reversed ? ' ビットの逆順を戻した' : ''}${c.oversize ? ' 1MB 超=未対応' : ''}`;
     }
   }
 

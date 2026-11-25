@@ -58,6 +58,9 @@
       this.speedHigh = true; // 本体(pce/)は電源投入で低速にする。HES 再生は高速のまま始める(hesPlayer.js 側の説明)
       this.lastDataAddr = -1;
       this.irqSample = 0;    // 直前のサイクルで見た割り込み線(I=1 なら 0)
+      // いま中にいる割り込みの処理(入った時のベクタを積み、RTI で降ろす)。CPU の動きには使わない控えで、
+      // HES の救済(hesBus.js の deferVblank)が「タイマ割り込みの処理中か」を知るのに使う
+      this.irqNest = []; this.irqTimerAt = 0;
       this.mprBuffer = 0;    // TAM/TMA が最後に通した値
       this.tMode = false;    // いまの命令が T フラグつきで始まったか
       this.ea = 0; this.imm = 0; this.mode = IMP;
@@ -141,6 +144,8 @@
      * [参照] PceCpu::ProcessIrq: 空読み 2 回 → PC 上位/下位 → P(B=0、D と T はそのまま積む)→ D と T を消して I=1 → ベクタ 2 バイト → 内部 1。
      */
     _interrupt(vector) {
+      if (this.irqNest.length < 16) this.irqNest.push(vector);
+      if (vector === VEC_TIMER) this.irqTimerAt = this.bus.clock || 0;
       this.rd(this.PC); this.rd(this.PC);
       this._push(this.PC >> 8); this._push(this.PC & 0xFF);
       this._push(this.P & ~F_B);
@@ -332,7 +337,7 @@
     c.PC = lo | (hi << 8);
   }
   function RTS(c) { c._tick(); const lo = c._pop(), hi = c._pop(); c._tick(); c._tick(); c.PC = ((lo | (hi << 8)) + 1) & 0xFFFF; }
-  function RTI(c) { c._tick(); setP(c, c._pop()); const lo = c._pop(), hi = c._pop(); c.PC = lo | (hi << 8); c._tick(); }
+  function RTI(c) { c.irqNest.pop(); c._tick(); setP(c, c._pop()); const lo = c._pop(), hi = c._pop(); c.PC = lo | (hi << 8); c._tick(); }
   function BSR(c) {
     c._tick();
     const ret = (c.PC - 1) & 0xFFFF;

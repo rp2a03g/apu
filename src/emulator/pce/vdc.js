@@ -10,6 +10,8 @@
  *   行の途中でスクロールやパレットを変えた効果が、変えた位置から出る。BG のタイルとスプライトも、石が実際に VRAM を読む位置に合わせて
  *   少しずつ取り込む(_loadBg / _evalSprites)。取り込みの間は CPU からの VRAM の読み書きが待たされる(_vramAccess)。
  *   行が終わると out[](242 行 × 682 桁、値は VCE の 9bit の色+白黒の印 $200)へ写す。行ごとのドットクロックは rowDiv[]。
+ *   row[] の値には印が 2 つ付く: $4000 = 透明(BG の色 0 か、絵の外)、$8000 = スプライトの画素。SuperGrafx で 2 個の VDC の絵を
+ *   重ねる時に使う(pce/vpc.js)。SuperGrafx の時は out へ写さず、host.vdcRowEnd に任せる。2 個目の VDC は画面の区切りを知らせない。
  *
  * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3)。このファイルの決まりは全部 [参照] Mesen 2 の Core/PCE/PceVdc.cpp と PceVpc.cpp(読んで動きを合わせた。写していない)。
  * 確かめ方: tools/headless/pce-mesen-ab.js --rom(画面の全画素と、I/O の時刻つきの並びを Mesen と比べる)。
@@ -37,15 +39,16 @@
   const V_DS = 0, V_DW = 1, V_DE = 2, V_SW = 3;
   const EV_NONE = 0, EV_LATCH_Y = 1, EV_LATCH_X = 2, EV_HDS_IRQ = 3, EV_INC_RCR = 4;
   const ST_COLLISION = 0x01, ST_OVERFLOW = 0x02, ST_RCR = 0x04, ST_SATB = 0x08, ST_DMA = 0x10, ST_VBLANK = 0x20, ST_BUSY = 0x40;
-  const GRAY = 0x200;
+  const GRAY = 0x200, TRANSPARENT = 0x4000, SPRITE = 0x8000;
   const MAX_TILES = 256, MAX_SPR = 128;
 
   class PceVdc {
     /**
      * @param {object} host - { clock(マスタークロックの通算), vce(PceVce), execFast()(マスタークロック 3 個ぶん本体を進める), onVdcFrame() }
      */
-    constructor(host) {
+    constructor(host, isVdc2) {
       this.host = host;
+      this.isVdc2 = !!isVdc2; // SuperGrafx の 2 個目
       this.vram = new Uint16Array(0x8000);
       this.satb = new Uint16Array(0x100);
       this.row = new Uint16Array(ROW_W + 2);
@@ -267,7 +270,7 @@
       this.latchClockX = NEVER; this.latchClockY = NEVER;
       if (this.scanline === LAST_LINE) {
         this.frameCount++;
-        if (this.host.onVdcFrame) this.host.onVdcFrame();
+        if (!this.isVdc2 && this.host.onVdcFrame) this.host.onVdcFrame();
       } else if (this.scanline >= this.host.vce.lines) {
         this.scanline = 0;
         this.vblankDone = false;
@@ -275,6 +278,7 @@
         this.burst = !this.nextBg && !this.nextSpr;
         this.bgOn = this.nextBg; this.sprOn = this.nextSpr;
       }
+      if (!this.isVdc2 && this.host.vdcLineStart) this.host.vdcLineStart();
       if (this.scanline >= FIRST_LINE && this.scanline < LAST_LINE) this.rowDiv[this.scanline - FIRST_LINE] = this.host.vce.divider;
 
       if (this.needRcrInc) this._incRcr();
@@ -433,7 +437,7 @@
         const bgOn = this.bgOn, sprOn = this.sprOn, total = this.totalCount, fine = this.lat.bxr & 7;
         const xHas = this.xHas, dX = this.dX, dFlag = this.dFlag, dData = this.dData, dIdx = this.dIdx, dPal = this.dPal;
         for (; x < xMax; x++) {
-          let color = pal[0], bg = 0;
+          let color = pal[0] | TRANSPARENT, bg = 0;
           const sx = this.screenX;
           if (bgOn) {
             const px = fine + sx, t = (px >> 3) & (MAX_TILES - 1), sh = 7 - (px & 7);
@@ -452,7 +456,7 @@
               if (over0) {
                 if (this.enCollision && i < this.drawCount) { this.status |= ST_COLLISION; this.irq = true; }
               } else if (bg === 0 || (dFlag[i] & 2)) {
-                color = pal[256 + dPal[i] * 16 + c];
+                color = pal[256 + dPal[i] * 16 + c] | SPRITE;
               }
               if (dIdx[i] === 0 && this.rowHasSprite0) over0 = true; else break;
             }
@@ -462,12 +466,13 @@
         }
       } else {
         // 絵の中だが BG もスプライトも切 = 背景色。絵の外 = 枠の色(スプライトのパレット 0 番)
-        const color = inPicture ? pal[0] : pal[256];
+        const color = (inPicture ? pal[0] : pal[256]) | TRANSPARENT;
         for (; x < xMax; x++) row[x] = color;
       }
       if (this.hClock === LINE) {
-        this.out.set(row.subarray(0, ROW_W), (this.scanline - FIRST_LINE) * ROW_W);
-        row.fill(0);
+        // 行の終わり。SuperGrafx は本体(優先順位の石)が 2 個ぶんを重ねてから消す。普通の本体はそのまま out へ
+        if (this.host.vdcRowEnd) this.host.vdcRowEnd(this, this.scanline);
+        else { this.out.set(row.subarray(0, ROW_W), (this.scanline - FIRST_LINE) * ROW_W); row.fill(0); }
       }
       this.xStart = x;
       this.lastDrawHClock = Math.floor(this.hClock / div) * div;
@@ -648,5 +653,7 @@
   PceVdc.ROW_W = ROW_W;
   PceVdc.ROWS = ROWS;
   PceVdc.FIRST_LINE = FIRST_LINE;
+  PceVdc.TRANSPARENT = TRANSPARENT;
+  PceVdc.SPRITE = SPRITE;
   Emu.PceVdc = PceVdc;
 })(typeof window !== 'undefined' ? window : globalThis);

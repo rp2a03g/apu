@@ -100,6 +100,11 @@
       pad: { Shot1: 2, Shot2: 3, Shot3: 5, Shot4: 0, Shot5: 1, Shot6: 7, Coin: 8, Start: 9, FF: -1, Rewind: -1, Pause: -1, SaveState: -1, LoadState: -1 },
       recLoop: true, recTrim: true }, // 録音を止めた時: ループを探して切る / 末尾の無音を切る(切れば録ったままが残る)
   };
+  // PC エンジン: 本体の種類(自動 = 専用カードか拡張子 .sgx なら SuperGrafx)とパッドの種類。6 ボタンパッドの III〜VI は決まったキー(D F G H)
+  const PCE_MODELS = ['auto', 'pce', 'sgx'], PCE_PADS = ['pad2', 'pad6', 'tap'];
+  const PCE_EXTRA_KEYS = { KeyD: 0x100, KeyF: 0x200, KeyG: 0x400, KeyH: 0x800 };
+  function loadPceCfg(c) { c = c && typeof c === 'object' ? c : {}; return { model: PCE_MODELS.includes(c.model) ? c.model : 'auto', pad: PCE_PADS.includes(c.pad) ? c.pad : 'pad2' }; }
+  function pceCfg() { if (!cfg.pce) cfg.pce = loadPceCfg(null); return cfg.pce; }
   function loadCps3Cfg(c) {
     c = c && typeof c === 'object' ? c : {};
     return { keys: Object.assign({}, DEFAULT_CFG.cps3.keys, c.keys && typeof c.keys === 'object' ? c.keys : null),
@@ -147,6 +152,7 @@
       msx: loadMsxCfg(c.msx),
       cps3: loadCps3Cfg(c.cps3),
       gb: { model: GB_MODELS.includes(c.gb && c.gb.model) ? c.gb.model : 'auto', palette: GB_PALETTES.includes(c.gb && c.gb.palette) ? c.gb.palette : 'auto' },
+      pce: loadPceCfg(c.pce),
     };
   }
   function saveCfg() { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { /* ignore */ } }
@@ -764,6 +770,7 @@
     canvas.addEventListener('pointerleave', () => sendTilt(0, 0));
     window.addEventListener('deviceorientation', (e) => { if (machine !== 'gb' || !gbTilt || e.gamma === null || e.beta === null) return; sendTilt(Math.sin(e.gamma * Math.PI / 180), Math.sin((e.beta - 45) * Math.PI / 180)); }); // 手前へ 45 度傾けて持った姿勢を水平とみなす
     canvas.addEventListener('keydown', (e) => {
+      if (machine === 'pce' && pceCfg().pad === 'pad6' && PCE_EXTRA_KEYS[e.code]) { e.preventDefault(); pceBits |= PCE_EXTRA_KEYS[e.code]; pushPad(); return; } // 6 ボタンパッドの III〜VI
       const a = keyActionOf(e.code);
       if (!a) {
         if (machine === 'msx') { e.preventDefault(); msxKey(e.code, true); } // MSX: 操作キー以外はそのまま MSX のキーボードへ
@@ -781,6 +788,7 @@
       else if (a === 'LoadState') { if (!e.repeat) requestLoadState(); }
     });
     canvas.addEventListener('keyup', (e) => {
+      if (machine === 'pce' && PCE_EXTRA_KEYS[e.code] && (pceBits & PCE_EXTRA_KEYS[e.code])) { e.preventDefault(); pceBits &= ~PCE_EXTRA_KEYS[e.code]; pushPad(); return; }
       const a = keyActionOf(e.code);
       if (!a) {
         if (machine === 'msx') { e.preventDefault(); msxKey(e.code, false); }
@@ -794,7 +802,7 @@
       else if (a === 'FF') { ffHold = false; pushSpeed(); }
       else if (a === 'Rewind') rewindHoldEnd();
     });
-    canvas.addEventListener('blur', () => { if (ffHold) { ffHold = false; pushSpeed(); } rewindHoldEnd(); keyBits = 0; keyTurbo = 0; cps3Bits = 0; pushPad(); if (machine === 'msx') msxKeyReleaseAll(); });
+    canvas.addEventListener('blur', () => { if (ffHold) { ffHold = false; pushSpeed(); } rewindHoldEnd(); keyBits = 0; keyTurbo = 0; cps3Bits = 0; pceBits = 0; pushPad(); if (machine === 'msx') msxKeyReleaseAll(); });
     pushSpeed();
     canvas.addEventListener('pointerdown', () => { canvas.focus(); resumeAudio(); });
     // ROM のドロップ(窓のどこでも)
@@ -1150,8 +1158,8 @@
     pop.addEventListener('mousedown', (e) => e.stopPropagation());
     pop.addEventListener('click', (e) => e.stopPropagation());
     // タブ: 共通 / ファミコン / MSX(機種の設定は機種のタブに、どの機種にも効く物は共通に)
-    const TABS = [['common', T('共通')], ['nes', T('ファミコン / FDS')], ['msx', 'MSX'], ['gb', T('ゲームボーイ')], ['cps3', 'CPS3']];
-    if (!cfgTab) cfgTab = machine === 'cps3' ? 'cps3' : machine === 'msx' ? 'msx' : machine === 'gb' ? 'gb' : (romBytes ? 'nes' : 'common');
+    const TABS = [['common', T('共通')], ['nes', T('ファミコン / FDS')], ['msx', 'MSX'], ['gb', T('ゲームボーイ')], ['pce', T('PC エンジン')], ['cps3', 'CPS3']];
+    if (!cfgTab) cfgTab = machine === 'cps3' ? 'cps3' : machine === 'msx' ? 'msx' : machine === 'gb' ? 'gb' : machine === 'pce' ? 'pce' : (romBytes ? 'nes' : 'common');
     const tabBar = document.createElement('div'); tabBar.className = 'nes-cfg-tabs';
     const panes = {}, tabBtns = {};
     const selectTab = (id) => { cfgTab = id; for (const k of Object.keys(panes)) { panes[k].hidden = k !== id; tabBtns[k].classList.toggle('is-on', k === id); } };
@@ -1296,6 +1304,20 @@
     // ── ゲームボーイ: 機種とスーパーゲームボーイの BIOS ──
     const sg = sec(T('本体'), 'gb');
     { const { r, s } = selRow(T('機種'));
+    { // PC エンジン
+      const sp = sec(T('本体'), 'pce'), pc = pceCfg();
+      { const { r, s } = selRow(T('機種'));
+        for (const [v, label] of [['auto', T('自動(専用カードか拡張子 .sgx なら SuperGrafx)')], ['pce', T('PC エンジン')], ['sgx', 'SuperGrafx']]) { const o = document.createElement('option'); o.value = v; o.textContent = label; s.appendChild(o); }
+        s.value = pc.model;
+        s.addEventListener('change', () => { pc.model = s.value; saveCfg(); });
+        sp.appendChild(r); }
+      { const { r, s } = selRow(T('パッド'));
+        for (const [v, label] of [['pad2', T('2 ボタン')], ['pad6', T('6 ボタン')], ['tap', T('マルチタップ(2 ボタン × 5)')]]) { const o = document.createElement('option'); o.value = v; o.textContent = label; s.appendChild(o); }
+        s.value = pc.pad;
+        s.addEventListener('change', () => { pc.pad = s.value; saveCfg(); });
+        sp.appendChild(r); }
+      note(sp, T('次に開くソフトから効きます。6 ボタンパッドの III〜VI はキーボードの D F G H です(割り当ての変更とゲームパッドへの割り当てはまだできません)。マルチタップの 2 番は 2 つ目のゲームパッドです。'));
+    }
       for (const [v, label] of [['auto', T('自動(カートリッジに合わせて白黒/カラー)')], ['dmg', T('ゲームボーイ(白黒)')], ['cgb', T('ゲームボーイカラー')], ['sgb', T('スーパーゲームボーイ')], ['sgb2', T('スーパーゲームボーイ 2')]]) { const o = document.createElement('option'); o.value = v; o.textContent = label; s.appendChild(o); }
       s.value = cfg.gb.model;
       s.addEventListener('change', () => { cfg.gb.model = s.value; saveCfg(); });
@@ -1561,12 +1583,13 @@
   // cps3Bits: CPS3 のキーボードの入力(CPS3_BITS の並び。8bit を超えるので他の機種の keyBits とは別に持つ)
   let cps3Bits = 0, cps3TestBtn = null, cps3Gfx = null, cps3Title = '', pendingCps3 = null;
   function sendPad(port, bits, turbo) {
+  let pceBits = 0; // PC エンジンの 6 ボタンパッドの III〜VI(bit8-11)
     if (node) node.port.postMessage({ type: 'pad', port, bits, turbo });
     else if (nes) nes.setController(port, bits, turbo);
   }
   function pushPad() {
     const gp = gamepadBits();
-    const bits = keyBits | touchBits | gp[0][0] | (machine === 'cps3' ? cps3Bits : 0), turbo = keyTurbo | touchTurbo | gp[0][1];
+    const bits = keyBits | touchBits | gp[0][0] | (machine === 'cps3' ? cps3Bits : 0) | (machine === 'pce' ? pceBits : 0), turbo = keyTurbo | touchTurbo | gp[0][1];
     const k1 = bits | (turbo << 16), k2 = gp[1][0] | (gp[1][1] << 16); // CPS3 は bits が 8bit を超える(ショット 3〜6、テスト、サービス)
     if (k1 !== lastPad) { lastPad = k1; sendPad(0, bits, turbo); }
     if (k2 !== lastPad2) { lastPad2 = k2; sendPad(1, gp[1][0], gp[1][1]); }
@@ -1685,7 +1708,7 @@
     // 再ビルド忘れの検出(capture-worker-client.js と同じ考え方): 主スレッドの現行ソースがバンドルに含まれているか
     const probes = [MML.Emu.NesConsole, MML.Emu.PPU, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC3, MML.Emu.NesMappers && MML.Emu.NesMappers.MMC5, MML.Emu.NesMappers && MML.Emu.NesMappers.VRC7, MML.Emu.FdsDisk && MML.Emu.FdsDisk.Mapper, MML.Emu.NesRewind];
     // MSX 本体(同じバンドルに入る)。ページが MSX の script を読んでいない時は比べる物が無いので飛ばす
-    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.GbPrinter, MML.Emu.GbBarcodeBoy, MML.Emu.APUGb, MML.Emu.CPUSm83, MML.Emu.PceConsole, MML.Emu.PceVdc, MML.Emu.PceVce, MML.Emu.PceCard, MML.Emu.PceTimer, MML.Emu.CPUHuC6280, MML.Emu.APUHuC6280, MML.Emu.Cps3Console, MML.Emu.Cps3Audio, MML.Emu.ZoomConsole, MML.Emu.Zsg2Audio, MML.Emu.EnsoniqConsole, MML.Emu.Es5505Audio, MML.Emu.createEs5510, MML.Emu.createM68000, MML.Emu.createM68020, MML.Emu.createF3Main, MML.Emu.createF3Video, MML.Emu.Cps3 && MML.Emu.Cps3.Machine, MML.Emu.Cps3 && MML.Emu.Cps3.SH2, MML.Emu.Cps3Rewind]) if (p) probes.push(p);
+    for (const p of [MML.Emu.MsxConsole, MML.Emu.MsxVdp, MML.Emu.GbConsole, MML.Emu.GbPpu, MML.Emu.GbCart, MML.Emu.GbPrinter, MML.Emu.GbBarcodeBoy, MML.Emu.APUGb, MML.Emu.CPUSm83, MML.Emu.PceConsole, MML.Emu.PceVdc, MML.Emu.PceVce, MML.Emu.PceCard, MML.Emu.PceVpc, MML.Emu.PceInput, MML.Emu.PceTimer, MML.Emu.CPUHuC6280, MML.Emu.APUHuC6280, MML.Emu.Cps3Console, MML.Emu.Cps3Audio, MML.Emu.ZoomConsole, MML.Emu.Zsg2Audio, MML.Emu.EnsoniqConsole, MML.Emu.Es5505Audio, MML.Emu.createEs5510, MML.Emu.createM68000, MML.Emu.createM68020, MML.Emu.createF3Main, MML.Emu.createF3Video, MML.Emu.Cps3 && MML.Emu.Cps3.Machine, MML.Emu.Cps3 && MML.Emu.Cps3.SH2, MML.Emu.Cps3Rewind]) if (p) probes.push(p);
     for (const p of probes) {
       if (typeof p !== 'function' || src.indexOf(p.toString()) < 0) {
         console.warn('[nes] nes-worklet.js がソースより古い(再ビルド忘れ)ため使いません。tools/build-capture-workers.ps1 で再ビルドしてください');
@@ -2344,8 +2367,10 @@
     if (NesScreen.onSpcState) NesScreen.onSpcState(null);
     updateBiosBtn(); updateSoftKbd();
     if (gbSgbMenuBtn) gbSgbMenuBtn.hidden = true;
-    const probe = new MML.Emu.PceConsole(bytes);
-    if (probe.card.oversize) flashStatus(T('1MB を超えるカードにはまだ対応していません(動かないことがあります)'));
+    const pc = pceCfg();
+    const pceOpts = { region: 'auto', model: pc.model === 'auto' ? (/\.sgx$/i.test(name || '') ? 'sgx' : 'auto') : pc.model, pad: pc.pad };
+    const probe = new MML.Emu.PceConsole(bytes, pceOpts);
+    pceBits = 0;
     pceFps = probe.frameRate;
     liveEnd('restart');
     rewindHoldEnd();
@@ -2355,7 +2380,7 @@
     hasBattery = probe.hasBattery; batteryKey = hasBattery ? stateKey : '';
     const battery = hasBattery ? await loadBattery(batteryKey) : null;
     if (battery && probe.setBattery(battery)) console.log('[pce]', T('セーブデータを読み込みました({n} バイト)', { n: battery.length }));
-    machineEl.textContent = T('PC エンジン');
+    machineEl.textContent = probe.sgx ? 'SuperGrafx' : T('PC エンジン');
     nameEl.textContent = romName;
     nameEl.title = MML.Emu.PceConsole.describe(probe);
     recExtBits = 0; fdsSideInfo = null; diskNames = [];
@@ -2373,7 +2398,7 @@
     applyCfgLabels();
     const rom = bytes.slice().buffer;
     const bat = battery ? battery.slice().buffer : null;
-    const ok = await startWorklet({ type: 'load', machine: 'pce', rom, battery: bat, pce: { region: 'auto' } }, [rom, bat].filter(Boolean));
+    const ok = await startWorklet({ type: 'load', machine: 'pce', rom, battery: bat, pce: pceOpts }, [rom, bat].filter(Boolean));
     if (!ok) { nes = probe; rewindBuf = MML.Emu.PceRewind ? new MML.Emu.PceRewind(nes) : null; lastPad = -1; lastPad2 = -1; mainFrames = 0; nes.setTurboRate(cfg.turboRate); startMain(); }
     liveBegin();
     updateStatus();

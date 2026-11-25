@@ -8,7 +8,8 @@
  *     出来上がった画面(vdc.out)は入れない(1 枚 330KB)。復元した直後の 1 フレームは、上半分が復元前の絵のままになる
  *   - 巻き戻し: 0.5 秒ごとのステート(1 分ぶん)+毎フレームのパッド値。逆再生の映像は、その時の画面を幅 292 に縮めて
  *     「色の番号 8bit+その画面の色表」で控える(PC エンジンは 512 色出せるので、1 画面に 256 色を超えた分は近い色に寄せる。逆再生の絵だけの話)
- * 形: { v: 1, machine: 'pce', romLen, romSum, tree }
+ * 形: { v: 1, machine: 'pce', romLen, romSum, sgx, tree }
+ *   本体の種類(SuperGrafx かどうか)が違うステートは読まない(VDC の数が違い、読むと落ちる)。パッドの種類は今の設定を保つ(ステートの物に戻さない)
  */
 (function (global) {
   'use strict';
@@ -24,17 +25,24 @@
 
   const PceState = {
     save(pce) {
-      return { v: 1, machine: 'pce', romLen: pce.card.rom.length, romSum: romSum(pce.card), tree: Emu.StateTree.snapshot(pce, [pce.card.rom, pce.vdc.out], SKIP_KEYS) };
+      return { v: 1, machine: 'pce', romLen: pce.card.rom.length, romSum: romSum(pce.card), sgx: !!pce.sgx, tree: Emu.StateTree.snapshot(pce, [pce.card.rom, pce.vdc.out].concat(pce.vdc2 ? [pce.vdc2.out, pce.vdc2.rowDiv] : []), SKIP_KEYS) };
     },
     // 同じ ROM で作ったステートを書き戻す。合わなければ false
     load(pce, state) {
       if (!state || state.v !== 1 || state.machine !== 'pce' || !state.tree) return false;
       if (state.romLen !== pce.card.rom.length || state.romSum !== romSum(pce.card)) return false;
-      const rec = pce.rec;
+      if (!!state.tree.sgx !== !!pce.sgx) return false;                  // 本体の種類が違う
+      const rec = pce.rec, padType = pce.input.type;
       Emu.StateTree.restore(pce, state.tree);
+      pce.input.type = padType;                                           // パッドの種類は今の設定が正
+      // 9c のステート(パッドが 2 個ぶん、SEL/CLR を本体に持っていた形)を読んだ時の埋め合わせ
+      for (const k of ['pad', 'padHeld', 'padTurbo']) { const a = pce[k]; while (a.length < 5) a.push(0); }
+      if (state.tree.padSel !== undefined) { pce.input.sel = !!state.tree.padSel; pce.input.clr = !!state.tree.padClr; }
+      pce.input.buttons = pce.pad;                                        // 同じ配列を指し直す
       pce.rec = rec;                       // 録音中ならそのまま続ける
       pce.ringHead = 0; pce.ringLen = 0;   // 音のリングは捨てる
       pce._frameFlag = false; pce._frameCb = false; pce._frameDirty = true;
+      pce.card.select(pce.cardBank | 0);   // 1MB 超のカードの段(カードそのものはステートに入れていない)
       return true;
     },
   };

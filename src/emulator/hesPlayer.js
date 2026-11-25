@@ -95,6 +95,8 @@
       this.cpu = new Emu.CPUHuC6280(this.bus);
       this.bus.cpu = this.cpu;
       this.bus.syncApu = () => this.apu.runToMaster(this._apuTimeOf(this.bus.clock));
+      // 救済「タイマ割り込みの処理中は垂直帰線を後回しにする」(hesBus.js の deferVblank の説明)。既定は HesPlayer.DEFER_VBLANK
+      this.bus.deferVblank = !!HesPlayer.DEFER_VBLANK;
 
       this.clockHz = MML.HES.CPU_CLOCK_HIGH;
       this.frameRate = MML.HES.VBLANK_FPS; // 抽出/描画用の名目フレームレート(実際のPLAY頻度とは独立)
@@ -454,6 +456,7 @@
     return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, pitchTrace, player, frameRate: player.frameRate };
   };
 
+  HesPlayer.DEFER_VBLANK = true; // 救済の既定(入。2026-11-26 利用者決定)。Mesen と比べる道具は切にして回す。pce-sweep.js は環境変数 PCE_HES_DEFER=0 で切
   Emu.HesPlayer = HesPlayer;
   // VGM(vgmPlayer.js captureVgmSongAsync)がHuC6280チップのフレームスナップショットを
   // hes2mml抽出器と同じ形で積むために公開する(gbsPlayer.jsのsnapshotGbApuForCaptureと同じ)。

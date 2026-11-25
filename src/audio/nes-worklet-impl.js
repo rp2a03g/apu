@@ -67,7 +67,7 @@
                 info = MML.Emu.GbConsole.describe(nes);
               }
             } else if (machine === 'pce') {
-              nes = new MML.Emu.PceConsole(new Uint8Array(m.rom), { region: (m.pce && m.pce.region) || 'auto' });
+              nes = new MML.Emu.PceConsole(new Uint8Array(m.rom), { region: (m.pce && m.pce.region) || 'auto', model: (m.pce && m.pce.model) || 'auto', pad: (m.pce && m.pce.pad) || 'pad2' });
               info = MML.Emu.PceConsole.describe(nes);
             } else if (machine === 'cps3') {
               // CP システム III: BIOS、プログラム(SIMM1/2 の像)、波形と絵(SIMM3 以降の像)、ゲームの名前。主スレッドが CD から取り出して送る

@@ -105,6 +105,7 @@ if (!has('--keep')) fs.rmSync(work, { recursive: true, force: true }); else cons
 
 // ── 自前 ──
 const { MML } = load({ strict: true });
+MML.Emu.HesPlayer.DEFER_VBLANK = false; // Mesen には無い救済(タイマ処理中は垂直帰線を後回し)は切って比べる
 const p = new MML.Emu.HesPlayer(readBytes(rom));
 const bus = p.bus;
 const B = [];

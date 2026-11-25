@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-23 10:43:13
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 03:37:40
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-11-23 10:43:13';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-11-26 03:37:40';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -167,6 +167,9 @@
       this.speedHigh = true; // 本体(pce/)は電源投入で低速にする。HES 再生は高速のまま始める(hesPlayer.js 側の説明)
       this.lastDataAddr = -1;
       this.irqSample = 0;    // 直前のサイクルで見た割り込み線(I=1 なら 0)
+      // いま中にいる割り込みの処理(入った時のベクタを積み、RTI で降ろす)。CPU の動きには使わない控えで、
+      // HES の救済(hesBus.js の deferVblank)が「タイマ割り込みの処理中か」を知るのに使う
+      this.irqNest = []; this.irqTimerAt = 0;
       this.mprBuffer = 0;    // TAM/TMA が最後に通した値
       this.tMode = false;    // いまの命令が T フラグつきで始まったか
       this.ea = 0; this.imm = 0; this.mode = IMP;
@@ -250,6 +253,8 @@
      * [参照] PceCpu::ProcessIrq: 空読み 2 回 → PC 上位/下位 → P(B=0、D と T はそのまま積む)→ D と T を消して I=1 → ベクタ 2 バイト → 内部 1。
      */
     _interrupt(vector) {
+      if (this.irqNest.length < 16) this.irqNest.push(vector);
+      if (vector === VEC_TIMER) this.irqTimerAt = this.bus.clock || 0;
       this.rd(this.PC); this.rd(this.PC);
       this._push(this.PC >> 8); this._push(this.PC & 0xFF);
       this._push(this.P & ~F_B);
@@ -441,7 +446,7 @@
     c.PC = lo | (hi << 8);
   }
   function RTS(c) { c._tick(); const lo = c._pop(), hi = c._pop(); c._tick(); c._tick(); c.PC = ((lo | (hi << 8)) + 1) & 0xFFFF; }
-  function RTI(c) { c._tick(); setP(c, c._pop()); const lo = c._pop(), hi = c._pop(); c.PC = lo | (hi << 8); c._tick(); }
+  function RTI(c) { c.irqNest.pop(); c._tick(); setP(c, c._pop()); const lo = c._pop(), hi = c._pop(); c.PC = lo | (hi << 8); c._tick(); }
   function BSR(c) {
     c._tick();
     const ret = (c.PC - 1) & 0xFFFF;
@@ -1320,6 +1325,7 @@
 
   const PAGE_SIZE = 0x2000;
   const LINE_IRQ1 = 2, LINE_TIMER = 4;
+  const DEFER_LIMIT = 1365 * 262; // 救済の後回しの上限(マスタークロック。1 画面ぶん)
 
   class HesBus {
     /**
@@ -1338,6 +1344,13 @@
       this.cpu = null;     // 同上(VDC/VCE を触った時に 1 サイクル待たせるのに使う)
       this.onWrite = null; // 書き込みの採り口(論理番地, 値)
       this.syncApu = null; // 音源へ書く直前に呼ぶ(hesPlayer.js が「今の時刻まで音源を進める」のに使う)
+      // HES の救済(実機には無い決まり。既定は入: HesPlayer.DEFER_VBLANK): タイマ割り込みの処理の中にいる間は、垂直帰線(IRQ1)の割り込みを入れず、戻った直後に入れる。
+      // 理由: タイマ割り込み(DDA の再生)の処理が頭で割り込みを許可し直すゲームがあり、ゲーム本体は「処理中なら曲の処理を後回しにする」確認を
+      //   垂直帰線の側に持っている。HES にする時にその確認が抜けた物は、DDA の処理が ch を選んでから値を書くまでの間に曲の処理が割り込み、
+      //   選択が変わったまま戻って、DDA の値が別の ch の波形に落ちる(鳴っている波形が少しずつ壊れる。DESIGN-PCE-CAPTURE.md §9.4)。
+      //   [推定] ゲーム固有の印を知らなくても同じ結果になる一般的な形としてこうした。Mesen には無い(入れると Mesen との照合は合わなくなる)。
+      //   RTI で戻らない処理に備えて、入ってから 1 画面ぶん経ったら後回しをやめる
+      this.deferVblank = false;
       this.reset();
     }
 
@@ -1370,7 +1383,14 @@
     /** かかっている割り込み(マスク前)。bit1 = IRQ1(VDC)、bit2 = タイマ。IRQ2(bit0)は CD/外部で、HES には無い */
     get irqActive() { return (this.vdc.irq ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0); }
     /** CPU が見る線(マスク後) */
-    irqLines() { return ((this.vdc.irq ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0)) & ~this.irqDisable; }
+    irqLines() {
+      let l = ((this.vdc.irq ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0)) & ~this.irqDisable;
+      if (this.deferVblank && (l & LINE_IRQ1)) {
+        const cpu = this.cpu;
+        if (cpu && cpu.irqNest.length && cpu.irqNest.indexOf(0xFFFA) >= 0 && this.clock - cpu.irqTimerAt < DEFER_LIMIT) l &= ~LINE_IRQ1;
+      }
+      return l;
+    }
 
     read(addr) {
       addr &= 0xFFFF;
@@ -1540,6 +1560,8 @@
       this.cpu = new Emu.CPUHuC6280(this.bus);
       this.bus.cpu = this.cpu;
       this.bus.syncApu = () => this.apu.runToMaster(this._apuTimeOf(this.bus.clock));
+      // 救済「タイマ割り込みの処理中は垂直帰線を後回しにする」(hesBus.js の deferVblank の説明)。既定は HesPlayer.DEFER_VBLANK
+      this.bus.deferVblank = !!HesPlayer.DEFER_VBLANK;
 
       this.clockHz = MML.HES.CPU_CLOCK_HIGH;
       this.frameRate = MML.HES.VBLANK_FPS; // 抽出/描画用の名目フレームレート(実際のPLAY頻度とは独立)
@@ -1899,6 +1921,7 @@
     return { audio, channelAudio, snapshots, dpcmTrace, controlTrace, pitchTrace, player, frameRate: player.frameRate };
   };
 
+  HesPlayer.DEFER_VBLANK = true; // 救済の既定(入。2026-11-26 利用者決定)。Mesen と比べる道具は切にして回す。pce-sweep.js は環境変数 PCE_HES_DEFER=0 で切
   Emu.HesPlayer = HesPlayer;
   // VGM(vgmPlayer.js captureVgmSongAsync)がHuC6280チップのフレームスナップショットを
   // hes2mml抽出器と同じ形で積むために公開する(gbsPlayer.jsのsnapshotGbApuForCaptureと同じ)。

@@ -28,6 +28,7 @@
 
   const PAGE_SIZE = 0x2000;
   const LINE_IRQ1 = 2, LINE_TIMER = 4;
+  const DEFER_LIMIT = 1365 * 262; // 救済の後回しの上限(マスタークロック。1 画面ぶん)
 
   class HesBus {
     /**
@@ -46,6 +47,13 @@
       this.cpu = null;     // 同上(VDC/VCE を触った時に 1 サイクル待たせるのに使う)
       this.onWrite = null; // 書き込みの採り口(論理番地, 値)
       this.syncApu = null; // 音源へ書く直前に呼ぶ(hesPlayer.js が「今の時刻まで音源を進める」のに使う)
+      // HES の救済(実機には無い決まり。既定は入: HesPlayer.DEFER_VBLANK): タイマ割り込みの処理の中にいる間は、垂直帰線(IRQ1)の割り込みを入れず、戻った直後に入れる。
+      // 理由: タイマ割り込み(DDA の再生)の処理が頭で割り込みを許可し直すゲームがあり、ゲーム本体は「処理中なら曲の処理を後回しにする」確認を
+      //   垂直帰線の側に持っている。HES にする時にその確認が抜けた物は、DDA の処理が ch を選んでから値を書くまでの間に曲の処理が割り込み、
+      //   選択が変わったまま戻って、DDA の値が別の ch の波形に落ちる(鳴っている波形が少しずつ壊れる。DESIGN-PCE-CAPTURE.md §9.4)。
+      //   [推定] ゲーム固有の印を知らなくても同じ結果になる一般的な形としてこうした。Mesen には無い(入れると Mesen との照合は合わなくなる)。
+      //   RTI で戻らない処理に備えて、入ってから 1 画面ぶん経ったら後回しをやめる
+      this.deferVblank = false;
       this.reset();
     }
 
@@ -78,7 +86,14 @@
     /** かかっている割り込み(マスク前)。bit1 = IRQ1(VDC)、bit2 = タイマ。IRQ2(bit0)は CD/外部で、HES には無い */
     get irqActive() { return (this.vdc.irq ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0); }
     /** CPU が見る線(マスク後) */
-    irqLines() { return ((this.vdc.irq ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0)) & ~this.irqDisable; }
+    irqLines() {
+      let l = ((this.vdc.irq ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0)) & ~this.irqDisable;
+      if (this.deferVblank && (l & LINE_IRQ1)) {
+        const cpu = this.cpu;
+        if (cpu && cpu.irqNest.length && cpu.irqNest.indexOf(0xFFFA) >= 0 && this.clock - cpu.irqTimerAt < DEFER_LIMIT) l &= ~LINE_IRQ1;
+      }
+      return l;
+    }
 
     read(addr) {
       addr &= 0xFFFF;

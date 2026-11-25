@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-23 10:43:13
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 03:37:40
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-23 10:43:13';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 03:37:40';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -20147,6 +20147,9 @@
       this.speedHigh = true; // 本体(pce/)は電源投入で低速にする。HES 再生は高速のまま始める(hesPlayer.js 側の説明)
       this.lastDataAddr = -1;
       this.irqSample = 0;    // 直前のサイクルで見た割り込み線(I=1 なら 0)
+      // いま中にいる割り込みの処理(入った時のベクタを積み、RTI で降ろす)。CPU の動きには使わない控えで、
+      // HES の救済(hesBus.js の deferVblank)が「タイマ割り込みの処理中か」を知るのに使う
+      this.irqNest = []; this.irqTimerAt = 0;
       this.mprBuffer = 0;    // TAM/TMA が最後に通した値
       this.tMode = false;    // いまの命令が T フラグつきで始まったか
       this.ea = 0; this.imm = 0; this.mode = IMP;
@@ -20230,6 +20233,8 @@
      * [参照] PceCpu::ProcessIrq: 空読み 2 回 → PC 上位/下位 → P(B=0、D と T はそのまま積む)→ D と T を消して I=1 → ベクタ 2 バイト → 内部 1。
      */
     _interrupt(vector) {
+      if (this.irqNest.length < 16) this.irqNest.push(vector);
+      if (vector === VEC_TIMER) this.irqTimerAt = this.bus.clock || 0;
       this.rd(this.PC); this.rd(this.PC);
       this._push(this.PC >> 8); this._push(this.PC & 0xFF);
       this._push(this.P & ~F_B);
@@ -20421,7 +20426,7 @@
     c.PC = lo | (hi << 8);
   }
   function RTS(c) { c._tick(); const lo = c._pop(), hi = c._pop(); c._tick(); c._tick(); c.PC = ((lo | (hi << 8)) + 1) & 0xFFFF; }
-  function RTI(c) { c._tick(); setP(c, c._pop()); const lo = c._pop(), hi = c._pop(); c.PC = lo | (hi << 8); c._tick(); }
+  function RTI(c) { c.irqNest.pop(); c._tick(); setP(c, c._pop()); const lo = c._pop(), hi = c._pop(); c.PC = lo | (hi << 8); c._tick(); }
   function BSR(c) {
     c._tick();
     const ret = (c.PC - 1) & 0xFFFF;
@@ -21127,6 +21132,8 @@
  *   行の途中でスクロールやパレットを変えた効果が、変えた位置から出る。BG のタイルとスプライトも、石が実際に VRAM を読む位置に合わせて
  *   少しずつ取り込む(_loadBg / _evalSprites)。取り込みの間は CPU からの VRAM の読み書きが待たされる(_vramAccess)。
  *   行が終わると out[](242 行 × 682 桁、値は VCE の 9bit の色+白黒の印 $200)へ写す。行ごとのドットクロックは rowDiv[]。
+ *   row[] の値には印が 2 つ付く: $4000 = 透明(BG の色 0 か、絵の外)、$8000 = スプライトの画素。SuperGrafx で 2 個の VDC の絵を
+ *   重ねる時に使う(pce/vpc.js)。SuperGrafx の時は out へ写さず、host.vdcRowEnd に任せる。2 個目の VDC は画面の区切りを知らせない。
  *
  * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3)。このファイルの決まりは全部 [参照] Mesen 2 の Core/PCE/PceVdc.cpp と PceVpc.cpp(読んで動きを合わせた。写していない)。
  * 確かめ方: tools/headless/pce-mesen-ab.js --rom(画面の全画素と、I/O の時刻つきの並びを Mesen と比べる)。
@@ -21154,15 +21161,16 @@
   const V_DS = 0, V_DW = 1, V_DE = 2, V_SW = 3;
   const EV_NONE = 0, EV_LATCH_Y = 1, EV_LATCH_X = 2, EV_HDS_IRQ = 3, EV_INC_RCR = 4;
   const ST_COLLISION = 0x01, ST_OVERFLOW = 0x02, ST_RCR = 0x04, ST_SATB = 0x08, ST_DMA = 0x10, ST_VBLANK = 0x20, ST_BUSY = 0x40;
-  const GRAY = 0x200;
+  const GRAY = 0x200, TRANSPARENT = 0x4000, SPRITE = 0x8000;
   const MAX_TILES = 256, MAX_SPR = 128;
 
   class PceVdc {
     /**
      * @param {object} host - { clock(マスタークロックの通算), vce(PceVce), execFast()(マスタークロック 3 個ぶん本体を進める), onVdcFrame() }
      */
-    constructor(host) {
+    constructor(host, isVdc2) {
       this.host = host;
+      this.isVdc2 = !!isVdc2; // SuperGrafx の 2 個目
       this.vram = new Uint16Array(0x8000);
       this.satb = new Uint16Array(0x100);
       this.row = new Uint16Array(ROW_W + 2);
@@ -21384,7 +21392,7 @@
       this.latchClockX = NEVER; this.latchClockY = NEVER;
       if (this.scanline === LAST_LINE) {
         this.frameCount++;
-        if (this.host.onVdcFrame) this.host.onVdcFrame();
+        if (!this.isVdc2 && this.host.onVdcFrame) this.host.onVdcFrame();
       } else if (this.scanline >= this.host.vce.lines) {
         this.scanline = 0;
         this.vblankDone = false;
@@ -21392,6 +21400,7 @@
         this.burst = !this.nextBg && !this.nextSpr;
         this.bgOn = this.nextBg; this.sprOn = this.nextSpr;
       }
+      if (!this.isVdc2 && this.host.vdcLineStart) this.host.vdcLineStart();
       if (this.scanline >= FIRST_LINE && this.scanline < LAST_LINE) this.rowDiv[this.scanline - FIRST_LINE] = this.host.vce.divider;
 
       if (this.needRcrInc) this._incRcr();
@@ -21550,7 +21559,7 @@
         const bgOn = this.bgOn, sprOn = this.sprOn, total = this.totalCount, fine = this.lat.bxr & 7;
         const xHas = this.xHas, dX = this.dX, dFlag = this.dFlag, dData = this.dData, dIdx = this.dIdx, dPal = this.dPal;
         for (; x < xMax; x++) {
-          let color = pal[0], bg = 0;
+          let color = pal[0] | TRANSPARENT, bg = 0;
           const sx = this.screenX;
           if (bgOn) {
             const px = fine + sx, t = (px >> 3) & (MAX_TILES - 1), sh = 7 - (px & 7);
@@ -21569,7 +21578,7 @@
               if (over0) {
                 if (this.enCollision && i < this.drawCount) { this.status |= ST_COLLISION; this.irq = true; }
               } else if (bg === 0 || (dFlag[i] & 2)) {
-                color = pal[256 + dPal[i] * 16 + c];
+                color = pal[256 + dPal[i] * 16 + c] | SPRITE;
               }
               if (dIdx[i] === 0 && this.rowHasSprite0) over0 = true; else break;
             }
@@ -21579,12 +21588,13 @@
         }
       } else {
         // 絵の中だが BG もスプライトも切 = 背景色。絵の外 = 枠の色(スプライトのパレット 0 番)
-        const color = inPicture ? pal[0] : pal[256];
+        const color = (inPicture ? pal[0] : pal[256]) | TRANSPARENT;
         for (; x < xMax; x++) row[x] = color;
       }
       if (this.hClock === LINE) {
-        this.out.set(row.subarray(0, ROW_W), (this.scanline - FIRST_LINE) * ROW_W);
-        row.fill(0);
+        // 行の終わり。SuperGrafx は本体(優先順位の石)が 2 個ぶんを重ねてから消す。普通の本体はそのまま out へ
+        if (this.host.vdcRowEnd) this.host.vdcRowEnd(this, this.scanline);
+        else { this.out.set(row.subarray(0, ROW_W), (this.scanline - FIRST_LINE) * ROW_W); row.fill(0); }
       }
       this.xStart = x;
       this.lastDrawHClock = Math.floor(this.hClock / div) * div;
@@ -21765,12 +21775,194 @@
   PceVdc.ROW_W = ROW_W;
   PceVdc.ROWS = ROWS;
   PceVdc.FIRST_LINE = FIRST_LINE;
+  PceVdc.TRANSPARENT = TRANSPARENT;
+  PceVdc.SPRITE = SPRITE;
   Emu.PceVdc = PceVdc;
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
+ * HuC6202(VPC: SuperGrafx の優先順位の石)— 2 個の VDC の絵を 1 行ずつ重ねる
+ * MML.Emu.PceVpc(段階 9d)
+ *
+ * SuperGrafx は VDC を 2 個持ち、この石が画素ごとにどちらを出すかを決める。
+ *   レジスタ(I/O $0008-$000E。$0000-$0007 が VDC1、$0010-$0017 が VDC2):
+ *     $08: 下位 4bit = 窓 1 と窓 2 の両方の内側、上位 4bit = 窓 2 だけの内側 の決まり
+ *     $09: 下位 4bit = 窓 1 だけの内側、上位 4bit = どの窓の内側でもない所 の決まり
+ *          決まり 4bit = bit0 VDC1 を出す / bit1 VDC2 を出す / bit2-3 重ね方(0 と 3: VDC1 が上、1: VDC2 のスプライトは VDC1 の BG の上、
+ *          2: VDC1 のスプライトは VDC2 の BG の下)
+ *     $0A/$0B: 窓 1 の幅(10bit)、$0C/$0D: 窓 2 の幅(10bit)。行の左から数えて幅より手前が「内側」
+ *     $0E: bit0 = ST0/ST1/ST2 の書き先を VDC2 にする
+ *
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3): 全部 [参照] Mesen 2 の Core/PCE/PceVpc.cpp(読んで動きを合わせた。写していない)。
+ *   ★ 窓の位置は「レジスタの値 − 16」を行バッファの頭からのドット数として使う(Mesen と同じ。左の枠の分の扱いが実機と合っているかは未確認)
+ *   ★ 重ね方 2 で「VDC2 のスプライトとの上下」は Mesen のソースにも (?) が付いている
+ *   電源投入時は $08 = $09 = $11(どこでも VDC1 だけを出す)
+ * 確かめ方: tools/headless/pce-rom-ab.js(SuperGrafx の ROM の画面を Mesen と全画素比べる)
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  class PceVpc {
+    /** @param {object} host - { vce, vdc(1 個目), vdc2 } */
+    constructor(host) {
+      this.host = host;
+      this.cfg = new Uint8Array(4); // 添字: bit0 = 窓 1 の内側、bit1 = 窓 2 の内側。値は決まり 4bit
+      this.reset();
+    }
+    reset() {
+      this.priority1 = 0; this.priority2 = 0; this.window1 = 0; this.window2 = 0; this.stToVdc2 = false;
+      this.xStart = 0;
+      this.write(0x08, 0x11); this.write(0x09, 0x11);
+    }
+    read(reg) {
+      switch (reg) {
+        case 0x08: return this.priority1;
+        case 0x09: return this.priority2;
+        case 0x0A: return this.window1 & 0xFF;
+        case 0x0B: return this.window1 >> 8;
+        case 0x0C: return this.window2 & 0xFF;
+        case 0x0D: return this.window2 >> 8;
+        default: return 0;
+      }
+    }
+    write(reg, value) {
+      switch (reg) {
+        case 0x08: this.cfg[3] = value & 0x0F; this.cfg[2] = (value >> 4) & 0x0F; this.priority1 = value; break;
+        case 0x09: this.cfg[1] = value & 0x0F; this.cfg[0] = (value >> 4) & 0x0F; this.priority2 = value; break;
+        case 0x0A: this.window1 = (this.window1 & 0x300) | value; break;
+        case 0x0B: this.window1 = (this.window1 & 0xFF) | ((value & 3) << 8); break;
+        case 0x0C: this.window2 = (this.window2 & 0x300) | value; break;
+        case 0x0D: this.window2 = (this.window2 & 0xFF) | ((value & 3) << 8); break;
+        case 0x0E: this.stToVdc2 = (value & 1) !== 0; break;
+        default: break;
+      }
+    }
+    /** 行の頭 */
+    lineStart() { this.xStart = 0; }
+    /** 今の横位置まで、2 個の VDC の行を重ねて out へ書く(レジスタを書かれる直前と、行の終わりに呼ぶ) */
+    merge() {
+      const h = this.host, v1 = h.vdc, v2 = h.vdc2, V = Emu.PceVdc;
+      const sl = v1.scanline;
+      if (sl < V.FIRST_LINE || sl >= V.FIRST_LINE + V.ROWS) return;
+      const div = h.vce.divider;
+      const xMax = Math.min(Math.floor(1365 / div), Math.floor(v1.hClock / div));
+      const r1 = v1.row, r2 = v2.row, out = v1.out, base = (sl - V.FIRST_LINE) * V.ROW_W;
+      const w1 = Math.max(0, this.window1 - 16), w2 = Math.max(0, this.window2 - 16);
+      const T = V.TRANSPARENT, S = V.SPRITE, bgColor = h.vce.pal[0];
+      for (let i = this.xStart; i < xMax; i++) {
+        const c = this.cfg[(i < w1 ? 1 : 0) | (i < w2 ? 2 : 0)];
+        let color;
+        switch (c & 3) {
+          case 1: color = r1[i]; break;
+          case 2: color = r2[i]; break;
+          case 3: {
+            const a = r1[i], b = r2[i];
+            const mode = (c >> 2) & 3;
+            if (mode === 1) color = ((a & T) || ((b & S) && !(a & S))) ? b : a;
+            else if (mode === 2) color = ((a & T) || ((a & S) && !(b & S) && !(b & T))) ? b : a;
+            else color = (a & T) ? b : a;
+            break;
+          }
+          default: color = bgColor; break;
+        }
+        out[base + i] = color;
+      }
+      this.xStart = xMax;
+    }
+  }
+
+  Emu.PceVpc = PceVpc;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * PC エンジンのパッド端子($1000)— 2 ボタンパッド、6 ボタンパッド、マルチタップ(2 ボタン × 5)
+ * MML.Emu.PceInput(段階 9d)
+ *
+ * 端子は出力 2 本(bit0 = SEL、bit1 = CLR)と入力 4 本。ソフトは SEL/CLR を上げ下げして 4bit ずつ読む。
+ * ボタンのビット(本体の setController と同じ): 0 I、1 II、2 SELECT、3 RUN、4 上、5 下、6 左、7 右、8 III、9 IV、10 V、11 VI
+ *
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3)。全部 [参照] Mesen 2 の Core/PCE/Input/(読んで動きを合わせた。写していない):
+ *   2 ボタン(PceController.h): CLR=1 の間は 0 が読める。SEL=1 なら 上/右/下/左、SEL=0 なら I/II/SELECT/RUN(押すと 0)。
+ *     上+下、左+右を同時に押したら、どちらも押していない扱い
+ *   6 ボタン(PceAvenuePad6.h): CLR が 0→1 になるたびに「追加ボタンの番」と「普通の番」が入れ替わる。CLR=1 の間は $F が読める。
+ *     追加ボタンの番: SEL=1 なら 0(6 ボタンの印)、SEL=0 なら III/IV/V/VI。普通の番は 2 ボタンと同じ並び(同時押しの打ち消しは無い)
+ *   マルチタップ(PceTurboTap.cpp): 何番を読むかの数え。CLR=0 のまま SEL が 0→1 で次の番へ、SEL=1 のまま CLR が 0→1 で 1 番へ戻る。
+ *     電源投入直後は「どれでもない」(5 番を越えた位置。$F が読める)。選ばれていないパッドには SEL=1・CLR=1 が見える
+ *   マウスは Mesen に無いので作っていない(未着手)
+ * 確かめ方: 合成 ROM(mk-pce-test-rom.js の 'pad')で、何も押していない時の読みの並びを Mesen と比べる(Mesen の自動実行は入力が入らない)
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const TYPES = ['pad2', 'pad6', 'tap'];
+
+  // 2 ボタン 1 個ぶんの読み。p = ボタンのビット
+  function read2(p, sel, clr) {
+    if (clr) return 0;
+    if ((p & 0x30) === 0x30) p &= ~0x30;
+    if ((p & 0xC0) === 0xC0) p &= ~0xC0;
+    let v = 0x0F;
+    if (sel) v &= ~(((p >> 4) & 1) | (((p >> 7) & 1) << 1) | (((p >> 5) & 1) << 2) | (((p >> 6) & 1) << 3)); // 上 右 下 左
+    else v &= ~(p & 0x0F);                                                                                   // I II SELECT RUN
+    return v & 0x0F;
+  }
+
+  class PceInput {
+    constructor(type) {
+      this.type = TYPES.includes(type) ? type : 'pad2';
+      this.buttons = [0, 0, 0, 0, 0]; // 端子 1〜5(マルチタップでなければ [0] だけ使う)
+      this.reset();
+    }
+    reset() {
+      this.sel = false; this.clr = false;   // 本体が出している線
+      this.extra = false;                   // 6 ボタン: 追加ボタンの番か
+      this.tapPort = 5;                     // マルチタップ: 選ばれている番(5 = どれでもない)
+      this.tapSel = [true, true, true, true, true]; this.tapClr = [true, true, true, true, true]; // 各パッドに見えている線
+      this.prev = 0;
+    }
+    write(value) {
+      const sel = (value & 1) !== 0, clr = (value & 2) !== 0;
+      if (this.type === 'pad6') {
+        if (clr && !this.clr) this.extra = !this.extra;
+      } else if (this.type === 'tap') {
+        const prevSel = (this.prev & 1) !== 0, prevClr = (this.prev & 2) !== 0;
+        if (!clr && !prevSel && sel && this.tapPort < 5) this.tapPort++;
+        if (sel && !prevClr && clr) this.tapPort = 0;
+        this.prev = value;
+        for (let i = 0; i < 5; i++) { const on = i === this.tapPort; this.tapSel[i] = on ? sel : true; this.tapClr[i] = on ? clr : true; }
+      }
+      this.sel = sel; this.clr = clr;
+    }
+    /** 入力 4 本(下位 4bit) */
+    read() {
+      if (this.type === 'pad6') {
+        if (this.clr) return 0x0F;
+        const p = this.buttons[0];
+        if (this.extra) return this.sel ? 0 : (0x0F & ~((p >> 8) & 0x0F));
+        let v = 0x0F;
+        if (this.sel) v &= ~(((p >> 4) & 1) | (((p >> 7) & 1) << 1) | (((p >> 5) & 1) << 2) | (((p >> 6) & 1) << 3));
+        else v &= ~(p & 0x0F);
+        return v & 0x0F;
+      }
+      if (this.type === 'tap') {
+        const n = this.tapPort;
+        return n < 5 ? read2(this.buttons[n], this.tapSel[n], this.tapClr[n]) : 0x0F;
+      }
+      return read2(this.buttons[0], this.sel, this.clr);
+    }
+  }
+
+  PceInput.TYPES = TYPES;
+  Emu.PceInput = PceInput;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
  * HuCard の読み込みとバンクの並べ方
- * MML.Emu.PceCard(段階 9c: 普通のカードだけ。1MB を超える拡張マッパー、RAM 内蔵カードは 9d)
+ * MML.Emu.PceCard(段階 9c: 普通のカード。9d: 1MB を超えるカードのバンク切り替え、RAM 内蔵カード、SuperGrafx 専用カードの見分け)
  *
  * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3):
  *   [参照] Mesen 2 の Core/PCE/PceConsole.cpp / PceMemoryManager.cpp(読んだだけで写していない):
@@ -21779,6 +21971,12 @@
  *   ★ Mesen のソースには 384K と 768K 専用の並べ方も書いてあるが、先に 2 の累乗へ埋めるので、そこには入らない(384K は 512K、768K は 1MB として並ぶ)。
  *      384K のカードは $00-$2F が中身、$30-$3F が 0、$40-$4F が後ろの 128K、という形になる。同じにしてある。
  *      実機の 384K/768K のカードの鏡像と同じかは未確認(手元の 384K の 10 本は Mesen と同じに動く)
+ *   [参照] 1MB を超えるカード(PceSf2RomMapper.cpp): バンク $00 の $1FF0-$1FFF へ書くと、番地の下位 4bit が「段」になり、
+ *          バンク $40-$7F に見える 512K が ROM の (段 × 512K + 512K) からの 512K に切り替わる。$00-$3F は頭の 512K のまま
+ *   [参照] RAM 内蔵カード(PceMemoryManager.cpp): バンク $40-$5F に 32K の RAM(4 回の鏡像)。見分けは ROM の CRC32(1 本だけ)
+ *   [参照] SuperGrafx 専用カード 5 本の CRC32(PceConsole.cpp)。ほかに拡張子 .sgx でも SuperGrafx として開く
+ *   ★ CRC32 は「512 バイトのヘッダを外し、ビットの逆順を戻した後、2 の累乗に埋める前」の中身で取る。Mesen はファイルそのまま(ヘッダ込み)で取るので、
+ *      ヘッダつきの吸い出しは Mesen では見分けられない(拡張子 .sgx なら通る)
  *   [推定] ビットが逆順の吸い出し: 北米版(TurboGrafx-16)のカードはデータ線の並びが国内版と逆で、吸い出しによっては各バイトのビットが
  *          逆順のまま入っている。見分け方: 電源投入時は MPR7 = 0 なので、リセットベクタ(頭の 8K の $1FFE/$1FFF)は必ず $E000 以上を指す。
  *          上位バイトが $E0 未満で、ビットを逆にすると $E0 以上になる物だけ、全バイトを逆にする。
@@ -21790,6 +21988,10 @@
   const Emu = MML.Emu = MML.Emu || {};
 
   const BANK = 0x2000;
+  const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+  function crc32(b) { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+  const SGX_ONLY = new Set([0xB486A8ED, 0x1F041166, 0x3B13AF61, 0x4C2126B0, 0x8C4588E2]); // SuperGrafx 専用の 5 本(ハッシュだけ)
+  const RAM_CARD = 0x083C956A;                                                             // RAM 32K 内蔵の 1 本
 
   class PceCard {
     constructor(bytes) {
@@ -21806,16 +22008,26 @@
           rom = fixed; this.reversed = true;
         }
       }
-      let size = 1; while (size < rom.length) size <<= 1;
-      if (size !== rom.length || rom.byteOffset) { const padded = new Uint8Array(Math.max(size, BANK)); padded.set(rom); rom = padded; }
+      this.crc = crc32(rom);
+      this.sgxOnly = SGX_ONLY.has(this.crc);
+      this.ramSize = this.crc === RAM_CARD ? 0x8000 : 0;
+      let size = BANK; while (size < rom.length) size <<= 1; // 8K に満たない物も 8K まで埋める
+      if (size !== rom.length || rom.byteOffset) { const padded = new Uint8Array(size); padded.set(rom); rom = padded; }
       this.rom = rom;
       const banks = rom.length / BANK;
       this.banks = banks;
-      const layout = banks === 0x40 ? [0, 0x10, 0x20, 0x30, 0x20, 0x30, 0x20, 0x30] : [0, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70];
+      this.layout = banks === 0x40 ? [0, 0x10, 0x20, 0x30, 0x20, 0x30, 0x20, 0x30] : [0, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70];
       // バンク番号 → ROM の中の位置
       this.offset = new Int32Array(0x80);
-      for (let i = 0; i < 0x80; i++) this.offset[i] = ((layout[i >> 4] + (i & 0x0F)) % banks) * BANK;
-      this.oversize = banks > 0x80; // 1MB 超(拡張マッパー)。9d で対応
+      this.banked = banks > 0x80; // 1MB 超: バンク $40-$7F を切り替える
+      this.oversize = false;      // (9c の名残。画面側が見る)
+      this.select(0);
+    }
+    /** 1MB 超のカードの段を選ぶ(普通のカードは 0 のまま) */
+    select(n) {
+      this.selected = n & 0x0F;
+      const banks = this.banks, L = this.layout, add = this.banked ? this.selected * 0x40 : 0;
+      for (let i = 0; i < 0x80; i++) this.offset[i] = ((L[i >> 4] + (i & 0x0F) + (i >= 0x40 ? add : 0)) % banks) * BANK;
     }
   }
 
@@ -21823,7 +22035,11 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
- * PC エンジン本体(段階 9c: HuCard、2 ボタンパッド 1 個、波形メモリ音源、VDC/VCE 1 組)
+ * PC エンジン本体(段階 9c: HuCard、2 ボタンパッド 1 個、波形メモリ音源、VDC/VCE 1 組。
+ *   段階 9d: SuperGrafx(VDC 2 個+優先順位の石 pce/vpc.js+RAM 32K)、1MB 超のカード、RAM 内蔵カード、6 ボタンパッドとマルチタップ pce/pad.js)
+ *   opts: model 'auto'(既定。SuperGrafx 専用カードなら SuperGrafx)/ 'pce' / 'sgx'、pad 'pad2'(既定)/ 'pad6' / 'tap'、region 'auto' / 'pce'
+ *   [参照] SuperGrafx の I/O(PceVpc.cpp): $0000-$03FF は下位 5bit で分ける。$00-$07 = VDC1、$08-$0E = 優先順位の石、$10-$17 = VDC2、ほかの読みは $FF。
+ *          RAM は 32K(バンク $F8-$FB が別々)。1 サイクルの中の順番はタイマ → VDC2 → VDC1
  * MML.Emu.PceConsole
  *
  * 作り: CPU(cpuHuC6280.js)が 1 サイクルごとに tick() を呼ぶ。tick はマスタークロック(21.47727MHz)を高速時 3、低速時 12 進め、
@@ -21890,16 +22106,31 @@
       opts = opts || {};
       this.card = opts.card || new Emu.PceCard(romBytes);
       this.region = opts.region || 'auto';
+      this.sgx = opts.model === 'sgx' || (opts.model !== 'pce' && this.card.sgxOnly);
       this.mpr = new Uint8Array(8);
-      this.ram = new Uint8Array(BANK);
+      this.ram = new Uint8Array(this.sgx ? BANK * 4 : BANK);
+      this.ramMask = this.ram.length - 1;
+      this.cardRam = this.card.ramSize ? new Uint8Array(this.card.ramSize) : null;
+      this.cardBank = 0; // 1MB 超のカードの段(ステートに入れるため本体側にも持つ)
       this.cdRam = new Uint8Array(0x10000);
       this.bram = PceConsole.blankBram();
       this.timer = new Emu.PceTimer();
       this.vce = new Emu.PceVce();
       this.vdc = new Emu.PceVdc(this);
+      this.vdc2 = null; this.vpc = null;
+      if (this.sgx) {
+        this.vdc2 = new Emu.PceVdc(this, true);
+        this.vpc = new Emu.PceVpc(this);
+        // 行の終わり: 2 個目は何もしない(1 個目より先に行末へ着く)。1 個目の時に 2 個ぶんを重ねて、両方の行を消す
+        this.vdcRowEnd = (vdc) => { if (vdc !== this.vdc) return; this.vpc.merge(); this.vdc.row.fill(0); this.vdc2.row.fill(0); };
+        this.vdcLineStart = () => { this.vpc.lineStart(); };
+      }
+      this.input = new Emu.PceInput(opts.pad);
       this.apu = new Emu.APUHuC6280();
       this.cpu = new Emu.CPUHuC6280(this);
-      this.pad = [0, 0]; this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.pad = [0, 0, 0, 0, 0]; this.padHeld = [0, 0, 0, 0, 0]; this.padTurbo = [0, 0, 0, 0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      // パッド端子が読むボタンは pad[] そのもの(同じ配列)。巻き戻しの進め直し(nesRewind.js)が pad[0] へ直接書くので、写しを持つと届かない
+      this.input.buttons = this.pad;
       this.sampleRate = 0; this.sampleAcc = 0;
       this.ring = new Float32Array(AUDIO_RING); this.ringR = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0; this.underruns = 0;
       this.onWrite = null;   // (reg(0-9), value, frameFrac) 波形メモリ音源への書き込み
@@ -21915,12 +22146,14 @@
     }
 
     reset() {
-      this.ram.fill(0); this.cdRam.fill(0);
+      this.ram.fill(0); this.cdRam.fill(0); if (this.cardRam) this.cardRam.fill(0);
       this.mpr.fill(0);
+      this.cardBank = 0; this.card.select(0);
       this.timer.reset(); this.vce.reset(); this.vdc.reset(); this.apu.reset && this.apu.reset();
+      if (this.sgx) { this.vdc2.reset(); this.vpc.reset(); }
+      this.input.reset();
       this.clock = 0; this.cycleSteps = 4;
       this.timerIrq = false; this.irq2 = false; this.irqDisable = 0; this.ioBuffer = 0; this.mprBuffer = 0;
-      this.padSel = false; this.padClr = false;
       this.bramLocked = false; this.cdIrqEnable = 0; this.cdReset = 0; this.cdRegs = new Uint8Array(16); this.cdAdpcmBusy = 0;
       this.frameCount = 0; this.frameStart = 0; this._frameFlag = false; this._frameCb = false; this.lastFrameLen = LINE * 262;
       this.sampleAcc = 0;
@@ -21931,23 +22164,13 @@
     static blankBram() { const b = new Uint8Array(0x800); b.set([0x48, 0x55, 0x42, 0x4D, 0x00, 0xA0, 0x10, 0x80]); return b; }
 
     setSampleRate(sr) { this.sampleRate = sr; this.sampleAcc = 0; this.ringHead = 0; this.ringLen = 0; }
-    // ボタンのビットは NesConsole.BUTTON と同じ並び(A B SELECT START UP DOWN LEFT RIGHT)。A = I、B = II、START = RUN
-    setController(port, bits, turbo) { if (port) return; this.padHeld[0] = bits & 0xFF; this.padTurbo[0] = (turbo | 0) & 0xFF; this._applyPad(); }
+    // ボタンのビットは NesConsole.BUTTON と同じ並び(A B SELECT START UP DOWN LEFT RIGHT)。A = I、B = II、START = RUN。
+    // 6 ボタンパッドは続けて bit8-11 = III IV V VI。port 1-4 はマルチタップの 2〜5 番
+    setController(port, bits, turbo) { if (port < 0 || port > 4) return; this.padHeld[port] = bits & 0xFFF; this.padTurbo[port] = (turbo | 0) & 0xFFF; this._applyPad(); }
     setTurboRate(frames) { this.turboRate = Math.max(1, frames | 0); this.turboPhase = 0; this._applyPad(); }
     _applyPad() {
       const on = ((this.turboPhase / this.turboRate) | 0) === 0;
-      let p = this.padHeld[0] | (on ? this.padTurbo[0] : 0);
-      if ((p & 0x30) === 0x30) p &= ~0x30; // [参照] 上+下、左+右を同時に押したら、どちらも押していない扱い(PceController.h の既定)
-      if ((p & 0xC0) === 0xC0) p &= ~0xC0;
-      this.pad[0] = p;
-    }
-    _padRead() {
-      if (this.padClr) return 0;
-      const p = this.pad[0];
-      let v = 0x0F;
-      if (this.padSel) v &= ~(((p >> 4) & 1) | (((p >> 7) & 1) << 1) | (((p >> 5) & 1) << 2) | (((p >> 6) & 1) << 3)); // 上 右 下 左
-      else v &= ~(p & 0x0F);                                                                                           // I II SELECT RUN
-      return v & 0x0F;
+      for (let i = 0; i < 5; i++) this.pad[i] = this.padHeld[i] | (on ? this.padTurbo[i] : 0);
     }
 
     get hasBattery() { return true; }
@@ -21999,6 +22222,7 @@
     execFast() {
       this.clock += 3;
       if (this.timer.advance(3)) this.timerIrq = true;
+      if (this.vdc2) this.vdc2.exec();
       this.vdc.exec();
       const sr = this.sampleRate;
       if (sr) {
@@ -22019,7 +22243,7 @@
       this.frameCount++;
       this._frameFlag = true; this._frameDirty = true;
       this.lastFrameLen = this.clock - this.frameStart;
-      if (this.padTurbo[0] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
+      if (this.padTurbo[0] || this.padTurbo[1] || this.padTurbo[2] || this.padTurbo[3] || this.padTurbo[4] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
       if (this.rec) { this.rec.cur.len = this.lastFrameLen; this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       this.frameStart = this.clock;
       if (!this.sampleRate) this.apu.runToMaster(this.clock); // 音を取らない時も、音源の時計を溜めすぎない
@@ -22030,7 +22254,7 @@
     }
 
     // ── 割り込み ──
-    get irqActive() { return (this.irq2 ? LINE_IRQ2 : 0) | (this.vdc.irq ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0); }
+    get irqActive() { return (this.irq2 ? LINE_IRQ2 : 0) | ((this.vdc.irq || (this.vdc2 !== null && this.vdc2.irq)) ? LINE_IRQ1 : 0) | (this.timerIrq ? LINE_TIMER : 0); }
     irqLines() { return this.irqActive & ~this.irqDisable; }
 
     // ── MPR ──
@@ -22040,9 +22264,12 @@
     // ── バス ──
     read(addr) {
       const bank = this.mpr[addr >>> 13], off = addr & 0x1FFF;
-      if (bank < 0x80) return this.card.rom[this.card.offset[bank] + off];
+      if (bank < 0x80) {
+        if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) return this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF];
+        return this.card.rom[this.card.offset[bank] + off];
+      }
       if (bank === 0xFF) { const v = this.readIo(off); if (this.onIo) this.onIo('R', addr, v); return v; }
-      if (bank >= 0xF8 && bank <= 0xFB) return this.ram[off];
+      if (bank >= 0xF8 && bank <= 0xFB) return this.ram[(((bank - 0xF8) << 13) | off) & this.ramMask];
       if (bank === 0xF7) return (!this.bramLocked && off < 0x800) ? this.bram[off] : 0xFF;
       if (bank < 0x88) return this.cdRam[((bank - 0x80) << 13) | off];
       return 0xFF;
@@ -22050,23 +22277,33 @@
     write(addr, value) {
       const bank = this.mpr[addr >>> 13], off = addr & 0x1FFF;
       if (bank === 0xFF) { if (this.onIo) this.onIo('W', addr, value); this.writeIo(off, value); return; }
-      if (bank >= 0xF8 && bank <= 0xFB) { this.ram[off] = value; return; }
+      if (bank >= 0xF8 && bank <= 0xFB) { this.ram[(((bank - 0xF8) << 13) | off) & this.ramMask] = value; return; }
+      if (bank < 0x80) {
+        if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF] = value;
+        else if (this.card.banked && bank === 0 && (off & 0x1FF0) === 0x1FF0) { this.cardBank = off & 0x0F; this.card.select(this.cardBank); }
+        return;
+      }
       if (bank === 0xF7) { if (!this.bramLocked && off < 0x800) { this.bram[off] = value; this.bramDirty = true; } return; }
       if (bank >= 0x80 && bank < 0x88) this.cdRam[((bank - 0x80) << 13) | off] = value;
     }
     /** ST0/ST1/ST2 の書き先(VDC のポート 0/2/3)。MPR を通らない */
     stWrite(port, value) {
       if (this.onIo) this.onIo('W', port & 3, value);
-      this.vdc.write(port, value);
+      (this.vpc !== null && this.vpc.stToVdc2 ? this.vdc2 : this.vdc).write(port, value);
       this.cpu.idle();
     }
 
     readIo(off) {
-      if (off < 0x0400) { this.tick(); return this.vdc.read(off); }                       // VDC(1 サイクル待たされる)
-      if (off < 0x0800) { this.tick(); this.vdc.draw(); return this.vce.read(off); }      // VCE(同上)
+      if (off < 0x0400) {                                                                 // VDC(1 サイクル待たされる)
+        this.tick();
+        if (this.vpc === null) return this.vdc.read(off);
+        const r = off & 0x1F;
+        return r < 0x08 ? this.vdc.read(r) : r < 0x10 ? this.vpc.read(r) : r < 0x18 ? this.vdc2.read(r) : 0xFF;
+      }
+      if (off < 0x0800) { this.tick(); if (this.vdc2) this.vdc2.draw(); this.vdc.draw(); return this.vce.read(off); } // VCE(同上)
       if (off < 0x0C00) return this.ioBuffer;                                             // 波形メモリ音源は読めない
       if (off < 0x1000) { this.ioBuffer = (this.ioBuffer & 0x80) | (this.timer.read() & 0x7F); return this.ioBuffer; }
-      if (off < 0x1400) { this.ioBuffer = (this.region === 'pce' ? 0x40 : 0) | 0x30 | this._padRead(); return this.ioBuffer; }
+      if (off < 0x1400) { this.ioBuffer = (this.region === 'pce' ? 0x40 : 0) | 0x30 | this.input.read(); return this.ioBuffer; }
       if (off < 0x1800) {
         switch (off & 3) {
           case 2: this.ioBuffer = (this.ioBuffer & 0xF8) | (this.irqDisable & 7); break;
@@ -22079,8 +22316,17 @@
     }
 
     writeIo(off, value) {
-      if (off < 0x0400) { this.vdc.write(off, value); this.cpu.idle(); return; }
-      if (off < 0x0800) { this.vdc.draw(); this.vce.write(off, value); this.cpu.idle(); return; }
+      if (off < 0x0400) {
+        if (this.vpc === null) this.vdc.write(off, value);
+        else {
+          const r = off & 0x1F;
+          if (r < 0x08) this.vdc.write(r, value);
+          else if (r < 0x10) { if (r <= 0x0E) { this.vdc2.draw(); this.vdc.draw(); this.vpc.merge(); } this.vpc.write(r, value); } // 重ね方を変える前に、ここまでの分を今の決まりで重ねておく
+          else if (r < 0x18) this.vdc2.write(r, value);
+        }
+        this.cpu.idle(); return;
+      }
+      if (off < 0x0800) { if (this.vdc2) this.vdc2.draw(); this.vdc.draw(); this.vce.write(off, value); this.cpu.idle(); return; }
       if (off < 0x0C00) {
         const reg = off & 0x0F;
         this.apu.runToMaster(this.clock);
@@ -22093,7 +22339,7 @@
         return;
       }
       if (off < 0x1000) { this.timer.write(off, value); this.ioBuffer = value; return; }
-      if (off < 0x1400) { this.padSel = (value & 1) !== 0; this.padClr = (value & 2) !== 0; this.ioBuffer = value; return; }
+      if (off < 0x1400) { this.input.write(value); this.ioBuffer = value; return; }
       if (off < 0x1800) {
         switch (off & 3) {
           case 2: this.irqDisable = value & 7; break;
@@ -22197,7 +22443,7 @@
 
     static describe(pce) {
       const c = pce.card;
-      return `HuCard ${c.fileSize >> 10}K(${c.banks} バンク)${c.hadHeader ? ' ヘッダ 512 バイトを外した' : ''}${c.reversed ? ' ビットの逆順を戻した' : ''}${c.oversize ? ' 1MB 超=未対応' : ''}`;
+      return `${pce.sgx ? 'SuperGrafx ' : ''}HuCard ${c.fileSize >> 10}K(${c.banks} バンク)${c.banked ? ' バンク切り替えつき' : ''}${c.ramSize ? ' RAM 内蔵' : ''}${pce.input.type !== 'pad2' ? ' パッド=' + pce.input.type : ''}${c.hadHeader ? ' ヘッダ 512 バイトを外した' : ''}${c.reversed ? ' ビットの逆順を戻した' : ''}${c.oversize ? ' 1MB 超=未対応' : ''}`;
     }
   }
 
@@ -22220,7 +22466,8 @@
  *     出来上がった画面(vdc.out)は入れない(1 枚 330KB)。復元した直後の 1 フレームは、上半分が復元前の絵のままになる
  *   - 巻き戻し: 0.5 秒ごとのステート(1 分ぶん)+毎フレームのパッド値。逆再生の映像は、その時の画面を幅 292 に縮めて
  *     「色の番号 8bit+その画面の色表」で控える(PC エンジンは 512 色出せるので、1 画面に 256 色を超えた分は近い色に寄せる。逆再生の絵だけの話)
- * 形: { v: 1, machine: 'pce', romLen, romSum, tree }
+ * 形: { v: 1, machine: 'pce', romLen, romSum, sgx, tree }
+ *   本体の種類(SuperGrafx かどうか)が違うステートは読まない(VDC の数が違い、読むと落ちる)。パッドの種類は今の設定を保つ(ステートの物に戻さない)
  */
 (function (global) {
   'use strict';
@@ -22236,17 +22483,24 @@
 
   const PceState = {
     save(pce) {
-      return { v: 1, machine: 'pce', romLen: pce.card.rom.length, romSum: romSum(pce.card), tree: Emu.StateTree.snapshot(pce, [pce.card.rom, pce.vdc.out], SKIP_KEYS) };
+      return { v: 1, machine: 'pce', romLen: pce.card.rom.length, romSum: romSum(pce.card), sgx: !!pce.sgx, tree: Emu.StateTree.snapshot(pce, [pce.card.rom, pce.vdc.out].concat(pce.vdc2 ? [pce.vdc2.out, pce.vdc2.rowDiv] : []), SKIP_KEYS) };
     },
     // 同じ ROM で作ったステートを書き戻す。合わなければ false
     load(pce, state) {
       if (!state || state.v !== 1 || state.machine !== 'pce' || !state.tree) return false;
       if (state.romLen !== pce.card.rom.length || state.romSum !== romSum(pce.card)) return false;
-      const rec = pce.rec;
+      if (!!state.tree.sgx !== !!pce.sgx) return false;                  // 本体の種類が違う
+      const rec = pce.rec, padType = pce.input.type;
       Emu.StateTree.restore(pce, state.tree);
+      pce.input.type = padType;                                           // パッドの種類は今の設定が正
+      // 9c のステート(パッドが 2 個ぶん、SEL/CLR を本体に持っていた形)を読んだ時の埋め合わせ
+      for (const k of ['pad', 'padHeld', 'padTurbo']) { const a = pce[k]; while (a.length < 5) a.push(0); }
+      if (state.tree.padSel !== undefined) { pce.input.sel = !!state.tree.padSel; pce.input.clr = !!state.tree.padClr; }
+      pce.input.buttons = pce.pad;                                        // 同じ配列を指し直す
       pce.rec = rec;                       // 録音中ならそのまま続ける
       pce.ringHead = 0; pce.ringLen = 0;   // 音のリングは捨てる
       pce._frameFlag = false; pce._frameCb = false; pce._frameDirty = true;
+      pce.card.select(pce.cardBank | 0);   // 1MB 超のカードの段(カードそのものはステートに入れていない)
       return true;
     },
   };
@@ -28897,7 +29151,7 @@
                 info = MML.Emu.GbConsole.describe(nes);
               }
             } else if (machine === 'pce') {
-              nes = new MML.Emu.PceConsole(new Uint8Array(m.rom), { region: (m.pce && m.pce.region) || 'auto' });
+              nes = new MML.Emu.PceConsole(new Uint8Array(m.rom), { region: (m.pce && m.pce.region) || 'auto', model: (m.pce && m.pce.model) || 'auto', pad: (m.pce && m.pce.pad) || 'pad2' });
               info = MML.Emu.PceConsole.describe(nes);
             } else if (machine === 'cps3') {
               // CP システム III: BIOS、プログラム(SIMM1/2 の像)、波形と絵(SIMM3 以降の像)、ゲームの名前。主スレッドが CD から取り出して送る

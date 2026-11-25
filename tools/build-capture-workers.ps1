@@ -268,6 +268,8 @@ $bundles = @(
             'src\emulator\pce\pceTimer.js',
             'src\emulator\pce\vce.js',
             'src\emulator\pce\vdc.js',
+            'src\emulator\pce\vpc.js',
+            'src\emulator\pce\pad.js',
             'src\emulator\pce\card.js',
             'src\emulator\pce\pceConsole.js',
             'src\emulator\pce\pceState.js',

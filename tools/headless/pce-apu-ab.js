@@ -39,6 +39,7 @@ if (has('--selfcheck')) {
   const endT = parseInt(arg('--frames', '600'), 10) * 1365 * 262;
   const stateOf = (apu) => apu.ch.map((c, i) => { let sum = 0; for (let k = 0; k < 32; k++) sum += c.wave[k] * (k + 1); return [c.timer, c.wavePos, c.out, sum, c.lfsr, c.noiseTimer, c.noiseOut].join(','); }).join('|');
   const run = (file, chunked) => {
+    MML.Emu.HesPlayer.DEFER_VBLANK = false; // Mesen には無い救済(タイマ処理中は垂直帰線を後回し)は切って比べる
     const p = new MML.Emu.HesPlayer(readBytes(file));
     const bus = p.bus, apu = p.apu, log = [];
     apu.forceChunked = chunked;
@@ -164,6 +165,7 @@ if (frameEnds.length < frames - 2) { console.log(`Mesen が記録を出しませ
 // ── 自前 ──
 const { load } = require('./load');
 const { MML } = load({ strict: true });
+MML.Emu.HesPlayer.DEFER_VBLANK = false; // Mesen には無い救済(タイマ処理中は垂直帰線を後回し)は切って比べる
 const p = new MML.Emu.HesPlayer(new Uint8Array(bytes));
 const bus = p.bus, cpu = p.cpu, apu = p.apu;
 if (typeof apu.runToMaster !== 'function') { console.error('この音源の実装は時刻つきで進められません(apu.runToMaster が無い。9b の作り直し前)'); process.exit(1); }

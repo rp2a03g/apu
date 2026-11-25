@@ -12,6 +12,7 @@
  *             タイル 64 個と BAT(仮想画面いっぱい)、スプライトの絵とスプライト表を VRAM へ(TIA のブロック転送)、表示を入れて待つ。
  *   IRQ1: VDC のステータスを読んで RAM に控え(最後の 1 個と、ビットごとの回数)、走査線の割り込みなら横スクロールを変え、
  *         垂直帰線なら横スクロールを戻して縦スクロールを 1 進める。場面によっては VRAM を読み返したり、VRAM 間の転送を掛けたりする。
+ *   場面 'pad' はパッドの端子を決まった順に読む。場面 'sgx' 'sgxmix' は SuperGrafx(.sgx で書き出す。2 個目の VDC と優先順位の石)。
  *   タイマ: 場面 'timer' だけ。割り込みごとに波形メモリ音源の DDA に値を書く(録音の時刻の確認用)。
  * 絵は式で作った模様(著作物ではない)。
  */
@@ -129,6 +130,14 @@ const SCENES = {
   vramio: { vce: 0x00, regs: Object.assign({ 0x09: 0x0010, 0x0F: 0x0012 }, HV_256), cr: 0xC8, sprites: ROW(100, 4, 40, 0x0080), readback: true, dma: true },
   // 表示中(垂直帰線の外)に VRAM へ書き続ける: 待たされ方の確認
   busy: { vce: 0x00, regs: Object.assign({ 0x09: 0x0010 }, HV_256), cr: 0xC8, sprites: ROW(100, 12, 18, 0x0080), busyWrite: true },
+  // パッドの端子: SEL/CLR を決まった順に上げ下げしながら読む(6 ボタンの見分け、マルチタップの番送り)。読んだ値は RAM $2300〜
+  pad: { vce: 0x00, regs: Object.assign({ 0x09: 0x0010 }, HV_256), cr: 0xC8, sprites: [], padSeq: [1, 3, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 3, 1, 0, 2, 0, 1, 3, 1, 0, 3, 0, 1, 0] },
+  // SuperGrafx: 2 個目の VDC にも BG とスプライトを出し、窓 2 つで重ね方を 4 通りに分ける(拡張子 .sgx で書き出す)
+  sgx: { sgx: true, vce: 0x00, regs: Object.assign({ 0x09: 0x0010 }, HV_256), cr: 0xC8, sprites: ROW(60, 8, 30, 0x0080),
+    vpc: { 0x08: 0xB7, 0x09: 0x23, 0x0A: 120, 0x0B: 0, 0x0C: 200, 0x0D: 0 }, sprites2: ROW(90, 8, 26, 0x0081, 2) },
+  // SuperGrafx: 重ね方を毎フレーム書き換える(行の途中ではなく垂直帰線で)+ ST0-2 の書き先を VDC2 に切り替える
+  sgxmix: { sgx: true, vce: 0x00, regs: Object.assign({ 0x09: 0x0010 }, HV_256), cr: 0xC8, sprites: ROW(100, 6, 34, 0x0080),
+    vpc: { 0x08: 0x37, 0x09: 0x7B, 0x0A: 80, 0x0B: 0, 0x0C: 160, 0x0D: 0 }, sprites2: ROW(110, 6, 30, 0x0082, 1), vpcFlip: true },
   // タイマ割り込みで DDA
   timer: { vce: 0x00, regs: Object.assign({ 0x09: 0x0010 }, HV_256), cr: 0xC8, sprites: [], timer: 3 },
 };
@@ -150,6 +159,9 @@ function buildTestRom(name) {
   const satb = new Array(256).fill(0);
   (sc.sprites || []).slice(0, 64).forEach((s, i) => { satb[i * 4] = s[0] & 0x3FF; satb[i * 4 + 1] = s[1] & 0x3FF; satb[i * 4 + 2] = (0x5000 >> 5) + ((s[2] & 7) << 1); satb[i * 4 + 3] = s[3]; });
   const satbAt = place(wordsToBytes(satb));
+  const satb2 = new Array(256).fill(0);
+  (sc.sprites2 || []).slice(0, 64).forEach((s, i) => { satb2[i * 4] = s[0] & 0x3FF; satb2[i * 4 + 1] = s[1] & 0x3FF; satb2[i * 4 + 2] = (0x5000 >> 5) + ((s[2] & 7) << 1); satb2[i * 4 + 3] = s[3]; });
+  const satb2At = sc.sgx ? place(wordsToBytes(satb2)) : 0;
   // BAT は 1 行ぶん(128 語)の模様を 2 種類持ち、行ごとに交互に転送する(ROM を小さく保つ)
   const batRow = (k) => { const o = []; for (let x = 0; x < 128; x++) o.push((((x + k * 3) & 15) << 12) | (0x100 + ((x * 5 + k * 11) & 63))); return o; };
   const batA = place(wordsToBytes(batRow(0))), batB = place(wordsToBytes(batRow(1)));
@@ -175,6 +187,21 @@ function buildTestRom(name) {
   a.vreg(0x00, 0x5000).st0(0x02).tia(sprAt, 0x0002, 8 * 64 * 2);
   a.vreg(0x00, 0x7F00).st0(0x02).tia(satbAt, 0x0002, 512);
   a.vreg(0x13, 0x7F00);
+  if (sc.sgx) {
+    // 2 個目の VDC($0010-$0013)。ST0-2 は使わず番地で書く
+    const v2 = (r, v) => a.lda(r).staAbs(0x0010).lda(v & 0xFF).staAbs(0x0012).lda((v >> 8) & 0xFF).staAbs(0x0013);
+    v2(0x05, 0x0000);
+    for (const r of Object.keys(sc.regs)) v2(+r, sc.regs[r]);
+    v2(0x07, 0x0004); v2(0x08, 0x0006);                                  // スクロールを少しずらす
+    v2(0x00, 0x1000); a.lda(0x02).staAbs(0x0010).tia(tilesAt, 0x0012, 64 * 16 * 2);
+    v2(0x00, 0x0000); a.lda(0x02).staAbs(0x0010);
+    for (let y = 0; y < rows; y++) a.tia((y & 1) ? batA : batB, 0x0012, cols * 2);   // 1 個目と行の模様を入れ替える
+    v2(0x00, 0x5000); a.lda(0x02).staAbs(0x0010).tia(sprAt, 0x0012, 8 * 64 * 2);
+    v2(0x00, 0x7F00); a.lda(0x02).staAbs(0x0010).tia(satb2At, 0x0012, 512);
+    v2(0x13, 0x7F00);
+    v2(0x05, sc.cr & 0xC0);                                              // 表示だけ入れる(割り込みは 1 個目から)
+    for (const r of Object.keys(sc.vpc)) a.lda(sc.vpc[r]).staAbs(+r);
+  }
   if (sc.dma) a.vreg(0x10, 0x1000).vreg(0x11, 0x6000).vreg(0x12, 0x00FF); // VRAM 間の転送($1000 → $6000、256 語)
   // RAM の控えを 0 に
   a.ldx(0x00).lda(0x00).label('clr').staAbsX(0x2200).inx().bne('clr');
@@ -186,6 +213,7 @@ function buildTestRom(name) {
   a.lda(sc.timer !== undefined ? 0x01 : 0x05).staAbs(0x1402);          // IRQ1(とタイマ)だけ通す。IRQ2 は止める
   a.vreg(0x05, sc.cr);
   a.cli();
+  if (sc.padSeq) sc.padSeq.forEach((v, i) => { a.lda(v).staAbs(0x1000).ldaAbs(0x1000).staAbs(0x2300 + i); });
   a.label('main');
   if (sc.busyWrite) a.vreg(0x00, 0x6800).st0(0x02).st1(0x55).st2(0xAA).st1(0x33).st2(0xCC).st1(0x0F).st2(0xF0).incAbs(0x2210);
   a.jmp('main');
@@ -206,6 +234,13 @@ function buildTestRom(name) {
     for (let i = 0; i < 16; i++) a.ldaAbs(0x0002).staAbs(0x2220 + i * 2).ldaAbs(0x0003).staAbs(0x2221 + i * 2);
   }
   if (sc.dma) a.vreg(0x10, 0x1000).vreg(0x11, 0x6000).vreg(0x12, 0x00FF);
+  if (sc.padSeq) sc.padSeq.forEach((v, i) => { a.lda(v).staAbs(0x1000).ldaAbs(0x1000).staAbs(0x2340 + i); });
+  if (sc.vpcFlip) {
+    // 偶数フレームと奇数フレームで重ね方を入れ替え、ST0-2 の書き先も切り替える(奇数の時は ST で VDC2 の横スクロールを書く)
+    a.ldaAbs(0x2208).and(0x01).beq('even')
+      .lda(0x7B).staAbs(0x0008).lda(0x37).staAbs(0x0009).lda(0x01).staAbs(0x000E).st0(0x07).ldaAbs(0x2208).staAbs(0x0012).stzAbs(0x0013).stzAbs(0x000E).jmp('vpcdone')
+      .label('even').lda(0x37).staAbs(0x0008).lda(0x7B).staAbs(0x0009).label('vpcdone');
+  }
   a.label('novbl').plx().pla().rti();
   // タイマ
   a.label('timer').pha().staAbs(0x1403).incAbs(0x2209).ldaAbs(0x2209).and(0x1F).staAbs(0x0806).pla().rti();
@@ -225,7 +260,7 @@ if (require.main === module) {
   const out = arg('--out', null);
   if (!out) { console.error('usage: node tools/headless/mk-pce-test-rom.js --out <フォルダ> | --list'); process.exit(2); }
   fs.mkdirSync(out, { recursive: true });
-  for (const k of Object.keys(SCENES)) { fs.writeFileSync(path.join(out, k + '.pce'), buildTestRom(k)); }
+  for (const k of Object.keys(SCENES)) { fs.writeFileSync(path.join(out, k + (SCENES[k].sgx ? '.sgx' : '.pce')), buildTestRom(k)); }
   console.log(`${Object.keys(SCENES).length} 本を書き出しました: ${out}`);
 }
 module.exports = { buildTestRom, SCENES };

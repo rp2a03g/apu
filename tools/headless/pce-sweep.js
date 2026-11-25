@@ -81,6 +81,7 @@ for (const file of files) {
     const track = (first + k) & 0xFF;
     const r = { file: path.basename(file), track };
     try {
+      E.HesPlayer.DEFER_VBLANK = process.env.PCE_HES_DEFER !== '0'; // 救済(タイマ処理中は垂直帰線を後回し)。既定は入。PCE_HES_DEFER=0 で切って回す
       const p = new E.HesPlayer(bytes);
       const seq = [];
       let dda = 0, h = 2166136261 | 0;

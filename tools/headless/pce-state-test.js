@@ -14,6 +14,7 @@ const file = process.argv.slice(2).find(a => !a.startsWith('--') && /\.(pce|sgx)
 if (!file) { console.error('usage: node tools/headless/pce-state-test.js "game.pce" [--frames 600]'); process.exit(2); }
 const N = parseInt(arg('--frames', '600'), 10);
 const rom = readBytes(file);
+const OPT = { model: /.sgx$/i.test(file) ? 'sgx' : 'auto' }; // 拡張子 .sgx は SuperGrafx として回す
 const hash = (a) => { let h = 2166136261 | 0; for (let i = 0; i < a.length; i++) h = Math.imul(h ^ a[i], 16777619) | 0; return h >>> 0; };
 const frameHash = (p) => hash(new Uint8Array(p.frame.buffer, p.frame.byteOffset, p.frame.byteLength));
 
@@ -21,7 +22,7 @@ ok(E.Image.detect(rom, 'x.pce').kind === 'pce', '中身判定 .pce');
 ok(E.Image.detect(rom, 'x.bin') === null || E.Image.detect(rom, 'x.bin').kind !== 'pce', '拡張子が .pce でなければ PC エンジンとは決めない');
 
 // ステート: N フレーム目で保存 → 120 進めて控える → 復元 → 同じだけ進めて同じか(画面、PC、マスタークロック、VRAM、音源の状態)
-const pce = new E.PceConsole(rom); pce.setSampleRate(44100);
+const pce = new E.PceConsole(rom, OPT); pce.setSampleRate(44100);
 for (let f = 0; f < N; f++) pce.runFrame();
 // 命令の途中・行の途中で保存しても続きが同じになるか見るため、フレームの境目から少し進めた所で取る
 for (let i = 0; i < 777; i++) pce.cpu.step();
@@ -39,7 +40,7 @@ const other = rom.map((b) => b ^ 1); // 全バイトを変えた別物(頭に 51
 ok(!E.PceState.load(new E.PceConsole(other), copy), '別の ROM のステートは拒否');
 
 // 巻き戻し
-const p2 = new E.PceConsole(rom); const rw = new E.PceRewind(p2);
+const p2 = new E.PceConsole(rom, OPT); const rw = new E.PceRewind(p2);
 // 戻る先は控えのフレーム(30 の倍数)を外す: ちょうど控えのフレームへ戻ると、絵は次のフレームが出来るまで前の物が残る(NES/GB と同じ。出来上がった絵は控えに入れていない)
 const want = { f: N + 30 + ((N + 30) % 30 === 0 ? 7 : 0) }; const total = N + 100;
 for (let f = 0; f < total; f++) { p2.setController(0, f % 50 < 10 ? 8 : 0); p2.runFrame(); rw.onFrame(); if (p2.frameCount === want.f) { want.h = frameHash(p2); want.ck = p2.clock; } }
@@ -51,10 +52,10 @@ rw.endReverse();
 // 取った控えを別の本体に読ませ、同じ入力で 60 フレーム進めて、毎フレームの時計と PC、最後の画面が元と同じか
 {
   const padOf = (f) => (f % 50 < 10 ? 8 : 0);
-  const p4 = new E.PceConsole(rom); const log = {}; let st4 = null, h4 = 0;
+  const p4 = new E.PceConsole(rom, OPT); const log = {}; let st4 = null, h4 = 0;
   p4.onFrame = () => { log[p4.frameCount] = p4.clock + ':' + p4.cpu.PC; if (p4.frameCount === want.f) st4 = structuredClone(E.PceState.save(p4)); if (p4.frameCount === want.f + 60) h4 = frameHash(p4); };
   for (let f = 0; f < want.f + 60; f++) { p4.setController(0, padOf(f)); p4.runFrame(); }
-  const p5 = new E.PceConsole(rom); let bad = null, h5 = 0;
+  const p5 = new E.PceConsole(rom, OPT); let bad = null, h5 = 0;
   const loaded = E.PceState.load(p5, st4);
   p5.onFrame = () => { if (!bad && log[p5.frameCount] !== p5.clock + ':' + p5.cpu.PC) bad = p5.frameCount; if (p5.frameCount === want.f + 60) h5 = frameHash(p5); };
   for (let f = want.f; f < want.f + 60; f++) { p5.setController(0, padOf(f)); p5.runFrame(); }
@@ -62,7 +63,7 @@ rw.endReverse();
 }
 
 // 録音 → VGM → 読み直し
-const p3 = new E.PceConsole(rom);
+const p3 = new E.PceConsole(rom, OPT);
 const runPad = (f) => (f >= 200 && f % 120 < 8 ? 8 : 0);
 for (let f = 0; f < N; f++) { p3.setController(0, runPad(f)); p3.runFrame(); }
 p3.startRecording();

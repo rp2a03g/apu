@@ -52,7 +52,7 @@ if (require.main === module) {
   if (!file) { console.error('ROM を指定してください(.pce)'); process.exit(2); }
   const { MML } = load({ strict: true });
   const SR = 44100;
-  const pce = new MML.Emu.PceConsole(readBytes(file), { region: arg('--region', 'auto') });
+  const pce = new MML.Emu.PceConsole(readBytes(file), { region: arg("--region", "auto"), model: arg("--model", /.sgx$/i.test(file) ? "sgx" : "auto"), pad: arg("--pad", "pad2") });
   console.log(`${path.basename(file)}: ${MML.Emu.PceConsole.describe(pce)}`);
   const aL = [], aR = [];
   if (audioOut) pce.setSampleRate(SR);
