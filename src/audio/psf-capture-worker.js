@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-26 12:32:50
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 14:53:17
  *
  * regsOnly capture worker bundle (psfCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.psfCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.psfCaptureBuiltAt = '2026-11-26 12:32:50';
+  MML.WorkerBundles.psfCaptureBuiltAt = '2026-11-26 14:53:17';
   MML.WorkerBundles.psfCapture = function () {
 /*
  * PSF (Portable Sound Format) 容器 / PS-EXE 解析
@@ -5798,6 +5798,8 @@
     if (k5) return { section: 'expansion', chip: 'k054539', type: 'array', index: +k5[1] - 1 };
     // VGM: MSM5205/6585(PC Engine CD ADPCM等、1ch)。chip.mute[]は1要素
     if (id === 'M5') return { section: 'expansion', chip: 'msm5205', type: 'array', index: 0 };
+    // PC エンジン CD-ROM² のゲーム画面: CD-DA(CD の音声トラック)。1 行
+    if (id === 'CDA') return { section: 'expansion', chip: 'pcecdda', type: 'array', index: 0 };
     // VGM: SegaPCM(SP1-16)。chip.mute[]はch 0-15
     const sp = id.match(/^SP(\d+)$/);
     if (sp) return { section: 'expansion', chip: 'segapcm', type: 'array', index: +sp[1] - 1 };
@@ -7122,6 +7124,15 @@
         ...panVolFields(c) });
     }
 
+    if (chips.includes('pcecdda')) {
+      // PC エンジン CD-ROM² の CD-DA(ゲーム画面のライブ表示だけ。VGM には音声が入らないので、VGM の再生では出ない)。
+      // 音程も音量のレジスタも無いので「鳴っているかどうか」だけの行(消音と音量のつまみのため)
+      const s = extraSnaps && extraSnaps.pcecdda ? extraSnaps.pcecdda[frameIdx] : null;
+      const c = s ? s[0] : { vol: 0, rawVol: 0, rawVolMax: 1, active: false, panNone: true };
+      channels.push({ id: 'CDA', color: '#8fd0ff', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 1, wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: 44100,
+        ...panVolFields(c) });
+    }
+
     if (chips.includes('segapcm')) {
       // SegaPCM(VGM: OutRun/After Burner等): 16ch ステレオPCM。GA1-4行と同じ3段階表示
       // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。デルタレジスタで
@@ -7940,6 +7951,34 @@
       if (!apu) return null;
       for (const w of writes) if (!w.read && w.addr >= 0 && w.addr <= 9) apu.writeRegister(0x0800 | w.addr, w.value);
       return E.snapshotHuC6280Apu(apu);
+    };
+  }
+  // PC エンジン CD-ROM² のゲーム画面: ADPCM(nesScreen.js toLiveWrites が番地 0x60000 で流す。値の下位 4bit = 符号、bit4 = 再生の始まり、bit5 = 止まった)。
+  // VGM の再生と同じ MSM5205(本体と同じ「減衰なし」の計算)に流して、M5 の行の形にする
+  function makePceAdpcmStepper() {
+    const E = MML.Emu;
+    const chip = E.MSM5205Audio ? new E.MSM5205Audio(1536000, 6, false) : null;
+    if (chip) chip.noLeak = true;
+    return (writes) => {
+      if (!chip) return null;
+      for (const w of writes) {
+        if (w.addr !== 0x60000) continue;
+        if (w.value & 0x30) { chip.write(0, 1); chip.write(0, 0); }
+        if (!(w.value & 0x20)) { chip.write(1, w.value & 0x0F); chip._consume(); }
+      }
+      return E.snapshotMSM5205(chip);
+    };
+  }
+  // 同じく CD-DA(番地 0x60001。値 = 操作の番号: 1 再生、2 一時停止、3 停止、5 終わりの指定=再生。1 の時 bit4 = 一時停止で始める)
+  function makePceCddaStepper() {
+    let playing = false;
+    return (writes) => {
+      for (const w of writes) {
+        if (w.addr !== 0x60001) continue;
+        const op = w.value & 0x0F;
+        if (op === 1) playing = !(w.value & 0x10); else if (op === 5) playing = true; else if (op === 2 || op === 3) playing = false;
+      }
+      return [{ active: playing, vol: playing ? 1 : 0, volApparent: playing ? 1 : 0, rawVol: playing ? 1 : 0, rawVolMax: 1, panNone: true }];
     };
   }
   function makeFme7Stepper() {
@@ -10954,6 +10993,10 @@
       if (this._chips.includes('kss')) { steppers.kss = makeKssStepper(this._chips); ex.kssPsg = []; ex.kssScc = []; ex.kssOpll = []; ex.kssDac = []; ex.opl = []; } // MSX のゲーム画面(KSS 形式の書き込み列)
       if (this._chips.includes('gbs')) { steppers.gb = makeGbStepper(); ex.gbsApu = []; } // GB のゲーム画面
       if (this._chips.includes('hes')) { steppers.pce = makePceStepper(); ex.hesApu = []; } // PC エンジンのゲーム画面
+      if (this._chips.includes('pcecdda')) { // CD-ROM²: ADPCM(M5 の行)と CD-DA(CDA の行)
+        steppers.pceAdpcm = makePceAdpcmStepper(); ex.msm5205 = []; ex.msm5205Live = null;
+        steppers.pceCdda = makePceCddaStepper(); ex.pcecdda = [];
+      }
       const cps3Rom = (opts && opts.cps3Rom) || null;
       if (this._chips.includes('cps3')) { steppers.cps3 = makeCps3Stepper(cps3Rom); ex.cps3 = []; } // CPS3 のゲーム画面
       const zsg2Rom = (opts && opts.zsg2Rom) || null;
@@ -11003,6 +11046,8 @@
       if (lr.steppers.kss) { const k = lr.steppers.kss(writes); ex.kssPsg[f] = k.psg; ex.kssScc[f] = k.scc; ex.kssOpll[f] = k.opll; ex.kssDac[f] = k.dac; ex.opl[f] = k.opl; }
       if (lr.steppers.gb) ex.gbsApu[f] = lr.steppers.gb(writes);
       if (lr.steppers.pce) ex.hesApu[f] = lr.steppers.pce(writes);
+      if (lr.steppers.pceAdpcm) ex.msm5205[f] = lr.steppers.pceAdpcm(writes);
+      if (lr.steppers.pceCdda) ex.pcecdda[f] = lr.steppers.pceCdda(writes);
       if (lr.steppers.cps3) ex.cps3[f] = lr.steppers.cps3(writes);
       if (lr.steppers.zsg2) ex.zsg2[f] = lr.steppers.zsg2(writes);
       if (lr.steppers.es5505) ex.es5505[f] = lr.steppers.es5505(writes);
@@ -11043,9 +11088,11 @@
       if (f === st.totalFrames) return;
       st.writeLog.length = f; st.regSnapshots.length = f; st.totalFrames = f;
       const ex = this._extraSnaps;
-      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu', 'cps3', 'zsg2', 'es5505']) if (ex[k]) ex[k].length = f;
+      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu', 'cps3', 'zsg2', 'es5505', 'pcecdda'].concat(lr.steppers.pceAdpcm ? ['msm5205'] : [])) if (ex[k]) ex[k].length = f;
       if (lr.steppers.gb) lr.steppers.gb = makeGbStepper();
       if (lr.steppers.pce) lr.steppers.pce = makePceStepper();
+      if (lr.steppers.pceAdpcm) lr.steppers.pceAdpcm = makePceAdpcmStepper();
+      if (lr.steppers.pceCdda) lr.steppers.pceCdda = makePceCddaStepper();
       if (lr.steppers.cps3) lr.steppers.cps3 = makeCps3Stepper(lr.cps3Rom);
       if (lr.steppers.zsg2) lr.steppers.zsg2 = makeZsg2Stepper(lr.zsg2Rom);
       if (lr.steppers.es5505) lr.steppers.es5505 = makeEs5505Stepper(lr.es5505Rom);

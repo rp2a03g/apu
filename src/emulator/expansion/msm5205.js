@@ -57,6 +57,9 @@
       this.initBitWidth = ((flags || 0) & 0x04) ? 4 : 3;
       this.mute = [false];
       this.vol = [1];
+      // true にすると、信号を「減衰なし・12bit で折り返す」計算にする(本ツールの PC エンジン本体 pce/adpcm.js と同じ。Mesen 2 の計算)。
+      // 本ツールが録った PC エンジン CD-ROM² の VGM を鳴らす時だけ vgmPlayer.js が立てる。ほかの VGM は libvgm と同じ減衰つきのまま
+      this.noLeak = false;
       this.reset();
     }
 
@@ -127,8 +130,11 @@
       data &= 0x0F;
       const diff = DIFF[this.step * 16 + data];
       // ★加算ではなく減衰付き(libvgm: ((sample << 8) + (signal * 245)) >> 8)
-      this.signal = ((diff << 8) + (this.signal * 245)) >> 8;
-      if (this.signal > 2047) this.signal = 2047; else if (this.signal < -2048) this.signal = -2048;
+      if (this.noLeak) this.signal = ((this.signal + diff + 2048) & 0xFFF) - 2048;
+      else {
+        this.signal = ((diff << 8) + (this.signal * 245)) >> 8;
+        if (this.signal > 2047) this.signal = 2047; else if (this.signal < -2048) this.signal = -2048;
+      }
       this.step += INDEX_SHIFT[data & 7];
       if (this.step > 48) this.step = 48; else if (this.step < 0) this.step = 0;
     }

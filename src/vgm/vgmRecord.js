@@ -368,11 +368,11 @@
   // 入力: { frames: [[write...]...], name, creator, notes }
   //   write = { addr(音源のレジスタ 0-9 = $0800-$0809), value, t(画面の頭からのマスタークロック) }、
   //   frames[f].len = その画面の長さ(マスタークロック)。無ければ、その画面の最後の要素 { len }。それも無ければ 1365×263
-  //   { adpcm: 12bit の出力, rate, t } と { cd: 操作の並び, t } は CD-ROM² の物(規格外ブロック PCEX。vgmHeader.js)
+  //   { adpcm: 4bit の符号, first(再生の始まり), t }・{ adpcmStop: 1, t } は CD-ROM² の ADPCM(正規の MSM5205 として入れる)、{ cd: 操作の並び, t } は CD-DA(規格外ブロック PCEX。vgmHeader.js)
   //   波形メモリ音源は VGM の正規チップ: ヘッダ $A4 にクロック 3579545(マスタークロック÷6)、0xB9 aa dd。
   //   1 画面は 262 行なら 734.3 サンプル、263 行なら 737.1 サンプルで 0x62(735)に乗らないので、時刻は録音頭からの通算を
   //   サンプルへ換算して 0x61 で待つ(GB と同じ)。画面の中の時刻も保たれるので、DDA(PCM)の間隔がそのまま残る。
-  const PCE_MASTER = 21477270, PCE_FRAME = 1365 * 263, PCE_CHIP_CLOCK = 3579545;
+  const PCE_MASTER = 21477270, PCE_FRAME = 1365 * 263, PCE_CHIP_CLOCK = 3579545, PCE_ADPCM_CLOCK = 1536000;
   VGM.encodePceRecording = function (rec) {
     const frames = rec.frames || [];
     const body = [];
@@ -387,11 +387,12 @@
       if (s > emitted) emitted = s;
     };
     const toSample = (t) => Math.floor(t * 44100 / PCE_MASTER);
-    // CD-ROM²: ADPCM の出力と CD-DA の操作は規格外ブロック PCEX(vgmHeader.js)。ADPCM は「続いている間」を 1 ブロックにまとめる
+    // CD-ROM²: ADPCM は VGM の正規の MSM5205(0x32 dd。上位 = レジスタ、下位 = 値)。再生の 1 個ごとに 4bit の符号を「データ」(レジスタ 1)へ書く。
+    //   石は「クロック ÷ 48」の速さで FIFO から取り出すので、クロックを 1,536,000(÷48 = 32000Hz = PC エンジンの最高の速さ)にしておけば、書いた間隔がそのまま再生の速さになる。
+    //   再生の始まりと終わりには「リセット」(レジスタ 0)を 1 → 0 と書いて、信号と段を 0 に戻す。CD-DA の操作は規格外ブロック PCEX(vgmHeader.js)
     const PX = VGM.PCEX;
     const pcex = (kind, payload) => { const b = [].concat(PX.MAGIC, [PX.VERSION, kind], payload); body.push(0x67, 0x66, PX.TYPE, ...u32(b.length), ...b); };
-    let run = null, adpcmN = 0, cdOps = 0; // run = { rate, t(通算の時刻), next(次の 1 個が来るはずの時刻), data }
-    const flushRun = () => { if (!run) return; flushWait(toSample(run.t)); pcex(PX.KIND_ADPCM, [run.rate].concat(run.data)); run = null; };
+    let adpcmN = 0, cdOps = 0;
     const isCd = !!rec.cd || frames.some((l) => l && l.some((w) => w.adpcm !== undefined || w.cd !== undefined));
     // ヘッダ(HuCard の録音にも付ける): 印と、1 画面の長さ(一番多かった長さ。262 行と 263 行で違う。録音の補正がフレームの格子に使う)
     const lenOf = (l) => { const t = l && l.length ? l[l.length - 1] : null; return l && l.len > 0 ? l.len : (t && t.len > 0 ? t.len : 0); };
@@ -404,18 +405,14 @@
       const len = list.len > 0 ? list.len : (tail && tail.len > 0 ? tail.len : PCE_FRAME); // 配列に付けた len は Worklet 越しだと落ちるので、最後の要素 { len } も見る
       for (let i = 0; i < list.length; i++) {
         const w = list[i];
-        if (w.adpcm !== undefined) {
-          const t = baseT + Math.max(0, Math.min(len - 1, w.t | 0)), step = PCE_MASTER * (16 - (w.rate & 0x0F)) / 32000;
-          // 速さが変わった、間が空いた(1 個半以上)、長くなりすぎた(約 0.25 秒ぶん)時は区切る
-          if (run && (run.rate !== (w.rate & 0x0F) || Math.abs(t - run.next) > step * 0.5 || run.data.length >= 8192)) flushRun();
-          if (!run) run = { rate: w.rate & 0x0F, t, next: t, data: [] };
-          run.data.push(w.adpcm & 0xFF, (w.adpcm >> 8) & 0x0F); run.next += step; adpcmN++;
+        if (w.adpcm !== undefined || w.adpcmStop) {
+          flushWait(toSample(baseT + Math.max(0, Math.min(len - 1, w.t | 0))));
+          if (w.adpcmStop || w.first) body.push(0x32, 0x01, 0x32, 0x00); // リセットを入れて戻す
+          if (w.adpcm !== undefined) { body.push(0x32, 0x10 | (w.adpcm & 0x0F)); adpcmN++; }
           continue;
         }
-        if (w.cd !== undefined) { if (w.cd && w.cd[0]) { flushRun(); flushWait(toSample(baseT + Math.max(0, Math.min(len - 1, w.t | 0)))); pcex(PX.KIND_CDDA, w.cd); cdOps++; } continue; }
+        if (w.cd !== undefined) { if (w.cd && w.cd[0]) { flushWait(toSample(baseT + Math.max(0, Math.min(len - 1, w.t | 0)))); pcex(PX.KIND_CDDA, w.cd); cdOps++; } continue; }
         if (w.addr === undefined) continue;
-        // ADPCM のブロックは 1 個目の時刻に置く。時刻がそれより先の書き込みを出す前に区切らないと、ブロックが後ろへずれて遅れて鳴る(見直しの指摘)
-        if (run && toSample(baseT + Math.max(0, Math.min(len - 1, w.t | 0))) > toSample(run.t)) flushRun();
         if (w.addr < 0 || w.addr > 9) { dropped++; continue; }
         flushWait(toSample(baseT + Math.max(0, Math.min(len - 1, w.t | 0))));
         body.push(0xB9, w.addr, w.value & 0xFF);
@@ -423,25 +420,25 @@
       }
       baseT += len;
     }
-    flushRun();
     const total = toSample(baseT);
     flushWait(total);
     body.push(0x66);
 
     const fields = [].concat(utf16(rec.name || ''), utf16(''), utf16(rec.game || ''), utf16(''),
-      utf16(rec.system || (isCd ? 'NEC PC Engine CD-ROM²' : 'NEC PC Engine')), utf16(''), utf16(rec.artist || ''), utf16(''), utf16(''),
+      utf16(rec.system || (isCd ? 'NEC PC Engine CD-ROM2' : 'NEC PC Engine')), utf16(''), utf16(rec.artist || ''), utf16(''), utf16(''),
       utf16(rec.creator || 'Sound Emulation Foundry'), utf16(rec.notes || ''));
     const gd3 = [].concat([0x47, 0x64, 0x33, 0x20], u32(0x100), u32(fields.length), fields);
     const hdr = new Uint8Array(HEADER_SIZE);
     hdr.set([0x56, 0x67, 0x6D, 0x20], 0);
     const size = HEADER_SIZE + body.length + gd3.length;
     hdr.set(u32(size - 4), 0x04);
-    hdr.set(u32(0x00000161), 0x08);
+    hdr.set(u32(adpcmN ? 0x00000172 : 0x00000161), 0x08); // MSM5205 の欄(0xF0)は 1.72 から
     hdr.set(u32(HEADER_SIZE + body.length - 0x14), 0x14);
     hdr.set(u32(total), 0x18);
     hdr.set(u32(60), 0x24);
     hdr.set(u32(HEADER_SIZE - 0x34), 0x34);
     hdr.set(u32(PCE_CHIP_CLOCK), 0xA4);
+    if (adpcmN) { hdr.set(u32(PCE_ADPCM_CLOCK), 0xF0); hdr[0xD7] = 0x06; } // MSM5205: クロック、0xD7 = 分周 48(bit0-1 = 2)+ 4bit(bit2)
     const vgm = new Uint8Array(size);
     vgm.set(hdr, 0); vgm.set(body, HEADER_SIZE); vgm.set(gd3, HEADER_SIZE + body.length);
     return { vgm, frames: frames.length, dropped, writes, samples: total, clock: PCE_CHIP_CLOCK, adpcm: adpcmN, cdOps, frameClocks, cd: isCd };

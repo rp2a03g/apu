@@ -262,6 +262,7 @@
    */
   Emu.captureHesSongAsync = async function (hesBytes, opt, onProgress) {
     const player = new HesPlayer(hesBytes);
+    if (opt && opt.deferVblank !== undefined) player.bus.deferVblank = !!opt.deferVblank; // 画面の設定(Worker へはこの形で届く)
     player.initSong(opt.track != null ? opt.track : player.header.firstTrack);
     if (opt.mute) Object.assign(player.apu.mute, opt.mute);
     // speedFactor: オフライン一括レンダリング(hes-stream-player.js HesBufferedPlayer)が
@@ -457,6 +458,9 @@
   };
 
   HesPlayer.DEFER_VBLANK = true; // 救済の既定(入。2026-11-26 利用者決定)。Mesen と比べる道具は切にして回す。pce-sweep.js は環境変数 PCE_HES_DEFER=0 で切
+  // 画面(⚙ → PC エンジン)で切にした時は localStorage の hes.deferVblank が '0'。主スレッドではここで読む。
+  // Worker には localStorage が無いので、先読みキャプチャへは opt.deferVblank で渡す(capture-worker-client.js が足す)
+  try { if (typeof localStorage !== 'undefined' && localStorage.getItem('hes.deferVblank') === '0') HesPlayer.DEFER_VBLANK = false; } catch (e) { /* 使えなければ既定のまま */ }
   Emu.HesPlayer = HesPlayer;
   // VGM(vgmPlayer.js captureVgmSongAsync)がHuC6280チップのフレームスナップショットを
   // hes2mml抽出器と同じ形で積むために公開する(gbsPlayer.jsのsnapshotGbApuForCaptureと同じ)。

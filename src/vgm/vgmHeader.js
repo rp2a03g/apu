@@ -66,14 +66,15 @@
   //   種類 0 = ヘッダ: 中身 1 バイト = 印(bit0 ADPCM がある、bit1 CD-DA の操作がある、bit2 CD-ROM² の録音)+ 1 画面の長さ(マスタークロック、4 バイト、下位が先。
   //            262 行なら 357630、263 行なら 358995。録音の補正 vgmClean.js がフレームの格子に使う。無い=古い録音は 735 サンプルとして扱う)。ストリームの頭に 1 個。
   //            HuCard の録音にも付く(印は 0)
-  //   種類 1 = ADPCM の出力: 速さ(1 バイト、$180E の下位 4bit。1 個の間隔 = (16 - 速さ) / 32000 秒)+ 12bit の出力(2 バイト、下位が先)× n。
-  //            ブロックの位置が 1 個目の時刻。MSM5205 を通した後の値(中心 2048)なので、再生側は RAM も差分の計算も要らない
+  //   (種類 1 は欠番。2026-11-26 の一時期だけ ADPCM の出力の並びを入れていたが、公開前にやめた)
+  //   ADPCM は規格外ブロックではなく、VGM の正規の MSM5205(ヘッダ 0xF0 のクロック、コマンド 0x32)で入れる。ヘッダの印 bit0 は「ADPCM がある」:
+  //   その VGM の MSM5205 は「減衰なし・12bit」で計算する(本体と同じ。expansion/msm5205.js の noLeak)
   //   種類 2 = CD-DA の操作: [1, 始まり LBA×3(上位が先), 終わり LBA×3, 終わりの動き(0 止まる 1 繰り返す 2 止まって割り込み), 一時停止で始めるか, 今の位置 LBA×3] 再生
   //            (置かれた時刻はコマンドを受けた時。音が出るのはシークの後=0.15 秒以上後)/ [2] 一時停止 / [3] 停止 /
   //            [4, $180F の値, 入ってからの時間(10ms 単位、下位が先の 2 バイト)] フェーダ(bit3 入、bit1 相手 1=ADPCM 0=CD-DA、bit2 速い)/
   //            [5, 終わり LBA×3, 終わりの動き] 終わりの指定(再生を始める)。
-  //            音声そのものは入れない(VGM 単体では CD-DA は鳴らない)。フェーダが ADPCM 相手の時は再生側が ADPCM の音量に掛ける
-  VGM.PCEX = { TYPE: 0xBA, MAGIC: [0x50, 0x43, 0x45, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_ADPCM: 1, KIND_CDDA: 2, FLAG_ADPCM: 1, FLAG_CDDA: 2, FLAG_CD: 4, MASTER: 21477270 };
+  //            音声そのものは入れない(VGM 単体では CD-DA は鳴らない)。フェーダが ADPCM 相手の時は再生側が MSM5205 の音量に掛ける
+  VGM.PCEX = { TYPE: 0xBA, MAGIC: [0x50, 0x43, 0x45, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_CDDA: 2, FLAG_ADPCM: 1, FLAG_CDDA: 2, FLAG_CD: 4, MASTER: 21477270 };
   VGM.isPcexBlock = function (type, block) {
     const m = VGM.PCEX.MAGIC;
     return type === VGM.PCEX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];

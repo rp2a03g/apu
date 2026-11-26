@@ -145,7 +145,7 @@
       const old = this.cd;
       this.cd = new Emu.PceCdRom(this, this.disc, { superCd: this.cdType !== 'cd' });
       if (old) {
-        this.cd.mute = old.mute; this.cd.vol = old.vol; this.cd.onCommand = old.onCommand; this.cd.onOp = old.onOp; this.cd.adpcm.onSample = old.adpcm.onSample;
+        this.cd.mute = old.mute; this.cd.vol = old.vol; this.cd.onCommand = old.onCommand; this.cd.onOp = old.onOp; this.cd.adpcm.onSample = old.adpcm.onSample; this.cd.adpcm.onStop = old.adpcm.onStop;
         if (old.onOp && (old.auStatus === 0 || old.auStatus === 2)) old.onOp([3]); // リセットで CD-DA は止まる(録音中なら記録に残す)
       }
     }
@@ -367,10 +367,13 @@
       w(1, apu.balance); w(8, apu.lfoFreq); w(9, apu.lfoCtrl); w(0, apu.selected);
       this.rec = { frames: [], cur };
       if (this.cdOn) {
-        // ADPCM は再生で 1 個進むたびの 12bit の出力、CD-DA は操作(SCSI のコマンドとフェーダ)を時刻つきで控える(VGM では規格外ブロック PCEX)
+        // ADPCM は再生で 1 個進むたびの 4bit の符号(VGM では正規の MSM5205 への書き込みになる)、CD-DA は操作(SCSI のコマンドとフェーダ)を時刻つきで控える(規格外ブロック PCEX)。
+        // 録り始めた時に ADPCM が鳴っている途中だった時は、その 1 回だけ頭の状態が合わない(次に鳴らし直した所から正しくなる)
         // 口の中では this.cd を毎回見る(リセットで CD 装置を作り直すので、ここで掴んだ物を使うと古い方の速さを読んでしまう。見直しの指摘)
         const at = () => this.clock - this.frameStart;
-        this.cd.adpcm.onSample = (out) => { if (this.rec) this.rec.cur.push({ adpcm: out, rate: this.cd.adpcm.rate & 0x0F, t: at() }); };
+        let begun = false;
+        this.cd.adpcm.onSample = (out, nibble, first) => { if (this.rec) { this.rec.cur.push({ adpcm: nibble & 0x0F, first: first || !begun, t: at() }); begun = true; } };
+        this.cd.adpcm.onStop = () => { if (this.rec) this.rec.cur.push({ adpcmStop: 1, t: at() }); };
         this.cd.onOp = (op) => { if (this.rec && op) this.rec.cur.push({ cd: op, t: at() }); };
         const now = this.cd.audioState(); if (now) cur.push({ cd: now, t: 0 });
         const fade = this.cd.fadeState(); if (fade) cur.push({ cd: fade, t: 0 });
@@ -381,7 +384,7 @@
       if (!rec) return [];
       this.rec = null;
       if (rec.cur.length) { rec.cur.len = this.clock - this.frameStart; rec.cur.push({ len: rec.cur.len }); rec.frames.push(rec.cur); }
-      if (this.cd) { this.cd.adpcm.onSample = null; this.cd.onOp = null; }
+      if (this.cd) { this.cd.adpcm.onSample = null; this.cd.adpcm.onStop = null; this.cd.onOp = null; }
       return rec.frames;
     }
 

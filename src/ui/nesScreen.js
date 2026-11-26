@@ -102,8 +102,10 @@
   };
   // PC エンジン: 本体の種類(自動 = 専用カードか拡張子 .sgx なら SuperGrafx)とパッドの種類。6 ボタンパッドの III〜VI は決まったキー(D F G H)
   const PCE_MODELS = ['auto', 'pce', 'sgx'], PCE_PADS = ['pad2', 'pad6', 'tap'];
-  const PCE_EXTRA_KEYS = { KeyD: 0x100, KeyF: 0x200, KeyG: 0x400, KeyH: 0x800 };
-  function loadPceCfg(c) { c = c && typeof c === 'object' ? c : {}; return { model: PCE_MODELS.includes(c.model) ? c.model : 'auto', pad: PCE_PADS.includes(c.pad) ? c.pad : 'pad2', cd: ['acd', 'scd', 'cd'].includes(c.cd) ? c.cd : 'acd' }; }
+  // 6 ボタンパッドの III〜VI(ビットは pceConsole.setController の bit8-11)。キーは設定(cfg.pce.keys)で変えられる。既定は D F G H
+  const PCE_KEY_ACTIONS = ['Pce3', 'Pce4', 'Pce5', 'Pce6'], PCE_KEY_BITS = { Pce3: 0x100, Pce4: 0x200, Pce5: 0x400, Pce6: 0x800 }, PCE_KEY_DEFAULT = { Pce3: 'KeyD', Pce4: 'KeyF', Pce5: 'KeyG', Pce6: 'KeyH' };
+  function pceExtraBit(code) { const k = pceCfg().keys; for (const a of PCE_KEY_ACTIONS) if (k[a] && k[a] === code) return PCE_KEY_BITS[a]; return 0; }
+  function loadPceCfg(c) { c = c && typeof c === 'object' ? c : {}; return { model: PCE_MODELS.includes(c.model) ? c.model : 'auto', pad: PCE_PADS.includes(c.pad) ? c.pad : 'pad2', cd: ['acd', 'scd', 'cd'].includes(c.cd) ? c.cd : 'acd', keys: Object.assign({}, PCE_KEY_DEFAULT, c.keys && typeof c.keys === 'object' ? c.keys : null) }; }
   function pceCfg() { if (!cfg.pce) cfg.pce = loadPceCfg(null); return cfg.pce; }
   function loadCps3Cfg(c) {
     c = c && typeof c === 'object' ? c : {};
@@ -164,7 +166,7 @@
   function actionLabel(a) {
     return { A: 'A', B: 'B', TurboA: T('連射 A'), TurboB: T('連射 B'), Select: 'Select', Start: 'Start', Up: T('上'), Down: T('下'), Left: T('左'), Right: T('右'),
       Shot1: T('ショット 1(弱パンチ)'), Shot2: T('ショット 2(中パンチ)'), Shot3: T('ショット 3(強パンチ)'), Shot4: T('ショット 4(弱キック)'), Shot5: T('ショット 5(中キック)'), Shot6: T('ショット 6(強キック)'),
-      Coin: T('コイン'), Test: T('テスト'), Service: T('サービス'),
+      Coin: T('コイン'), Test: T('テスト'), Service: T('サービス'), Pce3: 'III', Pce4: 'IV', Pce5: 'V', Pce6: 'VI',
       FF: T('早送り(押している間)'), Rewind: T('巻き戻し(押している間)'), Pause: T('一時停止'), SaveState: T('状態保存'), LoadState: T('状態読込') }[a] || a;
   }
   // KeyboardEvent.code → 表示名
@@ -795,7 +797,7 @@
     canvas.addEventListener('pointerleave', () => sendTilt(0, 0));
     window.addEventListener('deviceorientation', (e) => { if (machine !== 'gb' || !gbTilt || e.gamma === null || e.beta === null) return; sendTilt(Math.sin(e.gamma * Math.PI / 180), Math.sin((e.beta - 45) * Math.PI / 180)); }); // 手前へ 45 度傾けて持った姿勢を水平とみなす
     canvas.addEventListener('keydown', (e) => {
-      if (machine === 'pce' && pceCfg().pad === 'pad6' && PCE_EXTRA_KEYS[e.code]) { e.preventDefault(); pceBits |= PCE_EXTRA_KEYS[e.code]; pushPad(); return; } // 6 ボタンパッドの III〜VI
+      if (machine === 'pce' && pceCfg().pad === 'pad6' && pceExtraBit(e.code)) { e.preventDefault(); pceBits |= pceExtraBit(e.code); pushPad(); return; } // 6 ボタンパッドの III〜VI
       const a = keyActionOf(e.code);
       if (!a) {
         if (machine === 'msx') { e.preventDefault(); msxKey(e.code, true); } // MSX: 操作キー以外はそのまま MSX のキーボードへ
@@ -813,7 +815,7 @@
       else if (a === 'LoadState') { if (!e.repeat) requestLoadState(); }
     });
     canvas.addEventListener('keyup', (e) => {
-      if (machine === 'pce' && PCE_EXTRA_KEYS[e.code] && (pceBits & PCE_EXTRA_KEYS[e.code])) { e.preventDefault(); pceBits &= ~PCE_EXTRA_KEYS[e.code]; pushPad(); return; }
+      if (machine === 'pce' && pceExtraBit(e.code) && (pceBits & pceExtraBit(e.code))) { e.preventDefault(); pceBits &= ~pceExtraBit(e.code); pushPad(); return; }
       const a = keyActionOf(e.code);
       if (!a) {
         if (machine === 'msx') { e.preventDefault(); msxKey(e.code, false); }
@@ -1360,7 +1362,7 @@
         s.addEventListener('change', () => { pc.cd = s.value; saveCfg(); });
         sc.appendChild(r); }
       biosNote(sc, T('CD のソフトの起動にシステムカード(.pce)が要ります。このブラウザに控えて次回も使います。CD は .cue(か .ccd)とデータのファイル(.bin / .img / .iso / .wav)を一緒に選ぶか、まとめてドロップしてください。圧縮された音声(MP3 など)のトラックは読めません。'));
-      note(sp, T('次に開くソフトから効きます。6 ボタンパッドの III〜VI はキーボードの D F G H です(割り当ての変更とゲームパッドへの割り当てはまだできません)。マルチタップの 2 番は 2 つ目のゲームパッドです。'));
+      note(sp, T('次に開くソフトから効きます。6 ボタンパッドの III〜VI のキーは下で変えられます(ゲームパッドへの割り当てはまだできません)。マルチタップの 2 番は 2 つ目のゲームパッドです。'));
     }
     const sg = sec(T('本体'), 'gb');
     { const { r, s } = selRow(T('機種'));
@@ -1459,6 +1461,17 @@
     keyTable(s2, KEY_ACTIONS, () => cfg.keys, 'nes');
     const s2m = sec(T('キーボード(操作キー。他のキーはそのまま MSX のキーボードへ)'), 'msx');
     keyTable(s2m, MSX_KEY_ACTIONS, () => cfg.msx.keys, 'msx');
+    // ── HES(曲データ)の救済の切り替え。ゲーム画面ではなく HES の再生と変換に効く ──
+    { const sh = sec(T('HES(曲データ)'), 'pce'), HP = MML.Emu.HesPlayer;
+      check(sh, !HP || HP.DEFER_VBLANK !== false, T('タイマ割り込みの処理中は、垂直帰線の割り込みを後回しにする'), (v) => {
+        if (HP) HP.DEFER_VBLANK = !!v;
+        try { if (v) localStorage.removeItem('hes.deferVblank'); else localStorage.setItem('hes.deferVblank', '0'); } catch (e) { /* 控えられなくても今回は効く */ }
+      });
+      note(sh, T('次に開く HES から効きます。HES には、ゲーム本来の割り込みの順番の決まりを写していない物があり、鳴っている波形が少しずつ壊れていく曲があります。入(既定)にすると、その崩れが出なくなります。実機に無い決まりなので、切にするとデータどおりに鳴らします。')); }
+    // ── PC エンジン: 6 ボタンパッドの III〜VI(I・II・SELECT・RUN・十字は「ファミコン / FDS」のタブの A・B・Select・Start・上下左右と共通)──
+    const s2p = sec(T('キーボード(6 ボタンパッドの III〜VI)'), 'pce');
+    keyTable(s2p, PCE_KEY_ACTIONS, () => pceCfg().keys, 'pce');
+    note(s2p, T('I・II・SELECT・RUN と十字は「ファミコン / FDS」のタブの A・B・Select・Start・上下左右と同じキーです。'));
     // ── CPS3: キーボード、ゲームパッド、BIOS ──
     const s2c = sec(T('キーボード(1P)'), 'cps3');
     keyTable(s2c, CPS3_KEY_ACTIONS, () => cfg.cps3.keys, 'cps3');
@@ -2024,7 +2037,13 @@
       }
       return out;
     }
-    for (const w of fr) if (w.addr !== undefined) out.push(w.read ? { addr: w.addr, value: 0, read: true } : { addr: w.addr, value: w.value });
+    for (const w of fr) {
+      if (w.addr !== undefined) out.push(w.read ? { addr: w.addr, value: 0, read: true } : { addr: w.addr, value: w.value });
+      // PC エンジン CD-ROM²: ADPCM は番地 0x60000(下位 4bit = 符号、bit4 = 再生の始まり、bit5 = 止まった)、CD-DA の操作は 0x60001(keyboard.js makePceAdpcmStepper / makePceCddaStepper)
+      else if (w.adpcm !== undefined) out.push({ addr: 0x60000, value: (w.adpcm & 0x0F) | (w.first ? 0x10 : 0) });
+      else if (w.adpcmStop) out.push({ addr: 0x60000, value: 0x20 });
+      else if (w.cd && w.cd[0]) out.push({ addr: 0x60001, value: (w.cd[0] & 0x0F) | (w.cd[0] === 1 && w.cd[8] ? 0x10 : 0) });
+    }
     return out;
   }
   // 本体の録音の開始/停止。on: 溜まった分を先に受け取ってから像を取り直す。off: keep なら像を取り直して続ける、discard なら結果を捨てる
@@ -2060,7 +2079,7 @@
     else if (machine === 'zoom' && zoomSet && zoomSet.kind === 'ensoniq') NesScreen.onLiveBegin({ chips: ['vgm', 'es5505'], fps: 60, name: romName || 'ES5505', es5505Rom: zoomSet.wave }); // 鍵盤表示の ES5505 の行。波形は音程の解析用
     else if (machine === 'zoom') NesScreen.onLiveBegin({ chips: ['vgm', 'zsg2'], fps: 60, name: romName || 'ZSG-2', zsg2Rom: zoomSet && zoomSet.wave }); // 鍵盤表示の ZSG-2 の行(VGM と同じ)。波形は音程の解析用
     else if (machine === 'gb') NesScreen.onLiveBegin({ chips: ['gbs'], fps: GB_FPS, name: romName || 'GB' }); // 鍵盤表示の GB の行(GBS と同じ)
-    else if (machine === 'pce') NesScreen.onLiveBegin({ chips: ['hes'], fps: pceFps, name: romName || 'PCE' }); // 鍵盤表示の波形メモリ音源の行(HES と同じ)
+    else if (machine === 'pce') NesScreen.onLiveBegin({ chips: pceCd ? ['hes', 'msm5205', 'pcecdda'] : ['hes'], fps: pceFps, name: romName || 'PCE' }); // 鍵盤表示の波形メモリ音源の行(HES と同じ)
     else if (machine === 'msx') NesScreen.onLiveBegin({ chips: msxLiveChips(), fps: msxFps || 60, name: romName || 'MSX' });
     else NesScreen.onLiveBegin({ chips: chipNames(), fps: FPS, name: romName || 'NES' });
     sendRecord(true);
@@ -2114,7 +2133,8 @@
     }
     if (machine === 'pce') {
       // 鍵盤表示の expansion.hes({ ch0..ch5 })を本体へ(pceConsole.applyMix)
-      const pickPce = (cfgObj) => (cfgObj && cfgObj.expansion && cfgObj.expansion.hes ? { hes: cfgObj.expansion.hes } : null);
+      // CD-ROM² の ADPCM は M5 の行(expansion.msm5205[0])、CD-DA は CDA の行(expansion.pcecdda[0])→ 本体の pcecd { adpcm, cdda }
+      const pickPce = (cfgObj) => { if (!cfgObj || !cfgObj.expansion) return null; const e = cfgObj.expansion, o = {}; if (e.hes) o.hes = e.hes; const cd = {}; if (e.msm5205 && e.msm5205[0] !== undefined) cd.adpcm = e.msm5205[0]; if (e.pcecdda && e.pcecdda[0] !== undefined) cd.cdda = e.pcecdda[0]; if (cd.adpcm !== undefined || cd.cdda !== undefined) o.pcecd = cd; return (o.hes || o.pcecd) ? o : null; };
       const mp = { type: 'mix', mute: pickPce(lastMix.mute), volume: pickPce(lastMix.volume) };
       if (node) node.port.postMessage(mp);
       else if (nes && typeof nes.applyMix === 'function') nes.applyMix(mp.mute, mp.volume);

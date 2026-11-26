@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-26 12:32:50
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 14:53:17
  *
  * regsOnly capture worker bundle (vgmCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.vgmCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-26 12:32:50';
+  MML.WorkerBundles.vgmCaptureBuiltAt = '2026-11-26 14:53:17';
   MML.WorkerBundles.vgmCapture = function () {
 /*
  * VGM ヘッダ解析
@@ -79,14 +79,15 @@
   //   種類 0 = ヘッダ: 中身 1 バイト = 印(bit0 ADPCM がある、bit1 CD-DA の操作がある、bit2 CD-ROM² の録音)+ 1 画面の長さ(マスタークロック、4 バイト、下位が先。
   //            262 行なら 357630、263 行なら 358995。録音の補正 vgmClean.js がフレームの格子に使う。無い=古い録音は 735 サンプルとして扱う)。ストリームの頭に 1 個。
   //            HuCard の録音にも付く(印は 0)
-  //   種類 1 = ADPCM の出力: 速さ(1 バイト、$180E の下位 4bit。1 個の間隔 = (16 - 速さ) / 32000 秒)+ 12bit の出力(2 バイト、下位が先)× n。
-  //            ブロックの位置が 1 個目の時刻。MSM5205 を通した後の値(中心 2048)なので、再生側は RAM も差分の計算も要らない
+  //   (種類 1 は欠番。2026-11-26 の一時期だけ ADPCM の出力の並びを入れていたが、公開前にやめた)
+  //   ADPCM は規格外ブロックではなく、VGM の正規の MSM5205(ヘッダ 0xF0 のクロック、コマンド 0x32)で入れる。ヘッダの印 bit0 は「ADPCM がある」:
+  //   その VGM の MSM5205 は「減衰なし・12bit」で計算する(本体と同じ。expansion/msm5205.js の noLeak)
   //   種類 2 = CD-DA の操作: [1, 始まり LBA×3(上位が先), 終わり LBA×3, 終わりの動き(0 止まる 1 繰り返す 2 止まって割り込み), 一時停止で始めるか, 今の位置 LBA×3] 再生
   //            (置かれた時刻はコマンドを受けた時。音が出るのはシークの後=0.15 秒以上後)/ [2] 一時停止 / [3] 停止 /
   //            [4, $180F の値, 入ってからの時間(10ms 単位、下位が先の 2 バイト)] フェーダ(bit3 入、bit1 相手 1=ADPCM 0=CD-DA、bit2 速い)/
   //            [5, 終わり LBA×3, 終わりの動き] 終わりの指定(再生を始める)。
-  //            音声そのものは入れない(VGM 単体では CD-DA は鳴らない)。フェーダが ADPCM 相手の時は再生側が ADPCM の音量に掛ける
-  VGM.PCEX = { TYPE: 0xBA, MAGIC: [0x50, 0x43, 0x45, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_ADPCM: 1, KIND_CDDA: 2, FLAG_ADPCM: 1, FLAG_CDDA: 2, FLAG_CD: 4, MASTER: 21477270 };
+  //            音声そのものは入れない(VGM 単体では CD-DA は鳴らない)。フェーダが ADPCM 相手の時は再生側が MSM5205 の音量に掛ける
+  VGM.PCEX = { TYPE: 0xBA, MAGIC: [0x50, 0x43, 0x45, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_CDDA: 2, FLAG_ADPCM: 1, FLAG_CDDA: 2, FLAG_CD: 4, MASTER: 21477270 };
   VGM.isPcexBlock = function (type, block) {
     const m = VGM.PCEX.MAGIC;
     return type === VGM.PCEX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
@@ -5148,6 +5149,7 @@
    */
   Emu.captureHesSongAsync = async function (hesBytes, opt, onProgress) {
     const player = new HesPlayer(hesBytes);
+    if (opt && opt.deferVblank !== undefined) player.bus.deferVblank = !!opt.deferVblank; // 画面の設定(Worker へはこの形で届く)
     player.initSong(opt.track != null ? opt.track : player.header.firstTrack);
     if (opt.mute) Object.assign(player.apu.mute, opt.mute);
     // speedFactor: オフライン一括レンダリング(hes-stream-player.js HesBufferedPlayer)が
@@ -5343,6 +5345,9 @@
   };
 
   HesPlayer.DEFER_VBLANK = true; // 救済の既定(入。2026-11-26 利用者決定)。Mesen と比べる道具は切にして回す。pce-sweep.js は環境変数 PCE_HES_DEFER=0 で切
+  // 画面(⚙ → PC エンジン)で切にした時は localStorage の hes.deferVblank が '0'。主スレッドではここで読む。
+  // Worker には localStorage が無いので、先読みキャプチャへは opt.deferVblank で渡す(capture-worker-client.js が足す)
+  try { if (typeof localStorage !== 'undefined' && localStorage.getItem('hes.deferVblank') === '0') HesPlayer.DEFER_VBLANK = false; } catch (e) { /* 使えなければ既定のまま */ }
   Emu.HesPlayer = HesPlayer;
   // VGM(vgmPlayer.js captureVgmSongAsync)がHuC6280チップのフレームスナップショットを
   // hes2mml抽出器と同じ形で積むために公開する(gbsPlayer.jsのsnapshotGbApuForCaptureと同じ)。
@@ -16305,6 +16310,9 @@
       this.initBitWidth = ((flags || 0) & 0x04) ? 4 : 3;
       this.mute = [false];
       this.vol = [1];
+      // true にすると、信号を「減衰なし・12bit で折り返す」計算にする(本ツールの PC エンジン本体 pce/adpcm.js と同じ。Mesen 2 の計算)。
+      // 本ツールが録った PC エンジン CD-ROM² の VGM を鳴らす時だけ vgmPlayer.js が立てる。ほかの VGM は libvgm と同じ減衰つきのまま
+      this.noLeak = false;
       this.reset();
     }
 
@@ -16375,8 +16383,11 @@
       data &= 0x0F;
       const diff = DIFF[this.step * 16 + data];
       // ★加算ではなく減衰付き(libvgm: ((sample << 8) + (signal * 245)) >> 8)
-      this.signal = ((diff << 8) + (this.signal * 245)) >> 8;
-      if (this.signal > 2047) this.signal = 2047; else if (this.signal < -2048) this.signal = -2048;
+      if (this.noLeak) this.signal = ((this.signal + diff + 2048) & 0xFFF) - 2048;
+      else {
+        this.signal = ((diff << 8) + (this.signal * 245)) >> 8;
+        if (this.signal > 2047) this.signal = 2047; else if (this.signal < -2048) this.signal = -2048;
+      }
       this.step += INDEX_SHIFT[data & 7];
       if (this.step > 48) this.step = 48; else if (this.step < 0) this.step = 0;
     }
@@ -19133,48 +19144,6 @@
     };
   }
 
-  // PC エンジン CD-ROM² の ADPCM(規格外 PCEX 種類 1、本ツールの録音。DESIGN-PCE-CAPTURE.md §6)。MSM5205 を通した後の 12bit の出力が
-  // 「速さ+値の並び」で届くので、32000Hz の時計を (16 - 速さ) 個ごとに 1 個ずつ出すだけ。ブロックが時刻より少し先に届くので、列に積んで順に出す。
-  // CD-DA の操作(種類 2)は音にしない(音声が VGM に入っていない)。フェーダが ADPCM 相手の時だけ音量に掛ける
-  function makePceAdpcmAdapter() {
-    const UNIT = (31 / 96) / (31 * 255); // 本体(pce/cdrom.js)と同じ物差し: 波形メモリ音源 1ch の最大 = 31/96
-    // ブロックは「1 個目の時刻」に届き、中身はその先(次の書き込みまで)の分。列に積んで 32000Hz の時計で順に出す。
-    //   再生速度を上げるとブロックが速く届いて列が溜まるので、1 画面ぶん(600 個)を超えて残っていたら古い分を捨てて追いつく。
-    //   遅くした時は列が切れるが、50ms までは最後の値を保つ(切れるたびに 0 へ戻すとブツブツ鳴る)。
-    //   clock() を回さない経路(シークの早送り、先読み)は advanceVgm で同じだけ進める。シークの控えには列ごと入る。
-    const a = {
-      id: 'pceadpcm', clockHz: 32000, accum: 0, chip: null, gain: CHIP_GAIN.huc6280, queue: [], head: 0, div: 16, count: 0, cur: 0, idle: 0, skipAcc: 0,
-      mute: { adpcm: false }, vol: { adpcm: 1 }, fadeOn: false, fadeFast: false, fadeLeft: 1,
-      push(block) {
-        if (this.queue.length - this.head > 1200) { this.queue.length = 0; this.head = 0; }
-        else if (this.head > 4096) { this.queue.splice(0, this.head); this.head = 0; }
-        const rate = block[6] & 0x0F;
-        for (let p = 7; p + 2 <= block.length; p += 2) this.queue.push(rate, block[p] | ((block[p + 1] & 0x0F) << 8));
-      },
-      // フェーダ: 相手が ADPCM の時だけ効かせる。elapsed は入ってからの時間(10ms 単位)
-      fade(v, elapsed) {
-        this.fadeOn = (v & 0x08) !== 0 && (v & 0x02) !== 0; this.fadeFast = (v & 0x04) !== 0;
-        this.fadeLeft = Math.max(0, 1 - (elapsed || 0) / 100 / (this.fadeFast ? 2.5 : 6));
-      },
-      clock() {
-        if (this.fadeOn && this.fadeLeft > 0) this.fadeLeft = Math.max(0, this.fadeLeft - 1 / (32000 * (this.fadeFast ? 2.5 : 6)));
-        if (++this.count < this.div) return;
-        this.count = 0;
-        const q = this.queue;
-        if (this.head < q.length) { this.div = 16 - q[this.head]; this.cur = (q[this.head + 1] - 2048) * 10; this.head += 2; this.idle = 0; }
-        else if (this.cur !== 0 && (this.idle += this.div) > 1600) { this.cur *= 0.9; if (Math.abs(this.cur) < 1) this.cur = 0; } // 50ms 待っても続きが来なければ 0 へ戻す
-      },
-      advanceVgm(n) { this.skipAcc += n * (32000 / VGM_RATE); let c = Math.floor(this.skipAcc); this.skipAcc -= c; while (c-- > 0) this.clock(); },
-      mix(out) { if (this.mute.adpcm) return; const s = this.cur * UNIT * this.gain * this.vol.adpcm * (this.fadeOn ? Math.floor(this.fadeLeft * 100) / 100 : 1); out[0] += s; out[1] += s; },
-      applyMute(m) { const e = m.expansion || m; if (e.pcecd) this.mute.adpcm = !!e.pcecd.adpcm; },
-      applyVolume(v) { const e = v.expansion || v; if (e.pcecd && e.pcecd.adpcm !== undefined) this.vol.adpcm = Math.max(0, Math.min(2, +e.pcecd.adpcm || 0)); },
-      getState() { return { queue: this.queue.slice(this.head), div: this.div, count: this.count, cur: this.cur, idle: this.idle, skipAcc: this.skipAcc, accum: this.accum, fadeOn: this.fadeOn, fadeFast: this.fadeFast, fadeLeft: this.fadeLeft }; },
-      setState(st) { this.queue = st.queue.slice(); this.head = 0; this.div = st.div; this.count = st.count; this.cur = st.cur; this.idle = st.idle; this.skipAcc = st.skipAcc; this.accum = st.accum || 0; this.fadeOn = st.fadeOn; this.fadeFast = st.fadeFast; this.fadeLeft = st.fadeLeft; }
-    };
-    a.chip = { getState: () => a.getState(), setState: (st) => a.setState(st) }; // シークの控えはアダプタごと(列を含めて)
-    return a;
-  }
-
   // MSX の DAC(規格外 MSXX ブロック、本ツールの MSX 録音。DESIGN-MSX-CAPTURE.md §5.6。コナミ DAC と turboR PCM の両方): KSS の牌の魔術師 D/A と同じ
   // majutsushiDac.js で鳴らす。書き込みはブロックの位置(時刻)で届くので clock は要らない。ミュート/音量は kss の dac 配列
   function makeMsxDacAdapter(msxx) {
@@ -19361,10 +19330,10 @@
         }
       }
       if (h.msxx && h.msxx.dac && Emu.MajutsushiDAC) { const a = makeMsxDacAdapter(h.msxx); this.adapters.push(a); this.adapterById.msxdac = a; } // MSX の DAC(MSXX)
-      if (h.pcex && (h.pcex.flags & 7)) { // PC エンジン CD-ROM²(PCEX。HuCard の録音にもヘッダは付くが、印が 0 なので何もしない): 本体(pceConsole.js の mixGain)と同じく全体を 0.6 倍(PCE_CD_GAIN)。ADPCM があればその口を足す
-        const PCE_CD_GAIN = 0.6, huc = this.adapterById.huc6280; if (huc) huc.gain *= PCE_CD_GAIN;
-        if (h.pcex.flags & 1) { const a = makePceAdpcmAdapter(); a.gain *= PCE_CD_GAIN; this.adapters.push(a); this.adapterById.pceadpcm = a; }
-      } // PC エンジン CD-ROM² の ADPCM(PCEX)
+      // 本ツールが録った PC エンジン CD-ROM²(PCEX の印 bit0 = ADPCM あり): MSM5205 を本体と同じ「減衰なし・12bit」の計算にする。
+      // 音量は、ほかの PC エンジン CD の VGM と同じ扱い(上の ×0.7)のまま。フェーダ(PCEX の CD-DA の操作 4)が ADPCM 相手の時は、この口の音量に掛ける
+      if (h.pcex && (h.pcex.flags & 1) && this.adapterById.msm5205) { const a = this.adapterById.msm5205; a.chip.noLeak = true; a.pceFade = null; const pl = this, mix0 = a.mix.bind(a);
+        a.mix = function (out) { const f = this.pceFade; if (!f) { mix0(out); return; } const k = Math.max(0, 1 - Math.floor((f.elapsed + (pl.samplePos - f.at) / 44100) / (f.fast ? 2.5 : 6) * 100) / 100); if (k <= 0) return; const g = this.gain; this.gain = g * k; mix0(out); this.gain = g; }; }
       if (h.sgb && Emu.SnesApu && Emu.SPC700) { const a = makeSgbSpcAdapter(); this.adapters.push(a); this.adapterById.sgbspc = a; } // スーパーゲームボーイの SNES 側音源(GBXX)
       this.timeAdapters = this.adapters.filter((a) => typeof a.advanceVgm === 'function'); // clock() を回さない経路でも時間を進める物
       this.pos = h.dataOffset;
@@ -19620,11 +19589,13 @@
         }
         return;
       }
-      // PC エンジン CD-ROM²(規格外 PCEX): 種類 1 = ADPCM の出力、種類 2 = CD-DA の操作(フェーダだけ見る)
+      // PC エンジン CD-ROM²(規格外 PCEX)の CD-DA の操作(種類 2): 音にはしない。フェーダ(操作 4)が ADPCM 相手(bit1)の時だけ MSM5205 の音量に掛ける
       if (MML.VGM && MML.VGM.isPcexBlock && MML.VGM.isPcexBlock(type, block)) {
-        const a = this.adapterById.pceadpcm, P = MML.VGM.PCEX;
-        if (a && block[5] === P.KIND_ADPCM && block.length >= 9) a.push(block);
-        else if (a && block[5] === P.KIND_CDDA && block[6] === 4 && block.length >= 8) a.fade(block[7], block.length >= 10 ? block[8] | (block[9] << 8) : 0);
+        const a = this.adapterById.msm5205, P = MML.VGM.PCEX;
+        if (a && block[5] === P.KIND_CDDA && block[6] === 4 && block.length >= 8) {
+          const v = block[7];
+          a.pceFade = ((v & 0x08) && (v & 0x02)) ? { at: this.samplePos, fast: (v & 0x04) !== 0, elapsed: block.length >= 10 ? (block[8] | (block[9] << 8)) / 100 : 0 } : null;
+        }
         if (this.onWrite && block[5] === P.KIND_CDDA) this.onWrite('pcecd', block[6], block.subarray(7));
         return;
       }
@@ -21243,6 +21214,8 @@
     if (k5) return { section: 'expansion', chip: 'k054539', type: 'array', index: +k5[1] - 1 };
     // VGM: MSM5205/6585(PC Engine CD ADPCM等、1ch)。chip.mute[]は1要素
     if (id === 'M5') return { section: 'expansion', chip: 'msm5205', type: 'array', index: 0 };
+    // PC エンジン CD-ROM² のゲーム画面: CD-DA(CD の音声トラック)。1 行
+    if (id === 'CDA') return { section: 'expansion', chip: 'pcecdda', type: 'array', index: 0 };
     // VGM: SegaPCM(SP1-16)。chip.mute[]はch 0-15
     const sp = id.match(/^SP(\d+)$/);
     if (sp) return { section: 'expansion', chip: 'segapcm', type: 'array', index: +sp[1] - 1 };
@@ -22567,6 +22540,15 @@
         ...panVolFields(c) });
     }
 
+    if (chips.includes('pcecdda')) {
+      // PC エンジン CD-ROM² の CD-DA(ゲーム画面のライブ表示だけ。VGM には音声が入らないので、VGM の再生では出ない)。
+      // 音程も音量のレジスタも無いので「鳴っているかどうか」だけの行(消音と音量のつまみのため)
+      const s = extraSnaps && extraSnaps.pcecdda ? extraSnaps.pcecdda[frameIdx] : null;
+      const c = s ? s[0] : { vol: 0, rawVol: 0, rawVolMax: 1, active: false, panNone: true };
+      channels.push({ id: 'CDA', color: '#8fd0ff', freq: 0, vol: c.vol, rawVol: c.rawVol, rawVolMax: 1, wave: { t: 'sample' }, active: !!c.active, sample: true, dmcReg: c.rawVol, dmcRateIdx: 15, dmcFreq: 44100,
+        ...panVolFields(c) });
+    }
+
     if (chips.includes('segapcm')) {
       // SegaPCM(VGM: OutRun/After Burner等): 16ch ステレオPCM。GA1-4行と同じ3段階表示
       // (ピッチ解析が信頼できれば絶対音名、なければ「サンプル」行)。デルタレジスタで
@@ -23385,6 +23367,34 @@
       if (!apu) return null;
       for (const w of writes) if (!w.read && w.addr >= 0 && w.addr <= 9) apu.writeRegister(0x0800 | w.addr, w.value);
       return E.snapshotHuC6280Apu(apu);
+    };
+  }
+  // PC エンジン CD-ROM² のゲーム画面: ADPCM(nesScreen.js toLiveWrites が番地 0x60000 で流す。値の下位 4bit = 符号、bit4 = 再生の始まり、bit5 = 止まった)。
+  // VGM の再生と同じ MSM5205(本体と同じ「減衰なし」の計算)に流して、M5 の行の形にする
+  function makePceAdpcmStepper() {
+    const E = MML.Emu;
+    const chip = E.MSM5205Audio ? new E.MSM5205Audio(1536000, 6, false) : null;
+    if (chip) chip.noLeak = true;
+    return (writes) => {
+      if (!chip) return null;
+      for (const w of writes) {
+        if (w.addr !== 0x60000) continue;
+        if (w.value & 0x30) { chip.write(0, 1); chip.write(0, 0); }
+        if (!(w.value & 0x20)) { chip.write(1, w.value & 0x0F); chip._consume(); }
+      }
+      return E.snapshotMSM5205(chip);
+    };
+  }
+  // 同じく CD-DA(番地 0x60001。値 = 操作の番号: 1 再生、2 一時停止、3 停止、5 終わりの指定=再生。1 の時 bit4 = 一時停止で始める)
+  function makePceCddaStepper() {
+    let playing = false;
+    return (writes) => {
+      for (const w of writes) {
+        if (w.addr !== 0x60001) continue;
+        const op = w.value & 0x0F;
+        if (op === 1) playing = !(w.value & 0x10); else if (op === 5) playing = true; else if (op === 2 || op === 3) playing = false;
+      }
+      return [{ active: playing, vol: playing ? 1 : 0, volApparent: playing ? 1 : 0, rawVol: playing ? 1 : 0, rawVolMax: 1, panNone: true }];
     };
   }
   function makeFme7Stepper() {
@@ -26399,6 +26409,10 @@
       if (this._chips.includes('kss')) { steppers.kss = makeKssStepper(this._chips); ex.kssPsg = []; ex.kssScc = []; ex.kssOpll = []; ex.kssDac = []; ex.opl = []; } // MSX のゲーム画面(KSS 形式の書き込み列)
       if (this._chips.includes('gbs')) { steppers.gb = makeGbStepper(); ex.gbsApu = []; } // GB のゲーム画面
       if (this._chips.includes('hes')) { steppers.pce = makePceStepper(); ex.hesApu = []; } // PC エンジンのゲーム画面
+      if (this._chips.includes('pcecdda')) { // CD-ROM²: ADPCM(M5 の行)と CD-DA(CDA の行)
+        steppers.pceAdpcm = makePceAdpcmStepper(); ex.msm5205 = []; ex.msm5205Live = null;
+        steppers.pceCdda = makePceCddaStepper(); ex.pcecdda = [];
+      }
       const cps3Rom = (opts && opts.cps3Rom) || null;
       if (this._chips.includes('cps3')) { steppers.cps3 = makeCps3Stepper(cps3Rom); ex.cps3 = []; } // CPS3 のゲーム画面
       const zsg2Rom = (opts && opts.zsg2Rom) || null;
@@ -26448,6 +26462,8 @@
       if (lr.steppers.kss) { const k = lr.steppers.kss(writes); ex.kssPsg[f] = k.psg; ex.kssScc[f] = k.scc; ex.kssOpll[f] = k.opll; ex.kssDac[f] = k.dac; ex.opl[f] = k.opl; }
       if (lr.steppers.gb) ex.gbsApu[f] = lr.steppers.gb(writes);
       if (lr.steppers.pce) ex.hesApu[f] = lr.steppers.pce(writes);
+      if (lr.steppers.pceAdpcm) ex.msm5205[f] = lr.steppers.pceAdpcm(writes);
+      if (lr.steppers.pceCdda) ex.pcecdda[f] = lr.steppers.pceCdda(writes);
       if (lr.steppers.cps3) ex.cps3[f] = lr.steppers.cps3(writes);
       if (lr.steppers.zsg2) ex.zsg2[f] = lr.steppers.zsg2(writes);
       if (lr.steppers.es5505) ex.es5505[f] = lr.steppers.es5505(writes);
@@ -26488,9 +26504,11 @@
       if (f === st.totalFrames) return;
       st.writeLog.length = f; st.regSnapshots.length = f; st.totalFrames = f;
       const ex = this._extraSnaps;
-      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu', 'cps3', 'zsg2', 'es5505']) if (ex[k]) ex[k].length = f;
+      for (const k of ['vrc7', 'n163', 'fme7', 'dmcSeq', 'dmcEnd', 'kssPsg', 'kssScc', 'kssOpll', 'kssDac', 'opl', 'gbsApu', 'hesApu', 'cps3', 'zsg2', 'es5505', 'pcecdda'].concat(lr.steppers.pceAdpcm ? ['msm5205'] : [])) if (ex[k]) ex[k].length = f;
       if (lr.steppers.gb) lr.steppers.gb = makeGbStepper();
       if (lr.steppers.pce) lr.steppers.pce = makePceStepper();
+      if (lr.steppers.pceAdpcm) lr.steppers.pceAdpcm = makePceAdpcmStepper();
+      if (lr.steppers.pceCdda) lr.steppers.pceCdda = makePceCddaStepper();
       if (lr.steppers.cps3) lr.steppers.cps3 = makeCps3Stepper(lr.cps3Rom);
       if (lr.steppers.zsg2) lr.steppers.zsg2 = makeZsg2Stepper(lr.zsg2Rom);
       if (lr.steppers.es5505) lr.steppers.es5505 = makeEs5505Stepper(lr.es5505Rom);

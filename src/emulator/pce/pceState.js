@@ -18,7 +18,7 @@
   const Emu = MML.Emu = MML.Emu || {};
 
   // 出来上がった画面(vdc.out)はキー名でなく配列そのもので外す(キー名 'out' で外すと、音源の ch の今の出力 out まで落ちる。見直しで分かった)
-  const SKIP_KEYS = new Set(['rom', 'card', 'rec', 'ring', 'ringR', '_frame', '_frameIdx', 'onFrame', 'onFrameExact', 'onWrite', 'onIo', 'host', 'bus', 'disc', 'onCommand', 'onSample', 'onOp']);
+  const SKIP_KEYS = new Set(['rom', 'card', 'rec', 'ring', 'ringR', '_frame', '_frameIdx', 'onFrame', 'onFrameExact', 'onWrite', 'onIo', 'host', 'bus', 'disc', 'onCommand', 'onSample', 'onStop', 'onOp']);
   const romSum = (card) => {
     if (card._sum === undefined) { let h = 2166136261 | 0; const r = card.rom; for (let i = 0; i < r.length; i += 97) h = Math.imul(h ^ r[i], 16777619) | 0; card._sum = h >>> 0; }
     return card._sum;

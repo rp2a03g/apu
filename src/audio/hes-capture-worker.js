@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-26 12:32:50
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 14:53:17
  *
  * regsOnly capture worker bundle (hesCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.hesCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.hesCaptureBuiltAt = '2026-11-26 12:32:50';
+  MML.WorkerBundles.hesCaptureBuiltAt = '2026-11-26 14:53:17';
   MML.WorkerBundles.hesCapture = function () {
 /*
  * HES (Hudson Entertainment Sound / PC Engine) ヘッダ解析
@@ -1727,6 +1727,7 @@
    */
   Emu.captureHesSongAsync = async function (hesBytes, opt, onProgress) {
     const player = new HesPlayer(hesBytes);
+    if (opt && opt.deferVblank !== undefined) player.bus.deferVblank = !!opt.deferVblank; // 画面の設定(Worker へはこの形で届く)
     player.initSong(opt.track != null ? opt.track : player.header.firstTrack);
     if (opt.mute) Object.assign(player.apu.mute, opt.mute);
     // speedFactor: オフライン一括レンダリング(hes-stream-player.js HesBufferedPlayer)が
@@ -1922,6 +1923,9 @@
   };
 
   HesPlayer.DEFER_VBLANK = true; // 救済の既定(入。2026-11-26 利用者決定)。Mesen と比べる道具は切にして回す。pce-sweep.js は環境変数 PCE_HES_DEFER=0 で切
+  // 画面(⚙ → PC エンジン)で切にした時は localStorage の hes.deferVblank が '0'。主スレッドではここで読む。
+  // Worker には localStorage が無いので、先読みキャプチャへは opt.deferVblank で渡す(capture-worker-client.js が足す)
+  try { if (typeof localStorage !== 'undefined' && localStorage.getItem('hes.deferVblank') === '0') HesPlayer.DEFER_VBLANK = false; } catch (e) { /* 使えなければ既定のまま */ }
   Emu.HesPlayer = HesPlayer;
   // VGM(vgmPlayer.js captureVgmSongAsync)がHuC6280チップのフレームスナップショットを
   // hes2mml抽出器と同じ形で積むために公開する(gbsPlayer.jsのsnapshotGbApuForCaptureと同じ)。

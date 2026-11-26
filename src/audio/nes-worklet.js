@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-26 12:32:50
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 14:53:17
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 12:32:50';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 14:53:17';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -22362,7 +22362,8 @@
       this.sampleCounter = 0;
       // 音に出す側(補間用に 1 つ前と今)
       this.audPrev = 0; this.audCur = 0; this.audAt = 0;
-      this.onSample = null;   // (12bit の出力) 再生で 1 個進むたび(録音用)
+      this.onSample = null;   // (12bit の出力, 4bit の符号, 再生の始まりか) 再生で 1 個進むたび(録音用)
+      this.onStop = null;     // 再生が止まった時(録音用)
     }
 
     _reset() {
@@ -22471,10 +22472,12 @@
     _playSample() {
       if (this.control & 0x80) { this.playing = (this.control & 0x20) !== 0; this.playRequest = false; return; }
       if (((this.control & 0x40) && this.length === 0) || !(this.control & 0x20) || (!this.playing && !this.playRequest)) {
-        this.playRequest = false; this.playing = false;
+        this.playRequest = false;
+        if (this.playing) { this.playing = false; if (this.onStop) this.onStop(); }
         return;
       }
-      if (this.playRequest) { this.playRequest = false; this.playing = true; this.out = 2048; this.magnitude = 0; }
+      let first = false;
+      if (this.playRequest) { this.playRequest = false; this.playing = true; this.out = 2048; this.magnitude = 0; first = true; }
       let data;
       if (this.nibble) {
         this.nibble = false;
@@ -22491,7 +22494,7 @@
       this._setHalf(this.length <= 0x8000);
       if (this.length === 0) this._setEnd(true);
       this.audPrev = this.audCur; this.audCur = (this.out - 2048) * 10; this.audAt = this.host.clock;
-      if (this.onSample) this.onSample(this.out);
+      if (this.onSample) this.onSample(this.out, data, first);
     }
 
     /** 今の音(16bit 相当の値)。再生中は 1 つ前と今の間を直線でつなぐ。止まっている間はゆっくり 0 へ */
@@ -23279,7 +23282,7 @@
       const old = this.cd;
       this.cd = new Emu.PceCdRom(this, this.disc, { superCd: this.cdType !== 'cd' });
       if (old) {
-        this.cd.mute = old.mute; this.cd.vol = old.vol; this.cd.onCommand = old.onCommand; this.cd.onOp = old.onOp; this.cd.adpcm.onSample = old.adpcm.onSample;
+        this.cd.mute = old.mute; this.cd.vol = old.vol; this.cd.onCommand = old.onCommand; this.cd.onOp = old.onOp; this.cd.adpcm.onSample = old.adpcm.onSample; this.cd.adpcm.onStop = old.adpcm.onStop;
         if (old.onOp && (old.auStatus === 0 || old.auStatus === 2)) old.onOp([3]); // リセットで CD-DA は止まる(録音中なら記録に残す)
       }
     }
@@ -23501,10 +23504,13 @@
       w(1, apu.balance); w(8, apu.lfoFreq); w(9, apu.lfoCtrl); w(0, apu.selected);
       this.rec = { frames: [], cur };
       if (this.cdOn) {
-        // ADPCM は再生で 1 個進むたびの 12bit の出力、CD-DA は操作(SCSI のコマンドとフェーダ)を時刻つきで控える(VGM では規格外ブロック PCEX)
+        // ADPCM は再生で 1 個進むたびの 4bit の符号(VGM では正規の MSM5205 への書き込みになる)、CD-DA は操作(SCSI のコマンドとフェーダ)を時刻つきで控える(規格外ブロック PCEX)。
+        // 録り始めた時に ADPCM が鳴っている途中だった時は、その 1 回だけ頭の状態が合わない(次に鳴らし直した所から正しくなる)
         // 口の中では this.cd を毎回見る(リセットで CD 装置を作り直すので、ここで掴んだ物を使うと古い方の速さを読んでしまう。見直しの指摘)
         const at = () => this.clock - this.frameStart;
-        this.cd.adpcm.onSample = (out) => { if (this.rec) this.rec.cur.push({ adpcm: out, rate: this.cd.adpcm.rate & 0x0F, t: at() }); };
+        let begun = false;
+        this.cd.adpcm.onSample = (out, nibble, first) => { if (this.rec) { this.rec.cur.push({ adpcm: nibble & 0x0F, first: first || !begun, t: at() }); begun = true; } };
+        this.cd.adpcm.onStop = () => { if (this.rec) this.rec.cur.push({ adpcmStop: 1, t: at() }); };
         this.cd.onOp = (op) => { if (this.rec && op) this.rec.cur.push({ cd: op, t: at() }); };
         const now = this.cd.audioState(); if (now) cur.push({ cd: now, t: 0 });
         const fade = this.cd.fadeState(); if (fade) cur.push({ cd: fade, t: 0 });
@@ -23515,7 +23521,7 @@
       if (!rec) return [];
       this.rec = null;
       if (rec.cur.length) { rec.cur.len = this.clock - this.frameStart; rec.cur.push({ len: rec.cur.len }); rec.frames.push(rec.cur); }
-      if (this.cd) { this.cd.adpcm.onSample = null; this.cd.onOp = null; }
+      if (this.cd) { this.cd.adpcm.onSample = null; this.cd.adpcm.onStop = null; this.cd.onOp = null; }
       return rec.frames;
     }
 
@@ -23590,7 +23596,7 @@
   const Emu = MML.Emu = MML.Emu || {};
 
   // 出来上がった画面(vdc.out)はキー名でなく配列そのもので外す(キー名 'out' で外すと、音源の ch の今の出力 out まで落ちる。見直しで分かった)
-  const SKIP_KEYS = new Set(['rom', 'card', 'rec', 'ring', 'ringR', '_frame', '_frameIdx', 'onFrame', 'onFrameExact', 'onWrite', 'onIo', 'host', 'bus', 'disc', 'onCommand', 'onSample', 'onOp']);
+  const SKIP_KEYS = new Set(['rom', 'card', 'rec', 'ring', 'ringR', '_frame', '_frameIdx', 'onFrame', 'onFrameExact', 'onWrite', 'onIo', 'host', 'bus', 'disc', 'onCommand', 'onSample', 'onStop', 'onOp']);
   const romSum = (card) => {
     if (card._sum === undefined) { let h = 2166136261 | 0; const r = card.rom; for (let i = 0; i < r.length; i += 97) h = Math.imul(h ^ r[i], 16777619) | 0; card._sum = h >>> 0; }
     return card._sum;

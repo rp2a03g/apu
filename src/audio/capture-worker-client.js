@@ -461,6 +461,8 @@
   // Worker化せず、メインスレッド版へそのまま流す)。dpcmTrace/controlTraceは
   // 「外側固定長6・中身が伸びる」二重配列なので、ch別に差分を受けて追記する。
   Emu.captureHesSongWorkerAsync = function (hesBytes, opt = {}, onProgress = null) {
+    // HES の救済の設定(hesPlayer.js HesPlayer.DEFER_VBLANK)は Worker に届かないので、ここで opt に足す
+    if (opt.deferVblank === undefined && Emu.HesPlayer) opt = Object.assign({}, opt, { deferVblank: !!Emu.HesPlayer.DEFER_VBLANK });
     if (!opt.regsOnly || opt.perChannelAudio) return Emu.captureHesSongAsync(hesBytes, opt, onProgress);
     const probes = () => [
       MML.HES && MML.HES.parseHeader, Emu.CPUHuC6280, Emu.HesBus, Emu.APUHuC6280,

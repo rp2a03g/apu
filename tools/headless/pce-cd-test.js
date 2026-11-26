@@ -38,6 +38,7 @@ let peak = 0, cdaFrames = 0, adpcmFrames = 0, st = null, stAt = 0, peakCd = 0;
 a.onFrame = () => { a.setController(0, padAt(a.frameCount)); };
 const t1 = Date.now();
 a.startRecording();
+const outs = []; { const prev = a.cd.adpcm.onSample; a.cd.adpcm.onSample = (out, nib, first) => { outs.push(out); prev(out, nib, first); }; }
 for (let f = 0; f < N; f++) {
   const s = a.runFrame();
   for (let i = 0; i < s.length; i++) { const v = Math.abs(s[i]); if (v > peak) peak = v; }
@@ -92,13 +93,23 @@ if (st) {
   if (process.argv.includes('--save')) fs.writeFileSync(path.join(dir, 'rec-test.vgm'), r.vgm);
   // 再生: 最後まで例外なく回り、ADPCM が鳴る
   const pl = new E.VgmPlayer(r.vgm); let pk = 0, apk = 0, n = 0;
-  const ad = pl.adapterById && pl.adapterById.pceadpcm;
-  while (!pl.ended && n < N + 120) { const buf = pl.renderFrame(44100); n++; if (buf) for (let i = 0; i < buf.length; i++) pk = Math.max(pk, Math.abs(buf[i])); if (ad) apk = Math.max(apk, Math.abs(ad.cur)); }
+  const ad = pl.adapterById && pl.adapterById.msm5205;
+  while (!pl.ended && n < N + 120) { const buf = pl.renderFrame(44100); n++; if (buf) for (let i = 0; i < buf.length; i++) pk = Math.max(pk, Math.abs(buf[i])); if (ad) apk = Math.max(apk, Math.abs(ad.chip.signal)); }
   // 波形メモリ音源も ADPCM も鳴っていない場面(CD-DA だけ)の録音は、VGM では無音になる(CD-DA の音声は VGM に入れない)
   const anyChip = frames.some(l => l.some(w => w.adpcm !== undefined || (w.addr === 4 && (w.value & 0x80))));
   ok(pl.ended || n >= N, `VgmPlayer で最後まで回る(${n} フレーム、最大 ${pk.toFixed(3)}、ADPCM の最大 ${apk})`);
   if (anyChip) ok(pk > 0.005, 'VGM の再生で音が出る'); else console.log('    (波形メモリ音源も ADPCM も鳴っていないので、VGM は無音。CD-DA の音声は VGM に入らない)');
-  if (nA > 0) ok(apk > 0, 'VGM の再生で ADPCM が鳴る');
+  if (nA > 0) {
+    ok(apk > 0, 'VGM の再生で ADPCM が鳴る(MSM5205 の口)');
+    ok(hdr.chips.msm5205 && hdr.chips.msm5205.clock === 1536000 && ad.chip.noLeak === true && ad.chip.playRate() === 32000, 'VGM のヘッダに MSM5205(クロック 1,536,000、4bit、÷48)。再生側は減衰なしの計算');
+    // 録った符号を MSM5205 に 1 個ずつ流し、本体の ADPCM の出力(12bit、中心 2048)と同じになるか
+    const chip = new E.MSM5205Audio(1536000, 6, false); chip.noLeak = true; let k = 0, bad = 0;
+    for (const l of frames) for (const w of l) {
+      if (w.adpcmStop || w.first) { chip.write(0, 1); chip.write(0, 0); }
+      if (w.adpcm !== undefined) { chip.write(1, w.adpcm); chip._consume(); if (chip.signal !== outs[k] - 2048) bad++; k++; }
+    }
+    ok(k === outs.length && bad === 0, `本体の ADPCM の出力と MSM5205 の計算が 1 個ずつ同じ(${k} 個、違う ${bad})`);
+  }
 }
 console.log(bad ? 'NG ' + bad : 'すべて OK');
 process.exit(bad ? 1 : 0);

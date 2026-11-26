@@ -58,7 +58,8 @@
       this.sampleCounter = 0;
       // 音に出す側(補間用に 1 つ前と今)
       this.audPrev = 0; this.audCur = 0; this.audAt = 0;
-      this.onSample = null;   // (12bit の出力) 再生で 1 個進むたび(録音用)
+      this.onSample = null;   // (12bit の出力, 4bit の符号, 再生の始まりか) 再生で 1 個進むたび(録音用)
+      this.onStop = null;     // 再生が止まった時(録音用)
     }
 
     _reset() {
@@ -167,10 +168,12 @@
     _playSample() {
       if (this.control & 0x80) { this.playing = (this.control & 0x20) !== 0; this.playRequest = false; return; }
       if (((this.control & 0x40) && this.length === 0) || !(this.control & 0x20) || (!this.playing && !this.playRequest)) {
-        this.playRequest = false; this.playing = false;
+        this.playRequest = false;
+        if (this.playing) { this.playing = false; if (this.onStop) this.onStop(); }
         return;
       }
-      if (this.playRequest) { this.playRequest = false; this.playing = true; this.out = 2048; this.magnitude = 0; }
+      let first = false;
+      if (this.playRequest) { this.playRequest = false; this.playing = true; this.out = 2048; this.magnitude = 0; first = true; }
       let data;
       if (this.nibble) {
         this.nibble = false;
@@ -187,7 +190,7 @@
       this._setHalf(this.length <= 0x8000);
       if (this.length === 0) this._setEnd(true);
       this.audPrev = this.audCur; this.audCur = (this.out - 2048) * 10; this.audAt = this.host.clock;
-      if (this.onSample) this.onSample(this.out);
+      if (this.onSample) this.onSample(this.out, data, first);
     }
 
     /** 今の音(16bit 相当の値)。再生中は 1 つ前と今の間を直線でつなぐ。止まっている間はゆっくり 0 へ */
