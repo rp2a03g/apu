@@ -60,7 +60,7 @@
     }
     _inputNow() {
       const m = this.msx, u = new Uint8Array(2 + KB_ROWS);
-      u[0] = m.joy[0]; u[1] = m.joy[1];
+      const j = m.joyUsed || m.joy; u[0] = j[0]; u[1] = j[1]; // joy[] は連射の位相が次へ進んだ後(nesRewind.js の _packPads と同じ理由)
       u.set(m.keyboard.rows.subarray(0, KB_ROWS), 2);
       return u;
     }

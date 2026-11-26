@@ -311,7 +311,7 @@
       if (this.fm && this.fmInternal) this.slot[lay.music[0]][lay.music[1]] = this.fm; // 内蔵 MSX-MUSIC(2+ は 3-3、turboR は 0-2)
       this.pageDev = new Array(8).fill(null);
       this.ppiA = 0; this.ppiC = 0; this.ssl = new Uint8Array(4);
-      this.joy = [0, 0]; this.joyHeld = [0, 0]; this.joyTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.joy = [0, 0]; this.joyUsed = [0, 0]; this.joyHeld = [0, 0]; this.joyTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
       this.sampleRate = 0; this.cycleAccum = 0;
       this.ring = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0;
       this.underruns = 0;
@@ -654,6 +654,7 @@
     }
     _frameEnd() {
       this._frameFlag = true;
+      this.joyUsed[0] = this.joy[0]; this.joyUsed[1] = this.joy[1]; // 終わったフレームで効いていた値(連射の位相を進める前)。巻き戻しはこれを控える
       if (this.joyTurbo[0] || this.joyTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyJoy(0); this._applyJoy(1); }
       if (this.rec) { this.rec.cur.spf = this.samplesPerFrame; this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       if (this.onFrame) this.onFrame();

@@ -44,6 +44,7 @@
       this.spcL = new Float32Array(SPC_FIFO); this.spcR = new Float32Array(SPC_FIFO); this.spcHead = 0; this.spcLen = 0; this.spcFrac = 0; this.spcStep = 0;
       this.spcGain = 1; this.gbGain = 1;
       this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.padUsed = [0, 0]; // 終わったフレームで効いていた値(連射の位相を進める前)。巻き戻しはこれを控える
       this.pad = [0, 0]; // 今効いているパッド値(NesConsole.BUTTON の並び)。巻き戻し(SgbRewind)が記録し、進め直す時は直接書く
       this.onFrame = null;
       this.recBase = 0; this.recPort = [0, 0, 0, 0]; this.menuFrames = 0;
@@ -58,6 +59,7 @@
       this.icd.onClock = (clk) => this._clock(clk);
       this.snes.onFrame = () => {
         if (this.menuFrames > 0 && --this.menuFrames === 0) this._applyPad();
+        this.padUsed[0] = this.pad[0]; this.padUsed[1] = this.pad[1];
         if (this.padTurbo[0] || this.padTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
         if (this.onFrame) this.onFrame();
       };
@@ -261,6 +263,9 @@
       for (let i = 0; i < 256; i++) { const r = (i >> 5) & 7, g = (i >> 2) & 7, b = i & 3; p[i] = (0xFF000000 | ((b * 85) << 16) | (((g * 255 / 7) | 0) << 8) | ((r * 255 / 7) | 0)) >>> 0; }
       this._pal = p;
     }
+    // 進め直しのパッド: pad[] に書くだけでは SNES 側のパッド端子に届かない(届けるのは _pushPad)。
+    // それまでは進め直しの間、巻き戻す直前に押していた物がそのまま入っていた
+    _unpackPads(p) { const sgb = this.nes; sgb.pad[0] = p & 0xFF; sgb.pad[1] = (p >> 8) & 0xFF; sgb._pushPad(); }
     get palette() { return this._pal; }
     _capture(f) {
       const FB = this.frameBytes, RING = Emu.NesRewind.RING;

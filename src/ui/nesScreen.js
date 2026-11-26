@@ -2440,6 +2440,32 @@
 
   // PC エンジンの HuCard を開く(流れはゲームボーイと同じ: 主スレッドで本体を作って検査 → Worklet(無理なら主スレッド実行))
   // CD-ROM²: set = { name, kind 'cue' | 'ccd', text, files: [{ name, data(Uint8Array) }], sub }。システムカードが無ければ待つ
+  // CD の圧縮された音声のトラック(.mp3 / .ogg / .flac / .m4a)を、ブラウザの復号で CD と同じ形(44.1kHz・16bit・ステレオの素の PCM)に直す。
+  // files = [{ name, data(Uint8Array) }]。返り値は [{ name, data, decoded: true }](長さは 1 セクタ=2352 バイトの倍数に 0 で埋める)。
+  // 復号は 44.1kHz の OfflineAudioContext で行う(別の周波数の物はブラウザが 44.1kHz に直す)。1 個ずつ順に(まとめて復号すると一時的なメモリが大きい)
+  async function decodeCdAudio(files, onProgress) {
+    const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!AC) throw new Error(T('このブラウザは音声の復号ができません'));
+    const out = [];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      if (onProgress) onProgress(i, files.length, f.name);
+      let buf;
+      try { buf = await new AC(2, 1, 44100).decodeAudioData(f.data.buffer.slice(f.data.byteOffset, f.data.byteOffset + f.data.byteLength)); }
+      catch (e) { throw new Error(T('音声のトラック({name})を復号できませんでした', { name: f.name })); }
+      const n = buf.length, l = buf.getChannelData(0), r = buf.numberOfChannels > 1 ? buf.getChannelData(1) : l;
+      const bytes = new Uint8Array(Math.ceil(n * 4 / 2352) * 2352), dv = new DataView(bytes.buffer);
+      for (let k = 0; k < n; k++) {
+        let a = Math.round(l[k] * 32768), b = Math.round(r[k] * 32768);
+        if (a > 32767) a = 32767; else if (a < -32768) a = -32768;
+        if (b > 32767) b = 32767; else if (b < -32768) b = -32768;
+        dv.setInt16(k * 4, a, true); dv.setInt16(k * 4 + 2, b, true);
+      }
+      out.push({ name: f.name, data: bytes, decoded: true });
+    }
+    return out;
+  }
+
   async function openPceCd(set) {
     if (!ensureDom()) throw new Error('win-nes がありません');
     const card = loadPceSysCard();
@@ -2671,6 +2697,7 @@
     registerOpener(kind, fn) { OPENERS[kind] = fn; },
     // CD-ROM² を開く(main.js が .cue / .ccd と一緒に選ばれたファイルを集めて渡す)
     openPceCd(set) { const p = openChain.then(() => openPceCd(set)); openChain = p.catch(() => {}); return p; },
+    decodeCdAudio,
     _debug: { setDiskDir: (h) => { diskDirHandle = h; updateDiskBadge(); }, injectBattery: (blob) => handleBatteryBlob(blob), diskImage: (i) => currentDiskImage(i), dirty: () => Array.from(diskDirty), writeBack: () => writeBackDirty() },
     // 複数の画像をひとまとめに開く(zip の中のディスク組など): MSX の .dsk は全部同じドライブの組にして [disk] で選ぶ、
     // FDS の .fds が複数なら面を順に並べて 1 本に、それ以外は最初の 1 本

@@ -10778,12 +10778,19 @@
       if ((ext === 'cue' || ext === 'ccd') && MML.UI.NesScreen && MML.UI.NesScreen.openPceCd) {
         const sib = Array.from((opts && opts.siblings) || []).filter(fl => fl !== file);
         const dataFiles = sib.filter(fl => /\.(bin|img|iso|wav|raw)$/i.test(fl.name));
+        // 圧縮された音声のトラック(cue の時だけ。同じ名前の .wav が一緒にあればそちらを使う)
+        const stemOf = (n) => n.replace(/\.[^.]+$/, '').toLowerCase();
+        const packed = ext === 'cue' ? sib.filter(fl => /\.(mp3|ogg|flac|m4a)$/i.test(fl.name) && !dataFiles.some(d => /\.wav$/i.test(d.name) && stemOf(d.name) === stemOf(fl.name))) : [];
         const stem = file.name.replace(/\.[^.]+$/, '').toLowerCase();
         const subFile = sib.find(fl => fl.name.toLowerCase() === stem + '.sub') || (sib.filter(fl => /\.sub$/i.test(fl.name)).length === 1 ? sib.find(fl => /\.sub$/i.test(fl.name)) : null);
         if (!dataFiles.length) { alert(T('CD のデータのファイルがありません。.cue(か .ccd)と、.bin / .img / .iso / .wav を一緒に選ぶか、まとめてドロップしてください。')); return false; }
         try {
           const set = { name: file.name, kind: ext, text: new TextDecoder('latin1').decode(await file.arrayBuffer()), files: [], sub: subFile ? new Uint8Array(await subFile.arrayBuffer()) : null, names: sib.map(fl => fl.name) };
           for (const fl of dataFiles) set.files.push({ name: fl.name, data: new Uint8Array(await fl.arrayBuffer()) });
+          if (packed.length && MML.UI.NesScreen.decodeCdAudio) {
+            const raw = []; for (const fl of packed) raw.push({ name: fl.name, data: new Uint8Array(await fl.arrayBuffer()) });
+            for (const d of await MML.UI.NesScreen.decodeCdAudio(raw)) set.files.push(d);
+          }
           stopAllFormatPlayback();
           await MML.UI.NesScreen.openPceCd(set);
         } catch (e) {

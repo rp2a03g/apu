@@ -1825,6 +1825,8 @@
     'システムカードを控えました: {name}': 'System Card saved: {name}',
     'システムカードとして読めません: {name}': 'Not a System Card: {name}',
     'システムカードがまだ控えてありません。⚙ → PC エンジン で選ぶか、システムカード(.pce)をドロップすると、この CD を開きます': 'No System Card saved yet. Choose one in ⚙ → PC Engine, or drop a System Card (.pce), and this CD will open.',
+    'このブラウザは音声の復号ができません': 'This browser cannot decode audio.',
+    '音声のトラック({name})を復号できませんでした': 'Could not decode the audio track ({name}).',
     'CD のソフトの起動にシステムカード(.pce)が要ります。このブラウザに控えて次回も使います。CD は .cue(か .ccd)とデータのファイル(.bin / .img / .iso / .wav)を一緒に選ぶか、まとめてドロップしてください。圧縮された音声(MP3 など)のトラックは読めません。': 'CD software needs a System Card (.pce). It is saved in this browser for next time. For a CD, select the .cue (or .ccd) together with its data files (.bin / .img / .iso / .wav), or drop them all at once. Compressed audio tracks (MP3 etc.) cannot be read.',
     'CD のトラックが読めません': 'No readable tracks on this CD',
     'CD のデータのファイルがありません。.cue(か .ccd)と、.bin / .img / .iso / .wav を一緒に選ぶか、まとめてドロップしてください。': 'The CD data files are missing. Select the .cue (or .ccd) together with the .bin / .img / .iso / .wav files, or drop them all at once.',

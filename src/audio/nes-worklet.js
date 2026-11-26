@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-26 21:53:59
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 22:01:55
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 21:53:59';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 22:01:55';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -13276,7 +13276,7 @@
       if (this.fm && this.fmInternal) this.slot[lay.music[0]][lay.music[1]] = this.fm; // 内蔵 MSX-MUSIC(2+ は 3-3、turboR は 0-2)
       this.pageDev = new Array(8).fill(null);
       this.ppiA = 0; this.ppiC = 0; this.ssl = new Uint8Array(4);
-      this.joy = [0, 0]; this.joyHeld = [0, 0]; this.joyTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.joy = [0, 0]; this.joyUsed = [0, 0]; this.joyHeld = [0, 0]; this.joyTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
       this.sampleRate = 0; this.cycleAccum = 0;
       this.ring = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0;
       this.underruns = 0;
@@ -13619,6 +13619,7 @@
     }
     _frameEnd() {
       this._frameFlag = true;
+      this.joyUsed[0] = this.joy[0]; this.joyUsed[1] = this.joy[1]; // 終わったフレームで効いていた値(連射の位相を進める前)。巻き戻しはこれを控える
       if (this.joyTurbo[0] || this.joyTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyJoy(0); this._applyJoy(1); }
       if (this.rec) { this.rec.cur.spf = this.samplesPerFrame; this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       if (this.onFrame) this.onFrame();
@@ -13867,7 +13868,7 @@
     }
     _inputNow() {
       const m = this.msx, u = new Uint8Array(2 + KB_ROWS);
-      u[0] = m.joy[0]; u[1] = m.joy[1];
+      const j = m.joyUsed || m.joy; u[0] = j[0]; u[1] = j[1]; // joy[] は連射の位相が次へ進んだ後(nesRewind.js の _packPads と同じ理由)
       u.set(m.keyboard.rows.subarray(0, KB_ROWS), 2);
       return u;
     }
@@ -19864,6 +19865,7 @@
       this.spcL = new Float32Array(SPC_FIFO); this.spcR = new Float32Array(SPC_FIFO); this.spcHead = 0; this.spcLen = 0; this.spcFrac = 0; this.spcStep = 0;
       this.spcGain = 1; this.gbGain = 1;
       this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.padUsed = [0, 0]; // 終わったフレームで効いていた値(連射の位相を進める前)。巻き戻しはこれを控える
       this.pad = [0, 0]; // 今効いているパッド値(NesConsole.BUTTON の並び)。巻き戻し(SgbRewind)が記録し、進め直す時は直接書く
       this.onFrame = null;
       this.recBase = 0; this.recPort = [0, 0, 0, 0]; this.menuFrames = 0;
@@ -19878,6 +19880,7 @@
       this.icd.onClock = (clk) => this._clock(clk);
       this.snes.onFrame = () => {
         if (this.menuFrames > 0 && --this.menuFrames === 0) this._applyPad();
+        this.padUsed[0] = this.pad[0]; this.padUsed[1] = this.pad[1];
         if (this.padTurbo[0] || this.padTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
         if (this.onFrame) this.onFrame();
       };
@@ -20081,6 +20084,9 @@
       for (let i = 0; i < 256; i++) { const r = (i >> 5) & 7, g = (i >> 2) & 7, b = i & 3; p[i] = (0xFF000000 | ((b * 85) << 16) | (((g * 255 / 7) | 0) << 8) | ((r * 255 / 7) | 0)) >>> 0; }
       this._pal = p;
     }
+    // 進め直しのパッド: pad[] に書くだけでは SNES 側のパッド端子に届かない(届けるのは _pushPad)。
+    // それまでは進め直しの間、巻き戻す直前に押していた物がそのまま入っていた
+    _unpackPads(p) { const sgb = this.nes; sgb.pad[0] = p & 0xFF; sgb.pad[1] = (p >> 8) & 0xFF; sgb._pushPad(); }
     get palette() { return this._pal; }
     _capture(f) {
       const FB = this.frameBytes, RING = Emu.NesRewind.RING;
@@ -22063,7 +22069,9 @@
  *      (そのため PREGAP が 2 つ以上ある cue では、後ろのトラックの LBA とファイルの中の位置がずれる)。新しいソースは上の通り全部を後ろへずらす。
  *      既定は新しい方。照合の時だけ opts.legacyPregap = true で 2.2.1 の数え方にする(TOC の値で食い違って分かった)
  *   ★ Mesen は「前のトラックの大きさ」を、後ろのトラックのセクタの大きさで計算する(2048 のデータと音声が 1 つのファイルに混ざる時だけ差が出る)。同じにしてある
- *   [推定] cue の FILE が WAVE で中身が RIFF の時は、data チャンクの頭から読む(Mesen はヘッダを飛ばさない)。MP3 などは読めない(呼び出し側が断る)
+ *   [推定] cue の FILE が WAVE で中身が RIFF の時は、data チャンクの頭から読む(Mesen はヘッダを飛ばさない)。MP3 などはここでは読めない。
+ *     画面の側(nesScreen.js の decodeCdAudio)がブラウザの復号で 44.1kHz・16bit・ステレオの素の PCM に直し、decoded の印を付けて渡す。
+ *     圧縮で頭と終わりに数十ミリ秒の余りが付くので、トラックの長さ(=後ろのトラックの始まり)は元のディスクと少し違う
  *   [推定] ccd(CloneCD): [Entry] の Point が 1〜99 の物をトラックとし、PLBA を始まり、Control の bit2 をデータの印として読む。
  *          img は LBA 0 からの 2352 バイト/セクタ。前置きは前のトラックに含める(cue の INDEX 00 が無い時と同じ形)
  */
@@ -22217,8 +22225,14 @@
       } else {
         const total = PceDisc.parseCue(set.text).filter(f => f.tracks.length).length;
         disc = PceDisc.fromCue(set.text, (name, type, index) => {
+          // 圧縮された音声(.mp3 など)を呼び出し側が PCM に直した物(decoded の印つき)は、拡張子を除いた名前で引き当てる
+          // (cue は .wav を指しているのに実物は .mp3、という配り方がある。cue が .mp3 を指している時も同じ)
+          const stemOf = (n) => base(n).replace(/\.[^.]+$/, '');
+          const dec = files.find(f => f.decoded && stemOf(f.name) === stemOf(name));
+          if (dec) return dec.data;
           if (type === 'MP3' || /\.(mp3|ogg|flac|ape)$/i.test(name)) throw new Error('cue: 圧縮された音声(' + base(name) + ')のトラックは読めません');
-          const hit = files.find(f => base(f.name) === base(name)) || (total === 1 && files.length === 1 ? files[0] : null) || (files.length === total ? files[index] : null);
+          const plain = files.filter(f => !f.decoded);
+          const hit = plain.find(f => base(f.name) === base(name)) || (total === 1 && plain.length === 1 ? plain[0] : null) || (plain.length === total ? plain[index] : null);
           // 一緒に選ばれた物の中に、同じ名前の圧縮された音声(.mp3 など)がある時は、そう知らせる(cue は .wav を指しているのに実物は .mp3、という配り方がある)
           if (!hit) { const stem = base(name).replace(/\.[^.]+$/, ''); const z = (set.names || []).find(n => base(n).replace(/\.[^.]+$/, '') === stem && /\.(mp3|ogg|flac|ape|m4a)$/i.test(n)); if (z) throw new Error('cue: 圧縮された音声(' + base(z) + ')のトラックは読めません(元の音声の .wav か、音声ごと 1 つになった .bin が要ります)'); }
           return hit ? hit.data : null;
