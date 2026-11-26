@@ -62,6 +62,32 @@
   //            1 = APU ポート $2140-$2143 への書き込み(ポート番号 0-3、値、刻印 4 バイト = 像の時点からの SPC700 のサイクル数)。
   //                ブロックの位置はおおよその時刻で、書く瞬間は刻印で決める(BIOS がドライバを送る握手は数十サイクル間隔なので、
   //                1/44100 秒に丸めると前後して化ける)
+  // PC エンジンの CD-ROM² の規格外ブロック(DESIGN-PCE-CAPTURE.md §6)。0x67 0x66 TYPE 長さ 'PCEX' 版 種類 中身…
+  //   種類 0 = ヘッダ: 中身 1 バイト = 印(bit0 ADPCM がある、bit1 CD-DA の操作がある)。ストリームの頭に 1 個
+  //   種類 1 = ADPCM の出力: 速さ(1 バイト、$180E の下位 4bit。1 個の間隔 = (16 - 速さ) / 32000 秒)+ 12bit の出力(2 バイト、下位が先)× n。
+  //            ブロックの位置が 1 個目の時刻。MSM5205 を通した後の値(中心 2048)なので、再生側は RAM も差分の計算も要らない
+  //   種類 2 = CD-DA の操作: [1, 始まり LBA×3(上位が先), 終わり LBA×3, 終わりの動き(0 止まる 1 繰り返す 2 止まって割り込み), 一時停止で始めるか, 今の位置 LBA×3] 再生
+  //            (置かれた時刻はコマンドを受けた時。音が出るのはシークの後=0.15 秒以上後)/ [2] 一時停止 / [3] 停止 /
+  //            [4, $180F の値, 入ってからの時間(10ms 単位、下位が先の 2 バイト)] フェーダ(bit3 入、bit1 相手 1=ADPCM 0=CD-DA、bit2 速い)/
+  //            [5, 終わり LBA×3, 終わりの動き] 終わりの指定(再生を始める)。
+  //            音声そのものは入れない(VGM 単体では CD-DA は鳴らない)。フェーダが ADPCM 相手の時は再生側が ADPCM の音量に掛ける
+  VGM.PCEX = { TYPE: 0xBA, MAGIC: [0x50, 0x43, 0x45, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_ADPCM: 1, KIND_CDDA: 2, FLAG_ADPCM: 1, FLAG_CDDA: 2 };
+  VGM.isPcexBlock = function (type, block) {
+    const m = VGM.PCEX.MAGIC;
+    return type === VGM.PCEX.TYPE && block && block.length >= 6 && block[0] === m[0] && block[1] === m[1] && block[2] === m[2] && block[3] === m[3];
+  };
+  // ストリーム先頭のデータブロックに PCEX のヘッダがあれば { flags } を返す(無ければ null)
+  VGM.scanPceExtension = function (bytes, dataOffset) {
+    let p = dataOffset;
+    while (p + 7 <= bytes.length && bytes[p] === 0x67 && bytes[p + 1] === 0x66) {
+      const type = bytes[p + 2];
+      const size = (bytes[p + 3] | (bytes[p + 4] << 8) | (bytes[p + 5] << 16) | (bytes[p + 6] << 24)) & 0x7FFFFFFF;
+      const block = bytes.subarray(p + 7, p + 7 + size);
+      if (VGM.isPcexBlock(type, block) && block[5] === VGM.PCEX.KIND_HEADER && block.length >= 7) return { flags: block[6] };
+      p += 7 + size;
+    }
+    return null;
+  };
   VGM.GBXX = { TYPE: 0xBD, MAGIC: [0x47, 0x42, 0x58, 0x58], VERSION: 1, KIND_SGB: 1, KIND_BUZZER: 2, SGB_STATE: 0, SGB_PORT: 1 };
   VGM.MSXX = { TYPE: 0xBE, MAGIC: [0x4D, 0x53, 0x58, 0x58], VERSION: 1, KIND_HEADER: 0, KIND_DAC: 1, KIND_PCM_CTRL: 2, META_PCM: 0x80,
     MACHINES: { msx1: 1, msx2: 2, msx2plus: 3, turbor: 4 }, DAC_TURBOR_PCM: 1, DAC_KONAMI: 2, DAC_KONAMI_SYNTH: 4 };
@@ -373,6 +399,7 @@
     // 最初の待ち/書き込みコマンドより前にあるものだけ見る(ここで分かればアダプタ生成と鍵盤の行構成に使える)
     if (chips.nes) chips.nes.extraChips = VGM.scanNesExtension(bytes, dataOffset);
     const msxx = VGM.scanMsxExtension(bytes, dataOffset); // MSX の DAC(規格外 MSXX)。本ツールの MSX 録音だけが持つ
+    const pcex = chips.huc6280 ? VGM.scanPceExtension(bytes, dataOffset) : null; // PC エンジンの CD-ROM²(規格外 PCEX)。本ツールの録音だけが持つ
     const sgb = chips.gb ? VGM.scanSgbExtension(bytes, dataOffset) : false; // スーパーゲームボーイの SNES 側音源(規格外 GBXX)。本ツールの SGB 録音だけが持つ
     // CP システム III(規格外 CP3X)。標準のクロック欄を持たないので、ここでチップ一覧へ足す(以降は他のチップと同じ経路)
     const cp3x = usedChips.length ? null : VGM.scanCps3Extension(bytes, dataOffset);
@@ -392,6 +419,7 @@
     return {
       magicOk: true,
       msxx,           // MSXX ブロック { machine, dac } | null
+      pcex,           // PCEX ブロック { flags } | null
       sgb,            // GBXX の SNES 側音源の像があるか
       version,
       versionText: ((version >> 8) & 0xFF).toString(16) + '.' + ((version >> 4) & 0xF).toString(16) + (version & 0xF).toString(16),

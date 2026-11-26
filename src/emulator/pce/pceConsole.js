@@ -2,6 +2,9 @@
  * PC エンジン本体(段階 9c: HuCard、2 ボタンパッド 1 個、波形メモリ音源、VDC/VCE 1 組。
  *   段階 9d: SuperGrafx(VDC 2 個+優先順位の石 pce/vpc.js+RAM 32K)、1MB 超のカード、RAM 内蔵カード、6 ボタンパッドとマルチタップ pce/pad.js)
  *   opts: model 'auto'(既定。SuperGrafx 専用カードなら SuperGrafx)/ 'pce' / 'sgx'、pad 'pad2'(既定)/ 'pad6' / 'tap'、region 'auto' / 'pce'
+ *   段階 9e: CD-ROM²。opts.cd に PceDisc を渡すと CD 装置つきで動く(romBytes はシステムカード)。opts.cdType 'scd'(既定。Super CD-ROM² の RAM 192K を
+ *     バンク $68-$7F に持ち、$18C0-$18C3 に印を出す)/ 'cd'(初代 CD-ROM²。どちらも無い)。CD 装置の中身は pce/cdrom.js・pce/adpcm.js・pce/cdImage.js
+ *   [参照] 1 サイクルの中の順番(PceMemoryManager.cpp): タイマ → VDC → CD 装置。CD 装置の時計は CD をつないだ時だけ進む
  *   [参照] SuperGrafx の I/O(PceVpc.cpp): $0000-$03FF は下位 5bit で分ける。$00-$07 = VDC1、$08-$0E = 優先順位の石、$10-$17 = VDC2、ほかの読みは $FF。
  *          RAM は 32K(バンク $F8-$FB が別々)。1 サイクルの中の順番はタイマ → VDC2 → VDC1
  * MML.Emu.PceConsole
@@ -34,7 +37,9 @@
  *      Mesen は HuCard の時、CD 本体のレジスタは見せるが CD 本体の時計は進めない。そのため「数十クロックで終わるはずの読み書き」が終わらず、
  *      印が立ちっぱなしになる。実機(CD 本体をつないだ時)は印がすぐ下りるはずで、つないでいなければ $18xx は読めない(未確認)。
  *      実ソフト 1 本(54 本中)がこの印で分岐していて、Mesen と同じ動きにするためにそのまま合わせた。CD を作る 9e で決め直す
- *   [推定] CD の中身(SCSI、ADPCM の再生と RAM、CD-DA、フェーダの効き)は 9e。$18C0-$18C3 の印は Mesen の設定(CD-ROM の種類)しだいで $FF にもなる
+ *   ★ HuCard の時も CD 装置のレジスタは本物(pce/cdrom.js)がつながっているが、時計は進めない(上の $180C の話。Mesen と同じ)。
+ *      HuCard で CD 装置の時計も進める(実機で CD 装置をつないだ形)かどうかは決めていない
+ *   [推定] CD つきの時は全体の音量を 0.6 倍にする(CD-DA の最大が 1.0 を超えないように。波形メモリ音源・CD-DA・ADPCM の比は Mesen のまま)
  *   [推定] 色: VCE の 9bit(緑 3・赤 3・青 3)を 各 3bit → 8bit に直線で伸ばす。白黒の印(VCE $0400 bit7)は輝度 0.299R+0.587G+0.114B
  * 確かめ方: tools/headless/pce-mesen-ab.js --rom(I/O の時刻つきの並びと画面を Mesen と比べる)
  */
@@ -77,6 +82,12 @@
       this.cardRam = this.card.ramSize ? new Uint8Array(this.card.ramSize) : null;
       this.cardBank = 0; // 1MB 超のカードの段(ステートに入れるため本体側にも持つ)
       this.cdRam = new Uint8Array(0x10000);
+      this.disc = opts.cd || null;
+      this.cdOn = !!opts.cd;
+      this.cdType = this.cdOn ? (opts.cdType === 'cd' ? 'cd' : 'scd') : '';
+      this.superRam = this.cdType === 'scd' ? new Uint8Array(0x30000) : null;
+      this.mixGain = this.cdOn ? 0.6 : 1;
+      this.cd = null; // reset() で作る
       this.bram = PceConsole.blankBram();
       this.timer = new Emu.PceTimer();
       this.vce = new Emu.PceVce();
@@ -110,7 +121,8 @@
     }
 
     reset() {
-      this.ram.fill(0); this.cdRam.fill(0); if (this.cardRam) this.cardRam.fill(0);
+      this.ram.fill(0); this.cdRam.fill(0); if (this.cardRam) this.cardRam.fill(0); if (this.superRam) this.superRam.fill(0);
+      this._newCd();
       this.mpr.fill(0);
       this.cardBank = 0; this.card.select(0);
       this.timer.reset(); this.vce.reset(); this.vdc.reset(); this.apu.reset && this.apu.reset();
@@ -118,10 +130,20 @@
       this.input.reset();
       this.clock = 0; this.cycleSteps = 4;
       this.timerIrq = false; this.irq2 = false; this.irqDisable = 0; this.ioBuffer = 0; this.mprBuffer = 0;
-      this.bramLocked = false; this.cdIrqEnable = 0; this.cdReset = 0; this.cdRegs = new Uint8Array(16); this.cdAdpcmBusy = 0;
+      this.bramLocked = false;
       this.frameCount = 0; this.frameStart = 0; this._frameFlag = false; this._frameCb = false; this.lastFrameLen = LINE * 262;
       this.sampleAcc = 0;
       this.cpu.powerOn();
+    }
+
+    /** CD 装置を電源投入時の状態で作り直す(消音の設定と記録の口は引き継ぐ) */
+    _newCd() {
+      const old = this.cd;
+      this.cd = new Emu.PceCdRom(this, this.disc, { superCd: this.cdType !== 'cd' });
+      if (old) {
+        this.cd.mute = old.mute; this.cd.vol = old.vol; this.cd.onCommand = old.onCommand; this.cd.onOp = old.onOp; this.cd.adpcm.onSample = old.adpcm.onSample;
+        if (old.onOp && (old.auStatus === 0 || old.auStatus === 2)) old.onOp([3]); // リセットで CD-DA は止まる(録音中なら記録に残す)
+      }
     }
 
     // バックアップ RAM の初期の中身(CD 本体の BIOS が「全消去」した直後の形。頭 8 バイトが見出し)
@@ -152,6 +174,9 @@
       // 鍵盤表示の名前は HES と同じ 'hes'({ ch0..ch5 })
       if (mute && mute.hes) put(this.apu.mute, mute.hes, (v) => !!v);
       if (volume && volume.hes) put(this.apu.vol, volume.hes, (v) => Math.max(0, Math.min(2, +v || 0)));
+      // CD-ROM² の CD-DA と ADPCM は 'pcecd'({ cdda, adpcm })。VGM の再生側(vgmPlayer.js の pceadpcm)と同じ名前
+      if (mute && mute.pcecd) put(this.cd.mute, mute.pcecd, (v) => !!v);
+      if (volume && volume.pcecd) put(this.cd.vol, volume.pcecd, (v) => Math.max(0, Math.min(2, +v || 0)));
     }
     frameFrac() { return Math.min(0.999999, (this.clock - this.frameStart) / (LINE * this.vce.lines)); }
 
@@ -188,6 +213,7 @@
       if (this.timer.advance(3)) this.timerIrq = true;
       if (this.vdc2) this.vdc2.exec();
       this.vdc.exec();
+      if (this.cdOn) this.cd.exec();
       const sr = this.sampleRate;
       if (sr) {
         this.sampleAcc += sr * 3;
@@ -197,7 +223,8 @@
             this.apu.runToMaster(this.clock);
             const s = this.apu.mixSample();
             const i = (this.ringHead + this.ringLen) & (AUDIO_RING - 1);
-            this.ring[i] = s.left; this.ringR[i] = s.right;
+            if (this.cdOn) { const cd = this.cd, g = this.mixGain; cd.mix(this.clock); this.ring[i] = (s.left + cd.outL) * g; this.ringR[i] = (s.right + cd.outR) * g; }
+            else { this.ring[i] = s.left; this.ringR[i] = s.right; }
             this.ringLen++;
           }
         }
@@ -208,7 +235,8 @@
       this._frameFlag = true; this._frameDirty = true;
       this.lastFrameLen = this.clock - this.frameStart;
       if (this.padTurbo[0] || this.padTurbo[1] || this.padTurbo[2] || this.padTurbo[3] || this.padTurbo[4] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
-      if (this.rec) { this.rec.cur.len = this.lastFrameLen; this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
+      // 画面の長さは最後の要素 { len } にも入れる(配列に付けた len は Worklet から主スレッドへ送る時に落ちる。262 行と 263 行で長さが違うので要る)
+      if (this.rec) { this.rec.cur.len = this.lastFrameLen; this.rec.cur.push({ len: this.lastFrameLen }); this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       this.frameStart = this.clock;
       if (!this.sampleRate) this.apu.runToMaster(this.clock); // 音を取らない時も、音源の時計を溜めすぎない
       // ここは VDC の行末処理の途中で、CPU も命令の途中。onFrame(巻き戻しの控えを取る)は命令が終わってから呼ぶ(step)。
@@ -230,6 +258,7 @@
       const bank = this.mpr[addr >>> 13], off = addr & 0x1FFF;
       if (bank < 0x80) {
         if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) return this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF];
+        if (this.superRam !== null && bank >= 0x68) return this.superRam[((bank - 0x68) << 13) | off];
         return this.card.rom[this.card.offset[bank] + off];
       }
       if (bank === 0xFF) { const v = this.readIo(off); if (this.onIo) this.onIo('R', addr, v); return v; }
@@ -244,6 +273,7 @@
       if (bank >= 0xF8 && bank <= 0xFB) { this.ram[(((bank - 0xF8) << 13) | off) & this.ramMask] = value; return; }
       if (bank < 0x80) {
         if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF] = value;
+        else if (this.superRam !== null && bank >= 0x68) this.superRam[((bank - 0x68) << 13) | off] = value;
         else if (this.card.banked && bank === 0 && (off & 0x1FF0) === 0x1FF0) { this.cardBank = off & 0x0F; this.card.select(this.cardBank); }
         return;
       }
@@ -275,7 +305,7 @@
         }
         return this.ioBuffer;
       }
-      if (off < 0x1C00) return this._cdRead(off & 0x3FF);
+      if (off < 0x1C00) return this.cd.read(off & 0x3FF);
       return 0xFF;
     }
 
@@ -312,41 +342,10 @@
         this.ioBuffer = value;
         return;
       }
-      if (off < 0x1C00) this._cdWrite(off & 0x3FF, value);
+      if (off < 0x1C00) this.cd.write(off & 0x3FF, value);
     }
 
-    // CD 本体の口(9c では「バックアップ RAM の鍵」だけ本物。ほかは 9e)
-    _cdRead(reg) {
-      switch (reg) {
-        case 0x00: case 0x01: return 0;
-        case 0x02: return this.cdIrqEnable;
-        case 0x03: this.bramLocked = true; return 0x02;
-        case 0x04: return this.cdReset;
-        case 0x05: case 0x06: case 0x07: case 0x08: case 0x09: return 0;
-        case 0x0A: this.cdAdpcmBusy |= 0x80; return 0;
-        case 0x0C: return this.cdAdpcmBusy;
-        case 0x0B: case 0x0D: case 0x0E: case 0x0F: return this.cdRegs[reg];
-        case 0xC0: return 0x00;
-        case 0xC1: return 0xAA;
-        case 0xC2: return 0x55;
-        case 0xC3: return 0x03;
-        default: return 0xFF;
-      }
-    }
-    _cdWrite(reg, value) {
-      switch (reg) {
-        case 0x02: this.cdIrqEnable = value & 0x7F; break;
-        case 0x04: this.cdReset = value & 0x0F; if (value & 2) this.cdIrqEnable &= 0x8F; break;
-        case 0x07: this.bramLocked = (value & 0x80) === 0; break;
-        case 0x0A: this.cdAdpcmBusy |= 0x04; break;
-        case 0x0D: if (value & 0x80) this.cdAdpcmBusy = 0; this.cdRegs[reg] = value; break;
-        case 0x0B: this.cdRegs[reg] = value & 0xFE; break; // bit0 は転送が走っていなければ立たない(HuCard では常に)
-        case 0x0E: case 0x0F: this.cdRegs[reg] = value; break;
-        default: break;
-      }
-    }
-
-    // ── 録音(VGM への符号化は別。書き込みの t は画面の頭からのマスタークロック、画面の長さは frames[f].len) ──
+    // ── 録音(VGM への符号化は別。書き込みの t は画面の頭からのマスタークロック、画面の長さは frames[f].len と、各画面の最後の要素 { len }) ──
     startRecording() {
       const cur = [], apu = this.apu, w = (addr, value) => cur.push({ addr, value: value & 0xFF, t: 0 });
       // 今の音源の像を、書き込みの並びに直して頭に置く(波形は ch を切ってから 32 個。読み位置は 0 に戻る)
@@ -361,12 +360,22 @@
       }
       w(1, apu.balance); w(8, apu.lfoFreq); w(9, apu.lfoCtrl); w(0, apu.selected);
       this.rec = { frames: [], cur };
+      if (this.cdOn) {
+        // ADPCM は再生で 1 個進むたびの 12bit の出力、CD-DA は操作(SCSI のコマンドとフェーダ)を時刻つきで控える(VGM では規格外ブロック PCEX)
+        // 口の中では this.cd を毎回見る(リセットで CD 装置を作り直すので、ここで掴んだ物を使うと古い方の速さを読んでしまう。見直しの指摘)
+        const at = () => this.clock - this.frameStart;
+        this.cd.adpcm.onSample = (out) => { if (this.rec) this.rec.cur.push({ adpcm: out, rate: this.cd.adpcm.rate & 0x0F, t: at() }); };
+        this.cd.onOp = (op) => { if (this.rec && op) this.rec.cur.push({ cd: op, t: at() }); };
+        const now = this.cd.audioState(); if (now) cur.push({ cd: now, t: 0 });
+        const fade = this.cd.fadeState(); if (fade) cur.push({ cd: fade, t: 0 });
+      }
     }
     stopRecording() {
       const rec = this.rec;
       if (!rec) return [];
       this.rec = null;
-      if (rec.cur.length) { rec.cur.len = this.clock - this.frameStart; rec.frames.push(rec.cur); }
+      if (rec.cur.length) { rec.cur.len = this.clock - this.frameStart; rec.cur.push({ len: rec.cur.len }); rec.frames.push(rec.cur); }
+      if (this.cd) { this.cd.adpcm.onSample = null; this.cd.onOp = null; }
       return rec.frames;
     }
 
@@ -407,6 +416,7 @@
 
     static describe(pce) {
       const c = pce.card;
+      if (pce.cdOn) return `${pce.sgx ? 'SuperGrafx ' : ''}${pce.cdType === 'scd' ? 'Super CD-ROM²' : 'CD-ROM²'} ${pce.disc.describe()} システムカード ${c.fileSize >> 10}K${c.hadHeader ? '(ヘッダ 512 バイトを外した)' : ''}`;
       return `${pce.sgx ? 'SuperGrafx ' : ''}HuCard ${c.fileSize >> 10}K(${c.banks} バンク)${c.banked ? ' バンク切り替えつき' : ''}${c.ramSize ? ' RAM 内蔵' : ''}${pce.input.type !== 'pad2' ? ' パッド=' + pce.input.type : ''}${c.hadHeader ? ' ヘッダ 512 バイトを外した' : ''}${c.reversed ? ' ビットの逆順を戻した' : ''}${c.oversize ? ' 1MB 超=未対応' : ''}`;
     }
   }

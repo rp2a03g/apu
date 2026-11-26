@@ -759,6 +759,48 @@
     };
   }
 
+  // PC エンジン CD-ROM² の ADPCM(規格外 PCEX 種類 1、本ツールの録音。DESIGN-PCE-CAPTURE.md §6)。MSM5205 を通した後の 12bit の出力が
+  // 「速さ+値の並び」で届くので、32000Hz の時計を (16 - 速さ) 個ごとに 1 個ずつ出すだけ。ブロックが時刻より少し先に届くので、列に積んで順に出す。
+  // CD-DA の操作(種類 2)は音にしない(音声が VGM に入っていない)。フェーダが ADPCM 相手の時だけ音量に掛ける
+  function makePceAdpcmAdapter() {
+    const UNIT = (31 / 96) / (31 * 255); // 本体(pce/cdrom.js)と同じ物差し: 波形メモリ音源 1ch の最大 = 31/96
+    // ブロックは「1 個目の時刻」に届き、中身はその先(次の書き込みまで)の分。列に積んで 32000Hz の時計で順に出す。
+    //   再生速度を上げるとブロックが速く届いて列が溜まるので、1 画面ぶん(600 個)を超えて残っていたら古い分を捨てて追いつく。
+    //   遅くした時は列が切れるが、50ms までは最後の値を保つ(切れるたびに 0 へ戻すとブツブツ鳴る)。
+    //   clock() を回さない経路(シークの早送り、先読み)は advanceVgm で同じだけ進める。シークの控えには列ごと入る。
+    const a = {
+      id: 'pceadpcm', clockHz: 32000, accum: 0, chip: null, gain: CHIP_GAIN.huc6280, queue: [], head: 0, div: 16, count: 0, cur: 0, idle: 0, skipAcc: 0,
+      mute: { adpcm: false }, vol: { adpcm: 1 }, fadeOn: false, fadeFast: false, fadeLeft: 1,
+      push(block) {
+        if (this.queue.length - this.head > 1200) { this.queue.length = 0; this.head = 0; }
+        else if (this.head > 4096) { this.queue.splice(0, this.head); this.head = 0; }
+        const rate = block[6] & 0x0F;
+        for (let p = 7; p + 2 <= block.length; p += 2) this.queue.push(rate, block[p] | ((block[p + 1] & 0x0F) << 8));
+      },
+      // フェーダ: 相手が ADPCM の時だけ効かせる。elapsed は入ってからの時間(10ms 単位)
+      fade(v, elapsed) {
+        this.fadeOn = (v & 0x08) !== 0 && (v & 0x02) !== 0; this.fadeFast = (v & 0x04) !== 0;
+        this.fadeLeft = Math.max(0, 1 - (elapsed || 0) / 100 / (this.fadeFast ? 2.5 : 6));
+      },
+      clock() {
+        if (this.fadeOn && this.fadeLeft > 0) this.fadeLeft = Math.max(0, this.fadeLeft - 1 / (32000 * (this.fadeFast ? 2.5 : 6)));
+        if (++this.count < this.div) return;
+        this.count = 0;
+        const q = this.queue;
+        if (this.head < q.length) { this.div = 16 - q[this.head]; this.cur = (q[this.head + 1] - 2048) * 10; this.head += 2; this.idle = 0; }
+        else if (this.cur !== 0 && (this.idle += this.div) > 1600) { this.cur *= 0.9; if (Math.abs(this.cur) < 1) this.cur = 0; } // 50ms 待っても続きが来なければ 0 へ戻す
+      },
+      advanceVgm(n) { this.skipAcc += n * (32000 / VGM_RATE); let c = Math.floor(this.skipAcc); this.skipAcc -= c; while (c-- > 0) this.clock(); },
+      mix(out) { if (this.mute.adpcm) return; const s = this.cur * UNIT * this.gain * this.vol.adpcm * (this.fadeOn ? Math.floor(this.fadeLeft * 100) / 100 : 1); out[0] += s; out[1] += s; },
+      applyMute(m) { const e = m.expansion || m; if (e.pcecd) this.mute.adpcm = !!e.pcecd.adpcm; },
+      applyVolume(v) { const e = v.expansion || v; if (e.pcecd && e.pcecd.adpcm !== undefined) this.vol.adpcm = Math.max(0, Math.min(2, +e.pcecd.adpcm || 0)); },
+      getState() { return { queue: this.queue.slice(this.head), div: this.div, count: this.count, cur: this.cur, idle: this.idle, skipAcc: this.skipAcc, accum: this.accum, fadeOn: this.fadeOn, fadeFast: this.fadeFast, fadeLeft: this.fadeLeft }; },
+      setState(st) { this.queue = st.queue.slice(); this.head = 0; this.div = st.div; this.count = st.count; this.cur = st.cur; this.idle = st.idle; this.skipAcc = st.skipAcc; this.accum = st.accum || 0; this.fadeOn = st.fadeOn; this.fadeFast = st.fadeFast; this.fadeLeft = st.fadeLeft; }
+    };
+    a.chip = { getState: () => a.getState(), setState: (st) => a.setState(st) }; // シークの控えはアダプタごと(列を含めて)
+    return a;
+  }
+
   // MSX の DAC(規格外 MSXX ブロック、本ツールの MSX 録音。DESIGN-MSX-CAPTURE.md §5.6。コナミ DAC と turboR PCM の両方): KSS の牌の魔術師 D/A と同じ
   // majutsushiDac.js で鳴らす。書き込みはブロックの位置(時刻)で届くので clock は要らない。ミュート/音量は kss の dac 配列
   function makeMsxDacAdapter(msxx) {
@@ -945,6 +987,10 @@
         }
       }
       if (h.msxx && h.msxx.dac && Emu.MajutsushiDAC) { const a = makeMsxDacAdapter(h.msxx); this.adapters.push(a); this.adapterById.msxdac = a; } // MSX の DAC(MSXX)
+      if (h.pcex) { // PC エンジン CD-ROM²(PCEX): 本体(pceConsole.js の mixGain)と同じく全体を 0.6 倍(PCE_CD_GAIN)。ADPCM があればその口を足す
+        const PCE_CD_GAIN = 0.6, huc = this.adapterById.huc6280; if (huc) huc.gain *= PCE_CD_GAIN;
+        if (h.pcex.flags & 1) { const a = makePceAdpcmAdapter(); a.gain *= PCE_CD_GAIN; this.adapters.push(a); this.adapterById.pceadpcm = a; }
+      } // PC エンジン CD-ROM² の ADPCM(PCEX)
       if (h.sgb && Emu.SnesApu && Emu.SPC700) { const a = makeSgbSpcAdapter(); this.adapters.push(a); this.adapterById.sgbspc = a; } // スーパーゲームボーイの SNES 側音源(GBXX)
       this.timeAdapters = this.adapters.filter((a) => typeof a.advanceVgm === 'function'); // clock() を回さない経路でも時間を進める物
       this.pos = h.dataOffset;
@@ -1198,6 +1244,14 @@
           if (block[6] === G.SGB_STATE) a.loadSpc(block.subarray(7));
           else if (block[6] === G.SGB_PORT && block.length >= 13) a.port(block[7], block[8], (block[9] | (block[10] << 8) | (block[11] << 16) | (block[12] << 24)) >>> 0);
         }
+        return;
+      }
+      // PC エンジン CD-ROM²(規格外 PCEX): 種類 1 = ADPCM の出力、種類 2 = CD-DA の操作(フェーダだけ見る)
+      if (MML.VGM && MML.VGM.isPcexBlock && MML.VGM.isPcexBlock(type, block)) {
+        const a = this.adapterById.pceadpcm, P = MML.VGM.PCEX;
+        if (a && block[5] === P.KIND_ADPCM && block.length >= 9) a.push(block);
+        else if (a && block[5] === P.KIND_CDDA && block[6] === 4 && block.length >= 8) a.fade(block[7], block.length >= 10 ? block[8] | (block[9] << 8) : 0);
+        if (this.onWrite && block[5] === P.KIND_CDDA) this.onWrite('pcecd', block[6], block.subarray(7));
         return;
       }
       // MSX の DAC の書き込み列(規格外 MSXX、vgmHeader.js VGM.MSXX 参照): value8 meta8(bit0-6=フレーム内時刻/128、bit7=turboR PCM)×n。kind 2(PCM の制御)は読み飛ばす

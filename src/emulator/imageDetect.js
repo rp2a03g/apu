@@ -9,6 +9,7 @@
  *     kind: 'nes'(iNES) / 'fds'(ディスクシステムの画像) / 'fds-bios'(disksys.rom) / 'msx-rom'(カートリッジ) / 'msx-dsk'(ディスク画像) /
  *           'gb'(ゲームボーイのカートリッジ。ヘッダ $0104 のロゴ先頭と $014D のチェックサムで見る) /
  *           'pce'(PC エンジンの HuCard。中身に目印が無いので拡張子 .pce / .sgx だけで決める)
+ *           'pce-bios'(CD-ROM² のシステムカード。.pce で、中の文字で見分ける)
  *     machine: 'nes' | 'msx' | 'gb' | 'pce'、media: 'cart' | 'disk' | 'bios'
  *   looksLikeGameEntry(name, size): アーカイブの一覧(中身を読む前)で「ゲームの画像らしい」か。拡張子がゲームの物か、拡張子無しでディスクのサイズ
  *   combineFds(list): 複数の .fds(1 枚ずつの画像)の面を順に並べて 1 本の .fds(ヘッダ無し)にする(zip に DISK1/DISK2 と分かれている物)
@@ -37,6 +38,15 @@
     let t = ''; for (let i = 0; i < 13; i++) t += String.fromCharCode(b[0x7FC0 + i]);
     return t === 'Super GAMEBOY';
   }
+  // PC エンジンの CD-ROM² システムカード: 512K 以下で、中に「CD-ROM」「SYSTEM」「NEC Home」の文字がある(手元の v1.00〜v3.00 の 14 本で確かめた目印。
+  // 北米版はビットが逆順の吸い出しがあるので、逆順でも探す)
+  function isPceSysCard(bytes) {
+    if (bytes.length > 0x80200 || bytes.length < 0x8000) return false;
+    const rev = (b) => { let r = 0; for (let i = 0; i < 8; i++) if (b & (1 << i)) r |= 0x80 >> i; return r; };
+    const has = (word, flip) => { const w = Array.from(word, (c) => flip ? rev(c.charCodeAt(0)) : c.charCodeAt(0)); outer: for (let i = 0; i + w.length <= bytes.length; i++) { if (bytes[i] !== w[0]) continue; for (let k = 1; k < w.length; k++) if (bytes[i + k] !== w[k]) continue outer; return true; } return false; };
+    for (const flip of [false, true]) if (has('NEC Home', flip) && has('CD-ROM', flip) && has('SYSTEM', flip)) return true;
+    return false;
+  }
   function isHes(bytes) { return bytes.length >= 4 && bytes[0] === 0x48 && bytes[1] === 0x45 && bytes[2] === 0x53 && bytes[3] === 0x4D; }
   function detect(bytes, name) {
     if (!bytes || bytes.length < 16) return null;
@@ -52,7 +62,7 @@
     if (C3 && bytes.length >= 0x1000000 && C3.isCd(bytes)) return { kind: 'cps3-cd', machine: 'cps3', media: 'cd' };
     // PC エンジン: 拡張子で決める。ただし先頭が "HESM" の物は HES(曲データ)に .pce の名前を付けた物なので、ゲームとしては開かない
     // (手元の「Sound Rips」152 本中 135 本がこれだった。Mesen も中身で HES として開く)
-    if (PCE_EXTS.includes(ext) && bytes.length >= 0x2000 && !isHes(bytes)) return { kind: 'pce', machine: 'pce', media: 'cart' };
+    if (PCE_EXTS.includes(ext) && bytes.length >= 0x2000 && !isHes(bytes)) return isPceSysCard(bytes) ? { kind: 'pce-bios', machine: 'pce', media: 'bios' } : { kind: 'pce', machine: 'pce', media: 'cart' };
     // ゲームボーイ: ヘッダが整っていれば拡張子に関係なく(.rom/.bin でも)。拡張子が GB の物ならヘッダが崩れていても GB として開く
     if ((Emu.GbCart && Emu.GbCart.isGb(bytes)) || GB_EXTS.includes(ext)) return { kind: 'gb', machine: 'gb', media: 'cart' };
     // MSX のディスク: サイズで(拡張子が無い物も多い。カートリッジの拡張子なら ROM として扱う)
@@ -78,5 +88,5 @@
     raws.forEach((s, i) => out.set(s.subarray(0, FDS_SIDE), i * FDS_SIDE));
     return out;
   }
-  Emu.Image = { isSgbBios, isHes, GAME_EXTS, CPS3_EXTS, MSX_CART_EXTS, DSK_SIZES, extOf, detect, looksLikeGameEntry, combineFds };
+  Emu.Image = { isSgbBios, isHes, isPceSysCard, GAME_EXTS, CPS3_EXTS, MSX_CART_EXTS, DSK_SIZES, extOf, detect, looksLikeGameEntry, combineFds };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-26 03:37:47
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 10:04:16
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 03:37:47';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 10:04:16';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -22035,9 +22035,972 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
+ * CD イメージ(cue+bin/img/iso/wav、ccd+img)の読み込みと、セクタ単位の読み出し
+ * MML.Emu.PceDisc(段階 9e)
+ *
+ * 持ち方: データのファイルは丸ごと Uint8Array で持つ(files[i].data)。セクタは LBA(0 始まり。00:02:00 が LBA 0)で数える。
+ *   トラックは { number, audio, sectorSize(2352 / 2048), raw(2352 のデータ=頭 16 バイトが見出し), file, offset(ファイルの中の位置), first, last }。
+ *
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3)。[参照] は Mesen 2 の Core/Shared/CdReader.cpp・CdReader.h(読んだだけで写していない):
+ *   [参照] cue の読み方。照合のため、トラックの境目とファイルの中の位置の決め方を Mesen と同じにしてある:
+ *          - PREGAP(ファイルに入っていない無音)は、それ以降の全トラックの LBA を後ろへずらす
+ *          - INDEX 00(ファイルに入っている前置き)がある時、1 つ前のトラックは INDEX 00 の手前で終わる。前置きはどのトラックにも属さない
+ *          - 2 つ目以降のファイルは、前のトラックの終わりの次の LBA から始まる
+ *          - 最後のトラックはファイルの終わりまで。ディスクの長さ(TOC の終わり)= 最後のセクタ+1+150
+ *   [参照] データの読み出し: トラックに属さないセクタ(前置き)は 0 が 2048 個。2352 のデータは頭 16 バイトを飛ばして 2048 個
+ *   [参照] サブコード(.sub、1 セクタ 96 バイト=P〜W が 12 バイトずつ)を、ドライブが返す並び(98 個: 同期 2 個 $00 $80+96 個、
+ *          1 個の中に P〜W が 1bit ずつ)に直して返す。.sub が無ければ 0
+ *   ★ PREGAP の数え方は Mesen の版で違う。照合に使っている実物(2.2.1)は「そのトラックの始まりだけ」をずらし、後ろのトラックへは持ち越さない
+ *      (そのため PREGAP が 2 つ以上ある cue では、後ろのトラックの LBA とファイルの中の位置がずれる)。新しいソースは上の通り全部を後ろへずらす。
+ *      既定は新しい方。照合の時だけ opts.legacyPregap = true で 2.2.1 の数え方にする(TOC の値で食い違って分かった)
+ *   ★ Mesen は「前のトラックの大きさ」を、後ろのトラックのセクタの大きさで計算する(2048 のデータと音声が 1 つのファイルに混ざる時だけ差が出る)。同じにしてある
+ *   [推定] cue の FILE が WAVE で中身が RIFF の時は、data チャンクの頭から読む(Mesen はヘッダを飛ばさない)。MP3 などは読めない(呼び出し側が断る)
+ *   [推定] ccd(CloneCD): [Entry] の Point が 1〜99 の物をトラックとし、PLBA を始まり、Control の bit2 をデータの印として読む。
+ *          img は LBA 0 からの 2352 バイト/セクタ。前置きは前のトラックに含める(cue の INDEX 00 が無い時と同じ形)
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const msf = (m, s, f) => (m * 60 + s) * 75 + f;
+  const parseMsf = (text) => { const p = String(text || '').split(':'); if (p.length !== 3) return -1; const v = p.map(x => parseInt(x, 10)); return v.some(isNaN) ? -1 : msf(v[0], v[1], v[2]); };
+
+  class PceDisc {
+    constructor() {
+      this.files = [];      // { name, data(Uint8Array), base(データの始まり。WAV の時だけ 0 でない) }
+      this.tracks = [];
+      this.sectorCount = 0; // 最後のセクタ+1
+      this.endLba = 150;    // TOC の「ディスクの終わり」(分秒フレームにする前の値)
+      this.sub = null;      // .sub の中身(無ければ null)
+    }
+
+    get empty() { return this.tracks.length === 0; }
+
+    /** cue の文字を { name, type, tracks: [{ number, format, pregap, index0, index1 }] } の並びにする */
+    static parseCue(text) {
+      const files = [];
+      for (const raw of String(text).split(/\r?\n/)) {
+        const line = raw.trim();
+        const up = line.toUpperCase();
+        if (up.startsWith('FILE')) {
+          let name = '', type = '';
+          const a = line.indexOf('"'), b = line.lastIndexOf('"');
+          if (a >= 0 && b > a) { name = line.slice(a + 1, b); type = line.slice(b + 1).trim(); }
+          else { const p = line.split(/\s+/); type = p.length > 2 ? p[p.length - 1] : ''; name = p.slice(1, p.length > 2 ? -1 : undefined).join(' '); }
+          name = name.trim();
+          if (!name) throw new Error('cue: FILE の名前が読めません');
+          files.push({ name, type: type.toUpperCase(), tracks: [] });
+        } else if (up.startsWith('TRACK')) {
+          if (!files.length) throw new Error('cue: FILE の前に TRACK があります');
+          const p = line.split(/\s+/);
+          const number = parseInt(p[1], 10);
+          if (p.length < 3 || isNaN(number)) throw new Error('cue: TRACK が読めません');
+          files[files.length - 1].tracks.push({ number, format: p[2].toUpperCase(), pregap: -1, index0: -1, index1: -1 });
+        } else if (up.startsWith('PREGAP') || up.startsWith('INDEX')) {
+          const f = files[files.length - 1], t = f && f.tracks[f.tracks.length - 1];
+          if (!t) throw new Error('cue: TRACK の前に ' + up.slice(0, 6).trim() + ' があります');
+          const p = line.split(/\s+/);
+          if (up.startsWith('PREGAP')) { const v = parseMsf(p[1]); if (v < 0) throw new Error('cue: PREGAP の時間が読めません'); t.pregap = v; }
+          else {
+            const n = parseInt(p[1], 10), v = parseMsf(p[2]);
+            if (isNaN(n) || v < 0) throw new Error('cue: INDEX が読めません');
+            if (n === 0) t.index0 = v; else if (n === 1) t.index1 = v; else throw new Error('cue: INDEX ' + n + ' には対応していません');
+          }
+        }
+      }
+      return files;
+    }
+
+    /**
+     * cue からディスクを作る。resolve(name, type, 何番目のファイルか) はデータのファイルの中身(Uint8Array)を返す(無ければ null)
+     */
+    static fromCue(text, resolve, opts) {
+      const legacy = !!(opts && opts.legacyPregap);
+      const disc = new PceDisc();
+      const cue = PceDisc.parseCue(text);
+      let pregapTotal = 0;
+      for (let fi = 0; fi < cue.length; fi++) {
+        const cf = cue[fi];
+        if (!cf.tracks.length) continue;
+        const data = resolve(cf.name, cf.type, fi);
+        if (!data) throw new Error('cue: データのファイルがありません: ' + cf.name);
+        let base = 0;
+        if (data.length > 44 && data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46) base = PceDisc.wavDataOffset(data);
+        const fileIndex = disc.files.length;
+        disc.files.push({ name: cf.name, data, base });
+        const origin = disc.tracks.length ? disc.tracks[disc.tracks.length - 1].last + 1 : 0;
+        for (const ct of cf.tracks) {
+          let sectorSize = 2352, audio = false, raw = false;
+          if (ct.format === 'AUDIO') audio = true;
+          else if (ct.format === 'MODE1/2352') raw = true;
+          else if (ct.format === 'MODE1/2048') sectorSize = 2048;
+          else throw new Error('cue: 対応していないトラックの形式です: ' + ct.format);
+          if (ct.index1 < 0) throw new Error('cue: INDEX 01 の無いトラックがあります');
+          const hasPregap = ct.pregap >= 0;
+          if (hasPregap) pregapTotal += ct.pregap;
+          let gapStart, first;
+          if (legacy) {
+            const own = hasPregap ? ct.pregap : 0;
+            gapStart = ct.index0 >= 0 ? ct.index0 + own + origin : -1;
+            if (hasPregap) gapStart = ct.index1 + origin;
+            first = ct.index1 + own + origin;
+          } else {
+            gapStart = ct.index0 >= 0 ? ct.index0 + origin : -1;
+            if (hasPregap) gapStart = ct.index1 + pregapTotal - ct.pregap + origin;
+            first = ct.index1 + pregapTotal + origin;
+          }
+          const t = { number: ct.number, audio, raw, sectorSize, file: fileIndex, offset: 0, first, last: first - 1, open: true };
+          const prev = disc.tracks[disc.tracks.length - 1];
+          if (!prev) t.offset = first * sectorSize;
+          else if (prev.open) {
+            prev.last = (gapStart >= 0 ? gapStart : first) - 1;
+            prev.open = false;
+            t.offset = prev.offset + (prev.last - prev.first + 1) * sectorSize; // ★ 後ろのトラックのセクタの大きさで数える(冒頭)
+          }
+          if (gapStart >= 0 && !hasPregap) t.offset += (first - gapStart) * sectorSize;
+          disc.tracks.push(t);
+        }
+        const lt = disc.tracks[disc.tracks.length - 1];
+        lt.last = lt.first + Math.floor(Math.max(0, data.length - base - lt.offset) / lt.sectorSize) - 1;
+        lt.open = false;
+      }
+      disc._finish();
+      return disc;
+    }
+
+    /** ccd(CloneCD)+img からディスクを作る */
+    static fromCcd(text, img) {
+      const disc = new PceDisc();
+      disc.files.push({ name: 'img', data: img, base: 0 });
+      let sec = null; const entries = [];
+      for (const raw of String(text).split(/\r?\n/)) {
+        const line = raw.trim();
+        const h = /^\[(.+)\]$/.exec(line);
+        if (h) { sec = /^Entry/i.test(h[1]) ? {} : null; if (sec) entries.push(sec); continue; }
+        const kv = /^([A-Za-z0-9]+)\s*=\s*(.+)$/.exec(line);
+        if (sec && kv) sec[kv[1].toLowerCase()] = parseInt(kv[2], kv[2].toLowerCase().startsWith('0x') ? 16 : 10);
+      }
+      const tr = entries.filter(e => e.point >= 1 && e.point <= 99 && !isNaN(e.plba)).sort((a, b) => a.point - b.point);
+      if (!tr.length) throw new Error('ccd: トラックが読めません');
+      const total = Math.floor(img.length / 2352);
+      for (let i = 0; i < tr.length; i++) {
+        const first = tr[i].plba, last = (i + 1 < tr.length ? tr[i + 1].plba : total) - 1, data = (tr[i].control & 4) !== 0;
+        disc.tracks.push({ number: tr[i].point, audio: !data, raw: data, sectorSize: 2352, file: 0, offset: first * 2352, first, last, open: false });
+      }
+      disc._finish();
+      return disc;
+    }
+
+    /**
+     * 一緒に選ばれたファイルの組からディスクを作る。set = { text(cue か ccd の中身), kind 'cue' | 'ccd', files: [{ name, data(Uint8Array) }], sub(Uint8Array、任意) }
+     * cue の FILE の名前は当てにならない(別の文字コードや、作った人の PC の絶対パスのことがある)ので、
+     * 「名前(フォルダを除く、大文字小文字を無視)が同じ物 → FILE が 1 つでデータのファイルも 1 つならそれ → 並び順」で探す
+     */
+    static fromSet(set, opts) {
+      const files = (set.files || []).filter(f => f && f.data);
+      const base = (n) => String(n).replace(/^.*[\\/]/, '').toLowerCase();
+      let disc;
+      if (set.kind === 'ccd') {
+        const img = files.find(f => /\.(img|bin)$/i.test(f.name)) || files[0];
+        if (!img) throw new Error('ccd: img のファイルがありません');
+        disc = PceDisc.fromCcd(set.text, img.data);
+      } else {
+        const total = PceDisc.parseCue(set.text).filter(f => f.tracks.length).length;
+        disc = PceDisc.fromCue(set.text, (name, type, index) => {
+          if (type === 'MP3' || /\.(mp3|ogg|flac|ape)$/i.test(name)) throw new Error('cue: 圧縮された音声(' + base(name) + ')のトラックは読めません');
+          const hit = files.find(f => base(f.name) === base(name)) || (total === 1 && files.length === 1 ? files[0] : null) || (files.length === total ? files[index] : null);
+          return hit ? hit.data : null;
+        }, opts);
+      }
+      if (set.sub) disc.sub = set.sub;
+      return disc;
+    }
+
+    /** ディスクの見分け(ステートが同じディスクの物かを確かめる数) */
+    get signature() {
+      if (this._sig === undefined) {
+        let h = (2166136261 ^ this.sectorCount ^ (this.tracks.length << 24)) | 0;
+        const t = this.tracks.find(x => !x.audio), buf = new Uint8Array(2048);
+        if (t) for (let s = 0; s < 2 && t.first + s <= t.last; s++) if (this.readData(t.first + s, buf)) for (let i = 0; i < 2048; i += 7) h = Math.imul(h ^ buf[i], 16777619) | 0;
+        this._sig = h >>> 0;
+      }
+      return this._sig;
+    }
+
+    static wavDataOffset(d) {
+      let p = 12;
+      while (p + 8 <= d.length) {
+        const id = String.fromCharCode(d[p], d[p + 1], d[p + 2], d[p + 3]), len = d[p + 4] | (d[p + 5] << 8) | (d[p + 6] << 16) | (d[p + 7] * 0x1000000);
+        if (id === 'data') return p + 8;
+        p += 8 + len + (len & 1);
+      }
+      return 44;
+    }
+
+    _finish() {
+      const lt = this.tracks[this.tracks.length - 1];
+      this.sectorCount = lt ? lt.last + 1 : 0;
+      this.endLba = this.sectorCount + 150;
+    }
+
+    /** セクタが属するトラック(0 始まりの番号)。どれにも属さなければ -1 */
+    trackOf(sector) {
+      const t = this.tracks;
+      for (let i = 0; i < t.length; i++) if (sector >= t[i].first && sector <= t[i].last) return i;
+      return -1;
+    }
+
+    /**
+     * データのセクタ 2048 バイトを out に入れて、入れた個数を返す。
+     * トラックに属さないセクタは 0 が 2048 個。ファイルからはみ出す時は 0 個([参照] 読めなかった時は何も足さない)
+     */
+    readData(sector, out) {
+      const ti = this.trackOf(sector);
+      if (ti < 0) { out.fill(0, 0, 2048); return 2048; }
+      const t = this.tracks[ti], f = this.files[t.file];
+      const at = f.base + t.offset + (sector - t.first) * t.sectorSize + (t.raw ? 16 : 0);
+      if (at + 2048 > f.data.length) return 0;
+      out.set(f.data.subarray(at, at + 2048));
+      return 2048;
+    }
+
+    /** 音声の 1 個(セクタの中の n 番目、0-587)。side: 0 = 左、2 = 右 */
+    sample(sector, n, side) {
+      const ti = this.trackOf(sector);
+      if (ti < 0) return 0;
+      const t = this.tracks[ti], f = this.files[t.file], d = f.data;
+      const at = f.base + t.offset + (sector - t.first) * 2352 + n * 4 + side;
+      if (at + 1 >= d.length) return 0;
+      const v = d[at] | (d[at + 1] << 8);
+      return v & 0x8000 ? v - 0x10000 : v;
+    }
+
+    /** サブコードの 1 個(sector × 98 + pos 番目) */
+    subByte(index) {
+      const sub = this.sub;
+      if (!sub) return 0;
+      const sector = Math.floor(index / 98), pos = index % 98, base = sector * 96;
+      if (base + 96 > sub.length) return 0;
+      if (pos === 0) return 0x00;
+      if (pos === 1) return 0x80;
+      const j = (pos - 2) >> 3, k = 7 - ((pos - 2) & 7);
+      let v = 0;
+      for (let ch = 0; ch < 8; ch++) v |= ((sub[base + ch * 12 + j] >> k) & 1) << (7 - ch);
+      return v;
+    }
+
+    /** 画面や記録に出す短い説明 */
+    describe() {
+      const n = this.tracks.length, d = this.tracks.filter(t => !t.audio).length;
+      const sec = Math.floor(this.sectorCount / 75);
+      return `CD ${n} トラック(データ ${d}、音声 ${n - d})${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    }
+  }
+
+  PceDisc.msf = msf;
+  Emu.PceDisc = PceDisc;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * CD-ROM² の ADPCM(MSM5205+RAM 64K+番地と長さのカウンタ)
+ * MML.Emu.PceAdpcm(段階 9e)
+ *
+ * host は PceCdRom(setIrq / clearIrq、SCSI の口、時計 host.clock)。exec() はマスタークロック 3 個ごと(need が立っている間だけ呼ばれる)。
+ * レジスタ: $1808/$1809 番地の口、$180A RAM の読み書き、$180B CD からの流し込み、$180C 状態(読み)、$180D 制御、$180E 再生の速さ。
+ *
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3)。[参照] は Mesen 2 の Core/PCE/CdRom/PceAdpcm.cpp(読んだだけで写していない):
+ *   [参照] $180D: bit1 の立ち上がりで書き込み番地 = 番地の口(bit0 が 0 なら -1)、bit3 の立ち上がりで読み出し番地 = 番地の口(bit2 が 0 なら -1)、
+ *          bit4 が立っている間は長さ = 番地の口で「終わり」の印を下ろす、bit5 = 再生、bit6 = 長さが 0 になったら止まる、bit7 = リセット
+ *   [参照] $180A の読み書きは RAM の空き枠を待つ。枠はマスタークロック 18 個ごとに 4 種類が巡り、読みは 1〜4 枠後、書きは 1〜3 枠後に行われる
+ *          (その間 $180C の bit7 / bit2 が立つ)。Mesen のコメント: 実際の遅れは分かっておらず、試験 ROM が通る値
+ *   [参照] 読み出しのたびに長さを 1 減らし、0 で「終わり」。書き込みのたびに長さを 1 増やす(17bit)。半分($8000)を下回ると「半分」の印
+ *   [参照] 再生: 1 個ごとに 4bit(上位 → 下位の順)。12bit の出力を差分で動かす。長さが $8000 以下で「半分」、0 で「終わり」
+ *          速さ = 32000 / (16 - $180E の下位 4bit) Hz
+ *   [参照] $180B(CD からの流し込み): bit0 か bit1 が立っている間、SCSI がデータを出して待っていれば、3×20 クロック後に 1 個取り込んで RAM へ書く。
+ *          データが尽きたら bit0 だけ下ろす(Mesen のコメント: bit1 まで下ろすと止まるソフト、bit0 を下ろさないと止まるソフトがある)
+ *   ★ 「半分」「終わり」の印の立て方は Mesen のまま(読み出し・書き込み・再生で条件が少しずつ違う: 未満/以下)。実機と同じかは未確認
+ *   [推定] 差分の表は MSM5205 の一般的な式(段の幅 = 16 × 1.1^n を切り捨て、n = 0〜48)で作る。Mesen の表と 392 個とも同じになることを確かめた
+ *   [推定] 音に出す値: (出力 - 2048) × 10 を 16bit の値として扱う(Mesen と同じ)。止まった後は最後の値からゆっくり 0 へ戻す(Mesen は無音)
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const MASTER = 21477270;
+  const IRQ_HALF = 0x04, IRQ_END = 0x08;
+
+  // 差分の表: 49 段 × 8(下位 3bit)
+  const STEP = (() => {
+    const t = new Int16Array(49 * 8);
+    for (let n = 0; n < 49; n++) {
+      const s = Math.floor(16 * Math.pow(1.1, n));
+      for (let v = 0; v < 8; v++) t[n * 8 + v] = Math.floor(s / 8) + ((v & 1) ? Math.floor(s / 4) : 0) + ((v & 2) ? Math.floor(s / 2) : 0) + ((v & 4) ? s : 0);
+    }
+    return t;
+  })();
+  const STEP_MOVE = [-1, -1, -1, -1, 2, 4, 6, 8];
+
+  class PceAdpcm {
+    constructor(host) {
+      this.host = host;
+      this.ram = new Uint8Array(0x10000);
+      this.nibble = false;
+      this.readAddr = 0; this.writeAddr = 0; this.addrPort = 0;
+      this.dmaCtrl = 0; this.control = 0; this.rate = 0;
+      this.length = 0;
+      this.endReached = false; this.halfReached = false;
+      this.playing = false; this.playRequest = false;
+      this.readBuf = 0; this.readWait = 0;
+      this.writeBuf = 0; this.writeWait = 0;
+      this.out = 0;           // 12bit の出力(リセットで 2048)
+      this.magnitude = 0;
+      this.dmaWait = 0;
+      this.need = true;
+      this.clocksPerSample = MASTER / 32000;
+      this.sampleCounter = 0;
+      // 音に出す側(補間用に 1 つ前と今)
+      this.audPrev = 0; this.audCur = 0; this.audAt = 0;
+      this.onSample = null;   // (12bit の出力) 再生で 1 個進むたび(録音用)
+    }
+
+    _reset() {
+      this.playRequest = false;
+      this.writeWait = 0; this.readWait = 0;
+      this.readAddr = 0; this.writeAddr = 0; this.addrPort = 0;
+      this._setEnd(false); this._setHalf(false);
+      this.length = 0;
+      this.nibble = false;
+      this.out = 2048; this.magnitude = 0;
+    }
+    _setHalf(v) { if (this.halfReached !== v) { this.halfReached = v; if (v) this.host.setIrq(IRQ_HALF); else this.host.clearIrq(IRQ_HALF); } }
+    _setEnd(v) { if (this.endReached !== v) { this.endReached = v; if (v) this.host.setIrq(IRQ_END); else this.host.clearIrq(IRQ_END); } }
+
+    _flags() {
+      if (this.control & 0x10) { this.length = this.addrPort; this._setEnd(false); }
+      if (this.control & 0x80) this._reset();
+      if (this.control & 0x20) this.need = true;
+    }
+
+    _setControl(value) {
+      if ((value & 0x02) && !(this.control & 0x02)) this.writeAddr = (this.addrPort - ((value & 0x01) ? 0 : 1)) & 0xFFFF;
+      if ((value & 0x08) && !(this.control & 0x08)) this.readAddr = (this.addrPort - ((value & 0x04) ? 0 : 1)) & 0xFFFF;
+      if (!this.playing && (value & 0x20)) this.playRequest = true;
+      this.control = value;
+      this._flags();
+    }
+
+    /** 次の空き枠までの待ち(exec の回数) */
+    _slotWait(forRead) {
+      const clock = this.host.clock, slot = Math.floor(clock / 18);
+      let gap;
+      switch (slot & 3) {
+        case 1: gap = forRead ? 2 : 1; break;
+        case 2: gap = forRead ? 1 : 3; break;
+        case 3: gap = forRead ? 4 : 2; break;
+        default: gap = forRead ? 3 : 1; break;
+      }
+      return Math.floor(((slot + gap) * 18 - clock) / 3) & 0xFF;
+    }
+
+    exec() {
+      this._flags();
+      if (this.playing || this.playRequest || (this.control & 0x20)) {
+        this.sampleCounter += 3;
+        if (this.sampleCounter >= this.clocksPerSample) { this._playSample(); this.sampleCounter -= this.clocksPerSample; }
+      }
+      if (this.readWait > 0 && --this.readWait === 0) {
+        this.readBuf = this.ram[this.readAddr];
+        this.readAddr = (this.readAddr + 1) & 0xFFFF;
+        if (!(this.control & 0x10)) {
+          if (this.length > 0) { this.length--; this._setHalf(this.length < 0x8000); }
+          else { this._setEnd(true); this._setHalf(false); }
+        }
+      }
+      if (this.writeWait > 0 && --this.writeWait === 0) {
+        this.ram[this.writeAddr] = this.writeBuf;
+        this.writeAddr = (this.writeAddr + 1) & 0xFFFF;
+        if (this.length === 0) this._setEnd(true);
+        this._setHalf(this.length < 0x8000);
+        if (!(this.control & 0x10)) this.length = (this.length + 1) & 0x1FFFF;
+      }
+      const dma = (this.dmaCtrl & 0x03) !== 0;
+      if (dma) this._dma();
+      this._flags();
+      this.need = this.playing || this.playRequest || (this.control & 0x20) !== 0 || this.readWait !== 0 || this.writeWait !== 0 || dma || this.dmaWait !== 0;
+    }
+
+    _dma() {
+      const scsi = this.host;
+      if (this.dmaWait) {
+        if (--this.dmaWait === 0) {
+          if (!this.writeWait) {
+            this.writeWait = this._slotWait(false);
+            this.writeBuf = scsi.scsiDataPort();
+            scsi.scsiAckAuto();
+            if (!scsi.scsiDataReady()) this.dmaCtrl &= ~0x01;
+          } else this.dmaWait++;
+        }
+      } else if (!scsi.ack && !scsi.cdl && scsi.io && scsi.req) this.dmaWait = 20;
+    }
+
+    write(reg, value) {
+      switch (reg) {
+        case 0x08: this.addrPort = (this.addrPort & 0xFF00) | value; break;
+        case 0x09: this.addrPort = (this.addrPort & 0x00FF) | (value << 8); break;
+        case 0x0A: this.writeWait = this._slotWait(false); this.writeBuf = value; this.need = true; break;
+        case 0x0B: if (!this.host.scsiDataReady()) value &= ~0x01; this.dmaCtrl = value; this.need = true; break;
+        case 0x0D: this._setControl(value); break;
+        case 0x0E: this.rate = value; this.clocksPerSample = MASTER / (32000 / (16 - (value & 0x0F))); break;
+        default: break;
+      }
+    }
+
+    read(reg) {
+      switch (reg) {
+        case 0x0A: this.readWait = this._slotWait(true); this.need = true; return this.readBuf;
+        case 0x0B: return this.dmaCtrl;
+        case 0x0C: return (this.endReached ? 0x01 : 0) | (this.writeWait ? 0x04 : 0) | (this.playing ? 0x08 : 0) | (this.readWait ? 0x80 : 0);
+        case 0x0D: return this.control;
+        case 0x0E: return this.rate;
+        default: return 0;
+      }
+    }
+
+    _playSample() {
+      if (this.control & 0x80) { this.playing = (this.control & 0x20) !== 0; this.playRequest = false; return; }
+      if (((this.control & 0x40) && this.length === 0) || !(this.control & 0x20) || (!this.playing && !this.playRequest)) {
+        this.playRequest = false; this.playing = false;
+        return;
+      }
+      if (this.playRequest) { this.playRequest = false; this.playing = true; this.out = 2048; this.magnitude = 0; }
+      let data;
+      if (this.nibble) {
+        this.nibble = false;
+        data = this.ram[this.readAddr] & 0x0F;
+        this.readAddr = (this.readAddr + 1) & 0xFFFF;
+        this.length = (this.length - 1) & 0x1FFFF;
+      } else {
+        this.nibble = true;
+        data = this.ram[this.readAddr] >> 4;
+      }
+      const v = data & 7, d = STEP[(this.magnitude << 3) | v];
+      this.out = (this.out + ((data & 8) ? -d : d)) & 0xFFF;
+      this.magnitude = Math.max(0, Math.min(48, this.magnitude + STEP_MOVE[v]));
+      this._setHalf(this.length <= 0x8000);
+      if (this.length === 0) this._setEnd(true);
+      this.audPrev = this.audCur; this.audCur = (this.out - 2048) * 10; this.audAt = this.host.clock;
+      if (this.onSample) this.onSample(this.out);
+    }
+
+    /** 今の音(16bit 相当の値)。再生中は 1 つ前と今の間を直線でつなぐ。止まっている間はゆっくり 0 へ */
+    level(clock) {
+      if (this.playing) {
+        const f = (clock - this.audAt) / this.clocksPerSample;
+        return f >= 1 ? this.audCur : this.audPrev + (this.audCur - this.audPrev) * f;
+      }
+      if (this.audCur !== 0) { this.audCur *= 0.998; if (Math.abs(this.audCur) < 1) this.audCur = 0; this.audPrev = this.audCur; }
+      return this.audCur;
+    }
+  }
+
+  PceAdpcm.STEP = STEP;
+  Emu.PceAdpcm = PceAdpcm;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
+ * CD-ROM² 装置(レジスタ $1800-$180F、割り込み、SCSI のバス、ドライブ、CD-DA、フェーダ)
+ * MML.Emu.PceCdRom(段階 9e)。ADPCM は pce/adpcm.js、イメージは pce/cdImage.js
+ *
+ * host は PceConsole(時計 host.clock、割り込み線 host.irq2、バックアップ RAM の鍵 host.bramLocked)。
+ * exec() はマスタークロック 3 個ごと(CD をつないでいる時だけ本体が呼ぶ。タイマ → VDC → ここ の順)。
+ *
+ * レジスタ(下位 10bit):
+ *   $00 読み = バスの状態(bit7 BSY、6 REQ、5 MSG、4 C/D、3 I/O)、書き = SEL を一瞬立てる   $01 データの口
+ *   $02 bit7 = ACK、下位 7bit = 割り込み許可   $03 読み = 割り込み要因(bit2 ADPCM 半分、3 ADPCM 終わり、4 サブコード、5 状態/メッセージ、6 データ)
+ *   $04 bit1 = ドライブのリセット   $05/$06 CD-DA の今の値(書くと左右を入れ替えて掴む)   $07 読み = サブコード、書き = バックアップ RAM の鍵
+ *   $08 読み = データを 1 個読んで自動で ACK   $08-$0E ADPCM   $0F フェーダ   $C0-$C3 Super CD-ROM² の印
+ *
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3)。[参照] は Mesen 2 の Core/PCE/CdRom/(PceCdRom / PceScsiBus / PceCdAudioPlayer / PceAudioFader。読んだだけで写していない):
+ *   [参照] SCSI の段(空き → コマンド → データ入力 → 状態 → メッセージ入力 → 空き、ほかに「忙しい」)と信号の組、REQ/ACK の握手、
+ *          割り込み要因の立て方(REQ・I/O・BSY が揃った時、C/D が立っていれば「状態/メッセージ」、そうでなければ「データ」)
+ *   [参照] コマンド: $00 準備確認(6)、$08 読み出し(6)、$D8 音声の始まり、$D9 音声の終わり、$DA 一時停止、$DD サブコード Q、$DE TOC(各 10)。
+ *          知らないコマンドは 1 個目で「正常終了」を返す
+ *   [参照] 読み出しの速さ: 1 セクタ = 2048 / 153600 秒(75 セクタ/秒)。その前にシークの時間。前のセクタを読み切らないうちに次が来たら 290ms の罰
+ *   [参照] CD-DA: マスタークロック 487 個ごとに 1 個(約 44101Hz)。6 個ごとにサブコードの割り込み要因(再生していなくても)。
+ *          終わりの動き 3 通り(止まる/頭へ戻る/止まって「正常終了」を返す=割り込み)
+ *   [参照] フェーダ($180F): bit3 = 入、bit1 = 相手(1 ADPCM、0 CD-DA)、bit2 = 速い。書いた時からの時間で直線に下げる(1% に 0.06 秒、速い時 0.025 秒)
+ *   [参照] ドライブのリセット中は割り込み要因を立てない。リセットは BSY と SEL を下ろさない(Mesen の作りのまま)
+ *   ★ 遅れの値(コマンドの段になるまで 3×25000 クロック、1 個ごとの REQ まで 3×1000、TOC の返事まで 3×3000、準備確認 3×150000、
+ *      ACK の自動解除 21、$1805 の連続書き込みを無視する 700)は Mesen の値。Mesen のコメント: どれも近似で、試験 ROM が通る範囲で決めた
+ *   ★ 準備確認の遅れは Mesen が実機の約 1/100 に縮めてある(起動を速くするため、と書いてある)。同じにした
+ *   [参照] シークの時間の表と式: pce-devel/PCECD_seek(Dave Shadoff、MIT ライセンス)の実機測定に基づく物。Mesen も同じ表を使う
+ *   [推定] 音量: CD-DA は 16bit の値そのまま、ADPCM は (出力-2048)×10 を、波形メモリ音源 1ch の最大 = 31×255 と同じ物差しで足す(Mesen の比)。
+ *          実機の音量の比は未確認
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const MASTER = 21477270;
+  const IRQ_SUB = 0x10, IRQ_STATUS = 0x20, IRQ_DATA = 0x40;
+  const PH_FREE = 0, PH_CMD = 1, PH_DATAIN = 2, PH_MSGIN = 4, PH_STATUS = 6, PH_BUSY = 7;
+  const UP_CMD = 0, UP_REQ = 1, UP_DATAIN = 3, UP_GOOD = 5;
+  const AU_PLAY = 0, AU_IDLE = 1, AU_PAUSE = 2, AU_STOP = 3;
+  const END_STOP = 0, END_LOOP = 1, END_IRQ = 2;
+  const SECTOR_CLOCKS = Math.floor(MASTER * 2048 / 153600);
+  const LATE_CLOCKS = Math.floor(MASTER * (290.0 / 1000.0));
+  const CDDA_CLOCKS = 487;
+  const SIGNATURE = [0x00, 0xAA, 0x55, 0x03];
+  // 波形メモリ音源の 1ch の最大(31×255)が本体の物差しで 31/96 になる、という換算
+  const UNIT = (31 / 96) / (31 * 255);
+
+  // シークの時間(ミリ秒)。帯ごとの「1 周のセクタ数、最初と最後のセクタ、1 周の時間」
+  const ZONES = [
+    [10, 0, 12572, 133.47], [11, 12573, 30244, 146.82], [12, 30245, 49523, 160.17], [13, 49524, 70408, 173.51],
+    [14, 70409, 92900, 186.86], [15, 92901, 116998, 200.21], [16, 116999, 142703, 213.56], [17, 142704, 170014, 226.90],
+    [18, 170015, 198932, 240.25], [19, 198933, 229456, 253.60], [20, 229457, 261587, 266.95], [21, 261588, 295324, 280.29],
+    [22, 295325, 330668, 293.64], [23, 330669, 333012, 306.99],
+  ];
+  const zoneOf = (lba) => { for (let i = 0; i < ZONES.length; i++) if (lba >= ZONES[i][1] && lba <= ZONES[i][2]) return i; return 0; };
+  const idiv = (a, b) => Math.floor(a / b);
+  function seekMs(from, to) {
+    const src = zoneOf(from), dst = zoneOf(to), gap = Math.abs(to - from);
+    let tracks;
+    if (dst === src) tracks = idiv(gap, ZONES[dst][0]);
+    else if (dst > src) tracks = idiv((ZONES[src][2] - from) >>> 0, ZONES[src][0]) + idiv((to - ZONES[dst][1]) >>> 0, ZONES[dst][0]) + 1606.48 * (dst - src - 1);
+    else tracks = idiv((from - ZONES[src][1]) >>> 0, ZONES[src][0]) + idiv((ZONES[dst][2] - to) >>> 0, ZONES[dst][0]) + 1606.48 * (src - dst - 1);
+    const half = ZONES[dst][3] / 2;
+    let ms;
+    if (gap < 2) ms = 150;
+    else if (gap < 5) ms = 150 + half;
+    else if (tracks <= 80) ms = 300 + half;
+    else if (tracks <= 160) ms = 366 + half;
+    else if (tracks <= 644) ms = 366 + half + (tracks - 161) * 16.66 / 80;
+    else ms = 800 + (tracks - 644) * 16.66 / 195;
+    return Math.floor(ms);
+  }
+  const seekClocks = (from, to) => Math.floor(MASTER * (seekMs(from, to) / 1000.0));
+  const bcd = (v) => ((Math.floor(v / 10) << 4) | (v % 10)) & 0xFF;
+  const unbcd = (v) => ((v >> 4) & 0x0F) * 10 + (v & 0x0F);
+  const CMD_SIZE = { 0x00: 6, 0x08: 6, 0xD8: 10, 0xD9: 10, 0xDA: 10, 0xDD: 10, 0xDE: 10 };
+
+  class PceCdRom {
+    constructor(host, disc, opts) {
+      opts = opts || {};
+      this.host = host;
+      this.disc = disc || new Emu.PceDisc();
+      this.superCd = opts.superCd !== false; // $18C0-$18C3 に Super CD-ROM² の印を出すか
+      this.adpcm = new Emu.PceAdpcm(this);
+      // レジスタ
+      this.activeIrqs = 0; this.enabledIrqs = 0; this.resetReg = 0;
+      this.readRight = false; this.sampleLatch = 0; this.latchLockUntil = 0;
+      // SCSI
+      this.ack = false; this.bsy = false; this.cdl = false; this.io = false; this.msg = false; this.req = false; this.rst = false; this.sel = false;
+      this.phase = PH_FREE; this.messageDone = false; this.dataPort = 0; this.readPort = 0;
+      this.sector = 0; this.sectorsToRead = 0;
+      this.changed = false; this.readCounter = 0; this.ackClear = 0; this.updCounter = 0; this.updType = UP_CMD; this.need = true;
+      this.cmd = [];
+      this.buf = new Uint8Array(2048); this.bufPos = 0; this.bufLen = 0;
+      // CD-DA
+      this.auStatus = AU_IDLE; this.auStart = 0; this.auEnd = 0; this.auEndMode = END_STOP; this.auSector = 0; this.auSample = 0;
+      this.left = 0; this.right = 0;
+      this.auClock = 0; this.subIrqCount = 0; this.subPos = 0; this.subSector = 0; this.subNext = 0; this.seekDelay = 0;
+      // フェーダ
+      this.fadeReg = 0; this.fadeOn = false; this.fadeAdpcm = false; this.fadeFast = false; this.fadeStart = 0;
+      // 音に出す側
+      this.audPL = 0; this.audPR = 0; this.audCL = 0; this.audCR = 0; this.audAt = 0;
+      this.outL = 0; this.outR = 0;
+      this.mute = { cdda: false, adpcm: false }; this.vol = { cdda: 1, adpcm: 1 };
+      this.onCommand = null; // (コマンドの並び) SCSI のコマンドを実行する時(確認用)
+      // CD-DA の状態が変わった時(録音用。VGM の規格外ブロック PCEX 種類 2 の中身と同じ並び。vgmHeader.js):
+      //   [1, 始まり LBA×3, 終わり LBA×3, 終わりの動き(0 止まる 1 繰り返す 2 止まって割り込み), 一時停止で始めるか, 今の位置 LBA×3] 再生(音が出るのはシークの後)
+      //   [2] 一時停止 / [3] 停止 / [4, $180F の値, 入ってからの時間(10ms 単位、2 バイト)] フェーダ / [5, 終わり LBA×3, 終わりの動き] 終わりの指定(再生を始める)
+      this.onOp = null;
+      this.reads = 0;        // 読んだセクタの数(表示・確認用)
+    }
+
+    // ── 割り込み ──
+    setIrq(src) {
+      if (this.resetReg & 0x02) return;
+      if (!(this.activeIrqs & src)) { this.activeIrqs |= src; this._irq(); }
+    }
+    clearIrq(src) { if (this.activeIrqs & src) { this.activeIrqs &= ~src; this._irq(); } }
+    _irq() { this.host.irq2 = (this.enabledIrqs & this.activeIrqs) !== 0; }
+
+    get clock() { return this.host.clock; }
+    currentSector() { return this.auStatus === AU_IDLE ? this.sector : this.auSector; }
+
+    // ── ADPCM から見た SCSI の口 ──
+    scsiDataPort() { return (this.phase === PH_STATUS || this.phase === PH_DATAIN || this.phase === PH_MSGIN) ? this.readPort : this.dataPort; }
+    scsiDataReady() { return this.bufLen > this.bufPos; }
+    scsiAckAuto() { this._set('ack', true); this._busIrq(); this.ackClear = 21; this.need = true; }
+
+    // ── SCSI ──
+    _set(name, v) { if (this[name] !== v) { this[name] = v; this.changed = true; this.need = true; } }
+    _busIrq() {
+      if (this.req && this.io && this.bsy) this.setIrq(this.cdl ? IRQ_STATUS : IRQ_DATA);
+      else { this.clearIrq(IRQ_STATUS); this.clearIrq(IRQ_DATA); }
+    }
+    _setReq(v) { this._set('req', v); this._busIrq(); }
+    _setPhase(p) {
+      if (this.phase === p) return;
+      this.updCounter = 0; this.changed = true; this.need = true; this.phase = p;
+      this._set('bsy', false); this._set('cdl', false); this._set('io', false); this._set('msg', false); this._set('req', false);
+      this._busIrq();
+      switch (p) {
+        case PH_CMD: this.readCounter = 0; this._set('bsy', true); this._set('cdl', true); this._set('req', true); break;
+        case PH_DATAIN: this._set('bsy', true); this._set('io', true); break;
+        case PH_MSGIN: this._set('bsy', true); this._set('cdl', true); this._set('io', true); this._set('msg', true); this._set('req', true); break;
+        case PH_STATUS: this._set('bsy', true); this._set('cdl', true); this._set('io', true); this._set('req', true); break;
+        case PH_BUSY: this._set('bsy', true); break;
+        default: break;
+      }
+      this._busIrq();
+      this._busIrq();
+    }
+    _busReset() {
+      this._set('ack', false); this._set('cdl', false); this._set('io', false); this._set('msg', false); this._set('req', false);
+      this._busIrq();
+      this.phase = PH_FREE; this.dataPort = 0; this.readPort = 0; this.sectorsToRead = 0; this.readCounter = 0;
+      this.cmd.length = 0; this.bufPos = 0; this.bufLen = 0;
+      if (this.onOp && this.auStatus !== AU_STOP) this.onOp([3]);
+      this.auStatus = AU_STOP;
+      this._busIrq();
+    }
+    /** 「状態」の段へ(status を返し、続けて data を length 個) */
+    _status(data, length) {
+      const n = length || 1;
+      this.buf.fill(data, 0, n); this.bufPos = 0; this.bufLen = n;
+      this.messageDone = false; this.readPort = 0;
+      this._setPhase(PH_STATUS);
+    }
+    setGoodStatus() { this._status(0, 1); }
+    _queue(type, delay) { if (type !== this.updType || this.updCounter === 0) { this.updType = type; this.updCounter = delay; this.need = true; } }
+
+    _update() {
+      if (!this.changed) return;
+      if (this.rst) { this._busReset(); return; }
+      do {
+        this.changed = false;
+        if (this.sel) {
+          this.updCounter = 0;
+          if (this.phase !== PH_DATAIN) this._queue(UP_CMD, 25000);
+          else { this._status(0, 8); this._queue(UP_CMD, 300000); break; } // 読み出しの途中で打ち切ると 8 個のメッセージが出る(Mesen のコメント: 試験 ROM による)
+        } else {
+          switch (this.phase) {
+            case PH_CMD: this._phaseCommand(); break;
+            case PH_DATAIN: this._phaseDataIn(); break;
+            case PH_MSGIN: this._phaseMessageIn(); break;
+            case PH_STATUS: this._phaseStatus(); break;
+            default: break;
+          }
+        }
+      } while (this.changed);
+    }
+    _phaseStatus() {
+      if (this.req && this.ack) this._setReq(false);
+      else if (!this.req && !this.ack && this.bufLen > this.bufPos) {
+        this.readPort = this.buf[this.bufPos++];
+        if (this.bufPos >= this.bufLen) this._setPhase(PH_MSGIN); else this._setReq(true);
+      }
+    }
+    _phaseMessageIn() {
+      if (this.req && this.ack) { this._setReq(false); this.messageDone = true; }
+      else if (!this.req && !this.ack && this.messageDone) { this.messageDone = false; this._setPhase(PH_FREE); }
+    }
+    _phaseDataIn() {
+      if (this.req && this.ack) this._setReq(false);
+      else if (!this.req && !this.ack) {
+        if (this.bufLen > this.bufPos) { this.readPort = this.buf[this.bufPos++]; this._setReq(true); }
+        else if (this.sectorsToRead === 0) this._queue(UP_GOOD, 1000);
+      }
+    }
+    _phaseCommand() {
+      if (this.req && this.ack) { this._setReq(false); this.cmd.push(this.dataPort); }
+      else if (!this.req && !this.ack && this.cmd.length > 0) {
+        const size = CMD_SIZE[this.cmd[0]] || 0;
+        if (size === 0) { this._status(0, 1); this.cmd.length = 0; }
+        else if (size <= this.cmd.length) { if (this.onCommand) this.onCommand(this.cmd); this._command(this.cmd[0]); this.cmd.length = 0; }
+        else this._queue(UP_REQ, 1000);
+      }
+    }
+
+    _command(op) {
+      const c = this.cmd, disc = this.disc;
+      switch (op) {
+        case 0x00: this._queue(UP_GOOD, 150000); break;
+        case 0x08: {
+          const sector = c[3] | (c[2] << 8) | ((c[1] & 0x1F) << 16), count = c[4];
+          if (count === 0 || sector >= disc.sectorCount) { this._status(0, 1); break; }
+          this.readCounter = (seekClocks(this.currentSector(), sector) >>> 0) + SECTOR_CLOCKS; // シークの時間は 32bit に丸まる(Mesen と同じ)
+          this.need = true;
+          this.sector = sector; this.sectorsToRead = count;
+          this._setPhase(PH_DATAIN); // 段はすぐ「データ入力」にする(待たせると絵が乱れるソフトがある、と Mesen のコメント)
+          if (this.onOp && (this.auStatus === AU_PLAY || this.auStatus === AU_PAUSE)) this.onOp([3]);
+          this.auStatus = AU_IDLE;
+          break;
+        }
+        case 0xD8: {
+          const start = this._audioLba();
+          if (start >= disc.sectorCount) { this._status(0, 1); break; }
+          this._play(start, c[1] === 0);
+          this._setPhase(PH_BUSY); // 音が出始めるまで「忙しい」のまま
+          break;
+        }
+        case 0xD9: {
+          const end = this._audioLba();
+          switch (c[1]) {
+            case 0: this.auStatus = AU_STOP; if (this.onOp) this.onOp([3]); break;
+            case 1: this._setEnd(end, END_LOOP); break;
+            case 2: this._setEnd(end, END_IRQ); break;
+            case 3: this._setEnd(end, END_STOP); break;
+            default: break;
+          }
+          if (c[1] === 1 || c[1] === 2) this._setPhase(PH_BUSY); else this._status(0, 1);
+          break;
+        }
+        case 0xDA: this.auStatus = AU_PAUSE; if (this.onOp) this.onOp([2]); this._status(0, 1); break;
+        case 0xDD: {
+          const sector = this.currentSector(), ti = disc.trackOf(sector);
+          const isData = ti >= 0 ? !disc.tracks[ti].audio : false;
+          const rel = ti >= 0 ? sector - disc.tracks[ti].first : 0;
+          const b = this.buf;
+          b[0] = this.auStatus; b[1] = 0x01 | (isData ? 0x40 : 0); b[2] = bcd(ti + 1); b[3] = 1;
+          b[4] = bcd(Math.floor(rel / 75 / 60)); b[5] = bcd(Math.floor(rel / 75) % 60); b[6] = bcd(rel % 75);
+          b[7] = bcd(Math.floor(sector / 75 / 60)); b[8] = bcd(Math.floor(sector / 75) % 60); b[9] = bcd(sector % 75);
+          this.bufPos = 0; this.bufLen = 10;
+          this._queue(UP_DATAIN, 1000);
+          break;
+        }
+        case 0xDE: {
+          const b = this.buf;
+          const putMsf = (lba) => { b[0] = bcd(Math.floor(lba / 75 / 60)); b[1] = bcd(Math.floor(lba / 75) % 60); b[2] = bcd(lba % 75); };
+          if (c[1] === 0) { b[0] = 1; b[1] = bcd(disc.tracks.length & 0xFF); b[2] = 0; b[3] = 0; }
+          else if (c[1] === 1) { putMsf(disc.endLba); b[3] = 0; }
+          else if (c[1] === 2) {
+            let track = unbcd(c[2]); if (track === 0) track = 1;
+            const over = track > disc.tracks.length;
+            putMsf(over ? disc.endLba : disc.tracks[track - 1].first + 150);
+            b[3] = (over || disc.tracks[track - 1].audio) ? 0 : 4;
+          } else break; // 知らない種類は返事をしない
+          this.bufPos = 0; this.bufLen = 4;
+          this._queue(UP_DATAIN, 3000);
+          break;
+        }
+        default: break;
+      }
+    }
+
+    /** 音声の位置の指定(コマンドの 10 個目の上位 2bit: 0 = LBA、$40 = 分秒フレーム、$80 = トラック番号) */
+    _audioLba() {
+      const c = this.cmd, disc = this.disc;
+      switch (c[9] & 0xC0) {
+        case 0x00: return ((c[3] << 16) | (c[4] << 8) | c[5]) >>> 0;
+        case 0x40: return (Emu.PceDisc.msf(unbcd(c[2]), unbcd(c[3]), unbcd(c[4])) - 150) >>> 0;
+        case 0x80: {
+          const n = unbcd(c[2]) - 1, t = disc.tracks;
+          if (n >= 0 && n < t.length) return t[n].first;
+          if (n > 0 && n === t.length) return t[n - 1].last; // 最後のトラックの次を指した時は、最後のトラックの終わり(Mesen のコメント: これが無いと進めなくなるソフトがある)
+          return 0;
+        }
+        default: return 0;
+      }
+    }
+
+    _play(start, pause) {
+      const ti = this.disc.trackOf(start);
+      if (ti < 0) return;
+      this.seekDelay = seekClocks(this.currentSector(), start) >>> 0;
+      this.auStart = start; this.auStatus = pause ? AU_PAUSE : AU_PLAY;
+      this.auEnd = this.disc.tracks[ti].last; this.auEndMode = END_STOP;
+      this.auSample = 0; this.auSector = start;
+      this.auClock = 0;
+      if (this.onOp) this.onOp(this.audioState());
+    }
+    _setEnd(end, mode) {
+      if (end >= this.disc.sectorCount) end = (this.disc.sectorCount - 1) >>> 0;
+      this.auEnd = end; this.auEndMode = mode; this.auStatus = AU_PLAY;
+      if (this.onOp) this.onOp([5, (end >> 16) & 0xFF, (end >> 8) & 0xFF, end & 0xFF, mode]);
+    }
+    /** 今の CD-DA の状態を操作の形で(再生を始めた時と、録音の頭に置く)。鳴っていなければ null */
+    audioState() {
+      if (this.auStatus !== AU_PLAY && this.auStatus !== AU_PAUSE) return null;
+      const lba3 = (v) => [(v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF];
+      return [1].concat(lba3(this.auStart), lba3(this.auEnd), [this.auEndMode, this.auStatus === AU_PAUSE ? 1 : 0], lba3(this.auSector));
+    }
+    /** 今のフェーダを操作の形で。入っていなければ null */
+    fadeState() {
+      if (!this.fadeOn) return null;
+      const el = Math.min(0xFFFF, Math.floor((this.host.clock - this.fadeStart) / (MASTER / 100)));
+      return [4, this.fadeReg, el & 0xFF, el >> 8];
+    }
+
+    _discRead() {
+      this.readCounter -= 3;
+      if (this.readCounter > 0) return;
+      if (this.bufLen <= this.bufPos) {
+        this.bufPos = 0; this.bufLen = this.disc.readData(this.sector, this.buf);
+        this.reads++;
+        this.sector = (this.sector + 1) & 0x1FFFFF;
+        this.sectorsToRead = (this.sectorsToRead - 1) & 0xFF;
+        this.changed = true; this.need = true;
+        this.readCounter = this.sectorsToRead === 0 ? 0 : SECTOR_CLOCKS;
+        this._setPhase(PH_DATAIN);
+      } else {
+        this.readCounter = LATE_CLOCKS; // 前のセクタが読み切られていない
+        this.need = true;
+      }
+    }
+
+    _scsiExec() {
+      if (this.ackClear > 0) { this.ackClear -= 3; if (this.ackClear === 0) this._set('ack', false); }
+      if (this.updCounter && --this.updCounter === 0) {
+        switch (this.updType) {
+          case UP_CMD: this._setPhase(PH_CMD); break;
+          case UP_REQ: this._setReq(true); break;
+          case UP_DATAIN: this._setPhase(PH_DATAIN); break;
+          default: this._status(0, 1); break;
+        }
+      }
+      if (this.readCounter > 0) this._discRead();
+      if (this.changed) this._update();
+      this.need = this.changed || this.readCounter > 0 || this.ackClear > 0 || this.updCounter > 0;
+    }
+
+    // ── CD-DA ──
+    _cddaTick() {
+      if (++this.subIrqCount >= 6) {
+        this.setIrq(IRQ_SUB);
+        this.subIrqCount = 0;
+        if (++this.subPos >= 98) {
+          this.subPos = 0;
+          if (!this.seekDelay) { this.subSector = this.subNext; this.subNext = this.currentSector(); } // シーク中は前のセクタのサブコードを繰り返す
+        }
+      }
+      if (this.seekDelay === 0) {
+        if (this.auStatus === AU_PLAY) {
+          const disc = this.disc;
+          this.left = disc.sample(this.auSector, this.auSample, 0);
+          this.right = disc.sample(this.auSector, this.auSample, 2);
+          if (++this.auSample === 588) {
+            this.auSample = 0; this.auSector++;
+            if (this.auSector > this.auEnd) {
+              if (this.auSector >= disc.sectorCount) this.auSector = disc.sectorCount - 1;
+              if (this.auEndMode === END_LOOP) this.auSector = this.auStart;
+              else { this.auStatus = AU_STOP; if (this.onOp) this.onOp([3]); if (this.auEndMode === END_IRQ) this.setGoodStatus(); }
+            }
+          }
+        } else { this.left = 0; this.right = 0; }
+        this.audPL = this.audCL; this.audPR = this.audCR; this.audCL = this.left; this.audCR = this.right; this.audAt = this.host.clock;
+      } else {
+        if (this.seekDelay <= CDDA_CLOCKS) { this.seekDelay = 0; this.setGoodStatus(); } // 音の出始め: 「正常終了」を返す
+        else this.seekDelay -= CDDA_CLOCKS;
+        this.audPL = this.audCL; this.audPR = this.audCR; this.audCL = 0; this.audCR = 0; this.audAt = this.host.clock;
+      }
+    }
+
+    /** マスタークロック 3 個ぶん */
+    exec() {
+      if (this.need) this._scsiExec();
+      if (this.adpcm.need) this.adpcm.exec();
+      this.auClock += 3;
+      if (this.auClock > CDDA_CLOCKS) { this.auClock -= CDDA_CLOCKS; this._cddaTick(); }
+    }
+
+    // ── フェーダ ──
+    _fade(forAdpcm) {
+      if (!this.fadeOn || this.fadeAdpcm !== forAdpcm) return 1;
+      const per = Math.floor((this.fadeFast ? 0.025 : 0.06) * MASTER);
+      const v = 1 - Math.floor((this.host.clock - this.fadeStart) / per) / 100; // 1% 刻みで下がる(Mesen は整数の割り算)
+      return v < 0 ? 0 : v;
+    }
+
+    /** 今の音を outL / outR に入れる(本体の物差し。波形メモリ音源に足す値) */
+    mix(clock) {
+      let l = 0, r = 0;
+      if (!this.mute.cdda) {
+        let f = (clock - this.audAt) / CDDA_CLOCKS; if (f > 1) f = 1;
+        const g = UNIT * this._fade(false) * this.vol.cdda;
+        l = (this.audPL + (this.audCL - this.audPL) * f) * g;
+        r = (this.audPR + (this.audCR - this.audPR) * f) * g;
+      }
+      const a = this.adpcm.level(clock);
+      if (a !== 0 && !this.mute.adpcm) { const v = a * UNIT * this._fade(true) * this.vol.adpcm; l += v; r += v; }
+      this.outL = l; this.outR = r;
+    }
+
+    // ── レジスタ ──
+    write(reg, value) {
+      switch (reg) {
+        case 0x00: this._set('sel', true); this._update(); this._set('sel', false); this._update(); break;
+        case 0x01: this.dataPort = value; this._update(); break;
+        case 0x02:
+          this._set('ack', (value & 0x80) !== 0); this._update();
+          this.enabledIrqs = value & 0x7F; this._irq();
+          break;
+        case 0x04: {
+          this.resetReg = value & 0x0F;
+          const reset = (value & 0x02) !== 0;
+          this._set('rst', reset); this._update();
+          if (reset) { this.enabledIrqs &= 0x8F; this._irq(); }
+          break;
+        }
+        case 0x05:
+          if (this.host.clock >= this.latchLockUntil) {
+            this.readRight = !this.readRight;
+            this.sampleLatch = (this.readRight ? this.right : this.left) & 0xFFFF;
+            this.latchLockUntil = this.host.clock + 700;
+          }
+          break;
+        case 0x07: this.host.bramLocked = (value & 0x80) === 0; break;
+        case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0E: this.adpcm.write(reg, value); break;
+        case 0x0F:
+          this.fadeReg = value; this.fadeOn = (value & 0x08) !== 0; this.fadeAdpcm = (value & 0x02) !== 0; this.fadeFast = (value & 0x04) !== 0;
+          this.fadeStart = this.host.clock;
+          if (this.onOp) this.onOp([4, value & 0xFF, 0, 0]);
+          break;
+        default: break;
+      }
+    }
+
+    read(reg) {
+      switch (reg) {
+        case 0x00: return (this.io ? 0x08 : 0) | (this.cdl ? 0x10 : 0) | (this.msg ? 0x20 : 0) | (this.req ? 0x40 : 0) | (this.bsy ? 0x80 : 0);
+        case 0x01: return this.scsiDataPort();
+        case 0x02: return this.enabledIrqs | (this.ack ? 0x80 : 0);
+        case 0x03: this.host.bramLocked = true; return this.activeIrqs | (this.readRight ? 0 : 0x02);
+        case 0x04: return this.resetReg;
+        case 0x05: return this.sampleLatch & 0xFF;
+        case 0x06: return (this.sampleLatch >> 8) & 0xFF;
+        case 0x07: { const v = this.disc.subByte(this.subSector * 98 + this.subPos); this.clearIrq(IRQ_SUB); return v; }
+        case 0x08: {
+          const v = this.scsiDataPort();
+          if (this.req && this.io && !this.cdl) { this.scsiAckAuto(); this._update(); }
+          return v;
+        }
+        case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0E: return this.adpcm.read(reg);
+        case 0x0F: return this.fadeReg;
+        case 0xC0: case 0xC1: case 0xC2: case 0xC3: return this.superCd ? SIGNATURE[reg & 3] : 0xFF;
+        default: return 0xFF;
+      }
+    }
+  }
+
+  PceCdRom.seekMs = seekMs;
+  PceCdRom.UNIT = UNIT;
+  Emu.PceCdRom = PceCdRom;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
  * PC エンジン本体(段階 9c: HuCard、2 ボタンパッド 1 個、波形メモリ音源、VDC/VCE 1 組。
  *   段階 9d: SuperGrafx(VDC 2 個+優先順位の石 pce/vpc.js+RAM 32K)、1MB 超のカード、RAM 内蔵カード、6 ボタンパッドとマルチタップ pce/pad.js)
  *   opts: model 'auto'(既定。SuperGrafx 専用カードなら SuperGrafx)/ 'pce' / 'sgx'、pad 'pad2'(既定)/ 'pad6' / 'tap'、region 'auto' / 'pce'
+ *   段階 9e: CD-ROM²。opts.cd に PceDisc を渡すと CD 装置つきで動く(romBytes はシステムカード)。opts.cdType 'scd'(既定。Super CD-ROM² の RAM 192K を
+ *     バンク $68-$7F に持ち、$18C0-$18C3 に印を出す)/ 'cd'(初代 CD-ROM²。どちらも無い)。CD 装置の中身は pce/cdrom.js・pce/adpcm.js・pce/cdImage.js
+ *   [参照] 1 サイクルの中の順番(PceMemoryManager.cpp): タイマ → VDC → CD 装置。CD 装置の時計は CD をつないだ時だけ進む
  *   [参照] SuperGrafx の I/O(PceVpc.cpp): $0000-$03FF は下位 5bit で分ける。$00-$07 = VDC1、$08-$0E = 優先順位の石、$10-$17 = VDC2、ほかの読みは $FF。
  *          RAM は 32K(バンク $F8-$FB が別々)。1 サイクルの中の順番はタイマ → VDC2 → VDC1
  * MML.Emu.PceConsole
@@ -22070,7 +23033,9 @@
  *      Mesen は HuCard の時、CD 本体のレジスタは見せるが CD 本体の時計は進めない。そのため「数十クロックで終わるはずの読み書き」が終わらず、
  *      印が立ちっぱなしになる。実機(CD 本体をつないだ時)は印がすぐ下りるはずで、つないでいなければ $18xx は読めない(未確認)。
  *      実ソフト 1 本(54 本中)がこの印で分岐していて、Mesen と同じ動きにするためにそのまま合わせた。CD を作る 9e で決め直す
- *   [推定] CD の中身(SCSI、ADPCM の再生と RAM、CD-DA、フェーダの効き)は 9e。$18C0-$18C3 の印は Mesen の設定(CD-ROM の種類)しだいで $FF にもなる
+ *   ★ HuCard の時も CD 装置のレジスタは本物(pce/cdrom.js)がつながっているが、時計は進めない(上の $180C の話。Mesen と同じ)。
+ *      HuCard で CD 装置の時計も進める(実機で CD 装置をつないだ形)かどうかは決めていない
+ *   [推定] CD つきの時は全体の音量を 0.6 倍にする(CD-DA の最大が 1.0 を超えないように。波形メモリ音源・CD-DA・ADPCM の比は Mesen のまま)
  *   [推定] 色: VCE の 9bit(緑 3・赤 3・青 3)を 各 3bit → 8bit に直線で伸ばす。白黒の印(VCE $0400 bit7)は輝度 0.299R+0.587G+0.114B
  * 確かめ方: tools/headless/pce-mesen-ab.js --rom(I/O の時刻つきの並びと画面を Mesen と比べる)
  */
@@ -22113,6 +23078,12 @@
       this.cardRam = this.card.ramSize ? new Uint8Array(this.card.ramSize) : null;
       this.cardBank = 0; // 1MB 超のカードの段(ステートに入れるため本体側にも持つ)
       this.cdRam = new Uint8Array(0x10000);
+      this.disc = opts.cd || null;
+      this.cdOn = !!opts.cd;
+      this.cdType = this.cdOn ? (opts.cdType === 'cd' ? 'cd' : 'scd') : '';
+      this.superRam = this.cdType === 'scd' ? new Uint8Array(0x30000) : null;
+      this.mixGain = this.cdOn ? 0.6 : 1;
+      this.cd = null; // reset() で作る
       this.bram = PceConsole.blankBram();
       this.timer = new Emu.PceTimer();
       this.vce = new Emu.PceVce();
@@ -22146,7 +23117,8 @@
     }
 
     reset() {
-      this.ram.fill(0); this.cdRam.fill(0); if (this.cardRam) this.cardRam.fill(0);
+      this.ram.fill(0); this.cdRam.fill(0); if (this.cardRam) this.cardRam.fill(0); if (this.superRam) this.superRam.fill(0);
+      this._newCd();
       this.mpr.fill(0);
       this.cardBank = 0; this.card.select(0);
       this.timer.reset(); this.vce.reset(); this.vdc.reset(); this.apu.reset && this.apu.reset();
@@ -22154,10 +23126,20 @@
       this.input.reset();
       this.clock = 0; this.cycleSteps = 4;
       this.timerIrq = false; this.irq2 = false; this.irqDisable = 0; this.ioBuffer = 0; this.mprBuffer = 0;
-      this.bramLocked = false; this.cdIrqEnable = 0; this.cdReset = 0; this.cdRegs = new Uint8Array(16); this.cdAdpcmBusy = 0;
+      this.bramLocked = false;
       this.frameCount = 0; this.frameStart = 0; this._frameFlag = false; this._frameCb = false; this.lastFrameLen = LINE * 262;
       this.sampleAcc = 0;
       this.cpu.powerOn();
+    }
+
+    /** CD 装置を電源投入時の状態で作り直す(消音の設定と記録の口は引き継ぐ) */
+    _newCd() {
+      const old = this.cd;
+      this.cd = new Emu.PceCdRom(this, this.disc, { superCd: this.cdType !== 'cd' });
+      if (old) {
+        this.cd.mute = old.mute; this.cd.vol = old.vol; this.cd.onCommand = old.onCommand; this.cd.onOp = old.onOp; this.cd.adpcm.onSample = old.adpcm.onSample;
+        if (old.onOp && (old.auStatus === 0 || old.auStatus === 2)) old.onOp([3]); // リセットで CD-DA は止まる(録音中なら記録に残す)
+      }
     }
 
     // バックアップ RAM の初期の中身(CD 本体の BIOS が「全消去」した直後の形。頭 8 バイトが見出し)
@@ -22188,6 +23170,9 @@
       // 鍵盤表示の名前は HES と同じ 'hes'({ ch0..ch5 })
       if (mute && mute.hes) put(this.apu.mute, mute.hes, (v) => !!v);
       if (volume && volume.hes) put(this.apu.vol, volume.hes, (v) => Math.max(0, Math.min(2, +v || 0)));
+      // CD-ROM² の CD-DA と ADPCM は 'pcecd'({ cdda, adpcm })。VGM の再生側(vgmPlayer.js の pceadpcm)と同じ名前
+      if (mute && mute.pcecd) put(this.cd.mute, mute.pcecd, (v) => !!v);
+      if (volume && volume.pcecd) put(this.cd.vol, volume.pcecd, (v) => Math.max(0, Math.min(2, +v || 0)));
     }
     frameFrac() { return Math.min(0.999999, (this.clock - this.frameStart) / (LINE * this.vce.lines)); }
 
@@ -22224,6 +23209,7 @@
       if (this.timer.advance(3)) this.timerIrq = true;
       if (this.vdc2) this.vdc2.exec();
       this.vdc.exec();
+      if (this.cdOn) this.cd.exec();
       const sr = this.sampleRate;
       if (sr) {
         this.sampleAcc += sr * 3;
@@ -22233,7 +23219,8 @@
             this.apu.runToMaster(this.clock);
             const s = this.apu.mixSample();
             const i = (this.ringHead + this.ringLen) & (AUDIO_RING - 1);
-            this.ring[i] = s.left; this.ringR[i] = s.right;
+            if (this.cdOn) { const cd = this.cd, g = this.mixGain; cd.mix(this.clock); this.ring[i] = (s.left + cd.outL) * g; this.ringR[i] = (s.right + cd.outR) * g; }
+            else { this.ring[i] = s.left; this.ringR[i] = s.right; }
             this.ringLen++;
           }
         }
@@ -22244,7 +23231,8 @@
       this._frameFlag = true; this._frameDirty = true;
       this.lastFrameLen = this.clock - this.frameStart;
       if (this.padTurbo[0] || this.padTurbo[1] || this.padTurbo[2] || this.padTurbo[3] || this.padTurbo[4] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
-      if (this.rec) { this.rec.cur.len = this.lastFrameLen; this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
+      // 画面の長さは最後の要素 { len } にも入れる(配列に付けた len は Worklet から主スレッドへ送る時に落ちる。262 行と 263 行で長さが違うので要る)
+      if (this.rec) { this.rec.cur.len = this.lastFrameLen; this.rec.cur.push({ len: this.lastFrameLen }); this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       this.frameStart = this.clock;
       if (!this.sampleRate) this.apu.runToMaster(this.clock); // 音を取らない時も、音源の時計を溜めすぎない
       // ここは VDC の行末処理の途中で、CPU も命令の途中。onFrame(巻き戻しの控えを取る)は命令が終わってから呼ぶ(step)。
@@ -22266,6 +23254,7 @@
       const bank = this.mpr[addr >>> 13], off = addr & 0x1FFF;
       if (bank < 0x80) {
         if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) return this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF];
+        if (this.superRam !== null && bank >= 0x68) return this.superRam[((bank - 0x68) << 13) | off];
         return this.card.rom[this.card.offset[bank] + off];
       }
       if (bank === 0xFF) { const v = this.readIo(off); if (this.onIo) this.onIo('R', addr, v); return v; }
@@ -22280,6 +23269,7 @@
       if (bank >= 0xF8 && bank <= 0xFB) { this.ram[(((bank - 0xF8) << 13) | off) & this.ramMask] = value; return; }
       if (bank < 0x80) {
         if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF] = value;
+        else if (this.superRam !== null && bank >= 0x68) this.superRam[((bank - 0x68) << 13) | off] = value;
         else if (this.card.banked && bank === 0 && (off & 0x1FF0) === 0x1FF0) { this.cardBank = off & 0x0F; this.card.select(this.cardBank); }
         return;
       }
@@ -22311,7 +23301,7 @@
         }
         return this.ioBuffer;
       }
-      if (off < 0x1C00) return this._cdRead(off & 0x3FF);
+      if (off < 0x1C00) return this.cd.read(off & 0x3FF);
       return 0xFF;
     }
 
@@ -22348,41 +23338,10 @@
         this.ioBuffer = value;
         return;
       }
-      if (off < 0x1C00) this._cdWrite(off & 0x3FF, value);
+      if (off < 0x1C00) this.cd.write(off & 0x3FF, value);
     }
 
-    // CD 本体の口(9c では「バックアップ RAM の鍵」だけ本物。ほかは 9e)
-    _cdRead(reg) {
-      switch (reg) {
-        case 0x00: case 0x01: return 0;
-        case 0x02: return this.cdIrqEnable;
-        case 0x03: this.bramLocked = true; return 0x02;
-        case 0x04: return this.cdReset;
-        case 0x05: case 0x06: case 0x07: case 0x08: case 0x09: return 0;
-        case 0x0A: this.cdAdpcmBusy |= 0x80; return 0;
-        case 0x0C: return this.cdAdpcmBusy;
-        case 0x0B: case 0x0D: case 0x0E: case 0x0F: return this.cdRegs[reg];
-        case 0xC0: return 0x00;
-        case 0xC1: return 0xAA;
-        case 0xC2: return 0x55;
-        case 0xC3: return 0x03;
-        default: return 0xFF;
-      }
-    }
-    _cdWrite(reg, value) {
-      switch (reg) {
-        case 0x02: this.cdIrqEnable = value & 0x7F; break;
-        case 0x04: this.cdReset = value & 0x0F; if (value & 2) this.cdIrqEnable &= 0x8F; break;
-        case 0x07: this.bramLocked = (value & 0x80) === 0; break;
-        case 0x0A: this.cdAdpcmBusy |= 0x04; break;
-        case 0x0D: if (value & 0x80) this.cdAdpcmBusy = 0; this.cdRegs[reg] = value; break;
-        case 0x0B: this.cdRegs[reg] = value & 0xFE; break; // bit0 は転送が走っていなければ立たない(HuCard では常に)
-        case 0x0E: case 0x0F: this.cdRegs[reg] = value; break;
-        default: break;
-      }
-    }
-
-    // ── 録音(VGM への符号化は別。書き込みの t は画面の頭からのマスタークロック、画面の長さは frames[f].len) ──
+    // ── 録音(VGM への符号化は別。書き込みの t は画面の頭からのマスタークロック、画面の長さは frames[f].len と、各画面の最後の要素 { len }) ──
     startRecording() {
       const cur = [], apu = this.apu, w = (addr, value) => cur.push({ addr, value: value & 0xFF, t: 0 });
       // 今の音源の像を、書き込みの並びに直して頭に置く(波形は ch を切ってから 32 個。読み位置は 0 に戻る)
@@ -22397,12 +23356,22 @@
       }
       w(1, apu.balance); w(8, apu.lfoFreq); w(9, apu.lfoCtrl); w(0, apu.selected);
       this.rec = { frames: [], cur };
+      if (this.cdOn) {
+        // ADPCM は再生で 1 個進むたびの 12bit の出力、CD-DA は操作(SCSI のコマンドとフェーダ)を時刻つきで控える(VGM では規格外ブロック PCEX)
+        // 口の中では this.cd を毎回見る(リセットで CD 装置を作り直すので、ここで掴んだ物を使うと古い方の速さを読んでしまう。見直しの指摘)
+        const at = () => this.clock - this.frameStart;
+        this.cd.adpcm.onSample = (out) => { if (this.rec) this.rec.cur.push({ adpcm: out, rate: this.cd.adpcm.rate & 0x0F, t: at() }); };
+        this.cd.onOp = (op) => { if (this.rec && op) this.rec.cur.push({ cd: op, t: at() }); };
+        const now = this.cd.audioState(); if (now) cur.push({ cd: now, t: 0 });
+        const fade = this.cd.fadeState(); if (fade) cur.push({ cd: fade, t: 0 });
+      }
     }
     stopRecording() {
       const rec = this.rec;
       if (!rec) return [];
       this.rec = null;
-      if (rec.cur.length) { rec.cur.len = this.clock - this.frameStart; rec.frames.push(rec.cur); }
+      if (rec.cur.length) { rec.cur.len = this.clock - this.frameStart; rec.cur.push({ len: rec.cur.len }); rec.frames.push(rec.cur); }
+      if (this.cd) { this.cd.adpcm.onSample = null; this.cd.onOp = null; }
       return rec.frames;
     }
 
@@ -22443,6 +23412,7 @@
 
     static describe(pce) {
       const c = pce.card;
+      if (pce.cdOn) return `${pce.sgx ? 'SuperGrafx ' : ''}${pce.cdType === 'scd' ? 'Super CD-ROM²' : 'CD-ROM²'} ${pce.disc.describe()} システムカード ${c.fileSize >> 10}K${c.hadHeader ? '(ヘッダ 512 バイトを外した)' : ''}`;
       return `${pce.sgx ? 'SuperGrafx ' : ''}HuCard ${c.fileSize >> 10}K(${c.banks} バンク)${c.banked ? ' バンク切り替えつき' : ''}${c.ramSize ? ' RAM 内蔵' : ''}${pce.input.type !== 'pad2' ? ' パッド=' + pce.input.type : ''}${c.hadHeader ? ' ヘッダ 512 バイトを外した' : ''}${c.reversed ? ' ビットの逆順を戻した' : ''}${c.oversize ? ' 1MB 超=未対応' : ''}`;
     }
   }
@@ -22467,6 +23437,7 @@
  *   - 巻き戻し: 0.5 秒ごとのステート(1 分ぶん)+毎フレームのパッド値。逆再生の映像は、その時の画面を幅 292 に縮めて
  *     「色の番号 8bit+その画面の色表」で控える(PC エンジンは 512 色出せるので、1 画面に 256 色を超えた分は近い色に寄せる。逆再生の絵だけの話)
  * 形: { v: 1, machine: 'pce', romLen, romSum, sgx, tree }
+ *   CD つきは cd(ディスクの見分け)と cdType も持つ。ディスクそのもの(disc)は入れない。CD 装置の RAM(64K+ADPCM 64K+Super の 192K)は入る
  *   本体の種類(SuperGrafx かどうか)が違うステートは読まない(VDC の数が違い、読むと落ちる)。パッドの種類は今の設定を保つ(ステートの物に戻さない)
  */
 (function (global) {
@@ -22475,7 +23446,7 @@
   const Emu = MML.Emu = MML.Emu || {};
 
   // 出来上がった画面(vdc.out)はキー名でなく配列そのもので外す(キー名 'out' で外すと、音源の ch の今の出力 out まで落ちる。見直しで分かった)
-  const SKIP_KEYS = new Set(['rom', 'card', 'rec', 'ring', 'ringR', '_frame', '_frameIdx', 'onFrame', 'onFrameExact', 'onWrite', 'onIo', 'host', 'bus']);
+  const SKIP_KEYS = new Set(['rom', 'card', 'rec', 'ring', 'ringR', '_frame', '_frameIdx', 'onFrame', 'onFrameExact', 'onWrite', 'onIo', 'host', 'bus', 'disc', 'onCommand', 'onSample', 'onOp']);
   const romSum = (card) => {
     if (card._sum === undefined) { let h = 2166136261 | 0; const r = card.rom; for (let i = 0; i < r.length; i += 97) h = Math.imul(h ^ r[i], 16777619) | 0; card._sum = h >>> 0; }
     return card._sum;
@@ -22483,13 +23454,15 @@
 
   const PceState = {
     save(pce) {
-      return { v: 1, machine: 'pce', romLen: pce.card.rom.length, romSum: romSum(pce.card), sgx: !!pce.sgx, tree: Emu.StateTree.snapshot(pce, [pce.card.rom, pce.vdc.out].concat(pce.vdc2 ? [pce.vdc2.out, pce.vdc2.rowDiv] : []), SKIP_KEYS) };
+      return { v: 1, machine: 'pce', romLen: pce.card.rom.length, romSum: romSum(pce.card), sgx: !!pce.sgx, cd: pce.cdOn ? pce.disc.signature : 0, cdType: pce.cdType || '', tree: Emu.StateTree.snapshot(pce, [pce.card.rom, pce.vdc.out].concat(pce.vdc2 ? [pce.vdc2.out, pce.vdc2.rowDiv] : []), SKIP_KEYS) };
     },
     // 同じ ROM で作ったステートを書き戻す。合わなければ false
     load(pce, state) {
       if (!state || state.v !== 1 || state.machine !== 'pce' || !state.tree) return false;
       if (state.romLen !== pce.card.rom.length || state.romSum !== romSum(pce.card)) return false;
       if (!!state.tree.sgx !== !!pce.sgx) return false;                  // 本体の種類が違う
+      if ((state.cd || 0) !== (pce.cdOn ? pce.disc.signature : 0) || (state.cdType || '') !== (pce.cdType || '')) return false; // CD の有無・ディスク・RAM の有無が違う
+      if (state.tree.cd === undefined) pce._newCd();                     // 9d までのステート(CD 装置の中身を持っていない): 電源投入時の状態にする
       const rec = pce.rec, padType = pce.input.type;
       Emu.StateTree.restore(pce, state.tree);
       pce.input.type = padType;                                           // パッドの種類は今の設定が正
@@ -31695,7 +32668,10 @@
                 info = MML.Emu.GbConsole.describe(nes);
               }
             } else if (machine === 'pce') {
-              nes = new MML.Emu.PceConsole(new Uint8Array(m.rom), { region: (m.pce && m.pce.region) || 'auto', model: (m.pce && m.pce.model) || 'auto', pad: (m.pce && m.pce.pad) || 'pad2' });
+              // CD-ROM²: m.cd = { kind, text, files: [{ name, data(ArrayBuffer) }], sub }。rom はシステムカード
+              let disc = null;
+              if (m.cd) disc = MML.Emu.PceDisc.fromSet({ kind: m.cd.kind, text: m.cd.text, files: m.cd.files.map((f) => ({ name: f.name, data: new Uint8Array(f.data) })), sub: m.cd.sub ? new Uint8Array(m.cd.sub) : null });
+              nes = new MML.Emu.PceConsole(new Uint8Array(m.rom), { region: (m.pce && m.pce.region) || 'auto', model: (m.pce && m.pce.model) || 'auto', pad: (m.pce && m.pce.pad) || 'pad2', cd: disc, cdType: (m.pce && m.pce.cdType) || 'scd' });
               info = MML.Emu.PceConsole.describe(nes);
             } else if (machine === 'cps3') {
               // CP システム III: BIOS、プログラム(SIMM1/2 の像)、波形と絵(SIMM3 以降の像)、ゲームの名前。主スレッドが CD から取り出して送る

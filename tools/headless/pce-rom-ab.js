@@ -19,7 +19,13 @@
  * フレームの数え方: どちらも「走査線 256 に入った所」で 1 フレーム。電源投入からの数なのでそのまま対応する。
  *   ただし画面だけは 1 つずれる: Mesen の Lua で endFrame の時に取れる絵は、まだ 1 つ前のフレームの物(絵の差し替えが endFrame の通知より後)。
  *   なので「--shots N」は Mesen の N 回目の endFrame で取った絵=N-1 フレーム目の絵を、自前の N-1 フレーム目と比べる。
- * 入力は与えない(Mesen の --testRunner では入力が入らない)。
+ * 入力: --keys "300-310:run,900-905:i" の形で「何フレーム目から何フレーム目の手前まで、どのボタンを押すか」を与えられる(1 番のパッド)。
+ *   Mesen 側は Lua の inputPolled の通知の中で emu.setInput を呼ぶ(画面の区切りの直後に入力を取り込む所)。自前は同じ区切りで setController。
+ *   ボタンの名前: i ii select run up down left right。(以前「--testRunner では入力が入らない」と書いていたのは誤りだった。2026-11-26)
+ * CD(段階 9e): .cue を渡すと CD-ROM² として回す。--syscard <システムカード>(または環境変数 PCE_SYSCARD)、--cdtype cd|scd(既定 scd)。
+ *   Mesen は Firmware フォルダの syscard3.pce を使うので、同じ中身のカードを渡すこと。Mesen の CD の種類(settings.json の PcEngine.CdRomType:
+ *   CdRom / SuperCdRom)を合わせた写しを --mesen で渡す。メモリは CD 装置の RAM 64K、ADPCM の RAM 64K、Super CD-ROM² の RAM 192K も比べる。
+ *   cue は同じフォルダに別の名前で写して渡す(Mesen がセーブを名前で残すため。.sub は名前が変わるので読まれない=サブコードは比べない)。
  * Mesen の設定: 電源投入時のメモリが乱数(既定)だと比べられないので、「RamPowerOnState = AllZeros」「DisableFrameSkipping = true」にした
  *   Mesen の写しを使う(Mesen.exe と同じフォルダに settings.json を置くと、そのフォルダだけで完結する。普段使いの設定は触らない)。
  *   描画の間引き(DisableFrameSkipping = false)が入っていると、最高速で回す時に絵が古いまま残り、スプライト衝突の判定も飛ぶ。
@@ -40,14 +46,14 @@ const USAGE = 'usage: node tools/headless/pce-rom-ab.js "game.pce" [--frames N] 
 if (has('--all')) {
   const folder = arg('--all', null);
   if (!folder || !fs.existsSync(folder)) { console.error(USAGE); process.exit(2); }
-  const walk = (dir, out) => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, e.name); if (e.isDirectory()) walk(p, out); else if (/\.(pce|sgx)$/i.test(e.name)) out.push(p); } return out; };
+  const walk = (dir, out) => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, e.name); if (e.isDirectory()) walk(p, out); else if (/\.(pce|sgx|cue)$/i.test(e.name) && !/^abrom-/.test(e.name)) out.push(p); } return out; };
   let files = walk(folder, []).sort();
   // 拡張子が .pce でも中身が HES(先頭 "HESM")の物は曲データなので外す(HES は pce-iotrace.js / pce-apu-ab.js で比べる)
   { const isHes = (p) => { const fd = fs.openSync(p, 'r'), b = Buffer.alloc(4); fs.readSync(fd, b, 0, 4, 0); fs.closeSync(fd); return b.toString('latin1') === 'HESM'; };
     const n0 = files.length; files = files.filter(p => !isHes(p)); if (files.length !== n0) console.log(`中身が HES の物 ${n0 - files.length} 本は外しました(残り ${files.length} 本)`); }
   const limit = parseInt(arg('--limit', '0'), 10); if (limit) files = files.slice(0, limit);
   const jobs = Math.max(1, parseInt(arg('--jobs', '4'), 10));
-  const pass = ['--frames', arg('--frames', '300')].concat(has('--shots') ? ['--shots', arg('--shots', '')] : []).concat(has('--no-io') ? ['--no-io'] : []).concat(has('--pad') ? ['--pad', arg('--pad', 'pad2')] : []).concat(has('--mesen') ? ['--mesen', arg('--mesen', '')] : []);
+  const pass = ['--frames', arg('--frames', '300')].concat(has('--shots') ? ['--shots', arg('--shots', '')] : []).concat(has('--no-io') ? ['--no-io'] : []).concat(has('--pad') ? ['--pad', arg('--pad', 'pad2')] : []).concat(has('--mesen') ? ['--mesen', arg('--mesen', '')] : []).concat(has('--syscard') ? ['--syscard', arg('--syscard', '')] : []).concat(has('--cdtype') ? ['--cdtype', arg('--cdtype', '')] : []).concat(has('--keys') ? ['--keys', arg('--keys', '')] : []);
   const rows = []; let next = 0, running = 0;
   const finishAll = () => {
     rows.sort((a, b) => a.file < b.file ? -1 : 1);
@@ -74,7 +80,15 @@ if (has('--all')) {
   return;
 }
 
-const rom = process.argv.slice(2).find(a => !a.startsWith('--') && /\.(pce|sgx)$/i.test(a));
+const rom = process.argv.slice(2).find((a, i, all) => !a.startsWith('--') && /\.(pce|sgx|cue)$/i.test(a) && !/^--(syscard|mesen|out)$/.test(all[i - 1] || ''));
+const isCd = !!rom && /\.cue$/i.test(rom);
+const sysCard = arg('--syscard', process.env.PCE_SYSCARD || null);
+const cdType = arg('--cdtype', 'scd') === 'cd' ? 'cd' : 'scd';
+if (isCd && (!sysCard || !fs.existsSync(sysCard))) { console.error('CD には --syscard <システムカード>(または環境変数 PCE_SYSCARD)が要ります'); process.exit(2); }
+// 入力の予定: [{ from, to, bits, names }]
+const BTN = { i: 1, ii: 2, select: 4, run: 8, up: 16, down: 32, left: 64, right: 128 };
+const presses = (arg('--keys', '') || '').split(',').filter(Boolean).map(p => { const m = /^(\d+)-(\d+):([a-z+]+)$/.exec(p.trim()); if (!m) { console.error('--keys の形: 300-310:run'); process.exit(2); } const names = m[3].split('+'); let bits = 0; for (const n of names) { if (!BTN[n]) { console.error('知らないボタン: ' + n); process.exit(2); } bits |= BTN[n]; } return { from: +m[1], to: +m[2], bits, names }; });
+const padAt = (n) => { let b = 0; for (const p of presses) if (n >= p.from && n < p.to) b |= p.bits; return b; };
 const frames = parseInt(arg('--frames', '300'), 10);
 const mesen = arg('--mesen', process.env.MESEN_EXE || null);
 if (!rom || !mesen || !fs.existsSync(mesen)) { console.error(USAGE); process.exit(2); }
@@ -91,6 +105,7 @@ const work = fs.mkdtempSync(path.join(os.tmpdir(), 'pce-rom-'));
 const W = work.replace(/\\/g, '/');
 const lua = [
   'local n = 0',
+  presses.length ? 'emu.addEventCallback(function()\n' + presses.map(p => '  if n >= ' + p.from + ' and n < ' + p.to + ' then emu.setInput({ ' + p.names.map(x => x + ' = true').join(', ') + ' }, 0) end').join('\n') + '\nend, emu.eventType.inputPolled)' : '',
   'local shots = {' + shots.map(s => '[' + s + ']=true').join(',') + '}',
   withIo ? 'local out = io.open("' + W + '/io.txt", "w")' : '',
   withIo ? 'local function cb(kind) return function(addr, value) local st = emu.getState() if st["memoryManager.mpr[0]"] == 255 then out:write(string.format("%d %s %04X %02X\\n", st.masterClock or 0, kind, addr, value)) end end end' : '',
@@ -110,6 +125,8 @@ const lua = [
   '      dump("vram", emu.memType.pceVideoRam, 0x10000) dump("satb", emu.memType.pceSpriteRam, 0x200)',
   '      dump("pal", emu.memType.pcePaletteRam, 0x400) dump("ram", emu.memType.pceWorkRam, ' + (isSgx ? '0x8000' : '0x2000') + ')',
   isSgx ? '      dump("vram2", emu.memType.pceVideoRamVdc2, 0x10000) dump("satb2", emu.memType.pceSpriteRamVdc2, 0x200)' : '',
+isCd ? '      dump("cdram", emu.memType.pceCdromRam, 0x10000) dump("adpcm", emu.memType.pceAdpcmRam, 0x10000)' : '',
+isCd && cdType === 'scd' ? '      dump("cardram", emu.memType.pceCardRam, 0x30000)' : '',
   '      local st = emu.getState() local t = io.open("' + W + '/state.txt", "w")',
   '      t:write(string.format("pc=%04x clock=%d", st["cpu.pc"] or 0, st.masterClock or 0)) t:close()',
   withIo ? '      out:close()' : '',
@@ -123,10 +140,13 @@ fs.writeFileSync(path.join(work, 'ab.lua'), lua);
 // Mesen はバックアップ RAM を「Saves/<ROM の名前>.sav」に残し、次に同じ名前で起動すると読み込む。前の実行の中身が残っていると
 // ゲームの動きが変わる(セーブを探す時間が変わる)ので、毎回ちがう名前の写しで回し、出来たセーブは消す。
 const romName = 'abrom-' + process.pid + '-' + Date.now().toString(36);
-const romCopy = path.join(work, romName + path.extname(rom).toLowerCase());
+const romCopy = isCd ? path.join(path.dirname(rom), romName + '.cue') : path.join(work, romName + path.extname(rom).toLowerCase());
 // ビットが逆順の吸い出しは、自前が戻した後の中身を Mesen へ渡す(Mesen は戻さないので、そのままでは動かず比べる意味が無い)
-{ const { load: ld, readBytes: rb } = require('./load'); const E0 = ld({ strict: true }).MML.Emu; const card = new E0.PceCard(rb(rom)); if (card.reversed) fs.writeFileSync(romCopy, Buffer.from(card.rom.subarray(0, card.fileSize))); else fs.copyFileSync(rom, romCopy); }
+if (isCd) fs.copyFileSync(rom, romCopy);
+else { const { load: ld, readBytes: rb } = require('./load'); const E0 = ld({ strict: true }).MML.Emu; const card = new E0.PceCard(rb(rom)); if (card.reversed) fs.writeFileSync(romCopy, Buffer.from(card.rom.subarray(0, card.fileSize))); else fs.copyFileSync(rom, romCopy); }
 spawnSync(mesen, ['--testRunner', romCopy, path.join(work, 'ab.lua'), '--timeout=' + Math.max(120, frames)], { encoding: 'utf8', timeout: Math.max(180000, frames * 1000) });
+if (isCd) fs.rmSync(romCopy, { force: true });
+if (has('--time')) console.error('Mesen ' + process.uptime().toFixed(1) + ' 秒');
 for (const home of [path.dirname(mesen), path.join(os.homedir(), 'Documents', 'MesenCE'), path.join(os.homedir(), 'Documents', 'Mesen2')]) {
   for (const sub of ['Saves', 'RecentGames', 'SaveStates']) { const dir = path.join(home, sub); let names = []; try { names = fs.readdirSync(dir); } catch (e) { /* 無ければよい */ } for (const n of names) if (n.startsWith(romName)) fs.rmSync(path.join(dir, n), { force: true }); }
 }
@@ -140,7 +160,10 @@ if (!fs.existsSync(path.join(work, 'state.txt'))) {
 const { load, readBytes } = require('./load');
 const { writePng } = require('./pce-run');
 const { MML } = load({ strict: true });
-const pce = new MML.Emu.PceConsole(readBytes(rom), { model: isSgx ? 'sgx' : 'pce', pad: arg('--pad', 'pad2') });
+let disc = null;
+if (isCd) disc = MML.Emu.PceDisc.fromCue(fs.readFileSync(rom, 'latin1'), (name) => { const p = path.join(path.dirname(rom), name); return fs.existsSync(p) ? new Uint8Array(fs.readFileSync(p)) : null; }, { legacyPregap: !has('--new-pregap') }); // 照合の相手(Mesen 2.2.1)の PREGAP の数え方に合わせる
+const pce = isCd ? new MML.Emu.PceConsole(readBytes(sysCard), { model: 'pce', pad: arg('--pad', 'pad2'), cd: disc, cdType })
+  : new MML.Emu.PceConsole(readBytes(rom), { model: isSgx ? 'sgx' : 'pce', pad: arg('--pad', 'pad2') });
 const B = [];
 if (withIo) pce.onIo = (k, a, v) => { if (a < 0x2000 && pce.mpr[0] === 0xFF) B.push({ t: pce.clock, k, a, v }); };
 const myShots = {};
@@ -149,7 +172,7 @@ const myShots = {};
 // なので「同じフレーム番号」ではなく「同じ時計の区切り」のメモリを比べる。合う区切りが無ければフレーム番号で取り、その旨を出す
 const mesenClock = +(/clock=(\d+)/.exec(fs.readFileSync(path.join(work, 'state.txt'), 'utf8')) || [0, 0])[1];
 let memAt = null, memByFrame = null;
-pce.onFrameExact = () => { const hit = pce.clock === mesenClock, byFrame = pce.frameCount === frames; if (!hit && !byFrame) return; const m = { vram: pce.vdc.vram.slice(), satb: pce.vdc.satb.slice(), pal: pce.vce.pal.slice(), ram: pce.ram.slice(), vram2: pce.vdc2 ? pce.vdc2.vram.slice() : null, satb2: pce.vdc2 ? pce.vdc2.satb.slice() : null, pc: pce.cpu.PC, clock: pce.clock, frame: pce.frameCount }; if (hit) memAt = m; if (byFrame) memByFrame = m; };
+pce.onFrameExact = () => { const hit = pce.clock === mesenClock, byFrame = pce.frameCount === frames; if (presses.length) pce.setController(0, padAt(pce.frameCount)); if (!hit && !byFrame) return; const m = { cdram: pce.cdRam.slice(), adpcm: pce.cd.adpcm.ram.slice(), cardram: pce.superRam ? pce.superRam.slice() : null, vram: pce.vdc.vram.slice(), satb: pce.vdc.satb.slice(), pal: pce.vce.pal.slice(), ram: pce.ram.slice(), vram2: pce.vdc2 ? pce.vdc2.vram.slice() : null, satb2: pce.vdc2 ? pce.vdc2.satb.slice() : null, pc: pce.cpu.PC, clock: pce.clock, frame: pce.frameCount }; if (hit) memAt = m; if (byFrame) memByFrame = m; };
 for (let f = 1; f <= frames + 2; f++) {
   pce._frameFlag = false;
   let guard = 0;
@@ -169,8 +192,8 @@ if (withIo) {
   const fmt = (e) => (e ? `${String(e.t).padStart(10)} ${e.k} ${e.a.toString(16).padStart(4, '0')} ${e.v.toString(16).padStart(2, '0')}` : ''.padStart(21));
   // CD 本体のレジスタの読みは、番地と時刻が同じなら値が違っても並びは同じとみなし、違った行数を別に数える(CD/ADPCM の中身は段階 9e)
   let cdDiff = 0;
-  const isCd = (e) => e.k === 'R' && e.a >= 0x1800 && e.a < 0x1C00;
-  const same = (x, y) => x && y && x.k === y.k && x.a === y.a && (x.v === y.v || isCd(x));
+  const lenient = (e) => false; // 9e から CD のレジスタの値も比べる
+  const same = (x, y) => x && y && x.k === y.k && x.a === y.a && (x.v === y.v || lenient(x));
   const endT = A.length ? A[A.length - 1].t : 0;
   while (B.length && B[B.length - 1].t > endT) B.pop();
   let i = 0, exact = 0, maxDt = 0;
@@ -203,10 +226,12 @@ if (withIo) {
     if (bad) { allOk = false; console.log(`${label}: 違う ${bad} / ${a.length}  ${first.join(', ')}`); summary.push(`${label} ${bad} 個違う`); }
     return bad;
   };
-  const mine = memAt || { vram: pce.vdc.vram, satb: pce.vdc.satb, pal: pce.vce.pal, ram: pce.ram, vram2: pce.vdc2 ? pce.vdc2.vram : null, satb2: pce.vdc2 ? pce.vdc2.satb : null };
+  const mine = memAt || { cdram: pce.cdRam, adpcm: pce.cd.adpcm.ram, cardram: pce.superRam, vram: pce.vdc.vram, satb: pce.vdc.satb, pal: pce.vce.pal, ram: pce.ram, vram2: pce.vdc2 ? pce.vdc2.vram : null, satb2: pce.vdc2 ? pce.vdc2.satb : null };
   const bad = cmp('VRAM', words(rd('vram')), mine.vram, 4) + cmp('スプライト表', words(rd('satb')), mine.satb, 4)
     + cmp('パレット', words(rd('pal')), mine.pal, 3) + cmp('RAM', rd('ram'), mine.ram, 2)
-    + (isSgx ? cmp('VRAM(VDC2)', words(rd('vram2')), mine.vram2, 4) + cmp('スプライト表(VDC2)', words(rd('satb2')), mine.satb2, 4) : 0);
+    + (isSgx ? cmp('VRAM(VDC2)', words(rd('vram2')), mine.vram2, 4) + cmp('スプライト表(VDC2)', words(rd('satb2')), mine.satb2, 4) : 0)
+    + (isCd ? cmp('CD 装置の RAM', rd('cdram'), mine.cdram, 2) + cmp('ADPCM の RAM', rd('adpcm'), mine.adpcm, 2) : 0)
+    + (isCd && cdType === 'scd' ? cmp('Super CD-ROM² の RAM', rd('cardram'), mine.cardram, 2) : 0);
   if (!bad) { console.log('メモリ: VRAM・スプライト表・パレット・RAM とも同じ'); summary.push('メモリ同じ'); }
 }
 

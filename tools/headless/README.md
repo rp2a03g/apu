@@ -34,6 +34,7 @@ export PATH="$PATH:/path/to/nodejs"
 | `pce-rom-ab.js` | HuCard の ROM を自前と Mesen 2 で無操作で走らせ、I/O の読み書き(マスタークロックの時刻つき)・終わりのメモリ(VRAM/スプライト表/パレット/RAM)・画面(全画素)の 3 つを比べる。`--all <フォルダ>` で一括。Mesen は「電源投入時のメモリ = 0」「描画の間引き無し」にした写しを使う(冒頭の説明) |
 | `mk-pce-test-rom.js` | PC エンジンの合成テスト ROM(15 場面: スプライトの大きさ/反転/優先、走査線の割り込み、あふれ、衝突、263 行、7MHz/10MHz、白黒、VRAM の読み返しと転送、表示中の書き込み、タイマ)。`--out <フォルダ>` で書き出し、`pce-rom-ab.js --all` に掛ける |
 | `pce-state-test.js` | PC エンジン本体まわりの通し確認(中身判定、ステート保存/復元、巻き戻し、録音 → VGM → VgmPlayer で読み直し)。ROM を引数で渡す |
+| `pce-cd-test.js` | PC エンジン CD-ROM² の通し確認(CD から読めたか、音、ステート保存/復元、巻き戻し、録音 → VGM(規格外ブロック PCEX)→ VgmPlayer)。`"disc.cue" --syscard <システムカード> [--keys "300-310:run"]`。Mesen との照合は `pce-rom-ab.js` に .cue を渡す(`--syscard`、`--cdtype cd\|scd`、`--keys` でボタン入力) |
 | `pce-sweep.js` | HES の総当たり(例外/無音/書き込み列のハッシュ)と、2 回ぶんの比較 |
 | `pce-mesen-ab.js` / `pce-iotrace.js` / `pce-apu-ab.js` | HES を Mesen 2 と比べる 3 本: 音源への書き込みの並び / I/O の読み書きを時刻つきで / 音源の内部状態(タイマ・読み位置・出力・波形・乱数)を書き込みごとに。どれも `--all <フォルダ>` で一括 |
 | `pce-vgm-ab.js` | PC エンジンの VGM を VGMPlay のリファレンス WAV と比べる(音量の包絡とスペクトルの形)。`--synth` で音量の表を 1 段ずつ |

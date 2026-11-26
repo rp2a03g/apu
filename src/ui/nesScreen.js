@@ -183,6 +183,7 @@
   let romName = '', romBytes = null;
   let image = null, imageBuf = null, frameW = 256, frameH = 240; // 画面の大きさ(frame メッセージの w/h。今は NES/MSX とも 256×240)
   let machine = 'nes';        // 'nes' | 'msx' | 'gb' | 'pce'(open がファイルで決める)
+  let pceCd = false;          // PC エンジンで CD-ROM² を動かしている
   let pceFps = 21477270 / 1365 / 263; // PC エンジン: 1 画面 263 行(59.83Hz)か 262 行(60.05Hz)。ソフトが VCE で選ぶ(loaded/フレームで知らされる)
   let cps3Fps = 59.6;         // CP システム III: 1 画面 264 行(59.60Hz)
   function curFps() { return machine === 'zoom' ? 60 : machine === 'gb' ? (gbSgb ? SGB_FPS : GB_FPS) : machine === 'pce' ? pceFps : machine === 'cps3' ? cps3Fps : FPS; }
@@ -411,6 +412,23 @@
     fdsBios = bytes;
     try { let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); localStorage.setItem(BIOS_KEY, btoa(s)); } catch (e) { /* 控えられなくても今回は使える */ }
   }
+  // ── PC エンジンの CD-ROM² システムカード(localStorage pce.syscard、base64。名前は pce.syscard.name)──
+  const PCE_SYS_KEY = 'pce.syscard';
+  let pceSysCard = null, pendingPceCd = null;
+  function loadPceSysCard() {
+    if (pceSysCard) return pceSysCard;
+    try { const v = localStorage.getItem(PCE_SYS_KEY); if (v) { const bin = atob(v); const b = new Uint8Array(bin.length); for (let i = 0; i < b.length; i++) b[i] = bin.charCodeAt(i); pceSysCard = b; } } catch (e) { /* localStorage 不可 */ }
+    return pceSysCard;
+  }
+  function pceSysCardName() { try { return localStorage.getItem(PCE_SYS_KEY + '.name') || ''; } catch (e) { return ''; } }
+  function storePceSysCardFile(bytes, name) {
+    pceSysCard = bytes;
+    try { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); localStorage.setItem(PCE_SYS_KEY, btoa(s)); localStorage.setItem(PCE_SYS_KEY + '.name', name || ''); } catch (e) { /* 控えられなくても今回は使える */ }
+    flashStatus(T('システムカードを控えました: {name}', { name: name || '' }));
+    if (cfgBiosRefresh) cfgBiosRefresh();
+    if (pendingPceCd) { const p = pendingPceCd; pendingPceCd = null; NesScreen.openPceCd(p).catch((e) => { statusEl.textContent = T('エラー: {msg}', { msg: e && e.message ? e.message : String(e) }); }); }
+  }
+  function clearPceSysCard() { try { localStorage.removeItem(PCE_SYS_KEY); localStorage.removeItem(PCE_SYS_KEY + '.name'); } catch (e) { /* ignore */ } pceSysCard = null; }
   // ── スーパーゲームボーイの BIOS(localStorage gb.sgb.<1|2>.bios / .boot、base64)──
   // bios = SNES 側のカートリッジ(256K = 初代、512K = SGB2)、boot = ゲームボーイ側のブート ROM 256 バイト(無くても動く)
   const SGB_BIOS_KEY = 'gb.sgb.';
@@ -701,6 +719,13 @@
         const D = MML.Emu.Image;
         if (D && D.isSgbBios && D.isSgbBios(b)) { storeSgbBiosFile(b, f.name); rest = rest.filter((x) => x !== f); }
         else if (b.length === 256 && target && target.kind === 'sgb') { storeSgbBios(target.rev, 'boot', b); flashStatus(T('ブート ROM を控えました: {name}', { name: f.name })); rest = rest.filter((x) => x !== f); }
+      }
+      // PC エンジンのシステムカード(中の文字で見分ける)
+      for (const f of rest.slice()) {
+        if (f.size > 0x80200) continue;
+        const b = new Uint8Array(await f.arrayBuffer()), D = MML.Emu.Image;
+        if (D && D.isPceSysCard && D.isPceSysCard(b)) { storePceSysCardFile(b, f.name); rest = rest.filter((x) => x !== f); }
+        else if (target && target.kind === 'pce') { alert(T('システムカードとして読めません: {name}', { name: f.name })); rest = rest.filter((x) => x !== f); }
       }
       // CPS3: 0x80000 バイトで、中身からゲームが分かる物(storeCps3BiosFile が控えて、設定の表も描き直す)
       for (const f of rest.slice()) {
@@ -1152,6 +1177,7 @@
     try { for (const [k] of MSX_BIOS_KINDS) localStorage.removeItem(MSX_BIOS_KEY + mach + '.' + k); } catch (e) { /* ignore */ }
     delete msxBiosCache[mach];
   }
+  let pceBiosRender = null;
   function clearFdsBios() { try { localStorage.removeItem(BIOS_KEY); } catch (e) { /* ignore */ } fdsBios = null; }
   function toggleCfgPopover(anchorEl) {
     if (popEl) { closeCfgPopover(); return; }
@@ -1274,6 +1300,7 @@
     const msxBox = document.createElement('div'); sb.appendChild(msxBox);
     biosNote(sb, T('メインを控えていない機種は同梱 C-BIOS で動きます(BASIC・ディスク・漢字は無し)。ディスクの起動にはメイン+サブ+ディスク ROM の 3 つ、turbo R はメイン+サブ(+漢字ドライバ)が要ります。ファイルは中身で振り分けるので名前は問いません(複数選択可)。機種「自動」は控えのある機種のうち MSX2 を優先します。MUSIC は MSX-MUSIC/FM-PAC の ROM(16K/64K)で、カートリッジ 2 の FM-PAC と 2+/turbo R の内蔵 FM に使います(無ければ同梱 C-BIOS の物)'));
     const renderBios = () => {
+      if (pceBiosRender) pceBiosRender();
       // FDS
       fdsBox.innerHTML = '';
       const r = document.createElement('div'); r.className = 'nes-cfg-row';
@@ -1316,6 +1343,18 @@
         s.value = pc.pad;
         s.addEventListener('change', () => { pc.pad = s.value; saveCfg(); });
         sp.appendChild(r); }
+      const sc = sec('CD-ROM²', 'pce');
+      const pceBiosBox = document.createElement('div'); sc.appendChild(pceBiosBox);
+      pceBiosRender = () => {
+        pceBiosBox.innerHTML = '';
+        const r = document.createElement('div'); r.className = 'nes-cfg-row';
+        const have = !!loadPceSysCard();
+        const lab = document.createElement('span'); lab.className = 'nes-disk-lbl'; lab.appendChild(ok(have)); lab.appendChild(document.createTextNode(' ' + T('システムカード') + ' ' + (have ? (pceSysCardName() || T('(控え済み)')) : T('(未)')))); r.appendChild(lab);
+        r.appendChild(mkBtn(T('選ぶ…'), T('システムカード(.pce)を選ぶ'), () => { biosTarget = { kind: 'pce' }; biosInput.click(); }));
+        if (have) r.appendChild(mkBtn(T('消す'), T('控えを消す'), () => { clearPceSysCard(); pceBiosRender(); }));
+        pceBiosBox.appendChild(r);
+      };
+      biosNote(sc, T('CD のソフトの起動にシステムカード(.pce)が要ります。このブラウザに控えて次回も使います。CD は .cue(か .ccd)とデータのファイル(.bin / .img / .iso / .wav)を一緒に選ぶか、まとめてドロップしてください。圧縮された音声(MP3 など)のトラックは読めません。'));
       note(sp, T('次に開くソフトから効きます。6 ボタンパッドの III〜VI はキーボードの D F G H です(割り当ての変更とゲームパッドへの割り当てはまだできません)。マルチタップの 2 番は 2 つ目のゲームパッドです。'));
     }
     const sg = sec(T('本体'), 'gb');
@@ -1696,7 +1735,7 @@
     statusEl.textContent = `${fps} fps · ${mode}` + dg + (underruns ? ' · ' + T('音切れ {n} 回', { n: underruns }) : '') + (hasBattery ? ' · ' + T('セーブ') : '') + (liveActive ? ' · ' + T('ロール') : '');
     if (cps3TestBtn) cps3TestBtn.hidden = machine !== 'cps3' || !!pendingCps3;
     if (pendingFds || pendingMsx || pendingCps3) return; // BIOS 待ちの案内を消さない
-    const chips = machine === 'gb' ? 'GB APU' : machine === 'pce' ? 'HuC6280' : machine === 'cps3' ? 'CPS3' : machine === 'zoom' ? (zoomSet && zoomSet.kind === 'ensoniq' ? 'ES5505' : 'ZSG-2') : machine === 'msx' ? msxChips.map((c) => c.toUpperCase()).join('+') : ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
+    const chips = machine === 'gb' ? 'GB APU' : machine === 'pce' ? (pceCd ? 'HuC6280+ADPCM' : 'HuC6280') : machine === 'cps3' ? 'CPS3' : machine === 'zoom' ? (zoomSet && zoomSet.kind === 'ensoniq' ? 'ES5505' : 'ZSG-2') : machine === 'msx' ? msxChips.map((c) => c.toUpperCase()).join('+') : ['VRC6', 'VRC7', 'FDS', 'MMC5', 'N163', 'SUNSOFT 5B'].filter((_, i) => recExtBits & (1 << i)).join('+');
     statusEl.title = (chips ? chips + ' ' : '') + (workletState === 'failed' ? T('AudioWorklet が使えないので主スレッドで実行しています(音は出ません)') : '') +
       (hasBattery ? ' ' + T('セーブデータはこのブラウザ(IndexedDB)に自動保存します(1 秒ごと・閉じる時)。キー: {key}', { key: batteryKey }) : '') +
       (liveActive ? ' ' + T('鍵盤表示のロールへ流しています') : '');
@@ -2153,7 +2192,7 @@
     }
     if (machine === 'pce') {
       // PC エンジン: 波形メモリ音源は VGM の正規チップ(0xB9)。効果音/処理落ちの補正(vgmClean.js)は PC エンジンの格子にまだ通していない(段階 9g)
-      const r = MML.VGM.encodePceRecording({ frames, name: (romName || 'PCE').replace(/\.(pce|sgx)$/i, ''), creator: 'Sound Emulation Foundry (PCE)' });
+      const r = MML.VGM.encodePceRecording({ frames, name: (romName || 'PCE').replace(/\.(pce|sgx|cue|ccd)$/i, ''), creator: 'Sound Emulation Foundry (PCE)', cd: pceCd });
       recRaw = r.vgm; recVgm = r.vgm;
       updateRecUi();
       recSfxChk.parentNode.hidden = recLagChk.parentNode.hidden = true;
@@ -2364,25 +2403,41 @@
   }
 
   // PC エンジンの HuCard を開く(流れはゲームボーイと同じ: 主スレッドで本体を作って検査 → Worklet(無理なら主スレッド実行))
-  async function openPce(bytes, name) {
+  // CD-ROM²: set = { name, kind 'cue' | 'ccd', text, files: [{ name, data(Uint8Array) }], sub }。システムカードが無ければ待つ
+  async function openPceCd(set) {
+    if (!ensureDom()) throw new Error('win-nes がありません');
+    const card = loadPceSysCard();
+    if (!card) {
+      pendingPceCd = set;
+      win.style.display = 'flex';
+      flashStatus(T('システムカードがまだ控えてありません。⚙ → PC エンジン で選ぶか、システムカード(.pce)をドロップすると、この CD を開きます'));
+      return null;
+    }
+    return openPce(card, set.name, set);
+  }
+  async function openPce(bytes, name, cdSet) {
     machine = 'pce'; pendingFds = null; pendingMsx = null; msxChips = []; msxDisk = false; gbSgb = 0; gbTilt = false;
     if (NesScreen.onSpcState) NesScreen.onSpcState(null);
     updateBiosBtn(); updateSoftKbd();
     if (gbSgbMenuBtn) gbSgbMenuBtn.hidden = true;
     const pc = pceCfg();
     const pceOpts = { region: 'auto', model: pc.model === 'auto' ? (/\.sgx$/i.test(name || '') ? 'sgx' : 'auto') : pc.model, pad: pc.pad };
-    const probe = new MML.Emu.PceConsole(bytes, pceOpts);
+    const disc = cdSet ? MML.Emu.PceDisc.fromSet(cdSet) : null; // 読めなければ例外(呼び出し側が知らせる)
+    if (disc && disc.empty) throw new Error(T('CD のトラックが読めません'));
+    pceCd = !!disc;
+    const probe = new MML.Emu.PceConsole(bytes, Object.assign({ cd: disc }, pceOpts));
     pceBits = 0;
     pceFps = probe.frameRate;
     liveEnd('restart');
     rewindHoldEnd();
     await flushBattery(); // 前の ROM のセーブを受け取ってから止める
     romBytes = bytes; romName = name || '';
-    stateKey = romKey(bytes);
+    // CD は「ディスクの見分け」で分ける(システムカードはどの CD でも同じなので)。セーブ(バックアップ RAM)もディスクごと
+    stateKey = disc ? 'pcecd-' + disc.signature.toString(16) + ':' + disc.sectorCount : romKey(bytes);
     hasBattery = probe.hasBattery; batteryKey = hasBattery ? stateKey : '';
     const battery = hasBattery ? await loadBattery(batteryKey) : null;
     if (battery && probe.setBattery(battery)) console.log('[pce]', T('セーブデータを読み込みました({n} バイト)', { n: battery.length }));
-    machineEl.textContent = probe.sgx ? 'SuperGrafx' : T('PC エンジン');
+    machineEl.textContent = disc ? 'CD-ROM²' : probe.sgx ? 'SuperGrafx' : T('PC エンジン');
     nameEl.textContent = romName;
     nameEl.title = MML.Emu.PceConsole.describe(probe);
     recExtBits = 0; fdsSideInfo = null; diskNames = [];
@@ -2400,7 +2455,10 @@
     applyCfgLabels();
     const rom = bytes.slice().buffer;
     const bat = battery ? battery.slice().buffer : null;
-    const ok = await startWorklet({ type: 'load', machine: 'pce', rom, battery: bat, pce: pceOpts }, [rom, bat].filter(Boolean));
+    // CD のデータは写さずに渡す(数百 MB ある)。Worklet が使えなかった時は渡っていないので、probe がそのまま主スレッドで動く
+    const cdMsg = cdSet ? { kind: cdSet.kind, text: cdSet.text, files: cdSet.files.map((f) => ({ name: f.name, data: f.data.buffer })), sub: cdSet.sub ? cdSet.sub.buffer : null } : null;
+    const cdBufs = cdMsg ? cdMsg.files.map((f) => f.data).concat(cdMsg.sub ? [cdMsg.sub] : []) : [];
+    const ok = await startWorklet({ type: 'load', machine: 'pce', rom, battery: bat, pce: pceOpts, cd: cdMsg }, [rom, bat].concat(cdBufs).filter(Boolean));
     if (!ok) { nes = probe; rewindBuf = MML.Emu.PceRewind ? new MML.Emu.PceRewind(nes) : null; lastPad = -1; lastPad2 = -1; mainFrames = 0; nes.setTurboRate(cfg.turboRate); startMain(); }
     liveBegin();
     updateStatus();
@@ -2547,6 +2605,7 @@
   const OPENERS = {
     'gb': (bytes, name) => openGb(bytes, name),
     'pce': (bytes, name) => openPce(bytes, name),
+    'pce-bios': (bytes, name) => { storePceSysCardFile(bytes, name); return null; }, // システムカード: 控えるだけ(CD が待っていれば、そのまま開く)
     'cps3-cd': (bytes, name) => openCps3(bytes, name),
     'cps3-bios': (bytes, name) => storeCps3BiosFile(bytes, name), // 控えるだけ(CD が BIOS 待ちなら、そのまま始める)
     'sgb-bios': (bytes, name) => { storeSgbBiosFile(bytes, name); return null; }, // スーパーゲームボーイの BIOS: 控えるだけ
@@ -2573,6 +2632,8 @@
     mount: () => (typeof ImageData === 'function' ? ensureDom() : false),
     // 機種の開き方を足す(kind は imageDetect.js の detect が返す物。将来の機種はここに登録すれば全経路に乗る)
     registerOpener(kind, fn) { OPENERS[kind] = fn; },
+    // CD-ROM² を開く(main.js が .cue / .ccd と一緒に選ばれたファイルを集めて渡す)
+    openPceCd(set) { const p = openChain.then(() => openPceCd(set)); openChain = p.catch(() => {}); return p; },
     _debug: { setDiskDir: (h) => { diskDirHandle = h; updateDiskBadge(); }, injectBattery: (blob) => handleBatteryBlob(blob), diskImage: (i) => currentDiskImage(i), dirty: () => Array.from(diskDirty), writeBack: () => writeBackDirty() },
     // 複数の画像をひとまとめに開く(zip の中のディスク組など): MSX の .dsk は全部同じドライブの組にして [disk] で選ぶ、
     // FDS の .fds が複数なら面を順に並べて 1 本に、それ以外は最初の 1 本

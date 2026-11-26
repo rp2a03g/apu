@@ -67,7 +67,10 @@
                 info = MML.Emu.GbConsole.describe(nes);
               }
             } else if (machine === 'pce') {
-              nes = new MML.Emu.PceConsole(new Uint8Array(m.rom), { region: (m.pce && m.pce.region) || 'auto', model: (m.pce && m.pce.model) || 'auto', pad: (m.pce && m.pce.pad) || 'pad2' });
+              // CD-ROM²: m.cd = { kind, text, files: [{ name, data(ArrayBuffer) }], sub }。rom はシステムカード
+              let disc = null;
+              if (m.cd) disc = MML.Emu.PceDisc.fromSet({ kind: m.cd.kind, text: m.cd.text, files: m.cd.files.map((f) => ({ name: f.name, data: new Uint8Array(f.data) })), sub: m.cd.sub ? new Uint8Array(m.cd.sub) : null });
+              nes = new MML.Emu.PceConsole(new Uint8Array(m.rom), { region: (m.pce && m.pce.region) || 'auto', model: (m.pce && m.pce.model) || 'auto', pad: (m.pce && m.pce.pad) || 'pad2', cd: disc, cdType: (m.pce && m.pce.cdType) || 'scd' });
               info = MML.Emu.PceConsole.describe(nes);
             } else if (machine === 'cps3') {
               // CP システム III: BIOS、プログラム(SIMM1/2 の像)、波形と絵(SIMM3 以降の像)、ゲームの名前。主スレッドが CD から取り出して送る

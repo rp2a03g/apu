@@ -10728,6 +10728,9 @@
       if (!files || !files.length) return null;
       if (files.length === 1) return files[0];
       const ext = (fl) => fl.name.split('.').pop().toLowerCase();
+      // CD イメージ(.cue / .ccd とデータのファイル)は、目次の側を開く
+      const toc = files.find(fl => ext(fl) === 'cue') || files.find(fl => ext(fl) === 'ccd');
+      if (toc) return toc;
       return files.find(fl => ext(fl) !== 'psflib' && ext(fl) !== 'dmc') || files[0];
     }
     function makeFileListSiblingResolver(files) {
@@ -10759,6 +10762,24 @@
       // 再帰的に呼ばれた場合(opts.fromArchive)は通常のファイルとして扱う。
       if ((ext === 'zip' || ext === '7z' || ext === 'rar' || ext === 'rsn' || ext === 'lzh' || ext === 'lha') && !(opts && opts.fromArchive)) return openArchive(file);
       if (!(opts && opts.fromArchive)) clearArchive(); // 単体ファイルを開いたらアーカイブ曲リストは閉じる
+      // CD イメージ(.cue / .ccd): 一緒に選ばれたデータのファイルを集めて、ゲーム画面(PC エンジンの CD-ROM²)へ
+      if ((ext === 'cue' || ext === 'ccd') && MML.UI.NesScreen && MML.UI.NesScreen.openPceCd) {
+        const sib = Array.from((opts && opts.siblings) || []).filter(fl => fl !== file);
+        const dataFiles = sib.filter(fl => /\.(bin|img|iso|wav|raw)$/i.test(fl.name));
+        const stem = file.name.replace(/\.[^.]+$/, '').toLowerCase();
+        const subFile = sib.find(fl => fl.name.toLowerCase() === stem + '.sub') || (sib.filter(fl => /\.sub$/i.test(fl.name)).length === 1 ? sib.find(fl => /\.sub$/i.test(fl.name)) : null);
+        if (!dataFiles.length) { alert(T('CD のデータのファイルがありません。.cue(か .ccd)と、.bin / .img / .iso / .wav を一緒に選ぶか、まとめてドロップしてください。')); return false; }
+        try {
+          const set = { name: file.name, kind: ext, text: new TextDecoder('latin1').decode(await file.arrayBuffer()), files: [], sub: subFile ? new Uint8Array(await subFile.arrayBuffer()) : null };
+          for (const fl of dataFiles) set.files.push({ name: fl.name, data: new Uint8Array(await fl.arrayBuffer()) });
+          stopAllFormatPlayback();
+          await MML.UI.NesScreen.openPceCd(set);
+        } catch (e) {
+          alert(T('この CD は開けません: {msg}', { msg: e && e.message ? e.message : String(e) }));
+          return false;
+        }
+        return 'nes';
+      }
       if (ext === 'vgz') ext = 'vgm'; // gzip圧縮VGM(中身の判別はloadVgmFile側)
       if (ext === 'nsfe') ext = 'nsf'; // NSFe(チャンク形式のNSF拡張。素のNSFへの変換はloadNsfFile→MML.NSF.normalize)
       if (ext === 'minipsf') ext = 'psf'; // _lib を参照する小さな PSF(中身の形式は同じ)
