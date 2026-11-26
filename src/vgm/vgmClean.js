@@ -58,6 +58,8 @@
   VGM.captureFrameSamples = function (hdr) {
     if (hdr && hdr.rate === 50) return 882;
     if (hdr && hdr.usedChips && hdr.usedChips.length === 1 && hdr.usedChips[0].id === 'gb' && hdr.usedChips[0].clock > 0) return 70224 * 44100 / hdr.usedChips[0].clock;
+    // PC エンジンの録音(本ツールの物。規格外ブロック PCEX のヘッダに 1 画面の長さがある): 262 行で約 734.31、263 行で約 737.11 サンプル
+    if (hdr && hdr.pcex && hdr.pcex.frameClocks > 0) return hdr.pcex.frameClocks * 44100 / 21477270;
     return 735;
   };
   let SPF = 735; // 1 フレームのサンプル数(44100/60)。50Hz の録音(MSX の PAL モード、ヘッダ 0x24=50)は 882(cleanCapture が入口で決める)

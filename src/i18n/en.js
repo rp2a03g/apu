@@ -1833,7 +1833,7 @@
     '{title} の BIOS を控えました。続けてゲーム CD のイメージ(.bin)を入れてください': 'Stored the BIOS for {title}. Now drop the game CD image (.bin)',
     'CPS3 のゲーム CD として読めません': 'This cannot be read as a CPS3 game CD',
     '{title} の BIOS(0x80000 バイト)をこの窓へ入れてください。入れると始まります': 'Drop the BIOS for {title} (0x80000 bytes) onto this window; the game starts once it is in',
-    'PC エンジンの録音には、効果音/処理落ちの補正はまだ掛けられません': 'Sound-effect removal and slowdown correction are not available yet for PC Engine recordings',
+    'CD-ROM² の録音には、効果音/処理落ちの補正は掛けられません': 'Sound-effect removal and lag correction are not available for CD-ROM² recordings',
     'バーコードを読ませる': 'Scan a barcode',
     '数字 13 桁か 8 桁': '13 or 8 digits',
     '読ませる': 'Scan',

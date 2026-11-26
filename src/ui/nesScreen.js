@@ -2196,13 +2196,15 @@
       return;
     }
     if (machine === 'pce') {
-      // PC エンジン: 波形メモリ音源は VGM の正規チップ(0xB9)。効果音/処理落ちの補正(vgmClean.js)は PC エンジンの格子にまだ通していない(段階 9g)
+      // PC エンジン: 波形メモリ音源は VGM の正規チップ(0xB9)。HuCard の録音は効果音/処理落ちの補正(vgmClean.js)を掛けられる(1 画面の長さは VGM の PCEX ヘッダから)。
+      // CD-ROM² の録音は掛けない(ADPCM のブロックは時刻を動かせず、CD-DA は VGM に入っていないので、詰めるとずれる)
       const r = MML.VGM.encodePceRecording({ frames, name: (romName || 'PCE').replace(/\.(pce|sgx|cue|ccd)$/i, ''), creator: 'Sound Emulation Foundry (PCE)', cd: pceCd });
       recRaw = r.vgm; recVgm = r.vgm;
+      if (!pceCd) { recSfxChk.checked = !!cfg.sfxRemove; recLagChk.checked = !!cfg.lagFix; applyRecClean(); updateRecUi(); return; }
       updateRecUi();
       recSfxChk.parentNode.hidden = recLagChk.parentNode.hidden = true;
       recInfoEl.textContent = T('録音: {sec} 秒({frames} フレーム、{kb} KB)', { sec: (r.samples / 44100).toFixed(1), frames: r.frames, kb: (r.vgm.length / 1024).toFixed(1) });
-      recInfoEl.title = T('PC エンジンの録音には、効果音/処理落ちの補正はまだ掛けられません');
+      recInfoEl.title = T('CD-ROM² の録音には、効果音/処理落ちの補正は掛けられません');
       return;
     }
     if (machine === 'msx') {

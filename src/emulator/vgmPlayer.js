@@ -987,7 +987,7 @@
         }
       }
       if (h.msxx && h.msxx.dac && Emu.MajutsushiDAC) { const a = makeMsxDacAdapter(h.msxx); this.adapters.push(a); this.adapterById.msxdac = a; } // MSX の DAC(MSXX)
-      if (h.pcex) { // PC エンジン CD-ROM²(PCEX): 本体(pceConsole.js の mixGain)と同じく全体を 0.6 倍(PCE_CD_GAIN)。ADPCM があればその口を足す
+      if (h.pcex && (h.pcex.flags & 7)) { // PC エンジン CD-ROM²(PCEX。HuCard の録音にもヘッダは付くが、印が 0 なので何もしない): 本体(pceConsole.js の mixGain)と同じく全体を 0.6 倍(PCE_CD_GAIN)。ADPCM があればその口を足す
         const PCE_CD_GAIN = 0.6, huc = this.adapterById.huc6280; if (huc) huc.gain *= PCE_CD_GAIN;
         if (h.pcex.flags & 1) { const a = makePceAdpcmAdapter(); a.gain *= PCE_CD_GAIN; this.adapters.push(a); this.adapterById.pceadpcm = a; }
       } // PC エンジン CD-ROM² の ADPCM(PCEX)

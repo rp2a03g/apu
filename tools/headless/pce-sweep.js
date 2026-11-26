@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 /*
  * PC エンジンの総当たり点検(段階 9。nes-sweep.js / msx-sweep.js / gb-sweep.js の PCE 版)。
- * いまは HES(実ソフトの音楽ドライバ)だけ。ROM の総当たりは本体(9c)ができてから足す。
+ * HES(実ソフトの音楽ドライバ)と、HuCard の ROM(段階 9g)。
+ *
+ *   node tools/headless/pce-sweep.js --roms "<folder>" [--frames 1800] [--jobs 6] [--out result.jsonl] [--limit N]
+ *   node tools/headless/pce-sweep.js --roms-report result.jsonl      結果の読み直し(分類の表だけ出す)
+ * --roms: フォルダ(下の階層も)の .pce / .sgx を 1 本ずつ frames フレーム回す。3 秒おきに RUN、その間に I を押す(タイトルを抜けるため)。1 本ごとに JSON 1 行:
+ *   file、size、banks、sgx、error(例外)、stuck(1 画面ぶん回しても画面の区切りが来なかった最初のフレーム)、
+ *   colors(1/3・2/3・終わりの画面にある色の数)、writes(波形メモリ音源への書き込み回数)、sound(どれかの ch が音量つきで入っていたフレーム数)、pc、ms。
+ *   中身が HES(先頭 "HESM")の物は外す。終わりに分類(例外/止まった/一色/無音)の表を出す。終了コードは例外か止まった物があれば 1。
  *
  *   node tools/headless/pce-sweep.js --hes "<folder>" [--out result.jsonl] [--tracks 3] [--sec 10] [--save <dir>]
  *   node tools/headless/pce-sweep.js --compare base.jsonl new.jsonl [--seq baseDir newDir]
@@ -58,6 +65,78 @@ if (has('--compare')) {
   for (const r of rows.slice(0, 60)) console.log('  ' + r);
   if (rows.length > 60) console.log(`  …ほか ${rows.length - 60}`);
   process.exit(diff ? 1 : 0);
+}
+
+// ── ROM の総当たり ──
+function romReport(rows, frames) {
+  const err = rows.filter(r => r.error), stuck = rows.filter(r => !r.error && r.stuck >= 0);
+  const fine = rows.filter(r => !r.error && !(r.stuck >= 0));
+  const blank = fine.filter(r => r.colors.every(c => c <= 1)), blankEnd = fine.filter(r => r.colors[2] <= 1 && !r.colors.every(c => c <= 1));
+  const silent = fine.filter(r => r.writes === 0), mute = fine.filter(r => r.writes > 0 && r.sound === 0);
+  console.log(`\nROM ${rows.length} 本(${frames} フレーム): 例外 ${err.length}、止まった ${stuck.length}、ずっと一色 ${blank.length}、終わりだけ一色 ${blankEnd.length}、音源に一度も書かない ${silent.length}、書くが鳴らさない ${mute.length}`);
+  const show = (label, list, fmt) => { if (!list.length) return; console.log(label + ':'); for (const r of list.slice(0, 40)) console.log('  ' + r.file + (fmt ? '  ' + fmt(r) : '')); if (list.length > 40) console.log('  …ほか ' + (list.length - 40)); };
+  show('例外', err, r => r.error);
+  show('止まった', stuck, r => 'フレーム ' + r.stuck + ' pc $' + (r.pc || 0).toString(16));
+  show('ずっと一色', blank, r => 'pc $' + (r.pc || 0).toString(16) + ' 書き込み ' + r.writes + ' ' + (r.size >> 10) + 'K');
+  show('終わりだけ一色', blankEnd, r => '色 ' + r.colors.join('/'));
+  show('音源に一度も書かない', silent.filter(r => !blank.includes(r)), r => '色 ' + r.colors.join('/'));
+  show('書くが鳴らさない', mute, r => '書き込み ' + r.writes);
+  return err.length + stuck.length;
+}
+if (has('--roms-report')) {
+  const rows = fs.readFileSync(arg('--roms-report', ''), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
+  process.exit(romReport(rows, rows.length ? rows[0].frames : 0) ? 1 : 0);
+}
+if (has('--rom-batch')) { // 子: 一覧のファイルを順に回して 1 本 1 行
+  const { load, readBytes } = require('./load'); const E = load({ strict: true }).MML.Emu;
+  const frames = parseInt(arg('--frames', '1800'), 10);
+  for (const file of fs.readFileSync(arg('--rom-batch', ''), 'utf8').split('\n').filter(Boolean)) {
+    const o = { file: path.basename(file), frames, colors: [0, 0, 0], writes: 0, sound: 0, stuck: -1 };
+    const t0 = Date.now();
+    try {
+      const bytes = readBytes(file); o.size = bytes.length;
+      const pce = new E.PceConsole(bytes, { model: /\.sgx$/i.test(file) ? 'sgx' : 'auto' });
+      o.banks = pce.card.banks; o.sgx = !!pce.sgx;
+      pce.onWrite = () => { o.writes++; };
+      const seen = new Uint8Array(1024);
+      for (let fr = 0; fr < frames; fr++) {
+        const k = fr % 180; pce.setController(0, (k >= 120 && k < 126 ? 8 : 0) | (k >= 30 && k < 34 ? 1 : 0));
+        pce._frameFlag = false; let guard = 0;
+        while (!pce._frameFlag && ++guard < 600000) pce.cpu.step();
+        if (!pce._frameFlag) { o.stuck = fr; break; }
+        const ch = pce.apu.ch; for (let i = 0; i < 6; i++) if ((ch[i].control & 0x80) && (ch[i].control & 0x1F)) { o.sound++; break; }
+        const at = fr + 1 === Math.floor(frames / 3) ? 0 : fr + 1 === Math.floor(frames * 2 / 3) ? 1 : fr + 1 === frames ? 2 : -1;
+        if (at >= 0) { seen.fill(0); const idx = pce.frameIdx; let n = 0; for (let i = 0; i < idx.length; i += 3) if (!seen[idx[i]]) { seen[idx[i]] = 1; n++; } o.colors[at] = n; }
+      }
+      o.pc = pce.cpu.PC;
+    } catch (e) { o.error = String(e && e.message || e).slice(0, 160); }
+    o.ms = Date.now() - t0;
+    console.log(JSON.stringify(o));
+  }
+  process.exit(0);
+}
+if (has('--roms')) {
+  const dir = arg('--roms', null);
+  if (!dir || !fs.existsSync(dir)) { console.error('usage: node tools/headless/pce-sweep.js --roms "<folder>" [--frames 1800] [--jobs 6] [--out result.jsonl]'); process.exit(2); }
+  const isHes = (p) => { const fd = fs.openSync(p, 'r'), b = Buffer.alloc(4); fs.readSync(fd, b, 0, 4, 0); fs.closeSync(fd); return b.toString('latin1') === 'HESM'; };
+  let files = walk(dir, /\.(pce|sgx)$/i, []).sort();
+  const n0 = files.length; files = files.filter(p => !isHes(p)); const hesN = n0 - files.length;
+  const limit = parseInt(arg('--limit', '0'), 10); if (limit) files = files.slice(0, limit);
+  const frames = arg('--frames', '1800'), jobs = Math.max(1, parseInt(arg('--jobs', '6'), 10)), outFile = arg('--out', null);
+  console.log(`ROM ${files.length} 本(中身が HES の ${hesN} 本は外した)、${frames} フレーム、${jobs} 並列`);
+  const os = require('os'), { spawn } = require('child_process');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pce-sweep-'));
+  const rows = []; let left = jobs;
+  if (outFile) fs.writeFileSync(outFile, '');
+  for (let j = 0; j < jobs; j++) {
+    const list = path.join(tmp, 'list' + j + '.txt');
+    fs.writeFileSync(list, files.filter((_, i) => i % jobs === j).join('\n'));
+    const ch = spawn(process.execPath, [__filename, '--rom-batch', list, '--frames', frames], { stdio: ['ignore', 'pipe', 'inherit'] });
+    let buf = '';
+    ch.stdout.on('data', (d) => { buf += d; let p; while ((p = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, p); buf = buf.slice(p + 1); if (!line.trim()) continue; const o = JSON.parse(line); rows.push(o); if (outFile) fs.appendFileSync(outFile, line + '\n'); if (rows.length % 50 === 0) process.stderr.write(rows.length + '/' + files.length + '\n'); } });
+    ch.on('close', () => { if (--left === 0) { fs.rmSync(tmp, { recursive: true, force: true }); rows.sort((a, b) => a.file < b.file ? -1 : 1); process.exit(romReport(rows, +frames) ? 1 : 0); } });
+  }
+  return;
 }
 
 const folder = arg('--hes', null);

@@ -393,7 +393,11 @@
     let run = null, adpcmN = 0, cdOps = 0; // run = { rate, t(通算の時刻), next(次の 1 個が来るはずの時刻), data }
     const flushRun = () => { if (!run) return; flushWait(toSample(run.t)); pcex(PX.KIND_ADPCM, [run.rate].concat(run.data)); run = null; };
     const isCd = !!rec.cd || frames.some((l) => l && l.some((w) => w.adpcm !== undefined || w.cd !== undefined));
-    if (isCd) pcex(PX.KIND_HEADER, [(frames.some((l) => l && l.some((w) => w.adpcm !== undefined)) ? PX.FLAG_ADPCM : 0) | (frames.some((l) => l && l.some((w) => w.cd !== undefined)) ? PX.FLAG_CDDA : 0)]);
+    // ヘッダ(HuCard の録音にも付ける): 印と、1 画面の長さ(一番多かった長さ。262 行と 263 行で違う。録音の補正がフレームの格子に使う)
+    const lenOf = (l) => { const t = l && l.length ? l[l.length - 1] : null; return l && l.len > 0 ? l.len : (t && t.len > 0 ? t.len : 0); };
+    const tally = new Map(); for (const l of frames) { const n = lenOf(l); if (n) tally.set(n, (tally.get(n) || 0) + 1); }
+    let frameClocks = PCE_FRAME, best = 0; for (const [n, c] of tally) if (c > best) { best = c; frameClocks = n; }
+    pcex(PX.KIND_HEADER, [(isCd ? PX.FLAG_CD : 0) | (frames.some((l) => l && l.some((w) => w.adpcm !== undefined)) ? PX.FLAG_ADPCM : 0) | (frames.some((l) => l && l.some((w) => w.cd !== undefined)) ? PX.FLAG_CDDA : 0), ...u32(frameClocks)]);
     for (let f = 0; f < frames.length; f++) {
       const list = frames[f] || [];
       const tail = list.length ? list[list.length - 1] : null;
@@ -440,7 +444,7 @@
     hdr.set(u32(PCE_CHIP_CLOCK), 0xA4);
     const vgm = new Uint8Array(size);
     vgm.set(hdr, 0); vgm.set(body, HEADER_SIZE); vgm.set(gd3, HEADER_SIZE + body.length);
-    return { vgm, frames: frames.length, dropped, writes, samples: total, clock: PCE_CHIP_CLOCK, adpcm: adpcmN, cdOps };
+    return { vgm, frames: frames.length, dropped, writes, samples: total, clock: PCE_CHIP_CLOCK, adpcm: adpcmN, cdOps, frameClocks, cd: isCd };
   };
 
   /*
