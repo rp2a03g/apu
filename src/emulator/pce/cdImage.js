@@ -96,6 +96,10 @@
         const fileIndex = disc.files.length;
         disc.files.push({ name: cf.name, data, base });
         const origin = disc.tracks.length ? disc.tracks[disc.tracks.length - 1].last + 1 : 0;
+        // ★ PREGAP の合計はファイルごとに数え直す。前のファイルまでの前置きは origin(前のトラックの終わりの次)にもう入っているので、
+        //   合計を持ち越すと 2 回数える(Mesen の今のソースは持ち越す。bin 1 個の cue では差が出ない)。
+        //   [試験] bin 1 個のディスクをトラックごとのファイルに分けた cue で、各トラックの始まりが元と同じになる事(持ち越すと 3 トラック目から 225 セクタずつずれた)
+        pregapTotal = 0;
         for (const ct of cf.tracks) {
           let sectorSize = 2352, audio = false, raw = false;
           if (ct.format === 'AUDIO') audio = true;

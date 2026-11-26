@@ -10774,6 +10774,22 @@
       // 再帰的に呼ばれた場合(opts.fromArchive)は通常のファイルとして扱う。
       if ((ext === 'zip' || ext === '7z' || ext === 'rar' || ext === 'rsn' || ext === 'lzh' || ext === 'lha') && !(opts && opts.fromArchive)) return openArchive(file);
       if (!(opts && opts.fromArchive)) clearArchive(); // 単体ファイルを開いたらアーカイブ曲リストは閉じる
+      // CD イメージ(.chd): 全部展開して「bin 1 個+cue」の形にしてから、下の .cue と同じ所へ(数百 MB の展開に 10〜40 秒かかるので進み具合を出す)
+      if (ext === 'chd' && MML.Emu.Chd && MML.UI.NesScreen && MML.UI.NesScreen.openPceCd) {
+        const note = (r) => { if (MML.UI.NesScreen.busy) MML.UI.NesScreen.busy(T('CHD を展開しています… {pct}%', { pct: Math.floor(r * 100) })); };
+        try {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          stopAllFormatPlayback();
+          note(0);
+          const set = await MML.Emu.Chd.toCdSet(bytes, note);
+          set.name = file.name;
+          await MML.UI.NesScreen.openPceCd(set);
+        } catch (e) {
+          alert(T('この CD は開けません: {msg}', { msg: e && e.message ? e.message : String(e) }));
+          return false;
+        }
+        return 'nes';
+      }
       // CD イメージ(.cue / .ccd): 一緒に選ばれたデータのファイルを集めて、ゲーム画面(PC エンジンの CD-ROM²)へ
       if ((ext === 'cue' || ext === 'ccd') && MML.UI.NesScreen && MML.UI.NesScreen.openPceCd) {
         const sib = Array.from((opts && opts.siblings) || []).filter(fl => fl !== file);

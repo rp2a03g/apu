@@ -2698,6 +2698,8 @@
     // CD-ROM² を開く(main.js が .cue / .ccd と一緒に選ばれたファイルを集めて渡す)
     openPceCd(set) { const p = openChain.then(() => openPceCd(set)); openChain = p.catch(() => {}); return p; },
     decodeCdAudio,
+    // 開く前の重い下ごしらえ(CHD の展開など)の進み具合を、ゲーム画面の窓の状態欄に出す
+    busy(text) { if (!ensureDom()) return; win.style.display = 'flex'; if (flashTimer) { clearTimeout(flashTimer); flashTimer = 0; } if (statusEl) statusEl.textContent = text; },
     _debug: { setDiskDir: (h) => { diskDirHandle = h; updateDiskBadge(); }, injectBattery: (blob) => handleBatteryBlob(blob), diskImage: (i) => currentDiskImage(i), dirty: () => Array.from(diskDirty), writeBack: () => writeBackDirty() },
     // 複数の画像をひとまとめに開く(zip の中のディスク組など): MSX の .dsk は全部同じドライブの組にして [disk] で選ぶ、
     // FDS の .fds が複数なら面を順に並べて 1 本に、それ以外は最初の 1 本
