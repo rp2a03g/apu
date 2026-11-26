@@ -6529,6 +6529,18 @@
 
   // --- 聴音: 鼻歌・楽器の単音 → MML(src/ui/dictationPanel.js、作業計画フェーズ4) ---
   // マイクは押されたときだけ開く。結果は recordPanel と同じ結果ダイアログ方式で、挿入前に必ず確認する。
+  MML.UI.MixDictation.init({
+    getAudioCtx: () => {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      return audioCtx;
+    },
+    getEditor: () => mmlSourceEl,
+    getMmlTempo: currentMmlTempo,
+    getUsedLetters: () => {
+      try { return Object.keys(MML.Mml.splitChannels(mmlSourceEl.value).channels); }
+      catch (e) { return []; }
+    }
+  });
   MML.UI.DictationPanel.init({
     toggleEl:    document.getElementById('btnDictation'),
     getAudioCtx: () => {

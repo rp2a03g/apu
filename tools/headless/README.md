@@ -22,6 +22,8 @@ export PATH="$PATH:/path/to/nodejs"
 |---|---|
 | `load.js` | `index.html` の script を順に読み込む。単体実行で読み込みレポート |
 | `shim.js` | 最小のDOM/AudioContext/Workerシム。UIコードが読み込み時に落ちないための張りぼて |
+| `wav2mml-bench.js` | 混ざった音の採譜(`src/input/polyTranscribe.js`)の回帰。`compose/` の 2A03 曲を鳴らした音だけから音符を拾い、正解(`compile().noteList`)と突き合わせる。基準値はファイル冒頭、3 ポイント落ちたら失敗。`--set threshold=0.5` でしきい値を変えて比べる、`--mml` で採譜結果も表示 |
+| `wav2mml.js` | 混ざった音 → MML の CLI。`<曲.wav>` 1 本なら 旋律→A / 2 声目→B / 低音→C / 打点→D。`--bass-stem` `--other-stem` `--drums-stem` `--vocals-stem` で外のツールが分けたステムを渡す |
 | `convert.js` | 変換API + CLI(NSF/SPC/KSS/GBS/HES/VGM/PSF、zip/7z/gzip内も可。PSFの `_lib` は同じzip/フォルダから引く) |
 | `nes-run.js` | 自前 NES エミュレータ(`src/emulator/nes/`)をヘッドレスで回して画面を PNG に書く。`--press "start:400-410,right:500-900"` でボタン、`--png-every` で途中の画面、`--audio` で WAV、`--vgm` で音源レジスタの録音(本体の ● と同じ経路)。.fds は `--bios disksys.rom`(または環境変数 FDS_BIOS)と、必要なら `--disk 1:900`(そのフレームで取り出し、90 フレーム後に B 面)。`--battery save.bin` でセーブ RAM(バッテリ/FDS 全面)を読んで始め、終わりに書く。Mesen の `tools/mesen/ref-screenshot.lua` と同じフレームの画面を比べる |
 | `gb-run.js` | 自前ゲームボーイエミュレータ(`src/emulator/gb/`、DESIGN-GB-CAPTURE.md)をヘッドレスで回す。`--selftest` で自作テスト ROM(`mk-gb-test-rom.js`)を全 MBC で通す。`--serial` / `--expect-serial Passed`(blargg)/ `--mooneye` でテスト ROM の合否、`--press` `--png` `--audio` `--dump` は nes-run.js と同じ |

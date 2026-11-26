@@ -675,6 +675,20 @@
     secFile.appendChild(fRow);
     pop.appendChild(secFile);
 
+    // 伴奏入りの曲・分けたステム(複数可)は別のダイアログ(src/ui/mixDictationPanel.js)へ渡す
+    if (UI.MixDictation) {
+      const secMix = section(T('曲(伴奏入り)から'));
+      const mRow = el('div', 'metro-row');
+      const mixBtn = el('button', 'dict-small', T('ファイルを選ぶ…')); mixBtn.type = 'button';
+      const mixInp = document.createElement('input'); mixInp.type = 'file'; mixInp.multiple = true; mixInp.accept = 'audio/*,.wav,.mp3,.m4a,.ogg,.flac,.webm'; mixInp.hidden = true;
+      mixInp.addEventListener('change', () => { if (mixInp.files && mixInp.files.length) { const fs = Array.prototype.slice.call(mixInp.files); closePopover(); UI.MixDictation.openFiles(fs); } });
+      mixBtn.addEventListener('click', () => mixInp.click());
+      mRow.appendChild(mixBtn); mRow.appendChild(mixInp);
+      mRow.appendChild(el('span', 'rec-note', T('旋律・低音・打点に分けて採譜(複数選ぶとステム扱い)')));
+      secMix.appendChild(mRow);
+      pop.appendChild(secMix);
+    }
+
     // ドロップでも読める
     pop.addEventListener('dragover', (e) => { e.preventDefault(); });
     pop.addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) loadFile(f); });

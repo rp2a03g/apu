@@ -3517,6 +3517,10 @@ details.nes-cfg-note > summary { cursor: pointer; }
 .dict-rec { padding: 6px 14px; font-weight: 600; border-radius: 4px; }
 .dict-rec.is-recording { color: var(--error); border-color: var(--error); animation: rec-blink 1s steps(2, start) infinite; }
 .dict-small { font-size: 11px; padding: 2px 8px; }
+/* 曲の採譜(mixDictationPanel.js): ファイルと役割の一覧 */
+.mixd-sources { max-height: 9.5em; overflow-y: auto; }
+.mixd-sources .metro-row { gap: 6px; }
+.mixd-sources select { flex: none; max-width: 150px; }
 .dict-modal { width: min(760px, 96vw); }
 .dict-body { overflow-y: auto; }
 .dict-cols { display: flex; gap: 16px; flex-wrap: wrap; }
