@@ -1833,7 +1833,9 @@
     '2 ボタン': '2-button',
     '6 ボタン': '6-button',
     'マルチタップ(2 ボタン × 5)': 'Multitap (five 2-button pads)',
-    '次に開くソフトから効きます。6 ボタンパッドの III〜VI のキーは下で変えられます(ゲームパッドへの割り当てはまだできません)。マルチタップの 2 番は 2 つ目のゲームパッドです。': 'Takes effect from the next game you open. The keys for buttons III–VI of the 6-button pad can be changed below (gamepad assignment is not available yet). Multitap pad 2 is the second gamepad.',
+    '次に開くソフトから効きます。6 ボタンパッドの III〜VI のキーとゲームパッドのボタンは下で変えられます。': 'Takes effect from the next game you open. The keys and gamepad buttons for buttons III–VI of the 6-button pad can be changed below.',
+    'ゲームパッド(6 ボタンパッドの III〜VI)': 'Gamepad (buttons III–VI of the 6-button pad)',
+    'I・II・SELECT・RUN は「共通」のタブのゲームパッドの表(A・B・Select・Start)と同じです。マルチタップは、つながっているゲームパッドが順に 1〜5 番になります(キーボードは 1 番)。': 'I, II, SELECT and RUN use the gamepad table in the Common tab (A, B, Select, Start). With the multitap, connected gamepads become pads 1–5 in order (the keyboard is pad 1).',
     'キーボード(6 ボタンパッドの III〜VI)': 'Keyboard (buttons III–VI of the 6-button pad)',
     'I・II・SELECT・RUN と十字は「ファミコン / FDS」のタブの A・B・Select・Start・上下左右と同じキーです。': 'I, II, SELECT, RUN and the D-pad use the same keys as A, B, Select, Start and the directions in the Famicom / FDS tab.',
     // ---- ゲーム画面の CPS3 対応(DESIGN-CPS3-CAPTURE.md §10)----

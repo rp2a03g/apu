@@ -69,7 +69,7 @@
             } else if (machine === 'pce') {
               // CD-ROM²: m.cd = { kind, text, files: [{ name, data(ArrayBuffer) }], sub }。rom はシステムカード
               let disc = null;
-              if (m.cd) disc = MML.Emu.PceDisc.fromSet({ kind: m.cd.kind, text: m.cd.text, files: m.cd.files.map((f) => ({ name: f.name, data: new Uint8Array(f.data) })), sub: m.cd.sub ? new Uint8Array(m.cd.sub) : null });
+              if (m.cd) disc = MML.Emu.PceDisc.fromSet({ kind: m.cd.kind, text: m.cd.text, files: m.cd.files.map((f) => ({ name: f.name, data: new Uint8Array(f.data) })), sub: m.cd.sub ? new Uint8Array(m.cd.sub) : null, names: m.cd.names || null });
               nes = new MML.Emu.PceConsole(new Uint8Array(m.rom), { region: (m.pce && m.pce.region) || 'auto', model: (m.pce && m.pce.model) || 'auto', pad: (m.pce && m.pce.pad) || 'pad2', cd: disc, cdType: (m.pce && m.pce.cdType) || 'scd' });
               info = MML.Emu.PceConsole.describe(nes);
             } else if (machine === 'cps3') {

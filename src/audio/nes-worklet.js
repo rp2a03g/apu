@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-26 14:53:17
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 17:05:38
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 14:53:17';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 17:05:38';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -22193,7 +22193,7 @@
     }
 
     /**
-     * 一緒に選ばれたファイルの組からディスクを作る。set = { text(cue か ccd の中身), kind 'cue' | 'ccd', files: [{ name, data(Uint8Array) }], sub(Uint8Array、任意) }
+     * 一緒に選ばれたファイルの組からディスクを作る。set = { text(cue か ccd の中身), kind 'cue' | 'ccd', files: [{ name, data(Uint8Array) }], sub(Uint8Array、任意), names(一緒に選ばれた全ファイルの名前、任意。案内に使う) }
      * cue の FILE の名前は当てにならない(別の文字コードや、作った人の PC の絶対パスのことがある)ので、
      * 「名前(フォルダを除く、大文字小文字を無視)が同じ物 → FILE が 1 つでデータのファイルも 1 つならそれ → 並び順」で探す
      */
@@ -22210,6 +22210,8 @@
         disc = PceDisc.fromCue(set.text, (name, type, index) => {
           if (type === 'MP3' || /\.(mp3|ogg|flac|ape)$/i.test(name)) throw new Error('cue: 圧縮された音声(' + base(name) + ')のトラックは読めません');
           const hit = files.find(f => base(f.name) === base(name)) || (total === 1 && files.length === 1 ? files[0] : null) || (files.length === total ? files[index] : null);
+          // 一緒に選ばれた物の中に、同じ名前の圧縮された音声(.mp3 など)がある時は、そう知らせる(cue は .wav を指しているのに実物は .mp3、という配り方がある)
+          if (!hit) { const stem = base(name).replace(/\.[^.]+$/, ''); const z = (set.names || []).find(n => base(n).replace(/\.[^.]+$/, '') === stem && /\.(mp3|ogg|flac|ape|m4a)$/i.test(n)); if (z) throw new Error('cue: 圧縮された音声(' + base(z) + ')のトラックは読めません(元の音声の .wav か、音声ごと 1 つになった .bin が要ります)'); }
           return hit ? hit.data : null;
         }, opts);
       }
@@ -32824,7 +32826,7 @@
             } else if (machine === 'pce') {
               // CD-ROM²: m.cd = { kind, text, files: [{ name, data(ArrayBuffer) }], sub }。rom はシステムカード
               let disc = null;
-              if (m.cd) disc = MML.Emu.PceDisc.fromSet({ kind: m.cd.kind, text: m.cd.text, files: m.cd.files.map((f) => ({ name: f.name, data: new Uint8Array(f.data) })), sub: m.cd.sub ? new Uint8Array(m.cd.sub) : null });
+              if (m.cd) disc = MML.Emu.PceDisc.fromSet({ kind: m.cd.kind, text: m.cd.text, files: m.cd.files.map((f) => ({ name: f.name, data: new Uint8Array(f.data) })), sub: m.cd.sub ? new Uint8Array(m.cd.sub) : null, names: m.cd.names || null });
               nes = new MML.Emu.PceConsole(new Uint8Array(m.rom), { region: (m.pce && m.pce.region) || 'auto', model: (m.pce && m.pce.model) || 'auto', pad: (m.pce && m.pce.pad) || 'pad2', cd: disc, cdType: (m.pce && m.pce.cdType) || 'scd' });
               info = MML.Emu.PceConsole.describe(nes);
             } else if (machine === 'cps3') {

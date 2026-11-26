@@ -10782,7 +10782,7 @@
         const subFile = sib.find(fl => fl.name.toLowerCase() === stem + '.sub') || (sib.filter(fl => /\.sub$/i.test(fl.name)).length === 1 ? sib.find(fl => /\.sub$/i.test(fl.name)) : null);
         if (!dataFiles.length) { alert(T('CD のデータのファイルがありません。.cue(か .ccd)と、.bin / .img / .iso / .wav を一緒に選ぶか、まとめてドロップしてください。')); return false; }
         try {
-          const set = { name: file.name, kind: ext, text: new TextDecoder('latin1').decode(await file.arrayBuffer()), files: [], sub: subFile ? new Uint8Array(await subFile.arrayBuffer()) : null };
+          const set = { name: file.name, kind: ext, text: new TextDecoder('latin1').decode(await file.arrayBuffer()), files: [], sub: subFile ? new Uint8Array(await subFile.arrayBuffer()) : null, names: sib.map(fl => fl.name) };
           for (const fl of dataFiles) set.files.push({ name: fl.name, data: new Uint8Array(await fl.arrayBuffer()) });
           stopAllFormatPlayback();
           await MML.UI.NesScreen.openPceCd(set);

@@ -104,8 +104,9 @@
   const PCE_MODELS = ['auto', 'pce', 'sgx'], PCE_PADS = ['pad2', 'pad6', 'tap'];
   // 6 ボタンパッドの III〜VI(ビットは pceConsole.setController の bit8-11)。キーは設定(cfg.pce.keys)で変えられる。既定は D F G H
   const PCE_KEY_ACTIONS = ['Pce3', 'Pce4', 'Pce5', 'Pce6'], PCE_KEY_BITS = { Pce3: 0x100, Pce4: 0x200, Pce5: 0x400, Pce6: 0x800 }, PCE_KEY_DEFAULT = { Pce3: 'KeyD', Pce4: 'KeyF', Pce5: 'KeyG', Pce6: 'KeyH' };
+  const PCE_PAD_DEFAULT = { Pce3: 6, Pce4: 7, Pce5: 10, Pce6: 11 }; // ゲームパッドのボタン番号(既定は、共通の表が使っていない LT / RT / 左右スティックの押し込み)
   function pceExtraBit(code) { const k = pceCfg().keys; for (const a of PCE_KEY_ACTIONS) if (k[a] && k[a] === code) return PCE_KEY_BITS[a]; return 0; }
-  function loadPceCfg(c) { c = c && typeof c === 'object' ? c : {}; return { model: PCE_MODELS.includes(c.model) ? c.model : 'auto', pad: PCE_PADS.includes(c.pad) ? c.pad : 'pad2', cd: ['acd', 'scd', 'cd'].includes(c.cd) ? c.cd : 'acd', keys: Object.assign({}, PCE_KEY_DEFAULT, c.keys && typeof c.keys === 'object' ? c.keys : null) }; }
+  function loadPceCfg(c) { c = c && typeof c === 'object' ? c : {}; return { model: PCE_MODELS.includes(c.model) ? c.model : 'auto', pad: PCE_PADS.includes(c.pad) ? c.pad : 'pad2', cd: ['acd', 'scd', 'cd'].includes(c.cd) ? c.cd : 'acd', keys: Object.assign({}, PCE_KEY_DEFAULT, c.keys && typeof c.keys === 'object' ? c.keys : null), padBtn: Object.assign({}, PCE_PAD_DEFAULT, c.padBtn && typeof c.padBtn === 'object' ? c.padBtn : null) }; }
   function pceCfg() { if (!cfg.pce) cfg.pce = loadPceCfg(null); return cfg.pce; }
   function loadCps3Cfg(c) {
     c = c && typeof c === 'object' ? c : {};
@@ -1362,7 +1363,7 @@
         s.addEventListener('change', () => { pc.cd = s.value; saveCfg(); });
         sc.appendChild(r); }
       biosNote(sc, T('CD のソフトの起動にシステムカード(.pce)が要ります。このブラウザに控えて次回も使います。CD は .cue(か .ccd)とデータのファイル(.bin / .img / .iso / .wav)を一緒に選ぶか、まとめてドロップしてください。圧縮された音声(MP3 など)のトラックは読めません。'));
-      note(sp, T('次に開くソフトから効きます。6 ボタンパッドの III〜VI のキーは下で変えられます(ゲームパッドへの割り当てはまだできません)。マルチタップの 2 番は 2 つ目のゲームパッドです。'));
+      note(sp, T('次に開くソフトから効きます。6 ボタンパッドの III〜VI のキーとゲームパッドのボタンは下で変えられます。'));
     }
     const sg = sec(T('本体'), 'gb');
     { const { r, s } = selRow(T('機種'));
@@ -1471,6 +1472,9 @@
     // ── PC エンジン: 6 ボタンパッドの III〜VI(I・II・SELECT・RUN・十字は「ファミコン / FDS」のタブの A・B・Select・Start・上下左右と共通)──
     const s2p = sec(T('キーボード(6 ボタンパッドの III〜VI)'), 'pce');
     keyTable(s2p, PCE_KEY_ACTIONS, () => pceCfg().keys, 'pce');
+    { const s3p = sec(T('ゲームパッド(6 ボタンパッドの III〜VI)'), 'pce');
+      padTable(s3p, PCE_KEY_ACTIONS, () => pceCfg().padBtn, 'pce');
+      note(s3p, T('I・II・SELECT・RUN は「共通」のタブのゲームパッドの表(A・B・Select・Start)と同じです。マルチタップは、つながっているゲームパッドが順に 1〜5 番になります(キーボードは 1 番)。')); }
     note(s2p, T('I・II・SELECT・RUN と十字は「ファミコン / FDS」のタブの A・B・Select・Start・上下左右と同じキーです。'));
     // ── CPS3: キーボード、ゲームパッド、BIOS ──
     const s2c = sec(T('キーボード(1P)'), 'cps3');
@@ -1617,7 +1621,9 @@
   // ── 入力 ──
   // ゲームパッド: つながっている順に 1P(キーボードと合成)、2P。戻り値は [[1P のビット, 連射ビット, 操作の集合], [2P ...]]
   function gamepadBits() {
-    const out = [[0, 0, 0], [0, 0, 0]];
+    // PC エンジンのマルチタップは 5 人まで(つながっている順に 1〜5 番)。ほかは 2 人まで
+    const pce6 = machine === 'pce' && pceCfg().pad === 'pad6', maxPads = (machine === 'pce' && pceCfg().pad === 'tap') ? 5 : 2;
+    const out = []; for (let i = 0; i < Math.max(2, maxPads); i++) out.push([0, 0, 0]);
     let n = 0;
     const pads = (navigator.getGamepads && navigator.getGamepads()) || [];
     for (const gp of pads) {
@@ -1630,15 +1636,17 @@
         const op = PAD_OPS.indexOf(a);
         if (op >= 0) acts |= 1 << op; else if (cps) bits |= CPS3_BITS[a]; else if (a === 'TurboA') turbo |= 1; else if (a === 'TurboB') turbo |= 2; else bits |= PAD_BITS[a];
       }
+      if (pce6) { const pm = pceCfg().padBtn; for (const a of PCE_KEY_ACTIONS) if (on(pm[a])) bits |= PCE_KEY_BITS[a]; } // 6 ボタンパッドの III〜VI
       if (on(12)) bits |= 16; if (on(13)) bits |= 32; if (on(14)) bits |= 64; if (on(15)) bits |= 128;
       const ax = gp.axes[0] || 0, ay = gp.axes[1] || 0;
       if (ax < -0.5) bits |= 64; if (ax > 0.5) bits |= 128; if (ay < -0.5) bits |= 16; if (ay > 0.5) bits |= 32;
       out[n][0] = bits; out[n][1] = turbo; out[n][2] = acts; n++;
-      if (n >= 2) break;
+      if (n >= maxPads) break;
     }
     return out;
   }
   let lastPad2 = -1, lastPadActs = 0, padFF = false;
+  const lastPadN = [0, 0, 0, 0, 0]; // マルチタップの 3〜5 番(添字 2〜4)に最後に送った値
   // cps3Bits: CPS3 のキーボードの入力(CPS3_BITS の並び。8bit を超えるので他の機種の keyBits とは別に持つ)
   let pceBits = 0; // PC エンジンの 6 ボタンパッドの III〜VI(bit8-11)
   let cps3Bits = 0, cps3TestBtn = null, cps3Gfx = null, cps3Title = '', pendingCps3 = null;
@@ -1652,8 +1660,9 @@
     const k1 = bits | (turbo << 16), k2 = gp[1][0] | (gp[1][1] << 16); // CPS3 は bits が 8bit を超える(ショット 3〜6、テスト、サービス)
     if (k1 !== lastPad) { lastPad = k1; sendPad(0, bits, turbo); }
     if (k2 !== lastPad2) { lastPad2 = k2; sendPad(1, gp[1][0], gp[1][1]); }
+    for (let i = 2; i < gp.length; i++) { const k = gp[i][0] | (gp[i][1] << 16); if (k !== lastPadN[i]) { lastPadN[i] = k; sendPad(i, gp[i][0], gp[i][1]); } } // マルチタップの 3〜5 番
     // パッドの操作(早送り/巻き戻し=押している間、一時停止/状態保存/読込=押した瞬間)。どちらのパッドでも
-    const acts = gp[0][2] | gp[1][2];
+    let acts = 0; for (const g of gp) acts |= g[2];
     if (acts !== lastPadActs) {
       const down = acts & ~lastPadActs, up = lastPadActs & ~acts;
       lastPadActs = acts;
@@ -2484,7 +2493,7 @@
     const rom = bytes.slice().buffer;
     const bat = battery ? battery.slice().buffer : null;
     // CD のデータは写さずに渡す(数百 MB ある)。Worklet が使えなかった時は渡っていないので、probe がそのまま主スレッドで動く
-    const cdMsg = cdSet ? { kind: cdSet.kind, text: cdSet.text, files: cdSet.files.map((f) => ({ name: f.name, data: f.data.buffer })), sub: cdSet.sub ? cdSet.sub.buffer : null } : null;
+    const cdMsg = cdSet ? { kind: cdSet.kind, text: cdSet.text, files: cdSet.files.map((f) => ({ name: f.name, data: f.data.buffer })), sub: cdSet.sub ? cdSet.sub.buffer : null, names: cdSet.names || null } : null;
     const cdBufs = cdMsg ? cdMsg.files.map((f) => f.data).concat(cdMsg.sub ? [cdMsg.sub] : []) : [];
     const ok = await startWorklet({ type: 'load', machine: 'pce', rom, battery: bat, pce: pceOpts, cd: cdMsg }, [rom, bat].concat(cdBufs).filter(Boolean));
     if (!ok) { nes = probe; rewindBuf = MML.Emu.PceRewind ? new MML.Emu.PceRewind(nes) : null; lastPad = -1; lastPad2 = -1; mainFrames = 0; nes.setTurboRate(cfg.turboRate); startMain(); }
