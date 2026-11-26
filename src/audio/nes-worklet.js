@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-26 10:04:16
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 11:43:23
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 10:04:16';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 11:43:23';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -22995,11 +22995,151 @@
 })(typeof window !== 'undefined' ? window : globalThis);
 
 /*
+ * アーケードカード(RAM 2MB+番地を自動で進める口 4 個+32bit のシフト/回転レジスタ)
+ * MML.Emu.PceArcadeCard(段階 9f)
+ *
+ * 見え方:
+ *   バンク $40-$43 のどこを読み書きしても、口 0-3 のデータの読み書きになる(番地は見ない)。
+ *   I/O $1A00-$1A7F: 口のレジスタ。bit4-5 = 口の番号、下位 4bit = レジスタ($1A40-$1A7F は $1A00-$1A3F の鏡像)
+ *     $0/$1 データ   $2-$4 基準番地(24bit)   $5/$6 オフセット(16bit)   $7/$8 増分(16bit)   $9 制御   $A 書くと「オフセットを基準に足す」(制御しだい)
+ *     制御: bit0 読み書きのたびに進める、bit1 番地にオフセットを足す、bit3 オフセットを負の向きに扱う、bit4 進める先(1 = 基準、0 = オフセット)、
+ *           bit5-6 「オフセットを基準に足す」きっかけ(1 = オフセット下位を書いた時、2 = 上位を書いた時、3 = $A を書いた時)
+ *   I/O $1AE0-$1AE3: 32bit の値、$1AE4: シフト(書くと値を動かす)、$1AE5: 回転、$1AFE/$1AFF: 版と印($10 $51)
+ *
+ * 根拠の札(DESIGN-PCE-CAPTURE.md §2.3)。[参照] は Mesen 2 の Core/PCE/CdRom/PceArcadeCard.cpp(読んだだけで写していない):
+ *   [参照] 番地 = 基準(+オフセット、bit1 の時)の下位 21bit。進めるのは番地を決めた後
+ *   [参照] シフト: 値の bit3 が 0 なら左へ(下位 3bit)個、1 なら右へ(下位 3bit を反転して +1)個。0 を書いた時は動かさない
+ *   ★ 「負の向き」(bit3)は、オフセットの符号を見ずにいつも $FF0000 を足す(Mesen の作り。オフセットが $8000 未満の時は実機と違うかもしれない)
+ *   ★ 制御の bit2(増分を負に扱う)は Mesen では使われていない。同じにしてある
+ *   ★ 回転($1AE5)は Mesen のソースに「未検証」とある。回す数が 0 になる値(下位 3bit が 0 で bit3 も 0)は C++ では結果が決まらない書き方なので、
+ *      ここでは「動かさない」にした(照合では使っていない)
+ *   [参照] $1A00-$1BFF のうち上に無い番地の読みは、CD 装置の側の値($FF)。口のレジスタ $B-$F の読みは $FF
+ *   [推定] RAM は 0 で始める
+ */
+(function (global) {
+  'use strict';
+  const MML = global.MML = global.MML || {};
+  const Emu = MML.Emu = MML.Emu || {};
+
+  const RAM_SIZE = 0x200000;
+
+  class PceArcadeCard {
+    constructor() {
+      this.ram = new Uint8Array(RAM_SIZE);
+      this.top = 0;                       // 書いた番地の最大+1(ステートに入れる範囲を決める)
+      this.base = new Uint32Array(4);     // 24bit
+      this.offset = new Uint16Array(4);
+      this.inc = new Uint16Array(4);
+      this.control = new Uint8Array(4);
+      this.value = 0;                     // 32bit(符号なしで持つ)
+      this.shiftReg = 0; this.rotateReg = 0;
+    }
+
+    _addr(p) {
+      const c = this.control[p];
+      let a = this.base[p];
+      if (c & 0x02) { a += this.offset[p]; if (c & 0x08) a += 0xFF0000; }
+      return a & 0x1FFFFF;
+    }
+    _step(p) {
+      const c = this.control[p];
+      if (!(c & 0x01)) return;
+      if (c & 0x10) this.base[p] = (this.base[p] + this.inc[p]) & 0xFFFFFF;
+      else this.offset[p] = (this.offset[p] + this.inc[p]) & 0xFFFF;
+    }
+    _offsetToBase(p) {
+      let a = this.base[p] + this.offset[p];
+      if (this.control[p] & 0x08) a += 0xFF0000;
+      this.base[p] = a & 0xFFFFFF;
+    }
+
+    /** 口 p のデータを読む(バンク $40-$43、$1Ap0/$1Ap1) */
+    readData(p) { const a = this._addr(p); this._step(p); return this.ram[a]; }
+    writeData(p, v) { const a = this._addr(p); this._step(p); this.ram[a] = v & 0xFF; if (a >= this.top) this.top = a + 1; }
+
+    /** I/O $1A00-$1BFF の読み。other は CD 装置の側が返した値(ここに無い番地はそれを返す) */
+    readIo(off, other) {
+      if (off <= 0x1A7F) {
+        const p = (off >> 4) & 3;
+        switch (off & 0x0F) {
+          case 0x00: case 0x01: return this.readData(p);
+          case 0x02: return this.base[p] & 0xFF;
+          case 0x03: return (this.base[p] >> 8) & 0xFF;
+          case 0x04: return (this.base[p] >> 16) & 0xFF;
+          case 0x05: return this.offset[p] & 0xFF;
+          case 0x06: return this.offset[p] >> 8;
+          case 0x07: return this.inc[p] & 0xFF;
+          case 0x08: return this.inc[p] >> 8;
+          case 0x09: return this.control[p];
+          case 0x0A: return 0;
+          default: return 0xFF;
+        }
+      }
+      switch (off) {
+        case 0x1AE0: return this.value & 0xFF;
+        case 0x1AE1: return (this.value >>> 8) & 0xFF;
+        case 0x1AE2: return (this.value >>> 16) & 0xFF;
+        case 0x1AE3: return (this.value >>> 24) & 0xFF;
+        case 0x1AE4: return this.shiftReg;
+        case 0x1AE5: return this.rotateReg;
+        case 0x1AFE: return 0x10;
+        case 0x1AFF: return 0x51;
+        default: return other;
+      }
+    }
+
+    writeIo(off, v) {
+      v &= 0xFF;
+      if (off <= 0x1A7F) {
+        const p = (off >> 4) & 3;
+        switch (off & 0x0F) {
+          case 0x00: case 0x01: this.writeData(p, v); break;
+          case 0x02: this.base[p] = (this.base[p] & 0xFFFF00) | v; break;
+          case 0x03: this.base[p] = (this.base[p] & 0xFF00FF) | (v << 8); break;
+          case 0x04: this.base[p] = (this.base[p] & 0x00FFFF) | (v << 16); break;
+          case 0x05: this.offset[p] = (this.offset[p] & 0xFF00) | v; if (((this.control[p] >> 5) & 3) === 1) this._offsetToBase(p); break;
+          case 0x06: this.offset[p] = (this.offset[p] & 0x00FF) | (v << 8); if (((this.control[p] >> 5) & 3) === 2) this._offsetToBase(p); break;
+          case 0x07: this.inc[p] = (this.inc[p] & 0xFF00) | v; break;
+          case 0x08: this.inc[p] = (this.inc[p] & 0x00FF) | (v << 8); break;
+          case 0x09: this.control[p] = v & 0x7F; break;
+          case 0x0A: if (((this.control[p] >> 5) & 3) === 3) this._offsetToBase(p); break;
+          default: break;
+        }
+        return;
+      }
+      switch (off) {
+        case 0x1AE0: this.value = ((this.value & 0xFFFFFF00) | v) >>> 0; break;
+        case 0x1AE1: this.value = ((this.value & 0xFFFF00FF) | (v << 8)) >>> 0; break;
+        case 0x1AE2: this.value = ((this.value & 0xFF00FFFF) | (v << 16)) >>> 0; break;
+        case 0x1AE3: this.value = ((this.value & 0x00FFFFFF) | (v << 24)) >>> 0; break;
+        case 0x1AE4:
+          this.shiftReg = v;
+          if (v) this.value = (v & 0x08) ? this.value >>> ((~v & 7) + 1) : (this.value << (v & 7)) >>> 0;
+          break;
+        case 0x1AE5:
+          this.rotateReg = v;
+          if (v) {
+            const n = (v & 0x08) ? (~v & 7) + 1 : (v & 7);
+            if (n > 0 && n < 32) this.value = ((v & 0x08) ? (this.value >>> n) | (this.value << (32 - n)) : (this.value << n) | (this.value >>> (32 - n))) >>> 0;
+          }
+          break;
+        default: break;
+      }
+    }
+  }
+
+  PceArcadeCard.RAM_SIZE = RAM_SIZE;
+  Emu.PceArcadeCard = PceArcadeCard;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/*
  * PC エンジン本体(段階 9c: HuCard、2 ボタンパッド 1 個、波形メモリ音源、VDC/VCE 1 組。
  *   段階 9d: SuperGrafx(VDC 2 個+優先順位の石 pce/vpc.js+RAM 32K)、1MB 超のカード、RAM 内蔵カード、6 ボタンパッドとマルチタップ pce/pad.js)
  *   opts: model 'auto'(既定。SuperGrafx 専用カードなら SuperGrafx)/ 'pce' / 'sgx'、pad 'pad2'(既定)/ 'pad6' / 'tap'、region 'auto' / 'pce'
  *   段階 9e: CD-ROM²。opts.cd に PceDisc を渡すと CD 装置つきで動く(romBytes はシステムカード)。opts.cdType 'scd'(既定。Super CD-ROM² の RAM 192K を
- *     バンク $68-$7F に持ち、$18C0-$18C3 に印を出す)/ 'cd'(初代 CD-ROM²。どちらも無い)。CD 装置の中身は pce/cdrom.js・pce/adpcm.js・pce/cdImage.js
+ *     バンク $68-$7F に持ち、$18C0-$18C3 に印を出す)/ 'cd'(初代 CD-ROM²。どちらも無い)/ 'acd'(段階 9f: 'scd' にアーケードカード pce/arcadeCard.js を足した形)。
+ *     [参照] アーケードカード(PceMemoryManager.h / PceArcadeCard.cpp): バンク $40-$43 の読み書きと I/O $1A00-$1BFF を横取りする。
+ *     バンク $40-$43 への書き込みは、下にあるカードの ROM へは届かない。CD 装置の中身は pce/cdrom.js・pce/adpcm.js・pce/cdImage.js
  *   [参照] 1 サイクルの中の順番(PceMemoryManager.cpp): タイマ → VDC → CD 装置。CD 装置の時計は CD をつないだ時だけ進む
  *   [参照] SuperGrafx の I/O(PceVpc.cpp): $0000-$03FF は下位 5bit で分ける。$00-$07 = VDC1、$08-$0E = 優先順位の石、$10-$17 = VDC2、ほかの読みは $FF。
  *          RAM は 32K(バンク $F8-$FB が別々)。1 サイクルの中の順番はタイマ → VDC2 → VDC1
@@ -23080,8 +23220,9 @@
       this.cdRam = new Uint8Array(0x10000);
       this.disc = opts.cd || null;
       this.cdOn = !!opts.cd;
-      this.cdType = this.cdOn ? (opts.cdType === 'cd' ? 'cd' : 'scd') : '';
-      this.superRam = this.cdType === 'scd' ? new Uint8Array(0x30000) : null;
+      this.cdType = this.cdOn ? (opts.cdType === 'cd' ? 'cd' : opts.cdType === 'acd' ? 'acd' : 'scd') : '';
+      this.superRam = (this.cdType === 'scd' || this.cdType === 'acd') ? new Uint8Array(0x30000) : null;
+      this.arcade = null; // reset() で作る(cdType が 'acd' の時)
       this.mixGain = this.cdOn ? 0.6 : 1;
       this.cd = null; // reset() で作る
       this.bram = PceConsole.blankBram();
@@ -23119,6 +23260,7 @@
     reset() {
       this.ram.fill(0); this.cdRam.fill(0); if (this.cardRam) this.cardRam.fill(0); if (this.superRam) this.superRam.fill(0);
       this._newCd();
+      this.arcade = this.cdType === 'acd' ? new Emu.PceArcadeCard() : null;
       this.mpr.fill(0);
       this.cardBank = 0; this.card.select(0);
       this.timer.reset(); this.vce.reset(); this.vdc.reset(); this.apu.reset && this.apu.reset();
@@ -23253,6 +23395,7 @@
     read(addr) {
       const bank = this.mpr[addr >>> 13], off = addr & 0x1FFF;
       if (bank < 0x80) {
+        if (this.arcade !== null && bank >= 0x40 && bank < 0x44) return this.arcade.readData(bank & 3);
         if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) return this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF];
         if (this.superRam !== null && bank >= 0x68) return this.superRam[((bank - 0x68) << 13) | off];
         return this.card.rom[this.card.offset[bank] + off];
@@ -23268,6 +23411,7 @@
       if (bank === 0xFF) { if (this.onIo) this.onIo('W', addr, value); this.writeIo(off, value); return; }
       if (bank >= 0xF8 && bank <= 0xFB) { this.ram[(((bank - 0xF8) << 13) | off) & this.ramMask] = value; return; }
       if (bank < 0x80) {
+        if (this.arcade !== null && bank >= 0x40 && bank < 0x44) { this.arcade.writeData(bank & 3, value); return; }
         if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF] = value;
         else if (this.superRam !== null && bank >= 0x68) this.superRam[((bank - 0x68) << 13) | off] = value;
         else if (this.card.banked && bank === 0 && (off & 0x1FF0) === 0x1FF0) { this.cardBank = off & 0x0F; this.card.select(this.cardBank); }
@@ -23301,7 +23445,7 @@
         }
         return this.ioBuffer;
       }
-      if (off < 0x1C00) return this.cd.read(off & 0x3FF);
+      if (off < 0x1C00) { const v = this.cd.read(off & 0x3FF); return (this.arcade !== null && off >= 0x1A00) ? this.arcade.readIo(off, v) : v; }
       return 0xFF;
     }
 
@@ -23338,7 +23482,7 @@
         this.ioBuffer = value;
         return;
       }
-      if (off < 0x1C00) this.cd.write(off & 0x3FF, value);
+      if (off < 0x1C00) { if (this.arcade !== null && off >= 0x1A00) this.arcade.writeIo(off, value); this.cd.write(off & 0x3FF, value); }
     }
 
     // ── 録音(VGM への符号化は別。書き込みの t は画面の頭からのマスタークロック、画面の長さは frames[f].len と、各画面の最後の要素 { len }) ──
@@ -23412,7 +23556,7 @@
 
     static describe(pce) {
       const c = pce.card;
-      if (pce.cdOn) return `${pce.sgx ? 'SuperGrafx ' : ''}${pce.cdType === 'scd' ? 'Super CD-ROM²' : 'CD-ROM²'} ${pce.disc.describe()} システムカード ${c.fileSize >> 10}K${c.hadHeader ? '(ヘッダ 512 バイトを外した)' : ''}`;
+      if (pce.cdOn) return `${pce.sgx ? 'SuperGrafx ' : ''}${pce.cdType === 'acd' ? 'Super CD-ROM²+アーケードカード' : pce.cdType === 'scd' ? 'Super CD-ROM²' : 'CD-ROM²'} ${pce.disc.describe()} システムカード ${c.fileSize >> 10}K${c.hadHeader ? '(ヘッダ 512 バイトを外した)' : ''}`;
       return `${pce.sgx ? 'SuperGrafx ' : ''}HuCard ${c.fileSize >> 10}K(${c.banks} バンク)${c.banked ? ' バンク切り替えつき' : ''}${c.ramSize ? ' RAM 内蔵' : ''}${pce.input.type !== 'pad2' ? ' パッド=' + pce.input.type : ''}${c.hadHeader ? ' ヘッダ 512 バイトを外した' : ''}${c.reversed ? ' ビットの逆順を戻した' : ''}${c.oversize ? ' 1MB 超=未対応' : ''}`;
     }
   }
@@ -23454,7 +23598,9 @@
 
   const PceState = {
     save(pce) {
-      return { v: 1, machine: 'pce', romLen: pce.card.rom.length, romSum: romSum(pce.card), sgx: !!pce.sgx, cd: pce.cdOn ? pce.disc.signature : 0, cdType: pce.cdType || '', tree: Emu.StateTree.snapshot(pce, [pce.card.rom, pce.vdc.out].concat(pce.vdc2 ? [pce.vdc2.out, pce.vdc2.rowDiv] : []), SKIP_KEYS) };
+      // アーケードカードの RAM(2MB)は丸ごとは入れない。書いた所まで(64K 単位に切り上げ)を arcadeRam に入れる
+      const ac = pce.arcade, acTop = ac ? Math.min(ac.ram.length, (ac.top + 0xFFFF) & ~0xFFFF) : 0;
+      return { v: 1, machine: 'pce', arcadeRam: ac && acTop ? ac.ram.slice(0, acTop) : null, romLen: pce.card.rom.length, romSum: romSum(pce.card), sgx: !!pce.sgx, cd: pce.cdOn ? pce.disc.signature : 0, cdType: pce.cdType || '', tree: Emu.StateTree.snapshot(pce, [pce.card.rom, pce.vdc.out].concat(pce.vdc2 ? [pce.vdc2.out, pce.vdc2.rowDiv] : [], ac ? [ac.ram] : []), SKIP_KEYS) };
     },
     // 同じ ROM で作ったステートを書き戻す。合わなければ false
     load(pce, state) {
@@ -23470,6 +23616,7 @@
       for (const k of ['pad', 'padHeld', 'padTurbo']) { const a = pce[k]; while (a.length < 5) a.push(0); }
       if (state.tree.padSel !== undefined) { pce.input.sel = !!state.tree.padSel; pce.input.clr = !!state.tree.padClr; }
       pce.input.buttons = pce.pad;                                        // 同じ配列を指し直す
+      if (pce.arcade) { const r = pce.arcade.ram; r.fill(0); if (state.arcadeRam) r.set(state.arcadeRam.subarray(0, r.length)); } // 控えに無い所は書かれていない=0
       pce.rec = rec;                       // 録音中ならそのまま続ける
       pce.ringHead = 0; pce.ringLen = 0;   // 音のリングは捨てる
       pce._frameFlag = false; pce._frameCb = false; pce._frameDirty = true;
@@ -23481,7 +23628,8 @@
   const RW_W = 292, RW_H = 242;
   class PceRewind extends (Emu.NesRewind || class {}) {
     constructor(pce) {
-      super(pce, { State: PceState, frameBytes: RW_W * RW_H, keep: 120 });
+      // アーケードカードつきは控え 1 個が最大 2MB 増えるので、持つ数を減らす(120 → 24。戻れる時間が短くなる)
+      super(pce, { State: PceState, frameBytes: RW_W * RW_H, keep: pce.arcade ? 24 : 120 });
       this.idxWidth = RW_W;
       this._idx = new Uint8Array(RW_W * RW_H);
       this._pal = new Uint32Array(256);

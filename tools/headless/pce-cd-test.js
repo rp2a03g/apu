@@ -2,7 +2,7 @@
 /*
  * PC エンジン CD-ROM² の通し確認(段階 9e): CD から読めたか、音が出るか、ステート保存/復元、巻き戻し、
  * 録音 → VGM(ADPCM と CD-DA の操作は規格外ブロック PCEX)→ VgmPlayer で読み直し。
- *   node tools/headless/pce-cd-test.js "disc.cue" --syscard "syscard3.pce" [--frames 1500] [--keys "300-310:run,900-905:run"] [--save]
+ *   node tools/headless/pce-cd-test.js "disc.cue" --syscard "syscard3.pce" [--frames 1500] [--keys "300-310:run,900-905:run"] [--cdtype acd|scd|cd] [--save]
  * データのファイルは cue と同じフォルダの .bin / .img / .iso / .wav を全部読んで、cue の FILE と名前で突き合わせる(本体と同じ決まり)。
  * --keys は「何フレーム目から何フレーム目の手前まで、どのボタンを押すか」(i ii select run up down left right。+ で同時押し)。
  * ADPCM が鳴る所まで進める入力を与えると、ADPCM の録音と再生も確かめる(鳴らなければその項目は飛ばす)。--save で録った VGM を cue の隣に残す。
@@ -25,9 +25,10 @@ const text = fs.readFileSync(cue, 'latin1');
 const dir = path.dirname(cue);
 const files = fs.readdirSync(dir).filter(n => /\.(bin|img|iso|wav)$/i.test(n)).map(n => ({ name: n, data: new Uint8Array(fs.readFileSync(path.join(dir, n))) }));
 const kind = /\.ccd$/i.test(cue) ? 'ccd' : 'cue';
-const mk = () => new E.PceConsole(h.readBytes(sys), { cd: E.PceDisc.fromSet({ kind, text, files }) });
+const cdType = arg('--cdtype', 'acd'); // 画面の既定と同じ(アーケードカードつき)
+const mk = () => new E.PceConsole(h.readBytes(sys), { cd: E.PceDisc.fromSet({ kind, text, files }), cdType });
 const hash = (a) => { let x = 2166136261 | 0; for (let i = 0; i < a.length; i++) x = Math.imul(x ^ a[i], 16777619) | 0; return x >>> 0; };
-const key = (p) => [p.clock, p.cpu.PC, hash(p.ram), hash(p.cdRam), hash(p.cd.adpcm.ram), p.superRam ? hash(p.superRam) : 0, hash(new Uint8Array(p.vdc.vram.buffer)), p.cd.sector, p.cd.auSector, p.cd.auSample, p.cd.phase, p.cd.adpcm.readAddr, p.cd.adpcm.out].join(',');
+const key = (p) => [p.clock, p.cpu.PC, hash(p.ram), hash(p.cdRam), hash(p.cd.adpcm.ram), p.superRam ? hash(p.superRam) : 0, p.arcade ? hash(p.arcade.ram) + ':' + Array.from(p.arcade.base).join('.') + ':' + p.arcade.value : 0, hash(new Uint8Array(p.vdc.vram.buffer)), p.cd.sector, p.cd.auSector, p.cd.auSample, p.cd.phase, p.cd.adpcm.readAddr, p.cd.adpcm.out].join(',');
 console.log('読み込み ' + ((Date.now() - t0) / 1000).toFixed(1) + ' 秒');
 
 // 1. 走らせて音を取る。ADPCM と CD-DA が鳴ったか

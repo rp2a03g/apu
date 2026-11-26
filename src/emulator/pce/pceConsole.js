@@ -3,7 +3,9 @@
  *   段階 9d: SuperGrafx(VDC 2 個+優先順位の石 pce/vpc.js+RAM 32K)、1MB 超のカード、RAM 内蔵カード、6 ボタンパッドとマルチタップ pce/pad.js)
  *   opts: model 'auto'(既定。SuperGrafx 専用カードなら SuperGrafx)/ 'pce' / 'sgx'、pad 'pad2'(既定)/ 'pad6' / 'tap'、region 'auto' / 'pce'
  *   段階 9e: CD-ROM²。opts.cd に PceDisc を渡すと CD 装置つきで動く(romBytes はシステムカード)。opts.cdType 'scd'(既定。Super CD-ROM² の RAM 192K を
- *     バンク $68-$7F に持ち、$18C0-$18C3 に印を出す)/ 'cd'(初代 CD-ROM²。どちらも無い)。CD 装置の中身は pce/cdrom.js・pce/adpcm.js・pce/cdImage.js
+ *     バンク $68-$7F に持ち、$18C0-$18C3 に印を出す)/ 'cd'(初代 CD-ROM²。どちらも無い)/ 'acd'(段階 9f: 'scd' にアーケードカード pce/arcadeCard.js を足した形)。
+ *     [参照] アーケードカード(PceMemoryManager.h / PceArcadeCard.cpp): バンク $40-$43 の読み書きと I/O $1A00-$1BFF を横取りする。
+ *     バンク $40-$43 への書き込みは、下にあるカードの ROM へは届かない。CD 装置の中身は pce/cdrom.js・pce/adpcm.js・pce/cdImage.js
  *   [参照] 1 サイクルの中の順番(PceMemoryManager.cpp): タイマ → VDC → CD 装置。CD 装置の時計は CD をつないだ時だけ進む
  *   [参照] SuperGrafx の I/O(PceVpc.cpp): $0000-$03FF は下位 5bit で分ける。$00-$07 = VDC1、$08-$0E = 優先順位の石、$10-$17 = VDC2、ほかの読みは $FF。
  *          RAM は 32K(バンク $F8-$FB が別々)。1 サイクルの中の順番はタイマ → VDC2 → VDC1
@@ -84,8 +86,9 @@
       this.cdRam = new Uint8Array(0x10000);
       this.disc = opts.cd || null;
       this.cdOn = !!opts.cd;
-      this.cdType = this.cdOn ? (opts.cdType === 'cd' ? 'cd' : 'scd') : '';
-      this.superRam = this.cdType === 'scd' ? new Uint8Array(0x30000) : null;
+      this.cdType = this.cdOn ? (opts.cdType === 'cd' ? 'cd' : opts.cdType === 'acd' ? 'acd' : 'scd') : '';
+      this.superRam = (this.cdType === 'scd' || this.cdType === 'acd') ? new Uint8Array(0x30000) : null;
+      this.arcade = null; // reset() で作る(cdType が 'acd' の時)
       this.mixGain = this.cdOn ? 0.6 : 1;
       this.cd = null; // reset() で作る
       this.bram = PceConsole.blankBram();
@@ -123,6 +126,7 @@
     reset() {
       this.ram.fill(0); this.cdRam.fill(0); if (this.cardRam) this.cardRam.fill(0); if (this.superRam) this.superRam.fill(0);
       this._newCd();
+      this.arcade = this.cdType === 'acd' ? new Emu.PceArcadeCard() : null;
       this.mpr.fill(0);
       this.cardBank = 0; this.card.select(0);
       this.timer.reset(); this.vce.reset(); this.vdc.reset(); this.apu.reset && this.apu.reset();
@@ -257,6 +261,7 @@
     read(addr) {
       const bank = this.mpr[addr >>> 13], off = addr & 0x1FFF;
       if (bank < 0x80) {
+        if (this.arcade !== null && bank >= 0x40 && bank < 0x44) return this.arcade.readData(bank & 3);
         if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) return this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF];
         if (this.superRam !== null && bank >= 0x68) return this.superRam[((bank - 0x68) << 13) | off];
         return this.card.rom[this.card.offset[bank] + off];
@@ -272,6 +277,7 @@
       if (bank === 0xFF) { if (this.onIo) this.onIo('W', addr, value); this.writeIo(off, value); return; }
       if (bank >= 0xF8 && bank <= 0xFB) { this.ram[(((bank - 0xF8) << 13) | off) & this.ramMask] = value; return; }
       if (bank < 0x80) {
+        if (this.arcade !== null && bank >= 0x40 && bank < 0x44) { this.arcade.writeData(bank & 3, value); return; }
         if (this.cardRam !== null && bank >= 0x40 && bank < 0x60) this.cardRam[(((bank - 0x40) << 13) | off) & 0x7FFF] = value;
         else if (this.superRam !== null && bank >= 0x68) this.superRam[((bank - 0x68) << 13) | off] = value;
         else if (this.card.banked && bank === 0 && (off & 0x1FF0) === 0x1FF0) { this.cardBank = off & 0x0F; this.card.select(this.cardBank); }
@@ -305,7 +311,7 @@
         }
         return this.ioBuffer;
       }
-      if (off < 0x1C00) return this.cd.read(off & 0x3FF);
+      if (off < 0x1C00) { const v = this.cd.read(off & 0x3FF); return (this.arcade !== null && off >= 0x1A00) ? this.arcade.readIo(off, v) : v; }
       return 0xFF;
     }
 
@@ -342,7 +348,7 @@
         this.ioBuffer = value;
         return;
       }
-      if (off < 0x1C00) this.cd.write(off & 0x3FF, value);
+      if (off < 0x1C00) { if (this.arcade !== null && off >= 0x1A00) this.arcade.writeIo(off, value); this.cd.write(off & 0x3FF, value); }
     }
 
     // ── 録音(VGM への符号化は別。書き込みの t は画面の頭からのマスタークロック、画面の長さは frames[f].len と、各画面の最後の要素 { len }) ──
@@ -416,7 +422,7 @@
 
     static describe(pce) {
       const c = pce.card;
-      if (pce.cdOn) return `${pce.sgx ? 'SuperGrafx ' : ''}${pce.cdType === 'scd' ? 'Super CD-ROM²' : 'CD-ROM²'} ${pce.disc.describe()} システムカード ${c.fileSize >> 10}K${c.hadHeader ? '(ヘッダ 512 バイトを外した)' : ''}`;
+      if (pce.cdOn) return `${pce.sgx ? 'SuperGrafx ' : ''}${pce.cdType === 'acd' ? 'Super CD-ROM²+アーケードカード' : pce.cdType === 'scd' ? 'Super CD-ROM²' : 'CD-ROM²'} ${pce.disc.describe()} システムカード ${c.fileSize >> 10}K${c.hadHeader ? '(ヘッダ 512 バイトを外した)' : ''}`;
       return `${pce.sgx ? 'SuperGrafx ' : ''}HuCard ${c.fileSize >> 10}K(${c.banks} バンク)${c.banked ? ' バンク切り替えつき' : ''}${c.ramSize ? ' RAM 内蔵' : ''}${pce.input.type !== 'pad2' ? ' パッド=' + pce.input.type : ''}${c.hadHeader ? ' ヘッダ 512 バイトを外した' : ''}${c.reversed ? ' ビットの逆順を戻した' : ''}${c.oversize ? ' 1MB 超=未対応' : ''}`;
     }
   }

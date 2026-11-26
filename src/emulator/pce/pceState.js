@@ -26,7 +26,9 @@
 
   const PceState = {
     save(pce) {
-      return { v: 1, machine: 'pce', romLen: pce.card.rom.length, romSum: romSum(pce.card), sgx: !!pce.sgx, cd: pce.cdOn ? pce.disc.signature : 0, cdType: pce.cdType || '', tree: Emu.StateTree.snapshot(pce, [pce.card.rom, pce.vdc.out].concat(pce.vdc2 ? [pce.vdc2.out, pce.vdc2.rowDiv] : []), SKIP_KEYS) };
+      // アーケードカードの RAM(2MB)は丸ごとは入れない。書いた所まで(64K 単位に切り上げ)を arcadeRam に入れる
+      const ac = pce.arcade, acTop = ac ? Math.min(ac.ram.length, (ac.top + 0xFFFF) & ~0xFFFF) : 0;
+      return { v: 1, machine: 'pce', arcadeRam: ac && acTop ? ac.ram.slice(0, acTop) : null, romLen: pce.card.rom.length, romSum: romSum(pce.card), sgx: !!pce.sgx, cd: pce.cdOn ? pce.disc.signature : 0, cdType: pce.cdType || '', tree: Emu.StateTree.snapshot(pce, [pce.card.rom, pce.vdc.out].concat(pce.vdc2 ? [pce.vdc2.out, pce.vdc2.rowDiv] : [], ac ? [ac.ram] : []), SKIP_KEYS) };
     },
     // 同じ ROM で作ったステートを書き戻す。合わなければ false
     load(pce, state) {
@@ -42,6 +44,7 @@
       for (const k of ['pad', 'padHeld', 'padTurbo']) { const a = pce[k]; while (a.length < 5) a.push(0); }
       if (state.tree.padSel !== undefined) { pce.input.sel = !!state.tree.padSel; pce.input.clr = !!state.tree.padClr; }
       pce.input.buttons = pce.pad;                                        // 同じ配列を指し直す
+      if (pce.arcade) { const r = pce.arcade.ram; r.fill(0); if (state.arcadeRam) r.set(state.arcadeRam.subarray(0, r.length)); } // 控えに無い所は書かれていない=0
       pce.rec = rec;                       // 録音中ならそのまま続ける
       pce.ringHead = 0; pce.ringLen = 0;   // 音のリングは捨てる
       pce._frameFlag = false; pce._frameCb = false; pce._frameDirty = true;
@@ -53,7 +56,8 @@
   const RW_W = 292, RW_H = 242;
   class PceRewind extends (Emu.NesRewind || class {}) {
     constructor(pce) {
-      super(pce, { State: PceState, frameBytes: RW_W * RW_H, keep: 120 });
+      // アーケードカードつきは控え 1 個が最大 2MB 増えるので、持つ数を減らす(120 → 24。戻れる時間が短くなる)
+      super(pce, { State: PceState, frameBytes: RW_W * RW_H, keep: pce.arcade ? 24 : 120 });
       this.idxWidth = RW_W;
       this._idx = new Uint8Array(RW_W * RW_H);
       this._pal = new Uint32Array(256);

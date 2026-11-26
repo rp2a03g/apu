@@ -103,7 +103,7 @@
   // PC エンジン: 本体の種類(自動 = 専用カードか拡張子 .sgx なら SuperGrafx)とパッドの種類。6 ボタンパッドの III〜VI は決まったキー(D F G H)
   const PCE_MODELS = ['auto', 'pce', 'sgx'], PCE_PADS = ['pad2', 'pad6', 'tap'];
   const PCE_EXTRA_KEYS = { KeyD: 0x100, KeyF: 0x200, KeyG: 0x400, KeyH: 0x800 };
-  function loadPceCfg(c) { c = c && typeof c === 'object' ? c : {}; return { model: PCE_MODELS.includes(c.model) ? c.model : 'auto', pad: PCE_PADS.includes(c.pad) ? c.pad : 'pad2' }; }
+  function loadPceCfg(c) { c = c && typeof c === 'object' ? c : {}; return { model: PCE_MODELS.includes(c.model) ? c.model : 'auto', pad: PCE_PADS.includes(c.pad) ? c.pad : 'pad2', cd: ['acd', 'scd', 'cd'].includes(c.cd) ? c.cd : 'acd' }; }
   function pceCfg() { if (!cfg.pce) cfg.pce = loadPceCfg(null); return cfg.pce; }
   function loadCps3Cfg(c) {
     c = c && typeof c === 'object' ? c : {};
@@ -1354,6 +1354,11 @@
         if (have) r.appendChild(mkBtn(T('消す'), T('控えを消す'), () => { clearPceSysCard(); pceBiosRender(); }));
         pceBiosBox.appendChild(r);
       };
+      { const { r, s } = selRow(T('CD の構成'));
+        for (const [v, label] of [['acd', T('Super CD-ROM² + アーケードカード')], ['scd', 'Super CD-ROM²'], ['cd', T('CD-ROM²(初代。RAM の増設なし)')]]) { const o = document.createElement('option'); o.value = v; o.textContent = label; s.appendChild(o); }
+        s.value = pc.cd;
+        s.addEventListener('change', () => { pc.cd = s.value; saveCfg(); });
+        sc.appendChild(r); }
       biosNote(sc, T('CD のソフトの起動にシステムカード(.pce)が要ります。このブラウザに控えて次回も使います。CD は .cue(か .ccd)とデータのファイル(.bin / .img / .iso / .wav)を一緒に選ぶか、まとめてドロップしてください。圧縮された音声(MP3 など)のトラックは読めません。'));
       note(sp, T('次に開くソフトから効きます。6 ボタンパッドの III〜VI はキーボードの D F G H です(割り当ての変更とゲームパッドへの割り当てはまだできません)。マルチタップの 2 番は 2 つ目のゲームパッドです。'));
     }
@@ -2423,6 +2428,7 @@
     const pc = pceCfg();
     const pceOpts = { region: 'auto', model: pc.model === 'auto' ? (/\.sgx$/i.test(name || '') ? 'sgx' : 'auto') : pc.model, pad: pc.pad };
     const disc = cdSet ? MML.Emu.PceDisc.fromSet(cdSet) : null; // 読めなければ例外(呼び出し側が知らせる)
+    if (disc) pceOpts.cdType = pc.cd; // CD の構成(アーケードカードつき/Super CD-ROM²/初代)
     if (disc && disc.empty) throw new Error(T('CD のトラックが読めません'));
     pceCd = !!disc;
     const probe = new MML.Emu.PceConsole(bytes, Object.assign({ cd: disc }, pceOpts));
@@ -2437,7 +2443,7 @@
     hasBattery = probe.hasBattery; batteryKey = hasBattery ? stateKey : '';
     const battery = hasBattery ? await loadBattery(batteryKey) : null;
     if (battery && probe.setBattery(battery)) console.log('[pce]', T('セーブデータを読み込みました({n} バイト)', { n: battery.length }));
-    machineEl.textContent = disc ? 'CD-ROM²' : probe.sgx ? 'SuperGrafx' : T('PC エンジン');
+    machineEl.textContent = disc ? (probe.cdType === 'cd' ? 'CD-ROM²' : probe.cdType === 'acd' ? 'Super CD-ROM² + AC' : 'Super CD-ROM²') : probe.sgx ? 'SuperGrafx' : T('PC エンジン');
     nameEl.textContent = romName;
     nameEl.title = MML.Emu.PceConsole.describe(probe);
     recExtBits = 0; fdsSideInfo = null; diskNames = [];

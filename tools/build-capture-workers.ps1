@@ -274,6 +274,7 @@ $bundles = @(
             'src\emulator\pce\cdImage.js',
             'src\emulator\pce\adpcm.js',
             'src\emulator\pce\cdrom.js',
+            'src\emulator\pce\arcadeCard.js',
             'src\emulator\pce\pceConsole.js',
             'src\emulator\pce\pceState.js',
             # CP System III (DESIGN-CPS3-CAPTURE.md stage 10d)

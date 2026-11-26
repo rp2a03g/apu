@@ -22,7 +22,7 @@
  * 入力: --keys "300-310:run,900-905:i" の形で「何フレーム目から何フレーム目の手前まで、どのボタンを押すか」を与えられる(1 番のパッド)。
  *   Mesen 側は Lua の inputPolled の通知の中で emu.setInput を呼ぶ(画面の区切りの直後に入力を取り込む所)。自前は同じ区切りで setController。
  *   ボタンの名前: i ii select run up down left right。(以前「--testRunner では入力が入らない」と書いていたのは誤りだった。2026-11-26)
- * CD(段階 9e): .cue を渡すと CD-ROM² として回す。--syscard <システムカード>(または環境変数 PCE_SYSCARD)、--cdtype cd|scd(既定 scd)。
+ * CD(段階 9e): .cue を渡すと CD-ROM² として回す。--syscard <システムカード>(または環境変数 PCE_SYSCARD)、--cdtype cd|scd|acd(既定 scd。acd はアーケードカードつき=Mesen の CdRomType が Arcade)。
  *   Mesen は Firmware フォルダの syscard3.pce を使うので、同じ中身のカードを渡すこと。Mesen の CD の種類(settings.json の PcEngine.CdRomType:
  *   CdRom / SuperCdRom)を合わせた写しを --mesen で渡す。メモリは CD 装置の RAM 64K、ADPCM の RAM 64K、Super CD-ROM² の RAM 192K も比べる。
  *   cue は同じフォルダに別の名前で写して渡す(Mesen がセーブを名前で残すため。.sub は名前が変わるので読まれない=サブコードは比べない)。
@@ -83,11 +83,12 @@ if (has('--all')) {
 const rom = process.argv.slice(2).find((a, i, all) => !a.startsWith('--') && /\.(pce|sgx|cue)$/i.test(a) && !/^--(syscard|mesen|out)$/.test(all[i - 1] || ''));
 const isCd = !!rom && /\.cue$/i.test(rom);
 const sysCard = arg('--syscard', process.env.PCE_SYSCARD || null);
-const cdType = arg('--cdtype', 'scd') === 'cd' ? 'cd' : 'scd';
+const cdType = ['cd', 'scd', 'acd'].includes(arg('--cdtype', 'scd')) ? arg('--cdtype', 'scd') : 'scd';
 if (isCd && (!sysCard || !fs.existsSync(sysCard))) { console.error('CD には --syscard <システムカード>(または環境変数 PCE_SYSCARD)が要ります'); process.exit(2); }
 // 入力の予定: [{ from, to, bits, names }]
 const BTN = { i: 1, ii: 2, select: 4, run: 8, up: 16, down: 32, left: 64, right: 128 };
 const presses = (arg('--keys', '') || '').split(',').filter(Boolean).map(p => { const m = /^(\d+)-(\d+):([a-z+]+)$/.exec(p.trim()); if (!m) { console.error('--keys の形: 300-310:run'); process.exit(2); } const names = m[3].split('+'); let bits = 0; for (const n of names) { if (!BTN[n]) { console.error('知らないボタン: ' + n); process.exit(2); } bits |= BTN[n]; } return { from: +m[1], to: +m[2], bits, names }; });
+const arcadeDump = parseInt(arg('--arcade-bytes', '0x200000')); // アーケードカードの RAM を頭から何バイト比べるか(Lua で 1 バイトずつ書き出すので、全部だと遅い)
 const padAt = (n) => { let b = 0; for (const p of presses) if (n >= p.from && n < p.to) b |= p.bits; return b; };
 const frames = parseInt(arg('--frames', '300'), 10);
 const mesen = arg('--mesen', process.env.MESEN_EXE || null);
@@ -126,7 +127,8 @@ const lua = [
   '      dump("pal", emu.memType.pcePaletteRam, 0x400) dump("ram", emu.memType.pceWorkRam, ' + (isSgx ? '0x8000' : '0x2000') + ')',
   isSgx ? '      dump("vram2", emu.memType.pceVideoRamVdc2, 0x10000) dump("satb2", emu.memType.pceSpriteRamVdc2, 0x200)' : '',
 isCd ? '      dump("cdram", emu.memType.pceCdromRam, 0x10000) dump("adpcm", emu.memType.pceAdpcmRam, 0x10000)' : '',
-isCd && cdType === 'scd' ? '      dump("cardram", emu.memType.pceCardRam, 0x30000)' : '',
+isCd && cdType !== 'cd' ? '      dump("cardram", emu.memType.pceCardRam, 0x30000)' : '',
+isCd && cdType === 'acd' ? '      dump("arcade", emu.memType.pceArcadeCardRam, ' + arcadeDump + ')' : '',
   '      local st = emu.getState() local t = io.open("' + W + '/state.txt", "w")',
   '      t:write(string.format("pc=%04x clock=%d", st["cpu.pc"] or 0, st.masterClock or 0)) t:close()',
   withIo ? '      out:close()' : '',
@@ -172,7 +174,7 @@ const myShots = {};
 // なので「同じフレーム番号」ではなく「同じ時計の区切り」のメモリを比べる。合う区切りが無ければフレーム番号で取り、その旨を出す
 const mesenClock = +(/clock=(\d+)/.exec(fs.readFileSync(path.join(work, 'state.txt'), 'utf8')) || [0, 0])[1];
 let memAt = null, memByFrame = null;
-pce.onFrameExact = () => { const hit = pce.clock === mesenClock, byFrame = pce.frameCount === frames; if (presses.length) pce.setController(0, padAt(pce.frameCount)); if (!hit && !byFrame) return; const m = { cdram: pce.cdRam.slice(), adpcm: pce.cd.adpcm.ram.slice(), cardram: pce.superRam ? pce.superRam.slice() : null, vram: pce.vdc.vram.slice(), satb: pce.vdc.satb.slice(), pal: pce.vce.pal.slice(), ram: pce.ram.slice(), vram2: pce.vdc2 ? pce.vdc2.vram.slice() : null, satb2: pce.vdc2 ? pce.vdc2.satb.slice() : null, pc: pce.cpu.PC, clock: pce.clock, frame: pce.frameCount }; if (hit) memAt = m; if (byFrame) memByFrame = m; };
+pce.onFrameExact = () => { const hit = pce.clock === mesenClock, byFrame = pce.frameCount === frames; if (presses.length) pce.setController(0, padAt(pce.frameCount)); if (!hit && !byFrame) return; const m = { arcade: pce.arcade ? pce.arcade.ram.slice(0, arcadeDump) : null, cdram: pce.cdRam.slice(), adpcm: pce.cd.adpcm.ram.slice(), cardram: pce.superRam ? pce.superRam.slice() : null, vram: pce.vdc.vram.slice(), satb: pce.vdc.satb.slice(), pal: pce.vce.pal.slice(), ram: pce.ram.slice(), vram2: pce.vdc2 ? pce.vdc2.vram.slice() : null, satb2: pce.vdc2 ? pce.vdc2.satb.slice() : null, pc: pce.cpu.PC, clock: pce.clock, frame: pce.frameCount }; if (hit) memAt = m; if (byFrame) memByFrame = m; };
 for (let f = 1; f <= frames + 2; f++) {
   pce._frameFlag = false;
   let guard = 0;
@@ -226,12 +228,13 @@ if (withIo) {
     if (bad) { allOk = false; console.log(`${label}: 違う ${bad} / ${a.length}  ${first.join(', ')}`); summary.push(`${label} ${bad} 個違う`); }
     return bad;
   };
-  const mine = memAt || { cdram: pce.cdRam, adpcm: pce.cd.adpcm.ram, cardram: pce.superRam, vram: pce.vdc.vram, satb: pce.vdc.satb, pal: pce.vce.pal, ram: pce.ram, vram2: pce.vdc2 ? pce.vdc2.vram : null, satb2: pce.vdc2 ? pce.vdc2.satb : null };
+  const mine = memAt || { arcade: pce.arcade ? pce.arcade.ram.subarray(0, arcadeDump) : null, cdram: pce.cdRam, adpcm: pce.cd.adpcm.ram, cardram: pce.superRam, vram: pce.vdc.vram, satb: pce.vdc.satb, pal: pce.vce.pal, ram: pce.ram, vram2: pce.vdc2 ? pce.vdc2.vram : null, satb2: pce.vdc2 ? pce.vdc2.satb : null };
   const bad = cmp('VRAM', words(rd('vram')), mine.vram, 4) + cmp('スプライト表', words(rd('satb')), mine.satb, 4)
     + cmp('パレット', words(rd('pal')), mine.pal, 3) + cmp('RAM', rd('ram'), mine.ram, 2)
     + (isSgx ? cmp('VRAM(VDC2)', words(rd('vram2')), mine.vram2, 4) + cmp('スプライト表(VDC2)', words(rd('satb2')), mine.satb2, 4) : 0)
     + (isCd ? cmp('CD 装置の RAM', rd('cdram'), mine.cdram, 2) + cmp('ADPCM の RAM', rd('adpcm'), mine.adpcm, 2) : 0)
-    + (isCd && cdType === 'scd' ? cmp('Super CD-ROM² の RAM', rd('cardram'), mine.cardram, 2) : 0);
+    + (isCd && cdType !== 'cd' ? cmp('Super CD-ROM² の RAM', rd('cardram'), mine.cardram, 2) : 0)
+    + (isCd && cdType === 'acd' ? cmp('アーケードカードの RAM', rd('arcade'), mine.arcade, 2) : 0);
   if (!bad) { console.log('メモリ: VRAM・スプライト表・パレット・RAM とも同じ'); summary.push('メモリ同じ'); }
 }
 

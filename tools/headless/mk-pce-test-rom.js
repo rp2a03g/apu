@@ -263,4 +263,4 @@ if (require.main === module) {
   for (const k of Object.keys(SCENES)) { fs.writeFileSync(path.join(out, k + (SCENES[k].sgx ? '.sgx' : '.pce')), buildTestRom(k)); }
   console.log(`${Object.keys(SCENES).length} 本を書き出しました: ${out}`);
 }
-module.exports = { buildTestRom, SCENES };
+module.exports = { buildTestRom, SCENES, Asm };
