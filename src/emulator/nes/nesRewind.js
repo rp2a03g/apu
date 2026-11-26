@@ -88,7 +88,7 @@
       const nes = this.nes, g = rv.regen;
       for (let k = 0; k < n && g.next <= g.upto; k++) {
         const p = this.pads[g.next - this.base];
-        if (p !== undefined) { nes.pad[0] = p & 0xFF; nes.pad[1] = (p >> 8) & 0xFF; }
+        if (p !== undefined) this._unpackPads(p);
         nes.runFrame();
         this._capture(nes.frameCount);
         g.next = nes.frameCount + 1;
@@ -109,12 +109,17 @@
     }
     // 戻れる一番古いフレーム(無ければ今のフレーム)
     get oldest() { return this.snaps.length ? this.snaps[0].frame : this.nes.frameCount; }
+    // パッドの値を 1 個の値に詰める/戻す。パッドの数やビット数が違う機種は差し替える(PC エンジン)
+    // 控えるのは「終わったフレームで効いていた値」(padUsed)。pad[] は連射の位相が次へ進んだ後なので、そちらを控えると連射中の進め直しが 1 フレームずれる
+    _packPads() { const p = this.nes.padUsed || this.nes.pad; return (p[0] & 0xFF) | ((p[1] & 0xFF) << 8); }
+    _unpackPads(p) { const nes = this.nes; nes.pad[0] = p & 0xFF; nes.pad[1] = (p >> 8) & 0xFF; }
+
     // 毎フレーム(_frameEnd の後)に呼ぶ
     onFrame() {
       if (this.replaying) return;
       const nes = this.nes, f = nes.frameCount;
       if (this.base > f) this.clear();
-      this.pads[f - this.base] = (nes.pad[0] & 0xFF) | ((nes.pad[1] & 0xFF) << 8);
+      this.pads[f - this.base] = this._packPads();
       this._capture(f);
       if (f % this.interval === 0) {
         this.snaps.push({ frame: f, state: this.State.save(nes) });
@@ -137,14 +142,14 @@
       if (si < 0) { si = 0; frame = this.snaps[0].frame; }
       const snap = this.snaps[si];
       // 今押している物は状態を読む「前」に控える(読んだ後に取ると、巻き戻した先で押していた物が残って押しっぱなしになった。2026-11-11)
-      const held = [nes.padHeld[0], nes.padHeld[1]], turbo = [nes.padTurbo[0], nes.padTurbo[1]];
+      const held = nes.padHeld.slice(), turbo = nes.padTurbo.slice();
       this.State.load(nes, snap.state);
       // 控えていたパッドの値で進める(setController を通さず pad を直接。連射の位相も記録に含まれている)
       this.replaying = true;
       try {
         while (nes.frameCount < frame) {
           const p = this.pads[nes.frameCount + 1 - this.base];
-          if (p !== undefined) { nes.pad[0] = p & 0xFF; nes.pad[1] = (p >> 8) & 0xFF; }
+          if (p !== undefined) this._unpackPads(p);
           nes.runFrame();
           this._capture(nes.frameCount); // 進め直した画面も輪へ(戻った直後の巻き戻しに使える)
         }
@@ -153,7 +158,7 @@
       this.snaps.length = si + 1;
       this.pads.length = Math.max(0, nes.frameCount + 1 - this.base);
       // 今押している物に戻す
-      nes.padHeld[0] = held[0]; nes.padHeld[1] = held[1]; nes.padTurbo[0] = turbo[0]; nes.padTurbo[1] = turbo[1];
+      for (let i = 0; i < held.length; i++) { nes.padHeld[i] = held[i]; nes.padTurbo[i] = turbo[i]; }
       nes._applyPad(0); nes._applyPad(1);
       return nes.frameCount;
     }

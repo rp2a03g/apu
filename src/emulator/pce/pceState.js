@@ -64,6 +64,18 @@
       this._lut = new Int16Array(1024);
     }
     get palette() { return this._pal.slice(); }
+    // パッドは 5 個(マルチタップ)× 12bit(I II SELECT RUN 上下左右 III IV V VI)。1〜4 番は 1 個の数(48bit)に詰め、
+    // 5 番が押されているフレームだけ [数, 5 番] の組にする(ふつうは数 1 個で済む)
+    _packPads() {
+      const p = this.nes.padUsed || this.nes.pad;
+      const n = (p[0] & 0xFFF) + (p[1] & 0xFFF) * 0x1000 + (p[2] & 0xFFF) * 0x1000000 + (p[3] & 0xFFF) * 0x1000000000;
+      return (p[4] & 0xFFF) ? [n, p[4] & 0xFFF] : n;
+    }
+    _unpackPads(v) {
+      const p = this.nes.pad; let n = v, p4 = 0;
+      if (typeof v !== 'number') { n = v[0]; p4 = v[1]; }
+      p[0] = n % 0x1000; n = Math.floor(n / 0x1000); p[1] = n % 0x1000; n = Math.floor(n / 0x1000); p[2] = n % 0x1000; p[3] = Math.floor(n / 0x1000) % 0x1000; p[4] = p4;
+    }
     // 今の画面を「色の番号+色表」にして輪に控える
     _capture(f) {
       const pce = this.nes, RING = Emu.NesRewind.RING, FB = this.frameBytes;

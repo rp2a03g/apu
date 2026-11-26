@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-26 17:05:38
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 21:53:59
  *
  * regsOnly capture worker bundle (gbsCapture). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.gbsCapture is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-26 17:05:38';
+  MML.WorkerBundles.gbsCaptureBuiltAt = '2026-11-26 21:53:59';
   MML.WorkerBundles.gbsCapture = function () {
 /*
  * GBS (Game Boy Sound) ヘッダ解析
@@ -1777,6 +1777,7 @@
       this.hram = new Uint8Array(0x7F);
       // パッドは NesConsole と同じ形(配列の [0] だけ使う。巻き戻し NesRewind/GbRewind が pad[0]/pad[1] を記録する)
       this.pad = [0, 0]; this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.padUsed = [0, 0]; // 終わったフレームで実際に効いていた値(連射の位相を進める前)。巻き戻しはこれを控える(nesRewind.js)
       this.cpuCycles = 0; this.frameCount = 0; this.frameT = 0; this._frameFlag = false;
       this.sampleRate = 0; this.cycleAccum = 0;
       this.ring = new Float32Array(AUDIO_RING); this.ringR = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0; this.underruns = 0;
@@ -2011,6 +2012,7 @@
       this.cart.tickRtc(this.frameT, CLOCK);
       this.frameCount++;
       this._frameFlag = true;
+      this.padUsed[0] = this.pad[0]; this.padUsed[1] = this.pad[1];
       if (this.padTurbo[0] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(0); }
       if (this.rec) { this.rec.cur.len = this.frameT; this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       this.frameT = 0;

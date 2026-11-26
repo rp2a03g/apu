@@ -38,6 +38,8 @@ export PATH="$PATH:/path/to/nodejs"
 | `pce-state-test.js` | PC エンジン本体まわりの通し確認(中身判定、ステート保存/復元、巻き戻し、録音 → VGM → VgmPlayer で読み直し)。ROM を引数で渡す |
 | `mk-pce-test-cd.js` | PC エンジン CD-ROM² の合成テスト CD(場面 arcade: アーケードカードの口 4 個・シフト/回転・折り返し)。頭 2 セクタは `--donor` の手持ちの CD から借りる(出来た物は配らない)。`pce-rom-ab.js <出来た disc.cue> --cdtype acd --keys "300-310:run"` で Mesen と比べる |
 | `pce-cd-test.js` | PC エンジン CD-ROM² の通し確認(CD から読めたか、音、ステート保存/復元、巻き戻し、録音 → VGM(規格外ブロック PCEX)→ VgmPlayer)。`"disc.cue" --syscard <システムカード> [--keys "300-310:run"]`。Mesen との照合は `pce-rom-ab.js` に .cue を渡す(`--syscard`、`--cdtype cd\|scd`、`--keys` でボタン入力) |
+| `pce-rewind-pad-test.js` | PC エンジンの巻き戻しが、パッド 5 個(マルチタップ)と 6 ボタン(III〜VI)、連射の位相を控えているかの確認。5 個に毎フレーム違う値を入れて途中へ戻し、進め直しで本体に入った値と、戻った所の状態を比べる。`"game.pce"` |
+| `rewind-turbo-test.js` | NES / GB の巻き戻しで、連射を押している間の進め直しが元と同じになるかの確認(入ったパッドの値と、戻った所の状態)。`"game.nes"` または `"game.gb"` |
 | `pce-sweep.js` | HES の総当たり(例外/無音/書き込み列のハッシュ)と、2 回ぶんの比較。`--roms <フォルダ>` で HuCard の ROM の総当たり(例外/止まった/一色/無音を分類。`--roms-report` で結果の読み直し) |
 | `pce-mesen-ab.js` / `pce-iotrace.js` / `pce-apu-ab.js` | HES を Mesen 2 と比べる 3 本: 音源への書き込みの並び / I/O の読み書きを時刻つきで / 音源の内部状態(タイマ・読み位置・出力・波形・乱数)を書き込みごとに。どれも `--all <フォルダ>` で一括 |
 | `pce-vgm-ab.js` | PC エンジンの VGM を VGMPlay のリファレンス WAV と比べる(音量の包絡とスペクトルの形)。`--synth` で音量の表を 1 段ずつ |

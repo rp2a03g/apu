@@ -1,6 +1,6 @@
 ﻿/*
  * GENERATED FILE - DO NOT EDIT BY HAND.
- * Built by tools/build-capture-workers.ps1 at 2026-11-26 17:05:38
+ * Built by tools/build-capture-workers.ps1 at 2026-11-26 21:53:59
  *
  * regsOnly capture worker bundle (nesWorklet). Loaded on the main thread as a plain
  * script, but the emulator code inside MML.WorkerBundles.nesWorklet is never
@@ -9,7 +9,7 @@
 (function (global) {
   var MML = global.MML = global.MML || {};
   MML.WorkerBundles = MML.WorkerBundles || {};
-  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 17:05:38';
+  MML.WorkerBundles.nesWorkletBuiltAt = '2026-11-26 21:53:59';
   MML.WorkerBundles.nesWorklet = function () {
 /*
  * 6502 CPUコア（NES/NSF用、デコードモード無効）
@@ -6057,6 +6057,7 @@
       this.pad = [0, 0]; this.padShift = [0, 0]; this.padStrobe = false;
       // 連射: padHeld(押しっぱなし)に padTurbo のビットを turboRate フレームごとに ON/OFF して足した物が pad(ゲームが読む値)
       this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.padUsed = [0, 0]; // 終わったフレームで実際に効いていた値(連射の位相を進める前)。巻き戻しはこれを控える(nesRewind.js)
       this.dmaCycles = 0;
       this.prevNmi = false; this.pendingNmi = false; this.nmiNext = false;
       this.cpuCycles = 0;
@@ -6318,6 +6319,7 @@
     }
     _frameEnd() {
       this._frameFlag = true;
+      this.padUsed[0] = this.pad[0]; this.padUsed[1] = this.pad[1];
       if (this.padTurbo[0] || this.padTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(0); this._applyPad(1); }
       if (this.rec) { this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       if (this.onFrame) this.onFrame();
@@ -6549,7 +6551,7 @@
       const nes = this.nes, g = rv.regen;
       for (let k = 0; k < n && g.next <= g.upto; k++) {
         const p = this.pads[g.next - this.base];
-        if (p !== undefined) { nes.pad[0] = p & 0xFF; nes.pad[1] = (p >> 8) & 0xFF; }
+        if (p !== undefined) this._unpackPads(p);
         nes.runFrame();
         this._capture(nes.frameCount);
         g.next = nes.frameCount + 1;
@@ -6570,12 +6572,17 @@
     }
     // 戻れる一番古いフレーム(無ければ今のフレーム)
     get oldest() { return this.snaps.length ? this.snaps[0].frame : this.nes.frameCount; }
+    // パッドの値を 1 個の値に詰める/戻す。パッドの数やビット数が違う機種は差し替える(PC エンジン)
+    // 控えるのは「終わったフレームで効いていた値」(padUsed)。pad[] は連射の位相が次へ進んだ後なので、そちらを控えると連射中の進め直しが 1 フレームずれる
+    _packPads() { const p = this.nes.padUsed || this.nes.pad; return (p[0] & 0xFF) | ((p[1] & 0xFF) << 8); }
+    _unpackPads(p) { const nes = this.nes; nes.pad[0] = p & 0xFF; nes.pad[1] = (p >> 8) & 0xFF; }
+
     // 毎フレーム(_frameEnd の後)に呼ぶ
     onFrame() {
       if (this.replaying) return;
       const nes = this.nes, f = nes.frameCount;
       if (this.base > f) this.clear();
-      this.pads[f - this.base] = (nes.pad[0] & 0xFF) | ((nes.pad[1] & 0xFF) << 8);
+      this.pads[f - this.base] = this._packPads();
       this._capture(f);
       if (f % this.interval === 0) {
         this.snaps.push({ frame: f, state: this.State.save(nes) });
@@ -6598,14 +6605,14 @@
       if (si < 0) { si = 0; frame = this.snaps[0].frame; }
       const snap = this.snaps[si];
       // 今押している物は状態を読む「前」に控える(読んだ後に取ると、巻き戻した先で押していた物が残って押しっぱなしになった。2026-11-11)
-      const held = [nes.padHeld[0], nes.padHeld[1]], turbo = [nes.padTurbo[0], nes.padTurbo[1]];
+      const held = nes.padHeld.slice(), turbo = nes.padTurbo.slice();
       this.State.load(nes, snap.state);
       // 控えていたパッドの値で進める(setController を通さず pad を直接。連射の位相も記録に含まれている)
       this.replaying = true;
       try {
         while (nes.frameCount < frame) {
           const p = this.pads[nes.frameCount + 1 - this.base];
-          if (p !== undefined) { nes.pad[0] = p & 0xFF; nes.pad[1] = (p >> 8) & 0xFF; }
+          if (p !== undefined) this._unpackPads(p);
           nes.runFrame();
           this._capture(nes.frameCount); // 進め直した画面も輪へ(戻った直後の巻き戻しに使える)
         }
@@ -6614,7 +6621,7 @@
       this.snaps.length = si + 1;
       this.pads.length = Math.max(0, nes.frameCount + 1 - this.base);
       // 今押している物に戻す
-      nes.padHeld[0] = held[0]; nes.padHeld[1] = held[1]; nes.padTurbo[0] = turbo[0]; nes.padTurbo[1] = turbo[1];
+      for (let i = 0; i < held.length; i++) { nes.padHeld[i] = held[i]; nes.padTurbo[i] = turbo[i]; }
       nes._applyPad(0); nes._applyPad(1);
       return nes.frameCount;
     }
@@ -16451,6 +16458,7 @@
       this.hram = new Uint8Array(0x7F);
       // パッドは NesConsole と同じ形(配列の [0] だけ使う。巻き戻し NesRewind/GbRewind が pad[0]/pad[1] を記録する)
       this.pad = [0, 0]; this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.padUsed = [0, 0]; // 終わったフレームで実際に効いていた値(連射の位相を進める前)。巻き戻しはこれを控える(nesRewind.js)
       this.cpuCycles = 0; this.frameCount = 0; this.frameT = 0; this._frameFlag = false;
       this.sampleRate = 0; this.cycleAccum = 0;
       this.ring = new Float32Array(AUDIO_RING); this.ringR = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0; this.underruns = 0;
@@ -16685,6 +16693,7 @@
       this.cart.tickRtc(this.frameT, CLOCK);
       this.frameCount++;
       this._frameFlag = true;
+      this.padUsed[0] = this.pad[0]; this.padUsed[1] = this.pad[1];
       if (this.padTurbo[0] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(0); }
       if (this.rec) { this.rec.cur.len = this.frameT; this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       this.frameT = 0;
@@ -23248,6 +23257,9 @@
       this.pad = [0, 0, 0, 0, 0]; this.padHeld = [0, 0, 0, 0, 0]; this.padTurbo = [0, 0, 0, 0, 0]; this.turboRate = 2; this.turboPhase = 0;
       // パッド端子が読むボタンは pad[] そのもの(同じ配列)。巻き戻しの進め直し(nesRewind.js)が pad[0] へ直接書くので、写しを持つと届かない
       this.input.buttons = this.pad;
+      // 終わったフレームで実際に効いていた値(連射の位相を進める前)。巻き戻しはこれを控える(pad[] は次のフレームの位相に進んだ後なので、
+      // そちらを控えると、連射を押している間の進め直しが 1 フレームずれる)
+      this.padUsed = [0, 0, 0, 0, 0];
       this.sampleRate = 0; this.sampleAcc = 0;
       this.ring = new Float32Array(AUDIO_RING); this.ringR = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0; this.underruns = 0;
       this.onWrite = null;   // (reg(0-9), value, frameFrac) 波形メモリ音源への書き込み
@@ -23377,6 +23389,7 @@
       this.frameCount++;
       this._frameFlag = true; this._frameDirty = true;
       this.lastFrameLen = this.clock - this.frameStart;
+      for (let i = 0; i < 5; i++) this.padUsed[i] = this.pad[i];
       if (this.padTurbo[0] || this.padTurbo[1] || this.padTurbo[2] || this.padTurbo[3] || this.padTurbo[4] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
       // 画面の長さは最後の要素 { len } にも入れる(配列に付けた len は Worklet から主スレッドへ送る時に落ちる。262 行と 263 行で長さが違うので要る)
       if (this.rec) { this.rec.cur.len = this.lastFrameLen; this.rec.cur.push({ len: this.lastFrameLen }); this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
@@ -23644,6 +23657,18 @@
       this._lut = new Int16Array(1024);
     }
     get palette() { return this._pal.slice(); }
+    // パッドは 5 個(マルチタップ)× 12bit(I II SELECT RUN 上下左右 III IV V VI)。1〜4 番は 1 個の数(48bit)に詰め、
+    // 5 番が押されているフレームだけ [数, 5 番] の組にする(ふつうは数 1 個で済む)
+    _packPads() {
+      const p = this.nes.padUsed || this.nes.pad;
+      const n = (p[0] & 0xFFF) + (p[1] & 0xFFF) * 0x1000 + (p[2] & 0xFFF) * 0x1000000 + (p[3] & 0xFFF) * 0x1000000000;
+      return (p[4] & 0xFFF) ? [n, p[4] & 0xFFF] : n;
+    }
+    _unpackPads(v) {
+      const p = this.nes.pad; let n = v, p4 = 0;
+      if (typeof v !== 'number') { n = v[0]; p4 = v[1]; }
+      p[0] = n % 0x1000; n = Math.floor(n / 0x1000); p[1] = n % 0x1000; n = Math.floor(n / 0x1000); p[2] = n % 0x1000; p[3] = Math.floor(n / 0x1000) % 0x1000; p[4] = p4;
+    }
     // 今の画面を「色の番号+色表」にして輪に控える
     _capture(f) {
       const pce = this.nes, RING = Emu.NesRewind.RING, FB = this.frameBytes;

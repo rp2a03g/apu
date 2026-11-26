@@ -109,6 +109,9 @@
       this.pad = [0, 0, 0, 0, 0]; this.padHeld = [0, 0, 0, 0, 0]; this.padTurbo = [0, 0, 0, 0, 0]; this.turboRate = 2; this.turboPhase = 0;
       // パッド端子が読むボタンは pad[] そのもの(同じ配列)。巻き戻しの進め直し(nesRewind.js)が pad[0] へ直接書くので、写しを持つと届かない
       this.input.buttons = this.pad;
+      // 終わったフレームで実際に効いていた値(連射の位相を進める前)。巻き戻しはこれを控える(pad[] は次のフレームの位相に進んだ後なので、
+      // そちらを控えると、連射を押している間の進め直しが 1 フレームずれる)
+      this.padUsed = [0, 0, 0, 0, 0];
       this.sampleRate = 0; this.sampleAcc = 0;
       this.ring = new Float32Array(AUDIO_RING); this.ringR = new Float32Array(AUDIO_RING); this.ringHead = 0; this.ringLen = 0; this.underruns = 0;
       this.onWrite = null;   // (reg(0-9), value, frameFrac) 波形メモリ音源への書き込み
@@ -238,6 +241,7 @@
       this.frameCount++;
       this._frameFlag = true; this._frameDirty = true;
       this.lastFrameLen = this.clock - this.frameStart;
+      for (let i = 0; i < 5; i++) this.padUsed[i] = this.pad[i];
       if (this.padTurbo[0] || this.padTurbo[1] || this.padTurbo[2] || this.padTurbo[3] || this.padTurbo[4] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(); }
       // 画面の長さは最後の要素 { len } にも入れる(配列に付けた len は Worklet から主スレッドへ送る時に落ちる。262 行と 263 行で長さが違うので要る)
       if (this.rec) { this.rec.cur.len = this.lastFrameLen; this.rec.cur.push({ len: this.lastFrameLen }); this.rec.frames.push(this.rec.cur); this.rec.cur = []; }

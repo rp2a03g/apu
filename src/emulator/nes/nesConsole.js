@@ -50,6 +50,7 @@
       this.pad = [0, 0]; this.padShift = [0, 0]; this.padStrobe = false;
       // 連射: padHeld(押しっぱなし)に padTurbo のビットを turboRate フレームごとに ON/OFF して足した物が pad(ゲームが読む値)
       this.padHeld = [0, 0]; this.padTurbo = [0, 0]; this.turboRate = 2; this.turboPhase = 0;
+      this.padUsed = [0, 0]; // 終わったフレームで実際に効いていた値(連射の位相を進める前)。巻き戻しはこれを控える(nesRewind.js)
       this.dmaCycles = 0;
       this.prevNmi = false; this.pendingNmi = false; this.nmiNext = false;
       this.cpuCycles = 0;
@@ -311,6 +312,7 @@
     }
     _frameEnd() {
       this._frameFlag = true;
+      this.padUsed[0] = this.pad[0]; this.padUsed[1] = this.pad[1];
       if (this.padTurbo[0] || this.padTurbo[1] || this.turboPhase) { this.turboPhase = (this.turboPhase + 1) % (this.turboRate * 2); this._applyPad(0); this._applyPad(1); }
       if (this.rec) { this.rec.frames.push(this.rec.cur); this.rec.cur = []; }
       if (this.onFrame) this.onFrame();
