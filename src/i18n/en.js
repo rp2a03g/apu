@@ -1825,6 +1825,7 @@
     'システムカードを控えました: {name}': 'System Card saved: {name}',
     'システムカードとして読めません: {name}': 'Not a System Card: {name}',
     'システムカードがまだ控えてありません。⚙ → PC エンジン で選ぶか、システムカード(.pce)をドロップすると、この CD を開きます': 'No System Card saved yet. Choose one in ⚙ → PC Engine, or drop a System Card (.pce), and this CD will open.',
+    'PC エンジンの CD ではないようです(起動の見出しが見つかりません)': 'This does not look like a PC Engine CD (boot header not found).',
     'CHD を展開しています… {pct}%': 'Unpacking the CHD… {pct}%',
     'このブラウザは音声の復号ができません': 'This browser cannot decode audio.',
     '音声のトラック({name})を復号できませんでした': 'Could not decode the audio track ({name}).',

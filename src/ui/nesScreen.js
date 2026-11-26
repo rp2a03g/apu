@@ -2487,6 +2487,8 @@
     const disc = cdSet ? MML.Emu.PceDisc.fromSet(cdSet) : null; // 読めなければ例外(呼び出し側が知らせる)
     if (disc) pceOpts.cdType = pc.cd; // CD の構成(アーケードカードつき/Super CD-ROM²/初代)
     if (disc && disc.empty) throw new Error(T('CD のトラックが読めません'));
+    // ほかの機種の CD(CHD は機種を問わない入れ物)は、システムカードの画面で止まるだけで理由が分からないので、知らせる(開くのは止めない)
+    if (disc && !disc.looksPce) setTimeout(() => flashStatus(T('PC エンジンの CD ではないようです(起動の見出しが見つかりません)')), 1500);
     pceCd = !!disc;
     const probe = new MML.Emu.PceConsole(bytes, Object.assign({ cd: disc }, pceOpts));
     pceBits = 0;

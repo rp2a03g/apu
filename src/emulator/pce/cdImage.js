@@ -196,6 +196,19 @@
     }
 
     /** ディスクの見分け(ステートが同じディスクの物かを確かめる数) */
+    /**
+     * PC エンジンの CD らしいか: 最初のデータのトラックの 2 セクタ目(起動の見出し)の 32 バイト目から「PC Engine CD-ROM SYSTEM」。
+     * [試験] 手元の 7 本は全部ここにある。[推定] Games Express の CD など、システムカードが別の物は違うかもしれないので、
+     * 呼び出し側は「開かない」のではなく「知らせる」だけにする
+     */
+    get looksPce() {
+      const t = this.tracks.find(x => !x.audio); if (!t) return false;
+      const buf = new Uint8Array(2048), key = 'PC Engine CD-ROM SYSTEM';
+      this.readData(t.first + 1, buf);
+      for (let i = 0; i < key.length; i++) if (buf[32 + i] !== key.charCodeAt(i)) return false;
+      return true;
+    }
+
     get signature() {
       if (this._sig === undefined) {
         let h = (2166136261 ^ this.sectorCount ^ (this.tracks.length << 24)) | 0;
